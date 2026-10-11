@@ -23,15 +23,16 @@ class Phone {
     return result as Extract<VoiceServerControl, { type: T }>
   }
 }
-describe('Voice Channel with real WSS, service adapters and durable Admin/core stores', () => {
+describe('Voice Channel with loopback WS, service adapters and durable Admin/core stores', () => {
   let dir: string, channel: VoiceChannel, admin: http.Server, asr: WebSocketServer, port: number
   let store: VoiceTurnStore, inbox: VoiceInbox, registrations: string[], friends: Map<string, Friend>
   let accepted: VoiceTurnAuthorizedPayload[], asrCalls: number, ttsCalls: number, phones: Phone[]
-  let asrResponses: string[]
+  let asrResponses: string[], setupStatus: 'draft' | 'complete'
   const channelId = '语音终端'
   const rpc = new RpcClient(), runtime = 'isolated-voice-runtime', human = 'isolated-human-admin'
   beforeEach(async () => {
     dir = await fs.mkdtemp(path.join(os.tmpdir(), 'voice-channel-')); phones = []; accepted = []; asrCalls = 0; ttsCalls = 0
+    setupStatus = 'complete'
     asrResponses = ['开灯', '别开灯', '好的']
     store = new VoiceTurnStore(dir); await store.load(); inbox = new VoiceInbox(path.join(dir, 'core-inbox')); inbox.load(); friends = new Map(); registrations = []
     for (const name of ['A', 'B']) {
@@ -53,7 +54,7 @@ describe('Voice Channel with real WSS, service adapters and durable Admin/core s
         if (bearer !== `Bearer ${request.method === 'verify_voice_admin' ? human : runtime}`) throw new Error('invalid runtime/human bearer')
         let result: unknown
         switch (request.method) {
-          case 'get_voice_config': result = { config: { asr: { provider_id: 'local', model_id: 'sensevoice' }, tts: { provider_id: 'local', model_id: 'kokoro' }, wake_word: '你好螃蟹' }, ...store.registrations(channelId), contacts: store.registrations(channelId).contacts.map(c => ({ ...c, ...(friends.get(c.platform_user_id) ? { friend_id: friends.get(c.platform_user_id)!.id } : {}) })),
+          case 'get_voice_config': result = { setup_status: setupStatus, terminal_entry: { url: `ws://localhost:3000/ws/voice/${encodeURIComponent(channelId)}` }, config: { asr: { provider_id: 'local', model_id: 'sensevoice' }, tts: { provider_id: 'local', model_id: 'kokoro' }, wake_word: '你好螃蟹' }, ...store.registrations(channelId), contacts: store.registrations(channelId).contacts.map(c => ({ ...c, ...(friends.get(c.platform_user_id) ? { friend_id: friends.get(c.platform_user_id)!.id } : {}) })),
             asr_connection: { provider_id: 'local', format: 'sherpa-offline-ws', endpoint: `ws://localhost:${(admin.address() as AddressInfo).port}/asr`, model_id: 'sensevoice', api_key: 'provider-secret' },
             tts_connection: { provider_id: 'local', format: 'mlx-audio-http', endpoint: `http://localhost:${(admin.address() as AddressInfo).port}`, model_id: 'kokoro', voice: 'zf_xiaobei', api_key: 'provider-secret' } }; break
           case 'verify_voice_admin': result = { verified: true }; break
@@ -95,16 +96,16 @@ describe('Voice Channel with real WSS, service adapters and durable Admin/core s
     await fs.rm(dir, { recursive: true, force: true })
   })
   async function connect() {
-    const socket = new WebSocket(`wss://localhost:${port}/voice`, { rejectUnauthorized: false }); const phone = new Phone(socket); phones.push(phone)
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/voice`, { rejectUnauthorized: false }); const phone = new Phone(socket); phones.push(phone)
     await new Promise<void>((resolve, reject) => { socket.once('open', resolve); socket.once('error', reject) }); return phone
   }
   async function pair() {
-    const pairing = await rpc.callSensitive<any, any>(port, 'voice_admin_action', { channel_id: channelId, command: { action: 'create_pairing', host: 'localhost' } }, 'isolated-admin', { authorizationBearer: human })
-    const phone = await connect(); phone.send({ type: 'pair', protocol_version: 2, nonce: pairing.pairing.nonce })
+    const pairing = await rpc.callSensitive<any, any>(port, 'voice_admin_action', { channel_id: channelId, command: { action: 'create_pairing' } }, 'isolated-admin', { authorizationBearer: human })
+    const phone = await connect(); phone.send({ type: 'pair', protocol_version: 3, nonce: pairing.pairing.nonce })
     const waiting = await phone.wait('pair_waiting'); expect(waiting.verification_code).toBe(pairing.pairing.verification_code)
     await rpc.callSensitive(port, 'voice_admin_action', { channel_id: channelId, command: { action: 'confirm_pairing', pairing_id: waiting.pairing_id } }, 'isolated-admin', { authorizationBearer: human })
     const credential = (await phone.wait('paired')).credential, live = await connect()
-    live.send({ type: 'hello', protocol_version: 2, credential, models: { embedding: VOICE_MODEL_VERSIONS.embedding, segmentation: VOICE_MODEL_VERSIONS.segmentation }, aec_verified: true })
+    live.send({ type: 'hello', protocol_version: 3, credential, models: { embedding: VOICE_MODEL_VERSIONS.embedding, segmentation: VOICE_MODEL_VERSIONS.segmentation }, aec_verified: true })
     const hello = await live.wait('hello'); expect(JSON.stringify(hello)).not.toContain('provider-secret')
     live.send({ type: 'heartbeat', foreground: true, microphone: 'closed', playback: 'idle' })
     return { phone: live, hello }
@@ -117,8 +118,16 @@ describe('Voice Channel with real WSS, service adapters and durable Admin/core s
       segments: [0, 1, 0].map((speaker, index) => ({ segment_index: index, start_sample: index * 960, end_sample: (index + 1) * 960, anonymous_speaker: String(speaker), identity_status: unknown && index === 1 ? 'unknown' : 'matched', ...(unknown && index === 1 ? {} : { registration_id: registrations[speaker] }) })) })
     return phone.wait('turn_status')
   }
+  it('rejects draft turns before turn_ready and before calling ASR', async () => {
+    setupStatus = 'draft'
+    const { phone } = await pair()
+    phone.send({ type: 'turn_start', turn_id: randomUUID() })
+    await phone.wait('error')
+    expect(phone.controls.some(c => c.type === 'turn_ready')).toBe(false)
+    expect(asrCalls).toBe(0); expect(accepted).toHaveLength(0)
+  })
   it('requires matching human confirmation, admits A B A atomically and keeps Provider credentials off the terminal', async () => {
-    await expect(rpc.callSensitive(port, 'voice_admin_action', { channel_id: channelId, command: { action: 'create_pairing', host: 'localhost' } }, 'agent-cli', { authorizationBearer: runtime })).rejects.toThrow()
+    await expect(rpc.callSensitive(port, 'voice_admin_action', { channel_id: channelId, command: { action: 'create_pairing' } }, 'agent-cli', { authorizationBearer: runtime })).rejects.toThrow()
     const { phone } = await pair(), status = await turn(phone)
     expect(status.status).toBe('accepted'); expect(asrCalls).toBe(3); expect(accepted).toHaveLength(1)
     expect(accepted[0].messages.map(m => [m.friend?.id, m.message.content.text, m.message.session.type])).toEqual([['A', '开灯', 'group'], ['B', '别开灯', 'group'], ['A', '好的', 'group']])
@@ -138,9 +147,9 @@ describe('Voice Channel with real WSS, service adapters and durable Admin/core s
     expect(accepted).toHaveLength(0)
     expect(inbox.pending()).toHaveLength(0)
   })
-  it('rejects a v1 handshake with an explicit version error', async () => {
-    const phone = await connect(); phone.send({ type: 'hello', protocol_version: 1, credential: 'old', models: VOICE_MODEL_VERSIONS, aec_verified: false })
-    const error = await phone.wait('error'); expect(error.code).toBe('VOICE_VERSION_UNSUPPORTED'); expect(error.message).toContain('protocol_version=2')
+  it('rejects a v2 handshake with an explicit version error', async () => {
+    const phone = await connect(); phone.send({ type: 'hello', protocol_version: 2, credential: 'old', models: VOICE_MODEL_VERSIONS, aec_verified: false })
+    const error = await phone.wait('error'); expect(error.code).toBe('VOICE_VERSION_UNSUPPORTED'); expect(error.message).toContain('protocol_version=3')
   })
   it('keeps a contact in the roster without an active sample and resolves current bindings', async () => {
     const contact = store.registrations(channelId).contacts[0]

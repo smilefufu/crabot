@@ -1,4 +1,4 @@
-// protocol-voice.md v0.2.0: shared terminal, configuration and admission contracts.
+// protocol-voice.md v0.3.0: shared terminal, configuration and admission contracts.
 import type { ModuleId, SessionId, FriendId } from './base-protocol.js'
 import type { ChannelMessage, Friend } from './channel-protocol.js'
 
@@ -30,7 +30,7 @@ export interface VoiceReplyContext {
   expires_at: string
 }
 export interface VoiceChannelCapability {
-  protocol_version: 2
+  protocol_version: 3
   send_timeout_ms: 30000
 }
 export type AudioServiceFormat = 'sherpa-offline-ws' | 'mlx-audio-http' | 'openai-audio'
@@ -65,6 +65,18 @@ export interface VoiceInstanceConfig {
   tts: AudioModelReference | null
   wake_word: string
 }
+export interface VoiceConnectionConfig {
+  base_url: string
+  transport: 'ws' | 'wss'
+}
+export interface VoiceSetupMetadata {
+  status: 'draft' | 'complete'
+  connection?: VoiceConnectionConfig
+}
+export interface VoiceTerminalEntry {
+  url: string
+  tls_fingerprint_sha256?: string
+}
 export interface VoiceContact {
   platform_user_id: string
   display_name: string
@@ -80,6 +92,8 @@ export interface VoiceRegistration {
 }
 export interface GetVoiceConfigParams { channel_id: ModuleId }
 export interface GetVoiceConfigResult {
+  setup_status: 'draft' | 'complete'
+  terminal_entry: VoiceTerminalEntry | null
   config: VoiceInstanceConfig
   enrollment_revision: number
   contacts: VoiceContact[]
@@ -140,7 +154,7 @@ export interface VerifyVoiceAdminResult { verified: true }
 
 export type VoiceAdminAction =
   | { action: 'status' }
-  | { action: 'create_pairing'; host: string }
+  | { action: 'create_pairing' }
   | { action: 'confirm_pairing'; pairing_id: string }
   | { action: 'revoke_terminal' }
   | { action: 'create_contact'; display_name: string }
@@ -148,11 +162,11 @@ export type VoiceAdminAction =
   | { action: 'delete_registration'; registration_id: string }
 export interface VoiceAdminActionParams { channel_id: ModuleId; command: VoiceAdminAction }
 export interface VoicePairing {
-  protocol_version: 2
+  protocol_version: 3
   channel_id: ModuleId
   pairing_id: string
   url: string
-  tls_fingerprint_sha256: string
+  tls_fingerprint_sha256?: string
   nonce: string
   verification_code: string
   expires_at: string
@@ -182,8 +196,8 @@ export type VoiceAdminActionResult =
 
 export interface VoiceModelVersions { segmentation: string; embedding: string }
 export type VoiceClientControl =
-  | { type: 'pair'; protocol_version: 2; nonce: string }
-  | { type: 'hello'; protocol_version: 2; credential: string; models: VoiceModelVersions; aec_verified: boolean }
+  | { type: 'pair'; protocol_version: 3; nonce: string }
+  | { type: 'hello'; protocol_version: 3; credential: string; models: VoiceModelVersions; aec_verified: boolean }
   | { type: 'heartbeat'; foreground: boolean; microphone: 'closed' | 'wake' | 'recording'; playback: 'idle' | 'playing' }
   | { type: 'turn_start'; turn_id: string }
   | { type: 'turn_query'; turn_id: string; payload_sha256: string }

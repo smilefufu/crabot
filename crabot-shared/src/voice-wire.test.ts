@@ -43,11 +43,11 @@ test('anonymous clusters have one identity result, with no candidate reference o
   validateVoiceSegments([a, b, { ...a, segment_index: 2, start_sample: 32000, end_sample: 48000 }], 48000)
   assert.throws(() => validateVoiceSegments([a, { ...a, segment_index: 1, start_sample: 16000, end_sample: 32000, registration_id: 'sample-other' }], 32000))
   assert.throws(() => validateVoiceSegments([{ ...b, segment_index: 0, start_sample: 0, registration_id: 'candidate' }], 32000))
-  assert.equal(parseVoiceClientControl(JSON.stringify({ type: 'pair', protocol_version: 2, nonce: 'fixture' })).type, 'pair')
+  assert.equal(parseVoiceClientControl(JSON.stringify({ type: 'pair', protocol_version: 3, nonce: 'fixture' })).type, 'pair')
 })
 test('controls reject extra identity fields, wrong versions and oversized input', () => {
   assert.deepEqual(parseVoiceClientControl(JSON.stringify({ type: 'turn_start', turn_id: id })), { type: 'turn_start', turn_id: id })
-  for (const value of [{ type: 'turn_start', turn_id: id, friend_id: 'master' }, { type: 'pair', protocol_version: 1, nonce: 'test' }, { type: 'heartbeat', foreground: 'true', microphone: 'closed', playback: 'idle' }]) {
+  for (const value of [{ type: 'turn_start', turn_id: id, friend_id: 'master' }, { type: 'pair', protocol_version: 2, nonce: 'test' }, { type: 'heartbeat', foreground: 'true', microphone: 'closed', playback: 'idle' }]) {
     assert.throws(() => parseVoiceClientControl(JSON.stringify(value)))
   }
   assert.throws(() => parseVoiceClientControl(' '.repeat(65537)))

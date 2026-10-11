@@ -492,6 +492,7 @@ export const ChannelConfig: React.FC = () => {
   // ---------- 创建表单 ----------
 
   const handleImplChange = (implId: string) => {
+    if (implId === 'channel-voice') { navigate('/channels/new/voice'); return }
     setCreateImplId(implId)
     setCreateEnv({})
     const impl = implementations.find((i) => i.id === implId)
@@ -531,9 +532,7 @@ export const ChannelConfig: React.FC = () => {
         ...(Object.keys(envToSave).length > 0 && { env: envToSave }),
         auto_start: false,
       })
-      toast.success(createImplId === 'channel-voice'
-        ? '语音渠道已创建。请启动实例、展开配置并生成配对二维码，再用 Android App 扫码连接'
-        : 'Channel 实例已创建。启动后请在该平台向 Crabot 发送 /认主 完成主人认证')
+      toast.success('Channel 实例已创建。启动后请在该平台向 Crabot 发送 /认主 完成主人认证')
       setShowCreateForm(false)
       setCreateName('')
       setCreatePlatform('')
@@ -678,6 +677,7 @@ export const ChannelConfig: React.FC = () => {
                         <span className={`badge ${statusInfo.cls}`}>
                           {statusInfo.label}
                         </span>
+                        {instance.voice_setup?.status === 'draft' && <span className="badge badge-secondary">待完成创建</span>}
                         {connInfo && (
                           <span className={`badge ${connInfo.cls}`}>
                             {connInfo.label}
@@ -688,7 +688,7 @@ export const ChannelConfig: React.FC = () => {
                       {/* Auto-start toggle */}
                       <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginTop: '0.75rem' }}>
                         <label className="toggle-switch">
-                          <input type="checkbox" checked={instance.auto_start} onChange={() => handleToggleAutoStart(instance)} />
+                          <input type="checkbox" disabled={instance.voice_setup?.status === 'draft'} checked={instance.auto_start} onChange={() => handleToggleAutoStart(instance)} />
                           <span className="toggle-track" />
                         </label>
                         <span style={{ fontSize: '0.75rem', color: instance.auto_start ? 'var(--text-secondary)' : 'var(--text-muted)' }}>
@@ -710,6 +710,7 @@ export const ChannelConfig: React.FC = () => {
                           <Button variant="danger" onClick={() => handleDelete(instance)}>删除</Button>
                         </>
                       )}
+                      {instance.implementation_id === 'channel-voice' && instance.voice_setup?.status !== 'complete' && <Button variant="secondary" onClick={() => navigate(`/channels/new/voice?instance_id=${encodeURIComponent(instance.id)}`)}>{instance.voice_setup?.status === 'draft' ? '继续配置' : '进入创建向导'}</Button>}
                       <button
                         className={`btn channel-config-toggle ${isSelected ? 'channel-config-toggle--active' : ''}`}
                         onClick={() => handleSelectInstance(instance.id)}

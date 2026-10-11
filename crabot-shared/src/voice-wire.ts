@@ -5,9 +5,9 @@ export const VOICE_MAX_SAMPLES = 240000
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 export class VoiceProtocolVersionError extends Error {
-  constructor() { super('语音协议版本不兼容，需要 protocol_version=2；旧试验数据需显式清理后重新配对') }
+  constructor() { super('语音协议版本不兼容，需要 protocol_version=3；请更新手机并重新扫码，保留同渠道声纹') }
 }
-function version(value: unknown): void { if (value !== 2) throw new VoiceProtocolVersionError() }
+function version(value: unknown): void { if (value !== 3) throw new VoiceProtocolVersionError() }
 
 function invalid(): never { throw new Error('Invalid voice protocol payload') }
 function object(value: unknown): Record<string, unknown> {

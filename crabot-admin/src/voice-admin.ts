@@ -1,10 +1,19 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { RpcError, assertVoiceUuid, type AudioServiceCapability, type Friend, type GetVoiceConfigResult, type SubmitVoiceTurnParams, type SyncVoiceTerminalParams, type VoiceAdminAction, type VoiceAdminActionResult, type VoiceTurnAuthorizedPayload, type VoiceTurnResult } from 'crabot-shared'
+import { RpcError, assertVoiceUuid, type AudioServiceCapability, type Friend, type GetVoiceConfigResult, type SubmitVoiceTurnParams, type SyncVoiceTerminalParams, type VoiceAdminAction, type VoiceAdminActionResult, type VoiceTurnAuthorizedPayload, type VoiceTurnResult, voiceSetupStatus, voiceTerminalEntry, parseVoiceConnection, validateInstanceId, voiceSessionId, sha256CanonicalJson, type VoiceConnectionConfig, type VoiceInstanceConfig, type VoiceTerminalEntry, type VoiceSetupMetadata } from 'crabot-shared'
 import { AudioServiceRegistry } from './audio-service-registry.js'
+import type { ChannelInstance } from './types.js'
 import { VoiceTurnStore } from './voice-turn-store.js'
 
 export interface VoiceAdminDeps {
   isVoice(channelId: string): boolean
+  instance(id: string): ChannelInstance | undefined
+  createInstance(name: string): Promise<ChannelInstance>
+  resumeInstance(id: string): Promise<ChannelInstance>
+  pauseInstance(id: string): Promise<ChannelInstance>
+  saveSetup(id: string, setup: VoiceSetupMetadata, autoStart: boolean): Promise<ChannelInstance>
+  fingerprint(): string | undefined
+  terminalHosts(): string[]
+  closeGateway(id: string): void
   admissionReady(): boolean
   verifyRuntime(channelId: string, bearer?: string): Promise<void>
   verifyCore(bearer?: string): Promise<void>
@@ -31,6 +40,7 @@ export class VoiceAdmin {
   readonly turns: VoiceTurnStore
   private replayTimer?: ReturnType<typeof setInterval>
   private replaying = false
+  private webWrites: Promise<unknown> = Promise.resolve()
   constructor(dataDir: string, private readonly deps: VoiceAdminDeps) {
     this.audio = new AudioServiceRegistry(dataDir)
     this.turns = new VoiceTurnStore(dataDir)
@@ -50,7 +60,7 @@ export class VoiceAdmin {
     const config = this.audio.getConfig(channelId)
     const metadata = this.turns.registrations(channelId)
     const contacts = metadata.contacts.map(contact => { const friend = this.deps.resolveFriend(channelId, contact.platform_user_id); return { ...contact, ...(friend ? { friend_id: friend.id } : {}) } })
-    return { config, ...metadata, contacts, asr_connection: this.audio.resolve(config.asr, 'asr'), tts_connection: this.audio.resolve(config.tts, 'tts') }
+    return { config, setup_status: this.setupStatus(channelId), terminal_entry: this.terminalEntry(channelId), ...metadata, contacts, asr_connection: this.audio.resolve(config.asr, 'asr'), tts_connection: this.audio.resolve(config.tts, 'tts') }
   }
   async verifyHuman(raw: unknown, bearer?: string): Promise<{ verified: true }> {
     const v = bodyObject(raw); requireFields(v, ['channel_id']); this.assertChannel(v.channel_id)
@@ -78,6 +88,7 @@ export class VoiceAdmin {
   async submit(raw: unknown, bearer?: string): Promise<VoiceTurnResult> {
     const v = bodyObject(raw); this.assertChannel(v.channel_id)
     await this.deps.verifyRuntime(v.channel_id, bearer)
+    if (this.setupStatus(v.channel_id) !== 'complete') throw new RpcError('FORBIDDEN', '请先完成语音创建向导')
     if (!this.deps.admissionReady()) throw new RpcError('SERVICE_UNAVAILABLE', 'Core Agent is not ready')
     const { result, payload } = await this.turns.submit(v as unknown as SubmitVoiceTurnParams, id => this.deps.resolveFriend(v.channel_id as string, id), () => this.deps.checkGroup(v.channel_id as string, v.session_id as string))
     if (payload) await this.deps.publish(payload)
@@ -124,7 +135,7 @@ export class VoiceAdmin {
     const v = bodyObject(raw)
     switch (v.action) {
       case 'status': case 'revoke_terminal': requireFields(v, ['action']); break
-      case 'create_pairing': requireFields(v, ['action', 'host']); if (typeof v.host !== 'string' || !v.host.trim() || v.host.length > 256) invalid('Invalid pairing host'); break
+      case 'create_pairing': requireFields(v, ['action']); break
       case 'confirm_pairing': requireFields(v, ['action', 'pairing_id']); assertVoiceUuid(v.pairing_id); break
       case 'create_contact': {
         requireFields(v, ['action', 'display_name'])
@@ -144,15 +155,84 @@ export class VoiceAdmin {
         await this.turns.revoke(channelId, v.registration_id); break
       default: invalid('Unknown voice management action')
     }
-    return this.deps.channelAction(channelId, v as unknown as VoiceAdminAction, bearer)
+    const result = await this.deps.channelAction(channelId, v as unknown as VoiceAdminAction, bearer)
+    if (result.action === 'status') result.state.hosts = this.deps.terminalHosts()
+    return result
+  }
+  private setupStatus(id: string): 'draft' | 'complete' {
+    const instance = this.deps.instance(id)
+    if (!instance) invalid('Voice instance required')
+    return voiceSetupStatus(instance.voice_setup)
+  }
+  private connection(id: string): VoiceConnectionConfig | null {
+    this.setupStatus(id)
+    const value = this.deps.instance(id)!.voice_setup?.connection
+    return value ? parseVoiceConnection(value) : null
+  }
+  private terminalEntry(id: string): VoiceTerminalEntry | null {
+    const value = this.connection(id)
+    return value ? voiceTerminalEntry(value, id, this.deps.fingerprint()) : null
+  }
+  private async createSetup(raw: unknown): Promise<ChannelInstance> {
+    const v = bodyObject(raw); requireFields(v, ['name', 'config'])
+    if (typeof v.name !== 'string') invalid('Instance name required')
+    const validated = validateInstanceId(v.name)
+    if (!validated.ok) invalid(validated.reason)
+    const existing = this.deps.instance(validated.id)
+    if (existing) {
+      if (existing.implementation_id !== 'channel-voice' || this.setupStatus(existing.id) !== 'draft') invalid('该名称已被使用')
+      return existing
+    }
+    const instance = await this.deps.createInstance(validated.id)
+    // The persisted draft survives configuration/registration failure and is resumed by ID.
+    await this.audio.saveConfig(instance.id, v.config)
+    return instance
+  }
+  private async saveConnection(id: string, raw: unknown, bearer: string): Promise<VoiceConnectionConfig> {
+    const value = parseVoiceConnection(raw), previous = this.connection(id)
+    if (JSON.stringify(value) === JSON.stringify(previous)) return value
+    const status = await this.deps.channelAction(id, { action: 'status' }, bearer)
+    if (status.action !== 'status') invalid('Terminal status unavailable')
+    if (status.state.paired) invalid('修改连接地址前请先撤销已配对终端')
+    await this.deps.saveSetup(id, { status: this.setupStatus(id), connection: value }, this.deps.instance(id)!.auto_start)
+    this.deps.closeGateway(id)
+    // Updating the terminal entry clears the pending nonce on the owning Channel.
+    await this.deps.configurationChanged()
+    return value
+  }
+  private async finishSetup(id: string, bearer: string): Promise<ChannelInstance> {
+    if (this.setupStatus(id) === 'complete') return this.deps.instance(id)!
+    const snapshot = async (): Promise<string> => {
+      const state = await this.deps.channelAction(id, { action: 'status' }, bearer)
+      const config = this.audio.getConfig(id), metadata = this.turns.registrations(id), live = this.turns.connectionState(id)
+      if (state.action !== 'status' || !state.state.paired || !state.state.connected || !state.state.foreground || state.state.microphone !== 'closed' || state.state.playback !== 'idle' || state.state.pairing_id || !live?.epoch || !live.foreground) invalid('手机需保持前台连接，并关闭待机、录音和播放')
+      if (metadata.registrations.some(r => r.status === 'pending')) invalid('请完成或撤销未完成的声纹登记')
+      if (!this.connection(id)) invalid('请先保存手机连接地址')
+      const asr = this.audio.resolve(config.asr, 'asr'), tts = this.audio.resolve(config.tts, 'tts')
+      if (!asr || !tts || !config.wake_word.trim()) invalid('请先配置 ASR、TTS 和手机端唤醒词')
+      if (!await this.deps.checkGroup(id, voiceSessionId(id))) invalid('请把语音渠道联系人绑定到现有 Master；语音群沿用现有群成员规则')
+      return sha256CanonicalJson({ config, asr, tts, metadata, live, connection: this.connection(id), contacts: metadata.contacts.map(c => this.deps.resolveFriend(id, c.platform_user_id) ?? null) })
+    }
+    const before = await snapshot()
+    for (const capability of ['asr', 'tts'] as const) {
+      const result = await this.deps.testAudio(id, capability) as { ok?: boolean }
+      if (result?.ok !== true) invalid(`${capability.toUpperCase()} 测试未通过`)
+    }
+    if (before !== await snapshot()) invalid('配置或手机状态已变化，请重新检查后完成')
+    return this.deps.saveSetup(id, { status: 'complete', connection: this.connection(id)! }, true)
   }
   /** Human REST only. Internal runtime endpoints are never exported on this web surface. */
   async handleWeb(req: IncomingMessage, res: ServerResponse, pathname: string, readBody: () => Promise<unknown>): Promise<boolean> {
-    if (!pathname.startsWith('/api/audio-services') && !/^\/api\/channels\/[^/]+\/voice\//.test(pathname)) return false
+    if (!pathname.startsWith('/api/audio-services') && pathname !== '/api/channels/voice/setup' && !/^\/api\/channels\/[^/]+\/voice\//.test(pathname)) return false
     const bearer = req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.slice(7) : undefined
     const json = (status: number, data: unknown) => { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(data)) }
-    try {
+    const execute = async () => {
       await this.deps.verifyHuman(bearer)
+      if (pathname === '/api/channels/voice/setup') {
+        if (req.method === 'POST') json(201, { instance: await this.createSetup(await readBody()) })
+        else json(405, { error: 'Method not allowed' })
+        return
+      }
       const service = pathname.match(/^\/api\/audio-services(?:\/([^/]+))?$/)
       if (service) {
         const id = service[1] ? decodeURIComponent(service[1]) : undefined
@@ -161,19 +241,31 @@ export class VoiceAdmin {
         else if (id && req.method === 'PUT') { const provider = await this.audio.saveProvider(await readBody(), id); await this.deps.configurationChanged(); json(200, { provider }) }
         else if (id && req.method === 'DELETE') { await this.audio.removeProvider(id); json(200, { deleted: true }) }
         else json(405, { error: 'Method not allowed' })
-        return true
+        return
       }
-      const route = pathname.match(/^\/api\/channels\/([^/]+)\/voice\/(config|action|test)$/)
-      if (!route) { json(404, { error: 'Not found' }); return true }
+      const route = pathname.match(/^\/api\/channels\/([^/]+)\/voice\/(config|action|test|connection|setup\/(?:resume|pause|finish))$/)
+      if (!route) { json(404, { error: 'Not found' }); return }
       const channelId = decodeURIComponent(route[1]); this.assertChannel(channelId)
-      if (route[2] === 'config' && req.method === 'GET') json(200, this.audio.getConfig(channelId))
-      else if (route[2] === 'config' && req.method === 'PUT') { const config = await this.audio.saveConfig(channelId, await readBody()); await this.deps.configurationChanged(); json(200, config) }
-      else if (route[2] === 'action' && req.method === 'POST') json(200, await this.action(channelId, await readBody(), bearer!))
-      else if (route[2] === 'test' && req.method === 'POST') {
+      const operation = route[2]
+      if (operation.startsWith('setup/') && req.method === 'POST') {
+        requireFields(bodyObject(await readBody()), [])
+        if (operation === 'setup/resume') json(200, { instance: await this.deps.resumeInstance(channelId) })
+        else if (operation === 'setup/pause') { this.deps.closeGateway(channelId); this.turns.disconnect(channelId); json(200, { instance: await this.deps.pauseInstance(channelId) }) }
+        else json(200, { instance: await this.finishSetup(channelId, bearer!) })
+      } else if (operation === 'connection' && req.method === 'GET') json(200, this.connection(channelId))
+      else if (operation === 'connection' && req.method === 'PUT') json(200, await this.saveConnection(channelId, await readBody(), bearer!))
+      else if (operation === 'config' && req.method === 'GET') json(200, this.audio.getConfig(channelId))
+      else if (operation === 'config' && req.method === 'PUT') { const config = await this.audio.saveConfig(channelId, await readBody()); await this.deps.configurationChanged(); json(200, config) }
+      else if (operation === 'action' && req.method === 'POST') json(200, await this.action(channelId, await readBody(), bearer!))
+      else if (operation === 'test' && req.method === 'POST') {
         const v = bodyObject(await readBody()); requireFields(v, ['capability'])
         if (v.capability !== 'asr' && v.capability !== 'tts') invalid('Invalid audio test capability')
         json(200, await this.deps.testAudio(channelId, v.capability))
       } else json(405, { error: 'Method not allowed' })
+    }
+    try {
+      if (req.method === 'GET') await execute()
+      else { const pending = this.webWrites.then(execute); this.webWrites = pending.catch(() => {}); await pending }
     } catch (error) {
       if (!res.writableEnded) {
         const code = (error as { code?: string }).code

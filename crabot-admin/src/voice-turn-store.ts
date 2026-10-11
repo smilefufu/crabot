@@ -82,6 +82,9 @@ export class VoiceTurnStore {
     if (!params.foreground || this.live.get(params.channel_id)?.epoch !== params.connection_epoch) this.contexts.delete(params.channel_id)
     this.live.set(params.channel_id, { epoch: params.connection_epoch, foreground: params.foreground })
   }
+  connectionState(channelId: string): { epoch: string | null; foreground: boolean } | undefined {
+    const state = this.live.get(channelId); return state ? { ...state } : undefined
+  }
   disconnect(channelId: string): void { this.live.delete(channelId); this.contexts.delete(channelId) }
   private withContext(payload: StoredPayload): VoiceTurnAuthorizedPayload {
     const live = this.live.get(payload.channel_id), context = this.contexts.get(payload.channel_id)

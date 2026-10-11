@@ -1,5 +1,8 @@
+import { adminWebTransport } from './admin-web-transport.js'
+import { VoiceGateway } from './voice-gateway.js'
+import { loadVoiceTls } from './voice-tls.js'
 import { VoiceAdmin } from './voice-admin.js'
-import { VOICE_MODEL_VERSIONS, testAudioService, type GetVoiceConfigParams } from 'crabot-shared'
+import { parseVoiceConnection, VOICE_MODEL_VERSIONS, testAudioService, type GetVoiceConfigParams } from 'crabot-shared'
 import { normalizeToolAccessUpdate } from './permission-entries.js'
 /**
  * Admin 模块 - Crabot 管理后台
@@ -8,7 +11,7 @@ import { normalizeToolAccessUpdate } from './permission-entries.js'
  */
 
 import http, { type IncomingMessage, type ServerResponse } from 'node:http'
-import type { Socket } from 'node:net'
+import type { Socket, Server as NetServer } from 'node:net'
 import crypto from 'node:crypto'
 import fs from 'node:fs/promises'
 import { createReadStream, createWriteStream } from 'node:fs'
@@ -659,7 +662,10 @@ export class AdminModule extends ModuleBase {
   private configDrainRetryDelayMs = 1_000
   private cutoverAttempt: Promise<void> | null = null
   private cutoverRecoveryReason: string | null = null
-  private webServer: http.Server | null = null
+  private webServer: NetServer | null = null
+  private closeWebTransport?: () => void
+  private voiceFingerprint?: string
+  private voiceGateway!: VoiceGateway
   private jwtSecret: string = ''
 
   // 数据存储
@@ -810,8 +816,28 @@ export class AdminModule extends ModuleBase {
     )
     this.agentManager = new AgentManager(this.adminConfig.data_dir)
     this.channelManager = new ChannelManager(this.adminConfig.data_dir, this.rpcClient)
+    this.voiceGateway = new VoiceGateway({
+      connection: id => {
+        const instance = this.channelManager.getInstance(id)
+        if (instance?.implementation_id !== 'channel-voice') return null
+        return instance.voice_setup?.connection ? parseVoiceConnection(instance.voice_setup.connection) : null
+      },
+      resolve: async id => {
+        if (this.channelManager.getInstance(id)?.implementation_id !== 'channel-voice') return undefined
+        try { return (await this.rpcClient.resolve({ module_id: id }, this.config.moduleId)).find(module => module.module_id === id && module.module_type === 'channel') }
+        catch { return undefined }
+      },
+    })
     this.voiceAdmin = new VoiceAdmin(this.adminConfig.data_dir, {
       isVoice: id => this.channelManager.getInstance(id)?.implementation_id === 'channel-voice',
+      instance: id => this.channelManager.getInstance(id),
+      createInstance: name => this.channelManager.createInstance({ implementation_id: 'channel-voice', name, auto_start: false }),
+      resumeInstance: id => this.channelManager.resumeVoice(id),
+      pauseInstance: id => this.channelManager.pauseVoice(id),
+      saveSetup: (id, setup, autoStart) => this.channelManager.saveVoiceSetup(id, setup, autoStart),
+      fingerprint: () => this.voiceFingerprint,
+      terminalHosts: () => [...new Set(Object.values(os.networkInterfaces()).flatMap(addresses => (addresses ?? []).filter(a => !a.internal && a.family === 'IPv4' && !a.address.startsWith('169.254.')).map(a => `http://${a.address}:${this.adminConfig.web_port}`)))],
+      closeGateway: id => this.voiceGateway.close(id),
       admissionReady: () => this.cutoverActivated,
       verifyRuntime: async (id, bearer) => { await this.rpcClient.callModuleManagerSensitive('verify_voice_runtime', { expected_module_id: id }, this.config.moduleId, { authorizationBearer: bearer }) },
       verifyCore: async bearer => { await this.rpcClient.callModuleManagerSensitive('verify_core_agent_runtime', { expected_module_id: 'crabot-agent' }, this.config.moduleId, { authorizationBearer: bearer }) },
@@ -1331,6 +1357,8 @@ export class AdminModule extends ModuleBase {
     }
 
     // 停止 Web 服务器
+    this.voiceGateway.close()
+    this.closeWebTransport?.()
     if (this.webServer) {
       await new Promise<void>((resolve) => {
         this.webServer!.close(() => resolve())
@@ -1393,6 +1421,7 @@ export class AdminModule extends ModuleBase {
         const { module_id, module_type } = event.payload as { module_id: string; module_type: string }
         this.invalidatePortCache(module_id, module_type)
         this.voiceAdmin.turns.disconnect(module_id)
+        this.voiceGateway.close(module_id)
         break
       }
       case 'module_manager.module_health_changed': {
@@ -1470,34 +1499,26 @@ export class AdminModule extends ModuleBase {
   // ============================================================================
 
   private async startWebServer(): Promise<void> {
-    this.webServer = http.createServer((req, res) => {
+    let tls
+    try { tls = await loadVoiceTls(this.adminConfig.data_dir); this.voiceFingerprint = tls.fingerprint }
+    catch { console.warn('[Admin] Direct voice WSS is unavailable; HTTP/WS remain available') }
+    const transport = adminWebTransport(tls, (req, res) => {
       this.handleWebRequest(req, res).catch((error) => {
         console.error('[Admin] Web request error:', error)
-        res.writeHead(500)
-        res.end(JSON.stringify({ error: 'Internal server error' }))
+        if (!res.headersSent) res.writeHead(500)
+        if (!res.writableEnded) res.end(JSON.stringify({ error: 'Internal server error' }))
       })
-    })
-
-    // WebSocket upgrade 处理
-    this.webServer.on('upgrade', (req, socket, head) => {
+    }, (req, socket, head) => {
       const handleAsync = async (): Promise<void> => {
-        if (!this.cutoverActivated) {
-          socket.write('HTTP/1.1 503 Service Unavailable\r\n\r\n')
-          socket.destroy()
-          return
-        }
-        if (this.chatManager) {
-          await this.chatManager.handleUpgrade(req, socket as Socket, head)
-        } else {
-          socket.write('HTTP/1.1 503 Service Unavailable\r\n\r\n')
-          socket.destroy()
-        }
+        if (!this.cutoverActivated) { socket.write('HTTP/1.1 503 Service Unavailable\r\n\r\n'); socket.destroy(); return }
+        if (await this.voiceGateway.upgrade(req, socket, head)) return
+        if (this.chatManager) await this.chatManager.handleUpgrade(req, socket, head)
+        else { socket.write('HTTP/1.1 503 Service Unavailable\r\n\r\n'); socket.destroy() }
       }
-      handleAsync().catch(() => {
-        socket.write('HTTP/1.1 500 Internal Server Error\r\n\r\n')
-        socket.destroy()
-      })
+      void handleAsync().catch(() => socket.destroy())
     })
+    this.webServer = transport.server
+    this.closeWebTransport = transport.close
 
     return new Promise((resolve, reject) => {
       this.webServer!.listen(this.adminConfig.web_port, () => {

@@ -52,7 +52,7 @@ export class VoiceChannel extends ModuleBase {
     this.registerMethod('update_config', async () => { this.disconnect(); await this.refreshConfig(); return { updated: true } })
     this.registerMethod('get_capabilities', () => ({ supported_message_types: ['text'], supported_features: [], supports_history_query: false, supports_platform_user_query: true,
       max_message_length: 120, max_file_size: 0, supports_file_path: false, supports_list_contacts: true, supports_list_groups: true, supports_list_group_members: true,
-      voice: { protocol_version: 2, send_timeout_ms: 30000 } }))
+      voice: { protocol_version: 3, send_timeout_ms: 30000 } }))
     this.registerMethod('get_sessions', async (params: { type?: string; pagination?: { page?: number; page_size?: number } }) => { await this.refreshConfig(); return paginate(params?.type === 'private' ? [] : [this.session()], params) })
     this.registerMethod('get_session', async (params: { session_id: string }) => { this.assertSession(params.session_id); await this.refreshConfig(); return { session: this.session() } })
     this.registerMethod('get_private_session', () => { throw new RpcError('CHANNEL_UNSUPPORTED_FEATURE', 'Voice has only a voice group') })
@@ -90,8 +90,9 @@ export class VoiceChannel extends ModuleBase {
       if (this.pairing && Date.parse(this.pairing.expires_at) <= Date.now()) { this.pairing.socket?.terminate(); this.pairing = undefined }
     }, 2000)
   }
+  protected override get listenHost(): string { return '127.0.0.1' }
   protected override createServer(rpc: (req: IncomingMessage, res: ServerResponse) => void): Server {
-    const transport = voiceTransport(this.terminal.tls(), rpc, socket => this.connected(socket))
+    const transport = voiceTransport(rpc, socket => this.connected(socket))
     this.closeTransport = transport.close
     return transport.server
   }
@@ -103,7 +104,12 @@ export class VoiceChannel extends ModuleBase {
     if (!this.adminPort) { const modules = await this.rpcClient.resolve({ module_type: 'admin' }, this.config.moduleId); if (!modules[0]) throw new Error('Admin is unavailable'); this.adminPort = modules[0].port }
     return this.rpcClient.callSensitive(this.adminPort, method, params, this.config.moduleId, { authorizationBearer: this.runtimeBearer, timeoutMs: 15000 })
   }
-  private async refreshConfig(): Promise<void> { this.settings = await this.admin('get_voice_config', { channel_id: this.config.moduleId }) }
+  private async refreshConfig(): Promise<void> {
+    this.settings = await this.admin('get_voice_config', { channel_id: this.config.moduleId })
+    if (this.pairing && (this.pairing.url !== this.settings.terminal_entry?.url || this.pairing.tls_fingerprint_sha256 !== this.settings.terminal_entry?.tls_fingerprint_sha256)) {
+      this.pairing.socket?.terminate(); this.pairing = undefined
+    }
+  }
   private async sync(ack: Partial<SyncVoiceTerminalParams> = {}): Promise<void> {
     await this.admin('sync_voice_terminal', { channel_id: this.config.moduleId, connection_epoch: this.connection?.epoch ?? null, foreground: this.connection?.foreground ?? false, ...ack })
   }
@@ -133,16 +139,15 @@ export class VoiceChannel extends ModuleBase {
     switch (command.action) {
       case 'status': fields(command, ['action']); await this.refreshConfig(); return { action: 'status', state: this.state() }
       case 'create_pairing': {
-        fields(command, ['action', 'host']); if (this.terminal.paired) throw new RpcError('INVALID_PARAMS', '请先撤销已有终端')
-        const url = new URL('wss://' + command.host)
-        if (url.username || url.password || url.pathname !== '/' || url.search || url.hash) throw new RpcError('INVALID_PARAMS', '无效配对地址')
-        url.port = String(this.config.port); url.pathname = '/voice'
+        fields(command, ['action']); if (this.terminal.paired) throw new RpcError('INVALID_PARAMS', '请先撤销已有终端')
+        await this.refreshConfig()
+        if (!this.settings.terminal_entry) throw new RpcError('INVALID_PARAMS', '请先保存手机可访问的后台地址')
         this.pairing?.socket?.terminate()
-        this.pairing = { protocol_version: 2, channel_id: this.config.moduleId, pairing_id: randomUUID(), url: url.toString(), tls_fingerprint_sha256: this.terminal.fingerprint(), nonce: randomBytes(32).toString('base64url'), verification_code: String(randomInt(100000, 1000000)), expires_at: new Date(Date.now() + 60000).toISOString() }
+        this.pairing = { protocol_version: 3, channel_id: this.config.moduleId, pairing_id: randomUUID(), ...this.settings.terminal_entry, nonce: randomBytes(32).toString('base64url'), verification_code: String(randomInt(100000, 1000000)), expires_at: new Date(Date.now() + 60000).toISOString() }
         return { action: 'create_pairing', pairing: { ...this.pairing } }
       }
       case 'confirm_pairing': {
-        fields(command, ['action', 'pairing_id']); const pairing = this.pairing
+        fields(command, ['action', 'pairing_id']); await this.refreshConfig(); const pairing = this.pairing
         if (!pairing?.socket || pairing.socket.readyState !== WebSocket.OPEN || pairing.pairing_id !== command.pairing_id || Date.parse(pairing.expires_at) <= Date.now()) throw new RpcError('INVALID_PARAMS', '配对核对已失效')
         const credential = await this.terminal.pair()
         this.send(pairing.socket, { type: 'paired', credential }); pairing.socket.close(); this.pairing = undefined
@@ -229,6 +234,7 @@ export class VoiceChannel extends ModuleBase {
       case 'turn_start':
         if (!c.foreground || c.input || c.processing || this.playback || this.enrollment) throw new Error('Voice is not ready')
         this.reply = undefined; await this.refreshConfig(); await this.sync()
+        if (this.settings.setup_status !== 'complete') { this.send(c.socket, { type: 'error', code: 'VOICE_REJECTED', message: '请先完成语音创建向导' }); return }
         if (!this.settings.asr_connection || !this.settings.tts_connection || !this.connection || this.connection !== c || !c.foreground) throw new Error('Voice configuration unavailable')
         c.input = new VoiceInputBuffer(control.turn_id); this.send(c.socket, { type: 'turn_ready', turn_id: control.turn_id }); return
       case 'turn_end': await this.completeTurn(c, control); return

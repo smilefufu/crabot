@@ -14,7 +14,7 @@ describe('Voice Admin human surface and durable publication responsibility', () 
   const friend: Friend = { id: 'fufu', display_name: 'FuFu', permission: 'master', channel_identities: [], created_at: new Date().toISOString(), updated_at: new Date().toISOString() }
   beforeEach(async () => {
     dir = await fs.mkdtemp(path.join(os.tmpdir(), 'voice-admin-')); bindings = new Map()
-    deps = { isVoice: id => id === channel, admissionReady: () => true,
+    deps = { isVoice: id => id === channel, instance: id => ({ id, implementation_id: 'channel-voice', auto_start: false } as never), createInstance: vi.fn(), resumeInstance: vi.fn(), pauseInstance: vi.fn(), saveSetup: vi.fn(), fingerprint: () => undefined, terminalHosts: () => [], closeGateway: vi.fn(), admissionReady: () => true,
       verifyRuntime: async (_, token) => { if (token !== runtime) throw new RpcError('UNAUTHORIZED', 'Current child required') },
       verifyCore: async token => { if (token !== core) throw new RpcError('UNAUTHORIZED', 'Exact core required') },
       verifyHuman: async token => { if (token !== human) throw new RpcError('FORBIDDEN', 'Human Admin required') },
@@ -44,6 +44,40 @@ describe('Voice Admin human surface and durable publication responsibility', () 
     return { channel_id: channel, session_id: voiceSessionId(channel), turn_id: id, connection_epoch: epoch, enrollment_revision: revision,
       messages: [{ platform_message_id: id + ':0', session: { channel_id: channel, session_id: voiceSessionId(channel), type: 'group' }, sender: { platform_user_id: r.platform_user_id, platform_display_name: r.display_name }, content: { type: 'text', text: '不要开灯' }, features: { is_mention_crab: true, voice: { turn_id: id, segment_index: 0, start_sample: 0, end_sample: 32000, anonymous_speaker: 'speaker-0', identity_status: 'matched', registration_id: r.registration_id } }, platform_timestamp: new Date().toISOString() }] }
   }
+  it('blocks a draft before durable admission even when the runtime is authenticated', async () => {
+    const params = await turn()
+    deps.instance = id => ({ id, implementation_id: 'channel-voice', auto_start: false, voice_setup: { status: 'draft' } } as never)
+    await expect(admin.submit(params, runtime)).rejects.toThrow('向导')
+    expect(admin.turns.pending()).toHaveLength(0); expect(deps.publish).not.toHaveBeenCalled()
+  })
+  it('returns a same-name draft without overwriting its service config', async () => {
+    deps.instance = id => ({ id, implementation_id: 'channel-voice', auto_start: false, voice_setup: { status: 'draft' } } as never)
+    const response = await request('/api/channels/voice/setup', 'POST', { name: channel, config: { asr: null, tts: null, wake_word: '别覆盖' } })
+    expect(response.status).toBe(201); expect(deps.createInstance).not.toHaveBeenCalled()
+    expect(admin.audio.getConfig(channel).wake_word).toBe('你好螃蟹')
+  })
+  it('finishes only after real foreground state, ordinary group checks and fixed service tests; retries are idempotent', async () => {
+    let instance = { id: channel, implementation_id: 'channel-voice', auto_start: false, voice_setup: { status: 'draft', connection: { base_url: 'http://phone.test:3000', transport: 'ws' } } } as any
+    deps.instance = () => instance
+    deps.saveSetup = vi.fn(async (_, setup, auto_start) => { instance = { ...instance, voice_setup: setup, auto_start }; return instance })
+    const provider = await admin.audio.saveProvider({ name: 'fixed-test-service', format: 'openai-audio', endpoint: 'http://test-service:9000', models: [{ model_id: 'audio', display_name: 'Audio', capabilities: ['asr', 'tts'], voice: 'test' }] })
+    const ref = { provider_id: provider.id, model_id: 'audio' }
+    await admin.audio.saveConfig(channel, { asr: ref, tts: ref, wake_word: '你好螃蟹' })
+    const epoch = randomUUID(); await admin.sync({ channel_id: channel, connection_epoch: epoch, foreground: true }, runtime)
+    deps.channelAction = vi.fn(async () => ({ action: 'status', state: { paired: true, connected: true, foreground: true, microphone: 'closed', playback: 'idle' } } as never))
+    deps.testAudio = vi.fn(async (_, cap) => {
+      if (cap === 'asr') await admin.sync({ channel_id: channel, connection_epoch: null, foreground: false }, runtime)
+      return { ok: true }
+    })
+    expect((await request('/api/channels/' + channel + '/voice/setup/finish', 'POST', {})).status).toBe(400)
+    expect(deps.saveSetup).not.toHaveBeenCalled(); expect(instance.voice_setup.status).toBe('draft')
+    await admin.sync({ channel_id: channel, connection_epoch: epoch, foreground: true }, runtime)
+    deps.testAudio = vi.fn(async () => ({ ok: true }))
+    expect((await request('/api/channels/' + channel + '/voice/setup/finish', 'POST', {})).status).toBe(200)
+    expect(instance).toMatchObject({ auto_start: true, voice_setup: { status: 'complete' } }); expect(deps.testAudio).toHaveBeenCalledTimes(2)
+    expect((await request('/api/channels/' + channel + '/voice/setup/finish', 'POST', {})).status).toBe(200)
+    expect(deps.saveSetup).toHaveBeenCalledTimes(1); expect(deps.testAudio).toHaveBeenCalledTimes(2)
+  })
   it('rejects Agent CLI/unauthenticated management and returns only redacted audio references', async () => {
     expect((await request('/api/audio-services', 'GET', undefined, 'agent-cli')).status).toBe(403)
     const provider = { name: 'local', format: 'openai-audio', endpoint: 'http://localhost:9099', api_key: 'private-provider-marker', models: [{ model_id: 'audio', display_name: 'Audio', capabilities: ['asr', 'tts'], voice: 'test' }] }

@@ -1,31 +1,26 @@
-import 'reflect-metadata'
-import { X509CertificateGenerator, cryptoProvider } from '@peculiar/x509'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
-import { createHash, randomBytes, randomUUID, timingSafeEqual, webcrypto, X509Certificate } from 'node:crypto'
+import { createHash, randomBytes, randomUUID, timingSafeEqual, X509Certificate, createPrivateKey } from 'node:crypto'
 
-interface TerminalDisk { protocol_version: 2; cert: string; key: string; credential_hash?: string }
+interface TerminalDisk { storage_version: 1; credential_hash?: string }
 export class TerminalStore {
   private data!: TerminalDisk
   constructor(private readonly directory: string) {}
   async load(): Promise<void> {
-    try { this.data = JSON.parse(await fs.readFile(path.join(this.directory, 'terminal.json'), 'utf8')) }
+    let raw: Record<string, unknown>
+    try { raw = JSON.parse(await fs.readFile(path.join(this.directory, 'terminal.json'), 'utf8')) }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
-      cryptoProvider.set(webcrypto as unknown as Crypto)
-      const algorithm = { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256', modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]) }
-      const keys = await webcrypto.subtle.generateKey(algorithm, true, ['sign', 'verify'])
-      const certificate = await X509CertificateGenerator.createSelfSigned({ serialNumber: randomBytes(16).toString('hex'), name: 'CN=Crabot Voice', notBefore: new Date(Date.now() - 60000), notAfter: new Date(Date.now() + 5 * 365 * 86400000), signingAlgorithm: algorithm, keys: keys as unknown as CryptoKeyPair })
-      const privateKey = Buffer.from(await webcrypto.subtle.exportKey('pkcs8', keys.privateKey))
-      this.data = { protocol_version: 2, cert: certificate.toString('pem'), key: '-----BEGIN PRIVATE KEY-----\n' + privateKey.toString('base64').match(/.{1,64}/g)!.join('\n') + '\n-----END PRIVATE KEY-----\n' }
-      privateKey.fill(0)
-      await this.save(this.data)
+      await this.save({ storage_version: 1 }); return
     }
-    if (this.data.protocol_version !== 2) throw new Error('Incompatible voice WIP pairing data; preserve or explicitly clear it before pairing with protocol_version=2')
-    new X509Certificate(this.data.cert)
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw) || (raw.credential_hash !== undefined && (typeof raw.credential_hash !== 'string' || !/^[a-f0-9]{64}$/.test(raw.credential_hash)))) throw new Error('Invalid voice pairing data; original file preserved')
+    if (raw.protocol_version === 2 && typeof raw.cert === 'string' && typeof raw.key === 'string') {
+      new X509Certificate(raw.cert); createPrivateKey(raw.key)
+      await this.save({ storage_version: 1, ...(raw.credential_hash ? { credential_hash: raw.credential_hash as string } : {}) })
+    } else if (raw.storage_version === 1 && Object.keys(raw).every(k => ['storage_version', 'credential_hash'].includes(k))) {
+      this.data = raw as unknown as TerminalDisk
+    } else throw new Error('Incompatible voice pairing data; original file preserved')
   }
-  tls(): { cert: string; key: string } { return { cert: this.data.cert, key: this.data.key } }
-  fingerprint(): string { return createHash('sha256').update(new X509Certificate(this.data.cert).raw).digest('hex') }
   get paired(): boolean { return !!this.data.credential_hash }
   matches(credential: string): boolean {
     const expected = this.data.credential_hash

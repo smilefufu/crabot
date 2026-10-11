@@ -126,3 +126,5 @@ export { pcm16Wave, speechWaveToPcm, transcribeAudio, synthesizeAudio } from './
 export { voiceSessionId } from './voice-wire.js'
 export { VOICE_MODEL_VERSIONS } from './voice-models.js'
 export { testAudioService } from './audio-client.js'
+
+export { parseVoiceConnection, voiceTerminalEntry, voiceSetupStatus } from './voice-connection.js'

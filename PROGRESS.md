@@ -28,17 +28,15 @@
 - 2026-10-10 17:18:31（Asia/Shanghai）以已合并代码 `7ebf64ed` 完成全模块、Web、CLI、MCP 构建及本机 user mode 正常重启，七模块及端点健康。新 Agent 使用本仓 dist；实际 Admin JS 与构建逐字节一致，生产 `get_worker_detail` 已返回新版执行事实结构，旧化身为 `legacy_unknown`。编译查询 fixture 确认旧值 `task=false` 不阻止主控派发、仅显示六个有效入口；未为验收触发新任务或模型请求，真实行为继续按后续 trace 观察。
 - 启动对账 revived=21、failed=0、unchanged=3944；9 条 `builtin trace writer unavailable` 的 Worker/trace 标识均在部署前出现，无新标识或新增 fatal 日志。保留为独立历史恢复告警，不据此改写任务或权限数据；Memory 后端修复仍独立处理。
 
-### 安卓语音终端与 Voice Channel：协议 v2 修订已实现，待联调验收
+### 安卓语音终端与 Voice Channel：v3 创建向导已实现，待真机验收
 
-- 两端身份修订及授权来源设计于 2026-10-11 获书面确认；正式 `protocol-voice.md` v0.2.0 已发布。后端通过 [主仓 PR #206](https://github.com/smilefufu/crabot/pull/206) 交付；[安卓仓库](https://github.com/smilefufu/crabot-voice-android)按用户要求不走 PR，现有实现分支待验收，测试与 diff review 通过后直接提交、推送 main。
-- 声纹样本 ID 与稳定渠道联系人分离，Friend 仅按当前 ChannelIdentity 解析；删除/重登不改绑定。唯一普通群允许 unknown/身份 uncertain 的全部发言，逐片段标 Friend/陌生人；内容重叠、无效分段或 ASR 失败仍整轮失败。权限及 Master 成员名册沿现有群规则，名册不依赖活跃声纹。私聊仍在后续范围。
-- Agent 只把事件作为定位通知，由 exact-core 无 trace RPC 读取 Admin 持久授权快照，整批落 inbox 后确认。回答机会只在内存，重启或过期不复活。终端整数协议为 2；旧 WIP 元数据明确拒绝并保留，不自动迁移/清除。
-- Admin 支持创建联系人、从列表绑定/解绑 Friend、以已有模板创建普通 Friend、独立登记/删除声纹；移除音频分类和家庭/客厅限定，仅保留原生 API 格式、地址、密钥与模型引用。合成预览已实际点通创建/绑定，刷新后可见新界面。
-- Shared/Admin/Channel/Agent/Web 类型检查与 Web 构建通过；合并最新 main 后根目录、Shared、Core、Voice、Wechat、Web 全量共 967 项通过。消息工具/发送 87、83 项，Manager 装配 45 项通过；Manager 其余 232 项通过，2 项 Memory trace 失败在当前 origin/main 同样复现。Admin 串行全量 1298 项通过，Auth 单跑 24 项通过；剩余 2 项文档断言失败在当前 origin/main 复现。Agent 全量长时间无进展后停止，其他失败未全部归因，不计通过。Android 0.2.0 产品与仪器 APK 构建、4 项 JVM、hash/签名核验通过；专用模拟器系统启动挂起，6 项仪器测试未运行，不借用旧版成功结果。
-- 2026-10-11 真机 OnePlus 7 Pro 已安装 0.2.0，启动显示模型已加载、关麦、未连接，麦克风/相机权限未授予；配套后端各模块重新编译通过。产品适配器对独立 SenseVoice/Kokoro API 的固定合成输入测试通过；实测极短静音返回 `<EMPTY>` 会被误收为正文，已先复现 2 项整轮错误准入，再修为整轮失败且不提交 partial，Shared 音频/协议 11 项、Voice 全量 10 项及真实 API 空结果复核通过。
-- 2026-10-11 20:25:00（Asia/Shanghai）按用户授权完成全模块、Web、CLI、MCP 构建及 `crabot restart`，现有 user mode 数据保留；本地部署分支保留 main 的已有提交，PR #206 未合并。实际部署目录 48 项 Voice 定向回归通过，原有七模块健康，后台 HTML 与本次构建逐字节一致。新建入口修正为“手机扫码配对”，创建页及成功提示说明先创建/启动、再生成二维码扫码的实际步骤，5 项配置 UI 回归、构建及实际页面检查通过。后台已创建/启动“手机语音”，八模块运行；保存独立 SenseVoice/Kokoro API 引用，两项实际后台连接测试通过，已生成配对二维码。待现场扫码/核对；ADB 当前未连接手机，真机录放音尚未验收。
-- [当前 Android 验证记录](https://github.com/smilefufu/crabot-voice-android/blob/feat/android-voice-v1/docs/verification/2026-10-11-android-voice-v2.md)列出验收顺序。手机配对、有限录放音生命周期、真人 B/未知/短句、唤醒/AEC、功耗、50轮整体响应与 Linux 两 UID 隔离仍待验收。FuFu 旧实验登记保留；公开文件/回环测试不代表声纹准确率或整体延迟。
-- 新建体验待修订：[创建向导/共用 Admin 入口](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/specs/2026-10-11-voice-channel-creation-wizard-design.md)与[安卓 WS/WSS 接入](https://github.com/smilefufu/crabot-voice-android/blob/main/docs/specs/2026-10-11-admin-entry-ws-wss-design.md)定稿待确认。创建阶段串起服务、扫码、联系人/声纹与群配置，保留草稿；手机复用 Admin Web 端口，完整 `public_base_url` 按 HTTP/HTTPS 推荐 WS/WSS，允许显式选择。同网无需外网，新协议拟为 v3，同渠道重配保留声纹。当前部署仍为独立 Voice WSS/v2，尚未改正式协议、产品代码或运行数据。
+- 身份/联系人、授权来源、创建向导与 Admin 共用端口设计均已确认，正式 `protocol-voice.md` v0.3.0 已发布。后端交付于 [PR #206](https://github.com/smilefufu/crabot/pull/206)，不自行合并；[安卓仓库](https://github.com/smilefufu/crabot-voice-android)按用户要求通过验证后直接提交 main。
+- 唯一普通语音群允许陌生人发言，逐片段标注 Friend/陌生人；声纹样本与稳定渠道联系人分离，Friend 按当前 ChannelIdentity 解析。群权限和 Master 成员名册沿用现有规则，声纹不授予权限。重叠、无效分段或 ASR 失败仍整轮失败；私聊属于后续范围。exact-core 从 Admin 读取持久授权快照并整批落 inbox，回答机会重启后不复活。
+- 新建阶段完成音频 API、扫码、联系人/Friend/声纹与群权限，再检查完成；未完成实例保留 draft、auto_start=false，不允许业务语音。退出停止草稿运行，可按原 ID 继续；运行中的继续配置不重启。完成前检查前台关麦、登记状态、普通群准入，并重测 ASR/TTS，持久化成功后启用。
+- WS/WSS 复用 Admin Web 端口，Voice 内部 RPC/WS 仅监听 loopback。完整 public_base_url 保留有效端口与路径前缀，HTTP/HTTPS 推荐 WS/WSS，允许用户显式选择；同网可用局域网。Admin 自签证书与私钥保存在受限文件，手机允许二维码 pin 或系统 CA+hostname；不自动切换协议。v2 的有效配对哈希与同渠道声纹保留，显式撤销后重新扫码；不清除 FuFu 实验数据。
+- 本次定向回归：Shared 22、Admin 30、Voice 12、Agent 8、Web 9、Android JVM 11 项通过；Shared/Admin/Voice/Agent 类型检查、Web 与 Android 0.3.0 产品/仪器 APK 编译通过。Android 包签名和 SHA-256 已核验；仪器包未执行。既有全量验证及基线失败见 PR/上一阶段记录，不作为本次新增通过数。
+- 当前本机仍运行上阶段 v2 部署；接下来按授权构建全部模块并 crabot restart，再核对运行产物与实际页面。ADB 当前未检测到手机，0.3.0 未安装到真机；既有手机语音实例、联系人及 API 引用保留。
+- 真人配对、有限录放音生命周期、A/B/A 换人、unknown/短句、唤醒误触发、AEC、功耗、50 轮整体延迟与 Linux 两 UID 隔离待验收。公开音频/回环测试不能证明真人声纹准确率或整体延迟；[Android v3 验证记录](https://github.com/smilefufu/crabot-voice-android/blob/main/docs/verification/2026-10-11-android-voice-v3.md)分别列明代码验证与现场验收。
 
 ### 未实装远程执行类别隐藏：已本地部署
 

@@ -545,7 +545,7 @@ export abstract class ModuleBase {
     })
 
     return new Promise((resolve, reject) => {
-      this.server!.listen(this.config.port, () => {
+      this.server!.listen(this.config.port, this.listenHost, () => {
         console.log(`[${this.config.moduleId}] Listening on port ${this.config.port}`)
         resolve()
       })
@@ -554,7 +554,9 @@ export abstract class ModuleBase {
     })
   }
 
-  /** Default HTTP transport; a Channel can isolate its terminal TLS surface on the same assigned port. */
+  protected get listenHost(): string | undefined { return undefined }
+
+  /** Default HTTP transport; modules may provide their own transport. */
   protected createServer(handler: (req: IncomingMessage, res: ServerResponse) => void): NetServer {
     return http.createServer(handler)
   }

@@ -343,6 +343,7 @@ export interface JsonSchemaProperty {
 }
 
 export interface ChannelInstance {
+  voice_setup?: import('crabot-shared').VoiceSetupMetadata
   id: string
   implementation_id: string
   name: string

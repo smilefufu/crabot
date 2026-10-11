@@ -12,6 +12,7 @@ import { ModuleDetail } from './pages/Modules/ModuleDetail'
 import { AgentConfig } from './pages/Agents/AgentConfig'
 import { WorkersPage } from './pages/Workers'
 import { ChannelConfig } from './pages/Channels/ChannelConfig'
+import { VoiceSetup } from './pages/Channels/VoiceSetup'
 import { NewChannel } from './pages/Channels/NewChannel'
 import { NewChannelOnboarding } from './pages/Channels/NewChannelOnboarding'
 import { GlobalSettings } from './pages/Settings/GlobalSettings'
@@ -121,6 +122,7 @@ const AppRoutes: React.FC = () => {
           </PrivateRoute>
         }
       />
+      <Route path="/channels/new/voice" element={<PrivateRoute><VoiceSetup /></PrivateRoute>} />
       <Route
         path="/channels/new/:implId/:methodId"
         element={

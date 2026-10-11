@@ -8,7 +8,7 @@ import fs from 'fs/promises'
 import fsSync from 'fs'
 import path from 'path'
 import yaml from 'js-yaml'
-import { generateTimestamp, type RpcClient, validateInstanceId } from 'crabot-shared'
+import { generateTimestamp, type RpcClient, validateInstanceId, voiceSetupStatus, type VoiceSetupMetadata } from 'crabot-shared'
 import type {
   ChannelImplementation,
   ChannelInstance,
@@ -88,6 +88,7 @@ function inferPlatformFromModuleId(moduleId: string): string {
 export class ChannelManager {
   private implementations: Map<string, ChannelImplementation> = new Map()
   private instances: Map<string, ChannelInstance> = new Map()
+  private instanceWrites: Promise<unknown> = Promise.resolve()
 
   private readonly dataDir: string
   private readonly implementationsFilePath: string
@@ -184,6 +185,7 @@ export class ChannelManager {
   }
 
   async createInstance(params: CreateChannelInstanceParams): Promise<ChannelInstance> {
+    if ('voice_setup' in params) throw new Error('voice_setup 只能由语音向导维护')
     const impl = this.implementations.get(params.implementation_id)
     if (!impl) {
       throw new Error(`Implementation not found: ${params.implementation_id}`)
@@ -207,7 +209,8 @@ export class ChannelManager {
       implementation_id: params.implementation_id,
       name: instanceId,
       platform,
-      auto_start: params.auto_start ?? false,
+      auto_start: impl.id === 'channel-voice' ? false : params.auto_start ?? false,
+      ...(impl.id === 'channel-voice' ? { voice_setup: { status: 'draft' as const } } : {}),
       start_priority: 30,
       module_registered: false,
       created_at: now,
@@ -239,9 +242,8 @@ export class ChannelManager {
         return registered
       } catch (error) {
         console.error(`[ChannelManager] Failed to register ${impl.id} module:`, error)
-        // 注册失败时回滚实例记录
-        this.instances.delete(instance.id)
-        await this.saveInstances()
+        // Voice 草稿已持久化；保留它供同名继续配置。
+        if (impl.id !== 'channel-voice') { this.instances.delete(instance.id); await this.saveInstances() }
         throw error
       }
     }
@@ -346,6 +348,9 @@ export class ChannelManager {
     if (!existing) {
       throw new Error(`Instance not found: ${params.instance_id}`)
     }
+
+    if ('voice_setup' in params) throw new Error('voice_setup 只能由语音向导维护')
+    if (existing.implementation_id === 'channel-voice' && voiceSetupStatus(existing.voice_setup) === 'draft' && params.auto_start === true) throw new Error('请先完成语音创建向导')
 
     // name 即 module_id，不允许通过 updateInstance 修改
     const updated: ChannelInstance = {
@@ -551,6 +556,9 @@ export class ChannelManager {
     } catch {
       console.log('[ChannelManager] No existing instances data')
     }
+    for (const instance of this.instances.values()) if (instance.implementation_id === 'channel-voice') {
+      if (voiceSetupStatus(instance.voice_setup) === 'draft' && instance.auto_start) throw new Error('语音草稿不能自动启动')
+    }
   }
 
   // ============================================================================
@@ -562,8 +570,8 @@ export class ChannelManager {
    */
   private async atomicWriteFile(filePath: string, content: string): Promise<void> {
     const tempPath = `${filePath}.tmp`
-    await fs.writeFile(tempPath, content, 'utf-8')
-    await fs.rename(tempPath, filePath)
+    try { await fs.writeFile(tempPath, content, 'utf-8'); await fs.rename(tempPath, filePath) }
+    finally { await fs.rm(tempPath, { force: true }) }
   }
 
   private async saveImplementations(): Promise<void> {
@@ -571,9 +579,68 @@ export class ChannelManager {
     await this.atomicWriteFile(this.implementationsFilePath, JSON.stringify(items, null, 2))
   }
 
+  private writeInstances<T>(operation: () => Promise<T>): Promise<T> {
+    const pending = this.instanceWrites.then(operation)
+    this.instanceWrites = pending.catch(() => {})
+    return pending
+  }
+
   private async saveInstances(): Promise<void> {
-    const items = Array.from(this.instances.values())
-    await this.atomicWriteFile(this.instancesFilePath, JSON.stringify(items, null, 2))
+    await this.writeInstances(() => this.atomicWriteFile(this.instancesFilePath, JSON.stringify([...this.instances.values()], null, 2)))
+  }
+
+  /** Persist first: a failed finish must leave the live owner in draft state. */
+  async saveVoiceSetup(id: string, setup: VoiceSetupMetadata, autoStart: boolean): Promise<ChannelInstance> {
+    if (voiceSetupStatus(setup) === 'draft' && autoStart) throw new Error('语音草稿不能自动启动')
+    return this.writeInstances(async () => {
+      const instance = this.instances.get(id)
+      if (instance?.implementation_id !== 'channel-voice') throw new Error('Voice instance required')
+      const updated = { ...instance, voice_setup: setup, auto_start: autoStart, updated_at: generateTimestamp() }
+      const items = [...this.instances.values()].map(item => item.id === id ? updated : item)
+      await this.atomicWriteFile(this.instancesFilePath, JSON.stringify(items, null, 2))
+      this.instances.set(id, updated)
+      return updated
+    })
+  }
+
+  private async resolveVoice(id: string) {
+    try { return await this.rpcClient.resolve({ module_id: id }, 'admin') }
+    catch (error) { if ((error as { code?: string }).code === 'NOT_FOUND' || (error instanceof Error && error.message === 'Module not found')) return []; throw error }
+  }
+
+  async resumeVoice(id: string): Promise<ChannelInstance> {
+    let instance = this.instances.get(id)
+    if (instance?.implementation_id !== 'channel-voice') throw new Error('Voice instance required')
+    // Absence denotes an existing pre-wizard instance; adoption is explicit.
+    if (instance.voice_setup === undefined) instance = await this.saveVoiceSetup(id, { status: 'draft' }, false)
+    else if (voiceSetupStatus(instance.voice_setup) !== 'draft') throw new Error('已完成的语音实例请在配置页维护')
+    const running = await this.resolveVoice(id)
+    if (!running.length) {
+      const impl = this.implementations.get(instance.implementation_id)!
+      try { await this.registerBuiltinModule(impl, instance) }
+      catch (error) { if (!(error instanceof Error && error.message.includes('DUPLICATE_ID')) && (error as { code?: string }).code !== 'DUPLICATE_ID') throw error }
+      try { await this.rpcClient.startModule(id, 'admin') }
+      catch (error) { if (!(error instanceof Error && error.message.includes('ALREADY_RUNNING'))) throw error }
+    }
+    const deadline = Date.now() + 15000
+    for (;;) {
+      const current = (await this.resolveVoice(id))[0]
+      if (current) {
+        try { await this.rpcClient.call(current.port, 'health', {}, 'admin', undefined, { timeoutMs: 1000 }); break }
+        catch { /* The process may be registered before its RPC listener is ready. */ }
+      }
+      if (Date.now() >= deadline) throw new Error('语音模块启动超时，请继续配置重试')
+      await new Promise(resolve => setTimeout(resolve, 100))
+    }
+    return this.instances.get(id)!
+  }
+
+  async pauseVoice(id: string): Promise<ChannelInstance> {
+    const instance = this.instances.get(id)
+    if (instance?.implementation_id !== 'channel-voice' || voiceSetupStatus(instance.voice_setup) !== 'draft') throw new Error('Voice draft required')
+    try { await this.rpcClient.stopModule(id, 'admin') }
+    catch (error) { if (!(error instanceof Error && /NOT_RUNNING|ALREADY_STOPPED/.test(error.message))) throw error }
+    return instance
   }
 
   private async deleteConfigFile(instanceId: string): Promise<void> {
