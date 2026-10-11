@@ -31,7 +31,7 @@
 ### 安卓语音终端与家庭 Channel：两端 spec 待确认
 
 - 已按用户要求创建 public 仓库 [crabot-voice-android](https://github.com/smilefufu/crabot-voice-android)，初始化 README 并克隆到主仓根目录；主仓 `.gitignore` 忽略该独立仓库。此次仅建立开发目录，未开始安卓产品实现。
-- 用户确定安卓手机起步、不采购硬件，一期端侧分段/声纹，至少支持无明显静音的连续换人B；按用户要求将整合稿拆为安卓仓的[客户端spec](crabot-voice-android/docs/superpowers/specs/2026-10-10-android-voice-terminal-v1-design.md)与文档仓的[后端spec](crabot-docs/superpowers/specs/2026-10-10-voice-channel-v1-design.md)，原入口保留跳转。安卓仓 README/AGENTS.md 固定后续安卓 spec 与计划的归属，跨端正式协议仍在 crabot-docs；两稿行为与验收条件保持不变，待用户书面确认。未改正式协议/产品代码或重启Crabot。
+- 用户确定安卓手机起步、不采购硬件，一期端侧分段/声纹，至少支持无明显静音的连续换人B；按用户要求将整合稿拆为安卓仓的[客户端spec](crabot-voice-android/docs/specs/2026-10-10-android-voice-terminal-v1-design.md)与文档仓的[后端spec](crabot-docs/superpowers/specs/2026-10-10-voice-channel-v1-design.md)，原入口保留跳转。安卓仓 README/AGENTS.md 固定后续安卓 spec 与计划的归属，跨端正式协议仍在 crabot-docs；两稿行为与验收条件保持不变，待用户书面确认。未改正式协议/产品代码或重启Crabot。
 - 推荐独立ASR/TTS服务、Admin保存引用且只在voice实例页配置、家庭group权限；新稿明确同轮多消息整体准入，避免前半句先执行。前台/锁屏、未知整轮拒绝、8秒接话与AEC未通过时按钮打断均是待确认建议，不能当成已批准。system mode、云接口与完整链路待验收。
 - OnePlus 7 Pro官方CAM++完成FuFu三段登记与新录音匹配；用户报告unknown，样本来源未核实，不报准确率。USB/AC保持唤醒按用户要求设3（原0）。[手机公开文件实验](crabot-docs/superpowers/research/voice-scenario-b-poc/README.md)完成6组FP32/INT8分段比对；约12.5秒FP32分段+匹配单次约1.4秒，边界重叠与INT8错归仍存在，保守门控会拒识，B可用率未证明。
 - [Whisper归属对照](crabot-docs/superpowers/research/voice-scenario-b-poc/ASR-ATTRIBUTION.md)与[中文ASR/短词门控](crabot-docs/superpowers/research/voice-scenario-b-poc/CHINESE-ASR.md)已保存版本/hash/原始结果：SenseVoice成为中文有限片段主候选，VAD需保留短接话；没有真人逐字gold，不把继承片段身份或ASR时间点当成归因验收。
