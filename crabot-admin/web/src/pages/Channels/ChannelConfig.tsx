@@ -531,7 +531,9 @@ export const ChannelConfig: React.FC = () => {
         ...(Object.keys(envToSave).length > 0 && { env: envToSave }),
         auto_start: false,
       })
-      toast.success('Channel 实例已创建。启动后请在该平台向 Crabot 发送 /认主 完成主人认证')
+      toast.success(createImplId === 'channel-voice'
+        ? '语音渠道已创建。请启动实例、展开配置并生成配对二维码，再用 Android App 扫码连接'
+        : 'Channel 实例已创建。启动后请在该平台向 Crabot 发送 /认主 完成主人认证')
       setShowCreateForm(false)
       setCreateName('')
       setCreatePlatform('')
@@ -580,14 +582,15 @@ export const ChannelConfig: React.FC = () => {
         {error && <div className="error-message">{error}</div>}
 
         <ChannelOnboardingCallout
-          visible={!onboardingDismissed && instances.some(instance => instance.implementation_id !== 'channel-voice')}
+          visible={!onboardingDismissed && !(showCreateForm && selectedImpl?.id === 'channel-voice') && instances.some(instance => instance.implementation_id !== 'channel-voice')}
           onDismiss={dismissOnboarding}
         />
 
         {/* Create Form */}
         {showCreateForm && (
           <div className="channel-create-panel">
-            <h2 className="channel-create-panel__title">新建 Channel 实例</h2>
+            <h2 className="channel-create-panel__title">{selectedImpl?.id === 'channel-voice' ? '新建语音渠道' : '新建 Channel 实例'}</h2>
+            {selectedImpl?.id === 'channel-voice' && <p className="schema-field__desc">先填写渠道名称并创建实例；启动后展开“配置”，生成一次性配对二维码，再用 Android App 扫码并核对两端配对码。</p>}
             <div className="channel-create-grid">
               <div className="form-group form-group--flush">
                 <label className="form-label">实现（Implementation）</label>
@@ -599,7 +602,7 @@ export const ChannelConfig: React.FC = () => {
               </div>
               <div className="form-group form-group--flush">
                 <label className="form-label">实例名称</label>
-                <input className="input" type="text" value={createName} onChange={(e) => setCreateName(e.target.value)} placeholder="如：飞书工作群" />
+                <input className="input" type="text" value={createName} onChange={(e) => setCreateName(e.target.value)} placeholder={selectedImpl?.id === 'channel-voice' ? '如：手机语音' : '如：飞书工作群'} />
               </div>
               <div className="form-group form-group--flush">
                 <label className="form-label">平台</label>

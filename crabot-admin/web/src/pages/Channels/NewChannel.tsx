@@ -53,7 +53,7 @@ export const NewChannel: React.FC = () => {
     // 始终提供"手动填写"入口
     cards.push({
       key: `${impl.id}:schema`,
-      title: `${impl.name} · 手动填写`,
+      title: `${impl.name} · ${impl.id === 'channel-voice' ? '手机扫码配对' : '手动填写'}`,
       description: methodFallbackDescription(impl),
       onClick: () => navigate(`/channels/config?implementation_id=${encodeURIComponent(impl.id)}`),
     })
@@ -141,6 +141,7 @@ export const NewChannel: React.FC = () => {
 }
 
 function methodFallbackDescription(impl: ChannelImplementation): string {
+  if (impl.id === 'channel-voice') return '先创建并启动渠道，再在配置页生成配对二维码，用 Android App 扫码连接。无需手动填写终端凭证。'
   const required = impl.config_schema?.required ?? []
   if (required.length > 0) return `手动填入：${required.slice(0, 3).join(' / ')}${required.length > 3 ? ' 等' : ''}`
   return '手动填入凭证后启动'
