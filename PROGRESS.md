@@ -30,7 +30,7 @@
 
 ### 安卓语音终端与 Voice Channel：协议 v2 修订已实现，待联调验收
 
-- 两端身份修订及授权来源设计于 2026-10-11 获书面确认；正式 `protocol-voice.md` v0.2.0 已发布。隔离分支通过 [主仓 PR #206](https://github.com/smilefufu/crabot/pull/206) / [安卓 PR #1](https://github.com/smilefufu/crabot-voice-android/pull/1) 交付，尚未部署当前实例。
+- 两端身份修订及授权来源设计于 2026-10-11 获书面确认；正式 `protocol-voice.md` v0.2.0 已发布。后端通过 [主仓 PR #206](https://github.com/smilefufu/crabot/pull/206) 交付；[安卓仓库](https://github.com/smilefufu/crabot-voice-android)按用户要求不走 PR，现有实现分支待验收，测试与 diff review 通过后直接提交、推送 main。尚未部署当前实例。
 - 声纹样本 ID 与稳定渠道联系人分离，Friend 仅按当前 ChannelIdentity 解析；删除/重登不改绑定。唯一普通群允许 unknown/身份 uncertain 的全部发言，逐片段标 Friend/陌生人；内容重叠、无效分段或 ASR 失败仍整轮失败。权限及 Master 成员名册沿现有群规则，名册不依赖活跃声纹。私聊仍在后续范围。
 - Agent 只把事件作为定位通知，由 exact-core 无 trace RPC 读取 Admin 持久授权快照，整批落 inbox 后确认。回答机会只在内存，重启或过期不复活。终端整数协议为 2；旧 WIP 元数据明确拒绝并保留，不自动迁移/清除。
 - Admin 支持创建联系人、从列表绑定/解绑 Friend、以已有模板创建普通 Friend、独立登记/删除声纹；移除音频分类和家庭/客厅限定，仅保留原生 API 格式、地址、密钥与模型引用。合成预览已实际点通创建/绑定，刷新后可见新界面。
