@@ -38,7 +38,7 @@
 - 2026-10-11 真机 OnePlus 7 Pro 已安装 0.2.0，启动显示模型已加载、关麦、未连接，麦克风/相机权限未授予；配套后端各模块重新编译通过。产品适配器对独立 SenseVoice/Kokoro API 的固定合成输入测试通过；实测极短静音返回 `<EMPTY>` 会被误收为正文，已先复现 2 项整轮错误准入，再修为整轮失败且不提交 partial，Shared 音频/协议 11 项、Voice 全量 10 项及真实 API 空结果复核通过。
 - 2026-10-11 20:25:00（Asia/Shanghai）按用户授权完成全模块、Web、CLI、MCP 构建及 `crabot restart`，现有 user mode 数据保留；本地部署分支保留 main 的已有提交，PR #206 未合并。实际部署目录 48 项 Voice 定向回归通过，原有七模块健康，后台 HTML 与本次构建逐字节一致。新建入口修正为“手机扫码配对”，创建页及成功提示说明先创建/启动、再生成二维码扫码的实际步骤，5 项配置 UI 回归、构建及实际页面检查通过。后台已创建/启动“手机语音”，八模块运行；保存独立 SenseVoice/Kokoro API 引用，两项实际后台连接测试通过，已生成配对二维码。待现场扫码/核对；ADB 当前未连接手机，真机录放音尚未验收。
 - [当前 Android 验证记录](https://github.com/smilefufu/crabot-voice-android/blob/feat/android-voice-v1/docs/verification/2026-10-11-android-voice-v2.md)列出验收顺序。手机配对、有限录放音生命周期、真人 B/未知/短句、唤醒/AEC、功耗、50轮整体响应与 Linux 两 UID 隔离仍待验收。FuFu 旧实验登记保留；公开文件/回环测试不代表声纹准确率或整体延迟。
-- 新建体验待修订：[语音渠道创建向导设计](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/specs/2026-10-11-voice-channel-creation-wizard-design.md)待用户确认。拟在创建阶段串起服务、扫码、联系人/声纹与群配置，保留可继续的草稿；主机默认值复用 `public_base_url`，同一家庭网络无需外网地址。当前手机连接独立 Voice WSS 端口，不能把 Admin 外网入口可访问当作语音已连通；尚未修改协议、产品代码或运行数据。
+- 新建体验待修订：[创建向导/共用 Admin 入口](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/specs/2026-10-11-voice-channel-creation-wizard-design.md)与[安卓 WS/WSS 接入](https://github.com/smilefufu/crabot-voice-android/blob/main/docs/specs/2026-10-11-admin-entry-ws-wss-design.md)定稿待确认。创建阶段串起服务、扫码、联系人/声纹与群配置，保留草稿；手机复用 Admin Web 端口，完整 `public_base_url` 按 HTTP/HTTPS 推荐 WS/WSS，允许显式选择。同网无需外网，新协议拟为 v3，同渠道重配保留声纹。当前部署仍为独立 Voice WSS/v2，尚未改正式协议、产品代码或运行数据。
 
 ### 未实装远程执行类别隐藏：已本地部署
 
