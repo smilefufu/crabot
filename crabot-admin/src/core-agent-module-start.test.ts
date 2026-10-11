@@ -5,6 +5,7 @@ describe('Admin core Agent module-start identity', () => {
   function subject(): any {
     const admin = Object.create(AdminModule.prototype) as any
     admin.agentPort = 0
+    admin.voiceAdmin = { replayPending: vi.fn().mockResolvedValue(undefined) }
     admin.config = { moduleId: 'admin-web' }
     admin.publishAgentConfigInvalidation = vi.fn().mockResolvedValue(true)
     admin.pushProxyConfigToModule = vi.fn().mockResolvedValue(undefined)
@@ -20,6 +21,7 @@ describe('Admin core Agent module-start identity', () => {
     })
     expect(admin.agentPort).toBe(0)
     expect(admin.publishAgentConfigInvalidation).not.toHaveBeenCalled()
+    expect(admin.voiceAdmin.replayPending).not.toHaveBeenCalled()
 
     await admin.onEvent({
       type: 'module_manager.module_started', timestamp: new Date().toISOString(), source: 'module-manager',
@@ -27,6 +29,7 @@ describe('Admin core Agent module-start identity', () => {
     })
     expect(admin.agentPort).toBe(19999)
     expect(admin.publishAgentConfigInvalidation).toHaveBeenCalledOnce()
+    expect(admin.voiceAdmin.replayPending).toHaveBeenCalledOnce()
 
     admin.invalidatePortCache('rogue-agent', 'agent')
     expect(admin.agentPort).toBe(19999)

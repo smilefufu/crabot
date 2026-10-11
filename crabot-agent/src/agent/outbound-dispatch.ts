@@ -266,20 +266,7 @@ export async function dispatchOutboundMessage(
 
   let sendResult: OutboundSendResult
   try {
-    sendResult = await deps.rpcClient.call<
-      {
-        session_id: string
-        content: MessageContent
-        delivery_id?: string
-        request_ids?: string[]
-        voice_reply_context?: VoiceReplyContext
-        features?: {
-          mentions?: PlatformMention[]
-          quote_message_id?: string
-        }
-      },
-      OutboundSendResult
-    >(channelPort, 'send_message', {
+    const params = {
       session_id: entry.session_id,
       // 与 prepare 落盘的 payload 同源（staged attachment 引用）——payload_sha256 校验依赖。
       content: delivery ? delivery.content : messageContent,
@@ -297,7 +284,10 @@ export async function dispatchOutboundMessage(
           },
         }
         : {}),
-    }, deps.moduleId, undefined, deps.voice ? { timeoutMs: deps.voice.send_timeout_ms } : {})
+    }
+    sendResult = deps.voice
+      ? await deps.rpcClient.call<typeof params, OutboundSendResult>(channelPort, 'send_message', params, deps.moduleId, undefined, { timeoutMs: deps.voice.send_timeout_ms })
+      : await deps.rpcClient.call<typeof params, OutboundSendResult>(channelPort, 'send_message', params, deps.moduleId)
   } catch (error) {
     if (delivery) await deps.adminChatDelivery!.fail(delivery.delivery_id, error)
     throw error

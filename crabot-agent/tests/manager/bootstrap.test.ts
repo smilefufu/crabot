@@ -409,6 +409,7 @@ describe('manager bootstrap（P5 Task 1）', () => {
 
   it('ManagerKey 的完整归属目标进入 send_message repair，当前会话缺 channel_id 时零探测补全', async () => {
     const rpcCall = vi.fn(async (_port: number, method: string, params: Record<string, unknown>) => {
+      if (method === 'get_capabilities') return {}
       if (method === 'send_message') {
         return { platform_message_id: 'pm-self', sent_at: '2026-09-04T00:00:00.000Z' }
       }
@@ -447,11 +448,12 @@ describe('manager bootstrap（P5 Task 1）', () => {
 
     await stack.registry.routeHumanMessages('wechat', 'sess-boot', [makeChannelMessage('回复我')])
 
-    expect(rpcCall.mock.calls.map((call) => call[1])).toEqual(['send_message'])
+    expect(rpcCall.mock.calls.map((call) => call[1])).toEqual(['get_capabilities', 'send_message'])
   })
 
   it('跨 episode 先从 list_sessions 登记来源，后续 send_message 只查当前 Loop 本地索引', async () => {
     const rpcCall = vi.fn(async (port: number, method: string) => {
+      if (method === 'get_capabilities') return {}
       if (method === 'get_sessions') {
         expect(port).toBe(19010)
         return {
@@ -505,7 +507,7 @@ describe('manager bootstrap（P5 Task 1）', () => {
     await stack.registry.routeHumanMessages('wechat', 'sess-boot', [makeChannelMessage('再发送')])
 
     expect(episode).toBe(2)
-    expect(rpcCall.mock.calls.map((call) => call[1])).toEqual(['get_sessions', 'send_message'])
+    expect(rpcCall.mock.calls.map((call) => call[1])).toEqual(['get_sessions', 'get_capabilities', 'send_message'])
   })
 
   it('Session 归属索引按 Manager 隔离，不从其他 Manager 的观察补全', async () => {
