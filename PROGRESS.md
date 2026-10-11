@@ -35,7 +35,7 @@
 - 新建阶段完成音频 API、扫码、联系人/Friend/声纹与群权限，再检查完成；未完成实例保留 draft、auto_start=false，不允许业务语音。退出停止草稿运行，可按原 ID 继续；运行中的继续配置不重启。完成前检查前台关麦、登记状态、普通群准入，并重测 ASR/TTS，持久化成功后启用。
 - WS/WSS 复用 Admin Web 端口，Voice 内部 RPC/WS 仅监听 loopback。完整 public_base_url 保留有效端口与路径前缀，HTTP/HTTPS 推荐 WS/WSS，允许用户显式选择；同网可用局域网。Admin 自签证书与私钥保存在受限文件，手机允许二维码 pin 或系统 CA+hostname；不自动切换协议。v2 的有效配对哈希与同渠道声纹保留，显式撤销后重新扫码；不清除 FuFu 实验数据。
 - 本次定向回归：Shared 22、Admin 30、Voice 12、Agent 8、Web 9、Android JVM 11 项通过；Shared/Admin/Voice/Agent 类型检查、Web 与 Android 0.3.0 产品/仪器 APK 编译通过。Android 包签名和 SHA-256 已核验；仪器包未执行。既有全量验证及基线失败见 PR/上一阶段记录，不作为本次新增通过数。
-- 当前本机仍运行上阶段 v2 部署；接下来按授权构建全部模块并 crabot restart，再核对运行产物与实际页面。ADB 当前未检测到手机，0.3.0 未安装到真机；既有手机语音实例、联系人及 API 引用保留。
+- 2026-10-12 00:02（Asia/Shanghai）完成全部模块/Web/CLI/MCP 构建并按授权 crabot restart；八模块健康，运行中 Voice 元数据 v0.3.0 / capability 3，127.0.0.1:19010 仅内部监听，Admin HTTP/HTTPS 共用 3000，返回 HTML 与本次产物一致，实际 TLS 与保存身份一致（文件 0600、目录 0700）。已有实例与音频 API 文件逐字节不变，v2 终端迁移为 storage_version 1 且校验材料保留。实际构建后页面已显示四步向导；冷重启使旧 Web 登录失效，完整扫码页操作待重新登录。原手机语音 auto_start=false，已恢复此前手动运行状态，不隐式采用草稿或改变权限。ADB 当前未连接，0.3.0 APK 已就绪但未安装到真机。
 - 真人配对、有限录放音生命周期、A/B/A 换人、unknown/短句、唤醒误触发、AEC、功耗、50 轮整体延迟与 Linux 两 UID 隔离待验收。公开音频/回环测试不能证明真人声纹准确率或整体延迟；[Android v3 验证记录](https://github.com/smilefufu/crabot-voice-android/blob/main/docs/verification/2026-10-11-android-voice-v3.md)分别列明代码验证与现场验收。
 
 ### 未实装远程执行类别隐藏：已本地部署
