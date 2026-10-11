@@ -33,7 +33,7 @@
 - 2026-10-10 用户书面确认安卓仓客户端 spec 与文档仓后端 spec；正式 `protocol-voice.md` 及两份实施计划已发布。隔离分支分别为主仓 `feat/voice-channel-android-v1` 和安卓仓 `feat/android-voice-v1`，设计型代码通过 PR 交付。
 - 已落实一期前台有限采音、端侧 FP32 分段/CAM++声纹、未知或争议整轮拒绝、8秒接话、AEC未通过时按钮打断、独立ASR/TTS引用与真实家庭group权限。正在实现认证/整轮持久接纳与后台原生配置，不改当前运行实例。
 - Shared/MM/Admin 已接入语音契约、实例独立认证、音频模型引用与完整轮次存档；Manager 以真实家庭群及各片段 Friend 接纳整组，formal send_message 单次发送并等待实际播放回执。真实 WSS 的 A→B→A/unknown 整轮门控、打断不重播和后台配置交互测试通过；恢复测试暴露的历史去重窗口已补责任标记。Manager 全套存在 2 项未修改基线同样失败的 Memory trace 测试，未扩大修复范围。产品 APK、真人换人/响应速度/AEC/功耗仍未验收。
-- 10月11日原生 Kotlin/JNI 调试 APK 已构建并核验签名；Wrapper/固定依赖及模型 hash 通过。4 项 JVM、5 项禁音频 ARM64 模拟器测试通过，覆盖原生推理及关闭后入口检查、Keystore、配对前静默/认证后心跳和证书替换拒绝；未使用用户录音。Admin voice 配置页已做合成数据的界面检查。未连接用户手机，真机录放音与客厅验收仍待设备。
+- 10月11日原生 Kotlin/JNI 调试 APK 已构建并核验签名；Wrapper/固定依赖及模型 hash 通过。4 项 JVM、5 项禁音频 ARM64 模拟器测试通过，覆盖原生推理及关闭后入口检查、Keystore、配对前静默/认证后心跳和证书替换拒绝；未使用用户录音。Admin voice 配置页已做合成数据的界面检查，文案明确 ASR/TTS 均通过外部 API 接入、模型由服务提供方运维；3 项配置页回归通过。未连接用户手机，真机录放音与客厅验收仍待设备。
 - 最终审查隔离复现了事件 Friend metadata 可替换而原 turn digest 不变的问题。[授权消息组来源补充 spec](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/specs/2026-10-11-voice-authorized-batch-source-design.md)已发布，待用户书面确认后增加 exact core 读取接口；实时 reply context 不落盘按原契约收口。当前后端 WIP 不部署，未将前述回归计作该缺口已修复。
 - OnePlus 7 Pro官方CAM++完成FuFu三段登记与新录音匹配；用户报告unknown，样本来源未核实，不报准确率。USB/AC保持唤醒按用户要求设3（原0）。[手机公开文件实验](crabot-docs/superpowers/research/voice-scenario-b-poc/README.md)完成6组FP32/INT8分段比对；约12.5秒FP32分段+匹配单次约1.4秒，边界重叠与INT8错归仍存在，保守门控会拒识，B可用率未证明。
 - [Whisper归属对照](crabot-docs/superpowers/research/voice-scenario-b-poc/ASR-ATTRIBUTION.md)与[中文ASR/短词门控](crabot-docs/superpowers/research/voice-scenario-b-poc/CHINESE-ASR.md)已保存版本/hash/原始结果：SenseVoice成为中文有限片段主候选，VAD需保留短接话；没有真人逐字gold，不把继承片段身份或ASR时间点当成归因验收。
