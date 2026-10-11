@@ -4,7 +4,7 @@
 
 - system mode 事故摘录已证明 `Read` 返回图片 bytes，Engine 工具回包保留 `images`；OpenAI Chat Completions / Responses 的请求转换遗漏该字段。修复为同批工具回包全部写出后附加多模态图片输入，保留调用 ID、错误文本和原始 Engine 历史。
 - main 已包含另一项微信修复交付的 builtin child `image_paths` / `supports_vision`，本次保留该实现，只补两个 adapter。八项图片回归先复现六项失败；合入最新 main 后 12 个相关文件 313 项及 Agent 类型检查通过，完成本次 diff review。尚未部署到目标 Linux 实例或验证真实 GUI 识图效果。
-- 孤儿 tool-use 的 400 另行核验：此前导出仅为 Worker session 摘录，可见调用均配对，无法证明截图所指 Manager 历史。当前检查点恢复已有中断结果且不重执行工具；仍需目标部署版本、清理前备份及当前历史确认事故来源，未按截图建议静默删除工具调用或改写恢复语义。
+- 孤儿 tool-use 改为框架防护（2026-10-11 用户确认）：共享 Engine 在完整回合、终止及下一请求边界闭合调用，保留真实结果与图片；未执行返回失败，执行中结果不明返回 interrupted/unknown，不重放历史工具。Manager 正常历史提交及 builtin SessionTree 写入强制校验；Manager 遗留缺失结果先逐字节备份再原子补齐，有效检查点真实结果优先，歧义拒绝。477 项定向测试与 Agent 构建通过；独立子进程 SIGKILL 恢复验证保留真实输出、下一请求/落盘均配对、历史工具重执行为 0。全量未收敛，未修改 main 独立复核 25 项原有失败；主仓设计型 PR 待 review/合并，尚未部署。事故具体丢失点仍未确认，不作为防护前置。
 
 ### Memory 可见性一致性：已本机部署，真实行为待观察
 

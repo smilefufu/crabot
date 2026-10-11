@@ -15,6 +15,7 @@ import type { EngineMessage, EngineResult, ToolDefinition } from '../../src/engi
 import type { AgentTrace } from '../../src/types.js'
 import * as engineModule from '../../src/engine/query-loop.js'
 import { chunksFromContent } from '../engine/helpers/mock-stream.js'
+import { assertToolMessageIntegrity } from '../../src/engine/tool-message-integrity.js'
 import { WorkspaceGitInspector } from '../../src/workers/harness/workspace-git-inspector.js'
 import { createWorkspaceGitTool } from '../../src/workers/workspace-git-capability.js'
 
@@ -392,8 +393,8 @@ describe('BuiltinWorkerAdapter', () => {
     const calls = ['Output', 'send_to_subagent', 'delegate_task'].map((name, i) => ({ name, id: `context-${i}`, input: {} }))
     const llm = makeAdapter([
       { toolCalls: calls, stopReason: 'tool_use' }, { text: 'burst one', stopReason: 'end_turn' },
-      { toolCalls: calls, stopReason: 'tool_use' }, { text: 'burst two', stopReason: 'end_turn' },
-      { toolCalls: calls, stopReason: 'tool_use' }, { text: 'new incarnation', stopReason: 'end_turn' },
+      { toolCalls: calls.map(c => ({ ...c, id: `${c.id}-2` })), stopReason: 'tool_use' }, { text: 'burst two', stopReason: 'end_turn' },
+      { toolCalls: calls.map(c => ({ ...c, id: `${c.id}-3` })), stopReason: 'tool_use' }, { text: 'new incarnation', stopReason: 'end_turn' },
     ])
     const base = spec({ adapter: llm })
     const tools = () => calls.map(({ name }) => defineTool({
@@ -421,6 +422,45 @@ describe('BuiltinWorkerAdapter', () => {
     expect(contexts[2].outputWaitState).not.toBe(contexts[0].outputWaitState)
     expect(childContexts[4].worker_subagent?.caller_instance_id).toBe(`${h.worker_id}#2`)
     expect(childContexts[5].worker_subagent?.caller_instance_id).toBe(`${h.worker_id}#2`)
+  })
+
+  it.each(['tool_use', 'max_tokens'] as const)('keeps persisted and subsequent builtin histories paired after %s', async stopReason => {
+    const toolCall = vi.fn(async () => ({ output: 'saved real result', isError: false }))
+    const llm = makeCompactionAwareAdapter([
+      { text: 'first reply', toolCalls: [{ id: 'integrity-call', name: 'echo', input: {} }], stopReason },
+      { text: 'continued', stopReason: 'end_turn' },
+    ])
+    const requests: EngineMessage[][] = []
+    const stream = llm.stream.bind(llm)
+    llm.stream = params => { requests.push(structuredClone(params.messages) as EngineMessage[]); return stream(params) }
+    const s = spec({ adapter: llm, tools: [defineTool({ name: 'echo', description: 'echo', inputSchema: {}, call: toolCall })] })
+    const adapter = new BuiltinWorkerAdapter({ dataDir: tmp, resolveRuntime: () => s.builtin! })
+    let h = await adapter.spawn(s)
+    await waitState(adapter, h, stopReason === 'tool_use' ? 'idle' : 'exited')
+    const original = JSON.parse(await fs.readFile(join(tmp, h.worker_id, 'meta-1.json'), 'utf8'))
+    let tree = await SessionTree.load(join(tmp, h.worker_id, 'session.jsonl'))
+    const saved = tree.pathTo(original.tip_node_id)
+    expect(() => assertToolMessageIntegrity(saved)).not.toThrow()
+    const result = saved.flatMap(message => 'toolResults' in message ? message.toolResults : [])
+    expect(result).toHaveLength(1)
+    expect(result[0].is_error).toBe(stopReason === 'max_tokens')
+    expect(toolCall).toHaveBeenCalledTimes(stopReason === 'tool_use' ? 1 : 0)
+    if (stopReason === 'max_tokens') {
+      h = await adapter.resume({ ...h, session_ref: original.tip_node_id }, 'continue after failure')
+      await waitState(adapter, h, 'idle')
+    }
+    await adapter.sendInput(h, 'next input')
+    await waitState(adapter, h, 'idle')
+    const fork = await adapter.fork(h, 'question', forkOptions())
+    await waitState(adapter, fork, 'exited')
+    expect(requests.length).toBeGreaterThanOrEqual(4)
+    for (const messages of requests) expect(() => assertToolMessageIntegrity(messages)).not.toThrow()
+    for (const handle of [h, fork]) {
+      const meta = JSON.parse(await fs.readFile(join(tmp, handle.worker_id, `meta-${handle.seq}.json`), 'utf8'))
+      tree = await SessionTree.load(join(tmp, handle.worker_id, 'session.jsonl'))
+      expect(() => assertToolMessageIntegrity(tree.pathTo(meta.tip_node_id))).not.toThrow()
+    }
+    expect(toolCall).toHaveBeenCalledTimes(stopReason === 'tool_use' ? 1 : 0)
   })
 
   it('spawn → burst end_turn → idle，纯文本终端视图可读', async () => {

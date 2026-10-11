@@ -6,7 +6,7 @@ import { tmpdir } from 'os'
 import { ManagerRegistry, type ManagerRegistryDeps } from '../../src/manager/registry.js'
 import { ManagerSessionStore } from '../../src/manager/session-store.js'
 import { TraceStore } from '../../src/core/trace-store.js'
-import { createUserMessage, defineTool, type LLMAdapter, type LLMStreamParams } from '../../src/engine/index.js'
+import { createUserMessage, defineTool, type LLMAdapter, type LLMStreamParams, type EngineMessage } from '../../src/engine/index.js'
 import type { ChannelMessage, Friend, ResolvedPermissions } from '../../src/types.js'
 import type { ManagerResumeCheckpoint } from '../../src/manager/resume-checkpoint.js'
 import { chunksFromContent } from '../engine/helpers/mock-stream.js'
@@ -15,6 +15,9 @@ import { renderGuidance } from '../../src/guidance/catalog.js'
 import { buildPromptCacheKey } from '../../src/engine/prompt-cache-key.js'
 import { DailyReflectionEvidence } from '../../src/manager/daily-reflection-evidence.js'
 import type { DailyReflectionState } from '../../src/manager/daily-reflection-types.js'
+import { createAssistantMessage } from '../../src/engine/types.js'
+import { assertToolMessageIntegrity } from '../../src/engine/tool-message-integrity.js'
+import { encodeSegment } from '../../src/workers/harness/ledger-store.js'
 import { WorkerTurnStore } from '../../src/workers/harness/worker-turn-store.js'
 
 const KEY = 'feishu::restart-test'
@@ -68,6 +71,37 @@ describe('Manager restart continuation', () => {
     })
     return checkpoint!
   }
+
+
+  it('repairs legacy orphans before the real Manager request and keeps both next wake and restart paired', async () => {
+    const statePath = join(dir, 'managers', encodeSegment(KEY), 'state.json')
+    await fs.mkdir(join(dir, 'managers', encodeSegment(KEY)), { recursive: true })
+    const old = { key: KEY, foldedCount: 0, recent: [createUserMessage('old input'),
+      createAssistantMessage([{ type: 'tool_use', id: 'historical', name: 'write', input: {} }], 'tool_use'),
+      createUserMessage('later input')] }
+    await fs.writeFile(statePath, JSON.stringify(old))
+    const execute = vi.fn(async () => ({ output: 'must not replay', isError: false }))
+    const requests: EngineMessage[][] = []
+    const adapter: LLMAdapter = { updateConfig() {}, async *stream(params) {
+      assertToolMessageIntegrity(params.messages)
+      requests.push(structuredClone(params.messages) as EngineMessage[])
+      yield* chunksFromContent([{ type: 'text', text: 'complete' }], 'end_turn')
+    } }
+    const overrides = { toolFace: () => [defineTool({ name: 'write', description: 'write', inputSchema: {}, call: execute })] }
+    const manager = registry(adapter, overrides)
+    await manager.routeHumanMessages('feishu', 'restart-test', [message('after-legacy', 'continue')])
+    await manager.routeHumanMessages('feishu', 'restart-test', [message('second', 'continue again')])
+    const restarted = registry(adapter, { ...overrides, store: new ManagerSessionStore(join(dir, 'managers')) })
+    await restarted.routeHumanMessages('feishu', 'restart-test', [message('restart', 'continue after restart')])
+    expect(requests.length).toBeGreaterThanOrEqual(3)
+    expect(execute).not.toHaveBeenCalled()
+    const recent = (await store.load(KEY)).recent
+    expect(() => assertToolMessageIntegrity(recent)).not.toThrow()
+    expect(recent.filter(m => m.id === old.recent[1].id)).toHaveLength(1)
+    expect(recent.flatMap(m => 'toolResults' in m ? m.toolResults : []).filter(r => r.tool_use_id === 'historical')).toEqual([
+      expect.objectContaining({ is_error: true, content: expect.stringContaining('unknown') }),
+    ])
+  })
 
   it.each(['restart', 'next_wake'])('retains a compaction checkpoint across %s without repeating its tool', async recovery => {
     const written = vi.fn(async () => ({ output: 'durable result '.repeat(6000), isError: false }))

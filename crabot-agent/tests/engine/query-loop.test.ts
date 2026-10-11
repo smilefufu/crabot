@@ -19,13 +19,13 @@ import { chunksFromContent } from './helpers/mock-stream.js'
 
 // --- Test Helpers ---
 
-function mockAdapter(responses: ReadonlyArray<ReadonlyArray<StreamChunk>>): LLMAdapter {
+function mockAdapter(responses: ReadonlyArray<ReadonlyArray<StreamChunk> | AsyncIterable<StreamChunk>>): LLMAdapter {
   let callIndex = 0
   return {
     async *stream() {
       const chunks = responses[callIndex] ?? []
       callIndex++
-      for (const chunk of chunks) {
+      for await (const chunk of chunks) {
         yield chunk
       }
     },
@@ -1474,12 +1474,14 @@ describe('runEngine compaction triggered by real usage', () => {
     lastUsage: { inputTokens: number; outputTokens: number; cacheReadTokens?: number; cacheCreationTokens?: number },
   ): LLMAdapter {
     const small = { inputTokens: 10, outputTokens: 10 }
+    const uniqueCall = (usage: Parameters<typeof toolUseResponseWithUsage>[0], id: string) =>
+      toolUseResponseWithUsage(usage).map(chunk => 'id' in chunk ? { ...chunk, id } : chunk)
     const main = mockAdapter([
-      toolUseResponseWithUsage(small),
-      toolUseResponseWithUsage(small),
-      toolUseResponseWithUsage(small),
-      toolUseResponseWithUsage(small),
-      toolUseResponseWithUsage(lastUsage),
+      uniqueCall(small, 'tu-1'),
+      uniqueCall(small, 'tu-2'),
+      uniqueCall(small, 'tu-3'),
+      uniqueCall(small, 'tu-4'),
+      uniqueCall(lastUsage, 'tu-5'),
       textResponse('done'),      // 主轮 6
     ])
     return {
@@ -1636,5 +1638,143 @@ describe('按需微信高清图保真', () => {
     }) })
     const result = requests[1].messages.flatMap(m => 'toolResults' in m ? m.toolResults : []).find(r => r.tool_use_id === 'image-call')
     expect(result?.images).toEqual([source])
+  })
+})
+
+describe('tool-use closure at Engine boundaries', () => {
+  const call = () => defineTool({
+    name: 'Read', description: 'read', inputSchema: { type: 'object' }, isReadOnly: true,
+    call: vi.fn(async () => ({ output: 'real output', isError: false,
+      images: [{ media_type: 'image/png', data: 'actual-image' }] })),
+  })
+  const results = (messages: readonly EngineMessage[]) => messages.flatMap(m => 'toolResults' in m ? m.toolResults : [])
+
+  it.each(['max_tokens', 'end_turn', null] as const)('closes calls without execution on terminal reason %s', async stopReason => {
+    const tool = call()
+    const snapshots: EngineMessage[][] = []
+    const ref = { current: [] as EngineMessage[] }
+    const chunks = [...textAndToolUseResponse('partial reply', 'tu-closed', 'Read', {})]
+    chunks[chunks.length - 1] = { type: 'message_end', stopReason }
+    const result = await runEngine({ prompt: 'test', adapter: mockAdapter([chunks]),
+      options: baseOptions({ tools: [tool], messagesRef: ref, onTurn: () => snapshots.push([...ref.current]) }) })
+    expect(result.outcome).toBe('failed')
+    expect(tool.call).not.toHaveBeenCalled()
+    expect(results(result.finalMessages)).toEqual([expect.objectContaining({ tool_use_id: 'tu-closed', is_error: true })])
+    expect(snapshots).toHaveLength(1)
+    expect(results(snapshots[0])).toHaveLength(1)
+  })
+
+  it('closes an abort while waiting for the pre-tool barrier as not executed', async () => {
+    const controller = new AbortController()
+    const queue = new HumanMessageQueue()
+    vi.spyOn(queue, 'hasBarrier', 'get').mockReturnValue(true)
+    vi.spyOn(queue, 'waitBarrier').mockImplementation(async () => { controller.abort() })
+    const tool = call()
+    const onTurn = vi.fn()
+    const ref = { current: [] as EngineMessage[] }
+    const result = await runEngine({ prompt: 'test', adapter: mockAdapter([toolUseResponse('tu-abort', 'Read', {})]),
+      options: baseOptions({ tools: [tool], abortSignal: controller.signal, humanMessageQueue: queue, messagesRef: ref, onTurn }) })
+    expect(result.outcome).toBe('aborted')
+    expect(tool.call).not.toHaveBeenCalled()
+    expect(results(result.finalMessages)[0]).toMatchObject({ tool_use_id: 'tu-abort', is_error: true })
+    expect(results(result.finalMessages)[0].content).toMatch(/not executed/i)
+    expect(results(ref.current)).toHaveLength(1)
+    expect(onTurn).toHaveBeenCalledWith(expect.objectContaining({ toolCalls: [expect.objectContaining({ id: 'tu-abort', isError: true })] }))
+  })
+
+  it('preserves a completed output and its image when tools_end reporting throws', async () => {
+    const tool = call()
+    const ref = { current: [] as EngineMessage[] }
+    const operation = runEngine({ prompt: 'test', adapter: mockAdapter([toolUseResponse('tu-known', 'Read', {})]),
+      options: baseOptions({ tools: [tool], supportsVision: true, messagesRef: ref, onLiveProgress: e => {
+        if (e.type === 'tools_end') throw new Error('progress failed')
+      } }) })
+    await expect(operation).rejects.toThrow('progress failed')
+    expect(tool.call).toHaveBeenCalledTimes(1)
+    expect(results(ref.current)[0]).toMatchObject({ tool_use_id: 'tu-known', is_error: false,
+      content: expect.stringContaining('real output'), images: [{ media_type: 'image/png', data: 'actual-image' }] })
+  })
+
+  it('preserves completed results when the turn checkpoint callback throws', async () => {
+    const tool = call()
+    const ref = { current: [] as EngineMessage[] }
+    const operation = runEngine({ prompt: 'test', adapter: mockAdapter([toolUseResponse('tu-hook', 'Read', {})]),
+      options: baseOptions({ tools: [tool], messagesRef: ref, onTurn: () => { throw new Error('checkpoint failed') } }) })
+    await expect(operation).rejects.toThrow('checkpoint failed')
+    expect(tool.call).toHaveBeenCalledTimes(1)
+    expect(results(ref.current)).toHaveLength(1)
+    expect(results(ref.current)[0].content).toContain('real output')
+  })
+
+  it('waits for parallel peers and keeps their real outputs when a permission callback fails', async () => {
+    const ref = { current: [] as EngineMessage[] }
+    let finishPeer!: () => void
+    const peer = new Promise<void>(resolve => { finishPeer = resolve })
+    const tool = defineTool({ name: 'Read', description: 'read', inputSchema: {}, isReadOnly: true,
+      call: vi.fn(async () => { await peer; return { output: 'parallel real output', isError: false } }) })
+    const adapter = mockAdapter([chunksFromContent([
+      { type: 'tool_use', id: 'denied', name: 'Read', input: { fail: true } },
+      { type: 'tool_use', id: 'peer', name: 'Read', input: {} },
+    ], 'tool_use')])
+    const operation = runEngine({ prompt: 'test', adapter, options: baseOptions({ tools: [tool], messagesRef: ref,
+      permissionConfig: { mode: 'bypass', checkPermission: async (_name, input) => {
+        if (input.fail) throw new Error('permission failed')
+        return { allowed: true }
+      } },
+    }) })
+    const rejection = expect(operation).rejects.toThrow('permission failed')
+    await vi.waitFor(() => expect(tool.call).toHaveBeenCalledTimes(1))
+    finishPeer()
+    await rejection
+    expect(results(ref.current)).toEqual([
+      expect.objectContaining({ tool_use_id: 'denied', is_error: true, content: expect.stringContaining('permission failed') }),
+      expect.objectContaining({ tool_use_id: 'peer', is_error: false, content: expect.stringContaining('parallel real output') }),
+    ])
+  })
+
+  it('keeps an aborting tool unknown and cancels later unstarted serial tools', async () => {
+    const controller = new AbortController()
+    const tool = defineTool({ name: 'Write', description: 'write', inputSchema: {},
+      call: vi.fn(async () => { controller.abort(); throw new Error('operation interrupted') }) })
+    const result = await runEngine({ prompt: 'test', adapter: mockAdapter([chunksFromContent([
+      { type: 'tool_use', id: 'started', name: 'Write', input: {} },
+      { type: 'tool_use', id: 'unstarted', name: 'Write', input: {} },
+    ], 'tool_use')]), options: baseOptions({ tools: [tool], abortSignal: controller.signal }) })
+    expect(result.outcome).toBe('aborted')
+    expect(tool.call).toHaveBeenCalledTimes(1)
+    expect(results(result.finalMessages)[0].content).toContain('unknown')
+    expect(results(result.finalMessages)[1].content).toContain('not executed')
+  })
+
+  it('rejects invalid initial history before requesting a model or executing a tool', async () => {
+    const adapter = mockAdapter([textResponse('must never run')])
+    const stream = vi.spyOn(adapter, 'stream')
+    await expect(runEngine({ prompt: '', adapter, options: baseOptions(), initialMessages: [
+      { id: 'bad', role: 'assistant', timestamp: 0, stopReason: 'tool_use', content: [
+        { type: 'tool_use', id: 'unpaired', name: 'Read', input: {} } ] },
+    ] })).rejects.toThrow('missing tool_result unpaired')
+    expect(stream).not.toHaveBeenCalled()
+  })
+
+  it('closes unstarted calls even if reporting the assistant response fails', async () => {
+    const tool = call()
+    const ref = { current: [] as EngineMessage[] }
+    const operation = runEngine({ prompt: 'test', adapter: mockAdapter([textAndToolUseResponse('prepare', 'progress-call', 'Read', {})]),
+      options: baseOptions({ tools: [tool], messagesRef: ref, onLiveProgress: event => {
+        if (event.type === 'turn_assistant') throw new Error('assistant progress failed')
+      } }) })
+    await expect(operation).rejects.toThrow('assistant progress failed')
+    expect(tool.call).not.toHaveBeenCalled()
+    expect(results(ref.current)).toEqual([expect.objectContaining({ tool_use_id: 'progress-call', is_error: true,
+      content: expect.stringContaining('not executed') })])
+  })
+
+  it('rejects duplicate response IDs before any tool execution', async () => {
+    const tool = call()
+    await expect(runEngine({ prompt: 'test', adapter: mockAdapter([chunksFromContent([
+      { type: 'tool_use', id: 'duplicate', name: 'Read', input: {} },
+      { type: 'tool_use', id: 'duplicate', name: 'Read', input: {} },
+    ], 'tool_use')]), options: baseOptions({ tools: [tool] }) })).rejects.toThrow('duplicate')
+    expect(tool.call).not.toHaveBeenCalled()
   })
 })
