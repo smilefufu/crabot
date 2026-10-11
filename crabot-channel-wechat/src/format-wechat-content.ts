@@ -205,7 +205,7 @@ export function formatWechatContent(
       const text = s('text') ?? ''
       const quotedSender = s('quoted_sender_name')
       const quotedContent = s('quoted_content')
-      const quotedSvrId = s('quoted_svr_id')
+      const quotedMessageId = s('quoted_message_id')
       const quotedResourceUrl = s('quoted_resource_url')
       const quotedMsgType = typeof raw.quoted_msg_type === 'number' ? raw.quoted_msg_type : undefined
 
@@ -218,8 +218,8 @@ export function formatWechatContent(
       parts.push(text)
       const composedText = parts.join('\n')
 
-      const features: Partial<MessageFeatures> = quotedSvrId
-        ? { quote_message_id: quotedSvrId }
+      const features: Partial<MessageFeatures> = quotedMessageId
+        ? { quote_message_id: quotedMessageId }
         : {}
 
       if (quotedMsgType === 1) {

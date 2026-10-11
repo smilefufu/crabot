@@ -106,28 +106,30 @@ it('channel 注册的取图 RPC 查询最新记录，保留原消息且不发布
 it('引用图片先解析原消息，每次查询最新高清，不下载引用快照里的缩略图', async () => {
   getMessage.mockImplementation(async id => id === 'quote' ? {
     id: 'quote', fieldTalker: 'group', fieldType: 18,
-    content: { quoted_svr_id: '514607585156521130', quoted_msg_type: 1, quoted_resource_url: 'https://cdn/old-thumb' },
+    content: { quoted_svr_id: '514607585156521130', quoted_message_id: 'm', quoted_msg_type: 1, quoted_resource_url: 'https://cdn/old-thumb' },
   } : message(1, 'https://cdn/latest-hd'))
   const result = await fetcher.fetch({ ...params, platform_message_id: 'quote' })
   expect(result).toMatchObject({ status: 'ready', image_quality: 'hd' })
   expect(fetch).toHaveBeenCalledWith('https://cdn/latest-hd', expect.anything())
-  expect(getMessage.mock.calls.map(([id]) => id)).toEqual(['quote', '514607585156521130'])
+  expect(getMessage.mock.calls.map(([id]) => id)).toEqual(['quote', 'm'])
 })
 
 it('原图片晚到时引用取图返回未就绪，补齐后同一请求可获得高清', async () => {
   let original: unknown = null
   getMessage.mockImplementation(async id => id === 'quote' ? {
-    fieldTalker: 'group', fieldType: 18, content: { quoted_svr_id: '514607585156521130' },
+    fieldTalker: 'group', fieldType: 18, content: { quoted_svr_id: '514607585156521130',
+      ...(original ? { quoted_message_id: 'm' } : {}) },
   } : original)
   expect(await fetcher.fetch({ ...params, platform_message_id: 'quote' })).toEqual({ status: 'not_ready', image_quality: 'unknown' })
   expect(fetch).not.toHaveBeenCalled()
+  expect(getMessage.mock.calls).toEqual([['quote']])
   original = message(1)
   expect(await fetcher.fetch({ ...params, platform_message_id: 'quote' })).toMatchObject({ status: 'ready', image_quality: 'hd' })
 })
 
 it('引用消息及原消息均须属于指定会话', async () => {
   getMessage.mockImplementation(async id => id === 'quote' ? {
-    fieldTalker: 'group', fieldType: 18, content: { quoted_svr_id: 'other-original' },
+    fieldTalker: 'group', fieldType: 18, content: { quoted_svr_id: '514607585156521130', quoted_message_id: 'other-original' },
   } : { ...message(1), fieldTalker: 'other' })
   expect(await fetcher.fetch({ ...params, platform_message_id: 'quote' })).toMatchObject({ status: 'failed', error: expect.stringContaining('不属于') })
   expect(fetch).not.toHaveBeenCalled()
@@ -137,7 +139,21 @@ it('引用消息及原消息均须属于指定会话', async () => {
 it('原消息查询不可用不能伪装成引用图片尚未就绪', async () => {
   getMessage.mockImplementation(async id => {
     if (id !== 'quote') throw new Error('connector unavailable')
-    return { fieldTalker: 'group', fieldType: 18, content: { quoted_svr_id: '514607585156521130' } }
+    return { fieldTalker: 'group', fieldType: 18, content: { quoted_svr_id: '514607585156521130', quoted_message_id: 'm' } }
   })
   expect(await fetcher.fetch({ ...params, platform_message_id: 'quote' })).toEqual({ status: 'failed', error: 'connector unavailable' })
+})
+
+it('旧 connector 缺统一引用 ID 时等待，不查询 svr 别名或下载旧 URL', async () => {
+  getMessage.mockResolvedValue({ fieldTalker: 'group', fieldType: 18,
+    content: { quoted_svr_id: '514607585156521130', quoted_msg_type: 1, quoted_resource_url: 'https://cdn/old-thumb' } })
+  expect(await fetcher.fetch({ ...params, platform_message_id: 'quote' })).toEqual({ status: 'not_ready', image_quality: 'unknown' })
+  expect(getMessage.mock.calls).toEqual([['quote']])
+  expect(fetch).not.toHaveBeenCalled()
+})
+
+it('引用目标已确认为非图片时及时失败，不进入高清等待', async () => {
+  getMessage.mockResolvedValue({ fieldTalker: 'group', fieldType: 18, content: { quoted_msg_type: 0 } })
+  expect(await fetcher.fetch({ ...params, platform_message_id: 'quote' })).toMatchObject({ status: 'failed', error: '该消息不是图片' })
+  expect(getMessage.mock.calls).toEqual([['quote']])
 })

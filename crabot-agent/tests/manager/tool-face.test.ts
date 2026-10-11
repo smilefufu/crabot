@@ -1256,7 +1256,7 @@ it.each(['ready', 'late'])('微信引用原图 %s：真实主控工具将最新�
   try {
     const channel = new WechatImageFetcher({ dataDir: dir, getTalker: () => 'group',
       getMessage: async id => id === 'quote' ? { fieldTalker: 'group', fieldType: 18,
-        content: { quoted_svr_id: '514607585156521130', quoted_resource_url: 'https://cdn/old-thumbnail' } }
+        content: { quoted_svr_id: '514607585156521130', ...(available ? { quoted_message_id: 'msg_original' } : {}), quoted_resource_url: 'https://cdn/old-thumbnail' } }
         : available ? original : null,
     })
     const rpc = vi.fn(async (_port, method, args) => method === 'get_capabilities'

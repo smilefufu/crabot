@@ -32,8 +32,11 @@ export class WechatImageFetcher {
       if (!message) throw new Error('无法查询图片消息：消息不存在或渠道暂不可用')
       if (message.fieldTalker !== talker) throw new Error('图片不属于指定会话')
       let content = message.content as Record<string, unknown> | undefined
-      if ((message.fieldType ?? content?.type) === 18 && typeof content?.quoted_svr_id === 'string') {
-        message = await this.deps.getMessage(content.quoted_svr_id)
+      if ((message.fieldType ?? content?.type) === 18) {
+        if (typeof content?.quoted_msg_type === 'number' && content.quoted_msg_type !== 1) throw new Error('该消息不是图片')
+        const quotedMessageId = content?.quoted_message_id
+        if (typeof quotedMessageId !== 'string' || !quotedMessageId) return { status: 'not_ready', image_quality: 'unknown' }
+        message = await this.deps.getMessage(quotedMessageId)
         if (!message) return { status: 'not_ready', image_quality: 'unknown' }
         if (message.fieldTalker !== talker) throw new Error('图片不属于指定会话')
         content = message.content as Record<string, unknown> | undefined

@@ -36,7 +36,7 @@ describe('微信高清文件交付到 builtin 子 Agent 的真实请求', () => 
     try {
       const channel = new WechatImageFetcher({ dataDir: dir, getTalker: () => 'group',
         getMessage: async id => id === 'quote' ? { fieldTalker: 'group', fieldType: 18,
-          content: { quoted_svr_id: '514607585156521130', quoted_resource_url: 'https://cdn/old-thumb' } }
+          content: { quoted_svr_id: '514607585156521130', quoted_message_id: 'msg_original', quoted_resource_url: 'https://cdn/old-thumb' } }
           : { fieldTalker: 'group', fieldType: 1, content: { image_origin: 1, resource_url: 'https://cdn/latest-hd' } },
       })
       const reader = createImageReader({ moduleId: 'agent', resolveChannelPort: async () => 123,

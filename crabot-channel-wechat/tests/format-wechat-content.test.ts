@@ -8,6 +8,7 @@ describe('formatWechatContent quote (type=18) with quoted_resource_url', () => {
       quoted_sender_name: '张三',
       quoted_content: '[图片]',
       quoted_svr_id: 'svr-123',
+      quoted_message_id: 'msg_original',
       quoted_msg_type: 1,
       quoted_resource_url: 'https://cdn.example.com/abc.jpg',
     })
@@ -16,7 +17,7 @@ describe('formatWechatContent quote (type=18) with quoted_resource_url', () => {
     expect(content.media_url).toBe('https://cdn.example.com/abc.jpg')
     expect(content.text).toContain('> 张三: [图片]')
     expect(content.text).toContain('看下这张')
-    expect(features.quote_message_id).toBe('svr-123')
+    expect(features.quote_message_id).toBe('msg_original')
   })
 
   it('quotes an emoji (type=47): lifts to image', () => {
@@ -52,13 +53,14 @@ describe('formatWechatContent quote (type=18) with quoted_resource_url', () => {
       quoted_sender_name: '张三',
       quoted_content: '我之前说的那个事',
       quoted_svr_id: 'svr-9',
+      quoted_message_id: 'msg_text',
       quoted_msg_type: 0,
     })
 
     expect(content.type).toBe('text')
     expect(content.text).toContain('> 张三: 我之前说的那个事')
     expect(content.text).toContain('同意')
-    expect(features.quote_message_id).toBe('svr-9')
+    expect(features.quote_message_id).toBe('msg_text')
   })
 
   it('quote without quoted_msg_type: falls back to text even if URL exists', () => {
@@ -160,4 +162,10 @@ it('图片引用按需读取，不凭引用快照宣称高清或自动注入图�
     expect(formatWechatContent(18, { text: '识图', quoted_svr_id: '514607585156521130',
       quoted_msg_type: 1, quoted_resource_url: url }).content).toMatchObject({ type: 'image', image_quality: 'unknown' })
   }
+})
+
+it('原消息未解析时不把微信服务端 ID 当成可查询引用 ID', () => {
+  const result = formatWechatContent(18, { text: '看引用图', quoted_svr_id: '514607585156521130' })
+  expect(result.features).not.toHaveProperty('quote_message_id')
+  expect(result.content.text).toContain('看引用图')
 })
