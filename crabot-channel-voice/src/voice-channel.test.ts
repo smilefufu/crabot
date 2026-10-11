@@ -27,10 +27,12 @@ describe('Voice Channel with real WSS, service adapters and durable Admin/core s
   let dir: string, channel: VoiceChannel, admin: http.Server, asr: WebSocketServer, port: number
   let store: VoiceTurnStore, inbox: VoiceInbox, registrations: string[], friends: Map<string, Friend>
   let accepted: VoiceTurnAuthorizedPayload[], asrCalls: number, ttsCalls: number, phones: Phone[]
+  let asrResponses: string[]
   const channelId = '语音终端'
   const rpc = new RpcClient(), runtime = 'isolated-voice-runtime', human = 'isolated-human-admin'
   beforeEach(async () => {
     dir = await fs.mkdtemp(path.join(os.tmpdir(), 'voice-channel-')); phones = []; accepted = []; asrCalls = 0; ttsCalls = 0
+    asrResponses = ['开灯', '别开灯', '好的']
     store = new VoiceTurnStore(dir); await store.load(); inbox = new VoiceInbox(path.join(dir, 'core-inbox')); inbox.load(); friends = new Map(); registrations = []
     for (const name of ['A', 'B']) {
       const contact = await store.createContact(channelId, name)
@@ -75,7 +77,7 @@ describe('Voice Channel with real WSS, service adapters and durable Admin/core s
         if (!binary) { socket.close(); return }
         const bytes = Buffer.from(data as Buffer)
         if (length === undefined) { expect(bytes.readInt32LE(0)).toBe(16000); length = bytes.readInt32LE(4) }
-        else { received += bytes.length; if (received === length) { socket.send(['开灯', '别开灯', '好的'][asrCalls++ % 3]) } }
+        else { received += bytes.length; if (received === length) { socket.send(asrResponses[asrCalls++ % asrResponses.length]) } }
       })
     })
     await new Promise<void>(resolve => admin.listen(0, resolve))
@@ -128,6 +130,13 @@ describe('Voice Channel with real WSS, service adapters and durable Admin/core s
     expect(accepted[0].messages.map(m => [m.friend?.id, m.message.content.text])).toEqual([['A', '开灯'], [undefined, '别开灯'], ['A', '好的']])
     expect(accepted[0].messages[1].message.features.voice?.identity_status).toBe('unknown')
     expect(inbox.pending()[0].payload?.messages).toHaveLength(3)
+  })
+  it.each(['<EMPTY>', ' <EMPTY> '])('an ASR empty marker %j fails the whole turn without submitting partial text', async marker => {
+    asrResponses[1] = marker
+    const { phone } = await pair()
+    expect((await turn(phone)).status).toBe('rejected')
+    expect(accepted).toHaveLength(0)
+    expect(inbox.pending()).toHaveLength(0)
   })
   it('rejects a v1 handshake with an explicit version error', async () => {
     const phone = await connect(); phone.send({ type: 'hello', protocol_version: 1, credential: 'old', models: VOICE_MODEL_VERSIONS, aec_verified: false })

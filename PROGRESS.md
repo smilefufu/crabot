@@ -35,7 +35,8 @@
 - Agent 只把事件作为定位通知，由 exact-core 无 trace RPC 读取 Admin 持久授权快照，整批落 inbox 后确认。回答机会只在内存，重启或过期不复活。终端整数协议为 2；旧 WIP 元数据明确拒绝并保留，不自动迁移/清除。
 - Admin 支持创建联系人、从列表绑定/解绑 Friend、以已有模板创建普通 Friend、独立登记/删除声纹；移除音频分类和家庭/客厅限定，仅保留原生 API 格式、地址、密钥与模型引用。合成预览已实际点通创建/绑定，刷新后可见新界面。
 - Shared/Admin/Channel/Agent/Web 类型检查与 Web 构建通过；合并最新 main 后根目录、Shared、Core、Voice、Wechat、Web 全量共 967 项通过。消息工具/发送 87、83 项，Manager 装配 45 项通过；Manager 其余 232 项通过，2 项 Memory trace 失败在当前 origin/main 同样复现。Admin 串行全量 1298 项通过，Auth 单跑 24 项通过；剩余 2 项文档断言失败在当前 origin/main 复现。Agent 全量长时间无进展后停止，其他失败未全部归因，不计通过。Android 0.2.0 产品与仪器 APK 构建、4 项 JVM、hash/签名核验通过；专用模拟器系统启动挂起，6 项仪器测试未运行，不借用旧版成功结果。
-- [当前 Android 验证记录](https://github.com/smilefufu/crabot-voice-android/blob/feat/android-voice-v1/docs/verification/2026-10-11-android-voice-v2.md)列出验收顺序。当前无手机连接；有限录放音生命周期、真人 B/未知/短句、唤醒/AEC、功耗、50轮整体响应与 Linux 两 UID 隔离仍待验收。FuFu 旧实验登记保留；公开文件/回环测试不代表声纹准确率或整体延迟。
+- 2026-10-11 真机 OnePlus 7 Pro 已安装 0.2.0，启动显示模型已加载、关麦、未连接，麦克风/相机权限未授予；配套后端各模块重新编译通过。产品适配器对独立 SenseVoice/Kokoro API 的固定合成输入测试通过；实测极短静音返回 `<EMPTY>` 会被误收为正文，已先复现 2 项整轮错误准入，再修为整轮失败且不提交 partial，Shared 音频/协议 11 项、Voice 全量 10 项及真实 API 空结果复核通过。
+- [当前 Android 验证记录](https://github.com/smilefufu/crabot-voice-android/blob/feat/android-voice-v1/docs/verification/2026-10-11-android-voice-v2.md)列出验收顺序。当前实例保持运行，待确认暂停后以独立数据联调；手机配对、有限录放音生命周期、真人 B/未知/短句、唤醒/AEC、功耗、50轮整体响应与 Linux 两 UID 隔离仍待验收。FuFu 旧实验登记保留；公开文件/回环测试不代表声纹准确率或整体延迟。
 
 ### 未实装远程执行类别隐藏：已本地部署
 

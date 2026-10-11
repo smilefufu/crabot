@@ -102,7 +102,7 @@ export async function transcribeAudio(connection: AudioServiceConnection, pcm: B
         } catch { finish(undefined, new Error('ASR websocket send failed')) }
       })
       ws.addEventListener('message', event => {
-        if (typeof event.data !== 'string' || event.data.length > 8000 || !event.data.trim() || event.data === 'EMPTY') finish(undefined, new Error('ASR returned no usable text'))
+        if (typeof event.data !== 'string' || event.data.length > 8000 || !event.data.trim() || ['EMPTY', '<EMPTY>'].includes(event.data.trim())) finish(undefined, new Error('ASR returned no usable text'))
         else finish(event.data.trim())
       })
     })
