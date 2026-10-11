@@ -4,6 +4,7 @@ import type { CrabMessagingDeps } from '../../src/mcp/crab-messaging.js'
 import { promises as fs } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { setTimeout as realDelay } from 'node:timers/promises'
 
 let dir: string
 let file: string
@@ -93,4 +94,29 @@ describe('调用级图片等待', () => {
     expect(parsed(await work).status).toBe('timed_out')
     expect(vi.getTimerCount()).toBe(0)
   })
+})
+
+it('引用目标在 110 秒补齐但仍仅有缩略图时，等待仍在首次 120 秒截止', async () => {
+  const { WechatImageFetcher } = await import('../../../crabot-channel-wechat/src/image-fetch.js')
+  let resolved = false
+  const getMessage = vi.fn(async id => {
+    if (id === 'msg_quote') return { fieldTalker: 'group', fieldType: 18,
+      content: { quoted_svr_id: '514607585156521130', ...(resolved ? { quoted_message_id: 'msg_original' } : {}) } }
+    if (id === 'msg_original') return { fieldTalker: 'group', fieldType: 1, content: { image_origin: 0 } }
+    throw new Error('unexpected query ID')
+  })
+  const channel = new WechatImageFetcher({ dataDir: dir, getTalker: () => 'group', getMessage })
+  call.mockImplementation(async (_port, method, params) => method === 'get_capabilities'
+    ? { supports_image_fetch: true } : channel.fetch(params))
+  const work = reader({ ...args, platform_message_id: 'msg_quote' })
+  await vi.advanceTimersByTimeAsync(110_000)
+  expect(getMessage.mock.calls.every(([id]) => id === 'msg_quote')).toBe(true)
+  resolved = true
+  // Node 的 promise timer 不受 Vitest 时钟控制，先让下一次真实查询完成。
+  await realDelay(2_100)
+  await vi.advanceTimersByTimeAsync(10_000)
+  expect(parsed(await work).status).toBe('timed_out')
+  expect(getMessage).toHaveBeenCalledWith('msg_original')
+  expect(getMessage).not.toHaveBeenCalledWith('514607585156521130')
+  expect(vi.getTimerCount()).toBe(0)
 })
