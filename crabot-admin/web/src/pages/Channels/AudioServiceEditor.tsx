@@ -4,7 +4,7 @@ import { Button } from '../../components/Common/Button'
 import { voiceService, type AudioServiceEdit, type AudioServicePublic } from '../../services/voice'
 
 export function AudioServiceEditor({ provider, onSaved, onCancel }: { provider?: AudioServicePublic; onSaved(): Promise<void>; onCancel(): void }) {
-  const [draft, setDraft] = useState<AudioServiceEdit>(() => ({ name: provider?.name ?? '', kind: provider?.kind ?? 'self_hosted', format: provider?.format ?? 'openai-audio', endpoint: provider?.endpoint ?? '',
+  const [draft, setDraft] = useState<AudioServiceEdit>(() => ({ name: provider?.name ?? '', format: provider?.format ?? 'openai-audio', endpoint: provider?.endpoint ?? '',
     api_key: '', models: structuredClone(provider?.models ?? [{ model_id: '', display_name: '', capabilities: ['asr'] }]) }))
   const [saving, setSaving] = useState(false), [error, setError] = useState('')
   const format = (value: AudioServiceFormat) => setDraft(d => ({ ...d, format: value, models: d.models.map(m => ({ ...m, capabilities: value === 'openai-audio' ? m.capabilities : [value === 'mlx-audio-http' ? 'tts' : 'asr'] })) }))
@@ -17,7 +17,6 @@ export function AudioServiceEditor({ provider, onSaved, onCancel }: { provider?:
     <h4>{provider ? '编辑音频服务' : '新增音频服务'}</h4>
     <div className="voice-fields">
       <label>服务名称<input className="input" required value={draft.name} onChange={e => setDraft({ ...draft, name: e.target.value })} /></label>
-      <label>音频去向<select className="select" value={draft.kind} onChange={e => setDraft({ ...draft, kind: e.target.value as AudioServiceEdit['kind'] })}><option value="self_hosted">自行部署的 API 服务</option><option value="cloud">第三方云 API</option></select></label>
       <label>接口格式<select className="select" value={draft.format} onChange={e => format(e.target.value as AudioServiceFormat)}><option value="openai-audio">OpenAI 基本音频接口</option><option value="sherpa-offline-ws">Sherpa 有限文件 ASR WebSocket</option><option value="mlx-audio-http">MLX-Audio TTS HTTP</option></select></label>
       <label>服务地址<input className="input" required value={draft.endpoint} placeholder={draft.format === 'sherpa-offline-ws' ? 'ws://主机:端口' : 'https://服务地址/v1'} onChange={e => setDraft({ ...draft, endpoint: e.target.value })} /></label>
       <label>API key<input className="input" type="password" autoComplete="new-password" value={draft.api_key} placeholder={provider?.has_api_key ? '已保存；留空保留原 key' : '无认证的 API 服务可留空'} onChange={e => setDraft({ ...draft, api_key: e.target.value })} /></label>

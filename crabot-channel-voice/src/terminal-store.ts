@@ -4,7 +4,7 @@ import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { createHash, randomBytes, randomUUID, timingSafeEqual, webcrypto, X509Certificate } from 'node:crypto'
 
-interface TerminalDisk { cert: string; key: string; credential_hash?: string }
+interface TerminalDisk { protocol_version: 2; cert: string; key: string; credential_hash?: string }
 export class TerminalStore {
   private data!: TerminalDisk
   constructor(private readonly directory: string) {}
@@ -17,10 +17,11 @@ export class TerminalStore {
       const keys = await webcrypto.subtle.generateKey(algorithm, true, ['sign', 'verify'])
       const certificate = await X509CertificateGenerator.createSelfSigned({ serialNumber: randomBytes(16).toString('hex'), name: 'CN=Crabot Voice', notBefore: new Date(Date.now() - 60000), notAfter: new Date(Date.now() + 5 * 365 * 86400000), signingAlgorithm: algorithm, keys: keys as unknown as CryptoKeyPair })
       const privateKey = Buffer.from(await webcrypto.subtle.exportKey('pkcs8', keys.privateKey))
-      this.data = { cert: certificate.toString('pem'), key: '-----BEGIN PRIVATE KEY-----\n' + privateKey.toString('base64').match(/.{1,64}/g)!.join('\n') + '\n-----END PRIVATE KEY-----\n' }
+      this.data = { protocol_version: 2, cert: certificate.toString('pem'), key: '-----BEGIN PRIVATE KEY-----\n' + privateKey.toString('base64').match(/.{1,64}/g)!.join('\n') + '\n-----END PRIVATE KEY-----\n' }
       privateKey.fill(0)
       await this.save(this.data)
     }
+    if (this.data.protocol_version !== 2) throw new Error('Incompatible voice WIP pairing data; preserve or explicitly clear it before pairing with protocol_version=2')
     new X509Certificate(this.data.cert)
   }
   tls(): { cert: string; key: string } { return { cert: this.data.cert, key: this.data.key } }

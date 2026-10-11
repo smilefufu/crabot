@@ -1106,7 +1106,7 @@ crabot 系统给你的所有信号——system prompt、supplement 注入、tool
           const caps = channel_id === 'admin-web' ? undefined : await rpcClient.call<{}, { voice?: import('crabot-shared').VoiceChannelCapability }>(
             await resolveChannelPort(channel_id), 'get_capabilities', {}, moduleId, undefined, { timeoutMs: 3000 })
           if (caps?.voice) {
-            if (caps.voice.protocol_version !== 1 || caps.voice.send_timeout_ms !== 30000) throw new Error('Unsupported voice delivery capability')
+            if (caps.voice.protocol_version !== 2 || caps.voice.send_timeout_ms !== 30000) throw new Error('Unsupported voice delivery capability')
             const context = deps.voiceReplyContext?.()
             if (!context || context.channel_id !== channel_id || context.session_id !== session_id || Date.parse(context.expires_at) <= Date.now()) throw new Error('当前没有有效的语音回答机会，请等待新的语音唤醒')
             sendResult = await dispatchOutboundMessage({ ...dispatchEntry, voice_reply_context: context }, { ...dispatchDeps, voice: caps.voice })

@@ -32,6 +32,7 @@ export class AudioServiceRegistry {
     try {
       const parsed = JSON.parse(await fs.readFile(this.filename, 'utf8')) as State
       if (!Array.isArray(parsed.providers) || !parsed.configs || typeof parsed.configs !== 'object') throw new Error('Corrupt audio service registry')
+      parsed.providers = parsed.providers.map(provider => { const { kind, ...current } = provider as AudioServiceProvider & { kind?: unknown }; return current })
       this.state = parsed
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
   }
@@ -44,7 +45,7 @@ export class AudioServiceRegistry {
     const provider = this.state.providers.find(p => p.id === reference.provider_id)
     const model = provider?.models.find(m => m.model_id === reference.model_id && m.capabilities.includes(capability))
     if (!provider || !model) fail(`Audio ${capability} reference is unavailable`)
-    return { provider_id: provider.id, kind: provider.kind, format: provider.format, endpoint: provider.endpoint, ...(provider.api_key ? { api_key: provider.api_key } : {}), model_id: model.model_id, ...(model.voice ? { voice: model.voice } : {}), ...(model.language ? { language: model.language } : {}) }
+    return { provider_id: provider.id, format: provider.format, endpoint: provider.endpoint, ...(provider.api_key ? { api_key: provider.api_key } : {}), model_id: model.model_id, ...(model.voice ? { voice: model.voice } : {}), ...(model.language ? { language: model.language } : {}) }
   }
   async saveConfig(channelId: string, raw: unknown): Promise<VoiceInstanceConfig> {
     return this.change(state => {
@@ -62,9 +63,9 @@ export class AudioServiceRegistry {
   async saveProvider(raw: unknown, id?: string): Promise<AudioServicePublic> {
     return this.change(state => {
       const v = record(raw)
-      keys(v, ['id', 'name', 'kind', 'format', 'endpoint', 'api_key', 'models', 'clear_api_key'])
+      keys(v, ['id', 'name', 'format', 'endpoint', 'api_key', 'models', 'clear_api_key'])
       text(v.name); text(v.endpoint)
-      if (!['self_hosted', 'cloud'].includes(v.kind as string) || !['sherpa-offline-ws', 'mlx-audio-http', 'openai-audio'].includes(v.format as string)) fail('Invalid audio service kind/format')
+      if (!['sherpa-offline-ws', 'mlx-audio-http', 'openai-audio'].includes(v.format as string)) fail('Invalid audio service format')
       const url = new URL(v.endpoint)
       const protocols = v.format === 'sherpa-offline-ws' ? ['ws:', 'wss:'] : ['http:', 'https:']
       if (!protocols.includes(url.protocol) || url.username || url.password || url.hash || url.search) fail('Invalid audio endpoint')
@@ -87,7 +88,7 @@ export class AudioServiceRegistry {
       if (v.api_key !== undefined && typeof v.api_key !== 'string') fail('Invalid API key')
       if (v.clear_api_key !== undefined && typeof v.clear_api_key !== 'boolean') fail('Invalid clear_api_key')
       const apiKey = v.clear_api_key === true ? undefined : (v.api_key as string | undefined)?.trim() || previous?.api_key
-      const provider: AudioServiceProvider = { id: id ?? randomUUID(), name: v.name, kind: v.kind as AudioServiceProvider['kind'], format: v.format as AudioServiceProvider['format'], endpoint: v.endpoint.replace(/\/$/, ''), ...(apiKey ? { api_key: apiKey } : {}), models: structuredClone(v.models) as AudioServiceProvider['models'] }
+      const provider: AudioServiceProvider = { id: id ?? randomUUID(), name: v.name, format: v.format as AudioServiceProvider['format'], endpoint: v.endpoint.replace(/\/$/, ''), ...(apiKey ? { api_key: apiKey } : {}), models: structuredClone(v.models) as AudioServiceProvider['models'] }
       for (const config of Object.values(state.configs)) {
         for (const capability of ['asr', 'tts'] as const) {
           const ref = config[capability]

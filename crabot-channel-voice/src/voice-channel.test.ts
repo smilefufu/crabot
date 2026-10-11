@@ -27,15 +27,16 @@ describe('Voice Channel with real WSS, service adapters and durable Admin/core s
   let dir: string, channel: VoiceChannel, admin: http.Server, asr: WebSocketServer, port: number
   let store: VoiceTurnStore, inbox: VoiceInbox, registrations: string[], friends: Map<string, Friend>
   let accepted: VoiceTurnAuthorizedPayload[], asrCalls: number, ttsCalls: number, phones: Phone[]
-  const channelId = '客厅'
+  const channelId = '语音终端'
   const rpc = new RpcClient(), runtime = 'isolated-voice-runtime', human = 'isolated-human-admin'
   beforeEach(async () => {
     dir = await fs.mkdtemp(path.join(os.tmpdir(), 'voice-channel-')); phones = []; accepted = []; asrCalls = 0; ttsCalls = 0
     store = new VoiceTurnStore(dir); await store.load(); inbox = new VoiceInbox(path.join(dir, 'core-inbox')); inbox.load(); friends = new Map(); registrations = []
     for (const name of ['A', 'B']) {
-      const r = await store.enroll(channelId, name, name, VOICE_MODEL_VERSIONS.embedding); registrations.push(r.registration_id)
+      const contact = await store.createContact(channelId, name)
+      const r = await store.enroll(channelId, contact.platform_user_id, VOICE_MODEL_VERSIONS.embedding); registrations.push(r.registration_id)
       await store.sync({ channel_id: channelId, connection_epoch: null, foreground: false, completed_enrollment: { registration_id: r.registration_id, model_id: r.model_id, enrollment_revision: store.registrations(channelId).enrollment_revision } })
-      friends.set(r.registration_id, { id: name, display_name: name, permission: name === 'A' ? 'master' : 'normal', channel_identities: [{ channel_id: channelId, platform_user_id: r.registration_id, platform_display_name: name }], created_at: new Date().toISOString(), updated_at: new Date().toISOString() })
+      friends.set(r.platform_user_id, { id: name, display_name: name, permission: name === 'A' ? 'master' : 'normal', channel_identities: [{ channel_id: channelId, platform_user_id: r.platform_user_id, platform_display_name: name }], created_at: new Date().toISOString(), updated_at: new Date().toISOString() })
     }
     admin = http.createServer(async (req, res) => {
       let body = ''; for await (const data of req) body += data
@@ -50,14 +51,14 @@ describe('Voice Channel with real WSS, service adapters and durable Admin/core s
         if (bearer !== `Bearer ${request.method === 'verify_voice_admin' ? human : runtime}`) throw new Error('invalid runtime/human bearer')
         let result: unknown
         switch (request.method) {
-          case 'get_voice_config': result = { config: { asr: { provider_id: 'local', model_id: 'sensevoice' }, tts: { provider_id: 'local', model_id: 'kokoro' }, wake_word: '你好螃蟹' }, ...store.registrations(channelId),
-            asr_connection: { provider_id: 'local', kind: 'self_hosted', format: 'sherpa-offline-ws', endpoint: `ws://localhost:${(admin.address() as AddressInfo).port}/asr`, model_id: 'sensevoice', api_key: 'provider-secret' },
-            tts_connection: { provider_id: 'local', kind: 'self_hosted', format: 'mlx-audio-http', endpoint: `http://localhost:${(admin.address() as AddressInfo).port}`, model_id: 'kokoro', voice: 'zf_xiaobei', api_key: 'provider-secret' } }; break
+          case 'get_voice_config': result = { config: { asr: { provider_id: 'local', model_id: 'sensevoice' }, tts: { provider_id: 'local', model_id: 'kokoro' }, wake_word: '你好螃蟹' }, ...store.registrations(channelId), contacts: store.registrations(channelId).contacts.map(c => ({ ...c, ...(friends.get(c.platform_user_id) ? { friend_id: friends.get(c.platform_user_id)!.id } : {}) })),
+            asr_connection: { provider_id: 'local', format: 'sherpa-offline-ws', endpoint: `ws://localhost:${(admin.address() as AddressInfo).port}/asr`, model_id: 'sensevoice', api_key: 'provider-secret' },
+            tts_connection: { provider_id: 'local', format: 'mlx-audio-http', endpoint: `http://localhost:${(admin.address() as AddressInfo).port}`, model_id: 'kokoro', voice: 'zf_xiaobei', api_key: 'provider-secret' } }; break
           case 'verify_voice_admin': result = { verified: true }; break
           case 'sync_voice_terminal': await store.sync(request.params); result = { synced: true }; break
           case 'get_voice_turn_status': result = store.status(request.params.channel_id, request.params.turn_id, request.params.payload_sha256); break
           case 'submit_voice_turn': {
-            const submission = await store.submit(request.params, id => friends.get(id))
+            const submission = await store.submit(request.params, id => friends.get(id), async () => true)
             if (submission.payload) { const record = inbox.accept(submission.payload); result = await store.confirm(channelId, record.turn_id, record.payload_sha256); inbox.confirm(record); accepted.push(submission.payload) }
             else result = submission.result
             break
@@ -97,11 +98,11 @@ describe('Voice Channel with real WSS, service adapters and durable Admin/core s
   }
   async function pair() {
     const pairing = await rpc.callSensitive<any, any>(port, 'voice_admin_action', { channel_id: channelId, command: { action: 'create_pairing', host: 'localhost' } }, 'isolated-admin', { authorizationBearer: human })
-    const phone = await connect(); phone.send({ type: 'pair', protocol_version: 1, nonce: pairing.pairing.nonce })
+    const phone = await connect(); phone.send({ type: 'pair', protocol_version: 2, nonce: pairing.pairing.nonce })
     const waiting = await phone.wait('pair_waiting'); expect(waiting.verification_code).toBe(pairing.pairing.verification_code)
     await rpc.callSensitive(port, 'voice_admin_action', { channel_id: channelId, command: { action: 'confirm_pairing', pairing_id: waiting.pairing_id } }, 'isolated-admin', { authorizationBearer: human })
     const credential = (await phone.wait('paired')).credential, live = await connect()
-    live.send({ type: 'hello', protocol_version: 1, credential, models: { embedding: VOICE_MODEL_VERSIONS.embedding, segmentation: VOICE_MODEL_VERSIONS.segmentation }, aec_verified: true })
+    live.send({ type: 'hello', protocol_version: 2, credential, models: { embedding: VOICE_MODEL_VERSIONS.embedding, segmentation: VOICE_MODEL_VERSIONS.segmentation }, aec_verified: true })
     const hello = await live.wait('hello'); expect(JSON.stringify(hello)).not.toContain('provider-secret')
     live.send({ type: 'heartbeat', foreground: true, microphone: 'closed', playback: 'idle' })
     return { phone: live, hello }
@@ -118,12 +119,28 @@ describe('Voice Channel with real WSS, service adapters and durable Admin/core s
     await expect(rpc.callSensitive(port, 'voice_admin_action', { channel_id: channelId, command: { action: 'create_pairing', host: 'localhost' } }, 'agent-cli', { authorizationBearer: runtime })).rejects.toThrow()
     const { phone } = await pair(), status = await turn(phone)
     expect(status.status).toBe('accepted'); expect(asrCalls).toBe(3); expect(accepted).toHaveLength(1)
-    expect(accepted[0].messages.map(m => [m.friend.id, m.message.content.text, m.message.session.type])).toEqual([['A', '开灯', 'group'], ['B', '别开灯', 'group'], ['A', '好的', 'group']])
+    expect(accepted[0].messages.map(m => [m.friend?.id, m.message.content.text, m.message.session.type])).toEqual([['A', '开灯', 'group'], ['B', '别开灯', 'group'], ['A', '好的', 'group']])
     expect(inbox.pending()[0].payload?.messages).toHaveLength(3)
   })
-  it('unknown B rejects the complete turn without transcribing or executing A alone', async () => {
+  it('unknown B preserves all A B A text and reaches the inbox as a stranger', async () => {
     const { phone } = await pair()
-    expect((await turn(phone, true)).status).toBe('rejected'); expect(asrCalls).toBe(0); expect(accepted).toEqual([]); expect(inbox.pending()).toEqual([])
+    expect((await turn(phone, true)).status).toBe('accepted'); expect(asrCalls).toBe(3)
+    expect(accepted[0].messages.map(m => [m.friend?.id, m.message.content.text])).toEqual([['A', '开灯'], [undefined, '别开灯'], ['A', '好的']])
+    expect(accepted[0].messages[1].message.features.voice?.identity_status).toBe('unknown')
+    expect(inbox.pending()[0].payload?.messages).toHaveLength(3)
+  })
+  it('rejects a v1 handshake with an explicit version error', async () => {
+    const phone = await connect(); phone.send({ type: 'hello', protocol_version: 1, credential: 'old', models: VOICE_MODEL_VERSIONS, aec_verified: false })
+    const error = await phone.wait('error'); expect(error.code).toBe('VOICE_VERSION_UNSUPPORTED'); expect(error.message).toContain('protocol_version=2')
+  })
+  it('keeps a contact in the roster without an active sample and resolves current bindings', async () => {
+    const contact = store.registrations(channelId).contacts[0]
+    await store.revoke(channelId, registrations[0])
+    const sessions: any = await rpc.call(port, 'get_sessions', {}, 'isolated-core')
+    expect(sessions.items[0].participants.find((p: any) => p.platform_user_id === contact.platform_user_id).friend_id).toBe('A')
+    friends.delete(contact.platform_user_id)
+    const updated: any = await rpc.call(port, 'get_sessions', {}, 'isolated-core')
+    expect(updated.items[0].participants.some((p: any) => p.platform_user_id === contact.platform_user_id)).toBe(false)
   })
   it('returns delivery success only after started, all audio and completed; an interrupted second attempt never replays', async () => {
     const { phone, hello } = await pair(), status = await turn(phone)

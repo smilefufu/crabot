@@ -2054,10 +2054,13 @@ export class UnifiedAgent extends ModuleBase {
     this.voiceInbox.confirm(record)
   }
 
-  private async handleVoiceTurn(payload: VoiceTurnAuthorizedPayload): Promise<void> {
+  private async handleVoiceTurn(notice: Pick<VoiceTurnAuthorizedPayload, 'channel_id' | 'turn_id' | 'payload_sha256'>): Promise<void> {
     this.assertRuntimeExecutionAdmission()
+    const { channel_id, turn_id, payload_sha256 } = notice
+    const payload = await this.rpcClient.callSensitive<unknown, VoiceTurnAuthorizedPayload>(await this.getAdminPort(), 'get_authorized_voice_turn', { channel_id, turn_id, payload_sha256 }, this.config.moduleId, { authorizationBearer: ConfigLoader.getRuntimeBearer(), timeoutMs: 3000 })
+    if (payload.channel_id !== channel_id || payload.turn_id !== turn_id || payload.payload_sha256 !== payload_sha256) throw new Error('Authorized voice turn locator mismatch')
     const record = this.voiceInbox.accept(payload)
-    // The core acknowledgement proves Admin owns this full digest; publishing alone cannot execute it.
+    // Only the exact-core read supplies authoritative identity and text; notifications cannot execute it.
     await this.confirmVoiceInbox(record)
     void this.drainVoiceInbox().catch(() => console.warn('[Agent] Voice batch remains durable; Manager admission will retry'))
   }
@@ -2093,7 +2096,7 @@ export class UnifiedAgent extends ModuleBase {
             undefined,
             { onDurableQueued: () => { this.voiceInbox.managed(record); queued() } },
             undefined,
-            { turnId: payload.turn_id, senderFriends: payload.messages.map(m => m.friend), ...(context ? { replyContext: context } : {}) },
+            { turnId: payload.turn_id, senderFriends: payload.messages.flatMap(m => m.friend ? [m.friend] : []), ...(context ? { replyContext: context } : {}) },
           )
           // Release ingress after the durable mailbox/history checkpoint, before the LLM finishes.
           await Promise.race([handedOff, outcome.then(() => { if (record.phase !== 'managed') throw new Error('Manager did not durably admit the voice batch') })])

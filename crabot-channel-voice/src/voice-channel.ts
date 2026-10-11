@@ -3,7 +3,7 @@ import type { Server } from 'node:net'
 import os from 'node:os'
 import { randomBytes, randomInt, randomUUID } from 'node:crypto'
 import { WebSocket, type RawData } from 'ws'
-import { ModuleBase, RpcError, VoiceInputBuffer, VOICE_MODEL_VERSIONS, encodeVoiceFrame, parseVoiceClientControl, sha256CanonicalJson, synthesizeAudio, transcribeAudio, voiceSessionId,
+import { ModuleBase, RpcError, VoiceInputBuffer, VOICE_MODEL_VERSIONS, encodeVoiceFrame, parseVoiceClientControl, VoiceProtocolVersionError, sha256CanonicalJson, synthesizeAudio, transcribeAudio, voiceSessionId,
   type GetVoiceConfigResult, type ModuleConfig, type RpcHandlerContext, type SensitiveRpcMethod, type SubmitVoiceTurnParams, type SyncVoiceTerminalParams, type VoiceAdminActionParams, type VoiceAdminActionResult,
   type VoiceClientControl, type VoicePairing, type VoiceReplyContext, type VoiceServerControl, type VoiceTerminalState, type VoiceTurnResult } from 'crabot-shared'
 import { TerminalStore } from './terminal-store.js'
@@ -51,21 +51,29 @@ export class VoiceChannel extends ModuleBase {
     this.registerMethod('voice_admin_action', (params: VoiceAdminActionParams, ctx?: RpcHandlerContext) => this.adminAction(params, ctx?.authorizationBearer))
     this.registerMethod('update_config', async () => { this.disconnect(); await this.refreshConfig(); return { updated: true } })
     this.registerMethod('get_capabilities', () => ({ supported_message_types: ['text'], supported_features: [], supports_history_query: false, supports_platform_user_query: true,
-      max_message_length: 120, max_file_size: 0, supports_file_path: false, supports_list_contacts: false, supports_list_groups: true, supports_list_group_members: true,
-      voice: { protocol_version: 1, send_timeout_ms: 30000 } }))
-    this.registerMethod('get_sessions', (params: { type?: string; pagination?: { page?: number; page_size?: number } }) => paginate(params?.type === 'private' ? [] : [this.session()], params))
-    this.registerMethod('get_session', (params: { session_id: string }) => { this.assertSession(params.session_id); return { session: this.session() } })
-    this.registerMethod('get_private_session', () => { throw new RpcError('CHANNEL_UNSUPPORTED_FEATURE', 'Voice has only a household group') })
-    this.registerMethod('list_groups', (params: { search?: string; pagination?: { page?: number; page_size?: number } }) => paginate(!params?.search || '家庭语音'.includes(params.search) ? [{ platform_session_id: 'household', group_name: '家庭语音', member_count: this.activeRegistrations().length }] : [], params))
+      max_message_length: 120, max_file_size: 0, supports_file_path: false, supports_list_contacts: true, supports_list_groups: true, supports_list_group_members: true,
+      voice: { protocol_version: 2, send_timeout_ms: 30000 } }))
+    this.registerMethod('get_sessions', async (params: { type?: string; pagination?: { page?: number; page_size?: number } }) => { await this.refreshConfig(); return paginate(params?.type === 'private' ? [] : [this.session()], params) })
+    this.registerMethod('get_session', async (params: { session_id: string }) => { this.assertSession(params.session_id); await this.refreshConfig(); return { session: this.session() } })
+    this.registerMethod('get_private_session', () => { throw new RpcError('CHANNEL_UNSUPPORTED_FEATURE', 'Voice has only a voice group') })
+    this.registerMethod('list_contacts', async (params: { search?: string; pagination?: { page?: number; page_size?: number } }) => {
+      await this.refreshConfig()
+      return paginate(this.settings.contacts.filter(c => !params?.search || c.display_name.includes(params.search)).map(c => ({ platform_user_id: c.platform_user_id, display_name: c.display_name })), params)
+    })
+    this.registerMethod('list_groups', async (params: { search?: string; pagination?: { page?: number; page_size?: number } }) => {
+      await this.refreshConfig()
+      return paginate(!params?.search || '语音群'.includes(params.search) ? [{ platform_session_id: 'household', group_name: '语音群', member_count: this.boundContacts().length }] : [], params)
+    })
     this.registerMethod('list_group_members', async (params: { session_id: string; pagination?: { page?: number; page_size?: number } }) => {
       this.assertSession(params.session_id); await this.refreshConfig()
-      const members = this.activeRegistrations().map(r => ({ platform_user_id: r.registration_id, display_name: r.display_name, role: 'member' }))
+      const members = this.boundContacts().map(c => ({ platform_user_id: c.platform_user_id, display_name: c.display_name, role: 'member' }))
       return { ...paginate(members, params), member_count: members.length, members_complete: true }
     })
-    this.registerMethod('get_platform_user_info', (params: { platform_user_id: string }) => {
-      const registration = this.activeRegistrations().find(r => r.registration_id === params.platform_user_id)
-      if (!registration) throw new RpcError('NOT_FOUND', 'Registered speaker not found')
-      return { platform_user_id: registration.registration_id, display_name: registration.display_name }
+    this.registerMethod('get_platform_user_info', async (params: { platform_user_id: string }) => {
+      await this.refreshConfig()
+      const contact = this.settings.contacts.find(c => c.platform_user_id === params.platform_user_id)
+      if (!contact) throw new RpcError('NOT_FOUND', 'Voice contact not found')
+      return { platform_user_id: contact.platform_user_id, display_name: contact.display_name }
     })
     this.registerMethod('get_history', () => { throw new RpcError('CHANNEL_HISTORY_UNAVAILABLE', 'Voice text history is owned by the conversation Manager') })
     this.registerMethod('get_message', () => { throw new RpcError('NOT_FOUND', 'Voice does not keep a second message archive') })
@@ -99,18 +107,19 @@ export class VoiceChannel extends ModuleBase {
   private async sync(ack: Partial<SyncVoiceTerminalParams> = {}): Promise<void> {
     await this.admin('sync_voice_terminal', { channel_id: this.config.moduleId, connection_epoch: this.connection?.epoch ?? null, foreground: this.connection?.foreground ?? false, ...ack })
   }
-  private assertSession(id: string): void { if (id !== voiceSessionId(this.config.moduleId)) throw new RpcError('NOT_FOUND', 'Household session not found') }
+  private assertSession(id: string): void { if (id !== voiceSessionId(this.config.moduleId)) throw new RpcError('NOT_FOUND', 'Voice group session not found') }
+  private boundContacts() { return this.settings.contacts.filter(c => c.friend_id !== undefined) }
   private activeRegistrations() { return this.settings.registrations.filter(r => r.status === 'active') }
   private session() {
-    return { id: voiceSessionId(this.config.moduleId), channel_id: this.config.moduleId, type: 'group', platform_session_id: 'household', title: '家庭语音',
-      participants: this.activeRegistrations().map(r => ({ friend_id: r.friend_id, platform_user_id: r.registration_id, role: 'member' })),
+    return { id: voiceSessionId(this.config.moduleId), channel_id: this.config.moduleId, type: 'group', platform_session_id: 'household', title: '语音群',
+      participants: this.boundContacts().map(c => ({ friend_id: c.friend_id!, platform_user_id: c.platform_user_id, role: 'member' })),
       permissions: { tool_access: { memory: true, messaging: true, task: false, mcp_skill: false, file_io: false, browser: false, shell: false, remote_exec: false, desktop: false }, storage: null },
       memory_scopes: [voiceSessionId(this.config.moduleId)], workspace_path: '', created_at: this.createdAt, updated_at: this.createdAt }
   }
   private state(): VoiceTerminalState {
     const c = this.connection
     return { paired: this.terminal.paired, connected: !!c, foreground: c?.foreground ?? false, microphone: c?.microphone ?? 'closed', playback: c?.playback ?? 'idle', aec_verified: false,
-      enrollment_revision: this.settings.enrollment_revision, registrations: this.settings.registrations,
+      enrollment_revision: this.settings.enrollment_revision, contacts: this.settings.contacts, registrations: this.settings.registrations,
       hosts: [...new Set(Object.values(os.networkInterfaces()).flatMap(addresses => (addresses ?? []).filter(a => !a.internal).map(a => a.family === 'IPv6' ? '[' + a.address + ']' : a.address)))],
       ...(this.pairing ? { pairing_id: this.pairing.pairing_id, ...(this.pairing.socket ? { verification_code: this.pairing.verification_code } : {}) } : {}) }
   }
@@ -129,7 +138,7 @@ export class VoiceChannel extends ModuleBase {
         if (url.username || url.password || url.pathname !== '/' || url.search || url.hash) throw new RpcError('INVALID_PARAMS', '无效配对地址')
         url.port = String(this.config.port); url.pathname = '/voice'
         this.pairing?.socket?.terminate()
-        this.pairing = { protocol_version: 1, channel_id: this.config.moduleId, pairing_id: randomUUID(), url: url.toString(), tls_fingerprint_sha256: this.terminal.fingerprint(), nonce: randomBytes(32).toString('base64url'), verification_code: String(randomInt(100000, 1000000)), expires_at: new Date(Date.now() + 60000).toISOString() }
+        this.pairing = { protocol_version: 2, channel_id: this.config.moduleId, pairing_id: randomUUID(), url: url.toString(), tls_fingerprint_sha256: this.terminal.fingerprint(), nonce: randomBytes(32).toString('base64url'), verification_code: String(randomInt(100000, 1000000)), expires_at: new Date(Date.now() + 60000).toISOString() }
         return { action: 'create_pairing', pairing: { ...this.pairing } }
       }
       case 'confirm_pairing': {
@@ -141,8 +150,8 @@ export class VoiceChannel extends ModuleBase {
       }
       case 'revoke_terminal': fields(command, ['action']); await this.terminal.revoke(); this.disconnect(); this.pairing?.socket?.terminate(); this.pairing = undefined; return { action: 'revoke_terminal', revoked: true }
       case 'enroll': {
-        fields(command, ['action', 'friend_id', 'display_name']); this.cancelInteraction(); await this.refreshConfig()
-        const registration = this.settings.registrations.find(r => r.status === 'pending' && r.friend_id === command.friend_id)
+        fields(command, ['action', 'platform_user_id']); this.cancelInteraction(); await this.refreshConfig()
+        const registration = this.settings.registrations.find(r => r.status === 'pending' && r.platform_user_id === command.platform_user_id)
         if (!registration || !this.connection?.foreground) throw new RpcError('SERVICE_UNAVAILABLE', '手机需在前台连接后才能登记')
         this.enrollment = { registration_id: registration.registration_id, revision: this.settings.enrollment_revision, deadline: Date.now() + 60000 }
         this.send(this.connection.socket, { type: 'enroll', registration, enrollment_revision: this.settings.enrollment_revision })
@@ -160,7 +169,7 @@ export class VoiceChannel extends ModuleBase {
   private sendHello(c: Connection): void {
     this.send(c.socket, { type: 'hello', connection_epoch: c.epoch, config: this.settings.config, enrollment_revision: this.settings.enrollment_revision, registrations: this.settings.registrations,
       destinations: [this.settings.asr_connection && { capability: 'asr' as const, ...this.settings.asr_connection }, this.settings.tts_connection && { capability: 'tts' as const, ...this.settings.tts_connection }].filter(Boolean).map(value => {
-        const connection = value!; return { capability: connection.capability, kind: connection.kind, endpoint: connection.endpoint }
+        const connection = value!; return { capability: connection.capability, endpoint: connection.endpoint }
       }) })
     this.sendClears()
   }
@@ -173,8 +182,8 @@ export class VoiceChannel extends ModuleBase {
     const handshake = setTimeout(() => { if (!authenticated && !pairingOnly) socket.terminate() }, 5000)
     socket.on('error', () => {})
     socket.on('close', () => { clearTimeout(handshake); if (this.connection?.socket === socket) this.disconnect(); if (this.pairing?.socket === socket) this.pairing = undefined })
-    const reject = () => {
-      try { this.send(socket, { type: 'error', code: 'VOICE_REJECTED', message: '本轮无法继续，请检查连接、登记和音频状态' }) } catch { /* disconnected */ }
+    const reject = (error?: unknown) => {
+      try { this.send(socket, { type: 'error', code: error instanceof VoiceProtocolVersionError ? 'VOICE_VERSION_UNSUPPORTED' : 'VOICE_REJECTED', message: error instanceof VoiceProtocolVersionError ? error.message : '本轮无法继续，请检查连接、登记和音频状态' }) } catch { /* disconnected */ }
       socket.terminate()
     }
     socket.on('message', (raw: RawData, binary: boolean) => {
@@ -212,7 +221,7 @@ export class VoiceChannel extends ModuleBase {
           if (binary) { if (!c.input) throw new Error('No ready turn'); c.input.append(data); data.fill(0); return }
           await this.control(c, control!)
         }).catch(reject)
-      } catch { reject() }
+      } catch (error) { reject(error) }
     })
   }
   private async control(c: Connection, control: VoiceClientControl): Promise<void> {
@@ -244,14 +253,14 @@ export class VoiceChannel extends ModuleBase {
     const deadline = setTimeout(() => controller.abort(), 10000)
     let submittedDigest: string | undefined
     try {
-      if (control.segments.some(s => s.identity_status !== 'matched' || !this.activeRegistrations().some(r => r.registration_id === s.registration_id))) throw new Error('整轮包含未知或有争议的说话人，请重新登记或轮流发言')
+      if (control.segments.some(s => s.identity_status === 'matched' && !this.activeRegistrations().some(r => r.registration_id === s.registration_id))) throw new Error('声纹引用已失效，请重说或重新登记')
       const messages: SubmitVoiceTurnParams['messages'] = []
       for (const segment of control.segments) {
         const text = await transcribeAudio(this.settings.asr_connection!, pcm.subarray(segment.start_sample * 2, segment.end_sample * 2), controller.signal)
-        const registration = this.activeRegistrations().find(r => r.registration_id === segment.registration_id)!
+        const registration = segment.identity_status === 'matched' ? this.activeRegistrations().find(r => r.registration_id === segment.registration_id) : undefined
         messages.push({ platform_message_id: control.turn_id + ':' + segment.segment_index, session: { channel_id: this.config.moduleId, session_id: voiceSessionId(this.config.moduleId), type: 'group' },
-          sender: { platform_user_id: registration.registration_id, platform_display_name: registration.display_name }, content: { type: 'text', text },
-          features: { is_mention_crab: true, voice: { turn_id: control.turn_id, segment_index: segment.segment_index, start_sample: segment.start_sample, end_sample: segment.end_sample, anonymous_speaker: segment.anonymous_speaker } }, platform_timestamp: new Date().toISOString() })
+          sender: { platform_user_id: registration?.platform_user_id ?? `unknown:${control.turn_id}:${segment.anonymous_speaker}`, platform_display_name: registration?.display_name ?? `陌生人 (${segment.anonymous_speaker})` }, content: { type: 'text', text },
+          features: { is_mention_crab: true, voice: { turn_id: control.turn_id, segment_index: segment.segment_index, start_sample: segment.start_sample, end_sample: segment.end_sample, anonymous_speaker: segment.anonymous_speaker, identity_status: segment.identity_status, ...(segment.registration_id ? { registration_id: segment.registration_id } : {}) } }, platform_timestamp: new Date().toISOString() })
       }
       controller.signal.throwIfAborted(); clearTimeout(deadline)
       if (this.connection !== c || !c.foreground) throw new Error('Terminal interaction ended')

@@ -4,6 +4,11 @@ import type { SubmitVoiceTurnParams, VoiceClientControl, VoiceSegment } from './
 export const VOICE_MAX_SAMPLES = 240000
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
+export class VoiceProtocolVersionError extends Error {
+  constructor() { super('语音协议版本不兼容，需要 protocol_version=2；旧试验数据需显式清理后重新配对') }
+}
+function version(value: unknown): void { if (value !== 2) throw new VoiceProtocolVersionError() }
+
 function invalid(): never { throw new Error('Invalid voice protocol payload') }
 function object(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) invalid()
@@ -28,10 +33,21 @@ function models(value: unknown): void {
   string(v.segmentation); string(v.embedding)
 }
 
+function identity(v: Record<string, unknown>, anonymous: Map<string, string>): void {
+  oneOf(v.identity_status, ['matched', 'unknown', 'uncertain'])
+  if (v.identity_status === 'matched') string(v.registration_id)
+  else if (v.registration_id !== undefined) invalid()
+  const signature = JSON.stringify([v.identity_status, v.registration_id])
+  const speaker = v.anonymous_speaker as string
+  if (anonymous.has(speaker) && anonymous.get(speaker) !== signature) invalid()
+  anonymous.set(speaker, signature)
+}
+
 export function validateVoiceSegments(value: unknown, samples: number): asserts value is VoiceSegment[] {
   integer(samples, 1, VOICE_MAX_SAMPLES)
   if (!Array.isArray(value) || !value.length || value.length > 32) invalid()
   let end = 0
+  const anonymous = new Map<string, string>()
   for (const [index, raw] of value.entries()) {
     const v = object(raw)
     fields(v, ['segment_index', 'start_sample', 'end_sample', 'anonymous_speaker', 'identity_status'], ['registration_id', 'score', 'margin'])
@@ -39,9 +55,7 @@ export function validateVoiceSegments(value: unknown, samples: number): asserts 
     integer(v.start_sample, end, samples - 1)
     integer(v.end_sample, (v.start_sample as number) + 1, samples)
     string(v.anonymous_speaker, 128)
-    oneOf(v.identity_status, ['matched', 'unknown', 'uncertain'])
-    if (v.identity_status === 'matched') string(v.registration_id)
-    else if (v.registration_id !== undefined) invalid()
+    identity(v, anonymous)
     for (const key of ['score', 'margin']) if (v[key] !== undefined && (typeof v[key] !== 'number' || !Number.isFinite(v[key]))) invalid()
     end = v.end_sample as number
   }
@@ -52,10 +66,10 @@ export function parseVoiceClientControl(data: string): VoiceClientControl {
   const v = object(JSON.parse(data))
   switch (v.type) {
     case 'pair':
-      fields(v, ['type', 'protocol_version', 'nonce']); oneOf(v.protocol_version, [1]); string(v.nonce); break
+      fields(v, ['type', 'protocol_version', 'nonce']); version(v.protocol_version); string(v.nonce); break
     case 'hello':
       fields(v, ['type', 'protocol_version', 'credential', 'models', 'aec_verified'])
-      oneOf(v.protocol_version, [1]); string(v.credential); models(v.models); oneOf(v.aec_verified, [true, false]); break
+      version(v.protocol_version); string(v.credential); models(v.models); oneOf(v.aec_verified, [true, false]); break
     case 'heartbeat':
       fields(v, ['type', 'foreground', 'microphone', 'playback'])
       oneOf(v.foreground, [true, false]); oneOf(v.microphone, ['closed', 'wake', 'recording']); oneOf(v.playback, ['idle', 'playing']); break
@@ -95,6 +109,7 @@ export function validateSubmitVoiceTurn(value: unknown): asserts value is Submit
   string(v.channel_id); string(v.session_id); assertVoiceUuid(v.turn_id); assertVoiceUuid(v.connection_epoch); integer(v.enrollment_revision)
   if (!Array.isArray(v.messages) || !v.messages.length || v.messages.length > 32) invalid()
   let end = 0
+  const anonymous = new Map<string, string>()
   const ids = new Set<string>()
   for (const [index, raw] of v.messages.entries()) {
     const m = object(raw)
@@ -113,11 +128,11 @@ export function validateSubmitVoiceTurn(value: unknown): asserts value is Submit
     const features = object(m.features); fields(features, ['is_mention_crab', 'voice'])
     if (features.is_mention_crab !== true) invalid()
     const voice = object(features.voice)
-    fields(voice, ['turn_id', 'segment_index', 'start_sample', 'end_sample', 'anonymous_speaker'])
+    fields(voice, ['turn_id', 'segment_index', 'start_sample', 'end_sample', 'anonymous_speaker', 'identity_status'], ['registration_id'])
     if (voice.turn_id !== v.turn_id || voice.segment_index !== index) invalid()
     integer(voice.start_sample, end, VOICE_MAX_SAMPLES - 1)
     integer(voice.end_sample, (voice.start_sample as number) + 1, VOICE_MAX_SAMPLES)
-    string(voice.anonymous_speaker, 128); end = voice.end_sample as number
+    string(voice.anonymous_speaker, 128); identity(voice, anonymous); end = voice.end_sample as number
   }
 }
 

@@ -28,14 +28,14 @@
 - 2026-10-10 17:18:31（Asia/Shanghai）以已合并代码 `7ebf64ed` 完成全模块、Web、CLI、MCP 构建及本机 user mode 正常重启，七模块及端点健康。新 Agent 使用本仓 dist；实际 Admin JS 与构建逐字节一致，生产 `get_worker_detail` 已返回新版执行事实结构，旧化身为 `legacy_unknown`。编译查询 fixture 确认旧值 `task=false` 不阻止主控派发、仅显示六个有效入口；未为验收触发新任务或模型请求，真实行为继续按后续 trace 观察。
 - 启动对账 revived=21、failed=0、unchanged=3944；9 条 `builtin trace writer unavailable` 的 Worker/trace 标识均在部署前出现，无新标识或新增 fatal 日志。保留为独立历史恢复告警，不据此改写任务或权限数据；Memory 后端修复仍独立处理。
 
-### 安卓语音终端与 Voice Channel：身份/配置修订待书面确认
+### 安卓语音终端与 Voice Channel：协议 v2 修订已实现，待联调验收
 
-- 原一期两端 spec 于 2026-10-10 确认，已有正式协议、隔离 WIP 和调试 APK；主仓 `feat/voice-channel-android-v1`、安卓仓 `feat/android-voice-v1` 通过设计型 PR 交付，尚未部署当前实例。
-- 10月11日已核实普通群允许陌生人、权限统一按群，普通陌生人私聊沿现行规则忽略；26 项原网关/群权限回归通过。[后端修订稿](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/specs/2026-10-11-voice-channel-contacts-and-group-revision-design.md)与[安卓修订稿](https://github.com/smilefufu/crabot-voice-android/blob/feat/android-voice-v1/docs/specs/2026-10-11-android-voice-identity-revision-design.md)待书面确认：登记关联稳定渠道联系人，保留群内 unknown/身份 uncertain 发言，逐片段标真实 Friend/陌生人，删除音频分类及家庭限定。内容无法归属的重叠仍失败；旧未知整轮拒绝规则停止继续实现。
-- 事件 Friend metadata 可替换但原 digest 不变的隔离复现及 exact core 读取方案已纳入本次后端修订；实时 reply context 不落盘。正式协议/两仓代码和旧预览尚未按修订修改，旧测试不计作新身份规则或来源缺口已修复；确认后先更新协议、实施计划，再实现。
-- 原 WIP 已接入独立 runtime 认证、ASR/TTS 引用、完整轮次存档、单次正式发送与实际播放回执。调试 APK 的 Wrapper/模型 hash/签名核验及 4 项 JVM、5 项禁音频 ARM64 测试通过；Admin API 文案与 3 项原配置页回归通过。Manager 全套有 2 项未修改基线同样失败的 Memory trace 测试，未扩大范围。
-- [端侧文件实验](crabot-docs/superpowers/research/voice-scenario-b-poc/README.md)、[内容归属](crabot-docs/superpowers/research/voice-scenario-b-poc/ASR-ATTRIBUTION.md)、[中文短词](crabot-docs/superpowers/research/voice-scenario-b-poc/CHINESE-ASR.md)及[外部 API 实验](crabot-docs/superpowers/research/voice-scenario-b-poc/SERVICE-APIS.md)保留版本/hash/原始证据。FuFu 实验登记不迁移/删除；用户报告 unknown 不作为未知识别准确率。公开文件/回环性能不代表真实换人或整链延迟。
-- 真人场景 B、短句/距离、唤醒/AEC、有限录放音生命周期、功耗、50轮整体响应及 Linux system mode 两 UID 隔离仍待验收；单人先测基础录放音，第二人到场测未登记与登记后新内容。私聊按声纹切换上下文、Agent 发起现场登记及其它 Channel 的 guest 标签列后续，不并入一期。
+- 两端身份修订及授权来源设计于 2026-10-11 获书面确认；正式 `protocol-voice.md` v0.2.0 已发布。隔离分支通过 [主仓 PR #206](https://github.com/smilefufu/crabot/pull/206) / [安卓 PR #1](https://github.com/smilefufu/crabot-voice-android/pull/1) 交付，尚未部署当前实例。
+- 声纹样本 ID 与稳定渠道联系人分离，Friend 仅按当前 ChannelIdentity 解析；删除/重登不改绑定。唯一普通群允许 unknown/身份 uncertain 的全部发言，逐片段标 Friend/陌生人；内容重叠、无效分段或 ASR 失败仍整轮失败。权限及 Master 成员名册沿现有群规则，名册不依赖活跃声纹。私聊仍在后续范围。
+- Agent 只把事件作为定位通知，由 exact-core 无 trace RPC 读取 Admin 持久授权快照，整批落 inbox 后确认。回答机会只在内存，重启或过期不复活。终端整数协议为 2；旧 WIP 元数据明确拒绝并保留，不自动迁移/清除。
+- Admin 支持创建联系人、从列表绑定/解绑 Friend、以已有模板创建普通 Friend、独立登记/删除声纹；移除音频分类和家庭/客厅限定，仅保留原生 API 格式、地址、密钥与模型引用。合成预览已实际点通创建/绑定，刷新后可见新界面。
+- Shared/Admin/Channel/Agent/Web 类型检查与 Web 构建通过；语音及普通群定向回归通过。完整 Manager 仍有 2 项未修改基线同样失败的 Memory trace 测试，未扩大范围。Android 0.2.0 产品与仪器 APK 构建、4 项 JVM、hash/签名核验通过；本次专用模拟器系统启动挂起，6 项仪器测试未运行，不借用旧版成功结果。
+- [当前 Android 验证记录](https://github.com/smilefufu/crabot-voice-android/blob/feat/android-voice-v1/docs/verification/2026-10-11-android-voice-v2.md)列出验收顺序。当前无手机连接；有限录放音生命周期、真人 B/未知/短句、唤醒/AEC、功耗、50轮整体响应与 Linux 两 UID 隔离仍待验收。FuFu 旧实验登记保留；公开文件/回环测试不代表声纹准确率或整体延迟。
 
 ### 未实装远程执行类别隐藏：已本地部署
 

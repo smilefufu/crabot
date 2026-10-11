@@ -1,5 +1,5 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { RpcError, assertVoiceUuid, type AudioServiceCapability, type Friend, type GetVoiceConfigResult, type SubmitVoiceTurnParams, type SyncVoiceTerminalParams, type VoiceAdminAction, type VoiceAdminActionResult, type VoiceRegistration, type VoiceTurnAuthorizedPayload, type VoiceTurnResult } from 'crabot-shared'
+import { RpcError, assertVoiceUuid, type AudioServiceCapability, type Friend, type GetVoiceConfigResult, type SubmitVoiceTurnParams, type SyncVoiceTerminalParams, type VoiceAdminAction, type VoiceAdminActionResult, type VoiceTurnAuthorizedPayload, type VoiceTurnResult } from 'crabot-shared'
 import { AudioServiceRegistry } from './audio-service-registry.js'
 import { VoiceTurnStore } from './voice-turn-store.js'
 
@@ -9,9 +9,8 @@ export interface VoiceAdminDeps {
   verifyRuntime(channelId: string, bearer?: string): Promise<void>
   verifyCore(bearer?: string): Promise<void>
   verifyHuman(bearer?: string): Promise<void>
-  resolveFriend(channelId: string, registrationId: string): Friend | undefined
-  getFriend(friendId: string): Friend | undefined
-  bindRegistration(channelId: string, registration: VoiceRegistration): Promise<void>
+  resolveFriend(channelId: string, platformUserId: string): Friend | undefined
+  checkGroup(channelId: string, sessionId: string): Promise<boolean>
   channelAction(channelId: string, command: VoiceAdminAction, bearer: string): Promise<VoiceAdminActionResult>
   publish(payload: VoiceTurnAuthorizedPayload): Promise<void>
   configurationChanged(): Promise<void>
@@ -49,7 +48,9 @@ export class VoiceAdmin {
     const channelId = v.channel_id
     this.assertChannel(channelId); await this.deps.verifyRuntime(channelId, bearer)
     const config = this.audio.getConfig(channelId)
-    return { config, ...this.turns.registrations(channelId), asr_connection: this.audio.resolve(config.asr, 'asr'), tts_connection: this.audio.resolve(config.tts, 'tts') }
+    const metadata = this.turns.registrations(channelId)
+    const contacts = metadata.contacts.map(contact => { const friend = this.deps.resolveFriend(channelId, contact.platform_user_id); return { ...contact, ...(friend ? { friend_id: friend.id } : {}) } })
+    return { config, ...metadata, contacts, asr_connection: this.audio.resolve(config.asr, 'asr'), tts_connection: this.audio.resolve(config.tts, 'tts') }
   }
   async verifyHuman(raw: unknown, bearer?: string): Promise<{ verified: true }> {
     const v = bodyObject(raw); requireFields(v, ['channel_id']); this.assertChannel(v.channel_id)
@@ -68,7 +69,7 @@ export class VoiceAdmin {
       if (field === 'completed_enrollment') {
         if (typeof ack.model_id !== 'string') invalid('Invalid enrollment model')
         const registration = this.turns.registrations(v.channel_id).registrations.find(r => r.registration_id === ack.registration_id)
-        if (!registration || this.deps.resolveFriend(v.channel_id, registration.registration_id)?.id !== registration.friend_id) invalid('Enrollment binding is unavailable')
+        if (!registration || !this.turns.registrations(v.channel_id).contacts.some(c => c.platform_user_id === registration.platform_user_id)) invalid('Enrollment contact is unavailable')
       }
     }
     await this.turns.sync(v as unknown as SyncVoiceTerminalParams)
@@ -78,7 +79,7 @@ export class VoiceAdmin {
     const v = bodyObject(raw); this.assertChannel(v.channel_id)
     await this.deps.verifyRuntime(v.channel_id, bearer)
     if (!this.deps.admissionReady()) throw new RpcError('SERVICE_UNAVAILABLE', 'Core Agent is not ready')
-    const { result, payload } = await this.turns.submit(v as unknown as SubmitVoiceTurnParams, id => this.deps.resolveFriend(v.channel_id as string, id))
+    const { result, payload } = await this.turns.submit(v as unknown as SubmitVoiceTurnParams, id => this.deps.resolveFriend(v.channel_id as string, id), () => this.deps.checkGroup(v.channel_id as string, v.session_id as string))
     if (payload) await this.deps.publish(payload)
     if (result.status !== 'pending') return result
     // Publishing is not acceptance. Core must first persist the whole batch and confirm it.
@@ -93,6 +94,11 @@ export class VoiceAdmin {
   async status(raw: unknown, bearer?: string): Promise<VoiceTurnResult> {
     const v = this.statusParams(raw); await this.deps.verifyRuntime(v.channel_id, bearer)
     return this.turns.status(v.channel_id, v.turn_id, v.payload_sha256)
+  }
+  async authorized(raw: unknown, bearer?: string): Promise<VoiceTurnAuthorizedPayload> {
+    await this.deps.verifyCore(bearer)
+    const v = this.statusParams(raw)
+    return this.turns.authorized(v.channel_id, v.turn_id, v.payload_sha256)
   }
   async confirm(raw: unknown, bearer?: string): Promise<VoiceTurnResult> {
     const v = this.statusParams(raw); await this.deps.verifyCore(bearer)
@@ -120,13 +126,17 @@ export class VoiceAdmin {
       case 'status': case 'revoke_terminal': requireFields(v, ['action']); break
       case 'create_pairing': requireFields(v, ['action', 'host']); if (typeof v.host !== 'string' || !v.host.trim() || v.host.length > 256) invalid('Invalid pairing host'); break
       case 'confirm_pairing': requireFields(v, ['action', 'pairing_id']); assertVoiceUuid(v.pairing_id); break
+      case 'create_contact': {
+        requireFields(v, ['action', 'display_name'])
+        if (typeof v.display_name !== 'string' || !v.display_name.trim() || v.display_name.length > 128) invalid('Invalid contact name')
+        return { action: 'create_contact', contact: await this.turns.createContact(channelId, v.display_name.trim()) }
+      }
       case 'enroll': {
-        requireFields(v, ['action', 'friend_id', 'display_name'])
-        if (typeof v.friend_id !== 'string' || typeof v.display_name !== 'string' || !v.display_name.trim() || v.display_name.length > 128) invalid('Invalid enrollment request')
-        if (!this.deps.getFriend(v.friend_id)) invalid('Friend not found')
-        const pending = this.turns.registrations(channelId).registrations.find(r => r.status === 'pending' && r.friend_id === v.friend_id)
-        const registration = pending ?? await this.turns.enroll(channelId, v.friend_id, v.display_name.trim(), this.deps.enrollmentModelId)
-        await this.deps.bindRegistration(channelId, registration)
+        requireFields(v, ['action', 'platform_user_id'])
+        if (typeof v.platform_user_id !== 'string') invalid('Invalid enrollment contact')
+        const metadata = this.turns.registrations(channelId)
+        if (!metadata.contacts.some(c => c.platform_user_id === v.platform_user_id)) invalid('Voice contact not found')
+        if (!metadata.registrations.some(r => r.status === 'pending' && r.platform_user_id === v.platform_user_id)) await this.turns.enroll(channelId, v.platform_user_id, this.deps.enrollmentModelId)
         break
       }
       case 'delete_registration':

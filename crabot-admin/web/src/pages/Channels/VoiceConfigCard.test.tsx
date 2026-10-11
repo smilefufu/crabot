@@ -1,25 +1,29 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MemoryRouter } from 'react-router-dom'
+import { friendService } from '../../services/friend'
+import { api } from '../../services/api'
+import { VoiceContacts } from './VoiceContacts'
 import { voiceService } from '../../services/voice'
 import { VoiceConfigCard } from './VoiceConfigCard'
 import { AudioServiceEditor } from './AudioServiceEditor'
 
 vi.mock('../../services/voice', () => ({ voiceService: { list: vi.fn(), config: vi.fn(), saveConfig: vi.fn(), action: vi.fn(), test: vi.fn(), save: vi.fn(), remove: vi.fn() } }))
-vi.mock('../../services/friend', () => ({ friendService: { listFriends: vi.fn(async () => ({ items: [{ id: 'fufu', display_name: 'FuFu' }] })) } }))
+vi.mock('../../services/friend', () => ({ friendService: { linkIdentity: vi.fn(async () => ({})), unlinkIdentity: vi.fn(async () => ({})), listFriends: vi.fn(async () => ({ items: [{ id: 'fufu', display_name: 'FuFu' }] })) } }))
 vi.mock('../../services/session', () => ({ sessionService: { listSessions: vi.fn(async () => ({ items: [{ id: 'group-1', platform_session_id: 'household' }] })), getGroupConfig: vi.fn(async () => ({ config: null })) } }))
 vi.mock('../../services/api', () => ({ api: { post: vi.fn(async () => ({ resolved: { tool_access: { memory: true, messaging: true, shell: false, desktop: false }, storage: null } })) } }))
+vi.mock('../../services/permission-template', () => ({ permissionTemplateService: { list: vi.fn(async () => ({ items: [{ id: 'minimal', name: '最小权限' }] })) } }))
 vi.mock('qrcode', () => ({ default: { toDataURL: vi.fn(async () => 'data:image/png;base64,fixture') } }))
-const provider = { id: 'provider', name: '自建音频', kind: 'self_hosted' as const, format: 'openai-audio' as const, endpoint: 'https://local.example/v1', has_api_key: true,
+const provider = { id: 'provider', name: '自建音频', format: 'openai-audio' as const, endpoint: 'https://local.example/v1', has_api_key: true,
   models: [{ model_id: 'asr', display_name: 'ASR', capabilities: ['asr' as const] }] }
 let terminal: Record<string, unknown>
 beforeEach(() => {
   vi.clearAllMocks()
-  terminal = { paired: false, connected: false, foreground: false, microphone: 'closed', playback: 'idle', aec_verified: false, enrollment_revision: 0, registrations: [], hosts: ['192.168.1.2'] }
+  terminal = { paired: false, connected: false, foreground: false, microphone: 'closed', playback: 'idle', aec_verified: false, enrollment_revision: 0, contacts: [], registrations: [], hosts: ['192.168.1.2'] }
   vi.mocked(voiceService.list).mockResolvedValue({ items: [provider] })
   vi.mocked(voiceService.config).mockResolvedValue({ asr: null, tts: null, wake_word: '你好螃蟹' })
   vi.mocked(voiceService.action).mockImplementation(async (_id, command) => {
-    if (command.action === 'create_pairing') return { action: 'create_pairing', pairing: { protocol_version: 1, channel_id: '客厅', pairing_id: 'p-1', url: 'wss://local.example:1234/voice', tls_fingerprint_sha256: 'fingerprint', nonce: 'one-time', verification_code: '123456', expires_at: new Date(Date.now() + 60000).toISOString() } }
+    if (command.action === 'create_pairing') return { action: 'create_pairing', pairing: { protocol_version: 2, channel_id: '客厅', pairing_id: 'p-1', url: 'wss://local.example:1234/voice', tls_fingerprint_sha256: 'fingerprint', nonce: 'one-time', verification_code: '123456', expires_at: new Date(Date.now() + 60000).toISOString() } }
     return { action: 'status', state: terminal as never }
   })
 })
@@ -32,7 +36,7 @@ describe('native voice instance configuration', () => {
     fireEvent.click(screen.getByRole('button', { name: '保存语音配置' }))
     await waitFor(() => expect(voiceService.saveConfig).toHaveBeenCalledWith('客厅', { asr: { provider_id: 'provider', model_id: 'asr' }, tts: null, wake_word: '你好螃蟹' }))
     expect(await screen.findByText(/当前允许：记忆、消息/)).toBeTruthy()
-    expect(screen.getByText(/Master 的语音不会获得私聊权限/)).toBeTruthy()
+    expect(screen.getByText(/所有发言者使用同一语音群权限/)).toBeTruthy()
   })
   it('cannot confirm a QR until the phone has connected and the same verification code is present', async () => {
     render(<MemoryRouter><VoiceConfigCard channelId="客厅" running /></MemoryRouter>)
@@ -44,9 +48,34 @@ describe('native voice instance configuration', () => {
     terminal = { ...terminal, pairing_id: 'p-1', verification_code: '123456' }
     await waitFor(() => expect(confirmation).toBeEnabled(), { timeout: 4000 })
   })
+  it('creates a contact offline and binds an existing Friend using the stable channel identity', async () => {
+    vi.mocked(voiceService.action).mockResolvedValue({ action: 'create_contact', contact: { platform_user_id: 'contact-1', display_name: 'FuFu' } })
+    render(<VoiceContacts channelId="voice" onChanged={async () => {}} />)
+    fireEvent.change(screen.getByLabelText('联系人名称'), { target: { value: 'FuFu' } })
+    fireEvent.click(screen.getByRole('button', { name: '创建渠道联系人' }))
+    await screen.findByText('联系人已创建，可绑定 Friend 或登记声纹')
+    expect(screen.getByRole('button', { name: '登记声纹' })).toBeDisabled()
+    fireEvent.change(screen.getByLabelText('已有 Friend'), { target: { value: 'fufu' } })
+    fireEvent.click(screen.getByRole('button', { name: '绑定已有 Friend' }))
+    await waitFor(() => expect(friendService.linkIdentity).toHaveBeenCalledWith('fufu', { channel_id: 'voice', platform_user_id: 'contact-1', platform_display_name: 'FuFu' }))
+    expect(screen.queryByLabelText(/Friend ID/)).toBeNull()
+  })
+  it('creates a normal Friend with an existing template and enrolls by contact rather than Friend ID', async () => {
+    const state = { ...terminal, connected: true, foreground: true, contacts: [{ platform_user_id: 'contact-2', display_name: '来宾' }] }
+    vi.mocked(api.post).mockResolvedValue({ friend: { id: 'new-friend', display_name: '来宾' } })
+    const refresh = vi.fn(async () => {})
+    render(<VoiceContacts channelId="voice" state={state as never} onChanged={refresh} />)
+    fireEvent.click(await screen.findByRole('button', { name: '登记声纹' }))
+    await waitFor(() => expect(voiceService.action).toHaveBeenCalledWith('voice', { action: 'enroll', platform_user_id: 'contact-2' }))
+    fireEvent.change(screen.getByLabelText('绑定的渠道联系人'), { target: { value: 'contact-2' } })
+    fireEvent.change(screen.getByLabelText('新 Friend 权限模板'), { target: { value: 'minimal' } })
+    fireEvent.click(screen.getByRole('button', { name: '创建并绑定普通 Friend' }))
+    await waitFor(() => expect(api.post).toHaveBeenCalledWith('/friends', { display_name: '来宾', permission: 'normal', permission_template_id: 'minimal', channel_identities: [{ channel_id: 'voice', platform_user_id: 'contact-2', platform_display_name: '来宾' }] }))
+  })
   it('keeps saved API keys masked and switches model capabilities with the selected native format', async () => {
     render(<AudioServiceEditor provider={provider} onSaved={async () => {}} onCancel={() => {}} />)
     expect(screen.getByLabelText('API key')).toHaveValue('')
+    expect(screen.queryByLabelText('音频去向')).toBeNull()
     fireEvent.change(screen.getByLabelText('接口格式'), { target: { value: 'mlx-audio-http' } })
     expect(screen.getByLabelText('文字转语音')).toBeChecked()
     expect(screen.getByLabelText('语音转文字')).not.toBeChecked()

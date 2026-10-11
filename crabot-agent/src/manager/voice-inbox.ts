@@ -5,6 +5,7 @@ import { sha256CanonicalJson, validateSubmitVoiceTurn, type VoiceReplyContext, t
 
 type StoredPayload = Omit<VoiceTurnAuthorizedPayload, 'reply_context'>
 export interface VoiceInboxRecord {
+  protocol_version: 2
   channel_id: string
   turn_id: string
   payload_sha256: string
@@ -19,7 +20,7 @@ function validatePayload(payload: StoredPayload): void {
   const original = {
     channel_id: payload.channel_id, session_id: payload.session_id, turn_id: payload.turn_id, connection_epoch: payload.connection_epoch, enrollment_revision: payload.enrollment_revision,
     messages: payload.messages.map(({ message, friend }) => {
-      if (!friend || message.sender.friend_id !== friend.id || !friend.channel_identities.some(ci => ci.channel_id === payload.channel_id && ci.platform_user_id === message.sender.platform_user_id)) throw new Error('Voice sender binding mismatch')
+      if (friend ? message.sender.friend_id !== friend.id || !friend.channel_identities.some(ci => ci.channel_id === payload.channel_id && ci.platform_user_id === message.sender.platform_user_id) : message.sender.friend_id !== undefined) throw new Error('Voice sender binding mismatch')
       const { friend_id, ...sender } = message.sender
       return { ...message, sender }
     }),
@@ -41,6 +42,7 @@ export class VoiceInbox {
       if (!/^[0-9a-f]{64}\.json$/.test(filename)) continue
       const record = JSON.parse(fs.readFileSync(path.join(this.directory, filename), 'utf8')) as VoiceInboxRecord
       const key = this.key(record.channel_id, record.turn_id)
+      if (record.protocol_version !== 2) throw new Error('Incompatible voice WIP inbox; use a separate v2 data directory')
       if (filename !== key + '.json' || !['accepted', 'managed'].includes(record.phase) || typeof record.confirmed !== 'boolean' || !/^[0-9a-f]{64}$/.test(record.payload_sha256) || (record.phase === 'accepted' && !record.payload)) throw new Error('Corrupt voice ingress record')
       if (record.payload) {
         validatePayload(record.payload)
@@ -58,7 +60,7 @@ export class VoiceInbox {
       return existing
     }
     const { reply_context, ...stored } = structuredClone(payload)
-    const record: VoiceInboxRecord = { channel_id: payload.channel_id, turn_id: payload.turn_id, payload_sha256: payload.payload_sha256, accepted_at: new Date().toISOString(), phase: 'accepted', confirmed: false, payload: stored }
+    const record: VoiceInboxRecord = { protocol_version: 2, channel_id: payload.channel_id, turn_id: payload.turn_id, payload_sha256: payload.payload_sha256, accepted_at: new Date().toISOString(), phase: 'accepted', confirmed: false, payload: stored }
     this.write(key, record)
     if (reply_context?.channel_id === payload.channel_id && reply_context.session_id === payload.session_id && reply_context.turn_id === payload.turn_id && reply_context.connection_epoch === payload.connection_epoch && Date.parse(reply_context.expires_at) > Date.now() && Date.parse(reply_context.expires_at) <= Date.now() + 60000) this.contexts.set(key, reply_context)
     return record

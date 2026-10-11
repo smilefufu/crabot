@@ -14,7 +14,7 @@ import {
 import { MEMORY_DATA_RPC_METHODS } from './memory-access.js'
 
 const SENSITIVE_METHODS: SensitiveRpcMethod[] = [
-  'get_voice_config', 'submit_voice_turn', 'get_voice_turn_status', 'confirm_voice_turn',
+  'get_voice_config', 'submit_voice_turn', 'get_voice_turn_status', 'get_authorized_voice_turn', 'confirm_voice_turn',
   'verify_voice_runtime', 'register_voice_runtime', 'voice_admin_action', 'verify_voice_admin', 'sync_voice_terminal',
   'verify_memory_access',
   'get_agent_config',

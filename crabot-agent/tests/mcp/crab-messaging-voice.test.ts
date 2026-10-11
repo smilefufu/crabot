@@ -6,7 +6,7 @@ describe('formal voice delivery policy', () => {
   it('uses arbitrary instance capability, injects runtime context only on the matching group, and never retries interrupted playback', async () => {
     const context = { channel_id: '客厅', session_id: 'group-1', turn_id: 'turn-1', connection_epoch: 'epoch-1', expires_at: new Date(Date.now() + 50000).toISOString() }
     const call = vi.fn(async (_port, method) => {
-      if (method === 'get_capabilities') return { voice: { protocol_version: 1, send_timeout_ms: 30000 } }
+      if (method === 'get_capabilities') return { voice: { protocol_version: 2, send_timeout_ms: 30000 } }
       throw new Error('ECONNRESET after playback started')
     })
     const tools = buildWorkerMessagingTools({ rpcClient: { call } as never, moduleId: 'manager-test', getAdminPort: async () => 1, resolveChannelPort: async () => 2, voiceReplyContext: () => context })

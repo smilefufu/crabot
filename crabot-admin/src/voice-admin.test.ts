@@ -4,7 +4,7 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
-import { RpcError, sha256CanonicalJson, voiceSessionId, type Friend, type SubmitVoiceTurnParams, type VoiceRegistration } from 'crabot-shared'
+import { RpcError, sha256CanonicalJson, voiceSessionId, type Friend, type SubmitVoiceTurnParams } from 'crabot-shared'
 import { VoiceAdmin, type VoiceAdminDeps } from './voice-admin.js'
 
 describe('Voice Admin human surface and durable publication responsibility', () => {
@@ -18,9 +18,8 @@ describe('Voice Admin human surface and durable publication responsibility', () 
       verifyRuntime: async (_, token) => { if (token !== runtime) throw new RpcError('UNAUTHORIZED', 'Current child required') },
       verifyCore: async token => { if (token !== core) throw new RpcError('UNAUTHORIZED', 'Exact core required') },
       verifyHuman: async token => { if (token !== human) throw new RpcError('FORBIDDEN', 'Human Admin required') },
-      getFriend: id => id === friend.id ? friend : undefined,
+      checkGroup: async () => true,
       resolveFriend: (_, id) => bindings.get(id),
-      bindRegistration: async (_, r) => { bindings.set(r.registration_id, { ...friend, channel_identities: [{ channel_id: channel, platform_user_id: r.registration_id, platform_display_name: r.display_name }] }) },
       channelAction: vi.fn(async () => { throw new RpcError('SERVICE_UNAVAILABLE', 'Phone offline') }),
       publish: vi.fn(async () => {}), configurationChanged: vi.fn(async () => {}), testAudio: vi.fn(async () => ({ ok: true })), enrollmentModelId: 'campplus-test' }
     admin = new VoiceAdmin(dir, deps); await admin.load()
@@ -36,16 +35,18 @@ describe('Voice Admin human surface and durable publication responsibility', () 
     return fetch(url + route, { method, headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' }, ...(body ? { body: JSON.stringify(body) } : {}) })
   }
   async function turn(): Promise<SubmitVoiceTurnParams> {
-    const r = await admin.turns.enroll(channel, friend.id, 'FuFu', 'campplus-test'); await deps.bindRegistration(channel, r)
+    const contact = await admin.turns.createContact(channel, 'FuFu')
+    const r = await admin.turns.enroll(channel, contact.platform_user_id, 'campplus-test')
+    bindings.set(contact.platform_user_id, { ...friend, channel_identities: [{ channel_id: channel, platform_user_id: contact.platform_user_id, platform_display_name: 'FuFu' }] })
     const epoch = randomUUID(); const revision = admin.turns.registrations(channel).enrollment_revision
     await admin.sync({ channel_id: channel, connection_epoch: epoch, foreground: true, completed_enrollment: { registration_id: r.registration_id, model_id: r.model_id, enrollment_revision: revision } }, runtime)
     const id = randomUUID()
     return { channel_id: channel, session_id: voiceSessionId(channel), turn_id: id, connection_epoch: epoch, enrollment_revision: revision,
-      messages: [{ platform_message_id: id + ':0', session: { channel_id: channel, session_id: voiceSessionId(channel), type: 'group' }, sender: { platform_user_id: r.registration_id, platform_display_name: r.display_name }, content: { type: 'text', text: '不要开灯' }, features: { is_mention_crab: true, voice: { turn_id: id, segment_index: 0, start_sample: 0, end_sample: 32000, anonymous_speaker: 'speaker-0' } }, platform_timestamp: new Date().toISOString() }] }
+      messages: [{ platform_message_id: id + ':0', session: { channel_id: channel, session_id: voiceSessionId(channel), type: 'group' }, sender: { platform_user_id: r.platform_user_id, platform_display_name: r.display_name }, content: { type: 'text', text: '不要开灯' }, features: { is_mention_crab: true, voice: { turn_id: id, segment_index: 0, start_sample: 0, end_sample: 32000, anonymous_speaker: 'speaker-0', identity_status: 'matched', registration_id: r.registration_id } }, platform_timestamp: new Date().toISOString() }] }
   }
   it('rejects Agent CLI/unauthenticated management and returns only redacted audio references', async () => {
     expect((await request('/api/audio-services', 'GET', undefined, 'agent-cli')).status).toBe(403)
-    const provider = { name: 'local', kind: 'self_hosted', format: 'openai-audio', endpoint: 'http://localhost:9099', api_key: 'private-provider-marker', models: [{ model_id: 'audio', display_name: 'Audio', capabilities: ['asr', 'tts'], voice: 'test' }] }
+    const provider = { name: 'local', format: 'openai-audio', endpoint: 'http://localhost:9099', api_key: 'private-provider-marker', models: [{ model_id: 'audio', display_name: 'Audio', capabilities: ['asr', 'tts'], voice: 'test' }] }
     const created = await request('/api/audio-services', 'POST', provider)
     expect(created.status).toBe(201); const publicData = await created.json() as { provider: { id: string; has_api_key: boolean } }
     expect(publicData.provider.has_api_key).toBe(true); expect(JSON.stringify(publicData)).not.toContain(provider.api_key)
@@ -59,12 +60,34 @@ describe('Voice Admin human surface and durable publication responsibility', () 
     expect((await request('/api/channels/not-voice/voice/config')).status).toBe(400)
   })
   it('revokes backend admission before a disconnected phone can acknowledge vector deletion', async () => {
-    await expect(admin.action(channel, { action: 'enroll', friend_id: friend.id, display_name: 'FuFu' }, human)).rejects.toThrow('offline')
+    const contact = await admin.turns.createContact(channel, 'FuFu')
+    await expect(admin.action(channel, { action: 'enroll', platform_user_id: contact.platform_user_id }, human)).rejects.toThrow('offline')
     const registration = admin.turns.registrations(channel).registrations[0]
-    expect(registration.status).toBe('pending'); expect(bindings.has(registration.registration_id)).toBe(true)
+    expect(registration.status).toBe('pending'); expect(bindings.size).toBe(0)
     await expect(admin.action(channel, { action: 'delete_registration', registration_id: registration.registration_id }, human)).rejects.toThrow('offline')
     expect(admin.turns.registrations(channel).registrations[0]).toMatchObject({ status: 'revoked', terminal_cleared: false })
     await expect(admin.sync({ channel_id: channel, connection_epoch: randomUUID(), foreground: true, completed_enrollment: { registration_id: registration.registration_id, model_id: registration.model_id, enrollment_revision: admin.turns.registrations(channel).enrollment_revision } }, runtime)).rejects.toThrow()
+  })
+  it('allows Admin-only contact creation offline and projects current binding without storing it', async () => {
+    const created = await admin.action(channel, { action: 'create_contact', display_name: 'FuFu' }, human)
+    expect(created.action).toBe('create_contact')
+    if (created.action !== 'create_contact') throw new Error('unexpected result')
+    expect(deps.channelAction).not.toHaveBeenCalled()
+    const id = created.contact.platform_user_id
+    expect((await admin.getConfig({ channel_id: channel }, runtime)).contacts[0]).not.toHaveProperty('friend_id')
+    bindings.set(id, { ...friend, channel_identities: [{ channel_id: channel, platform_user_id: id }] })
+    expect((await admin.getConfig({ channel_id: channel }, runtime)).contacts[0].friend_id).toBe(friend.id)
+    bindings.delete(id)
+    expect((await admin.getConfig({ channel_id: channel }, runtime)).contacts[0]).not.toHaveProperty('friend_id')
+  })
+  it('reads durable authorization only for exact core, including after confirmation', async () => {
+    const params = await turn(); await admin.turns.submit(params, id => bindings.get(id), async () => true)
+    const locator = { channel_id: channel, turn_id: params.turn_id, payload_sha256: sha256CanonicalJson(params) }
+    await expect(admin.authorized(locator, runtime)).rejects.toThrow('Exact core')
+    expect((await admin.authorized(locator, core)).messages[0].friend?.id).toBe(friend.id)
+    await admin.confirm(locator, core)
+    expect((await admin.authorized(locator, core)).messages[0].message.content.text).toBe('不要开灯')
+    await expect(admin.authorized({ ...locator, payload_sha256: 'f'.repeat(64) }, core)).rejects.toThrow()
   })
   it('keeps the whole authorized turn after publish failure and retries it with its original digest', async () => {
     const params = await turn(); const digest = sha256CanonicalJson(params)

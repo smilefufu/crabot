@@ -834,7 +834,7 @@ export class ManagerLoop {
         messages, [], channelId, sessionId,
         messages[0].session.type === 'group' ? 'group' : 'private',
         this.deps.quotedPrefetch,
-        (msg) => resolveSenderIdentity({ msg, senderFriend: senderFriends?.find(f => f.id === msg.sender.friend_id) ?? friend }),
+        (msg) => resolveSenderIdentity({ msg, senderFriend: senderFriends ? senderFriends.find(f => f.id === msg.sender.friend_id) : friend }),
       )
     } catch {
       // A malformed Channel response must not prevent admission of the human message.
@@ -3028,7 +3028,7 @@ function renderChannelMessages(
     return prefix + formatChannelMessageLine(message, {
       timezone: envelope.timezone,
       now: new Date(envelope.received_at),
-      identity: resolveSenderIdentity({ msg: message, senderFriend: isHumanWake(envelope.wake) ? envelope.wake.senderFriends?.find(f => f.id === message.sender.friend_id) ?? friend : friend }),
+      identity: resolveSenderIdentity({ msg: message, senderFriend: isHumanWake(envelope.wake) && envelope.wake.senderFriends ? envelope.wake.senderFriends.find(f => f.id === message.sender.friend_id) : friend }),
       quotedMessages,
     })
   })

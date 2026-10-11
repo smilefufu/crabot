@@ -820,9 +820,11 @@ export class AdminModule extends ModuleBase {
         if (!payload) throw new RpcError('UNAUTHORIZED', 'Human Admin credential required')
         if (payload.sub !== 'admin' || payload.agent_cli) throw new RpcError('FORBIDDEN', 'Human Admin credential required')
       },
-      resolveFriend: (channelId, registrationId) => this.resolveFriendByChannelIdentity(channelId, registrationId) ?? undefined,
-      getFriend: id => this.friends.get(id),
-      bindRegistration: async (channelId, registration) => { await this.handleLinkChannelIdentity({ friend_id: registration.friend_id, channel_identity: { channel_id: channelId, platform_user_id: registration.registration_id, platform_display_name: registration.display_name } }) },
+      resolveFriend: (channelId, platformUserId) => this.resolveFriendByChannelIdentity(channelId, platformUserId) ?? undefined,
+      checkGroup: async (channelId, sessionId) => {
+        const session = await this.resolveChannelSession(channelId, sessionId, this.getMasterPlatformUserIdsForChannel(channelId))
+        return session.id === sessionId && session.channel_id === channelId && session.type === 'group' && sessionHasMasterParticipant(session, this.friends.values())
+      },
       channelAction: async (id, command, bearer) => {
         const modules = await this.rpcClient.resolve({ module_id: id }, this.config.moduleId)
         if (!modules[0]) throw new RpcError('SERVICE_UNAVAILABLE', 'Voice Channel is not running')
@@ -994,6 +996,7 @@ export class AdminModule extends ModuleBase {
     this.registerMethod('get_voice_config', (params: GetVoiceConfigParams, context?: RpcHandlerContext) => this.voiceAdmin.getConfig(params, context?.authorizationBearer))
     this.registerMethod('submit_voice_turn', (params: unknown, context?: RpcHandlerContext) => this.voiceAdmin.submit(params, context?.authorizationBearer))
     this.registerMethod('get_voice_turn_status', (params: unknown, context?: RpcHandlerContext) => this.voiceAdmin.status(params, context?.authorizationBearer))
+    this.registerMethod('get_authorized_voice_turn', (params: unknown, context?: RpcHandlerContext) => this.voiceAdmin.authorized(params, context?.authorizationBearer))
     this.registerMethod('confirm_voice_turn', (params: unknown, context?: RpcHandlerContext) => this.voiceAdmin.confirm(params, context?.authorizationBearer))
     this.registerMethod('sync_voice_terminal', (params: unknown, context?: RpcHandlerContext) => this.voiceAdmin.sync(params, context?.authorizationBearer))
     this.registerMethod('verify_voice_admin', (params: { channel_id: string }, context?: RpcHandlerContext) => this.voiceAdmin.verifyHuman(params, context?.authorizationBearer))

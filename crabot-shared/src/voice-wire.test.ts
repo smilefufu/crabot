@@ -37,15 +37,23 @@ test('speaker segments retain A B A and reject overlapping, fractional or misind
   }
   validateVoiceSegments([{ ...segments[0], identity_status: 'unknown', registration_id: undefined }].map(({ registration_id, ...rest }) => rest), 16000)
 })
+test('anonymous clusters have one identity result, with no candidate reference on unknown or uncertain speech', () => {
+  const a = { segment_index: 0, start_sample: 0, end_sample: 16000, anonymous_speaker: 'A', identity_status: 'matched', registration_id: 'sample-a' }
+  const b = { segment_index: 1, start_sample: 16000, end_sample: 32000, anonymous_speaker: 'B', identity_status: 'uncertain' }
+  validateVoiceSegments([a, b, { ...a, segment_index: 2, start_sample: 32000, end_sample: 48000 }], 48000)
+  assert.throws(() => validateVoiceSegments([a, { ...a, segment_index: 1, start_sample: 16000, end_sample: 32000, registration_id: 'sample-other' }], 32000))
+  assert.throws(() => validateVoiceSegments([{ ...b, segment_index: 0, start_sample: 0, registration_id: 'candidate' }], 32000))
+  assert.equal(parseVoiceClientControl(JSON.stringify({ type: 'pair', protocol_version: 2, nonce: 'fixture' })).type, 'pair')
+})
 test('controls reject extra identity fields, wrong versions and oversized input', () => {
   assert.deepEqual(parseVoiceClientControl(JSON.stringify({ type: 'turn_start', turn_id: id })), { type: 'turn_start', turn_id: id })
-  for (const value of [{ type: 'turn_start', turn_id: id, friend_id: 'master' }, { type: 'pair', protocol_version: 2, nonce: 'test' }, { type: 'heartbeat', foreground: 'true', microphone: 'closed', playback: 'idle' }]) {
+  for (const value of [{ type: 'turn_start', turn_id: id, friend_id: 'master' }, { type: 'pair', protocol_version: 1, nonce: 'test' }, { type: 'heartbeat', foreground: 'true', microphone: 'closed', playback: 'idle' }]) {
     assert.throws(() => parseVoiceClientControl(JSON.stringify(value)))
   }
   assert.throws(() => parseVoiceClientControl(' '.repeat(65537)))
 })
 test('submission rejects sender-supplied Friend, partial session and non-text instructions', () => {
-  const params = { channel_id: '客厅', session_id: 'household-session', turn_id: id, connection_epoch: other, enrollment_revision: 1, messages: [{ platform_message_id: id + ':0', session: { channel_id: '客厅', session_id: 'household-session', type: 'group' }, sender: { platform_user_id: 'registered-a', platform_display_name: 'A' }, content: { type: 'text', text: '不要开灯' }, features: { is_mention_crab: true, voice: { turn_id: id, segment_index: 0, start_sample: 0, end_sample: 16000, anonymous_speaker: '0' } }, platform_timestamp: '2026-10-10T00:00:00.000Z' }] }
+  const params = { channel_id: '客厅', session_id: 'household-session', turn_id: id, connection_epoch: other, enrollment_revision: 1, messages: [{ platform_message_id: id + ':0', session: { channel_id: '客厅', session_id: 'household-session', type: 'group' }, sender: { platform_user_id: 'registered-a', platform_display_name: 'A' }, content: { type: 'text', text: '不要开灯' }, features: { is_mention_crab: true, voice: { turn_id: id, segment_index: 0, start_sample: 0, end_sample: 16000, anonymous_speaker: '0', identity_status: 'matched', registration_id: 'sample-a' } }, platform_timestamp: '2026-10-10T00:00:00.000Z' }] }
   validateSubmitVoiceTurn(params)
   for (const change of [(p: typeof params) => Object.assign(p.messages[0].sender, { friend_id: 'master' }), (p: typeof params) => p.messages[0].session.type = 'private', (p: typeof params) => p.messages[0].content.type = 'system_event']) {
     const copy = structuredClone(params); change(copy); assert.throws(() => validateSubmitVoiceTurn(copy))
@@ -53,7 +61,7 @@ test('submission rejects sender-supplied Friend, partial session and non-text in
 })
 test('all voice runtime RPC methods require the no-trace transport', async () => {
   const client = new RpcClient()
-  for (const method of ['sync_voice_terminal', 'get_voice_config', 'submit_voice_turn', 'get_voice_turn_status', 'confirm_voice_turn', 'verify_voice_runtime', 'register_voice_runtime', 'voice_admin_action', 'verify_voice_admin']) {
+  for (const method of ['sync_voice_terminal', 'get_voice_config', 'submit_voice_turn', 'get_voice_turn_status', 'get_authorized_voice_turn', 'confirm_voice_turn', 'verify_voice_runtime', 'register_voice_runtime', 'voice_admin_action', 'verify_voice_admin']) {
     assert.equal(isSensitiveRpcCall(method, {}), true)
     await assert.rejects(client.call(1, method, {}, 'forged-source'), /callSensitive/)
   }
