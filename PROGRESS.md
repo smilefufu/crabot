@@ -31,12 +31,12 @@
 ### 安卓语音终端与 Voice Channel：v3 创建向导已实现，待真机验收
 
 - 身份/联系人、授权来源、创建向导与 Admin 共用端口设计均已确认，正式 `protocol-voice.md` v0.3.0 已发布。后端交付于 [PR #206](https://github.com/smilefufu/crabot/pull/206)，不自行合并；[安卓仓库](https://github.com/smilefufu/crabot-voice-android)按用户要求通过验证后直接提交 main。
-- 唯一普通语音群允许陌生人发言，逐片段标注 Friend/陌生人；声纹样本与稳定渠道联系人分离，Friend 按当前 ChannelIdentity 解析。群权限和 Master 成员名册沿用现有规则，声纹不授予权限。重叠、无效分段或 ASR 失败仍整轮失败；私聊属于后续范围。exact-core 从 Admin 读取持久授权快照并整批落 inbox，回答机会重启后不复活。
-- 新建阶段完成音频 API、扫码、联系人/Friend/声纹与群权限，再检查完成；未完成实例保留 draft、auto_start=false，不允许业务语音。退出停止草稿运行，可按原 ID 继续；运行中的继续配置不重启。完成前检查前台关麦、登记状态、普通群准入，并重测 ASR/TTS，持久化成功后启用。
+- 唯一普通语音群允许陌生人发言，逐片段标注好友/陌生人；声纹样本与稳定渠道联系人分离，好友按当前 ChannelIdentity 解析。群权限和 Master 成员名册沿用现有规则，声纹不授予权限。重叠、无效分段或 ASR 失败仍整轮失败；私聊属于后续范围。exact-core 从 Admin 读取持久授权快照并整批落 inbox，回答机会重启后不复活。
+- 新建阶段完成音频 API、扫码、联系人/好友/声纹与群权限，再检查完成；未完成实例保留 draft、auto_start=false，不允许业务语音。退出停止草稿运行，可按原 ID 继续；运行中的继续配置不重启。完成前检查前台关麦、登记状态、普通群准入，并重测 ASR/TTS，持久化成功后启用。
 - WS/WSS 复用 Admin Web 端口，Voice 内部 RPC/WS 仅监听 loopback。完整 public_base_url 保留有效端口与路径前缀，HTTP/HTTPS 推荐 WS/WSS，允许用户显式选择；同网可用局域网。Admin 自签证书与私钥保存在受限文件，手机允许二维码 pin 或系统 CA+hostname；不自动切换协议。v2 的有效配对哈希与同渠道声纹保留，显式撤销后重新扫码；不清除 FuFu 实验数据。
 - 本次定向回归：Shared 22、Admin 30、Voice 12、Agent 8、Web 9、Android JVM 11 项通过；Shared/Admin/Voice/Agent 类型检查、Web 与 Android 0.3.0 产品/仪器 APK 编译通过。Android 包签名和 SHA-256 已核验；仪器包未执行。既有全量验证及基线失败见 PR/上一阶段记录，不作为本次新增通过数。
 - 2026-10-12 已完成全部模块/Web/CLI/MCP 构建及授权 crabot restart；八模块健康，Voice 元数据 v0.3.0 / capability 3，内部仅监听 loopback，Admin HTTP/HTTPS 共用 3000。实际产物与 TLS 身份已核验，原实例/音频配置及有效 v2 终端校验材料保留。四步向导已部署；ASR/TTS 固定输入测试通过，第一步自动测试门槛已补齐，失败保留同一草稿，Web 10 项与构建通过。
-- OnePlus 7 Pro 保留数据升级 0.3.2，方向回归先复现失败、修复后真机 1 项通过，JVM 11 项通过。扫码保持竖屏，过期码明确提示重新生成；局域网 Admin 3000 的 WSS 真人扫码/核对确认通过，后台与手机均显示已连接、前台关麦。安卓 main 已提交；FuFu 渠道联系人已创建，Friend 绑定待用户确认，创建仍为 draft。公网默认 BASE_URL 的 WSS Upgrade 实测 502，未修改隧道；[扫码真机记录](https://github.com/smilefufu/crabot-voice-android/blob/main/docs/verification/2026-10-12-android-pairing-portrait.md)保留具体证据。
+- OnePlus 7 Pro 保留数据升级 0.3.2，方向回归先复现失败、修复后真机 1 项通过，JVM 11 项通过。扫码保持竖屏，过期码明确提示重新生成；局域网 Admin 3000 的 WSS 真人扫码/核对确认通过，后台与手机均显示已连接、前台关麦。安卓 main 已提交；FuFu 渠道联系人已创建，好友绑定待用户确认，创建仍为 draft。语音界面及通用权限标签统一使用“好友”。公网默认 BASE_URL 的 WSS Upgrade 实测 502，未修改隧道；[扫码真机记录](https://github.com/smilefufu/crabot-voice-android/blob/main/docs/verification/2026-10-12-android-pairing-portrait.md)保留具体证据。
 - 有限录放音生命周期、声纹登记、A/B/A 换人、unknown/短句、唤醒误触发、AEC、功耗、50 轮整体延迟与 Linux 两 UID 隔离待验收。公开音频/回环测试不能证明真人声纹准确率或整体延迟；[Android v3 验证记录](https://github.com/smilefufu/crabot-voice-android/blob/main/docs/verification/2026-10-11-android-voice-v3.md)分别列明代码验证与现场验收。
 
 ### 未实装远程执行类别隐藏：已本地部署
