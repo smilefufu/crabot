@@ -756,6 +756,7 @@ export interface HarnessDeps {
     connectionRevision?: string
     dispose(): Promise<void>
   }>
+  readonly computerUseEnv?: (context: WorkerContext, execution: AgentCliExecutionRef) => Promise<Record<string, string>>
   readonly issueAgentCliCredential?: (context: {
     execution: AgentCliExecutionRef
     manager_key: ManagerKey
@@ -993,10 +994,11 @@ export class WorkerHarness {
     context: WorkerContext,
     execution: AgentCliExecutionRef,
   ): Promise<{ execution_env?: Record<string, string> }> {
+    const desktop = await this.deps.computerUseEnv?.(context, execution) ?? {}
     if (!this.deps.issueAgentCliCredential || !context.manager_key || !context.target_session) {
       // Keep the child in Agent mode even when no scoped bearer can be minted;
       // the CLI must fail closed instead of reading Admin's internal token.
-      return { execution_env: { CRABOT_ACTOR: 'agent' } }
+      return { execution_env: { ...desktop, CRABOT_ACTOR: 'agent' } }
     }
     const credential = await this.deps.issueAgentCliCredential({
       execution,
@@ -1005,7 +1007,7 @@ export class WorkerHarness {
       ...(context.creator_friend_id ? { creator_friend_id: context.creator_friend_id } : {}),
     })
     if (!credential.token) throw new Error('Admin returned an empty Agent CLI credential')
-    return { execution_env: { CRABOT_TOKEN: credential.token, CRABOT_ACTOR: 'agent' } }
+    return { execution_env: { ...desktop, CRABOT_TOKEN: credential.token, CRABOT_ACTOR: 'agent' } }
   }
 
   private inputOwnershipRevision(workerId: string): number {

@@ -760,7 +760,7 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
       let processedResults: typeof toolResults
       if (options.supportsVision) {
         // VLM: compress images (resize + JPEG) then pass through
-        const imageReads = new Set(processed.toolUseBlocks.filter(block => block.name === 'fetch_image').map(block => block.id))
+        const imageReads = new Set(processed.toolUseBlocks.filter(block => block.name === 'fetch_image' || currentTools.find(tool => tool.name === block.name)?.traceMetadata?.computer_use_standard === true).map(block => block.id))
         processedResults = await Promise.all(toolResults.map(async result => imageReads.has(result.tool_use_id)
           ? result : (await compressToolResultImages([result]))[0]))
       } else {

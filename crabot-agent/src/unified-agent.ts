@@ -1,3 +1,5 @@
+import { retireLegacyWorkerComputerUse } from './agent/computer-use-legacy.js'
+import { ComputerUseOwner, isStandardComputerUse } from './agent/computer-use-owner.js'
 import { executionObservation, requestObservation, persistObservation, observationFile, readObservation } from './permissions/execution-observation.js'
 import { assertExecutionPolicy, executionAdmission } from './workers/execution-policy.js'
 import { authorizeTool, roleAuthorization, entryAuthorization, fileAuthorization, assertAuthorizedTools } from './permissions/tool-authorization.js'
@@ -702,6 +704,13 @@ export class UnifiedAgent extends ModuleBase {
   private imageConnInfo?: ImageConnInfo
   private imageCapability: { available: boolean; reason?: string } = { available: false }
   private mcpConnector: McpConnector = new McpConnector()
+  private readonly computerUseOwner = new ComputerUseOwner(value => this.registerSecret(value), () => path.join(getAgentDataDir(), 'computer-use'), async () => {
+    const workers = await this.managerStack?.ledger.listAllWorkers() ?? []
+    const legacy = (this.agentConfig?.mcp_servers ?? []).filter(server => server.name === 'computer-use'
+      && server.command === 'node' && server.args?.length === 1 && Object.keys(server.env ?? {}).length === 0
+      && server.args[0].replace(/\\/g, '/').endsWith('/crabot-mcp-tools/dist/computer-use/main.js'))
+    await retireLegacyWorkerComputerUse(workers.map(item => item.worker), legacy.map(server => server.args![0]))
+  })
   private roles: Set<'front' | 'worker'> = new Set()
   /** SDK 环境配置（Worker 专用） */
   private sdkEnvWorker?: SdkEnvConfig
@@ -1100,7 +1109,10 @@ export class UnifiedAgent extends ModuleBase {
       readWorkerSubagentTrace: (params) => this.readWorkerSubagentTracePage(params),
       mintActivityCursor: (position) => this.mintWorkerActivityCursor(position),
       // P6-A §8.10：化身终态主动收割（最后一次 native read → Agent-owned copy）。
-      onIncarnationTerminal: (handle) => { void this.harvestIncarnationNativeTrace(handle) },
+      onIncarnationTerminal: (handle) => {
+        if (handle.incarnation_id) this.computerUseOwner.revoke(`worker:${handle.worker_id}:${handle.incarnation_id}`)
+        void this.harvestIncarnationNativeTrace(handle)
+      },
       // Parent native activity is already persisted by Harness. Only terminal direct CLI children
       // are read here; running child output is never continuously captured.
       onNativeActivityCollected: (handle) => {
@@ -1168,11 +1180,17 @@ export class UnifiedAgent extends ModuleBase {
       callAdmin: async <P, R>(method: string, params: P): Promise<R> =>
         this.rpcClient.call<P, R>(await this.getAdminPort(), method, params, this.config.moduleId),
       getRuntimeConfigSummary: () => this.agentConfig,
-      managerMcpToolsFor: ({ permissions }) => {
+      managerMcpToolsFor: (access) => {
+        const { permissions } = access
         if (process.env.CRABOT_MANAGER_MCP_ENABLED !== '1' || !permissions) return []
-        return this.mcpConnector.getAllTools().filter((tool) => {
+        return this.computerUseOwner.bindTools(this.mcpConnector.getAllTools().filter((tool) => {
           const category = tool.category
           return (category === 'desktop' || category === 'mcp_skill') && permissions.tool_access[category] === true
+        }), `manager:${access.managerKey}:${access.creatorFriendId ?? ''}`, async () => {
+          const target = access.targetSession
+          if (!target || (target.type === 'private' && !access.creatorFriendId)) return false
+          const fresh = await this.resolvePrincipalPermissions(target.type === 'private' ? access.creatorFriendId : undefined, target.session_id, target.type, target.channel_id)
+          return this.desktopEnabled() && fresh?.tool_access.desktop === true
         })
       },
       managerMcpToolAuthorization: async ({ targetSession, creatorFriendId, category }) => {
@@ -1249,9 +1267,14 @@ export class UnifiedAgent extends ModuleBase {
         return buildWorkerCapabilityBundle({
           impl,
           workerId: worker_id,
+          computerUseReady: this.computerUseOwner.available,
           permissions: workerPermissions,
           skills: this.agentConfig?.skills ?? [],
-          mcpServers: this.agentConfig?.mcp_servers ?? [],
+          mcpServers: (this.agentConfig?.mcp_servers ?? []).flatMap(server => {
+            if (!isStandardComputerUse(server)) return [server]
+            if (!this.computerUseOwner.connected || !workerPermissions.tool_access.desktop) return []
+            return [server] // Endpoint and credential travel in this incarnation's execution_env only.
+          }),
           ...(impl === 'builtin'
             ? {}
             : {
@@ -1261,6 +1284,14 @@ export class UnifiedAgent extends ModuleBase {
                 ),
               }),
         })
+      },
+      computerUseEnv: async (context, execution) => {
+        const empty = { CRABOT_COMPUTER_USE_TOKEN: '', CRABOT_COMPUTER_USE_ENDPOINT: '' }
+        if (execution.kind !== 'worker' || !this.desktopEnabled()
+          || !narrowWorkerPermissions(BUILTIN_WORKER_PERMISSIONS, context.principal_permissions ?? null).tool_access.desktop) return empty
+        const scoped = this.computerUseOwner.workerConfig(`worker:${execution.worker_id}:${execution.incarnation_id}`, async method =>
+          this.desktopEnabled() && (method === 'list' || await this.desktopWorkerCurrent(execution.worker_id, execution.incarnation_id)))
+        return scoped?.env ?? empty
       },
       issueAgentCliCredential: (context) => this.issueAgentCliCredential(context),
       hasRunningBg: (workerId, scope) => this.agentHandler?.hasRunningBgForWorker(workerId, undefined, scope) ?? Promise.resolve(false),
@@ -1508,7 +1539,14 @@ export class UnifiedAgent extends ModuleBase {
     }
 
     // 外部 MCP（admin 托管，McpConnector 在 onStart 连接）。
-    const externalTools = this.mcpConnector.getAllTools()
+    const externalTools = this.mcpConnector.getAllTools().map(tool => tool.traceMetadata?.computer_use_standard === true ? { ...tool,
+      call: (input: Record<string, unknown>, context: import('./engine/types.js').ToolCallContext) => {
+        const caller = context.computerUseCaller
+        if (!caller || caller.worker_id !== ctx.worker_id) return Promise.resolve({ output: 'COMPUTER_USE_FORBIDDEN', isError: true })
+        return this.computerUseOwner.bindTools([tool], `worker:${caller.worker_id}:${caller.incarnation_id}`, async () =>
+          this.desktopEnabled() && workerPerms.tool_access.desktop && await this.desktopWorkerCurrent(caller.worker_id, caller.incarnation_id))[0].call(input, context)
+      },
+    } : tool)
     tools.push(...externalTools)
 
     // 临时页面：`taskId` 用 worker_id（页面 meta.owner_task_id 与台账里的 worker 对得上）。
@@ -1552,7 +1590,7 @@ export class UnifiedAgent extends ModuleBase {
       if (!authorization) throw new Error(`CAPABILITY_UNAVAILABLE: 未声明的 Worker 工具 ${tool.name}`)
       return authorizeTool(tool, authorization)
     }).filter(tool => tool.authorization!.available())
-    effectiveTools.push(authorizeTool(createGuidanceTool('worker'), roleAuthorization('worker')))
+    effectiveTools.push(authorizeTool(createGuidanceTool('worker', { computerUse: effectiveTools.some(tool => tool.traceMetadata?.computer_use_standard === true) }), roleAuthorization('worker')))
     assertAuthorizedTools(effectiveTools)
     const subagents = this.agentConfig?.subagents ?? []
     if (subagents.length === 0) return effectiveTools
@@ -1622,6 +1660,7 @@ export class UnifiedAgent extends ModuleBase {
   private buildBuiltinWorkerSystemPrompt(ctx: BuiltinRuntimeContext): string {
     const skillListing = buildWorkerSkillListing(this.resolveMainlineWorkerSkills(ctx))
     return assembleBuiltinWorkerPrompt({
+      computerUse: this.computerUseOwner.available && narrowWorkerPermissions(BUILTIN_WORKER_PERMISSIONS, ctx.principal_permissions ?? null).tool_access.desktop,
       workspaceRoot: ctx.workspace.root,
       ...(skillListing ? { skillListing } : {}),
       imageAvailable: this.imageCapability.available,
@@ -1917,7 +1956,7 @@ export class UnifiedAgent extends ModuleBase {
     const digest = candidate.model_config.cost_effective ?? worker
     const nextWorkerSdk = worker ? this.buildSdkEnv(worker) : undefined
     const nextDigestSdk = digest ? this.buildSdkEnv(digest) : undefined
-    const nextMcp = await McpConnector.prepare(candidate.mcp_servers ?? [])
+    const nextMcp = await McpConnector.prepare(await this.computerUseOwner.prepare(candidate.mcp_servers ?? []))
     let nextImageConn: ImageConnInfo | undefined
     let nextImageCapability: { available: boolean; reason?: string } = { available: false }
     let coldHandler: AgentHandler | undefined
@@ -5502,7 +5541,7 @@ export class UnifiedAgent extends ModuleBase {
       console.log(
         `[${this.config.moduleId}] Connecting to ${this.agentConfig.mcp_servers.length} MCP server(s)...`
       )
-      await this.mcpConnector.connectAll(this.agentConfig.mcp_servers)
+      await this.mcpConnector.connectAll(await this.computerUseOwner.prepare(this.agentConfig.mcp_servers))
       console.log(
         `[${this.config.moduleId}] ${this.mcpConnector.count} MCP server(s) connected`
       )
@@ -5602,6 +5641,17 @@ export class UnifiedAgent extends ModuleBase {
       })
   }
 
+  private desktopEnabled(): boolean {
+    return !this.runtimeClosing && !this.configStale && !!this.agentConfig?.mcp_servers?.some(isStandardComputerUse)
+  }
+
+  private async desktopWorkerCurrent(workerId: string, incarnationId: string): Promise<boolean> {
+    const found = await this.managerStack?.ledger.findWorker(workerId)
+    const incarnation = found?.worker.incarnations.find(item => item.incarnation_id === incarnationId)
+    return found?.worker.task.status !== 'closed' && !!incarnation && incarnation.state !== 'exited'
+      && (incarnation.query_id !== undefined || [...found!.worker.incarnations].reverse().find(item => !item.query_id)?.incarnation_id === incarnationId)
+  }
+
   protected override async onStop(): Promise<void> {
     this.runtimeClosing = true
     await this.scheduleScriptRunner.stop()
@@ -5648,6 +5698,7 @@ export class UnifiedAgent extends ModuleBase {
     await Promise.race([
       (async () => {
         await this.mcpConnector.disconnectAll()
+        await this.computerUseOwner.close()
         await this.lspManager.stop()
       })(),
       new Promise<void>((resolve) => setTimeout(resolve, 10_000)),

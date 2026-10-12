@@ -4,6 +4,7 @@ import { splitManagerKey } from './principal.js'
 import { guidanceCatalog } from '../guidance/catalog.js'
 
 export interface PromptInputs {
+  readonly computerUse?: boolean
   readonly managerKey: ManagerKey
   readonly isSystemThread: boolean
   readonly isGroup?: boolean
@@ -36,7 +37,7 @@ export function assembleManagerSystemPrompt(inputs: PromptInputs): string {
     ? [assembleDailyReflectionPrompt()]
     : [MANAGER_IDENTITY, CRABOT_CAPABILITIES, MANAGER_EXECUTOR_COLLABORATION,
         `当前会话：${JSON.stringify({ channel_id: channelId, session_id: sessionId })}`,
-        guidanceCatalog('manager'),
+        guidanceCatalog('manager', { computerUse: inputs.computerUse }),
       ]
   if (inputs.adminPersonality) parts.push('## AI 性格（管理员配置）\n\n' + inputs.adminPersonality)
   if (!inputs.isBuiltinDailyReflection) {

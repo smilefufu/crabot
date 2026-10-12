@@ -5,7 +5,7 @@ import type { ToolCallContext } from '../engine/types.js'
 import { createGuidanceTool } from '../guidance/catalog.js'
 
 export function createGuidanceProtocolServer(): Server {
-  const tool = createGuidanceTool('worker')
+  const tool = createGuidanceTool('worker', { computerUse: process.env.CRABOT_COMPUTER_USE_GUIDANCE === '1' })
   const server = new Server({ name: 'crabot-guidance', version: '1.0.0' }, { capabilities: { tools: {} } })
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [{
     name: tool.name, description: tool.description, inputSchema: tool.inputSchema,
