@@ -464,7 +464,7 @@ export const CLI_DOMAIN_LABELS: Record<CliDomain, string> = {
   skill: 'Skill（技能）',
   schedule: 'Schedule（定时任务）',
   channel: 'Channel（消息通道）',
-  friend: 'Friend（熟人）',
+  friend: '好友',
   permission: 'Permission（权限模板）',
   config: 'Config（全局配置）',
   undo: 'Undo（撤销）',
