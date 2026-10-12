@@ -5,6 +5,7 @@
 - 按已确认 [spec](crabot-docs/superpowers/specs/2026-10-12-computer-use-cua-driver-design.md) 和先行发布的协议，锁定 `cua-driver-rs-v0.34.1`（prerelease）；标准 builtin 提供 19 项原生方法与 `perform_actions`，不使用 main 的 run_steps/run_script/since。
 - Agent 统一宿主、可信 Manager/builtin 上下文和 CLI incarnation 执行环境；凭据/端点不落入任务 MCP 配置，按现有权限与有效化身检查。引用隔离、忙碌即时返回、16 步/60 秒整批校验、取消/unknown 隔离、不重放、终态 session 清理及旧受管 stdio 退出已实现。Driver 截图默认 1024，保留原生坐标与结果，条件 guidance 正文沿用确认稿。
 - 三模块编译、340 项 Agent 定向回归、215 项 CLI/builtin/Manager 回归、17 项 MCP/桥接、注册表保持和坏 hash/准备清理验证通过；其中 CLI 环境需要真实 CLI 的 85 项被环境跳过。全量 Agent 在单核持续满载 33 分钟仍无报告后中止，未定位原因，不算通过；已有核心提示词 354/350 长度断言在 base 同样不满足，本次未改正文。
+- PR #209 的隔离恢复风险已按确认方案修复：旧 Driver 退出确认后由新的发现/观察重建；同一桥接/可信凭据保留，原生 session/ref 全清，每调用方新观察后才允许输入。重连失败、取消、超时/shutdown 清理迟到运行时，不恢复任务或重放动作；就绪与桥接存活分开判断。恢复修订 MCP/bridge 31 项、Agent 16 项及准备 2 项回归、Agent/MCP 编译通过；两项旧 capability 用例在修复前 HEAD 同样被 storage=null 的 CLI 准入拒绝，单独记录。Windows Release 的 tar 盘符误判已改相对 archive 解压，等待新 head 的真实四平台 CI。
 - 四平台资产 SHA 和完整 macOS App 签名已核对；真实宿主→service→App 握手、session 生命周期及权限缺失局部降级/清理通过。macOS 尚缺 Accessibility/Screen Recording；Windows、Intel Mac、Linux X11/GNOME Wayland/Sway 和模型效率实验仍待验收/预算。未部署生产，不能声称全平台或模型任务验收完成。
 
 

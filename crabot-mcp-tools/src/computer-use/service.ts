@@ -70,7 +70,9 @@ async function main(): Promise<void> {
     directory = await fs.mkdtemp(join(tmpdir(), 'crabot-desktop-'))
     await fs.chmod(directory, 0o700)
     const endpoint = process.platform === 'win32' ? `\\\\.\\pipe\\crabot-desktop-${randomUUID()}` : join(directory, 'bridge.sock')
-    coordinator = new ComputerUseCoordinator(await createNativeDriver(process.env.CRABOT_COMPUTER_USE_ROOT, process.env.CRABOT_COMPUTER_USE_STATE_DIR), token => authorize(token, 'call'))
+    const connect = () => createNativeDriver(process.env.CRABOT_COMPUTER_USE_ROOT!, process.env.CRABOT_COMPUTER_USE_STATE_DIR!)
+    coordinator = new ComputerUseCoordinator(await connect(), token => authorize(token, 'call'), connect,
+      available => { if (process.connected) process.send!({ type: 'availability', available }) })
     bridge = createComputerUseBridge(coordinator, authorize)
     await coordinator.tools()
     if (!stopping) {

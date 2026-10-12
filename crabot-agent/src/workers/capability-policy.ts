@@ -67,6 +67,7 @@ export interface WorkerCapabilityPolicyInput {
   readonly skills: ReadonlyArray<SkillConfig>
   readonly mcpServers: ReadonlyArray<MCPServerConfig>
   readonly tmpPageBridge?: TmpPageBridgeLaunch
+  readonly computerUseReady?: boolean
 }
 
 function assertUniqueBuiltinSkillNames(skills: ReadonlyArray<SkillConfig>): void {
@@ -164,7 +165,7 @@ export function buildWorkerCapabilityBundle(input: WorkerCapabilityPolicyInput):
   }
   return {
     skills,
-    mcp_servers: [...mcpServers, createTmpPageMcpServerConfig(input.workerId, input.tmpPageBridge), createGuidanceMcpServerConfig(mcpServers.some(isStandardComputerUse)),
+    mcp_servers: [...mcpServers, createTmpPageMcpServerConfig(input.workerId, input.tmpPageBridge), createGuidanceMcpServerConfig(input.computerUseReady !== false && mcpServers.some(isStandardComputerUse)),
       ...(input.permissions.tool_access.file_io ? [createWorkspaceGitMcpServerConfig()] : [])],
   }
 }

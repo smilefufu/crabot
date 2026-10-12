@@ -20,11 +20,13 @@ export class ComputerUseOwner {
   private child?: ChildProcess
   private endpoint?: string
   private preparation?: Promise<void>
+  private ready = false
   private readonly grants = new Map<string, { token: string; check: (method: string) => Promise<boolean> }>()
   private readonly tokens = new Map<string, (method: string) => Promise<boolean>>()
   private config?: MCPServerConfig
   constructor(private readonly rememberSecret: (value: string) => void, private readonly stateDirectory: () => string, private readonly retireLegacy: () => Promise<void>) {}
-  get available(): boolean { return !!this.endpoint && !!this.child?.connected }
+  get connected(): boolean { return !!this.endpoint && !!this.child?.connected }
+  get available(): boolean { return this.ready && this.connected }
   revoke(key: string): void {
     const grant = this.grants.get(key)
     if (!grant) return
@@ -47,7 +49,7 @@ export class ComputerUseOwner {
   }
 
   workerConfig(key: string, check: (method: string) => Promise<boolean>): MCPServerConfig | undefined {
-    if (!this.available || !this.config) return undefined
+    if (!this.connected || !this.config) return undefined
     const config = { ...this.config, env: { CRABOT_COMPUTER_USE_ENDPOINT: this.endpoint!, CRABOT_COMPUTER_USE_TOKEN: this.credential(key, check) } }
     managedConfigurations.add(config)
     return config
@@ -58,7 +60,7 @@ export class ComputerUseOwner {
     if (!standard) { await this.close().catch(error => console.error('[computer-use] cleanup pending:', error.message)); return [...configs] }
     this.config = standard
     try {
-      if (!this.available) {
+      if (!this.connected) {
         if (this.child) await this.close()
         this.preparation ??= this.start(standard).finally(() => { this.preparation = undefined })
         await this.preparation
@@ -86,19 +88,21 @@ export class ComputerUseOwner {
     this.child = child
     child.stderr?.on('data', () => {}) // Runtime errors cross IPC without process environment or credentials.
     child.on('message', (message: any) => {
+      if (this.child !== child) return
+      if (message?.type === 'availability') this.ready = message.available === true
       if (message?.type !== 'authorize') return
       const check = this.tokens.get(message.token)
       void Promise.resolve(check?.(message.method) ?? false).catch(() => false).then(allowed => {
         if (child.connected) child.send({ type: 'authorized', id: message.id, allowed })
       })
     })
-    child.on('exit', () => { if (this.child === child) { this.endpoint = undefined; this.child = undefined; this.grants.clear(); this.tokens.clear() } })
+    child.on('exit', () => { if (this.child === child) { this.ready = false; this.endpoint = undefined; this.child = undefined; this.grants.clear(); this.tokens.clear() } })
     await new Promise<void>((done, fail) => {
       const timer = setTimeout(() => fail(new Error('COMPUTER_USE_HOST_START_TIMEOUT')), 30_000)
       child.once('error', fail)
       child.once('exit', () => { clearTimeout(timer); fail(new Error('COMPUTER_USE_HOST_EXITED')) })
       child.on('message', (message: any) => {
-        if (message?.type === 'ready') { clearTimeout(timer); this.endpoint = message.endpoint; done() }
+        if (message?.type === 'ready') { clearTimeout(timer); this.endpoint = message.endpoint; this.ready = true; done() }
         if (message?.type === 'unavailable') { clearTimeout(timer); fail(new Error(message.reason)) }
       })
     })
@@ -106,7 +110,7 @@ export class ComputerUseOwner {
 
   async close(): Promise<void> {
     const child = this.child
-    this.endpoint = undefined; this.grants.clear(); this.tokens.clear()
+    this.ready = false; this.endpoint = undefined; this.grants.clear(); this.tokens.clear()
     if (!child) return
     if (child.connected) child.disconnect()
     await new Promise<void>((done, fail) => {

@@ -1267,11 +1267,12 @@ export class UnifiedAgent extends ModuleBase {
         return buildWorkerCapabilityBundle({
           impl,
           workerId: worker_id,
+          computerUseReady: this.computerUseOwner.available,
           permissions: workerPermissions,
           skills: this.agentConfig?.skills ?? [],
           mcpServers: (this.agentConfig?.mcp_servers ?? []).flatMap(server => {
             if (!isStandardComputerUse(server)) return [server]
-            if (!this.computerUseOwner.available || !workerPermissions.tool_access.desktop) return []
+            if (!this.computerUseOwner.connected || !workerPermissions.tool_access.desktop) return []
             return [server] // Endpoint and credential travel in this incarnation's execution_env only.
           }),
           ...(impl === 'builtin'

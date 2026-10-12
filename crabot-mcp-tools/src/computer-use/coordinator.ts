@@ -39,6 +39,16 @@ function additionalNativeText(result: CallToolResult, text: string): CallToolRes
   })
 }
 
+function interruptible<T>(pending: Promise<T>, signal: AbortSignal): Promise<T> {
+  let abort = () => {}
+  const interrupted = new Promise<never>((_, reject) => {
+    abort = () => reject(new Error('COMPUTER_USE_NOT_STARTED'))
+    if (signal.aborted) abort()
+    else signal.addEventListener('abort', abort, { once: true })
+  })
+  return Promise.race([pending, interrupted]).finally(() => signal.removeEventListener('abort', abort))
+}
+
 /** One instance controller. Caller keys come exclusively from the host's credential registry. */
 export class ComputerUseCoordinator {
   private catalog?: Tool[]
@@ -50,33 +60,42 @@ export class ComputerUseCoordinator {
   private quarantined = false
   private cleanup?: Promise<void>
   private cleanupError?: Error
+  private reconnection?: Promise<void>
+  private closed = false
+  private requiresObservation = false
   private active?: { caller: string; controller: AbortController }
   private readonly pendingSessionEnds = new Set<string>()
 
-  constructor(private readonly driver: NativeDriver, private readonly authorize: (caller: string) => Promise<boolean>) {}
+  constructor(private driver: NativeDriver, private readonly authorize: (caller: string) => Promise<boolean>,
+    private readonly reconnect?: () => Promise<NativeDriver>, private readonly availabilityChanged: (available: boolean) => void = () => {}) {}
 
   async tools(): Promise<Tool[]> {
     if (!this.catalog) {
-      const all = await this.driver.tools()
-      const selected = NATIVE_TOOLS.map(name => {
-        const native = all.find(tool => tool.name === name)
-        if (!native) throw new Error(`CUA_DRIVER_CONTRACT_MISMATCH: ${name}`)
-        const tool = structuredClone(native)
-        delete tool.inputSchema.properties?.session
-        if (tool.inputSchema.required) tool.inputSchema.required = tool.inputSchema.required.filter(key => key !== 'session')
-        tool.inputSchema.additionalProperties = false
-        this.validators.set(name, new AjvJsonSchemaValidator().getValidator(tool.inputSchema))
-        return tool
-      })
-      this.validators.set('perform_actions', new AjvJsonSchemaValidator().getValidator(BATCH_SCHEMA))
-      this.catalog = [...selected, { name: 'perform_actions', description: 'Execute 1–16 already determined native actions under one desktop controller (60s total). Validate every step before input. Do not use steps that depend on a new observation; put a layout-changing action last. Stops on error, partial or unknown; never replays. Optionally observe the target once at the end. completed means a response was received, not that the user goal succeeded.', inputSchema: BATCH_SCHEMA }]
+      await this.loadTools(this.driver)
     }
-    return structuredClone(this.catalog)
+    return structuredClone(this.catalog!)
+  }
+
+  private async loadTools(driver: NativeDriver): Promise<void> {
+    const all = await driver.tools()
+    const selected = NATIVE_TOOLS.map(name => {
+      const native = all.find(tool => tool.name === name)
+      if (!native) throw new Error(`CUA_DRIVER_CONTRACT_MISMATCH: ${name}`)
+      const tool = structuredClone(native)
+      delete tool.inputSchema.properties?.session
+      if (tool.inputSchema.required) tool.inputSchema.required = tool.inputSchema.required.filter(key => key !== 'session')
+      tool.inputSchema.additionalProperties = false
+      this.validators.set(name, new AjvJsonSchemaValidator().getValidator(tool.inputSchema))
+      return tool
+    })
+    this.validators.set('perform_actions', new AjvJsonSchemaValidator().getValidator(BATCH_SCHEMA))
+    this.catalog = [...selected, { name: 'perform_actions', description: 'Execute 1–16 already determined native actions under one desktop controller (60s total). Validate every step before input. Do not use steps that depend on a new observation; put a layout-changing action last. Stops on error, partial or unknown; never replays. Optionally observe the target once at the end. completed means a response was received, not that the user goal succeeded.', inputSchema: BATCH_SCHEMA }]
   }
 
   private validate(caller: string, name: string, args: Record<string, unknown>): void {
     const validator = this.validators.get(name)
     if (!validator || !validator(args).valid) throw new Error('COMPUTER_USE_INPUT_INVALID')
+    if (this.requiresObservation && name !== 'perform_actions' && !READ_TOOLS.has(name) && !this.observed.has(caller)) throw new Error('COMPUTER_USE_OBSERVATION_REQUIRED')
     if (ACTION_TOOLS.has(name) && (args.x !== undefined || args.from_x !== undefined || args.from_zoom === true) && !this.observed.has(caller)) throw new Error('COMPUTER_USE_OBSERVATION_REQUIRED')
     for (const field of ['element_token', 'capture_id']) {
       if (args[field] === undefined) continue
@@ -90,7 +109,7 @@ export class ComputerUseCoordinator {
 
   async call(caller: string, name: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<CallToolResult> {
     if (!await this.authorize(caller)) return errorResult('COMPUTER_USE_FORBIDDEN')
-    if (this.quarantined) return errorResult('COMPUTER_USE_QUARANTINED')
+    if (this.closed || (this.quarantined && (!READ_TOOLS.has(name) || !this.reconnect))) return errorResult('COMPUTER_USE_QUARANTINED')
     if (this.busy) return errorResult('COMPUTER_USE_BUSY')
     this.busy = true
     const controller = new AbortController()
@@ -100,6 +119,15 @@ export class ComputerUseCoordinator {
     if (signal?.aborted) abort()
     const timer = setTimeout(() => controller.abort(), 60_000)
     try {
+      if (this.quarantined) {
+        if (this.reconnection) return errorResult('COMPUTER_USE_QUARANTINED')
+        this.reconnection = this.recover(controller.signal).finally(() => { this.reconnection = undefined })
+        try { await interruptible(this.reconnection, controller.signal) }
+        catch (error) {
+          const data = { code: 'COMPUTER_USE_QUARANTINED', reason: error instanceof Error ? error.message : String(error) }
+          return { isError: true, structuredContent: data, content: [{ type: 'text', text: JSON.stringify(data) }] }
+        }
+      }
       await this.tools()
       this.validate(caller, name, args)
       if (name === 'perform_actions') {
@@ -120,26 +148,23 @@ export class ComputerUseCoordinator {
   private async execute(caller: string, name: string, args: Record<string, unknown>, signal: AbortSignal): Promise<CallToolResult> {
     if (!await this.authorize(caller)) return errorResult('COMPUTER_USE_FORBIDDEN')
     if (signal.aborted) return errorResult('COMPUTER_USE_NOT_STARTED')
-    let session = this.sessions.get(caller)
-    if (!session) {
-      session = `crabot-${randomUUID()}`
-      const started = await this.driver.call('start_session', { session }, signal)
-      if (started.isError) return started
-      this.sessions.set(caller, session)
-    }
-    const nativeArgs = { ...args, session }
-    if (['get_window_state', 'get_desktop_state'].includes(name)) {
-      // Coordinate metadata and image dimensions are produced together by Driver.
-      Object.assign(nativeArgs, { max_image_dimension: args.max_image_dimension ?? 1024 })
-    }
     try {
-      const pending = this.driver.call(name, nativeArgs, signal)
-      let abort!: () => void
-      const interrupted = new Promise<never>((_, reject) => {
-        if (signal.aborted) reject(new Error('interrupted'))
-        else { abort = () => reject(new Error('interrupted')); signal.addEventListener('abort', abort, { once: true }) }
-      })
-      const result = await Promise.race([pending, interrupted]).finally(() => signal.removeEventListener('abort', abort))
+      let session = this.sessions.get(caller)
+      if (!session) {
+        session = `crabot-${randomUUID()}`
+        const started = await interruptible(this.driver.call('start_session', { session }, signal), signal)
+        const state = outcome(started)
+        if (state === 'unknown') this.quarantine()
+        if (state !== 'completed') return { ...started, isError: true }
+        this.sessions.set(caller, session)
+      }
+      if (signal.aborted) return errorResult('COMPUTER_USE_NOT_STARTED')
+      const nativeArgs = { ...args, session }
+      if (['get_window_state', 'get_desktop_state'].includes(name)) {
+        // Coordinate metadata and image dimensions are produced together by Driver.
+        Object.assign(nativeArgs, { max_image_dimension: args.max_image_dimension ?? 1024 })
+      }
+      const result = await interruptible(this.driver.call(name, nativeArgs, signal), signal)
       const state = outcome(result)
       if (state === 'unknown') { this.quarantine(); return { ...result, isError: true } }
       if (!READ_TOOLS.has(name)) {
@@ -223,11 +248,43 @@ export class ComputerUseCoordinator {
     } catch { this.quarantine() } finally { this.busy = false }
   }
   private quarantine(): void {
-    this.quarantined = true; this.references.clear(); this.observed.clear()
+    if (!this.quarantined) this.availabilityChanged(false)
+    this.quarantined = true; this.requiresObservation = true
+    this.references.clear(); this.observed.clear(); this.sessions.clear(); this.pendingSessionEnds.clear()
     this.cleanup ??= this.driver.close().catch(error => { this.cleanupError = error instanceof Error ? error : new Error(String(error)) })
   }
+
+  private async recover(signal: AbortSignal): Promise<void> {
+    let candidate: NativeDriver | undefined
+    try {
+      await this.cleanup
+      if (this.cleanupError) throw this.cleanupError
+      signal.throwIfAborted()
+      if (this.closed) throw new Error('COMPUTER_USE_QUARANTINED')
+      candidate = await this.reconnect!()
+      signal.throwIfAborted()
+      if (this.closed) throw new Error('COMPUTER_USE_QUARANTINED')
+      await this.loadTools(candidate)
+      signal.throwIfAborted()
+      if (this.closed) throw new Error('COMPUTER_USE_QUARANTINED')
+      this.driver = candidate
+      this.cleanup = undefined
+      this.quarantined = false
+      this.availabilityChanged(true)
+    } catch (error) {
+      if (candidate) {
+        this.cleanup = candidate.close().catch(error => { this.cleanupError = error instanceof Error ? error : new Error(String(error)) })
+        await this.cleanup
+      }
+      throw error
+    }
+  }
+
   async close(): Promise<void> {
+    this.closed = true
+    this.active?.controller.abort()
     this.quarantine()
+    await this.reconnection?.catch(() => {})
     await this.cleanup
     if (this.cleanupError) throw this.cleanupError
   }

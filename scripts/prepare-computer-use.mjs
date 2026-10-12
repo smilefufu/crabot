@@ -43,7 +43,7 @@ try {
   if (createHash('sha256').update(data).digest('hex') !== asset.sha256) throw new Error('COMPUTER_USE_ASSET_CHECKSUM_MISMATCH')
   const archive = join(stage, asset.name)
   await fs.writeFile(archive, data)
-  await runBounded('tar', ['-xf', archive, '-C', stage], { timeout: 120_000, signal: controller.signal })
+  await runBounded('tar', ['-xf', asset.name], { cwd: stage, timeout: 120_000, signal: controller.signal })
   await fs.unlink(archive)
   const payload = asset.prefix ? join(stage, asset.prefix) : stage
   if (process.platform === 'darwin') await runBounded('codesign', ['--verify', '--deep', '--strict', join(payload, 'CuaDriver.app')], { timeout: 30_000, signal: controller.signal })
