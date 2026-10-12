@@ -1,5 +1,10 @@
 # Crabot 项目进度
 
+### Intel macOS Release 构建：已补齐，待发布验证
+
+- Release 矩阵补 `macos-15-intel` / `darwin-x64`，在原生 Intel runner 安装依赖、构建并使用现有载荷校验与 Scrapling 冒烟检查；发行文件名与安装脚本一致，不改安装或运行协议。
+- 已先复现 Intel 构建缺失；矩阵、原平台保留及脚本语法定向验证通过。tag 发布后以 CI 结果和线上 `darwin-x64` 包及 checksum 为交付依据；旧 Intel macOS 实机安装待验收。
+
 ### 工具图片进入模型请求：已修复，system mode 待验证
 
 - system mode 事故摘录已证明 `Read` 返回图片 bytes，Engine 工具回包保留 `images`；OpenAI Chat Completions / Responses 的请求转换遗漏该字段。修复为同批工具回包全部写出后附加多模态图片输入，保留调用 ID、错误文本和原始 Engine 历史。
