@@ -9,7 +9,7 @@ baseline=$4
 mkdir -p "$output"
 fixture=$(mktemp -d /tmp/crabot-system-audit-XXXXXX)
 chmod 0755 "$fixture"  # 普通用户需要穿过安装根的父目录。
-cp "$workspace/.github/scripts/smoke-scrapling.mjs" "$workspace/.github/scripts/scrapling-exit-probe.py" "$fixture/"
+cp "$workspace/.github/scripts/smoke-scrapling.mjs" "$workspace/.github/scripts/smoke-scrapling-crypto.py" "$workspace/.github/scripts/scrapling-exit-probe.py" "$fixture/"
 root=$fixture/install-custom
 persons=(crabot-audit-a crabot-audit-b)
 cleanup() {

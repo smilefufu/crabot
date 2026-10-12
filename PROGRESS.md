@@ -4,7 +4,7 @@
 
 - 按已确认 [spec](crabot-docs/superpowers/specs/2026-10-12-intel-macos-release-design.md)，原生 `macos-15-intel` / `darwin-x64` 仅使用 cryptography 48.0.1 官方 wheel，其余平台保留 50.0.2；其它依赖版本/hash、binary-only 与准备清理保持。两项原 Linux 下载 404 已换为同版本、同 checksum 的 Ubuntu 官方快照。
 - 构建检查实际版本，发行冒烟加入 JWT 三算法签名与错误签名拒绝；Intel 最终 tar.gz 在不同目录解包后重复资源和真实 MCP/browser 验证。各平台仅上传 draft，全部构建通过后公开完整版本。
-- 四平台实际依赖 dry-run、7 项准备/安装回归、脚本语法及本次 diff review 通过。本机 ARM 的 JWT/13 工具、HTTP/JS/stealth/session/PNG/生产 connector 冒烟通过；localhost 代理失败在原脚本复现，仅测试进程绕过代理后通过。原生 Intel、最终 archive 和线上附件验收仍待 CI，旧 Mac 实机安装另待用户复测。
+- 四平台实际依赖 dry-run、7 项准备/安装回归、脚本语法及本次 diff review 通过。本机 ARM 的 JWT/13 工具、HTTP/JS/stealth/session/PNG/生产 connector 冒烟通过；localhost 代理失败在原脚本复现，仅测试进程绕过代理后通过。原生 Intel 的实际依赖、JWT/MCP/browser 和最终 archive 验收已通过；Linux 旧 CLI 升级及真实 Memory 同步通过，新 JWT helper 漏复制到 system audit 临时目录的问题已补并验证搬迁接线。完整四平台公开发行仍待新 tag CI，旧 Mac 实机安装另待用户复测。
 
 ### 工具图片进入模型请求：已修复，system mode 待验证
 
