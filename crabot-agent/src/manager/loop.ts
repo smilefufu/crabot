@@ -2148,6 +2148,7 @@ export class ManagerLoop {
   private managerSystemPrompt(effectiveWake: WakeEvent | undefined): string {
     const extra = this.deps.promptInputs()
     return assembleManagerSystemPrompt({
+      computerUse: this.deps.toolFace(effectiveWake, this.currentToolFaceState).some(tool => tool.traceMetadata?.computer_use_standard === true),
       managerKey: this.deps.key,
       isSystemThread: this.deps.isSystemThread,
       isBuiltinDailyReflection: isBuiltinDailyReflectionWake(effectiveWake),

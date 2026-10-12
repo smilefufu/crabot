@@ -1,3 +1,4 @@
+import computerUseRuntime from '../../scripts/lib/computer-use-runtime.cjs'
 #!/usr/bin/env node
 /**
  * 校验 release staging 目录是否包含全部运行时载荷。
@@ -69,3 +70,5 @@ if (missing.length > 0) {
 runtime.loadRuntime(stagingDir, { full: true })
 
 console.log(`[verify-release-payload] OK：${expected.length} 个运行时文件齐全（其中 skill 载荷 ${skillPayload.length} 个）`)
+
+computerUseRuntime.loadRuntime(stagingDir, { full: true })

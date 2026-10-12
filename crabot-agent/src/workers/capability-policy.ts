@@ -163,7 +163,7 @@ export function buildWorkerCapabilityBundle(input: WorkerCapabilityPolicyInput):
   }
   return {
     skills,
-    mcp_servers: [...mcpServers, createTmpPageMcpServerConfig(input.workerId, input.tmpPageBridge), createGuidanceMcpServerConfig(),
+    mcp_servers: [...mcpServers, createTmpPageMcpServerConfig(input.workerId, input.tmpPageBridge), createGuidanceMcpServerConfig(mcpServers.some(server => server.name === 'computer-use' && server.env?.CRABOT_COMPUTER_USE_ENDPOINT !== undefined)),
       ...(input.permissions.tool_access.file_io ? [createWorkspaceGitMcpServerConfig()] : [])],
   }
 }

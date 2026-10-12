@@ -128,6 +128,9 @@ export interface OutputWaitEntry {
 }
 
 export interface ToolCallContext {
+  /** Trusted assembly fields; never part of model tool arguments. */
+  readonly computerUseCredential?: string
+  readonly computerUseCaller?: { readonly worker_id: string; readonly incarnation_id: string }
   /** Caller-owned missing-tool errors; this callback must never execute a hidden tool. */
   readonly unavailableToolResult?: (name: string) => ToolCallResult
   readonly abortSignal?: AbortSignal

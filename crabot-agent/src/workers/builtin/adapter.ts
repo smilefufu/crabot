@@ -1706,6 +1706,11 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
             },
           }
         }
+        if (tool.traceMetadata?.computer_use_standard === true) return { ...tool,
+          call: (input: Record<string, unknown>, context: ToolCallContext) => tool.call(input, { ...context,
+            ...(instance.incarnation_id ? { computerUseCaller: { worker_id: instance.worker_id, incarnation_id: instance.incarnation_id } } : {}),
+          }),
+        }
         if (tool.name !== 'delegate_task' && tool.name !== 'send_to_subagent') return tool
         return {
           ...tool,

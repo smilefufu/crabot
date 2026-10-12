@@ -225,6 +225,7 @@ main() {
     info "Setting up Python environment..."
     (cd crabot-memory && uv sync)
     node scripts/prepare-scrapling.mjs
+    node scripts/prepare-computer-use.mjs
     info "Source install complete."
   else
     section "Release Install"
@@ -276,6 +277,7 @@ main() {
     info "Setting up Python environment..."
     (cd "$INSTALL_DIR/crabot-memory" && uv sync)
     node "$INSTALL_DIR/scripts/prepare-scrapling.mjs" --check
+    node "$INSTALL_DIR/scripts/prepare-computer-use.mjs" --check
   fi
 
   if [ "$SYSTEM_MODE" = "true" ]; then

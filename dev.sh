@@ -287,6 +287,7 @@ build_all() {
 # ── Scrapling ─────────────────────────────────────────────
 
 check_scrapling() {
+  node "$SCRIPT_DIR/scripts/prepare-computer-use.mjs" || return 1
   local required
   required=$(node -e "const runtime=require('./scripts/lib/scrapling-runtime.cjs');console.log(runtime.runtimeRequired(process.env.DATA_DIR))") || return 1
   if [ "$required" = "true" ]; then

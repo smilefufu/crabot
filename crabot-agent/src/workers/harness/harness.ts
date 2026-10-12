@@ -1212,6 +1212,7 @@ export class WorkerHarness {
         const caps = this.deps.capabilityBundle
           ? await this.deps.capabilityBundle({
               worker_id: workerId,
+              incarnation_id: incarnationId,
               impl,
               principal_permissions: context.principal_permissions,
             })
@@ -2257,9 +2258,11 @@ export class WorkerHarness {
         throw new ImplAlreadyUsedError(worker.worker_id, targetImpl)
       }
 
+      const incarnationId = randomUUID()
       const caps = this.deps.capabilityBundle
         ? await this.deps.capabilityBundle({
             worker_id: worker.worker_id,
+            incarnation_id: incarnationId,
             impl: targetImpl,
             principal_permissions: auth.principal_permissions,
           })
@@ -2281,7 +2284,6 @@ export class WorkerHarness {
       }
 
       const handoffAt = this.deps.now()
-      const incarnationId = randomUUID()
       const workspaceGit = (await this.checkWorkspaceGit(workspace.root, auth.principal_permissions)).current
       const gitContext: WorkerWorkspaceGitContext = {
         worker_id: worker.worker_id, incarnation_id: incarnationId, workspace_root: workspace.root, baseline: workspaceGit,
@@ -3092,7 +3094,7 @@ export class WorkerHarness {
     let builtinInjection: SpawnSpec['builtin']
     let workspace: Workspace
     let caps
-    let targetIncarnationId: string
+    const targetIncarnationId = randomUUID()
     let targetInstructions: Awaited<ReturnType<typeof captureWorkspaceInstructions>>
     let targetGit: WorkspaceGitObservation
     let targetGitContext: WorkerWorkspaceGitContext
@@ -3112,6 +3114,7 @@ export class WorkerHarness {
       caps = this.deps.capabilityBundle
         ? await this.deps.capabilityBundle({
             worker_id: worker.worker_id,
+            incarnation_id: targetIncarnationId,
             impl: targetImpl,
             principal_permissions: principalPermissions,
           })
@@ -3132,7 +3135,6 @@ export class WorkerHarness {
 
       // The target identity, workspace rules snapshot and the private handoff package all exist
       // before we stop the source. Any failure here leaves the source untouched and retryable.
-      targetIncarnationId = randomUUID()
       const capturedAt = this.deps.now()
       targetGit = (await this.checkWorkspaceGit(workspace.root, principalPermissions)).current
       targetGitContext = {

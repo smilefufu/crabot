@@ -1,0 +1,11 @@
+{
+  "version": "0.34.1",
+  "tag": "cua-driver-rs-v0.34.1",
+  "commit": "0c69d9a2c8abbb5051a2df4a23f0fa166d5385dc",
+  "assets": {
+    "darwin-arm64": { "name": "cua-driver-rs-0.34.1-darwin-arm64.tar.gz", "sha256": "83ffed8d41ef0f133976d594b02eb86dd59ef4a8721396b6e25078a59c6056d6", "prefix": "cua-driver-rs-0.34.1-darwin-arm64" },
+    "darwin-x64": { "name": "cua-driver-rs-0.34.1-darwin-x86_64.tar.gz", "sha256": "c485781a64b6f75ea46f63d03c5b4f646e0f1dcea2c7547805f235259193a156", "prefix": "cua-driver-rs-0.34.1-darwin-x86_64" },
+    "linux-x64": { "name": "cua-driver-rs-0.34.1-linux-x86_64-binary.tar.gz", "sha256": "a41fe2bdcbeea4501dc594c074f16b0975728e0cc7b08b90acea8564d48fafee", "prefix": "" },
+    "win32-x64": { "name": "cua-driver-rs-0.34.1-windows-x86_64-binary.zip", "sha256": "021bc2e5330c80a6c5e2c347c305fafbd4defe195d6282e0d20436f2f13c19bb", "prefix": "" }
+  }
+}

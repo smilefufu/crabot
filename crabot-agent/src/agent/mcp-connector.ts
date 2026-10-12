@@ -80,6 +80,7 @@ function decodeImageData(data: string): Buffer | undefined {
 
 export class McpConnector {
   private readonly clients: Map<string, Client> = new Map()
+  private readonly standardDesktopServers = new Set<string>()
   /** Cached tool definitions — populated at connect time, avoids per-task listTools() */
   private cachedTools: ToolDefinition[] = []
   private catalogGeneration = 0
@@ -155,6 +156,8 @@ export class McpConnector {
     for (const [name, defaults] of candidate.toolDefaultsMap) this.toolDefaultsMap.set(name, defaults)
     this.serverDescriptions.clear()
     for (const [name, description] of candidate.serverDescriptions) this.serverDescriptions.set(name, description)
+    this.standardDesktopServers.clear()
+    for (const name of candidate.standardDesktopServers) this.standardDesktopServers.add(name)
     candidate.clients.clear()
     await Promise.allSettled(Array.from(oldClients.values()).map((client) => client.close()))
   }
@@ -195,6 +198,7 @@ export class McpConnector {
   private async connectOne(config: MCPServerConfig): Promise<void> {
     if (this.clients.has(config.name)) return
     assertMcpName(config.name, 'MCP server name')
+    if (config.name === 'computer-use' && config.args?.[1] === '--crabot-standard' && config.env?.CRABOT_COMPUTER_USE_ENDPOINT) this.standardDesktopServers.add(config.name)
 
     const transport = this.resolveTransport(config)
     const client = new Client(
@@ -366,6 +370,7 @@ export class McpConnector {
               permission_category: mcpCategoryFor(serverName),
               connector_generation: nextGeneration,
               definition_digest: digest,
+              ...(this.standardDesktopServers.has(serverName) ? { computer_use_standard: true, computer_use_driver_version: '0.34.1' } : {}),
             },
             call: async (input, context = {}) => {
               try {
@@ -399,7 +404,7 @@ export class McpConnector {
                 context.abortSignal?.addEventListener('abort', abort, { once: true })
                 let result
                 try {
-                  result = await client.callTool({ name: mcpTool.name, arguments: merged }, undefined, {
+                  result = await client.callTool({ name: mcpTool.name, arguments: merged, ...(this.standardDesktopServers.has(serverName) && context.computerUseCredential ? { _meta: { crabot_computer_use_token: context.computerUseCredential } } : {}) }, undefined, {
                     signal: controller.signal, timeout: MCP_CALL_TIMEOUT_MS,
                   })
                 } catch (error) {
@@ -430,6 +435,11 @@ export class McpConnector {
                 const contentArray = Array.isArray(result.content)
                   ? result.content as Array<{ type: string; text?: string; data?: string; mimeType?: string }>
                   : []
+                const structured = (result as { structuredContent?: Record<string, unknown> }).structuredContent
+                if (this.standardDesktopServers.has(serverName) && structured) {
+                  const json = JSON.stringify(structured)
+                  if (!contentArray.some(block => block.type === 'text' && block.text === json)) contentArray.unshift({ type: 'text', text: json })
+                }
                 let textBytes = 0
                 let textTruncated = false
                 const texts: string[] = []

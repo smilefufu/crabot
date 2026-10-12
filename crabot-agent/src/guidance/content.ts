@@ -1,6 +1,8 @@
 // Product-owned workflows; independent of user Skills.
 // Approved: 2026-09-18-guidance-workflow-boundaries-design.md
 export const GUIDANCE = {
+  'manager.computer-use': { title: '桌面操作与验收', body: '先用 list_windows 和 get_window_state 确认目标窗口。优先使用返回的 element_token；像素操作使用当前截图的坐标。已确定且不依赖中间观察的连续动作使用 perform_actions。界面改变、引用失效或连接恢复后重新观察。effect=unverifiable 表示未验证；partial/unknown 先核对实际状态，不盲目重试。完成前按用户目标验证实际结果。' },
+  'worker.computer-use': { title: '桌面操作与验收', body: '先用 list_windows 和 get_window_state 确认目标窗口。优先使用返回的 element_token；像素操作使用当前截图的坐标。已确定且不依赖中间观察的连续动作使用 perform_actions。界面改变、引用失效或连接恢复后重新观察。effect=unverifiable 表示未验证；partial/unknown 先核对实际状态，不盲目重试。完成前按用户目标验证实际结果。' },
   'manager.delegation': {
     title: '组织与调整执行',
     body: `适用：需要安排并行工作，或决定复用、建立分支、换新执行器时。简单首次委托直接按核心提示词处理。
