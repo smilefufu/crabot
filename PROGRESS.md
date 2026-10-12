@@ -1,10 +1,10 @@
 # Crabot 项目进度
 
-### Intel macOS Release 构建：兼容已实现，待最终发行验收
+### Intel macOS Release：已发布，旧 Mac 实机待复测
 
-- 按已确认 [spec](crabot-docs/superpowers/specs/2026-10-12-intel-macos-release-design.md)，原生 `macos-15-intel` / `darwin-x64` 仅使用 cryptography 48.0.1 官方 wheel，其余平台保留 50.0.2；其它依赖版本/hash、binary-only 与准备清理保持。两项原 Linux 下载 404 已换为同版本、同 checksum 的 Ubuntu 官方快照。
-- 构建检查实际版本，发行冒烟加入 JWT 三算法签名与错误签名拒绝；Intel 最终 tar.gz 在不同目录解包后重复资源和真实 MCP/browser 验证。各平台仅上传 draft，全部构建通过后公开完整版本。
-- 四平台实际依赖 dry-run、7 项准备/安装回归、脚本语法及本次 diff review 通过。本机 ARM 的 JWT/13 工具、HTTP/JS/stealth/session/PNG/生产 connector 冒烟通过；localhost 代理失败在原脚本复现，仅测试进程绕过代理后通过。原生 Intel 的实际依赖、JWT/MCP/browser 和最终 archive 验收已通过；Linux 旧 CLI 升级及真实 Memory 同步通过，新 JWT helper 漏复制到 system audit 临时目录的问题已补并验证搬迁接线。完整四平台公开发行仍待新 tag CI，旧 Mac 实机安装另待用户复测。
+- 按已确认 [spec](crabot-docs/superpowers/specs/2026-10-12-intel-macos-release-design.md) 补原生 `macos-15-intel` / `darwin-x64`；该平台仅使用 cryptography 48.0.1 官方 wheel，其余平台保留 50.0.2，其它固定版本/hash 和 binary-only 校验保持。两项 Linux 失效 URL 使用同版本、同 checksum 的官方快照。
+- [v2026.10.12.4](https://github.com/smilefufu/crabot/releases/tag/v2026.10.12.4) 已公开并成为 latest；[四平台与 publish CI](https://github.com/smilefufu/crabot/actions/runs/38231180278) 全部成功。八项包/checksum 附件已上传，四包发布 checksum 与 GitHub 上传 digest 一致，安装器所用 latest 重定向正确，Intel 真实下载 URL HEAD=200。
+- 原生 Intel 的 cryptography/JWT 三算法正负例、三阶段完整资源及 13 工具、HTTP/HTTPS/JS/stealth/session/PNG/生产 connector 验收通过，包含最终 tar.gz 在不同目录的解包结果。Linux 旧 CLI 一次升级、真实 Memory 同步和两普通 UID 冷/热/EOF/SIGTERM 无残留通过；Windows 最终 zip 真实调用通过。CI helper 搬迁遗漏已补齐，Windows 测试目录缩短以避免 DLL 长路径失败；各平台先上传 draft，全部通过后公开。macOS 15 Intel 已验收，截图旧 Mac 的具体系统版本与现场安装仍待用户复测。
 
 ### 工具图片进入模型请求：已修复，system mode 待验证
 
