@@ -517,11 +517,13 @@ describe('AgentHandler bg-entities admin RPC', () => {
     vi.spyOn(wh.getBuiltinBgEntityRegistry(), 'list').mockResolvedValue([
       makeShellRecord({ entity_id: 'mainline', owner: { friend_id: 'friend-1', worker_id: 'worker-1' }, status: 'completed', ended_at: endedAt }),
       makeShellRecord({ entity_id: 'fork', owner: { friend_id: 'friend-1', worker_id: 'worker-1', incarnation_id: 'fork-1' } }),
+      makeShellRecord({ entity_id: 'old-child', type: 'agent', owner: { friend_id: 'friend-1', worker_id: 'worker-1' }, status: 'stalled', ended_at: endedAt }),
       makeShellRecord({ entity_id: 'other', owner: { friend_id: 'friend-1', worker_id: 'worker-2' } }),
     ])
     expect(await wh.listWorkerBackground('worker-1')).toEqual([
-      { entity_id: 'mainline', status: 'completed', ended_at: endedAt },
-      { entity_id: 'fork', status: 'running', ended_at: null },
+      { entity_id: 'mainline', type: 'shell', status: 'completed', ended_at: endedAt },
+      { entity_id: 'fork', type: 'shell', status: 'running', ended_at: null },
+      { entity_id: 'old-child', type: 'agent', status: 'stalled', ended_at: endedAt },
     ])
   })
 

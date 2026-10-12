@@ -707,9 +707,9 @@ export class AgentHandler {
       entity.owner.worker_id === workerId && entity.exit_notification?.status === 'pending')
   }
 
-  async listWorkerBackground(workerId: string): Promise<Pick<BgEntityRecord, 'entity_id' | 'status' | 'ended_at'>[]> {
+  async listWorkerBackground(workerId: string): Promise<Pick<BgEntityRecord, 'entity_id' | 'type' | 'status' | 'ended_at'>[]> {
     return (await this.bgRegistry.list()).filter(entity => entity.owner.worker_id === workerId)
-      .map(({ entity_id, status, ended_at }) => ({ entity_id, status, ended_at }))
+      .map(({ entity_id, type, status, ended_at }) => ({ entity_id, type, status, ended_at }))
   }
 
   async stopBuiltinShells(workerId: string, incarnationId?: string): Promise<void> {

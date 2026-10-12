@@ -368,6 +368,11 @@ function haltSeverity(reason: TaskHaltReason): number {
   return HALT_REASON_SEVERITY[reason] ?? 0
 }
 
+function isEndedInterruptedAgent(entity: { type?: 'shell' | 'agent'; status: string; ended_at: string | null }): boolean {
+  return entity.type === 'agent' && entity.status === 'stalled'
+    && !!entity.ended_at && Number.isFinite(Date.parse(entity.ended_at))
+}
+
 function settleCliTask(
   task: LedgerWorker['task'],
   state: WorkerContractState,
@@ -766,6 +771,7 @@ export interface HarnessDeps {
   readonly isExecutionReady?: () => boolean
   readonly listWorkerBackground?: (workerId: string) => Promise<Array<{
     entity_id: string
+    type?: 'shell' | 'agent'
     status: 'running' | 'completed' | 'failed' | 'killed' | 'stalled'
     ended_at: string | null
   }>>
@@ -4458,7 +4464,7 @@ export class WorkerHarness {
       }
       const background = (await this.deps.listWorkerBackground(workerId)).map(entity => ({
         entity_id: entity.entity_id,
-        ...(entity.status !== 'running' && entity.status !== 'stalled' && entity.ended_at ? { ended_at: entity.ended_at } : {}),
+        ...(entity.status !== 'running' && (entity.status !== 'stalled' || isEndedInterruptedAgent(entity)) && entity.ended_at ? { ended_at: entity.ended_at } : {}),
       }))
       return { halt, background }
     } catch {
@@ -4479,7 +4485,8 @@ export class WorkerHarness {
     if (mainline.stop_evidence?.execution_stopped_at) times.push(mainline.stop_evidence.execution_stopped_at)
     if (native?.stoppedAt) times.push(native.stoppedAt)
     const background = await this.deps.listWorkerBackground?.(worker.worker_id) ?? []
-    if (background.some(entity => entity.status === 'running' || entity.status === 'stalled')) return
+    if (background.some(entity => entity.status === 'running'
+      || (entity.status === 'stalled' && !isEndedInterruptedAgent(entity)))) return
     const resolved = new Map<string, string>()
     const currentBackground = new Map(background.map(entity => [entity.entity_id, entity.ended_at]))
     for (const incarnation of worker.incarnations) {
@@ -5113,9 +5120,18 @@ export class WorkerHarness {
         // 动作（续办回 running / 交接 / 停止落 closed）本身即视为已消费——直接标 consumed，
         // 不拿过期事实新开 episode。
         const task = found.worker.task
-        if (task.status !== 'halted' || task.halt?.halt_reason !== 'crashed') {
+        const mainline = mainlineIncarnation(found.worker)
+        if (task.status === 'closed' || (mainline && (
+          (mainline.incarnation_id && mainline.incarnation_id !== notice.incarnation_id)
+          || mainline.state === 'running' || mainline.state === 'idle'))) {
           await this.markRecoveryNoticeConsumed(found.managerKey, workerId, noticeId)
           return undefined
+        }
+        // The same crashed carrier has not been handled merely because its aggregate task says running.
+        // Keep inconsistent or unsettled facts pending and use the existing delivery backoff.
+        if (!mainline || mainline.state !== 'exited' || mainline.ended_reason !== 'crashed'
+          || task.status !== 'halted' || task.halt?.halt_reason !== 'crashed') {
+          return { managerKey: found.managerKey, event: undefined }
         }
         const incarnation = found.worker.incarnations.find((item) => item.incarnation_id === notice.incarnation_id)
         if (!incarnation || !isExecutableIncarnation(incarnation)) return undefined
@@ -5135,7 +5151,7 @@ export class WorkerHarness {
 
       let consumed = false
       try {
-        consumed = (await this.deps.onOperationNotification?.(prepared.managerKey, prepared.event))?.consumed === true
+        if (prepared.event) consumed = (await this.deps.onOperationNotification?.(prepared.managerKey, prepared.event))?.consumed === true
       } catch (error) {
         console.error(`[WorkerHarness] recovery notice delivery failed for ${workerId}/${noticeId}:`, error)
       }
@@ -5908,7 +5924,8 @@ export class WorkerHarness {
         return this.settleControlOperation(current, 'unknown', 'worker-owned background execution remains active')
       }
       const background = await this.deps.listWorkerBackground?.(operation.worker_id) ?? []
-      if (background.some(entity => entity.status === 'running' || entity.status === 'stalled')) {
+      if (background.some(entity => entity.status === 'running'
+        || (entity.status === 'stalled' && !isEndedInterruptedAgent(entity)))) {
         return this.settleControlOperation(current, 'unknown', 'worker-owned background execution is not confirmed stopped')
       }
       for (const item of found.worker.incarnations) {
