@@ -43,7 +43,12 @@ try {
   if (createHash('sha256').update(data).digest('hex') !== asset.sha256) throw new Error('COMPUTER_USE_ASSET_CHECKSUM_MISMATCH')
   const archive = join(stage, asset.name)
   await fs.writeFile(archive, data)
-  await runBounded('tar', ['-xf', asset.name], { cwd: stage, timeout: 120_000, signal: controller.signal })
+  const extraction = { cwd: stage, timeout: 120_000, signal: controller.signal }
+  if (process.platform === 'win32') {
+    await runBounded('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+      'Expand-Archive -LiteralPath $env:CRABOT_COMPUTER_USE_ARCHIVE -DestinationPath . -Force'],
+      { ...extraction, env: { ...process.env, CRABOT_COMPUTER_USE_ARCHIVE: asset.name } })
+  } else await runBounded('tar', ['-xf', asset.name], extraction)
   await fs.unlink(archive)
   const payload = asset.prefix ? join(stage, asset.prefix) : stage
   if (process.platform === 'darwin') await runBounded('codesign', ['--verify', '--deep', '--strict', join(payload, 'CuaDriver.app')], { timeout: 30_000, signal: controller.signal })

@@ -35,11 +35,10 @@ test('failed pinned preparation keeps previous payload and removes staging/lock'
   } finally { await fs.rm(temporary, { recursive: true, force: true }) }
 })
 
-test('prepares the Windows payload under a drive-like path using the verified local archive', async () => {
+test('prepares a real Windows ZIP under a drive-like path even when PATH tar cannot read ZIP', async () => {
   const temporary = await fs.mkdtemp(join(tmpdir(), 'cua-windows-prepare-'))
   const product = join(temporary, process.platform === 'win32' ? 'product with spaces' : 'D:product with spaces')
   const cache = join(temporary, 'cache')
-  const input = join(temporary, 'input')
   const run = promisify(execFile)
   try {
     for (const file of ['scripts/prepare-computer-use.mjs', 'scripts/computer-use/runtime.json', 'scripts/lib/computer-use-runtime.cjs', 'scripts/lib/scrapling-prepare.mjs', 'scripts/lib/scrapling-runtime.cjs']) {
@@ -47,19 +46,25 @@ test('prepares the Windows payload under a drive-like path using the verified lo
       await fs.copyFile(join(root, file), join(product, file))
     }
     await fs.mkdir(cache)
-    await fs.mkdir(input)
-    await fs.writeFile(join(input, 'cua-driver.exe'), 'fixture driver bytes')
-    await fs.writeFile(join(input, 'cua-driver-uia.exe'), 'fixture UIA bytes')
     const pinPath = join(product, 'scripts/computer-use/runtime.json')
     const pin = JSON.parse(await fs.readFile(pinPath, 'utf8'))
     const asset = pin.assets['win32-x64']
-    await run('tar', ['-czf', asset.name, '-C', input, 'cua-driver.exe', 'cua-driver-uia.exe'], { cwd: cache })
+    await fs.writeFile(join(cache, asset.name), Buffer.from('UEsDBBQAAAAAABKvTF1HeufYFAAAABQAAAAOAAAAY3VhLWRyaXZlci5leGVmaXh0dXJlIGRyaXZlciBieXRlc1BLAwQUAAAAAAASr0xdFkMaXhEAAAARAAAAEgAAAGN1YS1kcml2ZXItdWlhLmV4ZWZpeHR1cmUgVUlBIGJ5dGVzUEsBAhQDFAAAAAAAEq9MXUd659gUAAAAFAAAAA4AAAAAAAAAAAAAAIABAAAAAGN1YS1kcml2ZXIuZXhlUEsBAhQDFAAAAAAAEq9MXRZDGl4RAAAAEQAAABIAAAAAAAAAAAAAAIABQAAAAGN1YS1kcml2ZXItdWlhLmV4ZVBLBQYAAAAAAgACAHwAAACBAAAAAAA=', 'base64'))
+    const env = { ...process.env, CRABOT_COMPUTER_USE_ASSET_DIR: cache }
+    if (process.platform !== 'win32') {
+      const commands = join(temporary, 'windows-commands')
+      await fs.mkdir(commands)
+      // Host fixture for PowerShell's ZIP operation; real Windows uses Expand-Archive.
+      await fs.writeFile(join(commands, 'powershell.exe'), '#!/usr/bin/env python3\nimport os,zipfile\nzipfile.ZipFile(os.environ["CRABOT_COMPUTER_USE_ARCHIVE"]).extractall(".")\n', { mode: 0o755 })
+      await fs.writeFile(join(commands, 'tar'), '#!/bin/sh\necho "GNU tar cannot extract ZIP" >&2\nexit 2\n', { mode: 0o755 })
+      env.PATH = commands + ':' + process.env.PATH
+    }
     asset.sha256 = createHash('sha256').update(await fs.readFile(join(cache, asset.name))).digest('hex')
     await fs.writeFile(pinPath, JSON.stringify(pin))
     const preload = join(temporary, 'windows-fixture.cjs')
     await fs.writeFile(preload, `Object.defineProperty(process, 'platform', { value: 'win32' }); Object.defineProperty(process, 'arch', { value: 'x64' });`)
     await run(process.execPath, ['--require', preload, join(product, 'scripts/prepare-computer-use.mjs')], {
-      env: { ...process.env, CRABOT_COMPUTER_USE_ASSET_DIR: cache }, timeout: 10_000,
+      env, timeout: 10_000,
     })
     const name = `${pin.version}-win32-x64`
     const payload = join(product, '.computer-use-runtime', name)
