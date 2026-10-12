@@ -323,7 +323,7 @@ jobs:
           (Get-FileHash "$DirName.zip" -Algorithm SHA256).Hash | Out-File "$DirName.zip.sha256"
 
           # 用最终 zip 的真实解压结果验收，覆盖链接/隐藏文件的封装损失。
-          $Expanded = "$env:TEMP\$DirName-unpacked"
+          $Expanded = Join-Path $env:RUNNER_TEMP 'release-unpacked'
           Expand-Archive -Path "$DirName.zip" -DestinationPath $Expanded
           $Unpacked = Join-Path $Expanded $DirName
           node .github/scripts/verify-release-payload.mjs "$Unpacked"
