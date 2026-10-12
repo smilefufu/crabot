@@ -7,7 +7,7 @@ import { voiceService } from '../../services/voice'
 
 vi.mock('../../components/Layout/MainLayout', () => ({ MainLayout: ({ children }: any) => <div>{children}</div> }))
 vi.mock('../../services/channel', () => ({ channelService: { getInstance: vi.fn(async id => ({ instance: { id, name: id, implementation_id: 'channel-voice', voice_setup: { status: 'draft' } } })) } }))
-vi.mock('../../services/voice', () => ({ voiceService: { setup: vi.fn(), resume: vi.fn(), saveConfig: vi.fn(), pause: vi.fn(), finish: vi.fn() } }))
+vi.mock('../../services/voice', () => ({ voiceService: { setup: vi.fn(), resume: vi.fn(), saveConfig: vi.fn(), pause: vi.fn(), finish: vi.fn(), test: vi.fn() } }))
 vi.mock('./VoiceServices', () => ({ VoiceServices: ({ onChange }: any) => <button onClick={() => onChange({ asr: { provider_id: 'service', model_id: 'asr' }, tts: { provider_id: 'service', model_id: 'tts' }, wake_word: '你好螃蟹' })}>选择服务</button> }))
 vi.mock('./VoiceConfigCard', async () => {
   const { useEffect } = await import('react')
@@ -20,12 +20,28 @@ beforeEach(() => {
   vi.clearAllMocks()
   vi.mocked(voiceService.setup).mockImplementation(async name => ({ instance: { id: name, name, implementation_id: 'channel-voice', voice_setup: { status: 'draft' } } as never }))
   vi.mocked(voiceService.resume).mockResolvedValue({ instance: {} as never })
+  vi.mocked(voiceService.test).mockResolvedValue({ ok: true })
   vi.mocked(voiceService.finish).mockRejectedValue(new Error('手机已断线，草稿保留'))
 })
 function view(url = '/channels/new/voice') {
   render(<StrictMode><MemoryRouter initialEntries={[url]}><Routes><Route path="/channels/new/voice" element={<VoiceSetup />} /><Route path="/channels/config" element={<div>渠道列表</div>} /></Routes></MemoryRouter></StrictMode>)
 }
 describe('Voice creation wizard', () => {
+  it('retains the same draft and stays on services when the first-step ASR test fails', async () => {
+    vi.mocked(voiceService.test).mockResolvedValueOnce({ ok: false })
+    view()
+    fireEvent.change(screen.getByLabelText('渠道名称'), { target: { value: '手机' } })
+    fireEvent.click(screen.getByRole('button', { name: '选择服务' }))
+    fireEvent.click(screen.getByRole('button', { name: '下一步' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('ASR 测试未通过')
+    expect(screen.queryByText('阶段：phone')).toBeNull()
+    expect(voiceService.test).toHaveBeenCalledWith('手机', 'asr')
+    expect(voiceService.test).not.toHaveBeenCalledWith('手机', 'tts')
+    fireEvent.click(screen.getByRole('button', { name: '下一步' }))
+    await screen.findByText('阶段：phone')
+    expect(voiceService.setup).toHaveBeenCalledTimes(1)
+    expect(voiceService.test).toHaveBeenCalledWith('手机', 'tts')
+  })
   it('creates once, prepares the phone automatically, blocks unsaved permissions and retains failed finish', async () => {
     view()
     fireEvent.change(screen.getByLabelText('渠道名称'), { target: { value: '手机' } })

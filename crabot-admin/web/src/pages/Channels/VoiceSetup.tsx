@@ -42,6 +42,10 @@ export function VoiceSetup() {
         setParams({ instance_id: target })
       } else await voiceService.saveConfig(target, config)
       await voiceService.resume(target); setRunning(true)
+      for (const capability of ['asr', 'tts'] as const) {
+        const result = await voiceService.test(target, capability)
+        if (!result.ok) throw new Error(`${capability.toUpperCase()} 测试未通过，草稿已保留`)
+      }
     }
     if (step === 3) { await voiceService.finish(id); navigate(`/channels/config?selected=${encodeURIComponent(id)}`) }
     else setStep(value => value + 1)
