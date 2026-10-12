@@ -7,7 +7,8 @@ browserforge==1.2.4
 certifi==2026.7.22
 cffi==2.1.1
 click==8.5.0
-cryptography==50.0.2
+cryptography==48.0.1 ; sys_platform == "darwin" and platform_machine == "x86_64"
+cryptography==50.0.2 ; sys_platform != "darwin" or platform_machine != "x86_64"
 cssselect==1.5.0
 curl-cffi==0.16.3
 greenlet==3.5.6

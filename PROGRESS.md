@@ -1,9 +1,10 @@
 # Crabot 项目进度
 
-### Intel macOS Release 构建：矩阵已补齐，依赖兼容待确认
+### Intel macOS Release 构建：兼容已实现，待最终发行验收
 
-- Release 矩阵补 `macos-15-intel` / `darwin-x64`，在原生 Intel runner 安装依赖、构建并使用现有载荷校验与 Scrapling 冒烟检查；发行文件名与安装脚本一致，不改安装或运行协议。
-- 已先复现 Intel 构建缺失；矩阵、原平台保留及脚本语法定向验证通过。发布验收发现 Linux 的两项锁定资源下载 404；77 项地址核查后仅将 `libfreetype6` / `libpng16-16` x64 下载地址替换为 Ubuntu 官方快照，同版本文件的 SHA-256 与原锁定值完全一致。Intel 原生 CI 的模块/Web 编译通过，但锁定 `cryptography 50.0.2` 无该平台 wheel，准备阶段失败，Intel 包尚未生成。新兼容 [spec](crabot-docs/superpowers/specs/2026-10-12-intel-macos-release-design.md) 待用户确认；部分发布版本已恢复 draft，公开 latest 保持 v2026.9.23。
+- 按已确认 [spec](crabot-docs/superpowers/specs/2026-10-12-intel-macos-release-design.md)，原生 `macos-15-intel` / `darwin-x64` 仅使用 cryptography 48.0.1 官方 wheel，其余平台保留 50.0.2；其它依赖版本/hash、binary-only 与准备清理保持。两项原 Linux 下载 404 已换为同版本、同 checksum 的 Ubuntu 官方快照。
+- 构建检查实际版本，发行冒烟加入 JWT 三算法签名与错误签名拒绝；Intel 最终 tar.gz 在不同目录解包后重复资源和真实 MCP/browser 验证。各平台仅上传 draft，全部构建通过后公开完整版本。
+- 四平台实际依赖 dry-run、7 项准备/安装回归、脚本语法及本次 diff review 通过。本机 ARM 的 JWT/13 工具、HTTP/JS/stealth/session/PNG/生产 connector 冒烟通过；localhost 代理失败在原脚本复现，仅测试进程绕过代理后通过。原生 Intel、最终 archive 和线上附件验收仍待 CI，旧 Mac 实机安装另待用户复测。
 
 ### 工具图片进入模型请求：已修复，system mode 待验证
 
