@@ -485,8 +485,9 @@ export class MCPServerManager {
                 && (existing.args.length === 1 || (existing.args.length === 2 && existing.args[1] === '--crabot-standard'))
                 && existing.args[0].replace(/\\/g, '/').endsWith('/crabot-mcp-tools/dist/computer-use/main.js'))) break
               const argsChanged = JSON.stringify(existing.args) !== JSON.stringify(builtin.args)
-              if (argsChanged) {
-                next.set(id, { ...existing, args: builtin.args, updated_at: generateTimestamp() })
+              const descriptionChanged = builtin.name === 'computer-use' && existing.description === 'Computer interaction: screenshot, mouse, keyboard (macOS)'
+              if (argsChanged || descriptionChanged) {
+                next.set(id, { ...existing, args: builtin.args, ...(descriptionChanged ? { description: builtin.description } : {}), updated_at: generateTimestamp() })
                 changed = true
               }
               break

@@ -3,13 +3,6 @@ const path = require('node:path')
 const crypto = require('node:crypto')
 const pin = require('../computer-use/runtime.json')
 
-function isStandardComputerUse(entry) {
-  return entry.name === 'computer-use' && (entry.transport ?? 'stdio') === 'stdio'
-    && entry.command === 'node' && Array.isArray(entry.args)
-    && entry.args.length === 2 && entry.args[1] === '--crabot-standard'
-    && entry.args[0].replaceAll('\\', '/').endsWith('/crabot-mcp-tools/dist/computer-use/main.js')
-    && Object.keys(entry.env ?? {}).length === 0
-}
 function loadRuntime(root, { full = false } = {}) {
   const platform = `${process.platform}-${process.arch}`
   const asset = pin.assets[platform]
@@ -18,7 +11,10 @@ function loadRuntime(root, { full = false } = {}) {
   const ready = JSON.parse(fs.readFileSync(path.join(directory, 'ready.json'), 'utf8'))
   if (ready.sha256 !== asset.sha256 || ready.version !== pin.version) throw new Error('COMPUTER_USE_RUNTIME_MISMATCH')
   const command = path.join(directory, process.platform === 'win32' ? 'cua-driver.exe' : 'cua-driver')
-  if (!ready.files || !ready.files[path.basename(command)]) throw new Error('COMPUTER_USE_RUNTIME_INCOMPLETE')
+  const required = [path.basename(command)]
+  if (process.platform === 'darwin') required.push('CuaDriver.app/Contents/MacOS/cua-driver', 'CuaDriver.app/Contents/Info.plist', 'CuaDriver.app/Contents/_CodeSignature/CodeResources')
+  if (process.platform === 'win32') required.push('cua-driver-uia.exe')
+  if (!ready.files || required.some(file => !ready.files[file])) throw new Error('COMPUTER_USE_RUNTIME_INCOMPLETE')
   for (const [relative, digest] of Object.entries(ready.files)) {
     const file = path.resolve(directory, relative)
     if (!file.startsWith(directory + path.sep)) throw new Error('COMPUTER_USE_RUNTIME_INVALID_PATH')
@@ -27,4 +23,4 @@ function loadRuntime(root, { full = false } = {}) {
   }
   return { directory, command, app: process.platform === 'darwin' ? path.join(directory, 'CuaDriver.app') : undefined, version: pin.version }
 }
-module.exports = { pin, isStandardComputerUse, loadRuntime }
+module.exports = { pin, loadRuntime }

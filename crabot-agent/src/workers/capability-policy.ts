@@ -1,3 +1,4 @@
+import { isStandardComputerUse } from '../agent/computer-use-owner.js'
 import { createGuidanceMcpServerConfig, GUIDANCE_MCP_SERVER_NAME } from '../guidance/worker-bridge.js'
 import path from 'node:path'
 import type { MCPServerConfig, ResolvedPermissions, SkillConfig } from '../types.js'
@@ -163,7 +164,7 @@ export function buildWorkerCapabilityBundle(input: WorkerCapabilityPolicyInput):
   }
   return {
     skills,
-    mcp_servers: [...mcpServers, createTmpPageMcpServerConfig(input.workerId, input.tmpPageBridge), createGuidanceMcpServerConfig(mcpServers.some(server => server.name === 'computer-use' && server.env?.CRABOT_COMPUTER_USE_ENDPOINT !== undefined)),
+    mcp_servers: [...mcpServers, createTmpPageMcpServerConfig(input.workerId, input.tmpPageBridge), createGuidanceMcpServerConfig(mcpServers.some(isStandardComputerUse)),
       ...(input.permissions.tool_access.file_io ? [createWorkspaceGitMcpServerConfig()] : [])],
   }
 }

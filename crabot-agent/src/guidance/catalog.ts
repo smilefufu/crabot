@@ -27,6 +27,7 @@ export function createGuidanceTool(role: GuidanceRole, options: GuidanceOptions 
     description: '按名称读取内置工作流。首次进入目录描述的场景时，在相关动作前读取；上下文已有完整有效正文则直接沿用。仅支持当前角色目录，与用户 Skill 独立。',
     inputSchema: { type: 'object', properties: { name: { type: 'string', enum: guidanceNames(role, options) } }, required: ['name'], additionalProperties: false },
     isReadOnly: true,
+    ...(options.computerUse ? { traceMetadata: { computer_use_guidance: true } } : {}),
     async call(input) {
       if (!input || typeof input !== 'object' || Array.isArray(input)
         || Object.keys(input).length !== 1 || typeof (input as { name?: unknown }).name !== 'string') {

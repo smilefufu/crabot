@@ -1,3 +1,4 @@
+import { retireLegacyWorkerComputerUse } from './agent/computer-use-legacy.js'
 import { ComputerUseOwner, isStandardComputerUse } from './agent/computer-use-owner.js'
 import { executionObservation, requestObservation, persistObservation, observationFile, readObservation } from './permissions/execution-observation.js'
 import { assertExecutionPolicy, executionAdmission } from './workers/execution-policy.js'
@@ -703,7 +704,13 @@ export class UnifiedAgent extends ModuleBase {
   private imageConnInfo?: ImageConnInfo
   private imageCapability: { available: boolean; reason?: string } = { available: false }
   private mcpConnector: McpConnector = new McpConnector()
-  private readonly computerUseOwner = new ComputerUseOwner(value => this.registerSecret(value))
+  private readonly computerUseOwner = new ComputerUseOwner(value => this.registerSecret(value), () => path.join(getAgentDataDir(), 'computer-use'), async () => {
+    const workers = await this.managerStack?.ledger.listAllWorkers() ?? []
+    const legacy = (this.agentConfig?.mcp_servers ?? []).filter(server => server.name === 'computer-use'
+      && server.command === 'node' && server.args?.length === 1 && Object.keys(server.env ?? {}).length === 0
+      && server.args[0].replace(/\\/g, '/').endsWith('/crabot-mcp-tools/dist/computer-use/main.js'))
+    await retireLegacyWorkerComputerUse(workers.map(item => item.worker), legacy.map(server => server.args![0]))
+  })
   private roles: Set<'front' | 'worker'> = new Set()
   /** SDK 环境配置（Worker 专用） */
   private sdkEnvWorker?: SdkEnvConfig
@@ -1102,7 +1109,10 @@ export class UnifiedAgent extends ModuleBase {
       readWorkerSubagentTrace: (params) => this.readWorkerSubagentTracePage(params),
       mintActivityCursor: (position) => this.mintWorkerActivityCursor(position),
       // P6-A §8.10：化身终态主动收割（最后一次 native read → Agent-owned copy）。
-      onIncarnationTerminal: (handle) => { void this.harvestIncarnationNativeTrace(handle) },
+      onIncarnationTerminal: (handle) => {
+        if (handle.incarnation_id) this.computerUseOwner.revoke(`worker:${handle.worker_id}:${handle.incarnation_id}`)
+        void this.harvestIncarnationNativeTrace(handle)
+      },
       // Parent native activity is already persisted by Harness. Only terminal direct CLI children
       // are read here; running child output is never continuously captured.
       onNativeActivityCollected: (handle) => {
@@ -1249,7 +1259,7 @@ export class UnifiedAgent extends ModuleBase {
             ...(impl !== 'builtin' ? ['CLI 原生工具与连接状态未知；Crabot MCP/Skill 表示下次 provision 的计划。'] : [])],
         })
       },
-      capabilityBundle: async ({ worker_id, incarnation_id, impl, principal_permissions }) => {
+      capabilityBundle: async ({ worker_id, impl, principal_permissions }) => {
         const workerPermissions = narrowWorkerPermissions(
           BUILTIN_WORKER_PERMISSIONS,
           principal_permissions ?? null,
@@ -1261,10 +1271,8 @@ export class UnifiedAgent extends ModuleBase {
           skills: this.agentConfig?.skills ?? [],
           mcpServers: (this.agentConfig?.mcp_servers ?? []).flatMap(server => {
             if (!isStandardComputerUse(server)) return [server]
-            if (!incarnation_id || !workerPermissions.tool_access.desktop) return []
-            const scoped = this.computerUseOwner.workerConfig(`worker:${worker_id}:${incarnation_id}`, async method =>
-              this.desktopEnabled() && workerPermissions.tool_access.desktop && (method === 'list' || await this.desktopWorkerCurrent(worker_id, incarnation_id)))
-            return scoped ? [scoped] : []
+            if (!this.computerUseOwner.available || !workerPermissions.tool_access.desktop) return []
+            return [server] // Endpoint and credential travel in this incarnation's execution_env only.
           }),
           ...(impl === 'builtin'
             ? {}
@@ -1275,6 +1283,14 @@ export class UnifiedAgent extends ModuleBase {
                 ),
               }),
         })
+      },
+      computerUseEnv: async (context, execution) => {
+        const empty = { CRABOT_COMPUTER_USE_TOKEN: '', CRABOT_COMPUTER_USE_ENDPOINT: '' }
+        if (execution.kind !== 'worker' || !this.desktopEnabled()
+          || !narrowWorkerPermissions(BUILTIN_WORKER_PERMISSIONS, context.principal_permissions ?? null).tool_access.desktop) return empty
+        const scoped = this.computerUseOwner.workerConfig(`worker:${execution.worker_id}:${execution.incarnation_id}`, async method =>
+          this.desktopEnabled() && (method === 'list' || await this.desktopWorkerCurrent(execution.worker_id, execution.incarnation_id)))
+        return scoped?.env ?? empty
       },
       issueAgentCliCredential: (context) => this.issueAgentCliCredential(context),
       hasRunningBg: (workerId, scope) => this.agentHandler?.hasRunningBgForWorker(workerId, undefined, scope) ?? Promise.resolve(false),
@@ -1643,7 +1659,7 @@ export class UnifiedAgent extends ModuleBase {
   private buildBuiltinWorkerSystemPrompt(ctx: BuiltinRuntimeContext): string {
     const skillListing = buildWorkerSkillListing(this.resolveMainlineWorkerSkills(ctx))
     return assembleBuiltinWorkerPrompt({
-          computerUse: this.computerUseOwner.available && narrowWorkerPermissions(BUILTIN_WORKER_PERMISSIONS, ctx.principal_permissions ?? null).tool_access.desktop,
+      computerUse: this.computerUseOwner.available && narrowWorkerPermissions(BUILTIN_WORKER_PERMISSIONS, ctx.principal_permissions ?? null).tool_access.desktop,
       workspaceRoot: ctx.workspace.root,
       ...(skillListing ? { skillListing } : {}),
       imageAvailable: this.imageCapability.available,
@@ -5630,8 +5646,9 @@ export class UnifiedAgent extends ModuleBase {
 
   private async desktopWorkerCurrent(workerId: string, incarnationId: string): Promise<boolean> {
     const found = await this.managerStack?.ledger.findWorker(workerId)
-    const latest = found?.worker.incarnations.at(-1)
-    return latest?.incarnation_id === incarnationId && latest.state !== 'exited'
+    const incarnation = found?.worker.incarnations.find(item => item.incarnation_id === incarnationId)
+    return found?.worker.task.status !== 'closed' && !!incarnation && incarnation.state !== 'exited'
+      && (incarnation.query_id !== undefined || [...found!.worker.incarnations].reverse().find(item => !item.query_id)?.incarnation_id === incarnationId)
   }
 
   protected override async onStop(): Promise<void> {

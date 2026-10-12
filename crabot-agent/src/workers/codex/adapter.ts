@@ -1,3 +1,4 @@
+import { isStandardComputerUse } from '../../agent/computer-use-owner.js'
 /**
  * Codex WorkerAdapter.
  *
@@ -846,11 +847,14 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     if (renderedMcp[WORKSPACE_GIT_MCP_SERVER_NAME]) {
       asTable(renderedMcp[WORKSPACE_GIT_MCP_SERVER_NAME]).env_vars = [WORKSPACE_GIT_CONTEXT_ENV]
     }
+    if (renderedMcp['computer-use'] && caps.mcp_servers.some(isStandardComputerUse)) {
+      asTable(renderedMcp['computer-use']).env_vars = ['CRABOT_COMPUTER_USE_TOKEN', 'CRABOT_COMPUTER_USE_ENDPOINT']
+    }
     if (Object.keys(renderedMcp).length > 0) config.mcp_servers = renderedMcp
     else delete config.mcp_servers
 
     const nativeInstructions = typeof config.developer_instructions === 'string' ? config.developer_instructions : ''
-    config.developer_instructions = [nativeInstructions, workerTaskInstructions(caps.mcp_servers.some(server => server.name === 'computer-use' && !!server.env?.CRABOT_COMPUTER_USE_ENDPOINT))].filter(Boolean).join('\n\n')
+    config.developer_instructions = [nativeInstructions, workerTaskInstructions(caps.mcp_servers.some(isStandardComputerUse))].filter(Boolean).join('\n\n')
 
     // TOML 要求根级 key 必须出现在第一个 table 之前,否则会被解析成前一个 table 的子字段。
     // 叠加了宿主配置之后靠字符串拼接已经保证不了这条(宿主自带 table),改由序列化器统一

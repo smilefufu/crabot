@@ -1059,7 +1059,6 @@ describe('WorkerHarness.handoffIncarnation — fixed capability snapshot', () =>
 
     expect(capabilityBundle).toHaveBeenLastCalledWith({
       worker_id: worker.worker_id,
-      incarnation_id: target.spawnCalls[0].incarnation_id,
       impl: 'builtin',
       principal_permissions: principalPermissions,
     })

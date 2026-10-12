@@ -756,6 +756,7 @@ export interface HarnessDeps {
     connectionRevision?: string
     dispose(): Promise<void>
   }>
+  readonly computerUseEnv?: (context: WorkerContext, execution: AgentCliExecutionRef) => Promise<Record<string, string>>
   readonly issueAgentCliCredential?: (context: {
     execution: AgentCliExecutionRef
     manager_key: ManagerKey
@@ -993,10 +994,11 @@ export class WorkerHarness {
     context: WorkerContext,
     execution: AgentCliExecutionRef,
   ): Promise<{ execution_env?: Record<string, string> }> {
+    const desktop = await this.deps.computerUseEnv?.(context, execution) ?? {}
     if (!this.deps.issueAgentCliCredential || !context.manager_key || !context.target_session) {
       // Keep the child in Agent mode even when no scoped bearer can be minted;
       // the CLI must fail closed instead of reading Admin's internal token.
-      return { execution_env: { CRABOT_ACTOR: 'agent' } }
+      return { execution_env: { ...desktop, CRABOT_ACTOR: 'agent' } }
     }
     const credential = await this.deps.issueAgentCliCredential({
       execution,
@@ -1005,7 +1007,7 @@ export class WorkerHarness {
       ...(context.creator_friend_id ? { creator_friend_id: context.creator_friend_id } : {}),
     })
     if (!credential.token) throw new Error('Admin returned an empty Agent CLI credential')
-    return { execution_env: { CRABOT_TOKEN: credential.token, CRABOT_ACTOR: 'agent' } }
+    return { execution_env: { ...desktop, CRABOT_TOKEN: credential.token, CRABOT_ACTOR: 'agent' } }
   }
 
   private inputOwnershipRevision(workerId: string): number {
@@ -1212,7 +1214,6 @@ export class WorkerHarness {
         const caps = this.deps.capabilityBundle
           ? await this.deps.capabilityBundle({
               worker_id: workerId,
-              incarnation_id: incarnationId,
               impl,
               principal_permissions: context.principal_permissions,
             })
@@ -2258,11 +2259,9 @@ export class WorkerHarness {
         throw new ImplAlreadyUsedError(worker.worker_id, targetImpl)
       }
 
-      const incarnationId = randomUUID()
       const caps = this.deps.capabilityBundle
         ? await this.deps.capabilityBundle({
             worker_id: worker.worker_id,
-            incarnation_id: incarnationId,
             impl: targetImpl,
             principal_permissions: auth.principal_permissions,
           })
@@ -2284,6 +2283,7 @@ export class WorkerHarness {
       }
 
       const handoffAt = this.deps.now()
+      const incarnationId = randomUUID()
       const workspaceGit = (await this.checkWorkspaceGit(workspace.root, auth.principal_permissions)).current
       const gitContext: WorkerWorkspaceGitContext = {
         worker_id: worker.worker_id, incarnation_id: incarnationId, workspace_root: workspace.root, baseline: workspaceGit,
@@ -3094,7 +3094,7 @@ export class WorkerHarness {
     let builtinInjection: SpawnSpec['builtin']
     let workspace: Workspace
     let caps
-    const targetIncarnationId = randomUUID()
+    let targetIncarnationId: string
     let targetInstructions: Awaited<ReturnType<typeof captureWorkspaceInstructions>>
     let targetGit: WorkspaceGitObservation
     let targetGitContext: WorkerWorkspaceGitContext
@@ -3114,7 +3114,6 @@ export class WorkerHarness {
       caps = this.deps.capabilityBundle
         ? await this.deps.capabilityBundle({
             worker_id: worker.worker_id,
-            incarnation_id: targetIncarnationId,
             impl: targetImpl,
             principal_permissions: principalPermissions,
           })
@@ -3135,6 +3134,7 @@ export class WorkerHarness {
 
       // The target identity, workspace rules snapshot and the private handoff package all exist
       // before we stop the source. Any failure here leaves the source untouched and retryable.
+      targetIncarnationId = randomUUID()
       const capturedAt = this.deps.now()
       targetGit = (await this.checkWorkspaceGit(workspace.root, principalPermissions)).current
       targetGitContext = {

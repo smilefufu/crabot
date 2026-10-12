@@ -1,5 +1,13 @@
 # Crabot 项目进度
 
+### Computer-use Cua Driver：候选实现完成，原生与模型验收待补
+
+- 按已确认 [spec](crabot-docs/superpowers/specs/2026-10-12-computer-use-cua-driver-design.md) 和先行发布的协议，锁定 `cua-driver-rs-v0.34.1`（prerelease）；标准 builtin 提供 19 项原生方法与 `perform_actions`，不使用 main 的 run_steps/run_script/since。
+- Agent 统一宿主、可信 Manager/builtin 上下文和 CLI incarnation 执行环境；凭据/端点不落入任务 MCP 配置，按现有权限与有效化身检查。引用隔离、忙碌即时返回、16 步/60 秒整批校验、取消/unknown 隔离、不重放、终态 session 清理及旧受管 stdio 退出已实现。Driver 截图默认 1024，保留原生坐标与结果，条件 guidance 正文沿用确认稿。
+- 三模块编译、340 项 Agent 定向回归、215 项 CLI/builtin/Manager 回归、17 项 MCP/桥接、注册表保持和坏 hash/准备清理验证通过；其中 CLI 环境需要真实 CLI 的 85 项被环境跳过。全量 Agent 在单核持续满载 33 分钟仍无报告后中止，未定位原因，不算通过；已有核心提示词 354/350 长度断言在 base 同样不满足，本次未改正文。
+- 四平台资产 SHA 和完整 macOS App 签名已核对；真实宿主→service→App 握手、session 生命周期及权限缺失局部降级/清理通过。macOS 尚缺 Accessibility/Screen Recording；Windows、Intel Mac、Linux X11/GNOME Wayland/Sway 和模型效率实验仍待验收/预算。未部署生产，不能声称全平台或模型任务验收完成。
+
+
 ### Intel macOS Release：已发布，旧 Mac 实机待复测
 
 - 按已确认 [spec](crabot-docs/superpowers/specs/2026-10-12-intel-macos-release-design.md) 补原生 `macos-15-intel` / `darwin-x64`；该平台仅使用 cryptography 48.0.1 官方 wheel，其余平台保留 50.0.2，其它固定版本/hash 和 binary-only 校验保持。两项 Linux 失效 URL 使用同版本、同 checksum 的官方快照。

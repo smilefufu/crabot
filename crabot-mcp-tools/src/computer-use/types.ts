@@ -24,5 +24,6 @@ export interface NativeDriver {
 }
 
 export function errorResult(code: string): CallToolResult {
-  return { isError: true, content: [{ type: 'text', text: JSON.stringify({ code }) }], structuredContent: { code } }
+  const data = { code, ...(code === 'COMPUTER_USE_UNKNOWN' ? { effect: 'unknown' } : {}) }
+  return { isError: true, content: [{ type: 'text', text: JSON.stringify(data) }], structuredContent: data }
 }

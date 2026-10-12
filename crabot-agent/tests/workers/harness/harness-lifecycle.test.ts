@@ -679,7 +679,6 @@ describe('WorkerHarness.spawnWorker', () => {
 
     expect(capabilityBundle).toHaveBeenCalledWith({
       worker_id: worker.worker_id,
-      incarnation_id: worker.incarnations.at(-1)!.incarnation_id,
       impl: 'builtin',
       principal_permissions: principalPermissions,
     })

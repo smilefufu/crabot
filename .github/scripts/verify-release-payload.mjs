@@ -1,4 +1,3 @@
-import computerUseRuntime from '../../scripts/lib/computer-use-runtime.cjs'
 #!/usr/bin/env node
 /**
  * 校验 release staging 目录是否包含全部运行时载荷。
@@ -14,6 +13,7 @@ import computerUseRuntime from '../../scripts/lib/computer-use-runtime.cjs'
 import { existsSync, readdirSync, statSync } from 'node:fs'
 import { join, relative, sep } from 'node:path'
 import runtime from '../../scripts/lib/scrapling-runtime.cjs'
+import computerUseRuntime from '../../scripts/lib/computer-use-runtime.cjs'
 
 const stagingDir = process.argv[2]
 if (!stagingDir) {
@@ -48,6 +48,11 @@ const required = [
   'install.sh',
   'LICENSE',
   'scripts/start.mjs',
+  'scripts/prepare-computer-use.mjs',
+  'scripts/lib/computer-use-runtime.cjs',
+  'scripts/computer-use/runtime.json',
+  'crabot-mcp-tools/dist/computer-use/service.js',
+  'crabot-mcp-tools/dist/computer-use/runtime-guard.js',
   'scripts/prepare-scrapling.mjs',
   'scripts/lib/scrapling-runtime.cjs',
   'scripts/lib/scrapling-prepare.mjs',
@@ -68,7 +73,6 @@ if (missing.length > 0) {
 }
 
 runtime.loadRuntime(stagingDir, { full: true })
+computerUseRuntime.loadRuntime(stagingDir, { full: true })
 
 console.log(`[verify-release-payload] OK：${expected.length} 个运行时文件齐全（其中 skill 载荷 ${skillPayload.length} 个）`)
-
-computerUseRuntime.loadRuntime(stagingDir, { full: true })
