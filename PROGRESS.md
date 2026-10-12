@@ -30,6 +30,7 @@
 
 ### 安卓语音终端与 Voice Channel：v3 创建向导已实现，待真机验收
 
+- 2026-10-12 用户指出首次创建不应出现预建联系人和好友绑定；已写[最小修订 spec](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/specs/2026-10-12-voice-creation-and-enrollment-separation-design.md)，待书面确认。创建仅服务/配对/群权限；首次声纹成功才形成联系人；创建完成与普通群准入分开，旧占位保留待核验且不充作群成员。正式协议、产品代码及部署尚未调整；手机 0.3.4 已连接，等待现场数字采音诊断，完整语音对话仍未验收。
 - 身份/联系人、授权来源、创建向导与 Admin 共用端口设计均已确认，正式 `protocol-voice.md` v0.3.0 已发布。后端交付于 [PR #206](https://github.com/smilefufu/crabot/pull/206)，不自行合并；[安卓仓库](https://github.com/smilefufu/crabot-voice-android)按用户要求通过验证后直接提交 main。
 - 唯一普通语音群允许陌生人发言，逐片段标注好友/陌生人；声纹样本与稳定渠道联系人分离，好友按当前 ChannelIdentity 解析。群权限和 Master 成员名册沿用现有规则，声纹不授予权限。重叠、无效分段或 ASR 失败仍整轮失败；私聊属于后续范围。exact-core 从 Admin 读取持久授权快照并整批落 inbox，回答机会重启后不复活。
 - 新建阶段完成音频 API、扫码、联系人/好友/声纹与群权限，再检查完成；未完成实例保留 draft、auto_start=false，不允许业务语音。退出停止草稿运行，可按原 ID 继续；运行中的继续配置不重启。完成前检查前台关麦、登记状态、普通群准入，并重测 ASR/TTS，持久化成功后启用。
