@@ -1,4 +1,4 @@
-# Crabot Windows Installer
+﻿# Crabot Windows Installer
 # Usage: powershell -ExecutionPolicy Bypass -File install.ps1
 
 param(
@@ -18,6 +18,7 @@ function Assert-NativeSuccess($stage) {
     if ($LASTEXITCODE -ne 0) { throw "$stage failed (exit code $LASTEXITCODE)" }
 }
 $script:ToolPaths = @()
+$script:PrivateNode = $false
 function Add-ToolPath($directory) {
     $env:Path = "$directory;$env:Path"
     $script:ToolPaths += $directory
@@ -38,7 +39,7 @@ function Ensure-Node {
     $cached = Join-Path $nodeDir 'node.exe'
     if (Test-Path -LiteralPath $cached) {
         $ver = (& $cached -v).TrimStart('v')
-        if ($LASTEXITCODE -eq 0 -and [version]$ver -ge [version]$RequiredNodeVersion) { Add-ToolPath $nodeDir; return }
+        if ($LASTEXITCODE -eq 0 -and [version]$ver -ge [version]$RequiredNodeVersion) { $script:PrivateNode = $true; Add-ToolPath $nodeDir; return }
     }
     $stage = Join-Path $env:TEMP ("crabot-node-{0}" -f [guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $stage | Out-Null
@@ -58,6 +59,7 @@ function Ensure-Node {
         if (Test-Path -LiteralPath $nodeDir) { Remove-Item -LiteralPath $nodeDir -Recurse -Force }
         New-Item -ItemType Directory -Force -Path (Split-Path $nodeDir -Parent) | Out-Null
         Move-Item -LiteralPath $payload -Destination $nodeDir
+        $script:PrivateNode = $true
         Add-ToolPath $nodeDir
     } finally { Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue }
 }
@@ -205,6 +207,27 @@ function Assert-CrabotStopped($targetInstallDir) {
     } catch {
         # The management service is not running or is not a Crabot instance.
     }
+}
+
+function Write-CrabotLauncher($directory) {
+    $default = "@echo off`nnode `"%~dp0cli.mjs`" %*"
+    $private = @'
+@echo off
+setlocal
+if not exist "%LOCALAPPDATA%\crabot\node\node.exe" (
+  echo Crabot Node is missing. Run install.ps1 again. 1>&2
+  exit /b 1
+)
+set "PATH=%LOCALAPPDATA%\crabot\node;%PATH%"
+"%LOCALAPPDATA%\crabot\node\node.exe" "%~dp0cli.mjs" %*
+'@
+    $cmdPath = Join-Path $directory 'crabot.cmd'
+    if (Test-Path -LiteralPath $cmdPath -PathType Leaf) {
+        $existing = (Get-Content -LiteralPath $cmdPath -Raw).Replace("`r`n", "`n").TrimEnd()
+        if ($existing -cne $default -and $existing -cne $private.Replace("`r`n", "`n").TrimEnd()) { return }
+    }
+    $content = if ($script:PrivateNode) { $private } else { $default }
+    Set-Content -LiteralPath $cmdPath -Value $content -Encoding ASCII
 }
 
 function Install-Crabot {
@@ -387,11 +410,8 @@ if ($newSessionPath -cne $env:Path) {
     $env:Path = $newSessionPath
 }
 
-# 创建 crabot.cmd 如果不存在，避免覆盖用户自定义的启动器。
-$cmdPath = Join-Path $crabotDir "crabot.cmd"
-if (-not (Test-Path -LiteralPath $cmdPath -PathType Leaf)) {
-    @('@echo off', 'node "%~dp0cli.mjs" %*') | Set-Content -Path $cmdPath -Encoding ASCII
-}
+# 仅更新可识别的产品启动器，保留用户自定义内容。
+Write-CrabotLauncher $crabotDir
 
 if (-not $FromSource) { Set-Content -LiteralPath (Join-Path $InstallDir 'VERSION') -Value $Version -Encoding ASCII }
 Write-Host "`n== Done! ==`n" -ForegroundColor Cyan

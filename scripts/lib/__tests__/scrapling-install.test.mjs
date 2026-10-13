@@ -89,13 +89,14 @@ function releaseInstallation(t, tool, damaged = false, options = {}) {
   return { ...result, extracted: existsSync(join(installDir, 'cli.mjs')), cli: existsSync(join(installDir, 'cli.mjs')) ? readFileSync(join(installDir, 'cli.mjs'), 'utf8') : null, version: existsSync(join(installDir, 'VERSION')) ? readFileSync(join(installDir, 'VERSION'), 'utf8').trim() : null, data: existsSync(join(installDir, 'data/sentinel')) ? readFileSync(join(installDir, 'data/sentinel'), 'utf8') : null }
 }
 for (const tool of ['shasum', 'sha256sum']) {
-  test(`release installation verifies SHA-256 with ${tool}`, { skip: process.platform === 'win32' }, t => {
+  const unavailable = process.platform === 'win32' || spawnSync('/bin/bash', ['-c', `command -v ${tool}`]).status !== 0
+  test(`release installation verifies SHA-256 with ${tool}`, { skip: unavailable }, t => {
     const result = releaseInstallation(t, tool)
     assert.equal(result.status, 0, result.stdout + result.stderr)
     assert.match(result.stdout, /tar\.gz: OK/)
     assert.equal(result.extracted, true)
   })
-  test(`release installation rejects a damaged archive with ${tool} before extraction`, { skip: process.platform === 'win32' }, t => {
+  test(`release installation rejects a damaged archive with ${tool} before extraction`, { skip: unavailable }, t => {
     const result = releaseInstallation(t, tool, true)
     assert.equal(result.status, 1, result.stdout + result.stderr)
     assert.match(result.stdout + result.stderr, /Checksum verification failed!/)
