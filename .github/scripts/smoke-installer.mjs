@@ -26,6 +26,11 @@ await fs.mkdir(home)
 const env = { ...process.env, HOME: home, USERPROFILE: home, DATA_DIR: data, CRABOT_INSTALL_DIR: product, SHELL: '/bin/bash',
   NO_PROXY: 'localhost,127.0.0.1', no_proxy: 'localhost,127.0.0.1', CRABOT_CI_ARCHIVE: archive,
   CRABOT_CI_PRODUCT: product, CRABOT_CI_REPO: repo }
+// Test-only: capture an Admin early exit before the runtime registry attaches logs.
+const startupTrace = join(fixture, 'startup-trace.mjs')
+await fs.writeFile(startupTrace, `import cp from 'node:child_process';import {syncBuiltinESMExports} from 'node:module';const original=cp.spawn;cp.spawn=(command,args,options)=>{const child=original(command,args,options);if(options?.cwd?.endsWith('crabot-admin')&&args?.includes('dist/main.js')){child.stderr?.on('data',data=>process.stderr.write('[admin early stderr] '+data));child.stdout?.on('data',data=>process.stdout.write('[admin early stdout] '+data));}return child};syncBuiltinESMExports()`)
+env.NODE_OPTIONS = `${env.NODE_OPTIONS || ''} --import=${pathToFileURL(startupTrace).href}`.trim()
+
 function run(command, args, options = {}) {
   return new Promise((resolveRun, reject) => {
     const child = spawn(command, args, { cwd: repo, env, stdio: 'inherit', ...options })
