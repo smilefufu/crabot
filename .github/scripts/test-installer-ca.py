@@ -25,14 +25,14 @@ with tempfile.TemporaryDirectory(prefix="ca-compat-") as temporary:
     try:
         with patch.dict(sys.modules, {"curl_cffi": package, "curl_cffi.curl": curl}), patch.object(locale, "getpreferredencoding", return_value="cp1252"):
             namespace["prepare_windows_ca"](scratch)
-            assert Path.cwd() == scratch.resolve()
+            assert os.path.samefile(Path.cwd(), scratch), f"cwd={Path.cwd()!s}, scratch={scratch!s}, ca={curl.DEFAULT_CACERT!r}"
             assert curl.DEFAULT_CACERT == "ca.pem"
             assert Path(curl.DEFAULT_CACERT).read_bytes() == certificates.read_bytes()
         os.chdir(original)
         curl.DEFAULT_CACERT = str(root / "ascii.pem")
         with patch.dict(sys.modules, {"curl_cffi": package, "curl_cffi.curl": curl}), patch.object(locale, "getpreferredencoding", return_value="cp1252"):
             namespace["prepare_windows_ca"](scratch)
-            assert os.getcwd() == original
+            assert os.path.samefile(os.getcwd(), original)
             assert curl.DEFAULT_CACERT.endswith("ascii.pem")
     finally:
         os.chdir(original)
