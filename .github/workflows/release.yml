@@ -74,6 +74,10 @@ jobs:
         shell: powershell
         run: .github/scripts/test-installer-windows.ps1
 
+      - name: Windows CA path compatibility regressions
+        shell: bash
+        run: python .github/scripts/test-installer-ca.py
+
       - name: Install dependencies (with devDeps for build)
         shell: bash
         run: |

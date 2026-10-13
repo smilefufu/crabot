@@ -84,3 +84,22 @@ test('CLI repairs dependencies before linking an entry with static third-party i
   assert.equal(result.status, 0, result.stderr)
   assert.match(result.stdout, /entry linked after dependency repair/)
 })
+
+test('fresh nvm installation remains usable in new Bash login and interactive shells', unix, t => {
+  const home = fixture(t)
+  mkdirSync(join(home, '.nvm'))
+  mkdirSync(join(home, 'node-bin'))
+  mkdirSync(join(home, 'product'))
+  writeFileSync(join(home, '.nvm/nvm.sh'), 'export PATH="$HOME/node-bin:$PATH"\n')
+  writeFileSync(join(home, 'node-bin/node'), '#!/bin/bash\necho nvm-node-found\n', { mode: 0o755 })
+  writeFileSync(join(home, 'product/cli.mjs'), '#!/bin/bash\nnode\n', { mode: 0o755 })
+  const result = bash('NODE_SWITCHED_BY_NVM=true; configure_path', { HOME: home, SHELL: '/bin/bash', NVM_DIR: join(home, '.nvm'), CRABOT_INSTALL_DIR: join(home, 'product') })
+  assert.equal(result.status, 0, result.stderr)
+  for (const args of [['--login', '-c'], ['-i', '-c']]) {
+    const env = { ...process.env, HOME: home, PATH: '/usr/bin:/bin:/usr/sbin:/sbin' }
+    delete env.NVM_DIR
+    const shell = spawnSync('/bin/bash', [...args, 'crabot'], { encoding: 'utf8', env })
+    assert.equal(shell.status, 0, shell.stderr)
+    assert.match(shell.stdout, /nvm-node-found/)
+  }
+})

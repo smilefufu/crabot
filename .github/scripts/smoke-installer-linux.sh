@@ -15,6 +15,8 @@ for image in ubuntu:24.04 debian:12 debian:13; do
       export DEBIAN_FRONTEND=noninteractive
       apt-get update -qq
       apt-get install -y -qq --no-install-recommends bash ca-certificates curl tar gzip libstdc++6 procps zsh
+      ln -s /opt/node/bin/node /usr/local/bin/node
+      ln -s /opt/uv/uv /usr/local/bin/uv
       export PATH=/opt/node/bin:/opt/uv:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
       node /workspace/.github/scripts/smoke-installer.mjs "$CRABOT_CI_ARCHIVE"
     '

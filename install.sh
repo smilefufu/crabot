@@ -207,6 +207,14 @@ append_path() {
   if [ ! -f "$file" ] || ! grep -Fqx "$line" "$file"; then
     printf '\n%s\n' "$line" >> "$file"
   fi
+  # nvm 安装器不创建缺失的 profile；登录 shell 也未必读取 .bashrc。
+  if [ -s "${NVM_DIR:-$HOME/.nvm}/nvm.sh" ]; then
+    local nvm_line='export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"; [ ! -s "$NVM_DIR/nvm.sh" ] || . "$NVM_DIR/nvm.sh"'
+    if [ "${NVM_DIR:-$HOME/.nvm}" != "$HOME/.nvm" ]; then
+      nvm_line="export NVM_DIR=$(printf '%q' "$NVM_DIR"); [ ! -s \"\$NVM_DIR/nvm.sh\" ] || . \"\$NVM_DIR/nvm.sh\""
+    fi
+    if ! grep -Fqx "$nvm_line" "$file"; then printf '\n%s\n' "$nvm_line" >> "$file"; fi
+  fi
 }
 configure_path() {
   local crabot_path="$INSTALL_DIR/cli.mjs"
