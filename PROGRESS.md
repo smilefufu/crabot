@@ -30,6 +30,7 @@
 
 ### 安卓语音终端与 Voice Channel：v3 创建向导已实现，待真机验收
 
+- 2026-10-13 真人采音已产生有效人声；本次 `ASR websocket failed` 是既有独立 ASR 17781 服务停止，TTS 17782 同样未运行，已恢复原测试 API 并通过固定输入转写/合成。另修复 core Agent 注册遗漏 `channel.voice_turn_authorized`：真实注册回归先失败后通过，Voice 9 项定向测试及类型检查通过；旧群 lane 6 项失败在未修改部署基线 `d80d5367` 原样复现。已编译并 `crabot restart`，八模块健康，旧 unknown 群消息按原 turn/digest 从 pending 变为 accepted、inbox managed/confirmed；真实 Manager 请求连续 6 次遇 LLM HTTP 502 过载，未生成/播报回答，不计完整问答验收。手机已重连并关麦，等待新一轮真实播报；未修改联系人、好友绑定、权限或模型配置。
 - 2026-10-12 用户指出首次创建不应出现预建联系人和好友绑定；已写[最小修订 spec](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/specs/2026-10-12-voice-creation-and-enrollment-separation-design.md)，待书面确认。创建仅服务/配对/群权限；首次声纹成功才形成联系人；创建完成与普通群准入分开，旧占位保留待核验且不充作群成员。联系人修订的正式协议与实现尚未调整；采音问题已独立修复，手机保留数据升级 0.3.5，产品问答待现场验收。
 - 身份/联系人、授权来源、创建向导与 Admin 共用端口设计均已确认，正式 `protocol-voice.md` v0.3.0 已发布。后端交付于 [PR #206](https://github.com/smilefufu/crabot/pull/206)，不自行合并；[安卓仓库](https://github.com/smilefufu/crabot-voice-android)按用户要求通过验证后直接提交 main。
 - 唯一普通语音群允许陌生人发言，逐片段标注好友/陌生人；声纹样本与稳定渠道联系人分离，好友按当前 ChannelIdentity 解析。群权限和 Master 成员名册沿用现有规则，声纹不授予权限。重叠、无效分段或 ASR 失败仍整轮失败；私聊属于后续范围。exact-core 从 Admin 读取持久授权快照并整批落 inbox，回答机会重启后不复活。
