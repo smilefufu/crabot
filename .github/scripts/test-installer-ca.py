@@ -10,7 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 source = Path(__file__).resolve().parents[2] / "scripts/scrapling/server.py"
-function = next(item for item in ast.parse(source.read_text()).body if isinstance(item, ast.FunctionDef) and item.name == "prepare_windows_ca")
+function = next(item for item in ast.parse(source.read_text(encoding="utf-8")).body if isinstance(item, ast.FunctionDef) and item.name == "prepare_windows_ca")
 namespace = {"sys": SimpleNamespace(platform="win32"), "locale": locale, "Path": Path, "shutil": shutil, "os": os}
 exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), "exec"), namespace)
 original = os.getcwd()
