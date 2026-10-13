@@ -241,6 +241,7 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
         assertToolMessageIntegrity(messages)
         response = await callNonStreaming(adapter, {
           messages,
+          createTextConsumer: options.createTextConsumer,
           systemPrompt: currentSystemPrompt,
           tools: [...currentTools],
           model: options.model,

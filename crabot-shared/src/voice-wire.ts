@@ -5,9 +5,9 @@ export const VOICE_MAX_SAMPLES = 240000
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 export class VoiceProtocolVersionError extends Error {
-  constructor() { super('语音协议版本不兼容，需要 protocol_version=3；请更新手机并重新扫码，保留同渠道声纹') }
+  constructor() { super('语音协议版本不兼容，需要 protocol_version=4；请更新手机，保留配对和声纹') }
 }
-function version(value: unknown): void { if (value !== 3) throw new VoiceProtocolVersionError() }
+function version(value: unknown): void { if (value !== 4) throw new VoiceProtocolVersionError() }
 
 function invalid(): never { throw new Error('Invalid voice protocol payload') }
 function object(value: unknown): Record<string, unknown> {
@@ -90,8 +90,12 @@ export function parseVoiceClientControl(data: string): VoiceClientControl {
       if (v.playback_id !== undefined) assertVoiceUuid(v.playback_id)
       break
     case 'playback':
-      fields(v, ['type', 'playback_id', 'status']); assertVoiceUuid(v.playback_id)
-      oneOf(v.status, ['started', 'completed', 'interrupted', 'failed']); break
+      fields(v, ['type', 'playback_id', 'status'], ['played_samples']); assertVoiceUuid(v.playback_id)
+      oneOf(v.status, ['started', 'completed', 'interrupted', 'failed'])
+      if (v.played_samples !== undefined) integer(v.played_samples, 0, 480000)
+      if (v.status === 'completed' && (v.played_samples === undefined || v.played_samples === 0)) invalid()
+      if (v.status === 'started' && (v.played_samples === undefined || v.played_samples === 0)) invalid()
+      break
     case 'enrollment_done':
       fields(v, ['type', 'registration_id', 'model_id', 'enrollment_revision'])
       string(v.registration_id); string(v.model_id); integer(v.enrollment_revision); break

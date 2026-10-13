@@ -1058,6 +1058,7 @@ export class UnifiedAgent extends ModuleBase {
     this.grandfatherBootstrapStore = new GrandfatherBootstrapStore(getAgentDataDir())
 
     this.managerStack = buildManagerStack({
+      coreRuntimeBearer: () => ConfigLoader.getRuntimeBearer(),
       dataRoot: getDataRootDir(),
       reflectionEvidence: {
         traces: this.traceStore,

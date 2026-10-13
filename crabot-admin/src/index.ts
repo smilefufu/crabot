@@ -1026,6 +1026,7 @@ export class AdminModule extends ModuleBase {
     this.registerMethod('confirm_voice_turn', (params: unknown, context?: RpcHandlerContext) => this.voiceAdmin.confirm(params, context?.authorizationBearer))
     this.registerMethod('sync_voice_terminal', (params: unknown, context?: RpcHandlerContext) => this.voiceAdmin.sync(params, context?.authorizationBearer))
     this.registerMethod('verify_voice_admin', (params: { channel_id: string }, context?: RpcHandlerContext) => this.voiceAdmin.verifyHuman(params, context?.authorizationBearer))
+    this.registerMethod('verify_voice_agent', (params: { channel_id: string }, context?: RpcHandlerContext) => this.voiceAdmin.verifyAgent(params, context?.authorizationBearer))
 
     this.registerMethod('update_channel_config', this.handleUpdateChannelConfig.bind(this))
 

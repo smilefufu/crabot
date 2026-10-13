@@ -919,6 +919,19 @@ describe('buildManagerToolFace', () => {
     }
   })
 
+  it.each(['full', 'progressive'] as const)('%s 的语音工具面区分当前回复与跨渠道投递', async mode => {
+    const call = vi.fn(async (_port, method) => method === 'get_capabilities' ? {} : { platform_message_id: 'sent', sent_at: new Date().toISOString() })
+    const tools = buildManagerToolFace(makeDeps({ faceState: createManagerToolFaceState(mode), voice: true, managerTarget: { channel_id: 'ch-1', session_id: 'sess-1' },
+      messagingDeps: makeMessagingDeps({ rpcClient: { call } as never }) }))
+    const send = tools.find(tool => tool.name === 'send_message')!
+    expect(send.description).toContain('当前语音会话的回复使用 <voice_reply>')
+    expect(send.description).not.toContain('普通 assistant text 留作内部记录，不代表已经回复')
+    const local = await send.call({ channel_id: 'ch-1', session_id: 'sess-1', content: '不要通过工具播报', post_send_action: 'none' })
+    expect(local.isError).toBe(true); expect(call).not.toHaveBeenCalled()
+    const remote = await send.call({ channel_id: 'remote', session_id: 'remote-group', content: '发到其它渠道', post_send_action: 'none' })
+    expect(remote.isError).not.toBe(true); expect(call.mock.calls.some(c => c[1] === 'send_message')).toBe(true)
+  })
+
   it.each(['full', 'progressive'] as const)('%s 的 send_message 说明与 Manager 无 intent 的接口一致', (mode) => {
     const tools = buildManagerToolFace(makeDeps({ faceState: createManagerToolFaceState(mode) }))
     const sendMessage = tools.find((tool) => tool.name === 'send_message')!

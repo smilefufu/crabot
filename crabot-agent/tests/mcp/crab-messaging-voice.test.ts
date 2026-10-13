@@ -3,24 +3,17 @@ import { buildWorkerMessagingTools } from '../../src/mcp/crab-messaging.js'
 
 afterEach(() => vi.useRealTimers())
 describe('formal voice delivery policy', () => {
-  it('uses arbitrary instance capability, injects runtime context only on the matching group, and never retries interrupted playback', async () => {
-    const context = { channel_id: '客厅', session_id: 'group-1', turn_id: 'turn-1', connection_epoch: 'epoch-1', expires_at: new Date(Date.now() + 50000).toISOString() }
+  it('rejects message-tool replies to a voice instance before any audio or delivery RPC', async () => {
     const call = vi.fn(async (_port, method) => {
-      if (method === 'get_capabilities') return { voice: { protocol_version: 3, send_timeout_ms: 30000 } }
-      throw new Error('ECONNRESET after playback started')
+      if (method === 'get_capabilities') return { voice: { protocol_version: 4, send_timeout_ms: 30000 } }
+      throw new Error('Unexpected delivery RPC')
     })
-    const tools = buildWorkerMessagingTools({ rpcClient: { call } as never, moduleId: 'manager-test', getAdminPort: async () => 1, resolveChannelPort: async () => 2, voiceReplyContext: () => context })
+    const tools = buildWorkerMessagingTools({ rpcClient: { call } as never, moduleId: 'manager-test', getAdminPort: async () => 1, resolveChannelPort: async () => 2 })
     const send = tools.find(tool => tool.name === 'send_message')!
     expect(send.schema).not.toHaveProperty('voice_reply_context')
-    const result = await send.handler({ channel_id: '客厅', session_id: 'group-1', content: '收到' })
-    expect(result.isError).toBe(true)
-    const sends = call.mock.calls.filter(args => args[1] === 'send_message')
-    expect(sends).toHaveLength(1)
-    expect(sends[0][2]).toMatchObject({ voice_reply_context: context })
-    expect(sends[0][5]).toEqual({ timeoutMs: 30000 })
-    call.mockClear()
-    expect((await send.handler({ channel_id: '客厅', session_id: 'other-group', content: '不要播' })).isError).toBe(true)
-    expect(call.mock.calls.filter(args => args[1] === 'send_message')).toEqual([])
+    const result = await send.handler({ channel_id: '手机语音', session_id: 'group-1', content: '收到' })
+    expect(result.isError).toBe(true); expect(JSON.stringify(result.content)).toContain('voice_reply')
+    expect(call.mock.calls.map(args => args[1])).toEqual(['get_capabilities'])
   })
   it('keeps ordinary channel retry behavior without leaking voice or Admin Chat metadata', async () => {
     vi.useFakeTimers()

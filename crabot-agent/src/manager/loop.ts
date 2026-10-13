@@ -1,3 +1,4 @@
+import { TaggedVoiceOutput, type VoiceOutputPort } from './voice-output.js'
 /**
  * ManagerLoop —— episode 生命周期(protocol-agent-v3.md §4.1/§4.2)。
  *
@@ -89,6 +90,11 @@ const ASSISTANT_TEXT_END_TURN_REMINDER = '[系统提醒] 你刚才直接输出�
   + '请据此判断刚才那段文字：\n'
   + '- 如果它是希望让人类看到的新内容，且与你已经发送的内容不重复 → 调用 send_message 发送一次，然后直接结束，不要再输出任何文字；\n'
   + '- 如果它只是内部总结，或与你已经发送的内容重复 → 不需要任何操作，直接结束即可，不要重复发送。'
+
+const VOICE_ASSISTANT_TEXT_END_TURN_REMINDER = '[系统提醒] 刚才标签外的普通文字不会播报。\n'
+  + '若当前人类需要听到新的答复，请用完整的 <voice_reply>...</voice_reply> 输出简短口语，再结束本轮。\n'
+  + '若只是内部说明、无需回应或内容已经播报，直接结束，不重复输出。\n'
+  + '回复当前语音会话不要调用 send_message；向其它渠道投递仍使用通讯工具。'
 
 const DAILY_REFLECTION_ASSISTANT_TEXT_END_TURN_REMINDER = '[系统提醒] 你刚才直接输出的文字只留在系统内部；需要人类看到的新摘要通过 send_daily_reflection_summary 发送到 Admin Web 系统任务线程。内部总结或已成功发送的摘要不再发送。\n'
   + '摘要投递不代表周期完成。有可推进事项就继续；没有其他可推进事项、只缺已派分析结果时，直接结束本轮，不再调用工具；系统会在结果到达后自动恢复执行。周期处理结束时单独调用 finish_daily_reflection，按真实结果申报 completed 或 partial，列明未完成事项。'
@@ -239,6 +245,8 @@ export interface EpisodeResult {
 }
 
 export interface ManagerLoopDeps {
+  readonly voiceOutput?: VoiceOutputPort
+  readonly onSuccessfulVoiceReply?: (target: { channel_id: string; session_id: string }) => void
   readonly onToolFinished?: (event: Extract<import('../engine/types.js').EngineToolLifecycleEvent, { type: 'tool_finished' }>, readOnly: boolean) => void
   readonly dailyReflection?: import('./daily-reflection.js').DailyReflection
   readonly key: ManagerKey
@@ -413,6 +421,8 @@ export class ManagerLoop {
    * episode 由 mutex 串行，不存在交叠。
    */
   private currentTraceId: string | undefined = undefined
+  private voiceOutput?: TaggedVoiceOutput
+  get isVoiceConversation(): boolean { return this.deps.voiceOutput?.isVoice() === true && this.currentToolProfile === 'normal' && !this.deps.isSystemThread }
   private currentVoiceReplyContext?: import('crabot-shared').VoiceReplyContext
   get voiceReplyContext(): import('crabot-shared').VoiceReplyContext | undefined {
     return this.currentVoiceReplyContext && Date.parse(this.currentVoiceReplyContext.expires_at) > Date.now() ? this.currentVoiceReplyContext : undefined
@@ -447,7 +457,9 @@ export class ManagerLoop {
     return this.successfulSendMessageTargetsInCurrentEpisode.has(`${target.channel_id}\u0000${target.session_id}`)
   }
 
-  recordSuccessfulSendMessage(target: { channel_id: string; session_id: string }): void {
+  recordSuccessfulSendMessage(target: { channel_id: string; session_id: string }): void { this.recordHumanDelivery(target) }
+
+  private recordHumanDelivery(target: { channel_id: string; session_id: string }): void {
     if (this.currentTraceId !== undefined) {
       this.successfulSendMessageTargetsInCurrentEpisode.add(`${target.channel_id}\u0000${target.session_id}`)
     }
@@ -921,6 +933,9 @@ export class ManagerLoop {
     this.postSendRecheckSequence = 0
     this.adminChatClaims = new Map()
     this.checkpointError = undefined
+    this.voiceOutput = this.isVoiceConversation && this.deps.voiceOutput ? new TaggedVoiceOutput(this.deps.voiceOutput, () => this.voiceReplyContext, record => {
+      this.recordHumanDelivery(record); this.deps.onSuccessfulVoiceReply?.(record)
+    }) : undefined
     this.successfulSendMessageTargetsInCurrentEpisode.clear()
     for (const item of episodeEnvelopes) {
       const hook = this.deferredSettleHooks.get(item)
@@ -1199,6 +1214,9 @@ export class ManagerLoop {
       this.deps.store.clearCheckpoint(this.deps.key, episodeId)
       throw err
     } finally {
+      await this.voiceOutput?.finishResponse()
+      this.voiceOutput = undefined
+      this.currentVoiceReplyContext = undefined
       this.automaticGuidance.clear()
       this.currentEpisodeInjected = null
       this.currentWakeEvent = null
@@ -1341,7 +1359,7 @@ export class ManagerLoop {
     state = attempt.state
     // 回复证据按本次执行消息 ID 保留，不依赖压缩前的数组长度。
     // protectedTail 在重启续跑时含本 episode 已执行的消息；普通唤醒时只有本次人类输入。
-    let repliedToHuman = detectRepliedToHuman(replyEvidence)
+    let repliedToHuman = this.voiceOutput?.completed === true || detectRepliedToHuman(replyEvidence)
       || detectRepliedToHuman(attempt.executedMessages)
     let successfulSendMessageTargets = successfulSendMessageTargetsOf(
       attempt.executedMessages,
@@ -2163,6 +2181,7 @@ export class ManagerLoop {
   private managerSystemPrompt(effectiveWake: WakeEvent | undefined): string {
     const extra = this.deps.promptInputs()
     return assembleManagerSystemPrompt({
+      voice: this.isVoiceConversation,
       computerUse: this.deps.toolFace(effectiveWake, this.currentToolFaceState).some(tool => tool.traceMetadata?.computer_use_guidance === true),
       managerKey: this.deps.key,
       isSystemThread: this.deps.isSystemThread,
@@ -2233,7 +2252,7 @@ export class ManagerLoop {
 
     const effectiveWake = this.effectiveWakeForCurrentEpisode()
     const isBuiltinDailyReflection = isBuiltinDailyReflectionWake(effectiveWake)
-    const systemPrompt = (): string => this.managerSystemPrompt(this.effectiveWakeForCurrentEpisode())
+    const systemPrompt = (): string => this.managerSystemPrompt(this.effectiveWakeForCurrentEpisode()) + (this.voiceOutput?.notes() ?? '')
     const readOnlyTools = new Map<string, boolean>()
     const tools = (): ReadonlyArray<ToolDefinition> => {
       const face = this.deps.toolFace(this.effectiveWakeForCurrentEpisode(), this.currentToolFaceState)
@@ -2318,6 +2337,7 @@ export class ManagerLoop {
       supportsVision: this.deps.supportsVision?.() ?? false,
       systemPrompt,
       tools,
+      createTextConsumer: this.voiceOutput ? () => this.voiceOutput!.consumer() : undefined,
       model,
       maxTurns: this.deps.maxTurns,
       ...(overrides?.contextWindowTokens !== undefined ? { contextWindowTokens: overrides.contextWindowTokens } : {}),
@@ -2420,6 +2440,7 @@ export class ManagerLoop {
         return { output, isError: true, traceMetadata: { tool_error_code: output.split(':')[0] } }
       },
       assistantTextEndTurnHandler: async () => {
+        if (this.isVoiceConversation && (this.voiceOutput?.committed || !this.voiceReplyContext)) return { kind: 'complete' as const }
         if (assistantTextEndTurnReminderSent) return { kind: 'complete' as const }
         if (!isBuiltinDailyReflection && !this.deps.hasPendingReply()) return { kind: 'complete' as const }
         assistantTextEndTurnReminderSent = true
@@ -2427,7 +2448,7 @@ export class ManagerLoop {
           kind: 'inject' as const,
           text: isBuiltinDailyReflection
             ? DAILY_REFLECTION_ASSISTANT_TEXT_END_TURN_REMINDER
-            : ASSISTANT_TEXT_END_TURN_REMINDER,
+            : this.isVoiceConversation ? VOICE_ASSISTANT_TEXT_END_TURN_REMINDER : ASSISTANT_TEXT_END_TURN_REMINDER,
         }
       },
       endTurnGate: async () => this.takeSpawnRecheckPrompt(),

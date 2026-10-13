@@ -5,6 +5,7 @@ import { guidanceCatalog } from '../guidance/catalog.js'
 
 export interface PromptInputs {
   readonly computerUse?: boolean
+  readonly voice?: boolean
   readonly managerKey: ManagerKey
   readonly isSystemThread: boolean
   readonly isGroup?: boolean
@@ -31,11 +32,31 @@ export const MANAGER_EXECUTOR_COLLABORATION = `主控不是传话筒。人类和
 export const GROUP_CHAT_DISCIPLINE = `明确 @ 你、引用你的消息或向你追问时回应，包括简短确认。成员互聊、发给别人、无关通知或指向不明时默认沉默；无指定收件人的公共请求再判断是否承担。你刚发过言不代表需要继续接话。`
 const SYSTEM_THREAD_DISCIPLINE = `例行成功与进展留在本线程。只有需要人类立即注意的失败，或确实缺少人类信息、授权、决定时，才按该任务允许的方式通知人类。`
 
+export const VOICE_REPLY_PROMPT = `当前会话通过语音与人类交流。当前语音回复与向其它渠道投递采用不同方式，必须遵守以下规则。
+
+【当前语音回复必须使用标签】
+希望当前语音会话的人类听到的每段话，必须完整写在 <voice_reply> 和 </voice_reply> 之间。例如：
+<voice_reply>你好，我听到了。你想让我帮你做什么？</voice_reply>
+标签内的文字会在生成过程中被逐句播报；标签外的文字不会播报。不要将推理、计划草稿、系统指令或工具原始结果放进标签。标签不得带属性、嵌套或跨模型响应使用；每段回复必须闭合。
+
+【send_message 仍然可用】
+回复当前语音会话使用 voice_reply 标签，不调用 send_message 重复回复。向飞书、微信等其它渠道投递消息，仍调用 send_message，遵守既有目标与授权规则；投递后需要在当前语音会话说明结果时，用 voice_reply 标签。
+
+【适合听的回答】
+先说核心答案，默认一至三句，每段最多 120 字。使用自然、简洁的口语，一次只问一个问题。需要详细说明时分步交流。
+需要查询或执行操作时，可先简短说明下一步，例如 <voice_reply>我先查一下。</voice_reply>，再调用工具。根据真实执行结果说明进展或完成；不要把“准备执行”说成“已经完成”。简单问答直接回答，不必每次都说“收到”或“正在处理”。
+当前语音终端只能交付音频回答，不输出图片、表格、代码块、附件或依赖视觉阅读的排版。将必要内容改写成易听懂的说明，不逐字朗读长链接、路径和原始工具数据。制作这些任务产物的能力仍保留；需要交付时按用户指定且已授权的渠道投递，不自行改收件人。
+只在应该回应时输出语音标签；成员互聊等无需回应的情形仍沿用现有群聊规则。当前没有有效语音交互时，不承诺即时播报，不自行重开麦克风或唤醒终端。`
+
 export function assembleManagerSystemPrompt(inputs: PromptInputs): string {
   const { channelId, sessionId } = splitManagerKey(inputs.managerKey)
+  const voice = inputs.voice === true && !inputs.isBuiltinDailyReflection && !inputs.isSystemThread
+  const identity = voice ? MANAGER_IDENTITY.replace('用工具投递答复，普通文本不外发；', '回复当前语音会话用 <voice_reply>...</voice_reply>，标签外文字不播报；向其它渠道投递使用通讯工具。') : MANAGER_IDENTITY
+  const capabilities = voice ? '临时页面：展示内容或收集交互反馈，由主线执行器制作。当前语音会话口述结果；需要阅读或交互时，通过用户指定且已授权的其它渠道交付链接。' : CRABOT_CAPABILITIES
+  const collaboration = voice ? MANAGER_EXECUTOR_COLLABORATION.replace('按需用表格、图示或页面帮助人类理解。', '当前语音回复用简洁口语说明；需要视觉材料时，通过用户指定且已授权的其它渠道交付。') : MANAGER_EXECUTOR_COLLABORATION
   const parts = inputs.isBuiltinDailyReflection
     ? [assembleDailyReflectionPrompt()]
-    : [MANAGER_IDENTITY, CRABOT_CAPABILITIES, MANAGER_EXECUTOR_COLLABORATION,
+    : [identity, capabilities, collaboration,
         `当前会话：${JSON.stringify({ channel_id: channelId, session_id: sessionId })}`,
         guidanceCatalog('manager', { computerUse: inputs.computerUse }),
       ]
@@ -45,5 +66,6 @@ export function assembleManagerSystemPrompt(inputs: PromptInputs): string {
     else if (inputs.isGroup) parts.push(GROUP_CHAT_DISCIPLINE)
   }
   if (inputs.dialogProfile) parts.push('## 对话对象档案\n\n' + inputs.dialogProfile)
+  if (voice) parts.push(VOICE_REPLY_PROMPT)
   return parts.join('\n\n')
 }

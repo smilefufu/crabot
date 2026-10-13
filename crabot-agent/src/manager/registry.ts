@@ -121,6 +121,7 @@ export interface ScheduleIdentity {
 }
 
 export interface ManagerRegistryDeps {
+  readonly voiceOutputFor?: (key: ManagerKey) => import('./voice-output.js').VoiceOutputPort
   readonly dailyReflectionFor?: (key: ManagerKey) => import('./daily-reflection.js').DailyReflection
   readonly store: ManagerSessionStore
   readonly policy: CompactionPolicy
@@ -231,6 +232,7 @@ export interface ManagerRegistryDeps {
     /** 当前 episode 的 trace、发送后复核与交付证据桥（registry 惰性桥接到 loops 实例）。 */
     traceHooks?: {
       currentTraceId: () => string | undefined
+      isVoice?: () => boolean
       voiceReplyContext?: () => import('crabot-shared').VoiceReplyContext | undefined
       onWorkerSpawned: (workerId: string) => void
       onPostSendAction: () => void
@@ -397,6 +399,11 @@ export class ManagerRegistry {
 
     const loopDeps: ManagerLoopDeps = {
       key,
+      voiceOutput: this.deps.voiceOutputFor?.(key),
+      onSuccessfulVoiceReply: target => {
+        const current = splitManagerKey(key)
+        if (target.channel_id === current.channelId && target.session_id === current.sessionId) this.pendingReplies.delete(key)
+      },
       isSystemThread,
       // ManagerKey 是 worker 的固定台账归属。使用 thunk 只为保持 ManagerLoop 的
       // 同步依赖注入形状，不从当前 principal 派生或改写会话归属。
@@ -428,6 +435,7 @@ export class ManagerRegistry {
           principalPermissionsOf(wakeEvent),
           {
             currentTraceId: () => this.loops.get(key)?.currentEpisodeTraceId,
+            isVoice: () => this.loops.get(key)?.isVoiceConversation === true,
             voiceReplyContext: () => this.loops.get(key)?.voiceReplyContext,
             onWorkerSpawned: (workerId) => this.loops.get(key)?.recordSpawnedWorker(workerId),
             onPostSendAction: () => this.loops.get(key)?.recordPostSendAction(),

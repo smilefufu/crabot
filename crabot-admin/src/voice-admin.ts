@@ -62,6 +62,10 @@ export class VoiceAdmin {
     const contacts = metadata.contacts.map(contact => { const friend = this.deps.resolveFriend(channelId, contact.platform_user_id); return { ...contact, ...(friend ? { friend_id: friend.id } : {}) } })
     return { config, setup_status: this.setupStatus(channelId), terminal_entry: this.terminalEntry(channelId), ...metadata, contacts, asr_connection: this.audio.resolve(config.asr, 'asr'), tts_connection: this.audio.resolve(config.tts, 'tts') }
   }
+  async verifyAgent(raw: unknown, bearer?: string): Promise<{ verified: true }> {
+    const v = bodyObject(raw); requireFields(v, ['channel_id']); this.assertChannel(v.channel_id)
+    await this.deps.verifyCore(bearer); return { verified: true }
+  }
   async verifyHuman(raw: unknown, bearer?: string): Promise<{ verified: true }> {
     const v = bodyObject(raw); requireFields(v, ['channel_id']); this.assertChannel(v.channel_id)
     const channelId = v.channel_id

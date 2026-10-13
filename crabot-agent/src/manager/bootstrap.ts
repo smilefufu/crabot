@@ -1,3 +1,5 @@
+import { voiceOutputPort } from './voice-output-port.js'
+import { createHash } from 'node:crypto'
 import { requestObservation, persistObservation, executionObservation, readObservation, observationFile } from '../permissions/execution-observation.js'
 /**
  * manager 栈装配 —— protocol-agent-v3.md §4/§5/§6/§7(P5 Task 1)。
@@ -148,6 +150,7 @@ export interface ManagerStack {
 }
 
 export interface BootstrapDeps {
+  readonly coreRuntimeBearer?: () => string | undefined
   readonly reflectionEvidence?: Pick<ReflectionEvidenceDeps, 'traces' | 'captureWorkerTrace' | 'readWorkerTrace' | 'redact'>
   readonly confirmDailyReflection?: import('./daily-reflection.js').DailyReflectionDeps['confirm']
   /** 存储根(= `getDataRootDir()`,即 `$DATA_DIR`);台账/事件流/manager 会话都按 §7 派生自它。 */
@@ -608,7 +611,16 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     return host
   }
   const imagePolicies = new Map<string, boolean | undefined>()
+  const voicePolicies = new Map<string, boolean>()
   registry = new ManagerRegistry({
+    voiceOutputFor: deps.coreRuntimeBearer ? key => {
+      const { channelId, sessionId } = splitManagerKey(key)
+      return voiceOutputPort(join(deps.dataRoot, 'agent', 'voice-replies', createHash('sha256').update(key).digest('hex')), () => voicePolicies.get(channelId) === true, async params => {
+        if (voicePolicies.get(channelId) !== true || params.voice_reply_context.channel_id !== channelId || params.voice_reply_context.session_id !== sessionId) throw new Error('Voice reply target does not match the current Manager')
+        const port = await deps.messagingDeps.resolveChannelPort(channelId)
+        return deps.messagingDeps.rpcClient.callSensitive(port, 'voice_output', params, deps.messagingDeps.moduleId, { authorizationBearer: deps.coreRuntimeBearer!(), timeoutMs: params.event.type === 'reply_end' ? 30000 : 3000 })
+      })
+    } : undefined,
     dailyReflectionFor,
     traceWriter: deps.traceWriter,
     onAdminChatWakeConsumed: deps.onAdminChatWakeConsumed,
@@ -646,6 +658,13 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     onHumanWake: async (key, principal) => (await principals.resolve(key, principal)).permissions,
     beforeWake: async (key, envelope) => {
       const { channelId } = splitManagerKey(key)
+      if (deps.coreRuntimeBearer && key !== SYSTEM_TASKS_MANAGER_KEY && !voicePolicies.has(channelId)) {
+        try {
+          const port = await deps.messagingDeps.resolveChannelPort(channelId)
+          const caps = await deps.messagingDeps.rpcClient.call<{}, { voice?: { protocol_version: number } }>(port, 'get_capabilities', {}, deps.messagingDeps.moduleId, undefined, { timeoutMs: 3000 })
+          voicePolicies.set(channelId, caps.voice?.protocol_version === 4)
+        } catch { /* no unverified voice exception */ }
+      }
       const wake = envelope?.wake
       if ((wake?.kind === 'human_messages' || wake?.kind === 'attention_flush')
         && wake.messages.some(message => message.content.image_quality !== undefined)) imagePolicies.set(channelId, true)
@@ -851,6 +870,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
           // (查不到监护 session 的 worker 事件)记 'system';人类消息记 'message'。
           triggerType: scheduleIdentity ? 'scheduled' : isWorkboardSystemInput || isSystemThread ? 'system' : 'message',
         }),
+        voice: traceHooks?.isVoice?.() === true,
         messagingDeps: { ...deps.messagingDeps, voiceReplyContext: traceHooks?.voiceReplyContext },
         // send_message 省略 channel_id 时使用的 manager 归属目标与结构化 Session 观察索引
         // （spec 2026-09-03-tool-input-repair）。两条桥都在工具调用时动态读取当前 Loop。

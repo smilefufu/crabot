@@ -34,6 +34,12 @@ describe('Voice Admin human surface and durable publication responsibility', () 
   async function request(route: string, method = 'GET', body?: unknown, token = human) {
     return fetch(url + route, { method, headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' }, ...(body ? { body: JSON.stringify(body) } : {}) })
   }
+  it('voice output identity requires exact current core and a real voice instance', async () => {
+    expect(await admin.verifyAgent({ channel_id: channel }, core)).toEqual({ verified: true })
+    for (const token of [runtime, human, undefined]) await expect(admin.verifyAgent({ channel_id: channel }, token)).rejects.toThrow('Exact core')
+    await expect(admin.verifyAgent({ channel_id: 'not-voice' }, core)).rejects.toThrow('Voice instance')
+    await expect(admin.verifyAgent({ channel_id: channel, source: 'crabot-agent' }, core)).rejects.toThrow('Unknown')
+  })
   async function turn(): Promise<SubmitVoiceTurnParams> {
     const contact = await admin.turns.createContact(channel, 'FuFu')
     const r = await admin.turns.enroll(channel, contact.platform_user_id, 'campplus-test')

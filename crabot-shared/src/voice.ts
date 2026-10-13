@@ -1,4 +1,4 @@
-// protocol-voice.md v0.3.0: shared terminal, configuration and admission contracts.
+// protocol-voice.md v0.4.0: shared terminal, configuration and admission contracts.
 import type { ModuleId, SessionId, FriendId } from './base-protocol.js'
 import type { ChannelMessage, Friend } from './channel-protocol.js'
 
@@ -29,8 +29,23 @@ export interface VoiceReplyContext {
   connection_epoch: string
   expires_at: string
 }
+export type VoiceOutputEvent =
+  | { type: 'reply_start'; playback_id: string }
+  | { type: 'reply_text'; playback_id: string; sequence: number; text: string }
+  | { type: 'reply_end'; playback_id: string }
+  | { type: 'reply_cancel'; playback_id: string }
+  | { type: 'response_end' }
+export interface VoiceOutputParams {
+  voice_reply_context: VoiceReplyContext
+  event: VoiceOutputEvent
+}
+export type VoiceOutputResult =
+  | { accepted: true }
+  | { platform_message_id: string; sent_at: string; played_samples: number }
+export interface VerifyVoiceAgentParams { channel_id: ModuleId }
+export interface VerifyVoiceAgentResult { verified: true }
 export interface VoiceChannelCapability {
-  protocol_version: 3
+  protocol_version: 4
   send_timeout_ms: 30000
 }
 export type AudioServiceFormat = 'sherpa-offline-ws' | 'mlx-audio-http' | 'openai-audio'
@@ -162,7 +177,7 @@ export type VoiceAdminAction =
   | { action: 'delete_registration'; registration_id: string }
 export interface VoiceAdminActionParams { channel_id: ModuleId; command: VoiceAdminAction }
 export interface VoicePairing {
-  protocol_version: 3
+  protocol_version: 4
   channel_id: ModuleId
   pairing_id: string
   url: string
@@ -196,14 +211,14 @@ export type VoiceAdminActionResult =
 
 export interface VoiceModelVersions { segmentation: string; embedding: string }
 export type VoiceClientControl =
-  | { type: 'pair'; protocol_version: 3; nonce: string }
-  | { type: 'hello'; protocol_version: 3; credential: string; models: VoiceModelVersions; aec_verified: boolean }
+  | { type: 'pair'; protocol_version: 4; nonce: string }
+  | { type: 'hello'; protocol_version: 4; credential: string; models: VoiceModelVersions; aec_verified: boolean }
   | { type: 'heartbeat'; foreground: boolean; microphone: 'closed' | 'wake' | 'recording'; playback: 'idle' | 'playing' }
   | { type: 'turn_start'; turn_id: string }
   | { type: 'turn_query'; turn_id: string; payload_sha256: string }
   | { type: 'turn_end'; turn_id: string; audio_sample_count: number; sample_rate: 16000; models: VoiceModelVersions; enrollment_revision: number; segments: VoiceSegment[] }
   | { type: 'cancel'; turn_id?: string; playback_id?: string }
-  | { type: 'playback'; playback_id: string; status: 'started' | 'completed' | 'interrupted' | 'failed' }
+  | { type: 'playback'; playback_id: string; status: 'started' | 'completed' | 'interrupted' | 'failed'; played_samples?: number }
   | { type: 'enrollment_done'; registration_id: string; model_id: string; enrollment_revision: number }
   | { type: 'registration_cleared'; registration_id: string; enrollment_revision: number }
 export type VoiceServerControl =
@@ -213,8 +228,9 @@ export type VoiceServerControl =
   | { type: 'heartbeat' }
   | { type: 'turn_ready'; turn_id: string }
   | { type: 'turn_status'; turn_id: string; status: VoiceTurnStatus; payload_sha256?: string; reason?: string }
-  | { type: 'playback_start'; playback_id: string; turn_id: string; text: string; sample_count: number }
-  | { type: 'playback_end'; playback_id: string }
+  | { type: 'playback_start'; playback_id: string; turn_id: string; text: string }
+  | { type: 'playback_end'; playback_id: string; text: string; sample_count: number }
+  | { type: 'response_end'; turn_id: string }
   | { type: 'playback_cancel'; playback_id: string }
   | { type: 'enroll'; registration: VoiceRegistration; enrollment_revision: number }
   | { type: 'clear_registration'; registration_id: string; enrollment_revision: number }

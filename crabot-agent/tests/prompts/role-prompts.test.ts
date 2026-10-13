@@ -55,6 +55,17 @@ describe('独立角色提示词', () => {
     expect(prompt).toContain('PERSONALITY_SENTINEL')
   })
 
+  it('语音装配替换原投递和视觉条款，其它角色保持原样', () => {
+    const inputs = { managerKey: 'fixture::voice', isSystemThread: false, isGroup: true }
+    const voice = assembleManagerSystemPrompt({ ...inputs, voice: true })
+    for (const absent of ['用工具投递答复，普通文本不外发', '主控投递链接', '按需用表格、图示或页面帮助人类理解']) expect(voice).not.toContain(absent)
+    for (const present of ['<voice_reply>', '默认一至三句', '不输出图片、表格、代码块', '成员互聊', '向其它渠道投递使用通讯工具']) expect(voice).toContain(present)
+    for (const role of [{ isSystemThread: true }, { isSystemThread: true, isBuiltinDailyReflection: true }]) {
+      expect(assembleManagerSystemPrompt({ ...inputs, ...role, voice: true })).toBe(assembleManagerSystemPrompt({ ...inputs, ...role }))
+    }
+    expect(assembleManagerSystemPrompt({ ...inputs, voice: false })).toBe(assembleManagerSystemPrompt(inputs))
+  })
+
   it('普通主控核心保留答复投递和回合收尾责任', () => {
     const prompt = assembleManagerSystemPrompt({ managerKey: 'fixture::synthetic', isSystemThread: false })
     expect(prompt).toContain('用工具投递答复，普通文本不外发')

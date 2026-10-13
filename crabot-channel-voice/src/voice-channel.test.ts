@@ -29,7 +29,7 @@ describe('Voice Channel with loopback WS, service adapters and durable Admin/cor
   let accepted: VoiceTurnAuthorizedPayload[], asrCalls: number, ttsCalls: number, phones: Phone[]
   let asrResponses: string[], setupStatus: 'draft' | 'complete'
   const channelId = '语音终端'
-  const rpc = new RpcClient(), runtime = 'isolated-voice-runtime', human = 'isolated-human-admin'
+  const rpc = new RpcClient(), runtime = 'isolated-voice-runtime', human = 'isolated-human-admin', core = 'isolated-core'
   beforeEach(async () => {
     dir = await fs.mkdtemp(path.join(os.tmpdir(), 'voice-channel-')); phones = []; accepted = []; asrCalls = 0; ttsCalls = 0
     setupStatus = 'complete'
@@ -51,12 +51,13 @@ describe('Voice Channel with loopback WS, service adapters and durable Admin/cor
       }
       const request = JSON.parse(body), bearer = req.headers.authorization
       try {
-        if (bearer !== `Bearer ${request.method === 'verify_voice_admin' ? human : runtime}`) throw new Error('invalid runtime/human bearer')
+        if (bearer !== `Bearer ${request.method === 'verify_voice_agent' ? core : request.method === 'verify_voice_admin' ? human : runtime}`) throw new Error('invalid runtime/human bearer')
         let result: unknown
         switch (request.method) {
           case 'get_voice_config': result = { setup_status: setupStatus, terminal_entry: { url: `ws://localhost:3000/ws/voice/${encodeURIComponent(channelId)}` }, config: { asr: { provider_id: 'local', model_id: 'sensevoice' }, tts: { provider_id: 'local', model_id: 'kokoro' }, wake_word: '你好螃蟹' }, ...store.registrations(channelId), contacts: store.registrations(channelId).contacts.map(c => ({ ...c, ...(friends.get(c.platform_user_id) ? { friend_id: friends.get(c.platform_user_id)!.id } : {}) })),
             asr_connection: { provider_id: 'local', format: 'sherpa-offline-ws', endpoint: `ws://localhost:${(admin.address() as AddressInfo).port}/asr`, model_id: 'sensevoice', api_key: 'provider-secret' },
             tts_connection: { provider_id: 'local', format: 'mlx-audio-http', endpoint: `http://localhost:${(admin.address() as AddressInfo).port}`, model_id: 'kokoro', voice: 'zf_xiaobei', api_key: 'provider-secret' } }; break
+          case 'verify_voice_agent':
           case 'verify_voice_admin': result = { verified: true }; break
           case 'sync_voice_terminal': await store.sync(request.params); result = { synced: true }; break
           case 'get_voice_turn_status': result = store.status(request.params.channel_id, request.params.turn_id, request.params.payload_sha256); break
@@ -83,7 +84,7 @@ describe('Voice Channel with loopback WS, service adapters and durable Admin/cor
     })
     await new Promise<void>(resolve => admin.listen(0, resolve))
     const reserve = net.createServer(); await new Promise<void>(resolve => reserve.listen(0, resolve)); port = (reserve.address() as AddressInfo).port; await new Promise<void>(resolve => reserve.close(() => resolve()))
-    channel = new VoiceChannel({ moduleId: channelId, moduleType: 'channel', version: '0.1.0', protocolVersion: '0.3.0', port }, path.join(dir, 'terminal'), runtime)
+    channel = new VoiceChannel({ moduleId: channelId, moduleType: 'channel', version: '0.1.0', protocolVersion: '0.4.0', port }, path.join(dir, 'terminal'), runtime)
     // Resolve only the isolated test Admin. All HTTP RPCs and terminal frames remain real.
     const client = (channel as unknown as { rpcClient: RpcClient }).rpcClient
     client.resolve = async () => [{ port: (admin.address() as AddressInfo).port }] as never
@@ -101,11 +102,11 @@ describe('Voice Channel with loopback WS, service adapters and durable Admin/cor
   }
   async function pair() {
     const pairing = await rpc.callSensitive<any, any>(port, 'voice_admin_action', { channel_id: channelId, command: { action: 'create_pairing' } }, 'isolated-admin', { authorizationBearer: human })
-    const phone = await connect(); phone.send({ type: 'pair', protocol_version: 3, nonce: pairing.pairing.nonce })
+    const phone = await connect(); phone.send({ type: 'pair', protocol_version: 4, nonce: pairing.pairing.nonce })
     const waiting = await phone.wait('pair_waiting'); expect(waiting.verification_code).toBe(pairing.pairing.verification_code)
     await rpc.callSensitive(port, 'voice_admin_action', { channel_id: channelId, command: { action: 'confirm_pairing', pairing_id: waiting.pairing_id } }, 'isolated-admin', { authorizationBearer: human })
     const credential = (await phone.wait('paired')).credential, live = await connect()
-    live.send({ type: 'hello', protocol_version: 3, credential, models: { embedding: VOICE_MODEL_VERSIONS.embedding, segmentation: VOICE_MODEL_VERSIONS.segmentation }, aec_verified: true })
+    live.send({ type: 'hello', protocol_version: 4, credential, models: { embedding: VOICE_MODEL_VERSIONS.embedding, segmentation: VOICE_MODEL_VERSIONS.segmentation }, aec_verified: true })
     const hello = await live.wait('hello'); expect(JSON.stringify(hello)).not.toContain('provider-secret')
     live.send({ type: 'heartbeat', foreground: true, microphone: 'closed', playback: 'idle' })
     return { phone: live, hello }
@@ -149,7 +150,7 @@ describe('Voice Channel with loopback WS, service adapters and durable Admin/cor
   })
   it('rejects a v2 handshake with an explicit version error', async () => {
     const phone = await connect(); phone.send({ type: 'hello', protocol_version: 2, credential: 'old', models: VOICE_MODEL_VERSIONS, aec_verified: false })
-    const error = await phone.wait('error'); expect(error.code).toBe('VOICE_VERSION_UNSUPPORTED'); expect(error.message).toContain('protocol_version=3')
+    const error = await phone.wait('error'); expect(error.code).toBe('VOICE_VERSION_UNSUPPORTED'); expect(error.message).toContain('protocol_version=4')
   })
   it('keeps a contact in the roster without an active sample and resolves current bindings', async () => {
     const contact = store.registrations(channelId).contacts[0]
@@ -163,14 +164,21 @@ describe('Voice Channel with loopback WS, service adapters and durable Admin/cor
   it('returns delivery success only after started, all audio and completed; an interrupted second attempt never replays', async () => {
     const { phone, hello } = await pair(), status = await turn(phone)
     const context: VoiceReplyContext = { channel_id: channelId, session_id: voiceSessionId(channelId), turn_id: status.turn_id, connection_epoch: hello.connection_epoch, expires_at: new Date(Date.now() + 50000).toISOString() }
-    const send = () => rpc.call(port, 'send_message', { session_id: context.session_id, content: { type: 'text', text: '收到' }, voice_reply_context: context }, 'isolated-core', undefined, { timeoutMs: 30000 })
+    const output = (event: any, token = core) => rpc.callSensitive<any, any>(port, 'voice_output', { voice_reply_context: context, event }, 'untrusted-source', { authorizationBearer: token, timeoutMs: 30000 })
+    await expect(output({ type: 'reply_start', playback_id: randomUUID() }, human)).rejects.toThrow()
+    const send = async (text = '收到。再说一句。') => {
+      const playback_id = randomUUID()
+      await output({ type: 'reply_start', playback_id })
+      await output({ type: 'reply_text', playback_id, sequence: 0, text })
+      return output({ type: 'reply_end', playback_id })
+    }
     let settled = false; const first = send().then(result => { settled = true; return result })
-    const start = await phone.wait('playback_start'); await vi.waitFor(() => expect(phone.frames.length).toBeGreaterThan(0)); phone.send({ type: 'playback', playback_id: start.playback_id, status: 'started' })
-    await phone.wait('playback_end'); expect(settled).toBe(false)
-    phone.send({ type: 'playback', playback_id: start.playback_id, status: 'completed' }); expect(await first).toMatchObject({ platform_message_id: start.playback_id })
-    const second = send(); void second.catch(() => {}); const playing = await phone.wait('playback_start')
+    const start = await phone.wait('playback_start'); await vi.waitFor(() => expect(phone.frames.length).toBeGreaterThan(0)); phone.send({ type: 'playback', playback_id: start.playback_id, status: 'started', played_samples: 480 })
+    const end = await phone.wait('playback_end'); expect(settled).toBe(false)
+    phone.send({ type: 'playback', playback_id: start.playback_id, status: 'completed', played_samples: end.sample_count }); expect(await first).toMatchObject({ platform_message_id: start.playback_id })
+    const second = send('第二段。'); void second.catch(() => {}); const playing = await phone.wait('playback_start')
     phone.send({ type: 'playback', playback_id: playing.playback_id, status: 'interrupted' }); await expect(second).rejects.toThrow()
-    expect(ttsCalls).toBe(2)
-    phone.send({ type: 'cancel' }); await new Promise(resolve => setTimeout(resolve, 10)); await expect(send()).rejects.toThrow(); expect(ttsCalls).toBe(2)
+    expect(ttsCalls).toBe(3)
+    phone.send({ type: 'cancel', turn_id: status.turn_id }); await new Promise(resolve => setTimeout(resolve, 10)); await expect(send()).rejects.toThrow(); expect(ttsCalls).toBe(3)
   })
 })
