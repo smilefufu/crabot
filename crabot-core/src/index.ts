@@ -531,8 +531,11 @@ export class ModuleManager {
     const fd = fs.openSync(temporary, 'w', 0o600)
     try { fs.writeFileSync(fd, JSON.stringify(record, null, 2)); fs.fsyncSync(fd) } finally { fs.closeSync(fd) }
     fs.renameSync(temporary, target)
-    const directoryFd = fs.openSync(directory, 'r')
-    try { fs.fsyncSync(directoryFd) } finally { fs.closeSync(directoryFd) }
+    // Node's Windows directory handles cannot be flushed; the file was synced before rename.
+    if (process.platform !== 'win32') {
+      const directoryFd = fs.openSync(directory, 'r')
+      try { fs.fsyncSync(directoryFd) } finally { fs.closeSync(directoryFd) }
+    }
   }
 
   private assertManagementOnlyAllowed(moduleId: ModuleId): void {

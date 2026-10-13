@@ -3,6 +3,8 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 
 export async function syncDirectory(directory: string): Promise<void> {
+  // Node's Windows directory handles cannot be flushed; file sync and rename remain mandatory.
+  if (process.platform === 'win32') return
   const handle = await fs.open(directory, 'r')
   try {
     await handle.sync()

@@ -13,12 +13,12 @@ import { runMigrations } from './upgrade-lib/migrate.mjs'
 import {
   getCurrentVersion,
   getLatestVersion,
-  detectPlatform,
+  getReleaseUrls,
   downloadAndExtract,
   writeVersionFile,
 } from './upgrade-lib/release.mjs'
 import { runSourceUpgrade, syncPythonDeps } from './upgrade-lib/source.mjs'
-import { runBounded } from './lib/scrapling-prepare.mjs'
+import { verifyReleasePackage } from './lib/release-package.mjs'
 import { detectMode as detectInstallScope } from './lib/mode.mjs'
 import { resolveCliDataDir } from './lib/instance.mjs'
 import { homedir } from 'node:os'
@@ -101,8 +101,14 @@ async function runReleaseMode() {
   const { tag: latest, publishedAt } = await getLatestVersion()
 
   if (current === latest) {
-    console.log(`Already up to date (${current}).`)
-    return
+    try {
+      await verifyReleasePackage(CRABOT_HOME, current)
+      console.log(`Already up to date (${current}).`)
+      return
+    } catch (error) {
+      if (error.code === 'CRABOT_PREPARATION_CANCELLED') throw error
+      logger.warn(`Installed release is incomplete; repairing: ${error.message}`)
+    }
   }
 
   console.log(`Current:  ${current ?? '(unknown — VERSION file missing)'}`)
@@ -114,16 +120,11 @@ async function runReleaseMode() {
     return
   }
 
-  const platform = detectPlatform()
-  const url = `https://github.com/smilefufu/crabot/releases/download/${latest}/crabot-${latest}-${platform}.tar.gz`
-  const sha256Url = `${url}.sha256`
-
-  await downloadAndExtract({ url, sha256Url, crabotHome: CRABOT_HOME, logger })
+  await downloadAndExtract({ ...getReleaseUrls(latest), crabotHome: CRABOT_HOME, logger })
 
   console.log('Syncing Python deps ...')
   await syncPythonDeps(CRABOT_HOME, logger)
-  await runBounded(process.execPath, [join(CRABOT_HOME, 'scripts/prepare-scrapling.mjs'), '--check'])
-  await runBounded(process.execPath, [join(CRABOT_HOME, 'scripts/prepare-computer-use.mjs'), '--check'])
+  await verifyReleasePackage(CRABOT_HOME, latest)
 
   console.log('Running data migrations ...')
   const result = await runMigrations(CRABOT_HOME, DATA_DIR, runScript, logger)
