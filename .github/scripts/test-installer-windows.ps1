@@ -57,6 +57,11 @@ if ($env:OS -eq 'Windows_NT') {
         try { $ErrorActionPreference = 'Continue'; & (Join-Path $product 'crabot.cmd') 2>$null }
         finally { $ErrorActionPreference = $savedPreference }
         Assert ($LASTEXITCODE -ne 0) 'missing private Node must fail rather than use the old Node'
+        function node { if ($args[0] -eq '-v') { 'v22.12.0' } else { 'x64' }; $global:LASTEXITCODE = 0 }
+        try { Ensure-Node } finally { Remove-Item Function:node }
+        $bootstrappedVersion = (& (Join-Path $nodeDir 'node.exe') -v).TrimStart('v')
+        Assert ($LASTEXITCODE -eq 0 -and [version]$bootstrappedVersion -ge [version]'22.14.0') 'cold old-Node repair must download and verify a usable official Node ZIP'
+        Assert ((& (Join-Path $nodeDir 'node.exe') -p 'process.arch') -eq 'x64') 'private official Node must execute as x64'
         Set-Content -LiteralPath (Join-Path $product 'crabot.cmd') -Value '@echo custom' -Encoding ASCII
         Write-CrabotLauncher $product
         Assert ((Get-Content -LiteralPath (Join-Path $product 'crabot.cmd') -Raw).Trim() -eq '@echo custom') 'custom launchers must survive'
