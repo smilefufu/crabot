@@ -3,8 +3,8 @@
 ### 跨平台安装与升级兼容：已确认，实施与原生 CI 验证中
 
 - 用户已确认[书面 spec](crabot-docs/superpowers/specs/2026-10-13-cross-platform-installation-design.md)，按四个既有发行平台落实安装/升级、user/system、源码/Release、干净环境与既有安装；本轮不新增 Linux/Windows ARM64 原生发行。用户已反馈截图 Intel Mac 正常安装，之前修复有效；具体 OS/完整浏览器桌面能力不推断。
-- Admin/Agent 的目标代际校验、失败状态协议与[实施计划](crabot-docs/superpowers/plans/2026-10-13-cross-platform-installation-implementation.md)先行发布。已补 uv/Node/Corepack、Bash/zsh PATH、旧包混代拒绝、Windows ZIP/PS5与PS7、CLI依赖恢复链接时序、数据/版本保持和CLI/UI一致校验；本地相关 27 项 Node 与 32 项升级器回归、PowerShell 7 回归通过。
-- 原生 Release CI 新增从最终 archive 实际安装、CLI/help、临时实例 startup/health/stop、数据保留重装、CLI/UI升级、真实旧公开包及修复入口、源码安装和坏摘要拒绝门禁；Linux 另跑 Ubuntu 24.04、Debian 12/13 容器。Windows 真实旧 Corepack 密钥故障与私有回退已在 PS5/PS7 通过；Mac Intel/ARM、Linux 四发行版及两 UID 已有完整通过，最终 head 仍需重验。Windows 最终 ZIP 原始 Admin stderr 已确认目录 fsync EPERM；两处仅跳过 Windows 不支持的目录同步，保留文件刷盘、原子替换及真实错误。11 项持久化回归与 Admin/Core 切换回归、编译通过；最终包新增 Admin Web/RPC、Agent/Memory RPC 实际运行门禁，Windows 最终 ZIP 三模块首次启动已通过；另发现 stop 先终止 supervisor 导致 Memory 孤儿锁住 .pyd，按既有 shutdown 进程树契约修复停机顺序、等待窗口和真实退出确认；双 PowerShell 完整重装/升级待最终原生结果。
+- Admin/Agent 的目标代际校验、失败状态协议与[实施计划](crabot-docs/superpowers/plans/2026-10-13-cross-platform-installation-implementation.md)先行发布。已补 uv/Node/Corepack、Bash/zsh PATH、旧包混代拒绝、Windows ZIP/PS5与PS7、CLI依赖恢复链接时序、数据/版本保持和CLI/UI一致校验；本地相关 27 项 Node 与 36 项升级器回归、PowerShell 7 回归通过。
+- 原生 Release CI 新增从最终 archive 实际安装、CLI/help、临时实例 startup/health/stop、数据保留重装、CLI/UI升级、真实旧公开包及修复入口、源码安装和坏摘要拒绝门禁；Linux 另跑 Ubuntu 24.04、Debian 12/13 容器。Windows 真实旧 Corepack 密钥故障与私有回退已在 PS5/PS7 通过；Mac Intel/ARM、Linux 四发行版及两 UID 已有完整通过，最终 head 仍需重验。Windows 最终 ZIP 原始 Admin stderr 已确认目录 fsync EPERM；两处仅跳过 Windows 不支持的目录同步，保留文件刷盘、原子替换及真实错误。11 项持久化回归与 Admin/Core 切换回归、编译通过；最终包新增 Admin Web/RPC、Agent/Memory RPC 实际运行门禁，Windows 最终 ZIP 三模块首次启动已通过；另发现 stop 先终止 supervisor 导致 Memory 孤儿锁住 .pyd，按既有 shutdown 进程树契约修复停机顺序、等待窗口和真实退出确认；Windows 原生停机/重装已通过；CLI 完整 ZIP 解压超过原两分钟上限，沿用既有二十分钟有界准备窗口，失败/取消仍清理且保留旧代码/VERSION；双 PowerShell 全部升级路径待最终原生结果。
 
 ### Computer-use Cua Driver：候选实现完成，原生与模型验收待补
 

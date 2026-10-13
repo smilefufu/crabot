@@ -67,7 +67,7 @@ async function extractArchive(archive, directory) {
   mkdirSync(directory, { recursive: true })
   if (archive.endsWith('.zip')) {
     await runBounded('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', 'Expand-Archive -LiteralPath $env:CRABOT_UPGRADE_ARCHIVE -DestinationPath $env:CRABOT_UPGRADE_STAGE -Force'], {
-      env: { ...process.env, CRABOT_UPGRADE_ARCHIVE: archive, CRABOT_UPGRADE_STAGE: directory }, timeout: 120_000,
+      env: { ...process.env, CRABOT_UPGRADE_ARCHIVE: archive, CRABOT_UPGRADE_STAGE: directory },
     })
   } else await runBounded('tar', ['-xzf', archive, '-C', directory, '--strip-components=1'], { timeout: 120_000 })
 }
@@ -114,6 +114,7 @@ export async function downloadRelease({ url, sha256Url, version, logger }) {
 export async function extractRelease({ tmp, tarPath, version, crabotHome, logger }) {
   let stage = join(tmp, 'stage')
   try {
+    logger?.info?.('Extracting release archive')
     await extractArchive(tarPath, stage)
     const fs = await import('node:fs')
     if (tarPath.endsWith('.zip')) {
