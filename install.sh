@@ -260,7 +260,13 @@ main() {
     local checksum_url="${url}.sha256"
     if curl -fsSL "$checksum_url" -o "/tmp/${filename}.sha256" 2>/dev/null; then
       info "Verifying checksum..."
-      (cd /tmp && sha256sum -c "${filename}.sha256") || {
+      (cd /tmp && {
+        if command -v sha256sum >/dev/null 2>&1; then
+          sha256sum -c "${filename}.sha256"
+        else
+          shasum -a 256 -c "${filename}.sha256"
+        fi
+      }) || {
         error "Checksum verification failed!"
         exit 1
       }
