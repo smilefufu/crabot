@@ -11,6 +11,8 @@ on:
       - 'scripts/upgrade*.mjs'
       - 'scripts/upgrade-lib/**'
       - 'scripts/_preflight.mjs'
+      - 'scripts/stop.mjs'
+      - 'scripts/lib/__tests__/stop-windows.test.mjs'
       - 'scripts/check-release.mjs'
       - 'scripts/lib/release-package.mjs'
       - 'scripts/lib/toolchain.mjs'
@@ -65,12 +67,16 @@ jobs:
 
       - name: Installer regressions (Unix)
         if: matrix.platform != 'windows'
-        run: node --test scripts/lib/__tests__/installer-compat.test.mjs scripts/lib/__tests__/scrapling-install.test.mjs scripts/lib/__tests__/scrapling-runtime.test.mjs
+        run: node --test scripts/lib/__tests__/installer-compat.test.mjs scripts/lib/__tests__/scrapling-install.test.mjs scripts/lib/__tests__/scrapling-runtime.test.mjs scripts/lib/__tests__/stop-windows.test.mjs
 
       - name: Installer regressions (PowerShell 7)
         if: matrix.platform == 'windows'
         shell: pwsh
         run: .github/scripts/test-installer-windows.ps1
+
+      - name: Windows stop sequence regression
+        if: matrix.platform == 'windows'
+        run: node --test scripts/lib/__tests__/stop-windows.test.mjs
 
       - name: Installer regressions (Windows PowerShell 5.1)
         if: matrix.platform == 'windows'
@@ -372,16 +378,25 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Native final-archive installer, startup, reinstall and rejection
+        if: matrix.platform != 'windows'
         shell: bash
         run: |
-          if [ "${{ matrix.platform }}" = windows ]; then
-            ARCHIVE=$(find "$GITHUB_WORKSPACE" -maxdepth 1 -name 'crabot-*-windows-x64.zip' -print -quit)
-            node .github/scripts/smoke-installer.mjs "$ARCHIVE" pwsh
-            node .github/scripts/smoke-installer.mjs "$ARCHIVE" powershell.exe
-          else
-            ARCHIVE=$(find "$GITHUB_WORKSPACE" -maxdepth 1 -name 'crabot-*.tar.gz' -print -quit)
-            node .github/scripts/smoke-installer.mjs "$ARCHIVE"
-          fi
+          ARCHIVE=$(find "$GITHUB_WORKSPACE" -maxdepth 1 -name 'crabot-*.tar.gz' -print -quit)
+          node .github/scripts/smoke-installer.mjs "$ARCHIVE"
+
+      - name: Final ZIP installer and runtime (PowerShell 7)
+        if: matrix.platform == 'windows'
+        shell: bash
+        run: |
+          ARCHIVE=$(find "$GITHUB_WORKSPACE" -maxdepth 1 -name 'crabot-*-windows-x64.zip' -print -quit)
+          node .github/scripts/smoke-installer.mjs "$ARCHIVE" pwsh
+
+      - name: Final ZIP installer and runtime (Windows PowerShell 5.1)
+        if: matrix.platform == 'windows'
+        shell: bash
+        run: |
+          ARCHIVE=$(find "$GITHUB_WORKSPACE" -maxdepth 1 -name 'crabot-*-windows-x64.zip' -print -quit)
+          node .github/scripts/smoke-installer.mjs "$ARCHIVE" powershell.exe
 
       - name: Linux installer distro compatibility (Ubuntu 24.04, Debian 12 and 13)
         if: matrix.platform == 'linux'

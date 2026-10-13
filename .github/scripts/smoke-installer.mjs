@@ -97,6 +97,7 @@ main
     }
   }
 }
+let ownedRuntimePids = []
 async function assertServicesStarted() {
   const rpc = async (port, method) => {
     const response = await fetch(`http://127.0.0.1:${port}/${method}`, {
@@ -119,6 +120,8 @@ async function assertServicesStarted() {
         if (!['healthy', 'degraded'].includes(health.status)) throw new Error(`${id}: ${JSON.stringify(health)}`)
         if (id === 'admin-web' && health.details?.web_server_running !== true) throw new Error('Admin Web is not running')
       }
+      ownedRuntimePids = modules.filter(item => ['admin-web', 'crabot-agent', 'memory-default'].includes(item.module_id)).map(item => item.pid).filter(pid => Number.isInteger(pid) && pid > 0)
+      if (ownedRuntimePids.length !== 3) throw new Error('MM did not expose all three owned module PIDs')
       const page = await fetch('http://127.0.0.1:3000/', { signal: AbortSignal.timeout(5000) })
       if (!page.ok || !(await page.text()).includes('<html')) throw new Error('Admin Web did not serve the application')
       console.log('[installer smoke] Admin Web/RPC, Agent RPC and Memory RPC are running')
@@ -126,6 +129,14 @@ async function assertServicesStarted() {
     } catch (error) { reason = error; await new Promise(resolve => setTimeout(resolve, 1000)) }
   }
   throw new Error(`Installed services did not start: ${reason?.message}`)
+}
+async function stopAndAssert() {
+  await run(process.execPath, [join(product, 'cli.mjs'), 'stop'])
+  const alive = pid => { try { process.kill(pid, 0); return true } catch { return false } }
+  const deadline = Date.now() + 10_000
+  while (ownedRuntimePids.some(alive) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 200))
+  if (ownedRuntimePids.some(alive)) throw new Error(`stop returned with owned module processes still alive: ${ownedRuntimePids.filter(alive).join(',')}`)
+  ownedRuntimePids = []
 }
 let started = false
 try {
@@ -151,7 +162,7 @@ try {
   try { await install() } catch { runningRejected = true }
   if (!runningRejected) throw new Error('installer did not report rejection of the running instance')
   if ((await fs.readFile(join(product, 'VERSION'), 'utf8')).trim() !== version) throw new Error('running-instance rejection changed version')
-  await run(process.execPath, [join(product, 'cli.mjs'), 'stop'])
+  await stopAndAssert()
   started = false
   const sentinel = join(data, 'installer-sentinel')
   await fs.writeFile(sentinel, 'user-state-must-survive')
@@ -174,7 +185,7 @@ try {
   await assertServicesStarted()
   const uiHealth = await fetch('http://127.0.0.1:19000/health', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }).then(r => r.json())
   if (uiHealth.data?.status !== 'healthy') throw new Error(`UI upgrade core health: ${JSON.stringify(uiHealth)}`)
-  await run(process.execPath, [join(product, 'cli.mjs'), 'stop'])
+  await stopAndAssert()
   started = false
   // Main installer must accept the real old public package without future Cua helpers.
   product = join(home, 'old')
@@ -197,7 +208,7 @@ try {
   started = true
   await run(process.execPath, [join(product, 'cli.mjs'), 'start', '-d'])
   await assertServicesStarted()
-  await run(process.execPath, [join(product, 'cli.mjs'), 'stop'])
+  await stopAndAssert()
   started = false
   badChecksum = true
   let rejected = false
@@ -223,7 +234,8 @@ try {
 } finally {
   if (started) await run(process.execPath, [join(product, 'cli.mjs'), 'stop']).catch(() => {})
   if (windows) {
-    for (const name of ['supervisor.pid', 'mm.pid']) {
+    for (const pid of ownedRuntimePids) await run('taskkill.exe', ['/pid', String(pid), '/t', '/f']).catch(() => {})
+    for (const name of ['mm.pid']) {
       try {
         const pid = Number((await fs.readFile(join(data, name), 'utf8')).trim())
         if (Number.isInteger(pid) && pid > 0) await run('taskkill.exe', ['/pid', String(pid), '/t', '/f']).catch(() => {})
@@ -231,5 +243,7 @@ try {
     }
   }
   server.close()
-  await fs.rm(fixture, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 })
+  const cleanupTimer = setTimeout(() => { console.error(`Fixture cleanup timed out: ${fixture}`); process.exit(1) }, 60_000)
+  cleanupTimer.unref()
+  try { await fs.rm(fixture, { recursive: true, force: true, maxRetries: 2, retryDelay: 200 }) } finally { clearTimeout(cleanupTimer) }
 }

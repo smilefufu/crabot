@@ -12,6 +12,7 @@ import http from 'node:http'
 import { readPid, clearPid, isPidAlive } from './lib/pid.mjs'
 import { resolveCliDataDir } from './lib/instance.mjs'
 import { acquireCliLock, releaseCliLock } from './lib/cli-lock.mjs'
+import { SUPERVISOR_FORCE_TIMEOUT_MS } from './lib/supervisor-shutdown.mjs'
 
 // OFFSET / DATA_DIR 收敛到 resolveCliDataDir（OFFSET 走 env > instance.json > 0；
 // DATA_DIR 走 env > 默认，不读 instance.data_dir）。
@@ -132,7 +133,9 @@ info('Stopping Crabot...')
 
 // 0. PID-first：如果有 mm.pid，先发 SIGTERM 给它（前台模式 = start 进程；后台模式 = supervisor）
 const startPid = readPid(DATA_DIR)
-if (startPid !== null && isPidAlive(startPid)) {
+// Windows SIGTERM terminates the supervisor without running its forwarding handler.
+// Keep its log pipes alive while MM drains the owned module trees through RPC.
+if (!IS_WIN && startPid !== null && isPidAlive(startPid)) {
   info(`Sending SIGTERM to mm.pid=${startPid}...`)
   try { process.kill(startPid, 'SIGTERM') } catch { /* ok */ }
   // 等最多 15s（200ms 粒度轮询：收割通常 10-20s，粗粒度只会平白多等半个周期）
@@ -146,13 +149,15 @@ if (startPid !== null && isPidAlive(startPid)) {
 await shutdownRpc(MM_PORT)
 
 // 2. 等 MM 退出
+const shutdownWindow = IS_WIN ? SUPERVISOR_FORCE_TIMEOUT_MS : 15_000
+const supervisorAlive = () => IS_WIN && startPid !== null && isPidAlive(startPid)
 let waited = 0
-while (isMmRunning() && waited < 15_000) {
+while ((isMmRunning() || supervisorAlive()) && waited < shutdownWindow) {
   await sleep(200)
   waited += 200
 }
 if (isMmRunning()) {
-  warn('Module Manager did not exit in 15s, force killing...')
+  warn(`Module Manager did not exit in ${shutdownWindow / 1000}s, force killing...`)
 }
 
 // 3. Unix 上按命令行杀残留 Node 进程；Windows 由步骤 5 端口扫描兜底
@@ -198,6 +203,12 @@ for (const port of ports) {
   for (const pid of findPidsByPort(port)) {
     killTree(pid)
   }
+}
+
+if (IS_WIN) {
+  const exitDeadline = Date.now() + 5000
+  while (supervisorAlive() && Date.now() < exitDeadline) await sleep(200)
+  if (supervisorAlive()) throw new Error(`Crabot process ${startPid} did not stop; retaining mm.pid`)
 }
 
 // 6. 清理 mm.pid 文件
