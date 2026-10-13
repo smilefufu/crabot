@@ -1,5 +1,10 @@
 # Crabot 项目进度
 
+### 跨平台安装与升级兼容：审查完成，待 spec 确认
+
+- 已复现旧包缺 Cua 检查入口、Bash 登录终端 PATH 不生效、uv 下载失败误报成功及 Windows upgrade 平台拒绝；同时核对 Node/Corepack、PowerShell 响应类型和发行资产差异。修复范围覆盖安装/升级、user/system、源码/Release、干净环境与既有安装，按[书面 spec](crabot-docs/superpowers/specs/2026-10-13-cross-platform-installation-design.md)等待确认后实施。
+- 待确定是否新增 Linux/Windows ARM64 原生发行及截图 Intel Mac 的系统版本；完整安装、首次启动、旧版本升级和失败拒绝将接入原生 CI 门禁。现有 sha256sum 局部修复已交付，整体修复未实现。
+
 ### Computer-use Cua Driver：候选实现完成，原生与模型验收待补
 
 - 按已确认 [spec](crabot-docs/superpowers/specs/2026-10-12-computer-use-cua-driver-design.md) 和先行发布的协议，锁定 `cua-driver-rs-v0.34.1`（prerelease）；标准 builtin 提供 19 项原生方法与 `perform_actions`，不使用 main 的 run_steps/run_script/since。
