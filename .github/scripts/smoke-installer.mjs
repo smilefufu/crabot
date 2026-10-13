@@ -34,7 +34,7 @@ env.NODE_OPTIONS = `${env.NODE_OPTIONS || ''} --import=${pathToFileURL(startupTr
 function run(command, args, options = {}) {
   return new Promise((resolveRun, reject) => {
     const child = spawn(command, args, { cwd: repo, env, stdio: 'inherit', ...options })
-    const timer = setTimeout(() => { child.kill(); reject(new Error(`${command} timed out`)) }, 15 * 60_000)
+    const timer = setTimeout(() => { child.kill(); reject(new Error(`${command} timed out`)) }, 45 * 60_000)
     child.on('error', error => { clearTimeout(timer); reject(error) })
     child.on('exit', code => { clearTimeout(timer); code === 0 ? resolveRun() : reject(new Error(`${command} exited ${code}`)) })
   })

@@ -233,6 +233,8 @@ set "PATH=%LOCALAPPDATA%\crabot\node;%PATH%"
 }
 
 function Install-Crabot {
+# Windows PowerShell 5.1 progress rendering slows large downloads; keep this local.
+$ProgressPreference = 'SilentlyContinue'
 # --- Main ---
 Write-Host "`n== Crabot Installer ==`n" -ForegroundColor Cyan
 

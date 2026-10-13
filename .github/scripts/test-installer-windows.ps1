@@ -2,6 +2,27 @@ $ErrorActionPreference = 'Stop'
 $repo = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
 . (Join-Path $repo 'install.ps1')
 function Assert($value, $message) { if (-not $value) { throw $message } }
+$originalEnsureNode = (Get-Item Function:Ensure-Node).ScriptBlock
+$originalProgress = $ProgressPreference
+$originalArchitecture = $env:PROCESSOR_ARCHITECTURE
+$originalWowArchitecture = $env:PROCESSOR_ARCHITEW6432
+try {
+    $env:PROCESSOR_ARCHITECTURE = 'AMD64'; $env:PROCESSOR_ARCHITEW6432 = $null
+    $ProgressPreference = 'Continue'
+    function Ensure-Node {
+        if ($ProgressPreference -ne 'SilentlyContinue') { throw 'download progress is enabled' }
+        throw 'progress fixture stop'
+    }
+    $message = ''
+    try { Install-Crabot } catch { $message = $_.Exception.Message }
+    Assert ($message -eq 'progress fixture stop') 'installer downloads must suppress PS5 progress rendering'
+    Assert ($ProgressPreference -eq 'Continue') 'installer must preserve the caller progress preference'
+} finally {
+    Set-Item Function:Ensure-Node -Value $originalEnsureNode
+    $ProgressPreference = $originalProgress
+    $env:PROCESSOR_ARCHITECTURE = $originalArchitecture
+    $env:PROCESSOR_ARCHITEW6432 = $originalWowArchitecture
+}
 foreach ($base in @(
     [pscustomobject]@{ ResponseUri = [uri]'https://github.com/smilefufu/crabot/releases/tag/v2026.10.12.4' },
     [pscustomobject]@{ RequestMessage = [pscustomobject]@{ RequestUri = [uri]'https://github.com/smilefufu/crabot/releases/tag/v2026.10.12.4' } }
