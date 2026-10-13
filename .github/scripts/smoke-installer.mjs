@@ -106,8 +106,8 @@ try {
   await run(process.execPath, [join(repo, '.github/scripts/smoke-scrapling.mjs'), product])
   const credentials = await import(pathToFileURL(join(product, 'crabot-admin/dist/credentials.js')).href)
   await credentials.writeCredentials(join(data, 'admin'), await credentials.newCredentialsFromPassword('fixture-install-password', { is_temp: false, changed_via: 'start' }))
-  await run(process.execPath, [join(product, 'cli.mjs'), 'start', '-d'])
   started = true
+  await run(process.execPath, [join(product, 'cli.mjs'), 'start', '-d'])
   const health = await fetch('http://127.0.0.1:19000/health', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }).then(r => r.json())
   if (health.data?.status !== 'healthy') throw new Error(`installed MM health: ${JSON.stringify(health)}`)
   let runningRejected = false
@@ -130,8 +130,8 @@ try {
   if (createHash('sha256').update(await fs.readFile(sentinel)).digest('hex') !== before) throw new Error('CLI upgrade changed user data')
   // Invoke the actual UI runner; use its status file and core health as evidence.
   await fs.writeFile(join(product, 'VERSION'), 'fixture-before-ui-upgrade\n')
-  await run(process.execPath, ['--import', proxy, join(product, 'scripts/ui-upgrade.mjs')])
   started = true
+  await run(process.execPath, ['--import', proxy, join(product, 'scripts/ui-upgrade.mjs')])
   const uiStatus = JSON.parse(await fs.readFile(join(data, 'admin/upgrade-status.json'), 'utf8'))
   if (uiStatus.phase !== 'done' || uiStatus.to_version !== version) throw new Error(`UI upgrade failed: ${JSON.stringify(uiStatus)}`)
   const uiHealth = await fetch('http://127.0.0.1:19000/health', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }).then(r => r.json())
@@ -156,6 +156,10 @@ try {
   }
   if ((await fs.readFile(join(product, 'VERSION'), 'utf8')).trim() !== version) throw new Error('legacy recovery did not commit target version')
   if (createHash('sha256').update(await fs.readFile(sentinel)).digest('hex') !== before) throw new Error('legacy installation/upgrade changed user data')
+  started = true
+  await run(process.execPath, [join(product, 'cli.mjs'), 'start', '-d'])
+  await run(process.execPath, [join(product, 'cli.mjs'), 'stop'])
+  started = false
   badChecksum = true
   let rejected = false
   try { await install() } catch { rejected = true }
@@ -171,8 +175,22 @@ try {
     await run(process.execPath, [join(repo, 'cli.mjs'), '--help'])
   }
   console.log(JSON.stringify({ platform: `${process.platform}-${process.arch}`, version, realInstaller: true, initialEntry: windows ? "irm|iex" : "bash", coreHealth: health.data.status, runningReinstallRejected: true, reinstallPreservesData: true, cliUpgradePreservesData: true, uiUpgradeStatus: uiStatus.phase, realLegacyPackageInstalled: legacyVersion, legacyRecoveryPreservesData: true, badChecksumRejected: true, requests: requests.length }))
+} catch (error) {
+  console.error(`Installer acceptance failed: ${error.message}`)
+  for (const name of ['supervisor.boot.log', 'mm.stderr.log', 'mm.stdout.log']) {
+    try { console.error(`${name}:\n${(await fs.readFile(join(data, 'logs', name), 'utf8')).slice(-12000)}`) } catch {}
+  }
+  throw error
 } finally {
   if (started) await run(process.execPath, [join(product, 'cli.mjs'), 'stop']).catch(() => {})
+  if (windows) {
+    for (const name of ['supervisor.pid', 'mm.pid']) {
+      try {
+        const pid = Number((await fs.readFile(join(data, name), 'utf8')).trim())
+        if (Number.isInteger(pid) && pid > 0) await run('taskkill.exe', ['/pid', String(pid), '/t', '/f']).catch(() => {})
+      } catch {}
+    }
+  }
   server.close()
-  await fs.rm(fixture, { recursive: true, force: true })
+  await fs.rm(fixture, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 })
 }
