@@ -4,7 +4,7 @@
 
 - 用户已确认[书面 spec](crabot-docs/superpowers/specs/2026-10-13-cross-platform-installation-design.md)，按四个既有发行平台落实安装/升级、user/system、源码/Release、干净环境与既有安装；本轮不新增 Linux/Windows ARM64 原生发行。用户已反馈截图 Intel Mac 正常安装，之前修复有效；具体 OS/完整浏览器桌面能力不推断。
 - Admin/Agent 的目标代际校验、失败状态协议与[实施计划](crabot-docs/superpowers/plans/2026-10-13-cross-platform-installation-implementation.md)先行发布。已补 uv/Node/Corepack、Bash/zsh PATH、旧包混代拒绝、Windows ZIP/PS5与PS7、CLI依赖恢复链接时序、数据/版本保持和CLI/UI一致校验；本地相关 23 项 Node 与 32 项升级器回归、PowerShell 7 回归通过。
-- 原生 Release CI 新增从最终 archive 实际安装、CLI/help、临时实例 startup/health/stop、数据保留重装、CLI升级和坏摘要拒绝门禁；四平台真实执行及旧入口仍待 CI，不将 fixture 或本机 ARM 成功记为全平台完成。
+- 原生 Release CI 新增从最终 archive 实际安装、CLI/help、临时实例 startup/health/stop、数据保留重装、CLI/UI升级、真实旧公开包及修复入口、源码安装和坏摘要拒绝门禁；Linux 另跑 Ubuntu 24.04、Debian 12/13 容器。Windows 真实旧 Corepack 密钥故障与私有回退已在 PS5/PS7 通过；四平台完整执行仍待 CI，不将 fixture 或本机 ARM 成功记为全平台完成。
 
 ### Computer-use Cua Driver：候选实现完成，原生与模型验收待补
 
@@ -15,13 +15,13 @@
 - 四平台资产 SHA 和完整 macOS App 签名已核对；真实宿主→service→App 握手、session 生命周期及权限缺失局部降级/清理通过。macOS 尚缺 Accessibility/Screen Recording；Windows、Intel Mac、Linux X11/GNOME Wayland/Sway 和模型效率实验仍待验收/预算。未部署生产，不能声称全平台或模型任务验收完成。
 
 
-### Intel macOS Release：已发布，旧 Mac 实机待复测
+### Intel macOS Release：已发布，截图 Mac 安装已通过
 
-- 10 月 13 日现场安装报错定位到安装器硬调用 `sha256sum`；缺少该命令时改用 macOS 的 `shasum -a 256 -c`，保持 SHA-256 校验与失败拒绝。受控安装回归覆盖两种真实校验工具、好包安装、坏包在解压前拒绝及工具均缺失时失败；旧 Mac 完整安装仍待现场复测。
+- 10 月 13 日现场安装报错定位到安装器硬调用 `sha256sum`；缺少该命令时改用 macOS 的 `shasum -a 256 -c`，保持 SHA-256 校验与失败拒绝。受控安装回归覆盖两种真实校验工具、好包安装、坏包在解压前拒绝及工具均缺失时失败；用户已反馈截图 Mac 正常安装，修复有效；具体 OS 与完整浏览器/桌面能力不推断。
 
 - 按已确认 [spec](crabot-docs/superpowers/specs/2026-10-12-intel-macos-release-design.md) 补原生 `macos-15-intel` / `darwin-x64`；该平台仅使用 cryptography 48.0.1 官方 wheel，其余平台保留 50.0.2，其它固定版本/hash 和 binary-only 校验保持。两项 Linux 失效 URL 使用同版本、同 checksum 的官方快照。
 - [v2026.10.12.4](https://github.com/smilefufu/crabot/releases/tag/v2026.10.12.4) 已公开并成为 latest；[四平台与 publish CI](https://github.com/smilefufu/crabot/actions/runs/38231180278) 全部成功。八项包/checksum 附件已上传，四包发布 checksum 与 GitHub 上传 digest 一致，安装器所用 latest 重定向正确，Intel 真实下载 URL HEAD=200。
-- 原生 Intel 的 cryptography/JWT 三算法正负例、三阶段完整资源及 13 工具、HTTP/HTTPS/JS/stealth/session/PNG/生产 connector 验收通过，包含最终 tar.gz 在不同目录的解包结果。Linux 旧 CLI 一次升级、真实 Memory 同步和两普通 UID 冷/热/EOF/SIGTERM 无残留通过；Windows 最终 zip 真实调用通过。CI helper 搬迁遗漏已补齐，Windows 测试目录缩短以避免 DLL 长路径失败；各平台先上传 draft，全部通过后公开。macOS 15 Intel 已验收，截图旧 Mac 的具体系统版本与现场安装仍待用户复测。
+- 原生 Intel 的 cryptography/JWT 三算法正负例、三阶段完整资源及 13 工具、HTTP/HTTPS/JS/stealth/session/PNG/生产 connector 验收通过，包含最终 tar.gz 在不同目录的解包结果。Linux 旧 CLI 一次升级、真实 Memory 同步和两普通 UID 冷/热/EOF/SIGTERM 无残留通过；Windows 最终 zip 真实调用通过。CI helper 搬迁遗漏已补齐，Windows 测试目录缩短以避免 DLL 长路径失败；各平台先上传 draft，全部通过后公开。macOS 15 Intel 已验收，截图旧 Mac 的现场安装已由用户确认通过，具体系统版本与完整浏览器/桌面能力仍未验收。
 
 ### 工具图片进入模型请求：已修复，system mode 待验证
 

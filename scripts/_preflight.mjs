@@ -1,7 +1,7 @@
 // scripts/_preflight.mjs
 //
-// Side-effect import — 每个直接被 user 调用的 entry 在 `import './lib/*'` 之前
-// `import './_preflight.mjs'` 一行即可（ESM 保证 static import 按声明顺序求值）。
+// CLI 在动态加载 bootstrap entry 前先 await 此模块，确保第三方依赖可被链接。
+// entry 的 side-effect import 复用已经完成的检查；静态 import 顺序不能修复链接缺依赖。
 //
 // 用途：兼容老版本升级路径漏装 scripts/lib 依赖的场景。scripts/lib 是独立 npm 包
 // （依赖 proper-lockfile 等），不属于 root workspace；老版本 install.sh / upgrade

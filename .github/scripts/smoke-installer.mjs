@@ -107,6 +107,10 @@ try {
   started = true
   const health = await fetch('http://127.0.0.1:19000/health', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }).then(r => r.json())
   if (health.data?.status !== 'healthy') throw new Error(`installed MM health: ${JSON.stringify(health)}`)
+  let runningRejected = false
+  try { await install() } catch { runningRejected = true }
+  if (!runningRejected) throw new Error('installer replaced the running instance')
+  if ((await fs.readFile(join(product, 'VERSION'), 'utf8')).trim() !== version) throw new Error('running-instance rejection changed version')
   await run(process.execPath, [join(product, 'cli.mjs'), 'stop'])
   started = false
   const sentinel = join(data, 'installer-sentinel')
@@ -127,6 +131,8 @@ try {
   started = true
   const uiStatus = JSON.parse(await fs.readFile(join(data, 'admin/upgrade-status.json'), 'utf8'))
   if (uiStatus.phase !== 'done' || uiStatus.to_version !== version) throw new Error(`UI upgrade failed: ${JSON.stringify(uiStatus)}`)
+  const uiHealth = await fetch('http://127.0.0.1:19000/health', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }).then(r => r.json())
+  if (uiHealth.data?.status !== 'healthy') throw new Error(`UI upgrade core health: ${JSON.stringify(uiHealth)}`)
   await run(process.execPath, [join(product, 'cli.mjs'), 'stop'])
   started = false
   // Main installer must accept the real old public package without future Cua helpers.
@@ -161,7 +167,7 @@ try {
     }
     await run(process.execPath, [join(repo, 'cli.mjs'), '--help'])
   }
-  console.log(JSON.stringify({ platform: `${process.platform}-${process.arch}`, version, realInstaller: true, coreHealth: health.data.status, reinstallPreservesData: true, cliUpgradePreservesData: true, uiUpgradeStatus: uiStatus.phase, realLegacyPackageInstalled: legacyVersion, legacyRecoveryPreservesData: true, badChecksumRejected: true, requests: requests.length }))
+  console.log(JSON.stringify({ platform: `${process.platform}-${process.arch}`, version, realInstaller: true, coreHealth: health.data.status, runningReinstallRejected: true, reinstallPreservesData: true, cliUpgradePreservesData: true, uiUpgradeStatus: uiStatus.phase, realLegacyPackageInstalled: legacyVersion, legacyRecoveryPreservesData: true, badChecksumRejected: true, requests: requests.length }))
 } finally {
   if (started) await run(process.execPath, [join(product, 'cli.mjs'), 'stop']).catch(() => {})
   server.close()
