@@ -21,19 +21,24 @@ with tempfile.TemporaryDirectory(prefix="ca-compat-") as temporary:
     scratch = root / "scratch"
     scratch.mkdir()
     curl = SimpleNamespace(DEFAULT_CACERT=str(certificates))
-    package = SimpleNamespace(curl=curl)
+    aio = SimpleNamespace(DEFAULT_CACERT=str(certificates))
+    package = SimpleNamespace(curl=curl, aio=aio)
     try:
-        with patch.dict(sys.modules, {"curl_cffi": package, "curl_cffi.curl": curl}), patch.object(locale, "getpreferredencoding", return_value="cp1252"):
-            namespace["prepare_windows_ca"](scratch)
+        with patch.dict(sys.modules, {"curl_cffi": package, "curl_cffi.curl": curl, "curl_cffi.aio": aio}), patch.object(locale, "getpreferredencoding", return_value="cp1252"):
+            prior = namespace["prepare_windows_ca"](scratch)
+            assert os.path.samefile(prior, original)
             assert os.path.samefile(Path.cwd(), scratch), f"cwd={Path.cwd()!s}, scratch={scratch!s}, ca={curl.DEFAULT_CACERT!r}"
-            assert curl.DEFAULT_CACERT == "ca.pem"
+            assert curl.DEFAULT_CACERT == aio.DEFAULT_CACERT == "ca.pem"
             assert Path(curl.DEFAULT_CACERT).read_bytes() == certificates.read_bytes()
         os.chdir(original)
         curl.DEFAULT_CACERT = str(root / "ascii.pem")
-        with patch.dict(sys.modules, {"curl_cffi": package, "curl_cffi.curl": curl}), patch.object(locale, "getpreferredencoding", return_value="cp1252"):
-            namespace["prepare_windows_ca"](scratch)
+        with patch.dict(sys.modules, {"curl_cffi": package, "curl_cffi.curl": curl, "curl_cffi.aio": aio}), patch.object(locale, "getpreferredencoding", return_value="cp1252"):
+            assert namespace["prepare_windows_ca"](scratch) is None
             assert os.path.samefile(os.getcwd(), original)
             assert curl.DEFAULT_CACERT.endswith("ascii.pem")
+        namespace["sys"].platform = "linux"
+        with patch.object(os, "getcwd", side_effect=PermissionError("inherited cwd is inaccessible")):
+            assert namespace["prepare_windows_ca"](scratch) is None
     finally:
         os.chdir(original)
 print("Windows CA path compatibility passed")

@@ -92,13 +92,16 @@ def prepare_windows_ca(temporary):
     if sys.platform != "win32":
         return
     import curl_cffi.curl as curl
+    import curl_cffi.aio as aio
     try:
         curl.DEFAULT_CACERT.encode(locale.getpreferredencoding(False))
     except UnicodeEncodeError:
         # libcurl 的 ANSI fopen 无法读取中文绝对路径；保留选定 CA 的原始内容。
         shutil.copyfile(curl.DEFAULT_CACERT, Path(temporary) / "ca.pem")
+        original_cwd = os.getcwd()
         os.chdir(temporary)
-        curl.DEFAULT_CACERT = "ca.pem"
+        curl.DEFAULT_CACERT = aio.DEFAULT_CACERT = "ca.pem"
+        return original_cwd
 
 
 def main():
@@ -118,14 +121,15 @@ def main():
             os.environ["XDG_CONFIG_HOME"] = str(private / "config")
             os.environ["CHROME_CONFIG_HOME"] = str(private / "config")
         tempfile.tempdir = temporary
-        original_cwd = os.getcwd()
+        original_cwd = None
         try:
-            prepare_windows_ca(temporary)
+            original_cwd = prepare_windows_ca(temporary)
             asyncio.run(serve())
         except asyncio.CancelledError:
             pass
         finally:
-            os.chdir(original_cwd)
+            if original_cwd is not None:
+                os.chdir(original_cwd)
 
 
 if __name__ == "__main__":
