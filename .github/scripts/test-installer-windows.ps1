@@ -44,13 +44,18 @@ if ($env:OS -eq 'Windows_NT') {
         Set-Content -LiteralPath (Join-Path $oldNode 'node.cmd') -Value '@exit /b 99' -Encoding ASCII
         Set-Content -LiteralPath (Join-Path $product 'cli.mjs') -Value "if (!process.execPath.includes('crabot')) process.exit(98); console.log('private-node-ok')" -Encoding ASCII
         Set-Content -LiteralPath (Join-Path $product 'crabot.cmd') -Value @('@echo off','node "%~dp0cli.mjs" %*') -Encoding ASCII
-        $script:PrivateNode = $true
+        function node { if ($args[0] -eq '-v') { 'v22.12.0' } else { 'x64' }; $global:LASTEXITCODE = 0 }
+        Ensure-Node
+        Remove-Item Function:node
+        Assert $script:PrivateNode 'Node 22.12 must select the validated private Node'
         Write-CrabotLauncher $product
         $env:Path = "$oldNode;$oldPath"
         $output = & (Join-Path $product 'crabot.cmd')
         Assert ($LASTEXITCODE -eq 0 -and $output -contains 'private-node-ok') 'new terminal launcher must ignore old Machine PATH Node'
         Remove-Item -LiteralPath (Join-Path $nodeDir 'node.exe')
-        & (Join-Path $product 'crabot.cmd') 2>$null
+        $savedPreference = $ErrorActionPreference
+        try { $ErrorActionPreference = 'Continue'; & (Join-Path $product 'crabot.cmd') 2>$null }
+        finally { $ErrorActionPreference = $savedPreference }
         Assert ($LASTEXITCODE -ne 0) 'missing private Node must fail rather than use the old Node'
         Set-Content -LiteralPath (Join-Path $product 'crabot.cmd') -Value '@echo custom' -Encoding ASCII
         Write-CrabotLauncher $product
@@ -58,6 +63,23 @@ if ($env:OS -eq 'Windows_NT') {
     } finally {
         $env:LOCALAPPDATA = $oldLocal; $env:Path = $oldPath
         Remove-Item -LiteralPath $launcherRoot -Recurse -Force
+    }
+    $corepackRoot = Join-Path ([IO.Path]::GetTempPath()) ('corepack-signature-' + [guid]::NewGuid().ToString('N'))
+    $oldLocal = $env:LOCALAPPDATA; $oldPath = $env:Path; $oldCorepackHome = $env:COREPACK_HOME
+    try {
+        $env:LOCALAPPDATA = Join-Path $corepackRoot 'local'
+        $env:COREPACK_HOME = Join-Path $corepackRoot 'cache'
+        $oldTool = Join-Path $corepackRoot 'old'
+        npm install --prefix $oldTool --ignore-scripts --no-audit --no-fund --registry=https://registry.npmjs.org corepack@0.29.4
+        Assert-NativeSuccess 'Old Corepack fixture'
+        $env:Path = "$(Join-Path $oldTool 'node_modules/.bin');$oldPath"
+        Ensure-Pnpm
+        Assert ($script:CorepackJS -and (Test-Path -LiteralPath $script:CorepackJS)) 'old npm signing keys must trigger the private Corepack fallback'
+        $version = Invoke-Pnpm --version
+        Assert ($version -eq '9.15.9') 'fallback must run the fixed project pnpm version with signature checks enabled'
+    } finally {
+        $env:LOCALAPPDATA = $oldLocal; $env:Path = $oldPath; $env:COREPACK_HOME = $oldCorepackHome
+        Remove-Item -LiteralPath $corepackRoot -Recurse -Force -ErrorAction SilentlyContinue
     }
     Assert (-not (Test-GitBash (Join-Path $env:WINDIR 'System32/bash.exe'))) 'WSL launcher must not be selected as Git Bash'
     $realGit = Get-Command git

@@ -133,8 +133,10 @@ function Ensure-Pnpm {
     $script:CorepackJS = $null
     $cmd = Get-Command corepack -ErrorAction SilentlyContinue
     if ($cmd) {
-        $ver = corepack pnpm@9.15.9 --version
-        if ($LASTEXITCODE -eq 0) { Write-Info "pnpm $ver ready"; return }
+        try {
+            $ver = corepack pnpm@9.15.9 --version
+            if ($LASTEXITCODE -eq 0) { Write-Info "pnpm $ver ready"; return }
+        } catch { Write-Warn "System Corepack failed; preparing the private tool: $_" }
     }
     $tools = Join-Path $env:LOCALAPPDATA 'crabot\corepack'
     $script:CorepackJS = Join-Path $tools 'node_modules\corepack\dist\corepack.js'
@@ -146,8 +148,8 @@ function Ensure-Pnpm {
     Add-ToolPath (Join-Path $tools 'node_modules/.bin')
 }
 function Invoke-Pnpm {
-    if ($script:CorepackJS) { node $script:CorepackJS pnpm @args }
-    else { corepack pnpm @args }
+    if ($script:CorepackJS) { node $script:CorepackJS pnpm@9.15.9 @args }
+    else { corepack pnpm@9.15.9 @args }
     Assert-NativeSuccess 'pnpm'
 }
 function Get-LatestRelease {

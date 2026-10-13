@@ -1,4 +1,6 @@
-import { promises as fs, createReadStream } from 'node:fs'
+import { promises as fs, createReadStream, createWriteStream } from 'node:fs'
+import { pipeline } from 'node:stream/promises'
+import { Readable } from 'node:stream'
 import { createServer } from 'node:http'
 import { join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -14,9 +16,11 @@ const filename = archive.split(/[\\/]/).at(-1)
 const version = filename.match(/^crabot-(.+)-(?:darwin|linux|windows)-(?:x64|arm64)\.(?:tar\.gz|zip)$/)?.[1]
 if (!version) throw new Error(`Invalid test archive: ${filename}`)
 const windows = process.platform === 'win32'
+const legacyVersion = 'v2026.10.12.4'
+const legacyFilename = filename.replace(version, legacyVersion)
 const fixture = await fs.mkdtemp(join(tmpdir(), 'ci-i-'))
 const home = join(fixture, 'h 空')
-const product = join(home, 'p')
+let product = join(home, 'p')
 const data = join(home, '.crabot/data')
 await fs.mkdir(home)
 const env = { ...process.env, HOME: home, USERPROFILE: home, DATA_DIR: data, CRABOT_INSTALL_DIR: product, SHELL: '/bin/bash',
@@ -31,11 +35,14 @@ function run(command, args, options = {}) {
   })
 }
 let badChecksum = false
+const legacyArchive = join(fixture, legacyFilename)
 const requests = []
 const server = createServer(async (req, res) => {
   requests.push(req.url)
   if (req.url.endsWith('/releases/latest')) { res.writeHead(302, { Location: `/smilefufu/crabot/releases/tag/${version}` }); res.end(); return }
   if (req.url.includes('/releases/tag/')) { res.end(version); return }
+  if (req.url.endsWith(`/${legacyFilename}.sha256`)) { res.end(await fs.readFile(`${legacyArchive}.sha256`)); return }
+  if (req.url.endsWith(`/${legacyFilename}`)) { createReadStream(legacyArchive).pipe(res); return }
   if (req.url.endsWith(`/${filename}.sha256`)) {
     const sha = await fs.readFile(`${archive}.sha256`, 'utf8')
     res.end(badChecksum ? '0'.repeat(64) + (windows ? '\n' : `  ${filename}\n`) : sha); return
@@ -46,7 +53,8 @@ const server = createServer(async (req, res) => {
 server.listen(0, '127.0.0.1')
 await once(server, 'listening')
 env.CRABOT_CI_HTTP = `http://127.0.0.1:${server.address().port}`
-async function install() {
+async function install(targetVersion = 'latest') {
+  env.CRABOT_CI_VERSION = targetVersion
   if (windows) {
     const script = join(fixture, 'install.ps1')
     await fs.writeFile(script, `
@@ -57,7 +65,7 @@ function Invoke-WebRequest {
   if ($OutFile) { $arguments.OutFile = $OutFile }
   Microsoft.PowerShell.Utility\\Invoke-WebRequest @arguments
 }
-& (Join-Path $env:CRABOT_CI_REPO 'install.ps1') -InstallDir $env:CRABOT_CI_PRODUCT
+& (Join-Path $env:CRABOT_CI_REPO 'install.ps1') -InstallDir $env:CRABOT_CI_PRODUCT -Version $env:CRABOT_CI_VERSION
 `)
     await run(process.argv[3] || 'pwsh', ['-NoProfile', '-NonInteractive', '-File', script])
   } else {
@@ -72,16 +80,22 @@ curl() {
   done
   command curl "\${args[@]}"
 }
+CRABOT_VERSION="$CRABOT_CI_VERSION"
 main
 `)
     await run('/bin/bash', [script])
-    for (const shell of ['/bin/bash', ...(process.platform === 'darwin' ? ['/bin/zsh'] : [])]) {
+    for (const shell of [env.SHELL]) {
       await run(shell, ['-l', '-i', '-c', 'command -v crabot && crabot --help'])
     }
   }
 }
 let started = false
 try {
+  for (const suffix of ['', '.sha256']) {
+    const response = await fetch(`https://github.com/smilefufu/crabot/releases/download/${legacyVersion}/${legacyFilename}${suffix}`, { signal: AbortSignal.timeout(900_000) })
+    if (!response.ok) throw new Error(`legacy public asset download failed: ${response.status}`)
+    await pipeline(Readable.fromWeb(response.body), createWriteStream(legacyArchive + suffix))
+  }
   await install()
   if ((await fs.readFile(join(product, 'VERSION'), 'utf8')).trim() !== version) throw new Error('installer did not write the verified version')
   await verifyReleasePackage(product, version)
@@ -98,6 +112,7 @@ try {
   const sentinel = join(data, 'installer-sentinel')
   await fs.writeFile(sentinel, 'user-state-must-survive')
   const before = createHash('sha256').update(await fs.readFile(sentinel)).digest('hex')
+  if (process.platform === 'darwin') env.SHELL = '/bin/zsh'
   await install()
   if (createHash('sha256').update(await fs.readFile(sentinel)).digest('hex') !== before) throw new Error('reinstall changed user data')
   const proxy = join(fixture, 'fetch-proxy.mjs')
@@ -106,13 +121,39 @@ try {
   await run(process.execPath, ['--import', proxy, join(product, 'cli.mjs'), 'upgrade', '--yes'])
   if ((await fs.readFile(join(product, 'VERSION'), 'utf8')).trim() !== version) throw new Error('CLI upgrade did not commit its target version')
   if (createHash('sha256').update(await fs.readFile(sentinel)).digest('hex') !== before) throw new Error('CLI upgrade changed user data')
+  // Invoke the actual UI runner; use its status file and core health as evidence.
+  await fs.writeFile(join(product, 'VERSION'), 'fixture-before-ui-upgrade\n')
+  await run(process.execPath, ['--import', proxy, join(product, 'scripts/ui-upgrade.mjs')])
+  started = true
+  const uiStatus = JSON.parse(await fs.readFile(join(data, 'admin/upgrade-status.json'), 'utf8'))
+  if (uiStatus.phase !== 'done' || uiStatus.to_version !== version) throw new Error(`UI upgrade failed: ${JSON.stringify(uiStatus)}`)
+  await run(process.execPath, [join(product, 'cli.mjs'), 'stop'])
+  started = false
+  // Main installer must accept the real old public package without future Cua helpers.
+  product = join(home, 'old')
+  env.CRABOT_CI_PRODUCT = product
+  env.CRABOT_INSTALL_DIR = product
+  await install(legacyVersion)
+  await verifyReleasePackage(product, legacyVersion)
+  await run(process.execPath, [join(product, 'cli.mjs'), '--help'])
+  if (windows) {
+    // The shipped old Windows CLI is immutable; verify its rejected path and installer repair.
+    let oldCliRejected = false
+    try { await run(process.execPath, ['--import', proxy, join(product, 'cli.mjs'), 'upgrade', '--yes']) } catch { oldCliRejected = true }
+    if (!oldCliRejected) throw new Error('expected the old Windows CLI to reject its unsupported platform')
+    await install()
+  } else {
+    await run(process.execPath, ['--import', proxy, join(product, 'cli.mjs'), 'upgrade', '--yes'])
+  }
+  if ((await fs.readFile(join(product, 'VERSION'), 'utf8')).trim() !== version) throw new Error('legacy recovery did not commit target version')
+  if (createHash('sha256').update(await fs.readFile(sentinel)).digest('hex') !== before) throw new Error('legacy installation/upgrade changed user data')
   badChecksum = true
   let rejected = false
   try { await install() } catch { rejected = true }
   if (!rejected) throw new Error('installer accepted a damaged checksum')
   if ((await fs.readFile(join(product, 'VERSION'), 'utf8')).trim() !== version) throw new Error('failed reinstall changed version')
   if (createHash('sha256').update(await fs.readFile(sentinel)).digest('hex') !== before) throw new Error('failed reinstall changed user data')
-  console.log(JSON.stringify({ platform: `${process.platform}-${process.arch}`, version, realInstaller: true, coreHealth: health.data.status, reinstallPreservesData: true, cliUpgradePreservesData: true, badChecksumRejected: true, requests: requests.length }))
+  console.log(JSON.stringify({ platform: `${process.platform}-${process.arch}`, version, realInstaller: true, coreHealth: health.data.status, reinstallPreservesData: true, cliUpgradePreservesData: true, uiUpgradeStatus: uiStatus.phase, realLegacyPackageInstalled: legacyVersion, legacyRecoveryPreservesData: true, badChecksumRejected: true, requests: requests.length }))
 } finally {
   if (started) await run(process.execPath, [join(product, 'cli.mjs'), 'stop']).catch(() => {})
   server.close()
