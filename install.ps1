@@ -189,6 +189,8 @@ if ($FromSource) {
     Set-Location ..
     node scripts/prepare-scrapling.mjs
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    node scripts/prepare-computer-use.mjs
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 } else {
     Write-Info "Release install..."
     if ($Version -eq "latest") {
@@ -316,6 +318,8 @@ if ($FromSource) {
         }
 
         node (Join-Path $InstallDir "scripts/prepare-scrapling.mjs") --check
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        node (Join-Path $InstallDir "scripts/prepare-computer-use.mjs") --check
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
         Set-Content -Path (Join-Path $InstallDir 'VERSION') -Value $Version -Encoding ASCII

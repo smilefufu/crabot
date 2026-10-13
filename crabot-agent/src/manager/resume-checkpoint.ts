@@ -1,6 +1,5 @@
 import {
   createAssistantMessage,
-  createBatchToolResultMessage,
   type EngineMessage,
   type EngineLlmResponseEvent,
   type EngineToolLifecycleEvent,
@@ -9,6 +8,8 @@ import {
 import type { TimedWakeEnvelope } from './loop.js'
 import type { ManagerSessionState } from './types.js'
 import type { ManagerToolProfile } from './tools/tool-catalog.js'
+import { isDeepStrictEqual } from 'node:util'
+import { completeToolUseMessages, unknownToolResult } from '../engine/tool-message-integrity.js'
 
 /** Private execution state; never returned by the Manager read model. */
 export interface ManagerResumeCheckpoint {
@@ -56,17 +57,22 @@ export function resumeManagerMessages(checkpoint: ManagerResumeCheckpoint): Read
     'toolResults' in message ? message.toolResults.map((result) => result.tool_use_id) : [],
   ))
   const tools = checkpoint.tools.filter((event) => pending.has(event.callId) && !results.has(event.toolUseId))
-  if (tools.length === 0) return checkpoint.state.recent
-  // Completed calls keep their real results. An interrupted call is not executed again by recovery.
-  return [
+  const existingCalls = new Set(checkpoint.state.recent.flatMap(message => message.role === 'assistant'
+    ? message.content.filter(block => block.type === 'tool_use').map(block => block.id) : []))
+  const uncommittedCalls = tools.filter(event => !existingCalls.has(event.toolUseId))
+  const messages = uncommittedCalls.length === 0 ? checkpoint.state.recent : [
     ...checkpoint.state.recent,
-    createAssistantMessage(tools.map((event) => ({
+    createAssistantMessage(uncommittedCalls.map(event => ({
       type: 'tool_use' as const, id: event.toolUseId, name: event.name, input: event.input,
     })), 'tool_use'),
-    createBatchToolResultMessage(tools.map((event) => ({
-      tool_use_id: event.toolUseId,
-      content: event.type === 'tool_finished' ? event.output : '[interrupted: agent restarted]',
-      is_error: event.type === 'tool_finished' ? event.isError : true,
-    }))),
   ]
+  // Preserve an existing call rather than duplicating it when its result was not committed.
+  return completeToolUseMessages(messages, block => {
+    const event = tools.find(candidate => candidate.toolUseId === block.id && candidate.name === block.name
+      && isDeepStrictEqual(candidate.input, block.input))
+    if (!event) return unknownToolResult(block)
+    return { tool_use_id: block.id,
+      content: event.type === 'tool_finished' ? event.output : '[interrupted: agent restarted]',
+      is_error: event.type === 'tool_finished' ? event.isError : true }
+  })
 }

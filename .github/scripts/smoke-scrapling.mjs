@@ -6,12 +6,16 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { once } from 'node:events'
+import { spawnSync } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
 const root = resolve(process.argv[2] ?? '.')
 const require = createRequire(join(root, 'crabot-agent/package.json'))
 const { Client } = require('@modelcontextprotocol/sdk/client/index.js')
 const { StdioClientTransport } = require('@modelcontextprotocol/sdk/client/stdio.js')
 const { resolveScraplingConfig, loadRuntime } = require(join(root, 'scripts/lib/scrapling-runtime.cjs'))
-loadRuntime(root, { full: true })
+const { directory, manifest } = loadRuntime(root, { full: true })
+const cryptoCheck = spawnSync(join(directory, manifest.command), ['-I', '-B', fileURLToPath(new URL('./smoke-scrapling-crypto.py', import.meta.url)), directory], { env: process.env, stdio: 'inherit', timeout: 30000 })
+if (cryptoCheck.error || cryptoCheck.status !== 0) throw cryptoCheck.error ?? new Error(`cryptography check exited ${cryptoCheck.status}`)
 const privateDir = await mkdtemp(join(tmpdir(), 'crabot-scrapling-smoke-'))
 const site = createServer((req, res) => {
   if (req.url === '/cookie/set') res.setHeader('Set-Cookie', 'scrapling=retained; Path=/')

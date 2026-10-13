@@ -112,7 +112,7 @@ function now(): string {
 }
 
 async function makeHarness(
-  overrides: Pick<HarnessDeps, 'onOperationNotification' | 'onIncarnationTerminal' | 'now' | 'isClosing'> = {},
+  overrides: Pick<HarnessDeps, 'onOperationNotification' | 'onIncarnationTerminal' | 'now' | 'isClosing' | 'listWorkerBackground' | 'hasRunningBg'> = {},
 ): Promise<{ harness: WorkerHarness; ledger: LedgerStore; adaptersMap: Map<WorkerImplId, WorkerAdapter> }> {
   const ledgersDir = join(dataDir, 'ledgers')
   const workspacesRoot = join(dataDir, 'workspaces')
@@ -614,6 +614,117 @@ describe('WorkerHarness restart recovery notices', () => {
       status: 'consumed',
       consumed_at: expect.any(String),
     })
+  })
+
+  it.each([
+    { name: '已结束中断 child', type: 'agent', status: 'stalled', end: '2026-01-01T00:00:00.000Z', pending: false, halted: true },
+    { name: '已结束 completed child', type: 'agent', status: 'completed', end: '2026-01-01T00:00:00.000Z', pending: false, halted: true },
+    { name: '未知 Shell', type: 'shell', status: 'stalled', end: '2026-01-01T00:00:00.000Z', pending: false, halted: false },
+    { name: '缺少结束时间 child', type: 'agent', status: 'stalled', end: null, pending: false, halted: false },
+    { name: '非法结束时间 child', type: 'agent', status: 'stalled', end: 'invalid', pending: false, halted: false },
+    { name: '缺少类型的历史记录', type: undefined, status: 'stalled', end: '2026-01-01T00:00:00.000Z', pending: false, halted: false },
+    { name: '真实运行 child', type: 'agent', status: 'running', end: null, pending: false, halted: false },
+    { name: '中断 child 通知未结算', type: 'agent', status: 'stalled', end: '2026-01-01T00:00:00.000Z', pending: true, halted: false },
+  ] as const)('关闭 crash 后恢复通知不丢失：$name', async ({ type, status, end, pending, halted }) => {
+    let closing = true
+    const route = vi.fn(async () => ({ consumed: true }))
+    const terminal = vi.fn()
+    const { harness, ledger, adaptersMap } = await makeHarness({
+      isClosing: () => closing, onOperationNotification: route, onIncarnationTerminal: terminal,
+      hasRunningBg: async () => status === 'running' || pending,
+      listWorkerBackground: async () => [{ entity_id: 'agent_old', type, status, ended_at: end }],
+    })
+    const fake = new FakeAdapter('builtin')
+    adaptersMap.set('builtin', fake)
+    harness.stopRecoveryNoticeDelivery()
+    await seed(ledger, DIALOG, makeWorker('w-shutdown-history'))
+    const worker = await getWorker(ledger, 'w-shutdown-history')
+    const incarnation = worker.incarnations[0]
+    harness.handleStateChange({ worker_id: worker.worker_id, incarnation_id: incarnation.incarnation_id,
+      seq: incarnation.seq, impl: 'builtin', session_ref: incarnation.session_ref }, 'exited', { endReason: 'crashed' })
+    await vi.waitFor(() => expect(terminal).toHaveBeenCalledOnce())
+    const stopped = await getWorker(ledger, worker.worker_id)
+    expect(stopped.incarnations[0]).toMatchObject({ state: 'exited', ended_reason: 'crashed' })
+    expect(stopped.task.status).toBe(halted ? 'halted' : 'running')
+    expect(stopped.recovery_notices?.[0]).toMatchObject({ status: 'pending', attempts: 0 })
+    expect(route).not.toHaveBeenCalled()
+    if (halted) expect(stopped.incarnations[0].stop_evidence?.background).toEqual([
+      { entity_id: 'agent_old', ended_at: end },
+    ])
+
+    closing = false
+    const restarted = await makeHarness({
+      onOperationNotification: route,
+      hasRunningBg: async () => status === 'running' || pending,
+      listWorkerBackground: async () => [{ entity_id: 'agent_old', type, status, ended_at: end }],
+    })
+    restarted.adaptersMap.set('builtin', fake)
+    await restarted.harness.reconcileOnStartup()
+    await restarted.harness.reconcileRecoveryNoticesOnStartup()
+    const after = await getWorker(restarted.ledger, worker.worker_id)
+    expect(route).toHaveBeenCalledTimes(halted ? 1 : 0)
+    expect(after.recovery_notices?.[0]?.status).toBe(halted ? 'consumed' : 'pending')
+    if (!halted) expect(after.recovery_notices?.[0]).toMatchObject({ attempts: 1, retry_after_at: expect.any(String) })
+    restarted.harness.stopRecoveryNoticeDelivery()
+  })
+
+  it('同一 crashed 化身的 running 矛盾不能被当成主控已处置，纠正事实后仍可投递', async () => {
+    let instant = Date.parse('2026-01-01T00:10:00Z')
+    const route = vi.fn(async () => ({ consumed: true }))
+    const { harness, ledger, adaptersMap } = await makeHarness({
+      now: () => new Date(instant).toISOString(), onOperationNotification: route,
+    })
+    const fake = new FakeAdapter('builtin')
+    adaptersMap.set('builtin', fake)
+    await seed(ledger, DIALOG, makeWorker('w-inconsistent-crash'))
+    await harness.reconcileOnStartup()
+    const crashed = await getWorker(ledger, 'w-inconsistent-crash')
+    await ledger.upsertWorker(DIALOG, crashed.worker_id, prev => prev && ({ ...prev,
+      task: { id: prev.task.id, title: prev.task.title, status: 'running', created_at: prev.task.created_at },
+    }))
+    await harness.reconcileRecoveryNoticesOnStartup()
+    expect(route).not.toHaveBeenCalled()
+    const retained = (await getWorker(ledger, crashed.worker_id)).recovery_notices?.[0]
+    expect(retained).toMatchObject({ status: 'pending', attempts: 1 })
+    await ledger.upsertWorker(DIALOG, crashed.worker_id, prev => prev && ({ ...prev, task: crashed.task }))
+    instant = Date.parse(retained!.retry_after_at!)
+    await harness.reconcileRecoveryNoticesOnStartup()
+    expect(route).toHaveBeenCalledOnce()
+    expect((await getWorker(ledger, crashed.worker_id)).recovery_notices?.[0]?.status).toBe('consumed')
+    harness.stopRecoveryNoticeDelivery()
+  })
+
+  it.each(['running', 'idle', 'unknown'] as const)('同一化身必须确认恢复，unknown 不消费通知：%s', async state => {
+    const route = vi.fn(async () => ({ consumed: true }))
+    const { harness, ledger } = await makeHarness({ onOperationNotification: route })
+    await seed(ledger, DIALOG, makeWorker('w-carrier-status'))
+    await harness.reconcileOnStartup()
+    await ledger.upsertWorker(DIALOG, 'w-carrier-status', prev => prev && ({ ...prev,
+      task: { ...prev.task, status: 'running', halt: undefined },
+      incarnations: [{ ...prev.incarnations[0], state }],
+    }))
+    await harness.reconcileRecoveryNoticesOnStartup()
+    expect(route).not.toHaveBeenCalled()
+    const notice = (await getWorker(ledger, 'w-carrier-status')).recovery_notices?.[0]
+    expect(notice?.status).toBe(state === 'unknown' ? 'pending' : 'consumed')
+    if (state === 'unknown') expect(notice).toMatchObject({ attempts: 1, retry_after_at: expect.any(String) })
+    harness.stopRecoveryNoticeDelivery()
+  })
+
+  it.each(['running', 'halted'] as const)('通知对应旧化身，主控已换到新主线：%s', async status => {
+    const route = vi.fn(async () => ({ consumed: true }))
+    const { harness, ledger } = await makeHarness({ onOperationNotification: route })
+    await seed(ledger, DIALOG, makeWorker('w-new-mainline'))
+    await harness.reconcileOnStartup()
+    const crashed = await getWorker(ledger, 'w-new-mainline')
+    await ledger.upsertWorker(DIALOG, crashed.worker_id, prev => prev && ({ ...prev,
+      task: status === 'halted' ? crashed.task : { ...prev.task, status: 'running', halt: undefined },
+      incarnations: [...prev.incarnations, { ...prev.incarnations[0], incarnation_id: 'new-mainline', seq: 2,
+        state: status === 'running' ? 'running' : 'exited', started_at: now() }],
+    }))
+    await harness.reconcileRecoveryNoticesOnStartup()
+    expect(route).not.toHaveBeenCalled()
+    expect((await getWorker(ledger, crashed.worker_id)).recovery_notices?.[0]?.status).toBe('consumed')
   })
 
   it('没有 recovery_notices 的历史 crashed worker 不会被扫描或唤醒', async () => {

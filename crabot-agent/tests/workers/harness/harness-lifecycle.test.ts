@@ -3674,6 +3674,21 @@ describe('WorkerHarness.killWorker', () => {
     expect((await harness.listWorkers(worker.manager_key))[0].task.status).not.toBe('closed')
   })
 
+  it.each([
+    { type: 'agent', end: '2026-01-01T00:00:00Z', expected: 'succeeded' },
+    { type: 'shell', end: '2026-01-01T00:00:00Z', expected: 'unknown' },
+    { type: 'agent', end: 'invalid', expected: 'unknown' },
+  ] as const)('停止核验区分已结束中断 child 与未知后台：$type/$end', async ({ type, end, expected }) => {
+    const { harness } = await makeHarness({}, {
+      hasRunningBg: async () => false,
+      listWorkerBackground: async () => [{ entity_id: 'historical', type, status: 'stalled', ended_at: end }],
+    })
+    const worker = await harness.spawnWorker(spawnParams())
+    const operation = await harness.requestWorkerStop(worker.worker_id)
+    expect(operation.status).toBe(expected)
+    expect((await harness.listWorkers(worker.manager_key))[0].task.status === 'closed').toBe(expected === 'succeeded')
+  })
+
   it('PR185: CLI 停止后仍有 stalled 后台资源时不能声称关闭成功', async () => {
     const { harness } = await makeHarness({ implId: 'codex' }, {
       hasRunningBg: async () => false,

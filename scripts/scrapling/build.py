@@ -2,6 +2,7 @@
 import hashlib
 import json
 import os
+import platform
 from pathlib import Path
 import shutil
 import site
@@ -92,6 +93,9 @@ if sys.platform == "win32":
     site.addsitedir(str(runtime / "packages"))
 from scrapling.core.ai import ScraplingMCPServer
 versions = json.loads((inputs / "runtime.json").read_text())
+crypto_version = "48.0.1" if sys.platform == "darwin" and platform.machine() == "x86_64" else "50.0.2"
+if importlib.metadata.version("cryptography") != crypto_version:
+    raise RuntimeError("Unexpected cryptography version for this platform")
 for package in ("scrapling", "mcp", "playwright", "patchright"):
     if importlib.metadata.version(package) != versions[package]:
         raise RuntimeError(f"Unexpected {package} version")

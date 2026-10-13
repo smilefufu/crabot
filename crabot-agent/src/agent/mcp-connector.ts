@@ -16,6 +16,7 @@ import type { ToolDefinition, ToolCategory } from '../engine/types.js'
 import type { MCPServerConfig, ResolvedPermissions } from '../types.js'
 import { buildChildEnv } from '../core/runtime-env.js'
 import { capWithMarker, truncateUtf8 } from '../engine/byte-cap.js'
+import { isManagedComputerUse } from './computer-use-owner.js'
 
 /**
  * 根据 MCP server 名称决定工具类别。
@@ -80,6 +81,7 @@ function decodeImageData(data: string): Buffer | undefined {
 
 export class McpConnector {
   private readonly clients: Map<string, Client> = new Map()
+  private readonly standardDesktopServers = new Set<string>()
   /** Cached tool definitions — populated at connect time, avoids per-task listTools() */
   private cachedTools: ToolDefinition[] = []
   private catalogGeneration = 0
@@ -155,6 +157,8 @@ export class McpConnector {
     for (const [name, defaults] of candidate.toolDefaultsMap) this.toolDefaultsMap.set(name, defaults)
     this.serverDescriptions.clear()
     for (const [name, description] of candidate.serverDescriptions) this.serverDescriptions.set(name, description)
+    this.standardDesktopServers.clear()
+    for (const name of candidate.standardDesktopServers) this.standardDesktopServers.add(name)
     candidate.clients.clear()
     await Promise.allSettled(Array.from(oldClients.values()).map((client) => client.close()))
   }
@@ -195,6 +199,7 @@ export class McpConnector {
   private async connectOne(config: MCPServerConfig): Promise<void> {
     if (this.clients.has(config.name)) return
     assertMcpName(config.name, 'MCP server name')
+    if (isManagedComputerUse(config)) this.standardDesktopServers.add(config.name)
 
     const transport = this.resolveTransport(config)
     const client = new Client(
@@ -366,6 +371,7 @@ export class McpConnector {
               permission_category: mcpCategoryFor(serverName),
               connector_generation: nextGeneration,
               definition_digest: digest,
+              ...(this.standardDesktopServers.has(serverName) ? { computer_use_standard: true, computer_use_driver_version: '0.34.1' } : {}),
             },
             call: async (input, context = {}) => {
               try {
@@ -399,7 +405,7 @@ export class McpConnector {
                 context.abortSignal?.addEventListener('abort', abort, { once: true })
                 let result
                 try {
-                  result = await client.callTool({ name: mcpTool.name, arguments: merged }, undefined, {
+                  result = await client.callTool({ name: mcpTool.name, arguments: merged, ...(this.standardDesktopServers.has(serverName) && context.computerUseCredential ? { _meta: { crabot_computer_use_token: context.computerUseCredential } } : {}) }, undefined, {
                     signal: controller.signal, timeout: MCP_CALL_TIMEOUT_MS,
                   })
                 } catch (error) {
@@ -430,6 +436,11 @@ export class McpConnector {
                 const contentArray = Array.isArray(result.content)
                   ? result.content as Array<{ type: string; text?: string; data?: string; mimeType?: string }>
                   : []
+                const structured = (result as { structuredContent?: Record<string, unknown> }).structuredContent
+                if (this.standardDesktopServers.has(serverName) && structured) {
+                  const json = JSON.stringify(structured)
+                  if (!contentArray.some(block => block.type === 'text' && block.text === json)) contentArray.unshift({ type: 'text', text: json })
+                }
                 let textBytes = 0
                 let textTruncated = false
                 const texts: string[] = []
@@ -478,12 +489,27 @@ export class McpConnector {
                   images: images.length > 0 ? images : undefined,
                   isError: !!result.isError,
                   traceMetadata: {
+                    ...(this.standardDesktopServers.has(serverName) && structured ? {
+                      computer_use_effect: typeof structured.effect === 'string' ? structured.effect : undefined,
+                      computer_use_status: typeof structured.status === 'string' ? structured.status : undefined,
+                      computer_use_code: typeof structured.code === 'string' ? structured.code : undefined,
+                      computer_use_path: typeof structured.path === 'string' ? structured.path : undefined,
+                      computer_use_route: typeof structured.route === 'string' ? structured.route : undefined,
+                      computer_use_verified: typeof structured.verified === 'boolean' ? structured.verified : undefined,
+                      computer_use_pid: typeof merged.pid === 'number' ? merged.pid : undefined,
+                      computer_use_window_id: typeof merged.window_id === 'number' ? merged.window_id : undefined,
+                      computer_use_steps: Array.isArray(structured.steps) ? JSON.stringify(structured.steps) : undefined,
+                    } : {}),
                     mcp_status: result.isError ? 'error' : 'completed',
                     mcp_output_truncated: textTruncated || output.truncated,
                     mcp_content_blocks_omitted: markers.length > 0,
                   },
                 }
               } catch (error) {
+                if (this.standardDesktopServers.has(serverName) && context.abortSignal?.aborted) return {
+                  output: JSON.stringify({ code: 'COMPUTER_USE_CANCELLED_UNKNOWN', effect: 'unknown' }), isError: true,
+                  traceMetadata: { mcp_status: 'error', computer_use_effect: 'unknown' },
+                }
                 const msg = error instanceof Error ? error.message : String(error)
                 return { output: msg, isError: true, traceMetadata: { mcp_status: 'error' } }
               }
@@ -562,6 +588,7 @@ export class McpConnector {
     const entries = Array.from(this.clients.entries())
     this.clients.clear()
     this.cachedTools = []
+    this.standardDesktopServers.clear()
     this.catalogGeneration += 1
     this.toolDigests.clear()
     this.staleServers.clear()

@@ -225,6 +225,7 @@ main() {
     info "Setting up Python environment..."
     (cd crabot-memory && uv sync)
     node scripts/prepare-scrapling.mjs
+    node scripts/prepare-computer-use.mjs
     info "Source install complete."
   else
     section "Release Install"
@@ -259,7 +260,13 @@ main() {
     local checksum_url="${url}.sha256"
     if curl -fsSL "$checksum_url" -o "/tmp/${filename}.sha256" 2>/dev/null; then
       info "Verifying checksum..."
-      (cd /tmp && sha256sum -c "${filename}.sha256") || {
+      (cd /tmp && {
+        if command -v sha256sum >/dev/null 2>&1; then
+          sha256sum -c "${filename}.sha256"
+        else
+          shasum -a 256 -c "${filename}.sha256"
+        fi
+      }) || {
         error "Checksum verification failed!"
         exit 1
       }
@@ -276,6 +283,7 @@ main() {
     info "Setting up Python environment..."
     (cd "$INSTALL_DIR/crabot-memory" && uv sync)
     node "$INSTALL_DIR/scripts/prepare-scrapling.mjs" --check
+    node "$INSTALL_DIR/scripts/prepare-computer-use.mjs" --check
   fi
 
   if [ "$SYSTEM_MODE" = "true" ]; then

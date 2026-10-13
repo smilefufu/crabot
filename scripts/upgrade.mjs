@@ -123,6 +123,7 @@ async function runReleaseMode() {
   console.log('Syncing Python deps ...')
   await syncPythonDeps(CRABOT_HOME, logger)
   await runBounded(process.execPath, [join(CRABOT_HOME, 'scripts/prepare-scrapling.mjs'), '--check'])
+  await runBounded(process.execPath, [join(CRABOT_HOME, 'scripts/prepare-computer-use.mjs'), '--check'])
 
   console.log('Running data migrations ...')
   const result = await runMigrations(CRABOT_HOME, DATA_DIR, runScript, logger)

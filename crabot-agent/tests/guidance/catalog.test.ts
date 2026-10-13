@@ -75,3 +75,16 @@ describe('product guidance boundaries', () => {
     expect(BUILTIN_WORKER_PERMISSIONS.tool_access.desktop).toBe(true)
   })
 })
+
+
+describe('computer-use conditional guidance', () => {
+  it('requires an explicitly available product desktop surface and keeps role boundaries', async () => {
+    expect(guidanceNames('worker')).not.toContain('worker.computer-use')
+    expect(guidanceNames('manager', { computerUse: true })).toContain('manager.computer-use')
+    expect(guidanceNames('worker', { computerUse: true })).not.toContain('manager.computer-use')
+    expect((await createGuidanceTool('worker').call({ name: 'worker.computer-use' }, context)).isError).toBe(true)
+    const result = await createGuidanceTool('worker', { computerUse: true }).call({ name: 'worker.computer-use' }, context)
+    expect(result.output).toContain('partial/unknown')
+    expect(result.isError).toBe(false)
+  })
+})

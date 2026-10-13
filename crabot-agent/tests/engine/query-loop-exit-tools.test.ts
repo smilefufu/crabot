@@ -92,7 +92,9 @@ describe('query-loop: exitsLoop 工具退出', () => {
       return 'invalid evidence'
     })
     const guarded: ToolDefinition = { ...dummyExitTool, turnZeroOnly: false, validateExit }
-    const adapter = makeAdapter([{ toolCalls: [{ name: 'do_exit', id: 'bad', input: {} }], stopReason: 'tool_use' }])
+    const adapter = makeAdapter([0, 1].map(index => ({
+      toolCalls: [{ name: 'do_exit', id: `bad-${index}`, input: {} }], stopReason: 'tool_use' as const,
+    })))
     const result = await runEngine({ prompt: 'test', adapter,
       options: { tools: [guarded], systemPrompt: '', model: 'test', maxTurns: 2 } })
     expect(result.outcome).toBe('max_turns')
@@ -112,6 +114,16 @@ describe('query-loop: exitsLoop 工具退出', () => {
     expect(result.outcome).toBe('aborted')
     expect(result.exitToolCall).toBeUndefined()
     expect(result.finalMessages.at(-1)).toMatchObject({ toolResults: [{ tool_use_id: 'cancelled', is_error: true }] })
+  })
+
+  it('closes exit calls if their permission callback throws before execution', async () => {
+    const ref = { current: [] as import('../../src/engine/types.js').EngineMessage[] }
+    const adapter = makeAdapter([{ toolCalls: [{ name: 'do_exit', id: 'permission-exit', input: {} }], stopReason: 'tool_use' }])
+    await expect(runEngine({ prompt: 'test', adapter, options: { tools: [dummyExitTool], systemPrompt: '', model: 'test',
+      messagesRef: ref, permissionConfig: { mode: 'bypass', checkPermission: async () => { throw new Error('permission unavailable') } },
+    } })).rejects.toThrow('permission unavailable')
+    expect(ref.current.at(-1)).toMatchObject({ toolResults: [{ tool_use_id: 'permission-exit', is_error: true,
+      content: expect.stringContaining('not executed') }] })
   })
 
   it('turn 0 调用 exitsLoop 工具 → engine 立刻退出，exitToolCall 暴露 name + input', async () => {

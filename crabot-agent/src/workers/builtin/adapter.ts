@@ -1,3 +1,4 @@
+import { assertToolMessageIntegrity } from '../../engine/tool-message-integrity.js'
 import { authorizeTool, roleAuthorization } from '../../permissions/tool-authorization.js'
 /**
  * BuiltinWorkerAdapter — worker 契约的 builtin 实现（P1：spawn + burst 状态机 + sendInput/resume）。
@@ -1460,6 +1461,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     initialCount: number,
     compacted: boolean,
   ): Promise<void> {
+    assertToolMessageIntegrity(result.finalMessages)
     if (compacted) {
       let parent: string | null = null
       for (const msg of result.finalMessages as EngineMessage[]) {
@@ -1703,6 +1705,11 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
               } })
             },
           }
+        }
+        if (tool.traceMetadata?.computer_use_standard === true) return { ...tool,
+          call: (input: Record<string, unknown>, context: ToolCallContext) => tool.call(input, { ...context,
+            ...(instance.incarnation_id ? { computerUseCaller: { worker_id: instance.worker_id, incarnation_id: instance.incarnation_id } } : {}),
+          }),
         }
         if (tool.name !== 'delegate_task' && tool.name !== 'send_to_subagent') return tool
         return {

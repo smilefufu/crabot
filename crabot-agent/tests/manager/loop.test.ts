@@ -361,7 +361,7 @@ describe('ManagerLoop', () => {
         if (recovering) {
           yield* chunksFromContent([], 'end_turn')
         } else if (inference++ === 0) {
-          yield* chunksFromContent([{ type: 'tool_use', id: 'once', name: 'probe', input: {} }], 'tool_use', { inputTokens: 90000, outputTokens: 5 })
+          yield* chunksFromContent([{ type: 'tool_use', id: `once-${snapshots.length}`, name: 'probe', input: {} }], 'tool_use', { inputTokens: 90000, outputTokens: 5 })
         } else {
           throw new Error('permanent test failure')
         }
@@ -3310,10 +3310,11 @@ describe('ManagerLoop', () => {
   })
 
   describe('EpisodeResult.successfulSendMessageTargets', () => {
+    let sendSequence = 0
     async function runSendMessageCase(input: Record<string, unknown>, isError = false) {
       const { adapter, queue } = makeAdapter()
       queue.push(
-        { toolCalls: [{ name: 'send_message', id: 'send-1', input }], stopReason: 'tool_use' },
+        { toolCalls: [{ name: 'send_message', id: `send-case-${++sendSequence}`, input }], stopReason: 'tool_use' },
         { stopReason: 'end_turn' },
       )
       const loop = new ManagerLoop(baseDeps({

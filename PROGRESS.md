@@ -1,10 +1,32 @@
 # Crabot 项目进度
 
+### 跨平台安装与升级兼容：审查完成，待 spec 确认
+
+- 已复现旧包缺 Cua 检查入口、Bash 登录终端 PATH 不生效、uv 下载失败误报成功及 Windows upgrade 平台拒绝；同时核对 Node/Corepack、PowerShell 响应类型和发行资产差异。修复范围覆盖安装/升级、user/system、源码/Release、干净环境与既有安装，按[书面 spec](crabot-docs/superpowers/specs/2026-10-13-cross-platform-installation-design.md)等待确认后实施。
+- 待确定是否新增 Linux/Windows ARM64 原生发行及截图 Intel Mac 的系统版本；完整安装、首次启动、旧版本升级和失败拒绝将接入原生 CI 门禁。现有 sha256sum 局部修复已交付，整体修复未实现。
+
+### Computer-use Cua Driver：候选实现完成，原生与模型验收待补
+
+- 按已确认 [spec](crabot-docs/superpowers/specs/2026-10-12-computer-use-cua-driver-design.md) 和先行发布的协议，锁定 `cua-driver-rs-v0.34.1`（prerelease）；标准 builtin 提供 19 项原生方法与 `perform_actions`，不使用 main 的 run_steps/run_script/since。
+- Agent 统一宿主、可信 Manager/builtin 上下文和 CLI incarnation 执行环境；凭据/端点不落入任务 MCP 配置，按现有权限与有效化身检查。引用隔离、忙碌即时返回、16 步/60 秒整批校验、取消/unknown 隔离、不重放、终态 session 清理及旧受管 stdio 退出已实现。Driver 截图默认 1024，保留原生坐标与结果，条件 guidance 正文沿用确认稿。
+- 三模块编译、340 项 Agent 定向回归、215 项 CLI/builtin/Manager 回归、17 项 MCP/桥接、注册表保持和坏 hash/准备清理验证通过；其中 CLI 环境需要真实 CLI 的 85 项被环境跳过。全量 Agent 在单核持续满载 33 分钟仍无报告后中止，未定位原因，不算通过；已有核心提示词 354/350 长度断言在 base 同样不满足，本次未改正文。
+- PR #209 的隔离恢复风险已按确认方案修复：旧 Driver 退出确认后由新的发现/观察重建；同一桥接/可信凭据保留，原生 session/ref 全清，每调用方新观察后才允许输入。重连失败、取消、超时/shutdown 清理迟到运行时，不恢复任务或重放动作；就绪与桥接存活分开判断。恢复修订 MCP/bridge 31 项、Agent 16 项及准备 2 项回归、Agent/MCP 编译通过；两项旧 capability 用例在修复前 HEAD 同样被 storage=null 的 CLI 准入拒绝，单独记录。Windows Release 的 tar 盘符/ZIP 格式问题已改为原生 Expand-Archive；回归使用真实 ZIP（非改名 tar），等待新 head 的真实四平台 CI。
+- 四平台资产 SHA 和完整 macOS App 签名已核对；真实宿主→service→App 握手、session 生命周期及权限缺失局部降级/清理通过。macOS 尚缺 Accessibility/Screen Recording；Windows、Intel Mac、Linux X11/GNOME Wayland/Sway 和模型效率实验仍待验收/预算。未部署生产，不能声称全平台或模型任务验收完成。
+
+
+### Intel macOS Release：已发布，旧 Mac 实机待复测
+
+- 10 月 13 日现场安装报错定位到安装器硬调用 `sha256sum`；缺少该命令时改用 macOS 的 `shasum -a 256 -c`，保持 SHA-256 校验与失败拒绝。受控安装回归覆盖两种真实校验工具、好包安装、坏包在解压前拒绝及工具均缺失时失败；旧 Mac 完整安装仍待现场复测。
+
+- 按已确认 [spec](crabot-docs/superpowers/specs/2026-10-12-intel-macos-release-design.md) 补原生 `macos-15-intel` / `darwin-x64`；该平台仅使用 cryptography 48.0.1 官方 wheel，其余平台保留 50.0.2，其它固定版本/hash 和 binary-only 校验保持。两项 Linux 失效 URL 使用同版本、同 checksum 的官方快照。
+- [v2026.10.12.4](https://github.com/smilefufu/crabot/releases/tag/v2026.10.12.4) 已公开并成为 latest；[四平台与 publish CI](https://github.com/smilefufu/crabot/actions/runs/38231180278) 全部成功。八项包/checksum 附件已上传，四包发布 checksum 与 GitHub 上传 digest 一致，安装器所用 latest 重定向正确，Intel 真实下载 URL HEAD=200。
+- 原生 Intel 的 cryptography/JWT 三算法正负例、三阶段完整资源及 13 工具、HTTP/HTTPS/JS/stealth/session/PNG/生产 connector 验收通过，包含最终 tar.gz 在不同目录的解包结果。Linux 旧 CLI 一次升级、真实 Memory 同步和两普通 UID 冷/热/EOF/SIGTERM 无残留通过；Windows 最终 zip 真实调用通过。CI helper 搬迁遗漏已补齐，Windows 测试目录缩短以避免 DLL 长路径失败；各平台先上传 draft，全部通过后公开。macOS 15 Intel 已验收，截图旧 Mac 的具体系统版本与现场安装仍待用户复测。
+
 ### 工具图片进入模型请求：已修复，system mode 待验证
 
 - system mode 事故摘录已证明 `Read` 返回图片 bytes，Engine 工具回包保留 `images`；OpenAI Chat Completions / Responses 的请求转换遗漏该字段。修复为同批工具回包全部写出后附加多模态图片输入，保留调用 ID、错误文本和原始 Engine 历史。
 - main 已包含另一项微信修复交付的 builtin child `image_paths` / `supports_vision`，本次保留该实现，只补两个 adapter。八项图片回归先复现六项失败；合入最新 main 后 12 个相关文件 313 项及 Agent 类型检查通过，完成本次 diff review。尚未部署到目标 Linux 实例或验证真实 GUI 识图效果。
-- 孤儿 tool-use 的 400 另行核验：此前导出仅为 Worker session 摘录，可见调用均配对，无法证明截图所指 Manager 历史。当前检查点恢复已有中断结果且不重执行工具；仍需目标部署版本、清理前备份及当前历史确认事故来源，未按截图建议静默删除工具调用或改写恢复语义。
+- 孤儿 tool-use 改为框架防护（2026-10-11 用户确认）：共享 Engine 在完整回合、终止及下一请求边界闭合调用，保留真实结果与图片；未执行返回失败，执行中结果不明返回 interrupted/unknown，不重放历史工具。Manager 正常历史提交及 builtin SessionTree 写入强制校验；Manager 遗留缺失结果先逐字节备份再原子补齐，有效检查点真实结果优先，歧义拒绝。477 项定向测试与 Agent 构建通过；独立子进程 SIGKILL 恢复验证保留真实输出、下一请求/落盘均配对、历史工具重执行为 0。全量未收敛，未修改 main 独立复核 25 项原有失败；主仓设计型 PR 待 review/合并，尚未部署。事故具体丢失点仍未确认，不作为防护前置。
 
 ### Memory 可见性一致性：已本机部署，真实行为待观察
 
@@ -83,6 +105,12 @@
 - 按已确认的 2026-09-07 自省设计与本次确认 diff 修正 manager.workboard：阻塞未变化仍判断人类提醒是否必要，最近三条成功外发消息决定重复提醒，旧任务板或摘要中的“此前提醒过”不代替核实；保留条件提醒、用户不催问要求及历史不足时不重复发送。
 - 仅调整指南第 4、5 条和完成条件；151/152 定向检查通过，Agent 类型检查与完整 diff review 通过。唯一失败为执行器核心 354 字超过旧 350 字阈值，在原 main 同样复现，未扩大修改范围。
 - 2026-10-02 23:27（Asia/Shanghai）以 main `a324ea65` 完成模块、Web、CLI、MCP 构建及本地重启；新 Agent PID 79586 使用本仓 dist，七模块及端点健康，启动对账 revived=19、failed=0、unchanged=3841。已核实新指南及自省入口装配；真实提醒效果待后续 trace 验证。
+
+### 重启恢复通知与历史 child 停止证据：已修复，待部署
+
+- 10 月 12 日核实 Telegram 研究 Worker 主线已 crashed，但历史 `stalled` child 阻挡聚合停止，任务保留 running；恢复通知因此被误当作已处置而消费，未送达主控。当前部署实现已在隔离临时台账复现，生产数据未改。
+- 按既有恢复与 PR #185 契约，停止核验区分有可信结束时间的中断 child 与未知 Shell，保存真实结束证据；内部后台投影保留实体类型。恢复通知按对应化身的真实恢复、替换或任务关闭判断过期，同一 crashed/unknown 化身及未结算后台责任继续保留 pending，沿原退避重试。
+- 不改变自省跨重启计时、提示词或持久化格式，不补发历史 consumed 通知。新增 17 项组合与停止保护回归，并加强后台类型投影验证；18 项本次定向检查通过。8 文件 414 项通过，4 项既有失败在未修改 main 复现；Agent 构建/类型检查通过。编译版本使用原事故两条历史记录副本验证通知路由 0→1，未接真实工具或 LLM；尚未部署或干预业务 Worker。
 
 ### 任务板自省无变化跳过：历史终态缺口已修复，待 review
 

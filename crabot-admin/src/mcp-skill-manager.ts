@@ -445,10 +445,10 @@ export class MCPServerManager {
       }> = [
         {
           name: 'computer-use',
-          description: 'Computer interaction: screenshot, mouse, keyboard (macOS)',
+          description: 'Computer interaction: Cua Driver 0.34.1 (macOS, Windows, Linux)',
           transport: 'stdio',
           command: 'node',
-          args: [path.join(mcpToolsPath, 'dist/computer-use/main.js')],
+          args: [path.join(mcpToolsPath, 'dist/computer-use/main.js'), '--crabot-standard'],
         },
         {
           name: 'lsp',
@@ -480,9 +480,14 @@ export class MCPServerManager {
           // 已注册：更新路径（项目目录可能变更）
           for (const [id, existing] of next) {
             if (existing.name === builtin.name && existing.is_builtin && builtin.name !== 'scrapling') {
+              if (builtin.name === 'computer-use' && !(existing.command === 'node' && (existing.transport ?? 'stdio') === 'stdio'
+                && Object.keys(existing.env ?? {}).length === 0 && Array.isArray(existing.args)
+                && (existing.args.length === 1 || (existing.args.length === 2 && existing.args[1] === '--crabot-standard'))
+                && existing.args[0].replace(/\\/g, '/').endsWith('/crabot-mcp-tools/dist/computer-use/main.js'))) break
               const argsChanged = JSON.stringify(existing.args) !== JSON.stringify(builtin.args)
-              if (argsChanged) {
-                next.set(id, { ...existing, args: builtin.args, updated_at: generateTimestamp() })
+              const descriptionChanged = builtin.name === 'computer-use' && existing.description === 'Computer interaction: screenshot, mouse, keyboard (macOS)'
+              if (argsChanged || descriptionChanged) {
+                next.set(id, { ...existing, args: builtin.args, ...(descriptionChanged ? { description: builtin.description } : {}), updated_at: generateTimestamp() })
                 changed = true
               }
               break

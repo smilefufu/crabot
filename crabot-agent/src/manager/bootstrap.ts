@@ -224,6 +224,7 @@ export interface BootstrapDeps {
   readonly describeExecutionTools?: import('./tools/execution-capabilities.js').DescribeExecutionTools
   /** 当前 worker capability；调用方必须按 harness 给出的固定权限快照过滤。 */
   readonly capabilityBundle?: (ctx: WorkerCapabilityContext) => Promise<CapabilityBundle>
+  readonly computerUseEnv?: HarnessDeps['computerUseEnv']
   readonly issueAgentCliCredential?: HarnessDeps['issueAgentCliCredential']
   /** Shared bg registry ownership check for builtin end_turn state mapping. */
   readonly hasRunningBg?: (workerId: string, scope?: 'all') => Promise<boolean>
@@ -490,6 +491,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     assertExecutionAdmission: deps.assertExecutionAdmission,
     assertExecutionPolicy: deps.assertExecutionPolicy,
     capabilityBundle: deps.capabilityBundle,
+    computerUseEnv: deps.computerUseEnv,
     issueAgentCliCredential: deps.issueAgentCliCredential,
     hasRunningBg: deps.hasRunningBg,
     isExecutionReady: () => candidatesReady && !candidatesClosing && !deps.isClosing?.(),

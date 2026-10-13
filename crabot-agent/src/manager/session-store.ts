@@ -11,7 +11,8 @@
 import { promises as fs } from 'fs'
 import { writeFileSync, renameSync, unlinkSync, readFileSync } from 'fs'
 import { join, dirname } from 'path'
-import { randomUUID } from 'crypto'
+import { randomUUID, createHash } from 'crypto'
+import { isDeepStrictEqual } from 'node:util'
 import { AsyncMutex } from '../workers/async-mutex'
 import { encodeSegment, decodeSegment } from '../workers/harness/ledger-store'
 import type { ManagerKey, ManagerSessionState } from './types'
@@ -19,15 +20,20 @@ import { normalizeImageRefs } from './image-vision'
 import type { EngineMessage } from '../engine/index.js'
 import type { ManagerResumeCheckpoint } from './resume-checkpoint.js'
 import type { TimedWakeEnvelope } from './loop.js'
+import { assertToolMessageIntegrity, completeToolUseMessages, unknownToolResult } from '../engine/tool-message-integrity.js'
 
 const STATE_FILE = 'state.json'
 const EPISODES_DIR = 'episodes'
 const CHECKPOINT_FILE = 'running.json'
 
-async function writeJsonAtomic(path: string, data: unknown): Promise<void> {
+async function writeJsonAtomic(path: string, data: unknown, mode?: number): Promise<void> {
   const tmpPath = join(dirname(path), `.tmp-${randomUUID()}.json`)
-  await fs.writeFile(tmpPath, JSON.stringify(data, null, 2), 'utf-8')
-  await fs.rename(tmpPath, path)
+  try {
+    await fs.writeFile(tmpPath, JSON.stringify(data, null, 2), { encoding: 'utf-8', mode })
+    await fs.rename(tmpPath, path)
+  } finally {
+    await fs.unlink(tmpPath).catch(() => {})
+  }
 }
 
 export class ManagerSessionStore {
@@ -40,27 +46,67 @@ export class ManagerSessionStore {
 
   /** 不存在的 key 返回空态,不建目录;坏 JSON 抛明确错误(不静默当空,否则会覆盖历史) */
   async load(key: ManagerKey): Promise<ManagerSessionState> {
+    return this.getMutex(key).run(() => this.loadUnlocked(key))
+  }
+
+  private async loadUnlocked(key: ManagerKey): Promise<ManagerSessionState> {
     const statePath = this.statePathFor(key)
-    let raw: string
+    let raw: Buffer
     try {
-      raw = await fs.readFile(statePath, 'utf-8')
+      raw = await fs.readFile(statePath)
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
         return { key, recent: [], foldedCount: 0 }
       }
       throw err
     }
+    let parsed: ManagerSessionState
     try {
-      const parsed = JSON.parse(raw) as ManagerSessionState
-      // 旧结构兼容:29a25d08 写出的 imageRefs 是 {message_id, paths},归一化为 images 形态
-      return parsed.imageRefs
-        ? { ...parsed, imageRefs: normalizeImageRefs(parsed.imageRefs) }
-        : parsed
+      parsed = JSON.parse(raw.toString('utf-8')) as ManagerSessionState
     } catch (err) {
       throw new Error(
         `[ManagerSessionStore] state.json 损坏(非法 JSON),拒绝当作空状态处理: ${statePath}: ${(err as Error).message}`
       )
     }
+    const incomplete = completeToolUseMessages(parsed.recent)
+    if (incomplete.some((message, index) => message !== parsed.recent[index])) {
+      const checkpoint = await this.loadCheckpoint(key)
+      if (checkpoint) completeToolUseMessages(checkpoint.state.recent)
+      const recent = completeToolUseMessages(parsed.recent, block => {
+        // A matching checkpoint's real result is stronger evidence than a synthetic unknown.
+        const recordedCall = checkpoint?.state.recent.flatMap(message => message.role === 'assistant'
+          ? message.content.filter(candidate => candidate.type === 'tool_use') : [])
+          .find(candidate => candidate.type === 'tool_use' && candidate.id === block.id
+            && candidate.name === block.name && isDeepStrictEqual(candidate.input, block.input))
+        const recordedResult = recordedCall && checkpoint?.state.recent.flatMap(message =>
+          'toolResults' in message ? message.toolResults : []).find(result => result.tool_use_id === block.id)
+        if (recordedResult) return recordedResult
+        const finished = checkpoint?.tools.find(event => event.type === 'tool_finished'
+          && event.toolUseId === block.id && event.name === block.name && isDeepStrictEqual(event.input, block.input))
+        return finished?.type === 'tool_finished'
+          ? { tool_use_id: block.id, content: finished.output, is_error: finished.isError }
+          : unknownToolResult(block)
+      })
+      const mode = (await fs.stat(statePath)).mode & 0o777
+      const backup = `${statePath}.bak-tool-history-${createHash('sha256').update(raw).digest('hex').slice(0, 16)}`
+      let handle: Awaited<ReturnType<typeof fs.open>> | undefined
+      try {
+        handle = await fs.open(backup, 'wx', mode & 0o600)
+        await handle.writeFile(raw)
+        await handle.sync()
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+      } finally {
+        await handle?.close()
+      }
+      if (!(await fs.readFile(backup)).equals(raw) || ((await fs.stat(backup)).mode & 0o777 & ~mode) !== 0) {
+        throw new Error(`[ManagerSessionStore] tool history backup verification failed: ${backup}`)
+      }
+      parsed = { ...parsed, recent }
+      await writeJsonAtomic(statePath, parsed, mode)
+    }
+    // 旧结构兼容:29a25d08 写出的 imageRefs 是 {message_id, paths},归一化为 images 形态
+    return parsed.imageRefs ? { ...parsed, imageRefs: normalizeImageRefs(parsed.imageRefs) } : parsed
   }
 
   /**
@@ -123,10 +169,11 @@ export class ManagerSessionStore {
 
   /** 原子写(tmp+rename);每 key 一把 AsyncMutex 保并发 save 不丢 */
   async save(state: ManagerSessionState): Promise<void> {
+    assertToolMessageIntegrity(state.recent)
     const mutex = this.getMutex(state.key)
     await mutex.run(async () => {
       await fs.mkdir(this.dirFor(state.key), { recursive: true })
-      const current = await this.load(state.key)
+      const current = await this.loadUnlocked(state.key)
       await writeJsonAtomic(this.statePathFor(state.key), { ...state, dailyReflection: current.dailyReflection })
     })
   }
@@ -137,7 +184,7 @@ export class ManagerSessionStore {
     update: (current: ManagerSessionState['dailyReflection']) => ManagerSessionState['dailyReflection'],
   ): Promise<ManagerSessionState['dailyReflection']> {
     return this.getMutex(key).run(async () => {
-      const state = await this.load(key)
+      const state = await this.loadUnlocked(key)
       const dailyReflection = update(state.dailyReflection)
       await fs.mkdir(this.dirFor(key), { recursive: true })
       await writeJsonAtomic(this.statePathFor(key), { ...state, dailyReflection })
@@ -201,6 +248,7 @@ export class ManagerSessionStore {
     for (const key of await this.listManagerKeys()) {
       try {
         const checkpoint = await this.loadCheckpoint(key)
+      if (checkpoint) completeToolUseMessages(checkpoint.state.recent)
         if (checkpoint) checkpoints.push(checkpoint)
       } catch (error) {
         console.error(`[ManagerSessionStore] resume checkpoint unavailable for ${key}:`, error)
@@ -209,13 +257,14 @@ export class ManagerSessionStore {
     return checkpoints
   }
 
-  /** episode 进行中的消息增量落盘(崩溃后可诊断,不参与 load);目录不存在自动创建 */
+  /** 完整工具组的 episode 消息落盘(崩溃后可诊断,不参与 load);目录不存在自动创建 */
   async appendEpisodeLog(
     key: ManagerKey,
     episodeId: string,
     messages: ReadonlyArray<EngineMessage>
   ): Promise<void> {
     if (messages.length === 0) return
+    assertToolMessageIntegrity(messages)
     const mutex = this.getMutex(key)
     await mutex.run(async () => {
       const episodesDir = join(this.dirFor(key), EPISODES_DIR)
