@@ -86,6 +86,28 @@ if ($env:OS -eq 'Windows_NT') {
         $env:LOCALAPPDATA = $oldLocal; $env:Path = $oldPath; $env:COREPACK_HOME = $oldCorepackHome
         Remove-Item -LiteralPath $corepackRoot -Recurse -Force -ErrorAction SilentlyContinue
     }
+    $instanceRoot = Join-Path ([IO.Path]::GetTempPath()) ('instance-space-' + [guid]::NewGuid().ToString('N'))
+    $dataRoot = Join-Path $instanceRoot ('data-' + [char]0x7a7a)
+    New-Item -ItemType Directory -Force -Path $dataRoot | Out-Null
+    try {
+        $instance = @{ data_dir = $dataRoot; port_offset = 0 } | ConvertTo-Json
+        [IO.File]::WriteAllText((Join-Path $instanceRoot 'instance.json'), $instance, [Text.UTF8Encoding]::new($false))
+        Set-Content -LiteralPath (Join-Path $dataRoot 'mm.pid') -Value $PID -Encoding ASCII
+        $probe = Join-Path $instanceRoot 'probe.ps1'
+        $env:CRABOT_TEST_INSTALLER = Join-Path $repo 'install.ps1'
+        $env:CRABOT_TEST_INSTANCE = $instanceRoot
+        Set-Content -LiteralPath $probe -Encoding ASCII -Value @'
+. $env:CRABOT_TEST_INSTALLER
+Assert-CrabotStopped $env:CRABOT_TEST_INSTANCE
+exit 99
+'@
+        $shell = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+        $proc = Start-Process -FilePath $shell -ArgumentList @('-NoProfile','-NonInteractive','-File', "`"$probe`"") -NoNewWindow -Wait -PassThru
+        Assert ($proc.ExitCode -eq 1) 'UTF-8 instance data paths must locate the live PID and reject reinstall'
+    } finally {
+        Remove-Item Env:CRABOT_TEST_INSTALLER, Env:CRABOT_TEST_INSTANCE -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $instanceRoot -Recurse -Force
+    }
     Assert (-not (Test-GitBash (Join-Path $env:WINDIR 'System32/bash.exe'))) 'WSL launcher must not be selected as Git Bash'
     $realGit = Get-Command git
     $gitBash = [IO.Path]::GetFullPath((Join-Path (Split-Path $realGit.Source -Parent) '../bin/bash.exe'))

@@ -1,4 +1,4 @@
-﻿# Crabot Windows Installer
+# Crabot Windows Installer
 # Usage: powershell -ExecutionPolicy Bypass -File install.ps1
 
 param(
@@ -24,7 +24,7 @@ function Add-ToolPath($directory) {
     $script:ToolPaths += $directory
 }
 
-# --- Node.js（用户目录，不要求 Program Files 写权限）---
+# --- Node.js in a writable user directory ---
 function Ensure-Node {
     $nodeCmd = Get-Command node -ErrorAction SilentlyContinue
     if ($nodeCmd) {
@@ -89,7 +89,7 @@ const {spawnSync}=require("node:child_process"); const r=spawnSync(process.env.C
     } finally { Remove-Item Env:CRABOT_BASH_CANDIDATE -ErrorAction SilentlyContinue }
 }
 
-# --- Git Bash（拒绝 PATH 中的 WSL launcher）---
+# --- Git Bash (reject the WSL launcher on PATH) ---
 $PortableGitVersion = '2.54.0'
 $PortableGitSha256 = 'bea006a6cc69673f27b1647e84ab3a68e912fbc175ab6320c5987e012897f311'
 function Ensure-Bash {
@@ -128,7 +128,7 @@ function Ensure-Bash {
     } finally { Remove-Item -LiteralPath $exe -Force -ErrorAction SilentlyContinue }
 }
 
-# --- pnpm（缺 Corepack 时准备固定私有工具）---
+# --- pnpm (prepare a pinned private Corepack when needed) ---
 function Ensure-Pnpm {
     $script:CorepackJS = $null
     $cmd = Get-Command corepack -ErrorAction SilentlyContinue
@@ -181,7 +181,7 @@ function Assert-CrabotStopped($targetInstallDir) {
     $portOffset = 0
     $instancePath = Join-Path $targetInstallDir 'instance.json'
     if (Test-Path -LiteralPath $instancePath -PathType Leaf) {
-        $instance = Get-Content -LiteralPath $instancePath -Raw | ConvertFrom-Json
+        $instance = Get-Content -LiteralPath $instancePath -Raw -Encoding UTF8 | ConvertFrom-Json
         if ($instance.data_dir) {
             $dataDir = $instance.data_dir
         }
@@ -342,8 +342,8 @@ await runSourceUpgrade(process.cwd(), console)
             Remove-Item $legacyDir.FullName -Recurse -Force
         }
 
-        # 根 package 没有随发布包提供 pnpm-lock.yaml，不能用非冻结安装恢复不固定的生产依赖。
-        # 根 package 的 commander、js-yaml、rotating-file-stream 保留发布包自带版本，不能在这里再次解析版本。
+        # The root package has no release lockfile; retain its bundled production dependencies.
+        # Do not resolve new commander, js-yaml or rotating-file-stream versions here.
         foreach ($mod in $runtimeModules) {
             $moduleDir = Join-Path $InstallDir $mod
             $nodeModulesDir = Join-Path $moduleDir 'node_modules'
@@ -405,21 +405,21 @@ if ($newUserPath -cne $currentPath) {
     [Environment]::SetEnvironmentVariable("Path", $newUserPath, "User")
     Write-Info "Updated user PATH for $crabotDir"
 }
-# 同步更新当前 session 的 $env:Path——SetEnvironmentVariable 只写注册表，
-# 当前进程的 PATH 不会自动刷新。同 session 后续操作（如 crabot start）能立即用。
+# SetEnvironmentVariable changes the registry; refresh this session too.
+# Commands run immediately after installation need the new PATH.
 $newSessionPath = Update-CrabotPath $env:Path
 if ($newSessionPath -cne $env:Path) {
     $env:Path = $newSessionPath
 }
 
-# 仅更新可识别的产品启动器，保留用户自定义内容。
+# Update only recognized product launchers; preserve custom contents.
 Write-CrabotLauncher $crabotDir
 
 if (-not $FromSource) { Set-Content -LiteralPath (Join-Path $InstallDir 'VERSION') -Value $Version -Encoding ASCII }
 Write-Host "`n== Done! ==`n" -ForegroundColor Cyan
 Write-Info "Run 'crabot start' to start Crabot (will prompt for admin password on first run)."
 Write-Info "Run 'crabot --help' for all commands."
-Write-Warn "如果新开的终端找不到 crabot 命令，请重启资源管理器（任务管理器 → Windows 资源管理器 → 重启）或注销重登一次，让 user PATH 广播生效。"
+Write-Warn "If a new terminal cannot find crabot, restart Windows Explorer or sign out and back in to refresh the user PATH."
 
 }
 if ($MyInvocation.InvocationName -ne '.') { Install-Crabot }

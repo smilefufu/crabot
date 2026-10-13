@@ -20,7 +20,7 @@ const legacyVersion = 'v2026.10.12.4'
 const legacyFilename = filename.replace(version, legacyVersion)
 const fixture = await fs.mkdtemp(join(tmpdir(), 'ci-i-'))
 const home = join(fixture, 'h 空')
-let product = join(home, 'p')
+let product = join(home, windows ? '.crabot' : 'p')
 const data = join(home, '.crabot/data')
 await fs.mkdir(home)
 const env = { ...process.env, HOME: home, USERPROFILE: home, DATA_DIR: data, CRABOT_INSTALL_DIR: product, SHELL: '/bin/bash',
@@ -39,6 +39,7 @@ const legacyArchive = join(fixture, legacyFilename)
 const requests = []
 const server = createServer(async (req, res) => {
   requests.push(req.url)
+  if (req.url === '/install.ps1') { res.setHeader('Content-Type', 'text/plain; charset=utf-8'); res.end(await fs.readFile(join(repo, 'install.ps1'))); return }
   if (req.url.endsWith('/releases/latest')) { res.writeHead(302, { Location: `/smilefufu/crabot/releases/tag/${version}` }); res.end(); return }
   if (req.url.includes('/releases/tag/')) { res.end(version); return }
   if (req.url.endsWith(`/${legacyFilename}.sha256`)) { res.end(await fs.readFile(`${legacyArchive}.sha256`)); return }
@@ -53,8 +54,9 @@ const server = createServer(async (req, res) => {
 server.listen(0, '127.0.0.1')
 await once(server, 'listening')
 env.CRABOT_CI_HTTP = `http://127.0.0.1:${server.address().port}`
-async function install(targetVersion = 'latest') {
+async function install(targetVersion = 'latest', useIex = false) {
   env.CRABOT_CI_VERSION = targetVersion
+  env.CRABOT_CI_IEX = useIex ? '1' : '0'
   if (windows) {
     const script = join(fixture, 'install.ps1')
     await fs.writeFile(script, `
@@ -65,7 +67,8 @@ function Invoke-WebRequest {
   if ($OutFile) { $arguments.OutFile = $OutFile }
   Microsoft.PowerShell.Utility\\Invoke-WebRequest @arguments
 }
-& (Join-Path $env:CRABOT_CI_REPO 'install.ps1') -InstallDir $env:CRABOT_CI_PRODUCT -Version $env:CRABOT_CI_VERSION
+if ($env:CRABOT_CI_IEX -eq '1') { Invoke-RestMethod ($env:CRABOT_CI_HTTP + '/install.ps1') | Invoke-Expression }
+else { & (Join-Path $env:CRABOT_CI_REPO 'install.ps1') -InstallDir $env:CRABOT_CI_PRODUCT -Version $env:CRABOT_CI_VERSION }
 `)
     await run(process.argv[3] || 'pwsh', ['-NoProfile', '-NonInteractive', '-File', script])
   } else {
@@ -96,7 +99,7 @@ try {
     if (!response.ok) throw new Error(`legacy public asset download failed: ${response.status}`)
     await pipeline(Readable.fromWeb(response.body), createWriteStream(legacyArchive + suffix))
   }
-  await install()
+  await install('latest', windows)
   if ((await fs.readFile(join(product, 'VERSION'), 'utf8')).trim() !== version) throw new Error('installer did not write the verified version')
   await verifyReleasePackage(product, version)
   await run(process.execPath, [join(product, 'cli.mjs'), '--help'])
@@ -167,7 +170,7 @@ try {
     }
     await run(process.execPath, [join(repo, 'cli.mjs'), '--help'])
   }
-  console.log(JSON.stringify({ platform: `${process.platform}-${process.arch}`, version, realInstaller: true, coreHealth: health.data.status, runningReinstallRejected: true, reinstallPreservesData: true, cliUpgradePreservesData: true, uiUpgradeStatus: uiStatus.phase, realLegacyPackageInstalled: legacyVersion, legacyRecoveryPreservesData: true, badChecksumRejected: true, requests: requests.length }))
+  console.log(JSON.stringify({ platform: `${process.platform}-${process.arch}`, version, realInstaller: true, initialEntry: windows ? "irm|iex" : "bash", coreHealth: health.data.status, runningReinstallRejected: true, reinstallPreservesData: true, cliUpgradePreservesData: true, uiUpgradeStatus: uiStatus.phase, realLegacyPackageInstalled: legacyVersion, legacyRecoveryPreservesData: true, badChecksumRejected: true, requests: requests.length }))
 } finally {
   if (started) await run(process.execPath, [join(product, 'cli.mjs'), 'stop']).catch(() => {})
   server.close()
