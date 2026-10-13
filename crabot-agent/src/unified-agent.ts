@@ -854,6 +854,7 @@ export class UnifiedAgent extends ModuleBase {
       port: config.port,
       subscriptions: [
         'channel.message_authorized',
+        'channel.voice_turn_authorized',
         'admin.task_status_changed',
         'module_manager.module_stopped',
         'admin.friend_updated',
