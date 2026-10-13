@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import { spawn } from 'node:child_process'
 import { createServer } from 'node:http'
 import { once } from 'node:events'
+import { pathToFileURL } from 'node:url'
 
 test('Windows stop requests MM shutdown before terminating its logging supervisor', async () => {
   const root = await fs.mkdtemp(join(tmpdir(), 'crabot-win-stop-'))
@@ -32,7 +33,7 @@ Object.defineProperty(process,'platform',{value:'win32'});
 process.kill=(pid,signal)=>{if(signal==='SIGTERM'){fs.writeFileSync(process.env.PREMATURE,'unsafe signal');fs.writeFileSync(process.env.MARKER,'MM lost its log pipe');return true}if(fs.existsSync(process.env.MARKER))throw Object.assign(new Error('gone'),{code:'ESRCH'});return true};
 cp.execSync=command=>{if(command==='netstat -ano -p TCP')return fs.existsSync(process.env.MARKER)?'':'  TCP 127.0.0.1:'+process.env.MM_PORT+' 0.0.0.0:0 LISTENING 43211';return ''};syncBuiltinESMExports()`)
     const result = await new Promise((resolve, reject) => {
-      const child = spawn(process.execPath, ['--import', preload, join(root, 'stop.mjs')], { env: { ...process.env, DATA_DIR: root, CRABOT_PORT_OFFSET: String(port - 19000), CRABOT_CLI_LOCK_HELD: '1', PREMATURE: premature, MARKER: marker, MM_PORT: String(port) }, stdio: ['ignore', 'pipe', 'pipe'] })
+      const child = spawn(process.execPath, ['--import', pathToFileURL(preload).href, join(root, 'stop.mjs')], { env: { ...process.env, DATA_DIR: root, CRABOT_PORT_OFFSET: String(port - 19000), CRABOT_CLI_LOCK_HELD: '1', PREMATURE: premature, MARKER: marker, MM_PORT: String(port) }, stdio: ['ignore', 'pipe', 'pipe'] })
       let output = ''; child.stdout.on('data', data => { output += data }); child.stderr.on('data', data => { output += data })
       const timer = setTimeout(() => { child.kill(); reject(new Error('stop fixture timed out')) }, 10_000)
       child.on('error', reject); child.on('exit', code => { clearTimeout(timer); resolve({ code, output }) })
