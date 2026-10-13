@@ -173,13 +173,13 @@ try {
   const proxy = join(fixture, 'fetch-proxy.mjs')
   await fs.writeFile(proxy, `const original=globalThis.fetch;globalThis.fetch=(url,options)=>{url=String(url);if(url.startsWith('https://github.com/smilefufu/crabot/'))url=process.env.CRABOT_CI_HTTP+url.slice('https://github.com'.length);return original(url,options)}`)
   await fs.writeFile(join(product, 'VERSION'), 'fixture-previous-version\n')
-  await run(process.execPath, ['--import', proxy, join(product, 'cli.mjs'), 'upgrade', '--yes'])
+  await run(process.execPath, ['--import', pathToFileURL(proxy).href, join(product, 'cli.mjs'), 'upgrade', '--yes'])
   if ((await fs.readFile(join(product, 'VERSION'), 'utf8')).trim() !== version) throw new Error('CLI upgrade did not commit its target version')
   if (createHash('sha256').update(await fs.readFile(sentinel)).digest('hex') !== before) throw new Error('CLI upgrade changed user data')
   // Invoke the actual UI runner; use its status file and core health as evidence.
   await fs.writeFile(join(product, 'VERSION'), 'fixture-before-ui-upgrade\n')
   started = true
-  await run(process.execPath, ['--import', proxy, join(product, 'scripts/ui-upgrade.mjs')])
+  await run(process.execPath, ['--import', pathToFileURL(proxy).href, join(product, 'scripts/ui-upgrade.mjs')])
   const uiStatus = JSON.parse(await fs.readFile(join(data, 'admin/upgrade-status.json'), 'utf8'))
   if (uiStatus.phase !== 'done' || uiStatus.to_version !== version) throw new Error(`UI upgrade failed: ${JSON.stringify(uiStatus)}`)
   await assertServicesStarted()
@@ -197,11 +197,11 @@ try {
   if (windows) {
     // The shipped old Windows CLI is immutable; verify its rejected path and installer repair.
     let oldCliRejected = false
-    try { await run(process.execPath, ['--import', proxy, join(product, 'cli.mjs'), 'upgrade', '--yes']) } catch { oldCliRejected = true }
+    try { await run(process.execPath, ['--import', pathToFileURL(proxy).href, join(product, 'cli.mjs'), 'upgrade', '--yes']) } catch { oldCliRejected = true }
     if (!oldCliRejected) throw new Error('expected the old Windows CLI to reject its unsupported platform')
     await install()
   } else {
-    await run(process.execPath, ['--import', proxy, join(product, 'cli.mjs'), 'upgrade', '--yes'])
+    await run(process.execPath, ['--import', pathToFileURL(proxy).href, join(product, 'cli.mjs'), 'upgrade', '--yes'])
   }
   if ((await fs.readFile(join(product, 'VERSION'), 'utf8')).trim() !== version) throw new Error('legacy recovery did not commit target version')
   if (createHash('sha256').update(await fs.readFile(sentinel)).digest('hex') !== before) throw new Error('legacy installation/upgrade changed user data')
