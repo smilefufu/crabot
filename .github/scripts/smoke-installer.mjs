@@ -97,6 +97,35 @@ main
     }
   }
 }
+async function assertServicesStarted() {
+  const rpc = async (port, method) => {
+    const response = await fetch(`http://127.0.0.1:${port}/${method}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}', signal: AbortSignal.timeout(5000),
+    })
+    const result = await response.json()
+    if (!response.ok || result.success !== true) throw new Error(`${port}/${method}: ${JSON.stringify(result)}`)
+    return result.data
+  }
+  const deadline = Date.now() + 60_000
+  let reason
+  while (Date.now() < deadline) {
+    try {
+      const { modules } = await rpc(19000, 'list_modules')
+      for (const id of ['admin-web', 'crabot-agent', 'memory-default']) {
+        const module = modules.find(item => item.module_id === id)
+        if (module?.status !== 'running') throw new Error(`${id} is ${module?.status || 'missing'}`)
+        const health = await rpc(module.port, 'health')
+        if (!['healthy', 'degraded'].includes(health.status)) throw new Error(`${id}: ${JSON.stringify(health)}`)
+        if (id === 'admin-web' && health.details?.web_server_running !== true) throw new Error('Admin Web is not running')
+      }
+      const page = await fetch('http://127.0.0.1:3000/', { signal: AbortSignal.timeout(5000) })
+      if (!page.ok || !(await page.text()).includes('<html')) throw new Error('Admin Web did not serve the application')
+      console.log('[installer smoke] Admin Web/RPC, Agent RPC and Memory RPC are running')
+      return
+    } catch (error) { reason = error; await new Promise(resolve => setTimeout(resolve, 1000)) }
+  }
+  throw new Error(`Installed services did not start: ${reason?.message}`)
+}
 let started = false
 try {
   for (const suffix of ['', '.sha256']) {
@@ -109,10 +138,12 @@ try {
   await verifyReleasePackage(product, version)
   await run(process.execPath, [join(product, 'cli.mjs'), '--help'])
   await run(process.execPath, [join(repo, '.github/scripts/smoke-scrapling.mjs'), product])
+  await run(process.execPath, [join(repo, '.github/scripts/test-durable-file.mjs'), product])
   const credentials = await import(pathToFileURL(join(product, 'crabot-admin/dist/credentials.js')).href)
   await credentials.writeCredentials(join(data, 'admin'), await credentials.newCredentialsFromPassword('fixture-install-password', { is_temp: false, changed_via: 'start' }))
   started = true
   await run(process.execPath, [join(product, 'cli.mjs'), 'start', '-d'])
+  await assertServicesStarted()
   const health = await fetch('http://127.0.0.1:19000/health', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }).then(r => r.json())
   if (health.data?.status !== 'healthy') throw new Error(`installed MM health: ${JSON.stringify(health)}`)
   let runningRejected = false
@@ -139,6 +170,7 @@ try {
   await run(process.execPath, ['--import', proxy, join(product, 'scripts/ui-upgrade.mjs')])
   const uiStatus = JSON.parse(await fs.readFile(join(data, 'admin/upgrade-status.json'), 'utf8'))
   if (uiStatus.phase !== 'done' || uiStatus.to_version !== version) throw new Error(`UI upgrade failed: ${JSON.stringify(uiStatus)}`)
+  await assertServicesStarted()
   const uiHealth = await fetch('http://127.0.0.1:19000/health', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }).then(r => r.json())
   if (uiHealth.data?.status !== 'healthy') throw new Error(`UI upgrade core health: ${JSON.stringify(uiHealth)}`)
   await run(process.execPath, [join(product, 'cli.mjs'), 'stop'])
@@ -163,6 +195,7 @@ try {
   if (createHash('sha256').update(await fs.readFile(sentinel)).digest('hex') !== before) throw new Error('legacy installation/upgrade changed user data')
   started = true
   await run(process.execPath, [join(product, 'cli.mjs'), 'start', '-d'])
+  await assertServicesStarted()
   await run(process.execPath, [join(product, 'cli.mjs'), 'stop'])
   started = false
   badChecksum = true
