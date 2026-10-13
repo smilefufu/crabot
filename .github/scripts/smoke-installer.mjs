@@ -106,7 +106,8 @@ async function assertServicesStarted() {
     if (!response.ok || result.success !== true) throw new Error(`${port}/${method}: ${JSON.stringify(result)}`)
     return result.data
   }
-  const deadline = Date.now() + 60_000
+  // An empty instance retries its missing model configuration for 60s before degraded registration.
+  const deadline = Date.now() + 120_000
   let reason
   while (Date.now() < deadline) {
     try {
