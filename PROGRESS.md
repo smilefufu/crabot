@@ -1,9 +1,10 @@
 # Crabot 项目进度
 
-### 跨平台安装与升级兼容：审查完成，待 spec 确认
+### 跨平台安装与升级兼容：已确认，实施与原生 CI 验证中
 
-- 已复现旧包缺 Cua 检查入口、Bash 登录终端 PATH 不生效、uv 下载失败误报成功及 Windows upgrade 平台拒绝；同时核对 Node/Corepack、PowerShell 响应类型和发行资产差异。修复范围覆盖安装/升级、user/system、源码/Release、干净环境与既有安装，按[书面 spec](crabot-docs/superpowers/specs/2026-10-13-cross-platform-installation-design.md)等待确认后实施。
-- 待确定是否新增 Linux/Windows ARM64 原生发行及截图 Intel Mac 的系统版本；完整安装、首次启动、旧版本升级和失败拒绝将接入原生 CI 门禁。现有 sha256sum 局部修复已交付，整体修复未实现。
+- 用户已确认[书面 spec](crabot-docs/superpowers/specs/2026-10-13-cross-platform-installation-design.md)，按四个既有发行平台落实安装/升级、user/system、源码/Release、干净环境与既有安装；本轮不新增 Linux/Windows ARM64 原生发行。用户已反馈截图 Intel Mac 正常安装，之前修复有效；具体 OS/完整浏览器桌面能力不推断。
+- Admin/Agent 的目标代际校验、失败状态协议与[实施计划](crabot-docs/superpowers/plans/2026-10-13-cross-platform-installation-implementation.md)先行发布。已补 uv/Node/Corepack、Bash/zsh PATH、旧包混代拒绝、Windows ZIP/PS5与PS7、CLI依赖恢复链接时序、数据/版本保持和CLI/UI一致校验；本地相关 23 项 Node 与 32 项升级器回归、PowerShell 7 回归通过。
+- 原生 Release CI 新增从最终 archive 实际安装、CLI/help、临时实例 startup/health/stop、数据保留重装、CLI升级和坏摘要拒绝门禁；四平台真实执行及旧入口仍待 CI，不将 fixture 或本机 ARM 成功记为全平台完成。
 
 ### Computer-use Cua Driver：候选实现完成，原生与模型验收待补
 

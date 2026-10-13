@@ -5,6 +5,17 @@ on:
     tags: ['v*']
   pull_request:
     paths:
+      - 'install.sh'
+      - 'install.ps1'
+      - 'cli.mjs'
+      - 'scripts/upgrade*.mjs'
+      - 'scripts/upgrade-lib/**'
+      - 'scripts/_preflight.mjs'
+      - 'scripts/check-release.mjs'
+      - 'scripts/lib/release-package.mjs'
+      - 'scripts/lib/toolchain.mjs'
+      - 'scripts/lib/__tests__/*install*.mjs'
+      - '.github/scripts/*install*'
       - 'scripts/computer-use/**'
       - 'scripts/*computer-use*.mjs'
       - 'scripts/lib/computer-use-*'
@@ -48,6 +59,20 @@ jobs:
         with:
           node-version: '22'
           cache: 'pnpm'
+
+      - name: Installer regressions (Unix)
+        if: matrix.platform != 'windows'
+        run: node --test scripts/lib/__tests__/installer-compat.test.mjs scripts/lib/__tests__/scrapling-install.test.mjs
+
+      - name: Installer regressions (PowerShell 7)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: .github/scripts/test-installer-windows.ps1
+
+      - name: Installer regressions (Windows PowerShell 5.1)
+        if: matrix.platform == 'windows'
+        shell: powershell
+        run: .github/scripts/test-installer-windows.ps1
 
       - name: Install dependencies (with devDeps for build)
         shell: bash
@@ -338,6 +363,18 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node .github/scripts/smoke-scrapling.mjs "$Unpacked"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Native final-archive installer, startup, reinstall and rejection
+        shell: bash
+        run: |
+          if [ "${{ matrix.platform }}" = windows ]; then
+            ARCHIVE=$(find "$GITHUB_WORKSPACE" -maxdepth 1 -name 'crabot-*-windows-x64.zip' -print -quit)
+            node .github/scripts/smoke-installer.mjs "$ARCHIVE" pwsh
+            node .github/scripts/smoke-installer.mjs "$ARCHIVE" powershell.exe
+          else
+            ARCHIVE=$(find "$GITHUB_WORKSPACE" -maxdepth 1 -name 'crabot-*.tar.gz' -print -quit)
+            node .github/scripts/smoke-installer.mjs "$ARCHIVE"
+          fi
 
       - name: Verify system upgrade and ordinary users (Linux)
         if: matrix.platform == 'linux'

@@ -9,24 +9,33 @@
 //
 // 这里 detect 缺失 → 自动跑一次 corepack pnpm install --prod；失败给出明确指引。
 
-import { existsSync } from 'node:fs'
-import { spawnSync } from 'node:child_process'
+import { existsSync, accessSync, constants } from 'node:fs'
+import { createRequire } from 'node:module'
+import { ensureCorepack } from './lib/toolchain.mjs'
+import { runBounded } from './lib/scrapling-prepare.mjs'
 import { resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const scriptsLibDir = resolve(__dirname, 'lib')
 const pkg = resolve(scriptsLibDir, 'package.json')
-const nm = resolve(scriptsLibDir, 'node_modules')
+let missing = false
+if (existsSync(pkg)) {
+  try { createRequire(pkg).resolve('proper-lockfile') } catch { missing = true }
+}
 
-if (existsSync(pkg) && !existsSync(nm)) {
+if (missing) {
+  if (process.getuid?.() !== 0 && existsSync('/etc/crabot/cluster.version')) throw new Error('Shared dependencies are missing; ask the administrator to repair the system installation')
+  accessSync(scriptsLibDir, constants.W_OK)
   console.log('[crabot] scripts/lib deps missing, auto-installing once...')
-  const r = spawnSync('corepack', ['pnpm', 'install', '--prod', '--prefer-offline'], {
-    cwd: scriptsLibDir, stdio: 'inherit',
-  })
-  if (r.status !== 0) {
-    console.error('[crabot] scripts/lib pnpm install failed; please run manually:')
-    console.error(`[crabot]   cd ${scriptsLibDir} && corepack pnpm install --prod`)
+  try {
+    const corepack = await ensureCorepack(resolve(__dirname, '..'))
+    const args = ['pnpm', 'install', '--prod', '--prefer-offline']
+    if (corepack) await runBounded(process.execPath, [corepack, ...args], { cwd: scriptsLibDir })
+    else if (process.platform === 'win32') await runBounded('cmd.exe', ['/d', '/s', '/c', `corepack ${args.join(' ')}`], { cwd: scriptsLibDir })
+    else await runBounded('corepack', args, { cwd: scriptsLibDir })
+  } catch (error) {
+    console.error(`[crabot] scripts/lib dependency repair failed: ${error.message}`)
     process.exit(1)
   }
 }

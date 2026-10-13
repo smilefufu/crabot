@@ -7,9 +7,9 @@ import { setTimeout as delay } from 'node:timers/promises'
 import runtime from './scrapling-runtime.cjs'
 
 // detached 创建专属进程组；只能终止本次准备命令拥有的进程。
-export function runBounded(command, args, { cwd, env = process.env, timeout = 20 * 60_000, signal } = {}) {
+export function runBounded(command, args, { cwd, env = process.env, timeout = 20 * 60_000, signal, shell = false } = {}) {
   return new Promise((done, fail) => {
-    const child = spawn(command, args, { cwd, env, stdio: 'inherit', detached: process.platform !== 'win32' })
+    const child = spawn(command, args, { cwd, env, shell, stdio: 'inherit', detached: process.platform !== 'win32' })
     let reason
     let forceTimer
     const killOwned = (force) => {

@@ -12,11 +12,11 @@ import { resolveCliDataDir } from './lib/instance.mjs'
 import { runScript } from './upgrade-lib/runner.mjs'
 import { runMigrations } from './upgrade-lib/migrate.mjs'
 import { runSourceUpgrade, syncPythonDeps } from './upgrade-lib/source.mjs'
-import { runBounded } from './lib/scrapling-prepare.mjs'
+import { verifyReleasePackage } from './lib/release-package.mjs'
 import {
   getCurrentVersion,
   getLatestVersion,
-  detectPlatform,
+  getReleaseUrls,
   downloadRelease,
   extractRelease,
   writeVersionFile,
@@ -95,14 +95,14 @@ async function main() {
       const { tag } = await getLatestVersion()
       targetVersion = tag
       if (current === tag) {
-        console.log(`[ui-upgrade] already up to date (${current})`)
-        writeStatus({ phase: 'done', to_version: current, finished_at: stamp() })
-        return
+        try {
+          await verifyReleasePackage(CRABOT_HOME, current)
+          console.log(`[ui-upgrade] already up to date (${current})`)
+          writeStatus({ phase: 'done', to_version: current, finished_at: stamp() })
+          return
+        } catch (error) { logger.warn(`Installed release is incomplete; repairing: ${error.message}`) }
       }
-      const platform = detectPlatform()
-      const url = `https://github.com/smilefufu/crabot/releases/download/${tag}/crabot-${tag}-${platform}.tar.gz`
-      console.log(`[ui-upgrade] (prepare) download ${url}`)
-      releaseArtifact = await downloadRelease({ url, sha256Url: `${url}.sha256`, logger })
+      releaseArtifact = await downloadRelease({ ...getReleaseUrls(tag), logger })
     }
   } catch (err) {
     const msg = err?.message || String(err)
@@ -122,7 +122,7 @@ async function main() {
       await extractRelease({ ...releaseArtifact, crabotHome: CRABOT_HOME, logger })
       console.log('[ui-upgrade] (switch) sync python deps')
       await syncPythonDeps(CRABOT_HOME, logger)
-      await runBounded(process.execPath, [join(CRABOT_HOME, 'scripts/prepare-scrapling.mjs'), '--check'])
+      await verifyReleasePackage(CRABOT_HOME, targetVersion)
     }
 
     console.log('[ui-upgrade] (switch) run migrations')

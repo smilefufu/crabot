@@ -1,4 +1,5 @@
-import { spawn } from 'node:child_process'
+import { ensureCorepack } from '../lib/toolchain.mjs'
+import { runBounded } from '../lib/scrapling-prepare.mjs'
 import { existsSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
@@ -15,32 +16,19 @@ const JS_MODULES = [
   'crabot-mcp-tools',
 ]
 const PY_MODULE = 'crabot-memory'
+let privateCorepack
 
-// Windows 上 corepack/pnpm/uv/npx 是 .cmd shim：
-// - 不开 shell → ENOENT（找不到 .cmd 后缀）；显式拼 .cmd 后缀 → Node 21+ 因
-//   CVE-2024-27980 强制要求 .cmd 必须走 shell，否则 EINVAL。
-// - 开 shell:true + args 数组 → 触发 Node 24 的 DEP0190 警告。
-// 所以走「拼成单字符串 + shell:true + args 空数组」：args 不是数组就不触发警告，
-// 单字符串也让 shell 自动按 PATHEXT 找 .cmd shim。
-// 安全：本文件所有 cmd/args 都是源码硬编码字符串，无用户输入，无注入风险。
+// Windows 的系统 corepack 是 .cmd shim；仅静态 pnpm 参数走 shell。
+// Node/uv 的真实 executable 直接传参数，保留空格/中文路径。
 const quoteWin = (s) => (/\s/.test(s) ? `"${s}"` : s)
 
 function runCmd(cmd, args, cwd, logger) {
-  return new Promise((resolve, reject) => {
-    const display = `${cmd} ${args.join(' ')}`
-    logger.info(`$ ${display}    (cwd: ${cwd})`)
-    const isWin = process.platform === 'win32'
-    // cmd 可能是绝对路径（如 findUv() 返回 C:\Users\Foo Bar\.local\bin\uv.exe），含空格要 quote
-    const winCmdLine = `${quoteWin(cmd)} ${args.map(quoteWin).join(' ')}`
-    const proc = isWin
-      ? spawn(winCmdLine, [], { cwd, stdio: 'inherit', shell: true })
-      : spawn(cmd, args, { cwd, stdio: 'inherit' })
-    proc.on('error', reject)
-    proc.on('exit', (code) => {
-      if (code === 0) resolve()
-      else reject(new Error(`${display} exited with code ${code}`))
-    })
-  })
+  if (cmd === 'corepack' && privateCorepack) { args = [privateCorepack, ...args]; cmd = process.execPath }
+  logger.info(`$ ${cmd} ${args.join(' ')}    (cwd: ${cwd})`)
+  if (process.platform === 'win32' && cmd === 'corepack') {
+    return runBounded(`corepack ${args.map(quoteWin).join(' ')}`, [], { cwd, shell: true })
+  }
+  return runBounded(cmd, args, { cwd })
 }
 
 // uv installer（https://astral.sh/uv）默认装到 ~/.local/bin/uv，但 Windows 上
@@ -71,6 +59,7 @@ async function installAndBuild(moduleDir, logger) {
 }
 
 export async function runSourceUpgrade(crabotHome, logger) {
+  privateCorepack = await ensureCorepack(crabotHome)
   // 注意：不调 `corepack enable` —— 它会尝试往 Node 安装目录（Windows 下是
   // Program Files）写 pnpm/yarn 系统 shim，需要管理员权限。我们已经显式用
   // `corepack pnpm ...` 调用，corepack 会按 package.json 的 packageManager
@@ -115,6 +104,6 @@ export async function runSourceUpgrade(crabotHome, logger) {
 export async function syncPythonDeps(crabotHome, logger) {
   const memoryDir = join(crabotHome, PY_MODULE)
   if (existsSync(memoryDir)) {
-    await runCmd(findUv(), ['sync'], memoryDir, logger)
+    await runCmd(findUv(), ['sync', '--frozen', '--no-dev'], memoryDir, logger)
   }
 }
