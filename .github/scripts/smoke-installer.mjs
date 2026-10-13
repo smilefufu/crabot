@@ -73,7 +73,7 @@ function Invoke-WebRequest {
   Microsoft.PowerShell.Utility\\Invoke-WebRequest @arguments
 }
 if ($env:CRABOT_CI_IEX -eq '1') { Invoke-RestMethod ($env:CRABOT_CI_HTTP + '/install.ps1') | Invoke-Expression }
-else { & (Join-Path $env:CRABOT_CI_REPO 'install.ps1') -InstallDir $env:CRABOT_CI_PRODUCT -Version $env:CRABOT_CI_VERSION }
+else { & (Join-Path $env:CRABOT_CI_REPO 'install.ps1') -InstallDir $env:CRABOT_CI_PRODUCT -Version $env:CRABOT_CI_VERSION; exit $LASTEXITCODE }
 `)
     await run(process.argv[3] || 'pwsh', ['-NoProfile', '-NonInteractive', '-File', script])
   } else {
@@ -149,7 +149,7 @@ try {
   if (health.data?.status !== 'healthy') throw new Error(`installed MM health: ${JSON.stringify(health)}`)
   let runningRejected = false
   try { await install() } catch { runningRejected = true }
-  if (!runningRejected) throw new Error('installer replaced the running instance')
+  if (!runningRejected) throw new Error('installer did not report rejection of the running instance')
   if ((await fs.readFile(join(product, 'VERSION'), 'utf8')).trim() !== version) throw new Error('running-instance rejection changed version')
   await run(process.execPath, [join(product, 'cli.mjs'), 'stop'])
   started = false
