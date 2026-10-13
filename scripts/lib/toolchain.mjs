@@ -11,7 +11,10 @@ export async function ensureCorepack(root) {
   try {
     await runBounded(system.command, system.args, { cwd: root, timeout: 60_000 })
     return null
-  } catch { /* Prepare the private tool without modifying the global installation. */ }
+  } catch (error) {
+    if (error.code === 'CRABOT_PREPARATION_CANCELLED') throw error
+    // Prepare the private tool without modifying the global installation.
+  }
   if (!existsSync(entry)) {
     const args = ['install', '--prefix', tools, '--ignore-scripts', '--no-audit', '--no-fund', '--registry=https://registry.npmjs.org', 'corepack@0.31.0']
     if (windows) {

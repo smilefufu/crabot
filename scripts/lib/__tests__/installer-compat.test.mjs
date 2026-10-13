@@ -4,7 +4,10 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'nod
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { spawnSync } from 'node:child_process'
+import { spawnSync, spawn } from 'node:child_process'
+import { createServer } from 'node:http'
+import { once } from 'node:events'
+import { readdirSync } from 'node:fs'
 import * as release from '../../upgrade-lib/release.mjs'
 
 const installer = fileURLToPath(new URL('../../../install.sh', import.meta.url))
@@ -101,5 +104,32 @@ test('fresh nvm installation remains usable in new Bash login and interactive sh
     const shell = spawnSync('/bin/bash', [...args, 'crabot'], { encoding: 'utf8', env })
     assert.equal(shell.status, 0, shell.stderr)
     assert.match(shell.stdout, /nvm-node-found/)
+  }
+})
+
+test('cancelled streaming upgrade download removes only its owned staging', unix, async t => {
+  const root = fixture(t)
+  let started
+  const requested = new Promise(resolve => { started = resolve })
+  const server = createServer((req, res) => { res.write('partial-archive'); started() })
+  server.listen(0, '127.0.0.1')
+  await once(server, 'listening')
+  const script = join(root, 'download.mjs')
+  const url = `http://127.0.0.1:${server.address().port}/release.tar.gz`
+  writeFileSync(script, `import {downloadRelease} from ${JSON.stringify(new URL('../../upgrade-lib/release.mjs', import.meta.url).href)};try{await downloadRelease({url:${JSON.stringify(url)},sha256Url:${JSON.stringify(url + '.sha256')},version:'fixture',logger:console})}catch{process.exitCode=1}`)
+  writeFileSync(join(root, 'sentinel'), 'existing-user-state')
+  const parent = spawn(process.execPath, [script], { env: { ...process.env, TMPDIR: root, TEMP: root, TMP: root }, stdio: 'ignore' })
+  const exited = once(parent, 'exit')
+  try {
+    await requested
+    parent.kill('SIGTERM')
+    const [code] = await exited
+    assert.notEqual(code, 0)
+    assert.deepEqual(readdirSync(root).filter(name => name.startsWith('crabot-upgrade-')), [])
+    assert.equal(readFileSync(join(root, 'sentinel'), 'utf8'), 'existing-user-state')
+  } finally {
+    parent.kill('SIGKILL')
+    server.closeAllConnections()
+    server.close()
   }
 })

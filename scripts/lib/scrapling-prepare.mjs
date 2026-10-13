@@ -17,13 +17,15 @@ export function runBounded(command, args, { cwd, env = process.env, timeout = 20
       if (process.platform === 'win32') spawn('taskkill', ['/pid', String(child.pid), '/t', ...(force ? ['/f'] : [])], { stdio: 'ignore' })
       else { try { process.kill(-child.pid, force ? 'SIGKILL' : 'SIGTERM') } catch {} }
     }
-    function terminate(message) {
-      reason ??= new Error(message)
+    function terminate(message, code) {
+      reason ??= Object.assign(new Error(message), code ? { code } : {})
       killOwned(false)
       forceTimer ??= setTimeout(() => killOwned(true), 2000)
     }
     const timer = setTimeout(() => terminate(`${command}: preparation timed out`), timeout)
-    const abort = () => terminate(`${command}: preparation cancelled`)
+    const abort = () => terminate(`${command}: preparation cancelled`, 'CRABOT_PREPARATION_CANCELLED')
+    process.once('SIGINT', abort)
+    process.once('SIGTERM', abort)
     signal?.addEventListener('abort', abort, { once: true })
     if (signal?.aborted) abort()
     child.on('error', err => { reason = err })
@@ -31,6 +33,8 @@ export function runBounded(command, args, { cwd, env = process.env, timeout = 20
       if (reason || code !== 0) killOwned(true)
       clearTimeout(timer); clearTimeout(forceTimer)
       signal?.removeEventListener('abort', abort)
+      process.removeListener('SIGINT', abort)
+      process.removeListener('SIGTERM', abort)
       if (reason || code !== 0) fail(reason ?? new Error(`${command} exited with code ${code}`))
       else done()
     })

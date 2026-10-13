@@ -356,6 +356,8 @@ JS
     assert_stopped
     CRABOT_DOWNLOAD_DIR=$(mktemp -d "${TMPDIR:-/tmp}/crabot-install.XXXXXX")
     trap 'rm -rf "$CRABOT_DOWNLOAD_DIR"' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
     local filename="crabot-${version}-${platform}.tar.gz"
     local url="https://github.com/smilefufu/crabot/releases/download/${version}/${filename}"
     info "Downloading $filename..."

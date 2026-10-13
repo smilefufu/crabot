@@ -62,7 +62,7 @@ jobs:
 
       - name: Installer regressions (Unix)
         if: matrix.platform != 'windows'
-        run: node --test scripts/lib/__tests__/installer-compat.test.mjs scripts/lib/__tests__/scrapling-install.test.mjs
+        run: node --test scripts/lib/__tests__/installer-compat.test.mjs scripts/lib/__tests__/scrapling-install.test.mjs scripts/lib/__tests__/scrapling-runtime.test.mjs
 
       - name: Installer regressions (PowerShell 7)
         if: matrix.platform == 'windows'

@@ -49,8 +49,8 @@ export async function getLatestVersion() {
   return { tag: decodeURIComponent(m[1]), publishedAt: null }
 }
 
-async function downloadFile(url, destPath) {
-  const res = await fetch(url, { headers: { 'User-Agent': 'crabot-upgrade' }, signal: AbortSignal.timeout(900_000) })
+async function downloadFile(url, destPath, signal) {
+  const res = await fetch(url, { headers: { 'User-Agent': 'crabot-upgrade' }, signal: AbortSignal.any([signal, AbortSignal.timeout(900_000)]) })
   if (!res.ok) throw new Error(`download failed: ${url} → ${res.status}`)
   await pipeline(Readable.fromWeb(res.body), createWriteStream(destPath))
 }
@@ -84,21 +84,29 @@ function moveEntry(fs, source, target) {
 export async function downloadRelease({ url, sha256Url, version, logger }) {
   const tmp = mkdtempSync(join(tmpdir(), 'crabot-upgrade-'))
   const tarPath = join(tmp, url.endsWith('.zip') ? 'release.zip' : 'release.tar.gz')
+  const controller = new AbortController()
+  const abort = () => controller.abort(new Error('release download cancelled'))
+  process.once('SIGINT', abort)
+  process.once('SIGTERM', abort)
   try {
     logger.info(`Downloading ${url}`)
-    await downloadFile(url, tarPath)
+    await downloadFile(url, tarPath, controller.signal)
     if (!sha256Url) throw new Error('release checksum URL is required')
     logger.info('Verifying checksum')
-    const expectedRes = await fetch(sha256Url, { headers: { 'User-Agent': 'crabot-upgrade' }, signal: AbortSignal.timeout(60_000) })
+    const expectedRes = await fetch(sha256Url, { headers: { 'User-Agent': 'crabot-upgrade' }, signal: AbortSignal.any([controller.signal, AbortSignal.timeout(60_000)]) })
     if (!expectedRes.ok) throw new Error(`sha256 fetch failed: ${expectedRes.status}`)
     const expected = (await expectedRes.text()).trim().split(/\s+/)[0]
     if (!/^[a-f0-9]{64}$/i.test(expected)) throw new Error('invalid release SHA-256 manifest')
     const actual = await sha256OfFile(tarPath)
+    controller.signal.throwIfAborted()
     if (actual !== expected.toLowerCase()) throw new Error(`checksum mismatch: expected ${expected}, got ${actual}`)
     return { tmp, tarPath, version }
   } catch (error) {
     rmSync(tmp, { recursive: true, force: true })
     throw error
+  } finally {
+    process.removeListener('SIGINT', abort)
+    process.removeListener('SIGTERM', abort)
   }
 }
 

@@ -32,6 +32,8 @@ function releaseInstallation(t, tool, damaged = false, options = {}) {
   const installDir = join(root, 'installed')
   t.after(() => {
     rmSync(root, { recursive: true, force: true })
+    const marker = join(root, 'download-directory')
+    if (existsSync(marker)) rmSync(readFileSync(marker, 'utf8'), { recursive: true, force: true })
     for (const suffix of ['', '.sha256']) rmSync(`/tmp/${filename}${suffix}`, { force: true })
   })
   mkdirSync(join(root, 'payload/crabot-memory'), { recursive: true })
@@ -70,6 +72,7 @@ function releaseInstallation(t, tool, damaged = false, options = {}) {
     uv() { return "$FIXTURE_UV_STATUS"; }
     node() { "$REAL_NODE" "$@"; }
     curl() {
+      if [ "$FIXTURE_CANCEL_DOWNLOAD" = 1 ]; then printf '%s' "$CRABOT_DOWNLOAD_DIR" > "$FIXTURE_DIRECTORY_MARKER"; kill -TERM $$; fi
       case "$2" in
         *.sha256) if [ "$FIXTURE_CHECKSUM_STATUS" != 0 ]; then return "$FIXTURE_CHECKSUM_STATUS"; fi; cp "$FIXTURE_CHECKSUM" "$4" ;;
         *) cp "$FIXTURE_ARCHIVE" "$4" ;;
@@ -79,6 +82,7 @@ function releaseInstallation(t, tool, damaged = false, options = {}) {
   `], {
     encoding: 'utf8',
     env: {
+      FIXTURE_CANCEL_DOWNLOAD: options.cancelDownload ? '1' : '0', FIXTURE_DIRECTORY_MARKER: join(root, 'download-directory'),
       FIXTURE_UV_STATUS: options.memoryFailure ? "19" : "0", FIXTURE_CHECKSUM_STATUS: options.missingChecksum ? "22" : "0",
       REAL_NODE: process.execPath, FIXTURE_PLATFORM: platform, PATH: bin, HOME: join(root, 'home'), SHELL: '/bin/bash',
       CRABOT_VERSION: version, CRABOT_INSTALL_DIR: installDir,
@@ -86,7 +90,7 @@ function releaseInstallation(t, tool, damaged = false, options = {}) {
       FIXTURE_ARCHIVE: archive, FIXTURE_CHECKSUM: checksum,
     },
   })
-  return { ...result, extracted: existsSync(join(installDir, 'cli.mjs')), cli: existsSync(join(installDir, 'cli.mjs')) ? readFileSync(join(installDir, 'cli.mjs'), 'utf8') : null, version: existsSync(join(installDir, 'VERSION')) ? readFileSync(join(installDir, 'VERSION'), 'utf8').trim() : null, data: existsSync(join(installDir, 'data/sentinel')) ? readFileSync(join(installDir, 'data/sentinel'), 'utf8') : null }
+  return { ...result, staging: existsSync(join(root, 'download-directory')) ? readFileSync(join(root, 'download-directory'), 'utf8') : null, extracted: existsSync(join(installDir, 'cli.mjs')), cli: existsSync(join(installDir, 'cli.mjs')) ? readFileSync(join(installDir, 'cli.mjs'), 'utf8') : null, version: existsSync(join(installDir, 'VERSION')) ? readFileSync(join(installDir, 'VERSION'), 'utf8').trim() : null, data: existsSync(join(installDir, 'data/sentinel')) ? readFileSync(join(installDir, 'data/sentinel'), 'utf8') : null }
 }
 for (const tool of ['shasum', 'sha256sum']) {
   const unavailable = process.platform === 'win32' || spawnSync('/bin/bash', ['-c', `command -v ${tool}`]).status !== 0
@@ -128,4 +132,14 @@ test('post-replacement Memory sync failure preserves data and does not claim the
   assert.equal(result.version, 'old-version')
   assert.equal(result.data, 'user-data')
   assert.doesNotMatch(result.stdout, /Done!/)
+})
+
+test('cancelled release download removes its staging and preserves existing installation', { skip: process.platform === 'win32' }, t => {
+  const result = releaseInstallation(t, '', false, { existing: true, cancelDownload: true })
+  assert.notEqual(result.status, 0)
+  assert.ok(result.staging)
+  assert.equal(existsSync(result.staging), false, 'SIGTERM must clean this installer staging')
+  assert.equal(result.cli, 'old-code')
+  assert.equal(result.version, 'old-version')
+  assert.equal(result.data, 'user-data')
 })

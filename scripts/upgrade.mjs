@@ -105,7 +105,10 @@ async function runReleaseMode() {
       await verifyReleasePackage(CRABOT_HOME, current)
       console.log(`Already up to date (${current}).`)
       return
-    } catch (error) { logger.warn(`Installed release is incomplete; repairing: ${error.message}`) }
+    } catch (error) {
+      if (error.code === 'CRABOT_PREPARATION_CANCELLED') throw error
+      logger.warn(`Installed release is incomplete; repairing: ${error.message}`)
+    }
   }
 
   console.log(`Current:  ${current ?? '(unknown — VERSION file missing)'}`)

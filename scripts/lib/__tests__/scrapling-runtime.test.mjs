@@ -1,4 +1,6 @@
 import { test } from 'node:test'
+import { spawn } from 'node:child_process'
+import { once } from 'node:events'
 import assert from 'node:assert/strict'
 import { promises as fs } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -97,4 +99,29 @@ test('failed subprocess terminates its owned grandchildren', async () => {
     await new Promise(resolve => setTimeout(resolve, 100))
     assert.throws(() => process.kill(pid, 0), /ESRCH/)
   } finally { await fs.rm(dir, { recursive: true, force: true }) }
+})
+
+test('preparation parent SIGTERM terminates its owned child', { skip: process.platform === 'win32' }, async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), 'prepare-interrupt-'))
+  const marker = join(root, 'child-pid')
+  const script = join(root, 'parent.mjs')
+  const childCode = "require('node:fs').writeFileSync(process.argv[1],String(process.pid));setInterval(()=>{},1000)"
+  await fs.writeFile(script, `import { runBounded } from ${JSON.stringify(new URL('../scrapling-prepare.mjs', import.meta.url).href)};try{await runBounded(process.execPath,['-e',${JSON.stringify(childCode)},${JSON.stringify(marker)}])}catch{process.exitCode=1}`)
+  const parent = spawn(process.execPath, [script], { stdio: 'ignore' })
+  const exited = once(parent, 'exit')
+  let childPid
+  try {
+    for (let n = 0; n < 100; n++) {
+      try { childPid = Number(await fs.readFile(marker, 'utf8')); break } catch { await new Promise(resolve => setTimeout(resolve, 20)) }
+    }
+    assert.ok(childPid, 'owned child did not start')
+    parent.kill('SIGTERM')
+    await exited
+    await new Promise(resolve => setTimeout(resolve, 100))
+    assert.throws(() => process.kill(childPid, 0), /ESRCH/)
+  } finally {
+    if (childPid) { try { process.kill(childPid, 'SIGKILL') } catch {} }
+    parent.kill('SIGKILL')
+    await fs.rm(root, { recursive: true, force: true })
+  }
 })

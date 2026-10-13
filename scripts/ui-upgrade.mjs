@@ -100,7 +100,10 @@ async function main() {
           console.log(`[ui-upgrade] already up to date (${current})`)
           writeStatus({ phase: 'done', to_version: current, finished_at: stamp() })
           return
-        } catch (error) { logger.warn(`Installed release is incomplete; repairing: ${error.message}`) }
+        } catch (error) {
+          if (error.code === 'CRABOT_PREPARATION_CANCELLED') throw error
+          logger.warn(`Installed release is incomplete; repairing: ${error.message}`)
+        }
       }
       releaseArtifact = await downloadRelease({ ...getReleaseUrls(tag), logger })
     }
