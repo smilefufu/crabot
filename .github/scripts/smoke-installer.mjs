@@ -153,6 +153,14 @@ try {
   if (!rejected) throw new Error('installer accepted a damaged checksum')
   if ((await fs.readFile(join(product, 'VERSION'), 'utf8')).trim() !== version) throw new Error('failed reinstall changed version')
   if (createHash('sha256').update(await fs.readFile(sentinel)).digest('hex') !== before) throw new Error('failed reinstall changed user data')
+  if (!process.env.CRABOT_CI_SKIP_SOURCE) {
+    if (windows) {
+      await run(process.argv[3] || 'pwsh', ['-NoProfile', '-NonInteractive', '-File', join(repo, 'install.ps1'), '-FromSource'])
+    } else {
+      await run('/bin/bash', [join(repo, 'install.sh'), '--from-source'])
+    }
+    await run(process.execPath, [join(repo, 'cli.mjs'), '--help'])
+  }
   console.log(JSON.stringify({ platform: `${process.platform}-${process.arch}`, version, realInstaller: true, coreHealth: health.data.status, reinstallPreservesData: true, cliUpgradePreservesData: true, uiUpgradeStatus: uiStatus.phase, realLegacyPackageInstalled: legacyVersion, legacyRecoveryPreservesData: true, badChecksumRejected: true, requests: requests.length }))
 } finally {
   if (started) await run(process.execPath, [join(product, 'cli.mjs'), 'stop']).catch(() => {})

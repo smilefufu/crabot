@@ -376,6 +376,13 @@ jobs:
             node .github/scripts/smoke-installer.mjs "$ARCHIVE"
           fi
 
+      - name: Linux installer distro compatibility (Ubuntu 24.04, Debian 12 and 13)
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: |
+          ARCHIVE=$(find "$GITHUB_WORKSPACE" -maxdepth 1 -name 'crabot-*-linux-x64.tar.gz' -print -quit)
+          bash .github/scripts/smoke-installer-linux.sh "$ARCHIVE"
+
       - name: Verify system upgrade and ordinary users (Linux)
         if: matrix.platform == 'linux'
         shell: bash
