@@ -66,7 +66,7 @@ async function sha256OfFile(path) {
 async function extractArchive(archive, directory) {
   mkdirSync(directory, { recursive: true })
   if (archive.endsWith('.zip')) {
-    await runBounded('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', 'Expand-Archive -LiteralPath $env:CRABOT_UPGRADE_ARCHIVE -DestinationPath $env:CRABOT_UPGRADE_STAGE -Force'], {
+    await runBounded('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', "$ProgressPreference = 'SilentlyContinue'; Expand-Archive -LiteralPath $env:CRABOT_UPGRADE_ARCHIVE -DestinationPath $env:CRABOT_UPGRADE_STAGE -Force"], {
       env: { ...process.env, CRABOT_UPGRADE_ARCHIVE: archive, CRABOT_UPGRADE_STAGE: directory },
     })
   } else await runBounded('tar', ['-xzf', archive, '-C', directory, '--strip-components=1'], { timeout: 120_000 })
