@@ -7,7 +7,7 @@ import { createNativeDriver } from './native-driver.js'
 import { ComputerUseCoordinator } from './coordinator.js'
 import type { ComputerUseRequest } from './client.js'
 
-type Authorize = (token: string, method: string) => Promise<boolean>
+type Authorize = (token: string, method: string, name?: string) => Promise<boolean>
 
 export function createComputerUseBridge(coordinator: ComputerUseCoordinator, authorize: Authorize) {
   const clients = new Set<Socket>()
@@ -24,7 +24,7 @@ export function createComputerUseBridge(coordinator: ComputerUseCoordinator, aut
       try {
         const request: ComputerUseRequest = JSON.parse(data)
         if (!request || typeof request.token !== 'string' || !['call', 'list'].includes(request.method)
-          || !await authorize(request.token, request.method)) throw new Error('COMPUTER_USE_FORBIDDEN')
+          || !await authorize(request.token, request.method, request.name)) throw new Error('COMPUTER_USE_FORBIDDEN')
         const result = request.method === 'list' ? { tools: await coordinator.tools() }
           : await coordinator.call(request.token, request.name ?? '', request.args ?? {}, controller.signal)
         socket.end(JSON.stringify({ result }))
@@ -37,16 +37,21 @@ export function createComputerUseBridge(coordinator: ComputerUseCoordinator, aut
 async function main(): Promise<void> {
   if (!process.send || !process.env.CRABOT_COMPUTER_USE_ROOT || !process.env.CRABOT_COMPUTER_USE_STATE_DIR) throw new Error('COMPUTER_USE_HOST_REQUIRED')
   const pending = new Map<string, (allowed: boolean) => void>()
-  const authorize: Authorize = (token, method) => new Promise(done => {
+  const authorize: Authorize = (token, method, name) => new Promise(done => {
     const id = randomUUID()
     const timer = setTimeout(() => { pending.delete(id); done(false) }, 5_000)
     pending.set(id, allowed => { clearTimeout(timer); done(allowed) })
-    if (process.connected) process.send!({ type: 'authorize', id, token, method })
+    if (process.connected) process.send!({ type: 'authorize', id, token, method, name })
     else { clearTimeout(timer); pending.delete(id); done(false) }
   })
   process.on('message', (message: any) => {
     if (message?.type === 'authorized') { pending.get(message.id)?.(message.allowed === true); pending.delete(message.id) }
     if (message?.type === 'revoke' && typeof message.token === 'string') void coordinator?.revoke(message.token)
+    if (message?.type === 'diagnostics' && typeof message.id === 'string') {
+      void coordinator?.diagnostics().catch(() => []).then(checks => {
+        if (process.connected) process.send!({ type: 'diagnostics', id: message.id, checks })
+      })
+    }
   })
   let coordinator: ComputerUseCoordinator | undefined
   let bridge: ReturnType<typeof createComputerUseBridge> | undefined

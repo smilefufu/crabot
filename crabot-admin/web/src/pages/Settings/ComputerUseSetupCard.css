@@ -1,0 +1,6 @@
+.computer-use-setup__steps { display: grid; gap: 12px; margin-top: 16px; }
+.computer-use-setup__step { padding: 12px 0; border-bottom: 1px solid var(--border-color, #dfe3e8); }
+.computer-use-setup__step > span { float: right; }
+.computer-use-setup__step > p { margin: 8px 0 0; }
+.computer-use-setup__path { display: block; margin-top: 12px; overflow-wrap: anywhere; }
+.computer-use-setup details > summary { cursor: pointer; }

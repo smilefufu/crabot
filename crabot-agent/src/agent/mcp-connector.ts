@@ -569,6 +569,26 @@ export class McpConnector {
     return this.clients.size
   }
 
+  /** Add only the missing owned desktop bridge; other client processes stay live. */
+  async connectComputerUse(config: MCPServerConfig, current: () => boolean): Promise<void> {
+    if (!isManagedComputerUse(config)) throw new Error('COMPUTER_USE_HOST_REQUIRED')
+    if (this.clients.has(config.name) || !current()) return
+    const generation = this.catalogGeneration
+    await this.connectOne(config)
+    const client = this.clients.get(config.name)
+    if (!current() || this.catalogGeneration !== generation) {
+      if (client && this.clients.get(config.name) === client) this.clients.delete(config.name)
+      await client?.close()
+      return
+    }
+    await this.refreshToolCache()
+    if (!current() && client && this.clients.get(config.name) === client) {
+      this.clients.delete(config.name)
+      this.markServerStale(config.name)
+      await client.close()
+    }
+  }
+
   private markServerStale(serverName: string): void {
     this.staleServers.add(serverName)
   }

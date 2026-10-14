@@ -8,6 +8,7 @@ import { createComputerUseServer } from '../src/computer-use/server'
 import { createComputerUseBridge } from '../src/computer-use/service'
 import { ComputerUseCoordinator } from '../src/computer-use/coordinator'
 import { NATIVE_TOOLS, type NativeDriver } from '../src/computer-use/types'
+import { requestComputerUse } from '../src/computer-use/client'
 
 const cleanup: Array<() => Promise<unknown>> = []
 afterEach(async () => {
@@ -17,6 +18,24 @@ afterEach(async () => {
 })
 
 describe('computer-use MCP → instance bridge → native fixture', () => {
+  it('limits the opaque host setup grant to observation and never permits input', async () => {
+    const directory = await fs.mkdtemp(join(tmpdir(), 'cu-setup-scope-'))
+    cleanup.push(() => fs.rm(directory, { recursive: true, force: true }))
+    const calls: string[] = []
+    const coordinator = new ComputerUseCoordinator({
+      async tools() { return NATIVE_TOOLS.map(name => ({ name, inputSchema: { type: 'object', properties: { session: { type: 'string' }, max_image_dimension: { type: 'integer' } }, additionalProperties: false } })) },
+      async call(name) { calls.push(name); return { content: [] } }, async close() {},
+    }, async token => token === 'host-setup')
+    const bridge = createComputerUseBridge(coordinator, async (token, method, name) => token === 'host-setup' && method === 'call' && name === 'get_desktop_state')
+    const endpoint = process.platform === 'win32' ? `\\\\.\\pipe\\cu-setup-${Date.now()}` : join(directory, 's.sock')
+    await new Promise<void>(done => bridge.server.listen(endpoint, done))
+    cleanup.push(async () => { bridge.close(); await coordinator.close() })
+    await expect(requestComputerUse(endpoint, { token: 'host-setup', method: 'call', name: 'type_text', args: {} })).rejects.toThrow('COMPUTER_USE_FORBIDDEN')
+    expect(calls).toHaveLength(0)
+    await requestComputerUse(endpoint, { token: 'host-setup', method: 'call', name: 'get_desktop_state', args: { max_image_dimension: 64 } })
+    expect(calls).toContain('get_desktop_state')
+    expect(calls).not.toContain('type_text')
+  })
   it('coordinates four caller sessions, preserves native evidence, and enforces live revocation', async () => {
     const directory = await fs.mkdtemp(join(tmpdir(), 'cu-wire-'))
     cleanup.push(() => fs.rm(directory, { recursive: true, force: true }))

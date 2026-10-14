@@ -269,6 +269,8 @@ import {
   formatMissingIdResponse,
 } from './goal-slash.js'
 import { readCredentials, verifyPassword, rotateCredentials, writeCredentials } from './credentials.js'
+import { ComputerUseSetup } from './computer-use-setup.js'
+import { isStandardComputerUse, type ComputerUseRuntimeStatus, type ComputerUseSetupRequest } from 'crabot-shared'
 import { getAdminLogsDir, getDataRootDir } from './core/data-paths.js'
 
 // ============================================================================
@@ -698,6 +700,7 @@ export class AdminModule extends ModuleBase {
 
   // MCP Server 管理器
   private mcpServerManager!: MCPServerManager
+  private computerUseSetup?: ComputerUseSetup
 
   // Skill 管理器
   private skillManager!: SkillManager
@@ -1249,6 +1252,7 @@ export class AdminModule extends ModuleBase {
   }
 
   protected override async onStop(): Promise<void> {
+    await this.computerUseSetup?.close()
     if (this.configDrainRetryTimer) {
       clearTimeout(this.configDrainRetryTimer)
       this.configDrainRetryTimer = undefined
@@ -1887,6 +1891,11 @@ export class AdminModule extends ModuleBase {
       }
 
       // MCP Server 路由
+      if (pathname === '/api/computer-use/setup' && ['GET', 'POST', 'DELETE'].includes(req.method ?? '')) {
+        await this.handleComputerUseSetupApi(req, res)
+        return
+      }
+
       if (pathname === '/api/mcp-servers' && req.method === 'GET') {
         await this.handleListMCPServersApi(req, res)
         return
@@ -7680,6 +7689,7 @@ export class AdminModule extends ModuleBase {
   private async handleGetAgentConfig(params: { instance_id: string }, context?: RpcHandlerContext, attempt = 0): Promise<{
     config_revision: number
     config: CoreAgentRuntimeConfig
+    computer_use_setup?: ComputerUseSetupRequest
   }> {
     if (params.instance_id !== 'crabot-agent') {
       throw new Error('Only exact core Agent may pull runtime config')
@@ -7857,6 +7867,7 @@ export class AdminModule extends ModuleBase {
     return {
       config_revision: epoch.revision,
       config: runtimeConfig,
+      ...(this.computerUseSetup?.requestForAgent() ? { computer_use_setup: this.computerUseSetup.requestForAgent() } : {}),
     }
   }
 
@@ -8006,6 +8017,67 @@ export class AdminModule extends ModuleBase {
   // ============================================================================
   // MCP Server REST API 处理方法
   // ============================================================================
+
+  private desktopSetup(): ComputerUseSetup {
+    if (!this.computerUseSetup) {
+      const helper = require(path.join(CRABOT_HOME, 'scripts/lib/computer-use-setup.cjs'))
+      this.computerUseSetup = new ComputerUseSetup({
+        configuration: () => {
+          const entry = this.mcpServerManager.list().find(server => server.name === 'computer-use')
+          const standard = !!entry?.is_builtin && isStandardComputerUse(entry)
+          return { enabled: entry?.enabled === true, standard,
+            root: standard ? path.resolve(path.dirname(entry!.args![0]), '../../..') : CRABOT_HOME,
+            key: crypto.createHash('sha256').update(JSON.stringify(entry ? { id: entry.id, enabled: entry.enabled, transport: entry.transport, command: entry.command, args: entry.args, env: entry.env } : null)).digest('hex') }
+        },
+        host: () => helper.describeHost(),
+        runtime: async () => {
+          const resolved = await this.rpcClient.callModuleManager<{ module_id: string }, { modules: Array<{ module_id: string; port: number }> }>(
+            'resolve', { module_id: 'crabot-agent' }, this.config.moduleId)
+          const module = resolved.modules.find(item => item.module_id === 'crabot-agent')
+          if (!module) throw new Error('COMPUTER_USE_AGENT_UNAVAILABLE')
+          const health = await this.rpcClient.call<Record<string, never>, { details?: { computer_use?: ComputerUseRuntimeStatus } }>(
+            module.port, 'health', {}, this.config.moduleId)
+          const status = health.details?.computer_use
+          if (!status || !['uninitialized', 'connecting', 'ready', 'quarantined'].includes(status.state)) throw new Error('COMPUTER_USE_AGENT_UNAVAILABLE')
+          return status
+        },
+        permissions: (root, signal) => helper.readPermissions(root, { signal }),
+        request: (root, capture, signal) => helper.requestPermissions(root, { signal, probeCapture: capture }),
+        settings: (root, permission, signal) => helper.openSettings(root, permission, { signal }),
+        appPath: root => process.platform === 'darwin' ? helper.appPath(root) : undefined,
+        reveal: root => helper.revealApp(root),
+        invalidate: async () => { await this.publishAgentConfigInvalidation() },
+      })
+    }
+    return this.computerUseSetup
+  }
+
+  private async handleComputerUseSetupApi(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const header = req.headers.authorization
+    const token = typeof header === 'string' && header.startsWith('Bearer ') ? header.slice(7) : ''
+    const human = await verifyJwtWithEpoch(token, this.jwtSecret, this.adminConfig.data_dir)
+    if (!human || !Number.isSafeInteger(human.exp) || human.exp <= Date.now() / 1000) { sendJson(res, 401, { error: 'Unauthorized' }); return }
+    if (human.sub !== 'admin') { sendJson(res, 403, { error: 'Forbidden' }); return }
+    try {
+      const setup = this.desktopSetup()
+      if (req.method === 'GET') { sendJson(res, 200, await setup.status()); return }
+      let raw: unknown
+      try { raw = await this.readJsonBody<unknown>(req) }
+      catch { sendJson(res, 400, { error: 'INVALID_PARAMS' }); return }
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) { sendJson(res, 400, { error: 'INVALID_PARAMS' }); return }
+      const body = raw as Record<string, unknown>
+      if (req.method === 'DELETE') {
+        if (Object.keys(body).some(key => key !== 'setup_id') || typeof body.setup_id !== 'string' || !body.setup_id) { sendJson(res, 400, { error: 'INVALID_PARAMS' }); return }
+        sendJson(res, 200, await setup.cancel(body.setup_id)); return
+      }
+      if (Object.keys(body).some(key => key !== 'action') || ![undefined, 'start', 'reveal_app'].includes(body.action as never)) { sendJson(res, 400, { error: 'INVALID_PARAMS' }); return }
+      sendJson(res, body.action === 'reveal_app' ? 200 : 202,
+        body.action === 'reveal_app' ? await setup.reveal() : await setup.start())
+    } catch (error) {
+      const reason = error instanceof Error && /^COMPUTER_USE_[A-Z_]+$/.test(error.message) ? error.message : 'COMPUTER_USE_SETUP_FAILED'
+      sendJson(res, reason === 'COMPUTER_USE_SETUP_CHANGED' || ['COMPUTER_USE_DISABLED', 'COMPUTER_USE_CUSTOM_BACKEND', 'COMPUTER_USE_INTERACTIVE_SESSION_REQUIRED', 'COMPUTER_USE_PLATFORM_UNSUPPORTED'].includes(reason) ? 409 : 503, { error: reason })
+    }
+  }
 
   private async handleListMCPServersApi(
     _req: IncomingMessage,

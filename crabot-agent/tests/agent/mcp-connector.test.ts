@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { McpConnector } from '../../src/agent/mcp-connector.js'
+import { ComputerUseOwner } from '../../src/agent/computer-use-owner.js'
 import type { MCPServerConfig, ResolvedPermissions } from '../../src/types.js'
 import { buildManagerToolFace } from '../../src/manager/tools/tool-face.js'
 import { createManagerToolFaceState } from '../../src/manager/tools/tool-catalog.js'
@@ -35,6 +36,39 @@ describe('McpConnector.reconnect', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     connector = new McpConnector()
+  })
+
+  it('adds only the owned desktop bridge and retains other client processes and in-flight calls', async () => {
+    await connector.connectAll([cfgA])
+    const other = connector.getClient('A') as any
+    let completed!: (result: unknown) => void
+    other.callTool.mockImplementation(() => new Promise(resolve => { completed = resolve }))
+    const running = connector.getAllTools()[0].call({})
+    while (!completed) await Promise.resolve()
+    const owner = new ComputerUseOwner(() => {}, () => '/unused', async () => {})
+    ;(owner as any).config = { name: 'computer-use', command: 'node', args: ['/fixture/crabot-mcp-tools/dist/computer-use/main.js', '--crabot-standard'] }
+    ;(owner as any).endpoint = 'fixture'; (owner as any).child = { connected: true }
+    const managed = owner.workerConfig('catalog', async method => method === 'list')!
+    await connector.connectComputerUse(managed, () => true)
+    expect(connector.getClient('A')).toBe(other)
+    expect(other.close).not.toHaveBeenCalled()
+    expect(connector.getAllTools().some(tool => tool.name === 'mcp__computer-use__echo')).toBe(true)
+    completed({ content: [{ type: 'text', text: 'original-call-completed' }] })
+    expect(await running).toMatchObject({ output: 'original-call-completed' })
+    await connector.disconnectAll()
+  })
+
+  it('closes a desktop connection arriving after the owner was closed', async () => {
+    const owner = new ComputerUseOwner(() => {}, () => '/unused', async () => {})
+    ;(owner as any).config = { name: 'computer-use', command: 'node', args: ['/fixture/crabot-mcp-tools/dist/computer-use/main.js', '--crabot-standard'] }
+    ;(owner as any).endpoint = 'fixture'; (owner as any).child = { connected: true }
+    let current = true
+    const { Client } = await import('@modelcontextprotocol/sdk/client/index.js') as any
+    const close = vi.fn()
+    Client.mockImplementationOnce(() => ({ connect: async () => { current = false }, close, listTools: vi.fn(), callTool: vi.fn() }))
+    await connector.connectComputerUse(owner.workerConfig('catalog', async () => true)!, () => current)
+    expect(close).toHaveBeenCalledTimes(1)
+    expect(connector.getClient('computer-use')).toBeUndefined()
   })
 
   it('replaceWith preserves captured connector identity and its tool path uses candidate clients', async () => {
