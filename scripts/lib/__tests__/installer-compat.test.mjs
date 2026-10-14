@@ -133,3 +133,34 @@ test('cancelled streaming upgrade download removes only its owned staging', unix
     server.close()
   }
 })
+
+test('uv bootstrap retries only a transport failure and rejects a bad checksum before extraction', unix, t => {
+  for (const mode of ['transport', 'hash', 'io']) {
+    const home = fixture(t)
+    const calls = join(home, 'calls')
+    const result = bash(`
+      curl() {
+        case "$2" in *uv-installer.sh) echo 'APP_VERSION="0.13.0"'; return;; esac
+        echo "$2" >> "$CALLS"
+        case "$MODE" in transport) return 22;; io) return 23;; esac
+        while [ "$#" -gt 0 ]; do if [ "$1" = -o ]; then printf bad > "$2"; return; fi; shift; done
+      }
+      tar() { echo UNEXPECTED_EXTRACTION; return 99; }
+      install_fixed_uv x86_64-unknown-linux-gnu deadbeef
+    `, { HOME: home, TMPDIR: home, CALLS: calls, MODE: mode })
+    assert.notEqual(result.status, 0)
+    const urls = readFileSync(calls, 'utf8').trim().split('\n')
+    assert.equal(urls.length, mode === 'transport' ? 2 : 1)
+    assert.match(urls[0], /mirrors\.ustc/)
+    if (mode === 'transport') assert.match(urls[1], /github\.com/)
+    assert.doesNotMatch(result.stdout, /UNEXPECTED_EXTRACTION/)
+    assert.deepEqual(readdirSync(home), ['calls'])
+  }
+})
+test('new release dependency helper graph must be complete', async t => {
+  const { verifyReleasePackage } = await import('../release-package.mjs')
+  const root = fixture(t)
+  const files = ['cli.mjs', 'package.json', 'dist/cli/main.js', 'scripts/start.mjs', 'crabot-memory/pyproject.toml', 'crabot-memory/uv.lock', 'scripts/check-release.mjs', 'scripts/installer-deps.mjs']
+  for (const file of files) { mkdirSync(join(root, file, '..'), { recursive: true }); writeFileSync(join(root, file), '') }
+  await assert.rejects(verifyReleasePackage(root, 'pr-test'), /missing scripts\/prepare-memory\.mjs/)
+})

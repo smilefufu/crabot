@@ -3,7 +3,7 @@ import { resolve, join } from 'node:path'
 import { homedir } from 'node:os'
 import { ensureCorepack } from './lib/toolchain.mjs'
 import { prepareMemoryDependencies } from './lib/memory-deps.mjs'
-import { packageSource, selectPackageSource, withPackageSource } from './lib/install-network.mjs'
+import { packageSource, selectPackageSource, withPackageSource, nativePackageEnvironment } from './lib/install-network.mjs'
 import { runBounded } from './lib/run-bounded.mjs'
 
 const [mode, directory, encodedContext, ...args] = process.argv.slice(2)
@@ -20,7 +20,10 @@ if (mode === 'memory') {
     const expected = join(process.platform === 'win32' ? (process.env.LOCALAPPDATA || homedir()) : join(homedir(), '.local/share'), 'crabot/corepack/node_modules/corepack/dist/corepack.js')
     if (resolve(corepack) !== resolve(expected)) throw new Error('Unexpected installer Corepack path')
   }
-  await withPackageSource(source, (url, env, remaining) => {
+  await withPackageSource(source, async (url, env, remaining) => {
+    const deadline = Date.now() + remaining
+    if (args.includes('install')) env = await nativePackageEnvironment(root, source, env, logger)
+    remaining = Math.max(1, deadline - Date.now())
     if (corepack) return runBounded(process.execPath, [corepack, 'pnpm@9.15.9', ...args], { cwd: root, env, timeout: remaining, captureError: true })
     if (process.platform === 'win32') return runBounded('cmd.exe', ['/d', '/s', '/c', `corepack pnpm@9.15.9 ${args.join(' ')}`], { cwd: root, env, timeout: remaining, captureError: true })
     return runBounded('corepack', ['pnpm@9.15.9', ...args], { cwd: root, env, timeout: remaining, captureError: true })

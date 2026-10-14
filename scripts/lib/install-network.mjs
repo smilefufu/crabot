@@ -1,6 +1,9 @@
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import { join } from 'node:path'
+import { join, dirname } from 'node:path'
+import { existsSync } from 'node:fs'
+import { mkdtemp, writeFile, readFile, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 
 const exec = promisify(execFile)
 const sources = {
@@ -66,9 +69,9 @@ export function packageEnvironment(kind, url, parent = process.env) {
   const env = { ...parent }
   if (kind === 'npm') {
     for (const key of Object.keys(env)) {
-      if (/^COREPACK_NPM_(TOKEN|USERNAME|PASSWORD)$/.test(key) || /^COREPACK_INTEGRITY_KEYS$/.test(key) || /^npm_config_(_auth|_authtoken|username|password|registry|strict_ssl|better_sqlite3_binary_host)/i.test(key)) delete env[key]
+      if (/^COREPACK_NPM_(TOKEN|USERNAME|PASSWORD)$/.test(key) || /^COREPACK_INTEGRITY_KEYS$/.test(key) || /^npm_config_(.*(?:_auth|token|username|password)|registry|strict_ssl|better_sqlite3_binary_host)/i.test(key)) delete env[key]
     }
-    Object.assign(env, { npm_config_registry: url, npm_config_strict_ssl: 'true', COREPACK_NPM_REGISTRY: url })
+    Object.assign(env, { npm_config_registry: url, npm_config_strict_ssl: 'true', COREPACK_NPM_REGISTRY: url, COREPACK_DEFAULT_TO_LATEST: '0', npm_config_update_notifier: 'false', SHARP_IGNORE_GLOBAL_LIBVIPS: '1' })
     if (url === sources.npm[0]) env.npm_config_better_sqlite3_binary_host = 'https://cdn.npmmirror.com/binaries/better-sqlite3'
   } else if (kind === 'python') {
     for (const key of Object.keys(env)) if (/^UV_(INDEX|DEFAULT_INDEX|EXTRA_INDEX_URL|INDEX_URL|INDEX_STRATEGY|INSECURE_HOST|NO_VERIFY_HASHES)(_|$)/.test(key)) delete env[key]
@@ -83,12 +86,41 @@ export function packageEnvironment(kind, url, parent = process.env) {
 function sourceFailure(error) {
   if (error.code === 'CRABOT_PREPARATION_CANCELLED') return false
   const message = `${error.message}\n${error.stderr ?? ''}`
-  if (/hash.*mismatch|mismatch.*hash|signature|keyid|integrity|EACCES|EPERM|ENOSPC|permission denied|no space left|cancelled/i.test(message)) return false
+  if (/gyp ERR!|ELIFECYCLE|hash.*mismatch|mismatch.*hash|signature|keyid|integrity|EACCES|EPERM|ENOSPC|permission denied|no space left|cancelled/i.test(message)) return false
   return /HTTP[^\n]*(403|404|408|429|5\d\d)|403 Forbidden|404 Not Found|ERR_PNPM_(FETCH|META_FETCH|NO_MATCHING_VERSION)|ETIMEDOUT|ECONNRESET|ECONNREFUSED|ENOTFOUND|network.*(failed|unreachable)|connection.*(reset|refused|timed out)|request.*timed out|was not found in the package registry/i.test(message)
+}
+
+async function npmTransport(env) {
+  const windows = process.platform === 'win32'
+  const npm = windows ? join(dirname(process.execPath), 'node_modules/npm/bin/npm-cli.js') : 'npm'
+  if (windows && !existsSync(npm)) return {}
+  let stdout
+  try {
+    ;({ stdout } = await exec(windows ? process.execPath : npm, [...(windows ? [npm] : []), 'config', 'list', '--json', '--no-update-notifier'], { env, timeout: 5000, maxBuffer: 1024 * 1024 }))
+  } catch (error) { if (error.code === 'ENOENT') return {}; throw new Error(`Cannot inspect npm transport settings (exit ${error.code ?? 'unknown'})`) }
+  const config = JSON.parse(stdout)
+  const transport = {}
+  for (const key of ['proxy', 'https-proxy', 'noproxy', 'cafile', 'ca']) {
+    const value = config[key]
+    if (value != null && value !== '') transport[`npm_config_${key.replaceAll('-', '_')}`] = Array.isArray(value) ? value.join('\n') : String(value)
+  }
+  return transport
 }
 
 export async function withPackageSource(source, action, { logger = console, timeout = 20 * 60_000, env = process.env } = {}) {
   const deadline = Date.now() + timeout
+  let configDirectory
+  if (source.kind === 'npm') {
+    const transport = await npmTransport(env)
+    configDirectory = await mkdtemp(join(tmpdir(), 'crabot-npm-config-'))
+    try {
+      await writeFile(join(configDirectory, 'user.npmrc'), '')
+      await writeFile(join(configDirectory, 'global.npmrc'), '')
+    } catch (error) { await rm(configDirectory, { recursive: true, force: true }); throw error }
+    env = { ...env }
+    for (const key of Object.keys(env)) if (/^npm_config_(userconfig|globalconfig)$/i.test(key)) delete env[key]
+    env = { ...env, ...transport, npm_config_userconfig: join(configDirectory, 'user.npmrc'), npm_config_globalconfig: join(configDirectory, 'global.npmrc') }
+  }
   const attempt = async () => {
     if (Date.now() >= deadline) throw new Error('Product dependency preparation timed out')
     const child = packageEnvironment(source.kind, source.url, env)
@@ -106,7 +138,7 @@ export async function withPackageSource(source, action, { logger = console, time
     try { return await attempt() } catch (officialError) {
       throw Object.assign(new AggregateError([domesticError, officialError], `Domestic and official ${source.kind} preparation failed: ${domesticError.message}; ${officialError.message}`), { dependencyKind: source.kind })
     }
-  }
+  } finally { if (configDirectory) await rm(configDirectory, { recursive: true, force: true }) }
 }
 
 export async function selectPythonDownloadSource(uv, request, { cwd, env = process.env, logger = console } = {}) {
@@ -127,4 +159,32 @@ export async function selectPythonDownloadSource(uv, request, { cwd, env = proce
   } catch {}
   logger.info(`Standalone Python source: ${source.url}${source.url === source.official ? ' (domestic missing/unavailable or redirected to official)' : ''}`)
   return source
+}
+
+export async function nativePackageEnvironment(directory, source, env, logger = console) {
+  if (source.url !== source.domestic) return env
+  let manifest, lock
+  try {
+    manifest = JSON.parse(await readFile(join(directory, 'package.json'), 'utf8'))
+    if (!manifest.dependencies?.['better-sqlite3']) return env
+    lock = await readFile(join(directory, 'pnpm-lock.yaml'), 'utf8')
+  } catch (error) { if (error.code === 'ENOENT') return env; throw error }
+  const versions = [...new Set([...lock.matchAll(/^  better-sqlite3@(\d+\.\d+\.\d+):/gm)].map(match => match[1]))]
+  const child = { ...env }
+  const filename = `better-sqlite3-v${versions[0]}-node-v${process.versions.modules}-${process.platform}-${process.arch}.tar.gz`
+  const url = `${child.npm_config_better_sqlite3_binary_host}/v${versions[0]}/${filename}`
+  const curl = process.platform === 'win32' ? join(env.WINDIR, 'System32/curl.exe') : 'curl'
+  let available = false
+  if (versions.length === 1) {
+    try {
+      const { stdout } = await exec(curl, ['--head', '--fail', '--silent', '--show-error', '--location', '--proto-redir', '=https', '--connect-timeout', '3', '--max-time', '5', '--write-out', '\n%{url_effective}', url], { env, timeout: 5000, maxBuffer: 65536 })
+      available = new URL(stdout.slice(stdout.lastIndexOf('\n') + 1)).hostname === 'cdn.npmmirror.com' && /content-type:.*(?:octet-stream|gzip|x-tar)/i.test(stdout)
+    } catch {}
+  }
+  if (available) logger.info(`SQLite prebuild source: ${url}`)
+  else {
+    delete child.npm_config_better_sqlite3_binary_host
+    logger.warn('SQLite mirror does not provide a verified transport for this locked version/ABI; using its official prebuild source')
+  }
+  return child
 }

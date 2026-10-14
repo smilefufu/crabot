@@ -16,6 +16,15 @@ on:
       - 'scripts/check-release.mjs'
       - 'scripts/lib/release-package.mjs'
       - 'scripts/lib/toolchain.mjs'
+      - 'scripts/installer-deps.mjs'
+      - 'scripts/prepare-memory.mjs'
+      - 'scripts/lib/install-network.mjs'
+      - 'scripts/lib/memory-deps.mjs'
+      - 'scripts/lib/run-bounded.mjs'
+      - 'scripts/lib/__tests__/install-network.test.mjs'
+      - 'crabot-core/src/core-modules*'
+      - '.github/scripts/*domestic*'
+      - '.github/scripts/test-uv-product-config.py'
       - 'scripts/lib/__tests__/*install*.mjs'
       - '.github/scripts/*install*'
       - '.github/scripts/test-durable-file.mjs'
@@ -64,6 +73,24 @@ jobs:
         with:
           node-version: '22'
           cache: 'pnpm'
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.13.0'
+
+      - name: Domestic source policy regressions
+        run: node --test scripts/lib/__tests__/install-network.test.mjs
+
+      - name: Cold dependency downloads with official origins blocked
+        shell: bash
+        run: |
+          python .github/scripts/audit-domestic-node.py "$GITHUB_WORKSPACE"
+          python .github/scripts/audit-domestic-python.py "$GITHUB_WORKSPACE" uv
+          python .github/scripts/test-uv-product-config.py "$GITHUB_WORKSPACE" uv
 
       - name: Installer regressions (Unix)
         if: matrix.platform != 'windows'
@@ -128,10 +155,6 @@ jobs:
 
           # admin: 后端 build → 前端 build:web（顺序执行，build:web 会进入 web/ 子项目自己 install）
           (cd crabot-admin && pnpm run build && pnpm run build:web)
-
-      - uses: astral-sh/setup-uv@v6
-        with:
-          version: '0.10.1'
 
       - name: Prepare portable Scrapling runtime
         shell: bash

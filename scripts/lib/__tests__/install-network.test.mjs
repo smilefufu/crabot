@@ -41,7 +41,7 @@ test('official failure is terminal and retains domestic error context', async ()
 })
 test('exhausted budget and cancellation do not start an official attempt', async () => {
   for (const message of ['HTTP 403 Forbidden', 'preparation cancelled']) {
-    const source = await selectPackageSource('npm', { logger: silent, probe: async () => true })
+    const source = await selectPackageSource('python', { logger: silent, probe: async () => true })
     let count = 0
     await assert.rejects(withPackageSource(source, async () => {
       count++
@@ -65,4 +65,28 @@ test('public registry settings and credentials stay in a child environment; prox
   assert.equal(python.UV_INSECURE_HOST, undefined)
   for (const key of ['PATH', 'HTTPS_PROXY', 'SSL_CERT_FILE', 'UV_PYTHON']) assert.equal(python[key], parent[key])
   assert.deepEqual(parent, original)
+})
+
+test('private npm config is excluded while proxy and CA are preserved; owned configs are removed', async () => {
+  const { mkdtemp, writeFile, readFile, access, rm } = await import('node:fs/promises')
+  const { join } = await import('node:path')
+  const { tmpdir } = await import('node:os')
+  const root = await mkdtemp(join(tmpdir(), 'npm-config-test-'))
+  const file = join(root, '.npmrc')
+  const config = '_auth=private-secret\nregistry=https://private.invalid\ncafile=/company/certs.pem\nhttps-proxy=http://127.0.0.1:7890\n'
+  await writeFile(file, config)
+  let owned
+  try {
+    const source = await selectPackageSource('npm', { probe: async () => true, logger: silent })
+    await withPackageSource(source, async (url, env) => {
+      assert.notEqual(env.npm_config_userconfig, file)
+      assert.equal(await readFile(env.npm_config_userconfig, 'utf8'), '')
+      assert.equal(await readFile(env.npm_config_globalconfig, 'utf8'), '')
+      assert.equal(env.npm_config_cafile, '/company/certs.pem')
+      assert.equal(env.npm_config_https_proxy, 'http://127.0.0.1:7890')
+      owned = env.npm_config_userconfig
+    }, { env: { ...process.env, npm_config_userconfig: file }, logger: silent })
+    await assert.rejects(access(owned))
+    assert.equal(await readFile(file, 'utf8'), config)
+  } finally { await rm(root, { recursive: true, force: true }) }
 })

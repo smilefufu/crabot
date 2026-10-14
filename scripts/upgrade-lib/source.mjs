@@ -1,5 +1,5 @@
 import { ensureCorepack } from '../lib/toolchain.mjs'
-import { selectPackageSource, packageEnvironment, withPackageSource } from '../lib/install-network.mjs'
+import { selectPackageSource, packageEnvironment, withPackageSource, nativePackageEnvironment } from '../lib/install-network.mjs'
 import { prepareMemoryDependencies } from '../lib/memory-deps.mjs'
 import { runBounded } from '../lib/scrapling-prepare.mjs'
 import { existsSync } from 'node:fs'
@@ -31,7 +31,11 @@ function runCmd(cmd, args, cwd, logger, source) {
     if (process.platform === 'win32' && cmd === 'corepack') return runBounded(`corepack ${args.map(quoteWin).join(' ')}`, [], { cwd, env, timeout, captureError, shell: true })
     return runBounded(cmd, args, { cwd, env, timeout, captureError })
   }
-  if (source && args.includes('install')) return withPackageSource(source, (url, env, remaining) => run(env, remaining, true), { logger })
+  if (source && args.includes('install')) return withPackageSource(source, async (url, env, remaining) => {
+    const deadline = Date.now() + remaining
+    env = await nativePackageEnvironment(cwd, source, env, logger)
+    return run(env, Math.max(1, deadline - Date.now()), true)
+  }, { logger })
   return run(source ? packageEnvironment('npm', source.url) : process.env)
 }
 

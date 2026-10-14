@@ -11,6 +11,7 @@ export function findUv() {
 }
 
 export async function prepareMemoryDependencies(directory, { dev = false, logger = console, source, uv = findUv() } = {}) {
+  const deadline = Date.now() + 20 * 60_000
   source ??= await selectPackageSource('python', { logger })
   const transport = await uvTransport(uv, directory)
   const originalLock = await readFile(join(directory, 'uv.lock'))
@@ -40,11 +41,11 @@ export async function prepareMemoryDependencies(directory, { dev = false, logger
       await run(['pip', 'install', '--python', python, '--no-deps', '--editable', '.', ...indexes])
       // A frozen offline audit checks that uv recognizes this environment without fetching packages.
       await run(['run', '--frozen', ...(dev ? [] : ['--no-dev']), '--offline', 'python', '-c', 'import src.main'])
-    }, { logger })
+    }, { logger, timeout: Math.max(1, deadline - Date.now()) })
   } catch (error) {
     if (error.code !== 'CRABOT_SOURCE_AWARE_LOCK') throw error
     logger.warn('Source-aware Memory lock: retaining the original frozen preparation path')
-    await runBounded(uv, ['sync', '--frozen', ...(dev ? [] : ['--no-dev'])], { cwd: directory, captureError: true })
+    await runBounded(uv, ['sync', '--frozen', ...(dev ? [] : ['--no-dev'])], { cwd: directory, captureError: true, timeout: Math.max(1, deadline - Date.now()) })
   } finally {
     await rm(temporary, { recursive: true, force: true })
     if (!(await readFile(join(directory, 'uv.lock'))).equals(originalLock)) throw new Error('Memory preparation changed the frozen lockfile')
