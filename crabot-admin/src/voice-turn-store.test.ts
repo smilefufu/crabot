@@ -5,6 +5,7 @@ import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { sha256CanonicalJson, type Friend, type SubmitVoiceTurnParams } from 'crabot-shared'
 import { voiceSessionId, VoiceTurnStore } from './voice-turn-store.js'
+import { enrolledVoiceContact, revokedVoiceSample } from '../../tests/voice-fixture.js'
 
 async function fixture() {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'voice-turns-'))
@@ -13,10 +14,7 @@ async function fixture() {
   const epoch = randomUUID()
   const friends = new Map<string, Friend>()
   for (const name of ['A', 'B']) {
-    const contact = await store.createContact(channel, name)
-    const registration = await store.enroll(channel, contact.platform_user_id, 'campplus-v1')
-    const revision = store.registrations(channel).enrollment_revision
-    await store.sync({ channel_id: channel, connection_epoch: epoch, foreground: true, completed_enrollment: { registration_id: registration.registration_id, model_id: 'campplus-v1', enrollment_revision: revision } })
+    const { registration } = await enrolledVoiceContact(store, channel, epoch, name, 'campplus-v1')
     friends.set(registration.platform_user_id, { id: name, display_name: name, permission: name === 'A' ? 'master' : 'normal', channel_identities: [{ channel_id: channel, platform_user_id: registration.platform_user_id, platform_display_name: name }], created_at: new Date().toISOString(), updated_at: new Date().toISOString() })
   }
   const turnId = randomUUID()
@@ -48,7 +46,7 @@ describe('whole voice turn authorization and durable acknowledgement', () => {
       const f = await fixture()
       try {
         const id = f.params.messages[1].features.voice!.registration_id!
-        if (scenario === 'revoked') { await f.store.revoke(f.channel, id); f.params.enrollment_revision = f.store.registrations(f.channel).enrollment_revision }
+        if (scenario === 'revoked') { await revokedVoiceSample(f.store, f.channel, id); f.params.enrollment_revision = f.store.registrations(f.channel).enrollment_revision }
         if (scenario === 'sender-mismatch') f.params.messages[1].sender.platform_user_id = f.params.messages[0].sender.platform_user_id
         const submission = await f.store.submit(f.params, f.resolve, async () => true)
         expect(submission.result.status).toBe('rejected')
@@ -76,7 +74,7 @@ describe('whole voice turn authorization and durable acknowledgement', () => {
     const f = await fixture()
     try {
       const id = f.params.messages[1].features.voice!.registration_id!
-      await f.store.revoke(f.channel, id)
+      await revokedVoiceSample(f.store, f.channel, id)
       const revision = f.store.registrations(f.channel).enrollment_revision
       await expect(f.store.sync({ channel_id: f.channel, connection_epoch: f.epoch, foreground: true, completed_enrollment: { registration_id: id, model_id: 'campplus-v1', enrollment_revision: revision } })).rejects.toThrow()
       await expect(f.store.sync({ channel_id: f.channel, connection_epoch: f.epoch, foreground: true, cleared_registration: { registration_id: id, enrollment_revision: revision - 1 } })).rejects.toThrow()

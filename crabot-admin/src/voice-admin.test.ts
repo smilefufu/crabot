@@ -6,6 +6,7 @@ import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { RpcError, sha256CanonicalJson, voiceSessionId, type Friend, type SubmitVoiceTurnParams } from 'crabot-shared'
 import { VoiceAdmin, type VoiceAdminDeps } from './voice-admin.js'
+import { enrolledVoiceContact } from '../../tests/voice-fixture.js'
 
 describe('Voice Admin human surface and durable publication responsibility', () => {
   let dir: string, admin: VoiceAdmin, server: http.Server, url: string, deps: VoiceAdminDeps
@@ -41,11 +42,9 @@ describe('Voice Admin human surface and durable publication responsibility', () 
     await expect(admin.verifyAgent({ channel_id: channel, source: 'crabot-agent' }, core)).rejects.toThrow('Unknown')
   })
   async function turn(): Promise<SubmitVoiceTurnParams> {
-    const contact = await admin.turns.createContact(channel, 'FuFu')
-    const r = await admin.turns.enroll(channel, contact.platform_user_id, 'campplus-test')
+    const epoch = randomUUID()
+    const { contact, registration: r, revision } = await enrolledVoiceContact(admin.turns, channel, epoch, 'FuFu', 'campplus-test')
     bindings.set(contact.platform_user_id, { ...friend, channel_identities: [{ channel_id: channel, platform_user_id: contact.platform_user_id, platform_display_name: 'FuFu' }] })
-    const epoch = randomUUID(); const revision = admin.turns.registrations(channel).enrollment_revision
-    await admin.sync({ channel_id: channel, connection_epoch: epoch, foreground: true, completed_enrollment: { registration_id: r.registration_id, model_id: r.model_id, enrollment_revision: revision } }, runtime)
     const id = randomUUID()
     return { channel_id: channel, session_id: voiceSessionId(channel), turn_id: id, connection_epoch: epoch, enrollment_revision: revision,
       messages: [{ platform_message_id: id + ':0', session: { channel_id: channel, session_id: voiceSessionId(channel), type: 'group' }, sender: { platform_user_id: r.platform_user_id, platform_display_name: r.display_name }, content: { type: 'text', text: '不要开灯' }, features: { is_mention_crab: true, voice: { turn_id: id, segment_index: 0, start_sample: 0, end_sample: 32000, anonymous_speaker: 'speaker-0', identity_status: 'matched', registration_id: r.registration_id } }, platform_timestamp: new Date().toISOString() }] }
@@ -100,25 +99,37 @@ describe('Voice Admin human surface and durable publication responsibility', () 
     expect((await request('/api/channels/not-voice/voice/config')).status).toBe(400)
   })
   it('revokes backend admission before a disconnected phone can acknowledge vector deletion', async () => {
-    const contact = await admin.turns.createContact(channel, 'FuFu')
-    await expect(admin.action(channel, { action: 'enroll', platform_user_id: contact.platform_user_id }, human)).rejects.toThrow('offline')
+    const started = await admin.action(channel, { action: 'enroll_new', display_name: 'FuFu', request_id: randomUUID(), expected_revision: 0 }, human)
+    expect(started).toMatchObject({ action: 'enroll_new', result: { status: 'pending' } })
     const registration = admin.turns.registrations(channel).registrations[0]
     expect(registration.status).toBe('pending'); expect(bindings.size).toBe(0)
-    await expect(admin.action(channel, { action: 'delete_registration', registration_id: registration.registration_id }, human)).rejects.toThrow('offline')
+    await admin.action(channel, { action: 'delete_registration', registration_id: registration.registration_id, request_id: randomUUID(), expected_revision: admin.turns.registrations(channel).enrollment_revision }, human)
     expect(admin.turns.registrations(channel).registrations[0]).toMatchObject({ status: 'revoked', terminal_cleared: false })
     await expect(admin.sync({ channel_id: channel, connection_epoch: randomUUID(), foreground: true, completed_enrollment: { registration_id: registration.registration_id, model_id: registration.model_id, enrollment_revision: admin.turns.registrations(channel).enrollment_revision } }, runtime)).rejects.toThrow()
   })
-  it('allows Admin-only contact creation offline and projects current binding without storing it', async () => {
-    const created = await admin.action(channel, { action: 'create_contact', display_name: 'FuFu' }, human)
-    expect(created.action).toBe('create_contact')
-    if (created.action !== 'create_contact') throw new Error('unexpected result')
-    expect(deps.channelAction).not.toHaveBeenCalled()
-    const id = created.contact.platform_user_id
+  it('requires successful enrollment before contact binding and projects current bindings without storing them', async () => {
+    await expect(admin.action(channel, { action: 'create_contact', display_name: 'FuFu' }, human)).rejects.toThrow('Unknown')
+    const epoch = randomUUID()
+    const { contact } = await enrolledVoiceContact(admin.turns, channel, epoch, 'FuFu', 'campplus-test')
+    const id = contact.platform_user_id
+    expect(() => admin.validateIdentity(channel, randomUUID())).toThrow('登记')
+    expect(() => admin.validateIdentity(channel, id)).not.toThrow()
     expect((await admin.getConfig({ channel_id: channel }, runtime)).contacts[0]).not.toHaveProperty('friend_id')
     bindings.set(id, { ...friend, channel_identities: [{ channel_id: channel, platform_user_id: id }] })
     expect((await admin.getConfig({ channel_id: channel }, runtime)).contacts[0].friend_id).toBe(friend.id)
     bindings.delete(id)
     expect((await admin.getConfig({ channel_id: channel }, runtime)).contacts[0]).not.toHaveProperty('friend_id')
+  })
+  it('accepts only current child, current epoch and foreground terminal management, without friend fields', async () => {
+    const epoch = randomUUID(), command = { channel_id: channel, connection_epoch: epoch, request: { request_id: randomUUID(), expected_revision: 0, command: { action: 'enroll_new', display_name: 'Local' } } }
+    await admin.sync({ channel_id: channel, connection_epoch: epoch, foreground: true }, runtime)
+    for (const bearer of [human, core, undefined]) await expect(admin.manageContacts(command, bearer)).rejects.toThrow('Current child')
+    await expect(admin.manageContacts({ ...command, connection_epoch: randomUUID() }, runtime)).rejects.toThrow('前台')
+    await expect(admin.manageContacts({ ...command, friend_id: 'injected' }, runtime)).rejects.toThrow('Unknown')
+    const result = await admin.manageContacts(command, runtime)
+    expect(result.status).toBe('pending'); expect(result.catalog.contacts).toEqual([])
+    await admin.sync({ channel_id: channel, connection_epoch: epoch, foreground: false }, runtime)
+    await expect(admin.managementResult({ channel_id: channel, connection_epoch: epoch, request_id: command.request.request_id }, runtime)).rejects.toThrow('前台')
   })
   it('reads durable authorization only for exact core, including after confirmation', async () => {
     const params = await turn(); await admin.turns.submit(params, id => bindings.get(id), async () => true)

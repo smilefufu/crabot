@@ -1,13 +1,13 @@
 import { createHash } from 'node:crypto'
-import type { SubmitVoiceTurnParams, VoiceClientControl, VoiceSegment } from './voice.js'
+import type { SubmitVoiceTurnParams, VoiceClientControl, VoiceSegment, VoiceManagementRequest } from './voice.js'
 
 export const VOICE_MAX_SAMPLES = 240000
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 export class VoiceProtocolVersionError extends Error {
-  constructor() { super('语音协议版本不兼容，需要 protocol_version=4；请更新手机，保留配对和声纹') }
+  constructor() { super('语音协议版本不兼容，需要 protocol_version=5；请更新手机，保留配对和声纹') }
 }
-function version(value: unknown): void { if (value !== 4) throw new VoiceProtocolVersionError() }
+function version(value: unknown): void { if (value !== 5) throw new VoiceProtocolVersionError() }
 
 function invalid(): never { throw new Error('Invalid voice protocol payload') }
 function object(value: unknown): Record<string, unknown> {
@@ -26,6 +26,20 @@ function integer(value: unknown, min = 0, max = Number.MAX_SAFE_INTEGER): void {
 function oneOf(value: unknown, choices: unknown[]): void { if (!choices.includes(value)) invalid() }
 export function assertVoiceUuid(value: unknown): asserts value is string {
   if (typeof value !== 'string' || !UUID.test(value)) invalid()
+}
+export function validateVoiceManagementRequest(value: unknown): asserts value is VoiceManagementRequest {
+  const request = object(value)
+  fields(request, ['request_id', 'expected_revision', 'command'])
+  assertVoiceUuid(request.request_id); integer(request.expected_revision)
+  const command = object(request.command)
+  switch (command.action) {
+    case 'enroll_new': fields(command, ['action', 'display_name']); break
+    case 'enroll': fields(command, ['action', 'platform_user_id']); assertVoiceUuid(command.platform_user_id); break
+    case 'rename_contact': fields(command, ['action', 'platform_user_id', 'display_name']); assertVoiceUuid(command.platform_user_id); break
+    case 'delete_registration': case 'cancel_enrollment': fields(command, ['action', 'registration_id']); assertVoiceUuid(command.registration_id); break
+    default: invalid()
+  }
+  if ('display_name' in command) { string(command.display_name, 128); if (!(command.display_name as string).trim()) invalid() }
 }
 function models(value: unknown): void {
   const v = object(value)
@@ -71,8 +85,11 @@ export function parseVoiceClientControl(data: string): VoiceClientControl {
       fields(v, ['type', 'protocol_version', 'credential', 'models', 'aec_verified'])
       version(v.protocol_version); string(v.credential); models(v.models); oneOf(v.aec_verified, [true, false]); break
     case 'heartbeat':
-      fields(v, ['type', 'foreground', 'microphone', 'playback'])
+      fields(v, ['type', 'foreground', 'microphone', 'playback', 'enrollment_revision']); integer(v.enrollment_revision)
       oneOf(v.foreground, [true, false]); oneOf(v.microphone, ['closed', 'wake', 'recording']); oneOf(v.playback, ['idle', 'playing']); break
+    case 'contact_action': fields(v, ['type', 'request']); validateVoiceManagementRequest(v.request); break
+    case 'contact_action_query': fields(v, ['type', 'request_id']); assertVoiceUuid(v.request_id); break
+    case 'catalog_applied': fields(v, ['type', 'enrollment_revision']); integer(v.enrollment_revision); break
     case 'turn_start':
       fields(v, ['type', 'turn_id']); assertVoiceUuid(v.turn_id); break
     case 'turn_query':

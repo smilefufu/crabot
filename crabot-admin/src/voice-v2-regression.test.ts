@@ -5,6 +5,7 @@ import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { sha256CanonicalJson, voiceSessionId, type Friend, type SubmitVoiceTurnParams } from 'crabot-shared'
 import { VoiceTurnStore } from './voice-turn-store.js'
+import { enrolledVoiceContact, revokedVoiceSample } from '../../tests/voice-fixture.js'
 
 async function fixture() {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'voice-v2-'))
@@ -33,19 +34,17 @@ describe('voice v2 ordinary strangers, stable contacts and authorized archive', 
     expect(f.store.pending()).toEqual([])
   }))
   it('keeps contacts across revoke and re-enrollment without persisting Friend bindings', () => withFixture(async f => {
-    const contact = await f.store.createContact(f.channel, 'FuFu')
-    const first = await f.store.enroll(f.channel, contact.platform_user_id, 'campplus')
-    await f.store.revoke(f.channel, first.registration_id)
-    const second = await f.store.enroll(f.channel, contact.platform_user_id, 'campplus')
+    const { contact, registration: first } = await enrolledVoiceContact(f.store, f.channel, f.epoch, 'FuFu', 'campplus')
+    await revokedVoiceSample(f.store, f.channel, first.registration_id)
+    const result = await f.store.manage(f.channel, { request_id: randomUUID(), expected_revision: f.store.registrations(f.channel).enrollment_revision, command: { action: 'enroll', platform_user_id: contact.platform_user_id } }, 'campplus')
+    const second = result.catalog.pending_enrollment!.registration
     expect(second.registration_id).not.toBe(first.registration_id)
     expect(second.platform_user_id).toBe(contact.platform_user_id)
     expect(f.store.registrations(f.channel).contacts).toEqual([contact])
     expect(await fs.readFile(path.join(f.dir, 'voice-turns.json'), 'utf8')).not.toContain('friend_id')
   }))
   it('uses current contact bindings on new turns, keeps an unbound matched speaker as stranger, and preserves historical authorization', () => withFixture(async f => {
-    const contact = await f.store.createContact(f.channel, 'FuFu'), r = await f.store.enroll(f.channel, contact.platform_user_id, 'campplus')
-    const revision = f.store.registrations(f.channel).enrollment_revision
-    await f.store.sync({ channel_id: f.channel, connection_epoch: f.epoch, foreground: true, completed_enrollment: { registration_id: r.registration_id, model_id: r.model_id, enrollment_revision: revision } })
+    const { contact, registration: r, revision } = await enrolledVoiceContact(f.store, f.channel, f.epoch, 'FuFu', 'campplus')
     let binding: Friend | undefined
     const submit = async () => {
       const params = structuredClone(f.params), turn = randomUUID()

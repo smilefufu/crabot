@@ -1,5 +1,5 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { RpcError, assertVoiceUuid, type AudioServiceCapability, type Friend, type GetVoiceConfigResult, type SubmitVoiceTurnParams, type SyncVoiceTerminalParams, type VoiceAdminAction, type VoiceAdminActionResult, type VoiceTurnAuthorizedPayload, type VoiceTurnResult, voiceSetupStatus, voiceTerminalEntry, parseVoiceConnection, validateInstanceId, voiceSessionId, sha256CanonicalJson, type VoiceConnectionConfig, type VoiceInstanceConfig, type VoiceTerminalEntry, type VoiceSetupMetadata } from 'crabot-shared'
+import { RpcError, assertVoiceUuid, validateVoiceManagementRequest, type VoiceManagementRequest, type VoiceManagementResult, type SyncVoiceTerminalResult, type AudioServiceCapability, type Friend, type GetVoiceConfigResult, type SubmitVoiceTurnParams, type SyncVoiceTerminalParams, type VoiceAdminAction, type VoiceAdminActionResult, type VoiceTurnAuthorizedPayload, type VoiceTurnResult, voiceSetupStatus, voiceTerminalEntry, parseVoiceConnection, validateInstanceId, voiceSessionId, sha256CanonicalJson, type VoiceConnectionConfig, type VoiceInstanceConfig, type VoiceTerminalEntry, type VoiceSetupMetadata } from 'crabot-shared'
 import { AudioServiceRegistry } from './audio-service-registry.js'
 import type { ChannelInstance } from './types.js'
 import { VoiceTurnStore } from './voice-turn-store.js'
@@ -57,6 +57,7 @@ export class VoiceAdmin {
     const v = bodyObject(raw); requireFields(v, ['channel_id']); this.assertChannel(v.channel_id)
     const channelId = v.channel_id
     this.assertChannel(channelId); await this.deps.verifyRuntime(channelId, bearer)
+    await this.turns.expireEnrollment(channelId)
     const config = this.audio.getConfig(channelId)
     const metadata = this.turns.registrations(channelId)
     const contacts = metadata.contacts.map(contact => { const friend = this.deps.resolveFriend(channelId, contact.platform_user_id); return { ...contact, ...(friend ? { friend_id: friend.id } : {}) } })
@@ -71,7 +72,27 @@ export class VoiceAdmin {
     const channelId = v.channel_id
     this.assertChannel(channelId); await this.deps.verifyHuman(bearer); return { verified: true }
   }
-  async sync(raw: unknown, bearer?: string): Promise<{ synced: true }> {
+  validateIdentity(channelId: string, platformUserId: string): void {
+    if (this.deps.isVoice(channelId) && !this.turns.hasContact(channelId, platformUserId)) throw new RpcError('INVALID_PARAMS', '语音身份尚未完成声纹登记，不能绑定好友')
+  }
+  private async managementCaller(raw: unknown, fields: string[], bearer?: string): Promise<Record<string, unknown>> {
+    const v = bodyObject(raw); requireFields(v, fields); this.assertChannel(v.channel_id)
+    await this.deps.verifyRuntime(v.channel_id, bearer); assertVoiceUuid(v.connection_epoch)
+    const live = this.turns.connectionState(v.channel_id)
+    if (!live?.foreground || live.epoch !== v.connection_epoch) throw new RpcError('FORBIDDEN', '仅当前前台配对终端可管理声纹')
+    return v
+  }
+  async manageContacts(raw: unknown, bearer?: string): Promise<VoiceManagementResult> {
+    const v = await this.managementCaller(raw, ['channel_id', 'connection_epoch', 'request'], bearer)
+    validateVoiceManagementRequest(v.request)
+    return this.turns.manage(v.channel_id as string, v.request, this.deps.enrollmentModelId, false, v.connection_epoch as string)
+  }
+  async managementResult(raw: unknown, bearer?: string): Promise<VoiceManagementResult> {
+    const v = await this.managementCaller(raw, ['channel_id', 'connection_epoch', 'request_id'], bearer)
+    assertVoiceUuid(v.request_id); await this.turns.expireEnrollment(v.channel_id as string)
+    return this.turns.managementResult(v.channel_id as string, v.request_id)
+  }
+  async sync(raw: unknown, bearer?: string): Promise<SyncVoiceTerminalResult> {
     const v = bodyObject(raw); requireFields(v, ['channel_id', 'connection_epoch', 'foreground', 'completed_enrollment', 'cleared_registration'])
     this.assertChannel(v.channel_id)
     await this.deps.verifyRuntime(v.channel_id, bearer)
@@ -82,12 +103,10 @@ export class VoiceAdmin {
       if (typeof ack.registration_id !== 'string' || !Number.isSafeInteger(ack.enrollment_revision) || (ack.enrollment_revision as number) < 0) invalid('Invalid registration acknowledgement')
       if (field === 'completed_enrollment') {
         if (typeof ack.model_id !== 'string') invalid('Invalid enrollment model')
-        const registration = this.turns.registrations(v.channel_id).registrations.find(r => r.registration_id === ack.registration_id)
-        if (!registration || !this.turns.registrations(v.channel_id).contacts.some(c => c.platform_user_id === registration.platform_user_id)) invalid('Enrollment contact is unavailable')
       }
     }
     await this.turns.sync(v as unknown as SyncVoiceTerminalParams)
-    return { synced: true }
+    return { synced: true, catalog: this.turns.catalog(v.channel_id) }
   }
   async submit(raw: unknown, bearer?: string): Promise<VoiceTurnResult> {
     const v = bodyObject(raw); this.assertChannel(v.channel_id)
@@ -141,22 +160,17 @@ export class VoiceAdmin {
       case 'status': case 'revoke_terminal': requireFields(v, ['action']); break
       case 'create_pairing': requireFields(v, ['action']); break
       case 'confirm_pairing': requireFields(v, ['action', 'pairing_id']); assertVoiceUuid(v.pairing_id); break
-      case 'create_contact': {
-        requireFields(v, ['action', 'display_name'])
-        if (typeof v.display_name !== 'string' || !v.display_name.trim() || v.display_name.length > 128) invalid('Invalid contact name')
-        return { action: 'create_contact', contact: await this.turns.createContact(channelId, v.display_name.trim()) }
+      case 'enroll_new': case 'enroll': case 'rename_contact': case 'delete_registration': case 'cancel_enrollment': {
+        const { request_id, expected_revision, ...command } = v
+        const request = { request_id, expected_revision, command }
+        validateVoiceManagementRequest(request)
+        const result = await this.turns.manage(channelId, request, this.deps.enrollmentModelId, true)
+        if (result.status !== 'rejected') {
+          try { await this.deps.channelAction(channelId, v as VoiceAdminAction, bearer) }
+          catch { console.warn('[Admin] Voice directory committed; terminal notification awaits reconnection') }
+        }
+        return { action: command.action as VoiceManagementRequest['command']['action'], result }
       }
-      case 'enroll': {
-        requireFields(v, ['action', 'platform_user_id'])
-        if (typeof v.platform_user_id !== 'string') invalid('Invalid enrollment contact')
-        const metadata = this.turns.registrations(channelId)
-        if (!metadata.contacts.some(c => c.platform_user_id === v.platform_user_id)) invalid('Voice contact not found')
-        if (!metadata.registrations.some(r => r.status === 'pending' && r.platform_user_id === v.platform_user_id)) await this.turns.enroll(channelId, v.platform_user_id, this.deps.enrollmentModelId)
-        break
-      }
-      case 'delete_registration':
-        requireFields(v, ['action', 'registration_id']); assertVoiceUuid(v.registration_id)
-        await this.turns.revoke(channelId, v.registration_id); break
       default: invalid('Unknown voice management action')
     }
     const result = await this.deps.channelAction(channelId, v as unknown as VoiceAdminAction, bearer)

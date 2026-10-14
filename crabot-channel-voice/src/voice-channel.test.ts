@@ -10,12 +10,26 @@ import { RpcClient, createSuccessResponse, createErrorResponse, encodeVoiceFrame
 import { VoiceTurnStore } from '../../crabot-admin/src/voice-turn-store.js'
 import { VoiceInbox } from '../../crabot-agent/src/manager/voice-inbox.js'
 import { VoiceChannel } from './voice-channel.js'
+import { enrolledVoiceContact, revokedVoiceSample } from '../../tests/voice-fixture.js'
 
 class Phone {
   readonly controls: VoiceServerControl[] = []
   readonly frames: Buffer[] = []
-  constructor(readonly socket: WebSocket) { socket.on('message', (raw, binary) => { if (binary) this.frames.push(Buffer.from(raw as Buffer)); else this.controls.push(JSON.parse(raw.toString())) }) }
-  send(control: unknown) { this.socket.send(JSON.stringify(control)) }
+  revision = 0
+  foreground = false
+  autoApply = true
+  constructor(readonly socket: WebSocket) { socket.on('message', (raw, binary) => {
+    if (binary) { this.frames.push(Buffer.from(raw as Buffer)); return }
+    const control = JSON.parse(raw.toString()); this.controls.push(control)
+    const catalog = control.catalog ?? control.result?.catalog
+    if (catalog && this.autoApply) {
+      this.revision = catalog.enrollment_revision
+      for (const r of catalog.registrations) if (r.status === 'revoked' && !r.terminal_cleared) this.send({ type: 'registration_cleared', registration_id: r.registration_id, enrollment_revision: this.revision })
+      this.send({ type: 'catalog_applied', enrollment_revision: this.revision })
+    }
+    if (control.type === 'heartbeat') this.send({ type: 'heartbeat', foreground: this.foreground, microphone: 'closed', playback: 'idle' })
+  }) }
+  send(control: any) { if (control.type === 'heartbeat') { this.foreground = control.foreground; control = { ...control, enrollment_revision: this.revision } }; this.socket.send(JSON.stringify(control)) }
   async wait<T extends VoiceServerControl['type']>(type: T): Promise<Extract<VoiceServerControl, { type: T }>> {
     let result: VoiceServerControl | undefined
     await vi.waitFor(() => { result = this.controls.find(c => c.type === type); expect(result).toBeDefined() }, { timeout: 4000, interval: 5 })
@@ -36,9 +50,7 @@ describe('Voice Channel with loopback WS, service adapters and durable Admin/cor
     asrResponses = ['开灯', '别开灯', '好的']
     store = new VoiceTurnStore(dir); await store.load(); inbox = new VoiceInbox(path.join(dir, 'core-inbox')); inbox.load(); friends = new Map(); registrations = []
     for (const name of ['A', 'B']) {
-      const contact = await store.createContact(channelId, name)
-      const r = await store.enroll(channelId, contact.platform_user_id, VOICE_MODEL_VERSIONS.embedding); registrations.push(r.registration_id)
-      await store.sync({ channel_id: channelId, connection_epoch: null, foreground: false, completed_enrollment: { registration_id: r.registration_id, model_id: r.model_id, enrollment_revision: store.registrations(channelId).enrollment_revision } })
+      const { registration: r } = await enrolledVoiceContact(store, channelId, randomUUID(), name, VOICE_MODEL_VERSIONS.embedding); registrations.push(r.registration_id)
       friends.set(r.platform_user_id, { id: name, display_name: name, permission: name === 'A' ? 'master' : 'normal', channel_identities: [{ channel_id: channelId, platform_user_id: r.platform_user_id, platform_display_name: name }], created_at: new Date().toISOString(), updated_at: new Date().toISOString() })
     }
     admin = http.createServer(async (req, res) => {
@@ -59,7 +71,9 @@ describe('Voice Channel with loopback WS, service adapters and durable Admin/cor
             tts_connection: { provider_id: 'local', format: 'mlx-audio-http', endpoint: `http://localhost:${(admin.address() as AddressInfo).port}`, model_id: 'kokoro', voice: 'zf_xiaobei', api_key: 'provider-secret' } }; break
           case 'verify_voice_agent':
           case 'verify_voice_admin': result = { verified: true }; break
-          case 'sync_voice_terminal': await store.sync(request.params); result = { synced: true }; break
+          case 'sync_voice_terminal': await store.sync(request.params); result = { synced: true, catalog: store.catalog(channelId) }; break
+          case 'manage_voice_contacts': result = await store.manage(channelId, request.params.request, VOICE_MODEL_VERSIONS.embedding); break
+          case 'get_voice_management_result': result = store.managementResult(channelId, request.params.request_id); break
           case 'get_voice_turn_status': result = store.status(request.params.channel_id, request.params.turn_id, request.params.payload_sha256); break
           case 'submit_voice_turn': {
             const submission = await store.submit(request.params, id => friends.get(id), async () => true)
@@ -84,7 +98,7 @@ describe('Voice Channel with loopback WS, service adapters and durable Admin/cor
     })
     await new Promise<void>(resolve => admin.listen(0, resolve))
     const reserve = net.createServer(); await new Promise<void>(resolve => reserve.listen(0, resolve)); port = (reserve.address() as AddressInfo).port; await new Promise<void>(resolve => reserve.close(() => resolve()))
-    channel = new VoiceChannel({ moduleId: channelId, moduleType: 'channel', version: '0.1.0', protocolVersion: '0.4.0', port }, path.join(dir, 'terminal'), runtime)
+    channel = new VoiceChannel({ moduleId: channelId, moduleType: 'channel', version: '0.1.0', protocolVersion: '0.5.0', port }, path.join(dir, 'terminal'), runtime)
     // Resolve only the isolated test Admin. All HTTP RPCs and terminal frames remain real.
     const client = (channel as unknown as { rpcClient: RpcClient }).rpcClient
     client.resolve = async () => [{ port: (admin.address() as AddressInfo).port }] as never
@@ -102,13 +116,14 @@ describe('Voice Channel with loopback WS, service adapters and durable Admin/cor
   }
   async function pair() {
     const pairing = await rpc.callSensitive<any, any>(port, 'voice_admin_action', { channel_id: channelId, command: { action: 'create_pairing' } }, 'isolated-admin', { authorizationBearer: human })
-    const phone = await connect(); phone.send({ type: 'pair', protocol_version: 4, nonce: pairing.pairing.nonce })
+    const phone = await connect(); phone.send({ type: 'pair', protocol_version: 5, nonce: pairing.pairing.nonce })
     const waiting = await phone.wait('pair_waiting'); expect(waiting.verification_code).toBe(pairing.pairing.verification_code)
     await rpc.callSensitive(port, 'voice_admin_action', { channel_id: channelId, command: { action: 'confirm_pairing', pairing_id: waiting.pairing_id } }, 'isolated-admin', { authorizationBearer: human })
     const credential = (await phone.wait('paired')).credential, live = await connect()
-    live.send({ type: 'hello', protocol_version: 4, credential, models: { embedding: VOICE_MODEL_VERSIONS.embedding, segmentation: VOICE_MODEL_VERSIONS.segmentation }, aec_verified: true })
+    live.send({ type: 'hello', protocol_version: 5, credential, models: { embedding: VOICE_MODEL_VERSIONS.embedding, segmentation: VOICE_MODEL_VERSIONS.segmentation }, aec_verified: true })
     const hello = await live.wait('hello'); expect(JSON.stringify(hello)).not.toContain('provider-secret')
     live.send({ type: 'heartbeat', foreground: true, microphone: 'closed', playback: 'idle' })
+    await live.wait('catalog_confirmed')
     return { phone: live, hello }
   }
   async function turn(phone: Phone, unknown = false) {
@@ -150,16 +165,42 @@ describe('Voice Channel with loopback WS, service adapters and durable Admin/cor
   })
   it('rejects a v2 handshake with an explicit version error', async () => {
     const phone = await connect(); phone.send({ type: 'hello', protocol_version: 2, credential: 'old', models: VOICE_MODEL_VERSIONS, aec_verified: false })
-    const error = await phone.wait('error'); expect(error.code).toBe('VOICE_VERSION_UNSUPPORTED'); expect(error.message).toContain('protocol_version=4')
+    const error = await phone.wait('error'); expect(error.code).toBe('VOICE_VERSION_UNSUPPORTED'); expect(error.message).toContain('protocol_version=5')
   })
   it('keeps a contact in the roster without an active sample and resolves current bindings', async () => {
     const contact = store.registrations(channelId).contacts[0]
-    await store.revoke(channelId, registrations[0])
+    await revokedVoiceSample(store, channelId, registrations[0])
     const sessions: any = await rpc.call(port, 'get_sessions', {}, 'isolated-core')
     expect(sessions.items[0].participants.find((p: any) => p.platform_user_id === contact.platform_user_id).friend_id).toBe('A')
     friends.delete(contact.platform_user_id)
     const updated: any = await rpc.call(port, 'get_sessions', {}, 'isolated-core')
     expect(updated.items[0].participants.some((p: any) => p.platform_user_id === contact.platform_user_id)).toBe(false)
+  })
+  it('registers from the terminal, immediately exposes a confirmed contact and queries original requests', async () => {
+    const { phone } = await pair()
+    const request = { request_id: randomUUID(), expected_revision: store.registrations(channelId).enrollment_revision, command: { action: 'enroll_new', display_name: 'New speaker' } }
+    phone.send({ type: 'contact_action', request })
+    const pending = (await phone.wait('contact_result')).result
+    expect(pending.status).toBe('pending'); expect(pending.catalog.contacts).toHaveLength(2)
+    const task = pending.catalog.pending_enrollment!
+    const sentAt = Date.now()
+    phone.send({ type: 'enrollment_done', registration_id: task.registration.registration_id, model_id: task.registration.model_id, enrollment_revision: task.enrollment_revision })
+    await vi.waitFor(() => expect(phone.controls.some(c => c.type === 'catalog' && c.catalog.contacts.some(contact => contact.display_name === 'New speaker'))).toBe(true))
+    expect(Date.now() - sentAt).toBeLessThan(2000)
+    const list: any = await rpc.call(port, 'list_contacts', {}, 'isolated-core')
+    expect(list.items.filter((c: any) => c.display_name === 'New speaker')).toHaveLength(1)
+    phone.send({ type: 'contact_action', request })
+    expect((await phone.wait('contact_result')).result.status).toBe('completed')
+    phone.send({ type: 'contact_action_query', request_id: request.request_id })
+    expect((await phone.wait('contact_result')).result.status).toBe('completed')
+    expect(store.registrations(channelId).contacts).toHaveLength(3)
+  })
+  it('does not start a turn while the terminal has not applied the latest catalog', async () => {
+    const { phone } = await pair(); phone.autoApply = false
+    await revokedVoiceSample(store, channelId, registrations[0])
+    phone.send({ type: 'turn_start', turn_id: randomUUID() })
+    expect((await phone.wait('error')).code).toBe('VOICE_CATALOG_NOT_READY')
+    expect(asrCalls).toBe(0)
   })
   it('returns delivery success only after started, all audio and completed; an interrupted second attempt never replays', async () => {
     const { phone, hello } = await pair(), status = await turn(phone)

@@ -1,24 +1,43 @@
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
-import { voiceSessionId, sha256CanonicalJson, validateSubmitVoiceTurn, type Friend, type SubmitVoiceTurnParams, type SyncVoiceTerminalParams, type VoiceContact, type VoiceRegistration, type VoiceReplyContext, type VoiceTurnAuthorizedPayload, type VoiceTurnResult } from 'crabot-shared'
+import { voiceSessionId, sha256CanonicalJson, validateSubmitVoiceTurn, validateVoiceManagementRequest, assertVoiceUuid, type Friend, type SubmitVoiceTurnParams, type SyncVoiceTerminalParams, type VoiceTerminalContact, type VoiceCatalog, type VoiceEnrollmentTask, type VoiceManagementRequest, type VoiceManagementResult, type VoiceRegistration, type VoiceReplyContext, type VoiceTurnAuthorizedPayload, type VoiceTurnResult } from 'crabot-shared'
 
 type StoredPayload = Omit<VoiceTurnAuthorizedPayload, 'reply_context'>
 type Turn = { result: VoiceTurnResult; payload?: StoredPayload }
-type Channel = { enrollment_revision: number; contacts: Omit<VoiceContact, 'friend_id'>[]; registrations: VoiceRegistration[] }
-type State = { version: 2; channels: Record<string, Channel>; turns: Record<string, Turn> }
+type Registration = VoiceRegistration & { task_revision?: number; completed_revision?: number; revoked_revision?: number }
+type RequestResult = { digest: string; status: 'pending' | 'completed' | 'rejected'; code?: string; message?: string }
+type Channel = { enrollment_revision: number; contacts: VoiceTerminalContact[]; unconfirmed_contacts: VoiceTerminalContact[]; registrations: Registration[]; task: { request_id: string; registration_id: string; revision: number; expires_at: string } | null; requests: Record<string, RequestResult> }
+type State = { version: 3; channels: Record<string, Channel>; turns: Record<string, Turn> }
 
 export { voiceSessionId } from 'crabot-shared'
 function key(channelId: string, turnId: string): string { return JSON.stringify([channelId, turnId]) }
 function fail(message: string): never { throw Object.assign(new Error(message), { code: 'INVALID_PARAMS' }) }
 function channel(state: State, id: string): Channel {
-  if (!Object.prototype.hasOwnProperty.call(state.channels, id)) Object.defineProperty(state.channels, id, { value: { enrollment_revision: 0, contacts: [], registrations: [] }, enumerable: true, configurable: true, writable: true })
+  if (!Object.prototype.hasOwnProperty.call(state.channels, id)) Object.defineProperty(state.channels, id, { value: { enrollment_revision: 0, contacts: [], unconfirmed_contacts: [], registrations: [], task: null, requests: {} }, enumerable: true, configurable: true, writable: true })
   return state.channels[id]
+}
+function validateDirectory(c: Channel, legacy: boolean): void {
+  if (!Number.isSafeInteger(c.enrollment_revision) || c.enrollment_revision < 0) throw new Error('Corrupt voice directory revision')
+  if (!legacy && !Array.isArray(c.unconfirmed_contacts)) throw new Error('Corrupt voice management store')
+  for (const contact of [...c.contacts, ...(legacy ? [] : c.unconfirmed_contacts)]) {
+    assertVoiceUuid(contact.platform_user_id)
+    if (typeof contact.display_name !== 'string' || !contact.display_name.trim() || contact.display_name.length > 128 || 'friend_id' in contact) throw new Error('Corrupt voice contact')
+  }
+  for (const r of c.registrations) {
+    assertVoiceUuid(r.registration_id); assertVoiceUuid(r.platform_user_id)
+    if (!['pending', 'active', 'revoked'].includes(r.status) || typeof r.terminal_cleared !== 'boolean' || typeof r.model_id !== 'string' || !r.model_id || typeof r.display_name !== 'string' || !r.display_name.trim()) throw new Error('Corrupt voice registration')
+  }
+  if (!legacy) {
+    if (!c.requests || Array.isArray(c.requests) || typeof c.requests !== 'object') throw new Error('Corrupt voice management store')
+    for (const [id, r] of Object.entries(c.requests)) { assertVoiceUuid(id); if (!/^[0-9a-f]{64}$/.test(r.digest) || !['pending', 'completed', 'rejected'].includes(r.status)) throw new Error('Corrupt voice management result') }
+    if (c.task !== null && (!c.task || !Number.isFinite(Date.parse(c.task.expires_at)) || !Number.isSafeInteger(c.task.revision) || !c.registrations.some(r => r.registration_id === c.task!.registration_id && r.status === 'pending') || c.requests[c.task.request_id]?.status !== 'pending')) throw new Error('Corrupt voice enrollment task')
+  }
 }
 
 /** Durable authorized text outbox; realtime connection and reply opportunities never reach disk. */
 export class VoiceTurnStore {
-  private state: State = { version: 2, channels: {}, turns: {} }
+  private state: State = { version: 3, channels: {}, turns: {} }
   private readonly live = new Map<string, { epoch: string | null; foreground: boolean }>()
   private readonly contexts = new Map<string, VoiceReplyContext>()
   private serial: Promise<unknown> = Promise.resolve()
@@ -26,56 +45,125 @@ export class VoiceTurnStore {
   constructor(dataDir: string) { this.filename = path.join(dataDir, 'voice-turns.json') }
   async load(): Promise<void> {
     try {
-      const state = JSON.parse(await fs.readFile(this.filename, 'utf8')) as State
-      if (state.version !== 2) throw new Error('Incompatible voice WIP store; use a separate v2 data directory')
+      const original = await fs.readFile(this.filename, 'utf8')
+      const state = JSON.parse(original) as State
+      if (![2, 3].includes(state.version)) throw new Error('Incompatible voice WIP store; original data preserved')
       if (!state.channels || !state.turns || typeof state.channels !== 'object' || typeof state.turns !== 'object' || Object.values(state.channels).some(c => !Array.isArray(c.contacts) || !Array.isArray(c.registrations)) || Object.values(state.turns).some(t => t.payload && 'reply_context' in t.payload)) throw new Error('Corrupt voice turn store')
+      for (const c of Object.values(state.channels)) validateDirectory(c, (state.version as number) === 2)
+      if ((state.version as number) === 2) {
+        for (const c of Object.values(state.channels)) {
+          const activeIds = new Set(c.registrations.filter(r => r.status === 'active').map(r => r.platform_user_id))
+          c.unconfirmed_contacts = c.contacts.filter(contact => !activeIds.has(contact.platform_user_id))
+          c.contacts = c.contacts.filter(contact => activeIds.has(contact.platform_user_id))
+          c.task = null; c.requests = {}; c.enrollment_revision++
+          for (const r of c.registrations) if (r.status !== 'active') { r.status = 'revoked'; r.terminal_cleared = false; r.revoked_revision = c.enrollment_revision }
+        }
+        state.version = 3
+        for (const c of Object.values(state.channels)) validateDirectory(c, false)
+        try { await fs.writeFile(this.filename + '.v2.bak', original, { mode: 0o600, flag: 'wx' }) }
+        catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error }
+        await this.persist(state)
+      }
       this.state = state
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
     this.live.clear(); this.contexts.clear()
   }
-  registrations(channelId: string): Channel {
-    return structuredClone(Object.prototype.hasOwnProperty.call(this.state.channels, channelId) ? this.state.channels[channelId] : { enrollment_revision: 0, contacts: [], registrations: [] })
+  registrations(channelId: string): VoiceCatalog & { unconfirmed_contacts: VoiceTerminalContact[] } {
+    const c = Object.prototype.hasOwnProperty.call(this.state.channels, channelId) ? this.state.channels[channelId] : undefined
+    if (!c) return { enrollment_revision: 0, contacts: [], registrations: [], pending_enrollment: null, unconfirmed_contacts: [] }
+    const registrations = c.registrations.map(({ task_revision, completed_revision, revoked_revision, ...r }) => r)
+    const task = c.task
+    const pending_enrollment: VoiceEnrollmentTask | null = task ? { registration: registrations.find(r => r.registration_id === task.registration_id)!, enrollment_revision: task.revision, expires_at: task.expires_at } : null
+    return structuredClone({ enrollment_revision: c.enrollment_revision, contacts: c.contacts, registrations, pending_enrollment, unconfirmed_contacts: c.unconfirmed_contacts })
   }
-  async createContact(channelId: string, displayName: string): Promise<VoiceContact> {
-    return this.change(state => {
-      const contact = { platform_user_id: randomUUID(), display_name: displayName }
-      channel(state, channelId).contacts.push(contact)
-      return contact
+  catalog(channelId: string): VoiceCatalog { const { unconfirmed_contacts, ...catalog } = this.registrations(channelId); return catalog }
+  hasContact(channelId: string, platformUserId: string): boolean { return this.registrations(channelId).contacts.some(c => c.platform_user_id === platformUserId) }
+  managementResult(channelId: string, requestId: string): VoiceManagementResult {
+    const current = Object.prototype.hasOwnProperty.call(this.state.channels, channelId) ? this.state.channels[channelId] : undefined
+    const result = current && Object.prototype.hasOwnProperty.call(current.requests, requestId) ? current.requests[requestId] : undefined
+    return { status: result?.status ?? 'unknown', catalog: this.catalog(channelId), ...(result?.code ? { code: result.code, message: result.message } : {}) }
+  }
+  private revokeSample(c: Channel, r: Registration): void {
+    if (r.status !== 'revoked') { r.status = 'revoked'; r.terminal_cleared = false; r.revoked_revision = c.enrollment_revision }
+  }
+  private cancelTask(c: Channel, code: string, message: string): void {
+    if (!c.task) return
+    const task = c.task; c.enrollment_revision++
+    this.revokeSample(c, c.registrations.find(r => r.registration_id === task.registration_id)!)
+    Object.assign(c.requests[task.request_id], { status: 'rejected', code, message }); c.task = null
+  }
+  async expireEnrollment(channelId: string): Promise<void> {
+    const c = Object.prototype.hasOwnProperty.call(this.state.channels, channelId) ? this.state.channels[channelId] : undefined
+    if (c?.task && Date.parse(c.task.expires_at) <= Date.now()) await this.change(state => {
+      const latest = channel(state, channelId)
+      if (latest.task && Date.parse(latest.task.expires_at) <= Date.now()) this.cancelTask(latest, 'EXPIRED', '声纹登记任务已过期，请重新开始')
     })
   }
-  async enroll(channelId: string, platformUserId: string, modelId: string): Promise<VoiceRegistration> {
-    return this.change(state => {
-      const current = channel(state, channelId), contact = current.contacts.find(c => c.platform_user_id === platformUserId)
-      if (!contact) fail('渠道联系人不存在')
-      if (current.registrations.some(r => r.status === 'pending')) fail('当前仍有登记任务待完成，请先撤销该任务')
-      if (current.registrations.some(r => r.status !== 'revoked' && r.platform_user_id === platformUserId)) fail('该联系人已经登记，请先删除旧声纹')
-      const registration: VoiceRegistration = { registration_id: randomUUID(), display_name: contact.display_name, platform_user_id: platformUserId, model_id: modelId, status: 'pending', terminal_cleared: false }
-      current.registrations.push(registration); current.enrollment_revision++
-      return registration
-    })
-  }
-  async revoke(channelId: string, registrationId: string): Promise<void> {
+  async manage(channelId: string, request: VoiceManagementRequest, modelId: string, allowUnconfirmed = false, terminalEpoch?: string): Promise<VoiceManagementResult> {
+    validateVoiceManagementRequest(request); await this.expireEnrollment(channelId)
+    const digest = sha256CanonicalJson(request)
     await this.change(state => {
-      const current = Object.prototype.hasOwnProperty.call(state.channels, channelId) ? state.channels[channelId] : undefined
-      const registration = current?.registrations.find(r => r.registration_id === registrationId)
-      if (!registration) fail('Unknown voice registration')
-      if (registration.status !== 'revoked') { registration.status = 'revoked'; registration.terminal_cleared = false; current!.enrollment_revision++ }
+      if (terminalEpoch && (this.live.get(channelId)?.epoch !== terminalEpoch || !this.live.get(channelId)?.foreground)) throw Object.assign(new Error('仅当前前台配对终端可管理声纹'), { code: 'FORBIDDEN' })
+      const c = channel(state, channelId)
+      const previous = Object.prototype.hasOwnProperty.call(c.requests, request.request_id) ? c.requests[request.request_id] : undefined
+      if (previous) { if (previous.digest !== digest) fail('同一管理请求 ID 的内容不一致'); return }
+      const result: RequestResult = { digest, status: 'completed' }
+      const reject = (code: string, message: string) => { Object.assign(result, { status: 'rejected', code, message }); c.requests[request.request_id] = result }
+      if (c.enrollment_revision !== request.expected_revision) { reject('CONFLICT', '联系人目录已变化，请核对最新列表后重试'); return }
+      const command = request.command
+      const taskRegistration = c.task && c.registrations.find(r => r.registration_id === c.task!.registration_id)
+      const deletingTask = command.action === 'delete_registration' && c.registrations.some(r => r.registration_id === command.registration_id && r.platform_user_id === taskRegistration?.platform_user_id)
+      if (c.task && command.action !== 'cancel_enrollment' && !deletingTask) { reject('BUSY', '当前有声纹录入任务，请完成或取消'); return }
+      if (command.action === 'enroll_new' || command.action === 'enroll') {
+        const contact = command.action === 'enroll_new' ? { platform_user_id: randomUUID(), display_name: command.display_name.trim() } : [...c.contacts, ...(allowUnconfirmed ? c.unconfirmed_contacts : [])].find(contact => contact.platform_user_id === command.platform_user_id)
+        if (!contact) { reject('NOT_FOUND', '正式渠道联系人不存在'); return }
+        c.enrollment_revision++
+        const registration: Registration = { registration_id: randomUUID(), ...contact, model_id: modelId, status: 'pending', terminal_cleared: false, task_revision: c.enrollment_revision }
+        c.registrations.push(registration)
+        c.task = { request_id: request.request_id, registration_id: registration.registration_id, revision: c.enrollment_revision, expires_at: new Date(Date.now() + 60000).toISOString() }
+        result.status = 'pending'
+      } else if (command.action === 'rename_contact') {
+        const contact = c.contacts.find(contact => contact.platform_user_id === command.platform_user_id)
+        if (!contact) { reject('NOT_FOUND', '正式渠道联系人不存在'); return }
+        contact.display_name = command.display_name.trim(); c.enrollment_revision++
+        for (const r of c.registrations) if (r.platform_user_id === contact.platform_user_id) r.display_name = contact.display_name
+      } else {
+        const registration = c.registrations.find(r => r.registration_id === command.registration_id)
+        if (!registration || (command.action === 'cancel_enrollment' && c.task?.registration_id !== registration.registration_id)) { reject('NOT_FOUND', '声纹任务或样本不存在'); return }
+        if (command.action === 'cancel_enrollment') this.cancelTask(c, 'CANCELLED', '声纹录入已取消')
+        else {
+          if (taskRegistration?.platform_user_id === registration.platform_user_id) this.cancelTask(c, 'CANCELLED', '声纹已删除，录入已取消')
+          c.enrollment_revision++; this.revokeSample(c, registration)
+        }
+      }
+      c.requests[request.request_id] = result
     })
+    return this.managementResult(channelId, request.request_id)
   }
   async sync(params: SyncVoiceTerminalParams): Promise<void> {
     if (params.completed_enrollment && params.cleared_registration) fail('One voice acknowledgement at a time')
+    await this.expireEnrollment(params.channel_id)
     if (params.completed_enrollment || params.cleared_registration) {
       await this.change(state => {
         const current = Object.prototype.hasOwnProperty.call(state.channels, params.channel_id) ? state.channels[params.channel_id] : undefined
         const ack = params.completed_enrollment ?? params.cleared_registration!
         const registration = current?.registrations.find(r => r.registration_id === ack.registration_id)
-        if (!current || !registration || ack.enrollment_revision !== current.enrollment_revision) fail('Stale voice enrollment acknowledgement')
+        if (!current || !registration || !params.foreground || this.live.get(params.channel_id)?.epoch !== params.connection_epoch) fail('Stale voice enrollment acknowledgement')
         if (params.completed_enrollment) {
-          if (registration.model_id !== params.completed_enrollment.model_id || !['pending', 'active'].includes(registration.status)) fail('Invalid voice enrollment task/model')
-          registration.status = 'active'
+          if (registration.model_id !== params.completed_enrollment.model_id || registration.task_revision !== ack.enrollment_revision) fail('Invalid voice enrollment task/model/revision')
+          if (!registration.completed_revision) {
+            const task = current.task
+            if (!task || task.registration_id !== registration.registration_id || registration.status !== 'pending' || Date.parse(task.expires_at) <= Date.now()) fail('声纹登记任务已失效')
+            current.enrollment_revision++
+            for (const old of current.registrations) if (old.platform_user_id === registration.platform_user_id && old.status === 'active') this.revokeSample(current, old)
+            if (!current.contacts.some(c => c.platform_user_id === registration.platform_user_id)) current.contacts.push({ platform_user_id: registration.platform_user_id, display_name: registration.display_name })
+            current.unconfirmed_contacts = current.unconfirmed_contacts.filter(c => c.platform_user_id !== registration.platform_user_id)
+            registration.status = 'active'; registration.completed_revision = current.enrollment_revision
+            current.requests[task.request_id].status = 'completed'; current.task = null
+          }
         } else {
-          if (registration.status !== 'revoked') fail('Registration has not been revoked')
-          registration.terminal_cleared = true
+          if (registration.status !== 'revoked' || ack.enrollment_revision < (registration.revoked_revision ?? 0) || ack.enrollment_revision > current.enrollment_revision) fail('Registration has not been revoked at this revision')
+          if (!registration.terminal_cleared) { registration.terminal_cleared = true; current.enrollment_revision++ }
         }
       })
     }
@@ -157,14 +245,17 @@ export class VoiceTurnStore {
   private async change<T>(update: (state: State) => T | Promise<T>): Promise<T> {
     const operation = this.serial.then(async () => {
       const state = structuredClone(this.state), result = await update(state)
-      await fs.mkdir(path.dirname(this.filename), { recursive: true })
-      const tmp = this.filename + '.' + randomUUID() + '.tmp'
-      try { await fs.writeFile(tmp, JSON.stringify(state), { mode: 0o600 }); await fs.rename(tmp, this.filename) }
-      finally { await fs.rm(tmp, { force: true }) }
+      await this.persist(state)
       this.state = state
       return result
     })
     this.serial = operation.catch(() => {})
     return operation
+  }
+  private async persist(state: State): Promise<void> {
+    await fs.mkdir(path.dirname(this.filename), { recursive: true })
+    const tmp = this.filename + '.' + randomUUID() + '.tmp'
+    try { await fs.writeFile(tmp, JSON.stringify(state), { mode: 0o600 }); await fs.rename(tmp, this.filename) }
+    finally { await fs.rm(tmp, { force: true }) }
   }
 }

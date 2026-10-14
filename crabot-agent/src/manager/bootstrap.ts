@@ -662,7 +662,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
         try {
           const port = await deps.messagingDeps.resolveChannelPort(channelId)
           const caps = await deps.messagingDeps.rpcClient.call<{}, { voice?: { protocol_version: number } }>(port, 'get_capabilities', {}, deps.messagingDeps.moduleId, undefined, { timeoutMs: 3000 })
-          voicePolicies.set(channelId, caps.voice?.protocol_version === 4)
+          voicePolicies.set(channelId, caps.voice?.protocol_version === 5)
         } catch { /* no unverified voice exception */ }
       }
       const wake = envelope?.wake

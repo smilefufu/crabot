@@ -17,7 +17,7 @@ export function VoiceConfigCard({ channelId, running, stage, onState, onDirty }:
     if (!running) { setState(undefined); onState?.(undefined); return }
     let active = true
     const poll = async () => { try { const result = await voiceService.action(channelId, { action: 'status' }); if (active && result.action === 'status') { setState(result.state); onState?.(result.state) } } catch { if (active) { setState(undefined); onState?.(undefined) } } }
-    void poll(); const timer = setInterval(() => { void poll() }, 3000)
+    void poll(); const timer = setInterval(() => { void poll() }, 2000)
     return () => { active = false; clearInterval(timer) }
   }, [channelId, running])
   return <section className="voice-config" aria-label="语音渠道配置">

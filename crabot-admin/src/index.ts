@@ -1025,6 +1025,8 @@ export class AdminModule extends ModuleBase {
     this.registerMethod('get_authorized_voice_turn', (params: unknown, context?: RpcHandlerContext) => this.voiceAdmin.authorized(params, context?.authorizationBearer))
     this.registerMethod('confirm_voice_turn', (params: unknown, context?: RpcHandlerContext) => this.voiceAdmin.confirm(params, context?.authorizationBearer))
     this.registerMethod('sync_voice_terminal', (params: unknown, context?: RpcHandlerContext) => this.voiceAdmin.sync(params, context?.authorizationBearer))
+    this.registerMethod('manage_voice_contacts', (params: unknown, context?: RpcHandlerContext) => this.voiceAdmin.manageContacts(params, context?.authorizationBearer))
+    this.registerMethod('get_voice_management_result', (params: unknown, context?: RpcHandlerContext) => this.voiceAdmin.managementResult(params, context?.authorizationBearer))
     this.registerMethod('verify_voice_admin', (params: { channel_id: string }, context?: RpcHandlerContext) => this.voiceAdmin.verifyHuman(params, context?.authorizationBearer))
     this.registerMethod('verify_voice_agent', (params: { channel_id: string }, context?: RpcHandlerContext) => this.voiceAdmin.verifyAgent(params, context?.authorizationBearer))
 
@@ -4065,6 +4067,7 @@ export class AdminModule extends ModuleBase {
     // 检查 channel identity 是否已被使用
     if (params.channel_identities) {
       for (const identity of params.channel_identities) {
+        this.voiceAdmin.validateIdentity(identity.channel_id, identity.platform_user_id)
         const key = this.getChannelIdentityKey(identity)
         if (this.channelIdentityIndex.has(key)) {
           throw new Error(`Channel identity already in use: ${key}`)
@@ -4162,6 +4165,7 @@ export class AdminModule extends ModuleBase {
     friend_id: FriendId
     channel_identity: ChannelIdentity
   }): Promise<{ friend: Friend }> {
+    this.voiceAdmin.validateIdentity(params.channel_identity.channel_id, params.channel_identity.platform_user_id)
     const existing = this.friends.get(params.friend_id)
     if (!existing) {
       throw new Error('Friend not found')

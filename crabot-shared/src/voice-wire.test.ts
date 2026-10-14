@@ -5,8 +5,8 @@ import { isSensitiveRpcCall, RpcClient } from './module-base.js'
 
 const id = '00112233-4455-6677-8899-aabbccddeeff'
 const other = 'ffeeddcc-bbaa-9988-7766-554433221100'
-test('voice v4 requires actual completed playback samples and rejects the old wire', () => {
-  assert.equal(parseVoiceClientControl(JSON.stringify({ type: 'pair', protocol_version: 4, nonce: 'fixture' })).type, 'pair')
+test('voice v5 requires actual completed playback samples and rejects the old wire', () => {
+  assert.equal(parseVoiceClientControl(JSON.stringify({ type: 'pair', protocol_version: 5, nonce: 'fixture' })).type, 'pair')
   assert.throws(() => parseVoiceClientControl(JSON.stringify({ type: 'pair', protocol_version: 3, nonce: 'fixture' })))
   assert.equal(parseVoiceClientControl(JSON.stringify({ type: 'playback', playback_id: id, status: 'completed', played_samples: 480 })).type, 'playback')
   for (const played_samples of [undefined, -1, 480001, 0.5]) {
@@ -51,7 +51,7 @@ test('anonymous clusters have one identity result, with no candidate reference o
   validateVoiceSegments([a, b, { ...a, segment_index: 2, start_sample: 32000, end_sample: 48000 }], 48000)
   assert.throws(() => validateVoiceSegments([a, { ...a, segment_index: 1, start_sample: 16000, end_sample: 32000, registration_id: 'sample-other' }], 32000))
   assert.throws(() => validateVoiceSegments([{ ...b, segment_index: 0, start_sample: 0, registration_id: 'candidate' }], 32000))
-  assert.equal(parseVoiceClientControl(JSON.stringify({ type: 'pair', protocol_version: 4, nonce: 'fixture' })).type, 'pair')
+  assert.equal(parseVoiceClientControl(JSON.stringify({ type: 'pair', protocol_version: 5, nonce: 'fixture' })).type, 'pair')
 })
 test('controls reject extra identity fields, wrong versions and oversized input', () => {
   assert.deepEqual(parseVoiceClientControl(JSON.stringify({ type: 'turn_start', turn_id: id })), { type: 'turn_start', turn_id: id })
@@ -69,7 +69,7 @@ test('submission rejects sender-supplied Friend, partial session and non-text in
 })
 test('all voice runtime RPC methods require the no-trace transport', async () => {
   const client = new RpcClient()
-  for (const method of ['sync_voice_terminal', 'get_voice_config', 'submit_voice_turn', 'get_voice_turn_status', 'get_authorized_voice_turn', 'confirm_voice_turn', 'verify_voice_runtime', 'register_voice_runtime', 'voice_admin_action', 'verify_voice_admin', 'verify_voice_agent', 'voice_output']) {
+  for (const method of ['manage_voice_contacts', 'get_voice_management_result', 'sync_voice_terminal', 'get_voice_config', 'submit_voice_turn', 'get_voice_turn_status', 'get_authorized_voice_turn', 'confirm_voice_turn', 'verify_voice_runtime', 'register_voice_runtime', 'voice_admin_action', 'verify_voice_admin', 'verify_voice_agent', 'voice_output']) {
     assert.equal(isSensitiveRpcCall(method, {}), true)
     await assert.rejects(client.call(1, method, {}, 'forged-source'), /callSensitive/)
   }

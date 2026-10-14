@@ -1,4 +1,4 @@
-// protocol-voice.md v0.4.0: shared terminal, configuration and admission contracts.
+// protocol-voice.md v0.5.0: shared terminal, configuration and admission contracts.
 import type { ModuleId, SessionId, FriendId } from './base-protocol.js'
 import type { ChannelMessage, Friend } from './channel-protocol.js'
 
@@ -45,7 +45,7 @@ export type VoiceOutputResult =
 export interface VerifyVoiceAgentParams { channel_id: ModuleId }
 export interface VerifyVoiceAgentResult { verified: true }
 export interface VoiceChannelCapability {
-  protocol_version: 4
+  protocol_version: 5
   send_timeout_ms: 30000
 }
 export type AudioServiceFormat = 'sherpa-offline-ws' | 'mlx-audio-http' | 'openai-audio'
@@ -105,6 +105,48 @@ export interface VoiceRegistration {
   status: 'pending' | 'active' | 'revoked'
   terminal_cleared: boolean
 }
+export interface VoiceTerminalContact {
+  platform_user_id: string
+  display_name: string
+}
+export interface VoiceEnrollmentTask {
+  registration: VoiceRegistration
+  enrollment_revision: number
+  expires_at: string
+}
+export interface VoiceCatalog {
+  enrollment_revision: number
+  contacts: VoiceTerminalContact[]
+  registrations: VoiceRegistration[]
+  pending_enrollment: VoiceEnrollmentTask | null
+}
+export type VoiceManagementCommand =
+  | { action: 'enroll_new'; display_name: string }
+  | { action: 'enroll'; platform_user_id: string }
+  | { action: 'rename_contact'; platform_user_id: string; display_name: string }
+  | { action: 'delete_registration'; registration_id: string }
+  | { action: 'cancel_enrollment'; registration_id: string }
+export interface VoiceManagementRequest {
+  request_id: string
+  expected_revision: number
+  command: VoiceManagementCommand
+}
+export interface VoiceManagementResult {
+  status: 'pending' | 'completed' | 'rejected' | 'unknown'
+  catalog: VoiceCatalog
+  code?: string
+  message?: string
+}
+export interface ManageVoiceContactsParams {
+  channel_id: ModuleId
+  connection_epoch: string
+  request: VoiceManagementRequest
+}
+export interface GetVoiceManagementResultParams {
+  channel_id: ModuleId
+  connection_epoch: string
+  request_id: string
+}
 export interface GetVoiceConfigParams { channel_id: ModuleId }
 export interface GetVoiceConfigResult {
   setup_status: 'draft' | 'complete'
@@ -113,6 +155,8 @@ export interface GetVoiceConfigResult {
   enrollment_revision: number
   contacts: VoiceContact[]
   registrations: VoiceRegistration[]
+  pending_enrollment: VoiceEnrollmentTask | null
+  unconfirmed_contacts: VoiceTerminalContact[]
   asr_connection: AudioServiceConnection | null
   tts_connection: AudioServiceConnection | null
 }
@@ -162,6 +206,7 @@ export interface SyncVoiceTerminalParams {
   completed_enrollment?: { registration_id: string; model_id: string; enrollment_revision: number }
   cleared_registration?: { registration_id: string; enrollment_revision: number }
 }
+export interface SyncVoiceTerminalResult { synced: true; catalog: VoiceCatalog }
 export interface VerifyVoiceRuntimeParams { expected_module_id: ModuleId }
 export interface VerifyVoiceRuntimeResult { verified: true }
 export interface VerifyVoiceAdminParams { channel_id: ModuleId }
@@ -172,12 +217,14 @@ export type VoiceAdminAction =
   | { action: 'create_pairing' }
   | { action: 'confirm_pairing'; pairing_id: string }
   | { action: 'revoke_terminal' }
-  | { action: 'create_contact'; display_name: string }
-  | { action: 'enroll'; platform_user_id: string }
-  | { action: 'delete_registration'; registration_id: string }
+  | { action: 'enroll_new'; display_name: string; request_id: string; expected_revision: number }
+  | { action: 'enroll'; platform_user_id: string; request_id: string; expected_revision: number }
+  | { action: 'rename_contact'; platform_user_id: string; display_name: string; request_id: string; expected_revision: number }
+  | { action: 'delete_registration'; registration_id: string; request_id: string; expected_revision: number }
+  | { action: 'cancel_enrollment'; registration_id: string; request_id: string; expected_revision: number }
 export interface VoiceAdminActionParams { channel_id: ModuleId; command: VoiceAdminAction }
 export interface VoicePairing {
-  protocol_version: 4
+  protocol_version: 5
   channel_id: ModuleId
   pairing_id: string
   url: string
@@ -196,7 +243,9 @@ export interface VoiceTerminalState {
   enrollment_revision: number
   contacts: VoiceContact[]
   registrations: VoiceRegistration[]
-  hosts: string[]
+  pending_enrollment: VoiceEnrollmentTask | null
+  unconfirmed_contacts: VoiceTerminalContact[]
+  hosts: string[] // Admin 投影的局域网候选完整 HTTP URL，含当前 Admin Web 端口；不包含 loopback/link-local
   pairing_id?: string
   verification_code?: string
 }
@@ -205,15 +254,16 @@ export type VoiceAdminActionResult =
   | { action: 'create_pairing'; pairing: VoicePairing }
   | { action: 'confirm_pairing'; confirmed: true }
   | { action: 'revoke_terminal'; revoked: true }
-  | { action: 'create_contact'; contact: VoiceContact }
-  | { action: 'enroll'; registration: VoiceRegistration }
-  | { action: 'delete_registration'; revoked: true }
+  | { action: 'enroll_new' | 'enroll' | 'rename_contact' | 'delete_registration' | 'cancel_enrollment'; result: VoiceManagementResult }
 
 export interface VoiceModelVersions { segmentation: string; embedding: string }
 export type VoiceClientControl =
-  | { type: 'pair'; protocol_version: 4; nonce: string }
-  | { type: 'hello'; protocol_version: 4; credential: string; models: VoiceModelVersions; aec_verified: boolean }
-  | { type: 'heartbeat'; foreground: boolean; microphone: 'closed' | 'wake' | 'recording'; playback: 'idle' | 'playing' }
+  | { type: 'pair'; protocol_version: 5; nonce: string }
+  | { type: 'hello'; protocol_version: 5; credential: string; models: VoiceModelVersions; aec_verified: boolean }
+  | { type: 'heartbeat'; foreground: boolean; microphone: 'closed' | 'wake' | 'recording'; playback: 'idle' | 'playing'; enrollment_revision: number }
+  | { type: 'contact_action'; request: VoiceManagementRequest }
+  | { type: 'contact_action_query'; request_id: string }
+  | { type: 'catalog_applied'; enrollment_revision: number }
   | { type: 'turn_start'; turn_id: string }
   | { type: 'turn_query'; turn_id: string; payload_sha256: string }
   | { type: 'turn_end'; turn_id: string; audio_sample_count: number; sample_rate: 16000; models: VoiceModelVersions; enrollment_revision: number; segments: VoiceSegment[] }
@@ -224,14 +274,17 @@ export type VoiceClientControl =
 export type VoiceServerControl =
   | { type: 'pair_waiting'; pairing_id: string; verification_code: string }
   | { type: 'paired'; credential: string }
-  | { type: 'hello'; connection_epoch: string; config: VoiceInstanceConfig; destinations: Array<{capability: AudioServiceCapability; endpoint: string}>; enrollment_revision: number; registrations: VoiceRegistration[] }
+  | { type: 'hello'; connection_epoch: string; config: VoiceInstanceConfig; destinations: Array<{capability: AudioServiceCapability; endpoint: string}>; catalog: VoiceCatalog }
   | { type: 'heartbeat' }
+  | { type: 'catalog'; catalog: VoiceCatalog }
+  | { type: 'catalog_confirmed'; enrollment_revision: number }
+  | { type: 'contact_result'; request_id: string; result: VoiceManagementResult }
   | { type: 'turn_ready'; turn_id: string }
   | { type: 'turn_status'; turn_id: string; status: VoiceTurnStatus; payload_sha256?: string; reason?: string }
   | { type: 'playback_start'; playback_id: string; turn_id: string; text: string }
   | { type: 'playback_end'; playback_id: string; text: string; sample_count: number }
   | { type: 'response_end'; turn_id: string }
   | { type: 'playback_cancel'; playback_id: string }
-  | { type: 'enroll'; registration: VoiceRegistration; enrollment_revision: number }
+  | { type: 'enroll'; task: VoiceEnrollmentTask }
   | { type: 'clear_registration'; registration_id: string; enrollment_revision: number }
   | { type: 'error'; code: string; message: string; turn_id?: string }

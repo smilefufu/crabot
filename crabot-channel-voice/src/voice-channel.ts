@@ -4,15 +4,16 @@ import type { Server } from 'node:net'
 import os from 'node:os'
 import { randomBytes, randomInt, randomUUID } from 'node:crypto'
 import { WebSocket, type RawData } from 'ws'
-import { ModuleBase, RpcError, VoiceInputBuffer, VOICE_MODEL_VERSIONS, encodeVoiceFrame, parseVoiceClientControl, VoiceProtocolVersionError, sha256CanonicalJson, assertVoiceUuid, transcribeAudio, voiceSessionId,
+import { ModuleBase, RpcError, VoiceInputBuffer, VOICE_MODEL_VERSIONS, encodeVoiceFrame, parseVoiceClientControl, validateVoiceManagementRequest, VoiceProtocolVersionError, sha256CanonicalJson, assertVoiceUuid, transcribeAudio, voiceSessionId,
   type GetVoiceConfigResult, type ModuleConfig, type RpcHandlerContext, type SensitiveRpcMethod, type SubmitVoiceTurnParams, type SyncVoiceTerminalParams, type VoiceAdminActionParams, type VoiceAdminActionResult,
-  type VoiceOutputParams, type VoiceOutputResult, type VoiceClientControl, type VoicePairing, type VoiceReplyContext, type VoiceServerControl, type VoiceTerminalState, type VoiceTurnResult } from 'crabot-shared'
+  type VoiceCatalog, type VoiceManagementResult, type SyncVoiceTerminalResult, type VoiceOutputParams, type VoiceOutputResult, type VoiceClientControl, type VoicePairing, type VoiceReplyContext, type VoiceServerControl, type VoiceTerminalState, type VoiceTurnResult } from 'crabot-shared'
 import { TerminalStore } from './terminal-store.js'
 import { voiceTransport } from './transport.js'
 
 interface Connection {
   socket: WebSocket; epoch: string; foreground: boolean; lastHeartbeat: number
   microphone: VoiceTerminalState['microphone']; playback: VoiceTerminalState['playback']
+  appliedRevision: number; confirmedRevision: number; helloSent: boolean
   input?: VoiceInputBuffer; processing?: AbortController; processingTurn?: string
 }
 interface ReplySlot { context: VoiceReplyContext; digest: string }
@@ -38,7 +39,8 @@ export class VoiceChannel extends ModuleBase {
   private playback?: ReplyPlayback
   private readonly playbacks = new Map<string, ReplyPlayback>()
   private replyTimer?: ReturnType<typeof setTimeout>
-  private enrollment?: { registration_id: string; revision: number; deadline: number }
+  private syncTail: Promise<void> = Promise.resolve()
+  private heartbeatSyncing = false
   private closeTransport?: () => void
   private heartbeatTimer?: ReturnType<typeof setInterval>
   private stopped = false
@@ -51,7 +53,7 @@ export class VoiceChannel extends ModuleBase {
     this.registerMethod('update_config', async () => { this.disconnect(); await this.refreshConfig(); return { updated: true } })
     this.registerMethod('get_capabilities', () => ({ supported_message_types: ['text'], supported_features: [], supports_history_query: false, supports_platform_user_query: true,
       max_message_length: 120, max_file_size: 0, supports_file_path: false, supports_list_contacts: true, supports_list_groups: true, supports_list_group_members: true,
-      voice: { protocol_version: 4, send_timeout_ms: 30000 } }))
+      voice: { protocol_version: 5, send_timeout_ms: 30000 } }))
     this.registerMethod('get_sessions', async (params: { type?: string; pagination?: { page?: number; page_size?: number } }) => { await this.refreshConfig(); return paginate(params?.type === 'private' ? [] : [this.session()], params) })
     this.registerMethod('get_session', async (params: { session_id: string }) => { this.assertSession(params.session_id); await this.refreshConfig(); return { session: this.session() } })
     this.registerMethod('get_private_session', () => { throw new RpcError('CHANNEL_UNSUPPORTED_FEATURE', 'Voice has only a voice group') })
@@ -85,8 +87,7 @@ export class VoiceChannel extends ModuleBase {
     this.heartbeatTimer = setInterval(() => {
       const c = this.connection
       if (c && Date.now() - c.lastHeartbeat > 5000) this.disconnect()
-      else if (c) { try { this.send(c.socket, { type: 'heartbeat' }); void this.sync().catch(() => this.disconnect()) } catch { this.disconnect() } }
-      if (this.enrollment && this.enrollment.deadline < Date.now()) this.enrollment = undefined
+      else if (c) { try { this.send(c.socket, { type: 'heartbeat' }); this.heartbeatSync() } catch { this.disconnect() } }
       if (this.pairing && Date.parse(this.pairing.expires_at) <= Date.now()) { this.pairing.socket?.terminate(); this.pairing = undefined }
     }, 2000)
   }
@@ -111,7 +112,40 @@ export class VoiceChannel extends ModuleBase {
     }
   }
   private async sync(ack: Partial<SyncVoiceTerminalParams> = {}): Promise<void> {
-    await this.admin('sync_voice_terminal', { channel_id: this.config.moduleId, connection_epoch: this.connection?.epoch ?? null, foreground: this.connection?.foreground ?? false, ...ack })
+    const c = this.connection
+    const operation = this.syncTail.then(async () => {
+      if (c !== this.connection) return
+      const result = await this.admin<SyncVoiceTerminalParams, SyncVoiceTerminalResult>('sync_voice_terminal', { channel_id: this.config.moduleId, connection_epoch: c?.epoch ?? null, foreground: c?.foreground ?? false, ...ack })
+      if (c !== this.connection) return
+      this.applyCatalog(result.catalog)
+      if (c?.helloSent) this.pushCatalog(c)
+    })
+    this.syncTail = operation.catch(() => {}); return operation
+  }
+  private heartbeatSync(): void {
+    if (this.heartbeatSyncing) return
+    this.heartbeatSyncing = true
+    void this.sync().catch(() => this.disconnect()).finally(() => { this.heartbeatSyncing = false })
+  }
+  private catalog(): VoiceCatalog {
+    return { enrollment_revision: this.settings.enrollment_revision, contacts: this.settings.contacts.map(({ platform_user_id, display_name }) => ({ platform_user_id, display_name })), registrations: this.settings.registrations, pending_enrollment: this.settings.pending_enrollment }
+  }
+  private applyCatalog(catalog: VoiceCatalog): void {
+    if (catalog.enrollment_revision < this.settings.enrollment_revision) return
+    const friends = new Map(this.settings.contacts.map(c => [c.platform_user_id, c.friend_id]))
+    if (this.settings.enrollment_revision !== catalog.enrollment_revision && (this.connection?.input || this.connection?.processing)) {
+      this.cancelInteraction()
+      if (this.connection) this.send(this.connection.socket, { type: 'error', code: 'VOICE_DIRECTORY_CHANGED', message: '声纹目录已更新，请重新开始本轮' })
+    }
+    this.settings = { ...this.settings, ...catalog, contacts: catalog.contacts.map(c => ({ ...c, ...(friends.get(c.platform_user_id) ? { friend_id: friends.get(c.platform_user_id) } : {}) })) }
+  }
+  private pushCatalog(c: Connection): void {
+    if (c.appliedRevision !== this.settings.enrollment_revision) this.send(c.socket, { type: 'catalog', catalog: this.catalog() })
+    else this.confirmCatalog(c)
+  }
+  private confirmCatalog(c: Connection): void {
+    if (c.appliedRevision !== this.settings.enrollment_revision || this.settings.registrations.some(r => r.status === 'revoked' && !r.terminal_cleared)) { c.confirmedRevision = -1; return }
+    if (c.confirmedRevision !== c.appliedRevision) { c.confirmedRevision = c.appliedRevision; this.send(c.socket, { type: 'catalog_confirmed', enrollment_revision: c.confirmedRevision }) }
   }
   private assertSession(id: string): void { if (id !== voiceSessionId(this.config.moduleId)) throw new RpcError('NOT_FOUND', 'Voice group session not found') }
   private boundContacts() { return this.settings.contacts.filter(c => c.friend_id !== undefined) }
@@ -126,6 +160,7 @@ export class VoiceChannel extends ModuleBase {
     const c = this.connection
     return { paired: this.terminal.paired, connected: !!c, foreground: c?.foreground ?? false, microphone: c?.microphone ?? 'closed', playback: c?.playback ?? 'idle', aec_verified: false,
       enrollment_revision: this.settings.enrollment_revision, contacts: this.settings.contacts, registrations: this.settings.registrations,
+      pending_enrollment: this.settings.pending_enrollment, unconfirmed_contacts: this.settings.unconfirmed_contacts,
       hosts: [...new Set(Object.values(os.networkInterfaces()).flatMap(addresses => (addresses ?? []).filter(a => !a.internal).map(a => a.family === 'IPv6' ? '[' + a.address + ']' : a.address)))],
       ...(this.pairing ? { pairing_id: this.pairing.pairing_id, ...(this.pairing.socket ? { verification_code: this.pairing.verification_code } : {}) } : {}) }
   }
@@ -143,7 +178,7 @@ export class VoiceChannel extends ModuleBase {
         await this.refreshConfig()
         if (!this.settings.terminal_entry) throw new RpcError('INVALID_PARAMS', '请先保存手机可访问的后台地址')
         this.pairing?.socket?.terminate()
-        this.pairing = { protocol_version: 4, channel_id: this.config.moduleId, pairing_id: randomUUID(), ...this.settings.terminal_entry, nonce: randomBytes(32).toString('base64url'), verification_code: String(randomInt(100000, 1000000)), expires_at: new Date(Date.now() + 60000).toISOString() }
+        this.pairing = { protocol_version: 5, channel_id: this.config.moduleId, pairing_id: randomUUID(), ...this.settings.terminal_entry, nonce: randomBytes(32).toString('base64url'), verification_code: String(randomInt(100000, 1000000)), expires_at: new Date(Date.now() + 60000).toISOString() }
         return { action: 'create_pairing', pairing: { ...this.pairing } }
       }
       case 'confirm_pairing': {
@@ -154,33 +189,33 @@ export class VoiceChannel extends ModuleBase {
         return { action: 'confirm_pairing', confirmed: true }
       }
       case 'revoke_terminal': fields(command, ['action']); await this.terminal.revoke(); this.disconnect(); this.pairing?.socket?.terminate(); this.pairing = undefined; return { action: 'revoke_terminal', revoked: true }
-      case 'enroll': {
-        fields(command, ['action', 'platform_user_id']); this.cancelInteraction(); await this.refreshConfig()
-        const registration = this.settings.registrations.find(r => r.status === 'pending' && r.platform_user_id === command.platform_user_id)
-        if (!registration || !this.connection?.foreground) throw new RpcError('SERVICE_UNAVAILABLE', '手机需在前台连接后才能登记')
-        this.enrollment = { registration_id: registration.registration_id, revision: this.settings.enrollment_revision, deadline: Date.now() + 60000 }
-        this.send(this.connection.socket, { type: 'enroll', registration, enrollment_revision: this.settings.enrollment_revision })
-        return { action: 'enroll', registration }
+      case 'enroll_new': case 'enroll': case 'rename_contact': case 'delete_registration': case 'cancel_enrollment': {
+        const { request_id, expected_revision, ...management } = command
+        validateVoiceManagementRequest({ request_id, expected_revision, command: management })
+        if (command.action !== 'rename_contact') this.cancelInteraction()
+        await this.refreshConfig()
+        if (this.connection) {
+          this.send(this.connection.socket, { type: 'catalog', catalog: this.catalog() })
+          if ((command.action === 'enroll' || command.action === 'enroll_new') && this.settings.pending_enrollment && this.connection.foreground) this.send(this.connection.socket, { type: 'enroll', task: this.settings.pending_enrollment })
+        }
+        return { action: command.action, result: { status: this.settings.pending_enrollment ? 'pending' : 'completed', catalog: this.catalog() } }
       }
-      case 'delete_registration': fields(command, ['action', 'registration_id']); this.cancelInteraction(); await this.refreshConfig(); this.sendClears(); return { action: 'delete_registration', revoked: true }
       default: throw new RpcError('INVALID_PARAMS', 'Invalid voice action')
     }
   }
   private send(socket: WebSocket, control: VoiceServerControl): void {
     if (socket.readyState !== WebSocket.OPEN) throw new Error('Terminal disconnected')
     if (socket.bufferedAmount > 50000) throw new Error('Terminal queue exceeds one second')
-    socket.send(JSON.stringify(control))
+    const text = JSON.stringify(control)
+    if (Buffer.byteLength(text) > 65536) throw new Error('Voice catalog exceeds control frame limit')
+    socket.send(text)
   }
   private sendHello(c: Connection): void {
-    this.send(c.socket, { type: 'hello', connection_epoch: c.epoch, config: this.settings.config, enrollment_revision: this.settings.enrollment_revision, registrations: this.settings.registrations,
+    this.send(c.socket, { type: 'hello', connection_epoch: c.epoch, config: this.settings.config, catalog: this.catalog(),
       destinations: [this.settings.asr_connection && { capability: 'asr' as const, ...this.settings.asr_connection }, this.settings.tts_connection && { capability: 'tts' as const, ...this.settings.tts_connection }].filter(Boolean).map(value => {
         const connection = value!; return { capability: connection.capability, endpoint: connection.endpoint }
       }) })
-    this.sendClears()
-  }
-  private sendClears(): void {
-    if (!this.connection) return
-    for (const r of this.settings.registrations) if (r.status === 'revoked' && !r.terminal_cleared) this.send(this.connection.socket, { type: 'clear_registration', registration_id: r.registration_id, enrollment_revision: this.settings.enrollment_revision })
+    c.helloSent = true
   }
   private connected(socket: WebSocket): void {
     let authenticated = false, pairingOnly = false, queue = Promise.resolve()
@@ -197,9 +232,9 @@ export class VoiceChannel extends ModuleBase {
         const control = binary ? undefined : parseVoiceClientControl(data.toString('utf8'))
         if (control?.type === 'heartbeat' && authenticated) {
           const c = this.connection; if (!c || c.socket !== socket) throw new Error('Connection changed')
-          c.lastHeartbeat = Date.now(); c.foreground = control.foreground; c.microphone = control.microphone; c.playback = control.playback
+          c.lastHeartbeat = Date.now(); c.foreground = control.foreground; c.microphone = control.microphone; c.playback = control.playback; c.appliedRevision = control.enrollment_revision
           if (!c.foreground) this.cancelInteraction()
-          void this.sync().catch(reject); return
+          this.heartbeatSync(); return
         }
         if (control?.type === 'cancel' && authenticated) {
           if (control.playback_id && control.playback_id !== this.playback?.id) return
@@ -219,7 +254,7 @@ export class VoiceChannel extends ModuleBase {
             if (control.type !== 'hello' || !this.terminal.matches(control.credential) || !compatible(control.models) || this.connection) throw new Error('Terminal authentication/model mismatch')
             await this.refreshConfig()
             if (this.stopped || socket.readyState !== WebSocket.OPEN || this.connection) throw new Error('Connection changed')
-            this.connection = { socket, epoch: randomUUID(), foreground: false, lastHeartbeat: Date.now(), microphone: 'closed', playback: 'idle' }
+            this.connection = { socket, epoch: randomUUID(), foreground: false, lastHeartbeat: Date.now(), microphone: 'closed', playback: 'idle', appliedRevision: -1, confirmedRevision: -1, helloSent: false }
             authenticated = true; clearTimeout(handshake); await this.sync(); this.sendHello(this.connection); return
           }
           const c = this.connection; if (!c || c.socket !== socket) throw new Error('Connection changed')
@@ -232,8 +267,9 @@ export class VoiceChannel extends ModuleBase {
   private async control(c: Connection, control: VoiceClientControl): Promise<void> {
     switch (control.type) {
       case 'turn_start':
-        if (!c.foreground || c.input || c.processing || this.playback || this.enrollment) throw new Error('Voice is not ready')
+        if (!c.foreground || c.input || c.processing || this.playback) throw new Error('Voice is not ready')
         this.reply = undefined; await this.refreshConfig(); await this.sync()
+        if (c.confirmedRevision !== this.settings.enrollment_revision || this.settings.pending_enrollment) { this.send(c.socket, { type: 'error', code: 'VOICE_CATALOG_NOT_READY', message: '请等待声纹目录同步或完成当前登记' }); return }
         if (this.settings.setup_status !== 'complete') { this.send(c.socket, { type: 'error', code: 'VOICE_REJECTED', message: '请先完成语音创建向导' }); return }
         if (!this.settings.asr_connection || !this.settings.tts_connection || !this.connection || this.connection !== c || !c.foreground) throw new Error('Voice configuration unavailable')
         c.input = new VoiceInputBuffer(control.turn_id); this.send(c.socket, { type: 'turn_ready', turn_id: control.turn_id }); return
@@ -243,11 +279,24 @@ export class VoiceChannel extends ModuleBase {
         this.send(c.socket, { type: 'turn_status', turn_id: control.turn_id, ...status }); return
       }
       case 'enrollment_done': {
-        const task = this.enrollment
-        if (!c.foreground || !task || task.deadline < Date.now() || task.registration_id !== control.registration_id || task.revision !== control.enrollment_revision || control.model_id !== VOICE_MODEL_VERSIONS.embedding) throw new Error('Enrollment acknowledgement mismatch')
-        await this.sync({ completed_enrollment: { registration_id: control.registration_id, model_id: control.model_id, enrollment_revision: control.enrollment_revision } }); this.enrollment = undefined; await this.refreshConfig(); this.sendHello(c); return
+        if (!c.foreground || control.model_id !== VOICE_MODEL_VERSIONS.embedding) throw new Error('Enrollment acknowledgement mismatch')
+        await this.sync({ completed_enrollment: { registration_id: control.registration_id, model_id: control.model_id, enrollment_revision: control.enrollment_revision } }); return
       }
-      case 'registration_cleared': await this.sync({ cleared_registration: { registration_id: control.registration_id, enrollment_revision: control.enrollment_revision } }); await this.refreshConfig(); return
+      case 'registration_cleared': await this.sync({ cleared_registration: { registration_id: control.registration_id, enrollment_revision: control.enrollment_revision } }); return
+      case 'catalog_applied': c.appliedRevision = control.enrollment_revision; c.confirmedRevision = -1; await this.sync(); this.confirmCatalog(c); return
+      case 'contact_action': {
+        if (!c.foreground) throw new Error('Foreground terminal required')
+        if (control.request.command.action !== 'rename_contact') this.cancelInteraction()
+        await this.sync()
+        const result = await this.admin<unknown, VoiceManagementResult>('manage_voice_contacts', { channel_id: this.config.moduleId, connection_epoch: c.epoch, request: control.request })
+        if (c !== this.connection) return
+        this.applyCatalog(result.catalog); this.send(c.socket, { type: 'contact_result', request_id: control.request.request_id, result }); return
+      }
+      case 'contact_action_query': {
+        await this.sync()
+        const result = await this.admin<unknown, VoiceManagementResult>('get_voice_management_result', { channel_id: this.config.moduleId, connection_epoch: c.epoch, request_id: control.request_id })
+        if (c === this.connection) { this.applyCatalog(result.catalog); this.send(c.socket, { type: 'contact_result', request_id: control.request_id, result }) }; return
+      }
       default: throw new Error('Unexpected terminal control')
     }
   }
@@ -354,7 +403,7 @@ export class VoiceChannel extends ModuleBase {
     this.connection?.input?.clear(); if (this.connection) this.connection.input = undefined
     this.connection?.processing?.abort(); if (this.connection) { this.connection.processing = undefined; this.connection.processingTurn = undefined }
     if (this.replyTimer) clearTimeout(this.replyTimer); this.replyTimer = undefined
-    this.playbacks.clear(); this.reply = undefined; this.enrollment = undefined; this.cancelPlayback('语音交互已结束')
+    this.playbacks.clear(); this.reply = undefined; this.cancelPlayback('语音交互已结束')
   }
   private disconnect(): void {
     this.cancelInteraction(); const c = this.connection; this.connection = undefined; c?.socket.terminate()

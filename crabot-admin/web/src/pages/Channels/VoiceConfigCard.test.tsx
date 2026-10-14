@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MemoryRouter } from 'react-router-dom'
 import { friendService } from '../../services/friend'
@@ -20,11 +20,11 @@ const provider = { id: 'provider', name: '自建音频', format: 'openai-audio' 
 let terminal: Record<string, unknown>
 beforeEach(() => {
   vi.clearAllMocks()
-  terminal = { paired: false, connected: false, foreground: false, microphone: 'closed', playback: 'idle', aec_verified: false, enrollment_revision: 0, contacts: [], registrations: [], hosts: ['http://192.168.1.2:3000'] }
+  terminal = { paired: false, connected: false, foreground: false, microphone: 'closed', playback: 'idle', aec_verified: false, enrollment_revision: 0, contacts: [], registrations: [], pending_enrollment: null, unconfirmed_contacts: [], hosts: ['http://192.168.1.2:3000'] }
   vi.mocked(voiceService.list).mockResolvedValue({ items: [provider] })
   vi.mocked(voiceService.config).mockResolvedValue({ asr: null, tts: null, wake_word: '你好螃蟹' })
   vi.mocked(voiceService.action).mockImplementation(async (_id, command) => {
-    if (command.action === 'create_pairing') return { action: 'create_pairing', pairing: { protocol_version: 4, channel_id: '客厅', pairing_id: 'p-1', url: 'wss://local.example:1234/voice', tls_fingerprint_sha256: 'fingerprint', nonce: 'one-time', verification_code: '123456', expires_at: new Date(Date.now() + 60000).toISOString() } }
+    if (command.action === 'create_pairing') return { action: 'create_pairing', pairing: { protocol_version: 5, channel_id: '客厅', pairing_id: 'p-1', url: 'wss://local.example:1234/voice', tls_fingerprint_sha256: 'fingerprint', nonce: 'one-time', verification_code: '123456', expires_at: new Date(Date.now() + 60000).toISOString() } }
     return { action: 'status', state: terminal as never }
   })
 })
@@ -55,13 +55,16 @@ describe('native voice instance configuration', () => {
     terminal = { ...terminal, pairing_id: 'p-1', verification_code: '123456' }
     await waitFor(() => expect(confirmation).toBeEnabled(), { timeout: 4000 })
   })
-  it('creates a contact offline and binds an existing Friend using the stable channel identity', async () => {
-    vi.mocked(voiceService.action).mockResolvedValue({ action: 'create_contact', contact: { platform_user_id: 'contact-1', display_name: 'FuFu' } })
-    render(<VoiceContacts channelId="voice" onChanged={async () => {}} />)
-    fireEvent.change(screen.getByLabelText('联系人名称'), { target: { value: 'FuFu' } })
-    fireEvent.click(screen.getByRole('button', { name: '创建渠道联系人' }))
-    await screen.findByText('联系人已创建，可绑定好友或登记声纹')
-    expect(screen.getByRole('button', { name: '登记声纹' })).toBeDisabled()
+  it('keeps a first enrollment task out of contacts, then binds the confirmed stable identity', async () => {
+    const state = { ...terminal, connected: true, foreground: true }
+    vi.mocked(voiceService.action).mockResolvedValue({ action: 'enroll_new', result: { status: 'pending', catalog: { enrollment_revision: 1, contacts: [], registrations: [], pending_enrollment: null } } })
+    const view = render(<VoiceContacts channelId="voice" state={state as never} onChanged={async () => {}} />)
+    fireEvent.change(screen.getByLabelText('录入名字'), { target: { value: 'FuFu' } })
+    fireEvent.click(screen.getByRole('button', { name: '登记新联系人' }))
+    await screen.findByText('录入任务已建立；手机现场完成后才生成正式联系人')
+    expect(within(screen.getByLabelText('绑定的渠道联系人')).queryByRole('option', { name: 'FuFu' })).toBeNull()
+    view.rerender(<VoiceContacts channelId="voice" state={{ ...state, contacts: [{ platform_user_id: 'contact-1', display_name: 'FuFu' }] } as never} onChanged={async () => {}} />)
+    fireEvent.change(screen.getByLabelText('绑定的渠道联系人'), { target: { value: 'contact-1' } })
     fireEvent.change(screen.getByLabelText('已有好友'), { target: { value: 'fufu' } })
     fireEvent.click(screen.getByRole('button', { name: '绑定已有好友' }))
     await waitFor(() => expect(friendService.linkIdentity).toHaveBeenCalledWith('fufu', { channel_id: 'voice', platform_user_id: 'contact-1', platform_display_name: 'FuFu' }))
@@ -69,15 +72,40 @@ describe('native voice instance configuration', () => {
   })
   it('creates a normal Friend with an existing template and enrolls by contact rather than Friend ID', async () => {
     const state = { ...terminal, connected: true, foreground: true, contacts: [{ platform_user_id: 'contact-2', display_name: '来宾' }] }
+    vi.mocked(voiceService.action).mockResolvedValue({ action: 'enroll', result: { status: 'pending', catalog: { enrollment_revision: 1, contacts: [], registrations: [], pending_enrollment: null } } })
     vi.mocked(api.post).mockResolvedValue({ friend: { id: 'new-friend', display_name: '来宾' } })
     const refresh = vi.fn(async () => {})
     render(<VoiceContacts channelId="voice" state={state as never} onChanged={refresh} />)
     fireEvent.click(await screen.findByRole('button', { name: '登记声纹' }))
-    await waitFor(() => expect(voiceService.action).toHaveBeenCalledWith('voice', { action: 'enroll', platform_user_id: 'contact-2' }))
+    await waitFor(() => expect(voiceService.action).toHaveBeenCalledWith('voice', expect.objectContaining({ action: 'enroll', platform_user_id: 'contact-2', request_id: expect.any(String), expected_revision: 0 })))
     fireEvent.change(screen.getByLabelText('绑定的渠道联系人'), { target: { value: 'contact-2' } })
     fireEvent.change(screen.getByLabelText('新好友权限模板'), { target: { value: 'minimal' } })
     fireEvent.click(screen.getByRole('button', { name: '创建并绑定普通好友' }))
     await waitFor(() => expect(api.post).toHaveBeenCalledWith('/friends', { display_name: '来宾', permission: 'normal', permission_template_id: 'minimal', channel_identities: [{ channel_id: 'voice', platform_user_id: 'contact-2', platform_display_name: '来宾' }] }))
+  })
+  it('retries an unconfirmed HTTP write with its original request ID', async () => {
+    const state = { ...terminal, connected: true, foreground: true }
+    vi.mocked(voiceService.action).mockRejectedValueOnce(new Error('response lost')).mockResolvedValueOnce({ action: 'enroll_new', result: { status: 'pending', catalog: { enrollment_revision: 1, contacts: [], registrations: [], pending_enrollment: null } } })
+    render(<VoiceContacts channelId="voice" state={state as never} onChanged={async () => {}} />)
+    fireEvent.change(screen.getByLabelText('录入名字'), { target: { value: 'New' } })
+    fireEvent.click(screen.getByRole('button', { name: '登记新联系人' }))
+    await screen.findByText('response lost')
+    fireEvent.click(screen.getByRole('button', { name: '登记新联系人' }))
+    await screen.findByText('录入任务已建立；手机现场完成后才生成正式联系人')
+    expect(vi.mocked(voiceService.action).mock.calls[0][1]).toEqual(vi.mocked(voiceService.action).mock.calls[1][1])
+  })
+  it('does not report an unknown result as committed and retains the request for retry', async () => {
+    const state = { ...terminal, connected: true, foreground: true }
+    const catalog = { enrollment_revision: 0, contacts: [], registrations: [], pending_enrollment: null }
+    vi.mocked(voiceService.action).mockResolvedValueOnce({ action: 'enroll_new', result: { status: 'unknown', catalog } }).mockResolvedValueOnce({ action: 'enroll_new', result: { status: 'pending', catalog } })
+    render(<VoiceContacts channelId="voice" state={state as never} onChanged={async () => {}} />)
+    fireEvent.change(screen.getByLabelText('录入名字'), { target: { value: 'New' } })
+    fireEvent.click(screen.getByRole('button', { name: '登记新联系人' }))
+    await screen.findByText('操作尚未确认，原请求已保留；请核对状态后重试')
+    expect(screen.queryByText('后台已提交，终端同步状态见列表')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: '登记新联系人' }))
+    await screen.findByText('录入任务已建立；手机现场完成后才生成正式联系人')
+    expect(vi.mocked(voiceService.action).mock.calls[0][1]).toEqual(vi.mocked(voiceService.action).mock.calls[1][1])
   })
   it('keeps saved API keys masked and switches model capabilities with the selected native format', async () => {
     render(<AudioServiceEditor provider={provider} onSaved={async () => {}} onCancel={() => {}} />)
