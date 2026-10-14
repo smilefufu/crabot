@@ -164,3 +164,10 @@ test('new release dependency helper graph must be complete', async t => {
   for (const file of files) { mkdirSync(join(root, file, '..'), { recursive: true }); writeFileSync(join(root, file), '') }
   await assert.rejects(verifyReleasePackage(root, 'pr-test'), /missing scripts\/prepare-memory\.mjs/)
 })
+
+test('system install rejects an incapable uv before dependency replacement', unix, () => {
+  const result = bash(`sudo() { return 0; }; uv() { return 2; }; ensure_system_uv; echo UNEXPECTED_PREPARATION`)
+  assert.notEqual(result.status, 0)
+  assert.match(result.stderr, /System uv cannot prepare/)
+  assert.doesNotMatch(result.stdout, /UNEXPECTED_PREPARATION/)
+})

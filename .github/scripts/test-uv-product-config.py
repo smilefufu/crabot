@@ -7,7 +7,9 @@ requests=[]
 class Server(http.server.BaseHTTPRequestHandler):
  def do_GET(self):
   requests.append(self.server.label)
-  self.send_response(404);self.end_headers()
+  if getattr(self.server,'version_page',False):
+   self.send_response(200);self.send_header('Content-Type','text/html');self.end_headers();self.wfile.write(b'<a href="hatchling-1.0.0-py3-none-any.whl">hatchling</a>')
+  else:self.send_response(404);self.end_headers()
  def log_message(self,*args):pass
 servers=[]
 for label in ['public','private']:
@@ -38,6 +40,14 @@ try:
   assert after.returncode!=0 and requests and 'private' not in requests,after.stderr
   assert (root/'uv.toml').read_text()==config
   print(f'Private index isolated; native TLS {native} preserved; source config unchanged',flush=True)
+ servers[0].version_page=True
+ (root/'missing-version.txt').write_text('hatchling==999999.0.0\n')
+ missing=subprocess.run([uv,'--no-config','pip','compile',str(root/'missing-version.txt'),'--default-index',public,'--no-cache'],cwd=root,env=env,text=True,capture_output=True,timeout=20)
+ assert missing.returncode!=0 and 'there is no version of hatchling==999999.0.0' in missing.stderr,missing.stderr
+ fallback=root/'fallback.mjs'
+ fallback.write_text('import {packageSource,withPackageSource} from '+json.dumps(module)+';let n=0;const s=packageSource("python","https://mirrors.aliyun.com/pypi/simple/");await withPackageSource(s,async()=>{if(++n===1)throw new Error(process.env.CRABOT_UV_FAILURE)});if(n!==2||s.url!==s.official)process.exit(1);')
+ subprocess.run(['node',str(fallback)],env=env|{'CRABOT_UV_FAILURE':missing.stderr},check=True,timeout=10)
+ print('Real uv missing locked version triggers exactly one official fallback',flush=True)
 finally:
  for server in servers:server.shutdown()
 shutil.rmtree(root)

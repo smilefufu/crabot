@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, symlinkSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { homedir } from 'node:os'
+import { execFileSync } from 'node:child_process'
 import { runBounded } from './run-bounded.mjs'
 import { selectPackageSource, withPackageSource } from './install-network.mjs'
 
@@ -11,7 +12,13 @@ export async function ensureCorepack(root, { source, logger = console } = {}) {
   source ??= await selectPackageSource('npm', { logger })
   const run = (cmd, args, timeout = 20 * 60_000) => withPackageSource(source, (url, env, remaining) => runBounded(cmd, args, { cwd: root, env, timeout: remaining, captureError: true }), { logger, timeout })
   const system = windows ? { command: 'cmd.exe', args: ['/d', '/s', '/c', 'corepack pnpm@9.15.9 --version'] } : { command: 'corepack', args: ['pnpm@9.15.9', '--version'] }
+  let missing = false
+  if (windows) {
+    try { execFileSync('where.exe', ['corepack'], { stdio: 'ignore', timeout: 5000 }) }
+    catch (error) { if (error.status !== 1) throw error; missing = true }
+  }
   try {
+    if (missing) throw Object.assign(new Error('Corepack executable is missing'), { code: 'ENOENT' })
     await run(system.command, system.args, 60_000)
     return null
   } catch (error) {

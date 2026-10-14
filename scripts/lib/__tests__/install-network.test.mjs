@@ -91,3 +91,14 @@ test('private npm config is excluded while proxy and CA are preserved; owned con
     assert.equal(await readFile(file, 'utf8'), config)
   } finally { await rm(root, { recursive: true, force: true }) }
 })
+
+test('uv missing locked version retries official once without changing the requirement', async () => {
+  const source = await selectPackageSource('python', { probe: async () => true, logger: silent })
+  const requirement = 'hatchling==999999.0.0'
+  const calls = []
+  await withPackageSource(source, async url => {
+    calls.push({ url, requirement })
+    if (calls.length === 1) throw new Error(`Because there is no version of ${requirement} and you require ${requirement}, requirements are unsatisfiable`)
+  }, { logger: silent })
+  assert.deepEqual(calls, [{ url: source.domestic, requirement }, { url: source.official, requirement }])
+})
