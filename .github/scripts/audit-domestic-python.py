@@ -91,8 +91,8 @@ try:
     assert bad_encoding.returncode != 0 and 'UnicodeEncodeError' in bad_encoding.stderr, bad_encoding.stderr
     migration_driver = root / 'migration.mjs'
     runner = (repo / 'scripts/upgrade-lib/runner.mjs').as_uri()
-    migration_driver.write_text('import {runScript} from ' + json.dumps(runner) + ';const r=await runScript(process.argv[2],process.argv[3]);if(r.exitCode!==0||!r.stdout.includes("空")||process.env.PYTHONIOENCODING!=="cp1252")process.exit(1);')
-    result = subprocess.run(['node', str(migration_driver), str(migration), str(root / 'data 空')], env=env | {'UV_OFFLINE': '1', 'PYTHONIOENCODING': 'cp1252'}, text=True, capture_output=True, timeout=30)
+    migration_driver.write_text('import {runScript} from ' + json.dumps(runner) + ';const r=await runScript(process.argv[2],process.argv[3]);if(r.exitCode!==0||!r.stdout.includes("空")||process.env.PYTHONIOENCODING!=="cp1252")process.exit(1);', encoding='utf-8')
+    result = subprocess.run(['node', str(migration_driver), str(migration), str(root / 'data 空')], env=env | {'UV_OFFLINE': '1', 'PYTHONIOENCODING': 'cp1252', 'CRABOT_DEV': '1'}, text=True, capture_output=True, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
     print('Actual Memory migration: offline/no-dev and UTF-8 despite inherited cp1252; parent encoding unchanged', flush=True)
     assert hashlib.sha256((project / 'uv.lock').read_bytes()).hexdigest() == lock_hash

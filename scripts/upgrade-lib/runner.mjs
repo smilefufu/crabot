@@ -24,7 +24,7 @@ export function runScript(scriptPath, dataDir) {
   // 这样 `uv run` 能定位到模块的 pyproject.toml；node/tsx 也能解析模块自身依赖。
   const cwd = dirname(dirname(scriptPath))
   const memoryPython = ext === '.py' && basename(cwd) === 'crabot-memory'
-  const dev = process.env.CRABOT_DEV === '1' || process.env.CRABOT_DEV === 'true'
+  const dev = process.env.CRABOT_DEV === 'true'
   const args = [...(memoryPython ? ['run', '--frozen', ...(dev ? [] : ['--no-dev']), 'python'] : baseArgs), scriptPath, `--data-dir=${dataDir}`]
   const env = ext === '.py' ? { ...process.env, PYTHONIOENCODING: 'utf-8' } : process.env
 
