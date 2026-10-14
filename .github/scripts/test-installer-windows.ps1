@@ -33,11 +33,11 @@ foreach ($base in @(
 }
 Remove-Item Function:Invoke-WebRequest
 $script:CorepackJS = $null
-function corepack { $global:LASTEXITCODE = 17 }
+function node { $global:LASTEXITCODE = 17 }
 $failed = $false
 try { Invoke-Pnpm install } catch { $failed = $true }
 Assert $failed 'native pnpm failures must stop installation'
-Remove-Item Function:corepack
+Remove-Item Function:node
 $root = Join-Path ([IO.Path]::GetTempPath()) ('installer-ps-test-' + [guid]::NewGuid().ToString('N'))
 try {
     foreach ($file in @('cli.mjs','package.json','dist/cli/main.js','scripts/start.mjs','crabot-memory/pyproject.toml','crabot-memory/uv.lock','scripts/prepare-scrapling.mjs')) {

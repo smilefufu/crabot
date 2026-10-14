@@ -24,6 +24,69 @@ function Add-ToolPath($directory) {
     $script:ToolPaths += $directory
 }
 
+
+# Installer-owned helpers also work with legacy packages; verify every file before executing.
+$InstallerHelperRevision = 'a88dc0722c38843607e877a409be49046d608ef3'
+$InstallerHelperHashes = @{
+    'scripts/installer-deps.mjs' = 'd4fd4bed9aa55ab09c65f7f63ffb8bfe275fbfac953caca131e5504df67d72b7'
+    'scripts/lib/install-network.mjs' = '7232c8d9cf0de62ba19888236dee3330242e8ca3e8c6d0405e0b03e711579012'
+    'scripts/lib/memory-deps.mjs' = '4a916bc72dcfb2d484a4f60b2ff5b2b82d7a863362f0ad52a798a5d456e11f65'
+    'scripts/lib/run-bounded.mjs' = '20cd05bbf043961f774a68d83c5c4ab5885a33dda0e36409788341b054132df7'
+    'scripts/lib/toolchain.mjs' = '8b48e0a59cb138274e361a642ff5665ee8e87c85bccec6e99d6162729b72ab1a'
+}
+$script:InstallerHelper = $null
+$script:InstallerHelperTemp = $null
+$script:NpmContext = '-'
+function Get-InstallerHelper {
+    if ($script:InstallerHelper) { return $script:InstallerHelper }
+    $candidate = $PSScriptRoot
+    $valid = [bool]$candidate
+    if ($valid) {
+        foreach ($relative in $InstallerHelperHashes.Keys) {
+            $file = Join-Path $candidate $relative
+            if (-not (Test-Path -LiteralPath $file) -or (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash -ine $InstallerHelperHashes[$relative]) { $valid = $false; break }
+        }
+    }
+    if ($valid) { $script:InstallerHelper = Join-Path $candidate 'scripts/installer-deps.mjs'; return $script:InstallerHelper }
+    $script:InstallerHelperTemp = Join-Path $env:TEMP ('crabot-installer-helpers-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $script:InstallerHelperTemp | Out-Null
+    foreach ($relative in $InstallerHelperHashes.Keys) {
+        $file = Join-Path $script:InstallerHelperTemp $relative
+        New-Item -ItemType Directory -Force -Path (Split-Path $file -Parent) | Out-Null
+        Invoke-WebRequest "https://raw.githubusercontent.com/smilefufu/crabot/$InstallerHelperRevision/$relative" -OutFile $file -UseBasicParsing -TimeoutSec 60
+        if ((Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash -ine $InstallerHelperHashes[$relative]) { throw 'Installer helper checksum mismatch' }
+    }
+    $script:InstallerHelper = Join-Path $script:InstallerHelperTemp 'scripts/installer-deps.mjs'
+    return $script:InstallerHelper
+}
+function Get-MirrorMetadata($uri) {
+    $client = New-Object Net.WebClient
+    $client.Encoding = [Text.Encoding]::UTF8
+    try {
+        $task = $client.DownloadStringTaskAsync([Uri]$uri)
+        if ($task.Wait(5000)) { return $task.Result }
+        $client.CancelAsync()
+    } catch { return $null }
+    finally { $client.Dispose() }
+    return $null
+}
+function Get-ToolArchive($mirror, $official, $file, $budgetSeconds = 900) {
+    $started = [Diagnostics.Stopwatch]::StartNew()
+    $url = if ($mirror) { $mirror } else { $official }
+    while ($true) {
+        $remaining = [int][Math]::Floor($budgetSeconds - $started.Elapsed.TotalSeconds)
+        if ($remaining -le 0) { throw 'Tool download timed out' }
+        try { Invoke-WebRequest $url -OutFile $file -UseBasicParsing -TimeoutSec $remaining; return }
+        catch {
+            $message = $_.Exception.Message
+            if ($url -eq $official -or $message -match 'Access.*denied|permission|ENOSPC|disk.*full|path.*not found' -or $message -notmatch '403|404|408|429|50[0-9]|timed out|connection|transport|decryption|name.*resolved') { throw }
+            Write-Warn 'Domestic tool download failed; retrying the same official version.'
+            Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue
+            $url = $official
+        }
+    }
+}
+
 # --- Node.js in a writable user directory ---
 function Ensure-Node {
     $nodeCmd = Get-Command node -ErrorAction SilentlyContinue
@@ -44,12 +107,14 @@ function Ensure-Node {
     $stage = Join-Path $env:TEMP ("crabot-node-{0}" -f [guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $stage | Out-Null
     try {
-        $checksums = (Invoke-WebRequest 'https://nodejs.org/dist/latest-v22.x/SHASUMS256.txt' -UseBasicParsing).Content
-        $line = @($checksums -split "`n" | Where-Object { $_ -match '^([a-f0-9]{64})\s+(node-v22\.[0-9]+\.[0-9]+-win-x64\.zip)\s*$' })
-        if ($line.Count -ne 1 -or $line[0] -notmatch '^([a-f0-9]{64})\s+(\S+)') { throw 'Node 22 official checksum manifest is invalid' }
-        $expected = $Matches[1]; $filename = $Matches[2]
+        $filename = 'node-v22.23.3-win-x64.zip'
+        $expected = '2b0ff57b049cda1bbcea2240eec20467018713c1efe1f7360c2681859b90ed71'
+        $base = 'https://cdn.npmmirror.com/binaries/node/v22.23.3'
+        $metadata = Get-MirrorMetadata "$base/SHASUMS256.txt"
+        $mirror = if ($metadata -match "$expected\s+$([regex]::Escape($filename))") { "$base/$filename" } else { $null }
+        Write-Info "Node download source: $(if ($mirror) { $base } else { 'https://nodejs.org/dist/v22.23.3 (domestic unavailable)' })"
         $archive = Join-Path $stage $filename
-        Invoke-WebRequest "https://nodejs.org/dist/latest-v22.x/$filename" -OutFile $archive -UseBasicParsing
+        Get-ToolArchive $mirror "https://nodejs.org/dist/v22.23.3/$filename" $archive
         if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ine $expected) { throw 'Node archive checksum mismatch' }
         Expand-Archive -LiteralPath $archive -DestinationPath $stage
         $payload = Join-Path $stage ([IO.Path]::GetFileNameWithoutExtension($filename))
@@ -73,14 +138,36 @@ function Ensure-Node {
 # --- uv ---
 function Ensure-Uv {
     $uvCmd = Get-Command uv -ErrorAction SilentlyContinue
-    if (-not $uvCmd) {
-        Invoke-RestMethod https://astral.sh/uv/install.ps1 | Invoke-Expression
-        Add-ToolPath (Join-Path $env:USERPROFILE '.local\bin')
-        $uvCmd = Get-Command uv -ErrorAction SilentlyContinue
-        if (-not $uvCmd) { throw 'uv installation did not provide a usable command' }
+    if ($uvCmd) {
+        uv --no-config export --help > $null
+        if ($LASTEXITCODE -eq 0) {
+            uv --no-config --show-settings python list --only-downloads --output-format json > $null
+            if ($LASTEXITCODE -eq 0) { uv --version; Assert-NativeSuccess 'uv version probe'; return }
+        }
     }
-    uv --version
-    Assert-NativeSuccess 'uv version probe'
+    $version = '0.13.0'
+    $filename = 'uv-x86_64-pc-windows-msvc.zip'
+    $expected = '088962f9e7b7bd9ea740c04c650b2a21c8928c345bd99ac24350dc924dba656c'
+    $base = 'https://mirrors.ustc.edu.cn/github-release/astral-sh/uv/LatestRelease'
+    $metadata = Get-MirrorMetadata "$base/uv-installer.sh"
+    $mirror = if ($metadata -match 'APP_VERSION="0\.13\.0"') { "$base/$filename" } else { $null }
+    Write-Info "uv download source: $(if ($mirror) { $base } else { 'official 0.13.0 (domestic missing/unavailable)' })"
+    $stage = Join-Path $env:TEMP ('crabot-uv-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $stage | Out-Null
+    try {
+        $archive = Join-Path $stage $filename
+        Get-ToolArchive $mirror "https://github.com/astral-sh/uv/releases/download/$version/$filename" $archive
+        if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ine $expected) { throw 'uv archive checksum mismatch' }
+        Expand-Archive -LiteralPath $archive -DestinationPath $stage
+        $payload = @(Get-ChildItem -LiteralPath $stage -Filter uv.exe -File -Recurse)
+        if ($payload.Count -ne 1) { throw 'uv archive payload is invalid' }
+        $bin = Join-Path $env:USERPROFILE '.local/bin'
+        New-Item -ItemType Directory -Force -Path $bin | Out-Null
+        foreach ($name in @('uv.exe','uvx.exe')) { Copy-Item -LiteralPath (Join-Path $payload[0].DirectoryName $name) -Destination (Join-Path $bin $name) -Force }
+        Add-ToolPath $bin
+        uv --version
+        Assert-NativeSuccess 'uv version probe'
+    } finally { Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue }
 }
 
 function Test-GitBash($candidate) {
@@ -136,27 +223,28 @@ function Ensure-Bash {
 
 # --- pnpm (prepare a pinned private Corepack when needed) ---
 function Ensure-Pnpm {
-    $script:CorepackJS = $null
-    $cmd = Get-Command corepack -ErrorAction SilentlyContinue
-    if ($cmd) {
-        try {
-            $ver = corepack pnpm@9.15.9 --version
-            if ($LASTEXITCODE -eq 0) { Write-Info "pnpm $ver ready"; return }
-        } catch { Write-Warn "System Corepack failed; preparing the private tool: $_" }
-    }
-    $tools = Join-Path $env:LOCALAPPDATA 'crabot\corepack'
-    $script:CorepackJS = Join-Path $tools 'node_modules\corepack\dist\corepack.js'
-    if (-not (Test-Path -LiteralPath $script:CorepackJS)) {
-        npm install --prefix $tools --ignore-scripts --no-audit --no-fund --registry=https://registry.npmjs.org corepack@0.31.0
-        Assert-NativeSuccess 'Corepack preparation'
-    }
-    Invoke-Pnpm --version
-    Add-ToolPath (Join-Path $tools 'node_modules/.bin')
+    Invoke-Pnpm --version | ForEach-Object { Write-Host $_ }
+    Write-Info 'pnpm 9.15.9 ready'
 }
 function Invoke-Pnpm {
-    if ($script:CorepackJS) { node $script:CorepackJS pnpm@9.15.9 @args }
-    else { corepack pnpm@9.15.9 @args }
-    Assert-NativeSuccess 'pnpm'
+    $helper = Get-InstallerHelper
+    $preference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $output = & node $helper pnpm (Get-Location).Path $script:NpmContext @args 2>&1
+        $status = $LASTEXITCODE
+    } finally { $ErrorActionPreference = $preference }
+    $result = $null
+    foreach ($line in $output) {
+        $text = [string]$line
+        if ($text.StartsWith('CRABOT_TOOL_RESULT=')) { $result = $text.Substring(19) }
+        elseif ($text) { Write-Output $text }
+    }
+    if ($status -ne 0) { throw "pnpm failed (exit code $status)" }
+    if (-not $result) { throw 'pnpm helper did not return its verified tool context' }
+    $script:NpmContext = $result
+    $context = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($result)) | ConvertFrom-Json
+    $script:CorepackJS = $context.corepack
 }
 function Get-LatestRelease {
     $response = Invoke-WebRequest 'https://github.com/smilefufu/crabot/releases/latest' -UseBasicParsing -MaximumRedirection 5
@@ -239,6 +327,7 @@ set "PATH=%LOCALAPPDATA%\crabot\node;%PATH%"
 }
 
 function Install-Crabot {
+try {
 # Windows PowerShell 5.1 progress rendering slows large downloads; keep this local.
 $ProgressPreference = 'SilentlyContinue'
 # --- Main ---
@@ -251,7 +340,7 @@ if ($Version -notmatch '^[A-Za-z0-9._-]+$') { throw 'Invalid release version' }
 Ensure-Node
 Ensure-Uv
 Ensure-Bash
-Ensure-Pnpm
+if (-not $FromSource) { Ensure-Pnpm }
 
 if ($FromSource) {
     Write-Info "Source install..."
@@ -375,7 +464,7 @@ await runSourceUpgrade(process.cwd(), console)
         Write-Info "Syncing Memory dependencies..."
         Push-Location $memoryDir
         try {
-            uv sync --frozen --no-dev
+            node (Get-InstallerHelper) memory $memoryDir -
             if ($LASTEXITCODE -ne 0) {
                 exit $LASTEXITCODE
             }
@@ -429,5 +518,8 @@ Write-Info "Run 'crabot start' to start Crabot (will prompt for admin password o
 Write-Info "Run 'crabot --help' for all commands."
 Write-Warn "If a new terminal cannot find crabot, restart Windows Explorer or sign out and back in to refresh the user PATH."
 
+} finally {
+    if ($script:InstallerHelperTemp) { Remove-Item -LiteralPath $script:InstallerHelperTemp -Recurse -Force -ErrorAction SilentlyContinue }
+}
 }
 if ($MyInvocation.InvocationName -ne '.') { Install-Crabot }
