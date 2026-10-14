@@ -60,7 +60,7 @@ function Ensure-Node {
         New-Item -ItemType Directory -Force -Path (Split-Path $nodeDir -Parent) | Out-Null
         Write-Info "Installing Node.js $version to $nodeDir..."
         # Windows may allow reads while a process or scanner prevents directory moves.
-        try { Copy-Item -LiteralPath $payload -Destination $nodeDir -Recurse }
+        try { Copy-Item -LiteralPath $payload -Destination $nodeDir -Recurse -Force }
         catch {
             Remove-Item -LiteralPath $nodeDir -Recurse -Force -ErrorAction SilentlyContinue
             throw

@@ -91,6 +91,9 @@ if ($env:OS -eq 'Windows_NT') {
                 function Expand-Archive($LiteralPath, $DestinationPath) {
                     Microsoft.PowerShell.Archive\Expand-Archive -LiteralPath $LiteralPath -DestinationPath $DestinationPath
                     $script:NodePayload = Join-Path $DestinationPath ([IO.Path]::GetFileNameWithoutExtension($LiteralPath))
+                    $hidden = Join-Path $script:NodePayload 'hidden-payload-fixture'
+                    [IO.File]::WriteAllText($hidden, 'complete-payload')
+                    [IO.File]::SetAttributes($hidden, [IO.FileAttributes]::Hidden)
                     if ($script:LockMode -eq 'readable') {
                         $script:PayloadProcess = Start-Process -FilePath (Join-Path $script:NodePayload 'node.exe') -ArgumentList @('-e', 'setInterval(function(){},1000)') -WorkingDirectory $script:NodePayload -NoNewWindow -PassThru
                         $renameFailed = $false
@@ -120,6 +123,7 @@ if ($env:OS -eq 'Windows_NT') {
                     Assert ($LASTEXITCODE -eq 0 -and [version]$bootstrappedVersion -ge [version]'22.14.0') 'cold old-Node repair must download and verify a usable official Node ZIP'
                     Assert ((& (Join-Path $nodeDir 'node.exe') -p 'process.arch') -eq 'x64') 'private official Node must execute as x64'
                     Assert (Test-Path -LiteralPath (Join-Path $nodeDir 'node_modules/npm/bin/npm-cli.js')) 'private Node must include the bundled npm files'
+                    Assert (([IO.File]::ReadAllText((Join-Path $nodeDir 'hidden-payload-fixture'))) -eq 'complete-payload') 'private Node copy must preserve hidden payload files'
                     Remove-Item -LiteralPath $nodeDir -Recurse -Force
                 } else {
                     Assert ($null -ne $failure) 'unreadable source files must remain installation failures'
