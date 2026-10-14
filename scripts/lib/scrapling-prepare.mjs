@@ -1,4 +1,5 @@
-import { spawn } from 'node:child_process'
+import { runBounded } from './run-bounded.mjs'
+export { runBounded } from './run-bounded.mjs'
 import { promises as fs, existsSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { homedir } from 'node:os'
@@ -6,40 +7,6 @@ import { randomUUID } from 'node:crypto'
 import { setTimeout as delay } from 'node:timers/promises'
 import runtime from './scrapling-runtime.cjs'
 
-// detached 创建专属进程组；只能终止本次准备命令拥有的进程。
-export function runBounded(command, args, { cwd, env = process.env, timeout = 20 * 60_000, signal, shell = false } = {}) {
-  return new Promise((done, fail) => {
-    const child = spawn(command, args, { cwd, env, shell, stdio: 'inherit', detached: process.platform !== 'win32' })
-    let reason
-    let forceTimer
-    const killOwned = (force) => {
-      if (!child.pid) return
-      if (process.platform === 'win32') spawn('taskkill', ['/pid', String(child.pid), '/t', ...(force ? ['/f'] : [])], { stdio: 'ignore' })
-      else { try { process.kill(-child.pid, force ? 'SIGKILL' : 'SIGTERM') } catch {} }
-    }
-    function terminate(message, code) {
-      reason ??= Object.assign(new Error(message), code ? { code } : {})
-      killOwned(false)
-      forceTimer ??= setTimeout(() => killOwned(true), 2000)
-    }
-    const timer = setTimeout(() => terminate(`${command}: preparation timed out`), timeout)
-    const abort = () => terminate(`${command}: preparation cancelled`, 'CRABOT_PREPARATION_CANCELLED')
-    process.once('SIGINT', abort)
-    process.once('SIGTERM', abort)
-    signal?.addEventListener('abort', abort, { once: true })
-    if (signal?.aborted) abort()
-    child.on('error', err => { reason = err })
-    child.on('close', code => {
-      if (reason || code !== 0) killOwned(true)
-      clearTimeout(timer); clearTimeout(forceTimer)
-      signal?.removeEventListener('abort', abort)
-      process.removeListener('SIGINT', abort)
-      process.removeListener('SIGTERM', abort)
-      if (reason || code !== 0) fail(reason ?? new Error(`${command} exited with code ${code}`))
-      else done()
-    })
-  })
-}
 function findUv() {
   const local = join(homedir(), '.local', 'bin', process.platform === 'win32' ? 'uv.exe' : 'uv')
   return existsSync(local) ? local : 'uv'
@@ -50,12 +17,17 @@ async function build(root, directory, signal) {
   const download = join(directory, '.python-download')
   const env = { ...process.env, UV_PYTHON_INSTALL_DIR: download, UV_CACHE_DIR: join(directory, '.uv-cache'), UV_LINK_MODE: 'copy', PYTHONNOUSERSITE: '1', PYTHONDONTWRITEBYTECODE: '1' }
   const run = (command, args, extra = {}) => runBounded(command, args, { cwd: root, env, signal, ...extra })
-  await run(findUv(), ['python', 'install', versions.python, '--install-dir', download, '--no-bin', '--no-registry'])
+  const { uvTransport, selectPackageSource, selectPythonDownloadSource, withPackageSource } = await import('./install-network.mjs')
+  const uv = findUv()
+  Object.assign(env, await uvTransport(uv, root, env)); delete env.UV_CONFIG_FILE
+  const standalone = await selectPythonDownloadSource(uv, versions.python, { cwd: root, env })
+  await withPackageSource(standalone, (url, child, remaining) => run(uv, ['python', 'install', versions.python, '--install-dir', download, '--no-bin', '--no-registry'], { env: child, timeout: remaining, captureError: true }), { env })
   const candidates = (await fs.readdir(download, { withFileTypes: true })).filter(p => p.isDirectory() && p.name.startsWith('cpython-')).map(p => p.name)
   if (candidates.length !== 1) throw new Error('standalone Python installation incomplete')
   await fs.rename(join(download, candidates[0]), join(directory, 'python'))
   const python = join(directory, 'python', process.platform === 'win32' ? 'python.exe' : 'bin/python3.12')
-  await run(findUv(), ['pip', 'sync', '--python', python, '--target', join(directory, 'packages'), '--only-binary', ':all:', '--require-hashes', join(input, 'requirements.lock')])
+  const packages = await selectPackageSource('python', { env })
+  await withPackageSource(packages, (index, child, remaining) => run(uv, ['pip', 'sync', '--python', python, '--target', join(directory, 'packages'), '--only-binary', ':all:', '--require-hashes', '--index', index, '--default-index', index, join(input, 'requirements.lock')], { env: child, timeout: remaining, captureError: true }), { env })
   env.PYTHONPATH = join(directory, 'packages')
   env.PLAYWRIGHT_BROWSERS_PATH = join(directory, 'browsers')
   env.PLAYWRIGHT_SKIP_BROWSER_GC = '1'
