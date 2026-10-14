@@ -2,6 +2,7 @@
 
 ### 跨平台安装与升级兼容：已发布
 
+- Windows 现场 Node 引导在整目录 `Move-Item` 报 Access denied；改为复制已校验的完整载荷，保留隐藏文件，真实读写失败仍拒绝且清理不完整工具目录。原生 PS5.1/PS7 使用真实进程占用目录复现旧代码失败，新代码安装通过；独占不可读文件的失败清理及私有 Node/npm/launcher 回归通过。[原生 CI](https://github.com/smilefufu/crabot/actions/runs/38527589428) 两种 PowerShell 另以真实 Node 22.12 引导私有 Node，安装公开 v2026.10.14.1 ZIP 并各验收三次 Admin Web/RPC、Agent/Memory RPC 启动、退出、重装和 CLI/UI 升级。此修复更新 main 安装器，发行包代码不变；现场具体占用进程尚未确认。
 - [v2026.10.14.1](https://github.com/smilefufu/crabot/releases/tag/v2026.10.14.1) 已公开，Intel Mac、Apple Silicon、Linux x64 和 Windows x64 的四包/四摘要完整，SHA 与 GitHub 资产 digest 一致，下载均返回 200，latest 指向新版；按已确认[spec](crabot-docs/superpowers/specs/2026-10-13-cross-platform-installation-design.md)完成，本轮不新增 Linux/Windows ARM64。
 - 修复 Windows Admin/MM 目录 fsync 与停机后 Memory 孤儿锁文件；保留文件刷盘、原子替换、真实 I/O 错误和进程身份查询。安装器补齐 Node/Corepack、uv、Git Bash/WSL、PS5/PS7、中文路径、macOS 摘要/Bash PATH、完整目标代际校验和 CLI/UI 升级；失败不误报成功，保留实例数据/自定义 launcher。
 - [正式 tag CI](https://github.com/smilefufu/crabot/actions/runs/38439450330) 四平台全部通过；Windows PS5.1/PS7 从最终 ZIP 各跑 11 项持久化回归与三次 Admin Web/RPC、Agent/Memory RPC 启动，并验证停机、重装、CLI/UI 升级、公开旧包恢复、坏摘要拒绝及源码安装。Linux 另验收 Ubuntu 22.04/24.04、Debian 12/13 和两普通 UID system mode。本地 36 项升级器回归通过；Windows Server CI 不替代 Win11 实机/桌面/真实模型验收，用户截图 Mac 的之前安装修复已获现场确认。未重启生产或调用 LLM。
