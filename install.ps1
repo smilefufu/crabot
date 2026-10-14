@@ -26,13 +26,13 @@ function Add-ToolPath($directory) {
 
 
 # Installer-owned helpers also work with legacy packages; verify every file before executing.
-$InstallerHelperRevision = 'a88dc0722c38843607e877a409be49046d608ef3'
+$InstallerHelperRevision = 'bf51627e9f9614dcd0a8e0d8a0c3960f209b5faf'
 $InstallerHelperHashes = @{
     'scripts/installer-deps.mjs' = 'd4fd4bed9aa55ab09c65f7f63ffb8bfe275fbfac953caca131e5504df67d72b7'
-    'scripts/lib/install-network.mjs' = '7232c8d9cf0de62ba19888236dee3330242e8ca3e8c6d0405e0b03e711579012'
+    'scripts/lib/install-network.mjs' = '93cd461fdfaeba4313a9244ae0400e654bdd141996de8229d5d9535a228040e5'
     'scripts/lib/memory-deps.mjs' = '4a916bc72dcfb2d484a4f60b2ff5b2b82d7a863362f0ad52a798a5d456e11f65'
     'scripts/lib/run-bounded.mjs' = '20cd05bbf043961f774a68d83c5c4ab5885a33dda0e36409788341b054132df7'
-    'scripts/lib/toolchain.mjs' = '8b48e0a59cb138274e361a642ff5665ee8e87c85bccec6e99d6162729b72ab1a'
+    'scripts/lib/toolchain.mjs' = 'b6f7ce6aeb57c793aae19701aaed2785760064b60f539d0d01e78b9d39f9cc20'
 }
 $script:InstallerHelper = $null
 $script:InstallerHelperTemp = $null
@@ -76,7 +76,15 @@ function Get-ToolArchive($mirror, $official, $file, $budgetSeconds = 900) {
     while ($true) {
         $remaining = [int][Math]::Floor($budgetSeconds - $started.Elapsed.TotalSeconds)
         if ($remaining -le 0) { throw 'Tool download timed out' }
-        try { Invoke-WebRequest $url -OutFile $file -UseBasicParsing -TimeoutSec $remaining; return }
+        try {
+            $response = Invoke-WebRequest $url -OutFile $file -UseBasicParsing -TimeoutSec $remaining -PassThru
+            $base = $response.BaseResponse
+            if ($base) {
+                $actual = if ($base.PSObject.Properties.Name -contains 'ResponseUri') { $base.ResponseUri } else { $base.RequestMessage.RequestUri }
+                Write-Info "Tool archive host: $($actual.Host)"
+            }
+            return
+        }
         catch {
             $message = $_.Exception.Message
             if ($url -eq $official -or $message -match 'Access.*denied|permission|ENOSPC|disk.*full|path.*not found' -or $message -notmatch '403|404|408|429|50[0-9]|timed out|connection|transport|decryption|name.*resolved') { throw }

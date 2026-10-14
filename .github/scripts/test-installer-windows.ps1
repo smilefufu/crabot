@@ -32,6 +32,32 @@ foreach ($base in @(
     Assert ((Get-LatestRelease) -eq 'v2026.10.12.4') 'latest must work with PS5 and PS7 response shapes'
 }
 Remove-Item Function:Invoke-WebRequest
+$downloadFixture = Join-Path ([IO.Path]::GetTempPath()) ('source-fallback-' + [guid]::NewGuid().ToString('N'))
+try {
+    foreach ($failure in @('HTTP 403 Forbidden', 'Access to the path is denied', 'unexpected failure')) {
+        $script:ToolDownloadCalls = @()
+        $script:ToolDownloadFailure = $failure
+        function Invoke-WebRequest($Uri, $OutFile, [switch]$UseBasicParsing, $TimeoutSec) {
+            $script:ToolDownloadCalls += [pscustomobject]@{ Uri = $Uri; Budget = $TimeoutSec }
+            if ($Uri -eq 'https://mirror.invalid/fixed.zip') { throw $script:ToolDownloadFailure }
+            [IO.File]::WriteAllText($OutFile, 'verified-later')
+        }
+        $errorMessage = $null
+        try { Get-ToolArchive 'https://mirror.invalid/fixed.zip' 'https://official.invalid/fixed.zip' $downloadFixture 30 }
+        catch { $errorMessage = $_.Exception.Message }
+        if ($failure -eq 'HTTP 403 Forbidden') {
+            Assert (-not $errorMessage) 'known source failure must retry the same official payload'
+            Assert ($script:ToolDownloadCalls.Count -eq 2) 'official tool retry must happen only once'
+            Assert ($script:ToolDownloadCalls[1].Budget -le $script:ToolDownloadCalls[0].Budget) 'tool fallback must share the remaining budget'
+        } else {
+            Assert ($errorMessage -eq $failure) 'I/O and unknown failures must stay terminal'
+            Assert ($script:ToolDownloadCalls.Count -eq 1) 'terminal tool errors must not retry official'
+        }
+    }
+} finally {
+    Remove-Item Function:Invoke-WebRequest
+    Remove-Item -LiteralPath $downloadFixture -Force -ErrorAction SilentlyContinue
+}
 $script:CorepackJS = $null
 function node { $global:LASTEXITCODE = 17 }
 $failed = $false

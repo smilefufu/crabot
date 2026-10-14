@@ -70,7 +70,7 @@ detect_platform() {
 }
 
 
-CRABOT_HELPER_REVISION='a88dc0722c38843607e877a409be49046d608ef3'
+CRABOT_HELPER_REVISION='bf51627e9f9614dcd0a8e0d8a0c3960f209b5faf'
 CRABOT_HELPER_ROOT=''
 CRABOT_HELPER_TEMP=''
 CRABOT_NPM_CONTEXT='-'
@@ -81,10 +81,10 @@ file_sha256() {
 installer_helper_hash() {
   case "$1" in
     scripts/installer-deps.mjs) echo d4fd4bed9aa55ab09c65f7f63ffb8bfe275fbfac953caca131e5504df67d72b7;;
-    scripts/lib/install-network.mjs) echo 7232c8d9cf0de62ba19888236dee3330242e8ca3e8c6d0405e0b03e711579012;;
+    scripts/lib/install-network.mjs) echo 93cd461fdfaeba4313a9244ae0400e654bdd141996de8229d5d9535a228040e5;;
     scripts/lib/memory-deps.mjs) echo 4a916bc72dcfb2d484a4f60b2ff5b2b82d7a863362f0ad52a798a5d456e11f65;;
     scripts/lib/run-bounded.mjs) echo 20cd05bbf043961f774a68d83c5c4ab5885a33dda0e36409788341b054132df7;;
-    scripts/lib/toolchain.mjs) echo 8b48e0a59cb138274e361a642ff5665ee8e87c85bccec6e99d6162729b72ab1a;;
+    scripts/lib/toolchain.mjs) echo b6f7ce6aeb57c793aae19701aaed2785760064b60f539d0d01e78b9d39f9cc20;;
     *) return 1;;
   esac
 }
@@ -134,7 +134,7 @@ install_fixed_node() (
   local metadata log started status=0
   started=$(date +%s)
   metadata=$(curl -fsSL "$mirror/v22.23.3/SHASUMS256.txt" --connect-timeout 3 --max-time 5) || metadata=''
-  if ! printf '%s\n' "$metadata" | grep -Fq 'node-v22.23.3-'; then mirror="$official"; warn 'Domestic Node metadata unavailable; using official 22.23.3'; fi
+  if ! printf '%s\n' "$metadata" | grep -F 'node-v22.23.3-' >/dev/null; then mirror="$official"; warn 'Domestic Node metadata unavailable; using official 22.23.3'; fi
   log=$(mktemp "${TMPDIR:-/tmp}/crabot-node.XXXXXX")
   trap 'rm -f "$log"' EXIT
   # nvm still owns its cache/install layout; the checksum comes from our official pin.
@@ -235,6 +235,10 @@ ensure_system_uv() {
     error "  curl -LsSf https://astral.sh/uv/install.sh | sudo env UV_INSTALL_DIR=/usr/local/bin UV_NO_MODIFY_PATH=1 sh"
     exit 1
   fi
+  if ! uv --no-config export --help >/dev/null 2>&1 || ! uv --no-config --show-settings python list --only-downloads --output-format json >/dev/null 2>&1; then
+    error 'System uv cannot prepare product dependencies; install uv 0.13.0 system-wide before retrying.'
+    exit 1
+  fi
   info "system uv found"
 }
 
@@ -265,13 +269,16 @@ install_fixed_uv() (
   base='https://mirrors.ustc.edu.cn/github-release/astral-sh/uv/LatestRelease'
   official="https://github.com/astral-sh/uv/releases/download/0.13.0/$filename"
   metadata=$(curl -fsSL "$base/uv-installer.sh" --connect-timeout 3 --max-time 5) || metadata=''
-  if printf '%s\n' "$metadata" | grep -Fq 'APP_VERSION="0.13.0"'; then url="$base/$filename"; else url="$official"; fi
+  if printf '%s\n' "$metadata" | grep -F 'APP_VERSION="0.13.0"' >/dev/null; then url="$base/$filename"; else url="$official"; fi
   while :; do
     info "uv download source: $url"
     remaining=$((900 - $(date +%s) + started))
     [ "$remaining" -gt 0 ] || return 28
-    local status
-    if curl -fsSL "$url" -o "$temporary/$filename" --connect-timeout 30 --max-time "$remaining"; then break; else status=$?; fi
+    local status actual
+    if actual=$(curl -fsSL "$url" -o "$temporary/$filename" --connect-timeout 30 --max-time "$remaining" --proto-redir =https --write-out "%{url_effective}"); then
+      info "uv archive download: $actual"
+      break
+    else status=$?; fi
     [ "$url" != "$official" ] && case "$status" in 6|7|18|22|28|35|56) true;; *) false;; esac || return "$status"
     warn 'Domestic uv transport failed; retrying official 0.13.0'
     url="$official"
