@@ -1,0 +1,21 @@
+name: Windows Node bootstrap regression
+on:
+  push:
+    branches: [ci/windows-node-lock-20261014]
+permissions:
+  contents: read
+jobs:
+  installer:
+    strategy:
+      fail-fast: false
+      matrix:
+        shell: [powershell, pwsh]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Native Windows installer regressions
+        shell: ${{ matrix.shell }}
+        run: .github/scripts/test-installer-windows.ps1
