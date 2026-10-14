@@ -76,6 +76,15 @@ export class ComputerUseCoordinator {
     return structuredClone(this.catalog!)
   }
 
+  async diagnostics(): Promise<Array<{ name: string; status: 'pass' | 'fail' | 'skip' }>> {
+    if (this.closed || this.quarantined || this.busy) return []
+    const result = await this.driver.call('health_report', { include: ['session_active', 'ax_capability', 'screen_capture_capability'] }, AbortSignal.timeout(3000))
+    const data = nativePayload(result)
+    if (result.isError || data.schema_version !== '1' || !Array.isArray(data.checks)) return []
+    return data.checks.filter((check: any) => typeof check?.name === 'string' && ['pass', 'fail', 'skip'].includes(check.status))
+      .map((check: any) => ({ name: check.name, status: check.status }))
+  }
+
   private async loadTools(driver: NativeDriver): Promise<void> {
     const all = await driver.tools()
     const selected = NATIVE_TOOLS.map(name => {

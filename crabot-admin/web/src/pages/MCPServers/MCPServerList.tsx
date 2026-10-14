@@ -1,4 +1,6 @@
 import React, { useState, useEffect } from 'react'
+import { Link } from 'react-router-dom'
+import { computerUseService, desktopStatusText, type ComputerUseSetupStatus } from '../../services/computerUse'
 import { mcpService } from '../../services/mcp'
 import { MainLayout } from '../../components/Layout/MainLayout'
 import { Card } from '../../components/Common/Card'
@@ -39,6 +41,7 @@ export const MCPServerList: React.FC = () => {
   const toast = useToast()
   const [servers, setServers] = useState<MCPServerRegistryEntry[]>([])
   const [loading, setLoading] = useState(true)
+  const [desktop, setDesktop] = useState<ComputerUseSetupStatus | null>(null)
   const [showForm, setShowForm] = useState(false)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [form, setForm] = useState<FormData>(EMPTY_FORM)
@@ -54,7 +57,9 @@ export const MCPServerList: React.FC = () => {
   const load = async () => {
     try {
       setLoading(true)
-      setServers(await mcpService.list())
+      const next = await mcpService.list()
+      setServers(next)
+      if (next.some(server => server.name === 'computer-use')) setDesktop(await computerUseService.status().catch(() => null))
     } catch (err) {
       toast.error(err instanceof Error ? err.message : '加载失败')
     } finally {
@@ -316,7 +321,7 @@ export const MCPServerList: React.FC = () => {
               <div className="mcp-row">
                 <div className="mcp-row__info">
                   <div className="mcp-row__header">
-                    <span className="mcp-row__name">{s.name}</span>
+                    <span className="mcp-row__name">{s.name === 'computer-use' && desktop?.standard ? '桌面控制' : s.name}</span>
                     {s.is_builtin && <span className="tag tag--info">内置</span>}
                     {s.is_essential && <span className="tag tag--primary">必要</span>}
                     <span className={`tag ${s.enabled ? 'tag--success' : ''}`}>
@@ -324,8 +329,11 @@ export const MCPServerList: React.FC = () => {
                     </span>
                   </div>
                   <div className="mcp-row__cmd">
-                    {s.command}{s.args?.length ? ' ' + s.args.join(' ') : ''}
+                    {s.name === 'computer-use' && desktop?.standard ? 'computer-use · ' : ''}{s.command}{s.args?.length ? ' ' + s.args.join(' ') : ''}
                   </div>
+                  {s.name === 'computer-use' && desktop && (
+                    <p className="mcp-row__desc">桌面控制：{desktopStatusText(desktop)} · <Link to="/settings#computer-use">设置桌面控制</Link></p>
+                  )}
                   {s.description && (
                     <div className="mcp-row__desc">{s.description}</div>
                   )}

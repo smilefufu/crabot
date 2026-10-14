@@ -4,7 +4,7 @@
  * 从 Admin 获取配置。Admin 是唯一的配置来源，获取失败则报错。
  */
 
-import type { RpcClient } from 'crabot-shared'
+import type { RpcClient, ComputerUseSetupRequest } from 'crabot-shared'
 import type { UnifiedAgentConfig } from '../types.js'
 
 // ============================================================================
@@ -14,6 +14,7 @@ import type { UnifiedAgentConfig } from '../types.js'
 interface GetAgentConfigResult {
   config_revision: number
   config: UnifiedAgentConfig
+  computer_use_setup?: ComputerUseSetupRequest
 }
 
 // ============================================================================
@@ -23,10 +24,15 @@ interface GetAgentConfigResult {
 export interface LoadedAgentConfig {
   config: UnifiedAgentConfig
   revision: number
+  computer_use_setup?: ComputerUseSetupRequest
 }
 
 export class ConfigLoader {
   private static currentRevision = 0
+  private static initialSetup?: ComputerUseSetupRequest
+  static consumeInitialSetup(): ComputerUseSetupRequest | undefined {
+    const request = this.initialSetup; this.initialSetup = undefined; return request
+  }
 
   static get revision(): number { return ConfigLoader.currentRevision }
   static getRuntimeBearer(): string | undefined { return ConfigLoader.runtimeBearer }
@@ -55,6 +61,7 @@ export class ConfigLoader {
     }
 
     const loaded = await this.pull(moduleId, rpcClient, adminEndpoint)
+    this.initialSetup = loaded.computer_use_setup
     this.acceptRevision(loaded.revision)
     console.log(`[ConfigLoader] Loaded config from Admin for ${moduleId}`)
     return loaded.config
@@ -212,6 +219,11 @@ export class ConfigLoader {
     return {
       config: { ...result.config, agent_config: agentConfig, runtime_config_authenticated: true },
       revision: result.config_revision,
+      ...(result.computer_use_setup && typeof result.computer_use_setup.setup_id === 'string'
+        && /^[0-9a-f-]{36}$/.test(result.computer_use_setup.setup_id)
+        && Date.parse(result.computer_use_setup.expires_at) > Date.now()
+        && Date.parse(result.computer_use_setup.expires_at) <= Date.now() + 180000
+        ? { computer_use_setup: result.computer_use_setup } : {}),
     }
   }
 
