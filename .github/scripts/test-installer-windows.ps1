@@ -78,11 +78,50 @@ if ($env:OS -eq 'Windows_NT') {
         try { $ErrorActionPreference = 'Continue'; & (Join-Path $product 'crabot.cmd') 2>$null }
         finally { $ErrorActionPreference = $savedPreference }
         Assert ($LASTEXITCODE -ne 0) 'missing private Node must fail rather than use the old Node'
-        function node { if ($args[0] -eq '-v') { 'v22.12.0' } else { 'x64' }; $global:LASTEXITCODE = 0 }
-        try { Ensure-Node } finally { Remove-Item Function:node }
-        $bootstrappedVersion = (& (Join-Path $nodeDir 'node.exe') -v).TrimStart('v')
-        Assert ($LASTEXITCODE -eq 0 -and [version]$bootstrappedVersion -ge [version]'22.14.0') 'cold old-Node repair must download and verify a usable official Node ZIP'
-        Assert ((& (Join-Path $nodeDir 'node.exe') -p 'process.arch') -eq 'x64') 'private official Node must execute as x64'
+        $oldTemp = $env:TEMP
+        $env:TEMP = Join-Path $launcherRoot 'download space'
+        New-Item -ItemType Directory -Path $env:TEMP | Out-Null
+        try {
+            foreach ($lockMode in @('readable', 'exclusive')) {
+                $script:PrivateNode = $false
+                $script:PayloadLock = $null
+                $script:LockMode = $lockMode
+                function node { if ($args[0] -eq '-v') { 'v22.12.0' } else { 'x64' }; $global:LASTEXITCODE = 0 }
+                function Expand-Archive($LiteralPath, $DestinationPath) {
+                    Microsoft.PowerShell.Archive\Expand-Archive -LiteralPath $LiteralPath -DestinationPath $DestinationPath
+                    $script:NodePayload = Join-Path $DestinationPath ([IO.Path]::GetFileNameWithoutExtension($LiteralPath))
+                    $lockedFile = if ($script:LockMode -eq 'readable') { 'node.exe' } else { 'README.md' }
+                    $share = if ($script:LockMode -eq 'readable') { [IO.FileShare]::Read } else { [IO.FileShare]::None }
+                    $script:PayloadLock = [IO.File]::Open((Join-Path $script:NodePayload $lockedFile), [IO.FileMode]::Open, [IO.FileAccess]::Read, $share)
+                    if ($script:LockMode -eq 'readable') {
+                        $renameFailed = $false
+                        try { Move-Item -LiteralPath $script:NodePayload -Destination (Join-Path $launcherRoot 'renamed-payload') }
+                        catch { $renameFailed = $_.FullyQualifiedErrorId -like 'MoveDirectoryItemIOError,*' }
+                        Assert $renameFailed 'a real Windows handle without delete sharing must reproduce the directory move failure'
+                    }
+                }
+                $failure = $null
+                try { Ensure-Node } catch { $failure = $_ }
+                finally {
+                    if ($script:PayloadLock) { $script:PayloadLock.Dispose() }
+                    Remove-Item Function:node, Function:Expand-Archive
+                    Get-ChildItem -LiteralPath $env:TEMP | Remove-Item -Recurse -Force
+                }
+                if ($lockMode -eq 'readable') {
+                    Assert (-not $failure) "readable locked Node payload must install: $failure"
+                    Assert $script:PrivateNode 'private Node must be selected only after successful installation'
+                    $bootstrappedVersion = (& (Join-Path $nodeDir 'node.exe') -v).TrimStart('v')
+                    Assert ($LASTEXITCODE -eq 0 -and [version]$bootstrappedVersion -ge [version]'22.14.0') 'cold old-Node repair must download and verify a usable official Node ZIP'
+                    Assert ((& (Join-Path $nodeDir 'node.exe') -p 'process.arch') -eq 'x64') 'private official Node must execute as x64'
+                    Assert (Test-Path -LiteralPath (Join-Path $nodeDir 'node_modules/npm/bin/npm-cli.js')) 'private Node must include the bundled npm files'
+                    Remove-Item -LiteralPath $nodeDir -Recurse -Force
+                } else {
+                    Assert ($null -ne $failure) 'unreadable source files must remain installation failures'
+                    Assert (-not $script:PrivateNode) 'a failed copy must not select the incomplete private Node'
+                    Assert (-not (Test-Path -LiteralPath $nodeDir)) 'a failed copy must clean up the incomplete tool directory'
+                }
+            }
+        } finally { $env:TEMP = $oldTemp }
         Set-Content -LiteralPath (Join-Path $product 'crabot.cmd') -Value '@echo custom' -Encoding ASCII
         Write-CrabotLauncher $product
         Assert ((Get-Content -LiteralPath (Join-Path $product 'crabot.cmd') -Raw).Trim() -eq '@echo custom') 'custom launchers must survive'
