@@ -1,9 +1,10 @@
 # Crabot 项目进度
 
-### 跨平台安装与升级兼容：审查完成，待 spec 确认
+### 跨平台安装与升级兼容：已发布
 
-- 已复现旧包缺 Cua 检查入口、Bash 登录终端 PATH 不生效、uv 下载失败误报成功及 Windows upgrade 平台拒绝；同时核对 Node/Corepack、PowerShell 响应类型和发行资产差异。修复范围覆盖安装/升级、user/system、源码/Release、干净环境与既有安装，按[书面 spec](crabot-docs/superpowers/specs/2026-10-13-cross-platform-installation-design.md)等待确认后实施。
-- 待确定是否新增 Linux/Windows ARM64 原生发行及截图 Intel Mac 的系统版本；完整安装、首次启动、旧版本升级和失败拒绝将接入原生 CI 门禁。现有 sha256sum 局部修复已交付，整体修复未实现。
+- [v2026.10.14.1](https://github.com/smilefufu/crabot/releases/tag/v2026.10.14.1) 已公开，Intel Mac、Apple Silicon、Linux x64 和 Windows x64 的四包/四摘要完整，SHA 与 GitHub 资产 digest 一致，下载均返回 200，latest 指向新版；按已确认[spec](crabot-docs/superpowers/specs/2026-10-13-cross-platform-installation-design.md)完成，本轮不新增 Linux/Windows ARM64。
+- 修复 Windows Admin/MM 目录 fsync 与停机后 Memory 孤儿锁文件；保留文件刷盘、原子替换、真实 I/O 错误和进程身份查询。安装器补齐 Node/Corepack、uv、Git Bash/WSL、PS5/PS7、中文路径、macOS 摘要/Bash PATH、完整目标代际校验和 CLI/UI 升级；失败不误报成功，保留实例数据/自定义 launcher。
+- [正式 tag CI](https://github.com/smilefufu/crabot/actions/runs/38439450330) 四平台全部通过；Windows PS5.1/PS7 从最终 ZIP 各跑 11 项持久化回归与三次 Admin Web/RPC、Agent/Memory RPC 启动，并验证停机、重装、CLI/UI 升级、公开旧包恢复、坏摘要拒绝及源码安装。Linux 另验收 Ubuntu 22.04/24.04、Debian 12/13 和两普通 UID system mode。本地 36 项升级器回归通过；Windows Server CI 不替代 Win11 实机/桌面/真实模型验收，用户截图 Mac 的之前安装修复已获现场确认。未重启生产或调用 LLM。
 
 ### Computer-use Cua Driver：候选实现完成，原生与模型验收待补
 
@@ -14,13 +15,13 @@
 - 四平台资产 SHA 和完整 macOS App 签名已核对；真实宿主→service→App 握手、session 生命周期及权限缺失局部降级/清理通过。macOS 尚缺 Accessibility/Screen Recording；Windows、Intel Mac、Linux X11/GNOME Wayland/Sway 和模型效率实验仍待验收/预算。未部署生产，不能声称全平台或模型任务验收完成。
 
 
-### Intel macOS Release：已发布，旧 Mac 实机待复测
+### Intel macOS Release：已发布，截图 Mac 安装已通过
 
-- 10 月 13 日现场安装报错定位到安装器硬调用 `sha256sum`；缺少该命令时改用 macOS 的 `shasum -a 256 -c`，保持 SHA-256 校验与失败拒绝。受控安装回归覆盖两种真实校验工具、好包安装、坏包在解压前拒绝及工具均缺失时失败；旧 Mac 完整安装仍待现场复测。
+- 10 月 13 日现场安装报错定位到安装器硬调用 `sha256sum`；缺少该命令时改用 macOS 的 `shasum -a 256 -c`，保持 SHA-256 校验与失败拒绝。受控安装回归覆盖两种真实校验工具、好包安装、坏包在解压前拒绝及工具均缺失时失败；用户已反馈截图 Mac 正常安装，修复有效；具体 OS 与完整浏览器/桌面能力不推断。
 
 - 按已确认 [spec](crabot-docs/superpowers/specs/2026-10-12-intel-macos-release-design.md) 补原生 `macos-15-intel` / `darwin-x64`；该平台仅使用 cryptography 48.0.1 官方 wheel，其余平台保留 50.0.2，其它固定版本/hash 和 binary-only 校验保持。两项 Linux 失效 URL 使用同版本、同 checksum 的官方快照。
 - [v2026.10.12.4](https://github.com/smilefufu/crabot/releases/tag/v2026.10.12.4) 已公开并成为 latest；[四平台与 publish CI](https://github.com/smilefufu/crabot/actions/runs/38231180278) 全部成功。八项包/checksum 附件已上传，四包发布 checksum 与 GitHub 上传 digest 一致，安装器所用 latest 重定向正确，Intel 真实下载 URL HEAD=200。
-- 原生 Intel 的 cryptography/JWT 三算法正负例、三阶段完整资源及 13 工具、HTTP/HTTPS/JS/stealth/session/PNG/生产 connector 验收通过，包含最终 tar.gz 在不同目录的解包结果。Linux 旧 CLI 一次升级、真实 Memory 同步和两普通 UID 冷/热/EOF/SIGTERM 无残留通过；Windows 最终 zip 真实调用通过。CI helper 搬迁遗漏已补齐，Windows 测试目录缩短以避免 DLL 长路径失败；各平台先上传 draft，全部通过后公开。macOS 15 Intel 已验收，截图旧 Mac 的具体系统版本与现场安装仍待用户复测。
+- 原生 Intel 的 cryptography/JWT 三算法正负例、三阶段完整资源及 13 工具、HTTP/HTTPS/JS/stealth/session/PNG/生产 connector 验收通过，包含最终 tar.gz 在不同目录的解包结果。Linux 旧 CLI 一次升级、真实 Memory 同步和两普通 UID 冷/热/EOF/SIGTERM 无残留通过；Windows 最终 zip 真实调用通过。CI helper 搬迁遗漏已补齐，Windows 测试目录缩短以避免 DLL 长路径失败；各平台先上传 draft，全部通过后公开。macOS 15 Intel 已验收，截图旧 Mac 的现场安装已由用户确认通过，具体系统版本与完整浏览器/桌面能力仍未验收。
 
 ### 工具图片进入模型请求：已修复，system mode 待验证
 

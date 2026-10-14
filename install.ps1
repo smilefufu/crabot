@@ -14,111 +14,166 @@ function Write-Info($msg)  { Write-Host "[crabot] $msg" -ForegroundColor Green }
 function Write-Warn($msg)  { Write-Host "[crabot] $msg" -ForegroundColor Yellow }
 function Write-Err($msg)   { Write-Host "[crabot] $msg" -ForegroundColor Red }
 
-# --- Node.js ---
+function Assert-NativeSuccess($stage) {
+    if ($LASTEXITCODE -ne 0) { throw "$stage failed (exit code $LASTEXITCODE)" }
+}
+$script:ToolPaths = @()
+$script:PrivateNode = $false
+function Add-ToolPath($directory) {
+    $env:Path = "$directory;$env:Path"
+    $script:ToolPaths += $directory
+}
+
+# --- Node.js in a writable user directory ---
 function Ensure-Node {
     $nodeCmd = Get-Command node -ErrorAction SilentlyContinue
     if ($nodeCmd) {
-        $ver = (node -v).TrimStart('v')
-        Write-Info "Node.js $ver found"
-        return
+        try {
+            $ver = (node -v).TrimStart('v')
+            $ok = $LASTEXITCODE -eq 0 -and [version]$ver -ge [version]$RequiredNodeVersion
+            $cpu = node -p 'process.arch'
+            if ($ok -and $LASTEXITCODE -eq 0 -and $cpu -eq 'x64') { Write-Info "Node.js $ver found"; return }
+        } catch { Write-Warn "Current Node is unusable: $_" }
     }
-    Write-Err "Node.js not found. Please install Node.js >= $RequiredNodeVersion from https://nodejs.org"
-    exit 1
+    $nodeDir = Join-Path $env:LOCALAPPDATA 'crabot\node'
+    $cached = Join-Path $nodeDir 'node.exe'
+    if (Test-Path -LiteralPath $cached) {
+        $ver = (& $cached -v).TrimStart('v')
+        if ($LASTEXITCODE -eq 0 -and [version]$ver -ge [version]$RequiredNodeVersion) { $script:PrivateNode = $true; Add-ToolPath $nodeDir; return }
+    }
+    $stage = Join-Path $env:TEMP ("crabot-node-{0}" -f [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $stage | Out-Null
+    try {
+        $checksums = (Invoke-WebRequest 'https://nodejs.org/dist/latest-v22.x/SHASUMS256.txt' -UseBasicParsing).Content
+        $line = @($checksums -split "`n" | Where-Object { $_ -match '^([a-f0-9]{64})\s+(node-v22\.[0-9]+\.[0-9]+-win-x64\.zip)\s*$' })
+        if ($line.Count -ne 1 -or $line[0] -notmatch '^([a-f0-9]{64})\s+(\S+)') { throw 'Node 22 official checksum manifest is invalid' }
+        $expected = $Matches[1]; $filename = $Matches[2]
+        $archive = Join-Path $stage $filename
+        Invoke-WebRequest "https://nodejs.org/dist/latest-v22.x/$filename" -OutFile $archive -UseBasicParsing
+        if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ine $expected) { throw 'Node archive checksum mismatch' }
+        Expand-Archive -LiteralPath $archive -DestinationPath $stage
+        $payload = Join-Path $stage ([IO.Path]::GetFileNameWithoutExtension($filename))
+        $version = (& (Join-Path $payload 'node.exe') -v).TrimStart('v')
+        Assert-NativeSuccess 'Downloaded Node version probe'
+        if ([version]$version -lt [version]$RequiredNodeVersion) { throw 'Downloaded Node is below the required version' }
+        if (Test-Path -LiteralPath $nodeDir) { Remove-Item -LiteralPath $nodeDir -Recurse -Force }
+        New-Item -ItemType Directory -Force -Path (Split-Path $nodeDir -Parent) | Out-Null
+        Move-Item -LiteralPath $payload -Destination $nodeDir
+        $script:PrivateNode = $true
+        Add-ToolPath $nodeDir
+    } finally { Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue }
 }
 
 # --- uv ---
 function Ensure-Uv {
     $uvCmd = Get-Command uv -ErrorAction SilentlyContinue
-    if ($uvCmd) {
-        Write-Info "uv found"
-        return
+    if (-not $uvCmd) {
+        Invoke-RestMethod https://astral.sh/uv/install.ps1 | Invoke-Expression
+        Add-ToolPath (Join-Path $env:USERPROFILE '.local\bin')
+        $uvCmd = Get-Command uv -ErrorAction SilentlyContinue
+        if (-not $uvCmd) { throw 'uv installation did not provide a usable command' }
     }
-    Write-Info "Installing uv..."
-    Invoke-RestMethod https://astral.sh/uv/install.ps1 | Invoke-Expression
+    uv --version
+    Assert-NativeSuccess 'uv version probe'
 }
 
-# --- Git Bash ---
-# crabot-agent 的 Bash 工具依赖 bash.exe。Windows 上三段式探测：
-#   1. CRABOT_BASH_PATH env（已配置）
-#   2. PATH 里的 bash.exe
-#   3. PATH 里的 git.exe 推 ..\..\bin\bash.exe（Git for Windows 默认 PATH 选项的常见情况）
-# 都没有 → 下载 PortableGit 自解压到 $InstallDir\PortableGit，写 user env CRABOT_BASH_PATH。
-$PortableGitVersion = "2.54.0"
+function Test-GitBash($candidate) {
+    if (-not $candidate -or -not (Test-Path -LiteralPath $candidate)) { return $false }
+    if ($candidate.StartsWith($env:WINDIR, [StringComparison]::OrdinalIgnoreCase)) { return $false }
+    $env:CRABOT_BASH_CANDIDATE = $candidate
+    try {
+        @'
+const {spawnSync}=require("node:child_process"); const r=spawnSync(process.env.CRABOT_BASH_CANDIDATE,["--noprofile","--norc","-c","uname -s"],{encoding:"utf8",timeout:10000}); process.exit(!r.error && r.status===0 && /^(MINGW|MSYS)/.test(r.stdout.trim()) ? 0 : 1)
+'@ | node
+        return $LASTEXITCODE -eq 0
+    } finally { Remove-Item Env:CRABOT_BASH_CANDIDATE -ErrorAction SilentlyContinue }
+}
+
+# --- Git Bash (reject the WSL launcher on PATH) ---
+$PortableGitVersion = '2.54.0'
+$PortableGitSha256 = 'bea006a6cc69673f27b1647e84ab3a68e912fbc175ab6320c5987e012897f311'
 function Ensure-Bash {
-    if ($env:CRABOT_BASH_PATH -and (Test-Path $env:CRABOT_BASH_PATH)) {
-        Write-Info "bash configured via CRABOT_BASH_PATH: $env:CRABOT_BASH_PATH"
-        return
-    }
+    $candidates = @($env:CRABOT_BASH_PATH)
     $bashCmd = Get-Command bash -ErrorAction SilentlyContinue
-    if ($bashCmd) {
-        Write-Info "bash found at $($bashCmd.Source)"
-        return
-    }
+    if ($bashCmd) { $candidates += $bashCmd.Source }
     $gitCmd = Get-Command git -ErrorAction SilentlyContinue
     if ($gitCmd) {
-        $candidate = [System.IO.Path]::GetFullPath((Join-Path (Split-Path $gitCmd.Source -Parent) "..\..\bin\bash.exe"))
-        if (Test-Path $candidate) {
-            Write-Info "bash found via git path: $candidate"
-            [Environment]::SetEnvironmentVariable("CRABOT_BASH_PATH", $candidate, "User")
+        $parent = Split-Path $gitCmd.Source -Parent
+        foreach ($relative in @('..\bin\bash.exe', '..\..\bin\bash.exe')) {
+            $candidates += [IO.Path]::GetFullPath((Join-Path $parent $relative))
+        }
+    }
+    $candidates += Join-Path $InstallDir 'PortableGit\bin\bash.exe'
+    foreach ($candidate in $candidates) {
+        if (Test-GitBash $candidate) {
             $env:CRABOT_BASH_PATH = $candidate
+            [Environment]::SetEnvironmentVariable('CRABOT_BASH_PATH', $candidate, 'User')
             return
         }
     }
-    if ($env:PROCESSOR_ARCHITECTURE -ne 'AMD64') {
-        Write-Err "Detected $env:PROCESSOR_ARCHITECTURE — auto-install only supports x64."
-        Write-Err "Please install Git for Windows manually: https://git-scm.com/downloads/win"
-        exit 1
-    }
-
     $filename = "PortableGit-$PortableGitVersion-64-bit.7z.exe"
-    $url = "https://github.com/git-for-windows/git/releases/download/v$PortableGitVersion.windows.1/$filename"
-    $exe = Join-Path $env:TEMP $filename
+    $exe = Join-Path $env:TEMP ("{0}-{1}.exe" -f $filename, [guid]::NewGuid().ToString('N'))
+    $dest = Join-Path $InstallDir 'PortableGit'
     New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-    $dest = Join-Path $InstallDir "PortableGit"
-
-    Write-Info "Installing PortableGit $PortableGitVersion (~65MB) to $dest..."
     try {
-        Invoke-WebRequest -Uri $url -OutFile $exe -UseBasicParsing
-    } catch {
-        Write-Err "Failed to download PortableGit from ${url}: $_"
-        Write-Err "Install Git for Windows manually: https://git-scm.com/downloads/win"
-        exit 1
-    }
-
-    # PortableGit 是 7-zip SFX 自解压包，-o<dir> -y 静默解压
-    $proc = Start-Process -FilePath $exe -ArgumentList @("-o`"$dest`"", "-y") -Wait -NoNewWindow -PassThru
-    Remove-Item $exe -ErrorAction SilentlyContinue
-    if ($proc.ExitCode -ne 0) {
-        Write-Err "PortableGit extraction failed with exit code $($proc.ExitCode)"
-        exit 1
-    }
-
-    $bashPath = Join-Path $dest "bin\bash.exe"
-    if (-not (Test-Path $bashPath)) {
-        Write-Err "PortableGit extracted but bash.exe missing at $bashPath"
-        exit 1
-    }
-    [Environment]::SetEnvironmentVariable("CRABOT_BASH_PATH", $bashPath, "User")
-    $env:CRABOT_BASH_PATH = $bashPath
-    Write-Info "PortableGit installed. CRABOT_BASH_PATH set to $bashPath"
+        Invoke-WebRequest "https://github.com/git-for-windows/git/releases/download/v$PortableGitVersion.windows.1/$filename" -OutFile $exe -UseBasicParsing
+        if ((Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash -ine $PortableGitSha256) { throw 'PortableGit checksum mismatch' }
+        $proc = Start-Process -FilePath $exe -ArgumentList @("-o`"$dest`"", '-y') -NoNewWindow -PassThru
+        if (-not $proc.WaitForExit(120000)) { $proc.Kill(); throw 'PortableGit extraction timed out' }
+        if ($proc.ExitCode -ne 0) { throw "PortableGit extraction failed: $($proc.ExitCode)" }
+        $bash = Join-Path $dest 'bin\bash.exe'
+        if (-not (Test-GitBash $bash)) { throw 'PortableGit did not provide a working Git Bash' }
+        $env:CRABOT_BASH_PATH = $bash
+        [Environment]::SetEnvironmentVariable('CRABOT_BASH_PATH', $bash, 'User')
+    } finally { Remove-Item -LiteralPath $exe -Force -ErrorAction SilentlyContinue }
 }
 
-# --- pnpm ---
+# --- pnpm (prepare a pinned private Corepack when needed) ---
 function Ensure-Pnpm {
-    $corepackCmd = Get-Command corepack -ErrorAction SilentlyContinue
-    if (-not $corepackCmd) {
-        Write-Err "corepack not found (Node 16.13+ required). Reinstall Node.js."
-        exit 1
+    $script:CorepackJS = $null
+    $cmd = Get-Command corepack -ErrorAction SilentlyContinue
+    if ($cmd) {
+        try {
+            $ver = corepack pnpm@9.15.9 --version
+            if ($LASTEXITCODE -eq 0) { Write-Info "pnpm $ver ready"; return }
+        } catch { Write-Warn "System Corepack failed; preparing the private tool: $_" }
     }
-    # 不调 `corepack enable` —— 它会往 Node 安装目录（Program Files）写 pnpm/yarn
-    # 系统 shim，非管理员 cmd 必然 EPERM。后续所有 `corepack pnpm ...` 调用会按
-    # packageManager 字段按需下载到用户 cache 执行，不需要 enable。
-    $pnpmVer = (corepack pnpm --version)
-    if ($LASTEXITCODE -ne 0) {
-        Write-Err "corepack could not run pnpm. Reinstall Node.js."
-        exit $LASTEXITCODE
+    $tools = Join-Path $env:LOCALAPPDATA 'crabot\corepack'
+    $script:CorepackJS = Join-Path $tools 'node_modules\corepack\dist\corepack.js'
+    if (-not (Test-Path -LiteralPath $script:CorepackJS)) {
+        npm install --prefix $tools --ignore-scripts --no-audit --no-fund --registry=https://registry.npmjs.org corepack@0.31.0
+        Assert-NativeSuccess 'Corepack preparation'
     }
-    Write-Info "pnpm $pnpmVer ready"
+    Invoke-Pnpm --version
+    Add-ToolPath (Join-Path $tools 'node_modules/.bin')
+}
+function Invoke-Pnpm {
+    if ($script:CorepackJS) { node $script:CorepackJS pnpm@9.15.9 @args }
+    else { corepack pnpm@9.15.9 @args }
+    Assert-NativeSuccess 'pnpm'
+}
+function Get-LatestRelease {
+    $response = Invoke-WebRequest 'https://github.com/smilefufu/crabot/releases/latest' -UseBasicParsing -MaximumRedirection 5
+    $base = $response.BaseResponse
+    if ($base.PSObject.Properties.Name -contains 'ResponseUri') { $uri = $base.ResponseUri.AbsoluteUri }
+    else { $uri = $base.RequestMessage.RequestUri.AbsoluteUri }
+    if ($uri -notmatch '/tag/([^/?#]+)') { throw "Failed to parse latest release: $uri" }
+    return [uri]::UnescapeDataString($Matches[1])
+}
+function Verify-Release($root, $targetVersion) {
+    foreach ($file in @('cli.mjs','package.json','dist/cli/main.js','scripts/start.mjs','crabot-memory/pyproject.toml','crabot-memory/uv.lock')) {
+        if (-not (Test-Path -LiteralPath (Join-Path $root $file) -PathType Leaf)) { throw "Release package missing $file" }
+    }
+    $check = Join-Path $root 'scripts/check-release.mjs'
+    if (Test-Path -LiteralPath $check) { node $check $targetVersion; Assert-NativeSuccess 'Release verification'; return }
+    if ($targetVersion -notin @('v2026.9.23','v2026.10.12.4')) { throw 'Release package missing scripts/check-release.mjs' }
+    foreach ($file in @('scripts/prepare-computer-use.mjs','scripts/computer-use/runtime.json','crabot-mcp-tools/dist/computer-use/service.js')) {
+        if (Test-Path -LiteralPath (Join-Path $root $file)) { throw "Mixed release generation: $file" }
+    }
+    if ($targetVersion -eq 'v2026.10.12.4') {
+        node (Join-Path $root 'scripts/prepare-scrapling.mjs') --check
+        Assert-NativeSuccess 'Legacy Scrapling verification'
+    } elseif (Test-Path -LiteralPath (Join-Path $root 'scripts/prepare-scrapling.mjs')) { throw 'Mixed release generation: Scrapling' }
 }
 
 function Assert-CrabotStopped($targetInstallDir) {
@@ -126,7 +181,7 @@ function Assert-CrabotStopped($targetInstallDir) {
     $portOffset = 0
     $instancePath = Join-Path $targetInstallDir 'instance.json'
     if (Test-Path -LiteralPath $instancePath -PathType Leaf) {
-        $instance = Get-Content -LiteralPath $instancePath -Raw | ConvertFrom-Json
+        $instance = Get-Content -LiteralPath $instancePath -Raw -Encoding UTF8 | ConvertFrom-Json
         if ($instance.data_dir) {
             $dataDir = $instance.data_dir
         }
@@ -156,9 +211,37 @@ function Assert-CrabotStopped($targetInstallDir) {
     }
 }
 
+function Write-CrabotLauncher($directory) {
+    $default = "@echo off`nnode `"%~dp0cli.mjs`" %*"
+    $private = @'
+@echo off
+setlocal
+if not exist "%LOCALAPPDATA%\crabot\node\node.exe" (
+  echo Crabot Node is missing. Run install.ps1 again. 1>&2
+  exit /b 1
+)
+set "PATH=%LOCALAPPDATA%\crabot\node;%PATH%"
+"%LOCALAPPDATA%\crabot\node\node.exe" "%~dp0cli.mjs" %*
+'@
+    $cmdPath = Join-Path $directory 'crabot.cmd'
+    if (Test-Path -LiteralPath $cmdPath -PathType Leaf) {
+        $existing = (Get-Content -LiteralPath $cmdPath -Raw).Replace("`r`n", "`n").TrimEnd()
+        if ($existing -cne $default -and $existing -cne $private.Replace("`r`n", "`n").TrimEnd()) { return }
+    }
+    $content = if ($script:PrivateNode) { $private } else { $default }
+    Set-Content -LiteralPath $cmdPath -Value $content -Encoding ASCII
+}
+
+function Install-Crabot {
+# Windows PowerShell 5.1 progress rendering slows large downloads; keep this local.
+$ProgressPreference = 'SilentlyContinue'
 # --- Main ---
 Write-Host "`n== Crabot Installer ==`n" -ForegroundColor Cyan
 
+$nativeArch = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
+if ($nativeArch -ne 'AMD64') { throw "Unsupported Windows architecture: $nativeArch; only native x64 releases are published" }
+$InstallDir = [IO.Path]::GetFullPath($InstallDir)
+if ($Version -notmatch '^[A-Za-z0-9._-]+$') { throw 'Invalid release version' }
 Ensure-Node
 Ensure-Uv
 Ensure-Bash
@@ -166,49 +249,19 @@ Ensure-Pnpm
 
 if ($FromSource) {
     Write-Info "Source install..."
-    corepack pnpm install
-    # shared 必须先编译
-    Push-Location crabot-shared
-    corepack pnpm install; corepack pnpm run build
-    Pop-Location
-    foreach ($mod in @('crabot-core','crabot-admin','crabot-agent','crabot-channel-host','crabot-channel-wechat','crabot-channel-telegram','crabot-channel-feishu','crabot-mcp-tools')) {
-        if (Test-Path $mod) {
-            Push-Location $mod
-            corepack pnpm install; corepack pnpm run build
-            Pop-Location
-        }
-    }
-    if (Test-Path 'crabot-admin/web') {
-        Push-Location 'crabot-admin/web'
-        corepack pnpm install; corepack pnpm run build
-        Pop-Location
-    }
-    corepack pnpm run build:cli
-    Set-Location crabot-memory
-    uv sync
-    Set-Location ..
-    node scripts/prepare-scrapling.mjs
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    node scripts/prepare-computer-use.mjs
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    $sourceRoot = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
+    Push-Location $sourceRoot
+    try {
+        @'
+import { runSourceUpgrade } from './scripts/upgrade-lib/source.mjs'
+await runSourceUpgrade(process.cwd(), console)
+'@ | node --input-type=module
+        Assert-NativeSuccess 'Source preparation/build'
+    } finally { Pop-Location }
 } else {
     Write-Info "Release install..."
     if ($Version -eq "latest") {
-        # 用 /releases/latest 的重定向拿真实 tag
-        # （atom feed 的 <title> 是 release 标题，可能含 commit message + 中文，不能当 tag 用）
-        try {
-            $resp = Invoke-WebRequest -Uri "https://github.com/smilefufu/crabot/releases/latest" -UseBasicParsing -MaximumRedirection 5
-            $finalUrl = $resp.BaseResponse.ResponseUri.AbsoluteUri
-        } catch {
-            Write-Err "Failed to fetch latest version from GitHub: $_"
-            exit 1
-        }
-        if ($finalUrl -match '/tag/(.+)$') {
-            $Version = $Matches[1]
-        } else {
-            Write-Err "Failed to parse latest version from $finalUrl"
-            exit 1
-        }
+        $Version = Get-LatestRelease
         Write-Info "Latest version: $Version"
     }
     Assert-CrabotStopped $InstallDir
@@ -223,13 +276,14 @@ if ($FromSource) {
     New-Item -ItemType Directory -Force -Path $stageParent | Out-Null
     try {
         Write-Info "Downloading $filename..."
-        Invoke-WebRequest -Uri $url -OutFile $archivePath
+        Invoke-WebRequest -Uri $url -OutFile $archivePath -UseBasicParsing -TimeoutSec 900
 
         $checksumUrl = "$url.sha256"
         $checksumPath = "$archivePath.sha256"
         Write-Info "Verifying release checksum..."
-        Invoke-WebRequest -Uri $checksumUrl -OutFile $checksumPath
-        $expectedHash = (Get-Content -LiteralPath $checksumPath -Raw).Trim()
+        Invoke-WebRequest -Uri $checksumUrl -OutFile $checksumPath -UseBasicParsing -TimeoutSec 60
+        $expectedHash = ((Get-Content -LiteralPath $checksumPath -Raw).Trim() -split "\s+")[0]
+        if ($expectedHash -notmatch '^[a-f0-9]{64}$') { throw 'Invalid release checksum manifest' }
         $actualHash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash
         if ($actualHash -ine $expectedHash) {
             Write-Err "Release archive checksum verification failed."
@@ -237,7 +291,7 @@ if ($FromSource) {
         }
 
         Write-Info "Extracting..."
-        Expand-Archive -Path $archivePath -DestinationPath $stageParent -Force
+        Expand-Archive -LiteralPath $archivePath -DestinationPath $stageParent -Force
         if (-not (Test-Path -LiteralPath (Join-Path $stageRelease "cli.mjs") -PathType Leaf) -or
             -not (Test-Path -LiteralPath (Join-Path $stageRelease "package.json") -PathType Leaf) -or
             -not (Test-Path -LiteralPath (Join-Path $stageRelease "scripts") -PathType Container) -or
@@ -263,29 +317,35 @@ if ($FromSource) {
             exit 1
         }
 
-        $versionPath = Join-Path $InstallDir 'VERSION'
-        if (Test-Path -LiteralPath $versionPath -PathType Leaf) {
-            Remove-Item -LiteralPath $versionPath -Force
-        }
+        $shortStage = Join-Path $stageParent 'p'
+        Move-Item -LiteralPath $stageRelease -Destination $shortStage
+        $stageRelease = $shortStage
+        Verify-Release $stageRelease $Version
 
-        $retainedEntries = @('PortableGit', 'data', 'instance.json', 'crabot.cmd')
+        $retainedEntries = @('PortableGit', 'data', 'instance.json', 'agent-venv', 'VERSION', 'crabot.cmd')
         foreach ($entry in Get-ChildItem -LiteralPath $stageRelease -Force) {
             if ($retainedEntries -contains $entry.Name) {
                 continue
             }
             $target = Join-Path $InstallDir $entry.Name
-            if (Test-Path $target) {
-                Remove-Item $target -Recurse -Force
+            if ($entry.Name -ne '.computer-use-runtime' -and (Test-Path -LiteralPath $target)) {
+                Remove-Item -LiteralPath $target -Recurse -Force
             }
-            Move-Item -LiteralPath $entry.FullName -Destination $target
+            if ($entry.Name -eq '.computer-use-runtime' -and (Test-Path -LiteralPath $target)) {
+                foreach ($child in Get-ChildItem -LiteralPath $entry.FullName -Force) {
+                    $destination = Join-Path $target $child.Name
+                    if (Test-Path -LiteralPath $destination) { Remove-Item -LiteralPath $destination -Recurse -Force }
+                    Move-Item -LiteralPath $child.FullName -Destination $destination
+                }
+            } else { Move-Item -LiteralPath $entry.FullName -Destination $target }
         }
 
         foreach ($legacyDir in Get-ChildItem -LiteralPath $InstallDir -Directory -Filter 'crabot-*-windows-x64' -ErrorAction SilentlyContinue) {
             Remove-Item $legacyDir.FullName -Recurse -Force
         }
 
-        # 根 package 没有随发布包提供 pnpm-lock.yaml，不能用非冻结安装恢复不固定的生产依赖。
-        # 根 package 的 commander、js-yaml、rotating-file-stream 保留发布包自带版本，不能在这里再次解析版本。
+        # The root package has no release lockfile; retain its bundled production dependencies.
+        # Do not resolve new commander, js-yaml or rotating-file-stream versions here.
         foreach ($mod in $runtimeModules) {
             $moduleDir = Join-Path $InstallDir $mod
             $nodeModulesDir = Join-Path $moduleDir 'node_modules'
@@ -296,7 +356,7 @@ if ($FromSource) {
             Write-Info "Restoring dependencies: $mod"
             Push-Location $moduleDir
             try {
-                corepack pnpm install --prod --frozen-lockfile
+                Invoke-Pnpm install --prod --frozen-lockfile
                 if ($LASTEXITCODE -ne 0) {
                     exit $LASTEXITCODE
                 }
@@ -317,19 +377,19 @@ if ($FromSource) {
             Pop-Location
         }
 
-        node (Join-Path $InstallDir "scripts/prepare-scrapling.mjs") --check
-        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-        node (Join-Path $InstallDir "scripts/prepare-computer-use.mjs") --check
-        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        Verify-Release $InstallDir $Version
 
-        Set-Content -Path (Join-Path $InstallDir 'VERSION') -Value $Version -Encoding ASCII
     } finally {
         Remove-Item $stageParent -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
 
 # PATH
-$crabotDir = if ($FromSource) { (Get-Location).Path } else { $InstallDir }
+foreach ($directory in $script:ToolPaths) {
+    $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+    if ($directory -notin ($userPath -split ";")) { [Environment]::SetEnvironmentVariable("Path", "$directory;$userPath", "User") }
+}
+$crabotDir = if ($FromSource) { $sourceRoot } else { $InstallDir }
 
 $legacyReleasePattern = ('^{0}\\crabot-[^\\]+-windows-x64\\?$' -f [regex]::Escape($crabotDir.TrimEnd('\')))
 function Update-CrabotPath($pathValue) {
@@ -347,20 +407,21 @@ if ($newUserPath -cne $currentPath) {
     [Environment]::SetEnvironmentVariable("Path", $newUserPath, "User")
     Write-Info "Updated user PATH for $crabotDir"
 }
-# 同步更新当前 session 的 $env:Path——SetEnvironmentVariable 只写注册表，
-# 当前进程的 PATH 不会自动刷新。同 session 后续操作（如 crabot start）能立即用。
+# SetEnvironmentVariable changes the registry; refresh this session too.
+# Commands run immediately after installation need the new PATH.
 $newSessionPath = Update-CrabotPath $env:Path
 if ($newSessionPath -cne $env:Path) {
     $env:Path = $newSessionPath
 }
 
-# 创建 crabot.cmd 如果不存在，避免覆盖用户自定义的启动器。
-$cmdPath = Join-Path $crabotDir "crabot.cmd"
-if (-not (Test-Path -LiteralPath $cmdPath -PathType Leaf)) {
-    @('@echo off', 'node "%~dp0cli.mjs" %*') | Set-Content -Path $cmdPath -Encoding ASCII
-}
+# Update only recognized product launchers; preserve custom contents.
+Write-CrabotLauncher $crabotDir
 
+if (-not $FromSource) { Set-Content -LiteralPath (Join-Path $InstallDir 'VERSION') -Value $Version -Encoding ASCII }
 Write-Host "`n== Done! ==`n" -ForegroundColor Cyan
 Write-Info "Run 'crabot start' to start Crabot (will prompt for admin password on first run)."
 Write-Info "Run 'crabot --help' for all commands."
-Write-Warn "如果新开的终端找不到 crabot 命令，请重启资源管理器（任务管理器 → Windows 资源管理器 → 重启）或注销重登一次，让 user PATH 广播生效。"
+Write-Warn "If a new terminal cannot find crabot, restart Windows Explorer or sign out and back in to refresh the user PATH."
+
+}
+if ($MyInvocation.InvocationName -ne '.') { Install-Crabot }

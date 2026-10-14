@@ -5,6 +5,22 @@ on:
     tags: ['v*']
   pull_request:
     paths:
+      - 'install.sh'
+      - 'install.ps1'
+      - 'cli.mjs'
+      - 'scripts/upgrade*.mjs'
+      - 'scripts/upgrade-lib/**'
+      - 'scripts/_preflight.mjs'
+      - 'scripts/stop.mjs'
+      - 'scripts/lib/__tests__/stop-windows.test.mjs'
+      - 'scripts/check-release.mjs'
+      - 'scripts/lib/release-package.mjs'
+      - 'scripts/lib/toolchain.mjs'
+      - 'scripts/lib/__tests__/*install*.mjs'
+      - '.github/scripts/*install*'
+      - '.github/scripts/test-durable-file.mjs'
+      - 'crabot-admin/src/durable-file.ts'
+      - 'crabot-core/src/index.ts'
       - 'scripts/computer-use/**'
       - 'scripts/*computer-use*.mjs'
       - 'scripts/lib/computer-use-*'
@@ -48,6 +64,28 @@ jobs:
         with:
           node-version: '22'
           cache: 'pnpm'
+
+      - name: Installer regressions (Unix)
+        if: matrix.platform != 'windows'
+        run: node --test scripts/lib/__tests__/installer-compat.test.mjs scripts/lib/__tests__/scrapling-install.test.mjs scripts/lib/__tests__/scrapling-runtime.test.mjs scripts/lib/__tests__/stop-windows.test.mjs
+
+      - name: Installer regressions (PowerShell 7)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: .github/scripts/test-installer-windows.ps1
+
+      - name: Windows stop sequence regression
+        if: matrix.platform == 'windows'
+        run: node --test scripts/lib/__tests__/stop-windows.test.mjs
+
+      - name: Installer regressions (Windows PowerShell 5.1)
+        if: matrix.platform == 'windows'
+        shell: powershell
+        run: .github/scripts/test-installer-windows.ps1
+
+      - name: Windows CA path compatibility regressions
+        shell: bash
+        run: python .github/scripts/test-installer-ca.py
 
       - name: Install dependencies (with devDeps for build)
         shell: bash
@@ -338,6 +376,34 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node .github/scripts/smoke-scrapling.mjs "$Unpacked"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Native final-archive installer, startup, reinstall and rejection
+        if: matrix.platform != 'windows'
+        shell: bash
+        run: |
+          ARCHIVE=$(find "$GITHUB_WORKSPACE" -maxdepth 1 -name 'crabot-*.tar.gz' -print -quit)
+          node .github/scripts/smoke-installer.mjs "$ARCHIVE"
+
+      - name: Final ZIP installer and runtime (PowerShell 7)
+        if: matrix.platform == 'windows'
+        shell: bash
+        run: |
+          ARCHIVE=$(find "$GITHUB_WORKSPACE" -maxdepth 1 -name 'crabot-*-windows-x64.zip' -print -quit)
+          node .github/scripts/smoke-installer.mjs "$ARCHIVE" pwsh
+
+      - name: Final ZIP installer and runtime (Windows PowerShell 5.1)
+        if: matrix.platform == 'windows'
+        shell: bash
+        run: |
+          ARCHIVE=$(find "$GITHUB_WORKSPACE" -maxdepth 1 -name 'crabot-*-windows-x64.zip' -print -quit)
+          node .github/scripts/smoke-installer.mjs "$ARCHIVE" powershell.exe
+
+      - name: Linux installer distro compatibility (Ubuntu 24.04, Debian 12 and 13)
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: |
+          ARCHIVE=$(find "$GITHUB_WORKSPACE" -maxdepth 1 -name 'crabot-*-linux-x64.tar.gz' -print -quit)
+          bash .github/scripts/smoke-installer-linux.sh "$ARCHIVE"
 
       - name: Verify system upgrade and ordinary users (Linux)
         if: matrix.platform == 'linux'

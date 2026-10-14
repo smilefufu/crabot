@@ -33,6 +33,6 @@ describe('getCurrentVersion', () => {
 describe('detectPlatform', () => {
   it('returns string of form <os>-<arch>', () => {
     const p = detectPlatform()
-    expect(p).toMatch(/^(darwin|linux)-(x64|arm64)$/)
+    expect(p).toMatch(/^(darwin|linux|windows)-(x64|arm64)$/)
   })
 })

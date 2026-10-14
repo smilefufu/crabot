@@ -13,7 +13,13 @@ cp "$workspace/.github/scripts/smoke-scrapling.mjs" "$workspace/.github/scripts/
 root=$fixture/install-custom
 persons=(crabot-audit-a crabot-audit-b)
 cleanup() {
-  for person in "${persons[@]}"; do userdel -r "$person" 2>/dev/null || true; done
+  for person in "${persons[@]}"; do
+    for mode in stdin-eof sigterm; do
+      stderr=/home/$person/.crabot/exit-data/$mode.stderr
+      if [ -f "$stderr" ]; then cp "$stderr" "$output/$person-$mode.stderr"; fi
+    done
+    userdel -r "$person" 2>/dev/null || true
+  done
   rm -rf "$fixture"
 }
 trap cleanup EXIT
