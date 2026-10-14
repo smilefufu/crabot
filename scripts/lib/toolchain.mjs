@@ -12,18 +12,18 @@ export async function ensureCorepack(root, { source, logger = console } = {}) {
   source ??= await selectPackageSource('npm', { logger })
   const run = (cmd, args, timeout = 20 * 60_000) => withPackageSource(source, (url, env, remaining) => runBounded(cmd, args, { cwd: root, env, timeout: remaining, captureError: true }), { logger, timeout })
   const system = windows ? { command: 'cmd.exe', args: ['/d', '/s', '/c', 'corepack pnpm@9.15.9 --version'] } : { command: 'corepack', args: ['pnpm@9.15.9', '--version'] }
-  let missing = false
-  if (windows) {
-    try { execFileSync('where.exe', ['corepack'], { stdio: 'ignore', timeout: 5000 }) }
-    catch (error) { if (error.status !== 1) throw error; missing = true }
-  }
   try {
-    if (missing) throw Object.assign(new Error('Corepack executable is missing'), { code: 'ENOENT' })
     await run(system.command, system.args, 60_000)
     return null
   } catch (error) {
     const failure = `${error.message}\n${error.stderr ?? ''}`
-    if (error.code !== 'ENOENT' && !/Cannot find matching keyid|corepack[^\n]*(not found|not recognized)|不是内部或外部命令/i.test(failure)) throw error
+    if (error.code !== 'ENOENT' && !/Cannot find matching keyid/i.test(failure)) {
+      if (!windows) throw error
+      let missing = false
+      try { execFileSync('where.exe', ['corepack'], { stdio: 'ignore', timeout: 5000 }) }
+      catch (discovery) { if (discovery.status !== 1) throw error; missing = true }
+      if (!missing) throw error
+    }
     // Prepare the private tool without modifying the global installation.
   }
   if (!existsSync(entry)) {
