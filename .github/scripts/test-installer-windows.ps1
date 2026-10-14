@@ -85,25 +85,31 @@ if ($env:OS -eq 'Windows_NT') {
             foreach ($lockMode in @('readable', 'exclusive')) {
                 $script:PrivateNode = $false
                 $script:PayloadLock = $null
+                $script:PayloadProcess = $null
                 $script:LockMode = $lockMode
                 function node { if ($args[0] -eq '-v') { 'v22.12.0' } else { 'x64' }; $global:LASTEXITCODE = 0 }
                 function Expand-Archive($LiteralPath, $DestinationPath) {
                     Microsoft.PowerShell.Archive\Expand-Archive -LiteralPath $LiteralPath -DestinationPath $DestinationPath
                     $script:NodePayload = Join-Path $DestinationPath ([IO.Path]::GetFileNameWithoutExtension($LiteralPath))
-                    $lockedFile = if ($script:LockMode -eq 'readable') { 'node.exe' } else { 'README.md' }
-                    $share = if ($script:LockMode -eq 'readable') { [IO.FileShare]::Read } else { [IO.FileShare]::None }
-                    $script:PayloadLock = [IO.File]::Open((Join-Path $script:NodePayload $lockedFile), [IO.FileMode]::Open, [IO.FileAccess]::Read, $share)
                     if ($script:LockMode -eq 'readable') {
+                        $script:PayloadProcess = Start-Process -FilePath (Join-Path $script:NodePayload 'node.exe') -ArgumentList @('-e', 'setInterval(function(){},1000)') -WorkingDirectory $script:NodePayload -NoNewWindow -PassThru
                         $renameFailed = $false
                         try { Move-Item -LiteralPath $script:NodePayload -Destination (Join-Path $launcherRoot 'renamed-payload') }
                         catch { $renameFailed = $_.FullyQualifiedErrorId -like 'MoveDirectoryItemIOError,*' }
-                        Assert $renameFailed 'a real Windows handle without delete sharing must reproduce the directory move failure'
+                        Assert $renameFailed 'a real process using the source directory must reproduce the directory move failure'
+                    } else {
+                        $script:PayloadLock = [IO.File]::Open((Join-Path $script:NodePayload 'README.md'), [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
                     }
                 }
                 $failure = $null
                 try { Ensure-Node } catch { $failure = $_ }
                 finally {
                     if ($script:PayloadLock) { $script:PayloadLock.Dispose() }
+                    if ($script:PayloadProcess) {
+                        if (-not $script:PayloadProcess.HasExited) { $script:PayloadProcess.Kill() }
+                        Assert ($script:PayloadProcess.WaitForExit(10000)) 'fixture process must exit before cleanup'
+                        $script:PayloadProcess.Dispose()
+                    }
                     Remove-Item Function:node, Function:Expand-Archive
                     Get-ChildItem -LiteralPath $env:TEMP | Remove-Item -Recurse -Force
                 }
