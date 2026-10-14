@@ -14,8 +14,8 @@ repo = Path(sys.argv[1]).resolve()
 uv = sys.argv[2]
 source = repo / 'crabot-memory'
 root = Path(tempfile.mkdtemp(prefix='crabot-cn-lock-audit-'))
-project = root / 'memory 空'
-project.mkdir()
+project = root / 'home 空' / 'crabot-memory'
+project.mkdir(parents=True)
 for name in ['pyproject.toml', 'uv.lock']:
     shutil.copy2(source / name, project / name)
 shutil.copytree(source / 'src', project / 'src')
@@ -84,6 +84,17 @@ try:
     env['UV_NO_CONFIG'] = '1'
     baseline = run('existing-start-entry', ['run', '--frozen', '--offline', 'python', '-c', 'import src.main'], expected_success=False)
     assert 'pytest' in baseline.stderr, baseline.stderr
+    (project / 'upgrade').mkdir()
+    migration = project / 'upgrade' / 'encoding-fixture.py'
+    migration.write_text('import sys; print(sys.argv[1]); print(chr(0x7a7a))')
+    bad_encoding = subprocess.run([uv, 'run', '--frozen', '--no-dev', 'python', str(migration), '--data-dir=' + str(root / 'data 空')], cwd=project, env=env | {'UV_OFFLINE': '1', 'PYTHONIOENCODING': 'cp1252'}, text=True, capture_output=True, timeout=30)
+    assert bad_encoding.returncode != 0 and 'UnicodeEncodeError' in bad_encoding.stderr, bad_encoding.stderr
+    migration_driver = root / 'migration.mjs'
+    runner = (repo / 'scripts/upgrade-lib/runner.mjs').as_uri()
+    migration_driver.write_text('import {runScript} from ' + json.dumps(runner) + ';const r=await runScript(process.argv[2],process.argv[3]);if(r.exitCode!==0||!r.stdout.includes("空")||process.env.PYTHONIOENCODING!=="cp1252")process.exit(1);')
+    result = subprocess.run(['node', str(migration_driver), str(migration), str(root / 'data 空')], env=env | {'UV_OFFLINE': '1', 'PYTHONIOENCODING': 'cp1252'}, text=True, capture_output=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+    print('Actual Memory migration: offline/no-dev and UTF-8 despite inherited cp1252; parent encoding unchanged', flush=True)
     assert hashlib.sha256((project / 'uv.lock').read_bytes()).hexdigest() == lock_hash
     assert hosts and set(hosts) == {'mirrors.aliyun.com'}, str(set(hosts))
     print('Actual Memory: cold domestic download, frozen hash/versions, production offline import OK', flush=True)

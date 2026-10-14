@@ -81,5 +81,6 @@ describe('buildCoreModules：DATA_DIR 顶层契约', () => {
     const env = envOf(buildCoreModules(OPTS), 'memory-default')
     expect(env.CRABOT_MEMORY_DATA_DIR).toBe(join('/home/u/.crabot/data', 'memory'))
     expect(env.DATA_DIR).toBeUndefined()
+    expect(env.PYTHONIOENCODING).toBe('utf-8')
   })
 })

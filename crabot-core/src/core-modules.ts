@@ -83,6 +83,7 @@ export function buildCoreModules(o: BuildCoreModulesOpts): CoreModule[] {
       auto_restart: true,
       start_priority: 15,  // 在 admin(10) 之后启动，确保配置已就绪
       env: {
+        PYTHONIOENCODING: 'utf-8',
         CRABOT_MEMORY_DATA_DIR: path.join(o.dataDir, 'memory'),
         CRABOT_MODULE_MANAGER_URL: o.mmEndpoint,
         CRABOT_MM_PORT: String(o.port),

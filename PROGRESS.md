@@ -6,6 +6,8 @@
 - Memory 从原锁导出带 hash 清单，私有 venv 同步及本地项目安装后做 frozen/offline 审计；标准生产入口排除 dev，开发/自定义入口保持。产品准备隔离用户私有包源认证，保留代理/CA，不写全局配置。SQLite 另验锁定版本/ABI 的 prebuild 来源，sharp 使用锁定平台包。
 - 本机 macOS 冷缓存、阻断官方来源：实际 Corepack/pnpm/42 个 Node 包、SQLite prebuild/sharp 均通过 npmmirror 下载并原生加载；Memory 仅访问阿里云，原锁 SHA 不变且生产离线加载通过。44 项安装器/源策略/资源回归、36 项升级器回归、8 项模块入口及本机 PS7 通过；真实 nvm/uv 固定版引导通过，生产 Memory 在坏用户 index 下仍可离线加载；四平台最终 archive、Windows PS5.1/7 与 Python 3.11 门禁已接入 CI，尚未完成。Win11/FlClash 现场与 GitHub 发行下载不能由本机实验推断；未改生产数据或进程。
 
+- 最终包 3bfe71f7 的 Intel/ARM Mac 已通过；Windows Python 3.11 的中文 stdout 令迁移退出，已补 UTF-8 子进程与标准 Memory 迁移 frozen/no-dev 的实测回归。无系统 Python 的 Linux 容器因 uv 选择 3.15、httptools 缺 wheel 而失败；[Spec §10](crabot-docs/superpowers/specs/2026-10-14-domestic-dependency-download-design.md) 提议缺解释器时独立使用现有固定 3.12.12，等待确认，尚未实现。四平台全部通过前不发版。
+
 ### 桌面控制首次设置：实现完成，等待 PR 审查与原生验收
 
 - 按用户确认的 [Spec](crabot-docs/superpowers/specs/2026-10-13-computer-use-setup-experience-design.md) 和先行发布的 Admin/Agent 协议，实现系统设置入口、具体权限诊断、系统授权引导、自动复检、真实截图验证与 computer-use 局部装配；MCP 标准项链接同一面板。正常流程无需终端、手动找 App 或重启 Agent。
