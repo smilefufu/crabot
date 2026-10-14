@@ -73,7 +73,8 @@ test('private npm config is excluded while proxy and CA are preserved; owned con
   const { tmpdir } = await import('node:os')
   const root = await mkdtemp(join(tmpdir(), 'npm-config-test-'))
   const file = join(root, '.npmrc')
-  const config = '_auth=private-secret\nregistry=https://private.invalid\ncafile=/company/certs.pem\nhttps-proxy=http://127.0.0.1:7890\n'
+  const certificate = join(root, 'company-ca.pem')
+  const config = `_auth=private-secret\nregistry=https://private.invalid\ncafile=${certificate}\nhttps-proxy=http://127.0.0.1:7890\n`
   await writeFile(file, config)
   let owned
   try {
@@ -82,7 +83,7 @@ test('private npm config is excluded while proxy and CA are preserved; owned con
       assert.notEqual(env.npm_config_userconfig, file)
       assert.equal(await readFile(env.npm_config_userconfig, 'utf8'), '')
       assert.equal(await readFile(env.npm_config_globalconfig, 'utf8'), '')
-      assert.equal(env.npm_config_cafile, '/company/certs.pem')
+      assert.equal(env.npm_config_cafile, certificate)
       assert.equal(env.npm_config_https_proxy, 'http://127.0.0.1:7890')
       owned = env.npm_config_userconfig
     }, { env: { ...process.env, npm_config_userconfig: file }, logger: silent })
