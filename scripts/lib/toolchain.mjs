@@ -10,12 +10,13 @@ const tools = windows ? join(process.env.LOCALAPPDATA || homedir(), 'crabot', 'c
 const entry = join(tools, 'node_modules/corepack/dist/corepack.js')
 export async function ensureCorepack(root, { source, logger = console } = {}) {
   source ??= await selectPackageSource('npm', { logger })
-  const run = (cmd, args, timeout = 20 * 60_000) => withPackageSource(source, (url, env, remaining) => runBounded(cmd, args, { cwd: root, env, timeout: remaining, captureError: true }), { logger, timeout })
+  const run = (cmd, args, timeout = 20 * 60_000) => withPackageSource(source, (url, env, remaining) => runBounded(cmd, args, { cwd: root, env, timeout: remaining, captureError: true }).catch(error => { error.toolchainCommand = cmd; throw error }), { logger, timeout })
   const system = windows ? { command: 'cmd.exe', args: ['/d', '/s', '/c', 'corepack pnpm@9.15.9 --version'] } : { command: 'corepack', args: ['pnpm@9.15.9', '--version'] }
   try {
     await run(system.command, system.args, 60_000)
     return null
   } catch (error) {
+    if (error.toolchainCommand !== system.command || error.code === 'CRABOT_PREPARATION_CANCELLED') throw error
     const failure = `${error.message}\n${error.stderr ?? ''}`
     if (error.code !== 'ENOENT' && !/Cannot find matching keyid/i.test(failure)) {
       if (!windows) throw error

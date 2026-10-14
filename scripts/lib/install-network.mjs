@@ -69,12 +69,12 @@ export function packageEnvironment(kind, url, parent = process.env) {
   const env = { ...parent }
   if (kind === 'npm') {
     for (const key of Object.keys(env)) {
-      if (/^COREPACK_NPM_(TOKEN|USERNAME|PASSWORD)$/.test(key) || /^COREPACK_INTEGRITY_KEYS$/.test(key) || /^npm_config_(.*(?:_auth|token|username|password)|registry|strict_ssl|better_sqlite3_binary_host)/i.test(key)) delete env[key]
+      if (/^COREPACK_NPM_(TOKEN|USERNAME|PASSWORD)$/i.test(key) || /^COREPACK_INTEGRITY_KEYS$/i.test(key) || /^npm_config_(.*(?:_auth|token|username|password)|registry|strict_ssl|better_sqlite3_binary_host)/i.test(key)) delete env[key]
     }
     Object.assign(env, { npm_config_registry: url, npm_config_strict_ssl: 'true', COREPACK_NPM_REGISTRY: url, COREPACK_DEFAULT_TO_LATEST: '0', npm_config_update_notifier: 'false', SHARP_IGNORE_GLOBAL_LIBVIPS: '1' })
     if (url === sources.npm[0]) env.npm_config_better_sqlite3_binary_host = 'https://cdn.npmmirror.com/binaries/better-sqlite3'
   } else if (kind === 'python') {
-    for (const key of Object.keys(env)) if (/^UV_(INDEX|DEFAULT_INDEX|EXTRA_INDEX_URL|INDEX_URL|INDEX_STRATEGY|INSECURE_HOST|NO_VERIFY_HASHES)(_|$)/.test(key)) delete env[key]
+    for (const key of Object.keys(env)) if (/^UV_(INDEX|DEFAULT_INDEX|EXTRA_INDEX_URL|INDEX_URL|INDEX_STRATEGY|INSECURE_HOST|NO_VERIFY_HASHES)(_|$)/i.test(key)) delete env[key]
     Object.assign(env, { UV_INDEX: url, UV_DEFAULT_INDEX: url, UV_INDEX_URL: url })
   } else if (kind === 'standalone') {
     delete env.UV_PYTHON_DOWNLOADS_JSON_URL

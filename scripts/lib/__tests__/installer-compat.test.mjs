@@ -171,3 +171,27 @@ test('system install rejects an incapable uv before dependency replacement', uni
   assert.match(result.stderr, /System uv cannot prepare/)
   assert.doesNotMatch(result.stdout, /UNEXPECTED_PREPARATION/)
 })
+
+test('healthy Corepack avoids Windows PATH discovery; localized absence is checked only after failure', t => {
+  const root = fixture(t)
+  for (const mode of ['healthy', 'missing', 'unknown', 'discovery-timeout', 'tmp-missing']) {
+    const code = `
+      import cp from 'node:child_process';
+      import { syncBuiltinESMExports } from 'node:module';
+      import { EventEmitter } from 'node:events';
+      Object.defineProperty(process, 'platform', { value: 'win32' });
+      const mode = process.env.TEST_MODE; let where = 0;
+      if(mode==='tmp-missing')process.env.TEMP=process.env.TMP=process.env.TEST_ROOT+'/does-not-exist';
+      cp.execFileSync = () => { where++; if(mode==='missing')throw Object.assign(new Error('absent'),{status:1}); if(mode==='discovery-timeout')throw Object.assign(new Error('scan timed out'),{code:'ETIMEDOUT'}); };
+      cp.spawn = () => { const child=new EventEmitter();child.stderr=new EventEmitter();setImmediate(()=>{if(mode!=='healthy')child.stderr.emit('data',Buffer.from('commande introuvable fixture'));child.emit('close',mode==='healthy'?0:1)});return child; };
+      syncBuiltinESMExports();
+      const {ensureCorepack}=await import(process.env.TOOLCHAIN_MODULE);
+      let failure;try {const value=await ensureCorepack(process.env.TEST_ROOT,{source:{kind:'npm',url:'https://registry.npmmirror.com',domestic:'https://registry.npmmirror.com',official:'https://registry.npmjs.org',systemProxy:false,proxy:''},logger:{info(){},warn(){}}});if(value!==null)throw new Error('unexpected private fallback')}catch(error){failure=error}
+      if(mode==='healthy'){if(failure||where!==0)throw failure||new Error('healthy Corepack scanned PATH')}
+      else if(mode==='tmp-missing'){if(failure?.code!=='ENOENT'||where!==0)throw new Error('configuration I/O failure was treated as Corepack absence')}
+      else {if(!failure||where!==1)throw new Error('unresolved failure skipped structured discovery');if(mode!=='missing'&&failure.stderr!=='commande introuvable fixture')throw new Error('original command failure lost')}
+    `
+    const result = spawnSync(process.execPath, ['--input-type=module', '-e', code], { encoding: 'utf8', env: { ...process.env, TEST_MODE: mode, TEST_ROOT: root, TEMP: root, TMP: root, LOCALAPPDATA: root, TOOLCHAIN_MODULE: new URL('../toolchain.mjs', import.meta.url).href } })
+    assert.equal(result.status, 0, mode + ': ' + result.stdout + result.stderr)
+  }
+})

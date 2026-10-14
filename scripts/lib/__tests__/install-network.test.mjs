@@ -102,3 +102,15 @@ test('uv missing locked version retries official once without changing the requi
   }, { logger: silent })
   assert.deepEqual(calls, [{ url: source.domestic, requirement }, { url: source.official, requirement }])
 })
+
+test('Windows environment name casing cannot forward authentication or disable verification', () => {
+  const parent = { corepack_npm_token: 'private', corepack_integrity_keys: '0', uv_insecure_host: 'mirrors.aliyun.com', uv_no_verify_hashes: '1', uv_index_private_password: 'private' }
+  const npm = packageEnvironment('npm', 'https://registry.npmmirror.com', parent)
+  const python = packageEnvironment('python', 'https://mirrors.aliyun.com/pypi/simple/', parent)
+  assert.equal(npm.corepack_npm_token, undefined)
+  assert.equal(npm.corepack_integrity_keys, undefined)
+  assert.equal(python.uv_insecure_host, undefined)
+  assert.equal(python.uv_no_verify_hashes, undefined)
+  assert.equal(python.uv_index_private_password, undefined)
+  assert.equal(parent.corepack_npm_token, 'private')
+})
