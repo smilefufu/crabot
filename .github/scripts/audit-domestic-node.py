@@ -75,6 +75,9 @@ try:
     hosts.clear()
     run('cold-frozen-install', [helper, 'pnpm', project, '-', 'install', '--frozen-lockfile'])
     run('native-load', ['-e', "const db=new (require('better-sqlite3'))(':memory:');if(db.prepare('select 7 as n').get().n!==7)process.exit(1);db.close();require('sharp')({create:{width:1,height:1,channels:3,background:'red'}}).png().toBuffer().then(b=>{if(!b.length)process.exit(1)})"])
+    prebuilds = list((root / 'npm-cache').rglob('*better-sqlite3*.tar.gz'))
+    assert len(prebuilds) == 1, 'cold owned cache must contain the downloaded SQLite prebuild'
+    print('SQLite downloaded prebuild: ' + prebuilds[0].name + '; SHA256=' + hashlib.sha256(prebuilds[0].read_bytes()).hexdigest(), flush=True)
     assert hashlib.sha256(lock.read_bytes()).hexdigest() == before
     assert 'registry.npmmirror.com' in hosts and 'cdn.npmmirror.com' in hosts, str(set(hosts))
     assert set(hosts) <= {'registry.npmmirror.com', 'cdn.npmmirror.com'}, str(set(hosts))

@@ -141,6 +141,17 @@ export async function withPackageSource(source, action, { logger = console, time
   } finally { if (configDirectory) await rm(configDirectory, { recursive: true, force: true }) }
 }
 
+async function probeBinaryDownload(url, env, expectedHost, proxy = '') {
+  const curl = process.platform === 'win32' ? join(env.WINDIR, 'System32/curl.exe') : 'curl'
+  const args = ['--head', '--fail', '--silent', '--show-error', '--location', '--proto-redir', '=https', '--connect-timeout', '3', '--max-time', '5', '--write-out', '\n%{url_effective}', url]
+  if (proxy) args.push('--proxy', proxy)
+  try {
+    const { stdout } = await exec(curl, args, { env, timeout: 5000, maxBuffer: 65536 })
+    const actual = stdout.slice(stdout.lastIndexOf('\n') + 1)
+    return new URL(actual).hostname === expectedHost && /content-type:.*(?:octet-stream|gzip|x-tar)/i.test(stdout)
+  } catch { return false }
+}
+
 export async function selectPythonDownloadSource(uv, request, { cwd, env = process.env, logger = console } = {}) {
   const source = packageSource('standalone', sources.standalone[1])
   const candidateEnv = packageEnvironment('standalone', source.domestic, env)
@@ -149,14 +160,7 @@ export async function selectPythonDownloadSource(uv, request, { cwd, env = proce
   const record = records.find(record => record.variant === 'default') ?? records[0]
   if (!record?.url) throw new Error('uv cannot identify the required standalone Python download')
   const proxy = await systemProxy(record.url, env)
-  const curl = process.platform === 'win32' ? join(env.WINDIR, 'System32/curl.exe') : 'curl'
-  try {
-    const args = ['--head', '--fail', '--silent', '--show-error', '--location', '--proto-redir', '=https', '--connect-timeout', '3', '--max-time', '5', '--write-out', '\n%{url_effective}', record.url]
-    if (proxy) args.push('--proxy', proxy)
-    const { stdout: headers } = await exec(curl, args, { env, timeout: 5000, maxBuffer: 65536 })
-    const actual = headers.slice(headers.lastIndexOf('\n') + 1)
-    if (new URL(actual).hostname === new URL(source.domestic).hostname && /content-type:.*(?:octet-stream|gzip|x-tar)/i.test(headers)) source.url = source.domestic
-  } catch {}
+  if (await probeBinaryDownload(record.url, env, new URL(source.domestic).hostname, proxy)) source.url = source.domestic
   logger.info(`Standalone Python source: ${source.url}${source.url === source.official ? ' (domestic missing/unavailable or redirected to official)' : ''}`)
   return source
 }
@@ -173,14 +177,7 @@ export async function nativePackageEnvironment(directory, source, env, logger = 
   const child = { ...env }
   const filename = `better-sqlite3-v${versions[0]}-node-v${process.versions.modules}-${process.platform}-${process.arch}.tar.gz`
   const url = `${child.npm_config_better_sqlite3_binary_host}/v${versions[0]}/${filename}`
-  const curl = process.platform === 'win32' ? join(env.WINDIR, 'System32/curl.exe') : 'curl'
-  let available = false
-  if (versions.length === 1) {
-    try {
-      const { stdout } = await exec(curl, ['--head', '--fail', '--silent', '--show-error', '--location', '--proto-redir', '=https', '--connect-timeout', '3', '--max-time', '5', '--write-out', '\n%{url_effective}', url], { env, timeout: 5000, maxBuffer: 65536 })
-      available = new URL(stdout.slice(stdout.lastIndexOf('\n') + 1)).hostname === 'cdn.npmmirror.com' && /content-type:.*(?:octet-stream|gzip|x-tar)/i.test(stdout)
-    } catch {}
-  }
+  const available = versions.length === 1 && await probeBinaryDownload(url, env, 'cdn.npmmirror.com')
   if (available) logger.info(`SQLite prebuild source: ${url}`)
   else {
     delete child.npm_config_better_sqlite3_binary_host

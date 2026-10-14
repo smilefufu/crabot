@@ -77,6 +77,11 @@ try:
     assert result.returncode == 0, result.stdout + result.stderr
     assert 'mirrors.aliyun.com' in result.stdout
     run('prod-frozen-offline', ['run', '--frozen', '--no-dev', '--offline', 'python', '-c', 'import src.main; print("memory import OK")'])
+    (project / 'uv.toml').write_text('[[index]]\nname="private"\nurl="https://private.invalid/simple"\ndefault=true\n')
+    env.pop('UV_NO_CONFIG')
+    run('prod-user-index-offline', ['run', '--frozen', '--no-dev', '--offline', 'python', '-c', 'import src.main'])
+    (project / 'uv.toml').unlink()
+    env['UV_NO_CONFIG'] = '1'
     baseline = run('existing-start-entry', ['run', '--frozen', '--offline', 'python', '-c', 'import src.main'], expected_success=False)
     assert 'pytest' in baseline.stderr, baseline.stderr
     assert hashlib.sha256((project / 'uv.lock').read_bytes()).hexdigest() == lock_hash
