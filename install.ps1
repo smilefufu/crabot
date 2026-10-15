@@ -26,11 +26,11 @@ function Add-ToolPath($directory) {
 
 
 # Installer-owned helpers also work with legacy packages; verify every file before executing.
-$InstallerHelperRevision = 'cf11ab0629e35c3e51b52e84db375de8e686455e'
+$InstallerHelperRevision = '4a41c1781b92aacd55b35c4cca76239737a9bbf2'
 $InstallerHelperHashes = @{
     'scripts/installer-deps.mjs' = 'd4fd4bed9aa55ab09c65f7f63ffb8bfe275fbfac953caca131e5504df67d72b7'
-    'scripts/lib/install-network.mjs' = 'fa6bf9db9278d1d36388739afbe6d96542acf9810a7d556f892bf34bdb0f673c'
-    'scripts/lib/memory-deps.mjs' = '9ce0f00f2c062a9dd4c48cb5a6cfe2e4081a2750c5e3f68fe6cf17fe437f9218'
+    'scripts/lib/install-network.mjs' = '4bb5b23ea2b3b5a4fd2fbc454d7425fb8fac9dbe793e45aba65a90ec2f681e17'
+    'scripts/lib/memory-deps.mjs' = '89b6a0bc5d00ed1e73d0c9fcf23ab00d817fc8cf77d1a0d15578e431ab58c2c3'
     'scripts/lib/run-bounded.mjs' = '20cd05bbf043961f774a68d83c5c4ab5885a33dda0e36409788341b054132df7'
     'scripts/lib/toolchain.mjs' = '7ce0955b964790804305e7d227228bea222cdabfe1bce84213e86a80f99cc886'
 }
