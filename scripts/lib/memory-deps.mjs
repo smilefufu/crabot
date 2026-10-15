@@ -16,13 +16,20 @@ export function findUv() {
 
 export async function prepareMemoryDependencies(directory, { dev = false, logger = console, source, uv = findUv() } = {}) {
   const deadline = Date.now() + 20 * 60_000
-  source ??= await selectPackageSource('python', { logger })
   const transport = await uvTransport(uv, directory)
   const originalLock = await readFile(join(directory, 'uv.lock'))
   const temporary = await mkdtemp(join(tmpdir(), 'crabot-memory-deps-'))
   const requirements = join(temporary, 'requirements.txt')
   const python = join(directory, '.venv', process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python')
   try {
+    if (transport.UV_OFFLINE === '1') {
+      logger.info('Offline Memory: retaining the original frozen preparation path')
+      const options = { cwd: directory, env: { ...process.env, UV_OFFLINE: '1' }, captureError: true }
+      await runBounded(uv, ['sync', '--frozen', ...(dev ? [] : ['--no-dev']), '--offline'], { ...options, timeout: Math.max(1, deadline - Date.now()) })
+      await runBounded(uv, ['run', '--frozen', ...(dev ? [] : ['--no-dev']), '--offline', 'python', '-c', 'import src.main'], { ...options, timeout: Math.max(1, deadline - Date.now()) })
+      return
+    }
+    source ??= await selectPackageSource('python', { logger, env: { ...process.env, ...transport } })
     await withPackageSource(source, async (index, env, remaining) => {
       env = { ...env, ...transport }; delete env.UV_CONFIG_FILE
       const deadline = Date.now() + remaining

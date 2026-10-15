@@ -42,6 +42,15 @@ try:
   assert after.returncode!=0 and requests and 'private' not in requests,after.stderr
   assert (root/'uv.toml').read_text()==config
   print(f'Private index isolated; native TLS {native} preserved; source config unchanged',flush=True)
+ offline_config='offline=true\n'
+ (root/'uv.toml').write_text(offline_config)
+ requests.clear()
+ transport=json.loads(subprocess.check_output(['node',str(driver),uv,str(root)],cwd=root,env=env,text=True,timeout=10))
+ assert transport.get('UV_OFFLINE')=='1',transport
+ offline=subprocess.run(base,cwd=root,env=env|transport,text=True,capture_output=True,timeout=20)
+ assert offline.returncode!=0 and not requests,offline.stderr
+ assert (root/'uv.toml').read_text()==offline_config
+ print('Configured offline mode retained; no registry requests',flush=True)
  servers[0].version_page=True
  (root/'missing-version.txt').write_text('hatchling==999999.0.0\n')
  missing=subprocess.run([uv,'--no-config','pip','compile',str(root/'missing-version.txt'),'--default-index',public,'--no-cache'],cwd=root,env=env,text=True,capture_output=True,timeout=20)

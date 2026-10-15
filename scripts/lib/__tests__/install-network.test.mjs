@@ -148,20 +148,21 @@ test('Memory keeps installed/explicit Python and pins only a missing default int
   const root = await mkdtemp(join(tmpdir(), 'crabot-python-request-test-'))
   t.after(() => rm(root, { recursive: true, force: true }))
   await writeFile(join(root, 'uv.lock'), 'unchanged frozen lock')
-  for (const mode of ['installed', 'missing', 'environment', 'pin', 'never', 'configured-never', 'configured-manual', 'io']) {
+  for (const mode of ['installed', 'missing', 'environment', 'pin', 'never', 'configured-never', 'configured-manual', 'configured-offline', 'io']) {
     const code = `
       import cp from 'node:child_process';import {syncBuiltinESMExports} from 'node:module';import {promisify} from 'node:util';import {EventEmitter} from 'node:events';import fs from 'node:fs';
-      const mode=process.env.TEST_MODE;const attempts=[];let probe;process.env.HTTPS_PROXY='http://localhost:7890';
+      const mode=process.env.TEST_MODE;const attempts=[];let probe;let frozen=false;process.env.HTTPS_PROXY='http://localhost:7890';
       delete process.env.UV_PYTHON;delete process.env.UV_PYTHON_DOWNLOADS;
       if(mode==='environment')process.env.UV_PYTHON='3.11';if(mode==='never')process.env.UV_PYTHON_DOWNLOADS='never';
       cp.execFile=()=>{};cp.execFile[promisify.custom]=async(command,args)=>{
-        if(args.includes('--show-settings'))return {stdout:'system_certs: false, python_preference: Managed, python_downloads: '+(mode==='never'||mode==='configured-never'?'Never':mode==='configured-manual'?'Manual':'Automatic')+','};
+        if(args.includes('--show-settings'))return {stdout:'connectivity: '+(mode==='configured-offline'?'Offline':'Online')+', system_certs: false, python_preference: Managed, python_downloads: '+(mode==='never'||mode==='configured-never'?'Never':mode==='configured-manual'?'Manual':'Automatic')+','};
         if(args.includes('pin')){if(mode==='pin')return {stdout:'3.11\\n'};throw Object.assign(new Error('no pin'),{stderr:'No Python version file found; specify a version to create one'});}
         if(args.includes('list')){probe=args[2];return {stdout:JSON.stringify([{key:'cpython-fixture',variant:'default',url:'https://mirrors.ustc.edu.cn/fixture.tar.gz'}])};}
         throw new Error('HTTP 404 Not Found');
       };
-      cp.spawn=(command,args)=>{
+      cp.spawn=(command,args,options)=>{
         const child=new EventEmitter();child.stderr=new EventEmitter();setImmediate(()=>{
+          if(args[0]==='sync')frozen=args.includes('--offline')&&args.includes('--frozen')&&options.env.UV_OFFLINE==='1';
           if(args[0]==='export')fs.writeFileSync(args[args.indexOf('--output-file')+1],'fixture==1.0 --hash=sha256:fixture');
           if(args[0]==='venv'){attempts.push(args);if(args.includes('--no-python-downloads')&&mode!=='installed'){child.stderr.emit('data',Buffer.from(mode==='io'?'EPERM: permission denied':'No interpreter found'));child.emit('close',1);return;}}
           child.emit('close',0);
@@ -169,7 +170,8 @@ test('Memory keeps installed/explicit Python and pins only a missing default int
       };syncBuiltinESMExports();
       const {prepareMemoryDependencies}=await import(process.env.TEST_MODULE);
       let error;try{await prepareMemoryDependencies(process.env.TEST_ROOT,{uv:'fixture-uv',source:{kind:'python',url:'https://pypi.org/simple',domestic:'https://mirrors.aliyun.com/pypi/simple/',official:'https://pypi.org/simple',systemProxy:false},logger:{info(){},warn(){}}})}catch(e){error=e}
-      if(mode==='never'||mode==='configured-never'||mode==='configured-manual'||mode==='io'){if(!error||attempts.length!==1||probe!==undefined)throw new Error('terminal failure attempted Python download')}
+      if(mode==='configured-offline'){if(error||!frozen||attempts.length!==0||probe!==undefined)throw error||new Error('offline preparation did not retain the original frozen path')}
+      else if(mode==='never'||mode==='configured-never'||mode==='configured-manual'||mode==='io'){if(!error||attempts.length!==1||probe!==undefined)throw new Error('terminal failure attempted Python download')}
       else if(mode==='installed'){if(error||attempts.length!==1||probe!==undefined||attempts[0].includes('--python'))throw error||new Error('installed interpreter replaced')}
       else{const expected=mode==='missing'?'3.12.12':'3.11';if(error||probe!==expected||attempts.length!==2||attempts[1][attempts[1].indexOf('--python')+1]!==expected)throw error||new Error('probe and downloaded interpreter must retain selected request');if(mode!=='missing'&&attempts[0][attempts[0].indexOf('--python')+1]!==expected)throw new Error('explicit Python ignored on first attempt')}
       if(fs.readFileSync(process.env.TEST_ROOT+'/uv.lock','utf8')!=='unchanged frozen lock')throw new Error('lock changed');
@@ -177,4 +179,17 @@ test('Memory keeps installed/explicit Python and pins only a missing default int
     const result = spawnSync(process.execPath, ['--input-type=module', '-e', code], { encoding: 'utf8', env: { ...process.env, TEST_MODE: mode, TEST_ROOT: root, TEST_MODULE: new URL('../memory-deps.mjs', import.meta.url).href } })
     assert.equal(result.status, 0, mode + ': ' + result.stdout + result.stderr)
   }
+})
+
+
+test('offline Python sources do not run network or standalone metadata probes', async () => {
+  const { selectPythonDownloadSource } = await import('../install-network.mjs')
+  let probes = 0
+  const env = { UV_OFFLINE: '1' }
+  const source = await selectPackageSource('python', { env, logger: silent, probe: async () => { probes++; throw new Error('unexpected probe') } })
+  const standalone = await selectPythonDownloadSource('does-not-exist', '3.12.12', { env, logger: silent })
+  assert.equal(probes, 0)
+  assert.equal(source.url, source.official)
+  assert.equal(standalone.url, standalone.official)
+  assert.equal(source.systemProxy, false)
 })

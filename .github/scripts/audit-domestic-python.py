@@ -82,6 +82,16 @@ try:
     assert interpreter == str(sys.version_info[:2]), interpreter
     print('Explicit Python pin retained; installed interpreter and version file unchanged', flush=True)
     run('prod-frozen-offline', ['run', '--frozen', '--no-dev', '--offline', 'python', '-c', 'import src.main; print("memory import OK")'])
+    (project / 'uv.toml').write_text('offline=true\n')
+    env.pop('UV_NO_CONFIG')
+    requests_before = len(hosts)
+    result = subprocess.run(['node', str(driver), str(project), uv], cwd=project, env=env, text=True, capture_output=True, timeout=1200)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert len(hosts) == requests_before and (project / 'uv.toml').read_text() == 'offline=true\n'
+    print('Configured offline Memory preparation: frozen sync/import, no availability or registry requests', flush=True)
+    (project / 'uv.toml').unlink()
+    env['UV_NO_CONFIG'] = '1'
+
     (project / 'uv.toml').write_text('[[index]]\nname="private"\nurl="https://private.invalid/simple"\ndefault=true\n')
     env.pop('UV_NO_CONFIG')
     run('prod-user-index-offline', ['run', '--frozen', '--no-dev', '--offline', 'python', '-c', 'import src.main'])

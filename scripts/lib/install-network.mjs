@@ -16,7 +16,7 @@ export async function uvTransport(uv, directory, env = process.env) {
   // Ask the installed uv to resolve its own configuration; never print the settings dump.
   let stdout
   try {
-    ;({ stdout } = await exec(uv, ['--show-settings', 'python', 'list', '--only-downloads', '--output-format', 'json'], { cwd: directory, env, timeout: 5000, maxBuffer: 4 * 1024 * 1024 }))
+    ;({ stdout } = await exec(uv, ['--show-settings', 'cache', 'dir'], { cwd: directory, env, timeout: 5000, maxBuffer: 4 * 1024 * 1024 }))
   } catch (error) { throw new Error(`Cannot inspect uv certificate settings (exit ${error.code ?? 'unknown'})`) }
   const system = stdout.match(/\b(?:system_certs|native_tls): (true|false),/)
   if (!system) throw new Error('uv cannot report its certificate settings; update uv to 0.13.0')
@@ -25,8 +25,9 @@ export async function uvTransport(uv, directory, env = process.env) {
   if (/custom_certificates:\s*Some/.test(stdout) && !certificate) throw new Error('uv certificate settings cannot be preserved safely')
   const preference = { Managed: 'managed', OnlyManaged: 'only-managed', System: 'system', OnlySystem: 'only-system' }[stdout.match(/\bpython_preference: (\w+),/)?.[1]]
   const downloads = { Automatic: 'automatic', Manual: 'manual', Never: 'never' }[stdout.match(/\bpython_downloads: (\w+),/)?.[1]]
-  if (!preference || !downloads) throw new Error('uv cannot report its Python selection/download settings; update uv to 0.13.0')
-  return { UV_NO_CONFIG: '1', UV_SYSTEM_CERTS: system[1], UV_NATIVE_TLS: system[1], UV_PYTHON_PREFERENCE: preference, UV_PYTHON_DOWNLOADS: downloads, ...certEnv }
+  const connectivity = stdout.match(/\bconnectivity: (Online|Offline),/)?.[1]
+  if (!preference || !downloads || !connectivity) throw new Error('uv cannot report its Python/network settings; update uv to 0.13.0')
+  return { UV_NO_CONFIG: '1', UV_SYSTEM_CERTS: system[1], UV_NATIVE_TLS: system[1], UV_PYTHON_PREFERENCE: preference, UV_PYTHON_DOWNLOADS: downloads, UV_OFFLINE: connectivity === 'Offline' ? '1' : '0', ...certEnv }
 }
 
 async function systemProxy(url, env) {
@@ -61,6 +62,10 @@ export function packageSource(kind, url) {
 export async function selectPackageSource(kind, { probe, logger = console, env = process.env } = {}) {
   const [domestic, official, path] = sources[kind] ?? []
   if (!domestic) throw new Error(`Unknown product dependency source: ${kind}`)
+  if (kind === 'python' && env.UV_OFFLINE === '1') {
+    logger.info('Offline Python: retaining the official source without an availability probe')
+    return { ...packageSource(kind, official), systemProxy: false }
+  }
   const proxy = probe ? '' : await systemProxy(domestic, env)
   const available = await (probe ? probe(domestic + path) : probeSource(domestic + path, kind, env, proxy))
   const source = { kind, url: available ? domestic : official, domestic, official, proxy, systemProxy: !probe && process.platform === 'win32' }
@@ -157,6 +162,10 @@ async function probeBinaryDownload(url, env, expectedHost, proxy = '') {
 
 export async function selectPythonDownloadSource(uv, request, { cwd, env = process.env, logger = console } = {}) {
   const source = packageSource('standalone', sources.standalone[1])
+  if (env.UV_OFFLINE === '1') {
+    logger.info('Offline standalone Python: skipping availability probes')
+    return { ...source, systemProxy: false }
+  }
   const candidateEnv = packageEnvironment('standalone', source.domestic, env)
   const { stdout } = await exec(uv, ['python', 'list', ...(request ? [request] : []), '--only-downloads', '--all-versions', '--output-format', 'json'], { cwd, env: candidateEnv, timeout: 5000, maxBuffer: 4 * 1024 * 1024 })
   const records = JSON.parse(stdout).filter(record => record.key.startsWith('cpython-'))
