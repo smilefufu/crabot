@@ -151,7 +151,7 @@ test('Memory keeps installed/explicit Python and pins only a missing default int
   for (const mode of ['installed', 'missing', 'environment', 'pin', 'never', 'io']) {
     const code = `
       import cp from 'node:child_process';import {syncBuiltinESMExports} from 'node:module';import {promisify} from 'node:util';import {EventEmitter} from 'node:events';import fs from 'node:fs';
-      const mode=process.env.TEST_MODE;const attempts=[];let probe;
+      const mode=process.env.TEST_MODE;const attempts=[];let probe;process.env.HTTPS_PROXY='http://localhost:7890';
       delete process.env.UV_PYTHON;delete process.env.UV_PYTHON_DOWNLOADS;
       if(mode==='environment')process.env.UV_PYTHON='3.11';if(mode==='never')process.env.UV_PYTHON_DOWNLOADS='never';
       cp.execFile=()=>{};cp.execFile[promisify.custom]=async(command,args)=>{
