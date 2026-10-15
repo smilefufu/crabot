@@ -56,7 +56,7 @@ try:
  missing=subprocess.run([uv,'--no-config','pip','compile',str(root/'missing-version.txt'),'--default-index',public,'--no-cache'],cwd=root,env=env,text=True,capture_output=True,timeout=20)
  assert missing.returncode!=0 and 'there is no version of hatchling==999999.0.0' in missing.stderr,missing.stderr
  fallback=root/'fallback.mjs'
- fallback.write_text('import {packageSource,withPackageSource} from '+json.dumps(module)+';let n=0;const s=packageSource("python","https://mirrors.aliyun.com/pypi/simple/");await withPackageSource(s,async()=>{if(++n===1)throw new Error(process.env.CRABOT_UV_FAILURE)});if(n!==2||s.url!==s.official)process.exit(1);')
+ fallback.write_text('import {packageSource,withPackageSource} from '+json.dumps(module)+';let n=0;const s=packageSource("python","https://mirrors.aliyun.com/pypi/simple/");s.systemProxy=false;await withPackageSource(s,async()=>{if(++n===1)throw new Error(process.env.CRABOT_UV_FAILURE)});if(n!==2||s.url!==s.official)process.exit(1);')
  subprocess.run(['node',str(fallback)],env=env|{'CRABOT_UV_FAILURE':missing.stderr},check=True,timeout=10)
  print('Real uv missing locked version triggers exactly one official fallback',flush=True)
 finally:
