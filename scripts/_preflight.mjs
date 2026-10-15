@@ -12,7 +12,8 @@
 import { existsSync, accessSync, constants } from 'node:fs'
 import { createRequire } from 'node:module'
 import { ensureCorepack } from './lib/toolchain.mjs'
-import { runBounded } from './lib/scrapling-prepare.mjs'
+import { runBounded } from './lib/run-bounded.mjs'
+import { selectPackageSource, withPackageSource } from './lib/install-network.mjs'
 import { resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -29,11 +30,15 @@ if (missing) {
   accessSync(scriptsLibDir, constants.W_OK)
   console.log('[crabot] scripts/lib deps missing, auto-installing once...')
   try {
-    const corepack = await ensureCorepack(resolve(__dirname, '..'))
+    const source = await selectPackageSource('npm')
+    const corepack = await ensureCorepack(resolve(__dirname, '..'), { source })
     const args = ['pnpm', 'install', '--prod', '--prefer-offline']
-    if (corepack) await runBounded(process.execPath, [corepack, ...args], { cwd: scriptsLibDir })
-    else if (process.platform === 'win32') await runBounded('cmd.exe', ['/d', '/s', '/c', `corepack ${args.join(' ')}`], { cwd: scriptsLibDir })
-    else await runBounded('corepack', args, { cwd: scriptsLibDir })
+    await withPackageSource(source, async (url, env, remaining) => {
+      const options = { cwd: scriptsLibDir, env, timeout: remaining, captureError: true }
+      if (corepack) await runBounded(process.execPath, [corepack, ...args], options)
+      else if (process.platform === 'win32') await runBounded('cmd.exe', ['/d', '/s', '/c', `corepack ${args.join(' ')}`], options)
+      else await runBounded('corepack', args, options)
+    })
   } catch (error) {
     console.error(`[crabot] scripts/lib dependency repair failed: ${error.message}`)
     process.exit(1)

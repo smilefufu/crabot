@@ -71,9 +71,16 @@ describe('buildCoreModules：DATA_DIR 顶层契约', () => {
     expect(agent?.entry).toBe('node --max-old-space-size=2048 --heapsnapshot-near-heap-limit=3 --heapsnapshot-signal=SIGUSR2 dist/main.js')
   })
 
+  it('production Memory excludes dev packages while development retains them', () => {
+    const memory = (isDev: boolean) => buildCoreModules({ ...OPTS, isDev }).find(m => m.module_id === 'memory-default')!
+    expect(memory(false).entry).toBe('uv run --frozen --no-dev python -m src.main')
+    expect(memory(true).entry).toBe('uv run --frozen python -m src.main')
+  })
+
   it('memory：仍走 CRABOT_MEMORY_DATA_DIR，env 里不出现 DATA_DIR', () => {
     const env = envOf(buildCoreModules(OPTS), 'memory-default')
     expect(env.CRABOT_MEMORY_DATA_DIR).toBe(join('/home/u/.crabot/data', 'memory'))
     expect(env.DATA_DIR).toBeUndefined()
+    expect(env.PYTHONIOENCODING).toBe('utf-8')
   })
 })

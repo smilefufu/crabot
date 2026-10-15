@@ -69,6 +69,91 @@ detect_platform() {
   esac
 }
 
+
+CRABOT_HELPER_REVISION='54608a8157e2f4359f1e02b077b47dd3c2b34269'
+CRABOT_HELPER_ROOT=''
+CRABOT_HELPER_TEMP=''
+CRABOT_NPM_CONTEXT='-'
+file_sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
+  else shasum -a 256 "$1" | awk '{print $1}'; fi
+}
+installer_helper_hash() {
+  case "$1" in
+    scripts/installer-deps.mjs) echo d4fd4bed9aa55ab09c65f7f63ffb8bfe275fbfac953caca131e5504df67d72b7;;
+    scripts/lib/install-network.mjs) echo a44aa06ead8e498fde4442919fd9fbbd8dd1b4af7c461d9b8ace955fe3ded18d;;
+    scripts/lib/memory-deps.mjs) echo f6e62f5b85b5091f657edf5973570c5db4ca7413639fcce7dfcc63ed702bd0a2;;
+    scripts/lib/run-bounded.mjs) echo 20cd05bbf043961f774a68d83c5c4ab5885a33dda0e36409788341b054132df7;;
+    scripts/lib/toolchain.mjs) echo 7ce0955b964790804305e7d227228bea222cdabfe1bce84213e86a80f99cc886;;
+    *) return 1;;
+  esac
+}
+cleanup_installer_files() {
+  [ -z "${CRABOT_DOWNLOAD_DIR:-}" ] || rm -rf "$CRABOT_DOWNLOAD_DIR"
+  [ -z "$CRABOT_HELPER_TEMP" ] || rm -rf "$CRABOT_HELPER_TEMP"
+}
+ensure_installer_helpers() {
+  [ -z "$CRABOT_HELPER_ROOT" ] || return 0
+  local valid=true file expected
+  for file in scripts/installer-deps.mjs scripts/lib/install-network.mjs scripts/lib/memory-deps.mjs scripts/lib/run-bounded.mjs scripts/lib/toolchain.mjs; do
+    expected=$(installer_helper_hash "$file")
+    if [ ! -f "$SOURCE_DIR/$file" ] || [ "$(file_sha256 "$SOURCE_DIR/$file")" != "$expected" ]; then valid=false; break; fi
+  done
+  if [ "$valid" = true ]; then CRABOT_HELPER_ROOT="$SOURCE_DIR"; return 0; fi
+  CRABOT_HELPER_TEMP=$(mktemp -d "${TMPDIR:-/tmp}/crabot-installer-helpers.XXXXXX")
+  trap cleanup_installer_files EXIT
+  for file in scripts/installer-deps.mjs scripts/lib/install-network.mjs scripts/lib/memory-deps.mjs scripts/lib/run-bounded.mjs scripts/lib/toolchain.mjs; do
+    mkdir -p "$CRABOT_HELPER_TEMP/$(dirname "$file")"
+    curl -fsSL "https://raw.githubusercontent.com/smilefufu/crabot/$CRABOT_HELPER_REVISION/$file" -o "$CRABOT_HELPER_TEMP/$file" --connect-timeout 10 --max-time 60 || return 1
+    [ "$(file_sha256 "$CRABOT_HELPER_TEMP/$file")" = "$(installer_helper_hash "$file")" ] || { error 'Installer helper checksum mismatch'; return 1; }
+  done
+  CRABOT_HELPER_ROOT="$CRABOT_HELPER_TEMP"
+}
+invoke_pnpm() {
+  ensure_installer_helpers || return 1
+  local output result status=0
+  output=$(node "$CRABOT_HELPER_ROOT/scripts/installer-deps.mjs" pnpm "$PWD" "$CRABOT_NPM_CONTEXT" "$@") || status=$?
+  result=$(printf '%s\n' "$output" | tail -n 1)
+  printf '%s\n' "$output" | sed '/^CRABOT_TOOL_RESULT=/d'
+  [ "$status" -eq 0 ] || return "$status"
+  case "$result" in CRABOT_TOOL_RESULT=*) CRABOT_NPM_CONTEXT="${result#CRABOT_TOOL_RESULT=}";; *) error 'pnpm helper did not return its verified tool context'; return 1;; esac
+}
+node_bootstrap_checksum() {
+  case "$1" in
+    node-v22.23.3-darwin-arm64.tar.xz) echo 72d5d8832b41c9d9646197af614ffd751406ea4d215060eb91b98864e1919a3e;;
+    node-v22.23.3-darwin-x64.tar.xz) echo ac41874c3352937119cfec39e1a98c578fe58ce8a86d7e785b89a4706015f305;;
+    node-v22.23.3-linux-x64.tar.xz) echo df450af89261115ef9f9e3830c3eeb2cc9213b63c720b1af623cb5dcbe2e02de;;
+    node-v22.23.3-darwin-arm64.tar.gz) echo 23b25245dcfb9af7262f8ff142e9e2e0af025368117329e7a7458a51e5922f53;;
+    node-v22.23.3-darwin-x64.tar.gz) echo 8a677b0219178efd6eb0e475457c4afb452b521a92f6e67845a73bd85727f2a8;;
+    node-v22.23.3-linux-x64.tar.gz) echo 1084aa36196bba4c3a5e69a1ee388a6e4ff729dad09445fbcd434b28fe3c24af;;
+    *) return 1;;
+  esac
+}
+install_fixed_node() (
+  local mirror='https://cdn.npmmirror.com/binaries/node' official='https://nodejs.org/dist'
+  local metadata log started status=0
+  started=$(date +%s)
+  metadata=$(curl -fsSL "$mirror/v22.23.3/SHASUMS256.txt" --connect-timeout 3 --max-time 5) || metadata=''
+  if ! printf '%s\n' "$metadata" | grep -F 'node-v22.23.3-' >/dev/null; then mirror="$official"; warn 'Domestic Node metadata unavailable; using official 22.23.3'; fi
+  log=$(mktemp "${TMPDIR:-/tmp}/crabot-node.XXXXXX")
+  trap 'rm -f "$log"' EXIT
+  # nvm still owns its cache/install layout; the checksum comes from our official pin.
+  nvm_get_checksum() { node_bootstrap_checksum "${4}.${5}"; }
+  curl() {
+    local remaining=$((900 - $(date +%s) + started))
+    [ "$remaining" -gt 0 ] || return 28
+    command curl --connect-timeout 30 --max-time "$remaining" "$@"
+  }
+  while :; do
+    info "Node download source: $mirror"
+    NVM_NODEJS_ORG_MIRROR="$mirror" nvm install -b 22.23.3 >"$log" 2>&1 && { cat "$log"; return 0; }
+    status=$?; cat "$log" >&2
+    if [ "$mirror" = "$official" ] || grep -Ei 'checksum.*(mismatch|fail)|permission|no space|EACCES|EPERM|ENOSPC' "$log" >/dev/null || ! grep -Ei '403|404|timed out|connection|failed to download|could not resolve' "$log" >/dev/null; then return "$status"; fi
+    warn 'Domestic Node transport failed; retrying the same official version'
+    mirror="$official"
+  done
+)
+
 # --- Node.js 检查/安装（统一走 nvm，避免与系统包冲突）---
 NVM_INSTALLER_URL="https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh"
 
@@ -108,9 +193,9 @@ ensure_node() {
     fi
   fi
 
-  nvm install 22
-  nvm use 22
-  nvm alias default 22
+  install_fixed_node || return 1
+  nvm use 22.23.3
+  nvm alias default 22.23.3
 
   NODE_SWITCHED_BY_NVM=true
   info "Node.js $(node -v) installed via nvm (本进程内)"
@@ -150,44 +235,65 @@ ensure_system_uv() {
     error "  curl -LsSf https://astral.sh/uv/install.sh | sudo env UV_INSTALL_DIR=/usr/local/bin UV_NO_MODIFY_PATH=1 sh"
     exit 1
   fi
+  if ! uv --no-config export --help >/dev/null 2>&1 || ! uv --no-config --show-settings python list --only-downloads --output-format json >/dev/null 2>&1; then
+    error 'System uv cannot prepare product dependencies; install uv 0.13.0 system-wide before retrying.'
+    exit 1
+  fi
   info "system uv found"
 }
 
 # --- uv 检查/安装 ---
 ensure_uv() {
-  if command -v uv &>/dev/null; then
+  if command -v uv >/dev/null 2>&1 && uv --no-config export --help >/dev/null 2>&1 && uv --no-config --show-settings python list --only-downloads --output-format json >/dev/null 2>&1; then
     local uv_version
-    uv_version=$(uv --version) || { error "uv version probe failed"; return 1; }
-    info "$uv_version found"
-    return
+    uv_version=$(uv --version) || return 1
+    info "$uv_version found"; return
   fi
-  section "Installing uv"
-  if ! (set -o pipefail; curl -LsSf https://astral.sh/uv/install.sh | sh); then
-    error "uv installation failed during download or installer execution"; return 1
-  fi
+  local platform target expected
+  platform=$(detect_platform) || return 1
+  case "$platform" in
+    darwin-arm64) target='aarch64-apple-darwin'; expected='a9c1b29002cf3c83f07fa9cd8a887a3be0107d90e23189721221e7257db8e3d6';;
+    darwin-x64) target='x86_64-apple-darwin'; expected='5f44dcbde809b632f47c36fadb241cb4d6f9af71d0c8f172b5d2026d3dde742c';;
+    linux-x64) target='x86_64-unknown-linux-gnu'; expected='1468ebd5a5541121837c5a2817b9972ba6090fa6caa3d142620850a47fb75154';;
+  esac
+  install_fixed_uv "$target" "$expected" || return 1
   export PATH="$HOME/.local/bin:$PATH"
-  local uv_version
-  uv_version=$(uv --version) || { error "uv was not installed at a usable PATH"; return 1; }
-  info "$uv_version installed"
+  uv --version || return 1
 }
+install_fixed_uv() (
+  local target="$1" expected="$2" temporary metadata filename base url official started remaining
+  temporary=$(mktemp -d "${TMPDIR:-/tmp}/crabot-uv.XXXXXX")
+  trap 'rm -rf "$temporary"' EXIT
+  started=$(date +%s)
+  filename="uv-$target.tar.gz"
+  base='https://mirrors.ustc.edu.cn/github-release/astral-sh/uv/LatestRelease'
+  official="https://github.com/astral-sh/uv/releases/download/0.13.0/$filename"
+  metadata=$(curl -fsSL "$base/uv-installer.sh" --connect-timeout 3 --max-time 5) || metadata=''
+  if printf '%s\n' "$metadata" | grep -F 'APP_VERSION="0.13.0"' >/dev/null; then url="$base/$filename"; else url="$official"; fi
+  while :; do
+    info "uv download source: $url"
+    remaining=$((900 - $(date +%s) + started))
+    [ "$remaining" -gt 0 ] || return 28
+    local status actual
+    if actual=$(curl -fsSL "$url" -o "$temporary/$filename" --connect-timeout 30 --max-time "$remaining" --proto-redir =https --write-out "%{url_effective}"); then
+      info "uv archive download: $actual"
+      break
+    else status=$?; fi
+    [ "$url" != "$official" ] && case "$status" in 6|7|18|22|28|35|56) true;; *) false;; esac || return "$status"
+    warn 'Domestic uv transport failed; retrying official 0.13.0'
+    url="$official"
+  done
+  [ "$(file_sha256 "$temporary/$filename")" = "$expected" ] || { error 'uv archive checksum mismatch'; return 1; }
+  tar -xzf "$temporary/$filename" -C "$temporary" || return 1
+  mkdir -p "$HOME/.local/bin"
+  install -m 755 "$temporary/uv-$target/uv" "$HOME/.local/bin/uv" || return 1
+  install -m 755 "$temporary/uv-$target/uvx" "$HOME/.local/bin/uvx" || return 1
+)
 
 # --- pnpm（仅源码安装路径需要，release 包内含 dist/） ---
 ensure_pnpm() {
-  local pnpm_version
-  if command -v corepack >/dev/null 2>&1 && pnpm_version=$(corepack pnpm@9.15.9 --version); then
-    info "pnpm $pnpm_version ready"; return
-  fi
-  local tools="$HOME/.local/share/crabot/corepack"
-  mkdir -p "$tools"
-  npm install --prefix "$tools" --no-audit --no-fund --ignore-scripts --registry=https://registry.npmjs.org corepack@0.31.0 || { error "Corepack preparation failed"; return 1; }
-  CRABOT_COREPACK_JS="$tools/node_modules/corepack/dist/corepack.js"
-  mkdir -p "$HOME/.local/bin"
-  if [ ! -e "$HOME/.local/bin/corepack" ] && [ ! -L "$HOME/.local/bin/corepack" ]; then ln -s "$CRABOT_COREPACK_JS" "$HOME/.local/bin/corepack"; fi
-  corepack() { node "$CRABOT_COREPACK_JS" "$@"; }
-  export CRABOT_COREPACK_JS
-  export -f corepack
-  pnpm_version=$(corepack pnpm@9.15.9 --version) || { error "Corepack could not run pnpm after preparation"; return 1; }
-  info "pnpm $pnpm_version ready"
+  invoke_pnpm --version || return 1
+  info 'pnpm 9.15.9 ready'
 }
 
 # --- 版本比较 ---
@@ -326,7 +432,6 @@ main() {
   case "$platform" in darwin-x64|darwin-arm64|linux-x64) :;; *) error "Unsupported Node platform: $platform"; return 1;; esac
 
   if [ "$FROM_SOURCE" = true ]; then
-    ensure_pnpm
     section "Source Install"
     (cd "$SOURCE_DIR" && node --input-type=module <<'JS'
 import { runSourceUpgrade } from './scripts/upgrade-lib/source.mjs'
@@ -355,7 +460,7 @@ JS
     case "$version" in ''|*[!a-zA-Z0-9._-]*) error "Invalid release version: $version"; return 1;; esac
     assert_stopped
     CRABOT_DOWNLOAD_DIR=$(mktemp -d "${TMPDIR:-/tmp}/crabot-install.XXXXXX")
-    trap 'rm -rf "$CRABOT_DOWNLOAD_DIR"' EXIT
+    trap cleanup_installer_files EXIT
     trap 'exit 130' INT
     trap 'exit 143' TERM
     local filename="crabot-${version}-${platform}.tar.gz"
@@ -392,7 +497,8 @@ JS
       fi
     done
     info "Setting up Python environment..."
-    (cd "$INSTALL_DIR/crabot-memory" && uv sync --frozen --no-dev)
+    ensure_installer_helpers
+    node "$CRABOT_HELPER_ROOT/scripts/installer-deps.mjs" memory "$INSTALL_DIR/crabot-memory" -
     rm -rf "$CRABOT_DOWNLOAD_DIR"
 
   fi
