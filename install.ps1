@@ -26,7 +26,7 @@ function Add-ToolPath($directory) {
 
 
 # Installer-owned helpers also work with legacy packages; verify every file before executing.
-$InstallerHelperRevision = '54608a8157e2f4359f1e02b077b47dd3c2b34269'
+$InstallerHelperRevision = 'e94455762a527b925fb6c2726fbbfcfdd5544795'
 $InstallerHelperHashes = @{
     'scripts/installer-deps.mjs' = 'd4fd4bed9aa55ab09c65f7f63ffb8bfe275fbfac953caca131e5504df67d72b7'
     'scripts/lib/install-network.mjs' = 'a44aa06ead8e498fde4442919fd9fbbd8dd1b4af7c461d9b8ace955fe3ded18d'
