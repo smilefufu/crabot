@@ -25,8 +25,8 @@ module=(repo/'scripts/lib/install-network.mjs').as_uri()
 driver.write_text('import { uvTransport } from ' + json.dumps(module) + '; console.log(JSON.stringify(await uvTransport(process.argv[2], process.argv[3])));')
 base=[uv,'pip','compile',str(root/'requirements.txt'),'--index',public,'--default-index',public,'--no-cache']
 try:
- for native in ['true','false']:
-  config=f'native-tls={native}\n[[index]]\nname="private"\nurl="{private}"\n'
+ for native, downloads, preference in [('true','never','only-system'),('false','manual','system')]:
+  config=f'native-tls={native}\npython-downloads="{downloads}"\npython-preference="{preference}"\n[[index]]\nname="private"\nurl="{private}"\n'
   (root/'uv.toml').write_text(config)
   requests.clear()
   before=subprocess.run(base,cwd=root,env=env,text=True,capture_output=True,timeout=20)
@@ -34,6 +34,8 @@ try:
   settings=subprocess.check_output(['node',str(driver),uv,str(root)],cwd=root,env=env,text=True,timeout=10)
   transport=json.loads(settings)
   assert transport['UV_NATIVE_TLS']==native,transport
+  assert transport.get('UV_PYTHON_DOWNLOADS')==downloads,transport
+  assert transport.get('UV_PYTHON_PREFERENCE')==preference,transport
   requests.clear()
   isolated=env|transport
   after=subprocess.run(base,cwd=root,env=isolated,text=True,capture_output=True,timeout=20)

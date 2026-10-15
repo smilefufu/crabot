@@ -42,7 +42,7 @@ export async function prepareMemoryDependencies(directory, { dev = false, logger
       }
       try { await run(['venv', '--no-python-downloads', ...(request ? ['--python', request] : []), '--allow-existing', '.venv']) }
       catch (error) {
-        if (process.env.UV_PYTHON_DOWNLOADS === 'never' || !/No (?:interpreter|Python).*found|No Python installation/i.test(error.stderr ?? '')) throw error
+        if (env.UV_PYTHON_DOWNLOADS !== 'automatic' || !/No (?:interpreter|Python).*found|No Python installation/i.test(error.stderr ?? '')) throw error
         request ||= '3.12.12'
         logger.info('Memory: acquiring the selected standalone Python interpreter')
         const download = await selectPythonDownloadSource(uv, request, { cwd: directory, env, logger })

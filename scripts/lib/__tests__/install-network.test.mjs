@@ -148,14 +148,14 @@ test('Memory keeps installed/explicit Python and pins only a missing default int
   const root = await mkdtemp(join(tmpdir(), 'crabot-python-request-test-'))
   t.after(() => rm(root, { recursive: true, force: true }))
   await writeFile(join(root, 'uv.lock'), 'unchanged frozen lock')
-  for (const mode of ['installed', 'missing', 'environment', 'pin', 'never', 'io']) {
+  for (const mode of ['installed', 'missing', 'environment', 'pin', 'never', 'configured-never', 'configured-manual', 'io']) {
     const code = `
       import cp from 'node:child_process';import {syncBuiltinESMExports} from 'node:module';import {promisify} from 'node:util';import {EventEmitter} from 'node:events';import fs from 'node:fs';
       const mode=process.env.TEST_MODE;const attempts=[];let probe;process.env.HTTPS_PROXY='http://localhost:7890';
       delete process.env.UV_PYTHON;delete process.env.UV_PYTHON_DOWNLOADS;
       if(mode==='environment')process.env.UV_PYTHON='3.11';if(mode==='never')process.env.UV_PYTHON_DOWNLOADS='never';
       cp.execFile=()=>{};cp.execFile[promisify.custom]=async(command,args)=>{
-        if(args.includes('--show-settings'))return {stdout:'system_certs: false,'};
+        if(args.includes('--show-settings'))return {stdout:'system_certs: false, python_preference: Managed, python_downloads: '+(mode==='never'||mode==='configured-never'?'Never':mode==='configured-manual'?'Manual':'Automatic')+','};
         if(args.includes('pin')){if(mode==='pin')return {stdout:'3.11\\n'};throw Object.assign(new Error('no pin'),{stderr:'No Python version file found; specify a version to create one'});}
         if(args.includes('list')){probe=args[2];return {stdout:JSON.stringify([{key:'cpython-fixture',variant:'default',url:'https://mirrors.ustc.edu.cn/fixture.tar.gz'}])};}
         throw new Error('HTTP 404 Not Found');
@@ -169,7 +169,7 @@ test('Memory keeps installed/explicit Python and pins only a missing default int
       };syncBuiltinESMExports();
       const {prepareMemoryDependencies}=await import(process.env.TEST_MODULE);
       let error;try{await prepareMemoryDependencies(process.env.TEST_ROOT,{uv:'fixture-uv',source:{kind:'python',url:'https://pypi.org/simple',domestic:'https://mirrors.aliyun.com/pypi/simple/',official:'https://pypi.org/simple',systemProxy:false},logger:{info(){},warn(){}}})}catch(e){error=e}
-      if(mode==='never'||mode==='io'){if(!error||attempts.length!==1||probe!==undefined)throw new Error('terminal failure attempted Python download')}
+      if(mode==='never'||mode==='configured-never'||mode==='configured-manual'||mode==='io'){if(!error||attempts.length!==1||probe!==undefined)throw new Error('terminal failure attempted Python download')}
       else if(mode==='installed'){if(error||attempts.length!==1||probe!==undefined||attempts[0].includes('--python'))throw error||new Error('installed interpreter replaced')}
       else{const expected=mode==='missing'?'3.12.12':'3.11';if(error||probe!==expected||attempts.length!==2||attempts[1][attempts[1].indexOf('--python')+1]!==expected)throw error||new Error('probe and downloaded interpreter must retain selected request');if(mode!=='missing'&&attempts[0][attempts[0].indexOf('--python')+1]!==expected)throw new Error('explicit Python ignored on first attempt')}
       if(fs.readFileSync(process.env.TEST_ROOT+'/uv.lock','utf8')!=='unchanged frozen lock')throw new Error('lock changed');

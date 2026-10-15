@@ -23,7 +23,10 @@ export async function uvTransport(uv, directory, env = process.env) {
   const certificate = stdout.match(/custom_certificates:\s*Some\(\s*("(?:[^"\\]|\\.)*")/)
   const certEnv = certificate ? { SSL_CERT_FILE: JSON.parse(certificate[1]), SSL_CERT_DIR: '' } : {}
   if (/custom_certificates:\s*Some/.test(stdout) && !certificate) throw new Error('uv certificate settings cannot be preserved safely')
-  return { UV_NO_CONFIG: '1', UV_SYSTEM_CERTS: system[1], UV_NATIVE_TLS: system[1], ...certEnv }
+  const preference = { Managed: 'managed', OnlyManaged: 'only-managed', System: 'system', OnlySystem: 'only-system' }[stdout.match(/\bpython_preference: (\w+),/)?.[1]]
+  const downloads = { Automatic: 'automatic', Manual: 'manual', Never: 'never' }[stdout.match(/\bpython_downloads: (\w+),/)?.[1]]
+  if (!preference || !downloads) throw new Error('uv cannot report its Python selection/download settings; update uv to 0.13.0')
+  return { UV_NO_CONFIG: '1', UV_SYSTEM_CERTS: system[1], UV_NATIVE_TLS: system[1], UV_PYTHON_PREFERENCE: preference, UV_PYTHON_DOWNLOADS: downloads, ...certEnv }
 }
 
 async function systemProxy(url, env) {
