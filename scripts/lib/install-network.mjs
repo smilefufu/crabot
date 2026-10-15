@@ -36,7 +36,7 @@ async function systemProxy(url, env) {
 }
 
 async function probeSource(url, kind, env, proxy) {
-  const curl = process.platform === 'win32' ? join(env.WINDIR, 'System32/curl.exe') : 'curl'
+  const curl = process.platform === 'win32' ? join(env[Object.keys(env).find(key => key.toLowerCase() === 'windir')], 'System32/curl.exe') : 'curl'
   const args = ['--fail', '--silent', '--show-error', '--location', '--proto-redir', '=https', '--connect-timeout', '3', '--max-time', '5', '--write-out', '\n%{url_effective}', url]
   if (proxy) args.push('--proxy', proxy)
   try {
@@ -142,7 +142,7 @@ export async function withPackageSource(source, action, { logger = console, time
 }
 
 async function probeBinaryDownload(url, env, expectedHost, proxy = '') {
-  const curl = process.platform === 'win32' ? join(env.WINDIR, 'System32/curl.exe') : 'curl'
+  const curl = process.platform === 'win32' ? join(env[Object.keys(env).find(key => key.toLowerCase() === 'windir')], 'System32/curl.exe') : 'curl'
   const args = ['--head', '--fail', '--silent', '--show-error', '--location', '--proto-redir', '=https', '--connect-timeout', '3', '--max-time', '5', '--write-out', '\n%{url_effective}', url]
   if (proxy) args.push('--proxy', proxy)
   try {

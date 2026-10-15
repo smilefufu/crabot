@@ -57,7 +57,8 @@ proxy_url = f'http://127.0.0.1:{server.server_port}'
 env.update(HTTPS_PROXY=proxy_url, HTTP_PROXY=proxy_url, ALL_PROXY=proxy_url, NO_PROXY='localhost,127.0.0.1',
            UV_CACHE_DIR=str(root / 'empty-cache'), UV_PYTHON_DOWNLOADS='never', UV_NO_PROGRESS='1', UV_NO_CONFIG='1')
 python = str(project / '.venv' / ('Scripts/python.exe' if os.name == 'nt' else 'bin/python'))
-env['UV_PYTHON'] = sys.executable
+pin = sys.executable + '\n'
+(project / '.python-version').write_text(pin, encoding='utf-8')
 def run(stage, args, expected_success=True):
     result = subprocess.run([uv, *args], cwd=project, env=env, text=True, capture_output=True, timeout=180)
     (root / (stage + '.log')).write_text(result.stdout + result.stderr)
@@ -76,6 +77,10 @@ try:
     (root / 'prepare.log').write_text(result.stdout + result.stderr)
     assert result.returncode == 0, result.stdout + result.stderr
     assert 'mirrors.aliyun.com' in result.stdout
+    assert (project / '.python-version').read_text(encoding='utf-8') == pin
+    interpreter = subprocess.check_output([python, '-c', 'import sys; print(sys.version_info[:2])'], text=True).strip()
+    assert interpreter == str(sys.version_info[:2]), interpreter
+    print('Explicit Python pin retained; installed interpreter and version file unchanged', flush=True)
     run('prod-frozen-offline', ['run', '--frozen', '--no-dev', '--offline', 'python', '-c', 'import src.main; print("memory import OK")'])
     (project / 'uv.toml').write_text('[[index]]\nname="private"\nurl="https://private.invalid/simple"\ndefault=true\n')
     env.pop('UV_NO_CONFIG')

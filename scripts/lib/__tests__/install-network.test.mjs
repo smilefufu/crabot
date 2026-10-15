@@ -114,3 +114,67 @@ test('Windows environment name casing cannot forward authentication or disable v
   assert.equal(python.uv_index_private_password, undefined)
   assert.equal(parent.corepack_npm_token, 'private')
 })
+
+test('Windows curl probes accept a plain environment with lowercase windir', async t => {
+  const { mkdtemp, writeFile, rm } = await import('node:fs/promises')
+  const { join } = await import('node:path')
+  const { tmpdir } = await import('node:os')
+  const { spawnSync } = await import('node:child_process')
+  const root = await mkdtemp(join(tmpdir(), 'crabot-windir-test-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  await writeFile(join(root, 'package.json'), JSON.stringify({ dependencies: { 'better-sqlite3': '12.9.0' } }))
+  await writeFile(join(root, 'pnpm-lock.yaml'), '  better-sqlite3@12.9.0:\n')
+  const code = `
+    import cp from 'node:child_process';import {syncBuiltinESMExports} from 'node:module';import {promisify} from 'node:util';import path from 'node:path';
+    Object.defineProperty(process,'platform',{value:'win32'});let calls=0;
+    cp.execFile=()=>{};cp.execFile[promisify.custom]=async(command,args)=>{
+      if(command!==path.join(process.env.TEST_ROOT,'System32/curl.exe'))throw new Error('incorrect Windows curl path');calls++;
+      const url=args.find(arg=>arg.startsWith('https://'));return {stdout:args.includes('--head')?'Content-Type: application/octet-stream\\n'+url:JSON.stringify({version:'0.31.0',dist:{integrity:'fixture',tarball:'fixture'}})+'\\n'+url};
+    };syncBuiltinESMExports();
+    const {selectPackageSource,nativePackageEnvironment,packageSource,packageEnvironment}=await import(process.env.TEST_MODULE);
+    const env={windir:process.env.TEST_ROOT,HTTPS_PROXY:'http://localhost:7890'};
+    const source=await selectPackageSource('npm',{env,logger:{info(){}}});if(source.url!==source.domestic)throw new Error('registry probe failed');
+    const child=await nativePackageEnvironment(process.env.TEST_ROOT,packageSource('npm',source.domestic),packageEnvironment('npm',source.domestic,env),{info(){},warn(){}});if(!child.npm_config_better_sqlite3_binary_host)throw new Error('binary probe failed');if(calls!==2)throw new Error('both probes must execute');
+  `
+  const result = spawnSync(process.execPath, ['--input-type=module', '-e', code], { encoding: 'utf8', env: { ...process.env, TEST_ROOT: root, TEST_MODULE: new URL('../install-network.mjs', import.meta.url).href } })
+  assert.equal(result.status, 0, result.stdout + result.stderr)
+})
+
+test('Memory keeps installed/explicit Python and pins only a missing default interpreter', async t => {
+  const { mkdtemp, writeFile, rm } = await import('node:fs/promises')
+  const { join } = await import('node:path')
+  const { tmpdir } = await import('node:os')
+  const { spawnSync } = await import('node:child_process')
+  const root = await mkdtemp(join(tmpdir(), 'crabot-python-request-test-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  await writeFile(join(root, 'uv.lock'), 'unchanged frozen lock')
+  for (const mode of ['installed', 'missing', 'environment', 'pin', 'never', 'io']) {
+    const code = `
+      import cp from 'node:child_process';import {syncBuiltinESMExports} from 'node:module';import {promisify} from 'node:util';import {EventEmitter} from 'node:events';import fs from 'node:fs';
+      const mode=process.env.TEST_MODE;const attempts=[];let probe;
+      delete process.env.UV_PYTHON;delete process.env.UV_PYTHON_DOWNLOADS;
+      if(mode==='environment')process.env.UV_PYTHON='3.11';if(mode==='never')process.env.UV_PYTHON_DOWNLOADS='never';
+      cp.execFile=()=>{};cp.execFile[promisify.custom]=async(command,args)=>{
+        if(args.includes('--show-settings'))return {stdout:'system_certs: false,'};
+        if(args.includes('pin')){if(mode==='pin')return {stdout:'3.11\\n'};throw Object.assign(new Error('no pin'),{stderr:'No Python version file found; specify a version to create one'});}
+        if(args.includes('list')){probe=args[2];return {stdout:JSON.stringify([{key:'cpython-fixture',variant:'default',url:'https://mirrors.ustc.edu.cn/fixture.tar.gz'}])};}
+        throw new Error('HTTP 404 Not Found');
+      };
+      cp.spawn=(command,args)=>{
+        const child=new EventEmitter();child.stderr=new EventEmitter();setImmediate(()=>{
+          if(args[0]==='export')fs.writeFileSync(args[args.indexOf('--output-file')+1],'fixture==1.0 --hash=sha256:fixture');
+          if(args[0]==='venv'){attempts.push(args);if(args.includes('--no-python-downloads')&&mode!=='installed'){child.stderr.emit('data',Buffer.from(mode==='io'?'EPERM: permission denied':'No interpreter found'));child.emit('close',1);return;}}
+          child.emit('close',0);
+        });return child;
+      };syncBuiltinESMExports();
+      const {prepareMemoryDependencies}=await import(process.env.TEST_MODULE);
+      let error;try{await prepareMemoryDependencies(process.env.TEST_ROOT,{uv:'fixture-uv',source:{kind:'python',url:'https://pypi.org/simple',domestic:'https://mirrors.aliyun.com/pypi/simple/',official:'https://pypi.org/simple',systemProxy:false},logger:{info(){},warn(){}}})}catch(e){error=e}
+      if(mode==='never'||mode==='io'){if(!error||attempts.length!==1||probe!==undefined)throw new Error('terminal failure attempted Python download')}
+      else if(mode==='installed'){if(error||attempts.length!==1||probe!==undefined||attempts[0].includes('--python'))throw error||new Error('installed interpreter replaced')}
+      else{const expected=mode==='missing'?'3.12.12':'3.11';if(error||probe!==expected||attempts.length!==2||attempts[1][attempts[1].indexOf('--python')+1]!==expected)throw error||new Error('probe and downloaded interpreter must retain selected request');if(mode!=='missing'&&attempts[0][attempts[0].indexOf('--python')+1]!==expected)throw new Error('explicit Python ignored on first attempt')}
+      if(fs.readFileSync(process.env.TEST_ROOT+'/uv.lock','utf8')!=='unchanged frozen lock')throw new Error('lock changed');
+    `
+    const result = spawnSync(process.execPath, ['--input-type=module', '-e', code], { encoding: 'utf8', env: { ...process.env, TEST_MODE: mode, TEST_ROOT: root, TEST_MODULE: new URL('../memory-deps.mjs', import.meta.url).href } })
+    assert.equal(result.status, 0, mode + ': ' + result.stdout + result.stderr)
+  }
+})
