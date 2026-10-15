@@ -1,5 +1,10 @@
 # Crabot 项目进度
 
+### crabot check 运行状态误报：已修复
+
+- MM/Admin RPC 的 health 使用 POST，Admin RPC 端口从 MM 的 list_modules 查询 exact admin-web，Web health 保留 GET；查不到端口时明确显示不可用，不再猜测 19001。保留端口偏移及 HTTP/连接失败诊断，不改服务运行行为。
+- 新增 6 个回归在旧脚本全部复现失败；修复后连同既有 MM 探针共 16 项通过。未重启现场服务，本次修复提交 main，发行包仍为 v2026.10.15.1。
+
 ### 国内依赖源优先：已发布
 
 - 按已确认 [Spec](crabot-docs/superpowers/specs/2026-10-14-domestic-dependency-download-design.md) 完成 install/reinstall 与 CLI/UI/source upgrade 的国内源探测、源故障最多一次官方回退和共用预算。Node 包优先 npmmirror，Python 包/构建依赖优先阿里云，uv/standalone Python 优先可用科大镜像；固定版本、锁/hash、Corepack 签名、TLS 与真实 I/O 错误保持。
