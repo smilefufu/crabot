@@ -418,6 +418,15 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
   let reconcileContinuationCandidatesForWorker: ((workerId: string) => void) | undefined
 
   let requestGuard: WorkerRequestGuard
+  const mayEnterSharedWorkerRoute = async (workerId: string): Promise<boolean> => {
+    try {
+      const bound = await requestGuard.load(workerId)
+      return !bound || bound.worker.origin.request!.execution_scope === 'group'
+    } catch {
+      console.error('[manager-bootstrap] Worker notification binding unavailable; shared routing refused')
+      return false
+    }
+  }
   const resolveBuiltinRuntime: BuiltinRuntimeFactory | undefined = deps.builtinSpawnDefaults ? async ctx => {
     const bound = await requestGuard.load(ctx.worker_id)
     if (!bound) {
@@ -464,7 +473,8 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     // `HarnessDeps.onEvent`)。失败落成 `consumed: false`,与"episode 没消费这批事件"同义:
     // 活性巡检据此在下一轮重报,这正是"manager 不可用时通知挂起、恢复后仍能收到"。
     // (`reportWorkerEventFailure` 自己保证不抛,见其注释。)
-    onEvent: (event) => {
+    onEvent: async (event) => {
+      if (!await mayEnterSharedWorkerRoute(event.worker_id)) return { consumed: false }
       // 对外事件走在唤醒过滤之前,且不共用下面那个门:`shouldWakeOnHarnessEvent` 答的是"要不
       // 要唤醒 manager"(input_sent 不唤醒),`!registry` 答的是"manager 侧接线好了没"——两者
       // 都与"task 状态有没有变"无关,拿它们当对外事件的门,等于把 §9.2 的正确性挂在别的模块
@@ -499,7 +509,8 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
         },
       )
     },
-    onOperationNotification: (managerKey, event, activityReceipt) => {
+    onOperationNotification: async (managerKey, event, activityReceipt) => {
+      if (!await mayEnterSharedWorkerRoute(event.worker_id)) return { consumed: false }
       // 对外事件与 onEvent 通道同理:operation_settled 自带落账后 task_status 后,
       // 停止/核验的 closed·halted 推送只经这条通道到达(唤醒面的对应事件已降审计)。
       publishTaskStatusChanged?.(event)

@@ -331,6 +331,24 @@ describe('manager bootstrap（P5 Task 1）', () => {
     for (const dispose of disposers) expect(dispose).toHaveBeenCalledTimes(1)
   })
 
+  it('personal or unverifiable Worker notifications never enter shared history, public events or fail-loud output', async () => {
+    const publish = vi.fn(), failure = vi.fn()
+    const stack = buildManagerStack({ ...makeDeps(), publishEvent: publish, reportEpisodeFailure: failure })
+    const event = { ts: new Date().toISOString(), kind: 'state_changed' as const, worker_id: 'w-personal', seq: 1,
+      task_status: 'halted' as const, detail: { text: 'PERSONAL_RESULT_AND_ERROR' } }
+    const load = vi.spyOn(stack.requestGuard, 'load').mockResolvedValue({ worker: { origin: { request: { execution_scope: 'request' } } } } as never)
+    const route = vi.spyOn(stack.registry, 'routeWorkerEvent'), operation = vi.spyOn(stack.registry, 'routeOperationNotification')
+    const callbacks = (stack.harness as any).deps
+    expect(await callbacks.onEvent(event)).toEqual({ consumed: false })
+    expect(await callbacks.onOperationNotification('wechat::sess-boot', event)).toEqual({ consumed: false })
+    load.mockRejectedValue(new Error('CAPABILITY_UNKNOWN: lost request context'))
+    expect(await callbacks.onEvent(event)).toEqual({ consumed: false })
+    expect(await callbacks.onOperationNotification('wechat::sess-boot', event)).toEqual({ consumed: false })
+    expect(route).not.toHaveBeenCalled(); expect(operation).not.toHaveBeenCalled()
+    expect(publish).not.toHaveBeenCalled(); expect(failure).not.toHaveBeenCalled()
+    await stack.dispose()
+  })
+
   // --- ② 四步接线契约 ---
 
   it('四步接线契约成立：三个 adapter 都拿到同一个 harness.handleStateChange，回调能落账；harness 看得到构造后才 set 进 Map 的 adapter', async () => {
