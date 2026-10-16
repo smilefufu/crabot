@@ -26,6 +26,7 @@ describe('isolated request admission with real ManagerLoop', () => {
   let directory: string, root: string, sources: TrustedHumanInputStore, requests: ConversationRequestStore
   let frames: RequestRunContext[], calls: LLMStreamParams[], sideEffects: number, revoked: boolean
   let onAction: () => Promise<void>, checkpointAtAction: ManagerResumeCheckpoint | undefined
+  let ready: boolean
   let tools: (frame: RequestRunContext) => ToolDefinition[]
   const resolved = (source: ConversationRequestSource): ResolveRequestPermissionSourcesResult => ({
     group: { kind: 'group', subject_id: key, is_master: false, resolved: structuredClone(permissions) },
@@ -33,7 +34,7 @@ describe('isolated request admission with real ManagerLoop', () => {
   })
   beforeEach(async () => {
     directory = await fs.mkdtemp(path.join(os.tmpdir(), 'isolated-request-')); root = path.join(directory, 'requests-runtime')
-    frames = []; calls = []; sideEffects = 0; revoked = false; checkpointAtAction = undefined; onAction = async () => {}
+    ready = true; frames = []; calls = []; sideEffects = 0; revoked = false; checkpointAtAction = undefined; onAction = async () => {}
     sources = new TrustedHumanInputStore(path.join(directory, 'sources'), { now: () => new Date().toISOString(), resolveSender: async (_channel, user) => user === 'a' ? { id: 'actual-a', display_name: 'A', permission: 'master', channel_identities: [{ channel_id: 'voice', platform_user_id: 'a' }], created_at: 't', updated_at: 't' } : null })
     requests = new ConversationRequestStore(path.join(directory, 'records'), sources, { now: () => new Date().toISOString(), resolveSources: async source => resolved(source) })
     tools = frame => [defineTool({ name: 'operation', description: 'fixture resource action', inputSchema: { type: 'object' }, async call() {
@@ -45,7 +46,7 @@ describe('isolated request admission with real ManagerLoop', () => {
   })
   afterEach(async () => { vi.restoreAllMocks(); await fs.rm(directory, { recursive: true, force: true }) })
   function runner(createLoop?: (frame: RequestRunContext) => ManagerLoop) {
-    return new ConversationRequestRunner(root, requests, { timezone: () => 'Asia/Shanghai', resolveCurrent: async (kind, source) => resolved(source)[kind], createLoop: createLoop ?? (frame => {
+    return new ConversationRequestRunner(root, requests, { canRun: () => ready, timezone: () => 'Asia/Shanghai', resolveCurrent: async (kind, source) => resolved(source)[kind], createLoop: createLoop ?? (frame => {
       frames.push(frame)
       const adapter: LLMAdapter = { updateConfig() {}, async *stream(params) {
         calls.push({ ...params, messages: [...params.messages] })
@@ -187,4 +188,110 @@ describe('isolated request admission with real ManagerLoop', () => {
     expect(frames[0].voiceReplyContext).toBeUndefined()
     expect((await executor.recover(key, result.request_id)).status).toBe('waiting')
   })
+  it('durably queues a personal event inside a running tool without waiting on its own episode', async () => {
+    const inputs = await input(), executor = runner()
+    const event = { ts: new Date().toISOString(), kind: 'turn_completed' as const, worker_id: 'w-personal', seq: 1, detail: { summary: 'PRIVATE_WORKER_RESULT' } }
+    onAction = async () => {
+      await requests.attachWorker(key, frames[0].request.request_id, event.worker_id)
+      expect(await executor.routeWorkerEvent(key, frames[0].request.request_id, event)).toEqual({ consumed: false })
+    }
+    const result = await executor.execute(key, inputs, { source_id: inputs[0].source_id, delivery: 'requester_private' })
+    await executor.recoverPending()
+    expect(frames).toHaveLength(2); expect(sideEffects).toBe(1)
+    expect(frames[1].request.request_id).toBe(result.request_id)
+    expect(frames[1].source.sender_friend_id).toBe('actual-a')
+    expect(frames[1].voiceReplyContext).toBeUndefined()
+    expect(JSON.stringify(calls.at(-1)!.messages)).toContain('PRIVATE_WORKER_RESULT')
+    expect(JSON.stringify(result)).not.toContain('PRIVATE_WORKER_RESULT')
+    expect(await executor.routeWorkerEvent(key, result.request_id, event)).toEqual({ consumed: true })
+    expect(frames).toHaveLength(2)
+    const events = await fs.readdir(path.join(root, result.request_id, 'events'))
+    expect((await fs.stat(path.join(root, result.request_id, 'events', events[0], 'event.json'))).mode & 0o777).toBe(0o600)
+  })
+
+  it('serializes concurrent duplicate events and rejects unrelated Worker IDs', async () => {
+    const inputs = await input(), executor = runner()
+    const result = await executor.execute(key, inputs, { source_id: inputs[0].source_id, delivery: 'origin' })
+    await executor.recoverPending()
+    await requests.attachWorker(key, result.request_id, 'owned')
+    const event = { ts: new Date().toISOString(), kind: 'turn_completed' as const, worker_id: 'owned', seq: 1 }
+    await Promise.all([executor.routeWorkerEvent(key, result.request_id, event), executor.routeWorkerEvent(key, result.request_id, event)])
+    await executor.recoverPending()
+    expect(frames).toHaveLength(2); expect(sideEffects).toBe(1)
+    await expect(executor.routeWorkerEvent(key, result.request_id, { ...event, worker_id: 'unrelated' })).rejects.toThrow('binding')
+    expect(frames).toHaveLength(2)
+  })
+
+  it('keeps an admitted event with no checkpoint unknown after restart instead of replaying it', async () => {
+    const inputs = await input(), executor = runner()
+    const result = await executor.execute(key, inputs, { source_id: inputs[0].source_id, delivery: 'origin' })
+    await executor.recoverPending(); await requests.attachWorker(key, result.request_id, 'owned')
+    const event = { ts: new Date().toISOString(), kind: 'turn_completed' as const, worker_id: 'owned', seq: 1 }
+    const broken = runner(() => { throw new Error('lost after event admission') })
+    await expect(broken.routeWorkerEvent(key, result.request_id, event)).rejects.toThrow('lost after event admission')
+    const recovered = runner(() => { throw new Error('must not replay') })
+    await recovered.recoverPending()
+    expect((await recovered.recover(key, result.request_id)).status).toBe('recovery_required')
+    expect(sideEffects).toBe(1)
+  })
+
+  it('acknowledges activity only after actual private context admission, and deduplicates a retried receipt', async () => {
+    const inputs = await input(), executor = runner()
+    const result = await executor.execute(key, inputs, { source_id: inputs[0].source_id, delivery: 'requester_private' })
+    await executor.recoverPending(); await requests.attachWorker(key, result.request_id, 'owned')
+    const event = { ts: new Date().toISOString(), kind: 'activity_available' as const, worker_id: 'owned', seq: 1, detail: { preview: 'PRIVATE_ACTIVITY', activity_through: 'cursor' } }
+    const receipt = { notification_id: 'notice', activity_through: 'cursor', admit: vi.fn(async () => {}), reject: vi.fn(async () => {}) }
+    expect(await executor.routeWorkerEvent(key, result.request_id, event, receipt)).toMatchObject({ consumed: false, registered: true })
+    await executor.recoverPending()
+    expect(receipt.admit).toHaveBeenCalledTimes(1); expect(receipt.reject).not.toHaveBeenCalled()
+    const retry = { ...receipt, admit: vi.fn(async () => {}) }
+    expect(await executor.routeWorkerEvent(key, result.request_id, event, retry)).toEqual({ consumed: true })
+    expect(retry.admit).toHaveBeenCalledTimes(1); expect(frames).toHaveLength(2)
+  })
+
+  it('persists notifications during startup without starting a model until the readiness gate opens', async () => {
+    const inputs = await input(), executor = runner(), result = await executor.execute(key, inputs, { source_id: inputs[0].source_id, delivery: 'origin' })
+    await requests.attachWorker(key, result.request_id, 'owned')
+    ready = false
+    const receipt = { notification_id: 'startup', activity_through: 'cursor', admit: vi.fn(async () => {}), reject: vi.fn(async () => {}) }
+    const event = { ts: new Date().toISOString(), kind: 'activity_available' as const, worker_id: 'owned', seq: 1 }
+    expect(await executor.routeWorkerEvent(key, result.request_id, event, receipt)).toEqual({ consumed: false })
+    expect(frames).toHaveLength(1)
+    ready = true
+    await executor.recoverPending()
+    expect(frames).toHaveLength(2)
+    expect(await executor.routeWorkerEvent(key, result.request_id, event, receipt)).toEqual({ consumed: true })
+    expect(receipt.admit).toHaveBeenCalledTimes(1)
+  })
+
+  it('preserves malformed event state rather than replaying its body', async () => {
+    const inputs = await input(), executor = runner(), result = await executor.execute(key, inputs, { source_id: inputs[0].source_id, delivery: 'origin' })
+    await requests.attachWorker(key, result.request_id, 'owned')
+    const event = { ts: new Date().toISOString(), kind: 'turn_completed' as const, worker_id: 'owned', seq: 1 }
+    await executor.routeWorkerEvent(key, result.request_id, event)
+    const [id] = await fs.readdir(path.join(root, result.request_id, 'events')), file = path.join(root, result.request_id, 'events', id, 'event.json')
+    const original = JSON.parse(await fs.readFile(file, 'utf8')), changed = JSON.stringify({ ...original, phase: 'queued', consumed: true })
+    await fs.writeFile(file, changed)
+    await expect(executor.routeWorkerEvent(key, result.request_id, event)).rejects.toThrow('Invalid request event')
+    expect(await fs.readFile(file, 'utf8')).toBe(changed)
+    expect(frames).toHaveLength(2)
+  })
+
+  it('contains receipt rejection errors when private queue storage is unavailable', async () => {
+    const inputs = await input(), executor = runner(), result = await executor.execute(key, inputs, { source_id: inputs[0].source_id, delivery: 'origin' })
+    await requests.attachWorker(key, result.request_id, 'owned')
+    const original = fs.readdir.bind(fs), directory = path.join(root, result.request_id, 'events')
+    vi.spyOn(fs, 'readdir').mockImplementation(async (...args: any[]) => {
+      if (args[0] === directory) throw new Error('queue storage unavailable')
+      return (original as any)(...args)
+    })
+    const receipt = { notification_id: 'failed-receipt', activity_through: 'cursor', admit: vi.fn(async () => {}), reject: vi.fn(async () => { throw new Error('receipt storage unavailable') }) }
+    const broken = runner()
+    expect(await broken.routeWorkerEvent(key, result.request_id, { ts: new Date().toISOString(), kind: 'activity_available', worker_id: 'owned', seq: 1 }, receipt)).toMatchObject({ registered: true })
+    await broken.dispose()
+    await new Promise<void>(resolve => setImmediate(resolve))
+    expect(receipt.reject).toHaveBeenCalled(); expect(receipt.admit).not.toHaveBeenCalled()
+    expect(frames).toHaveLength(1)
+  })
+
 })

@@ -44,6 +44,8 @@ import {
 } from './tool-catalog.js'
 
 export interface ToolFaceDeps {
+  /** Host request boundary applied before catalog projection, including MCP refresh. */
+  readonly decorateTool?: (tool: ToolDefinition) => ToolDefinition
   readonly workerRequestControl?: import('./worker-request-context.js').WorkerRequestControl
   readonly requestGuard?: import('../../workers/harness/request-guard.js').WorkerRequestGuard
   readonly requestAuthorization?: 'shared' | 'request'
@@ -84,6 +86,7 @@ export interface ToolFaceDeps {
   readonly authorization?: () => MasterAuthorization | undefined
   readonly validateMasterAuthorization?: (auth: MasterAuthorization) => Promise<boolean>
   /** Episode-local delivery/control evidence used to close a Worker turn. */
+  readonly hasSuccessfulWorkerDelivery?: import('./worker-tools.js').WorkerToolsDeps['hasSuccessfulWorkerDelivery']
   readonly hasSuccessfulSendMessageTo?: (target: { channel_id: string; session_id: string }) => boolean
   readonly onSuccessfulSendMessage?: (target: { channel_id: string; session_id: string }) => void
   readonly hasContinuedWorker?: (workerId: string) => boolean
@@ -271,6 +274,13 @@ function messagingToolToDefinition(tool: MessagingTool, deps: ToolFaceDeps): Too
       const args = Object.fromEntries(Object.entries(input).filter(([key]) => key !== 'intent' && key !== 'post_send_action'))
       try {
         const result = await tool.handler(args, context)
+        const text = result.content.map((block) => block.text).join('\n')
+        if (deps.requestAuthorization === 'request' && isHumanDelivery && !result.isError) {
+          let receipt: { platform_message_id?: unknown; sent_at?: unknown; error?: unknown; error_code?: unknown }
+          try { receipt = JSON.parse(text) } catch { return { output: 'DELIVERY_UNCONFIRMED', isError: true } }
+          if (!receipt || receipt.error !== undefined || receipt.error_code !== undefined) return { output: text, isError: true }
+          if (typeof receipt.platform_message_id !== 'string' || !receipt.platform_message_id || typeof receipt.sent_at !== 'string' || !Number.isFinite(Date.parse(receipt.sent_at))) return { output: 'DELIVERY_UNCONFIRMED', isError: true }
+        }
         if (result.observedSessionTargets?.length) {
           try {
             deps.onObservedSessionTargets?.(result.observedSessionTargets)
@@ -279,7 +289,9 @@ function messagingToolToDefinition(tool: MessagingTool, deps: ToolFaceDeps): Too
           }
         }
         if (!result.isError && postSendAction === 'spawn_worker') deps.onPostSendAction?.('spawn_worker')
-        const text = result.content.map((block) => block.text).join('\n')
+        if (tool.name === 'send_private_message' && !result.isError) {
+          for (const target of result.observedSessionTargets ?? []) deps.onSuccessfulSendMessage?.(target)
+        }
         if (isSendMessage && !result.isError) {
           const channelId = args.channel_id
           const sessionId = args.session_id
@@ -583,7 +595,8 @@ export function buildManagerToolFace(deps: ToolFaceDeps): ToolDefinition[] {
       // Refresh only between Engine turns. Requests already issued retain their own tool references.
       const catalog = state.catalog!.withExternalMcpTools(externalMcpTools
         .map(tool => wrapExternalMcpTool(tool, authorizeExternal))
-        .filter((tool): tool is ToolDefinition => tool !== undefined))
+        .filter((tool): tool is ToolDefinition => tool !== undefined)
+        .map(tool => deps.decorateTool?.(tool) ?? tool))
       const searchTool = authorizeTool(buildSearchToolsTool(catalog, state), roleAuthorization('manager'))
       const familyTool = authorizeTool(buildLoadToolFamilyTool(catalog, state), roleAuthorization('manager'))
       Object.assign(state, { catalog, searchTool, familyTool, externalMcpTools: [...externalMcpTools] })
@@ -610,6 +623,7 @@ export function buildManagerToolFace(deps: ToolFaceDeps): ToolDefinition[] {
     readWorkerSubagents: deps.readWorkerSubagents,
     readWorkerSubagentDetail: deps.readWorkerSubagentDetail,
     readWorkerSubagentTrace: deps.readWorkerSubagentTrace,
+    ...(deps.hasSuccessfulWorkerDelivery ? { hasSuccessfulWorkerDelivery: deps.hasSuccessfulWorkerDelivery } : {}),
     ...(deps.hasSuccessfulSendMessageTo ? { hasSuccessfulSendMessageTo: deps.hasSuccessfulSendMessageTo } : {}),
     ...(deps.hasContinuedWorker ? { hasContinuedWorker: deps.hasContinuedWorker } : {}),
     ...(deps.onWorkerContinuation ? { onWorkerContinuation: deps.onWorkerContinuation } : {}),
@@ -673,15 +687,17 @@ export function buildManagerToolFace(deps: ToolFaceDeps): ToolDefinition[] {
       return result
     } }
   })
-  assertClosedToolFace(builtinTools)
-  if (!deps.faceState) return builtinTools
+  const scopedBuiltinTools = builtinTools.map(tool => deps.decorateTool?.(tool) ?? tool)
+  assertClosedToolFace(scopedBuiltinTools)
+  if (!deps.faceState) return scopedBuiltinTools
 
   const profile = selectedProfile
   const wrappedMcpTools = externalMcpTools
     .map(tool => wrapExternalMcpTool(tool, authorizeExternal))
     .filter((tool): tool is ToolDefinition => tool !== undefined)
+    .map(tool => deps.decorateTool?.(tool) ?? tool)
   const catalog = new ManagerToolCatalog(
-    [...builtinTools.sort((a, b) => Number(CONDITIONAL_TOOLS.has(a.name)) - Number(CONDITIONAL_TOOLS.has(b.name)) || a.name.localeCompare(b.name)), ...wrappedMcpTools],
+    [...scopedBuiltinTools.sort((a, b) => Number(CONDITIONAL_TOOLS.has(a.name)) - Number(CONDITIONAL_TOOLS.has(b.name)) || a.name.localeCompare(b.name)), ...wrappedMcpTools],
     profile,
     undefined,
     undefined,

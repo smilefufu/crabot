@@ -10,7 +10,7 @@ function setup() {
     workerContext: () => ({ managerKey: 'm::s', principalPermissions: current }),
     workerImplSnapshot: () => ({ statuses: [{ impl: 'builtin', ready: true }] }),
     projectDocs: {
-      ledger: { findWorker: vi.fn(async () => ({ managerKey: 'm::s', worker: { incarnations: [{ impl: 'builtin', workspace: '/fixture' }] } })) },
+      ledger: { findWorker: vi.fn(async () => ({ managerKey: 'm::s', worker: { origin: {}, incarnations: [{ impl: 'builtin', workspace: '/fixture' }] } })) },
       readWorkerContext: vi.fn(async () => ({ principal_permissions: old })),
     },
     describeExecutionTools: vi.fn((impl) => executionObservation({ role: 'worker', impl, source: 'execution_plan', tools: ['Read'] })),
@@ -39,7 +39,7 @@ describe('execution capability evidence', () => {
     const { deps, old, tool } = setup()
     old.tool_access.remote_exec = true
     const before = structuredClone(old)
-    deps.projectDocs.ledger.findWorker.mockResolvedValue({ managerKey: 'm::s', worker: { incarnations: [{ impl, workspace: '/fixture' }] } })
+    deps.projectDocs.ledger.findWorker.mockResolvedValue({ managerKey: 'm::s', worker: { origin: {}, incarnations: [{ impl, workspace: '/fixture' }] } })
     const result = await query(tool, { worker_id: 'old-worker' })
 
     expect(result.authorization.source).toBe('worker_snapshot')
@@ -64,7 +64,7 @@ describe('execution capability evidence', () => {
   })
   it('does not consult worker context or assembly before checking ownership', async () => {
     const { deps, tool } = setup()
-    deps.projectDocs.ledger.findWorker.mockResolvedValue({ managerKey: 'other::s', worker: { incarnations: [] } })
+    deps.projectDocs.ledger.findWorker.mockResolvedValue({ managerKey: 'other::s', worker: { origin: {}, incarnations: [] } })
     expect((await tool.call({ worker_id: 'foreign' }, {} as never)).isError).toBe(true)
     expect(deps.projectDocs.readWorkerContext).not.toHaveBeenCalled()
     expect(deps.describeExecutionTools).not.toHaveBeenCalled()
@@ -72,7 +72,7 @@ describe('execution capability evidence', () => {
   it('distinguishes unknown principal/CLI live tools from current configuration', async () => {
     const { deps, tool } = setup()
     deps.projectDocs.readWorkerContext.mockResolvedValue(undefined as never)
-    deps.projectDocs.ledger.findWorker.mockResolvedValue({ managerKey: 'm::s', worker: { incarnations: [{ impl: 'codex', workspace: '/fixture' }] } })
+    deps.projectDocs.ledger.findWorker.mockResolvedValue({ managerKey: 'm::s', worker: { origin: {}, incarnations: [{ impl: 'codex', workspace: '/fixture' }] } })
     const result = await query(tool, { worker_id: 'old' })
     expect(result.authorization.known).toBe(false)
     expect(result.authorization.tool_access).toBeNull()

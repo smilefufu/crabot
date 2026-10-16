@@ -464,6 +464,8 @@ export class ManagerLoop {
     return this.currentEpisodeInjected !== null
   }
 
+  get hasSuccessfulHumanDelivery(): boolean { return this.successfulSendMessageTargetsInCurrentEpisode.size > 0 }
+
   hasSuccessfulSendMessageTo(target: { channel_id: string; session_id: string }): boolean {
     return this.successfulSendMessageTargetsInCurrentEpisode.has(`${target.channel_id}\u0000${target.session_id}`)
   }

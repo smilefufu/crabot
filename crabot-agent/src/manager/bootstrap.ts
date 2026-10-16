@@ -1,5 +1,8 @@
 import { isDeepStrictEqual } from 'node:util'
 import { allowed } from '../permissions/tool-authorization.js'
+import { ConversationRequestRunner } from './conversation-request-runner.js'
+import { createConversationRequestLoop } from './request-loop.js'
+import type { ToolFaceDeps } from './tools/tool-face.js'
 import { ConversationRequestAuthority } from './conversation-request-authority.js'
 import { voiceOutputPort } from './voice-output-port.js'
 import { createHash } from 'node:crypto'
@@ -87,6 +90,9 @@ import { WorkerContextStore } from '../workers/harness/context-store.js'
 import { managerToolProfileForSchedule, type ManagerToolProfile } from './tools/tool-catalog.js'
 
 export interface ManagerMcpAccessContext {
+  /** Host-only request boundary; never accepted from MCP/model arguments. */
+  readonly requestId?: string
+  readonly requestPermissions?: () => Promise<ResolvedPermissions>
   readonly managerKey: ManagerKey
   readonly targetSession?: {
     readonly channel_id: string
@@ -149,6 +155,7 @@ export interface ManagerStack {
   /** Persistent bindings are initialized during reconciliation, never construction. */
   readonly principalBindings: PrincipalBindingStore
   readonly trustedHumanInputs: TrustedHumanInputStore
+  readonly requestRunner: ConversationRequestRunner
   readonly conversationRequests: ConversationRequestStore
   readonly requestGuard: WorkerRequestGuard
   /**
@@ -417,14 +424,22 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
   const adapters = new Map<WorkerImplId, WorkerAdapter>()
   let reconcileContinuationCandidatesForWorker: ((workerId: string) => void) | undefined
 
+  let requestRunner: ConversationRequestRunner
   let requestGuard: WorkerRequestGuard
-  const mayEnterSharedWorkerRoute = async (workerId: string): Promise<boolean> => {
+  const personalWorkerRoute = async (event: import('../workers/harness/worker-events.js').HarnessEvent, receipt?: import('../workers/harness/worker-events.js').ActivityContextAdmissionReceipt) => {
     try {
-      const bound = await requestGuard.load(workerId)
-      return !bound || bound.worker.origin.request!.execution_scope === 'group'
+      const bound = await requestGuard.load(event.worker_id)
+      if (!bound || bound.worker.origin.request!.execution_scope === 'group') return undefined
+      if (deps.isClosing?.() || !requestRunner) return { consumed: false }
+      if (!receipt && !shouldWakeOnHarnessEvent(event) && event.kind !== 'operation_settled' && event.kind !== 'turn_completed' && event.kind !== 'query_completed' && event.kind !== 'query_failed' && event.kind !== 'activity_available') return { consumed: false }
+      return await requestRunner.routeWorkerEvent(bound.worker.manager_key, bound.request.request_id, {
+        ...event, detail: { ...(event.detail ?? {}), trigger_type: bound.worker.origin.trigger_type, task_id: bound.worker.task.id,
+          ...(event.task_status ? { outcome: event.task_status } : {}) },
+      }, receipt)
     } catch {
-      console.error('[manager-bootstrap] Worker notification binding unavailable; shared routing refused')
-      return false
+      console.error('[manager-bootstrap] Personal Worker notification unavailable; shared routing refused')
+      await receipt?.reject().catch(() => undefined)
+      return { consumed: false }
     }
   }
   const resolveBuiltinRuntime: BuiltinRuntimeFactory | undefined = deps.builtinSpawnDefaults ? async ctx => {
@@ -474,7 +489,8 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     // 活性巡检据此在下一轮重报,这正是"manager 不可用时通知挂起、恢复后仍能收到"。
     // (`reportWorkerEventFailure` 自己保证不抛,见其注释。)
     onEvent: async (event) => {
-      if (!await mayEnterSharedWorkerRoute(event.worker_id)) return { consumed: false }
+      const personal = await personalWorkerRoute(event)
+      if (personal) return personal
       // 对外事件走在唤醒过滤之前,且不共用下面那个门:`shouldWakeOnHarnessEvent` 答的是"要不
       // 要唤醒 manager"(input_sent 不唤醒),`!registry` 答的是"manager 侧接线好了没"——两者
       // 都与"task 状态有没有变"无关,拿它们当对外事件的门,等于把 §9.2 的正确性挂在别的模块
@@ -510,7 +526,8 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
       )
     },
     onOperationNotification: async (managerKey, event, activityReceipt) => {
-      if (!await mayEnterSharedWorkerRoute(event.worker_id)) return { consumed: false }
+      const personal = await personalWorkerRoute(event, activityReceipt)
+      if (personal) return personal
       // 对外事件与 onEvent 通道同理:operation_settled 自带落账后 task_status 后,
       // 停止/核验的 closed·halted 推送只经这条通道到达(唤醒面的对应事件已降审计)。
       publishTaskStatusChanged?.(event)
@@ -648,6 +665,9 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
   const reflectionTurns = new WorkerTurnStore(workersDir)
   const reflectionEvidence = deps.reflectionEvidence ? new DailyReflectionEvidence({
     ...deps.reflectionEvidence, managersDir, store: sessionStore, ledger, harness, turns: reflectionTurns,
+    canReadWorker: async id => {
+      try { const bound = await requestGuard.load(id); return !bound || bound.worker.origin.request!.execution_scope === 'group' } catch { return false }
+    },
   }) : undefined
   const reflectionHosts = new Map<ManagerKey, DailyReflection>()
   const dailyReflectionFor = (key: ManagerKey): DailyReflection => {
@@ -673,15 +693,46 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
   }
   const imagePolicies = new Map<string, boolean | undefined>()
   const voicePolicies = new Map<string, boolean>()
-  registry = new ManagerRegistry({
-    voiceOutputFor: deps.coreRuntimeBearer ? key => {
+  const voiceOutputFor: import('./registry.js').ManagerRegistryDeps['voiceOutputFor'] = deps.coreRuntimeBearer ? key => {
       const { channelId, sessionId } = splitManagerKey(key)
       return voiceOutputPort(join(deps.dataRoot, 'agent', 'voice-replies', createHash('sha256').update(key).digest('hex')), () => voicePolicies.get(channelId) === true, async params => {
         if (voicePolicies.get(channelId) !== true || params.voice_reply_context.channel_id !== channelId || params.voice_reply_context.session_id !== sessionId) throw new Error('Voice reply target does not match the current Manager')
         const port = await deps.messagingDeps.resolveChannelPort(channelId)
         return deps.messagingDeps.rpcClient.callSensitive(port, 'voice_output', params, deps.messagingDeps.moduleId, { authorizationBearer: deps.coreRuntimeBearer!(), timeoutMs: params.event.type === 'reply_end' ? 30000 : 3000 })
       })
-    } : undefined,
+    } : undefined
+  const requestRuntimeRoot = join(agentDir, 'conversation-requests')
+  requestRunner = new ConversationRequestRunner(requestRuntimeRoot, conversationRequests, {
+    canRun: () => candidatesReady && !candidatesClosing && !deps.isClosing?.(),
+    timezone: deps.timezone ?? (() => 'Asia/Shanghai'),
+    validateEvent: async (key, requestId, event) => {
+      const bound = await requestGuard.load(event.worker_id)
+      if (!bound || bound.worker.manager_key !== key || bound.request.request_id !== requestId || bound.worker.origin.request!.execution_scope !== 'request') throw new Error('Invalid personal event binding')
+      await requestGuard.authorizeControl(event.worker_id, new ConversationRequestAuthority(conversationRequests, key, requestId, 'request', resolveCurrentRequestSource), async () => allowed)
+    },
+    resolveCurrent: resolveCurrentRequestSource,
+    createLoop: context => createConversationRequestLoop(context, { bootstrap: deps, harness, ledger, contexts: workerContextStore,
+      canRun: () => candidatesReady && !candidatesClosing && !deps.isClosing?.(),
+      guard: requestGuard, policy: DEFAULT_MANAGER_COMPACTION_POLICY, root: requestRuntimeRoot,
+      voiceOutput: voiceOutputFor?.(context.request.manager_key) }),
+  })
+  const sharedProjectLedger: ToolFaceDeps['projectDocs']['ledger'] = {
+    listWorkers: async key => {
+      const visible = []
+      for (const worker of await ledger.listWorkers(key)) {
+        try { const bound = await requestGuard.load(worker.worker_id); if (!bound || bound.worker.origin.request!.execution_scope === 'group') visible.push(worker) } catch { /* Unverifiable metadata stays out of shared results. */ }
+      }
+      return visible
+    },
+    findWorker: async id => {
+      const found = await ledger.findWorker(id)
+      if (!found) return undefined
+      const bound = await requestGuard.load(id)
+      return bound?.worker.origin.request?.execution_scope === 'request' ? undefined : found
+    },
+  }
+  registry = new ManagerRegistry({
+    voiceOutputFor,
     dailyReflectionFor,
     traceWriter: deps.traceWriter,
     onAdminChatWakeConsumed: deps.onAdminChatWakeConsumed,
@@ -935,6 +986,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
         voice: traceHooks?.isVoice?.() === true,
         requestAuthorization: targetSessionType === 'group' && !isSystemThread && !scheduleIdentity ? 'shared' : undefined,
         requestGuard,
+        executeRequest: targetSessionType === 'group' && !isSystemThread && !scheduleIdentity ? input => requestRunner.execute(key, traceHooks?.requestInputs() ?? [], input, traceHooks?.voiceReplyContextForSource(input.source_id), traceHooks?.onSuccessfulSendMessage) : undefined,
         workerRequestControl: targetSessionType === 'group' && !isSystemThread && !scheduleIdentity ? { scope: 'shared', authority: async (selection, operation) => {
           const inputs = traceHooks?.requestInputs() ?? []
           if (selection.source_id) {
@@ -1007,7 +1059,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
         onWorkerContinuation: traceHooks?.onWorkerContinuation,
         workboard: { store: workboardStore, managerKey: key },
         projectDocs: {
-          ledger,
+          ledger: sharedProjectLedger,
           readWorkerContext: (workerId) => workerContextStore.read(workerId),
           managerKey: key,
           managerPrincipalPermissions: managerPermissions ?? undefined,
@@ -1036,6 +1088,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
       candidatesClosing = true
       await Promise.all(candidateRuns.values())
       registry?.dispose()
+      await requestRunner.dispose()
       const results = await Promise.allSettled(
         [...adapters.values()].map((adapter) => Promise.resolve().then(() => adapter.dispose())),
       )
@@ -1051,7 +1104,9 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
 
   return {
     startContinuationReconciliation: async () => {
+      if (candidatesClosing || deps.isClosing?.()) return
       candidatesReady = true
+      await requestRunner.recoverPending()
       for (const { managerKey } of await ledger.listAllWorkers()) scheduleCandidates(managerKey)
       await Promise.all(candidateRuns.values())
     },
@@ -1064,6 +1119,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     principalBindings,
     trustedHumanInputs,
     conversationRequests,
+    requestRunner,
     requestGuard,
     builtinDataDir,
     store: sessionStore,

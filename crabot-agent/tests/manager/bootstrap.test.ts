@@ -913,6 +913,7 @@ describe('manager bootstrap（P5 Task 1）', () => {
       ))
       expect(context.principal_permissions).toEqual(principalPermissions)
       await stack.dispose()
+      await vi.waitFor(() => expect(stack.registry.isExecuting(key)).toBe(false))
     } finally {
       vi.clearAllTimers()
       vi.useRealTimers()

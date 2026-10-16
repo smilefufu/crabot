@@ -109,6 +109,8 @@ export interface WorkerToolsDeps {
     next_cursor?: string
     unavailable_reason?: string
   }>
+  /** Request-owned delivery proof may use its fixed private target; it cannot settle another request. */
+  readonly hasSuccessfulWorkerDelivery?: (worker: LedgerWorker) => boolean | Promise<boolean>
   /** Exact report target must have accepted a send_message in this Manager episode. */
   readonly hasSuccessfulSendMessageTo?: (target: { channel_id: string; session_id: string }) => boolean
   /** A continued turn needs an actual same-episode input/continuation action. */
@@ -712,7 +714,8 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
       if (reason !== undefined && typeof reason !== 'string') return invalid('resolve_worker_turn: reason 必须是字符串')
       try {
         const worker = await authorizeWorker(worker_id, callContext)
-        if ((resolution === 'reported' || resolution === 'asked_human') && !deps.hasSuccessfulSendMessageTo?.(worker.report_to)) {
+        if ((resolution === 'reported' || resolution === 'asked_human') && !(deps.hasSuccessfulWorkerDelivery
+          ? await deps.hasSuccessfulWorkerDelivery(worker) : deps.hasSuccessfulSendMessageTo?.(worker.report_to))) {
           throw new Error(deps.voice ? '本 Manager 回合尚未向该执行器的 report_to 完成正式交付，不能把该回合标记为已交付；当前语音回复需实际播放完成，其它渠道消息需成功投递。' : '本 Manager 回合尚未向该 worker 的 report_to 成功调用 send_message，不能把 worker turn 标记为已交付')
         }
         if (resolution === 'continued' && !deps.hasContinuedWorker?.(worker_id)) {

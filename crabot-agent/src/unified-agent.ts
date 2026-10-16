@@ -1197,18 +1197,19 @@ export class UnifiedAgent extends ModuleBase {
         return this.computerUseOwner.bindTools(this.mcpConnector.getAllTools().filter((tool) => {
           const category = tool.category
           return (category === 'desktop' || category === 'mcp_skill') && permissions.tool_access[category] === true
-        }), `manager:${access.managerKey}:${access.creatorFriendId ?? ''}`, async () => {
+        }), `manager:${access.managerKey}:${access.creatorFriendId ?? ''}${access.requestId ? ':' + access.requestId : ''}`, async () => {
           const target = access.targetSession
           if (!target || (target.type === 'private' && !access.creatorFriendId)) return false
-          const fresh = await this.resolvePrincipalPermissions(target.type === 'private' ? access.creatorFriendId : undefined, target.session_id, target.type, target.channel_id)
+          const fresh = access.requestPermissions ? await access.requestPermissions()
+            : await this.resolvePrincipalPermissions(target.type === 'private' ? access.creatorFriendId : undefined, target.session_id, target.type, target.channel_id)
           return this.desktopEnabled() && fresh?.tool_access.desktop === true
         })
       },
-      managerMcpToolAuthorization: async ({ targetSession, creatorFriendId, category }) => {
+      managerMcpToolAuthorization: async ({ targetSession, creatorFriendId, category, requestPermissions }) => {
         if (process.env.CRABOT_MANAGER_MCP_ENABLED !== '1' || !targetSession
           || (targetSession.type === 'private' && !creatorFriendId)
           || (category !== 'desktop' && category !== 'mcp_skill')) return false
-        const permissions = await this.resolvePrincipalPermissions(
+        const permissions = requestPermissions ? await requestPermissions() : await this.resolvePrincipalPermissions(
           targetSession.type === 'private' ? creatorFriendId : undefined,
           targetSession.session_id,
           targetSession.type,

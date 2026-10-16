@@ -3485,7 +3485,7 @@ export class WorkerHarness {
 
   /** Read-only: no reconciliation, health probe, delivery or lifecycle mutation. */
   async readManagerReviewFacts(managerKey: ManagerKey): Promise<IdleReviewFacts> {
-    const workers = (await this.deps.ledger.listWorkers(managerKey)).sort((a, b) => a.worker_id.localeCompare(b.worker_id))
+    const workers = (await this.sharedManagerWorkers(managerKey)).sort((a, b) => a.worker_id.localeCompare(b.worker_id))
     let canSkip = this.deps.isExecutionReady?.() !== false
     if (workers.length && !this.deps.readReviewBackgrounds) return { fingerprint: '', canSkip: false }
     const backgrounds = await this.deps.readReviewBackgrounds?.(workers.map(worker => worker.worker_id)) ?? {}
@@ -4687,6 +4687,20 @@ export class WorkerHarness {
     return executionState(false, unknown)
   }
 
+  /** Shared idle review/candidate eviction must not observe or retire personal requests. */
+  private async sharedManagerWorkers(managerKey: ManagerKey): Promise<LedgerWorker[]> {
+    const visible: LedgerWorker[] = []
+    for (const worker of await this.deps.ledger.listWorkers(managerKey)) {
+      try {
+        const guard = this.deps.requestGuard?.()
+        if (!guard) { if (!worker.origin.request) visible.push(worker); continue }
+        const bound = await guard.load(worker.worker_id)
+        if (!bound || bound.worker.origin.request!.execution_scope === 'group') visible.push(worker)
+      } catch { /* Unverifiable request data cannot enter shared review. */ }
+    }
+    return visible
+  }
+
   async reconcileContinuationCandidates(
     managerKey: ManagerKey,
     board: ManagerWorkboard,
@@ -4748,7 +4762,7 @@ export class WorkerHarness {
         void Promise.resolve(this.deps.onEvent?.(event)).catch(error => console.error('[WorkerHarness] aggregate notification failed:', error))
       }
     }
-    const workers = await this.deps.ledger.listWorkers(managerKey)
+    const workers = await this.sharedManagerWorkers(managerKey)
     const projects = await resolveWorkerProjects(workers, board)
     this.continuationProjects.set(managerKey, { scope: JSON.stringify(board.objectives), projects })
     const view = await this.workerView(workers, board, projects)
