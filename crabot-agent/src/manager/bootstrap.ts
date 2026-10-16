@@ -56,6 +56,7 @@ import { makeTaskStatusEventBridge, type AgentEventPublisher } from './events.js
 import { shouldWakeOnHarnessEvent } from './inbound-adapters.js'
 import { buildManagerToolFace } from './tools/tool-face.js'
 import { PrincipalBindingStore } from './principal-binding-store.js'
+import { TrustedHumanInputStore } from './trusted-human-input-store.js'
 import { ManagerWorkboardStore } from './workboard-store.js'
 import {
   ManagerPrincipalStore,
@@ -141,6 +142,7 @@ export interface ManagerStack {
   readonly principals: ManagerPrincipalStore
   /** Persistent bindings are initialized during reconciliation, never construction. */
   readonly principalBindings: PrincipalBindingStore
+  readonly trustedHumanInputs: TrustedHumanInputStore
   /**
    * builtin adapter 的私有 dataDir。`reconcileManagerStack` 需要它跑
    * `BuiltinWorkerAdapter.scanOrphans`——见该函数注释里的顺序契约。放在 stack 上而不是
@@ -548,6 +550,13 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
 
   const managersDir = join(agentDir, 'managers')
   const sessionStore = new ManagerSessionStore(managersDir)
+  const trustedHumanInputs = new TrustedHumanInputStore(managersDir, {
+    now: deps.now,
+    resolveSender: async (channelId, platformUserId) => {
+      if (!deps.principalResolver.resolveChannelSender) throw new Error('Channel sender verification unavailable')
+      return deps.principalResolver.resolveChannelSender(channelId, platformUserId)
+    },
+  })
   let candidatesReady = false
   let candidatesClosing = false
   const pendingCandidateManagers = new Set<ManagerKey>()
@@ -655,6 +664,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     // 人类消息唤醒边界:这是人类消息链路上**唯一**一次异步解析。返回本批发言者算好的档位,
     // 由 registry 挂到本 episode 的唤醒事件上——缓存只服务于同步 thunk(记忆档位 /
     // 对话对象档案),派活用的档位走事件,不走缓存(PR #59 review)。
+    recordHumanInputs: async (key, messages) => { await trustedHumanInputs.capture(key, messages) },
     onHumanWake: async (key, principal) => (await principals.resolve(key, principal)).permissions,
     beforeWake: async (key, envelope) => {
       const { channelId } = splitManagerKey(key)
@@ -981,6 +991,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     adapters,
     principals,
     principalBindings,
+    trustedHumanInputs,
     builtinDataDir,
     store: sessionStore,
     dailyReflectionFor,

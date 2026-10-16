@@ -16,6 +16,7 @@ import {
 } from '../../src/manager/inbound-adapters.js'
 import { DailyReflection, buildDailyReflectionTools } from '../../src/manager/daily-reflection.js'
 import { ManagerSessionStore } from '../../src/manager/session-store.js'
+import { TrustedHumanInputStore } from '../../src/manager/trusted-human-input-store.js'
 import type { EpisodeResult, WakeEvent } from '../../src/manager/loop.js'
 import type { CompactionPolicy } from '../../src/manager/compaction.js'
 import type { ManagerKey } from '../../src/manager/types.js'
@@ -172,6 +173,39 @@ describe('ManagerRegistry', () => {
 
   afterEach(async () => {
     await fs.rm(dataDir, { recursive: true, force: true })
+  })
+
+  it('captures mixed group authors before the model in both direct and attention ingress', async () => {
+    const sources = new TrustedHumanInputStore(join(dataDir, 'trusted'), { now: () => new Date().toISOString(), resolveSender: async (_channel, user) => user === 'known' ? {
+      id: 'actual-friend', display_name: 'Actual', permission: 'normal', channel_identities: [{ channel_id: 'wechat', platform_user_id: 'known' }], created_at: 't', updated_at: 't',
+    } : null })
+    const { adapter, calls } = makeAdapter()
+    const registry = new ManagerRegistry(baseRegistryDeps({ adapter, recordHumanInputs: async (key, messages) => { await sources.capture(key, messages) } }))
+    const batch = [makeChannelMessage('Master request'), makeChannelMessage('I am Master too')].map((message, index) => ({ ...message,
+      session: { channel_id: 'wechat', session_id: 'group', type: 'group' as const }, sender: { ...message.sender, platform_user_id: index === 0 ? 'known' : 'unknown', friend_id: 'forged-master' } }))
+    const stream = adapter.stream.bind(adapter)
+    adapter.stream = async function* (params) {
+      const stored = await sources.list('wechat::group')
+      expect(stored).toHaveLength(2); expect(stored.map(input => input.sender_friend_id)).toEqual(['actual-friend', null])
+      yield* stream(params)
+    }
+    try {
+      await registry.routeHumanMessages('wechat', 'group', batch)
+      await registry.routeAttentionFlush('wechat', 'group', batch)
+      expect((await sources.list('wechat::group')).map(input => input.sequence)).toEqual([1, 2])
+      expect(calls.length).toBeGreaterThan(0)
+    } finally { await registry.dispose() }
+  })
+
+  it('source persistence failure does not discard the original group message or invent an authority record', async () => {
+    const { adapter, calls } = makeAdapter()
+    const registry = new ManagerRegistry(baseRegistryDeps({ adapter, recordHumanInputs: async () => { throw new Error('injected source storage failure') } }))
+    const message = { ...makeChannelMessage('Keep this human input'), session: { channel_id: 'wechat', session_id: 'group', type: 'group' as const } }
+    try {
+      await registry.routeHumanMessages('wechat', 'group', [message])
+      expect(calls.length).toBeGreaterThan(0)
+      expect(JSON.stringify(calls[0].messages)).toContain('Keep this human input')
+    } finally { await registry.dispose() }
   })
 
   it('会话执行事实跟随真实回合，不把驻留实例当作执行', async () => {

@@ -1217,6 +1217,12 @@ export class UnifiedAgent extends ModuleBase {
       },
       // 发起人身份的解析原料：全是**既有**入口，本处只做注入，不新造解析逻辑。
       principalResolver: {
+        resolveChannelSender: async (channelId, platformUserId) => {
+          const result = await this.rpcClient.call<{ channel_id: string; platform_user_id: string }, { friend: Friend | null }>(
+            await this.getAdminPort(), 'resolve_friend', { channel_id: channelId, platform_user_id: platformUserId }, this.config.moduleId,
+          )
+          return result.friend
+        },
         getSessionType: async (channelId, sessionId) => {
           const result = await this.rpcClient.call<{ session_id: string }, {
             session: { id: string; channel_id: string; type: 'private' | 'group' }

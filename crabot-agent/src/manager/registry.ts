@@ -180,6 +180,8 @@ export interface ManagerRegistryDeps {
    * (`WakeEvent.principalPermissions`)。会话级缓存回答不了"本 episode 的发言者是谁"——群聊里
    * 换个人说话就整体覆盖——而派出去的 worker 的权限身份必须是**本批消息的发言者**。
    */
+  /** Persist real group inputs before LLM handling; this does not grant request authority. */
+  readonly recordHumanInputs?: (key: ManagerKey, messages: ReadonlyArray<ChannelMessage>) => Promise<void>
   readonly onHumanWake?: (
     key: ManagerKey,
     principal: HumanPrincipal,
@@ -561,6 +563,10 @@ export class ManagerRegistry {
     try {
       // Capture before principal lookup so queueing cannot rewrite ingress time.
       const envelope = { ...this.makeEnvelope(capture, initialWake, undefined, messages, correlation), ...(voiceContext ? { voice_turn_id: voiceContext.turnId } : {}), ...(voiceContext?.replyContext ? { voice_reply_context: voiceContext.replyContext } : {}) }
+      if (sessionType === 'group' && this.deps.recordHumanInputs) {
+        try { await this.deps.recordHumanInputs(key, messages) }
+        catch (error) { console.error(`[ManagerRegistry] trusted sources unavailable for '${key}'; new request authority must remain closed:`, error) }
+      }
       // 只会退回 fail-soft 兜底,而消息丢了就是丢了。
       let principalPermissions: ResolvedPermissions | undefined
       if (this.deps.onHumanWake) {

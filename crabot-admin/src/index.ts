@@ -188,6 +188,8 @@ import {
   createCliAccessConfig,
   type ResolvePrincipalPermissionsParams,
   type ResolvePrincipalPermissionsResult,
+  type ResolveRequestPermissionSourcesParams,
+  type ResolveRequestPermissionSourcesResult,
   type SetTaskGoalParams,
   type SetTaskGoalResult,
   type AppendTaskGoalAuditEntryParams,
@@ -1066,6 +1068,7 @@ export class AdminModule extends ModuleBase {
       await this.handleGetFriendPermission(params.friend_id)
     )
     this.registerMethod('resolve_principal_permissions', this.resolvePrincipalPermissions.bind(this))
+    this.registerMethod('resolve_request_permission_sources', this.handleResolveRequestPermissionSources.bind(this))
     this.registerMethod('get_group_session_config', this.handleGetGroupSessionConfig.bind(this))
     this.registerMethod('update_group_session_config', this.handleUpdateGroupSessionConfig.bind(this))
     this.registerMethod('delete_group_session_config', this.handleDeleteGroupSessionConfig.bind(this))
@@ -9849,6 +9852,39 @@ export class AdminModule extends ModuleBase {
       }
       throw error
     }
+  }
+
+  /** Internal read-only facts; isolated request guards must still authorize every complete operation. */
+  private async handleResolveRequestPermissionSources(
+    params: ResolveRequestPermissionSourcesParams,
+    context?: RpcHandlerContext,
+  ): Promise<ResolveRequestPermissionSourcesResult> {
+    const bearer = context?.authorizationBearer
+    if (!bearer) throw new RpcError('UNAUTHORIZED', 'Missing runtime credential')
+    await this.rpcClient.callModuleManagerSensitive(
+      'verify_core_agent_runtime', { expected_module_id: 'crabot-agent' }, this.config.moduleId,
+      { authorizationBearer: bearer },
+    )
+    if (!this.dataLoaded) throw new RpcError('SERVICE_UNAVAILABLE', '好友权限数据尚未加载')
+    const source = params?.source
+    const keys = ['source_id', 'channel_id', 'session_id', 'session_type', 'platform_message_id', 'platform_user_id', 'sender_friend_id']
+    if (!params || typeof params !== 'object' || Array.isArray(params) || Object.keys(params).length !== 1 || !source || typeof source !== 'object' || Array.isArray(source)
+      || Object.keys(source).length !== keys.length || keys.some(key => !Object.prototype.hasOwnProperty.call(source, key))
+      || typeof source.source_id !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(source.source_id)
+      || source.session_type !== 'group' || [source.channel_id, source.session_id, source.platform_message_id, source.platform_user_id].some(value => typeof value !== 'string' || !value.trim())
+      || (source.sender_friend_id !== null && (typeof source.sender_friend_id !== 'string' || !source.sender_friend_id.trim()))) throw new RpcError('INVALID_PARAMS', '请求来源不完整或包含未知字段')
+    const group = await this.resolvePrincipalPermissions({ channel_id: source.channel_id, session_id: source.session_id, session_type: 'group' })
+    const result: ResolveRequestPermissionSourcesResult = {
+      group: { kind: 'group', subject_id: `${source.channel_id}::${source.session_id}`, is_master: false, resolved: group.resolved }, friend: null,
+    }
+    if (source.sender_friend_id !== null) {
+      const friend = this.resolveFriendByChannelIdentity(source.channel_id, source.platform_user_id)
+      if (!friend || friend.id !== source.sender_friend_id || !friend.channel_identities.some(identity => identity.channel_id === source.channel_id && identity.platform_user_id === source.platform_user_id)) throw new RpcError('FORBIDDEN', '原发起人的渠道好友绑定已失效或变化')
+      const resolved = this.buildResolvedFriendPermissions(friend)
+      if (!resolved) throw new RpcError('SERVICE_UNAVAILABLE', '原发起人的完整权限不可用')
+      result.friend = { kind: 'friend', subject_id: friend.id, is_master: friend.permission === 'master', resolved }
+    }
+    return structuredClone(result)
   }
 
   /**

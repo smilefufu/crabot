@@ -5,7 +5,8 @@
 - 2026-10-16 用户明确“确认整组，按依赖顺序推进”，含安卓配套；按[所有者激活计划](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/plans/2026-10-16-voice-device-owner-activation-implementation.md)先做激活，再做请求级授权/插话隔离，最后接全语音管理。正式 Voice §13/Admin/Base 激活契约已发布；整组完成前不部署半套 wire6。
 - 第一阶段实现已接通：配对前本机三段自动引导、稳定所有者密文、wire6 核对与落盘回执、正式联系人/目标 Master 持久提交及创建向导；新渠道不能跳过关联，旧渠道保留配对和人物 ID，人工解绑/降级/删除后不被恢复流程重新认主。删除或重录样本不改变所有者。
 - 定向验证：Shared144、Admin59（含真实好友写盘/索引4）、Voice20（含实际 RPC/WS 激活）、Agent64、Web14与相关构建通过。安卓 JVM18、隔离存储/连接/升级21、首次流程3及公开 JNI 一致性2通过；三段音频为公开文件回放，未代替真人登记/误认率验收。完整证据见两仓实施计划。
-- 原 Voice PR #206 已同步 main，冲突解决并可合并；完整构建通过，历史全量失败与未修改 main 对照，Agent连接重试未收敛，不声称整仓全绿。未自合并、重启后端或安装用户手机；当前真实配对与 FuFu 样本保留。
+- 原 Voice 基线 #206 经 Claude 审查后由 CI 自动合并；完整构建通过，历史全量失败与未修改 main 对照，Agent连接重试未收敛，不声称整仓全绿。合并不等于部署；当前真实配对与 FuFu 样本保留。
+- 请求授权 B1/B2 基础已实现：逐条可信输入在 LLM 前保存（不信任正文/传入好友ID/任务标注），Admin exact-core 返回完整分立来源，操作守卫同时核实原上限和当前同源权限，不拼读A/写B。Shared144、Admin权限45、Agent主体/守卫/输入/bootstrap94及构建通过；Registry范围156通过/2项Memory trace旧失败在未改main复现。独立请求执行、Worker全链、Memory/投递/迁移/UI仍未完成，个人群权限尚未启用。
 - 后续语音工具复用 load_tool_family 的唯一 voice 族；search_tools 仍仅外部 MCP，核心15项不扩张，每次调用独立鉴权。精确主控提示词 diff 单独确认；请求授权、全语音流程与真人 Thea/多人/延迟均仍待验证。
 
 ### crabot check 运行状态误报：已修复
