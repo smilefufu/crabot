@@ -1103,8 +1103,8 @@ crabot 系统给你的所有信号——system prompt、supplement 注入、tool
         }
         let sendResult: { platform_message_id: string; sent_at: string }
         try {
-          const caps = channel_id === 'admin-web' ? undefined : await rpcClient.call<{}, { voice?: import('crabot-shared').VoiceChannelCapability }>(
-            await resolveChannelPort(channel_id), 'get_capabilities', {}, moduleId, undefined, { timeoutMs: 3000 })
+          const caps = channel_id === 'admin-web' ? undefined : await withRetry(async () => rpcClient.call<{}, { voice?: import('crabot-shared').VoiceChannelCapability }>(
+            await resolveChannelPort(channel_id), 'get_capabilities', {}, moduleId, undefined, { timeoutMs: 3000 }))
           if (caps?.voice) {
             throw new Error('当前语音回复必须使用 <voice_reply>...</voice_reply>，不能通过 send_message 重复播报')
           } else {

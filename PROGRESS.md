@@ -1,5 +1,10 @@
 # Crabot 项目进度
 
+### 普通渠道发送：能力预检沿用有界瞬态重试
+
+- PR #206 review 第3项已复核为真实回归：Channel 短暂重启时，get_capabilities 原位于发送重试外，导致普通渠道直接失败。只为该只读预检复用现有瞬态重试，不缓存能力、不改变 Voice 标签拒绝或发送后状态。
+- 三项回归先失败后通过，相关发送/私发/ask_human/目标观察28项与Agent构建通过；预检最多3次，永久错误立即返回，未确认能力前不发送。源码修复不代表已替换现场部署。
+
 ### crabot check 运行状态误报：已修复
 
 - MM/Admin RPC 的 health 使用 POST，Admin RPC 端口从 MM 的 list_modules 查询 exact admin-web，Web health 保留 GET；查不到端口时明确显示不可用，不再猜测 19001。保留端口偏移及 HTTP/连接失败诊断，不改服务运行行为。
