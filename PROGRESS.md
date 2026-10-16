@@ -1,5 +1,10 @@
 # Crabot 项目进度
 
+### 普通渠道发送：能力预检沿用有界瞬态重试
+
+- PR #206 review 第3项已复核为真实回归：Channel 短暂重启时，get_capabilities 原位于发送重试外，导致普通渠道直接失败。只为该只读预检复用现有瞬态重试，不缓存能力、不改变 Voice 标签拒绝或发送后状态。
+- 三项回归先失败后通过，相关发送/私发/ask_human/目标观察28项与Agent构建通过；预检最多3次，永久错误立即返回，未确认能力前不发送。源码修复不代表已替换现场部署。
+
 ### 语音所有者、请求授权与全语音管理：整组已确认，先实现激活
 
 - 2026-10-16 用户明确“确认整组，按依赖顺序推进”，含安卓配套；按[所有者激活计划](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/plans/2026-10-16-voice-device-owner-activation-implementation.md)先做激活，再做请求级授权/插话隔离，最后接全语音管理。正式 Voice §13/Admin/Base 激活契约已发布；整组完成前不部署半套 wire6。
