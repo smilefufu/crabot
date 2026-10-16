@@ -1,5 +1,13 @@
 # Crabot 项目进度
 
+### 语音所有者、请求授权与全语音管理：整组已确认，先实现激活
+
+- 2026-10-16 用户明确“确认整组，按依赖顺序推进”，含安卓配套；按[所有者激活计划](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/plans/2026-10-16-voice-device-owner-activation-implementation.md)先做激活，再做请求级授权/插话隔离，最后接全语音管理。正式 Voice §13/Admin/Base 激活契约已发布；整组完成前不部署半套 wire6。
+- 安卓 main e8d401b 已含三段共用质量层和配对前所有者密文基础：JVM18、公开音频真实 JNI/身份18、隔离存储/升级13及产品/测试 APK 构建通过。旧配对、向量、目录与待回执保留；后台指定的稳定有效登记才能恢复所有者，不按名字或列表顺序认主。新入口尚未接首次 UI/网络，不算自动 Master 绑定完成。
+- 后端独立事实层固定操作/联系人/登记/目标 Master，样本就绪与最终完成分开持久，写盘失败沿原 ID 恢复。Shared143、Admin所有者及原 Voice22和构建通过；human 配对、正式目录及真实好友提交仍在接入，事务单测不替代端到端验收。
+- 原 Voice PR #206 已同步 main，冲突解决并可合并；完整构建通过，历史全量失败与未修改 main 对照，Agent连接重试未收敛，不声称整仓全绿。未自合并、重启后端或安装用户手机；当前真实配对与 FuFu 样本保留。
+- 后续语音工具复用 load_tool_family 的唯一 voice 族；search_tools 仍仅外部 MCP，核心15项不扩张，每次调用独立鉴权。精确主控提示词 diff 单独确认；请求授权、全语音流程与真人 Thea/多人/延迟均仍待验证。
+
 ### crabot check 运行状态误报：已修复
 
 - MM/Admin RPC 的 health 使用 POST，Admin RPC 端口从 MM 的 list_modules 查询 exact admin-web，Web health 保留 GET；查不到端口时明确显示不可用，不再猜测 19001。保留端口偏移及 HTTP/连接失败诊断，不改服务运行行为。
