@@ -8049,13 +8049,13 @@ export class AdminModule extends ModuleBase {
     const credential = payload.agent_cli
     if (!route || !credential) throw new RpcError('FORBIDDEN', 'Agent CLI route is not allowed')
 
-    let execution: { valid: true; cli_access: 'none' | 'read' | 'write'; shell: boolean }
+    let execution: { valid: true; cli_access: 'none' | 'read' | 'write'; shell: boolean; request_verified?: true }
     try {
       const port = await this.ensureAgentPort()
       if (!port) throw new Error('Agent unavailable')
       execution = await this.rpcClient.call<
         { execution: AgentCliExecutionRef; domain: CliDomain; access: 'read' | 'write' },
-        { valid: true; cli_access: 'none' | 'read' | 'write'; shell: boolean }
+        { valid: true; cli_access: 'none' | 'read' | 'write'; shell: boolean; request_verified?: true }
       >(port, 'authorize_agent_cli_execution', {
         execution: credential.execution,
         domain: route.domain,
@@ -8070,6 +8070,11 @@ export class AdminModule extends ModuleBase {
     if (execution.valid !== true || !['none', 'read', 'write'].includes(execution.cli_access)
       || typeof execution.shell !== 'boolean') throw new RpcError('FORBIDDEN', 'Invalid execution authorization')
 
+    if (execution.request_verified === true) {
+      if (credential.execution.kind !== 'worker' || credential.target_session.type !== 'group'
+        || !execution.shell || !hasCliAccess(execution.cli_access, route.access)) throw new RpcError('FORBIDDEN', 'Invalid request authorization')
+      return { context: credential, shell: true, masterPrivate: false }
+    }
     const principal = await this.resolvePrincipalPermissions({
       ...(credential.target_session.type === 'private' && credential.creator_friend_id
         ? { sender_friend_id: credential.creator_friend_id }

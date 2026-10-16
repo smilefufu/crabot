@@ -55,6 +55,7 @@ export interface InternalHandlerContext {
   readonly senderIsMaster?: boolean
   /** 发起人 effective permissions（friend ∪ session）——静态兜底值 */
   readonly resolvedPermissions?: ResolvedPermissions
+  readonly requestCliAuthorization?: (input: HookInput) => Promise<HookResult>
   /**
    * 任务权限活值 getter（存在时优先于 resolvedPermissions）。
    * 由 worker loop 注入，读 taskState 持有者——supplement/resume 刷新后下一轮 hook 即生效
@@ -80,6 +81,7 @@ export interface HookExecutorContext {
   /** ↓ Task 8 新增：CLI 权限闸需要的上下文 */
   readonly senderIsMaster?: boolean
   readonly resolvedPermissions?: ResolvedPermissions
+  readonly requestCliAuthorization?: (input: HookInput) => Promise<HookResult>
   /** 任务权限活值 getter（存在时优先于 resolvedPermissions；spec: 2026-07-20-task-permission-hot-refresh-design.md） */
   readonly getResolvedPermissions?: () => ResolvedPermissions | undefined
   readonly contentReviewer?: ContentReviewer

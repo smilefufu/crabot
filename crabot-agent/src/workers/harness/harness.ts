@@ -1,3 +1,4 @@
+import { executionAdmission } from '../execution-policy.js'
 import { sha256CanonicalJson } from 'crabot-shared'
 import type { ConversationRequestAuthority } from '../../manager/conversation-request-authority.js'
 import type { RequestPermissionSource } from '../../manager/request-permission-sources.js'
@@ -817,6 +818,7 @@ export interface SpawnWorkerParams {
 }
 
 export interface HarnessSendToWorkerOptions {
+  readonly authorize?: () => Promise<void>
   readonly rejectStoppedParent?: boolean
   readonly raw?: boolean
   /** Interrupt a non-builtin mainline before delivering this direction change. */
@@ -1126,9 +1128,12 @@ export class WorkerHarness {
 
   async spawnRequestWorker(p: SpawnWorkerParams, caller: ConversationRequestAuthority): Promise<{ status: 'spawned' | 'existing'; worker: LedgerWorker }> {
     this.deps.assertExecutionAdmission?.()
+    if (p.builtin) throw new Error('REQUEST_SPAWN_RUNTIME_MUST_BE_HOST_CONFIGURED')
     const guard = this.deps.requestGuard?.()
     if (!guard) throw new Error('CAPABILITY_UNKNOWN: Worker request guard unavailable')
     const choices = new Map<RequestPermissionSource['kind'], WorkerImplId>()
+    let selectionFailure: unknown
+    let admitted = false
     const checkSpawn = async (source: RequestPermissionSource) => {
       try {
         const impl = choices.get(source.kind) ?? (this.deps.selectWorkerImpl ? this.deps.selectWorkerImpl(p.impl, undefined, source.resolved) : p.impl ?? this.deps.defaultImpl)
@@ -1139,38 +1144,47 @@ export class WorkerHarness {
         }
         choices.set(source.kind, impl)
         return allowed
-      } catch { return denied('EXECUTION_POLICY_UNSUPPORTED', '请求来源不能兑现该执行器及工作目录的完整范围') }
+      } catch (error) {
+        if ((error as { code?: string })?.code === 'WORKER_IMPLEMENTATION_NOT_READY') selectionFailure = error
+        return denied('EXECUTION_POLICY_UNSUPPORTED', '请求来源不能兑现该执行器及工作目录的完整范围')
+      }
     }
-    return caller.run(checkSpawn, async frame => {
-      if (p.managerKey !== frame.request.manager_key) throw new Error('Request spawn manager mismatch')
-      const workerId = `w-request-${sha256CanonicalJson([frame.request.request_id, caller.executionScope, p.title, p.prompt, p.impl ?? null, p.workspace ?? null, p.goal ?? null])}`
-      let mutex = this.requestSpawnMutexes.get(workerId)
-      if (!mutex) { mutex = new AsyncMutex(); this.requestSpawnMutexes.set(workerId, mutex) }
-      return mutex.run(() => caller.run(checkSpawn, async frame => {
-        const existing = await this.deps.ledger.findWorker(workerId)
-        if (existing) {
-          const bound = await guard.load(workerId)
-          if (!bound || bound.request.request_id !== frame.request.request_id || existing.worker.origin.request?.execution_scope !== caller.executionScope) throw new Error('Request spawn identity conflict')
-          if (!existing.worker.incarnations.some(item => isExecutableIncarnation(item) && item.session_ref)) throw new Error(`REQUEST_SPAWN_RECOVERY_REQUIRED: ${workerId}`)
-          return { status: 'existing' as const, worker: existing.worker }
-        }
-        const request = await guard.bindSpawn(frame, workerId, caller.executionScope)
-        const principal = await boundedRequestPermissions(frame.ceiling, frame.current)
-        const recheckSpawn = () => caller.run(async source => {
-          if (source.kind !== frame.current.kind) return denied('PERMISSION_DENIED', '派发来源已变化')
-          return checkSpawn(source)
-        }, async () => undefined)
-        const worker = await this.spawnWorkerInternal({ ...p, impl: choices.get(frame.current.kind),
-          origin: { ...p.origin, trigger_type: 'message', creator_friend_id: frame.source.sender_friend_id ?? undefined, request },
-          report_to: { channel_id: frame.source.message.session.channel_id, session_id: frame.source.message.session.session_id },
-          target_session: { ...frame.source.message.session, type: 'group' }, principal_permissions: principal,
-        }, workerId, recheckSpawn)
-        return { status: 'spawned' as const, worker }
-      }))
-    })
+    try {
+      return await caller.run(checkSpawn, async frame => {
+        admitted = true
+        if (p.managerKey !== frame.request.manager_key) throw new Error('Request spawn manager mismatch')
+        const workerId = `w-request-${sha256CanonicalJson([frame.request.request_id, caller.executionScope, p.title, p.prompt, p.impl ?? null, p.workspace ?? null, p.goal ?? null])}`
+        let mutex = this.requestSpawnMutexes.get(workerId)
+        if (!mutex) { mutex = new AsyncMutex(); this.requestSpawnMutexes.set(workerId, mutex) }
+        return mutex.run(() => caller.run(checkSpawn, async frame => {
+          const existing = await this.deps.ledger.findWorker(workerId)
+          if (existing) {
+            const bound = await guard.load(workerId)
+            if (!bound || bound.request.request_id !== frame.request.request_id || existing.worker.origin.request?.execution_scope !== caller.executionScope) throw new Error('Request spawn identity conflict')
+            if (!existing.worker.incarnations.some(item => isExecutableIncarnation(item) && item.session_ref)) throw new Error(`REQUEST_SPAWN_RECOVERY_REQUIRED: ${workerId}`)
+            return { status: 'existing' as const, worker: existing.worker }
+          }
+          const request = await guard.bindSpawn(frame, workerId, caller.executionScope)
+          const principal = await boundedRequestPermissions(frame.ceiling, frame.current)
+          const recheckSpawn = () => caller.run(async source => {
+            if (source.kind !== frame.current.kind) return denied('PERMISSION_DENIED', '派发来源已变化')
+            return checkSpawn(source)
+          }, async () => undefined)
+          const worker = await this.spawnWorkerInternal({ ...p, impl: choices.get(frame.current.kind),
+            origin: { ...p.origin, trigger_type: 'message', creator_friend_id: frame.source.sender_friend_id ?? undefined, request },
+            report_to: { channel_id: frame.source.message.session.channel_id, session_id: frame.source.message.session.session_id },
+            target_session: { ...frame.source.message.session, type: 'group' }, principal_permissions: principal,
+          }, workerId, recheckSpawn, (file, write) => caller.run(source => checkFileAccess(source.resolved, file, '/', write), async () => undefined))
+          return { status: 'spawned' as const, worker }
+        }))
+      })
+    } catch (error) {
+      if (!admitted && selectionFailure && error instanceof Error && error.message.startsWith('PERMISSION_DENIED:')) throw selectionFailure
+      throw error
+    }
   }
 
-  private async spawnWorkerInternal(p: SpawnWorkerParams, workerId: string, beforeProvision?: () => Promise<void>): Promise<LedgerWorker> {
+  private async spawnWorkerInternal(p: SpawnWorkerParams, workerId: string, beforeProvision?: () => Promise<void>, authorizeFile?: (file: string, write: boolean) => Promise<void>): Promise<LedgerWorker> {
     this.deps.assertExecutionAdmission?.()
     const incarnationId = randomUUID()
     // P6-C §2：显式/省略统一走纯选择器（显式只查自己不 fallback；省略 default→固定顺序）。
@@ -1215,7 +1229,7 @@ export class WorkerHarness {
 
     return this.withLock(workerId, async () => {
       const startedAt = this.deps.now()
-      const workspaceGit = (await this.checkWorkspaceGit(workspace.root, p.principal_permissions)).current
+      const workspaceGit = (await this.checkWorkspaceGit(workspace.root, p.principal_permissions, undefined, authorizeFile)).current
       const gitContext: WorkerWorkspaceGitContext = {
         worker_id: workerId, incarnation_id: incarnationId, workspace_root: workspace.root, baseline: workspaceGit,
       }
@@ -1225,6 +1239,7 @@ export class WorkerHarness {
         incarnationId,
         workspaceRoot: workspace.root,
         capturedAt: startedAt,
+        ...(authorizeFile ? { authorize: authorizeFile } : {}),
       })
       const initial: LedgerWorker = {
         worker_id: workerId,
@@ -1288,7 +1303,7 @@ export class WorkerHarness {
         const builtin =
           p.builtin ??
           (impl === 'builtin'
-            ? this.deps.builtinSpawnDefaults?.({
+            ? await this.deps.builtinSpawnDefaults?.({
                 worker_id: workerId,
                 workspace,
                 origin: p.origin,
@@ -1510,6 +1525,7 @@ export class WorkerHarness {
         raw: opts?.raw ?? false,
         enqueued_at: this.deps.now(),
         allow_terminal_continuation: true,
+        ...(opts?.authorize ? { authorize: opts.authorize } : {}),
         ...(opts?.rejectStoppedParent ? { reject_stopped_parent: true } : {}),
         ...(opts?.immediate_redirect === true ? { immediate_redirect: true } : {}),
         ...(durableReceipt
@@ -1587,6 +1603,7 @@ export class WorkerHarness {
       let redirectError: unknown
       if (redirectTarget) {
         try {
+          if (opts?.authorize) await opts.authorize()
           if (receipt && synchronousDeadlineAt !== undefined) {
             const activeReceipt = receipt
             await this.awaitWithinDeadline(
@@ -2032,12 +2049,14 @@ export class WorkerHarness {
     text: string,
     raw: boolean,
     delivery?: Pick<SendInputOptions, 'immediate_redirect' | 'delivery_id' | 'deadline_at' | 'signal'>,
+    authorize?: () => Promise<void>,
   ): Promise<InputAttempt> {
     const revisionKey = `${handle.worker_id}#${handle.impl}#${handle.seq}`
     const stateChangeRevision = this.stateChangeRevisions.get(revisionKey) ?? 0
     const inputOwnershipRevision = this.inputOwnershipRevision(handle.worker_id)
     try {
-      this.deps.assertExecutionPolicy?.(handle.impl, (await this.contextStore.read(handle.worker_id))?.principal_permissions)
+      if (authorize) await authorize()
+      await this.assertWorkerExecutionPolicy(handle.worker_id, handle.impl)
       await adapter.sendInput(handle, text, { raw, ...delivery })
     } catch (error) {
       if (error instanceof WorkerExitedError) {
@@ -2202,7 +2221,7 @@ export class WorkerHarness {
       const attempt = await this.attemptInput(adapter, handle, item.text, item.raw, {
         ...deliveryOptions,
         ...(item.immediate_redirect ? { immediate_redirect: true } : {}),
-      })
+      }, item.authorize)
       if (attempt.kind === 'exited') {
         if (item.allow_terminal_continuation === false) return 'delivered'
         if (item.delivery_id) {
@@ -2362,7 +2381,7 @@ export class WorkerHarness {
         return expiredAfterInstructions
       }
       const builtin = targetImpl === 'builtin'
-        ? this.deps.builtinSpawnDefaults?.({
+        ? await this.deps.builtinSpawnDefaults?.({
             worker_id: worker.worker_id,
             workspace,
             origin: worker.origin,
@@ -2826,6 +2845,7 @@ export class WorkerHarness {
             text,
             raw,
             deliveryOptions,
+            item?.authorize,
           )
           if (attempt.kind === 'exited') {
             // adapter 侧权威判定这个"看起来存活"的新主线其实也已经终态(台账的异步状态
@@ -2938,14 +2958,15 @@ export class WorkerHarness {
   ): Promise<ContinuationDelivery> {
     this.deps.assertExecutionAdmission?.()
     // P6-B：resume 重验 ready（「已有 running incarnation 不杀，新 resume/handoff 重验」）。
+    if (item?.authorize) await item.authorize()
     await this.deps.assertWorkerImplReady?.(mainline.impl)
     const expiredAfterReady = this.expiredInboxDelivery(item, mainline.seq)
     if (expiredAfterReady) return expiredAfterReady
     const incarnationId = randomUUID()
     const workerContext = await this.contextStore.read(worker.worker_id)
-    this.deps.assertExecutionPolicy?.(mainline.impl, workerContext?.principal_permissions)
+    await this.assertWorkerExecutionPolicy(worker.worker_id, mainline.impl)
     const gitPermissions = workerContext?.principal_permissions
-    const workspaceGit = (await this.checkWorkspaceGit(mainline.workspace, gitPermissions)).current
+    const workspaceGit = (await this.checkWorkspaceGit(mainline.workspace, gitPermissions, undefined, (file, write) => this.assertWorkerFileAccess(worker.worker_id, file, write))).current
     const gitContext: WorkerWorkspaceGitContext = {
       worker_id: worker.worker_id, incarnation_id: incarnationId, workspace_root: mainline.workspace, baseline: workspaceGit,
     }
@@ -2955,6 +2976,7 @@ export class WorkerHarness {
       incarnationId,
       workspaceRoot: mainline.workspace,
       capturedAt: this.deps.now(),
+      authorize: (file, write) => this.assertWorkerFileAccess(worker.worker_id, file, write),
     })
     const expiredAfterInstructions = this.expiredInboxDelivery(item, mainline.seq)
     if (expiredAfterInstructions) return expiredAfterInstructions
@@ -2983,6 +3005,8 @@ export class WorkerHarness {
     let newHandle
     try {
       await this.inheritCliObservation(worker.worker_id, mainline.incarnation_id, incarnationId, mainline.impl)
+      if (item?.authorize) await item.authorize()
+      await this.assertWorkerExecutionPolicy(worker.worker_id, mainline.impl)
       const returnedHandle = await adapter.resume(prevRef, appendWorkspaceGitObservation(text, workspaceGit), {
         workspace_git: gitContext,
         ...(admission ? { connection_env: admission.env } : {}),
@@ -3114,7 +3138,8 @@ export class WorkerHarness {
       session_ref: source.session_ref,
     }
 
-    this.deps.assertExecutionPolicy?.(targetImpl, (await this.contextStore.read(worker.worker_id))?.principal_permissions)
+    if (deadlineItem?.authorize) await deadlineItem.authorize()
+    await this.assertWorkerExecutionPolicy(worker.worker_id, targetImpl)
     // 0. Pre-flight(三轮 review 修复):目标 impl 若在这个 worker 名下已经有过任何化身
     // (含已终态、含 fork 分支,见 ImplAlreadyUsedError 类注释)——即"切到该 worker 曾经用过
     // 的实现"(含切回原实现、同实现切换)——必然会在下面 step 3 的 newAdapter.spawn 里抛错:
@@ -3186,6 +3211,7 @@ export class WorkerHarness {
       }
       // tracked credential target 等确定性检查必须在 package / source stop 之前完成；preflightProvision
       // 不得写 workspace。正式 provision 仍在 source teardown 之后执行并重检，避免 TOCTOU 静默越界。
+      await this.assertWorkerExecutionPolicy(worker.worker_id, targetImpl)
       await newAdapter.preflightProvision?.(workspace, caps)
       const expiredAfterPreflight = this.expiredInboxDelivery(deadlineItem, source.seq)
       if (expiredAfterPreflight) {
@@ -3197,7 +3223,7 @@ export class WorkerHarness {
       // before we stop the source. Any failure here leaves the source untouched and retryable.
       targetIncarnationId = randomUUID()
       const capturedAt = this.deps.now()
-      targetGit = (await this.checkWorkspaceGit(workspace.root, principalPermissions)).current
+      targetGit = (await this.checkWorkspaceGit(workspace.root, principalPermissions, undefined, (file, write) => this.assertWorkerFileAccess(worker.worker_id, file, write))).current
       targetGitContext = {
         worker_id: worker.worker_id, incarnation_id: targetIncarnationId, workspace_root: workspace.root, baseline: targetGit,
       }
@@ -3207,6 +3233,7 @@ export class WorkerHarness {
         incarnationId: targetIncarnationId,
         workspaceRoot: workspace.root,
         capturedAt,
+        authorize: (file, write) => this.assertWorkerFileAccess(worker.worker_id, file, write),
       })
       targetExecutionEnv = await this.executionEnv(handoffContext ?? {}, {
         kind: 'worker', worker_id: worker.worker_id, incarnation_id: targetIncarnationId,
@@ -3217,7 +3244,7 @@ export class WorkerHarness {
         return { restoredDurableReceipt: false, delivery: expiredAfterInstructions }
       }
       if (targetImpl === 'builtin') {
-        builtinInjection = this.deps.builtinSpawnDefaults?.({
+        builtinInjection = await this.deps.builtinSpawnDefaults?.({
           worker_id: worker.worker_id,
           workspace,
           origin: worker.origin,
@@ -3241,6 +3268,7 @@ export class WorkerHarness {
         discardPreparedHandoff()
         return { restoredDurableReceipt: false, delivery: expiredAfterInjection }
       }
+      await this.assertWorkerExecutionPolicy(worker.worker_id, targetImpl)
       handoff = await this.captureHandoffPackage(worker, source, sourceAdapter, sourceHandle, capturedAt)
       const expiredAfterHandoff = this.expiredInboxDelivery(deadlineItem, source.seq)
       if (expiredAfterHandoff) {
@@ -3276,6 +3304,7 @@ export class WorkerHarness {
           if (admission) void admission.dispose().catch(() => {})
           return { restoredDurableReceipt: false, delivery: expiredBeforeSourceStop }
         }
+        await this.assertWorkerExecutionPolicy(worker.worker_id, targetImpl)
         const stop = await this.stopSourceForHandoffLocked(managerKey, worker, source)
         if (stop.status !== 'succeeded') {
           throw new Error(`WorkerHarness.handoffIncarnation: source stop did not verify (${stop.status})`)
@@ -3298,6 +3327,8 @@ export class WorkerHarness {
     }
     let newHandle
     try {
+      if (deadlineItem?.authorize) await deadlineItem.authorize()
+      await this.assertWorkerExecutionPolicy(worker.worker_id, targetImpl)
       await newAdapter.provision(workspace, caps)
       await this.recordCliProvision(worker.worker_id, targetIncarnationId, targetImpl, caps)
       const expiredBeforeSpawn = this.expiredInboxDelivery(deadlineItem, source.seq)
@@ -3305,6 +3336,8 @@ export class WorkerHarness {
         if (admission) void admission.dispose().catch(() => {})
         return { restoredDurableReceipt: false, delivery: expiredBeforeSpawn }
       }
+      if (deadlineItem?.authorize) await deadlineItem.authorize()
+      await this.assertWorkerExecutionPolicy(worker.worker_id, targetImpl)
       newHandle = await newAdapter.spawn({
         worker_id: worker.worker_id,
         incarnation_id: targetIncarnationId,
@@ -3666,18 +3699,58 @@ export class WorkerHarness {
   async authorizeAgentCliExecution(
     execution: Extract<AgentCliExecutionRef, { kind: 'worker' }>,
     domain: CliDomain,
-  ): Promise<{ valid: true; cli_access: 'none' | 'read' | 'write'; shell: boolean }> {
-    const found = await this.deps.ledger.findWorker(execution.worker_id)
-    const incarnation = found?.worker.incarnations.find(
-      (item) => item.incarnation_id === execution.incarnation_id,
-    )
-    if (!found || found.worker.task.status === 'closed' || !incarnation
-      || !isExecutableIncarnation(incarnation) || incarnation.state === 'exited') {
-      throw new Error('FORBIDDEN')
+    access: 'read' | 'write' = 'read',
+  ): Promise<{ valid: true; cli_access: 'none' | 'read' | 'write'; shell: boolean; request_verified?: true }> {
+    const verifyExecution = async () => {
+      const found = await this.deps.ledger.findWorker(execution.worker_id)
+      const incarnation = found?.worker.incarnations.find(item => item.incarnation_id === execution.incarnation_id)
+      if (!found || found.worker.task.status === 'closed' || !incarnation
+        || !isExecutableIncarnation(incarnation) || incarnation.state === 'exited') throw new Error('FORBIDDEN')
     }
+    await verifyExecution()
     const context = await this.contextStore.read(execution.worker_id)
+    const guard = this.deps.requestGuard?.()
+    const bound = guard ? await guard.load(execution.worker_id) : null
+    if (!guard && context?.request) throw new Error('CAPABILITY_UNKNOWN: Worker request guard unavailable')
+    if (bound) return guard!.runResource(execution.worker_id, async source => {
+      const permissions = workerCliExecutionPermissions(source.resolved)
+      const level = permissions.cli_access[domain]
+      return permissions.shell && (level === 'write' || access === 'read' && level === 'read')
+        ? allowed : denied('PERMISSION_DENIED', 'Shell and CLI access require the same complete source')
+    }, async () => {
+      await verifyExecution()
+      return { valid: true as const, cli_access: access, shell: true, request_verified: true as const }
+    })
     const permissions = workerCliExecutionPermissions(context?.principal_permissions)
     return { valid: true, cli_access: permissions.cli_access[domain], shell: permissions.shell }
+  }
+
+  private async assertWorkerFileAccess(workerId: string, file: string, write: boolean): Promise<void> {
+    const guard = this.deps.requestGuard?.()
+    if (!guard) {
+      if ((await this.contextStore.read(workerId))?.request || (await this.deps.ledger.findWorker(workerId))?.worker.origin.request) throw new Error('CAPABILITY_UNKNOWN: Worker request guard unavailable')
+      return
+    }
+    if (!await guard.load(workerId)) return
+    await guard.runResource(workerId, source => checkFileAccess(source.resolved, file, '/', write), async () => undefined)
+  }
+
+  /** Original request remains the resource actor for input, resume, fork and handoff. */
+  private async assertWorkerExecutionPolicy(workerId: string, impl: WorkerImplId): Promise<void> {
+    const context = await this.contextStore.read(workerId)
+    const guard = this.deps.requestGuard?.()
+    const bound = guard ? await guard.load(workerId) : null
+    if (!bound) {
+      const worker = await this.deps.ledger.findWorker(workerId)
+      if (context?.request || worker?.worker.origin.request) throw new Error('CAPABILITY_UNKNOWN: Worker request guard unavailable')
+      this.deps.assertExecutionPolicy?.(impl, context?.principal_permissions)
+      return
+    }
+    await guard!.runResource(workerId, async source => {
+      const admission = executionAdmission(impl, source.resolved)
+      return admission.status === 'allowed' ? allowed : denied(
+        admission.status === 'unknown' ? 'CAPABILITY_UNKNOWN' : 'EXECUTION_POLICY_UNSUPPORTED', admission.reasons.join('; '))
+    }, async () => undefined)
   }
 
   async sendToExecutionBranch(
@@ -3707,7 +3780,7 @@ export class WorkerHarness {
       const adapter = this.deps.adapters.get(incarnation.impl)
       if (!adapter) throw new Error('execution branch adapter is unavailable')
       try {
-        this.deps.assertExecutionPolicy?.(incarnation.impl, (await this.contextStore.read(workerId))?.principal_permissions)
+        await this.assertWorkerExecutionPolicy(workerId, incarnation.impl)
         await adapter.sendInput({ ...handleForIncarnation(workerId, incarnation), query_id: receipt.query_id }, text, {
           delivery_id: deliveryId,
           onAccepted: () => onSettled({ status: 'delivered' }),
@@ -3787,6 +3860,7 @@ export class WorkerHarness {
       }
       const adapter = this.deps.adapters.get(mainline.impl)
       if (!adapter?.respondToUi) throw new Error(`worker impl '${mainline.impl}' does not support UI responses`)
+      await this.assertWorkerExecutionPolicy(workerId, mainline.impl)
       const acceptedAt = this.deps.now()
       const operation = await this.controlOperationStore.create({
         worker_id: workerId,
@@ -3808,6 +3882,7 @@ export class WorkerHarness {
         // A response is single-use once admitted. A native adapter error can mean that a key was
         // already accepted, so keep the snapshot consumed and settle unknown rather than retrying.
         await this.uiSnapshotStore.consume(workerId, snapshotId, acceptedAt)
+        await this.assertWorkerExecutionPolicy(workerId, mainline.impl)
         await adapter.respondToUi(handleForIncarnation(workerId, mainline), response)
       } catch (error) {
         await this.settleControlOperation(
@@ -3930,10 +4005,16 @@ export class WorkerHarness {
     workspaceRoot: string,
     permissions: ResolvedPermissions | undefined,
     baseline?: WorkspaceGitObservation,
+    authorize?: (file: string, write: boolean) => Promise<void>,
   ): Promise<WorkspaceGitCheck> {
     if (!narrowWorkerPermissions(BUILTIN_WORKER_PERMISSIONS, permissions ?? null).tool_access.file_io) {
       return { current: workspaceGitError(workspaceRoot, 'access_denied'), ...(baseline ? { baseline } : {}),
         comparison: 'unavailable', comparison_reason: 'access_denied', commits: [], commits_truncated: false }
+    }
+    if (authorize) {
+      try { await authorize(workspaceRoot, false) }
+      catch { return { current: workspaceGitError(workspaceRoot, 'access_denied'), ...(baseline ? { baseline } : {}),
+        comparison: 'unavailable', comparison_reason: 'access_denied', commits: [], commits_truncated: false } }
     }
     return this.gitInspector.inspect(workspaceRoot, baseline)
   }
@@ -3952,7 +4033,7 @@ export class WorkerHarness {
       throw new Error('Worker 没有 file_io 权限')
     }
     return { worker_id: workerId, incarnation_id: requireStableIncarnationId(incarnation, workerId),
-      git: await this.checkWorkspaceGit(workspace, permissions, incarnation.workspace_git) }
+      git: await this.checkWorkspaceGit(workspace, permissions, incarnation.workspace_git, (file, write) => this.assertWorkerFileAccess(workerId, file, write)) }
   }
 
   private async turnWorkspaceGit(handle: IncarnationHandle): Promise<WorkspaceGitCheck | undefined> {
@@ -3966,7 +4047,7 @@ export class WorkerHarness {
       return { current: workspaceGitError(incarnation.workspace, 'access_denied'), baseline: incarnation.workspace_git,
         comparison: 'unavailable', comparison_reason: 'worker_permissions_unavailable', commits: [], commits_truncated: false }
     }
-    return this.checkWorkspaceGit(incarnation.workspace, permissions, incarnation.workspace_git)
+    return this.checkWorkspaceGit(incarnation.workspace, permissions, incarnation.workspace_git, (file, write) => this.assertWorkerFileAccess(handle.worker_id, file, write))
   }
 
   private async createPendingTurn(
@@ -5526,6 +5607,9 @@ export class WorkerHarness {
       // harness 动作收尾)——不重复判定。
       if (isTerminalStatus(worker.task.status)) return 'unchanged'
 
+      if (this.deps.requestGuard) await this.deps.requestGuard().load(workerId)
+      else if (worker.origin.request || (await this.contextStore.read(workerId))?.request) throw new Error('CAPABILITY_UNKNOWN: Worker request guard unavailable')
+
       const mainline = mainlineIncarnation(worker)
       if (!mainline) {
         await this.markAgentNativeSystemTaskLost(managerKey, worker)
@@ -6219,7 +6303,7 @@ export class WorkerHarness {
   async queryWorker(
     workerId: string,
     question: string,
-    opts?: { readonly managerKey?: ManagerKey },
+    opts?: { readonly managerKey?: ManagerKey; readonly authorize?: () => Promise<void> },
   ): Promise<QueryWorkerStartedResult> {
     this.deps.assertExecutionAdmission?.()
     interface QueryPrep {
@@ -6236,7 +6320,8 @@ export class WorkerHarness {
       if (!found) throw new WorkerNotFoundError(workerId)
       if (found.worker.task.status === 'closed') throw new TaskCancelledError(workerId)
       const incarnation = requireExecutableIncarnation(requireMainlineIncarnation(found.worker))
-      this.deps.assertExecutionPolicy?.(incarnation.impl, (await this.contextStore.read(workerId))?.principal_permissions)
+      await this.assertWorkerExecutionPolicy(workerId, incarnation.impl)
+      if (opts?.authorize) await opts.authorize()
       const queryId = randomUUID()
       const createdAt = this.deps.now()
       let receipt: WorkerQueryReceipt
@@ -6306,15 +6391,16 @@ export class WorkerHarness {
     try {
       const workerContext = await this.contextStore.read(workerId)
       const permissions = workerContext?.principal_permissions
-      this.deps.assertExecutionPolicy?.(prep.implId, permissions)
+      await this.assertWorkerExecutionPolicy(workerId, prep.implId)
       await this.inheritCliObservation(workerId, prep.ref.incarnation_id, forkIncarnationId, prep.implId)
-      forkGit = (await this.checkWorkspaceGit(prep.workspace, permissions)).current
+      forkGit = (await this.checkWorkspaceGit(prep.workspace, permissions, undefined, (file, write) => this.assertWorkerFileAccess(workerId, file, write))).current
       forkInstructions = await captureWorkspaceInstructions({
         workersDir: this.deps.workersDir,
         workerId,
         incarnationId: forkIncarnationId,
         workspaceRoot: prep.workspace,
         capturedAt: this.deps.now(),
+        authorize: (file, write) => this.assertWorkerFileAccess(workerId, file, write),
       })
       admission = await this.deps.admitWorkerConnection?.(prep.implId, workerId)
       const forkOptions: ForkOptions = {
@@ -6336,6 +6422,8 @@ export class WorkerHarness {
           'not_started',
         )
       }
+      if (opts?.authorize) await opts.authorize()
+      await this.assertWorkerExecutionPolicy(workerId, prep.implId)
       forkHandle = await this.awaitForkEstablishment(
         prep.adapter.fork(prep.ref, appendWorkspaceGitObservation(question, forkGit), forkOptions),
         prep.adapter,

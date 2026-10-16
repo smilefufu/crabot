@@ -67,6 +67,7 @@ export interface SpawnPersistentAgentOpts {
   /** Worker execution hooks inherited by the child. */
   readonly hookRegistry?: import('../../hooks/hook-registry.js').HookRegistry
   readonly lspManager?: import('../../hooks/types.js').LspManagerLike
+  readonly requestCliAuthorization?: import('../types.js').EngineOptions['requestCliAuthorization']
   /** The child has no human identity of its own. */
   readonly senderIsMaster?: boolean
   /** Permission snapshot used by hooks such as the CLI permission gate. */
@@ -262,6 +263,7 @@ export async function spawnPersistentAgent(opts: SpawnPersistentAgentOpts): Prom
             hookRegistry: opts.hookRegistry,
             lspManager: opts.lspManager,
             senderIsMaster: opts.senderIsMaster,
+            requestCliAuthorization: opts.requestCliAuthorization,
             resolvedPermissions: opts.resolvedPermissions,
             abortSignal: abortController.signal,
             // 同 forkEngine：bg-agent 也是 subagent 派发路径，禁用 compaction。

@@ -1,5 +1,9 @@
+import { WorkerRequestToolScope } from '../../../src/workers/harness/request-tools.js'
+import { authorizeTool, fileAuthorization, entryAuthorization, roleAuthorization } from '../../../src/permissions/tool-authorization.js'
+import { defineTool } from '../../../src/engine/index.js'
 import { buildWorkerTools } from '../../../src/manager/tools/worker-tools.js'
-import type { WorkerHarness } from '../../../src/workers/harness/harness.js'
+import { UnifiedAgent } from '../../../src/unified-agent.js'
+import { WorkerHarness } from '../../../src/workers/harness/harness.js'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
@@ -110,6 +114,103 @@ describe('Worker request guard never borrows a neighbouring speaker or legacy sn
     await fs.rm(file)
     await expect(guard.load('w-owner')).rejects.toThrow(/binding|context/i)
   })
+  function resourceHarness() {
+    const harness = Object.create(WorkerHarness.prototype) as WorkerHarness
+    Object.assign(harness, { deps: { ledger, requestGuard: () => guard }, contextStore: contexts })
+    return harness
+  }
+  async function activeExecution() {
+    await ledger.upsertWorker(key, 'w-owner', prev => ({ ...prev!, incarnations: [{ incarnation_id: 'inc-owner', seq: 1, impl: 'builtin', state: 'idle', workspace: path.join(root, 'b'), session_ref: 'session-owner', started_at: time }] }))
+    return { kind: 'worker' as const, worker_id: 'w-owner', incarnation_id: 'inc-owner' }
+  }
+  it('CLI gateway requires Shell plus requested domain/access from the same original and current source', async () => {
+    const execution = await activeExecution(), harness = resourceHarness()
+    expect(await harness.authorizeAgentCliExecution(execution, 'schedule', 'write')).toMatchObject({ request_verified: true, shell: true, cli_access: 'write' })
+    // Group supplies Shell, current friend supplies CLI; neither supplies the complete action.
+    const originalCurrent = current.getMockImplementation()!
+    group.resolved.cli_access.schedule = 'none'
+    current.mockImplementation(async (kind, source) => {
+      const result = await originalCurrent(kind, source)
+      if (result?.kind === 'friend') result.resolved.tool_access.shell = false
+      return result
+    })
+    await expect(harness.authorizeAgentCliExecution(execution, 'schedule', 'write')).rejects.toThrow('PERMISSION_DENIED')
+    current.mockImplementation(async () => { throw new Error('unavailable') })
+    await expect(harness.authorizeAgentCliExecution(execution, 'schedule', 'write')).rejects.toThrow('CAPABILITY_UNKNOWN')
+  })
+  it('CLI authority rechecks exact execution after asynchronous authorization and never falls back on half bindings', async () => {
+    const execution = await activeExecution(), harness = resourceHarness()
+    const originalCurrent = current.getMockImplementation()!
+    current.mockImplementation(async (kind, source) => {
+      const result = await originalCurrent(kind, source)
+      await ledger.upsertWorker(key, 'w-owner', prev => ({ ...prev!, task: { ...prev!.task, status: 'closed' } }))
+      return result
+    })
+    await expect(harness.authorizeAgentCliExecution(execution, 'schedule', 'read')).rejects.toThrow(/FORBIDDEN|closed/)
+    current.mockImplementation(originalCurrent)
+    await activeExecution()
+    await ledger.upsertWorker(key, 'w-owner', prev => ({ ...prev!, task: { ...prev!.task, status: 'running' } }))
+    await fs.rm(path.join(root, 'workers/w-owner/context.json'))
+    await expect(harness.authorizeAgentCliExecution(execution, 'schedule', 'read')).rejects.toThrow('CAPABILITY_UNKNOWN')
+  })
+  it('production builtin tool assembly uses request scopes for real file writes and live Shell/CLI hooks', async () => {
+    const runtimeAgent = Object.create(UnifiedAgent.prototype) as any
+    Object.assign(runtimeAgent, { agentHandler: { createBuiltinBgToolOptions: () => undefined }, agentConfig: { skills: [{ id: 'tmp-page', name: 'tmp-page', description: 'page', skill_dir: path.join(root, 'skills') }], model_config: { powerful: { endpoint: 'https://example.invalid', apikey: 'test', model_id: 'test', format: 'anthropic' } } },
+      mcpConnector: { getAllTools: () => [] }, computerUseOwner: { available: false }, imageCapability: { available: false }, config: { moduleId: 'test' }, knownSecrets: new Set() })
+    const fixed = (await requests.get(key, ownerRequest))!
+    const ctx = { worker_id: 'w-owner', workspace: { root: path.join(root, 'b') }, origin: (await ledger.findWorker('w-owner'))!.worker.origin,
+      principal_permissions: group.resolved, request_runtime: { guard, ceilings: [fixed.record.permission_sources.group, fixed.record.permission_sources.friend!] } }
+    const runtime = runtimeAgent.buildBuiltinWorkerRuntime(ctx)
+    const tools = runtime.tools(), write = tools.find((tool: any) => tool.name === 'Write')
+    const file = path.join(root, 'b/real-production-result')
+    expect((await write.call({ file_path: file, content: 'verified' }, {})).isError).not.toBe(true)
+    expect(await fs.readFile(file, 'utf8')).toBe('verified')
+    expect((await write.call({ file_path: path.join(root, 'a/no-write'), content: 'bad' }, {})).isError).toBe(true)
+    expect(await runtime.requestCliAuthorization({ event: 'PreToolUse', toolName: 'Bash', toolInput: { command: 'crabot schedule list' } })).toMatchObject({ action: 'continue' })
+    expect(await runtime.requestCliAuthorization({ event: 'PreToolUse', toolName: 'Bash', toolInput: { command: 'crabot config get --reveal' } })).toMatchObject({ action: 'block' })
+    group.resolved.tool_access.shell = false
+    const oldCurrent = current.getMockImplementation()!
+    current.mockImplementation(async (kind, source) => { const result = await oldCurrent(kind, source); if (result) result.resolved.tool_access.shell = false; return result })
+    expect(await runtime.requestCliAuthorization({ event: 'PreToolUse', toolName: 'Bash', toolInput: { command: 'printf no' } })).toMatchObject({ action: 'block' })
+    expect(() => runtimeAgent.buildBuiltinWorkerRuntime({ ...ctx, request_runtime: undefined })).toThrow('CAPABILITY_UNKNOWN')
+  })
+  it('does not enter a resource after the Worker is closed while current authorization was being fetched', async () => {
+    const originalCurrent = current.getMockImplementation()!
+    current.mockImplementation(async (kind, source) => {
+      const result = await originalCurrent(kind, source)
+      await ledger.upsertWorker(key, 'w-owner', prev => ({ ...prev!, task: { ...prev!.task, status: 'closed' } }))
+      return result
+    })
+    const action = vi.fn()
+    await expect(guard.runResource('w-owner', async () => allowed, action)).rejects.toThrow('closed')
+    expect(action).not.toHaveBeenCalled()
+  })
+  it('the live desktop bridge checks the same immutable request and current authorization on every call', async () => {
+    await activeExecution()
+    const runtimeAgent = Object.create(UnifiedAgent.prototype) as any
+    runtimeAgent.managerStack = { ledger, requestGuard: guard }
+    expect(await runtimeAgent.desktopWorkerCurrent('w-owner', 'inc-owner')).toBe(true)
+    const originalCurrent = current.getMockImplementation()!
+    current.mockImplementation(async (kind, source) => { const result = await originalCurrent(kind, source); if (result) result.resolved.tool_access.desktop = false; return result })
+    expect(await runtimeAgent.desktopWorkerCurrent('w-owner', 'inc-owner')).toBe(false)
+    current.mockImplementation(async () => { throw new Error('unavailable') })
+    expect(await runtimeAgent.desktopWorkerCurrent('w-owner', 'inc-owner', false)).toBe(false)
+    current.mockImplementation(originalCurrent)
+    await requests.close(key, ownerRequest)
+    expect(await runtimeAgent.desktopWorkerCurrent('w-owner', 'inc-owner')).toBe(false)
+  })
+  it('the actual send/query tools retain a host-only recheck of the caller across asynchronous preparation', async () => {
+    const { tools, action } = toolFixture(await caller('owner', 'queued-control'))
+    for (const name of ['send_to_worker', 'query_worker']) {
+      action.mockResolvedValue({ status: 'delivered' })
+      await tools.find(tool => tool.name === name)!.call({ worker_id: 'w-owner', text: 'continue', question: 'inspect' })
+      const options = action.mock.calls.at(-1)![2] as any
+      expect(options.authorize).toBeTypeOf('function')
+      people.get('owner')!.channel_identities = []
+      await expect(options.authorize()).rejects.toThrow('PERMISSION_DENIED')
+      people.get('owner')!.channel_identities = [{ channel_id: 'voice', platform_user_id: 'owner' }]
+    }
+  })
   const guardedOperations = [
     ['send_to_worker', { text: 'dangerous redirect' }], ['query_worker', { question: 'read private result' }],
     ['get_worker_state', {}], ['get_worker_activity', {}], ['get_worker_turn', {}],
@@ -167,6 +268,76 @@ describe('Worker request guard never borrows a neighbouring speaker or legacy sn
     const own = await ownerFixture.tools.find(tool => tool.name === 'list_workers')!.call({ include_terminal: true })
     expect(own.isError).toBe(false); expect(own.output).toContain('owner task')
     expect(fixed!.record.delivery.kind).toBe('origin')
+  })
+
+  async function resourceTools() {
+    const fixed = (await requests.get(key, ownerRequest))!.record
+    let configured = true
+    const write = vi.fn(async (input: Record<string, unknown>) => { await fs.writeFile(String(input.file_path), String(input.content)); return { output: 'written', isError: false } })
+    const bash = vi.fn(async () => ({ output: 'ran', isError: false }))
+    const output = vi.fn(async () => ({ output: 'PARENT_ENTITY', isError: false }))
+    const scope = new WorkerRequestToolScope({ guard, workerId: 'w-owner', ceilings: [fixed.permission_sources.group, fixed.permission_sources.friend!], cwd: root,
+      rawTools: permissions => configured ? [
+        authorizeTool(defineTool({ name: 'Write', description: '', inputSchema: { type: 'object' }, call: write }), fileAuthorization('worker', () => permissions, () => root, 'file_path', true)),
+        authorizeTool(defineTool({ name: 'Bash', description: '', inputSchema: { type: 'object' }, call: bash }), entryAuthorization('worker', 'shell', () => permissions)),
+        authorizeTool(defineTool({ name: 'Output', description: '', inputSchema: { type: 'object' }, call: output }), roleAuthorization('worker')),
+      ].filter(tool => tool.authorization!.available()) : [],
+      skills: () => [], authorizeCommand: async permissions => permissions.tool_access.shell && permissions.cli_access.provider === 'write' ? allowed : denied('PERMISSION_DENIED', 'complete shell + provider required'),
+    })
+    return { scope, write, bash, output, disable: () => { configured = false } }
+  }
+  it('uses actual current tool closures and preserves read-A/write-B without splicing permissions', async () => {
+    const { scope, write } = await resourceTools(), tool = scope.tools().find(tool => tool.name === 'Write')!
+    expect((await tool.call({ file_path: path.join(root, 'b/result'), content: 'own result' })).isError).toBe(false)
+    expect((await tool.call({ file_path: path.join(root, 'a/result'), content: 'forbidden' })).isError).toBe(true)
+    expect(write).toHaveBeenCalledOnce(); expect(await fs.readFile(path.join(root, 'b/result'), 'utf8')).toBe('own result')
+    await expect(fs.stat(path.join(root, 'a/result'))).rejects.toThrow()
+  })
+  it('cannot combine shell from one current source and CLI write from another', async () => {
+    const { scope, bash } = await resourceTools(), base = current.getMockImplementation()!
+    current.mockImplementation(async (kind, origin) => { const source = structuredClone(await base(kind, origin)); if (source) { if (kind === 'group') source.resolved.cli_access.provider = 'none'; else source.resolved.tool_access.shell = false }; return source })
+    const tool = scope.tools().find(tool => tool.name === 'Bash')!
+    expect((await tool.call({ command: 'crabot provider add' })).isError).toBe(true)
+    expect(bash).not.toHaveBeenCalled()
+  })
+  it('checks the final/repaired input again and freezes arguments while authority is resolved', async () => {
+    const { scope, write } = await resourceTools(), tool = scope.tools().find(tool => tool.name === 'Write')!
+    expect((await tool.authorization!.check({ file_path: path.join(root, 'b/result') })).allowed).toBe(true)
+    expect((await tool.call({ file_path: path.join(root, 'a/result'), content: 'bad repaired target' })).isError).toBe(true)
+    const input = { file_path: path.join(root, 'b/result'), content: 'original' }, pending = tool.call(input)
+    input.file_path = path.join(root, 'a/result'); input.content = 'mutated'
+    expect((await pending).isError).toBe(false); expect(write).toHaveBeenCalledOnce()
+    expect(await fs.readFile(path.join(root, 'b/result'), 'utf8')).toBe('original')
+  })
+  it('does not call a stale raw closure after configuration removal or a closed original request', async () => {
+    const { scope, write, disable } = await resourceTools(), tool = scope.tools().find(tool => tool.name === 'Write')!
+    disable()
+    expect((await tool.call({ file_path: path.join(root, 'b/result'), content: 'bad' })).isError).toBe(true)
+    await requests.close(key, ownerRequest)
+    expect((await tool.call({ file_path: path.join(root, 'b/result'), content: 'bad' })).output).toContain('REQUEST_CLOSED')
+    expect(write).not.toHaveBeenCalled()
+  })
+  it('keeps a child rebound entity tool owned by the child while rechecking the original request', async () => {
+    const { scope, output } = await resourceTools(), original = scope.tools(false).find(tool => tool.name === 'Output')!
+    const child = vi.fn(async () => ({ output: 'CHILD_ENTITY', isError: false }))
+    const rebound = scope.wrapChildBound(original, { ...original, call: child })
+    expect((await rebound.call({ entity_id: 'child-entity' })).output).toBe('CHILD_ENTITY')
+    expect(child).toHaveBeenCalledOnce(); expect(output).not.toHaveBeenCalled(); expect(rebound.authorization?.role).toBe('child')
+    await requests.close(key, ownerRequest)
+    expect((await rebound.call({ entity_id: 'child-entity' })).isError).toBe(true); expect(child).toHaveBeenCalledOnce()
+  })
+  it('reports unknown execution after a side effect instead of lying about an authorization denial or replaying', async () => {
+    const { scope, write } = await resourceTools(), tool = scope.tools().find(tool => tool.name === 'Write')!
+    write.mockImplementationOnce(async input => { await fs.writeFile(String(input.file_path), 'committed'); throw new Error('PRIVATE_ERROR_BODY') })
+    const result = await tool.call({ file_path: path.join(root, 'b/result'), content: 'body' })
+    expect(result.output).toBe('TOOL_EXECUTION_OUTCOME_UNKNOWN'); expect(result.isError).toBe(true); expect(write).toHaveBeenCalledOnce()
+    expect(await fs.readFile(path.join(root, 'b/result'), 'utf8')).toBe('committed')
+  })
+  it('keeps unavailable authority distinct from ordinary denial and never falls back to the legacy snapshot', async () => {
+    const { scope, write } = await resourceTools(), tool = scope.tools().find(tool => tool.name === 'Write')!
+    current.mockRejectedValue(new Error('RPC unavailable'))
+    expect((await tool.call({ file_path: path.join(root, 'b/result'), content: 'bad' })).output).toContain('CAPABILITY_UNKNOWN')
+    expect(write).not.toHaveBeenCalled()
   })
 
 })

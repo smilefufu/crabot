@@ -29,6 +29,11 @@ import type { LedgerWorker } from '../harness/ledger-types.js'
  * 构造 `SpawnSpec` 的契约套件与单测可能没有台账语境。工厂实现须自行决定缺省时的行为。
  */
 export interface BuiltinRuntimeContext {
+  /** Host-only verified request state; never persisted with adapter context. */
+  readonly request_runtime?: {
+    readonly guard: import('../harness/request-guard.js').WorkerRequestGuard
+    readonly ceilings: ReadonlyArray<import('../../manager/request-permission-sources.js').RequestPermissionSource>
+  }
   /** 仅执行分支注入；后台归属，不参与授权或 Worker 身份快照。 */
   readonly incarnation_id?: string
   readonly workspace_git?: WorkerWorkspaceGitContext
@@ -66,7 +71,7 @@ export interface BuiltinRuntimeContext {
  * `principal_permissions` 带进来——工厂对它只做读取,不重新解析(见该字段注释)。两者都经过
  * 本工厂,别混:一个现取、一个固定。
  */
-export type BuiltinRuntimeFactory = (ctx: BuiltinRuntimeContext) => SpawnSpec['builtin']
+export type BuiltinRuntimeFactory = (ctx: BuiltinRuntimeContext) => SpawnSpec['builtin'] | Promise<SpawnSpec['builtin']>
 
 function cliAccess(perm: 'none' | 'read' | 'write'): CliAccessConfig {
   return Object.fromEntries(CLI_DOMAINS.map((d: CliDomain) => [d, perm])) as CliAccessConfig

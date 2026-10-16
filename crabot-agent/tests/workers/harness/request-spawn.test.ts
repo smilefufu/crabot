@@ -1,3 +1,4 @@
+import { WorkerNotReadyError } from '../../../src/workers/implementation-selection.js'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
@@ -89,6 +90,92 @@ describe('request spawn binds before any carrier side effect', () => {
     if (point === 'workspace') expect(provision).not.toHaveBeenCalled()
   })
 
+  it('cannot use a host-supplied custom runtime or an ungranted default workspace to bypass the resource guard', async () => {
+    await expect(harness.spawnRequestWorker({ ...params, builtin: {} as never }, caller)).rejects.toThrow('HOST_CONFIGURED')
+    await expect(harness.spawnRequestWorker({ ...params, workspace: undefined }, caller)).rejects.toThrow(/PERMISSION_DENIED/)
+    expect(provision).not.toHaveBeenCalled(); expect(spawn).not.toHaveBeenCalled()
+  })
+  it('workspace instruction normalization cannot create a link through a read-only source', async () => {
+    await fs.writeFile(path.join(root, 'a/AGENTS.md'), 'rules')
+    const publicCaller = new ConversationRequestAuthority(requests, key, recordId, 'group', async () => structuredClone(group))
+    await expect(harness.spawnRequestWorker({ ...params, workspace: path.join(root, 'a') }, publicCaller)).rejects.toThrow(/PERMISSION_DENIED/)
+    expect(await fs.lstat(path.join(root, 'a/CLAUDE.md')).catch(() => null)).toBeNull()
+    expect(provision).not.toHaveBeenCalled(); expect(spawn).not.toHaveBeenCalled()
+  })
+  it.each(['input', 'resume', 'handoff', 'query', 'branch'] as const)('refuses %s with a closed original request even though the legacy snapshot would permit it', async operation => {
+    const { worker } = await harness.spawnRequestWorker(params, caller)
+    const mainline = worker.incarnations[0], adapter = (harness as any).deps.adapters.get('builtin')
+    const action = vi.fn(); Object.assign(adapter, { sendInput: action, resume: action, fork: action, respondToUi: action })
+    await requests.close(key, recordId)
+    if (operation === 'input') await expect((harness as any).attemptInput(adapter, { worker_id: worker.worker_id, impl: 'builtin', seq: 1, session_ref: 'actual-session' }, 'redirect', false)).rejects.toThrow('closed')
+    if (operation === 'resume') await expect((harness as any).reviveIncarnation(key, worker, mainline, adapter, 'resume')).rejects.toThrow('closed')
+    if (operation === 'handoff') await expect((harness as any).handoffIncarnation(key, worker, mainline, 'codex', 'handoff')).rejects.toThrow('closed')
+    if (operation === 'query') await expect(harness.queryWorker(worker.worker_id, 'query')).rejects.toThrow('closed')
+    if (operation === 'branch') {
+      const fork = { ...mainline, incarnation_id: 'fork-inc', seq: 2, forked_from: mainline.incarnation_id, query_id: 'fork-query' }
+      await ledger.upsertWorker(key, worker.worker_id, prev => ({ ...prev!, incarnations: [...prev!.incarnations, fork] }))
+      const receipts = (harness as any).queryReceiptStore
+      await receipts.create({ worker_id: worker.worker_id, manager_key: key, query_id: 'fork-query', question_preview: 'query', created_at: time, updated_at: time, establishment_deadline_at: '2026-10-16T00:00:10Z', state: 'starting', manager_notification: { status: 'not_required' } })
+      await receipts.markRunning(worker.worker_id, 'fork-query', 2, time)
+      await expect(harness.sendToExecutionBranch(worker.worker_id, 'fork-inc', 'branch', 'delivery', async () => {})).rejects.toThrow('closed')
+    }
+    expect(action).not.toHaveBeenCalled()
+  })
+  it('a denied UI confirmation does not consume the snapshot or send a native key', async () => {
+    const { worker } = await harness.spawnRequestWorker(params, caller)
+    const mainline = worker.incarnations[0], adapter = (harness as any).deps.adapters.get('builtin')
+    const action = vi.fn(); adapter.respondToUi = action
+    const store = (harness as any).uiSnapshotStore
+    const snapshot = await store.prepare({ worker_id: worker.worker_id, manager_key: key, incarnation_id: mainline.incarnation_id,
+      impl: 'builtin', seq: 1, fingerprint: 'confirm-1', actions: [{ action_id: 'confirm', kind: 'keys', keys: ['Enter'] }], created_at: time }, true, time)
+    await requests.close(key, recordId)
+    await expect(harness.respondToWorkerUi(worker.worker_id, snapshot.snapshot_id, 'confirm')).rejects.toThrow('closed')
+    expect((await store.get(worker.worker_id, snapshot.snapshot_id)).status).toBe('active')
+    expect(action).not.toHaveBeenCalled()
+  })
+  it('current grants cannot promote a directory-scoped original request into a native full-host handoff', async () => {
+    const { worker } = await harness.spawnRequestWorker(params, caller)
+    friend!.resolved.storage = { workspace_path: '/', access: 'readwrite' }
+    await expect((harness as any).handoffIncarnation(key, worker, worker.incarnations[0], 'codex', 'switch')).rejects.toThrow(/PERMISSION_DENIED/)
+    expect(connection).toHaveBeenCalledOnce()
+  })
+  it('startup reconciliation preserves a broken binding and never probes it as a legacy Worker', async () => {
+    const { worker } = await harness.spawnRequestWorker(params, caller)
+    const adapter = (harness as any).deps.adapters.get('builtin'), state = vi.fn(async () => 'running')
+    adapter.state = state
+    await fs.rm(path.join(root, 'workers', worker.worker_id, 'context.json'))
+    const report = await harness.reconcileOnStartup()
+    expect(report.failed).toContain(worker.worker_id); expect(state).not.toHaveBeenCalled()
+    expect((await ledger.findWorker(worker.worker_id))!.worker.origin.request).toEqual(worker.origin.request)
+  })
+  it('a queued input rechecks its verified caller before delivery after that identity is revoked', async () => {
+    const { worker } = await harness.spawnRequestWorker(params, caller)
+    const adapter = (harness as any).deps.adapters.get('builtin'), action = vi.fn()
+    adapter.sendInput = action
+    const inbox = (harness as any).getInbox(worker.worker_id)
+    inbox.hold('fixture-pause')
+    const authorize = vi.fn(() => guard.authorizeControl(worker.worker_id, caller, async () => ({ allowed: true })))
+    await harness.sendToWorker(worker.worker_id, 'queued owner command', { authorize })
+    expect(inbox.pending).toBe(1); expect(action).not.toHaveBeenCalled()
+    friend = null
+    inbox.release('fixture-pause')
+    await expect((harness as any).flushInbox(worker.worker_id)).rejects.toThrow('PERMISSION_DENIED')
+    expect(authorize).toHaveBeenCalled(); expect(action).not.toHaveBeenCalled()
+    expect(inbox.pending).toBe(1)
+  })
+  it('preserves implementation readiness details without masking them as missing personal permission', async () => {
+    const failure = new WorkerNotReadyError('builtin', [], { builtin: 'model unavailable' })
+    ;(harness as any).deps.selectWorkerImpl = () => { throw failure }
+    await expect(harness.spawnRequestWorker(params, caller)).rejects.toBe(failure)
+    expect(connection).not.toHaveBeenCalled(); expect(resolve).not.toHaveBeenCalled()
+  })
+  it('a group-specific implementation rejection still permits a whole valid friend source', async () => {
+    ;(harness as any).deps.selectWorkerImpl = (_impl: unknown, _excluded: unknown, permissions: ResolvedPermissions) => {
+      if (permissions.storage?.access === 'read') throw new WorkerNotReadyError(undefined, ['builtin'], {})
+      return 'builtin'
+    }
+    expect((await harness.spawnRequestWorker(params, caller)).status).toBe('spawned')
+  })
   it('preserves a failed half-written binding and refuses to restart its original plan', async () => {
     const write = fs.writeFile.bind(fs)
     const fail = vi.spyOn(fs, 'writeFile').mockImplementation(async (file, ...args) => { if (String(file).includes('.context.json.tmp-')) throw new Error('context write failed'); return (write as any)(file, ...args) })

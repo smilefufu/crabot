@@ -444,6 +444,7 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
         const result = await harness.sendToWorker(worker_id, text, {
           managerKey: context().managerKey,
           deadline_at: new Date(deadlineAt).toISOString(),
+          ...(workerRequestCaller(callContext) ? { authorize: async () => { await authorizeWorker(worker_id, callContext) } } : {}),
           ...(immediate_redirect !== undefined ? { immediate_redirect } : {}),
           ...(legacyContinuationAuth ? { legacyContinuationAuth } : {}),
         })
@@ -481,6 +482,7 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
         await authorizeWorker(worker_id, callContext)
         const result = await harness.queryWorker(worker_id, question, {
           managerKey: context().managerKey,
+          ...(workerRequestCaller(callContext) ? { authorize: async () => { await authorizeWorker(worker_id, callContext) } } : {}),
         })
         return ok(result)
       } catch (error) {

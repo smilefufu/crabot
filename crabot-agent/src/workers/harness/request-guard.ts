@@ -54,7 +54,11 @@ export class WorkerRequestGuard {
     if (!bound) throw new Error('Worker has no request binding')
     if (bound.worker.task.status === 'closed') throw new Error('Worker is closed')
     const authority = new ConversationRequestAuthority(this.requests, bound.worker.manager_key, bound.request.request_id, bound.worker.origin.request!.execution_scope, this.resolveCurrent)
-    return authority.run(source => checkCompleteOperation(workerSource(source)), frame => execute({ ...frame, ceiling: workerSource(frame.ceiling), current: workerSource(frame.current) }))
+    return authority.run(source => checkCompleteOperation(workerSource(source)), async frame => {
+      const current = await this.load(workerId)
+      if (!current || current.worker.task.status === 'closed' || !isDeepStrictEqual(current.worker.origin.request, bound.worker.origin.request)) throw new Error('Worker request changed or closed')
+      return execute({ ...frame, ceiling: workerSource(frame.ceiling), current: workerSource(frame.current) })
+    })
   }
   async authorizeControl(workerId: string, caller: ConversationRequestAuthority, checkCompleteOperation: (source: RequestPermissionSource) => Promise<PermissionDecision>): Promise<void> {
     const found = await this.ledger.findWorker(workerId)

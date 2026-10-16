@@ -142,7 +142,8 @@ async function provesLegacyClaudeOwnership(params: {
   return false
 }
 
-async function createRelativeLink(targetName: 'AGENTS.md' | 'CLAUDE.md', linkPath: string): Promise<void> {
+async function createRelativeLink(targetName: 'AGENTS.md' | 'CLAUDE.md', linkPath: string, authorize?: (file: string, write: boolean) => Promise<void>): Promise<void> {
+  if (authorize) await authorize(linkPath, true)
   try {
     await fs.symlink(targetName, linkPath, 'file')
   } catch (error) {
@@ -150,12 +151,13 @@ async function createRelativeLink(targetName: 'AGENTS.md' | 'CLAUDE.md', linkPat
   }
 }
 
-async function migrateLegacyClaudeBridge(workspaceRoot: string): Promise<void> {
+async function migrateLegacyClaudeBridge(workspaceRoot: string, authorize?: (file: string, write: boolean) => Promise<void>): Promise<void> {
   const claudePath = join(workspaceRoot, 'CLAUDE.md')
   const backup = join(workspaceRoot, `.CLAUDE.md.crabot-migrate-${randomUUID()}`)
+  if (authorize) { await authorize(claudePath, true); await authorize(backup, true) }
   await fs.rename(claudePath, backup)
   try {
-    await createRelativeLink('AGENTS.md', claudePath)
+    await createRelativeLink('AGENTS.md', claudePath, authorize)
   } catch (error) {
     await fs.rename(backup, claudePath)
     throw error
@@ -163,7 +165,8 @@ async function migrateLegacyClaudeBridge(workspaceRoot: string): Promise<void> {
   await fs.rm(backup)
 }
 
-async function normalizeWorkspaceInstructionEntries(workersDir: string, workspaceRoot: string): Promise<boolean> {
+async function normalizeWorkspaceInstructionEntries(workersDir: string, workspaceRoot: string, authorize?: (file: string, write: boolean) => Promise<void>): Promise<boolean> {
+  if (authorize) await authorize(workspaceRoot, false)
   let rootStat: Awaited<ReturnType<typeof fs.stat>>
   try {
     rootStat = await fs.stat(workspaceRoot)
@@ -174,6 +177,7 @@ async function normalizeWorkspaceInstructionEntries(workersDir: string, workspac
 
   const agentsPath = join(workspaceRoot, 'AGENTS.md')
   const claudePath = join(workspaceRoot, 'CLAUDE.md')
+  if (authorize) { await authorize(agentsPath, false); await authorize(claudePath, false) }
   const [agents, claude] = await Promise.all([
     inspectInstructionEntry(agentsPath, 'AGENTS.md'),
     inspectInstructionEntry(claudePath, 'CLAUDE.md'),
@@ -181,11 +185,11 @@ async function normalizeWorkspaceInstructionEntries(workersDir: string, workspac
 
   if (agents.kind === 'missing' && claude.kind === 'missing') return false
   if (agents.kind === 'file' && claude.kind === 'missing') {
-    await createRelativeLink('AGENTS.md', claudePath)
+    await createRelativeLink('AGENTS.md', claudePath, authorize)
     return true
   }
   if (agents.kind === 'missing' && claude.kind === 'file') {
-    await createRelativeLink('CLAUDE.md', agentsPath)
+    await createRelativeLink('CLAUDE.md', agentsPath, authorize)
     return true
   }
   if (agents.kind === 'symlink' && claude.kind === 'file') {
@@ -200,7 +204,7 @@ async function normalizeWorkspaceInstructionEntries(workersDir: string, workspac
     if (!await provesLegacyClaudeOwnership({ workersDir, workspaceRoot, agents, claude })) {
       throw new Error('AGENTS.md 与 CLAUDE.md 是两份独立正文，无法自动确定权威来源')
     }
-    await migrateLegacyClaudeBridge(workspaceRoot)
+    await migrateLegacyClaudeBridge(workspaceRoot, authorize)
     return true
   }
   throw new Error('AGENTS.md 与 CLAUDE.md 必须由一份普通正文和指向它的有效软链接组成')
@@ -216,13 +220,15 @@ export async function captureWorkspaceInstructions(params: {
   readonly incarnationId: string
   readonly workspaceRoot: string
   readonly capturedAt: string
+  readonly authorize?: (file: string, write: boolean) => Promise<void>
 }): Promise<CapturedWorkspaceInstructions> {
   return mutexFor(params.workspaceRoot).run(async () => {
-    const present = await normalizeWorkspaceInstructionEntries(params.workersDir, params.workspaceRoot)
+    const present = await normalizeWorkspaceInstructionEntries(params.workersDir, params.workspaceRoot, params.authorize)
     if (!present) return { snapshot: { source: 'absent', captured_at: params.capturedAt } }
 
     let text: string
     try {
+      if (params.authorize) await params.authorize(join(params.workspaceRoot, 'AGENTS.md'), false)
       text = await fs.readFile(join(params.workspaceRoot, 'AGENTS.md'), 'utf-8')
     } catch (error) {
       throw new Error(`AGENTS.md 正文无法读取: ${(error as Error).message}`)

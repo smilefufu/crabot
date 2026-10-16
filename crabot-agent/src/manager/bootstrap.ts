@@ -1,3 +1,5 @@
+import { isDeepStrictEqual } from 'node:util'
+import { allowed } from '../permissions/tool-authorization.js'
 import { ConversationRequestAuthority } from './conversation-request-authority.js'
 import { voiceOutputPort } from './voice-output-port.js'
 import { createHash } from 'node:crypto'
@@ -416,6 +418,19 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
   let reconcileContinuationCandidatesForWorker: ((workerId: string) => void) | undefined
 
   let requestGuard: WorkerRequestGuard
+  const resolveBuiltinRuntime: BuiltinRuntimeFactory | undefined = deps.builtinSpawnDefaults ? async ctx => {
+    const bound = await requestGuard.load(ctx.worker_id)
+    if (!bound) {
+      if (ctx.origin?.request) throw new Error('CAPABILITY_UNKNOWN: Adapter request has no verified Worker binding')
+      return deps.builtinSpawnDefaults!(ctx)
+    }
+    const wire = (value: unknown) => JSON.parse(JSON.stringify(value) ?? 'null')
+    if (!isDeepStrictEqual(wire(ctx.origin), wire(bound.worker.origin)) || !bound.worker.incarnations.some(item => item.workspace === ctx.workspace.root)) throw new Error('CAPABILITY_UNKNOWN: Adapter context does not match its request-bound Worker')
+    return requestGuard.runResource(ctx.worker_id, async () => allowed, async () => deps.builtinSpawnDefaults!({ ...ctx, request_runtime: {
+      guard: requestGuard,
+      ceilings: [bound.request.permission_sources.group, ...(bound.worker.origin.request!.execution_scope === 'request' && bound.request.permission_sources.friend ? [bound.request.permission_sources.friend] : [])],
+    } }))
+  } : undefined
   const harnessDeps: HarnessDeps = {
     requestGuard: () => requestGuard,
     adapters,
@@ -500,7 +515,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
       })
     },
     redactFailureReason: deps.redactFailureReason,
-    builtinSpawnDefaults: deps.builtinSpawnDefaults,
+    builtinSpawnDefaults: resolveBuiltinRuntime,
     assertExecutionAdmission: deps.assertExecutionAdmission,
     assertExecutionPolicy: deps.assertExecutionPolicy,
     capabilityBundle: deps.capabilityBundle,
@@ -529,7 +544,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
       dataDir: builtinDataDir,
       onStateChange: harness.handleStateChange,
       onNativeActivity: harness.handleNativeActivity,
-      resolveRuntime: deps.builtinSpawnDefaults,
+      resolveRuntime: resolveBuiltinRuntime,
       traceHooks: deps.builtinTraceHooks,
       traceReader: deps.builtinTraceReader,
     }),
