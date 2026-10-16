@@ -12,7 +12,7 @@ export const TOOL_ENTRY_EXPLANATIONS: Record<EffectiveToolCategory, string> = {
   file_io: '内置文件与项目文档，受 storage 真实目录和读写级别限制；未配置范围不允许访问。',
   shell: '以运行账号执行主机命令，可访问文件、网络和远程机器，不受内置文件范围隔离。',
   mcp_skill: '已启用的外部 MCP 与用户 Skill；服务操作不受内置文件范围隔离，Skill 不增加工具权限。',
-  desktop: '仅可信 Master 私聊的桌面控制；子 Agent 不继承。',
+  desktop: '桌面控制仅限经核验的 Master 私聊或 Master 本人独立请求；独立请求仍须同时满足原授权上限与当前授权。共享群主控和子 Agent 不继承。',
 }
 
 export function effectiveToolAccess(value: Partial<Record<EffectiveToolCategory | RetiredToolCategory, boolean>>): EffectiveToolAccessConfig {
