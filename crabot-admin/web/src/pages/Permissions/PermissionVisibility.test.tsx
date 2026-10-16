@@ -41,7 +41,7 @@ describe('permission category visibility', () => {
     expect(screen.queryByText('远程执行')).not.toBeInTheDocument()
     expect(screen.queryByText('任务管理')).not.toBeInTheDocument()
     expect(screen.queryByText('浏览器')).not.toBeInTheDocument()
-    expect(screen.getByText('未授权内置文件范围')).toBeInTheDocument()
+    expect(screen.getByText('未授权额外目录')).toBeInTheDocument()
     expect(screen.getByText(/后端数据过滤尚未核实/)).toBeInTheDocument()
     fireEvent.change(screen.getByPlaceholderText('例如：高级用户'), { target: { value: 'New' } })
     fireEvent.click(screen.getByLabelText('本地命令'))

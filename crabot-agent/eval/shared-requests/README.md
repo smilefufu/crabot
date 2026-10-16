@@ -1,6 +1,6 @@
 # B7 受控真实模型重放
 
-此目录使用生产 Manager / 独立请求 / Harness / builtin Worker / 工具守卫 / Voice 标签解析器。只有模型连接使用当前 Admin 的 powerful slot；身份、群、好友、文件、Memory、MCP、Channel 与语音播放回执均为合成或隔离实现。内置 Worker 实际读写临时目录；禁用 Shell、桌面和原生 CLI，不连接真人渠道，不采集声音、不产生播报、不部署。
+此目录使用生产 Manager / 独立请求 / Harness / builtin Worker / 工具守卫 / Voice 标签解析器。只有模型连接使用当前 Admin 的 powerful slot；身份、群、好友、文件、Memory、MCP、Channel 与语音播放回执均为合成或隔离实现。每例临时设置并最终恢复 `WORKER_WORKSPACES_DIR`，不继承现场受管根。内置 Worker 实际读写临时目录；禁用 Shell、桌面和原生 CLI，不连接真人渠道，不采集声音、不产生播报、不部署。
 
 ## 步骤 → 验证
 

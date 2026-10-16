@@ -444,11 +444,17 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
   }
   const resolveBuiltinRuntime: BuiltinRuntimeFactory | undefined = deps.builtinSpawnDefaults ? async ctx => {
     const bound = await requestGuard.load(ctx.worker_id)
+    const found = await ledger.findWorker(ctx.worker_id), saved = await workerContextStore.read(ctx.worker_id)
+    const wire = (value: unknown) => JSON.parse(JSON.stringify(value) ?? 'null')
+    const managed = harness.managedWorkspaceScope(ctx.worker_id, ctx.workspace.root)
+    if (found && saved?.principal_permissions && saved.manager_key === found.managerKey
+      && saved.creator_friend_id === found.worker.origin.creator_friend_id && isDeepStrictEqual(wire(ctx.origin), wire(found.worker.origin))
+      && isDeepStrictEqual(wire(ctx.principal_permissions), wire(saved.principal_permissions)) && await managed()) ctx = { ...ctx, managed_workspace: managed }
+    else ctx = { ...ctx, managed_workspace: undefined }
     if (!bound) {
       if (ctx.origin?.request) throw new Error('CAPABILITY_UNKNOWN: Adapter request has no verified Worker binding')
       return deps.builtinSpawnDefaults!(ctx)
     }
-    const wire = (value: unknown) => JSON.parse(JSON.stringify(value) ?? 'null')
     if (!isDeepStrictEqual(wire(ctx.origin), wire(bound.worker.origin)) || !bound.worker.incarnations.some(item => item.workspace === ctx.workspace.root)) throw new Error('CAPABILITY_UNKNOWN: Adapter context does not match its request-bound Worker')
     return requestGuard.runResource(ctx.worker_id, async () => allowed, async () => deps.builtinSpawnDefaults!({ ...ctx, request_runtime: {
       guard: requestGuard,
@@ -1060,6 +1066,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
         workboard: { store: workboardStore, managerKey: key },
         projectDocs: {
           ledger: sharedProjectLedger,
+          managedWorkspace: (id, workspace) => harness.managedWorkspaceScope(id, workspace),
           readWorkerContext: (workerId) => workerContextStore.read(workerId),
           managerKey: key,
           managerPrincipalPermissions: managerPermissions ?? undefined,

@@ -16,7 +16,8 @@ import { requestSourceFor } from './conversation-request-store.js'
 import { RequestManagerToolScope, requestMemoryScopes } from './tools/request-tool-scope.js'
 import { buildManagerToolFace, type ToolFaceDeps } from './tools/tool-face.js'
 import { readObservation, observationFile, executionObservation, persistObservation, requestObservation } from '../permissions/execution-observation.js'
-import { allowed, denied, checkFileAccess } from '../permissions/tool-authorization.js'
+import { checkProjectFileAccess } from './tools/project-doc-tools.js'
+import { allowed, denied } from '../permissions/tool-authorization.js'
 
 interface Dependencies {
   canRun?(): boolean
@@ -136,7 +137,7 @@ export function createConversationRequestLoop(context: RequestRunContext, deps: 
       schedule: { targetSession: target, ...(source.sender_friend_id ? { creatorFriendId: source.sender_friend_id } : {}),
         canCreate: !!source.sender_friend_id, resolvePermissions: async () => (recheck ? await recheck() : actor).resolved },
       isSystemThread: false, workboard: { store: board, managerKey: key },
-      projectDocs: { ledger: visibleLedger, readWorkerContext: id => deps.contexts.read(id), managerKey: key, managerPrincipalPermissions: permissions },
+      projectDocs: { ledger: visibleLedger, managedWorkspace: (id, workspace) => deps.harness.managedWorkspaceScope(id, workspace), readWorkerContext: id => deps.contexts.read(id), managerKey: key, managerPrincipalPermissions: permissions },
     }
   }
   const scope = new RequestManagerToolScope({ context, raw, checkOperation: async (name, input, actor) => {
@@ -149,7 +150,7 @@ export function createConversationRequestLoop(context: RequestRunContext, deps: 
       const found = await visibleLedger.findWorker(input.worker_id)
       const workspace = found?.worker.incarnations.filter(item => item.forked_from === undefined).at(-1)?.workspace
       if (!workspace) return denied('PERMISSION_DENIED', '执行器目录不可核实')
-      return checkFileAccess(actor.resolved, workspace, process.cwd(), false)
+      return checkProjectFileAccess(raw(actor).projectDocs, workspace)
     }
     if (name.endsWith('_schedule') || name === 'list_schedules') {
       const read = name === 'get_schedule' || name === 'list_schedules', access = actor.resolved.cli_access.schedule

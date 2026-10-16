@@ -6,7 +6,8 @@ import type { RequestExecutionCapabilities, ExecutionCapabilities } from './exec
 import type { ToolFaceDeps } from './tool-face.js'
 import { buildManagerToolFace } from './tool-face.js'
 import { boundedRequestPermissions } from '../../workers/harness/request-permissions.js'
-import { allowed, denied, checkFileAccess } from '../../permissions/tool-authorization.js'
+import { checkProjectFileAccess } from './project-doc-tools.js'
+import { allowed, denied } from '../../permissions/tool-authorization.js'
 
 /** Existing group query/label fallback; scopes do not create a new Memory visibility boundary. */
 export function requestMemoryScopes(source: RequestPermissionSource, sessionId: string): string[] {
@@ -37,7 +38,7 @@ export class RequestManagerToolScope {
     const entry = await tool.authorization.check(input)
     if (!entry.allowed) return entry
     if (name === 'inspect_project_docs' && typeof input.project_root === 'string') {
-      const file = await checkFileAccess(source.resolved, input.project_root, process.cwd(), false)
+      const file = await checkProjectFileAccess(this.deps.raw(source).projectDocs, input.project_root)
       if (!file.allowed) return file
     }
     return this.deps.checkOperation(name, input, source)

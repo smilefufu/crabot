@@ -428,7 +428,7 @@ describe('DialogObjectsPage', () => {
     expect(screen.queryByLabelText('权限模板')).not.toBeInTheDocument()
     expect(screen.getByLabelText('记忆读写')).toBeChecked()
     expect(screen.queryByLabelText('桌面控制（仅 Master 私聊）')).not.toBeInTheDocument()
-    expect(screen.getByLabelText('启用存储')).toBeChecked()
+    expect(screen.getByLabelText('授权额外目录')).toBeChecked()
     expect(screen.getByLabelText('范围标识')).toHaveValue('friend:friend-1')
   })
 
@@ -441,7 +441,7 @@ describe('DialogObjectsPage', () => {
     })
 
     fireEvent.click(screen.getByLabelText('消息操作'))
-    fireEvent.change(screen.getByLabelText('工作区路径'), { target: { value: '/data/friend-1' } })
+    fireEvent.change(screen.getByLabelText('额外目录路径'), { target: { value: '/data/friend-1' } })
     fireEvent.click(screen.getByLabelText('自定义范围'))
     fireEvent.change(screen.getByLabelText('范围标识'), {
       target: { value: 'friend:friend-1, friend:shared' },
@@ -809,8 +809,8 @@ describe('DialogObjectsPage', () => {
     expect(getSessionConfig).toHaveBeenCalledWith('wechat-main', 'group-1')
     expect(screen.queryByLabelText('桌面控制')).not.toBeInTheDocument()
     expect(screen.getByLabelText('消息操作')).not.toBeChecked()
-    expect(screen.getByLabelText('启用存储')).toBeChecked()
-    expect(screen.getByLabelText('工作区路径')).toHaveValue('/srv/dialog/group-1')
+    expect(screen.getByLabelText('授权额外目录')).toBeChecked()
+    expect(screen.getByLabelText('额外目录路径')).toHaveValue('/srv/dialog/group-1')
     expect(screen.getByLabelText('访问级别')).toHaveValue('readwrite')
     expect(screen.getByLabelText('自定义范围')).toBeChecked()
     expect(screen.getByLabelText('范围标识')).toHaveValue('group-scope-a, group-scope-b')
@@ -889,9 +889,9 @@ describe('DialogObjectsPage', () => {
 
     expect(await screen.findByRole('heading', { name: '群聊权限编辑' })).toBeInTheDocument()
 
-    const storageToggle = await screen.findByLabelText('启用存储')
+    const storageToggle = await screen.findByLabelText('授权额外目录')
     expect(storageToggle).toBeChecked()
-    const storagePath = screen.getByLabelText('工作区路径')
+    const storagePath = screen.getByLabelText('额外目录路径')
     fireEvent.click(screen.getByLabelText('消息操作'))
     fireEvent.change(storagePath, { target: { value: '/data/dialog/group-1' } })
     fireEvent.change(screen.getByLabelText('访问级别'), { target: { value: 'read' } })

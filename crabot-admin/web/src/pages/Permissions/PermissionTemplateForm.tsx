@@ -283,6 +283,7 @@ export const PermissionTemplateForm: React.FC<PermissionTemplateFormProps> = ({
       </div>
 
       {/* Storage */}
+      <div style={hintStyle}>file_io 开启后，宿主核验的任务自有默认目录可读写；以下配置仅限制额外目录。关闭 file_io 会同时关闭两类文件入口。</div>
       <div>
         <label style={{
           ...labelStyle,
@@ -297,13 +298,13 @@ export const PermissionTemplateForm: React.FC<PermissionTemplateFormProps> = ({
             disabled={isSystem}
             style={{ accentColor: 'var(--primary)' }}
           />
-          启用文件访问
+          授权额外目录
         </label>
-        {!form.storage_enabled && <div style={hintStyle}>未授权内置文件范围</div>}
+        {!form.storage_enabled && <div style={hintStyle}>未授权额外目录</div>}
         {form.storage_enabled && (
           <div style={{ display: 'grid', gap: '0.5rem', marginTop: '0.5rem', paddingLeft: '1.5rem' }}>
             <div>
-              <label style={labelStyle}>工作目录路径</label>
+              <label style={labelStyle}>额外目录路径</label>
               <input
                 className="input"
                 value={form.workspace_path}

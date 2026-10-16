@@ -75,6 +75,38 @@ updateConfig() { }, async *stream(params) {
 })
 
 
+test('production runtime verifies the omitted default root and executes file tools there', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'b7-default-harness-'))
+  let shared = 0, request = 0, worker = 0
+  const before = process.env.WORKER_WORKSPACES_DIR
+  process.env.WORKER_WORKSPACES_DIR = path.join(root, 'must-not-be-used')
+  const adapter = { updateConfig() { }, async *stream(params) {
+    if (params.tools.some(tool => tool.name === 'Write')) {
+      const [id] = await fs.readdir(path.join(root, 'data', 'workspaces'))
+      const file = path.join(root, 'data', 'workspaces', id, 'result.txt')
+      yield* response(worker++ === 0 ? { name: 'Write', input: { file_path: file, content: 'DEFAULT_OK' } } : undefined); return
+    }
+    if (params.systemPrompt.includes('已经由系统固定来源的请求')) {
+      yield* response(request++ === 0 ? { name: 'spawn_worker', input: { impl: 'builtin', title: '默认目录实际写入', prompt: '在自己的默认目录写入 result.txt。' } } : undefined); return
+    }
+    if (!params.tools.some(tool => tool.name === 'execute_request')) { yield* response({ name: 'load_tool_family', input: { family: 'crabot' } }); return }
+    yield* response(shared++ === 0 ? { name: 'execute_request', input: { source_id: originalSource(params), delivery: 'origin' } } : undefined)
+  } }
+  try {
+    const result = await runCase({ scenario: { id: 'offline-default', task: 'read' }, root: path.join(root, 'data'), liveAdapter: adapter, model: 'scripted', connection: { endpoint: 'https://example.invalid', apikey: 'not-a-real-key', format: 'openai', model_id: 'scripted' }, record() {}, budget: { take: () => true }, timeoutMs: 15000 })
+    assert.equal(result.status, 'passed', JSON.stringify(result))
+    assert.equal(result.worker_records.length, 1)
+    const workspace = result.worker_records[0].worker.incarnations[0].workspace
+    assert.equal(await fs.readFile(path.join(workspace, 'result.txt'), 'utf8'), 'DEFAULT_OK')
+    assert.equal(result.worker_records[0].bound.author, 'f-owner')
+    assert.equal(process.env.WORKER_WORKSPACES_DIR, path.join(root, 'must-not-be-used'))
+    await assert.rejects(fs.stat(path.join(root, 'must-not-be-used')))
+  } finally {
+    if (before === undefined) delete process.env.WORKER_WORKSPACES_DIR; else process.env.WORKER_WORKSPACES_DIR = before
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
 test('offline harness discovers personal MCP through production search and executes via request scope', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'b7-mcp-harness-'))
   let shared = 0, request = 0; const events = []

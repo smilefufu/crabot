@@ -346,6 +346,34 @@ describe('production isolated request tool closure', () => {
     expect(rpc.mock.calls.some(call => call[1] === 'send_message' || call[1] === 'upload_media')).toBe(false)
   })
 
+  it('reads and delivers only an owned verified default task directory, without changing stored scopes', async () => {
+    vi.stubEnv('WORKER_WORKSPACES_DIR', path.join(root, 'workspaces'))
+    friend.resolved.tool_access.file_io = true
+    const initial = await execute(), record = (await stack.conversationRequests.get(key, initial.request_id))!.record
+    await bindPersonalWorker(record)
+    const workspace = path.join(root, 'workspaces', 'w-personal'), file = path.join(workspace, 'facts.md')
+    await fs.mkdir(workspace, { recursive: true }); await fs.writeFile(file, 'OWNED_DEFAULT_ARTIFACT')
+    await stack.ledger.upsertWorker(key, 'w-personal', w => ({ ...w!, incarnations: [{ incarnation_id: 'fixture-incarnation', impl: 'builtin', seq: 1, state: 'idle', workspace, session_ref: 'fixture', started_at: new Date().toISOString() }] }))
+    const store = new WorkerContextStore(path.join(root, 'agent', 'workers')), saved = await store.read('w-personal')
+    await store.write('w-personal', { ...saved!, principal_permissions: structuredClone(friend.resolved) })
+    inspect = async params => {
+      results.read = await tool(params, 'inspect_project_docs').call({ project_root: workspace, operation: 'read', path: 'facts.md' }, context)
+      results.send = await tool(params, 'send_message').call({ channel_id: 'chat', session_id: 'owner-private', content: 'artifact', file_path: file, post_send_action: 'none' }, context)
+    }
+    const inputs = await stack.trustedHumanInputs.capture(key, [{ ...message(), platform_message_id: 'owned-files' }])
+    await stack.requestRunner.execute(key, inputs, { source_id: inputs[0].source_id, delivery: 'origin' })
+    expect(results.read).toMatchObject({ isError: false }); expect(results.read.output).toContain('OWNED_DEFAULT_ARTIFACT')
+    expect(results.send.isError).toBe(false)
+    expect(rpc.mock.calls.some(call => call[1] === 'send_message' && call[2].content?.file_path === file)).toBe(true)
+    expect((await store.read('w-personal'))!.principal_permissions!.storage).toBeNull()
+    // The same file path never supplies ownership to another same-permission requester.
+    current.friend = { ...friend, subject_id: 'f-peer' }
+    inspect = async params => { results.denied = await tool(params, 'inspect_project_docs').call({ project_root: workspace, operation: 'read', path: 'facts.md' }, context) }
+    const peerInputs = await stack.trustedHumanInputs.capture(key, [{ ...message(), platform_message_id: 'revoked-files' }])
+    await stack.requestRunner.execute(key, peerInputs, { source_id: peerInputs[0].source_id, delivery: 'origin' })
+    expect(results.denied?.isError ?? true).toBe(true)
+  })
+
   it('keeps loaded families isolated even across requests from the same friend', async () => {
     inspect = async params => { planned = calls.length === 1 ? { name: 'load_tool_family', input: { family: 'memory' } } : undefined }
     await execute()

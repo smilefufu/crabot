@@ -4,7 +4,7 @@ import type { ConversationRequestAuthority } from '../../manager/conversation-re
 import type { RequestPermissionSource } from '../../manager/request-permission-sources.js'
 import type { WorkerRequestGuard } from './request-guard.js'
 import { boundedRequestPermissions } from './request-permissions.js'
-import { allowed, denied, checkFileAccess } from '../../permissions/tool-authorization.js'
+import { allowed, denied, checkFileAccess, type ManagedWorkspaceScope } from '../../permissions/tool-authorization.js'
 import { createHash } from 'node:crypto'
 import { executionObservation, persistObservation, observationFile, readObservation } from '../../permissions/execution-observation.js'
 /**
@@ -1174,7 +1174,7 @@ export class WorkerHarness {
             origin: { ...p.origin, trigger_type: 'message', creator_friend_id: frame.source.sender_friend_id ?? undefined, request },
             report_to: { channel_id: frame.source.message.session.channel_id, session_id: frame.source.message.session.session_id },
             target_session: { ...frame.source.message.session, type: 'group' }, principal_permissions: principal,
-          }, workerId, recheckSpawn, (file, write) => caller.run(source => checkFileAccess(source.resolved, file, '/', write), async () => undefined))
+          }, workerId, recheckSpawn, (file, write, managed) => caller.run(source => checkFileAccess(source.resolved, file, '/', write, managed), async () => undefined))
           return { status: 'spawned' as const, worker }
         }))
       })
@@ -1184,7 +1184,7 @@ export class WorkerHarness {
     }
   }
 
-  private async spawnWorkerInternal(p: SpawnWorkerParams, workerId: string, beforeProvision?: () => Promise<void>, authorizeFile?: (file: string, write: boolean) => Promise<void>): Promise<LedgerWorker> {
+  private async spawnWorkerInternal(p: SpawnWorkerParams, workerId: string, beforeProvision?: () => Promise<void>, authorizeFile?: (file: string, write: boolean, managed: ManagedWorkspaceScope) => Promise<void>): Promise<LedgerWorker> {
     this.deps.assertExecutionAdmission?.()
     const incarnationId = randomUUID()
     // P6-C §2：显式/省略统一走纯选择器（显式只查自己不 fallback；省略 default→固定顺序）。
@@ -1206,13 +1206,18 @@ export class WorkerHarness {
       if (admission) await admission.dispose()
       throw error
     }
+    let admissionDisposed = false
+    let admissionRetained = false
+    const disposeAdmission = async () => {
+      if (admission && !admissionDisposed && !admissionRetained) { admissionDisposed = true; await admission.dispose() }
+    }
     let fenceReleased = false
     const releaseFence = () => { if (fence && !fenceReleased) { fenceReleased = true; fence.release() } }
     const adapter = this.deps.adapters.get(impl)
     if (!adapter) {
       // 失败路径必须 dispose：runtime 目录（如 codex CODEX_HOME）不得残留。
       releaseFence()
-      if (admission) await admission.dispose()
+      await disposeAdmission()
       throw new Error(`WorkerHarness.spawnWorker: no adapter registered for impl '${impl}'`)
     }
 
@@ -1223,13 +1228,19 @@ export class WorkerHarness {
       workspace = await this.deps.workspaces.resolve(workerId, p.workspace)
     } catch (error) {
       releaseFence()
-      if (admission) await admission.dispose()
+      await disposeAdmission()
       throw error
     }
 
+    const managed = this.deps.workspaces.fileScope(workerId, workspace.root)
+    const authorize = async (file: string, write: boolean) => {
+      if (authorizeFile) return authorizeFile(file, write, managed)
+      const access = await checkFileAccess(p.principal_permissions, file, '/', write, managed)
+      if (!access.allowed) throw new Error(access.reason)
+    }
     return this.withLock(workerId, async () => {
       const startedAt = this.deps.now()
-      const workspaceGit = (await this.checkWorkspaceGit(workspace.root, p.principal_permissions, undefined, authorizeFile)).current
+      const workspaceGit = (await this.checkWorkspaceGit(workspace.root, p.principal_permissions, undefined, authorize)).current
       const gitContext: WorkerWorkspaceGitContext = {
         worker_id: workerId, incarnation_id: incarnationId, workspace_root: workspace.root, baseline: workspaceGit,
       }
@@ -1239,7 +1250,7 @@ export class WorkerHarness {
         incarnationId,
         workspaceRoot: workspace.root,
         capturedAt: startedAt,
-        ...(authorizeFile ? { authorize: authorizeFile } : {}),
+        authorize,
       })
       const initial: LedgerWorker = {
         worker_id: workerId,
@@ -1346,7 +1357,7 @@ export class WorkerHarness {
         await this.deps.reportWorkerOutcome?.(impl, null)
       } catch (err) {
         releaseFence()
-        if (admission) await admission.dispose()
+        await disposeAdmission()
         const now = this.deps.now()
         const failed = await this.deps.ledger.upsertWorker(p.managerKey, workerId, (prev) => {
           if (!prev) return undefined
@@ -1405,8 +1416,11 @@ export class WorkerHarness {
       // spawn 返回即终态（启动期握手超时等）时不会有终态钩子再触发——立即 dispose。
       releaseFence()
       if (admission) {
-        if (initialState === 'exited') await admission.dispose()
-        else this.connectionDisposers.set(`${workerId}:1`, admission.dispose)
+        if (initialState === 'exited') await disposeAdmission()
+        else {
+          this.connectionDisposers.set(`${workerId}:1`, admission.dispose)
+          admissionRetained = true
+        }
       }
       const inbox = this.getInbox(workerId)
       inbox.release()
@@ -1432,6 +1446,10 @@ export class WorkerHarness {
         }, spawned?.task.status)
       }
       return spawned as LedgerWorker
+    }).catch(async error => {
+      releaseFence()
+      await disposeAdmission()
+      throw error
     })
   }
 
@@ -2364,7 +2382,11 @@ export class WorkerHarness {
 
       const handoffAt = this.deps.now()
       const incarnationId = randomUUID()
-      const workspaceGit = (await this.checkWorkspaceGit(workspace.root, auth.principal_permissions)).current
+      const authorizeFile = async (file: string, write: boolean) => {
+        const access = await checkFileAccess(auth.principal_permissions, file, '/', write, this.deps.workspaces.fileScope(worker.worker_id, workspace.root))
+        if (!access.allowed) throw new Error(access.reason)
+      }
+      const workspaceGit = (await this.checkWorkspaceGit(workspace.root, auth.principal_permissions, undefined, authorizeFile)).current
       const gitContext: WorkerWorkspaceGitContext = {
         worker_id: worker.worker_id, incarnation_id: incarnationId, workspace_root: workspace.root, baseline: workspaceGit,
       }
@@ -2374,7 +2396,8 @@ export class WorkerHarness {
         incarnationId,
         workspaceRoot: workspace.root,
         capturedAt: handoffAt,
-      })
+        authorize: authorizeFile,
+      }).catch(async error => { if (admission) await admission.dispose(); throw error })
       const expiredAfterInstructions = this.expiredInboxDelivery(item, legacy.seq)
       if (expiredAfterInstructions) {
         if (admission) void admission.dispose().catch(() => {})
@@ -3725,14 +3748,36 @@ export class WorkerHarness {
     return { valid: true, cli_access: permissions.cli_access[domain], shell: permissions.shell }
   }
 
+  /** Ownership only; caller still applies its own resource/role and lifecycle checks. */
+  managedWorkspaceScope(workerId: string, workspaceRoot: string): ManagedWorkspaceScope {
+    return async () => {
+      const found = await this.deps.ledger.findWorker(workerId), context = await this.contextStore.read(workerId)
+      if (!found || !context?.principal_permissions || context.manager_key !== found.managerKey
+        || found.worker.manager_key !== found.managerKey || context.creator_friend_id !== found.worker.origin.creator_friend_id
+        || !found.worker.incarnations.some(item => item.workspace === workspaceRoot)) throw new Error('CAPABILITY_UNKNOWN: Worker file ownership unavailable')
+      if (found.worker.origin.request || context.request) {
+        const guard = this.deps.requestGuard?.()
+        if (!guard || !await guard.load(workerId)) throw new Error('CAPABILITY_UNKNOWN: Worker request ownership unavailable')
+      }
+      return this.deps.workspaces.fileScope(workerId, workspaceRoot)()
+    }
+  }
+
   private async assertWorkerFileAccess(workerId: string, file: string, write: boolean): Promise<void> {
+    const found = await this.deps.ledger.findWorker(workerId), context = await this.contextStore.read(workerId)
+    if (!found || !context) throw new Error('CAPABILITY_UNKNOWN: Worker file ownership unavailable')
+    const legacyContext = found.worker.legacy_source && context.manager_key === undefined && !context.request && !found.worker.origin.request
+    if (!legacyContext && (context.manager_key !== found.managerKey || context.creator_friend_id !== found.worker.origin.creator_friend_id)) throw new Error('CAPABILITY_UNKNOWN: Worker file ownership unavailable')
+    const workspace = requireMainlineIncarnation(found.worker).workspace
+    const managed = legacyContext ? undefined : this.managedWorkspaceScope(workerId, workspace)
     const guard = this.deps.requestGuard?.()
-    if (!guard) {
-      if ((await this.contextStore.read(workerId))?.request || (await this.deps.ledger.findWorker(workerId))?.worker.origin.request) throw new Error('CAPABILITY_UNKNOWN: Worker request guard unavailable')
+    if (found.worker.origin.request || context.request) {
+      if (!guard) throw new Error('CAPABILITY_UNKNOWN: Worker request guard unavailable')
+      await guard.runResource(workerId, source => checkFileAccess(source.resolved, file, '/', write, managed), async () => undefined)
       return
     }
-    if (!await guard.load(workerId)) return
-    await guard.runResource(workerId, source => checkFileAccess(source.resolved, file, '/', write), async () => undefined)
+    const access = await checkFileAccess(context.principal_permissions, file, '/', write, managed)
+    if (!access.allowed) throw new Error(access.reason)
   }
 
   /** Original request remains the resource actor for input, resume, fork and handoff. */

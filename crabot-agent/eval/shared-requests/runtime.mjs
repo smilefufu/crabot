@@ -32,7 +32,7 @@ export const cases = [
 /** Real production composition; synthetic identity/Channel/MCP transports and bounded files only. */
 export async function runCase({ scenario, root, liveAdapter, model, thinking, connection, record, budget, timeoutMs = 240000 }) {
   await fs.mkdir(root, { recursive: true, mode: 0o700 })
-  const envKeys = ['CRABOT_MANAGER_TOOL_LOADING_MODE', 'CRABOT_MANAGER_TOOL_LOADING_KEYS', 'DATA_DIR', 'CRABOT_AGENT_DATA_DIR']
+  const envKeys = ['CRABOT_MANAGER_TOOL_LOADING_MODE', 'CRABOT_MANAGER_TOOL_LOADING_KEYS', 'DATA_DIR', 'CRABOT_AGENT_DATA_DIR', 'WORKER_WORKSPACES_DIR']
   const savedEnv = Object.fromEntries(envKeys.map(key => [key, process.env[key]]))
   const groupKey = 'eval-voice::shared', session = { channel_id: 'eval-voice', session_id: 'shared', type: 'group' }
   const privateRoot = path.join(root, 'owner-files'), publicRoot = path.join(root, 'public-files')
@@ -149,6 +149,7 @@ export async function runCase({ scenario, root, liveAdapter, model, thinking, co
   const workerAdapter = observe('worker')
   process.env.CRABOT_MANAGER_TOOL_LOADING_MODE = 'progressive'
   process.env.CRABOT_MANAGER_TOOL_LOADING_KEYS = ''
+  process.env.WORKER_WORKSPACES_DIR = path.join(root, 'workspaces')
   process.env.DATA_DIR = root
   process.env.CRABOT_AGENT_DATA_DIR = path.join(root, 'agent')
   try {

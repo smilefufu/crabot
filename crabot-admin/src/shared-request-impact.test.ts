@@ -51,6 +51,8 @@ it('enumerates known groups and future defaults as possible same-channel actors,
   await fs.mkdir(path.join(root, 'agent')); await fs.writeFile(path.join(root, 'agent', 'private-chat.txt'), 'PRIVATE BODY DO NOT EXPORT')
   const report = await buildSharedRequestImpact(root), text = JSON.stringify(report)
   expect(report.membership).toBe('same_channel_candidates_only')
+  expect(report.managed_workspace_file_access).toMatchObject({ enabled_by: 'file_io', default_access: 'readwrite', extra_storage_unchanged: true })
+  expect(report.managed_workspace_file_access.compatibility).toContain('缺快照')
   expect(report.entries.some(entry => entry.session_id === 'g' && entry.friend_id === 'friend')).toBe(true)
   expect(report.entries.some(entry => entry.session_id === null && entry.friend_id === 'master')).toBe(true)
   expect(text).not.toMatch(/PRIVATE BODY|SHOULD_NOT_EXPORT_NAME|platform_user_id|channel_identities/)

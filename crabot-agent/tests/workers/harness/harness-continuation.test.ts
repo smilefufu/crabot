@@ -1,3 +1,4 @@
+import { BUILTIN_WORKER_PERMISSIONS } from '../../../src/workers/builtin/runtime.js'
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { promises as fs } from 'fs'
 import { tmpdir } from 'os'
@@ -251,6 +252,7 @@ function spawnParams(overrides: Partial<SpawnWorkerParams> = {}): SpawnWorkerPar
     prompt: '把活干完',
     origin: { spawned_by_episode: 'wechat::sess-1', trigger_type: 'message' },
     report_to: { channel_id: 'wechat', session_id: 'sess-1' },
+    principal_permissions: { ...BUILTIN_WORKER_PERMISSIONS, storage: { workspace_path: overrides.workspace ?? dataDir, access: 'readwrite' } },
     ...overrides,
   }
 }
@@ -2444,9 +2446,9 @@ describe('HarnessEvent.task_status —— 透明接续的迁移点', () => {
 describe('legacy incarnation guardrails', () => {
   const managerKey = 'test::legacy-session' as ManagerKey
   const permissions = {
-    tool_access: { memory: false, messaging: false, task: false, mcp_skill: false, file_io: false, browser: false, shell: false, remote_exec: false, desktop: false },
+    tool_access: { memory: false, messaging: false, task: false, mcp_skill: false, file_io: true, browser: false, shell: false, remote_exec: false, desktop: false },
     cli_access: { provider: 'none', agent: 'none', mcp: 'none', skill: 'none', schedule: 'none', channel: 'none', friend: 'none', permission: 'none', config: 'none', undo: 'none' },
-    storage: null,
+    get storage() { return { workspace_path: join(dataDir, 'workspace'), access: 'readwrite' as const } },
     memory_scopes: ['legacy'],
   } as const
 

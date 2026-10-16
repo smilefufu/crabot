@@ -56,7 +56,7 @@ function makeHarness(impl: WorkerImplId = 'builtin'): WorkerHarness {
 async function spawn(fileIo = true) {
   return harness.spawnWorker({ managerKey: KEY, title: 'project task', prompt: 'inspect project', workspace,
     origin: { trigger_type: 'message', creator_friend_id: 'owner' }, report_to: { channel_id: 'test', session_id: 'project-git' },
-    principal_permissions: { ...BUILTIN_WORKER_PERMISSIONS, tool_access: { ...BUILTIN_WORKER_PERMISSIONS.tool_access, file_io: fileIo } },
+    principal_permissions: { ...BUILTIN_WORKER_PERMISSIONS, storage: { workspace_path: workspace, access: 'readwrite' }, tool_access: { ...BUILTIN_WORKER_PERMISSIONS.tool_access, file_io: fileIo } },
   })
 }
 
@@ -114,9 +114,16 @@ describe('Harness workspace Git contract', () => {
 
   it('denies automatic Git reads without file_io, including turn completion; explicit denial calls no inspector', async () => {
     const inspect = vi.spyOn(WorkspaceGitInspector.prototype, 'inspect')
-    const worker = await spawn(false)
+    await expect(spawn(false)).rejects.toThrow('PERMISSION_DENIED')
+    expect(inspect).not.toHaveBeenCalled()
+    const worker = await spawn()
+    const { WorkerContextStore } = await import('../../../src/workers/harness/context-store.js')
+    const contexts = new WorkerContextStore(path.join(root, 'workers')), saved = await contexts.read(worker.worker_id)
+    // Historical tasks with file_io disabled may exist; observing them still does not read Git.
+    await contexts.write(worker.worker_id, { ...saved!, principal_permissions: { ...saved!.principal_permissions!, tool_access: { ...saved!.principal_permissions!.tool_access, file_io: false } } })
+    inspect.mockClear()
     const incarnation = worker.incarnations[0]
-    expect(incarnation).toMatchObject({ workspace_git: { state: { status: 'error', reason_code: 'access_denied' } } })
+    expect(incarnation.workspace_git).toBeDefined()
     await expect(harness.inspectWorkspaceGit(worker.worker_id, async (actual) => actual)).rejects.toThrow('file_io')
     harness.handleStateChange({ worker_id: worker.worker_id, incarnation_id: incarnation.incarnation_id, seq: 1,
       impl: 'builtin', session_ref: 'native-session' }, 'idle', { completionSource: 'builtin_end_turn' })
@@ -155,7 +162,7 @@ describe('Harness workspace Git contract', () => {
     const inspect = vi.spyOn(WorkspaceGitInspector.prototype, 'inspect')
     const denied = { ...BUILTIN_WORKER_PERMISSIONS, tool_access: { ...BUILTIN_WORKER_PERMISSIONS.tool_access, file_io: false } }
     const projectDeps = { ledger, managerKey: KEY, readWorkerContext: async () => undefined,
-      wakeEvent: { kind: 'human_messages' as const, messages: [], principalPermissions: denied } }
+      managerPrincipalPermissions: denied }
     const tools = buildWorkerTools({ harness, context: () => ({ managerKey: KEY, reportTo: worker.report_to }),
       authorizeProjectRead: (workspaceRoot) => authorizeProjectRoot(projectDeps, workspaceRoot, false) })
     const tool = tools.find((item) => item.name === 'inspect_workspace_git')!
@@ -163,12 +170,12 @@ describe('Harness workspace Git contract', () => {
     expect((await tool.call({ worker_id: worker.worker_id, path: '/' }, {} as never)).isError).toBe(true)
     for (const invalid of [null, [], 'worker-id']) expect((await tool.call(invalid as never, {} as never)).isError).toBe(true)
     expect(inspect).not.toHaveBeenCalled()
-    projectDeps.wakeEvent.principalPermissions = { ...BUILTIN_WORKER_PERMISSIONS,
+    projectDeps.managerPrincipalPermissions = { ...BUILTIN_WORKER_PERMISSIONS,
       storage: { workspace_path: path.join(root, 'other'), access: 'readwrite' } } as typeof denied
     await fs.mkdir(path.join(root, 'other'))
     expect((await tool.call({ worker_id: worker.worker_id }, {} as never)).isError).toBe(true)
     expect(inspect).not.toHaveBeenCalled()
-    projectDeps.wakeEvent.principalPermissions = BUILTIN_WORKER_PERMISSIONS
+    projectDeps.managerPrincipalPermissions = { ...BUILTIN_WORKER_PERMISSIONS, storage: { workspace_path: workspace, access: 'readwrite' } }
     expect((await tool.call({ worker_id: worker.worker_id }, {} as never)).isError).toBe(false)
     expect(inspect).toHaveBeenCalledTimes(1)
   })

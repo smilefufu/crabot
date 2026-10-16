@@ -12,6 +12,7 @@ import { boundedRequestPermissions } from '../../../src/workers/harness/request-
 import { TrustedHumanInputStore } from '../../../src/manager/trusted-human-input-store.js'
 import { ConversationRequestStore } from '../../../src/manager/conversation-request-store.js'
 import { ConversationRequestAuthority } from '../../../src/manager/conversation-request-authority.js'
+import { checkFileAccess } from '../../../src/permissions/tool-authorization.js'
 import { assertExecutionPolicy } from '../../../src/workers/execution-policy.js'
 import type { WorkerAdapter, SpawnSpec } from '../../../src/workers/types.js'
 import type { RequestPermissionSource, ConversationRequestSource } from '../../../src/manager/request-permission-sources.js'
@@ -41,7 +42,7 @@ describe('request spawn binds before any carrier side effect', () => {
     workspaces = new WorkspaceManager(path.join(root, 'workspaces')); originalResolve = workspaces.resolve.bind(workspaces); resolve = vi.spyOn(workspaces, 'resolve')
     provision = vi.fn(async () => {}); spawn = vi.fn(async (spec: SpawnSpec) => ({ worker_id: spec.worker_id, incarnation_id: spec.incarnation_id, seq: 1, impl: 'builtin', session_ref: 'actual-session' }))
     const adapter = { implId: 'builtin', provision, spawn, capabilities: () => ({ fork: true, revive: true, goalMode: false, subagent: false, structuredTrace: true }), state: async () => 'running', readTrace: async () => ({ events: [], nextCursor: { offset: 0 } }) } as unknown as WorkerAdapter
-    connection = vi.fn(async () => ({ env: {}, dispose: async () => {} }))
+    connection = vi.fn(async () => ({ env: {}, dispose: vi.fn(async () => {}) }))
     harness = new WorkerHarness({ adapters: new Map([['builtin', adapter]]), defaultImpl: 'builtin', ledger, workspaces, workersDir: path.join(root, 'workers'), now: () => time, requestGuard: () => guard, assertExecutionPolicy, admitWorkerConnection: connection })
     params = { managerKey: key, title: 'owner task', prompt: '完整要求', workspace: path.join(root, 'b'), origin: { trigger_type: 'system', creator_friend_id: 'forged' }, report_to: { channel_id: 'wrong', session_id: 'wrong' }, target_session: { channel_id: 'wrong', session_id: 'wrong', type: 'private' }, principal_permissions: permissions }
   })
@@ -90,11 +91,46 @@ describe('request spawn binds before any carrier side effect', () => {
     if (point === 'workspace') expect(provision).not.toHaveBeenCalled()
   })
 
-  it('cannot use a host-supplied custom runtime or an ungranted default workspace to bypass the resource guard', async () => {
+  it('cannot use a host-supplied custom runtime to bypass the resource guard', async () => {
     await expect(harness.spawnRequestWorker({ ...params, builtin: {} as never }, caller)).rejects.toThrow('HOST_CONFIGURED')
-    await expect(harness.spawnRequestWorker({ ...params, workspace: undefined }, caller)).rejects.toThrow(/PERMISSION_DENIED/)
     expect(provision).not.toHaveBeenCalled(); expect(spawn).not.toHaveBeenCalled()
   })
+  it.each(['read', 'null'] as const)('admits an omitted workspace with %s extra storage and preserves the request', async storage => {
+    if (storage === 'null') {
+      // Keep the original ceilings; revoke only the extra range, not file_io.
+      group.resolved.storage = null
+      friend!.resolved.storage = null
+    }
+    const { worker } = await harness.spawnRequestWorker({ ...params, workspace: undefined }, caller)
+    expect(worker.origin.creator_friend_id).toBe('actual-owner')
+    expect(worker.report_to).toEqual({ channel_id: 'voice', session_id: 'shared' })
+    const workspace = worker.incarnations[0].workspace!
+    expect(workspace).toBe(path.join(root, 'workspaces', worker.worker_id))
+    expect((await contexts.read(worker.worker_id))!.principal_permissions!.storage).toEqual(storage === 'null' ? null : { workspace_path: await fs.realpath(path.join(root, 'a')), access: 'read' })
+    expect(provision).toHaveBeenCalledOnce(); expect(spawn).toHaveBeenCalledOnce()
+  })
+
+  it('rechecks both file_io switches for actual default writes after revocation', async () => {
+    const { worker } = await harness.spawnRequestWorker({ ...params, workspace: undefined }, caller)
+    const workspace = worker.incarnations[0].workspace!, file = path.join(workspace, 'result.txt')
+    const managed = harness.managedWorkspaceScope(worker.worker_id, workspace)
+    const write = () => guard.runResource(worker.worker_id, source => checkFileAccess(source.resolved, file, '/', true, managed), async () => fs.writeFile(file, 'OWNED'))
+    await write(); expect(await fs.readFile(file, 'utf8')).toBe('OWNED')
+    group.resolved.tool_access.file_io = false; friend!.resolved.tool_access.file_io = false
+    await expect(write()).rejects.toThrow('PERMISSION_DENIED')
+    expect(await fs.readFile(file, 'utf8')).toBe('OWNED')
+  })
+
+  it('releases connection admission and activation fence on a preparation denial', async () => {
+    const release = vi.fn()
+    ;(harness as any).deps.acquireWorkerFence = () => ({ release })
+    group.resolved.tool_access.file_io = false; friend!.resolved.tool_access.file_io = false
+    await expect(harness.spawnRequestWorker({ ...params, workspace: undefined }, caller)).rejects.toThrow('PERMISSION_DENIED')
+    expect(release).toHaveBeenCalledOnce()
+    expect((await connection.mock.results[0].value).dispose).toHaveBeenCalledOnce()
+    expect(provision).not.toHaveBeenCalled(); expect(spawn).not.toHaveBeenCalled()
+  })
+
   it('workspace instruction normalization cannot create a link through a read-only source', async () => {
     await fs.writeFile(path.join(root, 'a/AGENTS.md'), 'rules')
     const publicCaller = new ConversationRequestAuthority(requests, key, recordId, 'group', async () => structuredClone(group))

@@ -85,5 +85,9 @@ export async function buildSharedRequestImpact(dataRoot: string) {
     }
   }
   return { schema_version: 1, generated_at: new Date().toISOString(), scope: 'all_ordinary_groups', membership: 'same_channel_candidates_only',
-    default_group_rules_included: true, unknown: [...new Set(unknown)], entries }
+    default_group_rules_included: true,
+    managed_workspace_file_access: { enabled_by: 'file_io', default_access: 'readwrite', extra_storage_unchanged: true,
+      compatibility: '可核验的旧任务自有默认目录也适用；原 storage=null 或只读时，该目录将可写。缺快照、归属或请求绑定不可核验时不授予默认范围；不重写配置或快照，不自动续办。',
+      cli_admission: '原生 CLI 仍须原有完整主机授权，默认目录可写不满足准入。' },
+    unknown: [...new Set(unknown)], entries }
 }

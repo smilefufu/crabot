@@ -15,7 +15,7 @@ export function RequestAuthority({ authority, binding }: { authority?: WorkerReq
         <strong>{source.kind === 'group' ? '群公共来源' : '好友个人来源'} · {source.subject_id}{source.is_master ? ' · Master' : ''}</strong>
         <p>工具入口：{Object.entries(source.resolved.tool_access).filter(([key, allowed]) => allowed && (VISIBLE_TOOL_CATEGORIES as readonly string[]).includes(key)).map(([key]) => TOOL_CATEGORY_LABELS[key as keyof typeof TOOL_CATEGORY_LABELS] ?? key).join('、') || '无'}</p>
         <p>CLI：{Object.entries(source.resolved.cli_access).filter(([, access]) => access !== 'none').map(([key, access]) => `${CLI_DOMAIN_LABELS[key as keyof typeof CLI_DOMAIN_LABELS] ?? key} ${access}`).join('、') || '无'}</p>
-        <p>文件范围：{source.resolved.storage ? `${source.resolved.storage.workspace_path} · ${source.resolved.storage.access}` : '未授权'}</p>
+        <p>额外文件范围：{source.resolved.storage ? `${source.resolved.storage.workspace_path} · ${source.resolved.storage.access}` : '未授权额外目录'}</p>
         <p>记忆过滤：{source.resolved.memory_scopes.join('、') || (source.kind === 'group' ? '按原群会话过滤' : '不额外过滤')}</p>
       </div>)}
     </details>

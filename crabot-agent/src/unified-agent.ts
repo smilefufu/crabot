@@ -1634,13 +1634,13 @@ export class UnifiedAgent extends ModuleBase {
       let authorization
       if (builtinTools.includes(tool)) {
         const file = fileSpecs[tool.name]
-        if (file) authorization = fileAuthorization('worker', () => principalPerms, () => workspaceRoot, file[0], file[1])
+        if (file) authorization = fileAuthorization('worker', () => principalPerms, () => workspaceRoot, file[0], file[1], ctx.managed_workspace)
         else if (tool.name === 'Bash') authorization = entryAuthorization('worker', 'shell', () => principalPerms)
         else if (internalNames.has(tool.name)) authorization = roleAuthorization('worker')
       } else if (external.has(tool) && (tool.category === 'desktop' || tool.category === 'mcp_skill')) {
         authorization = entryAuthorization('worker', tool.category, () => principalPerms)
       } else if (fixedProduct.has(tool)) authorization = roleAuthorization('worker')
-      else if (tool === workspaceGitTool) authorization = fileAuthorization('worker', () => principalPerms, () => workspaceRoot, 'workspace_root', false)
+      else if (tool === workspaceGitTool) authorization = fileAuthorization('worker', () => principalPerms, () => workspaceRoot, 'workspace_root', false, ctx.managed_workspace)
       if (!authorization) throw new Error(`CAPABILITY_UNAVAILABLE: 未声明的 Worker 工具 ${tool.name}`)
       return authorizeTool(tool, authorization)
     }).filter(tool => tool.authorization!.available())

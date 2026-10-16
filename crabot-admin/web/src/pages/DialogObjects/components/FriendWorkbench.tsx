@@ -244,22 +244,22 @@ export const FriendWorkbench: React.FC<FriendWorkbenchProps> = ({
               </div>
 
               <div className="session-modal-section">
-                <div style={{ fontWeight: 600 }}>存储权限</div>
+                <div style={{ fontWeight: 600 }}>额外目录权限</div>
                 <label className="session-permission-switch-row">
                   <span className="session-permission-switch-value">
-                    <span>启用存储</span>
+                    <span>授权额外目录</span>
                     <span>
                       {friendStorageEnabled
                         ? summarizeFriendStorage({
                             workspace_path: friendStoragePath.trim() || DEFAULT_STORAGE_PATH,
                             access: friendStorageAccess,
                           })
-                        : '未授权内置文件范围'}
+                        : '未授权额外目录'}
                     </span>
                   </span>
                   <span className="toggle-switch">
                     <input
-                      aria-label="启用存储"
+                      aria-label="授权额外目录"
                       type="checkbox"
                       checked={friendStorageEnabled}
                       onChange={(event) => onFriendStorageEnabledChange(event.target.checked)}
@@ -270,11 +270,11 @@ export const FriendWorkbench: React.FC<FriendWorkbenchProps> = ({
                 {friendStorageEnabled && (
                   <div className="session-detail-grid">
                     <Input
-                      label="工作区路径"
-                      aria-label="工作区路径"
+                      label="额外目录路径"
+                      aria-label="额外目录路径"
                       value={friendStoragePath}
                       onChange={(event) => onFriendStoragePathChange(event.target.value)}
-                      help="输入当前好友私聊可访问的工作区路径。"
+                      help="file_io 开启后任务自有默认目录可读写；此处只配置额外目录。"
                     />
                     <label style={{ display: 'grid', gap: '0.35rem' }}>
                       <span style={{ fontSize: '0.875rem', fontWeight: 500 }}>访问级别</span>
