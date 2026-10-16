@@ -7,9 +7,9 @@ export const VOICE_MAX_SAMPLES = 240000
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 export class VoiceProtocolVersionError extends Error {
-  constructor() { super('语音协议版本不兼容，需要 protocol_version=5；请更新手机，保留配对和声纹') }
+  constructor() { super('语音协议版本不兼容，需要 protocol_version=6；请更新手机，保留配对和声纹') }
 }
-function version(value: unknown): void { if (value !== 5) throw new VoiceProtocolVersionError() }
+function version(value: unknown): void { if (value !== 6) throw new VoiceProtocolVersionError() }
 
 function invalid(): never { throw new Error('Invalid voice protocol payload') }
 function object(value: unknown): Record<string, unknown> {
@@ -102,13 +102,14 @@ export function parseVoiceClientControl(data: string): VoiceClientControl {
   const v = object(JSON.parse(data))
   switch (v.type) {
     case 'pair':
-      fields(v, ['type', 'protocol_version', 'nonce']); version(v.protocol_version); string(v.nonce); break
+      fields(v, ['type', 'protocol_version', 'nonce', 'owner']); version(v.protocol_version); string(v.nonce); validateVoiceDeviceOwner(v.owner); break
     case 'hello':
-      fields(v, ['type', 'protocol_version', 'credential', 'models', 'aec_verified'])
-      version(v.protocol_version); string(v.credential); models(v.models); oneOf(v.aec_verified, [true, false]); break
+      fields(v, ['type', 'protocol_version', 'credential', 'models', 'aec_verified'], ['owner'])
+      version(v.protocol_version); string(v.credential); models(v.models); oneOf(v.aec_verified, [true, false]); if (v.owner !== undefined) validateVoiceDeviceOwner(v.owner); break
     case 'heartbeat':
       fields(v, ['type', 'foreground', 'microphone', 'playback', 'enrollment_revision']); integer(v.enrollment_revision)
       oneOf(v.foreground, [true, false]); oneOf(v.microphone, ['closed', 'wake', 'recording']); oneOf(v.playback, ['idle', 'playing']); break
+    case 'owner_saved': fields(v, ['type', 'saved']); validateVoiceOwnerSaved(v.saved); break
     case 'contact_action': fields(v, ['type', 'request']); validateVoiceManagementRequest(v.request); break
     case 'contact_action_query': fields(v, ['type', 'request_id']); assertVoiceUuid(v.request_id); break
     case 'catalog_applied': fields(v, ['type', 'enrollment_revision']); integer(v.enrollment_revision); break

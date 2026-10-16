@@ -66,7 +66,7 @@ export class VoiceOwnerStore {
   get(channelId: string): VoiceOwnerActivation | null { return this.record(channelId)?.activation ?? null }
   pendingBindings(): VoiceOwnerActivationRecord[] {
     if (!this.loaded) throw new Error('Voice owner store is not loaded')
-    return structuredClone(this.state.records.filter(record => record.samples_saved && record.activation.status === 'pending'))
+    return structuredClone(this.state.records.filter(record => record.samples_saved && !record.binding_revoked && record.activation.status === 'pending'))
   }
   prepareInitial(channelId: string, pairingId: string, owner: VoiceDeviceOwner, friendId: string, createMaster: boolean): Promise<VoiceOwnerActivation> {
     assertVoiceUuid(pairingId)
@@ -84,9 +84,11 @@ export class VoiceOwnerStore {
     return this.update(next => {
       const previous = next.records.find(value => value.channel_id === candidate.channel_id)
       if (previous) {
-        if (previous.mode !== candidate.mode || previous.target_friend_id !== candidate.target_friend_id || previous.create_master !== candidate.create_master || !sameOwner(previous.activation.owner, candidate.activation.owner) ||
-          (candidate.mode === 'legacy' && (previous.activation.platform_user_id !== candidate.activation.platform_user_id || previous.activation.registration_id !== candidate.activation.registration_id))) conflict('所有者或原 Master 关联冲突，不能重新认主')
+        if (previous.mode !== candidate.mode || previous.target_friend_id !== candidate.target_friend_id || previous.create_master !== candidate.create_master ||
+          (candidate.mode === 'initial' && !sameOwner(previous.activation.owner, candidate.activation.owner)) ||
+          (candidate.mode === 'legacy' && (previous.activation.platform_user_id !== candidate.activation.platform_user_id || previous.activation.registration_id !== candidate.activation.registration_id || previous.activation.owner.model_id !== candidate.activation.owner.model_id))) conflict('所有者或原 Master 关联冲突，不能重新认主')
         if (previous.activation.status === 'pending' && candidate.mode === 'initial') {
+          if (previous.pairing_id !== candidate.pairing_id) previous.samples_saved = false
           previous.pairing_id = candidate.pairing_id
           previous.binding_revoked = false // A fresh human pairing confirmation reaffirms this same, still-pending operation.
         }
@@ -115,7 +117,17 @@ export class VoiceOwnerStore {
       return record.activation
     })
   }
-  noteFriendDeletion(friendId: string): Promise<void> {
+  pause(channelId: string): Promise<void> {
+    return this.update(next => {
+      const record = next.records.find(value => value.channel_id === channelId)
+      if (record?.activation.status === 'pending') { record.binding_revoked = true; record.samples_saved = false }
+    })
+  }
+  hasPendingTarget(friendId: string): boolean {
+    if (!this.loaded) throw new Error('Voice owner store is not loaded')
+    return this.state.records.some(record => record.target_friend_id === friendId && record.activation.status === 'pending')
+  }
+  noteFriendWithdrawal(friendId: string): Promise<void> {
     return this.update(next => {
       for (const record of next.records) if (record.target_friend_id === friendId && record.activation.status === 'pending') {
         record.master_was_present = true

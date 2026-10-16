@@ -842,6 +842,14 @@ export class AdminModule extends ModuleBase {
       terminalHosts: () => [...new Set(Object.values(os.networkInterfaces()).flatMap(addresses => (addresses ?? []).filter(a => !a.internal && a.family === 'IPv4' && !a.address.startsWith('169.254.')).map(a => `http://${a.address}:${this.adminConfig.web_port}`)))],
       closeGateway: id => this.voiceGateway.close(id),
       admissionReady: () => this.cutoverActivated,
+      ownerReady: () => this.dataLoaded,
+      ownerFriends: () => [...this.friends.values()],
+      persistOwnerFriend: async friend => {
+        if (!this.dataLoaded) throw new RpcError('SERVICE_UNAVAILABLE', '好友数据尚未加载')
+        this.friends.set(friend.id, friend)
+        for (const identity of friend.channel_identities) this.channelIdentityIndex.set(this.getChannelIdentityKey(identity), friend.id)
+        await this.saveData()
+      },
       verifyRuntime: async (id, bearer) => { await this.rpcClient.callModuleManagerSensitive('verify_voice_runtime', { expected_module_id: id }, this.config.moduleId, { authorizationBearer: bearer }) },
       verifyCore: async bearer => { await this.rpcClient.callModuleManagerSensitive('verify_core_agent_runtime', { expected_module_id: 'crabot-agent' }, this.config.moduleId, { authorizationBearer: bearer }) },
       verifyHuman: async bearer => {
@@ -854,10 +862,10 @@ export class AdminModule extends ModuleBase {
         const session = await this.resolveChannelSession(channelId, sessionId, this.getMasterPlatformUserIdsForChannel(channelId))
         return session.id === sessionId && session.channel_id === channelId && session.type === 'group' && sessionHasMasterParticipant(session, this.friends.values())
       },
-      channelAction: async (id, command, bearer) => {
+      channelAction: async (id, command, bearer, ownerActivation) => {
         const modules = await this.rpcClient.resolve({ module_id: id }, this.config.moduleId)
         if (!modules[0]) throw new RpcError('SERVICE_UNAVAILABLE', 'Voice Channel is not running')
-        return this.rpcClient.callSensitive(modules[0].port, 'voice_admin_action', { channel_id: id, command }, this.config.moduleId, { authorizationBearer: bearer })
+        return this.rpcClient.callSensitive(modules[0].port, 'voice_admin_action', { channel_id: id, command, ...(ownerActivation ? { owner_activation: ownerActivation } : {}) }, this.config.moduleId, { authorizationBearer: bearer })
       },
       publish: async payload => { await this.rpcClient.publishEvent({ id: generateId(), type: 'channel.voice_turn_authorized', source: this.config.moduleId, payload, timestamp: generateTimestamp() }, this.config.moduleId) },
       configurationChanged: async () => {
@@ -4109,7 +4117,7 @@ export class AdminModule extends ModuleBase {
   }
 
   private async handleUpdateFriend(params: UpdateFriendParams): Promise<{ friend: Friend }> {
-    const existing = this.friends.get(params.friend_id)
+    let existing = this.friends.get(params.friend_id)
     if (!existing) {
       throw new Error('Friend not found')
     }
@@ -4122,6 +4130,12 @@ export class AdminModule extends ModuleBase {
       if (existingMaster) {
         throw new Error('A master friend already exists')
       }
+    }
+
+    if (existing.permission === 'master' && params.permission === 'normal' && this.dataLoaded && this.voiceAdmin.owners.hasPendingTarget(existing.id)) {
+      await this.voiceAdmin.owners.noteFriendWithdrawal(existing.id)
+      existing = this.friends.get(params.friend_id)
+      if (!existing) throw new RpcError('CONFLICT', '好友在所有者关联期间发生变化')
     }
 
     const nextPermission = params.permission ?? existing.permission
@@ -4148,13 +4162,19 @@ export class AdminModule extends ModuleBase {
   }
 
   private async handleDeleteFriend(params: { friend_id: FriendId }): Promise<{ deleted: true }> {
-    const friend = this.friends.get(params.friend_id)
+    let friend = this.friends.get(params.friend_id)
     if (!friend) {
       throw new Error('Friend not found')
     }
 
     if (friend.permission === 'master') {
       throw new Error('Cannot delete master friend')
+    }
+
+    if (this.dataLoaded && this.voiceAdmin.owners.hasPendingTarget(friend.id)) {
+      await this.voiceAdmin.owners.noteFriendWithdrawal(friend.id)
+      friend = this.friends.get(params.friend_id)
+      if (!friend || friend.permission === 'master') throw new RpcError('CONFLICT', '好友在所有者关联期间发生变化')
     }
 
     // 清理索引
@@ -4208,7 +4228,7 @@ export class AdminModule extends ModuleBase {
     channel_id: ModuleId
     platform_user_id: string
   }): Promise<{ friend: Friend }> {
-    const existing = this.friends.get(params.friend_id)
+    let existing = this.friends.get(params.friend_id)
     if (!existing) {
       throw new Error('Friend not found')
     }
@@ -4220,6 +4240,12 @@ export class AdminModule extends ModuleBase {
 
     if (!hasIdentity) {
       throw new Error('Channel identity not found')
+    }
+
+    if (this.dataLoaded && this.voiceAdmin.owners.hasPendingTarget(existing.id)) {
+      await this.voiceAdmin.owners.noteIdentityUnlink(existing.id, params.channel_id, params.platform_user_id)
+      existing = this.friends.get(params.friend_id)
+      if (!existing?.channel_identities.some(identity => identity.channel_id === params.channel_id && identity.platform_user_id === params.platform_user_id)) throw new RpcError('CONFLICT', '好友渠道身份在所有者关联期间发生变化')
     }
 
     const friend: Friend = {

@@ -24,7 +24,7 @@ beforeEach(() => {
   vi.mocked(voiceService.list).mockResolvedValue({ items: [provider] })
   vi.mocked(voiceService.config).mockResolvedValue({ asr: null, tts: null, wake_word: '你好螃蟹' })
   vi.mocked(voiceService.action).mockImplementation(async (_id, command) => {
-    if (command.action === 'create_pairing') return { action: 'create_pairing', pairing: { protocol_version: 5, channel_id: '客厅', pairing_id: 'p-1', url: 'wss://local.example:1234/voice', tls_fingerprint_sha256: 'fingerprint', nonce: 'one-time', verification_code: '123456', expires_at: new Date(Date.now() + 60000).toISOString() } }
+    if (command.action === 'create_pairing') return { action: 'create_pairing', pairing: { protocol_version: 6, channel_id: '客厅', pairing_id: 'p-1', url: 'wss://local.example:1234/voice', tls_fingerprint_sha256: 'fingerprint', nonce: 'one-time', verification_code: '123456', expires_at: new Date(Date.now() + 60000).toISOString() } }
     return { action: 'status', state: terminal as never }
   })
 })
@@ -53,7 +53,22 @@ describe('native voice instance configuration', () => {
     const confirmation = await screen.findByRole('button', { name: '核对一致，确认配对' })
     expect(confirmation).toBeDisabled()
     terminal = { ...terminal, pairing_id: 'p-1', verification_code: '123456' }
+    await new Promise(resolve => setTimeout(resolve, 2100))
+    expect(confirmation).toBeDisabled()
+    terminal = { ...terminal, pairing_owner: { profile_id: 'owner-profile', display_name: 'Owner', model_id: 'fixture' } }
     await waitFor(() => expect(confirmation).toBeEnabled(), { timeout: 4000 })
+    expect(screen.getByText(/设备所有者：Owner/)).toHaveTextContent('Master')
+  })
+  it('checks automatic owner completion without manual contact or Friend binding in the wizard', async () => {
+    terminal = { ...terminal, paired: true, connected: true, foreground: true,
+      owner_activation: { status: 'completed', owner: { display_name: 'FuFu' } } }
+    render(<MemoryRouter><VoiceConfigCard channelId="voice" running stage="contacts" ownerRequired /></MemoryRouter>)
+    expect(await screen.findByText(/设备所有者 FuFu 已关联 Master/)).toBeTruthy()
+    expect(screen.queryByLabelText('录入名字')).toBeNull()
+    expect(screen.queryByLabelText('已有好友')).toBeNull()
+    expect(screen.queryByRole('button', { name: '绑定已有好友' })).toBeNull()
+    expect(await screen.findByLabelText('群权限模板')).toBeTruthy()
+    expect(friendService.listFriends).not.toHaveBeenCalled()
   })
   it('keeps a first enrollment task out of contacts, then binds the confirmed stable identity', async () => {
     const state = { ...terminal, connected: true, foreground: true }

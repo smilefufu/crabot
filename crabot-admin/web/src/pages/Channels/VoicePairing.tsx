@@ -41,10 +41,12 @@ export function VoicePairing({ channelId, running, state, onChanged }: { channel
   useEffect(() => { let active = true; setQr(''); if (pairing) void QRCode.toDataURL(JSON.stringify(pairing)).then(value => { if (active) setQr(value) }); return () => { active = false } }, [pairing])
   let preview = ''
   try { preview = voiceTerminalEntry(connection, channelId).url } catch { /* incomplete input */ }
+  const pairingOwner = state?.pairing_owner
   const changed = JSON.stringify(connection) !== JSON.stringify(saved)
   async function run(work: () => Promise<void>) { setBusy(true); setError(''); try { await work(); await onChanged() } catch (e) { setError(e instanceof Error ? e.message : '配对失败') } finally { setBusy(false) } }
   return <div>
     <h4>手机配对</h4>
+    <p>新设备请先在手机登记本人声纹，再扫描下方二维码。核对时请同时确认设备所有者。</p>
     <p>{!running ? '请先启动此渠道。' : state ? `${state.paired ? '已配对' : '未配对'} · ${state.connected ? '已连接' : '离线'} · ${state.foreground ? '前台' : '非前台'} · 麦克风 ${state.microphone === 'closed' ? '关闭' : state.microphone === 'wake' ? '本地唤醒' : '录音中'}` : '正在等待终端状态。'}</p>
     {error && <p role="alert">{error}</p>}
     <div className="voice-fields">
@@ -61,9 +63,9 @@ export function VoicePairing({ channelId, running, state, onChanged }: { channel
     <div className="voice-actions">
       <Button disabled={busy || !running || !preview || !changed || !!state?.paired} onClick={() => void run(async () => { const value = await voiceService.saveConnection(channelId, connection); setSaved(value); setConnection(value); setPairing(undefined) })}>保存连接地址</Button>
       <Button disabled={busy || !running || !!state?.paired || changed || !preview} onClick={() => void run(async () => { const result = await voiceService.action(channelId, { action: 'create_pairing' }); if (result.action === 'create_pairing') setPairing(result.pairing) })}>生成一次性配对码</Button>
-      <Button variant="danger" disabled={busy || !running || !state?.paired} onClick={() => void run(async () => { await voiceService.action(channelId, { action: 'revoke_terminal' }); setPairing(undefined) })}>撤销终端</Button>
+      <Button variant="danger" disabled={busy || !running || (!state?.paired && state?.owner_activation?.status !== 'pending')} onClick={() => void run(async () => { await voiceService.action(channelId, { action: 'revoke_terminal' }); setPairing(undefined) })}>撤销终端</Button>
     </div>
     {state?.paired && <p>更换连接地址或升级旧配对时，先撤销终端，再用同一渠道的新二维码扫码。手机保留同渠道的声纹登记。</p>}
-    {pairing && <div className="voice-pairing">{qr && <img src={qr} width={220} height={220} alt="手机扫描的一次性语音配对二维码" />}<p>用 Android App 扫码，核对两端均显示 <strong>{pairing.verification_code}</strong> 后确认。有效期至 {new Date(pairing.expires_at).toLocaleTimeString()}。</p><p>地址：{pairing.url}</p><Button disabled={busy || changed || state?.pairing_id !== pairing.pairing_id || state?.verification_code !== pairing.verification_code || Date.parse(pairing.expires_at) <= Date.now()} onClick={() => void run(async () => { await voiceService.action(channelId, { action: 'confirm_pairing', pairing_id: pairing.pairing_id }); setPairing(undefined) })}>核对一致，确认配对</Button></div>}
+    {pairing && <div className="voice-pairing">{pairingOwner && <p>设备所有者：{pairingOwner.display_name}。{state?.owner_activation?.status === 'completed' ? '本次只重新配对，保留现有联系人和 Master 关联。' : '确认后将关联为当前 Crabot 的 Master；已有 Master 时保留原好友并追加本渠道身份。'}</p>}{qr && <img src={qr} width={220} height={220} alt="手机扫描的一次性语音配对二维码" />}<p>用 Android App 扫码，核对两端均显示 <strong>{pairing.verification_code}</strong> 后确认。有效期至 {new Date(pairing.expires_at).toLocaleTimeString()}。</p><p>地址：{pairing.url}</p><Button disabled={busy || changed || !pairingOwner || state?.pairing_id !== pairing.pairing_id || state?.verification_code !== pairing.verification_code || Date.parse(pairing.expires_at) <= Date.now()} onClick={() => void run(async () => { await voiceService.action(channelId, { action: 'confirm_pairing', pairing_id: pairing.pairing_id }); setPairing(undefined) })}>核对一致，确认配对</Button></div>}
   </div>
 }

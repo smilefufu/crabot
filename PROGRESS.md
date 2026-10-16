@@ -3,8 +3,8 @@
 ### 语音所有者、请求授权与全语音管理：整组已确认，先实现激活
 
 - 2026-10-16 用户明确“确认整组，按依赖顺序推进”，含安卓配套；按[所有者激活计划](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/plans/2026-10-16-voice-device-owner-activation-implementation.md)先做激活，再做请求级授权/插话隔离，最后接全语音管理。正式 Voice §13/Admin/Base 激活契约已发布；整组完成前不部署半套 wire6。
-- 安卓 main e8d401b 已含三段共用质量层和配对前所有者密文基础：JVM18、公开音频真实 JNI/身份18、隔离存储/升级13及产品/测试 APK 构建通过。旧配对、向量、目录与待回执保留；后台指定的稳定有效登记才能恢复所有者，不按名字或列表顺序认主。新入口尚未接首次 UI/网络，不算自动 Master 绑定完成。
-- 后端独立事实层固定操作/联系人/登记/目标 Master，样本就绪与最终完成分开持久，写盘失败沿原 ID 恢复。Shared143、Admin所有者/绑定事务及原 Voice34和构建通过；已准备固定目标 Master 的新建/追加与删除/解绑意图回归，human 配对、正式目录及真实好友提交仍在接入，事务单测不替代端到端验收。
+- 第一阶段实现已接通：配对前本机三段自动引导、稳定所有者密文、wire6 核对与落盘回执、正式联系人/目标 Master 持久提交及创建向导；新渠道不能跳过关联，旧渠道保留配对和人物 ID，人工解绑/降级/删除后不被恢复流程重新认主。删除或重录样本不改变所有者。
+- 定向验证：Shared144、Admin59（含真实好友写盘/索引4）、Voice20（含实际 RPC/WS 激活）、Agent64、Web14与相关构建通过。安卓 JVM18、隔离存储/连接/升级21、首次流程3及公开 JNI 一致性2通过；三段音频为公开文件回放，未代替真人登记/误认率验收。完整证据见两仓实施计划。
 - 原 Voice PR #206 已同步 main，冲突解决并可合并；完整构建通过，历史全量失败与未修改 main 对照，Agent连接重试未收敛，不声称整仓全绿。未自合并、重启后端或安装用户手机；当前真实配对与 FuFu 样本保留。
 - 后续语音工具复用 load_tool_family 的唯一 voice 族；search_tools 仍仅外部 MCP，核心15项不扩张，每次调用独立鉴权。精确主控提示词 diff 单独确认；请求授权、全语音流程与真人 Thea/多人/延迟均仍待验证。
 
@@ -88,7 +88,7 @@
 - 语音当前以`<voice_reply>`增量投递，系统提示词、最终工具面、一次纠偏及交付判定已按确认稿条件化，其它渠道继续send_message。逐句TTS、连续PCM、started/completed、response_end接话及外发后禁止整请求重试已实现，重启不补播。旧轮8aecebaf三次SSE错误后总69.869秒超过60秒机会；0.5.1已修复超时关麦与首页原因，不能将该修复或最新成功播报当作延迟验收。原SSE错误映射502的四次授权重放均HTTP200，根因未复现，未据此更换模型。
 - 唯一普通语音群允许陌生人发言，逐片段保留好友/陌生人和全部内容；好友按当前ChannelIdentity解析，声纹不授予权限。重叠、无效分段/ASR失败仍整轮失败；授权快照整批入inbox，重启不复活回答机会。私聊及自然抢话/AEC属于后续范围。
 - Admin创建向导与WS/WSS共端口已部署；完整BASE_URL保留端口/路径前缀，HTTP/HTTPS推荐WS/WSS且可显式选择，同网允许局域网。内部Voice入口只监听loopback，二维码pin或系统CA/hostname失败不降级；历史v2需明确撤销重配，有效v3/v4配对可直接升级。扫码竖屏、现场核对与局域网WSS已通过；公网默认BASE_URL的Upgrade曾502，隧道未修改。
-- 创建向导与群准入分离仍按独立[10月12日修订稿](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/specs/2026-10-12-voice-creation-and-enrollment-separation-design.md)待确认。首次成功登记才形成联系人已由10月14日稿覆盖，其余创建阶段好友绑定/finish/group_ready改动未实施；当前未完成实例保留draft/auto_start=false，完成前仍检查登记与普通群名册准入。
+- 创建阶段本人手动登记/绑定已由10月15日整组确认稿替代：新增所有者自动关联后仍保留草稿及普通群准入；不纳入旧稿未确认的 group_ready 等独立设想。整组 wire6 尚未统一部署，现场仍按原版本运行。
 - 后端定向及集成构建/回归已完成，既有Admin/Web/Agent全量失败在未修改main复现；不声称整仓全量绿色，具体数字与历史联调见PR及[Android验证目录](https://github.com/smilefufu/crabot-voice-android/tree/main/docs/verification)。本次只改Android与进度记录，无后台产品代码或重启。
 - 后续验收：多位真人A/B/A、未知者短句误识率、三轮接话、唤醒误触发、50轮整体延迟、回声/AEC、功耗及Linux两UID隔离。公开文件和一次FuFu成功不能证明这些指标；整体流畅性仍待改善。
 

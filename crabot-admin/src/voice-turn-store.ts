@@ -1,7 +1,7 @@
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
-import { voiceSessionId, sha256CanonicalJson, validateSubmitVoiceTurn, validateVoiceManagementRequest, assertVoiceUuid, type Friend, type SubmitVoiceTurnParams, type SyncVoiceTerminalParams, type VoiceTerminalContact, type VoiceCatalog, type VoiceEnrollmentTask, type VoiceManagementRequest, type VoiceManagementResult, type VoiceRegistration, type VoiceReplyContext, type VoiceTurnAuthorizedPayload, type VoiceTurnResult } from 'crabot-shared'
+import { voiceSessionId, sha256CanonicalJson, validateSubmitVoiceTurn, validateVoiceManagementRequest, assertVoiceUuid, validateVoiceOwnerActivation, type VoiceOwnerActivation, type Friend, type SubmitVoiceTurnParams, type SyncVoiceTerminalParams, type VoiceTerminalContact, type VoiceCatalog, type VoiceEnrollmentTask, type VoiceManagementRequest, type VoiceManagementResult, type VoiceRegistration, type VoiceReplyContext, type VoiceTurnAuthorizedPayload, type VoiceTurnResult } from 'crabot-shared'
 
 type StoredPayload = Omit<VoiceTurnAuthorizedPayload, 'reply_context'>
 type Turn = { result: VoiceTurnResult; payload?: StoredPayload }
@@ -77,6 +77,22 @@ export class VoiceTurnStore {
     return structuredClone({ enrollment_revision: c.enrollment_revision, contacts: c.contacts, registrations, pending_enrollment, unconfirmed_contacts: c.unconfirmed_contacts })
   }
   catalog(channelId: string): VoiceCatalog { const { unconfirmed_contacts, ...catalog } = this.registrations(channelId); return catalog }
+  async commitOwnerIdentity(channelId: string, activation: VoiceOwnerActivation): Promise<void> {
+    validateVoiceOwnerActivation(activation)
+    await this.change(state => {
+      const current = channel(state, channelId)
+      const existing = current.registrations.find(value => value.registration_id === activation.registration_id)
+      if (existing) {
+        if (existing.platform_user_id !== activation.platform_user_id || existing.model_id !== activation.owner.model_id || existing.status !== 'active' || !current.contacts.some(value => value.platform_user_id === activation.platform_user_id)) fail('所有者登记与原操作冲突')
+        return
+      }
+      if (current.task || current.contacts.length || current.unconfirmed_contacts.length || current.registrations.length) fail('首次认主目录已有身份，不能覆盖')
+      current.enrollment_revision++
+      const contact = { platform_user_id: activation.platform_user_id, display_name: activation.owner.display_name }
+      current.contacts.push(contact)
+      current.registrations.push({ registration_id: activation.registration_id, ...contact, model_id: activation.owner.model_id, status: 'active', terminal_cleared: false, completed_revision: current.enrollment_revision })
+    })
+  }
   hasContact(channelId: string, platformUserId: string): boolean { return this.registrations(channelId).contacts.some(c => c.platform_user_id === platformUserId) }
   managementResult(channelId: string, requestId: string): VoiceManagementResult {
     const current = Object.prototype.hasOwnProperty.call(this.state.channels, channelId) ? this.state.channels[channelId] : undefined

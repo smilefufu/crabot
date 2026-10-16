@@ -4,9 +4,9 @@ import type { Server } from 'node:net'
 import os from 'node:os'
 import { randomBytes, randomInt, randomUUID } from 'node:crypto'
 import { WebSocket, type RawData } from 'ws'
-import { ModuleBase, RpcError, VoiceInputBuffer, VOICE_MODEL_VERSIONS, encodeVoiceFrame, parseVoiceClientControl, validateVoiceManagementRequest, VoiceProtocolVersionError, sha256CanonicalJson, assertVoiceUuid, transcribeAudio, voiceSessionId,
+import { ModuleBase, RpcError, VoiceInputBuffer, VOICE_MODEL_VERSIONS, encodeVoiceFrame, parseVoiceClientControl, validateVoiceManagementRequest, VoiceProtocolVersionError, validateVoiceOwnerActivation, sha256CanonicalJson, assertVoiceUuid, transcribeAudio, voiceSessionId,
   type GetVoiceConfigResult, type ModuleConfig, type RpcHandlerContext, type SensitiveRpcMethod, type SubmitVoiceTurnParams, type SyncVoiceTerminalParams, type VoiceAdminActionParams, type VoiceAdminActionResult,
-  type VoiceCatalog, type VoiceManagementResult, type SyncVoiceTerminalResult, type VoiceOutputParams, type VoiceOutputResult, type VoiceClientControl, type VoicePairing, type VoiceReplyContext, type VoiceServerControl, type VoiceTerminalState, type VoiceTurnResult } from 'crabot-shared'
+  type VoiceCatalog, type VoiceDeviceOwner, type VoiceManagementResult, type SyncVoiceTerminalResult, type VoiceOutputParams, type VoiceOutputResult, type VoiceClientControl, type VoicePairing, type VoiceReplyContext, type VoiceServerControl, type VoiceTerminalState, type VoiceTurnResult } from 'crabot-shared'
 import { TerminalStore } from './terminal-store.js'
 import { voiceTransport } from './transport.js'
 
@@ -21,6 +21,9 @@ function failed(message: string): never { throw new RpcError('CHANNEL_SEND_FAILE
 function compatible(models: { segmentation: string; embedding: string }): boolean {
   return models.segmentation === VOICE_MODEL_VERSIONS.segmentation && models.embedding === VOICE_MODEL_VERSIONS.embedding
 }
+function sameOwner(a: VoiceDeviceOwner, b: VoiceDeviceOwner): boolean {
+  return a.profile_id === b.profile_id && a.display_name === b.display_name && a.model_id === b.model_id
+}
 function fields(raw: unknown, allowed: string[]): asserts raw is Record<string, unknown> {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw) || Object.keys(raw).some(key => !allowed.includes(key))) throw new RpcError('INVALID_PARAMS', 'Invalid voice parameters')
 }
@@ -34,7 +37,7 @@ export class VoiceChannel extends ModuleBase {
   private readonly terminal: TerminalStore
   private settings!: GetVoiceConfigResult
   private connection?: Connection
-  private pairing?: VoicePairing & { socket?: WebSocket }
+  private pairing?: VoicePairing & { socket?: WebSocket; owner?: VoiceDeviceOwner }
   private reply?: ReplySlot
   private playback?: ReplyPlayback
   private readonly playbacks = new Map<string, ReplyPlayback>()
@@ -53,7 +56,7 @@ export class VoiceChannel extends ModuleBase {
     this.registerMethod('update_config', async () => { this.disconnect(); await this.refreshConfig(); return { updated: true } })
     this.registerMethod('get_capabilities', () => ({ supported_message_types: ['text'], supported_features: [], supports_history_query: false, supports_platform_user_query: true,
       max_message_length: 120, max_file_size: 0, supports_file_path: false, supports_list_contacts: true, supports_list_groups: true, supports_list_group_members: true,
-      voice: { protocol_version: 5, send_timeout_ms: 30000 } }))
+      voice: { protocol_version: 6, send_timeout_ms: 30000 } }))
     this.registerMethod('get_sessions', async (params: { type?: string; pagination?: { page?: number; page_size?: number } }) => { await this.refreshConfig(); return paginate(params?.type === 'private' ? [] : [this.session()], params) })
     this.registerMethod('get_session', async (params: { session_id: string }) => { this.assertSession(params.session_id); await this.refreshConfig(); return { session: this.session() } })
     this.registerMethod('get_private_session', () => { throw new RpcError('CHANNEL_UNSUPPORTED_FEATURE', 'Voice has only a voice group') })
@@ -117,8 +120,17 @@ export class VoiceChannel extends ModuleBase {
       if (c !== this.connection) return
       const result = await this.admin<SyncVoiceTerminalParams, SyncVoiceTerminalResult>('sync_voice_terminal', { channel_id: this.config.moduleId, connection_epoch: c?.epoch ?? null, foreground: c?.foreground ?? false, ...ack })
       if (c !== this.connection) return
+      const previousSetup = this.settings.setup_status
+      this.settings.setup_status = result.setup_status
+      const previousOwner = this.settings.owner_activation
+      this.settings.owner_activation = result.owner_activation
+      if (result.owner_activation?.status === 'completed' && this.terminal.pendingActivation === result.owner_activation.operation_id) await this.terminal.activate(result.owner_activation.operation_id)
       this.applyCatalog(result.catalog)
-      if (c?.helloSent) this.pushCatalog(c)
+      if (c?.helloSent) {
+        if (previousSetup !== result.setup_status) this.send(c.socket, { type: 'setup_status', status: result.setup_status })
+        if (result.owner_activation && JSON.stringify(previousOwner) !== JSON.stringify(result.owner_activation)) this.send(c.socket, { type: 'owner_activation', activation: result.owner_activation })
+        this.pushCatalog(c)
+      }
     })
     this.syncTail = operation.catch(() => {}); return operation
   }
@@ -158,19 +170,23 @@ export class VoiceChannel extends ModuleBase {
   }
   private state(): VoiceTerminalState {
     const c = this.connection
-    return { paired: this.terminal.paired, connected: !!c, foreground: c?.foreground ?? false, microphone: c?.microphone ?? 'closed', playback: c?.playback ?? 'idle', aec_verified: false,
+    return { owner_activation: this.settings.owner_activation, ...(this.pairing?.owner ? { pairing_owner: this.pairing.owner } : {}), paired: this.terminal.paired, connected: !!c, foreground: c?.foreground ?? false, microphone: c?.microphone ?? 'closed', playback: c?.playback ?? 'idle', aec_verified: false,
       enrollment_revision: this.settings.enrollment_revision, contacts: this.settings.contacts, registrations: this.settings.registrations,
       pending_enrollment: this.settings.pending_enrollment, unconfirmed_contacts: this.settings.unconfirmed_contacts,
       hosts: [...new Set(Object.values(os.networkInterfaces()).flatMap(addresses => (addresses ?? []).filter(a => !a.internal).map(a => a.family === 'IPv6' ? '[' + a.address + ']' : a.address)))],
       ...(this.pairing ? { pairing_id: this.pairing.pairing_id, ...(this.pairing.socket ? { verification_code: this.pairing.verification_code } : {}) } : {}) }
   }
   private async adminAction(raw: VoiceAdminActionParams, bearer?: string): Promise<VoiceAdminActionResult> {
-    fields(raw, ['channel_id', 'command'])
+    fields(raw, ['channel_id', 'command', 'owner_activation'])
     if (raw.channel_id !== this.config.moduleId || !bearer) throw new RpcError('UNAUTHORIZED', 'Human Admin is required')
     const modules = await this.rpcClient.resolve({ module_type: 'admin' }, this.config.moduleId)
     if (!modules[0]) throw new RpcError('SERVICE_UNAVAILABLE', 'Admin is unavailable')
     await this.rpcClient.callSensitive(modules[0].port, 'verify_voice_admin', { channel_id: this.config.moduleId }, this.config.moduleId, { authorizationBearer: bearer, timeoutMs: 3000 })
     const command = raw.command
+    if (raw.owner_activation !== undefined) {
+      if (command.action !== 'confirm_pairing') throw new RpcError('INVALID_PARAMS', 'Owner activation is only valid for pairing confirmation')
+      validateVoiceOwnerActivation(raw.owner_activation)
+    }
     switch (command.action) {
       case 'status': fields(command, ['action']); await this.refreshConfig(); return { action: 'status', state: this.state() }
       case 'create_pairing': {
@@ -178,14 +194,22 @@ export class VoiceChannel extends ModuleBase {
         await this.refreshConfig()
         if (!this.settings.terminal_entry) throw new RpcError('INVALID_PARAMS', '请先保存手机可访问的后台地址')
         this.pairing?.socket?.terminate()
-        this.pairing = { protocol_version: 5, channel_id: this.config.moduleId, pairing_id: randomUUID(), ...this.settings.terminal_entry, nonce: randomBytes(32).toString('base64url'), verification_code: String(randomInt(100000, 1000000)), expires_at: new Date(Date.now() + 60000).toISOString() }
+        this.pairing = { protocol_version: 6, channel_id: this.config.moduleId, pairing_id: randomUUID(), ...this.settings.terminal_entry, nonce: randomBytes(32).toString('base64url'), verification_code: String(randomInt(100000, 1000000)), expires_at: new Date(Date.now() + 60000).toISOString() }
         return { action: 'create_pairing', pairing: { ...this.pairing } }
       }
       case 'confirm_pairing': {
         fields(command, ['action', 'pairing_id']); await this.refreshConfig(); const pairing = this.pairing
         if (!pairing?.socket || pairing.socket.readyState !== WebSocket.OPEN || pairing.pairing_id !== command.pairing_id || Date.parse(pairing.expires_at) <= Date.now()) throw new RpcError('INVALID_PARAMS', '配对核对已失效')
-        const credential = await this.terminal.pair()
-        this.send(pairing.socket, { type: 'paired', credential }); pairing.socket.close(); this.pairing = undefined
+        const activation = raw.owner_activation
+        if (this.settings.owner_activation_required && this.settings.owner_activation?.status !== 'completed') {
+          const expected = this.settings.owner_activation
+          if (!activation || !expected || activation.status !== 'pending' || activation.operation_id !== expected.operation_id || activation.registration_id !== expected.registration_id || activation.platform_user_id !== expected.platform_user_id || !pairing.owner || !sameOwner(activation.owner, pairing.owner) || !sameOwner(expected.owner, pairing.owner)) throw new RpcError('INVALID_PARAMS', '请重新核对设备所有者和原激活操作')
+        } else if (activation) throw new RpcError('INVALID_PARAMS', '已有渠道不能重新认主')
+        this.pairing = undefined
+        let credential: string
+        try { credential = await this.terminal.pair(activation?.operation_id) }
+        catch (error) { if (!this.pairing && pairing.socket.readyState === WebSocket.OPEN && Date.parse(pairing.expires_at) > Date.now()) this.pairing = pairing; throw error }
+        this.send(pairing.socket, { type: 'paired', credential, owner_activation: activation ?? null }); pairing.socket.close()
         return { action: 'confirm_pairing', confirmed: true }
       }
       case 'revoke_terminal': fields(command, ['action']); await this.terminal.revoke(); this.disconnect(); this.pairing?.socket?.terminate(); this.pairing = undefined; return { action: 'revoke_terminal', revoked: true }
@@ -211,7 +235,7 @@ export class VoiceChannel extends ModuleBase {
     socket.send(text)
   }
   private sendHello(c: Connection): void {
-    this.send(c.socket, { type: 'hello', connection_epoch: c.epoch, config: this.settings.config, catalog: this.catalog(),
+    this.send(c.socket, { type: 'hello', connection_epoch: c.epoch, setup_status: this.settings.setup_status, config: this.settings.config, catalog: this.catalog(), owner_activation: this.settings.owner_activation,
       destinations: [this.settings.asr_connection && { capability: 'asr' as const, ...this.settings.asr_connection }, this.settings.tts_connection && { capability: 'tts' as const, ...this.settings.tts_connection }].filter(Boolean).map(value => {
         const connection = value!; return { capability: connection.capability, endpoint: connection.endpoint }
       }) })
@@ -248,11 +272,12 @@ export class VoiceChannel extends ModuleBase {
             if (control.type === 'pair') {
               const p = this.pairing
               if (this.terminal.paired || !p || p.socket || p.nonce !== control.nonce || Date.parse(p.expires_at) <= Date.now()) throw new Error('Pairing expired')
-              p.socket = socket; p.nonce = ''; pairingOnly = true
+              p.socket = socket; p.owner = structuredClone(control.owner); p.nonce = ''; pairingOnly = true
               this.send(socket, { type: 'pair_waiting', pairing_id: p.pairing_id, verification_code: p.verification_code }); return
             }
             if (control.type !== 'hello' || !this.terminal.matches(control.credential) || !compatible(control.models) || this.connection) throw new Error('Terminal authentication/model mismatch')
             await this.refreshConfig()
+            if (this.settings.owner_activation_required && this.settings.owner_activation?.status === 'pending' && control.owner && !sameOwner(control.owner, this.settings.owner_activation.owner)) throw new Error('Owner profile mismatch')
             if (this.stopped || socket.readyState !== WebSocket.OPEN || this.connection) throw new Error('Connection changed')
             this.connection = { socket, epoch: randomUUID(), foreground: false, lastHeartbeat: Date.now(), microphone: 'closed', playback: 'idle', appliedRevision: -1, confirmedRevision: -1, helloSent: false }
             authenticated = true; clearTimeout(handshake); await this.sync(); this.sendHello(this.connection); return
@@ -266,10 +291,21 @@ export class VoiceChannel extends ModuleBase {
   }
   private async control(c: Connection, control: VoiceClientControl): Promise<void> {
     switch (control.type) {
+      case 'owner_saved': {
+        if (!c.foreground) throw new Error('Foreground terminal required')
+        try { await this.sync({ owner_saved: control.saved }) }
+        catch {
+          if (c === this.connection) this.send(c.socket, { type: 'error', code: 'VOICE_OWNER_PENDING', message: '手机声纹已保存，后台尚未完成联系人和 Master 关联；请重试同步，若仍失败请在后台处理' })
+          return
+        }
+        if (c === this.connection && this.settings.owner_activation) this.send(c.socket, { type: 'owner_activation', activation: this.settings.owner_activation })
+        return
+      }
       case 'turn_start':
         if (!c.foreground || c.input || c.processing || this.playback) throw new Error('Voice is not ready')
         this.reply = undefined; await this.refreshConfig(); await this.sync()
         if (c.confirmedRevision !== this.settings.enrollment_revision || this.settings.pending_enrollment) { this.send(c.socket, { type: 'error', code: 'VOICE_CATALOG_NOT_READY', message: '请等待声纹目录同步或完成当前登记' }); return }
+        if (this.settings.owner_activation_required && this.settings.owner_activation?.status !== 'completed') { this.send(c.socket, { type: 'error', code: 'VOICE_OWNER_NOT_READY', message: '请先完成设备所有者关联' }); return }
         if (this.settings.setup_status !== 'complete') { this.send(c.socket, { type: 'error', code: 'VOICE_REJECTED', message: '请先完成语音创建向导' }); return }
         if (!this.settings.asr_connection || !this.settings.tts_connection || !this.connection || this.connection !== c || !c.foreground) throw new Error('Voice configuration unavailable')
         c.input = new VoiceInputBuffer(control.turn_id); this.send(c.socket, { type: 'turn_ready', turn_id: control.turn_id }); return

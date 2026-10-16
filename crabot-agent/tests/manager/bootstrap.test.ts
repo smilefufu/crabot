@@ -187,14 +187,14 @@ describe('manager bootstrap（P5 Task 1）', () => {
     }
   }
 
-  it('discovers wire 5 and assembles the voice reply prompt and streaming output together', async () => {
+  it('discovers wire 6 and assembles the voice reply prompt and streaming output together', async () => {
     const requests: LLMStreamParams[] = []
     const callSensitive = vi.fn(async (_port, method, params) => {
       expect(method).toBe('voice_output')
       return params.event.type === 'reply_end' ? { platform_message_id: params.event.playback_id, sent_at: new Date().toISOString(), played_samples: 480 } : { accepted: true }
     })
     const messagingDeps = makeMessagingDeps()
-    messagingDeps.rpcClient = { call: vi.fn(async () => ({ voice: { protocol_version: 5 } })), callSensitive } as never
+    messagingDeps.rpcClient = { call: vi.fn(async () => ({ voice: { protocol_version: 6 } })), callSensitive } as never
     const stack = buildManagerStack(makeDeps({ coreRuntimeBearer: () => 'fixture-core', messagingDeps,
       managerAdapter: () => ({ async *stream(params) {
         requests.push(params)

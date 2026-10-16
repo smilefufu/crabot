@@ -15,7 +15,7 @@ describe('Voice Admin human surface and durable publication responsibility', () 
   const friend: Friend = { id: 'fufu', display_name: 'FuFu', permission: 'master', channel_identities: [], created_at: new Date().toISOString(), updated_at: new Date().toISOString() }
   beforeEach(async () => {
     dir = await fs.mkdtemp(path.join(os.tmpdir(), 'voice-admin-')); bindings = new Map()
-    deps = { isVoice: id => id === channel, instance: id => ({ id, implementation_id: 'channel-voice', auto_start: false } as never), createInstance: vi.fn(), resumeInstance: vi.fn(), pauseInstance: vi.fn(), saveSetup: vi.fn(), fingerprint: () => undefined, terminalHosts: () => [], closeGateway: vi.fn(), admissionReady: () => true,
+    deps = { ownerReady: () => true, ownerFriends: () => [...new Map([...bindings.values()].map(friend => [friend.id, friend])).values()], persistOwnerFriend: vi.fn(), isVoice: id => id === channel, instance: id => ({ id, implementation_id: 'channel-voice', auto_start: false } as never), createInstance: vi.fn(), resumeInstance: vi.fn(), pauseInstance: vi.fn(), saveSetup: vi.fn(), fingerprint: () => undefined, terminalHosts: () => [], closeGateway: vi.fn(), admissionReady: () => true,
       verifyRuntime: async (_, token) => { if (token !== runtime) throw new RpcError('UNAUTHORIZED', 'Current child required') },
       verifyCore: async token => { if (token !== core) throw new RpcError('UNAUTHORIZED', 'Exact core required') },
       verifyHuman: async token => { if (token !== human) throw new RpcError('FORBIDDEN', 'Human Admin required') },
