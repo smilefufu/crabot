@@ -1,3 +1,4 @@
+import { requestInputsForMessages, type TrustedHumanInput } from './trusted-human-input.js'
 /**
  * ManagerRegistry —— manager 实例台账与唤醒路由(protocol-agent-v3.md §4.4)。
  *
@@ -181,7 +182,7 @@ export interface ManagerRegistryDeps {
    * 换个人说话就整体覆盖——而派出去的 worker 的权限身份必须是**本批消息的发言者**。
    */
   /** Persist real group inputs before LLM handling; this does not grant request authority. */
-  readonly recordHumanInputs?: (key: ManagerKey, messages: ReadonlyArray<ChannelMessage>) => Promise<void>
+  readonly recordHumanInputs?: (key: ManagerKey, messages: ReadonlyArray<ChannelMessage>) => Promise<ReadonlyArray<TrustedHumanInput> | void>
   readonly onHumanWake?: (
     key: ManagerKey,
     principal: HumanPrincipal,
@@ -234,6 +235,7 @@ export interface ManagerRegistryDeps {
     /** 当前 episode 的 trace、发送后复核与交付证据桥（registry 惰性桥接到 loops 实例）。 */
     traceHooks?: {
       currentTraceId: () => string | undefined
+      requestInputs: () => ReadonlyArray<TrustedHumanInput>
       isVoice?: () => boolean
       voiceReplyContext?: () => import('crabot-shared').VoiceReplyContext | undefined
       onWorkerSpawned: (workerId: string) => void
@@ -437,6 +439,7 @@ export class ManagerRegistry {
           principalPermissionsOf(wakeEvent),
           {
             currentTraceId: () => this.loops.get(key)?.currentEpisodeTraceId,
+            requestInputs: () => this.loops.get(key)?.requestInputs ?? [],
             isVoice: () => this.loops.get(key)?.isVoiceConversation === true,
             voiceReplyContext: () => this.loops.get(key)?.voiceReplyContext,
             onWorkerSpawned: (workerId) => this.loops.get(key)?.recordSpawnedWorker(workerId),
@@ -563,8 +566,9 @@ export class ManagerRegistry {
     try {
       // Capture before principal lookup so queueing cannot rewrite ingress time.
       const envelope = { ...this.makeEnvelope(capture, initialWake, undefined, messages, correlation), ...(voiceContext ? { voice_turn_id: voiceContext.turnId } : {}), ...(voiceContext?.replyContext ? { voice_reply_context: voiceContext.replyContext } : {}) }
+      let requestInputs: ReadonlyArray<TrustedHumanInput> = []
       if (sessionType === 'group' && this.deps.recordHumanInputs) {
-        try { await this.deps.recordHumanInputs(key, messages) }
+        try { requestInputs = requestInputsForMessages(key, messages, (await this.deps.recordHumanInputs(key, messages)) ?? []) }
         catch (error) { console.error(`[ManagerRegistry] trusted sources unavailable for '${key}'; new request authority must remain closed:`, error) }
       }
       // 只会退回 fail-soft 兜底,而消息丢了就是丢了。
@@ -582,8 +586,8 @@ export class ManagerRegistry {
       const withPerms = principalPermissions ? { principalPermissions } : {}
       const event: WakeEvent =
         kind === 'human_messages'
-          ? { kind: 'human_messages', messages, ...withFriend, ...withPerms, ...withSenderFriends }
-          : { kind: 'attention_flush', messages, ...withFriend, ...withPerms, ...withSenderFriends }
+          ? { kind: 'human_messages', messages, ...withFriend, ...withPerms, ...withSenderFriends, ...(requestInputs.length ? { request_inputs: requestInputs } : {}) }
+          : { kind: 'attention_flush', messages, ...withFriend, ...withPerms, ...withSenderFriends, ...(requestInputs.length ? { request_inputs: requestInputs } : {}) }
       if (this.pendingResumes.has(key) || this.resumeTasks.has(key)) {
         await this.resumeBeforeWake(key, { ...envelope, wake: event })
       }

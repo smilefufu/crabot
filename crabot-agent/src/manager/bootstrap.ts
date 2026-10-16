@@ -686,7 +686,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     // 人类消息唤醒边界:这是人类消息链路上**唯一**一次异步解析。返回本批发言者算好的档位,
     // 由 registry 挂到本 episode 的唤醒事件上——缓存只服务于同步 thunk(记忆档位 /
     // 对话对象档案),派活用的档位走事件,不走缓存(PR #59 review)。
-    recordHumanInputs: async (key, messages) => { await trustedHumanInputs.capture(key, messages) },
+    recordHumanInputs: (key, messages) => trustedHumanInputs.capture(key, messages),
     onHumanWake: async (key, principal) => (await principals.resolve(key, principal)).permissions,
     beforeWake: async (key, envelope) => {
       const { channelId } = splitManagerKey(key)
@@ -903,6 +903,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
           triggerType: scheduleIdentity ? 'scheduled' : isWorkboardSystemInput || isSystemThread ? 'system' : 'message',
         }),
         voice: traceHooks?.isVoice?.() === true,
+        requestAuthorization: targetSessionType === 'group' && !isSystemThread && !scheduleIdentity ? 'shared' : undefined,
         messagingDeps: { ...deps.messagingDeps, voiceReplyContext: traceHooks?.voiceReplyContext },
         // send_message 省略 channel_id 时使用的 manager 归属目标与结构化 Session 观察索引
         // （spec 2026-09-03-tool-input-repair）。两条桥都在工具调用时动态读取当前 Loop。

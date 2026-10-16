@@ -42,6 +42,7 @@ import {
 } from './tool-catalog.js'
 
 export interface ToolFaceDeps {
+  readonly requestAuthorization?: 'shared' | 'request'
   readonly voice?: boolean
   readonly dailyReflection?: DailyReflection
   readonly describeExecutionTools?: DescribeExecutionTools
@@ -612,7 +613,7 @@ export function buildManagerToolFace(deps: ToolFaceDeps): ToolDefinition[] {
     ...(deps.workerImplSnapshot ? { workerImplSnapshot: deps.workerImplSnapshot } : {}),
     ...(deps.schedule ? { schedule: deps.schedule } : {}),
   })
-  const guidanceTool = createGuidanceTool('manager', { computerUse: deps.externalMcpTools?.some(tool => tool.traceMetadata?.computer_use_standard === true) })
+  const guidanceTool = createGuidanceTool('manager', { requestAware: deps.requestAuthorization !== undefined, computerUse: deps.externalMcpTools?.some(tool => tool.traceMetadata?.computer_use_standard === true) })
   const workboardTools = buildWorkboardTools(deps.workboard)
   const projectDocTools = buildProjectDocTools({ ...deps.projectDocs, get managerPrincipalPermissions() { return currentPrincipal() } })
 

@@ -1,3 +1,4 @@
+import { requestInputsForMessages, type TrustedHumanInput } from './trusted-human-input.js'
 import { TaggedVoiceOutput, type VoiceOutputPort } from './voice-output.js'
 /**
  * ManagerLoop —— episode 生命周期(protocol-agent-v3.md §4.1/§4.2)。
@@ -111,6 +112,7 @@ export type WakeEvent =
   | {
       readonly kind: 'human_messages'
       readonly messages: ReadonlyArray<ChannelMessage>
+      readonly request_inputs?: ReadonlyArray<TrustedHumanInput>
       /**
        * P7 J additive:本批消息的**发言者**(§4.3 权限身份、§8.2 `creator_friend_id`)。
        * 与 schedule 的 `creatorFriendId` 同样只在唤醒事件上随行、**不作为独立字段进对话
@@ -185,6 +187,7 @@ export type WakeEvent =
   | {
       readonly kind: 'attention_flush'
       readonly messages: ReadonlyArray<ChannelMessage>
+      readonly request_inputs?: ReadonlyArray<TrustedHumanInput>
       /**
        * P7 J additive:与 `human_messages` 的同名字段逐字同义(见上)。
        * **群聊注意力放行走的是这一条**,漏带 friend 就等于群聊路径拿不到发起人身份
@@ -299,7 +302,7 @@ export interface ManagerLoopDeps {
    */
   readonly toolFace: (wakeEvent?: WakeEvent, faceState?: ManagerToolFaceState) => ReadonlyArray<ToolDefinition>
   /** System prompt inputs are stable for the whole dialogProfile revision. */
-  readonly promptInputs: () => { readonly dialogProfile?: string; readonly isGroup?: boolean; readonly adminPersonality?: string }
+  readonly promptInputs: () => { readonly dialogProfile?: string; readonly isGroup?: boolean; readonly adminPersonality?: string; readonly requestAuthorization?: 'shared' | 'request' }
   readonly harness: WorkerHarness
   readonly now: () => Date
   /**
@@ -409,6 +412,8 @@ export class ManagerLoop {
   private currentToolFaceState: ManagerToolFaceState | undefined
   private readonly deferredSettleHooks = new Map<TimedWakeEnvelope, (result: EpisodeResult) => void>()
   private readonly currentHumanInputs = new Map<string, ManagerEpisodeHumanInput>()
+  private readonly currentRequestInputs = new Map<string, TrustedHumanInput>()
+  get requestInputs(): ReadonlyArray<TrustedHumanInput> { return structuredClone([...this.currentRequestInputs.values()]) }
   private humanInputCoverage: 'complete' | 'partial' = 'complete'
   /** daily reflection 可能在 failed episode 后作为 carried wake 与新 primary 一同消费。 */
   private currentEpisodeEnvelopes: ReadonlyArray<TimedWakeEnvelope> = []
@@ -616,7 +621,9 @@ export class ManagerLoop {
     this.resumeCheckpoint = {
       ...this.resumeCheckpoint,
       state: { ...nextState, committedHumanMessageIds: [...committedIds], ...(imageRefs.size > 0 ? { imageRefs: [...imageRefs.values()] } : {}) },
-      envelopes,
+      envelopes: envelopes.map(envelope => isHumanWake(envelope.wake) && envelope.wake.request_inputs ? {
+        ...envelope, wake: { ...envelope.wake, request_inputs: envelope.wake.request_inputs.filter(input => this.currentRequestInputs.has(input.source_id)) },
+      } : envelope),
       wakeIndex: this.currentWakeEvent ? envelopes.indexOf(this.currentWakeEvent) : -1,
       ...(this.currentToolProfile ? { toolProfile: this.currentToolProfile } : {}),
       pending,
@@ -673,6 +680,9 @@ export class ManagerLoop {
   private recordHumanInputs(envelopes: ReadonlyArray<TimedWakeEnvelope>): void {
     for (const envelope of envelopes) {
       if (!isHumanWake(envelope.wake)) continue
+      for (const input of requestInputsForMessages(this.deps.key, envelope.wake.messages, envelope.wake.request_inputs)) {
+        if (!this.currentRequestInputs.has(input.source_id)) this.currentRequestInputs.set(input.source_id, structuredClone(input))
+      }
       for (const message of envelope.wake.messages) {
         if (this.currentHumanInputs.has(message.platform_message_id)) continue
         this.currentHumanInputs.set(message.platform_message_id, {
@@ -891,6 +901,7 @@ export class ManagerLoop {
     this.contextRecoveryPending = false
     const episodeId = recovery?.episodeId ?? randomUUID()
     this.currentHumanInputs.clear()
+    this.currentRequestInputs.clear()
     this.humanInputCoverage = recovery ? 'partial' : 'complete'
     if (recovery) envelope = recovery.envelopes[recovery.wakeIndex]
     this.mailbox.clearContextAdmissions()
@@ -1007,6 +1018,7 @@ export class ManagerLoop {
       }
       committedHumanMessages = committed.messageCount
       humanInputsCommitted = true
+      this.recordHumanInputs(committed.humanInputEnvelopes)
       if (committed.hasNewDirectHumanMessages || envelope?.voice_turn_id) this.deps.markPendingReply()
       // 已提交人类消息 id 的内存镜像:mid-episode 注入的投影判定用它(同步、无 store I/O)
       this.knownCommittedHumanIds = new Set(state.committedHumanMessageIds ?? [])
@@ -1078,7 +1090,7 @@ export class ManagerLoop {
       )
       this.currentTraceId = episodeId
       traceStarted = true
-      this.recordHumanInputs(committed.humanInputEnvelopes)
+      this.recordHumanInputs([])
       const initialTools = !recovery
         ? this.deps.toolFace(this.effectiveWakeForCurrentEpisode(), this.currentToolFaceState)
         : undefined
@@ -1226,6 +1238,7 @@ export class ManagerLoop {
       this.currentEpisodeEnvelopes = []
       this.currentTraceId = undefined
       this.currentHumanInputs.clear()
+      this.currentRequestInputs.clear()
       this.tracedLlmResponses.clear()
       this.tracedUsageResponses.clear()
       this.tracedToolStarts.clear()
@@ -2187,9 +2200,20 @@ export class ManagerLoop {
       isSystemThread: this.deps.isSystemThread,
       isBuiltinDailyReflection: isBuiltinDailyReflectionWake(effectiveWake),
       isGroup: extra.isGroup ?? false,
+      requestAuthorization: this.requestAuthorizationForWake(effectiveWake),
       dialogProfile: extra.dialogProfile,
       adminPersonality: extra.adminPersonality,
     })
+  }
+
+  private requestAuthorizationForWake(wake: WakeEvent | undefined): 'shared' | 'request' | undefined {
+    const extra = this.deps.promptInputs()
+    if (!extra.isGroup || this.deps.isSystemThread || wake?.kind === 'schedule' || this.currentToolProfile !== 'normal') return undefined
+    return extra.requestAuthorization ?? 'shared'
+  }
+
+  private renderManagerGuidance(name: GuidanceName): string {
+    return renderGuidance('manager', name, { requestAware: this.requestAuthorizationForWake(this.effectiveWakeForCurrentEpisode()) !== undefined })
   }
 
   private provideAutomaticGuidance(envelopes: ReadonlyArray<TimedWakeEnvelope>): string[] {
@@ -2199,13 +2223,13 @@ export class ManagerLoop {
       const name = automaticGuidanceForWake(wake)
       if (!name || this.automaticGuidance.has(name)) continue
       this.automaticGuidance.add(name)
-      texts.push(renderGuidance('manager', name))
+      texts.push(this.renderManagerGuidance(name))
     }
     return texts
   }
 
   private transientPromptCounts(): Map<string, number> {
-    const counts = new Map([...this.automaticGuidance].map(name => [renderGuidance('manager', name), 1]))
+    const counts = new Map([...this.automaticGuidance].map(name => [this.renderManagerGuidance(name), 1]))
     for (const item of [...this.currentEpisodeEnvelopes, ...(this.currentEpisodeInjected ?? [])]) {
       const prompt = transientSystemPromptForWake(item.wake)
       if (prompt) counts.set(prompt, (counts.get(prompt) ?? 0) + 1)
@@ -2973,12 +2997,17 @@ function projectHumanEnvelope(
   entries: ReadonlyArray<{ readonly message: ChannelMessage; readonly index: number }>,
 ): TimedWakeEnvelope {
   if (!isHumanWake(envelope.wake)) throw new Error('projectHumanEnvelope requires a human wake')
+  const messages = entries.map(({ message }) => message)
+  const first = messages[0]
+  const key = first ? `${first.session.channel_id}::${first.session.session_id}` as ManagerKey : undefined
   const humanOccurredAt = envelope.human_occurred_at
     ? entries.map(({ message, index }) => envelope.human_occurred_at?.[index] ?? { message_id: message.platform_message_id })
     : undefined
   return {
     ...envelope,
-    wake: { ...envelope.wake, messages: entries.map(({ message }) => message) },
+    wake: { ...envelope.wake, messages,
+      ...(envelope.wake.request_inputs ? { request_inputs: key ? requestInputsForMessages(key, messages, envelope.wake.request_inputs) : [] } : {}),
+    },
     ...(humanOccurredAt ? { human_occurred_at: humanOccurredAt } : {}),
   }
 }
@@ -3047,7 +3076,9 @@ function renderChannelMessages(
   const lines = messages.map((message, index) => {
     const occurred = envelope.human_occurred_at?.[index]?.occurred_at
     const prefix = occurred ? `[human occurred_at="${occurred}"]\n` : ''
-    return prefix + formatChannelMessageLine(message, {
+    const input = isHumanWake(envelope.wake) ? requestInputsForMessages(`${message.session.channel_id}::${message.session.session_id}` as ManagerKey, [message], envelope.wake.request_inputs)[0] : undefined
+    const source = input ? '[系统核验的原始输入定位；只定位，不授予权限]\n' + JSON.stringify({ source_id: input.source_id, platform_message_id: input.message.platform_message_id, identity_status: input.identity_status, sender_friend_id: input.sender_friend_id }) + '\n' : ''
+    return prefix + source + formatChannelMessageLine(message, {
       timezone: envelope.timezone,
       now: new Date(envelope.received_at),
       identity: resolveSenderIdentity({ msg: message, senderFriend: isHumanWake(envelope.wake) && envelope.wake.senderFriends ? envelope.wake.senderFriends.find(f => f.id === message.sender.friend_id) : friend }),

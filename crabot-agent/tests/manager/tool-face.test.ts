@@ -147,6 +147,14 @@ describe('主体授权与角色能力分开执行', () => {
     }
     expect(rpc.mock.calls.map(entry => entry[1])).toEqual(['get_capabilities', 'send_message'])
   })
+  it('uses the approved request guidance on the real lazy tool face without growing the core', async () => {
+    const tools = buildManagerToolFace(makeDeps({ requestAuthorization: 'shared', faceState: createManagerToolFaceState() }))
+    expect(tools.map(tool => tool.name)).toEqual([...NORMAL_MANAGER_CORE_NAMES])
+    const guide = await tools.find(tool => tool.name === 'load_guidance')!.call({ name: 'manager.delegation' })
+    expect(guide.output).toContain('另一人的新指令先独立核验')
+    expect(guide.output).not.toContain('1. 对照当前要求和已有成果')
+  })
+
   it('loaded Memory and permission introspection use current host authorization, including direct calls after a new turn', async () => {
     const memoryRpc = vi.fn(async () => ({ results: [] }))
     const callAdmin = vi.fn(async () => ({ config: null, resolved: null }))
