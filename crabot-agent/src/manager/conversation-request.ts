@@ -27,3 +27,15 @@ export interface ConversationRequestBinding {
   source_sha256: string
   execution_scope: 'group' | 'request'
 }
+
+export interface ExecuteConversationRequestParams {
+  source_id: string
+  quote?: string
+  delivery: 'origin' | 'requester_private'
+}
+export interface ExecuteConversationRequestResult {
+  request_id: string
+  status: 'running' | 'waiting' | 'closed' | 'recovery_required'
+  delivery: 'origin' | 'requester_private'
+  worker_ids: string[]
+}

@@ -249,6 +249,7 @@ export interface EpisodeResult {
 
 export interface ManagerLoopDeps {
   readonly voiceOutput?: VoiceOutputPort
+  readonly voiceResponseEndOwner?: 'parent'
   readonly onSuccessfulVoiceReply?: (target: { channel_id: string; session_id: string }) => void
   readonly onToolFinished?: (event: Extract<import('../engine/types.js').EngineToolLifecycleEvent, { type: 'tool_finished' }>, readOnly: boolean) => void
   readonly dailyReflection?: import('./daily-reflection.js').DailyReflection
@@ -413,7 +414,12 @@ export class ManagerLoop {
   private readonly deferredSettleHooks = new Map<TimedWakeEnvelope, (result: EpisodeResult) => void>()
   private readonly currentHumanInputs = new Map<string, ManagerEpisodeHumanInput>()
   private readonly currentRequestInputs = new Map<string, TrustedHumanInput>()
+  private readonly requestVoiceContexts = new Map<string, import('crabot-shared').VoiceReplyContext>()
   get requestInputs(): ReadonlyArray<TrustedHumanInput> { return structuredClone([...this.currentRequestInputs.values()]) }
+  voiceReplyContextForSource(sourceId: string): import('crabot-shared').VoiceReplyContext | undefined {
+    const context = this.requestVoiceContexts.get(sourceId)
+    return context && Date.parse(context.expires_at) > Date.now() ? structuredClone(context) : undefined
+  }
   private humanInputCoverage: 'complete' | 'partial' = 'complete'
   /** daily reflection 可能在 failed episode 后作为 carried wake 与新 primary 一同消费。 */
   private currentEpisodeEnvelopes: ReadonlyArray<TimedWakeEnvelope> = []
@@ -681,7 +687,10 @@ export class ManagerLoop {
     for (const envelope of envelopes) {
       if (!isHumanWake(envelope.wake)) continue
       for (const input of requestInputsForMessages(this.deps.key, envelope.wake.messages, envelope.wake.request_inputs)) {
-        if (!this.currentRequestInputs.has(input.source_id)) this.currentRequestInputs.set(input.source_id, structuredClone(input))
+        if (!this.currentRequestInputs.has(input.source_id)) {
+          this.currentRequestInputs.set(input.source_id, structuredClone(input))
+          if (envelope.voice_reply_context) this.requestVoiceContexts.set(input.source_id, structuredClone(envelope.voice_reply_context))
+        }
       }
       for (const message of envelope.wake.messages) {
         if (this.currentHumanInputs.has(message.platform_message_id)) continue
@@ -902,6 +911,7 @@ export class ManagerLoop {
     const episodeId = recovery?.episodeId ?? randomUUID()
     this.currentHumanInputs.clear()
     this.currentRequestInputs.clear()
+    this.requestVoiceContexts.clear()
     this.humanInputCoverage = recovery ? 'partial' : 'complete'
     if (recovery) envelope = recovery.envelopes[recovery.wakeIndex]
     this.mailbox.clearContextAdmissions()
@@ -1226,7 +1236,7 @@ export class ManagerLoop {
       this.deps.store.clearCheckpoint(this.deps.key, episodeId)
       throw err
     } finally {
-      await this.voiceOutput?.finishResponse()
+      if (this.deps.voiceResponseEndOwner !== 'parent') await this.voiceOutput?.finishResponse()
       this.voiceOutput = undefined
       this.currentVoiceReplyContext = undefined
       this.automaticGuidance.clear()
@@ -1239,6 +1249,7 @@ export class ManagerLoop {
       this.currentTraceId = undefined
       this.currentHumanInputs.clear()
       this.currentRequestInputs.clear()
+      this.requestVoiceContexts.clear()
       this.tracedLlmResponses.clear()
       this.tracedUsageResponses.clear()
       this.tracedToolStarts.clear()
@@ -1534,7 +1545,7 @@ export class ManagerLoop {
       outcome: attempt.result.outcome,
       turns: totalTurnsUsed,
       consumedEvents,
-      repliedToHuman,
+      repliedToHuman: repliedToHuman || allSuccessfulSendMessageTargets.size > 0,
       successfulSendMessageTargets: [...allSuccessfulSendMessageTargets].map((key) => {
         const [channelId, sessionId] = key.split('\u0000')
         return { channel_id: channelId, session_id: sessionId }

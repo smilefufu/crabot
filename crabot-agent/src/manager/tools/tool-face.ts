@@ -1,3 +1,4 @@
+import { buildExecuteRequestTool } from './execute-request.js'
 import { authorizeTool, roleAuthorization, entryAuthorization, checkFileAccess, allowed, denied } from '../../permissions/tool-authorization.js'
 /**
  * Manager 能力目录与 episode 工具投影 —— protocol-agent-v3.md §4.3。
@@ -43,6 +44,7 @@ import {
 
 export interface ToolFaceDeps {
   readonly requestAuthorization?: 'shared' | 'request'
+  readonly executeRequest?: (input: import('../conversation-request.js').ExecuteConversationRequestParams) => Promise<import('../conversation-request.js').ExecuteConversationRequestResult>
   readonly voice?: boolean
   readonly dailyReflection?: DailyReflection
   readonly describeExecutionTools?: DescribeExecutionTools
@@ -621,6 +623,7 @@ export function buildManagerToolFace(deps: ToolFaceDeps): ToolDefinition[] {
     ...(normalProfile ? [guidanceTool] : []),
     ...(normalProfile || dailyProfile ? [createExecutionCapabilitiesTool({ ...deps, workerContext: () => currentDeps().workerContext() })] : []),
     ...(dailyProfile ? buildDailyReflectionTools(deps.dailyReflection) : []),
+    ...(normalProfile && deps.requestAuthorization === 'shared' && deps.executeRequest ? [buildExecuteRequestTool(input => currentDeps().executeRequest!(input))] : []),
     ...messagingTools,
     ...memoryTools,
     ...workerTools,
@@ -697,7 +700,7 @@ export function buildManagerToolFace(deps: ToolFaceDeps): ToolDefinition[] {
       messaging: messagingTools.map(tool => tool.name),
       worker: [...workerTools.map(tool => tool.name), 'get_execution_capabilities'],
       schedule: infoTools.filter(tool => tool.name.endsWith('_schedule') || tool.name === 'list_schedules').map(tool => tool.name),
-      crabot: ['inspect_crabot', 'get_friend_permissions'],
+      crabot: ['inspect_crabot', 'get_friend_permissions', 'execute_request'],
     },
   )
   deps.faceState.catalog = catalog

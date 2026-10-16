@@ -236,6 +236,7 @@ export interface ManagerRegistryDeps {
     traceHooks?: {
       currentTraceId: () => string | undefined
       requestInputs: () => ReadonlyArray<TrustedHumanInput>
+      voiceReplyContextForSource: (sourceId: string) => import('crabot-shared').VoiceReplyContext | undefined
       isVoice?: () => boolean
       voiceReplyContext?: () => import('crabot-shared').VoiceReplyContext | undefined
       onWorkerSpawned: (workerId: string) => void
@@ -440,6 +441,7 @@ export class ManagerRegistry {
           {
             currentTraceId: () => this.loops.get(key)?.currentEpisodeTraceId,
             requestInputs: () => this.loops.get(key)?.requestInputs ?? [],
+            voiceReplyContextForSource: sourceId => this.loops.get(key)?.voiceReplyContextForSource(sourceId),
             isVoice: () => this.loops.get(key)?.isVoiceConversation === true,
             voiceReplyContext: () => this.loops.get(key)?.voiceReplyContext,
             onWorkerSpawned: (workerId) => this.loops.get(key)?.recordSpawnedWorker(workerId),

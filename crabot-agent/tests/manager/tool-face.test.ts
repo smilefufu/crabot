@@ -147,6 +147,31 @@ describe('主体授权与角色能力分开执行', () => {
     }
     expect(rpc.mock.calls.map(entry => entry[1])).toEqual(['get_capabilities', 'send_message'])
   })
+  it('loads execute_request only from the existing crabot family with no extra core or external search result', async () => {
+    const state = createManagerToolFaceState()
+    const executeRequest = vi.fn(async () => ({ request_id: 'fixed', status: 'waiting' as const, delivery: 'requester_private' as const, worker_ids: [], body: 'PRIVATE_BODY' }))
+    const deps = makeDeps({ requestAuthorization: 'shared', executeRequest, faceState: state })
+    const initial = buildManagerToolFace(deps)
+    expect(initial.map(tool => tool.name)).toEqual([...NORMAL_MANAGER_CORE_NAMES])
+    const search = await initial.find(tool => tool.name === 'search_tools')!.call({ query: 'execute_request' })
+    expect(search.output).toContain('no_match')
+    const loaded = await initial.find(tool => tool.name === 'load_tool_family')!.call({ family: 'crabot' })
+    expect(loaded.output).toContain('execute_request')
+    const tool = buildManagerToolFace(deps).find(tool => tool.name === 'execute_request')!
+    expect(tool).toBeDefined()
+    const result = await tool.call({ source_id: 'current', delivery: 'requester_private' })
+    expect(result.output).toContain('[本人私发请求状态：正文不在共享上下文显示。不得要求返回正文或改发原群。]')
+    expect(result.output).not.toContain('PRIVATE_BODY')
+    expect(executeRequest).toHaveBeenCalledTimes(1)
+    expect((await tool.call({ source_id: 'current', delivery: 'origin', permission: 'master' })).isError).toBe(true)
+    expect(executeRequest).toHaveBeenCalledTimes(1)
+    executeRequest.mockRejectedValueOnce(new Error('SECRET_FAILURE_BODY'))
+    expect((await tool.call({ source_id: 'current', delivery: 'requester_private' })).output).not.toContain('SECRET_FAILURE_BODY')
+    for (const requestAuthorization of [undefined, 'request'] as const) {
+      expect(buildManagerToolFace(makeDeps({ requestAuthorization, executeRequest })).some(tool => tool.name === 'execute_request')).toBe(false)
+    }
+  })
+
   it('uses the approved request guidance on the real lazy tool face without growing the core', async () => {
     const tools = buildManagerToolFace(makeDeps({ requestAuthorization: 'shared', faceState: createManagerToolFaceState() }))
     expect(tools.map(tool => tool.name)).toEqual([...NORMAL_MANAGER_CORE_NAMES])
