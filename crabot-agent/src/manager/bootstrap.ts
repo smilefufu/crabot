@@ -57,6 +57,8 @@ import { shouldWakeOnHarnessEvent } from './inbound-adapters.js'
 import { buildManagerToolFace } from './tools/tool-face.js'
 import { PrincipalBindingStore } from './principal-binding-store.js'
 import { TrustedHumanInputStore } from './trusted-human-input-store.js'
+import { ConversationRequestStore } from './conversation-request-store.js'
+import type { ResolveRequestPermissionSourcesResult } from './request-permission-sources.js'
 import { ManagerWorkboardStore } from './workboard-store.js'
 import {
   ManagerPrincipalStore,
@@ -143,6 +145,7 @@ export interface ManagerStack {
   /** Persistent bindings are initialized during reconciliation, never construction. */
   readonly principalBindings: PrincipalBindingStore
   readonly trustedHumanInputs: TrustedHumanInputStore
+  readonly conversationRequests: ConversationRequestStore
   /**
    * builtin adapter 的私有 dataDir。`reconcileManagerStack` 需要它跑
    * `BuiltinWorkerAdapter.scanOrphans`——见该函数注释里的顺序契约。放在 stack 上而不是
@@ -555,6 +558,16 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     resolveSender: async (channelId, platformUserId) => {
       if (!deps.principalResolver.resolveChannelSender) throw new Error('Channel sender verification unavailable')
       return deps.principalResolver.resolveChannelSender(channelId, platformUserId)
+    },
+  })
+  const conversationRequests = new ConversationRequestStore(managersDir, trustedHumanInputs, {
+    now: deps.now,
+    resolveSources: async source => {
+      const bearer = deps.coreRuntimeBearer?.()
+      if (!bearer) throw new Error('Request permission resolution requires the core runtime credential')
+      const port = await deps.messagingDeps.getAdminPort()
+      return deps.messagingDeps.rpcClient.callSensitive<{ source: typeof source }, ResolveRequestPermissionSourcesResult>(
+        port, 'resolve_request_permission_sources', { source }, deps.messagingDeps.moduleId, { authorizationBearer: bearer })
     },
   })
   let candidatesReady = false
@@ -992,6 +1005,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     principals,
     principalBindings,
     trustedHumanInputs,
+    conversationRequests,
     builtinDataDir,
     store: sessionStore,
     dailyReflectionFor,

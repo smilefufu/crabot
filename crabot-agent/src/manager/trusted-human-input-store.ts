@@ -31,7 +31,8 @@ function assertMessage(key: ManagerKey, value: unknown): asserts value is Channe
 function original(message: ChannelMessage): ChannelMessage {
   const { friend_id, ...sender } = message.sender
   const { task_id, ...raw } = message
-  return { ...raw, sender }
+  // Persist exactly the JSON wire facts; absent optional fields must hash identically after recovery.
+  return JSON.parse(JSON.stringify({ ...raw, sender })) as ChannelMessage
 }
 
 /** Not exposed to tools/RPC. Only the authenticated ingress composition may call capture. */
@@ -53,9 +54,10 @@ export class TrustedHumanInputStore {
       let changed = false
       for (const message of batch) {
         assertMessage(key, message)
+        const wireMessage = original(message)
         const existing = state.inputs.find(input => input.message.platform_message_id === message.platform_message_id)
         if (existing) {
-          if (!isDeepStrictEqual(original(existing.message), original(message))) throw new Error('Trusted human input source conflict')
+          if (!isDeepStrictEqual(original(existing.message), wireMessage)) throw new Error('Trusted human input source conflict')
           results.push(existing); continue
         }
         let status: TrustedHumanInput['identity_status'] = 'unresolved', friendId: string | null = null
@@ -69,7 +71,7 @@ export class TrustedHumanInputStore {
         const saved: TrustedHumanInput = {
           source_id: randomUUID(), manager_key: key, sequence: (state.inputs.at(-1)?.sequence ?? 0) + 1,
           received_at: receivedAt, identity_status: status, sender_friend_id: friendId,
-          message: { ...original(message), sender: { ...original(message).sender, ...(friendId ? { friend_id: friendId } : {}) } },
+          message: { ...wireMessage, sender: { ...wireMessage.sender, ...(friendId ? { friend_id: friendId } : {}) } },
         }
         state.inputs.push(saved); results.push(saved); changed = true
       }
