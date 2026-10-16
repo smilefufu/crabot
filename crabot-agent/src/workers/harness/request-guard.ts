@@ -25,6 +25,10 @@ function workerSource(source: RequestPermissionSource): RequestPermissionSource 
 export class WorkerRequestGuard {
   constructor(private readonly ledger: LedgerStore, private readonly contexts: WorkerContextStore, private readonly requests: ConversationRequestStore, private readonly resolveCurrent: CurrentResolver) {}
   async load(workerId: string): Promise<BoundWorkerRequest | null> {
+    try { return await this.loadBound(workerId) }
+    catch (cause) { throw Object.assign(new Error('CAPABILITY_UNKNOWN: Worker request binding/context unavailable'), { cause }) }
+  }
+  private async loadBound(workerId: string): Promise<BoundWorkerRequest | null> {
     const found = await this.ledger.findWorker(workerId)
     if (!found) throw new Error('Worker not found')
     const context = await this.contexts.read(workerId), binding = found.worker.origin.request
@@ -37,6 +41,13 @@ export class WorkerRequestGuard {
     if (context.target_session?.type !== 'group' || `${context.target_session.channel_id}::${context.target_session.session_id}` !== fixed.source.manager_key
       || binding.execution_scope === 'group' && fixed.record.delivery.kind === 'requester_private') throw new Error('Worker request scope/target mismatch')
     return { worker: found.worker, request: fixed.record, source: fixed.source }
+  }
+  async bindSpawn(frame: RequestOperationFrame, workerId: string, executionScope: 'group' | 'request') {
+    const fixed = await this.requests.get(frame.request.manager_key, frame.request.request_id)
+    if (!fixed || fixed.record.source_sha256 !== frame.request.source_sha256 || fixed.source.source_id !== frame.source.source_id || fixed.record.status !== 'open') throw new Error('Request spawn source unavailable or closed')
+    if (executionScope === 'group' && fixed.record.delivery.kind === 'requester_private') throw new Error('Private delivery requires an isolated request')
+    await this.requests.attachWorker(fixed.record.manager_key, fixed.record.request_id, workerId)
+    return { schema_version: 1 as const, request_id: fixed.record.request_id, source_sha256: fixed.record.source_sha256, execution_scope: executionScope }
   }
   async runResource<T>(workerId: string, checkCompleteOperation: (source: RequestPermissionSource) => Promise<PermissionDecision>, execute: (frame: RequestOperationFrame) => Promise<T>): Promise<T> {
     const bound = await this.load(workerId)

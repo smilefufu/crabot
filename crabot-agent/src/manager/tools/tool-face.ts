@@ -1,3 +1,4 @@
+import { bindWorkerRequestTool } from './worker-request-context.js'
 import { buildExecuteRequestTool } from './execute-request.js'
 import { authorizeTool, roleAuthorization, entryAuthorization, checkFileAccess, allowed, denied } from '../../permissions/tool-authorization.js'
 /**
@@ -43,6 +44,8 @@ import {
 } from './tool-catalog.js'
 
 export interface ToolFaceDeps {
+  readonly workerRequestControl?: import('./worker-request-context.js').WorkerRequestControl
+  readonly requestGuard?: import('../../workers/harness/request-guard.js').WorkerRequestGuard
   readonly requestAuthorization?: 'shared' | 'request'
   readonly executeRequest?: (input: import('../conversation-request.js').ExecuteConversationRequestParams) => Promise<import('../conversation-request.js').ExecuteConversationRequestResult>
   readonly voice?: boolean
@@ -593,6 +596,8 @@ export function buildManagerToolFace(deps: ToolFaceDeps): ToolDefinition[] {
   const memoryFace = buildManagerMemoryFace(deps.memoryServer)
   const memoryTools = dailyProfile ? protectDailyReflectionMemory(memoryFace) : memoryFace
   const workerTools = buildWorkerTools({
+    requestControl: deps.workerRequestControl,
+    requestGuard: deps.requestGuard,
     authorizeProjectRead: (workspaceRoot) => authorizeProjectRoot({ ...deps.projectDocs, managerPrincipalPermissions: currentPrincipal() }, workspaceRoot, false),
     harness: deps.harness,
     voice: deps.voice,
@@ -619,9 +624,11 @@ export function buildManagerToolFace(deps: ToolFaceDeps): ToolDefinition[] {
   const workboardTools = buildWorkboardTools(deps.workboard)
   const projectDocTools = buildProjectDocTools({ ...deps.projectDocs, get managerPrincipalPermissions() { return currentPrincipal() } })
 
+  let executionCapabilities = normalProfile || dailyProfile ? createExecutionCapabilitiesTool({ ...deps, workerContext: () => currentDeps().workerContext() }) : undefined
+  if (executionCapabilities && deps.workerRequestControl) executionCapabilities = bindWorkerRequestTool(executionCapabilities, deps.workerRequestControl)
   const builtinTools = [
     ...(normalProfile ? [guidanceTool] : []),
-    ...(normalProfile || dailyProfile ? [createExecutionCapabilitiesTool({ ...deps, workerContext: () => currentDeps().workerContext() })] : []),
+    ...(executionCapabilities ? [executionCapabilities] : []),
     ...(dailyProfile ? buildDailyReflectionTools(deps.dailyReflection) : []),
     ...(normalProfile && deps.requestAuthorization === 'shared' && deps.executeRequest ? [buildExecuteRequestTool(input => currentDeps().executeRequest!(input))] : []),
     ...messagingTools,

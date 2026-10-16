@@ -1,3 +1,9 @@
+import { sha256CanonicalJson } from 'crabot-shared'
+import type { ConversationRequestAuthority } from '../../manager/conversation-request-authority.js'
+import type { RequestPermissionSource } from '../../manager/request-permission-sources.js'
+import type { WorkerRequestGuard } from './request-guard.js'
+import { boundedRequestPermissions } from './request-permissions.js'
+import { allowed, denied, checkFileAccess } from '../../permissions/tool-authorization.js'
 import { createHash } from 'node:crypto'
 import { executionObservation, persistObservation, observationFile, readObservation } from '../../permissions/execution-observation.js'
 /**
@@ -671,6 +677,7 @@ export class ImplAlreadyUsedError extends Error {
 }
 
 export interface HarnessDeps {
+  readonly requestGuard?: () => WorkerRequestGuard
   /**
    * 化身进入终态（exited）时触发一次（fire-and-forget，P6-A §8.10）：装配层用它做
    * native trace 终态收割（最后一次 read + 写 Agent-owned copy）。回调异常不得影响
@@ -910,6 +917,7 @@ function continuationDelivery(
 }
 
 export class WorkerHarness {
+  private readonly requestSpawnMutexes = new Map<string, AsyncMutex>()
   private readonly pendingBgNotifications = new Map<string, number>()
   private readonly continuationObservations = new Map<string, { key: string; fact: WorkerExecutionFact; runtimeFact: WorkerExecutionFact; stoppedAt?: string; stopUnverified?: boolean }>()
   private readonly continuationProjects = new Map<ManagerKey, { scope: string; projects: WorkerViewFacts['projects'] }>()
@@ -1112,8 +1120,58 @@ export class WorkerHarness {
   }
 
   async spawnWorker(p: SpawnWorkerParams): Promise<LedgerWorker> {
+    if (p.origin.request) throw new Error('REQUEST_SPAWN_REQUIRES_BOUND_ADMISSION')
+    return this.spawnWorkerInternal(p, `w-${randomUUID()}`)
+  }
+
+  async spawnRequestWorker(p: SpawnWorkerParams, caller: ConversationRequestAuthority): Promise<{ status: 'spawned' | 'existing'; worker: LedgerWorker }> {
     this.deps.assertExecutionAdmission?.()
-    const workerId = `w-${randomUUID()}`
+    const guard = this.deps.requestGuard?.()
+    if (!guard) throw new Error('CAPABILITY_UNKNOWN: Worker request guard unavailable')
+    const choices = new Map<RequestPermissionSource['kind'], WorkerImplId>()
+    const checkSpawn = async (source: RequestPermissionSource) => {
+      try {
+        const impl = choices.get(source.kind) ?? (this.deps.selectWorkerImpl ? this.deps.selectWorkerImpl(p.impl, undefined, source.resolved) : p.impl ?? this.deps.defaultImpl)
+        this.deps.assertExecutionPolicy?.(impl, source.resolved, true)
+        if (p.workspace) {
+          const access = await checkFileAccess(source.resolved, p.workspace, '/', false)
+          if (!access.allowed) return access
+        }
+        choices.set(source.kind, impl)
+        return allowed
+      } catch { return denied('EXECUTION_POLICY_UNSUPPORTED', '请求来源不能兑现该执行器及工作目录的完整范围') }
+    }
+    return caller.run(checkSpawn, async frame => {
+      if (p.managerKey !== frame.request.manager_key) throw new Error('Request spawn manager mismatch')
+      const workerId = `w-request-${sha256CanonicalJson([frame.request.request_id, caller.executionScope, p.title, p.prompt, p.impl ?? null, p.workspace ?? null, p.goal ?? null])}`
+      let mutex = this.requestSpawnMutexes.get(workerId)
+      if (!mutex) { mutex = new AsyncMutex(); this.requestSpawnMutexes.set(workerId, mutex) }
+      return mutex.run(() => caller.run(checkSpawn, async frame => {
+        const existing = await this.deps.ledger.findWorker(workerId)
+        if (existing) {
+          const bound = await guard.load(workerId)
+          if (!bound || bound.request.request_id !== frame.request.request_id || existing.worker.origin.request?.execution_scope !== caller.executionScope) throw new Error('Request spawn identity conflict')
+          if (!existing.worker.incarnations.some(item => isExecutableIncarnation(item) && item.session_ref)) throw new Error(`REQUEST_SPAWN_RECOVERY_REQUIRED: ${workerId}`)
+          return { status: 'existing' as const, worker: existing.worker }
+        }
+        const request = await guard.bindSpawn(frame, workerId, caller.executionScope)
+        const principal = await boundedRequestPermissions(frame.ceiling, frame.current)
+        const recheckSpawn = () => caller.run(async source => {
+          if (source.kind !== frame.current.kind) return denied('PERMISSION_DENIED', '派发来源已变化')
+          return checkSpawn(source)
+        }, async () => undefined)
+        const worker = await this.spawnWorkerInternal({ ...p, impl: choices.get(frame.current.kind),
+          origin: { ...p.origin, trigger_type: 'message', creator_friend_id: frame.source.sender_friend_id ?? undefined, request },
+          report_to: { channel_id: frame.source.message.session.channel_id, session_id: frame.source.message.session.session_id },
+          target_session: { ...frame.source.message.session, type: 'group' }, principal_permissions: principal,
+        }, workerId, recheckSpawn)
+        return { status: 'spawned' as const, worker }
+      }))
+    })
+  }
+
+  private async spawnWorkerInternal(p: SpawnWorkerParams, workerId: string, beforeProvision?: () => Promise<void>): Promise<LedgerWorker> {
+    this.deps.assertExecutionAdmission?.()
     const incarnationId = randomUUID()
     // P6-C §2：显式/省略统一走纯选择器（显式只查自己不 fallback；省略 default→固定顺序）。
     // 选择器抛 WORKER_IMPLEMENTATION_NOT_READY（含 ready list/reasons），无任何副作用。
@@ -1205,6 +1263,7 @@ export class WorkerHarness {
       try {
         // 跨实现身份快照必须先于 provision 落盘：CLI-first worker 与 builtin 一样需要它。
         const requestedContext: WorkerContext = {
+          ...(p.origin.request ? { schema_version: 2 as const, request: p.origin.request } : {}),
           ...(p.principal_permissions === undefined ? {} : { principal_permissions: p.principal_permissions }),
           manager_key: p.managerKey,
           ...(p.target_session ? { target_session: p.target_session } : {}),
@@ -1218,6 +1277,7 @@ export class WorkerHarness {
               principal_permissions: context.principal_permissions,
             })
           : EMPTY_CAPABILITY_BUNDLE
+        if (beforeProvision) await beforeProvision()
         await adapter.provision(workspace, caps)
         await this.recordCliProvision(workerId, incarnationId, impl, caps)
         // builtin 注入:调用方显式传了就用它;没传(manager 的 spawn_worker 工具就不可能传——
@@ -1256,6 +1316,7 @@ export class WorkerHarness {
         // 调用方/状态/数据错误（already spawned、meta 缺失等）与 provision 错误都不置 degraded。
         try {
           spawnPhase = 'spawn'
+          if (beforeProvision) await beforeProvision()
           const returnedHandle = await adapter.spawn(spec)
           if (returnedHandle.incarnation_id !== undefined && returnedHandle.incarnation_id !== incarnationId) {
             throw new Error(`WorkerHarness.spawnWorker: adapter returned mismatched incarnation_id for ${workerId}`)

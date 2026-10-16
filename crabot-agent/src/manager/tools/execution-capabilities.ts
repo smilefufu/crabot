@@ -1,3 +1,5 @@
+import { workerRequestCaller } from './worker-request-context.js'
+import { allowed } from '../../permissions/tool-authorization.js'
 import { defineTool, type ToolDefinition } from '../../engine/index.js'
 import type { ResolvedPermissions, CliAccessConfig, StoragePermission } from '../../types.js'
 import type { WorkerImplId } from '../../workers/types.js'
@@ -33,12 +35,12 @@ export interface ExecutionCapabilities {
 export function createExecutionCapabilitiesTool(deps: ToolFaceDeps): ToolDefinition {
   return defineTool({
     name: 'get_execution_capabilities',
-    description: '核对主体授权、角色职责和执行事实。省略参数返回当前主体的新建计划；worker_id 返回当前会话 Worker 的固定主体和最新主线化身记录，impl 仅筛选新建计划。planned 不代表实际收到工具；legacy_unknown 不代表权限被关闭。工具调用明确拒绝前，不将缺记录或角色限制当成需要用户开权。查询不派发、不授予权限。',
+    description: deps.requestAuthorization ? '核对当前执行边界的主体授权、角色职责和执行事实。共享主控只显示群公共授权，不代表发起人个人能力；独立请求显示固定来源及当前可用范围，不合并成一份更宽权限。worker_id 返回有权读取的 Worker 固定请求与最新主线记录。planned 不代表实际收到工具，legacy_unknown 不代表权限被关闭。查询不派发、不授予权限；先按明确拒绝判断真实缺口。' : '核对主体授权、角色职责和执行事实。省略参数返回当前主体的新建计划；worker_id 返回当前会话 Worker 的固定主体和最新主线化身记录，impl 仅筛选新建计划。planned 不代表实际收到工具；legacy_unknown 不代表权限被关闭。工具调用明确拒绝前，不将缺记录或角色限制当成需要用户开权。查询不派发、不授予权限。',
     inputSchema: { type: 'object', properties: {
       worker_id: { type: 'string' }, impl: { type: 'string', enum: ['builtin', 'claude-code', 'codex'] },
     }, additionalProperties: false },
     isReadOnly: true,
-    async call(input) {
+    async call(input, callContext) {
       try {
         if (!input || typeof input !== 'object' || Array.isArray(input)
           || Object.keys(input).some(key => !['worker_id', 'impl'].includes(key))) throw new Error('仅接受 worker_id 或 impl')
@@ -53,6 +55,12 @@ export function createExecutionCapabilitiesTool(deps: ToolFaceDeps): ToolDefinit
         if (args.worker_id) {
           const found = await deps.projectDocs.ledger.findWorker(args.worker_id)
           if (!found || found.managerKey !== current.managerKey) throw new Error('执行器不存在或不属于当前会话')
+          if (deps.requestGuard) {
+            const bound = await deps.requestGuard.load(args.worker_id)
+            const caller = workerRequestCaller(callContext)
+            if (caller) await deps.requestGuard.authorizeControl(args.worker_id, caller, async () => allowed)
+            else if (bound) throw new Error('REQUEST_CONTEXT_REQUIRED')
+          } else if (found.worker.origin.request) throw new Error('CAPABILITY_UNKNOWN: Worker request guard unavailable')
           const incarnation = found.worker.incarnations.filter(item => item.forked_from === undefined).at(-1)
           if (!incarnation || incarnation.impl === 'legacy') throw new Error('该执行器没有现代主线化身')
           implementations = [incarnation.impl]

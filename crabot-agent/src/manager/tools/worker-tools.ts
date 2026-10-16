@@ -1,3 +1,7 @@
+import { bindWorkerRequestTool, workerRequestCaller, type WorkerRequestControl } from './worker-request-context.js'
+import type { WorkerRequestGuard } from '../../workers/harness/request-guard.js'
+import { allowed } from '../../permissions/tool-authorization.js'
+import type { ToolCallContext } from '../../engine/types.js'
 /**
  * worker 工具集 —— manager 唯一的 worker 编排入口(protocol-agent-v3 §4.1/§4.3/§5.5)。
  *
@@ -83,6 +87,8 @@ export interface WorkerToolsContext {
 }
 
 export interface WorkerToolsDeps {
+  readonly requestControl?: WorkerRequestControl
+  readonly requestGuard?: WorkerRequestGuard
   readonly voice?: boolean
   readonly readWorkerSubagents?: (params: ListWorkerSubagentsParams) => Promise<ListWorkerSubagentsResult>
   readonly readWorkerSubagentDetail?: (params: GetWorkerSubagentDetailParams) => Promise<GetWorkerSubagentDetailResult>
@@ -298,9 +304,15 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
     return !!capturedAuthorization && !!validateMasterAuthorization && await validateMasterAuthorization(capturedAuthorization)
   }
 
-  const authorizeWorker = async (workerId: string): Promise<LedgerWorker> => {
+  const authorizeWorker = async (workerId: string, callContext?: ToolCallContext): Promise<LedgerWorker> => {
     const found = await harness.findWorker(workerId)
     if (!found) throw new Error(ACCESS_DENIED)
+    if (deps.requestGuard) {
+      const bound = await deps.requestGuard.load(workerId)
+      const caller = workerRequestCaller(callContext)
+      if (caller) await deps.requestGuard.authorizeControl(workerId, caller, async () => allowed)
+      else if (bound && !await masterAuthorized()) throw new Error('REQUEST_CONTEXT_REQUIRED: 执行器操作缺少当前真实请求来源')
+    } else if (found.worker.origin.request) throw new Error('CAPABILITY_UNKNOWN: Worker request guard unavailable')
     if (found.worker.manager_key === context().managerKey) return found.worker
     if (!await masterAuthorized()) throw new Error(ACCESS_DENIED)
     return found.worker
@@ -339,7 +351,7 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
       required: ['title', 'prompt'],
     },
     isReadOnly: false,
-    call: async (input): Promise<ToolCallResult> => {
+    call: async (input, callContext): Promise<ToolCallResult> => {
       const { title, prompt, impl, workspace } = input as {
         title?: string
         prompt?: string
@@ -355,7 +367,7 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
       const ctx = context()
       if (!ctx.principalPermissions) return invalid('CAPABILITY_UNKNOWN: 缺少可信主体授权，无法新建执行器。')
       try {
-        const worker: LedgerWorker = await harness.spawnWorker({
+        const spawnParams = {
           managerKey: ctx.managerKey,
           title,
           prompt,
@@ -373,10 +385,13 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
           principal_permissions: ctx.principalPermissions,
           impl,
           workspace,
-        })
+        }
+        const caller = workerRequestCaller(callContext)
+        const result = caller ? await harness.spawnRequestWorker(spawnParams, caller) : { status: 'spawned' as const, worker: await harness.spawnWorker(spawnParams) }
+        const { worker } = result
         ctx.onWorkerSpawned?.(worker.worker_id)
         const incarnation = worker.incarnations[0]
-        return ok({ status: 'spawned', worker_id: worker.worker_id, impl: incarnation?.impl,
+        return ok({ status: result.status, worker_id: worker.worker_id, impl: incarnation?.impl,
           ...(incarnation && incarnation.impl !== 'legacy' ? { workspace_git: incarnation.workspace_git } : {}) })
       } catch (error) {
         return mapError('spawn_worker', error)
@@ -410,7 +425,7 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
       required: ['worker_id', 'text'],
     },
     isReadOnly: false,
-    call: async (input): Promise<ToolCallResult> => {
+    call: async (input, callContext): Promise<ToolCallResult> => {
       const { worker_id, text, immediate_redirect } = input as {
         worker_id?: string
         text?: string
@@ -424,7 +439,7 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
 
       const deadlineAt = Date.now() + INPUT_DELIVERY_TIMEOUT_MS
       try {
-        const worker = await awaitWithinSendToWorkerDeadline(deadlineAt, () => authorizeWorker(worker_id))
+        const worker = await awaitWithinSendToWorkerDeadline(deadlineAt, () => authorizeWorker(worker_id, callContext))
         const legacyContinuationAuth = capturedLegacyContinuationAuth?.(worker.manager_key)
         const result = await harness.sendToWorker(worker_id, text, {
           managerKey: context().managerKey,
@@ -457,13 +472,13 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
       required: ['worker_id', 'question'],
     },
     isReadOnly: false,
-    call: async (input): Promise<ToolCallResult> => {
+    call: async (input, callContext): Promise<ToolCallResult> => {
       const { worker_id, question } = input as { worker_id?: string; question?: string }
       if (!worker_id || typeof worker_id !== 'string') return invalid('query_worker: worker_id 必填且为字符串')
       if (!question || typeof question !== 'string') return invalid('query_worker: question 必填且为字符串')
 
       try {
-        await authorizeWorker(worker_id)
+        await authorizeWorker(worker_id, callContext)
         const result = await harness.queryWorker(worker_id, question, {
           managerKey: context().managerKey,
         })
@@ -479,12 +494,12 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
     description: '按当前回合文件读取授权，实时核验执行器主线工作区 Git 状态与化身启动基线；提交和干净状态不单独证明完成。',
     inputSchema: { type: 'object', properties: { worker_id: { type: 'string' } }, required: ['worker_id'], additionalProperties: false },
     isReadOnly: true,
-    async call(input) {
+    async call(input, callContext) {
       if (!input || typeof input !== 'object' || Array.isArray(input) || typeof input.worker_id !== 'string' || !input.worker_id || Object.keys(input).some((key) => key !== 'worker_id')) {
         return invalid('inspect_workspace_git 只接受 worker_id')
       }
       try {
-        await authorizeWorker(input.worker_id)
+        await authorizeWorker(input.worker_id, callContext)
         if (!deps.authorizeProjectRead) throw new Error('当前回合没有项目读取授权')
         return ok(await harness.inspectWorkspaceGit(input.worker_id, deps.authorizeProjectRead))
       } catch (error) { return mapError('inspect_workspace_git', error) }
@@ -500,11 +515,11 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
       required: ['worker_id'],
     },
     isReadOnly: true,
-    call: async (input): Promise<ToolCallResult> => {
+    call: async (input, callContext): Promise<ToolCallResult> => {
       const workerId = (input as { worker_id?: string }).worker_id
       if (!workerId || typeof workerId !== 'string') return invalid('get_worker_state: worker_id 必填且为字符串')
       try {
-        return ok(await workerState(harness, await authorizeWorker(workerId)))
+        return ok(await workerState(harness, await authorizeWorker(workerId, callContext)))
       } catch (error) {
         return mapError(`get_worker_state(${workerId})`, error)
       }
@@ -527,7 +542,7 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
       required: ['worker_id'],
     },
     isReadOnly: true,
-    call: async (input): Promise<ToolCallResult> => {
+    call: async (input, callContext): Promise<ToolCallResult> => {
       const { worker_id, incarnation_id, after, view } = input as {
         worker_id?: string
         incarnation_id?: string
@@ -539,7 +554,7 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
       if (after !== undefined && typeof after !== 'string') return invalid('get_worker_activity: after 必须是字符串')
       if (view !== undefined && view !== 'assistant' && view !== 'all') return invalid('get_worker_activity: view 只能是 assistant 或 all')
       try {
-        await authorizeWorker(worker_id)
+        await authorizeWorker(worker_id, callContext)
         if (!deps.readWorkerActivity) throw new Error('worker activity reader is unavailable')
         const result = await deps.readWorkerActivity({
           worker_id,
@@ -568,7 +583,7 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
       required: ['worker_id'],
     },
     isReadOnly: true,
-    call: async (input): Promise<ToolCallResult> => {
+    call: async (input, callContext): Promise<ToolCallResult> => {
       const params = input as unknown as GetWorkerTurnParams
       const { worker_id, turn_id, view, cursor } = params
       if (!worker_id || typeof worker_id !== 'string') return invalid('get_worker_turn: worker_id 必填且为字符串')
@@ -576,7 +591,7 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
       if (view !== undefined && view !== 'result' && view !== 'activity') return invalid('get_worker_turn: view 只能是 result 或 activity')
       if (cursor !== undefined && typeof cursor !== 'string') return invalid('get_worker_turn: cursor 必须是字符串')
       try {
-        await authorizeWorker(worker_id)
+        await authorizeWorker(worker_id, callContext)
         const pageCursor = readTurnCursor(params)
         const turn = await harness.getWorkerTurn(worker_id, pageCursor?.turn_id ?? turn_id)
         const activity = turn && (view === 'activity' || !turn.completion_result)
@@ -602,11 +617,11 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
       required: ['worker_id'],
     },
     isReadOnly: false,
-    call: async (input): Promise<ToolCallResult> => {
+    call: async (input, callContext): Promise<ToolCallResult> => {
       const workerId = (input as { worker_id?: string }).worker_id
       if (!workerId || typeof workerId !== 'string') return invalid('request_worker_interrupt: worker_id 必填且为字符串')
       try {
-        await authorizeWorker(workerId)
+        await authorizeWorker(workerId, callContext)
         return ok({ operation: await harness.requestWorkerInterrupt(workerId) })
       } catch (error) {
         return mapError(`request_worker_interrupt(${workerId})`, error)
@@ -623,11 +638,11 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
       required: ['worker_id'],
     },
     isReadOnly: false,
-    call: async (input): Promise<ToolCallResult> => {
+    call: async (input, callContext): Promise<ToolCallResult> => {
       const workerId = (input as { worker_id?: string }).worker_id
       if (!workerId || typeof workerId !== 'string') return invalid('request_worker_stop: worker_id 必填且为字符串')
       try {
-        await authorizeWorker(workerId)
+        await authorizeWorker(workerId, callContext)
         return ok({ operation: await harness.requestWorkerStop(workerId) })
       } catch (error) {
         return mapError(`request_worker_stop(${workerId})`, error)
@@ -649,14 +664,14 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
       required: ['worker_id', 'snapshot_id', 'action_id'],
     },
     isReadOnly: false,
-    call: async (input): Promise<ToolCallResult> => {
+    call: async (input, callContext): Promise<ToolCallResult> => {
       const { worker_id, snapshot_id, action_id, text } = input as { worker_id?: string; snapshot_id?: string; action_id?: string; text?: string }
       if (!worker_id || typeof worker_id !== 'string') return invalid('respond_to_worker_ui: worker_id 必填且为字符串')
       if (!snapshot_id || typeof snapshot_id !== 'string') return invalid('respond_to_worker_ui: snapshot_id 必填且为字符串')
       if (!action_id || typeof action_id !== 'string') return invalid('respond_to_worker_ui: action_id 必填且为字符串')
       if (text !== undefined && typeof text !== 'string') return invalid('respond_to_worker_ui: text 必须是字符串')
       try {
-        await authorizeWorker(worker_id)
+        await authorizeWorker(worker_id, callContext)
         return ok(await harness.respondToWorkerUi(worker_id, snapshot_id, action_id, text))
       } catch (error) {
         return mapError(`respond_to_worker_ui(${worker_id})`, error)
@@ -680,7 +695,7 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
       required: ['worker_id', 'turn_id', 'resolution'],
     },
     isReadOnly: false,
-    call: async (input): Promise<ToolCallResult> => {
+    call: async (input, callContext): Promise<ToolCallResult> => {
       const { worker_id, turn_id, resolution, reason } = input as {
         worker_id?: string
         turn_id?: string
@@ -694,7 +709,7 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
       }
       if (reason !== undefined && typeof reason !== 'string') return invalid('resolve_worker_turn: reason 必须是字符串')
       try {
-        const worker = await authorizeWorker(worker_id)
+        const worker = await authorizeWorker(worker_id, callContext)
         if ((resolution === 'reported' || resolution === 'asked_human') && !deps.hasSuccessfulSendMessageTo?.(worker.report_to)) {
           throw new Error(deps.voice ? '本 Manager 回合尚未向该执行器的 report_to 完成正式交付，不能把该回合标记为已交付；当前语音回复需实际播放完成，其它渠道消息需成功投递。' : '本 Manager 回合尚未向该 worker 的 report_to 成功调用 send_message，不能把 worker turn 标记为已交付')
         }
@@ -727,12 +742,12 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
       required: ['worker_id'],
     },
     isReadOnly: true,
-    call: async (input): Promise<ToolCallResult> => {
+    call: async (input, callContext): Promise<ToolCallResult> => {
       const { worker_id, seq } = input as { worker_id?: string; seq?: number }
       if (!worker_id || typeof worker_id !== 'string') return invalid('get_worker_terminal: worker_id 必填且为字符串')
 
       try {
-        await authorizeWorker(worker_id)
+        await authorizeWorker(worker_id, callContext)
         const terminal = await harness.getWorkerTerminal(
           worker_id,
           seq !== undefined ? { seq } : undefined
@@ -758,11 +773,25 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
       },
     },
     isReadOnly: true,
-    call: async (input): Promise<ToolCallResult> => {
+    call: async (input, callContext): Promise<ToolCallResult> => {
       try {
         const params = input as { include_terminal?: boolean; page?: number; page_size?: number }
         const managerKey = context().managerKey
-        const all = await harness.listWorkers(managerKey)
+        const candidates = await harness.listWorkers(managerKey)
+        const all: LedgerWorker[] = []
+        for (const worker of candidates) {
+          try {
+            if (deps.requestGuard && !workerRequestCaller(callContext)) {
+              const bound = await deps.requestGuard.load(worker.worker_id)
+              if (bound && worker.origin.request?.execution_scope === 'group' && bound.request.delivery.kind === 'origin') { all.push(worker); continue }
+            }
+            await authorizeWorker(worker.worker_id, callContext); all.push(worker)
+          }
+          catch (error) {
+            const reason = error instanceof Error ? error.message : ''
+            if (!reason.startsWith('PERMISSION_DENIED:') && !reason.startsWith('REQUEST_CONTEXT_REQUIRED:')) throw error
+          }
+        }
         const board = deps.readWorkboard ? await deps.readWorkboard(managerKey) : {
           manager_key: managerKey,
           objectives: [],
@@ -835,11 +864,11 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
     description: '读取一个执行器的完整详情。当前会话只能读取自己的执行器。',
     inputSchema: { type: 'object', properties: { worker_id: { type: 'string' } }, required: ['worker_id'] },
     isReadOnly: true,
-    call: async (input): Promise<ToolCallResult> => {
+    call: async (input, callContext): Promise<ToolCallResult> => {
       const workerId = (input as { worker_id?: string }).worker_id
       if (!workerId) return invalid('get_worker_detail: worker_id 必填且为字符串')
       try {
-        const worker = await authorizeWorker(workerId)
+        const worker = await authorizeWorker(workerId, callContext)
         return ok({ worker, execution: await harness.getWorkerExecutionObservation(workerId) })
       }
       catch (error) { return mapError(`get_worker_detail(${workerId})`, error) }
@@ -866,7 +895,7 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
         required,
         additionalProperties: false,
       },
-      async call(input) {
+      async call(input, callContext) {
         const params = input as { worker_id?: string; subagent_id?: string; incarnation_id?: string; cursor?: string }
         if (!params || typeof params !== 'object' || Array.isArray(params)
           || Object.keys(params).some(key => !allowed.includes(key))
@@ -874,7 +903,7 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
           || (!isList && (typeof params.subagent_id !== 'string' || !params.subagent_id))
           || (extra && params[extra as 'cursor' | 'incarnation_id'] !== undefined && typeof params[extra as 'cursor' | 'incarnation_id'] !== 'string')) return invalid(`${name}: invalid parameters`)
         try {
-          await authorizeWorker(params.worker_id)
+          await authorizeWorker(params.worker_id, callContext)
           if (isList) {
             if (!deps.readWorkerSubagents) throw new Error('child reader unavailable')
             const result = await deps.readWorkerSubagents(params as ListWorkerSubagentsParams)
@@ -903,7 +932,7 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
       },
     },
     isReadOnly: true,
-    call: async (input): Promise<ToolCallResult> => {
+    call: async (input, callContext): Promise<ToolCallResult> => {
       try {
         if (!await masterAuthorized()) return invalid(ACCESS_DENIED)
         const p = input as { manager_key?: string; status?: TaskStatus | TaskStatus[]; page?: number; page_size?: number }
@@ -921,7 +950,7 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
     },
   }) : undefined
 
-  return [
+  const tools = [
     spawnWorker,
     sendToWorker,
     queryWorker,
@@ -940,4 +969,5 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
     listWorkerImplementations,
     ...(listAllWorkers ? [listAllWorkers] : []),
   ]
+  return deps.requestControl ? tools.map(tool => bindWorkerRequestTool(tool, deps.requestControl!)) : tools
 }

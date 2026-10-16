@@ -1,3 +1,5 @@
+import { buildWorkerTools } from '../../../src/manager/tools/worker-tools.js'
+import type { WorkerHarness } from '../../../src/workers/harness/harness.js'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
@@ -108,4 +110,63 @@ describe('Worker request guard never borrows a neighbouring speaker or legacy sn
     await fs.rm(file)
     await expect(guard.load('w-owner')).rejects.toThrow(/binding|context/i)
   })
+  const guardedOperations = [
+    ['send_to_worker', { text: 'dangerous redirect' }], ['query_worker', { question: 'read private result' }],
+    ['get_worker_state', {}], ['get_worker_activity', {}], ['get_worker_turn', {}],
+    ['request_worker_interrupt', {}], ['request_worker_stop', {}],
+    ['respond_to_worker_ui', { snapshot_id: 'snapshot', action_id: 'confirm' }],
+    ['resolve_worker_turn', { turn_id: 'turn', resolution: 'suppressed', reason: 'verified no delivery' }],
+    ['get_worker_terminal', {}], ['get_worker_detail', {}], ['inspect_workspace_git', {}],
+    ['list_worker_subagents', {}], ['get_worker_subagent_detail', { subagent_id: 'child' }], ['get_worker_subagent_trace', { subagent_id: 'child' }],
+  ] as const
+  function toolFixture(authority: ConversationRequestAuthority, scope: 'shared' | 'request' = 'request') {
+    const action = vi.fn(async () => ({ status: 'delivered', summary: 'OWNER_PRIVATE_RESULT' }))
+    const harness = { findWorker: (id: string) => ledger.findWorker(id), listWorkers: (key: any) => ledger.listWorkers(key), workerView: async (workers: any[]) => ({ executing: workers, candidates: [], attention: [], history: [], excludedIdle: [] }),
+      sendToWorker: action, queryWorker: action, getWorkerTerminal: action, getWorkerTurn: action, getWorkerControlOperations: action, getWorkerExecutionObservation: action, requestWorkerInterrupt: action, requestWorkerStop: action, respondToWorkerUi: action, resolveWorkerTurn: action, inspectWorkspaceGit: action,
+    } as unknown as WorkerHarness
+    const tools = buildWorkerTools({ harness, context: () => ({ managerKey: key, reportTo: { channel_id: 'voice', session_id: 'shared' }, principalPermissions: group.resolved }), requestGuard: guard,
+      requestControl: { scope, authority: async () => authority }, readWorkerActivity: action as never, readWorkerSubagents: action as never, readWorkerSubagentDetail: action as never, readWorkerSubagentTrace: action as never,
+    })
+    return { action, tools, harness }
+  }
+  it.each(guardedOperations)('rejects a same-template peer at the real %s entry before reading/controlling any private task', async (name, args) => {
+    const { tools, action } = toolFixture(await caller('peer', `peer-${name}`))
+    const result = await tools.find(tool => tool.name === name)!.call({ worker_id: 'w-owner', ...args })
+    expect(result.isError).toBe(true)
+    expect(result.output).toContain('PERMISSION_DENIED')
+    expect(result.output).not.toContain('OWNER_PRIVATE_RESULT')
+    expect(action).not.toHaveBeenCalled()
+  })
+  it('keeps the caller separate for concurrent tool invocations and rejects a string-field impersonation', async () => {
+    const owner = await caller('owner', 'owner-concurrent'), peer = await caller('peer', 'peer-concurrent')
+    const fixture = toolFixture(owner, 'shared')
+    // The actual shared controller can only return group scope; a personal scope is rejected even if miswired.
+    const wrong = await fixture.tools.find(tool => tool.name === 'get_worker_terminal')!.call({ worker_id: 'w-owner', source_id: 'owner' })
+    expect(wrong.output).toContain('SCOPE_MISMATCH'); expect(fixture.action).not.toHaveBeenCalled()
+    const harness = fixture.harness
+    const groupRecord = await requests.forInputs(key, (await sourceStore.list(key)).filter(input => input.message.platform_message_id === 'peer-concurrent')).create({ source_id: (await sourceStore.list(key)).find(input => input.message.platform_message_id === 'peer-concurrent')!.source_id, delivery: 'origin' })
+    const sharedPeer = new ConversationRequestAuthority(requests, key, groupRecord.request_id, 'group', current)
+    let finishOwner!: () => void
+    const held = new Promise<void>(resolve => { finishOwner = resolve })
+    const tools = buildWorkerTools({ harness, context: () => ({ managerKey: key, reportTo: { channel_id: 'voice', session_id: 'shared' } }), requestGuard: guard, requestControl: { scope: 'request', authority: async () => owner } })
+    const tools2 = buildWorkerTools({ harness, context: () => ({ managerKey: key, reportTo: { channel_id: 'voice', session_id: 'shared' } }), requestGuard: guard, requestControl: { scope: 'request', authority: async () => { await held; return peer } } })
+    const foreign = tools2.find(tool => tool.name === 'get_worker_terminal')!.call({ worker_id: 'w-owner', caller: owner, sender_friend_id: 'owner' })
+    const own = await tools.find(tool => tool.name === 'get_worker_terminal')!.call({ worker_id: 'w-owner' })
+    finishOwner()
+    expect(own.isError).toBe(false); expect((await foreign).isError).toBe(true)
+    expect(fixture.action).toHaveBeenCalledOnce()
+    await expect(guard.authorizeControl('w-owner', sharedPeer, async () => allowed)).rejects.toThrow('REQUEST_CONTEXT_REQUIRED')
+  })
+  it('does not expose personal tasks in the shared list but the real owner can list its own task', async () => {
+    const owner = await caller('owner', 'owner-list')
+    const fixed = await requests.get(key, ownerRequest)
+    const shared = new ConversationRequestAuthority(requests, key, ownerRequest, 'group', current)
+    const publicFixture = toolFixture(shared, 'shared'), ownerFixture = toolFixture(owner)
+    const visible = await publicFixture.tools.find(tool => tool.name === 'list_workers')!.call({ include_terminal: true })
+    expect(visible.isError).toBe(false); expect(visible.output).not.toContain('owner task')
+    const own = await ownerFixture.tools.find(tool => tool.name === 'list_workers')!.call({ include_terminal: true })
+    expect(own.isError).toBe(false); expect(own.output).toContain('owner task')
+    expect(fixed!.record.delivery.kind).toBe('origin')
+  })
+
 })

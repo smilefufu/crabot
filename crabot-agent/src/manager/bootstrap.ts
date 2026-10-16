@@ -1,3 +1,4 @@
+import { ConversationRequestAuthority } from './conversation-request-authority.js'
 import { voiceOutputPort } from './voice-output-port.js'
 import { createHash } from 'node:crypto'
 import { requestObservation, persistObservation, executionObservation, readObservation, observationFile } from '../permissions/execution-observation.js'
@@ -414,7 +415,9 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
   const adapters = new Map<WorkerImplId, WorkerAdapter>()
   let reconcileContinuationCandidatesForWorker: ((workerId: string) => void) | undefined
 
+  let requestGuard: WorkerRequestGuard
   const harnessDeps: HarnessDeps = {
+    requestGuard: () => requestGuard,
     adapters,
     defaultImpl: DEFAULT_WORKER_IMPL,
     ...(deps.assertWorkerImplReady ? { assertWorkerImplReady: deps.assertWorkerImplReady } : {}),
@@ -572,13 +575,14 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
         port, 'resolve_request_permission_sources', { source }, deps.messagingDeps.moduleId, { authorizationBearer: bearer })
     },
   })
-  const requestGuard = new WorkerRequestGuard(ledger, workerContextStore, conversationRequests, async (kind, source) => {
+  const resolveCurrentRequestSource = async (kind: import('./request-permission-sources.js').RequestPermissionSource['kind'], source: import('./request-permission-sources.js').ConversationRequestSource) => {
     const bearer = deps.coreRuntimeBearer?.()
     if (!bearer) throw new Error('Request source revalidation requires the core runtime credential')
     const result = await deps.messagingDeps.rpcClient.callSensitive<ResolveRequestPermissionSourceParams, ResolveRequestPermissionSourceResult>(
       await deps.messagingDeps.getAdminPort(), 'resolve_request_permission_source', { source, kind }, deps.messagingDeps.moduleId, { authorizationBearer: bearer })
     return result.source
-  })
+  }
+  requestGuard = new WorkerRequestGuard(ledger, workerContextStore, conversationRequests, resolveCurrentRequestSource)
   let candidatesReady = false
   let candidatesClosing = false
   const pendingCandidateManagers = new Set<ManagerKey>()
@@ -904,6 +908,24 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
         }),
         voice: traceHooks?.isVoice?.() === true,
         requestAuthorization: targetSessionType === 'group' && !isSystemThread && !scheduleIdentity ? 'shared' : undefined,
+        requestGuard,
+        workerRequestControl: targetSessionType === 'group' && !isSystemThread && !scheduleIdentity ? { scope: 'shared', authority: async (selection, operation) => {
+          const inputs = traceHooks?.requestInputs() ?? []
+          if (selection.source_id) {
+            const record = await conversationRequests.forInputs(key, inputs).create({ source_id: selection.source_id, ...(selection.quote !== undefined ? { quote: selection.quote } : {}), delivery: 'origin' })
+            return new ConversationRequestAuthority(conversationRequests, key, record.request_id, 'group', resolveCurrentRequestSource)
+          }
+          if (!inputs.length && !selection.quote && wakeEvent && wakeEvent.kind !== 'human_messages' && wakeEvent.kind !== 'attention_flush' && operation.worker_id) {
+            const found = await ledger.findWorker(operation.worker_id)
+            const bound = found ? await requestGuard.load(operation.worker_id) : null
+            if (found?.managerKey === key && !bound && !found.worker.origin.request) return undefined
+          }
+          if (!inputs.length && !selection.quote && wakeEvent?.kind === 'worker_event') {
+            const bound = await requestGuard.load(wakeEvent.event.worker_id)
+            if (bound && bound.worker.manager_key === key && bound.worker.origin.request?.execution_scope === 'group') return new ConversationRequestAuthority(conversationRequests, key, bound.request.request_id, 'group', resolveCurrentRequestSource)
+          }
+          throw new Error('REQUEST_SOURCE_REQUIRED: 请引用当前系统核验的原始输入')
+        } } : undefined,
         messagingDeps: { ...deps.messagingDeps, voiceReplyContext: traceHooks?.voiceReplyContext },
         // send_message 省略 channel_id 时使用的 manager 归属目标与结构化 Session 观察索引
         // （spec 2026-09-03-tool-input-repair）。两条桥都在工具调用时动态读取当前 Loop。
