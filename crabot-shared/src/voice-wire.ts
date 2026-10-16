@@ -1,5 +1,7 @@
 import { createHash } from 'node:crypto'
-import type { SubmitVoiceTurnParams, VoiceClientControl, VoiceSegment, VoiceManagementRequest } from './voice.js'
+import type { SubmitVoiceTurnParams, VoiceClientControl, VoiceSegment, VoiceManagementRequest, VoiceDeviceOwner, VoiceOwnerActivation, VoiceOwnerSaved } from './voice.js'
+
+import { VOICE_MODEL_VERSIONS } from './voice-models.js'
 
 export const VOICE_MAX_SAMPLES = 240000
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
@@ -26,6 +28,26 @@ function integer(value: unknown, min = 0, max = Number.MAX_SAFE_INTEGER): void {
 function oneOf(value: unknown, choices: unknown[]): void { if (!choices.includes(value)) invalid() }
 export function assertVoiceUuid(value: unknown): asserts value is string {
   if (typeof value !== 'string' || !UUID.test(value)) invalid()
+}
+export function validateVoiceDeviceOwner(value: unknown): asserts value is VoiceDeviceOwner {
+  const owner = object(value)
+  fields(owner, ['profile_id', 'display_name', 'model_id'])
+  assertVoiceUuid(owner.profile_id)
+  if (typeof owner.display_name !== 'string' || owner.display_name !== owner.display_name.trim() ||
+    Array.from(owner.display_name).length < 1 || Array.from(owner.display_name).length > 80 || /[\u0000-\u001f\u007f-\u009f]/u.test(owner.display_name)) invalid()
+  if (owner.model_id !== VOICE_MODEL_VERSIONS.embedding) invalid()
+}
+export function validateVoiceOwnerActivation(value: unknown): asserts value is VoiceOwnerActivation {
+  const activation = object(value)
+  fields(activation, ['operation_id', 'owner', 'platform_user_id', 'registration_id', 'status'])
+  assertVoiceUuid(activation.operation_id); assertVoiceUuid(activation.platform_user_id); assertVoiceUuid(activation.registration_id)
+  validateVoiceDeviceOwner(activation.owner); oneOf(activation.status, ['pending', 'completed'])
+}
+export function validateVoiceOwnerSaved(value: unknown): asserts value is VoiceOwnerSaved {
+  const saved = object(value)
+  fields(saved, ['operation_id', 'profile_id', 'registration_id', 'model_id'])
+  assertVoiceUuid(saved.operation_id); assertVoiceUuid(saved.profile_id); assertVoiceUuid(saved.registration_id)
+  if (saved.model_id !== VOICE_MODEL_VERSIONS.embedding) invalid()
 }
 export function validateVoiceManagementRequest(value: unknown): asserts value is VoiceManagementRequest {
   const request = object(value)

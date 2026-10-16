@@ -288,3 +288,23 @@ export type VoiceServerControl =
   | { type: 'enroll'; task: VoiceEnrollmentTask }
   | { type: 'clear_registration'; registration_id: string; enrollment_revision: number }
   | { type: 'error'; code: string; message: string; turn_id?: string }
+
+// protocol-voice.md §13: owner metadata; wire6 activation is integrated separately.
+export interface VoiceDeviceOwner {
+  profile_id: string
+  display_name: string
+  model_id: string
+}
+export interface VoiceOwnerActivation {
+  operation_id: string
+  owner: VoiceDeviceOwner
+  platform_user_id: string
+  registration_id: string
+  status: 'pending' | 'completed'
+}
+export interface VoiceOwnerSaved {
+  operation_id: string
+  profile_id: string
+  registration_id: string
+  model_id: string
+}
