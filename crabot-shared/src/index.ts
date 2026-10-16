@@ -1,6 +1,7 @@
+export type { ConversationRequestSource } from './conversation-request-source.js'
 // crabot-shared/src/index.ts
 export type { ExecutionObservation } from './execution-observation.js'
-export { MEMORY_DATA_RPC_METHODS, type MemoryAccessContext, type MemoryDataRpcMethod } from './memory-access.js'
+export { MEMORY_DATA_RPC_METHODS, type MemoryAccessContext, type MemoryRequestContext, type VerifyMemoryAccessParams, type VerifyMemoryAccessResult, type VerifyMemoryRequestAccessResult, type MemoryDataRpcMethod } from './memory-access.js'
 export {
   // Types
   type ModuleId,

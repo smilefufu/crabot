@@ -1,17 +1,9 @@
-import type { ModuleId, SessionId, FriendId } from 'crabot-shared'
+import type { ConversationRequestSource } from 'crabot-shared'
+export type { ConversationRequestSource } from 'crabot-shared'
 import { isResolvedPermissionsSnapshot } from '../workers/harness/context-store.js'
 import type { ResolvedPermissions } from '../types.js'
 
 /** protocol-admin §3.2.8; framework input, never a model-selected authority. */
-export interface ConversationRequestSource {
-  source_id: string
-  channel_id: ModuleId
-  session_id: SessionId
-  session_type: 'group'
-  platform_message_id: string
-  platform_user_id: string
-  sender_friend_id: FriendId | null
-}
 export interface RequestPermissionSource {
   kind: 'group' | 'friend'
   subject_id: string
@@ -37,4 +29,12 @@ export function assertRequestPermissionSources(origin: ConversationRequestSource
   if (!exact(value, ['group', 'friend']) || origin.session_type !== 'group'
     || !matchesRequestPermissionSource(value.group, 'group', `${origin.channel_id}::${origin.session_id}`)
     || value.friend !== null && !matchesRequestPermissionSource(value.friend, 'friend', origin.sender_friend_id)) throw new Error('Invalid request permission sources')
+}
+
+export interface ResolveRequestPermissionSourceParams {
+  source: ConversationRequestSource
+  kind: 'group' | 'friend'
+}
+export interface ResolveRequestPermissionSourceResult {
+  source: RequestPermissionSource | null
 }

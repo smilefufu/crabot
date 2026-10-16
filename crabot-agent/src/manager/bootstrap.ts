@@ -58,7 +58,8 @@ import { buildManagerToolFace } from './tools/tool-face.js'
 import { PrincipalBindingStore } from './principal-binding-store.js'
 import { TrustedHumanInputStore } from './trusted-human-input-store.js'
 import { ConversationRequestStore } from './conversation-request-store.js'
-import type { ResolveRequestPermissionSourcesResult } from './request-permission-sources.js'
+import { WorkerRequestGuard } from '../workers/harness/request-guard.js'
+import type { ResolveRequestPermissionSourceParams, ResolveRequestPermissionSourceResult, ResolveRequestPermissionSourcesResult } from './request-permission-sources.js'
 import { ManagerWorkboardStore } from './workboard-store.js'
 import {
   ManagerPrincipalStore,
@@ -146,6 +147,7 @@ export interface ManagerStack {
   readonly principalBindings: PrincipalBindingStore
   readonly trustedHumanInputs: TrustedHumanInputStore
   readonly conversationRequests: ConversationRequestStore
+  readonly requestGuard: WorkerRequestGuard
   /**
    * builtin adapter 的私有 dataDir。`reconcileManagerStack` 需要它跑
    * `BuiltinWorkerAdapter.scanOrphans`——见该函数注释里的顺序契约。放在 stack 上而不是
@@ -569,6 +571,13 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
       return deps.messagingDeps.rpcClient.callSensitive<{ source: typeof source }, ResolveRequestPermissionSourcesResult>(
         port, 'resolve_request_permission_sources', { source }, deps.messagingDeps.moduleId, { authorizationBearer: bearer })
     },
+  })
+  const requestGuard = new WorkerRequestGuard(ledger, workerContextStore, conversationRequests, async (kind, source) => {
+    const bearer = deps.coreRuntimeBearer?.()
+    if (!bearer) throw new Error('Request source revalidation requires the core runtime credential')
+    const result = await deps.messagingDeps.rpcClient.callSensitive<ResolveRequestPermissionSourceParams, ResolveRequestPermissionSourceResult>(
+      await deps.messagingDeps.getAdminPort(), 'resolve_request_permission_source', { source, kind }, deps.messagingDeps.moduleId, { authorizationBearer: bearer })
+    return result.source
   })
   let candidatesReady = false
   let candidatesClosing = false
@@ -1006,6 +1015,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     principalBindings,
     trustedHumanInputs,
     conversationRequests,
+    requestGuard,
     builtinDataDir,
     store: sessionStore,
     dailyReflectionFor,

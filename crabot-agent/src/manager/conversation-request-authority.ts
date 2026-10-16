@@ -24,7 +24,8 @@ export class ConversationRequestAuthority {
   ) {
     if (scope !== 'group' && scope !== 'request') throw new Error('Invalid request execution scope')
   }
-  async run<T>(checkCompleteOperation: (source: RequestPermissionSource) => Promise<PermissionDecision>, execute: (frame: RequestOperationFrame) => Promise<T>): Promise<T> {
+  get executionScope(): 'group' | 'request' { return this.scope }
+  async run<T>(checkCompleteOperation: (source: RequestPermissionSource, origin: TrustedHumanInput) => Promise<PermissionDecision>, execute: (frame: RequestOperationFrame) => Promise<T>): Promise<T> {
     const fixed = await this.requireOpen()
     const ceilings = structuredClone(fixed.record.permission_sources)
     if (this.scope === 'group') ceilings.friend = null
@@ -35,7 +36,7 @@ export class ConversationRequestAuthority {
       if (resolved) current.set(kind, structuredClone(resolved))
       return resolved
     })
-    const decision = await gate.authorize(checkCompleteOperation)
+    const decision = await gate.authorize(source => checkCompleteOperation(source, structuredClone(fixed.source)))
     if (!decision.allowed) throw new Error(decision.reason)
     // A close committed while current authority was being fetched must stop a new action.
     await this.requireOpen()

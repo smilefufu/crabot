@@ -69,4 +69,45 @@ describe('Complete group/requester permission sources', () => {
     admin.buildResolvedFriendPermissions = vi.fn(() => null)
     await expect(admin.handleResolveRequestPermissionSources({ source: source() }, core)).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
   })
+  it('verifies a real current Master request for Memory without upgrading the shared group', async () => {
+    admin.friends.get('actual-friend').permission = 'master'
+    const request = { request_id: 'a'.repeat(64), source: source() }
+    const before = await admin.resolvePrincipalPermissions({ ...source(), sender_friend_id: 'actual-friend' })
+    await expect(admin.handleVerifyMemoryAccess({ caller_kind: 'core_agent', master_request: request }, core)).resolves.toEqual({ verified: true, request_verified: true })
+    expect(await admin.resolvePrincipalPermissions({ ...source(), sender_friend_id: 'actual-friend' })).toEqual(before)
+    admin.friends.get('actual-friend').permission = 'normal'
+    await expect(admin.handleVerifyMemoryAccess({ caller_kind: 'core_agent', master_request: request }, core)).rejects.toMatchObject({ code: 'FORBIDDEN' })
+    admin.friends.get('actual-friend').permission = 'master'; admin.channelIdentityIndex.clear()
+    await expect(admin.handleVerifyMemoryAccess({ caller_kind: 'core_agent', master_request: request }, core)).rejects.toMatchObject({ code: 'FORBIDDEN' })
+  })
+  it('rejects malformed Memory request proofs, strangers and current Memory revocation', async () => {
+    admin.friends.get('actual-friend').permission = 'master'
+    const request = { request_id: 'a'.repeat(64), source: source() }
+    for (const changed of [{ ...request, request_id: 'uuid-is-not-proof' }, { ...request, role: 'master' }, { ...request, source: { ...source(), session_type: 'private' } }]) {
+      await expect(admin.handleVerifyMemoryAccess({ caller_kind: 'core_agent', master_request: changed }, core)).rejects.toMatchObject({ code: 'INVALID_PARAMS' })
+    }
+    await expect(admin.handleVerifyMemoryAccess({ caller_kind: 'core_agent', master_request: { ...request, source: { ...source(), sender_friend_id: null } } }, core)).rejects.toMatchObject({ code: 'FORBIDDEN' })
+    const original = admin.buildResolvedFriendPermissions.bind(admin)
+    admin.buildResolvedFriendPermissions = (friend: any) => { const result = original(friend); result.tool_access.memory = false; return result }
+    await expect(admin.handleVerifyMemoryAccess({ caller_kind: 'core_agent', master_request: request }, core)).rejects.toMatchObject({ code: 'FORBIDDEN' })
+  })
+
+  it('revalidates personal authority without a live group Channel lookup, while keeping original stranger identity', async () => {
+    admin.resolvePermissionTarget.mockRejectedValue(new Error('Channel offline'))
+    admin.friends.get('actual-friend').permission = 'master'
+    await expect(admin.handleResolveRequestPermissionSource({ source: source(), kind: 'friend' }, core)).resolves.toMatchObject({ source: { kind: 'friend', subject_id: 'actual-friend', is_master: true } })
+    await expect(admin.handleVerifyMemoryAccess({ caller_kind: 'core_agent', master_request: { request_id: 'a'.repeat(64), source: source() } }, core)).resolves.toEqual({ verified: true, request_verified: true })
+    await expect(admin.handleResolveRequestPermissionSource({ source: { ...source(), sender_friend_id: null }, kind: 'friend' }, core)).resolves.toEqual({ source: null })
+    expect(admin.resolvePermissionTarget).not.toHaveBeenCalled()
+  })
+  it('resolves the group source without requiring personal identity/config availability and strictly validates the one-source request', async () => {
+    const friendLookup = vi.spyOn(admin, 'resolveFriendByChannelIdentity').mockImplementation(() => { throw new Error('Personal directory unavailable') })
+    await expect(admin.handleResolveRequestPermissionSource({ source: source(), kind: 'group' }, core)).resolves.toMatchObject({ source: { kind: 'group', subject_id: 'fixture-channel::fixture-group', is_master: false } })
+    expect(friendLookup).not.toHaveBeenCalled()
+    for (const value of [{ source: source(), kind: 'private' }, { source: source(), kind: 'group', friend_id: 'master' }, { source: { ...source(), role: 'master' }, kind: 'group' }]) {
+      await expect(admin.handleResolveRequestPermissionSource(value, core)).rejects.toMatchObject({ code: 'INVALID_PARAMS' })
+    }
+    await expect(admin.handleResolveRequestPermissionSource({ source: source(), kind: 'friend' }, {})).rejects.toMatchObject({ code: 'UNAUTHORIZED' })
+  })
+
 })

@@ -1,3 +1,5 @@
+import type { ConversationRequestSource } from 'crabot-shared'
+import type { VerifyMemoryAccessResult, VerifyMemoryRequestAccessResult } from 'crabot-shared'
 import { adminWebTransport } from './admin-web-transport.js'
 import { VoiceGateway } from './voice-gateway.js'
 import { loadVoiceTls } from './voice-tls.js'
@@ -188,6 +190,9 @@ import {
   createCliAccessConfig,
   type ResolvePrincipalPermissionsParams,
   type ResolvePrincipalPermissionsResult,
+  type ResolveRequestPermissionSourceParams,
+  type ResolveRequestPermissionSourceResult,
+  type RequestPermissionSource,
   type ResolveRequestPermissionSourcesParams,
   type ResolveRequestPermissionSourcesResult,
   type SetTaskGoalParams,
@@ -1069,6 +1074,7 @@ export class AdminModule extends ModuleBase {
     )
     this.registerMethod('resolve_principal_permissions', this.resolvePrincipalPermissions.bind(this))
     this.registerMethod('resolve_request_permission_sources', this.handleResolveRequestPermissionSources.bind(this))
+    this.registerMethod('resolve_request_permission_source', this.handleResolveRequestPermissionSource.bind(this))
     this.registerMethod('get_group_session_config', this.handleGetGroupSessionConfig.bind(this))
     this.registerMethod('update_group_session_config', this.handleUpdateGroupSessionConfig.bind(this))
     this.registerMethod('delete_group_session_config', this.handleDeleteGroupSessionConfig.bind(this))
@@ -9854,37 +9860,56 @@ export class AdminModule extends ModuleBase {
     }
   }
 
-  /** Internal read-only facts; isolated request guards must still authorize every complete operation. */
-  private async handleResolveRequestPermissionSources(
-    params: ResolveRequestPermissionSourcesParams,
-    context?: RpcHandlerContext,
-  ): Promise<ResolveRequestPermissionSourcesResult> {
+  private async requireRequestSourceCaller(context?: RpcHandlerContext): Promise<void> {
     const bearer = context?.authorizationBearer
     if (!bearer) throw new RpcError('UNAUTHORIZED', 'Missing runtime credential')
-    await this.rpcClient.callModuleManagerSensitive(
-      'verify_core_agent_runtime', { expected_module_id: 'crabot-agent' }, this.config.moduleId,
-      { authorizationBearer: bearer },
-    )
+    try {
+      await this.rpcClient.callModuleManagerSensitive('verify_core_agent_runtime', { expected_module_id: 'crabot-agent' }, this.config.moduleId, { authorizationBearer: bearer })
+    } catch (error) {
+      const code = error && typeof error === 'object' && 'code' in error ? error.code : undefined
+      if (code === 'UNAUTHORIZED' || code === 'FORBIDDEN') throw new RpcError(code, 'Invalid core Agent credential')
+      throw new RpcError('SERVICE_UNAVAILABLE', 'Request source verifier unavailable', { retryable: true })
+    }
     if (!this.dataLoaded) throw new RpcError('SERVICE_UNAVAILABLE', '好友权限数据尚未加载')
-    const source = params?.source
+  }
+
+  private validateRequestSource(value: unknown): ConversationRequestSource {
     const keys = ['source_id', 'channel_id', 'session_id', 'session_type', 'platform_message_id', 'platform_user_id', 'sender_friend_id']
-    if (!params || typeof params !== 'object' || Array.isArray(params) || Object.keys(params).length !== 1 || !source || typeof source !== 'object' || Array.isArray(source)
-      || Object.keys(source).length !== keys.length || keys.some(key => !Object.prototype.hasOwnProperty.call(source, key))
-      || typeof source.source_id !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(source.source_id)
-      || source.session_type !== 'group' || [source.channel_id, source.session_id, source.platform_message_id, source.platform_user_id].some(value => typeof value !== 'string' || !value.trim())
-      || (source.sender_friend_id !== null && (typeof source.sender_friend_id !== 'string' || !source.sender_friend_id.trim()))) throw new RpcError('INVALID_PARAMS', '请求来源不完整或包含未知字段')
+    if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length !== keys.length || keys.some(key => !Object.prototype.hasOwnProperty.call(value, key))) throw new RpcError('INVALID_PARAMS', '请求来源不完整或包含未知字段')
+    const source = value as ConversationRequestSource
+    if (typeof source.source_id !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(source.source_id)
+      || source.session_type !== 'group' || [source.channel_id, source.session_id, source.platform_message_id, source.platform_user_id].some(item => typeof item !== 'string' || !item.trim())
+      || source.sender_friend_id !== null && (typeof source.sender_friend_id !== 'string' || !source.sender_friend_id.trim())) throw new RpcError('INVALID_PARAMS', '请求来源不完整或包含未知字段')
+    return source
+  }
+
+  /** Identity/role/config are read in one synchronous snapshot, without a private-scene resolver. */
+  private requestFriendSource(source: ConversationRequestSource): RequestPermissionSource | null {
+    if (source.sender_friend_id === null) return null
+    const friend = this.resolveFriendByChannelIdentity(source.channel_id, source.platform_user_id)
+    if (!friend || friend.id !== source.sender_friend_id || !friend.channel_identities.some(identity => identity.channel_id === source.channel_id && identity.platform_user_id === source.platform_user_id)) throw new RpcError('FORBIDDEN', '原发起人的渠道好友绑定已失效或变化')
+    const resolved = this.buildResolvedFriendPermissions(friend)
+    if (!resolved) throw new RpcError('SERVICE_UNAVAILABLE', '原发起人的完整权限不可用')
+    return { kind: 'friend', subject_id: friend.id, is_master: friend.permission === 'master', resolved }
+  }
+
+  /** Creation captures both complete sources; no personal authority enters the shared Manager. */
+  private async handleResolveRequestPermissionSources(params: ResolveRequestPermissionSourcesParams, context?: RpcHandlerContext): Promise<ResolveRequestPermissionSourcesResult> {
+    await this.requireRequestSourceCaller(context)
+    if (!params || typeof params !== 'object' || Array.isArray(params) || Object.keys(params).length !== 1 || !Object.prototype.hasOwnProperty.call(params, 'source')) throw new RpcError('INVALID_PARAMS', 'Invalid request source parameters')
+    const source = this.validateRequestSource(params.source)
     const group = await this.resolvePrincipalPermissions({ channel_id: source.channel_id, session_id: source.session_id, session_type: 'group' })
-    const result: ResolveRequestPermissionSourcesResult = {
-      group: { kind: 'group', subject_id: `${source.channel_id}::${source.session_id}`, is_master: false, resolved: group.resolved }, friend: null,
-    }
-    if (source.sender_friend_id !== null) {
-      const friend = this.resolveFriendByChannelIdentity(source.channel_id, source.platform_user_id)
-      if (!friend || friend.id !== source.sender_friend_id || !friend.channel_identities.some(identity => identity.channel_id === source.channel_id && identity.platform_user_id === source.platform_user_id)) throw new RpcError('FORBIDDEN', '原发起人的渠道好友绑定已失效或变化')
-      const resolved = this.buildResolvedFriendPermissions(friend)
-      if (!resolved) throw new RpcError('SERVICE_UNAVAILABLE', '原发起人的完整权限不可用')
-      result.friend = { kind: 'friend', subject_id: friend.id, is_master: friend.permission === 'master', resolved }
-    }
-    return structuredClone(result)
+    return structuredClone({ group: { kind: 'group', subject_id: `${source.channel_id}::${source.session_id}`, is_master: false, resolved: group.resolved }, friend: this.requestFriendSource(source) })
+  }
+
+  /** Operation-time checks need only the selected complete source. */
+  private async handleResolveRequestPermissionSource(params: ResolveRequestPermissionSourceParams, context?: RpcHandlerContext): Promise<ResolveRequestPermissionSourceResult> {
+    await this.requireRequestSourceCaller(context)
+    if (!params || typeof params !== 'object' || Array.isArray(params) || Object.keys(params).length !== 2 || !Object.prototype.hasOwnProperty.call(params, 'source') || !Object.prototype.hasOwnProperty.call(params, 'kind') || !['group', 'friend'].includes(params.kind)) throw new RpcError('INVALID_PARAMS', 'Invalid single request source parameters')
+    const source = this.validateRequestSource(params.source)
+    if (params.kind === 'friend') return structuredClone({ source: this.requestFriendSource(source) })
+    const result = await this.resolvePrincipalPermissions({ channel_id: source.channel_id, session_id: source.session_id, session_type: 'group' })
+    return { source: { kind: 'group', subject_id: `${source.channel_id}::${source.session_id}`, is_master: false, resolved: result.resolved } }
   }
 
   /**
@@ -10528,9 +10553,9 @@ export class AdminModule extends ModuleBase {
   }
 
   private async handleVerifyMemoryAccess(
-    params: { caller_kind?: unknown },
+    params: { caller_kind?: unknown; master_request?: unknown },
     context?: RpcHandlerContext,
-  ): Promise<{ verified: true }> {
+  ): Promise<VerifyMemoryAccessResult | VerifyMemoryRequestAccessResult> {
     const bearer = context?.authorizationBearer
     if (!bearer) throw new RpcError('UNAUTHORIZED', 'Missing Memory credential')
     if (params.caller_kind === 'admin_web') {
@@ -10548,6 +10573,16 @@ export class AdminModule extends ModuleBase {
       }
     } else {
       throw new RpcError('INVALID_PARAMS', 'Invalid Memory caller kind')
+    }
+    if (Object.keys(params).some(key => key !== 'caller_kind' && key !== 'master_request')) throw new RpcError('INVALID_PARAMS', 'Unknown Memory verifier parameter')
+    if (params.master_request !== undefined) {
+      if (params.caller_kind !== 'core_agent') throw new RpcError('FORBIDDEN', 'Master request requires the core Agent')
+      const request = params.master_request as Record<string, unknown>
+      if (!request || typeof request !== 'object' || Array.isArray(request) || Object.keys(request).length !== 2
+        || !Object.prototype.hasOwnProperty.call(request, 'request_id') || typeof request.request_id !== 'string' || !/^[0-9a-f]{64}$/.test(request.request_id) || !Object.prototype.hasOwnProperty.call(request, 'source')) throw new RpcError('INVALID_PARAMS', 'Invalid Memory request context')
+      const permissions = await this.handleResolveRequestPermissionSource({ source: request.source as ConversationRequestSource, kind: 'friend' }, context)
+      if (!permissions.source?.is_master || permissions.source.resolved.tool_access.memory !== true) throw new RpcError('FORBIDDEN', 'Current Master Memory authority required')
+      return { verified: true, request_verified: true }
     }
     return { verified: true }
   }
