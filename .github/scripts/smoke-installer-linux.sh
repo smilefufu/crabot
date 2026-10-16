@@ -18,6 +18,7 @@ for image in ubuntu:24.04 debian:12 debian:13; do
       ln -s /opt/node/bin/node /usr/local/bin/node
       ln -s /opt/uv/uv /usr/local/bin/uv
       export PATH=/opt/node/bin:/opt/uv:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      if command -v python3 || command -v cc; then echo "fixture unexpectedly contains Python/compiler" >&2; exit 1; fi
       node /workspace/.github/scripts/smoke-installer.mjs "$CRABOT_CI_ARCHIVE"
     '
 done

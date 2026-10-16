@@ -55,7 +55,7 @@ function releaseInstallation(t, tool, damaged = false, options = {}) {
   writeFileSync(checksum, `${createHash('sha256').update(readFileSync(archive)).digest('hex')}  ${filename}\n`)
   if (damaged) writeFileSync(archive, 'damaged release')
   // Restricted PATH models a clean Mac without sha256sum. Use real checksum tools.
-  for (const command of ['mkdir', 'cp', 'tar', 'gzip', 'rm', 'ln', 'chmod', 'mv', 'mktemp', ...(tool ? [tool] : [])]) {
+  for (const command of ['mkdir', 'cp', 'tar', 'gzip', 'rm', 'ln', 'chmod', 'mv', 'mktemp', 'dirname', 'awk', 'tail', 'sed', 'grep', ...(tool ? [tool] : [])]) {
     const resolved = spawnSync('/bin/bash', ['-c', `command -v ${command}`], { encoding: 'utf8' })
     assert.equal(resolved.status, 0, `required test command missing: ${command}`)
     symlinkSync(resolved.stdout.trim(), join(bin, command))
@@ -70,7 +70,7 @@ function releaseInstallation(t, tool, damaged = false, options = {}) {
     ensure_node() { :; }
     ensure_uv() { :; }
     uv() { return "$FIXTURE_UV_STATUS"; }
-    node() { "$REAL_NODE" "$@"; }
+    node() { case "$1" in */installer-deps.mjs) return "$FIXTURE_UV_STATUS";; *) "$REAL_NODE" "$@";; esac; }
     curl() {
       if [ "$FIXTURE_CANCEL_DOWNLOAD" = 1 ]; then printf '%s' "$CRABOT_DOWNLOAD_DIR" > "$FIXTURE_DIRECTORY_MARKER"; kill -TERM $$; fi
       case "$2" in

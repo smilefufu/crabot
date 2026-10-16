@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process'
-import { dirname, extname } from 'node:path'
+import { dirname, extname, basename } from 'node:path'
 
 const RUNNERS = {
   '.py': ['uv', ['run', 'python']],
@@ -19,17 +19,20 @@ export function runScript(scriptPath, dataDir) {
     return Promise.reject(new Error(`unsupported script extension: ${ext}`))
   }
   const [cmd, baseArgs] = runner
-  const args = [...baseArgs, scriptPath, `--data-dir=${dataDir}`]
 
   // 以模块目录作为 cwd（脚本路径形如 <moduleDir>/upgrade/<name>.<ext>），
   // 这样 `uv run` 能定位到模块的 pyproject.toml；node/tsx 也能解析模块自身依赖。
   const cwd = dirname(dirname(scriptPath))
+  const memoryPython = ext === '.py' && basename(cwd) === 'crabot-memory'
+  const dev = process.env.CRABOT_DEV === 'true'
+  const args = [...(memoryPython ? ['run', '--frozen', ...(dev ? [] : ['--no-dev']), 'python'] : baseArgs), scriptPath, `--data-dir=${dataDir}`]
+  const env = ext === '.py' ? { ...process.env, PYTHONIOENCODING: 'utf-8' } : process.env
 
   return new Promise((resolve, reject) => {
     const isWin = process.platform === 'win32'
     const proc = isWin
-      ? spawn(`${cmd} ${args.map(quoteWin).join(' ')}`, [], { cwd, stdio: ['ignore', 'pipe', 'pipe'], shell: true })
-      : spawn(cmd, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'] })
+      ? spawn(`${cmd} ${args.map(quoteWin).join(' ')}`, [], { cwd, env, stdio: ['ignore', 'pipe', 'pipe'], shell: true })
+      : spawn(cmd, args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] })
     let stdout = ''
     let stderr = ''
     proc.stdout.on('data', (chunk) => {
