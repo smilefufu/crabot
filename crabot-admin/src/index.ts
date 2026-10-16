@@ -1,3 +1,8 @@
+import { adminWebTransport } from './admin-web-transport.js'
+import { VoiceGateway } from './voice-gateway.js'
+import { loadVoiceTls } from './voice-tls.js'
+import { VoiceAdmin } from './voice-admin.js'
+import { parseVoiceConnection, VOICE_MODEL_VERSIONS, testAudioService, type GetVoiceConfigParams } from 'crabot-shared'
 import { normalizeToolAccessUpdate } from './permission-entries.js'
 /**
  * Admin 模块 - Crabot 管理后台
@@ -6,7 +11,7 @@ import { normalizeToolAccessUpdate } from './permission-entries.js'
  */
 
 import http, { type IncomingMessage, type ServerResponse } from 'node:http'
-import type { Socket } from 'node:net'
+import type { Socket, Server as NetServer } from 'node:net'
 import crypto from 'node:crypto'
 import fs from 'node:fs/promises'
 import { createReadStream, createWriteStream } from 'node:fs'
@@ -659,7 +664,10 @@ export class AdminModule extends ModuleBase {
   private configDrainRetryDelayMs = 1_000
   private cutoverAttempt: Promise<void> | null = null
   private cutoverRecoveryReason: string | null = null
-  private webServer: http.Server | null = null
+  private webServer: NetServer | null = null
+  private closeWebTransport?: () => void
+  private voiceFingerprint?: string
+  private voiceGateway!: VoiceGateway
   private jwtSecret: string = ''
 
   // 数据存储
@@ -684,6 +692,7 @@ export class AdminModule extends ModuleBase {
 
   // Channel 管理器
   private channelManager: ChannelManager
+  private voiceAdmin: VoiceAdmin
 
   // 模块安装器
   private moduleInstaller: ModuleInstaller
@@ -810,6 +819,63 @@ export class AdminModule extends ModuleBase {
     )
     this.agentManager = new AgentManager(this.adminConfig.data_dir)
     this.channelManager = new ChannelManager(this.adminConfig.data_dir, this.rpcClient)
+    this.voiceGateway = new VoiceGateway({
+      connection: id => {
+        const instance = this.channelManager.getInstance(id)
+        if (instance?.implementation_id !== 'channel-voice') return null
+        return instance.voice_setup?.connection ? parseVoiceConnection(instance.voice_setup.connection) : null
+      },
+      resolve: async id => {
+        if (this.channelManager.getInstance(id)?.implementation_id !== 'channel-voice') return undefined
+        try { return (await this.rpcClient.resolve({ module_id: id }, this.config.moduleId)).find(module => module.module_id === id && module.module_type === 'channel') }
+        catch { return undefined }
+      },
+    })
+    this.voiceAdmin = new VoiceAdmin(this.adminConfig.data_dir, {
+      isVoice: id => this.channelManager.getInstance(id)?.implementation_id === 'channel-voice',
+      instance: id => this.channelManager.getInstance(id),
+      createInstance: name => this.channelManager.createInstance({ implementation_id: 'channel-voice', name, auto_start: false }),
+      resumeInstance: id => this.channelManager.resumeVoice(id),
+      pauseInstance: id => this.channelManager.pauseVoice(id),
+      saveSetup: (id, setup, autoStart) => this.channelManager.saveVoiceSetup(id, setup, autoStart),
+      fingerprint: () => this.voiceFingerprint,
+      terminalHosts: () => [...new Set(Object.values(os.networkInterfaces()).flatMap(addresses => (addresses ?? []).filter(a => !a.internal && a.family === 'IPv4' && !a.address.startsWith('169.254.')).map(a => `http://${a.address}:${this.adminConfig.web_port}`)))],
+      closeGateway: id => this.voiceGateway.close(id),
+      admissionReady: () => this.cutoverActivated,
+      verifyRuntime: async (id, bearer) => { await this.rpcClient.callModuleManagerSensitive('verify_voice_runtime', { expected_module_id: id }, this.config.moduleId, { authorizationBearer: bearer }) },
+      verifyCore: async bearer => { await this.rpcClient.callModuleManagerSensitive('verify_core_agent_runtime', { expected_module_id: 'crabot-agent' }, this.config.moduleId, { authorizationBearer: bearer }) },
+      verifyHuman: async bearer => {
+        const payload = bearer ? await verifyJwtWithEpoch(bearer, this.jwtSecret, this.adminConfig.data_dir) : null
+        if (!payload) throw new RpcError('UNAUTHORIZED', 'Human Admin credential required')
+        if (payload.sub !== 'admin' || payload.agent_cli) throw new RpcError('FORBIDDEN', 'Human Admin credential required')
+      },
+      resolveFriend: (channelId, platformUserId) => this.resolveFriendByChannelIdentity(channelId, platformUserId) ?? undefined,
+      checkGroup: async (channelId, sessionId) => {
+        const session = await this.resolveChannelSession(channelId, sessionId, this.getMasterPlatformUserIdsForChannel(channelId))
+        return session.id === sessionId && session.channel_id === channelId && session.type === 'group' && sessionHasMasterParticipant(session, this.friends.values())
+      },
+      channelAction: async (id, command, bearer) => {
+        const modules = await this.rpcClient.resolve({ module_id: id }, this.config.moduleId)
+        if (!modules[0]) throw new RpcError('SERVICE_UNAVAILABLE', 'Voice Channel is not running')
+        return this.rpcClient.callSensitive(modules[0].port, 'voice_admin_action', { channel_id: id, command }, this.config.moduleId, { authorizationBearer: bearer })
+      },
+      publish: async payload => { await this.rpcClient.publishEvent({ id: generateId(), type: 'channel.voice_turn_authorized', source: this.config.moduleId, payload, timestamp: generateTimestamp() }, this.config.moduleId) },
+      configurationChanged: async () => {
+        for (const instance of this.channelManager.listInstances().items.filter(i => i.implementation_id === 'channel-voice')) {
+          this.voiceAdmin.turns.disconnect(instance.id)
+          try {
+            const modules = await this.rpcClient.resolve({ module_id: instance.id }, this.config.moduleId)
+            if (modules[0]) await this.rpcClient.call(modules[0].port, 'update_config', { config: this.voiceAdmin.audio.getConfig(instance.id) }, this.config.moduleId)
+          } catch { console.warn(`[Admin] Voice config changed; ${instance.id} must reconnect before admitting a new turn`) }
+        }
+      },
+      testAudio: async (id, capability) => {
+        const connection = this.voiceAdmin.audio.resolve(this.voiceAdmin.audio.getConfig(id)[capability], capability)
+        if (!connection) throw new RpcError('INVALID_PARAMS', `请先配置 ${capability.toUpperCase()} 服务`)
+        return testAudioService(connection, capability)
+      },
+      enrollmentModelId: VOICE_MODEL_VERSIONS.embedding,
+    })
     this.moduleInstaller = new ModuleInstaller(this.adminConfig.data_dir)
     this.mcpServerManager = new MCPServerManager(this.adminConfig.data_dir)
     this.skillManager = new SkillManager(this.adminConfig.data_dir)
@@ -956,6 +1022,17 @@ export class AdminModule extends ModuleBase {
 
     // Channel 配置管理
     this.registerMethod('get_channel_config', this.handleGetChannelConfig.bind(this))
+    this.registerMethod('get_voice_config', (params: GetVoiceConfigParams, context?: RpcHandlerContext) => this.voiceAdmin.getConfig(params, context?.authorizationBearer))
+    this.registerMethod('submit_voice_turn', (params: unknown, context?: RpcHandlerContext) => this.voiceAdmin.submit(params, context?.authorizationBearer))
+    this.registerMethod('get_voice_turn_status', (params: unknown, context?: RpcHandlerContext) => this.voiceAdmin.status(params, context?.authorizationBearer))
+    this.registerMethod('get_authorized_voice_turn', (params: unknown, context?: RpcHandlerContext) => this.voiceAdmin.authorized(params, context?.authorizationBearer))
+    this.registerMethod('confirm_voice_turn', (params: unknown, context?: RpcHandlerContext) => this.voiceAdmin.confirm(params, context?.authorizationBearer))
+    this.registerMethod('sync_voice_terminal', (params: unknown, context?: RpcHandlerContext) => this.voiceAdmin.sync(params, context?.authorizationBearer))
+    this.registerMethod('manage_voice_contacts', (params: unknown, context?: RpcHandlerContext) => this.voiceAdmin.manageContacts(params, context?.authorizationBearer))
+    this.registerMethod('get_voice_management_result', (params: unknown, context?: RpcHandlerContext) => this.voiceAdmin.managementResult(params, context?.authorizationBearer))
+    this.registerMethod('verify_voice_admin', (params: { channel_id: string }, context?: RpcHandlerContext) => this.voiceAdmin.verifyHuman(params, context?.authorizationBearer))
+    this.registerMethod('verify_voice_agent', (params: { channel_id: string }, context?: RpcHandlerContext) => this.voiceAdmin.verifyAgent(params, context?.authorizationBearer))
+
     this.registerMethod('update_channel_config', this.handleUpdateChannelConfig.bind(this))
 
     // 模块安装管理
@@ -1025,6 +1102,8 @@ export class AdminModule extends ModuleBase {
 
     // 确保数据目录存在
     await fs.mkdir(this.adminConfig.data_dir, { recursive: true })
+    await this.voiceAdmin.load()
+    this.voiceAdmin.start()
     // Source managers must load before coordinator recovery so its semantic HMAC observes
     // persisted data rather than empty in-memory maps.
 
@@ -1252,6 +1331,7 @@ export class AdminModule extends ModuleBase {
   }
 
   protected override async onStop(): Promise<void> {
+    this.voiceAdmin.stop()
     await this.computerUseSetup?.close()
     if (this.configDrainRetryTimer) {
       clearTimeout(this.configDrainRetryTimer)
@@ -1284,6 +1364,8 @@ export class AdminModule extends ModuleBase {
     }
 
     // 停止 Web 服务器
+    this.voiceGateway.close()
+    this.closeWebTransport?.()
     if (this.webServer) {
       await new Promise<void>((resolve) => {
         this.webServer!.close(() => resolve())
@@ -1330,6 +1412,7 @@ export class AdminModule extends ModuleBase {
           if (typeof port === 'number' && port > 0) {
             this.agentPort = port
           }
+          this.voiceAdmin.replayPending().catch(() => console.warn('[Admin] Voice pending batches remain durable; replay will retry'))
           console.log(`[Admin] Core Agent started (port=${port}), publishing invalidation hint...`)
           this.publishAgentConfigInvalidation().catch((err: Error) => {
             console.warn(`[Admin] Failed to publish config invalidation for ${module_id}: ${err.message}`)
@@ -1344,6 +1427,8 @@ export class AdminModule extends ModuleBase {
       case 'module_manager.module_stopped': {
         const { module_id, module_type } = event.payload as { module_id: string; module_type: string }
         this.invalidatePortCache(module_id, module_type)
+        this.voiceAdmin.turns.disconnect(module_id)
+        this.voiceGateway.close(module_id)
         break
       }
       case 'module_manager.module_health_changed': {
@@ -1421,34 +1506,26 @@ export class AdminModule extends ModuleBase {
   // ============================================================================
 
   private async startWebServer(): Promise<void> {
-    this.webServer = http.createServer((req, res) => {
+    let tls
+    try { tls = await loadVoiceTls(this.adminConfig.data_dir); this.voiceFingerprint = tls.fingerprint }
+    catch { console.warn('[Admin] Direct voice WSS is unavailable; HTTP/WS remain available') }
+    const transport = adminWebTransport(tls, (req, res) => {
       this.handleWebRequest(req, res).catch((error) => {
         console.error('[Admin] Web request error:', error)
-        res.writeHead(500)
-        res.end(JSON.stringify({ error: 'Internal server error' }))
+        if (!res.headersSent) res.writeHead(500)
+        if (!res.writableEnded) res.end(JSON.stringify({ error: 'Internal server error' }))
       })
-    })
-
-    // WebSocket upgrade 处理
-    this.webServer.on('upgrade', (req, socket, head) => {
+    }, (req, socket, head) => {
       const handleAsync = async (): Promise<void> => {
-        if (!this.cutoverActivated) {
-          socket.write('HTTP/1.1 503 Service Unavailable\r\n\r\n')
-          socket.destroy()
-          return
-        }
-        if (this.chatManager) {
-          await this.chatManager.handleUpgrade(req, socket as Socket, head)
-        } else {
-          socket.write('HTTP/1.1 503 Service Unavailable\r\n\r\n')
-          socket.destroy()
-        }
+        if (!this.cutoverActivated) { socket.write('HTTP/1.1 503 Service Unavailable\r\n\r\n'); socket.destroy(); return }
+        if (await this.voiceGateway.upgrade(req, socket, head)) return
+        if (this.chatManager) await this.chatManager.handleUpgrade(req, socket, head)
+        else { socket.write('HTTP/1.1 503 Service Unavailable\r\n\r\n'); socket.destroy() }
       }
-      handleAsync().catch(() => {
-        socket.write('HTTP/1.1 500 Internal Server Error\r\n\r\n')
-        socket.destroy()
-      })
+      void handleAsync().catch(() => socket.destroy())
     })
+    this.webServer = transport.server
+    this.closeWebTransport = transport.close
 
     return new Promise((resolve, reject) => {
       this.webServer!.listen(this.adminConfig.web_port, () => {
@@ -1527,6 +1604,7 @@ export class AdminModule extends ModuleBase {
 
     // 路由处理
     try {
+      if (await this.voiceAdmin.handleWeb(req, res, pathname, () => this.readJsonBody(req))) return
       if (pathname === '/api/auth/login' && req.method === 'POST') {
         await this.handleLogin(req, res)
         return
@@ -3998,6 +4076,7 @@ export class AdminModule extends ModuleBase {
     // 检查 channel identity 是否已被使用
     if (params.channel_identities) {
       for (const identity of params.channel_identities) {
+        this.voiceAdmin.validateIdentity(identity.channel_id, identity.platform_user_id)
         const key = this.getChannelIdentityKey(identity)
         if (this.channelIdentityIndex.has(key)) {
           throw new Error(`Channel identity already in use: ${key}`)
@@ -4095,6 +4174,7 @@ export class AdminModule extends ModuleBase {
     friend_id: FriendId
     channel_identity: ChannelIdentity
   }): Promise<{ friend: Friend }> {
+    this.voiceAdmin.validateIdentity(params.channel_identity.channel_id, params.channel_identity.platform_user_id)
     const existing = this.friends.get(params.friend_id)
     if (!existing) {
       throw new Error('Friend not found')
@@ -9361,6 +9441,7 @@ export class AdminModule extends ModuleBase {
    * 运行」的模块，两者无缝衔接、消除竞态。端口经 MM resolve 自解析，无运行模块时安全 no-op。
    */
   async reconcileRunningModuleConfigs(): Promise<void> {
+    await this.voiceAdmin.replayPending()
     await this.configMutationCoordinator.drainPendingInvalidation()
     await this.publishAgentConfigInvalidation()
     await this.syncGlobalConfigToMemoryModules().catch((err: Error) => {

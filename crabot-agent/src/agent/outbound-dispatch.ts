@@ -1,7 +1,7 @@
 /** Shared outbound channel dispatch for messaging tools and assistant-text fallback. */
 
 import * as path from 'path'
-import type { RpcClient } from 'crabot-shared'
+import type { RpcClient, VoiceChannelCapability, VoiceReplyContext } from 'crabot-shared'
 import type { Friend } from '../types.js'
 
 // ============================================================================
@@ -50,6 +50,7 @@ export interface OutboundMessage {
   /** The human-input epoch current when this delivery was initiated. */
   readonly human_input_epoch?: number
   readonly sent_at_attempt_ms: number
+  readonly voice_reply_context?: VoiceReplyContext
 }
 
 /** Called after a channel message is successfully delivered. */
@@ -90,6 +91,7 @@ export interface OutboundDispatchDeps {
   readonly authorizeFile?: (hostPath: string) => Promise<void>
   readonly onDispatched?: OnDispatchedHook
   readonly adminChatDelivery?: AdminChatDeliveryHooks
+  readonly voice?: VoiceChannelCapability
 }
 
 export interface OutboundSendResult {
@@ -264,23 +266,12 @@ export async function dispatchOutboundMessage(
 
   let sendResult: OutboundSendResult
   try {
-    sendResult = await deps.rpcClient.call<
-      {
-        session_id: string
-        content: MessageContent
-        delivery_id?: string
-        request_ids?: string[]
-        features?: {
-          mentions?: PlatformMention[]
-          quote_message_id?: string
-        }
-      },
-      OutboundSendResult
-    >(channelPort, 'send_message', {
+    const params = {
       session_id: entry.session_id,
       // 与 prepare 落盘的 payload 同源（staged attachment 引用）——payload_sha256 校验依赖。
       content: delivery ? delivery.content : messageContent,
       ...(delivery ? { delivery_id: delivery.delivery_id, request_ids: delivery.request_ids } : {}),
+      ...(deps.voice && entry.voice_reply_context ? { voice_reply_context: entry.voice_reply_context } : {}),
       ...(hasFeatures
         ? {
           features: {
@@ -293,7 +284,10 @@ export async function dispatchOutboundMessage(
           },
         }
         : {}),
-    }, deps.moduleId)
+    }
+    sendResult = deps.voice
+      ? await deps.rpcClient.call<typeof params, OutboundSendResult>(channelPort, 'send_message', params, deps.moduleId, undefined, { timeoutMs: deps.voice.send_timeout_ms })
+      : await deps.rpcClient.call<typeof params, OutboundSendResult>(channelPort, 'send_message', params, deps.moduleId)
   } catch (error) {
     if (delivery) await deps.adminChatDelivery!.fail(delivery.delivery_id, error)
     throw error

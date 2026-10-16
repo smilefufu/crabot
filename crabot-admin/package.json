@@ -32,7 +32,9 @@
     "semver": "^7.7.4",
     "tar": "^7.5.16",
     "uuid": "^9.0.0",
-    "ws": "^8.19.0"
+    "ws": "^8.19.0",
+    "@peculiar/x509": "1.14.2",
+    "reflect-metadata": "0.2.2"
   },
   "devDependencies": {
     "@types/bcryptjs": "^2.4.0",

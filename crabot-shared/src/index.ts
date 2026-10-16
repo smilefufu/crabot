@@ -119,4 +119,13 @@ export { INSTANCE_ID_REGEX, validateInstanceId, type InstanceIdResult } from './
 
 export type { ImageQuality, FetchImageParams, FetchImageResult } from './image-fetch.js'
 
+export * from './voice.js'
+export * from './channel-protocol.js'
+export { VoiceProtocolVersionError, VOICE_MAX_SAMPLES, assertVoiceUuid, validateVoiceSegments, validateVoiceManagementRequest, parseVoiceClientControl, validateSubmitVoiceTurn, encodeVoiceFrame, VoiceInputBuffer } from './voice-wire.js'
+export { pcm16Wave, speechWaveToPcm, transcribeAudio, synthesizeAudio } from './audio-client.js'
+export { voiceSessionId } from './voice-wire.js'
+export { VOICE_MODEL_VERSIONS } from './voice-models.js'
+export { testAudioService } from './audio-client.js'
+
+export { parseVoiceConnection, voiceTerminalEntry, voiceSetupStatus } from './voice-connection.js'
 export * from './computer-use.js'

@@ -2609,6 +2609,48 @@ describe('ManagerLoop', () => {
     expect(result.turns).toBe(1)
   })
 
+  it.each([true, false])('voice 实际 completed=%s 决定正式交付，不伪造工具或触发旧提醒', async completed => {
+    const { adapter, calls, queue } = makeAdapter({ autoSettleAssistantTextReminder: false })
+    queue.push({ text: '<voice_reply>听到了。</voice_reply>', stopReason: 'end_turn' })
+    const send = vi.fn(async ({ event }) => {
+      if (event.type === 'reply_end') {
+        if (!completed) throw new Error('Playback interrupted')
+        return { platform_message_id: event.playback_id, sent_at: new Date().toISOString(), played_samples: 480 }
+      }
+      return { accepted: true as const }
+    })
+    const delivered = vi.fn()
+    const loop = new ManagerLoop(baseDeps({ store, adapter, voiceOutput: { isVoice: () => true, send, save: () => {}, records: () => [] }, onSuccessfulVoiceReply: delivered }))
+    const context = { channel_id: 'wechat', session_id: 'sess-loop', turn_id: 'turn', connection_epoch: 'epoch', expires_at: new Date(Date.now() + 60000).toISOString() }
+    const result = await loop.wakeUp({ ...timed({ kind: 'human_messages', messages: [makeChannelMessage('你好')] }), voice_reply_context: context })
+    expect(result.repliedToHuman).toBe(completed); expect(delivered).toHaveBeenCalledTimes(completed ? 1 : 0)
+    expect(calls).toHaveLength(1)
+    expect(calls[0].systemPrompt).toContain('<voice_reply>')
+    expect(calls[0].systemPrompt).not.toContain('用工具投递答复，普通文本不外发')
+    expect(JSON.stringify(calls[0].messages)).not.toContain('只有 send_message 发送的内容才能送达人类')
+    expect(send.mock.calls.at(-1)?.[0].event.type).toBe('response_end')
+    expect(result.successfulSendMessageTargets.some(t => t.channel_id === 'wechat' && t.session_id === 'sess-loop')).toBe(completed)
+  })
+
+  it('voice 无外发仅纠偏一次，工具后与旧历史均遵守语音规则', async () => {
+    const { adapter, calls, queue } = makeAdapter({ autoSettleAssistantTextReminder: false })
+    queue.push({ text: '漏写标签', stopReason: 'end_turn' })
+    queue.push({ text: '<voice_reply>我查一下。</voice_reply>', toolCalls: [{ name: 'lookup', id: 'look', input: {} }], stopReason: 'tool_use' })
+    queue.push({ text: '<voice_reply>已经查到了。</voice_reply>', stopReason: 'end_turn' })
+    const loop = new ManagerLoop(baseDeps({ store, adapter, voiceOutput: { isVoice: () => true, save: () => {}, records: () => [], send: async ({ event }) => event.type === 'reply_end' ? { platform_message_id: event.playback_id, sent_at: new Date().toISOString(), played_samples: 480 } : { accepted: true } },
+      toolFace: () => [defineTool({ name: 'lookup', description: 'read', inputSchema: { type: 'object' }, call: async () => ({ output: '查询结果' }) })] }))
+    await store.save({ key: KEY, foldedCount: 0, recent: [createAssistantMessage([{ type: 'tool_use', id: 'old', name: 'send_message', input: { content: '旧回复' } }], 'tool_use'), createToolResultMessage('old', 'sent')] })
+    const result = await loop.wakeUp({ ...timed({ kind: 'human_messages', messages: [makeChannelMessage('查一下')] }), voice_reply_context: { channel_id: 'wechat', session_id: 'sess-loop', turn_id: 'turn', connection_epoch: 'epoch', expires_at: new Date(Date.now() + 60000).toISOString() } })
+    expect(result.repliedToHuman).toBe(true); expect(calls).toHaveLength(3)
+    for (const request of calls) {
+      expect(request.systemPrompt).toContain('<voice_reply>')
+      expect(request.systemPrompt).not.toContain('用工具投递答复，普通文本不外发')
+      expect(JSON.stringify(request.messages)).not.toContain('只有 send_message 发送的内容才能送达人类')
+    }
+    expect(JSON.stringify(calls[1].messages)).toContain('刚才标签外的普通文字不会播报')
+    expect(JSON.stringify(calls[2].messages)).toContain('查询结果')
+  })
+
   it('manager 直接输出文字后注入一次提醒，模型可改用 send_message 发送', async () => {
     const { adapter, calls, queue } = makeAdapter({ autoSettleAssistantTextReminder: false })
     let sent = 0
@@ -3481,6 +3523,20 @@ describe('ManagerLoop', () => {
       const prompt = await renderedPrompt({ kind: 'human_messages', messages: [richMessage()] })
       expect(prompt).toContain('identity=\\"stranger\\"')
       expect(prompt).toContain('id=\\"pm-rich\\"')
+    })
+
+    it('voice 批次逐条使用当前 Friend，陌生人不会继承同轮 Master 身份', async () => {
+      const normal = { ...MASTER, id: 'f-normal', permission: 'normal', channel_identities: [{ channel_id: 'wechat', platform_user_id: 'u10' }] } as Friend
+      const messages = ['u9', 'unknown:turn:1', 'u10', 'u9'].map((speaker, index) => ({
+        ...richMessage(), platform_message_id: `voice-${index}`, sender: { platform_user_id: speaker, platform_display_name: speaker, ...(speaker === 'u9' ? { friend_id: MASTER.id } : speaker === 'u10' ? { friend_id: normal.id } : {}) }, content: { type: 'text' as const, text: `片段${index}` },
+      }))
+      const prompt = await renderedPrompt({ kind: 'human_messages', messages, friend: MASTER, senderFriends: [MASTER, normal] })
+      const lines = prompt.match(/<message[^>]+>/g)!
+      expect(lines).toHaveLength(4)
+      expect(lines.map(line => line.match(/identity=\\"(.*?)\\"/)?.[1])).toEqual(['master', 'stranger', 'friend', 'master'])
+      expect(prompt.indexOf('片段1')).toBeLessThan(prompt.indexOf('片段2'))
+      const unbound = await renderedPrompt({ kind: 'human_messages', messages: [richMessage()], friend: MASTER, senderFriends: [] })
+      expect(unbound).toContain('identity=\\"stranger\\"')
     })
 
     it('attention_flush 走同一个渲染器(标签不同、消息渲染完全一致)', async () => {

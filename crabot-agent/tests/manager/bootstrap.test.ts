@@ -187,6 +187,32 @@ describe('manager bootstrap（P5 Task 1）', () => {
     }
   }
 
+  it('discovers wire 5 and assembles the voice reply prompt and streaming output together', async () => {
+    const requests: LLMStreamParams[] = []
+    const callSensitive = vi.fn(async (_port, method, params) => {
+      expect(method).toBe('voice_output')
+      return params.event.type === 'reply_end' ? { platform_message_id: params.event.playback_id, sent_at: new Date().toISOString(), played_samples: 480 } : { accepted: true }
+    })
+    const messagingDeps = makeMessagingDeps()
+    messagingDeps.rpcClient = { call: vi.fn(async () => ({ voice: { protocol_version: 5 } })), callSensitive } as never
+    const stack = buildManagerStack(makeDeps({ coreRuntimeBearer: () => 'fixture-core', messagingDeps,
+      managerAdapter: () => ({ async *stream(params) {
+        requests.push(params)
+        yield* chunksFromContent([{ type: 'text', text: '<voice_reply>我听到了。</voice_reply>' }], 'end_turn')
+      }, updateConfig() {} }),
+    }))
+    await stack.principals.init()
+    const message = groupMessage('请回答')
+    message.session = { channel_id: 'voice', session_id: 'voice-group', type: 'group' }
+    try {
+      await stack.registry.routeHumanMessages('voice', 'voice-group', [message], FRIEND_A, undefined, undefined, undefined, {
+        turnId: 'fixture-turn', senderFriends: [FRIEND_A], replyContext: { channel_id: 'voice', session_id: 'voice-group', turn_id: 'fixture-turn', connection_epoch: 'fixture-epoch', expires_at: new Date(Date.now() + 60000).toISOString() },
+      })
+      expect(requests[0].systemPrompt).toContain('回复当前语音会话使用 voice_reply 标签')
+      expect(callSensitive.mock.calls.map(call => call[2].event.type)).toEqual(['reply_start', 'reply_text', 'reply_end', 'response_end'])
+    } finally { await stack.dispose() }
+  })
+
   it('自省后台事实来源实际装配到Harness，构造时不读取后台注册表', async () => {
     const read = vi.fn(async (ids: readonly string[]) => Object.fromEntries(ids.map(id =>
       [id, { fingerprint: 'local', canSkip: true, active: false }])))
@@ -409,6 +435,7 @@ describe('manager bootstrap（P5 Task 1）', () => {
 
   it('ManagerKey 的完整归属目标进入 send_message repair，当前会话缺 channel_id 时零探测补全', async () => {
     const rpcCall = vi.fn(async (_port: number, method: string, params: Record<string, unknown>) => {
+      if (method === 'get_capabilities') return {}
       if (method === 'send_message') {
         return { platform_message_id: 'pm-self', sent_at: '2026-09-04T00:00:00.000Z' }
       }
@@ -447,11 +474,12 @@ describe('manager bootstrap（P5 Task 1）', () => {
 
     await stack.registry.routeHumanMessages('wechat', 'sess-boot', [makeChannelMessage('回复我')])
 
-    expect(rpcCall.mock.calls.map((call) => call[1])).toEqual(['send_message'])
+    expect(rpcCall.mock.calls.map((call) => call[1])).toEqual(['get_capabilities', 'send_message'])
   })
 
   it('跨 episode 先从 list_sessions 登记来源，后续 send_message 只查当前 Loop 本地索引', async () => {
     const rpcCall = vi.fn(async (port: number, method: string) => {
+      if (method === 'get_capabilities') return {}
       if (method === 'get_sessions') {
         expect(port).toBe(19010)
         return {
@@ -505,7 +533,7 @@ describe('manager bootstrap（P5 Task 1）', () => {
     await stack.registry.routeHumanMessages('wechat', 'sess-boot', [makeChannelMessage('再发送')])
 
     expect(episode).toBe(2)
-    expect(rpcCall.mock.calls.map((call) => call[1])).toEqual(['get_sessions', 'send_message'])
+    expect(rpcCall.mock.calls.map((call) => call[1])).toEqual(['get_sessions', 'get_capabilities', 'send_message'])
   })
 
   it('Session 归属索引按 Manager 隔离，不从其他 Manager 的观察补全', async () => {

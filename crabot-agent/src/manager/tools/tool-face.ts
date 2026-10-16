@@ -42,6 +42,7 @@ import {
 } from './tool-catalog.js'
 
 export interface ToolFaceDeps {
+  readonly voice?: boolean
   readonly dailyReflection?: DailyReflection
   readonly describeExecutionTools?: DescribeExecutionTools
   readonly readExecutionObservation?: (workerId: string, incarnationId: string, impl: import('../../workers/types.js').WorkerImplId) => Promise<import('crabot-shared').ExecutionObservation>
@@ -235,11 +236,16 @@ function messagingToolToDefinition(tool: MessagingTool, deps: ToolFaceDeps): Too
     // 保底：极端情况下退化成空 schema，不阻断装配（与 mcp-tool-bridge 同策略）
   }
 
+  let description = tool.description
+  if (isSendMessage) {
+    description = deps.voice
+      ? '向指定会话发送文本、媒体 URL 或本地文件。当前语音会话的回复使用 <voice_reply>...</voice_reply>，本工具用于其它渠道的消息投递；标签外的普通 assistant text 留作内部记录。只发送人类需要知道的进展、结果或问题，不外发内部系统提醒。已成功投递的内容不重复发送；没有后续工作或需要等待人类回复时，结束本回合，无需再发送收尾消息。'
+      : '向指定会话发送文本、媒体 URL 或本地文件。人类只能看到成功投递的消息；普通 assistant text 留作内部记录，不代表已经回复。只发送人类需要知道的进展、结果或问题，不外发内部系统提醒。已成功投递的内容不重复发送；没有后续工作或需要等待人类回复时，结束本回合，无需再发送收尾消息。'
+  }
+
   return defineTool({
     name: tool.name,
-    description: isSendMessage
-      ? '向指定会话发送文本、媒体 URL 或本地文件。人类只能看到成功投递的消息；普通 assistant text 留作内部记录，不代表已经回复。只发送人类需要知道的进展、结果或问题，不外发内部系统提醒。已成功投递的内容不重复发送；没有后续工作或需要等待人类回复时，结束本回合，无需再发送收尾消息。'
-      : tool.description,
+    description,
     inputSchema,
     isReadOnly: MESSAGING_READ_ONLY.has(tool.name),
     ...(isSendMessage
@@ -250,6 +256,8 @@ function messagingToolToDefinition(tool: MessagingTool, deps: ToolFaceDeps): Too
         }
       : {}),
     call: async (input, context): Promise<ToolCallResult> => {
+      if (isSendMessage && deps.voice && input.session_id === deps.managerTarget?.session_id
+        && (input.channel_id === undefined || input.channel_id === deps.managerTarget?.channel_id)) return { output: '当前语音回复请使用 <voice_reply>...</voice_reply>；send_message 仍可向其它渠道投递。', isError: true }
       const postSendAction = input.post_send_action
       if (isHumanDelivery && postSendAction !== 'none' && postSendAction !== 'spawn_worker') {
         return { output: 'post_send_action 必须是 none 或 spawn_worker', isError: true }
@@ -584,6 +592,7 @@ export function buildManagerToolFace(deps: ToolFaceDeps): ToolDefinition[] {
   const workerTools = buildWorkerTools({
     authorizeProjectRead: (workspaceRoot) => authorizeProjectRoot({ ...deps.projectDocs, managerPrincipalPermissions: currentPrincipal() }, workspaceRoot, false),
     harness: deps.harness,
+    voice: deps.voice,
     readWorkboard: (managerKey) => deps.workboard.store.load(managerKey),
     context: () => currentDeps().workerContext(),
     authorization: deps.authorization,

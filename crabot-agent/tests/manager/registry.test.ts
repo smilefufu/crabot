@@ -460,6 +460,51 @@ describe('ManagerRegistry', () => {
 
   // --- routeHumanMessages ---
 
+  it('voice A B A enters one durable group wake before the model, with each Friend and no persisted playback authority', async () => {
+    const entered = deferred(), release = deferred(), { adapter, calls } = makeAdapter()
+    const stream = adapter.stream.bind(adapter)
+    adapter.stream = async function* (params) { entered.resolve(); await release.promise; yield* stream(params) }
+    const principals: unknown[] = []
+    const registry = new ManagerRegistry(baseRegistryDeps({ adapter, onHumanWake: async (_key, principal) => { principals.push(principal) } }))
+    const friends = ['A', 'B'].map(name => ({ id: name, name, display_name: name, permission: name === 'A' ? 'master' : 'normal', channel_identities: [{ channel_id: 'living-room', platform_user_id: name }] } as Friend))
+    const messages = ['A', 'B', 'A'].map((name, index) => ({ ...makeChannelMessage(['开灯', '别开灯', '好的'][index]), platform_message_id: 'voice-' + index,
+      session: { channel_id: 'living-room', session_id: 'household', type: 'group' as const }, sender: { friend_id: name, platform_user_id: name, platform_display_name: name } }))
+    const context = { channel_id: 'living-room', session_id: 'household', turn_id: 'voice-turn', connection_epoch: 'voice-epoch', expires_at: new Date(Date.now() + 60000).toISOString() }
+    let queued = false
+    const running = registry.routeHumanMessages('living-room', 'household', messages, friends[0], undefined, { onDurableQueued: () => { queued = true } }, undefined, { turnId: context.turn_id, senderFriends: friends, replyContext: context })
+    await entered.promise
+    try {
+      expect(queued).toBe(true)
+      expect(principals).toEqual([{ friend: friends[0], sessionType: 'group' }])
+      const checkpoint = await store.loadCheckpoint('living-room::household' as ManagerKey)
+      expect(JSON.stringify(checkpoint)).toContain('voice-0')
+      expect(JSON.stringify(checkpoint)).toContain('voice-1')
+      expect(JSON.stringify(checkpoint)).toContain('voice-2')
+      expect(JSON.stringify(checkpoint)).not.toContain('voice_reply_context')
+      expect(JSON.stringify(checkpoint)).not.toContain('voice-epoch')
+    } finally { release.resolve() }
+    await running
+    const rendered = JSON.stringify(calls[0].messages)
+    expect(rendered).toMatch(/from_id=\\"A\\"[^\n]*identity=\\"master\\"/)
+    expect(rendered).toMatch(/from_id=\\"B\\"[^\n]*identity=\\"friend\\"/)
+    expect(rendered.indexOf('开灯')).toBeLessThan(rendered.indexOf('别开灯'))
+    expect(rendered.indexOf('别开灯')).toBeLessThan(rendered.indexOf('好的'))
+  })
+
+  it('voice handoff write failure after human history commit still executes the durable responsibility once on retry', async () => {
+    const { adapter, calls } = makeAdapter(), registry = new ManagerRegistry(baseRegistryDeps({ adapter }))
+    const message = { ...makeChannelMessage('不要漏掉这条业务责任'), session: { channel_id: 'living-room', session_id: 'retry', type: 'group' as const } }
+    const context = { turnId: 'durable-turn', senderFriends: [] }
+    await expect(registry.routeHumanMessages('living-room', 'retry', [message], undefined, undefined,
+      { onDurableQueued: () => { throw new Error('inbox disk failed') } }, undefined, context)).rejects.toThrow('inbox disk failed')
+    expect(calls).toHaveLength(0)
+    expect((await store.load('living-room::retry' as ManagerKey)).committedHumanMessageIds).toEqual([message.platform_message_id])
+    await registry.routeHumanMessages('living-room', 'retry', [message], undefined, undefined, { onDurableQueued: () => {} }, undefined, context)
+    expect(calls.length).toBeGreaterThan(0)
+    expect(JSON.stringify(calls[0].messages).match(/不要漏掉这条业务责任/g)).toHaveLength(1)
+    expect((await store.load('living-room::retry' as ManagerKey)).committedHumanMessageIds).toEqual([message.platform_message_id])
+  })
+
   it('routeHumanMessages: 打到 `${channelId}::${sessionId}` 对应的 manager', async () => {
     const { adapter, queue } = makeAdapter()
     queue.push({ text: '收到', stopReason: 'end_turn' })

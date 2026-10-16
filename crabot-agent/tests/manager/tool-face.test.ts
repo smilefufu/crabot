@@ -131,7 +131,8 @@ function memoryToolNames(tools: ToolDefinition[]): string[] {
 
 describe('主体授权与角色能力分开执行', () => {
   it.each(['full', 'shadow', 'progressive'] as const)('messaging=false 在 %s 工具面只允许当前可信对话回复，不能通过同名 session 或文件附件扩大授权', async mode => {
-    const rpc = vi.fn(async () => ({ platform_message_id: 'fixture', sent_at: '2026-10-10' }))
+    const rpc = vi.fn(async (_port: number, method: string) => method === 'get_capabilities'
+      ? {} : { platform_message_id: 'fixture', sent_at: '2026-10-10' })
     const principal = { ...BUILTIN_WORKER_PERMISSIONS, tool_access: { ...BUILTIN_WORKER_PERMISSIONS.tool_access, messaging: false, file_io: false } }
     const deps = makeDeps({ faceState: createManagerToolFaceState(mode), candidatePermissions: principal,
       managerTarget: { channel_id: 'ch-1', session_id: 'sess-1', type: 'private' },
@@ -140,11 +141,11 @@ describe('主体授权与角色能力分开执行', () => {
     const send = buildManagerToolFace(deps).find(tool => tool.name === 'send_message')!
     const reply = { channel_id: 'ch-1', session_id: 'sess-1', content: 'fixture', post_send_action: 'none' }
     expect((await send.call(reply, {})).isError).toBe(false)
-    expect(rpc).toHaveBeenCalledOnce()
+    expect(rpc.mock.calls.map(entry => entry[1])).toEqual(['get_capabilities', 'send_message'])
     for (const input of [{ ...reply, channel_id: 'ch-2' }, { ...reply, session_id: 'other' }, { ...reply, file_path: '/tmp/secret' }]) {
       expect((await send.call(input, {})).output).toContain('PERMISSION_DENIED')
     }
-    expect(rpc).toHaveBeenCalledOnce()
+    expect(rpc.mock.calls.map(entry => entry[1])).toEqual(['get_capabilities', 'send_message'])
   })
   it('loaded Memory and permission introspection use current host authorization, including direct calls after a new turn', async () => {
     const memoryRpc = vi.fn(async () => ({ results: [] }))
@@ -918,6 +919,19 @@ describe('buildManagerToolFace', () => {
     }
   })
 
+  it.each(['full', 'progressive'] as const)('%s 的语音工具面区分当前回复与跨渠道投递', async mode => {
+    const call = vi.fn(async (_port, method) => method === 'get_capabilities' ? {} : { platform_message_id: 'sent', sent_at: new Date().toISOString() })
+    const tools = buildManagerToolFace(makeDeps({ faceState: createManagerToolFaceState(mode), voice: true, managerTarget: { channel_id: 'ch-1', session_id: 'sess-1' },
+      messagingDeps: makeMessagingDeps({ rpcClient: { call } as never }) }))
+    const send = tools.find(tool => tool.name === 'send_message')!
+    expect(send.description).toContain('当前语音会话的回复使用 <voice_reply>')
+    expect(send.description).not.toContain('普通 assistant text 留作内部记录，不代表已经回复')
+    const local = await send.call({ channel_id: 'ch-1', session_id: 'sess-1', content: '不要通过工具播报', post_send_action: 'none' })
+    expect(local.isError).toBe(true); expect(call).not.toHaveBeenCalled()
+    const remote = await send.call({ channel_id: 'remote', session_id: 'remote-group', content: '发到其它渠道', post_send_action: 'none' })
+    expect(remote.isError).not.toBe(true); expect(call.mock.calls.some(c => c[1] === 'send_message')).toBe(true)
+  })
+
   it.each(['full', 'progressive'] as const)('%s 的 send_message 说明与 Manager 无 intent 的接口一致', (mode) => {
     const tools = buildManagerToolFace(makeDeps({ faceState: createManagerToolFaceState(mode) }))
     const sendMessage = tools.find((tool) => tool.name === 'send_message')!
@@ -931,6 +945,7 @@ describe('buildManagerToolFace', () => {
     const onPostSendAction = vi.fn()
     const onSuccessfulSendMessage = vi.fn()
     const rpcCall = vi.fn(async (_port: number, method: string) => {
+      if (method === 'get_capabilities') return {}
       if (method === 'send_message') {
         return { platform_message_id: 'm1', sent_at: '2026-08-01T00:00:00.000Z' }
       }
@@ -1119,6 +1134,7 @@ describe('buildManagerToolFace', () => {
 
     it('engine 真实调用链使用 repaired target，不扫描 Channel，也不改写原工具返回', async () => {
       const call = vi.fn(async (_port: number, method: string) => {
+        if (method === 'get_capabilities') return {}
         if (method === 'send_message') {
           return { platform_message_id: 'pm-1', sent_at: '2026-09-05T00:00:00.000Z' }
         }
@@ -1152,7 +1168,7 @@ describe('buildManagerToolFace', () => {
         sent_at: '2026-09-05T00:00:00.000Z',
       })
       expect(result.content).not.toContain('observedSessionTargets')
-      expect(call.mock.calls.map((entry) => entry[1])).toEqual(['send_message'])
+      expect(call.mock.calls.map((entry) => entry[1])).toEqual(['get_capabilities', 'send_message'])
       expect(call).toHaveBeenCalledWith(
         19002,
         'send_message',

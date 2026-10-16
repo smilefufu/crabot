@@ -83,6 +83,7 @@ export interface WorkerToolsContext {
 }
 
 export interface WorkerToolsDeps {
+  readonly voice?: boolean
   readonly readWorkerSubagents?: (params: ListWorkerSubagentsParams) => Promise<ListWorkerSubagentsResult>
   readonly readWorkerSubagentDetail?: (params: GetWorkerSubagentDetailParams) => Promise<GetWorkerSubagentDetailResult>
   readonly readWorkerSubagentTrace?: (params: GetWorkerSubagentTraceParams) => Promise<GetWorkerSubagentTraceResult>
@@ -666,8 +667,8 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
   const resolveWorkerTurn = defineTool({
     name: 'resolve_worker_turn',
     description:
-      '标记一个已检查的执行器回合如何处置。reported 或 asked_human 必须已向该执行器的 report_to 成功发送；' +
-      'continued 必须已实际续办；suppressed 必须写明原因。',
+      deps.voice ? '标记一个已检查的执行器回合如何处置。reported 或 asked_human 必须已向该执行器的 report_to 完成正式交付：当前语音会话以标签回复实际播放完成为准，其它渠道以发送工具成功投递为准。continued 必须已实际续办；suppressed 必须写明原因。' : ('标记一个已检查的执行器回合如何处置。reported 或 asked_human 必须已向该执行器的 report_to 成功发送；' +
+      'continued 必须已实际续办；suppressed 必须写明原因。'),
     inputSchema: {
       type: 'object',
       properties: {
@@ -695,7 +696,7 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
       try {
         const worker = await authorizeWorker(worker_id)
         if ((resolution === 'reported' || resolution === 'asked_human') && !deps.hasSuccessfulSendMessageTo?.(worker.report_to)) {
-          throw new Error('本 Manager 回合尚未向该 worker 的 report_to 成功调用 send_message，不能把 worker turn 标记为已交付')
+          throw new Error(deps.voice ? '本 Manager 回合尚未向该执行器的 report_to 完成正式交付，不能把该回合标记为已交付；当前语音回复需实际播放完成，其它渠道消息需成功投递。' : '本 Manager 回合尚未向该 worker 的 report_to 成功调用 send_message，不能把 worker turn 标记为已交付')
         }
         if (resolution === 'continued' && !deps.hasContinuedWorker?.(worker_id)) {
           throw new Error('本 Manager 回合尚未对该 worker 执行实际续办动作，不能标记为 continued')

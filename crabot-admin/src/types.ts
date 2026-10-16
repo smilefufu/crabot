@@ -1,3 +1,4 @@
+import type { VoiceSetupMetadata } from 'crabot-shared'
 import type { ToolAccessUpdate } from 'crabot-shared'
 /**
  * Admin 模块类型定义
@@ -2147,6 +2148,7 @@ export interface ChannelImplementation {
  * Channel 实例
  */
 export interface ChannelInstance {
+  voice_setup?: VoiceSetupMetadata
   id: string
   implementation_id: string
   name: string

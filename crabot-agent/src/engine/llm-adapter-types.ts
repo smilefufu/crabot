@@ -76,7 +76,15 @@ export function thinkingEffortValue(thinking: LLMThinkingConfig | undefined): st
   return thinking.level === 'off' ? 'none' : thinking.level
 }
 
+export interface AssistantTextConsumer {
+  readonly externallyCommitted: boolean
+  write(text: string): Promise<void>
+  finish(): Promise<void>
+  abort(): Promise<void>
+}
+
 export interface LLMStreamParams {
+  readonly createTextConsumer?: () => AssistantTextConsumer
   /** Runs outside provider retry handling; may update messages before each actual attempt. */
   readonly beforeAttempt?: (adapter: LLMAdapter, model: string) => void | Promise<void>
   readonly onRequestLifecycle?: (event: LLMRequestEvent) => void
@@ -166,8 +174,8 @@ export async function callNonStreaming(
 ): Promise<LLMCallResponse> {
   // 统一走流式消费 + 缓冲整流重试（2026-06 起移除非流式 complete() 路径）：
   //   - 流式让字节持续流动，链路网关 / 反代不易把"静默连接"当死连接掐掉；
-  //   - 本层是纯 buffer 消费——丢弃 partial、重发整请求是安全的（无下游看得到重复
-  //     chunk），所以 mid-stream 断流也能整流重跑，直到成功或耗尽重试次数；
+  //   - 普通调用只缓冲响应，可以丢弃 partial 后重试；语音 consumer 外发文字后
+  //     不再重跑整请求，防止已经播放的内容重复。
   //   - 单次 attempt 的 TTFB / 空闲超时由各 adapter stream() 内的 withStreamTimeout 负责，
   //     超时抛 StreamTimeoutError（可重试）→ 在这里换新连接重发。
   return await withStreamConsumptionRetry(adapter, params)
@@ -257,6 +265,7 @@ async function withStreamConsumptionRetry(
         retryMode, delayMs, maxAttempts, error: error instanceof Error ? error.message : String(error) })
     }
     if (request) observe(request)
+    const consumer = params.createTextConsumer?.()
     let firstChunkMs: number | undefined
     let chunkCount = 0
     try {
@@ -274,8 +283,10 @@ async function withStreamConsumptionRetry(
         if (chunk.type === 'error') {
           throw new Error(chunk.error)
         }
+        if (consumer && chunk.type === 'text_delta') await consumer.write(chunk.text)
         processor.process(chunk)
       }
+      if (consumer) await consumer.finish()
       const result = processor.finalize()
       const completed: LLMRequestEvent | undefined = request ? {
         ...request, status: 'completed', endedAtMs: Date.now(), firstChunkMs, chunkCount,
@@ -304,7 +315,9 @@ async function withStreamConsumptionRetry(
         failureKind: params.signal?.aborted ? 'aborted' : 'request_failed',
         error: err instanceof Error ? err.message : String(err),
       })
+      if (consumer) await consumer.abort()
       lastError = err
+      if (consumer?.externallyCommitted) throw err
       if (params.signal?.aborted) throw err
       if (!isRetryableError(err)) throw err
       // 配置变更消费必须先于所有放弃判定（review 3rd）：变更落在最后一次失败上时，

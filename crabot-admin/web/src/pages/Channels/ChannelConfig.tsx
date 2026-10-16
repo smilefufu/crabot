@@ -12,6 +12,7 @@ import type {
   JsonSchemaProperty,
 } from '../../types'
 import { useToast } from '../../contexts/ToastContext'
+import { VoiceConfigCard } from './VoiceConfigCard'
 
 const CHANNEL_ONBOARDING_STORAGE_KEY = 'crabot:channel-onboarding-dismissed:v1'
 
@@ -491,6 +492,7 @@ export const ChannelConfig: React.FC = () => {
   // ---------- 创建表单 ----------
 
   const handleImplChange = (implId: string) => {
+    if (implId === 'channel-voice') { navigate('/channels/new/voice'); return }
     setCreateImplId(implId)
     setCreateEnv({})
     const impl = implementations.find((i) => i.id === implId)
@@ -579,14 +581,15 @@ export const ChannelConfig: React.FC = () => {
         {error && <div className="error-message">{error}</div>}
 
         <ChannelOnboardingCallout
-          visible={!onboardingDismissed && instances.length > 0}
+          visible={!onboardingDismissed && !(showCreateForm && selectedImpl?.id === 'channel-voice') && instances.some(instance => instance.implementation_id !== 'channel-voice')}
           onDismiss={dismissOnboarding}
         />
 
         {/* Create Form */}
         {showCreateForm && (
           <div className="channel-create-panel">
-            <h2 className="channel-create-panel__title">新建 Channel 实例</h2>
+            <h2 className="channel-create-panel__title">{selectedImpl?.id === 'channel-voice' ? '新建语音渠道' : '新建 Channel 实例'}</h2>
+            {selectedImpl?.id === 'channel-voice' && <p className="schema-field__desc">先填写渠道名称并创建实例；启动后展开“配置”，生成一次性配对二维码，再用 Android App 扫码并核对两端配对码。</p>}
             <div className="channel-create-grid">
               <div className="form-group form-group--flush">
                 <label className="form-label">实现（Implementation）</label>
@@ -598,7 +601,7 @@ export const ChannelConfig: React.FC = () => {
               </div>
               <div className="form-group form-group--flush">
                 <label className="form-label">实例名称</label>
-                <input className="input" type="text" value={createName} onChange={(e) => setCreateName(e.target.value)} placeholder="如：飞书工作群" />
+                <input className="input" type="text" value={createName} onChange={(e) => setCreateName(e.target.value)} placeholder={selectedImpl?.id === 'channel-voice' ? '如：手机语音' : '如：飞书工作群'} />
               </div>
               <div className="form-group form-group--flush">
                 <label className="form-label">平台</label>
@@ -674,6 +677,7 @@ export const ChannelConfig: React.FC = () => {
                         <span className={`badge ${statusInfo.cls}`}>
                           {statusInfo.label}
                         </span>
+                        {instance.voice_setup?.status === 'draft' && <span className="badge badge-secondary">待完成创建</span>}
                         {connInfo && (
                           <span className={`badge ${connInfo.cls}`}>
                             {connInfo.label}
@@ -684,7 +688,7 @@ export const ChannelConfig: React.FC = () => {
                       {/* Auto-start toggle */}
                       <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginTop: '0.75rem' }}>
                         <label className="toggle-switch">
-                          <input type="checkbox" checked={instance.auto_start} onChange={() => handleToggleAutoStart(instance)} />
+                          <input type="checkbox" disabled={instance.voice_setup?.status === 'draft'} checked={instance.auto_start} onChange={() => handleToggleAutoStart(instance)} />
                           <span className="toggle-track" />
                         </label>
                         <span style={{ fontSize: '0.75rem', color: instance.auto_start ? 'var(--text-secondary)' : 'var(--text-muted)' }}>
@@ -706,6 +710,7 @@ export const ChannelConfig: React.FC = () => {
                           <Button variant="danger" onClick={() => handleDelete(instance)}>删除</Button>
                         </>
                       )}
+                      {instance.implementation_id === 'channel-voice' && instance.voice_setup?.status !== 'complete' && <Button variant="secondary" onClick={() => navigate(`/channels/new/voice?instance_id=${encodeURIComponent(instance.id)}`)}>{instance.voice_setup?.status === 'draft' ? '继续配置' : '进入创建向导'}</Button>}
                       <button
                         className={`btn channel-config-toggle ${isSelected ? 'channel-config-toggle--active' : ''}`}
                         onClick={() => handleSelectInstance(instance.id)}
@@ -719,7 +724,9 @@ export const ChannelConfig: React.FC = () => {
                   {/* Config Panel */}
                   {isSelected && (
                     <div className="channel-config-panel">
-                      {configLoading ? (
+                      {instance.implementation_id === 'channel-voice' ? (
+                        <VoiceConfigCard key={instance.id} channelId={instance.id} running={isRunning} />
+                      ) : configLoading ? (
                         <Loading />
                       ) : isRunning && editingConfig ? (
                         <>

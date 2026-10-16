@@ -6,6 +6,7 @@ const executionEnv = new AsyncLocalStorage<Readonly<Record<string, string>>>()
 
 const SCRUBBED_CHILD_ENV_KEYS = new Set([
   CORE_AGENT_RUNTIME_BEARER_ENV,
+  'CRABOT_VOICE_RUNTIME_BEARER',
 ])
 
 const SCRUBBED_INHERITED_ENV_KEYS = new Set([
