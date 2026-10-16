@@ -986,6 +986,7 @@ export const DialogObjectsPage: React.FC = () => {
           <div style={{ display: 'grid', gap: '1rem' }}>
             <div>
               <h2 style={{ margin: 0 }}>群聊权限编辑</h2>
+              <p>这是对所有成员（含陌生人）有效的公共授权。好友本人可在独立请求中使用个人授权，两份配置分别保留。</p>
             </div>
 
             {groupConfigLoading ? (

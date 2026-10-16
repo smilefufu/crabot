@@ -82,7 +82,17 @@ export interface GetWorkerDetailParams {
   worker_id: string
 }
 
+export interface WorkerRequestAuthorityView {
+  status: 'verified' | 'unavailable'
+  request_id: string
+  execution_scope: 'group' | 'request'
+  initiator?: { channel_id: string; platform_user_id: string; display_name: string; friend_id: string | null }
+  permission_sources?: import('./request-permission-sources.js').ResolveRequestPermissionSourcesResult
+  delivery?: 'origin' | 'requester_private'
+}
+
 export interface GetWorkerDetailResult {
+  request_authority?: WorkerRequestAuthorityView
   execution_observations?: import('crabot-shared').ExecutionObservation[]
   worker: LedgerWorker
 }

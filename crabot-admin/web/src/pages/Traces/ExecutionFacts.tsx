@@ -13,6 +13,6 @@ export function ExecutionFacts({ observation }: { observation?: ExecutionObserva
         <p>{observation.constraints.join(' ')}</p>
         <small>记录版本：{observation.revision}</small>
       </div>}
-    <p style={{ fontSize: 12, color: 'var(--text-muted)' }}>权限修改只影响新派发的 Worker；既有 Worker 和子 Agent 使用父 Worker 的固定主体快照。</p>
+    <p style={{ fontSize: 12, color: 'var(--text-muted)' }}>此处是该化身实际装配记录。请求绑定的 Worker 每次动作还需通过原授权上限与当前同源授权复核；撤权会阻止后续动作。旧 Worker 保留原主体快照，不追认新个人授权。</p>
   </section>
 }

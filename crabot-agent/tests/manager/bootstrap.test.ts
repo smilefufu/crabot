@@ -901,7 +901,7 @@ describe('manager bootstrap（P5 Task 1）', () => {
       await vi.waitFor(() => expect(vi.getTimerCount()).toBeGreaterThan(0))
       await vi.advanceTimersByTimeAsync(60 * 60 * 1000)
       await vi.waitFor(() => expect(inspected).toBeDefined())
-      await vi.advanceTimersByTimeAsync(100)
+      await vi.waitFor(() => expect(stack.registry.isExecuting(key)).toBe(false))
 
       expect(inspected).toMatchObject({ isError: false })
       expect(inspected?.output).toContain('# 自省项目')

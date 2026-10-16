@@ -4599,7 +4599,21 @@ export class UnifiedAgent extends ModuleBase {
         constraints: ['无该化身执行事实记录；不从当前配置补推历史工具。'] })
       return incarnation.incarnation_id ? readObservation(observationFile(path.join(getAgentDataDir(), 'workers'), found.worker.worker_id, incarnation.incarnation_id), fallback) : fallback
     }))
-    return { ...buildWorkerDetail(found), execution_observations: observations.filter((item): item is NonNullable<typeof item> => !!item) }
+    let requestAuthority: import('./manager/read-model.js').WorkerRequestAuthorityView | undefined
+    const binding = found.worker.origin.request
+    if (binding) {
+      requestAuthority = { status: 'unavailable', request_id: binding.request_id, execution_scope: binding.execution_scope }
+      try {
+        const bound = await this.requireManagerStack().requestGuard.load(params.worker_id)
+        if (bound) requestAuthority = { ...requestAuthority, status: 'verified',
+          initiator: { channel_id: bound.source.message.session.channel_id,
+            platform_user_id: bound.source.message.sender.platform_user_id,
+            display_name: bound.source.message.sender.platform_display_name, friend_id: bound.source.sender_friend_id },
+          permission_sources: structuredClone(bound.request.permission_sources), delivery: bound.request.delivery.kind }
+      } catch { /* Keep the Admin record readable; missing proof must never become inferred authority. */ }
+    }
+    return { ...buildWorkerDetail(found), ...(requestAuthority ? { request_authority: requestAuthority } : {}),
+      execution_observations: observations.filter((item): item is NonNullable<typeof item> => !!item) }
   }
 
   /** §8.3 get_worker_terminal：返回一次完整的 live/final/headless/unavailable 观察。 */

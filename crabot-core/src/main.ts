@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process'
 /**
  * Module Manager 入口文件
  */
@@ -104,6 +105,9 @@ const CORE_MODULES = buildCoreModules({
   adminEndpoint: ADMIN_ENDPOINT,
   newApiToken: process.env.CRABOT_NEW_API_ADMIN_TOKEN || '',
 })
+
+// Prepare before any module can read new request data, including direct dev MM startup.
+execFileSync(process.execPath, [path.join(CRABOT_ROOT, 'scripts/prepare-shared-requests.mjs'), `--data-dir=${DATA_DIR}`], { stdio: 'inherit' })
 
 const manager = new ModuleManager({
   port: PORT,

@@ -149,6 +149,18 @@ export interface WorkerIncarnation {
   forked_from?: number | string
 }
 
+export interface WorkerRequestAuthorityView {
+  status: 'verified' | 'unavailable'
+  request_id: string
+  execution_scope: 'group' | 'request'
+  initiator?: { channel_id: string; platform_user_id: string; display_name: string; friend_id: string | null }
+  permission_sources?: {
+    group: { kind: 'group' | 'friend'; subject_id: string; is_master: boolean; resolved: Pick<import('../types').PermissionTemplate, 'tool_access' | 'cli_access' | 'storage' | 'memory_scopes'> }
+    friend: { kind: 'group' | 'friend'; subject_id: string; is_master: boolean; resolved: Pick<import('../types').PermissionTemplate, 'tool_access' | 'cli_access' | 'storage' | 'memory_scopes'> } | null
+  }
+  delivery?: 'origin' | 'requester_private'
+}
+
 export interface LedgerWorker {
   worker_id: string
   manager_key: string
@@ -177,6 +189,7 @@ export interface LedgerWorker {
     spawned_by_episode?: string
     creator_friend_id?: string
     trigger_type: 'message' | 'scheduled' | 'system'
+    request?: { schema_version: 1; request_id: string; source_sha256: string; execution_scope: 'group' | 'request' }
   }
   report_to: { channel_id: string; session_id: string }
   incarnations: WorkerIncarnation[]
@@ -445,7 +458,7 @@ export const agentObservabilityService = {
     return api.get(`/agent/workers?${search.toString()}`)
   },
 
-  getWorkerDetail(workerId: string): Promise<{ worker: LedgerWorker; execution_observations?: import('crabot-shared/dist/execution-observation.js').ExecutionObservation[] }> {
+  getWorkerDetail(workerId: string): Promise<{ worker: LedgerWorker; request_authority?: WorkerRequestAuthorityView; execution_observations?: import('crabot-shared/dist/execution-observation.js').ExecutionObservation[] }> {
     return api.get(`/agent/workers/${encodeURIComponent(workerId)}`)
   },
 

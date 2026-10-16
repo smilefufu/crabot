@@ -222,6 +222,7 @@ describe('DialogObjects components', () => {
       />
     )
     expect(screen.getByRole('link', { name: '打开私聊场景画像' })).toHaveAttribute('href', '/memory/scenes/friend%3Afriend-1')
+    expect(screen.getByText(/其本人发起的群请求/)).toBeInTheDocument()
     expect(screen.getByLabelText('记忆读写')).toBeInTheDocument()
     expect(screen.queryByLabelText('桌面控制（仅 Master 私聊）')).not.toBeInTheDocument()
     expect(screen.queryByLabelText('权限模板')).not.toBeInTheDocument()
@@ -241,6 +242,7 @@ describe('DialogObjects components', () => {
         onEditPermission={() => {}}
       />
     )
+    expect(screen.getByText(/所有成员（含陌生人）的公共授权/)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '编辑群权限' })).toBeInTheDocument()
 
     rerender(

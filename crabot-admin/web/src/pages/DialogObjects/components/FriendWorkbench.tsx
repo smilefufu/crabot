@@ -195,8 +195,9 @@ export const FriendWorkbench: React.FC<FriendWorkbenchProps> = ({
         <div className="dialog-object-permission-panel">
           <div style={{ display: 'grid', gap: '0.35rem' }}>
             <strong>好友权限</strong>
+            <p>用于该好友的私聊及其本人发起的群请求。群内按同一个完整授权来源执行，不与群权限逐字段拼接；其他人插话不会取得此权限。</p>
             <div style={{ color: 'var(--text-secondary)', fontSize: '0.875rem' }}>
-              {friendPermissionSource === 'independent' ? '当前使用完整独立配置，不随模板变化。' : friendPermissionSource === 'template' ? '当前继承模板；保存后成为完整独立配置。' : '权限来源加载中。'}既有 Worker 保留派发时快照。
+              {friendPermissionSource === 'independent' ? '当前使用完整独立配置，不随模板变化。' : friendPermissionSource === 'template' ? '当前继承模板；保存后成为完整独立配置。' : '权限来源加载中。'}创建时的授权上限保留；请求 Worker 的后续动作还会复核当前授权。
             </div>
           </div>
 
