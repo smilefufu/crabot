@@ -1,5 +1,6 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
+import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
 import { execFile } from 'node:child_process'
 import { promises as fs } from 'node:fs'
 import { join, resolve } from 'node:path'
@@ -11,8 +12,26 @@ function run(command: string, args: string[], env?: NodeJS.ProcessEnv): Promise<
   return new Promise((done, fail) => execFile(command, args, { env, timeout: 15_000 }, error => error ? fail(error) : done()))
 }
 
+export async function waitForMacPermissions(client: Pick<Client, 'callTool'>, deadline: number): Promise<void> {
+  while (Date.now() < deadline) {
+    const result = await client.callTool({ name: 'check_permissions', arguments: { prompt: false } }, undefined,
+      { timeout: Math.max(1, Math.min(5000, deadline - Date.now())) }) as CallToolResult
+    if (result.isError && result.content?.some(item => item.type === 'text' && item.text.startsWith('permissions_pending:'))) {
+      await new Promise(done => setTimeout(done, 100))
+      continue
+    }
+    if (result.isError || !result.structuredContent) throw new Error('COMPUTER_USE_PERMISSION_CHECK_FAILED')
+    if (result.structuredContent.accessibility === false) throw new Error('COMPUTER_USE_ACCESSIBILITY_REQUIRED')
+    if (result.structuredContent.screen_recording === false) throw new Error('COMPUTER_USE_SCREEN_RECORDING_REQUIRED')
+    if (result.structuredContent.accessibility !== true || result.structuredContent.screen_recording !== true) throw new Error('COMPUTER_USE_PERMISSION_CHECK_FAILED')
+    return
+  }
+  throw new Error('COMPUTER_USE_PERMISSIONS_PENDING')
+}
+
 /** Owns only a private runtime. Never adopts or stops the user's default Driver daemon. */
 export async function createNativeDriver(root: string, stateDirectory: string): Promise<NativeDriver> {
+  const deadline = Date.now() + 30000
   const runtime = require(resolve(root, 'scripts/lib/computer-use-runtime.cjs')).loadRuntime(root)
   if (runtime.version !== DRIVER_VERSION) throw new Error('COMPUTER_USE_RUNTIME_MISMATCH')
   if (process.platform === 'win32') {
@@ -20,6 +39,11 @@ export async function createNativeDriver(root: string, stateDirectory: string): 
     if (!/^\d+$/.test(session) || Number(session) === 0) throw new Error('COMPUTER_USE_INTERACTIVE_SESSION_REQUIRED')
   }
   if (process.platform === 'linux' && (!process.env.DISPLAY && !process.env.WAYLAND_DISPLAY)) throw new Error('COMPUTER_USE_INTERACTIVE_SESSION_REQUIRED')
+  if (process.platform === 'darwin') {
+    const permissions = await require(resolve(root, 'scripts/lib/computer-use-setup.cjs')).readPermissions(root)
+    if (!permissions.accessibility) throw new Error('COMPUTER_USE_ACCESSIBILITY_REQUIRED')
+    if (!permissions.screen_recording) throw new Error('COMPUTER_USE_SCREEN_RECORDING_REQUIRED')
+  }
   const guard = await acquireRuntimeGuard(stateDirectory)
   const directory = await fs.mkdtemp(join(tmpdir(), 'crabot-cua-'))
   await fs.chmod(directory, 0o700)
@@ -75,8 +99,7 @@ export async function createNativeDriver(root: string, stateDirectory: string): 
     await client.connect(transport)
     if (process.platform !== 'darwin') { nativePid = transport.pid; if (nativePid) await guard.record(nativePid, '') }
     if (process.platform === 'darwin') {
-      const permission = await client.callTool({ name: 'check_permissions', arguments: {} }, undefined, { timeout: 5_000 })
-      if (permission.isError) throw new Error('COMPUTER_USE_OS_PERMISSIONS_REQUIRED')
+      await waitForMacPermissions(client, deadline)
     }
     return {
       async tools() { return (await client.listTools()).tools },

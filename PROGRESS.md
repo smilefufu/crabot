@@ -1,5 +1,23 @@
 # Crabot 项目进度
 
+### crabot check 运行状态误报：已修复
+
+- MM/Admin RPC 的 health 使用 POST，Admin RPC 端口从 MM 的 list_modules 查询 exact admin-web，Web health 保留 GET；查不到端口时明确显示不可用，不再猜测 19001。保留端口偏移及 HTTP/连接失败诊断，不改服务运行行为。
+- 新增 6 个回归在旧脚本全部复现失败；修复后连同既有 MM 探针共 16 项通过。未重启现场服务，本次修复提交 main，发行包仍为 v2026.10.15.1。
+
+### 国内依赖源优先：已发布
+
+- 按已确认 [Spec](crabot-docs/superpowers/specs/2026-10-14-domestic-dependency-download-design.md) 完成 install/reinstall 与 CLI/UI/source upgrade 的国内源探测、源故障最多一次官方回退和共用预算。Node 包优先 npmmirror，Python 包/构建依赖优先阿里云，uv/standalone Python 优先可用科大镜像；固定版本、锁/hash、Corepack 签名、TLS 与真实 I/O 错误保持。
+- Memory 在原锁 hash 清单下完成私有 venv 准备及 frozen/offline 审计；已有/显式 Python、uv 下载策略、解释器偏好、离线限制和代理/CA 保持，不修改全局源或私有凭据。无可用解释器、无显式版本且允许下载时独立获取 CPython 3.12.12；标准生产 Memory 排除 dev，Python 子进程使用 UTF-8。
+- [v2026.10.15.1](https://github.com/smilefufu/crabot/releases/tag/v2026.10.15.1) 的四个最终发行包已通过 [正式原生门禁](https://github.com/smilefufu/crabot/actions/runs/38681362533)：Intel/ARM Mac、Linux x64、Windows x64，包含实际 Admin Web/RPC、Agent/Memory RPC 启停、重装、CLI/UI/source 升级、旧包恢复和坏摘要拒绝。Windows 覆盖 PS5.1/7、Python 3.11、中文路径；Linux 另覆盖无 Python/编译器的 Ubuntu 24.04、Debian 12/13 及 system mode 两普通 UID。四包/四摘要已公开核验，latest 指向新版。
+- 本机阻断官方来源的冷缓存实验确认实际 Corepack/pnpm/Node 包、SQLite/sharp 和 Memory 从国内源获取；47 项定向、36 项升级器、8 项模块入口与 uv 0.13/0.10.4 配置保留验证通过。Windows Server CI 不代表 Win11/FlClash 现场验收；Crabot/GitHub 分发可达性仍独立，未修改生产数据或进程。
+
+### 桌面控制首次设置：实现完成，等待 PR 审查与原生验收
+
+- 按用户确认的 [Spec](crabot-docs/superpowers/specs/2026-10-13-computer-use-setup-experience-design.md) 和先行发布的 Admin/Agent 协议，实现系统设置入口、具体权限诊断、系统授权引导、自动复检、真实截图验证与 computer-use 局部装配；MCP 标准项链接同一面板。正常流程无需终端、手动找 App 或重启 Agent。
+- 人类 Admin JWT 才可开始设置；GET 不申请授权/截图，不接管默认 daemon。180 秒、重复点击、陈旧取消、退出与迟到结果均有界收口；Worker 权限快照、其它 MCP 连接、unknown 隔离和不重放保持。Windows/Linux 使用同一实例内的临时只读宿主观察，截图不进入模型或历史。
+- Shared/Agent/Admin/MCP/Web 编译与定向回归、真实 helper 子进程清理及浏览器 fixture 通过。本机签名 App 只读探针两项授权均为 true；未重置权限。Agent 既有 runtime-config-invalidation 两项失败已在未修改的 d9c3908d 复现；未授权 macOS 账户、其它原生平台和模型业务验收仍待补。本次尚未合并或部署。
+
 ### 跨平台安装与升级兼容：已发布
 
 - Windows 现场 Node 引导在整目录 `Move-Item` 报 Access denied；改为复制已校验的完整载荷，保留隐藏文件，真实读写失败仍拒绝且清理不完整工具目录。原生 PS5.1/PS7 使用真实进程占用目录复现旧代码失败，新代码安装通过；独占不可读文件的失败清理及私有 Node/npm/launcher 回归通过。[原生 CI](https://github.com/smilefufu/crabot/actions/runs/38527589428) 两种 PowerShell 另以真实 Node 22.12 引导私有 Node，安装公开 v2026.10.14.1 ZIP 并各验收三次 Admin Web/RPC、Agent/Memory RPC 启动、退出、重装和 CLI/UI 升级。此修复更新 main 安装器，发行包代码不变；现场具体占用进程尚未确认。
@@ -13,7 +31,7 @@
 - Agent 统一宿主、可信 Manager/builtin 上下文和 CLI incarnation 执行环境；凭据/端点不落入任务 MCP 配置，按现有权限与有效化身检查。引用隔离、忙碌即时返回、16 步/60 秒整批校验、取消/unknown 隔离、不重放、终态 session 清理及旧受管 stdio 退出已实现。Driver 截图默认 1024，保留原生坐标与结果，条件 guidance 正文沿用确认稿。
 - 三模块编译、340 项 Agent 定向回归、215 项 CLI/builtin/Manager 回归、17 项 MCP/桥接、注册表保持和坏 hash/准备清理验证通过；其中 CLI 环境需要真实 CLI 的 85 项被环境跳过。全量 Agent 在单核持续满载 33 分钟仍无报告后中止，未定位原因，不算通过；已有核心提示词 354/350 长度断言在 base 同样不满足，本次未改正文。
 - PR #209 的隔离恢复风险已按确认方案修复：旧 Driver 退出确认后由新的发现/观察重建；同一桥接/可信凭据保留，原生 session/ref 全清，每调用方新观察后才允许输入。重连失败、取消、超时/shutdown 清理迟到运行时，不恢复任务或重放动作；就绪与桥接存活分开判断。恢复修订 MCP/bridge 31 项、Agent 16 项及准备 2 项回归、Agent/MCP 编译通过；两项旧 capability 用例在修复前 HEAD 同样被 storage=null 的 CLI 准入拒绝，单独记录。Windows Release 的 tar 盘符/ZIP 格式问题已改为原生 Expand-Archive；回归使用真实 ZIP（非改名 tar），等待新 head 的真实四平台 CI。
-- 四平台资产 SHA 和完整 macOS App 签名已核对；真实宿主→service→App 握手、session 生命周期及权限缺失局部降级/清理通过。macOS 尚缺 Accessibility/Screen Recording；Windows、Intel Mac、Linux X11/GNOME Wayland/Sway 和模型效率实验仍待验收/预算。未部署生产，不能声称全平台或模型任务验收完成。
+- 四平台资产 SHA 和完整 macOS App 签名已核对；真实宿主→service→App 握手、session 生命周期及权限缺失局部降级/清理通过。10 月 13 日本机已验证两项授权、direct capture 和 Agent MCP 连接；该版本已本机部署，首次设置 UI 是上方独立改动。Windows、Intel Mac、Linux X11/GNOME Wayland/Sway 和模型效率实验仍待验收/预算，不能声称全平台或模型任务验收完成。
 
 
 ### Intel macOS Release：已发布，截图 Mac 安装已通过

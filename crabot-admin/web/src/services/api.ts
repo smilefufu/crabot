@@ -86,9 +86,10 @@ class ApiClient {
     })
   }
 
-  async delete<T>(endpoint: string, data?: unknown): Promise<T> {
+  async delete<T>(endpoint: string, data?: unknown, keepalive = false): Promise<T> {
     return this.request<T>(endpoint, {
       method: 'DELETE',
+      ...(keepalive ? { keepalive: true } : {}),
       ...(data !== undefined ? { body: JSON.stringify(data) } : {}),
     })
   }

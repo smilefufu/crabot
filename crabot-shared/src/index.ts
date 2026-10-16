@@ -128,3 +128,4 @@ export { VOICE_MODEL_VERSIONS } from './voice-models.js'
 export { testAudioService } from './audio-client.js'
 
 export { parseVoiceConnection, voiceTerminalEntry, voiceSetupStatus } from './voice-connection.js'
+export * from './computer-use.js'

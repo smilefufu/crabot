@@ -1805,6 +1805,7 @@ export class UnifiedAgent extends ModuleBase {
   protected override async onEvent(event: Event): Promise<void> {
     switch (event.type) {
       case 'admin.agent_config_invalidated':
+        this.computerUseOwner.cancelSetupVerification()
         this.scheduleRuntimeConfigPull()
         break
 
@@ -1936,6 +1937,8 @@ export class UnifiedAgent extends ModuleBase {
         }
         this.configStale = false
         this.configAuthenticated = true
+        await this.refreshComputerUseResource()
+        this.verifyComputerUseSetup(loaded.computer_use_setup)
         return
       }
       await this.applyRuntimeConfigCandidate(loaded.config)
@@ -1944,6 +1947,7 @@ export class UnifiedAgent extends ModuleBase {
       this.configResourcesDetached = false
       this.configStale = false
       this.configAuthenticated = true
+      this.verifyComputerUseSetup(loaded.computer_use_setup)
     } catch (error) {
       this.configStale = true
       this.configAuthenticated = false
@@ -1951,6 +1955,29 @@ export class UnifiedAgent extends ModuleBase {
       this.disconnectRuntimeConfigResources()
       throw error
     }
+  }
+
+  private desktopSetupRequest?: import('crabot-shared').ComputerUseSetupRequest
+
+  private async refreshComputerUseResource(): Promise<void> {
+    const snapshot = this.agentConfig
+    const standard = snapshot?.mcp_servers?.find(isStandardComputerUse)
+    if (!standard || this.runtimeClosing || this.computerUseOwner.status.state === 'quarantined') return
+    const current = () => !this.runtimeClosing && this.agentConfig === snapshot && !this.configStale
+    try {
+      const configs = await this.computerUseOwner.prepare([standard])
+      if (!current()) { await this.computerUseOwner.close(); return }
+      const prepared = configs.find(config => config.name === 'computer-use')
+      if (prepared) await this.mcpConnector.connectComputerUse(prepared, current)
+    } catch { /* Resource failure never invalidates the authenticated model config or other MCPs. */ }
+  }
+
+  private verifyComputerUseSetup(request?: import('crabot-shared').ComputerUseSetupRequest): void {
+    this.desktopSetupRequest = request
+    if (!request) { this.computerUseOwner.cancelSetupVerification(); return }
+    if (process.platform === 'darwin' || this.runtimeClosing) return
+    void this.computerUseOwner.verifySetup(request, () => !this.runtimeClosing && !this.configStale
+      && this.desktopSetupRequest?.setup_id === request.setup_id && this.desktopEnabled())
   }
 
   private disconnectRuntimeConfigResources(): void {
@@ -5434,6 +5461,11 @@ export class UnifiedAgent extends ModuleBase {
   // ============================================================================
 
   protected override async getHealthDetails(): Promise<Record<string, unknown>> {
+    const desktop = await this.computerUseOwner.diagnostics()
+    if (desktop.state === 'ready' && !this.mcpConnector.getAllTools().some(tool => tool.traceMetadata?.computer_use_standard === true)) {
+      desktop.state = 'connecting'
+      desktop.reason = 'COMPUTER_USE_TOOL_CATALOG_UNAVAILABLE'
+    }
     return {
       roles: Array.from(this.roles),
       idle: this.sessionManager.getPendingSessionCount() === 0,
@@ -5443,6 +5475,7 @@ export class UnifiedAgent extends ModuleBase {
       llm_status: this.isConfigured() ? 'ready' : 'not_configured',
       sdk_status: this.sdkEnvWorker ? 'ready' : 'not_configured',
       mcp_servers_count: this.mcpConnector.count,
+      computer_use: desktop,
       // Event loop watchdog 指标：MM 拿到 health 响应时同步读这两个字段，能反映
       // agent 进程的 event loop 是否被同步代码阻塞 / GC 暂停。
       // last_event_loop_lag_ms：最近一次 1s 间隔实际 tick 与 1000ms 预期的差值
@@ -5620,6 +5653,7 @@ export class UnifiedAgent extends ModuleBase {
         `[${this.config.moduleId}] Connecting to ${this.agentConfig.mcp_servers.length} MCP server(s)...`
       )
       await this.mcpConnector.connectAll(await this.computerUseOwner.prepare(this.agentConfig.mcp_servers))
+      this.verifyComputerUseSetup(ConfigLoader.consumeInitialSetup())
       console.log(
         `[${this.config.moduleId}] ${this.mcpConnector.count} MCP server(s) connected`
       )

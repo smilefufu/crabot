@@ -9,6 +9,7 @@ import { browserService } from '../../services/browser'
 import { ProxyConfigCard } from './ProxyConfigCard'
 import { PublicBaseUrlCard } from './PublicBaseUrlCard'
 import { VersionUpgradeCard } from './VersionUpgradeCard'
+import { ComputerUseSetupCard } from './ComputerUseSetupCard'
 
 interface ConfigStatus {
   configured: boolean
@@ -122,6 +123,8 @@ export const GlobalSettings: React.FC = () => {
           默认模型配置已移至「模型供应商」页面顶部。
         </p>
       </Card>
+
+      <ComputerUseSetupCard />
 
       <Card title="浏览器管理" className="settings-card">
         {browserLoading ? (

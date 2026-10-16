@@ -11,6 +11,10 @@ export async function verifyReleasePackage(root, version, { run = runBounded } =
   const required = ['cli.mjs', 'package.json', 'dist/cli/main.js', 'scripts/start.mjs', 'crabot-memory/pyproject.toml', 'crabot-memory/uv.lock']
   if (!Object.hasOwn(legacy, version)) required.push('scripts/check-release.mjs')
   for (const file of required) if (!existsSync(join(root, file))) throw new Error(`Release package missing ${file}`)
+  const dependencyHelpers = ['scripts/installer-deps.mjs', 'scripts/prepare-memory.mjs', 'scripts/lib/install-network.mjs', 'scripts/lib/memory-deps.mjs', 'scripts/lib/run-bounded.mjs']
+  if (dependencyHelpers.some(file => existsSync(join(root, file)))) {
+    for (const file of dependencyHelpers) if (!existsSync(join(root, file))) throw new Error(`Release package incomplete: missing ${file}`)
+  }
   for (const [name, files] of Object.entries(components)) {
     if (Object.hasOwn(legacy, version) && !legacy[version].includes(name)) {
       if (files.some(file => existsSync(join(root, file)))) throw new Error(`Release package has mixed ${name} generation: ${version}`)
