@@ -34,6 +34,7 @@ interface Dependencies {
 export function createConversationRequestLoop(context: RequestRunContext, deps: Dependencies): ManagerLoop {
   const host = deps.bootstrap, request = context.request, source = context.source
   const target = source.message.session, key = request.manager_key
+  const voiceOutput = request.delivery.kind === 'origin' ? deps.voiceOutput : undefined
   const board = new ManagerWorkboardStore(path.join(deps.root, request.request_id, 'workboard'))
   const deliveries = new RequestDeliveryStore(path.join(deps.root, request.request_id), request)
   let loop: ManagerLoop, pending = false
@@ -107,7 +108,7 @@ export function createConversationRequestLoop(context: RequestRunContext, deps: 
         targetSession: target, triggerType: 'message', onWorkerSpawned: id => loop?.recordSpawnedWorker(id) }),
       messagingDeps: { ...host.messagingDeps, rpcClient: rpc, voiceReplyContext: () => context.voiceReplyContext,
         resolveChannelPort: async channelId => { const port = await host.messagingDeps.resolveChannelPort(channelId); channelPorts.set(port, channelId); return port } },
-      managerTarget: target, voice: !!context.voiceReplyContext,
+      managerTarget: target, voice: voiceOutput?.isVoice() === true,
       sessionChannelsFor: id => loop?.sessionChannelsFor(id),
       onObservedSessionTargets: targets => loop?.recordObservedSessionTargets(targets),
       onPostSendAction: () => loop?.recordPostSendAction(),
@@ -198,7 +199,7 @@ export function createConversationRequestLoop(context: RequestRunContext, deps: 
     promptInputs: () => ({ isGroup: true, requestAuthorization: 'request',
       dialogProfile: JSON.stringify({ request_id: request.request_id, source: requestSourceFor(source), original_message: source.message, selection: request.selection, delivery: request.delivery }),
       ...(host.managerPersonality?.() ? { adminPersonality: host.managerPersonality() } : {}) }),
-    voiceOutput: context.voiceReplyContext ? deps.voiceOutput : undefined, voiceResponseEndOwner: context.voiceReplyContext ? 'parent' : undefined,
+    voiceOutput, voiceResponseEndOwner: context.voiceReplyContext ? 'parent' : undefined,
     onSuccessfulVoiceReply: value => { pending = false; context.onSuccessfulOriginDelivery?.(value) },
     harness: deps.harness, now: () => new Date(host.now()), timezone: host.timezone,
     markPendingReply: () => { pending = true }, hasPendingReply: () => pending,
