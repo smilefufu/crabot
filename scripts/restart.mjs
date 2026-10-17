@@ -8,7 +8,7 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { homedir } from 'node:os'
 import { resolveCliDataDir } from './lib/instance.mjs'
-import { acquireCliLock, releaseCliLock } from './lib/cli-lock.mjs'
+import { acquireCliLock, releaseCliLock, cliLockToken } from './lib/cli-lock.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const CRABOT_HOME = resolve(__dirname, '..')
@@ -26,12 +26,12 @@ function writeStatus(patch) {
   writeFileSync(STATUS_FILE, JSON.stringify({ ...prev, ...patch }, null, 2))
 }
 
-function node(args) {
+function node(args, lock) {
   execFileSync(process.execPath, [CLI, ...args], {
     cwd: CRABOT_HOME,
     stdio: 'inherit',
     // 锁由本 restart 外层持有全程；子 stop/start 见此 env 跳过抢锁（防自死锁）
-    env: { ...process.env, CRABOT_CLI_LOCK_HELD: '1' },
+    env: { ...process.env, CRABOT_CLI_LOCK_HELD: cliLockToken(lock) },
   })
 }
 
@@ -52,9 +52,9 @@ async function main() {
     process.on('exit', () => releaseCliLock(cliLockPath))
 
     console.log('[restart] stop')
-    node(['stop'])
+    node(['stop'], cliLockPath)
     console.log('[restart] start -d')
-    node(['start', '-d'])
+    node(['start', '-d'], cliLockPath)
     writeStatus({ phase: 'done', finished_at: stamp() })
     console.log(`[restart] done at=${stamp()}`)
   } catch (err) {

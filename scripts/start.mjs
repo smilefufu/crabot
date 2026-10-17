@@ -13,12 +13,14 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { spawn, spawnSync } from 'node:child_process'
 import { homedir } from 'node:os'
 import net from 'node:net'
-import { writePid, clearPid, checkSingleInstance, isPidAlive } from './lib/pid.mjs'
+import { checkSingleInstance, isPidAlive } from './lib/pid.mjs'
 import { scanModules, applyMigration } from './upgrade-lib/migrate.mjs'
 import { runScript } from './upgrade-lib/runner.mjs'
 import { hasInstance, resolveCliDataDir } from './lib/instance.mjs'
 import { probeMmHealthy } from './lib/mm-probe.mjs'
-import { acquireCliLock, releaseCliLock } from './lib/cli-lock.mjs'
+import { acquireCliLock, releaseCliLock, hasInheritedCliLock } from './lib/cli-lock.mjs'
+import { runManagedCore } from './lib/managed-core.mjs'
+import { inspectInstance } from './lib/instance-runtime.mjs'
 import scraplingRuntime from './lib/scrapling-runtime.cjs'
 import { runBounded } from './lib/scrapling-prepare.mjs'
 
@@ -163,11 +165,12 @@ if (!existsSync(mmEntry) || !existsSync(orphanRecoveryEntry)) {
 }
 
 // CLI 操作互斥（restart 外层持锁时经 env 跳过）。start 有大量 process.exit 出口，
-// 统一由 exit handler 释放；SIGKILL 残留的死锁由 acquire 侧的陈旧检测接管。
-if (!process.env.CRABOT_CLI_LOCK_HELD) {
+// 统一由 exit handler 释放；进程意外退出时操作系统关闭锁句柄。
+let startupLock
+if (!hasInheritedCliLock(DATA_DIR)) {
   try {
-    const cliLockPath = await acquireCliLock(DATA_DIR, 'start')
-    process.on('exit', () => releaseCliLock(cliLockPath))
+    startupLock = await acquireCliLock(DATA_DIR, 'start')
+    process.on('exit', () => releaseCliLock(startupLock))
   } catch (error) {
     console.error(`[crabot] ${error.message}`)
     process.exit(1)
@@ -175,6 +178,11 @@ if (!process.env.CRABOT_CLI_LOCK_HELD) {
 }
 
 // 单实例预检
+const currentInstance = inspectInstance(DATA_DIR)
+if (currentInstance.state === 'running' || currentInstance.state === 'starting') {
+  console.error(`[crabot] already running (pid=${currentInstance.record.mm?.pid ?? currentInstance.record.controller.pid}). Run 'crabot stop' first.`)
+  process.exit(1)
+}
 const single = checkSingleInstance(DATA_DIR)
 if (!single.ok) {
   console.error(`[crabot] already running (pid=${single.runningPid}). Run 'crabot stop' first.`)
@@ -240,30 +248,12 @@ if (pending.length > 0) {
 }
 
 if (!DAEMON_MODE) {
-  // 前台模式：写本进程 PID（stop 时 SIGTERM 给我，我转发给 MM）
-  writePid(DATA_DIR, process.pid)
-
-  const child = spawn(process.execPath, [mmEntry], {
-    cwd: resolve(ROOT, 'crabot-core'),
-    stdio: 'inherit',
-    env: { ...process.env },
-  })
-
-  const cleanup = () => clearPid(DATA_DIR)
-  child.on('exit', (code) => {
-    cleanup()
-    process.exit(code ?? 1)
-  })
-  child.on('error', (err) => {
-    cleanup()
-    console.error(`[crabot] failed to spawn Module Manager: ${err.message}`)
-    process.exit(1)
-  })
-  process.on('exit', cleanup)
-
-  for (const sig of ['SIGINT', 'SIGTERM']) {
-    process.on(sig, () => child.kill(sig))
-  }
+  await runManagedCore({ root: ROOT, dataDir: DATA_DIR, mmPort: MM_PORT,
+    env: process.env, stdio: ['inherit', 'inherit', 'inherit'],
+    cleanup: code => process.exit(code), log: message => process.stdout.write(message) })
+  // Foreground waiting is presentation, not a lifecycle mutation. Stop/restart can now acquire the lock.
+  releaseCliLock(startupLock)
+  startupLock = undefined
 } else {
   // 后台模式：spawn detached supervisor，父进程轮询 health 后退出
   const supervisorEntry = resolve(__dirname, 'supervisor.mjs')
@@ -284,8 +274,7 @@ if (!DAEMON_MODE) {
       CRABOT_SUPERVISOR_MM_CWD: resolve(ROOT, 'crabot-core'),
     },
   })
-  // 父进程立即写 supervisor.pid 到 mm.pid（避免 race）
-  writePid(DATA_DIR, sup.pid)
+  // The supervisor publishes its own verified controller/MM identities under this startup lock.
   sup.unref()
 
   console.log('[crabot] Starting in background...')

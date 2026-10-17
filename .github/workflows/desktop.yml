@@ -59,6 +59,8 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y build-essential libcurl4-openssl-dev libexpat1-dev zlib1g-dev
       - name: Prepare isolated build directory
         run: mkdir -p .desktop-build
+      - name: Build OS process identity helper with installed compiler
+        run: node scripts/build-native.mjs
       - name: Install frozen build dependencies
         run: |
           pnpm install --frozen-lockfile
@@ -71,8 +73,9 @@ jobs:
       - name: Runtime regressions
         run: |
           node --test scripts/lib/__tests__/product-*.test.mjs
+          node --test scripts/lib/__tests__/instance-runtime.test.mjs scripts/lib/__tests__/cli-lock-native.test.mjs scripts/lib/__tests__/process-identity.test.mjs scripts/lib/__tests__/stop-windows.test.mjs
           cd crabot-core
-          node node_modules/vitest/vitest.mjs run src/agent-venv.test.ts src/core-modules.test.ts --maxWorkers=1 --minWorkers=1
+          node node_modules/vitest/vitest.mjs run src/agent-venv.test.ts src/core-modules.test.ts src/shutdown-generation.test.ts --maxWorkers=1 --minWorkers=1
       - name: Agent environment regressions
         run: |
           cd crabot-agent

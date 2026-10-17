@@ -142,6 +142,13 @@ async function shutdown() {
 
 process.on('SIGINT', shutdown)
 process.on('SIGTERM', shutdown)
+// Inherited IPC belongs to the concrete Launcher child; no network caller can write it.
+process.on('message', (message: unknown) => {
+  const request = message as { type?: unknown; generation?: unknown } | null
+  if (request?.type === 'crabot-shutdown' && typeof request.generation === 'string'
+    && request.generation === process.env.CRABOT_INSTANCE_GENERATION) void shutdown()
+})
+process.channel?.unref()
 
 // 启动
 manager.start().catch((error) => {

@@ -34,6 +34,7 @@ import {
   type ModuleManagerConfig,
   type ModuleRuntime,
   type ModuleStopReason,
+  type ShutdownParams,
   DEFAULT_CONFIG,
   createModuleStartedEvent,
   createModuleStoppedEvent,
@@ -1093,7 +1094,12 @@ export class ModuleManager {
 
   // --- Shutdown ---
 
-  private async handleShutdown(): Promise<Record<string, never>> {
+  private async handleShutdown(params: ShutdownParams = {}): Promise<Record<string, never>> {
+    if (params.expected_generation !== undefined
+      && (typeof params.expected_generation !== 'string' || !params.expected_generation
+        || params.expected_generation !== process.env.CRABOT_INSTANCE_GENERATION)) {
+      throw Object.assign(new Error('Shutdown generation does not match this instance'), { code: 'STALE_INSTANCE' })
+    }
     setTimeout(() => {
       this.stop().catch(console.error)
     }, 100)

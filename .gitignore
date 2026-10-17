@@ -74,3 +74,4 @@ scrapling-runtime.json.*.tmp
 .desktop-build/
 .product-runtime/
 product-runtime.json
+crabot-native/build/

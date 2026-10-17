@@ -26,6 +26,9 @@ if (existsSync(pkg)) {
 }
 
 if (missing) {
+  if (existsSync(resolve(__dirname, '../product-runtime.json')) || existsSync(resolve(__dirname, '../.product-runtime')) || process.env.CRABOT_PRODUCT_REQUIRED === '1') {
+    throw new Error('内置依赖缺失，请通过桌面修复安装；不会在首次启动时联网安装依赖。')
+  }
   if (process.getuid?.() !== 0 && existsSync('/etc/crabot/cluster.version')) throw new Error('Shared dependencies are missing; ask the administrator to repair the system installation')
   accessSync(scriptsLibDir, constants.W_OK)
   console.log('[crabot] scripts/lib deps missing, auto-installing once...')
