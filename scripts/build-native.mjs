@@ -34,7 +34,7 @@ if (process.platform === 'win32') {
   if (!installation || installation.includes('\n')) throw new Error('Microsoft C++ build tools not found')
   const script = join(cache, 'compile.cmd')
   await fs.writeFile(script, '@echo off\r\ncall "%CRABOT_NATIVE_VS%\\Common7\\Tools\\VsDevCmd.bat" -arch=x64 >nul\r\nif errorlevel 1 exit /b %errorlevel%\r\ncl.exe /nologo /LD /MT /EHsc /O2 /std:c++17 /I"%CRABOT_NATIVE_INCLUDE%" "%CRABOT_NATIVE_SOURCE%" /link "%CRABOT_NATIVE_LIBRARY%" Advapi32.lib /OUT:"%CRABOT_NATIVE_BINARY%"\r\n')
-  await runBounded('cmd.exe', ['/d', '/s', '/c', '"' + script + '"'], { cwd: output, env: { ...process.env,
+  await runBounded('cmd.exe', ['/d', '/s', '/c', script], { cwd: output, env: { ...process.env,
     CRABOT_NATIVE_VS: installation, CRABOT_NATIVE_INCLUDE: include,
     CRABOT_NATIVE_SOURCE: source, CRABOT_NATIVE_LIBRARY: library, CRABOT_NATIVE_BINARY: binary,
   } })
