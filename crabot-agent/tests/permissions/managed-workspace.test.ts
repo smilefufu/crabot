@@ -2,6 +2,7 @@ import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { filterToolsForSubAgent } from '../../src/agent/subagent-tool-filter.js'
 import { WorkspaceManager } from '../../src/workers/harness/workspace-manager.js'
 import { checkFileAccess } from '../../src/permissions/tool-authorization.js'
 import { UnifiedAgent } from '../../src/unified-agent.js'
@@ -26,6 +27,18 @@ describe('host-verified managed task files', () => {
     expect(await tools.find((t: any) => t.name === 'Write')?.call({ file_path: file, content: 'task result' }, {})).toMatchObject({ isError: false })
     expect(await fs.readFile(file, 'utf8')).toBe('task result')
     expect((await tools.find((t: any) => t.name === 'Read').call({ file_path: file }, {})).output).toContain('task result')
+    const child = filterToolsForSubAgent(tools, { file_system: true } as never, [])
+    expect((await child.find((t: any) => t.name === 'Write')!.call({ file_path: path.join(workspace, 'child.txt'), content: 'child result' }, {})).isError).toBe(false)
+    expect((await child.find((t: any) => t.name === 'Write')!.call({ file_path: path.join(root, 'outside.txt'), content: 'must not write' }, {})).isError).toBe(true)
+    expect(child.some((t: any) => t.category === 'messaging' || t.category === 'memory')).toBe(false)
+    expect((await tools.find((t: any) => t.name === 'Edit').call({ file_path: file, old_string: 'task result', new_string: 'edited result' }, {})).isError).toBe(false)
+    expect(await fs.readFile(file, 'utf8')).toBe('edited result')
+    const secret = path.join(root, 'secret.txt'); await fs.writeFile(secret, 'OUTSIDE_SECRET')
+    await fs.symlink(secret, path.join(workspace, 'escape.txt'))
+    const grep = await tools.find((t: any) => t.name === 'Grep').call({ path: workspace, pattern: 'OUTSIDE_SECRET', output_mode: 'content' }, {})
+    expect(grep.isError).toBe(false); expect(grep.output).not.toContain('OUTSIDE_SECRET')
+    expect((await tools.find((t: any) => t.name === 'Grep').call({ path: path.join(workspace, 'escape.txt'), pattern: 'OUTSIDE_SECRET' }, {})).isError).toBe(true)
+    expect((await tools.find((t: any) => t.name === 'Glob').call({ path: workspace, pattern: '*.txt' }, {})).isError).toBe(false)
     expect(tools.some((t: any) => t.category === 'messaging' || t.category === 'memory')).toBe(false)
   })
   it('keeps file_io as the total switch and never derives ownership from cwd', async () => {
@@ -35,12 +48,12 @@ describe('host-verified managed task files', () => {
     expect((await checkFileAccess(disabled, file, workspace, true, scope)).allowed).toBe(false)
     expect((await checkFileAccess(undefined, file, workspace, true, scope)).allowed).toBe(false)
   })
-  it('combines own default read/write with readonly extra storage without widening either root', async () => {
+  it.each(['read', 'readwrite'] as const)('combines own default read/write with %s extra storage without widening either root', async access => {
     const extra = path.join(root, 'extra'); await fs.mkdir(extra)
-    const p = { ...principal(), storage: { workspace_path: extra, access: 'read' as const } }, scope = workspaces.fileScope('owner', workspace)
+    const p = { ...principal(), storage: { workspace_path: extra, access } }, scope = workspaces.fileScope('owner', workspace)
     for (const write of [false, true]) expect((await checkFileAccess(p, path.join(workspace, 'new/sub.txt'), '/', write, scope)).allowed).toBe(true)
     expect((await checkFileAccess(p, extra, '/', false, scope)).allowed).toBe(true)
-    expect((await checkFileAccess(p, extra, '/', true, scope)).allowed).toBe(false)
+    expect((await checkFileAccess(p, extra, '/', true, scope)).allowed).toBe(access === 'readwrite')
     for (const target of [root, path.dirname(workspace), workspace + '-other', path.join(path.dirname(workspace), 'other/new')]) {
       expect((await checkFileAccess(p, target, '/', false, scope)).allowed).toBe(false)
     }

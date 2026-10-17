@@ -124,8 +124,9 @@ describe('request spawn binds before any carrier side effect', () => {
   it('releases connection admission and activation fence on a preparation denial', async () => {
     const release = vi.fn()
     ;(harness as any).deps.acquireWorkerFence = () => ({ release })
-    group.resolved.tool_access.file_io = false; friend!.resolved.tool_access.file_io = false
-    await expect(harness.spawnRequestWorker({ ...params, workspace: undefined }, caller)).rejects.toThrow('PERMISSION_DENIED')
+    await fs.writeFile(path.join(root, 'a/AGENTS.md'), 'rules')
+    const publicCaller = new ConversationRequestAuthority(requests, key, recordId, 'group', async () => structuredClone(group))
+    await expect(harness.spawnRequestWorker({ ...params, workspace: path.join(root, 'a') }, publicCaller)).rejects.toThrow('PERMISSION_DENIED')
     expect(release).toHaveBeenCalledOnce()
     expect((await connection.mock.results[0].value).dispose).toHaveBeenCalledOnce()
     expect(provision).not.toHaveBeenCalled(); expect(spawn).not.toHaveBeenCalled()

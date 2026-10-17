@@ -1261,7 +1261,7 @@ describe('WorkerHarness — 接续过程中的并发', () => {
       secondResolved = true
     })
 
-    await new Promise((resolve) => setTimeout(resolve, 20))
+    await waitUntil(async () => fake.resumeCalls.length === 1)
     expect(secondResolved).toBe(false)
     expect(fake.resumeCalls).toHaveLength(1) // 第二次没有并发触发第二次 resume
 

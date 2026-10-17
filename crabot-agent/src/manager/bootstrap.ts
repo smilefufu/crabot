@@ -445,13 +445,15 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
   }
   const resolveBuiltinRuntime: BuiltinRuntimeFactory | undefined = deps.builtinSpawnDefaults ? async ctx => {
     const bound = await requestGuard.load(ctx.worker_id)
-    const found = await ledger.findWorker(ctx.worker_id), saved = await workerContextStore.read(ctx.worker_id)
     const wire = (value: unknown) => JSON.parse(JSON.stringify(value) ?? 'null')
-    const managed = harness.managedWorkspaceScope(ctx.worker_id, ctx.workspace.root)
-    if (found && saved?.principal_permissions && saved.manager_key === found.managerKey
-      && saved.creator_friend_id === found.worker.origin.creator_friend_id && isDeepStrictEqual(wire(ctx.origin), wire(found.worker.origin))
-      && isDeepStrictEqual(wire(ctx.principal_permissions), wire(saved.principal_permissions)) && await managed()) ctx = { ...ctx, managed_workspace: managed }
-    else ctx = { ...ctx, managed_workspace: undefined }
+    ctx = { ...ctx, managed_workspace: async () => {
+      const found = await ledger.findWorker(ctx.worker_id), saved = await workerContextStore.read(ctx.worker_id)
+      if (!found || !saved?.principal_permissions || saved.manager_key !== found.managerKey
+        || saved.creator_friend_id !== found.worker.origin.creator_friend_id
+        || !isDeepStrictEqual(wire(ctx.origin), wire(found.worker.origin))
+        || !isDeepStrictEqual(wire(ctx.principal_permissions), wire(saved.principal_permissions))) return undefined
+      return harness.managedWorkspaceScope(ctx.worker_id, ctx.workspace.root)()
+    } }
     if (!bound) {
       if (ctx.origin?.request) throw new Error('CAPABILITY_UNKNOWN: Adapter request has no verified Worker binding')
       return deps.builtinSpawnDefaults!(ctx)

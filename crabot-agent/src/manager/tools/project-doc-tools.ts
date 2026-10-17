@@ -26,7 +26,7 @@ export interface ProjectDocToolDeps {
   readonly ledger: Pick<LedgerStore, 'listWorkers' | 'findWorker'>
   /** Shared with execution-capabilities; project authorization never reads a Worker principal. */
   readonly readWorkerContext: (workerId: string) => Promise<WorkerContext | undefined>
-  /** Host supplies this only after ledger/context and request ownership validation. */
+  /** Host revalidates ledger/context task ownership before each operation. */
   readonly managedWorkspace?: (workerId: string, workspace: string) => ManagedWorkspaceScope
   readonly managerKey: ManagerKey
   /** Current Manager authority; ordinary wake sources never supply their own permissions. */

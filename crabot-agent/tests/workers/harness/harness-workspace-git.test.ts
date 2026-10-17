@@ -114,7 +114,8 @@ describe('Harness workspace Git contract', () => {
 
   it('denies automatic Git reads without file_io, including turn completion; explicit denial calls no inspector', async () => {
     const inspect = vi.spyOn(WorkspaceGitInspector.prototype, 'inspect')
-    await expect(spawn(false)).rejects.toThrow('PERMISSION_DENIED')
+    const disabled = await spawn(false)
+    expect(disabled.incarnations[0].workspace_instructions).toMatchObject({ source: 'absent' })
     expect(inspect).not.toHaveBeenCalled()
     const worker = await spawn()
     const { WorkerContextStore } = await import('../../../src/workers/harness/context-store.js')

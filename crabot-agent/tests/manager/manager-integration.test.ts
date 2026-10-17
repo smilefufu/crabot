@@ -721,6 +721,7 @@ describe('manager-integration（P4 Task 10：真实 ManagerRegistry + 真实 Wor
         managerKey,
         title: 'codex worker（fork 不支持）',
         prompt: '随便干点什么',
+        principal_permissions: BUILTIN_WORKER_PERMISSIONS,
         origin: { spawned_by_episode: key, trigger_type: 'message' },
         report_to: { channel_id: 'wechat', session_id: 'sess-fork' },
         impl: 'codex',

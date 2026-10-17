@@ -178,6 +178,7 @@ function directSpawnParams(overrides: Partial<SpawnWorkerParams> = {}): SpawnWor
     prompt: '把活干完',
     origin: { spawned_by_episode: CTX.managerKey, trigger_type: 'message' },
     report_to: CTX.reportTo,
+    principal_permissions: CTX.principalPermissions,
     ...overrides,
   }
 }
