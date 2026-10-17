@@ -51,7 +51,7 @@ async function rootDirectory(root, scope) {
   return realpathSync(root)
 }
 
-export async function prepareCliPayload({ sourceRoot, installRoot, scope = 'user', version }) {
+export async function prepareCliPayload({ sourceRoot, installRoot, scope = 'user', version, repair = false, dataDir }) {
   sourceRoot = await fs.realpath(sourceRoot)
   if (await present(path.join(sourceRoot, 'desktop-host.json'))) fail('桌面已包含完整核心，请从桌面安装管理命令，不复制另一套环境。')
   const release = await verifyCoreRelease(sourceRoot, { version })
@@ -60,7 +60,7 @@ export async function prepareCliPayload({ sourceRoot, installRoot, scope = 'user
   if (!relative || relative !== '..' && !relative.startsWith('..' + path.sep) && !path.isAbsolute(relative)) fail('CLI 安装目录不能位于待复制的核心中。')
   const lock = await acquireCliLock(installRoot, 'prepare-cli-payload')
   const id = release.inventory_sha256, target = path.join(installRoot, 'releases', id)
-  let pending
+  let pending, retainedCore
   try {
     const file = path.join(installRoot, metadataName), prior = await present(file)
     if (!prior) {
@@ -84,16 +84,44 @@ export async function prepareCliPayload({ sourceRoot, installRoot, scope = 'user
     const releases = path.dirname(target)
     await fs.mkdir(releases, { mode: 0o755 }).catch(error => { if (error.code !== 'EEXIST') throw error })
     if (!identity.isOwnedDirectory(releases) || (await fs.lstat(releases)).isSymbolicLink()) fail('版本目录归属无法核验。')
-    if (!await present(target)) {
+    const targetStat = await present(target)
+    let damaged = false
+    if (targetStat) {
+      if (!targetStat.isDirectory() || targetStat.isSymbolicLink()) fail('核心版本目录被重定向，未切换。')
+      try { await verifyCoreRelease(target, { version: release.version }) }
+      catch (error) { if (!repair || error.code !== 'CRABOT_CORE_INTEGRITY') throw error; damaged = true }
+    }
+    async function stoppedRepair() {
+      if (scope !== 'user' || !dataDir || !cliLockToken(path.resolve(dataDir, 'cli.lock'))
+        || readCliSelection(installRoot) !== id || inspectInstance(dataDir).state !== 'stopped') fail('修复前必须持有同一实例操作锁并确认停止。')
+      const records = await fs.readdir(path.join(dataDir, 'module-runtime-registry/records')).catch(error => { if (error.code === 'ENOENT') return []; throw error })
+      if (records.some(name => name.endsWith('.json'))) fail('仍有未收口模块记录，未修复核心。')
+      const current = await fs.lstat(target)
+      if (current.isSymbolicLink() || !current.isDirectory() || current.ino !== targetStat.ino || current.dev !== targetStat.dev) fail('待修复核心已改变，未替换。')
+    }
+    if (!targetStat || damaged) {
+      if (damaged) await stoppedRepair()
       pending = path.join(releases, '.preparing-' + randomUUID())
       await fs.cp(sourceRoot, pending, { recursive: true, verbatimSymlinks: true, mode: constants.COPYFILE_FICLONE, filter: () => true })
       await verifyCoreRelease(pending, { version: release.version })
-      await fs.rename(pending, target); pending = undefined
+      if (damaged) {
+        await stoppedRepair()
+        retainedCore = path.join(releases, '.damaged-' + id + '-' + randomUUID())
+        await fs.rename(target, retainedCore)
+        try { await fs.rename(pending, target) }
+        catch (error) {
+          try {
+            if (await present(target)) throw error
+            await fs.rename(retainedCore, target)
+          }
+          catch (restore) { throw new AggregateError([error, restore], '修复发布和原位恢复失败；受损核心已保留，请重新安装完整包。') }
+          throw error
+        }
+      } else await fs.rename(pending, target)
+      pending = undefined
     }
-    const targetStat = await fs.lstat(target)
-    if (!targetStat.isDirectory() || targetStat.isSymbolicLink()) fail('核心版本目录被重定向，未切换。')
     await verifyCoreRelease(target, { version: release.version })
-    return { installRoot, coreRoot: target, id, version: release.version, scope, command: launcher }
+    return { installRoot, coreRoot: target, id, version: release.version, scope, command: launcher, ...(retainedCore ? { retainedCore } : {}) }
   } finally {
     if (pending) await fs.rm(pending, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
     releaseCliLock(lock)

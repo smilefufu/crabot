@@ -20,4 +20,5 @@ try {
   }
   console.log('Crabot 内置核心已安装。服务尚未启动；使用 crabot start 完成实例初始化。')
   console.log('Core version: ' + result.version)
+  if (result.retainedCore) console.log('受损核心已保留：' + result.retainedCore)
 } catch (error) { console.error('[crabot] ' + error.message); process.exitCode = 1 }

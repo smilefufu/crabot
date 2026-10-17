@@ -43,6 +43,16 @@ try {
   await fs.writeFile(path.join(installed, '.env'), 'PRESERVED=container-environment\n')
   await install()
   assert.equal(await fs.readFile(path.join(installed, '.env'), 'utf8'), 'PRESERVED=container-environment\n')
+  const environment = path.join(data, 'agent-venv', 'smoke-package')
+  await fs.mkdir(path.dirname(environment), { recursive: true }); await fs.writeFile(environment, 'preserved custom dependency')
+  await fs.writeFile(path.join(payload, 'cli.mjs'), '// deliberately damaged installed smoke payload\n')
+  await install()
+  const retained = (await fs.readdir(path.join(installed, 'releases'))).filter(name => name.startsWith('.damaged-'))
+  assert.equal(retained.length, 1)
+  assert.equal(await fs.readFile(path.join(installed, 'releases', retained[0], 'cli.mjs'), 'utf8'), '// deliberately damaged installed smoke payload\n')
+  assert.equal(await fs.readFile(environment, 'utf8'), 'preserved custom dependency')
+  assert.equal(await fs.readFile(path.join(installed, '.env'), 'utf8'), 'PRESERVED=container-environment\n')
+  await verifyCoreRelease(payload)
   const command = path.join(installed, 'bin', windows ? 'crabot.exe' : 'crabot')
   assert.equal((await execute(command, ['--version'], { env, timeout: 30_000 })).stdout.trim(), release.version)
   if (!windows) {
@@ -59,5 +69,5 @@ try {
   await assert.rejects(fs.lstat(path.join(data, 'mm.pid')), { code: 'ENOENT' })
   await verifyCoreRelease(payload); await verifyCoreRelease(core)
   console.log('CRABOT_INSTALLED_CLI ' + JSON.stringify({ platform: process.platform, arch: process.arch, version: release.version,
-    bundled_installer: true, repeated_install: true, no_host_tools: true, unchanged_payloads: true, no_service_started: true, unicode_spaced_paths: true }))
+    bundled_installer: true, repeated_install: true, repaired_payload: true, retained_damaged_payload: true, preserved_user_environment: true, no_host_tools: true, unchanged_payloads: true, no_service_started: true, unicode_spaced_paths: true }))
 } finally { await fs.rm(temporary, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
