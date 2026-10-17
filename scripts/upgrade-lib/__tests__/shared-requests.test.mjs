@@ -23,8 +23,60 @@ async function setup() {
   await fs.writeFile(path.join(root, 'agent', 'workers', 'old', 'input.json'), 'OLD INPUT DO NOT REPLAY')
   await fs.writeFile(path.join(root, 'admin', 'friends.json'), '[]')
 }
+async function devLaunch() {
+  const source = await fs.readFile(path.join(home, 'dev.sh'), 'utf8')
+  const start = source.indexOf('  # 4. 单实例预检'), end = source.indexOf('\n}\n', start)
+  expect(start).toBeGreaterThan(0); expect(end).toBeGreaterThan(start)
+  const fixture = path.join(root, 'dev-mm-fixture.mjs')
+  await fs.writeFile(fixture, `import fs from 'node:fs/promises'; import path from 'node:path'; import { pathToFileURL } from 'node:url';
+    const [home, data] = process.argv.slice(2);
+    for (let count = 0; count < 600; count++) {
+      if (await fs.stat(path.join(data, 'mm.pid')).then(() => true, () => false)) break;
+      await new Promise(resolve => setTimeout(resolve, 5));
+    }
+    const { prepareSharedRequests } = await import(pathToFileURL(path.join(home, 'scripts/upgrade-lib/shared-requests.mjs')));
+    await prepareSharedRequests(home, data, { info() {}, error() {} });
+    console.log('DEV_MM_READY');`)
+  const shell = `set -euo pipefail
+    log_info() { :; }
+    log_error() { echo "$@" >&2; }
+    node() {
+      case "$1" in
+        "$SCRIPT_DIR/crabot-core/dist/orphan-recovery-preflight.js") return 0 ;;
+        "$SCRIPT_DIR/scripts/prepare-shared-requests.mjs") "$NODE_BIN" "$@" ;;
+        dist/main.js) echo DEV_MM_SPAWN; "$NODE_BIN" "$DEV_MM_FIXTURE" "$SCRIPT_DIR" "$DATA_DIR" ;;
+        *) return 99 ;;
+      esac
+    }
+    launch() {
+      ${source.slice(start, end)}
+    }
+    launch
+    # The finite MM fixture exited normally; do not signal its already-finished PID.
+    trap - EXIT
+    rm -f "$DATA_DIR/mm.pid"`
+  return spawnSync('bash', ['-c', shell], { env: { ...process.env, SCRIPT_DIR: home, DATA_DIR: root, NODE_BIN: process.execPath, DEV_MM_FIXTURE: fixture }, encoding: 'utf8', timeout: 10000 })
+}
 beforeEach(async () => { root = await fs.mkdtemp(path.join(os.tmpdir(), 'request-migration-')) })
 afterEach(async () => { await fs.rm(root, { recursive: true, force: true }) })
+it('first dev launch prepares before its live MM PID, and the MM fallback sees ready', async () => {
+  if (process.platform === 'win32') return
+  await setup()
+  const result = await devLaunch()
+  expect(result.status, result.stdout + result.stderr).toBe(0)
+  expect(result.stdout).toContain('DEV_MM_READY')
+  expect(JSON.parse(await fs.readFile(ready(), 'utf8')).status).toBe('ready')
+  expect(JSON.parse(await fs.readFile(ledgerPath(), 'utf8')).ledger).toEqual(ledger())
+})
+it('failed dev preparation never launches MM or rewrites the original ledger', async () => {
+  if (process.platform === 'win32') return
+  await setup(); const invalid = '{"unsupported":true}'; await fs.writeFile(ledgerPath(), invalid)
+  const result = await devLaunch()
+  expect(result.status).not.toBe(0); expect(result.stdout).not.toContain('DEV_MM_SPAWN')
+  expect(await fs.readFile(ledgerPath(), 'utf8')).toBe(invalid)
+  expect(result.stdout + result.stderr).not.toContain('Stop Crabot before preparing request upgrade')
+  await expect(fs.stat(ready())).rejects.toThrow()
+})
 it('verified backup precedes conversion; old identity, context, checkpoint and receipts stay unchanged; idempotent ready path', async () => {
   await setup(); const original = await fs.readFile(ledgerPath(), 'utf8')
   const result = await prepareSharedRequests(home, root, quiet)

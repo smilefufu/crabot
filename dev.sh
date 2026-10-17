@@ -424,6 +424,9 @@ start() {
   fi
   export CRABOT_ORPHAN_RECOVERY_INTERACTIVE=0
 
+  # 离线准备必须先于 MM 启动和 mm.pid 写入，失败时不启动任何受管模块。
+  node "$SCRIPT_DIR/scripts/prepare-shared-requests.mjs" "--data-dir=$DATA_DIR"
+
   # 5. Module Manager（后台 spawn + 捕获 PID + trap 清理；前台 wait 保持 Ctrl-C 体验）
   #
   # stdout/stderr 同时落盘到 module-manager.log —— 包含 MM 自己的 health check
