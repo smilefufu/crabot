@@ -149,9 +149,11 @@ test('budget exhaustion is inconclusive and never accepted as a passing empty re
 })
 
 
-for (const voice of [false, true]) for (const earlyAck of [false, true]) test(`offline personal result checks acknowledgement before tools: voice=${voice}, early=${earlyAck}`, async () => {
+for (const [voice, earlyAck, duplicateAck] of [
+  [false, false, false], [false, true, false], [true, false, false], [true, true, false], [false, true, true],
+]) test(`offline personal result checks acknowledgement: voice=${voice}, early=${earlyAck}, duplicate=${duplicateAck}`, async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'b7-voice-completion-'))
-  let shared = 0, personal = 0, worker = 0, sentAck = false, finalSent = false
+  let shared = 0, personal = 0, worker = 0, sentAck = false, finalSent = false, sentDuplicate = false
   const events = []
   const adapter = { updateConfig() {}, async *stream(params) {
     const body = JSON.stringify(params.messages)
@@ -161,6 +163,10 @@ for (const voice of [false, true]) for (const earlyAck of [false, true]) test(`o
       return
     }
     if (params.systemPrompt.includes('已经由系统固定来源的请求')) {
+      if (duplicateAck && !sentDuplicate) {
+        sentDuplicate = true
+        yield* response({ name: 'send_message', input: { channel_id: 'eval-voice', session_id: 'shared', content: '好，我再核对一下。', post_send_action: 'none' } }); return
+      }
       if (personal++ === 0) yield* response({ name: 'spawn_worker', input: { impl: 'builtin', title: '读取资料', prompt: '读取用户授权 README.md 中的验证码。' } }, voice && !earlyAck ? '<voice_reply>好，我帮你看看。</voice_reply>' : undefined)
       else if (body.includes('turn_completed') && !finalSent) {
         finalSent = true
@@ -179,8 +185,9 @@ for (const voice of [false, true]) for (const earlyAck of [false, true]) test(`o
   } }
   try {
     const result = await runCase({ scenario: { id: 'offline-personal-voice-completion', voice, task: 'read', earlyAck: true }, root: path.join(root, 'data'), liveAdapter: adapter, model: 'scripted', connection: { endpoint: 'https://example.invalid', apikey: 'not-a-real-key', format: 'openai', model_id: 'scripted' }, record: event => events.push(event), budget: { take: () => true }, timeoutMs: 15000 })
-    assert.equal(result.status, earlyAck ? 'passed' : 'failed', JSON.stringify(result))
+    assert.equal(result.status, earlyAck && !duplicateAck ? 'passed' : 'failed', JSON.stringify(result))
     assert.equal(result.checks.initial_ack_before_work, earlyAck)
+    if (earlyAck) assert.equal(result.checks.single_ack_and_result, !duplicateAck)
     assert.equal(result.checks.expected_effect, true)
     assert.equal(result.first_manager_work_tool.name, 'load_tool_family')
     assert.equal(result.worker_records.length, 1)

@@ -33,6 +33,24 @@ describe('approved shared request prompt projections', () => {
     expect(prompt).not.toContain('按需用表格、图示或页面帮助人类理解')
   })
 
+  it.each([false, true].flatMap(voice => [
+    { ...group, isGroup: false, voice },
+    { ...group, voice },
+    { ...group, requestAuthorization: 'shared' as const, voice },
+    { ...group, requestAuthorization: 'request' as const, voice },
+  ]))('acknowledges tool work in the common Manager rule and only varies the delivery outlet: %j', inputs => {
+    const prompt = assembleManagerSystemPrompt(inputs)
+    expect(prompt).toContain('先用一句简短回应说明准备做什么，再进行工具查询、加载工具族、能力核对、查询或派发')
+    expect(prompt).toContain('独立请求承接、执行器反馈和恢复事件不重复接单')
+    expect(prompt).not.toContain('短任务完成后一次性汇报')
+    expect(prompt).not.toContain('需要查询或执行操作时，可先简短说明下一步')
+    if (inputs.voice) expect(prompt).toContain('接单与任务回报沿用主控通用规则')
+    else {
+      expect(prompt).toContain('用工具投递答复，普通文本不外发')
+      expect(prompt).not.toContain('接单与任务回报沿用主控通用规则')
+    }
+  })
+
   it('keeps task reporting alive after an input turn and limits companion wording to Voice', () => {
     const voice = assembleManagerSystemPrompt({ ...group, requestAuthorization: 'shared', voice: true })
     expect(voice).toContain('原来那次语音交互结束不代表任务回报结束')
