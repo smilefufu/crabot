@@ -27,21 +27,32 @@ test('OS process arguments preserve Unicode, spaces and empty arguments', async 
   assert.deepEqual(identity.inspectProcessArguments(child.pid).slice(-args.length), args)
 })
 
-test('identity inspection racing a known child exit reports alive or absent without losing stop state', async () => {
+test('exit-race identity remains exact or explicitly unknown until the OS confirms absence', async () => {
   for (let i = 0; i < 12; i++) {
-    const child = spawn(process.execPath, ['-e', 'process.send("ready");setTimeout(()=>process.exit(0),10)'], {
+    const child = spawn(process.execPath, ['-e', 'process.on("message",()=>process.exit(0));process.send("ready")'], {
       stdio: ['ignore', 'ignore', 'inherit', 'ipc'],
     })
     const exited = once(child, 'exit')
     await once(child, 'message')
     const expected = identity.inspectProcess(child.pid)
+    assert.ok(expected)
+    child.send('exit')
     while (child.exitCode === null && child.signalCode === null) {
-      const current = identity.inspectProcess(child.pid)
-      if (current) assert.equal(identity.sameProcess(expected, current), true)
+      try {
+        const current = identity.inspectProcess(child.pid)
+        if (current) assert.equal(identity.sameProcess(expected, current), true)
+      } catch (error) { assert.equal(error.code, 'CRABOT_PROCESS_IDENTITY') }
       await new Promise(resolve => setTimeout(resolve, 1))
     }
     await exited
-    assert.equal(identity.inspectProcess(child.pid), null)
+    const deadline = Date.now() + 2000
+    for (;;) {
+      try { assert.equal(identity.inspectProcess(child.pid), null); break }
+      catch (error) {
+        if (error.code !== 'CRABOT_PROCESS_IDENTITY' || Date.now() >= deadline) throw error
+        await new Promise(resolve => setTimeout(resolve, 10))
+      }
+    }
   }
 })
 

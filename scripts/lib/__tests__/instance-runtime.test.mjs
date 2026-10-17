@@ -74,6 +74,24 @@ test('late cleanup cannot remove the replacement generation or its mm.pid', asyn
   await stopInstance(f.data)
 })
 
+test('a transient identity failure during stop waits for evidence instead of reporting stopped or signalling an unknown process', { skip: process.platform === 'win32' }, async t => {
+  const f = await fixture(t)
+  const inspect = identity.inspectProcess
+  let probes = 0
+  try {
+    await stopInstance(f.data, { log: message => {
+      if (!message.startsWith('Stopping generation')) return
+      identity.inspectProcess = pid => {
+        if (pid === f.record.mm.pid && probes++ < 2) throw Object.assign(new Error('fixture transient identity failure'), { code: 'CRABOT_PROCESS_IDENTITY' })
+        return inspect(pid)
+      }
+    } })
+    assert.ok(probes >= 3)
+    assert.equal(readFileSync(f.marker, 'utf8'), 'graceful')
+    assert.equal(readInstanceRuntime(f.data), null)
+  } finally { identity.inspectProcess = inspect }
+})
+
 test('status JSON uses the verified MM and discovered Admin port, and never repairs forged identity', async t => {
   const f = await fixture(t)
   const statusEntry = fileURLToPath(new URL('../../status.mjs', import.meta.url))

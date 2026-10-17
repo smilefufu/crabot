@@ -54,10 +54,16 @@ async function collectOwned(record, dataDir) {
   return [...owned.values()]
 }
 
-function alive(process) { return identity.sameProcess(process, identity.inspectProcess(process.pid)) }
+function processState(process) {
+  try { return identity.sameProcess(process, identity.inspectProcess(process.pid)) ? 'alive' : 'gone' }
+  catch (error) { if (error.code === 'CRABOT_PROCESS_IDENTITY') return 'unknown'; throw error }
+}
+function alive(process) { return processState(process) === 'alive' }
+const unsettled = process => processState(process) !== 'gone'
 
 async function shutdownRpc(record) {
-  if (!record.mm || !alive(record.mm)) return
+  if (!record.mm || processState(record.mm) === 'gone') return
+  if (!alive(record.mm)) throw Object.assign(new Error('MM 身份暂时无法核验；未发送停机请求，保留运行记录。'), { code: 'CRABOT_STOP_UNKNOWN' })
   const response = await fetch(`http://127.0.0.1:${record.mm_port}/shutdown`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ id: randomUUID(), params: { expected_generation: record.generation } }),
@@ -79,7 +85,7 @@ export async function stopInstance(dataDir, { timeoutMs = SUPERVISOR_FORCE_TIMEO
   else if (alive(record.controller)) process.kill(record.controller.pid, 'SIGTERM')
   else if (record.mm && alive(record.mm)) process.kill(record.mm.pid, 'SIGTERM')
   const deadline = Date.now() + timeoutMs
-  while (Date.now() < deadline && owned.some(alive)) await sleep(pollMs)
+  while (Date.now() < deadline && owned.some(unsettled)) await sleep(pollMs)
   const remaining = owned.filter(alive)
   if (remaining.length) {
     log('Graceful shutdown window elapsed; terminating only confirmed processes.')
@@ -89,9 +95,10 @@ export async function stopInstance(dataDir, { timeoutMs = SUPERVISOR_FORCE_TIMEO
       try { process.kill(target.pid, 'SIGKILL') } catch (error) { if (error.code !== 'ESRCH') throw error }
     }
     const forceDeadline = Date.now() + 5000
-    while (Date.now() < forceDeadline && owned.some(alive)) await sleep(pollMs)
+    while (Date.now() < forceDeadline && owned.some(unsettled)) await sleep(pollMs)
   }
   if (owned.some(alive)) throw Object.assign(new Error('仍有确认归属的进程未退出；保留运行记录，请打开诊断。'), { code: 'CRABOT_STOP_INCOMPLETE' })
+  if (owned.some(unsettled)) throw Object.assign(new Error('进程身份仍未知；未向未知进程发信号，保留运行记录。'), { code: 'CRABOT_STOP_UNKNOWN' })
   // MM removes module records only after full tree settlement. A dead root alone proves less.
   try {
     if ((await fs.readdir(join(dataDir, 'module-runtime-registry', 'records'))).some(file => file.endsWith('.json'))) {
