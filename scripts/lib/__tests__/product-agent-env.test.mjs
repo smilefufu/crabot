@@ -23,7 +23,7 @@ function fixture(t) {
       ['product/python/' + python]: { size: 21, sha256: createHash('sha256').update('immutable interpreter').digest('hex') },
     } },
   }
-  const data = join(root, 'data')
+  const data = join(root, '实例 数据')
   mkdirSync(data)
   const binary = join(data, 'agent-venv', process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python')
   const calls = []

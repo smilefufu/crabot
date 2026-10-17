@@ -80,7 +80,9 @@ function ensureProductPythonEnvironment(runtime, dataDir, directory, spawn) {
   if (!fs.existsSync(base)) {
     const pending = base + '.building-' + crypto.randomUUID()
     try {
-      fs.cpSync(runtime.pythonHome, pending, { recursive: true, verbatimSymlinks: true })
+      // Node 22's C++ directory fast path mishandles Unicode Windows paths
+      // (nodejs/node#61950). A filter selects its Unicode-safe JS traversal.
+      fs.cpSync(runtime.pythonHome, pending, { recursive: true, verbatimSymlinks: true, ...(windows ? { filter: () => true } : {}) })
       for (const [name, record] of entries) {
         const relative = name.slice(prefix.length)
         const actual = fs.readFileSync(path.join(pending, relative))

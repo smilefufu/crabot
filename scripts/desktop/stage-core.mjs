@@ -110,16 +110,23 @@ try {
   const cmd = relative => '@echo off\r\nsetlocal DisableDelayedExpansion\r\nset "CRABOT_CLI_ROOT=%~dp0' + relative + '"\r\n"%CRABOT_CLI_ROOT%\\.product-runtime\\node\\node.exe" "%CRABOT_CLI_ROOT%\\cli.mjs" %*\r\nexit /b %errorlevel%\r\n'
   await fs.writeFile(path.join(output, 'bin/crabot.cmd'), cmd('..'))
   await fs.writeFile(path.join(output, 'crabot.cmd'), cmd(''))
-  async function checkLinks(directory) {
+  async function preparePayload(directory) {
     for (const item of await fs.readdir(directory, { withFileTypes: true })) {
       const file = path.join(directory, item.name)
       if (item.isSymbolicLink()) {
         const relative = path.relative(output, await fs.realpath(file))
         if (relative === '..' || relative.startsWith('..' + path.sep) || path.isAbsolute(relative)) throw new Error('Core package link escapes its installation: ' + path.relative(output, file))
-      } else if (item.isDirectory()) await checkLinks(file)
+      } else if (item.isDirectory()) await preparePayload(file)
+      else if (item.isFile() && process.platform !== 'win32') {
+        // Standard tar extraction removes group/other write bits. Record those
+        // portable modes up front instead of shipping an inventory that fails
+        // after an ordinary extraction (uv's empty target .lock was 0666).
+        const stat = await fs.stat(file)
+        if (stat.mode & 0o022) await fs.chmod(file, stat.mode & 0o755)
+      }
     }
   }
-  await checkLinks(output)
+  await preparePayload(output)
   product.loadProductRuntime(output, { required: true, full: true })
   scrapling.loadRuntime(output, { full: true })
   computerUse.loadRuntime(output, { full: true })

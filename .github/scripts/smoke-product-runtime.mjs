@@ -28,10 +28,14 @@ if (process.platform === 'win32') {
   console.log('CRABOT_PYTHON_COPY ' + JSON.stringify({
     source_link: sync.lstatSync(runtime.pythonHome).isSymbolicLink(),
     source_entries: sync.readdirSync(runtime.pythonHome).slice(0, 24),
-    copied_link: sync.lstatSync(probe).isSymbolicLink(),
-    copied_entries: sync.readdirSync(probe).slice(0, 24),
+    copied_exists: sync.existsSync(probe),
+    copied_entries: sync.existsSync(probe) ? sync.readdirSync(probe).slice(0, 24) : [],
     build_exists: sync.existsSync(join(probe, 'BUILD')),
   }))
+  sync.rmSync(probe, { recursive: true, force: true })
+  sync.cpSync(runtime.pythonHome, probe, { recursive: true, verbatimSymlinks: true, filter: () => true })
+  assert.equal(sync.existsSync(join(probe, 'BUILD')), true, 'Unicode-safe copy must retain the real sealed Python layout')
+  console.log('CRABOT_PYTHON_COPY_FILTERED ' + JSON.stringify({ copied_entries: sync.readdirSync(probe).slice(0, 24), build_exists: true }))
   sync.rmSync(probe, { recursive: true, force: true })
 }
 const pythonPath = pythonEnv.ensureProductAgentVenv(runtime, data)
