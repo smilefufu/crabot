@@ -4,9 +4,9 @@
 
 - 已确认[中文 Spec](crabot-docs/superpowers/specs/2026-10-17-desktop-application-design.md)及[分阶段计划](crabot-docs/superpowers/plans/2026-10-17-desktop-application-implementation.md)。仅在 feat/desktop-application worktree 推进；需求完整实现和验证前不推主仓 main、不提前建 PR，不部署现场、不触碰无关 WIP。
 - P0 正式契约、P1/P2/P3 内置环境/共同实例/SDK、P4 OS peer 及真实 Electron 窗口边界已获四平台 CI 证据，Ubuntu 24.04/26.04 含断网容器。P5 已接首次模型引导、主要/高级入口、主题、权限设置和独立诊断；HTTP/outbox、草稿、附件沙箱与管理凭据过滤有回归，真实模型首答尚未验收。
-- P6 已接登录自启动、共用原生更新入口、只读活动核对、停机备份和持久化版本维护保护；CLI/GUI 重开不能绕过未完成更新。SDK/服务端/Web/原生窗口的本轮定向回归通过，最终签名更新链尚未验收。真实旧包识别、OS TCP/DataRoot 和固定连接停机下层 19 项通过，实际接管、已知 CLI 入口处理和依赖恢复继续；工作区/可写环境不宣称完整回滚。
-- P7 候选已完整复制核心并脱离源码验证。官方 Git 相对链接使核心逐项字节从约 2.175 GB 降至 1.489 GB；候选 07 ZIP 为 711,830,977 字节，共用 CLI tar.gz 为 543,690,629 字节。CLI 普通解压查出一个空 .lock 的权限收紧导致完整性失败，已在新组包路径修正，待新归档复验。
-- [CI 39070844302](https://github.com/smilefufu/crabot/actions/runs/39070844302) 的 Linux、Mac arm64 已通过完整宿主与源码外候选启动；Intel 仍在组包。Windows 原生 helper 编译已通过，后续实际 Python 复制未生成中文目标目录；6041fe2c 改用 Unicode 安全遍历，保留全量摘要，待原生重跑。没有将部分平台通过记为整体完成。
+- P6 已接登录自启动、原生更新入口、活动核对、停机备份和持久化维护保护；新增原生菜单安装用户级 `crabot` 命令，共用内置 Node，保留冲突入口及 shell 配置。命令/入口 6 项、桌面 38 项本机通过（2 项按平台留 CI）；Windows HKCU 与实际安装后的命令仍待原生结果。旧包识别/OS 归属/固定连接 19 项通过，实际接管、依赖恢复和 CLI 独立升级适配继续。
+- P7 候选 08（b066da0e，0.1.0-desktop.4）普通解包完整清单通过，核心 32,712 文件、1,489,166,799 字节；桌面 ZIP 711,857,988 字节，CLI tar.gz 543,689,039 字节。源码外独立依赖、SQLite、CLI 和 ad-hoc App 签名检查通过；不代表正式签名/安装/模型验收。
+- [CI 39072295698](https://github.com/smilefufu/crabot/actions/runs/39072295698) 的 Linux、Mac arm64 全部通过；Windows 中文复制已通过，后续 pip 中文输出暴露编码失败，61682654 补 UTF-8 并通过本机真实离线探针。Intel 已启动核心，认证计时错误经 5.2 秒慢校验夹具先失败后修复；挑战仍限 5 秒，4 项实际 peer 回归通过。[新 CI 39075806515](https://github.com/smilefufu/crabot/actions/runs/39075806515) 正在验证，未计四平台整体完成。
 - 受管 MCP 新字段的[补充 Spec](crabot-docs/superpowers/specs/2026-10-18-desktop-managed-mcp-design.md)因审批门禁待确认。签名身份、目标桌面测试机与模型账号/预算已询问；完整迁移、更新、最终签名安装、最低系统和真实模型仍未验收。详细证据集中在[实施与验收记录](crabot-docs/superpowers/plans/2026-10-17-desktop-application-validation.md)。
 
 ### 任务默认目录文件授权：独立修复待审查
