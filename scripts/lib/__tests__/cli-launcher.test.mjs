@@ -20,15 +20,15 @@ async function fixture(t) {
   await fs.copyFile(process.execPath, node, constants.COPYFILE_FICLONE)
   if (!windows) { await fs.chmod(executable, 0o755); await fs.chmod(node, 0o755) }
   await fs.writeFile(path.join(root, 'core-release.json'), '{}')
-  await fs.writeFile(path.join(root, 'cli.mjs'), 'if(process.argv[2]==="wait"){process.on("SIGTERM",()=>process.exit(23));console.log("ready");setInterval(()=>{},1000)}else{console.log(JSON.stringify({args:process.argv.slice(2),pid:process.pid,exe:process.execPath}));process.exit(Number(process.env.TEST_EXIT||0))}')
+  await fs.writeFile(path.join(root, 'cli.mjs'), 'if(process.argv[2]==="wait"){process.on("SIGTERM",()=>process.exit(23));console.log("ready");setInterval(()=>{},1000)}else{console.log(JSON.stringify({args:process.argv.slice(2),pid:process.pid,exe:process.execPath,required:process.env.CRABOT_PRODUCT_REQUIRED}));process.exit(Number(process.env.TEST_EXIT||0))}')
   return { directory, root, executable, node }
 }
 
 test('the actual native command preserves Unicode, empty arguments, quotes and exit codes using bundled Node', async t => {
   const f = await fixture(t), args = ['status', '', '中文 空格', 'a"b', 'trailing\\', 'back\\"slash', 'literal&value', "single'quote"]
-  const { stdout } = await promisify(execFile)(f.executable, args, { env: { ...process.env, PATH: '' } })
+  const { stdout } = await promisify(execFile)(f.executable, args, { env: { ...process.env, PATH: '', CRABOT_PRODUCT_REQUIRED: '0' } })
   const result = JSON.parse(stdout)
-  assert.deepEqual(result.args, args); assert.equal(result.exe, f.node)
+  assert.deepEqual(result.args, args); assert.equal(result.exe, f.node); assert.equal(result.required, '1')
   await assert.rejects(promisify(execFile)(f.executable, [], { env: { ...process.env, TEST_EXIT: '37' } }), { code: 37 })
 })
 

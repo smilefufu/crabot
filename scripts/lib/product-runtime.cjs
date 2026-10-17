@@ -47,7 +47,7 @@ function verifyFile(root, relative, entry) {
 function loadProductRuntime(root, { required = false, full = false } = {}) {
   const target = path.join(root, 'product-runtime.json')
   if (!fs.existsSync(target)) {
-    if (required || fs.existsSync(path.join(root, '.product-runtime'))) invalid('清单缺失，请修复安装')
+    if (required || fs.existsSync(path.join(root, '.product-runtime')) || fs.existsSync(path.join(root, 'core-release.json'))) invalid('清单缺失，请修复安装')
     return null
   }
   let manifest

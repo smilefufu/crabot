@@ -6,13 +6,15 @@ import { scanModules, applyMigration } from '../upgrade-lib/migrate.mjs'
 import { runScript } from '../upgrade-lib/runner.mjs'
 import product from './product-runtime.cjs'
 import management from './desktop-management.cjs'
+import cliLocation from './cli-location.cjs'
 import { assertVersionMaintenanceAllowsStart } from './version-maintenance.mjs'
 
 // Common preparation only: no password prompt, TTY, GUI, lifecycle lock or model calls.
 export function prepareCoreEnvironment({ root, dataDir, source = process.env }) {
   assertVersionMaintenanceAllowsStart(dataDir)
+  const installation = cliLocation.assertSelectedCli(root)
   const env = { ...source, DATA_DIR: resolve(dataDir) }
-  const file = join(root, '.env')
+  const file = join(installation?.root ?? root, '.env')
   if (existsSync(file)) {
     for (const raw of readFileSync(file, 'utf8').split('\n')) {
       const line = raw.replace(/#.*$/, '').trim(), split = line.indexOf('=')

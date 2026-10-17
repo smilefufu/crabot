@@ -25,11 +25,16 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
+// A retained immutable version is not an alternate writable instance entry.
+const { default: cliLocation } = await import(new URL('./scripts/lib/cli-location.cjs', import.meta.url))
+try { cliLocation.assertSelectedCli(__dirname) }
+catch (error) { console.error('[crabot] ' + error.message); process.exit(1) }
+
 // Windows 上 ESM dynamic import 不接受 C:\... 绝对路径，必须转 file:///C:/...
 const importPath = (p) => import(pathToFileURL(p).href)
 
 // 让下游（auth.ts、scripts/*）能在任意 cwd 下找到安装根目录
-if (!process.env.CRABOT_HOME) {
+if (existsSync(resolve(__dirname, 'core-release.json')) || !process.env.CRABOT_HOME) {
   process.env.CRABOT_HOME = __dirname
 }
 

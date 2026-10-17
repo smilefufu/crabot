@@ -73,3 +73,19 @@ test('legacy and desktop installations cannot be silently replaced by a standalo
   await fs.writeFile(path.join(sourceRoot, 'desktop-host.json'), '{}')
   await assert.rejects(prepareCliPayload({ sourceRoot, installRoot: path.join(f.parent, 'another') }), { code: 'CRABOT_CLI_INSTALLATION' })
 })
+
+
+test('retained CLI code refuses bootstrap before dependency loading when a newer version is selected', async t => {
+  const f = await fixture(t), one = await prepareCliPayload({ sourceRoot: await f.source('1.2.3'), installRoot: f.installRoot })
+  await choose(f, one)
+  const two = await prepareCliPayload({ sourceRoot: await f.source('1.2.4'), installRoot: f.installRoot })
+  await choose(f, two, one.id)
+  // Replace only this disposable fixture's script with the real CLI bootstrap.
+  // No preflight/dependencies/native addon are copied: stale code must stop first.
+  await fs.copyFile(new URL('../../../cli.mjs', import.meta.url), path.join(one.coreRoot, 'cli.mjs'))
+  await fs.mkdir(path.join(one.coreRoot, 'scripts/lib'), { recursive: true })
+  await fs.copyFile(new URL('../cli-location.cjs', import.meta.url), path.join(one.coreRoot, 'scripts/lib/cli-location.cjs'))
+  await assert.rejects(promisify(execFile)(process.execPath, [path.join(one.coreRoot, 'cli.mjs'), 'start']), error => {
+    assert.equal(error.code, 1); assert.match(error.stderr, /此核心已不是当前版本/); assert.doesNotMatch(error.stderr, /MODULE_NOT_FOUND/); return true
+  })
+})

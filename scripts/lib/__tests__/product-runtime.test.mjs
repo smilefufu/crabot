@@ -42,6 +42,8 @@ test('source installs stay optional; a sealed installation cannot silently becom
   t.after(() => rm(root, { recursive: true, force: true }))
   assert.equal(loadProductRuntime(root), null)
   assert.throws(() => loadProductRuntime(root, { required: true }), /内置运行环境|runtime/i)
+  await writeFile(join(root, 'core-release.json'), '{}')
+  assert.throws(() => loadProductRuntime(root), /清单缺失/)
   await mkdir(join(root, '.product-runtime'))
   assert.throws(() => loadProductRuntime(root), /清单缺失/)
 })

@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 #include <stdexcept>
+#include <cstdlib>
 #ifdef _WIN32
 #include <windows.h>
 #else
@@ -65,6 +66,7 @@ static BOOL WINAPI ConsoleSignal(DWORD signal) { return signal == CTRL_C_EVENT |
 int wmain(int argc, wchar_t** argv) {
   try {
     auto root = Payload(), node = root / L".product-runtime/node/node.exe";
+    if (!SetEnvironmentVariableW(L"CRABOT_PRODUCT_REQUIRED", L"1")) throw std::runtime_error("Cannot select bundled runtime");
     if (!fs::is_regular_file(node)) throw std::runtime_error("Bundled Node is missing");
     std::wstring command = Quote(node.wstring()) + L" " + Quote((root / L"cli.mjs").wstring());
     for (int i = 1; i < argc; i++) command += L" " + Quote(argv[i]);
@@ -87,7 +89,9 @@ int wmain(int argc, wchar_t** argv) {
 #else
 int main(int argc, char** argv) {
   try {
-    auto root = Payload(); std::string node = root / ".product-runtime/node/bin/node", entry = root / "cli.mjs";
+    auto root = Payload();
+    if (setenv("CRABOT_PRODUCT_REQUIRED", "1", 1)) throw std::runtime_error("Cannot select bundled runtime");
+    std::string node = root / ".product-runtime/node/bin/node", entry = root / "cli.mjs";
     if (!fs::is_regular_file(node)) throw std::runtime_error("Bundled Node is missing");
     std::vector<char*> args{node.data(), entry.data()};
     for (int i = 1; i < argc; i++) args.push_back(argv[i]);

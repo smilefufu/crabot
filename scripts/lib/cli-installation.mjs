@@ -1,7 +1,7 @@
 // Standalone CLI installation mechanics only. The calling installer/upgrader
 // owns user confirmation, instance shutdown, scoped backup and migrations.
 // Payloads are immutable; neither selection nor data lives inside their tree.
-import { promises as fs, constants, realpathSync, existsSync, readFileSync, lstatSync } from 'node:fs'
+import { promises as fs, constants, realpathSync } from 'node:fs'
 import path from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import identity from './process-identity.cjs'
@@ -9,6 +9,9 @@ import management from './desktop-management.cjs'
 import { acquireCliLock, releaseCliLock, cliLockToken } from './cli-lock.mjs'
 import { verifyCoreRelease } from './core-release.mjs'
 import { inspectInstance } from './instance-runtime.mjs'
+import location from './cli-location.cjs'
+const { readCliMetadata: metadata, readCliSelection, locateCliInstallation } = location
+export { readCliSelection, locateCliInstallation }
 
 const metadataName = 'cli-installation.json', selectorName = 'current-core'
 const launcherName = process.platform === 'win32' ? 'crabot.exe' : 'crabot'
@@ -16,37 +19,6 @@ const fail = message => { throw Object.assign(new Error(message), { code: 'CRABO
 const identifier = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value)
 async function present(file) { try { return await fs.lstat(file) } catch (error) { if (error.code === 'ENOENT') return null; throw error } }
 async function digest(file) { return createHash('sha256').update(await fs.readFile(file)).digest('hex') }
-function metadata(root) {
-  try {
-    const file = path.join(root, metadataName), stat = lstatSync(file)
-    if (!stat.isFile() || stat.size > 65_536) throw new Error()
-    const value = JSON.parse(readFileSync(file, 'utf8'))
-    if (value.schema_version !== 1 || !['user', 'system'].includes(value.scope) || !identifier(value.launcher_sha256)
-      || Object.keys(value).some(key => !['schema_version', 'scope', 'launcher_sha256'].includes(key))) throw new Error()
-    return value
-  } catch { fail('CLI 安装记录无法校验，请保留当前目录并重新安装。') }
-}
-export function readCliSelection(root) {
-  try {
-    const file = path.join(root, selectorName), stat = identity.isOwnedDirectory(root)
-    // Shared system code is root-owned and intentionally readable by employees.
-    const record = metadata(root)
-    if (record.scope === 'user' && !stat) throw new Error()
-    const selected = lstatSync(file)
-    if (!selected.isFile() || selected.size > 65) throw new Error()
-    const text = readFileSync(file, 'utf8')
-    if (!identifier(text.trim()) || text !== text.trim() + '\n') throw new Error()
-    return text.trim()
-  } catch (error) { if (error.code === 'ENOENT') return null; fail('CLI 版本选择记录损坏，请保留数据并重新安装。') }
-}
-export function locateCliInstallation(coreRoot) {
-  coreRoot = realpathSync(coreRoot)
-  const releases = path.dirname(coreRoot), root = path.dirname(releases)
-  if (path.basename(releases) !== 'releases' || !existsSync(path.join(root, metadataName))) return null
-  const record = metadata(root), id = path.basename(coreRoot)
-  if (!identifier(id)) fail('CLI 核心目录无法核验。')
-  return { root, coreRoot, id, scope: record.scope, selected: readCliSelection(root) === id }
-}
 async function publish(root, name, text, scope, previous) {
   const file = path.join(root, name), temporary = file + '.tmp-' + randomUUID()
   const current = await fs.readFile(file, 'utf8').catch(error => { if (error.code === 'ENOENT') return null; throw error })
@@ -128,6 +100,7 @@ export async function prepareCliPayload({ sourceRoot, installRoot, scope = 'user
 export async function selectCliPayload(prepared, { expected = null, dataDir } = {}) {
   const { installRoot, coreRoot, id, scope } = prepared
   authority(scope)
+  if (!identity.isOwnedDirectory(installRoot)) fail('CLI 安装目录不属于当前系统用户。')
   if (scope === 'user' && (!dataDir || !cliLockToken(path.resolve(dataDir, 'cli.lock')) || inspectInstance(dataDir).state !== 'stopped')) fail('CLI 版本切换前必须持有实例操作锁并确认停止。')
   const lock = await acquireCliLock(installRoot, 'select-cli-payload')
   try {

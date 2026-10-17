@@ -10,7 +10,7 @@ const files = new Set(['scripts/prepare-product-runtime.mjs', 'scripts/prepare-s
   'scripts/build-native.mjs', 'crabot-desktop/src/main.ts', 'crabot-desktop/src/controller.ts', 'crabot-desktop/src/session-host.ts',
   'scripts/run-product-memory.mjs', 'scripts/lib/install-network.mjs', 'scripts/lib/run-bounded.mjs', 'scripts/upgrade-lib/runner.mjs',
   '.github/scripts/smoke-product-runtime.mjs', 'crabot-agent/src/core/runtime-env.ts', 'crabot-agent/src/core/background-shell.ts',
-  '.github/scripts/smoke-packaged-desktop.mjs', 'scripts/lib/desktop-cli-install.mjs', 'scripts/lib/version-maintenance.mjs', 'scripts/lib/cli-installation.mjs', 'scripts/lib/release-package.mjs', 'scripts/upgrade-lib/release.mjs',
+  '.github/scripts/smoke-packaged-desktop.mjs', 'scripts/lib/desktop-cli-install.mjs', 'scripts/lib/version-maintenance.mjs', 'scripts/lib/cli-installation.mjs', 'scripts/lib/cli-location.cjs', 'cli.mjs', 'scripts/lib/release-package.mjs', 'scripts/upgrade-lib/release.mjs',
   'crabot-agent/src/utils/resolve-bash-path.ts', 'crabot-agent/src/agent/mcp-connector.ts',
   'crabot-agent/package.json', 'crabot-agent/pnpm-lock.yaml', 'crabot-mcp-tools/package.json', 'crabot-mcp-tools/pnpm-lock.yaml'])
 let full = true

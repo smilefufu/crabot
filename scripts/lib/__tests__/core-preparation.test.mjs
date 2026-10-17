@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, chmodSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
+import { createHash } from 'node:crypto'
 import management from '../desktop-management.cjs'
 import { prepareCoreEnvironment, applyStartupMigrations } from '../core-preparation.mjs'
 
@@ -77,4 +78,29 @@ test('an older core cannot relabel newer data or begin any forward migration', a
   assert.equal(readFileSync(join(data, 'z-newer/SCHEMA_VERSION'), 'utf8'), 'v2\n')
   assert.equal(existsSync(join(data, 'a-forward/SCHEMA_VERSION')), false)
   assert.equal(existsSync(join(data, 'a-forward/must-not-run')), false)
+})
+
+
+test('versioned CLI reads container environment without editing payloads and refuses an obsolete version before data writes', t => {
+  const f = fixture(t), id = 'a'.repeat(64), core = join(f.root, 'releases', id), files = {}, executables = {}
+  mkdirSync(core, { recursive: true })
+  writeFileSync(join(f.root, 'cli-installation.json'), JSON.stringify({ schema_version: 1, scope: 'user', launcher_sha256: 'b'.repeat(64) }))
+  writeFileSync(join(f.root, 'current-core'), id + '\n')
+  writeFileSync(join(core, 'core-release.json'), JSON.stringify({ inventory_sha256: id }))
+  writeFileSync(join(f.root, '.env'), 'CUSTOM=from-container\nCRABOT_JWT_SECRET=preserved-file-secret\n')
+  for (const name of ['node', 'python', 'uv', 'bash', 'git', 'rg']) {
+    const relative = 'runtime/bin/' + name, content = 'fixture-' + name
+    mkdirSync(join(core, 'runtime/bin'), { recursive: true }); writeFileSync(join(core, relative), content, { mode: 0o755 })
+    executables[name] = relative; files[relative] = { size: Buffer.byteLength(content), sha256: createHash('sha256').update(content).digest('hex') }
+  }
+  for (const name of ['python', 'memory']) mkdirSync(join(core, 'runtime', name))
+  writeFileSync(join(core, 'product-runtime.json'), JSON.stringify({ schema_version: 1, version: '1.2.3', platform: process.platform, arch: process.arch,
+    versions: { python: '3.12.12', node: '22.22.3' }, executables, files, path_entries: ['runtime/bin'], python_home: 'runtime/python', memory_packages: 'runtime/memory', seed_wheels: [] }))
+  const result = prepareCoreEnvironment({ root: core, dataDir: f.data, source: { CUSTOM: 'explicit' } })
+  assert.equal(result.env.CUSTOM, 'explicit'); assert.equal(result.env.CRABOT_JWT_SECRET, 'preserved-file-secret')
+  assert.equal(existsSync(join(core, '.env')), false)
+  writeFileSync(join(f.root, 'current-core'), 'c'.repeat(64) + '\n')
+  const untouched = join(f.root, 'uncreated-data')
+  assert.throws(() => prepareCoreEnvironment({ root: core, dataDir: untouched, source: {} }), { code: 'CRABOT_CLI_INSTALLATION' })
+  assert.equal(existsSync(untouched), false)
 })
