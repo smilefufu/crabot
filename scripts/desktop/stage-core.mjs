@@ -7,6 +7,7 @@ import { runBounded } from '../lib/run-bounded.mjs'
 import product from '../lib/product-runtime.cjs'
 import scrapling from '../lib/scrapling-runtime.cjs'
 import computerUse from '../lib/computer-use-runtime.cjs'
+import { writeCoreRelease, verifyCoreRelease } from '../lib/core-release.mjs'
 
 const excluded = new Set(['node_modules', 'node_modules_link_check', '.git', '.env', '.venv', '__pycache__', '__tests__', 'tests', 'test'])
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
@@ -95,7 +96,6 @@ try {
   const cmd = relative => '@echo off\r\nsetlocal DisableDelayedExpansion\r\nset "CRABOT_CLI_ROOT=%~dp0' + relative + '"\r\n"%CRABOT_CLI_ROOT%\\.product-runtime\\node\\node.exe" "%CRABOT_CLI_ROOT%\\cli.mjs" %*\r\nexit /b %errorlevel%\r\n'
   await fs.writeFile(path.join(output, 'bin/crabot.cmd'), cmd('..'))
   await fs.writeFile(path.join(output, 'crabot.cmd'), cmd(''))
-  await fs.writeFile(path.join(output, 'core-release.json'), JSON.stringify({ schema_version: 1, version, platform: process.platform, arch: process.arch, commit, source_dirty: sourceDirty }, null, 2) + '\n')
   async function checkLinks(directory) {
     for (const item of await fs.readdir(directory, { withFileTypes: true })) {
       const file = path.join(directory, item.name)
@@ -109,6 +109,9 @@ try {
   product.loadProductRuntime(output, { required: true, full: true })
   scrapling.loadRuntime(output, { full: true })
   computerUse.loadRuntime(output, { full: true })
+  const inventory = await writeCoreRelease(output, { schema_version: 1, version, platform: process.platform, arch: process.arch, commit, source_dirty: sourceDirty })
+  await verifyCoreRelease(output, { version })
+  console.log('Core inventory: ' + JSON.stringify(inventory))
   console.log('Core candidate staged: ' + output)
 } catch (error) {
   // The failed candidate is ours and has never been published or used as DATA_DIR.

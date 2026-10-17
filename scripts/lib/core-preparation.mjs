@@ -38,6 +38,17 @@ export function prepareCoreEnvironment({ root, dataDir, source = process.env }) 
 // the lifecycle lock; upgrade/takeover adapters own their separate backup requirement.
 export async function applyStartupMigrations(root, dataDir, env, log = () => {}) {
   const pending = scanModules(root, dataDir)
+  // Preflight the whole version set before the first module can mutate data.
+  // A rollback cannot turn a newer schema into an older one by relabelling it.
+  for (const migration of pending) {
+    const versions = [migration.dataVersion ?? 'v0', migration.codeVersion]
+    if (versions.some(value => !/^v\d+$/.test(value) || !Number.isSafeInteger(Number(value.slice(1))))) {
+      throw Object.assign(new Error(`Invalid schema version: ${migration.moduleId}`), { code: 'CRABOT_SCHEMA_VERSION_INVALID' })
+    }
+    if (Number(versions[0].slice(1)) > Number(versions[1].slice(1))) {
+      throw Object.assign(new Error(`Data requires a newer core: ${migration.moduleId}`), { code: 'CRABOT_DATA_NEWER_THAN_CODE' })
+    }
+  }
   for (const migration of pending) {
     log(`${migration.moduleId}: ${migration.dataVersion ?? 'fresh'} → ${migration.codeVersion}`)
     const result = await applyMigration(join(root, migration.moduleId), migration.dataDir, migration.dataVersion,

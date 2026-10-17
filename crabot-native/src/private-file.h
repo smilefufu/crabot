@@ -36,7 +36,7 @@ static napi_value WritePrivateFile(napi_env env, napi_callback_info info) {
     napi_throw_error(env, "CRABOT_PRIVATE_FILE", error.what()); return nullptr;
   }
 }
-static napi_value IsPrivatePath(napi_env env, napi_callback_info info, bool directory) {
+static napi_value IsPrivatePath(napi_env env, napi_callback_info info, bool directory, bool requirePrivate = true) {
   HANDLE file = INVALID_HANDLE_VALUE; PSECURITY_DESCRIPTOR descriptor = nullptr; PSID current = nullptr;
   try {
     size_t argc = 1; napi_value args[1]; napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
@@ -53,9 +53,10 @@ static napi_value IsPrivatePath(napi_env env, napi_callback_info info, bool dire
     auto sid = Inspect(GetCurrentProcessId()).owner;
     if (!ConvertStringSidToSidA(sid.c_str(), &current)) throw std::runtime_error("Cannot inspect current user SID");
     SECURITY_DESCRIPTOR_CONTROL control; DWORD revision; void* raw = nullptr;
-    bool valid = owner && acl && EqualSid(owner, current) && GetSecurityDescriptorControl(descriptor, &control, &revision)
+    bool valid = owner && EqualSid(owner, current);
+    if (valid && requirePrivate) valid = acl && GetSecurityDescriptorControl(descriptor, &control, &revision)
       && (control & SE_DACL_PROTECTED) && acl->AceCount == 1 && GetAce(acl, 0, &raw);
-    if (valid) {
+    if (valid && requirePrivate) {
       auto ace = static_cast<ACCESS_ALLOWED_ACE*>(raw);
       valid = ace->Header.AceType == ACCESS_ALLOWED_ACE_TYPE && EqualSid(&ace->SidStart, current)
         && ((ace->Mask & FILE_ALL_ACCESS) == FILE_ALL_ACCESS || (ace->Mask & GENERIC_ALL));
@@ -70,6 +71,7 @@ static napi_value IsPrivatePath(napi_env env, napi_callback_info info, bool dire
 }
 static napi_value IsPrivateFile(napi_env env, napi_callback_info info) { return IsPrivatePath(env, info, false); }
 static napi_value IsPrivateDirectory(napi_env env, napi_callback_info info) { return IsPrivatePath(env, info, true); }
+static napi_value IsOwnedDirectory(napi_env env, napi_callback_info info) { return IsPrivatePath(env, info, true, false); }
 static napi_value CreatePrivateDirectory(napi_env env, napi_callback_info info) {
   PSECURITY_DESCRIPTOR descriptor = nullptr;
   try {
@@ -95,6 +97,7 @@ static void RegisterPrivateFile(napi_env env, napi_value exports) {
     {"isPrivateFile", nullptr, IsPrivateFile, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"createPrivateDirectory", nullptr, CreatePrivateDirectory, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"isPrivateDirectory", nullptr, IsPrivateDirectory, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"isOwnedDirectory", nullptr, IsOwnedDirectory, nullptr, nullptr, nullptr, napi_default, nullptr},
   };
   napi_define_properties(env, exports, sizeof(methods) / sizeof(methods[0]), methods);
 }

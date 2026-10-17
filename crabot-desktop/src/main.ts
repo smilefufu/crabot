@@ -46,6 +46,7 @@ function show() { window?.show(); window?.focus() }
 
 async function boot() {
   try {
+    if (app.isPackaged) await (await loadCore('scripts/lib/core-release.mjs')).verifyCoreRelease(coreRoot, { version: app.getVersion() })
     const { resolveCliDataDir } = await loadCore('scripts/lib/instance.mjs')
     dataRoot = path.resolve(resolveCliDataDir({ homeDir: path.join(homedir(), '.crabot') }))
     const management = (await loadCore('scripts/lib/desktop-management.cjs')).default

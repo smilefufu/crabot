@@ -16,7 +16,7 @@ const require = createRequire(import.meta.url)
 const product = require(join(root, 'scripts/lib/product-runtime.cjs'))
 const pythonEnv = require(join(root, 'scripts/lib/product-python-env.cjs'))
 const runtime = product.loadProductRuntime(root, { required: true, full: true })
-const data = await fs.realpath(await fs.mkdtemp(join(tmpdir(), 'crabot-product-smoke-')))
+const data = await fs.realpath(await fs.mkdtemp(join(tmpdir(), 'Crabot 产品 中文 ')))
 const env = product.productEnvironment(runtime, data, process.env)
 const pathKey = process.platform === 'win32' ? Object.keys(env).find(key => key.toLowerCase() === 'path') ?? 'PATH' : 'PATH'
 const pythonPath = pythonEnv.ensureProductAgentVenv(runtime, data)

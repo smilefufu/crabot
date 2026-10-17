@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn, execFile } from 'node:child_process'
 import { createRequire } from 'node:module'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, rm, readFile, writeFile, mkdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -103,6 +103,16 @@ test('actual Electron host shares its real core with CLI and distinguishes hide,
     assert.equal(inspectInstance(data).state, 'stopped')
     console.log('CRABOT_FULL_HOST_RESULT ' + JSON.stringify({ platform: process.platform, arch: process.arch, native_bootstrap: true,
       cli_gui_same_instance: true, close_keeps_core: true, gui_crash_keeps_core: true, cli_stop_stays_stopped: true, cli_start_reconnects_gui: true, relaunch_autostarts: true, quit_cancel_preserves_core: true, quit_stops_core: true }))
+  } catch (error) {
+    // Disposable CI data only; preserve the bootstrap cause before cleanup.
+    // Never collect credentials, configuration, chats or the developer's data.
+    const evidence = path.join(root, '.desktop-build')
+    await mkdir(evidence, { recursive: true })
+    for (const file of ['supervisor.boot.log', 'mm.stdout.log', 'mm.stderr.log']) {
+      const contents = await readFile(path.join(data, 'logs', file)).catch(() => null)
+      if (contents) await writeFile(path.join(evidence, 'full-host-' + file), contents.subarray(-128_000))
+    }
+    throw error
   } finally {
     for (const child of children) if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
     await cli('stop')

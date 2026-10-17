@@ -6,9 +6,10 @@ import path from 'node:path'
 import { tmpdir } from 'node:os'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
+import { verifyCoreRelease } from '../../scripts/lib/core-release.mjs'
 
 const root = await fs.realpath(path.resolve(process.argv[2]))
-const metadata = JSON.parse(await fs.readFile(path.join(root, 'core-release.json'), 'utf8'))
+const metadata = await verifyCoreRelease(root)
 const temporary = await fs.mkdtemp(path.join(tmpdir(), 'crabot-core-package-'))
 const execute = promisify(execFile)
 try {

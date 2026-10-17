@@ -1,0 +1,75 @@
+// Immutable core inventory shared by desktop and CLI artifacts. This detects
+// incomplete/mixed payloads; installer signatures authenticate their source.
+import { createHash } from 'node:crypto'
+import { createReadStream } from 'node:fs'
+import { promises as fs } from 'node:fs'
+import path from 'node:path'
+
+const excluded = new Set(['core-files.json', 'core-release.json', 'desktop-host.json'])
+const digest = bytes => createHash('sha256').update(bytes).digest('hex')
+const fail = () => { throw Object.assign(new Error('核心发行文件不完整或已改变，请修复安装。'), { code: 'CRABOT_CORE_INTEGRITY' }) }
+const inside = (root, file) => {
+  const relative = path.relative(root, file)
+  return relative !== '..' && !relative.startsWith('..' + path.sep) && !path.isAbsolute(relative)
+}
+async function hashFile(file) {
+  const hash = createHash('sha256')
+  for await (const chunk of createReadStream(file)) hash.update(chunk)
+  return hash.digest('hex')
+}
+
+async function inventory(root) {
+  const files = Object.create(null)
+  async function walk(directory) {
+    const entries = await fs.readdir(directory, { withFileTypes: true })
+    for (const entry of entries.sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0)) {
+      const file = path.join(directory, entry.name), relative = path.relative(root, file).split(path.sep).join('/')
+      if (excluded.has(relative)) continue
+      if (entry.isDirectory()) await walk(file)
+      else if (entry.isFile()) {
+        const stat = await fs.lstat(file)
+        files[relative] = { type: 'file', size: stat.size, sha256: await hashFile(file),
+          ...(process.platform === 'win32' ? {} : { mode: stat.mode & 0o777 }) }
+      } else if (entry.isSymbolicLink()) {
+        const target = await fs.readlink(file)
+        if (path.isAbsolute(target) || !inside(root, await fs.realpath(file))) fail()
+        files[relative] = { type: 'link', target }
+      } else fail()
+    }
+  }
+  await walk(root)
+  return { schema_version: 1, files }
+}
+
+export async function writeCoreRelease(directory, release) {
+  const root = await fs.realpath(directory), index = await inventory(root)
+  const text = JSON.stringify(index) + '\n'
+  await fs.writeFile(path.join(root, 'core-files.json'), text, { flag: 'wx' })
+  await fs.writeFile(path.join(root, 'core-release.json'), JSON.stringify({ ...release, inventory_sha256: digest(text) }, null, 2) + '\n', { flag: 'wx' })
+  return { files: Object.keys(index.files).length, bytes: Object.values(index.files).reduce((total, file) => total + (file.size ?? 0), 0) }
+}
+
+export async function verifyCoreRelease(directory, { version, platform = process.platform, arch = process.arch } = {}) {
+  try {
+    const root = await fs.realpath(directory)
+    for (const name of ['core-release.json', 'core-files.json']) {
+      const stat = await fs.lstat(path.join(root, name))
+      if (!stat.isFile() || stat.size > (name === 'core-release.json' ? 65_536 : 64 * 1024 * 1024)) fail()
+    }
+    const metadata = JSON.parse(await fs.readFile(path.join(root, 'core-release.json'), 'utf8'))
+    if (metadata.schema_version !== 1 || !/^\d+\.\d+\.\d+(?:-[\w.-]+)?$/.test(metadata.version)
+      || (version && metadata.version !== version) || metadata.platform !== platform || metadata.arch !== arch
+      || !/^[a-f0-9]{40}$/.test(metadata.commit) || typeof metadata.source_dirty !== 'boolean'
+      || !/^[a-f0-9]{64}$/.test(metadata.inventory_sha256)) fail()
+    const text = await fs.readFile(path.join(root, 'core-files.json'), 'utf8')
+    if (digest(text) !== metadata.inventory_sha256) fail()
+    const expected = JSON.parse(text)
+    if (expected.schema_version !== 1 || !expected.files || typeof expected.files !== 'object' || Array.isArray(expected.files)) fail()
+    const actual = await inventory(root)
+    if (JSON.stringify(expected) !== JSON.stringify(actual)) fail()
+    const packageJson = JSON.parse(await fs.readFile(path.join(root, 'package.json'), 'utf8'))
+    const runtime = JSON.parse(await fs.readFile(path.join(root, 'product-runtime.json'), 'utf8'))
+    if (packageJson.version !== metadata.version || runtime.version !== metadata.version) fail()
+    return metadata
+  } catch { fail() }
+}

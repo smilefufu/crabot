@@ -22,10 +22,12 @@ import { inspectInstance } from './lib/instance-runtime.mjs'
 import { launchBackgroundCore } from './lib/background-core.mjs'
 import scraplingRuntime from './lib/scrapling-runtime.cjs'
 import { runBounded } from './lib/scrapling-prepare.mjs'
+import { verifyCoreRelease } from './lib/core-release.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const ROOT = resolve(__dirname, '..')
 const HOME_CRABOT = resolve(homedir(), '.crabot')
+if (existsSync(resolve(ROOT, 'core-release.json'))) await verifyCoreRelease(ROOT)
 
 // auto-init：缺 instance.json → 同步调 crabot init（在 const OFFSET 读取前）
 if (!hasInstance(HOME_CRABOT) && !management.readDesktopManagement(resolveCliDataDir({ homeDir: HOME_CRABOT }))) {

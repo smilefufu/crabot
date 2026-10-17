@@ -62,3 +62,19 @@ test('common start migrations preserve success/failure schema settlement without
   await applyStartupMigrations(root, data, process.env)
   assert.equal(existsSync(join(data, 'mm.pid')), false)
 })
+
+test('an older core cannot relabel newer data or begin any forward migration', async t => {
+  const { root, data } = fixture(t)
+  for (const name of ['a-forward', 'z-newer']) {
+    mkdirSync(join(root, 'crabot-' + name, 'upgrade'), { recursive: true })
+    mkdirSync(join(data, name)); writeFileSync(join(data, name, 'existing.json'), '{}')
+    writeFileSync(join(root, 'crabot-' + name, 'schema_version'), 'v1')
+  }
+  writeFileSync(join(data, 'z-newer/SCHEMA_VERSION'), 'v2\n')
+  writeFileSync(join(root, 'crabot-a-forward/upgrade/from_v0_to_v1.mjs'),
+    'import {writeFileSync} from "node:fs"; writeFileSync(process.argv[2].slice("--data-dir=".length) + "/must-not-run", "changed")')
+  await assert.rejects(applyStartupMigrations(root, data, process.env), { code: 'CRABOT_DATA_NEWER_THAN_CODE' })
+  assert.equal(readFileSync(join(data, 'z-newer/SCHEMA_VERSION'), 'utf8'), 'v2\n')
+  assert.equal(existsSync(join(data, 'a-forward/SCHEMA_VERSION')), false)
+  assert.equal(existsSync(join(data, 'a-forward/must-not-run')), false)
+})

@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "versions": ["v2026.10.14.1", "v2026.10.15.1"],
+  "files": {
+    "cli.mjs": "3f2383de11bf82421529e8bd938fcdfb8451f5141012c2a9ff5a946662f2e00f",
+    "crabot.cmd": "eecdb03ae8979d47c6e7094bea23d2ccc4064a38c4a2cad06d8b132b457dcb38",
+    "scripts/start.mjs": "d35beba81ae62a6070f66ccde09259551fdefda88fa85427edf8577edd713ae1",
+    "scripts/supervisor.mjs": "e3106a51f449083dc95256a98e971523001be370acf7565999eaa80d784e6eee",
+    "crabot-core/dist/main.js": "ac90f05895ef5824a31c03eac1308140104c725b6104bd0fd40d5069f09f9fcb"
+  }
+}

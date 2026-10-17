@@ -1,4 +1,5 @@
 const path = require('node:path')
+const fs = require('node:fs')
 // Both standalone Node and Electron use this Node-API-only helper. It has no V8/libuv ABI dependency.
 const native = require('../../crabot-native/build/Release/crabot-native.node')
 
@@ -14,6 +15,10 @@ module.exports = { ...native, sameProcess,
   tryFileLock: native.tryFileLock,
   releaseFileLock: native.releaseFileLock,
   inspectProcessArguments: native.inspectProcessArguments,
+  isOwnedDirectory: native.isOwnedDirectory ?? (directory => {
+    const stat = fs.lstatSync(directory)
+    return stat.isDirectory() && !stat.isSymbolicLink() && String(stat.uid) === native.inspectProcess(process.pid).owner
+  }),
   ...(native.inspectPeer ? { inspectPeer: native.inspectPeer } : {}),
   ...(native.createPipeServer ? {
     createPipeServer: native.createPipeServer, acceptPipe: native.acceptPipe,

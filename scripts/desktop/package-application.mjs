@@ -8,6 +8,7 @@ import { runBounded } from '../lib/run-bounded.mjs'
 import product from '../lib/product-runtime.cjs'
 import scrapling from '../lib/scrapling-runtime.cjs'
 import computerUse from '../lib/computer-use-runtime.cjs'
+import { verifyCoreRelease } from '../lib/core-release.mjs'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 const args = new Map(process.argv.slice(2).map(value => { const split = value.indexOf('='); return [value.slice(0, split), value.slice(split + 1)] }))
@@ -15,8 +16,7 @@ if (args.get('--candidate') !== 'true' || !args.get('--core') || !args.get('--ou
 const core = await fs.realpath(path.resolve(args.get('--core'))), projectDir = path.resolve(args.get('--out'))
 if (!path.relative(root, projectDir).startsWith('.desktop-build' + path.sep)) throw new Error('Candidate project must be under .desktop-build')
 try { await fs.lstat(projectDir); throw new Error('Candidate project already exists') } catch (error) { if (error.code !== 'ENOENT') throw error }
-const release = JSON.parse(await fs.readFile(path.join(core, 'core-release.json'), 'utf8'))
-if (release.schema_version !== 1 || release.platform !== process.platform || release.arch !== process.arch || !/^\d+\.\d+\.\d+(?:-[\w.-]+)?$/.test(release.version)) throw new Error('Core candidate is incompatible')
+const release = await verifyCoreRelease(core)
 const runtime = product.loadProductRuntime(core, { required: true, full: true })
 scrapling.loadRuntime(core, { full: true })
 computerUse.loadRuntime(core, { full: true })
@@ -81,6 +81,7 @@ if (!packagedResources) throw new Error('Electron builder did not report its pac
 product.loadProductRuntime(path.join(packagedResources, 'core'), { required: true, full: true })
 scrapling.loadRuntime(path.join(packagedResources, 'core'), { full: true })
 computerUse.loadRuntime(path.join(packagedResources, 'core'), { full: true })
+await verifyCoreRelease(path.join(packagedResources, 'core'), { version: release.version })
 const builderRequire = createRequire(createRequire(require.resolve('electron-builder')).resolve('app-builder-lib/package.json'))
 const asar = builderRequire('@electron/asar')
 for (const file of ['dist/main.js', 'dist/preload.cjs', 'dist/assets/tray.png', 'node_modules/crabot-client/dist/index.js', 'node_modules/zod/package.json', 'node_modules/electron-updater/package.json']) {

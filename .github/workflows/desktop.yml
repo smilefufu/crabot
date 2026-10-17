@@ -91,6 +91,8 @@ jobs:
           node --test scripts/lib/__tests__/instance-runtime.test.mjs scripts/lib/__tests__/cli-lock-native.test.mjs scripts/lib/__tests__/process-identity.test.mjs scripts/lib/__tests__/local-auth-transport.test.mjs scripts/lib/__tests__/stop-windows.test.mjs scripts/lib/__tests__/background-core.test.mjs
           node --test scripts/lib/__tests__/desktop-session.test.mjs
           node --test scripts/lib/__tests__/core-preparation.test.mjs
+          node --test scripts/lib/__tests__/core-release.test.mjs
+          node --test scripts/lib/__tests__/legacy-desktop.test.mjs
           cd crabot-core
           node node_modules/vitest/vitest.mjs run src/agent-venv.test.ts src/core-modules.test.ts src/shutdown-generation.test.ts src/module-management-secrets.test.ts --maxWorkers=1 --minWorkers=1
       - name: Agent environment regressions

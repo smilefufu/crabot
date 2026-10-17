@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer, connect } from 'node:net'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, statSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { once } from 'node:events'
@@ -17,6 +17,19 @@ test('native identity includes OS owner, precise creation identity and executabl
   assert.ok(identity.listProcessIds().includes(process.pid))
   assert.ok(identity.inspectProcessArguments(process.pid).length > 0)
   for (const pid of [-1, 0, NaN, Infinity, '1', 1.5]) assert.throws(() => identity.inspectProcess(pid))
+})
+
+test('read-only directory ownership never substitutes for private bootstrap ACLs', t => {
+  const directory = mkdtempSync(join(tmpdir(), 'crabot-owned-directory-'))
+  t.after(() => rmSync(directory, { recursive: true, force: true }))
+  const before = statSync(directory).mode
+  assert.equal(identity.isOwnedDirectory(directory), true)
+  assert.equal(statSync(directory).mode, before)
+  if (process.platform === 'win32') assert.equal(identity.isPrivateDirectory(directory), false)
+  else {
+    const alias = join(directory, 'alias'); symlinkSync(directory, alias, 'dir')
+    assert.equal(identity.isOwnedDirectory(alias), false)
+  }
 })
 
 test('OS process arguments preserve Unicode, spaces and empty arguments', async t => {
