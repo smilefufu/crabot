@@ -23,11 +23,13 @@ import { launchBackgroundCore } from './lib/background-core.mjs'
 import scraplingRuntime from './lib/scrapling-runtime.cjs'
 import { runBounded } from './lib/scrapling-prepare.mjs'
 import { verifyCoreRelease } from './lib/core-release.mjs'
+import { assertVersionMaintenanceAllowsStart } from './lib/version-maintenance.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const ROOT = resolve(__dirname, '..')
 const HOME_CRABOT = resolve(homedir(), '.crabot')
 if (existsSync(resolve(ROOT, 'core-release.json'))) await verifyCoreRelease(ROOT)
+assertVersionMaintenanceAllowsStart(resolveCliDataDir({ homeDir: HOME_CRABOT }))
 
 // auto-init：缺 instance.json → 同步调 crabot init（在 const OFFSET 读取前）
 if (!hasInstance(HOME_CRABOT) && !management.readDesktopManagement(resolveCliDataDir({ homeDir: HOME_CRABOT }))) {
@@ -55,6 +57,19 @@ process.env.CRABOT_ORPHAN_RECOVERY_INTERACTIVE = !DAEMON_MODE
 
 const DATA_DIR = resolveCliDataDir({ homeDir: HOME_CRABOT })
 const OFFSET = parseInt(process.env.CRABOT_PORT_OFFSET || '0', 10)
+// Hold the operation lock before environment preparation can write to DATA_DIR.
+// Version replacement must not race these earlier startup writers.
+let startupLock
+if (!hasInheritedCliLock(DATA_DIR)) {
+  try {
+    startupLock = await acquireCliLock(DATA_DIR, 'start')
+    process.on('exit', () => releaseCliLock(startupLock))
+  } catch (error) {
+    console.error(`[crabot] ${error.message}`)
+    process.exit(1)
+  }
+}
+assertVersionMaintenanceAllowsStart(DATA_DIR)
 const prepared = prepareCoreEnvironment({ root: ROOT, dataDir: DATA_DIR })
 Object.assign(process.env, prepared.env)
 
@@ -109,19 +124,6 @@ const orphanRecoveryEntry = resolve(ROOT, 'crabot-core/dist/orphan-recovery-pref
 if (!existsSync(mmEntry) || !existsSync(orphanRecoveryEntry)) {
   console.error('[crabot] crabot-core build output not found. Run build first.')
   process.exit(1)
-}
-
-// CLI 操作互斥（restart 外层持锁时经 env 跳过）。start 有大量 process.exit 出口，
-// 统一由 exit handler 释放；进程意外退出时操作系统关闭锁句柄。
-let startupLock
-if (!hasInheritedCliLock(DATA_DIR)) {
-  try {
-    startupLock = await acquireCliLock(DATA_DIR, 'start')
-    process.on('exit', () => releaseCliLock(startupLock))
-  } catch (error) {
-    console.error(`[crabot] ${error.message}`)
-    process.exit(1)
-  }
 }
 
 // 单实例预检

@@ -1,8 +1,10 @@
 import { existsSync, realpathSync } from 'node:fs'
+import { readdir } from 'node:fs/promises'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
-import type { DesktopHostState } from 'crabot-client'
-import { SessionHost } from './session-host.js'
+import { ActivityClient, HttpClient, type DesktopHostState } from 'crabot-client'
+import { SessionHost, sameHostContext } from './session-host.js'
+import type { UpdateDownload } from './update-dialog.js'
 
 export class DesktopController {
   readonly host: SessionHost
@@ -34,9 +36,64 @@ export class DesktopController {
     let message = '本机服务尚未就绪。可重新检查连接或查看基础诊断，按提示恢复。'
     if (migration) message = '发现已有部署或数据，需要先检查并确认接管。'
     else if (code === 'CRABOT_INSTANCE_STARTING') message = '服务仍在启动。请稍候重新检查状态，再停止服务。'
+    else if (code === 'CRABOT_MAINTENANCE_PENDING') message = '版本更新尚未核验完成。请退出并重新打开 Crabot 检查恢复；仍未恢复时重新安装目标版本，保留现有数据。'
     this.host.status(migration ? 'migration_required' : 'error', message, code)
   }
   fail(error: unknown) { this.report(error) }
+  async updateActivity(): Promise<'idle' | 'active' | 'unknown'> {
+    try {
+      const current = await this.current()
+      if (this.host.snapshot().phase === 'stopped' && current.state === 'stopped') {
+        const records = await readdir(path.join(this.options.dataRoot, 'module-runtime-registry/records')).catch(error => {
+          if (error.code === 'ENOENT') return []; throw error
+        })
+        return records.some(name => name.endsWith('.json')) ? 'unknown' : 'idle'
+      }
+      const credential = await this.host.credential()
+      if (!credential || !current.mmAlive || credential.generation !== current.record?.generation) return 'unknown'
+      const activity = await new ActivityClient(new HttpClient({ endpoint: new URL('/api', credential.admin_url).href,
+        token: () => {
+          const context = this.host.context()
+          if (!context || !sameHostContext(credential, context)) throw new Error('Instance changed')
+          return credential.token
+        } })).read()
+      const context = this.host.context()
+      return context && sameHostContext(credential, context) ? activity : 'unknown'
+    } catch { return 'unknown' }
+  }
+  async prepareUpdate(update: UpdateDownload, install: () => Promise<void>): Promise<void> {
+    this.busy++
+    const pending = this.operation.then(async () => {
+      const { acquireCliLock, releaseCliLock } = await this.load('scripts/lib/cli-lock.mjs')
+      const maintenance = await this.load('scripts/lib/version-maintenance.mjs')
+      const { stopInstance } = await this.load('scripts/lib/instance-controller.mjs')
+      const { createMaintenanceBackup } = await this.load('scripts/lib/maintenance-backup.mjs')
+      const lock = await acquireCliLock(this.options.dataRoot, 'desktop-update')
+      try {
+        await this.current()
+        if (await this.updateActivity() !== 'idle') throw Object.assign(new Error('Current activity cannot be confirmed idle'), { code: 'CRABOT_UPDATE_BUSY' })
+        const record = await maintenance.beginVersionMaintenance(this.options.dataRoot, this.options.coreRoot, update.version, this.options.appVersion)
+        this.host.status('stopping', '正在停止共享实例并备份升级所需的数据。')
+        await stopInstance(this.options.dataRoot)
+        this.host.status('stopped', '共享实例已停止，正在准备版本更新。')
+        const backup = await createMaintenanceBackup(this.options.dataRoot)
+        await maintenance.recordVersionMaintenanceBackup(this.options.dataRoot, record.id, backup)
+        await maintenance.markVersionMaintenanceInstalling(this.options.dataRoot, record.id)
+        await install()
+      } finally { releaseCliLock(lock) }
+    }).catch(error => { this.report(error); throw error })
+    this.operation = pending.catch(() => {}).finally(() => { this.busy-- })
+    return pending
+  }
+  async recoverVersion(): Promise<boolean> {
+    const maintenance = await this.load('scripts/lib/version-maintenance.mjs')
+    if (!maintenance.readVersionMaintenance(this.options.dataRoot)) return false
+    const { verifyDataCompatibility } = await this.load('scripts/lib/core-preparation.mjs')
+    await maintenance.recoverVersionMaintenance({ dataDir: this.options.dataRoot, root: this.options.coreRoot, appVersion: this.options.appVersion,
+      verifyCompatible: () => verifyDataCompatibility(this.options.coreRoot, this.options.dataRoot),
+      run: async () => (await this.start()).phase === 'ready' })
+    return true
+  }
   private run(operation: () => Promise<void>): Promise<DesktopHostState> {
     this.busy++
     const pending = this.operation.then(operation).catch(error => { this.report(error) }).finally(() => { this.busy-- })

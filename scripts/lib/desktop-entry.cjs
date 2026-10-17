@@ -33,7 +33,7 @@ function verifyDesktopEntry(peer, policy) {
     if (!tail.length || !sameFile(tail[0], policy.entry)) return false
     tail = tail.slice(1)
   }
-  if (tail.some(value => value !== '--background' && !(process.platform === 'darwin' && /^-psn_[0-9_]+$/.test(value)))) return false
+  if (tail.some(value => !['--background', '--check-updates'].includes(value) && !(process.platform === 'darwin' && /^-psn_[0-9_]+$/.test(value)))) return false
   return identity.sameProcess(peer, identity.inspectProcess(peer.pid))
 }
 

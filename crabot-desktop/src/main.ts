@@ -13,6 +13,9 @@ import { collectDiagnostics } from './diagnostics.js'
 import { ArtifactWindows } from './artifact-window.js'
 import { LoginStartup, type StartupState } from './login-startup.js'
 import { externalUrl, isAppUrl, isTrustedFrame } from './window-security.js'
+import { UpdateDialog } from './update-dialog.js'
+import { createUpdateDriver } from './update-driver.js'
+import { verifyUpdateDownload } from './update-package.js'
 
 app.setName('Crabot')
 if (process.platform === 'linux') app.setDesktopName('crabot.desktop')
@@ -24,6 +27,8 @@ let window: BrowserWindow | undefined, tray: Tray | undefined, controller: Deskt
 let dataRoot = path.join(homedir(), '.crabot/data'), initialError: unknown, quitting = false
 let pendingQuit: Promise<boolean> | undefined
 let artifacts: ArtifactWindows | undefined
+let updates: UpdateDialog | undefined
+let updateRequested = process.argv.includes('--check-updates')
 
 async function quit(): Promise<boolean> {
   if (pendingQuit) return pendingQuit
@@ -38,7 +43,7 @@ async function quit(): Promise<boolean> {
         return false
       }
     }
-    quitting = true; artifacts?.close(); controller?.close(); tray?.destroy(); app.quit(); return true
+    quitting = true; app.quit(); return true
   })().finally(() => { pendingQuit = undefined })
   return pendingQuit
 }
@@ -53,7 +58,10 @@ async function boot() {
     app.setPath('userData', path.join(dataRoot, 'desktop-profile'))
   } catch (error) { initialError = error }
   if (!app.requestSingleInstanceLock()) { quitting = true; app.quit(); return }
-  app.on('second-instance', show)
+  app.on('second-instance', (_event, args) => {
+    show()
+    if (args.includes('--check-updates')) { updateRequested = true; if (updates) void updates.open() }
+  })
   await app.whenReady()
   if (process.platform === 'win32') app.setAppUserModelId('com.crabot.desktop')
   const startup = new LoginStartup({ platform: process.platform, packaged: app.isPackaged, executable: process.execPath,
@@ -62,6 +70,15 @@ async function boot() {
   const background = process.argv.includes('--background') || startup.launchedAtLogin()
   await access(path.join(coreRoot, 'crabot-admin/dist/web/desktop.html'))
   controller = new DesktopController({ coreRoot, dataRoot, appVersion: app.getVersion(), platform: process.platform as 'darwin' | 'win32' | 'linux', packaged: app.isPackaged })
+  let driver = null, configurationError = false
+  try { driver = await createUpdateDriver({ resources: process.resourcesPath, cacheRoot: path.join(dataRoot, 'runtime-cache'), packaged: app.isPackaged,
+    beginExit: () => { quitting = true; return () => { quitting = false } } }) }
+  catch { configurationError = true }
+  updates = new UpdateDialog({ version: app.getVersion(), driver, configurationError, show: options => dialog.showMessageBox(options),
+    activity: () => controller!.updateActivity(), prepareInstall: async (update, install) => {
+      await verifyUpdateDownload(update)
+      await controller!.prepareUpdate(update, install)
+    } })
   artifacts = new ArtifactWindows(controller.host, () => { if (!quitting) updateMenus() })
   const privateSession = session.fromPartition('persist:crabot-desktop')
   privateSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false))
@@ -80,6 +97,7 @@ async function boot() {
     return report
   }
   registerDesktopIpc({ ipc: ipcMain, contents: () => window?.webContents, controller, quit, diagnostics,
+    openUpdateDialog: () => updates!.open(),
     openExternal: url => shell.openExternal(url), revealData: async () => !(await shell.openPath(dataRoot)),
     exportDiagnostics: async id => {
       const report = reports.get(id)
@@ -131,9 +149,9 @@ async function boot() {
       click: (item: Electron.MenuItem) => { void changeStartup(item.checked) } })
     tray?.setContextMenu(Menu.buildFromTemplate([{ label: '打开 Crabot', click: show }, { type: 'separator' },
       { label: '启动服务', click: () => { void controller!.start() } }, { label: '停止服务', click: () => { void controller!.stop() } },
-      { type: 'separator' }, startupItem(), { label: '退出 Crabot', click: () => { void quit() } }]))
+      { type: 'separator' }, startupItem(), { label: '检查更新…', click: () => { void updates!.open() } }, { label: '退出 Crabot', click: () => { void quit() } }]))
     Menu.setApplicationMenu(Menu.buildFromTemplate([
-      { label: 'Crabot', submenu: [{ label: '打开 Crabot', click: show }, startupItem(), { type: 'separator' }, { label: '退出 Crabot', accelerator: 'CommandOrControl+Q', click: () => { void quit() } }] },
+      { label: 'Crabot', submenu: [{ label: '打开 Crabot', click: show }, startupItem(), { label: '检查更新…', click: () => { void updates!.open() } }, { type: 'separator' }, { label: '退出 Crabot', accelerator: 'CommandOrControl+Q', click: () => { void quit() } }] },
       { label: '文件', submenu: [{ label: '保存当前附件…', accelerator: 'CommandOrControl+S', enabled: artifacts?.hasFocused(), click: () => { artifacts?.saveFocused() } }] },
       { role: 'editMenu' }, { role: 'viewMenu' }, { role: 'windowMenu' },
     ]))
@@ -144,9 +162,15 @@ async function boot() {
   await window.loadURL('app://crabot/')
   // The local UI is visible while the controller verifies the large payload.
   if (initialError) controller.fail(initialError)
-  else { void controller.start(); controller.watch() }
+  else {
+    void controller.recoverVersion().then(recovered => { if (!recovered) void controller!.start() }).catch(error => controller!.fail(error))
+    controller.watch()
+  }
+  updates.start()
+  if (updateRequested) void updates.open()
 }
 app.on('activate', show)
 app.on('before-quit', event => { if (!quitting) { event.preventDefault(); void quit() } })
 app.on('window-all-closed', () => { /* Tray owns the application lifetime. */ })
+app.on('will-quit', () => { updates?.close(); artifacts?.close(); controller?.close(); tray?.destroy() })
 void boot().catch(async () => { await dialog.showMessageBox({ type: 'error', message: 'Crabot 界面启动失败，请修复安装。' }); quitting = true; app.quit() })

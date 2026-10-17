@@ -3,13 +3,14 @@ import { join } from 'node:path'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { createServer } from 'node:net'
-import { acquireCliLock, releaseCliLock } from '../lib/cli-lock.mjs'
+import { acquireCliLock, releaseCliLock, cliLockToken } from '../lib/cli-lock.mjs'
 import { inspectInstance } from '../lib/instance-runtime.mjs'
 import { prepareCoreEnvironment, applyStartupMigrations } from '../lib/core-preparation.mjs'
 import { launchBackgroundCore } from '../lib/background-core.mjs'
 import management from '../lib/desktop-management.cjs'
 import { detectMode } from '../lib/mode.mjs'
 import { verifyCoreRelease } from '../lib/core-release.mjs'
+import { assertVersionMaintenanceAllowsStart } from '../lib/version-maintenance.mjs'
 
 // Desktop presentation adapter. Shared preparation/migration/controller layers have
 // no TTY, password, task source, session, delivery or recovery-task semantics.
@@ -21,8 +22,9 @@ export async function startDesktopCore({ root, dataDir, source = process.env, on
     throw Object.assign(new Error('此部署需要使用原管理方式；桌面不会自动接管 system/dev 实例。'), { code: 'CRABOT_DESKTOP_TAKEOVER_REQUIRED' })
   }
   management.ensurePrivateDataRoot(dataDir)
-  const lock = await acquireCliLock(dataDir, 'desktop-start')
+  const lock = cliLockToken(join(dataDir, 'cli.lock')) ? undefined : await acquireCliLock(dataDir, 'desktop-start')
   try {
+    assertVersionMaintenanceAllowsStart(dataDir)
     const current = inspectInstance(dataDir)
     if (current.state !== 'stopped') throw Object.assign(new Error('请先核对已有实例。'), { code: 'CRABOT_DESKTOP_TAKEOVER_REQUIRED' })
     management.initializeDesktopManagement(dataDir)
@@ -44,5 +46,5 @@ export async function startDesktopCore({ root, dataDir, source = process.env, on
     await applyStartupMigrations(root, dataDir, env)
     stage('launch_controller')
     return await launchBackgroundCore({ root, dataDir, env, mmPort, webPort })
-  } finally { releaseCliLock(lock) }
+  } finally { if (lock) releaseCliLock(lock) }
 }

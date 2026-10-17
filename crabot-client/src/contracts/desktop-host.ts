@@ -29,6 +29,7 @@ export interface DesktopBridge {
   stopService(): Promise<DesktopHostState>
   reconnect(): Promise<DesktopHostState>
   quit(): Promise<boolean>
+  openUpdateDialog(): Promise<boolean>
   openExternal(url: string): Promise<boolean>
   revealDataFolder(): Promise<boolean>
   getDiagnostics(): Promise<DesktopDiagnostics>

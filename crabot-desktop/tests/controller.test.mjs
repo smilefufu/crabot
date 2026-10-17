@@ -2,6 +2,9 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { DesktopController } from '../dist/controller.js'
 import { fileURLToPath } from 'node:url'
+import { promises as fs } from 'node:fs'
+import path from 'node:path'
+import { tmpdir } from 'node:os'
 
 test('a stopped GUI observes an externally started shared core without starting it itself', async t => {
   const controller = new DesktopController({ coreRoot: '/unused', dataRoot: '/unused', appVersion: 'fixture', platform: process.platform })
@@ -64,4 +67,34 @@ test('a completed explicit stop invalidates a watcher still verifying the instal
   release(); await watching
   assert.equal(controller.host.snapshot().phase, 'stopped')
   assert.equal(connects, 0)
+})
+
+test('a stopped host needs settled process records before it can report update-safe inactivity', async t => {
+  const root = await fs.mkdtemp(path.join(tmpdir(), 'crabot-update-activity-'))
+  const controller = new DesktopController({ coreRoot: '/unused', dataRoot: root, appVersion: 'fixture', platform: process.platform })
+  t.after(async () => { controller.close(); await fs.rm(root, { recursive: true, force: true }) })
+  controller.current = async () => ({ state: 'stopped', mmAlive: false, record: null })
+  controller.host.status('stopped')
+  assert.equal(await controller.updateActivity(), 'idle')
+  await fs.mkdir(path.join(root, 'module-runtime-registry/records'), { recursive: true })
+  await fs.writeFile(path.join(root, 'module-runtime-registry/records/unsettled.json'), '{}')
+  assert.equal(await controller.updateActivity(), 'unknown')
+  controller.current = async () => { throw new Error('Process ownership unknown') }
+  assert.equal(await controller.updateActivity(), 'unknown')
+})
+
+test('work which appears before the common update lock is acquired prevents stop, backup and installer writes', async t => {
+  const controller = new DesktopController({ coreRoot: '/unused', dataRoot: '/unused', appVersion: 'fixture', platform: process.platform })
+  t.after(() => controller.close())
+  const calls = []
+  controller.current = async () => { calls.push('inspect') }
+  controller.updateActivity = async () => { calls.push('activity'); return 'active' }
+  controller.load = async file => {
+    if (file.endsWith('cli-lock.mjs')) return { acquireCliLock: async () => { calls.push('lock'); return 'fixture' }, releaseCliLock: () => { calls.push('unlock') } }
+    const forbidden = () => { throw new Error('Must not mutate after an active/unknown check') }
+    return { beginVersionMaintenance: forbidden, stopInstance: forbidden, createMaintenanceBackup: forbidden }
+  }
+  await assert.rejects(controller.prepareUpdate({ version: '1.2.4' }, async () => { calls.push('install') }), { code: 'CRABOT_UPDATE_BUSY' })
+  assert.deepEqual(calls, ['lock', 'inspect', 'activity', 'unlock'])
+  assert.equal(controller.host.snapshot().phase, 'error')
 })

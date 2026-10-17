@@ -4,7 +4,7 @@ import type { DesktopController } from './controller.js'
 import { z, type DesktopDiagnostics } from 'crabot-client'
 
 export function registerDesktopIpc(options: { ipc: IpcMain; contents: () => WebContents | undefined; controller: DesktopController;
-  quit: () => Promise<boolean>; openExternal: (url: string) => Promise<void>; revealData: () => Promise<boolean>;
+  quit: () => Promise<boolean>; openUpdateDialog: () => Promise<boolean>; openExternal: (url: string) => Promise<void>; revealData: () => Promise<boolean>;
   diagnostics: () => Promise<DesktopDiagnostics>; exportDiagnostics: (id: string) => Promise<boolean> }) {
   const channels: string[] = []
   function handle(channel: string, action: (argument?: unknown) => unknown, argumentAllowed = false) {
@@ -20,6 +20,7 @@ export function registerDesktopIpc(options: { ipc: IpcMain; contents: () => WebC
   handle('desktop:stop', () => options.controller.stop())
   handle('desktop:reconnect', () => options.controller.reconnect())
   handle('desktop:quit', options.quit)
+  handle('desktop:open-update', options.openUpdateDialog)
   handle('desktop:open-external', async value => { const url = externalUrl(value); if (!url) return false; await options.openExternal(url); return true }, true)
   handle('desktop:reveal-data', options.revealData)
   handle('desktop:diagnostics', options.diagnostics)

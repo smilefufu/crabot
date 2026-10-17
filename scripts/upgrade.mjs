@@ -22,6 +22,7 @@ import { verifyReleasePackage } from './lib/release-package.mjs'
 import { detectMode as detectInstallScope } from './lib/mode.mjs'
 import { resolveCliDataDir } from './lib/instance.mjs'
 import { homedir } from 'node:os'
+import { openDesktopUpdate } from './lib/desktop-update-entry.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const CRABOT_HOME = resolve(__dirname, '..')
@@ -165,6 +166,11 @@ async function main() {
     console.error('[crabot] this is a system-mode install at ' + CRABOT_HOME + ';')
     console.error('[crabot] please ask the administrator to run `sudo crabot upgrade`.')
     process.exit(1)
+  }
+
+  if (await openDesktopUpdate(CRABOT_HOME)) {
+    console.log('[crabot] 已请求桌面应用打开更新界面，请在应用中确认安装。')
+    return
   }
 
   if (isMmRunning()) {

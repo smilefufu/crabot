@@ -81,11 +81,11 @@ async function main() {
   }
   const trusted = makeWindow(), foreign = makeWindow()
   attachDesktopNetwork(privateSession, host, () => trusted.webContents)
-  let starts = 0
+  let starts = 0, updateDialogs = 0
   let preview, exported
   registerDesktopIpc({ ipc: ipcMain, contents: () => trusted.webContents,
     controller: { host, start: async () => { starts++; return state }, stop: async () => state, reconnect: async () => state },
-    quit: async () => true, revealData: async () => true, openExternal: async () => {},
+    quit: async () => true, openUpdateDialog: async () => { updateDialogs++; return true }, revealData: async () => true, openExternal: async () => {},
     diagnostics: async () => preview = await collectDiagnostics(path.join(__dirname, '../..'), state, []),
     exportDiagnostics: async id => { assert.equal(id, preview.report_id); exported = id; return false },
   })
@@ -99,6 +99,16 @@ async function main() {
   assert.equal(starts, 1)
   const rejected = await foreign.webContents.executeJavaScript('window.crabotDesktop.startService().then(()=>false,()=>true)')
   assert.equal(rejected, true); assert.equal(starts, 1)
+  assert.equal(await trusted.webContents.executeJavaScript('window.crabotDesktop.openUpdateDialog()'), true)
+  assert.equal(await foreign.webContents.executeJavaScript('window.crabotDesktop.openUpdateDialog().then(()=>false,()=>true)'), true)
+  assert.equal(updateDialogs, 1)
+  const { createUpdateDriver } = await module('update-driver.js')
+  const candidateResources = path.join(root, 'candidate-resources')
+  await fs.mkdir(candidateResources)
+  await fs.writeFile(path.join(candidateResources, 'candidate-only.json'), '{}')
+  await fs.writeFile(path.join(candidateResources, 'app-update.yml'), 'must not parse or initialize a network updater')
+  assert.equal(await createUpdateDriver({ resources: candidateResources, cacheRoot: path.join(root, 'updater-cache'), packaged: true,
+    beginExit: () => { throw new Error('Candidate must never prepare an installer') } }), null)
   const result = await trusted.webContents.executeJavaScript(`fetch(${JSON.stringify(origin + '/api/probe')}).then(r=>r.json())`)
   assert.equal(result.ok, true)
   assert.equal(received.find(req => req.url === '/api/probe').authorization, 'Bearer fixture-main-only')

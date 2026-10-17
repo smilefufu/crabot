@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
 import { VersionUpgradeCard } from './VersionUpgradeCard'
 import type { VersionState } from '../../services/version'
+vi.mock('../../services/desktop-host', () => ({ isDesktop: false }))
 
 // Shared mutable state — tests update this before rendering
 const __state: { current: VersionState } = {

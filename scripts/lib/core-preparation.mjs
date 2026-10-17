@@ -6,9 +6,11 @@ import { scanModules, applyMigration } from '../upgrade-lib/migrate.mjs'
 import { runScript } from '../upgrade-lib/runner.mjs'
 import product from './product-runtime.cjs'
 import management from './desktop-management.cjs'
+import { assertVersionMaintenanceAllowsStart } from './version-maintenance.mjs'
 
 // Common preparation only: no password prompt, TTY, GUI, lifecycle lock or model calls.
 export function prepareCoreEnvironment({ root, dataDir, source = process.env }) {
+  assertVersionMaintenanceAllowsStart(dataDir)
   const env = { ...source, DATA_DIR: resolve(dataDir) }
   const file = join(root, '.env')
   if (existsSync(file)) {
@@ -37,6 +39,17 @@ export function prepareCoreEnvironment({ root, dataDir, source = process.env }) 
 // Original start-time migration semantics: caller has proved stopped state and owns
 // the lifecycle lock; upgrade/takeover adapters own their separate backup requirement.
 export async function applyStartupMigrations(root, dataDir, env, log = () => {}) {
+  assertVersionMaintenanceAllowsStart(dataDir)
+  const pending = verifyDataCompatibility(root, dataDir)
+  for (const migration of pending) {
+    log(`${migration.moduleId}: ${migration.dataVersion ?? 'fresh'} → ${migration.codeVersion}`)
+    const result = await applyMigration(join(root, migration.moduleId), migration.dataDir, migration.dataVersion,
+      migration.codeVersion, (script, directory) => runScript(script, directory, { root, env }))
+    if (!result.ok) throw Object.assign(new Error(`Migration failed: ${migration.moduleId}/${result.failedAt}`), { code: 'CRABOT_MIGRATION_FAILED' })
+  }
+}
+
+export function verifyDataCompatibility(root, dataDir) {
   const pending = scanModules(root, dataDir)
   // Preflight the whole version set before the first module can mutate data.
   // A rollback cannot turn a newer schema into an older one by relabelling it.
@@ -49,10 +62,5 @@ export async function applyStartupMigrations(root, dataDir, env, log = () => {})
       throw Object.assign(new Error(`Data requires a newer core: ${migration.moduleId}`), { code: 'CRABOT_DATA_NEWER_THAN_CODE' })
     }
   }
-  for (const migration of pending) {
-    log(`${migration.moduleId}: ${migration.dataVersion ?? 'fresh'} → ${migration.codeVersion}`)
-    const result = await applyMigration(join(root, migration.moduleId), migration.dataDir, migration.dataVersion,
-      migration.codeVersion, (script, directory) => runScript(script, directory, { root, env }))
-    if (!result.ok) throw Object.assign(new Error(`Migration failed: ${migration.moduleId}/${result.failedAt}`), { code: 'CRABOT_MIGRATION_FAILED' })
-  }
+  return pending
 }

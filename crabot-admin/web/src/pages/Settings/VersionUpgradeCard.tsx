@@ -4,13 +4,33 @@ import { Button } from '../../components/Common/Button'
 import { useToast } from '../../contexts/ToastContext'
 import { useSystemVersion, pollVersion } from '../../hooks/useSystemVersion'
 import { versionService, type VersionState } from '../../services/version'
+import { desktopBridge, isDesktop, useDesktopState } from '../../services/desktop-host'
 
 type Phase = 'idle' | 'starting' | 'upgrading' | 'restarting' | 'success' | 'failed' | 'timeout'
 
 const POLL_INTERVAL = 3000
 const TIMEOUT_MS = 5 * 60 * 1000
 
-export const VersionUpgradeCard: React.FC = () => {
+export const VersionUpgradeCard: React.FC = () => isDesktop ? <DesktopVersionUpgradeCard /> : <ServerVersionUpgradeCard />
+
+const DesktopVersionUpgradeCard: React.FC = () => {
+  const state = useDesktopState(), toast = useToast()
+  const [opening, setOpening] = useState(false)
+  const open = async () => {
+    setOpening(true)
+    try {
+      if (!await desktopBridge?.openUpdateDialog()) throw new Error('未能打开本机更新界面，请从 Crabot 菜单重试。')
+    } catch (error) { toast.error(error instanceof Error ? error.message : '未能打开本机更新界面。') }
+    finally { setOpening(false) }
+  }
+  return <Card title="版本与升级"><div className="version-card">
+    <div className="version-card__row"><span className="version-card__label">桌面应用版本</span><span className="version-card__value">{state?.app_version ?? '正在读取…'}</span></div>
+    <p className="version-card__hint">更新包含应用和内置运行环境。下载期间可以继续使用，安装前会请你确认并停止共享服务。</p>
+    <Button variant="secondary" onClick={open} disabled={opening}>{opening ? '正在打开…' : '打开桌面更新'}</Button>
+  </div></Card>
+}
+
+const ServerVersionUpgradeCard: React.FC = () => {
   const { state, refresh } = useSystemVersion()
   const toast = useToast()
   const [checking, setChecking] = useState(false)

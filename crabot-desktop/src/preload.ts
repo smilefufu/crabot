@@ -18,6 +18,7 @@ const bridge: DesktopBridge = {
   stopService: () => stateCall('desktop:stop'),
   reconnect: () => stateCall('desktop:reconnect'),
   quit: () => booleanCall('desktop:quit'),
+  openUpdateDialog: () => booleanCall('desktop:open-update'),
   openExternal: value => booleanCall('desktop:open-external', z.string().max(4096).parse(value)),
   revealDataFolder: () => booleanCall('desktop:reveal-data'),
   getDiagnostics: async () => DesktopDiagnosticsSchema.parse(await ipcRenderer.invoke('desktop:diagnostics')),
