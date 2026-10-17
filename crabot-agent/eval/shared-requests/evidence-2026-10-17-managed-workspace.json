@@ -1,0 +1,391 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-17",
+  "product_code_tested": "eb313ba69ca9d621920507b6a4c8695219ebdddf",
+  "model": "gpt-6.1-sol",
+  "format": "openai",
+  "total_model_adapter_calls": 137,
+  "scope": "Production Manager/Request/Harness/builtin tools and actual configured model; all identities, files, Channel/MCP/voice receipts synthetic and isolated. No live delivery, microphone, speaker or deployment.",
+  "limits": {
+    "batch_model_calls": 48,
+    "case_model_calls": 24,
+    "tokens_per_call": 4096,
+    "seconds_per_case": 240
+  },
+  "verification": {
+    "agent_affected_suites": {
+      "passed": 741,
+      "skipped_tmux": 5,
+      "excluded_existing_recovery_suite": true
+    },
+    "production_builtin_runtime_passed": 35,
+    "admin_impact_passed": 7,
+    "web_passed": 41,
+    "offline_replay_passed": 5,
+    "upgrade_passed": 16,
+    "builds": [
+      "Shared TypeScript",
+      "Agent TypeScript",
+      "Admin TypeScript",
+      "Web TypeScript and Vite bundle"
+    ],
+    "prompt_profiles": 8,
+    "fixed_core_tool_counts": [
+      15,
+      11,
+      3
+    ]
+  },
+  "baseline_failures_reproduced_on_unmodified_code": {
+    "code": "1a5a2823",
+    "failures": [
+      "harness-recovery: strict state_changed detail expectation",
+      "harness-recovery: asynchronous teardown ENOTEMPTY",
+      "worker-authorization: existing Master global detail fixture"
+    ]
+  },
+  "acceptance": {
+    "managed_default_workspace": "implemented and verified",
+    "passed_real_model_scenarios": [
+      "private-delivery",
+      "private-unconfirmed",
+      "worker-revoked",
+      "model-wait-stranger",
+      "tool-return-peer",
+      "worker-running-stranger"
+    ],
+    "failed_real_model_scenarios": {
+      "personal-voice": "Default Worker preparation and actual document read succeeded, but the final canary was not spoken after the original response window ended. A voice acknowledgement is not result delivery."
+    },
+    "inconclusive_runs_retained": "Batch B reached its 48-call cap before private-unconfirmed sent anything (17 calls available to that case). The fresh isolated full-case replay D passed with 22 calls; the original inconclusive run remains retained.",
+    "overall_B7": "incomplete",
+    "deployed": false,
+    "human_voice_acceptance": "not performed"
+  },
+  "cohorts": [
+    {
+      "cohort": "crabot-b7-managed-files-live-a-20261017-0755",
+      "plan_sha256": "81dff2afa165a705d71518ff4b47677bed5a887b6c003b3700c8764f87e17469",
+      "model_adapter_calls": 30,
+      "cases": [
+        {
+          "scenario": "personal-voice",
+          "recorded_status": "failed",
+          "fatal": null,
+          "model_adapter_calls": 14,
+          "elapsed_ms": 38128,
+          "checks": {
+            "no_hijack": true,
+            "worker_reached": true,
+            "bound_owner_unchanged": true,
+            "interruption_reached": true,
+            "no_private_shared_body": true,
+            "private_target": true,
+            "expected_effect": false,
+            "no_duplicate_unknown_send": true,
+            "worker_receipt": true,
+            "voice_tag_delivery": true,
+            "request_isolation": true,
+            "no_fixture_gaps": true
+          },
+          "spawn_workspace_omitted": 1,
+          "default_workspace_workers": 1,
+          "worker_file_results": [
+            {
+              "name": "Read",
+              "is_error": false
+            }
+          ],
+          "requester_private_send_attempts": 0,
+          "actual_prompt_audit": "passed",
+          "raw_artifact_sha256": {
+            "events.jsonl": "6e856128b8f31da57c41cf43f8c9ab5c0b6abab5414a313ef67680627dfd1f32",
+            "result.json": "fc1966bebbe8e2022f17393a37a74bdd2a8085928c4dfff3770bf600fa17c65a"
+          }
+        },
+        {
+          "scenario": "private-delivery",
+          "recorded_status": "passed",
+          "fatal": null,
+          "model_adapter_calls": 16,
+          "elapsed_ms": 31320,
+          "checks": {
+            "no_hijack": true,
+            "worker_reached": true,
+            "bound_owner_unchanged": true,
+            "interruption_reached": true,
+            "no_private_shared_body": true,
+            "private_target": true,
+            "expected_effect": true,
+            "no_duplicate_unknown_send": true,
+            "worker_receipt": true,
+            "voice_tag_delivery": true,
+            "request_isolation": true,
+            "no_fixture_gaps": true
+          },
+          "spawn_workspace_omitted": 1,
+          "default_workspace_workers": 1,
+          "worker_file_results": [
+            {
+              "name": "Read",
+              "is_error": false
+            }
+          ],
+          "requester_private_send_attempts": 1,
+          "actual_prompt_audit": "passed",
+          "raw_artifact_sha256": {
+            "events.jsonl": "dc377d778549e4fb7666219bfed27a16db651db14bd4ab9a0e7f0888d87d325f",
+            "result.json": "91fa989e6664ec7281a51676c99276841556b1ba87ac43db085890028d11cd5d"
+          }
+        }
+      ]
+    },
+    {
+      "cohort": "crabot-b7-managed-files-live-b-20261017-0757",
+      "plan_sha256": "bb2835d2909a04b58a8507865f12a6684864d7c13e011f7748ed8e434f9db36c",
+      "model_adapter_calls": 48,
+      "cases": [
+        {
+          "scenario": "model-wait-stranger",
+          "recorded_status": "passed",
+          "fatal": null,
+          "model_adapter_calls": 17,
+          "elapsed_ms": 40190,
+          "checks": {
+            "no_hijack": true,
+            "worker_reached": true,
+            "bound_owner_unchanged": true,
+            "interruption_reached": true,
+            "no_private_shared_body": true,
+            "private_target": true,
+            "expected_effect": true,
+            "no_duplicate_unknown_send": true,
+            "worker_receipt": true,
+            "voice_tag_delivery": true,
+            "request_isolation": true,
+            "no_fixture_gaps": true
+          },
+          "spawn_workspace_omitted": 0,
+          "default_workspace_workers": 0,
+          "worker_file_results": [
+            {
+              "name": "Write",
+              "is_error": false
+            },
+            {
+              "name": "Read",
+              "is_error": false
+            }
+          ],
+          "requester_private_send_attempts": 0,
+          "actual_prompt_audit": "passed",
+          "raw_artifact_sha256": {
+            "events.jsonl": "1c328f8be1633e1c74e98d28b05ada31be0fef71925475b3f76daca7507b0f1d",
+            "result.json": "27ff1c5391ce814f71695d90ac8032a5ec21e55dde991c971fd3b5096f544d7d"
+          }
+        },
+        {
+          "scenario": "worker-revoked",
+          "recorded_status": "passed",
+          "fatal": null,
+          "model_adapter_calls": 14,
+          "elapsed_ms": 40166,
+          "checks": {
+            "no_hijack": true,
+            "worker_reached": true,
+            "bound_owner_unchanged": true,
+            "interruption_reached": true,
+            "no_private_shared_body": true,
+            "private_target": true,
+            "expected_effect": true,
+            "no_duplicate_unknown_send": true,
+            "worker_receipt": true,
+            "voice_tag_delivery": true,
+            "request_isolation": true,
+            "no_fixture_gaps": true
+          },
+          "spawn_workspace_omitted": 0,
+          "default_workspace_workers": 0,
+          "worker_file_results": [
+            {
+              "name": "Write",
+              "is_error": true
+            }
+          ],
+          "requester_private_send_attempts": 0,
+          "actual_prompt_audit": "passed",
+          "raw_artifact_sha256": {
+            "events.jsonl": "b10f7e3c5730b222df4d0e7e7f74a937127bfbc6f5e5241bde77816aa6b66879",
+            "result.json": "ff8436092d371ab858065a803ea6ea25943382ec2438c766c5cfadda2659f882"
+          }
+        },
+        {
+          "scenario": "private-unconfirmed",
+          "recorded_status": "inconclusive",
+          "fatal": "B7_BUDGET_EXHAUSTED",
+          "model_adapter_calls": 17,
+          "elapsed_ms": 50594,
+          "checks": {
+            "no_hijack": true,
+            "worker_reached": true,
+            "bound_owner_unchanged": true,
+            "interruption_reached": true,
+            "no_private_shared_body": true,
+            "private_target": true,
+            "expected_effect": false,
+            "no_duplicate_unknown_send": false,
+            "worker_receipt": true,
+            "voice_tag_delivery": true,
+            "request_isolation": true,
+            "no_fixture_gaps": true
+          },
+          "spawn_workspace_omitted": 0,
+          "default_workspace_workers": 0,
+          "worker_file_results": [
+            {
+              "name": "Read",
+              "is_error": false
+            }
+          ],
+          "requester_private_send_attempts": 0,
+          "actual_prompt_audit": "passed",
+          "raw_artifact_sha256": {
+            "events.jsonl": "9ce8b85a093c737ef231615119e6dab66ce09bfe7871c9272c0cfe3a83dcc8f7",
+            "result.json": "d05e9b271ef7fd9a682dbbf1d52487ee1a0a89d383d073a507333eb2f7b01949"
+          }
+        }
+      ]
+    },
+    {
+      "cohort": "crabot-b7-managed-files-live-c-20261017-0758",
+      "plan_sha256": "91d3614fcdad9dd4c18442dea8988f69a90051090ba0ff7a76075ea14e153687",
+      "model_adapter_calls": 37,
+      "cases": [
+        {
+          "scenario": "tool-return-peer",
+          "recorded_status": "passed",
+          "fatal": null,
+          "model_adapter_calls": 20,
+          "elapsed_ms": 44234,
+          "checks": {
+            "no_hijack": true,
+            "worker_reached": true,
+            "bound_owner_unchanged": true,
+            "interruption_reached": true,
+            "no_private_shared_body": true,
+            "private_target": true,
+            "expected_effect": true,
+            "no_duplicate_unknown_send": true,
+            "worker_receipt": true,
+            "voice_tag_delivery": true,
+            "request_isolation": true,
+            "no_fixture_gaps": true
+          },
+          "spawn_workspace_omitted": 0,
+          "default_workspace_workers": 0,
+          "worker_file_results": [
+            {
+              "name": "Glob",
+              "is_error": false
+            },
+            {
+              "name": "Write",
+              "is_error": false
+            },
+            {
+              "name": "Read",
+              "is_error": false
+            }
+          ],
+          "requester_private_send_attempts": 0,
+          "actual_prompt_audit": "passed",
+          "raw_artifact_sha256": {
+            "events.jsonl": "da5195291045b2f1b959f6bc26c4ef1956488d642fd0da2c7e9a0741e115ef85",
+            "result.json": "f3c86d4e2e54808a9f9c59955543b7fa3b012266e06545fb4997a63005513d9e"
+          }
+        },
+        {
+          "scenario": "worker-running-stranger",
+          "recorded_status": "passed",
+          "fatal": null,
+          "model_adapter_calls": 17,
+          "elapsed_ms": 48650,
+          "checks": {
+            "no_hijack": true,
+            "worker_reached": true,
+            "bound_owner_unchanged": true,
+            "interruption_reached": true,
+            "no_private_shared_body": true,
+            "private_target": true,
+            "expected_effect": true,
+            "no_duplicate_unknown_send": true,
+            "worker_receipt": true,
+            "voice_tag_delivery": true,
+            "request_isolation": true,
+            "no_fixture_gaps": true
+          },
+          "spawn_workspace_omitted": 0,
+          "default_workspace_workers": 0,
+          "worker_file_results": [
+            {
+              "name": "Write",
+              "is_error": false
+            },
+            {
+              "name": "Read",
+              "is_error": false
+            }
+          ],
+          "requester_private_send_attempts": 0,
+          "actual_prompt_audit": "passed",
+          "raw_artifact_sha256": {
+            "events.jsonl": "d96489796e56c27b7995f5ec259de7a23bab150b1f23625b41cefb7abf4e560d",
+            "result.json": "8eb83495ad4a807a0119a8532bc32f1358f5c2066f276eea975f70947adda208"
+          }
+        }
+      ]
+    },
+    {
+      "cohort": "crabot-b7-managed-files-live-d-20261017-0800",
+      "plan_sha256": "9f2ef2589f6db785920ec0c7660c882253b00a767ea2a415b373ca8da1134f9f",
+      "model_adapter_calls": 22,
+      "cases": [
+        {
+          "scenario": "private-unconfirmed",
+          "recorded_status": "passed",
+          "fatal": null,
+          "model_adapter_calls": 22,
+          "elapsed_ms": 53353,
+          "checks": {
+            "no_hijack": true,
+            "worker_reached": true,
+            "bound_owner_unchanged": true,
+            "interruption_reached": true,
+            "no_private_shared_body": true,
+            "private_target": true,
+            "expected_effect": true,
+            "no_duplicate_unknown_send": true,
+            "worker_receipt": true,
+            "voice_tag_delivery": true,
+            "request_isolation": true,
+            "no_fixture_gaps": true
+          },
+          "spawn_workspace_omitted": 1,
+          "default_workspace_workers": 1,
+          "worker_file_results": [
+            {
+              "name": "Read",
+              "is_error": false
+            }
+          ],
+          "requester_private_send_attempts": 1,
+          "actual_prompt_audit": "passed",
+          "raw_artifact_sha256": {
+            "events.jsonl": "91a5fb0f99b1055249ab84273dbbdf5322f16433d4da86165d240066e3203c5f",
+            "result.json": "b831d064b4f6c173813b1e9951c37be308c1943f8a60cb8d8bd8392a90557f5b"
+          }
+        }
+      ]
+    }
+  ]
+}
