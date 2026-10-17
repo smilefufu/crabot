@@ -1,9 +1,23 @@
+import type { ConversationRequestSource } from './conversation-request-source.js'
+
 /** protocol-memory §3.0: trusted host context; never a model argument. */
 export interface MemoryAccessContext {
-  actor_kind: 'conversation' | 'master_private' | 'admin' | 'builtin_reflection' | 'builtin_graph_rebuild' | 'mechanical'
+  actor_kind: 'conversation' | 'master_private' | 'master_request' | 'admin' | 'builtin_reflection' | 'builtin_graph_rebuild' | 'mechanical'
   memory_enabled: boolean
+  request?: MemoryRequestContext
   scene?: { type: 'friend'; friend_id: string } | { type: 'group_session'; channel_id: string; session_id: string }
 }
+
+export interface MemoryRequestContext {
+  request_id: string
+  source: ConversationRequestSource
+}
+export interface VerifyMemoryAccessParams {
+  caller_kind: 'core_agent' | 'admin_web'
+  master_request?: MemoryRequestContext
+}
+export interface VerifyMemoryAccessResult { verified: true }
+export interface VerifyMemoryRequestAccessResult { verified: true; request_verified: true }
 
 export const MEMORY_DATA_RPC_METHODS = [
   'write_short_term', 'search_short_term', 'batch_write_short_term', 'write_long_term', 'search_long_term',

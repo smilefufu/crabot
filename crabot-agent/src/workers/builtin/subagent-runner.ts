@@ -1,3 +1,5 @@
+import type { WorkerRequestToolScope } from '../harness/request-tools.js'
+import type { EngineOptions } from '../../engine/types.js'
 import { observationFile, persistObservation, requestObservation, readObservation, executionObservation } from '../../permissions/execution-observation.js'
 import { authorizeTool, roleAuthorization } from '../../permissions/tool-authorization.js'
 import { ChildExecutionSession } from './child-execution-session.js'
@@ -29,6 +31,8 @@ import { createBuiltinWorkerHookRegistry } from './runtime.js'
 const WORKER_OWNER = '__builtin_worker__'
 
 export interface BuiltinSubagentExecutionContext {
+  readonly requestTools?: WorkerRequestToolScope
+  readonly requestCliAuthorization?: EngineOptions['requestCliAuthorization']
   readonly permissionConfig: ToolPermissionConfig
   readonly resolvedPermissions: ResolvedPermissions
   readonly availableSkills: ReadonlyArray<SkillConfig>
@@ -167,6 +171,8 @@ export class BuiltinSubagentRunner {
         return {
           tools: childCapabilities.tools.map(tool => {
             const bound = rebound.find(bound => bound.name === tool.name)
+            if (execution.requestTools && bound) return execution.requestTools.wrapChildBound(tool, bound)
+            if (execution.requestTools && tool.name === 'Skill') return execution.requestTools.wrapChildSkill(tool, childCapabilities.skills)
             if (tool.authorization) return authorizeTool(bound ?? tool, { ...tool.authorization, role: 'child' })
             if (tool.name === 'Skill') return authorizeTool(tool, roleAuthorization('child'))
             return bound ?? tool
@@ -213,6 +219,7 @@ export class BuiltinSubagentRunner {
       permissionConfig: childExecution.permissionConfig,
       resolvedPermissions: childExecution.resolvedPermissions,
       senderIsMaster: false,
+      requestCliAuthorization: execution.requestCliAuthorization,
       hookRegistry: this.childHookRegistry(subagent),
       ...(subagent.hook_preset === 'lsp_diagnostics' ? { lspManager: this.lspManager } : {}),
       subTrace: {
@@ -354,7 +361,7 @@ export class BuiltinSubagentRunner {
       allowedSkillIds: subagent.allowed_skill_ids,
       availableSkills: execution.availableSkills,
       getCwd: execution.getCwd,
-      allowPermissionGatedSkills: execution.resolvedPermissions.tool_access.mcp_skill,
+      allowPermissionGatedSkills: execution.requestTools?.permitsChildUserSkills ?? execution.resolvedPermissions.tool_access.mcp_skill,
     })
   }
 

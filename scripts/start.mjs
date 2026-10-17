@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { prepareSharedRequests } from './upgrade-lib/shared-requests.mjs'
 
 // Crabot Start — 生产模式启动
 // 加载环境变量 → 创建数据目录 → 密码检查 → 启动 Module Manager（前台）
@@ -238,6 +239,8 @@ if (pending.length > 0) {
   }
   console.log('[crabot] migrations done')
 }
+
+await prepareSharedRequests(ROOT, DATA_DIR)
 
 if (!DAEMON_MODE) {
   // 前台模式：写本进程 PID（stop 时 SIGTERM 给我，我转发给 MM）

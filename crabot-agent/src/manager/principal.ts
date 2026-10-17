@@ -148,6 +148,8 @@ export interface PrincipalResolverDeps {
   readonly crabSelfHandle: (channelId: string) => string | undefined
   /** Authoritative Admin record used for execution-time Master revalidation. */
   readonly getFriend?: (friendId: string) => Promise<Friend | null>
+  /** Actual Admin ChannelIdentity lookup for immutable group input attribution. */
+  readonly resolveChannelSender?: (channelId: string, platformUserId: string) => Promise<Friend | null>
   /** Cold recovery of pre-binding sessions, from the exact Channel target only. */
   readonly getSessionType?: (channelId: string, sessionId: string) => Promise<'private' | 'group'>
 }

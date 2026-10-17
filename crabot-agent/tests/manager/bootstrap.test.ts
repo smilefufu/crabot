@@ -187,14 +187,17 @@ describe('manager bootstrap（P5 Task 1）', () => {
     }
   }
 
-  it('discovers wire 5 and assembles the voice reply prompt and streaming output together', async () => {
+  it('discovers wire 7 and assembles the voice reply prompt and streaming output together', async () => {
     const requests: LLMStreamParams[] = []
+    let currentTurn: string | null = 'fixture-turn'
     const callSensitive = vi.fn(async (_port, method, params) => {
+      if (method === 'get_voice_output_state') return { channel_id: 'voice', session_id: 'voice-group', connection_epoch: 'fixture-epoch', foreground: true, speech_enabled: true, activity: currentTurn ? 'processing' : 'idle', current_turn_id: currentTurn }
       expect(method).toBe('voice_output')
+      if (params.event.type === 'response_end') currentTurn = null
       return params.event.type === 'reply_end' ? { platform_message_id: params.event.playback_id, sent_at: new Date().toISOString(), played_samples: 480 } : { accepted: true }
     })
     const messagingDeps = makeMessagingDeps()
-    messagingDeps.rpcClient = { call: vi.fn(async () => ({ voice: { protocol_version: 5 } })), callSensitive } as never
+    messagingDeps.rpcClient = { call: vi.fn(async () => ({ voice: { protocol_version: 8 } })), callSensitive } as never
     const stack = buildManagerStack(makeDeps({ coreRuntimeBearer: () => 'fixture-core', messagingDeps,
       managerAdapter: () => ({ async *stream(params) {
         requests.push(params)
@@ -209,7 +212,7 @@ describe('manager bootstrap（P5 Task 1）', () => {
         turnId: 'fixture-turn', senderFriends: [FRIEND_A], replyContext: { channel_id: 'voice', session_id: 'voice-group', turn_id: 'fixture-turn', connection_epoch: 'fixture-epoch', expires_at: new Date(Date.now() + 60000).toISOString() },
       })
       expect(requests[0].systemPrompt).toContain('回复当前语音会话使用 voice_reply 标签')
-      expect(callSensitive.mock.calls.map(call => call[2].event.type)).toEqual(['reply_start', 'reply_text', 'reply_end', 'response_end'])
+      expect(callSensitive.mock.calls.filter(call => call[1] === 'voice_output' && call[2].event.type !== 'pending_results').map(call => call[2].event.type)).toEqual(['reply_start', 'reply_text', 'reply_end', 'response_end'])
     } finally { await stack.dispose() }
   })
 
@@ -329,6 +332,24 @@ describe('manager bootstrap（P5 Task 1）', () => {
     await expect(stack.dispose()).rejects.toThrow('Failed to dispose one or more worker adapters')
 
     for (const dispose of disposers) expect(dispose).toHaveBeenCalledTimes(1)
+  })
+
+  it('personal or unverifiable Worker notifications never enter shared history, public events or fail-loud output', async () => {
+    const publish = vi.fn(), failure = vi.fn()
+    const stack = buildManagerStack({ ...makeDeps(), publishEvent: publish, reportEpisodeFailure: failure })
+    const event = { ts: new Date().toISOString(), kind: 'state_changed' as const, worker_id: 'w-personal', seq: 1,
+      task_status: 'halted' as const, detail: { text: 'PERSONAL_RESULT_AND_ERROR' } }
+    const load = vi.spyOn(stack.requestGuard, 'load').mockResolvedValue({ worker: { origin: { request: { execution_scope: 'request' } } } } as never)
+    const route = vi.spyOn(stack.registry, 'routeWorkerEvent'), operation = vi.spyOn(stack.registry, 'routeOperationNotification')
+    const callbacks = (stack.harness as any).deps
+    expect(await callbacks.onEvent(event)).toEqual({ consumed: false })
+    expect(await callbacks.onOperationNotification('wechat::sess-boot', event)).toEqual({ consumed: false })
+    load.mockRejectedValue(new Error('CAPABILITY_UNKNOWN: lost request context'))
+    expect(await callbacks.onEvent(event)).toEqual({ consumed: false })
+    expect(await callbacks.onOperationNotification('wechat::sess-boot', event)).toEqual({ consumed: false })
+    expect(route).not.toHaveBeenCalled(); expect(operation).not.toHaveBeenCalled()
+    expect(publish).not.toHaveBeenCalled(); expect(failure).not.toHaveBeenCalled()
+    await stack.dispose()
   })
 
   // --- ② 四步接线契约 ---
@@ -883,7 +904,7 @@ describe('manager bootstrap（P5 Task 1）', () => {
       await vi.waitFor(() => expect(vi.getTimerCount()).toBeGreaterThan(0))
       await vi.advanceTimersByTimeAsync(60 * 60 * 1000)
       await vi.waitFor(() => expect(inspected).toBeDefined())
-      await vi.advanceTimersByTimeAsync(100)
+      await vi.waitFor(() => expect(stack.registry.isExecuting(key)).toBe(false))
 
       expect(inspected).toMatchObject({ isError: false })
       expect(inspected?.output).toContain('# 自省项目')
@@ -895,6 +916,7 @@ describe('manager bootstrap（P5 Task 1）', () => {
       ))
       expect(context.principal_permissions).toEqual(principalPermissions)
       await stack.dispose()
+      await vi.waitFor(() => expect(stack.registry.isExecuting(key)).toBe(false))
     } finally {
       vi.clearAllTimers()
       vi.useRealTimers()
@@ -1233,7 +1255,7 @@ describe('manager bootstrap（P5 Task 1）', () => {
     } finally { await stack.dispose() }
   })
 
-  it('群聊 Worker 事件不把最近发言者当作私聊委托身份', async () => {
+  it('无可信来源的旧群Worker事件不借最近发言者身份新派发', async () => {
     let script: LLMAdapter = silentManager()
     const stack = buildManagerStack(makeDeps({ managerAdapter: () => script }))
     const key = 'wechat::sess-boot' as ManagerKey
@@ -1246,8 +1268,8 @@ describe('manager bootstrap（P5 Task 1）', () => {
       await stack.registry.routeWorkerEvent({ ts: new Date().toISOString(), kind: 'state_changed', worker_id: 'w-seeded', seq: 1 })
       await settle()
       const spawned = (await stack.ledger.listAllWorkers()).filter(w => w.worker.worker_id !== 'w-seeded')
-      expect(spawned).toHaveLength(1)
-      expect(spawned[0].worker.origin.creator_friend_id).toBeUndefined()
+      expect(spawned).toHaveLength(0)
+      expect((await stack.ledger.findWorker('w-seeded'))?.worker.origin.request).toBeUndefined()
     } finally {
       await stack.dispose()
     }

@@ -1,0 +1,307 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-16",
+  "product_code_tested": "0c628dd56d9d5c8495d441e1cc4795a1ef42950a",
+  "model": "gpt-6.1-sol",
+  "format": "openai",
+  "total_model_adapter_calls_including_invalid_fixtures": 178,
+  "cohorts": [
+    {
+      "cohort": "crabot-b7-pilot-20261016-2",
+      "model_adapter_calls": 7,
+      "plan_sha256": "75048b4c1b7fc380510423a729584b0eeeca08cb3966eaeee66e93ee4e6a73be",
+      "cases": [
+        {
+          "scenario": "personal-voice",
+          "model_adapter_calls": 6,
+          "recorded_status": "passed",
+          "acceptance": "not_accepted_fixture",
+          "elapsed_ms": 24529,
+          "first_voice_ms": null,
+          "private_send_attempts": 0,
+          "raw_artifact_sha256": {
+            "events.jsonl": "4f2758835fe06d845685d0cb909d7113271b2d700dd310cc751c9c8fb71913a2",
+            "result.json": "c3495b3900fba8b16905d2332ca01e63e992128e839d6a015a78d9c2afa954be"
+          },
+          "failed_checks_as_recorded": []
+        },
+        {
+          "scenario": "public-voice",
+          "model_adapter_calls": 1,
+          "recorded_status": "passed",
+          "acceptance": "not_accepted_fixture",
+          "elapsed_ms": 3340,
+          "first_voice_ms": null,
+          "private_send_attempts": 0,
+          "raw_artifact_sha256": {
+            "events.jsonl": "52f3d0ecd785feff88ca3e63e823f6bb6170af119e923ee9fcd781005303ef5f",
+            "result.json": "9d5483a359e2ef659d25a9bc0ecd2bed79103430bcdbac73793f0b0be1e68534"
+          },
+          "failed_checks_as_recorded": []
+        }
+      ]
+    },
+    {
+      "cohort": "crabot-b7-interruption-20261016-1",
+      "model_adapter_calls": 29,
+      "plan_sha256": "2368a68a800b01d6881312bde488050f730a1c6eea1c28d30a196ed4ea8a2b2c",
+      "cases": [
+        {
+          "scenario": "model-wait-stranger",
+          "model_adapter_calls": 15,
+          "recorded_status": "failed",
+          "acceptance": "not_accepted_fixture",
+          "elapsed_ms": 47909,
+          "first_voice_ms": null,
+          "private_send_attempts": 0,
+          "raw_artifact_sha256": {
+            "events.jsonl": "fab2fad37a6677ba9f68c54d9e75726907393137b5b1442cbd77b97fb8cb0c61",
+            "result.json": "461e00e7f6f022be68ec77fd4cf5e21a3f70d9b00a3612c3887affb338b56723"
+          },
+          "failed_checks_as_recorded": [
+            "expected_effect"
+          ]
+        },
+        {
+          "scenario": "tool-return-peer",
+          "model_adapter_calls": 14,
+          "recorded_status": "terminated_without_result",
+          "acceptance": "not_accepted_fixture",
+          "elapsed_ms": null,
+          "first_voice_ms": null,
+          "private_send_attempts": 0,
+          "raw_artifact_sha256": {
+            "events.jsonl": "d20946fc7f773ae53bd20ca710545be53c1ef873be6cd99eb2485c9abbac92ac"
+          }
+        }
+      ]
+    },
+    {
+      "cohort": "crabot-b7-interruption-20261016-2",
+      "model_adapter_calls": 40,
+      "plan_sha256": "6d5a90ff5dc24878c05f4f379f4b7d99ec603a33d119920bc9107245238f16d8",
+      "cases": [
+        {
+          "scenario": "model-wait-stranger",
+          "model_adapter_calls": 13,
+          "recorded_status": "passed",
+          "acceptance": "not_accepted_fixture",
+          "elapsed_ms": 40827,
+          "first_voice_ms": null,
+          "private_send_attempts": 0,
+          "raw_artifact_sha256": {
+            "events.jsonl": "778d600b1e45a63a7503f5ba1ee5b8cb9df6d3aa85640046f08c35efe88ee0c4",
+            "result.json": "686a750d30b400bd8e4ae05edc7e168639242e7b30dc3c14ab66e76e5485c4fa"
+          },
+          "failed_checks_as_recorded": []
+        },
+        {
+          "scenario": "tool-return-peer",
+          "model_adapter_calls": 12,
+          "recorded_status": "failed",
+          "acceptance": "not_accepted_fixture",
+          "elapsed_ms": 39034,
+          "first_voice_ms": null,
+          "private_send_attempts": 0,
+          "raw_artifact_sha256": {
+            "events.jsonl": "3378c489c6ab72e4bad16f2ad07d1f7281fd0d6430e6ed9f8e2d619465007959",
+            "result.json": "c3a03f6478552811f93339442d0805b7ef436eaf801ed4593947f7a0229a0bbd"
+          },
+          "failed_checks_as_recorded": [
+            "interruption_reached",
+            "expected_effect"
+          ]
+        },
+        {
+          "scenario": "worker-running-stranger",
+          "model_adapter_calls": 15,
+          "recorded_status": "passed",
+          "acceptance": "not_accepted_fixture",
+          "elapsed_ms": 35608,
+          "first_voice_ms": null,
+          "private_send_attempts": 0,
+          "raw_artifact_sha256": {
+            "events.jsonl": "6549583978c00da89aae1fab5366775d657a3f5ecad211c3d7912d751c1cb56c",
+            "result.json": "f1ae3b681d60c30f82901b53fedabd41c54bab9f246549d1ec197ec0c3577fe4"
+          },
+          "failed_checks_as_recorded": []
+        }
+      ]
+    },
+    {
+      "cohort": "crabot-b7-controlled-20261016-3",
+      "model_adapter_calls": 36,
+      "plan_sha256": "31a5eaf6337cfff961640c58ec41572ad6e8fc79212c2df2844654fb3a5a295e",
+      "cases": [
+        {
+          "scenario": "personal-voice",
+          "model_adapter_calls": 6,
+          "recorded_status": "failed",
+          "acceptance": "failed_workspace_omitted",
+          "elapsed_ms": 21342,
+          "first_voice_ms": null,
+          "private_send_attempts": 0,
+          "raw_artifact_sha256": {
+            "events.jsonl": "ac66a997c5f4d4aebe0e3e0e4edd0ec97c2cd27c18984cb3d400beb4a4e44d2a",
+            "result.json": "209b7f1531b75e1b88959b677a69160a3087c0ff96bc8e4b00e7dbca553c0c97"
+          },
+          "failed_checks_as_recorded": [
+            "expected_effect"
+          ]
+        },
+        {
+          "scenario": "tool-return-peer",
+          "model_adapter_calls": 16,
+          "recorded_status": "passed",
+          "acceptance": "partial_isolation_only_call_limit_hit",
+          "elapsed_ms": 38416,
+          "first_voice_ms": null,
+          "private_send_attempts": 0,
+          "raw_artifact_sha256": {
+            "events.jsonl": "06b5dd6366491297ed853082b732ae05aefde3777a8b55a080fc1cf0ad63d5d0",
+            "result.json": "fd66b93769f316e6e99d40c6b2356cf5455d0643cabcb09f1f6048559f9aa555"
+          },
+          "failed_checks_as_recorded": []
+        },
+        {
+          "scenario": "worker-revoked",
+          "model_adapter_calls": 14,
+          "recorded_status": "passed",
+          "acceptance": "passed_revocation_guard",
+          "elapsed_ms": 49406,
+          "first_voice_ms": null,
+          "private_send_attempts": 0,
+          "raw_artifact_sha256": {
+            "events.jsonl": "6167f83f6e08459bbf858e4489fab5948338493c7af729654baf319266bb61b5",
+            "result.json": "3d8e7ecc2e3cd7437b39a0e745d44169999a36068c5bb6487f13bab347ca9b5e"
+          },
+          "failed_checks_as_recorded": []
+        }
+      ]
+    },
+    {
+      "cohort": "crabot-b7-private-20261016-4",
+      "model_adapter_calls": 21,
+      "plan_sha256": "c19186c968736b7496adba8e327589f4b29faed0c430e45e79b3d99fef58313d",
+      "cases": [
+        {
+          "scenario": "private-delivery",
+          "model_adapter_calls": 9,
+          "recorded_status": "failed",
+          "acceptance": "failed_workspace_omitted",
+          "elapsed_ms": 32377,
+          "first_voice_ms": {},
+          "private_send_attempts": 1,
+          "raw_artifact_sha256": {
+            "events.jsonl": "aada763ab57967be78a61d1327ae2e6cda06c22a7efdf940aba2cd2d9bd658b0",
+            "result.json": "271a7bf7d8f57e675171d5079742555a12b25bcf33fd9b886a01d4014c54a83c"
+          },
+          "failed_checks_as_recorded": [
+            "expected_effect"
+          ]
+        },
+        {
+          "scenario": "private-unconfirmed",
+          "model_adapter_calls": 11,
+          "recorded_status": "failed",
+          "acceptance": "not_accepted_workspace_and_unknown_send_fixture",
+          "elapsed_ms": 44232,
+          "first_voice_ms": {},
+          "private_send_attempts": 1,
+          "raw_artifact_sha256": {
+            "events.jsonl": "81d9afcf16c818427fbd2e6524d51dce940909e76bdfb5bafa98ae1c57b5169f",
+            "result.json": "3e1d774b166be07db57d327b09c4e9c2f411c3faab9cdcc24a7d1b8361436366"
+          },
+          "failed_checks_as_recorded": [
+            "expected_effect",
+            "no_duplicate_unknown_send"
+          ]
+        },
+        {
+          "scenario": "public-voice",
+          "model_adapter_calls": 1,
+          "recorded_status": "passed",
+          "acceptance": "passed_synthetic_voice_transport",
+          "elapsed_ms": 4373,
+          "first_voice_ms": {
+            "text_ms": 3594
+          },
+          "private_send_attempts": 0,
+          "raw_artifact_sha256": {
+            "events.jsonl": "00f941d410b857d00e37f009d2d1dcc3ee255856db8d89d94a3cb2127e8b12bf",
+            "result.json": "b8a598b7f3eb5b19368179756f835a39c29f46305553ec8c0819f6bc8fdffc80"
+          },
+          "failed_checks_as_recorded": []
+        }
+      ]
+    },
+    {
+      "cohort": "crabot-b7-explicit-20261016-5",
+      "model_adapter_calls": 45,
+      "plan_sha256": "fdcc7008e6750b4e5aaa62201412cba28853b9ebf9ee4c446eecdbf9b72e1d8b",
+      "cases": [
+        {
+          "scenario": "personal-voice-explicit-workspace",
+          "model_adapter_calls": 14,
+          "recorded_status": "failed",
+          "acceptance": "failed_async_voice_profile_and_delivery",
+          "elapsed_ms": 51134,
+          "first_voice_ms": {
+            "text_ms": 20137
+          },
+          "private_send_attempts": 0,
+          "raw_artifact_sha256": {
+            "events.jsonl": "045091067c1f027b1138d11313dbf4a45fc405bc98a5789b059116ca25839068",
+            "result.json": "f528accdc9de93879821fc4b03d7b30bc8171b41cf3b3d8b70250575270c9e1b"
+          },
+          "failed_checks_as_recorded": [
+            "expected_effect"
+          ]
+        },
+        {
+          "scenario": "private-delivery-explicit-workspace",
+          "model_adapter_calls": 16,
+          "recorded_status": "passed",
+          "acceptance": "passed_private_body_and_interruption_isolation",
+          "elapsed_ms": 43135,
+          "first_voice_ms": {},
+          "private_send_attempts": 1,
+          "raw_artifact_sha256": {
+            "events.jsonl": "88d36579a110ae8a2eddaa399bd1e763c95ec9aabf4035eb94577befe4434089",
+            "result.json": "83a36df24fd67a7ba8f018e5149384cfd1846e81497deba555133dce364b7c78"
+          },
+          "failed_checks_as_recorded": []
+        },
+        {
+          "scenario": "private-unconfirmed-explicit-workspace",
+          "model_adapter_calls": 15,
+          "recorded_status": "passed",
+          "acceptance": "passed_single_unknown_private_attempt_no_body_fallback",
+          "elapsed_ms": 49291,
+          "first_voice_ms": {},
+          "private_send_attempts": 1,
+          "raw_artifact_sha256": {
+            "events.jsonl": "1831a3c9a0deb22de3cdf1808d268a6c3f1dc064a4b8e6bb4043a8ce76ef3a2a",
+            "result.json": "c78653ac6c957d4bbb3847f46489dcc9429cd0046efa4339cf400074c9c5de5a"
+          },
+          "failed_checks_as_recorded": []
+        }
+      ]
+    }
+  ],
+  "post_model_repair": {
+    "file": "crabot-agent/src/manager/request-loop.ts",
+    "behavior": "Preserve known origin voice profile independently of an active answer opportunity; requester_private keeps group audio disabled. No prompt text change, no new audio opportunity.",
+    "verification": "52 focused production/prompt/request/voice regressions; 141 tool catalog/search/MCP authorization regressions; Agent TypeScript build; 4 offline replay checks. No real-model rerun of this repair yet."
+  },
+  "unaccepted": [
+    "desktop explanation wording awaits direct human confirmation",
+    "isolated request spawn_worker.workspace wording awaits direct human confirmation",
+    "natural file request without explicit workspace failed",
+    "asynchronous voice result after original response_end not delivered; preserving profile alone does not solve delivery lifecycle",
+    "final fixture reruns for all three interruption phases and remaining B7 matrix",
+    "human device and ASR/TTS/audio latency acceptance"
+  ],
+  "b7_complete": false,
+  "live_deployment_modified": false
+}

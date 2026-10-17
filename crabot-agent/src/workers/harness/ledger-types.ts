@@ -1,3 +1,4 @@
+import type { ConversationRequestBinding } from '../../manager/conversation-request.js'
 import type { ModuleId, FriendId, SessionId, TaskId } from '../../types'
 import type { IncarnationEndReason, IncarnationId, WorkerContractState, WorkerImplId, WorkspaceInstructionSnapshot, WorkspaceGitObservation } from '../types'
 
@@ -149,6 +150,7 @@ export interface LedgerWorker {
     closed?: TaskClosedInfo
   }
   origin: {
+    request?: ConversationRequestBinding
     spawned_by_episode?: string
     creator_friend_id?: FriendId
     trigger_type: 'message' | 'scheduled' | 'system'
@@ -164,4 +166,10 @@ export interface LedgerWorker {
 export interface WorkerLedger {
   manager_key: ManagerKey
   workers: LedgerWorker[]
+}
+
+/** Physical envelope rejects readers that do not understand request-bound Workers. */
+export interface RequestAwareWorkerLedgerFile {
+  schema_version: 1
+  ledger: WorkerLedger
 }

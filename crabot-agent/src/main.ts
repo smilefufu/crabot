@@ -1,3 +1,4 @@
+import { assertRequestUpgradeReady } from './manager/request-upgrade.js'
 /**
  * Unified Agent 模块入口
  */
@@ -50,6 +51,7 @@ process.on('unhandledRejection', (reason, promise) => {
 })
 
 async function main(): Promise<void> {
+  await assertRequestUpgradeReady(getAgentDataDir())
   // 初始化 RpcClient（用于从 Admin 获取配置）
   const mmEndpoint = process.env.CRABOT_MM_ENDPOINT || 'http://localhost:19000'
   const rpcClient = new RpcClient(parseInt(mmEndpoint.split(':').pop() || '19000', 10))

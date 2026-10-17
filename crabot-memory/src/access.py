@@ -61,7 +61,7 @@ def authorize_method(method: str, params: dict) -> MemoryAccessContext:
     context = access_context(params, required=True)
     actor = context.actor_kind
     if (actor == "conversation" and method in _GLOBAL_METHODS
-        or actor == "master_private" and method in _ADMIN_METHODS
+        or actor in {"master_private", "master_request"} and method in _ADMIN_METHODS
         or actor == "builtin_reflection" and method not in _REFLECTION_METHODS
         or actor == "builtin_graph_rebuild" and method not in _GRAPH_METHODS
         or actor == "mechanical" and method != "run_maintenance"):

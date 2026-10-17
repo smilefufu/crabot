@@ -457,6 +457,7 @@ export interface EngineOptions {
   readonly senderIsMaster?: boolean
   /** 发起人 effective permissions（friend ∪ session 并集）——CLI permission gate hook 用（静态兜底） */
   readonly resolvedPermissions?: import('../types.js').ResolvedPermissions
+  readonly requestCliAuthorization?: (input: import('../hooks/types.js').HookInput) => Promise<import('../hooks/types.js').HookResult>
   /**
    * 任务权限活值 getter（存在时 hook 优先读它）。由 worker loop 注入 taskState 持有者，
    * supplement/resume 刷新后下一轮 hook 即生效（spec: 2026-07-20-task-permission-hot-refresh-design.md）。

@@ -713,6 +713,7 @@ describe('trigger_schedule 端到端(真实 manager 栈 + mock LLM)', () => {
     const spawnSpy = vi
       .spyOn(stack.harness, 'spawnWorker')
       .mockResolvedValue(makeLedgerWorker({ workerId: 'w-spawned' }))
+    const routeSpy = vi.spyOn(stack.registry, 'admitSchedule')
     const agent = buildAgent(stack)
 
     // 该会话最近说话的是 f-lastspeaker（唤醒边界解析过一次，写进了会话级缓存）
@@ -742,6 +743,8 @@ describe('trigger_schedule 端到端(真实 manager 栈 + mock LLM)', () => {
     // 解析是以调度的 creator 名义发起的，档位也是那一份
     expect(calls.map((c) => c.senderFriendId)).toEqual(['f-lastspeaker', 'friend-7', 'friend-7'])
     expect(params.principal_permissions?.memory_scopes).toEqual(['scope-of-friend-7'])
+    const admissions = await Promise.all(routeSpy.mock.results.map(result => result.value))
+    await Promise.all(admissions.map(admission => admission.completion))
   })
 
   it('is_builtin 的 scheduled 不借最近发言人的权限派发普通 Worker', async () => {
@@ -832,6 +835,25 @@ describe('get_worker_detail(§8.3)', () => {
   it('不存在 → 抛带 worker_id 的明确错误', async () => {
     const agent = buildAgent({ ledger: { findWorker: async () => undefined } })
     await expect(agent.handleGetWorkerDetail({ worker_id: 'w-missing' })).rejects.toThrow(/w-missing/)
+  })
+})
+
+describe('Admin Worker request authority projection', () => {
+  const binding = { schema_version: 1 as const, request_id: 'original-request', source_sha256: 'h', execution_scope: 'request' as const }
+  it('shows only verified original identity and ceilings, never the source message body', async () => {
+    const worker = makeLedgerWorker({ workerId: 'w' }); worker.origin.request = binding
+    const fixed = { worker, request: { permission_sources: { group: { kind: 'group' }, friend: { kind: 'friend' } }, delivery: { kind: 'requester_private' } },
+      source: { sender_friend_id: 'original-friend', message: { session: { channel_id: 'c' }, sender: { platform_user_id: 'original', platform_display_name: 'Original' }, content: { text: 'PRIVATE ORIGINAL BODY' } } } }
+    const agent = buildAgent({ ledger: { findWorker: async () => ({ managerKey: worker.manager_key, worker }) }, requestGuard: { load: async () => fixed } } as any)
+    const result = await agent.handleGetWorkerDetail({ worker_id: 'w' })
+    expect(result.request_authority).toMatchObject({ status: 'verified', initiator: { friend_id: 'original-friend', platform_user_id: 'original' }, delivery: 'requester_private' })
+    expect(JSON.stringify(result.request_authority)).not.toContain('PRIVATE ORIGINAL BODY')
+  })
+  it('invalid bindings retain an unavailable Admin record and do not infer creator authority', async () => {
+    const worker = makeLedgerWorker({ workerId: 'w' }); worker.origin.request = binding
+    const agent = buildAgent({ ledger: { findWorker: async () => ({ managerKey: worker.manager_key, worker }) }, requestGuard: { load: async () => { throw new Error('hash mismatch') } } } as any)
+    const result = await agent.handleGetWorkerDetail({ worker_id: 'w' })
+    expect(result.request_authority).toEqual({ status: 'unavailable', request_id: binding.request_id, execution_scope: 'request' })
   })
 })
 

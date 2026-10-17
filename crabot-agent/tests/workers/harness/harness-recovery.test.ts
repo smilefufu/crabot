@@ -105,6 +105,7 @@ class FakeAdapter implements WorkerAdapter {
 let dataDir: string
 let nowValue: number
 const events: HarnessEvent[] = []
+const harnesses: WorkerHarness[] = []
 
 function now(): string {
   nowValue += 1000
@@ -133,6 +134,7 @@ async function makeHarness(
     ...overrides,
   }
   const harness = new WorkerHarness(deps)
+  harnesses.push(harness)
   return { harness, ledger, adaptersMap }
 }
 
@@ -174,9 +176,15 @@ beforeEach(async () => {
   dataDir = await fs.mkdtemp(join(tmpdir(), 'harness-recovery-test-'))
   nowValue = Date.parse('2026-01-01T00:00:00.000Z')
   events.length = 0
+  harnesses.length = 0
 })
 
 afterEach(async () => {
+  for (const harness of harnesses) {
+    harness.stopRecoveryNoticeDelivery()
+    harness.stopLivenessSweep()
+    await Promise.all([...(harness as any).stateChangeTails.values()])
+  }
   await fs.rm(dataDir, { recursive: true, force: true })
 })
 

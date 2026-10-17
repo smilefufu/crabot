@@ -1,3 +1,4 @@
+import { BUILTIN_WORKER_PERMISSIONS } from '../../../src/workers/builtin/runtime.js'
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { promises as fs } from 'fs'
 import { tmpdir } from 'os'
@@ -1260,7 +1261,7 @@ describe('WorkerHarness — 接续过程中的并发', () => {
       secondResolved = true
     })
 
-    await new Promise((resolve) => setTimeout(resolve, 20))
+    await waitUntil(async () => fake.resumeCalls.length === 1)
     expect(secondResolved).toBe(false)
     expect(fake.resumeCalls).toHaveLength(1) // 第二次没有并发触发第二次 resume
 
@@ -2445,9 +2446,9 @@ describe('HarnessEvent.task_status —— 透明接续的迁移点', () => {
 describe('legacy incarnation guardrails', () => {
   const managerKey = 'test::legacy-session' as ManagerKey
   const permissions = {
-    tool_access: { memory: false, messaging: false, task: false, mcp_skill: false, file_io: false, browser: false, shell: false, remote_exec: false, desktop: false },
+    tool_access: { memory: false, messaging: false, task: false, mcp_skill: false, file_io: true, browser: false, shell: false, remote_exec: false, desktop: false },
     cli_access: { provider: 'none', agent: 'none', mcp: 'none', skill: 'none', schedule: 'none', channel: 'none', friend: 'none', permission: 'none', config: 'none', undo: 'none' },
-    storage: null,
+    get storage() { return { workspace_path: join(dataDir, 'workspace'), access: 'readwrite' as const } },
     memory_scopes: ['legacy'],
   } as const
 

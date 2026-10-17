@@ -195,3 +195,14 @@ test('healthy Corepack avoids Windows PATH discovery; localized absence is check
     assert.equal(result.status, 0, mode + ': ' + result.stdout + result.stderr)
   }
 })
+
+test('request upgrade generation is complete or rejected before package acceptance', async t => {
+  const { verifyReleasePackage } = await import('../release-package.mjs')
+  const root = fixture(t)
+  const base = ['cli.mjs', 'package.json', 'dist/cli/main.js', 'scripts/start.mjs', 'crabot-memory/pyproject.toml', 'crabot-memory/uv.lock', 'scripts/prepare-scrapling.mjs', 'scripts/lib/scrapling-runtime.cjs', 'scripts/scrapling/runtime.json', 'scrapling-runtime.json']
+  const generation = ['crabot-agent/shared_request_version', 'crabot-agent/dist/manager/request-upgrade.js', 'crabot-admin/dist/shared-request-impact.js', 'scripts/prepare-shared-requests.mjs', 'scripts/upgrade-lib/shared-requests.mjs']
+  for (const file of [...base, generation[0]]) { mkdirSync(join(root, file, '..'), { recursive: true }); writeFileSync(join(root, file), '') }
+  await assert.rejects(verifyReleasePackage(root, 'v2026.10.12.4'), /missing crabot-agent\/dist\/manager\/request-upgrade/)
+  for (const file of generation.slice(1)) { mkdirSync(join(root, file, '..'), { recursive: true }); writeFileSync(join(root, file), '') }
+  await verifyReleasePackage(root, 'v2026.10.12.4', { run: async () => {} })
+})

@@ -28,7 +28,8 @@ export function voiceTerminalEntry(connection: VoiceConnectionConfig, channelId:
 
 export function voiceSetupStatus(metadata?: VoiceSetupMetadata): 'draft' | 'complete' {
   if (metadata === undefined) return 'complete'
-  if (!metadata || !['draft', 'complete'].includes(metadata.status) || Object.keys(metadata).some(k => k !== 'status' && k !== 'connection')) throw new Error('语音创建状态无效')
+  if (!metadata || !['draft', 'complete'].includes(metadata.status) || Object.keys(metadata).some(k => k !== 'status' && k !== 'connection' && k !== 'owner_activation_required')) throw new Error('语音创建状态无效')
+  if (metadata.owner_activation_required !== undefined && typeof metadata.owner_activation_required !== 'boolean') throw new Error('语音所有者激活设置无效')
   if (metadata.connection !== undefined) parseVoiceConnection(metadata.connection)
   return metadata.status
 }

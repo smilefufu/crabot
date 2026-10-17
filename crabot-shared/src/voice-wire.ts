@@ -1,13 +1,16 @@
 import { createHash } from 'node:crypto'
-import type { SubmitVoiceTurnParams, VoiceClientControl, VoiceSegment, VoiceManagementRequest } from './voice.js'
+import type { SubmitVoiceTurnParams, VoiceClientControl, VoiceSegment, VoiceManagementRequest, VoiceDeviceOwner, VoiceOwnerActivation, VoiceOwnerSaved } from './voice.js'
+
+import { VOICE_MODEL_VERSIONS } from './voice-models.js'
+import type { VoiceAgentContext } from './voice.js'
 
 export const VOICE_MAX_SAMPLES = 240000
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 export class VoiceProtocolVersionError extends Error {
-  constructor() { super('语音协议版本不兼容，需要 protocol_version=5；请更新手机，保留配对和声纹') }
+  constructor() { super('语音协议版本不兼容，需要 protocol_version=8；请更新手机，保留配对和声纹') }
 }
-function version(value: unknown): void { if (value !== 5) throw new VoiceProtocolVersionError() }
+function version(value: unknown): void { if (value !== 8) throw new VoiceProtocolVersionError() }
 
 function invalid(): never { throw new Error('Invalid voice protocol payload') }
 function object(value: unknown): Record<string, unknown> {
@@ -27,6 +30,26 @@ function oneOf(value: unknown, choices: unknown[]): void { if (!choices.includes
 export function assertVoiceUuid(value: unknown): asserts value is string {
   if (typeof value !== 'string' || !UUID.test(value)) invalid()
 }
+export function validateVoiceDeviceOwner(value: unknown): asserts value is VoiceDeviceOwner {
+  const owner = object(value)
+  fields(owner, ['profile_id', 'display_name', 'model_id'])
+  assertVoiceUuid(owner.profile_id)
+  if (typeof owner.display_name !== 'string' || owner.display_name !== owner.display_name.trim() ||
+    Array.from(owner.display_name).length < 1 || Array.from(owner.display_name).length > 80 || /[\u0000-\u001f\u007f-\u009f]/u.test(owner.display_name)) invalid()
+  if (owner.model_id !== VOICE_MODEL_VERSIONS.embedding) invalid()
+}
+export function validateVoiceOwnerActivation(value: unknown): asserts value is VoiceOwnerActivation {
+  const activation = object(value)
+  fields(activation, ['operation_id', 'owner', 'platform_user_id', 'registration_id', 'status'])
+  assertVoiceUuid(activation.operation_id); assertVoiceUuid(activation.platform_user_id); assertVoiceUuid(activation.registration_id)
+  validateVoiceDeviceOwner(activation.owner); oneOf(activation.status, ['pending', 'completed'])
+}
+export function validateVoiceOwnerSaved(value: unknown): asserts value is VoiceOwnerSaved {
+  const saved = object(value)
+  fields(saved, ['operation_id', 'profile_id', 'registration_id', 'model_id'])
+  assertVoiceUuid(saved.operation_id); assertVoiceUuid(saved.profile_id); assertVoiceUuid(saved.registration_id)
+  if (saved.model_id !== VOICE_MODEL_VERSIONS.embedding) invalid()
+}
 export function validateVoiceManagementRequest(value: unknown): asserts value is VoiceManagementRequest {
   const request = object(value)
   fields(request, ['request_id', 'expected_revision', 'command'])
@@ -40,6 +63,17 @@ export function validateVoiceManagementRequest(value: unknown): asserts value is
     default: invalid()
   }
   if ('display_name' in command) { string(command.display_name, 128); if (!(command.display_name as string).trim()) invalid() }
+}
+export function validateVoiceAgentContext(value: unknown): asserts value is VoiceAgentContext {
+  const context = object(value); fields(context, ['request_id', 'source', 'turn_id', 'delivery'])
+  oneOf(context.delivery, ['origin', 'requester_private'])
+  if (typeof context.request_id !== 'string' || !/^[a-f0-9]{64}$/.test(context.request_id)) invalid()
+  assertVoiceUuid(context.turn_id)
+  const source = object(context.source)
+  fields(source, ['source_id', 'channel_id', 'session_id', 'session_type', 'platform_message_id', 'platform_user_id', 'sender_friend_id'])
+  assertVoiceUuid(source.source_id)
+  for (const key of ['channel_id', 'session_id', 'platform_message_id', 'platform_user_id', 'sender_friend_id']) string(source[key])
+  if (source.session_type !== 'group' || source.session_id !== voiceSessionId(source.channel_id as string)) invalid()
 }
 function models(value: unknown): void {
   const v = object(value)
@@ -80,13 +114,24 @@ export function parseVoiceClientControl(data: string): VoiceClientControl {
   const v = object(JSON.parse(data))
   switch (v.type) {
     case 'pair':
-      fields(v, ['type', 'protocol_version', 'nonce']); version(v.protocol_version); string(v.nonce); break
+      fields(v, ['type', 'protocol_version', 'nonce', 'owner']); version(v.protocol_version); string(v.nonce); validateVoiceDeviceOwner(v.owner); break
     case 'hello':
-      fields(v, ['type', 'protocol_version', 'credential', 'models', 'aec_verified'])
-      version(v.protocol_version); string(v.credential); models(v.models); oneOf(v.aec_verified, [true, false]); break
+      fields(v, ['type', 'protocol_version', 'credential', 'models', 'aec_verified'], ['owner'])
+      version(v.protocol_version); string(v.credential); models(v.models); oneOf(v.aec_verified, [true, false]); if (v.owner !== undefined) validateVoiceDeviceOwner(v.owner); break
     case 'heartbeat':
-      fields(v, ['type', 'foreground', 'microphone', 'playback', 'enrollment_revision']); integer(v.enrollment_revision)
+      fields(v, ['type', 'foreground', 'microphone', 'playback', 'enrollment_revision', 'speech_enabled', 'activity']); integer(v.enrollment_revision)
+      oneOf(v.speech_enabled, [true, false]); oneOf(v.activity, ['idle', 'recording', 'processing', 'answering', 'management'])
       oneOf(v.foreground, [true, false]); oneOf(v.microphone, ['closed', 'wake', 'recording']); oneOf(v.playback, ['idle', 'playing']); break
+    case 'owner_saved': fields(v, ['type', 'saved']); validateVoiceOwnerSaved(v.saved); break
+    case 'guided_prompt':
+      fields(v, ['type', 'operation_id', 'step']); assertVoiceUuid(v.operation_id); oneOf(v.step, [1, 2, 3]); break
+    case 'guided_cancel':
+      fields(v, ['type', 'operation_id']); assertVoiceUuid(v.operation_id); break
+    case 'guided_playback': {
+      fields(v, ['type', 'operation_id', 'playback_id', 'status'], ['played_samples']); assertVoiceUuid(v.operation_id)
+      const { operation_id, ...report } = v
+      parseVoiceClientControl(JSON.stringify({ ...report, type: 'playback' })); break
+    }
     case 'contact_action': fields(v, ['type', 'request']); validateVoiceManagementRequest(v.request); break
     case 'contact_action_query': fields(v, ['type', 'request_id']); assertVoiceUuid(v.request_id); break
     case 'catalog_applied': fields(v, ['type', 'enrollment_revision']); integer(v.enrollment_revision); break
@@ -106,6 +151,8 @@ export function parseVoiceClientControl(data: string): VoiceClientControl {
       if (v.turn_id !== undefined) assertVoiceUuid(v.turn_id)
       if (v.playback_id !== undefined) assertVoiceUuid(v.playback_id)
       break
+    case 'playback_ready':
+      fields(v, ['type', 'playback_id', 'accepted']); assertVoiceUuid(v.playback_id); oneOf(v.accepted, [true, false]); break
     case 'playback':
       fields(v, ['type', 'playback_id', 'status'], ['played_samples']); assertVoiceUuid(v.playback_id)
       oneOf(v.status, ['started', 'completed', 'interrupted', 'failed'])
