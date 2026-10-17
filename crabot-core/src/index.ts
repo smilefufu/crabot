@@ -1216,6 +1216,11 @@ export class ModuleManager {
       ...(adminRpcPort && moduleId !== 'admin-web' ? { CRABOT_ADMIN_ENDPOINT: `http://localhost:${adminRpcPort}` } : {}),
       ...(moduleId === 'admin-web' ? { CRABOT_ADMIN_STARTUP_MODE: 'core-agent-cutover', CRABOT_ADMIN_CUTOVER_BEARER: (() => { const token = crypto.randomBytes(32).toString('base64url'); (runtime as ModuleRuntime & { _pendingCutover?: { token: string; child: ChildProcess; revoked: boolean } })._pendingCutover = { token, child: undefined as unknown as ChildProcess, revoked: false }; return token })() } : {}),
     }
+    if (moduleId !== 'admin-web') {
+      for (const key of Object.keys(childEnv)) {
+        if (['CRABOT_JWT_SECRET', 'CRABOT_ADMIN_PASSWORD', 'CRABOT_ADMIN_CUTOVER_BEARER'].includes(key.toUpperCase())) delete childEnv[key]
+      }
+    }
     delete childEnv.CRABOT_VOICE_RUNTIME_BEARER
     // Runtime credentials bind only the exact core Agent or voice child.
     if (moduleId === 'crabot-agent' || this.isVoiceModule(moduleId)) {

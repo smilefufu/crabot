@@ -98,7 +98,11 @@ try {
   const migrationEnv = { ...env, PATH: data }
   assert.equal((await runScript(pythonMigration, migrated, { root, env: migrationEnv })).exitCode, 0)
   const migrationResult = JSON.parse(await fs.readFile(join(migrated, 'migration.json'), 'utf8'))
-  assert.equal(migrationResult.python, await fs.realpath(runtime.executables.python))
+  // Linux's verified entry is a library-path launcher; sys.executable identifies
+  // the bundled binary it execs, rather than the wrapper script itself.
+  const pythonBinary = join(runtime.pythonHome, process.platform === 'win32' ? 'python.exe'
+    : 'bin/python' + runtime.manifest.versions.python.split('.').slice(0, 2).join('.'))
+  assert.equal(migrationResult.python, await fs.realpath(pythonBinary))
   assert.ok(migrationResult.yaml.startsWith(await fs.realpath(runtime.memoryPackages)))
   const nodeMigration = join(upgrade, 'probe.mjs')
   await fs.writeFile(nodeMigration, 'import{writeFileSync}from"node:fs";import{join}from"node:path";const data=process.argv.find(value=>value.startsWith("--data-dir=")).slice(11);writeFileSync(join(data,"node.json"),JSON.stringify({node:process.execPath}))')
