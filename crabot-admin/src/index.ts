@@ -34,7 +34,7 @@ import { runCrabotImport, ImportPreflightRejected, type ImportDeps } from './bac
 import type { ImportStatus, OnConflict, ImportItemResult } from './backup/import/import-types.js'
 import { shouldDisableOnImport } from './backup/import/schedule-arm.js'
 import { VersionService } from './version/version-service.js'
-import { startUpgrade, canUpgrade, isUpgradeInProgress } from './version/upgrade-runner.js'
+import { startUpgrade, canUpgrade, isUpgradeInProgress, requiresDesktopUpdater, DESKTOP_UPGRADE_REASON } from './version/upgrade-runner.js'
 import { readArchiveTextFile, listArchiveEntries } from './openclaw-import/archive-reader.js'
 import { readJsonArrayFromArchive } from './backup/import/read-archive-category.js'
 import { extractArchiveSubtree } from './openclaw-import/extract-subtree.js'
@@ -7343,6 +7343,10 @@ export class AdminModule extends ModuleBase {
   }
 
   private async handleStartUpgradeApi(_req: IncomingMessage, res: ServerResponse): Promise<void> {
+    if (requiresDesktopUpdater(CRABOT_HOME)) {
+      sendJson(res, 409, { code: 'DESKTOP_MANAGED_INSTALLATION', error: DESKTOP_UPGRADE_REASON })
+      return
+    }
     const state = await this.versionService.check()
     const verdict = canUpgrade(state)
     if (!verdict.ok) {
