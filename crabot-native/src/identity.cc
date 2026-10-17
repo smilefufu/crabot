@@ -340,6 +340,7 @@ static napi_value ReleaseLock(napi_env env, napi_callback_info info) {
   napi_value result; napi_get_undefined(env, &result); return result;
 }
 #include "local-pipe.h"
+#include "private-file.h"
 
 static napi_value Initialize(napi_env env, napi_value exports) {
   napi_property_descriptor methods[] = {
@@ -355,6 +356,7 @@ static napi_value Initialize(napi_env env, napi_value exports) {
   napi_define_properties(env, exports, sizeof(methods) / sizeof(methods[0]), methods);
 #ifdef _WIN32
   RegisterLocalPipe(env, exports);
+  RegisterPrivateFile(env, exports);
 #endif
   return exports;
 }

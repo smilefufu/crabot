@@ -45,7 +45,8 @@ describe('credentials read/write', () => {
     await writeCredentials(dir, cred)
 
     const stat = await fs.stat(path.join(dir, 'credentials.json'))
-    expect(stat.mode & 0o777).toBe(0o600)
+    if (process.platform === 'win32') expect(require('../../scripts/lib/process-identity.cjs').isPrivateFile(path.join(dir, 'credentials.json'))).toBe(true)
+    else expect(stat.mode & 0o777).toBe(0o600)
 
     const read = await readCredentials(dir)
     expect(read).toEqual(cred)

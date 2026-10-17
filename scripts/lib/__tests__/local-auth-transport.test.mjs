@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, lstatSync } from 'node:fs'
+import { mkdtempSync, rmSync, lstatSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { once } from 'node:events'
@@ -15,6 +15,20 @@ test('Windows native pipe entry points reject arbitrary paths and foreign handle
     assert.throws(() => identity.inspectPeer(value))
     assert.throws(() => identity.readPipe(value))
   }
+})
+
+test('Windows private files have a protected current-user owner/ACL from creation and never overwrite a prior file', { skip: process.platform !== 'win32' }, t => {
+  const directory = mkdtempSync(join(tmpdir(), 'crabot-private-file-中文 space-'))
+  t.after(() => rmSync(directory, { recursive: true, force: true }))
+  const file = join(directory, 'credentials.json')
+  const privateDirectory = join(directory, 'private-data')
+  identity.createPrivateDirectory(privateDirectory)
+  assert.equal(identity.isPrivateDirectory(privateDirectory), true)
+  assert.throws(() => identity.createPrivateDirectory(privateDirectory))
+  identity.writePrivateFile(file, '{"fixture":true}')
+  assert.equal(identity.isPrivateFile(file), true)
+  assert.throws(() => identity.writePrivateFile(file, '{"overwrite":true}'))
+  assert.equal(readFileSync(file, 'utf8'), '{"fixture":true}')
 })
 
 test('private local transport identifies both OS peers across processes, ignoring claimed PID; idle accept cancels', { timeout: 15_000 }, async t => {

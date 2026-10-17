@@ -21,4 +21,6 @@ module.exports = { ...native, sameProcess,
     inspectServerPeer: native.inspectServerPeer,
     readPipe: native.readPipe, writePipe: native.writePipe, closePipe: native.closePipe,
   } : {}),
+  ...(native.writePrivateFile ? { writePrivateFile: native.writePrivateFile, isPrivateFile: native.isPrivateFile,
+    createPrivateDirectory: native.createPrivateDirectory, isPrivateDirectory: native.isPrivateDirectory } : {}),
 }
