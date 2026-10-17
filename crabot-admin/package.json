@@ -21,6 +21,7 @@
   "author": "Crabot Team",
   "license": "Apache-2.0",
   "dependencies": {
+    "crabot-client": "file:../crabot-client",
     "@types/adm-zip": "^0.5.8",
     "adm-zip": "^0.5.16",
     "bcryptjs": "^2.4.3",

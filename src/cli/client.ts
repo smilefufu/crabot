@@ -1,75 +1,53 @@
 import type { AuthConfig } from './auth.js'
 import { CliError, fromHttpError } from './errors.js'
+import { HttpClient, ClientError, z } from 'crabot-client'
 
 export class AdminClient {
-  constructor(private readonly auth: AuthConfig) {}
+  private readonly http: HttpClient
+  constructor(private readonly auth: AuthConfig) {
+    this.http = new HttpClient({ endpoint: auth.endpoint, token: () => auth.token })
+  }
 
-  private buildUrl(path: string): string {
-    const base = this.auth.endpoint.replace(/\/$/, '')
+  private async fetchWithErrorMap<T>(path: string, init: RequestInit): Promise<T> {
     const normalizedPath = path.startsWith('/') ? path : `/${path}`
-    return `${base}${normalizedPath}`
-  }
-
-  private buildHeaders(): Record<string, string> {
-    return {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${this.auth.token}`,
-    }
-  }
-
-  private async parseResponse<T>(response: Response): Promise<T> {
-    let body: unknown
-    const text = await response.text()
-    try { body = JSON.parse(text) } catch { body = text }
-
-    if (!response.ok) {
-      const message = (typeof body === 'object' && body !== null
-        ? ((body as Record<string, unknown>)['message'] as string) ??
-          ((body as Record<string, unknown>)['error'] as string) ??
-          `HTTP ${response.status}`
-        : typeof body === 'string' && body.length > 0 ? body : `HTTP ${response.status}`)
-      throw fromHttpError(response.status, message)
-    }
-    return body as T
-  }
-
-  private async fetchWithErrorMap<T>(url: string, init: RequestInit): Promise<T> {
-    let response: Response
     try {
-      response = await fetch(url, init)
+      // Compatibility boundary for commands not yet assigned a resource DTO schema.
+      const result = await this.http.request(normalizedPath, z.unknown(), {
+        ...init, headers: { 'Content-Type': 'application/json' }, timeoutMs: 120_000,
+      })
+      return (result === undefined ? '' : result) as T // preserve the CLI's empty-response value
     } catch (e) {
-      throw new CliError('ADMIN_UNREACHABLE', `Cannot reach Admin at ${url}: ${(e as Error).message}`)
+      if (e instanceof ClientError) {
+        if (e.kind === 'timeout' || e.kind === 'cancelled') throw new CliError('ADMIN_TIMEOUT', e.message)
+        if (e.kind !== 'unreachable') throw fromHttpError(e.status ?? 500, e.message)
+      }
+      throw new CliError('ADMIN_UNREACHABLE', `Cannot reach Admin at ${this.auth.endpoint}: ${(e as Error).message}`)
     }
-    return this.parseResponse<T>(response)
   }
 
   async get<T>(path: string): Promise<T> {
-    return this.fetchWithErrorMap<T>(this.buildUrl(path), {
+    return this.fetchWithErrorMap<T>(path, {
       method: 'GET',
-      headers: this.buildHeaders(),
     })
   }
 
   async post<T>(path: string, body?: unknown): Promise<T> {
-    return this.fetchWithErrorMap<T>(this.buildUrl(path), {
+    return this.fetchWithErrorMap<T>(path, {
       method: 'POST',
-      headers: this.buildHeaders(),
       body: body !== undefined ? JSON.stringify(body) : undefined,
     })
   }
 
   async patch<T>(path: string, body: unknown): Promise<T> {
-    return this.fetchWithErrorMap<T>(this.buildUrl(path), {
+    return this.fetchWithErrorMap<T>(path, {
       method: 'PATCH',
-      headers: this.buildHeaders(),
       body: JSON.stringify(body),
     })
   }
 
   async delete<T>(path: string): Promise<T> {
-    return this.fetchWithErrorMap<T>(this.buildUrl(path), {
+    return this.fetchWithErrorMap<T>(path, {
       method: 'DELETE',
-      headers: this.buildHeaders(),
     })
   }
 

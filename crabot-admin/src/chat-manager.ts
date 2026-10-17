@@ -9,6 +9,7 @@ import { Socket } from 'node:net'
 import { WebSocket, WebSocketServer } from 'ws'
 import { generateId, generateTimestamp, sha256CanonicalJson, type RpcClient, type TaskId } from 'crabot-shared'
 import { createHash } from 'node:crypto'
+import { ChatClientMessageSchema } from 'crabot-client'
 import { AdminChatAssertions } from './admin-chat-assertions.js'
 import { ChatRequestIndex } from './chat-request-index.js'
 import { ChatDeliveryJournalStore, type ChatDeliveryJournalRecord } from './chat-delivery-journal.js'
@@ -206,10 +207,10 @@ export class ChatManager {
   private setupWebSocket(ws: WebSocket): void {
     ws.on('message', async (data) => {
       try {
-        const message = JSON.parse(data.toString()) as ChatClientMessage
+        const message = ChatClientMessageSchema.parse(JSON.parse(data.toString()))
         await this.onMessage(message)
       } catch (error) {
-        console.error('[ChatManager] Failed to handle message:', error)
+        console.error('[ChatManager] Failed to handle chat frame; no frame contents logged')
         this.pushToClient({
           type: 'chat_error',
           error: 'Invalid message format',
@@ -453,8 +454,8 @@ export class ChatManager {
       throw new Error('Admin Chat ingress was not JWT authenticated')
     }
     assertValidRequestId(params.request_id)
-    const text = params.text.trim()
-    if (!text && params.files.length === 0) {
+    const text = params.text
+    if (!text.trim() && params.files.length === 0) {
       throw new Error('Empty message')
     }
 

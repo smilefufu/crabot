@@ -6,6 +6,9 @@ on:
   pull_request:
     paths:
       - 'crabot-desktop/**'
+      - 'crabot-client/**'
+      - 'crabot-admin/**'
+      - 'src/cli/client*'
       - 'crabot-core/**'
       - 'crabot-agent/src/core/runtime-env.ts'
       - 'crabot-agent/src/agent/mcp-connector.ts'
@@ -63,7 +66,10 @@ jobs:
         run: node scripts/build-native.mjs
       - name: Install frozen build dependencies
         run: |
+          pnpm --dir crabot-client install --frozen-lockfile
+          node crabot-client/node_modules/typescript/bin/tsc -p crabot-client/tsconfig.json
           pnpm install --frozen-lockfile
+          pnpm --dir scripts/lib install --frozen-lockfile
           pnpm --dir crabot-shared install --frozen-lockfile
           node crabot-shared/node_modules/typescript/bin/tsc -p crabot-shared/tsconfig.json
           for module in crabot-core crabot-agent crabot-admin crabot-mcp-tools; do
@@ -72,14 +78,28 @@ jobs:
           done
       - name: Runtime regressions
         run: |
+          node --test crabot-client/tests/*.test.mjs
           node --test scripts/lib/__tests__/product-*.test.mjs
-          node --test scripts/lib/__tests__/instance-runtime.test.mjs scripts/lib/__tests__/cli-lock-native.test.mjs scripts/lib/__tests__/process-identity.test.mjs scripts/lib/__tests__/stop-windows.test.mjs
+          node --test scripts/lib/__tests__/instance-runtime.test.mjs scripts/lib/__tests__/cli-lock-native.test.mjs scripts/lib/__tests__/process-identity.test.mjs scripts/lib/__tests__/stop-windows.test.mjs scripts/lib/__tests__/background-core.test.mjs
           cd crabot-core
           node node_modules/vitest/vitest.mjs run src/agent-venv.test.ts src/core-modules.test.ts src/shutdown-generation.test.ts --maxWorkers=1 --minWorkers=1
       - name: Agent environment regressions
         run: |
           cd crabot-agent
           node node_modules/vitest/vitest.mjs run tests/core/runtime-env.test.ts tests/core/child-env-guard.test.ts tests/utils/resolve-bash-path.test.ts tests/agent/mcp-connector.test.ts tests/mcp-connector-tool-defaults.test.ts --maxWorkers=1 --minWorkers=1
+      - name: Shared HTTP and chat protocol regressions
+        run: |
+          node node_modules/typescript/bin/tsc -p tsconfig.cli.json
+          node node_modules/vitest/vitest.mjs run src/cli/client.test.ts --maxWorkers=1 --minWorkers=1
+          cd crabot-admin
+          node node_modules/vitest/vitest.mjs run src/chat-http-ws.test.ts src/chat-manager.test.ts src/http-diagnostics.test.ts --maxWorkers=1 --minWorkers=1
+      - name: Web compilation and state regressions
+        run: |
+          cd crabot-admin/web
+          pnpm install --frozen-lockfile
+          node node_modules/typescript/bin/tsc -p tsconfig.json
+          node node_modules/vite/bin/vite.js build
+          node node_modules/vitest/vitest.mjs run src/pages/Chat/index.test.tsx src/services/server-state.test.ts --maxWorkers=1 --minWorkers=1
       - name: Build locked browser and computer-use resources
         run: |
           node scripts/prepare-scrapling.mjs --release=desktop-ci

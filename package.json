@@ -10,6 +10,7 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "crabot-client": "file:./crabot-client",
     "commander": "^13.0.0",
     "js-yaml": "^4.2.0",
     "rotating-file-stream": "^3.2.9"

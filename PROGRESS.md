@@ -1,12 +1,12 @@
 # Crabot 项目进度
 
-### 桌面化方案：独立 worktree 开发中，P1 跨平台修复、P2 共同控制层验证
+### 桌面化方案：独立 worktree 开发中，基础原生 CI 通过，P3 通信验证推进
 
 - 用户确认[中文 Spec](crabot-docs/superpowers/specs/2026-10-17-desktop-application-design.md)及五项补充决定：macOS 14+ 双架构、Windows 11 x64、Ubuntu Desktop 24.04/26.04 x64；Linux 桌面控制分会话声明支持；优先主要界面；默认后台下载、用户发起安装；登录自启动默认关闭。
 - 已整理[分阶段实施计划](crabot-docs/superpowers/plans/2026-10-17-desktop-application-implementation.md)：P0 协议基线 → P1 内置环境 → P2 共用实例/CLI → P3 SDK/通信 → P4 桌面认证与窗口 → P5 引导/主要界面 → P6 迁移/更新 → P7 最终发行验收，各阶段列明步骤、验证方式与退出条件。
 - P0 已补 Desktop 正式协议及 Admin/MM/Agent 边界，文档仓 c661332；主仓仅在独立 worktree 的 feat/desktop-application 分支推进，需求完成并完整验证前不推 main、不提前建 PR，不触碰现场部署及无关 WIP。
-- P1 已实现锁定资源构建、重定位/完整性检查、Agent/MCP 私有 Python 基底与依赖隔离、产品 Memory 离线启动接线及子进程凭据过滤。本机实际执行内置 Node/Python/pip/npm/npx/Git/rg、后台 shell、Memory 临时库读写、三个 stdio MCP（含冲突依赖）与本地浏览器通过；跨平台 CI、最终桌面包及 P2–P7 尚未验收。
-- 开发分支原生 CI 已通过 macOS 双架构及 Ubuntu 24.04 离线载荷；26.04 wrapper 与 Windows 构建失败正在定向修复。P2 已接入进程身份、OS 互斥锁、代际停机与 CLI 控制适配，临时子进程及核心定向测试通过；跨平台及完整 GUI 尚未验收，不启动第二个真实 MM。
+- P1 载荷和 P2 进程控制基础已通过[四平台原生 CI](https://github.com/smilefufu/crabot/actions/runs/39041801625)，Linux 另过 Ubuntu 24.04/26.04 断网容器；后台前端被杀后的核心存活由本机夹具验证。最终 CLI/桌面安装、迁移、签名和真实 GUI 尚未验收。
+- P3 新增共享 contracts/HTTP/WS SDK，文字统一 HTTP、同 ID 重试，HTTP 快照核对删除/更新及迟到响应，CLI 旧输出兼容。原文编码与 409 偏差先复现再按协议修复；本机 SDK 9、CLI 21、Admin 42、Web 22 项定向通过，实际 CJS 加载和 Web 构建通过；增量原生回归、P4–P7 继续推进。全程不启动第二个真实 MM、不触碰现场数据。
 
 ### 任务默认目录文件授权：独立修复待审查
 

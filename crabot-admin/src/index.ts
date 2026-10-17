@@ -1,4 +1,6 @@
 import { adminWebTransport } from './admin-web-transport.js'
+import { parseChatMultipartMetadata } from 'crabot-client'
+import { correlateHttpRequest } from './http-diagnostics.js'
 import { VoiceGateway } from './voice-gateway.js'
 import { loadVoiceTls } from './voice-tls.js'
 import { VoiceAdmin } from './voice-admin.js'
@@ -1539,7 +1541,8 @@ export class AdminModule extends ModuleBase {
     // 设置 CORS 头
     res.setHeader('Access-Control-Allow-Origin', '*')
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, DELETE, OPTIONS')
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization')
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Crabot-Request-Id')
+    res.setHeader('Access-Control-Expose-Headers', 'X-Crabot-Request-Id')
 
     if (req.method === 'OPTIONS') {
       res.writeHead(204)
@@ -1549,6 +1552,7 @@ export class AdminModule extends ModuleBase {
 
     const url = new URL(req.url ?? '/', `http://localhost:${this.adminConfig.web_port}`)
     const pathname = url.pathname
+    if (pathname.startsWith('/api/')) correlateHttpRequest(req, res)
     let agentCliAuth: AgentCliWebAuth | undefined
 
     if (!this.cutoverActivated && (pathname === '/api/chat/messages' || pathname === '/api/chat/tasks' || pathname.startsWith('/api/chat/messages/') || pathname.startsWith('/api/chat/tasks/'))) {
@@ -10268,12 +10272,15 @@ export class AdminModule extends ModuleBase {
         body: Buffer.concat(chunks),
       })
       const form = await request.formData()
-      const text = String(form.get('text') ?? '')
-      const requestId = String(form.get('request_id') ?? '')
-      if (!requestId) {
-        sendJson(res, 400, { error: 'request_id required' })
+      const metadata = parseChatMultipartMetadata({
+        text: form.get('text') ?? undefined, text_json: form.get('text_json') ?? undefined,
+        request_id: form.get('request_id') ?? '',
+      })
+      if (!metadata.success) {
+        sendJson(res, 400, { error: 'invalid chat request_id or text' })
         return
       }
+      const text = metadata.data.text ?? '', requestId = metadata.data.request_id
       const files: Array<{ buffer: Buffer; filename: string; mime_type: string }> = []
       // File 类在 Node 20+ 全局可用；使用 as unknown 绕过 tsconfig 中未含 DOM lib 的类型限制
       const FileClass = (globalThis as unknown as { File: new (...args: unknown[]) => { name: string; type: string; arrayBuffer(): Promise<ArrayBuffer> } }).File
@@ -10294,7 +10301,8 @@ export class AdminModule extends ModuleBase {
       )
       sendJson(res, 200, result)
     } catch (err) {
-      sendJson(res, 400, { error: err instanceof Error ? err.message : 'invalid multipart request' })
+      const conflict = (err as { code?: string })?.code === 'ADMIN_CHAT_REQUEST_CONFLICT'
+      sendJson(res, conflict ? 409 : 400, { error: err instanceof Error ? err.message : 'invalid multipart request' })
     }
   }
 

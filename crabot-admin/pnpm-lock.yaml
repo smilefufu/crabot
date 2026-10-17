@@ -23,6 +23,9 @@ importers:
       better-sqlite3:
         specifier: ^12.6.2
         version: 12.9.0
+      crabot-client:
+        specifier: file:../crabot-client
+        version: file:../crabot-client
       crabot-shared:
         specifier: file:../crabot-shared
         version: file:../crabot-shared
@@ -769,6 +772,9 @@ packages:
   confbox@0.1.8:
     resolution: {integrity: sha512-RMtmw0iFkeR4YV+fUOSucriAQNb9g8zFR52MWCtl+cCZOFRNL6zeB395vPzFhEjjn4fMxXudmELnl/KF/WrK6w==}
 
+  crabot-client@file:../crabot-client:
+    resolution: {directory: ../crabot-client, type: directory}
+
   crabot-shared@file:../crabot-shared:
     resolution: {directory: ../crabot-shared, type: directory}
 
@@ -1359,6 +1365,9 @@ packages:
     resolution: {integrity: sha512-4LCcse/U2MHZ63HAJVE+v71o7yOdIe4cZ70Wpf8D/IyjDKYQLV5GD46B+hSTjJsvV5PztjvHoU580EftxjDZFQ==}
     engines: {node: '>=12.20'}
 
+  zod@4.6.7:
+    resolution: {integrity: sha512-g8W2D2kU6a8untc053fX1uVBKzM7yqAxW/3zwk83+6RyF2+SKOuV+c0wBDhUwzV1PaGapmZH+rmcUzPf+3CGwg==}
+
 snapshots:
 
   '@ampproject/remapping@2.3.0':
@@ -1901,6 +1910,10 @@ snapshots:
   concat-map@0.0.1: {}
 
   confbox@0.1.8: {}
+
+  crabot-client@file:../crabot-client:
+    dependencies:
+      zod: 4.6.7
 
   crabot-shared@file:../crabot-shared:
     dependencies:
@@ -2538,3 +2551,5 @@ snapshots:
   yn@3.1.1: {}
 
   yocto-queue@1.2.2: {}
+
+  zod@4.6.7: {}

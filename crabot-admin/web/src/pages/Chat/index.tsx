@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react'
+import React, { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } from 'react'
 import { MainLayout } from '../../components/Layout/MainLayout'
 import { chatService } from '../../services/chat'
 import type { ChatMessageContent, ChatServerMessage, ChatTaskSnapshot, ConnectionStatus } from '../../types/chat'
@@ -7,6 +7,8 @@ import { ConfirmModal } from '../../components/Common/ConfirmModal'
 import { useToast } from '../../contexts/ToastContext'
 import { ChatMessageItem, type MessageState } from './ChatMessageItem'
 import { MessageContextMenu } from './MessageContextMenu'
+import { createRequestId, ClientError } from 'crabot-client'
+import { ChatSnapshotController, useServerScope, getServerScope } from '../../services/server-state'
 
 const PAGE_SIZE = 30
 
@@ -29,8 +31,16 @@ function formatDateLabel(ts: string): string {
 }
 
 export const Chat: React.FC = () => {
+  const pendingSend = useRef<{ id: string; text: string; files: File[] } | null>(null)
   const toast = useToast()
   const [messages, setMessages] = useState<MessageState[]>([])
+  const messagesRef = useRef(messages)
+  messagesRef.current = messages
+  const scope = useServerScope()
+  const snapshotController = useMemo(() => new ChatSnapshotController({
+    history: (...args) => chatService.loadHistory(...args), task: (...args) => chatService.getTaskSnapshot(...args),
+  }, scope), [scope])
+  const [syncStatus, setSyncStatus] = useState<'syncing' | 'synced' | 'partial' | 'error'>('syncing')
   // 消息级任务图标数据（task_id → 快照，终态也保留供图标显示 ✓/✗）
   const [taskStatuses, setTaskStatuses] = useState<Map<string, ChatTaskSnapshot>>(new Map())
   const [input, setInput] = useState('')
@@ -69,6 +79,8 @@ export const Chat: React.FC = () => {
   )
   const fileInputRef = useRef<HTMLInputElement>(null)
   const isLoadingHistoryRef = useRef(false)
+  const paginationEpoch = useRef(0)
+  const olderAbort = useRef<AbortController | null>(null)
   const isNearBottomRef = useRef(true)
   // 首屏定位完成标记：完成前自动滚动 effect 与顶部哨兵都不工作，
   // 防止初始 smooth 全程滚 + 哨兵在 scrollTop=0 时误触发连环加载
@@ -122,92 +134,55 @@ export const Chat: React.FC = () => {
     setShowScrollButton(false)
   }, [])
 
-  // 连接 WebSocket
-  useEffect(() => {
-    if (connectionStatus === 'disconnected' || connectionStatus === 'error') {
-      chatService.connect()
-    }
-
-    const unsubStatus = chatService.onStatusChange((status) => {
-      setConnectionStatus(status)
-      if (status === 'connected') {
-        // 重连补齐：pushToClient 断连即丢，断连期间的回复与 ✓ 标记经重拉历史找回。
-        // 服务端消息为权威：按 message_id 去重合并；被落库版本取代的本地乐观 user
-        // 消息（msg_ 前缀临时 id，同 request_id）丢弃，未落库的乐观消息原样保留。
-        chatService.loadHistory(PAGE_SIZE).then((history) => {
-          if (history.length === 0) return
-          setMessages((prev) => {
-            const known = new Set(prev.map((m) => m.message_id))
-            const fresh = [...history].reverse().filter((m) => !known.has(m.message_id))
-            if (fresh.length === 0) return prev
-            const settled = new Set(
-              fresh.map((m) => m.request_id).filter((id): id is string => id !== undefined)
-            )
-            const kept = prev.filter(
-              (m) => !(m.message_id.startsWith('msg_') && m.request_id !== undefined && settled.has(m.request_id))
-            )
-            // fresh 里可能混有本会话早先已收到回复的 user 消息（WS 文本路径前端不知道
-            // 服务端 UUID，只能等重连补齐）——不能一律 concat 到队尾，按时间戳归位。
-            const merged = [...kept, ...fresh.map((m) => ({ ...m, status: 'completed' as const }))]
-            merged.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime())
-            return merged
-          })
-        }).catch(() => {/* ignore */})
-      }
-    })
-    const unsubMessage = chatService.onMessage(handleServerMessage)
-
-    return () => {
-      unsubStatus()
-      unsubMessage()
-    }
-  }, [])
-
-  // 加载历史消息并 hydrate 页内消息的任务快照
-  useEffect(() => {
-    const loadHistory = async () => {
-      try {
-        const history = await chatService.loadHistory(PAGE_SIZE)
-        if (history.length > 0) {
-          // API 返回倒序（最新在前），UI 需要正序（最旧在前）
-          const chronological = [...history].reverse()
-          setMessages(chronological.map((msg) => ({ ...msg, status: 'completed' as const })))
-          // hydrate：对页内消息出现的 task_id 批量拉快照（getTaskSnapshot 已有 null 处理）
-          const taskIds = [...new Set(chronological.map((m) => m.task_id).filter(Boolean))] as string[]
-          if (taskIds.length > 0) {
-            const snapshots = await Promise.all(taskIds.map((id) => chatService.getTaskSnapshot(id)))
-            snapshots.forEach((snap) => {
-              if (snap) upsertTaskStatus(snap)
-            })
-          }
+  const refreshSnapshot = useCallback(async (known: readonly MessageState[] = messagesRef.current) => {
+    setSyncStatus('syncing')
+    try {
+      const snapshot = await snapshotController.refresh(known, PAGE_SIZE)
+      if (!snapshot) return
+      const chronological = [...snapshot.messages].sort((a, b) => a.timestamp.localeCompare(b.timestamp))
+      const view = chronological.map(message => ({ ...message, status: 'completed' as const }))
+      messagesRef.current = view
+      setMessages(view)
+      setHasMore(snapshot.hasMore)
+      setTaskStatuses(previous => {
+        const next = new Map<string, ChatTaskSnapshot>()
+        for (const message of snapshot.messages) {
+          if (!message.task_id) continue
+          const current = snapshot.tasks.has(message.task_id) ? snapshot.tasks.get(message.task_id) : previous.get(message.task_id)
+          if (current) next.set(message.task_id, current)
         }
-        if (history.length < PAGE_SIZE) {
-          setHasMore(false)
-        }
-      } catch (error) {
-        console.error('Failed to load chat history:', error)
-      }
-    }
-    loadHistory()
-  }, [])
-
-  // 30s 轮询兜底：刷新非终态任务快照（防丢推送；终态跳过；无非终态时跳过）
-  const TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled'])
-  useEffect(() => {
-    const interval = setInterval(() => {
-      setTaskStatuses((cur) => {
-        const nonTerminal = Array.from(cur.values()).filter((t) => !TERMINAL_STATUSES.has(t.status))
-        if (nonTerminal.length === 0) return cur
-        Promise.all(nonTerminal.map((t) => chatService.getTaskSnapshot(t.task_id))).then((snaps) => {
-          snaps.forEach((snap) => {
-            if (snap) upsertTaskStatus(snap)
-          })
-        }).catch(() => {/* 静默忽略 */})
-        return cur
+        return next
       })
-    }, 30000)
+      setSyncStatus(snapshot.incomplete ? 'partial' : 'synced')
+    } catch { setSyncStatus('error') }
+  }, [snapshotController])
+
+  useEffect(() => {
+    messagesRef.current = []
+    setMessages([]); setTaskStatuses(new Map())
+    setLoadingMore(false); isLoadingHistoryRef.current = false
+    initialPositionedRef.current = false; setUnreadCount(0); setShowScrollButton(false)
+    void refreshSnapshot()
+    return () => { snapshotController.dispose(); paginationEpoch.current++; olderAbort.current?.abort() }
+  }, [refreshSnapshot, snapshotController])
+
+  // A connected socket invalidates HTTP facts; it is not evidence that the view has synchronized.
+  useEffect(() => {
+    if (chatService.status === 'disconnected' || chatService.status === 'error') chatService.connect()
+    const unsubscribeStatus = chatService.onStatusChange(status => {
+      setConnectionStatus(status)
+      if (status === 'connected') void refreshSnapshot()
+    })
+    const unsubscribeMessage = chatService.onMessage(handleServerMessage)
+    const unsubscribeInvalid = chatService.onInvalidation?.(() => { void refreshSnapshot() })
+    return () => { unsubscribeStatus(); unsubscribeMessage(); unsubscribeInvalid?.() }
+  }, [refreshSnapshot])
+
+  useEffect(() => {
+    if (![...taskStatuses.values()].some(task => !['closed', 'completed', 'failed', 'cancelled'].includes(task.status))) return
+    const interval = setInterval(() => { void refreshSnapshot() }, 30_000)
     return () => clearInterval(interval)
-  }, [upsertTaskStatus])
+  }, [taskStatuses, refreshSnapshot])
 
   // 首屏瞬时锚定底部（同步于绘制前，无可感知滚动）
   useLayoutEffect(() => {
@@ -235,63 +210,29 @@ export const Chat: React.FC = () => {
     }
   }, [messages])
 
-  // 加载更早的消息
+  // Older-page data expands the requested range; a fresh snapshot supplies the facts.
   const loadOlderMessages = useCallback(async () => {
-    if (!hasMore || loadingMore) return
-    const oldest = messages[0]
-    if (!oldest) return
-
-    setLoadingMore(true)
-    isLoadingHistoryRef.current = true
-
+    if (!hasMore || loadingMore || !messagesRef.current.length) return
+    const epoch = ++paginationEpoch.current
+    olderAbort.current?.abort()
+    const abort = new AbortController(); olderAbort.current = abort
+    const oldest = messagesRef.current[0]
+    setLoadingMore(true); isLoadingHistoryRef.current = true
     const container = messagesContainerRef.current
-    const prevScrollHeight = container?.scrollHeight ?? 0
-    const prevScrollTop = container?.scrollTop ?? 0
-
+    const height = container?.scrollHeight ?? 0, top = container?.scrollTop ?? 0
     try {
-      const older = await chatService.loadHistory(PAGE_SIZE, oldest.timestamp)
-      if (older.length < PAGE_SIZE) {
-        setHasMore(false)
-      }
-      if (older.length > 0) {
-        const chronological = [...older].reverse()
-        setMessages((prev) => [
-          ...chronological.map((msg) => ({ ...msg, status: 'completed' as const })),
-          ...prev,
-        ])
-        // hydrate 新加载的老消息的任务快照（taskStatuses 没有的才拉）
-        const newTaskIds = [...new Set(chronological.map((m) => m.task_id).filter(Boolean))] as string[]
-        if (newTaskIds.length > 0) {
-          setTaskStatuses((cur) => {
-            const missing = newTaskIds.filter((id) => !cur.has(id))
-            if (missing.length > 0) {
-              Promise.all(missing.map((id) => chatService.getTaskSnapshot(id))).then((snaps) => {
-                snaps.forEach((snap) => {
-                  if (snap) upsertTaskStatus(snap)
-                })
-              }).catch(() => {/* 静默忽略 */})
-            }
-            return cur
-          })
-        }
-        // 保持滚动位置：等 DOM 更新后调整 scrollTop
-        requestAnimationFrame(() => {
-          if (container) {
-            const newScrollHeight = container.scrollHeight
-            // 保留触发时的原 scrollTop 偏移，而非假定从 0 开始
-            container.scrollTop = prevScrollTop + (newScrollHeight - prevScrollHeight)
-          }
-          setLoadingMore(false)
-          isLoadingHistoryRef.current = false
-        })
-        return
-      }
-    } catch (error) {
-      console.error('Failed to load older messages:', error)
+      const older = await chatService.loadHistory(PAGE_SIZE, oldest.timestamp, abort.signal)
+      if (epoch !== paginationEpoch.current) return
+      if (older.length) await refreshSnapshot([...messagesRef.current, ...older])
+      else setHasMore(false)
+      requestAnimationFrame(() => {
+        if (epoch === paginationEpoch.current && container) container.scrollTop = top + container.scrollHeight - height
+      })
+    } catch { if (!abort.signal.aborted) setSyncStatus('error') }
+    finally {
+      if (epoch === paginationEpoch.current) { setLoadingMore(false); isLoadingHistoryRef.current = false }
     }
-    setLoadingMore(false)
-    isLoadingHistoryRef.current = false
-  }, [hasMore, loadingMore, messages])
+  }, [hasMore, loadingMore, refreshSnapshot])
 
   // IntersectionObserver 检测滚动到顶部
   useEffect(() => {
@@ -314,7 +255,11 @@ export const Chat: React.FC = () => {
   }, [hasMore, loadingMore, loadOlderMessages])
 
   // 处理服务端消息
-  const handleServerMessage = (message: ChatServerMessage) => {
+  const handleServerMessage = async (message: ChatServerMessage) => {
+    if (message.type !== 'chat_reply' && message.type !== 'chat_error') {
+      await refreshSnapshot()
+      return
+    }
     if (message.type === 'chat_reply' && message.reply_type === 'task_created') {
       // task_created 单独处理：转为系统提示样式消息，避免覆盖 dispatcher 先行 direct_reply
       // WS chat_reply 的 content 仍是 string，包装成 ChatMessageContent
@@ -334,12 +279,9 @@ export const Chat: React.FC = () => {
       })
       // task_created：本地 upsert 初始快照 + tag 同 request_id 的 user 消息
       if (message.task_id) {
-        const newTask: ChatTaskSnapshot = {
-          task_id: message.task_id,
-          status: 'executing',
-          title: (message.content ?? '').replace(/^已创建任务：/, ''),
-        }
-        upsertTaskStatus(newTask)
+        void chatService.getTaskSnapshot(message.task_id).then(snapshot => {
+          if (snapshot && scope === getServerScope()) upsertTaskStatus(snapshot)
+        }).catch(() => { if (scope === getServerScope()) setSyncStatus('partial') })
         // 同 request_id 的 user 消息打标（本地消息列表）
         setMessages((prev) =>
           prev.map((m) =>
@@ -404,45 +346,7 @@ export const Chat: React.FC = () => {
       // 占位气泡退役后无原地收口对象：错误以普通系统提示呈现（toast）。
       // 失败说明（fail-loud）另经 chat_push 作为独立消息到达，与此不重复。
       toast.error(message.error || '消息处理失败')
-    } else if (message.type === 'chat_push') {
-      // manager 经 send_message 伪 channel 回流的新消息（完整 ChatMessage，含 media）：
-      // 直接追加为独立消息（占位气泡已退役，无原地结算对象，UX 对齐 channel）。
-      setMessages((prev) => [...prev, { ...message.message, status: 'completed' as const }])
-    } else if (message.type === 'chat_message_acked') {
-      // 「已接收」标记（protocol-admin §3.20.2）：agent 在人类输入 commit 后经
-      // chat_acknowledge 打标并推送。本地时间即可（刷新后经聊天历史读到持久化值）。
-      setMessages((prev) =>
-        prev.map((m) =>
-          m.role === 'user' && !m.acknowledged_at && m.request_id !== undefined
-            && message.request_ids.includes(m.request_id)
-            ? { ...m, acknowledged_at: new Date().toISOString() }
-            : m
-        )
-      )
-    } else if (message.type === 'chat_task_update') {
-      // 任务状态/计划变更：upsert 进 taskStatuses（终态也保留供图标显示 ✓/✗）
-      upsertTaskStatus(message.task)
-    } else if (message.type === 'chat_message_tagged') {
-      // Admin 回填：把对应 message_id 的消息打上 task_id
-      const { message_id, task_id } = message
-      setMessages((prev) =>
-        prev.map((m) =>
-          m.message_id === message_id ? { ...m, task_id } : m
-        )
-      )
-      // 如果 taskStatuses 还没有该 task_id 的快照，拉一次
-      setTaskStatuses((cur) => {
-        if (!cur.has(task_id)) {
-          chatService.getTaskSnapshot(task_id).then((snap) => {
-            if (snap) upsertTaskStatus(snap)
-          }).catch(() => {/* 静默忽略 */})
-        }
-        return cur
-      })
-    } else if (message.type === 'chat_message_deleted') {
-      // 单条消息删除（DELETE /api/chat/messages/:id 成功后推送）
-      const { message_id } = message
-      setMessages((prev) => prev.filter((m) => m.message_id !== message_id))
+
     }
   }
 
@@ -515,52 +419,35 @@ export const Chat: React.FC = () => {
 
   // 发送消息（附件路径失败时保留 quote，与保留 input/attachments 同语义）
   const handleSend = async () => {
-    const content = input.trim()
+    const content = input
     // 只有 quote 而无正文/附件时不能发送
-    if ((!content && attachments.length === 0) || connectionStatus !== 'connected') return
+    if ((!content.trim() && attachments.length === 0) || connectionStatus !== 'connected') return
     if (isSending) return
 
     setIsSending(true)
+    const composed = composeWithQuote(content), files = attachments, quoteAtSend = quote
+    const previous = pendingSend.current
+    const same = previous?.text === composed && previous.files.length === files.length
+      && previous.files.every((file, index) => file === files[index])
+    const requestId = same ? previous.id : createRequestId()
+    pendingSend.current = { id: requestId, text: composed, files }
     try {
-      if (attachments.length > 0) {
-        // 带附件走 HTTP multipart。
-        // 清空动作放在发送成功之后：失败时保留 input/attachments/quote 让用户直接重试
-        const files = attachments
-        const composed = composeWithQuote(content)
-        const { message } = await chatService.sendMessageWithAttachments(composed, files)
-        setAttachments([])
-        setInput('')
-        setQuote(null)
-        releasePreviewUrls(files)
-        // 只追加用户消息；回复由 chat_push 作为独立消息到达（占位气泡已退役）。
-        setMessages((prev) => [
-          ...prev,
-          { ...message, status: 'sent' as const },
-        ])
-      } else {
-        // 既有 WS 纯文本路径（入口已保证 content 非空）
-        const composed = composeWithQuote(content)
-        const request_id = chatService.sendMessage(composed)
-
-        // 添加用户消息（内容含引用块前缀）；回复由 chat_push 作为独立消息到达
-        const userMessage: MessageState = {
-          message_id: `msg_${Date.now()}`,
-          role: 'user',
-          content: { type: 'text', text: composed },
-          request_id,
-          timestamp: new Date().toISOString(),
-          status: 'sent',
-        }
-
-        setMessages((prev) => [...prev, userMessage])
-        setInput('')
-        setQuote(null)
-      }
-
+      const { message } = files.length
+        ? await chatService.sendMessageWithAttachments(composed, files, requestId)
+        : await chatService.sendMessage(composed, requestId)
+      if (scope !== getServerScope()) return
+      setMessages(prev => prev.some(item => item.message_id === message.message_id)
+        ? prev : [...prev, { ...message, status: 'sent' as const }])
+      setAttachments(current => current.filter(file => !files.includes(file)))
+      setInput(current => current === content ? '' : current)
+      setQuote(current => current === quoteAtSend ? null : current)
+      pendingSend.current = null
+      releasePreviewUrls(files)
       inputRef.current?.focus()
+      void refreshSnapshot()
     } catch (error) {
-      console.error('Failed to send message:', error)
-      toast.error('发送失败，请重试')
+      toast.error(error instanceof ClientError && ['unreachable', 'timeout', 'cancelled'].includes(error.kind)
+        ? '发送结果尚未确认，草稿已保留。原样重试会核对同一条消息。' : '发送失败，草稿已保留，请重试')
     } finally {
       setIsSending(false)
     }
@@ -645,11 +532,13 @@ export const Chat: React.FC = () => {
 
   // 连接状态指示器
   const renderConnectionStatus = () => {
+    const syncText = { synced: '已同步', syncing: '正在同步...', partial: '状态未完全同步', error: '状态未完全同步' }[syncStatus]
     const statusConfig: Record<ConnectionStatus, { color: string; text: string }> = {
       connecting: { color: '#f59e0b', text: '连接中...' },
-      connected: { color: '#10b981', text: '已连接' },
+      connected: { color: syncStatus === 'synced' ? '#10b981' : '#f59e0b', text: syncText },
       disconnected: { color: '#94a3b8', text: '已断开' },
       error: { color: '#ef4444', text: '连接错误' },
+      replaced: { color: '#94a3b8', text: '聊天已在另一个窗口打开' },
     }
 
     const config = statusConfig[connectionStatus]
@@ -665,9 +554,10 @@ export const Chat: React.FC = () => {
           }}
         />
         <span style={{ fontSize: '0.85rem', color: config.color }}>{config.text}</span>
-        {(connectionStatus === 'disconnected' || connectionStatus === 'error') && (
+        {(connectionStatus === 'disconnected' || connectionStatus === 'error' || connectionStatus === 'replaced'
+          || (connectionStatus === 'connected' && ['partial', 'error'].includes(syncStatus))) && (
           <button
-            onClick={handleReconnect}
+            onClick={connectionStatus === 'connected' ? () => { void refreshSnapshot() } : handleReconnect}
             style={{
               padding: '0.25rem 0.5rem',
               fontSize: '0.8rem',
@@ -678,7 +568,7 @@ export const Chat: React.FC = () => {
               cursor: 'pointer',
             }}
           >
-            重连
+            {connectionStatus === 'connected' ? '重新同步' : '重连'}
           </button>
         )}
       </div>
