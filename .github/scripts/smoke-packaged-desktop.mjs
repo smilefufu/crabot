@@ -40,12 +40,17 @@ const fromCheckout = path.relative(project, core)
 assert.ok(path.isAbsolute(fromCheckout) || fromCheckout.startsWith('..' + path.sep))
 const { verifyCoreRelease } = await import(pathToFileURL(path.join(core, 'scripts/lib/core-release.mjs')))
 await verifyCoreRelease(core)
-const { inspectInstance } = await import(pathToFileURL(path.join(core, 'scripts/lib/instance-runtime.mjs')))
 const data = path.join(temporary, '实例 数据')
 const env = { ...process.env, DATA_DIR: data }
 delete env.ELECTRON_RUN_AS_NODE; delete env.NODE_OPTIONS; delete env.NODE_PATH; delete env.CRABOT_DEV; delete env.CRABOT_PORT_OFFSET
 const node = path.join(core, process.platform === 'win32' ? '.product-runtime/node/node.exe' : '.product-runtime/node/bin/node')
 const cli = async (...args) => (await promisify(execFile)(node, [path.join(core, 'cli.mjs'), ...args], { env, cwd: core, timeout: 90_000, maxBuffer: 2 * 1024 * 1024 })).stdout
+// Run bundled native readers in short-lived children: Windows keeps a loaded
+// DLL mapped until process exit, including when the containing app is removed.
+const inspectInstance = async () => JSON.parse((await promisify(execFile)(node, ['--input-type=module', '-e',
+  'import{pathToFileURL}from"node:url";const m=await import(pathToFileURL(process.argv[1]));console.log(JSON.stringify(m.inspectInstance(process.argv[2])))',
+  path.join(core, 'scripts/lib/instance-runtime.mjs'), data], { env, timeout: 30_000 })).stdout)
+
 const children = []
 async function waitForExit(child) {
   try {
@@ -83,16 +88,16 @@ function launch() {
 }
 try {
   let gui = launch(); await gui.phase('ready')
-  const first = inspectInstance(data)
+  const first = await inspectInstance()
   assert.equal(first.state, 'running'); assert.equal(first.record.install_root, await fs.realpath(core))
   assert.equal(JSON.parse(await cli('status', '--json')).running, true)
-  const management = (await import(pathToFileURL(path.join(core, 'scripts/lib/desktop-management.cjs')))).default
-  const { installDesktopCli } = await import(pathToFileURL(path.join(core, 'scripts/lib/desktop-cli-install.mjs')))
-  const cliHome = management.ensurePrivateDataRoot(path.join(temporary, '命令 用户'))
+  const cliHome = path.join(temporary, '命令 用户')
   const registrationEnv = { ...env, HOME: cliHome, SHELL: process.platform === 'darwin' ? '/bin/zsh' : '/bin/bash',
     LOCALAPPDATA: path.join(cliHome, 'AppData/Local'), PATH: process.platform === 'win32' ? path.join(process.env.SystemRoot, 'System32') : '/usr/bin:/bin' }
   delete registrationEnv.ZDOTDIR
-  const registration = await installDesktopCli({ coreRoot: core, dataDir: data, home: cliHome, env: registrationEnv })
+  const registrationCode = 'import{pathToFileURL}from"node:url";import path from"node:path";const[root,dataDir,home]=process.argv.slice(1);const management=(await import(pathToFileURL(path.join(root,"scripts/lib/desktop-management.cjs")))).default;management.ensurePrivateDataRoot(home);const{installDesktopCli}=await import(pathToFileURL(path.join(root,"scripts/lib/desktop-cli-install.mjs")));console.log(JSON.stringify(await installDesktopCli({coreRoot:root,dataDir,home})))'
+  const registration = JSON.parse((await promisify(execFile)(node, ['--input-type=module', '-e', registrationCode, core, data, cliHome],
+    { env: registrationEnv, timeout: 90_000, maxBuffer: 2 * 1024 * 1024 })).stdout)
   const commandEnv = { ...registrationEnv, DATA_DIR: data, CRABOT_REGISTERED_CLI: registration.command }
   let registeredVersion
   if (process.platform === 'win32') {
@@ -104,11 +109,11 @@ try {
   const release = JSON.parse(await fs.readFile(path.join(core, 'core-release.json'), 'utf8'))
   assert.equal(registeredVersion, release.version)
   gui.child.kill('SIGKILL'); await gui.exited()
-  assert.equal(inspectInstance(data).state, 'running')
+  assert.equal((await inspectInstance()).state, 'running')
   gui = launch(); await gui.phase('ready')
-  assert.equal(inspectInstance(data).record.generation, first.record.generation)
+  assert.equal((await inspectInstance()).record.generation, first.record.generation)
   await cli('stop'); await gui.phase('stopped')
-  assert.equal(inspectInstance(data).state, 'stopped')
+  assert.equal((await inspectInstance()).state, 'stopped')
   gui.child.kill('SIGKILL'); await gui.exited()
   console.log('CRABOT_PACKAGED_BOOT ' + JSON.stringify({ platform: process.platform, arch: process.arch,
     packaged_asar_native_auth: true, installed_core_shared_with_cli: true, gui_crash_preserves_core: true, reattach_same_generation: true,
@@ -123,7 +128,7 @@ try {
   for (const child of children) if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
   const exits = await Promise.allSettled(children.map(waitForExit))
   await cli('stop')
-  assert.equal(inspectInstance(data).state, 'stopped', 'Unverified processes keep their disposable data for investigation')
+  assert.equal((await inspectInstance()).state, 'stopped', 'Unverified processes keep their disposable data for investigation')
   for (const exit of exits) if (exit.status === 'rejected') throw exit.reason
   await fs.rm(temporary, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
 }

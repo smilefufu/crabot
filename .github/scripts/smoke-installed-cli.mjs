@@ -51,8 +51,11 @@ try {
     assert.equal(login.stdout.trim(), release.version)
   }
   await assert.rejects(fs.lstat(sentinel), { code: 'ENOENT' })
-  const runtime = (await import(pathToFileURL(path.join(payload, 'scripts/lib/instance-runtime.mjs'))))
-  assert.equal(runtime.inspectInstance(data).state, 'stopped')
+  // Native DLLs loaded into this test process cannot be unlinked on Windows.
+  // Probe with the bundled child and let it exit before removing its payload.
+  const probe = 'import{pathToFileURL}from"node:url";const m=await import(pathToFileURL(process.argv[1]));console.log(JSON.stringify(m.inspectInstance(process.argv[2])))'
+  const runtime = await execute(node, ['--input-type=module', '-e', probe, path.join(payload, 'scripts/lib/instance-runtime.mjs'), data], { env, timeout: 30_000 })
+  assert.equal(JSON.parse(runtime.stdout).state, 'stopped')
   await assert.rejects(fs.lstat(path.join(data, 'mm.pid')), { code: 'ENOENT' })
   await verifyCoreRelease(payload); await verifyCoreRelease(core)
   console.log('CRABOT_INSTALLED_CLI ' + JSON.stringify({ platform: process.platform, arch: process.arch, version: release.version,
