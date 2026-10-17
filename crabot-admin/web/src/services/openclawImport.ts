@@ -4,8 +4,7 @@
  * parse：上传备份 .tar.gz（可能 GB 级，发原始二进制流，不走 JSON/multipart）。
  * execute：按用户勾选执行导入。
  */
-import { api } from './api'
-import { storage } from '../utils/storage'
+import { api, fetchAdmin } from './api'
 
 export interface ProviderOverviewItem {
   source_name: string
@@ -67,12 +66,10 @@ export interface ImportSummary {
 export const openclawImportService = {
   /** 上传备份并解析出概览（原始二进制流上传）。 */
   async parseBackup(file: File): Promise<{ token: string; overview: BackupOverview }> {
-    const token = storage.getToken()
-    const res = await fetch('/api/openclaw-import/parse', {
+    const res = await fetchAdmin('/api/openclaw-import/parse', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/octet-stream',
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
       },
       body: file,
     })

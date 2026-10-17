@@ -20,6 +20,8 @@ export interface ClientDiagnostic {
 }
 export interface ClientOptions {
   endpoint: string
+  /** Host lifetime/instance cancellation; remains independent of any UI or desktop framework. */
+  signal?: AbortSignal
   token?: (path: string) => string | null | undefined | Promise<string | null | undefined>
   fetch?: typeof fetch
   diagnose?: (event: ClientDiagnostic) => void
@@ -48,20 +50,23 @@ export class HttpClient {
     const timeout = new AbortController()
     const timer = setTimeout(() => timeout.abort(), timeoutMs)
     const abort = () => timeout.abort()
-    options.signal?.addEventListener('abort', abort, { once: true })
-    if (options.signal?.aborted) timeout.abort()
+    const signals = [options.signal, this.options.signal].filter((value): value is AbortSignal => !!value)
+    signals.forEach(signal => signal.addEventListener('abort', abort, { once: true }))
+    if (signals.some(signal => signal.aborted)) timeout.abort()
     let status: number | undefined, failure: ClientErrorKind | undefined
     try {
       const headers = new Headers(options.headers)
       headers.set('X-Crabot-Request-Id', requestId)
       if (timeout.signal.aborted) throw new Error('Request aborted')
       const token = await awaitSignal(Promise.resolve(this.options.token?.(path)), timeout.signal)
+      timeout.signal.throwIfAborted()
       if (token) headers.set('Authorization', 'Bearer ' + token)
-      const response = await (this.options.fetch ?? fetch)(this.endpoint + path, {
+      const response = await awaitSignal((this.options.fetch ?? fetch)(this.endpoint + path, {
         ...init, headers, redirect: 'error', signal: timeout.signal,
-      })
+      }), timeout.signal)
       status = response.status
-      const raw = await response.text()
+      const raw = await awaitSignal(response.text(), timeout.signal)
+      timeout.signal.throwIfAborted()
       let body: unknown
       try { body = raw ? JSON.parse(raw) : undefined } catch { body = raw }
       if (!response.ok) {
@@ -83,13 +88,13 @@ export class HttpClient {
       let mapped: ClientError
       if (error instanceof ClientError) mapped = error
       else if (timeout.signal.aborted) {
-        const cancelled = options.signal?.aborted
+        const cancelled = signals.some(signal => signal.aborted)
         mapped = new ClientError(cancelled ? 'cancelled' : 'timeout', cancelled ? 'Request cancelled' : 'Request timed out', status, undefined, requestId)
       } else mapped = new ClientError('unreachable', 'Cannot reach Admin', status, undefined, requestId)
       failure = mapped.kind
       throw mapped
     } finally {
-      clearTimeout(timer); options.signal?.removeEventListener('abort', abort)
+      clearTimeout(timer); signals.forEach(signal => signal.removeEventListener('abort', abort))
       // No URLs, query strings, headers, tokens, request/response bodies or user text.
       try { this.options.diagnose?.({ operation, request_id: requestId, status, error: failure, duration_ms: Date.now() - started }) } catch { /* diagnostics cannot affect a mutation result */ }
     }

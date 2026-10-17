@@ -5,8 +5,7 @@
 
 import './_preflight.mjs'
 
-import { existsSync, readFileSync, mkdirSync } from 'node:fs'
-import { randomBytes } from 'node:crypto'
+import { existsSync } from 'node:fs'
 import { createInterface } from 'node:readline'
 import { resolve, dirname } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -14,8 +13,8 @@ import { spawnSync } from 'node:child_process'
 import { homedir } from 'node:os'
 import net from 'node:net'
 import { checkSingleInstance } from './lib/pid.mjs'
-import { scanModules, applyMigration } from './upgrade-lib/migrate.mjs'
-import { runScript } from './upgrade-lib/runner.mjs'
+import { prepareCoreEnvironment, applyStartupMigrations } from './lib/core-preparation.mjs'
+import management from './lib/desktop-management.cjs'
 import { hasInstance, resolveCliDataDir } from './lib/instance.mjs'
 import { acquireCliLock, releaseCliLock, hasInheritedCliLock } from './lib/cli-lock.mjs'
 import { runManagedCore } from './lib/managed-core.mjs'
@@ -29,7 +28,7 @@ const ROOT = resolve(__dirname, '..')
 const HOME_CRABOT = resolve(homedir(), '.crabot')
 
 // auto-init：缺 instance.json → 同步调 crabot init（在 const OFFSET 读取前）
-if (!hasInstance(HOME_CRABOT)) {
+if (!hasInstance(HOME_CRABOT) && !management.readDesktopManagement(resolveCliDataDir({ homeDir: HOME_CRABOT }))) {
   console.log('[crabot] first run, auto-running init...')
   const initEntry = resolve(__dirname, 'init.mjs')
   const r = spawnSync(process.execPath, [initEntry], { stdio: 'inherit', env: { ...process.env } })
@@ -52,29 +51,12 @@ process.env.CRABOT_ORPHAN_RECOVERY_INTERACTIVE = !DAEMON_MODE
 
 // ── 环境变量 ──
 
-function loadEnvFile(filePath) {
-  if (!existsSync(filePath)) return
-  const lines = readFileSync(filePath, 'utf-8').split('\n')
-  for (const raw of lines) {
-    const line = raw.replace(/#.*$/, '').trim()
-    if (!line || !line.includes('=')) continue
-    const idx = line.indexOf('=')
-    const key = line.slice(0, idx)
-    const val = line.slice(idx + 1)
-    if (!process.env[key]) {
-      process.env[key] = val
-    }
-  }
-}
-
 const DATA_DIR = resolveCliDataDir({ homeDir: HOME_CRABOT })
 const OFFSET = parseInt(process.env.CRABOT_PORT_OFFSET || '0', 10)
-process.env.DATA_DIR = DATA_DIR
+const prepared = prepareCoreEnvironment({ root: ROOT, dataDir: DATA_DIR })
+Object.assign(process.env, prepared.env)
 
-// admin/.env 已废弃（密码改存 credentials.json）；保留 ROOT/.env 兜底
-loadEnvFile(resolve(ROOT, '.env'))
-
-if (scraplingRuntime.runtimeRequired(DATA_DIR)) {
+if (!prepared.runtime && scraplingRuntime.runtimeRequired(DATA_DIR)) {
   try {
     await runBounded(process.execPath, [resolve(ROOT, 'scripts/prepare-scrapling.mjs')])
   } catch (err) {
@@ -83,46 +65,8 @@ if (scraplingRuntime.runtimeRequired(DATA_DIR)) {
   }
 }
 
-if (!process.env.CRABOT_JWT_SECRET) {
-  process.env.CRABOT_JWT_SECRET = randomBytes(32).toString('hex')
-}
-
-// PATH 兜底：onboard/install 有些场景未持久化 ~/.local/bin 到 shell profile，
-// 导致 Node spawn 子进程时找不到 uv。若该目录存在且未在 PATH 中，prepend 进去。
-const LOCAL_BIN = resolve(homedir(), '.local/bin')
-if (existsSync(LOCAL_BIN)) {
-  const currentPath = (process.env.PATH || '').split(':').filter(Boolean)
-  if (!currentPath.includes(LOCAL_BIN)) {
-    process.env.PATH = [LOCAL_BIN, ...currentPath].join(':')
-  }
-}
-
-// NO_PROXY 兜底：用户开了系统代理（HTTP_PROXY/HTTPS_PROXY/ALL_PROXY）时，
-// Python httpx 默认 trust_env=True 会把 localhost RPC 也走代理 → 502 Bad Gateway，
-// memory 等 Python 模块 register 失败、卡在 starting。Node http 不读代理变量不受影响，
-// 但显式声明 loopback 不走代理对 TS 也无害。
-{
-  const required = ['localhost', '127.0.0.1', '::1']
-  const merge = (existing) => {
-    const set = new Set(
-      (existing || '').split(',').map((s) => s.trim()).filter(Boolean)
-    )
-    for (const h of required) set.add(h)
-    return Array.from(set).join(',')
-  }
-  const merged = merge(process.env.NO_PROXY || process.env.no_proxy)
-  process.env.NO_PROXY = merged
-  process.env.no_proxy = merged
-}
-
-// ── 数据目录 ──
-
-for (const sub of ['admin', 'agent', 'memory']) {
-  mkdirSync(resolve(DATA_DIR, sub), { recursive: true })
-}
-
 // ── 密码检查 ──
-
+if (!prepared.managed) {
 const credModUrl = pathToFileURL(
   resolve(ROOT, 'crabot-admin/dist/credentials.js'),
 ).href
@@ -153,6 +97,7 @@ if (!existingCred) {
   await writeCredentials(resolve(DATA_DIR, 'admin'), newCred)
   console.log('[crabot] Password saved.')
   console.log('[crabot] \x1b[33mThis is a temporary password — you will be required to change it on first login.\x1b[0m')
+}
 }
 
 // ── 启动 Module Manager ──
@@ -227,25 +172,8 @@ console.log(`[crabot] Admin Web: http://localhost:${WEB_PORT}`)
 // Migration 兜底：start 自动跑缺失的 migration（覆盖 upgrade-time 漏跑场景）
 // 用 applyMigration 包装版（chainUpgrade + writeSchemaVersion 原子，不可能漏写
 // SCHEMA_VERSION）；不做 backup（启动不备份，upgrade.mjs 主路径才备）。
-const pending = scanModules(ROOT, DATA_DIR)
-if (pending.length > 0) {
-  console.log(`[crabot] applying ${pending.length} pending migration(s)...`)
-  for (const m of pending) {
-    console.log(`[crabot]   ${m.moduleId}: ${m.dataVersion ?? 'fresh'} → ${m.codeVersion}`)
-    const result = await applyMigration(
-      resolve(ROOT, m.moduleId),
-      m.dataDir,
-      m.dataVersion,
-      m.codeVersion,
-      runScript,
-    )
-    if (!result.ok) {
-      console.error(`[crabot] migration failed for ${m.moduleId} at ${result.failedAt}`)
-      process.exit(1)
-    }
-  }
-  console.log('[crabot] migrations done')
-}
+try { await applyStartupMigrations(ROOT, DATA_DIR, process.env, message => console.log(`[crabot] ${message}`)) }
+catch (error) { console.error(`[crabot] ${error.message}`); process.exit(1) }
 
 if (!DAEMON_MODE) {
   await runManagedCore({ root: ROOT, dataDir: DATA_DIR, mmPort: MM_PORT,

@@ -34,6 +34,7 @@ import { ScheduleList } from './pages/Schedules/ScheduleList'
 import { OpenClawImportWizard } from './pages/OpenClawImport/OpenClawImportWizard'
 import { BackupExportPage } from './pages/Backup/BackupExportPage'
 import './App.css'
+import { DesktopGate } from './components/DesktopGate'
 
 const PrivateRoute: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const { isAuthenticated, isTemp } = useAuth()
@@ -290,9 +291,11 @@ function App() {
     <BrowserRouter>
       <AuthProvider>
         <ToastProvider>
-          <DialogApplicationsProvider>
-            <AppRoutes />
-          </DialogApplicationsProvider>
+          <DesktopGate>
+            <DialogApplicationsProvider>
+              <AppRoutes />
+            </DialogApplicationsProvider>
+          </DesktopGate>
         </ToastProvider>
       </AuthProvider>
     </BrowserRouter>

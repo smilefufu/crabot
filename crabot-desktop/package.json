@@ -1,0 +1,23 @@
+{
+  "name": "crabot-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/main.js",
+  "crabotDesktopDevelopment": true,
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node build-preload.mjs",
+    "start": "node start.mjs"
+  },
+  "dependencies": {
+    "crabot-client": "file:../crabot-client",
+    "electron-updater": "6.8.9"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "electron": "44.9.0",
+    "electron-builder": "26.15.3",
+    "esbuild": "0.25.12",
+    "typescript": "~5.8.0"
+  }
+}

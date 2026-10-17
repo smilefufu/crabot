@@ -43,6 +43,23 @@ test('HTTP failures, cancellation, timeout and unreachable remain distinct; ther
   await assert.rejects(stalledAuth.request('/x', z.unknown(), { signal: cancel.signal }), { kind: 'cancelled' })
 })
 
+test('host instance cancellation discards a late body even when a transport ignores abort', async () => {
+  const scope = new AbortController()
+  let finish
+  const body = new Promise(resolve => { finish = resolve })
+  let fetched
+  const started = new Promise(resolve => { fetched = resolve })
+  const client = new HttpClient({ endpoint: 'http://localhost/api', signal: scope.signal, fetch: async () => {
+    fetched(); return { status: 200, ok: true, text: () => body }
+  } })
+  const result = client.request('/old-instance', z.object({ ok: z.boolean() }))
+  await started
+  scope.abort()
+  await assert.rejects(result, { kind: 'cancelled' })
+  finish('{"ok":true}')
+  await assert.rejects(client.request('/old-client', z.unknown()), { kind: 'cancelled' })
+})
+
 test('chat retry preserves request ID, exact whitespace and ordered attachments; a successful send uses the server message', async () => {
   const attempts = []
   const http = new HttpClient({ endpoint: 'http://localhost/api', fetch: async (url, init) => {

@@ -83,12 +83,14 @@ jobs:
             pnpm --dir "$module" install --frozen-lockfile
             node "$module/node_modules/typescript/bin/tsc" -p "$module/tsconfig.json"
           done
+          pnpm --dir crabot-desktop install --frozen-lockfile
       - name: Runtime regressions
         run: |
           node --test crabot-client/tests/*.test.mjs
           node --test scripts/lib/__tests__/product-*.test.mjs
           node --test scripts/lib/__tests__/instance-runtime.test.mjs scripts/lib/__tests__/cli-lock-native.test.mjs scripts/lib/__tests__/process-identity.test.mjs scripts/lib/__tests__/local-auth-transport.test.mjs scripts/lib/__tests__/stop-windows.test.mjs scripts/lib/__tests__/background-core.test.mjs
           node --test scripts/lib/__tests__/desktop-session.test.mjs
+          node --test scripts/lib/__tests__/core-preparation.test.mjs
           cd crabot-core
           node node_modules/vitest/vitest.mjs run src/agent-venv.test.ts src/core-modules.test.ts src/shutdown-generation.test.ts --maxWorkers=1 --minWorkers=1
       - name: Agent environment regressions
@@ -107,7 +109,21 @@ jobs:
           pnpm install --frozen-lockfile
           node node_modules/typescript/bin/tsc -p tsconfig.json
           node node_modules/vite/bin/vite.js build
-          node node_modules/vitest/vitest.mjs run src/pages/Chat/index.test.tsx src/services/server-state.test.ts --maxWorkers=1 --minWorkers=1
+          node node_modules/vitest/vitest.mjs run src/pages/Chat/index.test.tsx src/services/server-state.test.ts src/services/desktop-host.test.ts src/components/ChangePasswordDialog.test.tsx --maxWorkers=1 --minWorkers=1
+      - name: Electron compilation and main-process state regressions
+        working-directory: crabot-desktop
+        run: |
+          node node_modules/typescript/bin/tsc -p tsconfig.json
+          node build-preload.mjs
+          node --test tests/desktop-network.test.mjs tests/session-host.test.mjs
+      - name: Real sandboxed Electron window boundaries on Linux
+        if: runner.os == 'Linux'
+        working-directory: crabot-desktop
+        run: xvfb-run -a node --test tests/electron-boundary.test.mjs 2>&1 | tee ../.desktop-build/electron-boundary.log
+      - name: Real sandboxed Electron window boundaries on macOS and Windows
+        if: runner.os != 'Linux'
+        working-directory: crabot-desktop
+        run: node --test tests/electron-boundary.test.mjs 2>&1 | tee ../.desktop-build/electron-boundary.log
       - name: Build locked browser and computer-use resources
         if: steps.scope.outputs.full_runtime == 'true'
         run: |

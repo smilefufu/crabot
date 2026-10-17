@@ -1,3 +1,4 @@
 export * from './chat.js'
 export * from './desktop.js'
+export * from './desktop-host.js'
 export { z } from 'zod'

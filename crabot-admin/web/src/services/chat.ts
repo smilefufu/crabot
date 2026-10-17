@@ -1,11 +1,17 @@
 import { ChatClient, ChatConnection, ClientError, createChatRequest, createRequestId } from 'crabot-client'
 import { storage } from '../utils/storage'
 import { getWebClient } from './api'
+import { adminUrl, desktopConnection, getDesktopState, isDesktop } from './desktop-host'
 
 class ChatService extends ChatConnection {
   constructor() {
     super({
       url: () => {
+        if (isDesktop) {
+          const url = new URL('/ws/chat', desktopConnection().origin)
+          url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
+          return url.href
+        }
         const token = storage.getToken()
         if (!token) throw new Error('Authentication required')
         const url = new URL('/ws/chat', window.location.origin)
@@ -35,9 +41,20 @@ class ChatService extends ChatConnection {
   clearMessages() { return this.client.clear() }
   mediaSrc(mediaUrl: string) {
     if (mediaUrl.startsWith('http://') || mediaUrl.startsWith('https://')) return mediaUrl
+    if (isDesktop) return getDesktopState()?.phase === 'ready' ? adminUrl(mediaUrl) : 'data:,'
     const token = storage.getToken()
     return token ? `${mediaUrl}?token=${encodeURIComponent(token)}` : mediaUrl
   }
 }
 
 export const chatService = new ChatService()
+if (isDesktop) {
+  // Keep the socket attached to the same host lifetime as HTTP, including a
+  // reconnect with the same generation after an Admin restart.
+  let signal: AbortSignal | undefined
+  window.crabotDesktop!.onStateChanged(() => {
+    if (getDesktopState()?.phase !== 'ready') { chatService.disconnect(); signal = undefined; return }
+    const next = desktopConnection().signal
+    if (signal !== next) { chatService.disconnect(); signal = next; chatService.connect() }
+  })
+}

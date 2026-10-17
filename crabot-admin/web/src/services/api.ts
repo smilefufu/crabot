@@ -4,24 +4,39 @@
 
 import { storage } from '../utils/storage'
 import { HttpClient, z } from 'crabot-client'
+import { adminUrl, desktopBridge, desktopConnection, isDesktop } from './desktop-host'
 
 const API_BASE = '/api'
 
 let client: HttpClient | undefined
+let clientSignal: AbortSignal | undefined
 export function getWebClient(): HttpClient {
+  const host = isDesktop ? desktopConnection() : undefined
+  if (host && host.signal !== clientSignal) { client = undefined; clientSignal = host.signal }
   client ??= new HttpClient({
-    endpoint: new URL(API_BASE, window.location.origin).href,
-    token: path => path === '/auth/login' ? null : storage.getToken(),
+    endpoint: new URL(API_BASE, host?.origin ?? window.location.origin).href,
+    signal: host?.signal,
+    token: path => isDesktop || path === '/auth/login' ? null : storage.getToken(),
     fetch: async (url, options) => {
       const response = await fetch(url, options)
       if (response.status === 401) {
-        storage.clearToken()
-        window.location.href = '/login'
+        if (isDesktop) void desktopBridge?.reconnect()
+        else { storage.clearToken(); window.location.href = '/login' }
       }
       return response
     },
   })
   return client
+}
+
+// Binary uploads/downloads and SSE use the same verified direct Admin origin.
+export function fetchAdmin(relative: string, options: RequestInit = {}): Promise<Response> {
+  const headers = new Headers(options.headers)
+  const token = isDesktop ? null : storage.getToken()
+  if (token) headers.set('Authorization', 'Bearer ' + token)
+  const hostSignal = isDesktop ? desktopConnection().signal : undefined
+  const signals = [options.signal, hostSignal].filter((value): value is AbortSignal => !!value)
+  return fetch(adminUrl(relative), { ...options, headers, redirect: 'error', ...(signals.length ? { signal: AbortSignal.any(signals) } : {}) })
 }
 
 class ApiClient {

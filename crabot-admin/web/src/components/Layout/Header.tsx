@@ -3,6 +3,7 @@ import { useLocation } from 'react-router-dom'
 import { useAuth } from '../../contexts/AuthContext'
 import { Button } from '../Common/Button'
 import { ChangePasswordDialog } from '../ChangePasswordDialog'
+import { isDesktop } from '../../services/desktop-host'
 
 const PAGE_NAMES: { path: string; name: string }[] = [
   { path: '/chat', name: '聊天' },
@@ -31,8 +32,8 @@ export const Header: React.FC = () => {
       <header className="app-header">
         <span className="app-header-page">{pageName}</span>
         <div style={{ display: 'flex', gap: 8 }}>
-          <Button variant="secondary" onClick={() => setShowDialog(true)}>修改密码</Button>
-          <Button variant="secondary" onClick={logout}>退出</Button>
+          <Button variant="secondary" onClick={() => setShowDialog(true)}>{isDesktop ? '浏览器访问密码' : '修改密码'}</Button>
+          <Button variant="secondary" onClick={logout}>{isDesktop ? '退出 Crabot' : '退出'}</Button>
         </div>
       </header>
       {showDialog && <ChangePasswordDialog onClose={() => setShowDialog(false)} />}

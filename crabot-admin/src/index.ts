@@ -1553,7 +1553,7 @@ export class AdminModule extends ModuleBase {
     this.closeWebTransport = transport.close
 
     return new Promise((resolve, reject) => {
-      this.webServer!.listen(this.adminConfig.web_port, () => {
+      this.webServer!.listen(this.adminConfig.web_port, process.env.CRABOT_ADMIN_WEB_HOST, () => {
         resolve()
       })
       this.webServer!.on('error', reject)

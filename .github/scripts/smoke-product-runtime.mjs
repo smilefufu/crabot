@@ -79,6 +79,33 @@ try {
   assert.equal(memory, 'memory-local-read-write-ok')
   report.memory_local_read_write = true
 
+  // Upgrade scripts use the same standalone interpreters, with private Memory deps,
+  // rather than uv sync, Electron Node or an Agent/MCP environment at startup.
+  const { runScript } = await import(pathToFileURL(join(root, 'scripts/upgrade-lib/runner.mjs')).href)
+  const upgrade = join(data, 'migration-fixture', 'crabot-memory', 'upgrade')
+  await fs.mkdir(upgrade, { recursive: true })
+  const pythonMigration = join(upgrade, 'probe.py')
+  await fs.writeFile(pythonMigration, [
+    'import sys,json,yaml',
+    'from pathlib import Path',
+    'assert sys.flags.isolated == 1',
+    'assert not any("agent-venv" in value for value in sys.path)',
+    'target=Path(next(value.split("=",1)[1] for value in sys.argv if value.startswith("--data-dir=")))',
+    'target.mkdir(parents=True,exist_ok=True)',
+    '(target/"migration.json").write_text(json.dumps({"python":str(Path(sys.executable).resolve()),"yaml":str(Path(yaml.__file__).resolve())}),encoding="utf-8")',
+  ].join('\n'))
+  const migrated = join(data, 'migration-data')
+  const migrationEnv = { ...env, PATH: data }
+  assert.equal((await runScript(pythonMigration, migrated, { root, env: migrationEnv })).exitCode, 0)
+  const migrationResult = JSON.parse(await fs.readFile(join(migrated, 'migration.json'), 'utf8'))
+  assert.equal(migrationResult.python, await fs.realpath(runtime.executables.python))
+  assert.ok(migrationResult.yaml.startsWith(await fs.realpath(runtime.memoryPackages)))
+  const nodeMigration = join(upgrade, 'probe.mjs')
+  await fs.writeFile(nodeMigration, 'import{writeFileSync}from"node:fs";import{join}from"node:path";const data=process.argv.find(value=>value.startsWith("--data-dir=")).slice(11);writeFileSync(join(data,"node.json"),JSON.stringify({node:process.execPath}))')
+  assert.equal((await runScript(nodeMigration, migrated, { root, env: migrationEnv })).exitCode, 0)
+  assert.equal(JSON.parse(await fs.readFile(join(migrated, 'node.json'), 'utf8')).node, await fs.realpath(runtime.executables.node))
+  report.offline_migration_interpreters = true
+
   const wheels = []
   for (const version of ['1.0', '2.0']) {
     const wheel = join(data, 'crabot_product_probe-' + version + '-py3-none-any.whl')
