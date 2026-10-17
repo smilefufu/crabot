@@ -26,6 +26,20 @@ describe('approved shared request prompt projections', () => {
     expect(prompt).toContain('当前会话：{"channel_id":"voice","session_id":"shared"}')
   })
 
+  it.each([false, true])('assigns acknowledgement to the shared Manager without suppressing isolated request delivery (voice=%s)', voice => {
+    const prompt = assembleManagerSystemPrompt({ ...group, requestAuthorization: 'request', voice })
+    expect(prompt).toContain('任务，选定摘录不能抹掉原文中的否定、条件或私发要求。\n\n当前是独立请求的承接处理，接单确认由共享主控负责；本上下文不再发送接单确认。需要澄清、报告真实进展或交付结果时，仍按固定目标正常回复。\n\n只处理这个请求')
+    for (const inputs of [
+      { ...group, voice },
+      { ...group, requestAuthorization: 'shared' as const, voice },
+      { ...group, isGroup: false, voice },
+      { ...group, isSystemThread: true, voice },
+      { ...group, isSystemThread: true, isBuiltinDailyReflection: true, voice },
+    ]) {
+      expect(assembleManagerSystemPrompt(inputs)).not.toContain('接单确认由共享主控负责')
+    }
+  })
+
   it.each(['shared', 'request'] as const)('keeps the whole voice tag contract in %s and no conflicting text delivery rule', requestAuthorization => {
     const prompt = assembleManagerSystemPrompt({ ...group, requestAuthorization, voice: true })
     expect(prompt).toContain(VOICE_REPLY_PROMPT)

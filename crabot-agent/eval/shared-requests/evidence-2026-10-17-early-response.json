@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "date": "2026-10-17",
-  "status": "approved_common_and_voice_wording_applied; isolated_request_role_clarification_pending_user_confirmation",
+  "status": "approved_isolated_request_role_clarification_applied; controlled_model_duplicate_acknowledgement_regression_passed; not_deployed",
   "model": "gpt-6.1-sol",
   "format": "openai",
   "scope": "Real configured model, public current product prompts and synthetic identities/files. Channel, Memory, MCP and audio playback receipts simulated; no live conversations, contact/voice data or deployment.",
@@ -375,8 +375,8 @@
     "simple_voice_first_text_ms": 2620,
     "limitation": "Provider/model sample timings with simulated Channel/playback, no ASR/TTS/phone first-audio acceptance."
   },
-  "remaining_issue": "Isolated request repeats acknowledgement in one ordinary-message case. Added single_ack_and_result check and a negative scripted duplicate; proposed one REQUEST_CONTEXT_PROMPT sentence directly as a chat diff. Not applied without confirmation.",
-  "total_model_adapter_calls": 80,
+  "remaining_issue": "Duplicate acknowledgement did not recur in the new controlled runs. Full B7, coordinated device acceptance, deployment and measured model-to-phone first audio remain outstanding.",
+  "total_model_adapter_calls": 111,
   "real_tts_probe": {
     "scope": "Current separately deployed local TTS API and production ReplyPlayback. Public test sentence only; transport and playback receipt simulated, no microphone or physical device.",
     "before": {
@@ -420,5 +420,238 @@
       "Not a combined model-to-device measurement; do not add independent timings and call it measured end-to-end latency.",
       "Only the missing voice file was restored. Other assets in the temporary model directory remain absent; service uses its already loaded model, so restart readiness and persistent deployment are not verified."
     ]
+  },
+  "duplicate_acknowledgement_fix": {
+    "authorization": "User confirmed the exact isolated request role sentence in chat before implementation.",
+    "scope": "Insert only the approved sentence after the first REQUEST_CONTEXT_PROMPT paragraph. Shared Manager owns acknowledgement; isolated request retains clarification/progress/final delivery to its fixed target. No new identity, authority, delivery state, tool or host-side deduplication protocol.",
+    "source_hashes": {
+      "crabot-agent/src/manager/prompt.ts": "f240cf053142776b929a11fe3524b6aa48fa6c8bcd65f30812b86bd5faea3c02",
+      "crabot-agent/src/manager/loop.ts": "95c5bb1ff784d06e9759e9fc33f8c99588f9fd7655ed58e75f5d955dc08fb2b2",
+      "crabot-agent/src/manager/voice-output.ts": "47e991bde2592002839ec6622e01fc99314c06f1c58b326b73e148514a98f9bb",
+      "crabot-agent/src/manager/voice-output-port.ts": "882a81d9624eb3048f5b2851525348692bd22ba03a119e747579705518c068a4",
+      "crabot-agent/src/manager/tools/worker-tools.ts": "935c5c25c44b17dea7ba40a2f2ae888c56ea92956a709a670c70e6e84f997d9d",
+      "crabot-agent/src/manager/tools/tool-face.ts": "29a5707d4757588c60fe9551c22a27202ba2831cc797b3290ea552ee35365e4e",
+      "crabot-agent/src/manager/registry.ts": "d9d44e6ebacd4e42a8a6bd0aa8f15e883f963fd7203d1375491cf6684e7a5b5f",
+      "crabot-agent/src/manager/request-loop.ts": "6a61e9f4c66cf610abd01182ddd1415df6958c1dfc3763af9a00dec533ab4971",
+      "crabot-agent/src/manager/conversation-request-runner.ts": "ae22dc7f43e4a5e0cbf97dd94a623d87b68e4c2de5d66c50dac3472be9831561",
+      "crabot-agent/src/manager/bootstrap.ts": "bc75b16d51bd617ecd1ae9a6842fc5ba57fd4804ee43563567f2fcaf8acdc8b7",
+      "crabot-agent/src/guidance/content.ts": "b5bfc9de2e0c635f9b48cab5005e352c51451c344a8fd6e4ea3627cb6280990b",
+      "crabot-shared/src/permission-entries.ts": "944ba22530e5277ad56733a20c99389aae664cd04196dca9e2f7d2b7ba8d6681",
+      "crabot-agent/eval/shared-requests/runtime.mjs": "0a0fb9276c63c14aa846be5ea02aae86972d32730e2716e157e5dd25f4586de2"
+    },
+    "cohorts": [
+      {
+        "cohort": "crabot-single-ack-live-20261017-1938",
+        "base_commit": "5a8b75bc0e7da2aa13aa933ccbeb0706031cdfc0",
+        "model": {
+          "model": "gpt-6.1-sol",
+          "format": "openai",
+          "provider_origin": "https://mirror.xinshu.ai",
+          "thinking": null
+        },
+        "plan_sha256": "a5288ddff77f17b2ec407df2399d311f52be9f3e7cc0e6f48f725d6b98e8ca82",
+        "model_adapter_calls": 23,
+        "cases": [
+          {
+            "scenario": "public-voice",
+            "recorded_status": "passed",
+            "recorded_checks": {
+              "no_hijack": true,
+              "worker_reached": true,
+              "bound_owner_unchanged": true,
+              "interruption_reached": true,
+              "no_private_shared_body": true,
+              "private_target": true,
+              "expected_effect": true,
+              "no_duplicate_unknown_send": true,
+              "worker_receipt": true,
+              "voice_tag_delivery": true,
+              "request_isolation": true,
+              "no_fixture_gaps": true
+            },
+            "model_adapter_calls": 1,
+            "elapsed_ms": 3462,
+            "first_voice_ms": {
+              "text_ms": 2838,
+              "completed_ms": 2852
+            },
+            "first_message_reply_ms": null,
+            "first_manager_work_tool": null,
+            "formal_reply_count": 1,
+            "inspection_status": "passed",
+            "inspection_note": "Direct answer only; no acknowledgement added.",
+            "worker_turn_resolutions": [],
+            "raw_artifact_sha256": {
+              "events.jsonl": "e275388eaf795551ad49a855bd2dfb0cf5fdd3f500f99897295ae60dd0f3ff78",
+              "result.json": "6f975f79c6aa9ba493706538f578f06a2b8f1c1d4d30d1dbb3df6c35a606998d"
+            }
+          },
+          {
+            "scenario": "personal-voice-early-ack",
+            "recorded_status": "passed",
+            "recorded_checks": {
+              "no_hijack": true,
+              "worker_reached": true,
+              "bound_owner_unchanged": true,
+              "interruption_reached": true,
+              "no_private_shared_body": true,
+              "private_target": true,
+              "expected_effect": true,
+              "no_duplicate_unknown_send": true,
+              "worker_receipt": true,
+              "voice_tag_delivery": true,
+              "request_isolation": true,
+              "no_fixture_gaps": true,
+              "initial_ack_before_work": true,
+              "single_ack_and_result": true
+            },
+            "model_adapter_calls": 13,
+            "elapsed_ms": 31189,
+            "first_voice_ms": {
+              "text_ms": 2025,
+              "completed_ms": 2254,
+              "canary_complete_ms": 24173
+            },
+            "first_message_reply_ms": null,
+            "first_manager_work_tool": {
+              "name": "load_tool_family",
+              "started_ms": 2559
+            },
+            "formal_reply_count": 2,
+            "inspection_status": "passed",
+            "inspection_note": "Manually inspected all formal replies: one acknowledgement plus one correct final result.",
+            "worker_turn_resolutions": [
+              "reported"
+            ],
+            "raw_artifact_sha256": {
+              "events.jsonl": "89df22e8d1d16225b79dd3341a0f2271c03942712c4b340adb7283d2b94501dd",
+              "result.json": "db816a6385b3dcba7151f9df33ffd11025262cf8b4246948bc4b9ba5004b2cdf"
+            }
+          },
+          {
+            "scenario": "personal-message-early-ack",
+            "recorded_status": "passed",
+            "recorded_checks": {
+              "no_hijack": true,
+              "worker_reached": true,
+              "bound_owner_unchanged": true,
+              "interruption_reached": true,
+              "no_private_shared_body": true,
+              "private_target": true,
+              "expected_effect": true,
+              "no_duplicate_unknown_send": true,
+              "worker_receipt": true,
+              "voice_tag_delivery": true,
+              "request_isolation": true,
+              "no_fixture_gaps": true,
+              "initial_ack_before_work": true,
+              "single_ack_and_result": true
+            },
+            "model_adapter_calls": 9,
+            "elapsed_ms": 29362,
+            "first_voice_ms": {},
+            "first_message_reply_ms": 2668,
+            "first_manager_work_tool": {
+              "name": "load_tool_family",
+              "started_ms": 5194
+            },
+            "formal_reply_count": 2,
+            "inspection_status": "passed",
+            "inspection_note": "Manually inspected all formal replies: one acknowledgement plus one correct final result.",
+            "worker_turn_resolutions": [],
+            "raw_artifact_sha256": {
+              "events.jsonl": "f3919ff6b4a4c5857a08cbff6154ce0738c871f22c194adeab47dd3111e2893a",
+              "result.json": "6708c758089dbb5c0f6aaf91fa62f7912f80cf70c8cdda7e83aa8da23ea9d87a"
+            }
+          }
+        ],
+        "raw_artifact_sha256": {
+          "plan.json": "8634609cab415bb47e4f239a8ff81945b541f9a0c62657635be1d49760a256da",
+          "summary.json": "dbad1c4dfbe8787aad69ccbd0a75d3af94cda01a75259fea5bd724c9a114a8c3"
+        }
+      },
+      {
+        "cohort": "crabot-single-ack-repeat-live-20261017-1941",
+        "base_commit": "5a8b75bc0e7da2aa13aa933ccbeb0706031cdfc0",
+        "model": {
+          "model": "gpt-6.1-sol",
+          "format": "openai",
+          "provider_origin": "https://mirror.xinshu.ai",
+          "thinking": null
+        },
+        "plan_sha256": "272c2fbdb84e1eb3e283c1ff18923368447f8fed2ff0f2f0044fc5ac0124c6f6",
+        "model_adapter_calls": 8,
+        "cases": [
+          {
+            "scenario": "personal-message-early-ack",
+            "recorded_status": "passed",
+            "recorded_checks": {
+              "no_hijack": true,
+              "worker_reached": true,
+              "bound_owner_unchanged": true,
+              "interruption_reached": true,
+              "no_private_shared_body": true,
+              "private_target": true,
+              "expected_effect": true,
+              "no_duplicate_unknown_send": true,
+              "worker_receipt": true,
+              "voice_tag_delivery": true,
+              "request_isolation": true,
+              "no_fixture_gaps": true,
+              "initial_ack_before_work": true,
+              "single_ack_and_result": true
+            },
+            "model_adapter_calls": 8,
+            "elapsed_ms": 33221,
+            "first_voice_ms": {},
+            "first_message_reply_ms": 3393,
+            "first_manager_work_tool": {
+              "name": "load_tool_family",
+              "started_ms": 5554
+            },
+            "formal_reply_count": 2,
+            "inspection_status": "passed",
+            "inspection_note": "Manually inspected all formal replies: one acknowledgement plus one correct final result.",
+            "worker_turn_resolutions": [],
+            "raw_artifact_sha256": {
+              "events.jsonl": "d24248a17b2ee00aff98d178df47afaa243723f32a7ae97b5fed3316202cfe04",
+              "result.json": "f0cefc2963d312126ed7359f6bced05d9d28afbc9486b56b7281018ce04212e2"
+            }
+          }
+        ],
+        "raw_artifact_sha256": {
+          "plan.json": "e7caa62b848a33d725f72c0698c2ec5a9dbebad473f1fdb3eaace68f82e50a9c",
+          "summary.json": "7a261730a25fa0f18349c3d572a4778e2d1397442ef1b4b70744c8655918338c"
+        }
+      }
+    ],
+    "new_model_adapter_calls": 31,
+    "regressions": {
+      "new_prompt_tests_failed_before_fix": 2,
+      "agent_directed_passed": 77,
+      "excluded_existing_role_prompt_test": 1,
+      "offline_tests_passed": 14,
+      "agent_typescript_build": "passed"
+    },
+    "prompt_audit": {
+      "profiles": 8,
+      "only_approved_insertion_in": [
+        "request",
+        "voice-request"
+      ],
+      "other_profiles_byte_identical": 6,
+      "core_tool_counts": [
+        15,
+        11,
+        3
+      ],
+      "all_four_runs_actual_inputs": "passed",
+      "raw_artifact_sha256": {
+        "prompt-audit.json": "f82d29c126b0a18d1ddfb59cb709e4af53a6e2d91a583e9951bcbdb65a9f8c39",
+        "actual-input-audit.json": "f10d7b73948bdb5e7815b1d0a6675fb88936b81a9219f27f9f99aa2581b413e5"
+      }
+    },
+    "inspection": "Original duplicate failure retained in after_cohorts. Two new ordinary-message runs each produced exactly one acknowledgement plus one correct result; the new Voice run did likewise and resolved its original Worker turn as reported. Simple Voice answered directly.",
+    "limits": "Channel and playback receipts simulated. No fresh ASR/TTS/phone listening test and no deployment. These controlled model samples verify behavior, not a protocol-level exactly-once guarantee."
   }
 }
