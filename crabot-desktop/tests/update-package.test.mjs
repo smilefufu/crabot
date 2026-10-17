@@ -35,4 +35,6 @@ test('download bytes are rechecked before installation; changed files, lengths a
     const alias = path.join(temporary, 'alias.zip'); await fs.symlink('package.zip', alias)
     await assert.rejects(verifyUpdateDownload({ ...update, file: alias }))
   }
+  await fs.rm(file)
+  await assert.rejects(verifyUpdateDownload(update), { code: 'CRABOT_UPDATE_INTEGRITY' })
 })

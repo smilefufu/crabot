@@ -44,7 +44,7 @@ export async function createUpdateDriver(options: { resources: string; cacheRoot
       const space = await statfs(options.cacheRoot, { bigint: true })
       // Reserve unpacking headroom; the stopped-data snapshot separately checks
       // its exact scope. Installer failures still retain the recovery fence.
-      if (space.bavail * space.bsize < BigInt(needed) * 4n + 64n * 1024n * 1024n) throw new Error('Insufficient update space')
+      if (space.bavail * space.bsize < BigInt(needed) * 4n + 64n * 1024n * 1024n) throw Object.assign(new Error('Insufficient update space'), { code: 'CRABOT_UPDATE_SPACE' })
       let event: UpdateDownloadedEvent | undefined
       const receive = (value: UpdateDownloadedEvent) => { event = value }
       const report = (value: ProgressInfo) => progress(value.percent)
@@ -73,11 +73,11 @@ export async function createUpdateDriver(options: { resources: string; cacheRoot
       try {
         await new Promise<void>((resolve, reject) => {
           const done = () => { clearTimeout(timer); updater.off('error', error); app.off('before-quit', exiting) }
-          const error = () => { done(); reject(new Error('Installer did not start')) }
+          const error = (cause?: unknown) => { done(); reject(cause instanceof Error ? cause : new Error('Installer did not start')) }
           const exiting = () => { done(); resolve() }
           const timer = setTimeout(error, 180_000)
           updater.once('error', error); app.once('before-quit', exiting)
-          try { updater.quitAndInstall(false, true) } catch { error() }
+          try { updater.quitAndInstall(false, true) } catch (cause) { error(cause) }
         })
       } catch (error) { undo(); throw error }
     },

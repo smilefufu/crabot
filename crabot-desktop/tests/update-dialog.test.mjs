@@ -40,3 +40,16 @@ test('an interrupted maintenance action reports recovery and never claims succes
   f.controller.start(); await flush(); await f.controller.open(); f.controller.close()
   assert.deepEqual(f.calls, ['check', 'activity']); assert.match(f.dialogs.at(-1).message, /未能确认/)
 })
+test('space and signature failures give specific safe recovery instructions instead of a network diagnosis', async () => {
+  for (const [code, word] of [['CRABOT_UPDATE_SPACE', '空间不足'], ['ERR_UPDATER_INVALID_SIGNATURE', '签名']]) {
+    const f = fixture({ check: async () => { throw Object.assign(new Error('https://secret/token'), { code }) }, response: 0 })
+    f.controller.start(); await flush(); await f.controller.open(); f.controller.close()
+    assert.ok(f.dialogs[0].detail.includes(word)); assert.equal(JSON.stringify(f.dialogs).includes('secret'), false)
+  }
+})
+test('a changed cached file can be downloaded again and cannot trap the user in repeated installation attempts', async () => {
+  const f = fixture({ prepare: async () => { throw Object.assign(new Error('Changed cache'), { code: 'CRABOT_UPDATE_INTEGRITY' }) } })
+  f.controller.start(); await flush(); await f.controller.open()
+  await f.controller.open(); await flush(); f.controller.close()
+  assert.deepEqual(f.calls, ['check', 'activity', 'check'])
+})
