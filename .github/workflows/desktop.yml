@@ -82,9 +82,9 @@ jobs:
           node scripts/prepare-scrapling.mjs --release=desktop-ci
           node scripts/prepare-computer-use.mjs
       - name: Build sealed product environment
-        run: node scripts/prepare-product-runtime.mjs > .desktop-build/product-build.log 2>&1
+        run: node scripts/prepare-product-runtime.mjs 2>&1 | tee .desktop-build/product-build.log
       - name: Execute real offline local capabilities
-        run: node .github/scripts/smoke-product-runtime.mjs > .desktop-build/product-smoke.log 2>&1
+        run: node .github/scripts/smoke-product-runtime.mjs 2>&1 | tee .desktop-build/product-smoke.log
       - name: Standard Ubuntu runtime compatibility
         if: runner.os == 'Linux'
         run: |
@@ -105,3 +105,4 @@ jobs:
             .desktop-build/*.log
             product-runtime.json
           if-no-files-found: warn
+          include-hidden-files: true
