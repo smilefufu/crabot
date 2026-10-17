@@ -4,6 +4,7 @@ import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createRequire } from 'node:module'
+import { execFileSync } from 'node:child_process'
 import { runBounded } from '../lib/run-bounded.mjs'
 import product from '../lib/product-runtime.cjs'
 import scrapling from '../lib/scrapling-runtime.cjs'
@@ -17,6 +18,13 @@ const core = await fs.realpath(path.resolve(args.get('--core'))), projectDir = p
 if (!path.relative(root, projectDir).startsWith('.desktop-build' + path.sep)) throw new Error('Candidate project must be under .desktop-build')
 try { await fs.lstat(projectDir); throw new Error('Candidate project already exists') } catch (error) { if (error.code !== 'ENOENT') throw error }
 const release = await verifyCoreRelease(core)
+function checkSource() {
+  if (release.source_dirty || execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim() !== release.commit
+    || execFileSync('git', ['status', '--porcelain'], { cwd: root, encoding: 'utf8' }).trim()) {
+    throw new Error('Desktop and core must be assembled from the same clean source commit; stage a fresh candidate')
+  }
+}
+checkSource()
 const runtime = product.loadProductRuntime(core, { required: true, full: true })
 scrapling.loadRuntime(core, { full: true })
 computerUse.loadRuntime(core, { full: true })
@@ -76,6 +84,7 @@ const configuration = {
 }
 await fs.writeFile(path.join(projectDir, 'candidate-build.json'), JSON.stringify({ ...release, candidate_only: true, signing: process.platform === 'darwin' ? 'ad_hoc' : 'unsigned' }, null, 2) + '\n')
 await build({ projectDir, config: configuration, publish: 'never', targets: Platform.current().createTarget('dir', Arch[process.arch]) })
+checkSource()
 if (!packagedResources) throw new Error('Electron builder did not report its packaged resources')
 // Signing/packing must not invalidate immutable core bytes or vendor identity.
 product.loadProductRuntime(path.join(packagedResources, 'core'), { required: true, full: true })

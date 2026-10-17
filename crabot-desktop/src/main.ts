@@ -46,7 +46,6 @@ function show() { window?.show(); window?.focus() }
 
 async function boot() {
   try {
-    if (app.isPackaged) await (await loadCore('scripts/lib/core-release.mjs')).verifyCoreRelease(coreRoot, { version: app.getVersion() })
     const { resolveCliDataDir } = await loadCore('scripts/lib/instance.mjs')
     dataRoot = path.resolve(resolveCliDataDir({ homeDir: path.join(homedir(), '.crabot') }))
     const management = (await loadCore('scripts/lib/desktop-management.cjs')).default
@@ -62,7 +61,7 @@ async function boot() {
   let startupState: StartupState = await startup.get().catch(() => ({ supported: app.isPackaged, enabled: false, approvalRequired: false }))
   const background = process.argv.includes('--background') || startup.launchedAtLogin()
   await access(path.join(coreRoot, 'crabot-admin/dist/web/desktop.html'))
-  controller = new DesktopController({ coreRoot, dataRoot, appVersion: app.getVersion(), platform: process.platform as 'darwin' | 'win32' | 'linux' })
+  controller = new DesktopController({ coreRoot, dataRoot, appVersion: app.getVersion(), platform: process.platform as 'darwin' | 'win32' | 'linux', packaged: app.isPackaged })
   artifacts = new ArtifactWindows(controller.host, () => { if (!quitting) updateMenus() })
   const privateSession = session.fromPartition('persist:crabot-desktop')
   privateSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false))
@@ -143,6 +142,7 @@ async function boot() {
   window.on('focus', updateMenus)
   tray.on('click', show)
   await window.loadURL('app://crabot/')
+  // The local UI is visible while the controller verifies the large payload.
   if (initialError) controller.fail(initialError)
   else { void controller.start(); controller.watch() }
 }

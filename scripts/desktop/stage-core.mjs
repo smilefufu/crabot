@@ -46,6 +46,20 @@ const sourceDirty = !!execFileSync('git', ['status', '--porcelain'], { cwd: root
 if (sourceDirty && options.get('--allow-dirty') !== 'true') throw new Error('Release staging requires committed sources; development candidates may use --allow-dirty=true')
 const modules = ['crabot-client', 'crabot-shared', 'crabot-core', 'crabot-agent', 'crabot-admin', 'crabot-mcp-tools',
   'crabot-channel-telegram', 'crabot-channel-wechat', 'crabot-channel-feishu', 'crabot-channel-dingtalk', 'crabot-channel-voice']
+// Rebuild the actual sources before taking the immutable snapshot. Checking that
+// dist exists is insufficient: a local candidate could otherwise contain old UI.
+for (const module of modules) {
+  await runBounded(runtime.executables.node, [path.join(root, module, 'node_modules/typescript/bin/tsc'), '-p', 'tsconfig.json'],
+    { cwd: path.join(root, module), timeout: 120_000 })
+}
+await runBounded(runtime.executables.node, [path.join(root, 'node_modules/typescript/bin/tsc'), '-p', 'tsconfig.cli.json'], { cwd: root, timeout: 120_000 })
+for (const [directory, script, args] of [
+  ['crabot-admin/web', 'node_modules/typescript/bin/tsc', ['-p', 'tsconfig.json']],
+  ['crabot-admin/web', 'node_modules/vite/bin/vite.js', ['build']],
+  ['crabot-desktop', 'node_modules/typescript/bin/tsc', ['-p', 'tsconfig.json']],
+  ['crabot-desktop', 'build-preload.mjs', []],
+]) await runBounded(runtime.executables.node, [path.join(root, directory, script), ...args], { cwd: path.join(root, directory), timeout: 120_000 })
+await runBounded(runtime.executables.node, [path.join(root, 'scripts/build-native.mjs')], { cwd: root, timeout: 120_000 })
 for (const module of modules) await fs.access(path.join(root, module, 'dist'))
 await fs.access(path.join(root, 'dist/cli/main.js'))
 await fs.access(path.join(root, 'crabot-native/build/Release/crabot-native.node'))
@@ -109,6 +123,10 @@ try {
   product.loadProductRuntime(output, { required: true, full: true })
   scrapling.loadRuntime(output, { full: true })
   computerUse.loadRuntime(output, { full: true })
+  if (execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim() !== commit
+    || !sourceDirty && execFileSync('git', ['status', '--porcelain'], { cwd: root, encoding: 'utf8' }).trim()) {
+    throw new Error('Sources changed while staging; build a fresh candidate from committed sources')
+  }
   const inventory = await writeCoreRelease(output, { schema_version: 1, version, platform: process.platform, arch: process.arch, commit, source_dirty: sourceDirty })
   await verifyCoreRelease(output, { version })
   console.log('Core inventory: ' + JSON.stringify(inventory))
