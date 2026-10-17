@@ -40,6 +40,12 @@ function knownLocations(cmd: string): string[] {
  */
 export function resolveExecutable(cmd: string): string {
   if (path.isAbsolute(cmd)) return cmd
+  if (process.env.CRABOT_PRODUCT_ROOT) {
+    const { loadProductRuntime } = require('../../scripts/lib/product-runtime.cjs')
+    const runtime = loadProductRuntime(process.env.CRABOT_PRODUCT_ROOT, { required: true })
+    const name = cmd === 'python3' ? 'python' : cmd
+    if (Object.prototype.hasOwnProperty.call(runtime.executables, name)) return runtime.executables[name]
+  }
   for (const candidate of knownLocations(cmd)) {
     if (fs.existsSync(candidate)) return candidate
   }

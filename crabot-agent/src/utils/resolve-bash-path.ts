@@ -38,6 +38,9 @@ export function computeBashPathPure(
   existsSyncFn: ExistsFn,
   whichFn: WhichFn,
 ): string | null {
+  if (env.CRABOT_PRODUCT_ROOT) {
+    return env.CRABOT_BASH_PATH && existsSyncFn(env.CRABOT_BASH_PATH) ? env.CRABOT_BASH_PATH : null
+  }
   if (platform !== 'win32') return 'bash'
 
   const envPath = env.CRABOT_BASH_PATH
@@ -82,4 +85,6 @@ function defaultWhich(name: string): string | null {
  * Friendly error message returned by Bash tool when bash cannot be located.
  * Single source of truth so bash-tool / bg-shell stay in sync.
  */
-export const BASH_NOT_FOUND_MESSAGE = `本机未检测到 bash。Windows 用户请安装 Git for Windows (https://git-scm.com/downloads/win)；若已安装但 crabot 找不到，请设置环境变量 CRABOT_BASH_PATH 指向 bash.exe（例如 C:\\Program Files\\Git\\bin\\bash.exe）。`
+export const BASH_NOT_FOUND_MESSAGE = process.env.CRABOT_PRODUCT_ROOT
+  ? 'Crabot 内置 Bash 不可用。请打开诊断，修复运行文件后重试。'
+  : `本机未检测到 bash。Windows 用户请安装 Git for Windows (https://git-scm.com/downloads/win)；若已安装但 crabot 找不到，请设置环境变量 CRABOT_BASH_PATH 指向 bash.exe（例如 C:\\Program Files\\Git\\bin\\bash.exe）。`

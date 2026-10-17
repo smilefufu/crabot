@@ -71,3 +71,6 @@ crabot-admin/test-data/
 scrapling-runtime.json
 scrapling-runtime.json.*.tmp
 .computer-use-runtime/
+.desktop-build/
+.product-runtime/
+product-runtime.json

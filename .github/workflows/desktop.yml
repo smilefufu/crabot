@@ -1,0 +1,107 @@
+name: Desktop runtime
+
+on:
+  push:
+    branches: ['feat/desktop-*']
+  pull_request:
+    paths:
+      - 'crabot-desktop/**'
+      - 'crabot-core/**'
+      - 'crabot-agent/src/core/runtime-env.ts'
+      - 'crabot-agent/src/agent/mcp-connector.ts'
+      - 'scripts/desktop/**'
+      - 'scripts/*product*.mjs'
+      - 'scripts/lib/product-*'
+      - '.github/scripts/*product*'
+      - '.github/scripts/fixtures/product-*'
+      - '.github/workflows/desktop.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  runtime:
+    name: Runtime ${{ matrix.target }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: linux-x64
+          - os: macos-14
+            target: darwin-arm64
+          - os: macos-15-intel
+            target: darwin-x64
+          - os: windows-latest
+            target: win32-x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.3'
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.13.0'
+      - name: Linux build prerequisites
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y build-essential libcurl4-openssl-dev libexpat1-dev zlib1g-dev
+      - name: Prepare isolated build directory
+        run: mkdir -p .desktop-build
+      - name: Install frozen build dependencies
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm --dir crabot-shared install --frozen-lockfile
+          node crabot-shared/node_modules/typescript/bin/tsc -p crabot-shared/tsconfig.json
+          for module in crabot-core crabot-agent crabot-admin crabot-mcp-tools; do
+            pnpm --dir "$module" install --frozen-lockfile
+            node "$module/node_modules/typescript/bin/tsc" -p "$module/tsconfig.json"
+          done
+      - name: Runtime regressions
+        run: |
+          node --test scripts/lib/__tests__/product-*.test.mjs
+          cd crabot-core
+          node node_modules/vitest/vitest.mjs run src/agent-venv.test.ts src/core-modules.test.ts --maxWorkers=1 --minWorkers=1
+      - name: Agent environment regressions
+        run: |
+          cd crabot-agent
+          node node_modules/vitest/vitest.mjs run tests/core/runtime-env.test.ts tests/core/child-env-guard.test.ts tests/utils/resolve-bash-path.test.ts tests/agent/mcp-connector.test.ts tests/mcp-connector-tool-defaults.test.ts --maxWorkers=1 --minWorkers=1
+      - name: Build locked browser and computer-use resources
+        run: |
+          node scripts/prepare-scrapling.mjs --release=desktop-ci
+          node scripts/prepare-computer-use.mjs
+      - name: Build sealed product environment
+        run: node scripts/prepare-product-runtime.mjs > .desktop-build/product-build.log 2>&1
+      - name: Execute real offline local capabilities
+        run: node .github/scripts/smoke-product-runtime.mjs > .desktop-build/product-smoke.log 2>&1
+      - name: Standard Ubuntu runtime compatibility
+        if: runner.os == 'Linux'
+        run: |
+          for release in 24.04 26.04; do
+            docker run --rm --network=none \
+              -v "$GITHUB_WORKSPACE:/workspace" -w /workspace \
+              "ubuntu:$release" \
+              /workspace/.product-runtime/node/bin/node \
+              .github/scripts/smoke-product-runtime.mjs \
+              > ".desktop-build/ubuntu-$release.log" 2>&1
+          done
+      - name: Save runtime evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-runtime-${{ matrix.target }}
+          path: |
+            .desktop-build/*.log
+            product-runtime.json
+          if-no-files-found: warn

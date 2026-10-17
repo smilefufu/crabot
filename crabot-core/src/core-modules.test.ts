@@ -29,6 +29,13 @@ afterEach(() => {
 })
 
 describe('buildCoreModules：DATA_DIR 顶层契约', () => {
+  it('sealed Memory uses prepared packages while only Agent gets the writable venv PATH', () => {
+    const mods = buildCoreModules({ ...OPTS, productRuntime: true, agentPath: '/private/agent/bin:/product/bin' })
+    expect(mods.find(m => m.module_id === 'memory-default')?.entry).toBe('node ../scripts/run-product-memory.mjs')
+    expect(envOf(mods, 'crabot-agent').PATH).toBe('/private/agent/bin:/product/bin')
+    expect(envOf(mods, 'admin-web').PATH).toBeUndefined()
+    expect(envOf(mods, 'memory-default').PATH).toBeUndefined()
+  })
   it('admin：DATA_DIR=顶层，CRABOT_ADMIN_DATA_DIR=模块级，builtin MCP 路径来自代码根', () => {
     const env = envOf(buildCoreModules(OPTS), 'admin-web')
     expect(env.DATA_DIR).toBe('/home/u/.crabot/data')

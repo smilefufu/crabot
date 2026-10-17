@@ -28,11 +28,15 @@ const WORKSPACE_DIR = process.env.WORKSPACE_DIR || homedir()
 // 写回 process.env 确保子进程通过 process.env spread 时能继承此值
 process.env.WORKSPACE_DIR = WORKSPACE_DIR
 
+const { loadProductRuntime, productEnvironment } = require('../../scripts/lib/product-runtime.cjs')
+const productRuntime = loadProductRuntime(CRABOT_ROOT, { required: process.env.CRABOT_PRODUCT_REQUIRED === '1' })
+if (productRuntime) Object.assign(process.env, productEnvironment(productRuntime, DATA_DIR))
+
 // Agent 专用 python 环境：确保 $DATA_DIR/agent-venv 存在（uv 懒创建），把其 bin
 // 前置到 PATH，让 agent shell 的 python3/pip3 落到实例 venv 而非系统 python。
 // uv 不可用或创建失败时返回 null，保持原 PATH（等价历史行为）。
-const agentVenvPath = ensureAgentVenv(DATA_DIR)
-if (agentVenvPath) {
+const agentVenvPath = ensureAgentVenv(DATA_DIR, undefined, productRuntime)
+if (agentVenvPath && !productRuntime) {
   process.env.PATH = agentVenvPath
 }
 
@@ -103,6 +107,8 @@ const CORE_MODULES = buildCoreModules({
   mmEndpoint: MM_ENDPOINT,
   adminEndpoint: ADMIN_ENDPOINT,
   newApiToken: process.env.CRABOT_NEW_API_ADMIN_TOKEN || '',
+  productRuntime: Boolean(productRuntime),
+  agentPath: productRuntime ? agentVenvPath ?? undefined : undefined,
 })
 
 const manager = new ModuleManager({

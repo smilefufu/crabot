@@ -1,10 +1,11 @@
 # Crabot 项目进度
 
-### 桌面化方案：Spec 已确认，实施计划已整理，未开始实现
+### 桌面化方案：独立 worktree 开发中，P1 运行环境验证推进
 
 - 用户确认[中文 Spec](crabot-docs/superpowers/specs/2026-10-17-desktop-application-design.md)及五项补充决定：macOS 14+ 双架构、Windows 11 x64、Ubuntu Desktop 24.04/26.04 x64；Linux 桌面控制分会话声明支持；优先主要界面；默认后台下载、用户发起安装；登录自启动默认关闭。
 - 已整理[分阶段实施计划](crabot-docs/superpowers/plans/2026-10-17-desktop-application-implementation.md)：P0 协议基线 → P1 内置环境 → P2 共用实例/CLI → P3 SDK/通信 → P4 桌面认证与窗口 → P5 引导/主要界面 → P6 迁移/更新 → P7 最终发行验收，各阶段列明步骤、验证方式与退出条件。
-- 当前仅完成文档；正式协议、实现代码、构建、迁移、部署和运行实例均未改动，各实施阶段尚未开始。
+- P0 已补 Desktop 正式协议及 Admin/MM/Agent 边界，文档仓 c661332；主仓仅在独立 worktree 的 feat/desktop-application 分支推进，需求完成并完整验证前不推 main、不提前建 PR，不触碰现场部署及无关 WIP。
+- P1 已实现锁定资源构建、重定位/完整性检查、Agent/MCP 私有 Python 基底与依赖隔离、产品 Memory 离线启动接线及子进程凭据过滤。本机实际执行内置 Node/Python/pip/npm/npx/Git/rg、后台 shell、Memory 临时库读写、三个 stdio MCP（含冲突依赖）与本地浏览器通过；跨平台 CI、最终桌面包及 P2–P7 尚未验收。
 
 ### 任务默认目录文件授权：独立修复待审查
 

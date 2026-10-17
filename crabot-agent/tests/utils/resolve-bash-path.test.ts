@@ -6,6 +6,13 @@ const NEVER_EXISTS = (_p: string) => false
 const WHICH_NOTHING = (_n: string) => null
 
 describe('computeBashPathPure (POSIX)', () => {
+  it('uses the sealed product Bash on every platform and never falls back when it is damaged', () => {
+    for (const platform of ['linux', 'darwin', 'win32'] as const) {
+      const env = { CRABOT_PRODUCT_ROOT: '/sealed', CRABOT_BASH_PATH: '/sealed/bash' }
+      expect(computeBashPathPure(platform, env, ALWAYS_EXISTS, WHICH_NOTHING)).toBe('/sealed/bash')
+      expect(computeBashPathPure(platform, env, NEVER_EXISTS, () => '/host/bash')).toBeNull()
+    }
+  })
   it("returns 'bash' on linux without touching env/fs/which", () => {
     expect(computeBashPathPure('linux', {}, NEVER_EXISTS, WHICH_NOTHING)).toBe('bash')
   })
