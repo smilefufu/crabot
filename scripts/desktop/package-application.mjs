@@ -1,6 +1,6 @@
 // Build an unpacked development candidate. This deliberately cannot publish or
 // claim release signing/notarization; final installers require the P6/P7 gates.
-import { promises as fs } from 'node:fs'
+import { promises as fs, constants } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createRequire } from 'node:module'
@@ -60,7 +60,6 @@ const configuration = {
   directories: { app: appDir, output: path.join(projectDir, 'unpacked') },
   electronDist: path.join(path.dirname(require.resolve('electron/package.json')), 'dist'),
   files: ['dist/**/*', 'package.json', '!**/*.map'],
-  extraResources: [{ from: core, to: 'core', filter: ['**/*'] }],
   asar: true, npmRebuild: false, publish: null,
   electronFuses: { runAsNode: false, enableCookieEncryption: true, enableNodeOptionsEnvironmentVariable: false,
     enableNodeCliInspectArguments: false, enableEmbeddedAsarIntegrityValidation: process.platform !== 'linux',
@@ -75,11 +74,15 @@ const configuration = {
     const resources = process.platform === 'darwin' ? path.join(context.appOutDir, 'Crabot.app/Contents/Resources') : path.join(context.appOutDir, 'resources')
     packagedResources = resources
     const packagedCore = path.join(resources, 'core')
+    // Electron's resource matcher prunes root node_modules and dotfiles. The
+    // standalone core is an opaque verified payload, not an Electron app tree.
+    await fs.cp(core, packagedCore, { recursive: true, verbatimSymlinks: true, mode: constants.COPYFILE_FICLONE })
     await fs.writeFile(path.join(packagedCore, 'desktop-host.json'), JSON.stringify({ schema_version: 1, platform: process.platform, arch: process.arch }) + '\n')
     await fs.writeFile(path.join(resources, 'candidate-only.json'), JSON.stringify({ ...release, candidate_only: true }) + '\n')
     product.loadProductRuntime(packagedCore, { required: true, full: true })
     scrapling.loadRuntime(packagedCore, { full: true })
     computerUse.loadRuntime(packagedCore, { full: true })
+    await verifyCoreRelease(packagedCore, { version: release.version })
   },
 }
 await fs.writeFile(path.join(projectDir, 'candidate-build.json'), JSON.stringify({ ...release, candidate_only: true, signing: process.platform === 'darwin' ? 'ad_hoc' : 'unsigned' }, null, 2) + '\n')

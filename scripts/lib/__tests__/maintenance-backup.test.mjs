@@ -33,7 +33,7 @@ test('backup requires the held lifecycle lock, verified stopped state and settle
 
 test('a verified snapshot preserves binary data and references without copying workspaces or working environments', async t => {
   const f = await fixture(t)
-  for (const name of ['workspaces', 'agent-venv', 'runtime-bases', 'mcp-envs', 'logs', 'desktop-profile']) {
+  for (const name of ['workspaces', 'agent-venv', 'runtime-bases', 'mcp-envs', 'runtime-cache', 'logs', 'desktop-profile']) {
     await fs.mkdir(path.join(f.data, name)); await fs.writeFile(path.join(f.data, name, 'keep'), 'preserve-in-place')
   }
   if (process.platform !== 'win32') {
@@ -46,7 +46,7 @@ test('a verified snapshot preserves binary data and references without copying w
   assert.equal(manifest.source, f.data)
   assert.deepEqual(await fs.readFile(path.join(result.directory, 'data/memory/db.sqlite')), Buffer.from([0, 71, 255, 0, 13, 10]))
   assert.equal(await fs.readFile(path.join(result.directory, 'data/admin/provider.json'), 'utf8'), '{"provider_id":"preserved"}')
-  for (const name of ['workspaces', 'agent-venv', 'runtime-bases', 'mcp-envs', 'logs', 'desktop-profile']) {
+  for (const name of ['workspaces', 'agent-venv', 'runtime-bases', 'mcp-envs', 'runtime-cache', 'logs', 'desktop-profile']) {
     assert.ok(result.excluded.includes(name))
     await assert.rejects(fs.lstat(path.join(result.directory, 'data', name)), { code: 'ENOENT' })
     assert.equal(await fs.readFile(path.join(f.data, name, 'keep'), 'utf8'), 'preserve-in-place')
