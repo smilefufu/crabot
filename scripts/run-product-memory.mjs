@@ -9,7 +9,7 @@ const runtime = product.loadProductRuntime(root, { required: true })
 const check = process.argv.includes('--check')
 const script = 'import sys, runpy; sys.path[:0] = sys.argv[1:3]; '
   + (check ? 'import src.main' : 'runpy.run_module("src.main", run_name="__main__")')
-const child = spawn(runtime.executables.python, ['-I', '-B', '-c', script, runtime.memoryPackages, resolve(root, 'crabot-memory')], {
+const child = spawn(runtime.executables.python, ['-I', '-X', 'utf8', '-B', '-c', script, runtime.memoryPackages, resolve(root, 'crabot-memory')], {
   cwd: resolve(root, 'crabot-memory'), stdio: 'inherit',
   env: { ...process.env, PYTHONNOUSERSITE: '1', PYTHONDONTWRITEBYTECODE: '1' },
 })

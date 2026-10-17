@@ -36,7 +36,7 @@ export function runScript(scriptPath, dataDir, { root, env: sourceEnv = process.
       cmd = runtime.executables.python
       delete env.PYTHONPATH; delete env.PYTHONHOME
       env.PYTHONIOENCODING = 'utf-8'; env.PYTHONNOUSERSITE = '1'; env.PYTHONDONTWRITEBYTECODE = '1'
-      args.splice(0, args.length, '-I', '-B')
+      args.splice(0, args.length, '-I', '-X', 'utf8', '-B')
       if (memoryPython) {
         // The migration consumes Memory's immutable product packages; it must not
         // start the Memory service or inherit the writable Agent/MCP environment.

@@ -118,6 +118,8 @@ function productEnvironment(runtime, dataDir, source = process.env) {
   env.CRABOT_BASH_PATH = runtime.executables.bash
   env.npm_config_cache = path.join(dataDir, 'runtime-cache', 'npm')
   env.UV_CACHE_DIR = path.join(dataDir, 'runtime-cache', 'uv')
+  env.PYTHONUTF8 ||= '1'
+  env.PYTHONIOENCODING ||= 'utf-8'
   // Do not set npm prefix: third-party Worker CLIs retain their user-install policy.
   return env
 }

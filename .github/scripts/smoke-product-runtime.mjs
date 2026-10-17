@@ -54,10 +54,14 @@ try {
   report.node = await run(runtime.executables.node, ['--version'])
   assert.equal(await run(runtime.executables.node, ['-p', 'process.execPath']), await fs.realpath(runtime.executables.node))
   const agentPython = join(pythonPath.split(delimiter)[0], process.platform === 'win32' ? 'python.exe' : 'python')
-  report.python = await run(agentPython, ['-I', '-c', 'import sys,pip; print(sys.version.split()[0])'])
+  report.python = await run(agentPython, ['-I', '-X', 'utf8', '-c', 'import sys,pip; print(sys.version.split()[0])'])
   assert.match(report.python, /^3\.12\./)
-  report.pip = await run(agentPython, ['-I', '-m', 'pip', '--version'])
+  report.pip = await run(agentPython, ['-I', '-X', 'utf8', '-m', 'pip', '--version'])
   assert.ok(report.pip.includes(data))
+  const encodingProbe = 'import sys; assert sys.stdout.encoding.lower().replace("-", "") == "utf8"; print("中文 路径")'
+  assert.equal(await run(agentPython, ['-c', encodingProbe]), '中文 路径')
+  assert.equal(await run(runtime.executables.python, ['-I', '-X', 'utf8', '-c', encodingProbe]), '中文 路径')
+  report.python_utf8_pipes = true
   const shell = command => run(runtime.executables.bash, ['-c', command])
   report.npm = await shell('npm --version')
   report.npx = await shell('npx --version')
@@ -108,7 +112,7 @@ try {
     ' print("memory-local-read-write-ok")',
     'asyncio.run(check())',
   ].join('\n')
-  const memory = await run(runtime.executables.python, ['-I', '-B', '-c', memoryCode, runtime.memoryPackages, join(root, 'crabot-memory'), join(data, 'memory', 'probe.db')])
+  const memory = await run(runtime.executables.python, ['-I', '-X', 'utf8', '-B', '-c', memoryCode, runtime.memoryPackages, join(root, 'crabot-memory'), join(data, 'memory', 'probe.db')])
   assert.equal(memory, 'memory-local-read-write-ok')
   report.memory_local_read_write = true
 
@@ -156,7 +160,7 @@ try {
       ' z.writestr(prefix+"WHEEL","Wheel-Version: 1.0\\nGenerator: crabot-probe\\nRoot-Is-Purelib: true\\nTag: py3-none-any\\n")',
       ' z.writestr(prefix+"RECORD","")',
     ].join('\n')
-    await run(agentPython, ['-I', '-c', code, wheel, version])
+    await run(agentPython, ['-I', '-X', 'utf8', '-c', code, wheel, version])
     wheels.push(wheel)
   }
   const mcpConfigs = [{ name: 'probe-node', command: 'node', args: [join(source, '.github/scripts/fixtures/product-mcp.mjs')] }]
@@ -183,7 +187,7 @@ try {
   assert.equal(values[0].uv_cache, env.UV_CACHE_DIR)
   assert.equal(values[1].version, '1.0')
   assert.equal(values[2].version, '2.0')
-  await assert.rejects(run(agentPython, ['-I', '-c', 'import crabot_product_probe']), /crabot_product_probe/)
+  await assert.rejects(run(agentPython, ['-I', '-X', 'utf8', '-c', 'import crabot_product_probe']), /crabot_product_probe/)
   report.mcp = { actual_stdio_connections: connector.count, dependency_versions: values.slice(1).map(value => value.version), admin_credentials_inherited: false }
 
   const browser = JSON.parse(await fs.readFile(join(root, 'scrapling-runtime.json'), 'utf8'))
@@ -199,7 +203,7 @@ try {
     ' browser.close()',
     'print("browser-local-page-ok")',
   ].join('\n')
-  const output = await run(runtime.executables.python, ['-I', '-B', '-c', browserCode, join(root, browser.directory, 'packages'), join(root, runtime.manifest.browser)], {
+  const output = await run(runtime.executables.python, ['-I', '-X', 'utf8', '-B', '-c', browserCode, join(root, browser.directory, 'packages'), join(root, runtime.manifest.browser)], {
     env: { ...env, PLAYWRIGHT_BROWSERS_PATH: join(root, browser.directory, 'browsers') },
   })
   assert.equal(output, 'browser-local-page-ok')

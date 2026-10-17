@@ -118,4 +118,8 @@ test('product PATH and caches are private without altering Worker CLI install po
   assert.equal(env.CUSTOM, 'kept')
   assert.deepEqual(source, { PATH: 'host-bin', npm_config_prefix: '/explicit/user/prefix', CUSTOM: 'kept' })
   assert.equal(env.CRABOT_BASH_PATH, runtime.executables.bash)
+  assert.equal(env.PYTHONUTF8, '1')
+  assert.equal(env.PYTHONIOENCODING, 'utf-8')
+  const explicit = productEnvironment(runtime, join(f.parent, 'data'), { PYTHONUTF8: '0', PYTHONIOENCODING: 'latin1' })
+  assert.equal(explicit.PYTHONUTF8, '0'); assert.equal(explicit.PYTHONIOENCODING, 'latin1')
 })

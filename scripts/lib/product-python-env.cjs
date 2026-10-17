@@ -59,7 +59,7 @@ function ensureProductPythonEnvironment(runtime, dataDir, directory, spawn) {
       throw environmentError('Python 环境损坏，请从诊断修复；现有依赖已保留')
     }
     ensurePythonAliases(binary)
-    run(binary, ['-I', '-c', 'import sys, pip; assert sys.prefix != sys.base_prefix'])
+    run(binary, ['-I', '-X', 'utf8', '-c', 'import sys, pip; assert sys.prefix != sys.base_prefix'])
     return path.dirname(binary) + path.delimiter + (env.PATH ?? env.Path ?? '')
   }
 
@@ -102,7 +102,7 @@ function ensureProductPythonEnvironment(runtime, dataDir, directory, spawn) {
     run(runtime.executables.uv, ['venv', '--offline', '--no-python-downloads', '--python', python, '--allow-existing', directory])
     run(runtime.executables.uv, ['pip', 'install', '--offline', '--no-index', '--python', binary, ...runtime.seedWheels])
     ensurePythonAliases(binary)
-    run(binary, ['-I', '-c', 'import sys, pip; assert sys.prefix != sys.base_prefix'])
+    run(binary, ['-I', '-X', 'utf8', '-c', 'import sys, pip; assert sys.prefix != sys.base_prefix'])
     fs.writeFileSync(marker, JSON.stringify({ schema_version: 1, base_id: id, python_version: version }) + '\n', { mode: 0o600 })
     fs.unlinkSync(installing)
   } catch (error) {

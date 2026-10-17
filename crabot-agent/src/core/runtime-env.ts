@@ -54,7 +54,7 @@ export function buildMcpChildEnv(overrides?: Record<string, string>): Record<str
   if (overrides) return buildChildEnv(overrides)
   if (!process.env.CRABOT_PRODUCT_ROOT) return undefined
   const env = buildChildEnv()
-  const keys = ['PATH', 'Path', 'CRABOT_BASH_PATH', 'CRABOT_PRODUCT_ROOT', 'UV_CACHE_DIR', 'npm_config_cache', 'npm_config_prefix', 'PYTHONNOUSERSITE']
+  const keys = ['PATH', 'Path', 'CRABOT_BASH_PATH', 'CRABOT_PRODUCT_ROOT', 'UV_CACHE_DIR', 'npm_config_cache', 'npm_config_prefix', 'PYTHONNOUSERSITE', 'PYTHONUTF8', 'PYTHONIOENCODING']
   return Object.fromEntries(keys.flatMap(key => env[key] === undefined ? [] : [[key, env[key]]]))
 }
 
