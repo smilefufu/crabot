@@ -11,6 +11,17 @@ const { ManagerSessionStore } = require('./dist/manager/session-store.js')
 const { ConfigLoader } = require('./dist/core/config-loader.js')
 const { createCrabMemoryServer } = require('./dist/mcp/crab-memory.js')
 export const spokenContainsToken = (speech, token) => speech.replaceAll('下划线', '_').replace(/[，、,。\s]/g, '').includes(token)
+export function duplicateVoiceReplies(outputs) {
+  const replies = new Map()
+  for (const { event } of outputs) if (event.type === 'reply_text') replies.set(event.playback_id, (replies.get(event.playback_id) ?? '') + event.text)
+  const seen = new Set(), duplicates = new Set()
+  for (const text of replies.values()) {
+    const value = text.trim()
+    if (value && seen.has(value)) duplicates.add(value)
+    seen.add(value)
+  }
+  return [...duplicates]
+}
 export const digest = data => createHash('sha256').update(typeof data === 'string' ? data : JSON.stringify(data)).digest('hex')
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms))
 const categories = ['memory', 'messaging', 'task', 'mcp_skill', 'file_io', 'browser', 'shell', 'remote_exec', 'desktop']
@@ -363,7 +374,7 @@ export async function runCase({ scenario, root, liveAdapter, model, thinking, co
       voice_tag_delivery: !scenario.voice || spoken.some(value => value.event.type === 'reply_end'),
       request_isolation: scenario.task === 'public' || modelInputs.some(item => item.systemPrompt.includes('已经由系统固定来源的请求')),
       no_fixture_gaps: gaps.length === 0,
-      ...(management ? { one_original_management_operation: managementCommands.length === 1 && managementNotified && managementCommitted, no_management_worker: records.length === 0, management_lazy_tools: modelInputs.some(item => item.tools.some(tool => tool.name === 'manage_voice_contacts')) && !modelInputs[0].tools.some(tool => tool.name === 'manage_voice_contacts'), completion_event_consumed: modelInputs.some(item => JSON.stringify(item.messages).includes('你此前发起的操作有了更新')) } : {}),
+      ...(management ? { one_original_management_operation: managementCommands.length === 1 && managementNotified && managementCommitted, no_management_worker: records.length === 0, management_lazy_tools: modelInputs.some(item => item.tools.some(tool => tool.name === 'manage_voice_contacts')) && !modelInputs[0].tools.some(tool => tool.name === 'manage_voice_contacts'), completion_event_consumed: modelInputs.some(item => JSON.stringify(item.messages).includes('你此前发起的操作有了更新')), no_duplicate_management_guidance: duplicateVoiceReplies(spoken).length === 0 } : {}),
       ...(scenario.earlyAck ? { initial_ack_before_work: initialReplyMs !== undefined && firstManagerWorkTool !== undefined && initialReplyMs <= firstManagerWorkTool.started_ms, single_ack_and_result: formalReplyCount === 2 } : {}),
       ...(scenario.voicePause ? {
         voice_waited_for_restore: queuedBeforeRestore > 0 && spokenBeforeRestore === 0,

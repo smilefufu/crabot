@@ -32,3 +32,5 @@ node crabot-agent/eval/shared-requests/audit.mjs /tmp/completed-evaluation-direc
 `first_voice_ms.completed_ms` 是首段模拟完成回执时间；`first_manager_tool` 从生产 Manager trace 的真实工具开始事件取时，不以模型函数头当成执行。`first_manager_work_tool` 排除发送/询问本身，`first_message_reply_ms` 来自成功的模拟发送回执。`personal-voice-early-ack` 与 `personal-message-early-ack` 使用不额外要求接单的原始文件查询请求，必须在首个查询或派发工具（包括加载工具族）开始前已有完整接单回执，这两个简单文件查询用例还要求只交付一条接单与一条最终结果，以捕获独立上下文重复接单；最终验证码交付仍单独核验；语音允许将下划线口述为“下划线”，不忽略大小写或变更实际字符。
 
 存在提示词待确认、原始用例失败、模型/超时/预算错误或不完整回执时，只记录局部证据；这些用例及对照通过均不等于 B7 完成或真人语音验收。
+
+`voice-enroll-new` 和 `voice-rerecord` 使用合成 Master/联系人及有限的采样完成事件，核对实际 voice 族加载、单次管理操作、原请求完成续办与提交后回报。模型、主控和标签解析真实运行；Admin、采样和播放仍是替身。验收同时检查不同播放段是否重复口述同一句指引，不能仅因操作只执行一次就判完整对话通过。若人工核对后补充评分，保留原始结果，另存复核结论，不重抽模型请求掩盖失败。

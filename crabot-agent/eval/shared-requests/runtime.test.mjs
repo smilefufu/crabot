@@ -3,7 +3,13 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { cases, runCase, spokenContainsToken } from './runtime.mjs'
+import { cases, runCase, spokenContainsToken, duplicateVoiceReplies } from './runtime.mjs'
+
+test('management speech grading catches a repeated reply across separate playback blocks', () => {
+  const output = (id, text) => ({ event: { type: 'reply_text', playback_id: id, text } })
+  assert.deepEqual(duplicateVoiceReplies([output('request', '请跟随'), output('request', '设备提示。'), output('shared', '请跟随设备提示。')]), ['请跟随设备提示。'])
+  assert.deepEqual(duplicateVoiceReplies([output('ack', '好，我来处理。'), output('result', '已经完成。')]), [])
+})
 
 async function* response(block, text) {
   yield { type: 'message_start', messageId: Math.random().toString() }
