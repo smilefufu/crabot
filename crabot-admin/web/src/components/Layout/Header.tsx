@@ -6,6 +6,8 @@ import { ChangePasswordDialog } from '../ChangePasswordDialog'
 import { isDesktop } from '../../services/desktop-host'
 
 const PAGE_NAMES: { path: string; name: string }[] = [
+  { path: '/desktop/diagnostics', name: '本地诊断' },
+  { path: '/desktop/permissions', name: '权限与能力' },
   { path: '/chat', name: '聊天' },
   { path: '/providers', name: '模型供应商' },
   { path: '/modules', name: '模块管理' },

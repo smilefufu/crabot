@@ -5,6 +5,7 @@ import { setServerScope } from './server-state'
 declare global { interface Window { crabotDesktop?: DesktopBridge } }
 export const desktopBridge = window.crabotDesktop
 export const isDesktop = !!desktopBridge || window.location.protocol === 'app:'
+if (isDesktop) document.documentElement.classList.add('is-desktop')
 let state: DesktopHostState | undefined
 let lifetime = new AbortController(), revision = 0
 const listeners = new Set<() => void>()

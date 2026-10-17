@@ -1,6 +1,6 @@
 import { pathToFileURL } from 'node:url'
 import path from 'node:path'
-import { DesktopHostStateSchema, DesktopSessionResponseSchema, HttpClient, MeResponseSchema, type DesktopHostState, type DesktopSessionResponse } from 'crabot-client'
+import { DesktopHostStateSchema, DesktopSessionResponseSchema, HttpClient, MeResponseSchema, type DesktopDiagnostics, type DesktopHostState, type DesktopSessionResponse } from 'crabot-client'
 
 export interface HostCredential {
   token: string
@@ -19,6 +19,7 @@ export class SessionHost {
   private closed = false
   private listeners = new Set<(state: DesktopHostState) => void>()
   private state: DesktopHostState
+  private history: DesktopDiagnostics['recent'] = []
   constructor(private readonly options: {
     coreRoot: string
     dataRoot: string
@@ -28,11 +29,14 @@ export class SessionHost {
     this.state = { phase: 'discovering', app_version: options.appVersion, platform: options.platform }
   }
   snapshot(): DesktopHostState { return this.state }
+  recent(): DesktopDiagnostics['recent'] { return this.history.map(item => ({ ...item })) }
   subscribe(callback: (state: DesktopHostState) => void): () => void {
     this.listeners.add(callback); return () => { this.listeners.delete(callback) }
   }
   private publish(value: DesktopHostState) {
     this.state = DesktopHostStateSchema.parse(value)
+    this.history.push({ at: new Date().toISOString(), phase: value.phase, ...('code' in value && value.code ? { code: value.code } : {}) })
+    if (this.history.length > 40) this.history.shift()
     this.listeners.forEach(callback => callback(this.state))
   }
   status(phase: Exclude<DesktopHostState['phase'], 'ready'>, message?: string, code?: string) {

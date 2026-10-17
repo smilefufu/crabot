@@ -1,12 +1,15 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, protocol, session, shell, Tray } from 'electron'
 import path from 'node:path'
 import { homedir } from 'node:os'
-import { access } from 'node:fs/promises'
+import { access, writeFile, rename, rm } from 'node:fs/promises'
+import { randomUUID } from 'node:crypto'
+import type { DesktopDiagnostics } from 'crabot-client'
 import { pathToFileURL, fileURLToPath } from 'node:url'
 import { DesktopController } from './controller.js'
 import { attachLocalPages } from './local-pages.js'
 import { attachDesktopNetwork } from './desktop-network.js'
 import { registerDesktopIpc } from './desktop-ipc.js'
+import { collectDiagnostics } from './diagnostics.js'
 import { externalUrl, isAppUrl, isTrustedFrame } from './window-security.js'
 
 app.setName('Crabot')
@@ -48,7 +51,7 @@ async function boot() {
   if (!app.requestSingleInstanceLock()) { quitting = true; app.quit(); return }
   app.on('second-instance', show)
   await app.whenReady()
-  await access(path.join(coreRoot, 'crabot-admin/dist/web/index.html'))
+  await access(path.join(coreRoot, 'crabot-admin/dist/web/desktop.html'))
   controller = new DesktopController({ coreRoot, dataRoot, appVersion: app.getVersion(), platform: process.platform as 'darwin' | 'win32' | 'linux' })
   const privateSession = session.fromPartition('persist:crabot-desktop')
   privateSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false))
@@ -59,8 +62,29 @@ async function boot() {
     backgroundColor: '#f5f5f7', autoHideMenuBar: process.platform !== 'darwin',
     webPreferences: { session: privateSession, preload: path.join(directory, 'preload.cjs'), nodeIntegration: false,
       contextIsolation: true, sandbox: true, webSecurity: true, webviewTag: false, allowRunningInsecureContent: false } })
-  registerDesktopIpc({ ipc: ipcMain, contents: () => window?.webContents, controller, quit,
-    openExternal: url => shell.openExternal(url), revealData: async () => !(await shell.openPath(dataRoot)) })
+  const reports = new Map<string, DesktopDiagnostics>()
+  const diagnostics = async () => {
+    const report = await collectDiagnostics(coreRoot, controller!.host.snapshot(), controller!.host.recent())
+    reports.set(report.report_id, report)
+    while (reports.size > 4) reports.delete(reports.keys().next().value!)
+    return report
+  }
+  registerDesktopIpc({ ipc: ipcMain, contents: () => window?.webContents, controller, quit, diagnostics,
+    openExternal: url => shell.openExternal(url), revealData: async () => !(await shell.openPath(dataRoot)),
+    exportDiagnostics: async id => {
+      const report = reports.get(id)
+      if (!report) return false
+      const chosen = await dialog.showSaveDialog({ title: '导出基础诊断', defaultPath: 'crabot-diagnostics.json', filters: [{ name: 'JSON', extensions: ['json'] }] })
+      if (chosen.canceled || !chosen.filePath) return false
+      const temporary = chosen.filePath + '.tmp-' + randomUUID()
+      let created = false
+      try {
+        await writeFile(temporary, JSON.stringify(report, null, 2) + '\n', { flag: 'wx', mode: 0o600 }); created = true
+        await rename(temporary, chosen.filePath); return true
+      } catch { return false }
+      finally { if (created) await rm(temporary, { force: true }).catch(() => {}) }
+    },
+  })
   controller.host.subscribe(state => {
     if (!window?.isDestroyed() && window?.webContents.mainFrame && isTrustedFrame(window.webContents.mainFrame, window.webContents)) window.webContents.send('desktop:state', state)
     tray?.setToolTip(`Crabot · ${state.phase === 'ready' ? '运行中' : state.phase === 'stopped' ? '已停止' : '正在检查'}`)

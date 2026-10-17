@@ -5,6 +5,7 @@ import { Input } from '../../components/Common/Input'
 import { Select } from '../../components/Common/Select'
 import { useToast } from '../../contexts/ToastContext'
 import type { PresetVendor, ModelInfo, ApiFormat } from '../../types'
+import { isDesktop } from '../../services/desktop-host'
 
 interface ProviderDrawerCreateProps {
   onCreated: (providerId: string) => void
@@ -15,7 +16,7 @@ interface ProviderDrawerCreateProps {
 // 无法把 code 自动送回 callback server，必须走"用户复制 redirect URL 粘贴回来"的兜底路径。
 const LOOPBACK_HOSTNAMES = ['localhost', '127.0.0.1', '::1']
 const isLoopbackAccess =
-  typeof window !== 'undefined' && LOOPBACK_HOSTNAMES.includes(window.location.hostname)
+  isDesktop || typeof window !== 'undefined' && LOOPBACK_HOSTNAMES.includes(window.location.hostname)
 
 export const ProviderDrawerCreate: React.FC<ProviderDrawerCreateProps> = ({
   onCreated,

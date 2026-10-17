@@ -1,5 +1,5 @@
 // Real Electron window/Chromium fixture, no business MM, models or user data.
-const { app, BrowserWindow, ipcMain, protocol, session } = require('electron')
+const { app, BrowserWindow, ipcMain, nativeTheme, protocol, session } = require('electron')
 const fs = require('node:fs/promises')
 const path = require('node:path')
 const { pathToFileURL } = require('node:url')
@@ -10,7 +10,7 @@ const { WebSocketServer } = require('../../crabot-admin/node_modules/ws')
 
 app.setName('Crabot boundary fixture')
 protocol.registerSchemesAsPrivileged([{ scheme: 'app', privileges: { standard: true, secure: true, supportFetchAPI: true } }])
-const windows = [], servers = []
+const windows = [], servers = [], clients = new Set()
 let root
 async function main() {
   root = process.env.CRABOT_BOUNDARY_ROOT
@@ -22,8 +22,10 @@ async function main() {
   const { attachDesktopNetwork } = await module('desktop-network.js')
   const { attachLocalPages } = await module('local-pages.js')
   const { registerDesktopIpc } = await module('desktop-ipc.js')
+  const { collectDiagnostics } = await module('diagnostics.js')
   const { isTrustedFrame } = await module('window-security.js')
   const received = [], external = [], upgrades = []
+  let wholeUi = false
   const websocket = new WebSocketServer({ noServer: true })
   async function listen(sink) {
     const server = createServer((req, res) => {
@@ -32,33 +34,51 @@ async function main() {
       res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type, X-Crabot-Request-Id')
       if (req.method === 'OPTIONS') { res.writeHead(204).end(); return }
       if (req.url === '/redirect') { res.writeHead(302, { Location: externalOrigin + '/landing' }).end(); return }
+      if (wholeUi) {
+        const url = new URL(req.url, 'http://fixture')
+        const body = url.pathname === '/api/model-config/global' ? { config: {} }
+          : url.pathname === '/api/model-config/agents/crabot-agent' ? { config: null }
+          : url.pathname === '/api/chat/messages' ? { messages: [] }
+          : url.pathname === '/api/config/status' ? { configured: false, missing: ['尚未选择默认模型'], warnings: [] }
+          : { items: [], pagination: { page: 1, page_size: 100, total_items: 0, total_pages: 1 } }
+        res.end(JSON.stringify(body)); return
+      }
       res.end(JSON.stringify({ ok: true }))
     })
     server.on('upgrade', (req, socket, head) => {
       upgrades.push({ url: req.url, authorization: req.headers.authorization })
-      websocket.handleUpgrade(req, socket, head, client => { client.send('{"connected":true}'); client.close(1000) })
+      websocket.handleUpgrade(req, socket, head, client => {
+        clients.add(client); client.on('close', () => clients.delete(client))
+        if (wholeUi) client.send('{"type":"chat_message_acked","request_ids":[]}')
+        else { client.send('{"connected":true}'); client.close(1000) }
+      })
     })
     servers.push(server); server.listen(0, '127.0.0.1'); await once(server, 'listening')
     return `http://127.0.0.1:${server.address().port}`
   }
   const externalOrigin = await listen(external), origin = await listen(received)
-  const state = { phase: 'ready', app_version: 'fixture', platform: process.platform, instance_id: 'a'.repeat(64), generation: 'b232f3cb-a297-440f-8aba-03af28359e36', admin_url: origin }
-  const host = { snapshot: () => state, context: () => ({ instance_id: state.instance_id, generation: state.generation, admin_url: origin }),
-    credential: async () => ({ token: 'fixture-main-only', instance_id: state.instance_id, generation: state.generation, admin_url: origin }), reconnect: async () => {} }
+  const ready = { phase: 'ready', app_version: 'fixture', platform: process.platform, instance_id: 'a'.repeat(64), generation: 'b232f3cb-a297-440f-8aba-03af28359e36', admin_url: origin }
+  let state = ready
+  const context = () => state.phase === 'ready' ? { instance_id: state.instance_id, generation: state.generation, admin_url: origin } : null
+  const host = { snapshot: () => state, context, credential: async () => context() && ({ token: 'fixture-main-only', ...context() }), reconnect: async () => {} }
   const privateSession = session.fromPartition('crabot-boundary')
   const web = path.join(root, 'web'); await fs.mkdir(web)
-  await fs.writeFile(path.join(web, 'index.html'), '<!doctype html><html><meta charset="utf-8"><title>Crabot fixture</title><body>本地窗口边界夹具</body></html>')
+  await fs.writeFile(path.join(web, 'desktop.html'), '<!doctype html><html><meta charset="utf-8"><title>Crabot fixture</title><body>本地窗口边界夹具</body></html>')
   attachLocalPages(privateSession, web)
   const makeWindow = () => {
-    const window = new BrowserWindow({ show: false, webPreferences: { session: privateSession, preload: path.join(__dirname, '../dist/preload.cjs'), sandbox: true, contextIsolation: true, nodeIntegration: false } })
+    const window = new BrowserWindow({ width: 1180, height: 800, show: false, webPreferences: { session: privateSession, preload: path.join(__dirname, '../dist/preload.cjs'), sandbox: true, contextIsolation: true, nodeIntegration: false, backgroundThrottling: false } })
     windows.push(window); return window
   }
   const trusted = makeWindow(), foreign = makeWindow()
   attachDesktopNetwork(privateSession, host, () => trusted.webContents)
   let starts = 0
+  let preview, exported
   registerDesktopIpc({ ipc: ipcMain, contents: () => trusted.webContents,
     controller: { host, start: async () => { starts++; return state }, stop: async () => state, reconnect: async () => state },
-    quit: async () => true, revealData: async () => true, openExternal: async () => {} })
+    quit: async () => true, revealData: async () => true, openExternal: async () => {},
+    diagnostics: async () => preview = await collectDiagnostics(path.join(__dirname, '../..'), state, []),
+    exportDiagnostics: async id => { assert.equal(id, preview.report_id); exported = id; return false },
+  })
   await trusted.loadURL('app://crabot/'); await foreign.loadURL('app://crabot/')
   assert.equal(isTrustedFrame(trusted.webContents.mainFrame, trusted.webContents), true)
   assert.equal(await trusted.webContents.executeJavaScript('typeof window.require'), 'undefined')
@@ -83,11 +103,60 @@ async function main() {
   await trusted.webContents.executeJavaScript(`fetch(${JSON.stringify(origin + '/redirect')}).then(r=>r.text())`)
   assert.equal(external.find(req => req.url === '/landing').authorization, undefined)
   assert.equal(await trusted.webContents.executeJavaScript('window.crabotDesktop.openExternal("file:///etc/passwd")'), false)
+  // Load the real built React application with only local, explicitly simulated
+  // Admin read responses. No model endpoint or business MM is started.
+  wholeUi = true
+  privateSession.protocol.unhandle('app')
+  attachLocalPages(privateSession, path.join(__dirname, '../../crabot-admin/dist/web'))
+  await trusted.loadURL('app://crabot/')
+  async function waitFor(script) {
+    const deadline = Date.now() + 5000
+    while (Date.now() < deadline) {
+      if (await trusted.webContents.executeJavaScript(script)) return
+      await new Promise(resolve => setTimeout(resolve, 25))
+    }
+    throw new Error('React fixture condition timed out: ' + script)
+  }
+  await waitFor('document.body.textContent.includes("让 Crabot 准备好为你工作") && document.body.textContent.includes("添加模型服务")')
+  const evidence = path.join(__dirname, '../../.desktop-build'); await fs.mkdir(evidence, { recursive: true })
+  await fs.writeFile(path.join(evidence, `welcome-${process.platform}-${process.arch}.png`), (await trusted.webContents.capturePage()).toPNG())
+  nativeTheme.themeSource = 'light'
+  await waitFor('matchMedia("(prefers-color-scheme: light)").matches')
+  await trusted.webContents.executeJavaScript('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))')
+  await fs.writeFile(path.join(evidence, `welcome-light-${process.platform}-${process.arch}.png`), (await trusted.webContents.capturePage()).toPNG())
+  await trusted.webContents.executeJavaScript('Array.from(document.querySelectorAll("a")).find(link=>link.textContent.includes("稍后设置")).click()')
+  await waitFor('!!document.querySelector("textarea") && !document.querySelector("textarea").disabled')
+  await trusted.webContents.executeJavaScript('document.querySelector("textarea").focus()')
+  await trusted.webContents.insertText('断线后保留的中文草稿')
+  await waitFor('document.querySelector("textarea").value === "断线后保留的中文草稿"')
+  state = { phase: 'disconnected', app_version: 'fixture', platform: process.platform }
+  trusted.webContents.send('desktop:state', state)
+  await waitFor('document.body.textContent.includes("与本机服务的连接已断开")')
+  state = ready; trusted.webContents.send('desktop:state', state)
+  await waitFor('!!document.querySelector("textarea") && !document.querySelector("textarea").disabled')
+  await waitFor('document.body.textContent.includes("已同步")')
+  await trusted.webContents.executeJavaScript('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))')
+  assert.equal(await trusted.webContents.executeJavaScript('document.querySelector("textarea").value'), '断线后保留的中文草稿')
+  assert.equal(await trusted.webContents.executeJavaScript('localStorage.getItem("crabot_admin_token")'), null)
+  await fs.writeFile(path.join(evidence, `chat-${process.platform}-${process.arch}.png`), (await trusted.webContents.capturePage()).toPNG())
+  await trusted.webContents.executeJavaScript(`document.querySelector('a[href="/desktop/diagnostics"]').click()`)
+  await waitFor('document.body.textContent.includes("报告时间")')
+  await trusted.webContents.executeJavaScript('Array.from(document.querySelectorAll("button")).find(button=>button.textContent==="导出基础诊断").click()')
+  await waitFor('document.body.textContent.includes("本次没有保存文件")')
+  assert.equal(exported, preview.report_id)
+  state = { phase: 'error', app_version: 'fixture', platform: process.platform, code: 'CRABOT_RUNTIME_INVALID' }
+  trusted.webContents.send('desktop:state', state)
+  await waitFor('!!Array.from(document.querySelectorAll("button")).find(button=>button.textContent==="本地诊断")')
+  await trusted.webContents.executeJavaScript('Array.from(document.querySelectorAll("button")).find(button=>button.textContent==="本地诊断").click()')
+  await waitFor('!!document.querySelector(".desktop-status .desktop-diagnostics dd")')
+  assert.equal(preview.state.phase, 'error')
   console.log('CRABOT_ELECTRON_BOUNDARY ' + JSON.stringify({ electron: process.versions.electron, node: process.versions.node,
-    sandbox: true, isolated_preload: true, current_frame_ipc: true, direct_http_header: true, direct_ws_header: true, foreign_frame_denied: true, redirect_token_absent: true }))
+    sandbox: true, isolated_preload: true, current_frame_ipc: true, direct_http_header: true, direct_ws_header: true,
+    foreign_frame_denied: true, redirect_token_absent: true, built_react_app: true, reconnect_keeps_draft: true, independent_diagnostics: true }))
 }
 main().then(() => cleanup(0), error => { console.error('Electron boundary fixture failed:', error); void cleanup(1) })
 async function cleanup(code) {
+  clients.forEach(client => client.terminate())
   windows.forEach(window => { if (!window.isDestroyed()) window.destroy() })
   await Promise.all(servers.map(server => new Promise(resolve => server.close(resolve))))
   app.exit(code)

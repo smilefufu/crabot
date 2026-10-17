@@ -1,12 +1,12 @@
-import { api } from './api'
-import type { ComputerUseSetupStatus } from '../../../../crabot-shared/src/computer-use'
+import { getWebClient } from './api'
+import { ComputerUseClient, type ComputerUseSetupStatus } from 'crabot-client'
 export type { ComputerUseSetupStatus }
 
 export const computerUseService = {
-  status: () => api.get<ComputerUseSetupStatus>('/computer-use/setup'),
-  start: () => api.post<ComputerUseSetupStatus>('/computer-use/setup', { action: 'start' }),
-  cancel: (setup_id: string, keepalive = false) => api.delete<ComputerUseSetupStatus>('/computer-use/setup', { setup_id }, keepalive),
-  reveal: () => api.post<ComputerUseSetupStatus>('/computer-use/setup', { action: 'reveal_app' }),
+  status: async () => new ComputerUseClient(getWebClient()).status(),
+  start: async () => new ComputerUseClient(getWebClient()).start(),
+  cancel: async (setup_id: string, keepalive = false) => new ComputerUseClient(getWebClient()).cancel(setup_id, { keepalive }),
+  reveal: async () => new ComputerUseClient(getWebClient()).reveal(),
 }
 export const setupRunning = (status?: ComputerUseSetupStatus | null): boolean =>
   ['permissions', 'capture', 'connecting'].includes(status?.setup?.phase ?? '')

@@ -34,7 +34,13 @@ import { ScheduleList } from './pages/Schedules/ScheduleList'
 import { OpenClawImportWizard } from './pages/OpenClawImport/OpenClawImportWizard'
 import { BackupExportPage } from './pages/Backup/BackupExportPage'
 import './App.css'
+import './desktop-theme.css'
 import { DesktopGate } from './components/DesktopGate'
+import { DesktopWelcome } from './pages/DesktopWelcome'
+import { isDesktop } from './services/desktop-host'
+import { DesktopDiagnosticsPanel } from './components/DesktopDiagnosticsPanel'
+import { MainLayout } from './components/Layout/MainLayout'
+import { DesktopPermissions } from './pages/DesktopPermissions'
 
 const PrivateRoute: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const { isAuthenticated, isTemp } = useAuth()
@@ -281,7 +287,9 @@ const AppRoutes: React.FC = () => {
           </PrivateRoute>
         }
       />
-      <Route path="/" element={<Navigate to="/chat" replace />} />
+      <Route path="/" element={isDesktop ? <PrivateRoute><DesktopWelcome /></PrivateRoute> : <Navigate to="/chat" replace />} />
+      <Route path="/desktop/diagnostics" element={<PrivateRoute><MainLayout><DesktopDiagnosticsPanel /></MainLayout></PrivateRoute>} />
+      <Route path="/desktop/permissions" element={<PrivateRoute><DesktopPermissions /></PrivateRoute>} />
     </Routes>
   )
 }

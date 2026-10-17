@@ -92,7 +92,7 @@ jobs:
           node --test scripts/lib/__tests__/desktop-session.test.mjs
           node --test scripts/lib/__tests__/core-preparation.test.mjs
           cd crabot-core
-          node node_modules/vitest/vitest.mjs run src/agent-venv.test.ts src/core-modules.test.ts src/shutdown-generation.test.ts --maxWorkers=1 --minWorkers=1
+          node node_modules/vitest/vitest.mjs run src/agent-venv.test.ts src/core-modules.test.ts src/shutdown-generation.test.ts src/module-management-secrets.test.ts --maxWorkers=1 --minWorkers=1
       - name: Agent environment regressions
         run: |
           cd crabot-agent
@@ -109,13 +109,13 @@ jobs:
           pnpm install --frozen-lockfile
           node node_modules/typescript/bin/tsc -p tsconfig.json
           node node_modules/vite/bin/vite.js build
-          node node_modules/vitest/vitest.mjs run src/pages/Chat/index.test.tsx src/services/server-state.test.ts src/services/desktop-host.test.ts src/components/ChangePasswordDialog.test.tsx --maxWorkers=1 --minWorkers=1
+          node node_modules/vitest/vitest.mjs run src/pages/Chat/index.test.tsx src/pages/DesktopWelcome.test.tsx src/services/server-state.test.ts src/services/desktop-host.test.ts src/components/ChangePasswordDialog.test.tsx src/components/DesktopDiagnosticsPanel.test.tsx src/pages/Settings/ComputerUseSetupCard.test.tsx --maxWorkers=1 --minWorkers=1
       - name: Electron compilation and main-process state regressions
         working-directory: crabot-desktop
         run: |
           node node_modules/typescript/bin/tsc -p tsconfig.json
           node build-preload.mjs
-          node --test tests/desktop-network.test.mjs tests/session-host.test.mjs
+          node --test tests/desktop-network.test.mjs tests/session-host.test.mjs tests/diagnostics.test.mjs
       - name: Real sandboxed Electron window boundaries on Linux
         if: runner.os == 'Linux'
         working-directory: crabot-desktop
@@ -153,6 +153,7 @@ jobs:
           name: desktop-runtime-${{ matrix.target }}
           path: |
             .desktop-build/*.log
+            .desktop-build/*.png
             .desktop-build/runtime-scope.json
             product-runtime.json
           if-no-files-found: warn

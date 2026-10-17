@@ -1,12 +1,13 @@
 # Crabot 项目进度
 
-### 桌面化方案：独立 worktree 开发中，P4 桌面壳与本地通信推进
+### 桌面化方案：独立 worktree 开发中，P4/P5 桌面主要流程推进
 
 - 用户确认[中文 Spec](crabot-docs/superpowers/specs/2026-10-17-desktop-application-design.md)及五项补充决定：macOS 14+ 双架构、Windows 11 x64、Ubuntu Desktop 24.04/26.04 x64；Linux 桌面控制分会话声明支持；优先主要界面；默认后台下载、用户发起安装；登录自启动默认关闭。
 - 已整理[分阶段实施计划](crabot-docs/superpowers/plans/2026-10-17-desktop-application-implementation.md)：P0 协议基线 → P1 内置环境 → P2 共用实例/CLI → P3 SDK/通信 → P4 桌面认证与窗口 → P5 引导/主要界面 → P6 迁移/更新 → P7 最终发行验收，各阶段列明步骤、验证方式与退出条件。
 - P0 已补 Desktop 正式协议及 Admin/MM/Agent 边界，文档仓 c661332；主仓仅在独立 worktree 的 feat/desktop-application 分支推进，需求完成并完整验证前不推 main、不提前建 PR，不触碰现场部署及无关 WIP。
 - P1/P2/P3 及 OS peer 通道已通过[四平台原生 CI](https://github.com/smilefufu/crabot/actions/runs/39046406747)，含 Ubuntu 24.04/26.04 断网容器；共同后台启动、CLI JSON 身份核对、共享 HTTP/WS SDK 与 Web 23 项状态/草稿回归通过。最终 CLI/桌面安装、迁移、签名和真实 GUI 尚未验收。
-- P4 已接 Admin 短期桌面会话、实际 OS peer/入口与重放拒绝；已有 WS 在撤销后停止收发。Electron 本机真实窗口验证隔离 preload、固定 IPC、HTTP/WS 主进程认证、其它窗口拒绝及外部重定向无 token；主进程 7 项、Web 28 项通过，四平台窗口 CI 继续。已有浏览器密码纪律保持，首次密码只允许已认证桌面原子建立，保存不会退出 GUI。共享环境/迁移不引入 TTY 或任务身份语义，宽权限/旧数据留给显式接管。首次模型、迁移/更新、完整壳、签名和目标桌面验收尚未完成；全程不启动第二个真实 MM、不触碰现场数据。
+- P4 的短桌面会话/OS peer/重放与 WS 撤销已接线；[CI 39052584993](https://github.com/smilefufu/crabot/actions/runs/39052584993) 四平台真实 Electron 窗口边界通过。Windows/macOS 完整 smoke 通过；Linux 新增迁移探针误把 Python launcher 与实际二进制相比，已修正，待原生重跑。CLI 原密码纪律保持，桌面首次浏览器密码原子建立，保存不会退出 GUI。
+- P5 已接可跳过的首次模型引导、已有模型保留、系统主题与字体、主要/高级入口、原 Cua 设定流程及独立基础诊断。诊断不读聊天/密钥/原始日志，按预览 ID 导出；完整 React 窗口断连后中文草稿保留。Agent 子进程不再继承 Admin 签名/密码环境，cutover 回归通过。首次真实模型、附件隔离、实际完整壳、迁移/更新、签名与目标桌面验收仍继续；不部署、不触碰现场数据。
 
 ### 任务默认目录文件授权：独立修复待审查
 
