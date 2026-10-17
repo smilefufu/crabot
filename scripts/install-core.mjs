@@ -11,6 +11,7 @@ if (!options.get('--install-root') || !['user', 'system'].includes(options.get('
 try {
   const result = await installStandaloneCli({ sourceRoot: path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'),
     installRoot: options.get('--install-root'), scope: options.get('--scope'),
+    version: options.get('--expected-version')?.replace(/^v/, ''),
     dataDir: options.get('--scope') === 'user' ? resolveCliDataDir({ homeDir: path.join(homedir(), '.crabot') }) : undefined })
   if (process.platform === 'win32') {
     const previous = identity.readUserPath()

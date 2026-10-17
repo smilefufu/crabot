@@ -15,6 +15,12 @@ NODE_SWITCHED_BY_NVM=false
 NODE_PREV_VERSION=""
 SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 BUNDLED_CORE_DIR=""
+CRABOT_DOWNLOAD_DIR=""
+CRABOT_RELEASE_ROOT=""
+CRABOT_RELEASE_VERSION=""
+CRABOT_RELEASE_PLATFORM=""
+SOURCE_IS_LOCAL=false
+if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then SOURCE_IS_LOCAL=true; fi
 
 # 解析参数
 SYSTEM_MODE=false
@@ -419,6 +425,49 @@ verify_release() {
   fi
 }
 
+# Download/checksum/extract before choosing an interpreter. Complete releases
+# bring their own tools; only legacy/source generations prepare host prerequisites.
+download_release() {
+  local platform="$1"
+  local version="${CRABOT_RELEASE_VERSION:-$CRABOT_VERSION}"
+  if [ "$version" = "latest" ]; then
+    # 用 /releases/latest 的重定向拿真实 tag
+    # （atom feed 的 <title> 是 release 标题，可能含 commit message + 中文，不能当 tag 用）
+    local latest_url
+    latest_url=$(curl -fsSLI -o /dev/null -w '%{url_effective}' \
+      "https://github.com/smilefufu/crabot/releases/latest")
+    version="${latest_url##*/tag/}"
+    if [ -z "$version" ] || [ "$version" = "$latest_url" ]; then
+      error "Failed to fetch latest version from GitHub. Set CRABOT_VERSION manually."
+      exit 1
+    fi
+    info "Latest version: $version"
+  fi
+
+  case "$version" in ''|*[!a-zA-Z0-9._-]*) error "Invalid release version: $version"; return 1;; esac
+  [ -z "$CRABOT_DOWNLOAD_DIR" ] || rm -rf "$CRABOT_DOWNLOAD_DIR"
+  CRABOT_DOWNLOAD_DIR=$(mktemp -d "${TMPDIR:-/tmp}/crabot-install.XXXXXX")
+  trap cleanup_installer_files EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  local filename="crabot-${version}-${platform}.tar.gz"
+  local url="https://github.com/smilefufu/crabot/releases/download/${version}/${filename}"
+  info "Downloading $filename..."
+  curl -fsSL "$url" -o "$CRABOT_DOWNLOAD_DIR/$filename" --connect-timeout 30 --max-time 900
+  curl -fsSL "${url}.sha256" -o "$CRABOT_DOWNLOAD_DIR/${filename}.sha256" --connect-timeout 30 --max-time 60
+  info "Verifying checksum..."
+  (cd "$CRABOT_DOWNLOAD_DIR" && {
+    if command -v sha256sum >/dev/null 2>&1; then sha256sum -c "${filename}.sha256"
+    else shasum -a 256 -c "${filename}.sha256"; fi
+  }) || { error "Checksum verification failed!"; return 1; }
+  local stage="$CRABOT_DOWNLOAD_DIR/package"
+  mkdir -p "$stage"
+  tar -xzf "$CRABOT_DOWNLOAD_DIR/$filename" -C "$stage" --strip-components=1
+  CRABOT_RELEASE_ROOT="$stage"
+  CRABOT_RELEASE_VERSION="$version"
+  CRABOT_RELEASE_PLATFORM="$platform"
+}
+
 # --- 主流程 ---
 main() {
   section "Crabot Installer"
@@ -434,11 +483,25 @@ main() {
     version_ge "${libc#glibc }" 2.35 || { error "Linux release requires glibc >= 2.35, found $libc"; return 1; }
   fi
 
-  if [ "$FROM_SOURCE" != true ] && [ -f "$SOURCE_DIR/core-release.json" ]; then
-    local bundled_node="$SOURCE_DIR/.product-runtime/node/bin/node" scope=user
+  local bundled_source=""
+  if [ "$FROM_SOURCE" != true ]; then
+    if [ "$SOURCE_IS_LOCAL" = true ] && [ -f "$SOURCE_DIR/core-release.json" ] && [ "$CRABOT_VERSION" = latest ]; then
+      bundled_source="$SOURCE_DIR"
+    else
+      download_release "$platform"
+      if [ -f "$CRABOT_RELEASE_ROOT/core-release.json" ]; then bundled_source="$CRABOT_RELEASE_ROOT"
+      elif [ -e "$CRABOT_RELEASE_ROOT/.product-runtime" ] || [ -e "$CRABOT_RELEASE_ROOT/product-runtime.json" ]; then
+        error "Bundled release metadata is missing; original installation preserved."; return 1
+      fi
+    fi
+  fi
+  if [ -n "$bundled_source" ]; then
+    local bundled_node="$bundled_source/.product-runtime/node/bin/node" scope=user
+    local expected_version=()
+    if [ -n "$CRABOT_RELEASE_VERSION" ]; then expected_version=("--expected-version=$CRABOT_RELEASE_VERSION"); fi
     [ -x "$bundled_node" ] || { error "Bundled Node is missing; repair the archive."; return 1; }
     [ "$SYSTEM_MODE" != true ] || scope=system
-    "$bundled_node" "$SOURCE_DIR/scripts/install-core.mjs" "--install-root=$INSTALL_DIR" "--scope=$scope" || return 1
+    "$bundled_node" "$bundled_source/scripts/install-core.mjs" "--install-root=$INSTALL_DIR" "--scope=$scope" "${expected_version[@]}" || return 1
     BUNDLED_CORE_DIR="$INSTALL_DIR/releases/$(cat "$INSTALL_DIR/current-core")"
   else
   if [ "$SYSTEM_MODE" = "true" ]; then
@@ -466,41 +529,9 @@ JS
     info "Source install complete."
   else
     section "Release Install"
-    # 获取版本
-    local version="$CRABOT_VERSION"
-    if [ "$version" = "latest" ]; then
-      # 用 /releases/latest 的重定向拿真实 tag
-      # （atom feed 的 <title> 是 release 标题，可能含 commit message + 中文，不能当 tag 用）
-      local latest_url
-      latest_url=$(curl -fsSLI -o /dev/null -w '%{url_effective}' \
-        "https://github.com/smilefufu/crabot/releases/latest")
-      version="${latest_url##*/tag/}"
-      if [ -z "$version" ] || [ "$version" = "$latest_url" ]; then
-        error "Failed to fetch latest version from GitHub. Set CRABOT_VERSION manually."
-        exit 1
-      fi
-      info "Latest version: $version"
-    fi
-
-    case "$version" in ''|*[!a-zA-Z0-9._-]*) error "Invalid release version: $version"; return 1;; esac
+    local version="$CRABOT_RELEASE_VERSION" stage="$CRABOT_RELEASE_ROOT" entry
+    if [ "$CRABOT_RELEASE_PLATFORM" != "$platform" ]; then download_release "$platform"; stage="$CRABOT_RELEASE_ROOT"; fi
     assert_stopped
-    CRABOT_DOWNLOAD_DIR=$(mktemp -d "${TMPDIR:-/tmp}/crabot-install.XXXXXX")
-    trap cleanup_installer_files EXIT
-    trap 'exit 130' INT
-    trap 'exit 143' TERM
-    local filename="crabot-${version}-${platform}.tar.gz"
-    local url="https://github.com/smilefufu/crabot/releases/download/${version}/${filename}"
-    info "Downloading $filename..."
-    curl -fsSL "$url" -o "$CRABOT_DOWNLOAD_DIR/$filename" --connect-timeout 30 --max-time 900
-    curl -fsSL "${url}.sha256" -o "$CRABOT_DOWNLOAD_DIR/${filename}.sha256" --connect-timeout 30 --max-time 60
-    info "Verifying checksum..."
-    (cd "$CRABOT_DOWNLOAD_DIR" && {
-      if command -v sha256sum >/dev/null 2>&1; then sha256sum -c "${filename}.sha256"
-      else shasum -a 256 -c "${filename}.sha256"; fi
-    }) || { error "Checksum verification failed!"; return 1; }
-    local stage="$CRABOT_DOWNLOAD_DIR/package" entry
-    mkdir -p "$stage"
-    tar -xzf "$CRABOT_DOWNLOAD_DIR/$filename" -C "$stage" --strip-components=1
     verify_release "$stage" "$version"
     mkdir -p "$INSTALL_DIR"
     if [ "$SYSTEM_MODE" = true ]; then chown root:root "$INSTALL_DIR"; chmod 0755 "$INSTALL_DIR"; fi

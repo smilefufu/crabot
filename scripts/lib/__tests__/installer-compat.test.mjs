@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawnSync, spawn } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { createServer } from 'node:http'
 import { once } from 'node:events'
 import { readdirSync } from 'node:fs'
@@ -178,11 +179,12 @@ test('healthy Corepack avoids Windows PATH discovery; localized absence is check
   for (const mode of ['healthy', 'missing', 'unknown', 'discovery-timeout', 'tmp-missing']) {
     const code = `
       import cp from 'node:child_process';
+      import os from 'node:os';
       import { syncBuiltinESMExports } from 'node:module';
       import { EventEmitter } from 'node:events';
       Object.defineProperty(process, 'platform', { value: 'win32' });
       const mode = process.env.TEST_MODE; let where = 0;
-      if(mode==='tmp-missing')process.env.TEMP=process.env.TMP=process.env.TEST_ROOT+'/does-not-exist';
+      if(mode==='tmp-missing')os.tmpdir=()=>process.env.TEST_ROOT+'/does-not-exist';
       cp.execFileSync = () => { where++; if(mode==='missing')throw Object.assign(new Error('absent'),{status:1}); if(mode==='discovery-timeout')throw Object.assign(new Error('scan timed out'),{code:'ETIMEDOUT'}); };
       cp.spawn = () => { const child=new EventEmitter();child.stderr=new EventEmitter();setImmediate(()=>{if(mode!=='healthy')child.stderr.emit('data',Buffer.from('commande introuvable fixture'));child.emit('close',mode==='healthy'?0:1)});return child; };
       syncBuiltinESMExports();
@@ -235,5 +237,51 @@ test('bundled PATH setup preserves a broken custom link and rejects a shared wri
     if (mode === 'broken-link') assert.equal(readlinkSync(entry), '/missing-custom-command')
     else assert.equal(existsSync(entry), false)
     assert.equal(existsSync(join(f.home, '.bashrc')), false)
+  }
+})
+
+
+test('remote complete releases use bundled Node before host setup and reject broken payloads', unix, t => {
+  for (const mode of ['complete', 'missing-metadata', 'bad-checksum']) {
+    const home = fixture(t), payload = join(home, 'payload'), archive = join(home, 'release.tar.gz')
+    mkdirSync(join(payload, '.product-runtime/node/bin'), { recursive: true })
+    copyFileSync(process.execPath, join(payload, '.product-runtime/node/bin/node'), constants.COPYFILE_FICLONE)
+    chmodSync(join(payload, '.product-runtime/node/bin/node'), 0o755)
+    if (mode !== 'missing-metadata') writeFileSync(join(payload, 'core-release.json'), '{}')
+    mkdirSync(join(payload, 'scripts'))
+    writeFileSync(join(payload, 'scripts/install-core.mjs'), "if(!process.argv.includes('--scope=user')||!process.argv.includes('--expected-version=fixture')||!process.argv.some(v=>v.startsWith('--install-root=')))process.exit(98);console.log('BUNDLED_INSTALL_ENTRY');process.exit(47)")
+    const packed = spawnSync('tar', ['-czf', archive, '-C', home, 'payload'], { encoding: 'utf8' })
+    assert.equal(packed.status, 0, packed.stderr)
+    const sha = mode === 'bad-checksum' ? '0'.repeat(64) : createHash('sha256').update(readFileSync(archive)).digest('hex')
+    const result = bash(`
+      curl() {
+        local url='' output=''
+        while [ "$#" -gt 0 ]; do case "$1" in https:*) url="$1";; -o) shift; output="$1";; esac; shift; done
+        case "$url" in *.sha256) printf '%s  %s\n' "$FIXTURE_SHA" "$(basename "\${url%.sha256}")" > "$output";; *) cp "$FIXTURE_ARCHIVE" "$output";; esac
+      }
+      ensure_node() { echo UNEXPECTED_HOST_NODE; return 88; }
+      ensure_uv() { echo UNEXPECTED_HOST_UV; return 88; }
+      main
+    `, { HOME: home, TMPDIR: home, CRABOT_VERSION: 'fixture', CRABOT_INSTALL_DIR: join(home, 'installed'), FIXTURE_ARCHIVE: archive, FIXTURE_SHA: sha })
+    const output = result.stdout + result.stderr
+    assert.notEqual(result.status, 0, output)
+    assert.doesNotMatch(output, /UNEXPECTED_HOST/)
+    if (mode === 'complete') assert.match(output, /BUNDLED_INSTALL_ENTRY/)
+    else {
+      assert.doesNotMatch(output, /BUNDLED_INSTALL_ENTRY/)
+      assert.match(output, mode === 'missing-metadata' ? /metadata is missing/ : /Checksum verification failed/)
+    }
+    assert.equal(existsSync(join(home, 'installed')), false)
+    assert.deepEqual(readdirSync(home).filter(name => name.startsWith('crabot-install.')), [])
+  }
+})
+
+
+test('PowerShell 5.1 and 7 remote complete releases bypass host prerequisites and preserve failed installs', { skip: process.platform !== 'win32' }, t => {
+  for (const shell of ['powershell.exe', 'pwsh.exe']) {
+    const result = spawnSync(shell, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File',
+      fileURLToPath(new URL('./remote-installer.ps1', import.meta.url)), '-Installer', installer.replace(/install\.sh$/, 'install.ps1'), '-Node', process.execPath],
+    { encoding: 'utf8', timeout: 120_000 })
+    assert.equal(result.status, 0, shell + ': ' + result.stdout + result.stderr)
   }
 })

@@ -34,7 +34,7 @@ async function checkData(dataDir, installRoot, selected) {
   }
 }
 
-export async function installStandaloneCli({ sourceRoot, installRoot, dataDir, scope = 'user' }) {
+export async function installStandaloneCli({ sourceRoot, installRoot, dataDir, scope = 'user', version }) {
   installRoot = path.resolve(installRoot)
   if (scope === 'user' && detectMode() === 'system') fail('此机器使用 system 安装，请通过现有命令或联系系统管理员管理。')
   for (const file of ['cli.mjs', '.git', 'core-release.json']) if (await present(path.join(installRoot, file))) fail('发现已有代码安装，请使用已有升级或显式接管流程，未覆盖原入口。')
@@ -49,7 +49,7 @@ export async function installStandaloneCli({ sourceRoot, installRoot, dataDir, s
     dataDir = path.resolve(dataDir)
     await checkData(dataDir, await fs.realpath(installRoot).catch(error => { if (error.code === 'ENOENT') return installRoot; throw error }), selected)
   }
-  const prepared = await prepareCliPayload({ sourceRoot, installRoot, scope })
+  const prepared = await prepareCliPayload({ sourceRoot, installRoot, scope, version })
   let lock
   try {
     if (scope === 'user') {

@@ -6,8 +6,8 @@
 - P0 正式契约、P1/P2/P3 内置环境/共同实例/SDK、P4 OS peer 及真实 Electron 窗口边界已获四平台 CI 证据，Ubuntu 24.04/26.04 含断网容器。P5 已接首次模型引导、主要/高级入口、主题、权限设置和独立诊断；HTTP/outbox、草稿、附件沙箱与管理凭据过滤有回归，真实模型首答尚未验收。
 - P6 已接登录自启动、原生更新入口、活动核对、停机备份和维护保护；GUI/CLI 不绕过未完成更新。新增用户命令注册、无 GUI 原生命令/不可变版本目录、旧版入口保护和包内自安装。候选 10 实际安装、重复安装、登录 shell、无宿主工具和载荷不变通过；远程引导、版本升级、损坏修复与真实旧包接管继续。
 - P7 候选 09（1ee0f273，0.1.0-desktop.5）普通归档全量复验通过：核心 1,489,270,323 字节，App ZIP 711,697,545，CLI tar.gz 545,272,801；包含原生命令、SQLite、实际图标与外层 ad-hoc 签名。候选 10（d5ecaa8f，.6）核心为 32,719 文件、1,489,282,049 字节，真实安装只使用临时 HOME/数据，不启动 MM、不改本机 PATH。
-- [CI 39075806515](https://github.com/smilefufu/crabot/actions/runs/39075806515) 的 Linux、Mac 双架构全部通过源码外 App/原生认证/CLI 注册与混用，Intel 握手修复已获真实验证。Windows pip 已过，遗漏的 MCP UTF-8 夹具已修；[39077060509](https://github.com/smilefufu/crabot/actions/runs/39077060509) 再暴露新 CLI 目录的私有 ACL 创建顺序，d5ecaa8f 已用先失败后通过的回归修正，不放宽已有目录权限。该轮 Linux/arm64 成功，Intel 仍在验证，Windows 修复待重跑，未计四平台整体完成。
-- 受管 MCP 新字段的[补充 Spec](crabot-docs/superpowers/specs/2026-10-18-desktop-managed-mcp-design.md)因审批门禁待确认。签名身份、目标桌面测试机与模型账号/预算已询问；完整迁移、更新、最终签名安装、最低系统和真实模型仍未验收。详细证据集中在[实施与验收记录](crabot-docs/superpowers/plans/2026-10-17-desktop-application-validation.md)。
+- [CI 39075806515](https://github.com/smilefufu/crabot/actions/runs/39075806515) 的 Linux、Mac 双架构全部通过源码外 App/原生认证/CLI 注册与混用，Intel 握手修复已获真实验证。Windows pip 已过，遗漏的 MCP UTF-8 夹具已修；[39077060509](https://github.com/smilefufu/crabot/actions/runs/39077060509) 再暴露新 CLI 目录的私有 ACL 创建顺序，d5ecaa8f 已用先失败后通过的回归修正，不放宽已有目录权限。该轮 Linux/arm64/Intel 全部成功。[39079192263](https://github.com/smilefufu/crabot/actions/runs/39079192263) 的 Windows 在安装兼容夹具暴露临时目录失败注入不稳定，已改为确定的真实缺失目录；其余平台仍在跑，未计四平台整体完成。
+- 受管 MCP 新字段的[补充 Spec](crabot-docs/superpowers/specs/2026-10-18-desktop-managed-mcp-design.md)因审批门禁待确认。用户指定当前 mirror-xinshu，完整候选 10 的真实 Provider 解析/Agent adapter 两次短请求通过（输入 63、输出 19 tokens、无重试）；生产配置摘要不变，不启动第二个 MM。GUI 首次引导到首答、完整迁移、更新、最终签名安装与最低系统仍未验收；用户暂无签名证书，申请与免费途径已查官方资料。详细证据集中在[实施与验收记录](crabot-docs/superpowers/plans/2026-10-17-desktop-application-validation.md)。
 
 ### 任务默认目录文件授权：独立修复待审查
 

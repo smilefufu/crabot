@@ -141,3 +141,11 @@ test('old wx locks and unsettled module records block installation without adopt
   await assert.rejects(installStandaloneCli({ sourceRoot, installRoot: f.installRoot, dataDir: f.dataDir }), /未收口模块/)
   await assert.rejects(fs.lstat(f.installRoot), { code: 'ENOENT' })
 })
+
+
+test('a downloaded version mismatch is refused before creating the installation', async t => {
+  const f = await fixture(t), sourceRoot = await f.source('1.2.3')
+  await assert.rejects(installStandaloneCli({ sourceRoot, installRoot: f.installRoot, dataDir: f.dataDir, version: '1.2.4' }), { code: 'CRABOT_CORE_INTEGRITY' })
+  await assert.rejects(fs.lstat(f.installRoot), { code: 'ENOENT' })
+  assert.deepEqual(await fs.readdir(f.dataDir), [])
+})

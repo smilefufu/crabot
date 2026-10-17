@@ -51,10 +51,10 @@ async function rootDirectory(root, scope) {
   return realpathSync(root)
 }
 
-export async function prepareCliPayload({ sourceRoot, installRoot, scope = 'user' }) {
+export async function prepareCliPayload({ sourceRoot, installRoot, scope = 'user', version }) {
   sourceRoot = await fs.realpath(sourceRoot)
   if (await present(path.join(sourceRoot, 'desktop-host.json'))) fail('桌面已包含完整核心，请从桌面安装管理命令，不复制另一套环境。')
-  const release = await verifyCoreRelease(sourceRoot)
+  const release = await verifyCoreRelease(sourceRoot, { version })
   installRoot = await rootDirectory(path.resolve(installRoot), scope)
   const relative = path.relative(sourceRoot, installRoot)
   if (!relative || relative !== '..' && !relative.startsWith('..' + path.sep) && !path.isAbsolute(relative)) fail('CLI 安装目录不能位于待复制的核心中。')
