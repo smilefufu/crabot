@@ -3,7 +3,9 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, writeFileSync, copyFileSync, readFileSync, rmSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { spawn } from 'node:child_process'
+import { spawn, execFile } from 'node:child_process'
+import { promisify } from 'node:util'
+import { fileURLToPath } from 'node:url'
 import { once } from 'node:events'
 import { createServer } from 'node:net'
 import { inspectInstance, identity } from '../instance-runtime.mjs'
@@ -41,4 +43,14 @@ test('detached shared core survives its launching frontend being killed; stop re
   assert.equal(inspectInstance(data).state, 'stopped')
   await new Promise(resolve => setTimeout(resolve, 300))
   assert.equal(inspectInstance(data).state, 'stopped')
+})
+
+
+test('only the verified Admin UI upgrader survives core stop, including its stop CLI', async () => {
+  const fixture = fileURLToPath(new URL('./fixtures/ui-maintenance.mjs', import.meta.url))
+  const checkout = fileURLToPath(new URL('../../../', import.meta.url))
+  for (const mode of ['updater', 'extra-args', 'agent-parent', 'unreadable']) {
+    const result = await promisify(execFile)(process.execPath, [fixture, checkout, mode], { timeout: 20_000 })
+    assert.match(result.stdout, /CONTROLLED_UI_MAINTENANCE_STOP/)
+  }
 })

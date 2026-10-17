@@ -1,6 +1,6 @@
 // Common process control only: no TTY prompts, GUI state, passwords or business RPCs.
 import { promises as fs } from 'node:fs'
-import { join } from 'node:path'
+import { join, isAbsolute, normalize } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { inspectInstance, clearInstanceRuntime, identity } from './instance-runtime.mjs'
 import { SUPERVISOR_FORCE_TIMEOUT_MS } from './supervisor-shutdown.mjs'
@@ -28,10 +28,13 @@ async function moduleProcesses(dataDir, owner) {
 
 async function collectOwned(record, dataDir) {
   const { probeProcessStartIdentity } = await import(new URL('../../crabot-core/dist/module-runtime-registry.js', import.meta.url))
-  const modules = []
+  const modules = [], admins = []
   for (const item of await moduleProcesses(dataDir, record.controller.owner)) {
     if (await probeProcessStartIdentity(item.process.pid) === item.record.process_start_identity
-      && identity.sameProcess(item.process, identity.inspectProcess(item.process.pid))) modules.push(item.process)
+      && identity.sameProcess(item.process, identity.inspectProcess(item.process.pid))) {
+      modules.push(item.process)
+      if (item.record.module_id === 'admin-web' && item.process.parent === record.mm?.pid) admins.push(item.process)
+    }
   }
   // Capture descendants before their parent exits; never adopt processes just because they own a port.
   const processes = []
@@ -41,12 +44,28 @@ async function collectOwned(record, dataDir) {
       if (process?.owner === record.controller.owner) processes.push(process)
     } catch { /* unrelated inaccessible or already-exited process */ }
   }
+  // The existing UI upgrader is an independent maintenance process. It and
+  // its stop CLI must survive Core shutdown; arbitrary detached children do not
+  // gain this exemption. Only the registered Admin's exact native entry does.
+  const independent = new Set()
+  const updater = normalize(join(record.install_root, 'scripts/ui-upgrade.mjs'))
+  for (const process of processes) {
+    const admin = admins.find(admin => process.parent === admin.pid && process.executable === admin.executable)
+    if (!admin || !alive(admin) || !alive(process)) continue
+    let args
+    try { args = identity.inspectProcessArguments(process.pid) }
+    catch (error) {
+      if (alive(process)) throw Object.assign(new Error('Admin 子进程入口暂时无法核验；未停止实例。'), { code: 'CRABOT_STOP_UNKNOWN' })
+      continue
+    }
+    if (args.length === 2 && isAbsolute(args[1]) && normalize(args[1]) === updater && alive(process)) independent.add(process.pid)
+  }
   const owned = new Map([record.controller, record.mm, ...modules].filter(Boolean).map(item => [item.pid, item]))
   for (let changed = true; changed;) {
     changed = false
     for (const process of processes) {
       const parent = owned.get(process.parent)
-      if (!owned.has(process.pid) && parent && alive(parent) && alive(process)) {
+      if (!independent.has(process.pid) && !owned.has(process.pid) && parent && alive(parent) && alive(process)) {
         owned.set(process.pid, process); changed = true
       }
     }
