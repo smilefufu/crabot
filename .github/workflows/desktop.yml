@@ -115,7 +115,7 @@ jobs:
         run: |
           node node_modules/typescript/bin/tsc -p tsconfig.json
           node build-preload.mjs
-          node --test tests/desktop-network.test.mjs tests/session-host.test.mjs tests/diagnostics.test.mjs
+          node --test tests/desktop-network.test.mjs tests/artifact-network.test.mjs tests/session-host.test.mjs tests/diagnostics.test.mjs
       - name: Real sandboxed Electron window boundaries on Linux
         if: runner.os == 'Linux'
         working-directory: crabot-desktop

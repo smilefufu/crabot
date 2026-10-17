@@ -7,7 +7,7 @@ function fixture() {
   for (const name of ['onBeforeRequest', 'onBeforeSendHeaders', 'onCompleted', 'onErrorOccurred']) webRequest[name] = handler => { hooks[name] = handler }
   const frame = { parent: null, origin: 'app://crabot', url: 'app://crabot/chat', processId: 11, routingId: 2 }
   const contents = { id: 7, mainFrame: frame, isDestroyed: () => false }
-  let scope = { instance_id: 'instance', generation: 'first', admin_url: 'http://127.0.0.1:3000' }, renewals = 0
+  let scope = { instance_id: 'instance', generation: 'first', admin_url: 'http://127.0.0.1:3000', connection_epoch: 1 }, renewals = 0
   const host = { context: () => scope, credential: async () => ({ ...scope, token: 'private-admin-token' }), reconnect: async () => { renewals++ } }
   const close = attachDesktopNetwork({ webRequest }, host, () => contents)
   const request = (id, extra = {}) => ({ id, method: 'GET', url: 'http://127.0.0.1:3000/api/auth/me',
@@ -40,6 +40,13 @@ test('a request captured before generation change cannot obtain the new generati
   const second = f.request(2); f.before(second)
   f.host.credential = async () => { f.setScope({ ...f.getScope(), generation: 'third' }); return { ...f.getScope(), token: 'new-private-token' } }
   assert.equal((await f.headers(second)).cancel, true)
+})
+
+test('same-generation reconnection cannot lend its new credential to a request from the previous connection lifetime', async t => {
+  const f = fixture(); t.after(f.close)
+  const request = f.request(1); f.before(request)
+  f.setScope({ ...f.getScope(), connection_epoch: 2 })
+  assert.equal((await f.headers(request)).cancel, true)
 })
 
 test('redirects preserve the original request scope; preflight is public and credential-free', async t => {

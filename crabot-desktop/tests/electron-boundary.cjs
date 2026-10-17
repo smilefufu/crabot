@@ -23,6 +23,7 @@ async function main() {
   const { attachLocalPages } = await module('local-pages.js')
   const { registerDesktopIpc } = await module('desktop-ipc.js')
   const { collectDiagnostics } = await module('diagnostics.js')
+  const { ArtifactWindows } = await module('artifact-window.js')
   const { isTrustedFrame } = await module('window-security.js')
   const received = [], external = [], upgrades = []
   let wholeUi = false
@@ -34,6 +35,10 @@ async function main() {
       res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type, X-Crabot-Request-Id')
       if (req.method === 'OPTIONS') { res.writeHead(204).end(); return }
       if (req.url === '/redirect') { res.writeHead(302, { Location: externalOrigin + '/landing' }).end(); return }
+      if (req.url === '/api/media/a232f3cb-a297-440f-8aba-03af28359e36') {
+        res.setHeader('Content-Type', 'text/html; charset=utf-8')
+        res.end('<!doctype html><title>Untrusted artifact fixture</title><body>附件预览<script>window.probe={bridge:typeof window.crabotDesktop,node:typeof require};fetch("/api/artifact-private-probe").catch(()=>{});</script></body>'); return
+      }
       if (wholeUi) {
         const url = new URL(req.url, 'http://fixture')
         const body = url.pathname === '/api/model-config/global' ? { config: {} }
@@ -59,7 +64,7 @@ async function main() {
   const externalOrigin = await listen(external), origin = await listen(received)
   const ready = { phase: 'ready', app_version: 'fixture', platform: process.platform, instance_id: 'a'.repeat(64), generation: 'b232f3cb-a297-440f-8aba-03af28359e36', admin_url: origin }
   let state = ready
-  const context = () => state.phase === 'ready' ? { instance_id: state.instance_id, generation: state.generation, admin_url: origin } : null
+  const context = () => state.phase === 'ready' ? { instance_id: state.instance_id, generation: state.generation, admin_url: origin, connection_epoch: 1 } : null
   const host = { snapshot: () => state, context, credential: async () => context() && ({ token: 'fixture-main-only', ...context() }), reconnect: async () => {} }
   const privateSession = session.fromPartition('crabot-boundary')
   const web = path.join(root, 'web'); await fs.mkdir(web)
@@ -103,6 +108,25 @@ async function main() {
   await trusted.webContents.executeJavaScript(`fetch(${JSON.stringify(origin + '/redirect')}).then(r=>r.text())`)
   assert.equal(external.find(req => req.url === '/landing').authorization, undefined)
   assert.equal(await trusted.webContents.executeJavaScript('window.crabotDesktop.openExternal("file:///etc/passwd")'), false)
+  const artifacts = new ArtifactWindows(host)
+  const artifactTarget = origin + '/api/media/a232f3cb-a297-440f-8aba-03af28359e36'
+  assert.equal(artifacts.open(artifactTarget + '?token=must-not-be-forwarded'), true)
+  const artifact = BrowserWindow.getAllWindows().find(window => !windows.includes(window))
+  assert.ok(artifact); windows.push(artifact)
+  if (artifact.webContents.isLoadingMainFrame()) await once(artifact.webContents, 'did-finish-load')
+  const artifactProbe = await artifact.webContents.executeJavaScript('({ ...window.probe, origin:window.origin, storage:(()=>{try{return localStorage.getItem("crabot_admin_token")}catch{return "denied"}})()})')
+  assert.deepEqual(artifactProbe, { bridge: 'undefined', node: 'undefined', origin: 'null', storage: 'denied' })
+  assert.equal(received.find(req => req.url === '/api/media/a232f3cb-a297-440f-8aba-03af28359e36').authorization, 'Bearer fixture-main-only')
+  assert.equal(received.some(req => req.url.includes('must-not-be-forwarded')), false)
+  assert.equal(received.some(req => req.url === '/api/artifact-private-probe' && req.authorization), false)
+  assert.equal(artifact.webContents.session === privateSession, false)
+  const saving = once(artifact.webContents.session, 'will-download')
+  artifact.webContents.session.once('will-download', event => event.preventDefault())
+  artifact.webContents.emit('before-input-event', { preventDefault() {} }, { type: 'keyDown', meta: true, control: true, key: 's' })
+  const [, item] = await saving
+  assert.equal(item.getURL(), artifactTarget)
+  assert.equal(received.filter(req => req.url === '/api/media/a232f3cb-a297-440f-8aba-03af28359e36' && req.authorization === 'Bearer fixture-main-only').length, 2)
+  artifacts.close()
   // Load the real built React application with only local, explicitly simulated
   // Admin read responses. No model endpoint or business MM is started.
   wholeUi = true
@@ -152,7 +176,7 @@ async function main() {
   assert.equal(preview.state.phase, 'error')
   console.log('CRABOT_ELECTRON_BOUNDARY ' + JSON.stringify({ electron: process.versions.electron, node: process.versions.node,
     sandbox: true, isolated_preload: true, current_frame_ipc: true, direct_http_header: true, direct_ws_header: true,
-    foreign_frame_denied: true, redirect_token_absent: true, built_react_app: true, reconnect_keeps_draft: true, independent_diagnostics: true }))
+    foreign_frame_denied: true, redirect_token_absent: true, isolated_artifact_preview: true, built_react_app: true, reconnect_keeps_draft: true, independent_diagnostics: true }))
 }
 main().then(() => cleanup(0), error => { console.error('Electron boundary fixture failed:', error); void cleanup(1) })
 async function cleanup(code) {

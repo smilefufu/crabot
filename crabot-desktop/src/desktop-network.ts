@@ -1,8 +1,8 @@
 import type { Session, WebContents, OnBeforeRequestListenerDetails, OnBeforeSendHeadersListenerDetails } from 'electron'
-import type { SessionHost, HostCredential } from './session-host.js'
+import { sameHostContext, type SessionHost, type HostContext } from './session-host.js'
 import { APP_ORIGIN, isTrustedFrame } from './window-security.js'
 
-type Scope = Omit<HostCredential, 'token'>
+type Scope = HostContext
 type Request = OnBeforeRequestListenerDetails | OnBeforeSendHeadersListenerDetails
 function origin(value: string): string | null {
   try {
@@ -11,9 +11,6 @@ function origin(value: string): string | null {
     if (url.protocol === 'wss:') url.protocol = 'https:'
     return url.origin
   } catch { return null }
-}
-function sameScope(a: Scope, b: Scope) {
-  return a.instance_id === b.instance_id && a.generation === b.generation && a.admin_url === b.admin_url
 }
 
 // HTTP/WS go directly to Admin. Only credential injection lives here, bound to the
@@ -39,16 +36,16 @@ export function attachDesktopNetwork(session: Session, host: SessionHost, conten
     const current = host.context()
     // Preflight is public and carries no token; external requests receive no Admin credential.
     if (details.method === 'OPTIONS' || !current || origin(details.url) !== origin(current.admin_url)) { callback({ requestHeaders: headers }); return }
-    if (!original || !sameScope(original, current) || !trusted(details)) { callback({ cancel: true }); return }
+    if (!original || !sameHostContext(original, current) || !trusted(details)) { callback({ cancel: true }); return }
     void host.credential().then(credential => {
-      if (!credential || !sameScope(original, credential) || !trusted(details)) { callback({ cancel: true }); return }
+      if (!credential || !sameHostContext(original, credential) || !trusted(details)) { callback({ cancel: true }); return }
       headers.Authorization = 'Bearer ' + credential.token
       callback({ requestHeaders: headers })
     }, () => callback({ cancel: true }))
   })
   session.webRequest.onCompleted(details => {
     const request = requests.get(details.id); requests.delete(details.id)
-    if (details.statusCode === 401 && request?.scope && host.context() && sameScope(request.scope, host.context()!)) void host.reconnect()
+    if (details.statusCode === 401 && request?.scope && host.context() && sameHostContext(request.scope, host.context()!)) void host.reconnect()
   })
   session.webRequest.onErrorOccurred(details => { requests.delete(details.id) })
   return () => {

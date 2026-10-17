@@ -25,7 +25,8 @@ it.each(['crabot-agent', 'admin-web', 'custom-module'])('the actual %s child rec
       expect(keys.includes(key)).toBe(id === 'admin-web')
     }
   } finally {
-    await mm.handleStopModule({ module_id: id }).catch(() => {})
-    await rm(directory, { recursive: true, force: true })
+    // The public RPC only acknowledges scheduling; cleanup must await actual exit.
+    await mm.stopModuleProcess(id, 'shutdown')
+    await rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
   }
 })

@@ -7,6 +7,11 @@ export interface HostCredential {
   instance_id: string
   generation: string
   admin_url: string
+  connection_epoch: number
+}
+export type HostContext = Omit<HostCredential, 'token'>
+export function sameHostContext(a: HostContext, b: HostContext): boolean {
+  return a.instance_id === b.instance_id && a.generation === b.generation && a.admin_url === b.admin_url && a.connection_epoch === b.connection_epoch
 }
 
 // Main-process state only. A renderer receives a validated state, never HostCredential.
@@ -71,20 +76,18 @@ export class SessionHost {
       if (this.closed || epoch !== this.epoch) return
       const code = error && typeof error === 'object' && 'code' in error && typeof error.code === 'string'
         && /^DESKTOP_[A-Z_]+$/.test(error.code) ? error.code : 'DESKTOP_UNAVAILABLE'
-      this.session = undefined; clearTimeout(this.timer)
-      this.publish({ phase: 'disconnected', app_version: this.options.appVersion, platform: this.options.platform,
-        message: '本机连接暂时不可用。可重新检查或查看诊断。', code })
+      this.status('disconnected', '本机连接暂时不可用。可重新检查或查看诊断。', code)
     }
   }
-  context(): Omit<HostCredential, 'token'> | null {
+  context(): HostContext | null {
     const current = this.session
-    return current ? { instance_id: current.instance_id, generation: current.generation, admin_url: current.admin_url } : null
+    return current ? { instance_id: current.instance_id, generation: current.generation, admin_url: current.admin_url, connection_epoch: this.epoch } : null
   }
   async credential(): Promise<HostCredential | null> {
     if (!this.session || this.closed) return null
     if (Date.parse(this.session.expires_at) <= Date.now() + 30_000) await this.reconnect()
-    return this.session && !this.closed ? { token: this.session.token, instance_id: this.session.instance_id,
-      generation: this.session.generation, admin_url: this.session.admin_url } : null
+    const context = this.context()
+    return this.session && context && !this.closed ? { ...context, token: this.session.token } : null
   }
   async check(): Promise<boolean> {
     const session = this.session, epoch = this.epoch

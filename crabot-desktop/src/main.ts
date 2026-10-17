@@ -10,6 +10,7 @@ import { attachLocalPages } from './local-pages.js'
 import { attachDesktopNetwork } from './desktop-network.js'
 import { registerDesktopIpc } from './desktop-ipc.js'
 import { collectDiagnostics } from './diagnostics.js'
+import { ArtifactWindows } from './artifact-window.js'
 import { externalUrl, isAppUrl, isTrustedFrame } from './window-security.js'
 
 app.setName('Crabot')
@@ -20,6 +21,7 @@ const loadCore = (file: string) => import(pathToFileURL(path.join(coreRoot, file
 let window: BrowserWindow | undefined, tray: Tray | undefined, controller: DesktopController | undefined
 let dataRoot = path.join(homedir(), '.crabot/data'), initialError: unknown, quitting = false
 let pendingQuit: Promise<boolean> | undefined
+let artifacts: ArtifactWindows | undefined
 
 async function quit(): Promise<boolean> {
   if (pendingQuit) return pendingQuit
@@ -34,7 +36,7 @@ async function quit(): Promise<boolean> {
         return false
       }
     }
-    quitting = true; controller?.close(); tray?.destroy(); app.quit(); return true
+    quitting = true; artifacts?.close(); controller?.close(); tray?.destroy(); app.quit(); return true
   })().finally(() => { pendingQuit = undefined })
   return pendingQuit
 }
@@ -53,6 +55,7 @@ async function boot() {
   await app.whenReady()
   await access(path.join(coreRoot, 'crabot-admin/dist/web/desktop.html'))
   controller = new DesktopController({ coreRoot, dataRoot, appVersion: app.getVersion(), platform: process.platform as 'darwin' | 'win32' | 'linux' })
+  artifacts = new ArtifactWindows(controller.host)
   const privateSession = session.fromPartition('persist:crabot-desktop')
   privateSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false))
   privateSession.setPermissionCheckHandler(() => false)
@@ -89,8 +92,13 @@ async function boot() {
     if (!window?.isDestroyed() && window?.webContents.mainFrame && isTrustedFrame(window.webContents.mainFrame, window.webContents)) window.webContents.send('desktop:state', state)
     tray?.setToolTip(`Crabot · ${state.phase === 'ready' ? '运行中' : state.phase === 'stopped' ? '已停止' : '正在检查'}`)
   })
-  window.webContents.setWindowOpenHandler(({ url }) => { const allowed = externalUrl(url); if (allowed) void shell.openExternal(allowed); return { action: 'deny' } })
-  window.webContents.on('will-navigate', (event, url) => { if (!isAppUrl(url)) { event.preventDefault(); const allowed = externalUrl(url); if (allowed) void shell.openExternal(allowed) } })
+  const openLink = (url: string) => { if (artifacts!.open(url)) return; const allowed = externalUrl(url); if (allowed) void shell.openExternal(allowed) }
+  window.webContents.setWindowOpenHandler(({ url }) => { openLink(url); return { action: 'deny' } })
+  window.webContents.on('will-navigate', (event, url) => { if (!isAppUrl(url) || url.startsWith('app://crabot/api/media/')) { event.preventDefault(); openLink(url) } })
+  privateSession.on('will-download', (event, item, contents) => {
+    event.preventDefault()
+    if (contents === window?.webContents && item.getInitiatorOrigin() === 'app://crabot') artifacts!.open(item.getURL(), true)
+  })
   window.webContents.on('will-attach-webview', event => event.preventDefault())
   window.on('close', event => { if (!quitting) { event.preventDefault(); window?.hide() } })
   window.once('ready-to-show', () => { if (!process.argv.includes('--background')) show() })

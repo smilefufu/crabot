@@ -56,3 +56,15 @@ test('a delayed bootstrap cannot resurrect a stopped or closed host', async t =>
   await host.reconnect()
   assert.equal(await host.credential(), null)
 })
+
+test('failed renewal ends the connection lifetime even when the server generation stays the same', async t => {
+  let failed = false
+  const host = await fixture(t, () => { if (failed) throw new Error('fixture unavailable'); return response('http://127.0.0.1:3000') })
+  await host.reconnect()
+  const original = host.context()
+  failed = true; await host.reconnect()
+  assert.equal(host.context(), null)
+  failed = false; await host.reconnect()
+  assert.equal(host.context().generation, original.generation)
+  assert.notEqual(host.context().connection_epoch, original.connection_epoch)
+})
