@@ -18,6 +18,9 @@ class Phone {
   revision = 0
   foreground = false
   autoApply = true
+  autoReady = true
+  speechEnabled = true
+  activity = 'idle'
   constructor(readonly socket: WebSocket) { socket.on('message', (raw, binary) => {
     if (binary) { this.frames.push(Buffer.from(raw as Buffer)); return }
     const control = JSON.parse(raw.toString()); this.controls.push(control)
@@ -27,9 +30,10 @@ class Phone {
       for (const r of catalog.registrations) if (r.status === 'revoked' && !r.terminal_cleared) this.send({ type: 'registration_cleared', registration_id: r.registration_id, enrollment_revision: this.revision })
       this.send({ type: 'catalog_applied', enrollment_revision: this.revision })
     }
+    if (control.type === 'playback_prepare') { this.send({ type: 'playback_ready', playback_id: control.playback_id, accepted: this.autoReady }); if (this.autoReady) this.send({ type: 'heartbeat', foreground: this.foreground, microphone: 'closed', playback: 'idle', activity: 'answering' }) }
     if (control.type === 'heartbeat') this.send({ type: 'heartbeat', foreground: this.foreground, microphone: 'closed', playback: 'idle' })
   }) }
-  send(control: any) { if (control.type === 'heartbeat') { this.foreground = control.foreground; control = { ...control, enrollment_revision: this.revision } }; this.socket.send(JSON.stringify(control)) }
+  send(control: any) { if (control.type === 'heartbeat') { this.foreground = control.foreground; this.speechEnabled = control.speech_enabled ?? this.speechEnabled; this.activity = control.activity ?? this.activity; control = { ...control, enrollment_revision: this.revision, speech_enabled: this.speechEnabled, activity: this.activity } }; this.socket.send(JSON.stringify(control)) }
   async wait<T extends VoiceServerControl['type']>(type: T): Promise<Extract<VoiceServerControl, { type: T }>> {
     let result: VoiceServerControl | undefined
     await vi.waitFor(() => { result = this.controls.find(c => c.type === type); expect(result).toBeDefined() }, { timeout: 4000, interval: 5 })
@@ -101,6 +105,7 @@ describe('Voice Channel with loopback WS, service adapters and durable Admin/cor
     channel = new VoiceChannel({ moduleId: channelId, moduleType: 'channel', version: '0.1.0', protocolVersion: '0.5.0', port }, path.join(dir, 'terminal'), runtime)
     // Resolve only the isolated test Admin. All HTTP RPCs and terminal frames remain real.
     const client = (channel as unknown as { rpcClient: RpcClient }).rpcClient
+    client.publishEvent = vi.fn(async () => 0)
     client.resolve = async () => [{ port: (admin.address() as AddressInfo).port }] as never
     await channel.start()
   })
@@ -116,11 +121,11 @@ describe('Voice Channel with loopback WS, service adapters and durable Admin/cor
   }
   async function pair() {
     const pairing = await rpc.callSensitive<any, any>(port, 'voice_admin_action', { channel_id: channelId, command: { action: 'create_pairing' } }, 'isolated-admin', { authorizationBearer: human })
-    const phone = await connect(); phone.send({ type: 'pair', protocol_version: 6, nonce: pairing.pairing.nonce, owner: { profile_id: randomUUID(), display_name: 'Fixture owner', model_id: VOICE_MODEL_VERSIONS.embedding } })
+    const phone = await connect(); phone.send({ type: 'pair', protocol_version: 7, nonce: pairing.pairing.nonce, owner: { profile_id: randomUUID(), display_name: 'Fixture owner', model_id: VOICE_MODEL_VERSIONS.embedding } })
     const waiting = await phone.wait('pair_waiting'); expect(waiting.verification_code).toBe(pairing.pairing.verification_code)
     await rpc.callSensitive(port, 'voice_admin_action', { channel_id: channelId, command: { action: 'confirm_pairing', pairing_id: waiting.pairing_id } }, 'isolated-admin', { authorizationBearer: human })
     const credential = (await phone.wait('paired')).credential, live = await connect()
-    live.send({ type: 'hello', protocol_version: 6, credential, models: { embedding: VOICE_MODEL_VERSIONS.embedding, segmentation: VOICE_MODEL_VERSIONS.segmentation }, aec_verified: true })
+    live.send({ type: 'hello', protocol_version: 7, credential, models: { embedding: VOICE_MODEL_VERSIONS.embedding, segmentation: VOICE_MODEL_VERSIONS.segmentation }, aec_verified: true })
     const hello = await live.wait('hello'); expect(JSON.stringify(hello)).not.toContain('provider-secret')
     live.send({ type: 'heartbeat', foreground: true, microphone: 'closed', playback: 'idle' })
     await live.wait('catalog_confirmed')
@@ -165,7 +170,7 @@ describe('Voice Channel with loopback WS, service adapters and durable Admin/cor
   })
   it('rejects a v2 handshake with an explicit version error', async () => {
     const phone = await connect(); phone.send({ type: 'hello', protocol_version: 2, credential: 'old', models: VOICE_MODEL_VERSIONS, aec_verified: false })
-    const error = await phone.wait('error'); expect(error.code).toBe('VOICE_VERSION_UNSUPPORTED'); expect(error.message).toContain('protocol_version=6')
+    const error = await phone.wait('error'); expect(error.code).toBe('VOICE_VERSION_UNSUPPORTED'); expect(error.message).toContain('protocol_version=7')
   })
   it('keeps a contact in the roster without an active sample and resolves current bindings', async () => {
     const contact = store.registrations(channelId).contacts[0]
@@ -222,4 +227,52 @@ describe('Voice Channel with loopback WS, service adapters and durable Admin/cor
     expect(ttsCalls).toBe(3)
     phone.send({ type: 'cancel', turn_id: status.turn_id }); await new Promise(resolve => setTimeout(resolve, 10)); await expect(send()).rejects.toThrow(); expect(ttsCalls).toBe(3)
   })
+  it('queries real output availability with exact-core auth, including explicit mute', async () => {
+    const { phone } = await pair()
+    const params = { channel_id: channelId, session_id: voiceSessionId(channelId) }
+    const state = () => rpc.callSensitive<any, any>(port, 'get_voice_output_state', params, 'fake-source', { authorizationBearer: core })
+    await expect(state()).resolves.toMatchObject({ foreground: true, speech_enabled: true, activity: 'idle' })
+    await expect(rpc.callSensitive(port, 'get_voice_output_state', params, 'fake-source', { authorizationBearer: human })).rejects.toThrow()
+    phone.send({ type: 'heartbeat', foreground: true, microphone: 'closed', playback: 'idle', speech_enabled: false })
+    await vi.waitFor(async () => expect(await state()).toMatchObject({ speech_enabled: false }))
+    expect(ttsCalls).toBe(0)
+  })
+  it('delivers an original-task notification with no live input turn and persists only actual completion', async () => {
+    const { phone } = await pair()
+    const state: any = await rpc.callSensitive(port, 'get_voice_output_state', { channel_id: channelId, session_id: voiceSessionId(channelId) }, 'agent', { authorizationBearer: core })
+    const context = { binding: { channel_id: channelId, session_id: voiceSessionId(channelId), response_id: randomUUID(), request_id: 'original-request', worker_id: 'worker-a', worker_turn_id: 'turn-a' }, connection_epoch: state.connection_epoch, kind: 'notification' }
+    const id = randomUUID()
+    const output = (event: any) => rpc.callSensitive<any, any>(port, 'voice_output', { delivery_context: context, event }, 'agent', { authorizationBearer: core, timeoutMs: 30000 })
+    await output({ type: 'reply_start', playback_id: id })
+    await output({ type: 'reply_text', playback_id: id, sequence: 0, text: '对了，刚才那份资料我找到了。' })
+    const completion = output({ type: 'reply_end', playback_id: id }); void completion.catch(() => {})
+    await phone.wait('playback_start'); const end = await phone.wait('playback_end')
+    const receipt = () => rpc.callSensitive<any, any>(port, 'get_voice_playback_receipt', { channel_id: channelId, session_id: voiceSessionId(channelId), playback_id: id }, 'agent', { authorizationBearer: core })
+    expect(await receipt()).toMatchObject({ status: 'unknown' })
+    phone.send({ type: 'playback', playback_id: id, status: 'completed', played_samples: end.sample_count })
+    expect(await completion).toMatchObject({ platform_message_id: id, played_samples: end.sample_count })
+    expect(await receipt()).toMatchObject({ status: 'completed', played_samples: end.sample_count })
+    await phone.wait('playback_confirmed')
+  })
+  it('updates only the current terminal pending marker while muted and never starts TTS', async () => {
+    const { phone } = await pair()
+    phone.send({ type: 'heartbeat', foreground: true, speech_enabled: false, microphone: 'closed', playback: 'idle', activity: 'idle' })
+    const target = { channel_id: channelId, session_id: voiceSessionId(channelId) }
+    const state: any = await rpc.callSensitive(port, 'get_voice_output_state', target, 'agent', { authorizationBearer: core })
+    const context = { binding: { ...target, response_id: 'pending-results' }, connection_epoch: state.connection_epoch, kind: 'notification' }
+    const update = (epoch: string) => rpc.callSensitive(port, 'voice_output', { delivery_context: { ...context, connection_epoch: epoch }, event: { type: 'pending_results', count: 2 } }, 'agent', { authorizationBearer: core })
+    await expect(update('old-epoch')).rejects.toThrow()
+    await update(state.connection_epoch)
+    expect(await phone.wait('pending_results')).toMatchObject({ count: 2 })
+    expect(ttsCalls).toBe(0); expect(phone.frames).toHaveLength(0)
+  })
+
+  it('does not synthesize if the terminal refuses the playback reservation', async () => {
+    const { phone } = await pair(); phone.autoReady = false
+    const state: any = await rpc.callSensitive(port, 'get_voice_output_state', { channel_id: channelId, session_id: voiceSessionId(channelId) }, 'agent', { authorizationBearer: core })
+    const context = { binding: { channel_id: channelId, session_id: voiceSessionId(channelId), response_id: randomUUID() }, connection_epoch: state.connection_epoch, kind: 'notification' }
+    await expect(rpc.callSensitive(port, 'voice_output', { delivery_context: context, event: { type: 'reply_start', playback_id: randomUUID() } }, 'agent', { authorizationBearer: core })).rejects.toThrow()
+    expect(ttsCalls).toBe(0); expect(phone.frames).toHaveLength(0)
+  })
+
 })

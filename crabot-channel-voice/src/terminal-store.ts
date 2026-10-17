@@ -32,6 +32,7 @@ export class TerminalStore {
       this.data = raw as unknown as TerminalDisk
     } else throw new Error('Incompatible voice pairing data; original file preserved')
   }
+  get receiptIdentity(): string | undefined { return this.data.credential_hash }
   get paired(): boolean { return !!this.data.credential_hash && !this.data.activation_pending }
   get pendingActivation(): string | undefined { return this.data.activation_pending ? this.data.activation_id : undefined }
   matches(credential: string): boolean {

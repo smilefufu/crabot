@@ -122,6 +122,7 @@ export interface ScheduleIdentity {
 }
 
 export interface ManagerRegistryDeps {
+  readonly onVoiceDeliveryCompleted?: (key: ManagerKey, result: import('./voice-output.js').VoicePendingResult) => Promise<boolean>
   readonly voiceOutputFor?: (key: ManagerKey) => import('./voice-output.js').VoiceOutputPort
   readonly dailyReflectionFor?: (key: ManagerKey) => import('./daily-reflection.js').DailyReflection
   readonly store: ManagerSessionStore
@@ -241,6 +242,7 @@ export interface ManagerRegistryDeps {
       voiceReplyContext?: () => import('crabot-shared').VoiceReplyContext | undefined
       onWorkerSpawned: (workerId: string) => void
       onPostSendAction: () => void
+      hasSuccessfulWorkerDelivery?: import('./tools/worker-tools.js').WorkerToolsDeps['hasSuccessfulWorkerDelivery']
       hasSuccessfulSendMessageTo: (target: { channel_id: string; session_id: string }) => boolean
       onSuccessfulSendMessage: (target: { channel_id: string; session_id: string }) => void
       sessionChannelsFor: (sessionId: string) => ReadonlySet<string> | undefined
@@ -263,6 +265,8 @@ export interface ManagerRegistryDeps {
 }
 
 export class ManagerRegistry {
+  private readonly voiceReadyPending = new Map<ManagerKey, import('crabot-shared').VoiceOutputReadyPayload>()
+  private readonly voiceReadyDrains = new Map<ManagerKey, Promise<void>>()
   private readonly loops = new Map<ManagerKey, ManagerLoop>()
   /**
    * 每个 key 当前"在途" episode 的引用计数——决定 evictIdle 是否可回收，以及持久操作通知
@@ -446,6 +450,10 @@ export class ManagerRegistry {
             voiceReplyContext: () => this.loops.get(key)?.voiceReplyContext,
             onWorkerSpawned: (workerId) => this.loops.get(key)?.recordSpawnedWorker(workerId),
             onPostSendAction: () => this.loops.get(key)?.recordPostSendAction(),
+            hasSuccessfulWorkerDelivery: (worker, turnId) => {
+              const loop = this.loops.get(key), voice = this.deps.voiceOutputFor?.(key)
+              return worker.report_to.channel_id + '::' + worker.report_to.session_id === key && voice?.isVoice() && voice.prepare ? loop?.hasSuccessfulVoiceWorkerDelivery(worker.worker_id, turnId) ?? false : loop?.hasSuccessfulSendMessageTo(worker.report_to) ?? false
+            },
             hasSuccessfulSendMessageTo: (target) => this.loops.get(key)?.hasSuccessfulSendMessageTo(target) ?? false,
             onSuccessfulSendMessage: (target) => {
               this.loops.get(key)?.recordSuccessfulSendMessage(target)
@@ -686,6 +694,54 @@ export class ManagerRegistry {
     }
     const result = await this.runWake(routedKey, envelope)
     return { consumed: result.consumedEvents === true }
+  }
+
+  async refreshVoiceOutput(key: ManagerKey): Promise<void> {
+    const port = this.deps.voiceOutputFor?.(key)
+    if (!port?.isVoice() || !port.state) return
+    const state = await port.state()
+    if (state.connection_epoch) await this.routeVoiceOutputReady({ channel_id: state.channel_id, session_id: state.session_id, connection_epoch: state.connection_epoch })
+  }
+
+  async routeVoiceOutputReady(notice: import('crabot-shared').VoiceOutputReadyPayload): Promise<void> {
+    this.assertWakeAdmission()
+    const key = `${notice.channel_id}::${notice.session_id}` as ManagerKey
+    const existing = this.voiceReadyDrains.get(key)
+    if (existing) return existing
+    if (this.isEpisodeActive(key) || this.hasWakePreparation(key)) { this.voiceReadyPending.set(key, structuredClone(notice)); return }
+    const operation = Promise.resolve().then(async () => {
+      const port = this.deps.voiceOutputFor?.(key)
+      if (!port?.state) return
+      const state = await port.state()
+      this.assertWakeAdmission()
+      if (state.channel_id !== notice.channel_id || state.session_id !== notice.session_id || state.connection_epoch !== notice.connection_epoch) return
+      await port.reconcile?.(); await port.updatePending?.()
+      await this.settleVoiceReceipts(key, port)
+      this.assertWakeAdmission()
+      if (!state.foreground || !state.speech_enabled || state.activity !== 'idle') return
+      const queued = port.records().filter(item => item.status === 'queued' && item.binding)
+      if (queued.length === 1 && port.deliver) {
+        if (await port.deliver(queued[0])) await this.settleVoiceReceipts(key, port)
+      } else if (queued.length > 1) {
+        const results = queued.slice(0, 3).map(item => ({ delivery_id: item.playback_id, text: item.text, binding: item.binding!, status: 'queued' as const }))
+        await this.runWake(key, this.makeEnvelope(this.captureIngress(), { kind: 'voice_delivery', results }))
+        await this.settleVoiceReceipts(key, port)
+      }
+      await port.updatePending?.()
+    }).finally(() => this.voiceReadyDrains.delete(key))
+    this.voiceReadyDrains.set(key, operation); return operation
+  }
+
+  private async settleVoiceReceipts(key: ManagerKey, port: import('./voice-output.js').VoiceOutputPort): Promise<void> {
+    for (const item of port.records().filter(record => record.status === 'completed' && record.binding && !record.receipt_handled)) {
+      const result = { delivery_id: item.playback_id, text: item.text, binding: item.binding!, status: 'completed' as const, sent_at: item.sent_at }
+      const handled = await this.deps.onVoiceDeliveryCompleted?.(key, result)
+      if (!handled && item.binding?.worker_id) {
+        const outcome = await this.runWake(key, this.makeEnvelope(this.captureIngress(), { kind: 'voice_delivery', results: [result] }))
+        if (!outcome.consumedEvents) continue
+      }
+      item.receipt_handled = true; port.save(item)
+    }
   }
 
   async routeMediaNotification(p: {
@@ -947,6 +1003,7 @@ export class ManagerRegistry {
     this.idleReviewBaselines.clear()
     this.idleReviewReads.clear()
     this.pendingReplies.clear()
+    this.voiceReadyPending.clear()
   }
 
   private captureIngress(): IngressCapture {
@@ -970,6 +1027,7 @@ export class ManagerRegistry {
             ...(event.task_status ? { outcome: event.task_status } : {}),
             trigger_type: found.worker.origin.trigger_type,
             task_id: found.worker.task.id,
+            request_id: found.worker.origin.request?.request_id,
           },
         }
       : event
@@ -1114,6 +1172,13 @@ export class ManagerRegistry {
       // "计数已归零、自唤醒尚未登记"的窗口,`evictIdle` 恰在此时跑就会把实例连同 mailbox
       // 一起回收掉。`maybeSelfWake` 内部的 `runWake` 在第一个 await 之前就完成了 +1。
       if (!result?.contextRecoveryRequired) this.maybeSelfWake(key, loop, result, selfWakeChain)
+      if (remaining <= 0 && result?.consumedEvents === true && this.voiceReadyPending.has(key)) {
+        const notice = this.voiceReadyPending.get(key)!; this.voiceReadyPending.delete(key)
+        void this.routeVoiceOutputReady(notice).catch(() => {})
+      }
+      if (remaining <= 0 && result?.consumedEvents === true && envelope?.wake.kind !== 'voice_delivery') {
+        void this.refreshVoiceOutput(key).catch(() => { /* Durable results remain pending until the next availability signal. */ })
+      }
       this.maybeScheduleIdleReview(key, loop, result, envelope?.wake.kind === 'workboard_idle_review')
     }
   }

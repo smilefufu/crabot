@@ -294,4 +294,24 @@ describe('isolated request admission with real ManagerLoop', () => {
     expect(frames).toHaveLength(1)
   })
 
+  it('continues a real completed voice receipt in the original request without a fake Worker event or repeated execution', async () => {
+    const inputs = await input(), executor = runner()
+    const result = await executor.execute(key, inputs, { source_id: inputs[0].source_id, delivery: 'origin' })
+    await requests.attachWorker(key, result.request_id, 'owned')
+    const receipt = { delivery_id: 'delivery-once', text: '刚才那份资料找到了。', status: 'completed' as const, sent_at: new Date().toISOString(),
+      binding: { channel_id: 'voice', session_id: 'shared', response_id: 'original-response', request_id: result.request_id, worker_id: 'owned', worker_turn_id: 'original-worker-turn' } }
+    expect(await executor.routeVoiceDelivery(key, result.request_id, receipt)).toEqual({ consumed: true })
+    expect(sideEffects).toBe(1); expect(frames).toHaveLength(2)
+    expect(frames[1].source.sender_friend_id).toBe('actual-a')
+    expect(frames[1].voiceReplyContext).toBeUndefined()
+    expect(JSON.stringify(calls.at(-1)!.messages)).toContain('voice_delivery_results')
+    const ids = await fs.readdir(path.join(root, result.request_id, 'events'))
+    const saved = JSON.parse(await fs.readFile(path.join(root, result.request_id, 'events', ids[0], 'event.json'), 'utf8'))
+    expect(saved.schema_version).toBe(2); expect(saved.event.kind).toBe('voice_delivery')
+    expect(await executor.routeVoiceDelivery(key, result.request_id, receipt)).toEqual({ consumed: true })
+    expect(frames).toHaveLength(2)
+    await expect(executor.routeVoiceDelivery(key, result.request_id, { ...receipt, binding: { ...receipt.binding, worker_id: 'other-person-worker' } })).rejects.toThrow('binding')
+    expect(sideEffects).toBe(1)
+  })
+
 })

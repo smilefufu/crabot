@@ -1,5 +1,5 @@
 import { requestInputsForMessages, type TrustedHumanInput } from './trusted-human-input.js'
-import { TaggedVoiceOutput, type VoiceOutputPort } from './voice-output.js'
+import { findVoiceDelivery, TaggedVoiceOutput, type VoiceOutputPort } from './voice-output.js'
 /**
  * ManagerLoop —— episode 生命周期(protocol-agent-v3.md §4.1/§4.2)。
  *
@@ -136,6 +136,7 @@ export type WakeEvent =
     }
   | { readonly kind: 'worker_event'; readonly event: HarnessEvent; readonly dailyReflection?: { runId: string; scheduleId: string; targetSession: { channel_id: string; session_id: string; type: 'private' | 'group' } } }
   | { readonly kind: 'media_notification'; readonly text: string }
+  | { readonly kind: 'voice_delivery'; readonly results: ReadonlyArray<import('./voice-output.js').VoicePendingResult> }
   | {
       readonly kind: 'schedule'
       readonly reflectionWindow?: import('./daily-reflection-types.js').ReflectionWindow
@@ -248,6 +249,7 @@ export interface EpisodeResult {
 }
 
 export interface ManagerLoopDeps {
+  readonly voiceRequest?: { request_id: string; delivery: 'origin' | 'requester_private' }
   readonly voiceOutput?: VoiceOutputPort
   readonly voiceResponseEndOwner?: 'parent'
   readonly onSuccessfulVoiceReply?: (target: { channel_id: string; session_id: string }) => void
@@ -468,6 +470,11 @@ export class ManagerLoop {
 
   hasSuccessfulSendMessageTo(target: { channel_id: string; session_id: string }): boolean {
     return this.successfulSendMessageTargetsInCurrentEpisode.has(`${target.channel_id}\u0000${target.session_id}`)
+  }
+
+  hasSuccessfulVoiceWorkerDelivery(workerId: string, turnId: string, requestId?: string): boolean {
+    return !!this.deps.voiceOutput && !!findVoiceDelivery(this.deps.voiceOutput, record => record.status === 'completed' && record.binding?.worker_id === workerId
+      && record.binding.worker_turn_id === turnId && (requestId === undefined || record.binding.request_id === requestId))
   }
 
   recordSuccessfulSendMessage(target: { channel_id: string; session_id: string }): void { this.recordHumanDelivery(target) }
@@ -956,9 +963,35 @@ export class ManagerLoop {
     this.postSendRecheckSequence = 0
     this.adminChatClaims = new Map()
     this.checkpointError = undefined
-    this.voiceOutput = this.isVoiceConversation && this.deps.voiceOutput ? new TaggedVoiceOutput(this.deps.voiceOutput, () => this.voiceReplyContext, record => {
-      this.recordHumanDelivery(record); this.deps.onSuccessfulVoiceReply?.(record)
-    }) : undefined
+    const pendingVoice = envelope?.wake.kind === 'voice_delivery' ? envelope.wake.results.filter(item => item.status !== 'completed') : undefined
+    let pendingVoiceIndex = 0
+    const ownedVoiceContext = () => {
+      const context = this.voiceReplyContext
+      if (!context) return undefined
+      const owned = [...this.currentEpisodeEnvelopes, ...(this.currentEpisodeInjected ?? [])]
+        .some(item => isHumanWake(item.wake) && item.voice_reply_context?.turn_id === context.turn_id)
+      return owned ? context : undefined
+    }
+    this.voiceOutput = this.isVoiceConversation && this.deps.voiceOutput ? new TaggedVoiceOutput(this.deps.voiceOutput, ownedVoiceContext, record => {
+      this.recordHumanDelivery(record)
+      if (!record.binding || !record.binding.worker_id && ownedVoiceContext()?.turn_id === record.turn_id) this.deps.onSuccessfulVoiceReply?.(record)
+    }, this.deps.voiceOutput.prepare ? () => {
+      if (this.deps.voiceRequest?.delivery === 'requester_private') return undefined
+      if (pendingVoice) return pendingVoice[0]?.binding
+      if (envelope?.wake.kind === 'voice_delivery') return undefined
+      const { channelId, sessionId } = splitManagerKey(this.deps.key)
+      const worker = [...this.currentEpisodeEnvelopes, ...(this.currentEpisodeInjected ?? [])].map(item => item.wake)
+        .filter((wake): wake is Extract<WakeEvent, { kind: 'worker_event' }> => wake.kind === 'worker_event')
+        .map(wake => wake.event).reverse().find(event => event.kind === 'turn_completed' && typeof event.detail?.turn_id === 'string')
+      const requestId = this.deps.voiceRequest?.request_id ?? (typeof worker?.detail?.request_id === 'string' ? worker.detail.request_id : undefined)
+      return { channel_id: channelId, session_id: sessionId,
+        response_id: worker ? `${worker.worker_id}:${worker.detail!.turn_id}` : this.currentVoiceReplyContext?.turn_id ?? episodeId,
+        ...(requestId ? { request_id: requestId } : {}),
+        ...(worker ? { worker_id: worker.worker_id, worker_turn_id: worker.detail!.turn_id as string } : {}) }
+    } : undefined, pendingVoice ? () => {
+      const item = pendingVoice[pendingVoiceIndex++]
+      return item ? findVoiceDelivery(this.deps.voiceOutput!, record => record.playback_id === item.delivery_id && record.status === 'queued') : undefined
+    } : undefined) : undefined
     this.successfulSendMessageTargetsInCurrentEpisode.clear()
     for (const item of episodeEnvelopes) {
       const hook = this.deferredSettleHooks.get(item)
@@ -2644,6 +2677,8 @@ export function managerTriggerFromWake(envelope: TimedWakeEnvelope | undefined, 
       return { type: 'system', summary: `任务板空闲自省${mergedNote}` }
     case 'worker_event':
       return { type: 'worker_event', summary: `worker 事件:${wake.event.kind} (${wake.event.worker_id})${mergedNote}`, source: `worker:${wake.event.worker_id}` }
+    case 'voice_delivery':
+      return { type: 'system', summary: `语音结果投递${mergedNote}` }
     case 'media_notification':
       return { type: 'worker_event', summary: `媒体下载完成${mergedNote}` }
     default: {
@@ -3060,6 +3095,8 @@ function renderWakeEvent(event: WakeEvent, envelope: TimedWakeEnvelope, quotedMe
       )
     case 'worker_event':
       return renderWorkerEvent(event.event)
+    case 'voice_delivery':
+      return JSON.stringify({ voice_delivery_results: event.results })
     case 'media_notification':
       return `[媒体下载完成]\n${event.text}`
     case 'schedule':

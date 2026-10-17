@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto'
+import { voiceOutputPort } from '../../src/manager/voice-output-port.js'
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { promises as fs } from 'fs'
 import { tmpdir } from 'os'
@@ -262,6 +264,62 @@ describe('ManagerRegistry', () => {
       ...rest,
     }
   }
+
+  it('uses current terminal facts to deliver a queued result without creating or executing a task', async () => {
+    const { adapter, calls } = makeAdapter()
+    const key = 'voice::group' as const
+    const item: import('../../src/manager/voice-output.js').VoiceDeliveryRecord = { playback_id: 'delivery', channel_id: 'voice', session_id: 'group', turn_id: 'expired', text: '资料找到了。', status: 'queued',
+      binding: { channel_id: 'voice', session_id: 'group', response_id: 'original', request_id: 'request', worker_id: 'worker', worker_turn_id: 'worker-turn' } }
+    let enabled = false
+    const completed = vi.fn(async () => true)
+    const deliver = vi.fn(async () => { item.status = 'completed'; item.sent_at = new Date().toISOString(); return true })
+    const port = { isVoice: () => true, records: () => [item], save: vi.fn(), send: vi.fn(), deliver,
+      state: async () => ({ channel_id: 'voice', session_id: 'group', connection_epoch: 'current', foreground: true, speech_enabled: enabled, activity: 'idle' as const, current_turn_id: null }) }
+    const registry = new ManagerRegistry(baseRegistryDeps({ adapter, voiceOutputFor: () => port, onVoiceDeliveryCompleted: completed }))
+    const notice = { channel_id: 'voice', session_id: 'group', connection_epoch: 'current' }
+    await registry.routeVoiceOutputReady(notice)
+    expect(deliver).not.toHaveBeenCalled(); expect(calls).toHaveLength(0)
+    enabled = true; await registry.routeVoiceOutputReady({ ...notice, connection_epoch: 'obsolete' })
+    expect(deliver).not.toHaveBeenCalled()
+    await registry.routeVoiceOutputReady(notice)
+    expect(deliver).toHaveBeenCalledTimes(1); expect(completed).toHaveBeenCalledTimes(1); expect(calls).toHaveLength(0)
+    await registry.routeVoiceOutputReady(notice)
+    expect(deliver).toHaveBeenCalledTimes(1); expect(completed).toHaveBeenCalledTimes(1)
+    await registry.dispose()
+  })
+
+  it('summarizes only a bounded public batch and keeps omitted results pending without chained playback', async () => {
+    const { adapter, queue, calls } = makeAdapter(), key = 'voice::group' as const
+    const sent: import('crabot-shared').VoiceOutputParams[] = []
+    let registry: ManagerRegistry
+    const notice = { channel_id: 'voice', session_id: 'group', connection_epoch: 'current' }
+    const port = voiceOutputPort(join(dataDir, 'voice'), () => true, async params => {
+      sent.push(params)
+      if (params.event.type === 'response_end') void registry.routeVoiceOutputReady(notice)
+      return params.event.type === 'reply_end' ? { platform_message_id: params.event.playback_id, played_samples: 480, sent_at: new Date().toISOString() } : { accepted: true }
+    }, {
+      state: async () => ({ ...notice, foreground: true, speech_enabled: true, activity: 'idle', current_turn_id: null }),
+      receipt: async id => ({ playback_id: id, status: 'unknown' }),
+    })
+    const results = Array.from({ length: 4 }, (_, index) => ({ playback_id: randomUUID(), channel_id: 'voice', session_id: 'group', turn_id: 'old-' + index, text: '原结论' + index, status: 'queued' as const,
+      binding: { channel_id: 'voice', session_id: 'group', response_id: 'response-' + index, request_id: 'request-' + index } }))
+    results.forEach(item => port.save(item))
+    queue.push({ text: '<voice_reply>照片整理好了。</voice_reply><voice_reply>行程也核对好了。</voice_reply>', stopReason: 'end_turn' })
+    registry = new ManagerRegistry(baseRegistryDeps({ adapter, voiceOutputFor: () => port }))
+    try {
+      await registry.routeVoiceOutputReady(notice)
+      expect(calls).toHaveLength(1)
+      expect(JSON.stringify(calls[0].messages)).toContain('原结论0')
+      expect(JSON.stringify(calls[0].messages)).not.toContain('原结论3')
+      const played = port.records().filter(item => item.status === 'completed')
+      expect(played.map(item => item.binding!.request_id)).toEqual(['request-0', 'request-1'])
+      expect(port.records().filter(item => item.status === 'queued').map(item => item.playback_id)).toEqual(results.slice(2).map(item => item.playback_id))
+      expect(sent.filter(item => item.event.type === 'reply_text')).toHaveLength(2)
+      expect(played.every(item => item.receipt_handled)).toBe(true)
+      const restarted = voiceOutputPort(join(dataDir, 'voice'), () => true, vi.fn())
+      expect(restarted.records().filter(item => item.status === 'completed').every(item => item.receipt_handled)).toBe(true)
+    } finally { await registry.dispose() }
+  })
 
   it.each([false, true])('retains corrected Memory errors and requires actual summary delivery (retry=%s)', async retrySummary => {
     const { adapter, queue, calls } = makeAdapter()
@@ -2742,4 +2800,6 @@ describe('inbound-adapters', () => {
       expect(shouldWakeOnHarnessEvent({ ...base, kind })).toBe(true)
     }
   })
+
+
 })

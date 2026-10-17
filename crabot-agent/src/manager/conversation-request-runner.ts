@@ -1,3 +1,4 @@
+import type { VoicePendingResult } from './voice-output.js'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
@@ -25,18 +26,28 @@ export interface RequestRunContext {
 }
 interface Dependencies {
   canRun?(): boolean
+  onSettled?(key: ManagerKey): void
   createLoop(context: RequestRunContext): ManagerLoop
   resolveCurrent(kind: RequestPermissionSource['kind'], source: ConversationRequestSource): Promise<RequestPermissionSource | null>
+  validateVoiceDelivery?(key: ManagerKey, requestId: string, result: VoicePendingResult): Promise<void>
   validateEvent?(key: ManagerKey, requestId: string, event: HarnessEvent): Promise<void>
   timezone(): string
 }
+interface RequestVoiceDeliveryEvent {
+  kind: 'voice_delivery'
+  ts: string
+  seq: number
+  worker_id: string
+  result: VoicePendingResult
+}
+type RequestRuntimeEvent = HarnessEvent | RequestVoiceDeliveryEvent
 interface RequestEvent {
-  schema_version: 1
+  schema_version: 1 | 2
   manager_key: ManagerKey
   request_id: string
   source_sha256: string
   event_id: string
-  event: HarnessEvent
+  event: RequestRuntimeEvent
   received_at: string
   phase: 'queued' | 'admitted' | 'settled'
   consumed: boolean
@@ -127,23 +138,33 @@ export class ConversationRequestRunner {
       return this.report(latest.record, latest.record.status === 'closed' ? 'closed' : result.outcome === 'completed' && !result.contextRecoveryRequired && !await this.hasUnknownDelivery(latest.record) ? 'waiting' : 'recovery_required')
     } finally {
       this.active.delete(requestId)
+      this.deps.onSettled?.(key)
       if (!this.closing && this.eventRequests.has(requestId)) void this.drain(key, requestId).catch(() => { /* Durable private responsibility remains pending. */ })
     }
   }
 
   /** Host-only routing after the ledger/context double binding has been checked. */
   async routeWorkerEvent(key: ManagerKey, requestId: string, event: HarnessEvent, receipt?: ActivityContextAdmissionReceipt): Promise<HarnessEventDelivery> {
+    return this.routeEvent(key, requestId, event, receipt)
+  }
+  async routeVoiceDelivery(key: ManagerKey, requestId: string, result: VoicePendingResult): Promise<HarnessEventDelivery> {
+    if (result.status !== 'completed' || result.binding.request_id !== requestId || !result.binding.worker_id || !result.binding.worker_turn_id
+      || !result.sent_at || !Number.isFinite(Date.parse(result.sent_at))) throw new Error('Voice delivery has no completed original binding')
+    return this.routeEvent(key, requestId, { kind: 'voice_delivery', ts: result.sent_at, seq: 0, worker_id: result.binding.worker_id, result: structuredClone(result) })
+  }
+  private async routeEvent(key: ManagerKey, requestId: string, event: RequestRuntimeEvent, receipt?: ActivityContextAdmissionReceipt): Promise<HarnessEventDelivery> {
     if (this.closing) return { consumed: false }
     const fixed = await this.requests.get(key, requestId)
     if (!fixed || fixed.record.status !== 'open' || !fixed.record.worker_ids.includes(event.worker_id)) throw new Error('Request event binding unavailable')
-    await this.deps.validateEvent?.(key, requestId, event)
+    if (event.kind === 'voice_delivery') await this.deps.validateVoiceDelivery?.(key, requestId, event.result)
+    else await this.deps.validateEvent?.(key, requestId, event)
     if (receipt && event.kind !== 'activity_available') throw new Error('Invalid activity receipt kind')
-    const normalized = JSON.parse(JSON.stringify(event)) as HarnessEvent
+    const normalized = JSON.parse(JSON.stringify(event)) as RequestRuntimeEvent
     const eventId = sha256CanonicalJson(normalized), directory = path.join(this.root, requestId, 'events', eventId), file = path.join(directory, 'event.json')
     const item = await this.queueLock.run(async () => {
       let item = await this.readEvent(file, fixed.record, eventId)
       if (!item) {
-        item = { schema_version: 1, manager_key: key, request_id: requestId, source_sha256: fixed.record.source_sha256,
+        item = { schema_version: event.kind === 'voice_delivery' ? 2 : 1, manager_key: key, request_id: requestId, source_sha256: fixed.record.source_sha256,
           event_id: eventId, event: normalized, received_at: new Date().toISOString(), phase: 'queued', consumed: false, context_admitted: false }
         await fs.mkdir(directory, { recursive: true, mode: 0o700 })
         await this.writeJsonAtomic(file, item)
@@ -181,7 +202,7 @@ export class ConversationRequestRunner {
     // Claim synchronously; queue writes have their own short mutex and do not wait on model/tools.
     this.active.add(requestId)
     const run = this.drainEvents(key, requestId).finally(async () => {
-      try { await this.rejectPendingReceipts(requestId) } finally { this.active.delete(requestId); this.drains.delete(requestId) }
+      try { await this.rejectPendingReceipts(requestId) } finally { this.active.delete(requestId); this.drains.delete(requestId); this.deps.onSettled?.(key) }
     })
     this.drains.set(requestId, run)
     return run
@@ -209,7 +230,8 @@ export class ConversationRequestRunner {
       const item = pending[0]
       if (!item) { this.eventRequests.delete(requestId); return }
       if (this.closing) return
-      await this.deps.validateEvent?.(key, requestId, item.event)
+      if (item.event.kind === 'voice_delivery') await this.deps.validateVoiceDelivery?.(key, requestId, item.event.result)
+      else await this.deps.validateEvent?.(key, requestId, item.event)
       const directory = path.join(root, 'events', item.event_id), file = path.join(directory, 'event.json')
       const store = new ManagerSessionStore(path.join(directory, 'session'))
       const checkpoint = await store.loadCheckpoint(key)
@@ -232,7 +254,7 @@ export class ConversationRequestRunner {
         authority: new ConversationRequestAuthority(this.requests, key, requestId, 'request', this.deps.resolveCurrent) })
       try {
         const result = checkpoint ? await loop.resume(checkpoint) : await loop.wakeUp({
-          wake: { kind: 'worker_event', event: structuredClone(item.event) }, received_at: item.received_at, timezone: this.deps.timezone(),
+          wake: item.event.kind === 'voice_delivery' ? { kind: 'voice_delivery', results: [structuredClone(item.event.result)] } : { kind: 'worker_event', event: structuredClone(item.event) }, received_at: item.received_at, timezone: this.deps.timezone(),
           ...(admission ? { activity_context_receipt: admission } : {}),
         })
         if (result.contextRecoveryRequired || !result.consumedEvents) { await liveReceipt?.reject(); return }
@@ -305,7 +327,7 @@ export class ConversationRequestRunner {
     catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error }
     const fields = ['schema_version', 'manager_key', 'request_id', 'source_sha256', 'event_id', 'event', 'received_at', 'phase', 'consumed', 'context_admitted']
     if (!item || typeof item !== 'object' || Array.isArray(item) || Object.keys(item).length !== fields.length || fields.some(field => !Object.prototype.hasOwnProperty.call(item, field))
-      || item.schema_version !== 1 || item.manager_key !== request.manager_key || item.request_id !== request.request_id
+      || (item.schema_version !== 1 && item.schema_version !== 2) || (item.schema_version === 2) !== (item.event?.kind === 'voice_delivery') || item.manager_key !== request.manager_key || item.request_id !== request.request_id
       || item.source_sha256 !== request.source_sha256 || item.event_id !== id || sha256CanonicalJson(item.event) !== id
       || !item.event || typeof item.event.kind !== 'string' || !Number.isFinite(Date.parse(item.event.ts)) || !Number.isInteger(item.event.seq) || item.event.seq < 0
       || !request.worker_ids.includes(item.event.worker_id) || !['queued', 'admitted', 'settled'].includes(item.phase)

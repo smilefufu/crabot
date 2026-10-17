@@ -7,9 +7,9 @@ export const VOICE_MAX_SAMPLES = 240000
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 export class VoiceProtocolVersionError extends Error {
-  constructor() { super('语音协议版本不兼容，需要 protocol_version=6；请更新手机，保留配对和声纹') }
+  constructor() { super('语音协议版本不兼容，需要 protocol_version=7；请更新手机，保留配对和声纹') }
 }
-function version(value: unknown): void { if (value !== 6) throw new VoiceProtocolVersionError() }
+function version(value: unknown): void { if (value !== 7) throw new VoiceProtocolVersionError() }
 
 function invalid(): never { throw new Error('Invalid voice protocol payload') }
 function object(value: unknown): Record<string, unknown> {
@@ -107,7 +107,8 @@ export function parseVoiceClientControl(data: string): VoiceClientControl {
       fields(v, ['type', 'protocol_version', 'credential', 'models', 'aec_verified'], ['owner'])
       version(v.protocol_version); string(v.credential); models(v.models); oneOf(v.aec_verified, [true, false]); if (v.owner !== undefined) validateVoiceDeviceOwner(v.owner); break
     case 'heartbeat':
-      fields(v, ['type', 'foreground', 'microphone', 'playback', 'enrollment_revision']); integer(v.enrollment_revision)
+      fields(v, ['type', 'foreground', 'microphone', 'playback', 'enrollment_revision', 'speech_enabled', 'activity']); integer(v.enrollment_revision)
+      oneOf(v.speech_enabled, [true, false]); oneOf(v.activity, ['idle', 'recording', 'processing', 'answering', 'management'])
       oneOf(v.foreground, [true, false]); oneOf(v.microphone, ['closed', 'wake', 'recording']); oneOf(v.playback, ['idle', 'playing']); break
     case 'owner_saved': fields(v, ['type', 'saved']); validateVoiceOwnerSaved(v.saved); break
     case 'contact_action': fields(v, ['type', 'request']); validateVoiceManagementRequest(v.request); break
@@ -129,6 +130,8 @@ export function parseVoiceClientControl(data: string): VoiceClientControl {
       if (v.turn_id !== undefined) assertVoiceUuid(v.turn_id)
       if (v.playback_id !== undefined) assertVoiceUuid(v.playback_id)
       break
+    case 'playback_ready':
+      fields(v, ['type', 'playback_id', 'accepted']); assertVoiceUuid(v.playback_id); oneOf(v.accepted, [true, false]); break
     case 'playback':
       fields(v, ['type', 'playback_id', 'status'], ['played_samples']); assertVoiceUuid(v.playback_id)
       oneOf(v.status, ['started', 'completed', 'interrupted', 'failed'])

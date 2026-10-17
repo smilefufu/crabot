@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { RpcCallError } from 'crabot-shared'
-import type { VoiceOutputParams, VoiceOutputResult, VoiceReplyContext } from 'crabot-shared'
+import type { VoiceDeliveryBinding, VoicePlaybackContext, VoiceOutputState, VoiceOutputParams, VoiceOutputResult, VoiceReplyContext } from 'crabot-shared'
 import type { AssistantTextConsumer } from '../engine/llm-adapter-types.js'
 
 export interface VoiceDeliveryRecord {
@@ -9,9 +9,19 @@ export interface VoiceDeliveryRecord {
   session_id: string
   turn_id: string
   text: string
-  status: 'prepared' | 'streaming' | 'completed' | 'failed' | 'unknown'
+  status: 'prepared' | 'queued' | 'streaming' | 'completed' | 'failed' | 'unknown'
+  binding?: VoiceDeliveryBinding
+  block_index?: number
   played_samples?: number
   completed_text?: string
+  sent_at?: string
+  receipt_handled?: boolean
+}
+export interface VoicePendingResult {
+  delivery_id: string
+  text: string
+  binding: VoiceDeliveryBinding
+  status?: 'queued' | 'completed'
   sent_at?: string
 }
 export interface VoiceOutputPort {
@@ -19,6 +29,16 @@ export interface VoiceOutputPort {
   send(params: VoiceOutputParams): Promise<VoiceOutputResult>
   save(record: VoiceDeliveryRecord): void
   records(): VoiceDeliveryRecord[]
+  find?(predicate: (record: VoiceDeliveryRecord) => boolean): VoiceDeliveryRecord | undefined
+  state?(): Promise<VoiceOutputState>
+  deliver?(record: VoiceDeliveryRecord): Promise<boolean>
+  updatePending?(): Promise<void>
+  reconcile?(): Promise<void>
+  prepare?(record: VoiceDeliveryRecord, reply?: VoiceReplyContext): Promise<VoicePlaybackContext | undefined>
+}
+
+export function findVoiceDelivery(port: VoiceOutputPort, predicate: (record: VoiceDeliveryRecord) => boolean): VoiceDeliveryRecord | undefined {
+  return port.find ? port.find(predicate) : port.records().find(predicate)
 }
 
 const OPEN = '<voice_reply>', CLOSE = '</voice_reply>'
@@ -67,50 +87,83 @@ export class TaggedVoiceOutput {
   private readonly committedTurns = new Set<string>()
   private readonly disabledTurns = new Set<string>()
   completed = false
+  private readonly blockIndexes = new Map<string, number>()
+  private lastPlaybackContext?: VoicePlaybackContext
   get committed(): boolean {
     const context = this.context()
-    return !!context && this.committedTurns.has(context.turn_id)
+    const key = context?.turn_id ?? this.binding?.()?.response_id
+    return !!key && this.committedTurns.has(key)
   }
   constructor(private readonly port: VoiceOutputPort, private readonly context: () => VoiceReplyContext | undefined,
-    private readonly delivered: (record: VoiceDeliveryRecord) => void) {}
+    private readonly delivered: (record: VoiceDeliveryRecord) => void,
+    private readonly binding?: () => VoiceDeliveryBinding | undefined,
+    private readonly resumeRecord?: () => VoiceDeliveryRecord | undefined) {}
   notes(): string {
     const facts = this.port.records().slice(-3).map(({ text, status, played_samples, completed_text }) => ({ text, status, played_samples, completed_text }))
     return facts.length ? '\n\n语音交付事实（运行时记录；只有 completed 表示全文已播出，其它状态不能当作人类已听到全文）：\n' + JSON.stringify(facts) : ''
   }
   consumer(): AssistantTextConsumer {
-    const context = this.context()
-    let record: VoiceDeliveryRecord | undefined, sequence = 0, committed = false, broken = false
-    const send = (event: VoiceOutputParams['event']) => this.port.send({ voice_reply_context: context!, event })
+    const context = this.context(), binding = this.binding?.(), key = context?.turn_id ?? binding?.response_id
+    let original: VoiceDeliveryRecord | undefined
+    let record: VoiceDeliveryRecord | undefined, sequence = 0, committed = false, broken = false, queued = false
+    let playbackContext: VoicePlaybackContext | undefined
+    const send = (event: VoiceOutputParams['event']) => this.port.send(playbackContext
+      ? { delivery_context: playbackContext, event } : { voice_reply_context: context!, event })
     const save = (): void => { if (record) this.port.save(record) }
     const cancel = async (): Promise<void> => {
       if (!record || record.status === 'completed') return
-      record.status = record.status === 'streaming' ? 'unknown' : 'failed'
+      if (queued && original) { this.port.save(original); record = undefined; return }
+      record.status = !queued && record.status === 'streaming' ? 'unknown' : 'failed'
       try { save() } finally {
-        try { await send({ type: 'reply_cancel', playback_id: record.playback_id }) } catch { /* no replay */ }
+        if (!queued) try { await send({ type: 'reply_cancel', playback_id: record.playback_id }) } catch { /* no replay */ }
         record = undefined
       }
     }
     const parser = new VoiceTagParser(async (event, text) => {
-      if (!context || this.disabledTurns.has(context.turn_id)) return
+      if (!key || this.disabledTurns.has(key)) return
       if (event === 'start') {
-        record = { playback_id: randomUUID(), channel_id: context.channel_id, session_id: context.session_id, turn_id: context.turn_id, text: '', status: 'prepared' }
-        sequence = 0; save()
-        await send({ type: 'reply_start', playback_id: record.playback_id })
+        const blockKey = JSON.stringify([binding?.response_id ?? context?.turn_id, binding?.request_id])
+        const blockIndex = this.blockIndexes.get(blockKey) ?? 0
+        this.blockIndexes.set(blockKey, blockIndex + 1)
+        original = undefined
+        if (this.resumeRecord) original = this.resumeRecord()
+        else if (binding) original = findVoiceDelivery(this.port, item => item.binding?.response_id === binding.response_id
+          && item.binding?.request_id === binding.request_id && item.block_index === blockIndex && ['queued', 'completed'].includes(item.status))
+        if (this.resumeRecord && !original) return
+        if (original?.status === 'completed') { this.completed = true; this.delivered(original); return }
+        record = { playback_id: original?.playback_id ?? randomUUID(), channel_id: (binding ?? context!).channel_id, session_id: (binding ?? context!).session_id,
+          turn_id: original?.turn_id ?? context?.turn_id ?? binding!.response_id, text: '', status: 'prepared', ...(binding ? { binding: structuredClone(original?.binding ?? binding), block_index: original?.block_index ?? blockIndex } : {}) }
+        sequence = 0; if (!original) save()
+        playbackContext = binding ? await this.port.prepare?.(record, binding.worker_id ? undefined : context) : undefined
+        queued = !!binding && !playbackContext
+        if (playbackContext) this.lastPlaybackContext = playbackContext
+        if (!queued) try { await send({ type: 'reply_start', playback_id: record.playback_id }) }
+        catch (error) {
+          if (!binding) throw error
+          // No reply_text has been sent, so this result has not produced any audio.
+          queued = true
+          try { await send({ type: 'reply_cancel', playback_id: record.playback_id }) } catch { /* preserve the unsent result */ }
+        }
       } else if (event === 'text' && record) {
-        record.text += text!; record.status = 'streaming'; save()
-        committed = true; this.committedTurns.add(context.turn_id)
-        await send({ type: 'reply_text', playback_id: record.playback_id, sequence: sequence++, text: text! })
+        record.text += text!; record.status = queued ? 'prepared' : 'streaming'; if (!queued || !original) save()
+        if (!queued) {
+          committed = true; this.committedTurns.add(key)
+          await send({ type: 'reply_text', playback_id: record.playback_id, sequence: sequence++, text: text! })
+        }
       } else if (event === 'end' && record) {
         if (!record.text.trim()) { await cancel(); return }
+        if (queued) {
+          record.status = 'queued'; save(); committed = true; this.committedTurns.add(key); record = undefined; return
+        }
         const result = await send({ type: 'reply_end', playback_id: record.playback_id })
         if (!('platform_message_id' in result) || result.platform_message_id !== record.playback_id
-          || !Number.isSafeInteger(result.played_samples) || result.played_samples <= 0 || !Number.isFinite(Date.parse(result.sent_at))) throw new Error('Invalid voice completion receipt')
+          || !Number.isSafeInteger(result.played_samples) || result.played_samples <= 0 || result.played_samples > 480000 || !Number.isFinite(Date.parse(result.sent_at))) throw new Error('Invalid voice completion receipt')
         record.status = 'completed'; record.played_samples = result.played_samples; record.sent_at = result.sent_at; save()
         this.completed = true; this.delivered(record); record = undefined
       }
     })
     const fail = async (error?: unknown): Promise<void> => {
-      broken = true; if (committed && context) this.disabledTurns.add(context.turn_id)
+      broken = true; if (committed && key) this.disabledTurns.add(key)
       if (record && error instanceof RpcCallError && error.details) {
         const samples = error.details.played_samples, text = error.details.completed_text
         if (Number.isSafeInteger(samples) && (samples as number) >= 0 && (samples as number) <= 480000) record.played_samples = samples as number
@@ -128,5 +181,6 @@ export class TaggedVoiceOutput {
   async finishResponse(): Promise<void> {
     const context = this.context()
     if (context) try { await this.port.send({ voice_reply_context: context, event: { type: 'response_end' } }) } catch { /* stale interaction is never revived */ }
+    else if (this.lastPlaybackContext) try { await this.port.send({ delivery_context: this.lastPlaybackContext, event: { type: 'response_end' } }) } catch { /* no stale replay */ }
   }
 }

@@ -114,10 +114,10 @@ export function createConversationRequestLoop(context: RequestRunContext, deps: 
       onObservedSessionTargets: targets => loop?.recordObservedSessionTargets(targets),
       onPostSendAction: () => loop?.recordPostSendAction(),
       hasSuccessfulSendMessageTo: value => loop?.hasSuccessfulSendMessageTo(value) ?? false,
-      hasSuccessfulWorkerDelivery: async worker => {
+      hasSuccessfulWorkerDelivery: async (worker, turnId) => {
         const bound = await deps.guard.load(worker.worker_id)
         if (bound?.request.delivery.kind === 'requester_private') return bound.request.request_id === request.request_id && loop.hasSuccessfulHumanDelivery
-        return loop?.hasSuccessfulSendMessageTo(worker.report_to) ?? false
+        return voiceOutput?.isVoice() && voiceOutput.prepare ? loop?.hasSuccessfulVoiceWorkerDelivery(worker.worker_id, turnId, request.request_id) ?? false : loop?.hasSuccessfulSendMessageTo(worker.report_to) ?? false
       },
       onSuccessfulSendMessage: value => {
         loop.recordSuccessfulSendMessage(value)
@@ -200,6 +200,7 @@ export function createConversationRequestLoop(context: RequestRunContext, deps: 
     promptInputs: () => ({ isGroup: true, requestAuthorization: 'request',
       dialogProfile: JSON.stringify({ request_id: request.request_id, source: requestSourceFor(source), original_message: source.message, selection: request.selection, delivery: request.delivery }),
       ...(host.managerPersonality?.() ? { adminPersonality: host.managerPersonality() } : {}) }),
+    voiceRequest: { request_id: request.request_id, delivery: request.delivery.kind },
     voiceOutput, voiceResponseEndOwner: context.voiceReplyContext ? 'parent' : undefined,
     onSuccessfulVoiceReply: value => { pending = false; context.onSuccessfulOriginDelivery?.(value) },
     harness: deps.harness, now: () => new Date(host.now()), timezone: host.timezone,

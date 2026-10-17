@@ -868,6 +868,7 @@ export class UnifiedAgent extends ModuleBase {
       subscriptions: [
         'channel.message_authorized',
         'channel.voice_turn_authorized',
+        'channel.voice_output_ready',
         'admin.task_status_changed',
         'module_manager.module_stopped',
         'admin.friend_updated',
@@ -1857,6 +1858,11 @@ export class UnifiedAgent extends ModuleBase {
       case 'admin.agent_config_invalidated':
         this.computerUseOwner.cancelSetupVerification()
         this.scheduleRuntimeConfigPull()
+        break
+
+      case 'channel.voice_output_ready':
+        this.assertRuntimeExecutionAdmission()
+        await this.requireManagerStack().registry.routeVoiceOutputReady(event.payload as import('crabot-shared').VoiceOutputReadyPayload)
         break
 
       case 'channel.voice_turn_authorized':

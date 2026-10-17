@@ -1,3 +1,5 @@
+import path from 'node:path'
+import { PlaybackReceipts } from './playback-receipts.js'
 import { ReplyPlayback } from './reply-playback.js'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Server } from 'node:net'
@@ -6,12 +8,13 @@ import { randomBytes, randomInt, randomUUID } from 'node:crypto'
 import { WebSocket, type RawData } from 'ws'
 import { ModuleBase, RpcError, VoiceInputBuffer, VOICE_MODEL_VERSIONS, encodeVoiceFrame, parseVoiceClientControl, validateVoiceManagementRequest, VoiceProtocolVersionError, validateVoiceOwnerActivation, sha256CanonicalJson, assertVoiceUuid, transcribeAudio, voiceSessionId,
   type GetVoiceConfigResult, type ModuleConfig, type RpcHandlerContext, type SensitiveRpcMethod, type SubmitVoiceTurnParams, type SyncVoiceTerminalParams, type VoiceAdminActionParams, type VoiceAdminActionResult,
-  type VoiceCatalog, type VoiceDeviceOwner, type VoiceManagementResult, type SyncVoiceTerminalResult, type VoiceOutputParams, type VoiceOutputResult, type VoiceClientControl, type VoicePairing, type VoiceReplyContext, type VoiceServerControl, type VoiceTerminalState, type VoiceTurnResult } from 'crabot-shared'
+  type VoiceCatalog, type VoiceDeviceOwner, type VoiceManagementResult, type SyncVoiceTerminalResult, type VoiceOutputParams, type VoiceOutputResult, type VoicePlaybackContext, type VoiceOutputState, type GetVoiceOutputStateParams, type GetVoicePlaybackReceiptParams, type VoiceClientControl, type VoicePairing, type VoiceReplyContext, type VoiceServerControl, type VoiceTerminalState, type VoiceTurnResult } from 'crabot-shared'
 import { TerminalStore } from './terminal-store.js'
 import { voiceTransport } from './transport.js'
 
 interface Connection {
   socket: WebSocket; epoch: string; foreground: boolean; lastHeartbeat: number
+  speechEnabled: boolean; activity: VoiceOutputState['activity']
   microphone: VoiceTerminalState['microphone']; playback: VoiceTerminalState['playback']
   appliedRevision: number; confirmedRevision: number; helloSent: boolean
   input?: VoiceInputBuffer; processing?: AbortController; processingTurn?: string
@@ -34,6 +37,10 @@ function paginate<T>(items: T[], params: { pagination?: { page?: number; page_si
 }
 
 export class VoiceChannel extends ModuleBase {
+  private readonly receipts: PlaybackReceipts
+  private reservation?: { id: string; connection: Connection; finish(accepted: boolean): void }
+  private readonly playbackDone = new Map<string, Promise<VoiceOutputResult>>()
+  private readonly outputContexts = new Map<string, VoicePlaybackContext>()
   private readonly terminal: TerminalStore
   private settings!: GetVoiceConfigResult
   private connection?: Connection
@@ -52,11 +59,12 @@ export class VoiceChannel extends ModuleBase {
   constructor(config: ModuleConfig, dataDirectory: string, private readonly runtimeBearer: string) {
     super(config)
     this.terminal = new TerminalStore(dataDirectory)
+    this.receipts = new PlaybackReceipts(path.join(dataDirectory, 'playback-receipts'))
     this.registerMethod('voice_admin_action', (params: VoiceAdminActionParams, ctx?: RpcHandlerContext) => this.adminAction(params, ctx?.authorizationBearer))
     this.registerMethod('update_config', async () => { this.disconnect(); await this.refreshConfig(); return { updated: true } })
     this.registerMethod('get_capabilities', () => ({ supported_message_types: ['text'], supported_features: [], supports_history_query: false, supports_platform_user_query: true,
       max_message_length: 120, max_file_size: 0, supports_file_path: false, supports_list_contacts: true, supports_list_groups: true, supports_list_group_members: true,
-      voice: { protocol_version: 6, send_timeout_ms: 30000 } }))
+      voice: { protocol_version: 7, send_timeout_ms: 30000 } }))
     this.registerMethod('get_sessions', async (params: { type?: string; pagination?: { page?: number; page_size?: number } }) => { await this.refreshConfig(); return paginate(params?.type === 'private' ? [] : [this.session()], params) })
     this.registerMethod('get_session', async (params: { session_id: string }) => { this.assertSession(params.session_id); await this.refreshConfig(); return { session: this.session() } })
     this.registerMethod('get_private_session', () => { throw new RpcError('CHANNEL_UNSUPPORTED_FEATURE', 'Voice has only a voice group') })
@@ -83,6 +91,8 @@ export class VoiceChannel extends ModuleBase {
     this.registerMethod('get_message', () => { throw new RpcError('NOT_FOUND', 'Voice does not keep a second message archive') })
     this.registerMethod('send_message', () => { throw new RpcError('CHANNEL_UNSUPPORTED_FEATURE', '当前语音回复必须使用 voice_reply 标签') })
     this.registerMethod('voice_output', (params: VoiceOutputParams, ctx?: RpcHandlerContext) => this.voiceOutput(params, ctx?.authorizationBearer))
+    this.registerMethod('get_voice_output_state', async (params: GetVoiceOutputStateParams, ctx?: RpcHandlerContext) => { fields(params, ['channel_id', 'session_id']); await this.verifyOutputTarget(params, ctx?.authorizationBearer); return this.outputState() })
+    this.registerMethod('get_voice_playback_receipt', async (params: GetVoicePlaybackReceiptParams, ctx?: RpcHandlerContext) => { fields(params, ['channel_id', 'session_id', 'playback_id']); await this.verifyOutputTarget(params, ctx?.authorizationBearer); return this.receipts.get(params.playback_id, params.channel_id, params.session_id) })
   }
   protected override async onStart(): Promise<void> {
     if (!this.runtimeBearer) throw new Error('Voice runtime bearer is required')
@@ -194,7 +204,7 @@ export class VoiceChannel extends ModuleBase {
         await this.refreshConfig()
         if (!this.settings.terminal_entry) throw new RpcError('INVALID_PARAMS', '请先保存手机可访问的后台地址')
         this.pairing?.socket?.terminate()
-        this.pairing = { protocol_version: 6, channel_id: this.config.moduleId, pairing_id: randomUUID(), ...this.settings.terminal_entry, nonce: randomBytes(32).toString('base64url'), verification_code: String(randomInt(100000, 1000000)), expires_at: new Date(Date.now() + 60000).toISOString() }
+        this.pairing = { protocol_version: 7, channel_id: this.config.moduleId, pairing_id: randomUUID(), ...this.settings.terminal_entry, nonce: randomBytes(32).toString('base64url'), verification_code: String(randomInt(100000, 1000000)), expires_at: new Date(Date.now() + 60000).toISOString() }
         return { action: 'create_pairing', pairing: { ...this.pairing } }
       }
       case 'confirm_pairing': {
@@ -256,15 +266,19 @@ export class VoiceChannel extends ModuleBase {
         const control = binary ? undefined : parseVoiceClientControl(data.toString('utf8'))
         if (control?.type === 'heartbeat' && authenticated) {
           const c = this.connection; if (!c || c.socket !== socket) throw new Error('Connection changed')
+          const wasReady = c.foreground && c.speechEnabled && c.activity === 'idle'
           c.lastHeartbeat = Date.now(); c.foreground = control.foreground; c.microphone = control.microphone; c.playback = control.playback; c.appliedRevision = control.enrollment_revision
-          if (!c.foreground) this.cancelInteraction()
+          c.speechEnabled = control.speech_enabled; c.activity = control.activity
+          if (!c.foreground || !c.speechEnabled) this.cancelInteraction()
+          if (!wasReady && c.foreground && c.speechEnabled && c.activity === 'idle') this.outputReady()
           this.heartbeatSync(); return
         }
         if (control?.type === 'cancel' && authenticated) {
-          if (control.playback_id && control.playback_id !== this.playback?.id) return
+          if (control.playback_id && control.playback_id !== this.playback?.id && control.playback_id !== this.reservation?.id) return
           if (control.turn_id && control.turn_id !== this.connection?.input?.turnId && control.turn_id !== this.connection?.processingTurn && control.turn_id !== this.reply?.context.turn_id) return
           this.cancelInteraction(); return
         }
+        if (control?.type === 'playback_ready' && authenticated) { if (this.reservation?.connection.socket === socket && this.reservation.id === control.playback_id) this.reservation.finish(control.accepted); return }
         if (control?.type === 'playback' && authenticated) { this.playbackReceipt(control); return }
         queue = queue.then(async () => {
           if (!authenticated) {
@@ -279,7 +293,7 @@ export class VoiceChannel extends ModuleBase {
             await this.refreshConfig()
             if (this.settings.owner_activation_required && this.settings.owner_activation?.status === 'pending' && control.owner && !sameOwner(control.owner, this.settings.owner_activation.owner)) throw new Error('Owner profile mismatch')
             if (this.stopped || socket.readyState !== WebSocket.OPEN || this.connection) throw new Error('Connection changed')
-            this.connection = { socket, epoch: randomUUID(), foreground: false, lastHeartbeat: Date.now(), microphone: 'closed', playback: 'idle', appliedRevision: -1, confirmedRevision: -1, helloSent: false }
+            this.connection = { socket, epoch: randomUUID(), foreground: false, speechEnabled: false, activity: 'idle', lastHeartbeat: Date.now(), microphone: 'closed', playback: 'idle', appliedRevision: -1, confirmedRevision: -1, helloSent: false }
             authenticated = true; clearTimeout(handshake); await this.sync(); this.sendHello(this.connection); return
           }
           const c = this.connection; if (!c || c.socket !== socket) throw new Error('Connection changed')
@@ -302,7 +316,7 @@ export class VoiceChannel extends ModuleBase {
         return
       }
       case 'turn_start':
-        if (!c.foreground || c.input || c.processing || this.playback) throw new Error('Voice is not ready')
+        if (!c.foreground || c.input || c.processing || this.playback || this.reservation) throw new Error('Voice is not ready')
         this.reply = undefined; await this.refreshConfig(); await this.sync()
         if (c.confirmedRevision !== this.settings.enrollment_revision || this.settings.pending_enrollment) { this.send(c.socket, { type: 'error', code: 'VOICE_CATALOG_NOT_READY', message: '请等待声纹目录同步或完成当前登记' }); return }
         if (this.settings.owner_activation_required && this.settings.owner_activation?.status !== 'completed') { this.send(c.socket, { type: 'error', code: 'VOICE_OWNER_NOT_READY', message: '请先完成设备所有者关联' }); return }
@@ -384,62 +398,154 @@ export class VoiceChannel extends ModuleBase {
       || !Number.isFinite(Date.parse(context.expires_at)) || Date.parse(context.expires_at) <= Date.now() || Date.parse(context.expires_at) > Date.now() + 60000 || Date.parse(slot.context.expires_at) <= Date.now()) failed('语音回答机会已结束，请重新开始')
     return { c, slot }
   }
-  private async voiceOutput(raw: VoiceOutputParams, bearer?: string): Promise<VoiceOutputResult> {
-    fields(raw, ['voice_reply_context', 'event'])
+  private async verifyOutputTarget(target: GetVoiceOutputStateParams, bearer?: string): Promise<void> {
+    if (!target || target.channel_id !== this.config.moduleId) throw new RpcError('INVALID_PARAMS', 'Voice target differs')
+    this.assertSession(target.session_id)
     if (!this.adminPort) await this.refreshConfig()
     await this.rpcClient.callSensitive(this.adminPort!, 'verify_voice_agent', { channel_id: this.config.moduleId }, this.config.moduleId, { authorizationBearer: bearer, timeoutMs: 3000 })
-    const context = raw.voice_reply_context, { c, slot } = this.assertReply(context), event = raw.event
-    fields(event, event.type === 'response_end' ? ['type'] : event.type === 'reply_text' ? ['type', 'playback_id', 'sequence', 'text'] : ['type', 'playback_id'])
+  }
+  private outputState(): VoiceOutputState {
+    const c = this.connection
+    return { channel_id: this.config.moduleId, session_id: voiceSessionId(this.config.moduleId), connection_epoch: c?.epoch ?? null,
+      foreground: c?.foreground ?? false, speech_enabled: c?.speechEnabled ?? false,
+      activity: this.settings?.pending_enrollment ? 'management' : c?.activity ?? 'idle', current_turn_id: this.reply?.context.turn_id ?? null }
+  }
+  private outputReady(): void {
+    const c = this.connection
+    if (!c || this.stopped) return
+    void this.rpcClient.publishEvent({ id: randomUUID(), type: 'channel.voice_output_ready', source: this.config.moduleId, timestamp: new Date().toISOString(),
+      payload: { channel_id: this.config.moduleId, session_id: voiceSessionId(this.config.moduleId), connection_epoch: c.epoch } }, this.config.moduleId).catch(() => {})
+  }
+  private assertOutput(context: VoicePlaybackContext, starting = false): Connection {
+    fields(context, ['binding', 'connection_epoch', 'kind', 'turn_id'])
+    fields(context.binding, ['channel_id', 'session_id', 'response_id', 'request_id', 'worker_id', 'worker_turn_id'])
+    this.assertSession(context.binding.session_id)
+    if (context.binding.channel_id !== this.config.moduleId || typeof context.binding.response_id !== 'string' || !context.binding.response_id
+      || !['reply', 'notification'].includes(context.kind) || (!!context.binding.worker_id !== !!context.binding.worker_turn_id)) failed('Invalid voice delivery binding')
+    const c = this.connection
+    if (!c?.foreground || !c.speechEnabled || c.epoch !== context.connection_epoch || this.settings.setup_status !== 'complete' || this.settings.pending_enrollment
+      || c.input || (c.processing && (context.kind !== 'reply' || c.processingTurn !== context.turn_id)) || c.activity === 'management' || c.activity === 'recording') failed('终端暂时不适合发声')
+    if (starting && (this.playback || this.reservation)) failed('播放忙')
+    if (starting && context.kind === 'notification' && c.activity !== 'idle') failed('当前对话尚未结束')
+    if (context.kind === 'reply' && (!context.turn_id || this.reply?.context.turn_id !== context.turn_id)) failed('当前回答已结束')
+    return c
+  }
+  private async preparePlayback(c: Connection, id: string, context: VoicePlaybackContext): Promise<void> {
+    await new Promise<void>((resolve, reject) => {
+      let settled = false
+      const timer = setTimeout(() => finish(false), 3000)
+      const finish = (accepted: boolean) => {
+        if (settled) return
+        settled = true; clearTimeout(timer)
+        if (!accepted && this.reservation?.id === id) this.reservation = undefined
+        if (accepted && this.connection === c) resolve(); else reject(new Error('Terminal refused playback reservation'))
+      }
+      this.reservation = { id, connection: c, finish }
+      try { this.send(c.socket, { type: 'playback_prepare', playback_id: id, context }) }
+      catch { finish(false) }
+    })
+  }
+  private async voiceOutput(raw: VoiceOutputParams, bearer?: string): Promise<VoiceOutputResult> {
+    fields(raw, ['voice_reply_context', 'delivery_context', 'event'])
+    if (!!raw.voice_reply_context === !!raw.delivery_context) throw new RpcError('INVALID_PARAMS', 'Exactly one voice output context is required')
+    const legacy = raw.voice_reply_context
+    const context: VoicePlaybackContext = raw.delivery_context ?? {
+      binding: { channel_id: legacy!.channel_id, session_id: legacy!.session_id, response_id: legacy!.turn_id },
+      connection_epoch: legacy!.connection_epoch, kind: 'reply', turn_id: legacy!.turn_id,
+    }
+    await this.verifyOutputTarget(context.binding, bearer)
+    const event = raw.event
+    let eventFields = ['type', 'playback_id']
+    if (event.type === 'pending_results') eventFields = ['type', 'count']
+    else if (event.type === 'response_end') eventFields = ['type']
+    else if (event.type === 'reply_text') eventFields = ['type', 'playback_id', 'sequence', 'text']
+    fields(event, eventFields)
+    if (event.type === 'pending_results') {
+      if (!Number.isSafeInteger(event.count) || event.count < 0) throw new RpcError('INVALID_PARAMS', 'Invalid pending count')
+      if (!this.connection || this.connection.epoch !== context.connection_epoch) failed('终端连接已变化')
+      this.send(this.connection.socket, { type: 'pending_results', count: event.count })
+      return { accepted: true }
+    }
     if (event.type === 'response_end') {
+      const c = this.assertOutput(context)
       if (this.playback) failed('播放尚未收口')
-      this.send(c.socket, { type: 'response_end', turn_id: context.turn_id }); this.reply = undefined
-      if (this.replyTimer) clearTimeout(this.replyTimer); this.playbacks.clear(); return { accepted: true }
+      if (context.kind === 'reply') { this.send(c.socket, { type: 'response_end', turn_id: context.turn_id! }); this.reply = undefined }
+      if (this.replyTimer) clearTimeout(this.replyTimer)
+      this.outputReady()
+      return { accepted: true }
     }
     if (!['reply_start', 'reply_text', 'reply_end', 'reply_cancel'].includes(event.type)) throw new RpcError('INVALID_PARAMS', '非法播放事件')
     assertVoiceUuid(event.playback_id)
     let play = this.playbacks.get(event.playback_id)
-    if (event.type === 'reply_cancel') { play?.cancel('runtime 取消播报'); if (this.playback === play) this.playback = undefined; return { accepted: true } }
+    if (event.type === 'reply_cancel') { play?.cancel('runtime取消播报'); return { accepted: true } }
     if (event.type === 'reply_start') {
-      if (play) return { accepted: true }
-      if (this.playback || this.playbacks.size >= 32) failed('播放忙或本轮回复过多')
-      const status = await this.admin<unknown, VoiceTurnResult>('get_voice_turn_status', { channel_id: this.config.moduleId, turn_id: context.turn_id, payload_sha256: slot.digest })
-      if (status.status !== 'accepted') failed('本轮尚未持久接纳')
-      this.assertReply(context); if (!this.settings.tts_connection) failed('TTS 未配置')
-      play = new ReplyPlayback(event.playback_id, this.settings.tts_connection!, {
-        valid: () => { this.assertReply(context); if (c.socket.bufferedAmount > 50000) failed('播放队列已满') },
-        start: text => this.send(c.socket, { type: 'playback_start', playback_id: event.playback_id, turn_id: context.turn_id, text }),
-        audio: (sequence, pcm) => c.socket.send(encodeVoiceFrame(2, event.playback_id, sequence, pcm)),
-        end: (text, sample_count) => this.send(c.socket, { type: 'playback_end', playback_id: event.playback_id, text, sample_count }),
-        cancel: () => { try { this.send(c.socket, { type: 'playback_cancel', playback_id: event.playback_id }) } catch { /* closing */ } },
-      })
-      this.playback = play; this.playbacks.set(event.playback_id, play)
-      void play.done.finally(() => { if (this.playback === play) this.playback = undefined; if (this.connection === c) c.playback = 'idle' }).catch(() => {})
-      return { accepted: true }
+      if (play) {
+        if (JSON.stringify(this.outputContexts.get(event.playback_id)) !== JSON.stringify(context)) failed('播放归属冲突')
+        return { accepted: true }
+      }
+      const c = this.assertOutput(context, true)
+      if (context.kind === 'reply') {
+        const slot = this.reply!
+        if (legacy) this.assertReply(legacy)
+        const status = await this.admin<unknown, VoiceTurnResult>('get_voice_turn_status', { channel_id: this.config.moduleId, turn_id: context.turn_id!, payload_sha256: slot.digest })
+        if (status.status !== 'accepted') failed('本轮尚未持久接纳')
+      }
+      if (!this.settings.tts_connection || !this.terminal.receiptIdentity) failed('TTS或终端不可用')
+      await this.preparePlayback(c, event.playback_id, context)
+      try {
+        this.assertOutput(context)
+        if (this.reservation?.id !== event.playback_id || this.reservation.connection !== c) failed('播放预留已失效')
+        if (context.kind === 'notification') { if (this.replyTimer) clearTimeout(this.replyTimer); this.replyTimer = undefined; this.reply = undefined }
+        this.receipts.prepare(event.playback_id, this.terminal.receiptIdentity, context.binding)
+        play = new ReplyPlayback(event.playback_id, this.settings.tts_connection, {
+          valid: () => { this.assertOutput(context); if (c.socket.bufferedAmount > 50000) failed('播放队列已满') },
+          start: text => this.send(c.socket, { type: 'playback_start', playback_id: event.playback_id, turn_id: context.turn_id ?? event.playback_id, text }),
+          audio: (sequence, pcm) => c.socket.send(encodeVoiceFrame(2, event.playback_id, sequence, pcm)),
+          end: (text, sample_count) => { this.receipts.ending(event.playback_id, sample_count); this.send(c.socket, { type: 'playback_end', playback_id: event.playback_id, text, sample_count }) },
+          cancel: () => { try { this.send(c.socket, { type: 'playback_cancel', playback_id: event.playback_id }) } catch { /* closing */ } },
+        })
+        this.playback = play; this.playbacks.set(event.playback_id, play); this.outputContexts.set(event.playback_id, structuredClone(context))
+        const done = play.done.then(result => {
+          const receipt = this.receipts.report({ playback_id: event.playback_id, status: 'completed', played_samples: result.played_samples }, this.terminal.receiptIdentity!)
+          if (receipt?.status !== 'completed') throw new Error('Playback completion was not saved')
+          if (this.connection === c) this.send(c.socket, { type: 'playback_confirmed', playback_id: event.playback_id })
+          this.outputReady(); return { ...result, sent_at: receipt.sent_at! }
+        }).finally(() => { if (this.playback === play) this.playback = undefined; if (this.connection === c) c.playback = 'idle'; this.playbacks.delete(event.playback_id); this.outputContexts.delete(event.playback_id); this.playbackDone.delete(event.playback_id) })
+        void done.catch(() => {}); this.playbackDone.set(event.playback_id, done)
+        return { accepted: true }
+      } finally { if (this.reservation?.id === event.playback_id) this.reservation = undefined }
     }
-    if (!play) failed('播放 ID 不存在')
+    if (!play || JSON.stringify(this.outputContexts.get(event.playback_id)) !== JSON.stringify(context)) failed('播放ID或归属不一致')
+    this.assertOutput(context)
     if (event.type === 'reply_text') {
       try { play.append(event.sequence, event.text) } catch { play.cancel('语音文字非法'); failed('语音文字超长、乱序或重复冲突') }
       return { accepted: true }
     }
     play.end()
-    try { return await play.done }
+    try { return await this.playbackDone.get(event.playback_id)! }
     catch { throw new RpcError('CHANNEL_SEND_FAILED', '本段语音未完整播放', { played_samples: play.playedSamples, completed_text: play.completedText }) }
   }
   private playbackReceipt(control: Extract<VoiceClientControl, { type: 'playback' }>): void {
     const play = this.playbacks.get(control.playback_id)
-    if (!play) return
-    if (control.status === 'started' && this.connection) this.connection.playback = 'playing'
-    play.receipt(control.status, control.played_samples)
-    console.log(`[Voice] playback=${play.id} status=${control.status}`)
+    if (play) {
+      if (control.status === 'started' && this.connection) this.connection.playback = 'playing'
+      play.receipt(control.status, control.played_samples)
+      if (control.status !== 'started' && control.status !== 'completed' && this.terminal.receiptIdentity) this.receipts.report(control, this.terminal.receiptIdentity)
+      return
+    }
+    if (!this.connection || !this.terminal.receiptIdentity) return
+    const receipt = this.receipts.report(control, this.terminal.receiptIdentity)
+    if (receipt) { this.send(this.connection.socket, { type: 'playback_confirmed', playback_id: control.playback_id }); this.outputReady() }
   }
   private cancelPlayback(reason: string): void {
     this.playback?.cancel(reason); this.playback = undefined
   }
   private cancelInteraction(): void {
+    this.reservation?.finish(false); this.reservation = undefined
     this.connection?.input?.clear(); if (this.connection) this.connection.input = undefined
     this.connection?.processing?.abort(); if (this.connection) { this.connection.processing = undefined; this.connection.processingTurn = undefined }
     if (this.replyTimer) clearTimeout(this.replyTimer); this.replyTimer = undefined
-    this.playbacks.clear(); this.reply = undefined; this.cancelPlayback('语音交互已结束')
+    this.playbacks.clear(); this.outputContexts.clear(); this.playbackDone.clear(); this.reply = undefined; this.cancelPlayback('语音交互已结束')
   }
   private disconnect(): void {
     this.cancelInteraction(); const c = this.connection; this.connection = undefined; c?.socket.terminate()

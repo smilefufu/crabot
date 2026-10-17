@@ -5,8 +5,9 @@ import os from 'node:os'
 import path from 'node:path'
 import { cases, runCase } from './runtime.mjs'
 
-async function* response(block) {
+async function* response(block, text) {
   yield { type: 'message_start', messageId: Math.random().toString() }
+  if (text) yield { type: 'text_delta', text }
   if (block) {
     const id = Math.random().toString()
     yield { type: 'tool_use_start', id, name: block.name }
@@ -144,5 +145,40 @@ test('budget exhaustion is inconclusive and never accepted as a passing empty re
     assert.equal(result.status, 'inconclusive')
     assert.equal(result.fatal, 'B7_BUDGET_EXHAUSTED')
     assert.equal(result.requests, 0)
+  } finally { await fs.rm(root, { recursive: true, force: true }) }
+})
+
+
+test('offline personal voice Worker reports once after the original reply closes, with its original request binding', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'b7-voice-completion-'))
+  let shared = 0, personal = 0, worker = 0
+  const events = []
+  const adapter = { updateConfig() {}, async *stream(params) {
+    const body = JSON.stringify(params.messages)
+    if (params.tools.some(tool => tool.name === 'Read')) {
+      if (worker++ === 0) yield* response({ name: 'Read', input: { file_path: path.join(root, 'data', 'owner-files', 'README.md') } })
+      else yield* response(undefined, '验证码是' + body.match(/B7_PRIVATE_[0-9a-f]{8}/)?.[0])
+      return
+    }
+    if (params.systemPrompt.includes('已经由系统固定来源的请求')) {
+      if (personal++ === 0) yield* response({ name: 'spawn_worker', input: { impl: 'builtin', title: '读取资料', prompt: '读取用户授权 README.md 中的验证码。' } }, '<voice_reply>好，我帮你看看。</voice_reply>')
+      else if (body.includes('turn_completed')) yield* response(undefined, '<voice_reply>刚才你让我查的验证码是' + body.match(/B7_PRIVATE_[0-9a-f]{8}/)?.[0] + '。</voice_reply>')
+      else yield* response()
+      return
+    }
+    if (!params.tools.some(tool => tool.name === 'execute_request')) { yield* response({ name: 'load_tool_family', input: { family: 'crabot' } }); return }
+    yield* response(shared++ === 0 ? { name: 'execute_request', input: { source_id: originalSource(params), delivery: 'origin' } } : undefined)
+  } }
+  try {
+    const result = await runCase({ scenario: { id: 'offline-personal-voice-completion', voice: true, task: 'read' }, root: path.join(root, 'data'), liveAdapter: adapter, model: 'scripted', connection: { endpoint: 'https://example.invalid', apikey: 'not-a-real-key', format: 'openai', model_id: 'scripted' }, record: event => events.push(event), budget: { take: () => true }, timeoutMs: 15000 })
+    assert.equal(result.status, 'passed', JSON.stringify(result))
+    assert.equal(result.worker_records.length, 1)
+    assert.equal(worker, 2)
+    const completed = result.spoken.filter(item => item.event.type === 'reply_text' && item.event.text.includes('B7_PRIVATE_'))
+    assert.equal(completed.length, 1)
+    assert.equal(completed[0].delivery_context.kind, 'notification')
+    assert.equal(completed[0].delivery_context.binding.worker_id, result.worker_records[0].worker.worker_id)
+    assert.equal(completed[0].delivery_context.binding.request_id, result.worker_records[0].bound.request.request_id)
+    assert.ok(events.some(event => event.type === 'synthetic_voice_output' && event.params.event.type === 'response_end'))
   } finally { await fs.rm(root, { recursive: true, force: true }) }
 })

@@ -1,6 +1,7 @@
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
+import { createHash } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { buildManagerStack, type BootstrapDeps, type ManagerStack } from '../../src/manager/bootstrap.js'
 import { createCrabMemoryServer, type MemoryTaskContext } from '../../src/mcp/crab-memory.js'
@@ -29,7 +30,7 @@ describe('production isolated request tool closure', () => {
   let inspectErrors: unknown[]
   let plannedText: string | undefined
   let planned: { name: string; input: Record<string, unknown> } | undefined
-  let results: Record<string, ToolCallResult>, throwSend: boolean, voiceChannel: boolean
+  let results: Record<string, ToolCallResult>, throwSend: boolean, voiceChannel: boolean, voiceReady: boolean
   beforeEach(async () => {
     vi.stubEnv('CRABOT_MANAGER_TOOL_LOADING_MODE', 'progressive')
     vi.stubEnv('CRABOT_MANAGER_TOOL_LOADING_KEYS', '')
@@ -38,13 +39,16 @@ describe('production isolated request tool closure', () => {
     group = { kind: 'group', subject_id: key, is_master: false, resolved: permissions() }
     friend = { kind: 'friend', subject_id: 'f-owner', is_master: true, resolved: permissions() }
     friend.resolved.tool_access.messaging = true; friend.resolved.tool_access.memory = true; friend.resolved.memory_scopes = ['personal']
-    current = { group, friend }; calls = []; contexts = []; results = {}; throwSend = false; voiceChannel = false; afterLookup = undefined
+    current = { group, friend }; calls = []; contexts = []; results = {}; throwSend = false; voiceChannel = false; voiceReady = false; afterLookup = undefined
     inspect = async () => {}; planned = undefined
     vi.spyOn(ConfigLoader, 'getRuntimeBearer').mockReturnValue('fixture-runtime')
     rpc = vi.fn(async (_port, method, params) => {
       if (method === 'resolve_request_permission_sources') return structuredClone({ group, friend })
       if (method === 'resolve_request_permission_source') return { source: structuredClone(current[params.kind as 'group' | 'friend']) }
-      if (method === 'get_capabilities') return voiceChannel ? { voice: { protocol_version: 6 } } : {}
+      if (method === 'get_capabilities') return voiceChannel ? { voice: { protocol_version: 7 } } : {}
+      if (method === 'get_voice_output_state') return { channel_id: 'voice', session_id: 'group', connection_epoch: 'current-epoch', foreground: true, speech_enabled: voiceReady, activity: 'idle', current_turn_id: null }
+      if (method === 'get_voice_playback_receipt') return { playback_id: params.playback_id, status: 'unknown' }
+      if (method === 'voice_output') return params.event.type === 'reply_end' ? { platform_message_id: params.event.playback_id, played_samples: 480, sent_at: new Date().toISOString() } : { accepted: true }
       if (method === 'get_friend') { afterLookup?.(); return { friend: { display_name: 'Owner', channel_identities: [{ channel_id: 'chat', platform_user_id: 'owner-chat' }] } } }
       if (method === 'get_session') return { session: { type: 'private', platform_session_id: params.session_id === 'owner-private' ? 'owner-chat' : 'other' } }
       if (method === 'find_or_create_private_session') return { session: { id: 'owner-private' } }
@@ -54,7 +58,7 @@ describe('production isolated request tool closure', () => {
     })
     admin = vi.fn(async (method, params) => method === 'get_friend' ? { friend: { channel_identities: [{ channel_id: 'chat', platform_user_id: 'owner-chat' }] } } : method === 'get_schedule' ? { schedule: { id: params.schedule_id, script: { source_sha256: 'abc' }, creator_friend_id: 'f-owner', target_session: message().session } } : {})
     const deps: BootstrapDeps = { dataRoot: root, now: () => new Date().toISOString(), timezone: () => 'Asia/Shanghai',
-      managerModel: () => 'fixture', managerAdapter: () => ({ updateConfig() {}, async *stream(params) { calls.push(params); planned = undefined; plannedText = undefined; try { await inspect(params) } catch (error) { inspectErrors.push(error); throw error } yield* chunksFromContent(planned ? [{ type: 'tool_use', id: 'engine-' + calls.length, ...planned }] : plannedText ? [{ type: 'text', text: plannedText }] : [], planned ? 'tool_use' : 'end_turn') } }),
+      managerModel: () => 'fixture', managerAdapter: () => ({ updateConfig() {}, async *stream(params) { calls.push(params); planned = undefined; plannedText = undefined; try { await inspect(params) } catch (error) { inspectErrors.push(error); throw error } yield* chunksFromContent([...(plannedText ? [{ type: 'text' as const, text: plannedText }] : []), ...(planned ? [{ type: 'tool_use' as const, id: 'engine-' + calls.length, ...planned }] : [])], planned ? 'tool_use' : 'end_turn') } }),
       coreRuntimeBearer: () => 'fixture-core', messagingDeps: { rpcClient: { call: rpc, callSensitive: rpc } as never, moduleId: 'crabot-agent', getAdminPort: async () => 10, resolveChannelPort: async () => 20 },
       memoryServerFor: ctx => { contexts.push(ctx); return createCrabMemoryServer({ rpcClient: { call: rpc, callSensitive: rpc } as never, moduleId: 'crabot-agent', getMemoryPort: async () => 30 }, ctx) },
       callAdmin: admin as never,
@@ -70,9 +74,9 @@ describe('production isolated request tool closure', () => {
     const inputs = await stack.trustedHumanInputs.capture(key, [message()])
     return stack.requestRunner.execute(key, inputs, { source_id: inputs[0].source_id, delivery })
   }
-  async function bindPersonalWorker(record: ConversationRequestRecord) {
+  async function bindPersonalWorker(record: ConversationRequestRecord, scope: 'group' | 'request' = 'request') {
     await stack.conversationRequests.attachWorker(key, record.request_id, 'w-personal')
-    const binding = { schema_version: 1 as const, request_id: record.request_id, source_sha256: record.source_sha256, execution_scope: 'request' as const }
+    const binding = { schema_version: 1 as const, request_id: record.request_id, source_sha256: record.source_sha256, execution_scope: scope }
     await stack.ledger.upsertWorker(key, 'w-personal', () => ({ worker_id: 'w-personal', manager_key: key,
       task: { id: 'w-personal', title: 'private', status: 'running', created_at: new Date().toISOString() },
       origin: { trigger_type: 'message', creator_friend_id: 'f-owner', request: binding }, report_to: { channel_id: 'voice', session_id: 'group' }, incarnations: [], updated_at: new Date().toISOString() }))
@@ -84,7 +88,7 @@ describe('production isolated request tool closure', () => {
   function tool(params: LLMStreamParams, name: string) { const result = params.tools.find(item => item.name === name); expect(result, name).toBeDefined(); return result! }
   const context = { toolUseId: 'fixture-tool', signal: new AbortController().signal } as never
 
-  it.each(['origin', 'requester_private'] as const)('keeps the known voice origin profile without inventing an audio opportunity (%s)', async delivery => {
+  it.each(['origin', 'requester_private'] as const)('queues the original voice reply while keeping private results out of the group (%s)', async delivery => {
     voiceChannel = true
     const prime = message()
     prime.platform_message_id = 'prime-channel-capabilities'
@@ -97,14 +101,46 @@ describe('production isolated request tool closure', () => {
         expect(params.systemPrompt).toContain(VOICE_REPLY_PROMPT)
         expect(params.systemPrompt).not.toContain('用工具投递答复，普通文本不外发')
         expect(tool(params, 'send_message').description).toContain('voice_reply')
-        plannedText = '<voice_reply>没有可用回答机会时不能播报这段话。</voice_reply>'
+        plannedText = '<voice_reply>刚才那份资料我找到了。</voice_reply>'
       } else {
         expect(params.systemPrompt).not.toContain(VOICE_REPLY_PROMPT)
       }
     }
     await execute(delivery)
     expect(seen).toBe(true)
-    expect(rpc.mock.calls.filter(call => call[1] === 'voice_output')).toEqual([])
+    expect(rpc.mock.calls.filter(call => call[1] === 'voice_output' && call[2].event.type !== 'pending_results')).toEqual([])
+    const directory = path.join(root, 'agent', 'voice-replies', createHash('sha256').update(key).digest('hex'))
+    const files = await fs.readdir(directory).catch(() => [])
+    const saved = await Promise.all(files.filter(name => name.endsWith('.json')).map(async name => JSON.parse(await fs.readFile(path.join(directory, name), 'utf8')).delivery))
+    expect(saved).toHaveLength(delivery === 'origin' ? 1 : 0)
+    if (delivery === 'origin') expect(saved[0]).toMatchObject({ status: 'queued', text: '刚才那份资料我找到了。', binding: { channel_id: 'voice', session_id: 'group' } })
+  })
+
+  it.each(['request', 'group'] as const)('delivers a completed %s Worker to its original voice target after the input turn ended', async scope => {
+    voiceChannel = true
+    const prime = message(); prime.platform_message_id = 'prime-voice'
+    await stack.registry.routeHumanMessages('voice', 'group', [prime])
+    const initial = await execute('origin'), request = (await stack.conversationRequests.get(key, initial.request_id))!.record
+    const { turns, turn } = await bindPersonalWorker(request, scope)
+    voiceReady = true
+    let step = 0
+    inspect = async params => {
+      expect(params.systemPrompt).toContain(VOICE_REPLY_PROMPT)
+      if (step++ === 0) {
+        plannedText = '<voice_reply>你让我查的资料找到了，在第二部分。</voice_reply>'
+        planned = { name: 'resolve_worker_turn', input: { worker_id: 'w-personal', turn_id: turn.turn_id, resolution: 'reported' } }
+      }
+    }
+    const event = { kind: 'turn_completed' as const, ts: new Date().toISOString(), worker_id: 'w-personal', seq: 1, detail: { turn_id: turn.turn_id, summary: '资料位于第二部分' } }
+    expect(await (stack.harness as any).deps.onOperationNotification(key, event)).toEqual({ consumed: true })
+    expect((await turns.get('w-personal', turn.turn_id))!.disposition.status).toBe('resolved')
+    const output = rpc.mock.calls.filter(call => call[1] === 'voice_output').map(call => call[2])
+    expect(output.filter(params => params.event.type === 'reply_text')).toHaveLength(1)
+    const playback = output.find(params => params.event.type === 'reply_start')
+    expect(playback.delivery_context).toMatchObject({ kind: 'notification', connection_epoch: 'current-epoch', binding: { channel_id: 'voice', session_id: 'group', request_id: request.request_id, worker_id: 'w-personal', worker_turn_id: turn.turn_id } })
+    expect(playback.voice_reply_context).toBeUndefined()
+    if (scope === 'request') expect(JSON.stringify(await stack.store.load(key))).not.toContain('资料位于第二部分')
+    expect(rpc.mock.calls.some(call => call[1] === 'send_message')).toBe(false)
   })
 
   it('uses existing lazy families and private target proof without leaking body to shared stores', async () => {

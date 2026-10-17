@@ -4,6 +4,7 @@ import { ConversationRequestRunner } from './conversation-request-runner.js'
 import { createConversationRequestLoop } from './request-loop.js'
 import type { ToolFaceDeps } from './tools/tool-face.js'
 import { ConversationRequestAuthority } from './conversation-request-authority.js'
+import { findVoiceDelivery } from './voice-output.js'
 import { voiceOutputPort } from './voice-output-port.js'
 import { createHash } from 'node:crypto'
 import { requestObservation, persistObservation, executionObservation, readObservation, observationFile } from '../permissions/execution-observation.js'
@@ -699,18 +700,44 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
   }
   const imagePolicies = new Map<string, boolean | undefined>()
   const voicePolicies = new Map<string, boolean>()
+  const voicePorts = new Map<ManagerKey, import('./voice-output.js').VoiceOutputPort>()
   const voiceOutputFor: import('./registry.js').ManagerRegistryDeps['voiceOutputFor'] = deps.coreRuntimeBearer ? key => {
+      const existing = voicePorts.get(key)
+      if (existing) return existing
       const { channelId, sessionId } = splitManagerKey(key)
-      return voiceOutputPort(join(deps.dataRoot, 'agent', 'voice-replies', createHash('sha256').update(key).digest('hex')), () => voicePolicies.get(channelId) === true, async params => {
-        if (voicePolicies.get(channelId) !== true || params.voice_reply_context.channel_id !== channelId || params.voice_reply_context.session_id !== sessionId) throw new Error('Voice reply target does not match the current Manager')
+      const call = async <T>(method: import('crabot-shared').SensitiveRpcMethod, params: unknown, timeoutMs = 3000): Promise<T> => {
+        if (candidatesClosing || deps.isClosing?.()) throw new Error('AGENT_SHUTTING_DOWN')
         const port = await deps.messagingDeps.resolveChannelPort(channelId)
-        return deps.messagingDeps.rpcClient.callSensitive(port, 'voice_output', params, deps.messagingDeps.moduleId, { authorizationBearer: deps.coreRuntimeBearer!(), timeoutMs: params.event.type === 'reply_end' ? 30000 : 3000 })
-      })
+        return deps.messagingDeps.rpcClient.callSensitive(port, method, params, deps.messagingDeps.moduleId, { authorizationBearer: deps.coreRuntimeBearer!(), timeoutMs })
+      }
+      const output = voiceOutputPort(join(deps.dataRoot, 'agent', 'voice-replies', createHash('sha256').update(key).digest('hex')), () => voicePolicies.get(channelId) === true, async params => {
+        const target = params.delivery_context?.binding ?? params.voice_reply_context
+        if (voicePolicies.get(channelId) !== true || target?.channel_id !== channelId || target.session_id !== sessionId) throw new Error('Voice reply target does not match the current Manager')
+        return call('voice_output', params, params.event.type === 'reply_end' ? 30000 : 4000)
+      }, { state: async () => {
+          const port = await deps.messagingDeps.resolveChannelPort(channelId)
+          const caps = await deps.messagingDeps.rpcClient.call<{}, { voice?: { protocol_version: number } }>(port, 'get_capabilities', {}, deps.messagingDeps.moduleId, undefined, { timeoutMs: 3000 })
+          if (caps.voice?.protocol_version !== 7) throw new Error('Voice feedback protocol is not available')
+          voicePolicies.set(channelId, true)
+          return call('get_voice_output_state', { channel_id: channelId, session_id: sessionId })
+        },
+        receipt: id => call('get_voice_playback_receipt', { channel_id: channelId, session_id: sessionId, playback_id: id }) })
+      voicePorts.set(key, output); return output
     } : undefined
   const requestRuntimeRoot = join(agentDir, 'conversation-requests')
   requestRunner = new ConversationRequestRunner(requestRuntimeRoot, conversationRequests, {
     canRun: () => candidatesReady && !candidatesClosing && !deps.isClosing?.(),
     timezone: deps.timezone ?? (() => 'Asia/Shanghai'),
+    onSettled: key => { if (registry) void registry.refreshVoiceOutput(key).catch(() => { /* Preserve queued delivery when the terminal is unavailable. */ }) },
+    validateVoiceDelivery: async (key, requestId, result) => {
+      const port = voiceOutputFor?.(key)
+      const record = port && findVoiceDelivery(port, item => item.playback_id === result.delivery_id && item.status === 'completed')
+      const bound = result.binding.worker_id ? await requestGuard.load(result.binding.worker_id) : undefined
+      if (!record?.binding || !isDeepStrictEqual(record.binding, result.binding) || record.binding.request_id !== requestId || record.binding.worker_id !== result.binding.worker_id
+        || record.binding.worker_turn_id !== result.binding.worker_turn_id || record.text !== result.text || record.sent_at !== result.sent_at
+        || !bound || bound.request.request_id !== requestId || bound.worker.origin.request?.execution_scope !== 'request') throw new Error('Voice delivery binding or receipt is not verified')
+      await requestGuard.authorizeControl(result.binding.worker_id!, new ConversationRequestAuthority(conversationRequests, key, requestId, 'request', resolveCurrentRequestSource), async () => allowed)
+    },
     validateEvent: async (key, requestId, event) => {
       const bound = await requestGuard.load(event.worker_id)
       if (!bound || bound.worker.manager_key !== key || bound.request.request_id !== requestId || bound.worker.origin.request!.execution_scope !== 'request') throw new Error('Invalid personal event binding')
@@ -739,6 +766,16 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
   }
   registry = new ManagerRegistry({
     voiceOutputFor,
+    onVoiceDeliveryCompleted: async (key, result) => {
+      if (!result.binding.worker_id) return false
+      const turn = await harness.getWorkerTurn(result.binding.worker_id, result.binding.worker_turn_id)
+      if (!result.binding.request_id) return turn?.disposition.status === 'resolved'
+      const bound = await requestGuard.load(result.binding.worker_id)
+      if (!bound || bound.request.request_id !== result.binding.request_id || bound.worker.manager_key !== key) throw new Error('Voice result owner unavailable')
+      if (turn?.disposition.status === 'resolved') return true
+      if (bound.worker.origin.request?.execution_scope !== 'request') return false
+      await requestRunner.routeVoiceDelivery(key, result.binding.request_id, result); return true
+    },
     dailyReflectionFor,
     traceWriter: deps.traceWriter,
     onAdminChatWakeConsumed: deps.onAdminChatWakeConsumed,
@@ -781,7 +818,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
         try {
           const port = await deps.messagingDeps.resolveChannelPort(channelId)
           const caps = await deps.messagingDeps.rpcClient.call<{}, { voice?: { protocol_version: number } }>(port, 'get_capabilities', {}, deps.messagingDeps.moduleId, undefined, { timeoutMs: 3000 })
-          voicePolicies.set(channelId, caps.voice?.protocol_version === 6)
+          voicePolicies.set(channelId, caps.voice?.protocol_version === 7)
         } catch { /* no unverified voice exception */ }
       }
       const wake = envelope?.wake
@@ -1059,6 +1096,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
           scheduleIdentity?.isBuiltin === true && scheduleIdentity.taskType === 'daily_reflection',
         authorization: () => principals.currentMasterAuthorization(key),
         validateMasterAuthorization: (auth) => principals.validateMasterAuthorization(auth),
+        hasSuccessfulWorkerDelivery: traceHooks?.hasSuccessfulWorkerDelivery,
         hasSuccessfulSendMessageTo: traceHooks?.hasSuccessfulSendMessageTo,
         onSuccessfulSendMessage: traceHooks?.onSuccessfulSendMessage,
         hasContinuedWorker: traceHooks?.hasContinuedWorker,

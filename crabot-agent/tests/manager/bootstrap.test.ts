@@ -187,14 +187,17 @@ describe('manager bootstrap（P5 Task 1）', () => {
     }
   }
 
-  it('discovers wire 6 and assembles the voice reply prompt and streaming output together', async () => {
+  it('discovers wire 7 and assembles the voice reply prompt and streaming output together', async () => {
     const requests: LLMStreamParams[] = []
+    let currentTurn: string | null = 'fixture-turn'
     const callSensitive = vi.fn(async (_port, method, params) => {
+      if (method === 'get_voice_output_state') return { channel_id: 'voice', session_id: 'voice-group', connection_epoch: 'fixture-epoch', foreground: true, speech_enabled: true, activity: currentTurn ? 'processing' : 'idle', current_turn_id: currentTurn }
       expect(method).toBe('voice_output')
+      if (params.event.type === 'response_end') currentTurn = null
       return params.event.type === 'reply_end' ? { platform_message_id: params.event.playback_id, sent_at: new Date().toISOString(), played_samples: 480 } : { accepted: true }
     })
     const messagingDeps = makeMessagingDeps()
-    messagingDeps.rpcClient = { call: vi.fn(async () => ({ voice: { protocol_version: 6 } })), callSensitive } as never
+    messagingDeps.rpcClient = { call: vi.fn(async () => ({ voice: { protocol_version: 7 } })), callSensitive } as never
     const stack = buildManagerStack(makeDeps({ coreRuntimeBearer: () => 'fixture-core', messagingDeps,
       managerAdapter: () => ({ async *stream(params) {
         requests.push(params)
@@ -209,7 +212,7 @@ describe('manager bootstrap（P5 Task 1）', () => {
         turnId: 'fixture-turn', senderFriends: [FRIEND_A], replyContext: { channel_id: 'voice', session_id: 'voice-group', turn_id: 'fixture-turn', connection_epoch: 'fixture-epoch', expires_at: new Date(Date.now() + 60000).toISOString() },
       })
       expect(requests[0].systemPrompt).toContain('回复当前语音会话使用 voice_reply 标签')
-      expect(callSensitive.mock.calls.map(call => call[2].event.type)).toEqual(['reply_start', 'reply_text', 'reply_end', 'response_end'])
+      expect(callSensitive.mock.calls.filter(call => call[1] === 'voice_output' && call[2].event.type !== 'pending_results').map(call => call[2].event.type)).toEqual(['reply_start', 'reply_text', 'reply_end', 'response_end'])
     } finally { await stack.dispose() }
   })
 

@@ -1,4 +1,4 @@
-// protocol-voice.md v0.6.0 (implementation in progress): shared terminal, configuration and admission contracts.
+// protocol-voice.md v0.7.0 (implementation in progress): shared terminal, configuration and admission contracts.
 import type { ModuleId, SessionId, FriendId } from './base-protocol.js'
 import type { ChannelMessage, Friend } from './channel-protocol.js'
 
@@ -35,9 +35,54 @@ export type VoiceOutputEvent =
   | { type: 'reply_end'; playback_id: string }
   | { type: 'reply_cancel'; playback_id: string }
   | { type: 'response_end' }
-export interface VoiceOutputParams {
-  voice_reply_context: VoiceReplyContext
-  event: VoiceOutputEvent
+  | { type: 'pending_results'; count: number }
+export interface VoiceDeliveryBinding {
+  channel_id: ModuleId
+  session_id: SessionId
+  response_id: string
+  request_id?: string
+  worker_id?: string
+  worker_turn_id?: string
+}
+export interface VoicePlaybackContext {
+  binding: VoiceDeliveryBinding
+  connection_epoch: string
+  kind: 'reply' | 'notification'
+  turn_id?: string
+}
+export type VoiceOutputParams =
+  | { voice_reply_context: VoiceReplyContext; delivery_context?: never; event: VoiceOutputEvent }
+  | { delivery_context: VoicePlaybackContext; voice_reply_context?: never; event: VoiceOutputEvent }
+export interface GetVoiceOutputStateParams { channel_id: ModuleId; session_id: SessionId }
+export interface VoiceOutputState {
+  channel_id: ModuleId
+  session_id: SessionId
+  connection_epoch: string | null
+  foreground: boolean
+  speech_enabled: boolean
+  activity: 'idle' | 'recording' | 'processing' | 'answering' | 'management'
+  current_turn_id: string | null
+}
+export interface VoicePlaybackReport {
+  playback_id: string
+  status: 'started' | 'completed' | 'interrupted' | 'failed'
+  played_samples?: number
+}
+export interface GetVoicePlaybackReceiptParams {
+  channel_id: ModuleId
+  session_id: SessionId
+  playback_id: string
+}
+export interface VoicePlaybackReceipt {
+  playback_id: string
+  status: 'unknown' | 'completed' | 'interrupted' | 'failed'
+  played_samples?: number
+  sent_at?: string
+}
+export interface VoiceOutputReadyPayload {
+  channel_id: ModuleId
+  session_id: SessionId
+  connection_epoch: string
 }
 export type VoiceOutputResult =
   | { accepted: true }
@@ -45,7 +90,7 @@ export type VoiceOutputResult =
 export interface VerifyVoiceAgentParams { channel_id: ModuleId }
 export interface VerifyVoiceAgentResult { verified: true }
 export interface VoiceChannelCapability {
-  protocol_version: 6
+  protocol_version: 7
   send_timeout_ms: 30000
 }
 export type AudioServiceFormat = 'sherpa-offline-ws' | 'mlx-audio-http' | 'openai-audio'
@@ -228,7 +273,7 @@ export type VoiceAdminAction =
   | { action: 'cancel_enrollment'; registration_id: string; request_id: string; expected_revision: number }
 export interface VoiceAdminActionParams { channel_id: ModuleId; command: VoiceAdminAction; owner_activation?: VoiceOwnerActivation }
 export interface VoicePairing {
-  protocol_version: 6
+  protocol_version: 7
   channel_id: ModuleId
   pairing_id: string
   url: string
@@ -264,9 +309,9 @@ export type VoiceAdminActionResult =
 
 export interface VoiceModelVersions { segmentation: string; embedding: string }
 export type VoiceClientControl =
-  | { type: 'pair'; protocol_version: 6; nonce: string; owner: VoiceDeviceOwner }
-  | { type: 'hello'; protocol_version: 6; credential: string; models: VoiceModelVersions; aec_verified: boolean; owner?: VoiceDeviceOwner }
-  | { type: 'heartbeat'; foreground: boolean; microphone: 'closed' | 'wake' | 'recording'; playback: 'idle' | 'playing'; enrollment_revision: number }
+  | { type: 'pair'; protocol_version: 7; nonce: string; owner: VoiceDeviceOwner }
+  | { type: 'hello'; protocol_version: 7; credential: string; models: VoiceModelVersions; aec_verified: boolean; owner?: VoiceDeviceOwner }
+  | { type: 'heartbeat'; foreground: boolean; microphone: 'closed' | 'wake' | 'recording'; playback: 'idle' | 'playing'; enrollment_revision: number; speech_enabled: boolean; activity: VoiceOutputState['activity'] }
   | { type: 'owner_saved'; saved: VoiceOwnerSaved }
   | { type: 'contact_action'; request: VoiceManagementRequest }
   | { type: 'contact_action_query'; request_id: string }
@@ -275,7 +320,8 @@ export type VoiceClientControl =
   | { type: 'turn_query'; turn_id: string; payload_sha256: string }
   | { type: 'turn_end'; turn_id: string; audio_sample_count: number; sample_rate: 16000; models: VoiceModelVersions; enrollment_revision: number; segments: VoiceSegment[] }
   | { type: 'cancel'; turn_id?: string; playback_id?: string }
-  | { type: 'playback'; playback_id: string; status: 'started' | 'completed' | 'interrupted' | 'failed'; played_samples?: number }
+  | ({ type: 'playback' } & VoicePlaybackReport)
+  | { type: 'playback_ready'; playback_id: string; accepted: boolean }
   | { type: 'enrollment_done'; registration_id: string; model_id: string; enrollment_revision: number }
   | { type: 'registration_cleared'; registration_id: string; enrollment_revision: number }
 export type VoiceServerControl =
@@ -290,7 +336,10 @@ export type VoiceServerControl =
   | { type: 'contact_result'; request_id: string; result: VoiceManagementResult }
   | { type: 'turn_ready'; turn_id: string }
   | { type: 'turn_status'; turn_id: string; status: VoiceTurnStatus; payload_sha256?: string; reason?: string }
+  | { type: 'playback_prepare'; playback_id: string; context: VoicePlaybackContext }
   | { type: 'playback_start'; playback_id: string; turn_id: string; text: string }
+  | { type: 'playback_confirmed'; playback_id: string }
+  | { type: 'pending_results'; count: number }
   | { type: 'playback_end'; playback_id: string; text: string; sample_count: number }
   | { type: 'response_end'; turn_id: string }
   | { type: 'playback_cancel'; playback_id: string }
@@ -298,7 +347,6 @@ export type VoiceServerControl =
   | { type: 'clear_registration'; registration_id: string; enrollment_revision: number }
   | { type: 'error'; code: string; message: string; turn_id?: string }
 
-// protocol-voice.md §13: owner metadata; wire6 activation is integrated separately.
 export interface VoiceDeviceOwner {
   profile_id: string
   display_name: string
