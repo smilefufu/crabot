@@ -51,10 +51,12 @@ async function rootDirectory(root, scope) {
   return realpathSync(root)
 }
 
-export async function prepareCliPayload({ sourceRoot, installRoot, scope = 'user', version, repair = false, dataDir }) {
+export async function prepareCliPayload({ sourceRoot, installRoot, scope = 'user', version, repair = false, dataDir, beforeWrite }) {
   sourceRoot = await fs.realpath(sourceRoot)
   if (await present(path.join(sourceRoot, 'desktop-host.json'))) fail('桌面已包含完整核心，请从桌面安装管理命令，不复制另一套环境。')
   const release = await verifyCoreRelease(sourceRoot, { version })
+  await beforeWrite?.()
+  if (dataDir) dataDir = realpathSync(dataDir)
   installRoot = await rootDirectory(path.resolve(installRoot), scope)
   const relative = path.relative(sourceRoot, installRoot)
   if (!relative || relative !== '..' && !relative.startsWith('..' + path.sep) && !path.isAbsolute(relative)) fail('CLI 安装目录不能位于待复制的核心中。')
@@ -88,7 +90,9 @@ export async function prepareCliPayload({ sourceRoot, installRoot, scope = 'user
     let damaged = false
     if (targetStat) {
       if (!targetStat.isDirectory() || targetStat.isSymbolicLink()) fail('核心版本目录被重定向，未切换。')
-      try { await verifyCoreRelease(target, { version: release.version }) }
+      try {
+        if ((await verifyCoreRelease(target, { version: release.version })).inventory_sha256 !== id) throw Object.assign(new Error('核心清单与版本目录不一致。'), { code: 'CRABOT_CORE_INTEGRITY' })
+      }
       catch (error) { if (!repair || error.code !== 'CRABOT_CORE_INTEGRITY') throw error; damaged = true }
     }
     async function stoppedRepair() {
@@ -103,7 +107,7 @@ export async function prepareCliPayload({ sourceRoot, installRoot, scope = 'user
       if (damaged) await stoppedRepair()
       pending = path.join(releases, '.preparing-' + randomUUID())
       await fs.cp(sourceRoot, pending, { recursive: true, verbatimSymlinks: true, mode: constants.COPYFILE_FICLONE, filter: () => true })
-      await verifyCoreRelease(pending, { version: release.version })
+      if ((await verifyCoreRelease(pending, { version: release.version })).inventory_sha256 !== id) throw Object.assign(new Error('待安装核心在准备期间改变，未发布。'), { code: 'CRABOT_CORE_INTEGRITY' })
       if (damaged) {
         await stoppedRepair()
         retainedCore = path.join(releases, '.damaged-' + id + '-' + randomUUID())
@@ -120,7 +124,6 @@ export async function prepareCliPayload({ sourceRoot, installRoot, scope = 'user
       } else await fs.rename(pending, target)
       pending = undefined
     }
-    await verifyCoreRelease(target, { version: release.version })
     return { installRoot, coreRoot: target, id, version: release.version, scope, command: launcher, ...(retainedCore ? { retainedCore } : {}) }
   } finally {
     if (pending) await fs.rm(pending, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })

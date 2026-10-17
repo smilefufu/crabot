@@ -5,7 +5,6 @@ import { promises as fs, realpathSync } from 'node:fs'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import identity from './process-identity.cjs'
-import { verifyCoreRelease } from './core-release.mjs'
 import { prepareCliPayload, selectCliPayload, readCliSelection } from './cli-installation.mjs'
 import { inspectInstance, readInstanceRuntime } from './instance-runtime.mjs'
 import { acquireCliLock, releaseCliLock } from './cli-lock.mjs'
@@ -83,16 +82,16 @@ export async function installStandaloneCli({ sourceRoot, installRoot, dataDir, s
     dataDir = path.resolve(dataDir)
     await checkData(dataDir, canonicalRoot(installRoot), selected)
   }
-  await verifyCoreRelease(sourceRoot, { version })
   let lock
   try {
-    if (scope === 'user') {
-      dataDir = management.ensurePrivateDataRoot(dataDir)
-      lock = await acquireCliLock(dataDir, 'install-standalone-cli')
-      assertVersionMaintenanceAllowsStart(dataDir)
-      await checkData(dataDir, canonicalRoot(installRoot), selected)
-    }
-    const prepared = await prepareCliPayload({ sourceRoot, installRoot, scope, version, repair: scope === 'user', dataDir })
+    const prepared = await prepareCliPayload({ sourceRoot, installRoot, scope, version, repair: scope === 'user', dataDir,
+      beforeWrite: async () => {
+        if (scope !== 'user') return
+        dataDir = management.ensurePrivateDataRoot(dataDir)
+        lock = await acquireCliLock(dataDir, 'install-standalone-cli')
+        assertVersionMaintenanceAllowsStart(dataDir)
+        await checkData(dataDir, canonicalRoot(installRoot), selected)
+      } })
     if (scope === 'user') await initializeBinding(dataDir, prepared.installRoot)
     await selectCliPayload(prepared, { dataDir, expected: selected })
     return prepared

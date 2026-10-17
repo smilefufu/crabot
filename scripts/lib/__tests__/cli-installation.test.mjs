@@ -161,6 +161,11 @@ test('reinstalling the same CLI repairs only its stopped payload and retains dam
   await fs.mkdir(path.join(f.dataDir, 'agent-venv')); await fs.writeFile(path.join(f.dataDir, 'agent-venv/custom-package'), 'keep dependency')
   await fs.writeFile(path.join(f.installRoot, '.env'), 'keep configuration')
   await fs.writeFile(path.join(initial.coreRoot, 'cli.mjs'), 'damaged payload')
+  // Even a self-consistent manifest must belong to this selected directory.
+  const changed = await verifyCoreRelease(sourceRoot)
+  await fs.rm(path.join(initial.coreRoot, 'core-files.json')); await fs.rm(path.join(initial.coreRoot, 'core-release.json'))
+  await writeCoreRelease(initial.coreRoot, changed)
+  assert.notEqual((await verifyCoreRelease(initial.coreRoot)).inventory_sha256, initial.id)
   const repaired = await installStandaloneCli({ sourceRoot, installRoot: f.installRoot, dataDir: f.dataDir })
   assert.equal(repaired.id, initial.id)
   assert.equal(readCliSelection(f.installRoot), initial.id)

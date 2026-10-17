@@ -9,6 +9,7 @@ import { notifyCliPathChange } from './lib/cli-path-notification.mjs'
 const options = new Map(process.argv.slice(2).map(value => { const split = value.indexOf('='); return [value.slice(0, split), value.slice(split + 1)] }))
 if (!options.get('--install-root') || !['user', 'system'].includes(options.get('--scope'))) throw new Error('Expected --install-root=<directory> --scope=user|system')
 try {
+  console.log('正在校验和安装内置环境，首次安装可能需要几分钟。')
   const result = await installStandaloneCli({ sourceRoot: path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'),
     installRoot: options.get('--install-root'), scope: options.get('--scope'),
     version: options.get('--expected-version')?.replace(/^v/, ''),
