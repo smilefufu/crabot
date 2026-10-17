@@ -28,5 +28,7 @@ module.exports = { ...native, sameProcess,
     readPipe: native.readPipe, writePipe: native.writePipe, closePipe: native.closePipe,
   } : {}),
   ...(native.writePrivateFile ? { writePrivateFile: native.writePrivateFile, isPrivateFile: native.isPrivateFile,
-    createPrivateDirectory: native.createPrivateDirectory, isPrivateDirectory: native.isPrivateDirectory } : {}),
+    isOwnedFile: native.isOwnedFile, createPrivateDirectory: native.createPrivateDirectory, isPrivateDirectory: native.isPrivateDirectory } : {}),
+  ...(native.readUserPath ? { readUserPath: native.readUserPath, appendUserPathDirectory: native.appendUserPathDirectory,
+    notifyUserPathChanged: native.notifyUserPathChanged } : {}),
 }

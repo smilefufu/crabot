@@ -352,6 +352,7 @@ static napi_value ReleaseLock(napi_env env, napi_callback_info info) {
 }
 #include "local-pipe.h"
 #include "private-file.h"
+#include "user-path.h"
 
 static napi_value Initialize(napi_env env, napi_value exports) {
   napi_property_descriptor methods[] = {
@@ -369,6 +370,7 @@ static napi_value Initialize(napi_env env, napi_value exports) {
 #ifdef _WIN32
   RegisterLocalPipe(env, exports);
   RegisterPrivateFile(env, exports);
+  RegisterUserPath(env, exports);
 #endif
   return exports;
 }

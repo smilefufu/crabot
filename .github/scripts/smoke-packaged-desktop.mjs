@@ -86,6 +86,23 @@ try {
   const first = inspectInstance(data)
   assert.equal(first.state, 'running'); assert.equal(first.record.install_root, await fs.realpath(core))
   assert.equal(JSON.parse(await cli('status', '--json')).running, true)
+  const management = (await import(pathToFileURL(path.join(core, 'scripts/lib/desktop-management.cjs')))).default
+  const { installDesktopCli } = await import(pathToFileURL(path.join(core, 'scripts/lib/desktop-cli-install.mjs')))
+  const cliHome = management.ensurePrivateDataRoot(path.join(temporary, '命令 用户'))
+  const registrationEnv = { ...env, HOME: cliHome, SHELL: process.platform === 'darwin' ? '/bin/zsh' : '/bin/bash',
+    LOCALAPPDATA: path.join(cliHome, 'AppData/Local'), PATH: process.platform === 'win32' ? path.join(process.env.SystemRoot, 'System32') : '/usr/bin:/bin' }
+  delete registrationEnv.ZDOTDIR
+  const registration = await installDesktopCli({ coreRoot: core, dataDir: data, home: cliHome, env: registrationEnv })
+  const commandEnv = { ...registrationEnv, DATA_DIR: data, CRABOT_REGISTERED_CLI: registration.command }
+  let registeredVersion
+  if (process.platform === 'win32') {
+    const probe = path.join(temporary, 'registered-cli.cmd')
+    await fs.writeFile(probe, '@echo off\r\ncall "%CRABOT_REGISTERED_CLI%" --version\r\nexit /b %errorlevel%\r\n')
+    registeredVersion = (await promisify(execFile)(path.join(process.env.SystemRoot, 'System32/cmd.exe'), ['/d', '/c', probe],
+      { env: commandEnv, encoding: 'utf8', timeout: 30_000 })).stdout.trim()
+  } else registeredVersion = (await promisify(execFile)(registration.command, ['--version'], { env: commandEnv, encoding: 'utf8', timeout: 30_000 })).stdout.trim()
+  const release = JSON.parse(await fs.readFile(path.join(core, 'core-release.json'), 'utf8'))
+  assert.equal(registeredVersion, release.version)
   gui.child.kill('SIGKILL'); await gui.exited()
   assert.equal(inspectInstance(data).state, 'running')
   gui = launch(); await gui.phase('ready')
@@ -95,7 +112,7 @@ try {
   gui.child.kill('SIGKILL'); await gui.exited()
   console.log('CRABOT_PACKAGED_BOOT ' + JSON.stringify({ platform: process.platform, arch: process.arch,
     packaged_asar_native_auth: true, installed_core_shared_with_cli: true, gui_crash_preserves_core: true, reattach_same_generation: true,
-    cli_stop_stays_stopped: true, unicode_spaced_data: true, outside_checkout: true, release_signed: false }))
+    cli_stop_stays_stopped: true, unicode_spaced_data: true, outside_checkout: true, registered_bundled_cli: true, release_signed: false }))
 } catch (error) {
   for (const file of ['supervisor.boot.log', 'mm.stdout.log', 'mm.stderr.log']) {
     const contents = await fs.readFile(path.join(data, 'logs', file)).catch(() => null)

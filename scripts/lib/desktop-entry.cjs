@@ -13,7 +13,7 @@ function loadDesktopEntry(root) {
     if (description.schema_version !== 1 || description.platform !== process.platform || description.arch !== process.arch
       || Object.keys(description).some(key => !['schema_version', 'platform', 'arch'].includes(key))) throw new Error('Desktop installation metadata is invalid')
     const executable = process.platform === 'darwin' ? resolve(root, '../../MacOS/Crabot')
-      : resolve(root, '../..', process.platform === 'win32' ? 'Crabot.exe' : 'crabot')
+      : resolve(root, '../..', process.platform === 'win32' ? 'Crabot.exe' : 'crabot-desktop')
     return { executable: realpathSync(executable), development: false }
   }
   // This source-only file is excluded from sealed core packages. No environment override.

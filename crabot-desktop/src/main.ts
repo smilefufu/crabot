@@ -29,6 +29,7 @@ let pendingQuit: Promise<boolean> | undefined
 let artifacts: ArtifactWindows | undefined
 let updates: UpdateDialog | undefined
 let updateRequested = process.argv.includes('--check-updates')
+let installingCli = false
 
 async function quit(): Promise<boolean> {
   if (pendingQuit) return pendingQuit
@@ -143,15 +144,39 @@ async function boot() {
     } catch (error) { await dialog.showMessageBox({ type: 'error', message: '登录启动设置未完成。', detail: error instanceof Error ? error.message : '请检查系统登录项后重试。' }) }
     finally { updateMenus() }
   }
+  async function installCli() {
+    if (installingCli || quitting) return
+    installingCli = true
+    updateMenus()
+    try {
+      const answer = await dialog.showMessageBox({ type: 'question', title: '安装管理命令', message: '为当前用户安装 crabot 命令？',
+        detail: '将添加用户级命令入口并配置 PATH。之后可在新终端中用 crabot status 等命令管理本机共享实例。',
+        buttons: ['取消', '安装命令'], defaultId: 0, cancelId: 0 })
+      if (answer.response !== 1) return
+      const { installDesktopCli } = await loadCore('scripts/lib/desktop-cli-install.mjs')
+      const result = await installDesktopCli({ coreRoot, dataDir: dataRoot })
+      await dialog.showMessageBox({ type: 'info', title: '管理命令', message: 'crabot 命令入口已安装。',
+        detail: result.notification_sent ? '请打开一个新终端使用。' : '系统环境通知尚未完成。新终端若仍未识别命令，请注销并重新登录后使用。', buttons: ['知道了'] })
+    } catch (error) {
+      const value = error as { code?: string; message?: string }
+      await dialog.showMessageBox({ type: 'error', title: '管理命令尚未安装完成',
+        message: value.code === 'CRABOT_CLI_INSTALL_REQUIRED' && value.message ? value.message : '命令注册未完成，请检查安装和用户目录的访问权限后重试。',
+        detail: '可以再次从此菜单继续安装。服务和业务数据保留。', buttons: ['知道了'] })
+    } finally { installingCli = false; if (!quitting) updateMenus() }
+  }
   function updateMenus() {
+    const cliItem = () => ({ label: installingCli ? '正在安装 crabot 命令…' : '安装 crabot 命令…',
+      enabled: app.isPackaged && !installingCli && controller?.host.snapshot().phase !== 'migration_required', click: () => { void installCli() } })
     const startupItem = () => ({ label: '登录后在后台启动' + (startupState.approvalRequired ? '（待系统允许）' : ''), type: 'checkbox' as const,
       checked: startupState.enabled || startupState.approvalRequired, enabled: startupState.supported && controller?.host.snapshot().phase !== 'migration_required',
       click: (item: Electron.MenuItem) => { void changeStartup(item.checked) } })
     tray?.setContextMenu(Menu.buildFromTemplate([{ label: '打开 Crabot', click: show }, { type: 'separator' },
       { label: '启动服务', click: () => { void controller!.start() } }, { label: '停止服务', click: () => { void controller!.stop() } },
-      { type: 'separator' }, startupItem(), { label: '检查更新…', click: () => { void updates!.open() } }, { label: '退出 Crabot', click: () => { void quit() } }]))
+      { type: 'separator' }, startupItem(), cliItem(), { label: '检查更新…', click: () => { void updates!.open() } }, { label: '退出 Crabot', click: () => { void quit() } }]))
     Menu.setApplicationMenu(Menu.buildFromTemplate([
-      { label: 'Crabot', submenu: [{ label: '打开 Crabot', click: show }, startupItem(), { label: '检查更新…', click: () => { void updates!.open() } }, { type: 'separator' }, { label: '退出 Crabot', accelerator: 'CommandOrControl+Q', click: () => { void quit() } }] },
+      { label: 'Crabot', submenu: [{ label: '打开 Crabot', click: show }, startupItem(),
+        cliItem(),
+        { label: '检查更新…', click: () => { void updates!.open() } }, { type: 'separator' }, { label: '退出 Crabot', accelerator: 'CommandOrControl+Q', click: () => { void quit() } }] },
       { label: '文件', submenu: [{ label: '保存当前附件…', accelerator: 'CommandOrControl+S', enabled: artifacts?.hasFocused(), click: () => { artifacts?.saveFocused() } }] },
       { role: 'editMenu' }, { role: 'viewMenu' }, { role: 'windowMenu' },
     ]))

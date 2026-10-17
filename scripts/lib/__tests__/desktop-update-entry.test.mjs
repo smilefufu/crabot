@@ -20,7 +20,7 @@ test('only a sealed app routes upgrade to its verified GUI executable with the f
   }
   assert.equal(await openDesktopUpdate(root, { launch }), false); assert.equal(called, 0)
   const executable = process.platform === 'darwin' ? path.resolve(root, '../../MacOS/Crabot')
-    : path.resolve(root, '../..', process.platform === 'win32' ? 'Crabot.exe' : 'crabot')
+    : path.resolve(root, '../..', process.platform === 'win32' ? 'Crabot.exe' : 'crabot-desktop')
   await fs.mkdir(path.dirname(executable), { recursive: true }); await fs.writeFile(executable, 'fixture-only')
   await fs.writeFile(path.join(root, 'desktop-host.json'), JSON.stringify({ schema_version: 1, platform: process.platform, arch: process.arch }))
   assert.equal(await openDesktopUpdate(root, { launch }), true); assert.equal(called, 1)

@@ -72,6 +72,7 @@ static napi_value IsPrivatePath(napi_env env, napi_callback_info info, bool dire
 static napi_value IsPrivateFile(napi_env env, napi_callback_info info) { return IsPrivatePath(env, info, false); }
 static napi_value IsPrivateDirectory(napi_env env, napi_callback_info info) { return IsPrivatePath(env, info, true); }
 static napi_value IsOwnedDirectory(napi_env env, napi_callback_info info) { return IsPrivatePath(env, info, true, false); }
+static napi_value IsOwnedFile(napi_env env, napi_callback_info info) { return IsPrivatePath(env, info, false, false); }
 static napi_value CreatePrivateDirectory(napi_env env, napi_callback_info info) {
   PSECURITY_DESCRIPTOR descriptor = nullptr;
   try {
@@ -98,6 +99,7 @@ static void RegisterPrivateFile(napi_env env, napi_value exports) {
     {"createPrivateDirectory", nullptr, CreatePrivateDirectory, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"isPrivateDirectory", nullptr, IsPrivateDirectory, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"isOwnedDirectory", nullptr, IsOwnedDirectory, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"isOwnedFile", nullptr, IsOwnedFile, nullptr, nullptr, nullptr, napi_default, nullptr},
   };
   napi_define_properties(env, exports, sizeof(methods) / sizeof(methods[0]), methods);
 }

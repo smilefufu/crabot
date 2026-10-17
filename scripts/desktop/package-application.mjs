@@ -29,6 +29,7 @@ const runtime = product.loadProductRuntime(core, { required: true, full: true })
 scrapling.loadRuntime(core, { full: true })
 computerUse.loadRuntime(core, { full: true })
 const appDir = path.join(projectDir, 'app')
+const appIcon = path.join(root, 'crabot-desktop/assets/app.png')
 await fs.mkdir(path.dirname(projectDir), { recursive: true })
 await fs.mkdir(projectDir)
 await fs.mkdir(appDir)
@@ -66,10 +67,10 @@ const configuration = {
     onlyLoadAppFromAsar: true, grantFileProtocolExtraPrivileges: false },
   // Candidate signatures are local only. Keep core bytes and the vendor Cua
   // identity unchanged; release signing must precede regenerated inventories.
-  mac: { minimumSystemVersion: '14.0.0', category: 'public.app-category.productivity', identity: '-', hardenedRuntime: false,
+  mac: { icon: appIcon, minimumSystemVersion: '14.0.0', category: 'public.app-category.productivity', identity: '-', hardenedRuntime: false,
     notarize: false, signIgnore: ['/Resources/core/'] },
-  win: { executableName: 'Crabot' },
-  linux: { executableName: 'crabot', syncDesktopName: true, category: 'Utility' },
+  win: { executableName: 'Crabot', icon: appIcon },
+  linux: { executableName: 'crabot-desktop', icon: appIcon, syncDesktopName: true, category: 'Utility' },
   afterPack: async context => {
     const resources = process.platform === 'darwin' ? path.join(context.appOutDir, 'Crabot.app/Contents/Resources') : path.join(context.appOutDir, 'resources')
     packagedResources = resources
@@ -100,7 +101,7 @@ for (const file of ['dist/main.js', 'dist/preload.cjs', 'dist/assets/tray.png', 
   asar.statFile(path.join(packagedResources, 'app.asar'), file)
 }
 const executable = process.platform === 'darwin' ? path.join(packagedResources, '../MacOS/Crabot')
-  : path.join(packagedResources, '..', process.platform === 'win32' ? 'Crabot.exe' : 'crabot')
+  : path.join(packagedResources, '..', process.platform === 'win32' ? 'Crabot.exe' : 'crabot-desktop')
 const { getCurrentFuseWire, FuseV1Options } = builderRequire('@electron/fuses')
 const fuses = await getCurrentFuseWire(executable)
 for (const key of [FuseV1Options.RunAsNode, FuseV1Options.EnableNodeOptionsEnvironmentVariable, FuseV1Options.EnableNodeCliInspectArguments]) {
