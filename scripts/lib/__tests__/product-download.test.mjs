@@ -68,3 +68,20 @@ test('cancel before download performs no network call and leaves no partial file
   await assert.rejects(downloadProductAsset(asset, target, { signal: controller.signal, fetcher: async () => { assert.fail('unexpected network call') } }), /abort/i)
   assert.deepEqual(await readdir(target), [])
 })
+
+test('transient connection failure retries once within the same asset budget; final diagnostic excludes raw errors', async t => {
+  const target = await directory(t)
+  let requests = 0
+  await downloadProductAsset(asset, target, { fetcher: async () => {
+    if (++requests === 1) throw new TypeError('sensitive transport detail', { cause: { code: 'ECONNRESET' } })
+    return new Response(content)
+  } })
+  assert.equal(requests, 2)
+  await rm(target, { recursive: true })
+  requests = 0
+  await assert.rejects(downloadProductAsset(asset, target, { fetcher: async () => {
+    requests++; throw new TypeError('sensitive transport detail', { cause: { code: 'ECONNRESET' } })
+  } }), error => error.message.includes('tool.tar.gz') && error.message.includes('ECONNRESET') && !error.message.includes('sensitive'))
+  assert.equal(requests, 2)
+  assert.deepEqual(await readdir(target), [])
+})

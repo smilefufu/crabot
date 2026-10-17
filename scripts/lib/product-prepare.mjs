@@ -34,9 +34,23 @@ export async function downloadProductAsset(asset, directory, { signal, fetcher =
     requestSignal.throwIfAborted()
     let url = asset.url
     let response
+    let retryAvailable = true
     for (let redirects = 0; redirects <= 5; redirects++) {
       if (new URL(url).protocol !== 'https:') throw new Error('Product asset requires HTTPS')
-      response = await fetcher(url, { signal: requestSignal, redirect: 'manual' })
+      for (;;) {
+        try { response = await fetcher(url, { signal: requestSignal, redirect: 'manual' }); break }
+        catch (error) {
+          requestSignal.throwIfAborted()
+          const code = error?.cause?.code
+          const transient = ['ECONNRESET', 'ETIMEDOUT', 'EAI_AGAIN', 'ENETUNREACH', 'ECONNREFUSED', 'UND_ERR_CONNECT_TIMEOUT'].includes(code)
+          if (retryAvailable && (transient || (error instanceof TypeError && !code))) {
+            retryAvailable = false
+            continue // one retry within the same deadline, digest, source and redirect budget
+          }
+          const reason = typeof code === 'string' && /^[A-Z0-9_]{1,64}$/.test(code) ? code : 'NETWORK_ERROR'
+          throw new Error(`Product asset ${name} from ${new URL(asset.url).hostname} unavailable: ${reason}`)
+        }
+      }
       if (![301, 302, 303, 307, 308].includes(response.status)) break
       await response.body?.cancel()
       const location = response.headers.get('location')
