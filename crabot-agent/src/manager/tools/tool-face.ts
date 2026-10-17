@@ -1,4 +1,4 @@
-import { authorizeTool, roleAuthorization, entryAuthorization, checkFileAccess, allowed, denied } from '../../permissions/tool-authorization.js'
+import { authorizeTool, roleAuthorization, entryAuthorization, allowed, denied } from '../../permissions/tool-authorization.js'
 /**
  * Manager 能力目录与 episode 工具投影 —— protocol-agent-v3.md §4.3。
  * 内置 messaging、memory、Worker、自省、任务板和项目文档仍按白名单构造；
@@ -31,7 +31,7 @@ import { buildCrabotInfoTools, type ManagerScheduleToolsContext } from './crabot
 import type { MasterAuthorization } from '../principal.js'
 import { buildWorkboardTools } from './workboard-tools.js'
 import type { ManagerWorkboardStore } from '../workboard-store.js'
-import { buildProjectDocTools, authorizeProjectRoot, type ProjectDocToolDeps } from './project-doc-tools.js'
+import { buildProjectDocTools, authorizeProjectRoot, checkProjectFileAccess, type ProjectDocToolDeps } from './project-doc-tools.js'
 import {
   ManagerToolCatalog,
   ToolSearchInputError,
@@ -293,7 +293,8 @@ function messagingToolToDefinition(tool: MessagingTool, deps: ToolFaceDeps): Too
 function buildMessagingFace(deps: ToolFaceDeps): ToolDefinition[] {
   const original = deps
   deps = { ...deps, messagingDeps: { ...deps.messagingDeps, authorizeFile: async hostPath => {
-    const decision = await checkFileAccess((original.faceState?.authorizationContext ?? original).workerContext().principalPermissions, hostPath, process.cwd(), false)
+    const current = original.faceState?.authorizationContext ?? original
+    const decision = await checkProjectFileAccess({ ...current.projectDocs, managerPrincipalPermissions: current.workerContext().principalPermissions }, hostPath)
     if (!decision.allowed) throw new Error(decision.reason)
   } } }
   if (deps.isBuiltinDailyReflection) return buildDailyReflectionMessagingFace(deps)
@@ -590,7 +591,7 @@ export function buildManagerToolFace(deps: ToolFaceDeps): ToolDefinition[] {
   const memoryFace = buildManagerMemoryFace(deps.memoryServer)
   const memoryTools = dailyProfile ? protectDailyReflectionMemory(memoryFace) : memoryFace
   const workerTools = buildWorkerTools({
-    authorizeProjectRead: (workspaceRoot) => authorizeProjectRoot({ ...deps.projectDocs, managerPrincipalPermissions: currentPrincipal() }, workspaceRoot, false),
+    authorizeProjectRead: (workspaceRoot) => authorizeProjectRoot({ ...currentDeps().projectDocs, managerPrincipalPermissions: currentPrincipal() }, workspaceRoot, false),
     harness: deps.harness,
     voice: deps.voice,
     readWorkboard: (managerKey) => deps.workboard.store.load(managerKey),
@@ -641,7 +642,7 @@ export function buildManagerToolFace(deps: ToolFaceDeps): ToolDefinition[] {
         if (!decision.allowed) return decision
         if (input.file_path !== undefined) {
           if (typeof input.file_path !== 'string') return denied('PERMISSION_DENIED', 'file_path 必须为字符串')
-          return checkFileAccess(principal(), input.file_path, process.cwd(), false)
+          return checkProjectFileAccess({ ...currentDeps().projectDocs, managerPrincipalPermissions: principal() }, input.file_path)
         }
         if (typeof input.media_url === 'string' && !/^https?:\/\//i.test(input.media_url)) return denied('PERMISSION_DENIED', '媒体地址不允许借用本地文件路径')
         return allowed

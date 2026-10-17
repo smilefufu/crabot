@@ -141,6 +141,7 @@ import {
 } from './worker-events'
 import { WorkerContextStore, type WorkerContext } from './context-store'
 import { captureWorkspaceInstructions } from './workspace-instructions'
+import { checkFileAccess, type ManagedWorkspaceScope } from '../../permissions/tool-authorization.js'
 import { WorkspaceGitInspector, workspaceGitError, appendWorkspaceGitObservation, summarizeWorkspaceGit } from './workspace-git-inspector'
 import {
   renderHandoffPrompt,
@@ -1134,13 +1135,21 @@ export class WorkerHarness {
       if (admission) await admission.dispose()
       throw error
     }
+    let admissionDisposed = false
+    let admissionRetained = false
+    const disposeAdmission = async () => {
+      if (admission && !admissionDisposed && !admissionRetained) {
+        admissionDisposed = true
+        await admission.dispose()
+      }
+    }
     let fenceReleased = false
     const releaseFence = () => { if (fence && !fenceReleased) { fenceReleased = true; fence.release() } }
     const adapter = this.deps.adapters.get(impl)
     if (!adapter) {
       // 失败路径必须 dispose：runtime 目录（如 codex CODEX_HOME）不得残留。
       releaseFence()
-      if (admission) await admission.dispose()
+      await disposeAdmission()
       throw new Error(`WorkerHarness.spawnWorker: no adapter registered for impl '${impl}'`)
     }
 
@@ -1151,23 +1160,24 @@ export class WorkerHarness {
       workspace = await this.deps.workspaces.resolve(workerId, p.workspace)
     } catch (error) {
       releaseFence()
-      if (admission) await admission.dispose()
+      await disposeAdmission()
       throw error
     }
 
     return this.withLock(workerId, async () => {
       const startedAt = this.deps.now()
-      const workspaceGit = (await this.checkWorkspaceGit(workspace.root, p.principal_permissions)).current
+      const managed = this.deps.workspaces.fileScope(workerId, workspace.root)
+      const workspaceGit = (await this.checkWorkspaceGit(workspace.root, p.principal_permissions, undefined, managed)).current
       const gitContext: WorkerWorkspaceGitContext = {
         worker_id: workerId, incarnation_id: incarnationId, workspace_root: workspace.root, baseline: workspaceGit,
       }
-      const instructions = await captureWorkspaceInstructions({
+      const instructions = await this.captureInstructions({
         workersDir: this.deps.workersDir,
         workerId,
         incarnationId,
         workspaceRoot: workspace.root,
         capturedAt: startedAt,
-      })
+      }, p.principal_permissions, managed)
       const initial: LedgerWorker = {
         worker_id: workerId,
         manager_key: p.managerKey,
@@ -1270,7 +1280,7 @@ export class WorkerHarness {
         await this.deps.reportWorkerOutcome?.(impl, null)
       } catch (err) {
         releaseFence()
-        if (admission) await admission.dispose()
+        await disposeAdmission()
         const now = this.deps.now()
         const failed = await this.deps.ledger.upsertWorker(p.managerKey, workerId, (prev) => {
           if (!prev) return undefined
@@ -1329,8 +1339,11 @@ export class WorkerHarness {
       // spawn 返回即终态（启动期握手超时等）时不会有终态钩子再触发——立即 dispose。
       releaseFence()
       if (admission) {
-        if (initialState === 'exited') await admission.dispose()
-        else this.connectionDisposers.set(`${workerId}:1`, admission.dispose)
+        if (initialState === 'exited') await disposeAdmission()
+        else {
+          this.connectionDisposers.set(`${workerId}:1`, admission.dispose)
+          admissionRetained = true
+        }
       }
       const inbox = this.getInbox(workerId)
       inbox.release()
@@ -1356,6 +1369,10 @@ export class WorkerHarness {
         }, spawned?.task.status)
       }
       return spawned as LedgerWorker
+    }).catch(async error => {
+      releaseFence()
+      await disposeAdmission()
+      throw error
     })
   }
 
@@ -2284,16 +2301,19 @@ export class WorkerHarness {
 
       const handoffAt = this.deps.now()
       const incarnationId = randomUUID()
-      const workspaceGit = (await this.checkWorkspaceGit(workspace.root, auth.principal_permissions)).current
+      const workspaceGit = (await this.checkWorkspaceGit(workspace.root, auth.principal_permissions, undefined, this.deps.workspaces.fileScope(worker.worker_id, workspace.root))).current
       const gitContext: WorkerWorkspaceGitContext = {
         worker_id: worker.worker_id, incarnation_id: incarnationId, workspace_root: workspace.root, baseline: workspaceGit,
       }
-      const instructions = await captureWorkspaceInstructions({
+      const instructions = await this.captureInstructions({
         workersDir: this.deps.workersDir,
         workerId: worker.worker_id,
         incarnationId,
         workspaceRoot: workspace.root,
         capturedAt: handoffAt,
+      }, auth.principal_permissions, this.deps.workspaces.fileScope(worker.worker_id, workspace.root)).catch(async error => {
+        if (admission) await admission.dispose()
+        throw error
       })
       const expiredAfterInstructions = this.expiredInboxDelivery(item, legacy.seq)
       if (expiredAfterInstructions) {
@@ -2884,17 +2904,17 @@ export class WorkerHarness {
     const workerContext = await this.contextStore.read(worker.worker_id)
     this.deps.assertExecutionPolicy?.(mainline.impl, workerContext?.principal_permissions)
     const gitPermissions = workerContext?.principal_permissions
-    const workspaceGit = (await this.checkWorkspaceGit(mainline.workspace, gitPermissions)).current
+    const workspaceGit = (await this.checkWorkspaceGit(mainline.workspace, gitPermissions, undefined, this.managedWorkspaceScope(worker.worker_id, mainline.workspace))).current
     const gitContext: WorkerWorkspaceGitContext = {
       worker_id: worker.worker_id, incarnation_id: incarnationId, workspace_root: mainline.workspace, baseline: workspaceGit,
     }
-    const instructions = await captureWorkspaceInstructions({
+    const instructions = await this.captureInstructions({
       workersDir: this.deps.workersDir,
       workerId: worker.worker_id,
       incarnationId,
       workspaceRoot: mainline.workspace,
       capturedAt: this.deps.now(),
-    })
+    }, gitPermissions)
     const expiredAfterInstructions = this.expiredInboxDelivery(item, mainline.seq)
     if (expiredAfterInstructions) return expiredAfterInstructions
     // P6-B §6.5：resume 同样 operation-time 解析连接（revision 变化即拒绝）。
@@ -3136,17 +3156,17 @@ export class WorkerHarness {
       // before we stop the source. Any failure here leaves the source untouched and retryable.
       targetIncarnationId = randomUUID()
       const capturedAt = this.deps.now()
-      targetGit = (await this.checkWorkspaceGit(workspace.root, principalPermissions)).current
+      targetGit = (await this.checkWorkspaceGit(workspace.root, principalPermissions, undefined, this.managedWorkspaceScope(worker.worker_id, workspace.root))).current
       targetGitContext = {
         worker_id: worker.worker_id, incarnation_id: targetIncarnationId, workspace_root: workspace.root, baseline: targetGit,
       }
-      targetInstructions = await captureWorkspaceInstructions({
+      targetInstructions = await this.captureInstructions({
         workersDir: this.deps.workersDir,
         workerId: worker.worker_id,
         incarnationId: targetIncarnationId,
         workspaceRoot: workspace.root,
         capturedAt,
-      })
+      }, principalPermissions)
       targetExecutionEnv = await this.executionEnv(handoffContext ?? {}, {
         kind: 'worker', worker_id: worker.worker_id, incarnation_id: targetIncarnationId,
       })
@@ -3865,12 +3885,42 @@ export class WorkerHarness {
     return this.turnStore.resolve(workerId, turnId, resolution, this.deps.now(), reason)
   }
 
+  /** Ownership proof only. Caller retains its own role, file_io and lifecycle gates. */
+  managedWorkspaceScope(workerId: string, workspaceRoot: string): ManagedWorkspaceScope {
+    return async () => {
+      const found = await this.deps.ledger.findWorker(workerId)
+      const context = await this.contextStore.read(workerId)
+      if (found?.worker.legacy_source && context?.principal_permissions && context.manager_key === undefined) return undefined
+      if (!found || !context?.principal_permissions || context.manager_key !== found.managerKey
+        || found.worker.manager_key !== found.managerKey
+        || context.creator_friend_id !== found.worker.origin.creator_friend_id
+        || !found.worker.incarnations.some(item => item.workspace === workspaceRoot)) {
+        throw new Error('CAPABILITY_UNKNOWN: Worker file ownership unavailable')
+      }
+      return this.deps.workspaces.fileScope(workerId, workspaceRoot)()
+    }
+  }
+
+  private async captureInstructions(
+    params: Parameters<typeof captureWorkspaceInstructions>[0],
+    permissions: ResolvedPermissions | undefined,
+    managed = this.managedWorkspaceScope(params.workerId, params.workspaceRoot),
+  ): ReturnType<typeof captureWorkspaceInstructions> {
+    // Product-only or file-disabled tasks continue without reading model-visible workspace rules.
+    if (!permissions?.tool_access.file_io) return { snapshot: { source: 'absent', captured_at: params.capturedAt } }
+    return captureWorkspaceInstructions({ ...params, authorize: async (file, write) => {
+      const access = await checkFileAccess(permissions, file, '/', write, managed)
+      if (!access.allowed) throw new Error(access.reason)
+    } })
+  }
+
   private async checkWorkspaceGit(
     workspaceRoot: string,
     permissions: ResolvedPermissions | undefined,
     baseline?: WorkspaceGitObservation,
+    managed?: ManagedWorkspaceScope,
   ): Promise<WorkspaceGitCheck> {
-    if (!narrowWorkerPermissions(BUILTIN_WORKER_PERMISSIONS, permissions ?? null).tool_access.file_io) {
+    if (!(await checkFileAccess(permissions, workspaceRoot, '/', false, managed)).allowed) {
       return { current: workspaceGitError(workspaceRoot, 'access_denied'), ...(baseline ? { baseline } : {}),
         comparison: 'unavailable', comparison_reason: 'access_denied', commits: [], commits_truncated: false }
     }
@@ -3891,7 +3941,7 @@ export class WorkerHarness {
       throw new Error('Worker 没有 file_io 权限')
     }
     return { worker_id: workerId, incarnation_id: requireStableIncarnationId(incarnation, workerId),
-      git: await this.checkWorkspaceGit(workspace, permissions, incarnation.workspace_git) }
+      git: await this.checkWorkspaceGit(workspace, permissions, incarnation.workspace_git, this.managedWorkspaceScope(workerId, incarnation.workspace)) }
   }
 
   private async turnWorkspaceGit(handle: IncarnationHandle): Promise<WorkspaceGitCheck | undefined> {
@@ -3905,7 +3955,7 @@ export class WorkerHarness {
       return { current: workspaceGitError(incarnation.workspace, 'access_denied'), baseline: incarnation.workspace_git,
         comparison: 'unavailable', comparison_reason: 'worker_permissions_unavailable', commits: [], commits_truncated: false }
     }
-    return this.checkWorkspaceGit(incarnation.workspace, permissions, incarnation.workspace_git)
+    return this.checkWorkspaceGit(incarnation.workspace, permissions, incarnation.workspace_git, this.managedWorkspaceScope(handle.worker_id, incarnation.workspace))
   }
 
   private async createPendingTurn(
@@ -6247,14 +6297,14 @@ export class WorkerHarness {
       const permissions = workerContext?.principal_permissions
       this.deps.assertExecutionPolicy?.(prep.implId, permissions)
       await this.inheritCliObservation(workerId, prep.ref.incarnation_id, forkIncarnationId, prep.implId)
-      forkGit = (await this.checkWorkspaceGit(prep.workspace, permissions)).current
-      forkInstructions = await captureWorkspaceInstructions({
+      forkGit = (await this.checkWorkspaceGit(prep.workspace, permissions, undefined, this.managedWorkspaceScope(workerId, prep.workspace))).current
+      forkInstructions = await this.captureInstructions({
         workersDir: this.deps.workersDir,
         workerId,
         incarnationId: forkIncarnationId,
         workspaceRoot: prep.workspace,
         capturedAt: this.deps.now(),
-      })
+      }, permissions)
       admission = await this.deps.admitWorkerConnection?.(prep.implId, workerId)
       const forkOptions: ForkOptions = {
         workspace_git: { worker_id: workerId, incarnation_id: forkIncarnationId, workspace_root: prep.workspace, baseline: forkGit },

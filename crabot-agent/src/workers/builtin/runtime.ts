@@ -29,6 +29,8 @@ import type { LedgerWorker } from '../harness/ledger-types.js'
  * 构造 `SpawnSpec` 的契约套件与单测可能没有台账语境。工厂实现须自行决定缺省时的行为。
  */
 export interface BuiltinRuntimeContext {
+  /** Host-only task ownership proof; never persisted with permissions or adapter state. */
+  readonly managed_workspace?: import('../../permissions/tool-authorization.js').ManagedWorkspaceScope
   /** 仅执行分支注入；后台归属，不参与授权或 Worker 身份快照。 */
   readonly incarnation_id?: string
   readonly workspace_git?: WorkerWorkspaceGitContext
@@ -129,7 +131,7 @@ const CLI_PERM_RANK: Record<CliPerm, number> = { none: 0, read: 1, write: 2 }
  * 逐项规则：
  * - `tool_access`：按类目**与**（两边都允许才允许）；
  * - `cli_access`：按域取**更严**的那一档（none < read < write）；
- * - `storage`：保留主体的固定范围；workspace 本身不产生授权；
+ * - `storage`：保留主体的额外范围；默认目录另由宿主核验，不改快照；
  * - `memory_scopes`：保留发起人的身份快照字段，供统一权限结构兼容；Worker 的
  *   `tool_access.memory` 固定 false，保留 scopes 不会重新开放 Memory。
  *

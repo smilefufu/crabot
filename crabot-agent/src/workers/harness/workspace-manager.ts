@@ -2,6 +2,7 @@ import path from 'node:path'
 import { promises as fs } from 'node:fs'
 import { getWorkspacesRootDir } from '../../core/data-paths.js'
 import type { Workspace } from '../types.js'
+import { isWithin, type ManagedWorkspaceScope } from '../../permissions/tool-authorization.js'
 
 /** Raised when workspace validation fails. */
 export class InvalidWorkspaceError extends Error {
@@ -29,15 +30,48 @@ export class WorkspaceManager {
    * @throws InvalidWorkspaceError 验证失败时
    */
   async resolve(taskId: string, requested?: string): Promise<Workspace> {
+    this.validateTaskId(taskId)
     if (requested === undefined) {
-      // 缺省：创建 <root>/<taskId> 并返回
+      await fs.mkdir(this.root, { recursive: true })
       const defaultPath = path.resolve(this.root, taskId)
+      const existing = await fs.lstat(defaultPath).catch(error => {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+        return undefined
+      })
+      if (existing && (!existing.isDirectory() || existing.isSymbolicLink())) throw new InvalidWorkspaceError('default task root must be a real directory')
       await fs.mkdir(defaultPath, { recursive: true })
+      await this.fileScope(taskId, defaultPath)()
       return { root: defaultPath }
     }
 
     // 验证 requested 路径
-    return this._validateAndResolve(taskId, requested)
+    const workspace = await this._validateAndResolve(taskId, requested)
+    await this.fileScope(taskId, requested)()
+    return workspace
+  }
+
+  private validateTaskId(taskId: string): void {
+    if (!taskId || taskId === '.' || taskId === '..' || taskId.includes('\0') || taskId.includes('\\') || path.basename(taskId) !== taskId) throw new InvalidWorkspaceError('invalid task identity')
+  }
+
+  /** Caller must first establish trusted task admission or ledger/context ownership. */
+  fileScope(taskId: string, workspaceRoot: string): ManagedWorkspaceScope {
+    return async () => {
+      this.validateTaskId(taskId)
+      const root = await fs.realpath(this.root).catch(error => {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+        return undefined
+      })
+      if (!root) return undefined
+      const expected = path.join(root, taskId), logical = path.resolve(this.root, taskId)
+      const requested = path.resolve(workspaceRoot)
+      const actual = await fs.realpath(workspaceRoot)
+      const claimsOwnRoot = isWithin(logical, requested) || isWithin(expected, requested) || isWithin(expected, actual)
+      if (!claimsOwnRoot) return undefined
+      const stat = await fs.lstat(expected)
+      if (!stat.isDirectory() || stat.isSymbolicLink() || !isWithin(expected, actual)) throw new InvalidWorkspaceError('default task root cannot be replaced or redirected')
+      return expected
+    }
   }
 
   private async _validateAndResolve(taskId: string, requested: string): Promise<Workspace> {

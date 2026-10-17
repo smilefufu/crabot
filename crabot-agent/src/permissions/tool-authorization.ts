@@ -6,6 +6,13 @@ import type { ResolvedPermissions } from '../types.js'
 import type { PermissionDecision, ToolDefinition } from '../engine/types.js'
 
 export type Principal = () => ResolvedPermissions | null | undefined
+/** Host-only ownership check, revalidated before every operation; never model input or persisted permissions. */
+export type ManagedWorkspaceScope = () => Promise<string | undefined>
+
+export function isWithin(root: string, target: string): boolean {
+  const relative = path.relative(root, target)
+  return relative === '' || (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative))
+}
 export type ToolAuthorization = {
   role: 'manager' | 'worker' | 'child'
   entry: EffectiveToolCategory | 'role'
@@ -55,26 +62,28 @@ async function canonicalPath(value: string, depth = 0): Promise<string> {
   return path.join(await canonicalPath(parent, depth + 1), path.basename(value))
 }
 
-export async function checkFileAccess(principal: ReturnType<Principal>, value: string, cwd: string, write: boolean): Promise<PermissionDecision> {
+export async function checkFileAccess(principal: ReturnType<Principal>, value: string, cwd: string, write: boolean, managed?: ManagedWorkspaceScope): Promise<PermissionDecision> {
   if (!principal) return denied('CAPABILITY_UNKNOWN', '缺少可信主体授权')
-  if (!principal.tool_access.file_io || !principal.storage) return denied('PERMISSION_DENIED', '未授权内置文件范围')
-  if (write && principal.storage.access !== 'readwrite') return denied('PERMISSION_DENIED', '文件范围只读')
+  if (!principal.tool_access.file_io) return denied('PERMISSION_DENIED', '未授权内置文件入口')
   try {
+    const target = await canonicalPath(path.resolve(cwd, value === '~' ? os.homedir() : value.startsWith('~/') ? path.join(os.homedir(), value.slice(2)) : value))
+    const ownRoot = await managed?.()
+    if (ownRoot && isWithin(ownRoot, target)) return allowed
+    if (!principal.storage) return denied('PERMISSION_DENIED', '未授权额外文件范围')
+    if (write && principal.storage.access !== 'readwrite') return denied('PERMISSION_DENIED', '文件范围只读')
     const root = await fs.realpath(principal.storage.workspace_path)
     if (!(await fs.stat(root)).isDirectory()) return denied('PERMISSION_DENIED', '授权文件范围不是目录')
-    const target = await canonicalPath(path.resolve(cwd, value === '~' ? os.homedir() : value.startsWith('~/') ? path.join(os.homedir(), value.slice(2)) : value))
-    const relative = path.relative(root, target)
-    if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) return denied('PERMISSION_DENIED', '文件路径超出授权范围')
+    if (!isWithin(root, target)) return denied('PERMISSION_DENIED', '文件路径超出授权范围')
     return allowed
   } catch (error) { return denied('PERMISSION_DENIED', `无法核实文件范围：${(error as Error).message}`) }
 }
 
-export function fileAuthorization(role: ToolAuthorization['role'], principal: Principal, cwd: () => string, key: string, write: boolean): ToolAuthorization {
+export function fileAuthorization(role: ToolAuthorization['role'], principal: Principal, cwd: () => string, key: string, write: boolean, managed?: ManagedWorkspaceScope): ToolAuthorization {
   const entry = entryAuthorization(role, 'file_io', principal)
-  return { ...entry, available: () => entry.available() && principal()?.storage !== null, async check(input) {
+  return { ...entry, async check(input) {
     const value = input[key]
     if (value !== undefined && typeof value !== 'string') return denied('PERMISSION_DENIED', '文件路径必须为字符串')
-    return checkFileAccess(principal(), typeof value === 'string' ? value : '.', cwd(), write)
+    return checkFileAccess(principal(), typeof value === 'string' ? value : '.', cwd(), write, managed)
   } }
 }
 

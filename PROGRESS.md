@@ -1,5 +1,12 @@
 # Crabot 项目进度
 
+### 任务默认目录文件授权：独立修复待审查
+
+- 按已确认 [spec](crabot-docs/superpowers/specs/2026-10-17-managed-workspace-default-file-access-design.md) 从 main 独立实现：保留 file_io 总开关，宿主核验 ledger/context 归属及受管真实根后允许任务自有默认目录读写，storage 只限制额外目录；不带入未发布的共享请求/语音协议组。
+- 修复 Worker/child 文件工具与主控项目读取、HTML 附件上传，准备/续办沿同一文件边界；file_io=false 不读取规则或 Git，原有派发与生命周期保持。未知归属、坏快照、其他任务及软链接逃逸拒绝，准备失败释放连接/fence，不删除产物或重放业务。
+- 定向 Agent 569 项、Web 37 项通过（5 项 tmux 用例沿原条件跳过）；Shared/Agent 编译和 Web 生产构建通过。macOS 临时路径与旧项目授权夹具的四项原有失败已在未改 main 复现，相关夹具按当前授权入口校准；Web 隔离依赖使用等价 ESM matcher setup。
+- 配置和原快照不改写；有效旧任务在 storage=null 或额外目录只读时，自有默认根升级后可写。权限 UI/能力说明同步额外目录含义；原生 CLI 仍需完整主机授权。验证及边界见 [独立实施计划](crabot-docs/superpowers/plans/2026-10-17-managed-workspace-main-fix.md)。本轮不部署、不改现场权限，不代表目标 Linux 或真实渠道/模型验收。
+
 ### 普通渠道发送：能力预检沿用有界瞬态重试
 
 - PR #206 review 第3项已复核为真实回归：Channel 短暂重启时，get_capabilities 原位于发送重试外，导致普通渠道直接失败。只为该只读预检复用现有瞬态重试，不缓存能力、不改变 Voice 标签拒绝或发送后状态。
