@@ -15,6 +15,7 @@ const sessionsModule = fileURLToPath(new URL('../../../crabot-admin/dist/desktop
 const sessionClient = new URL('../desktop-session-client.mjs', import.meta.url).href
 const localTransport = new URL('../local-auth-transport.cjs', import.meta.url).href
 const frameModule = new URL('../desktop-frames.cjs', import.meta.url).href
+const productModule = new URL('../product-runtime.cjs', import.meta.url).href
 
 async function fixture(t) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'crabot-desktop-session-中文 space-'))), data = join(root, 'data')
@@ -24,6 +25,14 @@ async function fixture(t) {
     import transport from ${JSON.stringify(localTransport)};
     import frameModule from ${JSON.stringify(frameModule)};
     import {readFileSync} from 'node:fs';import {join} from 'node:path';
+    import product from ${JSON.stringify(productModule)};
+    if(process.env.TEST_SLOW_PREFLIGHT==='1'){
+      const load=product.loadProductRuntime;
+      product.loadProductRuntime=(...args)=>{
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,5200);
+        product.loadProductRuntime=load;return load(...args);
+      };
+    }
     const data=process.env.TEST_DATA;
     async function manual(nonce, action) {
       const metadata=JSON.parse(readFileSync(join(data,'desktop-session.json'),'utf8'));
@@ -90,10 +99,10 @@ async function fixture(t) {
   })
   const [ready] = await once(mm, 'message'); assert.equal(ready.type, 'ready')
   server = identity.inspectProcess(ready.pid)
-  async function client(action, trusted = true) {
+  async function client(action, trusted = true, slowPreflight = false) {
     const entry = trusted ? uiEntry : join(root, 'impostor-ui.mjs')
     if (!trusted) writeFileSync(entry, readFileSync(uiEntry))
-    const child = spawn(process.execPath, [entry], { env: { ...process.env, TEST_DATA: data, ...(action ? { TEST_ACTION: action } : {}) },
+    const child = spawn(process.execPath, [entry], { env: { ...process.env, TEST_DATA: data, ...(slowPreflight ? { TEST_SLOW_PREFLIGHT: '1' } : {}), ...(action ? { TEST_ACTION: action } : {}) },
       stdio: ['ignore', 'ignore', 'inherit', 'ipc'] })
     clients.add(child)
     const [result] = await once(child, 'message')
@@ -149,4 +158,12 @@ test('an idle authenticated transport expires within the five-second handshake w
   assert.equal(result.result.closed, true)
   assert.ok(Date.now() - started >= 4500 && Date.now() - started < 7000)
   assert.equal(existsSync(join(f.data, 'desktop-session.json')), true)
+})
+
+test('local runtime verification precedes the five-second peer handshake budget', { timeout: 15_000 }, async t => {
+  const f = await fixture(t), started = Date.now()
+  const { result } = await f.client(undefined, true, true)
+  assert.ok(Date.now() - started >= 5200)
+  assert.equal(result.session?.type, 'session', JSON.stringify(result))
+  assert.equal(await f.validate(result.session), true)
 })

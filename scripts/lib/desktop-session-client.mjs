@@ -36,13 +36,15 @@ function readDiscovery(dataRoot, record) {
 }
 
 export async function openDesktopSession(dataRoot) {
-  let socket, frames, expired = false
-  const timer = setTimeout(() => { expired = true; frames?.fail(new Error('Desktop handshake timed out')); socket?.destroy() }, 5000)
+  let socket, frames, timer, expired = false
   try {
     const instance = inspectInstance(dataRoot)
     if (instance.state !== 'running' || !instance.record?.mm
       || !identity.sameProcess(instance.record.mm, identity.inspectProcess(instance.record.mm.pid))) fail('DESKTOP_UNAVAILABLE')
     const record = instance.record, description = readDiscovery(dataRoot, record)
+    // Local payload verification is not a peer handshake. On cold storage it
+    // may exceed five seconds; the connection and challenge remain bounded.
+    timer = setTimeout(() => { expired = true; frames?.fail(new Error('Desktop handshake timed out')); socket?.destroy() }, 5000)
     const connection = await transport.connectLocalAuth(description.socket_address)
     socket = connection.socket
     if (expired || !identity.sameProcess(description.server, connection.peer)) fail('DESKTOP_UNAUTHORIZED')
