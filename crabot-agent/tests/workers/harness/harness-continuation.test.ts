@@ -251,6 +251,7 @@ function spawnParams(overrides: Partial<SpawnWorkerParams> = {}): SpawnWorkerPar
     prompt: '把活干完',
     origin: { spawned_by_episode: 'wechat::sess-1', trigger_type: 'message' },
     report_to: { channel_id: 'wechat', session_id: 'sess-1' },
+    principal_permissions: { ...BUILTIN_WORKER_PERMISSIONS, storage: { workspace_path: overrides.workspace ?? dataDir, access: 'readwrite' } },
     ...overrides,
   }
 }

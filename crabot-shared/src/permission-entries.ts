@@ -9,7 +9,7 @@ export type ToolAccessUpdate = EffectiveToolAccessConfig & Partial<Record<Retire
 export const TOOL_ENTRY_EXPLANATIONS: Record<EffectiveToolCategory, string> = {
   memory: '记忆工具入口；配置范围不代表后端数据过滤已核实。',
   messaging: '扩展消息、渠道查询和跨目标投递；当前可信对话的正常答复保留。',
-  file_io: '内置文件与项目文档，受 storage 真实目录和读写级别限制；未配置范围不允许访问。',
+  file_io: '内置文件与项目文档入口；关闭时不可访问。开启后，宿主核验的任务自有默认目录可读写，额外目录受 storage 范围和读写级别限制；角色限制仍有效。',
   shell: '以运行账号执行主机命令，可访问文件、网络和远程机器，不受内置文件范围隔离。',
   mcp_skill: '已启用的外部 MCP 与用户 Skill；服务操作不受内置文件范围隔离，Skill 不增加工具权限。',
   desktop: '仅可信 Master 私聊的桌面控制；子 Agent 不继承。',

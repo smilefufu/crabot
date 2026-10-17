@@ -1295,3 +1295,32 @@ it.each(['ready', 'late'])('微信引用原图 %s：真实主控工具将最新�
     expect(download).toHaveBeenCalledWith('https://cdn/latest-hd', expect.anything())
   } finally { clearTimeout(timer); vi.unstubAllGlobals(); await fs.rm(dir, { recursive: true, force: true }) }
 })
+
+
+describe('managed task attachment regression', () => {
+  it.each(['private', 'group'] as const)('sends an owned default HTML with storage=null in %s', async type => {
+    const { promises: fs } = await import('node:fs')
+    const root = await fs.mkdtemp(join(tmpdir(), 'managed-send-'))
+    try {
+      const workspace = join(root, 'workspaces', 'w-owned')
+      await fs.mkdir(join(workspace, 'deliverables'), { recursive: true })
+      const file = join(workspace, 'deliverables', 'result.html')
+      await fs.writeFile(file, '<h1>task result</h1>')
+      const principal = { ...BUILTIN_WORKER_PERMISSIONS, storage: null }
+      const worker = { worker_id: 'w-owned', manager_key: MANAGER_KEY, incarnations: [{ workspace }] }
+      const rpc = vi.fn(async (_port: number, method: string) => method === 'get_capabilities'
+        ? {} : { platform_message_id: 'fixture', sent_at: '2026-10-17' })
+      const deps = makeDeps({ candidatePermissions: principal, managerTarget: { channel_id: 'ch-1', session_id: 'sess-1', type },
+        messagingDeps: makeMessagingDeps({ rpcClient: { call: rpc } as never }),
+        projectDocs: { managerKey: MANAGER_KEY, ledger: { listWorkers: async () => [worker], findWorker: async () => undefined },
+          readWorkerContext: async () => undefined,
+          managedWorkspace: () => async () => await fs.realpath(workspace),
+        } as never,
+      })
+      const send = buildManagerToolFace(deps).find(tool => tool.name === 'send_message')!
+      const result = await send.call({ channel_id: 'ch-1', session_id: 'sess-1', file_path: file, content: 'result', post_send_action: 'none' }, {})
+      expect(result).toMatchObject({ isError: false })
+      expect(rpc.mock.calls.map(entry => entry[1])).toContain('send_message')
+    } finally { await fs.rm(root, { recursive: true, force: true }) }
+  })
+})

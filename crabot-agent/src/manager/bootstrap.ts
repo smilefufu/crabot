@@ -1,5 +1,6 @@
 import { voiceOutputPort } from './voice-output-port.js'
 import { createHash } from 'node:crypto'
+import { isDeepStrictEqual } from 'node:util'
 import { requestObservation, persistObservation, executionObservation, readObservation, observationFile } from '../permissions/execution-observation.js'
 /**
  * manager 栈装配 —— protocol-agent-v3.md §4/§5/§6/§7(P5 Task 1)。
@@ -407,6 +408,18 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
   const adapters = new Map<WorkerImplId, WorkerAdapter>()
   let reconcileContinuationCandidatesForWorker: ((workerId: string) => void) | undefined
 
+  const resolveBuiltinRuntime: BuiltinRuntimeFactory | undefined = deps.builtinSpawnDefaults ? ctx =>
+    deps.builtinSpawnDefaults!({ ...ctx, managed_workspace: async () => {
+      const found = await ledger.findWorker(ctx.worker_id)
+      const saved = await workerContextStore.read(ctx.worker_id)
+      const wire = (value: unknown) => JSON.parse(JSON.stringify(value) ?? 'null')
+      if (!found || !saved?.principal_permissions || saved.manager_key !== found.managerKey
+        || saved.creator_friend_id !== found.worker.origin.creator_friend_id
+        || !isDeepStrictEqual(wire(ctx.origin), wire(found.worker.origin))
+        || !isDeepStrictEqual(wire(ctx.principal_permissions), wire(saved.principal_permissions))) return undefined
+      return harness.managedWorkspaceScope(ctx.worker_id, ctx.workspace.root)()
+    } }) : undefined
+
   const harnessDeps: HarnessDeps = {
     adapters,
     defaultImpl: DEFAULT_WORKER_IMPL,
@@ -490,7 +503,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
       })
     },
     redactFailureReason: deps.redactFailureReason,
-    builtinSpawnDefaults: deps.builtinSpawnDefaults,
+    builtinSpawnDefaults: resolveBuiltinRuntime,
     assertExecutionAdmission: deps.assertExecutionAdmission,
     assertExecutionPolicy: deps.assertExecutionPolicy,
     capabilityBundle: deps.capabilityBundle,
@@ -519,7 +532,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
       dataDir: builtinDataDir,
       onStateChange: harness.handleStateChange,
       onNativeActivity: harness.handleNativeActivity,
-      resolveRuntime: deps.builtinSpawnDefaults,
+      resolveRuntime: resolveBuiltinRuntime,
       traceHooks: deps.builtinTraceHooks,
       traceReader: deps.builtinTraceReader,
     }),
@@ -927,6 +940,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
         workboard: { store: workboardStore, managerKey: key },
         projectDocs: {
           ledger,
+          managedWorkspace: (id, workspace) => harness.managedWorkspaceScope(id, workspace),
           readWorkerContext: (workerId) => workerContextStore.read(workerId),
           managerKey: key,
           managerPrincipalPermissions: managerPermissions ?? undefined,

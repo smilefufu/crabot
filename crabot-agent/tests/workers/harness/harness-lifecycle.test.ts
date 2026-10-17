@@ -1,3 +1,4 @@
+import { BUILTIN_WORKER_PERMISSIONS } from '../../../src/workers/builtin/runtime.js'
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { promises as fs } from 'fs'
 import { tmpdir } from 'os'
@@ -329,6 +330,7 @@ function spawnParams(overrides: Partial<SpawnWorkerParams> = {}): SpawnWorkerPar
     origin: {
       trigger_type: 'message' },
     report_to: { channel_id: 'wechat', session_id: 'sess-1' },
+    principal_permissions: { ...BUILTIN_WORKER_PERMISSIONS, storage: { workspace_path: overrides.workspace ?? dataDir, access: 'readwrite' } },
     ...overrides,
   }
 }
@@ -711,7 +713,7 @@ describe('WorkerHarness.spawnWorker', () => {
 
   it('无 principal 的新 worker 仍在 provision 前落空 context，而非误作 legacy ENOENT', async () => {
     const { harness, workersDir } = await makeHarness()
-    const worker = await harness.spawnWorker(spawnParams())
+    const worker = await harness.spawnWorker(spawnParams({ principal_permissions: undefined }))
     expect(JSON.parse(await fs.readFile(join(workersDir, worker.worker_id, 'context.json'), 'utf-8'))).toEqual({
       manager_key: 'test::friend-1',
     })
