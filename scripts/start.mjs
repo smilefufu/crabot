@@ -5,22 +5,22 @@
 
 import './_preflight.mjs'
 
-import { existsSync, readFileSync, mkdirSync, openSync } from 'node:fs'
+import { existsSync, readFileSync, mkdirSync } from 'node:fs'
 import { randomBytes } from 'node:crypto'
 import { createInterface } from 'node:readline'
 import { resolve, dirname } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { spawn, spawnSync } from 'node:child_process'
+import { spawnSync } from 'node:child_process'
 import { homedir } from 'node:os'
 import net from 'node:net'
-import { checkSingleInstance, isPidAlive } from './lib/pid.mjs'
+import { checkSingleInstance } from './lib/pid.mjs'
 import { scanModules, applyMigration } from './upgrade-lib/migrate.mjs'
 import { runScript } from './upgrade-lib/runner.mjs'
 import { hasInstance, resolveCliDataDir } from './lib/instance.mjs'
-import { probeMmHealthy } from './lib/mm-probe.mjs'
 import { acquireCliLock, releaseCliLock, hasInheritedCliLock } from './lib/cli-lock.mjs'
 import { runManagedCore } from './lib/managed-core.mjs'
 import { inspectInstance } from './lib/instance-runtime.mjs'
+import { launchBackgroundCore } from './lib/background-core.mjs'
 import scraplingRuntime from './lib/scrapling-runtime.cjs'
 import { runBounded } from './lib/scrapling-prepare.mjs'
 
@@ -255,55 +255,13 @@ if (!DAEMON_MODE) {
   releaseCliLock(startupLock)
   startupLock = undefined
 } else {
-  // 后台模式：spawn detached supervisor，父进程轮询 health 后退出
-  const supervisorEntry = resolve(__dirname, 'supervisor.mjs')
-  // supervisor 自身的 boot 日志：它若在顶层 import 阶段就崩（如缺运行时依赖），
-  // stdio:'ignore' 会让它静默消失、连 mm.stderr.log 都来不及建（supervisor.mjs
-  // 在更后面才 createStream）。把 supervisor 进程自己的 stdout/stderr 落到这里，
-  // 保证这类「起不来且没日志」的崩溃留下堆栈。
-  const bootLogDir = resolve(DATA_DIR, 'logs')
-  mkdirSync(bootLogDir, { recursive: true })
-  const bootLogFd = openSync(resolve(bootLogDir, 'supervisor.boot.log'), 'a')
-  const sup = spawn(process.execPath, [supervisorEntry], {
-    detached: true,
-    stdio: ['ignore', bootLogFd, bootLogFd],
-    env: {
-      ...process.env,
-      CRABOT_SUPERVISOR_DATA_DIR: DATA_DIR,
-      CRABOT_SUPERVISOR_MM_ENTRY: mmEntry,
-      CRABOT_SUPERVISOR_MM_CWD: resolve(ROOT, 'crabot-core'),
-    },
-  })
-  // The supervisor publishes its own verified controller/MM identities under this startup lock.
-  sup.unref()
-
-  console.log('[crabot] Starting in background...')
-  console.log('[crabot] Waiting for Module Manager to become healthy... (up to 30s)')
-
-  // 健康轮询（最多 30s）
-  const deadline = Date.now() + 30_000
-  while (Date.now() < deadline) {
-    if (!isPidAlive(sup.pid)) {
-      console.error('[crabot] supervisor exited unexpectedly. Check logs at', resolve(DATA_DIR, 'logs/supervisor.boot.log'))
-      process.exit(1)
-    }
-    try {
-      // MM 的 /health 是 POST RPC 路由，GET 会 405（见 lib/mm-probe.mjs）
-      if (await probeMmHealthy(MM_PORT)) {
-        const r2 = await fetch(`http://localhost:${WEB_PORT}/health`, { signal: AbortSignal.timeout(1500) })
-        if (r2.ok) {
-          console.log(`[crabot] \x1b[32m●\x1b[0m MM ready (port ${MM_PORT})`)
-          console.log(`[crabot] \x1b[32m●\x1b[0m Admin Web ready (port ${WEB_PORT})`)
-          console.log(`[crabot] Started. PID ${sup.pid}. Run \`crabot status\` to check, \`crabot stop\` to stop.`)
-          process.exit(0)
-        }
-      }
-    } catch { /* keep trying */ }
-    await new Promise(r => setTimeout(r, 250))
-  }
-  console.error(`[crabot] timeout after 30s. Check logs at ${resolve(DATA_DIR, 'logs/mm.stderr.log')}`)
-  console.error(`[crabot] supervisor still running at pid ${sup.pid}; if it eventually starts, fine; otherwise crabot stop.`)
-  process.exit(1)
+  try {
+    const { record } = await launchBackgroundCore({ root: ROOT, dataDir: DATA_DIR, env: process.env,
+      mmPort: MM_PORT, webPort: WEB_PORT, log: message => console.log(`[crabot] ${message}`) })
+    console.log(`[crabot] MM ready (port ${MM_PORT}); Admin Web ready (port ${WEB_PORT}).`)
+    console.log(`[crabot] Started. PID ${record.controller.pid}. Run \`crabot status\` to check, \`crabot stop\` to stop.`)
+    process.exit(0)
+  } catch (error) { console.error(`[crabot] ${error.message}`); process.exit(1) }
 }
 
 // ── 辅助函数 ──

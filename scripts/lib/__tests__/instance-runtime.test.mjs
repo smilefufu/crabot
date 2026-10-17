@@ -74,6 +74,35 @@ test('late cleanup cannot remove the replacement generation or its mm.pid', asyn
   await stopInstance(f.data)
 })
 
+test('status JSON uses the verified MM and discovered Admin port, and never repairs forged identity', async t => {
+  const f = await fixture(t)
+  const statusEntry = fileURLToPath(new URL('../../status.mjs', import.meta.url))
+  async function status() {
+    const child = spawn(process.execPath, [statusEntry, '--json'], {
+      env: { ...process.env, DATA_DIR: f.data, HOME: f.root, USERPROFILE: f.root, CRABOT_PORT_OFFSET: '0' },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    let stdout = '', stderr = ''
+    child.stdout.on('data', chunk => { stdout += chunk }); child.stderr.on('data', chunk => { stderr += chunk })
+    const [code] = await once(child, 'exit')
+    assert.equal(code, 0, stderr)
+    return { body: JSON.parse(stdout), stderr }
+  }
+  const healthy = await status()
+  assert.equal(healthy.body.running, true)
+  assert.equal(healthy.body.endpoints.mm.url, `http://localhost:${f.record.mm_port}`)
+  assert.equal(healthy.body.endpoints.admin_rpc.url, 'http://localhost:23456')
+  const file = join(f.data, 'instance-runtime.json')
+  const forged = JSON.stringify({ ...f.record, controller: { ...f.record.controller, started: 'wrong incarnation' } })
+  writeFileSync(file, forged)
+  const unverified = await status()
+  assert.equal(unverified.body.running, false)
+  assert.match(unverified.stderr, /Cannot verify instance identity/)
+  assert.equal(readFileSync(file, 'utf8'), forged)
+  writeFileSync(file, JSON.stringify(f.record))
+  await stopInstance(f.data)
+})
+
 test('legacy PID alone is not adopted and an MM shutdown window cannot be shortened', async t => {
   const root = mkdtempSync(join(tmpdir(), 'crabot-legacy-pid-'))
   t.after(() => rmSync(root, { recursive: true, force: true }))

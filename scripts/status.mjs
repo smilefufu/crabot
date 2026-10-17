@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url'
 import { homedir } from 'node:os'
 import { hasInstance, readInstance, resolveCliDataDir } from './lib/instance.mjs'
 import { probeMmModules } from './lib/mm-probe.mjs'
+import { inspectInstance } from './lib/instance-runtime.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const ROOT = resolve(__dirname, '..')
@@ -36,10 +37,23 @@ const ENDPOINTS = {
 }
 
 // 单点判定：MM 活 = 整个实例活；admin_ui/admin_rpc 的死活从 modules 里找 admin-web 推断
-const modules = await probeMmModules(19000 + OFFSET)
+let modules = null
+try {
+  const instance = inspectInstance(DATA_DIR)
+  if (instance.state === 'legacy') {
+    // Read-only compatibility; this is not an ownership proof and cannot authorize takeover/stop.
+    modules = await probeMmModules(19000 + OFFSET)
+  } else if (instance.state === 'running' && instance.record.mm) {
+    ENDPOINTS.mm.url = `http://localhost:${instance.record.mm_port}`
+    const snapshot = await probeMmModules(instance.record.mm_port)
+    const latest = inspectInstance(DATA_DIR)
+    if (latest.state === 'running' && latest.record.generation === instance.record.generation) modules = snapshot
+  }
+} catch (error) { console.error(`[crabot] Cannot verify instance identity: ${error.message}`) }
 const running = modules !== null
 const adminModule = modules?.find((m) => (m.module_id ?? m.id) === 'admin-web')
 const adminAlive = adminModule?.status === 'running'
+if (typeof adminModule?.port === 'number') ENDPOINTS.admin_rpc.url = `http://localhost:${adminModule.port}`
 
 const health = {
   mm: running,

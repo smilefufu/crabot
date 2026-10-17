@@ -20,6 +20,8 @@ createServer((request, response) => {
       const valid = input.params?.expected_generation === process.env.CRABOT_INSTANCE_GENERATION
       response.writeHead(valid ? 200 : 409).end(JSON.stringify({ success: valid }))
       if (valid) stop()
-    } else response.end(JSON.stringify({ success: true }))
+    } else if (request.url === '/list_modules') {
+      response.end(JSON.stringify({ success: true, data: { modules: [{ module_id: 'admin-web', status: 'running', port: 23456 }] } }))
+    } else response.end(JSON.stringify({ success: true, data: { status: 'healthy' } }))
   })
 }).listen(Number(process.env.TEST_PORT), '127.0.0.1', () => writeFileSync(process.env.TEST_READY, 'ready'))
