@@ -87,6 +87,7 @@ export interface ToolFaceDeps {
   readonly validateMasterAuthorization?: (auth: MasterAuthorization) => Promise<boolean>
   /** Episode-local delivery/control evidence used to close a Worker turn. */
   readonly hasSuccessfulWorkerDelivery?: import('./worker-tools.js').WorkerToolsDeps['hasSuccessfulWorkerDelivery']
+  readonly onWorkerTurnInspected?: import('./worker-tools.js').WorkerToolsDeps['onWorkerTurnInspected']
   readonly hasSuccessfulSendMessageTo?: (target: { channel_id: string; session_id: string }) => boolean
   readonly onSuccessfulSendMessage?: (target: { channel_id: string; session_id: string }) => void
   readonly hasContinuedWorker?: (workerId: string) => boolean
@@ -625,6 +626,7 @@ export function buildManagerToolFace(deps: ToolFaceDeps): ToolDefinition[] {
     readWorkerSubagentDetail: deps.readWorkerSubagentDetail,
     readWorkerSubagentTrace: deps.readWorkerSubagentTrace,
     ...(deps.hasSuccessfulWorkerDelivery ? { hasSuccessfulWorkerDelivery: deps.hasSuccessfulWorkerDelivery } : {}),
+    ...(deps.onWorkerTurnInspected ? { onWorkerTurnInspected: deps.onWorkerTurnInspected } : {}),
     ...(deps.hasSuccessfulSendMessageTo ? { hasSuccessfulSendMessageTo: deps.hasSuccessfulSendMessageTo } : {}),
     ...(deps.hasContinuedWorker ? { hasContinuedWorker: deps.hasContinuedWorker } : {}),
     ...(deps.onWorkerContinuation ? { onWorkerContinuation: deps.onWorkerContinuation } : {}),

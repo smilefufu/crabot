@@ -243,6 +243,7 @@ export interface ManagerRegistryDeps {
       onWorkerSpawned: (workerId: string) => void
       onPostSendAction: () => void
       hasSuccessfulWorkerDelivery?: import('./tools/worker-tools.js').WorkerToolsDeps['hasSuccessfulWorkerDelivery']
+      onWorkerTurnInspected?: import('./tools/worker-tools.js').WorkerToolsDeps['onWorkerTurnInspected']
       hasSuccessfulSendMessageTo: (target: { channel_id: string; session_id: string }) => boolean
       onSuccessfulSendMessage: (target: { channel_id: string; session_id: string }) => void
       sessionChannelsFor: (sessionId: string) => ReadonlySet<string> | undefined
@@ -450,6 +451,7 @@ export class ManagerRegistry {
             voiceReplyContext: () => this.loops.get(key)?.voiceReplyContext,
             onWorkerSpawned: (workerId) => this.loops.get(key)?.recordSpawnedWorker(workerId),
             onPostSendAction: () => this.loops.get(key)?.recordPostSendAction(),
+            onWorkerTurnInspected: (worker, turnId) => this.loops.get(key)?.recordInspectedWorkerTurn(worker, turnId),
             hasSuccessfulWorkerDelivery: (worker, turnId) => {
               const loop = this.loops.get(key), voice = this.deps.voiceOutputFor?.(key)
               return worker.report_to.channel_id + '::' + worker.report_to.session_id === key && voice?.isVoice() && voice.prepare ? loop?.hasSuccessfulVoiceWorkerDelivery(worker.worker_id, turnId) ?? false : loop?.hasSuccessfulSendMessageTo(worker.report_to) ?? false

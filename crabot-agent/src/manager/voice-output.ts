@@ -100,7 +100,7 @@ export class TaggedVoiceOutput {
     private readonly resumeRecord?: () => VoiceDeliveryRecord | undefined) {}
   notes(): string {
     const facts = this.port.records().slice(-3).map(({ text, status, played_samples, completed_text }) => ({ text, status, played_samples, completed_text }))
-    return facts.length ? '\n\n语音交付事实（运行时记录；只有 completed 表示全文已播出，其它状态不能当作人类已听到全文）：\n' + JSON.stringify(facts) : ''
+    return facts.length ? '\n\n语音交付事实由系统记录：待交付只是已保存；只有 completed 表示对应文字已完整播放，不证明人类实际听见。部分、取消或未知播放不能当作全文送达，不自动从头重说。终端恢复后需要衔接多项结果时，只整理这些原本允许回到当前会话的结果，给出各项核心结论，不重新执行任务，不混入私发正文或内部过程。\n' + JSON.stringify(facts) : ''
   }
   consumer(): AssistantTextConsumer {
     const context = this.context(), binding = this.binding?.(), key = context?.turn_id ?? binding?.response_id

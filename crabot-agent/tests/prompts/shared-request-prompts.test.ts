@@ -33,6 +33,19 @@ describe('approved shared request prompt projections', () => {
     expect(prompt).not.toContain('按需用表格、图示或页面帮助人类理解')
   })
 
+  it('keeps task reporting alive after an input turn and limits companion wording to Voice', () => {
+    const voice = assembleManagerSystemPrompt({ ...group, requestAuthorization: 'shared', voice: true })
+    expect(voice).toContain('原来那次语音交互结束不代表任务回报结束')
+    expect(voice).toContain('待交付不代表已经播放')
+    expect(voice).toContain('不为每件事重复索要播放许可')
+    expect(voice).not.toContain('当前没有有效语音交互时，不承诺即时播报')
+    for (const inputs of [{ ...group }, { ...group, isGroup: false }, { ...group, isSystemThread: true }]) {
+      const other = assembleManagerSystemPrompt(inputs)
+      expect(other).not.toContain('原来那次语音交互结束不代表任务回报结束')
+      expect(other).not.toContain('不为每件事重复索要播放许可')
+    }
+  })
+
   it.each([
     { ...group, isGroup: false },
     { ...group, isSystemThread: true },

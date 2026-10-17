@@ -114,6 +114,7 @@ export function createConversationRequestLoop(context: RequestRunContext, deps: 
       onObservedSessionTargets: targets => loop?.recordObservedSessionTargets(targets),
       onPostSendAction: () => loop?.recordPostSendAction(),
       hasSuccessfulSendMessageTo: value => loop?.hasSuccessfulSendMessageTo(value) ?? false,
+      onWorkerTurnInspected: (worker, turnId) => loop?.recordInspectedWorkerTurn(worker, turnId),
       hasSuccessfulWorkerDelivery: async (worker, turnId) => {
         const bound = await deps.guard.load(worker.worker_id)
         if (bound?.request.delivery.kind === 'requester_private') return bound.request.request_id === request.request_id && loop.hasSuccessfulHumanDelivery

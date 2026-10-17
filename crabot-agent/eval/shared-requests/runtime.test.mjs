@@ -182,3 +182,37 @@ test('offline personal voice Worker reports once after the original reply closes
     assert.ok(events.some(event => event.type === 'synthetic_voice_output' && event.params.event.type === 'response_end'))
   } finally { await fs.rm(root, { recursive: true, force: true }) }
 })
+
+for (const voicePause of ['muted', 'offline']) test('offline harness retains an unsent voice answer until explicit ' + voicePause + ' restore', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'b7-voice-restore-'))
+  const adapter = { updateConfig() {}, async *stream() { yield* response(undefined, '<voice_reply>十五。</voice_reply>') } }
+  try {
+    const result = await runCase({ scenario: { id: 'offline-voice-restore-' + voicePause, voice: true, task: 'public', voicePause }, root: path.join(root, 'data'), liveAdapter: adapter, model: 'scripted', connection: { endpoint: 'https://example.invalid', apikey: 'not-a-real-key', format: 'openai', model_id: 'scripted' }, record() {}, budget: { take: () => true }, timeoutMs: 10000 })
+    assert.equal(result.status, 'passed', JSON.stringify(result))
+    assert.equal(result.requests, 1)
+    assert.deepEqual(result.voice_restore, { queued_before_restore: 1, voice_texts_before_restore: 0, restored: true })
+    assert.equal(result.spoken.filter(item => item.event.type === 'reply_start').length, 1)
+  } finally { await fs.rm(root, { recursive: true, force: true }) }
+})
+
+
+test('offline harness catches up two public results without a new human wake at restore', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'b7-voice-backlog-'))
+  const events = []
+  let step = 0
+  const adapter = { updateConfig() {}, async *stream() {
+    yield* response(undefined, ['<voice_reply>十五。</voice_reply>', '<voice_reply>五十六。</voice_reply>',
+      '<voice_reply>加法结果是十五。</voice_reply><voice_reply>乘法结果是五十六。</voice_reply>'][step++])
+  } }
+  try {
+    const result = await runCase({ scenario: cases.find(item => item.id === 'public-voice-backlog'), root: path.join(root, 'data'), liveAdapter: adapter, model: 'scripted', connection: { endpoint: 'https://example.invalid', apikey: 'not-a-real-key', format: 'openai', model_id: 'scripted' }, record: event => events.push(event), budget: { take: () => true }, timeoutMs: 10000 })
+    assert.equal(result.status, 'passed', JSON.stringify(result))
+    assert.equal(result.requests, 3)
+    assert.deepEqual(result.voice_restore, { queued_before_restore: 2, voice_texts_before_restore: 0, restored: true })
+    assert.equal(result.spoken.filter(item => item.event.type === 'reply_start').length, 2)
+    const summary = events.filter(event => event.type === 'model_input').at(-1)
+    assert.ok(JSON.stringify(summary.messages).includes('不需要你判断周围是否有人聊天'))
+    assert.ok(JSON.stringify(summary.messages).includes('不要假设用户已唤醒或准备接话'))
+    assert.equal(result.source_inputs.length, 2)
+  } finally { await fs.rm(root, { recursive: true, force: true }) }
+})

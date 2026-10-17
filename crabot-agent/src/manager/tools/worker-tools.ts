@@ -111,6 +111,8 @@ export interface WorkerToolsDeps {
   }>
   /** Request-owned delivery proof may use its fixed private target; it cannot settle another request. */
   readonly hasSuccessfulWorkerDelivery?: (worker: LedgerWorker, turnId: string) => boolean | Promise<boolean>
+  /** Host-authorized, successfully read frozen turn; never supplied by the model as delivery proof. */
+  readonly onWorkerTurnInspected?: (worker: LedgerWorker, turnId: string) => void
   /** Exact report target must have accepted a send_message in this Manager episode. */
   readonly hasSuccessfulSendMessageTo?: (target: { channel_id: string; session_id: string }) => boolean
   /** A continued turn needs an actual same-episode input/continuation action. */
@@ -595,7 +597,7 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
       if (view !== undefined && view !== 'result' && view !== 'activity') return invalid('get_worker_turn: view 只能是 result 或 activity')
       if (cursor !== undefined && typeof cursor !== 'string') return invalid('get_worker_turn: cursor 必须是字符串')
       try {
-        await authorizeWorker(worker_id, callContext)
+        const worker = await authorizeWorker(worker_id, callContext)
         const pageCursor = readTurnCursor(params)
         const turn = await harness.getWorkerTurn(worker_id, pageCursor?.turn_id ?? turn_id)
         const activity = turn && (view === 'activity' || !turn.completion_result)
@@ -605,7 +607,9 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
           content: activity?.events.map((event) => JSON.stringify(event) + '\n').join('') ?? '',
           ...(activity?.unavailableReason ? { unavailable_reason: activity.unavailableReason } : {}),
         } : turn?.completion_result ?? extractWorkerCompletion(activity?.events ?? [], undefined, activity?.unavailableReason)
-        return ok(pageWorkerTurn(params, turn, body))
+        const page = pageWorkerTurn(params, turn, body)
+        if (turn) deps.onWorkerTurnInspected?.(worker, turn.turn_id)
+        return ok(page)
       } catch (error) {
         return mapError(`get_worker_turn(${worker_id})`, error)
       }
@@ -686,7 +690,7 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
   const resolveWorkerTurn = defineTool({
     name: 'resolve_worker_turn',
     description:
-      deps.voice ? '标记一个已检查的执行器回合如何处置。reported 或 asked_human 必须已向该执行器的 report_to 完成正式交付：当前语音会话以标签回复实际播放完成为准，其它渠道以发送工具成功投递为准。continued 必须已实际续办；suppressed 必须写明原因。' : ('标记一个已检查的执行器回合如何处置。reported 或 asked_human 必须已向该执行器的 report_to 成功发送；' +
+      deps.voice ? '标记一个已检查的执行器回合如何处置。reported 或 asked_human 必须已有与该执行器原回报关联的真实正式交付：当前语音会话以实际播放完成为准，其它渠道以发送工具成功投递为准。语音待交付不算成功，可结束本回合等待投递，不要重复输出同一结果或重做任务。continued 必须已实际续办；suppressed 必须写明原因。' : ('标记一个已检查的执行器回合如何处置。reported 或 asked_human 必须已向该执行器的 report_to 成功发送；' +
       'continued 必须已实际续办；suppressed 必须写明原因。'),
     inputSchema: {
       type: 'object',

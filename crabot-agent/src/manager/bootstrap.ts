@@ -1097,6 +1097,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
         authorization: () => principals.currentMasterAuthorization(key),
         validateMasterAuthorization: (auth) => principals.validateMasterAuthorization(auth),
         hasSuccessfulWorkerDelivery: traceHooks?.hasSuccessfulWorkerDelivery,
+        onWorkerTurnInspected: traceHooks?.onWorkerTurnInspected,
         hasSuccessfulSendMessageTo: traceHooks?.hasSuccessfulSendMessageTo,
         onSuccessfulSendMessage: traceHooks?.onSuccessfulSendMessage,
         hasContinuedWorker: traceHooks?.hasContinuedWorker,

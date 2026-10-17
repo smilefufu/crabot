@@ -1,0 +1,407 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-17",
+  "model": "gpt-6.1-sol",
+  "format": "openai",
+  "additional_model_adapter_calls": 71,
+  "scope": "Production Manager/Request/Harness/Builtin with configured model, public product prompts and synthetic identities, conversations and files; isolated Channel/Memory/MCP and simulated playback receipts. No live voice, contacts, files or deployment.",
+  "prompt_status": "All five exact Voice-only wording changes confirmed in conversation, including wake-only input boundary.",
+  "verification": {
+    "agent_directed_passed": 161,
+    "excluded_preexisting_tests": 3,
+    "offline_harness_passed": 9,
+    "managed_workspace_passed": 11,
+    "agent_typescript_build": "passed",
+    "prompt_profiles": 8,
+    "core_tool_counts": [
+      15,
+      11,
+      3
+    ],
+    "actual_input_audits": "All seven recorded scenarios passed prompt/isolation checks, including the two retained functional failures."
+  },
+  "failure_and_repair": {
+    "retained_failure": "Both first restore cases played saved text but could not settle original Worker turn: result was read via get_worker_turn before turn_completed, leaving voice output without Worker/turn binding.",
+    "repair": "Record only host-authorized successfully read frozen Worker turn and its original request/target in the active Manager episode. Shared and isolated request paths covered. Two production regressions failed before repair and passed after.",
+    "post_repair": "Muted/offline cases each used a fresh notification epoch, no voice text before explicit restore, exact original Worker turn binding and reported after completed. Two-result backlog delivered two core conclusions with separate receipts."
+  },
+  "baseline_failures_reproduced_on_unmodified_code": {
+    "base_commit": "bd5802bd",
+    "failures": [
+      "2 existing registry Memory error projection assertions",
+      "1 existing generic role prompt assertion",
+      "3 existing bootstrap dispatch assertions",
+      "41 of 53 legacy worker-tools fixtures fail missing trusted subject (not weakened)"
+    ]
+  },
+  "acceptance": {
+    "passed_current_real_model_cases": [
+      "public-voice",
+      "personal-voice",
+      "personal-voice-muted",
+      "personal-voice-offline",
+      "public-voice-backlog"
+    ],
+    "whole_B7": "not declared complete",
+    "human_voice_acceptance": "not performed",
+    "deployed": false,
+    "latency_limit": "The online personal file-read sample emitted no early acknowledgement; first Voice text at 23671ms. This is not microphone/TTS/first-audio latency acceptance."
+  },
+  "cohorts": [
+    {
+      "cohort": "crabot-voice-feedback-live-20261017-1530",
+      "plan_sha256": "2b7cad577d43f62701b431b4cd28ad4f66c412a508f30243d43fe824061a2959",
+      "base_commit": "8363f2b4e6d3045d0972649b4e726bf735fb5aa6",
+      "source_hashes": {
+        "crabot-agent/src/manager/prompt.ts": "494c3aed7820cc9918e672c1b1aa212924631b34234a4c4d23d1271f06d5e84e",
+        "crabot-agent/src/manager/loop.ts": "7e8d766c5b1bdba9b49dd14f611d5ca46db0b4d57649b63d65e68e58b98d9ae2",
+        "crabot-agent/src/manager/voice-output.ts": "47e991bde2592002839ec6622e01fc99314c06f1c58b326b73e148514a98f9bb",
+        "crabot-agent/src/manager/voice-output-port.ts": "882a81d9624eb3048f5b2851525348692bd22ba03a119e747579705518c068a4",
+        "crabot-agent/src/manager/tools/worker-tools.ts": "b8196e357a7c3c8c92073beae28a39fb189fe900c7deedb5c93e7f14074dbf5c",
+        "crabot-agent/src/manager/request-loop.ts": "ab093c136866ad6487886973aa73cc14d287a6d3918489ee592eb0eca7033f0a",
+        "crabot-agent/src/manager/conversation-request-runner.ts": "ae22dc7f43e4a5e0cbf97dd94a623d87b68e4c2de5d66c50dac3472be9831561",
+        "crabot-agent/src/manager/bootstrap.ts": "88566083dc7dd196a94dfbbaeee8281c3d3e14ff87b568ec53b8c38e8321adef",
+        "crabot-agent/src/guidance/content.ts": "b5bfc9de2e0c635f9b48cab5005e352c51451c344a8fd6e4ea3627cb6280990b",
+        "crabot-shared/src/permission-entries.ts": "944ba22530e5277ad56733a20c99389aae664cd04196dca9e2f7d2b7ba8d6681",
+        "crabot-agent/eval/shared-requests/runtime.mjs": "269455f3808b75bb9ef9f7616b19f93ba48d80d0c90a1cff813843d243a5d61b"
+      },
+      "model_adapter_calls": 14,
+      "cases": [
+        {
+          "scenario": "personal-voice",
+          "recorded_status": "passed",
+          "fatal": null,
+          "model_adapter_calls": 13,
+          "elapsed_ms": 32606,
+          "checks": {
+            "no_hijack": true,
+            "worker_reached": true,
+            "bound_owner_unchanged": true,
+            "interruption_reached": true,
+            "no_private_shared_body": true,
+            "private_target": true,
+            "expected_effect": true,
+            "no_duplicate_unknown_send": true,
+            "worker_receipt": true,
+            "voice_tag_delivery": true,
+            "request_isolation": true,
+            "no_fixture_gaps": true
+          },
+          "voice_restore": null,
+          "first_voice_text_ms": 23671,
+          "worker_turn_count": 1,
+          "all_original_worker_turns_reported": true,
+          "exact_worker_turn_playback_binding": true,
+          "reply_start_count": 1,
+          "actual_human_source_count": 1,
+          "pending_results_instruction_seen": false,
+          "raw_artifact_sha256": {
+            "events.jsonl": "201a02c3f9e83b44b0f555b228ee8262fcd328b59f1790a01963811c447ed8db",
+            "result.json": "c72c320135674c787ce7a1548b84c395079c80519a4e8b8f023224997f0bb9a1"
+          }
+        },
+        {
+          "scenario": "public-voice",
+          "recorded_status": "passed",
+          "fatal": null,
+          "model_adapter_calls": 1,
+          "elapsed_ms": 2629,
+          "checks": {
+            "no_hijack": true,
+            "worker_reached": true,
+            "bound_owner_unchanged": true,
+            "interruption_reached": true,
+            "no_private_shared_body": true,
+            "private_target": true,
+            "expected_effect": true,
+            "no_duplicate_unknown_send": true,
+            "worker_receipt": true,
+            "voice_tag_delivery": true,
+            "request_isolation": true,
+            "no_fixture_gaps": true
+          },
+          "voice_restore": null,
+          "first_voice_text_ms": 1952,
+          "worker_turn_count": 0,
+          "all_original_worker_turns_reported": false,
+          "exact_worker_turn_playback_binding": false,
+          "reply_start_count": 1,
+          "actual_human_source_count": 1,
+          "pending_results_instruction_seen": false,
+          "raw_artifact_sha256": {
+            "events.jsonl": "2cc31b991bac7f6a166b485536bcbf8fc5df6252215c3de9261bfb3f77cdc03a",
+            "result.json": "a5b33ce8fc37ed5d2c5fb22e3fd85c9c28e7493ca9ab7bb3d7abf31610596741"
+          }
+        }
+      ]
+    },
+    {
+      "cohort": "crabot-voice-restore-live-20261017-1541",
+      "plan_sha256": "3c2022ce89583b826329a684d5aab858a26bcba9f158348139e19d31e3aead39",
+      "base_commit": "8363f2b4e6d3045d0972649b4e726bf735fb5aa6",
+      "source_hashes": {
+        "crabot-agent/src/manager/prompt.ts": "494c3aed7820cc9918e672c1b1aa212924631b34234a4c4d23d1271f06d5e84e",
+        "crabot-agent/src/manager/loop.ts": "7e8d766c5b1bdba9b49dd14f611d5ca46db0b4d57649b63d65e68e58b98d9ae2",
+        "crabot-agent/src/manager/voice-output.ts": "47e991bde2592002839ec6622e01fc99314c06f1c58b326b73e148514a98f9bb",
+        "crabot-agent/src/manager/voice-output-port.ts": "882a81d9624eb3048f5b2851525348692bd22ba03a119e747579705518c068a4",
+        "crabot-agent/src/manager/tools/worker-tools.ts": "b8196e357a7c3c8c92073beae28a39fb189fe900c7deedb5c93e7f14074dbf5c",
+        "crabot-agent/src/manager/request-loop.ts": "ab093c136866ad6487886973aa73cc14d287a6d3918489ee592eb0eca7033f0a",
+        "crabot-agent/src/manager/conversation-request-runner.ts": "ae22dc7f43e4a5e0cbf97dd94a623d87b68e4c2de5d66c50dac3472be9831561",
+        "crabot-agent/src/manager/bootstrap.ts": "88566083dc7dd196a94dfbbaeee8281c3d3e14ff87b568ec53b8c38e8321adef",
+        "crabot-agent/src/guidance/content.ts": "b5bfc9de2e0c635f9b48cab5005e352c51451c344a8fd6e4ea3627cb6280990b",
+        "crabot-shared/src/permission-entries.ts": "944ba22530e5277ad56733a20c99389aae664cd04196dca9e2f7d2b7ba8d6681",
+        "crabot-agent/eval/shared-requests/runtime.mjs": "0926a201f4328fd8204c8f36975e227118763b5cfa55afc62db12b49d2f82836"
+      },
+      "model_adapter_calls": 25,
+      "cases": [
+        {
+          "scenario": "personal-voice-muted",
+          "recorded_status": "failed",
+          "fatal": null,
+          "model_adapter_calls": 12,
+          "elapsed_ms": 117269,
+          "checks": {
+            "no_hijack": true,
+            "worker_reached": true,
+            "bound_owner_unchanged": true,
+            "interruption_reached": true,
+            "no_private_shared_body": true,
+            "private_target": true,
+            "expected_effect": true,
+            "no_duplicate_unknown_send": true,
+            "worker_receipt": true,
+            "voice_tag_delivery": true,
+            "request_isolation": true,
+            "no_fixture_gaps": true,
+            "voice_waited_for_restore": true,
+            "voice_fresh_notification": true,
+            "original_worker_reported": false
+          },
+          "voice_restore": {
+            "queued_before_restore": 1,
+            "voice_texts_before_restore": 0,
+            "restored": true
+          },
+          "first_voice_text_ms": 116736,
+          "worker_turn_count": 1,
+          "all_original_worker_turns_reported": false,
+          "exact_worker_turn_playback_binding": false,
+          "reply_start_count": 1,
+          "actual_human_source_count": 1,
+          "pending_results_instruction_seen": false,
+          "raw_artifact_sha256": {
+            "events.jsonl": "01d565de9bb58a377fd31c04102baa3a73663bac573be3a72d7d2f3179e43749",
+            "result.json": "8bff852b0bb24941d3336e5d38dc6dce494dba9c66fbfe8917602f9bf0a13577"
+          }
+        },
+        {
+          "scenario": "personal-voice-offline",
+          "recorded_status": "failed",
+          "fatal": null,
+          "model_adapter_calls": 13,
+          "elapsed_ms": 30494,
+          "checks": {
+            "no_hijack": true,
+            "worker_reached": true,
+            "bound_owner_unchanged": true,
+            "interruption_reached": true,
+            "no_private_shared_body": true,
+            "private_target": true,
+            "expected_effect": true,
+            "no_duplicate_unknown_send": true,
+            "worker_receipt": true,
+            "voice_tag_delivery": true,
+            "request_isolation": true,
+            "no_fixture_gaps": true,
+            "voice_waited_for_restore": true,
+            "voice_fresh_notification": true,
+            "original_worker_reported": false
+          },
+          "voice_restore": {
+            "queued_before_restore": 2,
+            "voice_texts_before_restore": 0,
+            "restored": true
+          },
+          "first_voice_text_ms": 29269,
+          "worker_turn_count": 1,
+          "all_original_worker_turns_reported": false,
+          "exact_worker_turn_playback_binding": false,
+          "reply_start_count": 2,
+          "actual_human_source_count": 1,
+          "pending_results_instruction_seen": true,
+          "raw_artifact_sha256": {
+            "events.jsonl": "c2e681673e8f4d7b64539643567d9988be04ab19ddc922e135812c81d2a1916d",
+            "result.json": "1b21d29ab2ecfecbc3dd192a86cdb28f1a2fc82ca1115bf1fefd6bac987f393a"
+          }
+        }
+      ]
+    },
+    {
+      "cohort": "crabot-voice-restore-fixed-live-20261017-1545",
+      "plan_sha256": "fa2cbbbb7253a5174b7fedf2b387b7f350a222573ca114d286711b012b466c84",
+      "base_commit": "8363f2b4e6d3045d0972649b4e726bf735fb5aa6",
+      "source_hashes": {
+        "crabot-agent/src/manager/prompt.ts": "494c3aed7820cc9918e672c1b1aa212924631b34234a4c4d23d1271f06d5e84e",
+        "crabot-agent/src/manager/loop.ts": "16131b17d901e56110e9bc53ded660b88a9148873279f1821c0f0a41ddd9e4c6",
+        "crabot-agent/src/manager/voice-output.ts": "47e991bde2592002839ec6622e01fc99314c06f1c58b326b73e148514a98f9bb",
+        "crabot-agent/src/manager/voice-output-port.ts": "882a81d9624eb3048f5b2851525348692bd22ba03a119e747579705518c068a4",
+        "crabot-agent/src/manager/tools/worker-tools.ts": "935c5c25c44b17dea7ba40a2f2ae888c56ea92956a709a670c70e6e84f997d9d",
+        "crabot-agent/src/manager/tools/tool-face.ts": "29a5707d4757588c60fe9551c22a27202ba2831cc797b3290ea552ee35365e4e",
+        "crabot-agent/src/manager/registry.ts": "d9d44e6ebacd4e42a8a6bd0aa8f15e883f963fd7203d1375491cf6684e7a5b5f",
+        "crabot-agent/src/manager/request-loop.ts": "6a61e9f4c66cf610abd01182ddd1415df6958c1dfc3763af9a00dec533ab4971",
+        "crabot-agent/src/manager/conversation-request-runner.ts": "ae22dc7f43e4a5e0cbf97dd94a623d87b68e4c2de5d66c50dac3472be9831561",
+        "crabot-agent/src/manager/bootstrap.ts": "bc75b16d51bd617ecd1ae9a6842fc5ba57fd4804ee43563567f2fcaf8acdc8b7",
+        "crabot-agent/src/guidance/content.ts": "b5bfc9de2e0c635f9b48cab5005e352c51451c344a8fd6e4ea3627cb6280990b",
+        "crabot-shared/src/permission-entries.ts": "944ba22530e5277ad56733a20c99389aae664cd04196dca9e2f7d2b7ba8d6681",
+        "crabot-agent/eval/shared-requests/runtime.mjs": "0926a201f4328fd8204c8f36975e227118763b5cfa55afc62db12b49d2f82836"
+      },
+      "model_adapter_calls": 29,
+      "cases": [
+        {
+          "scenario": "personal-voice-muted",
+          "recorded_status": "passed",
+          "fatal": null,
+          "model_adapter_calls": 14,
+          "elapsed_ms": 32131,
+          "checks": {
+            "no_hijack": true,
+            "worker_reached": true,
+            "bound_owner_unchanged": true,
+            "interruption_reached": true,
+            "no_private_shared_body": true,
+            "private_target": true,
+            "expected_effect": true,
+            "no_duplicate_unknown_send": true,
+            "worker_receipt": true,
+            "voice_tag_delivery": true,
+            "request_isolation": true,
+            "no_fixture_gaps": true,
+            "voice_waited_for_restore": true,
+            "voice_fresh_notification": true,
+            "original_worker_reported": true
+          },
+          "voice_restore": {
+            "queued_before_restore": 1,
+            "voice_texts_before_restore": 0,
+            "restored": true
+          },
+          "first_voice_text_ms": 25668,
+          "worker_turn_count": 1,
+          "all_original_worker_turns_reported": true,
+          "exact_worker_turn_playback_binding": true,
+          "reply_start_count": 1,
+          "actual_human_source_count": 1,
+          "pending_results_instruction_seen": false,
+          "raw_artifact_sha256": {
+            "events.jsonl": "052c72f816ed4c3bf95d089bd47af6621a08ae0a62b18b623b46669d1b5bae00",
+            "result.json": "2ead4b8d417009b04d1c9a86d04154ee8a505a70280759d1e44ce66dd2dc7b45"
+          }
+        },
+        {
+          "scenario": "personal-voice-offline",
+          "recorded_status": "passed",
+          "fatal": null,
+          "model_adapter_calls": 15,
+          "elapsed_ms": 37577,
+          "checks": {
+            "no_hijack": true,
+            "worker_reached": true,
+            "bound_owner_unchanged": true,
+            "interruption_reached": true,
+            "no_private_shared_body": true,
+            "private_target": true,
+            "expected_effect": true,
+            "no_duplicate_unknown_send": true,
+            "worker_receipt": true,
+            "voice_tag_delivery": true,
+            "request_isolation": true,
+            "no_fixture_gaps": true,
+            "voice_waited_for_restore": true,
+            "voice_fresh_notification": true,
+            "original_worker_reported": true
+          },
+          "voice_restore": {
+            "queued_before_restore": 1,
+            "voice_texts_before_restore": 0,
+            "restored": true
+          },
+          "first_voice_text_ms": 31923,
+          "worker_turn_count": 1,
+          "all_original_worker_turns_reported": true,
+          "exact_worker_turn_playback_binding": true,
+          "reply_start_count": 1,
+          "actual_human_source_count": 1,
+          "pending_results_instruction_seen": false,
+          "raw_artifact_sha256": {
+            "events.jsonl": "a83de6b6768a11cfb6bdde1605dc330dad00495f17a3d059e62270339cadb8e2",
+            "result.json": "fcd858ce4c42e6daf94127dac083075d5bdf01dc690b03aab89b9cdfc42a51e2"
+          }
+        }
+      ]
+    },
+    {
+      "cohort": "crabot-voice-backlog-live-20261017-1556",
+      "plan_sha256": "69f125be9b9f43bfb441e985ec6ce70bcc3a84a99590032536d176849aa61abc",
+      "base_commit": "8363f2b4e6d3045d0972649b4e726bf735fb5aa6",
+      "source_hashes": {
+        "crabot-agent/src/manager/prompt.ts": "494c3aed7820cc9918e672c1b1aa212924631b34234a4c4d23d1271f06d5e84e",
+        "crabot-agent/src/manager/loop.ts": "95c5bb1ff784d06e9759e9fc33f8c99588f9fd7655ed58e75f5d955dc08fb2b2",
+        "crabot-agent/src/manager/voice-output.ts": "47e991bde2592002839ec6622e01fc99314c06f1c58b326b73e148514a98f9bb",
+        "crabot-agent/src/manager/voice-output-port.ts": "882a81d9624eb3048f5b2851525348692bd22ba03a119e747579705518c068a4",
+        "crabot-agent/src/manager/tools/worker-tools.ts": "935c5c25c44b17dea7ba40a2f2ae888c56ea92956a709a670c70e6e84f997d9d",
+        "crabot-agent/src/manager/tools/tool-face.ts": "29a5707d4757588c60fe9551c22a27202ba2831cc797b3290ea552ee35365e4e",
+        "crabot-agent/src/manager/registry.ts": "d9d44e6ebacd4e42a8a6bd0aa8f15e883f963fd7203d1375491cf6684e7a5b5f",
+        "crabot-agent/src/manager/request-loop.ts": "6a61e9f4c66cf610abd01182ddd1415df6958c1dfc3763af9a00dec533ab4971",
+        "crabot-agent/src/manager/conversation-request-runner.ts": "ae22dc7f43e4a5e0cbf97dd94a623d87b68e4c2de5d66c50dac3472be9831561",
+        "crabot-agent/src/manager/bootstrap.ts": "bc75b16d51bd617ecd1ae9a6842fc5ba57fd4804ee43563567f2fcaf8acdc8b7",
+        "crabot-agent/src/guidance/content.ts": "b5bfc9de2e0c635f9b48cab5005e352c51451c344a8fd6e4ea3627cb6280990b",
+        "crabot-shared/src/permission-entries.ts": "944ba22530e5277ad56733a20c99389aae664cd04196dca9e2f7d2b7ba8d6681",
+        "crabot-agent/eval/shared-requests/runtime.mjs": "1c25756d247078bf1a55302ca7f2d5facfe437111a5051085ab6a11a75f04b3e"
+      },
+      "model_adapter_calls": 3,
+      "cases": [
+        {
+          "scenario": "public-voice-backlog",
+          "recorded_status": "passed",
+          "fatal": null,
+          "model_adapter_calls": 3,
+          "elapsed_ms": 10020,
+          "checks": {
+            "no_hijack": true,
+            "worker_reached": true,
+            "bound_owner_unchanged": true,
+            "interruption_reached": true,
+            "no_private_shared_body": true,
+            "private_target": true,
+            "expected_effect": true,
+            "no_duplicate_unknown_send": true,
+            "worker_receipt": true,
+            "voice_tag_delivery": true,
+            "request_isolation": true,
+            "no_fixture_gaps": true,
+            "voice_waited_for_restore": true,
+            "voice_fresh_notification": true,
+            "original_worker_reported": true,
+            "both_results_preserved": true
+          },
+          "voice_restore": {
+            "queued_before_restore": 2,
+            "voice_texts_before_restore": 0,
+            "restored": true
+          },
+          "first_voice_text_ms": 9185,
+          "worker_turn_count": 0,
+          "all_original_worker_turns_reported": false,
+          "exact_worker_turn_playback_binding": false,
+          "reply_start_count": 2,
+          "actual_human_source_count": 2,
+          "pending_results_instruction_seen": true,
+          "raw_artifact_sha256": {
+            "events.jsonl": "be9680f264e7e48cb18a3e820b47d7c9548bddc3440e1f6b7d7b3af4d498e14f",
+            "result.json": "282bff2cc6943fb5f4cfab227c5f2a0db9523044b9f2f8180238b8cf7b065bae"
+          }
+        }
+      ]
+    }
+  ]
+}

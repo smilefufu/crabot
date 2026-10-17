@@ -42,7 +42,7 @@ import {
 } from '../engine/index.js'
 import type { HumanMessageQueueLike, LLMRequestEvent } from '../engine/types.js'
 import { AsyncMutex } from '../workers/async-mutex'
-import type { TaskPriority } from '../workers/harness/ledger-types.js'
+import type { LedgerWorker, TaskPriority } from '../workers/harness/ledger-types.js'
 import { formatChannelMessageLine, type QuotedMessageEntry } from '../prompt-manager.js'
 import { prefetchQuotedMessages, type PrefetchQuotedDeps } from '../utils/quoted-message-prefetcher.js'
 import { splitManagerKey } from './principal.js'
@@ -73,7 +73,7 @@ import { DEFAULT_MAX_CONTEXT_TOKENS } from '../engine/query-loop.js'
 import { REMOTE_IMAGE_PREFETCH_TIMEOUT_MS, GroupInboundImageProjection, collectInboundImages, injectInboundImages, pruneImageRefs, readImageFileSync, toImageBlock, type ManagerImageRef } from './image-vision.js'
 import { fetchRemoteImage } from '../agent/media-resolver.js'
 import type { ImageBlock } from '../engine/index.js'
-import { assembleManagerSystemPrompt } from './prompt.js'
+import { assembleManagerSystemPrompt, VOICE_PENDING_RESULTS_PROMPT } from './prompt.js'
 import { summarizeSpanInput, summarizeSpanOutput } from './span-summary.js'
 import type { ManagerSessionStore } from './session-store.js'
 import { dailyReflectionResultForTrace } from './daily-reflection.js'
@@ -437,6 +437,7 @@ export class ManagerLoop {
   private voiceOutput?: TaggedVoiceOutput
   get isVoiceConversation(): boolean { return this.deps.voiceOutput?.isVoice() === true && this.currentToolProfile === 'normal' && !this.deps.isSystemThread }
   private currentVoiceReplyContext?: import('crabot-shared').VoiceReplyContext
+  private inspectedVoiceWorker?: { binding: import('crabot-shared').VoiceDeliveryBinding; humanTurnId?: string }
   get voiceReplyContext(): import('crabot-shared').VoiceReplyContext | undefined {
     return this.currentVoiceReplyContext && Date.parse(this.currentVoiceReplyContext.expires_at) > Date.now() ? this.currentVoiceReplyContext : undefined
   }
@@ -475,6 +476,17 @@ export class ManagerLoop {
   hasSuccessfulVoiceWorkerDelivery(workerId: string, turnId: string, requestId?: string): boolean {
     return !!this.deps.voiceOutput && !!findVoiceDelivery(this.deps.voiceOutput, record => record.status === 'completed' && record.binding?.worker_id === workerId
       && record.binding.worker_turn_id === turnId && (requestId === undefined || record.binding.request_id === requestId))
+  }
+
+  recordInspectedWorkerTurn(worker: LedgerWorker, turnId: string): void {
+    if (!this.isExecuting || !this.isVoiceConversation || worker.manager_key !== this.deps.key) return
+    const { channelId, sessionId } = splitManagerKey(this.deps.key)
+    if (worker.report_to.channel_id !== channelId || worker.report_to.session_id !== sessionId) return
+    const requestId = worker.origin.request?.request_id
+    if (this.deps.voiceRequest && this.deps.voiceRequest.request_id !== requestId) return
+    this.inspectedVoiceWorker = { humanTurnId: this.currentVoiceReplyContext?.turn_id,
+      binding: { channel_id: channelId, session_id: sessionId, response_id: `${worker.worker_id}:${turnId}`,
+        worker_id: worker.worker_id, worker_turn_id: turnId, ...(requestId ? { request_id: requestId } : {}) } }
   }
 
   recordSuccessfulSendMessage(target: { channel_id: string; session_id: string }): void { this.recordHumanDelivery(target) }
@@ -953,6 +965,7 @@ export class ManagerLoop {
     if (recovery) this.currentVoiceReplyContext = undefined
     else if (envelope && isHumanWake(envelope.wake)) this.currentVoiceReplyContext = envelope.voice_reply_context
     this.currentEpisodeEnvelopes = episodeEnvelopes
+    this.inspectedVoiceWorker = undefined
     this.currentToolProfile = toolProfile
     this.mailbox.setActiveProfile(toolProfile)
     this.currentToolFaceState = createManagerToolFaceState(managerToolLoadingModeForKey(this.deps.key))
@@ -979,6 +992,8 @@ export class ManagerLoop {
       if (this.deps.voiceRequest?.delivery === 'requester_private') return undefined
       if (pendingVoice) return pendingVoice[0]?.binding
       if (envelope?.wake.kind === 'voice_delivery') return undefined
+      const inspected = this.inspectedVoiceWorker
+      if (inspected && inspected.humanTurnId === this.currentVoiceReplyContext?.turn_id) return inspected.binding
       const { channelId, sessionId } = splitManagerKey(this.deps.key)
       const worker = [...this.currentEpisodeEnvelopes, ...(this.currentEpisodeInjected ?? [])].map(item => item.wake)
         .filter((wake): wake is Extract<WakeEvent, { kind: 'worker_event' }> => wake.kind === 'worker_event')
@@ -3096,7 +3111,7 @@ function renderWakeEvent(event: WakeEvent, envelope: TimedWakeEnvelope, quotedMe
     case 'worker_event':
       return renderWorkerEvent(event.event)
     case 'voice_delivery':
-      return JSON.stringify({ voice_delivery_results: event.results })
+      return (event.results.some(item => item.status !== 'completed') ? VOICE_PENDING_RESULTS_PROMPT + '\n' : '') + JSON.stringify({ voice_delivery_results: event.results })
     case 'media_notification':
       return `[媒体下载完成]\n${event.text}`
     case 'schedule':

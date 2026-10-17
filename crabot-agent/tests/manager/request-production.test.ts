@@ -82,7 +82,7 @@ describe('production isolated request tool closure', () => {
       origin: { trigger_type: 'message', creator_friend_id: 'f-owner', request: binding }, report_to: { channel_id: 'voice', session_id: 'group' }, incarnations: [], updated_at: new Date().toISOString() }))
     await new WorkerContextStore(path.join(root, 'agent', 'workers')).write('w-personal', { schema_version: 2, manager_key: key, creator_friend_id: 'f-owner', request: binding, target_session: message().session })
     const turns = new WorkerTurnStore(path.join(root, 'agent', 'workers'))
-    const turn = await turns.create({ worker_id: 'w-personal', manager_key: key, incarnation_id: 'fixture-incarnation', impl: 'builtin', seq: 1, session_ref: 'fixture', activity_from: '0', activity_through: '1', completed_at: new Date().toISOString(), completion_source: 'builtin_end_turn' })
+    const turn = await turns.create({ worker_id: 'w-personal', manager_key: key, incarnation_id: 'fixture-incarnation', impl: 'builtin', seq: 1, session_ref: 'fixture', activity_from: '0', activity_through: '1', completed_at: new Date().toISOString(), completion_source: 'builtin_end_turn', completion_result: { source: 'assistant_text', content: '资料位于第二部分' } })
     return { turns, turn }
   }
   function tool(params: LLMStreamParams, name: string) { const result = params.tools.find(item => item.name === name); expect(result, name).toBeDefined(); return result! }
@@ -141,6 +141,35 @@ describe('production isolated request tool closure', () => {
     expect(playback.voice_reply_context).toBeUndefined()
     if (scope === 'request') expect(JSON.stringify(await stack.store.load(key))).not.toContain('资料位于第二部分')
     expect(rpc.mock.calls.some(call => call[1] === 'send_message')).toBe(false)
+  })
+
+  it.each(['request', 'group'] as const)('binds an inspected %s Worker result before its completion notification arrives', async scope => {
+    voiceChannel = true
+    const prime = message(); prime.platform_message_id = 'prime-inspected-voice'
+    await stack.registry.routeHumanMessages('voice', 'group', [prime])
+    const initial = await execute('origin'), request = (await stack.conversationRequests.get(key, initial.request_id))!.record
+    const { turns, turn } = await bindPersonalWorker(request, scope)
+    voiceReady = true
+    let step = 0
+    inspect = async params => {
+      if (step++ === 0) {
+        planned = { name: 'get_worker_turn', input: { worker_id: 'w-personal' } }
+      } else if (step === 2) {
+        expect(JSON.stringify(params.messages)).toContain('资料位于第二部分')
+        plannedText = '<voice_reply>资料找到了，在第二部分。</voice_reply>'
+        planned = { name: 'resolve_worker_turn', input: { worker_id: 'w-personal', turn_id: turn.turn_id, resolution: 'reported' } }
+      }
+    }
+    const event = { kind: 'activity_available' as const, ts: new Date().toISOString(), worker_id: 'w-personal', seq: 1, detail: { preview: '资料已整理' } }
+    expect(await (stack.harness as any).deps.onOperationNotification(key, event)).toEqual({ consumed: true })
+    const output = rpc.mock.calls.filter(call => call[1] === 'voice_output').map(call => call[2])
+    expect(output.find(params => params.event.type === 'reply_start').delivery_context).toMatchObject({
+      kind: 'notification', binding: { request_id: request.request_id, worker_id: 'w-personal', worker_turn_id: turn.turn_id },
+    })
+    expect((await turns.get('w-personal', turn.turn_id))!.disposition).toMatchObject({ status: 'resolved', resolution: 'reported' })
+    expect(output.filter(params => params.event.type === 'reply_text')).toHaveLength(1)
+    expect(rpc.mock.calls.some(call => call[1] === 'send_message')).toBe(false)
+    if (scope === 'request') expect(JSON.stringify(await stack.store.load(key))).not.toContain('资料位于第二部分')
   })
 
   it('uses existing lazy families and private target proof without leaking body to shared stores', async () => {
