@@ -1,5 +1,11 @@
 # Crabot 项目进度
 
+### 桌面化方案：Spec 已确认，实施计划已整理，未开始实现
+
+- 用户确认[中文 Spec](crabot-docs/superpowers/specs/2026-10-17-desktop-application-design.md)及五项补充决定：macOS 14+ 双架构、Windows 11 x64、Ubuntu Desktop 24.04/26.04 x64；Linux 桌面控制分会话声明支持；优先主要界面；默认后台下载、用户发起安装；登录自启动默认关闭。
+- 已整理[分阶段实施计划](crabot-docs/superpowers/plans/2026-10-17-desktop-application-implementation.md)：P0 协议基线 → P1 内置环境 → P2 共用实例/CLI → P3 SDK/通信 → P4 桌面认证与窗口 → P5 引导/主要界面 → P6 迁移/更新 → P7 最终发行验收，各阶段列明步骤、验证方式与退出条件。
+- 当前仅完成文档；正式协议、实现代码、构建、迁移、部署和运行实例均未改动，各实施阶段尚未开始。
+
 ### 任务默认目录文件授权：独立修复待审查
 
 - 按已确认 [spec](crabot-docs/superpowers/specs/2026-10-17-managed-workspace-default-file-access-design.md) 从 main 独立实现：保留 file_io 总开关，宿主核验 ledger/context 归属及受管真实根后允许任务自有默认目录读写，storage 只限制额外目录；不带入未发布的共享请求/语音协议组。
