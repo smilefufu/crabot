@@ -22,6 +22,8 @@ const output = join(root, 'crabot-native', 'build', 'Release')
 await fs.mkdir(output, { recursive: true })
 const source = join(root, 'crabot-native', 'src', 'identity.cc')
 const binary = join(output, 'crabot-native.node')
+const cliSource = join(root, 'crabot-native/src/cli-launcher.cc')
+const cliBinary = join(output, process.platform === 'win32' ? 'crabot.exe' : 'crabot')
 if (process.platform === 'win32') {
   const library = await downloadProductAsset({
     url: `https://nodejs.org/dist/v${version}/win-x64/node.lib`,
@@ -33,15 +35,18 @@ if (process.platform === 'win32') {
   const installation = stdout.trim()
   if (!installation || installation.includes('\n')) throw new Error('Microsoft C++ build tools not found')
   const script = join(cache, 'compile.cmd')
-  await fs.writeFile(script, '@echo off\r\ncall "%CRABOT_NATIVE_VS%\\Common7\\Tools\\VsDevCmd.bat" -arch=x64 >nul\r\nif errorlevel 1 exit /b %errorlevel%\r\ncl.exe /nologo /LD /MT /EHsc /O2 /std:c++17 /I"%CRABOT_NATIVE_INCLUDE%" "%CRABOT_NATIVE_SOURCE%" "%CRABOT_NATIVE_HOST_HOOK%" /link "%CRABOT_NATIVE_LIBRARY%" Advapi32.lib Shell32.lib User32.lib Iphlpapi.lib Ws2_32.lib delayimp.lib /DELAYLOAD:node.exe /OUT:"%CRABOT_NATIVE_BINARY%"\r\n')
+  await fs.writeFile(script, '@echo off\r\ncall "%CRABOT_NATIVE_VS%\\Common7\\Tools\\VsDevCmd.bat" -arch=x64 >nul\r\nif errorlevel 1 exit /b %errorlevel%\r\ncl.exe /nologo /LD /MT /EHsc /O2 /std:c++17 /I"%CRABOT_NATIVE_INCLUDE%" "%CRABOT_NATIVE_SOURCE%" "%CRABOT_NATIVE_HOST_HOOK%" /link "%CRABOT_NATIVE_LIBRARY%" Advapi32.lib Shell32.lib User32.lib Iphlpapi.lib Ws2_32.lib delayimp.lib /DELAYLOAD:node.exe /OUT:"%CRABOT_NATIVE_BINARY%"\r\nif errorlevel 1 exit /b %errorlevel%\r\ncl.exe /nologo /MT /EHsc /O2 /std:c++17 "%CRABOT_CLI_SOURCE%" /link /OUT:"%CRABOT_CLI_BINARY%"\r\n')
   await runBounded('cmd.exe', ['/d', '/s', '/c', script], { cwd: output, env: { ...process.env,
     CRABOT_NATIVE_VS: installation, CRABOT_NATIVE_INCLUDE: include,
     CRABOT_NATIVE_SOURCE: source, CRABOT_NATIVE_LIBRARY: library, CRABOT_NATIVE_BINARY: binary,
     CRABOT_NATIVE_HOST_HOOK: join(root, 'crabot-native/src/win-host-hook.cc'),
+    CRABOT_CLI_SOURCE: cliSource, CRABOT_CLI_BINARY: cliBinary,
   } })
 } else {
   await runBounded(process.env.CXX || 'c++', ['-std=c++17', '-O2', '-fPIC',
     ...(process.platform === 'darwin' ? ['-bundle', '-undefined', 'dynamic_lookup', '-mmacosx-version-min=14.0'] : ['-shared']),
     '-I' + include, source, '-o', binary])
+  await runBounded(process.env.CXX || 'c++', ['-std=c++17', '-O2',
+    ...(process.platform === 'darwin' ? ['-mmacosx-version-min=14.0'] : []), cliSource, '-o', cliBinary])
 }
 console.log('Native process identity helper built: ' + process.platform + '-' + process.arch)

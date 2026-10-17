@@ -105,10 +105,11 @@ try {
       { cwd: path.join(output, directory), env: nodeEnv, timeout: 10 * 60_000 })
   }
   await fs.mkdir(path.join(output, 'bin'))
-  const wrapper = '#!/bin/sh\nCRABOT_CLI_ENTRY="$0"\nCRABOT_CLI_LINKS=0\nwhile [ -L "$CRABOT_CLI_ENTRY" ]; do\n  CRABOT_CLI_LINKS=$((CRABOT_CLI_LINKS + 1))\n  [ "$CRABOT_CLI_LINKS" -le 32 ] || exit 1\n  CRABOT_CLI_LINK=$(readlink "$CRABOT_CLI_ENTRY") || exit 1\n  case "$CRABOT_CLI_LINK" in\n    /*) CRABOT_CLI_ENTRY="$CRABOT_CLI_LINK" ;;\n    *) CRABOT_CLI_ENTRY="$(dirname "$CRABOT_CLI_ENTRY")/$CRABOT_CLI_LINK" ;;\n  esac\ndone\nCRABOT_CLI_ROOT=$(CDPATH= cd -- "$(dirname "$CRABOT_CLI_ENTRY")/.." && pwd -P) || exit 1\nexec "$CRABOT_CLI_ROOT/.product-runtime/node/bin/node" "$CRABOT_CLI_ROOT/cli.mjs" "$@"\n'
-  await fs.writeFile(path.join(output, 'bin/crabot'), wrapper, { mode: 0o755 })
-  const cmd = relative => '@echo off\r\nsetlocal DisableDelayedExpansion\r\nset "CRABOT_CLI_ROOT=%~dp0' + relative + '"\r\n"%CRABOT_CLI_ROOT%\\.product-runtime\\node\\node.exe" "%CRABOT_CLI_ROOT%\\cli.mjs" %*\r\nexit /b %errorlevel%\r\n'
-  await fs.writeFile(path.join(output, 'bin/crabot.cmd'), cmd('..'))
+  const nativeCommand = process.platform === 'win32' ? 'crabot.exe' : 'crabot'
+  await fs.copyFile(path.join(root, 'crabot-native/build/Release', nativeCommand), path.join(output, 'bin', nativeCommand))
+  if (process.platform !== 'win32') await fs.chmod(path.join(output, 'bin/crabot'), 0o755)
+  const cmd = relative => '@echo off\r\nsetlocal DisableDelayedExpansion\r\n"%~dp0' + relative + 'bin\\crabot.exe" %*\r\nexit /b %errorlevel%\r\n'
+  await fs.writeFile(path.join(output, 'bin/crabot.cmd'), cmd('..\\'))
   await fs.writeFile(path.join(output, 'crabot.cmd'), cmd(''))
   async function preparePayload(directory) {
     for (const item of await fs.readdir(directory, { withFileTypes: true })) {
@@ -116,13 +117,14 @@ try {
       if (item.isSymbolicLink()) {
         const relative = path.relative(output, await fs.realpath(file))
         if (relative === '..' || relative.startsWith('..' + path.sep) || path.isAbsolute(relative)) throw new Error('Core package link escapes its installation: ' + path.relative(output, file))
-      } else if (item.isDirectory()) await preparePayload(file)
-      else if (item.isFile() && process.platform !== 'win32') {
-        // Standard tar extraction removes group/other write bits. Record those
-        // portable modes up front instead of shipping an inventory that fails
-        // after an ordinary extraction (uv's empty target .lock was 0666).
+      } else if (item.isDirectory()) {
+        await preparePayload(file)
+        if (process.platform !== 'win32') await fs.chmod(file, 0o755)
+      } else if (item.isFile() && process.platform !== 'win32') {
+        // Sealed product files contain no user secrets. Portable public read
+        // permissions also let employees execute the same root-installed core.
         const stat = await fs.stat(file)
-        if (stat.mode & 0o022) await fs.chmod(file, stat.mode & 0o755)
+        await fs.chmod(file, stat.mode & 0o111 ? 0o755 : 0o644)
       }
     }
   }

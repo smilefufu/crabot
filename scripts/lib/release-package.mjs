@@ -1,6 +1,7 @@
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { runBounded } from './scrapling-prepare.mjs'
+import { verifyCoreRelease } from './core-release.mjs'
 
 const legacy = { 'v2026.9.23': [], 'v2026.10.12.4': ['scrapling'] }
 const components = {
@@ -8,6 +9,10 @@ const components = {
   'computer-use': ['scripts/prepare-computer-use.mjs', 'scripts/lib/computer-use-runtime.cjs', 'scripts/computer-use/runtime.json', 'crabot-mcp-tools/dist/computer-use/service.js'],
 }
 export async function verifyReleasePackage(root, version, { run = runBounded } = {}) {
+  if (existsSync(join(root, 'core-release.json'))) {
+    await verifyCoreRelease(root, { version: version?.replace(/^v/, '') })
+    return // Complete bundled payloads do not run network/dependency preparers.
+  }
   const required = ['cli.mjs', 'package.json', 'dist/cli/main.js', 'scripts/start.mjs', 'crabot-memory/pyproject.toml', 'crabot-memory/uv.lock']
   if (!Object.hasOwn(legacy, version)) required.push('scripts/check-release.mjs')
   for (const file of required) if (!existsSync(join(root, file))) throw new Error(`Release package missing ${file}`)
