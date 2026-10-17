@@ -19,6 +19,21 @@ const runtime = product.loadProductRuntime(root, { required: true, full: true })
 const data = await fs.realpath(await fs.mkdtemp(join(tmpdir(), 'Crabot 产品 中文 ')))
 const env = product.productEnvironment(runtime, data, process.env)
 const pathKey = process.platform === 'win32' ? Object.keys(env).find(key => key.toLowerCase() === 'path') ?? 'PATH' : 'PATH'
+if (process.platform === 'win32') {
+  // Temporary evidence for the native cross-volume copy failure in run 39066001418.
+  // Only sealed Python resource names and a disposable destination are inspected.
+  const sync = require('node:fs'), probe = join(data, 'runtime-bases', 'python-' + '0'.repeat(24) + '.building-' + crypto.randomUUID())
+  sync.mkdirSync(dirname(probe), { recursive: true })
+  sync.cpSync(runtime.pythonHome, probe, { recursive: true, verbatimSymlinks: true })
+  console.log('CRABOT_PYTHON_COPY ' + JSON.stringify({
+    source_link: sync.lstatSync(runtime.pythonHome).isSymbolicLink(),
+    source_entries: sync.readdirSync(runtime.pythonHome).slice(0, 24),
+    copied_link: sync.lstatSync(probe).isSymbolicLink(),
+    copied_entries: sync.readdirSync(probe).slice(0, 24),
+    build_exists: sync.existsSync(join(probe, 'BUILD')),
+  }))
+  sync.rmSync(probe, { recursive: true, force: true })
+}
 const pythonPath = pythonEnv.ensureProductAgentVenv(runtime, data)
 env[pathKey] = pythonPath
 env.DATA_DIR = data

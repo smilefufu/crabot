@@ -41,7 +41,8 @@ for (const version of ['v2026.10.14.1', 'v2026.10.15.1']) {
   const available = await fs.stat(archive).then(() => true, () => false)
   test('read-only recognition matches the verified real release ' + version, { skip: !available }, async t => {
     const f = await fixture(t)
-    const files = ['cli.mjs', 'crabot.cmd', 'scripts/start.mjs', 'scripts/supervisor.mjs', 'crabot-core/dist/main.js']
+    const files = ['cli.mjs', 'crabot.cmd', 'scripts/start.mjs', 'scripts/supervisor.mjs', 'crabot-core/dist/main.js',
+      'crabot-core/dist/index.js', 'crabot-core/dist/core-modules.js', 'crabot-core/dist/module-runtime-registry.js']
     for (const file of files) {
       const target = path.join(f.root, file); await fs.mkdir(path.dirname(target), { recursive: true })
       await fs.copyFile(new URL(file, archive), target)

@@ -94,6 +94,8 @@ jobs:
           node --test scripts/lib/__tests__/core-preparation.test.mjs
           node --test scripts/lib/__tests__/core-release.test.mjs
           node --test scripts/lib/__tests__/legacy-desktop.test.mjs
+          node --test scripts/lib/__tests__/legacy-mm-rpc.test.mjs
+          node --test scripts/lib/__tests__/legacy-runtime.test.mjs
           node --test scripts/lib/__tests__/maintenance-backup.test.mjs
           cd crabot-core
           node node_modules/vitest/vitest.mjs run src/agent-venv.test.ts src/core-modules.test.ts src/shutdown-generation.test.ts src/module-management-secrets.test.ts --maxWorkers=1 --minWorkers=1

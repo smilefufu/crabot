@@ -15,6 +15,7 @@ module.exports = { ...native, sameProcess,
   tryFileLock: native.tryFileLock,
   releaseFileLock: native.releaseFileLock,
   inspectProcessArguments: native.inspectProcessArguments,
+  listListeningTcpPorts: native.listListeningTcpPorts,
   isOwnedDirectory: native.isOwnedDirectory ?? (directory => {
     const stat = fs.lstatSync(directory)
     return stat.isDirectory() && !stat.isSymbolicLink() && String(stat.uid) === native.inspectProcess(process.pid).owner

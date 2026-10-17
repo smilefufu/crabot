@@ -32,6 +32,25 @@ test('read-only directory ownership never substitutes for private bootstrap ACLs
   }
 })
 
+for (const host of ['127.0.0.1', '::1']) test('TCP listener ownership comes from the OS for ' + host, { timeout: 20_000 }, async t => {
+  const server = createServer()
+  t.after(() => new Promise(resolve => server.close(resolve)))
+  server.listen(0, host); await once(server, 'listening')
+  const port = server.address().port
+  assert.ok(identity.listListeningTcpPorts(process.pid).includes(port))
+  const child = spawn(process.execPath, ['-e', 'require("node:net").createServer().listen(0,"127.0.0.1",function(){process.send(this.address().port)})'], {
+    stdio: ['ignore', 'ignore', 'inherit', 'ipc'],
+  })
+  t.after(async () => { const exited = once(child, 'exit'); child.kill(); await exited })
+  const [otherPort] = await once(child, 'message')
+  assert.ok(identity.listListeningTcpPorts(child.pid).includes(otherPort))
+  assert.equal(identity.listListeningTcpPorts(process.pid).includes(otherPort), false)
+  assert.equal(identity.listListeningTcpPorts(child.pid).includes(port), false)
+  await new Promise(resolve => server.close(resolve))
+  assert.equal(identity.listListeningTcpPorts(process.pid).includes(port), false)
+  for (const invalid of [0, -1, NaN, '1']) assert.throws(() => identity.listListeningTcpPorts(invalid))
+})
+
 test('OS process arguments preserve Unicode, spaces and empty arguments', async t => {
   const args = ['中文 space', '', 'quote"literal']
   const child = spawn(process.execPath, ['-e', 'process.send("ready");setInterval(()=>{},1000)', ...args], { stdio: ['ignore', 'ignore', 'inherit', 'ipc'] })

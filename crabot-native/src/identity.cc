@@ -8,8 +8,11 @@
 #include <cerrno>
 #include <cmath>
 #include <cstring>
+#include <set>
 #ifdef _WIN32
+#include <winsock2.h>
 #include <windows.h>
+#include <iphlpapi.h>
 #include <tlhelp32.h>
 #include <sddl.h>
 #include <winternl.h>
@@ -25,6 +28,7 @@
 #include <libproc.h>
 #include <sys/un.h>
 #include <sys/sysctl.h>
+#include <netinet/in.h>
 #else
 #include <dirent.h>
 #include <sys/stat.h>
@@ -274,6 +278,7 @@ static napi_value ArgumentsCall(napi_env env, napi_callback_info info) {
     return result;
   } catch (const std::exception& error) { napi_throw_error(env, "CRABOT_PROCESS_ARGUMENTS", error.what()); return nullptr; }
 }
+#include "tcp-listeners.h"
 struct FileLock {
 #ifdef _WIN32
   HANDLE handle = INVALID_HANDLE_VALUE;
@@ -353,6 +358,7 @@ static napi_value Initialize(napi_env env, napi_value exports) {
     {"tryFileLock", nullptr, TryLock, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"releaseFileLock", nullptr, ReleaseLock, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"inspectProcessArguments", nullptr, ArgumentsCall, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"listListeningTcpPorts", nullptr, ListeningPortsCall, nullptr, nullptr, nullptr, napi_default, nullptr},
 #ifndef _WIN32
     {"inspectPeer", nullptr, PeerCall, nullptr, nullptr, nullptr, napi_default, nullptr},
 #endif
