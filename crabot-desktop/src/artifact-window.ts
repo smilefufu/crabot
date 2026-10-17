@@ -6,20 +6,25 @@ import type { SessionHost } from './session-host.js'
 import { externalUrl } from './window-security.js'
 
 export class ArtifactWindows {
-  private windows = new Map<string, BrowserWindow>()
-  constructor(private readonly host: SessionHost) {}
+  private windows = new Map<string, { window: BrowserWindow; save: () => void }>()
+  constructor(private readonly host: SessionHost, private readonly changed: () => void = () => {}) {}
+  hasFocused(): boolean { return Array.from(this.windows.values()).some(item => item.window === BrowserWindow.getFocusedWindow()) }
+  saveFocused(): boolean {
+    const item = Array.from(this.windows.values()).find(item => item.window === BrowserWindow.getFocusedWindow())
+    if (!item) return false
+    item.save(); return true
+  }
   open(value: string, download = false): boolean {
     const scope = this.host.context(), target = artifactUrl(value, scope)
     if (!scope || !target) return false
     const key = JSON.stringify([scope, target])
     const existing = this.windows.get(key)
-    if (existing && !existing.isDestroyed()) { existing.show(); existing.focus(); return true }
+    if (existing && !existing.window.isDestroyed()) { existing.window.show(); existing.window.focus(); if (download) existing.save(); return true }
     const isolated = session.fromPartition('crabot-artifact-' + randomUUID())
     isolated.setPermissionRequestHandler((_contents, _permission, callback) => callback(false))
     isolated.setPermissionCheckHandler(() => false)
     const window = new BrowserWindow({ width: 960, height: 720, title: 'Crabot · 附件预览', autoHideMenuBar: true,
       webPreferences: { session: isolated, sandbox: true, contextIsolation: true, nodeIntegration: false, webSecurity: true, webviewTag: false } })
-    this.windows.set(key, window)
     const policy = attachArtifactNetwork(isolated, this.host, () => window.isDestroyed() ? undefined : window.webContents, target, scope)
     const downloads = new Set<DownloadItem>()
     let allowDownload = true, beganDownload = false
@@ -27,6 +32,8 @@ export class ArtifactWindows {
       if (policy.arm('download')) { allowDownload = true; window.webContents.downloadURL(target) }
       else void dialog.showMessageBox(window, { type: 'info', message: '当前附件连接已失效或仍在读取，请从 Crabot 重新打开后保存。' })
     }
+    this.windows.set(key, { window, save }); this.changed()
+    window.on('focus', this.changed)
     isolated.on('will-download', (event, item, contents) => {
       if (!allowDownload || contents !== window.webContents || item.getURLChain().some(url => url !== target)) { event.preventDefault(); return }
       allowDownload = false; beganDownload = true
@@ -49,6 +56,7 @@ export class ArtifactWindows {
     })
     window.once('closed', () => {
       downloads.forEach(item => { try { item.cancel() } catch { /* Chromium may already have disposed a cancelled item. */ } }); policy.close(); this.windows.delete(key)
+      this.changed()
       void isolated.clearStorageData().catch(() => {})
     })
     if (download) save()
@@ -57,5 +65,5 @@ export class ArtifactWindows {
     })
     return true
   }
-  close() { for (const window of this.windows.values()) if (!window.isDestroyed()) window.destroy(); this.windows.clear() }
+  close() { for (const { window } of this.windows.values()) if (!window.isDestroyed()) window.destroy(); this.windows.clear() }
 }

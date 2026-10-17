@@ -79,6 +79,10 @@ export class DesktopController {
       if (this.busy) return
       if (!current.mmAlive) {
         if (state.phase === 'ready' || state.phase === 'disconnected') this.host.status('stopped', '共享实例已停止。')
+      } else if (state.phase === 'stopped') {
+        this.retries = 0
+        this.host.status('disconnected', '共享实例已启动，正在恢复连接。')
+        await this.host.reconnect()
       } else if (state.phase === 'ready' && current.record.generation !== state.generation) {
         this.host.status('disconnected', '实例已重新启动，正在恢复连接。')
         await this.host.reconnect()

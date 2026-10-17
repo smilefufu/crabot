@@ -122,7 +122,7 @@ async function main() {
   assert.equal(artifact.webContents.session === privateSession, false)
   const saving = once(artifact.webContents.session, 'will-download')
   artifact.webContents.session.once('will-download', event => event.preventDefault())
-  artifact.webContents.emit('before-input-event', { preventDefault() {} }, { type: 'keyDown', meta: true, control: true, key: 's' })
+  assert.equal(artifacts.open(artifactTarget, true), true)
   const [, item] = await saving
   assert.equal(item.getURL(), artifactTarget)
   assert.equal(received.filter(req => req.url === '/api/media/a232f3cb-a297-440f-8aba-03af28359e36' && req.authorization === 'Bearer fixture-main-only').length, 2)

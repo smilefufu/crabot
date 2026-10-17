@@ -79,7 +79,7 @@ jobs:
           pnpm --dir scripts/lib install --frozen-lockfile
           pnpm --dir crabot-shared install --frozen-lockfile
           node crabot-shared/node_modules/typescript/bin/tsc -p crabot-shared/tsconfig.json
-          for module in crabot-core crabot-agent crabot-admin crabot-mcp-tools; do
+          for module in crabot-core crabot-agent crabot-admin crabot-mcp-tools crabot-channel-telegram crabot-channel-wechat crabot-channel-feishu crabot-channel-dingtalk crabot-channel-voice; do
             pnpm --dir "$module" install --frozen-lockfile
             node "$module/node_modules/typescript/bin/tsc" -p "$module/tsconfig.json"
           done
@@ -115,7 +115,7 @@ jobs:
         run: |
           node node_modules/typescript/bin/tsc -p tsconfig.json
           node build-preload.mjs
-          node --test tests/desktop-network.test.mjs tests/artifact-network.test.mjs tests/session-host.test.mjs tests/diagnostics.test.mjs
+          node --test tests/desktop-network.test.mjs tests/artifact-network.test.mjs tests/session-host.test.mjs tests/diagnostics.test.mjs tests/login-startup.test.mjs tests/controller.test.mjs
       - name: Real sandboxed Electron window boundaries on Linux
         if: runner.os == 'Linux'
         working-directory: crabot-desktop
@@ -146,6 +146,31 @@ jobs:
               .github/scripts/smoke-product-runtime.mjs \
               > ".desktop-build/ubuntu-$release.log" 2>&1
           done
+      - name: Whole Electron host with real core and CLI on Linux
+        if: runner.os == 'Linux' && steps.scope.outputs.full_runtime == 'true'
+        working-directory: crabot-desktop
+        env:
+          CRABOT_FULL_CORE_TEST: '1'
+        run: xvfb-run -a node --test tests/full-host.test.mjs 2>&1 | tee ../.desktop-build/full-host.log
+      - name: Whole Electron host with real core and CLI on macOS and Windows
+        if: runner.os != 'Linux' && steps.scope.outputs.full_runtime == 'true'
+        working-directory: crabot-desktop
+        env:
+          CRABOT_FULL_CORE_TEST: '1'
+        run: node --test tests/full-host.test.mjs 2>&1 | tee ../.desktop-build/full-host.log
+      - name: Assemble common core and unpacked Electron candidate
+        if: steps.scope.outputs.full_runtime == 'true'
+        run: |
+          node scripts/desktop/stage-core.mjs "--out=.desktop-build/安装 候选/core" --version=0.1.0-desktop.1
+          node .github/scripts/verify-release-payload.mjs "$GITHUB_WORKSPACE/.desktop-build/安装 候选/core"
+          node .github/scripts/validate-staged-core.mjs ".desktop-build/安装 候选/core"
+          node scripts/desktop/package-application.mjs --candidate=true "--core=.desktop-build/安装 候选/core" "--out=.desktop-build/安装 候选/gui" 2>&1 | tee .desktop-build/gui-package.log
+      - name: Boot actual packaged app with native session and CLI on Linux
+        if: runner.os == 'Linux' && steps.scope.outputs.full_runtime == 'true'
+        run: xvfb-run -a node .github/scripts/smoke-packaged-desktop.mjs ".desktop-build/安装 候选/gui" 2>&1 | tee .desktop-build/packaged-boot.log
+      - name: Boot actual packaged app with native session and CLI on macOS and Windows
+        if: runner.os != 'Linux' && steps.scope.outputs.full_runtime == 'true'
+        run: node .github/scripts/smoke-packaged-desktop.mjs ".desktop-build/安装 候选/gui" 2>&1 | tee .desktop-build/packaged-boot.log
       - name: Save runtime evidence
         if: always()
         uses: actions/upload-artifact@v4

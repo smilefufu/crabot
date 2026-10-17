@@ -1,4 +1,5 @@
 import { Command } from 'commander'
+import { readFileSync } from 'node:fs'
 import { resolveAuth } from './auth.js'
 import { AdminClient } from './client.js'
 import { CliError } from './errors.js'
@@ -66,11 +67,13 @@ export function requireSubCommand(parent: Command, name: string): Command {
 
 export function run(argv: string[]): void {
   const program = new Command()
+  const version = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')).version
+  if (typeof version !== 'string' || !version) throw new Error('Invalid Crabot package version')
 
   program
     .name('crabot')
     .description('Crabot CLI — AI-first admin client')
-    .version('1.0.0')
+    .version(version)
     .option('-e, --admin-endpoint <url>', 'Admin endpoint URL (overrides CRABOT_ENDPOINT)')
     .option('-t, --token <token>', 'Auth token (overrides CRABOT_TOKEN)')
     .option('--human', 'Human-readable output (table + colored errors)')

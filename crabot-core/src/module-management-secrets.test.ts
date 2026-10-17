@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import ModuleManager from './index.js'
 
+// Windows cleanup includes several bounded OS process-tree queries.
 it.each(['crabot-agent', 'admin-web', 'custom-module'])('the actual %s child receives only its own management credentials', async id => {
   const directory = await mkdtemp(path.join(tmpdir(), 'crabot-module-env-'))
   const script = path.join(directory, 'child.cjs'), output = path.join(directory, 'result.json')
@@ -29,4 +30,4 @@ it.each(['crabot-agent', 'admin-web', 'custom-module'])('the actual %s child rec
     await mm.stopModuleProcess(id, 'shutdown')
     await rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
   }
-})
+}, 30_000)
