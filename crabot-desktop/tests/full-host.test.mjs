@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 import { once } from 'node:events'
 import { inspectInstance } from '../../scripts/lib/instance-runtime.mjs'
+import { SUPERVISOR_FORCE_TIMEOUT_MS } from '../../scripts/lib/supervisor-shutdown.mjs'
 
 // A second business MM is forbidden on the developer's live host. CI has its own
 // clean user/machine, and every child uses this one disposable DATA_DIR.
@@ -22,9 +23,11 @@ test('actual Electron host shares its real core with CLI and distinguishes hide,
   const env = { ...process.env, DATA_DIR: data, CRABOT_FULL_HOST_FIXTURE: '1' }
   delete env.ELECTRON_RUN_AS_NODE; delete env.CRABOT_DEV; delete env.CRABOT_PORT_OFFSET
   const children = []
-  async function waitForExit(child) {
+  async function waitForExit(child, graceful = false) {
     try {
-      if (child.exitCode === null && child.signalCode === null) await once(child, 'exit', { signal: AbortSignal.timeout(30_000) })
+      // Explicit quit includes the core's complete graceful shutdown window.
+      const timeout = graceful ? SUPERVISOR_FORCE_TIMEOUT_MS + 20_000 : 30_000
+      if (child.exitCode === null && child.signalCode === null) await once(child, 'exit', { signal: AbortSignal.timeout(timeout) })
       return { code: child.exitCode, signal: child.signalCode }
     } finally { child.stdin?.destroy(); child.stdout?.destroy(); child.stderr?.destroy() }
   }
@@ -62,7 +65,7 @@ test('actual Electron host shares its real core with CLI and distinguishes hide,
       }
       throw new Error('Timed out waiting for ' + tag + '\n' + output)
     }
-    return { child, exited: () => waitForExit(child), next, command: async value => { child.stdin.write(value + '\n'); return next(value) } }
+    return { child, exited: graceful => waitForExit(child, graceful), next, command: async value => { child.stdin.write(value + '\n'); return next(value) } }
   }
   try {
     let gui = launch()
@@ -106,13 +109,14 @@ test('actual Electron host shares its real core with CLI and distinguishes hide,
       await new Promise(resolve => setTimeout(resolve, 100))
     }
     assert.equal(stopped.phase, 'stopped')
-    gui.child.stdin.write('quit_confirm\n'); assert.equal((await gui.exited()).code, 0); step('stopped_gui_quit')
+    gui.child.stdin.write('quit_confirm\n'); assert.equal((await gui.exited(true)).code, 0); step('stopped_gui_quit')
     gui = launch()
     const restarted = await gui.next('ready')
     assert.notEqual(restarted.generation, first.generation)
     assert.equal((await gui.command('quit_cancel')).result, false)
     assert.equal(inspectInstance(data).state, 'running')
-    gui.child.stdin.write('quit_confirm\n'); assert.equal((await gui.exited()).code, 0)
+    step('active_core_quit_requested')
+    gui.child.stdin.write('quit_confirm\n'); assert.equal((await gui.exited(true)).code, 0)
     assert.equal(inspectInstance(data).state, 'stopped')
     console.log('CRABOT_FULL_HOST_RESULT ' + JSON.stringify({ platform: process.platform, arch: process.arch, native_bootstrap: true,
       cli_gui_same_instance: true, close_keeps_core: true, gui_crash_keeps_core: true, cli_stop_stays_stopped: true, cli_start_reconnects_gui: true, relaunch_autostarts: true, quit_cancel_preserves_core: true, quit_stops_core: true }))
@@ -128,7 +132,7 @@ test('actual Electron host shares its real core with CLI and distinguishes hide,
     throw error
   } finally {
     for (const child of children) if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
-    const exits = await Promise.allSettled(children.map(waitForExit))
+    const exits = await Promise.allSettled(children.map(child => waitForExit(child)))
     await cli('stop')
     assert.equal(inspectInstance(data).state, 'stopped', 'Preserve fixture data when stop is unverified')
     for (const exit of exits) if (exit.status === 'rejected') throw exit.reason

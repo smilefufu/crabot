@@ -1,7 +1,7 @@
 // Snapshot only after verified shutdown under the common OS lifecycle lock.
 // Workspaces, working dependencies and UI/log caches stay in place; they are
 // explicitly outside this data rollback. External references are never followed.
-import { promises as fs, constants, createReadStream, createWriteStream } from 'node:fs'
+import { promises as fs, constants, createReadStream, createWriteStream, realpathSync } from 'node:fs'
 import { pipeline } from 'node:stream/promises'
 import { createHash, randomUUID } from 'node:crypto'
 import path from 'node:path'
@@ -28,7 +28,9 @@ async function syncDirectory(directory) {
 
 export async function createMaintenanceBackup(dataDir, { signal } = {}) {
   cancelled(signal)
-  dataDir = await fs.realpath(dataDir)
+  // Match the canonical path used by desktop management and instance records.
+  // Windows async realpath can expand a short TEMP path differently.
+  dataDir = realpathSync(dataDir)
   if (!cliLockToken(path.join(dataDir, 'cli.lock')) || inspectInstance(dataDir).state !== 'stopped') {
     fail('CRABOT_BACKUP_REQUIRES_STOP', '必须持有操作锁并确认实例停止后才能备份。')
   }

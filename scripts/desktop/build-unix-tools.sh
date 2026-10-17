@@ -24,7 +24,9 @@ fi
   cd "$workspace/git"
   flags=(NO_GETTEXT=1 NO_TCLTK=1 NO_PERL=1 NO_PYTHON=1 NO_RUST=1 NO_DARWIN_PORTS=1 NO_OPENSSL=1 CURL_CONFIG= CURL_LIBCURL=-lcurl prefix="$destination/git")
   make -j"$jobs" "${flags[@]}"
-  make "${flags[@]}" install
+  # Relative aliases survive relocation and avoid expanding each hard link into
+  # another complete Git binary in app copies and ZIP update packages.
+  make "${flags[@]}" INSTALL_SYMLINKS=1 install
 )
 # The wrapper keeps Git's helpers and templates relocatable after app installation.
 cat > "$destination/bin/git" <<'WRAPPER'

@@ -9,8 +9,12 @@ import { createMaintenanceBackup, verifyMaintenanceBackup } from '../maintenance
 
 async function fixture(t) {
   const root = await fs.mkdtemp(path.join(tmpdir(), 'Crabot 维护 '))
-  t.after(() => fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }))
   const data = management.ensurePrivateDataRoot(path.join(root, '数据'))
+  t.after(async () => {
+    // Windows cannot remove the lock file until its OS handle is released.
+    releaseCliLock(path.join(data, 'cli.lock'))
+    await fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+  })
   await fs.mkdir(path.join(data, 'admin')); await fs.mkdir(path.join(data, 'memory'))
   await fs.writeFile(path.join(data, 'admin/provider.json'), '{"provider_id":"preserved"}')
   await fs.writeFile(path.join(data, 'memory/db.sqlite'), Buffer.from([0, 71, 255, 0, 13, 10]))

@@ -85,6 +85,7 @@ jobs:
           done
           pnpm --dir crabot-desktop install --frozen-lockfile
       - name: Runtime regressions
+        timeout-minutes: 8
         run: |
           node --test crabot-client/tests/*.test.mjs
           node --test scripts/lib/__tests__/product-*.test.mjs

@@ -1,7 +1,7 @@
 // Actual packaged executable/ASAR/fuses and native bootstrap, no injected hooks.
 // CI-only: the developer's live user may already own the single business MM.
 import assert from 'node:assert/strict'
-import { promises as fs } from 'node:fs'
+import { promises as fs, constants } from 'node:fs'
 import path from 'node:path'
 import { tmpdir } from 'node:os'
 import { spawn, execFile } from 'node:child_process'
@@ -18,11 +18,32 @@ function inside(relative) {
   return result
 }
 assert.equal(location.schema_version, 1)
-const executable = inside(location.executable), core = inside(location.core)
+const originalExecutable = inside(location.executable), originalCore = inside(location.core)
+// An app nested under the checkout can silently resolve missing dependencies
+// from ancestor node_modules. Run the exact candidate outside that tree.
+const platformRoot = path.dirname(process.platform === 'darwin'
+  ? path.dirname(path.dirname(originalExecutable)) : originalExecutable)
+for (const file of [originalExecutable, originalCore]) {
+  const relative = path.relative(platformRoot, file)
+  assert.ok(relative && relative !== '..' && !relative.startsWith('..' + path.sep) && !path.isAbsolute(relative))
+}
+const temporary = await fs.mkdtemp(path.join(tmpdir(), 'Crabot 打包 '))
+const relocated = path.join(temporary, path.basename(platformRoot))
+try { await fs.rename(platformRoot, relocated) }
+catch (error) {
+  if (error.code !== 'EXDEV') throw error
+  await fs.cp(platformRoot, relocated, { recursive: true, verbatimSymlinks: true, mode: constants.COPYFILE_FICLONE })
+}
+const executable = path.join(relocated, path.relative(platformRoot, originalExecutable))
+const core = path.join(relocated, path.relative(platformRoot, originalCore))
+const fromCheckout = path.relative(project, core)
+assert.ok(path.isAbsolute(fromCheckout) || fromCheckout.startsWith('..' + path.sep))
+const { verifyCoreRelease } = await import(pathToFileURL(path.join(core, 'scripts/lib/core-release.mjs')))
+await verifyCoreRelease(core)
 const { inspectInstance } = await import(pathToFileURL(path.join(core, 'scripts/lib/instance-runtime.mjs')))
-const temporary = await fs.mkdtemp(path.join(tmpdir(), 'Crabot 打包 ')), data = path.join(temporary, '实例 数据')
+const data = path.join(temporary, '实例 数据')
 const env = { ...process.env, DATA_DIR: data }
-delete env.ELECTRON_RUN_AS_NODE; delete env.NODE_OPTIONS; delete env.CRABOT_DEV; delete env.CRABOT_PORT_OFFSET
+delete env.ELECTRON_RUN_AS_NODE; delete env.NODE_OPTIONS; delete env.NODE_PATH; delete env.CRABOT_DEV; delete env.CRABOT_PORT_OFFSET
 const node = path.join(core, process.platform === 'win32' ? '.product-runtime/node/node.exe' : '.product-runtime/node/bin/node')
 const cli = async (...args) => (await promisify(execFile)(node, [path.join(core, 'cli.mjs'), ...args], { env, cwd: core, timeout: 90_000, maxBuffer: 2 * 1024 * 1024 })).stdout
 const children = []
@@ -73,7 +94,7 @@ try {
   gui.child.kill('SIGKILL'); await gui.exited()
   console.log('CRABOT_PACKAGED_BOOT ' + JSON.stringify({ platform: process.platform, arch: process.arch,
     packaged_asar_native_auth: true, installed_core_shared_with_cli: true, gui_crash_preserves_core: true, reattach_same_generation: true,
-    cli_stop_stays_stopped: true, unicode_spaced_data: true, release_signed: false }))
+    cli_stop_stays_stopped: true, unicode_spaced_data: true, outside_checkout: true, release_signed: false }))
 } finally {
   for (const child of children) if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
   const exits = await Promise.allSettled(children.map(waitForExit))

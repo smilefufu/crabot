@@ -46,6 +46,20 @@ try {
   report.rg = await shell('rg --version')
   assert.match(report.git, /^git version /)
   assert.match(report.rg, /^ripgrep /)
+  // Exercise child helpers and relocated aliases, rather than only --version.
+  const gitConfig = join(data, 'git-config'), hooks = join(data, 'empty-hooks')
+  await fs.writeFile(gitConfig, ''); await fs.mkdir(hooks)
+  const gitEnv = { ...env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: gitConfig }
+  const git = args => run(runtime.executables.git, ['-c', 'core.hooksPath=' + hooks, ...args], { env: gitEnv })
+  const repository = join(data, '本地 仓库'), cloned = join(data, '克隆 仓库')
+  await git(['-c', 'init.defaultBranch=main', 'init', repository])
+  await fs.writeFile(join(repository, 'probe.txt'), 'offline bundled Git\n')
+  await git(['-C', repository, 'add', 'probe.txt'])
+  await git(['-C', repository, '-c', 'user.name=Crabot Probe', '-c', 'user.email=probe@localhost', '-c', 'commit.gpgSign=false', 'commit', '-m', 'local probe'])
+  await git(['clone', '--no-local', repository, cloned])
+  assert.equal(await fs.readFile(join(cloned, 'probe.txt'), 'utf8'), 'offline bundled Git\n')
+  await git(['-C', cloned, 'fsck', '--full'])
+  report.git_local_commit_clone = true
   const background = await shell("python3 -I -c 'print(73)' > background.txt & wait; cat background.txt")
   assert.equal(background, '73')
   report.background_shell = true
