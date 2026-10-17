@@ -19,7 +19,7 @@ export function buildVoiceTools(port: VoiceManagementPort): ToolDefinition[] {
     defineTool({ name: 'list_voice_contacts', description: '查询本渠道已登记的联系人、关联好友及声音识别是否可用。后续操作使用返回的 ID 指定对象；指代不明或存在同名对象时先澄清。',
       inputSchema: { type: 'object', properties: {}, additionalProperties: false }, isReadOnly: true,
       call: input => Object.keys(input).length ? Promise.resolve(invalid()) : call({ action: 'list', context: port.context }) }),
-    defineTool({ name: 'manage_voice_contacts', description: '新增联系人、录入或更新指定联系人的声音、修改本渠道显示名、停用声音识别，或取消已发起的操作。新增联系人默认建立普通好友；关联已有好友时须明确其 ID。录音由设备引导。返回 pending 时等待结果通知，不重复发起，成功前不宣称已经记住。改名仅影响本渠道显示名；停用声音识别保留联系人、好友和历史。',
+    defineTool({ name: 'manage_voice_contacts', description: '新增联系人、录入或更新指定联系人的声音、修改本渠道显示名、停用声音识别，或取消已发起的操作。新增联系人默认建立普通好友；关联已有好友时须明确其 ID。录音提示和采样由设备自动引导。返回 pending 后等待结果通知，不再口述采样步骤、不重复发起，成功前不宣称已经记住。改名仅影响本渠道显示名；停用声音识别保留联系人、好友和历史。',
       inputSchema: { type: 'object', additionalProperties: false, required: ['expected_revision', 'command'], properties: {
         expected_revision: { type: 'integer', minimum: 0 },
         command: { oneOf: [

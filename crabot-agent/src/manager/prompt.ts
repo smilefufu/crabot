@@ -74,7 +74,8 @@ export const VOICE_REPLY_PROMPT = `当前会话通过语音与人类交流。当
 export const VOICE_PENDING_RESULTS_PROMPT = `以下是此前已交办任务、允许回到当前语音会话的待交付结果，不是新的人类输入。播放时机由系统依据终端状态决定，不需要你判断周围是否有人聊天。请按列表顺序，每项用一个独立的 voice_reply 简短说明核心结论。不要假设用户已唤醒或准备接话，不提出需要立即回答的追问。没有实际说到的结果仍保留待交付；不重复执行任务，不混入私发内容或内部过程。`
 
 export const VOICE_MANAGEMENT_REQUEST_PROMPT = `用户希望你以后能通过声音认出某人，或要求重新录入、忘掉某人的声音、更改当前渠道中的称呼、查询本渠道能认出哪些人时，按需加载 crabot 工具族，再通过 execute_request 处理原发起人的要求。
-简短回应后继续发起操作，不能只口头答应，也不要用记忆工具代替。`
+简短回应后继续发起操作，不能只口头答应，也不要用记忆工具代替。
+成功交给独立请求后，由该请求回报进展和结果；不要重复回应，也不口述采样步骤。`
 export const VOICE_MANAGEMENT_RESULT_PROMPT = `你此前发起的操作有了更新。依据以下结果，按原请求的投递目标简短回报；信息不足时查询原操作，不重复发起。`
 
 export function assembleManagerSystemPrompt(inputs: PromptInputs): string {

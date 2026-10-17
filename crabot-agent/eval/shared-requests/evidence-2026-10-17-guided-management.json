@@ -1,6 +1,6 @@
 {
   "date": "2026-10-17",
-  "status": "implementation_candidate_speech_gate_open",
+  "status": "controlled_model_passed_joint_upgrade_preparation",
   "source_base": "acb778f3f83e3dd558453759d191aa22a351da80",
   "source_hashes": {
     "crabot-shared/src/voice.ts": "a86b621809ab85559b65991fa5c61bd8b7e8a20c2033cbe0740d68eb7d5bc46f",
@@ -8,8 +8,8 @@
     "crabot-admin/src/voice-agent-management.ts": "d6df1d8336543cb8fc0a97f079f2dbfd556ba9b365c0c386a5e51c5a474178e0",
     "crabot-admin/src/voice-turn-store.ts": "db35ea919f761ca5eec2ec1e8aac38676d9ad44af9cdaabac5f5b9b7a8a74f5f",
     "crabot-admin/src/voice-contact-friend.ts": "cda1d4bbe5bbc2d6a0d70ca90bb7b334689de1cc1d119f84b43426725df5f938",
-    "crabot-agent/src/manager/prompt.ts": "d0bed4558457bd4bdb91fd3d4a900a63bb59d9d6a50f371451f413acc5c3dd19",
-    "crabot-agent/src/manager/tools/voice-tools.ts": "460854875fb12a43fb2c74fcd5017e78aa5259c80021a643781cc7c4c9b23744",
+    "crabot-agent/src/manager/prompt.ts": "1fcffd0348b9a42c1642e41740af240cb6d0adb944f96ad46784a89bb1fa3c6e",
+    "crabot-agent/src/manager/tools/voice-tools.ts": "e06b371ba6e03d07ea21ac6ad14186db7904ef83dc9d3cc37265e8ac5f76a1b2",
     "crabot-agent/src/manager/voice-management-host.ts": "d777760304c0bbadfb8b0ae818489315fb3b79862ad248d4397ff60cf9f8d36e",
     "crabot-agent/src/manager/conversation-request-runner.ts": "7dd50042e0c579b60f332bc3a7cdd2f3f0a78ef7e0e70b515e8c289acfd1093e",
     "crabot-channel-voice/src/voice-channel.ts": "aab68fc0bda7bafb23e858ab1b6e5f6c4e59534cf9e7179f380f355ba3822154",
@@ -165,9 +165,8 @@
     }
   },
   "remaining": [
-    "First enrollment is not fully accepted: the isolated request and shared Manager both spoke the same capture guidance. The operation ran once; completion was reported after commit.",
-    "A minimal wording change for shared handoff and device-owned capture guidance awaits user confirmation; no additional product text has been applied.",
-    "Main feature PR and coordinated live upgrade remain gated; live wire5 and real phone remain unchanged.",
+    "Main feature PR review and final coordinated upgrade readiness.",
+    "Stop old runtime only after readiness; verify a complete consistent backup and apply all matching protocol8 artifacts together.",
     "Retained-data physical-phone install, actual audio latency and two-person enrollment/identification remain unaccepted."
   ],
   "live_runtime_mutated": false,
@@ -242,6 +241,173 @@
     "offline_checks": {
       "passed": 17,
       "failed": 0
+    }
+  },
+  "handoff_wording_retest": {
+    "confirmation": "User explicitly approved both shared handoff and management-tool capture-guidance wording in this conversation. Applied exactly; no other product prompt changed.",
+    "run_source_hashes": {
+      "crabot-agent/src/manager/tools/voice-tools.ts": "e06b371ba6e03d07ea21ac6ad14186db7904ef83dc9d3cc37265e8ac5f76a1b2",
+      "crabot-agent/src/manager/voice-management-host.ts": "d777760304c0bbadfb8b0ae818489315fb3b79862ad248d4397ff60cf9f8d36e",
+      "crabot-shared/src/voice.ts": "a86b621809ab85559b65991fa5c61bd8b7e8a20c2033cbe0740d68eb7d5bc46f",
+      "crabot-agent/src/manager/prompt.ts": "1fcffd0348b9a42c1642e41740af240cb6d0adb944f96ad46784a89bb1fa3c6e",
+      "crabot-agent/src/manager/loop.ts": "baf0be972d07c64ea2fc700cc5263e15d3b750fb3fd0d1ddfe7a9e495712df42",
+      "crabot-agent/src/manager/voice-output.ts": "47e991bde2592002839ec6622e01fc99314c06f1c58b326b73e148514a98f9bb",
+      "crabot-agent/src/manager/voice-output-port.ts": "882a81d9624eb3048f5b2851525348692bd22ba03a119e747579705518c068a4",
+      "crabot-agent/src/manager/tools/worker-tools.ts": "935c5c25c44b17dea7ba40a2f2ae888c56ea92956a709a670c70e6e84f997d9d",
+      "crabot-agent/src/manager/tools/tool-face.ts": "65b1044ab47adb70e20cc86e61304c7caf7820c80136c3ea869eaba633a30bad",
+      "crabot-agent/src/manager/registry.ts": "d9d44e6ebacd4e42a8a6bd0aa8f15e883f963fd7203d1375491cf6684e7a5b5f",
+      "crabot-agent/src/manager/request-loop.ts": "b7db36f6f3b10aed235357ddf26c40a63d5ef6d3cfdbbbd47195f2d17b655d3e",
+      "crabot-agent/src/manager/conversation-request-runner.ts": "7dd50042e0c579b60f332bc3a7cdd2f3f0a78ef7e0e70b515e8c289acfd1093e",
+      "crabot-agent/src/manager/bootstrap.ts": "3931e625eb4214cb2c29481882706e2ddcfd718a745e79f56bbdd360657fd108",
+      "crabot-agent/src/guidance/content.ts": "b5bfc9de2e0c635f9b48cab5005e352c51451c344a8fd6e4ea3627cb6280990b",
+      "crabot-shared/src/permission-entries.ts": "944ba22530e5277ad56733a20c99389aae664cd04196dca9e2f7d2b7ba8d6681",
+      "crabot-agent/eval/shared-requests/runtime.mjs": "206bd0374d8369536cd19138bdfffa16b0bd7c2a8f57b3f15768923ee76cf06e"
+    },
+    "model": {
+      "model": "gpt-6.1-sol",
+      "format": "openai",
+      "provider_origin": "https://mirror.xinshu.ai",
+      "thinking": null
+    },
+    "calls": 16,
+    "results": [
+      {
+        "scenario": "voice-enroll-new",
+        "status": "passed",
+        "checks": {
+          "no_hijack": true,
+          "worker_reached": true,
+          "bound_owner_unchanged": true,
+          "interruption_reached": true,
+          "no_private_shared_body": true,
+          "private_target": true,
+          "expected_effect": true,
+          "no_duplicate_unknown_send": true,
+          "worker_receipt": true,
+          "voice_tag_delivery": true,
+          "request_isolation": true,
+          "no_fixture_gaps": true,
+          "one_original_management_operation": true,
+          "no_management_worker": true,
+          "management_lazy_tools": true,
+          "completion_event_consumed": true,
+          "no_duplicate_management_guidance": true
+        },
+        "requests": 8,
+        "elapsed_ms": 85979,
+        "formal_reply_count": 2,
+        "first_voice_ms": {
+          "text_ms": 3427,
+          "completed_ms": 3568
+        },
+        "manual_speech_review": {
+          "status": "passed",
+          "blocks": [
+            {
+              "first_text_ms": 3427,
+              "text": "好，我会按你的要求记住 Thea 的声音。"
+            },
+            {
+              "first_text_ms": 84892,
+              "text": "已经记住 Thea 的声音了，以后可以通过声音认出她。"
+            }
+          ],
+          "commit_ms": 81667,
+          "no_repeated_ack_guidance_or_completion": true,
+          "completion_after_commit": true
+        },
+        "model_durations_ms": [
+          3920,
+          2959,
+          2705,
+          2814,
+          2827,
+          1919,
+          63707,
+          3754
+        ]
+      },
+      {
+        "scenario": "voice-rerecord",
+        "status": "passed",
+        "checks": {
+          "no_hijack": true,
+          "worker_reached": true,
+          "bound_owner_unchanged": true,
+          "interruption_reached": true,
+          "no_private_shared_body": true,
+          "private_target": true,
+          "expected_effect": true,
+          "no_duplicate_unknown_send": true,
+          "worker_receipt": true,
+          "voice_tag_delivery": true,
+          "request_isolation": true,
+          "no_fixture_gaps": true,
+          "one_original_management_operation": true,
+          "no_management_worker": true,
+          "management_lazy_tools": true,
+          "completion_event_consumed": true,
+          "no_duplicate_management_guidance": true
+        },
+        "requests": 8,
+        "elapsed_ms": 22322,
+        "formal_reply_count": 2,
+        "first_voice_ms": {
+          "text_ms": 2254,
+          "completed_ms": 2400
+        },
+        "manual_speech_review": {
+          "status": "passed",
+          "blocks": [
+            {
+              "first_text_ms": 2254,
+              "text": "好，我来为 Thea 重新录入声音。"
+            },
+            {
+              "first_text_ms": 21464,
+              "text": "Thea 的声音已经重新录入好了。"
+            }
+          ],
+          "commit_ms": 18669,
+          "no_repeated_ack_guidance_or_completion": true,
+          "completion_after_commit": true
+        },
+        "model_durations_ms": [
+          2796,
+          2818,
+          2579,
+          2526,
+          2842,
+          2210,
+          2111,
+          3083
+        ]
+      }
+    ],
+    "prompt_checks": {
+      "assembled_profiles": 8,
+      "core_counts": [
+        15,
+        11,
+        3
+      ],
+      "actual_model_inputs": "passed"
+    },
+    "unit_checks": {
+      "passed": 159,
+      "failed": 0
+    },
+    "offline_checks": {
+      "passed": 17,
+      "failed": 0
+    },
+    "scope": "Real production Manager/request/voice parser and configured model. Synthetic Admin, finite sample-ready event and playback receipts; no real microphone, audio or contact data.",
+    "timing_limit": "First speakable text is measured before synthetic playback; excludes actual ASR/TTS/device. First enrollment includes a 63707ms model response with no speech; retained rather than retried or hidden. Total replay duration is not a real capture-duration measurement.",
+    "full_build": {
+      "command": "./dev.sh build",
+      "node": "22.22.3",
+      "status": "passed",
+      "scope": "All TypeScript modules and production Admin Web; no service start."
     }
   }
 }
