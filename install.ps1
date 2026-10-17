@@ -345,6 +345,22 @@ $nativeArch = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } e
 if ($nativeArch -ne 'AMD64') { throw "Unsupported Windows architecture: $nativeArch; only native x64 releases are published" }
 $InstallDir = [IO.Path]::GetFullPath($InstallDir)
 if ($Version -notmatch '^[A-Za-z0-9._-]+$') { throw 'Invalid release version' }
+if (-not $FromSource -and $PSScriptRoot -and (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'core-release.json') -PathType Leaf)) {
+    $bundledNode = Join-Path $PSScriptRoot '.product-runtime/node/node.exe'
+    if (-not (Test-Path -LiteralPath $bundledNode -PathType Leaf)) { throw 'Bundled Node is missing; repair the archive.' }
+    $expectedCommand = Join-Path $InstallDir 'bin/crabot.exe'
+    $sourceCommand = Join-Path $PSScriptRoot 'bin/crabot.exe'
+    foreach ($existingCommand in @(Get-Command crabot -All -ErrorAction SilentlyContinue)) {
+        if ($existingCommand.CommandType -ne 'Application' -or
+            ($existingCommand.Path -ine $expectedCommand -and $existingCommand.Path -ine $sourceCommand)) {
+            throw 'An existing crabot command was preserved. Resolve its source before installing this CLI.'
+        }
+    }
+    & $bundledNode (Join-Path $PSScriptRoot 'scripts/install-core.mjs') "--install-root=$InstallDir" '--scope=user'
+    Assert-NativeSuccess 'Bundled CLI installation'
+    Write-Info 'Open a new terminal and run crabot start. The service has not been started.'
+    return
+}
 Ensure-Node
 Ensure-Uv
 Ensure-Bash

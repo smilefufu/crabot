@@ -4,8 +4,6 @@ import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { homedir } from 'node:os'
 import { randomUUID } from 'node:crypto'
-import { execFile } from 'node:child_process'
-import { promisify } from 'node:util'
 import desktop from './desktop-entry.cjs'
 import identity from './process-identity.cjs'
 import management from './desktop-management.cjs'
@@ -13,6 +11,7 @@ import { verifyCoreRelease } from './core-release.mjs'
 import { acquireCliLock, releaseCliLock } from './cli-lock.mjs'
 import { assertVersionMaintenanceAllowsStart } from './version-maintenance.mjs'
 import { detectMode } from './mode.mjs'
+import { notifyCliPathChange } from './cli-path-notification.mjs'
 
 const start = '# >>> Crabot desktop CLI >>>', end = '# <<< Crabot desktop CLI <<<'
 const pathBlock = `${start}\ncase ":$PATH:" in\n  *":$HOME/.local/bin:"*) ;;\n  *) export PATH="$HOME/.local/bin:$PATH" ;;\nesac\n${end}`
@@ -135,15 +134,6 @@ export async function installDesktopCli({ coreRoot, dataDir, home = homedir(), e
   } finally { releaseCliLock(lock) }
   // OS notification can wait on unrelated windows; registration is complete and
   // service start/stop must be able to use the lifecycle lock during that wait.
-  let notificationSent = true
-  if (windows) {
-    const helperEnv = Object.fromEntries(Object.entries(env).filter(([key]) => /^(SYSTEMROOT|WINDIR|COMSPEC|TEMP|TMP|USERPROFILE|LOCALAPPDATA|APPDATA)$/i.test(key)))
-    try {
-      const { stdout } = await promisify(execFile)(path.join(coreRoot, '.product-runtime/node/node.exe'),
-        ['-e', 'process.stdout.write(String(require(process.argv[1]).notifyUserPathChanged()))', path.join(coreRoot, 'scripts/lib/process-identity.cjs')],
-        { env: helperEnv, timeout: 10_000, maxBuffer: 4096, windowsHide: true })
-      notificationSent = stdout === 'true'
-    } catch { notificationSent = false }
-  }
+  const notificationSent = windows ? await notifyCliPathChange(coreRoot, env) : true
   return { command: entry, shell_files: shellFiles, notification_sent: notificationSent }
 }

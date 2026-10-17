@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, copyFileSync, chmodSync, symlinkSync, readlinkSync, existsSync, constants } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -80,6 +80,7 @@ test('CLI repairs dependencies before linking an entry with static third-party i
   const fs = await import('node:fs/promises')
   await fs.copyFile(new URL('../../../cli.mjs', import.meta.url), join(root, 'cli.mjs'))
   await fs.mkdir(join(root, 'scripts/lib'), { recursive: true })
+  await fs.copyFile(new URL('../cli-location.cjs', import.meta.url), join(root, 'scripts/lib/cli-location.cjs'))
   await fs.writeFile(join(root, 'scripts/_preflight.mjs'), `import fs from 'node:fs';import path from 'node:path';import {fileURLToPath} from 'node:url';const lib=path.join(path.dirname(fileURLToPath(import.meta.url)),'lib/node_modules/fixture-package');fs.mkdirSync(lib,{recursive:true});fs.writeFileSync(path.join(lib,'package.json'),JSON.stringify({main:'index.js'}));fs.writeFileSync(path.join(lib,'index.js'),'module.exports=true')`)
   await fs.writeFile(join(root, 'scripts/lib/registry.mjs'), "import value from 'fixture-package'; export default value")
   await fs.writeFile(join(root, 'scripts/start.mjs'), "import './_preflight.mjs';import value from './lib/registry.mjs';if(!value)process.exit(1);console.log('entry linked after dependency repair')")
@@ -193,5 +194,46 @@ test('healthy Corepack avoids Windows PATH discovery; localized absence is check
     `
     const result = spawnSync(process.execPath, ['--input-type=module', '-e', code], { encoding: 'utf8', env: { ...process.env, TEST_MODE: mode, TEST_ROOT: root, TEMP: root, TMP: root, LOCALAPPDATA: root, TOOLCHAIN_MODULE: new URL('../toolchain.mjs', import.meta.url).href } })
     assert.equal(result.status, 0, mode + ': ' + result.stdout + result.stderr)
+  }
+})
+
+
+function bundledPathFixture(t) {
+  const home = fixture(t), core = join(home, '产品 中文'), installed = join(home, 'installed')
+  mkdirSync(join(core, '.product-runtime/node/bin'), { recursive: true })
+  copyFileSync(process.execPath, join(core, '.product-runtime/node/bin/node'), constants.COPYFILE_FICLONE)
+  chmodSync(join(core, '.product-runtime/node/bin/node'), 0o755)
+  mkdirSync(join(installed, 'bin'), { recursive: true })
+  writeFileSync(join(installed, 'bin/crabot'), '#!/bin/sh\necho bundled-command\n', { mode: 0o755 })
+  return { home, core, installed, env: { HOME: home, TEST_CORE: core, CRABOT_INSTALL_DIR: installed, SHELL: '/bin/bash', PATH: '/usr/bin:/bin:/usr/sbin:/sbin' } }
+}
+
+test('bundled CLI PATH setup uses its own Node and preserves login preferences without adding nvm', unix, t => {
+  const f = bundledPathFixture(t)
+  writeFileSync(join(f.home, '.profile'), 'export PRESERVED_PROFILE=present\n')
+  mkdirSync(join(f.home, '.nvm')); writeFileSync(join(f.home, '.nvm/nvm.sh'), 'echo must-not-be-added\n')
+  for (let i = 0; i < 2; i++) {
+    const result = bash('BUNDLED_CORE_DIR="$TEST_CORE"; configure_path', f.env)
+    assert.equal(result.status, 0, result.stdout + result.stderr)
+  }
+  const profile = readFileSync(join(f.home, '.profile'), 'utf8')
+  assert.ok(profile.startsWith('export PRESERVED_PROFILE=present\n')); assert.doesNotMatch(profile, /NVM_DIR|nvm\.sh/)
+  for (const args of [['--login', '-c'], ['-i', '-c']]) {
+    const result = spawnSync('/bin/bash', [...args, 'crabot'], { env: { ...process.env, ...f.env }, encoding: 'utf8' })
+    assert.equal(result.status, 0, result.stderr); assert.match(result.stdout, /bundled-command/)
+  }
+})
+
+test('bundled PATH setup preserves a broken custom link and rejects a shared writable command directory', unix, t => {
+  for (const mode of ['broken-link', 'shared-directory']) {
+    const f = bundledPathFixture(t), prefix = join(f.home, '.local/bin'), entry = join(prefix, 'crabot')
+    mkdirSync(prefix, { recursive: true })
+    if (mode === 'broken-link') symlinkSync('/missing-custom-command', entry)
+    else chmodSync(prefix, 0o777)
+    const result = bash('BUNDLED_CORE_DIR="$TEST_CORE"; configure_path', f.env)
+    assert.notEqual(result.status, 0)
+    if (mode === 'broken-link') assert.equal(readlinkSync(entry), '/missing-custom-command')
+    else assert.equal(existsSync(entry), false)
+    assert.equal(existsSync(join(f.home, '.bashrc')), false)
   }
 })

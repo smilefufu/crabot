@@ -14,6 +14,8 @@ on:
       - 'crabot-agent/src/core/runtime-env.ts'
       - 'crabot-agent/src/agent/mcp-connector.ts'
       - 'scripts/**'
+      - 'install.sh'
+      - 'install.ps1'
       - '.github/scripts/*product*'
       - '.github/scripts/fixtures/product-*'
       - '.github/scripts/desktop-runtime-scope.mjs'
@@ -91,7 +93,7 @@ jobs:
           node --test scripts/lib/__tests__/product-*.test.mjs
           node --test scripts/lib/__tests__/instance-runtime.test.mjs scripts/lib/__tests__/cli-lock-native.test.mjs scripts/lib/__tests__/process-identity.test.mjs scripts/lib/__tests__/local-auth-transport.test.mjs scripts/lib/__tests__/stop-windows.test.mjs scripts/lib/__tests__/background-core.test.mjs scripts/lib/__tests__/supervisor-bootstrap.test.mjs scripts/lib/__tests__/mm-startup.test.mjs
           node --test scripts/lib/__tests__/desktop-session.test.mjs
-          node --test scripts/lib/__tests__/core-preparation.test.mjs
+          node --test scripts/lib/__tests__/core-preparation.test.mjs scripts/lib/__tests__/installer-compat.test.mjs
           node --test scripts/lib/__tests__/core-release.test.mjs scripts/lib/__tests__/cli-launcher.test.mjs scripts/lib/__tests__/cli-installation.test.mjs
           node --test scripts/lib/__tests__/legacy-desktop.test.mjs
           node --test scripts/lib/__tests__/legacy-mm-rpc.test.mjs
@@ -172,6 +174,7 @@ jobs:
           node scripts/desktop/stage-core.mjs "--out=.desktop-build/安装 候选/core" --version=0.1.0-desktop.1
           node .github/scripts/verify-release-payload.mjs "$GITHUB_WORKSPACE/.desktop-build/安装 候选/core"
           node .github/scripts/validate-staged-core.mjs ".desktop-build/安装 候选/core"
+          node .github/scripts/smoke-installed-cli.mjs ".desktop-build/安装 候选/core"
           node scripts/desktop/package-application.mjs --candidate=true "--core=.desktop-build/安装 候选/core" "--out=.desktop-build/安装 候选/gui" 2>&1 | tee .desktop-build/gui-package.log
       - name: Boot actual packaged app with native session and CLI on Linux
         timeout-minutes: 10

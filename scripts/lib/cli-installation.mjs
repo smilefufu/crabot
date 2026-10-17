@@ -41,7 +41,10 @@ function authority(scope) {
 }
 async function rootDirectory(root, scope) {
   authority(scope)
-  await fs.mkdir(root, { recursive: true, mode: scope === 'system' ? 0o755 : 0o700 })
+  if (!await present(root)) {
+    if (scope === 'user') management.ensurePrivateDataRoot(root)
+    else await fs.mkdir(root, { recursive: true, mode: 0o755 })
+  }
   if (!identity.isOwnedDirectory(root) || (await fs.lstat(root)).isSymbolicLink()) fail('CLI 安装目录归属无法核验，未替换入口。')
   for (const name of ['.git', 'cli.mjs', 'core-release.json']) if (await present(path.join(root, name))) fail('发现原有代码安装，请通过已有升级或桌面接管流程迁移，未覆盖原安装。')
   if (scope === 'user') management.ensurePrivateDataRoot(root)

@@ -14,6 +14,7 @@ FROM_SOURCE=false
 NODE_SWITCHED_BY_NVM=false
 NODE_PREV_VERSION=""
 SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+BUNDLED_CORE_DIR=""
 
 # 解析参数
 SYSTEM_MODE=false
@@ -314,7 +315,7 @@ append_path() {
     printf '\n%s\n' "$line" >> "$file"
   fi
   # nvm 安装器不创建缺失的 profile；登录 shell 也未必读取 .bashrc。
-  if [ -s "${NVM_DIR:-$HOME/.nvm}/nvm.sh" ]; then
+  if [ -z "$BUNDLED_CORE_DIR" ] && [ -s "${NVM_DIR:-$HOME/.nvm}/nvm.sh" ]; then
     local nvm_line='export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"; [ ! -s "$NVM_DIR/nvm.sh" ] || . "$NVM_DIR/nvm.sh"'
     if [ "${NVM_DIR:-$HOME/.nvm}" != "$HOME/.nvm" ]; then
       nvm_line="export NVM_DIR=$(printf '%q' "$NVM_DIR"); [ ! -s \"\$NVM_DIR/nvm.sh\" ] || . \"\$NVM_DIR/nvm.sh\""
@@ -325,24 +326,41 @@ append_path() {
 configure_path() {
   local crabot_path="$INSTALL_DIR/cli.mjs"
   if [ "$FROM_SOURCE" = true ]; then crabot_path="$SOURCE_DIR/cli.mjs"; fi
+  if [ -n "$BUNDLED_CORE_DIR" ]; then crabot_path="$INSTALL_DIR/bin/crabot"; fi
   if [ "$SYSTEM_MODE" = true ]; then
+    if [ -n "$BUNDLED_CORE_DIR" ] && { [ -e /usr/local/bin/crabot ] || [ -L /usr/local/bin/crabot ]; }; then
+      if [ ! -L /usr/local/bin/crabot ] || [ "$(readlink /usr/local/bin/crabot)" != "$crabot_path" ]; then
+        error "Preserving conflicting command: /usr/local/bin/crabot; installed command: $crabot_path"; return 1
+      fi
+      return
+    fi
     ln -sf "$crabot_path" /usr/local/bin/crabot
     chmod +x "$crabot_path"
     return
   fi
   local bin_dir="$HOME/.local/bin" shell_rc
   mkdir -p "$bin_dir"
-  if [ -e "$bin_dir/crabot" ] && { [ ! -L "$bin_dir/crabot" ] || [ "$(readlink "$bin_dir/crabot")" != "$crabot_path" ]; }; then
+  if [ -n "$BUNDLED_CORE_DIR" ]; then
+    "$BUNDLED_CORE_DIR/.product-runtime/node/bin/node" --input-type=module - "$bin_dir" <<'JS'
+import fs from 'node:fs'
+const stat = fs.lstatSync(process.argv[2])
+if (!stat.isDirectory() || stat.isSymbolicLink() || stat.uid !== process.getuid() || (stat.mode & 0o022)) throw new Error('User command directory is not exclusively writable by this account; existing entries were preserved')
+JS
+  fi
+  if { [ -e "$bin_dir/crabot" ] || [ -L "$bin_dir/crabot" ]; } && { [ ! -L "$bin_dir/crabot" ] || [ "$(readlink "$bin_dir/crabot")" != "$crabot_path" ]; }; then
+    if [ -n "$BUNDLED_CORE_DIR" ]; then error "Preserving conflicting command: $bin_dir/crabot; installed command: $crabot_path"; return 1; fi
     warn "Preserving existing launcher: $bin_dir/crabot; new CLI: $crabot_path"
   else
-    ln -sf "$crabot_path" "$bin_dir/crabot"
+    if [ -z "$BUNDLED_CORE_DIR" ]; then ln -sf "$crabot_path" "$bin_dir/crabot"
+    elif [ ! -L "$bin_dir/crabot" ]; then ln -s "$crabot_path" "$bin_dir/crabot"; fi
   fi
   chmod +x "$crabot_path"
   case "$SHELL" in
     */zsh)
       mkdir -p "${ZDOTDIR:-$HOME}"
       shell_rc="${ZDOTDIR:-$HOME}/.zshrc"
-      append_path "$shell_rc" ;;
+      append_path "$shell_rc"
+      if [ -n "$BUNDLED_CORE_DIR" ]; then append_path "${ZDOTDIR:-$HOME}/.zprofile"; fi ;;
     */bash)
       append_path "$HOME/.bashrc"
       shell_rc="$HOME/.bash_profile"
@@ -416,6 +434,13 @@ main() {
     version_ge "${libc#glibc }" 2.35 || { error "Linux release requires glibc >= 2.35, found $libc"; return 1; }
   fi
 
+  if [ "$FROM_SOURCE" != true ] && [ -f "$SOURCE_DIR/core-release.json" ]; then
+    local bundled_node="$SOURCE_DIR/.product-runtime/node/bin/node" scope=user
+    [ -x "$bundled_node" ] || { error "Bundled Node is missing; repair the archive."; return 1; }
+    [ "$SYSTEM_MODE" != true ] || scope=system
+    "$bundled_node" "$SOURCE_DIR/scripts/install-core.mjs" "--install-root=$INSTALL_DIR" "--scope=$scope" || return 1
+    BUNDLED_CORE_DIR="$INSTALL_DIR/releases/$(cat "$INSTALL_DIR/current-core")"
+  else
   if [ "$SYSTEM_MODE" = "true" ]; then
     ensure_system_node
     ensure_system_uv
@@ -503,6 +528,8 @@ JS
 
   fi
 
+  fi # source / legacy release preparation
+
   if [ "$SYSTEM_MODE" = "true" ]; then
     section "Creating /etc/crabot/ skeleton"
 
@@ -531,8 +558,8 @@ JS
     fi
 
     # 铺一份供应商目录注释样例（.example 不激活；激活需改名为 vendor.yaml）
-    if [ -f "$INSTALL_DIR/scripts/templates/vendor.yaml.example" ]; then
-      cp "$INSTALL_DIR/scripts/templates/vendor.yaml.example" /etc/crabot/defaults/vendor.yaml.example
+    if [ -f "${BUNDLED_CORE_DIR:-$INSTALL_DIR}/scripts/templates/vendor.yaml.example" ]; then
+      cp "${BUNDLED_CORE_DIR:-$INSTALL_DIR}/scripts/templates/vendor.yaml.example" /etc/crabot/defaults/vendor.yaml.example
       chmod 0644 /etc/crabot/defaults/vendor.yaml.example
     fi
 
@@ -554,7 +581,7 @@ LR
 
   section "Setting up PATH"
   configure_path
-  if [ "$FROM_SOURCE" != true ]; then printf '%s\n' "$version" > "$INSTALL_DIR/VERSION"; fi
+  if [ "$FROM_SOURCE" != true ] && [ -z "$BUNDLED_CORE_DIR" ]; then printf '%s\n' "$version" > "$INSTALL_DIR/VERSION"; fi
 
   if [ "$SYSTEM_MODE" = "true" ]; then
     section "Done! (system mode)"
