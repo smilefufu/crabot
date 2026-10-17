@@ -1,6 +1,8 @@
 import path from 'node:path'
 import { PlaybackReceipts } from './playback-receipts.js'
 import { ReplyPlayback } from './reply-playback.js'
+import { GuidedPlayback } from './guided-playback.js'
+import type { VoiceGuidedEnrollment } from 'crabot-shared'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Server } from 'node:net'
 import os from 'node:os'
@@ -37,6 +39,9 @@ function paginate<T>(items: T[], params: { pagination?: { page?: number; page_si
 }
 
 export class VoiceChannel extends ModuleBase {
+  private guided?: VoiceGuidedEnrollment
+  private guidedStep = 0
+  private guidedPlayback?: { id: string; step: 1 | 2 | 3; player: GuidedPlayback }
   private readonly receipts: PlaybackReceipts
   private reservation?: { id: string; connection: Connection; finish(accepted: boolean): void }
   private readonly playbackDone = new Map<string, Promise<VoiceOutputResult>>()
@@ -64,7 +69,7 @@ export class VoiceChannel extends ModuleBase {
     this.registerMethod('update_config', async () => { this.disconnect(); await this.refreshConfig(); return { updated: true } })
     this.registerMethod('get_capabilities', () => ({ supported_message_types: ['text'], supported_features: [], supports_history_query: false, supports_platform_user_query: true,
       max_message_length: 120, max_file_size: 0, supports_file_path: false, supports_list_contacts: true, supports_list_groups: true, supports_list_group_members: true,
-      voice: { protocol_version: 7, send_timeout_ms: 30000 } }))
+      voice: { protocol_version: 8, send_timeout_ms: 30000 } }))
     this.registerMethod('get_sessions', async (params: { type?: string; pagination?: { page?: number; page_size?: number } }) => { await this.refreshConfig(); return paginate(params?.type === 'private' ? [] : [this.session()], params) })
     this.registerMethod('get_session', async (params: { session_id: string }) => { this.assertSession(params.session_id); await this.refreshConfig(); return { session: this.session() } })
     this.registerMethod('get_private_session', () => { throw new RpcError('CHANNEL_UNSUPPORTED_FEATURE', 'Voice has only a voice group') })
@@ -139,6 +144,7 @@ export class VoiceChannel extends ModuleBase {
       if (c?.helloSent) {
         if (previousSetup !== result.setup_status) this.send(c.socket, { type: 'setup_status', status: result.setup_status })
         if (result.owner_activation && JSON.stringify(previousOwner) !== JSON.stringify(result.owner_activation)) this.send(c.socket, { type: 'owner_activation', activation: result.owner_activation })
+        await this.reconcileGuided(c, result.guided_enrollment)
         this.pushCatalog(c)
       }
     })
@@ -151,6 +157,57 @@ export class VoiceChannel extends ModuleBase {
   }
   private catalog(): VoiceCatalog {
     return { enrollment_revision: this.settings.enrollment_revision, contacts: this.settings.contacts.map(({ platform_user_id, display_name }) => ({ platform_user_id, display_name })), registrations: this.settings.registrations, pending_enrollment: this.settings.pending_enrollment }
+  }
+  private async reconcileGuided(c: Connection, offer: VoiceGuidedEnrollment | null): Promise<void> {
+    if (c !== this.connection) return
+    if (this.guided) {
+      const result = await this.admin<unknown, VoiceManagementResult>('get_voice_management_result', { channel_id: this.config.moduleId, connection_epoch: c.epoch, request_id: this.guided.operation_id })
+      if (result.status === 'completed' || result.status === 'rejected') {
+        const operationId = this.guided.operation_id
+        this.guidedPlayback?.player.cancel(); this.guidedPlayback = undefined; this.guided = undefined
+        this.send(c.socket, { type: 'guided_end', operation_id: operationId, status: result.status, message: result.message ?? (result.status === 'completed' ? '声音记录已登记完成' : '本次录入已结束') })
+      }
+      return
+    }
+    if (!offer || offer.connection_epoch !== c.epoch || !c.foreground || !c.speechEnabled || c.input || c.processing || this.playback || this.reservation || c.activity === 'recording') return
+    this.cancelInteraction(); this.guided = offer; this.guidedStep = 0
+    this.send(c.socket, { type: 'guided_enroll', enrollment: offer })
+  }
+  private async cancelGuided(c: Connection): Promise<void> {
+    const guided = this.guided
+    if (!guided) return
+    this.guided = undefined; this.guidedPlayback?.player.cancel(); this.guidedPlayback = undefined
+    try {
+      await this.refreshConfig()
+      if (this.settings.pending_enrollment?.registration.registration_id === guided.task.registration.registration_id) {
+        await this.admin('manage_voice_contacts', { channel_id: this.config.moduleId, connection_epoch: c.epoch,
+          request: { request_id: randomUUID(), expected_revision: this.settings.enrollment_revision, command: { action: 'cancel_enrollment', registration_id: guided.task.registration.registration_id } } })
+      }
+    } finally {
+      if (c === this.connection) this.send(c.socket, { type: 'guided_end', operation_id: guided.operation_id, status: 'rejected', message: '本次录入已停止；麦克风关闭' })
+    }
+  }
+  private playGuided(c: Connection, operationId: string, step: 1 | 2 | 3): void {
+    const guided = this.guided
+    if (!guided || guided.operation_id !== operationId || guided.connection_epoch !== c.epoch || !c.foreground || !c.speechEnabled
+      || c.microphone !== 'closed' || this.guidedPlayback || !this.settings.tts_connection || Date.parse(guided.task.expires_at) <= Date.now()
+      || step !== this.guidedStep && step !== this.guidedStep + 1) throw new Error('Guided capture is not ready')
+    const lines = ['你好，这是我的第一段声音，请记住我的说话方式。', '我正在录入自己的声音，以后请认出是我在说话。', '很高兴认识你，以后我会经常和你聊天。', '今天的阳光很好，我想和你分享身边的事情。', '我会自然地说完这句话，请听听我的声音。', '现在我正在说话，这段录音会用来认识我。'].filter(text => !text.includes(this.settings.config.wake_word))
+    if (lines.length < 3) throw new Error('Wake phrase conflicts with enrollment prompts')
+    const text = (step === 1 ? `${guided.task.registration.display_name}，你好。我来记住你的声音，并登记为好友。愿意的话，` : '') + `请读：${lines[step - 1]}`
+    const id = randomUUID(); this.guidedStep = step
+    const player = new GuidedPlayback(this.settings.tts_connection, text, Date.parse(guided.task.expires_at), {
+      valid: () => { if (this.connection !== c || this.guided !== guided || !c.foreground || !c.speechEnabled || c.microphone !== 'closed') throw new Error('Guided context expired') },
+      start: () => this.send(c.socket, { type: 'guided_prompt_start', operation_id: operationId, step, playback_id: id, text }),
+      audio: (sequence, pcm) => { if (c.socket.bufferedAmount > 50000) throw new Error('Guided audio queue full'); c.socket.send(encodeVoiceFrame(2, id, sequence, pcm)) },
+      end: samples => this.send(c.socket, { type: 'guided_prompt_end', operation_id: operationId, playback_id: id, sample_count: samples }),
+    })
+    this.guidedPlayback = { id, step, player }
+    void player.done.then(() => {
+      if (this.guidedPlayback?.id !== id || this.guided !== guided || this.connection !== c || !c.foreground || !c.speechEnabled || Date.parse(guided.task.expires_at) <= Date.now()) return
+      this.guidedPlayback = undefined
+      this.send(c.socket, { type: 'guided_record', operation_id: operationId, step, playback_id: id })
+    }).catch(() => { if (this.guided === guided && this.connection === c) void this.cancelGuided(c).catch(() => undefined) })
   }
   private applyCatalog(catalog: VoiceCatalog): void {
     if (catalog.enrollment_revision < this.settings.enrollment_revision) return
@@ -204,7 +261,7 @@ export class VoiceChannel extends ModuleBase {
         await this.refreshConfig()
         if (!this.settings.terminal_entry) throw new RpcError('INVALID_PARAMS', '请先保存手机可访问的后台地址')
         this.pairing?.socket?.terminate()
-        this.pairing = { protocol_version: 7, channel_id: this.config.moduleId, pairing_id: randomUUID(), ...this.settings.terminal_entry, nonce: randomBytes(32).toString('base64url'), verification_code: String(randomInt(100000, 1000000)), expires_at: new Date(Date.now() + 60000).toISOString() }
+        this.pairing = { protocol_version: 8, channel_id: this.config.moduleId, pairing_id: randomUUID(), ...this.settings.terminal_entry, nonce: randomBytes(32).toString('base64url'), verification_code: String(randomInt(100000, 1000000)), expires_at: new Date(Date.now() + 60000).toISOString() }
         return { action: 'create_pairing', pairing: { ...this.pairing } }
       }
       case 'confirm_pairing': {
@@ -270,6 +327,7 @@ export class VoiceChannel extends ModuleBase {
           c.lastHeartbeat = Date.now(); c.foreground = control.foreground; c.microphone = control.microphone; c.playback = control.playback; c.appliedRevision = control.enrollment_revision
           c.speechEnabled = control.speech_enabled; c.activity = control.activity
           if (!c.foreground || !c.speechEnabled) this.cancelInteraction()
+          if ((!c.foreground || !c.speechEnabled) && this.guided) void this.cancelGuided(c).catch(() => undefined)
           if (!wasReady && c.foreground && c.speechEnabled && c.activity === 'idle') this.outputReady()
           this.heartbeatSync(); return
         }
@@ -305,6 +363,11 @@ export class VoiceChannel extends ModuleBase {
   }
   private async control(c: Connection, control: VoiceClientControl): Promise<void> {
     switch (control.type) {
+      case 'guided_prompt': await this.sync(); if (this.guided?.operation_id === control.operation_id) this.playGuided(c, control.operation_id, control.step); return
+      case 'guided_playback':
+        if (this.guided?.operation_id === control.operation_id && this.guidedPlayback?.id === control.playback_id) this.guidedPlayback.player.receipt(control.status, control.played_samples)
+        return
+      case 'guided_cancel': if (this.guided?.operation_id === control.operation_id) await this.cancelGuided(c); return
       case 'owner_saved': {
         if (!c.foreground) throw new Error('Foreground terminal required')
         try { await this.sync({ owner_saved: control.saved }) }
@@ -408,7 +471,7 @@ export class VoiceChannel extends ModuleBase {
     const c = this.connection
     return { channel_id: this.config.moduleId, session_id: voiceSessionId(this.config.moduleId), connection_epoch: c?.epoch ?? null,
       foreground: c?.foreground ?? false, speech_enabled: c?.speechEnabled ?? false,
-      activity: this.settings?.pending_enrollment ? 'management' : c?.activity ?? 'idle', current_turn_id: this.reply?.context.turn_id ?? null }
+      activity: this.guided || this.settings?.pending_enrollment ? 'management' : c?.activity ?? 'idle', current_turn_id: this.reply?.context.turn_id ?? null }
   }
   private outputReady(): void {
     const c = this.connection
@@ -423,7 +486,7 @@ export class VoiceChannel extends ModuleBase {
     if (context.binding.channel_id !== this.config.moduleId || typeof context.binding.response_id !== 'string' || !context.binding.response_id
       || !['reply', 'notification'].includes(context.kind) || (!!context.binding.worker_id !== !!context.binding.worker_turn_id)) failed('Invalid voice delivery binding')
     const c = this.connection
-    if (!c?.foreground || !c.speechEnabled || c.epoch !== context.connection_epoch || this.settings.setup_status !== 'complete' || this.settings.pending_enrollment
+    if (!c?.foreground || !c.speechEnabled || c.epoch !== context.connection_epoch || this.settings.setup_status !== 'complete' || this.settings.pending_enrollment || this.guided
       || c.input || (c.processing && (context.kind !== 'reply' || c.processingTurn !== context.turn_id)) || c.activity === 'management' || c.activity === 'recording') failed('终端暂时不适合发声')
     if (starting && (this.playback || this.reservation)) failed('播放忙')
     if (starting && context.kind === 'notification' && c.activity !== 'idle') failed('当前对话尚未结束')
@@ -548,6 +611,7 @@ export class VoiceChannel extends ModuleBase {
     this.playbacks.clear(); this.outputContexts.clear(); this.playbackDone.clear(); this.reply = undefined; this.cancelPlayback('语音交互已结束')
   }
   private disconnect(): void {
+    this.guided = undefined; this.guidedPlayback?.player.cancel(); this.guidedPlayback = undefined
     this.cancelInteraction(); const c = this.connection; this.connection = undefined; c?.socket.terminate()
     if (!this.stopped) void this.sync().catch(() => {})
   }

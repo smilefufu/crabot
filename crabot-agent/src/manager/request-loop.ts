@@ -18,6 +18,7 @@ import { buildManagerToolFace, type ToolFaceDeps } from './tools/tool-face.js'
 import { readObservation, observationFile, executionObservation, persistObservation, requestObservation } from '../permissions/execution-observation.js'
 import { checkProjectFileAccess } from './tools/project-doc-tools.js'
 import { allowed, denied } from '../permissions/tool-authorization.js'
+import { VOICE_TOOL_NAMES } from './tools/voice-tools.js'
 
 interface Dependencies {
   canRun?(): boolean
@@ -97,6 +98,18 @@ export function createConversationRequestLoop(context: RequestRunContext, deps: 
       }
     } })
     return {
+      ...(source.message.features.voice && actor.kind === 'friend' && actor.is_master && request.permission_sources.friend?.is_master && host.coreRuntimeBearer ? {
+        voiceManagement: {
+          context: { request_id: request.request_id, source: requestSourceFor(source), turn_id: source.message.features.voice.turn_id, delivery: request.delivery.kind },
+          call: async (input: import('crabot-shared').VoiceAgentActionParams): Promise<import('crabot-shared').VoiceAgentManagementResult> => {
+            const current = recheck ? await recheck() : actor
+            if (current.kind !== 'friend' || !current.is_master) throw new Error('PERMISSION_DENIED')
+            const bearer = host.coreRuntimeBearer!()
+            if (!bearer) throw new Error('CAPABILITY_UNKNOWN')
+            return host.messagingDeps.rpcClient.callSensitive(await host.messagingDeps.getAdminPort(), 'voice_agent_action', input, host.messagingDeps.moduleId, { authorizationBearer: bearer })
+          },
+        },
+      } : {}),
       harness: deps.harness, requestGuard: deps.guard, requestAuthorization: 'request',
       workerRequestControl: { scope: 'request', authority: async () => context.authority },
       readExecutionObservation: (workerId, incarnationId, impl) => readObservation(observationFile(path.join(host.dataRoot, 'agent', 'workers'), workerId, incarnationId),
@@ -143,6 +156,7 @@ export function createConversationRequestLoop(context: RequestRunContext, deps: 
   }
   const scope = new RequestManagerToolScope({ context, raw, checkOperation: async (name, input, actor) => {
     if (deps.canRun?.() === false || host.isClosing?.()) return denied('CAPABILITY_UNKNOWN', '运行时正在关闭')
+    if ((VOICE_TOOL_NAMES as readonly string[]).includes(name) && (actor.kind !== 'friend' || !actor.is_master)) return denied('PERMISSION_DENIED', '当前请求不提供此工具')
     if (name === 'send_message' && request.delivery.kind === 'requester_private') {
       if (typeof input.channel_id !== 'string' || typeof input.session_id !== 'string') return denied('PERMISSION_DENIED', '私发目标未核实')
       if (!await verifyPrivateTarget(input.channel_id, input.session_id)) return denied('PERMISSION_DENIED', '私发目标不是原发起人')
@@ -196,7 +210,9 @@ export function createConversationRequestLoop(context: RequestRunContext, deps: 
       const base = raw(request.permission_sources.group)
       const candidates = new Map<string, NonNullable<ToolFaceDeps['externalMcpTools']>[number]>()
       for (const actor of [request.permission_sources.group, request.permission_sources.friend]) if (actor) for (const tool of raw(actor).externalMcpTools ?? []) candidates.set(tool.name, tool)
-      return buildManagerToolFace({ ...base, faceState, candidatePermissions: candidate, externalMcpTools: [...candidates.values()], decorateTool: scope.decorate })
+      return buildManagerToolFace({ ...base,
+        ...(request.permission_sources.friend ? { voiceManagement: raw(request.permission_sources.friend).voiceManagement } : {}),
+        faceState, candidatePermissions: candidate, externalMcpTools: [...candidates.values()], decorateTool: scope.decorate })
     },
     promptInputs: () => ({ isGroup: true, requestAuthorization: 'request',
       dialogProfile: JSON.stringify({ request_id: request.request_id, source: requestSourceFor(source), original_message: source.message, selection: request.selection, delivery: request.delivery }),

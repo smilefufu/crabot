@@ -1,6 +1,7 @@
-// protocol-voice.md v0.7.0 (implementation in progress): shared terminal, configuration and admission contracts.
+// protocol-voice.md v0.8.0 (implementation in progress): shared terminal, configuration and admission contracts.
 import type { ModuleId, SessionId, FriendId } from './base-protocol.js'
 import type { ChannelMessage, Friend } from './channel-protocol.js'
+import type { ConversationRequestSource } from './conversation-request-source.js'
 
 export type VoiceIdentityStatus = 'matched' | 'unknown' | 'uncertain'
 export interface VoiceSegment {
@@ -90,7 +91,7 @@ export type VoiceOutputResult =
 export interface VerifyVoiceAgentParams { channel_id: ModuleId }
 export interface VerifyVoiceAgentResult { verified: true }
 export interface VoiceChannelCapability {
-  protocol_version: 7
+  protocol_version: 8
   send_timeout_ms: 30000
 }
 export type AudioServiceFormat = 'sherpa-offline-ws' | 'mlx-audio-http' | 'openai-audio'
@@ -255,7 +256,7 @@ export interface SyncVoiceTerminalParams {
   completed_enrollment?: { registration_id: string; model_id: string; enrollment_revision: number }
   cleared_registration?: { registration_id: string; enrollment_revision: number }
 }
-export interface SyncVoiceTerminalResult { synced: true; catalog: VoiceCatalog; owner_activation: VoiceOwnerActivation | null; setup_status: 'draft' | 'complete' }
+export interface SyncVoiceTerminalResult { synced: true; catalog: VoiceCatalog; guided_enrollment: VoiceGuidedEnrollment | null; owner_activation: VoiceOwnerActivation | null; setup_status: 'draft' | 'complete' }
 export interface VerifyVoiceRuntimeParams { expected_module_id: ModuleId }
 export interface VerifyVoiceRuntimeResult { verified: true }
 export interface VerifyVoiceAdminParams { channel_id: ModuleId }
@@ -273,7 +274,7 @@ export type VoiceAdminAction =
   | { action: 'cancel_enrollment'; registration_id: string; request_id: string; expected_revision: number }
 export interface VoiceAdminActionParams { channel_id: ModuleId; command: VoiceAdminAction; owner_activation?: VoiceOwnerActivation }
 export interface VoicePairing {
-  protocol_version: 7
+  protocol_version: 8
   channel_id: ModuleId
   pairing_id: string
   url: string
@@ -309,10 +310,13 @@ export type VoiceAdminActionResult =
 
 export interface VoiceModelVersions { segmentation: string; embedding: string }
 export type VoiceClientControl =
-  | { type: 'pair'; protocol_version: 7; nonce: string; owner: VoiceDeviceOwner }
-  | { type: 'hello'; protocol_version: 7; credential: string; models: VoiceModelVersions; aec_verified: boolean; owner?: VoiceDeviceOwner }
+  | { type: 'pair'; protocol_version: 8; nonce: string; owner: VoiceDeviceOwner }
+  | { type: 'hello'; protocol_version: 8; credential: string; models: VoiceModelVersions; aec_verified: boolean; owner?: VoiceDeviceOwner }
   | { type: 'heartbeat'; foreground: boolean; microphone: 'closed' | 'wake' | 'recording'; playback: 'idle' | 'playing'; enrollment_revision: number; speech_enabled: boolean; activity: VoiceOutputState['activity'] }
   | { type: 'owner_saved'; saved: VoiceOwnerSaved }
+  | { type: 'guided_prompt'; operation_id: string; step: 1 | 2 | 3 }
+  | ({ type: 'guided_playback'; operation_id: string } & VoicePlaybackReport)
+  | { type: 'guided_cancel'; operation_id: string }
   | { type: 'contact_action'; request: VoiceManagementRequest }
   | { type: 'contact_action_query'; request_id: string }
   | { type: 'catalog_applied'; enrollment_revision: number }
@@ -344,6 +348,11 @@ export type VoiceServerControl =
   | { type: 'response_end'; turn_id: string }
   | { type: 'playback_cancel'; playback_id: string }
   | { type: 'enroll'; task: VoiceEnrollmentTask }
+  | { type: 'guided_enroll'; enrollment: VoiceGuidedEnrollment }
+  | { type: 'guided_prompt_start'; operation_id: string; step: 1 | 2 | 3; playback_id: string; text: string }
+  | { type: 'guided_prompt_end'; operation_id: string; playback_id: string; sample_count: number }
+  | { type: 'guided_record'; operation_id: string; step: 1 | 2 | 3; playback_id: string }
+  | { type: 'guided_end'; operation_id: string; status: 'completed' | 'rejected'; message: string }
   | { type: 'clear_registration'; registration_id: string; enrollment_revision: number }
   | { type: 'error'; code: string; message: string; turn_id?: string }
 
@@ -364,4 +373,37 @@ export interface VoiceOwnerSaved {
   profile_id: string
   registration_id: string
   model_id: string
+}
+
+export interface VoiceAgentContext {
+  request_id: string
+  source: ConversationRequestSource
+  turn_id: string
+  delivery: 'origin' | 'requester_private'
+}
+export type VoiceAgentActionParams =
+  | { action: 'list'; context: VoiceAgentContext }
+  | { action: 'manage'; context: VoiceAgentContext; request: VoiceManagementRequest; existing_friend_id?: FriendId }
+  | { action: 'result' | 'commit' | 'ack'; context: VoiceAgentContext; operation_id: string }
+export interface VoiceAgentManagementResult {
+  operation_id: string | null
+  status: 'pending' | 'completed' | 'rejected' | 'unknown'
+  catalog: VoiceCatalog
+  contacts: VoiceContact[]
+  friend_id?: FriendId
+  code?: string
+  message?: string
+}
+export interface VoiceAgentManagementReadyPayload {
+  channel_id: ModuleId
+  session_id: SessionId
+  request_id: string
+  operation_id: string
+}
+export interface VoiceGuidedEnrollment {
+  operation_id: string
+  request_id: string
+  connection_epoch: string
+  delivery: 'origin' | 'requester_private'
+  task: VoiceEnrollmentTask
 }

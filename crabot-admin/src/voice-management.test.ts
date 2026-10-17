@@ -92,7 +92,7 @@ describe('Voice v5 management transactions', () => {
     expect(loaded.registrations(channel).contacts).toEqual([contact])
     expect(loaded.registrations(channel).unconfirmed_contacts).toEqual([placeholder])
     expect(JSON.parse(await readFile(file + '.v2.bak', 'utf8'))).toEqual(old)
-    expect(JSON.parse(await readFile(file, 'utf8')).version).toBe(3)
+    expect(JSON.parse(await readFile(file, 'utf8')).version).toBe(4)
   })
   it('preserves corrupt original data instead of partially migrating or resetting it', async () => {
     const file = path.join(directory, 'voice-turns.json')

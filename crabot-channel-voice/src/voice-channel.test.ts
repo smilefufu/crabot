@@ -75,7 +75,7 @@ describe('Voice Channel with loopback WS, service adapters and durable Admin/cor
             tts_connection: { provider_id: 'local', format: 'mlx-audio-http', endpoint: `http://localhost:${(admin.address() as AddressInfo).port}`, model_id: 'kokoro', voice: 'zf_xiaobei', api_key: 'provider-secret' } }; break
           case 'verify_voice_agent':
           case 'verify_voice_admin': result = { verified: true }; break
-          case 'sync_voice_terminal': await store.sync(request.params); result = { synced: true, catalog: store.catalog(channelId), owner_activation: null, setup_status: setupStatus }; break
+          case 'sync_voice_terminal': await store.sync(request.params); result = { synced: true, catalog: store.catalog(channelId), guided_enrollment: store.guidedEnrollment(channelId), owner_activation: null, setup_status: setupStatus }; break
           case 'manage_voice_contacts': result = await store.manage(channelId, request.params.request, VOICE_MODEL_VERSIONS.embedding); break
           case 'get_voice_management_result': result = store.managementResult(channelId, request.params.request_id); break
           case 'get_voice_turn_status': result = store.status(request.params.channel_id, request.params.turn_id, request.params.payload_sha256); break
@@ -102,7 +102,7 @@ describe('Voice Channel with loopback WS, service adapters and durable Admin/cor
     })
     await new Promise<void>(resolve => admin.listen(0, resolve))
     const reserve = net.createServer(); await new Promise<void>(resolve => reserve.listen(0, resolve)); port = (reserve.address() as AddressInfo).port; await new Promise<void>(resolve => reserve.close(() => resolve()))
-    channel = new VoiceChannel({ moduleId: channelId, moduleType: 'channel', version: '0.1.0', protocolVersion: '0.7.0', port }, path.join(dir, 'terminal'), runtime)
+    channel = new VoiceChannel({ moduleId: channelId, moduleType: 'channel', version: '0.1.0', protocolVersion: '0.8.0', port }, path.join(dir, 'terminal'), runtime)
     // Resolve only the isolated test Admin. All HTTP RPCs and terminal frames remain real.
     const client = (channel as unknown as { rpcClient: RpcClient }).rpcClient
     client.publishEvent = vi.fn(async () => 0)
@@ -121,11 +121,11 @@ describe('Voice Channel with loopback WS, service adapters and durable Admin/cor
   }
   async function pair() {
     const pairing = await rpc.callSensitive<any, any>(port, 'voice_admin_action', { channel_id: channelId, command: { action: 'create_pairing' } }, 'isolated-admin', { authorizationBearer: human })
-    const phone = await connect(); phone.send({ type: 'pair', protocol_version: 7, nonce: pairing.pairing.nonce, owner: { profile_id: randomUUID(), display_name: 'Fixture owner', model_id: VOICE_MODEL_VERSIONS.embedding } })
+    const phone = await connect(); phone.send({ type: 'pair', protocol_version: 8, nonce: pairing.pairing.nonce, owner: { profile_id: randomUUID(), display_name: 'Fixture owner', model_id: VOICE_MODEL_VERSIONS.embedding } })
     const waiting = await phone.wait('pair_waiting'); expect(waiting.verification_code).toBe(pairing.pairing.verification_code)
     await rpc.callSensitive(port, 'voice_admin_action', { channel_id: channelId, command: { action: 'confirm_pairing', pairing_id: waiting.pairing_id } }, 'isolated-admin', { authorizationBearer: human })
     const credential = (await phone.wait('paired')).credential, live = await connect()
-    live.send({ type: 'hello', protocol_version: 7, credential, models: { embedding: VOICE_MODEL_VERSIONS.embedding, segmentation: VOICE_MODEL_VERSIONS.segmentation }, aec_verified: true })
+    live.send({ type: 'hello', protocol_version: 8, credential, models: { embedding: VOICE_MODEL_VERSIONS.embedding, segmentation: VOICE_MODEL_VERSIONS.segmentation }, aec_verified: true })
     const hello = await live.wait('hello'); expect(JSON.stringify(hello)).not.toContain('provider-secret')
     live.send({ type: 'heartbeat', foreground: true, microphone: 'closed', playback: 'idle' })
     await live.wait('catalog_confirmed')
@@ -146,6 +146,37 @@ describe('Voice Channel with loopback WS, service adapters and durable Admin/cor
     await phone.wait('error')
     expect(phone.controls.some(c => c.type === 'turn_ready')).toBe(false)
     expect(asrCalls).toBe(0); expect(accepted).toHaveLength(0)
+  })
+  it('guides a bounded management task with separate playback IDs, waits for real completion and never calls ASR', async () => {
+    const { phone } = await pair()
+    await vi.waitFor(() => expect(store.connectionState(channelId)?.foreground).toBe(true))
+    const live = store.connectionState(channelId)!, operationId = randomUUID()
+    const owner = store.catalog(channelId).contacts[0]
+    const result = await store.manage(channelId, { request_id: operationId, expected_revision: store.catalog(channelId).enrollment_revision,
+      command: { action: 'enroll_new', display_name: 'Synthetic guest' } }, VOICE_MODEL_VERSIONS.embedding, false, live.epoch!, {
+      context: { delivery: 'origin', request_id: 'a'.repeat(64), turn_id: randomUUID(), source: { source_id: randomUUID(), channel_id: channelId, session_id: voiceSessionId(channelId), session_type: 'group', platform_message_id: 'source-fixture', platform_user_id: owner.platform_user_id, sender_friend_id: 'A' } },
+      connection_epoch: live.epoch!, friend_id: randomUUID(), create_friend: true, sampled: false, acknowledged: false,
+    })
+    phone.send({ type: 'catalog_applied', enrollment_revision: phone.revision })
+    const offered = await phone.wait('guided_enroll')
+    expect(offered.enrollment.operation_id).toBe(operationId)
+    phone.send({ type: 'heartbeat', foreground: true, microphone: 'closed', playback: 'idle', activity: 'management' })
+    phone.send({ type: 'guided_prompt', operation_id: operationId, step: 1 })
+    const start = await phone.wait('guided_prompt_start'), end = await phone.wait('guided_prompt_end')
+    expect(start.operation_id).toBe(operationId); expect(end.sample_count).toBe(480)
+    expect(phone.controls.some(control => control.type === 'guided_record')).toBe(false)
+    phone.send({ type: 'guided_playback', operation_id: randomUUID(), playback_id: start.playback_id, status: 'completed', played_samples: 480 })
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(phone.controls.some(control => control.type === 'guided_record')).toBe(false)
+    phone.send({ type: 'guided_playback', operation_id: operationId, playback_id: start.playback_id, status: 'completed', played_samples: 480 })
+    expect(await phone.wait('guided_record')).toMatchObject({ operation_id: operationId, step: 1, playback_id: start.playback_id })
+    expect(asrCalls).toBe(0); expect(accepted).toEqual([])
+    expect(result.catalog.pending_enrollment).not.toBeNull()
+    phone.send({ type: 'guided_cancel', operation_id: operationId })
+    expect((await phone.wait('guided_end')).status).toBe('rejected')
+    expect(store.catalog(channelId).contacts).toHaveLength(2)
+    expect(store.managementResult(channelId, operationId).status).toBe('rejected')
+    expect(phone.controls.some(control => control.type === 'response_end')).toBe(false)
   })
   it('requires matching human confirmation, admits A B A atomically and keeps Provider credentials off the terminal', async () => {
     await expect(rpc.callSensitive(port, 'voice_admin_action', { channel_id: channelId, command: { action: 'create_pairing' } }, 'agent-cli', { authorizationBearer: runtime })).rejects.toThrow()
@@ -170,7 +201,7 @@ describe('Voice Channel with loopback WS, service adapters and durable Admin/cor
   })
   it('rejects a v2 handshake with an explicit version error', async () => {
     const phone = await connect(); phone.send({ type: 'hello', protocol_version: 2, credential: 'old', models: VOICE_MODEL_VERSIONS, aec_verified: false })
-    const error = await phone.wait('error'); expect(error.code).toBe('VOICE_VERSION_UNSUPPORTED'); expect(error.message).toContain('protocol_version=7')
+    const error = await phone.wait('error'); expect(error.code).toBe('VOICE_VERSION_UNSUPPORTED'); expect(error.message).toContain('protocol_version=8')
   })
   it('keeps a contact in the roster without an active sample and resolves current bindings', async () => {
     const contact = store.registrations(channelId).contacts[0]

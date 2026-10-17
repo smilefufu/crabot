@@ -197,7 +197,7 @@ describe('manager bootstrap（P5 Task 1）', () => {
       return params.event.type === 'reply_end' ? { platform_message_id: params.event.playback_id, sent_at: new Date().toISOString(), played_samples: 480 } : { accepted: true }
     })
     const messagingDeps = makeMessagingDeps()
-    messagingDeps.rpcClient = { call: vi.fn(async () => ({ voice: { protocol_version: 7 } })), callSensitive } as never
+    messagingDeps.rpcClient = { call: vi.fn(async () => ({ voice: { protocol_version: 8 } })), callSensitive } as never
     const stack = buildManagerStack(makeDeps({ coreRuntimeBearer: () => 'fixture-core', messagingDeps,
       managerAdapter: () => ({ async *stream(params) {
         requests.push(params)

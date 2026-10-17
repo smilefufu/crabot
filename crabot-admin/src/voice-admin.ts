@@ -6,6 +6,7 @@ import type { ChannelInstance } from './types.js'
 import { VoiceTurnStore } from './voice-turn-store.js'
 import { VoiceOwnerStore } from './voice-owner-store.js'
 import { commitVoiceOwnerMaster } from './voice-owner-master.js'
+import { VoiceAgentManagement } from './voice-agent-management.js'
 
 export interface VoiceAdminDeps {
   isVoice(channelId: string): boolean
@@ -19,8 +20,8 @@ export interface VoiceAdminDeps {
   closeGateway(id: string): void
   admissionReady(): boolean
   ownerReady(): boolean
-  ownerFriends(): Friend[]
-  persistOwnerFriend(friend: Friend): Promise<void>
+  friends(): Friend[]
+  persistFriend(friend: Friend): Promise<void>
   verifyRuntime(channelId: string, bearer?: string): Promise<void>
   verifyCore(bearer?: string): Promise<void>
   verifyHuman(bearer?: string): Promise<void>
@@ -28,6 +29,7 @@ export interface VoiceAdminDeps {
   checkGroup(channelId: string, sessionId: string): Promise<boolean>
   channelAction(channelId: string, command: VoiceAdminAction, bearer: string, ownerActivation?: VoiceOwnerActivation): Promise<VoiceAdminActionResult>
   publish(payload: VoiceTurnAuthorizedPayload): Promise<void>
+  publishManagement?(payload: import('crabot-shared').VoiceAgentManagementReadyPayload): Promise<void>
   configurationChanged(): Promise<void>
   testAudio(channelId: string, capability: AudioServiceCapability): Promise<unknown>
   enrollmentModelId: string
@@ -45,6 +47,7 @@ export class VoiceAdmin {
   readonly audio: AudioServiceRegistry
   readonly turns: VoiceTurnStore
   readonly owners: VoiceOwnerStore
+  readonly agent: VoiceAgentManagement
   private ownerWrites: Promise<unknown> = Promise.resolve()
   private replayTimer?: ReturnType<typeof setInterval>
   private replaying = false
@@ -53,6 +56,9 @@ export class VoiceAdmin {
     this.audio = new AudioServiceRegistry(dataDir)
     this.turns = new VoiceTurnStore(dataDir)
     this.owners = new VoiceOwnerStore(dataDir)
+    this.agent = new VoiceAgentManagement({ turns: this.turns, modelId: deps.enrollmentModelId, isVoice: deps.isVoice,
+      verifyCore: deps.verifyCore, ready: id => { if (!deps.ownerReady()) throw new RpcError('SERVICE_UNAVAILABLE', '好友数据尚未加载'); this.assertOwnerReady(id) },
+      friends: deps.friends, persist: deps.persistFriend, resolveFriend: deps.resolveFriend })
   }
   async load(): Promise<void> { await this.audio.load(); await this.turns.load(); await this.owners.load() }
   start(): void {
@@ -77,6 +83,7 @@ export class VoiceAdmin {
     const v = bodyObject(raw); requireFields(v, ['channel_id']); this.assertChannel(v.channel_id)
     await this.deps.verifyCore(bearer); return { verified: true }
   }
+  async verifyAgentRuntime(bearer?: string): Promise<void> { await this.deps.verifyCore(bearer) }
   async verifyHuman(raw: unknown, bearer?: string): Promise<{ verified: true }> {
     const v = bodyObject(raw); requireFields(v, ['channel_id']); this.assertChannel(v.channel_id)
     const channelId = v.channel_id
@@ -98,7 +105,7 @@ export class VoiceAdmin {
     const v = await this.managementCaller(raw, ['channel_id', 'connection_epoch', 'request'], bearer)
     validateVoiceManagementRequest(v.request)
     this.assertOwnerReady(v.channel_id as string)
-    return this.turns.manage(v.channel_id as string, v.request, this.deps.enrollmentModelId, false, v.connection_epoch as string)
+    return this.agent.serialize(() => this.turns.manage(v.channel_id as string, v.request as VoiceManagementRequest, this.deps.enrollmentModelId, false, v.connection_epoch as string))
   }
   async managementResult(raw: unknown, bearer?: string): Promise<VoiceManagementResult> {
     const v = await this.managementCaller(raw, ['channel_id', 'connection_epoch', 'request_id'], bearer)
@@ -109,6 +116,7 @@ export class VoiceAdmin {
     const v = bodyObject(raw); requireFields(v, ['channel_id', 'connection_epoch', 'foreground', 'completed_enrollment', 'cleared_registration', 'owner_saved'])
     this.assertChannel(v.channel_id)
     await this.deps.verifyRuntime(v.channel_id, bearer)
+    await this.agent.cancelUnauthorizedSampling()
     if (v.connection_epoch !== null) assertVoiceUuid(v.connection_epoch)
     if (typeof v.foreground !== 'boolean') invalid('Invalid foreground state')
     if (v.owner_saved !== undefined) {
@@ -126,8 +134,8 @@ export class VoiceAdmin {
         if (typeof ack.model_id !== 'string') invalid('Invalid enrollment model')
       }
     }
-    await this.turns.sync(v as unknown as SyncVoiceTerminalParams)
-    return { synced: true, catalog: this.visibleCatalog(v.channel_id), owner_activation: this.owners.get(v.channel_id), setup_status: this.setupStatus(v.channel_id) }
+    await this.agent.serialize(() => this.turns.sync(v as unknown as SyncVoiceTerminalParams))
+    return { synced: true, catalog: this.visibleCatalog(v.channel_id), guided_enrollment: this.turns.guidedEnrollment(v.channel_id), owner_activation: this.owners.get(v.channel_id), setup_status: this.setupStatus(v.channel_id) }
   }
   async submit(raw: unknown, bearer?: string): Promise<VoiceTurnResult> {
     const v = bodyObject(raw); this.assertChannel(v.channel_id)
@@ -169,10 +177,16 @@ export class VoiceAdmin {
     if (this.replaying) return
     this.replaying = true
     try {
+      await this.turns.expireEnrollments()
+      await this.agent.cancelUnauthorizedSampling()
       if (this.deps.ownerReady()) for (const record of this.owners.pendingBindings()) {
         try { await this.finalizeOwner(record.channel_id) } catch { /* Preserve pending facts for the original operation or explicit human recovery. */ }
       }
       if (!this.deps.admissionReady()) return
+      for (const payload of this.turns.agentPending()) {
+        try { await this.deps.publishManagement?.(payload) }
+        catch { /* Original management result remains pending and queryable. */ }
+      }
       for (const payload of this.turns.pending()) {
         try { await this.deps.publish(payload) }
         catch { console.warn('[Admin] Voice batch remains pending; publication will retry') }
@@ -192,7 +206,7 @@ export class VoiceAdmin {
         const request = { request_id, expected_revision, command }
         validateVoiceManagementRequest(request)
         this.assertOwnerReady(channelId)
-        const result = await this.turns.manage(channelId, request, this.deps.enrollmentModelId, true)
+        const result = await this.agent.serialize(() => this.turns.manage(channelId, request, this.deps.enrollmentModelId, true))
         if (result.status !== 'rejected') {
           try { await this.deps.channelAction(channelId, v as VoiceAdminAction, bearer) }
           catch { console.warn('[Admin] Voice directory committed; terminal notification awaits reconnection') }
@@ -208,7 +222,7 @@ export class VoiceAdmin {
       if (status.action !== 'status' || status.state.pairing_id !== v.pairing_id || !status.state.pairing_owner) invalid('请先扫描并核对当前设备所有者')
       const owner = status.state.pairing_owner
       validateVoiceDeviceOwner(owner)
-      const masters = this.deps.ownerFriends().filter(friend => friend.permission === 'master')
+      const masters = this.deps.friends().filter(friend => friend.permission === 'master')
       if (masters.length > 1) throw new RpcError('CONFLICT', '存在多个 Master，需先恢复好友数据')
       const master = masters[0], previous = this.owners.record(channelId)
       if (master?.channel_identities.some(identity => identity.channel_id === channelId && identity.platform_user_id !== previous?.activation.platform_user_id)) throw new RpcError('CONFLICT', 'Master 已有不同的同渠道身份')
@@ -235,7 +249,7 @@ export class VoiceAdmin {
   private visibleCatalog(id: string): VoiceCatalog { const { unconfirmed_contacts, ...catalog } = this.visibleMetadata(id); return catalog }
   private async legacyOwner(id: string): Promise<void> {
     if (this.ownerRequired(id) || this.owners.get(id) || !this.deps.ownerReady()) return
-    const masters = this.deps.ownerFriends().filter(friend => friend.permission === 'master')
+    const masters = this.deps.friends().filter(friend => friend.permission === 'master')
     if (masters.length !== 1) return
     const identities = masters[0].channel_identities.filter(identity => identity.channel_id === id)
     if (identities.length !== 1) return
@@ -256,7 +270,7 @@ export class VoiceAdmin {
       if (!record) throw new RpcError('NOT_FOUND', '所有者激活操作不存在')
       if (record.activation.status === 'completed') return record.activation
       if (record.mode === 'legacy' && this.turns.registrations(id).registrations.filter(value => value.platform_user_id === record.activation.platform_user_id && value.model_id === record.activation.owner.model_id && value.status === 'active').length !== 1) throw new RpcError('CONFLICT', '原所有者声纹已失效，需在 Admin 恢复')
-      const friendId = await commitVoiceOwnerMaster(record, { friends: () => this.deps.ownerFriends(), persist: friend => this.deps.persistOwnerFriend(friend) })
+      const friendId = await commitVoiceOwnerMaster(record, { friends: () => this.deps.friends(), persist: friend => this.deps.persistFriend(friend) })
       if (record.mode === 'initial') await this.turns.commitOwnerIdentity(id, record.activation)
       return this.owners.complete(id, friendId)
     })

@@ -24,7 +24,7 @@ beforeEach(() => {
   vi.mocked(voiceService.list).mockResolvedValue({ items: [provider] })
   vi.mocked(voiceService.config).mockResolvedValue({ asr: null, tts: null, wake_word: '你好螃蟹' })
   vi.mocked(voiceService.action).mockImplementation(async (_id, command) => {
-    if (command.action === 'create_pairing') return { action: 'create_pairing', pairing: { protocol_version: 7, channel_id: '客厅', pairing_id: 'p-1', url: 'wss://local.example:1234/voice', tls_fingerprint_sha256: 'fingerprint', nonce: 'one-time', verification_code: '123456', expires_at: new Date(Date.now() + 60000).toISOString() } }
+    if (command.action === 'create_pairing') return { action: 'create_pairing', pairing: { protocol_version: 8, channel_id: '客厅', pairing_id: 'p-1', url: 'wss://local.example:1234/voice', tls_fingerprint_sha256: 'fingerprint', nonce: 'one-time', verification_code: '123456', expires_at: new Date(Date.now() + 60000).toISOString() } }
     return { action: 'status', state: terminal as never }
   })
 })

@@ -13,7 +13,7 @@ describe('Owner recovery and actual Admin Friend mutations', () => {
     return new AdminModule({ moduleId: 'owner-friend-fixture', moduleType: 'admin', version: 'test', protocolVersion: '0.1.0', port: 0, subscriptions: [] }, { data_dir: directory, web_port: 0 }) as any
   }
   function binding(instance: any) {
-    return { friends: () => [...instance.friends.values()], persist: instance.voiceAdmin.deps.persistOwnerFriend }
+    return { friends: () => [...instance.friends.values()], persist: instance.voiceAdmin.deps.persistFriend }
   }
   beforeEach(async () => {
     directory = await fs.mkdtemp(path.join(os.tmpdir(), 'voice-owner-friend-'))

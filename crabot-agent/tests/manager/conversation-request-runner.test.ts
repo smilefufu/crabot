@@ -294,6 +294,27 @@ describe('isolated request admission with real ManagerLoop', () => {
     expect(frames).toHaveLength(1)
   })
 
+  it('persists a management result without any Worker, deduplicates by operation and verifies its stored body', async () => {
+    const inputs = await input(), executor = runner()
+    const result = await executor.execute(key, inputs, { source_id: inputs[0].source_id, delivery: 'requester_private' })
+    const validate = vi.fn(async () => {})
+    ;(executor as any).deps.validateVoiceManagement = validate
+    const outcome = { operation_id: '00112233-4455-4677-8899-aabbccddeeff', status: 'completed' as const,
+      catalog: { enrollment_revision: 2, contacts: [], registrations: [], pending_enrollment: null }, contacts: [], friend_id: 'new-normal' }
+    expect(await executor.routeVoiceManagement(key, result.request_id, outcome)).toEqual({ consumed: true })
+    expect(sideEffects).toBe(1); expect(frames).toHaveLength(2)
+    expect(frames[1].request.delivery.kind).toBe('requester_private')
+    expect(JSON.stringify(calls.at(-1)!.messages)).toContain('你此前发起的操作有了更新')
+    expect(JSON.stringify(calls.at(-1)!.messages)).not.toContain('worker_event')
+    await executor.routeVoiceManagement(key, result.request_id, { ...outcome, catalog: { ...outcome.catalog, enrollment_revision: 3 } })
+    expect(frames).toHaveLength(2)
+    const [id] = await fs.readdir(path.join(root, result.request_id, 'events')), file = path.join(root, result.request_id, 'events', id, 'event.json')
+    const saved = JSON.parse(await fs.readFile(file, 'utf8'))
+    expect(saved.schema_version).toBe(3); expect(saved.event.worker_id).toBeUndefined(); expect(saved.event_sha256).toMatch(/^[a-f0-9]{64}$/)
+    saved.event.result.friend_id = 'tampered'; await fs.writeFile(file, JSON.stringify(saved))
+    await expect(executor.routeVoiceManagement(key, result.request_id, outcome)).rejects.toThrow('Invalid request event')
+  })
+
   it('continues a real completed voice receipt in the original request without a fake Worker event or repeated execution', async () => {
     const inputs = await input(), executor = runner()
     const result = await executor.execute(key, inputs, { source_id: inputs[0].source_id, delivery: 'origin' })

@@ -8,7 +8,7 @@ const id = '00112233-4455-6677-8899-aabbccddeeff'
 const other = 'ffeeddcc-bbaa-9988-7766-554433221100'
 const owner = { profile_id: id, display_name: 'Owner', model_id: VOICE_MODEL_VERSIONS.embedding }
 test('voice v7 requires actual completed playback samples and rejects the old wire', () => {
-  assert.equal(parseVoiceClientControl(JSON.stringify({ type: 'pair', protocol_version: 7, nonce: 'fixture', owner })).type, 'pair')
+  assert.equal(parseVoiceClientControl(JSON.stringify({ type: 'pair', protocol_version: 8, nonce: 'fixture', owner })).type, 'pair')
   assert.throws(() => parseVoiceClientControl(JSON.stringify({ type: 'pair', protocol_version: 3, nonce: 'fixture' })))
   assert.equal(parseVoiceClientControl(JSON.stringify({ type: 'playback', playback_id: id, status: 'completed', played_samples: 480 })).type, 'playback')
   for (const played_samples of [undefined, -1, 480001, 0.5]) {
@@ -53,7 +53,7 @@ test('anonymous clusters have one identity result, with no candidate reference o
   validateVoiceSegments([a, b, { ...a, segment_index: 2, start_sample: 32000, end_sample: 48000 }], 48000)
   assert.throws(() => validateVoiceSegments([a, { ...a, segment_index: 1, start_sample: 16000, end_sample: 32000, registration_id: 'sample-other' }], 32000))
   assert.throws(() => validateVoiceSegments([{ ...b, segment_index: 0, start_sample: 0, registration_id: 'candidate' }], 32000))
-  assert.equal(parseVoiceClientControl(JSON.stringify({ type: 'pair', protocol_version: 7, nonce: 'fixture', owner })).type, 'pair')
+  assert.equal(parseVoiceClientControl(JSON.stringify({ type: 'pair', protocol_version: 8, nonce: 'fixture', owner })).type, 'pair')
 })
 test('controls reject extra identity fields, wrong versions and oversized input', () => {
   assert.deepEqual(parseVoiceClientControl(JSON.stringify({ type: 'turn_start', turn_id: id })), { type: 'turn_start', turn_id: id })
@@ -78,13 +78,13 @@ test('all voice runtime RPC methods require the no-trace transport', async () =>
 })
 
 test('v7 owner pairing and receipts are strict while a saved old credential may use a v7 hello', () => {
-  const pair = { type: 'pair', protocol_version: 7, nonce: 'fixture', owner }
+  const pair = { type: 'pair', protocol_version: 8, nonce: 'fixture', owner }
   assert.equal(parseVoiceClientControl(JSON.stringify(pair)).type, 'pair')
   const { owner: omitted, ...missing } = pair
   assert.throws(() => parseVoiceClientControl(JSON.stringify(missing)))
   assert.throws(() => parseVoiceClientControl(JSON.stringify({ ...pair, protocol_version: 5 })))
   assert.throws(() => parseVoiceClientControl(JSON.stringify({ ...pair, owner: { ...owner, permission: 'master' } })))
-  const hello = { type: 'hello', protocol_version: 7, credential: 'saved-v5-credential', models: VOICE_MODEL_VERSIONS, aec_verified: false }
+  const hello = { type: 'hello', protocol_version: 8, credential: 'saved-v5-credential', models: VOICE_MODEL_VERSIONS, aec_verified: false }
   assert.equal(parseVoiceClientControl(JSON.stringify(hello)).type, 'hello')
   assert.equal(parseVoiceClientControl(JSON.stringify({ ...hello, owner })).type, 'hello')
   const saved = { operation_id: other, profile_id: id, registration_id: other, model_id: owner.model_id }

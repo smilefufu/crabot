@@ -2,6 +2,7 @@ import { isDeepStrictEqual } from 'node:util'
 import { allowed } from '../permissions/tool-authorization.js'
 import { ConversationRequestRunner } from './conversation-request-runner.js'
 import { createConversationRequestLoop } from './request-loop.js'
+import { VoiceManagementHost } from './voice-management-host.js'
 import type { ToolFaceDeps } from './tools/tool-face.js'
 import { ConversationRequestAuthority } from './conversation-request-authority.js'
 import { findVoiceDelivery } from './voice-output.js'
@@ -131,6 +132,7 @@ export const DEFAULT_MANAGER_COMPACTION_POLICY: CompactionPolicy = {
 }
 
 export interface ManagerStack {
+  voiceManagementReady(payload: import('crabot-shared').VoiceAgentManagementReadyPayload): Promise<void>
   startContinuationReconciliation(): Promise<void>
   readonly dailyReflectionFor: (key: ManagerKey) => DailyReflection
   readonly ledger: LedgerStore
@@ -719,7 +721,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
       }, { state: async () => {
           const port = await deps.messagingDeps.resolveChannelPort(channelId)
           const caps = await deps.messagingDeps.rpcClient.call<{}, { voice?: { protocol_version: number } }>(port, 'get_capabilities', {}, deps.messagingDeps.moduleId, undefined, { timeoutMs: 3000 })
-          if (caps.voice?.protocol_version !== 7) throw new Error('Voice feedback protocol is not available')
+          if (caps.voice?.protocol_version !== 8) throw new Error('Voice feedback protocol is not available')
           voicePolicies.set(channelId, true)
           return call('get_voice_output_state', { channel_id: channelId, session_id: sessionId })
         },
@@ -727,7 +729,9 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
       voicePorts.set(key, output); return output
     } : undefined
   const requestRuntimeRoot = join(agentDir, 'conversation-requests')
+  let voiceManagementHost: VoiceManagementHost
   requestRunner = new ConversationRequestRunner(requestRuntimeRoot, conversationRequests, {
+    validateVoiceManagement: (key, requestId, result) => voiceManagementHost.validate(key, requestId, result),
     canRun: () => candidatesReady && !candidatesClosing && !deps.isClosing?.(),
     timezone: deps.timezone ?? (() => 'Asia/Shanghai'),
     onSettled: key => { if (registry) void registry.refreshVoiceOutput(key).catch(() => { /* Preserve queued delivery when the terminal is unavailable. */ }) },
@@ -750,6 +754,14 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
       canRun: () => candidatesReady && !candidatesClosing && !deps.isClosing?.(),
       guard: requestGuard, policy: DEFAULT_MANAGER_COMPACTION_POLICY, root: requestRuntimeRoot,
       voiceOutput: voiceOutputFor?.(context.request.manager_key) }),
+  })
+  voiceManagementHost = new VoiceManagementHost({ requests: conversationRequests, runner: requestRunner, resolveCurrent: resolveCurrentRequestSource,
+    call: async input => {
+      const bearer = deps.coreRuntimeBearer?.()
+      if (!bearer || candidatesClosing || deps.isClosing?.()) throw new Error('CAPABILITY_UNKNOWN')
+      return deps.messagingDeps.rpcClient.callSensitive(await deps.messagingDeps.getAdminPort(), 'voice_agent_action', input,
+        deps.messagingDeps.moduleId, { authorizationBearer: bearer })
+    },
   })
   const sharedProjectLedger: ToolFaceDeps['projectDocs']['ledger'] = {
     listWorkers: async key => {
@@ -820,7 +832,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
         try {
           const port = await deps.messagingDeps.resolveChannelPort(channelId)
           const caps = await deps.messagingDeps.rpcClient.call<{}, { voice?: { protocol_version: number } }>(port, 'get_capabilities', {}, deps.messagingDeps.moduleId, undefined, { timeoutMs: 3000 })
-          voicePolicies.set(channelId, caps.voice?.protocol_version === 7)
+          voicePolicies.set(channelId, caps.voice?.protocol_version === 8)
         } catch { /* no unverified voice exception */ }
       }
       const wake = envelope?.wake
@@ -1151,10 +1163,18 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
   }
 
   return {
+    voiceManagementReady: payload => voiceManagementHost.ready(payload),
     startContinuationReconciliation: async () => {
       if (candidatesClosing || deps.isClosing?.()) return
       candidatesReady = true
       await requestRunner.recoverPending()
+      const bearer = deps.coreRuntimeBearer?.()
+      if (bearer) {
+        try {
+          const pending = await deps.messagingDeps.rpcClient.callSensitive<{}, { operations: import('crabot-shared').VoiceAgentManagementReadyPayload[] }>(await deps.messagingDeps.getAdminPort(), 'get_pending_voice_agent_operations', {}, deps.messagingDeps.moduleId, { authorizationBearer: bearer })
+          for (const locator of pending.operations) { try { await voiceManagementHost.ready(locator) } catch { /* Original operation remains pending. */ } }
+        } catch { /* Admin reissues the durable management locators after it becomes ready. */ }
+      }
       for (const { managerKey } of await ledger.listAllWorkers()) scheduleCandidates(managerKey)
       await Promise.all(candidateRuns.values())
     },

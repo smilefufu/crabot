@@ -23,6 +23,32 @@ function originalSource(params) {
   return source
 }
 
+for (const id of ['voice-enroll-new', 'voice-rerecord']) test(`offline management harness uses the actual original request and dedicated completion: ${id}`, async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'voice-management-harness-'))
+  let requested = false, executed = false, dispatched = false
+  const adapter = { updateConfig() {}, async *stream(params) {
+    const text = JSON.stringify(params.messages)
+    if (params.systemPrompt.includes('已经由系统固定来源的请求')) {
+      if (text.includes('你此前发起的操作有了更新')) { yield* response(undefined, '<voice_reply>已记住 Thea 的声音。</voice_reply>'); return }
+      if (!params.tools.some(tool => tool.name === 'manage_voice_contacts')) { yield* response({ name: 'load_tool_family', input: { family: 'voice' } }); return }
+      if (!requested) { requested = true; yield* response({ name: 'list_voice_contacts', input: {} }); return }
+      if (!executed) {
+        executed = true
+        yield* response({ name: 'manage_voice_contacts', input: { expected_revision: 1, command: id === 'voice-enroll-new' ? { action: 'enroll_new', display_name: 'Thea' } : { action: 'enroll', platform_user_id: '00112233-4455-4677-8899-aabbccddeeff' } } }); return
+      }
+      yield* response(); return
+    }
+    if (!params.tools.some(tool => tool.name === 'execute_request')) { yield* response({ name: 'load_tool_family', input: { family: 'crabot' } }); return }
+    if (!dispatched) { dispatched = true; yield* response({ name: 'execute_request', input: { source_id: originalSource(params), delivery: 'origin' } }, '<voice_reply>好，我来帮你记住。</voice_reply>'); return }
+    yield* response()
+  } }
+  try {
+    const result = await runCase({ scenario: cases.find(item => item.id === id), root: path.join(root, 'data'), liveAdapter: adapter, model: 'scripted', connection: { endpoint: 'https://example.invalid', apikey: 'synthetic', format: 'openai', model_id: 'scripted' }, record() {}, budget: { take: () => true }, timeoutMs: 15000 })
+    assert.equal(result.status, 'passed', JSON.stringify(result))
+    assert.equal(result.management.commands.length, 1)
+  } finally { await fs.rm(root, { recursive: true, force: true }) }
+})
+
 test('offline harness uses actual voice parser and local receipt, no external transport', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'b7-harness-'))
   const events = []

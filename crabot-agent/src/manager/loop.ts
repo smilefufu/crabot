@@ -73,7 +73,7 @@ import { DEFAULT_MAX_CONTEXT_TOKENS } from '../engine/query-loop.js'
 import { REMOTE_IMAGE_PREFETCH_TIMEOUT_MS, GroupInboundImageProjection, collectInboundImages, injectInboundImages, pruneImageRefs, readImageFileSync, toImageBlock, type ManagerImageRef } from './image-vision.js'
 import { fetchRemoteImage } from '../agent/media-resolver.js'
 import type { ImageBlock } from '../engine/index.js'
-import { assembleManagerSystemPrompt, VOICE_PENDING_RESULTS_PROMPT } from './prompt.js'
+import { assembleManagerSystemPrompt, VOICE_PENDING_RESULTS_PROMPT, VOICE_MANAGEMENT_RESULT_PROMPT } from './prompt.js'
 import { summarizeSpanInput, summarizeSpanOutput } from './span-summary.js'
 import type { ManagerSessionStore } from './session-store.js'
 import { dailyReflectionResultForTrace } from './daily-reflection.js'
@@ -137,6 +137,7 @@ export type WakeEvent =
   | { readonly kind: 'worker_event'; readonly event: HarnessEvent; readonly dailyReflection?: { runId: string; scheduleId: string; targetSession: { channel_id: string; session_id: string; type: 'private' | 'group' } } }
   | { readonly kind: 'media_notification'; readonly text: string }
   | { readonly kind: 'voice_delivery'; readonly results: ReadonlyArray<import('./voice-output.js').VoicePendingResult> }
+  | { readonly kind: 'voice_management'; readonly result: import('crabot-shared').VoiceAgentManagementResult }
   | {
       readonly kind: 'schedule'
       readonly reflectionWindow?: import('./daily-reflection-types.js').ReflectionWindow
@@ -2694,6 +2695,8 @@ export function managerTriggerFromWake(envelope: TimedWakeEnvelope | undefined, 
       return { type: 'worker_event', summary: `worker 事件:${wake.event.kind} (${wake.event.worker_id})${mergedNote}`, source: `worker:${wake.event.worker_id}` }
     case 'voice_delivery':
       return { type: 'system', summary: `语音结果投递${mergedNote}` }
+    case 'voice_management':
+      return { type: 'system', summary: `语音登记结果${mergedNote}` }
     case 'media_notification':
       return { type: 'worker_event', summary: `媒体下载完成${mergedNote}` }
     default: {
@@ -3112,6 +3115,8 @@ function renderWakeEvent(event: WakeEvent, envelope: TimedWakeEnvelope, quotedMe
       return renderWorkerEvent(event.event)
     case 'voice_delivery':
       return (event.results.some(item => item.status !== 'completed') ? VOICE_PENDING_RESULTS_PROMPT + '\n' : '') + JSON.stringify({ voice_delivery_results: event.results })
+    case 'voice_management':
+      return VOICE_MANAGEMENT_RESULT_PROMPT + '\n' + JSON.stringify(event.result)
     case 'media_notification':
       return `[媒体下载完成]\n${event.text}`
     case 'schedule':

@@ -2,14 +2,15 @@ import { createHash } from 'node:crypto'
 import type { SubmitVoiceTurnParams, VoiceClientControl, VoiceSegment, VoiceManagementRequest, VoiceDeviceOwner, VoiceOwnerActivation, VoiceOwnerSaved } from './voice.js'
 
 import { VOICE_MODEL_VERSIONS } from './voice-models.js'
+import type { VoiceAgentContext } from './voice.js'
 
 export const VOICE_MAX_SAMPLES = 240000
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 export class VoiceProtocolVersionError extends Error {
-  constructor() { super('语音协议版本不兼容，需要 protocol_version=7；请更新手机，保留配对和声纹') }
+  constructor() { super('语音协议版本不兼容，需要 protocol_version=8；请更新手机，保留配对和声纹') }
 }
-function version(value: unknown): void { if (value !== 7) throw new VoiceProtocolVersionError() }
+function version(value: unknown): void { if (value !== 8) throw new VoiceProtocolVersionError() }
 
 function invalid(): never { throw new Error('Invalid voice protocol payload') }
 function object(value: unknown): Record<string, unknown> {
@@ -63,6 +64,17 @@ export function validateVoiceManagementRequest(value: unknown): asserts value is
   }
   if ('display_name' in command) { string(command.display_name, 128); if (!(command.display_name as string).trim()) invalid() }
 }
+export function validateVoiceAgentContext(value: unknown): asserts value is VoiceAgentContext {
+  const context = object(value); fields(context, ['request_id', 'source', 'turn_id', 'delivery'])
+  oneOf(context.delivery, ['origin', 'requester_private'])
+  if (typeof context.request_id !== 'string' || !/^[a-f0-9]{64}$/.test(context.request_id)) invalid()
+  assertVoiceUuid(context.turn_id)
+  const source = object(context.source)
+  fields(source, ['source_id', 'channel_id', 'session_id', 'session_type', 'platform_message_id', 'platform_user_id', 'sender_friend_id'])
+  assertVoiceUuid(source.source_id)
+  for (const key of ['channel_id', 'session_id', 'platform_message_id', 'platform_user_id', 'sender_friend_id']) string(source[key])
+  if (source.session_type !== 'group' || source.session_id !== voiceSessionId(source.channel_id as string)) invalid()
+}
 function models(value: unknown): void {
   const v = object(value)
   fields(v, ['segmentation', 'embedding'])
@@ -111,6 +123,15 @@ export function parseVoiceClientControl(data: string): VoiceClientControl {
       oneOf(v.speech_enabled, [true, false]); oneOf(v.activity, ['idle', 'recording', 'processing', 'answering', 'management'])
       oneOf(v.foreground, [true, false]); oneOf(v.microphone, ['closed', 'wake', 'recording']); oneOf(v.playback, ['idle', 'playing']); break
     case 'owner_saved': fields(v, ['type', 'saved']); validateVoiceOwnerSaved(v.saved); break
+    case 'guided_prompt':
+      fields(v, ['type', 'operation_id', 'step']); assertVoiceUuid(v.operation_id); oneOf(v.step, [1, 2, 3]); break
+    case 'guided_cancel':
+      fields(v, ['type', 'operation_id']); assertVoiceUuid(v.operation_id); break
+    case 'guided_playback': {
+      fields(v, ['type', 'operation_id', 'playback_id', 'status'], ['played_samples']); assertVoiceUuid(v.operation_id)
+      const { operation_id, ...report } = v
+      parseVoiceClientControl(JSON.stringify({ ...report, type: 'playback' })); break
+    }
     case 'contact_action': fields(v, ['type', 'request']); validateVoiceManagementRequest(v.request); break
     case 'contact_action_query': fields(v, ['type', 'request_id']); assertVoiceUuid(v.request_id); break
     case 'catalog_applied': fields(v, ['type', 'enrollment_revision']); integer(v.enrollment_revision); break

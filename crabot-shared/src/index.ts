@@ -121,6 +121,7 @@ export { INSTANCE_ID_REGEX, validateInstanceId, type InstanceIdResult } from './
 export type { ImageQuality, FetchImageParams, FetchImageResult } from './image-fetch.js'
 
 export * from './voice.js'
+export { validateVoiceAgentContext } from './voice-wire.js'
 export * from './channel-protocol.js'
 export { VoiceProtocolVersionError, VOICE_MAX_SAMPLES, assertVoiceUuid, validateVoiceSegments, validateVoiceManagementRequest, validateVoiceDeviceOwner, validateVoiceOwnerActivation, validateVoiceOwnerSaved, parseVoiceClientControl, validateSubmitVoiceTurn, encodeVoiceFrame, VoiceInputBuffer } from './voice-wire.js'
 export { pcm16Wave, speechWaveToPcm, transcribeAudio, synthesizeAudio } from './audio-client.js'

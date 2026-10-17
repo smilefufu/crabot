@@ -18,7 +18,7 @@ describe('Voice owner activation through trusted Admin entrypoints', () => {
     deps = {
       isVoice: id => id === channel, instance: () => instance, createInstance: vi.fn(), resumeInstance: vi.fn(), pauseInstance: vi.fn(), saveSetup: vi.fn(),
       fingerprint: () => undefined, terminalHosts: () => [], closeGateway: vi.fn(), admissionReady: () => true, ownerReady: () => true,
-      ownerFriends: () => [...friends.values()], persistOwnerFriend: vi.fn(async friend => { friends.set(friend.id, structuredClone(friend)); await fs.writeFile(path.join(directory, 'friends-fixture.json'), JSON.stringify([...friends.values()])) }),
+      friends: () => [...friends.values()], persistFriend: vi.fn(async friend => { friends.set(friend.id, structuredClone(friend)); await fs.writeFile(path.join(directory, 'friends-fixture.json'), JSON.stringify([...friends.values()])) }),
       verifyRuntime: async (_, bearer) => { if (bearer !== runtime) throw new RpcError('FORBIDDEN', 'current child required') },
       verifyCore: vi.fn(), verifyHuman: async bearer => { if (bearer !== human) throw new RpcError('FORBIDDEN', 'human required') },
       resolveFriend: (id, contact) => [...friends.values()].find(friend => friend.channel_identities.some(identity => identity.channel_id === id && identity.platform_user_id === contact)),
@@ -71,12 +71,12 @@ describe('Voice owner activation through trusted Admin entrypoints', () => {
   })
   it('failed Friend persistence leaves a recoverable pending operation and no public contact', async () => {
     const activation = await confirm()
-    const persist = deps.persistOwnerFriend
-    deps.persistOwnerFriend = vi.fn(async friend => { await persist(friend); throw new Error('injected lost commit result') })
+    const persist = deps.persistFriend
+    deps.persistFriend = vi.fn(async friend => { await persist(friend); throw new Error('injected lost commit result') })
     await expect(saved(activation)).rejects.toThrow('injected')
     expect(admin.owners.get(channel)?.status).toBe('pending')
     expect((await admin.getConfig({ channel_id: channel }, runtime)).contacts).toEqual([])
-    deps.persistOwnerFriend = persist
+    deps.persistFriend = persist
     const restored = new VoiceAdmin(directory, deps); await restored.load(); admin = restored
     await admin.replayPending()
     expect(admin.owners.get(channel)?.status).toBe('completed'); expect(friends.size).toBe(1)
@@ -100,7 +100,7 @@ describe('Voice owner activation through trusted Admin entrypoints', () => {
     expect(concurrent.owner_activation).toEqual(activation)
     expect(config.owner_activation_required).toBe(false); expect(activation.platform_user_id).toBe(contact.platform_user_id)
     await saved(activation)
-    expect(friends.get(master.id)).toEqual(master); expect(deps.persistOwnerFriend).not.toHaveBeenCalled()
+    expect(friends.get(master.id)).toEqual(master); expect(deps.persistFriend).not.toHaveBeenCalled()
     expect(admin.turns.catalog(channel).contacts).toHaveLength(1)
   })
   it('legacy recovery retains the owner operation while an explicit rerecord replaces its active sample', async () => {

@@ -869,6 +869,7 @@ export class UnifiedAgent extends ModuleBase {
         'channel.message_authorized',
         'channel.voice_turn_authorized',
         'channel.voice_output_ready',
+        'channel.voice_management_ready',
         'admin.task_status_changed',
         'module_manager.module_stopped',
         'admin.friend_updated',
@@ -1863,6 +1864,11 @@ export class UnifiedAgent extends ModuleBase {
       case 'channel.voice_output_ready':
         this.assertRuntimeExecutionAdmission()
         await this.requireManagerStack().registry.routeVoiceOutputReady(event.payload as import('crabot-shared').VoiceOutputReadyPayload)
+        break
+
+      case 'channel.voice_management_ready':
+        this.assertRuntimeExecutionAdmission()
+        await this.requireManagerStack().voiceManagementReady(event.payload as import('crabot-shared').VoiceAgentManagementReadyPayload)
         break
 
       case 'channel.voice_turn_authorized':

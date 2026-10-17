@@ -45,7 +45,7 @@ describe('production isolated request tool closure', () => {
     rpc = vi.fn(async (_port, method, params) => {
       if (method === 'resolve_request_permission_sources') return structuredClone({ group, friend })
       if (method === 'resolve_request_permission_source') return { source: structuredClone(current[params.kind as 'group' | 'friend']) }
-      if (method === 'get_capabilities') return voiceChannel ? { voice: { protocol_version: 7 } } : {}
+      if (method === 'get_capabilities') return voiceChannel ? { voice: { protocol_version: 8 } } : {}
       if (method === 'get_voice_output_state') return { channel_id: 'voice', session_id: 'group', connection_epoch: 'current-epoch', foreground: true, speech_enabled: voiceReady, activity: 'idle', current_turn_id: null }
       if (method === 'get_voice_playback_receipt') return { playback_id: params.playback_id, status: 'unknown' }
       if (method === 'voice_output') return params.event.type === 'reply_end' ? { platform_message_id: params.event.playback_id, played_samples: 480, sent_at: new Date().toISOString() } : { accepted: true }
@@ -87,6 +87,35 @@ describe('production isolated request tool closure', () => {
   }
   function tool(params: LLMStreamParams, name: string) { const result = params.tools.find(item => item.name === name); expect(result, name).toBeDefined(); return result! }
   const context = { toolUseId: 'fixture-tool', signal: new AbortController().signal } as never
+
+  it.each([false, true])('loads voice only inside the original Master request and rechecks after loading (revoked=%s)', async revoke => {
+    const original = rpc.getMockImplementation()!
+    rpc.mockImplementation(async (...args) => args[1] === 'voice_agent_action'
+      ? { operation_id: null, status: 'completed', catalog: { enrollment_revision: 0, contacts: [], registrations: [], pending_enrollment: null }, contacts: [] }
+      : original(...args))
+    let turn = 0
+    inspect = async params => {
+      turn++
+      if (turn === 1) {
+        expect(params.tools.some(tool => tool.name === 'list_voice_contacts')).toBe(false)
+        planned = { name: 'load_tool_family', input: { family: 'voice' } }
+      } else if (turn === 2) {
+        expect(params.tools.some(tool => tool.name === 'list_voice_contacts')).toBe(true)
+        if (revoke) current.friend = { ...friend, is_master: false }
+        planned = { name: 'list_voice_contacts', input: {} }
+      }
+    }
+    const source = message()
+    source.content = { type: 'text', text: '你现在能认出哪些人？' }
+    source.features.voice = { turn_id: '00112233-4455-4677-8899-aabbccddeeff', segment_index: 0, start_sample: 0, end_sample: 32000,
+      anonymous_speaker: 'speaker-0', identity_status: 'matched', registration_id: '00112233-4455-4677-8899-aabbccddeeff' }
+    const inputs = await stack.trustedHumanInputs.capture(key, [source])
+    await stack.requestRunner.execute(key, inputs, { source_id: inputs[0].source_id, delivery: 'origin' })
+    const actions = rpc.mock.calls.filter(args => args[1] === 'voice_agent_action')
+    expect(actions).toHaveLength(revoke ? 0 : 1)
+    if (!revoke) expect(actions[0][2]).toMatchObject({ action: 'list', context: { source: { sender_friend_id: 'f-owner', platform_message_id: source.platform_message_id } } })
+    expect(calls.every(params => !params.systemPrompt.includes('三段采样'))).toBe(true)
+  })
 
   it.each(['origin', 'requester_private'] as const)('queues the original voice reply while keeping private results out of the group (%s)', async delivery => {
     voiceChannel = true

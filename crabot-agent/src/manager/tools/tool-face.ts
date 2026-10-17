@@ -1,5 +1,6 @@
 import { bindWorkerRequestTool } from './worker-request-context.js'
 import { buildExecuteRequestTool } from './execute-request.js'
+import { buildVoiceTools, VOICE_TOOL_NAMES, VOICE_FAMILY_DESCRIPTION, type VoiceManagementPort } from './voice-tools.js'
 import { authorizeTool, roleAuthorization, entryAuthorization, allowed, denied } from '../../permissions/tool-authorization.js'
 /**
  * Manager 能力目录与 episode 工具投影 —— protocol-agent-v3.md §4.3。
@@ -44,6 +45,7 @@ import {
 } from './tool-catalog.js'
 
 export interface ToolFaceDeps {
+  readonly voiceManagement?: VoiceManagementPort
   /** Host request boundary applied before catalog projection, including MCP refresh. */
   readonly decorateTool?: (tool: ToolDefinition) => ToolDefinition
   readonly workerRequestControl?: import('./worker-request-context.js').WorkerRequestControl
@@ -520,7 +522,7 @@ function buildLoadToolFamilyTool(catalog: ManagerToolCatalog, state: ManagerTool
       properties: { family: { type: 'string', minLength: 1, maxLength: 128,
         description: catalog.profile === 'daily_reflection'
           ? 'memory：记忆正文与已有 links 读取、候选写入、更新和增量建链（含 get_memory_detail、quick_capture、set_memory_links）；worker：执行器管理与执行条件。'
-          : 'memory：记忆；messaging：消息/历史/联系人/媒体；worker：执行器管理与执行条件；schedule：定时任务；crabot：部署/配置/权限查询。mcp：只列可用外部服务；mcp__服务名：完整加载该服务。',
+          : 'memory：记忆；messaging：消息/历史/联系人/媒体；worker：执行器管理与执行条件；schedule：定时任务；crabot：部署/配置/权限查询。mcp：只列可用外部服务；mcp__服务名：完整加载该服务。' + (catalog.tools.some(tool => (VOICE_TOOL_NAMES as readonly string[]).includes(tool.name)) ? '\n' + VOICE_FAMILY_DESCRIPTION : ''),
       } },
       required: ['family'],
     },
@@ -644,6 +646,7 @@ export function buildManagerToolFace(deps: ToolFaceDeps): ToolDefinition[] {
   let executionCapabilities = normalProfile || dailyProfile ? createExecutionCapabilitiesTool({ ...deps, workerContext: () => currentDeps().workerContext() }) : undefined
   if (executionCapabilities && deps.workerRequestControl) executionCapabilities = bindWorkerRequestTool(executionCapabilities, deps.workerRequestControl)
   const builtinTools = [
+    ...(normalProfile && deps.requestAuthorization === 'request' && deps.voiceManagement ? buildVoiceTools({ context: deps.voiceManagement.context, call: input => currentDeps().voiceManagement!.call(input) }) : []),
     ...(normalProfile ? [guidanceTool] : []),
     ...(executionCapabilities ? [executionCapabilities] : []),
     ...(dailyProfile ? buildDailyReflectionTools(deps.dailyReflection) : []),
@@ -727,6 +730,7 @@ export function buildManagerToolFace(deps: ToolFaceDeps): ToolDefinition[] {
       worker: [...workerTools.map(tool => tool.name), 'get_execution_capabilities'],
       schedule: infoTools.filter(tool => tool.name.endsWith('_schedule') || tool.name === 'list_schedules').map(tool => tool.name),
       crabot: ['inspect_crabot', 'get_friend_permissions', 'execute_request'],
+      voice: deps.voiceManagement ? [...VOICE_TOOL_NAMES] : [],
     },
   )
   deps.faceState.catalog = catalog

@@ -850,8 +850,8 @@ export class AdminModule extends ModuleBase {
       closeGateway: id => this.voiceGateway.close(id),
       admissionReady: () => this.cutoverActivated,
       ownerReady: () => this.dataLoaded,
-      ownerFriends: () => [...this.friends.values()],
-      persistOwnerFriend: async friend => {
+      friends: () => [...this.friends.values()],
+      persistFriend: async friend => {
         if (!this.dataLoaded) throw new RpcError('SERVICE_UNAVAILABLE', '好友数据尚未加载')
         this.friends.set(friend.id, friend)
         for (const identity of friend.channel_identities) this.channelIdentityIndex.set(this.getChannelIdentityKey(identity), friend.id)
@@ -875,6 +875,7 @@ export class AdminModule extends ModuleBase {
         return this.rpcClient.callSensitive(modules[0].port, 'voice_admin_action', { channel_id: id, command, ...(ownerActivation ? { owner_activation: ownerActivation } : {}) }, this.config.moduleId, { authorizationBearer: bearer })
       },
       publish: async payload => { await this.rpcClient.publishEvent({ id: generateId(), type: 'channel.voice_turn_authorized', source: this.config.moduleId, payload, timestamp: generateTimestamp() }, this.config.moduleId) },
+      publishManagement: async payload => { await this.rpcClient.publishEvent({ id: generateId(), type: 'channel.voice_management_ready', source: this.config.moduleId, payload, timestamp: generateTimestamp() }, this.config.moduleId) },
       configurationChanged: async () => {
         for (const instance of this.channelManager.listInstances().items.filter(i => i.implementation_id === 'channel-voice')) {
           this.voiceAdmin.turns.disconnect(instance.id)
@@ -1045,6 +1046,12 @@ export class AdminModule extends ModuleBase {
     this.registerMethod('sync_voice_terminal', (params: unknown, context?: RpcHandlerContext) => this.voiceAdmin.sync(params, context?.authorizationBearer))
     this.registerMethod('manage_voice_contacts', (params: unknown, context?: RpcHandlerContext) => this.voiceAdmin.manageContacts(params, context?.authorizationBearer))
     this.registerMethod('get_voice_management_result', (params: unknown, context?: RpcHandlerContext) => this.voiceAdmin.managementResult(params, context?.authorizationBearer))
+    this.registerMethod('voice_agent_action', (params: unknown, context?: RpcHandlerContext) => this.voiceAdmin.agent.action(params, context?.authorizationBearer))
+    this.registerMethod('get_pending_voice_agent_operations', async (params: unknown, context?: RpcHandlerContext) => {
+      await this.voiceAdmin.verifyAgentRuntime(context?.authorizationBearer)
+      if (!params || typeof params !== 'object' || Array.isArray(params) || Object.keys(params).length) throw new RpcError('INVALID_PARAMS', 'Expected empty parameters')
+      return { operations: this.voiceAdmin.turns.agentPending() }
+    })
     this.registerMethod('verify_voice_admin', (params: { channel_id: string }, context?: RpcHandlerContext) => this.voiceAdmin.verifyHuman(params, context?.authorizationBearer))
     this.registerMethod('verify_voice_agent', (params: { channel_id: string }, context?: RpcHandlerContext) => this.voiceAdmin.verifyAgent(params, context?.authorizationBearer))
 

@@ -1,0 +1,174 @@
+{
+  "date": "2026-10-17",
+  "status": "implementation_candidate_model_gate_open",
+  "source_base": "acb778f3f83e3dd558453759d191aa22a351da80",
+  "source_hashes": {
+    "crabot-shared/src/voice.ts": "a86b621809ab85559b65991fa5c61bd8b7e8a20c2033cbe0740d68eb7d5bc46f",
+    "crabot-shared/src/voice-wire.ts": "b1c2664fa7dcc51e84e49b390a3bb5cc512e4af807b22e72b24ed7bd4428437b",
+    "crabot-admin/src/voice-agent-management.ts": "d6df1d8336543cb8fc0a97f079f2dbfd556ba9b365c0c386a5e51c5a474178e0",
+    "crabot-admin/src/voice-turn-store.ts": "db35ea919f761ca5eec2ec1e8aac38676d9ad44af9cdaabac5f5b9b7a8a74f5f",
+    "crabot-admin/src/voice-contact-friend.ts": "cda1d4bbe5bbc2d6a0d70ca90bb7b334689de1cc1d119f84b43426725df5f938",
+    "crabot-agent/src/manager/prompt.ts": "9afde393acf32733f8cfe587ce1cad147c7d937fbafe1d23db998a68e9043a5f",
+    "crabot-agent/src/manager/tools/voice-tools.ts": "460854875fb12a43fb2c74fcd5017e78aa5259c80021a643781cc7c4c9b23744",
+    "crabot-agent/src/manager/voice-management-host.ts": "d777760304c0bbadfb8b0ae818489315fb3b79862ad248d4397ff60cf9f8d36e",
+    "crabot-agent/src/manager/conversation-request-runner.ts": "7dd50042e0c579b60f332bc3a7cdd2f3f0a78ef7e0e70b515e8c289acfd1093e",
+    "crabot-channel-voice/src/voice-channel.ts": "aab68fc0bda7bafb23e858ab1b6e5f6c4e59534cf9e7179f380f355ba3822154",
+    "crabot-channel-voice/src/guided-playback.ts": "1b1fa8d915b75e6eea11902f064c03e43d85e0e110ccc3df05435ede6aaec1b1"
+  },
+  "versions": {
+    "voice_module": "0.8.0",
+    "wire": 8,
+    "voice_store": 4,
+    "android": "0.7.0",
+    "android_code": 16
+  },
+  "checks": {
+    "admin-broad": {
+      "passed": 79,
+      "failed": 0,
+      "report_sha256": "9fb7fd119efb42199476ba38dd9a8dc5a8a55269f6b9eb5f67abe9ebee6b4eae"
+    },
+    "agent-broad": {
+      "passed": 314,
+      "failed": 0,
+      "report_sha256": "39761fdb9feb3bc6be773261d9ed24fec1eec368b7ef582db88221e91878b1d4"
+    },
+    "channel-broad": {
+      "passed": 33,
+      "failed": 0,
+      "report_sha256": "50c51bfe083a448589938224f09cbb1df64477a4d26a0e50d0722e6df0947259"
+    },
+    "cutover": {
+      "passed": 13,
+      "failed": 0,
+      "report_sha256": "4d271493e41d0ef4760e9a2e97559e58b35b1b817c818d37a4f07ecd75561c69"
+    },
+    "web": {
+      "passed": 8,
+      "failed": 0,
+      "report_sha256": "b50cf9e7c5ecb2918e36240daa5ada9485e22c64068cab5503b7fc5a3e62483e"
+    },
+    "shared": {
+      "passed": 149,
+      "failed": 0
+    },
+    "upgrade": {
+      "passed": 16,
+      "failed": 0
+    },
+    "offline_production": {
+      "passed": 16,
+      "failed": 0
+    },
+    "android_jvm": {
+      "passed": 26,
+      "failed": 0
+    },
+    "android_instrumentation": {
+      "passed": 10,
+      "failed": 0,
+      "scope": "Read-only ARM64 emulator, isolated encrypted cache, loopback transport and public audio. No microphone capture or real phone."
+    }
+  },
+  "prompt_audit": {
+    "assembled_profiles": 8,
+    "core_counts": [
+      15,
+      11,
+      3
+    ],
+    "actual_replay_inputs": "passed",
+    "approved_four_prompt_edits_applied": true,
+    "unapproved_prompt_edits_applied": false
+  },
+  "real_model": {
+    "model": {
+      "model": "gpt-6.1-sol",
+      "format": "openai",
+      "provider_origin": "https://mirror.xinshu.ai",
+      "thinking": null
+    },
+    "calls": 9,
+    "results": [
+      {
+        "scenario": "voice-enroll-new",
+        "status": "failed",
+        "checks": {
+          "no_hijack": true,
+          "worker_reached": true,
+          "bound_owner_unchanged": true,
+          "interruption_reached": true,
+          "no_private_shared_body": true,
+          "private_target": true,
+          "expected_effect": false,
+          "no_duplicate_unknown_send": true,
+          "worker_receipt": true,
+          "voice_tag_delivery": true,
+          "request_isolation": false,
+          "no_fixture_gaps": true,
+          "one_original_management_operation": false,
+          "no_management_worker": true,
+          "management_lazy_tools": false,
+          "completion_event_consumed": false
+        },
+        "requests": 1,
+        "elapsed_ms": 4650,
+        "first_voice_ms": {
+          "text_ms": 3903,
+          "completed_ms": 4097
+        }
+      },
+      {
+        "scenario": "voice-rerecord",
+        "status": "passed",
+        "checks": {
+          "no_hijack": true,
+          "worker_reached": true,
+          "bound_owner_unchanged": true,
+          "interruption_reached": true,
+          "no_private_shared_body": true,
+          "private_target": true,
+          "expected_effect": true,
+          "no_duplicate_unknown_send": true,
+          "worker_receipt": true,
+          "voice_tag_delivery": true,
+          "request_isolation": true,
+          "no_fixture_gaps": true,
+          "one_original_management_operation": true,
+          "no_management_worker": true,
+          "management_lazy_tools": true,
+          "completion_event_consumed": true
+        },
+        "requests": 8,
+        "elapsed_ms": 31166,
+        "first_voice_ms": {
+          "text_ms": 2602,
+          "completed_ms": 2816
+        }
+      }
+    ],
+    "transports": "Synthetic Admin/Channel, finite sample-ready event and playback receipts. Real production Manager, isolated request and event closure. No real audio or contacts sent to model.",
+    "run_source_hashes": {
+      "crabot-agent/src/manager/prompt.ts": "9afde393acf32733f8cfe587ce1cad147c7d937fbafe1d23db998a68e9043a5f",
+      "crabot-agent/src/manager/loop.ts": "baf0be972d07c64ea2fc700cc5263e15d3b750fb3fd0d1ddfe7a9e495712df42",
+      "crabot-agent/src/manager/voice-output.ts": "47e991bde2592002839ec6622e01fc99314c06f1c58b326b73e148514a98f9bb",
+      "crabot-agent/src/manager/voice-output-port.ts": "882a81d9624eb3048f5b2851525348692bd22ba03a119e747579705518c068a4",
+      "crabot-agent/src/manager/tools/worker-tools.ts": "935c5c25c44b17dea7ba40a2f2ae888c56ea92956a709a670c70e6e84f997d9d",
+      "crabot-agent/src/manager/tools/tool-face.ts": "65b1044ab47adb70e20cc86e61304c7caf7820c80136c3ea869eaba633a30bad",
+      "crabot-agent/src/manager/registry.ts": "d9d44e6ebacd4e42a8a6bd0aa8f15e883f963fd7203d1375491cf6684e7a5b5f",
+      "crabot-agent/src/manager/request-loop.ts": "b7db36f6f3b10aed235357ddf26c40a63d5ef6d3cfdbbbd47195f2d17b655d3e",
+      "crabot-agent/src/manager/conversation-request-runner.ts": "7dd50042e0c579b60f332bc3a7cdd2f3f0a78ef7e0e70b515e8c289acfd1093e",
+      "crabot-agent/src/manager/bootstrap.ts": "3931e625eb4214cb2c29481882706e2ddcfd718a745e79f56bbdd360657fd108",
+      "crabot-agent/src/guidance/content.ts": "b5bfc9de2e0c635f9b48cab5005e352c51451c344a8fd6e4ea3627cb6280990b",
+      "crabot-shared/src/permission-entries.ts": "944ba22530e5277ad56733a20c99389aae664cd04196dca9e2f7d2b7ba8d6681",
+      "crabot-agent/eval/shared-requests/runtime.mjs": "92898985941242ceca60e0b7ff89f91038d9a41e79d7b854ee47fd78e64b1b28"
+    }
+  },
+  "remaining": [
+    "First registration model case acknowledged but did not invoke execute_request; minimal prompt strengthening requires user confirmation before applying and retesting.",
+    "Main feature PR and coordinated live upgrade remain gated.",
+    "Retained-data physical-phone install, actual playback latency and two-person enrollment/identification remain unaccepted."
+  ],
+  "live_runtime_mutated": false,
+  "real_phone_installed": false
+}

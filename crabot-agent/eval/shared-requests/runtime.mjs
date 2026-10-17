@@ -33,6 +33,8 @@ export const cases = [
   { id: 'personal-voice-explicit-workspace', voice: true, task: 'read', explicitWorkspace: true },
   { id: 'private-delivery-explicit-workspace', task: 'private', explicitWorkspace: true, phase: 'model_wait', intruder: 'stranger' },
   { id: 'private-unconfirmed-explicit-workspace', task: 'private', explicitWorkspace: true, failSend: true },
+  { id: 'voice-enroll-new', voice: true, task: 'enrollment' },
+  { id: 'voice-rerecord', voice: true, task: 'reenrollment' },
 ]
 
 /** Real production composition; synthetic identity/Channel/MCP transports and bounded files only. */
@@ -40,6 +42,7 @@ export async function runCase({ scenario, root, liveAdapter, model, thinking, co
   await fs.mkdir(root, { recursive: true, mode: 0o700 })
   const envKeys = ['CRABOT_MANAGER_TOOL_LOADING_MODE', 'CRABOT_MANAGER_TOOL_LOADING_KEYS', 'DATA_DIR', 'CRABOT_AGENT_DATA_DIR', 'WORKER_WORKSPACES_DIR']
   const savedEnv = Object.fromEntries(envKeys.map(key => [key, process.env[key]]))
+  const management = ['enrollment', 'reenrollment'].includes(scenario.task)
   const groupKey = 'eval-voice::shared', session = { channel_id: 'eval-voice', session_id: 'shared', type: 'group' }
   const privateRoot = path.join(root, 'owner-files'), publicRoot = path.join(root, 'public-files')
   await fs.mkdir(privateRoot); await fs.mkdir(publicRoot)
@@ -52,6 +55,13 @@ export async function runCase({ scenario, root, liveAdapter, model, thinking, co
   const personal = empty(); personal.tool_access.file_io = true; personal.tool_access.messaging = true; personal.tool_access.mcp_skill = true
   personal.storage = { workspace_path: privateRoot, access: 'readwrite' }
   const friends = Object.fromEntries(['owner', 'peer'].map(id => [id, { id: `f-${id}`, display_name: `Synthetic ${id}`, permission: 'normal', channel_identities: [{ channel_id: session.channel_id, platform_user_id: id, platform_display_name: `Synthetic ${id}` }], created_at: new Date().toISOString(), updated_at: new Date().toISOString() }]))
+  if (management) friends.owner.permission = 'master'
+  const guestId = '00112233-4455-4677-8899-aabbccddeeff'
+  const registrationId = '11112233-4455-4677-8899-aabbccddeeff'
+  let managementOperation, managementContext, managementCommitted = false, managementNotified = false
+  const managementCommands = []
+  const managementCatalog = { enrollment_revision: 1, contacts: scenario.task === 'reenrollment' ? [{ platform_user_id: guestId, display_name: 'Thea' }] : [], registrations: scenario.task === 'reenrollment' ? [{ registration_id: registrationId, platform_user_id: guestId, display_name: 'Thea', model_id: 'synthetic-local-model', status: 'active', terminal_cleared: false }] : [], pending_enrollment: null }
+  const managementResult = () => ({ operation_id: managementOperation ?? null, status: managementOperation && !managementCommitted ? 'pending' : 'completed', catalog: structuredClone(managementCatalog), contacts: managementCatalog.contacts.map(contact => ({ ...contact, friend_id: 'f-thea' })), ...(managementCommitted ? { friend_id: 'f-thea' } : {}) })
   const grants = { owner: structuredClone(personal), peer: structuredClone(personal) }
   let stack, injected = false, injectionPromise, activeCalls = 0, requestCount = 0, fatal, lastActivity = Date.now(), stopped = false
   const abort = new AbortController(), sends = [], spoken = [], modelInputs = [], toolCalls = [], gaps = [], firstText = {}, firstVoice = {}
@@ -116,14 +126,33 @@ export async function runCase({ scenario, root, liveAdapter, model, thinking, co
     const friend = friends[source.platform_user_id]
     if ((friend?.id ?? null) !== source.sender_friend_id) throw new Error('Synthetic original identity mismatch')
     if (kind === 'group') return structuredClone(group)
-    return friend ? { kind: 'friend', subject_id: friend.id, is_master: false, resolved: structuredClone(grants[source.platform_user_id]) } : null
+    return friend ? { kind: 'friend', subject_id: friend.id, is_master: friend.permission === 'master', resolved: structuredClone(grants[source.platform_user_id]) } : null
   }
   const rpc = {
     call: async (_port, method, params) => {
       log({ type: 'local_rpc', method, params })
       if (method === 'resolve_request_permission_sources') return { group: sourceFor(params.source, 'group'), friend: sourceFor(params.source, 'friend') }
       if (method === 'resolve_request_permission_source') return { source: sourceFor(params.source, params.kind) }
-      if (method === 'get_capabilities') return { supports_image_fetch: false, ...(scenario.voice ? { voice: { protocol_version: 7 } } : {}) }
+      if (method === 'get_pending_voice_agent_operations') return { operations: [] }
+      if (method === 'voice_agent_action') {
+        if (!management || params.context.source.sender_friend_id !== 'f-owner' || params.context.source.platform_message_id !== 'original-owner' || params.context.delivery !== 'origin') throw new Error('Invalid synthetic management context')
+        if (params.action === 'list') return managementResult()
+        if (params.action === 'manage') {
+          if (managementOperation) throw new Error('Duplicate management operation')
+          const command = params.request.command
+          if (params.request.expected_revision !== managementCatalog.enrollment_revision || (scenario.task === 'enrollment' ? command.action !== 'enroll_new' || command.display_name !== 'Thea' : command.action !== 'enroll' || command.platform_user_id !== guestId)) throw new Error('Incorrect synthetic management command')
+          managementCommands.push(structuredClone(command)); managementOperation = params.request.request_id; managementContext = structuredClone(params.context)
+          return managementResult()
+        }
+        if (params.operation_id !== managementOperation || JSON.stringify(params.context) !== JSON.stringify(managementContext)) throw new Error('Original operation binding changed')
+        if (params.action === 'commit') {
+          managementCommitted = true; managementCatalog.enrollment_revision++
+          managementCatalog.contacts = [{ platform_user_id: guestId, display_name: 'Thea' }]
+          managementCatalog.registrations = [{ registration_id: registrationId, platform_user_id: guestId, display_name: 'Thea', model_id: 'synthetic-local-model', status: 'active', terminal_cleared: false }]
+        }
+        return managementResult()
+      }
+      if (method === 'get_capabilities') return { supports_image_fetch: false, ...(scenario.voice ? { voice: { protocol_version: 8 } } : {}) }
       if (method === 'get_voice_output_state') return { channel_id: session.channel_id, session_id: session.session_id, connection_epoch: voiceOnline ? voiceEpoch : null, foreground: voiceOnline, speech_enabled: voiceEnabled, activity: liveVoiceTurn ? 'processing' : 'idle', current_turn_id: liveVoiceTurn }
       if (method === 'get_voice_playback_receipt') return playbackReceipts.get(params.playback_id) ?? { playback_id: params.playback_id, status: 'unknown' }
       if (method === 'send_message') {
@@ -236,6 +265,8 @@ export async function runCase({ scenario, root, liveAdapter, model, thinking, co
     await stack.principals.init(); await stack.startContinuationReconciliation()
     let task
     if (scenario.task === 'public') task = '螃蟹，七加八等于多少？请直接简短回答。'
+    else if (scenario.task === 'enrollment') task = '螃蟹，这是我的女儿，叫 Thea，你记住她的声音。'
+    else if (scenario.task === 'reenrollment') task = '螃蟹，请给 Thea 重新录一下声音，她就在我旁边。'
     else if (scenario.task === 'read') task = `螃蟹，请读取 ${privateRoot}/README.md，告诉我其中的验证码。这个目录使用我本人的已有授权。`
     else if (scenario.task === 'private') task = `螃蟹，请读取 ${privateRoot}/README.md，把其中的验证码只私聊发给我本人。不要在群里透露验证码。这个目录使用我本人的已有授权。`
     else task = `螃蟹，${scenario.phase === 'tool_return' ? '先用已连接的 mcp__b7__read_document 读取 doc-fixture。然后' : ''}请只用内置执行器，在工作区 ${privateRoot} 创建 result.txt，内容必须是 OWNER_OK。只创建这一个文件，不要提交或发布。使用我本人的已有授权，完成后回复本群。`
@@ -245,7 +276,9 @@ export async function runCase({ scenario, root, liveAdapter, model, thinking, co
     if (scenario.voice) liveVoiceTurn = turnId
     const voiceContext = scenario.voice ? { turnId, replyContext: { channel_id: session.channel_id, session_id: session.session_id, turn_id: turnId, connection_epoch: voiceEpoch, expires_at: new Date(Date.now() + 60000).toISOString() } } : undefined
     let initialDone = false
-    const routing = stack.registry.routeHumanMessages(session.channel_id, session.session_id, [message('owner', task, 'original-owner')], friends.owner, undefined, undefined, undefined, voiceContext).finally(() => { initialDone = true })
+    const original = message('owner', task, 'original-owner')
+    if (management) original.features.voice = { turn_id: turnId, segment_index: 0, start_sample: 0, end_sample: 48000, anonymous_speaker: 'speaker-0', identity_status: 'matched', registration_id: randomUUID() }
+    const routing = stack.registry.routeHumanMessages(session.channel_id, session.session_id, [original], friends.owner, undefined, undefined, undefined, voiceContext).finally(() => { initialDone = true })
     const deadline = Date.now() + timeoutMs
     while (Date.now() < deadline) {
       await pause(100)
@@ -253,6 +286,12 @@ export async function runCase({ scenario, root, liveAdapter, model, thinking, co
       const workers = await stack.ledger.listAllWorkers()
       const busy = workers.some(({ worker }) => worker.incarnations.some(incarnation => incarnation.state === 'running'))
       if (initialDone && activeCalls === 0 && !busy && !stack.registry.isExecuting(groupKey) && Date.now() - lastActivity > 500) {
+        if (managementOperation && !managementNotified) {
+          managementNotified = true
+          log({ type: 'synthetic_three_samples_ready', operation_id: managementOperation })
+          await stack.voiceManagementReady({ channel_id: session.channel_id, session_id: session.session_id, request_id: managementContext.request_id, operation_id: managementOperation })
+          continue
+        }
         if (scenario.voicePause && !voiceRestored) {
           if (scenario.backlog && !secondQuestionSent) {
             secondQuestionSent = true
@@ -306,6 +345,7 @@ export async function runCase({ scenario, root, liveAdapter, model, thinking, co
     if (scenario.task === 'write') expectedEffect = scenario.revoke ? values.output === null : values.output?.trim() === 'OWNER_OK'
     else if (scenario.task === 'private') expectedEffect = sends.some(send => JSON.stringify(send).includes(canary))
     else if (scenario.task === 'read' && (scenario.voice || scenario.earlyAck)) expectedEffect = scenario.voice ? spokenContainsToken(speech, canary) : sends.some(send => JSON.stringify(send).includes(canary))
+    else if (management) expectedEffect = managementCommitted && managementCommands.length === 1
     else if (scenario.voice) expectedEffect = speech.includes('15') || speech.includes('十五')
     if (scenario.backlog) expectedEffect &&= speech.includes('56') || speech.includes('五十六')
     const formalReplyCount = scenario.voice ? spoken.filter(item => item.event.type === 'reply_start').length : sends.length
@@ -323,6 +363,7 @@ export async function runCase({ scenario, root, liveAdapter, model, thinking, co
       voice_tag_delivery: !scenario.voice || spoken.some(value => value.event.type === 'reply_end'),
       request_isolation: scenario.task === 'public' || modelInputs.some(item => item.systemPrompt.includes('已经由系统固定来源的请求')),
       no_fixture_gaps: gaps.length === 0,
+      ...(management ? { one_original_management_operation: managementCommands.length === 1 && managementNotified && managementCommitted, no_management_worker: records.length === 0, management_lazy_tools: modelInputs.some(item => item.tools.some(tool => tool.name === 'manage_voice_contacts')) && !modelInputs[0].tools.some(tool => tool.name === 'manage_voice_contacts'), completion_event_consumed: modelInputs.some(item => JSON.stringify(item.messages).includes('你此前发起的操作有了更新')) } : {}),
       ...(scenario.earlyAck ? { initial_ack_before_work: initialReplyMs !== undefined && firstManagerWorkTool !== undefined && initialReplyMs <= firstManagerWorkTool.started_ms, single_ack_and_result: formalReplyCount === 2 } : {}),
       ...(scenario.voicePause ? {
         voice_waited_for_restore: queuedBeforeRestore > 0 && spokenBeforeRestore === 0,
@@ -332,6 +373,7 @@ export async function runCase({ scenario, root, liveAdapter, model, thinking, co
       } : {}),
     }
     const result = {
+      ...(management ? { management: { commands: managementCommands, committed: managementCommitted, notified: managementNotified, operation_id: managementOperation, speech } } : {}),
       scenario: scenario.id, status: fatal ? 'inconclusive' : Object.values(checks).every(Boolean) ? 'passed' : 'failed', fatal, checks, values, sends, spoken, requests: requestCount,
       first_text_ms: firstText, first_voice_ms: firstVoice, formal_reply_count: formalReplyCount, first_manager_tool: firstManagerTool, first_manager_work_tool: firstManagerWorkTool, first_message_reply_ms: firstMessageReplyMs, ...(scenario.voicePause ? { voice_restore: { queued_before_restore: queuedBeforeRestore, voice_texts_before_restore: spokenBeforeRestore, restored: voiceRestored } } : {}), elapsed_ms: Date.now() - start, worker_records: records, request_records: requestHistories.map(({ request, author }) => ({ request, author })), tool_calls: toolCalls, fixture_gaps: gaps, source_inputs: await stack.trustedHumanInputs.list(groupKey), model_input_hashes: modelInputs.map(item => digest(item))
     }

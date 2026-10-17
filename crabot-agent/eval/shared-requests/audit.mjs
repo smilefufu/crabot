@@ -4,7 +4,7 @@ import path from 'node:path'
 import { createRequire } from 'node:module'
 import { digest } from './runtime.mjs'
 const require = createRequire(new URL('../../package.json', import.meta.url))
-const { assembleManagerSystemPrompt, VOICE_REPLY_PROMPT, SHARED_REQUEST_BOUNDARY, REQUEST_CONTEXT_PROMPT } = require('./dist/manager/prompt.js')
+const { assembleManagerSystemPrompt, VOICE_REPLY_PROMPT, SHARED_REQUEST_BOUNDARY, REQUEST_CONTEXT_PROMPT, VOICE_MANAGEMENT_REQUEST_PROMPT } = require('./dist/manager/prompt.js')
 const { assembleBuiltinWorkerPrompt } = require('./dist/prompts/builtin-worker.js')
 const { renderGuidance } = require('./dist/guidance/catalog.js')
 const { buildManagerToolFace } = require('./dist/manager/tools/tool-face.js')
@@ -31,6 +31,7 @@ for (const [name, input] of variants) {
     assert.ok(prompt.includes(input.requestAuthorization === 'shared' ? SHARED_REQUEST_BOUNDARY : REQUEST_CONTEXT_PROMPT))
   }
   if (input.voice) { assert.ok(prompt.includes(VOICE_REPLY_PROMPT)); assert.ok(!prompt.includes('用工具投递答复，普通文本不外发')) }
+  assert.equal(prompt.includes(VOICE_MANAGEMENT_REQUEST_PROMPT), !!input.voice && input.requestAuthorization === 'shared')
   if (!requestAware) { for (const mode of ['shared', 'request']) assert.equal(assembleManagerSystemPrompt({ ...input, requestAuthorization: mode }), prompt) }
   rows.push({ profile: name, prompt_sha256: digest(prompt), characters: prompt.length, prompt })
 }
@@ -77,7 +78,7 @@ for (const replayRoot of process.argv.slice(2)) {
         workers++
         check(!input.systemPrompt.includes(SHARED_REQUEST_BOUNDARY))
         check(!input.systemPrompt.includes(REQUEST_CONTEXT_PROMPT))
-        check(!input.tools.some(tool => ['send_message', 'send_private_message', 'execute_request'].includes(tool.name)))
+        check(!input.tools.some(tool => ['send_message', 'send_private_message', 'execute_request', 'list_voice_contacts', 'manage_voice_contacts', 'get_voice_management_result'].includes(tool.name)))
         continue
       }
       if (input.systemPrompt.includes(REQUEST_CONTEXT_PROMPT)) {
@@ -94,6 +95,7 @@ for (const replayRoot of process.argv.slice(2)) {
       } else {
         shared++
         check(input.systemPrompt.includes(SHARED_REQUEST_BOUNDARY))
+        check(!input.tools.some(tool => ['list_voice_contacts', 'manage_voice_contacts', 'get_voice_management_result'].includes(tool.name)), 'voice management escaped the isolated request')
         check(!input.systemPrompt.includes('以人类最新提出或确认的要求为准'))
         if (source?.scenario_config.task === 'private') {
           const doc = await fs.readFile(path.join(scenarioRoot, 'data', 'owner-files', 'README.md'), 'utf8')

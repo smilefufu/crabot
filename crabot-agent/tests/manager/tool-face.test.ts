@@ -1,4 +1,5 @@
 import { BUILTIN_WORKER_PERMISSIONS } from '../../src/workers/builtin/runtime.js'
+import { VOICE_TOOL_NAMES, VOICE_FAMILY_DESCRIPTION } from '../../src/manager/tools/voice-tools.js'
 /**
  * manager 封闭工具面装配测试 —— protocol-agent-v3.md §4.3。
  *
@@ -1355,5 +1356,32 @@ describe('managed task attachment regression', () => {
       expect(result).toMatchObject({ isError: false })
       expect(rpc.mock.calls.map(entry => entry[1])).toContain('send_message')
     } finally { await fs.rm(root, { recursive: true, force: true }) }
+  })
+})
+
+describe('guided voice family projection', () => {
+  const port = () => ({ context: { request_id: 'a'.repeat(64), turn_id: '00112233-4455-4677-8899-aabbccddeeff', source: {} as never },
+    call: vi.fn(async () => ({ operation_id: null, status: 'completed' as const, catalog: { enrollment_revision: 0, contacts: [], registrations: [], pending_enrollment: null }, contacts: [] })) })
+  it('keeps the fixed core, loads voice only on demand and exposes it on the next turn', async () => {
+    const state = createManagerToolFaceState(), voiceManagement = port()
+    const deps = makeDeps({ faceState: state, requestAuthorization: 'request', voiceManagement })
+    const first = buildManagerToolFace(deps)
+    expect(first.some(tool => (VOICE_TOOL_NAMES as readonly string[]).includes(tool.name))).toBe(false)
+    const loader = first.find(tool => tool.name === 'load_tool_family')!
+    expect(JSON.stringify(loader.inputSchema)).toContain(VOICE_FAMILY_DESCRIPTION)
+    const result = JSON.parse((await loader.call({ family: 'voice' }, {})).output)
+    expect(result.status).toBe('loaded'); expect(result.loaded.sort()).toEqual([...VOICE_TOOL_NAMES].sort())
+    expect(first.some(tool => tool.name === 'manage_voice_contacts')).toBe(false)
+    expect(buildManagerToolFace(deps).filter(tool => (VOICE_TOOL_NAMES as readonly string[]).includes(tool.name))).toHaveLength(3)
+    expect(JSON.parse((await loader.call({ family: 'voice' }, {})).output).status).toBe('already_visible')
+    expect(buildManagerToolFace({ ...deps, faceState: createManagerToolFaceState() }).some(tool => tool.name === 'manage_voice_contacts')).toBe(false)
+    expect(state.catalog!.search(createManagerToolFaceState(), '记住声音', 5).loaded).toEqual([])
+  })
+  it.each(['shared', 'daily_reflection', 'memory_graph_rebuild'])('does not install the family for %s', profile => {
+    const state = createManagerToolFaceState()
+    const face = buildManagerToolFace(makeDeps({ faceState: state, voiceManagement: port(),
+      ...(profile === 'shared' ? { requestAuthorization: 'shared' as const } : { profile: profile as 'daily_reflection' | 'memory_graph_rebuild', isBuiltinDailyReflection: profile === 'daily_reflection' }) }))
+    expect(face.some(tool => (VOICE_TOOL_NAMES as readonly string[]).includes(tool.name))).toBe(false)
+    expect(state.catalog!.loadFamily(state, 'voice').status).toBe('unavailable')
   })
 })
