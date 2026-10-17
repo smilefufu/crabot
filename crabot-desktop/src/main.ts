@@ -1,7 +1,7 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, protocol, session, shell, Tray } from 'electron'
 import path from 'node:path'
 import { homedir } from 'node:os'
-import { access, writeFile, rename, rm } from 'node:fs/promises'
+import { access, readFile, writeFile, rename, rm } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import type { DesktopDiagnostics } from 'crabot-client'
 import { pathToFileURL, fileURLToPath } from 'node:url'
@@ -111,12 +111,9 @@ async function boot() {
   window.webContents.on('will-attach-webview', event => event.preventDefault())
   window.on('close', event => { if (!quitting) { event.preventDefault(); window?.hide() } })
   window.once('ready-to-show', () => { if (!background) show() })
-  // A built-in vector is rendered locally; it needs no downloaded image or external page.
-  const iconWindow = new BrowserWindow({ show: false, webPreferences: { sandbox: true, nodeIntegration: false, contextIsolation: true, offscreen: true } })
-  await iconWindow.loadURL('data:text/html,' + encodeURIComponent('<html style="margin:0;background:transparent"><body style="margin:0"><svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32"><rect x="2" y="4" width="28" height="24" rx="9" fill="#3740a5"/><path d="M8 12h16v9H8z" fill="white"/><circle cx="12" cy="16" r="2" fill="#3740a5"/><circle cx="20" cy="16" r="2" fill="#3740a5"/></svg></body></html>'))
-  const capture = await iconWindow.webContents.capturePage({ x: 0, y: 0, width: 32, height: 32 })
-  iconWindow.destroy()
-  tray = new Tray(nativeImage.createFromBuffer(capture.toPNG()).resize({ width: 20, height: 20 }))
+  const trayImage = nativeImage.createFromBuffer(await readFile(path.join(directory, 'assets/tray.png')))
+  if (trayImage.isEmpty()) throw new Error('Desktop tray asset is invalid')
+  tray = new Tray(trayImage.resize({ width: 20, height: 20 }))
   tray.setToolTip('Crabot')
   async function changeStartup(enabled: boolean) {
     try {

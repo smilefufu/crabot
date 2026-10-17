@@ -15,7 +15,7 @@ vi.mock('./Providers/ProviderDrawerCreate', () => ({ ProviderDrawerCreate: ({ on
   <button onClick={() => onCreated('provider')}>完成显式模型服务配置</button> }))
 const provider = { id: 'provider', name: '我的模型服务', status: 'active', models: [{ model_id: 'model', display_name: '我的模型', type: 'llm' }] }
 beforeEach(() => {
-  vi.clearAllMocks(); mocks.hasManagerModel.mockResolvedValue(false); mocks.choices.mockResolvedValue({ items: [provider] })
+  vi.resetAllMocks(); mocks.hasManagerModel.mockResolvedValue(false); mocks.choices.mockResolvedValue({ items: [provider] })
   mocks.selectDefault.mockResolvedValue({ config: { default_llm_provider_id: 'provider', default_llm_model_id: 'model' } })
 })
 function show() { render(<MemoryRouter><Routes><Route path="/" element={<DesktopWelcome />} /><Route path="/chat" element={<p>聊天页面</p>} /></Routes></MemoryRouter>) }
@@ -35,6 +35,7 @@ it('fresh users can skip model configuration without a password or permission st
   expect(mocks.selectDefault).not.toHaveBeenCalled()
 })
 it('explicit default selection saves references once, then opens chat for an actual reply', async () => {
+  mocks.hasManagerModel.mockResolvedValueOnce(false).mockResolvedValueOnce(true)
   show()
   const save = await screen.findByRole('button', { name: '保存并开始聊天' })
   expect(mocks.selectDefault).not.toHaveBeenCalled()
@@ -42,6 +43,13 @@ it('explicit default selection saves references once, then opens chat for an act
   expect(await screen.findByText('聊天页面')).toBeInTheDocument()
   expect(mocks.selectDefault).toHaveBeenCalledOnce()
   expect(mocks.selectDefault).toHaveBeenCalledWith({ provider_id: 'provider', model_id: 'model' })
+})
+it('a saved global default never claims chat is configured while an explicit powerful slot still needs repair', async () => {
+  show(); fireEvent.click(await screen.findByRole('button', { name: '保存并开始聊天' }))
+  expect(await screen.findByRole('alert')).toHaveTextContent('主控仍有单独配置')
+  expect(screen.queryByText('聊天页面')).toBeNull()
+  expect(screen.getByRole('link', { name: '修正主控模型配置' })).toHaveAttribute('href', '/agents/config')
+  expect(mocks.selectDefault).toHaveBeenCalledOnce()
 })
 it('a lost save response preserves the selection and checks facts before allowing another write', async () => {
   mocks.selectDefault.mockRejectedValue(new Error('fixture response lost'))

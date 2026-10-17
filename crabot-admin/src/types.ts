@@ -1675,6 +1675,17 @@ export interface SlotThinkingConfig {
   thinking_custom?: string | number
 }
 
+/** protocol-admin §3.19.2/§3.19.5：仅返回存储的引用，不解析连接或刷新 OAuth。 */
+export type CoreAgentModelRole = 'powerful' | 'cost_effective'
+export interface AgentInstanceModelConfig {
+  agent_id: 'crabot-agent'
+  models: Partial<Record<CoreAgentModelRole, ModelSlotRef>>
+  thinking?: Partial<Record<CoreAgentModelRole, SlotThinkingConfig>>
+}
+export interface GetAgentModelConfigResult {
+  config: AgentInstanceModelConfig | null
+}
+
 /** Agent 实例配置（存储格式：引用注册表 ID） */
 export interface AgentInstanceConfig {
   /** 实例 ID */

@@ -8,7 +8,7 @@ const Config = z.object({ default_llm_provider_id: z.string().optional(), defaul
 const GlobalResult = z.object({ config: Config })
 const ProviderChoices = z.object({ items: z.array(z.object({ id: z.string(), name: z.string(), status: z.enum(['active', 'inactive', 'error']),
   models: z.array(z.object({ model_id: z.string(), display_name: z.string(), type: z.enum(['llm', 'image']) })) })) })
-const AgentConfig = z.object({ config: z.object({ models: z.object({ manager: Ref.optional() }) }).nullable() })
+const AgentConfig = z.object({ config: z.object({ models: z.object({ powerful: Ref.optional() }) }).nullable() })
 export type ModelChoiceProvider = z.infer<typeof ProviderChoices>['items'][number]
 
 export class ModelClient {
@@ -25,11 +25,12 @@ export class ModelClient {
     }), headers })
   }
   async hasManagerModel(options?: RequestOptions): Promise<boolean> {
-    const [global, providers] = await Promise.all([this.globalConfig(options), this.choices(options)])
+    const [global, providers, agent] = await Promise.all([this.globalConfig(options), this.choices(options), this.managerConfig(options)])
     const valid = (ref: z.infer<typeof Ref> | undefined) => !!ref && providers.items.some(provider => provider.id === ref.provider_id
       && provider.status === 'active' && provider.models.some(model => model.type === 'llm' && model.model_id === ref.model_id))
-    if (global.config.default_llm_provider_id && global.config.default_llm_model_id
-      && valid({ provider_id: global.config.default_llm_provider_id, model_id: global.config.default_llm_model_id })) return true
-    return valid((await this.managerConfig(options)).config?.models.manager)
+    const explicit = agent.config?.models.powerful
+    if (explicit) return valid(explicit)
+    return !!global.config.default_llm_provider_id && !!global.config.default_llm_model_id
+      && valid({ provider_id: global.config.default_llm_provider_id, model_id: global.config.default_llm_model_id })
   }
 }

@@ -23,7 +23,7 @@ test('Ubuntu startup is absent by default and created only on opt-in, with a bac
   assert.equal((await f.startup.get()).enabled, false)
   await assert.rejects(readFile(f.file), { code: 'ENOENT' })
   assert.equal((await f.startup.set(true)).enabled, true)
-  assert.match(await readFile(f.file, 'utf8'), /^Exec="\/opt\/中文 Crabot\/crabot" --background$/m)
+  assert.match(await readFile(f.file, 'utf8'), /^Exec=\/usr\/bin\/env -- "\/opt\/中文 Crabot\/crabot" --background$/m)
   await writeFile(f.file, (await readFile(f.file, 'utf8')) + 'Hidden=true\n')
   assert.equal((await f.startup.get()).enabled, false)
   assert.equal((await f.startup.set(false)).enabled, false)

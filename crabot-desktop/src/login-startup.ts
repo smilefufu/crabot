@@ -45,7 +45,9 @@ export class LoginStartup {
         // Exec quoting is desktop-entry syntax, not shell syntax. Literal percent
         // must be doubled; backslashes pass through both string and Exec parsing.
         const quoted = executable.replace(/\\/g, '\\\\\\\\').replace(/"/g, '\\\\"').replace(/`/g, '\\\\`').replace(/\$/g, '\\\\$').replace(/%/g, '%%')
-        const text = `[Desktop Entry]\nType=Application\nName=Crabot\nExec="${quoted}" --background\nTerminal=false\nX-GNOME-Autostart-enabled=true\n${marker}\n`
+        // GIO validates argv[0] before expanding %% to a literal percent. Keep
+        // its executable fixed; env forwards the expanded path without a shell.
+        const text = `[Desktop Entry]\nType=Application\nName=Crabot\nExec=/usr/bin/env -- "${quoted}" --background\nTerminal=false\nX-GNOME-Autostart-enabled=true\n${marker}\n`
         await mkdir(path.dirname(this.file()), { recursive: true })
         const temporary = this.file() + '.tmp-' + randomUUID()
         try { await writeFile(temporary, text, { flag: 'wx', mode: 0o600 }); await rename(temporary, this.file()) }

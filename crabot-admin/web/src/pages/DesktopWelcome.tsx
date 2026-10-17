@@ -17,10 +17,11 @@ export function DesktopWelcome() {
   const [providerId, setProviderId] = useState(''), [modelId, setModelId] = useState('')
   const [creating, setCreating] = useState(false), [saving, setSaving] = useState(false)
   const [error, setError] = useState(''), [mustCheck, setMustCheck] = useState(false)
+  const [needsSlotFix, setNeedsSlotFix] = useState(false)
   const [refresh, setRefresh] = useState(0)
   useEffect(() => {
     const abort = new AbortController()
-    setPhase('checking'); setError('')
+    setPhase('checking'); setError(''); setNeedsSlotFix(false)
     void (async () => {
       if (await client.hasManagerModel({ signal: abort.signal })) { if (!abort.signal.aborted) navigate('/chat', { replace: true }); return }
       const choices = (await client.choices({ signal: abort.signal })).items.filter(provider => provider.status === 'active' && provider.models.some(model => model.type === 'llm'))
@@ -38,7 +39,11 @@ export function DesktopWelcome() {
     setSaving(true); setError('')
     try {
       await client.selectDefault({ provider_id: providerId, model_id: chosen })
-      navigate('/chat')
+      if (await client.hasManagerModel()) navigate('/chat')
+      else {
+        setMustCheck(true); setNeedsSlotFix(true)
+        setError('全局默认模型已保存，但主控仍有单独配置需要修正。')
+      }
     } catch {
       setMustCheck(true); setError('未能确认保存结果，已保留选择。请先重新检查配置。')
     } finally { setSaving(false) }
@@ -63,6 +68,7 @@ export function DesktopWelcome() {
         </div>
       </>}
       {error && <p role="alert">{error}</p>}
+      {needsSlotFix && <p><Link to="/agents/config">修正主控模型配置</Link></p>}
       <p className="desktop-welcome-note">连接检查和实际模型调用都由你发起，可能产生模型服务费用。收到真实回复后，才能确认配置可用。</p>
       <div className="desktop-welcome-links"><Link to="/chat">稍后设置，进入应用</Link><Link to="/providers">完整模型设置</Link></div>
       <p className="desktop-welcome-note">桌面无需 Crabot 密码。截图、麦克风和桌面控制权限会在使用相应功能时再请求。</p>

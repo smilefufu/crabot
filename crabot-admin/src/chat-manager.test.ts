@@ -194,13 +194,14 @@ describe('入站带附件消息（handleInboundMessage）', () => {
     // user 消息已落库且正常返回
     expect(result.message.content.text).toBe('会失败的消息')
     expect(mgr.getMessages(10)).toHaveLength(1)
-    // P6-A §11.4：失败不再立即 chat_error——dispatch loop 退避重试（上限后报错），
+    // P6-A §11.4：失败不再立即 chat_error——dispatch loop 退避重试，
     // journal 保持 pending_dispatch；重启由 reconcileInboundDispatches 恢复。
     // 2026-08-30：chat_status 占位推送退役（protocol-admin §3.20.2）——无推送。
     expect(pushed).toEqual([])
     const journalPath = `${TEST_DATA_DIR}/chat-inbound-dispatch-journal/req-err.json`
     const journal = JSON.parse(await fs.readFile(journalPath, 'utf-8'))
     expect(journal.status).toBe('pending_dispatch')
+    mgr.close()
   })
 
   it('文字+附件：附件落 store，落库 content 含 media[]（URL 形态），process_message 收到绝对路径版', async () => {

@@ -8,7 +8,7 @@
 - P1/P2/P3 及 OS peer 通道已通过[四平台原生 CI](https://github.com/smilefufu/crabot/actions/runs/39046406747)，含 Ubuntu 24.04/26.04 断网容器；共同后台启动、CLI JSON 身份核对、共享 HTTP/WS SDK 与 Web 23 项状态/草稿回归通过。最终 CLI/桌面安装、迁移、签名和真实 GUI 尚未验收。
 - P4 的短桌面会话/OS peer/重放与 WS 撤销已接线；[CI 39052584993](https://github.com/smilefufu/crabot/actions/runs/39052584993) 四平台真实 Electron 窗口边界通过。Windows/macOS 完整 smoke 通过；Linux 新增迁移探针误把 Python launcher 与实际二进制相比，已修正，待原生重跑。CLI 原密码纪律保持，桌面首次浏览器密码原子建立，保存不会退出 GUI。
 - P5 已接可跳过的首次模型引导、系统主题、主要/高级入口、原 Cua 设定和独立基础诊断；完整 React 断连保留中文草稿。附件使用单次认证的独立沙箱预览/原生保存，真实 Electron 已验证无 bridge、Node、持久凭据或认证子请求；15 项宿主/网络/诊断测试通过。Agent 子进程不继承 Admin 签名/密码环境。首次真实模型、完整壳生命周期、迁移/更新、签名与目标桌面验收继续；不部署、不触碰现场数据。
-- P6 登录自启动已接原生菜单，默认关闭，拒绝覆盖未知启动项；CLI 外部启动后的 GUI 自动连接已红绿回归。新增完整核心/CLI 与打包 Electron 启停 CI，保留本机现场单实例。Mac arm64 开发候选展开约 2.6 GiB，核心约 2.3 GiB；独立 CLI/SQLite/NAPI 及 194 项 CLI、22 项桌面回归通过，Ubuntu GIO 与完整宿主待 CI。受管 MCP 新字段的[补充 Spec](crabot-docs/superpowers/specs/2026-10-18-desktop-managed-mcp-design.md)因审批门禁待确认；迁移/更新及最终发行继续，候选不代表签名安装验收。
+- P6 登录自启动默认关闭，拒绝覆盖未知启动项；[CI 39059740632](https://github.com/smilefufu/crabot/actions/runs/39059740632) 的 Mac arm64 完整宿主及 ASAR 候选通过共享实例、GUI 崩溃、CLI stop/start、退出取消和停机。其它平台暴露的 GIO 百分号路径、Windows 原生模块宿主绑定及 Intel 托盘启动问题已定向修复，待原生重跑。模型引导按 powerful 引用核对，修复连续传输失败误删聊天 outbox；本机 Admin 46、SDK 17、Web 41 项及真实 Electron 窗口通过。受管 MCP 新字段的[补充 Spec](crabot-docs/superpowers/specs/2026-10-18-desktop-managed-mcp-design.md)因审批门禁待确认；旧安装迁移、完整更新及签名发行继续，不触碰现场部署。
 
 ### 任务默认目录文件授权：独立修复待审查
 

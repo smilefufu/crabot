@@ -83,7 +83,7 @@ scrapling.loadRuntime(path.join(packagedResources, 'core'), { full: true })
 computerUse.loadRuntime(path.join(packagedResources, 'core'), { full: true })
 const builderRequire = createRequire(createRequire(require.resolve('electron-builder')).resolve('app-builder-lib/package.json'))
 const asar = builderRequire('@electron/asar')
-for (const file of ['dist/main.js', 'dist/preload.cjs', 'node_modules/crabot-client/dist/index.js', 'node_modules/zod/package.json', 'node_modules/electron-updater/package.json']) {
+for (const file of ['dist/main.js', 'dist/preload.cjs', 'dist/assets/tray.png', 'node_modules/crabot-client/dist/index.js', 'node_modules/zod/package.json', 'node_modules/electron-updater/package.json']) {
   asar.statFile(path.join(packagedResources, 'app.asar'), file)
 }
 const executable = process.platform === 'darwin' ? path.join(packagedResources, '../MacOS/Crabot')

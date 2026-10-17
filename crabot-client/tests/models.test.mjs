@@ -21,9 +21,14 @@ test('first-run reads neither test the remote model nor copy credentials into ch
   assert.ok(calls.every(call => !call.options.method || call.options.method === 'GET'))
 })
 test('existing explicit Manager model is retained when the global default is empty', async () => {
-  const { client } = fixture({ manager: { models: { manager: { provider_id: 'provider', model_id: 'model' }, powerful: { provider_id: 'other', model_id: 'other' } } } })
+  const { client } = fixture({ manager: { models: { powerful: { provider_id: 'provider', model_id: 'model' } } } })
   assert.equal(await client.hasManagerModel(), true)
   assert.equal(await fixture().client.hasManagerModel(), false)
+})
+test('an explicit powerful slot is authoritative and never falls back to a global model or retired manager slot', async () => {
+  const config = { default_llm_provider_id: 'provider', default_llm_model_id: 'model' }
+  assert.equal(await fixture({ config, manager: { models: { powerful: { provider_id: 'missing', model_id: 'missing' } } } }).client.hasManagerModel(), false)
+  assert.equal(await fixture({ manager: { models: { manager: { provider_id: 'provider', model_id: 'model' } } } }).client.hasManagerModel(), false)
 })
 test('dangling, inactive and image-only defaults are not presented as an existing chat model', async () => {
   const config = { default_llm_provider_id: 'provider', default_llm_model_id: 'model' }

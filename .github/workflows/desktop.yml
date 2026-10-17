@@ -102,7 +102,7 @@ jobs:
           node node_modules/typescript/bin/tsc -p tsconfig.cli.json
           node node_modules/vitest/vitest.mjs run src/cli/client.test.ts --maxWorkers=1 --minWorkers=1
           cd crabot-admin
-          node node_modules/vitest/vitest.mjs run src/chat-http-ws.test.ts src/chat-manager.test.ts src/http-diagnostics.test.ts src/desktop-auth.test.ts src/credentials.test.ts src/computer-use-setup-api.test.ts src/memory-access.test.ts src/voice-admin.test.ts --maxWorkers=1 --minWorkers=1
+          node node_modules/vitest/vitest.mjs run src/chat-http-ws.test.ts src/chat-manager.test.ts src/chat-outbox-recovery.test.ts src/http-diagnostics.test.ts src/model-client-http.test.ts src/desktop-auth.test.ts src/credentials.test.ts src/computer-use-setup-api.test.ts src/memory-access.test.ts src/voice-admin.test.ts --maxWorkers=1 --minWorkers=1
       - name: Web compilation and state regressions
         run: |
           cd crabot-admin/web
