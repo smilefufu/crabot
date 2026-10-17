@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { cases, runCase } from './runtime.mjs'
+import { cases, runCase, spokenContainsToken } from './runtime.mjs'
 
 async function* response(block, text) {
   yield { type: 'message_start', messageId: Math.random().toString() }
@@ -149,9 +149,9 @@ test('budget exhaustion is inconclusive and never accepted as a passing empty re
 })
 
 
-test('offline personal voice Worker reports once after the original reply closes, with its original request binding', async () => {
+for (const voice of [false, true]) for (const earlyAck of [false, true]) test(`offline personal result checks acknowledgement before tools: voice=${voice}, early=${earlyAck}`, async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'b7-voice-completion-'))
-  let shared = 0, personal = 0, worker = 0
+  let shared = 0, personal = 0, worker = 0, sentAck = false, finalSent = false
   const events = []
   const adapter = { updateConfig() {}, async *stream(params) {
     const body = JSON.stringify(params.messages)
@@ -161,25 +161,42 @@ test('offline personal voice Worker reports once after the original reply closes
       return
     }
     if (params.systemPrompt.includes('已经由系统固定来源的请求')) {
-      if (personal++ === 0) yield* response({ name: 'spawn_worker', input: { impl: 'builtin', title: '读取资料', prompt: '读取用户授权 README.md 中的验证码。' } }, '<voice_reply>好，我帮你看看。</voice_reply>')
-      else if (body.includes('turn_completed')) yield* response(undefined, '<voice_reply>刚才你让我查的验证码是' + body.match(/B7_PRIVATE_[0-9a-f]{8}/)?.[0] + '。</voice_reply>')
+      if (personal++ === 0) yield* response({ name: 'spawn_worker', input: { impl: 'builtin', title: '读取资料', prompt: '读取用户授权 README.md 中的验证码。' } }, voice && !earlyAck ? '<voice_reply>好，我帮你看看。</voice_reply>' : undefined)
+      else if (body.includes('turn_completed') && !finalSent) {
+        finalSent = true
+        const text = '刚才你让我查的验证码是' + body.match(/B7_PRIVATE_[0-9a-f]{8}/)?.[0] + '。'
+        yield* response(voice ? undefined : { name: 'send_message', input: { channel_id: 'eval-voice', session_id: 'shared', content: text, post_send_action: 'none' } }, voice ? '<voice_reply>' + text + '</voice_reply>' : undefined)
+      }
       else yield* response()
       return
     }
-    if (!params.tools.some(tool => tool.name === 'execute_request')) { yield* response({ name: 'load_tool_family', input: { family: 'crabot' } }); return }
+    if (!voice && earlyAck && !sentAck) {
+      sentAck = true
+      yield* response({ name: 'send_message', input: { channel_id: 'eval-voice', session_id: 'shared', content: '好，我帮你查一下。', post_send_action: 'none' } }); return
+    }
+    if (!params.tools.some(tool => tool.name === 'execute_request')) { yield* response({ name: 'load_tool_family', input: { family: 'crabot' } }, voice && earlyAck ? '<voice_reply>好，我帮你查一下。</voice_reply>' : undefined); return }
     yield* response(shared++ === 0 ? { name: 'execute_request', input: { source_id: originalSource(params), delivery: 'origin' } } : undefined)
   } }
   try {
-    const result = await runCase({ scenario: { id: 'offline-personal-voice-completion', voice: true, task: 'read' }, root: path.join(root, 'data'), liveAdapter: adapter, model: 'scripted', connection: { endpoint: 'https://example.invalid', apikey: 'not-a-real-key', format: 'openai', model_id: 'scripted' }, record: event => events.push(event), budget: { take: () => true }, timeoutMs: 15000 })
-    assert.equal(result.status, 'passed', JSON.stringify(result))
+    const result = await runCase({ scenario: { id: 'offline-personal-voice-completion', voice, task: 'read', earlyAck: true }, root: path.join(root, 'data'), liveAdapter: adapter, model: 'scripted', connection: { endpoint: 'https://example.invalid', apikey: 'not-a-real-key', format: 'openai', model_id: 'scripted' }, record: event => events.push(event), budget: { take: () => true }, timeoutMs: 15000 })
+    assert.equal(result.status, earlyAck ? 'passed' : 'failed', JSON.stringify(result))
+    assert.equal(result.checks.initial_ack_before_work, earlyAck)
+    assert.equal(result.checks.expected_effect, true)
+    assert.equal(result.first_manager_work_tool.name, 'load_tool_family')
     assert.equal(result.worker_records.length, 1)
     assert.equal(worker, 2)
-    const completed = result.spoken.filter(item => item.event.type === 'reply_text' && item.event.text.includes('B7_PRIVATE_'))
-    assert.equal(completed.length, 1)
-    assert.equal(completed[0].delivery_context.kind, 'notification')
-    assert.equal(completed[0].delivery_context.binding.worker_id, result.worker_records[0].worker.worker_id)
-    assert.equal(completed[0].delivery_context.binding.request_id, result.worker_records[0].bound.request.request_id)
-    assert.ok(events.some(event => event.type === 'synthetic_voice_output' && event.params.event.type === 'response_end'))
+    if (voice) {
+      const completed = result.spoken.filter(item => item.event.type === 'reply_text' && item.event.text.includes('B7_PRIVATE_'))
+      assert.equal(completed.length, 1)
+      assert.equal(completed[0].delivery_context.kind, 'notification')
+      assert.equal(completed[0].delivery_context.binding.worker_id, result.worker_records[0].worker.worker_id)
+      assert.equal(completed[0].delivery_context.binding.request_id, result.worker_records[0].bound.request.request_id)
+      assert.ok(events.some(event => event.type === 'synthetic_voice_output' && event.params.event.type === 'response_end'))
+    } else {
+      const completed = result.sends.filter(item => JSON.stringify(item).includes('B7_PRIVATE_'))
+      assert.equal(completed.length, 1)
+      assert.equal(completed[0].session_id, 'shared')
+    }
   } finally { await fs.rm(root, { recursive: true, force: true }) }
 })
 
@@ -215,4 +232,14 @@ test('offline harness catches up two public results without a new human wake at 
     assert.ok(JSON.stringify(summary.messages).includes('不要假设用户已唤醒或准备接话'))
     assert.equal(result.source_inputs.length, 2)
   } finally { await fs.rm(root, { recursive: true, force: true }) }
+})
+
+
+test('spoken result validation accepts spoken underscores without accepting a different token', () => {
+  const token = 'B7_PRIVATE_a1b2c3d4'
+  assert.equal(spokenContainsToken('验证码是：B7，下划线，PRIVATE，下划线，a1b2c3d4。', token), true)
+  assert.equal(spokenContainsToken('验证码是：' + token + '。', token), true)
+  assert.equal(spokenContainsToken('B7，下划线，PRIVATE，下划线，a1b2c3d5', token), false)
+  assert.equal(spokenContainsToken('B7，下划线，private，下划线，a1b2c3d4', token), false)
+  assert.equal(spokenContainsToken('B7，下划线，a1b2c3d4', token), false)
 })

@@ -29,4 +29,6 @@ node crabot-agent/eval/shared-requests/audit.mjs /tmp/completed-evaluation-direc
 
 每例保留输入、真实工具结果、Trace/活动回执、固定来源和实际发送/文件记录。输出目录和文件默认私有，密钥写日志前脱敏；不要提交原始输出、现场配置或会话。`first_text_ms` 是模型文字首片段，可能是内部文字；`first_voice_ms.text_ms` 才是 Voice 文字首次交给本地播放替身的时间，`canary_complete_ms` 是测试验证码完整到达的时间。两者都不包含真实 ASR / TTS / 音频播放延迟。
 
+`first_voice_ms.completed_ms` 是首段模拟完成回执时间；`first_manager_tool` 从生产 Manager trace 的真实工具开始事件取时，不以模型函数头当成执行。`first_manager_work_tool` 排除发送/询问本身，`first_message_reply_ms` 来自成功的模拟发送回执。`personal-voice-early-ack` 与 `personal-message-early-ack` 使用不额外要求接单的原始文件查询请求，必须在首个查询或派发工具（包括加载工具族）开始前已有完整接单回执，最终验证码交付仍单独核验；语音允许将下划线口述为“下划线”，不忽略大小写或变更实际字符。
+
 存在提示词待确认、原始用例失败、模型/超时/预算错误或不完整回执时，只记录局部证据；这些用例及对照通过均不等于 B7 完成或真人语音验收。
