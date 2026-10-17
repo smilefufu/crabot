@@ -19,7 +19,7 @@
 - 本机权限元数据只读快照发现6个已知群存在潜在授权差异，涉及同一好友，并另含未来默认群规则；同渠道仅是可能请求作者，未当作已验证群成员。未修改现场配置、进程或手机，完整清单仅本地私有保存。
 - 2026-10-17 已按确认稿实现默认目录授权：file_io 为总开关，宿主核验的自有默认目录读写、storage 只管额外目录；首次准备、builtin/child、续办、主控合格读取/产物上传接通，原快照/归属及CLI准入保持。Agent741项＋生产装配35项、Web41、Admin7、离线5、升级16及四项构建通过；5项tmux按条件跳过，扩大检查的3项既有失败已在原HEAD复现。
 - B7 本轮真实模型共137次适配器调用：原始自然请求的本人私发、未知发送不重发、撤权及3个插话时点通过；8次用例保留1次语音失败和1次批次预算不足（后者单例完整复跑通过），不删早期失败/对照。实际输入审计、8种提示词和15/11/3核心目录通过，唯一模型文字改动为已确认file_io说明。脱敏证据：crabot-agent/eval/shared-requests/evidence-2026-10-17-managed-workspace.json。
-- personal-voice根因已核实：Worker约24秒完成，续办已生成正确voice_reply，但未继承实时回复上下文；共享初轮又在约27秒提前response_end。另需串行同窗输出，避免并发播放冲突。[最小修复稿](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/specs/2026-10-17-voice-async-response-lifecycle-design.md)待确认，仅覆盖原60秒有效窗口；长任务主动通知另行设计。B7整组、真人、全语音管理及统一PR/部署仍未完成；本轮未改实现、正式协议、现场配置或手机。
+- personal-voice根因已核实：Worker约24秒完成，续办有正确voice_reply却丢实时投递上下文，初轮又过早response_end。用户确认语音沿现有任务执行/验收/完成回报，只处理播放时机；[修订spec](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/specs/2026-10-17-voice-async-response-lifecycle-design.md)已改为不以60秒限制通知，覆盖忙碌、静音、离线及自然衔接，安卓配套在其仓库；旧“只修原窗口”稿停止采用。书面核对、正式协议/精确提示词、实现、B7整组/真人、全语音管理及统一PR/部署仍待完成；本轮仅文档，现场配置与手机未改。
 
 ### crabot check 运行状态误报：已修复
 
