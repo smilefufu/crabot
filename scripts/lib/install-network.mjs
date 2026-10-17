@@ -33,10 +33,14 @@ export async function uvTransport(uv, directory, env = process.env) {
 async function systemProxy(url, env) {
   if (process.platform !== 'win32' || env.HTTPS_PROXY || env.https_proxy || env.ALL_PROXY || env.all_proxy) return ''
   const script = '$u=[Uri]$env:CRABOT_NETWORK_PROBE;$p=[Net.WebRequest]::DefaultWebProxy;if($p){$v=$p.GetProxy($u);if($v -ne $u){$v.AbsoluteUri}}'
-  const { stdout } = await exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
-    env: { ...env, CRABOT_NETWORK_PROBE: url }, timeout: 5000, maxBuffer: 4096,
-  })
-  return stdout.trim()
+  try {
+    const { stdout } = await exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
+      env: { ...env, CRABOT_NETWORK_PROBE: url }, timeout: 15_000, maxBuffer: 4096,
+    })
+    return stdout.trim()
+  } catch (error) {
+    throw new Error(`Cannot inspect Windows system proxy (exit ${error.code ?? 'unknown'}, signal ${error.signal ?? 'none'}, timed_out=${error.killed === true})`)
+  }
 }
 
 async function probeSource(url, kind, env, proxy) {

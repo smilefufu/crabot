@@ -55,7 +55,8 @@ export async function downloadProductAsset(asset, directory, { signal, fetcher =
 
 async function unpack(archive, destination, strip, signal) {
   await fs.mkdir(destination, { recursive: true })
-  await runBounded('tar', ['-xf', archive, '-C', destination, '--strip-components=' + strip], { signal })
+  const tar = windows ? join(process.env.SystemRoot, 'System32', 'tar.exe') : 'tar'
+  await runBounded(tar, ['-xf', archive, '-C', destination, '--strip-components=' + strip], { signal })
 }
 
 async function inventory(root, directory, files = {}) {
@@ -129,7 +130,7 @@ export async function prepareProductRuntime(root, { cache, version = 'desktop-de
     const rgAsset = config.rg[target]
     const rgUrl = 'https://github.com/BurntSushi/ripgrep/releases/download/' + config.versions.rg + '/' + rgAsset.name
     const rgArchive = await downloadProductAsset({ ...rgAsset, url: rgUrl }, cache, { signal })
-    await unpack(rgArchive, join(directory, 'rg'), windows ? 0 : 1, signal)
+    await unpack(rgArchive, join(directory, 'rg'), 1, signal)
     await license(directory, 'ripgrep', config.versions.rg, rgUrl)
 
     if (windows) {

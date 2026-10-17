@@ -66,7 +66,7 @@ def linux_resources():
 def launcher(name, executable):
     target = runtime / name
     relative = executable.relative_to(runtime).as_posix()
-    target.write_text('#!/bin/sh\nset -eu\nruntime=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)\nexport LD_LIBRARY_PATH="$runtime/lib:$runtime/python/lib"\nexec "$runtime/' + relative + '" "$@"\n')
+    target.write_text('#!/bin/sh\nset -eu\ncase "$0" in */*) base=${0%/*};; *) base=.;; esac\nruntime=$(CDPATH= cd -- "$base" && pwd)\nexport LD_LIBRARY_PATH="$runtime/lib:$runtime/python/lib"\nexec "$runtime/' + relative + '" "$@"\n')
     target.chmod(0o755)
     return target
 
