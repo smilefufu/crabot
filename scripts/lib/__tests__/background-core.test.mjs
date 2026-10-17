@@ -16,10 +16,12 @@ test('detached shared core survives its launching frontend being killed; stop re
   writeFileSync(join(root, 'package.json'), '{"type":"module"}')
   copyFileSync(new URL('./fixtures/core.mjs', import.meta.url), join(root, 'crabot-core', 'dist', 'main.js'))
   const managed = new URL('../managed-core.mjs', import.meta.url).href
-  writeFileSync(join(root, 'scripts', 'supervisor.mjs'), `import {runManagedCore} from ${JSON.stringify(managed)};await runManagedCore({root:process.env.TEST_CORE_ROOT,dataDir:process.env.TEST_DATA_DIR,mmPort:Number(process.env.TEST_PORT),env:process.env,stdio:['ignore','ignore','ignore'],cleanup:code=>process.exit(code)})`)
+  const bootstrap = new URL('../supervisor-bootstrap.mjs', import.meta.url).href
+  writeFileSync(join(root, 'scripts', 'supervisor.mjs'), `import {runManagedCore} from ${JSON.stringify(managed)};import{claimSupervisorStart}from${JSON.stringify(bootstrap)};const context={root:process.env.TEST_CORE_ROOT,dataDir:process.env.TEST_DATA_DIR,mmPort:Number(process.env.TEST_PORT)};const record=await claimSupervisorStart(context);await runManagedCore({...context,adoptGeneration:record.generation,env:process.env,stdio:['ignore','ignore','ignore'],cleanup:code=>process.exit(code)})`)
   const probe = createServer().listen(0, '127.0.0.1'); await once(probe, 'listening')
   const port = probe.address().port; await new Promise(resolve => probe.close(resolve))
-  const source = `import {launchBackgroundCore} from ${JSON.stringify(new URL('../background-core.mjs', import.meta.url).href)};await launchBackgroundCore({root:process.env.TEST_CORE_ROOT,dataDir:process.env.TEST_DATA_DIR,env:process.env,mmPort:Number(process.env.TEST_PORT),webPort:Number(process.env.TEST_PORT)});process.send('ready');setInterval(()=>{},1000)`
+  const locks = new URL('../cli-lock.mjs', import.meta.url).href
+  const source = `import {launchBackgroundCore} from ${JSON.stringify(new URL('../background-core.mjs', import.meta.url).href)};import{acquireCliLock,releaseCliLock}from${JSON.stringify(locks)};const lock=await acquireCliLock(process.env.TEST_DATA_DIR,'fixture-start');await launchBackgroundCore({root:process.env.TEST_CORE_ROOT,dataDir:process.env.TEST_DATA_DIR,env:process.env,mmPort:Number(process.env.TEST_PORT),webPort:Number(process.env.TEST_PORT)});releaseCliLock(lock);process.send('ready');setInterval(()=>{},1000)`
   const frontend = spawn(process.execPath, ['--input-type=module', '-e', source], {
     env: { ...process.env, TEST_CORE_ROOT: root, TEST_DATA_DIR: data, TEST_PORT: String(port), TEST_MARKER: marker, TEST_READY: join(root, 'ready') },
     stdio: ['ignore', 'ignore', 'inherit', 'ipc'],

@@ -1,12 +1,15 @@
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { join } from 'node:path'
-import { createInstanceRuntime, recordMmProcess, clearInstanceRuntime } from './instance-runtime.mjs'
+import { realpathSync } from 'node:fs'
+import { createInstanceRuntime, readOwnStartingRuntime, recordMmProcess, clearInstanceRuntime } from './instance-runtime.mjs'
 import { createSupervisorShutdownController } from './supervisor-shutdown.mjs'
 
 // A controller owns one concrete MM child. CLI/GUI adapters decide presentation and when to launch.
-export async function runManagedCore({ root, dataDir, mmPort, env, stdio, cleanup, log = () => {} }) {
-  const record = createInstanceRuntime({ root, dataDir, mmPort })
+export async function runManagedCore({ root, dataDir, mmPort, env, stdio, cleanup, log = () => {}, adoptGeneration }) {
+  root = realpathSync(root); dataDir = realpathSync(dataDir)
+  const record = adoptGeneration === undefined ? createInstanceRuntime({ root, dataDir, mmPort })
+    : readOwnStartingRuntime({ root, dataDir, mmPort, generation: adoptGeneration })
   const childEnv = { ...env, DATA_DIR: dataDir, CRABOT_INSTANCE_GENERATION: record.generation }
   delete childEnv.CRABOT_CLI_LOCK_HELD
   const mm = spawn(process.execPath, [join(root, 'crabot-core', 'dist', 'main.js')], {

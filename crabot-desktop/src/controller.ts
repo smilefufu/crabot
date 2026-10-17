@@ -31,8 +31,10 @@ export class DesktopController {
     const value = error as { code?: string }
     const code = typeof value?.code === 'string' && /^[A-Z0-9_]{1,128}$/.test(value.code) ? value.code : 'DESKTOP_UNAVAILABLE'
     const migration = ['CRABOT_DESKTOP_TAKEOVER_REQUIRED', 'CRABOT_DATA_NOT_PRIVATE', 'CRABOT_LEGACY_INSTANCE'].includes(code)
-    this.host.status(migration ? 'migration_required' : 'error', migration
-      ? '发现已有部署或数据，需要先检查并确认接管。' : '本机服务尚未就绪。可重新检查连接或打开数据目录查看日志。', code)
+    let message = '本机服务尚未就绪。可重新检查连接或查看基础诊断，按提示恢复。'
+    if (migration) message = '发现已有部署或数据，需要先检查并确认接管。'
+    else if (code === 'CRABOT_INSTANCE_STARTING') message = '服务仍在启动。请稍候重新检查状态，再停止服务。'
+    this.host.status(migration ? 'migration_required' : 'error', message, code)
   }
   fail(error: unknown) { this.report(error) }
   private run(operation: () => Promise<void>): Promise<DesktopHostState> {
@@ -57,7 +59,9 @@ export class DesktopController {
       if (current.state === 'running' && current.mmAlive) { await this.host.reconnect(); return }
       this.host.status('starting', '正在准备内置环境并启动本机服务。')
       const { startDesktopCore } = await this.load('scripts/desktop/start-core.mjs')
-      await startDesktopCore({ root: this.options.coreRoot, dataDir: this.options.dataRoot })
+      const started = Date.now()
+      await startDesktopCore({ root: this.options.coreRoot, dataDir: this.options.dataRoot,
+        onStage: (phase: string) => console.info(JSON.stringify({ component: 'desktop-startup', phase, at: new Date().toISOString(), elapsed_ms: Date.now() - started })) })
       await this.host.reconnect()
     })
   }

@@ -89,7 +89,7 @@ jobs:
         run: |
           node --test crabot-client/tests/*.test.mjs
           node --test scripts/lib/__tests__/product-*.test.mjs
-          node --test scripts/lib/__tests__/instance-runtime.test.mjs scripts/lib/__tests__/cli-lock-native.test.mjs scripts/lib/__tests__/process-identity.test.mjs scripts/lib/__tests__/local-auth-transport.test.mjs scripts/lib/__tests__/stop-windows.test.mjs scripts/lib/__tests__/background-core.test.mjs
+          node --test scripts/lib/__tests__/instance-runtime.test.mjs scripts/lib/__tests__/cli-lock-native.test.mjs scripts/lib/__tests__/process-identity.test.mjs scripts/lib/__tests__/local-auth-transport.test.mjs scripts/lib/__tests__/stop-windows.test.mjs scripts/lib/__tests__/background-core.test.mjs scripts/lib/__tests__/supervisor-bootstrap.test.mjs scripts/lib/__tests__/mm-startup.test.mjs
           node --test scripts/lib/__tests__/desktop-session.test.mjs
           node --test scripts/lib/__tests__/core-preparation.test.mjs
           node --test scripts/lib/__tests__/core-release.test.mjs
@@ -172,9 +172,11 @@ jobs:
           node .github/scripts/validate-staged-core.mjs ".desktop-build/安装 候选/core"
           node scripts/desktop/package-application.mjs --candidate=true "--core=.desktop-build/安装 候选/core" "--out=.desktop-build/安装 候选/gui" 2>&1 | tee .desktop-build/gui-package.log
       - name: Boot actual packaged app with native session and CLI on Linux
+        timeout-minutes: 10
         if: runner.os == 'Linux' && steps.scope.outputs.full_runtime == 'true'
         run: xvfb-run -a node .github/scripts/smoke-packaged-desktop.mjs ".desktop-build/安装 候选/gui" 2>&1 | tee .desktop-build/packaged-boot.log
       - name: Boot actual packaged app with native session and CLI on macOS and Windows
+        timeout-minutes: 10
         if: runner.os != 'Linux' && steps.scope.outputs.full_runtime == 'true'
         run: node .github/scripts/smoke-packaged-desktop.mjs ".desktop-build/安装 候选/gui" 2>&1 | tee .desktop-build/packaged-boot.log
       - name: Save runtime evidence

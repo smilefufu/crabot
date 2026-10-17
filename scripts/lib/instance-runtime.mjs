@@ -1,27 +1,14 @@
-import { existsSync, readFileSync, writeFileSync, renameSync, unlinkSync, realpathSync, mkdirSync } from 'node:fs'
+import { writeFileSync, renameSync, unlinkSync, realpathSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import identity from './process-identity.cjs'
 import { readPid, writePid, clearPid, isPidAlive } from './pid.mjs'
+import runtimeRecord from './instance-runtime-record.cjs'
 
 const filename = 'instance-runtime.json'
 const fail = message => { throw Object.assign(new Error(message), { code: 'CRABOT_INSTANCE_UNVERIFIED' }) }
 
-export function readInstanceRuntime(dataDir) {
-  const file = join(dataDir, filename)
-  if (!existsSync(file)) return null
-  let record
-  try { record = JSON.parse(readFileSync(file, 'utf8')) } catch { fail('运行记录损坏；保留现场，请打开诊断。') }
-  const validProcess = process => process && Number.isSafeInteger(process.pid) && process.pid > 0
-    && ['owner', 'started', 'executable'].every(key => typeof process[key] === 'string' && process[key])
-  if (record?.schema_version !== 1 || !/^[a-f0-9]{64}$/.test(record.instance_id)
-    || !/^[a-f0-9-]{36}$/.test(record.generation) || typeof record.data_dir !== 'string'
-    || typeof record.install_root !== 'string' || !validProcess(record.controller)
-    || (record.mm !== null && !validProcess(record.mm))
-    || !Number.isInteger(record.mm_port) || record.mm_port < 1 || record.mm_port > 65535) fail('运行记录格式不兼容；未终止任何进程。')
-  if (record.data_dir !== realpathSync(dataDir)) fail('运行记录的数据目录不匹配。')
-  return record
-}
+export const readInstanceRuntime = runtimeRecord.readInstanceRuntime
 
 function save(dataDir, record) {
   const file = join(dataDir, filename), pending = file + '.tmp-' + randomUUID()
@@ -57,6 +44,16 @@ export function recordMmProcess(dataDir, generation, pid) {
   if (!mm || mm.owner !== record.controller.owner || mm.parent !== record.controller.pid) fail('无法确认 MM 子进程身份。')
   save(dataDir, { ...record, mm })
   return { ...record, mm }
+}
+
+export function readOwnStartingRuntime({ root, dataDir, generation, mmPort }) {
+  const record = readInstanceRuntime(dataDir)
+  if (!record || record.generation !== generation || record.mm !== null || record.mm_port !== mmPort
+    || record.install_root !== realpathSync(root)
+    || !identity.sameProcess(record.controller, identity.inspectProcess(process.pid))) {
+    fail('后台启动登记不属于当前控制进程；未启动 MM。')
+  }
+  return record
 }
 
 export function clearInstanceRuntime(dataDir, generation) {

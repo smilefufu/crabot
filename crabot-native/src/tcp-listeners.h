@@ -14,11 +14,13 @@ static std::set<int> ListeningPorts(int pid) {
     if (status != NO_ERROR || buffer.empty()) throw std::runtime_error("Cannot inspect TCP listeners");
     if (family == AF_INET) {
       auto table = reinterpret_cast<MIB_TCPTABLE_OWNER_PID*>(buffer.data());
-      if (buffer.size() < sizeof(DWORD) || table->dwNumEntries > (buffer.size() - sizeof(DWORD)) / sizeof(MIB_TCPROW_OWNER_PID)) throw std::runtime_error("Invalid TCP table");
+      const auto offset = offsetof(MIB_TCPTABLE_OWNER_PID, table);
+      if (buffer.size() < offset || table->dwNumEntries > (buffer.size() - offset) / sizeof(MIB_TCPROW_OWNER_PID)) throw std::runtime_error("Invalid TCP table");
       for (DWORD i = 0; i < table->dwNumEntries; i++) if (table->table[i].dwOwningPid == static_cast<DWORD>(pid)) ports.insert(ntohs(static_cast<u_short>(table->table[i].dwLocalPort)));
     } else {
       auto table = reinterpret_cast<MIB_TCP6TABLE_OWNER_PID*>(buffer.data());
-      if (buffer.size() < sizeof(DWORD) || table->dwNumEntries > (buffer.size() - sizeof(DWORD)) / sizeof(MIB_TCP6ROW_OWNER_PID)) throw std::runtime_error("Invalid TCP6 table");
+      const auto offset = offsetof(MIB_TCP6TABLE_OWNER_PID, table);
+      if (buffer.size() < offset || table->dwNumEntries > (buffer.size() - offset) / sizeof(MIB_TCP6ROW_OWNER_PID)) throw std::runtime_error("Invalid TCP6 table");
       for (DWORD i = 0; i < table->dwNumEntries; i++) if (table->table[i].dwOwningPid == static_cast<DWORD>(pid)) ports.insert(ntohs(static_cast<u_short>(table->table[i].dwLocalPort)));
     }
   }

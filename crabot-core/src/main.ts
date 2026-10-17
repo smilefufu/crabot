@@ -17,6 +17,11 @@ const AGENT_DIR = path.join(CRABOT_ROOT, 'crabot-agent')
 const PORT_OFF = parseInt(process.env.CRABOT_PORT_OFFSET || '0', 10)
 const DATA_DIR = process.env.DATA_DIR
   || path.join(homedir(), '.crabot', PORT_OFF > 0 ? `data-${PORT_OFF}` : 'data')
+if (process.env.CRABOT_INSTANCE_GENERATION) {
+  require('../../scripts/lib/mm-startup.cjs').verifyManagedMmStartup({
+    root: CRABOT_ROOT, dataDir: DATA_DIR, generation: process.env.CRABOT_INSTANCE_GENERATION,
+  })
+}
 // Agent worker tools 的工作目录（bash / read / write / edit / glob / grep 的 cwd）。
 // 默认 = 用户家目录：agent 一上来就能直接看到用户真实文件（~/code/ 等），而不是
 // Crabot 自身的安装根（既无用又混淆）。WORKSPACE_DIR env 显式设置则覆盖。

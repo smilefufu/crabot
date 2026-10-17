@@ -77,6 +77,7 @@ export async function stopInstance(dataDir, { timeoutMs = SUPERVISOR_FORCE_TIMEO
   if (timeoutMs < SUPERVISOR_FORCE_TIMEOUT_MS) throw new Error('Cannot shorten the MM graceful shutdown window')
   const current = inspectInstance(dataDir)
   if (current.state === 'legacy') throw Object.assign(new Error('旧实例缺少可验证的启动记录，请使用原版本停止或通过桌面接管流程升级。'), { code: 'CRABOT_LEGACY_INSTANCE' })
+  if (current.state === 'starting') throw Object.assign(new Error('服务正在启动，进程登记尚未完成；请稍候重新检查后再停止。'), { code: 'CRABOT_INSTANCE_STARTING' })
   if (!current.record) { log('Stopped.'); return }
   const record = current.record
   const owned = await collectOwned(record, dataDir)

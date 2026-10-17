@@ -96,7 +96,7 @@ async function boot() {
     },
   })
   controller.host.subscribe(state => {
-    console.info(JSON.stringify({ component: 'desktop', phase: state.phase, ...('code' in state && state.code ? { code: state.code } : {}) }))
+    console.info(JSON.stringify({ component: 'desktop', phase: state.phase, at: new Date().toISOString(), ...('code' in state && state.code ? { code: state.code } : {}) }))
     if (!window?.isDestroyed() && window?.webContents.mainFrame && isTrustedFrame(window.webContents.mainFrame, window.webContents)) window.webContents.send('desktop:state', state)
     tray?.setToolTip(`Crabot · ${state.phase === 'ready' ? '运行中' : state.phase === 'stopped' ? '已停止' : '正在检查'}`)
     if (tray) updateMenus()

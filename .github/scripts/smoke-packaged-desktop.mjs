@@ -70,7 +70,8 @@ function launch() {
   child.stderr.on('data', chunk => { output = (output + chunk).slice(-128_000) })
   child.on('error', error => { output += String(error); ended = true })
   async function phase(expected) {
-    const deadline = Date.now() + 100_000
+    // Includes full immutable payload checks, bounded 120s preflight and core boot.
+    const deadline = Date.now() + 180_000
     while (Date.now() < deadline) {
       if (phases.some(event => event.phase === expected)) return
       if (ended || phases.some(event => ['error', 'migration_required'].includes(event.phase))) throw new Error('Packaged boot failed\n' + output)
@@ -95,6 +96,12 @@ try {
   console.log('CRABOT_PACKAGED_BOOT ' + JSON.stringify({ platform: process.platform, arch: process.arch,
     packaged_asar_native_auth: true, installed_core_shared_with_cli: true, gui_crash_preserves_core: true, reattach_same_generation: true,
     cli_stop_stays_stopped: true, unicode_spaced_data: true, outside_checkout: true, release_signed: false }))
+} catch (error) {
+  for (const file of ['supervisor.boot.log', 'mm.stdout.log', 'mm.stderr.log']) {
+    const contents = await fs.readFile(path.join(data, 'logs', file)).catch(() => null)
+    if (contents) await fs.writeFile(path.join(path.dirname(project), 'packaged-' + file), contents.subarray(-128_000))
+  }
+  throw error
 } finally {
   for (const child of children) if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
   const exits = await Promise.allSettled(children.map(waitForExit))

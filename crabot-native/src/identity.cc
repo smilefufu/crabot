@@ -9,8 +9,10 @@
 #include <cmath>
 #include <cstring>
 #include <set>
+#include <cstddef>
 #ifdef _WIN32
 #include <winsock2.h>
+#include <ws2tcpip.h>
 #include <windows.h>
 #include <iphlpapi.h>
 #include <tlhelp32.h>
