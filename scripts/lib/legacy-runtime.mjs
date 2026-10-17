@@ -38,6 +38,11 @@ export async function withVerifiedLegacyRuntime(installation, use, { signal } = 
       if (pid === recordedPid || /^node(?:\.exe)?$/i.test(path.basename(current.executable))) fail('无法核验旧 Node 进程命令行，保留原安装。')
       continue
     }
+    if (args.length === 3 && args[2] === 'start') {
+      // The published CLI imports start.mjs in the same foreground process.
+      // Its actual argv remains node cli.mjs start, rather than the import path.
+      try { if (samePath(args[1], path.join(root, 'cli.mjs'))) candidates.push({ kind: 'foreground', process: current }) } catch {}
+    }
     if (args.length !== 2) continue
     for (const [kind, entry] of Object.entries(expectedEntries)) {
       try { if (samePath(args[1], entry)) candidates.push({ kind, process: current }) } catch {}

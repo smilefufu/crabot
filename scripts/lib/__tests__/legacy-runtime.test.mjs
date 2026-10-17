@@ -42,7 +42,7 @@ test('a copied PID file does not adopt or signal the process it names', { skip: 
   assert.equal(await fs.readFile(path.join(f.data, 'mm.pid'), 'utf8'), String(process.pid))
 })
 
-for (const correctData of [true, false]) test('controlled MM protocol fixture binds its actual DataRoot: ' + correctData, { skip: !available, timeout: 20_000 }, async t => {
+for (const [kind, correctData] of [['daemon', true], ['daemon', false], ['foreground-cli', true], ['foreground-script', true], ['foreground-cli-invalid', true]]) test('controlled legacy runtime binds its actual launch form and DataRoot: ' + kind + '/' + correctData, { skip: !available, timeout: 20_000 }, async t => {
   const f = await fixture(t), requests = []
   const actualData = correctData ? f.data : path.join(f.parent, 'another-instance')
   if (!correctData) { await fs.mkdir(actualData); await fs.mkdir(path.join(actualData, 'agent')) }
@@ -54,15 +54,19 @@ for (const correctData of [true, false]) test('controlled MM protocol fixture bi
   // Only argv is substituted. PID/start/owner/parent/executable, TCP listener and
   // HTTP connection are real OS evidence. No full business MM runs on this host.
   t.mock.method(identity, 'listProcessIds', () => [process.pid, child.pid])
-  t.mock.method(identity, 'inspectProcessArguments', pid => [process.execPath,
-    path.join(f.root, pid === process.pid ? 'scripts/supervisor.mjs' : 'crabot-core/dist/main.js')])
+  t.mock.method(identity, 'inspectProcessArguments', pid => pid !== process.pid ? [process.execPath, path.join(f.root, 'crabot-core/dist/main.js')]
+    : kind.startsWith('foreground-cli') ? [process.execPath, path.join(f.root, 'cli.mjs'), 'start', ...(kind.endsWith('invalid') ? ['--unknown-launch'] : [])]
+    : [process.execPath, path.join(f.root, kind === 'daemon' ? 'scripts/supervisor.mjs' : 'scripts/start.mjs')])
   await fs.writeFile(path.join(f.data, 'mm.pid'), String(process.pid))
-  if (correctData) {
+  if (kind.endsWith('invalid')) {
+    await assert.rejects(discoverLegacyRuntime(f.installation), { code: 'CRABOT_LEGACY_RUNTIME_UNVERIFIED' })
+    assert.deepEqual(requests, [])
+  } else if (correctData) {
     const state = await withVerifiedLegacyRuntime(f.installation, async (snapshot, rpc) => {
       assert.equal(snapshot.state, 'running'); assert.equal(snapshot.mm.pid, child.pid)
       await rpc.shutdown(); return snapshot
     })
-    assert.equal(state.launch_kind, 'daemon')
+    assert.equal(state.launch_kind, kind === 'daemon' ? 'daemon' : 'foreground')
     assert.deepEqual(requests, ['/get_module_definition', '/shutdown'])
   } else {
     await assert.rejects(discoverLegacyRuntime(f.installation), /实际数据目录/)
