@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { hashPassword, verifyPassword, readCredentials, writeCredentials, newCredentialsFromPassword, rotateCredentials, DEFAULT_SCRYPT_PARAMS, type Credentials } from './credentials'
+import { hashPassword, verifyPassword, readCredentials, writeCredentials, createCredentialsIfAbsent, newCredentialsFromPassword, rotateCredentials, DEFAULT_SCRYPT_PARAMS, type Credentials } from './credentials'
 import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
 import * as os from 'node:os'
@@ -118,4 +118,17 @@ describe('rotateCredentials', () => {
     expect(await verifyPassword('new-secret', rotated)).toBe(true)
     expect(await verifyPassword('old', rotated)).toBe(false)
   })
+})
+
+it('首次密码并发发布只有一个成功，不覆盖赢家，且不留下临时凭据', async () => {
+  const dir = await makeTmpDir()
+  try {
+    const candidates = await Promise.all(['first', 'second'].map(password => newCredentialsFromPassword(password, { is_temp: false, changed_via: 'ui' })))
+    const results = await Promise.all(candidates.map(credentials => createCredentialsIfAbsent(dir, credentials)))
+    expect(results.filter(Boolean)).toHaveLength(1)
+    expect(await readCredentials(dir)).toEqual(candidates[results.indexOf(true)])
+    expect(await fs.readdir(dir)).toEqual(['credentials.json'])
+    expect(await createCredentialsIfAbsent(dir, candidates[results.indexOf(false)])).toBe(false)
+    expect(await readCredentials(dir)).toEqual(candidates[results.indexOf(true)])
+  } finally { await fs.rm(dir, { recursive: true, force: true }) }
 })

@@ -70,6 +70,20 @@ describe('real loopback HTTP and legacy WS use the same chat admission', () => {
     expect(manager.getMessages(10)).toHaveLength(1)
   })
 
+  it('WS accepts a header without a token URL, and an invalid header never falls back to query authentication', async () => {
+    const base = endpoint.replace('http:', 'ws:').replace(/\/api$/, '') + '/ws/chat'
+    const socket = new WebSocket(base, { headers: { Authorization: 'Bearer fixture-human' } })
+    sockets.push(socket); await once(socket, 'open')
+    const rejected = new WebSocket(base + '?token=fixture-human', { headers: { Authorization: 'Bearer invalid' } })
+    sockets.push(rejected)
+    rejected.on('error', () => {})
+    const [request, response] = await once(rejected, 'unexpected-response')
+    expect(response.statusCode).toBe(401)
+    response.resume(); request.destroy()
+    expect(socket.readyState).toBe(WebSocket.OPEN)
+    expect(rpc).not.toHaveBeenCalled()
+  })
+
   it('same ID with changed text or attachment order is HTTP 409 with no extra visible message/media', async () => {
     const files = [new File(['a'], 'a.txt', { type: 'text/plain' }), new File(['b'], 'b.txt', { type: 'text/plain' })]
     await client().send(createChatRequest('attachments', files, 'req-conflict'))

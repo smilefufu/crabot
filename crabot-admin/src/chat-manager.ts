@@ -174,7 +174,8 @@ export class ChatManager {
     }
 
     // JWT 认证
-    const token = url.searchParams.get('token')
+    const token = req.headers.authorization?.startsWith('Bearer ')
+      ? req.headers.authorization.slice(7) : url.searchParams.get('token')
     let tokenValid = false
     try {
       tokenValid = !!(token && (await this.verifyJwt(token, this.jwtSecret, this.dataDir)))

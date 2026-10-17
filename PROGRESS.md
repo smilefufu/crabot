@@ -1,12 +1,12 @@
 # Crabot 项目进度
 
-### 桌面化方案：独立 worktree 开发中，基础原生 CI 通过，P3 通信验证推进
+### 桌面化方案：独立 worktree 开发中，四平台基础通过，P4 桌面会话推进
 
 - 用户确认[中文 Spec](crabot-docs/superpowers/specs/2026-10-17-desktop-application-design.md)及五项补充决定：macOS 14+ 双架构、Windows 11 x64、Ubuntu Desktop 24.04/26.04 x64；Linux 桌面控制分会话声明支持；优先主要界面；默认后台下载、用户发起安装；登录自启动默认关闭。
 - 已整理[分阶段实施计划](crabot-docs/superpowers/plans/2026-10-17-desktop-application-implementation.md)：P0 协议基线 → P1 内置环境 → P2 共用实例/CLI → P3 SDK/通信 → P4 桌面认证与窗口 → P5 引导/主要界面 → P6 迁移/更新 → P7 最终发行验收，各阶段列明步骤、验证方式与退出条件。
 - P0 已补 Desktop 正式协议及 Admin/MM/Agent 边界，文档仓 c661332；主仓仅在独立 worktree 的 feat/desktop-application 分支推进，需求完成并完整验证前不推 main、不提前建 PR，不触碰现场部署及无关 WIP。
-- P1 载荷和 P2 进程控制基础已通过[四平台原生 CI](https://github.com/smilefufu/crabot/actions/runs/39041801625)，Linux 另过 Ubuntu 24.04/26.04 断网容器；后台前端被杀后的核心存活由本机夹具验证。最终 CLI/桌面安装、迁移、签名和真实 GUI 尚未验收。
-- P3 新增共享 contracts/HTTP/WS SDK，文字统一 HTTP、同 ID 重试，HTTP 快照核对删除/更新及迟到响应，CLI 旧输出兼容。原文编码与 409 偏差先复现再按协议修复；本机 SDK 9、CLI 21、Admin 42、Web 22 项定向通过，实际 CJS 加载和 Web 构建通过；增量原生回归、P4–P7 继续推进。全程不启动第二个真实 MM、不触碰现场数据。
+- P1/P2/P3 及 OS peer 通道已通过[四平台原生 CI](https://github.com/smilefufu/crabot/actions/runs/39046406747)，含 Ubuntu 24.04/26.04 断网容器；共同后台启动、CLI JSON 身份核对、共享 HTTP/WS SDK 与 Web 23 项状态/草稿回归通过。最终 CLI/桌面安装、迁移、签名和真实 GUI 尚未验收。
+- P4 接入 Admin 短期桌面人类会话和本机握手；原 internal/密码分支保持，首次浏览器密码只允许已认证桌面显式、原子建立。真实临时进程验证实际入口、双向 peer、重放、5 秒超时、Admin 重启及 MM/代际失效；Electron 壳和最终产品验收继续。全程不启动第二个真实 MM、不触碰现场数据。
 
 ### 任务默认目录文件授权：独立修复待审查
 

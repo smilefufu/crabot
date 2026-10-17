@@ -81,6 +81,7 @@ jobs:
           node --test crabot-client/tests/*.test.mjs
           node --test scripts/lib/__tests__/product-*.test.mjs
           node --test scripts/lib/__tests__/instance-runtime.test.mjs scripts/lib/__tests__/cli-lock-native.test.mjs scripts/lib/__tests__/process-identity.test.mjs scripts/lib/__tests__/local-auth-transport.test.mjs scripts/lib/__tests__/stop-windows.test.mjs scripts/lib/__tests__/background-core.test.mjs
+          node --test scripts/lib/__tests__/desktop-session.test.mjs
           cd crabot-core
           node node_modules/vitest/vitest.mjs run src/agent-venv.test.ts src/core-modules.test.ts src/shutdown-generation.test.ts --maxWorkers=1 --minWorkers=1
       - name: Agent environment regressions
@@ -92,7 +93,7 @@ jobs:
           node node_modules/typescript/bin/tsc -p tsconfig.cli.json
           node node_modules/vitest/vitest.mjs run src/cli/client.test.ts --maxWorkers=1 --minWorkers=1
           cd crabot-admin
-          node node_modules/vitest/vitest.mjs run src/chat-http-ws.test.ts src/chat-manager.test.ts src/http-diagnostics.test.ts --maxWorkers=1 --minWorkers=1
+          node node_modules/vitest/vitest.mjs run src/chat-http-ws.test.ts src/chat-manager.test.ts src/http-diagnostics.test.ts src/desktop-auth.test.ts src/credentials.test.ts src/computer-use-setup-api.test.ts src/memory-access.test.ts src/voice-admin.test.ts --maxWorkers=1 --minWorkers=1
       - name: Web compilation and state regressions
         run: |
           cd crabot-admin/web

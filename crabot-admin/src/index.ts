@@ -1,6 +1,7 @@
 import { adminWebTransport } from './admin-web-transport.js'
 import { parseChatMultipartMetadata } from 'crabot-client'
 import { correlateHttpRequest } from './http-diagnostics.js'
+import { DesktopSessions, type DesktopClaims } from './desktop-session.js'
 import { VoiceGateway } from './voice-gateway.js'
 import { loadVoiceTls } from './voice-tls.js'
 import { VoiceAdmin } from './voice-admin.js'
@@ -275,7 +276,7 @@ import {
   formatGoalListResponse,
   formatMissingIdResponse,
 } from './goal-slash.js'
-import { readCredentials, verifyPassword, rotateCredentials, writeCredentials } from './credentials.js'
+import { readCredentials, verifyPassword, rotateCredentials, writeCredentials, newCredentialsFromPassword, createCredentialsIfAbsent } from './credentials.js'
 import { ComputerUseSetup } from './computer-use-setup.js'
 import { isStandardComputerUse, type ComputerUseRuntimeStatus, type ComputerUseSetupRequest } from 'crabot-shared'
 import { getAdminLogsDir, getDataRootDir } from './core/data-paths.js'
@@ -290,6 +291,7 @@ interface JwtPayload {
   exp: number
   e?: number          // token_epoch；internal-token 无此字段
   agent_cli?: AgentCliCredentialContext
+  desktop?: DesktopClaims
 }
 
 interface AgentCliWebAuth {
@@ -374,11 +376,14 @@ function verifyJwt(token: string, secret: string): JwtPayload | null {
     .replace(/\+/g, '-')
     .replace(/\//g, '_')
 
-  if (signatureB64 !== expectedSignature) return null
+  if (!/^[A-Za-z0-9_-]{43}$/.test(signatureB64) || signatureB64.length !== expectedSignature.length
+    || !crypto.timingSafeEqual(Buffer.from(signatureB64), Buffer.from(expectedSignature))) return null
 
   try {
+    const header = JSON.parse(Buffer.from(headerB64, 'base64').toString())
     const payload = JSON.parse(Buffer.from(payloadB64, 'base64').toString())
-    if (payload.exp <= Math.floor(Date.now() / 1000)) return null
+    if (header.alg !== 'HS256' || typeof payload.sub !== 'string' || !Number.isSafeInteger(payload.iat)
+      || !Number.isSafeInteger(payload.exp) || payload.exp <= Math.floor(Date.now() / 1000)) return null
     return payload
   } catch {
     return null
@@ -671,6 +676,7 @@ export class AdminModule extends ModuleBase {
   private voiceFingerprint?: string
   private voiceGateway!: VoiceGateway
   private jwtSecret: string = ''
+  private desktopSessions?: DesktopSessions
 
   // 数据存储
   private friends: Map<FriendId, Friend> = new Map()
@@ -847,8 +853,8 @@ export class AdminModule extends ModuleBase {
       verifyRuntime: async (id, bearer) => { await this.rpcClient.callModuleManagerSensitive('verify_voice_runtime', { expected_module_id: id }, this.config.moduleId, { authorizationBearer: bearer }) },
       verifyCore: async bearer => { await this.rpcClient.callModuleManagerSensitive('verify_core_agent_runtime', { expected_module_id: 'crabot-agent' }, this.config.moduleId, { authorizationBearer: bearer }) },
       verifyHuman: async bearer => {
-        const payload = bearer ? await verifyJwtWithEpoch(bearer, this.jwtSecret, this.adminConfig.data_dir) : null
-        if (!payload) throw new RpcError('UNAUTHORIZED', 'Human Admin credential required')
+        const payload = bearer ? await this.verifyHumanToken(bearer) : null
+        if (!payload) throw new RpcError(this.isNonHumanToken(bearer) ? 'FORBIDDEN' : 'UNAUTHORIZED', 'Human Admin credential required')
         if (payload.sub !== 'admin' || payload.agent_cli) throw new RpcError('FORBIDDEN', 'Human Admin credential required')
       },
       resolveFriend: (channelId, platformUserId) => this.resolveFriendByChannelIdentity(channelId, platformUserId) ?? undefined,
@@ -1247,7 +1253,7 @@ export class AdminModule extends ModuleBase {
       this.rpcClient,
       () => this.ensureAgentPort(),
       this.jwtSecret,
-      verifyJwtWithEpoch,
+      token => this.verifyHumanToken(token),
       this.mediaStore!,
     )
     await this.chatManager.loadData()
@@ -1290,6 +1296,20 @@ export class AdminModule extends ModuleBase {
 
     // 启动 Web 服务器
     await this.startWebServer()
+    try {
+      this.desktopSessions = new DesktopSessions({
+        root: path.resolve(__dirname, '../..'), dataRoot: getDataRootDir(),
+        adminUrl: `http://127.0.0.1:${this.adminConfig.web_port}`,
+        issue: async (desktop, exp) => {
+          const cred = await readCredentials(this.adminConfig.data_dir)
+          return signJwt({ sub: 'admin', iat: Math.floor(Date.now() / 1000), exp, e: cred?.token_epoch ?? 0, desktop }, this.jwtSecret)
+        },
+      })
+      await this.desktopSessions.start()
+    } catch {
+      await this.desktopSessions?.close().catch(() => {})
+      console.warn('[DesktopAuth] DESKTOP_UNAVAILABLE; browser and management services remain available')
+    }
 
     console.log(`[Admin] Web server started on port ${this.adminConfig.web_port}`)
 
@@ -1333,6 +1353,8 @@ export class AdminModule extends ModuleBase {
   }
 
   protected override async onStop(): Promise<void> {
+    try { await this.desktopSessions?.close() }
+    catch { console.warn('[DesktopAuth] Listener stopped; discovery cleanup incomplete, record retained') }
     this.voiceAdmin.stop()
     await this.computerUseSetup?.close()
     if (this.configDrainRetryTimer) {
@@ -1388,6 +1410,7 @@ export class AdminModule extends ModuleBase {
   protected override async getHealthDetails(): Promise<Record<string, unknown>> {
     const health: Record<string, unknown> = {
       web_server_running: this.webServer !== null,
+      desktop_session_ready: this.desktopSessions?.ready === true,
       cutover_ready: this.cutoverActivated,
       ...(this.cutoverActivated ? {} : { recovery_reason: this.cutoverRecoveryReason ?? 'waiting for authenticated core Agent startup/configuration' }),
       friends_count: this.friends.size,
@@ -1587,8 +1610,12 @@ export class AdminModule extends ModuleBase {
           return
         }
       } else {
-        const payload = await verifyJwtWithEpoch(token, this.jwtSecret, this.adminConfig.data_dir)
+        const payload = await this.verifyAuthenticatedToken(token)
         if (!payload) {
+        if (basicPayload?.sub === 'admin' && basicPayload.desktop !== undefined) {
+          sendJson(res, 401, { error: 'DESKTOP_UNAUTHORIZED', message: 'Desktop session is unavailable; reconnect locally' })
+          return
+        }
         // 区分 token 不合法 vs epoch 失效
         const basicValid = basicPayload
         if (basicValid && basicValid.sub !== 'internal') {
@@ -1602,6 +1629,10 @@ export class AdminModule extends ModuleBase {
           res.end(JSON.stringify({ error: 'Invalid or expired token' }))
         }
         return
+        }
+        if (pathname.startsWith('/api/chat/') && (payload.sub !== 'admin' || payload.agent_cli)) {
+          sendJson(res, 403, { error: 'Human Admin credential required' })
+          return
         }
       }
     }
@@ -3101,6 +3132,29 @@ export class AdminModule extends ModuleBase {
   // 认证 API
   // ============================================================================
 
+  private async verifyAuthenticatedToken(token: string): Promise<JwtPayload | null> {
+    const payload = verifyJwt(token, this.jwtSecret)
+    if (!payload) return null
+    // Only the new desktop claim enters this branch. Legacy internal/password
+    // tokens continue through the original verifier with its unchanged epoch rules.
+    if (payload.desktop === undefined) return verifyJwtWithEpoch(token, this.jwtSecret, this.adminConfig.data_dir)
+    if (payload.sub !== 'admin' || payload.agent_cli || !this.desktopSessions?.validate(payload.desktop, payload.exp)) return null
+    const cred = await readCredentials(this.adminConfig.data_dir)
+    return payload.e === (cred?.token_epoch ?? 0) ? payload : null
+  }
+
+  private async verifyHumanToken(token: string): Promise<JwtPayload | null> {
+    const payload = await this.verifyAuthenticatedToken(token)
+    return payload?.sub === 'admin' && !payload.agent_cli ? payload : null
+  }
+
+  private isNonHumanToken(token: string | undefined): boolean {
+    // Denial classification only: this method never grants or forwards authority.
+    if (!token) return false
+    const payload = verifyJwt(token, this.jwtSecret)
+    return !!payload && (payload.sub !== 'admin' || !!payload.agent_cli)
+  }
+
   private async handleLogin(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const body = await this.readJsonBody<LoginRequest>(req)
 
@@ -3142,15 +3196,18 @@ export class AdminModule extends ModuleBase {
     res.end(JSON.stringify(response))
   }
 
-  private async handleGetMe(_req: IncomingMessage, res: ServerResponse): Promise<void> {
+  private async handleGetMe(req: IncomingMessage, res: ServerResponse): Promise<void> {
     // 鉴权已在 dispatcher 拦截（API 前置）；此处只读 credentials.json
     const cred = await readCredentials(this.adminConfig.data_dir)
-    if (!cred) {
+    const token = req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.slice(7) : ''
+    const human = await this.verifyHumanToken(token)
+    if (!human) { sendJson(res, 403, { error: 'Human Admin credential required' }); return }
+    if (!cred && !human.desktop) {
       res.writeHead(503)
       res.end(JSON.stringify({ error: AdminErrorCode.SERVER_NOT_INITIALIZED }))
       return
     }
-    const body: MeResponse = { is_temp: cred.is_temp }
+    const body: MeResponse = { is_temp: cred?.is_temp ?? false, password_configured: !!cred, auth_method: human.desktop ? 'desktop' : 'password' }
     res.writeHead(200, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify(body))
   }
@@ -3164,8 +3221,8 @@ export class AdminModule extends ModuleBase {
       res.end(JSON.stringify({ error: 'Unauthorized' }))
       return
     }
-    const payload = await verifyJwtWithEpoch(token, this.jwtSecret, this.adminConfig.data_dir)
-    if (!payload || payload.sub === 'internal') {
+    const payload = await this.verifyHumanToken(token)
+    if (!payload) {
       res.writeHead(403)
       res.end(JSON.stringify({ error: 'Forbidden', message: 'internal-token cannot change human password' }))
       return
@@ -3183,6 +3240,13 @@ export class AdminModule extends ModuleBase {
 
     const cred = await readCredentials(this.adminConfig.data_dir)
     if (!cred) {
+      if (payload.desktop) {
+        const created = await createCredentialsIfAbsent(this.adminConfig.data_dir,
+          await newCredentialsFromPassword(body.new_password, { is_temp: false, changed_via: 'ui' }))
+        if (!created) { sendJson(res, 409, { error: 'Browser password was configured concurrently; refresh before changing it' }); return }
+        sendJson(res, 200, {})
+        return
+      }
       res.writeHead(503)
       res.end(JSON.stringify({ error: AdminErrorCode.SERVER_NOT_INITIALIZED }))
       return
@@ -8139,8 +8203,12 @@ export class AdminModule extends ModuleBase {
   private async handleComputerUseSetupApi(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const header = req.headers.authorization
     const token = typeof header === 'string' && header.startsWith('Bearer ') ? header.slice(7) : ''
-    const human = await verifyJwtWithEpoch(token, this.jwtSecret, this.adminConfig.data_dir)
-    if (!human || !Number.isSafeInteger(human.exp) || human.exp <= Date.now() / 1000) { sendJson(res, 401, { error: 'Unauthorized' }); return }
+    const human = await this.verifyHumanToken(token)
+    if (!human) {
+      const forbidden = this.isNonHumanToken(token)
+      sendJson(res, forbidden ? 403 : 401, { error: forbidden ? 'Forbidden' : 'Unauthorized' }); return
+    }
+    if (!Number.isSafeInteger(human.exp) || human.exp <= Date.now() / 1000) { sendJson(res, 401, { error: 'Unauthorized' }); return }
     if (human.sub !== 'admin') { sendJson(res, 403, { error: 'Forbidden' }); return }
     try {
       const setup = this.desktopSetup()
@@ -10175,7 +10243,7 @@ export class AdminModule extends ModuleBase {
       ?? (req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.slice(7) : null)
     let ok = false
     try {
-      ok = !!(token && (await verifyJwtWithEpoch(token, this.jwtSecret, this.adminConfig.data_dir)))
+      ok = !!(token && (await this.verifyAuthenticatedToken(token)))
     } catch { ok = false }
     if (!ok) {
       sendJson(res, 401, { error: 'Unauthorized' })
@@ -10480,8 +10548,11 @@ export class AdminModule extends ModuleBase {
     const bearer = context?.authorizationBearer
     if (!bearer) throw new RpcError('UNAUTHORIZED', 'Missing Memory credential')
     if (params.caller_kind === 'admin_web') {
-      const payload = await verifyJwtWithEpoch(bearer, this.jwtSecret, this.adminConfig.data_dir)
-      if (!payload) throw new RpcError('UNAUTHORIZED', 'Invalid Admin credential')
+      const payload = await this.verifyHumanToken(bearer)
+      if (!payload) {
+        if (this.isNonHumanToken(bearer)) throw new RpcError('FORBIDDEN', 'Human Admin credential required')
+        throw new RpcError('UNAUTHORIZED', 'Invalid Admin credential')
+      }
       if (payload.sub !== 'admin' || payload.agent_cli) throw new RpcError('FORBIDDEN', 'Human Admin credential required')
     } else if (params.caller_kind === 'core_agent') {
       try {

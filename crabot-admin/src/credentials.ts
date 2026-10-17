@@ -163,3 +163,14 @@ export async function writeCredentials(dataDir: string, c: Credentials): Promise
   await fs.writeFile(tmp, JSON.stringify(c, null, 2), { mode: 0o600 })
   await fs.rename(tmp, target)
 }
+
+/** Publish a first human password atomically without overwriting a concurrent writer. */
+export async function createCredentialsIfAbsent(dataDir: string, credentials: Credentials): Promise<boolean> {
+  await fs.mkdir(dataDir, { recursive: true })
+  const temporary = path.join(dataDir, `${FILE_NAME}.tmp.${crypto.randomUUID()}`)
+  try {
+    await fs.writeFile(temporary, JSON.stringify(credentials, null, 2), { flag: 'wx', mode: 0o600 })
+    try { await fs.link(temporary, path.join(dataDir, FILE_NAME)); return true }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'EEXIST') return false; throw error }
+  } finally { await fs.rm(temporary, { force: true }) }
+}
