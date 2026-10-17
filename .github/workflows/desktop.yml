@@ -10,13 +10,13 @@ on:
       - 'crabot-admin/**'
       - 'src/cli/client*'
       - 'crabot-core/**'
+      - 'crabot-native/**'
       - 'crabot-agent/src/core/runtime-env.ts'
       - 'crabot-agent/src/agent/mcp-connector.ts'
-      - 'scripts/desktop/**'
-      - 'scripts/*product*.mjs'
-      - 'scripts/lib/product-*'
+      - 'scripts/**'
       - '.github/scripts/*product*'
       - '.github/scripts/fixtures/product-*'
+      - '.github/scripts/desktop-runtime-scope.mjs'
       - '.github/workflows/desktop.yml'
   workflow_dispatch:
 
@@ -33,7 +33,7 @@ defaults:
 
 jobs:
   runtime:
-    name: Runtime ${{ matrix.target }}
+    name: Desktop foundation ${{ matrix.target }}
     timeout-minutes: 90
     strategy:
       fail-fast: false
@@ -50,6 +50,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
@@ -57,8 +59,13 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           version: '0.13.0'
+      - name: Select complete runtime validation scope
+        id: scope
+        env:
+          CRABOT_CI_BASE: ${{ github.event.before || github.event.pull_request.base.sha }}
+        run: node .github/scripts/desktop-runtime-scope.mjs
       - name: Linux build prerequisites
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && steps.scope.outputs.full_runtime == 'true'
         run: sudo apt-get update && sudo apt-get install -y build-essential libcurl4-openssl-dev libexpat1-dev zlib1g-dev
       - name: Prepare isolated build directory
         run: mkdir -p .desktop-build
@@ -102,15 +109,18 @@ jobs:
           node node_modules/vite/bin/vite.js build
           node node_modules/vitest/vitest.mjs run src/pages/Chat/index.test.tsx src/services/server-state.test.ts --maxWorkers=1 --minWorkers=1
       - name: Build locked browser and computer-use resources
+        if: steps.scope.outputs.full_runtime == 'true'
         run: |
           node scripts/prepare-scrapling.mjs --release=desktop-ci
           node scripts/prepare-computer-use.mjs
       - name: Build sealed product environment
+        if: steps.scope.outputs.full_runtime == 'true'
         run: node scripts/prepare-product-runtime.mjs 2>&1 | tee .desktop-build/product-build.log
       - name: Execute real offline local capabilities
+        if: steps.scope.outputs.full_runtime == 'true'
         run: node .github/scripts/smoke-product-runtime.mjs 2>&1 | tee .desktop-build/product-smoke.log
       - name: Standard Ubuntu runtime compatibility
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && steps.scope.outputs.full_runtime == 'true'
         run: |
           for release in 24.04 26.04; do
             docker run --rm --network=none \
@@ -127,6 +137,7 @@ jobs:
           name: desktop-runtime-${{ matrix.target }}
           path: |
             .desktop-build/*.log
+            .desktop-build/runtime-scope.json
             product-runtime.json
           if-no-files-found: warn
           include-hidden-files: true

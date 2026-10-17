@@ -72,17 +72,21 @@ static std::vector<int> Pids() {
 static Identity Inspect(int pid) {
   Identity result; result.pid = pid;
 #ifdef _WIN32
-  HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+  HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, pid);
   if (!process) {
     if (GetLastError() == ERROR_INVALID_PARAMETER) return {};
     throw std::runtime_error("Cannot inspect process identity");
   }
+  if (WaitForSingleObject(process, 0) == WAIT_OBJECT_0) { CloseHandle(process); return {}; }
   FILETIME created, exited, kernel, user;
   wchar_t path[32768]; DWORD length = 32768;
   HANDLE token = nullptr;
   if (!GetProcessTimes(process, &created, &exited, &kernel, &user)
       || !QueryFullProcessImageNameW(process, 0, path, &length)
       || !OpenProcessToken(process, TOKEN_QUERY, &token)) {
+    // An opened process can terminate between queries; only an OS-signalled
+    // process is classified as exited. Access failures on live processes still fail closed.
+    if (WaitForSingleObject(process, 0) == WAIT_OBJECT_0) { CloseHandle(process); return {}; }
     CloseHandle(process); throw std::runtime_error("Cannot inspect process identity");
   }
   DWORD size = 0; GetTokenInformation(token, TokenUser, nullptr, 0, &size);

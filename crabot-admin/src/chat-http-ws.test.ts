@@ -13,12 +13,14 @@ import { HttpClient, ChatClient, createChatRequest } from 'crabot-client'
 describe('real loopback HTTP and legacy WS use the same chat admission', () => {
   let directory: string, manager: ChatManager, server: Server, endpoint: string
   let rpc: ReturnType<typeof vi.fn>
+  let sessionValid: boolean
   const sockets: WebSocket[] = []
   beforeEach(async () => {
     directory = await mkdtemp(path.join(tmpdir(), 'crabot-chat-transport-'))
     const media = new MediaStore(directory); await media.init()
     rpc = vi.fn(async () => ({}))
-    manager = new ChatManager(directory, { call: rpc, callSensitive: rpc } as never, async () => 12345, 'fixture-secret', async token => token === 'fixture-human' ? { sub: 'admin' } : null, media)
+    sessionValid = true
+    manager = new ChatManager(directory, { call: rpc, callSensitive: rpc } as never, async () => 12345, 'fixture-secret', async token => sessionValid && token === 'fixture-human' ? { sub: 'admin' } : null, media)
     await manager.loadData()
     const handler = (AdminModule.prototype as any).handlePostChatMessageApi
     server = createServer((request, response) => {
@@ -81,6 +83,22 @@ describe('real loopback HTTP and legacy WS use the same chat admission', () => {
     expect(response.statusCode).toBe(401)
     response.resume(); request.destroy()
     expect(socket.readyState).toBe(WebSocket.OPEN)
+    expect(rpc).not.toHaveBeenCalled()
+  })
+
+  it.each(['inbound', 'outbound'])('an established WS rejects %s after its session is revoked', async direction => {
+    const socket = new WebSocket(endpoint.replace('http:', 'ws:').replace(/\/api$/, '') + '/ws/chat', {
+      headers: { Authorization: 'Bearer fixture-human' },
+    })
+    sockets.push(socket); await once(socket, 'open')
+    const messages: unknown[] = []
+    socket.on('message', message => messages.push(message))
+    sessionValid = false
+    if (direction === 'inbound') socket.send(JSON.stringify({ type: 'chat_message', request_id: 'revoked', content: 'must not dispatch' }))
+    else (manager as any).pushToClient({ type: 'chat_error', error: 'private event' })
+    await vi.waitFor(() => expect(socket.readyState).toBe(WebSocket.CLOSED), { timeout: 1000 })
+    expect(messages).toEqual([])
+    expect(manager.getMessages(10)).toHaveLength(0)
     expect(rpc).not.toHaveBeenCalled()
   })
 

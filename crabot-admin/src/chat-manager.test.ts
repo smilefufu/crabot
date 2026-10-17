@@ -10,6 +10,12 @@ import type { Task } from './types.js'
 
 const TEST_DATA_DIR = './test-data/chat-manager-send-test'
 
+function attachAuthenticatedClient(mgr: ChatManager, send: (data: string) => void): void {
+  const client = { readyState: 1, send, on: vi.fn(), close: vi.fn() }
+  ;(mgr as any).activeClient = client
+  ;(mgr as any).setupWebSocket(client, 'test-token')
+}
+
 /** 创建注入 MediaStore 的 ChatManager（async） */
 async function makeManager(): Promise<ChatManager> {
   const store = new MediaStore(TEST_DATA_DIR)
@@ -86,10 +92,7 @@ describe('ChatManager.handleSendMessage', () => {
 
   it('WS send 同步抛错时推送 best-effort 吞错，不污染调用方', async () => {
     const mgr = await makeManager()
-    ;(mgr as unknown as { activeClient: unknown }).activeClient = {
-      readyState: 1, // WebSocket.OPEN
-      send: () => { throw new Error('socket closing') },
-    }
+    attachAuthenticatedClient(mgr, () => { throw new Error('socket closing') })
     // handleSendMessage（内部 pushToClient）与 pushTaskUpdate 都不应抛错
     await expect(
       mgr.handleSendMessage({ session_id: 'admin-chat', delivery_id: 'd-ws-err-1', content: { type: 'text', text: 'ok' } })
@@ -182,10 +185,7 @@ describe('入站带附件消息（handleInboundMessage）', () => {
       throw new Error('agent down')
     })
     const pushed: Array<{ type: string }> = []
-    ;(mgr as unknown as { activeClient: unknown }).activeClient = {
-      readyState: 1, // WebSocket.OPEN
-      send: (data: string) => { pushed.push(JSON.parse(data)) },
-    }
+    attachAuthenticatedClient(mgr, data => { pushed.push(JSON.parse(data)) })
     const result = await mgr.handleInboundMessage({
       request_id: 'req-err',
       text: '会失败的消息',
@@ -317,10 +317,7 @@ describe('tagMessageTask / tagUserMessageByRequestId', () => {
   /** 捕获推送的 helper */
   function attachClientStub(mgr: ChatManager): Array<{ type: string; [k: string]: unknown }> {
     const pushed: Array<{ type: string; [k: string]: unknown }> = []
-    ;(mgr as unknown as { activeClient: unknown }).activeClient = {
-      readyState: 1, // WebSocket.OPEN
-      send: (data: string) => { pushed.push(JSON.parse(data)) },
-    }
+    attachAuthenticatedClient(mgr, data => { pushed.push(JSON.parse(data)) })
     return pushed
   }
 
@@ -342,6 +339,7 @@ describe('tagMessageTask / tagUserMessageByRequestId', () => {
     const msgs = mgr.getMessages(10)
     expect(msgs[0].task_id).toBe('task-001')
     // 验证推送：handleSendMessage 推了 chat_push，tagMessageTask 又推了 chat_message_tagged
+    await vi.waitFor(() => expect(pushed.filter(p => p.type === 'chat_message_tagged')).toHaveLength(1))
     const tagged = pushed.filter((p) => p.type === 'chat_message_tagged')
     expect(tagged).toHaveLength(1)
     expect(tagged[0].message_id).toBe(msgId)
@@ -516,10 +514,7 @@ describe('deleteMessage', () => {
   /** 捕获推送的 helper（复用 tagMessageTask 区的写法） */
   function attachClientStub(mgr: ChatManager): Array<{ type: string; [k: string]: unknown }> {
     const pushed: Array<{ type: string; [k: string]: unknown }> = []
-    ;(mgr as unknown as { activeClient: unknown }).activeClient = {
-      readyState: 1, // WebSocket.OPEN
-      send: (data: string) => { pushed.push(JSON.parse(data)) },
-    }
+    attachAuthenticatedClient(mgr, data => { pushed.push(JSON.parse(data)) })
     return pushed
   }
 
@@ -531,12 +526,13 @@ describe('deleteMessage', () => {
       delivery_id: 'd-auto-21',
       content: { type: 'text', text: '待删除的消息' },
     })
+    await vi.waitFor(() => expect(pushed).toHaveLength(1))
     pushed.length = 0 // 清空 handleSendMessage 产生的推送
 
     const ok = await mgr.deleteMessage(platform_message_id)
     expect(ok).toBe(true)
     expect(mgr.getMessages(10)).toHaveLength(0)
-    expect(pushed).toHaveLength(1)
+    await vi.waitFor(() => expect(pushed).toHaveLength(1))
     expect(pushed[0]).toMatchObject({ type: 'chat_message_deleted', message_id: platform_message_id })
   })
 
@@ -615,10 +611,7 @@ describe('ChatManager.chat_acknowledge（protocol-admin §3.20.2）', () => {
     const mgr = await makeManager()
     await mgr.handleInboundMessage({ request_id: requestId, text: '在吗', files: [] }, 'test-token')
     const pushed: Array<Record<string, unknown>> = []
-    ;(mgr as unknown as { activeClient: unknown }).activeClient = {
-      readyState: 1, // WebSocket.OPEN
-      send: (data: string) => { pushed.push(JSON.parse(data)) },
-    }
+    attachAuthenticatedClient(mgr, data => { pushed.push(JSON.parse(data)) })
     ;(mgr as unknown as { testPushed?: Array<Record<string, unknown>> }).testPushed = pushed
     return mgr
   }
@@ -633,7 +626,7 @@ describe('ChatManager.chat_acknowledge（protocol-admin §3.20.2）', () => {
 
     const user = mgr.getMessages(10).find((m) => m.role === 'user')
     expect(user?.acknowledged_at).toBeTruthy()
-    expect(pushedOf(mgr).map((p) => p.type)).toEqual(['chat_message_acked'])
+    await vi.waitFor(() => expect(pushedOf(mgr).map((p) => p.type)).toEqual(['chat_message_acked']))
     expect(pushedOf(mgr)[0].request_ids).toEqual(['req-ack-1'])
 
     const mgr2 = await makeManager()
@@ -645,7 +638,7 @@ describe('ChatManager.chat_acknowledge（protocol-admin §3.20.2）', () => {
     const mgr = await makeManagerWithUserMessage('req-ack-2')
     expect(await mgr.acknowledgeRequests(['req-ack-2'])).toBe(1)
     expect(await mgr.acknowledgeRequests(['req-ack-2'])).toBe(0)
-    expect(pushedOf(mgr)).toHaveLength(1)
+    await vi.waitFor(() => expect(pushedOf(mgr)).toHaveLength(1))
   })
 
   it('未知 request_id 静默忽略，返回 0', async () => {

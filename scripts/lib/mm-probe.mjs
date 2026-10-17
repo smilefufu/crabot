@@ -27,7 +27,7 @@ export function parseListModulesResponse(body) {
  */
 export async function probeMmModules(mmPort, fetchImpl = fetch) {
   try {
-    const r = await fetchImpl(`http://localhost:${mmPort}/list_modules`, {
+    const r = await fetchImpl(`http://127.0.0.1:${mmPort}/list_modules`, {
       ...POST_OPTS,
       signal: AbortSignal.timeout(2000),
     })
@@ -43,7 +43,7 @@ export async function probeMmModules(mmPort, fetchImpl = fetch) {
  */
 export async function probeMmHealthy(mmPort, fetchImpl = fetch) {
   try {
-    const r = await fetchImpl(`http://localhost:${mmPort}/health`, {
+    const r = await fetchImpl(`http://127.0.0.1:${mmPort}/health`, {
       ...POST_OPTS,
       signal: AbortSignal.timeout(1500),
     })

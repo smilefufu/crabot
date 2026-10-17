@@ -128,6 +128,7 @@ it('首次密码并发发布只有一个成功，不覆盖赢家，且不留下�
     const results = await Promise.all(candidates.map(credentials => createCredentialsIfAbsent(dir, credentials)))
     expect(results.filter(Boolean)).toHaveLength(1)
     expect(await readCredentials(dir)).toEqual(candidates[results.indexOf(true)])
+    if (process.platform === 'win32') expect(require('../../scripts/lib/process-identity.cjs').isPrivateFile(path.join(dir, 'credentials.json'))).toBe(true)
     expect(await fs.readdir(dir)).toEqual(['credentials.json'])
     expect(await createCredentialsIfAbsent(dir, candidates[results.indexOf(false)])).toBe(false)
     expect(await readCredentials(dir)).toEqual(candidates[results.indexOf(true)])

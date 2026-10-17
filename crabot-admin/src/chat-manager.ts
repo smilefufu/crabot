@@ -96,6 +96,7 @@ export class ChatManager {
   private messages: Map<string, ChatMessage> = new Map()
   private wsServer: WebSocketServer | null = null
   private activeClient: WebSocket | null = null
+  private readonly clientSessions = new WeakMap<WebSocket, { token: string; queue: Promise<void>; pending: number }>()
   private readonly messagesFilePath: string
   private readonly assertions: AdminChatAssertions
   /** P6-A §3.4：request 级 CAS 真相源（fingerprint 幂等/冲突判据）。 */
@@ -201,12 +202,13 @@ export class ChatManager {
       }
 
       this.activeClient = ws
-      this.setupWebSocket(ws)
+      this.setupWebSocket(ws, token!)
     })
   }
 
-  private setupWebSocket(ws: WebSocket): void {
-    ws.on('message', async (data) => {
+  private setupWebSocket(ws: WebSocket, token: string): void {
+    this.clientSessions.set(ws, { token, queue: Promise.resolve(), pending: 0 })
+    ws.on('message', (data) => this.queueClientOperation(ws, async () => {
       try {
         const message = ChatClientMessageSchema.parse(JSON.parse(data.toString()))
         await this.onMessage(message)
@@ -217,7 +219,7 @@ export class ChatManager {
           error: 'Invalid message format',
         })
       }
-    })
+    }))
 
     ws.on('close', () => {
       if (this.activeClient === ws) {
@@ -228,6 +230,25 @@ export class ChatManager {
     ws.on('error', (error) => {
       console.error('[ChatManager] WebSocket error:', error)
     })
+  }
+
+  // Each frame uses current server-side authority. Serializing per connection also
+  // preserves order while credential/epoch checks await disk or native peer checks.
+  private queueClientOperation(ws: WebSocket, operation: () => void | Promise<void>): void {
+    const session = this.clientSessions.get(ws)
+    if (!session || this.activeClient !== ws || ws.readyState !== WebSocket.OPEN) return
+    if (session.pending >= 128) { ws.close(1013, 'Reconnect and refresh state'); return }
+    session.pending++
+    session.queue = session.queue.then(async () => {
+      if (this.activeClient !== ws || ws.readyState !== WebSocket.OPEN) return
+      let authorized = false
+      try { authorized = !!await this.verifyJwt(session.token, this.jwtSecret, this.dataDir) } catch { /* fail closed */ }
+      if (this.activeClient !== ws || ws.readyState !== WebSocket.OPEN) return
+      if (!authorized) { ws.close(4401, 'Session expired'); return }
+      await operation()
+    }).catch(() => {
+      console.warn('[ChatManager] WebSocket operation failed; no frame contents logged')
+    }).finally(() => { session.pending-- })
   }
 
   private async onMessage(data: ChatClientMessage): Promise<void> {
@@ -576,15 +597,16 @@ export class ChatManager {
   }
 
   private pushToClient(message: ChatServerMessage): void {
-    if (this.activeClient && this.activeClient.readyState === WebSocket.OPEN) {
+    const client = this.activeClient
+    if (client) this.queueClientOperation(client, () => {
       // send 在 OPEN→CLOSING 竞态下可能同步抛错；推送是 best-effort，
       // 不能让异常冒泡污染调用方（尤其任务状态机 applyStatusTransition 钩子）
       try {
-        this.activeClient.send(JSON.stringify(message))
+        client.send(JSON.stringify(message))
       } catch (error) {
         console.warn('[ChatManager] pushToClient failed:', error instanceof Error ? error.message : String(error))
       }
-    }
+    })
   }
 
   // ==========================================================================
