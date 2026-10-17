@@ -13,5 +13,12 @@ module.exports = { ...native, sameProcess,
   listProcessIds: native.listProcessIds,
   tryFileLock: native.tryFileLock,
   releaseFileLock: native.releaseFileLock,
+  inspectProcessArguments: native.inspectProcessArguments,
   ...(native.inspectPeer ? { inspectPeer: native.inspectPeer } : {}),
+  ...(native.createPipeServer ? {
+    createPipeServer: native.createPipeServer, acceptPipe: native.acceptPipe,
+    closePipeServer: native.closePipeServer, connectPipe: native.connectPipe,
+    inspectServerPeer: native.inspectServerPeer,
+    readPipe: native.readPipe, writePipe: native.writePipe, closePipe: native.closePipe,
+  } : {}),
 }

@@ -7,10 +7,15 @@
 #include <stdexcept>
 #include <cerrno>
 #include <cmath>
+#include <cstring>
 #ifdef _WIN32
 #include <windows.h>
 #include <tlhelp32.h>
 #include <sddl.h>
+#include <winternl.h>
+#include <shellapi.h>
+#include <io.h>
+#include <fcntl.h>
 #else
 #include <unistd.h>
 #include <sys/socket.h>
@@ -19,6 +24,7 @@
 #ifdef __APPLE__
 #include <libproc.h>
 #include <sys/un.h>
+#include <sys/sysctl.h>
 #else
 #include <dirent.h>
 #include <sys/stat.h>
@@ -161,10 +167,10 @@ static napi_value Object(napi_env env, const Identity& identity) {
   Property(env, value, "executable", String(env, identity.executable));
   return value;
 }
-static int Argument(napi_env env, napi_callback_info info) {
+static int Argument(napi_env env, napi_callback_info info, bool descriptor = false) {
   size_t argc = 1; napi_value args[1]; double value;
   napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
-  if (argc != 1 || napi_get_value_double(env, args[0], &value) != napi_ok || !std::isfinite(value) || value <= 0 || value > 2147483647 || value != static_cast<int>(value)) {
+  if (argc != 1 || napi_get_value_double(env, args[0], &value) != napi_ok || !std::isfinite(value) || value < (descriptor ? 0 : 1) || value > 2147483647 || value != static_cast<int>(value)) {
     throw std::runtime_error("Expected a positive process ID or socket descriptor");
   }
   return static_cast<int>(value);
@@ -184,11 +190,13 @@ static napi_value PidsCall(napi_env env, napi_callback_info) {
 #ifndef _WIN32
 static napi_value PeerCall(napi_env env, napi_callback_info info) {
   try {
-    int fd = Argument(env, info), pid; uid_t uid;
+    int fd = Argument(env, info, true), pid;
 #ifdef __APPLE__
+    uid_t uid;
     gid_t gid; socklen_t size = sizeof(pid);
     if (getpeereid(fd, &uid, &gid) || getsockopt(fd, SOL_LOCAL, LOCAL_PEERPID, &pid, &size)) throw std::runtime_error("Cannot identify local socket peer");
 #else
+    uid_t uid;
     struct ucred peer; socklen_t size = sizeof(peer);
     if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &peer, &size)) throw std::runtime_error("Cannot identify local socket peer");
     uid = peer.uid; pid = peer.pid;
@@ -199,6 +207,69 @@ static napi_value PeerCall(napi_env env, napi_callback_info info) {
   } catch (const std::exception& error) { napi_throw_error(env, "CRABOT_PEER_IDENTITY", error.what()); return nullptr; }
 }
 #endif
+
+// Inspect the OS process entry, never arguments claimed by the IPC client.
+static std::vector<std::string> ProcessArguments(int pid) {
+  std::vector<std::string> args;
+#ifdef _WIN32
+  HANDLE process = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, pid);
+  if (!process) throw std::runtime_error("Cannot inspect process arguments");
+  using Query = NTSTATUS (NTAPI*)(HANDLE, PROCESSINFOCLASS, PVOID, ULONG, PULONG);
+  auto query = reinterpret_cast<Query>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQueryInformationProcess"));
+  PROCESS_BASIC_INFORMATION basic{}; PEB peb{}; RTL_USER_PROCESS_PARAMETERS parameters{};
+  bool valid = query && query(process, ProcessBasicInformation, &basic, sizeof(basic), nullptr) >= 0
+    && basic.PebBaseAddress && ReadProcessMemory(process, basic.PebBaseAddress, &peb, sizeof(peb), nullptr)
+    && peb.ProcessParameters && ReadProcessMemory(process, peb.ProcessParameters, &parameters, sizeof(parameters), nullptr);
+  auto size = parameters.CommandLine.Length;
+  std::vector<wchar_t> command(size / sizeof(wchar_t) + 1, L'\0');
+  valid = valid && size && size % sizeof(wchar_t) == 0 && size <= parameters.CommandLine.MaximumLength
+    && ReadProcessMemory(process, parameters.CommandLine.Buffer, command.data(), size, nullptr);
+  CloseHandle(process);
+  if (!valid) throw std::runtime_error("Cannot inspect process command line");
+  int count = 0; auto words = CommandLineToArgvW(command.data(), &count);
+  if (!words) throw std::runtime_error("Cannot parse process command line");
+  for (int i = 0; i < count; i++) {
+    int bytes = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, words[i], -1, nullptr, 0, nullptr, nullptr);
+    if (!bytes) { LocalFree(words); throw std::runtime_error("Invalid process command line"); }
+    std::vector<char> utf8(bytes);
+    WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, words[i], -1, utf8.data(), bytes, nullptr, nullptr);
+    args.emplace_back(utf8.data());
+  }
+  LocalFree(words);
+#elif __APPLE__
+  int mib[] = { CTL_KERN, KERN_PROCARGS2, pid };
+  size_t size = 0;
+  if (sysctl(mib, 3, nullptr, &size, nullptr, 0) || size < sizeof(int) || size > 2 * 1024 * 1024) throw std::runtime_error("Cannot inspect process arguments");
+  std::vector<char> buffer(size);
+  if (sysctl(mib, 3, buffer.data(), &size, nullptr, 0)) throw std::runtime_error("Cannot read process arguments");
+  int count; std::memcpy(&count, buffer.data(), sizeof(count));
+  size_t offset = sizeof(count);
+  while (offset < size && buffer[offset]) offset++;
+  while (offset < size && !buffer[offset]) offset++;
+  if (count <= 0 || count > 65536) throw std::runtime_error("Invalid process argument count");
+  for (int i = 0; i < count; i++) {
+    size_t end = offset;
+    while (end < size && buffer[end]) end++;
+    if (end >= size) throw std::runtime_error("Incomplete process arguments");
+    args.emplace_back(buffer.data() + offset, end - offset); offset = end + 1;
+  }
+#else
+  auto raw = Read("/proc/" + std::to_string(pid) + "/cmdline");
+  if (raw.empty() || raw.size() > 2 * 1024 * 1024 || raw.back() != '\0') throw std::runtime_error("Cannot read process arguments");
+  size_t offset = 0;
+  while (offset < raw.size()) {
+    auto end = raw.find('\0', offset); args.push_back(raw.substr(offset, end - offset)); offset = end + 1;
+  }
+#endif
+  return args;
+}
+static napi_value ArgumentsCall(napi_env env, napi_callback_info info) {
+  try {
+    auto args = ProcessArguments(Argument(env, info)); napi_value result; napi_create_array(env, &result);
+    for (size_t i = 0; i < args.size(); i++) napi_set_element(env, result, i, String(env, args[i]));
+    return result;
+  } catch (const std::exception& error) { napi_throw_error(env, "CRABOT_PROCESS_ARGUMENTS", error.what()); return nullptr; }
+}
 struct FileLock {
 #ifdef _WIN32
   HANDLE handle = INVALID_HANDLE_VALUE;
@@ -268,17 +339,23 @@ static napi_value ReleaseLock(napi_env env, napi_callback_info info) {
   static_cast<FileLock*>(data)->Close();
   napi_value result; napi_get_undefined(env, &result); return result;
 }
+#include "local-pipe.h"
+
 static napi_value Initialize(napi_env env, napi_value exports) {
   napi_property_descriptor methods[] = {
     {"inspectProcess", nullptr, InspectCall, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"listProcessIds", nullptr, PidsCall, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"tryFileLock", nullptr, TryLock, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"releaseFileLock", nullptr, ReleaseLock, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"inspectProcessArguments", nullptr, ArgumentsCall, nullptr, nullptr, nullptr, napi_default, nullptr},
 #ifndef _WIN32
     {"inspectPeer", nullptr, PeerCall, nullptr, nullptr, nullptr, napi_default, nullptr},
 #endif
   };
   napi_define_properties(env, exports, sizeof(methods) / sizeof(methods[0]), methods);
+#ifdef _WIN32
+  RegisterLocalPipe(env, exports);
+#endif
   return exports;
 }
 NAPI_MODULE(NODE_GYP_MODULE_NAME, Initialize)

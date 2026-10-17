@@ -5,6 +5,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { once } from 'node:events'
+import { spawn } from 'node:child_process'
 import identity from '../process-identity.cjs'
 
 test('native identity includes OS owner, precise creation identity and executable; invalid PIDs fail closed', () => {
@@ -14,7 +15,16 @@ test('native identity includes OS owner, precise creation identity and executabl
   assert.equal(identity.sameProcess(self, identity.inspectProcess(process.pid)), true)
   assert.equal(identity.sameProcess({ ...self, started: 'reused PID' }, self), false)
   assert.ok(identity.listProcessIds().includes(process.pid))
+  assert.ok(identity.inspectProcessArguments(process.pid).length > 0)
   for (const pid of [-1, 0, NaN, Infinity, '1', 1.5]) assert.throws(() => identity.inspectProcess(pid))
+})
+
+test('OS process arguments preserve Unicode, spaces and empty arguments', async t => {
+  const args = ['中文 space', '', 'quote"literal']
+  const child = spawn(process.execPath, ['-e', 'process.send("ready");setInterval(()=>{},1000)', ...args], { stdio: ['ignore', 'ignore', 'inherit', 'ipc'] })
+  t.after(() => child.kill())
+  await once(child, 'message')
+  assert.deepEqual(identity.inspectProcessArguments(child.pid).slice(-args.length), args)
 })
 
 test('Unix local peer is obtained from the OS, not from client-reported PID', { skip: process.platform === 'win32' }, async () => {
