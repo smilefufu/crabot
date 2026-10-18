@@ -71,7 +71,8 @@ export async function maintainLegacySystemUser(entry, { action, source, observat
   const parameters = { dataDir, context, expected: observation, entryFenceId: sourceFenceId, operationId, targetRoot, runtimeOptions }
   const lock = await acquireCliLock(dataDir, 'system-legacy-' + action)
   try {
-    const target = cliLocation.assertSelectedCli(targetRoot), release = await verifyCoreRelease(targetRoot)
+    const target = ['migrate', 'check-migration'].includes(action) ? cliLocation.assertSelectedCli(targetRoot) : cliLocation.locateCliInstallation(targetRoot)
+    const release = await verifyCoreRelease(targetRoot)
     if (!target || target.scope !== 'system' || target.id !== release.inventory_sha256 || targetRoot !== target.coreRoot) fail()
     const copyRelative = path.join('system-conversion', operationId, 'legacy-instance.json')
     const converted = bytes => {

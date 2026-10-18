@@ -5,8 +5,8 @@ import path from 'node:path'
 import { tmpdir } from 'node:os'
 import { randomUUID } from 'node:crypto'
 import { planSystemConversion } from '../system-conversion.mjs'
-import { createLegacySystemConversionPermit, validateLegacySystemConversionPermit, conversionStopMaintenanceMatches } from '../system-conversion-permit.mjs'
-import { readLegacySystemConversionPermit, readLegacySystemAccountPermit, readSystemUserPermit, runLegacySystemConversionStop } from '../system-user.mjs'
+import { createLegacySystemConversionPermit, validateLegacySystemConversionPermit, conversionStopMaintenanceMatches, conversionMaintenanceMatches } from '../system-conversion-permit.mjs'
+import { readLegacySystemConversionPermit, readLegacySystemAccountPermit, readSystemUserPermit, runLegacySystemConversionStop, runLegacySystemConversion } from '../system-user.mjs'
 
 function fixture() {
   const entry = { user: 'alice', uid: 1001, gid: 1002, home: '/home/alice', data_dir: '/srv/alice', port_offset: 100, enabled: true, autostart: false }
@@ -19,7 +19,7 @@ function fixture() {
   const bootId = randomUUID(), fenceId = randomUUID()
   const record = { schema_version: 1, plan, phase: 'running', boot_id: bootId,
     progress: { schema_version: 1, kind: 'conversion', id: plan.id, phase: 'running', stage: 'stop_dispatched', current_uid: entry.uid,
-      source_fence_id: fenceId, results: [{ uid: entry.uid, originally_running: true, stop_dispatched: true, stopped: false }] } }
+      source_fence_id: fenceId, results: [{ uid: entry.uid, user: entry.user, state: 'pending', originally_running: true, stop_dispatched: true, stopped: false }] } }
   const maintenance = { schema_version: 1, id: plan.id, operation: 'conversion', phase: 'running', boot_id: bootId,
     current_uid: entry.uid, stage: 'stop_dispatched', targets: [entry.uid], unsettled: [] }
   const sourceFence = { id: fenceId, operation_id: plan.id, phase: 'fenced', entries_fenced: true, installation: source }
@@ -90,3 +90,77 @@ test('ordinary users cannot enter the root conversion dispatcher or spawn a help
   await assert.rejects(runLegacySystemConversionStop({}, { root: '/must-not-read', operationId: randomUUID(), spawnProcess: () => assert.fail() }),
     { code: 'CRABOT_SYSTEM_ADMIN_REQUIRED' })
 })
+
+test('a tagged conversion data descriptor cannot be consumed by the ordinary snapshot role', { skip: process.platform === 'win32' }, t => {
+  const directory = fs.mkdtempSync(path.join(tmpdir(), 'crabot-conversion-data-role-'))
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }))
+  const f = fixture(), permit = { ...createLegacySystemConversionPermit(f), action: 'snapshot', install_root: f.record.plan.install_root,
+    target: f.record.plan.target, snapshot: null }
+  const file = path.join(directory, 'permit.json'); fs.writeFileSync(file, JSON.stringify(permit), { mode: 0o600 })
+  const fd = fs.openSync(file, 'r')
+  try { assert.throws(() => readSystemUserPermit(fd, process.getuid())) } finally { fs.closeSync(fd) }
+})
+
+function dataFixture(action) {
+  const f = fixture(), row = f.record.progress.results[0]
+  f.action = action; row.stopped = true; row.snapshot_dispatched = true
+  const stage = { snapshot: 'snapshot_dispatched', migrate: 'migration_dispatched', 'cancel-preparation': 'source_preparation_cancel_dispatched' }[action]
+  f.record.progress.stage = stage; f.maintenance.stage = stage
+  if (action === 'migrate') {
+    f.sourceFence.phase = 'data_changing'; row.migration_dispatched = true
+    row.snapshot = { id: randomUUID(), system_operation_id: f.record.plan.id, target_id: f.record.plan.target.id,
+      backup: { id: randomUUID(), sha256: 'd'.repeat(64) } }
+  }
+  return f
+}
+for (const action of ['snapshot', 'migrate', 'cancel-preparation']) test('dedicated data permit pins the root phase/source/target and carries no arbitrary command: ' + action, () => {
+  const f = dataFixture(action), permit = createLegacySystemConversionPermit(f)
+  assert.equal(permit.action, action); assert.equal(permit.install_root, f.record.plan.install_root)
+  assert.deepEqual(permit.target, f.record.plan.target); assert.equal(permit.input, undefined); assert.equal(permit.deployment, undefined)
+  assert.equal(conversionStopMaintenanceMatches(permit, f.maintenance, f.bootId), false)
+  assert.equal(conversionMaintenanceMatches(permit, f.maintenance, f.bootId), true)
+  assert.equal(conversionMaintenanceMatches(permit, { ...f.maintenance, stage: 'stop_dispatched' }, f.bootId), false)
+  assert.equal(conversionMaintenanceMatches(permit, f.maintenance, randomUUID()), false)
+  assert.deepEqual(validateLegacySystemConversionPermit(permit), permit)
+  if (action === 'migrate') assert.deepEqual(permit.snapshot, f.record.progress.results[0].snapshot)
+  else assert.equal(permit.snapshot, null)
+})
+for (const changed of ['unsealed-migration', 'sealed-snapshot', 'wrong-public-stage', 'unknown-result', 'wrong-user', 'not-all-stopped', 'bad-backup',
+  'wrong-target', 'already-migrated', 'not-dispatched', 'bad-result-set', 'snapshot-replay', 'cancel-after-migration']) test('unsettled conversion data stages cannot issue a descriptor: ' + changed, () => {
+  const action = changed === 'sealed-snapshot' || changed === 'snapshot-replay' ? 'snapshot' : changed === 'cancel-after-migration' ? 'cancel-preparation' : 'migrate'
+  const f = dataFixture(action), row = f.record.progress.results[0]
+  if (changed === 'unsealed-migration') f.sourceFence.phase = 'fenced'
+  if (changed === 'sealed-snapshot') f.sourceFence.phase = 'data_changing'
+  if (changed === 'wrong-public-stage') f.maintenance.stage = 'snapshot_ready'
+  if (changed === 'unknown-result') row.state = 'unknown'
+  if (changed === 'wrong-user') row.user = 'bob'
+  if (changed === 'not-all-stopped') row.stopped = false
+  if (changed === 'bad-backup') row.snapshot.backup.sha256 = 'invalid'
+  if (changed === 'wrong-target') row.snapshot.target_id = 'f'.repeat(64)
+  if (changed === 'already-migrated') row.migrated = true
+  if (changed === 'not-dispatched') row.migration_dispatched = false
+  if (changed === 'bad-result-set') f.record.progress.results.push({ ...row })
+  if (changed === 'snapshot-replay') row.snapshot = {}
+  if (changed === 'cancel-after-migration') row.migration_dispatched = true
+  assert.throws(() => createLegacySystemConversionPermit(f))
+})
+
+test('data descriptor cannot add business contents, redirect targets or cross ordinary/discovery role readers', { skip: process.platform === 'win32' }, t => {
+  const f = dataFixture('migrate'), permit = createLegacySystemConversionPermit(f)
+  const directory = fs.mkdtempSync(path.join(tmpdir(), 'crabot-data-role-reader-')), file = path.join(directory, 'permit.json')
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }))
+  fs.writeFileSync(file, JSON.stringify(permit), { mode: 0o600 })
+  for (const reader of [readSystemUserPermit, readLegacySystemAccountPermit]) {
+    const fd = fs.openSync(file, 'r'); try { assert.throws(() => reader(fd, process.getuid())) } finally { fs.closeSync(fd) }
+  }
+  for (const patch of [{ input: 'arbitrary-command' }, { install_root: '../elsewhere' }, { target: { ...permit.target, api_key: 'must-not-read' } },
+    { snapshot: { ...permit.snapshot, content: 'must-not-transfer' } }, { action: 'check-migration' }]) {
+    assert.throws(() => validateLegacySystemConversionPermit({ ...permit, ...patch }))
+  }
+})
+
+for (const action of ['snapshot', 'migrate', 'cancel-preparation']) test('nonadministrator cannot dispatch conversion data helpers: ' + action,
+  { skip: process.platform === 'linux' && process.getuid() === 0 }, async () => {
+    await assert.rejects(runLegacySystemConversion({}, { root: '/must-not-read', operationId: randomUUID(), action,
+      spawnProcess: () => assert.fail('must not spawn') }), { code: 'CRABOT_SYSTEM_ADMIN_REQUIRED' })
+  })

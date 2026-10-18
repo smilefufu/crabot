@@ -140,3 +140,15 @@ test('a verified legacy source alias is adopted without moving its shared base o
   assert.equal(JSON.parse(await fsp.readFile(f.manifestFile, 'utf8')).api_key, previous.api_key)
   assert.equal(await fsp.realpath(alias), f.sourceRoot)
 })
+
+for (const selection of ['absent', 'other']) test('all legacy snapshots and pre-data cancellation work before target command selection: ' + selection, options, async t => {
+  const f = await fixture(t)
+  if (selection === 'absent') await fsp.rm(path.join(path.dirname(path.dirname(f.targetRoot)), 'current-core'))
+  else await f.choose('f'.repeat(64))
+  const snapshot = await f.invoke('snapshot')
+  assert.equal(readVersionMaintenance(f.dataDir).phase, 'backed_up')
+  assert.equal(await fsp.readFile(f.manifestFile, 'utf8'), f.original)
+  await assert.rejects(f.invoke('migrate', { snapshot }), { code: 'CRABOT_CLI_INSTALLATION' })
+  assert.deepEqual(await f.invoke('cancel-preparation'), { preparation_cancelled: true, service_started: false })
+  assert.equal(await fsp.readFile(path.join(f.dataDir, 'fixture/content'), 'utf8'), 'before')
+})

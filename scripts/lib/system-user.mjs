@@ -56,7 +56,7 @@ function readRootPermit(fd, ownerUid) {
 }
 export function readSystemUserPermit(fd = 3, ownerUid = 0) {
   const permit = readRootPermit(fd, ownerUid)
-  if (permit.schema_version !== 1 || !helperActions.has(permit.action) || !/^[a-f0-9-]{36}$/.test(permit.id)) throw systemError('管理员委托格式不兼容。')
+  if (permit.schema_version !== 1 || permit.kind !== undefined || !helperActions.has(permit.action) || !/^[a-f0-9-]{36}$/.test(permit.id)) throw systemError('管理员委托格式不兼容。')
   validateSystemEntries([permit.entry])
   return permit
 }
@@ -65,25 +65,37 @@ export function readLegacySystemConversionPermit(fd = 3, ownerUid = 0) {
   return validateLegacySystemConversionPermit(readRootPermit(fd, ownerUid))
 }
 
-export async function runLegacySystemConversionStop(entry, { root, operationId, spawnProcess = spawn }) {
+export function runLegacySystemConversionStop(entry, options) {
+  return runLegacySystemConversion(entry, { ...options, action: 'stop-legacy' })
+}
+export async function runLegacySystemConversion(entry, { root, operationId, action, spawnProcess = spawn }) {
   if (process.platform !== 'linux' || process.getuid?.() !== 0) throw systemError('跨用户转换仅Linux管理员可执行。', 'CRABOT_SYSTEM_ADMIN_REQUIRED')
   const { SystemOperationStore } = await import('./system-operation.mjs')
   const { LegacySystemEntryFence } = await import('./legacy-system-fence.mjs')
   const { cliLockToken } = await import('./cli-lock.mjs')
   const { readSystemBootId } = await import('./system-context.mjs')
   const store = new SystemOperationStore()
-  if (!cliLockToken(path.join(store.directory, 'cli.lock'))) throw systemError('转换停止必须持有当前根作业锁。', 'CRABOT_SYSTEM_CONVERSION_PERMIT')
+  if (!cliLockToken(path.join(store.directory, 'cli.lock'))) throw systemError('转换动作必须持有当前根作业锁。', 'CRABOT_SYSTEM_CONVERSION_PERMIT')
   const record = store.read(store.file(operationId), true), maintenance = store.maintenance()
   const { validateSystemConversionPlan } = await import('./system-conversion.mjs')
   validateSystemConversionPlan(record?.plan)
   store.registry.verifyAccount(entry)
   const sourceFence = await new LegacySystemEntryFence().inspect(record?.plan?.source?.installRoot)
-  const permit = createLegacySystemConversionPermit({ record, maintenance, entry, sourceFence, bootId: readSystemBootId() })
+  const permit = createLegacySystemConversionPermit({ record, maintenance, entry, sourceFence, bootId: readSystemBootId(), action })
+  const cliLocation = (await import('./cli-location.cjs')).default
+  const target = cliLocation.locateCliInstallation(root)
+  if (!target || target.scope !== 'system' || target.coreRoot !== root || target.root !== record.plan.install_root || target.id !== record.plan.target.id) {
+    throw systemError('转换助手与固定目标核心不一致。', 'CRABOT_SYSTEM_CONVERSION_PERMIT')
+  }
+  const { verifyCoreRelease } = await import('./core-release.mjs')
+  if ((await verifyCoreRelease(root, { version: record.plan.target.version })).inventory_sha256 !== target.id) {
+    throw systemError('转换目标核心已改变。', 'CRABOT_SYSTEM_CONVERSION_PERMIT')
+  }
   const node = verifyRootExecutable(path.join(root, '.product-runtime/node/bin/node'))
   const helper = verifyRootExecutable(path.join(root, 'scripts/system-conversion-user-helper.mjs'))
   const request = { command: '/usr/bin/setpriv', args: ['--reuid=' + entry.uid, '--regid=' + entry.gid, '--init-groups', '--', node, helper, permit.action],
     env: systemUserEnvironment(entry), cwd: '/' }
-  return delegateUserRequest(request, permit, { input: null, spawnProcess, permits: '/etc/crabot/system/permits' })
+  return delegateUserRequest(request, permit, { input: null, spawnProcess, permits: '/etc/crabot/system/permits', timeout: action === 'stop-legacy' ? 180_000 : 20 * 60_000 })
 }
 
 export function validateLegacyAccountRequest({ account, release, port_offset_hint }) {
@@ -123,7 +135,7 @@ export async function runSystemUser(entry, { root, action, input = null, operati
 
 // Descriptor transport only: callers above own the identity, fixed executable,
 // allowed action, environment and role. This layer never reads employee files.
-async function delegateUserRequest(request, record, { input, spawnProcess, permits }) {
+async function delegateUserRequest(request, record, { input, spawnProcess, permits, timeout = 180_000 }) {
   verifyRootDirectory(path.dirname(permits))
   try { fs.mkdirSync(permits, { mode: 0o700 }) } catch (error) { if (error.code !== 'EEXIST') throw error }
   const directory = fs.lstatSync(permits)
@@ -138,7 +150,7 @@ async function delegateUserRequest(request, record, { input, spawnProcess, permi
       const child = spawnProcess(request.command, request.args, { cwd: request.cwd, env: request.env, stdio: ['pipe', 'ignore', 'ignore', fd, 'pipe'] })
       let stdout = '', bytes = 0, failure
       const unknown = () => systemError('该用户操作失败或结果未知，请检查本人状态与日志。', 'CRABOT_SYSTEM_USER_UNKNOWN')
-      const timer = setTimeout(() => { failure ??= unknown(); child.kill('SIGTERM') }, 180_000)
+      const timer = setTimeout(() => { failure ??= unknown(); child.kill('SIGTERM') }, timeout)
       const replies = child.stdio[4]
       replies.setEncoding('utf8')
       replies.on('data', data => {
