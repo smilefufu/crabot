@@ -9,7 +9,7 @@ import { once } from 'node:events'
 import assert from 'node:assert/strict'
 
 const checkout = process.argv[2], mode = process.argv[3] ?? 'updater'
-const expectedCompletion = mode === 'updater' || mode === 'unreadable' || mode === 'cleanup-race'
+const expectedCompletion = mode === 'updater' || mode === 'unreadable' || mode === 'cleanup-race' || mode === 'registration-delay'
 const { default: identity } = await import(pathToFileURL(path.join(checkout, 'scripts/lib/process-identity.cjs')))
 const root = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'crabot-maintenance-fixture-')))
 for (const directory of ['scripts', 'data', 'pids', 'crabot-core/dist', 'crabot-admin/dist']) await fs.mkdir(path.join(root, directory), { recursive: true })
@@ -24,17 +24,24 @@ const updaterArgs = [path.join(root, 'scripts/ui-upgrade.mjs'), ...(mode === 'ex
 await fs.writeFile(path.join(root, 'crabot-admin/dist/main.js'), prefix('admin') + `import{spawn}from'node:child_process';process.once('message',()=>{const child=spawn(process.execPath,${JSON.stringify(updaterArgs)},{detached:true,stdio:'inherit'});child.unref()});setInterval(()=>{},1000);`)
 await fs.writeFile(path.join(root, 'crabot-core/dist/main.js'), prefix('mm') + `
 import{spawn}from'node:child_process';import{once}from'node:events';import{createServer}from'node:http';
+import{inspectInstance}from ${JSON.stringify(url('scripts/lib/instance-runtime.mjs'))};
 import{ModuleRuntimeRegistry}from ${JSON.stringify(url('crabot-core/dist/module-runtime-registry.js'))};
 const registry=new ModuleRuntimeRegistry(${JSON.stringify(path.join(root, 'data'))});await registry.initialize();
 const admin=spawn(process.execPath,[${JSON.stringify(path.join(root, 'crabot-admin/dist/main.js'))}],{stdio:['ignore','inherit','inherit','ipc']});
 const runtimeId=registry.createRuntimeId();await registry.recordSpawn({moduleId:${JSON.stringify(mode === 'agent-parent' ? 'crabot-agent' : 'admin-web')},runtimeId,rootPid:admin.pid,modulePort:23456});
 let stopping=false;async function stop(){if(stopping)return;stopping=true;const exited=once(admin,'exit');admin.kill();await exited;await registry.removeRuntime(runtimeId);process.exit(0)}
-process.on('SIGTERM',stop);createServer((req,res)=>{if(req.url==='/shutdown'){res.end(JSON.stringify({success:true}));void stop()}else res.end('{}')}).listen(${port},'127.0.0.1',()=>admin.send('start'));
+process.on('SIGTERM',stop);createServer((req,res)=>{if(req.url==='/shutdown'){res.end(JSON.stringify({success:true}));void stop()}else res.end('{}')}).listen(${port},'127.0.0.1',async()=>{
+writeFileSync(${JSON.stringify(path.join(root, 'mm-listening'))},'listening');
+const deadline=Date.now()+5000;
+for(;;){const current=inspectInstance(${JSON.stringify(path.join(root, 'data'))});if(current.state==='running'&&current.record.mm?.pid===process.pid)break;if(Date.now()>=deadline)throw new Error('fixture MM registration timed out');await new Promise(resolve=>setTimeout(resolve,25))}
+admin.send('start')});
 `)
 await fs.writeFile(path.join(root, 'controller.mjs'), prefix('controller') + `
-import{spawn}from'node:child_process';import{createInstanceRuntime,recordMmProcess}from ${JSON.stringify(url('scripts/lib/instance-runtime.mjs'))};
+import{spawn}from'node:child_process';import{existsSync}from'node:fs';import{createInstanceRuntime,recordMmProcess}from ${JSON.stringify(url('scripts/lib/instance-runtime.mjs'))};
 const data=${JSON.stringify(path.join(root, 'data'))};const record=createInstanceRuntime({dataDir:data,root:${JSON.stringify(root)},mmPort:${port}});
-const mm=spawn(process.execPath,[${JSON.stringify(path.join(root, 'crabot-core/dist/main.js'))}],{stdio:'inherit'});recordMmProcess(data,record.generation,mm.pid);
+const mm=spawn(process.execPath,[${JSON.stringify(path.join(root, 'crabot-core/dist/main.js'))}],{stdio:'inherit'});
+${mode === 'registration-delay' ? `const deadline=Date.now()+5000;while(!existsSync(${JSON.stringify(path.join(root, 'mm-listening'))})){if(Date.now()>deadline)throw new Error('fixture server did not listen');await new Promise(resolve=>setTimeout(resolve,25))}await new Promise(resolve=>setTimeout(resolve,400));` : ''}
+recordMmProcess(data,record.generation,mm.pid);
 process.on('SIGTERM',()=>mm.kill());mm.on('exit',code=>process.exit(code??1));
 `)
 const child = spawn(process.execPath, [path.join(root, 'controller.mjs')], { stdio: ['ignore', 'ignore', 'pipe'] })
