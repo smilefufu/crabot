@@ -3,15 +3,19 @@
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 import { createHash } from 'node:crypto'
+import { constants } from 'node:fs'
 import { createReadStream } from 'node:fs'
 import { promises as fs } from 'node:fs'
-import { join, resolve, delimiter } from 'node:path'
+import { join, resolve, delimiter, dirname } from 'node:path'
 import { tmpdir } from 'node:os'
 import { pathToFileURL } from 'node:url'
 import { createRequire } from 'node:module'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-const [oldArgument, nextArgument, archiveArgument] = process.argv.slice(2)
+const [oldArgument, nextArgument, archiveArgument, commandMode] = process.argv.slice(2)
+const cliCommand = commandMode === '--cli-command'
+if (commandMode && !cliCommand) throw new Error('Unknown fixture option')
+if (cliCommand && !archiveArgument) throw new Error('CLI command fixture requires a full archive')
 if (!oldArgument || !nextArgument) throw new Error('Expected previous and target complete core directories')
 const old = await fs.realpath(resolve(oldArgument)), next = await fs.realpath(resolve(nextArgument))
 const require = createRequire(import.meta.url)
@@ -21,7 +25,7 @@ const { installStandaloneCli } = await import(pathToFileURL(join(next, 'scripts/
 const { readCliSelection, prepareCliPayload } = await import(pathToFileURL(join(next, 'scripts/lib/cli-installation.mjs')))
 const { inspectInstance } = await import(pathToFileURL(join(next, 'scripts/lib/instance-runtime.mjs')))
 const { readVersionMaintenance } = await import(pathToFileURL(join(next, 'scripts/lib/version-maintenance.mjs')))
-const { verifyCoreRelease } = await import(pathToFileURL(join(next, 'scripts/lib/core-release.mjs')))
+const { writeCoreRelease, verifyCoreRelease } = await import(pathToFileURL(join(next, 'scripts/lib/core-release.mjs')))
 const { verifyMaintenanceBackup } = await import(pathToFileURL(join(next, 'scripts/lib/maintenance-backup.mjs')))
 const { downloadRelease } = await import('../../scripts/upgrade-lib/release.mjs')
 const { applyDownloadedCliUpgrade } = await import('../../scripts/lib/standalone-cli-release.mjs')
@@ -29,9 +33,24 @@ const execute = promisify(execFile)
 const temporary = await fs.realpath(await fs.mkdtemp(join(tmpdir(), 'Crabot CLI 升级 ')))
 const dataDir = join(temporary, '实例'), installRoot = join(temporary, '程序')
 const env = { ...process.env, DATA_DIR: dataDir }
-const run = async (command, args) => (await execute(command, args, { env, timeout: 180_000, maxBuffer: 1024 * 1024, windowsHide: true })).stdout
+const run = async (command, args) => (await execute(command, args, { env, timeout: args[0] === 'upgrade' ? 600_000 : 180_000, maxBuffer: 1024 * 1024, windowsHide: true })).stdout
 try {
-  const one = await installStandaloneCli({ sourceRoot: old, installRoot, dataDir })
+  let sourceRoot = old
+  if (cliCommand) {
+    // Explicit synthetic previous release with the current command code; this is
+    // command dispatch acceptance, not compatibility evidence for a published old release.
+    sourceRoot = join(temporary, 'previous-core-fixture')
+    await fs.cp(old, sourceRoot, { recursive: true, verbatimSymlinks: true, mode: constants.COPYFILE_FICLONE, filter: () => true })
+    const metadata = await verifyCoreRelease(sourceRoot)
+    const version = '0.0.0-cli-update-fixture'
+    for (const file of ['package.json', 'product-runtime.json']) {
+      const value = JSON.parse(await fs.readFile(join(sourceRoot, file), 'utf8'))
+      await fs.writeFile(join(sourceRoot, file), JSON.stringify({ ...value, version }))
+    }
+    await fs.rm(join(sourceRoot, 'core-files.json')); await fs.rm(join(sourceRoot, 'core-release.json'))
+    await writeCoreRelease(sourceRoot, { ...metadata, version })
+  }
+  const one = await installStandaloneCli({ sourceRoot, installRoot, dataDir })
   const runtime = product.loadProductRuntime(one.coreRoot, { required: true })
   const agentPath = pythonEnv.ensureProductAgentVenv(runtime, dataDir)
   const mcpPath = pythonEnv.ensureProductMcpVenv(runtime, dataDir, 'stable-custom-mcp-id')
@@ -47,10 +66,20 @@ try {
   const targetVersion = (await verifyCoreRelease(next)).version
   let two
   if (archiveArgument) {
-    const archive = await fs.realpath(resolve(archiveArgument))
+    let archivePath = resolve(archiveArgument), archiveReport
+    if (archiveArgument.endsWith('.json')) {
+      archiveReport = JSON.parse(await fs.readFile(archivePath, 'utf8'))
+      assert.equal(archiveReport.candidate_only, true)
+      assert.equal(archiveReport.roundtrip_verified, true)
+      assert.equal(archiveReport.file, archiveReport.file.split(/[\\/]/).at(-1))
+      assert.equal(archiveReport.version, targetVersion)
+      archivePath = resolve(dirname(archivePath), archiveReport.file)
+    }
+    const archive = await fs.realpath(archivePath)
     const hash = createHash('sha256')
     for await (const chunk of createReadStream(archive)) hash.update(chunk)
     const checksum = hash.digest('hex'), requests = []
+    if (archiveReport) assert.equal(archiveReport.sha256, checksum)
     const endpoint = archive.endsWith('.zip') ? '/core.zip' : '/core.tar.gz'
     const server = createServer((req, res) => {
       requests.push(req.url)
@@ -62,9 +91,21 @@ try {
     try {
       const url = `http://127.0.0.1:${server.address().port}${endpoint}`
       const logger = { info: console.log, warn: console.warn, error: console.error }
-      const artifact = await downloadRelease({ url, sha256Url: url + '.sha256', version: 'v' + targetVersion, logger })
-      two = await applyDownloadedCliUpgrade({ root: one.coreRoot, dataDir, artifact, logger })
-      assert.equal((await fs.stat(artifact.tmp).catch(() => null)), null)
+      if (cliCommand) {
+        const releaseBase = `https://github.com/smilefufu/crabot/releases/download/v${targetVersion}/crabot-v${targetVersion}-${process.platform === 'win32' ? 'windows' : process.platform}-${process.arch}${archive.endsWith('.zip') ? '.zip' : '.tar.gz'}`
+        const hook = join(temporary, 'release-fetch-fixture.mjs')
+        await fs.writeFile(hook, `const original=globalThis.fetch;globalThis.fetch=(input,options)=>{const u=String(input);if(u==='https://github.com/smilefufu/crabot/releases/latest')return Promise.resolve(new Response(null,{status:302,headers:{location:'https://github.com/smilefufu/crabot/releases/tag/v${targetVersion}'}}));if(u===${JSON.stringify(releaseBase)})return original(${JSON.stringify(url)},options);if(u===${JSON.stringify(releaseBase + '.sha256')})return original(${JSON.stringify(url + '.sha256')},options);throw new Error('Unexpected fixture request');};`)
+        const prior = env.NODE_OPTIONS
+        env.NODE_OPTIONS = '--import=' + pathToFileURL(hook).href
+        try { assert.match(await run(one.command, ['upgrade', '--yes']), /服务保持停止/) }
+        finally { if (prior === undefined) delete env.NODE_OPTIONS; else env.NODE_OPTIONS = prior }
+        const id = readCliSelection(installRoot)
+        two = { coreRoot: join(installRoot, 'releases', id), id, version: targetVersion }
+      } else {
+        const artifact = await downloadRelease({ url, sha256Url: url + '.sha256', version: 'v' + targetVersion, logger })
+        two = await applyDownloadedCliUpgrade({ root: one.coreRoot, dataDir, artifact, logger })
+        assert.equal((await fs.stat(artifact.tmp).catch(() => null)), null)
+      }
       assert.deepEqual(requests, [endpoint, endpoint + '.sha256'])
     } finally { await new Promise(resolve => server.close(resolve)) }
   } else {
@@ -88,7 +129,7 @@ try {
   assert.equal((await verifyCoreRelease(one.coreRoot)).version, one.version)
   assert.equal((await verifyCoreRelease(two.coreRoot)).version, two.version)
   console.log(JSON.stringify({ platform: process.platform, arch: process.arch, from: one.version, to: two.version,
-    target_bundled_node: true, full_archive_download_checksum_extract: Boolean(archiveArgument), native_command_selected_target: true, scoped_backup_verified: true,
+    target_bundled_node: true, actual_cli_upgrade_command: cliCommand, synthetic_previous_release: cliCommand, full_archive_download_checksum_extract: Boolean(archiveArgument), native_command_selected_target: true, scoped_backup_verified: true,
     stable_agent_and_mcp_python_preserved: true, workspaces_preserved: true, immutable_payloads_verified: true,
     no_mm_started: true, health_verified: false }))
 } finally { await fs.rm(temporary, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }

@@ -5,9 +5,9 @@
 - 按已确认[中文 Spec](crabot-docs/superpowers/specs/2026-10-17-desktop-application-design.md)及[分阶段计划](crabot-docs/superpowers/plans/2026-10-17-desktop-application-implementation.md)，仅在 feat/desktop-application worktree 开发。完整实现和验证前不推主仓 main、不提前建 PR、不部署现场、不触碰无关 WIP。
 - P0–P4 的正式契约、内置环境、共同实例、SDK、OS peer 和真实 Electron 边界有四平台基础证据，Ubuntu 24.04/26.04 含断网容器。P5 已接首用模型引导、主要/高级入口、主题、权限和诊断。用户指定 mirror-xinshu 的实际 Admin 解析/Agent adapter 两次短请求通过（输入 63/输出 19，无重试）；GUI 引导到业务首答仍待验收，生产配置未修改。
 - 受管 MCP 补充已确认并落实协议。旧注册/备份不自动接管，新标准 npx/uvx 默认隔离，可切自定义；稳定 id 复用。Admin 56、环境 13、Web 3 项及类型检查通过；候选 14 的实际五个 stdio MCP 离线冲突包/uvx、凭据过滤和损坏保留通过，最后核对完整清单不变。新原生 CI 已在四平台通过此 MCP 阶段，整轮尚未通过。
-- P6 登录自启动、原生更新入口、活动核对、共同停机与维护保护已接。独立 CLI 原生命令、不可变版本目录、包内/远程安装、同版本修复已实现；候选 14（30c824de，0.1.0-desktop.10）32,727 文件、1,489,314,816 字节，实际新装/重装/修复 17.4/6.8/19.8s。Agent Node 工具目录补入工作依赖排除范围，回归先失败后通过。
-- 独立 user CLI 跨版本事务及下载适配已接：目标内置 Node 持共同锁，核对归属/停止/兼容，备份、绑定目标、切换和迁移；CLI 保持停止，浏览器 Admin 先准备后停机并用新核心启动。42 项事务/备份/失败边界、升级器 40 项通过。候选 12→14 实际普通完整归档经本地 HTTP 下载、SHA、解包、目标 Node、原生命令、备份和 Agent/MCP Python/工作区保留通过，不启动 MM；CLI/UI 命令入口和原生安装后服务健康仍待完整验收。
-- [39083497000](https://github.com/smilefufu/crabot/actions/runs/39083497000) 继续原生验收：Windows 已越过前述 ACL/Corepack/夹具清理问题，PS5.1/7 远程安装兼容、五个 MCP 通过；整宿主关闭窗口夹具因 Electron Windows 的 stdin 固定 EOF 超时。已改测试专用本机控制通道，EOF 定向回归通过，产品 IPC/认证不变；最低 OS、最终签名/安装器、旧 user 接管、system 升级、恢复流程及 GUI 真正业务任务仍未验收。用户暂无签名证书，官方申请与免费途径见文档。
+- P6 登录自启动、原生更新入口、活动核对、共同停机与维护保护已接。独立 CLI 原生命令、不可变版本目录、包内/远程安装、同版本修复已实现；候选 15（f93430fa，0.1.0-desktop.11）32,728 文件、1,489,319,888 字节；候选 14 实际新装/重装/修复 17.4/6.8/19.8s。Agent Node 工具目录补入工作依赖排除范围，回归先失败后通过。
+- 独立 user CLI 跨版本事务及下载适配已接：目标内置 Node 持共同锁，核对归属/停止/兼容，备份、绑定目标、切换和迁移；CLI 保持停止，浏览器 Admin 先准备后停机并用新核心启动。42 项事务/备份/失败边界、升级器 40 项通过。候选 12→14 实际普通完整归档经本地 HTTP 下载、SHA、解包、目标 Node、原生命令、备份和 Agent/MCP Python/工作区保留通过，不启动 MM；候选 15 的真实 crabot upgrade --yes（显式标记的旧版本元数据夹具）也通过，普通归档器使用内置 Python 并强制解包全量复验，Unix 本机已集成通过。浏览器按钮、Windows ZIP、升级后服务健康仍待完整验收。
+- [39083497000](https://github.com/smilefufu/crabot/actions/runs/39083497000) 继续原生验收：Windows 已越过前述 ACL/Corepack/夹具清理问题，PS5.1/7 远程安装兼容、五个 MCP 通过；Linux/arm64 整轮成功，Intel 首装 125.4s、重装 59.4s、真实首次启停/停后重装通过，损坏修复仍触及 180s，已继续优化组件复制及先核对完整元数据；48 项相关回归通过，完整候选本机新装/修复 13.3/14.2s。Windows 整宿主关闭窗口夹具因 Electron 的 stdin 固定 EOF 超时。已改测试专用本机控制通道，EOF 定向回归通过，产品 IPC/认证不变；最低 OS、最终签名/安装器、旧 user 接管、system 升级、恢复流程及 GUI 真正业务任务仍未验收。用户暂无签名证书，官方申请与免费途径见文档。
 - 详细构建、失败与修复证据统一维护在[实施与验收记录](crabot-docs/superpowers/plans/2026-10-17-desktop-application-validation.md)。候选 13 的字节码探针污染保留为失败证据；未把阶段性通过当作整项需求完成。
 
 ### 任务默认目录文件授权：独立修复待审查
