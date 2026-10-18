@@ -38,14 +38,20 @@ test('a copied PID file does not adopt or signal the process it names', async t 
   assert.equal(await fs.readFile(path.join(f.data, 'mm.pid'), 'utf8'), String(process.pid))
 })
 
-for (const [kind, correctData] of [['daemon', true], ['daemon-fenced', true], ['daemon', false], ['foreground-cli', true], ['foreground-script', true], ['foreground-cli-invalid', true]]) test('controlled legacy runtime binds its actual launch form and DataRoot: ' + kind + '/' + correctData, { timeout: 20_000 }, async t => {
+for (const [kind, correctData] of [['daemon', true], ['daemon-observer-delay', true], ['daemon-fenced', true], ['daemon', false], ['foreground-cli', true], ['foreground-script', true], ['foreground-cli-invalid', true]]) test('controlled legacy runtime binds its actual launch form and DataRoot: ' + kind + '/' + correctData, { timeout: 20_000 }, async t => {
   const f = await fixture(t), requests = []
   const entryFenceId = kind === 'daemon-fenced' ? (await fenceLegacyEntries(f.installation)).id : undefined
   const actualData = correctData ? f.data : path.join(f.parent, 'another-instance')
   if (!correctData) { await fs.mkdir(actualData); await fs.mkdir(path.join(actualData, 'agent')) }
-  const source = `const http=require('node:http'),path=require('node:path');const server=http.createServer(async(req,res)=>{let text='';for await(const b of req)text+=b;const body=JSON.parse(text);process.send({request:req.url});res.end(JSON.stringify({id:body.id,success:true,data:{definition:{module_id:'crabot-agent',cwd:path.join(process.argv[2],'crabot-agent'),env:{DATA_DIR:process.argv[1],CRABOT_AGENT_DATA_DIR:path.join(process.argv[1],'agent')}}}}))});server.listen(0,'127.0.0.1',()=>process.send({port:server.address().port}))`
+  // HTTP completion and IPC audit delivery are separate OS channels. The fake
+  // server waits until this test has observed the request before replying.
+  const source = `const http=require('node:http'),path=require('node:path');const server=http.createServer(async(req,res)=>{let text='';for await(const b of req)text+=b;const body=JSON.parse(text);await new Promise(resolve=>{process.once('message',reply=>{if(reply.ack!==body.id)throw new Error('fixture audit acknowledgement mismatch');resolve()});process.send({request:req.url,id:body.id})});res.end(JSON.stringify({id:body.id,success:true,data:{definition:{module_id:'crabot-agent',cwd:path.join(process.argv[2],'crabot-agent'),env:{DATA_DIR:process.argv[1],CRABOT_AGENT_DATA_DIR:path.join(process.argv[1],'agent')}}}}))});server.listen(0,'127.0.0.1',()=>process.send({port:server.address().port}))`
   const child = spawn(process.execPath, ['-e', source, actualData, f.root], { stdio: ['ignore', 'ignore', 'inherit', 'ipc'] })
-  child.on('message', message => { if (message.request) requests.push(message.request) })
+  child.on('message', message => {
+    if (!message.request) return
+    const observed = () => { requests.push(message.request); child.send({ ack: message.id }) }
+    if (kind === 'daemon-observer-delay') setTimeout(observed, 100); else observed()
+  })
   t.after(async () => { if (child.exitCode !== null || child.signalCode !== null) return; const exit = once(child, 'exit'); child.kill(); await exit })
   await once(child, 'message')
   // Only argv is substituted. PID/start/owner/parent/executable, TCP listener and
