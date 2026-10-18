@@ -191,7 +191,7 @@ export async function prepareCliPayload({ sourceRoot, installRoot, scope = 'user
       if (failed) throw failed.reason
       if (scope === 'system') await systemTree(pending, true)
       if ((await verifyCoreRelease(pending, { version: release.version })).inventory_sha256 !== id) throw Object.assign(new Error('待安装核心在准备期间改变，未发布。'), { code: 'CRABOT_CORE_INTEGRITY' })
-      await fs.chmod(pending, scope === 'system' ? 0o755 : rootMode)
+      if (scope === 'system') await fs.chmod(pending, 0o755)
       if (damaged) {
         await stoppedRepair()
         retainedCore = path.join(releases, '.damaged-' + id + '-' + randomUUID())
@@ -207,6 +207,7 @@ export async function prepareCliPayload({ sourceRoot, installRoot, scope = 'user
         }
       } else await fs.rename(pending, target)
       pending = undefined
+      if (scope === 'user') await fs.chmod(target, rootMode)
     }
     return { installRoot, coreRoot: target, id, version: release.version, scope, command: launcher, ...(retainedCore ? { retainedCore } : {}) }
   } catch (error) {

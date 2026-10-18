@@ -403,3 +403,27 @@ test('a data migration cannot follow an external module directory that the scope
   assert.equal(await fs.readFile(path.join(external, 'preferences'), 'utf8'), 'external-before')
   assert.equal(await fs.readFile(path.join(external, 'SCHEMA_VERSION'), 'utf8'), 'v1')
 })
+
+test('user read-only Core publication retains writable private staging until rename', { skip: process.platform === 'win32' }, async t => {
+  const f = await fixture(t), sourceRoot = await f.source('1.2.3'), rename = fs.rename
+  await fs.chmod(sourceRoot, 0o555)
+  let prepared, checked = false
+  const patch = t.mock.method(fs, 'rename', async (from, to) => {
+    if (path.basename(String(from)).startsWith('.preparing-')) {
+      checked = true
+      const mode = (await fs.stat(from)).mode & 0o777
+      if (mode !== 0o700) throw Object.assign(new Error('controlled readonly directory rename refusal'), { code: 'EACCES' })
+    }
+    return rename(from, to)
+  })
+  try {
+    prepared = await prepareCliPayload({ sourceRoot, installRoot: f.installRoot })
+    assert.equal(checked, true); assert.equal((await fs.stat(prepared.coreRoot)).mode & 0o777, 0o555)
+  } finally {
+    patch.mock.restore(); await fs.chmod(sourceRoot, 0o755)
+    if (prepared) await fs.chmod(prepared.coreRoot, 0o755)
+    // A failing old implementation may leave this fixture's readonly staging.
+    const releases = path.join(f.installRoot, 'releases')
+    for (const name of await fs.readdir(releases).catch(() => [])) if (name.startsWith('.preparing-')) await fs.chmod(path.join(releases, name), 0o700)
+  }
+})

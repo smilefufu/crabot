@@ -49,8 +49,8 @@ test('detached shared core survives its launching frontend being killed; stop re
 test('only the verified Admin UI upgrader survives core stop, including its stop CLI', async () => {
   const fixture = fileURLToPath(new URL('./fixtures/ui-maintenance.mjs', import.meta.url))
   const checkout = fileURLToPath(new URL('../../../', import.meta.url))
-  for (const mode of ['updater', 'extra-args', 'agent-parent', 'unreadable', 'cleanup-race', 'registration-delay']) {
-    const result = await promisify(execFile)(process.execPath, [fixture, checkout, mode], { timeout: 20_000 })
+  for (const mode of ['updater', 'extra-args', 'agent-parent', 'unreadable', 'cleanup-race', 'registration-delay', 'admin-registration-delay']) {
+    const result = await promisify(execFile)(process.execPath, [fixture, checkout, mode], { timeout: 35_000 })
     assert.match(result.stdout, /CONTROLLED_UI_MAINTENANCE_STOP/)
   }
 })
