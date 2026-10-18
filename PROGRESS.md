@@ -9,7 +9,7 @@
 - 本机候选18（ada422fc，0.1.0-desktop.14，1,489,365,173字节）原生安装/重复/修复23.1/10.3/22.8s；未启动本机业务MM。GUI 维护恢复已串行，拒绝自动重放未知的未完成 schema 迁移；迁移前拒绝超出备份覆盖的模块引用。新启动检查 receipt/preload 保护已接，父进程被杀后旧子仍活时新操作被拒；旧子结束后仅启动可受控重检固定 orphan preflight，不绕过 schema 保护。相关锁/安装/实例/维护85项、桌面控制21项通过；另以实际维护层/受控迁移子进程验证：父进程被杀后普通启动及GUI恢复均拒绝重放，脚本仅执行一次、备份保留；不为已有保护重复添加状态。完整旧版接管仍未完成。
 - 旧 user 接管已有真实发行识别、五入口可逆阻断/seal和同连接单次精确停机组件；两版 Windows CRLF 原始字节与 Unix 分开验证，30项定向通过。旧Python已有只读观察与独立目录重建准备：精确版本wheel、安装后解释器/pip探针、失败/取消保持原环境；相关31项定向证据通过。现场92包只读检查，两个未登记文件已核对为官方uv旧bootstrap；未重建现场环境。完整接管、启动源、默认环境/命令切换及真实业务仍待完成。
 - P7 安装包构建/解包全量核验已接 CI；最新 GUI 候选18（.14）实际 DMG 674,531,820 / ZIP 693,087,012字节及 App/ASAR/Core/fuses往返通过；仅候选，不代表可信签名或实际安装。用户暂无签名证书，取得途径见[签名指南](crabot-docs/guides/desktop-release-signing.md)。最低桌面 OS、权限/IME及实际业务验收仍独立进行。
-- CI 39086043903 的 Linux 成功、Mac两架构只读根失败已修待原生重跑；Windows到首次ready后，故意强杀GUI引发测试 readline 的未处理ECONNRESET，作业最终按90分钟期限结束。已用独立流复现并修测试传输，保留全部产品断言，2项回归通过；39090630680（803b2c6f）ARM Mac全流程成功、Intel Mac仍进行；Linux夹具登记竞态与Windows Python junction失败已修，下一轮原生重验，不能把旧轮成功算为最新源码验收。
+- 原生 CI 39090630680（803b2c6f）两Mac完整成功；Linux夹具登记与Windows junction失败已定位修复。8f89d1f4新轮Linux已越过原故障；Windows的父进程崩溃夹具误设“普通子必存活”，已按Node/libuv Job语义只对指定故障子注入detached，保留忙/中断全部断言，并补身份未知时拒绝及释放句柄；16项本机定向通过，原生待重验。测试EOF/reset修复也待此轮完整验证。
 - 用户否决原 system 升级两个选项并要求整体优化；[完整体验 Spec](crabot-docs/superpowers/specs/2026-10-18-system-mode-experience-design.md)覆盖安装、员工开通、日常管理、自动协调维护与恢复，待书面确认，未据未确认方案新增 system 实现。
 - 详细构建、原生与故障证据统一见[验收记录](crabot-docs/superpowers/plans/2026-10-17-desktop-application-validation.md)。阶段性回归、构建与真实部署/产品验收分别记录，不计整项需求完成。
 

@@ -47,7 +47,14 @@ try {
   const migration = `import{existsSync,writeFileSync,appendFileSync}from'node:fs';const data=process.argv.find(a=>a.startsWith('--data-dir=')).slice(11);appendFileSync(data+'/invocations','one\\n');writeFileSync(data+'/child-pid',String(process.pid));const deadline=setTimeout(()=>clearInterval(gate),30000);const gate=setInterval(()=>{if(existsSync(data+'/finish')){clearInterval(gate);clearTimeout(deadline);writeFileSync(data+'/preferences','changed-once')}},20)`
   const target = await prepareCliPayload({ sourceRoot: await source('1.2.4', { 'crabot-admin/schema_version': 'v2', 'crabot-admin/upgrade/from_v1_to_v2.mjs': migration }), installRoot: installation })
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => /^(PATH|HOME|USERPROFILE|SYSTEMROOT|WINDIR|TEMP|TMP|TMPDIR)$/i.test(key)))
-  const parentCode = `import{applyStoppedCliUpgrade}from${JSON.stringify(new URL('scripts/lib/standalone-cli-upgrade.mjs', checkout).href)};await applyStoppedCliUpgrade({sourceRoot:process.argv[1],targetRoot:process.argv[2],dataDir:process.argv[3],env:process.env})`
+  const parentCode = `
+    import path from 'node:path';
+    import {keepControlledChildAfterParentExit} from ${JSON.stringify(new URL('scripts/lib/__tests__/fixtures/controlled-orphan.mjs', checkout).href)};
+    import {applyStoppedCliUpgrade} from ${JSON.stringify(new URL('scripts/lib/standalone-cli-upgrade.mjs', checkout).href)};
+    const [sourceRoot,targetRoot,dataDir] = process.argv.slice(1);
+    keepControlledChildAfterParentExit(path.join(targetRoot,'crabot-admin/upgrade/from_v1_to_v2.mjs'));
+    await applyStoppedCliUpgrade({sourceRoot,targetRoot,dataDir,env:process.env});
+  `
   parent = spawn(process.execPath, ['--input-type=module', '-e', parentCode, old.coreRoot, target.coreRoot, data], { env, stdio: ['ignore', 'ignore', 'inherit'] })
   const deadline = Date.now() + 30000
   while (!(await fs.stat(path.join(admin, 'child-pid')).catch(() => null))) { assert.ok(Date.now() < deadline && parent.exitCode === null, 'controlled migration did not start'); await new Promise(resolve => setTimeout(resolve, 20)) }
@@ -83,7 +90,7 @@ try {
   assert.equal(backup.source, data)
   assert.equal(await fs.readFile(path.join(backupRoot, 'data/admin/SCHEMA_VERSION'), 'utf8'), 'v1')
   assert.equal(await fs.readFile(path.join(backupRoot, 'data/admin/preferences'), 'utf8'), 'before')
-  console.log('CRABOT_SCHEMA_FENCE ' + JSON.stringify({ platform: process.platform, controlled_payload: true, parent_crash: true, active_child_start_blocked: true,
+  console.log('CRABOT_SCHEMA_FENCE ' + JSON.stringify({ platform: process.platform, controlled_payload: true, orphan_fault_injected: windows, parent_crash: true, active_child_start_blocked: true,
     gui_recovery_replay_blocked_before_and_after_exit: true, script_invocations: 1, schema_marker_unchanged: true, backup_retained: true, business_mm_started: false }))
 } finally {
   controller?.close()

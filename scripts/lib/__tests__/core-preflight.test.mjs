@@ -5,8 +5,9 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
+import { randomUUID } from 'node:crypto'
 import { runCorePreflight } from '../core-preflight.mjs'
-import { acquireCliLock, acquireStartupLock, releaseCliLock } from '../cli-lock.mjs'
+import { acquireCliLock, acquireStartupLock, releaseCliLock, cliLockToken } from '../cli-lock.mjs'
 import state from '../preflight-state.cjs'
 import identity from '../process-identity.cjs'
 
@@ -42,16 +43,36 @@ test('a missing program produces an acknowledged failure without bypassing the g
 })
 
 test('parent crash keeps a live preflight protected, and its unacknowledged exit remains interrupted', { timeout: 15000 }, async t => {
-  const f = await fixture(t, "const fs=require('fs'),data=process.env.DATA_DIR;fs.writeFileSync(data+'/ready','yes');const deadline=setTimeout(()=>clearInterval(gate),8000);const gate=setInterval(()=>{if(fs.existsSync(data+'/finish')){clearInterval(gate);clearTimeout(deadline);fs.writeFileSync(data+'/late','preserved')}},20)")
-  const parentCode = `import{acquireCliLock}from${JSON.stringify(new URL('../cli-lock.mjs', import.meta.url).href)};import{runCorePreflight}from${JSON.stringify(new URL('../core-preflight.mjs', import.meta.url).href)};await acquireCliLock(process.argv[1],'parent');await runCorePreflight({root:process.argv[2],dataDir:process.argv[1],node:process.execPath,env:{...process.env,DATA_DIR:process.argv[1]}})`
-  const parent = spawn(process.execPath, ['--input-type=module', '-e', parentCode, f.data, f.root], { stdio: ['ignore', 'ignore', 'inherit'] })
-  t.after(() => { if (parent.exitCode === null && parent.signalCode === null) parent.kill('SIGKILL') })
+  let f, parent, receipt
+  t.after(async () => {
+    if (f) await fs.writeFile(path.join(f.data, 'finish'), 'settle-controlled-child').catch(() => {})
+    if (parent && parent.exitCode === null && parent.signalCode === null) { const ended = once(parent, 'exit'); parent.kill('SIGKILL'); await ended }
+    const deadline = Date.now() + 2000
+    while (receipt?.child && Date.now() < deadline) {
+      try { if (!identity.sameProcess(receipt.child, identity.inspectProcess(receipt.child.pid))) break }
+      catch (error) { if (error.code !== 'CRABOT_PROCESS_IDENTITY') throw error }
+      await new Promise(resolve => setTimeout(resolve, 20))
+    }
+  })
+  f = await fixture(t, "const fs=require('fs'),data=process.env.DATA_DIR;fs.writeFileSync(data+'/ready','yes');const deadline=setTimeout(()=>clearInterval(gate),8000);const gate=setInterval(()=>{if(fs.existsSync(data+'/finish')){clearInterval(gate);clearTimeout(deadline);fs.writeFileSync(data+'/late','preserved')}},20)")
+  const parentCode = `
+    import path from 'node:path';
+    import {keepControlledChildAfterParentExit} from ${JSON.stringify(new URL('./fixtures/controlled-orphan.mjs', import.meta.url).href)};
+    import {acquireCliLock} from ${JSON.stringify(new URL('../cli-lock.mjs', import.meta.url).href)};
+    import {runCorePreflight} from ${JSON.stringify(new URL('../core-preflight.mjs', import.meta.url).href)};
+    const [dataDir,root] = process.argv.slice(1);
+    keepControlledChildAfterParentExit(path.join(root,'crabot-core/dist/orphan-recovery-preflight.js'));
+    await acquireCliLock(dataDir,'parent');
+    await runCorePreflight({root,dataDir,node:process.execPath,env:{...process.env,DATA_DIR:dataDir}});
+  `
+  parent = spawn(process.execPath, ['--input-type=module', '-e', parentCode, f.data, f.root], { stdio: ['ignore', 'ignore', 'inherit'] })
   const deadline = Date.now() + 7000
   while (!(await fs.stat(path.join(f.data, 'ready')).catch(() => null))) {
     if (Date.now() > deadline || parent.exitCode !== null) assert.fail('Controlled preflight did not start')
     await new Promise(resolve => setTimeout(resolve, 20))
   }
-  const receipt = state.read(f.data), exited = once(parent, 'exit')
+  receipt = state.read(f.data)
+  const exited = once(parent, 'exit')
   parent.kill('SIGKILL'); await exited
   assert.ok(identity.sameProcess(receipt.child, identity.inspectProcess(receipt.child.pid)))
   await assert.rejects(acquireCliLock(f.data, 'next-operation', 0), { code: 'CRABOT_PREFLIGHT_BUSY' })
@@ -135,4 +156,38 @@ test('failed spawn has no possible child writer and acknowledges only its own re
       env: { ...process.env, DATA_DIR: f.data } }), { code: 'ENOENT' })
     assert.equal(state.read(f.data), null)
   } finally { releaseCliLock(lock) }
+})
+
+
+test('unknown child identity keeps the receipt protected and releases the attempted OS lock', async t => {
+  let child
+  t.after(async () => {
+    if (child && child.exitCode === null && child.signalCode === null) { const ended = once(child, 'exit'); child.kill(); await ended }
+  })
+  const f = await fixture(t, '')
+  child = spawn(process.execPath, ['-e', 'process.send("ready");setInterval(()=>{},1000)'], { stdio: ['ignore', 'ignore', 'inherit', 'ipc'] })
+  await once(child, 'message')
+  const lock = await acquireCliLock(f.data, 'controlled-unknown-child')
+  const record = { schema_version: 1, kind: 'orphan_preflight', id: randomUUID(), lock_token: cliLockToken(lock),
+    owner: identity.inspectProcess(process.pid), child: identity.inspectProcess(child.pid) }
+  try { state.publish(f.data, record) } finally { releaseCliLock(lock) }
+  const inspect = identity.inspectProcess
+  t.mock.method(identity, 'inspectProcess', pid => {
+    if (pid === child.pid) throw Object.assign(new Error('Controlled unknown identity'), { code: 'CRABOT_PROCESS_IDENTITY' })
+    return inspect(pid)
+  })
+  await assert.rejects(acquireCliLock(f.data, 'unknown-child', 0), { code: 'CRABOT_PROCESS_IDENTITY' })
+  const attempted = identity.tryFileLock(path.join(f.data, 'cli.lock'), '{}')
+  assert.ok(attempted); identity.releaseFileLock(attempted)
+  assert.equal(state.read(f.data).id, record.id)
+  t.mock.restoreAll()
+  await assert.rejects(acquireCliLock(f.data, 'still-live', 0), { code: 'CRABOT_PREFLIGHT_BUSY' })
+  const ended = once(child, 'exit'); child.kill(); await ended
+  const deadline = Date.now() + 2000
+  for (;;) {
+    try { assert.equal(identity.inspectProcess(child.pid), null); break }
+    catch (error) { if (error.code !== 'CRABOT_PROCESS_IDENTITY' || Date.now() >= deadline) throw error; await new Promise(resolve => setTimeout(resolve, 10)) }
+  }
+  await assert.rejects(acquireCliLock(f.data, 'exited-without-ack', 0), { code: 'CRABOT_PREFLIGHT_INTERRUPTED' })
+  assert.equal(state.read(f.data).id, record.id)
 })
