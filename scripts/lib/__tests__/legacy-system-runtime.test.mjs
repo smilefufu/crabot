@@ -4,7 +4,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { tmpdir } from 'node:os'
 import identity from '../process-identity.cjs'
-import { discoverLegacySystemDeployment } from '../legacy-system-runtime.mjs'
+import { discoverLegacySystemDeployment, withFencedLegacySystemRuntime } from '../legacy-system-runtime.mjs'
 const options = { skip: process.platform === 'win32' }
 function fixture(t) {
   const parent = fs.realpathSync(fs.mkdtempSync(path.join(tmpdir(), 'crabot-old-system-runtime-')))
@@ -51,4 +51,50 @@ test('code/manifest changes and replaced OS process evidence refuse the discover
   await assert.rejects(f.discover({ observeAccount: async () => (++count === 1 ? f.account : { ...f.account, manifest_fingerprint: 'c'.repeat(64) }) }))
   f.snapshot.mm = { ...f.snapshot.mm, started: 'different-start' }
   await assert.rejects(f.discover(), { code: 'CRABOT_LEGACY_RUNTIME_UNVERIFIED' })
+})
+
+
+async function fencedFixture(t) {
+  const f = fixture(t)
+  fs.chmodSync(f.data, 0o700)
+  Object.assign(f.account, { install_root: f.root, port_offset: 100 })
+  const expected = await f.discover()
+  const use = callback => withFencedLegacySystemRuntime(f.context, expected, callback, f.options)
+  return { ...f, expected, use }
+}
+
+test('fenced system adapter binds the original account/data/process evidence before exposing its same-UID RPC', options, async t => {
+  const f = await fencedFixture(t)
+  const result = await f.use(async (snapshot, rpc) => {
+    assert.equal(snapshot.state, 'running'); assert.equal(snapshot.data_dir, f.data)
+    assert.equal(typeof rpc.getDefinition, 'function'); return { accepted: true }
+  })
+  assert.deepEqual(result, { accepted: true })
+})
+
+for (const changed of ['manifest', 'code', 'data', 'controller', 'mm', 'expected-binding']) test('fenced system adapter refuses changed preflight evidence: ' + changed, options, async t => {
+  const f = await fencedFixture(t)
+  if (changed === 'manifest') f.account.manifest_fingerprint = 'c'.repeat(64)
+  if (changed === 'code') f.account.code_fingerprint = 'c'.repeat(64)
+  if (changed === 'data') { f.agent.env.DATA_DIR = f.other; f.agent.env.CRABOT_AGENT_DATA_DIR = path.join(f.other, 'agent'); fs.mkdirSync(f.agent.env.CRABOT_AGENT_DATA_DIR) }
+  if (changed === 'controller') f.expected.controller = { ...f.expected.controller, started: 'stale' }
+  if (changed === 'mm') f.expected.mm = { ...f.expected.mm, started: 'stale' }
+  if (changed === 'expected-binding') f.expected.data_binding = 'unverified'
+  let called = false
+  await assert.rejects(f.use(() => { called = true }), { code: 'CRABOT_LEGACY_SYSTEM_RUNTIME' })
+  assert.equal(called, false)
+})
+
+test('no launcher establishes stopped only with the original private data and settled module records', options, async t => {
+  const f = await fencedFixture(t); f.snapshot.state = 'stopped'
+  assert.equal((await f.use(snapshot => snapshot)).state, 'stopped')
+  fs.mkdirSync(path.join(f.data, 'module-runtime-registry/records'), { recursive: true })
+  fs.writeFileSync(path.join(f.data, 'module-runtime-registry/records/pending.json'), '{}')
+  await assert.rejects(f.use(() => assert.fail('unsettled module record cannot authorize stop')))
+  fs.unlinkSync(path.join(f.data, 'module-runtime-registry/records/pending.json'))
+  fs.writeFileSync(path.join(f.data, 'mm.pid'), String(process.pid))
+  await assert.rejects(f.use(() => assert.fail('a remaining old PID is not a stopped instance')))
+  fs.unlinkSync(path.join(f.data, 'mm.pid')); fs.renameSync(f.data, f.data + '-retained')
+  await assert.rejects(f.use(() => assert.fail('missing data cannot authorize a replacement')), { code: 'CRABOT_DATA_MISSING' })
+  assert.equal(fs.existsSync(f.data), false)
 })
