@@ -98,3 +98,33 @@ it('foreground start releases only its startup lock after MM health, while its o
   } finally { child.kill('SIGTERM'); await exited }
   expect(await fs.readFile(path.join(data, 'mm.pid'), 'utf8')).toBe('2147483000')
 }, 12000)
+
+it('actual compiled MM releases startup ownership after ingress and its exit preserves later lock/PID evidence', async () => {
+  await scripts()
+  await fs.cp(path.join(product, 'crabot-core/dist'), path.join(home, 'crabot-core/dist'), { recursive: true })
+  await fs.symlink(path.join(product, 'crabot-core/node_modules'), path.join(home, 'crabot-core/node_modules'), 'dir')
+  // Limit this main-entry test to MM lifecycle; independent core-module and venv tests cover those.
+  await write('crabot-core/dist/core-modules.js', 'exports.buildCoreModules = () => []')
+  await write('crabot-core/dist/agent-venv.js', 'exports.ensureAgentVenv = () => null')
+  const port = await new Promise(resolve => { const socket = net.createServer(); socket.listen(0, '127.0.0.1', () => { const port = socket.address().port; socket.close(() => resolve(port)) }) })
+  const child = spawn(process.execPath, [path.join(home, 'crabot-core/dist/main.js')], { cwd: path.join(home, 'crabot-core'), env: { ...env(), PORT: String(port), CRABOT_PORT_OFFSET: '0' }, stdio: ['ignore', 'pipe', 'pipe'] })
+  let output = ''; child.stdout.on('data', bytes => { output += bytes }); child.stderr.on('data', bytes => { output += bytes })
+  const exited = new Promise(resolve => child.on('close', resolve))
+  try {
+    const deadline = Date.now() + 8000
+    let healthy = false
+    while (Date.now() < deadline) {
+      try { healthy = (await (await fetch(`http://127.0.0.1:${port}/health`, { method: 'POST', body: '{}', signal: AbortSignal.timeout(200) })).json()).data.status === 'healthy' } catch {}
+      const locked = await fs.stat(path.join(data, 'cli.lock')).then(() => true, () => false)
+      if (healthy && !locked) break
+      await new Promise(resolve => setTimeout(resolve, 20))
+    }
+    expect(healthy, output).toBe(true)
+    expect(await fs.readFile(path.join(data, 'mm.pid'), 'utf8')).toBe(String(child.pid))
+    await expect(fs.stat(path.join(data, 'cli.lock'))).rejects.toThrow()
+    await fs.writeFile(path.join(data, 'cli.lock'), JSON.stringify({ pid: 2147483000, command: 'later fixture' }))
+    await fs.writeFile(path.join(data, 'mm.pid'), '2147483000')
+  } finally { child.kill('SIGTERM'); await exited }
+  expect(JSON.parse(await fs.readFile(path.join(data, 'cli.lock'), 'utf8')).command).toBe('later fixture')
+  expect(await fs.readFile(path.join(data, 'mm.pid'), 'utf8')).toBe('2147483000')
+}, 12000)

@@ -15,6 +15,7 @@ import type { ConversationRequestRecord, ExecuteConversationRequestParams, Execu
 import type { RequestPermissionSource, ConversationRequestSource } from './request-permission-sources.js'
 import type { TrustedHumanInput } from './trusted-human-input.js'
 import type { ManagerKey } from './types.js'
+import { readRequestEvent, readRequestAdmission, requestEventId, type RequestEvent, type RequestRuntimeEvent } from './request-runtime-metadata.js'
 
 export interface RequestRunContext {
   request: ConversationRequestRecord
@@ -33,40 +34,6 @@ interface Dependencies {
   validateVoiceManagement?(key: ManagerKey, requestId: string, result: import('crabot-shared').VoiceAgentManagementResult): Promise<void>
   validateEvent?(key: ManagerKey, requestId: string, event: HarnessEvent): Promise<void>
   timezone(): string
-}
-interface RequestVoiceDeliveryEvent {
-  kind: 'voice_delivery'
-  ts: string
-  seq: number
-  worker_id: string
-  result: VoicePendingResult
-}
-interface RequestVoiceManagementEvent {
-  kind: 'voice_management'
-  ts: string
-  seq: number
-  result: import('crabot-shared').VoiceAgentManagementResult
-}
-type RequestRuntimeEvent = HarnessEvent | RequestVoiceDeliveryEvent | RequestVoiceManagementEvent
-interface RequestEvent {
-  schema_version: 1 | 2 | 3
-  event_sha256?: string
-  manager_key: ManagerKey
-  request_id: string
-  source_sha256: string
-  event_id: string
-  event: RequestRuntimeEvent
-  received_at: string
-  phase: 'queued' | 'admitted' | 'settled'
-  consumed: boolean
-  context_admitted: boolean
-}
-interface Admission {
-  schema_version: 1
-  request_id: string
-  source_sha256: string
-  phase: 'admitted' | 'settled'
-  outcome: EpisodeResult['outcome'] | null
 }
 
 export function parseConversationRequestProposal(value: unknown): ExecuteConversationRequestParams {
@@ -116,7 +83,7 @@ export class ConversationRequestRunner {
       const directory = path.join(this.root, requestId), file = path.join(directory, 'admission.json')
       await this.saveOwner(key, fixed.record)
       const store = new ManagerSessionStore(path.join(directory, 'session'))
-      let admission = await this.readAdmission(file, fixed.record)
+      let admission = await readRequestAdmission(file, fixed.record)
       const checkpoint = await store.loadCheckpoint(key)
       if (!admission && checkpoint) throw new Error('Request checkpoint has no durable admission')
       if (admission?.phase === 'settled' && checkpoint) throw new Error('Settled request admission has an unfinished checkpoint')
@@ -165,9 +132,7 @@ export class ConversationRequestRunner {
     if (!fixed || !result.operation_id || !['completed', 'rejected'].includes(result.status)) throw new Error('Original management result is unavailable')
     return this.routeEvent(key, requestId, { kind: 'voice_management', ts: fixed.source.received_at, seq: 0, result: structuredClone(result) })
   }
-  private eventId(event: RequestRuntimeEvent): string {
-    return sha256CanonicalJson(event.kind === 'voice_management' ? { kind: event.kind, operation_id: event.result.operation_id } : event)
-  }
+
   private async validateEvent(key: ManagerKey, requestId: string, event: RequestRuntimeEvent): Promise<void> {
     if (event.kind === 'voice_management') {
       if (!this.deps.validateVoiceManagement) throw new Error('Management event validation is unavailable')
@@ -182,9 +147,9 @@ export class ConversationRequestRunner {
     await this.validateEvent(key, requestId, event)
     if (receipt && event.kind !== 'activity_available') throw new Error('Invalid activity receipt kind')
     const normalized = JSON.parse(JSON.stringify(event)) as RequestRuntimeEvent
-    const eventId = this.eventId(normalized), directory = path.join(this.root, requestId, 'events', eventId), file = path.join(directory, 'event.json')
+    const eventId = requestEventId(normalized), directory = path.join(this.root, requestId, 'events', eventId), file = path.join(directory, 'event.json')
     const item = await this.queueLock.run(async () => {
-      let item = await this.readEvent(file, fixed.record, eventId)
+      let item = await readRequestEvent(file, fixed.record, eventId)
       if (!item) {
         item = { schema_version: event.kind === 'voice_management' ? 3 : event.kind === 'voice_delivery' ? 2 : 1, manager_key: key, request_id: requestId, source_sha256: fixed.record.source_sha256,
           ...(event.kind === 'voice_management' ? { event_sha256: sha256CanonicalJson(normalized) } : {}),
@@ -215,7 +180,7 @@ export class ConversationRequestRunner {
       return { consumed: false, ...(receipt ? { registered: true } : {}) }
     }
     await run
-    return { consumed: (await this.readEvent(file, fixed.record, eventId))?.consumed === true }
+    return { consumed: (await readRequestEvent(file, fixed.record, eventId))?.consumed === true }
   }
 
   private drain(key: ManagerKey, requestId: string): Promise<void> {
@@ -233,7 +198,7 @@ export class ConversationRequestRunner {
   private async drainEvents(key: ManagerKey, requestId: string): Promise<void> {
     let fixed = await this.requests.get(key, requestId)
     if (!fixed || fixed.record.status !== 'open') return
-    const root = path.join(this.root, requestId), initial = await this.readAdmission(path.join(root, 'admission.json'), fixed.record)
+    const root = path.join(this.root, requestId), initial = await readRequestAdmission(path.join(root, 'admission.json'), fixed.record)
     if (initial?.phase !== 'settled' || initial.outcome !== 'completed' || await this.hasUnknownDelivery(fixed.record)) return
     const canonical = new ManagerSessionStore(path.join(root, 'session'))
     for (;;) {
@@ -245,7 +210,7 @@ export class ConversationRequestRunner {
       const pending: RequestEvent[] = []
       for (const id of entries) {
         if (!/^[a-f0-9]{64}$/.test(id)) throw new Error('Invalid private event directory')
-        const item = await this.readEvent(path.join(root, 'events', id, 'event.json'), fixed.record, id)
+        const item = await readRequestEvent(path.join(root, 'events', id, 'event.json'), fixed.record, id)
         if (!item) throw new Error('Missing private event receipt')
         if (item.phase !== 'settled') pending.push(item)
       }
@@ -336,44 +301,17 @@ export class ConversationRequestRunner {
     const ids = await fs.readdir(directory).catch(error => { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []; throw error })
     for (const id of ids) {
       if (!/^[a-f0-9]{64}$/.test(id)) throw new Error('Invalid request event directory')
-      const item = await this.readEvent(path.join(directory, id, 'event.json'), request, id)
+      const item = await readRequestEvent(path.join(directory, id, 'event.json'), request, id)
       if (!item) throw new Error('Missing request event receipt')
       if (item.phase === 'admitted' && !await new ManagerSessionStore(path.join(directory, id, 'session')).loadCheckpoint(request.manager_key)) return true
     }
     return false
   }
 
-  private async readEvent(file: string, request: ConversationRequestRecord, id: string): Promise<RequestEvent | null> {
-    let item: RequestEvent
-    try { item = JSON.parse(await fs.readFile(file, 'utf8')) }
-    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error }
-    const fields = ['schema_version', 'manager_key', 'request_id', 'source_sha256', 'event_id', 'event', 'received_at', 'phase', 'consumed', 'context_admitted']
-    if (item?.schema_version === 3) fields.push('event_sha256')
-    if (!item || typeof item !== 'object' || Array.isArray(item) || Object.keys(item).length !== fields.length || fields.some(field => !Object.prototype.hasOwnProperty.call(item, field))
-      || ![1, 2, 3].includes(item.schema_version) || (item.schema_version === 2) !== (item.event?.kind === 'voice_delivery') || (item.schema_version === 3) !== (item.event?.kind === 'voice_management') || item.manager_key !== request.manager_key || item.request_id !== request.request_id
-      || item.source_sha256 !== request.source_sha256 || item.event_id !== id || this.eventId(item.event) !== id
-      || item.schema_version === 3 && item.event_sha256 !== sha256CanonicalJson(item.event)
-      || !item.event || typeof item.event.kind !== 'string' || !Number.isFinite(Date.parse(item.event.ts)) || !Number.isInteger(item.event.seq) || item.event.seq < 0
-      || (item.event.kind === 'voice_management' ? !item.event.result?.operation_id || !['completed', 'rejected'].includes(item.event.result.status) : !request.worker_ids.includes(item.event.worker_id)) || !['queued', 'admitted', 'settled'].includes(item.phase)
-      || item.phase === 'queued' && (item.consumed || item.context_admitted) || item.phase === 'admitted' && item.consumed || item.phase === 'settled' && !item.consumed
-      || typeof item.consumed !== 'boolean' || typeof item.context_admitted !== 'boolean' || !Number.isFinite(Date.parse(item.received_at))) throw new Error('Invalid request event; refusing replay')
-    return item
-  }
-
   private report(request: ConversationRequestRecord, status: ExecuteConversationRequestResult['status']): ExecuteConversationRequestResult {
     return { request_id: request.request_id, status, delivery: request.delivery.kind, worker_ids: [...request.worker_ids] }
   }
-  private async readAdmission(file: string, request: ConversationRequestRecord): Promise<Admission | null> {
-    let value: unknown
-    try { value = JSON.parse(await fs.readFile(file, 'utf8')) }
-    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error }
-    const item = value as Partial<Admission> | null
-    if (!item || typeof item !== 'object' || Array.isArray(item) || Object.keys(item).length !== 5
-      || item.schema_version !== 1 || item.request_id !== request.request_id || item.source_sha256 !== request.source_sha256
-      || (typeof item.phase !== 'string' || !['admitted', 'settled'].includes(item.phase))
-      || (item.phase === 'admitted' ? item.outcome !== null : (typeof item.outcome !== 'string' || !['completed', 'failed', 'max_turns', 'aborted'].includes(item.outcome)))) throw new Error('Invalid request admission; refusing replay')
-    return item as Admission
-  }
+
   private async writeJsonAtomic(file: string, value: unknown): Promise<void> {
     const temporary = `${file}.${randomUUID()}.tmp`
     try {

@@ -4,20 +4,8 @@ import { randomUUID } from 'node:crypto'
 import { sha256CanonicalJson } from 'crabot-shared'
 import { AsyncMutex } from '../workers/async-mutex.js'
 import type { ConversationRequestRecord } from './conversation-request.js'
+import { parseRequestDeliveryAttempt, readRequestDeliveryConfirmation, readRequestDeliveryFile, isRequestDeliveryReceipt, type RequestDeliveryAttempt as Attempt, type RequestDeliveryReceipt as Receipt } from './request-runtime-metadata.js'
 
-interface Receipt { platform_message_id: string; sent_at: string }
-interface Attempt {
-  schema_version: 1
-  request_id: string
-  source_sha256: string
-  operation_id: string
-  target: { channel_id: string; session_id: string }
-}
-function validReceipt(value: unknown): value is Receipt {
-  const receipt = value as Partial<Receipt> | null
-  return !!receipt && typeof receipt.platform_message_id === 'string' && !!receipt.platform_message_id
-    && typeof receipt.sent_at === 'string' && Number.isFinite(Date.parse(receipt.sent_at))
-}
 
 /** Request-local outbox responsibility. Unknown sends are barriers, never automatic retries. */
 export class RequestDeliveryStore {
@@ -50,7 +38,7 @@ export class RequestDeliveryStore {
         await authorize()
         invoked = true
         const response = await send()
-        if (!validReceipt(response)) throw new Error('DELIVERY_OUTCOME_UNKNOWN')
+        if (!isRequestDeliveryReceipt(response)) throw new Error('DELIVERY_OUTCOME_UNKNOWN')
         const receipt: Receipt = { platform_message_id: response.platform_message_id, sent_at: response.sent_at }
         const file = this.file(attempt.operation_id), temporary = `${file}.${randomUUID()}.tmp`
         try {
@@ -64,29 +52,7 @@ export class RequestDeliveryStore {
     })
   }
   private file(id: string): string { return path.join(this.root, 'deliveries', `${id}.json`) }
-  private attempt(value: unknown): Attempt {
-    const item = value as Attempt
-    const fields = ['schema_version', 'request_id', 'source_sha256', 'operation_id', 'target']
-    if (!item || Object.keys(item).length !== fields.length || fields.some(field => !Object.prototype.hasOwnProperty.call(item, field))
-      || item.schema_version !== 1 || item.request_id !== this.request.request_id || item.source_sha256 !== this.request.source_sha256
-      || !/^[a-f0-9]{64}$/.test(item.operation_id) || typeof item.target?.channel_id !== 'string' || !item.target.channel_id
-      || typeof item.target.session_id !== 'string' || !item.target.session_id) throw new Error('DELIVERY_OUTCOME_UNKNOWN: Invalid request delivery record')
-    return item
-  }
-  private async confirmed(attempt: Attempt): Promise<Receipt | null> {
-    const value = await this.read(this.file(attempt.operation_id)) as (Attempt & { receipt: Receipt }) | null
-    if (!value) return null
-    const { receipt, ...saved } = value
-    this.attempt(saved)
-    if (sha256CanonicalJson(saved) !== sha256CanonicalJson(attempt) || !validReceipt(receipt)) throw new Error('DELIVERY_OUTCOME_UNKNOWN: Invalid delivery confirmation')
-    return receipt
-  }
-  private async read(file: string): Promise<unknown | null> {
-    try {
-      const value: unknown = JSON.parse(await fs.readFile(file, 'utf8'))
-      if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('DELIVERY_OUTCOME_UNKNOWN: Invalid delivery file')
-      return value
-    }
-    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error }
-  }
+  private attempt(value: unknown): Attempt { return parseRequestDeliveryAttempt(value, this.request) }
+  private confirmed(attempt: Attempt): Promise<Receipt | null> { return readRequestDeliveryConfirmation(this.root, this.request, attempt) }
+  private read(file: string): Promise<unknown | null> { return readRequestDeliveryFile(file) }
 }

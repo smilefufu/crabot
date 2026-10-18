@@ -43,8 +43,7 @@ async function inputs(root) {
 async function validateRuntimeMetadata(home, root, entries, requests) {
   if (!entries.some(entry => entry.name.startsWith(`conversation-requests${path.sep}`))) return
   const load = name => import(pathToFileURL(path.join(home, 'crabot-agent/dist/manager', name)).href)
-  const [{ ConversationRequestRunner }, { RequestDeliveryStore }] = await Promise.all([load('conversation-request-runner.js'), load('request-delivery-store.js')])
-  const reader = Object.create(ConversationRequestRunner.prototype)
+  const reader = await load('request-runtime-metadata.js')
   for (const entry of entries) {
     const parts = entry.name.split(path.sep)
     if (parts[0] !== 'conversation-requests') continue
@@ -54,16 +53,16 @@ async function validateRuntimeMetadata(home, root, entries, requests) {
     if (name === 'owner.json') {
       const owner = JSON.parse(await fs.readFile(filename, 'utf8'))
       if (owner.schema_version !== 1 || owner.request_id !== request.request_id || owner.manager_key !== request.manager_key || owner.source_sha256 !== request.source_sha256) throw new Error('Invalid request owner')
-    } else if (name === 'admission.json') await reader.readAdmission(filename, request)
-    else if (name === 'event.json') await reader.readEvent(filename, request, parts.at(-2))
+    } else if (name === 'admission.json') await reader.readRequestAdmission(filename, request)
+    else if (name === 'event.json') await reader.readRequestEvent(filename, request, parts.at(-2))
     else {
-      const delivery = new RequestDeliveryStore(path.join(root, 'agent/conversation-requests', parts[1]), request)
-      const value = await delivery.read(filename)
-      if (name === 'delivery-pending.json') delivery.attempt(value)
+      const directory = path.join(root, 'agent/conversation-requests', parts[1])
+      const value = await reader.readRequestDeliveryFile(filename)
+      if (name === 'delivery-pending.json') reader.parseRequestDeliveryAttempt(value, request)
       else {
         const { receipt, ...attempt } = value
-        delivery.attempt(attempt)
-        if (parts.at(-1) !== `${attempt.operation_id}.json` || !await delivery.confirmed(attempt)) throw new Error('Invalid delivery receipt')
+        reader.parseRequestDeliveryAttempt(attempt, request)
+        if (parts.at(-1) !== `${attempt.operation_id}.json` || !await reader.readRequestDeliveryConfirmation(directory, request, attempt)) throw new Error('Invalid delivery receipt')
       }
     }
   }

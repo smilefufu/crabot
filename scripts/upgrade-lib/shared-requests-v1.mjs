@@ -113,7 +113,7 @@ export async function validateBindings(crabotHome, backup, entries = null) {
           if (!original) throw new Error('Missing original request')
           if (entries) {
             if (originalRequests.has(request.request_id)) throw new Error('Duplicate original request')
-            originalRequests.set(request.request_id, original)
+            originalRequests.set(request.request_id, original.record)
           }
         }
       }
