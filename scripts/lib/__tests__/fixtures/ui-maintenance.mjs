@@ -27,7 +27,7 @@ import{spawn}from'node:child_process';import{once}from'node:events';import{creat
 import{ModuleRuntimeRegistry}from ${JSON.stringify(url('crabot-core/dist/module-runtime-registry.js'))};
 const registry=new ModuleRuntimeRegistry(${JSON.stringify(path.join(root, 'data'))});await registry.initialize();
 const admin=spawn(process.execPath,[${JSON.stringify(path.join(root, 'crabot-admin/dist/main.js'))}],{stdio:['ignore','inherit','inherit','ipc']});
-const runtimeId=registry.createRuntimeId();await registry.recordSpawn({moduleId:${JSON.stringify(mode === 'agent-parent' ? 'core-agent' : 'admin-web')},runtimeId,rootPid:admin.pid,modulePort:23456});
+const runtimeId=registry.createRuntimeId();await registry.recordSpawn({moduleId:${JSON.stringify(mode === 'agent-parent' ? 'crabot-agent' : 'admin-web')},runtimeId,rootPid:admin.pid,modulePort:23456});
 let stopping=false;async function stop(){if(stopping)return;stopping=true;const exited=once(admin,'exit');admin.kill();await exited;await registry.removeRuntime(runtimeId);process.exit(0)}
 process.on('SIGTERM',stop);createServer((req,res)=>{if(req.url==='/shutdown'){res.end(JSON.stringify({success:true}));void stop()}else res.end('{}')}).listen(${port},'127.0.0.1',()=>admin.send('start'));
 `)
