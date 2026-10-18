@@ -4,7 +4,8 @@ import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { tmpdir } from 'node:os'
 import { materializeLegacyRelease } from './fixtures/legacy-release.mjs'
-import { discoverLegacySystemRelease } from '../legacy-system-release.mjs'
+import { discoverLegacySystemRelease, discoverFencedLegacySystemRelease } from '../legacy-system-release.mjs'
+import { legacyEntryFiles, entryFenceBytes } from '../legacy-entry-files.mjs'
 const options = { skip: process.platform === 'win32' }
 async function fixture(t, version = 'v2026.10.15.1') {
   const parent = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'crabot-legacy-system-code-')))
@@ -57,4 +58,32 @@ test('shared entry ownership is rejected before reading employee-controlled crit
   })
   await assert.rejects(f.discover(), /管理员只读/)
   assert.equal(reads, 0)
+})
+
+
+for (const version of ['v2026.10.14.1', 'v2026.10.15.1']) test('fenced shared code is rechecked without reading the root-private transaction: ' + version, options, async t => {
+  const f = await fixture(t, version), recognized = await f.discover()
+  const args = { root: f.root, platform: 'linux', ownerUid: process.getuid(), checkRoot: () => {} }
+  await assert.rejects(discoverFencedLegacySystemRelease(args))
+  for (const file of legacyEntryFiles) await fs.writeFile(path.join(f.root, file), entryFenceBytes(file, 'system'))
+  const read = fs.readFile, lstat = fs.lstat
+  const guard = file => {
+    if (typeof file === 'string' && (file.startsWith(f.data) || file.includes('.system-takeover'))) assert.fail('readonly shared code observation cannot read root transaction or employee data')
+  }
+  t.mock.method(fs, 'readFile', (file, ...rest) => { guard(file); return read(file, ...rest) })
+  t.mock.method(fs, 'lstat', (file, ...rest) => { guard(file); return lstat(file, ...rest) })
+  const result = await discoverFencedLegacySystemRelease(args)
+  assert.deepEqual(result, recognized)
+  assert.deepEqual(Object.keys(result), ['version', 'installRoot', 'code_fingerprint'])
+})
+
+for (const changed of ['partial', 'user-fence', 'modified-code', 'source-marker', 'writable-file']) test('shared code observations reject non-system or incomplete fencing: ' + changed, options, async t => {
+  const f = await fixture(t), args = { root: f.root, platform: 'linux', ownerUid: process.getuid(), checkRoot: () => {} }
+  const original = await fs.readFile(path.join(f.root, 'scripts/start.mjs'))
+  for (const file of legacyEntryFiles) await fs.writeFile(path.join(f.root, file), entryFenceBytes(file, changed === 'user-fence' ? 'desktop' : 'system'))
+  if (changed === 'partial') await fs.writeFile(path.join(f.root, 'scripts/start.mjs'), original)
+  if (changed === 'modified-code') await fs.appendFile(path.join(f.root, 'crabot-core/dist/index.js'), 'custom')
+  if (changed === 'source-marker') await fs.mkdir(path.join(f.root, '.git'))
+  if (changed === 'writable-file') await fs.chmod(path.join(f.root, 'scripts/start.mjs'), 0o666)
+  await assert.rejects(discoverFencedLegacySystemRelease(args), { code: 'CRABOT_LEGACY_UNSUPPORTED' })
 })

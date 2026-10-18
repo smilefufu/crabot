@@ -6,6 +6,9 @@ import { createHash } from 'node:crypto'
 import { verifyRootDirectory } from './system-user.mjs'
 import { verifyLegacyReleaseEntries } from './legacy-release-identity.mjs'
 import { systemError } from './system-registry.mjs'
+import { legacyReleaseFiles } from './legacy-release-files.mjs'
+import { legacyEntryFiles, entryFenceBytes, hashEntry, readEntry } from './legacy-entry-files.mjs'
+const catalog = JSON.parse(await fs.readFile(new URL('../desktop/legacy-releases.json', import.meta.url), 'utf8'))
 
 // Check directories from the shared root outward before touching a leaf. This
 // is code-path policy only; it never follows an employee data/config reference.
@@ -28,7 +31,7 @@ export async function verifyLegacySystemCodePaths(root, relatives, ownerUid = 0)
 }
 
 // ownerUid/checkRoot are internal filesystem-fixture seams, not CLI/env options.
-export async function discoverLegacySystemRelease({ root, platform = process.platform, ownerUid = 0, checkRoot = verifyRootDirectory }) {
+async function sharedRoot(root, platform, ownerUid, checkRoot) {
   if (platform !== 'linux') throw systemError('旧共享发行的自动转换仅支持Linux。', 'CRABOT_LEGACY_UNSUPPORTED')
   root = path.resolve(root)
   await checkRoot(root)
@@ -40,8 +43,31 @@ export async function discoverLegacySystemRelease({ root, platform = process.pla
     const present = await fs.lstat(path.join(root, name)).catch(error => { if (error.code === 'ENOENT') return null; throw error })
     if (present) throw systemError('源码或已受管安装不属于标准旧发行自动转换，原代码和本地修改保留。', 'CRABOT_LEGACY_UNSUPPORTED')
   }
+  return root
+}
+function summary(root, version, files) {
+  return { version, installRoot: root, code_fingerprint: createHash('sha256').update(JSON.stringify({ version, root, files })).digest('hex') }
+}
+export async function discoverLegacySystemRelease({ root, platform = process.platform, ownerUid = 0, checkRoot = verifyRootDirectory }) {
+  root = await sharedRoot(root, platform, ownerUid, checkRoot)
   await verifyLegacySystemCodePaths(root, ['VERSION'], ownerUid)
   const { version, files } = await verifyLegacyReleaseEntries(root, { platform,
     beforeRead: ({ files }) => verifyLegacySystemCodePaths(root, Object.keys(files), ownerUid) })
-  return { version, installRoot: root, code_fingerprint: createHash('sha256').update(JSON.stringify({ version, root, files })).digest('hex') }
+  return summary(root, version, files)
+}
+
+// Public code bytes only. This works after UID drop without opening the root's
+// private fence record; it observes code and does not grant conversion authority.
+export async function discoverFencedLegacySystemRelease({ root, platform = process.platform, ownerUid = 0, checkRoot = verifyRootDirectory }) {
+  root = await sharedRoot(root, platform, ownerUid, checkRoot)
+  await verifyLegacySystemCodePaths(root, ['VERSION'], ownerUid)
+  const version = (await readEntry(path.join(root, 'VERSION'))).bytes.toString('utf8').trim()
+  if (!catalog.versions.includes(version)) throw systemError('此历史版本尚未列入自动接管范围，请保留原安装。', 'CRABOT_LEGACY_UNSUPPORTED')
+  const files = legacyReleaseFiles(catalog, version, platform)
+  await verifyLegacySystemCodePaths(root, Object.keys(files), ownerUid)
+  for (const [name, original] of Object.entries(files)) {
+    const expected = legacyEntryFiles.includes(name) ? hashEntry(entryFenceBytes(name, 'system')) : original
+    if (hashEntry((await readEntry(path.join(root, name))).bytes) !== expected) throw systemError('旧共享代码或入口隔离已改变，未继续转换。', 'CRABOT_LEGACY_UNSUPPORTED')
+  }
+  return summary(root, version, files)
 }

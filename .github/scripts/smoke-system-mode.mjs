@@ -123,6 +123,17 @@ try {
       await fs.appendFile(entry, '\n// controlled modified legacy entry\n')
       await assert.rejects(runLegacySystemAccount(employee, { root: core, release, portOffsetHint: 100 }), { code: 'CRABOT_LEGACY_UNSUPPORTED' })
       await fs.writeFile(entry, originals['scripts/start.mjs'])
+      const { LegacySystemEntryFence } = await load('scripts/lib/legacy-system-fence.mjs')
+      const sharedFence = new LegacySystemEntryFence(), operationId = randomUUID()
+      const fenced = await sharedFence.fence(release, operationId)
+      assert.equal((await fs.stat(path.join(legacyEntryFixture, '.system-takeover'))).mode & 0o777, 0o700)
+      // Code observation after UID drop must not need the root-only transaction,
+      // and the original discovery-only helper still rejects these changed bytes.
+      const codeProbe = `const{discoverFencedLegacySystemRelease}=await import(process.argv[1]);console.log(JSON.stringify(await discoverFencedLegacySystemRelease({root:process.argv[2]})))`
+      const observed = await uidCommand(['--input-type=module', '-e', codeProbe, pathToFileURL(path.join(core, 'scripts/lib/legacy-system-release.mjs')).href, legacyEntryFixture])
+      assert.deepEqual(JSON.parse(observed.stdout), release)
+      await assert.rejects(runLegacySystemAccount(employee, { root: core, release, portOffsetHint: 100 }), { code: 'CRABOT_LEGACY_UNSUPPORTED' })
+      await sharedFence.restore(legacyEntryFixture, fenced.id, operationId)
       const cleanup = `const fs=require('fs'),p=require('path');const d=p.join(process.env.HOME,'.crabot');if(fs.readdirSync(d).join(',')!=='instance.json')throw Error('unexpected fixture data');fs.unlinkSync(p.join(d,'instance.json'));fs.rmdirSync(d);`
       await uidCommand(['-e', cleanup])
     })
