@@ -56,6 +56,10 @@ function install() {
   app.once('will-quit', () => control.destroy())
   controlReader(control).on('line', command => {
     commands = commands.then(async () => {
+      if (command.startsWith('first_model:')) {
+        const result = await require('./fixtures/first-model-renderer.cjs')(window, command.slice('first_model:'.length))
+        emit('first_model', result); return
+      }
       if (command === 'close') window.close()
       else if (command === 'show') app.emit('activate')
       else if (command === 'quit_cancel' || command === 'quit_confirm') {

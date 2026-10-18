@@ -10,6 +10,7 @@ import { promisify } from 'node:util'
 import { once } from 'node:events'
 import { createServer } from 'node:net'
 import controlReader from './full-host-transport.cjs'
+import { startFirstModelProvider } from './fixtures/first-model-provider.mjs'
 import { randomBytes } from 'node:crypto'
 import { inspectInstance } from '../../scripts/lib/instance-runtime.mjs'
 import { SUPERVISOR_FORCE_TIMEOUT_MS } from '../../scripts/lib/supervisor-shutdown.mjs'
@@ -92,14 +93,30 @@ test('actual Electron host shares its real core with CLI and distinguishes hide,
     const send = value => control.write(value + '\n')
     return { child, exited: graceful => waitForExit(child, graceful), next, send, command: async value => { send(value); return next(value) } }
   }
+  const provider = await startFirstModelProvider()
+  t.after(() => provider.close())
   try {
+    const bootStarted = Date.now()
     let gui = await launch()
     const first = await gui.next('ready')
+    const initialReadyMs = Date.now() - bootStarted
     step('initial_ready')
     assert.deepEqual(first.renderer, { node: 'undefined', token: null })
     const instance = inspectInstance(data)
     assert.equal(instance.state, 'running'); assert.equal(instance.record.generation, first.generation)
     assert.notEqual(instance.record.controller.pid, gui.child.pid)
+    const firstModelStarted = Date.now()
+    gui.send('first_model:' + provider.endpoint)
+    const conversation = await gui.next('first_model')
+    assert.equal(conversation.visible_reply, true); assert.equal(conversation.durable_delivery, true); assert.equal(conversation.durable_input_ack, true)
+    assert.equal(conversation.renderer_token_absent, true); assert.equal(conversation.remote_model_verified, false)
+    const modelDeadline = Date.now() + 10_000
+    while (!provider.evidence.finished && Date.now() < modelDeadline) await new Promise(resolve => setTimeout(resolve, 100))
+    assert.equal(provider.evidence.finished, true); assert.equal(provider.evidence.failures, 0)
+    assert.equal(provider.evidence.requests, 2)
+    assert.equal(inspectInstance(data).record.generation, first.generation)
+    console.log('CRABOT_FULL_HOST_FIRST_MODEL ' + JSON.stringify({ ...conversation, requests: provider.evidence.requests, same_generation: true, initial_ready_ms: initialReadyMs, first_model_flow_ms: Date.now() - firstModelStarted }))
+    step('first_model_conversation')
     assert.equal((await gui.command('close')).visible, false)
     assert.equal(inspectInstance(data).record.generation, first.generation)
     const status = JSON.parse(await cli('status', '--json'))

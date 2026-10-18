@@ -4,7 +4,7 @@ import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs'
 // Native identity, control, SDK and UI checks always run. Rebuild the full interpreter/
 // browser payload when its inputs or actual capability consumers change, or on manual final validation.
 const prefixes = ['crabot-core/', 'crabot-memory/', 'crabot-shared/', 'crabot-mcp-tools/', 'crabot-native/', 'scripts/desktop/', 'scripts/scrapling/',
-  'scripts/computer-use/', 'scripts/lib/product-', 'scripts/lib/legacy-', 'scripts/lib/managed-mcp-', 'scripts/lib/scrapling-', 'scripts/lib/computer-use-',
+  'scripts/computer-use/', 'crabot-desktop/tests/fixtures/first-model-', 'scripts/lib/product-', 'scripts/lib/legacy-', 'scripts/lib/managed-mcp-', 'scripts/lib/scrapling-', 'scripts/lib/computer-use-',
   'scripts/lib/__tests__/legacy-python', 'scripts/lib/__tests__/system-', 'scripts/lib/system-', 'scripts/system', '.github/scripts/smoke-system',
   '.github/scripts/fixtures/product-']
 const files = new Set(['scripts/prepare-product-runtime.mjs', 'scripts/prepare-scrapling.mjs', 'scripts/prepare-computer-use.mjs',
