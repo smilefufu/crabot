@@ -21,7 +21,12 @@ assert.equal(report.files.length, extensions.length)
 for (const extension of extensions) assert.equal(report.files.filter(file => path.extname(file.file) === extension).length, 1)
 const require = createRequire(path.join(repository, 'crabot-desktop/package.json'))
 const builderRequire = createRequire(createRequire(require.resolve('electron-builder')).resolve('app-builder-lib/package.json'))
-const sevenZip = process.platform === 'win32' ? await builderRequire('./out/toolsets/7zip.js').getPath7za() : null
+let sevenZip
+if (process.platform === 'win32') {
+  assert.ok(process.env.ProgramFiles, 'Windows container verification requires the full 7-Zip build-host tool')
+  sevenZip = path.join(process.env.ProgramFiles, '7-Zip', '7z.exe')
+  assert.equal((await fs.stat(sevenZip)).isFile(), true)
+}
 async function hash(file) {
   const digest = createHash('sha256')
   for await (const chunk of createReadStream(file)) digest.update(chunk)
@@ -48,11 +53,11 @@ try {
         await runBounded('/usr/bin/dpkg-deb', ['--extract', file, output])
         application = path.join(output, 'opt/Crabot')
       } else {
-        await runBounded(sevenZip, ['x', file, '-o' + output, '-y'])
+        await runBounded(sevenZip, ['x', '-tNsis', file, '-o' + output, '-y'])
         const embedded = path.join(output, '$PLUGINSDIR/app-64.7z')
         assert.equal((await fs.lstat(embedded)).isFile(), true)
         application = path.join(output, 'app')
-        await runBounded(sevenZip, ['x', embedded, '-o' + application, '-y'])
+        await runBounded(sevenZip, ['x', '-t7z', embedded, '-o' + application, '-y'])
       }
       const resources = path.join(application, process.platform === 'darwin' ? 'Resources' : 'resources')
       const candidate = JSON.parse(await fs.readFile(path.join(resources, 'candidate-only.json'), 'utf8'))
