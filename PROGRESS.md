@@ -8,8 +8,9 @@
 - P6已接登录自启动、同通道更新入口、活动核对、共享停机/备份/恢复和独立CLI完整归档升级。无GUI包使用同一Core及内置Node；真实HTTP/SHA/解包/crabot upgrade保留停止状态和依赖已验。普通版本维护与legacy接管来源分开，未知schema迁移保持保护。最终GUI安装按钮、全平台更新后健康仍待验收。
 - [System整体Spec](crabot-docs/superpowers/specs/2026-10-18-system-mode-experience-design.md)及批量语义已确认，[协议](crabot-docs/protocols/protocol-system.md)/[计划](crabot-docs/superpowers/plans/2026-10-18-system-mode-experience-implementation.md)先行。S1–S4注册/UID隔离/systemd/本人CLI/批量/共享更新/受保护恢复已接，System扩大158项通过。Linux真实root共享所有权及umask077检查通过；首次密码回显已修复并通过真实三UID开通，员工启动健康未通过，已补隔离CI的有界服务诊断，完整托管仍未验收。
 - S5已有旧表候选与降UID发现、实际DataRoot观察、共享代码隔离/独立root事务及本人精确停止；相关67项通过、1项Linux专用待原生。专用转换纯协调器22项、受保护的原绑定注册16项及上述System146项通过，区分legacy与sealed来源、全备份后切换、未知保持保护、成功用户独立前进。专用转换作业持久化已接至原绑定注册：双份意图、boot/UID重核、失败保护及不误用普通恢复，12项新回归通过。专用停止许可/UID助手已接：当前根锁、双边boot/阶段、精确原运行绑定与完整隔离才可授权，执行前在本人UID重核根维护及协调器；205项合并回归通过。旧system本人数据保护已补：真实旧来源/manifest/root操作绑定、实际UID先于目录I/O、备份/精确取消及离线一次迁移，294项相关合并通过。完整UID迁移委托与环境/入口切换、专用恢复、已停止部署可信绑定与全部实际启动源核验尚未接通，不计完整转换通过。
-- P7原生39145289298的ARM Mac全链成功；Intel重建组前7项成功后达10分钟整步上限，预算改20分钟并补固定阶段日志，尚未计通过。Windows运行回归通过后在真实环境私有ACL处拒绝，限定新目录/标记用显式私有创建，离线重建/选择19项、产品23项通过（Windows专用各1项待原生）。83651750原生轮39147490023的Windows实际ACL、完整重建/默认切换/取消已通过，整套GUI/CLI通过并生成588,292,390字节NSIS，解包校验引用已移除依赖而失败；已改用锁定builder自带且实测支持NSIS的解包器，待新原生重验。Linux较早轮的实际DEB/ASAR/原生会话/CLI共享、GUI崩溃重连及归档升级通过，不代表systemd已完成。
+- P7原生39147490023的ARM/Intel Mac完整链均成功（包含真实Python重建/默认切换、GUI/CLI、DMG/ZIP内容、包后启动及归档升级）；20分钟重建组预算与固定阶段日志已补，最新代码仍待后续轮。Windows运行回归通过后在真实环境私有ACL处拒绝，限定新目录/标记用显式私有创建，离线重建/选择19项、产品23项通过（Windows专用各1项待原生）。83651750原生轮39147490023的Windows实际ACL、完整重建/默认切换/取消已通过，整套GUI/CLI通过并生成588,292,390字节NSIS，解包校验引用已移除依赖而失败；已改用锁定builder自带且实测支持NSIS的解包器，待新原生重验。Linux较早轮的实际DEB/ASAR/原生会话/CLI共享、GUI崩溃重连及归档升级通过，不代表systemd已完成。
 - 本机候选18（0.1.0-desktop.14）Core约1.49GB、DMG674,531,820/ZIP693,087,012字节，完整往返验证；不含后续全部改动，不能作为最新发行。用户暂无签名证书，见[指南](crabot-docs/guides/desktop-release-signing.md)；最终签名、最低桌面OS/IME/权限、资源指标及真实业务分别验收。
+- 普通CLI首次密码/改密输入另复现并修复提示早于raw/监听及粘贴回车卡死，非TTY队列保持；17项回归、真实PTY旧新对照及临时DATA_DIR实际密码轮换/epoch验证通过，未启动MM。
 - 详细证据见[验收记录](crabot-docs/superpowers/plans/2026-10-17-desktop-application-validation.md)及System计划；源码、局部回归、构建、真实部署和产品验收分开记录，不计整项需求完成。
 
 ### 任务默认目录文件授权：独立修复待审查
