@@ -11,8 +11,9 @@ import { once } from 'node:events'
 import { createServer } from 'node:net'
 import controlReader from './full-host-transport.cjs'
 import { startFirstModelProvider } from './fixtures/first-model-provider.mjs'
+import { observeDesktopResources } from '../../.github/scripts/desktop-resources.mjs'
 import { randomBytes } from 'node:crypto'
-import { inspectInstance } from '../../scripts/lib/instance-runtime.mjs'
+import { inspectInstance, identity } from '../../scripts/lib/instance-runtime.mjs'
 import { SUPERVISOR_FORCE_TIMEOUT_MS } from '../../scripts/lib/supervisor-shutdown.mjs'
 
 // A second business MM is forbidden on the developer's live host. CI has its own
@@ -119,6 +120,11 @@ test('actual Electron host shares its real core with CLI and distinguishes hide,
     console.log('CRABOT_FULL_HOST_FIRST_MODEL ' + JSON.stringify({ ...conversation, requests: provider.evidence.requests, same_generation: true, initial_ready_ms: initialReadyMs, first_model_flow_ms: Date.now() - firstModelStarted }))
     step('first_model_conversation')
     assert.equal((await gui.command('capture_chat')).captured, true)
+    const resources = { phase: 'after-first-model-conversation', ...await observeDesktopResources([
+      identity.inspectProcess(gui.child.pid), instance.record.controller, instance.record.mm,
+    ]) }
+    await writeFile(path.join(root, '.desktop-build/desktop-resources.json'), JSON.stringify(resources) + '\n')
+    console.log('CRABOT_DESKTOP_RESOURCES ' + JSON.stringify(resources))
     assert.equal((await gui.command('close')).visible, false)
     assert.equal(inspectInstance(data).record.generation, first.generation)
     const status = JSON.parse(await cli('status', '--json'))
