@@ -22,7 +22,7 @@ test('Windows stop requests MM shutdown before terminating its logging superviso
     await fs.copyFile(new URL('../../stop.mjs', import.meta.url), join(root, 'stop.mjs'))
     for (const file of ['pid.mjs', 'supervisor-shutdown.mjs']) await fs.copyFile(new URL(`../${file}`, import.meta.url), join(root, 'lib', file))
     await fs.writeFile(join(root, 'lib/instance.mjs'), 'export const resolveCliDataDir=()=>process.env.DATA_DIR')
-    await fs.writeFile(join(root, 'lib/cli-lock.mjs'), 'export const acquireCliLock=async()=>null;export const releaseCliLock=()=>{}')
+    await fs.writeFile(join(root, 'lib/cli-lock.mjs'), 'export const acquireCliLock=async()=>null;export const releaseCliLock=()=>{};export const inheritedCliLock=async()=>true')
     await fs.writeFile(join(root, 'mm.pid'), '43210')
     server.listen(0, '127.0.0.1')
     await once(server, 'listening')
