@@ -13,5 +13,13 @@
   "version_files": {
     "v2026.10.14.1": { "crabot-core/dist/core-modules.js": "11de57b8c9ab22035221b9557435793ff1d3f9e2c1764981e6cb846acbcb1753" },
     "v2026.10.15.1": { "crabot-core/dist/core-modules.js": "5daea1695b84389309d7e846dfb8d8a74957e31634ca868886e77c0c75daf62c" }
+  },
+  "platform_files": {
+    "win32": {
+      "cli.mjs": "5d0eeb65dd5a1099fd4ee2ac8083b4e6d870742028fe198de1eff652bc4cc1cc",
+      "crabot.cmd": "241882639d01bc1fb94d56e8e000f61b0ae0ce1bb6812edb3ce627b370bc302e",
+      "scripts/start.mjs": "d9cad4b8ffb2916ed16eeb9728d219b4579171a799efd8693cd4ada394e4f367",
+      "scripts/supervisor.mjs": "c266a8beadc8faff36bf33494a478a2af33e27e27cda0af5d2d3fb71a036a29d"
+    }
   }
 }

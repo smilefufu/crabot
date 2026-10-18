@@ -2,6 +2,7 @@
 // Never executes old code, stops processes, migrates data or grants authentication.
 import { promises as fs, realpathSync } from 'node:fs'
 import path from 'node:path'
+import { legacyReleaseFiles } from './legacy-release-files.mjs'
 import { createHash, randomUUID } from 'node:crypto'
 import identity from './process-identity.cjs'
 import management from './desktop-management.cjs'
@@ -63,16 +64,16 @@ async function read(root, directory) {
     const original = record.originals[file]
     if (!original || typeof original.bytes !== 'string' || !Number.isInteger(original.mode) || original.mode < 0 || original.mode > 0o777) fail()
     const bytes = Buffer.from(original.bytes, 'base64')
-    if (bytes.toString('base64') !== original.bytes || hash(bytes) !== catalog.files[file]) fail()
+    if (bytes.toString('base64') !== original.bytes || hash(bytes) !== legacyReleaseFiles(catalog, record.installation.version)[file]) fail()
   }
   if (!identity.isOwnedDirectory(record.installation.dataRoot) || realpathSync(record.installation.dataRoot) !== record.installation.dataRoot) fail()
-  const files = { ...catalog.files, ...catalog.version_files[record.installation.version] }
+  const files = legacyReleaseFiles(catalog, record.installation.version)
   if (record.installation.fingerprint !== hash(JSON.stringify({ version: record.installation.version, root: realpathSync(root), dataDir: record.installation.dataRoot, files }))) fail()
   return record
 }
 async function current(root, record) {
   if ((await regular(path.join(root, 'VERSION'))).bytes.toString('utf8').trim() !== record.installation.version) fail()
-  for (const [file, expected] of Object.entries({ ...catalog.files, ...catalog.version_files[record.installation.version] })) {
+  for (const [file, expected] of Object.entries(legacyReleaseFiles(catalog, record.installation.version))) {
     if (!entries.includes(file) && hash((await regular(path.join(root, file))).bytes) !== expected) fail()
   }
   const states = new Map()
@@ -101,13 +102,13 @@ export async function fenceLegacyEntries(installation) {
     const originals = Object.create(null)
     for (const file of entries) {
       const { bytes, mode } = await regular(path.join(checked.installRoot, file))
-      if (hash(bytes) !== catalog.files[file]) fail()
+      if (hash(bytes) !== legacyReleaseFiles(catalog, checked.version)[file]) fail()
       originals[file] = { bytes: bytes.toString('base64'), mode }
     }
     const record = { schema_version: 1, id: randomUUID(), installation: checked, phase: 'fencing', originals }
     await write(directory, record) // Durable originals before the first entry is changed.
     for (const file of entries) {
-      if (hash((await regular(path.join(checked.installRoot, file))).bytes) !== catalog.files[file]) fail()
+      if (hash((await regular(path.join(checked.installRoot, file))).bytes) !== legacyReleaseFiles(catalog, checked.version)[file]) fail()
       await replace(path.join(checked.installRoot, file), fence(file), originals[file].mode)
     }
     record.phase = 'fenced'; await write(directory, record)

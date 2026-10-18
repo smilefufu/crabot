@@ -3,6 +3,7 @@
 import { promises as fs, realpathSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import path from 'node:path'
+import { legacyReleaseFiles } from './legacy-release-files.mjs'
 import identity from './process-identity.cjs'
 import { detectMode } from './mode.mjs'
 
@@ -27,7 +28,7 @@ export async function discoverLegacyUserInstall({ root, dataDir, source = proces
     || await present(path.join(dataDir, 'desktop-managed.json'))) fail('此安装不属于可自动接管的旧 user 发行。')
   const version = (await readRegular(root, 'VERSION')).toString('utf8').trim()
   if (!catalog.versions.includes(version)) fail('此历史版本尚未列入自动接管范围，请保留原安装。')
-  const files = { ...catalog.files, ...catalog.version_files[version] }
+  const files = legacyReleaseFiles(catalog, version)
   for (const [file, expected] of Object.entries(files)) {
     if (hash(await readRegular(root, file)) !== expected) fail('旧安装的关键入口已修改，不能按标准发行自动接管。')
   }

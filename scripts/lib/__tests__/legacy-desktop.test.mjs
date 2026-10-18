@@ -50,3 +50,16 @@ for (const version of ['v2026.10.14.1', 'v2026.10.15.1']) {
     await assert.rejects(discoverLegacyUserInstall(f), /关键入口已修改/)
   })
 }
+
+// Published Windows entry files use CRLF. Even a line-ending-only edit is not
+// silently accepted as the original release on another native platform.
+test('raw platform entry fingerprints reject line-ending changes', async t => {
+  const f = await fixture(t)
+  await materializeLegacyRelease(f.root)
+  const entry = path.join(f.root, 'cli.mjs')
+  const before = await fs.readFile(entry, 'utf8')
+  const changed = process.platform === 'win32' ? before.replaceAll('\r\n', '\n') : before.replaceAll('\n', '\r\n')
+  assert.notEqual(changed, before)
+  await fs.writeFile(entry, changed)
+  await assert.rejects(discoverLegacyUserInstall({ root: f.root, dataDir: f.dataDir }), { code: 'CRABOT_LEGACY_UNSUPPORTED' })
+})
