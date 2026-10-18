@@ -1,4 +1,5 @@
 import test from 'node:test'
+import { createHash } from 'node:crypto'
 import assert from 'node:assert/strict'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
@@ -45,5 +46,43 @@ test('symlink aliases stay inside the payload and executable permissions are che
   await fs.chmod(path.join(f.root, 'bin/node'), 0o755)
   await fs.rm(path.join(f.root, 'bin/node-alias')); await fs.symlink('../../outside', path.join(f.root, 'bin/node-alias'))
   await fs.writeFile(path.join(f.parent, 'outside'), 'outside')
+  await assert.rejects(verifyCoreRelease(f.root), { code: 'CRABOT_CORE_INTEGRITY' })
+})
+
+test('inventory stays byte-compatible with sorted depth-first manifests across many asynchronous reads', async t => {
+  const f = await fixture(t)
+  const expected = new Map()
+  for (const directory of ['a', 'a/nested', '中文 空格', 'z']) {
+    await fs.mkdir(path.join(f.root, directory), { recursive: true })
+    for (let i = 0; i < 19; i++) {
+      const name = path.join(directory, `file-${i}.txt`)
+      const contents = Buffer.alloc(i * 103 + 1, i)
+      await fs.writeFile(path.join(f.root, name), contents)
+      expected.set(name.split(path.sep).join('/'), contents)
+    }
+  }
+  await writeCoreRelease(f.root, f.release)
+  const first = await fs.readFile(path.join(f.root, 'core-files.json'), 'utf8')
+  const manifest = JSON.parse(first)
+  const depthFirst = async directory => {
+    const files = []
+    for (const name of (await fs.readdir(directory)).sort()) {
+      const full = path.join(directory, name)
+      if (['core-files.json', 'core-release.json'].includes(name) && directory === f.root) continue
+      if ((await fs.lstat(full)).isDirectory()) files.push(...await depthFirst(full))
+      else files.push(path.relative(f.root, full).split(path.sep).join('/'))
+    }
+    return files
+  }
+  assert.deepEqual(Object.keys(manifest.files), await depthFirst(f.root))
+  for (const [name, bytes] of expected) {
+    assert.equal(manifest.files[name].size, bytes.length)
+    assert.equal(manifest.files[name].sha256, createHash('sha256').update(bytes).digest('hex'))
+  }
+  await verifyCoreRelease(f.root)
+  await fs.rm(path.join(f.root, 'core-files.json')); await fs.rm(path.join(f.root, 'core-release.json'))
+  await writeCoreRelease(f.root, f.release)
+  assert.equal(await fs.readFile(path.join(f.root, 'core-files.json'), 'utf8'), first)
+  await fs.writeFile(path.join(f.root, '中文 空格/file-18.txt'), Buffer.alloc(18 * 103 + 1, 99))
   await assert.rejects(verifyCoreRelease(f.root), { code: 'CRABOT_CORE_INTEGRITY' })
 })

@@ -19,25 +19,40 @@ async function hashFile(file) {
 }
 
 async function inventory(root) {
-  const files = Object.create(null)
+  const entries = []
   async function walk(directory) {
-    const entries = await fs.readdir(directory, { withFileTypes: true })
-    for (const entry of entries.sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0)) {
+    const children = await fs.readdir(directory, { withFileTypes: true })
+    for (const entry of children.sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0)) {
       const file = path.join(directory, entry.name), relative = path.relative(root, file).split(path.sep).join('/')
       if (excluded.has(relative)) continue
       if (entry.isDirectory()) await walk(file)
-      else if (entry.isFile()) {
-        const stat = await fs.lstat(file)
-        files[relative] = { type: 'file', size: stat.size, sha256: await hashFile(file),
-          ...(process.platform === 'win32' ? {} : { mode: stat.mode & 0o777 }) }
-      } else if (entry.isSymbolicLink()) {
-        const target = await fs.readlink(file)
-        if (path.isAbsolute(target) || !inside(root, await fs.realpath(file))) fail()
-        files[relative] = { type: 'link', target }
-      } else fail()
+      else if (entry.isFile() || entry.isSymbolicLink()) entries.push({ file, relative })
+      else fail()
     }
   }
   await walk(root)
+  const records = new Array(entries.length)
+  let cursor = 0
+  async function readFiles() {
+    while (cursor < entries.length) {
+      const index = cursor++, { file } = entries[index]
+      const stat = await fs.lstat(file)
+      if (stat.isFile()) {
+        records[index] = { type: 'file', size: stat.size, sha256: await hashFile(file),
+          ...(process.platform === 'win32' ? {} : { mode: stat.mode & 0o777 }) }
+      } else if (stat.isSymbolicLink()) {
+        const target = await fs.readlink(file)
+        if (path.isAbsolute(target) || !inside(root, await fs.realpath(file))) fail()
+        records[index] = { type: 'link', target }
+      } else fail()
+    }
+  }
+  // Bound open files and stream buffers; finish every reader before failure/cleanup.
+  const outcomes = await Promise.allSettled(Array.from({ length: Math.min(8, entries.length) }, readFiles))
+  const failure = outcomes.find(result => result.status === 'rejected')
+  if (failure) throw failure.reason
+  const files = Object.create(null)
+  for (let index = 0; index < entries.length; index++) files[entries[index].relative] = records[index]
   return { schema_version: 1, files }
 }
 
