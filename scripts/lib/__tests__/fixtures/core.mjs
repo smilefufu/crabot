@@ -1,6 +1,8 @@
 // A local test child, never a Crabot instance. No modules, models or production data.
 import { createServer } from 'node:http'
 import { writeFileSync } from 'node:fs'
+// A failed fixture setup must not leave its fake HTTP server holding test pipes.
+process.once('disconnect', () => process.exit(0))
 let stopping = false
 function stop() {
   if (stopping) return

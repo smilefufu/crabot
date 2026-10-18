@@ -80,5 +80,7 @@ test('package references are reported without reading their targets or hanging o
   const result = await inspect(f)
   assert.equal(result.site_references, 1); assert.equal(result.packages[0].references, 1)
   assert.equal(result.special_site_files, process.platform === 'win32' ? 0 : 1)
-  assert.equal(await fs.readFile(path.join(external, 'keep.py'), 'utf8'), 'external-content')
+  await fs.writeFile(path.join(external, 'keep.py'), 'changed-outside-environment')
+  assert.equal((await inspect(f)).fingerprint, result.fingerprint, 'External directory contents must not be traversed or hashed')
+  assert.equal(await fs.readFile(path.join(external, 'keep.py'), 'utf8'), 'changed-outside-environment')
 })

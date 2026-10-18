@@ -11,6 +11,7 @@
 - P7 安装包构建/解包全量核验已接 CI；已有 GUI 候选09（.5）的实际 DMG 674,539,349 / ZIP 693,041,636字节及 App/ASAR/Core/fuses往返通过，不代表最新 Core、可信签名或实际安装。用户暂无签名证书，取得途径见[签名指南](crabot-docs/guides/desktop-release-signing.md)。最低桌面 OS、权限/IME及实际业务验收仍独立进行。
 - CI 39086043903 的 Linux 成功、Mac两架构只读根失败已修待原生重跑；Windows到首次ready后，故意强杀GUI引发测试 readline 的未处理ECONNRESET，作业最终按90分钟期限结束。已用独立流复现并修测试传输，保留全部产品断言，2项回归通过；39090630680（803b2c6f）正在四平台原生验证，尚不含后续preflight/传输修复。
 - 用户否决原 system 升级两个选项并要求整体优化；[完整体验 Spec](crabot-docs/superpowers/specs/2026-10-18-system-mode-experience-design.md)覆盖安装、员工开通、日常管理、自动协调维护与恢复，待书面确认，未据未确认方案新增 system 实现。
+- 新候选17（cfa03abc，.13，32,738文件/1,489,365,017字节）实际原生 CLI 安装/重复/修复15.0/6.8/15.1s，保留用户环境、受损载荷及停止状态，未启动业务MM。803b2c6f 原生CI又定位Windows junction漏识别、Linux夹具ready早于身份登记；已修读侧引用判定/遍历剪枝，夹具竞态注入250ms先失败后通过，实例/后台9项、Python4项通过，原生重跑仍待结果。
 - 详细构建、原生与故障证据统一见[验收记录](crabot-docs/superpowers/plans/2026-10-17-desktop-application-validation.md)。阶段性回归、构建与真实部署/产品验收分别记录，不计整项需求完成。
 
 ### 任务默认目录文件授权：独立修复待审查
