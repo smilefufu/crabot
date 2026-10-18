@@ -3,6 +3,8 @@
 import { existsSync, lstatSync, readFileSync, realpathSync, writeFileSync, openSync, fsyncSync, closeSync, renameSync, rmSync } from 'node:fs'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
+import { userInfo } from 'node:os'
+import { withFencedLegacySystemRuntime } from './legacy-system-runtime.mjs'
 import identity from './process-identity.cjs'
 import management from './desktop-management.cjs'
 import { acquireStartupLock, releaseCliLock, cliLockToken } from './cli-lock.mjs'
@@ -40,8 +42,9 @@ export function readVersionMaintenance(dataDir) {
     const validSource = record.schema_version === 1
       ? version(record.source_version) && /^[a-f0-9]{64}$/.test(record.source_inventory_sha256) && source === undefined
       : record.schema_version === 2 && legacyVersions.includes(record.source_version) && record.source_inventory_sha256 === undefined
-        && record.system_operation_id === undefined && record.target_core !== undefined && source?.scope === 'user' && uuid(source.entry_fence_id)
-        && /^[a-f0-9]{64}$/.test(source.fingerprint) && Object.keys(source).length === 3
+        && record.target_core !== undefined && uuid(source?.entry_fence_id) && /^[a-f0-9]{64}$/.test(source.fingerprint)
+        && (source.scope === 'user' && record.system_operation_id === undefined && Object.keys(source).length === 3
+          || source.scope === 'system' && uuid(record.system_operation_id) && /^[a-f0-9]{64}$/.test(source.manifest_fingerprint) && Object.keys(source).length === 4)
     if (!validSource || !uuid(record.id) || record.data_dir !== realpathSync(dataDir)
       || !path.isAbsolute(record.install_root) || !version(record.target_version)
       || record.target_core !== undefined && (!record.target_core || typeof record.target_core.root !== 'string'
@@ -65,7 +68,10 @@ function write(dataDir, record, initial = false) {
 }
 export function assertVersionMaintenanceAllowsStart(dataDir) {
   const record = readVersionMaintenance(dataDir)
-  if (record && (!recovering.has(record.id) || !cliLockToken(path.join(realpathSync(dataDir), 'cli.lock')))) fail()
+  if (record && (!recovering.has(record.id) || !cliLockToken(path.join(realpathSync(dataDir), 'cli.lock')))) {
+    if (record.system_operation_id) throw Object.assign(new Error('管理员版本维护尚未核验完成。请联系管理员运行crabot system status检查恢复；原数据和备份已保留。'), { code: 'CRABOT_MAINTENANCE_PENDING' })
+    fail()
+  }
 }
 export async function beginVersionMaintenance(dataDir, root, targetVersion, sourceVersion, { systemOperationId } = {}) {
   dataDir = locked(dataDir)
@@ -108,6 +114,61 @@ export async function beginLegacyUserVersionMaintenance({ dataDir, installation,
   if ((await legacyUserSource(record)).phase !== 'fenced') fail()
   write(dataDir, record, true); return record
 }
+// Dedicated system source adapter. Root authorization/entry sealing belongs to
+// the conversion role; these methods only protect this already-dropped UID's data.
+function assertLegacySystemUid(context) {
+  const actual = userInfo(), account = context?.account
+  if (!account || account.uid <= 0 || actual.uid !== account.uid || actual.gid !== account.gid
+    || actual.username !== account.user || actual.homedir !== account.home) fail()
+}
+async function legacySystemSource(record, { context, expected, operationId, entryFenceId, runtimeOptions }) {
+  assertLegacySystemUid(context)
+  if (record?.schema_version !== 2 || record.legacy_source?.scope !== 'system' || record.system_operation_id !== operationId
+    || record.legacy_source.entry_fence_id !== entryFenceId || record.install_root !== context.release?.installRoot
+    || record.source_version !== context.release.version || record.legacy_source.fingerprint !== context.release.code_fingerprint
+    || record.legacy_source.manifest_fingerprint !== expected?.manifest_fingerprint || record.data_dir !== expected?.data_dir
+    || inspectInstance(record.data_dir).state !== 'stopped') fail()
+  const observed = await withFencedLegacySystemRuntime(context, expected, value => value, runtimeOptions)
+  if (observed.state !== 'stopped') fail()
+}
+export async function beginLegacySystemVersionMaintenance(options) {
+  const { context, expected, entryFenceId, operationId } = options
+  assertLegacySystemUid(context)
+  const dataDir = management.requirePrivateDataRoot(options.dataDir); locked(dataDir)
+  if (readVersionMaintenance(dataDir) || !uuid(entryFenceId) || !uuid(operationId) || expected?.data_dir !== dataDir
+    || !legacyVersions.includes(context.release?.version) || !/^[a-f0-9]{64}$/.test(expected.manifest_fingerprint)) fail()
+  const targetRoot = realpathSync(options.targetRoot), release = await verifyCoreRelease(targetRoot)
+  const record = { schema_version: 2, id: randomUUID(), data_dir: dataDir, install_root: realpathSync(context.release.installRoot),
+    source_version: context.release.version, target_version: release.version, system_operation_id: operationId,
+    legacy_source: { scope: 'system', entry_fence_id: entryFenceId, fingerprint: context.release.code_fingerprint,
+      manifest_fingerprint: expected.manifest_fingerprint },
+    target_core: { root: targetRoot, inventory_sha256: release.inventory_sha256 }, phase: 'preparing', backup: null }
+  await legacySystemSource(record, options)
+  write(dataDir, record, true); return record
+}
+// The root conversion role must have sealed shared entries before dispatching
+// this step. Employees never read or modify the root-private fence transaction.
+export async function markLegacySystemVersionMaintenanceInstalling(options) {
+  assertLegacySystemUid(options.context)
+  const dataDir = locked(management.requirePrivateDataRoot(options.dataDir)), record = readVersionMaintenance(dataDir)
+  if (record?.id !== options.id || record.phase !== 'backed_up') fail()
+  await backupOf(dataDir, record)
+  await legacySystemSource(record, options)
+  record.phase = 'installing'; write(dataDir, record)
+}
+export async function cancelPreparedLegacySystemVersionMaintenance(options) {
+  assertLegacySystemUid(options.context)
+  const dataDir = locked(management.requirePrivateDataRoot(options.dataDir)), record = readVersionMaintenance(dataDir)
+  if (record?.id !== options.id || !['preparing', 'backed_up'].includes(record.phase)) fail()
+  await legacySystemSource(record, options)
+  if (record.backup) await backupOf(dataDir, record)
+  await legacySystemSource(record, options)
+  const current = readVersionMaintenance(dataDir)
+  if (current?.id !== record.id || current.phase !== record.phase) fail()
+  rmSync(path.join(dataDir, name)); syncDirectory(dataDir)
+  return { preparation_cancelled: true, service_started: false }
+}
+
 // Bind an already verified immutable target before replacement begins. Existing
 // in-place App updates omit this field and retain their original root contract.
 export async function bindVersionMaintenanceTarget(dataDir, id, root) {
