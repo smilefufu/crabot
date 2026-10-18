@@ -1,12 +1,11 @@
 // CLI and browser-admin release adapters share read/copy preparation. The target
 // coordinator owns the stopped-state transaction; these functions never stop/start MM.
-import { promises as fs } from 'node:fs'
 import path from 'node:path'
-import { stageRelease } from '../upgrade-lib/release.mjs'
-import { prepareCliPayload, locateCliInstallation } from './cli-installation.mjs'
+import { locateCliInstallation } from './cli-installation.mjs'
 import { verifyCoreRelease } from './core-release.mjs'
 import { runBounded } from './run-bounded.mjs'
 import product from './product-runtime.cjs'
+import { prepareDownloadedCliPayload } from './cli-release-preparation.mjs'
 
 function currentInstallation(root) {
   const installation = locateCliInstallation(root)
@@ -15,16 +14,8 @@ function currentInstallation(root) {
 }
 
 // May run while MM is active: no data snapshot/migration, selector switch or service mutation.
-export async function prepareDownloadedCliUpgrade({ root, artifact, logger }) {
-  try {
-    const installation = currentInstallation(root)
-    await verifyCoreRelease(root) // Repair a damaged source from an external complete installer first.
-    const staged = await stageRelease({ ...artifact, logger })
-    const prepared = await prepareCliPayload({ sourceRoot: staged, installRoot: installation.root,
-      version: artifact.version.replace(/^v/, '') })
-    if (prepared.id === installation.id) throw new Error('目标与当前核心相同，无需切换。')
-    return prepared
-  } finally { await fs.rm(artifact.tmp, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
+export async function prepareDownloadedCliUpgrade(options) {
+  return prepareDownloadedCliPayload({ ...options, scope: 'user' })
 }
 
 export async function applyPreparedCliUpgrade({ root, dataDir, prepared }) {

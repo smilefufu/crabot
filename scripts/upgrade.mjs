@@ -183,7 +183,11 @@ async function main() {
   }
 
   const standalone = locateCliInstallation(CRABOT_HOME)
-  if (standalone && standalone.scope !== 'user') throw new Error('内置 system CLI 更新适配尚未就绪，未更改共享核心；请保留当前安装并联系管理员。')
+  if (standalone?.scope === 'system') {
+    const { runSystemUpgradeCli } = await import('./lib/system-upgrade-cli.mjs')
+    process.exitCode = await runSystemUpgradeCli({ root: CRABOT_HOME, yes: ASSUME_YES, logger })
+    return
+  }
   if (standalone && inspectInstance(DATA_DIR).state !== 'stopped') throw new Error('实例尚未核验停止，请先运行 crabot stop。')
   if (isMmRunning()) {
     console.error('[upgrade] Module Manager appears to be running. Run `crabot stop` first.')

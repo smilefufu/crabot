@@ -4,8 +4,8 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { userInfo } from 'node:os'
 import { fileURLToPath } from 'node:url'
-import { readSystemUserPermit } from './lib/system-user.mjs'
-import { applySystemUserBinding } from './lib/system-context.mjs'
+import { readSystemUserPermit, systemUserEnvironment } from './lib/system-user.mjs'
+import { applySystemUserBinding, assertSystemControlAvailable } from './lib/system-context.mjs'
 import { controlSystemUser, inspectSystemUser, systemctlForUser } from './lib/system-control.mjs'
 import { systemError } from './lib/system-registry.mjs'
 import management from './lib/desktop-management.cjs'
@@ -13,15 +13,18 @@ import { acquireCliLock, releaseCliLock } from './lib/cli-lock.mjs'
 import { systemdAvailable } from './lib/system-service.mjs'
 import { stopInstance } from './lib/instance-controller.mjs'
 import { inspectInstance } from './lib/instance-runtime.mjs'
+import { maintainSystemUser } from './lib/system-user-upgrade.mjs'
+import { validateSystemDeployment } from './lib/system-upgrade.mjs'
 
 const root = fileURLToPath(new URL('../', import.meta.url))
-console.log = (...args) => console.error(...args)
-let lock
+const reply = frame => fs.writeFileSync(4, JSON.stringify(frame) + '\n')
+let lock, diagnosticEntry
 try {
   const permit = readSystemUserPermit(), entry = permit.entry, account = userInfo()
   if (process.platform !== 'linux' || account.uid !== entry.uid || account.gid !== entry.gid || account.username !== entry.user
     || account.homedir !== entry.home || process.argv[2] !== permit.action) throw systemError('UID助手与管理员委托身份不一致。')
   applySystemUserBinding(entry)
+  diagnosticEntry = entry
   process.stdin.setEncoding('utf8')
   let input = '', bytes = 0
   for await (const chunk of process.stdin) { bytes += Buffer.byteLength(chunk); if (bytes > 65536) throw systemError('UID助手输入过大。'); input += chunk }
@@ -46,6 +49,11 @@ try {
     if (!fs.existsSync(manifest)) fs.writeFileSync(manifest, JSON.stringify({ mode: 'system', port_offset: entry.port_offset,
       applied_cluster_version: null, applied_at: new Date().toISOString(), data_dir: dataDir, crabot_home: root }) + '\n', { flag: 'wx', mode: 0o600, flush: true })
     result = { prepared: true, credential_preserved: Boolean(credentials) }
+  } else if (['snapshot', 'migrate', 'cancel-preparation'].includes(permit.action)) {
+    validateSystemDeployment(permit.deployment)
+    assertSystemControlAvailable(entry, { permit })
+    result = await maintainSystemUser(entry, { action: permit.action, deployment: permit.deployment,
+      operationId: permit.operation_id, snapshot: permit.snapshot, env: systemUserEnvironment(entry) })
   } else if (permit.action === 'inspect') result = await inspectSystemUser(entry)
   else if (['start', 'stop', 'restart'].includes(permit.action)) result = await controlSystemUser(entry, permit.action, permit.previous, { permit })
   else if (permit.action === 'configure-service') {
@@ -63,8 +71,23 @@ try {
     }
     result = { disabled: true }
   } else throw systemError('UID助手动作不兼容。')
-  process.stdout.write(JSON.stringify({ ok: true, result }) + '\n')
+  reply({ ok: true, result })
 } catch (error) {
-  process.stdout.write(JSON.stringify({ ok: false, code: error.code ?? 'CRABOT_SYSTEM_USER_FAILED', message: error.message }) + '\n')
+  let diagnostic = false
+  if (diagnosticEntry) {
+    let fd
+    try {
+      management.ensurePrivateDataRoot(diagnosticEntry.data_dir)
+      const logs = management.ensurePrivateDataRoot(path.join(diagnosticEntry.data_dir, 'logs'))
+      fd = fs.openSync(path.join(logs, 'system-maintenance.log'), fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_APPEND | fs.constants.O_NOFOLLOW, 0o600)
+      const stat = fs.fstatSync(fd)
+      if (stat.uid === diagnosticEntry.uid && stat.isFile() && stat.nlink === 1 && (stat.mode & 0o777) === 0o600) {
+        fs.writeSync(fd, new Date().toISOString() + ' ' + (error.stack ?? 'Unknown system operation failure') + '\n'); diagnostic = true
+      }
+    } catch {} finally { if (fd !== undefined) fs.closeSync(fd) }
+  }
+  const controlled = typeof error.code === 'string' && error.code.startsWith('CRABOT_')
+  reply({ ok: false, code: controlled ? error.code : 'CRABOT_SYSTEM_USER_FAILED',
+    message: controlled ? error.message : '员工实例操作未完成，请检查本人诊断日志。', diagnostic_available: diagnostic })
   process.exitCode = 1
 } finally { releaseCliLock(lock) }

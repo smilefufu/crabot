@@ -6,7 +6,7 @@ import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { systemError, validateSystemEntries } from './system-registry.mjs'
 
-const helperActions = new Set(['prepare', 'inspect', 'start', 'stop', 'restart', 'disable', 'configure-service'])
+const helperActions = new Set(['prepare', 'inspect', 'start', 'stop', 'restart', 'disable', 'configure-service', 'snapshot', 'migrate', 'cancel-preparation'])
 const safePath = '/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin'
 export function systemUserEnvironment(entry) {
   validateSystemEntries([entry])
@@ -22,16 +22,19 @@ export function systemUserCommand(entry, { node, helper, action }) {
     env: systemUserEnvironment(entry), cwd: '/' }
 }
 
-export function verifyRootExecutable(file) {
+function verifyRootPath(file, directory) {
   file = path.resolve(file)
   for (let current = file;; current = path.dirname(current)) {
     const stat = fs.lstatSync(current)
-    if (stat.isSymbolicLink() || stat.uid !== 0 || stat.mode & 0o022 || current === file && !stat.isFile()
-      || current !== file && !stat.isDirectory()) throw systemError('共享助手或其父目录并非管理员只读安装，未执行。')
+    if (stat.isSymbolicLink() || stat.uid !== 0 || stat.mode & 0o022 || current === file && !(directory ? stat.isDirectory() : stat.isFile())
+      || current !== file && !stat.isDirectory()) throw systemError('共享安装路径并非管理员只读：' + current + '（uid=' + stat.uid + '，mode=' + (stat.mode & 0o7777).toString(8) + '）；未执行。')
     if (current === '/') break
   }
   return file
 }
+
+export function verifyRootExecutable(file) { return verifyRootPath(file, false) }
+export function verifyRootDirectory(file) { return verifyRootPath(file, true) }
 
 // A root-owned private descriptor proves delegation even on /proc mounts that
 // prevent an employee UID from inspecting its root parent. No root API is opened.
@@ -44,7 +47,7 @@ export function readSystemUserPermit(fd = 3, ownerUid = 0) {
   return permit
 }
 
-export async function runSystemUser(entry, { root, action, input = null, operationId, previous, spawnProcess = spawn }) {
+export async function runSystemUser(entry, { root, action, input = null, operationId, previous, deployment, snapshot, spawnProcess = spawn }) {
   if (process.platform !== 'linux' || process.getuid?.() !== 0) throw systemError('跨用户控制仅Linux管理员可执行。', 'CRABOT_SYSTEM_ADMIN_REQUIRED')
   const node = verifyRootExecutable(path.join(root, '.product-runtime/node/bin/node'))
   const helper = verifyRootExecutable(path.join(root, 'scripts/system-user-helper.mjs'))
@@ -54,25 +57,25 @@ export async function runSystemUser(entry, { root, action, input = null, operati
   const directory = fs.lstatSync(permits)
   if (!directory.isDirectory() || directory.isSymbolicLink() || directory.uid !== 0 || (directory.mode & 0o777) !== 0o700) throw systemError('管理员委托目录无法核验。')
   const id = randomUUID(), file = path.join(permits, id + '.json')
-  const record = { schema_version: 1, id, entry, action, operation_id: operationId ?? null, previous: previous ?? null }
+  const record = { schema_version: 1, id, entry, action, operation_id: operationId ?? null, previous: previous ?? null, deployment: deployment ?? null, snapshot: snapshot ?? null }
   fs.writeFileSync(file, JSON.stringify(record) + '\n', { flag: 'wx', mode: 0o600, flush: true })
   fs.chmodSync(file, 0o600)
   let fd
   try {
     fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW)
     return await new Promise((resolve, reject) => {
-      const child = spawnProcess(request.command, request.args, { cwd: request.cwd, env: request.env, stdio: ['pipe', 'pipe', 'pipe', fd] })
+      const child = spawnProcess(request.command, request.args, { cwd: request.cwd, env: request.env, stdio: ['pipe', 'ignore', 'ignore', fd, 'pipe'] })
       let stdout = '', bytes = 0, failure
       const unknown = () => systemError('该用户操作失败或结果未知，请检查本人状态与日志。', 'CRABOT_SYSTEM_USER_UNKNOWN')
       const timer = setTimeout(() => { failure ??= unknown(); child.kill('SIGTERM') }, 180_000)
-      child.stdout.setEncoding('utf8')
-      child.stdout.on('data', data => {
+      const replies = child.stdio[4]
+      replies.setEncoding('utf8')
+      replies.on('data', data => {
         bytes += Buffer.byteLength(data)
         if (bytes > 1024 * 1024) { failure ??= unknown(); child.kill('SIGTERM') }
         else stdout += data
       })
-      // Drain diagnostics without ever reflecting employee/provider output into root logs.
-      child.stderr.resume()
+      // Ordinary stdout/stderr are not a control channel and never enter root logs.
       child.stdin.on('error', () => { failure ??= unknown() })
       child.on('error', () => { failure ??= unknown() })
       child.on('close', () => {

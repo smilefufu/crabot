@@ -5,6 +5,7 @@ import path from 'node:path'
 import { tmpdir } from 'node:os'
 import { SystemRegistry } from '../system-registry.mjs'
 import { SystemOperationStore } from '../system-operation.mjs'
+import { planSystemUpgrade } from '../system-upgrade.mjs'
 import { planSystemBatch } from '../system-batch.mjs'
 
 const options = { skip: process.platform === 'win32' }
@@ -63,4 +64,41 @@ test('changed administrator binding after preview is rejected before a job is cr
   await registry.update(entries => entries.map(entry => ({ ...entry, autostart: true })))
   await assert.rejects(store.prepare(plan), { code: 'CRABOT_SYSTEM_INSTANCE_CHANGED' })
   assert.equal(store.maintenance(), null)
+})
+
+
+test('shared update persists its distinct stages and excludes omitted or newly registered users', options, async t => {
+  const { store, registry } = await fixture(t)
+  const instances = registry.read().map(entry => ({ entry, observation: { state: 'stopped', generation: null } }))
+  const plan = planSystemUpgrade({ installRoot: '/opt/crabot', source: { id: 'a'.repeat(64), version: '1.2.3' },
+    target: { id: 'b'.repeat(64), version: '1.2.4' }, instances })
+  await assert.rejects(store.prepare({ ...plan, instances: instances.slice(0, 1) }), { code: 'CRABOT_SYSTEM_INSTANCE_CHANGED' })
+  await store.prepare(plan)
+  assert.equal(store.maintenance().operation, 'upgrade')
+  let selected = plan.source.id
+  const result = await store.run(plan.id, { upgrade: {
+    snapshot: async () => ({ system_operation_id: plan.id }), select: async () => { selected = plan.target.id },
+    selected: async () => selected, migrate: async () => {}, observe: async () => ({ state: 'stopped' }),
+    stop: () => assert.fail('originally stopped'), startSource: () => assert.fail(), startTarget: () => assert.fail(),
+  } })
+  assert.equal(result.exit_code, 0); assert.equal(store.maintenance().phase, 'completed')
+  assert.equal(store.read(store.file(plan.id), true).progress.stage, 'migration_completed')
+  store.assertIdle()
+  await assert.rejects(store.run(plan.id, { upgrade: {} }), { code: 'CRABOT_SYSTEM_OPERATION_INTERRUPTED' })
+})
+
+
+test('private completion without the public fence update cannot be reported as success', options, async t => {
+  const { store, plan } = await fixture(t); await store.prepare(plan)
+  const write = store.write.bind(store)
+  store.write = (file, record, mode) => {
+    if (file.endsWith('/maintenance.json') && record.phase === 'completed') throw new Error('public journal fsync failed')
+    return write(file, record, mode)
+  }
+  await assert.rejects(store.run(plan.id, { apply: async () => ({ state: 'started' }) }), /public journal/)
+  store.write = write
+  assert.equal(store.read(store.file(plan.id), true).phase, 'completed')
+  assert.equal(store.maintenance().phase, 'running')
+  assert.throws(() => store.completion(plan.id), { code: 'CRABOT_SYSTEM_JOURNAL_FAILED' })
+  assert.throws(() => store.assertIdle(), { code: 'CRABOT_SYSTEM_BUSY' })
 })

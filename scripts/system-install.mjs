@@ -5,11 +5,14 @@ import { fileURLToPath } from 'node:url'
 import { SystemRegistry, systemError } from './lib/system-registry.mjs'
 import { installSystemUserService, systemdAvailable } from './lib/system-service.mjs'
 import cliLocation from './lib/cli-location.cjs'
+import { verifyRootExecutable } from './lib/system-user.mjs'
 try {
   const root = fileURLToPath(new URL('../', import.meta.url)), registry = new SystemRegistry()
   registry.authority()
   const installation = cliLocation.assertSelectedCli(root)
   if (!installation || installation.scope !== 'system') throw systemError('只接受已选中的完整system发行。')
+  verifyRootExecutable(path.join(root, 'scripts/system-user-helper.mjs'))
+  verifyRootExecutable(path.join(root, '.product-runtime/node/bin/node'))
   if (!fs.existsSync('/etc/crabot')) { fs.mkdirSync('/etc/crabot', { mode: 0o755 }); fs.chmodSync('/etc/crabot', 0o755) }
   if (!fs.existsSync(path.join(registry.directory, 'instances.json'))) {
     const old = '/etc/crabot/registry/ports.json'

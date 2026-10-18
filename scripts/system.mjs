@@ -1,7 +1,5 @@
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { execFile } from 'node:child_process'
-import { promisify } from 'node:util'
 import { createInterface } from 'node:readline/promises'
 import { parseSystemArguments } from './lib/system-arguments.mjs'
 import { SystemRegistry, systemError } from './lib/system-registry.mjs'
@@ -10,8 +8,9 @@ import { planSystemBatch, requireBatchConfirmation } from './lib/system-batch.mj
 import { runSystemUser, verifyRootExecutable } from './lib/system-user.mjs'
 import { installSystemUserService, ensureSystemUserManager, systemdAvailable } from './lib/system-service.mjs'
 import cliLocation from './lib/cli-location.cjs'
+import { submitSystemOperation, systemOperationStage } from './lib/system-job-client.mjs'
 
-const execute = promisify(execFile), root = fileURLToPath(new URL('../', import.meta.url))
+const root = fileURLToPath(new URL('../', import.meta.url))
 async function password() {
   process.stdin.setEncoding('utf8')
   if (!process.stdin.isTTY) throw systemError('首次开通请在管理员交互终端设置初始密码；不从命令参数或环境变量读取密码。')
@@ -46,7 +45,10 @@ try {
   const store = new SystemOperationStore(registry)
   if (args.action === 'status') {
     const maintenance = store.maintenance()
-    if (maintenance) console.log('作业 ' + maintenance.id + ': ' + maintenance.operation + ' / ' + maintenance.phase)
+    if (maintenance) {
+      console.log('作业 ' + maintenance.id + ': ' + maintenance.operation + ' / ' + maintenance.phase)
+      if (maintenance.stage) console.log('当前阶段：' + systemOperationStage(maintenance.stage))
+    }
     for (const entry of registry.read()) {
       if (!entry.enabled) { console.log(entry.user + '\t已停用（数据保留）'); continue }
       try {
@@ -60,7 +62,7 @@ try {
     }
     if (maintenance) {
       const job = store.read(store.file(maintenance.id), true)
-      for (const row of job?.progress?.results ?? []) console.log(row.user + '\t' + row.state + (row.message ? '：' + row.message : ''))
+      for (const row of job?.progress?.results ?? []) console.log(row.user + '\t' + row.state + (row.message || row.error?.message ? '：' + (row.message ?? row.error.message) : ''))
       if (maintenance.unsettled.length) console.log('结果未知用户UID：' + maintenance.unsettled.join(', ') + '；保留维护保护，未自动重试。')
     }
   } else if (args.action === 'user') {
@@ -109,23 +111,6 @@ try {
       try { answer = await prompt.question('当前工作可能中断，确认本次维护？[y/N] ') } finally { prompt.close() }
       if (!/^y(es)?$/i.test(answer.trim())) throw systemError('已取消，未执行任何启停。')
     }
-    await store.prepare(plan)
-    const node = verifyRootExecutable(path.join(root, '.product-runtime/node/bin/node'))
-    const job = verifyRootExecutable(path.join(root, 'scripts/system-job.mjs'))
-    await execute('/usr/bin/systemd-run', ['--quiet', '--unit=crabot-operation-' + plan.id, '--service-type=exec',
-      '--property=WorkingDirectory=/', '--property=Restart=no', node, job, plan.id], {
-      env: { PATH: '/usr/sbin:/usr/bin:/sbin:/bin', LANG: 'C.UTF-8' }, cwd: '/', timeout: 15_000, maxBuffer: 65536 })
-    console.log('已提交作业 ' + plan.id + '；SSH断开后继续，可运行sudo crabot system status查看。')
-    for (;;) {
-      const current = store.read(store.file(plan.id), true)
-      if (current.phase === 'completed') {
-        for (const row of current.progress.results) console.log(row.user + '\t' + row.state + (row.message ? '：' + row.message : ''))
-        console.log('完成：' + current.progress.results.length + '个实例。'); process.exitCode = current.progress.exit_code; break
-      }
-      const state = await execute('/usr/bin/systemctl', ['show', 'crabot-operation-' + plan.id, '--property=ActiveState', '--value'],
-        { env: { PATH: '/usr/sbin:/usr/bin:/sbin:/bin', LANG: 'C.UTF-8' }, cwd: '/', timeout: 5000, maxBuffer: 4096 })
-      if (['failed', 'inactive'].includes(state.stdout.trim())) throw systemError('协调作业已停止，结果需要核对；维护记录保留，请运行system status，不自动重试。', 'CRABOT_SYSTEM_OPERATION_INTERRUPTED')
-      await new Promise(resolve => setTimeout(resolve, 500))
-    }
+    process.exitCode = await submitSystemOperation(plan, { root, store })
   }
 } catch (error) { console.error('[crabot] ' + error.message); process.exitCode = 1 }

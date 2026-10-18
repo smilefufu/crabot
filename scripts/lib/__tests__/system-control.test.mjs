@@ -4,7 +4,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { tmpdir } from 'node:os'
 import { controlSystemUser, systemctlForUser, parseSystemServiceStatus, reconcileSystemService } from '../system-control.mjs'
-import { applySystemUserBinding, ownSystemEntry } from '../system-context.mjs'
+import { applySystemUserBinding, ownSystemEntry, systemMaintenanceAllowsServiceStart } from '../system-context.mjs'
 import management from '../desktop-management.cjs'
 import identity from '../process-identity.cjs'
 
@@ -83,4 +83,18 @@ test('leftover preparation processes and a mismatched service controller stay un
   assert.throws(() => reconcileSystemService({ state: 'stopped' }, { ...service, tasks: null }, null, 1001))
   assert.throws(() => parseSystemServiceStatus('ActiveState=active\nMainPID=wrong\nTasksCurrent=1\nInvocationID=\n'))
   assert.throws(() => reconcileSystemService({ state: 'stopped' }, { ...service, pid: 123 }, { owner: '0' }, 1001))
+})
+
+
+test('a deployment service start requires the exact current boot, UID, selected core and service cgroup', () => {
+  const record = { schema_version: 1, phase: 'running', operation: 'upgrade', current_uid: 1001,
+    boot_id: 'boot-now', allow_start: { uid: 1001, core_id: 'b'.repeat(64) } }
+  const context = { entry: { uid: 1001 }, coreId: 'b'.repeat(64), bootId: 'boot-now', cgroup: '0::/user.slice/crabot.service\n' }
+  assert.equal(systemMaintenanceAllowsServiceStart(record, context), true)
+  for (const change of [{ bootId: 'old-boot' }, { coreId: 'a'.repeat(64) }, { entry: { uid: 1002 } }, { cgroup: '0::/user.slice/other.service' }]) {
+    assert.equal(systemMaintenanceAllowsServiceStart(record, { ...context, ...change }), false)
+  }
+  for (const change of [{ phase: 'completed' }, { allow_start: undefined }, { current_uid: 1002 }]) {
+    assert.equal(systemMaintenanceAllowsServiceStart({ ...record, ...change }, context), false)
+  }
 })

@@ -19,7 +19,9 @@ try {
     identity.appendUserPathDirectory(path.dirname(result.command), previous)
     if (!await notifyCliPathChange(result.coreRoot)) console.warn('环境通知尚未完成；新终端若仍未识别命令，请注销并重新登录。')
   }
-  console.log('Crabot 内置核心已安装。服务尚未启动；使用 crabot start 完成实例初始化。')
+  console.log(options.get('--scope') === 'system'
+    ? 'Crabot 共享核心已安装。使用 sudo crabot system user add <已有Linux用户> 开通实例；业务尚未启动。'
+    : 'Crabot 内置核心已安装。服务尚未启动；使用 crabot start 完成实例初始化。')
   console.log('Core version: ' + result.version)
   if (result.retainedCore) console.log('受损核心已保留：' + result.retainedCore)
 } catch (error) { console.error('[crabot] ' + error.message); process.exitCode = 1 }

@@ -11,6 +11,7 @@ import { selectSystemUserAction } from './system-batch.mjs'
 import { systemError } from './system-registry.mjs'
 import management from './desktop-management.cjs'
 import cliLocation from './cli-location.cjs'
+import { readVersionMaintenance } from './version-maintenance.mjs'
 import { systemdAvailable } from './system-service.mjs'
 
 const execute = promisify(execFile)
@@ -53,6 +54,8 @@ export async function inspectSystemUser(entry) {
     const service = parseSystemServiceStatus(response.stdout)
     Object.assign(result, reconcileSystemService(current, service, service.pid ? identity.inspectProcess(service.pid) : null, entry.uid))
   }
+  const maintenance = readVersionMaintenance(entry.data_dir)
+  if (maintenance) result.maintenance = { id: maintenance.id, phase: maintenance.phase, target_version: maintenance.target_version }
   if (current.state === 'running') {
     const port = 19000 + entry.port_offset
     const modules = await probeMmModules(port)

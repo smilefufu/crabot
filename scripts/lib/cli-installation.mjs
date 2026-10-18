@@ -10,6 +10,7 @@ import { acquireCliLock, releaseCliLock, cliLockToken } from './cli-lock.mjs'
 import { verifyCoreRelease } from './core-release.mjs'
 import { inspectInstance } from './instance-runtime.mjs'
 import location from './cli-location.cjs'
+import { verifyRootDirectory } from './system-user.mjs'
 const { readCliMetadata: metadata, readCliSelection, locateCliInstallation } = location
 export { readCliSelection, locateCliInstallation }
 
@@ -46,6 +47,7 @@ async function rootDirectory(root, scope) {
     else await fs.mkdir(root, { recursive: true, mode: 0o755 })
   }
   if (!identity.isOwnedDirectory(root) || (await fs.lstat(root)).isSymbolicLink()) fail('CLI 安装目录归属无法核验，未替换入口。')
+  if (scope === 'system') verifyRootDirectory(root)
   for (const name of ['.git', 'cli.mjs', 'core-release.json']) if (await present(path.join(root, name))) fail('发现原有代码安装，请通过已有升级或桌面接管流程迁移，未覆盖原安装。')
   if (scope === 'user') management.ensurePrivateDataRoot(root)
   return realpathSync(root)

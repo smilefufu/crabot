@@ -214,7 +214,7 @@ jobs:
       - name: Real systemd administrator and three-user batch control
         if: runner.os == 'Linux' && steps.scope.outputs.full_runtime == 'true'
         timeout-minutes: 15
-        run: sudo --preserve-env=GITHUB_ACTIONS "$GITHUB_WORKSPACE/.product-runtime/node/bin/node" .github/scripts/smoke-system-mode.mjs "$GITHUB_WORKSPACE/.desktop-build/安装 候选/core" "$GITHUB_WORKSPACE/.desktop-build/system-mode.json" 2>&1 | tee .desktop-build/system-mode.log
+        run: sudo --preserve-env=GITHUB_ACTIONS "$GITHUB_WORKSPACE/.product-runtime/node/bin/node" .github/scripts/smoke-system-mode.mjs "$GITHUB_WORKSPACE/.desktop-build/安装 候选/core" "$GITHUB_WORKSPACE/.desktop-build/system-mode.json" "$GITHUB_WORKSPACE/.desktop-build/cli-archive/archive.json" 2>&1 | tee .desktop-build/system-mode.log
       - name: Save runtime evidence
         if: always()
         uses: actions/upload-artifact@v4

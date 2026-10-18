@@ -2,6 +2,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { userInfo } from 'node:os'
 import { SystemRegistry, systemError } from './system-registry.mjs'
+import cliLocation from './cli-location.cjs'
 import { systemUserEnvironment } from './system-user.mjs'
 
 export function ownSystemEntry({ registry = new SystemRegistry(), account = userInfo() } = {}) {
@@ -28,20 +29,29 @@ export function assertSystemControlAvailable(entry, { directory = '/etc/crabot/s
   const record = JSON.parse(fs.readFileSync(file, 'utf8'))
   if (record.schema_version !== 1 || !Array.isArray(record.targets) || typeof record.id !== 'string') throw systemError('共享维护状态不兼容，未执行启停。')
   if (!record.targets.includes(entry.uid) || record.phase === 'completed' && !record.unsettled?.includes(entry.uid)) return
-  if (permit?.operation_id === record.id && permit.entry?.uid === entry.uid && ['start', 'stop', 'restart'].includes(permit.action)) return
+  if (permit?.operation_id === record.id && permit.entry?.uid === entry.uid && ['start', 'stop', 'restart', 'snapshot', 'migrate', 'cancel-preparation'].includes(permit.action)) return
   throw systemError('管理员维护或批量作业正在进行：' + record.id + '；请用system status查看。', 'CRABOT_SYSTEM_BUSY')
 }
 
-export function assertSystemServiceStartAllowed(entry) {
+export function readSystemBootId() {
+  return process.platform === 'linux' ? fs.readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim() : null
+}
+export function systemMaintenanceAllowsServiceStart(record, { entry, coreId, bootId, cgroup }) {
+  if (record?.schema_version !== 1 || record.phase !== 'running' || record.current_uid !== entry.uid
+    || !bootId || record.boot_id !== bootId || !cgroup.split('\n').some(line => line.endsWith('/crabot.service'))) return false
+  if (record.operation === 'upgrade') return record.allow_start?.uid === entry.uid && record.allow_start.core_id === coreId
+  return ['start', 'restart'].includes(record.operation)
+}
+export function assertSystemServiceStartAllowed(entry, { root } = {}) {
   const file = '/etc/crabot/system/maintenance.json'
   let allowed = false
   if (fs.existsSync(file)) {
     const stat = fs.lstatSync(file)
     if (stat.isFile() && !stat.isSymbolicLink() && stat.uid === 0 && !(stat.mode & 0o022) && stat.size < 65536) {
       const record = JSON.parse(fs.readFileSync(file, 'utf8'))
-      const cgroup = fs.readFileSync('/proc/self/cgroup', 'utf8')
-      allowed = record.schema_version === 1 && record.phase === 'running' && record.current_uid === entry.uid
-        && ['start', 'restart'].includes(record.operation) && cgroup.split('\n').some(line => line.endsWith('/crabot.service'))
+      const installation = root ? cliLocation.assertSelectedCli(root) : null
+      allowed = systemMaintenanceAllowsServiceStart(record, { entry, coreId: installation?.id,
+        bootId: readSystemBootId(), cgroup: fs.readFileSync('/proc/self/cgroup', 'utf8') })
     }
   }
   if (!allowed) assertSystemControlAvailable(entry)

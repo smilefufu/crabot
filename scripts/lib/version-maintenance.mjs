@@ -9,6 +9,7 @@ import { acquireStartupLock, releaseCliLock, cliLockToken } from './cli-lock.mjs
 import { verifyCoreRelease } from './core-release.mjs'
 import { inspectInstance } from './instance-runtime.mjs'
 import { verifyMaintenanceBackup } from './maintenance-backup.mjs'
+import cliLocation from './cli-location.cjs'
 
 const name = 'desktop-maintenance.json', recovering = new Set()
 const version = value => typeof value === 'string' && /^\d+\.\d+\.\d+(?:-[\w.-]+)?$/.test(value)
@@ -38,6 +39,7 @@ export function readVersionMaintenance(dataDir) {
       || record.target_core !== undefined && (!record.target_core || typeof record.target_core.root !== 'string'
         || !path.isAbsolute(record.target_core.root) || !/^[a-f0-9]{64}$/.test(record.target_core.inventory_sha256)
         || Object.keys(record.target_core).some(key => !['root', 'inventory_sha256'].includes(key)))
+      || record.system_operation_id !== undefined && !uuid(record.system_operation_id)
       || !['preparing', 'backed_up', 'installing', 'verifying'].includes(record.phase)
       || record.backup !== null && (!uuid(record.backup?.id) || !/^[a-f0-9]{64}$/.test(record.backup?.sha256))) fail()
     return record
@@ -57,14 +59,14 @@ export function assertVersionMaintenanceAllowsStart(dataDir) {
   const record = readVersionMaintenance(dataDir)
   if (record && (!recovering.has(record.id) || !cliLockToken(path.join(realpathSync(dataDir), 'cli.lock')))) fail()
 }
-export async function beginVersionMaintenance(dataDir, root, targetVersion, sourceVersion) {
+export async function beginVersionMaintenance(dataDir, root, targetVersion, sourceVersion, { systemOperationId } = {}) {
   dataDir = locked(dataDir)
   management.ensurePrivateDataRoot(dataDir)
-  if (readVersionMaintenance(dataDir) || !version(targetVersion)) fail()
+  if (readVersionMaintenance(dataDir) || !version(targetVersion) || systemOperationId !== undefined && !uuid(systemOperationId)) fail()
   const release = await verifyCoreRelease(root, { version: sourceVersion })
   const record = { schema_version: 1, id: randomUUID(), data_dir: dataDir, install_root: realpathSync(root),
     source_version: release.version, target_version: targetVersion, source_inventory_sha256: release.inventory_sha256,
-    phase: 'preparing', backup: null }
+    phase: 'preparing', backup: null, ...(systemOperationId ? { system_operation_id: systemOperationId } : {}) }
   write(dataDir, record, true); return record
 }
 // Bind an already verified immutable target before replacement begins. Existing
@@ -165,3 +167,26 @@ export async function completeStoppedVersionMaintenance({ dataDir, root, id, mig
 
 // Existing user-CLI adapter retains its entry and identical offline semantics.
 export function completeStoppedCliVersionMaintenance(options) { return completeStoppedVersionMaintenance(options) }
+
+// Cancel only a pre-install preparation. This never restores data or starts a
+// service; the coordinator separately owns selection and the original run set.
+export async function cancelPreparedVersionMaintenance({ dataDir, root, id, verifyCompatible, systemOperationId }) {
+  dataDir = locked(dataDir); root = realpathSync(root)
+  const record = readVersionMaintenance(dataDir)
+  if (record?.id !== id || !['preparing', 'backed_up'].includes(record.phase) || record.install_root !== root
+    || systemOperationId !== undefined && record.system_operation_id !== systemOperationId
+    || inspectInstance(dataDir).state !== 'stopped') fail()
+  const verify = async () => {
+    cliLocation.assertSelectedCli(root)
+    const release = await verifyCoreRelease(root, { version: record.source_version })
+    if (release.inventory_sha256 !== record.source_inventory_sha256 || inspectInstance(dataDir).state !== 'stopped') fail()
+    if (record.backup) await backupOf(dataDir, record)
+  }
+  await verify()
+  await verifyCompatible()
+  await verify()
+  const current = readVersionMaintenance(dataDir)
+  if (current?.id !== id || current.phase !== record.phase) fail()
+  rmSync(path.join(dataDir, name)); syncDirectory(dataDir)
+  return { preparation_cancelled: true, service_started: false }
+}

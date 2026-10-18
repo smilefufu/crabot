@@ -182,7 +182,14 @@ test('healthy Corepack avoids Windows PATH discovery; localized absence is check
       import os from 'node:os';
       import { syncBuiltinESMExports } from 'node:module';
       import { EventEmitter } from 'node:events';
+      import { promisify } from 'node:util';
       Object.defineProperty(process, 'platform', { value: 'win32' });
+      const npmConfig = () => { throw new Error('npm transport must use its promisified query'); };
+      npmConfig[promisify.custom] = async (command,args) => {
+        if(command!==process.execPath || JSON.stringify(args.slice(-4))!==JSON.stringify(['config','list','--json','--no-update-notifier']))throw new Error('unexpected npm transport command');
+        return {stdout:'{}',stderr:''};
+      };
+      cp.execFile = npmConfig;
       const mode = process.env.TEST_MODE; let where = 0;
       if(mode==='tmp-missing')os.tmpdir=()=>process.env.TEST_ROOT+'/does-not-exist';
       cp.execFileSync = () => { where++; if(mode==='missing')throw Object.assign(new Error('absent'),{status:1}); if(mode==='discovery-timeout')throw Object.assign(new Error('scan timed out'),{code:'ETIMEDOUT'}); };

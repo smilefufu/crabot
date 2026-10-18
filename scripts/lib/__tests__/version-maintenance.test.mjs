@@ -9,7 +9,7 @@ import { writeCoreRelease, verifyCoreRelease } from '../core-release.mjs'
 import { createMaintenanceBackup } from '../maintenance-backup.mjs'
 import { prepareCoreEnvironment } from '../core-preparation.mjs'
 import { assertVersionMaintenanceAllowsStart, beginVersionMaintenance, readVersionMaintenance,
-  recordVersionMaintenanceBackup, markVersionMaintenanceInstalling, recoverVersionMaintenance, bindVersionMaintenanceTarget } from '../version-maintenance.mjs'
+  recordVersionMaintenanceBackup, markVersionMaintenanceInstalling, recoverVersionMaintenance, bindVersionMaintenanceTarget, cancelPreparedVersionMaintenance } from '../version-maintenance.mjs'
 
 async function fixture(t) {
   const temporary = await fs.mkdtemp(path.join(tmpdir(), 'Crabot 版本维护 '))
@@ -148,4 +148,52 @@ test('target binding requires the held operation lock and the declared target ve
   await bindVersionMaintenanceTarget(f.dataDir, record.id, target)
   releaseCliLock(lock)
   await assert.rejects(bindVersionMaintenanceTarget(f.dataDir, record.id, target), { code: 'CRABOT_MAINTENANCE_PENDING' })
+})
+
+for (const phase of ['preparing', 'backed_up']) test('safe pre-install cancellation preserves all data without starting or restoring: ' + phase, async t => {
+  const f = await fixture(t), { lock, record } = await f.begin()
+  try {
+    if (phase === 'backed_up') await recordVersionMaintenanceBackup(f.dataDir, record.id, await createMaintenanceBackup(f.dataDir))
+    await fs.writeFile(path.join(f.dataDir, 'admin/config'), 'keep-current-source-data')
+    let checked = false
+    assert.deepEqual(await cancelPreparedVersionMaintenance({ ...f, id: record.id, verifyCompatible: async () => { checked = true } }),
+      { preparation_cancelled: true, service_started: false })
+    assert.equal(checked, true); assert.equal(readVersionMaintenance(f.dataDir), null)
+    assert.equal(await fs.readFile(path.join(f.dataDir, 'admin/config'), 'utf8'), 'keep-current-source-data')
+    assert.equal(await fs.stat(path.join(f.dataDir, 'mm.pid')).catch(() => null), null)
+  } finally { releaseCliLock(lock) }
+})
+test('pre-install cancellation refuses begun migration, incompatible source or an unknown identity', async t => {
+  const f = await fixture(t), { lock, record } = await f.begin()
+  try {
+    await assert.rejects(cancelPreparedVersionMaintenance({ ...f, id: 'b'.repeat(36), verifyCompatible: () => assert.fail() }))
+    await assert.rejects(cancelPreparedVersionMaintenance({ ...f, id: record.id, verifyCompatible: () => { throw new Error('data incompatible') } }), /data incompatible/)
+    assert.equal(readVersionMaintenance(f.dataDir).phase, 'preparing')
+    await recordVersionMaintenanceBackup(f.dataDir, record.id, await createMaintenanceBackup(f.dataDir))
+    await markVersionMaintenanceInstalling(f.dataDir, record.id)
+    await assert.rejects(cancelPreparedVersionMaintenance({ ...f, id: record.id, verifyCompatible: () => assert.fail('must not replay any migration') }))
+    assert.equal(readVersionMaintenance(f.dataDir).phase, 'installing')
+  } finally { releaseCliLock(lock) }
+})
+
+test('pre-install cancellation retains the fence if source changes during verification', async t => {
+  const f = await fixture(t), { lock, record } = await f.begin()
+  try {
+    await assert.rejects(cancelPreparedVersionMaintenance({ ...f, id: record.id, verifyCompatible: () => fs.appendFile(path.join(f.root, 'package.json'), ' ') }), { code: 'CRABOT_CORE_INTEGRITY' })
+    assert.equal(readVersionMaintenance(f.dataDir).phase, 'preparing')
+  } finally { releaseCliLock(lock) }
+})
+
+test('a system preparation is linked to one deployment operation and cannot be cancelled by another', async t => {
+  const f = await fixture(t), lock = await acquireCliLock(f.dataDir, 'system-operation-owner')
+  const operation = '11111111-1111-1111-1111-111111111111'
+  try {
+    const record = await beginVersionMaintenance(f.dataDir, f.root, '1.2.4', undefined, { systemOperationId: operation })
+    assert.equal(readVersionMaintenance(f.dataDir).system_operation_id, operation)
+    await assert.rejects(cancelPreparedVersionMaintenance({ ...f, id: record.id, systemOperationId: '22222222-2222-2222-2222-222222222222', verifyCompatible: () => assert.fail() }))
+    await cancelPreparedVersionMaintenance({ ...f, id: record.id, systemOperationId: operation, verifyCompatible: async () => {} })
+    assert.equal(readVersionMaintenance(f.dataDir), null)
+    await assert.rejects(beginVersionMaintenance(f.dataDir, f.root, '1.2.4', undefined, { systemOperationId: '../not-an-operation' }))
+    assert.equal(readVersionMaintenance(f.dataDir), null)
+  } finally { releaseCliLock(lock) }
 })

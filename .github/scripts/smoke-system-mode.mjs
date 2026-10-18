@@ -2,8 +2,10 @@
 // No production profile/provider or real model call. Never run on a developer host.
 import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
+import { constants, createReadStream } from 'node:fs'
+import { createServer } from 'node:http'
 import path from 'node:path'
-import { randomUUID } from 'node:crypto'
+import { randomUUID, createHash } from 'node:crypto'
 import { execFile, spawn } from 'node:child_process'
 import { promisify } from 'node:util'
 import { once } from 'node:events'
@@ -11,9 +13,11 @@ import { pathToFileURL } from 'node:url'
 
 if (process.env.GITHUB_ACTIONS !== 'true' || process.platform !== 'linux' || process.getuid() !== 0) throw new Error('Real system acceptance requires an isolated Linux CI root process')
 const execute = promisify(execFile), source = await fs.realpath(process.argv[2]), evidence = path.resolve(process.argv[3])
-const id = randomUUID().slice(0, 8), installed = '/opt/crabot-system-smoke-' + id
+const id = randomUUID().slice(0, 8), installed = '/var/lib/crabot-system-smoke-' + id
 const env = { PATH: '/usr/sbin:/usr/bin:/sbin:/bin', HOME: '/root', USER: 'root', LOGNAME: 'root', LANG: 'C.UTF-8', GITHUB_ACTIONS: 'true',
   HTTP_PROXY: 'http://127.0.0.1:9', HTTPS_PROXY: 'http://127.0.0.1:9', CRABOT_ROOT_TEST_SECRET: 'root-only-not-for-employees' }
+const previousFixture = installed + '-previous-fixture'
+const archiveReport = process.argv[4] ? path.resolve(process.argv[4]) : null
 const command = path.join(installed, 'bin/crabot'), users = [], events = []
 let installOwned = false, loaded, store
 const run = (binary, args, options = {}) => execute(binary, args, { env, cwd: '/', timeout: 180_000, maxBuffer: 4 * 1024 * 1024, ...options })
@@ -70,8 +74,25 @@ async function assertEmployeeRuntime(entry) {
 try {
   await run('/usr/bin/systemctl', ['is-active', 'systemd-logind.service'])
   for (const file of ['/etc/crabot', '/usr/local/bin/crabot', '/etc/systemd/user/crabot.service', '/etc/logrotate.d/crabot']) await absent(file)
+  await absent(installed); await absent(previousFixture)
+  const parent = await fs.lstat(path.dirname(installed))
+  assert.equal(parent.uid, 0); assert.equal(parent.mode & 0o022, 0, 'CI system install must use a root-protected ancestor')
   installOwned = true
-  await phase('fresh-bundled-system-install', () => run('/bin/bash', [path.join(source, 'install.sh'), '--system', '--install-dir=' + installed], { timeout: 300_000 }))
+  let installationSource = source
+  if (archiveReport) {
+    await fs.cp(source, previousFixture, { recursive: true, verbatimSymlinks: true, mode: constants.COPYFILE_FICLONE, filter: () => true })
+    const { writeCoreRelease, verifyCoreRelease } = await import(pathToFileURL(path.join(source, 'scripts/lib/core-release.mjs')))
+    const metadata = await verifyCoreRelease(previousFixture), version = '0.0.0-system-update-fixture'
+    for (const file of ['package.json', 'product-runtime.json']) {
+      const value = JSON.parse(await fs.readFile(path.join(previousFixture, file), 'utf8'))
+      await fs.writeFile(path.join(previousFixture, file), JSON.stringify({ ...value, version }))
+    }
+    await fs.rm(path.join(previousFixture, 'core-files.json')); await fs.rm(path.join(previousFixture, 'core-release.json'))
+    await writeCoreRelease(previousFixture, { ...metadata, version })
+    installationSource = previousFixture
+  }
+  await phase('fresh-bundled-system-install', () => run('/bin/bash', [path.join(installationSource, 'install.sh'), '--system', '--install-dir=' + installed], { timeout: 300_000 }))
+  await fs.rm(previousFixture, { recursive: true, force: true })
   const selected = (await fs.readFile(path.join(installed, 'current-core'), 'utf8')).trim(), core = path.join(installed, 'releases', selected)
   const load = file => import(pathToFileURL(path.join(core, file)))
   const { SystemRegistry } = await load('scripts/lib/system-registry.mjs'), { runSystemUser } = await load('scripts/lib/system-user.mjs')
@@ -96,8 +117,49 @@ try {
   const firstGeneration = await assertEmployeeRuntime(alice)
   assert.equal((await state(bob)).state, 'stopped')
   await phase('batch-restart-preserves-stopped', () => run(command, ['system', 'restart', '--all', '--yes']))
-  const restartedGeneration = await assertEmployeeRuntime(alice)
+  let restartedGeneration = await assertEmployeeRuntime(alice)
   assert.notEqual(restartedGeneration, firstGeneration); assert.equal((await state(bob)).state, 'stopped')
+  if (archiveReport) await phase('shared-upgrade-real-command-and-archive', async () => {
+    const report = JSON.parse(await fs.readFile(archiveReport, 'utf8'))
+    assert.equal(report.candidate_only, true); assert.equal(report.roundtrip_verified, true)
+    assert.equal(report.file, path.basename(report.file))
+    const archive = path.join(path.dirname(archiveReport), report.file), digest = createHash('sha256')
+    for await (const chunk of createReadStream(archive)) digest.update(chunk)
+    assert.equal(digest.digest('hex'), report.sha256)
+    const requests = [], server = createServer((req, res) => {
+      requests.push(req.url)
+      if (req.url === '/core.tar.gz') createReadStream(archive).pipe(res)
+      else if (req.url === '/core.tar.gz.sha256') res.end(report.sha256)
+      else { res.statusCode = 404; res.end() }
+    })
+    await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve) })
+    const hook = path.join(installed, 'fetch-fixture.mjs'), snapshots = new Map()
+    for (const entry of users) snapshots.set(entry.uid, await fs.readFile(path.join(entry.data_dir, 'admin/credentials.json')))
+    try {
+      const base = 'https://github.com/smilefufu/crabot/releases/download/v' + report.version + '/crabot-v' + report.version + '-linux-x64.tar.gz'
+      const url = 'http://127.0.0.1:' + server.address().port + '/core.tar.gz'
+      await fs.writeFile(hook, `const original=globalThis.fetch;globalThis.fetch=(input,options)=>{const u=String(input);if(u==='https://github.com/smilefufu/crabot/releases/latest')return Promise.resolve(new Response(null,{status:302,headers:{location:'https://github.com/smilefufu/crabot/releases/tag/v${report.version}'}}));if(u===${JSON.stringify(base)})return original(${JSON.stringify(url)},options);if(u===${JSON.stringify(base + '.sha256')})return original(${JSON.stringify(url + '.sha256')},options);throw new Error('Unexpected fixture request');};`)
+      const output = await run(command, ['upgrade', '--yes'], { env: { ...env, NODE_OPTIONS: '--import=' + pathToFileURL(hook).href }, timeout: 600_000 })
+      assert.match(output.stdout, /作业结束/)
+      assert.deepEqual(requests, ['/core.tar.gz', '/core.tar.gz.sha256'])
+      const next = (await fs.readFile(path.join(installed, 'current-core'), 'utf8')).trim()
+      assert.notEqual(next, selected); loaded.core = path.join(installed, 'releases', next)
+      const job = store.read(store.file(store.maintenance().id), true)
+      assert.equal(job.plan.kind, 'upgrade'); assert.equal(job.progress.exit_code, 0)
+      assert.deepEqual(job.progress.results.map(row => row.state), ['healthy', 'kept_stopped', 'kept_stopped'])
+      assert.equal((await state(alice)).core_version, report.version); assert.equal((await state(alice)).ready, true)
+      assert.equal((await state(bob)).state, 'stopped'); assert.equal((await state(carol)).state, 'stopped')
+      for (const entry of users) {
+        assert.deepEqual(await fs.readFile(path.join(entry.data_dir, 'admin/credentials.json')), snapshots.get(entry.uid))
+        assert.equal((await fs.stat(entry.data_dir)).uid, entry.uid)
+        await absent(path.join(entry.data_dir, 'desktop-maintenance.json'))
+        const backups = await fs.readdir(entry.data_dir + '.desktop-backups')
+        assert.ok(backups.some(name => !name.startsWith('.')))
+      }
+      assert.notEqual(await assertEmployeeRuntime(alice), restartedGeneration)
+    } finally { await fs.rm(hook, { force: true }); await new Promise(resolve => server.close(resolve)) }
+  })
+  if (archiveReport) restartedGeneration = await assertEmployeeRuntime(alice)
   // A real NSS identity change must fail this user before any privileged data action.
   let changedUid = Number((await run('/usr/bin/id', ['-u', carol.user])).stdout.trim()) + 10000
   while (await run('/usr/bin/getent', ['passwd', String(changedUid)]).then(() => true, () => false)) changedUid++
@@ -138,7 +200,7 @@ try {
     assert.deepEqual(await fs.readFile(path.join(alice.data_dir, 'admin/credentials.json')), preserved)
   })
   await fs.writeFile(evidence, JSON.stringify({ install_root: installed, selected, users: users.map(({ user, uid, gid, port_offset }) => ({ user, uid, gid, port_offset })), events,
-    real_systemd: true, real_uid_transitions: true, real_core: true, cli_disconnect_survived: true, uses_real_model_provider: false }, null, 2) + '\n')
+    real_systemd: true, real_uid_transitions: true, real_core: true, cli_disconnect_survived: true, full_archive_shared_upgrade: Boolean(archiveReport), synthetic_previous_release: Boolean(archiveReport), uses_real_model_provider: false }, null, 2) + '\n')
 } catch (error) {
   for (const user of users) {
     if (!user.uid) continue
@@ -184,6 +246,7 @@ try {
   if (!settled) throw new Error('CI-owned processes remain unknown; test installation and data retained')
   for (const user of users) await run('/usr/sbin/userdel', ['--remove', user.user]).catch(() => {})
   if (installOwned) {
+    await fs.rm(previousFixture, { recursive: true, force: true })
     await fs.rm('/etc/systemd/user/crabot.service', { force: true })
     await fs.rm('/usr/local/bin/crabot', { force: true }); await fs.rm('/etc/logrotate.d/crabot', { force: true })
     await fs.rm('/etc/crabot', { recursive: true, force: true }); await fs.rm(installed, { recursive: true, force: true })
