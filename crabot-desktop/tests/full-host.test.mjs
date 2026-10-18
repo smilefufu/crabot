@@ -8,6 +8,9 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 import { once } from 'node:events'
+import { createServer } from 'node:net'
+import { createInterface } from 'node:readline'
+import { randomBytes } from 'node:crypto'
 import { inspectInstance } from '../../scripts/lib/instance-runtime.mjs'
 import { SUPERVISOR_FORCE_TIMEOUT_MS } from '../../scripts/lib/supervisor-shutdown.mjs'
 
@@ -22,7 +25,8 @@ test('actual Electron host shares its real core with CLI and distinguishes hide,
   const node = path.join(root, process.platform === 'win32' ? '.product-runtime/node/node.exe' : '.product-runtime/node/bin/node')
   const env = { ...process.env, DATA_DIR: data, CRABOT_FULL_HOST_FIXTURE: '1' }
   delete env.ELECTRON_RUN_AS_NODE; delete env.CRABOT_DEV; delete env.CRABOT_PORT_OFFSET
-  const children = []
+  const children = [], controls = []
+  t.after(async () => { for (const { server, sockets } of controls) { for (const socket of sockets) socket.destroy(); await new Promise(resolve => server.close(resolve)) } })
   async function waitForExit(child, graceful = false) {
     try {
       // Explicit quit includes the core's complete graceful shutdown window.
@@ -33,9 +37,23 @@ test('actual Electron host shares its real core with CLI and distinguishes hide,
   }
   const step = phase => console.log('CRABOT_FULL_HOST_STEP ' + JSON.stringify({ platform: process.platform, phase }))
   const cli = async (...args) => (await promisify(execFile)(node, [path.join(root, 'cli.mjs'), ...args], { env, cwd: root, timeout: 90_000, maxBuffer: 2 * 1024 * 1024 })).stdout
-  function launch() {
+  async function launch() {
+    const token = randomBytes(24).toString('hex'), sockets = new Set()
+    let connected
+    const connection = new Promise(resolve => { connected = resolve })
+    const server = createServer(socket => {
+      sockets.add(socket); socket.once('close', () => sockets.delete(socket)); socket.on('error', () => {})
+      createInterface({ input: socket }).once('line', supplied => {
+        if (supplied !== token) socket.destroy()
+        else connected(socket)
+      })
+    })
+    controls.push({ server, sockets })
+    await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve) })
+
     const child = spawn(createRequire(import.meta.url)('electron'), [appRoot], { env: { ...env,
-      NODE_OPTIONS: '--require=' + JSON.stringify(fileURLToPath(new URL('./full-host-preload.cjs', import.meta.url))) }, stdio: ['pipe', 'pipe', 'pipe'] })
+      CRABOT_FULL_HOST_CONTROL_PORT: String(server.address().port), CRABOT_FULL_HOST_CONTROL_TOKEN: token,
+      NODE_OPTIONS: '--require=' + JSON.stringify(fileURLToPath(new URL('./full-host-preload.cjs', import.meta.url))) }, stdio: ['ignore', 'pipe', 'pipe'] })
     children.push(child)
     let output = '', pending = '', ended = false
     const events = []
@@ -65,10 +83,15 @@ test('actual Electron host shares its real core with CLI and distinguishes hide,
       }
       throw new Error('Timed out waiting for ' + tag + '\n' + output)
     }
-    return { child, exited: graceful => waitForExit(child, graceful), next, command: async value => { child.stdin.write(value + '\n'); return next(value) } }
+    let timer
+    const control = await Promise.race([connection, new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error('Fixture control did not connect\n' + output)), 10_000)
+    })]).finally(() => clearTimeout(timer))
+    const send = value => control.write(value + '\n')
+    return { child, exited: graceful => waitForExit(child, graceful), next, send, command: async value => { send(value); return next(value) } }
   }
   try {
-    let gui = launch()
+    let gui = await launch()
     const first = await gui.next('ready')
     step('initial_ready')
     assert.deepEqual(first.renderer, { node: 'undefined', token: null })
@@ -82,7 +105,7 @@ test('actual Electron host shares its real core with CLI and distinguishes hide,
     assert.equal((await gui.command('show')).visible, true)
     gui.child.kill('SIGKILL'); await gui.exited(); step('gui_crash_exited')
     assert.equal(inspectInstance(data).state, 'running')
-    gui = launch(); assert.equal((await gui.next('ready')).generation, first.generation); step('reattached')
+    gui = await launch(); assert.equal((await gui.next('ready')).generation, first.generation); step('reattached')
     await cli('stop')
     let stopped
     for (let attempt = 0; attempt < 80; attempt++) {
@@ -109,14 +132,14 @@ test('actual Electron host shares its real core with CLI and distinguishes hide,
       await new Promise(resolve => setTimeout(resolve, 100))
     }
     assert.equal(stopped.phase, 'stopped')
-    gui.child.stdin.write('quit_confirm\n'); assert.equal((await gui.exited(true)).code, 0); step('stopped_gui_quit')
-    gui = launch()
+    gui.send('quit_confirm'); assert.equal((await gui.exited(true)).code, 0); step('stopped_gui_quit')
+    gui = await launch()
     const restarted = await gui.next('ready')
     assert.notEqual(restarted.generation, first.generation)
     assert.equal((await gui.command('quit_cancel')).result, false)
     assert.equal(inspectInstance(data).state, 'running')
     step('active_core_quit_requested')
-    gui.child.stdin.write('quit_confirm\n'); assert.equal((await gui.exited(true)).code, 0)
+    gui.send('quit_confirm'); assert.equal((await gui.exited(true)).code, 0)
     assert.equal(inspectInstance(data).state, 'stopped')
     console.log('CRABOT_FULL_HOST_RESULT ' + JSON.stringify({ platform: process.platform, arch: process.arch, native_bootstrap: true,
       cli_gui_same_instance: true, close_keeps_core: true, gui_crash_keeps_core: true, cli_stop_stays_stopped: true, cli_start_reconnects_gui: true, relaunch_autostarts: true, quit_cancel_preserves_core: true, quit_stops_core: true }))

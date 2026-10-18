@@ -3,6 +3,10 @@
 if (!process.versions.electron || !process.env.CRABOT_FULL_HOST_FIXTURE) throw new Error('Full host fixture requires an explicitly isolated Electron process')
 delete process.env.NODE_OPTIONS
 const { createInterface } = require('node:readline')
+const { createConnection } = require('node:net')
+const port = Number(process.env.CRABOT_FULL_HOST_CONTROL_PORT), token = process.env.CRABOT_FULL_HOST_CONTROL_TOKEN
+delete process.env.CRABOT_FULL_HOST_CONTROL_PORT
+delete process.env.CRABOT_FULL_HOST_CONTROL_TOKEN
 let window, quitResponse = 0
 const emit = (tag, fields = {}) => process.stdout.write('CRABOT_FULL_HOST ' + JSON.stringify({ tag, ...fields }) + '\n')
 const state = () => window.webContents.executeJavaScript('window.crabotDesktop.getState()')
@@ -45,7 +49,12 @@ function install() {
   const existing = BrowserWindow.getAllWindows().sort((a, b) => a.id - b.id)[0]
   if (existing) capture(existing)
   let commands = Promise.resolve()
-  createInterface({ input: process.stdin }).on('line', command => {
+  // Electron 44.9.0 common/init.ts deliberately replaces Windows stdin with EOF.
+  const control = createConnection({ host: '127.0.0.1', port })
+  control.once('connect', () => control.write(token + '\n'))
+  control.once('error', error => emit('fixture_error', { message: 'Control connection: ' + error.code }))
+  app.once('will-quit', () => control.destroy())
+  createInterface({ input: control }).on('line', command => {
     commands = commands.then(async () => {
       if (command === 'close') window.close()
       else if (command === 'show') app.emit('activate')
