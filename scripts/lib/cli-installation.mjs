@@ -27,6 +27,7 @@ async function publish(root, name, text, scope, previous) {
   try {
     if (process.platform === 'win32') identity.writePrivateFile(temporary, text)
     else await fs.writeFile(temporary, text, { flag: 'wx', mode: scope === 'system' ? 0o644 : 0o600, flush: true })
+    if (scope === 'system') await fs.chmod(temporary, 0o644)
     if (previous === null) await fs.link(temporary, file)
     else await fs.rename(temporary, file)
     if (process.platform !== 'win32') {
@@ -40,14 +41,66 @@ function authority(scope) {
     fail('共享 CLI 安装只能由 Linux 系统管理员更新。')
   }
 }
+// Only freshly created shared directories are made public. Existing private or
+// employee-writable paths are rejected rather than having their permissions widened.
+async function systemDirectory(directory) {
+  if (!await present(directory)) {
+    await systemDirectory(path.dirname(directory))
+    let created = false
+    try { await fs.mkdir(directory, { mode: 0o755 }); created = true }
+    catch (error) { if (error.code !== 'EEXIST') throw error }
+    if (created) await fs.chmod(directory, 0o755)
+  }
+  verifyRootDirectory(directory)
+  for (let current = directory;; current = path.dirname(current)) {
+    if (!((await fs.lstat(current)).mode & 0o001)) fail('共享安装目录不可由员工访问：' + current)
+    if (current === '/') break
+  }
+}
+async function systemFile(file) {
+  const stat = await fs.lstat(file)
+  if (!stat.isFile() || stat.uid !== 0 || stat.mode & 0o7022 || !(stat.mode & 0o004)) fail('共享安装文件并非管理员所有且员工只读：' + file)
+}
+async function systemTree(root, claim = false) {
+  // claim is used only inside a new root-private staging tree. Never adopt an
+  // already published tree: an employee may still hold an old writable handle.
+  const directory = await fs.lstat(root)
+  if (!directory.isDirectory() || directory.isSymbolicLink() || directory.uid !== 0
+    || (claim ? (directory.mode & 0o777) !== 0o700 : directory.mode & 0o7022 || (directory.mode & 0o005) !== 0o005)) fail('共享核心目录归属或权限无法核验。')
+  async function walk(file) {
+    const stat = await fs.lstat(file)
+    if (stat.isSymbolicLink()) {
+      const target = path.relative(root, await fs.realpath(file))
+      if (target === '..' || target.startsWith('..' + path.sep) || path.isAbsolute(target)) fail('共享核心链接超出安装目录。')
+      if (claim) await fs.lchown(file, 0, 0)
+      else if (stat.uid !== 0) fail('共享核心链接并非管理员所有：' + file)
+      return
+    }
+    if (!stat.isFile() && !stat.isDirectory()) fail('共享核心包含不支持的文件。')
+    if (claim) await fs.chown(file, 0, 0)
+    else if (stat.uid !== 0) fail('共享核心并非管理员所有：' + file)
+    if (stat.mode & 0o7022 || !(stat.mode & 0o004) || (stat.isDirectory() || stat.mode & 0o111) && !(stat.mode & 0o001)) fail('共享核心权限不支持员工只读运行：' + file)
+    if (stat.isDirectory()) for (const name of await fs.readdir(file)) await walk(path.join(file, name))
+  }
+  // The staging root remains 0700 until the complete payload is verified.
+  for (const name of await fs.readdir(root)) await walk(path.join(root, name))
+}
+async function installSystemLauncher(original, launcher) {
+  const temporary = await fs.mkdtemp(path.join(path.dirname(launcher), '.preparing-'))
+  try {
+    await fs.chmod(temporary, 0o700)
+    const staged = path.join(temporary, launcherName)
+    await fs.copyFile(original, staged, constants.COPYFILE_EXCL)
+    await fs.chown(staged, 0, 0)
+    await fs.chmod(staged, 0o755)
+    await fs.link(staged, launcher)
+  } finally { await fs.rm(temporary, { recursive: true, force: true }) }
+}
 async function rootDirectory(root, scope) {
   authority(scope)
-  if (!await present(root)) {
-    if (scope === 'user') management.ensurePrivateDataRoot(root)
-    else await fs.mkdir(root, { recursive: true, mode: 0o755 })
-  }
+  if (scope === 'user' && !await present(root)) management.ensurePrivateDataRoot(root)
+  if (scope === 'system') await systemDirectory(root)
   if (!identity.isOwnedDirectory(root) || (await fs.lstat(root)).isSymbolicLink()) fail('CLI 安装目录归属无法核验，未替换入口。')
-  if (scope === 'system') verifyRootDirectory(root)
   for (const name of ['.git', 'cli.mjs', 'core-release.json']) if (await present(path.join(root, name))) fail('发现原有代码安装，请通过已有升级或桌面接管流程迁移，未覆盖原安装。')
   if (scope === 'user') management.ensurePrivateDataRoot(root)
   return realpathSync(root)
@@ -73,25 +126,36 @@ export async function prepareCliPayload({ sourceRoot, installRoot, scope = 'user
       const record = { schema_version: 1, scope, launcher_sha256: await digest(launcher) }
       await publish(installRoot, metadataName, JSON.stringify(record) + '\n', scope, null)
     }
+    if (scope === 'system') {
+      await systemFile(file)
+      if (await present(path.join(installRoot, selectorName))) await systemFile(path.join(installRoot, selectorName))
+    }
     const record = metadata(installRoot)
     if (record.scope !== scope) fail('不能在原有 CLI 安装上更改 user/system 管理范围。')
     const bin = path.join(installRoot, 'bin'), launcher = path.join(bin, launcherName)
-    await fs.mkdir(bin, { mode: scope === 'system' ? 0o755 : 0o700 }).catch(error => { if (error.code !== 'EEXIST') throw error })
+    if (scope === 'system') await systemDirectory(bin)
+    else await fs.mkdir(bin, { mode: 0o700 }).catch(error => { if (error.code !== 'EEXIST') throw error })
     if (!identity.isOwnedDirectory(bin) || (await fs.lstat(bin)).isSymbolicLink()) fail('命令目录归属无法核验。')
     if (!await present(launcher)) {
       const original = path.join(sourceRoot, 'bin', launcherName)
       if (await digest(original) !== record.launcher_sha256) fail('初始启动器尚未安装完整，请用原安装包重试。')
-      await fs.copyFile(original, launcher, constants.COPYFILE_EXCL)
-      if (process.platform !== 'win32') await fs.chmod(launcher, 0o755)
+      if (scope === 'system') await installSystemLauncher(original, launcher)
+      else {
+        await fs.copyFile(original, launcher, constants.COPYFILE_EXCL)
+        if (process.platform !== 'win32') await fs.chmod(launcher, 0o755)
+      }
     }
+    if (scope === 'system') await systemFile(launcher)
     if (!(await fs.lstat(launcher)).isFile() || await digest(launcher) !== record.launcher_sha256) fail('已有启动器已改变，未覆盖。')
     const releases = path.dirname(target)
-    await fs.mkdir(releases, { mode: 0o755 }).catch(error => { if (error.code !== 'EEXIST') throw error })
+    if (scope === 'system') await systemDirectory(releases)
+    else await fs.mkdir(releases, { mode: 0o755 }).catch(error => { if (error.code !== 'EEXIST') throw error })
     if (!identity.isOwnedDirectory(releases) || (await fs.lstat(releases)).isSymbolicLink()) fail('版本目录归属无法核验。')
     const targetStat = await present(target)
     let damaged = false
     if (targetStat) {
       if (!targetStat.isDirectory() || targetStat.isSymbolicLink()) fail('核心版本目录被重定向，未切换。')
+      if (scope === 'system') await systemTree(target)
       try {
         if ((await verifyCoreRelease(target, { version: release.version })).inventory_sha256 !== id) throw Object.assign(new Error('核心清单与版本目录不一致。'), { code: 'CRABOT_CORE_INTEGRITY' })
       }
@@ -125,7 +189,9 @@ export async function prepareCliPayload({ sourceRoot, installRoot, scope = 'user
       const copies = await Promise.allSettled(Array.from({ length: Math.min(4, entries.length) }, copyParts))
       const failed = copies.find(result => result.status === 'rejected')
       if (failed) throw failed.reason
+      if (scope === 'system') await systemTree(pending, true)
       if ((await verifyCoreRelease(pending, { version: release.version })).inventory_sha256 !== id) throw Object.assign(new Error('待安装核心在准备期间改变，未发布。'), { code: 'CRABOT_CORE_INTEGRITY' })
+      await fs.chmod(pending, scope === 'system' ? 0o755 : rootMode)
       if (damaged) {
         await stoppedRepair()
         retainedCore = path.join(releases, '.damaged-' + id + '-' + randomUUID())
@@ -141,7 +207,6 @@ export async function prepareCliPayload({ sourceRoot, installRoot, scope = 'user
         }
       } else await fs.rename(pending, target)
       pending = undefined
-      await fs.chmod(target, rootMode)
     }
     return { installRoot, coreRoot: target, id, version: release.version, scope, command: launcher, ...(retainedCore ? { retainedCore } : {}) }
   } catch (error) {
@@ -164,6 +229,12 @@ export async function selectCliPayload(prepared, { expected = null, dataDir } = 
   if (scope === 'user' && (!dataDir || !cliLockToken(path.resolve(dataDir, 'cli.lock')) || inspectInstance(dataDir).state !== 'stopped')) fail('CLI 版本切换前必须持有实例操作锁并确认停止。')
   const lock = await acquireCliLock(installRoot, 'select-cli-payload')
   try {
+    if (scope === 'system') {
+      await systemDirectory(installRoot)
+      await systemFile(path.join(installRoot, metadataName))
+      if (await present(path.join(installRoot, selectorName))) await systemFile(path.join(installRoot, selectorName))
+      await systemTree(coreRoot)
+    }
     const record = metadata(installRoot)
     if (record.scope !== scope || !identifier(id) || realpathSync(coreRoot) !== realpathSync(path.join(installRoot, 'releases', id))) fail('目标 CLI 版本不属于此安装。')
     const target = await fs.lstat(coreRoot)
@@ -171,6 +242,7 @@ export async function selectCliPayload(prepared, { expected = null, dataDir } = 
     const release = await verifyCoreRelease(coreRoot, { version: prepared.version })
     if (release.inventory_sha256 !== id || readCliSelection(installRoot) !== expected) fail('当前 CLI 版本已变化，未切换。')
     const launcher = path.join(installRoot, 'bin', launcherName)
+    if (scope === 'system') { await systemDirectory(path.dirname(launcher)); await systemFile(launcher) }
     if (await digest(launcher) !== record.launcher_sha256) fail('CLI 启动器已变化，未切换。')
     await publish(installRoot, selectorName, id + '\n', scope, expected === null ? null : expected + '\n')
   } finally { releaseCliLock(lock) }
