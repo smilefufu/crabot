@@ -174,20 +174,6 @@ jobs:
               .github/scripts/smoke-product-runtime.mjs \
               > ".desktop-build/ubuntu-$release.log" 2>&1
           done
-      - name: Whole Electron host with real core and CLI on Linux
-        timeout-minutes: 12
-        if: runner.os == 'Linux' && steps.scope.outputs.full_runtime == 'true'
-        working-directory: crabot-desktop
-        env:
-          CRABOT_FULL_CORE_TEST: '1'
-        run: xvfb-run -a node --test tests/full-host.test.mjs 2>&1 | tee ../.desktop-build/full-host.log
-      - name: Whole Electron host with real core and CLI on macOS and Windows
-        timeout-minutes: 12
-        if: runner.os != 'Linux' && steps.scope.outputs.full_runtime == 'true'
-        working-directory: crabot-desktop
-        env:
-          CRABOT_FULL_CORE_TEST: '1'
-        run: node --test tests/full-host.test.mjs 2>&1 | tee ../.desktop-build/full-host.log
       - name: Assemble common core and unpacked Electron candidate
         if: steps.scope.outputs.full_runtime == 'true'
         run: |
@@ -223,6 +209,20 @@ jobs:
         if: runner.os == 'Linux' && steps.scope.outputs.full_runtime == 'true'
         timeout-minutes: 15
         run: sudo --preserve-env=GITHUB_ACTIONS "$GITHUB_WORKSPACE/.product-runtime/node/bin/node" .github/scripts/smoke-system-mode.mjs "$GITHUB_WORKSPACE/.desktop-build/安装 候选/core" "$GITHUB_WORKSPACE/.desktop-build/system-mode.json" "$GITHUB_WORKSPACE/.desktop-build/cli-archive/archive.json" 2>&1 | tee .desktop-build/system-mode.log
+      - name: Whole Electron host with real core and CLI on Linux
+        timeout-minutes: 12
+        if: runner.os == 'Linux' && steps.scope.outputs.full_runtime == 'true'
+        working-directory: crabot-desktop
+        env:
+          CRABOT_FULL_CORE_TEST: '1'
+        run: xvfb-run -a node --test tests/full-host.test.mjs 2>&1 | tee ../.desktop-build/full-host.log
+      - name: Whole Electron host with real core and CLI on macOS and Windows
+        timeout-minutes: 12
+        if: runner.os != 'Linux' && steps.scope.outputs.full_runtime == 'true'
+        working-directory: crabot-desktop
+        env:
+          CRABOT_FULL_CORE_TEST: '1'
+        run: node --test tests/full-host.test.mjs 2>&1 | tee ../.desktop-build/full-host.log
       - name: Save runtime evidence
         if: always()
         uses: actions/upload-artifact@v4
