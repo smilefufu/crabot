@@ -199,6 +199,21 @@ try {
     assert.equal(registry.read().find(entry => entry.user === alice.user).enabled, false)
     assert.deepEqual(await fs.readFile(path.join(alice.data_dir, 'admin/credentials.json')), preserved)
   })
+  await phase('administrator-reopen-and-autostart-toggle', async () => {
+    await run(command, ['system', 'user', 'add', alice.user, '--autostart'])
+    const reopened = registry.read().find(entry => entry.user === alice.user)
+    assert.equal(reopened.enabled, true); assert.equal(reopened.autostart, true)
+    assert.equal(reopened.port_offset, alice.port_offset); assert.equal(reopened.data_dir, alice.data_dir)
+    assert.deepEqual(await fs.readFile(path.join(alice.data_dir, 'admin/credentials.json')), preserved)
+    assert.equal((await state(alice)).state, 'stopped')
+    const autostartState = () => run('/usr/bin/setpriv', ['--reuid=' + alice.uid, '--regid=' + alice.gid, '--init-groups', '--', '/usr/bin/systemctl', '--user', 'is-enabled', 'crabot.service'],
+      { env: { PATH: '/usr/bin:/bin', HOME: alice.home, USER: alice.user, XDG_RUNTIME_DIR: '/run/user/' + alice.uid, DBUS_SESSION_BUS_ADDRESS: 'unix:path=/run/user/' + alice.uid + '/bus' } })
+    assert.equal((await autostartState()).stdout.trim(), 'enabled')
+    await run(command, ['system', 'user', 'add', alice.user, '--no-autostart'])
+    assert.equal(registry.read().find(entry => entry.user === alice.user).autostart, false)
+    await assert.rejects(autostartState(), error => error.code === 1 && error.stdout.trim() === 'disabled')
+    assert.equal((await state(alice)).state, 'stopped')
+  })
   await fs.writeFile(evidence, JSON.stringify({ install_root: installed, selected, users: users.map(({ user, uid, gid, port_offset }) => ({ user, uid, gid, port_offset })), events,
     real_systemd: true, real_uid_transitions: true, real_core: true, cli_disconnect_survived: true, full_archive_shared_upgrade: Boolean(archiveReport), synthetic_previous_release: Boolean(archiveReport), uses_real_model_provider: false }, null, 2) + '\n')
 } catch (error) {

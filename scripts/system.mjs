@@ -68,18 +68,20 @@ try {
   } else if (args.action === 'user') {
     store.assertIdle()
     if (systemdAvailable()) installSystemUserService(installation.root)
-    else if (args.autostart) throw systemError('当前环境没有systemd，不能配置开机自启动；可不带--autostart开通CLI实例。', 'CRABOT_SYSTEMD_UNAVAILABLE')
+    else if (args.autostart !== undefined) throw systemError('当前环境没有systemd，不能配置开机自启动；可省略自启动选项开通CLI实例。', 'CRABOT_SYSTEMD_UNAVAILABLE')
     if (args.operation === 'add') {
+      registry.accountLookup(args.user)
       const existing = registry.read().find(entry => entry.user === args.user)
       const initial = existing ? null : await password()
-      const entry = await registry.register(args.user, { autostart: args.autostart, prepare: async value => {
-        store.assertIdle()
-        await runSystemUser(value, { root, action: 'prepare', input: { password: initial } })
-        if (systemdAvailable()) {
-          await ensureSystemUserManager(value)
-          await runSystemUser(value, { root, action: 'configure-service' })
-        }
-      } })
+      const entry = await registry.register(args.user, { autostart: args.autostart, assertAvailable: () => store.assertIdle(),
+        prepare: value => runSystemUser(value, { root, action: 'prepare', input: { password: initial } }),
+        configure: async (value, { reopening }) => {
+          if (reopening) await runSystemUser(value, { root, action: 'verify-provision' })
+          if (systemdAvailable()) {
+            await ensureSystemUserManager(value)
+            await runSystemUser(value, { root, action: 'configure-service' })
+          }
+        } })
       console.log('已开通 ' + entry.user + '；端口 ' + (3000 + entry.port_offset) + '；开机自启动：' + (entry.autostart ? '开启' : '关闭'))
       console.log('运行方式：' + (systemdAvailable() ? 'systemd按UID托管' : 'CLI（无systemd托管）'))
       console.log('启动：sudo -H -u ' + "'" + entry.user.replaceAll("'", "'\\''") + "'" + ' crabot start -d')

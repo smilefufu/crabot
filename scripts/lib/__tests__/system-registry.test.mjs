@@ -47,7 +47,10 @@ test('new registry is explicit; registration preserves repeat state and allocate
   const bob = await registry.register('bob')
   assert.equal(alice.port_offset, 100); assert.equal(bob.port_offset, 200); assert.equal(alice.autostart, false)
   assert.equal(fs.existsSync(alice.data_dir), false, 'root registry must not create or read employee directories')
-  assert.deepEqual(await registry.register('alice', { autostart: true, prepare: () => assert.fail('must not reset existing credentials or environment') }), alice)
+  assert.deepEqual(await registry.register('alice', { prepare: () => assert.fail('must not reset existing credentials or environment') }), alice)
+  assert.equal((await registry.register('alice', { autostart: true })).autostart, true)
+  assert.equal((await registry.register('alice')).autostart, true)
+  assert.equal((await registry.register('alice', { autostart: false })).autostart, false)
   assert.deepEqual(calls, [1001]); assert.equal(registry.read().length, 2)
 })
 
@@ -59,14 +62,17 @@ test('preparation failure leaves registry unchanged and never records incomplete
   assert.equal((await registry.register('bob')).port_offset, 100)
 })
 
-test('changed accounts and disabled records cannot be silently reinitialized', options, async t => {
+test('changed accounts are refused; explicit reopening preserves the disabled binding and never initializes data', options, async t => {
   const { registry, accounts } = fixture(t)
   await registry.update(() => [entry()], { create: true })
   accounts.get('alice').uid = 1010
   await assert.rejects(registry.register('alice'), /身份已变化/)
   accounts.get('alice').uid = 1001
   await registry.update(entries => entries.map(value => ({ ...value, enabled: false })))
-  await assert.rejects(registry.register('alice'), /已停用/)
+  let reopening = false
+  const reopened = await registry.register('alice', { prepare: () => assert.fail('never reset old data or credentials'),
+    configure: async (value, context) => { reopening = context.reopening; assert.equal(value.data_dir, entry().data_dir) } })
+  assert.equal(reopening, true); assert.deepEqual(reopened, entry())
 })
 
 test('corrupt, writable, hardlinked or redirected registry is never treated as empty', options, async t => {
@@ -88,4 +94,34 @@ test('registration uses OS mutual exclusion for concurrent allocations', options
   await registry.update(() => [], { create: true })
   await Promise.all([registry.register('alice'), registry.register('bob')])
   assert.deepEqual(registry.read().map(value => value.port_offset).sort(), [100, 200])
+})
+
+
+test('a repeated opening still checks the maintenance gate while holding the registry lock', options, async t => {
+  const { registry } = fixture(t); await registry.update(() => [entry()], { create: true })
+  await assert.rejects(registry.register('alice', { assertAvailable: () => { throw new Error('maintenance is active') } }), /maintenance is active/)
+  assert.deepEqual(registry.read(), [entry()])
+})
+test('service configuration failure retains the old enabled and autostart flags', options, async t => {
+  const { registry } = fixture(t), disabled = { ...entry(), enabled: false, autostart: true }
+  await registry.update(() => [disabled], { create: true })
+  await assert.rejects(registry.register('alice', { autostart: false, configure: () => { throw new Error('service could not disable') } }), /service could not disable/)
+  assert.deepEqual(registry.read(), [disabled])
+})
+test('NSS is rechecked inside the lock before preparation and publication', options, async t => {
+  const { registry, accounts } = fixture(t); await registry.update(() => [], { create: true })
+  let lookups = 0
+  registry.accountLookup = user => {
+    lookups++; return { ...accounts.get(user), uid: lookups === 1 ? 1001 : 1003 }
+  }
+  const registered = await registry.register('alice', { prepare: value => assert.equal(value.uid, 1003) })
+  assert.equal(registered.uid, 1003)
+})
+
+
+test('an explicit unchanged autostart flag still reconciles the actual service after a prior partial failure', options, async t => {
+  const { registry } = fixture(t); await registry.update(() => [entry()], { create: true })
+  let configured = 0
+  await registry.register('alice', { autostart: false, configure: () => { configured++ } })
+  assert.equal(configured, 1)
 })

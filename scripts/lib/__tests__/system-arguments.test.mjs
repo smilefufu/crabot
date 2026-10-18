@@ -8,5 +8,12 @@ test('batch all is explicit; unknown flags, arbitrary commands and user lists ca
 })
 test('administrator user commands do not accept UID/path/shell substitutions', () => {
   assert.deepEqual(parseSystemArguments(['user', 'add', 'alice', '--autostart']), { action: 'user', operation: 'add', user: 'alice', autostart: true })
-  for (const args of [['user', 'remove', 'alice', '--autostart'], ['user', 'add', '--uid=0'], ['user', 'add', 'alice', '--home=/root'], ['user', 'add', 'alice', 'bob']]) assert.throws(() => parseSystemArguments(args))
+  for (const args of [['user', 'remove', 'alice', '--autostart'], ['user', 'add', 'alice', '--autostart', '--no-autostart'], ['user', 'add', '--uid=0'], ['user', 'add', 'alice', '--home=/root'], ['user', 'add', 'alice', 'bob']]) assert.throws(() => parseSystemArguments(args))
+})
+
+
+test('omitted autostart preserves an existing selection; only explicit flags change it', () => {
+  assert.equal(parseSystemArguments(['user', 'add', 'alice']).autostart, undefined)
+  assert.equal(parseSystemArguments(['user', 'add', 'alice', '--no-autostart']).autostart, false)
+  assert.equal(parseSystemArguments(['user', 'add', 'alice', '--autostart']).autostart, true)
 })

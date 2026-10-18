@@ -98,3 +98,10 @@ test('a deployment service start requires the exact current boot, UID, selected 
     assert.equal(systemMaintenanceAllowsServiceStart({ ...record, ...change }, context), false)
   }
 })
+
+
+test('a cancelled foreground start does not dispatch a fresh service', async t => {
+  const entry = fixture(t), controller = new AbortController(); controller.abort()
+  await assert.rejects(controlSystemUser(entry, 'start', stopped, { available: () => {}, observe: async () => stopped,
+    signal: controller.signal, invoke: () => assert.fail('cancelled before dispatch') }), { code: 'CRABOT_SYSTEM_START_CANCELLED' })
+})

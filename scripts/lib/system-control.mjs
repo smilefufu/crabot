@@ -74,7 +74,7 @@ export async function systemctlForUser(entry, args, run = execute) {
 }
 
 export async function controlSystemUser(entry, action, previous, { permit, observe = inspectSystemUser, invoke = systemctlForUser,
-  available = assertSystemControlAvailable, stop = stopInstance, waitMs = 90_000 } = {}) {
+  available = assertSystemControlAvailable, stop = stopInstance, waitMs = 90_000, signal } = {}) {
   available(entry, { permit })
   const directory = management.ensurePrivateDataRoot(path.join(entry.data_dir, 'system-control'))
   const lock = await acquireCliLock(directory, 'system-' + action)
@@ -97,9 +97,11 @@ export async function controlSystemUser(entry, action, previous, { permit, obser
       } finally { releaseCliLock(lifecycle) }
       if (selected === 'stop') return { state: 'stopped' }
     }
+    if (signal?.aborted) throw systemError('已请求取消前台启动，正在核对本人服务以完成停止。', 'CRABOT_SYSTEM_START_CANCELLED')
     await invoke(entry, ['start', 'crabot.service'])
     const deadline = Date.now() + waitMs
     do {
+      if (signal?.aborted) throw systemError('已请求取消前台启动，正在核对本人服务以完成停止。', 'CRABOT_SYSTEM_START_CANCELLED')
       const started = await observe(entry)
       if (started.state === 'running' && started.ready === true) return { state: selected === 'restart' ? 'restarted' : 'started', generation: started.generation }
       if (Date.now() >= deadline) break

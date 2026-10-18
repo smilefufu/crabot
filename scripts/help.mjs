@@ -34,7 +34,7 @@ const lines = [
   '',
   bold('共享服务器管理员（内置system安装）'),
   `  ${cyan('sudo crabot system status')}                 查看所有已开通用户及作业`,
-  `  ${cyan('sudo crabot system user add <user>')}        开通已有Linux用户`,
+  `  ${cyan('sudo crabot system user add <user>')}        开通/重新开通；--autostart/--no-autostart切自启动`,
   `  ${cyan('sudo crabot system start --all')}            批量启动`,
   `  ${cyan('sudo crabot system stop --all')}             批量停止`,
   `  ${cyan('sudo crabot system restart --all')}          重启原运行集合，保留停止状态`,

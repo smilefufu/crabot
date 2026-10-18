@@ -108,20 +108,31 @@ export class SystemRegistry {
     if (actual.uid !== entry.uid || actual.gid !== entry.gid || actual.home !== entry.home || actual.user !== entry.user) fail('Linux用户身份已变化，保留原绑定，请管理员检查。')
     return actual
   }
-  async register(user, { autostart = false, prepare = async () => {} } = {}) {
+  async register(user, { autostart, prepare = async () => {}, configure = async () => {}, assertAvailable = () => {} } = {}) {
     this.authority()
-    const account = this.accountLookup(user)
+    this.accountLookup(user)
+    if (autostart !== undefined && typeof autostart !== 'boolean') fail('自启动选项不兼容。')
     let selected
     await this.update(async entries => {
+      assertAvailable()
+      const account = this.accountLookup(user)
       selected = entries.find(entry => entry.user === user)
-      if (selected) { this.verifyAccount(selected); if (!selected.enabled) fail('该用户已停用，请先由管理员明确处理原绑定。'); return entries }
+      if (selected) {
+        this.verifyAccount(selected)
+        const reopening = !selected.enabled
+        selected.enabled = true
+        if (autostart !== undefined) selected.autostart = autostart
+        if (reopening || autostart !== undefined) await configure(selected, { reopening })
+        return entries
+      }
       const used = new Set(entries.map(entry => entry.port_offset))
       let port_offset = 100
       while (used.has(port_offset)) port_offset += 100
       if (port_offset > 9900) fail('没有可用端口偏移，未开通用户。')
-      selected = { ...account, data_dir: path.join(account.home, '.crabot', 'data-' + port_offset), port_offset, enabled: true, autostart }
+      selected = { ...account, data_dir: path.join(account.home, '.crabot', 'data-' + port_offset), port_offset, enabled: true, autostart: autostart ?? false }
       validateSystemEntries([...entries, selected])
       await prepare(selected)
+      await configure(selected, { reopening: false })
       entries.push(selected)
       return entries
     })
