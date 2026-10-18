@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 
-import './_preflight.mjs'
 
 import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs'
@@ -8,17 +7,16 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { homedir } from 'node:os'
 import { detectMode } from './upgrade-lib/mode.mjs'
+import { detectMode as detectInstallScope } from './lib/mode.mjs'
 import { resolveCliDataDir } from './lib/instance.mjs'
 import { runScript } from './upgrade-lib/runner.mjs'
 import { runMigrations } from './upgrade-lib/migrate.mjs'
-import { runSourceUpgrade, syncPythonDeps } from './upgrade-lib/source.mjs'
-import { verifyReleasePackage } from './lib/release-package.mjs'
+import { prepareUpgrade, installPreparedUpgrade } from './upgrade-lib/prepared-upgrade.mjs'
+import { acquireCliLock, releaseCliLock } from './lib/cli-lock.mjs'
+import { preflightRestart } from './upgrade-lib/preflight.mjs'
 import {
   getCurrentVersion,
   getLatestVersion,
-  getReleaseUrls,
-  downloadRelease,
-  extractRelease,
   writeVersionFile,
 } from './upgrade-lib/release.mjs'
 
@@ -61,7 +59,7 @@ function writeStatus(patch) {
 }
 
 function node(args) {
-  execFileSync(process.execPath, [CLI, ...args], { cwd: CRABOT_HOME, stdio: 'inherit' })
+  execFileSync(process.execPath, [CLI, ...args], { cwd: CRABOT_HOME, stdio: 'inherit', env: { ...process.env, CRABOT_CLI_LOCK_HELD: '1', CRABOT_CLI_LOCK_OWNER: String(process.pid) } })
 }
 
 function stamp() {
@@ -69,6 +67,7 @@ function stamp() {
 }
 
 async function main() {
+  if (detectInstallScope('/etc/crabot') === 'system' && process.getuid?.() !== 0) throw new Error('System upgrade requires an administrator; the running instance was not stopped')
   const mode = detectMode(CRABOT_HOME) // 'release' | 'source'
   const fromVersion = readVersion(mode)
   console.log(`[ui-upgrade] start mode=${mode} from=${fromVersion} at=${stamp()}`)
@@ -82,54 +81,45 @@ async function main() {
   })
 
   // ========== 准备阶段（实例照常运行，最慢、最易失败的步骤都在这里；失败不停服务）==========
-  let releaseArtifact = null
-  let targetVersion = null
+  let prepared
+  let targetVersion
   try {
-    if (mode === 'source') {
-      console.log('[ui-upgrade] (prepare) git pull --ff-only')
-      execFileSync('git', ['pull', '--ff-only'], { cwd: CRABOT_HOME, stdio: 'inherit' })
-      console.log('[ui-upgrade] (prepare) build：install + build 所有模块')
-      await runSourceUpgrade(CRABOT_HOME, logger)
-    } else {
-      const current = getCurrentVersion(CRABOT_HOME)
-      const { tag } = await getLatestVersion()
-      targetVersion = tag
-      if (current === tag) {
-        try {
-          await verifyReleasePackage(CRABOT_HOME, current)
-          console.log(`[ui-upgrade] already up to date (${current})`)
-          writeStatus({ phase: 'done', to_version: current, finished_at: stamp() })
+    targetVersion = mode === 'release' ? (await getLatestVersion()).tag : undefined
+    if (mode === 'release' && getCurrentVersion(CRABOT_HOME) === targetVersion) {
+      try {
+        const current = await preflightRestart(CRABOT_HOME, DATA_DIR)
+        if (!current.modules.length && ['ready', 'not_applicable'].includes(current.shared.status)) {
+          writeStatus({ phase: 'done', to_version: targetVersion, finished_at: stamp() })
+          console.log(`[ui-upgrade] already up to date (${targetVersion})`)
           return
-        } catch (error) {
-          if (error.code === 'CRABOT_PREPARATION_CANCELLED') throw error
-          logger.warn(`Installed release is incomplete; repairing: ${error.message}`)
         }
-      }
-      releaseArtifact = await downloadRelease({ ...getReleaseUrls(tag), logger })
+      } catch (error) { logger.warn(`Installed target needs repair: ${error.message}`) }
     }
+    prepared = await prepareUpgrade(CRABOT_HOME, DATA_DIR, { mode, version: targetVersion, logger })
+    console.log(`[ui-upgrade] prepared product ${prepared.payload_bytes} bytes; scoped data backup ${prepared.preview.backup_bytes ?? 'legacy pending'}`)
+    await preflightRestart(prepared.stage, DATA_DIR)
   } catch (err) {
     const msg = err?.message || String(err)
     console.error('[ui-upgrade] prepare FAILED（服务未停，无影响）:', msg)
     writeStatus({ phase: 'failed', error: `准备阶段失败，服务未停：${msg}`, finished_at: stamp() })
-    process.exit(1)
+    process.exitCode = 1
+    return
   }
 
-  // ========== 切换阶段（停机，尽量短：只做 stop + 落盘类操作 + start）==========
+  // ========== 切换阶段：同一实例操作锁；此时无需下载、解包、安装依赖或构建 ==========
+  let lock
+  let switchStarted = false
   try {
+    lock = await acquireCliLock(DATA_DIR, 'web-upgrade')
+    await preflightRestart(prepared.stage, DATA_DIR)
     writeStatus({ phase: 'restarting' })
     console.log('[ui-upgrade] (switch) stop')
+    switchStarted = true
     node(['stop'])
-
-    if (mode === 'release' && releaseArtifact) {
-      console.log('[ui-upgrade] (switch) extract release')
-      await extractRelease({ ...releaseArtifact, crabotHome: CRABOT_HOME, logger })
-      console.log('[ui-upgrade] (switch) sync python deps')
-      await syncPythonDeps(CRABOT_HOME, logger)
-      await verifyReleasePackage(CRABOT_HOME, targetVersion)
-    }
+    await installPreparedUpgrade(prepared, CRABOT_HOME, DATA_DIR)
 
     console.log('[ui-upgrade] (switch) run migrations')
-    const result = await runMigrations(CRABOT_HOME, DATA_DIR, runScript, logger)
+    const result = await runMigrations(CRABOT_HOME, DATA_DIR, runScript, logger, { lockHeld: true })
     if (!result.ok) {
       throw new Error(`migration failed in ${result.failedModule} at ${result.failedAt} (backup: ${result.backupPath ?? 'none'})`)
     }
@@ -146,13 +136,17 @@ async function main() {
   } catch (err) {
     const msg = err?.message || String(err)
     console.error('[ui-upgrade] switch FAILED:', msg)
-    writeStatus({ phase: 'failed', error: `切换阶段失败（已停机，需人工恢复）：${msg}`, finished_at: stamp() })
-    process.exit(1)
+    writeStatus({ phase: 'failed', error: `${switchStarted ? '停止/切换阶段失败，请检查实例状态' : '切换预检失败，服务未停'}：${msg}`, finished_at: stamp() })
+    process.exitCode = 1
+    return
+  } finally {
+    releaseCliLock(lock)
   }
+
 }
 
 main().catch((err) => {
   const msg = err?.message || String(err)
   writeStatus({ phase: 'failed', error: msg, finished_at: stamp() })
-  process.exit(1)
+  process.exitCode = 1
 })

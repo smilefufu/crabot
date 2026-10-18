@@ -1,7 +1,7 @@
 """crabot-memory v3 → v4: 短期记忆 FTS5 召回升级。
 
 操作：
-1. 备份 data/memory/short_term.db → short_term.db.v3.backup-{ts}
+1. 由共同迁移事务核验本次实际写入范围的备份
 2. 在原库 DROP（若存在）+ 重建 FTS5 虚拟表 + 3 个 trigger（trigram tokenizer）
 3. INSERT INTO short_term_fts(short_term_fts) VALUES('rebuild') 全量重建索引
 4. 写 SCHEMA_VERSION 到 v4
@@ -15,7 +15,6 @@ Tokenizer 选 trigram 而非 unicode61：unicode61 不切 CJK 连续字符串，
 Usage: uv run python crabot-memory/upgrade/from_v3_to_v4.py --data-dir=<path>
 """
 import argparse
-import shutil
 import sqlite3
 import sys
 from datetime import datetime
@@ -23,18 +22,8 @@ from pathlib import Path
 from typing import List, Optional
 
 
-def _now_ts() -> str:
-    return datetime.now().strftime("%Y%m%d-%H%M%S")
-
-
-def backup_short_term(db_path: Path, log: List[str]) -> Optional[Path]:
-    if not db_path.exists():
-        log.append(f"short_term.db: not present at {db_path}, skipped backup")
-        return None
-    backup = db_path.with_name(f"{db_path.name}.v3.backup-{_now_ts()}")
-    shutil.copy2(db_path, backup)
-    log.append(f"short_term.db: backed up to {backup.name}")
-    return backup
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from scoped_upgrade import enter, require_context
 
 
 def build_fts_index(db_path: Path, log: List[str]) -> None:
@@ -109,7 +98,7 @@ def migrate(data_dir: Path) -> List[str]:
     log: List[str] = []
     log.append(f"=== v3 → v4 migration started at {datetime.now().isoformat()} ===")
     db = data_dir / "short_term.db"
-    backup_short_term(db, log)
+    require_context(data_dir)
     build_fts_index(db, log)
     log.append(f"=== v3 → v4 migration completed at {datetime.now().isoformat()} ===")
 
@@ -129,6 +118,9 @@ def main() -> int:
         return 1
 
     try:
+        result = enter(data_dir, 3, 4)
+        if result is not None:
+            return 0
         log = migrate(data_dir)
         for line in log:
             print(line)

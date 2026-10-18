@@ -11,7 +11,7 @@ import { execSync } from 'node:child_process'
 import http from 'node:http'
 import { readPid, clearPid, isPidAlive } from './lib/pid.mjs'
 import { resolveCliDataDir } from './lib/instance.mjs'
-import { acquireCliLock, releaseCliLock } from './lib/cli-lock.mjs'
+import { acquireCliLock, releaseCliLock, inheritedCliLock } from './lib/cli-lock.mjs'
 import { SUPERVISOR_FORCE_TIMEOUT_MS } from './lib/supervisor-shutdown.mjs'
 
 // OFFSET / DATA_DIR 收敛到 resolveCliDataDir（OFFSET 走 env > instance.json > 0；
@@ -119,7 +119,7 @@ function shutdownRpc(port, timeoutMs = 5000) {
 
 // CLI 操作互斥（restart 外层持锁时经 env 跳过）。process.exit 路径由 exit handler
 // 释放；SIGKILL 残留的死锁由 acquire 侧的陈旧检测接管。
-if (!process.env.CRABOT_CLI_LOCK_HELD) {
+if (!inheritedCliLock(DATA_DIR)) {
   try {
     const cliLockPath = await acquireCliLock(DATA_DIR, 'stop')
     process.on('exit', () => releaseCliLock(cliLockPath))

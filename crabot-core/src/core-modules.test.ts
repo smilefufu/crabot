@@ -77,6 +77,14 @@ describe('buildCoreModules：DATA_DIR 顶层契约', () => {
     expect(memory(true).entry).toBe('uv run --frozen python -m src.main')
   })
 
+  it('prepared Memory runs its verified interpreter without dependency installation and preserves module identity', () => {
+    const memory = buildCoreModules({ ...OPTS, memoryPython: '/prepared environment/bin/python' }).find(m => m.module_id === 'memory-default')!
+    expect(memory.entry).toBe('"/prepared environment/bin/python" -m src.main')
+    expect(memory.cwd).toBe(OPTS.memoryDir)
+    expect(memory.data_dir).toBe(join(OPTS.dataDir, 'memory'))
+    expect(memory.env).toEqual(buildCoreModules(OPTS).find(m => m.module_id === 'memory-default')!.env)
+  })
+
   it('memory：仍走 CRABOT_MEMORY_DATA_DIR，env 里不出现 DATA_DIR', () => {
     const env = envOf(buildCoreModules(OPTS), 'memory-default')
     expect(env.CRABOT_MEMORY_DATA_DIR).toBe(join('/home/u/.crabot/data', 'memory'))

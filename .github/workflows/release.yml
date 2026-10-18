@@ -83,7 +83,7 @@ jobs:
           version: '0.13.0'
 
       - name: Domestic source policy regressions
-        run: node --test scripts/lib/__tests__/install-network.test.mjs
+        run: node --test scripts/lib/__tests__/install-network.test.mjs scripts/lib/__tests__/memory-preparation-marker.test.mjs
 
       - name: Cold dependency downloads with official origins blocked
         shell: bash

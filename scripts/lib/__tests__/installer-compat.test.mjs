@@ -1,4 +1,5 @@
 import { test } from 'node:test'
+import { createHash } from 'node:crypto'
 import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -22,6 +23,17 @@ function bash(code, env = {}) {
     encoding: 'utf8', env: { ...process.env, INSTALLER: installer, ...env },
   })
 }
+test('installer helper pins match the shipped scripts on Unix and Windows', () => {
+  const shell = readFileSync(installer, 'utf8')
+  const powershell = readFileSync(new URL('../../../install.ps1', import.meta.url), 'utf8')
+  const entries = [...shell.matchAll(/(scripts\/[\w/.-]+)\) echo ([a-f0-9]{64})/g)]
+  assert.equal(entries.length, 5)
+  for (const [, name, expected] of entries) {
+    const actual = createHash('sha256').update(readFileSync(new URL(`../../../${name}`, import.meta.url))).digest('hex')
+    assert.equal(expected, actual, `${name}: Unix pin must match shipped helper`)
+    assert.ok(powershell.includes(`'${name}' = '${actual}'`), `${name}: Windows pin must match shipped helper`)
+  }
+})
 test('failed uv download is a failed prerequisite, without an installed message', unix, t => {
   const result = bash('curl() { return 22; }; ensure_uv', { HOME: fixture(t), PATH: '/usr/bin:/bin:/usr/sbin:/sbin' })
   assert.notEqual(result.status, 0, result.stdout + result.stderr)

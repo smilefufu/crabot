@@ -315,6 +315,12 @@ sync_memory_deps() {
     return 0
   }
 
+  node --input-type=module - "$SCRIPT_DIR/scripts/lib/memory-deps.mjs" "$MEMORY_DIR" <<'NODE'
+import { pathToFileURL } from 'node:url'
+const { clearPreparedEnvironment } = await import(pathToFileURL(process.argv[2]).href)
+await clearPreparedEnvironment(process.argv[3])
+NODE
+
   mkdir -p "$DATA_DIR/memory"
 }
 
@@ -439,8 +445,8 @@ start() {
   # 用 process substitution 让 tee 不切走主进程；node 自己当 wait 的目标
   node dist/main.js > >(tee -a "$mm_log") 2>&1 &
   local mm_pid=$!
-  echo "$mm_pid" > "$DATA_DIR/mm.pid"
-  trap 'kill -TERM '"$mm_pid"' 2>/dev/null; rm -f "'"$DATA_DIR"'/mm.pid"' INT TERM EXIT
+  # MM 在共同迁移准备通过后自行写入 PID，避免开发入口提前制造“活实例”。
+  trap 'kill -TERM '"$mm_pid"' 2>/dev/null' INT TERM EXIT
   wait "$mm_pid"
 }
 

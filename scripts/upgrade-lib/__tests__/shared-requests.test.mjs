@@ -1,9 +1,10 @@
-import { it, expect, beforeEach, afterEach } from 'vitest'
+import { it, expect, beforeEach, afterEach, vi } from 'vitest'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { spawnSync } from 'node:child_process'
+import { createRequire } from 'node:module'
 import { prepareSharedRequests } from '../shared-requests.mjs'
 import { runMigrations } from '../migrate.mjs'
 const home = fileURLToPath(new URL('../../../', import.meta.url)), quiet = { info() {}, error() {} }
@@ -30,10 +31,7 @@ async function devLaunch() {
   const fixture = path.join(root, 'dev-mm-fixture.mjs')
   await fs.writeFile(fixture, `import fs from 'node:fs/promises'; import path from 'node:path'; import { pathToFileURL } from 'node:url';
     const [home, data] = process.argv.slice(2);
-    for (let count = 0; count < 600; count++) {
-      if (await fs.stat(path.join(data, 'mm.pid')).then(() => true, () => false)) break;
-      await new Promise(resolve => setTimeout(resolve, 5));
-    }
+    await fs.writeFile(path.join(data, 'mm.pid'), String(process.pid));
     const { prepareSharedRequests } = await import(pathToFileURL(path.join(home, 'scripts/upgrade-lib/shared-requests.mjs')));
     await prepareSharedRequests(home, data, { info() {}, error() {} });
     console.log('DEV_MM_READY');`)
@@ -84,7 +82,7 @@ it('verified backup precedes conversion; old identity, context, checkpoint and r
   const converted = JSON.parse(await fs.readFile(ledgerPath(), 'utf8'))
   expect(converted).toEqual({ schema_version: 1, ledger: ledger() })
   expect(converted.manager_key).toBeUndefined(); expect(converted.workers).toBeUndefined() // old strict reader cannot consume this
-  expect(await fs.readFile(path.join(root, 'shared-request-upgrade-v1', 'backup', 'agent', 'worker-ledgers', file), 'utf8')).toBe(original)
+  expect(await fs.readFile(path.join(root, 'shared-request-upgrade-v2', 'backup', 'agent', 'worker-ledgers', file), 'utf8')).toBe(original)
   expect(await fs.readFile(path.join(root, 'agent', 'workers', 'old', 'context.json'), 'utf8')).toBe(JSON.stringify({ creator_friend_id: 'historical-friend' }))
   expect(await fs.readFile(path.join(root, 'agent', 'managers', 'old', 'checkpoint.json'), 'utf8')).toBe('OLD CHECKPOINT PRIVATE BODY')
   expect(await fs.readFile(path.join(root, 'agent', 'workers', 'old', 'input.json'), 'utf8')).toBe('OLD INPUT DO NOT REPLAY')
@@ -113,7 +111,7 @@ it.each([['requests.json', { version: 99, requests: [] }], ['request-sources.jso
 })
 it('backup/report tampering fails closed and rolls converted files back', async () => {
   await setup(); const original = await fs.readFile(ledgerPath(), 'utf8')
-  await expect(prepareSharedRequests(home, root, quiet, { async afterConvert() { await fs.writeFile(path.join(root, 'shared-request-upgrade-v1', 'impact.json'), '{}') } })).rejects.toThrow('Impact report')
+  await expect(prepareSharedRequests(home, root, quiet, { async afterConvert() { await fs.writeFile(path.join(root, 'shared-request-upgrade-v2', 'impact.json'), '{}') } })).rejects.toThrow('Impact report')
   expect(await fs.readFile(ledgerPath(), 'utf8')).toBe(original); await expect(fs.stat(ready())).rejects.toThrow()
   await expect(prepareSharedRequests(home, root, quiet)).rejects.toThrow('Impact report')
 })
@@ -132,12 +130,12 @@ it('ready-path verifies report and plan; new Worker contents are never restored 
   await setup(); await prepareSharedRequests(home, root, quiet)
   const converted = JSON.parse(await fs.readFile(ledgerPath(), 'utf8')); converted.ledger.workers.push({ worker_id: 'new' }); await fs.writeFile(ledgerPath(), JSON.stringify(converted))
   await prepareSharedRequests(home, root, quiet); expect(JSON.parse(await fs.readFile(ledgerPath(), 'utf8')).ledger.workers).toHaveLength(2)
-  await fs.writeFile(path.join(root, 'shared-request-upgrade-v1', 'plan.json'), '{}')
+  await fs.writeFile(path.join(root, 'shared-request-upgrade-v2', 'plan.json'), '{}')
   await expect(prepareSharedRequests(home, root, quiet)).rejects.toThrow('plan changed')
 })
 it('fresh install and shared runMigrations entry produce the same completed gate', async () => {
   await runMigrations(home, root, async () => ({ exitCode: 0 }), quiet)
-  expect(JSON.parse(await fs.readFile(ready(), 'utf8'))).toMatchObject({ schema_version: 1, status: 'ready' })
+  expect(JSON.parse(await fs.readFile(ready(), 'utf8'))).toMatchObject({ schema_version: 2, status: 'ready' })
 })
 
 it('a process crash after first conversion resumes only the verified file transaction, never checkpoint work', async () => {
@@ -192,6 +190,17 @@ it.each([false, true])('valid request-bound data uses real original/hash/double-
   }) })
   const request = await requests.forInputs(key, inputs).create({ source_id: inputs[0].source_id, delivery: 'requester_private' })
   await requests.attachWorker(key, request.request_id, 'bound')
+  if (!corrupted) {
+    const { sha256CanonicalJson } = await load('crabot-shared/dist/index.js')
+    const event = { kind: 'voice_management', ts: timestamp, seq: 0, result: { operation_id: 'synthetic-operation', status: 'completed' } }
+    const eventId = sha256CanonicalJson({ kind: event.kind, operation_id: event.result.operation_id })
+    const directory = path.join(root, 'agent/conversation-requests', request.request_id)
+    await fs.mkdir(path.join(directory, 'events', eventId), { recursive: true })
+    await fs.writeFile(path.join(directory, 'owner.json'), JSON.stringify({ schema_version: 1, manager_key: key, request_id: request.request_id, source_sha256: request.source_sha256 }))
+    await fs.writeFile(path.join(directory, 'admission.json'), JSON.stringify({ schema_version: 1, request_id: request.request_id, source_sha256: request.source_sha256, phase: 'admitted', outcome: null }))
+    await fs.writeFile(path.join(directory, 'events', eventId, 'event.json'), JSON.stringify({ schema_version: 3, manager_key: key, request_id: request.request_id, source_sha256: request.source_sha256,
+      event_id: eventId, event_sha256: sha256CanonicalJson(event), event, received_at: timestamp, phase: 'queued', consumed: false, context_admitted: false }))
+  }
   const binding = { schema_version: 1, request_id: request.request_id, source_sha256: corrupted ? 'a'.repeat(64) : request.source_sha256, execution_scope: 'request' }
   const context = new WorkerContextStore(path.join(root, 'agent', 'workers'))
   await context.write('bound', { schema_version: 2, request: binding, manager_key: key, creator_friend_id: 'friend', target_session: { channel_id: 'channel', session_id: 'group', type: 'group' } })
@@ -202,5 +211,53 @@ it.each([false, true])('valid request-bound data uses real original/hash/double-
     const result = await prepareSharedRequests(home, root, quiet)
     expect(result.status).toBe('prepared'); expect(await fs.readFile(result.report, 'utf8')).not.toContain('SYNTHETIC ORIGINAL REQUEST BODY')
     expect(JSON.parse(await fs.readFile(ledgerPath(), 'utf8'))).toEqual({ schema_version: 1, ledger: value })
+    const cache = createRequire(import.meta.url).cache
+    expect(cache[path.join(home, 'crabot-agent/dist/manager/conversation-request-runner.js')]).toBeUndefined()
+    expect(cache[path.join(home, 'crabot-agent/dist/manager/loop.js')]).toBeUndefined()
   }
+})
+
+it('migration never reads, hashes or backs up unrelated histories and a 100 GiB workspace', async () => {
+  await setup()
+  const excluded = ['workspaces/large/deliverables.bin', 'agent/managers/old/history.jsonl', 'agent/observations/log.jsonl', 'agent/workers/old/input.json', 'agent/managers/old/checkpoint.json', 'admin/traces/old.json']
+  for (const name of excluded) {
+    await fs.mkdir(path.dirname(path.join(root, name)), { recursive: true })
+    const file = await fs.open(path.join(root, name), 'w')
+    await file.truncate(name.startsWith('workspaces/') ? 100 * 1024 ** 3 : 4096)
+    await file.close()
+  }
+  const forbidden = filename => excluded.some(name => String(filename) === path.join(root, name))
+  const originalRead = fs.readFile, originalOpen = fs.open, originalCopy = fs.copyFile
+  const reads = vi.spyOn(fs, 'readFile').mockImplementation((filename, ...args) => {
+    if (forbidden(filename)) throw new Error('Unrelated history read')
+    return originalRead(filename, ...args)
+  })
+  const opens = vi.spyOn(fs, 'open').mockImplementation((filename, ...args) => {
+    if (forbidden(filename)) throw new Error('Unrelated history stream')
+    return originalOpen(filename, ...args)
+  })
+  const copies = vi.spyOn(fs, 'copyFile').mockImplementation((filename, ...args) => {
+    if (forbidden(filename)) throw new Error('Unrelated history backup')
+    return originalCopy(filename, ...args)
+  })
+  try {
+    await prepareSharedRequests(home, root, quiet)
+    const transaction = path.join(root, 'shared-request-upgrade-v2')
+    const plan = JSON.parse(await originalRead(path.join(transaction, 'plan.json'), 'utf8'))
+    expect(plan.files.map(file => file.name)).toEqual([path.join('agent', 'worker-ledgers', file)])
+    const backupFiles = await fs.readdir(path.join(transaction, 'backup', 'agent'))
+    expect(backupFiles).toEqual(['worker-ledgers'])
+    expect((await fs.stat(path.join(root, excluded[0]))).size).toBe(100 * 1024 ** 3)
+  } finally { reads.mockRestore(); opens.mockRestore(); copies.mockRestore() }
+})
+
+it.each([false, true])('legacy v1 ready and interrupted transactions retain original validation; interrupted=%s', async interrupted => {
+  await setup()
+  const { prepareSharedRequests: legacy } = await import('../shared-requests-v1.mjs')
+  if (interrupted) await expect(legacy(home, root, quiet, { afterConvert() { throw new Error('legacy interruption') } })).rejects.toThrow('legacy interruption')
+  else await legacy(home, root, quiet)
+  const result = await prepareSharedRequests(home, root, quiet)
+  expect(result.status).toBe(interrupted ? 'prepared' : 'ready')
+  expect(JSON.parse(await fs.readFile(ready(), 'utf8'))).toMatchObject({ schema_version: 1, transaction: 'shared-request-upgrade-v1' })
+  await expect(fs.stat(path.join(root, 'shared-request-upgrade-v2'))).rejects.toThrow()
 })
