@@ -8,8 +8,9 @@ import { createInterface } from 'node:readline'
 
 // Evaluate only the actual input function. Never import a start/password command
 // body: these tests must not start MM, read profiles or rotate real credentials.
-function prompter(script, input, write, exit = () => assert.fail('must not exit in this input scenario')) {
-  const source = fs.readFileSync(new URL('../../' + script, import.meta.url), 'utf8')
+function prompter(script, input, write, exit = () => assert.fail('must not exit in this input scenario'), lineEnding) {
+  const raw = fs.readFileSync(new URL('../../' + script, import.meta.url), 'utf8')
+  const source = (lineEnding ? raw.replace(/\r?\n/g, lineEnding) : raw).replace(/\r\n/g, '\n')
   const start = source.indexOf('function createPrompter() {'), end = source.indexOf('\n}\n', start) + 3
   assert.ok(start > 0 && end > start)
   return vm.runInNewContext(source.slice(start, end) + ';createPrompter()', {
@@ -21,6 +22,13 @@ function terminal(raw = false) {
     setRawMode(value) { this.isRaw = value }, resume() {}, pause() {} })
 }
 for (const script of ['start.mjs', 'password.mjs']) {
+  test(script + ': actual function loading supports both LF and Windows CRLF checkouts', async () => {
+    for (const lineEnding of ['\n', '\r\n']) {
+      const input = terminal(), prompt = prompter(script, input, () => {}, undefined, lineEnding)
+      const result = prompt.ask('Secret: '); input.emit('data', 'private-pass\r')
+      assert.equal(await result, 'private-pass'); prompt.close(); assert.equal(input.isRaw, false)
+    }
+  })
   test(script + ': raw mode and listener are ready before a visible secret prompt can be answered', async () => {
     const input = terminal(), output = []
     const prompt = prompter(script, input, value => {
