@@ -57,6 +57,9 @@ test('changed, missing, unrecorded and source records remain distinct and creden
   const result = await inspect(f), item = result.packages[0]
   assert.equal(item.modified_files, 1); assert.equal(item.missing_files, 1); assert.equal(item.has_source_record, true)
   assert.equal(result.unrecorded_site_files, 2)
+  const extension = result.unrecorded_files.find(file => file.path === 'unrecorded.py')
+  assert.deepEqual(extension, { path: 'unrecorded.py', size: 14, sha256: createHash('sha256').update('user extension').digest('hex') })
+  assert.equal(result.unrecorded_files.some(file => file.path.includes(f.dataDir)), false)
   assert.notEqual(result.fingerprint, before.fingerprint)
   assert.equal(JSON.stringify(result).includes(secret), false)
   assert.equal(JSON.stringify(result).includes('example.invalid'), false)

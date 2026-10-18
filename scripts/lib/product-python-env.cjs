@@ -123,4 +123,4 @@ function ensureProductMcpVenv(runtime, dataDir, serverId, spawn = spawnSync) {
   return ensureProductPythonEnvironment(runtime, dataDir, path.join(dataDir, 'mcp-envs', id, 'python'), spawn)
 }
 
-module.exports = { ensureProductAgentVenv, ensureProductMcpVenv }
+module.exports = { ensureProductAgentVenv, ensureProductMcpVenv, ensureProductPythonEnvironment }

@@ -25,8 +25,11 @@ def regular_text(file):
     return file.read_text(encoding='utf-8')
 
 
-def inspect(data, target_version):
-    root = pathlib.Path(data) / 'agent-venv'
+def inspect(data, target_version, directory='agent-venv'):
+    parent = pathlib.Path(data).resolve()
+    root = parent / directory
+    if not root.resolve().is_relative_to(parent):
+        raise ValueError('Environment outside data directory')
     report = dict(schema_version=1, observation_only=True, status='absent', packages=[])
     if reference(root):
         raise ValueError('Unsupported legacy environment')
@@ -101,7 +104,8 @@ def inspect(data, target_version):
         report['packages'].append(item)
         if len(report['packages']) > 4096:
             raise ValueError('Too many package records')
-    unrecorded = references = special = 0
+    unrecorded = []
+    references = special = 0
     for directory, dirs, files in os.walk(site, followlinks=False):
         dirs.sort(); files.sort()
         linked = {name for name in dirs if reference(pathlib.Path(directory, name))}
@@ -114,16 +118,19 @@ def inspect(data, target_version):
             elif not file.is_file():
                 special += 1
             elif file.suffix != '.pyc' and file not in covered:
-                unrecorded += 1
-                fingerprint.update(str(file.relative_to(root)).encode()); fingerprint.update(digest(file).encode())
+                record = dict(path=file.relative_to(site).as_posix(), size=file.stat().st_size, sha256=digest(file))
+                unrecorded.append(record)
+                if len(unrecorded) > 4096:
+                    raise ValueError('Too many unrecorded files')
+                fingerprint.update(str(file.relative_to(root)).encode()); fingerprint.update(record['sha256'].encode())
     report.update(status='observed', python_version=version, target_python_version=target_version,
-                  same_python_minor=parts[:2] == target_version.split('.')[:2], unrecorded_site_files=unrecorded,
+                  same_python_minor=parts[:2] == target_version.split('.')[:2], unrecorded_site_files=len(unrecorded), unrecorded_files=unrecorded,
                   site_references=references, special_site_files=special, fingerprint=fingerprint.hexdigest())
     return report
 
 
 try:
-    print(json.dumps(inspect(sys.argv[1], sys.argv[2]), ensure_ascii=False))
+    print(json.dumps(inspect(sys.argv[1], sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else 'agent-venv'), ensure_ascii=False))
 except Exception:
     # Source filenames, package URLs, local configuration and contents stay private.
     print('CRABOT_LEGACY_PYTHON_INSPECTION_FAILED', file=sys.stderr)

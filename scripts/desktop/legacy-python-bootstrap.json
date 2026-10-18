@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "source": "https://github.com/astral-sh/uv/blob/b1b14d39aef8e307ec5cf1d7243819fd5a2cc544/crates/uv-virtualenv/src/virtualenv.rs",
+  "retired_for_python": "3.10",
+  "retirement_source": "https://github.com/astral-sh/uv/pull/20222",
+  "files": {
+    "_virtualenv.pth": {
+      "size": 18,
+      "sha256": "69ac3d8f27e679c81b94ab30b3b56e9cd138219b1ba94a1fa3606d5a76a1433d"
+    },
+    "_virtualenv.py": {
+      "size": 4342,
+      "sha256": "6cf30c56faf2a55228914dbbd17f8088ed371ebb08f5e7fa6fd931f913fcaf1d"
+    }
+  }
+}

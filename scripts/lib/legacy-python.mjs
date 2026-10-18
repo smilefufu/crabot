@@ -7,16 +7,17 @@ import { promisify } from 'node:util'
 import identity from './process-identity.cjs'
 import product from './product-runtime.cjs'
 
-export async function inspectLegacyPythonEnvironment({ root, dataDir }) {
+export async function inspectPythonEnvironment({ root, dataDir, directory = 'agent-venv' }) {
   const unavailable = () => Object.assign(new Error('无法安全检查旧 Python 依赖，未执行旧环境或改动数据；请保留现有部署。'), { code: 'CRABOT_LEGACY_PYTHON_INSPECTION' })
-  if (!identity.isOwnedDirectory(dataDir)) throw unavailable()
+  if (typeof directory !== 'string' || !directory || directory.includes('\\') || directory.includes(':')
+    || directory.split('/').some(part => !part || part === '.' || part === '..') || !identity.isOwnedDirectory(dataDir)) throw unavailable()
   root = realpathSync(root); dataDir = realpathSync(dataDir)
   const runtime = product.loadProductRuntime(root, { required: true, full: true })
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => /^(SYSTEMROOT|WINDIR|TEMP|TMP|TMPDIR|LANG|LC_.*)$/i.test(key)))
   let result
   try {
     const { stdout } = await promisify(execFile)(runtime.executables.python, ['-I', '-S', '-B', '-X', 'utf8',
-      path.join(root, 'scripts/desktop/inspect-legacy-python.py'), dataDir, runtime.manifest.versions.python],
+      path.join(root, 'scripts/desktop/inspect-legacy-python.py'), dataDir, runtime.manifest.versions.python, directory],
     { env, timeout: 120_000, maxBuffer: 2 * 1024 * 1024, windowsHide: true })
     result = JSON.parse(stdout)
   } catch { throw unavailable() }
@@ -24,4 +25,8 @@ export async function inspectLegacyPythonEnvironment({ root, dataDir }) {
     || !Array.isArray(result.packages) || result.packages.length > 4096
     || result.status === 'observed' && (!/^[a-f0-9]{64}$/.test(result.fingerprint) || typeof result.same_python_minor !== 'boolean')) throw unavailable()
   return result
+}
+
+export function inspectLegacyPythonEnvironment({ root, dataDir }) {
+  return inspectPythonEnvironment({ root, dataDir })
 }
