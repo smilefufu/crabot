@@ -11,7 +11,7 @@ import { cliLockToken } from './cli-lock.mjs'
 import { inspectInstance } from './instance-runtime.mjs'
 
 const excluded = new Set(['workspaces', 'agent-venv', 'agent-environments', 'agent-tools', 'runtime-bases', 'mcp-envs', 'runtime-cache', 'logs', 'desktop-profile',
-  'cli.lock', 'startup-preflight.json', 'mm.pid', 'instance-runtime.json', 'desktop-maintenance.json', '.DS_Store'])
+  'system-control', 'cli.lock', 'startup-preflight.json', 'mm.pid', 'instance-runtime.json', 'desktop-maintenance.json', '.DS_Store'])
 const fail = (code, message) => { throw Object.assign(new Error(message), { code }) }
 const cancelled = signal => { if (signal?.aborted) fail('CRABOT_MAINTENANCE_CANCELLED', '已取消维护，原数据保留。') }
 async function hash(file) {

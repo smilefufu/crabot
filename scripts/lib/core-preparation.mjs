@@ -11,12 +11,13 @@ import { assertLocalMigrationData } from './maintenance-backup.mjs'
 import { readVersionMaintenance, assertVersionMaintenanceAllowsStart } from './version-maintenance.mjs'
 
 // Common preparation only: no password prompt, TTY, GUI, lifecycle lock or model calls.
-export function prepareCoreEnvironment({ root, dataDir, source = process.env }) {
+export function prepareCoreEnvironment({ root, dataDir, source = process.env, loadInstallationEnv }) {
   assertVersionMaintenanceAllowsStart(dataDir)
   const installation = cliLocation.assertSelectedCli(root)
   const env = { ...source, DATA_DIR: resolve(dataDir) }
   const file = join(installation?.root ?? root, '.env')
-  if (existsSync(file)) {
+  const readInstallationEnv = loadInstallationEnv ?? (installation?.scope !== 'system')
+  if (readInstallationEnv && existsSync(file)) {
     for (const raw of readFileSync(file, 'utf8').split('\n')) {
       const line = raw.replace(/#.*$/, '').trim(), split = line.indexOf('=')
       if (split > 0 && !env[line.slice(0, split)]) env[line.slice(0, split)] = line.slice(split + 1)

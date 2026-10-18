@@ -93,6 +93,7 @@ jobs:
           node --test crabot-client/tests/*.test.mjs
           node --test scripts/lib/__tests__/product-*.test.mjs
           node --test scripts/lib/__tests__/instance-runtime.test.mjs scripts/lib/__tests__/cli-lock-native.test.mjs scripts/lib/__tests__/process-identity.test.mjs scripts/lib/__tests__/local-auth-transport.test.mjs scripts/lib/__tests__/stop-windows.test.mjs scripts/lib/__tests__/background-core.test.mjs scripts/lib/__tests__/supervisor-bootstrap.test.mjs scripts/lib/__tests__/mm-startup.test.mjs
+          node --test scripts/lib/__tests__/system-*.test.mjs
           node --test scripts/lib/__tests__/desktop-session.test.mjs
           node --test scripts/lib/__tests__/core-preparation.test.mjs scripts/lib/__tests__/core-preflight.test.mjs scripts/lib/__tests__/installer-compat.test.mjs
           node --test scripts/lib/__tests__/archive-core.test.mjs scripts/lib/__tests__/core-release.test.mjs scripts/lib/__tests__/cli-launcher.test.mjs scripts/lib/__tests__/cli-installation.test.mjs
@@ -210,6 +211,10 @@ jobs:
         run: |
           node scripts/desktop/archive-core.mjs --candidate=true "--core=.desktop-build/安装 候选/core" --out=.desktop-build/cli-archive 2>&1 | tee .desktop-build/cli-archive.log
           node .github/scripts/smoke-cli-update.mjs ".desktop-build/安装 候选/core" ".desktop-build/安装 候选/core" .desktop-build/cli-archive/archive.json --cli-command 2>&1 | tee .desktop-build/cli-update.log
+      - name: Real systemd administrator and three-user batch control
+        if: runner.os == 'Linux' && steps.scope.outputs.full_runtime == 'true'
+        timeout-minutes: 15
+        run: sudo --preserve-env=GITHUB_ACTIONS "$GITHUB_WORKSPACE/.product-runtime/node/bin/node" .github/scripts/smoke-system-mode.mjs "$GITHUB_WORKSPACE/.desktop-build/安装 候选/core" "$GITHUB_WORKSPACE/.desktop-build/system-mode.json" 2>&1 | tee .desktop-build/system-mode.log
       - name: Save runtime evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -219,6 +224,7 @@ jobs:
             .desktop-build/*.log
             .desktop-build/*.png
             .desktop-build/runtime-scope.json
+            .desktop-build/system-mode.json
             .desktop-build/platform-installers/installers.json
             .desktop-build/cli-archive/archive.json
             product-runtime.json

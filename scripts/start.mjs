@@ -24,6 +24,8 @@ import { launchBackgroundCore } from './lib/background-core.mjs'
 import scraplingRuntime from './lib/scrapling-runtime.cjs'
 import { runBounded } from './lib/scrapling-prepare.mjs'
 import { verifyCoreRelease } from './lib/core-release.mjs'
+import cliLocation from './lib/cli-location.cjs'
+import { prepareSystemStartupData } from './lib/system-startup-data.mjs'
 import { assertVersionMaintenanceAllowsStart } from './lib/version-maintenance.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -173,8 +175,11 @@ console.log(`[crabot] Admin Web: http://localhost:${WEB_PORT}`)
 
 // Migration 兜底：start 自动跑缺失的 migration（覆盖 upgrade-time 漏跑场景）
 // 用 applyMigration 包装版（chainUpgrade + writeSchemaVersion 原子，不可能漏写
-// SCHEMA_VERSION）；不做 backup（启动不备份，upgrade.mjs 主路径才备）。
-try { await applyStartupMigrations(ROOT, DATA_DIR, process.env, message => console.log(`[crabot] ${message}`)) }
+// SCHEMA_VERSION）；user/source保留旧兜底，受管system启动额外保留迁移前备份及中断保护。
+try {
+  if (cliLocation.locateCliInstallation(ROOT)?.scope === 'system') await prepareSystemStartupData({ root: ROOT, dataDir: DATA_DIR, env: process.env })
+  else await applyStartupMigrations(ROOT, DATA_DIR, process.env, message => console.log(`[crabot] ${message}`))
+}
 catch (error) { console.error(`[crabot] ${error.message}`); process.exit(1) }
 
 if (!DAEMON_MODE) {

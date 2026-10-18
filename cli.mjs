@@ -27,7 +27,8 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 
 // A retained immutable version is not an alternate writable instance entry.
 const { default: cliLocation } = await import(new URL('./scripts/lib/cli-location.cjs', import.meta.url))
-try { cliLocation.assertSelectedCli(__dirname) }
+let cliInstallation
+try { cliInstallation = cliLocation.assertSelectedCli(__dirname) }
 catch (error) { console.error('[crabot] ' + error.message); process.exit(1) }
 
 // Windows 上 ESM dynamic import 不接受 C:\... 绝对路径，必须转 file:///C:/...
@@ -41,14 +42,37 @@ if (existsSync(resolve(__dirname, 'core-release.json')) || !process.env.CRABOT_H
 const args = process.argv.slice(2)
 const command = args[0] ?? 'help'
 
-const bootstrapCommands = new Set(['start', 'stop', 'check', 'help', 'upgrade', 'status', 'init', 'sync', 'vendor', 'backup', 'import', 'restart'])
+const bootstrapCommands = new Set(['system', 'start', 'stop', 'check', 'help', 'upgrade', 'status', 'init', 'sync', 'vendor', 'backup', 'import', 'restart'])
+
+if (command === '_system-service') {
+  if (process.platform !== 'linux' || cliInstallation?.scope !== 'system') {
+    console.error('[crabot] 受管服务入口仅用于已安装的Linux system Core。'); process.exit(1)
+  }
+  await importPath(resolve(__dirname, 'scripts/system-service.mjs'))
+} else if (cliInstallation?.scope === 'system' && !['system', 'upgrade', 'vendor', 'help'].includes(command)) {
+  try {
+    const { ownSystemEntry, applySystemUserBinding } = await importPath(resolve(__dirname, 'scripts/lib/system-context.mjs'))
+    const entry = applySystemUserBinding(ownSystemEntry())
+    if (['start', 'stop', 'restart'].includes(command)) {
+      if (args.includes('--all')) throw new Error('批量操作请使用sudo crabot system ' + command + ' --all。')
+      const { runOwnSystemCommand } = await importPath(resolve(__dirname, 'scripts/lib/system-own-cli.mjs'))
+      const { systemdAvailable } = await importPath(resolve(__dirname, 'scripts/lib/system-service.mjs'))
+      if (systemdAvailable()) {
+        await runOwnSystemCommand(entry, command, args.slice(1))
+        process.exit(0)
+      }
+    }
+  } catch (error) { console.error('[crabot] ' + error.message); process.exit(1) }
+}
 
 // 在加载含第三方静态 import 的入口前完成旧安装的依赖修复。
 if ((bootstrapCommands.has(command) && command !== 'help') || command === 'password') {
   await importPath(resolve(__dirname, 'scripts/_preflight.mjs'))
 }
 
-if (command === 'password') {
+if (command === '_system-service') {
+  // The imported service retains its own child/exit lifecycle.
+} else if (command === 'password') {
   await importPath(resolve(__dirname, 'scripts/password.mjs'))
 } else if (bootstrapCommands.has(command)) {
   const scriptPath = resolve(__dirname, `scripts/${command}.mjs`)

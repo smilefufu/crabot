@@ -104,3 +104,12 @@ test('versioned CLI reads container environment without editing payloads and ref
   assert.throws(() => prepareCoreEnvironment({ root: core, dataDir: untouched, source: {} }), { code: 'CRABOT_CLI_INSTALLATION' })
   assert.equal(existsSync(untouched), false)
 })
+
+test('per-UID system preparation never loads the shared administrator environment', t => {
+  const { root, data } = fixture(t)
+  writeFileSync(join(root, '.env'), 'ROOT_CREDENTIAL=must-not-inherit\nCRABOT_JWT_SECRET=root-secret\n')
+  const result = prepareCoreEnvironment({ root, dataDir: data, source: { HOME: '/home/alice' }, loadInstallationEnv: false })
+  assert.equal(result.env.ROOT_CREDENTIAL, undefined)
+  assert.notEqual(result.env.CRABOT_JWT_SECRET, 'root-secret')
+  assert.equal(result.env.HOME, '/home/alice')
+})

@@ -564,23 +564,22 @@ JS
   if [ "$SYSTEM_MODE" = "true" ]; then
     section "Creating /etc/crabot/ skeleton"
 
-    # 创建 crabot group（如不存在）
-    if ! getent group crabot &>/dev/null; then
-      groupadd -r crabot
-      info "created group 'crabot'"
-    fi
-
-    mkdir -p /etc/crabot/defaults /etc/crabot/registry
-    chown root:root /etc/crabot
-    chown root:root /etc/crabot/defaults
-    chown root:crabot /etc/crabot/registry
+    mkdir -p /etc/crabot/defaults
+    chown root:root /etc/crabot /etc/crabot/defaults
     chmod 0755 /etc/crabot /etc/crabot/defaults
-    chmod 0775 /etc/crabot/registry
-
-    if [ ! -f /etc/crabot/registry/ports.json ]; then
-      echo '[]' > /etc/crabot/registry/ports.json
-      chown root:crabot /etc/crabot/registry/ports.json
-      chmod 0664 /etc/crabot/registry/ports.json
+    if [ -n "$BUNDLED_CORE_DIR" ]; then
+      "$BUNDLED_CORE_DIR/.product-runtime/node/bin/node" "$BUNDLED_CORE_DIR/scripts/system-install.mjs"
+    else
+      # Existing source/legacy installation keeps its original initialization path.
+      if ! getent group crabot &>/dev/null; then groupadd -r crabot; fi
+      mkdir -p /etc/crabot/registry
+      chown root:crabot /etc/crabot/registry
+      chmod 0775 /etc/crabot/registry
+      if [ ! -f /etc/crabot/registry/ports.json ]; then
+        echo '[]' > /etc/crabot/registry/ports.json
+        chown root:crabot /etc/crabot/registry/ports.json
+        chmod 0664 /etc/crabot/registry/ports.json
+      fi
     fi
 
     if [ ! -f /etc/crabot/cluster.version ]; then
@@ -617,11 +616,16 @@ LR
   if [ "$SYSTEM_MODE" = "true" ]; then
     section "Done! (system mode)"
     info "下一步："
-    info "  1. 把员工加入 crabot group:"
-    info "     sudo usermod -a -G crabot alice"
-    info "     sudo usermod -a -G crabot bob"
-    info "  2. (可选) 自定义员工可选供应商目录：sudo crabot vendor add，或编辑 /etc/crabot/defaults/vendor.yaml（参考同目录 .example）"
-    info "  3. 通知员工：crabot start 即可（vendor 改动各员工重启 crabot 后自动生效，无需 sync）"
+    if [ -n "$BUNDLED_CORE_DIR" ]; then
+      info "  1. 开通已有Linux用户：sudo crabot system user add alice"
+      info "  2. 以员工身份启动：sudo -H -u alice crabot start -d"
+      info "  3. 查看全局状态：sudo crabot system status"
+      info "  批量操作：sudo crabot system start/stop/restart --all（真实systemd环境）"
+    else
+      info "  1. 把员工加入 crabot group：sudo usermod -a -G crabot alice"
+      info "  2. 员工重新登录后运行crabot start"
+    fi
+    info "  可选供应商目录：sudo crabot vendor add；vendor改动各员工重启后生效，无需sync。"
   else
     section "Done!"
     if [ "$NODE_SWITCHED_BY_NVM" = "true" ]; then

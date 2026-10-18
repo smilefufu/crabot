@@ -138,9 +138,9 @@ export async function recoverVersionMaintenance({ dataDir, root, appVersion, ver
 }
 
 
-// CLI upgrade preserves the pre-existing stopped state. This is offline code/data
-// completion, not the GUI recovery callback's ordinary start + health acceptance.
-export async function completeStoppedCliVersionMaintenance({ dataDir, root, id, migrate, verifyComplete }) {
+// Offline completion preserves the stopped state. Callers own version selection;
+// this is separate from GUI recovery that starts the service and verifies health.
+export async function completeStoppedVersionMaintenance({ dataDir, root, id, migrate, verifyComplete }) {
   dataDir = locked(dataDir)
   const record = readVersionMaintenance(dataDir)
   root = realpathSync(root)
@@ -162,3 +162,6 @@ export async function completeStoppedCliVersionMaintenance({ dataDir, root, id, 
     rmSync(path.join(dataDir, name)); syncDirectory(dataDir)
   } finally { recovering.delete(record.id) }
 }
+
+// Existing user-CLI adapter retains its entry and identical offline semantics.
+export function completeStoppedCliVersionMaintenance(options) { return completeStoppedVersionMaintenance(options) }

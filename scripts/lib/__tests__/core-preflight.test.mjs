@@ -78,7 +78,15 @@ test('parent crash keeps a live preflight protected, and its unacknowledged exit
   await assert.rejects(acquireCliLock(f.data, 'next-operation', 0), { code: 'CRABOT_PREFLIGHT_BUSY' })
   await assert.rejects(acquireStartupLock(f.data, 'recover-start', 0), { code: 'CRABOT_PREFLIGHT_BUSY' })
   await fs.writeFile(path.join(f.data, 'finish'), 'complete-this-controlled-preflight')
-  while (identity.sameProcess(receipt.child, identity.inspectProcess(receipt.child.pid))) await new Promise(resolve => setTimeout(resolve, 20))
+  const settlementDeadline = Date.now() + 3000
+  for (;;) {
+    try { if (!identity.sameProcess(receipt.child, identity.inspectProcess(receipt.child.pid))) break }
+    catch (error) { if (error.code !== 'CRABOT_PROCESS_IDENTITY') throw error }
+    // Windows may deny identity access during exit. Unknown is not gone: wait
+    // until the OS confirms absence/replacement, keeping the receipt protected.
+    if (Date.now() >= settlementDeadline) assert.fail('Controlled child exit identity remains unknown')
+    await new Promise(resolve => setTimeout(resolve, 20))
+  }
   assert.equal(await fs.readFile(path.join(f.data, 'late'), 'utf8'), 'preserved')
   await assert.rejects(acquireCliLock(f.data, 'after-exit', 0), { code: 'CRABOT_PREFLIGHT_INTERRUPTED' })
   assert.equal(state.read(f.data).id, receipt.id)
