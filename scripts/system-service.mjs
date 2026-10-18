@@ -19,8 +19,8 @@ let lock
 try {
   const entry = applySystemUserBinding(ownSystemEntry())
   await assertSystemServiceStartAllowed(entry, { root })
+  const dataDir = management.requirePrivateDataRoot(entry.data_dir)
   await verifyCoreRelease(root)
-  const dataDir = management.ensurePrivateDataRoot(entry.data_dir)
   lock = await acquireStartupLock(dataDir, 'system-service-start')
   await assertSystemServiceStartAllowed(entry, { root })
   if (inspectInstance(dataDir).state !== 'stopped') throw new Error('实例已经运行或身份未知，未创建第二个MM。')

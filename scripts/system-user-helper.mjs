@@ -30,27 +30,29 @@ try {
   let input = '', bytes = 0
   for await (const chunk of process.stdin) { bytes += Buffer.byteLength(chunk); if (bytes > 65536) throw systemError('UID助手输入过大。'); input += chunk }
   input = JSON.parse(input).input
+  if (!['prepare', 'verify-provision', 'configure-service'].includes(permit.action)) management.requirePrivateDataRoot(entry.data_dir)
   let result
   if (permit.action === 'prepare' || permit.action === 'verify-provision') {
-    const home = management.ensurePrivateDataRoot(path.join(entry.home, '.crabot'))
-    const manifest = path.join(home, 'instance.json')
-    if (fs.existsSync(manifest)) {
+    const homePath = path.join(entry.home, '.crabot')
+    const home = permit.action === 'verify-provision' ? management.requirePrivateDataRoot(homePath) : management.ensurePrivateDataRoot(homePath)
+    const manifest = path.join(home, 'instance.json'), existing = fs.existsSync(manifest)
+    if (existing) {
       const previous = JSON.parse(fs.readFileSync(manifest, 'utf8'))
       const installation = cliLocation.locateCliInstallation(root)
       const previousInstallation = typeof previous.crabot_home === 'string' ? cliLocation.locateCliInstallation(previous.crabot_home) : null
       if (previous.mode !== 'system' || previous.port_offset !== entry.port_offset || !installation || previousInstallation?.root !== installation.root) throw systemError('发现旧实例绑定，请先完成兼容转换，未覆盖。')
     } else if (permit.action === 'verify-provision') throw systemError('原开通绑定缺失，未重新初始化；请检查本人保留数据。')
-    const dataDir = management.ensurePrivateDataRoot(entry.data_dir)
+    const dataDir = existing || permit.action === 'verify-provision' ? management.requirePrivateDataRoot(entry.data_dir) : management.ensurePrivateDataRoot(entry.data_dir)
     lock = await acquireCliLock(dataDir, 'system-provision')
     if (inspectInstance(dataDir).state !== 'stopped') throw systemError('现有实例尚未停止，未修改开通配置。')
     const { readCredentials, writeCredentials, newCredentialsFromPassword } = await import(new URL('../crabot-admin/dist/credentials.js', import.meta.url))
     const credentials = await readCredentials(path.join(dataDir, 'admin'))
     if (!credentials) {
-      if (permit.action === 'verify-provision') throw systemError('原浏览器凭据缺失，未重置；请检查本人诊断和备份。')
+      if (existing || permit.action === 'verify-provision') throw systemError('原浏览器凭据缺失，未重置；请检查本人诊断和备份。')
       if (typeof input?.password !== 'string' || input.password.length < 4 || input.password.length > 4096) throw systemError('请在管理员本地设置至少4字符的浏览器初始密码。')
       await writeCredentials(path.join(dataDir, 'admin'), await newCredentialsFromPassword(input.password, { is_temp: true, changed_via: 'start' }))
     }
-    if (!fs.existsSync(manifest)) fs.writeFileSync(manifest, JSON.stringify({ mode: 'system', port_offset: entry.port_offset,
+    if (!existing) fs.writeFileSync(manifest, JSON.stringify({ mode: 'system', port_offset: entry.port_offset,
       applied_cluster_version: null, applied_at: new Date().toISOString(), data_dir: dataDir, crabot_home: root }) + '\n', { flag: 'wx', mode: 0o600, flush: true })
     result = { prepared: true, credential_preserved: Boolean(credentials) }
   } else if (['snapshot', 'migrate', 'cancel-preparation', 'check-migration'].includes(permit.action)) {
@@ -76,8 +78,9 @@ try {
       await controlSystemUser(entry, 'stop', permit.previous, { permit })
       await systemctlForUser(entry, ['disable', 'crabot.service'])
     } else {
-      lock = await acquireCliLock(entry.data_dir, 'system-disable-cli')
-      await stopInstance(entry.data_dir)
+      const dataDir = management.requirePrivateDataRoot(entry.data_dir)
+      lock = await acquireCliLock(dataDir, 'system-disable-cli')
+      await stopInstance(dataDir)
     }
     result = { disabled: true }
   } else throw systemError('UID助手动作不兼容。')

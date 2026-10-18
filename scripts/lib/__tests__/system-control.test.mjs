@@ -3,10 +3,11 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 import { tmpdir } from 'node:os'
-import { controlSystemUser, systemctlForUser, parseSystemServiceStatus, reconcileSystemService } from '../system-control.mjs'
+import { controlSystemUser, inspectSystemUser, systemctlForUser, parseSystemServiceStatus, reconcileSystemService } from '../system-control.mjs'
 import { applySystemUserBinding, ownSystemEntry, systemMaintenanceAllowsServiceStart } from '../system-context.mjs'
 import management from '../desktop-management.cjs'
 import identity from '../process-identity.cjs'
+import { cliLockToken } from '../cli-lock.mjs'
 
 function fixture(t) {
   const parent = fs.realpathSync(fs.mkdtempSync(path.join(tmpdir(), 'crabot-system-control-')))
@@ -116,4 +117,28 @@ test('a legacy environment alias for the same bound directory is normalized; a r
   const other = path.join(parent, 'different-root'); fs.mkdirSync(other); fs.mkdirSync(path.join(other, path.basename(entry.data_dir)))
   fs.symlinkSync(other, alias, 'dir')
   assert.throws(() => applySystemUserBinding(entry, { DATA_DIR: path.join(alias, path.basename(entry.data_dir)) }), { code: 'CRABOT_SYSTEM_BINDING_CONFLICT' })
+})
+
+
+test('managed control never recreates a missing bound data root before observing or dispatching', async t => {
+  const entry = fixture(t); fs.rmSync(entry.data_dir, { recursive: true })
+  await assert.rejects(inspectSystemUser(entry), { code: 'CRABOT_DATA_MISSING' })
+  assert.equal(fs.existsSync(entry.data_dir), false)
+  for (const action of ['start', 'stop', 'restart']) {
+    await assert.rejects(controlSystemUser(entry, action, stopped, { available: () => {},
+      observe: () => assert.fail('missing data must refuse before status or service dispatch'),
+      invoke: () => assert.fail(), stop: () => assert.fail() }), { code: 'CRABOT_DATA_MISSING' })
+    assert.equal(fs.existsSync(entry.data_dir), false)
+  }
+})
+
+
+test('control uses the canonical lifecycle lock and stop target for a same-directory parent alias', { skip: process.platform === 'win32' }, async t => {
+  const entry = fixture(t), real = entry.data_dir, parent = path.dirname(real), alias = path.join(parent, 'control-alias')
+  fs.symlinkSync(parent, alias, 'dir'); entry.data_dir = path.join(alias, path.basename(real))
+  const observations = [running('old'), running('old'), stopped]
+  const result = await controlSystemUser(entry, 'stop', running('old'), { available: () => {}, observe: () => observations.shift(),
+    stop: directory => { assert.equal(directory, real); assert.ok(cliLockToken(path.join(real, 'cli.lock'))) },
+    invoke: async (_, args) => assert.deepEqual(args, ['stop', 'crabot.service']) })
+  assert.deepEqual(result, { state: 'stopped' })
 })

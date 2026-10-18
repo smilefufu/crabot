@@ -44,7 +44,8 @@ export function reconcileSystemService(current, service, controller, uid) {
 }
 
 export async function inspectSystemUser(entry) {
-  const current = inspectInstance(entry.data_dir)
+  const dataDir = management.requirePrivateDataRoot(entry.data_dir)
+  const current = inspectInstance(dataDir)
   if (!['running', 'starting', 'stopped'].includes(current.state)) throw systemError('旧实例尚未完成可信转换，未执行受管启停。')
   const result = { state: current.state, generation: current.state === 'stopped' ? null : current.record.generation, ready: false, health: 'unhealthy',
     core_version: current.state === 'running' ? cliLocation.readCoreVersion(current.record.install_root) : null,
@@ -55,7 +56,7 @@ export async function inspectSystemUser(entry) {
     const service = parseSystemServiceStatus(response.stdout)
     Object.assign(result, reconcileSystemService(current, service, service.pid ? identity.inspectProcess(service.pid) : null, entry.uid))
   }
-  const maintenance = readVersionMaintenance(entry.data_dir)
+  const maintenance = readVersionMaintenance(dataDir)
   if (maintenance) result.maintenance = { id: maintenance.id, phase: maintenance.phase, target_version: maintenance.target_version }
   if (current.state === 'running') {
     const port = 19000 + entry.port_offset
@@ -77,7 +78,8 @@ export async function systemctlForUser(entry, args, run = execute) {
 export async function controlSystemUser(entry, action, previous, { permit, observe = inspectSystemUser, invoke = systemctlForUser,
   available = assertSystemControlAvailable, stop = stopInstance, waitMs = 90_000, signal } = {}) {
   available(entry, { permit })
-  const directory = management.ensurePrivateDataRoot(path.join(entry.data_dir, 'system-control'))
+  const dataDir = management.requirePrivateDataRoot(entry.data_dir)
+  const directory = management.ensurePrivateDataRoot(path.join(dataDir, 'system-control'))
   const lock = await acquireCliLock(directory, 'system-' + action)
   try {
     available(entry, { permit })
@@ -85,11 +87,11 @@ export async function controlSystemUser(entry, action, previous, { permit, obser
     const selected = selectSystemUserAction(action, previous ?? current, current)
     if (selected === 'skip') return { state: 'skipped', observed_state: current.state }
     if (selected === 'stop' || selected === 'restart') {
-      const lifecycle = await acquireCliLock(entry.data_dir, 'system-stop-owned-instance')
+      const lifecycle = await acquireCliLock(dataDir, 'system-stop-owned-instance')
       try {
         const checked = await observe(entry)
         selectSystemUserAction(action, previous ?? current, checked)
-        await stop(entry.data_dir)
+        await stop(dataDir)
         // The unit has no ExecStop that would reacquire this lock. A replacement
         // launcher cannot create a new MM while this lock remains held.
         await invoke(entry, ['stop', 'crabot.service'])

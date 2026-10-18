@@ -53,6 +53,10 @@ if (command === '_system-service') {
   try {
     const { ownSystemEntry, applySystemUserBinding } = await importPath(resolve(__dirname, 'scripts/lib/system-context.mjs'))
     const entry = applySystemUserBinding(ownSystemEntry())
+    if (['start', 'stop', 'restart', 'status', 'check'].includes(command)) {
+      const { default: management } = await importPath(resolve(__dirname, 'scripts/lib/desktop-management.cjs'))
+      management.requirePrivateDataRoot(entry.data_dir)
+    }
     if (['start', 'stop', 'restart'].includes(command)) {
       if (args.includes('--all')) throw new Error('批量操作请使用sudo crabot system ' + command + ' --all。')
       const { runOwnSystemCommand } = await importPath(resolve(__dirname, 'scripts/lib/system-own-cli.mjs'))

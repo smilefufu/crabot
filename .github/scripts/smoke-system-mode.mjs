@@ -278,6 +278,24 @@ try {
     await asUser(bob, ['stop']); assert.equal((await state(bob)).state, 'stopped')
     await fs.rm(fixture); await fs.rm(marker)
   })
+  await phase('missing-profile-refuses-control-service-and-repeat-open', async () => {
+    const retained = bob.data_dir + '-ci-retained'
+    const ownNode = args => run('/usr/bin/setpriv', ['--reuid=' + bob.uid, '--regid=' + bob.gid, '--init-groups', '--', path.join(loaded.core, '.product-runtime/node/bin/node'), ...args],
+      { env: { PATH: '/usr/bin:/bin', HOME: bob.home, USER: bob.user, LOGNAME: bob.user } })
+    const rename = (from, to) => ownNode(['-e', "require('fs').renameSync(process.argv[1],process.argv[2])", from, to])
+    await absent(retained); await rename(bob.data_dir, retained)
+    try {
+      await assert.rejects(state(bob), { code: 'CRABOT_DATA_MISSING' })
+      for (const args of [['status', '--json'], ['start', '-d']]) await assert.rejects(asUser(bob, args), error => error.code === 1 && /数据目录不存在/.test(error.stderr))
+      await assert.rejects(asUser(bob, ['_system-service']), error => error.code === 64 && /数据目录不存在/.test(error.stderr))
+      await assert.rejects(run(command, ['system', 'user', 'add', bob.user]), error => error.code === 1 && /数据目录不存在/.test(error.stderr))
+      await absent(bob.data_dir)
+    } finally {
+      if (await fs.lstat(bob.data_dir).catch(() => null)) throw new Error('Missing bound profile was recreated; original retained for CI diagnosis')
+      await rename(retained, bob.data_dir)
+    }
+    assert.equal((await state(bob)).state, 'stopped')
+  })
   await fs.writeFile(evidence, JSON.stringify({ install_root: installed, selected, users: users.map(({ user, uid, gid, port_offset }) => ({ user, uid, gid, port_offset })), events,
     real_systemd: true, real_uid_transitions: true, real_core: true, cli_disconnect_survived: true, real_coordinator_death_recovered_without_replay: true, full_archive_shared_upgrade: Boolean(archiveReport), synthetic_previous_release: Boolean(archiveReport), uses_real_model_provider: false }, null, 2) + '\n')
 } catch (error) {
