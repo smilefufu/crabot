@@ -5,6 +5,7 @@ const path = require('node:path')
 const crypto = require('node:crypto')
 const { spawnSync } = require('node:child_process')
 const { productEnvironment } = require('./product-runtime.cjs')
+const { readAgentEnvironmentSelection } = require('./agent-python-selection.cjs')
 
 const windows = process.platform === 'win32'
 
@@ -114,7 +115,8 @@ function ensureProductPythonEnvironment(runtime, dataDir, directory, spawn) {
 }
 
 function ensureProductAgentVenv(runtime, dataDir, spawn = spawnSync) {
-  return ensureProductPythonEnvironment(runtime, dataDir, path.join(dataDir, 'agent-venv'), spawn)
+  const selected = readAgentEnvironmentSelection(dataDir)
+  return ensureProductPythonEnvironment(runtime, dataDir, selected?.directory ?? path.join(dataDir, 'agent-venv'), spawn)
 }
 
 function ensureProductMcpVenv(runtime, dataDir, serverId, spawn = spawnSync) {

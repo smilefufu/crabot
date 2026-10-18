@@ -10,9 +10,13 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { planLegacyPythonRebuild, prepareLegacyPythonRebuild } from '../legacy-python-rebuild.mjs'
 import { inspectLegacyPythonEnvironment } from '../legacy-python.mjs'
+import { createInstanceRuntime, clearInstanceRuntime } from '../instance-runtime.mjs'
 import { acquireCliLock, releaseCliLock } from '../cli-lock.mjs'
 import product from '../product-runtime.cjs'
 import management from '../desktop-management.cjs'
+import python from '../product-python-env.cjs'
+import selection from '../agent-python-selection.cjs'
+import { selectLegacyPythonRebuild, cancelLegacyPythonSelection } from '../legacy-python-selection.mjs'
 
 const root = realpathSync(new URL('../../../', import.meta.url))
 const require = createRequire(path.join(root, 'crabot-admin/package.json')), AdmZip = require('adm-zip'), execute = promisify(execFile)
@@ -176,4 +180,83 @@ test('the production preparation runner verifies a dependency-free legacy enviro
   const record = JSON.parse(await fs.readFile(path.join(f.dataDir, result.directory, 'legacy-rebuild.json')))
   assert.deepEqual(record.pins, [])
   assert.equal(await fs.stat(path.join(f.dataDir, 'agent-python.json')).catch(() => null), null)
+})
+
+
+test('verified rebuild selection changes the default interpreter without moving either environment', async t => {
+  const f = await fixture(t), prepared = await prepare(f)
+  const input = { root, dataDir: f.dataDir, prepared, expectedFingerprint: f.old.fingerprint }
+  const open = fs.open
+  let published = false
+  const syncFailure = t.mock.method(fs, 'open', async (file, ...args) => {
+    if (file === f.dataDir && !published) { published = true; throw Object.assign(new Error('controlled directory fsync failure'), { code: 'EIO' }) }
+    return open(file, ...args)
+  })
+  await assert.rejects(selectLegacyPythonRebuild(input), { code: 'CRABOT_PYTHON_SELECTION_UNKNOWN' })
+  syncFailure.mock.restore()
+  assert.equal(selection.readAgentEnvironmentSelection(f.dataDir).record.id, prepared.id)
+  assert.equal((await selectLegacyPythonRebuild(input)).id, prepared.id)
+  const runtime = product.loadProductRuntime(root, { required: true })
+  const selectedPath = python.ensureProductAgentVenv(runtime, f.dataDir)
+  assert.equal(selectedPath.split(path.delimiter)[0], path.dirname(prepared.binary))
+  const output = await execute(prepared.binary, ['-I', '-B', '-c', 'import crabot_migration_probe;print(crabot_migration_probe.value)'])
+  assert.equal(output.stdout.trim(), 'rebuilt-from-wheel')
+  assert.equal((await inspectLegacyPythonEnvironment({ root, dataDir: f.dataDir })).fingerprint, f.old.fingerprint)
+  assert.equal(await fs.readFile(path.join(f.site, 'crabot_migration_probe.py'), 'utf8'), f.code)
+  const selectedFile = path.join(f.dataDir, selection.selectionName), originalReference = await fs.readFile(selectedFile)
+  const otherReference = { ...JSON.parse(originalReference), id: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', directory: 'agent-environments/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb' }
+  await fs.writeFile(selectedFile, JSON.stringify(otherReference))
+  await assert.rejects(selectLegacyPythonRebuild(input), { code: 'CRABOT_PYTHON_SELECTION_CONFLICT' })
+  assert.deepEqual(JSON.parse(await fs.readFile(selectedFile, 'utf8')), otherReference)
+  await fs.writeFile(selectedFile, originalReference)
+  await assert.rejects(cancelLegacyPythonSelection({ ...input, prepared: { ...prepared, receipt_sha256: 'b'.repeat(64) } }), { code: 'CRABOT_PYTHON_SELECTION_CONFLICT' })
+  // A damaged selected target remains blocked; cancellation can clear only this
+  // exact reference and does not delete either environment.
+  await fs.rename(path.join(f.dataDir, prepared.directory, 'legacy-rebuild.json'), path.join(f.dataDir, prepared.directory, 'receipt-retained'))
+  assert.throws(() => python.ensureProductAgentVenv(runtime, f.dataDir), { code: 'CRABOT_PYTHON_ENV_SELECTION_INVALID' })
+  const cancelSyncFailure = t.mock.method(fs, 'open', async (file, ...args) => {
+    if (file === f.dataDir) throw Object.assign(new Error('controlled cancel fsync failure'), { code: 'EIO' })
+    return open(file, ...args)
+  })
+  await assert.rejects(cancelLegacyPythonSelection(input), { code: 'CRABOT_PYTHON_SELECTION_UNKNOWN' })
+  cancelSyncFailure.mock.restore()
+  assert.deepEqual(await cancelLegacyPythonSelection(input), { cleared: false })
+  assert.equal(selection.readAgentEnvironmentSelection(f.dataDir), null)
+  assert.equal((await fs.stat(path.join(f.dataDir, prepared.directory))).isDirectory(), true)
+  await assertOriginal(f)
+})
+
+test('selection refuses a changed source and a missing operation lock without replacing the old default', async t => {
+  const f = await fixture(t), prepared = await prepare(f)
+  const input = { root, dataDir: f.dataDir, prepared, expectedFingerprint: f.old.fingerprint }
+  const running = createInstanceRuntime({ dataDir: f.dataDir, root, mmPort: 18999 })
+  await assert.rejects(selectLegacyPythonRebuild(input), { code: 'CRABOT_BACKUP_REQUIRES_STOP' })
+  clearInstanceRuntime(f.dataDir, running.generation)
+  const probe = t.mock.method(python, 'ensureProductPythonEnvironment', () => { throw new Error('https://private-probe-output.invalid/must-not-return') })
+  await assert.rejects(selectLegacyPythonRebuild(input), error => {
+    assert.equal(error.code, 'CRABOT_LEGACY_PYTHON_SELECTION_UNVERIFIED')
+    assert.equal(error.message.includes('must-not-return'), false)
+    assert.equal(error.cause.message.includes('must-not-return'), true)
+    return true
+  })
+  probe.mock.restore()
+  await fs.writeFile(path.join(f.site, 'crabot_migration_probe.py'), 'concurrent source change')
+  await assert.rejects(selectLegacyPythonRebuild(input))
+  assert.equal(selection.readAgentEnvironmentSelection(f.dataDir), null)
+  releaseCliLock(f.lock)
+  await assert.rejects(selectLegacyPythonRebuild(input), { code: 'CRABOT_BACKUP_REQUIRES_STOP' })
+  assert.equal(selection.readAgentEnvironmentSelection(f.dataDir), null)
+})
+
+
+test('a known exact pre-business reference can be cancelled without deleting the old environment', async t => {
+  const f = await fixture(t), prepared = { id: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', directory: 'agent-environments/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+    receipt_sha256: 'b'.repeat(64), source_fingerprint: f.old.fingerprint }
+  const file = path.join(f.dataDir, selection.selectionName)
+  const record = { schema_version: 1, id: prepared.id, directory: prepared.directory, receipt_sha256: prepared.receipt_sha256, source_fingerprint: prepared.source_fingerprint }
+  const bytes = JSON.stringify(record) + '\n'
+  if (process.platform === 'win32') { const { default: identity } = await import('../process-identity.cjs'); identity.writePrivateFile(file, bytes) }
+  else await fs.writeFile(file, bytes, { flag: 'wx', mode: 0o600 })
+  assert.deepEqual(await cancelLegacyPythonSelection({ root, dataDir: f.dataDir, prepared, expectedFingerprint: f.old.fingerprint }), { cleared: true })
+  await assertOriginal(f)
 })
