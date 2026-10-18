@@ -85,6 +85,7 @@ async function fixture(t) {
   return { dataDir, site, old, code, calls, offline, lock }
 }
 const prepare = (f, extra = {}) => prepareLegacyPythonRebuild({ root, dataDir: f.dataDir,
+  progress: stage => console.log('LEGACY_PYTHON_REBUILD_STAGE ' + stage),
   expectedFingerprint: f.old.fingerprint, execute: f.offline, ...extra })
 
 async function assertOriginal(f) {
@@ -186,6 +187,7 @@ test('the production preparation runner verifies a dependency-free legacy enviro
 test('verified rebuild selection changes the default interpreter without moving either environment', async t => {
   const f = await fixture(t), prepared = await prepare(f)
   const input = { root, dataDir: f.dataDir, prepared, expectedFingerprint: f.old.fingerprint }
+  console.log('LEGACY_PYTHON_SELECTION_STAGE pre-publication-failure-check')
   const open = fs.open, rename = fs.rename
   const failedPublication = t.mock.method(fs, 'rename', async (from, to) => {
     if (to === path.join(f.dataDir, selection.selectionName)) throw Object.assign(new Error('controlled pre-publication rename failure'), { code: 'EIO' })
@@ -203,6 +205,7 @@ test('verified rebuild selection changes the default interpreter without moving 
     await assert.rejects(selectLegacyPythonRebuild(input), { code: 'CRABOT_PYTHON_SELECTION_UNKNOWN' })
     syncFailure.mock.restore()
   } else await selectLegacyPythonRebuild(input) // Node has no Windows directory-fsync path to inject.
+  console.log('LEGACY_PYTHON_SELECTION_STAGE publication-verified')
   assert.equal(selection.readAgentEnvironmentSelection(f.dataDir).record.id, prepared.id)
   assert.equal((await selectLegacyPythonRebuild(input)).id, prepared.id)
   const runtime = product.loadProductRuntime(root, { required: true })
@@ -212,6 +215,7 @@ test('verified rebuild selection changes the default interpreter without moving 
   assert.equal(output.stdout.trim(), 'rebuilt-from-wheel')
   assert.equal((await inspectLegacyPythonEnvironment({ root, dataDir: f.dataDir })).fingerprint, f.old.fingerprint)
   assert.equal(await fs.readFile(path.join(f.site, 'crabot_migration_probe.py'), 'utf8'), f.code)
+  console.log('LEGACY_PYTHON_SELECTION_STAGE conflict-and-cancellation-check')
   const selectedFile = path.join(f.dataDir, selection.selectionName), originalReference = await fs.readFile(selectedFile)
   const otherReference = { ...JSON.parse(originalReference), id: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', directory: 'agent-environments/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb' }
   await fs.writeFile(selectedFile, JSON.stringify(otherReference))

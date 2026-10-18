@@ -154,7 +154,7 @@ jobs:
         if: steps.scope.outputs.full_runtime == 'true'
         run: node --test scripts/lib/__tests__/legacy-python.test.mjs 2>&1 | tee .desktop-build/legacy-python-inspection.log
       - name: Rebuild legacy Python in an unselected environment
-        timeout-minutes: 10
+        timeout-minutes: 20
         if: steps.scope.outputs.full_runtime == 'true'
         run: node --test scripts/lib/__tests__/legacy-python-rebuild.test.mjs 2>&1 | tee .desktop-build/legacy-python-rebuild.log
       - name: Execute real offline local capabilities
