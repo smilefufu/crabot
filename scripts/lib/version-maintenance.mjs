@@ -5,7 +5,7 @@ import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import identity from './process-identity.cjs'
 import management from './desktop-management.cjs'
-import { acquireCliLock, releaseCliLock, cliLockToken } from './cli-lock.mjs'
+import { acquireStartupLock, releaseCliLock, cliLockToken } from './cli-lock.mjs'
 import { verifyCoreRelease } from './core-release.mjs'
 import { inspectInstance } from './instance-runtime.mjs'
 import { verifyMaintenanceBackup } from './maintenance-backup.mjs'
@@ -106,7 +106,7 @@ export async function markVersionMaintenanceInstalling(dataDir, id) {
 // verifyCompatible is read-only. run uses the ordinary migration/start/health
 // path under this same lock; neither callback may relabel schemas or reset data.
 export async function recoverVersionMaintenance({ dataDir, root, appVersion, verifyCompatible, run }) {
-  const lock = await acquireCliLock(dataDir, 'desktop-recover-version')
+  const lock = await acquireStartupLock(dataDir, 'desktop-recover-version')
   let record
   try {
     dataDir = locked(dataDir); record = readVersionMaintenance(dataDir)

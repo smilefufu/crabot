@@ -3,24 +3,43 @@ import { mkdirSync, readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import native from './process-identity.cjs'
+import preflight from './preflight-state.cjs'
 
 const handles = new Map()
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
 
-export async function acquireCliLock(dataDir, command, waitMs = 5000) {
+async function acquire(dataDir, command, waitMs, recoveryId) {
   mkdirSync(dataDir, { recursive: true })
   const path = resolve(dataDir, 'cli.lock')
   const deadline = Date.now() + waitMs
   const token = randomUUID()
   const owner = native.inspectProcess(process.pid)
   for (;;) {
+    let preparationBusy
     if (!handles.has(path)) {
       const handle = native.tryFileLock(path, JSON.stringify({ pid: process.pid, command, started_at: new Date().toISOString(), owner, token }))
-      if (handle) { handles.set(path, { handle, token }); return path }
+      if (handle) {
+        try { preflight.assertSettled(dataDir, recoveryId) }
+        catch (error) {
+          native.releaseFileLock(handle)
+          if (error.code !== 'CRABOT_PREFLIGHT_BUSY') throw error
+          preparationBusy = error
+        }
+        if (!preparationBusy) { handles.set(path, { handle, token }); return path }
+      }
     }
-    if (Date.now() >= deadline) throw new Error('another crabot CLI operation is in progress — wait for it to finish, then retry')
+    if (Date.now() >= deadline) throw preparationBusy ?? new Error('another crabot CLI operation is in progress — wait for it to finish, then retry')
     await sleep(Math.min(100, Math.max(1, deadline - Date.now())))
   }
+}
+
+export function acquireCliLock(dataDir, command, waitMs = 5000) { return acquire(dataDir, command, waitMs) }
+
+// Only explicit startup/recovery can replace a stopped orphan-check receipt.
+// This does not authorize retrying schema migrations or other business work.
+export async function acquireStartupLock(dataDir, command = 'start', waitMs = 5000) {
+  const previous = preflight.read(dataDir)
+  return acquire(dataDir, command, waitMs, previous?.id)
 }
 
 export function releaseCliLock(path) {

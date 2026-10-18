@@ -16,7 +16,8 @@ import { checkSingleInstance } from './lib/pid.mjs'
 import { prepareCoreEnvironment, applyStartupMigrations } from './lib/core-preparation.mjs'
 import management from './lib/desktop-management.cjs'
 import { hasInstance, resolveCliDataDir } from './lib/instance.mjs'
-import { acquireCliLock, releaseCliLock, hasInheritedCliLock } from './lib/cli-lock.mjs'
+import { acquireStartupLock, releaseCliLock, hasInheritedCliLock } from './lib/cli-lock.mjs'
+import { runCorePreflight } from './lib/core-preflight.mjs'
 import { runManagedCore } from './lib/managed-core.mjs'
 import { inspectInstance } from './lib/instance-runtime.mjs'
 import { launchBackgroundCore } from './lib/background-core.mjs'
@@ -62,7 +63,7 @@ const OFFSET = parseInt(process.env.CRABOT_PORT_OFFSET || '0', 10)
 let startupLock
 if (!hasInheritedCliLock(DATA_DIR)) {
   try {
-    startupLock = await acquireCliLock(DATA_DIR, 'start')
+    startupLock = await acquireStartupLock(DATA_DIR, 'start')
     process.on('exit', () => releaseCliLock(startupLock))
   } catch (error) {
     console.error(`[crabot] ${error.message}`)
@@ -152,12 +153,9 @@ if (!await probePort(19000 + OFFSET)) {
   process.exit(1)
 }
 
-const orphanRecovery = spawnSync(process.execPath, [orphanRecoveryEntry], {
-  cwd: resolve(ROOT, 'crabot-core'),
-  stdio: 'inherit',
-  env: { ...process.env },
-})
-if (orphanRecovery.status !== 0) {
+const orphanRecovery = await runCorePreflight({ root: ROOT, dataDir: DATA_DIR, node: process.execPath,
+  stdio: 'inherit', env: { ...process.env } })
+if (orphanRecovery.exitCode !== 0) {
   console.error('[crabot] startup aborted before Module Manager was launched.')
   process.exit(1)
 }

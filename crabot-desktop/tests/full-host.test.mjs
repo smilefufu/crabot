@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 import { once } from 'node:events'
 import { createServer } from 'node:net'
-import { createInterface } from 'node:readline'
+import controlReader from './full-host-transport.cjs'
 import { randomBytes } from 'node:crypto'
 import { inspectInstance } from '../../scripts/lib/instance-runtime.mjs'
 import { SUPERVISOR_FORCE_TIMEOUT_MS } from '../../scripts/lib/supervisor-shutdown.mjs'
@@ -38,18 +38,20 @@ test('actual Electron host shares its real core with CLI and distinguishes hide,
   const step = phase => console.log('CRABOT_FULL_HOST_STEP ' + JSON.stringify({ platform: process.platform, phase }))
   const cli = async (...args) => (await promisify(execFile)(node, [path.join(root, 'cli.mjs'), ...args], { env, cwd: root, timeout: 90_000, maxBuffer: 2 * 1024 * 1024 })).stdout
   async function launch() {
+    t.signal.throwIfAborted()
     const token = randomBytes(24).toString('hex'), sockets = new Set()
     let connected
     const connection = new Promise(resolve => { connected = resolve })
     const server = createServer(socket => {
       sockets.add(socket); socket.once('close', () => sockets.delete(socket)); socket.on('error', () => {})
-      createInterface({ input: socket }).once('line', supplied => {
+      controlReader(socket).once('line', supplied => {
         if (supplied !== token) socket.destroy()
         else connected(socket)
       })
     })
     controls.push({ server, sockets })
     await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve) })
+    t.signal.throwIfAborted()
 
     const child = spawn(createRequire(import.meta.url)('electron'), [appRoot], { env: { ...env,
       CRABOT_FULL_HOST_CONTROL_PORT: String(server.address().port), CRABOT_FULL_HOST_CONTROL_TOKEN: token,

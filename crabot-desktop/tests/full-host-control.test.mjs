@@ -2,10 +2,10 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import { createServer } from 'node:net'
-import { createInterface } from 'node:readline'
+import controlReader from './full-host-transport.cjs'
 import { createRequire } from 'node:module'
 import { EventEmitter } from 'node:events'
-import { Readable } from 'node:stream'
+import { Readable, PassThrough } from 'node:stream'
 import { runInNewContext } from 'node:vm'
 
 // Exercise only the fixture's control transport with Windows-style EOF stdin.
@@ -16,7 +16,7 @@ test('full-host fixture receives controls despite EOF stdin and removes transpor
   const connection = new Promise(resolve => { connected = resolve })
   const server = createServer(socket => {
     sockets.add(socket); socket.once('close', () => sockets.delete(socket))
-    createInterface({ input: socket }).once('line', token => { assert.equal(token, 'fixture-token'); connected(socket) })
+    controlReader(socket).once('line', token => { assert.equal(token, 'fixture-token'); connected(socket) })
   })
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
   const app = new EventEmitter()
@@ -47,4 +47,14 @@ test('full-host fixture receives controls despite EOF stdin and removes transpor
     for (const socket of sockets) socket.destroy()
     await new Promise(resolve => server.close(resolve))
   }
+})
+
+test('the fixture socket owner handles resets without a second unhandled readline error', () => {
+  const input = new PassThrough(), errors = []
+  input.on('error', error => errors.push(error.code))
+  const reader = controlReader(input)
+  try {
+    assert.doesNotThrow(() => input.emit('error', Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' })))
+    assert.deepEqual(errors, ['ECONNRESET'])
+  } finally { reader.close(); input.destroy() }
 })

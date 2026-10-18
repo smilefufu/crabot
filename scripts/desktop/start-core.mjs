@@ -1,9 +1,7 @@
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
-import { execFile } from 'node:child_process'
-import { promisify } from 'node:util'
 import { createServer } from 'node:net'
-import { acquireCliLock, releaseCliLock, cliLockToken } from '../lib/cli-lock.mjs'
+import { acquireStartupLock, releaseCliLock, cliLockToken } from '../lib/cli-lock.mjs'
 import { inspectInstance } from '../lib/instance-runtime.mjs'
 import { prepareCoreEnvironment, applyStartupMigrations } from '../lib/core-preparation.mjs'
 import { launchBackgroundCore } from '../lib/background-core.mjs'
@@ -11,6 +9,7 @@ import management from '../lib/desktop-management.cjs'
 import { detectMode } from '../lib/mode.mjs'
 import { verifyCoreRelease } from '../lib/core-release.mjs'
 import { assertVersionMaintenanceAllowsStart } from '../lib/version-maintenance.mjs'
+import { runCorePreflight } from '../lib/core-preflight.mjs'
 
 // Desktop presentation adapter. Shared preparation/migration/controller layers have
 // no TTY, password, task source, session, delivery or recovery-task semantics.
@@ -22,7 +21,7 @@ export async function startDesktopCore({ root, dataDir, source = process.env, on
     throw Object.assign(new Error('此部署需要使用原管理方式；桌面不会自动接管 system/dev 实例。'), { code: 'CRABOT_DESKTOP_TAKEOVER_REQUIRED' })
   }
   management.ensurePrivateDataRoot(dataDir)
-  const lock = cliLockToken(join(dataDir, 'cli.lock')) ? undefined : await acquireCliLock(dataDir, 'desktop-start')
+  const lock = cliLockToken(join(dataDir, 'cli.lock')) ? undefined : await acquireStartupLock(dataDir, 'desktop-start')
   try {
     assertVersionMaintenanceAllowsStart(dataDir)
     const current = inspectInstance(dataDir)
@@ -41,7 +40,8 @@ export async function startDesktopCore({ root, dataDir, source = process.env, on
       probe.listen(mmPort, '127.0.0.1', () => probe.close(resolve))
     })
     stage('orphan_preflight')
-    await promisify(execFile)(runtime.executables.node, [entry], { cwd: join(root, 'crabot-core'), env, timeout: 120_000, maxBuffer: 1024 * 1024 })
+    const preflight = await runCorePreflight({ root, dataDir, node: runtime.executables.node, env, timeoutMs: 120_000 })
+    if (preflight.exitCode !== 0) throw Object.assign(new Error('启动前的孤儿进程检查未通过，原数据已保留。'), { code: 'CRABOT_PREFLIGHT_FAILED' })
     stage('migrations')
     await applyStartupMigrations(root, dataDir, env)
     stage('launch_controller')

@@ -2,7 +2,7 @@
 // No product auth handler is replaced. Final packaged fuses disable this route.
 if (!process.versions.electron || !process.env.CRABOT_FULL_HOST_FIXTURE) throw new Error('Full host fixture requires an explicitly isolated Electron process')
 delete process.env.NODE_OPTIONS
-const { createInterface } = require('node:readline')
+const controlReader = require('./full-host-transport.cjs')
 const { createConnection } = require('node:net')
 const port = Number(process.env.CRABOT_FULL_HOST_CONTROL_PORT), token = process.env.CRABOT_FULL_HOST_CONTROL_TOKEN
 delete process.env.CRABOT_FULL_HOST_CONTROL_PORT
@@ -54,7 +54,7 @@ function install() {
   control.once('connect', () => control.write(token + '\n'))
   control.once('error', error => emit('fixture_error', { message: 'Control connection: ' + error.code }))
   app.once('will-quit', () => control.destroy())
-  createInterface({ input: control }).on('line', command => {
+  controlReader(control).on('line', command => {
     commands = commands.then(async () => {
       if (command === 'close') window.close()
       else if (command === 'show') app.emit('activate')
