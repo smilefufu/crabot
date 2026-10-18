@@ -86,18 +86,23 @@ export class DesktopController {
     this.operation = pending.catch(() => {}).finally(() => { this.busy-- })
     return pending
   }
-  async recoverVersion(): Promise<boolean> {
-    const maintenance = await this.load('scripts/lib/version-maintenance.mjs')
-    if (!maintenance.readVersionMaintenance(this.options.dataRoot)) return false
-    const { verifyDataCompatibility } = await this.load('scripts/lib/core-preparation.mjs')
-    const { assertLocalMigrationData } = await this.load('scripts/lib/maintenance-backup.mjs')
-    await maintenance.recoverVersionMaintenance({ dataDir: this.options.dataRoot, root: this.options.coreRoot, appVersion: this.options.appVersion,
-      verifyCompatible: async () => {
-        const pending = verifyDataCompatibility(this.options.coreRoot, this.options.dataRoot)
-        await assertLocalMigrationData(this.options.dataRoot, pending)
-      },
-      run: async () => (await this.start()).phase === 'ready' })
-    return true
+  recoverVersion(): Promise<boolean> {
+    this.busy++
+    const pending = this.operation.then(async () => {
+      const maintenance = await this.load('scripts/lib/version-maintenance.mjs')
+      if (!maintenance.readVersionMaintenance(this.options.dataRoot)) return false
+      const { verifyDataCompatibility } = await this.load('scripts/lib/core-preparation.mjs')
+      const { assertLocalMigrationData } = await this.load('scripts/lib/maintenance-backup.mjs')
+      await maintenance.recoverVersionMaintenance({ dataDir: this.options.dataRoot, root: this.options.coreRoot, appVersion: this.options.appVersion,
+        verifyCompatible: async () => {
+          const pending = verifyDataCompatibility(this.options.coreRoot, this.options.dataRoot)
+          await assertLocalMigrationData(this.options.dataRoot, pending)
+        },
+        run: async () => { await this.startCore(); return this.host.snapshot().phase === 'ready' } })
+      return true
+    })
+    this.operation = pending.then(() => {}, () => {}).finally(() => { this.busy-- })
+    return pending
   }
   private run(operation: () => Promise<void>): Promise<DesktopHostState> {
     this.busy++
@@ -113,20 +118,19 @@ export class DesktopController {
     }
     return { ...current, mmAlive: current.record?.mm && identity.sameProcess(current.record.mm, identity.inspectProcess(current.record.mm.pid)) }
   }
-  start(): Promise<DesktopHostState> {
-    return this.run(async () => {
-      this.retries = 0
-      await this.verifyInstallation()
-      const current = await this.current()
-      if (current.state === 'running' && current.mmAlive) { await this.host.reconnect(); return }
-      this.host.status('starting', '正在准备内置环境并启动本机服务。')
-      const { startDesktopCore } = await this.load('scripts/desktop/start-core.mjs')
-      const started = Date.now()
-      await startDesktopCore({ root: this.options.coreRoot, dataDir: this.options.dataRoot,
-        onStage: (phase: string) => console.info(JSON.stringify({ component: 'desktop-startup', phase, at: new Date().toISOString(), elapsed_ms: Date.now() - started })) })
-      await this.host.reconnect()
-    })
+  private async startCore(): Promise<void> {
+    this.retries = 0
+    await this.verifyInstallation()
+    const current = await this.current()
+    if (current.state === 'running' && current.mmAlive) { await this.host.reconnect(); return }
+    this.host.status('starting', '正在准备内置环境并启动本机服务。')
+    const { startDesktopCore } = await this.load('scripts/desktop/start-core.mjs')
+    const started = Date.now()
+    await startDesktopCore({ root: this.options.coreRoot, dataDir: this.options.dataRoot,
+      onStage: (phase: string) => console.info(JSON.stringify({ component: 'desktop-startup', phase, at: new Date().toISOString(), elapsed_ms: Date.now() - started })) })
+    await this.host.reconnect()
   }
+  start(): Promise<DesktopHostState> { return this.run(() => this.startCore()) }
   stop(): Promise<DesktopHostState> {
     return this.run(async () => {
       this.host.status('stopping', '正在等待共享实例完成停机。')

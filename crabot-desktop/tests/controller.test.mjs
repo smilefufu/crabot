@@ -116,7 +116,43 @@ test('GUI recovery checks backup coverage before its ordinary startup adapter ru
     } }
     throw new Error('Unexpected adapter')
   }
-  controller.start = async () => { calls.push('start'); return { phase: 'ready' } }
+  controller.startCore = async () => { calls.push('start') }
   await assert.rejects(controller.recoverVersion(), { code: 'CRABOT_BACKUP_SCOPE_UNVERIFIED' })
   assert.deepEqual(calls, ['lock', 'compatibility', 'coverage'])
+})
+
+test('recovery serializes with GUI stop and start operations while it owns the maintenance transaction', async t => {
+  const controller = new DesktopController({ coreRoot: '/unused', dataRoot: '/unused', appVersion: 'fixture', platform: process.platform })
+  t.after(() => controller.close())
+  const calls = []
+  let begin, finish
+  const begun = new Promise(resolve => { begin = resolve })
+  const barrier = new Promise(resolve => { finish = resolve })
+  controller.load = async file => {
+    if (file.endsWith('version-maintenance.mjs')) return {
+      readVersionMaintenance: () => ({}), recoverVersionMaintenance: async options => {
+        calls.push('recover'); begin(); await barrier; await options.verifyCompatible(); assert.equal(await options.run(), true); calls.push('recovered')
+      },
+    }
+    if (file.endsWith('core-preparation.mjs')) return { verifyDataCompatibility: () => [] }
+    if (file.endsWith('maintenance-backup.mjs')) return { assertLocalMigrationData: async () => {} }
+    if (file.endsWith('cli-lock.mjs')) return { acquireCliLock: async () => 'lock', releaseCliLock: () => {} }
+    if (file.endsWith('instance-controller.mjs')) return { stopInstance: async () => { calls.push('stop') } }
+    throw new Error('Unexpected adapter')
+  }
+  controller.current = async () => ({ state: 'stopped' })
+  controller.startCore = async () => {
+    calls.push('start')
+    controller.host.publish({ phase: 'ready', app_version: 'fixture', platform: process.platform,
+      instance_id: '1'.repeat(64), generation: '11111111-1111-4111-8111-111111111111', admin_url: 'http://127.0.0.1:3000' })
+  }
+  const recovery = controller.recoverVersion(); await begun
+  const stopping = controller.stop()
+  await new Promise(resolve => setImmediate(resolve))
+  const before = [...calls]
+  finish()
+  await recovery; await stopping
+  assert.deepEqual(before, ['recover'])
+  assert.deepEqual(calls, ['recover', 'start', 'recovered', 'stop'])
+  assert.equal(controller.host.snapshot().phase, 'stopped')
 })
