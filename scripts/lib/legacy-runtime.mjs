@@ -9,11 +9,11 @@ import { withVerifiedLegacyProcessGraph, assertLegacyProcessesCurrent } from './
 const fail = message => { throw Object.assign(new Error(message), { code: 'CRABOT_LEGACY_RUNTIME_UNVERIFIED' }) }
 const samePath = (a, b) => realpathSync(a) === realpathSync(b)
 
-export async function withVerifiedLegacyRuntime(installation, use, { signal, entryFenceId } = {}) {
+async function verifiedLegacyRuntime(installation, use, { signal, entryFenceId } = {}, fencePhase = 'fenced') {
   let recognized
   if (entryFenceId) {
     const fenced = await inspectLegacyEntryFence(installation.installRoot)
-    if (fenced.id !== entryFenceId || fenced.phase !== 'fenced' || !fenced.entries_fenced) fail('旧入口尚未完成隔离，未开始接管。')
+    if (fenced.id !== entryFenceId || fenced.phase !== fencePhase || !fenced.entries_fenced) fail('旧入口尚未完成隔离，未开始接管。')
     recognized = fenced.installation
   } else recognized = await discoverLegacyUserInstall({ root: installation.installRoot, dataDir: installation.dataRoot })
   if (recognized.fingerprint !== installation.fingerprint) fail('旧安装在检查后发生变化，未开始接管。')
@@ -44,6 +44,15 @@ export async function withVerifiedLegacyRuntime(installation, use, { signal, ent
     assertLegacyProcessesCurrent(snapshot)
     return use({ ...snapshot, installation: recognized }, rpc)
   }, { signal, recordedPid })
+}
+
+export function withVerifiedLegacyRuntime(installation, use, options) {
+  return verifiedLegacyRuntime(installation, use, options)
+}
+
+// Read-only after the data boundary. No RPC/mutation callback is exposed.
+export function discoverSealedLegacyRuntime(installation, options) {
+  return verifiedLegacyRuntime(installation, snapshot => snapshot, options, 'data_changing')
 }
 
 export async function discoverLegacyRuntime(installation, options) {

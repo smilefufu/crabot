@@ -10,8 +10,11 @@ import { verifyCoreRelease } from './core-release.mjs'
 import { inspectInstance } from './instance-runtime.mjs'
 import { verifyMaintenanceBackup } from './maintenance-backup.mjs'
 import cliLocation from './cli-location.cjs'
+import { inspectLegacyEntryFence, sealLegacyEntryFence } from './legacy-entry-fence.mjs'
+import { discoverLegacyRuntime, discoverSealedLegacyRuntime } from './legacy-runtime.mjs'
 
 const name = 'desktop-maintenance.json', recovering = new Set()
+const legacyVersions = JSON.parse(readFileSync(new URL('../desktop/legacy-releases.json', import.meta.url), 'utf8')).versions
 const version = value => typeof value === 'string' && /^\d+\.\d+\.\d+(?:-[\w.-]+)?$/.test(value)
 const uuid = value => typeof value === 'string' && /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(value)
 const fail = () => { throw Object.assign(new Error('版本维护尚未核验完成。请在桌面应用中检查恢复，必要时重新安装；原数据和记录已保留。'), { code: 'CRABOT_MAINTENANCE_PENDING' }) }
@@ -33,9 +36,14 @@ export function readVersionMaintenance(dataDir) {
       : String(stat.uid) === identity.inspectProcess(process.pid).owner && (stat.mode & 0o777) === 0o600
     if (!stat.isFile() || stat.size > 65_536 || !privateFile) fail()
     const record = JSON.parse(readFileSync(file, 'utf8'))
-    if (record.schema_version !== 1 || !uuid(record.id) || record.data_dir !== realpathSync(dataDir)
-      || !path.isAbsolute(record.install_root) || !version(record.source_version) || !version(record.target_version)
-      || !/^[a-f0-9]{64}$/.test(record.source_inventory_sha256)
+    const source = record.legacy_source
+    const validSource = record.schema_version === 1
+      ? version(record.source_version) && /^[a-f0-9]{64}$/.test(record.source_inventory_sha256) && source === undefined
+      : record.schema_version === 2 && legacyVersions.includes(record.source_version) && record.source_inventory_sha256 === undefined
+        && record.system_operation_id === undefined && record.target_core !== undefined && source?.scope === 'user' && uuid(source.entry_fence_id)
+        && /^[a-f0-9]{64}$/.test(source.fingerprint) && Object.keys(source).length === 3
+    if (!validSource || !uuid(record.id) || record.data_dir !== realpathSync(dataDir)
+      || !path.isAbsolute(record.install_root) || !version(record.target_version)
       || record.target_core !== undefined && (!record.target_core || typeof record.target_core.root !== 'string'
         || !path.isAbsolute(record.target_core.root) || !/^[a-f0-9]{64}$/.test(record.target_core.inventory_sha256)
         || Object.keys(record.target_core).some(key => !['root', 'inventory_sha256'].includes(key)))
@@ -67,6 +75,37 @@ export async function beginVersionMaintenance(dataDir, root, targetVersion, sour
   const record = { schema_version: 1, id: randomUUID(), data_dir: dataDir, install_root: realpathSync(root),
     source_version: release.version, target_version: targetVersion, source_inventory_sha256: release.inventory_sha256,
     phase: 'preparing', backup: null, ...(systemOperationId ? { system_operation_id: systemOperationId } : {}) }
+  write(dataDir, record, true); return record
+}
+// Explicit legacy-user adapter. The ordinary sealed source path above remains
+// distinct; no old release is assigned a fabricated Core inventory/version.
+async function legacyUserSource(record) {
+  if (record?.schema_version !== 2 || record.legacy_source?.scope !== 'user'
+    || inspectInstance(record.data_dir).state !== 'stopped') fail()
+  for (const marker of ['.git', 'core-release.json', 'cli-installation.json']) {
+    try { lstatSync(path.join(record.install_root, marker)); fail() } catch (error) { if (error.code !== 'ENOENT') throw error }
+  }
+  const fenced = await inspectLegacyEntryFence(record.install_root)
+  const expected = { version: record.source_version, installRoot: record.install_root,
+    dataRoot: record.data_dir, fingerprint: record.legacy_source.fingerprint }
+  if (fenced.id !== record.legacy_source.entry_fence_id || !fenced.entries_fenced
+    || !['fenced', 'data_changing'].includes(fenced.phase)
+    || Object.keys(expected).some(key => fenced.installation[key] !== expected[key])) fail()
+  const observe = fenced.phase === 'fenced' ? discoverLegacyRuntime : discoverSealedLegacyRuntime
+  if ((await observe(expected, { entryFenceId: fenced.id })).state !== 'stopped') fail()
+  return fenced
+}
+export async function beginLegacyUserVersionMaintenance({ dataDir, installation, entryFenceId, targetRoot }) {
+  dataDir = management.requirePrivateDataRoot(dataDir); locked(dataDir)
+  if (readVersionMaintenance(dataDir) || !uuid(entryFenceId) || installation?.dataRoot !== dataDir
+    || !legacyVersions.includes(installation?.version)) fail()
+  targetRoot = realpathSync(targetRoot)
+  const release = await verifyCoreRelease(targetRoot)
+  const record = { schema_version: 2, id: randomUUID(), data_dir: dataDir, install_root: realpathSync(installation.installRoot),
+    source_version: installation.version, target_version: release.version,
+    legacy_source: { scope: 'user', entry_fence_id: entryFenceId, fingerprint: installation.fingerprint },
+    target_core: { root: targetRoot, inventory_sha256: release.inventory_sha256 }, phase: 'preparing', backup: null }
+  if ((await legacyUserSource(record)).phase !== 'fenced') fail()
   write(dataDir, record, true); return record
 }
 // Bind an already verified immutable target before replacement begins. Existing
@@ -103,6 +142,11 @@ export async function markVersionMaintenanceInstalling(dataDir, id) {
   const record = readVersionMaintenance(dataDir)
   if (record?.id !== id || record.phase !== 'backed_up') fail()
   await backupOf(dataDir, record)
+  if (record.schema_version === 2) {
+    const source = await legacyUserSource(record)
+    if (source.phase === 'fenced') await sealLegacyEntryFence(record.install_root, source.id)
+    if ((await legacyUserSource(record)).phase !== 'data_changing') fail()
+  }
   record.phase = 'installing'; write(dataDir, record)
 }
 // verifyCompatible is read-only. run uses the ordinary migration/start/health
@@ -113,6 +157,9 @@ export async function recoverVersionMaintenance({ dataDir, root, appVersion, ver
   try {
     dataDir = locked(dataDir); record = readVersionMaintenance(dataDir)
     if (!record) return false
+    // Legacy takeover owns entry/startup and environment selection as well as
+    // data. The ordinary updater must never auto-resume just its target Core.
+    if (record.schema_version !== 1) fail()
     root = realpathSync(root)
     const exactSource = record.install_root === root, exactTarget = (record.target_core?.root ?? record.install_root) === root
     if (!exactSource && !exactTarget) fail()
@@ -173,7 +220,7 @@ export function completeStoppedCliVersionMaintenance(options) { return completeS
 export async function cancelPreparedVersionMaintenance({ dataDir, root, id, verifyCompatible, systemOperationId }) {
   dataDir = locked(dataDir); root = realpathSync(root)
   const record = readVersionMaintenance(dataDir)
-  if (record?.id !== id || !['preparing', 'backed_up'].includes(record.phase) || record.install_root !== root
+  if (record?.schema_version !== 1 || record.id !== id || !['preparing', 'backed_up'].includes(record.phase) || record.install_root !== root
     || systemOperationId !== undefined && record.system_operation_id !== systemOperationId
     || inspectInstance(dataDir).state !== 'stopped') fail()
   const verify = async () => {
@@ -185,6 +232,21 @@ export async function cancelPreparedVersionMaintenance({ dataDir, root, id, veri
   await verify()
   await verifyCompatible()
   await verify()
+  const current = readVersionMaintenance(dataDir)
+  if (current?.id !== id || current.phase !== record.phase) fail()
+  rmSync(path.join(dataDir, name)); syncDirectory(dataDir)
+  return { preparation_cancelled: true, service_started: false }
+}
+
+// Data protection only: the surrounding takeover may restore known old entries
+// after this succeeds. It must not resume business while a newer phase exists.
+export async function cancelPreparedLegacyUserVersionMaintenance({ dataDir, id }) {
+  dataDir = locked(dataDir)
+  const record = readVersionMaintenance(dataDir)
+  if (record?.schema_version !== 2 || record.id !== id || !['preparing', 'backed_up'].includes(record.phase)) fail()
+  if ((await legacyUserSource(record)).phase !== 'fenced') fail()
+  if (record.backup) await backupOf(dataDir, record)
+  if ((await legacyUserSource(record)).phase !== 'fenced') fail()
   const current = readVersionMaintenance(dataDir)
   if (current?.id !== id || current.phase !== record.phase) fail()
   rmSync(path.join(dataDir, name)); syncDirectory(dataDir)
