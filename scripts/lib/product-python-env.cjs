@@ -5,6 +5,7 @@ const path = require('node:path')
 const crypto = require('node:crypto')
 const { spawnSync } = require('node:child_process')
 const { productEnvironment } = require('./product-runtime.cjs')
+const identity = require('./process-identity.cjs')
 const { readAgentEnvironmentSelection } = require('./agent-python-selection.cjs')
 
 const windows = process.platform === 'win32'
@@ -97,14 +98,19 @@ function ensureProductPythonEnvironment(runtime, dataDir, directory, spawn) {
 
   const python = path.join(base, windows ? 'python.exe' : 'bin/python' + version.split('.').slice(0, 2).join('.'))
   fs.mkdirSync(path.dirname(directory), { recursive: true })
-  fs.mkdirSync(directory, { mode: 0o700 })
+  if (windows) identity.createPrivateDirectory(directory)
+  else fs.mkdirSync(directory, { mode: 0o700 })
   try {
-    fs.writeFileSync(installing, JSON.stringify({ schema_version: 1, pid: process.pid }), { mode: 0o600 })
+    const preparing = JSON.stringify({ schema_version: 1, pid: process.pid })
+    if (windows) identity.writePrivateFile(installing, preparing)
+    else fs.writeFileSync(installing, preparing, { mode: 0o600 })
     run(runtime.executables.uv, ['venv', '--offline', '--no-python-downloads', '--python', python, '--allow-existing', directory])
     run(runtime.executables.uv, ['pip', 'install', '--offline', '--no-index', '--python', binary, ...runtime.seedWheels])
     ensurePythonAliases(binary)
     run(binary, ['-I', '-X', 'utf8', '-c', 'import sys, pip; assert sys.prefix != sys.base_prefix'])
-    fs.writeFileSync(marker, JSON.stringify({ schema_version: 1, base_id: id, python_version: version }) + '\n', { mode: 0o600 })
+    const ready = JSON.stringify({ schema_version: 1, base_id: id, python_version: version }) + '\n'
+    if (windows) identity.writePrivateFile(marker, ready)
+    else fs.writeFileSync(marker, ready, { mode: 0o600 })
     fs.unlinkSync(installing)
   } catch (error) {
     // This directory was created by this operation; no preexisting user environment is removed.

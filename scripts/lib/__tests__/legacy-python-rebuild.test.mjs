@@ -186,14 +186,23 @@ test('the production preparation runner verifies a dependency-free legacy enviro
 test('verified rebuild selection changes the default interpreter without moving either environment', async t => {
   const f = await fixture(t), prepared = await prepare(f)
   const input = { root, dataDir: f.dataDir, prepared, expectedFingerprint: f.old.fingerprint }
-  const open = fs.open
-  let published = false
-  const syncFailure = t.mock.method(fs, 'open', async (file, ...args) => {
-    if (file === f.dataDir && !published) { published = true; throw Object.assign(new Error('controlled directory fsync failure'), { code: 'EIO' }) }
-    return open(file, ...args)
+  const open = fs.open, rename = fs.rename
+  const failedPublication = t.mock.method(fs, 'rename', async (from, to) => {
+    if (to === path.join(f.dataDir, selection.selectionName)) throw Object.assign(new Error('controlled pre-publication rename failure'), { code: 'EIO' })
+    return rename(from, to)
   })
-  await assert.rejects(selectLegacyPythonRebuild(input), { code: 'CRABOT_PYTHON_SELECTION_UNKNOWN' })
-  syncFailure.mock.restore()
+  await assert.rejects(selectLegacyPythonRebuild(input), { code: 'EIO' })
+  failedPublication.mock.restore()
+  assert.equal(selection.readAgentEnvironmentReference(f.dataDir), null)
+  if (process.platform !== 'win32') {
+    let published = false
+    const syncFailure = t.mock.method(fs, 'open', async (file, ...args) => {
+      if (file === f.dataDir && !published) { published = true; throw Object.assign(new Error('controlled directory fsync failure'), { code: 'EIO' }) }
+      return open(file, ...args)
+    })
+    await assert.rejects(selectLegacyPythonRebuild(input), { code: 'CRABOT_PYTHON_SELECTION_UNKNOWN' })
+    syncFailure.mock.restore()
+  } else await selectLegacyPythonRebuild(input) // Node has no Windows directory-fsync path to inject.
   assert.equal(selection.readAgentEnvironmentSelection(f.dataDir).record.id, prepared.id)
   assert.equal((await selectLegacyPythonRebuild(input)).id, prepared.id)
   const runtime = product.loadProductRuntime(root, { required: true })
@@ -214,12 +223,14 @@ test('verified rebuild selection changes the default interpreter without moving 
   // exact reference and does not delete either environment.
   await fs.rename(path.join(f.dataDir, prepared.directory, 'legacy-rebuild.json'), path.join(f.dataDir, prepared.directory, 'receipt-retained'))
   assert.throws(() => python.ensureProductAgentVenv(runtime, f.dataDir), { code: 'CRABOT_PYTHON_ENV_SELECTION_INVALID' })
-  const cancelSyncFailure = t.mock.method(fs, 'open', async (file, ...args) => {
-    if (file === f.dataDir) throw Object.assign(new Error('controlled cancel fsync failure'), { code: 'EIO' })
-    return open(file, ...args)
-  })
-  await assert.rejects(cancelLegacyPythonSelection(input), { code: 'CRABOT_PYTHON_SELECTION_UNKNOWN' })
-  cancelSyncFailure.mock.restore()
+  if (process.platform !== 'win32') {
+    const cancelSyncFailure = t.mock.method(fs, 'open', async (file, ...args) => {
+      if (file === f.dataDir) throw Object.assign(new Error('controlled cancel fsync failure'), { code: 'EIO' })
+      return open(file, ...args)
+    })
+    await assert.rejects(cancelLegacyPythonSelection(input), { code: 'CRABOT_PYTHON_SELECTION_UNKNOWN' })
+    cancelSyncFailure.mock.restore()
+  } else assert.deepEqual(await cancelLegacyPythonSelection(input), { cleared: true })
   assert.deepEqual(await cancelLegacyPythonSelection(input), { cleared: false })
   assert.equal(selection.readAgentEnvironmentSelection(f.dataDir), null)
   assert.equal((await fs.stat(path.join(f.dataDir, prepared.directory))).isDirectory(), true)

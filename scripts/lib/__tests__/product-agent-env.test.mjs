@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os'
 import { createHash } from 'node:crypto'
 import { createRequire } from 'node:module'
 const require = createRequire(import.meta.url)
+const identity = require('../process-identity.cjs')
 const { ensureProductAgentVenv } = require('../product-python-env.cjs')
 
 function fixture(t) {
@@ -98,4 +99,22 @@ test('an offline seed failure removes only the newly created venv and preserves 
   assert.equal(existsSync(join(f.data, 'agent-venv')), false)
   assert.equal(existsSync(join(f.data, 'runtime-bases')), true)
   assert.equal(existsSync(f.runtime.pythonHome), true)
+})
+
+
+test('new Windows environment and its control markers have explicit private ACLs', { skip: process.platform !== 'win32' }, t => {
+  const f = fixture(t), directory = dirname(dirname(f.binary)), installing = join(directory, '.crabot-installing.json')
+  let checked = false
+  const spawn = (command, args, options) => {
+    if (!checked) {
+      assert.equal(identity.isPrivateDirectory(directory), true, 'an inherited ACL is not the private environment record boundary')
+      assert.equal(identity.isPrivateFile(installing), true)
+      checked = true
+    }
+    return f.spawn(command, args, options)
+  }
+  ensureProductAgentVenv(f.runtime, f.data, spawn)
+  assert.equal(checked, true)
+  assert.equal(identity.isPrivateDirectory(directory), true)
+  assert.equal(identity.isPrivateFile(join(directory, '.crabot-runtime.json')), true)
 })
