@@ -4,15 +4,25 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { systemError, validateSystemEntries } from './system-registry.mjs'
+import { systemError, validateSystemEntries, validateSystemAccount } from './system-registry.mjs'
 
 const helperActions = new Set(['prepare', 'verify-provision', 'inspect', 'start', 'stop', 'restart', 'disable', 'configure-service', 'snapshot', 'migrate', 'cancel-preparation', 'check-migration'])
 const safePath = '/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin'
+export function systemAccountEnvironment(account) {
+  validateSystemAccount(account)
+  return { HOME: account.home, USER: account.user, LOGNAME: account.user, PATH: safePath, LANG: 'C.UTF-8',
+    XDG_RUNTIME_DIR: '/run/user/' + account.uid, DBUS_SESSION_BUS_ADDRESS: 'unix:path=/run/user/' + account.uid + '/bus' }
+}
 export function systemUserEnvironment(entry) {
   validateSystemEntries([entry])
-  return { HOME: entry.home, USER: entry.user, LOGNAME: entry.user, PATH: safePath,
-    LANG: 'C.UTF-8', DATA_DIR: entry.data_dir, CRABOT_PORT_OFFSET: String(entry.port_offset),
-    XDG_RUNTIME_DIR: '/run/user/' + entry.uid, DBUS_SESSION_BUS_ADDRESS: 'unix:path=/run/user/' + entry.uid + '/bus' }
+  const { user, uid, gid, home } = entry
+  return { ...systemAccountEnvironment({ user, uid, gid, home }), DATA_DIR: entry.data_dir, CRABOT_PORT_OFFSET: String(entry.port_offset) }
+}
+export function legacySystemAccountCommand(account, { node, helper }) {
+  validateSystemAccount(account)
+  if (!path.isAbsolute(node) || !path.isAbsolute(helper)) throw systemError('账号发现助手入口不兼容。')
+  return { command: '/usr/bin/setpriv', args: ['--reuid=' + account.uid, '--regid=' + account.gid, '--init-groups', '--', node, helper, 'discover-legacy'],
+    env: systemAccountEnvironment(account), cwd: '/' }
 }
 
 export function systemUserCommand(entry, { node, helper, action }) {
@@ -38,13 +48,42 @@ export function verifyRootDirectory(file) { return verifyRootPath(file, true) }
 
 // A root-owned private descriptor proves delegation even on /proc mounts that
 // prevent an employee UID from inspecting its root parent. No root API is opened.
-export function readSystemUserPermit(fd = 3, ownerUid = 0) {
+function readRootPermit(fd, ownerUid) {
   const stat = fs.fstatSync(fd)
   if (!stat.isFile() || stat.uid !== ownerUid || (stat.mode & 0o777) !== 0o600 || stat.nlink !== 1 || stat.size > 65536) throw systemError('管理员委托无法核验。')
-  const permit = JSON.parse(fs.readFileSync(fd, 'utf8'))
+  return JSON.parse(fs.readFileSync(fd, 'utf8'))
+}
+export function readSystemUserPermit(fd = 3, ownerUid = 0) {
+  const permit = readRootPermit(fd, ownerUid)
   if (permit.schema_version !== 1 || !helperActions.has(permit.action) || !/^[a-f0-9-]{36}$/.test(permit.id)) throw systemError('管理员委托格式不兼容。')
   validateSystemEntries([permit.entry])
   return permit
+}
+
+export function validateLegacyAccountRequest({ account, release, port_offset_hint }) {
+  validateSystemAccount(account)
+  if (!release || Object.keys(release).length !== 3 || typeof release.version !== 'string'
+    || !/^v\d{4}\.\d{2}\.\d{2}\.\d+$/.test(release.version) || typeof release.installRoot !== 'string'
+    || !path.posix.isAbsolute(release.installRoot) || path.posix.normalize(release.installRoot) !== release.installRoot
+    || /[\0\r\n]/.test(release.installRoot) || !/^[a-f0-9]{64}$/.test(release.code_fingerprint ?? '')
+    || !Number.isInteger(port_offset_hint) || port_offset_hint < 100 || port_offset_hint > 9900 || port_offset_hint % 100 !== 0) throw systemError('旧账号发现上下文无法核验。')
+}
+export function readLegacySystemAccountPermit(fd = 3, ownerUid = 0) {
+  const permit = readRootPermit(fd, ownerUid)
+  if (permit.schema_version !== 1 || permit.kind !== 'legacy-account-discovery' || permit.action !== 'discover-legacy'
+    || !/^[a-f0-9-]{36}$/.test(permit.id) || Object.keys(permit).length !== 7) throw systemError('只读账号委托格式不兼容。')
+  validateLegacyAccountRequest(permit)
+  return permit
+}
+export async function runLegacySystemAccount(account, { root, release, portOffsetHint, spawnProcess = spawn }) {
+  if (process.platform !== 'linux' || process.getuid?.() !== 0) throw systemError('跨用户发现仅Linux管理员可执行。', 'CRABOT_SYSTEM_ADMIN_REQUIRED')
+  const context = { account, release, port_offset_hint: portOffsetHint }
+  validateLegacyAccountRequest(context)
+  const node = verifyRootExecutable(path.join(root, '.product-runtime/node/bin/node'))
+  const helper = verifyRootExecutable(path.join(root, 'scripts/legacy-system-user-helper.mjs'))
+  return delegateUserRequest(legacySystemAccountCommand(account, { node, helper }),
+    { schema_version: 1, id: randomUUID(), kind: 'legacy-account-discovery', action: 'discover-legacy', ...context },
+    { input: null, spawnProcess, permits: '/run/crabot-system-discovery' })
 }
 
 export async function runSystemUser(entry, { root, action, input = null, operationId, previous, deployment, snapshot, spawnProcess = spawn }) {
@@ -52,12 +91,18 @@ export async function runSystemUser(entry, { root, action, input = null, operati
   const node = verifyRootExecutable(path.join(root, '.product-runtime/node/bin/node'))
   const helper = verifyRootExecutable(path.join(root, 'scripts/system-user-helper.mjs'))
   const request = systemUserCommand(entry, { node, helper, action })
-  const permits = '/etc/crabot/system/permits'
+  const record = { schema_version: 1, id: randomUUID(), entry, action, operation_id: operationId ?? null, previous: previous ?? null, deployment: deployment ?? null, snapshot: snapshot ?? null }
+  return delegateUserRequest(request, record, { input, spawnProcess, permits: '/etc/crabot/system/permits' })
+}
+
+// Descriptor transport only: callers above own the identity, fixed executable,
+// allowed action, environment and role. This layer never reads employee files.
+async function delegateUserRequest(request, record, { input, spawnProcess, permits }) {
+  verifyRootDirectory(path.dirname(permits))
   try { fs.mkdirSync(permits, { mode: 0o700 }) } catch (error) { if (error.code !== 'EEXIST') throw error }
   const directory = fs.lstatSync(permits)
   if (!directory.isDirectory() || directory.isSymbolicLink() || directory.uid !== 0 || (directory.mode & 0o777) !== 0o700) throw systemError('管理员委托目录无法核验。')
-  const id = randomUUID(), file = path.join(permits, id + '.json')
-  const record = { schema_version: 1, id, entry, action, operation_id: operationId ?? null, previous: previous ?? null, deployment: deployment ?? null, snapshot: snapshot ?? null }
+  const file = path.join(permits, record.id + '.json')
   fs.writeFileSync(file, JSON.stringify(record) + '\n', { flag: 'wx', mode: 0o600, flush: true })
   fs.chmodSync(file, 0o600)
   let fd

@@ -16,7 +16,7 @@ const execute = promisify(execFile), source = await fs.realpath(process.argv[2])
 const id = randomUUID().slice(0, 8), installed = '/var/lib/crabot-system-smoke-' + id
 const env = { PATH: '/usr/sbin:/usr/bin:/sbin:/bin', HOME: '/root', USER: 'root', LOGNAME: 'root', LANG: 'C.UTF-8', GITHUB_ACTIONS: 'true',
   HTTP_PROXY: 'http://127.0.0.1:9', HTTPS_PROXY: 'http://127.0.0.1:9', CRABOT_ROOT_TEST_SECRET: 'root-only-not-for-employees' }
-const previousFixture = installed + '-previous-fixture'
+const previousFixture = installed + '-previous-fixture', legacyEntryFixture = installed + '-legacy-entry-fixture'
 const archiveReport = process.argv[4] ? path.resolve(process.argv[4]) : null
 const command = path.join(installed, 'bin/crabot'), users = [], events = []
 let installOwned = false, loaded, store
@@ -74,7 +74,7 @@ async function assertEmployeeRuntime(entry) {
 try {
   await run('/usr/bin/systemctl', ['is-active', 'systemd-logind.service'])
   for (const file of ['/etc/crabot', '/usr/local/bin/crabot', '/etc/systemd/user/crabot.service', '/etc/logrotate.d/crabot']) await absent(file)
-  await absent(installed); await absent(previousFixture)
+  await absent(installed); await absent(previousFixture); await absent(legacyEntryFixture)
   const parent = await fs.lstat(path.dirname(installed))
   assert.equal(parent.uid, 0); assert.equal(parent.mode & 0o022, 0, 'CI system install must use a root-protected ancestor')
   installOwned = true
@@ -95,7 +95,7 @@ try {
   await fs.rm(previousFixture, { recursive: true, force: true })
   const selected = (await fs.readFile(path.join(installed, 'current-core'), 'utf8')).trim(), core = path.join(installed, 'releases', selected)
   const load = file => import(pathToFileURL(path.join(core, file)))
-  const { SystemRegistry } = await load('scripts/lib/system-registry.mjs'), { runSystemUser } = await load('scripts/lib/system-user.mjs')
+  const { SystemRegistry } = await load('scripts/lib/system-registry.mjs'), { runSystemUser, runLegacySystemAccount } = await load('scripts/lib/system-user.mjs')
   const { SystemOperationStore } = await load('scripts/lib/system-operation.mjs')
   const { default: product } = await load('scripts/lib/product-runtime.cjs'), runtime = product.loadProductRuntime(core)
   const { default: identity } = await load('scripts/lib/process-identity.cjs')
@@ -105,6 +105,27 @@ try {
     await run('/usr/sbin/useradd', ['--create-home', '--shell', '/bin/bash', user])
     const account = (await run('/usr/bin/getent', ['passwd', user])).stdout.trim().split(':')
     users.push({ user, uid: Number(account[2]), gid: Number(account[3]), home: account[5] })
+    if (suffix === 'a') await phase('legacy-account-discovery-after-real-uid-drop', async () => {
+      // Published entry bytes only: this is not a full old release or old MM test.
+      const { materializeLegacyRelease } = await import('../../scripts/lib/__tests__/fixtures/legacy-release.mjs')
+      const { discoverLegacySystemRelease } = await load('scripts/lib/legacy-system-release.mjs')
+      await fs.mkdir(legacyEntryFixture, { mode: 0o755 })
+      const originals = await materializeLegacyRelease(legacyEntryFixture)
+      const release = await discoverLegacySystemRelease({ root: legacyEntryFixture }), employee = users.at(-1)
+      const uidCommand = args => run('/usr/bin/setpriv', ['--reuid=' + employee.uid, '--regid=' + employee.gid, '--init-groups', '--', runtime.executables.node, ...args],
+        { env: { PATH: '/usr/bin:/bin', HOME: employee.home, USER: employee.user, LOGNAME: employee.user } })
+      const setup = `const fs=require('fs'),p=require('path');const d=p.join(process.env.HOME,'.crabot');fs.mkdirSync(d,{mode:0o700});fs.writeFileSync(p.join(d,'instance.json'),JSON.stringify({mode:'system',port_offset:100,crabot_home:process.argv[1],data_dir:'/root/must-not-adopt',api_key:'must-not-return'}),{flag:'wx',mode:0o600});`
+      await uidCommand(['-e', setup, legacyEntryFixture])
+      const result = await runLegacySystemAccount(employee, { root: core, release, portOffsetHint: 100 })
+      assert.equal(result.uid, employee.uid); assert.equal(result.data_binding, 'unverified')
+      assert.equal(result.port_offset, 100); assert.doesNotMatch(JSON.stringify(result), /must-not|api_key|data_dir/)
+      const entry = path.join(legacyEntryFixture, 'scripts/start.mjs')
+      await fs.appendFile(entry, '\n// controlled modified legacy entry\n')
+      await assert.rejects(runLegacySystemAccount(employee, { root: core, release, portOffsetHint: 100 }), { code: 'CRABOT_LEGACY_SYSTEM_ACCOUNT' })
+      await fs.writeFile(entry, originals['scripts/start.mjs'])
+      const cleanup = `const fs=require('fs'),p=require('path');const d=p.join(process.env.HOME,'.crabot');if(fs.readdirSync(d).join(',')!=='instance.json')throw Error('unexpected fixture data');fs.unlinkSync(p.join(d,'instance.json'));fs.rmdirSync(d);`
+      await uidCommand(['-e', cleanup])
+    })
     await phase('administrator-open-' + suffix, () => run(runtime.executables.python, ['-I', '-B', '-X', 'utf8', '-c', ptyCode, command, user, 'fixture-pass-' + id]))
     Object.assign(users.at(-1), registry.read().find(entry => entry.user === user))
     assert.equal(users.at(-1).autostart, false)
@@ -306,6 +327,7 @@ try {
   for (const user of users) await run('/usr/sbin/userdel', ['--remove', user.user]).catch(() => {})
   if (installOwned) {
     await fs.rm(previousFixture, { recursive: true, force: true })
+    await fs.rm(legacyEntryFixture, { recursive: true, force: true })
     await fs.rm('/etc/systemd/user/crabot.service', { force: true })
     await fs.rm('/usr/local/bin/crabot', { force: true }); await fs.rm('/etc/logrotate.d/crabot', { force: true })
     await fs.rm('/etc/crabot', { recursive: true, force: true }); await fs.rm(installed, { recursive: true, force: true })

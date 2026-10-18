@@ -12,14 +12,23 @@ const fields = ['uid', 'gid', 'user', 'home', 'data_dir', 'port_offset', 'enable
 const absolute = value => typeof value === 'string' && path.posix.isAbsolute(value) && path.posix.normalize(value) === value && !/[\0\r\n]/.test(value)
 const username = value => typeof value === 'string' && value.length <= 256 && /^[^\s\x00-\x1f\x7f/:.-][^\s\x00-\x1f\x7f/:]*$/.test(value)
 
+function validAccount(account) {
+  return account && Number.isInteger(account.uid) && account.uid > 0 && account.uid <= 0xfffffffe
+    && Number.isInteger(account.gid) && account.gid >= 0 && account.gid <= 0xfffffffe
+    && username(account.user) && absolute(account.home) && account.home !== '/'
+}
+export function validateSystemAccount(account) {
+  if (!validAccount(account) || Object.keys(account).length !== 4
+    || ['uid', 'gid', 'user', 'home'].some(key => !Object.hasOwn(account, key))) fail('Linux账号身份不兼容，未访问员工数据。')
+  return account
+}
+
 export function validateSystemEntries(entries) {
   if (!Array.isArray(entries) || entries.length > 99) fail('共享实例注册表格式不兼容，未执行任何操作。')
   const users = new Set(), uids = new Set(), offsets = new Set(), directories = new Set()
   for (const entry of entries) {
     if (!entry || Object.keys(entry).length !== fields.length || fields.some(key => !Object.hasOwn(entry, key))
-      || !Number.isInteger(entry.uid) || entry.uid < 1 || entry.uid > 0xfffffffe
-      || !Number.isInteger(entry.gid) || entry.gid < 0 || entry.gid > 0xfffffffe || !username(entry.user)
-      || !absolute(entry.home) || entry.home === '/' || !absolute(entry.data_dir) || entry.data_dir === '/'
+      || !validAccount(entry) || !absolute(entry.data_dir) || entry.data_dir === '/'
       || !Number.isInteger(entry.port_offset) || entry.port_offset < 100 || entry.port_offset > 9900 || entry.port_offset % 100 !== 0
       || typeof entry.enabled !== 'boolean' || typeof entry.autostart !== 'boolean'
       || users.has(entry.user) || uids.has(entry.uid) || offsets.has(entry.port_offset) || directories.has(entry.data_dir)) {
@@ -41,8 +50,7 @@ export function resolveLinuxAccount(user, execute = execFileSync) {
   if (lines.length !== 1 || columns.length !== 7 || name !== user || !/^[1-9][0-9]*$/.test(uid)
     || !/^[0-9]+$/.test(gid) || !absolute(home) || home === '/') fail('Linux账号身份不兼容，未开通实例。')
   const account = { user: name, uid: Number(uid), gid: Number(gid), home }
-  if (!Number.isSafeInteger(account.uid) || account.uid > 0xfffffffe || !Number.isSafeInteger(account.gid) || account.gid > 0xfffffffe) fail('Linux账号编号不兼容。')
-  return account
+  return validateSystemAccount(account)
 }
 
 function trustedDirectory(directory, ownerUid) {
