@@ -36,17 +36,27 @@ if (windows) {
   install = () => execute(path.join(system, 'System32/WindowsPowerShell/v1.0/powershell.exe'), ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', wrapper],
     { env, cwd: temporary, timeout: 180_000, maxBuffer: 4 * 1024 * 1024 })
 } else install = () => execute('/bin/bash', [path.join(core, 'install.sh'), '--install-dir=' + installed], { env, cwd: temporary, timeout: 180_000, maxBuffer: 4 * 1024 * 1024 })
+const durations = {}
+async function installPhase(phase) {
+  const started = Date.now()
+  console.log('CRABOT_CLI_INSTALL_PHASE ' + JSON.stringify({ phase, state: 'starting' }))
+  try { return await install() }
+  finally {
+    durations[phase] = Date.now() - started
+    console.log('CRABOT_CLI_INSTALL_PHASE ' + JSON.stringify({ phase, elapsed_ms: durations[phase] }))
+  }
+}
 try {
-  const first = await install(); assert.match(first.stdout, /Core version: /)
+  const first = await installPhase('fresh'); assert.match(first.stdout, /Core version: /)
   const id = (await fs.readFile(path.join(installed, 'current-core'), 'utf8')).trim(), payload = path.join(installed, 'releases', id)
   assert.equal((await verifyCoreRelease(payload)).inventory_sha256, id)
   await fs.writeFile(path.join(installed, '.env'), 'PRESERVED=container-environment\n')
-  await install()
+  await installPhase('repeat')
   assert.equal(await fs.readFile(path.join(installed, '.env'), 'utf8'), 'PRESERVED=container-environment\n')
   const environment = path.join(data, 'agent-venv', 'smoke-package')
   await fs.mkdir(path.dirname(environment), { recursive: true }); await fs.writeFile(environment, 'preserved custom dependency')
   await fs.writeFile(path.join(payload, 'cli.mjs'), '// deliberately damaged installed smoke payload\n')
-  await install()
+  await installPhase('repair')
   const retained = (await fs.readdir(path.join(installed, 'releases'))).filter(name => name.startsWith('.damaged-'))
   assert.equal(retained.length, 1)
   assert.equal(await fs.readFile(path.join(installed, 'releases', retained[0], 'cli.mjs'), 'utf8'), '// deliberately damaged installed smoke payload\n')
@@ -69,5 +79,5 @@ try {
   await assert.rejects(fs.lstat(path.join(data, 'mm.pid')), { code: 'ENOENT' })
   await verifyCoreRelease(payload); await verifyCoreRelease(core)
   console.log('CRABOT_INSTALLED_CLI ' + JSON.stringify({ platform: process.platform, arch: process.arch, version: release.version,
-    bundled_installer: true, repeated_install: true, repaired_payload: true, retained_damaged_payload: true, preserved_user_environment: true, no_host_tools: true, unchanged_payloads: true, no_service_started: true, unicode_spaced_paths: true }))
+    duration_ms: durations, bundled_installer: true, repeated_install: true, repaired_payload: true, retained_damaged_payload: true, preserved_user_environment: true, no_host_tools: true, unchanged_payloads: true, no_service_started: true, unicode_spaced_paths: true }))
 } finally { await fs.rm(temporary, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
