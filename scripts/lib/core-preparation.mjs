@@ -42,14 +42,14 @@ export function prepareCoreEnvironment({ root, dataDir, source = process.env, lo
 
 // Original start-time migration semantics: caller has proved stopped state and owns
 // the lifecycle lock; upgrade/takeover adapters own their separate backup requirement.
-export async function applyStartupMigrations(root, dataDir, env, log = () => {}) {
+export async function applyStartupMigrations(root, dataDir, env, log = () => {}, { outputFd } = {}) {
   assertVersionMaintenanceAllowsStart(dataDir)
   const pending = verifyDataCompatibility(root, dataDir)
   if (readVersionMaintenance(dataDir)?.backup) await assertLocalMigrationData(dataDir, pending)
   for (const migration of pending) {
     log(`${migration.moduleId}: ${migration.dataVersion ?? 'fresh'} → ${migration.codeVersion}`)
     const result = await applyMigration(join(root, migration.moduleId), migration.dataDir, migration.dataVersion,
-      migration.codeVersion, (script, directory) => runScript(script, directory, { root, env }))
+      migration.codeVersion, (script, directory) => runScript(script, directory, { root, env, outputFd }))
     if (!result.ok) throw Object.assign(new Error(`Migration failed: ${migration.moduleId}/${result.failedAt}`), { code: 'CRABOT_MIGRATION_FAILED' })
   }
 }

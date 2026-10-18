@@ -6,12 +6,20 @@ import { runSystemUser } from './lib/system-user.mjs'
 const root = fileURLToPath(new URL('../', import.meta.url))
 try {
   const registry = new SystemRegistry(); registry.authority()
-  const store = new SystemOperationStore(registry), id = process.argv[2]
+  const store = new SystemOperationStore(registry), [id, recoveryId, ...extra] = process.argv.slice(2)
+  if (extra.length) throw new Error('Unexpected coordinator arguments')
   const plan = store.read(store.file(id), true)?.plan
-  const upgrade = plan?.kind === 'upgrade' ? await systemUpgradeOperations(plan, { root, registry }) : undefined
-  const result = await store.run(id, { upgrade, apply: async (entry, action, previous) => {
+  const upgrade = plan?.kind === 'upgrade' ? await systemUpgradeOperations(plan, { root, registry, recovering: Boolean(recoveryId) }) : undefined
+  const apply = async (entry, action, previous) => {
+    if (!registry.read().some(current => current.enabled && JSON.stringify(current) === JSON.stringify(entry))) throw new Error('System user binding changed')
     registry.verifyAccount(entry)
     return runSystemUser(entry, { root, action, previous, operationId: id })
-  } })
+  }
+  const observe = async entry => {
+    registry.verifyAccount(entry)
+    return runSystemUser(entry, { root, action: 'inspect', operationId: id })
+  }
+  const result = recoveryId ? await store.runRecovery(id, recoveryId, upgrade ?? { apply, observe })
+    : await store.run(id, { upgrade, apply })
   process.exitCode = result.exit_code
 } catch (error) { console.error('[crabot] ' + error.message); process.exitCode = 1 }

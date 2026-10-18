@@ -8,11 +8,11 @@ import { validateSystemDeployment } from './system-upgrade.mjs'
 import { runSystemUser, verifyRootExecutable } from './system-user.mjs'
 import { systemError } from './system-registry.mjs'
 
-export async function systemUpgradeOperations(plan, { root, registry }) {
+export async function systemUpgradeOperations(plan, { root, registry, recovering = false }) {
   validateSystemDeployment(plan)
   const target = cliLocation.locateCliInstallation(root)
   if (!target || target.scope !== 'system' || target.root !== plan.install_root || target.id !== plan.target.id
-    || cliLocation.readCliSelection(plan.install_root) !== plan.source.id) throw systemError('共享更新作业来源或目标已改变。')
+    || !(recovering ? [plan.source.id, plan.target.id] : [plan.source.id]).includes(cliLocation.readCliSelection(plan.install_root))) throw systemError('共享更新作业来源或目标已改变。')
   for (const release of [plan.source, plan.target]) {
     const directory = path.join(plan.install_root, 'releases', release.id)
     verifyRootExecutable(path.join(directory, 'scripts/system-user-helper.mjs'))
@@ -32,6 +32,7 @@ export async function systemUpgradeOperations(plan, { root, registry }) {
     stop: (entry, previous) => invoke(entry, 'stop', { previous }),
     snapshot: entry => invoke(entry, 'snapshot'),
     migrate: (entry, snapshot) => invoke(entry, 'migrate', { snapshot }),
+    checkMigration: (entry, snapshot) => invoke(entry, 'check-migration', { snapshot }),
     cancelSnapshot: entry => invoke(entry, 'cancel-preparation'),
     startSource: entry => invoke(entry, 'start'), startTarget: entry => invoke(entry, 'start'),
     selected: async () => cliLocation.readCliSelection(plan.install_root),

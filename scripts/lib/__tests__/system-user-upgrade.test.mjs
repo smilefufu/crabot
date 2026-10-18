@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { promises as fs, constants, readFileSync } from 'node:fs'
+import { promises as fs, constants, readFileSync, openSync, closeSync } from 'node:fs'
 import path from 'node:path'
 import { tmpdir } from 'node:os'
 import { createHash, randomUUID } from 'node:crypto'
@@ -81,4 +81,24 @@ test('another operation, changed snapshot or a live replacement cannot authorize
   await assert.rejects(f.invoke('migrate', { snapshot, observe: async () => ({ state: 'running', generation: 'new-instance' }) }), { code: 'CRABOT_SYSTEM_INSTANCE_CHANGED' })
   assert.equal(readVersionMaintenance(f.data).phase, 'backed_up')
   assert.equal(await fs.readFile(path.join(f.data, 'fixture/content'), 'utf8'), 'before')
+})
+
+
+test('migration output remains in the employee private file and never corrupts the control channel', options, async t => {
+  const f = await fixture(t), snapshot = await f.invoke('snapshot'); await f.choose(f.target)
+  const log = path.join(f.data, 'private-migration.log'), fd = openSync(log, 'ax', 0o600)
+  try { await f.invoke('migrate', { snapshot, outputFd: fd }) } finally { closeSync(fd) }
+  assert.equal(await fs.readFile(log, 'utf8'), 'ordinary migration output\n')
+  assert.equal((await fs.stat(log)).mode & 0o777, 0o600)
+  assert.equal(readVersionMaintenance(f.data), null)
+})
+
+
+test('a root-acknowledged migration can be checked offline; an outstanding fence cannot be bypassed', options, async t => {
+  const f = await fixture(t), snapshot = await f.invoke('snapshot'); await f.choose(f.target)
+  await assert.rejects(f.invoke('check-migration', { snapshot }), { code: 'CRABOT_MAINTENANCE_PENDING' })
+  await f.invoke('migrate', { snapshot })
+  assert.deepEqual(await f.invoke('check-migration', { snapshot }), { verified: true, service_started: false })
+  await fs.appendFile(path.join(f.data + '.desktop-backups', snapshot.backup.id, 'data/fixture/content'), 'damaged')
+  await assert.rejects(f.invoke('check-migration', { snapshot }))
 })

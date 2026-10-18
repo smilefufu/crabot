@@ -8,6 +8,7 @@ import { planSystemBatch, requireBatchConfirmation } from './lib/system-batch.mj
 import { runSystemUser, verifyRootExecutable } from './lib/system-user.mjs'
 import { installSystemUserService, ensureSystemUserManager, systemdAvailable } from './lib/system-service.mjs'
 import cliLocation from './lib/cli-location.cjs'
+import { recoverSystemOperation } from './lib/system-recovery-cli.mjs'
 import { submitSystemOperation, systemOperationStage } from './lib/system-job-client.mjs'
 
 const root = fileURLToPath(new URL('../', import.meta.url))
@@ -48,6 +49,7 @@ try {
     if (maintenance) {
       console.log('作业 ' + maintenance.id + ': ' + maintenance.operation + ' / ' + maintenance.phase)
       if (maintenance.stage) console.log('当前阶段：' + systemOperationStage(maintenance.stage))
+      if (maintenance.phase !== 'completed' || maintenance.unsettled.length) console.log('恢复核对：sudo crabot system recover ' + maintenance.id)
     }
     for (const entry of registry.read()) {
       if (!entry.enabled) { console.log(entry.user + '\t已停用（数据保留）'); continue }
@@ -65,6 +67,8 @@ try {
       for (const row of job?.progress?.results ?? []) console.log(row.user + '\t' + row.state + (row.message || row.error?.message ? '：' + (row.message ?? row.error.message) : ''))
       if (maintenance.unsettled.length) console.log('结果未知用户UID：' + maintenance.unsettled.join(', ') + '；保留维护保护，未自动重试。')
     }
+  } else if (args.action === 'recover') {
+    process.exitCode = await recoverSystemOperation({ root, registry, store, args })
   } else if (args.action === 'user') {
     store.assertIdle()
     if (systemdAvailable()) installSystemUserService(installation.root)

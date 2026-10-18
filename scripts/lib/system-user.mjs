@@ -6,7 +6,7 @@ import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { systemError, validateSystemEntries } from './system-registry.mjs'
 
-const helperActions = new Set(['prepare', 'verify-provision', 'inspect', 'start', 'stop', 'restart', 'disable', 'configure-service', 'snapshot', 'migrate', 'cancel-preparation'])
+const helperActions = new Set(['prepare', 'verify-provision', 'inspect', 'start', 'stop', 'restart', 'disable', 'configure-service', 'snapshot', 'migrate', 'cancel-preparation', 'check-migration'])
 const safePath = '/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin'
 export function systemUserEnvironment(entry) {
   validateSystemEntries([entry])

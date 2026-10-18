@@ -7,6 +7,8 @@ import { SystemRegistry, systemError, validateSystemEntries } from './system-reg
 import { acquireCliLock, releaseCliLock } from './cli-lock.mjs'
 import { executeSystemUpgrade, validateSystemDeployment } from './system-upgrade.mjs'
 import { readSystemBootId } from './system-context.mjs'
+import { executeSystemRecovery } from './system-recovery.mjs'
+import { assertCoordinatorStopped } from './system-coordinator.mjs'
 import { executeSystemBatch } from './system-batch.mjs'
 
 const uuid = value => typeof value === 'string' && /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(value)
@@ -46,7 +48,7 @@ export class SystemOperationStore {
   }
   maintenance() {
     const record = this.read(path.join(this.directory, 'maintenance.json'))
-    if (record && (record.schema_version !== 1 || !uuid(record.id) || !['prepared', 'running', 'completed', 'interrupted'].includes(record.phase)
+    if (record && (record.schema_version !== 1 || !uuid(record.id) || !['prepared', 'running', 'completed', 'interrupted', 'recovery_prepared'].includes(record.phase)
       || !Array.isArray(record.targets) || !Array.isArray(record.unsettled))) throw systemError('共享维护记录不兼容，未继续操作。')
     return record
   }
@@ -97,17 +99,58 @@ export class SystemOperationStore {
       this.write(this.file(id), record, 0o600)
       const isUpgrade = record.plan.kind === 'upgrade'
       const execute = isUpgrade ? executeSystemUpgrade : executeSystemBatch
-      const bootId = readSystemBootId()
-      const result = await execute(record.plan, { ...(isUpgrade ? upgrade : { apply, progress }), save: async value => {
-        record.progress = value
-        record.phase = value.phase
-        this.write(this.file(id), record, 0o600)
-        this.write(path.join(this.directory, 'maintenance.json'), { schema_version: 1, id, operation: isUpgrade ? 'upgrade' : record.plan.action, boot_id: bootId,
-          phase: value.phase, targets: (isUpgrade ? record.plan.instances : record.plan.items).map(item => item.entry.uid), current_uid: value.current_uid,
-          allow_start: value.allow_start, stage: value.stage,
-          unsettled: value.results.filter(row => value.phase === 'interrupted' || row.state === 'unknown' || row.code === 'CRABOT_SYSTEM_USER_UNKNOWN').map(row => row.uid) }, 0o644)
-      } })
+      record.boot_id = readSystemBootId()
+      const result = await execute(record.plan, { ...(isUpgrade ? upgrade : { apply, progress }),
+        save: async value => this.persistProgress(record, value) })
       return result
     } finally { releaseCliLock(lock) }
   }
+  persistProgress(record, value) {
+    record.progress = value; record.phase = value.phase
+    this.write(this.file(record.plan.id), record, 0o600)
+    const upgrade = record.plan.kind === 'upgrade'
+    this.write(path.join(this.directory, 'maintenance.json'), { schema_version: 1, id: record.plan.id,
+      operation: upgrade ? 'upgrade' : record.plan.action, boot_id: record.boot_id, recovery_id: record.recovery?.id,
+      phase: value.phase, targets: (upgrade ? record.plan.instances : record.plan.items).map(item => item.entry.uid),
+      current_uid: value.current_uid, allow_start: value.allow_start, stage: value.stage,
+      unsettled: value.results.filter(row => value.phase === 'interrupted' || row.state === 'unknown'
+        || row.code === 'CRABOT_SYSTEM_USER_UNKNOWN').map(row => row.uid) }, 0o644)
+  }
+  async prepareRecovery(id, mode, { checkCoordinator = assertCoordinatorStopped } = {}) {
+    if (!['continue', 'cancel'].includes(mode)) throw systemError('恢复方式不兼容。')
+    this.initialize()
+    const lock = await acquireCliLock(this.directory, 'system-prepare-recovery')
+    try {
+      const record = this.read(this.file(id), true), maintenance = this.maintenance()
+      if (!record || maintenance?.id !== id) throw systemError('此作业不再持有当前维护保护，未修改其他作业。')
+      await checkCoordinator(record)
+      const items = record.plan.instances ?? record.plan.items, entries = this.registry.read()
+      for (const item of items) if (!entries.some(entry => entry.enabled && JSON.stringify(entry) === JSON.stringify(item.entry))) throw systemError('恢复期间用户绑定变化，未执行。', 'CRABOT_SYSTEM_INSTANCE_CHANGED')
+      if (record.phase === 'completed' && maintenance.phase === 'completed' && !maintenance.unsettled.length) return null
+      const attempt = randomUUID(), checkpoint = path.join(this.directory, 'jobs', attempt + '.checkpoint.json')
+      this.write(checkpoint, { schema_version: 1, operation_id: id, attempt_id: attempt, previous: record }, 0o600)
+      record.recovery = { id: attempt, mode, base_progress: record.progress,
+        previous_attempt_id: record.recovery?.id ?? null }
+      record.phase = 'recovery_prepared'; record.boot_id = readSystemBootId()
+      this.write(this.file(id), record, 0o600)
+      this.write(path.join(this.directory, 'maintenance.json'), { schema_version: 1, id,
+        operation: record.plan.kind === 'upgrade' ? 'upgrade' : record.plan.action,
+        phase: 'recovery_prepared', targets: items.map(item => item.entry.uid), unsettled: [], recovery_id: attempt }, 0o644)
+      return record
+    } finally { releaseCliLock(lock) }
+  }
+  async runRecovery(id, attempt, operations) {
+    this.initialize()
+    const lock = await acquireCliLock(this.directory, 'system-recovery-job')
+    try {
+      const record = this.read(this.file(id), true), maintenance = this.maintenance()
+      if (!record || record.phase !== 'recovery_prepared' || record.recovery?.id !== attempt || maintenance?.id !== id
+        || maintenance.phase !== 'recovery_prepared' || maintenance.recovery_id !== attempt) throw systemError('恢复已经开始或阶段未知，未重复执行。', 'CRABOT_SYSTEM_OPERATION_INTERRUPTED')
+      record.phase = 'running'; record.boot_id = readSystemBootId()
+      this.write(this.file(id), record, 0o600)
+      return await executeSystemRecovery(record.plan, record.recovery.base_progress, { mode: record.recovery.mode,
+        operations: { ...operations, save: async value => this.persistProgress(record, value) } })
+    } finally { releaseCliLock(lock) }
+  }
+
 }

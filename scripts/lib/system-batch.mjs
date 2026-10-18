@@ -39,7 +39,7 @@ export function requireBatchConfirmation(plan, { yes = false, interactive = fals
 export async function executeSystemBatch(plan, { apply, save = async () => {}, progress = () => {} }) {
   if (!plan || plan.schema_version !== 1 || !actions.has(plan.action) || !Array.isArray(plan.items)) fail('批量计划不兼容。')
   validateSystemEntries(plan.items.map(item => item.entry))
-  const result = { schema_version: 1, id: plan.id, action: plan.action, phase: 'running', results: [] }
+  const result = { schema_version: 1, id: plan.id, action: plan.action, phase: 'running', results: [], dispatched: [] }
   await save(structuredClone(result))
   for (const item of plan.items) {
     let outcome
@@ -48,6 +48,7 @@ export async function executeSystemBatch(plan, { apply, save = async () => {}, p
       // Persist intent before dispatch. If the coordinator disappears after this
       // point, this user remains unknown until inspected, never automatically replayed.
       result.current_uid = item.entry.uid
+      result.dispatched.push(item.entry.uid)
       await save(structuredClone(result))
       try {
         outcome = await apply(structuredClone(item.entry), plan.action, structuredClone(item.observation))

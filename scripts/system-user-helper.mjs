@@ -19,7 +19,7 @@ import { validateSystemDeployment } from './lib/system-upgrade.mjs'
 
 const root = fileURLToPath(new URL('../', import.meta.url))
 const reply = frame => fs.writeFileSync(4, JSON.stringify(frame) + '\n')
-let lock, diagnosticEntry
+let lock, diagnosticEntry, outputFd
 try {
   const permit = readSystemUserPermit(), entry = permit.entry, account = userInfo()
   if (process.platform !== 'linux' || account.uid !== entry.uid || account.gid !== entry.gid || account.username !== entry.user
@@ -53,11 +53,17 @@ try {
     if (!fs.existsSync(manifest)) fs.writeFileSync(manifest, JSON.stringify({ mode: 'system', port_offset: entry.port_offset,
       applied_cluster_version: null, applied_at: new Date().toISOString(), data_dir: dataDir, crabot_home: root }) + '\n', { flag: 'wx', mode: 0o600, flush: true })
     result = { prepared: true, credential_preserved: Boolean(credentials) }
-  } else if (['snapshot', 'migrate', 'cancel-preparation'].includes(permit.action)) {
+  } else if (['snapshot', 'migrate', 'cancel-preparation', 'check-migration'].includes(permit.action)) {
     validateSystemDeployment(permit.deployment)
     assertSystemControlAvailable(entry, { permit })
+    if (permit.action === 'migrate') {
+      const logs = management.ensurePrivateDataRoot(path.join(entry.data_dir, 'logs'))
+      outputFd = fs.openSync(path.join(logs, 'system-maintenance.log'), fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_APPEND | fs.constants.O_NOFOLLOW, 0o600)
+      const stat = fs.fstatSync(outputFd)
+      if (!stat.isFile() || stat.uid !== entry.uid || stat.nlink !== 1 || (stat.mode & 0o777) !== 0o600) throw systemError('本人维护日志无法安全打开，未派发迁移。')
+    }
     result = await maintainSystemUser(entry, { action: permit.action, deployment: permit.deployment,
-      operationId: permit.operation_id, snapshot: permit.snapshot, env: systemUserEnvironment(entry) })
+      operationId: permit.operation_id, snapshot: permit.snapshot, env: systemUserEnvironment(entry), outputFd })
   } else if (permit.action === 'inspect') result = await inspectSystemUser(entry)
   else if (['start', 'stop', 'restart'].includes(permit.action)) result = await controlSystemUser(entry, permit.action, permit.previous, { permit })
   else if (permit.action === 'configure-service') {
@@ -94,4 +100,4 @@ try {
   reply({ ok: false, code: controlled ? error.code : 'CRABOT_SYSTEM_USER_FAILED',
     message: controlled ? error.message : '员工实例操作未完成，请检查本人诊断日志。', diagnostic_available: diagnostic })
   process.exitCode = 1
-} finally { releaseCliLock(lock) }
+} finally { if (outputFd !== undefined) fs.closeSync(outputFd); releaseCliLock(lock) }

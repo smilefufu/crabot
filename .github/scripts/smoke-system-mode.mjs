@@ -214,8 +214,51 @@ try {
     await assert.rejects(autostartState(), error => error.code === 1 && error.stdout.trim() === 'disabled')
     assert.equal((await state(alice)).state, 'stopped')
   })
+  await phase('coordinator-death-and-protected-real-recovery', async () => {
+    const { planSystemBatch } = await import(pathToFileURL(path.join(loaded.core, 'scripts/lib/system-batch.mjs')))
+    const plan = await planSystemBatch('start', registry.read(), async entry => {
+      registry.verifyAccount(entry); return state(entry)
+    })
+    await store.prepare(plan)
+    const unit = 'crabot-operation-' + plan.id, marker = path.join(installed, 'controlled-root-dispatch'), fixture = path.join(installed, 'controlled-root-coordinator.mjs')
+    const script = `import fs from 'node:fs';import {SystemOperationStore} from ${JSON.stringify(pathToFileURL(path.join(loaded.core, 'scripts/lib/system-operation.mjs')).href)};const store=new SystemOperationStore();await store.run(${JSON.stringify(plan.id)},{apply:async()=>{fs.writeFileSync(${JSON.stringify(marker)},'root intent reached; no employee action performed',{mode:0o600});await new Promise(()=>setInterval(()=>{},1000));}});`
+    await fs.writeFile(fixture, script, { mode: 0o600 })
+    const currentNode = path.join(loaded.core, '.product-runtime/node/bin/node')
+    await run('/usr/bin/systemd-run', ['--quiet', '--unit=' + unit, '--service-type=exec', '--property=Restart=no', '--property=TasksAccounting=yes', currentNode, fixture])
+    const deadline = Date.now() + 30_000
+    while (!await fs.lstat(marker).catch(() => null) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 100))
+    assert.equal(await fs.readFile(marker, 'utf8'), 'root intent reached; no employee action performed')
+    const pending = store.read(store.file(plan.id), true)
+    assert.equal(pending.progress.current_uid, alice.uid)
+    assert.equal((await state(alice)).state, 'stopped', 'fault point precedes any employee start')
+    const pid = Number((await run('/usr/bin/systemctl', ['show', unit, '--property=MainPID', '--value'])).stdout.trim())
+    const processIdentity = loaded.identity.inspectProcess(pid)
+    assert.equal(processIdentity.owner, '0'); assert.equal(processIdentity.executable, await fs.realpath(currentNode))
+    assert.equal(loaded.identity.sameProcess(processIdentity, loaded.identity.inspectProcess(pid)), true)
+    process.kill(pid, 'SIGKILL')
+    for (;;) {
+      const response = await run('/usr/bin/systemctl', ['show', unit, '--property=ActiveState', '--value'])
+      if (['failed', 'inactive'].includes(response.stdout.trim())) break
+      if (Date.now() > deadline) throw new Error('controlled root coordinator did not settle')
+      await new Promise(resolve => setTimeout(resolve, 100))
+    }
+    const before = await fs.readFile(store.file(plan.id))
+    await run(command, ['system', 'recover', plan.id])
+    assert.deepEqual(await fs.readFile(store.file(plan.id)), before, 'default recovery is read-only')
+    await assert.rejects(run(command, ['system', 'recover', plan.id, '--continue', '--yes'], { timeout: 240_000 }), error => error.code === 1 && error.stdout.includes('observed_stopped'))
+    const recovered = store.read(store.file(plan.id), true)
+    assert.equal(recovered.phase, 'completed'); assert.equal(recovered.progress.results[0].original_action_unknown, true)
+    assert.deepEqual(recovered.progress.results.map(row => row.state), ['observed_stopped', 'started', 'failed'])
+    assert.deepEqual(store.maintenance().unsettled, [])
+    assert.equal((await state(alice)).state, 'stopped', 'unknown issued start must never replay')
+    assert.equal((await state(bob)).ready, true, 'untouched safe user continues under a real recovery unit')
+    await assertEmployeeRuntime(bob)
+    await assert.rejects(run(currentNode, [fixture]), error => error.code === 1)
+    await asUser(bob, ['stop']); assert.equal((await state(bob)).state, 'stopped')
+    await fs.rm(fixture); await fs.rm(marker)
+  })
   await fs.writeFile(evidence, JSON.stringify({ install_root: installed, selected, users: users.map(({ user, uid, gid, port_offset }) => ({ user, uid, gid, port_offset })), events,
-    real_systemd: true, real_uid_transitions: true, real_core: true, cli_disconnect_survived: true, full_archive_shared_upgrade: Boolean(archiveReport), synthetic_previous_release: Boolean(archiveReport), uses_real_model_provider: false }, null, 2) + '\n')
+    real_systemd: true, real_uid_transitions: true, real_core: true, cli_disconnect_survived: true, real_coordinator_death_recovered_without_replay: true, full_archive_shared_upgrade: Boolean(archiveReport), synthetic_previous_release: Boolean(archiveReport), uses_real_model_provider: false }, null, 2) + '\n')
 } catch (error) {
   for (const user of users) {
     if (!user.uid) continue
@@ -225,6 +268,7 @@ try {
   throw error
 } finally {
   const operation = store?.maintenance()
+  if (operation?.recovery_id) await run('/usr/bin/systemctl', ['stop', 'crabot-recovery-' + operation.recovery_id]).catch(() => {})
   if (operation) await run('/usr/bin/systemctl', ['stop', 'crabot-operation-' + operation.id]).catch(() => {})
   for (const user of users.reverse()) {
     if (loaded && user.uid) await loaded.runSystemUser(user, { root: loaded.core, action: 'stop', operationId: store.maintenance()?.id }).catch(() => {})

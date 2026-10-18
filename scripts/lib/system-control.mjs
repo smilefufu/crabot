@@ -47,7 +47,8 @@ export async function inspectSystemUser(entry) {
   const current = inspectInstance(entry.data_dir)
   if (!['running', 'starting', 'stopped'].includes(current.state)) throw systemError('旧实例尚未完成可信转换，未执行受管启停。')
   const result = { state: current.state, generation: current.state === 'stopped' ? null : current.record.generation, ready: false, health: 'unhealthy',
-    core_version: current.state === 'running' ? cliLocation.readCoreVersion(current.record.install_root) : null }
+    core_version: current.state === 'running' ? cliLocation.readCoreVersion(current.record.install_root) : null,
+    core_id: current.state === 'running' ? cliLocation.locateCliInstallation(current.record.install_root)?.id ?? null : null }
   if (current.record && current.record.mm_port !== 19000 + entry.port_offset) throw systemError('实际MM端口与受管绑定不同，未执行控制。')
   if (systemdAvailable()) {
     const response = await systemctlForUser(entry, ['show', 'crabot.service', '--all', '--property=ActiveState,MainPID,TasksCurrent,ControlGroup,InvocationID'])

@@ -13,7 +13,8 @@ const RUNNERS = {
 // 可能带空格，必须用双引号包裹。
 const quoteWin = (s) => (/\s/.test(s) ? `"${s}"` : s)
 
-export function runScript(scriptPath, dataDir, { root, env: sourceEnv = process.env } = {}) {
+export function runScript(scriptPath, dataDir, { root, env: sourceEnv = process.env, outputFd } = {}) {
+  if (outputFd !== undefined && (!Number.isInteger(outputFd) || outputFd < 0)) throw new Error('Invalid migration output descriptor')
   const ext = extname(scriptPath)
   const runner = RUNNERS[ext]
   if (!runner) {
@@ -49,17 +50,18 @@ export function runScript(scriptPath, dataDir, { root, env: sourceEnv = process.
 
   return new Promise((resolve, reject) => {
     const isWin = process.platform === 'win32'
+    const stdio = ['ignore', outputFd ?? 'pipe', outputFd ?? 'pipe']
     const proc = isWin && !runtime
-      ? spawn(`${cmd} ${args.map(quoteWin).join(' ')}`, [], { cwd, env, stdio: ['ignore', 'pipe', 'pipe'], shell: true })
-      : spawn(cmd, args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] })
+      ? spawn(`${cmd} ${args.map(quoteWin).join(' ')}`, [], { cwd, env, stdio, shell: true })
+      : spawn(cmd, args, { cwd, env, stdio })
     let stdout = ''
     let stderr = ''
-    proc.stdout.on('data', (chunk) => {
+    proc.stdout?.on('data', (chunk) => {
       const s = chunk.toString()
       stdout += s
       process.stdout.write(s)
     })
-    proc.stderr.on('data', (chunk) => {
+    proc.stderr?.on('data', (chunk) => {
       const s = chunk.toString()
       stderr += s
       process.stderr.write(s)

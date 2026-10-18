@@ -18,11 +18,11 @@ const root = fileURLToPath(new URL('../', import.meta.url))
 let lock
 try {
   const entry = applySystemUserBinding(ownSystemEntry())
-  assertSystemServiceStartAllowed(entry, { root })
+  await assertSystemServiceStartAllowed(entry, { root })
   await verifyCoreRelease(root)
   const dataDir = management.ensurePrivateDataRoot(entry.data_dir)
   lock = await acquireStartupLock(dataDir, 'system-service-start')
-  assertSystemServiceStartAllowed(entry, { root })
+  await assertSystemServiceStartAllowed(entry, { root })
   if (inspectInstance(dataDir).state !== 'stopped') throw new Error('实例已经运行或身份未知，未创建第二个MM。')
   const prepared = prepareCoreEnvironment({ root, dataDir, loadInstallationEnv: false })
   const { readCredentials } = await import(new URL('../crabot-admin/dist/credentials.js', import.meta.url))

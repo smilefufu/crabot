@@ -102,3 +102,40 @@ test('private completion without the public fence update cannot be reported as s
   assert.throws(() => store.completion(plan.id), { code: 'CRABOT_SYSTEM_JOURNAL_FAILED' })
   assert.throws(() => store.assertIdle(), { code: 'CRABOT_SYSTEM_BUSY' })
 })
+
+test('recovery cannot take over a still-active coordinator or its descendants', options, async t => {
+  const { store, plan } = await fixture(t); await store.prepare(plan)
+  await assert.rejects(store.prepareRecovery(plan.id, 'cancel', { checkCoordinator: () => { throw new Error('migration child is still alive') } }), /child is still alive/)
+  assert.equal(store.read(store.file(plan.id), true).phase, 'prepared'); assert.equal(store.maintenance().phase, 'prepared')
+})
+test('recovery checkpoints are private; late original or superseded recovery coordinators cannot dispatch', options, async t => {
+  const { store, plan } = await fixture(t); await store.prepare(plan)
+  const first = await store.prepareRecovery(plan.id, 'cancel', { checkCoordinator: async () => {} })
+  const checkpoint = path.join(store.directory, 'jobs', first.recovery.id + '.checkpoint.json')
+  assert.equal(fs.statSync(checkpoint).mode & 0o777, 0o600)
+  assert.equal(store.read(checkpoint, true).previous.phase, 'prepared')
+  await assert.rejects(store.run(plan.id, { apply: () => assert.fail() }), { code: 'CRABOT_SYSTEM_OPERATION_INTERRUPTED' })
+  const second = await store.prepareRecovery(plan.id, 'cancel', { checkCoordinator: async () => {} })
+  assert.notEqual(second.recovery.id, first.recovery.id)
+  await assert.rejects(store.runRecovery(plan.id, first.recovery.id, { apply: () => assert.fail() }), { code: 'CRABOT_SYSTEM_OPERATION_INTERRUPTED' })
+  const result = await store.runRecovery(plan.id, second.recovery.id, { observe: async () => ({ state: 'stopped' }), apply: () => assert.fail() })
+  assert.equal(result.exit_code, 1); assert.equal(store.maintenance().phase, 'completed'); store.assertIdle()
+  await assert.rejects(store.runRecovery(plan.id, second.recovery.id, {}), { code: 'CRABOT_SYSTEM_OPERATION_INTERRUPTED' })
+})
+test('fresh batch observations can release settled unknown actions without dispatching them again', options, async t => {
+  const { store, plan } = await fixture(t); await store.prepare(plan)
+  await store.run(plan.id, { apply: async entry => {
+    if (entry.uid === 1001) throw Object.assign(new Error('lost helper reply'), { code: 'CRABOT_SYSTEM_USER_UNKNOWN' })
+    return { state: 'started' }
+  } })
+  assert.deepEqual(store.maintenance().unsettled, [1001])
+  const recovery = await store.prepareRecovery(plan.id, 'continue', { checkCoordinator: async () => {} })
+  const result = await store.runRecovery(plan.id, recovery.recovery.id, { observe: async () => ({ state: 'stopped' }), apply: () => assert.fail('never replay an issued action') })
+  assert.equal(result.results[0].original_action_unknown, true); assert.equal(result.exit_code, 1)
+  assert.deepEqual(store.maintenance().unsettled, []); store.assertIdle()
+})
+test('already settled jobs need no recovery and do not alter current data or services', options, async t => {
+  const { store, plan } = await fixture(t); await store.prepare(plan)
+  await store.run(plan.id, { apply: async () => ({ state: 'started' }) })
+  assert.equal(await store.prepareRecovery(plan.id, 'continue', { checkCoordinator: async () => {} }), null)
+})

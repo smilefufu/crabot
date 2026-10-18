@@ -26,7 +26,7 @@ export function planSystemUpgrade({ installRoot, source, target, instances }) {
 export async function executeSystemUpgrade(plan, operations) {
   const result = { schema_version: 1, id: plan.id, kind: 'upgrade', phase: 'running', stage: 'stopping',
     results: plan.instances.map(({ entry, observation }) => ({ uid: entry.uid, user: entry.user,
-      originally_running: observation.state === 'running', stopped: observation.state === 'stopped', snapshot_dispatched: false,
+      originally_running: observation.state === 'running', stopped: observation.state === 'stopped', stop_dispatched: false, start_dispatched: false, snapshot_dispatched: false,
       migration_dispatched: false, migrated: false, started: false, state: 'pending' })) }
   const save = async () => {
     try { await operations.save(structuredClone(result)) }
@@ -48,6 +48,7 @@ export async function executeSystemUpgrade(plan, operations) {
   let preparationError
   try {
     for (const row of result.results.filter(row => row.originally_running)) {
+      row.stop_dispatched = true
       await stage('stop_dispatched', row.uid)
       const item = entries.get(row.uid)
       const stopped = await operations.stop(item.entry, item.observation)
@@ -87,11 +88,12 @@ export async function executeSystemUpgrade(plan, operations) {
           await operations.cancelSnapshot(item.entry, plan.id)
         }
         if (row.originally_running && row.stopped) {
+          row.start_dispatched = true
           await stage('source_start_dispatched', row.uid)
           result.allow_start = { uid: row.uid, core_id: plan.source.id }; await save()
           const started = await operations.startSource(item.entry)
           if (started.state !== 'started' && !(started.state === 'skipped' && started.observed_state === 'running')) throw systemError('原实例尚未恢复健康。')
-          row.state = 'healthy'; row.started = true
+          row.state = 'healthy'; row.started = true; row.generation = started.generation
         } else if (row.originally_running || (await operations.observe(item.entry)).state !== 'stopped') row.state = 'unknown'
       } catch (error) {
         if (error.code === 'CRABOT_SYSTEM_JOURNAL_FAILED') throw error
@@ -111,11 +113,12 @@ export async function executeSystemUpgrade(plan, operations) {
       row.migrated = true
       await stage('migration_completed', row.uid)
       if (row.originally_running) {
+        row.start_dispatched = true
         await stage('target_start_dispatched', row.uid)
         result.allow_start = { uid: row.uid, core_id: plan.target.id }; await save()
         const started = await operations.startTarget(item.entry)
         if (started.state !== 'started' && !(started.state === 'skipped' && started.observed_state === 'running')) throw systemError('目标实例尚未恢复健康。')
-        row.state = 'healthy'; row.started = true
+        row.state = 'healthy'; row.started = true; row.generation = started.generation
       } else {
         if ((await operations.observe(item.entry)).state !== 'stopped') throw systemError('原停止用户出现非预期运行，未停止新实例。', 'CRABOT_SYSTEM_INSTANCE_CHANGED')
         row.state = 'kept_stopped'
