@@ -49,5 +49,12 @@ module.exports = async function firstModel(window, endpoint) {
     return { provider_created_via_http: true, default_selected_via_ui: true, chat_submitted_via_ui: true, visible_reply: true,
       durable_delivery: true, durable_input_ack: true, renderer_token_absent: true, model_substitute: true, remote_model_verified: false }
   }
-  return window.webContents.executeJavaScript('(' + converse.toString() + ')(' + JSON.stringify(providerId) + ')')
+  try { return await window.webContents.executeJavaScript('(' + converse.toString() + ')(' + JSON.stringify(providerId) + ')') }
+  catch (error) {
+    try {
+      const snapshot = await window.webContents.executeJavaScript('(' + require('./first-model-snapshot.cjs').toString() + ')()')
+      error.message += '\nFirst-model snapshot: ' + JSON.stringify(snapshot)
+    } catch {}
+    throw error
+  }
 }

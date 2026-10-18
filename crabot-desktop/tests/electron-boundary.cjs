@@ -82,10 +82,11 @@ async function main() {
   const trusted = makeWindow(), foreign = makeWindow()
   attachDesktopNetwork(privateSession, host, () => trusted.webContents)
   let starts = 0, updateDialogs = 0
-  let preview, exported
+  let preview, exported, helpOpened
+  const helpRequest = new Promise(resolve => { helpOpened = resolve })
   registerDesktopIpc({ ipc: ipcMain, contents: () => trusted.webContents,
     controller: { host, start: async () => { starts++; return state }, stop: async () => state, reconnect: async () => state },
-    quit: async () => true, openUpdateDialog: async () => { updateDialogs++; return true }, revealData: async () => true, openExternal: async () => {},
+    quit: async () => true, openUpdateDialog: async () => { updateDialogs++; return true }, revealData: async () => true, openExternal: async url => { helpOpened(url) },
     diagnostics: async () => preview = await collectDiagnostics(path.join(__dirname, '../..'), state, []),
     exportDiagnostics: async id => { assert.equal(id, preview.report_id); exported = id; return false },
   })
@@ -183,15 +184,23 @@ async function main() {
   await trusted.webContents.executeJavaScript('Array.from(document.querySelectorAll("button")).find(button=>button.textContent==="导出基础诊断").click()')
   await waitFor('document.body.textContent.includes("本次没有保存文件")')
   assert.equal(exported, preview.report_id)
-  state = { phase: 'error', app_version: 'fixture', platform: process.platform, code: 'CRABOT_RUNTIME_INVALID' }
+  const { DesktopController } = await module('controller.js')
+  const failure = new DesktopController({ coreRoot: path.join(__dirname, '../..'), dataRoot: root, appVersion: 'fixture', platform: process.platform })
+  failure.fail(Object.assign(new Error('synthetic product integrity failure'), { code: 'CRABOT_RUNTIME_INVALID' }))
+  state = failure.host.snapshot(); failure.close()
   trusted.webContents.send('desktop:state', state)
   await waitFor('!!Array.from(document.querySelectorAll("button")).find(button=>button.textContent==="本地诊断")')
   await trusted.webContents.executeJavaScript('Array.from(document.querySelectorAll("button")).find(button=>button.textContent==="本地诊断").click()')
   await waitFor('!!document.querySelector(".desktop-status .desktop-diagnostics dd")')
   assert.equal(preview.state.phase, 'error')
+  await trusted.webContents.executeJavaScript('Array.from(document.querySelector(".desktop-status .desktop-diagnostics").querySelectorAll("button")).find(button=>button.textContent==="安装与修复说明").click()')
+  assert.equal(await helpRequest, 'https://github.com/smilefufu/crabot-docs/blob/main/guides/desktop-usage.md')
+  await waitFor('document.body.textContent.includes("内置运行文件未通过校验") && !!Array.from(document.querySelector(".desktop-status .desktop-diagnostics").querySelectorAll("button")).find(button=>button.textContent==="重新检查" && !button.disabled)')
+  await trusted.webContents.executeJavaScript('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))')
+  await fs.writeFile(path.join(evidence, `diagnostics-${process.platform}-${process.arch}.png`), (await trusted.webContents.capturePage()).toPNG())
   console.log('CRABOT_ELECTRON_BOUNDARY ' + JSON.stringify({ electron: process.versions.electron, node: process.versions.node,
     sandbox: true, isolated_preload: true, current_frame_ipc: true, direct_http_header: true, direct_ws_header: true,
-    foreign_frame_denied: true, redirect_token_absent: true, isolated_artifact_preview: true, built_react_app: true, reconnect_keeps_draft: true, independent_diagnostics: true }))
+    foreign_frame_denied: true, redirect_token_absent: true, isolated_artifact_preview: true, built_react_app: true, reconnect_keeps_draft: true, independent_diagnostics: true, repair_help_ipc: true }))
 }
 main().then(() => cleanup(0), error => { console.error('Electron boundary fixture failed:', error); void cleanup(1) })
 async function cleanup(code) {

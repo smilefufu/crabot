@@ -178,6 +178,7 @@ test('actual Electron host shares its real core with CLI and distinguishes hide,
     console.log('CRABOT_FULL_HOST_RESULT ' + JSON.stringify({ platform: process.platform, arch: process.arch, native_bootstrap: true,
       cli_gui_same_instance: true, close_keeps_core: true, gui_crash_keeps_core: true, cli_stop_stays_stopped: true, cli_start_reconnects_gui: true, relaunch_autostarts: true, quit_cancel_preserves_core: true, quit_stops_core: true }))
   } catch (error) {
+    console.log('CRABOT_FULL_HOST_MODEL_COUNTERS ' + JSON.stringify(provider.evidence))
     // Disposable CI data only; preserve the bootstrap cause before cleanup.
     // Never collect credentials, configuration, chats or the developer's data.
     const evidence = path.join(root, '.desktop-build')

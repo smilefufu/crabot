@@ -85,7 +85,15 @@ function install() {
       } else if (command !== 'state') throw new Error('Unknown fixture command')
       const current = await state()
       emit(command, { phase: current.phase, generation: current.phase === 'ready' ? current.generation : undefined, visible: window.isVisible() })
-    }).catch(error => emit('fixture_error', { message: String(error) }))
+    }).catch(async error => {
+      if (command.startsWith('first_model:') && process.env.GITHUB_ACTIONS === 'true') {
+        try {
+          const fs = require('node:fs'), path = require('node:path')
+          fs.writeFileSync(path.resolve(__dirname, '../../.desktop-build/capture_first_model_failure-' + process.platform + '.png'), (await window.webContents.capturePage()).toPNG())
+        } catch {}
+      }
+      emit('fixture_error', { message: String(error) })
+    })
   })
 }
 setImmediate(install)

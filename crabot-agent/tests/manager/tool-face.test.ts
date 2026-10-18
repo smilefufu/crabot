@@ -1,4 +1,5 @@
 import { BUILTIN_WORKER_PERMISSIONS } from '../../src/workers/builtin/runtime.js'
+import { startFirstModelProvider } from '../../../crabot-desktop/tests/fixtures/first-model-provider.mjs'
 /**
  * manager 封闭工具面装配测试 —— protocol-agent-v3.md §4.3。
  *
@@ -1323,4 +1324,24 @@ describe('managed task attachment regression', () => {
       expect(rpc.mock.calls.map(entry => entry[1])).toContain('send_message')
     } finally { await fs.rm(root, { recursive: true, force: true }) }
   })
+})
+
+
+it('desktop first-model substitute emits a call that satisfies the actual Manager delivery contract', async () => {
+  const provider = await startFirstModelProvider()
+  try {
+    const tools = buildManagerToolFace(makeDeps())
+    const send = tools.find(tool => tool.name === 'send_message')!
+    const adapter = createAdapter({ endpoint: provider.endpoint, apikey: 'isolated-first-model-fixture', format: 'openai' })
+    let argumentsText = ''
+    for await (const chunk of adapter.stream({ model: 'desktop-first-model', systemPrompt: 'Isolated desktop contract fixture',
+      messages: [createUserMessage('First reply')], tools })) {
+      if (chunk.type === 'tool_use_delta') argumentsText += chunk.inputJson
+    }
+    const input = JSON.parse(argumentsText)
+    const schema = send.inputSchema as { required?: string[] }
+    for (const field of schema.required ?? []) expect(Object.hasOwn(input, field), 'missing required Manager input: ' + field).toBe(true)
+    expect(input.post_send_action).toBe('none')
+    expect(input.channel_id).toBe('admin-web'); expect(input.session_id).toBe('admin-chat')
+  } finally { await provider.close() }
 })

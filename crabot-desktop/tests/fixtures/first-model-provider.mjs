@@ -28,7 +28,7 @@ export async function startFirstModelProvider() {
       if (!delivered) {
         evidence.tool_sent = true
         send(chunk({ role: 'assistant', tool_calls: [{ index: 0, id: 'call_first_model_reply', type: 'function', function: { name: 'send_message',
-          arguments: JSON.stringify({ channel_id: 'admin-web', session_id: 'admin-chat', content: firstModelReply }) } }] }))
+          arguments: JSON.stringify({ channel_id: 'admin-web', session_id: 'admin-chat', content: firstModelReply, post_send_action: 'none' }) } }] }))
       }
       send(chunk({}, delivered ? 'stop' : 'tool_calls'))
       send({ id: 'first-model-usage', object: 'chat.completion.chunk', created: 1, model: body.model, choices: [], usage: { prompt_tokens: 20, completion_tokens: 5, total_tokens: 25 } })
