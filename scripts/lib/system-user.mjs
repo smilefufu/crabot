@@ -5,6 +5,7 @@ import path from 'node:path'
 import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { systemError, validateSystemEntries, validateSystemAccount } from './system-registry.mjs'
+import { createLegacySystemConversionPermit, validateLegacySystemConversionPermit } from './system-conversion-permit.mjs'
 
 const helperActions = new Set(['prepare', 'verify-provision', 'inspect', 'start', 'stop', 'restart', 'disable', 'configure-service', 'snapshot', 'migrate', 'cancel-preparation', 'check-migration'])
 const safePath = '/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin'
@@ -58,6 +59,31 @@ export function readSystemUserPermit(fd = 3, ownerUid = 0) {
   if (permit.schema_version !== 1 || !helperActions.has(permit.action) || !/^[a-f0-9-]{36}$/.test(permit.id)) throw systemError('管理员委托格式不兼容。')
   validateSystemEntries([permit.entry])
   return permit
+}
+
+export function readLegacySystemConversionPermit(fd = 3, ownerUid = 0) {
+  return validateLegacySystemConversionPermit(readRootPermit(fd, ownerUid))
+}
+
+export async function runLegacySystemConversionStop(entry, { root, operationId, spawnProcess = spawn }) {
+  if (process.platform !== 'linux' || process.getuid?.() !== 0) throw systemError('跨用户转换仅Linux管理员可执行。', 'CRABOT_SYSTEM_ADMIN_REQUIRED')
+  const { SystemOperationStore } = await import('./system-operation.mjs')
+  const { LegacySystemEntryFence } = await import('./legacy-system-fence.mjs')
+  const { cliLockToken } = await import('./cli-lock.mjs')
+  const { readSystemBootId } = await import('./system-context.mjs')
+  const store = new SystemOperationStore()
+  if (!cliLockToken(path.join(store.directory, 'cli.lock'))) throw systemError('转换停止必须持有当前根作业锁。', 'CRABOT_SYSTEM_CONVERSION_PERMIT')
+  const record = store.read(store.file(operationId), true), maintenance = store.maintenance()
+  const { validateSystemConversionPlan } = await import('./system-conversion.mjs')
+  validateSystemConversionPlan(record?.plan)
+  store.registry.verifyAccount(entry)
+  const sourceFence = await new LegacySystemEntryFence().inspect(record?.plan?.source?.installRoot)
+  const permit = createLegacySystemConversionPermit({ record, maintenance, entry, sourceFence, bootId: readSystemBootId() })
+  const node = verifyRootExecutable(path.join(root, '.product-runtime/node/bin/node'))
+  const helper = verifyRootExecutable(path.join(root, 'scripts/system-conversion-user-helper.mjs'))
+  const request = { command: '/usr/bin/setpriv', args: ['--reuid=' + entry.uid, '--regid=' + entry.gid, '--init-groups', '--', node, helper, permit.action],
+    env: systemUserEnvironment(entry), cwd: '/' }
+  return delegateUserRequest(request, permit, { input: null, spawnProcess, permits: '/etc/crabot/system/permits' })
 }
 
 export function validateLegacyAccountRequest({ account, release, port_offset_hint }) {

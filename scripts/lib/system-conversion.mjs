@@ -32,19 +32,24 @@ export function validateSystemConversionPlan(plan) {
     || !target || Object.keys(target).length !== 2 || !hash(target.id)
     || !/^\d+\.\d+\.\d+(?:-[\w.-]+)?$/.test(target.version ?? '') || !Array.isArray(instances)) fail('旧共享来源、目标或转换集合无法核验。')
   validateSystemEntries(instances.map(item => item?.entry))
-  for (const item of instances) {
-    if (Object.keys(item).length !== 2 || !Object.hasOwn(item, 'entry') || !Object.hasOwn(item, 'observation')) fail('转换计划只能包含运维绑定和观察。')
-    const { entry, observation: value } = item
-    if (!entry.enabled || !value || Object.keys(value).some(key => !observationFields.includes(key))
-      || value.uid !== entry.uid || value.user !== entry.user || value.port_offset !== entry.port_offset || value.data_dir !== entry.data_dir
-      || value.install_root !== source.installRoot || value.code_fingerprint !== source.code_fingerprint || !hash(value.manifest_fingerprint)
-      || !['running', 'stopped'].includes(value.runtime_state)
-      || value.data_binding !== (value.runtime_state === 'running' ? 'observed_running' : 'verified_stopped')
-      || value.runtime_state === 'running' && (!processRecord(value.controller, entry.uid) || !processRecord(value.mm, entry.uid)
-        || value.mm_port !== 19000 + entry.port_offset || value.mm.pid === value.controller.pid
-        || value.mm.parent !== value.controller.pid || value.mm.executable !== value.controller.executable || !['daemon', 'foreground'].includes(value.launch_kind))) fail('存在未核实的数据绑定或旧启动来源，未创建转换计划。')
-  }
+  for (const item of instances) validateSystemConversionInstance(item, source)
   return plan
+}
+export function validateSystemConversionInstance(item, source) {
+  validateSystemEntries([item?.entry])
+  if (!source || Object.keys(source).length !== 3 || !versions.includes(source.version)
+    || !absolute(source.installRoot) || !hash(source.code_fingerprint)) fail('旧共享来源无法核验。')
+  if (!item || Object.keys(item).length !== 2 || !Object.hasOwn(item, 'entry') || !Object.hasOwn(item, 'observation')) fail('转换计划只能包含运维绑定和观察。')
+  const { entry, observation: value } = item
+  if (!entry.enabled || !value || Object.keys(value).some(key => !observationFields.includes(key))
+    || value.uid !== entry.uid || value.user !== entry.user || value.port_offset !== entry.port_offset || value.data_dir !== entry.data_dir
+    || value.install_root !== source.installRoot || value.code_fingerprint !== source.code_fingerprint || !hash(value.manifest_fingerprint)
+    || !['running', 'stopped'].includes(value.runtime_state)
+    || value.data_binding !== (value.runtime_state === 'running' ? 'observed_running' : 'verified_stopped')
+    || value.runtime_state === 'running' && (!processRecord(value.controller, entry.uid) || !processRecord(value.mm, entry.uid)
+      || value.mm_port !== 19000 + entry.port_offset || value.mm.pid === value.controller.pid
+      || value.mm.parent !== value.controller.pid || value.mm.executable !== value.controller.executable || !['daemon', 'foreground'].includes(value.launch_kind))) fail('存在未核实的数据绑定或旧启动来源，未创建转换计划。')
+  return item
 }
 
 export async function executeSystemConversion(plan, operations) {
