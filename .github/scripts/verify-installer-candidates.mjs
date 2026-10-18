@@ -21,7 +21,7 @@ assert.equal(report.files.length, extensions.length)
 for (const extension of extensions) assert.equal(report.files.filter(file => path.extname(file.file) === extension).length, 1)
 const require = createRequire(path.join(repository, 'crabot-desktop/package.json'))
 const builderRequire = createRequire(createRequire(require.resolve('electron-builder')).resolve('app-builder-lib/package.json'))
-const sevenZip = process.platform === 'win32' ? builderRequire('7zip-bin').path7za : null
+const sevenZip = process.platform === 'win32' ? await builderRequire('./out/toolsets/7zip.js').getPath7za() : null
 async function hash(file) {
   const digest = createHash('sha256')
   for await (const chunk of createReadStream(file)) digest.update(chunk)
