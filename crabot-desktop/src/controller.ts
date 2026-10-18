@@ -35,6 +35,7 @@ export class DesktopController {
     const migration = ['CRABOT_DESKTOP_TAKEOVER_REQUIRED', 'CRABOT_DATA_NOT_PRIVATE', 'CRABOT_LEGACY_INSTANCE'].includes(code)
     let message = '本机服务尚未就绪。可重新检查连接或查看基础诊断，按提示恢复。'
     if (migration) message = '发现已有部署或数据，需要先检查并确认接管。'
+    else if (code === 'CRABOT_BACKUP_SCOPE_UNVERIFIED') message = '迁移涉及无法确认备份覆盖的数据引用，已停止迁移。请保留现有数据并查看恢复选项。'
     else if (code === 'CRABOT_INSTANCE_STARTING') message = '服务仍在启动。请稍候重新检查状态，再停止服务。'
     else if (code === 'CRABOT_MAINTENANCE_PENDING') message = '版本更新尚未核验完成。请退出并重新打开 Crabot 检查恢复；仍未恢复时重新安装目标版本，保留现有数据。'
     this.host.status(migration ? 'migration_required' : 'error', message, code)
@@ -89,8 +90,12 @@ export class DesktopController {
     const maintenance = await this.load('scripts/lib/version-maintenance.mjs')
     if (!maintenance.readVersionMaintenance(this.options.dataRoot)) return false
     const { verifyDataCompatibility } = await this.load('scripts/lib/core-preparation.mjs')
+    const { assertLocalMigrationData } = await this.load('scripts/lib/maintenance-backup.mjs')
     await maintenance.recoverVersionMaintenance({ dataDir: this.options.dataRoot, root: this.options.coreRoot, appVersion: this.options.appVersion,
-      verifyCompatible: () => verifyDataCompatibility(this.options.coreRoot, this.options.dataRoot),
+      verifyCompatible: async () => {
+        const pending = verifyDataCompatibility(this.options.coreRoot, this.options.dataRoot)
+        await assertLocalMigrationData(this.options.dataRoot, pending)
+      },
       run: async () => (await this.start()).phase === 'ready' })
     return true
   }

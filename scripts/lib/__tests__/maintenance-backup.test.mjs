@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import management from '../desktop-management.cjs'
 import { acquireCliLock, releaseCliLock } from '../cli-lock.mjs'
-import { createMaintenanceBackup, verifyMaintenanceBackup } from '../maintenance-backup.mjs'
+import { createMaintenanceBackup, verifyMaintenanceBackup, assertLocalMigrationData } from '../maintenance-backup.mjs'
 
 async function fixture(t) {
   const root = await fs.mkdtemp(path.join(tmpdir(), 'Crabot 维护 '))
@@ -92,4 +92,26 @@ for (const interruption of ['concurrent write', 'cancel']) test('an interrupted 
   assert.deepEqual(await fs.readdir(f.data + '.desktop-backups'), [])
   assert.equal(await fs.readFile(path.join(f.data, 'admin/provider.json'), 'utf8'),
     interruption === 'cancel' ? '{"provider_id":"preserved"}' : 'external edit must survive')
+})
+
+
+test('migration coverage requires the lifecycle lock only when data needs migration', async t => {
+  const f = await fixture(t), pending = [{ dataDir: path.join(f.data, 'admin') }]
+  await assertLocalMigrationData(f.data, [])
+  await assert.rejects(assertLocalMigrationData(f.data, pending), { code: 'CRABOT_BACKUP_REQUIRES_STOP' })
+  const lock = await acquireCliLock(f.data, 'coverage-test'); t.after(() => releaseCliLock(lock))
+  await assertLocalMigrationData(f.data, pending)
+  await fs.writeFile(path.join(f.data, 'mm.pid'), String(process.pid))
+  await assert.rejects(assertLocalMigrationData(f.data, pending), { code: 'CRABOT_BACKUP_REQUIRES_STOP' })
+})
+
+for (const kind of ['directory reference', 'hard-linked file']) test('migration never writes unbacked data through ' + kind, async t => {
+  const f = await fixture(t), external = path.join(f.root, 'external')
+  await fs.mkdir(external); await fs.writeFile(path.join(external, 'keep'), 'original')
+  if (kind === 'directory reference') await fs.symlink(external, path.join(f.data, 'admin/reference'), process.platform === 'win32' ? 'junction' : 'dir')
+  else await fs.link(path.join(external, 'keep'), path.join(f.data, 'admin/reference'))
+  const lock = await acquireCliLock(f.data, 'coverage-test'); t.after(() => releaseCliLock(lock))
+  await assert.rejects(assertLocalMigrationData(f.data, [{ dataDir: path.join(f.data, 'admin') }]), { code: 'CRABOT_BACKUP_SCOPE_UNVERIFIED' })
+  await assertLocalMigrationData(f.data, [{ dataDir: path.join(f.data, 'memory') }])
+  assert.equal(await fs.readFile(path.join(external, 'keep'), 'utf8'), 'original')
 })

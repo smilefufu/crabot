@@ -62,7 +62,7 @@ export async function prepareCliPayload({ sourceRoot, installRoot, scope = 'user
   if (!relative || relative !== '..' && !relative.startsWith('..' + path.sep) && !path.isAbsolute(relative)) fail('CLI 安装目录不能位于待复制的核心中。')
   const lock = await acquireCliLock(installRoot, 'prepare-cli-payload')
   const id = release.inventory_sha256, target = path.join(installRoot, 'releases', id)
-  let pending, retainedCore
+  let pending, retainedCore, preparationError
   try {
     const file = path.join(installRoot, metadataName), prior = await present(file)
     if (!prior) {
@@ -123,7 +123,6 @@ export async function prepareCliPayload({ sourceRoot, installRoot, scope = 'user
       const copies = await Promise.allSettled(Array.from({ length: Math.min(4, entries.length) }, copyParts))
       const failed = copies.find(result => result.status === 'rejected')
       if (failed) throw failed.reason
-      await fs.chmod(pending, rootMode)
       if ((await verifyCoreRelease(pending, { version: release.version })).inventory_sha256 !== id) throw Object.assign(new Error('待安装核心在准备期间改变，未发布。'), { code: 'CRABOT_CORE_INTEGRITY' })
       if (damaged) {
         await stoppedRepair()
@@ -140,11 +139,19 @@ export async function prepareCliPayload({ sourceRoot, installRoot, scope = 'user
         }
       } else await fs.rename(pending, target)
       pending = undefined
+      await fs.chmod(target, rootMode)
     }
     return { installRoot, coreRoot: target, id, version: release.version, scope, command: launcher, ...(retainedCore ? { retainedCore } : {}) }
+  } catch (error) {
+    preparationError = error
+    throw error
   } finally {
-    if (pending) await fs.rm(pending, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
-    releaseCliLock(lock)
+    try {
+      if (pending) await fs.rm(pending, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+    } catch (cleanupError) {
+      if (preparationError) throw new AggregateError([preparationError, cleanupError], '核心准备失败，部分暂存未清理；已保留原版本和失败原因。', { cause: preparationError })
+      throw cleanupError
+    } finally { releaseCliLock(lock) }
   }
 }
 

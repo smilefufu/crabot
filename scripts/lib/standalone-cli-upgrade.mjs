@@ -7,7 +7,7 @@ import { readStandaloneCliBinding } from './standalone-cli-install.mjs'
 import { acquireCliLock, releaseCliLock } from './cli-lock.mjs'
 import { inspectInstance } from './instance-runtime.mjs'
 import { verifyCoreRelease } from './core-release.mjs'
-import { createMaintenanceBackup } from './maintenance-backup.mjs'
+import { createMaintenanceBackup, assertLocalMigrationData } from './maintenance-backup.mjs'
 import { beginVersionMaintenance, bindVersionMaintenanceTarget, recordVersionMaintenanceBackup,
   markVersionMaintenanceInstalling, completeStoppedCliVersionMaintenance } from './version-maintenance.mjs'
 import { applyStartupMigrations, verifyDataCompatibility } from './core-preparation.mjs'
@@ -32,7 +32,8 @@ export async function applyStoppedCliUpgrade({ sourceRoot, targetRoot, dataDir, 
       if (records.some(name => name.endsWith('.json'))) fail('模块尚未收口，未继续升级。')
     }
     await stopped(source.id)
-    verifyDataCompatibility(targetRoot, dataDir) // preflight every module before any data write
+    const migrations = verifyDataCompatibility(targetRoot, dataDir) // preflight every module before any data write
+    await assertLocalMigrationData(dataDir, migrations)
     const next = await verifyCoreRelease(targetRoot)
     const record = await beginVersionMaintenance(dataDir, sourceRoot, next.version)
     const backup = await createMaintenanceBackup(dataDir)

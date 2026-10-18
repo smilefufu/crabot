@@ -98,3 +98,25 @@ test('work which appears before the common update lock is acquired prevents stop
   assert.deepEqual(calls, ['lock', 'inspect', 'activity', 'unlock'])
   assert.equal(controller.host.snapshot().phase, 'error')
 })
+
+
+test('GUI recovery checks backup coverage before its ordinary startup adapter runs', async t => {
+  const controller = new DesktopController({ coreRoot: '/unused', dataRoot: '/unused', appVersion: 'fixture', platform: process.platform })
+  t.after(() => controller.close())
+  const pending = [{ dataDir: '/unused/admin' }], calls = []
+  controller.load = async file => {
+    if (file.endsWith('version-maintenance.mjs')) return {
+      readVersionMaintenance: () => ({}),
+      recoverVersionMaintenance: async options => { calls.push('lock'); await options.verifyCompatible(); await options.run() },
+    }
+    if (file.endsWith('core-preparation.mjs')) return { verifyDataCompatibility: () => { calls.push('compatibility'); return pending } }
+    if (file.endsWith('maintenance-backup.mjs')) return { assertLocalMigrationData: async (data, actual) => {
+      calls.push('coverage'); assert.equal(data, '/unused'); assert.equal(actual, pending)
+      throw Object.assign(new Error('External reference'), { code: 'CRABOT_BACKUP_SCOPE_UNVERIFIED' })
+    } }
+    throw new Error('Unexpected adapter')
+  }
+  controller.start = async () => { calls.push('start'); return { phase: 'ready' } }
+  await assert.rejects(controller.recoverVersion(), { code: 'CRABOT_BACKUP_SCOPE_UNVERIFIED' })
+  assert.deepEqual(calls, ['lock', 'compatibility', 'coverage'])
+})

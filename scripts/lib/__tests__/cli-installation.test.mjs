@@ -361,3 +361,45 @@ test('parallel preparation can copy a read-only Core root and preserves its dire
     if (prepared) await fs.chmod(prepared.coreRoot, 0o755)
   }
 })
+
+test('failed preparation cleanup preserves the original error and always releases the installation lock', async t => {
+  const f = await fixture(t), sourceRoot = await f.source('1.2.3')
+  const copy = fs.cp, remove = fs.rm
+  const primary = Object.assign(new Error('copy failed'), { code: 'EIO' })
+  const cleanup = Object.assign(new Error('cleanup failed'), { code: 'EACCES' })
+  fs.cp = async () => { throw primary }
+  fs.rm = async (file, options) => {
+    if (path.basename(String(file)).startsWith('.preparing-')) throw cleanup
+    return remove(file, options)
+  }
+  try {
+    await assert.rejects(prepareCliPayload({ sourceRoot, installRoot: f.installRoot }), error => {
+      assert.ok(error instanceof AggregateError)
+      assert.equal(error.cause, primary)
+      assert.deepEqual(error.errors, [primary, cleanup])
+      return true
+    })
+  } finally { fs.cp = copy; fs.rm = remove }
+  const lock = await acquireCliLock(f.installRoot, 'after-failed-cleanup', 0)
+  releaseCliLock(lock)
+  assert.equal(readCliSelection(f.installRoot), null)
+  assert.equal((await verifyCoreRelease(sourceRoot)).version, '1.2.3')
+})
+
+test('a data migration cannot follow an external module directory that the scoped backup does not contain', async t => {
+  const f = await fixture(t)
+  const one = await installStandaloneCli({ sourceRoot: await f.source('1.2.3'), installRoot: f.installRoot, dataDir: f.dataDir })
+  const external = path.join(f.parent, 'external-data'); await fs.mkdir(external)
+  await fs.writeFile(path.join(external, 'SCHEMA_VERSION'), 'v1')
+  await fs.writeFile(path.join(external, 'preferences'), 'external-before')
+  await fs.symlink(external, path.join(f.dataDir, 'admin'), process.platform === 'win32' ? 'junction' : 'dir')
+  const code = "import{writeFileSync}from'node:fs'; const dir=process.argv.find(a=>a.startsWith('--data-dir=')).slice(11); writeFileSync(dir+'/preferences','external-after');"
+  const two = await prepareCliPayload({ sourceRoot: await f.source('1.2.4', {
+    'crabot-admin/schema_version': 'v2', 'crabot-admin/upgrade/from_v1_to_v2.mjs': code,
+  }), installRoot: f.installRoot })
+  await assert.rejects(applyStoppedCliUpgrade({ sourceRoot: one.coreRoot, targetRoot: two.coreRoot, dataDir: f.dataDir }), { code: 'CRABOT_BACKUP_SCOPE_UNVERIFIED' })
+  assert.equal(readCliSelection(f.installRoot), one.id)
+  assert.equal(readVersionMaintenance(f.dataDir), null)
+  assert.equal(await fs.readFile(path.join(external, 'preferences'), 'utf8'), 'external-before')
+  assert.equal(await fs.readFile(path.join(external, 'SCHEMA_VERSION'), 'utf8'), 'v1')
+})

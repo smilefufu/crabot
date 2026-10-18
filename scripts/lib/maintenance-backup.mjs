@@ -135,3 +135,25 @@ export async function verifyMaintenanceBackup(directory, expectedHash) {
     return manifest
   } catch { fail('CRABOT_BACKUP_INVALID', '备份校验失败，不能用于恢复。') }
 }
+
+// Backup deliberately does not follow references. Only maintenance migrations use
+// this stopped/locked preflight; normal source startup keeps its existing behavior.
+export async function assertLocalMigrationData(dataDir, migrations) {
+  if (!migrations.length) return
+  dataDir = realpathSync(dataDir)
+  if (!cliLockToken(path.join(dataDir, 'cli.lock')) || inspectInstance(dataDir).state !== 'stopped') {
+    fail('CRABOT_BACKUP_REQUIRES_STOP', '迁移范围检查需要持有操作锁并确认实例停止。')
+  }
+  const unsupported = () => fail('CRABOT_BACKUP_SCOPE_UNVERIFIED', '迁移数据含无法由当前备份覆盖的链接或特殊文件；未继续迁移，请保留原部署。')
+  async function inspect(file) {
+    const stat = await fs.lstat(file)
+    if (stat.isSymbolicLink()) unsupported()
+    if (stat.isDirectory()) {
+      for (const entry of await fs.readdir(file)) await inspect(path.join(file, entry))
+    } else if (!stat.isFile() || stat.nlink > 1) unsupported()
+  }
+  for (const migration of migrations) {
+    if (realpathSync(path.dirname(migration.dataDir)) !== dataDir) unsupported()
+    await inspect(path.join(dataDir, path.basename(migration.dataDir)))
+  }
+}

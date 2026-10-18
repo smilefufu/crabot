@@ -7,7 +7,8 @@ import { runScript } from '../upgrade-lib/runner.mjs'
 import product from './product-runtime.cjs'
 import management from './desktop-management.cjs'
 import cliLocation from './cli-location.cjs'
-import { assertVersionMaintenanceAllowsStart } from './version-maintenance.mjs'
+import { assertLocalMigrationData } from './maintenance-backup.mjs'
+import { readVersionMaintenance, assertVersionMaintenanceAllowsStart } from './version-maintenance.mjs'
 
 // Common preparation only: no password prompt, TTY, GUI, lifecycle lock or model calls.
 export function prepareCoreEnvironment({ root, dataDir, source = process.env }) {
@@ -43,6 +44,7 @@ export function prepareCoreEnvironment({ root, dataDir, source = process.env }) 
 export async function applyStartupMigrations(root, dataDir, env, log = () => {}) {
   assertVersionMaintenanceAllowsStart(dataDir)
   const pending = verifyDataCompatibility(root, dataDir)
+  if (readVersionMaintenance(dataDir)?.backup) await assertLocalMigrationData(dataDir, pending)
   for (const migration of pending) {
     log(`${migration.moduleId}: ${migration.dataVersion ?? 'fresh'} → ${migration.codeVersion}`)
     const result = await applyMigration(join(root, migration.moduleId), migration.dataDir, migration.dataVersion,
