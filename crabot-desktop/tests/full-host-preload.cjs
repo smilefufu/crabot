@@ -56,6 +56,22 @@ function install() {
   app.once('will-quit', () => control.destroy())
   controlReader(control).on('line', command => {
     commands = commands.then(async () => {
+      if (command === 'capture_welcome' || command === 'capture_chat') {
+        if (process.env.GITHUB_ACTIONS !== 'true') throw new Error('Captures require synthetic isolated CI data')
+        const selector = command === 'capture_welcome' ? '.desktop-welcome' : '[data-msg-role="assistant"]'
+        const deadline = Date.now() + 30_000
+        let rendered = false
+        while (Date.now() < deadline) {
+          rendered = await window.webContents.executeJavaScript('!!document.querySelector(' + JSON.stringify(selector) + ')')
+          if (rendered) break
+          await new Promise(resolve => setTimeout(resolve, 100))
+        }
+        if (!rendered) throw new Error('Expected synthetic UI was not rendered')
+        const fs = require('node:fs'), path = require('node:path'), directory = path.resolve(__dirname, '../../.desktop-build')
+        fs.mkdirSync(directory, { recursive: true })
+        fs.writeFileSync(path.join(directory, command + '-' + process.platform + '.png'), (await window.webContents.capturePage()).toPNG())
+        emit(command, { captured: true }); return
+      }
       if (command.startsWith('first_model:')) {
         const result = await require('./fixtures/first-model-renderer.cjs')(window, command.slice('first_model:'.length))
         emit('first_model', result); return
