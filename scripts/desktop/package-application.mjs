@@ -10,6 +10,7 @@ import product from '../lib/product-runtime.cjs'
 import scrapling from '../lib/scrapling-runtime.cjs'
 import computerUse from '../lib/computer-use-runtime.cjs'
 import { verifyCoreRelease } from '../lib/core-release.mjs'
+import { verifyDesktopAsar } from '../lib/desktop-asar.mjs'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 const args = new Map(process.argv.slice(2).map(value => { const split = value.indexOf('='); return [value.slice(0, split), value.slice(split + 1)] }))
@@ -97,9 +98,8 @@ computerUse.loadRuntime(path.join(packagedResources, 'core'), { full: true })
 await verifyCoreRelease(path.join(packagedResources, 'core'), { version: release.version })
 const builderRequire = createRequire(createRequire(require.resolve('electron-builder')).resolve('app-builder-lib/package.json'))
 const asar = builderRequire('@electron/asar')
-for (const file of ['dist/main.js', 'dist/preload.cjs', 'dist/assets/tray.png', 'node_modules/crabot-client/dist/index.js', 'node_modules/zod/package.json', 'node_modules/electron-updater/package.json']) {
-  asar.statFile(path.join(packagedResources, 'app.asar'), file)
-}
+verifyDesktopAsar(asar, path.join(packagedResources, 'app.asar'))
+
 const executable = process.platform === 'darwin' ? path.join(packagedResources, '../MacOS/Crabot')
   : path.join(packagedResources, '..', process.platform === 'win32' ? 'Crabot.exe' : 'crabot-desktop')
 const { getCurrentFuseWire, FuseV1Options } = builderRequire('@electron/fuses')

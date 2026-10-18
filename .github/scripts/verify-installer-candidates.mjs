@@ -9,6 +9,7 @@ import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 import { runBounded } from '../../scripts/lib/run-bounded.mjs'
 import { verifyCoreRelease } from '../../scripts/lib/core-release.mjs'
+import { verifyDesktopAsar } from '../../scripts/lib/desktop-asar.mjs'
 
 const repository = fileURLToPath(new URL('../../', import.meta.url))
 const directory = await fs.realpath(path.resolve(process.argv[2]))
@@ -63,7 +64,7 @@ try {
       assert.match(report.app.asar_sha256, /^[a-f0-9]{64}$/)
       assert.equal(await hash(path.join(resources, 'app.asar')), report.app.asar_sha256)
       const asar = builderRequire('@electron/asar')
-      for (const name of ['dist/main.js', 'dist/preload.cjs', 'node_modules/crabot-client/dist/index.js']) asar.statFile(path.join(resources, 'app.asar'), name)
+      verifyDesktopAsar(asar, path.join(resources, 'app.asar'))
       const executable = path.join(application, process.platform === 'darwin' ? 'MacOS/Crabot' : process.platform === 'win32' ? 'Crabot.exe' : 'crabot-desktop')
       assert.match(report.app.executable_sha256, /^[a-f0-9]{64}$/)
       assert.equal(await hash(executable), report.app.executable_sha256)
