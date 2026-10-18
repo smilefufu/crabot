@@ -85,3 +85,25 @@ test('an in-flight old CLI management command is never mistaken for a stopped in
   t.mock.method(identity, 'inspectProcessArguments', () => [process.execPath, path.join(f.root, 'cli.mjs'), 'upgrade'])
   await assert.rejects(discoverLegacyRuntime(f.installation), { code: 'CRABOT_LEGACY_RUNTIME_UNVERIFIED' })
 })
+
+
+test('Linux relative legacy argv is resolved against each actual target cwd, not the new observer cwd', { skip: process.platform !== 'linux', timeout: 20_000 }, async t => {
+  const f = await fixture(t), requests = []
+  const server = `const http=require('node:http'),path=require('node:path');const server=http.createServer(async(req,res)=>{let raw='';for await(const b of req)raw+=b;const body=JSON.parse(raw);process.send({request:req.url});res.end(JSON.stringify({id:body.id,success:true,data:{definition:{module_id:'crabot-agent',cwd:path.join(process.argv[2],'crabot-agent'),env:{DATA_DIR:process.argv[1],CRABOT_AGENT_DATA_DIR:path.join(process.argv[1],'agent')}}}}))});server.listen(0,'127.0.0.1',()=>process.send({port:server.address().port}))`
+  const controllerCode = `const {spawn}=require('node:child_process');const child=spawn(process.execPath,['-e',${JSON.stringify(server)},process.argv[1],process.argv[2]],{cwd:process.cwd(),stdio:['ignore','ignore','inherit','ipc']});child.on('message',message=>process.send({...message,mm_pid:child.pid}));process.on('SIGTERM',()=>{child.once('exit',()=>process.exit(0));child.kill('SIGTERM')})`
+  const controller = spawn(process.execPath, ['-e', controllerCode, f.data, f.root], { cwd: f.root, stdio: ['ignore', 'ignore', 'inherit', 'ipc'] })
+  t.after(async () => { if (controller.exitCode !== null || controller.signalCode !== null) return; const exited = once(controller, 'exit'); controller.kill('SIGTERM'); await exited })
+  const [ready] = await once(controller, 'message')
+  controller.on('message', message => { if (message.request) requests.push(message.request) })
+  t.mock.method(identity, 'listProcessIds', () => [controller.pid, ready.mm_pid])
+  t.mock.method(identity, 'inspectProcessArguments', pid => pid === controller.pid
+    ? [process.execPath, 'cli.mjs', 'start'] : [process.execPath, 'crabot-core/dist/main.js'])
+  await fs.writeFile(path.join(f.data, 'mm.pid'), String(controller.pid))
+  assert.notEqual(process.cwd(), f.root)
+  const requested = once(controller, 'message')
+  const observed = await discoverLegacyRuntime(f.installation)
+  await requested
+  assert.equal(observed.controller.pid, controller.pid); assert.equal(observed.mm.pid, ready.mm_pid)
+  assert.equal(observed.state, 'running'); assert.equal(observed.launch_kind, 'foreground')
+  assert.deepEqual(requests, ['/get_module_definition'])
+})

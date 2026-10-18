@@ -118,10 +118,10 @@ try {
       await uidCommand(['-e', setup, legacyEntryFixture])
       const result = await runLegacySystemAccount(employee, { root: core, release, portOffsetHint: 100 })
       assert.equal(result.uid, employee.uid); assert.equal(result.data_binding, 'unverified')
-      assert.equal(result.port_offset, 100); assert.doesNotMatch(JSON.stringify(result), /must-not|api_key|data_dir/)
+      assert.equal(result.port_offset, 100); assert.equal(result.runtime_state, 'no_known_launcher'); assert.doesNotMatch(JSON.stringify(result), /must-not|api_key|data_dir/)
       const entry = path.join(legacyEntryFixture, 'scripts/start.mjs')
       await fs.appendFile(entry, '\n// controlled modified legacy entry\n')
-      await assert.rejects(runLegacySystemAccount(employee, { root: core, release, portOffsetHint: 100 }), { code: 'CRABOT_LEGACY_SYSTEM_ACCOUNT' })
+      await assert.rejects(runLegacySystemAccount(employee, { root: core, release, portOffsetHint: 100 }), { code: 'CRABOT_LEGACY_UNSUPPORTED' })
       await fs.writeFile(entry, originals['scripts/start.mjs'])
       const cleanup = `const fs=require('fs'),p=require('path');const d=p.join(process.env.HOME,'.crabot');if(fs.readdirSync(d).join(',')!=='instance.json')throw Error('unexpected fixture data');fs.unlinkSync(p.join(d,'instance.json'));fs.rmdirSync(d);`
       await uidCommand(['-e', cleanup])
