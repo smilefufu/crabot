@@ -106,7 +106,24 @@ export async function prepareCliPayload({ sourceRoot, installRoot, scope = 'user
     if (!targetStat || damaged) {
       if (damaged) await stoppedRepair()
       pending = path.join(releases, '.preparing-' + randomUUID())
-      await fs.cp(sourceRoot, pending, { recursive: true, verbatimSymlinks: true, mode: constants.COPYFILE_FICLONE, filter: () => true })
+      const rootMode = (await fs.stat(sourceRoot)).mode & 0o777
+      await fs.mkdir(pending, { mode: 0o700 })
+      const entries = await fs.readdir(sourceRoot)
+      let cursor = 0
+      async function copyParts() {
+        while (cursor < entries.length) {
+          const name = entries[cursor++]
+          // Independent top-level trees bound I/O concurrency. Keep the Unicode-safe
+          // Node traversal on Windows and preserve relative links on every platform.
+          await fs.cp(path.join(sourceRoot, name), path.join(pending, name), {
+            recursive: true, verbatimSymlinks: true, mode: constants.COPYFILE_FICLONE, filter: () => true,
+          })
+        }
+      }
+      const copies = await Promise.allSettled(Array.from({ length: Math.min(4, entries.length) }, copyParts))
+      const failed = copies.find(result => result.status === 'rejected')
+      if (failed) throw failed.reason
+      await fs.chmod(pending, rootMode)
       if ((await verifyCoreRelease(pending, { version: release.version })).inventory_sha256 !== id) throw Object.assign(new Error('待安装核心在准备期间改变，未发布。'), { code: 'CRABOT_CORE_INTEGRITY' })
       if (damaged) {
         await stoppedRepair()

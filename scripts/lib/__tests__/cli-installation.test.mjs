@@ -347,3 +347,17 @@ test('release application rejects a valid payload from another container before 
   assert.equal(readVersionMaintenance(f.dataDir), null)
   assert.equal(inspectInstance(f.dataDir).state, 'stopped')
 })
+
+test('parallel preparation can copy a read-only Core root and preserves its directory mode', { skip: process.platform === 'win32' }, async t => {
+  const f = await fixture(t), sourceRoot = await f.source('1.2.3')
+  let prepared
+  await fs.chmod(sourceRoot, 0o555)
+  try {
+    prepared = await prepareCliPayload({ sourceRoot, installRoot: f.installRoot })
+    assert.equal((await fs.stat(prepared.coreRoot)).mode & 0o777, 0o555)
+    assert.equal((await verifyCoreRelease(prepared.coreRoot)).version, '1.2.3')
+  } finally {
+    await fs.chmod(sourceRoot, 0o755)
+    if (prepared) await fs.chmod(prepared.coreRoot, 0o755)
+  }
+})

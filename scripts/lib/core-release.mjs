@@ -18,7 +18,7 @@ async function hashFile(file) {
   return hash.digest('hex')
 }
 
-async function inventory(root) {
+async function inventory(root, expected) {
   const entries = []
   async function walk(directory) {
     const children = await fs.readdir(directory, { withFileTypes: true })
@@ -31,26 +31,46 @@ async function inventory(root) {
     }
   }
   await walk(root)
+  if (expected && (Object.keys(expected).length !== entries.length || entries.some(entry => !Object.hasOwn(expected, entry.relative)))) fail()
   const records = new Array(entries.length)
-  let cursor = 0
-  async function readFiles() {
-    while (cursor < entries.length) {
-      const index = cursor++, { file } = entries[index]
-      const stat = await fs.lstat(file)
-      if (stat.isFile()) {
-        records[index] = { type: 'file', size: stat.size, sha256: await hashFile(file),
-          ...(process.platform === 'win32' ? {} : { mode: stat.mode & 0o777 }) }
-      } else if (stat.isSymbolicLink()) {
-        const target = await fs.readlink(file)
-        if (path.isAbsolute(target) || !inside(root, await fs.realpath(file))) fail()
-        records[index] = { type: 'link', target }
-      } else fail()
+  async function readEntries(visit) {
+    let cursor = 0, stopped = false
+    async function reader() {
+      while (!stopped && cursor < entries.length) {
+        const index = cursor++
+        await visit(entries[index], index)
+      }
     }
+    // Stop assigning work on failure and await every in-flight operation before cleanup.
+    const outcomes = await Promise.allSettled(Array.from({ length: Math.min(8, entries.length) }, () => reader().catch(error => {
+      stopped = true; throw error
+    })))
+    const failure = outcomes.find(result => result.status === 'rejected')
+    if (failure) throw failure.reason
   }
-  // Bound open files and stream buffers; finish every reader before failure/cleanup.
-  const outcomes = await Promise.allSettled(Array.from({ length: Math.min(8, entries.length) }, readFiles))
-  const failure = outcomes.find(result => result.status === 'rejected')
-  if (failure) throw failure.reason
+  // Check the cheap complete tree before hashing large runtimes. No metadata cache
+  // survives this call; every valid file still receives its full byte hash below.
+  await readEntries(async ({ file, relative }, index) => {
+    const stat = await fs.lstat(file)
+    if (stat.isFile()) {
+      records[index] = { type: 'file', size: stat.size, sha256: undefined,
+        ...(process.platform === 'win32' ? {} : { mode: stat.mode & 0o777 }) }
+      if (expected) {
+        const wanted = expected[relative]
+        if (wanted?.type !== 'file' || wanted.size !== stat.size || !/^[a-f0-9]{64}$/.test(wanted.sha256)
+          || process.platform !== 'win32' && wanted.mode !== records[index].mode) fail()
+      }
+    } else if (stat.isSymbolicLink()) {
+      const target = await fs.readlink(file)
+      if (path.isAbsolute(target) || !inside(root, await fs.realpath(file))) fail()
+      records[index] = { type: 'link', target }
+      if (expected && JSON.stringify(expected[relative]) !== JSON.stringify(records[index])) fail()
+    } else fail()
+  })
+  await readEntries(async ({ file, relative }, index) => {
+    if (records[index].type === 'file') records[index].sha256 = await hashFile(file)
+    if (expected && JSON.stringify(expected[relative]) !== JSON.stringify(records[index])) fail()
+  })
   const files = Object.create(null)
   for (let index = 0; index < entries.length; index++) files[entries[index].relative] = records[index]
   return { schema_version: 1, files }
@@ -80,7 +100,7 @@ export async function verifyCoreRelease(directory, { version, platform = process
     if (digest(text) !== metadata.inventory_sha256) fail()
     const expected = JSON.parse(text)
     if (expected.schema_version !== 1 || !expected.files || typeof expected.files !== 'object' || Array.isArray(expected.files)) fail()
-    const actual = await inventory(root)
+    const actual = await inventory(root, expected.files)
     if (JSON.stringify(expected) !== JSON.stringify(actual)) fail()
     const packageJson = JSON.parse(await fs.readFile(path.join(root, 'package.json'), 'utf8'))
     const runtime = JSON.parse(await fs.readFile(path.join(root, 'product-runtime.json'), 'utf8'))

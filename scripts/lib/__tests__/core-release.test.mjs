@@ -86,3 +86,18 @@ test('inventory stays byte-compatible with sorted depth-first manifests across m
   await fs.writeFile(path.join(f.root, '中文 空格/file-18.txt'), Buffer.alloc(18 * 103 + 1, 99))
   await assert.rejects(verifyCoreRelease(f.root), { code: 'CRABOT_CORE_INTEGRITY' })
 })
+
+for (const damage of ['extra-name', 'changed-size']) test('known invalid inventory metadata is rejected before reading payload bytes: ' + damage, async t => {
+  const f = await fixture(t)
+  await writeCoreRelease(f.root, f.release)
+  if (damage === 'extra-name') await fs.writeFile(path.join(f.root, 'extra'), 'not indexed')
+  else await fs.appendFile(path.join(f.root, 'bin/node'), 'changed size')
+  const fsModule = (await import('node:fs')).default
+  const { syncBuiltinESMExports } = await import('node:module')
+  const reader = t.mock.method(fsModule, 'createReadStream', () => { throw new Error('Unnecessary payload read') })
+  syncBuiltinESMExports()
+  try {
+    await assert.rejects(verifyCoreRelease(f.root), { code: 'CRABOT_CORE_INTEGRITY' })
+    assert.equal(reader.mock.callCount(), 0)
+  } finally { reader.mock.restore(); syncBuiltinESMExports() }
+})
