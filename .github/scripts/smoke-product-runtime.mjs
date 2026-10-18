@@ -41,7 +41,7 @@ try {
   assert.ok(report.pip.includes(data))
   const encodingProbe = 'import sys; assert sys.stdout.encoding.lower().replace("-", "") == "utf8"; print("中文 路径")'
   assert.equal(await run(agentPython, ['-c', encodingProbe]), '中文 路径')
-  assert.equal(await run(runtime.executables.python, ['-I', '-X', 'utf8', '-c', encodingProbe]), '中文 路径')
+  assert.equal(await run(runtime.executables.python, ['-I', '-X', 'utf8', '-B', '-c', encodingProbe]), '中文 路径')
   report.python_utf8_pipes = true
   const shell = command => run(runtime.executables.bash, ['-c', command])
   report.npm = await shell('npm --version')

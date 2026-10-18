@@ -16,6 +16,7 @@ const { MCPServerManager } = require(join(root, 'crabot-admin/dist/mcp-skill-man
 const { resolveManagedMcpConfig } = require(join(root, 'crabot-admin/dist/managed-mcp-runtime.js'))
 const { McpConnector } = await import(pathToFileURL(join(root, 'crabot-agent/dist/agent/mcp-connector.js')).href)
 const { ensureProductAgentVenv } = require(join(root, 'scripts/lib/product-python-env.cjs'))
+const { verifyCoreRelease } = await import(pathToFileURL(join(root, 'scripts/lib/core-release.mjs')).href)
 const { loadProductRuntime } = require(join(root, 'scripts/lib/product-runtime.cjs'))
 const runtime = loadProductRuntime(root, { required: true, full: true })
 const exec = promisify(execFile)
@@ -121,8 +122,9 @@ try {
   assert.equal((await resolveManagedMcpConfig(root, data, entry, registry.toAgentConfig(entry))).command, configs[0].command)
   const absentProbe = 'import importlib.util; assert importlib.util.find_spec("crabot_isolation_probe") is None'
   await run(agentPython, ['-I', '-X', 'utf8', '-c', absentProbe], {})
-  await run(runtime.executables.python, ['-I', '-X', 'utf8', '-c', absentProbe], {})
+  await run(runtime.executables.python, ['-I', '-X', 'utf8', '-B', '-c', absentProbe], {})
   loadProductRuntime(root, { required: true, full: true })
+  if (await fs.stat(join(root, 'core-release.json')).catch(() => null)) await verifyCoreRelease(root)
   console.log(JSON.stringify({ platform: process.platform, arch: process.arch, managed_stdio_servers: 5,
     offline_conflicting_dependencies: true, agent_and_product_unchanged: true, stable_id_reuse: true, own_credentials_preserved: true,
     internal_bearer_filtered: true, damaged_environment_preserved: true, no_mm: true }))
