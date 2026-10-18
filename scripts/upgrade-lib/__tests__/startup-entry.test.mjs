@@ -4,7 +4,7 @@ import path from 'node:path'
 import os from 'node:os'
 import net from 'node:net'
 import { fileURLToPath } from 'node:url'
-import { spawnSync } from 'node:child_process'
+import { spawnSync, spawn } from 'node:child_process'
 const product = fileURLToPath(new URL('../../../', import.meta.url))
 let root, data, home
 beforeEach(async () => {
@@ -73,3 +73,28 @@ it('actual Web upgrade entry leaves the running build alone when isolated prepar
   expect(await fs.readFile(path.join(home, 'dist/live.js'), 'utf8')).toBe('old build')
   await expect(fs.stat(path.join(data, 'calls.json'))).rejects.toThrow()
 })
+
+it('foreground start releases only its startup lock after MM health, while its own process stays alive', async () => {
+  await scripts()
+  await write('crabot-admin/dist/credentials.js', 'exports.readCredentials = async () => ({}); exports.writeCredentials = async () => {}; exports.newCredentialsFromPassword = () => {};')
+  await fs.copyFile(path.join(product, 'scripts/start.mjs'), path.join(home, 'scripts/start.mjs'))
+  const port = await new Promise(resolve => { const socket = net.createServer(); socket.listen(0, '127.0.0.1', () => { const port = socket.address().port; socket.close(() => resolve(port)) }) })
+  await write('crabot-core/dist/main.js', `const http=require('node:http'); const server=http.createServer((req,res)=>{res.setHeader('content-type','application/json');res.end(JSON.stringify({data:{status:'healthy'}}))}); server.listen(${port},'127.0.0.1');`)
+  const child = spawn(process.execPath, [path.join(home, 'scripts/start.mjs')], { cwd: home, env: { ...env(), CRABOT_PORT_OFFSET: String(port - 19000) }, stdio: ['ignore', 'pipe', 'pipe'] })
+  let output = ''; child.stdout.on('data', bytes => { output += bytes }); child.stderr.on('data', bytes => { output += bytes })
+  const exited = new Promise(resolve => child.on('close', resolve))
+  try {
+    const deadline = Date.now() + 8000
+    while (Date.now() < deadline) {
+      const pid = await fs.readFile(path.join(data, 'mm.pid'), 'utf8').catch(() => '')
+      const locked = await fs.stat(path.join(data, 'cli.lock')).then(() => true, () => false)
+      if (pid && !locked) break
+      await new Promise(resolve => setTimeout(resolve, 20))
+    }
+    expect(child.exitCode, output).toBeNull()
+    expect(await fs.readFile(path.join(data, 'mm.pid'), 'utf8')).toBe(String(child.pid))
+    await expect(fs.stat(path.join(data, 'cli.lock'))).rejects.toThrow()
+    await fs.writeFile(path.join(data, 'mm.pid'), '2147483000')
+  } finally { child.kill('SIGTERM'); await exited }
+  expect(await fs.readFile(path.join(data, 'mm.pid'), 'utf8')).toBe('2147483000')
+}, 12000)

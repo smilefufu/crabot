@@ -164,12 +164,17 @@ if (!existsSync(mmEntry) || !existsSync(orphanRecoveryEntry)) {
 
 // CLI 操作互斥（restart 外层持锁时经 env 跳过）。start 有大量 process.exit 出口，
 // 统一由 exit handler 释放；SIGKILL 残留的死锁由 acquire 侧的陈旧检测接管。
+let startupCliLock
+function releaseStartupLock() {
+  releaseCliLock(startupCliLock)
+  startupCliLock = undefined
+}
 if (!inheritedCliLock(DATA_DIR)) {
   try {
-    const cliLockPath = await acquireCliLock(DATA_DIR, 'start')
+    startupCliLock = await acquireCliLock(DATA_DIR, 'start')
     process.env.CRABOT_CLI_LOCK_HELD = '1'
     process.env.CRABOT_CLI_LOCK_OWNER = String(process.pid)
-    process.on('exit', () => releaseCliLock(cliLockPath))
+    process.on('exit', releaseStartupLock)
   } catch (error) {
     console.error(`[crabot] ${error.message}`)
     process.exit(1)
@@ -235,7 +240,23 @@ if (!DAEMON_MODE) {
     env: { ...process.env },
   })
 
-  const cleanup = () => clearPid(DATA_DIR)
+  if (startupCliLock) {
+    // The foreground process stays alive; its operation lock is only for bounded startup.
+    void (async () => {
+      const deadline = Date.now() + 30_000
+      while (child.exitCode === null && Date.now() < deadline) {
+        if (await probeMmHealthy(MM_PORT)) break
+        await new Promise(resolve => setTimeout(resolve, 250))
+      }
+      releaseStartupLock()
+    })()
+  }
+
+  const cleanup = () => {
+    try {
+      if (readFileSync(resolve(DATA_DIR, 'mm.pid'), 'utf8').trim() === String(process.pid)) clearPid(DATA_DIR)
+    } catch { /* Never clear a replacement process's PID. */ }
+  }
   child.on('exit', (code) => {
     cleanup()
     process.exit(code ?? 1)
