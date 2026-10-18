@@ -35,6 +35,9 @@ export class DesktopController {
     const migration = ['CRABOT_DESKTOP_TAKEOVER_REQUIRED', 'CRABOT_DATA_NOT_PRIVATE', 'CRABOT_LEGACY_INSTANCE'].includes(code)
     let message = '本机服务尚未就绪。可重新检查连接或查看基础诊断，按提示恢复。'
     if (migration) message = '发现已有部署或数据，需要先检查并确认接管。'
+    else if (['CRABOT_CORE_INTEGRITY', 'CRABOT_RUNTIME_INVALID'].includes(code)) message = '内置运行文件未通过校验。请保留数据目录，并使用同版或更高版的桌面安装包修复；修复前先确认共享服务已停止。工作依赖不会因此被清空。'
+    else if (['CRABOT_PYTHON_ENV_INVALID', 'CRABOT_PYTHON_ENV_MIGRATION_REQUIRED', 'CRABOT_PYTHON_ENV_SELECTION_INVALID'].includes(code)) message = '工作用Python环境需要单独核验，现有依赖已保留。请打开基础诊断并导出报告；重新安装应用不会自动清空或重建该环境。'
+    else if (['CRABOT_BACKUP_SPACE', 'CRABOT_UPDATE_SPACE', 'ENOSPC'].includes(code)) message = '磁盘空间不足，当前步骤未能完成。请保留现有数据和维护记录，释放空间后打开基础诊断核对，再继续操作。'
     else if (code === 'CRABOT_BACKUP_SCOPE_UNVERIFIED') message = '迁移涉及无法确认备份覆盖的数据引用，已停止迁移。请保留现有数据并查看恢复选项。'
     else if (code === 'CRABOT_MIGRATION_INTERRUPTED') message = '上次数据迁移尚未完成，已停止自动重试。原数据、备份和维护记录已保留，请查看基础诊断并按恢复流程处理。'
     else if (['CRABOT_PREFLIGHT_BUSY', 'CRABOT_PREFLIGHT_INTERRUPTED', 'CRABOT_PREFLIGHT_TIMEOUT'].includes(code)) message = '上次启动检查尚未确认结束，检查记录已保留。稍后点击启动可重新核对；只有旧检查进程已结束才会继续，不会清空数据。'

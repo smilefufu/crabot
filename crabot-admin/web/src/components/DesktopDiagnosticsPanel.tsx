@@ -27,6 +27,13 @@ export function DesktopDiagnosticsPanel() {
     catch { setNotice('未能保存诊断文件，请重新选择可写位置。') }
     finally { setBusy(false) }
   }
+  const openInstallHelp = async () => {
+    setNotice('')
+    try {
+      const opened = await bridge.openExternal('https://github.com/smilefufu/crabot-docs/blob/main/guides/desktop-usage.md')
+      if (!opened) setNotice('未能打开说明。请从原发行来源获取同版或更高版桌面安装包，并保留数据目录。')
+    } catch { setNotice('未能打开说明。请从原发行来源获取同版或更高版桌面安装包，并保留数据目录。') }
+  }
   return <section className="desktop-diagnostics" aria-label="本地诊断">
     <h2>本地诊断</h2>
     <p>服务无法启动时，也可以检查应用组件并导出基础诊断。</p>
@@ -34,7 +41,9 @@ export function DesktopDiagnosticsPanel() {
       <Button variant="secondary" disabled={busy} onClick={() => { void refresh() }}>{busy ? '正在处理…' : '重新检查'}</Button>
       <Button variant="secondary" disabled={busy || !report} onClick={() => { void exportReport() }}>导出基础诊断</Button>
       <Button variant="secondary" onClick={() => { void bridge.revealDataFolder() }}>打开数据与日志目录</Button>
+      <Button variant="secondary" onClick={() => { void openInstallHelp() }}>安装与修复说明</Button>
     </div>
+    <p>内置文件损坏时，先确认共享服务已停止，再用同版或更高版安装包修复，并保留数据目录。工作用 Python 环境需单独核验，重装不会自动清空或重建已有依赖。</p>
     {notice && <p role="status">{notice}</p>}
     {report && <>
       <dl>
