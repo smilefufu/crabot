@@ -278,7 +278,7 @@ try {
     await asUser(bob, ['stop']); assert.equal((await state(bob)).state, 'stopped')
     await fs.rm(fixture); await fs.rm(marker)
   })
-  await phase('missing-profile-refuses-control-service-and-repeat-open', async () => {
+  await phase('missing-profile-and-credentials-never-reinitialize', async () => {
     const retained = bob.data_dir + '-ci-retained'
     const ownNode = args => run('/usr/bin/setpriv', ['--reuid=' + bob.uid, '--regid=' + bob.gid, '--init-groups', '--', path.join(loaded.core, '.product-runtime/node/bin/node'), ...args],
       { env: { PATH: '/usr/bin:/bin', HOME: bob.home, USER: bob.user, LOGNAME: bob.user } })
@@ -295,6 +295,16 @@ try {
       await rename(retained, bob.data_dir)
     }
     assert.equal((await state(bob)).state, 'stopped')
+    const credentials = path.join(bob.data_dir, 'admin/credentials.json'), saved = credentials + '.ci-retained'
+    await absent(saved); await rename(credentials, saved)
+    try {
+      await assert.rejects(loaded.runSystemUser(bob, { root: loaded.core, action: 'prepare', input: { password: 'replacement-must-not-take-effect' } }),
+        error => error.code === 'CRABOT_SYSTEM_UNVERIFIED' && /原浏览器凭据缺失/.test(error.message))
+      await absent(credentials)
+    } finally {
+      if (await fs.lstat(credentials).catch(() => null)) throw new Error('Existing manifest credentials were reinitialized; original retained for CI diagnosis')
+      await rename(saved, credentials)
+    }
   })
   await fs.writeFile(evidence, JSON.stringify({ install_root: installed, selected, users: users.map(({ user, uid, gid, port_offset }) => ({ user, uid, gid, port_offset })), events,
     real_systemd: true, real_uid_transitions: true, real_core: true, cli_disconnect_survived: true, real_coordinator_death_recovered_without_replay: true, full_archive_shared_upgrade: Boolean(archiveReport), synthetic_previous_release: Boolean(archiveReport), uses_real_model_provider: false }, null, 2) + '\n')

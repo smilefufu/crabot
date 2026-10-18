@@ -51,17 +51,22 @@ export async function selectLegacyPythonRebuild({ root, dataDir, prepared, expec
   catch (error) { fail('CRABOT_LEGACY_PYTHON_SELECTION_UNVERIFIED', error) }
   await sourcePlan(root, dataDir, expectedFingerprint)
   selection.verifyAgentEnvironmentCandidate(dataDir, record)
+  if (JSON.stringify(selection.readAgentEnvironmentReference(dataDir)) !== JSON.stringify(current)) fail('CRABOT_PYTHON_SELECTION_CONFLICT')
   if (!current) {
     const file = path.join(dataDir, selection.selectionName), temporary = file + '.tmp-' + randomUUID()
-    let linked = false
+    let published = false
     try {
       const bytes = JSON.stringify(record) + '\n'
       if (process.platform === 'win32') { identity.writePrivateFile(temporary, ''); await fs.writeFile(temporary, bytes, { flush: true }) }
       else await fs.writeFile(temporary, bytes, { flag: 'wx', mode: 0o600, flush: true })
       if (process.platform !== 'win32') await fs.chmod(temporary, 0o600)
-      await fs.link(temporary, file); linked = true
+      // All supported writers hold the same lifecycle lock. Recheck initial
+      // absence immediately before atomic rename; no transient hardlink survives
+      // a crash to make an otherwise complete private reference unreadable.
+      if (selection.readAgentEnvironmentReference(dataDir)) fail('CRABOT_PYTHON_SELECTION_CONFLICT')
+      await fs.rename(temporary, file); published = true
       await sync(dataDir)
-    } catch (error) { if (linked) uncertain(error); throw error }
+    } catch (error) { if (published) uncertain(error); throw error }
     finally { await fs.rm(temporary, { force: true }) }
   }
   return { ...record, selected: true }
