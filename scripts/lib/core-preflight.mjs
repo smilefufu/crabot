@@ -3,7 +3,6 @@ import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { randomUUID } from 'node:crypto'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
 import { cliLockToken, hasInheritedCliLock } from './cli-lock.mjs'
 import state from './preflight-state.cjs'
 import identity from './process-identity.cjs'
@@ -20,7 +19,7 @@ export async function runCorePreflight({ root, dataDir, node, env, stdio = ['ign
   state.publish(dataDir, record, previous?.id ?? null)
   let child, timer, stdout = '', stderr = ''
   try {
-    child = spawn(node, ['--import', fileURLToPath(new URL('./preflight-child.mjs', import.meta.url)),
+    child = spawn(node, ['--import', new URL('./preflight-child.mjs', import.meta.url).href,
       path.join(root, 'crabot-core/dist/orphan-recovery-preflight.js')], {
       cwd: path.join(root, 'crabot-core'), stdio, env: { ...env, CRABOT_PREFLIGHT_DATA_DIR: dataDir, CRABOT_PREFLIGHT_ID: record.id },
     })
