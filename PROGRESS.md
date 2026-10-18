@@ -1,17 +1,16 @@
 # Crabot 项目进度
 
-### 桌面化方案：独立 worktree 开发中，推进 P6/P7
+### 桌面化方案：独立 worktree 推进桌面与兼容转换
 
-- 按已确认[中文 Spec](crabot-docs/superpowers/specs/2026-10-17-desktop-application-design.md)及[实施计划](crabot-docs/superpowers/plans/2026-10-17-desktop-application-implementation.md)，仅在 feat/desktop-application worktree 开发。完整实现与验证前不推主仓 main、不提前建 PR，不部署/重启现场，保留无关 WIP。
-- P0–P4 的内置环境、共享实例、SDK、OS peer 与真实 Electron 边界有四平台基础证据；P5 首用模型、主题、权限与诊断已接。用户指定 mirror-xinshu 的真实 Admin 解析/Agent adapter 两次短请求通过（输入63/输出19），GUI 引导至业务首答仍待验收，生产配置未改。
-- 受管 MCP 补充已确认并落实协议及实现：旧注册/恢复不接管，新标准 npx/uvx 默认隔离、稳定 id 复用、可切自定义。候选14及四平台原生 CI 的实际五个 stdio MCP 冲突依赖/离线连接/凭据过滤与完整清单保持通过；不等于整轮或完整迁移通过。
-- P6 已接登录自启动、更新入口、活动核对、共享停机和版本维护。独立 CLI 使用同一内置 Core、稳定原生命令、不可变版本目录、普通包/远程安装与同版修复；user CLI 离线升级保留停止状态，浏览器 Admin 先准备再停机并用新核心启动。完整归档经 HTTP/SHA/解包及真实 crabot upgrade 夹具已通过；最终浏览器按钮、四平台归档和更新后服务健康仍待汇总。
-- 本机候选18（ada422fc，0.1.0-desktop.14，1,489,365,173字节）原生安装/重复/修复23.1/10.3/22.8s；未启动本机业务MM。GUI 维护恢复已串行，拒绝自动重放未知的未完成 schema 迁移；迁移前拒绝超出备份覆盖的模块引用。新启动检查 receipt/preload 保护已接，父进程被杀后旧子仍活时新操作被拒；旧子结束后仅启动可受控重检固定 orphan preflight，不绕过 schema 保护。相关锁/安装/实例/维护85项、桌面控制21项通过；另以实际维护层/受控迁移子进程验证：父进程被杀后普通启动及GUI恢复均拒绝重放，脚本仅执行一次、备份保留；不为已有保护重复添加状态。旧user的数据保护已明确区分旧来源（内部schema2）与sealed升级来源，先隔离/停机/范围备份，迁移前封闭旧入口恢复；17项来源/中断/真实离线迁移及扩大94项通过（1项Linux专用待原生），失败不自动重放。完整旧版接管仍未完成。
-- 旧 user 接管已有真实发行识别、五入口可逆阻断/seal和同连接单次精确停机组件；两版 Windows CRLF 原始字节与 Unix 分开验证，30项定向通过。旧Python已有只读观察、固定目录重建及默认引用选择/精确取消：验证wheel/RECORD、解释器/pip及新旧摘要，引用损坏不回退，刷盘未知保持保护。准备/选择22项及最终3项故障重验、隔离/备份17项和Core包装5项通过。现场92包仅只读检查，未重建；整体接管、启动源/命令切换及真实业务仍待完成。
-- P7 安装包构建/解包全量核验已接 CI；最新 GUI 候选18（.14）实际 DMG 674,531,820 / ZIP 693,087,012字节及 App/ASAR/Core/fuses往返通过；仅候选，不代表可信签名或实际安装。用户暂无签名证书，取得途径见[签名指南](crabot-docs/guides/desktop-release-signing.md)。最低桌面 OS、权限/IME及实际业务验收仍独立进行。
-- 原生CI 39133517865两Mac完整通过；最新39141209222的Linux真实root/umask077、环境重建、Electron＋Core＋CLI与安装包构建通过，实际包后启动及普通CLI归档升级也通过；systemd首次密码设置发现回显竞态，已用真实PTY复现并修复，两次提示前均关闭回显且监听就绪；密码7项及System108项通过，尚待下一轮真实托管验收。两Mac只读Core发布失败已恢复user暂存可写直到rename的顺序，root发布规则保持，50项通过（1项平台跳过）；Windows受控维护夹具的Admin就绪竞态先复现后修复，七场景和后台Core两项通过。假Core负例仅在OS确认退出后模拟超时，生产保护/超时不改。Windows随后在真实Python默认选择的私有ACL处被拒，已把新环境目录/控制文件改为显式私有创建；离线重建/选择及环境19项通过（Windows ACL专用1项待原生）。平台不存在的目录fsync故障注入已限定POSIX，各平台另验发布前失败不换默认。原生39145289298的ARM Mac完整链成功，Intel完成重建前7项后达整步10分钟上限，未计通过；组预算改20分钟并补固定阶段日志，真实选择定向重验1项通过。新四平台完整结果仍待收敛。
-- 用户已确认[system整体Spec](crabot-docs/superpowers/specs/2026-10-18-system-mode-experience-design.md)及批量语义；[协议](crabot-docs/protocols/protocol-system.md)/[计划](crabot-docs/superpowers/plans/2026-10-18-system-mode-experience-implementation.md)已先行。S1/S2/S2b注册、UID隔离、systemd/本人CLI和批量控制已接，S3内置共享更新与按UID范围备份/迁移已接；S4受保护recover入口、阶段回执、协调器死亡守卫及私有迁移日志已接。System/准备/维护及旧部署/入口隔离191项通过（Linux专用1项待CI），便携安装/完整性50项通过（1项平台跳过）。Linux复制后保留构建UID的真实所有权缺陷已修，前置真实root/umask077原生检查通过。共享旧入口隔离组件已接root独立事务，原字节/权限先刷盘，数据变更后禁止还原，未知代码/源码WIP拒绝覆盖；整体转换尚未集成。旧端口表仅候选、同UID别名全拒绝，账号助手先降UID只读发现，实际运行目录取MM定义而非展示字段；本人CLI/服务/控制/复用开通先核验既有目录，缺目录不建空实例，别名停止用规范锁。S4整机故障、S5完整转换及P7继续，不触碰现场、不提前PR。
-- 详细构建、原生与故障证据统一见[验收记录](crabot-docs/superpowers/plans/2026-10-17-desktop-application-validation.md)。阶段性回归、构建与真实部署/产品验收分别记录，不计整项需求完成。
+- 按已确认[中文Spec](crabot-docs/superpowers/specs/2026-10-17-desktop-application-design.md)及[计划](crabot-docs/superpowers/plans/2026-10-17-desktop-application-implementation.md)，仅在feat/desktop-application worktree开发。完整实现与验证前不推主仓main、不提前建PR，不部署/重启现场，保留无关WIP。
+- P0–P4的内置环境、共享实例、SDK、OS peer与真实Electron边界已有四平台基础证据；受管MCP按稳定id隔离，五类真实stdio冲突依赖/离线连接/凭据过滤已验证。新HTTP文字、旧WS与业务权限契约保持；完整最新四平台结果继续收敛。
+- P5已接模型、主题、权限与本地诊断。用户指定mirror-xinshu经Admin解析/Agent adapter的两次短请求成功（输入63/输出19），生产配置未改；GUI引导到实际业务首答仍待验收。旧user的识别、精确停止、可逆入口隔离、旧Python独立重建/默认引用及内部schema2数据保护已接；失败不自动重放、不移动旧venv，完整接管/入口及启动源切换尚未完成。
+- P6已接登录自启动、同通道更新入口、活动核对、共享停机/备份/恢复和独立CLI完整归档升级。无GUI包使用同一Core及内置Node；真实HTTP/SHA/解包/crabot upgrade保留停止状态和依赖已验。普通版本维护与legacy接管来源分开，未知schema迁移保持保护。最终GUI安装按钮、全平台更新后健康仍待验收。
+- [System整体Spec](crabot-docs/superpowers/specs/2026-10-18-system-mode-experience-design.md)及批量语义已确认，[协议](crabot-docs/protocols/protocol-system.md)/[计划](crabot-docs/superpowers/plans/2026-10-18-system-mode-experience-implementation.md)先行。S1–S4注册/UID隔离/systemd/本人CLI/批量/共享更新/受保护恢复已接，System扩大130项通过。Linux真实root共享所有权及umask077检查通过；真实PTY复现并修复首次密码回显竞态，三UID完整托管仍待重验。
+- S5已有旧表候选与降UID发现、实际DataRoot观察、共享代码隔离/独立root事务及本人精确停止；相关67项通过、1项Linux专用待原生。专用转换纯协调器22项及上述System130项通过，区分legacy与sealed来源、全备份后切换、未知保持保护、成功用户独立前进。尚未接通root转换许可/作业、完整UID迁移/注册、已停止部署的可信绑定与全部实际启动源核验，不计完整转换通过。
+- P7原生39145289298的ARM Mac全链成功；Intel重建组前7项成功后达10分钟整步上限，预算改20分钟并补固定阶段日志，尚未计通过。Windows运行回归通过后在真实环境私有ACL处拒绝，限定新目录/标记用显式私有创建，离线重建/选择19项、产品23项通过（Windows专用各1项待原生）。最新83651750原生轮39147490023在跑；Linux较早轮的实际DEB/ASAR/原生会话/CLI共享、GUI崩溃重连及归档升级通过，不代表systemd已完成。
+- 本机候选18（0.1.0-desktop.14）Core约1.49GB、DMG674,531,820/ZIP693,087,012字节，完整往返验证；不含后续全部改动，不能作为最新发行。用户暂无签名证书，见[指南](crabot-docs/guides/desktop-release-signing.md)；最终签名、最低桌面OS/IME/权限、资源指标及真实业务分别验收。
+- 详细证据见[验收记录](crabot-docs/superpowers/plans/2026-10-17-desktop-application-validation.md)及System计划；源码、局部回归、构建、真实部署和产品验收分开记录，不计整项需求完成。
 
 ### 任务默认目录文件授权：独立修复待审查
 
