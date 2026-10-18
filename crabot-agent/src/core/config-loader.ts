@@ -4,7 +4,7 @@
  * 从 Admin 获取配置。Admin 是唯一的配置来源，获取失败则报错。
  */
 
-import type { RpcClient, ComputerUseSetupRequest } from 'crabot-shared'
+import { RpcCallError, type RpcClient, type ComputerUseSetupRequest } from 'crabot-shared'
 import type { UnifiedAgentConfig } from '../types.js'
 
 // ============================================================================
@@ -83,6 +83,7 @@ export class ConfigLoader {
    * **为什么必须走 pull 而不是靠 push**：admin 的 pushConfigToAgentModules 不下发
    * system_prompt / mcp_servers，靠 push 活过来的 agent 是空 prompt + 零 MCP。
    *
+   * Admin 明确返回未配模型时直接注册既有降级态，配置后的认证重拉由运行期负责。
    * 默认预算 60s 覆盖 admin 完整 onStart 的冷启动窗口；单次退避封顶 2s，保证
    * 「admin listen」到「agent register」的额外延迟不超过一个退避间隔。
    * 参数仅为可测注入，生产用默认值。
@@ -116,6 +117,10 @@ export class ConfigLoader {
           }
           return config
         } catch (error) {
+          if (error instanceof RpcCallError && error.code === 'ADMIN_CORE_AGENT_MODEL_NOT_CONFIGURED') {
+            console.warn('[ConfigLoader] 主控模型暂未就绪，先启动受保护的管理模式；配置后自动重新拉取')
+            return this.createDegradedConfig(process.env.Crabot_MODULE_ID || 'crabot-agent')
+          }
           lastError = this.describeError(error)
           const now = Date.now()
           if (attempts === 1) {

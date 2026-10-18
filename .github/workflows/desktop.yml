@@ -112,7 +112,7 @@ jobs:
       - name: Agent environment regressions
         run: |
           cd crabot-agent
-          node node_modules/vitest/vitest.mjs run tests/core/runtime-env.test.ts tests/core/child-env-guard.test.ts tests/utils/resolve-bash-path.test.ts tests/agent/mcp-connector.test.ts tests/mcp-connector-tool-defaults.test.ts --maxWorkers=1 --minWorkers=1
+          node node_modules/vitest/vitest.mjs run tests/core/config-loader.test.ts tests/core/config-loader-slice0.test.ts tests/core/runtime-env.test.ts tests/core/child-env-guard.test.ts tests/utils/resolve-bash-path.test.ts tests/agent/mcp-connector.test.ts tests/mcp-connector-tool-defaults.test.ts --maxWorkers=1 --minWorkers=1
       - name: Shared HTTP and chat protocol regressions
         run: |
           node node_modules/typescript/bin/tsc -p tsconfig.cli.json
