@@ -9,6 +9,16 @@ function json(file) {
   if (!stat.isFile() || stat.size > 65_536) throw new Error('Invalid installation record')
   return JSON.parse(readFileSync(file, 'utf8'))
 }
+// Metadata-only display lookup; installation/startup own full inventory checks.
+function readCoreVersion(root) {
+  const file = path.join(root, 'core-release.json')
+  if (!existsSync(file) && !existsSync(path.join(root, 'core-files.json'))) return null
+  try {
+    const value = json(file)
+    if (value.schema_version !== 1 || typeof value.version !== 'string' || !/^\d+\.\d+\.\d+(?:-[\w.-]+)?$/.test(value.version)) throw new Error()
+    return value.version
+  } catch { throw new Error('Invalid sealed release version') }
+}
 function readCliMetadata(root) {
   try {
     const value = json(path.join(root, 'cli-installation.json'))
@@ -42,4 +52,4 @@ function assertSelectedCli(coreRoot) {
   if (installation && !installation.selected) fail('此核心已不是当前版本，请使用已安装的 crabot 命令；未运行旧版。')
   return installation
 }
-module.exports = { readCliMetadata, readCliSelection, locateCliInstallation, assertSelectedCli }
+module.exports = { readCoreVersion, readCliMetadata, readCliSelection, locateCliInstallation, assertSelectedCli }

@@ -35,6 +35,14 @@ describe('getCurrentVersion', () => {
     await expect(verifyReleasePackage(dir, '1.2.3')).rejects.toHaveProperty('code', 'CRABOT_CORE_INTEGRITY')
   })
 
+  it('rejects invalid or missing sealed metadata rather than using a stale VERSION', () => {
+    writeFileSync(join(dir, 'VERSION'), 'v0.9.0')
+    writeFileSync(join(dir, 'core-files.json'), '{}')
+    expect(() => getCurrentVersion(dir)).toThrow('Invalid sealed release version')
+    writeFileSync(join(dir, 'core-release.json'), 'invalid-json')
+    expect(() => getCurrentVersion(dir)).toThrow('Invalid sealed release version')
+  })
+
   it('returns null if VERSION file is absent', () => {
     expect(getCurrentVersion(dir)).toBeNull()
   })

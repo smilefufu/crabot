@@ -7,14 +7,11 @@ import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { verifyReleasePackage } from '../lib/release-package.mjs'
 import { verifyCoreRelease } from '../lib/core-release.mjs'
+import location from '../lib/cli-location.cjs'
 
 export function getCurrentVersion(crabotHome) {
-  const sealed = join(crabotHome, 'core-release.json')
-  if (existsSync(sealed)) {
-    const release = JSON.parse(readFileSync(sealed, 'utf8'))
-    if (release.schema_version !== 1 || typeof release.version !== 'string' || !/^\d+\.\d+\.\d+(?:-[\w.-]+)?$/.test(release.version)) throw new Error('Invalid sealed release version')
-    return release.version
-  }
+  const sealed = location.readCoreVersion(crabotHome)
+  if (sealed !== null) return sealed
   const p = join(crabotHome, 'VERSION')
   if (!existsSync(p)) return null
   const v = readFileSync(p, 'utf-8').trim()

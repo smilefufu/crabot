@@ -67,6 +67,34 @@ describe('VersionService capability', () => {
   })
 })
 
+describe('VersionService sealed core', () => {
+  it('reads the immutable core version and does not mistake a v-prefixed tag for an update', async () => {
+    const home = tmpHome(false)
+    try {
+      writeFileSync(join(home, 'core-release.json'), JSON.stringify({ schema_version: 1, version: '1.2.3' }))
+      const state = await new VersionService({ crabotHome: home, dataDir: home, etcDir: join(home, 'no-etc'), fetchLatestTag: async () => 'v1.2.3' }).check()
+      expect(state.current_version).toBe('1.2.3')
+      expect(state.latest_version).toBe('v1.2.3')
+      expect(state.upgrade_available).toBe(false)
+      expect(state.error).toBeNull()
+    } finally { rmSync(home, { recursive: true, force: true }) }
+  })
+  it('never substitutes a stale VERSION when a sealed core version is invalid or missing', async () => {
+    for (const contents of ['invalid-json', null]) {
+      const home = tmpHome(false)
+      try {
+        writeFileSync(join(home, 'VERSION'), 'v0.9.0')
+        writeFileSync(join(home, 'core-files.json'), '{}')
+        if (contents !== null) writeFileSync(join(home, 'core-release.json'), contents)
+        const state = await new VersionService({ crabotHome: home, dataDir: home, etcDir: join(home, 'no-etc'), fetchLatestTag: async () => 'v1.2.3' }).check()
+        expect(state.current_version).toBeNull()
+        expect(state.upgrade_available).toBe(false)
+        expect(state.error).toMatch(/sealed release version/)
+      } finally { rmSync(home, { recursive: true, force: true }) }
+    }
+  })
+})
+
 describe('VersionService source', () => {
   function makeSourceSvc(git: (args: string[]) => string) {
     const home = mkdtempSync(join(tmpdir(), 'crabot-src-'))
