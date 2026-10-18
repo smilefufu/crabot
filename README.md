@@ -2,6 +2,14 @@
 
 模块化硅基伙伴。将 AI 智能体连接到消息渠道（Telegram、微信等），通过 Web UI 或 CLI 管理，让它们自主处理任务。
 
+## 桌面版（开发候选）
+
+桌面版正在独立分支开发与验收，尚未正式发行。它会内置Node、Python、浏览器和必需依赖，安装后直接打开；GUI无需Crabot密码，原crabot管理命令继续保留并共用同一实例。关闭窗口继续后台运行，退出Crabot会停止共享服务。
+
+候选的使用方式见[桌面版指南](https://github.com/smilefufu/crabot-docs/blob/main/guides/desktop-usage.md)，管理员共享部署见[System mode指南](https://github.com/smilefufu/crabot-docs/blob/main/guides/system-mode-operations.md)。旧部署的完整兼容转换仍在实施，当前公开旧发行包不因此具备新版转换和批量管理能力。
+
+下面的快速开始仍介绍现有CLI发行和源码方式；桌面安装包及完整升级入口在正式发行时提供。
+
 ## 架构
 
 ```
