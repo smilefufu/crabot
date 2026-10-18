@@ -87,7 +87,7 @@ try {
   if (diagnosticEntry) {
     let fd
     try {
-      management.ensurePrivateDataRoot(diagnosticEntry.data_dir)
+      management.requirePrivateDataRoot(diagnosticEntry.data_dir)
       const logs = management.ensurePrivateDataRoot(path.join(diagnosticEntry.data_dir, 'logs'))
       fd = fs.openSync(path.join(logs, 'system-maintenance.log'), fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_APPEND | fs.constants.O_NOFOLLOW, 0o600)
       const stat = fs.fstatSync(fd)

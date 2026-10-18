@@ -102,3 +102,30 @@ test('a root-acknowledged migration can be checked offline; an outstanding fence
   await fs.appendFile(path.join(f.data + '.desktop-backups', snapshot.backup.id, 'data/fixture/content'), 'damaged')
   await assert.rejects(f.invoke('check-migration', { snapshot }))
 })
+
+
+test('system data maintenance uses one canonical lock for a parent-directory alias', options, async t => {
+  const f = await fixture(t), parent = path.dirname(f.data), alias = path.join(parent, 'home-alias')
+  await fs.symlink(parent, alias, 'dir')
+  f.entry.data_dir = path.join(alias, path.basename(f.data))
+  const snapshot = await f.invoke('snapshot'); await f.choose(f.target)
+  await f.invoke('migrate', { snapshot })
+  assert.deepEqual(await f.invoke('check-migration', { snapshot }), { verified: true, service_started: false })
+  assert.equal(readVersionMaintenance(f.data), null)
+})
+
+
+test('a replaced data-root symlink is still refused before any data-maintenance record', options, async t => {
+  const f = await fixture(t), alias = f.data + '-replacement'
+  await fs.symlink(f.data, alias, 'dir'); f.entry.data_dir = alias
+  await assert.rejects(f.invoke('snapshot'), { code: 'CRABOT_DATA_NOT_PRIVATE' })
+  assert.equal(readVersionMaintenance(f.data), null)
+})
+
+
+test('missing managed data is reported without creating an empty replacement instance', options, async t => {
+  const f = await fixture(t), missing = f.data + '-missing'; f.entry.data_dir = missing
+  await assert.rejects(f.invoke('snapshot'), { code: 'CRABOT_DATA_MISSING' })
+  await assert.rejects(fs.lstat(missing), { code: 'ENOENT' })
+  assert.equal(readVersionMaintenance(f.data), null)
+})

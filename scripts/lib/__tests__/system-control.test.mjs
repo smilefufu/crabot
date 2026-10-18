@@ -105,3 +105,15 @@ test('a cancelled foreground start does not dispatch a fresh service', async t =
   await assert.rejects(controlSystemUser(entry, 'start', stopped, { available: () => {}, observe: async () => stopped,
     signal: controller.signal, invoke: () => assert.fail('cancelled before dispatch') }), { code: 'CRABOT_SYSTEM_START_CANCELLED' })
 })
+
+
+test('a legacy environment alias for the same bound directory is normalized; a retargeted alias is refused', { skip: process.platform === 'win32' }, t => {
+  const entry = fixture(t), parent = path.dirname(entry.data_dir), alias = path.join(parent, 'old-home-alias')
+  fs.symlinkSync(parent, alias, 'dir')
+  const env = { DATA_DIR: path.join(alias, path.basename(entry.data_dir)), CRABOT_PORT_OFFSET: String(entry.port_offset) }
+  applySystemUserBinding(entry, env); assert.equal(env.DATA_DIR, entry.data_dir)
+  fs.unlinkSync(alias)
+  const other = path.join(parent, 'different-root'); fs.mkdirSync(other); fs.mkdirSync(path.join(other, path.basename(entry.data_dir)))
+  fs.symlinkSync(other, alias, 'dir')
+  assert.throws(() => applySystemUserBinding(entry, { DATA_DIR: path.join(alias, path.basename(entry.data_dir)) }), { code: 'CRABOT_SYSTEM_BINDING_CONFLICT' })
+})

@@ -13,8 +13,12 @@ export function ownSystemEntry({ registry = new SystemRegistry(), account = user
   return entry
 }
 
+function sameBindingDirectory(value, expected) {
+  if (path.resolve(value) === expected) return true
+  try { return fs.realpathSync(value) === fs.realpathSync(expected) } catch { return false }
+}
 export function applySystemUserBinding(entry, env = process.env) {
-  if (env.DATA_DIR && path.resolve(env.DATA_DIR) !== entry.data_dir
+  if (env.DATA_DIR && !sameBindingDirectory(env.DATA_DIR, entry.data_dir)
     || env.CRABOT_PORT_OFFSET && env.CRABOT_PORT_OFFSET !== String(entry.port_offset)) {
     throw systemError('当前DATA_DIR或端口偏移与管理员绑定冲突，请检查旧shell环境；未操作其他实例。', 'CRABOT_SYSTEM_BINDING_CONFLICT')
   }
