@@ -160,12 +160,14 @@ jobs:
               > ".desktop-build/ubuntu-$release.log" 2>&1
           done
       - name: Whole Electron host with real core and CLI on Linux
+        timeout-minutes: 12
         if: runner.os == 'Linux' && steps.scope.outputs.full_runtime == 'true'
         working-directory: crabot-desktop
         env:
           CRABOT_FULL_CORE_TEST: '1'
         run: xvfb-run -a node --test tests/full-host.test.mjs 2>&1 | tee ../.desktop-build/full-host.log
       - name: Whole Electron host with real core and CLI on macOS and Windows
+        timeout-minutes: 12
         if: runner.os != 'Linux' && steps.scope.outputs.full_runtime == 'true'
         working-directory: crabot-desktop
         env:

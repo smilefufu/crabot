@@ -156,3 +156,26 @@ test('recovery serializes with GUI stop and start operations while it owns the m
   assert.deepEqual(calls, ['recover', 'start', 'recovered', 'stop'])
   assert.equal(controller.host.snapshot().phase, 'stopped')
 })
+
+test('reopening GUI recovery never automatically replays a partially failed data migration', async t => {
+  const controller = new DesktopController({ coreRoot: '/unused', dataRoot: '/unused', appVersion: 'fixture', platform: process.platform })
+  t.after(() => controller.close())
+  const record = { phase: 'installing' }
+  let writes = 0
+  controller.load = async file => {
+    if (file.endsWith('version-maintenance.mjs')) return {
+      readVersionMaintenance: () => ({ ...record }), recoverVersionMaintenance: async options => {
+        await options.verifyCompatible(); record.phase = 'verifying'; await options.run(); await options.verifyCompatible()
+      },
+    }
+    if (file.endsWith('core-preparation.mjs')) return { verifyDataCompatibility: () => [{ dataDir: '/unused/admin' }] }
+    if (file.endsWith('maintenance-backup.mjs')) return { assertLocalMigrationData: async () => {} }
+    throw new Error('Unexpected adapter')
+  }
+  controller.startCore = async () => { writes++; throw Object.assign(new Error('Partial data write'), { code: 'MIGRATION_FAILED' }) }
+  await assert.rejects(controller.recoverVersion(), { code: 'MIGRATION_FAILED' })
+  assert.equal(record.phase, 'verifying'); assert.equal(writes, 1)
+  await assert.rejects(controller.recoverVersion(), { code: 'CRABOT_MIGRATION_INTERRUPTED' })
+  assert.equal(writes, 1)
+  assert.equal(record.phase, 'verifying')
+})
