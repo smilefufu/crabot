@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { scanModules, backupDataDir } from '../migrate.mjs'
+import { scanModules } from '../migrate.mjs'
 
 describe('scanModules', () => {
   let crabotHome, dataDir
@@ -81,35 +81,6 @@ describe('scanModules', () => {
     const result = scanModules(crabotHome, dataDir)
     expect(result[0].codeVersion).toBe('v2')
     expect(result[0].dataVersion).toBe('v1')
-  })
-})
-
-describe('backupDataDir', () => {
-  let dataDir
-
-  beforeEach(() => {
-    dataDir = mkdtempSync(join(tmpdir(), 'crabot-bkp-'))
-  })
-
-  afterEach(() => {
-    rmSync(dataDir, { recursive: true, force: true })
-    rmSync(`${dataDir}.backup-20260423-153012`, { recursive: true, force: true })
-  })
-
-  it('copies dataDir to <dataDir>.backup-<timestamp>', async () => {
-    writeFileSync(join(dataDir, 'a.txt'), 'hello')
-    mkdirSync(join(dataDir, 'sub'))
-    writeFileSync(join(dataDir, 'sub', 'b.txt'), 'world')
-
-    const backupPath = await backupDataDir(dataDir, '20260423-153012')
-    expect(backupPath).toBe(`${dataDir}.backup-20260423-153012`)
-    const { readFileSync: rfs, existsSync: ex } = await import('node:fs')
-    expect(rfs(join(backupPath, 'a.txt'), 'utf-8')).toBe('hello')
-    expect(ex(join(backupPath, 'sub', 'b.txt'))).toBe(true)
-  })
-
-  it('throws if dataDir does not exist', async () => {
-    await expect(backupDataDir('/nonexistent/path-xyz', '20260423-153012')).rejects.toThrow()
   })
 })
 
@@ -245,6 +216,7 @@ describe('runMigrations', () => {
     writeFileSync(join(md, 'schema_version'), codeVer)
     mkdirSync(join(md, 'upgrade'), { recursive: true })
     for (const s of scripts) writeFileSync(join(md, 'upgrade', s), '// noop\n')
+    writeFileSync(join(md, 'upgrade', 'scope.mjs'), `export async function migrationScope() { return { reads: [], writes: ['${name}/somefile'] } }`)
     const dd = join(dataDir, name)
     mkdirSync(dd, { recursive: true })
     if (dataVer !== null) writeFileSync(join(dd, 'SCHEMA_VERSION'), dataVer)
@@ -271,7 +243,8 @@ describe('runMigrations', () => {
     const { readFileSync: rfs, readdirSync: rds } = await import('node:fs')
     expect(rfs(join(dataDir, 'memory', 'SCHEMA_VERSION'), 'utf-8').trim()).toBe('v2')
     const entries = rds(dataDir)
-    expect(entries.some(e => e.startsWith('memory.backup-'))).toBe(true)
+    expect(entries).toContain('.upgrade-migrations')
+    expect(rfs(join(dataDir, '.upgrade-migrations/crabot-memory-v1-v2/backup/memory/somefile'), 'utf8')).toBe('data')
   })
 
   it('stops at first failed module and does NOT write SCHEMA_VERSION', async () => {
@@ -304,6 +277,7 @@ describe('applyMigration', () => {
     mkdirSync(moduleData, { recursive: true })
     mkdirSync(join(moduleDir, 'upgrade'), { recursive: true })
     writeFileSync(join(moduleDir, 'upgrade', 'from_v1_to_v2.mjs'), '// noop\n')
+    writeFileSync(join(moduleDir, 'upgrade', 'scope.mjs'), `export async function migrationScope() { return { reads: [], writes: [] } }`)
   })
 
   afterEach(() => {
@@ -315,7 +289,7 @@ describe('applyMigration', () => {
     const { applyMigration } = await import('../migrate.mjs')
     const result = await applyMigration(moduleDir, moduleData, 'v1', 'v2',
       async () => ({ exitCode: 0, stdout: '', stderr: '' }))
-    expect(result).toEqual({ ok: true })
+    expect(result).toMatchObject({ ok: true })
     const { readFileSync: rfs } = await import('node:fs')
     expect(rfs(join(moduleData, 'SCHEMA_VERSION'), 'utf-8').trim()).toBe('v2')
   })
@@ -331,13 +305,11 @@ describe('applyMigration', () => {
   })
 
   it('from == to 时是 no-op（不写 SCHEMA_VERSION 避免没必要的 disk write）', async () => {
-    // 注：从语义角度，应该写——但 chainUpgrade 内部 toN <= fromN return {ok:true} 不跑脚本
-    // applyMigration 还是会 writeSchemaVersion（result.ok=true 不区分是否跑了脚本）
     const { applyMigration } = await import('../migrate.mjs')
     const result = await applyMigration(moduleDir, moduleData, 'v2', 'v2',
       async () => ({ exitCode: 0, stdout: '', stderr: '' }))
-    expect(result).toEqual({ ok: true })
+    expect(result).toMatchObject({ ok: true })
     const { readFileSync: rfs } = await import('node:fs')
-    expect(rfs(join(moduleData, 'SCHEMA_VERSION'), 'utf-8').trim()).toBe('v2')
+    expect(await import('node:fs').then(fs => fs.existsSync(join(moduleData, 'SCHEMA_VERSION')))).toBe(false)
   })
 })

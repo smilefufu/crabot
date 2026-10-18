@@ -110,20 +110,27 @@ export async function downloadRelease({ url, sha256Url, version, logger }) {
   }
 }
 
+/** Extraction and integrity only; safe to use while the installed instance runs. */
+export async function unpackRelease({ tarPath, stage, version, logger }) {
+  logger?.info?.('Extracting release into preparation directory')
+  await extractArchive(tarPath, stage)
+  if (tarPath.endsWith('.zip')) {
+    const fs = await import('node:fs')
+    const entries = fs.readdirSync(stage)
+    if (entries.length !== 1 || !fs.statSync(join(stage, entries[0])).isDirectory()) throw new Error('invalid release ZIP root')
+    stage = join(stage, entries[0])
+  }
+  await verifyReleasePackage(stage, version)
+  return stage
+}
+
 // 解压 + 覆盖安装目录（必须在 stop 之后做：覆盖的是运行代码文件）。
 export async function extractRelease({ tmp, tarPath, version, crabotHome, logger }) {
   let stage = join(tmp, 'stage')
   try {
-    logger?.info?.('Extracting release archive')
-    await extractArchive(tarPath, stage)
+    stage = await unpackRelease({ tarPath, stage, version, logger })
     const fs = await import('node:fs')
-    if (tarPath.endsWith('.zip')) {
-      const entries = fs.readdirSync(stage)
-      if (entries.length !== 1 || !fs.statSync(join(stage, entries[0])).isDirectory()) throw new Error('invalid release ZIP root')
-      stage = join(stage, entries[0])
-    }
-    await verifyReleasePackage(stage, version)
-    const retained = new Set(['data', 'instance.json', 'agent-venv', 'VERSION'])
+    const retained = new Set(['.git', '.env', 'data', 'instance.json', 'agent-venv', 'VERSION'])
     for (const name of fs.readdirSync(stage)) {
       if (retained.has(name) || (name === 'crabot.cmd' && existsSync(join(crabotHome, name)))) continue
       const target = join(crabotHome, name)

@@ -439,7 +439,7 @@ start() {
   # 用 process substitution 让 tee 不切走主进程；node 自己当 wait 的目标
   node dist/main.js > >(tee -a "$mm_log") 2>&1 &
   local mm_pid=$!
-  echo "$mm_pid" > "$DATA_DIR/mm.pid"
+  # MM 在共同迁移准备通过后自行写入 PID，避免开发入口提前制造“活实例”。
   trap 'kill -TERM '"$mm_pid"' 2>/dev/null; rm -f "'"$DATA_DIR"'/mm.pid"' INT TERM EXIT
   wait "$mm_pid"
 }

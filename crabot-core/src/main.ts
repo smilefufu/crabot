@@ -11,6 +11,7 @@ import { buildCoreModules } from './core-modules.js'
 import { ensureAgentVenv } from './agent-venv.js'
 import { createOrphanTerminationConfirmer } from './orphan-recovery-prompt.js'
 
+async function main(): Promise<void> {
 // 获取模块路径
 const CRABOT_ROOT = path.resolve(process.cwd(), '..')
 const ADMIN_DIR = path.join(CRABOT_ROOT, 'crabot-admin')
@@ -18,6 +19,29 @@ const AGENT_DIR = path.join(CRABOT_ROOT, 'crabot-agent')
 const PORT_OFF = parseInt(process.env.CRABOT_PORT_OFFSET || '0', 10)
 const DATA_DIR = process.env.DATA_DIR
   || path.join(homedir(), '.crabot', PORT_OFF > 0 ? `data-${PORT_OFF}` : 'data')
+// Hold the same instance operation lock through direct MM startup and ingress opening.
+fs.mkdirSync(DATA_DIR, { recursive: true })
+const locks = require(path.join(CRABOT_ROOT, 'scripts/lib/cli-lock.mjs'))
+const inheritedLock = locks.inheritedCliLock(DATA_DIR)
+const startupLock = inheritedLock ? null : await locks.acquireCliLock(DATA_DIR, 'mm-start')
+process.on('exit', () => locks.releaseCliLock(startupLock))
+if (!inheritedLock) {
+  const { assertStopped } = require(path.join(CRABOT_ROOT, 'scripts/upgrade-lib/scoped-data.mjs'))
+  await assertStopped(DATA_DIR)
+}
+execFileSync(process.execPath, [path.join(CRABOT_ROOT, 'scripts/prepare-shared-requests.mjs'), `--data-dir=${DATA_DIR}`], {
+  stdio: 'inherit', env: { ...process.env, CRABOT_CLI_LOCK_HELD: '1', CRABOT_CLI_LOCK_OWNER: inheritedLock ? process.env.CRABOT_CLI_LOCK_OWNER : String(process.pid) },
+})
+if (!inheritedLock) {
+  // Direct/dev MM owns its PID only after preparation, with no live-PID exemption.
+  fs.writeFileSync(path.join(DATA_DIR, 'mm.pid'), String(process.pid))
+  process.on('exit', () => {
+    try {
+      const file = path.join(DATA_DIR, 'mm.pid')
+      if (fs.readFileSync(file, 'utf8').trim() === String(process.pid)) fs.unlinkSync(file)
+    } catch { /* Startup may have exited before writing a PID. */ }
+  })
+}
 // Agent worker tools 的工作目录（bash / read / write / edit / glob / grep 的 cwd）。
 // 默认 = 用户家目录：agent 一上来就能直接看到用户真实文件（~/code/ 等），而不是
 // Crabot 自身的安装根（既无用又混淆）。WORKSPACE_DIR env 显式设置则覆盖。
@@ -89,12 +113,16 @@ if (PORT_OFFSET !== 0) {
   console.log(`[ModuleManager] Port offset: ${PORT_OFFSET} (MM=${PORT}, Admin RPC=${ADMIN_RPC_PORT}, Admin Web=${ADMIN_WEB_PORT})`)
 }
 
+const { preparedMemoryPython } = require(path.join(CRABOT_ROOT, 'scripts/lib/memory-deps.mjs'))
+const memoryPython = await preparedMemoryPython(MEMORY_DIR)
+
 // 核心模块定义（Admin 和 Agent 是核心层模块，需要预定义）
 const CORE_MODULES = buildCoreModules({
   crabotRoot: CRABOT_ROOT,
   adminDir: ADMIN_DIR,
   agentDir: AGENT_DIR,
   memoryDir: MEMORY_DIR,
+  memoryPython,
   dataDir: DATA_DIR,
   workspaceDir: WORKSPACE_DIR,
   isDev,
@@ -106,8 +134,6 @@ const CORE_MODULES = buildCoreModules({
   newApiToken: process.env.CRABOT_NEW_API_ADMIN_TOKEN || '',
 })
 
-// Prepare before any module can read new request data, including direct dev MM startup.
-execFileSync(process.execPath, [path.join(CRABOT_ROOT, 'scripts/prepare-shared-requests.mjs'), `--data-dir=${DATA_DIR}`], { stdio: 'inherit' })
 
 const manager = new ModuleManager({
   port: PORT,
@@ -142,9 +168,16 @@ process.on('SIGINT', shutdown)
 process.on('SIGTERM', shutdown)
 
 // 启动
-manager.start().catch((error) => {
+manager.start().then(() => locks.releaseCliLock(startupLock)).catch((error) => {
   console.error('Failed to start Module Manager:', error)
   process.exit(1)
 })
 
 console.log(`Module Manager starting on port ${PORT}...`)
+
+}
+
+main().catch(error => {
+  console.error('Module Manager startup preparation failed:', error instanceof Error ? error.message : String(error))
+  process.exitCode = 1
+})

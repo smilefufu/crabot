@@ -8,11 +8,18 @@ Usage: uv run python crabot-memory/upgrade/from_v0_to_v1.py --data-dir=<path>
 """
 import argparse
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from scoped_upgrade import enter, require_context
+
 
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--data-dir", required=True)
-    ap.parse_args()
+    args = ap.parse_args()
+    if enter(Path(args.data_dir), 0, 1) is not None:
+        return
     print("[from_v0_to_v1] no-op: treating legacy data as v1 baseline.")
 
 

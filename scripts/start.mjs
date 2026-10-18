@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-import { prepareSharedRequests } from './upgrade-lib/shared-requests.mjs'
 
 // Crabot Start — 生产模式启动
 // 加载环境变量 → 创建数据目录 → 密码检查 → 启动 Module Manager（前台）
@@ -15,11 +14,11 @@ import { spawn, spawnSync } from 'node:child_process'
 import { homedir } from 'node:os'
 import net from 'node:net'
 import { writePid, clearPid, checkSingleInstance, isPidAlive } from './lib/pid.mjs'
-import { scanModules, applyMigration } from './upgrade-lib/migrate.mjs'
+import { runMigrations } from './upgrade-lib/migrate.mjs'
 import { runScript } from './upgrade-lib/runner.mjs'
 import { hasInstance, resolveCliDataDir } from './lib/instance.mjs'
 import { probeMmHealthy } from './lib/mm-probe.mjs'
-import { acquireCliLock, releaseCliLock } from './lib/cli-lock.mjs'
+import { acquireCliLock, releaseCliLock, inheritedCliLock } from './lib/cli-lock.mjs'
 import scraplingRuntime from './lib/scrapling-runtime.cjs'
 import { runBounded } from './lib/scrapling-prepare.mjs'
 
@@ -165,9 +164,11 @@ if (!existsSync(mmEntry) || !existsSync(orphanRecoveryEntry)) {
 
 // CLI 操作互斥（restart 外层持锁时经 env 跳过）。start 有大量 process.exit 出口，
 // 统一由 exit handler 释放；SIGKILL 残留的死锁由 acquire 侧的陈旧检测接管。
-if (!process.env.CRABOT_CLI_LOCK_HELD) {
+if (!inheritedCliLock(DATA_DIR)) {
   try {
     const cliLockPath = await acquireCliLock(DATA_DIR, 'start')
+    process.env.CRABOT_CLI_LOCK_HELD = '1'
+    process.env.CRABOT_CLI_LOCK_OWNER = String(process.pid)
     process.on('exit', () => releaseCliLock(cliLockPath))
   } catch (error) {
     console.error(`[crabot] ${error.message}`)
@@ -217,30 +218,12 @@ console.log(`[crabot] Tmp-page proxy target: 127.0.0.1:${TMP_PAGE_PORT}`)
 console.log(`[crabot] Starting Module Manager (port ${MM_PORT})...`)
 console.log(`[crabot] Admin Web: http://localhost:${WEB_PORT}`)
 
-// Migration 兜底：start 自动跑缺失的 migration（覆盖 upgrade-time 漏跑场景）
-// 用 applyMigration 包装版（chainUpgrade + writeSchemaVersion 原子，不可能漏写
-// SCHEMA_VERSION）；不做 backup（启动不备份，upgrade.mjs 主路径才备）。
-const pending = scanModules(ROOT, DATA_DIR)
-if (pending.length > 0) {
-  console.log(`[crabot] applying ${pending.length} pending migration(s)...`)
-  for (const m of pending) {
-    console.log(`[crabot]   ${m.moduleId}: ${m.dataVersion ?? 'fresh'} → ${m.codeVersion}`)
-    const result = await applyMigration(
-      resolve(ROOT, m.moduleId),
-      m.dataDir,
-      m.dataVersion,
-      m.codeVersion,
-      runScript,
-    )
-    if (!result.ok) {
-      console.error(`[crabot] migration failed for ${m.moduleId} at ${result.failedAt}`)
-      process.exit(1)
-    }
-  }
-  console.log('[crabot] migrations done')
+// All migrations complete with a verified scoped backup before this startup writes its PID.
+const migration = await runMigrations(ROOT, DATA_DIR, runScript, console, { lockHeld: true })
+if (!migration.ok) {
+  console.error(`[crabot] migration failed for ${migration.failedModule} at ${migration.failedAt}; scoped backup: ${migration.backupPath}`)
+  process.exit(1)
 }
-
-await prepareSharedRequests(ROOT, DATA_DIR)
 
 if (!DAEMON_MODE) {
   // 前台模式：写本进程 PID（stop 时 SIGTERM 给我，我转发给 MM）

@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 
-import './_preflight.mjs'
 
 import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs'
@@ -9,6 +8,7 @@ import { fileURLToPath } from 'node:url'
 import { homedir } from 'node:os'
 import { resolveCliDataDir } from './lib/instance.mjs'
 import { acquireCliLock, releaseCliLock } from './lib/cli-lock.mjs'
+import { preflightRestart } from './upgrade-lib/preflight.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const CRABOT_HOME = resolve(__dirname, '..')
@@ -31,7 +31,7 @@ function node(args) {
     cwd: CRABOT_HOME,
     stdio: 'inherit',
     // 锁由本 restart 外层持有全程；子 stop/start 见此 env 跳过抢锁（防自死锁）
-    env: { ...process.env, CRABOT_CLI_LOCK_HELD: '1' },
+    env: { ...process.env, CRABOT_CLI_LOCK_HELD: '1', CRABOT_CLI_LOCK_OWNER: String(process.pid) },
   })
 }
 
@@ -51,6 +51,7 @@ async function main() {
     cliLockPath = await acquireCliLock(DATA_DIR, 'restart')
     process.on('exit', () => releaseCliLock(cliLockPath))
 
+    await preflightRestart(CRABOT_HOME, DATA_DIR)
     console.log('[restart] stop')
     node(['stop'])
     console.log('[restart] start -d')

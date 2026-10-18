@@ -71,3 +71,5 @@ crabot-admin/test-data/
 scrapling-runtime.json
 scrapling-runtime.json.*.tmp
 .computer-use-runtime/
+
+/crabot-memory/prepared-environment.json

@@ -57,3 +57,13 @@ export function releaseCliLock(lockPath) {
   if (!lockPath) return
   try { unlinkSync(lockPath) } catch { /* 已被接管者移走：无需处理 */ }
 }
+
+/** An inherited flag alone is not a lock: bind it to the live parent's actual lock record. */
+export function inheritedCliLock(dataDir, env = process.env) {
+  const pid = Number(env.CRABOT_CLI_LOCK_OWNER)
+  if (env.CRABOT_CLI_LOCK_HELD !== '1' || !Number.isSafeInteger(pid) || pid < 1) return false
+  try {
+    const holder = JSON.parse(readFileSync(resolve(dataDir, 'cli.lock'), 'utf8'))
+    return holder.pid === pid && isPidAlive(pid)
+  } catch { return false }
+}

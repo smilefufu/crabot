@@ -104,7 +104,7 @@ export async function runSourceUpgrade(crabotHome, logger) {
 
   const memoryDir = join(crabotHome, PY_MODULE)
   if (existsSync(memoryDir)) {
-    await prepareMemoryDependencies(memoryDir, { dev: true, logger, uv: findUv() })
+    await prepareMemoryDependencies(memoryDir, { dev: true, logger, uv: findUv(), relocatable: true })
   }
   // 使用磁盘上的新准备入口，避免 UI git pull 后仍复用旧模块函数。
   await runCmd(process.execPath, [join(crabotHome, 'scripts', 'prepare-scrapling.mjs')], crabotHome, logger)
@@ -114,6 +114,6 @@ export async function runSourceUpgrade(crabotHome, logger) {
 export async function syncPythonDeps(crabotHome, logger) {
   const memoryDir = join(crabotHome, PY_MODULE)
   if (existsSync(memoryDir)) {
-    await prepareMemoryDependencies(memoryDir, { logger, uv: findUv() })
+    await prepareMemoryDependencies(memoryDir, { logger, uv: findUv(), relocatable: true })
   }
 }
