@@ -87,6 +87,7 @@ it('active instance and competing operation cannot enter conversion', async () =
 it('all supported Memory chains declare cross-module cleanup, SQLite companions and deterministic rename targets', async () => {
   const data = path.join(root, 'data/memory')
   await fs.mkdir(data)
+  await fs.mkdir(path.join(data, 'lancedb'))
   await fs.mkdir(path.join(root, 'data/admin/module-configs'), { recursive: true })
   await fs.writeFile(path.join(root, 'data/admin/module-configs/memory-one.json'), '{}')
   await fs.writeFile(path.join(root, 'data/admin/module-configs/agent-one.json'), '{}')
@@ -123,5 +124,18 @@ it('live recorded modules block migration even when all legacy PID files are mis
   await fs.writeFile(path.join(root, 'data/module-runtime-registry/records/fixture.json'), JSON.stringify({ schema_version: 1, root_pid: process.pid, module_port: 1 }))
   const convert = vi.fn()
   await expect(executeMigration(await description(), convert)).rejects.toThrow('recorded module is still running')
+  expect(convert).not.toHaveBeenCalled()
+})
+
+it('recovery retains original declared scope after conversion creates files that change discovery', async () => {
+  await adapter()
+  await fs.writeFile(path.join(moduleDir, 'upgrade/scope.mjs'), `import fs from 'node:fs'; import path from 'node:path'; export const migrationScope = async ({dataRoot}) => ({ reads: [], writes: fs.existsSync(path.join(dataRoot,'test/new')) ? ['test/new','test/changed-discovery'] : ['test/new'] })`)
+  const first = await description()
+  await executeMigration(first, async () => { await fs.writeFile(path.join(root, 'data/test/new'), 'created'); return { exitCode: 0 } }, { advanceVersion: false })
+  const recovered = await description()
+  expect(recovered.scope).toEqual(first.scope)
+  const convert = vi.fn()
+  const { runMigrations } = await import('../migrate.mjs')
+  expect((await runMigrations(path.join(root, 'product'), path.join(root, 'data'), convert, { info() {} })).ok).toBe(true)
   expect(convert).not.toHaveBeenCalled()
 })

@@ -103,8 +103,13 @@ def migrate(data_dir: Path, *, dry_run: bool = False) -> dict:
     backup = Path(os.environ["CRABOT_MIGRATION_PLAN"]).parent / "backup"
     for file, text in changes:
         temp = file.with_suffix(".upgrade.tmp")
-        temp.write_text(text, encoding="utf-8")
-        temp.replace(file)
+        output = temp.open("x", encoding="utf-8")
+        try:
+            with output:
+                output.write(text)
+            temp.replace(file)
+        finally:
+            temp.unlink(missing_ok=True)
     db = data_dir / "long_term_v2.db"
     if db.exists():
         with sqlite3.connect(db) as conn:

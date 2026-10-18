@@ -11,6 +11,8 @@ export function versionNumber(value) {
 }
 export async function describeMigration(moduleDir, dataDir, fromVersion, toVersion) {
   const from = versionNumber(fromVersion), to = versionNumber(toVersion)
+  fromVersion = from === 0 ? null : `v${from}`
+  toVersion = `v${to}`
   if (to <= from) throw new Error('Migration must advance the data version')
   const moduleId = path.basename(moduleDir)
   if (!/^crabot-[a-z0-9-]+$/.test(moduleId) || path.basename(dataDir) !== moduleId.slice(7)) throw new Error('Migration module/data ownership mismatch')
@@ -18,7 +20,9 @@ export async function describeMigration(moduleDir, dataDir, fromVersion, toVersi
   const scopeFile = path.join(moduleDir, 'upgrade/scope.mjs')
   if (!await optional(scopeFile)) throw new Error(`Missing migration scope adapter: ${moduleId}`)
   const { migrationScope } = await import(pathToFileURL(scopeFile).href)
-  const scope = await migrationScope({ dataRoot, from, to, transactionId: id })
+  const existing = await optional(path.join(dataRoot, '.upgrade-migrations', id, 'plan.json'))
+  const saved = existing ? JSON.parse(existing).description : null
+  const scope = saved?.scope ?? await migrationScope({ dataRoot, from, to, transactionId: id })
   if (!scope || !Array.isArray(scope.reads) || !Array.isArray(scope.writes)) throw new Error('Invalid migration scope adapter')
   scope.writes = [...new Set([...scope.writes.map(name => name.split(/[\\/]/).join(path.sep)), path.join(moduleId.slice(7), 'SCHEMA_VERSION')])].sort()
   scope.reads = [...new Set(scope.reads.map(name => name.split(/[\\/]/).join(path.sep)))].filter(name => !scope.writes.includes(name)).sort()
@@ -31,7 +35,9 @@ export async function describeMigration(moduleDir, dataDir, fromVersion, toVersi
     const script = path.join(moduleDir, 'upgrade', matches[0])
     scripts.push({ path: script, sha256: await fileDigest(script) })
   }
-  return { schema_version: 1, id, module_id: moduleId, data_root: dataRoot, from: fromVersion, to: toVersion, scope, scripts, adapter_sha256: await fileDigest(scopeFile) }
+  const description = { schema_version: 1, id, module_id: moduleId, data_root: dataRoot, from: fromVersion, to: toVersion, scope, scripts, adapter_sha256: await fileDigest(scopeFile) }
+  if (saved && JSON.stringify(saved) !== JSON.stringify(description)) throw new Error('Migration code or instance changed; preserve original recovery scope')
+  return description
 }
 
 export async function assertNoInterruptedMigrations(dataRoot) {

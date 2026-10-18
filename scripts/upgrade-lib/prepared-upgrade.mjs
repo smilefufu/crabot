@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { execFile } from 'node:child_process'
+import { createRequire } from 'node:module'
 import { promisify } from 'node:util'
 import { randomUUID } from 'node:crypto'
 import { fileDigest, optional, writeAtomic, hash, assertStopped } from './scoped-data.mjs'
@@ -33,6 +34,33 @@ async function copySource(home, stage, revision) {
   }
   if (await sourceIdentity(home) !== revision) throw new Error('Source revision changed during preparation')
 }
+/** Reuse only pinned product resources that the target's own checker accepts. */
+async function seedRuntimes(home, stage, logger) {
+  const require = createRequire(path.join(stage, 'package.json'))
+  const scrapling = require(path.join(stage, 'scripts/lib/scrapling-runtime.cjs'))
+  let cachedScrapling
+  try {
+    const pointer = JSON.parse(await fs.readFile(path.join(home, 'scrapling-runtime.json'), 'utf8'))
+    if (typeof pointer.directory !== 'string' || !pointer.directory.startsWith('.scrapling-runtime-') || path.basename(pointer.directory) !== pointer.directory) throw new Error('Invalid cached resource path')
+    cachedScrapling = { name: pointer.directory, ...scrapling.validateDirectory(stage, path.join(home, pointer.directory), { full: true }) }
+  } catch { /* Missing or another generation: the existing preparer downloads its pinned resources. */ }
+  if (cachedScrapling) {
+    await fs.cp(cachedScrapling.directory, path.join(stage, cachedScrapling.name), { recursive: true, verbatimSymlinks: true })
+    await fs.writeFile(path.join(stage, 'scrapling-runtime.json'), JSON.stringify({ directory: cachedScrapling.name }))
+    scrapling.loadRuntime(stage, { full: true })
+    logger.info('Reused verified Scrapling runtime for target generation')
+  }
+  const computer = require(path.join(stage, 'scripts/lib/computer-use-runtime.cjs'))
+  let cachedComputer
+  try { cachedComputer = computer.loadRuntime(home, { full: true }) } catch { /* Existing preparer owns missing generations. */ }
+  if (cachedComputer) {
+    const relative = path.relative(home, cachedComputer.directory)
+    if (!relative.startsWith(`.computer-use-runtime${path.sep}`)) throw new Error('Invalid cached Cua resource path')
+    await fs.cp(cachedComputer.directory, path.join(stage, relative), { recursive: true, verbatimSymlinks: true })
+    computer.loadRuntime(stage, { full: true })
+    logger.info('Reused verified Cua runtime for target generation')
+  }
+}
 async function inventory(root, names) {
   const entries = []
   async function visit(name) {
@@ -48,8 +76,8 @@ async function inventory(root, names) {
 async function artifactNames(stage, mode, home) {
   if (mode === 'release') {
     const names = (await fs.readdir(stage)).filter(name => !protectedNames.has(name))
-    if (await fs.lstat(path.join(home, 'crabot.cmd')).then(() => true, () => false)) return names.filter(name => name !== 'crabot.cmd')
-    return names
+    if (await fs.lstat(path.join(home, 'crabot.cmd')).then(() => true, () => false)) return expandRuntimePool(stage, names.filter(name => name !== 'crabot.cmd'))
+    return expandRuntimePool(stage, names)
   }
   const candidates = ['dist', 'node_modules', 'scripts/lib/node_modules', '.computer-use-runtime', 'scrapling-runtime.json']
   for (const entry of await fs.readdir(stage, { withFileTypes: true })) {
@@ -62,7 +90,14 @@ async function artifactNames(stage, mode, home) {
   candidates.push('crabot-admin/web/node_modules')
   const existing = []
   for (const name of candidates) if (await fs.lstat(path.join(stage, name)).then(() => true, () => false)) existing.push(name)
-  return existing
+  return expandRuntimePool(stage, existing)
+}
+async function expandRuntimePool(stage, names) {
+  const result = names.filter(name => name !== '.computer-use-runtime')
+  if (names.includes('.computer-use-runtime')) {
+    for (const name of await fs.readdir(path.join(stage, '.computer-use-runtime'))) result.push(path.join('.computer-use-runtime', name))
+  }
+  return result
 }
 async function validateEnvironment(stage) {
   const python = await preparedMemoryPython(path.join(stage, 'crabot-memory'))
@@ -98,7 +133,11 @@ export async function prepareUpgrade(home, dataRoot, { mode, version, logger = c
     stage = path.join(parent, `stage-${randomUUID()}`)
     await fs.mkdir(stage, { mode: 0o700 })
     const started = performance.now()
-    if (mode === 'source') { await copySource(home, stage, target); await build(stage, logger) }
+    if (mode === 'source') {
+      await copySource(home, stage, target)
+      if (build === runSourceUpgrade) await seedRuntimes(home, stage, logger)
+      await build(stage, logger)
+    }
     else {
       artifact = await download({ ...getReleaseUrls(target), logger })
       stage = await unpack({ ...artifact, stage, logger })

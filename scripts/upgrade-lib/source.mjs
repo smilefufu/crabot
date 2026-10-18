@@ -63,7 +63,7 @@ function findUv() {
 // （否则可能用错 major 版本，把 lockfile v9.0 降级成 v5.4）
 async function installAndBuild(moduleDir, logger, source) {
   // --prefer-offline：lock 未变时跳过网络 verify，毫秒级返回
-  await runCmd('corepack', ['pnpm', 'install', '--prefer-offline'], moduleDir, logger, source)
+  await runCmd('corepack', ['pnpm', 'install', '--frozen-lockfile', '--prefer-offline'], moduleDir, logger, source)
   await runCmd('corepack', ['pnpm', 'run', 'build'], moduleDir, logger, source)
 }
 
@@ -74,7 +74,7 @@ export async function runSourceUpgrade(crabotHome, logger) {
   // Program Files）写 pnpm/yarn 系统 shim，需要管理员权限。我们已经显式用
   // `corepack pnpm ...` 调用，corepack 会按 package.json 的 packageManager
   // 字段按需下载到用户 cache（%LOCALAPPDATA%\node\corepack）执行，不需要 enable。
-  await runCmd('corepack', ['pnpm', 'install', '--prefer-offline'], crabotHome, logger, source)
+  await runCmd('corepack', ['pnpm', 'install', '--frozen-lockfile', '--prefer-offline'], crabotHome, logger, source)
 
   const sharedDir = join(crabotHome, SHARED_MODULE)
   if (existsSync(sharedDir)) {
@@ -99,7 +99,7 @@ export async function runSourceUpgrade(crabotHome, logger) {
   // 没有 build 步骤，只装 prod deps。
   const scriptsLibDir = join(crabotHome, 'scripts', 'lib')
   if (existsSync(join(scriptsLibDir, 'package.json'))) {
-    await runCmd('corepack', ['pnpm', 'install', '--prod', '--prefer-offline'], scriptsLibDir, logger, source)
+    await runCmd('corepack', ['pnpm', 'install', '--prod', '--frozen-lockfile', '--prefer-offline'], scriptsLibDir, logger, source)
   }
 
   const memoryDir = join(crabotHome, PY_MODULE)

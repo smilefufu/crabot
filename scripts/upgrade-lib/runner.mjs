@@ -37,8 +37,8 @@ export async function runScript(scriptPath, dataDir, context = null) {
   }
 
   return new Promise((resolve, reject) => {
-    const isWin = process.platform === 'win32'
-    const proc = isWin
+    const usesCommandShim = process.platform === 'win32' && cmd === 'npx'
+    const proc = usesCommandShim
       ? spawn(`${quoteWin(cmd)} ${args.map(quoteWin).join(' ')}`, [], { cwd, env, stdio: ['ignore', 'pipe', 'pipe'], shell: true })
       : spawn(cmd, args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] })
     let stdout = ''

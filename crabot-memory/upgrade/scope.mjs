@@ -26,7 +26,12 @@ export async function migrationScope({ dataRoot, from, to, transactionId }) {
   for (let n = from; n < to; n++) {
     if (n === 1) writes.push('memory/lancedb', 'memory/long_term', ...database('memory/long_term_v2.db'))
     if (n === 2) {
-      writes.push('memory/lancedb', retired, ...database('memory/long_term_v2.db'), 'memory/upgrade-v2-to-v3.log', 'admin/global-config.json')
+      const lancedb = await fs.lstat(path.join(dataRoot, 'memory/lancedb')).catch(error => { if (error.code === 'ENOENT') return null; throw error })
+      if (lancedb) {
+        if (await fs.lstat(path.join(dataRoot, retired)).then(() => true, () => false)) throw new Error('Declared retired LanceDB target already exists')
+        writes.push('memory/lancedb', retired)
+      }
+      writes.push(...database('memory/long_term_v2.db'), 'memory/upgrade-v2-to-v3.log', 'admin/global-config.json')
       for (const entry of await children(dataRoot, 'admin/module-configs')) {
         if (entry.name.startsWith('memory-') && entry.name.endsWith('.json')) writes.push(path.join('admin/module-configs', entry.name))
       }
