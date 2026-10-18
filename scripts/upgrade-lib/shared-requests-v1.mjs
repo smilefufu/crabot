@@ -111,8 +111,10 @@ export async function validateBindings(crabotHome, backup, entries = null) {
         for (const request of data.requests) {
           const original = await requests.get(key, request.request_id)
           if (!original) throw new Error('Missing original request')
-          if (originalRequests.has(request.request_id)) throw new Error('Duplicate original request')
-          originalRequests.set(request.request_id, original)
+          if (entries) {
+            if (originalRequests.has(request.request_id)) throw new Error('Duplicate original request')
+            originalRequests.set(request.request_id, original)
+          }
         }
       }
     }
