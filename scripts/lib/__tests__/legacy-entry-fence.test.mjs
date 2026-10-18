@@ -109,3 +109,13 @@ test('an original entry is never replaced before its recovery record is durable'
   await assert.rejects(fs.stat(f.journal), { code: 'ENOENT' })
   assert.equal((await fenceLegacyEntries(f.installation)).phase, 'fenced')
 })
+
+
+test('strict umask does not change original entry permissions after a cancelled takeover', { skip: process.platform === 'win32' }, async t => {
+  const f = await fixture(t), entry = path.join(f.root, 'cli.mjs'), original = (await fs.stat(entry)).mode & 0o777
+  const mask = process.umask(0o077)
+  try { await fenceLegacyEntries(f.installation); await restoreLegacyEntries(f.root) }
+  finally { process.umask(mask) }
+  assert.equal((await fs.stat(entry)).mode & 0o777, original)
+  await restored(f)
+})

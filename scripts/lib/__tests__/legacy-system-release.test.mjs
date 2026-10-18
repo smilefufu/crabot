@@ -42,3 +42,19 @@ test('system recognition preserves root ownership policy and refuses another nat
   await assert.rejects(f.discover({ platform: 'darwin' }), /仅支持Linux/)
   await assert.rejects(f.discover({ checkRoot: () => { throw new Error('untrusted installation ancestor') } }), /untrusted installation ancestor/)
 })
+
+
+test('shared entry ownership is rejected before reading employee-controlled critical bytes', options, async t => {
+  const f = await fixture(t), file = path.join(f.root, 'scripts/start.mjs'), lstat = fs.lstat, read = fs.readFile
+  t.mock.method(fs, 'lstat', async target => {
+    const stat = await lstat(target)
+    return target === file ? Object.assign(Object.create(stat), { uid: stat.uid + 1 }) : stat
+  })
+  let reads = 0
+  t.mock.method(fs, 'readFile', (target, ...args) => {
+    if (target === file) { reads++; assert.fail('must reject an employee-owned critical path before byte inspection') }
+    return read(target, ...args)
+  })
+  await assert.rejects(f.discover(), /管理员只读/)
+  assert.equal(reads, 0)
+})

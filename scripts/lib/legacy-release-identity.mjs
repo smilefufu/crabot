@@ -11,10 +11,11 @@ async function regular(root, relative) {
   if (!stat.isFile() || stat.size > 1024 * 1024 || realpathSync(file) !== file) fail('旧安装入口被重定向或无法识别，未作修改。')
   return fs.readFile(file)
 }
-export async function verifyLegacyReleaseEntries(root, { platform = process.platform } = {}) {
+export async function verifyLegacyReleaseEntries(root, { platform = process.platform, beforeRead } = {}) {
   const version = (await regular(root, 'VERSION')).toString('utf8').trim()
   if (!catalog.versions.includes(version)) fail('此历史版本尚未列入自动接管范围，请保留原安装。')
   const files = legacyReleaseFiles(catalog, version, platform)
+  await beforeRead?.({ version, files })
   for (const [file, expected] of Object.entries(files)) {
     if (createHash('sha256').update(await regular(root, file)).digest('hex') !== expected) fail('旧安装的关键入口已修改，不能按标准发行自动接管。')
   }

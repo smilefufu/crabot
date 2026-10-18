@@ -3,28 +3,14 @@
 import { promises as fs, realpathSync } from 'node:fs'
 import path from 'node:path'
 import { legacyReleaseFiles } from './legacy-release-files.mjs'
-import { createHash, randomUUID } from 'node:crypto'
+import { randomUUID } from 'node:crypto'
 import identity from './process-identity.cjs'
 import management from './desktop-management.cjs'
 import { acquireCliLock, releaseCliLock } from './cli-lock.mjs'
 import { discoverLegacyUserInstall } from './legacy-desktop.mjs'
+import { legacyEntryFiles as entries, hashEntry as hash, failEntryFence as fail, entryFenceBytes as fence, readEntry as regular, replaceEntry as replace, syncEntryDirectory } from './legacy-entry-files.mjs'
 
 const catalog = JSON.parse(await fs.readFile(new URL('../desktop/legacy-releases.json', import.meta.url), 'utf8'))
-const entries = ['cli.mjs', 'crabot.cmd', 'scripts/start.mjs', 'scripts/supervisor.mjs', 'crabot-core/dist/main.js']
-const hash = bytes => createHash('sha256').update(bytes).digest('hex')
-const fail = () => { throw Object.assign(new Error('旧入口接管状态无法安全继续；原记录已保留，不覆盖未知入口或放行旧核心。'), { code: 'CRABOT_LEGACY_ENTRY_FENCE' }) }
-const fence = file => Buffer.from(file.endsWith('.cmd')
-  ? '@echo off\r\necho Crabot takeover is pending. Open the desktop app to recover. 1>&2\r\nexit /b 1\r\n'
-  : '#!/usr/bin/env node\nthrow Object.assign(new Error("Crabot takeover is pending. Open the desktop app to recover."), { code: "CRABOT_LEGACY_ENTRY_FENCE" })\n')
-async function sync(directory) {
-  if (process.platform === 'win32') return
-  const handle = await fs.open(directory, 'r'); try { await handle.sync() } finally { await handle.close() }
-}
-async function regular(file, limit = 1024 * 1024) {
-  const stat = await fs.lstat(file)
-  if (!stat.isFile() || stat.size > limit || realpathSync(file) !== file) fail()
-  return { bytes: await fs.readFile(file), mode: stat.mode & 0o777 }
-}
 async function control(root, create = false) {
   root = realpathSync(root)
   if (!identity.isOwnedDirectory(root)) fail()
@@ -33,18 +19,11 @@ async function control(root, create = false) {
     if (error.code !== 'ENOENT' || !create) throw error
     management.ensurePrivateDataRoot(directory)
   }
+  if (create) await syncEntryDirectory(root)
   const stat = await fs.lstat(directory)
   if (!identity.isOwnedDirectory(directory) || realpathSync(directory) !== directory
     || (process.platform === 'win32' ? !identity.isPrivateDirectory(directory) : (stat.mode & 0o777) !== 0o700)) fail()
   return directory
-}
-async function replace(file, bytes, mode) {
-  const temporary = file + '.takeover-' + randomUUID()
-  try {
-    if (process.platform === 'win32') { identity.writePrivateFile(temporary, ''); await fs.writeFile(temporary, bytes, { flush: true }) }
-    else await fs.writeFile(temporary, bytes, { flag: 'wx', mode, flush: true })
-    await fs.rename(temporary, file); await sync(path.dirname(file))
-  } finally { await fs.rm(temporary, { force: true }) }
 }
 async function write(directory, record) {
   await replace(path.join(directory, 'transaction.json'), Buffer.from(JSON.stringify(record) + '\n'), 0o600)
