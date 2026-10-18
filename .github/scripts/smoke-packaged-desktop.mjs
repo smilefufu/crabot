@@ -89,7 +89,7 @@ function launch() {
 try {
   let gui = launch(); await gui.phase('ready')
   const first = await inspectInstance()
-  assert.equal(first.state, 'running'); assert.equal(first.record.install_root, await fs.realpath(core))
+  assert.equal(first.state, 'running'); assert.equal(await fs.realpath(first.record.install_root), await fs.realpath(core))
   assert.equal(JSON.parse(await cli('status', '--json')).running, true)
   const cliHome = path.join(temporary, '命令 用户')
   const registrationEnv = { ...env, HOME: cliHome, SHELL: process.platform === 'darwin' ? '/bin/zsh' : '/bin/bash',
