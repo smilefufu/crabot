@@ -322,8 +322,18 @@ try {
 } catch (error) {
   for (const user of users) {
     if (!user.uid) continue
-    const diagnostic = await run('/usr/bin/journalctl', ['--no-pager', '-n', '35', '_UID=' + user.uid, '--user-unit=crabot.service']).catch(() => null)
+    const diagnostic = await run('/usr/bin/journalctl', ['--no-pager', '-n', '50', '_UID=' + user.uid, '_SYSTEMD_USER_UNIT=crabot.service']).catch(() => null)
     if (diagnostic) console.error(diagnostic.stdout)
+    if (!loaded || !user.data_dir) continue
+    // These disposable CI users have no provider or customer data. Read only a
+    // fixed, bounded set of startup logs after the same real UID/group drop.
+    const probe = `const fs=require('fs'),p=require('path');for(const name of ['mm.stdout.log','mm.stderr.log','admin-web.log','crabot-agent.log','memory-default.log','system-maintenance.log']){const file=p.join(process.argv[1],'logs',name);let fd;try{fd=fs.openSync(file,fs.constants.O_RDONLY|fs.constants.O_NOFOLLOW);const s=fs.fstatSync(fd);if(!s.isFile()||s.uid!==process.getuid()||s.nlink!==1)continue;const bytes=Buffer.alloc(Math.min(s.size,65536));fs.readSync(fd,bytes,0,bytes.length,s.size-bytes.length);console.log('CRABOT_CI_STARTUP_LOG '+name+'\\n'+bytes.toString('utf8').split('\\n').slice(-70).join('\\n'))}catch(e){console.log('CRABOT_CI_STARTUP_LOG '+name+' '+e.code)}finally{if(fd!==undefined)fs.closeSync(fd)}}`
+    const startup = await run('/usr/bin/setpriv', ['--reuid=' + user.uid, '--regid=' + user.gid, '--init-groups', '--',
+      path.join(loaded.core, '.product-runtime/node/bin/node'), '-e', probe, user.data_dir],
+      { env: { PATH: '/usr/bin:/bin', HOME: user.home, USER: user.user, LOGNAME: user.user } }).catch(() => null)
+    if (startup) console.error(startup.stdout)
+    const observed = await state(user).catch(error => ({ error: error.code }))
+    console.error('CRABOT_CI_STARTUP_STATE ' + JSON.stringify({ user: user.user, ...observed }))
   }
   throw error
 } finally {
