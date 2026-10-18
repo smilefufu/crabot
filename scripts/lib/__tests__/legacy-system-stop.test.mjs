@@ -27,10 +27,12 @@ async function fixture(t, mode) {
   await fence.fence(release, operation)
   // A controlled HTTP server and its real parent; only argv is substituted.
   // This is neither root ownership evidence nor a business MM/systemd process.
-  const server = `const http=require('node:http'),fs=require('node:fs'),path=require('node:path');const[root,data,mode,audit]=process.argv.slice(1);const server=http.createServer(async(req,res)=>{let raw='';for await(const bytes of req)raw+=bytes;const body=JSON.parse(raw);fs.appendFileSync(audit,req.url+'\\n');if(req.url==='/get_module_definition')res.end(JSON.stringify({id:body.id,success:true,data:{definition:{module_id:'crabot-agent',cwd:path.join(root,'crabot-agent'),env:{DATA_DIR:data,CRABOT_AGENT_DATA_DIR:path.join(data,'agent'),CRABOT_PORT_OFFSET:String(server.address().port-19000)}}}}));else if(req.url==='/shutdown'){if(mode==='drop')res.destroy();else res.end(JSON.stringify({id:body.id,success:true,data:{}}));if(mode!=='hold')setTimeout(()=>process.exit(0),30)}});let port=19100;server.on('error',error=>{if(error.code!=='EADDRINUSE'||port>=28900)throw error;port+=100;server.listen(port,'127.0.0.1')});server.once('listening',()=>process.send({port:server.address().port,pid:process.pid}));server.listen(port,'127.0.0.1')`
+  const server = `const http=require('node:http'),fs=require('node:fs'),path=require('node:path'),{spawn}=require('node:child_process');const[root,data,mode,audit]=process.argv.slice(1);let child;if(mode==='orphan'){child=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{detached:true,stdio:'ignore'});child.unref()}const server=http.createServer(async(req,res)=>{let raw='';for await(const bytes of req)raw+=bytes;const body=JSON.parse(raw);fs.appendFileSync(audit,req.url+'\\n');if(req.url==='/get_module_definition')res.end(JSON.stringify({id:body.id,success:true,data:{definition:{module_id:'crabot-agent',cwd:path.join(root,'crabot-agent'),env:{DATA_DIR:data,CRABOT_AGENT_DATA_DIR:path.join(data,'agent'),CRABOT_PORT_OFFSET:String(server.address().port-19000)}}}}));else if(req.url==='/shutdown'){if(mode==='drop')res.destroy();else res.end(JSON.stringify({id:body.id,success:true,data:{}}));if(mode!=='hold')setTimeout(()=>process.exit(0),30)}});let port=19100;server.on('error',error=>{if(error.code!=='EADDRINUSE'||port>=28900)throw error;port+=100;server.listen(port,'127.0.0.1')});server.once('listening',()=>process.send({port:server.address().port,pid:process.pid,child:child?.pid}));server.listen(port,'127.0.0.1')`
   const controllerCode = `const{spawn}=require('node:child_process');const child=spawn(process.execPath,['-e',${JSON.stringify(server)},...process.argv.slice(1)],{stdio:['ignore','ignore','inherit','ipc']});child.on('message',message=>process.send(message));child.on('exit',code=>process.exit(code??1));process.on('message',()=>child.kill('SIGKILL'))`
   const controller = spawn(process.execPath, ['-e', controllerCode, root, data, mode, audit], { stdio: ['ignore', 'ignore', 'inherit', 'ipc'] })
+  let orphan
   t.after(async () => {
+    if (orphan && identity.sameProcess(orphan, identity.inspectProcess(orphan.pid))) process.kill(orphan.pid, 'SIGKILL')
     if (controller.exitCode === null && controller.signalCode === null) {
       const exit = once(controller, 'exit', { signal: AbortSignal.timeout(10_000) })
       if (controller.connected) controller.send('fixture-cleanup')
@@ -39,9 +41,10 @@ async function fixture(t, mode) {
     await fs.rm(parent, { recursive: true, force: true })
   })
   const [ready] = await once(controller, 'message', { signal: AbortSignal.timeout(10_000) })
+  if (ready.child) orphan = identity.inspectProcess(ready.child)
   await fs.writeFile(path.join(data, 'mm.pid'), String(controller.pid))
   const inspectArgs = identity.inspectProcessArguments
-  t.mock.method(identity, 'listProcessIds', () => [controller.pid, ready.pid])
+  t.mock.method(identity, 'listProcessIds', () => [controller.pid, ready.pid, ...(orphan ? [orphan.pid] : [])])
   t.mock.method(identity, 'inspectProcessArguments', pid => pid === controller.pid ? [process.execPath, path.join(root, 'scripts/supervisor.mjs')]
     : pid === ready.pid ? [process.execPath, path.join(root, 'crabot-core/dist/main.js')] : inspectArgs(pid))
   const context = { release, port_offset_hint: ready.port - 19000 }
@@ -55,7 +58,7 @@ async function fixture(t, mode) {
   const expected = await discoverLegacySystemDeployment(context, runtimeOptions)
   const requests = async () => (await fs.readFile(audit, 'utf8')).trim().split('\n')
   const stop = extra => stopFencedLegacySystemInstance(context, { expected, timeoutMs: 5000, runtimeOptions, ...extra })
-  return { root, data, controller, expected, observation, stop, requests }
+  return { root, data, controller, expected, observation, stop, requests, orphan }
 }
 
 for (const mode of ['ack', 'drop']) test('system legacy stop sends shutdown once and proves the owned original tree exited: ' + mode, options, async t => {
@@ -81,4 +84,14 @@ for (const changed of ['manifest', 'generation', 'code', 'invalid-timeout']) tes
   await assert.rejects(f.stop(changed === 'invalid-timeout' ? { timeoutMs: 0 } : undefined))
   assert.equal((await f.requests()).includes('/shutdown'), false)
   assert.equal(f.controller.exitCode, null)
+})
+
+
+test('a real captured child surviving MM and controller exits keeps legacy stop unknown, without killing or replay', options, async t => {
+  const f = await fixture(t, 'orphan')
+  assert.ok(f.orphan); assert.equal(f.orphan.parent, f.expected.mm.pid)
+  await assert.rejects(f.stop({ timeoutMs: 150 }), { code: 'CRABOT_LEGACY_STOP_UNKNOWN' })
+  assert.equal(identity.sameProcess(f.orphan, identity.inspectProcess(f.orphan.pid)), true)
+  assert.equal((await f.requests()).filter(value => value === '/shutdown').length, 1)
+  assert.equal(await fs.readFile(path.join(f.data, 'preserved'), 'utf8'), 'same employee data')
 })
