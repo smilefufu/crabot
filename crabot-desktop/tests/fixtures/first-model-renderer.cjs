@@ -3,11 +3,14 @@
 module.exports = async function firstModel(window, endpoint) {
   if (!/^http:\/\/127\.0\.0\.1:[0-9]+\/v1$/.test(endpoint)) throw new Error('First-model fixture requires loopback')
   const create = async function (endpoint) {
-    const config = await fetch('/api/model-config/global').then(response => { if (!response.ok) throw Error('Initial model config unavailable'); return response.json() })
+    const state = await window.crabotDesktop.getState()
+    if (state.phase !== 'ready') throw Error('Desktop session unavailable')
+    const api = relative => new URL(relative, state.admin_url).href
+    const config = await fetch(api('/api/model-config/global')).then(response => { if (!response.ok) throw Error('Initial model config unavailable'); return response.json() })
     if (config.config.default_llm_provider_id || config.config.default_llm_model_id) throw Error('First-run fixture is already configured')
-    const response = await fetch('/api/model-providers', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+    const response = await fetch(api('/api/model-providers'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
       name: 'Isolated desktop first model', type: 'manual', format: 'openai', endpoint, api_key: 'isolated-first-model-fixture',
-      models: [{ model_id: 'desktop-first-model', display_name: 'Desktop first model', type: 'llm', context_window: 32000 }],
+      models: [{ model_id: 'desktop-first-model', display_name: 'Desktop first model', type: 'llm', context_window: 128000 }],
     }) })
     if (response.status !== 201) throw Error('First model provider was not created')
     const provider = await response.json()
@@ -16,6 +19,9 @@ module.exports = async function firstModel(window, endpoint) {
   const providerId = await window.webContents.executeJavaScript('(' + create.toString() + ')(' + JSON.stringify(endpoint) + ')')
   await new Promise(resolve => { window.webContents.once('did-finish-load', resolve); window.webContents.reload() })
   const converse = async function (providerId) {
+    const state = await window.crabotDesktop.getState()
+    if (state.phase !== 'ready') throw Error('Desktop session unavailable')
+    const api = relative => new URL(relative, state.admin_url).href
     const wait = async (description, read) => {
       const deadline = Date.now() + 90_000
       while (Date.now() < deadline) { const value = await read(); if (value) return value; await new Promise(resolve => setTimeout(resolve, 100)) }
@@ -32,12 +38,12 @@ module.exports = async function firstModel(window, endpoint) {
     const reply = '桌面首次对话链路已连通。'
     await wait('visible delivered reply', () => [...document.querySelectorAll('[data-msg-role="assistant"]')].some(element => element.textContent.includes(reply)))
     await wait('durable delivery and input acknowledgement', async () => {
-      const history = await fetch('/api/chat/messages?limit=20').then(response => { if (!response.ok) throw Error('History unavailable'); return response.json() })
+      const history = await fetch(api('/api/chat/messages?limit=20')).then(response => { if (!response.ok) throw Error('History unavailable'); return response.json() })
       const user = history.messages.find(message => message.role === 'user' && message.content.text === 'CI首次对话\n请在当前桌面会话回复预定的测试内容。')
       const assistant = history.messages.find(message => message.role === 'assistant' && message.content.text === reply)
       return user?.request_id && user.acknowledged_at && assistant?.delivery_id
     })
-    const stored = await fetch('/api/model-config/global').then(response => response.json())
+    const stored = await fetch(api('/api/model-config/global')).then(response => response.json())
     if (stored.config.default_llm_provider_id !== providerId || stored.config.default_llm_model_id !== 'desktop-first-model') throw Error('Default reference changed')
     if (localStorage.getItem('crabot_admin_token')) throw Error('Renderer persisted a desktop credential')
     return { provider_created_via_http: true, default_selected_via_ui: true, chat_submitted_via_ui: true, visible_reply: true,
