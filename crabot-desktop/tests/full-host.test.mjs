@@ -12,6 +12,7 @@ import { createServer } from 'node:net'
 import controlReader from './full-host-transport.cjs'
 import { startFirstModelProvider } from './fixtures/first-model-provider.mjs'
 import { observeDesktopResources } from '../../.github/scripts/desktop-resources.mjs'
+import { startDesktopDiskObservation } from '../../.github/scripts/desktop-disk.mjs'
 import { randomBytes } from 'node:crypto'
 import { inspectInstance, identity } from '../../scripts/lib/instance-runtime.mjs'
 import { SUPERVISOR_FORCE_TIMEOUT_MS } from '../../scripts/lib/supervisor-shutdown.mjs'
@@ -96,11 +97,17 @@ test('actual Electron host shares its real core with CLI and distinguishes hide,
   }
   const provider = await startFirstModelProvider()
   t.after(() => provider.close())
+  const disk = await startDesktopDiskObservation(temporary)
+  let initializationComplete = false
   try {
     const bootStarted = Date.now()
     let gui = await launch()
     const first = await gui.next('ready')
     const initialReadyMs = Date.now() - bootStarted
+    initializationComplete = true
+    const initializationDisk = { phase: 'first-core-ready', ...await disk.stop() }
+    await writeFile(path.join(root, '.desktop-build/desktop-initialization-disk.json'), JSON.stringify(initializationDisk) + '\n')
+    console.log('CRABOT_DESKTOP_INITIALIZATION_DISK ' + JSON.stringify(initializationDisk))
     step('initial_ready')
     assert.deepEqual(first.renderer, { node: 'undefined', token: null })
     const instance = inspectInstance(data)
@@ -181,6 +188,8 @@ test('actual Electron host shares its real core with CLI and distinguishes hide,
     }
     throw error
   } finally {
+    const sample = await disk.stop()
+    if (!initializationComplete) console.log('CRABOT_DESKTOP_INITIALIZATION_DISK ' + JSON.stringify({ phase: 'initialization-interrupted', ...sample }))
     for (const child of children) if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
     const exits = await Promise.allSettled(children.map(child => waitForExit(child)))
     await cli('stop')

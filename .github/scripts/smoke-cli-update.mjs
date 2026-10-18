@@ -12,6 +12,7 @@ import { pathToFileURL } from 'node:url'
 import { createRequire } from 'node:module'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
+import { startDesktopDiskObservation } from './desktop-disk.mjs'
 const [oldArgument, nextArgument, archiveArgument, commandMode] = process.argv.slice(2)
 const cliCommand = commandMode === '--cli-command'
 if (commandMode && !cliCommand) throw new Error('Unknown fixture option')
@@ -34,6 +35,7 @@ const temporary = await fs.realpath(await fs.mkdtemp(join(tmpdir(), 'Crabot CLI 
 const dataDir = join(temporary, '实例'), installRoot = join(temporary, '程序')
 const env = { ...process.env, DATA_DIR: dataDir }
 const run = async (command, args) => (await execute(command, args, { env, timeout: args[0] === 'upgrade' ? 600_000 : 180_000, maxBuffer: 1024 * 1024, windowsHide: true })).stdout
+let disk, updateComplete = false
 try {
   let sourceRoot = old
   if (cliCommand) {
@@ -64,6 +66,7 @@ try {
   if (adminSchema) await fs.writeFile(join(dataDir, 'admin/SCHEMA_VERSION'), adminSchema)
   await fs.writeFile(join(dataDir, 'admin/upgrade-probe.json'), '{"preserve":true}')
   const targetVersion = (await verifyCoreRelease(next)).version
+  disk = await startDesktopDiskObservation(temporary)
   let two
   if (archiveArgument) {
     let archivePath = resolve(archiveArgument), archiveReport
@@ -128,8 +131,18 @@ try {
   await verifyMaintenanceBackup(join(dataDir + '.desktop-backups', backups[0]))
   assert.equal((await verifyCoreRelease(one.coreRoot)).version, one.version)
   assert.equal((await verifyCoreRelease(two.coreRoot)).version, two.version)
+  updateComplete = true
   console.log(JSON.stringify({ platform: process.platform, arch: process.arch, from: one.version, to: two.version,
     target_bundled_node: true, actual_cli_upgrade_command: cliCommand, synthetic_previous_release: cliCommand, full_archive_download_checksum_extract: Boolean(archiveArgument), native_command_selected_target: true, scoped_backup_verified: true,
     stable_agent_and_mcp_python_preserved: true, workspaces_preserved: true, immutable_payloads_verified: true,
     no_mm_started: true, health_verified: false }))
-} finally { await fs.rm(temporary, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
+} finally {
+  if (disk) {
+    const sample = { phase: updateComplete ? 'cli-update-completed' : 'cli-update-interrupted', ...await disk.stop() }
+    console.log('CRABOT_CLI_UPDATE_DISK ' + JSON.stringify(sample))
+    const evidence = new URL('../../.desktop-build/', import.meta.url)
+    await fs.mkdir(evidence, { recursive: true })
+    await fs.writeFile(new URL('cli-update-disk.json', evidence), JSON.stringify(sample) + '\n')
+  }
+  await fs.rm(temporary, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+}
