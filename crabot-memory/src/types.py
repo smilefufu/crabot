@@ -3,7 +3,7 @@ Memory 模块数据类型定义
 对齐 protocol-memory.md 和 base-protocol.md
 """
 from typing import Optional, List, Dict, Any, Literal, Union
-from pydantic import BaseModel, Field, ConfigDict, StrictBool
+from pydantic import BaseModel, Field, ConfigDict, StrictBool, model_validator
 from datetime import datetime
 import uuid
 
@@ -171,11 +171,41 @@ class SceneIdentityGroup(BaseModel):
 SceneIdentity = Union[SceneIdentityFriend, SceneIdentityGroup]
 
 
+class ConversationRequestSource(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    source_id: str = Field(pattern=r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+    channel_id: str = Field(min_length=1)
+    session_id: str = Field(min_length=1)
+    session_type: Literal["group"]
+    platform_message_id: str = Field(min_length=1)
+    platform_user_id: str = Field(min_length=1)
+    sender_friend_id: Optional[str]
+
+
+class MemoryRequestContext(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    request_id: str = Field(pattern=r"^[0-9a-f]{64}$")
+    source: ConversationRequestSource
+
+
 class MemoryAccessContext(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    actor_kind: Literal["conversation", "master_private", "admin", "builtin_reflection", "builtin_graph_rebuild", "mechanical"]
+    actor_kind: Literal["conversation", "master_private", "master_request", "admin", "builtin_reflection", "builtin_graph_rebuild", "mechanical"]
     memory_enabled: StrictBool
     scene: Optional[SceneIdentity] = None
+    request: Optional[MemoryRequestContext] = None
+
+    @model_validator(mode="after")
+    def validate_request_actor(self):
+        if self.actor_kind == "master_request":
+            if self.request is None or not isinstance(self.scene, SceneIdentityGroup):
+                raise ValueError("Master request requires its actual group scene")
+            source = self.request.source
+            if not source.sender_friend_id or not source.sender_friend_id.strip() or self.scene.channel_id != source.channel_id or self.scene.session_id != source.session_id:
+                raise ValueError("Master request source does not match its scene")
+        elif self.request is not None:
+            raise ValueError("Request source is only valid for the request actor")
+        return self
 
 
 class SceneProfile(BaseModel):

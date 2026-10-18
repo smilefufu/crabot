@@ -1,0 +1,597 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-17",
+  "status": "prerequisite_checks_recorded; guided_voice_management_not_implemented; new_wording_pending; not_deployed",
+  "base_commit": "18cbe94de7d48f4cd41c0554c2a013130442039f",
+  "merged_main": "59e9e76c704dcb4aa84fc8783b5180f80bfecba1",
+  "current_change_source_hashes": {
+    "crabot-agent/src/manager/bootstrap.ts": "a9d4da2937d679760b1f13e00c6c361defa98c7c931c68b6e55aed7c60c8c413",
+    "crabot-agent/src/manager/tools/project-doc-tools.ts": "d9341418aeb92dd5b9b7b31d3f32d664938652f64092cd588953c19dd2907381",
+    "crabot-agent/src/workers/harness/harness.ts": "28974cdc0fa64306c6a71d499f9bb5879bdac72627547e8254d4c25c571ddba4",
+    "crabot-agent/tests/manager/manager-integration.test.ts": "e8bc6e032cb0b72becb2678fb485aa57187a536dd565a1bae2f6e65fba726581",
+    "crabot-agent/tests/manager/tool-face.test.ts": "0922cee59b8e7e5423fb5800daf45d9c38662c0406be61873d4eca325d1b4501",
+    "crabot-agent/tests/manager/worker-tools.test.ts": "d57ecbfebc170f943eeee768acd8120667b0a0102d602a3b028dcc59d9fbbe21",
+    "crabot-agent/tests/permissions/managed-workspace-host.test.ts": "a4ba9ad58871262de58d31366f88ac10c54659b2b069d5ebe5482daaa66d150b",
+    "crabot-agent/tests/permissions/managed-workspace.test.ts": "6a6ac390a9a0492e86d34075a0e7a0649377be77b4a61b767a5c945948f66b32",
+    "crabot-agent/tests/workers/builtin-injection.test.ts": "b71b7ba81f5ee77d6f89c8cc42817a10d93c96cb9a8f2fbfff92dd352633ace9",
+    "crabot-agent/tests/workers/builtin-output-liveness.test.ts": "1715b79cdce077b4b3759549a10821146f5921dd34239e45bbd8b769ac067712",
+    "crabot-agent/tests/workers/harness/harness-continuation.test.ts": "63f67e57fd449caa2121b647fbf4eae4aef082a8500fcff7b71378f3c60f66e8",
+    "crabot-agent/tests/workers/harness/harness-recovery.test.ts": "4ceafca9a79de727c9d26ccc1996b90cfa52ba0de0aaf3450e025cffcdf93bd8",
+    "crabot-agent/tests/workers/harness/harness-workspace-git.test.ts": "408d14413ab06a33099d2a90ef7a5231c1629fa4cd786993daa00f9ecc2b2c8c",
+    "crabot-agent/tests/workers/harness/request-spawn.test.ts": "7c0b45bd830dcc4abece4acde0f5d3f467caca2ca08e716934512d77b4751271",
+    "crabot-channel-voice/crabot-module.yaml": "0184d0b57fb8223e34bd8a2d55fd867b57b1c3758041542bf20e702ab7d717f0",
+    "crabot-channel-voice/src/main.test.ts": "917e15dc5dc1501a12f8b136e5d79e3917df40c5803d23ed483f7fa7e50580c6",
+    "crabot-channel-voice/src/main.ts": "31e5b544bc89abe2c5e61807220e36725f15859a919d85c8c872fc3b2b88cefa",
+    "crabot-channel-voice/src/owner-activation.test.ts": "599936518cbcbfd3eff755d6a062a50f31e4d231d2fb51386e1732cdd01b7a3a",
+    "crabot-channel-voice/src/voice-channel.test.ts": "52445ac8b1c01452e80377a3081311f7c3c817c62e481fadd066fbb7799cd4fb"
+  },
+  "checks": {
+    "voice-final": {
+      "assertion_statuses": {
+        "passed": 28
+      },
+      "sha256": "8f019d29f2b88dc4c92a6c34ea8bc0151d9d9961412a52827467885d82de13f3"
+    },
+    "core": {
+      "assertion_statuses": {
+        "passed": 175
+      },
+      "sha256": "100a3f9aa3021caf4de9d476aff5452b172e5f57919bfced49f2dd17aea8a8ad"
+    },
+    "web-node22": {
+      "assertion_statuses": {
+        "passed": 366
+      },
+      "sha256": "f79facbc644fad5af9a15cf430c6371047f6e24b1f55bfb1046ebbd4790da335"
+    },
+    "upgrade-fixed": {
+      "assertion_statuses": {
+        "passed": 41
+      },
+      "sha256": "72fd5ccc3fddbddea33bc0bb0bca80efc35aac7838f9576ab7afe19a8463c132"
+    },
+    "admin": {
+      "assertion_statuses": {
+        "passed": 1389,
+        "failed": 2
+      },
+      "sha256": "3107533a875844801e01b08cfef76090036ba7755f200f2b554813253f78f2b4"
+    },
+    "agent-bounded": {
+      "assertion_statuses": {
+        "passed": 4255,
+        "failed": 44,
+        "skipped": 65
+      },
+      "sha256": "f915fa36134804ad44972e353223d5ae1c84478160087cd771eb1eb3066c51c2"
+    },
+    "final-review-regression": {
+      "assertion_statuses": {
+        "passed": 155,
+        "failed": 1
+      },
+      "sha256": "79f2f9892a0ebc540d1e12fe74d885ca11bdbe2df058a7d15ee7a39362acb742"
+    },
+    "admission-final": {
+      "assertion_statuses": {
+        "passed": 229
+      },
+      "sha256": "83b5233f2d1b053ec5e0f104ee38378a4067f29621f21348c6bd378213958903"
+    },
+    "trusted-fixtures-fixed": {
+      "assertion_statuses": {
+        "passed": 72,
+        "failed": 1
+      },
+      "sha256": "34bd0db49618fdcdc92738d0009e40dff1bc36678348ecccfdc98a3662c7106d"
+    },
+    "remaining-fixtures-fixed": {
+      "assertion_statuses": {
+        "passed": 38
+      },
+      "sha256": "313e6bc65cdf39ca987f51386edb7ca6e0f43f2e8e327839411998c326747960"
+    }
+  },
+  "shared_node_tests": {
+    "passed": 147,
+    "log_sha256": "59ae35770ded4045e74c02d9662d20b510d1d620f0cb87b66df604f0223b9458"
+  },
+  "memory_request_tests": {
+    "passed": 14,
+    "log_sha256": "06bffd20bf2b322bbbfd0bcee71c0f2f539d25829a2be8206dbc15eb4039cffa"
+  },
+  "offline_replay": {
+    "passed": 14,
+    "log_sha256": "e7a593c979ea4f20245354b520dbfb270d02b8e23d4d1da8e059d27861b11a82"
+  },
+  "agent_suite_limits": {
+    "full_attempt": "Interrupted verified test runner only after 9 minutes with one unchanged connection-retry suite not settling. Raw log retained.",
+    "full_log_sha256": "d5ae4a49fa30eaaf47d315560058068097101d4f395cb12cb0c3b3278b688e7e",
+    "explicitly_excluded": [
+      "tests/engine/call-non-streaming.test.ts"
+    ],
+    "other_suite_results": "4255 passed, 44 failed, 65 skipped; read per-assertion statuses, not reporter top-level counts which include skipped as passed.",
+    "classification": [
+      {
+        "file": "agent-handler.test.ts",
+        "case": " AgentHandler resolveSceneAnchorLabel preserves an existing scene label when a profile already exists",
+        "classification": "reproduced_on_unmodified_main",
+        "proof": "agent-main-more-baseline"
+      },
+      {
+        "file": "agent-handler.test.ts",
+        "case": " AgentHandler resolveSceneAnchorLabel falls back to the default label when no profile exists yet",
+        "classification": "reproduced_on_unmodified_main",
+        "proof": "agent-main-more-baseline"
+      },
+      {
+        "file": "worker-mcp-capability.test.ts",
+        "case": " UnifiedAgent worker capability production wiring 真实装配经 spawn/handoff 把当前 MCP 配置按固定 principal 快照送到目标 provision",
+        "classification": "reproduced_on_unmodified_main",
+        "proof": "agent-main-rest-baseline"
+      },
+      {
+        "file": "worker-mcp-capability.test.ts",
+        "case": " Scrapling product config provisioning 三种 Worker 共用完整启动配置，低权限主体没有 MCP 或条件 Skill",
+        "classification": "reproduced_on_unmodified_main",
+        "proof": "agent-main-rest-baseline"
+      },
+      {
+        "file": "child-env-guard.test.ts",
+        "case": " Agent child environment guard requires every child_process owner to import the scrubbed environment helper",
+        "classification": "reproduced_on_unmodified_main",
+        "proof": "agent-main-rest-baseline"
+      },
+      {
+        "file": "runtime-config-invalidation.test.ts",
+        "case": " UnifiedAgent runtime config invalidation cold unconfigured Agent atomically installs a handler before opening execution admission",
+        "classification": "reproduced_on_unmodified_main",
+        "proof": "agent-main-more-baseline"
+      },
+      {
+        "file": "runtime-config-invalidation.test.ts",
+        "case": " UnifiedAgent runtime config invalidation marks failed pull stale, closes stale MCP connections, and retries with backoff",
+        "classification": "reproduced_on_unmodified_main",
+        "proof": "agent-main-more-baseline"
+      },
+      {
+        "file": "compaction-failure.test.ts",
+        "case": " runEngine context compaction failure fails the run instead of silently continuing on a fake compaction",
+        "classification": "reproduced_on_unmodified_main",
+        "proof": "agent-main-rest-baseline"
+      },
+      {
+        "file": "compaction-failure.test.ts",
+        "case": " runEngine context compaction failure does not rewrite messages when the run is aborted during compaction",
+        "classification": "reproduced_on_unmodified_main",
+        "proof": "agent-main-rest-baseline"
+      },
+      {
+        "file": "compaction-failure.test.ts",
+        "case": " runEngine context compaction failure still completes normally when compaction succeeds",
+        "classification": "reproduced_on_unmodified_main",
+        "proof": "agent-main-rest-baseline"
+      },
+      {
+        "file": "catalog.test.ts",
+        "case": " product guidance boundaries keeps short cores and role-specific catalogs; ordinary tasks receive no workflows",
+        "classification": "reproduced_on_unmodified_main",
+        "proof": "agent-main-rest-baseline"
+      },
+      {
+        "file": "process-admin-chat-message.test.ts",
+        "case": " processAdminChatMessage —— admin chat 入站（cutover 后下游是 manager） master 身份与记忆档位 按 master 身份解析权限，结果决定这轮 worker 的工具面",
+        "classification": "reproduced_on_unmodified_main",
+        "proof": "agent-main-more-baseline"
+      },
+      {
+        "file": "process-admin-chat-message.test.ts",
+        "case": " processAdminChatMessage —— admin chat 入站（cutover 后下游是 manager） master 身份与记忆档位 记忆档位按 master 身份解析出的 scopes 走（不再是硬编码的私有档）",
+        "classification": "reproduced_on_unmodified_main",
+        "proof": "agent-main-more-baseline"
+      },
+      {
+        "file": "process-admin-chat-message.test.ts",
+        "case": " processAdminChatMessage —— admin chat 入站（cutover 后下游是 manager） master 身份与记忆档位 身份解析失败时不写入身份，worker 退回固定档位（不是放开）",
+        "classification": "reproduced_on_unmodified_main",
+        "proof": "agent-main-more-baseline"
+      },
+      {
+        "file": "process-direct-batch.test.ts",
+        "case": " processDirectBatch —— 私聊 lane handler（cutover 后下游是 manager） 权限身份解析（变异靶 M4） 解析出的身份随 spawn 下传，决定这轮派出去的 worker 能用哪些工具",
+        "classification": "reproduced_on_unmodified_main",
+        "proof": "agent-main-rest-baseline"
+      },
+      {
+        "file": "process-direct-batch.test.ts",
+        "case": " processDirectBatch —— 私聊 lane handler（cutover 后下游是 manager） 权限身份解析（变异靶 M4） 解析失败时不写入身份，worker 退回固定档位（不是放开也不是沿用上一轮）",
+        "classification": "reproduced_on_unmodified_main",
+        "proof": "agent-main-rest-baseline"
+      },
+      {
+        "file": "process-direct-batch.test.ts",
+        "case": " processDirectBatch —— 私聊 lane handler（cutover 后下游是 manager） memory 权限档位（变异靶 M5） 按该 friend 解析出的 memory_scopes 授权读写，不是 public/全局",
+        "classification": "reproduced_on_unmodified_main",
+        "proof": "agent-main-rest-baseline"
+      },
+      {
+        "file": "process-direct-batch.test.ts",
+        "case": " processDirectBatch —— 私聊 lane handler（cutover 后下游是 manager） memory 权限档位（变异靶 M5） 身份解析失败时私聊不回落到 legacy session 配置（仍不是公开）",
+        "classification": "reproduced_on_unmodified_main",
+        "proof": "agent-main-rest-baseline"
+      },
+      {
+        "file": "process-group-lane-batch.test.ts",
+        "case": " processGroupLaneBatch —— 群聊 lane handler（cutover 后下游是 manager） 批合并与唤醒语义（变异靶 M2） 发言者取批内最后一条：权限按他解析",
+        "classification": "reproduced_on_unmodified_main",
+        "proof": "agent-main-more-baseline"
+      },
+      {
+        "file": "process-group-lane-batch.test.ts",
+        "case": " processGroupLaneBatch —— 群聊 lane handler（cutover 后下游是 manager） 权限身份解析（变异靶 M4） 按群聊语义解析发起人身份，结果随 spawn 下传决定这轮 worker 能用哪些工具",
+        "classification": "reproduced_on_unmodified_main",
+        "proof": "agent-main-more-baseline"
+      },
+      {
+        "file": "process-group-lane-batch.test.ts",
+        "case": " processGroupLaneBatch —— 群聊 lane handler（cutover 后下游是 manager） 权限身份解析（变异靶 M4） 解析失败时不写入身份，worker 退回固定档位",
+        "classification": "reproduced_on_unmodified_main",
+        "proof": "agent-main-more-baseline"
+      },
+      {
+        "file": "process-group-lane-batch.test.ts",
+        "case": " processGroupLaneBatch —— 群聊 lane handler（cutover 后下游是 manager） memory 权限档位 —— 群聊三档（变异靶 M5 / M5G2） 第一档：按解析出的 memory_scopes 授权读写，不是 public/全局",
+        "classification": "reproduced_on_unmodified_main",
+        "proof": "agent-main-more-baseline"
+      },
+      {
+        "file": "process-group-lane-batch.test.ts",
+        "case": " processGroupLaneBatch —— 群聊 lane handler（cutover 后下游是 manager） memory 权限档位 —— 群聊三档（变异靶 M5 / M5G2） 第二档（群聊专有）：解析成功但 scopes 为空时收敛到本群，不允许空 scope 越界",
+        "classification": "reproduced_on_unmodified_main",
+        "proof": "agent-main-more-baseline"
+      },
+      {
+        "file": "process-group-lane-batch.test.ts",
+        "case": " processGroupLaneBatch —— 群聊 lane handler（cutover 后下游是 manager） memory 权限档位 —— 群聊三档（变异靶 M5 / M5G2） 第三档：身份解析失败时回落到该 session 配置的 scopes（仍不是公开）",
+        "classification": "reproduced_on_unmodified_main",
+        "proof": "agent-main-more-baseline"
+      },
+      {
+        "file": "loop-trace.test.ts",
+        "case": " ManagerLoop episode trace wiring continues through real Engine tools after losing directory history; known gap=false",
+        "classification": "reproduced_on_unmodified_main",
+        "proof": "agent-main-more-baseline"
+      },
+      {
+        "file": "loop-trace.test.ts",
+        "case": " ManagerLoop episode trace wiring continues through real Engine tools after losing directory history; known gap=true",
+        "classification": "reproduced_on_unmodified_main",
+        "proof": "agent-main-more-baseline"
+      },
+      {
+        "file": "manager-integration.test.ts",
+        "case": " manager-integration（P4 Task 10：真实 ManagerRegistry + 真实 WorkerHarness + 真实 builtin adapter + 真实工具面） 场景四：capabilities().fork===false 的 worker 上调 query_worker，同一工具调用返回结构化错误，并留下待通知 query receipt",
+        "classification": "fixed_test_fixture_or_teardown",
+        "proof": "final-review-regression"
+      },
+      {
+        "file": "registry.test.ts",
+        "case": " ManagerRegistry retains corrected Memory errors and requires actual summary delivery (retry=false)",
+        "classification": "reproduced_on_unmodified_main",
+        "proof": "agent-main-baseline"
+      },
+      {
+        "file": "registry.test.ts",
+        "case": " ManagerRegistry retains corrected Memory errors and requires actual summary delivery (retry=true)",
+        "classification": "reproduced_on_unmodified_main",
+        "proof": "agent-main-baseline"
+      },
+      {
+        "file": "worker-authorization.test.ts",
+        "case": " session worker authorization Master gets explicit global list with stable pagination and execution-time revocation rejects cross-session detail",
+        "classification": "reproduced_on_unmodified_main",
+        "proof": "agent-main-rest-baseline"
+      },
+      {
+        "file": "worker-tools.test.ts",
+        "case": " worker observation and turn closure 活动读取缺省只请求 assistant view，显式 all 才请求工具活动",
+        "classification": "reproduced_on_unmodified_main",
+        "proof": "agent-main-baseline"
+      },
+      {
+        "file": "role-prompts.test.ts",
+        "case": " 独立角色提示词 主控保留职责与权限原则，工作流只提供目录",
+        "classification": "reproduced_on_unmodified_main",
+        "proof": "agent-main-baseline"
+      },
+      {
+        "file": "builtin-injection.test.ts",
+        "case": " builtin worker 注入管道（harness → 工厂回退） spawnWorker 不传 builtin → 回退到注入工厂，worker 真的跑起来并执行了一次工具调用",
+        "classification": "fixed_test_fixture_or_teardown",
+        "proof": "final-review-regression"
+      },
+      {
+        "file": "builtin-output-liveness.test.ts",
+        "case": " Output -> builtin Adapter -> liveness sweep does not wake Manager at minute 32 of an actual 64-minute Output",
+        "classification": "fixed_test_fixture_or_teardown",
+        "proof": "final-review-regression"
+      },
+      {
+        "file": "builtin-output-liveness.test.ts",
+        "case": " Output -> builtin Adapter -> liveness sweep still reports an Output stuck past its fixed deadline and deduplicates it",
+        "classification": "fixed_test_fixture_or_teardown",
+        "proof": "final-review-regression"
+      },
+      {
+        "file": "builtin-output-liveness.test.ts",
+        "case": " Output -> builtin Adapter -> liveness sweep receives Manager input while waiting and resumes the existing Worker",
+        "classification": "fixed_test_fixture_or_teardown",
+        "proof": "final-review-regression"
+      },
+      {
+        "file": "claude-code-adapter.test.ts",
+        "case": " ClaudeCodeAdapter — prompt 投递验证(2026-08-06 MCP 弹窗事故修复) 真实 Stop hook 报告 claude_stop completion hint",
+        "classification": "reproduced_on_unmodified_main",
+        "proof": "native-main-baseline"
+      },
+      {
+        "file": "claude-code-adapter.test.ts",
+        "case": " ClaudeCodeAdapter — 启动期就绪握手(\\e[?2004h) 启动投递遇到真实 MCP 选择器 → 保留 prompt 未投递并把操作交给 Manager",
+        "classification": "reproduced_on_unmodified_main",
+        "proof": "native-main-baseline"
+      },
+      {
+        "file": "claude-code-adapter.test.ts",
+        "case": " ClaudeCodeAdapter — 启动期就绪握手(\\e[?2004h) 启动暂扣给 manager 的是直接捕获的可读终端画面，不含转义序列",
+        "classification": "reproduced_on_unmodified_main",
+        "proof": "native-main-baseline"
+      },
+      {
+        "file": "harness-recovery.test.ts",
+        "case": " WorkerHarness.reconcileOnStartup — 三态判定 台账化身 state=exited 但 adapter 报活(内部矛盾) → 矛盾修复为 running，发 state_changed(source=reconcile)，归 revived",
+        "classification": "reproduced_on_unmodified_main",
+        "proof": "agent-main-rest-baseline"
+      },
+      {
+        "file": "harness-recovery.test.ts",
+        "case": " WorkerHarness restart recovery notices 投递前校验：notice 到期时 task 已被 manager 处置(非 crash 停摆) → 直接标 consumed，不拿过期事实唤醒",
+        "classification": "fixed_test_fixture_or_teardown",
+        "proof": "final-review-regression"
+      },
+      {
+        "file": "workspace-manager.test.ts",
+        "case": " WorkspaceManager requested 校验：绝对路径且已存在的目录 requested 是已存在的绝对目录路径时通过",
+        "classification": "reproduced_on_unmodified_main",
+        "proof": "agent-main-rest-baseline"
+      },
+      {
+        "file": "workspace-manager.test.ts",
+        "case": " WorkspaceManager requested 校验：允许自己的 taskId 目录 落在 <root>/<自己的 taskId> 的路径应通过",
+        "classification": "reproduced_on_unmodified_main",
+        "proof": "agent-main-rest-baseline"
+      },
+      {
+        "file": "workspace-manager.test.ts",
+        "case": " WorkspaceManager requested 校验：允许自己的 taskId 目录 落在 <root>/<自己的 taskId> 子目录的路径应通过",
+        "classification": "reproduced_on_unmodified_main",
+        "proof": "agent-main-rest-baseline"
+      }
+    ],
+    "baseline_main_sha": "59e9e76c704dcb4aa84fc8783b5180f80bfecba1",
+    "baseline_reports": {
+      "agent-main-baseline": {
+        "assertion_statuses": {
+          "passed": 198,
+          "failed": 4
+        },
+        "sha256": "81a6e44662037a77fb38b0facb2c52e8dbbd5277ed55ec11ba312270d0759419"
+      },
+      "agent-main-more-baseline": {
+        "assertion_statuses": {
+          "passed": 136,
+          "failed": 15
+        },
+        "sha256": "98774e5344099f229825ecbb400f76c5d3038f4b6a2a711645604f63a5b347ce"
+      },
+      "agent-main-rest-baseline": {
+        "assertion_statuses": {
+          "passed": 103,
+          "failed": 16
+        },
+        "sha256": "3883485f5db2a9ed00990b3480cb0e380ffe68ec340531226c05dc468b46b1ea"
+      },
+      "native-main-baseline": {
+        "assertion_statuses": {
+          "skipped": 108,
+          "failed": 3
+        },
+        "sha256": "9175eec9b1367cfd1ff63c9991be567ea780064ce1c486d6bad8bec93256b925"
+      },
+      "admin-main-baseline": {
+        "assertion_statuses": {
+          "failed": 2,
+          "passed": 3
+        },
+        "sha256": "6f8a2a6948b568f6a027e1c06831b592745da9dfa56953ad15d5b735e54fdf18"
+      }
+    },
+    "reason_comparison": "One missing-principal failure has the same CAPABILITY_UNKNOWN code with a different reason string; permission semantics remain refusal. Other baseline failures reproduce the same cause.",
+    "fixture_followups": "Initial broad failures also identified 47 old fixture cases without trusted principal snapshots. Tests now supply explicit subjects; product guards stay enabled. Six later failures (four other fixture cases and two async teardowns) passed focused retests. No claim of entire repository green."
+  },
+  "model_replay": {
+    "calls": 25,
+    "cases": [
+      {
+        "scenario": "personal-voice-early-ack",
+        "status": "passed",
+        "model_adapter_calls": 6,
+        "checks": {
+          "no_hijack": true,
+          "worker_reached": true,
+          "bound_owner_unchanged": true,
+          "interruption_reached": true,
+          "no_private_shared_body": true,
+          "private_target": true,
+          "expected_effect": true,
+          "no_duplicate_unknown_send": true,
+          "worker_receipt": true,
+          "voice_tag_delivery": true,
+          "request_isolation": true,
+          "no_fixture_gaps": true,
+          "initial_ack_before_work": true,
+          "single_ack_and_result": true
+        },
+        "first_voice_ms": {
+          "text_ms": 2570,
+          "completed_ms": 2770,
+          "canary_complete_ms": 14444
+        },
+        "formal_reply_count": 2,
+        "worker_count": 0,
+        "turn_resolutions": [],
+        "raw_artifact_sha256": {
+          "events.jsonl": "b7ffbcb8d5c0452c143e33fc34394726045e11a4e56bb13669f38449cadecd93",
+          "result.json": "d7b0f427cc1fc3f0fc2290ca9054e57f9f0d0327afc75cce510d5d41b92ce5e1"
+        }
+      },
+      {
+        "scenario": "worker-running-stranger",
+        "status": "passed",
+        "model_adapter_calls": 19,
+        "checks": {
+          "no_hijack": true,
+          "worker_reached": true,
+          "bound_owner_unchanged": true,
+          "interruption_reached": true,
+          "no_private_shared_body": true,
+          "private_target": true,
+          "expected_effect": true,
+          "no_duplicate_unknown_send": true,
+          "worker_receipt": true,
+          "voice_tag_delivery": true,
+          "request_isolation": true,
+          "no_fixture_gaps": true
+        },
+        "first_voice_ms": {},
+        "formal_reply_count": 3,
+        "worker_count": 1,
+        "turn_resolutions": [
+          "reported"
+        ],
+        "raw_artifact_sha256": {
+          "events.jsonl": "70f82df19454b8641cfd77e48efd03cb452556466e558b21728f0c91b2daa1b9",
+          "result.json": "388b290a2cd7da7eced0efc12bb87ecfb3c7fc2fcfc821abd4bec02699033b2d"
+        }
+      }
+    ],
+    "source_hashes_at_run": {
+      "crabot-agent/src/manager/prompt.ts": "f240cf053142776b929a11fe3524b6aa48fa6c8bcd65f30812b86bd5faea3c02",
+      "crabot-agent/src/manager/loop.ts": "95c5bb1ff784d06e9759e9fc33f8c99588f9fd7655ed58e75f5d955dc08fb2b2",
+      "crabot-agent/src/manager/voice-output.ts": "47e991bde2592002839ec6622e01fc99314c06f1c58b326b73e148514a98f9bb",
+      "crabot-agent/src/manager/voice-output-port.ts": "882a81d9624eb3048f5b2851525348692bd22ba03a119e747579705518c068a4",
+      "crabot-agent/src/manager/tools/worker-tools.ts": "935c5c25c44b17dea7ba40a2f2ae888c56ea92956a709a670c70e6e84f997d9d",
+      "crabot-agent/src/manager/tools/tool-face.ts": "29a5707d4757588c60fe9551c22a27202ba2831cc797b3290ea552ee35365e4e",
+      "crabot-agent/src/manager/registry.ts": "d9d44e6ebacd4e42a8a6bd0aa8f15e883f963fd7203d1375491cf6684e7a5b5f",
+      "crabot-agent/src/manager/request-loop.ts": "6a61e9f4c66cf610abd01182ddd1415df6958c1dfc3763af9a00dec533ab4971",
+      "crabot-agent/src/manager/conversation-request-runner.ts": "ae22dc7f43e4a5e0cbf97dd94a623d87b68e4c2de5d66c50dac3472be9831561",
+      "crabot-agent/src/manager/bootstrap.ts": "3b03873eb625a3b983ccdfb50ae0a499ab27dd348d1442003cff5ffa337026f3",
+      "crabot-agent/src/guidance/content.ts": "b5bfc9de2e0c635f9b48cab5005e352c51451c344a8fd6e4ea3627cb6280990b",
+      "crabot-shared/src/permission-entries.ts": "944ba22530e5277ad56733a20c99389aae664cd04196dca9e2f7d2b7ba8d6681",
+      "crabot-agent/eval/shared-requests/runtime.mjs": "0a0fb9276c63c14aa846be5ea02aae86972d32730e2716e157e5dd25f4586de2"
+    },
+    "plan_sha256": "5034959fa28099d9b6a85f68251cb621ef08a6083b11a909b67e8bc6af21a2f7",
+    "summary_sha256": "25f27ac5c33267c829be8ba0aacd09d35a70d7e2478efff1351dc96363015b8a",
+    "post_replay_changes": "Only structured missing-principal error code, Voice startup version metadata, tests/teardown, and a behavior-preserving normalization helper deduplication. Final focused regressions, build, offline composition and unchanged prompt audit pass; no new prompt wording applied."
+  },
+  "prompt_audit": {
+    "profiles": 8,
+    "core_counts": [
+      15,
+      11,
+      3
+    ],
+    "unchanged_from_approved_prompts": true,
+    "raw_artifact_sha256": {
+      "prompt-audit.json": "f82d29c126b0a18d1ddfb59cb709e4af53a6e2d91a583e9951bcbdb65a9f8c39",
+      "actual-input-audit.json": "64da43868dd16769cda8987bc6c7a7cc342d63928408a6b2183dc6b661dc47d3"
+    },
+    "voice_family_implemented": false
+  },
+  "upgrade_rehearsal": {
+    "captured_files": 1435,
+    "first": "prepared",
+    "second": "ready",
+    "ledger_wrappers_verified": 21,
+    "other_files_byte_preserved": 1414,
+    "production_modified": false,
+    "ran_business": false,
+    "full_production_backup": false,
+    "raw_result_sha256": "bc4ec5914627deeace150824c2ff3a1980714f94153905f70da658891ab74363",
+    "local_state_subset": true,
+    "contents": "Authority, context and Voice state subset. The copied Voice state also retains its existing authorized text; private local copy only, never printed or sent to a model. Not a full coherent production backup."
+  },
+  "audio_service_preflight": {
+    "input": "Only checked-in public ASR fixture and fixed TTS text; no mic/device",
+    "results": [
+      {
+        "capability": "asr",
+        "origin": "ws://127.0.0.1:17781",
+        "model": "sensevoice",
+        "elapsed_ms": 620,
+        "result": {
+          "ok": true,
+          "capability": "asr",
+          "text": "你好，我是螃蟹。"
+        }
+      },
+      {
+        "capability": "tts",
+        "origin": "http://127.0.0.1:17782",
+        "model": "models/kokoro",
+        "elapsed_ms": 206,
+        "result": {
+          "ok": true,
+          "capability": "tts",
+          "sample_count": 69600
+        }
+      }
+    ]
+  },
+  "android_candidate": {
+    "source": "c6c0a6597f87fd0d175dfcb5eb7aaa22783fa2b2",
+    "version_name": "0.6.1",
+    "version_code": 15,
+    "wire": 7,
+    "installed": false,
+    "unit_tests": 23,
+    "failures": 0,
+    "artifacts": [
+      {
+        "file": "app/build/outputs/apk/debug/app-debug.apk",
+        "bytes": 54616451,
+        "sha256": "dc0850120b980e85920767f453aa1a53245bcfc98f61db88600e1c0c87825847"
+      },
+      {
+        "file": "app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk",
+        "bytes": 1305967,
+        "sha256": "414cc8c16e7dc5926f8651056f13b8f613e983305a251f57409ffe24a4ab9608"
+      }
+    ],
+    "signature_verified": true
+  },
+  "builds": {
+    "full_project": "passed",
+    "full_build_log_sha256": "2afc2d4208bd42ea7945f12d11a50c56a73ffb389b710ccf8a137054f57789ee",
+    "final_agent_and_voice": "passed",
+    "android_application_and_test_apk": "passed"
+  },
+  "remaining": [
+    "Publish formal guided-management increment, implement Admin/Channel/Agent/Android management and normal-Friend commit, then test it.",
+    "Apply only user-confirmed new model wording; exact proposed diff was shown in chat, not saved in Markdown.",
+    "Finish group review/PR, confirm final protocol/APK versions, then perform coordinated full backup/upgrade and real-device acceptance.",
+    "Two-person enrollment/identity and real end-to-end first audio remain unverified; no microphone or actual Channel delivery in this replay."
+  ],
+  "production_changed": false,
+  "apk_installed": false,
+  "product_prompts_changed": false
+}

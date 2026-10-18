@@ -464,3 +464,18 @@ describe('daily reflection persisted evidence', () => {
     expect((await f.provider.capture(state)).records).toEqual([])
   })
 })
+
+
+it('excludes personal and unverifiable Worker bodies from automatic reflection evidence', async () => {
+  const f = await fixture()
+  const worker = await importLegacyWorker(f)
+  const read = vi.spyOn(f.deps.harness, 'readWorkerEvents')
+  worker.origin.request = { schema_version: 1, request_id: 'private', source_sha256: 'hash', execution_scope: 'request' }
+  f.events.set(worker.worker_id, [{ ts: activity, kind: 'turn_completed', worker_id: worker.worker_id, seq: 1, detail: { summary: 'PRIVATE_BODY' } }])
+  expect((await f.provider.capture(state)).records).toEqual([])
+  expect(read).not.toHaveBeenCalled()
+  delete worker.origin.request
+  f.deps.canReadWorker = async () => false
+  expect((await f.provider.capture(state)).records).toEqual([])
+  expect(read).not.toHaveBeenCalled()
+})

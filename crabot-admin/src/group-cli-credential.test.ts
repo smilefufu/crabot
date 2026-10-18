@@ -62,6 +62,27 @@ describe('Agent CLI credential: group authorization', () => {
     },
   )
 
+  it('accepts only an online whole-operation request check and does not turn a group Master into private Master', async () => {
+    const { token } = await issue(admin, 'master-owner')
+    const payload = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString())
+    admin.resolvePrincipalPermissions.mockRejectedValue(new Error('group cannot replace request authorization'))
+    admin.rpcClient.call.mockResolvedValue({ valid: true, cli_access: 'read', shell: true, request_verified: true })
+    expect(await admin.authorizeAgentCliRequest(payload, 'GET', '/api/schedules')).toMatchObject({ shell: true, masterPrivate: false })
+    expect(admin.resolvePrincipalPermissions).not.toHaveBeenCalled()
+    expect(admin.rpcClient.call).toHaveBeenCalledWith(19005, 'authorize_agent_cli_execution', { execution, domain: 'schedule', access: 'read' }, 'admin-test')
+    admin.rpcClient.call.mockResolvedValue({ valid: true, cli_access: 'read', shell: false, request_verified: true })
+    await expect(admin.authorizeAgentCliRequest(payload, 'GET', '/api/schedules')).rejects.toMatchObject({ code: 'FORBIDDEN' })
+    admin.rpcClient.call.mockRejectedValue(new Error('Agent unavailable'))
+    await expect(admin.authorizeAgentCliRequest(payload, 'GET', '/api/schedules')).rejects.toThrow('Agent unavailable')
+  })
+  it('a marker in the bearer cannot bypass a legacy Agent response or current group denial', async () => {
+    const { token } = await issue(admin)
+    const payload = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString())
+    payload.agent_cli.request_verified = true
+    admin.resolvePrincipalPermissions.mockResolvedValue({ resolved: { cli_access: { schedule: 'none' }, tool_access: { shell: false } } })
+    await expect(admin.authorizeAgentCliRequest(payload, 'GET', '/api/schedules')).rejects.toMatchObject({ code: 'FORBIDDEN' })
+    expect(admin.resolvePrincipalPermissions).toHaveBeenCalledOnce()
+  })
   it('does not bypass core Agent authentication for groups', async () => {
     admin.rpcClient.callModuleManagerSensitive.mockRejectedValue(new Error('invalid runtime bearer'))
     await expect(issue(admin, 'guest:wechat-test:member')).rejects.toThrow('invalid runtime bearer')

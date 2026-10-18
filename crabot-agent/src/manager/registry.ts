@@ -1,3 +1,4 @@
+import { requestInputsForMessages, type TrustedHumanInput } from './trusted-human-input.js'
 /**
  * ManagerRegistry —— manager 实例台账与唤醒路由(protocol-agent-v3.md §4.4)。
  *
@@ -121,6 +122,7 @@ export interface ScheduleIdentity {
 }
 
 export interface ManagerRegistryDeps {
+  readonly onVoiceDeliveryCompleted?: (key: ManagerKey, result: import('./voice-output.js').VoicePendingResult) => Promise<boolean>
   readonly voiceOutputFor?: (key: ManagerKey) => import('./voice-output.js').VoiceOutputPort
   readonly dailyReflectionFor?: (key: ManagerKey) => import('./daily-reflection.js').DailyReflection
   readonly store: ManagerSessionStore
@@ -180,6 +182,8 @@ export interface ManagerRegistryDeps {
    * (`WakeEvent.principalPermissions`)。会话级缓存回答不了"本 episode 的发言者是谁"——群聊里
    * 换个人说话就整体覆盖——而派出去的 worker 的权限身份必须是**本批消息的发言者**。
    */
+  /** Persist real group inputs before LLM handling; this does not grant request authority. */
+  readonly recordHumanInputs?: (key: ManagerKey, messages: ReadonlyArray<ChannelMessage>) => Promise<ReadonlyArray<TrustedHumanInput> | void>
   readonly onHumanWake?: (
     key: ManagerKey,
     principal: HumanPrincipal,
@@ -232,10 +236,14 @@ export interface ManagerRegistryDeps {
     /** 当前 episode 的 trace、发送后复核与交付证据桥（registry 惰性桥接到 loops 实例）。 */
     traceHooks?: {
       currentTraceId: () => string | undefined
+      requestInputs: () => ReadonlyArray<TrustedHumanInput>
+      voiceReplyContextForSource: (sourceId: string) => import('crabot-shared').VoiceReplyContext | undefined
       isVoice?: () => boolean
       voiceReplyContext?: () => import('crabot-shared').VoiceReplyContext | undefined
       onWorkerSpawned: (workerId: string) => void
       onPostSendAction: () => void
+      hasSuccessfulWorkerDelivery?: import('./tools/worker-tools.js').WorkerToolsDeps['hasSuccessfulWorkerDelivery']
+      onWorkerTurnInspected?: import('./tools/worker-tools.js').WorkerToolsDeps['onWorkerTurnInspected']
       hasSuccessfulSendMessageTo: (target: { channel_id: string; session_id: string }) => boolean
       onSuccessfulSendMessage: (target: { channel_id: string; session_id: string }) => void
       sessionChannelsFor: (sessionId: string) => ReadonlySet<string> | undefined
@@ -258,6 +266,8 @@ export interface ManagerRegistryDeps {
 }
 
 export class ManagerRegistry {
+  private readonly voiceReadyPending = new Map<ManagerKey, import('crabot-shared').VoiceOutputReadyPayload>()
+  private readonly voiceReadyDrains = new Map<ManagerKey, Promise<void>>()
   private readonly loops = new Map<ManagerKey, ManagerLoop>()
   /**
    * 每个 key 当前"在途" episode 的引用计数——决定 evictIdle 是否可回收，以及持久操作通知
@@ -435,10 +445,17 @@ export class ManagerRegistry {
           principalPermissionsOf(wakeEvent),
           {
             currentTraceId: () => this.loops.get(key)?.currentEpisodeTraceId,
+            requestInputs: () => this.loops.get(key)?.requestInputs ?? [],
+            voiceReplyContextForSource: sourceId => this.loops.get(key)?.voiceReplyContextForSource(sourceId),
             isVoice: () => this.loops.get(key)?.isVoiceConversation === true,
             voiceReplyContext: () => this.loops.get(key)?.voiceReplyContext,
             onWorkerSpawned: (workerId) => this.loops.get(key)?.recordSpawnedWorker(workerId),
             onPostSendAction: () => this.loops.get(key)?.recordPostSendAction(),
+            onWorkerTurnInspected: (worker, turnId) => this.loops.get(key)?.recordInspectedWorkerTurn(worker, turnId),
+            hasSuccessfulWorkerDelivery: (worker, turnId) => {
+              const loop = this.loops.get(key), voice = this.deps.voiceOutputFor?.(key)
+              return worker.report_to.channel_id + '::' + worker.report_to.session_id === key && voice?.isVoice() && voice.prepare ? loop?.hasSuccessfulVoiceWorkerDelivery(worker.worker_id, turnId) ?? false : loop?.hasSuccessfulSendMessageTo(worker.report_to) ?? false
+            },
             hasSuccessfulSendMessageTo: (target) => this.loops.get(key)?.hasSuccessfulSendMessageTo(target) ?? false,
             onSuccessfulSendMessage: (target) => {
               this.loops.get(key)?.recordSuccessfulSendMessage(target)
@@ -561,6 +578,11 @@ export class ManagerRegistry {
     try {
       // Capture before principal lookup so queueing cannot rewrite ingress time.
       const envelope = { ...this.makeEnvelope(capture, initialWake, undefined, messages, correlation), ...(voiceContext ? { voice_turn_id: voiceContext.turnId } : {}), ...(voiceContext?.replyContext ? { voice_reply_context: voiceContext.replyContext } : {}) }
+      let requestInputs: ReadonlyArray<TrustedHumanInput> = []
+      if (sessionType === 'group' && this.deps.recordHumanInputs) {
+        try { requestInputs = requestInputsForMessages(key, messages, (await this.deps.recordHumanInputs(key, messages)) ?? []) }
+        catch (error) { console.error(`[ManagerRegistry] trusted sources unavailable for '${key}'; new request authority must remain closed:`, error) }
+      }
       // 只会退回 fail-soft 兜底,而消息丢了就是丢了。
       let principalPermissions: ResolvedPermissions | undefined
       if (this.deps.onHumanWake) {
@@ -576,8 +598,8 @@ export class ManagerRegistry {
       const withPerms = principalPermissions ? { principalPermissions } : {}
       const event: WakeEvent =
         kind === 'human_messages'
-          ? { kind: 'human_messages', messages, ...withFriend, ...withPerms, ...withSenderFriends }
-          : { kind: 'attention_flush', messages, ...withFriend, ...withPerms, ...withSenderFriends }
+          ? { kind: 'human_messages', messages, ...withFriend, ...withPerms, ...withSenderFriends, ...(requestInputs.length ? { request_inputs: requestInputs } : {}) }
+          : { kind: 'attention_flush', messages, ...withFriend, ...withPerms, ...withSenderFriends, ...(requestInputs.length ? { request_inputs: requestInputs } : {}) }
       if (this.pendingResumes.has(key) || this.resumeTasks.has(key)) {
         await this.resumeBeforeWake(key, { ...envelope, wake: event })
       }
@@ -674,6 +696,54 @@ export class ManagerRegistry {
     }
     const result = await this.runWake(routedKey, envelope)
     return { consumed: result.consumedEvents === true }
+  }
+
+  async refreshVoiceOutput(key: ManagerKey): Promise<void> {
+    const port = this.deps.voiceOutputFor?.(key)
+    if (!port?.isVoice() || !port.state) return
+    const state = await port.state()
+    if (state.connection_epoch) await this.routeVoiceOutputReady({ channel_id: state.channel_id, session_id: state.session_id, connection_epoch: state.connection_epoch })
+  }
+
+  async routeVoiceOutputReady(notice: import('crabot-shared').VoiceOutputReadyPayload): Promise<void> {
+    this.assertWakeAdmission()
+    const key = `${notice.channel_id}::${notice.session_id}` as ManagerKey
+    const existing = this.voiceReadyDrains.get(key)
+    if (existing) return existing
+    if (this.isEpisodeActive(key) || this.hasWakePreparation(key)) { this.voiceReadyPending.set(key, structuredClone(notice)); return }
+    const operation = Promise.resolve().then(async () => {
+      const port = this.deps.voiceOutputFor?.(key)
+      if (!port?.state) return
+      const state = await port.state()
+      this.assertWakeAdmission()
+      if (state.channel_id !== notice.channel_id || state.session_id !== notice.session_id || state.connection_epoch !== notice.connection_epoch) return
+      await port.reconcile?.(); await port.updatePending?.()
+      await this.settleVoiceReceipts(key, port)
+      this.assertWakeAdmission()
+      if (!state.foreground || !state.speech_enabled || state.activity !== 'idle') return
+      const queued = port.records().filter(item => item.status === 'queued' && item.binding)
+      if (queued.length === 1 && port.deliver) {
+        if (await port.deliver(queued[0])) await this.settleVoiceReceipts(key, port)
+      } else if (queued.length > 1) {
+        const results = queued.slice(0, 3).map(item => ({ delivery_id: item.playback_id, text: item.text, binding: item.binding!, status: 'queued' as const }))
+        await this.runWake(key, this.makeEnvelope(this.captureIngress(), { kind: 'voice_delivery', results }))
+        await this.settleVoiceReceipts(key, port)
+      }
+      await port.updatePending?.()
+    }).finally(() => this.voiceReadyDrains.delete(key))
+    this.voiceReadyDrains.set(key, operation); return operation
+  }
+
+  private async settleVoiceReceipts(key: ManagerKey, port: import('./voice-output.js').VoiceOutputPort): Promise<void> {
+    for (const item of port.records().filter(record => record.status === 'completed' && record.binding && !record.receipt_handled)) {
+      const result = { delivery_id: item.playback_id, text: item.text, binding: item.binding!, status: 'completed' as const, sent_at: item.sent_at }
+      const handled = await this.deps.onVoiceDeliveryCompleted?.(key, result)
+      if (!handled && item.binding?.worker_id) {
+        const outcome = await this.runWake(key, this.makeEnvelope(this.captureIngress(), { kind: 'voice_delivery', results: [result] }))
+        if (!outcome.consumedEvents) continue
+      }
+      item.receipt_handled = true; port.save(item)
+    }
   }
 
   async routeMediaNotification(p: {
@@ -935,6 +1005,7 @@ export class ManagerRegistry {
     this.idleReviewBaselines.clear()
     this.idleReviewReads.clear()
     this.pendingReplies.clear()
+    this.voiceReadyPending.clear()
   }
 
   private captureIngress(): IngressCapture {
@@ -958,6 +1029,7 @@ export class ManagerRegistry {
             ...(event.task_status ? { outcome: event.task_status } : {}),
             trigger_type: found.worker.origin.trigger_type,
             task_id: found.worker.task.id,
+            request_id: found.worker.origin.request?.request_id,
           },
         }
       : event
@@ -1102,6 +1174,13 @@ export class ManagerRegistry {
       // "计数已归零、自唤醒尚未登记"的窗口,`evictIdle` 恰在此时跑就会把实例连同 mailbox
       // 一起回收掉。`maybeSelfWake` 内部的 `runWake` 在第一个 await 之前就完成了 +1。
       if (!result?.contextRecoveryRequired) this.maybeSelfWake(key, loop, result, selfWakeChain)
+      if (remaining <= 0 && result?.consumedEvents === true && this.voiceReadyPending.has(key)) {
+        const notice = this.voiceReadyPending.get(key)!; this.voiceReadyPending.delete(key)
+        void this.routeVoiceOutputReady(notice).catch(() => {})
+      }
+      if (remaining <= 0 && result?.consumedEvents === true && envelope?.wake.kind !== 'voice_delivery') {
+        void this.refreshVoiceOutput(key).catch(() => { /* Durable results remain pending until the next availability signal. */ })
+      }
       this.maybeScheduleIdleReview(key, loop, result, envelope?.wake.kind === 'workboard_idle_review')
     }
   }

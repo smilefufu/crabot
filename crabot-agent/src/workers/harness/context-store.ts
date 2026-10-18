@@ -1,10 +1,15 @@
 import { randomUUID } from 'crypto'
+import { canonicalizeJson } from 'crabot-shared'
+import { AsyncMutex } from '../async-mutex.js'
+import { assertConversationRequestBinding } from './request-binding.js'
+import type { ConversationRequestBinding } from '../../manager/conversation-request.js'
 import { promises as fs } from 'fs'
 import { join } from 'path'
 
 import { CLI_DOMAINS, type CliAccessConfig, type ResolvedPermissions, type StoragePermission, type ToolAccessConfig } from '../../types.js'
 
 const CONTEXT_FILE = 'context.json'
+const CONTEXT_KEYS = ['principal_permissions', 'manager_key', 'target_session', 'creator_friend_id', 'schema_version', 'request']
 const TOOL_ACCESS_KEY_MAP = {
   memory: true,
   messaging: true,
@@ -21,6 +26,8 @@ const CLI_ACCESS_KEYS = CLI_DOMAINS
 const CLI_PERMISSIONS = new Set(['none', 'read', 'write'])
 
 export interface WorkerContext {
+  readonly schema_version?: 2
+  readonly request?: ConversationRequestBinding
   readonly principal_permissions?: ResolvedPermissions
   readonly manager_key?: string
   readonly target_session?: {
@@ -89,7 +96,7 @@ function normalizeResolvedPermissionsForWrite(value: unknown, path: string): Res
 }
 
 function validatePersistedContext(value: unknown, path: string): WorkerContext {
-  if (!isRecord(value) || !hasOnlyKeys(value, ['principal_permissions', 'manager_key', 'target_session', 'creator_friend_id'])) {
+  if (!isRecord(value) || !hasOnlyKeys(value, CONTEXT_KEYS)) {
     throw new Error(`WorkerContextStore: invalid context at ${path}`)
   }
   if (value.principal_permissions !== undefined && !isResolvedPermissionsSnapshot(value.principal_permissions)) {
@@ -107,7 +114,13 @@ function validatePersistedContext(value: unknown, path: string): WorkerContext {
   if (value.creator_friend_id !== undefined && typeof value.creator_friend_id !== 'string') {
     throw new Error(`WorkerContextStore: invalid creator_friend_id at ${path}`)
   }
+  if (value.request !== undefined) {
+    assertConversationRequestBinding(value.request)
+    if (value.schema_version !== 2 || !isRecord(target) || target.type !== 'group'
+      || !target.channel_id || !target.session_id || value.manager_key !== `${target.channel_id}::${target.session_id}`) throw new Error(`WorkerContextStore: invalid request target/version at ${path}`)
+  } else if (value.schema_version !== undefined) throw new Error(`WorkerContextStore: unsupported context version at ${path}`)
   return {
+    ...(value.request === undefined ? {} : { schema_version: 2, request: value.request }),
     ...(value.principal_permissions === undefined ? {} : { principal_permissions: value.principal_permissions }),
     ...(value.manager_key === undefined ? {} : { manager_key: value.manager_key }),
     ...(target === undefined ? {} : { target_session: target as WorkerContext['target_session'] }),
@@ -116,7 +129,7 @@ function validatePersistedContext(value: unknown, path: string): WorkerContext {
 }
 
 function normalizeContextForWrite(value: unknown, path: string): WorkerContext {
-  if (!isRecord(value) || !hasOnlyKeys(value, ['principal_permissions', 'manager_key', 'target_session', 'creator_friend_id'])) {
+  if (!isRecord(value) || !hasOnlyKeys(value, CONTEXT_KEYS)) {
     throw new Error(`WorkerContextStore: invalid context at ${path}`)
   }
   return validatePersistedContext({
@@ -129,6 +142,7 @@ function normalizeContextForWrite(value: unknown, path: string): WorkerContext {
 
 /** Harness 持有的跨实现 worker 身份快照；文件内容严格限于协议定义字段。 */
 export class WorkerContextStore {
+  private readonly locks = new Map<string, AsyncMutex>()
   constructor(private readonly workersDir: string) {}
 
   private pathFor(workerId: string): string {
@@ -136,21 +150,25 @@ export class WorkerContextStore {
   }
 
   async write(workerId: string, context: WorkerContext): Promise<WorkerContext> {
-    const path = this.pathFor(workerId)
-    const dir = join(this.workersDir, workerId)
-    const tmpPath = join(dir, `.${CONTEXT_FILE}.tmp-${randomUUID()}`)
-    // RPC 的历史 ResolvedPermissions 可能缺少后来新增的已知类目；写前补最严默认，
-    // 让落盘结果始终满足 read 的严格契约，同时拒绝未知字段与非法值。
-    const normalized = normalizeContextForWrite(context, path)
-    await fs.mkdir(dir, { recursive: true })
-    try {
-      await fs.writeFile(tmpPath, JSON.stringify(normalized), 'utf-8')
-      await fs.rename(tmpPath, path)
-      return normalized
-    } catch (err) {
-      await fs.rm(tmpPath, { force: true }).catch(() => undefined)
-      throw err
-    }
+    let mutex = this.locks.get(workerId)
+    if (!mutex) { mutex = new AsyncMutex(); this.locks.set(workerId, mutex) }
+    const captured = structuredClone(context)
+    return mutex.run(async () => {
+      const path = this.pathFor(workerId), dir = join(this.workersDir, workerId)
+      const tmpPath = join(dir, `.${CONTEXT_FILE}.tmp-${randomUUID()}`)
+      const normalized = normalizeContextForWrite(captured, path), previous = await this.read(workerId)
+      if (previous?.request && canonicalizeJson(previous.request) !== canonicalizeJson(normalized.request ?? null)) throw new Error('Worker request binding is immutable')
+      if (previous && !previous.request && normalized.request) throw new Error('Cannot attach request authority to a historical Worker context')
+      await fs.mkdir(dir, { recursive: true })
+      try {
+        await fs.writeFile(tmpPath, JSON.stringify(normalized), normalized.request ? { encoding: 'utf8', mode: 0o600 } : 'utf-8')
+        await fs.rename(tmpPath, path)
+        return normalized
+      } catch (err) {
+        await fs.rm(tmpPath, { force: true }).catch(() => undefined)
+        throw err
+      }
+    })
   }
 
   /** ENOENT 是历史 worker 的明确 fallback；其他读取失败一律上抛。 */

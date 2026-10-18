@@ -1768,6 +1768,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     permissionConfig: ToolPermissionConfig
     hookRegistry: HookRegistry
     resolvedPermissions: typeof BUILTIN_WORKER_PERMISSIONS
+    requestCliAuthorization?: import('../../engine/types.js').EngineOptions['requestCliAuthorization']
     senderIsMaster: boolean
     maxTokens?: number
     contextWindowTokens?: number
@@ -1778,6 +1779,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     return {
       permissionConfig: { mode: 'bypass' },
       hookRegistry: this.hookRegistry,
+      ...(builtin.requestCliAuthorization ? { requestCliAuthorization: builtin.requestCliAuthorization } : {}),
       resolvedPermissions: builtin.resolvedPermissions ?? narrowWorkerPermissions(BUILTIN_WORKER_PERMISSIONS, null),
       // worker 不是任何人：F 阶段没有可信发起人身份（origin.creator_friend_id 现网恒空），
       // 不能走 CLI 闸的 master 短路。J 接线真实身份后由 origin 解析（见 runtime.ts 注释）。
@@ -1810,7 +1812,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
           `(${CONTEXT_FILE} missing — worker was never spawned through this adapter?)`,
         )
       }
-      const builtin = this.deps.resolveRuntime({
+      const builtin = await this.deps.resolveRuntime({
         ...context,
         ...(workspaceInstructions !== undefined ? { workspace_instructions: workspaceInstructions } : {}),
         workspace_git: workspaceGit,

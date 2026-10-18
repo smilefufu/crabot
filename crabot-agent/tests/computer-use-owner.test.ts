@@ -113,7 +113,7 @@ describe('computer-use trusted owner', () => {
       { incarnation_id: 'old', state: 'idle' }, { incarnation_id: 'current', state: 'running' },
       { incarnation_id: 'branch', query_id: 'query', state: 'running' },
     ] }
-    agent.managerStack = { ledger: { findWorker: async () => ({ worker }) } }
+    agent.managerStack = { requestGuard: { load: async () => null }, ledger: { findWorker: async () => ({ worker }) } }
     expect(await agent.desktopWorkerCurrent('w', 'current')).toBe(true)
     expect(await agent.desktopWorkerCurrent('w', 'branch')).toBe(true)
     expect(await agent.desktopWorkerCurrent('w', 'old')).toBe(false)

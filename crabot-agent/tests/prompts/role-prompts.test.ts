@@ -66,6 +66,15 @@ describe('独立角色提示词', () => {
     expect(assembleManagerSystemPrompt({ ...inputs, voice: false })).toBe(assembleManagerSystemPrompt(inputs))
   })
 
+  it('提前接单属于主控的新请求，Worker和每日反思不继承，System保留例行静默', () => {
+    const worker = assembleBuiltinWorkerPrompt({ workspaceRoot: '/fixture', imageAvailable: false })
+    const daily = assembleManagerSystemPrompt({ managerKey: 'fixture::daily', isSystemThread: true, isBuiltinDailyReflection: true })
+    for (const prompt of [worker, daily]) expect(prompt).not.toContain('先用一句简短回应说明准备做什么')
+    const system = assembleManagerSystemPrompt({ managerKey: 'fixture::system', isSystemThread: true })
+    expect(system).toContain('例行成功与进展留在本线程')
+    expect(system).toContain('只有需要人类立即注意的失败')
+  })
+
   it('普通主控核心保留答复投递和回合收尾责任', () => {
     const prompt = assembleManagerSystemPrompt({ managerKey: 'fixture::synthetic', isSystemThread: false })
     expect(prompt).toContain('用工具投递答复，普通文本不外发')

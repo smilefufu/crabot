@@ -1,3 +1,5 @@
+import type { ConversationRequestSource } from 'crabot-shared'
+export type { ConversationRequestSource } from 'crabot-shared'
 import type { VoiceSetupMetadata } from 'crabot-shared'
 import type { ToolAccessUpdate } from 'crabot-shared'
 /**
@@ -253,6 +255,24 @@ export interface ResolvePrincipalPermissionsResult {
     session_template_id?: string
     fallback?: 'minimal'
   }
+}
+
+
+
+export interface RequestPermissionSource {
+  kind: 'group' | 'friend'
+  subject_id: string
+  is_master: boolean
+  resolved: ResolvedPermissions
+}
+
+export interface ResolveRequestPermissionSourcesParams {
+  source: ConversationRequestSource
+}
+
+export interface ResolveRequestPermissionSourcesResult {
+  group: RequestPermissionSource
+  friend: RequestPermissionSource | null
 }
 
 // ============================================================================
@@ -2537,4 +2557,12 @@ export interface WorkerImplementationConfig {
 export interface WorkerImplementationRuntimeConfig {
   config: WorkerImplementationConfig
   connection_revisions: Partial<Record<CLIWorkerImplId, string>>
+}
+
+export interface ResolveRequestPermissionSourceParams {
+  source: ConversationRequestSource
+  kind: 'group' | 'friend'
+}
+export interface ResolveRequestPermissionSourceResult {
+  source: RequestPermissionSource | null
 }

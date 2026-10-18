@@ -20,7 +20,7 @@ describe('CliAccessEditor', () => {
     fireEvent.click(screen.getByRole('button', { name: /高级/ }))
     expect(screen.getByText(/Provider/)).toBeInTheDocument()
     expect(screen.getByText(/Agent/)).toBeInTheDocument()
-    expect(screen.getByText(/Friend/)).toBeInTheDocument()
+    expect(screen.getByText(/好友/)).toBeInTheDocument()
     expect(screen.getByText(/Permission/)).toBeInTheDocument()
     expect(screen.getByText(/Config/)).toBeInTheDocument()
     expect(screen.getByText(/Undo/)).toBeInTheDocument()

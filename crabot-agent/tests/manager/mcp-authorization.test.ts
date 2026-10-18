@@ -6,6 +6,9 @@ import AdminModule from '../../../crabot-admin/src/index.js'
 import { PermissionTemplateManager } from '../../../crabot-admin/src/permission-template-manager.js'
 import { groupSessionConfigKey } from '../../../crabot-admin/src/group-session-config.js'
 import { createToolAccessConfig } from '../../../crabot-admin/src/types.js'
+import { ConfigLoader } from '../../src/core/config-loader.js'
+import { ConversationRequestAuthority } from '../../src/manager/conversation-request-authority.js'
+import { ManagerSessionStore } from '../../src/manager/session-store.js'
 import { UnifiedAgent } from '../../src/unified-agent.js'
 import type { Friend, ResolvedPermissions, UnifiedAgentConfig } from '../../src/types.js'
 import type { ManagerStack } from '../../src/manager/bootstrap.js'
@@ -301,4 +304,43 @@ describe('Manager MCP production authorization wiring', () => {
     await (await scheduled(identity)).expectHidden(mcpName)
     expect(execute).toHaveBeenCalledOnce()
   })
+  it('real UnifiedAgent request MCP uses its guarded friend source while retaining the true group and global rollback', async () => {
+    grantPrivate()
+    const friendPermissions = await agent.resolvePrincipalPermissions('creator', target.session_id, 'private', target.channel_id)
+    const group = groupTarget(false)!
+    const owner = admin.friends.get('creator')
+    owner.channel_identities = [{ channel_id: group.channel_id, platform_user_id: 'creator-platform' }]
+    vi.spyOn(ConfigLoader, 'getRuntimeBearer').mockReturnValue('fixture-core')
+    const original = rpc.getMockImplementation()!
+    rpc.mockImplementation(async (...args: any[]) => args[1] === 'resolve_friend' ? { friend: owner } : original(...args))
+    const groupPermissions = await agent.resolvePrincipalPermissions(undefined, group.session_id, 'group', group.channel_id)
+    expect(groupPermissions.tool_access.mcp_skill).toBe(false)
+    expect(friendPermissions.tool_access.mcp_skill).toBe(true)
+    const sources = { group: { kind: 'group', subject_id: key, is_master: false, resolved: groupPermissions },
+      friend: { kind: 'friend', subject_id: 'creator', is_master: false, resolved: friendPermissions } }
+    vi.spyOn(agent.rpcClient, 'callSensitive').mockImplementation(async (_port, method, params: any) => {
+      if (method === 'resolve_request_permission_sources') return sources
+      if (method === 'resolve_request_permission_source') return { source: sources[params.kind as 'group' | 'friend'] }
+      throw new Error('Unexpected sensitive RPC')
+    })
+    const [source] = await stack.trustedHumanInputs.capture(key, [{ platform_message_id: 'request-source', session: group,
+      sender: { platform_user_id: 'creator-platform', platform_display_name: 'creator' }, content: { type: 'text', text: '查询我的归档' },
+      platform_timestamp: new Date().toISOString(), features: { is_mention_crab: true } }])
+    const record = await stack.conversationRequests.forInputs(key, [source]).create({ source_id: source.source_id, delivery: 'origin' })
+    const authority = new ConversationRequestAuthority(stack.conversationRequests, key, record.request_id, 'request', async kind => sources[kind] as never)
+    await stack.startContinuationReconciliation()
+    const loop = (stack.requestRunner as any).deps.createLoop({ source, request: record, authority, store: new ManagerSessionStore(join(directory, 'isolated')) })
+    const state = createManagerToolFaceState()
+    const tools = () => (loop as any).deps.toolFace(undefined, state)
+    const search = tools().find((tool: any) => tool.name === 'search_tools')!
+    expect(JSON.parse((await search.call({ query: mcpName, limit: 1 }, {})).output).loaded).toContain(mcpName)
+    const tool = tools().find((item: any) => item.name === mcpName)!
+    expect(await tool.call({}, {})).toMatchObject({ isError: false })
+    expect(execute).toHaveBeenCalledOnce()
+    expect(stack.principals.currentMasterAuthorization(key)).toBeUndefined()
+    vi.stubEnv('CRABOT_MANAGER_MCP_ENABLED', '0')
+    expect(await tool.call({}, {})).toMatchObject({ isError: true })
+    expect(execute).toHaveBeenCalledOnce()
+  })
+
 })

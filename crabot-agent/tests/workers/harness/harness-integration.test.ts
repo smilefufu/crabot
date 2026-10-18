@@ -1,3 +1,4 @@
+import { BUILTIN_WORKER_PERMISSIONS } from '../../../src/workers/builtin/runtime.js'
 /**
  * WorkerHarness — 真实 adapter 集成冒烟(P3 Task 10)。
  *
@@ -130,6 +131,7 @@ describe('WorkerHarness — 真实 builtin adapter 集成冒烟(mock LLM)', () =
 
       const managerKey = `test::friend-builtin-integ` as ManagerKey
       const worker = await harness.spawnWorker({
+        principal_permissions: BUILTIN_WORKER_PERMISSIONS,
         managerKey,
         title: '集成冒烟任务',
         prompt: '把活干完',
@@ -326,6 +328,7 @@ describe.skipIf(!tmuxAvailable)('WorkerHarness — 真实 claude-code adapter �
         report_to: { channel_id: 'wechat', session_id: 'sess-1' },
         impl: 'claude-code',
         workspace: workspaceRoot,
+        principal_permissions: { ...BUILTIN_WORKER_PERMISSIONS, storage: { workspace_path: workspaceRoot, access: 'readwrite' } },
       })
       sessionsToCleanup.push(`crabot-w-${worker.worker_id}-1`)
 
@@ -443,6 +446,7 @@ describe.skipIf(!tmuxAvailable)(
         adaptersMap1.set('claude-code', adapterA)
 
         const aliveWorker = await harness1.spawnWorker({
+          principal_permissions: BUILTIN_WORKER_PERMISSIONS,
           managerKey,
           title: '存活 worker',
           prompt: '你好',
@@ -454,6 +458,7 @@ describe.skipIf(!tmuxAvailable)(
         sessionsToCleanup.push(`crabot-w-${aliveWorker.worker_id}-1`)
 
         const deadWorker = await harness1.spawnWorker({
+          principal_permissions: BUILTIN_WORKER_PERMISSIONS,
           managerKey,
           title: '将被外部杀掉的 worker',
           prompt: '你好',
@@ -576,6 +581,7 @@ describe.skipIf(!tmuxAvailable)(
         adaptersMap1.set('claude-code', adapterA)
 
         const worker = await harness1.spawnWorker({
+          principal_permissions: BUILTIN_WORKER_PERMISSIONS,
           managerKey,
           title: 'PoC③ worker',
           prompt: '你好',
@@ -644,6 +650,7 @@ describe.skipIf(!tmuxAvailable)(
         adaptersMap1.set('claude-code', adapterA)
 
         const worker = await harness1.spawnWorker({
+          principal_permissions: BUILTIN_WORKER_PERMISSIONS,
           managerKey,
           title: 'PoC④ worker',
           prompt: '你好',

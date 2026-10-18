@@ -221,6 +221,8 @@ class MemoryModule:
             "params": {"caller_kind": "admin_web" if context.actor_kind == "admin" else "core_agent"},
             "timestamp": datetime.utcnow().isoformat() + "Z",
         }
+        if context.actor_kind == "master_request":
+            payload["params"]["master_request"] = context.request.model_dump()
         try:
             async with httpx.AsyncClient(trust_env=False, timeout=10.0) as client:
                 response = await client.post(f"{self.config.admin_endpoint}/verify_memory_access", json=payload, headers={"Authorization": f"Bearer {bearer}"})
@@ -230,6 +232,8 @@ class MemoryModule:
         except Exception:
             raise MemoryAccessError("SERVICE_UNAVAILABLE", "Memory verifier unavailable", retryable=True) from None
         if response.is_success and result.get("success") is True and result.get("data", {}).get("verified") is True:
+            if context.actor_kind == "master_request" and result.get("data", {}).get("request_verified") is not True:
+                raise MemoryAccessError("SERVICE_UNAVAILABLE", "Memory request verifier unavailable", retryable=True)
             return
         code = result.get("error", {}).get("code")
         if code in {"UNAUTHORIZED", "FORBIDDEN"}:

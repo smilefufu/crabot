@@ -1,3 +1,4 @@
+import { prepareSharedRequests } from './shared-requests.mjs'
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { cp, writeFile } from 'node:fs/promises'
 import { join, basename } from 'node:path'
@@ -120,6 +121,7 @@ function timestamp() {
 export async function runMigrations(crabotHome, dataDir, runScriptFn, logger) {
   const targets = scanModules(crabotHome, dataDir)
   if (targets.length === 0) {
+    await prepareSharedRequests(crabotHome, dataDir, logger)
     return { ok: true, migrated: [], skipped: [] }
   }
 
@@ -150,5 +152,6 @@ export async function runMigrations(crabotHome, dataDir, runScriptFn, logger) {
     logger.info(`[${t.moduleId}] done`)
     migrated.push(t.moduleId)
   }
+  await prepareSharedRequests(crabotHome, dataDir, logger)
   return { ok: true, migrated, skipped: [] }
 }

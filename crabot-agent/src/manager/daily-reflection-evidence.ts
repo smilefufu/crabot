@@ -18,6 +18,7 @@ export interface ReflectionEvidenceDeps {
   managersDir: string
   store: ManagerSessionStore
   ledger: LedgerStore
+  canReadWorker?: (workerId: string) => Promise<boolean>
   harness: WorkerHarness
   turns: WorkerTurnStore
   traces: Pick<TraceStore, 'listTraceManagerKeys' | 'readManagerEpisodes' | 'readManagerEpisode'>
@@ -167,6 +168,7 @@ export class DailyReflectionEvidence {
     }
 
     for (const { worker } of await this.deps.ledger.listAllWorkers()) {
+      if (worker.origin.request?.execution_scope === 'request' || this.deps.canReadWorker && !await this.deps.canReadWorker(worker.worker_id)) continue
       if (worker.origin.spawned_by_episode && reflectionEpisodes.has(worker.origin.spawned_by_episode)) continue
       if (state.analysis_worker_ids.includes(worker.worker_id)) continue
       const events = await this.deps.harness.readWorkerEvents(worker.worker_id)
@@ -245,6 +247,7 @@ export class DailyReflectionEvidence {
           else gaps.push(`human_input_unavailable:${id}`)
         }
       } else {
+        if (this.deps.canReadWorker && !await this.deps.canReadWorker(source.worker_id)) throw new Error('worker_source_unavailable')
         const events = await this.deps.harness.readWorkerEvents(source.worker_id)
         if (events.length < source.event_count) gaps.push('worker_events_truncated')
         values.push(...events.slice(0, source.event_count).filter(event => inWindow(event.ts, window)))

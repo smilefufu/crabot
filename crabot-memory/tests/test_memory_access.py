@@ -122,3 +122,75 @@ async def test_private_ordinary_memory_cannot_be_summarized_into_friend_profile(
         await module._dispatch("upsert_scene_profile", {**payload, "access_context": ordinary})
     await module._dispatch("upsert_scene_profile", {**payload, "access_context": admin})
     assert await module._dispatch("get_scene_profile", {"scene": scene, "access_context": ordinary}) == {"profile": None}
+
+
+def master_request_context():
+    return {"actor_kind": "master_request", "memory_enabled": True,
+        "scene": {"type": "group_session", "channel_id": "voice", "session_id": "shared"},
+        "request": {"request_id": "a" * 64, "source": {
+            "source_id": "11111111-1111-4111-8111-111111111111", "channel_id": "voice", "session_id": "shared", "session_type": "group",
+            "platform_message_id": "synthetic-message", "platform_user_id": "speaker-a", "sender_friend_id": "actual-a"}}}
+
+
+def test_master_request_requires_exact_original_group_and_does_not_change_other_actors():
+    import copy
+    valid = master_request_context()
+    assert authorize_method("get_memory", {"access_context": valid}).actor_kind == "master_request"
+    for change in [lambda c: c.pop("request"), lambda c: c["request"].update(request_id="not-a-hash"),
+        lambda c: c["request"]["source"].update(sender_friend_id=None), lambda c: c["request"]["source"].update(session_type="private"),
+        lambda c: c.update(scene={"type": "friend", "friend_id": "actual-a"}), lambda c: c["scene"].update(session_id="other"),
+        lambda c: c["request"].update(role="master"), lambda c: c.update(actor_kind="conversation"), lambda c: c.update(actor_kind="master_private")]:
+        candidate = copy.deepcopy(valid); change(candidate)
+        with pytest.raises(MemoryAccessError) as error:
+            access_context({"access_context": candidate})
+        assert error.value.code == "INVALID_PARAMS"
+    for method in ["export_memories", "restore_memory", "run_maintenance", "import_long_term", "migrate_historical_inbox_batch"]:
+        with pytest.raises(MemoryAccessError) as error:
+            authorize_method(method, {"access_context": valid})
+        assert error.value.code == "FORBIDDEN"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("verified,expected", [(True, None), (False, "SERVICE_UNAVAILABLE")])
+async def test_master_request_needs_new_verifier_receipt_and_header_only_credential(module, monkeypatch, verified, expected):
+    captured = []
+    class Client:
+        def __init__(self, **kwargs):
+            assert kwargs["trust_env"] is False
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *args):
+            pass
+        async def post(self, url, **kwargs):
+            captured.append(kwargs)
+            data = {"verified": True, **({"request_verified": True} if verified else {})}
+            return SimpleNamespace(json=lambda: {"success": True, "data": data}, is_success=True)
+    monkeypatch.setattr(httpx, "AsyncClient", Client)
+    context = access_context({"access_context": master_request_context()})
+    if expected:
+        with pytest.raises(MemoryAccessError) as error:
+            await module._verify_caller(context, "only-in-header")
+        assert error.value.code == expected
+    else:
+        await module._verify_caller(context, "only-in-header")
+    request = captured[0]
+    assert request["json"]["params"] == {"caller_kind": "core_agent", "master_request": master_request_context()["request"]}
+    assert request["headers"] == {"Authorization": "Bearer only-in-header"}
+    assert "only-in-header" not in str(request["json"])
+
+
+@pytest.mark.asyncio
+async def test_master_request_reads_private_ordinary_data_but_ordinary_friend_remains_limited(module):
+    admin = {"actor_kind": "admin", "memory_enabled": True}
+    await module._lt_v2_rpc.quick_capture({"id": "request-private-fixture", "type": "fact", "brief": "fixture", "content": "synthetic private fact",
+        "visibility": "private", "scopes": [], "access_context": admin})
+    module._verify_caller = AsyncMock()
+    ordinary = {"actor_kind": "conversation", "memory_enabled": True, "scene": master_request_context()["scene"]}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=module.app), base_url="http://memory.test") as client:
+        result = await client.post("/get_memory", headers={"Authorization": "Bearer synthetic-runtime"},
+            json={"params": {"id": "request-private-fixture", "include": "full", "access_context": master_request_context()}})
+        assert result.json()["success"] is True
+        assert "synthetic private fact" in result.json()["data"]["body"]
+        limited = await client.post("/get_memory", headers={"Authorization": "Bearer synthetic-runtime"},
+            json={"params": {"id": "request-private-fixture", "include": "full", "access_context": ordinary}})
+        assert limited.json()["error"]["code"] == "NOT_FOUND"

@@ -92,6 +92,7 @@ export const GroupWorkbench: React.FC<GroupWorkbenchProps> = ({
         <div><strong>{group.title}</strong></div>
         <div>来源渠道：{group.channel_id}</div>
         <div>群成员数量：{group.participant_count}</div>
+        <p>群权限是所有成员（含陌生人）的公共授权。已核验好友的本人请求还可使用其个人授权；不会提升共享主控或其他人的权限。</p>
         <div>master_in_group：{group.master_in_group ? '是' : '否'}</div>
         <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
           <Button variant="secondary" onClick={onEditPermission}>

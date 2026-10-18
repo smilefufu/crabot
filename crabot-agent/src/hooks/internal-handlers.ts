@@ -57,6 +57,10 @@ registerInternalHandler('lsp-diagnostics', async (input, context) => {
 //   4. 硬闸：cli_access[domain] 与 (read/write) 不匹配 → block
 //   5. 软闸：REQUIRES_CONTENT_REVIEW（仅 schedule add）→ 调 contentReviewer，deny → block
 registerInternalHandler('cli-permission-gate', async (input, context) => {
+  if (context.requestCliAuthorization) {
+    try { return await context.requestCliAuthorization(input) }
+    catch { return { action: 'block', message: 'CAPABILITY_UNKNOWN: Request CLI authorization unavailable' } }
+  }
   const cmdStr = String(input.toolInput?.['command'] ?? '')
   const parsed = parseCrabotInvocation(cmdStr)
   if (!parsed) return { action: 'continue' }
