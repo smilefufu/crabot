@@ -119,6 +119,31 @@ try {
       const result = await runLegacySystemAccount(employee, { root: core, release, portOffsetHint: 100 })
       assert.equal(result.uid, employee.uid); assert.equal(result.data_binding, 'unverified')
       assert.equal(result.port_offset, 100); assert.equal(result.runtime_state, 'no_known_launcher'); assert.doesNotMatch(JSON.stringify(result), /must-not|api_key|data_dir/)
+      const { collectLegacySystemProcesses, assertLegacySystemProcessCoverage } = await load('scripts/lib/legacy-system-processes.mjs')
+      const { planSystemConversion } = await load('scripts/lib/system-conversion.mjs')
+      const empty = planSystemConversion({ installRoot: installed, source: release, target: { id: selected, version: JSON.parse(await fs.readFile(path.join(core, 'package.json'), 'utf8')).version }, instances: [] })
+      // Real same-UID Node metadata only, not an old business MM. A writable
+      // historical registry omitting this UID must not mean no shared consumers.
+      const child = spawn('/usr/bin/setpriv', ['--reuid=' + employee.uid, '--regid=' + employee.gid, '--init-groups', '--', runtime.executables.node,
+        '-e', "process.stdout.write('metadata-ready');setInterval(()=>{},1000)", '--', 'census-argv-must-not-be-persisted'],
+        { cwd: legacyEntryFixture, env: { PATH: '/usr/bin:/bin', HOME: employee.home, USER: employee.user, LOGNAME: employee.user }, stdio: ['ignore', 'pipe', 'inherit'] })
+      let original
+      try {
+        const [ready] = await once(child.stdout, 'data', { signal: AbortSignal.timeout(10_000) })
+        assert.equal(ready.toString(), 'metadata-ready'); original = identity.inspectProcess(child.pid)
+        assert.equal(original.owner, String(employee.uid))
+        const census = collectLegacySystemProcesses(legacyEntryFixture)
+        assert.equal(census.find(row => identity.sameProcess(row.process, original))?.uses_source, true)
+        assert.equal(JSON.stringify(census).includes('census-argv-must-not-be-persisted'), false)
+        assert.throws(() => assertLegacySystemProcessCoverage(empty, census), { code: 'CRABOT_LEGACY_SYSTEM_PROCESSES' })
+      } finally {
+        if (original && identity.sameProcess(original, identity.inspectProcess(child.pid))) {
+          const exited = once(child, 'exit', { signal: AbortSignal.timeout(10_000) })
+          child.kill('SIGTERM'); await exited
+        }
+      }
+      assertLegacySystemProcessCoverage(empty, collectLegacySystemProcesses(legacyEntryFixture), { stopped: true })
+      console.log('CRABOT_SYSTEM_LEGACY_PROCESS_CENSUS ' + JSON.stringify({ actual_uid: true, omitted_uid_refused: true, settled_after_exit: true, mm_started: false }))
       const entry = path.join(legacyEntryFixture, 'scripts/start.mjs')
       await fs.appendFile(entry, '\n// controlled modified legacy entry\n')
       await assert.rejects(runLegacySystemAccount(employee, { root: core, release, portOffsetHint: 100 }), { code: 'CRABOT_LEGACY_UNSUPPORTED' })
