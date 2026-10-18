@@ -4,7 +4,7 @@
 
 - 按已确认[中文Spec](crabot-docs/superpowers/specs/2026-10-17-desktop-application-design.md)及[计划](crabot-docs/superpowers/plans/2026-10-17-desktop-application-implementation.md)，仅在feat/desktop-application worktree开发。完整实现与验证前不推主仓main、不提前建PR，不部署/重启现场，保留无关WIP。
 - P0–P4的内置环境、共享实例、SDK、OS peer与真实Electron边界已有四平台基础证据；受管MCP按稳定id隔离，五类真实stdio冲突依赖/离线连接/凭据过滤已验证。新HTTP文字、旧WS与业务权限契约保持；完整最新四平台结果继续收敛。
-- P5已接模型、主题、权限与本地诊断。用户指定mirror-xinshu经Admin解析/Agent adapter的两次短请求成功（输入63/输出19），生产配置未改；GUI引导到实际业务首答仍待验收。旧user的识别、精确停止、可逆入口隔离、旧Python独立重建/默认引用及内部schema2数据保护已接；失败不自动重放、不移动旧venv，完整接管/入口及启动源切换尚未完成。
+- P5已接模型、主题、权限与本地诊断。用户指定mirror-xinshu经Admin解析/Agent adapter的两次短请求成功（输入63/输出19），生产配置未改；新增HTTP→真实引用存储/版本→Core双slot及Provider变更后重解析集成，相关Admin/SDK/UI共19项通过，未启动MM或调用模型。GUI引导到实际业务首答仍待验收。旧user的识别、精确停止、可逆入口隔离、旧Python独立重建/默认引用及内部schema2数据保护已接；失败不自动重放、不移动旧venv，完整接管/入口及启动源切换尚未完成。
 - P6已接登录自启动、同通道更新入口、活动核对、共享停机/备份/恢复和独立CLI完整归档升级。无GUI包使用同一Core及内置Node；真实HTTP/SHA/解包/crabot upgrade保留停止状态和依赖已验。普通版本维护与legacy接管来源分开，未知schema迁移保持保护。最终GUI安装按钮、全平台更新后健康仍待验收。
 - [System整体Spec](crabot-docs/superpowers/specs/2026-10-18-system-mode-experience-design.md)及批量语义已确认，[协议](crabot-docs/protocols/protocol-system.md)/[计划](crabot-docs/superpowers/plans/2026-10-18-system-mode-experience-implementation.md)先行。S1–S4注册/UID隔离/systemd/本人CLI/批量/共享更新/受保护恢复已接，System/共享启动/旧数据等扩大341项通过。Linux真实root所有权/umask077与三UID开通通过；真实首启定位未配模型的管理降级被严格健康判据误拒绝，已修System现时必要模块健康与桌面/CLI管理入口判据，Agent业务门禁保持，真实托管仍待新CI。
 - S5已接旧表候选/降UID发现、实际DataRoot及精确停止、共享来源隔离、独立root事务与原绑定注册；备份/迁移专用描述符和UID助手现已串联本人原清单、离线schema、Python准备引用与默认选择。397项相关回归通过，1项Linux专用待原生；备份不要求提前选新版，迁移要求新版已选中及旧来源封存，未知迁移/清单发布不重跑，Root不读员工业务正文。标准旧0755目录可核验停机；data目录以device/inode固定，停止/原结构/凭据核验后仅收窄顶层，子目录和父目录不改。根协调/全局入口、专用恢复、已停止部署可信绑定与全部实际启动源仍待接通；完整真实旧发行多UID转换尚未验收，不计S5完成。
