@@ -34,6 +34,9 @@ export function readVersionMaintenance(dataDir) {
     if (record.schema_version !== 1 || !uuid(record.id) || record.data_dir !== realpathSync(dataDir)
       || !path.isAbsolute(record.install_root) || !version(record.source_version) || !version(record.target_version)
       || !/^[a-f0-9]{64}$/.test(record.source_inventory_sha256)
+      || record.target_core !== undefined && (!record.target_core || typeof record.target_core.root !== 'string'
+        || !path.isAbsolute(record.target_core.root) || !/^[a-f0-9]{64}$/.test(record.target_core.inventory_sha256)
+        || Object.keys(record.target_core).some(key => !['root', 'inventory_sha256'].includes(key)))
       || !['preparing', 'backed_up', 'installing', 'verifying'].includes(record.phase)
       || record.backup !== null && (!uuid(record.backup?.id) || !/^[a-f0-9]{64}$/.test(record.backup?.sha256))) fail()
     return record
@@ -62,6 +65,21 @@ export async function beginVersionMaintenance(dataDir, root, targetVersion, sour
     source_version: release.version, target_version: targetVersion, source_inventory_sha256: release.inventory_sha256,
     phase: 'preparing', backup: null }
   write(dataDir, record, true); return record
+}
+// Bind an already verified immutable target before replacement begins. Existing
+// in-place App updates omit this field and retain their original root contract.
+export async function bindVersionMaintenanceTarget(dataDir, id, root) {
+  dataDir = locked(dataDir)
+  const record = readVersionMaintenance(dataDir)
+  if (record?.id !== id || !['preparing', 'backed_up'].includes(record.phase)) fail()
+  root = realpathSync(root)
+  const release = await verifyCoreRelease(root, { version: record.target_version })
+  if (record.target_core) {
+    if (record.target_core.root !== root || record.target_core.inventory_sha256 !== release.inventory_sha256) fail()
+    return record
+  }
+  record.target_core = { root, inventory_sha256: release.inventory_sha256 }
+  write(dataDir, record); return record
 }
 async function backupOf(dataDir, record) {
   if (!record.backup) fail()
@@ -92,11 +110,15 @@ export async function recoverVersionMaintenance({ dataDir, root, appVersion, ver
   try {
     dataDir = locked(dataDir); record = readVersionMaintenance(dataDir)
     if (!record) return false
-    if (record.install_root !== realpathSync(root)) fail()
+    root = realpathSync(root)
+    const exactSource = record.install_root === root, exactTarget = (record.target_core?.root ?? record.install_root) === root
+    if (!exactSource && !exactTarget) fail()
     const release = await verifyCoreRelease(root, { version: appVersion })
-    const previous = ['preparing', 'backed_up'].includes(record.phase) && appVersion === record.source_version
+    const previous = exactSource && ['preparing', 'backed_up'].includes(record.phase) && appVersion === record.source_version
       && release.inventory_sha256 === record.source_inventory_sha256
-    if (!previous && appVersion !== record.target_version) fail()
+    if (!previous && (!exactTarget || appVersion !== record.target_version
+      || record.target_core && release.inventory_sha256 !== record.target_core.inventory_sha256)) fail()
+    const expectedInventory = previous ? record.source_inventory_sha256 : record.target_core?.inventory_sha256
     if (record.backup) await backupOf(dataDir, record)
     else if (!previous) fail()
     await verifyCompatible()
@@ -105,7 +127,9 @@ export async function recoverVersionMaintenance({ dataDir, root, appVersion, ver
     // the exact verified source may be resumed if replacement never began.
     if (!previous) { record.phase = 'verifying'; write(dataDir, record) }
     if (!await run()) fail()
-    await verifyCoreRelease(root, { version: appVersion }); await verifyCompatible()
+    const completed = await verifyCoreRelease(root, { version: appVersion })
+    if (expectedInventory && completed.inventory_sha256 !== expectedInventory) fail()
+    await verifyCompatible()
     if (readVersionMaintenance(dataDir)?.id !== record.id) fail()
     rmSync(path.join(dataDir, name)); syncDirectory(dataDir)
     return true
