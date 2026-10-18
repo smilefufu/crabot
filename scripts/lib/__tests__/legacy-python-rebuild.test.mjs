@@ -37,9 +37,10 @@ test('rebuild planning refuses unknown sources, changed records, duplicate ident
 })
 
 async function fixture(t) {
-  const dataDir = management.ensurePrivateDataRoot(await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'Crabot Python 重建 '))))
+  const parent = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'Crabot Python 重建 ')))
   let lock
-  t.after(async () => { if (lock) releaseCliLock(lock); await fs.rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) })
+  t.after(async () => { if (lock) releaseCliLock(lock); await fs.rm(parent, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) })
+  const dataDir = management.ensurePrivateDataRoot(path.join(parent, 'private-data'))
   const legacy = path.join(dataDir, 'agent-venv')
   const site = path.join(legacy, process.platform === 'win32' ? 'Lib/site-packages' : 'lib/python3.11/site-packages')
   const info = 'crabot_migration_probe-1.2.3.dist-info/'
