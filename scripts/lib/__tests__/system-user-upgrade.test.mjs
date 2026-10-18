@@ -1,9 +1,10 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { promises as fs, constants, readFileSync, openSync, closeSync } from 'node:fs'
+import { promises as fs, constants, readFileSync, closeSync } from 'node:fs'
 import path from 'node:path'
 import { tmpdir } from 'node:os'
 import { createHash, randomUUID } from 'node:crypto'
+import { openSystemUserMaintenanceLog } from '../system-user-diagnostics.mjs'
 import { maintainSystemUser } from '../system-user-upgrade.mjs'
 import { writeCoreRelease, verifyCoreRelease } from '../core-release.mjs'
 import { readVersionMaintenance, assertVersionMaintenanceAllowsStart } from '../version-maintenance.mjs'
@@ -86,11 +87,13 @@ test('another operation, changed snapshot or a live replacement cannot authorize
 
 test('migration output remains in the employee private file and never corrupts the control channel', options, async t => {
   const f = await fixture(t), snapshot = await f.invoke('snapshot'); await f.choose(f.target)
-  const log = path.join(f.data, 'private-migration.log'), fd = openSync(log, 'ax', 0o600)
+  const oldLogs = path.join(f.data, 'logs'); await fs.mkdir(oldLogs, { mode: 0o755 }); await fs.chmod(oldLogs, 0o755)
+  const log = path.join(f.data, 'system-control/system-maintenance.log'), fd = openSystemUserMaintenanceLog(f.entry)
   try { await f.invoke('migrate', { snapshot, outputFd: fd }) } finally { closeSync(fd) }
   assert.equal(await fs.readFile(log, 'utf8'), 'ordinary migration output\n')
   assert.equal((await fs.stat(log)).mode & 0o777, 0o600)
   assert.equal(readVersionMaintenance(f.data), null)
+  assert.equal((await fs.stat(oldLogs)).mode & 0o777, 0o755)
 })
 
 

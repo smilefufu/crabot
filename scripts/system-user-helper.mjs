@@ -13,6 +13,7 @@ import { acquireCliLock, releaseCliLock } from './lib/cli-lock.mjs'
 import { systemdAvailable } from './lib/system-service.mjs'
 import { stopInstance } from './lib/instance-controller.mjs'
 import { inspectInstance } from './lib/instance-runtime.mjs'
+import { openSystemUserMaintenanceLog } from './lib/system-user-diagnostics.mjs'
 import { maintainSystemUser } from './lib/system-user-upgrade.mjs'
 import cliLocation from './lib/cli-location.cjs'
 import { validateSystemDeployment } from './lib/system-upgrade.mjs'
@@ -68,10 +69,7 @@ try {
     validateSystemDeployment(permit.deployment)
     assertSystemControlAvailable(entry, { permit })
     if (permit.action === 'migrate') {
-      const logs = management.ensurePrivateDataRoot(path.join(entry.data_dir, 'logs'))
-      outputFd = fs.openSync(path.join(logs, 'system-maintenance.log'), fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_APPEND | fs.constants.O_NOFOLLOW, 0o600)
-      const stat = fs.fstatSync(outputFd)
-      if (!stat.isFile() || stat.uid !== entry.uid || stat.nlink !== 1 || (stat.mode & 0o777) !== 0o600) throw systemError('本人维护日志无法安全打开，未派发迁移。')
+      outputFd = openSystemUserMaintenanceLog(entry)
     }
     result = await maintainSystemUser(entry, { action: permit.action, deployment: permit.deployment,
       operationId: permit.operation_id, snapshot: permit.snapshot, env: systemUserEnvironment(entry), outputFd })
@@ -99,9 +97,7 @@ try {
   if (diagnosticEntry) {
     let fd
     try {
-      management.requirePrivateDataRoot(diagnosticEntry.data_dir)
-      const logs = management.ensurePrivateDataRoot(path.join(diagnosticEntry.data_dir, 'logs'))
-      fd = fs.openSync(path.join(logs, 'system-maintenance.log'), fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_APPEND | fs.constants.O_NOFOLLOW, 0o600)
+      fd = openSystemUserMaintenanceLog(diagnosticEntry)
       const stat = fs.fstatSync(fd)
       if (stat.uid === diagnosticEntry.uid && stat.isFile() && stat.nlink === 1 && (stat.mode & 0o777) === 0o600) {
         fs.writeSync(fd, new Date().toISOString() + ' ' + (error.stack ?? 'Unknown system operation failure') + '\n'); diagnostic = true
