@@ -4,13 +4,19 @@ import { promises as fs, realpathSync } from 'node:fs'
 import path from 'node:path'
 import identity from './process-identity.cjs'
 import { discoverLegacyUserInstall } from './legacy-desktop.mjs'
+import { inspectLegacyEntryFence } from './legacy-entry-fence.mjs'
 import { openLegacyMmRpc } from './legacy-mm-rpc.mjs'
 
 const fail = message => { throw Object.assign(new Error(message), { code: 'CRABOT_LEGACY_RUNTIME_UNVERIFIED' }) }
 const samePath = (a, b) => realpathSync(a) === realpathSync(b)
 
-export async function withVerifiedLegacyRuntime(installation, use, { signal } = {}) {
-  const recognized = await discoverLegacyUserInstall({ root: installation.installRoot, dataDir: installation.dataRoot })
+export async function withVerifiedLegacyRuntime(installation, use, { signal, entryFenceId } = {}) {
+  let recognized
+  if (entryFenceId) {
+    const fenced = await inspectLegacyEntryFence(installation.installRoot)
+    if (fenced.id !== entryFenceId || fenced.phase !== 'fenced' || !fenced.entries_fenced) fail('旧入口尚未完成隔离，未开始接管。')
+    recognized = fenced.installation
+  } else recognized = await discoverLegacyUserInstall({ root: installation.installRoot, dataDir: installation.dataRoot })
   if (recognized.fingerprint !== installation.fingerprint) fail('旧安装在检查后发生变化，未开始接管。')
   const { installRoot: root, dataRoot: data } = recognized
   const self = identity.inspectProcess(process.pid), candidates = []
@@ -38,10 +44,17 @@ export async function withVerifiedLegacyRuntime(installation, use, { signal } = 
       if (pid === recordedPid || /^node(?:\.exe)?$/i.test(path.basename(current.executable))) fail('无法核验旧 Node 进程命令行，保留原安装。')
       continue
     }
-    if (args.length === 3 && args[2] === 'start') {
-      // The published CLI imports start.mjs in the same foreground process.
-      // Its actual argv remains node cli.mjs start, rather than the import path.
-      try { if (samePath(args[1], path.join(root, 'cli.mjs'))) candidates.push({ kind: 'foreground', process: current }) } catch {}
+    let entry
+    try { entry = realpathSync(args[1]) } catch {}
+    if (entry === path.join(root, 'cli.mjs')) {
+      // Imports retain node cli.mjs start as argv. Other old management commands
+      // may still write/unlink code or the old wx lock after this discovery.
+      if (args.length !== 3 || args[2] !== 'start') fail('旧管理命令仍在运行，请等待结束后重新检查。')
+      candidates.push({ kind: 'foreground', process: current })
+      continue
+    }
+    if (entry && path.dirname(entry) === path.join(root, 'scripts') && !['start.mjs', 'supervisor.mjs'].includes(path.basename(entry))) {
+      fail('旧管理脚本仍在运行，请等待结束后重新检查。')
     }
     if (args.length !== 2) continue
     for (const [kind, entry] of Object.entries(expectedEntries)) {

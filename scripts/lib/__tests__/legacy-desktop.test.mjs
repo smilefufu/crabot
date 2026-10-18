@@ -1,8 +1,9 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { promises as fs } from 'node:fs'
+import { promises as fs, realpathSync } from 'node:fs'
 import path from 'node:path'
 import { tmpdir } from 'node:os'
+import { materializeLegacyRelease } from './fixtures/legacy-release.mjs'
 import { discoverLegacyUserInstall } from '../legacy-desktop.mjs'
 
 async function fixture(t) {
@@ -37,20 +38,12 @@ test('a symbolic data root is refused without following or modifying its target'
 })
 
 for (const version of ['v2026.10.14.1', 'v2026.10.15.1']) {
-  const archive = new URL(`../../../.desktop-build/legacy-${version.slice(1)}/source/crabot-${version}-darwin-arm64/`, import.meta.url)
-  const available = await fs.stat(archive).then(() => true, () => false)
-  test('read-only recognition matches the verified real release ' + version, { skip: !available }, async t => {
+  test('read-only recognition matches the verified real release ' + version, async t => {
     const f = await fixture(t)
-    const files = ['cli.mjs', 'crabot.cmd', 'scripts/start.mjs', 'scripts/supervisor.mjs', 'crabot-core/dist/main.js',
-      'crabot-core/dist/index.js', 'crabot-core/dist/core-modules.js', 'crabot-core/dist/module-runtime-registry.js']
-    for (const file of files) {
-      const target = path.join(f.root, file); await fs.mkdir(path.dirname(target), { recursive: true })
-      await fs.copyFile(new URL(file, archive), target)
-    }
-    await fs.writeFile(path.join(f.root, 'VERSION'), version + '\n')
+    await materializeLegacyRelease(f.root, version)
     const discovered = await discoverLegacyUserInstall(f)
     assert.equal(discovered.version, version)
-    assert.equal(discovered.dataRoot, await fs.realpath(f.dataDir))
+    assert.equal(discovered.dataRoot, realpathSync(f.dataDir))
     assert.match(discovered.fingerprint, /^[a-f0-9]{64}$/)
     assert.deepEqual(await fs.readdir(f.dataDir), [])
     await fs.appendFile(path.join(f.root, 'scripts/start.mjs'), '\n// custom service\n')

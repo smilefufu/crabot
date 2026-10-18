@@ -1,6 +1,6 @@
 // Read-only recognition of the explicitly supported pre-desktop user releases.
 // No old script is executed, no process is stopped and no authority is minted.
-import { promises as fs } from 'node:fs'
+import { promises as fs, realpathSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import path from 'node:path'
 import identity from './process-identity.cjs'
@@ -12,7 +12,7 @@ const hash = text => createHash('sha256').update(text).digest('hex')
 async function present(file) { try { await fs.lstat(file); return true } catch (error) { if (error.code === 'ENOENT') return false; throw error } }
 async function readRegular(root, relative) {
   const file = path.join(root, relative), stat = await fs.lstat(file)
-  if (!stat.isFile() || stat.size > 1024 * 1024 || await fs.realpath(file) !== file) fail('旧安装入口被重定向或无法识别，未作修改。')
+  if (!stat.isFile() || stat.size > 1024 * 1024 || realpathSync(file) !== file) fail('旧安装入口被重定向或无法识别，未作修改。')
   return fs.readFile(file)
 }
 
@@ -22,7 +22,7 @@ export async function discoverLegacyUserInstall({ root, dataDir, source = proces
   }
   root = path.resolve(root); dataDir = path.resolve(dataDir)
   if (!identity.isOwnedDirectory(root) || !identity.isOwnedDirectory(dataDir)) fail('安装或数据目录不属于当前系统用户，未作修改。')
-  root = await fs.realpath(root); dataDir = await fs.realpath(dataDir)
+  root = realpathSync(root); dataDir = realpathSync(dataDir)
   if (await present(path.join(root, '.git')) || await present(path.join(root, 'core-release.json'))
     || await present(path.join(dataDir, 'desktop-managed.json'))) fail('此安装不属于可自动接管的旧 user 发行。')
   const version = (await readRegular(root, 'VERSION')).toString('utf8').trim()
