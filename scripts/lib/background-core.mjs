@@ -4,7 +4,7 @@ import { mkdirSync, openSync, closeSync, realpathSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import product from './product-runtime.cjs'
 import { createInstanceRuntime, inspectInstance, identity } from './instance-runtime.mjs'
-import { probeMmHealthy } from './mm-probe.mjs'
+import { probeHealthStatus } from './mm-probe.mjs'
 import { cliLockToken, hasInheritedCliLock } from './cli-lock.mjs'
 
 // Caller owns the lifecycle lock and has completed initialization/migrations.
@@ -53,7 +53,7 @@ export async function launchBackgroundCore({ root, dataDir, env, mmPort, webPort
       throw Object.assign(new Error(`Background controller exited; diagnostics: ${bootLog}`), { code: 'CRABOT_START_FAILED' })
     }
     const state = inspectInstance(dataDir)
-    if (state.record?.generation === record.generation && state.record.controller.pid === child.pid && state.record.mm && await probeMmHealthy(mmPort)) {
+    if (state.record?.generation === record.generation && state.record.controller.pid === child.pid && state.record.mm && ['healthy', 'degraded'].includes(await probeHealthStatus(mmPort))) {
       try {
         const response = await fetch(`http://127.0.0.1:${webPort}/health`, { signal: AbortSignal.timeout(1500) })
         if (response.ok) return { record: state.record, ready: true }

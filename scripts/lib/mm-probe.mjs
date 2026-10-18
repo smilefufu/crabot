@@ -42,15 +42,20 @@ export async function probeMmModules(mmPort, fetchImpl = fetch) {
  * 探 MM 的 /health：仅当 HTTP 2xx 且 data.status === 'healthy' 返回 true。
  */
 export async function probeMmHealthy(mmPort, fetchImpl = fetch) {
+  return await probeHealthStatus(mmPort, fetchImpl) === 'healthy'
+}
+
+// Common bounded health RPC only. Callers separately decide whether a degraded
+// management process is operational; this grants no model/business admission.
+export async function probeHealthStatus(port, fetchImpl = fetch) {
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return null
   try {
-    const r = await fetchImpl(`http://127.0.0.1:${mmPort}/health`, {
+    const r = await fetchImpl(`http://127.0.0.1:${port}/health`, {
       ...POST_OPTS,
       signal: AbortSignal.timeout(1500),
     })
-    if (!r.ok) return false
-    const body = await r.json()
-    return body?.data?.status === 'healthy'
-  } catch {
-    return false
-  }
+    if (!r.ok) return null
+    const body = await r.json(), status = body?.data?.status
+    return body?.success === true && ['healthy', 'degraded', 'unhealthy'].includes(status) ? status : null
+  } catch { return null }
 }

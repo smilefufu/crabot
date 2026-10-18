@@ -24,6 +24,6 @@ createServer((request, response) => {
       if (valid) stop()
     } else if (request.url === '/list_modules') {
       response.end(JSON.stringify({ success: true, data: { modules: [{ module_id: 'admin-web', status: 'running', port: 23456 }] } }))
-    } else response.end(JSON.stringify({ success: true, data: { status: 'healthy' } }))
+    } else response.end(JSON.stringify({ success: true, data: { status: process.env.TEST_HEALTH_STATUS || 'healthy' } }))
   })
 }).listen(Number(process.env.TEST_PORT), '127.0.0.1', () => writeFileSync(process.env.TEST_READY, 'ready'))

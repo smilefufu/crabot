@@ -4,7 +4,7 @@ import { promisify } from 'node:util'
 import { inspectInstance, identity } from './instance-runtime.mjs'
 import { stopInstance } from './instance-controller.mjs'
 import { acquireCliLock, releaseCliLock } from './cli-lock.mjs'
-import { probeMmHealthy, probeMmModules } from './mm-probe.mjs'
+import { probeHealthStatus, probeMmModules } from './mm-probe.mjs'
 import { systemUserEnvironment } from './system-user.mjs'
 import { assertSystemControlAvailable } from './system-context.mjs'
 import { selectSystemUserAction } from './system-batch.mjs'
@@ -43,6 +43,18 @@ export function reconcileSystemService(current, service, controller, uid) {
   return { state: 'stopped', generation: null }
 }
 
+// Operational readiness for browser configuration/diagnostics. Always observe
+// current health: a newly registered module need not wait for MM's periodic cache.
+export async function probeSystemReadiness(port) {
+  const unavailable = { ready: false, health: 'unhealthy' }
+  const modules = await probeMmModules(port)
+  const required = ['admin-web', 'crabot-agent', 'memory-default'].map(id => modules?.find(module => module.module_id === id))
+  if (required.some(module => module?.status !== 'running' || !Number.isInteger(module.port))) return unavailable
+  const statuses = await Promise.all([probeHealthStatus(port), ...required.map(module => probeHealthStatus(module.port))])
+  if (statuses.some(status => !['healthy', 'degraded'].includes(status))) return unavailable
+  return { ready: true, health: statuses.includes('degraded') ? 'degraded' : 'healthy' }
+}
+
 export async function inspectSystemUser(entry) {
   const dataDir = management.requirePrivateDataRoot(entry.data_dir)
   const current = inspectInstance(dataDir)
@@ -59,11 +71,7 @@ export async function inspectSystemUser(entry) {
   const maintenance = readVersionMaintenance(dataDir)
   if (maintenance) result.maintenance = { id: maintenance.id, phase: maintenance.phase, target_version: maintenance.target_version }
   if (current.state === 'running') {
-    const port = 19000 + entry.port_offset
-    const modules = await probeMmModules(port)
-    const required = ['admin-web', 'crabot-agent', 'memory-default'].map(id => modules?.find(module => module.module_id === id))
-    result.ready = await probeMmHealthy(port) && required.every(module => module?.status === 'running' && ['healthy', 'degraded'].includes(module.last_health_status))
-    if (result.ready) result.health = required.some(module => module.last_health_status === 'degraded') ? 'degraded' : 'healthy'
+    Object.assign(result, await probeSystemReadiness(19000 + entry.port_offset))
   }
   return result
 }
