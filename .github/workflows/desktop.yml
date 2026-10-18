@@ -27,7 +27,7 @@ permissions:
 
 concurrency:
   group: desktop-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 defaults:
   run:
@@ -179,6 +179,12 @@ jobs:
           node .github/scripts/validate-staged-core.mjs ".desktop-build/安装 候选/core"
           node .github/scripts/smoke-installed-cli.mjs ".desktop-build/安装 候选/core"
           node scripts/desktop/package-application.mjs --candidate=true "--core=.desktop-build/安装 候选/core" "--out=.desktop-build/安装 候选/gui" 2>&1 | tee .desktop-build/gui-package.log
+      - name: Build and extract native installer candidates
+        if: steps.scope.outputs.full_runtime == 'true'
+        timeout-minutes: 15
+        run: |
+          node scripts/desktop/package-installers.mjs --candidate=true "--project=.desktop-build/安装 候选/gui" --out=.desktop-build/platform-installers 2>&1 | tee .desktop-build/installers.log
+          node .github/scripts/verify-installer-candidates.mjs .desktop-build/platform-installers 2>&1 | tee .desktop-build/installer-verification.log
       - name: Boot actual packaged app with native session and CLI on Linux
         timeout-minutes: 10
         if: runner.os == 'Linux' && steps.scope.outputs.full_runtime == 'true'
@@ -201,6 +207,8 @@ jobs:
             .desktop-build/*.log
             .desktop-build/*.png
             .desktop-build/runtime-scope.json
+            .desktop-build/platform-installers/installers.json
+            .desktop-build/cli-archive/archive.json
             product-runtime.json
           if-no-files-found: warn
           include-hidden-files: true
