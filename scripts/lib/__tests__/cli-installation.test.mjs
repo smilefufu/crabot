@@ -1,4 +1,6 @@
 import test from 'node:test'
+import { createHash } from 'node:crypto'
+import { readFileSync } from 'node:fs'
 import assert from 'node:assert/strict'
 import { promises as fs, constants } from 'node:fs'
 import path from 'node:path'
@@ -9,14 +11,19 @@ import { prepareCliPayload, selectCliPayload, readCliSelection, locateCliInstall
 import { writeCoreRelease, verifyCoreRelease } from '../core-release.mjs'
 import { acquireCliLock, releaseCliLock } from '../cli-lock.mjs'
 import management from '../desktop-management.cjs'
+import { applyStoppedCliUpgrade } from '../standalone-cli-upgrade.mjs'
+import { readVersionMaintenance, assertVersionMaintenanceAllowsStart } from '../version-maintenance.mjs'
+import { verifyMaintenanceBackup } from '../maintenance-backup.mjs'
+import { inspectInstance } from '../instance-runtime.mjs'
 import { installStandaloneCli } from '../standalone-cli-install.mjs'
 
+const bundledNodeHash = createHash('sha256').update(readFileSync(process.execPath)).digest('hex')
 const windows = process.platform === 'win32', name = windows ? 'crabot.exe' : 'crabot'
 async function fixture(t) {
   const parent = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'Crabot CLI 版本 ')))
   t.after(() => fs.rm(parent, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }))
   const installRoot = path.join(parent, '安装'), dataDir = management.ensurePrivateDataRoot(path.join(parent, '数据'))
-  async function source(version) {
+  async function source(version, extraFiles = {}) {
     const root = path.join(parent, '核心 ' + version)
     await fs.mkdir(path.join(root, 'bin'), { recursive: true })
     const node = path.join(root, windows ? '.product-runtime/node/node.exe' : '.product-runtime/node/bin/node')
@@ -25,7 +32,19 @@ async function fixture(t) {
     await fs.copyFile(new URL('../../../crabot-native/build/Release/' + name, import.meta.url), path.join(root, 'bin', name))
     if (!windows) { await fs.chmod(node, 0o755); await fs.chmod(path.join(root, 'bin/crabot'), 0o755) }
     await fs.writeFile(path.join(root, 'cli.mjs'), 'console.log(' + JSON.stringify(version) + ')')
-    for (const file of ['package.json', 'product-runtime.json']) await fs.writeFile(path.join(root, file), JSON.stringify({ version }))
+    await fs.writeFile(path.join(root, 'package.json'), JSON.stringify({ version }))
+    // This fixture runs only Node migrations. Other command slots share the verified binary and are never executed.
+    const relativeNode = path.relative(root, node).split(path.sep).join('/')
+    const directory = path.posix.dirname(relativeNode)
+    await fs.writeFile(path.join(root, 'product-runtime.json'), JSON.stringify({ schema_version: 1, version,
+      platform: process.platform, arch: process.arch, versions: { node: process.versions.node, python: '3.12.12' },
+      executables: Object.fromEntries(['node', 'python', 'uv', 'bash', 'git', 'rg'].map(name => [name, relativeNode])),
+      path_entries: [directory], python_home: directory, memory_packages: directory, seed_wheels: [],
+      files: { [relativeNode]: { size: (await fs.stat(node)).size, sha256: bundledNodeHash } } }))
+    for (const [file, content] of Object.entries(extraFiles)) {
+      await fs.mkdir(path.dirname(path.join(root, file)), { recursive: true })
+      await fs.writeFile(path.join(root, file), content)
+    }
     await writeCoreRelease(root, { schema_version: 1, version, platform: process.platform, arch: process.arch, commit: '1'.repeat(40), source_dirty: false })
     return root
   }
@@ -223,4 +242,83 @@ test('repair restores an occupied publication failure and can rebuild a missing 
   assert.equal((await verifyCoreRelease(repaired.coreRoot)).version, '1.2.3')
   assert.equal(await fs.readFile(path.join(retained, 'cli.mjs'), 'utf8'), 'retained damage')
   assert.equal(readCliSelection(f.installRoot), installed.id)
+})
+
+
+test('offline CLI upgrade preserves dependencies and stopped state while verifying a real Node migration', async t => {
+  const f = await fixture(t)
+  const one = await installStandaloneCli({ sourceRoot: await f.source('1.2.3'), installRoot: f.installRoot, dataDir: f.dataDir })
+  await fs.mkdir(path.join(f.dataDir, 'admin'), { recursive: true })
+  await fs.writeFile(path.join(f.dataDir, 'admin/SCHEMA_VERSION'), 'v1')
+  await fs.writeFile(path.join(f.dataDir, 'admin/preferences'), 'before')
+  for (const directory of ['agent-venv', 'mcp-envs/server', 'workspaces/task']) {
+    await fs.mkdir(path.join(f.dataDir, directory), { recursive: true })
+    await fs.writeFile(path.join(f.dataDir, directory, 'keep'), 'user dependency')
+  }
+  const code = "import{writeFileSync}from'node:fs'; const dir=process.argv.find(a=>a.startsWith('--data-dir=')).slice(11); writeFileSync(dir+'/preferences','after');"
+  const two = await prepareCliPayload({ sourceRoot: await f.source('1.2.4', {
+    'crabot-admin/schema_version': 'v2', 'crabot-admin/upgrade/from_v1_to_v2.mjs': code,
+  }), installRoot: f.installRoot })
+  const result = await applyStoppedCliUpgrade({ sourceRoot: one.coreRoot, targetRoot: two.coreRoot, dataDir: f.dataDir })
+  assert.equal(result.service_started, false); assert.equal(result.health_verified, false)
+  assert.equal(inspectInstance(f.dataDir).state, 'stopped')
+  assert.equal(readCliSelection(f.installRoot), two.id)
+  assert.equal(readVersionMaintenance(f.dataDir), null)
+  assert.equal(await fs.readFile(path.join(f.dataDir, 'admin/SCHEMA_VERSION'), 'utf8'), 'v2\n')
+  assert.equal(await fs.readFile(path.join(f.dataDir, 'admin/preferences'), 'utf8'), 'after')
+  const backup = await verifyMaintenanceBackup(result.backup)
+  assert.equal(backup.source, f.dataDir)
+  assert.equal(await fs.readFile(path.join(result.backup, 'data/admin/preferences'), 'utf8'), 'before')
+  for (const directory of ['agent-venv', 'mcp-envs/server', 'workspaces/task']) {
+    assert.equal(await fs.readFile(path.join(f.dataDir, directory, 'keep'), 'utf8'), 'user dependency')
+  }
+  assert.equal((await verifyCoreRelease(one.coreRoot)).version, '1.2.3')
+  assert.equal((await promisify(execFile)(one.command, ['--version'], { env: { ...process.env, PATH: '' } })).stdout.trim(), '1.2.4')
+})
+
+for (const failure of ['newer-data', 'unsettled-module', 'different-binding', 'changed-target']) {
+  test('offline CLI upgrade refuses before switching or fencing: ' + failure, async t => {
+    const f = await fixture(t)
+    const one = await installStandaloneCli({ sourceRoot: await f.source('1.2.3'), installRoot: f.installRoot, dataDir: f.dataDir })
+    const two = await prepareCliPayload({ sourceRoot: await f.source('1.2.4', { 'crabot-admin/schema_version': 'v1' }), installRoot: f.installRoot })
+    if (failure === 'newer-data') {
+      await fs.mkdir(path.join(f.dataDir, 'admin'))
+      await fs.writeFile(path.join(f.dataDir, 'admin/SCHEMA_VERSION'), 'v2')
+      await fs.writeFile(path.join(f.dataDir, 'admin/preferences'), 'keep')
+    }
+    if (failure === 'unsettled-module') {
+      await fs.mkdir(path.join(f.dataDir, 'module-runtime-registry/records'), { recursive: true })
+      await fs.writeFile(path.join(f.dataDir, 'module-runtime-registry/records/pending.json'), '{}')
+    }
+    if (failure === 'different-binding') await fs.rm(path.join(f.dataDir, 'cli-managed.json'))
+    if (failure === 'changed-target') await fs.appendFile(path.join(two.coreRoot, 'cli.mjs'), ' ')
+    await assert.rejects(applyStoppedCliUpgrade({ sourceRoot: one.coreRoot, targetRoot: two.coreRoot, dataDir: f.dataDir }))
+    assert.equal(readCliSelection(f.installRoot), one.id)
+    assert.equal(readVersionMaintenance(f.dataDir), null)
+    assert.equal(inspectInstance(f.dataDir).state, 'stopped')
+  })
+}
+
+test('a partially failed migration retains the exact selected target, backup and maintenance fence without replaying', async t => {
+  const f = await fixture(t)
+  const one = await installStandaloneCli({ sourceRoot: await f.source('1.2.3'), installRoot: f.installRoot, dataDir: f.dataDir })
+  await fs.mkdir(path.join(f.dataDir, 'admin'))
+  await fs.writeFile(path.join(f.dataDir, 'admin/SCHEMA_VERSION'), 'v1')
+  await fs.writeFile(path.join(f.dataDir, 'admin/preferences'), 'before')
+  const code = "import{appendFileSync}from'node:fs'; const dir=process.argv.find(a=>a.startsWith('--data-dir=')).slice(11); appendFileSync(dir+'/preferences',' partial'); process.exit(13);"
+  const two = await prepareCliPayload({ sourceRoot: await f.source('1.2.4', {
+    'crabot-admin/schema_version': 'v2', 'crabot-admin/upgrade/from_v1_to_v2.mjs': code,
+  }), installRoot: f.installRoot })
+  await assert.rejects(applyStoppedCliUpgrade({ sourceRoot: one.coreRoot, targetRoot: two.coreRoot, dataDir: f.dataDir }), { code: 'CRABOT_MIGRATION_FAILED' })
+  const record = readVersionMaintenance(f.dataDir)
+  assert.equal(record.phase, 'verifying'); assert.equal(record.target_core.root, two.coreRoot)
+  assert.equal(readCliSelection(f.installRoot), two.id)
+  assert.equal(await fs.readFile(path.join(f.dataDir, 'admin/SCHEMA_VERSION'), 'utf8'), 'v1')
+  assert.equal(await fs.readFile(path.join(f.dataDir, 'admin/preferences'), 'utf8'), 'before partial')
+  assert.throws(() => assertVersionMaintenanceAllowsStart(f.dataDir), { code: 'CRABOT_MAINTENANCE_PENDING' })
+  await assert.rejects(applyStoppedCliUpgrade({ sourceRoot: one.coreRoot, targetRoot: two.coreRoot, dataDir: f.dataDir }))
+  assert.equal(await fs.readFile(path.join(f.dataDir, 'admin/preferences'), 'utf8'), 'before partial')
+  const directory = path.join(f.dataDir + '.desktop-backups', record.backup.id)
+  await verifyMaintenanceBackup(directory, record.backup.sha256)
+  assert.equal(await fs.readFile(path.join(directory, 'data/admin/preferences'), 'utf8'), 'before')
 })

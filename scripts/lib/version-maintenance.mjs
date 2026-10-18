@@ -7,6 +7,7 @@ import identity from './process-identity.cjs'
 import management from './desktop-management.cjs'
 import { acquireCliLock, releaseCliLock, cliLockToken } from './cli-lock.mjs'
 import { verifyCoreRelease } from './core-release.mjs'
+import { inspectInstance } from './instance-runtime.mjs'
 import { verifyMaintenanceBackup } from './maintenance-backup.mjs'
 
 const name = 'desktop-maintenance.json', recovering = new Set()
@@ -134,4 +135,30 @@ export async function recoverVersionMaintenance({ dataDir, root, appVersion, ver
     rmSync(path.join(dataDir, name)); syncDirectory(dataDir)
     return true
   } finally { if (record) recovering.delete(record.id); releaseCliLock(lock) }
+}
+
+
+// CLI upgrade preserves the pre-existing stopped state. This is offline code/data
+// completion, not the GUI recovery callback's ordinary start + health acceptance.
+export async function completeStoppedCliVersionMaintenance({ dataDir, root, id, migrate, verifyComplete }) {
+  dataDir = locked(dataDir)
+  const record = readVersionMaintenance(dataDir)
+  root = realpathSync(root)
+  if (record?.id !== id || record.phase !== 'installing' || record.target_core?.root !== root) fail()
+  const verify = async () => {
+    if (inspectInstance(dataDir).state !== 'stopped') fail()
+    const release = await verifyCoreRelease(root, { version: record.target_version })
+    if (release.inventory_sha256 !== record.target_core.inventory_sha256) fail()
+    await backupOf(dataDir, record)
+  }
+  await verify()
+  record.phase = 'verifying'; write(dataDir, record)
+  recovering.add(record.id)
+  try {
+    await migrate()
+    await verifyComplete()
+    await verify()
+    if (readVersionMaintenance(dataDir)?.id !== record.id) fail()
+    rmSync(path.join(dataDir, name)); syncDirectory(dataDir)
+  } finally { recovering.delete(record.id) }
 }

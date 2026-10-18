@@ -18,7 +18,7 @@ function canonicalRoot(directory) {
   try { return realpathSync(directory) } catch (error) { if (error.code === 'ENOENT') return directory; throw error }
 }
 const bindingName = 'cli-managed.json'
-async function readBinding(dataDir, installRoot) {
+export async function readStandaloneCliBinding(dataDir, installRoot) {
   const file = path.join(dataDir, bindingName), stat = await present(file)
   if (!stat) return null
   const privateFile = process.platform === 'win32' ? identity.isPrivateFile(file)
@@ -31,7 +31,7 @@ async function readBinding(dataDir, installRoot) {
   return record
 }
 async function initializeBinding(dataDir, installRoot) {
-  if (await readBinding(dataDir, installRoot)) return
+  if (await readStandaloneCliBinding(dataDir, installRoot)) return
   const temporary = path.join(dataDir, bindingName + '.tmp-' + randomUUID())
   const text = JSON.stringify({ schema_version: 1, install_root: installRoot, data_dir: realpathSync(dataDir) }) + '\n'
   try {
@@ -53,7 +53,7 @@ async function checkData(dataDir, installRoot, selected) {
   const records = await fs.readdir(path.join(dataDir, 'module-runtime-registry/records')).catch(error => { if (error.code === 'ENOENT') return []; throw error })
   if (records.some(name => name.endsWith('.json'))) fail('仍有未收口模块记录，无法确认停止；未切换代码。')
   const record = readInstanceRuntime(dataDir)
-  const ownData = await readBinding(dataDir, installRoot) || selected && record?.install_root === path.join(installRoot, 'releases', selected)
+  const ownData = await readStandaloneCliBinding(dataDir, installRoot) || selected && record?.install_root === path.join(installRoot, 'releases', selected)
   const entries = await fs.readdir(dataDir)
   if (!ownData && entries.some(name => !['cli.lock', '.DS_Store'].includes(name))) fail('发现尚未归属于此 CLI 安装的数据，需要先完成旧安装迁移。原数据已保留。')
   // Old wx locks cannot be adopted by merely opening the new OS lock's inode.
