@@ -10,7 +10,7 @@ import identity from './process-identity.cjs'
 import { cliLockToken } from './cli-lock.mjs'
 import { inspectInstance } from './instance-runtime.mjs'
 
-const excluded = new Set(['workspaces', 'agent-venv', 'runtime-bases', 'mcp-envs', 'runtime-cache', 'logs', 'desktop-profile',
+const excluded = new Set(['workspaces', 'agent-venv', 'agent-tools', 'runtime-bases', 'mcp-envs', 'runtime-cache', 'logs', 'desktop-profile',
   'cli.lock', 'mm.pid', 'instance-runtime.json', 'desktop-maintenance.json', '.DS_Store'])
 const fail = (code, message) => { throw Object.assign(new Error(message), { code }) }
 const cancelled = signal => { if (signal?.aborted) fail('CRABOT_MAINTENANCE_CANCELLED', '已取消维护，原数据保留。') }
