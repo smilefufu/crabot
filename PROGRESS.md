@@ -2,13 +2,13 @@
 
 ### 桌面化方案：独立 worktree 开发中，推进 P6/P7
 
-- 已确认[中文 Spec](crabot-docs/superpowers/specs/2026-10-17-desktop-application-design.md)及[分阶段计划](crabot-docs/superpowers/plans/2026-10-17-desktop-application-implementation.md)。仅在 feat/desktop-application worktree 推进；需求完整实现和验证前不推主仓 main、不提前建 PR，不部署现场、不触碰无关 WIP。
-- P0 正式契约、P1/P2/P3 内置环境/共同实例/SDK、P4 OS peer 及真实 Electron 窗口边界已获四平台 CI 证据，Ubuntu 24.04/26.04 含断网容器。P5 已接首次模型引导、主要/高级入口、主题、权限设置和独立诊断；HTTP/outbox、草稿、附件沙箱与管理凭据过滤有回归，真实模型首答尚未验收。
-- P6 已接登录自启动、原生更新入口、活动核对、停机备份和维护保护；GUI/CLI 不绕过未完成更新。新增用户命令注册、无 GUI 原生命令/不可变版本目录、旧版入口保护和包内自安装。候选 10 实际安装、重复安装、登录 shell、无宿主工具和载荷不变通过；远程引导已接包内工具并补坏包/版本回归，Windows 专项待 CI；同版本修复已补停机后归属、坏载荷保留和发布失败恢复，43 项本机相关验证 42 通过、1 平台跳过，候选 11 的实际离线新装/重复安装/损坏后重装已通过（无宿主工具、保留坏载荷和用户依赖、不启动 MM）。候选 12 实际耗时：新装 24.5s、重装 12.4s、损坏修复 26.7s；真实完整 tar.gz 经远程 Unix 分支校验/解包/安装通过（离线回环 38.8s）。跨版本升级与真实旧包接管继续。
-- P7 候选 09（1ee0f273，0.1.0-desktop.5）普通归档全量复验通过：核心 1,489,270,323 字节，App ZIP 711,697,545，CLI tar.gz 545,272,801；包含原生命令、SQLite、实际图标与外层 ad-hoc 签名。候选 10（d5ecaa8f，.6）核心为 32,719 文件、1,489,282,049 字节，真实安装只使用临时 HOME/数据，不启动 MM、不改本机 PATH。
-- [CI 39075806515](https://github.com/smilefufu/crabot/actions/runs/39075806515) 的 Linux、Mac 双架构全部通过源码外 App/原生认证/CLI 注册与混用，Intel 握手修复已获真实验证。Windows pip 已过，遗漏的 MCP UTF-8 夹具已修；[39077060509](https://github.com/smilefufu/crabot/actions/runs/39077060509) 再暴露新 CLI 目录的私有 ACL 创建顺序，d5ecaa8f 已用先失败后通过的回归修正，不放宽已有目录权限。该轮 Linux/arm64/Intel 全部成功。[39079192263](https://github.com/smilefufu/crabot/actions/runs/39079192263) 的 Windows 在安装兼容夹具暴露临时目录失败注入不稳定，已改为确定的真实缺失目录；该轮 Linux/arm64 成功，Intel 通过完整宿主后在新 CLI 安装触及测试 180 秒上限；已减少重复清单读取；39081066609 的 Intel 仍触及原 180 秒测试上限，Windows 在新增夹具清理失败（修复已在工作树），完整清单改 8 路有界读取，排序/字节格式和全部校验不变；21 项安装/修复/清单回归通过，旧完整候选只读全量复验兼容，本机单次校验 3.36s → 2.09s。两项继续原生验证，未计四平台整体完成。
-- 无 GUI CLI 跨版本切换补齐唯一目标根/清单绑定，旧原位 GUI 维护记录兼容；来源只在安装前可恢复，安装后不接受其它同版本目录或被重写的目标。维护/备份/入口 22 项通过，尚未接通完整 CLI 跨版本事务。新增安装后真实服务启停和停机后重装验收只在真实 CI 执行，本机不启动第二个 MM。
-- 受管 MCP 新字段的[补充 Spec](crabot-docs/superpowers/specs/2026-10-18-desktop-managed-mcp-design.md)已获用户确认；已更新协议并接入注册/导入默认选择、受管环境与自定义切换，旧配置不自动接管。本机 5 个真实 stdio MCP（Python/Node 各两组冲突依赖及 uvx）离线连接、稳定 id 复用、凭据过滤和损坏保留通过；Admin 56、环境 13、Web 3 项定向及前后端类型检查通过，四平台原生结果待记录。用户指定当前 mirror-xinshu，完整候选 10 的真实 Provider 解析/Agent adapter 两次短请求通过（输入 63、输出 19 tokens、无重试）；生产配置摘要不变，不启动第二个 MM。GUI 首次引导到首答、完整迁移、更新、最终签名安装与最低系统仍未验收；用户暂无签名证书，申请与免费途径已查官方资料。详细证据集中在[实施与验收记录](crabot-docs/superpowers/plans/2026-10-17-desktop-application-validation.md)。
+- 按已确认[中文 Spec](crabot-docs/superpowers/specs/2026-10-17-desktop-application-design.md)及[分阶段计划](crabot-docs/superpowers/plans/2026-10-17-desktop-application-implementation.md)，仅在 feat/desktop-application worktree 开发。完整实现和验证前不推主仓 main、不提前建 PR、不部署现场、不触碰无关 WIP。
+- P0–P4 的正式契约、内置环境、共同实例、SDK、OS peer 和真实 Electron 边界有四平台基础证据，Ubuntu 24.04/26.04 含断网容器。P5 已接首用模型引导、主要/高级入口、主题、权限和诊断。用户指定 mirror-xinshu 的实际 Admin 解析/Agent adapter 两次短请求通过（输入 63/输出 19，无重试）；GUI 引导到业务首答仍待验收，生产配置未修改。
+- 受管 MCP 补充已确认并落实协议。旧注册/备份不自动接管，新标准 npx/uvx 默认隔离，可切自定义；稳定 id 复用。Admin 56、环境 13、Web 3 项及类型检查通过；候选 14 的实际五个 stdio MCP 离线冲突包/uvx、凭据过滤和损坏保留通过，最后核对完整清单不变。新原生 CI 已在四平台通过此 MCP 阶段，整轮尚未通过。
+- P6 登录自启动、原生更新入口、活动核对、共同停机与维护保护已接。独立 CLI 原生命令、不可变版本目录、包内/远程安装、同版本修复已实现；候选 14（30c824de，0.1.0-desktop.10）32,727 文件、1,489,314,816 字节，实际新装/重装/修复 17.4/6.8/19.8s。Agent Node 工具目录补入工作依赖排除范围，回归先失败后通过。
+- 独立 user CLI 跨版本事务及下载适配已接：目标内置 Node 持共同锁，核对归属/停止/兼容，备份、绑定目标、切换和迁移；CLI 保持停止，浏览器 Admin 先准备后停机并用新核心启动。42 项事务/备份/失败边界、升级器 40 项通过。候选 12→14 实际普通完整归档经本地 HTTP 下载、SHA、解包、目标 Node、原生命令、备份和 Agent/MCP Python/工作区保留通过，不启动 MM；CLI/UI 命令入口和原生安装后服务健康仍待完整验收。
+- [39083497000](https://github.com/smilefufu/crabot/actions/runs/39083497000) 继续原生验收：Windows 已越过前述 ACL/Corepack/夹具清理问题，PS5.1/7 远程安装兼容、五个 MCP 通过；整宿主关闭窗口夹具因 Electron Windows 的 stdin 固定 EOF 超时。已改测试专用本机控制通道，EOF 定向回归通过，产品 IPC/认证不变；最低 OS、最终签名/安装器、旧 user 接管、system 升级、恢复流程及 GUI 真正业务任务仍未验收。用户暂无签名证书，官方申请与免费途径见文档。
+- 详细构建、失败与修复证据统一维护在[实施与验收记录](crabot-docs/superpowers/plans/2026-10-17-desktop-application-validation.md)。候选 13 的字节码探针污染保留为失败证据；未把阶段性通过当作整项需求完成。
 
 ### 任务默认目录文件授权：独立修复待审查
 

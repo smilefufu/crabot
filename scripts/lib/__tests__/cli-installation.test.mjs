@@ -11,6 +11,7 @@ import { prepareCliPayload, selectCliPayload, readCliSelection, locateCliInstall
 import { writeCoreRelease, verifyCoreRelease } from '../core-release.mjs'
 import { acquireCliLock, releaseCliLock } from '../cli-lock.mjs'
 import management from '../desktop-management.cjs'
+import { applyPreparedCliUpgrade, prepareDownloadedCliUpgrade } from '../standalone-cli-release.mjs'
 import { applyStoppedCliUpgrade } from '../standalone-cli-upgrade.mjs'
 import { readVersionMaintenance, assertVersionMaintenanceAllowsStart } from '../version-maintenance.mjs'
 import { verifyMaintenanceBackup } from '../maintenance-backup.mjs'
@@ -321,4 +322,28 @@ test('a partially failed migration retains the exact selected target, backup and
   const directory = path.join(f.dataDir + '.desktop-backups', record.backup.id)
   await verifyMaintenanceBackup(directory, record.backup.sha256)
   assert.equal(await fs.readFile(path.join(directory, 'data/admin/preferences'), 'utf8'), 'before')
+})
+
+
+test('release staging failure cleans only the download and preserves selected code and data', async t => {
+  const f = await fixture(t)
+  const one = await installStandaloneCli({ sourceRoot: await f.source('1.2.3'), installRoot: f.installRoot, dataDir: f.dataDir })
+  const temporary = path.join(f.parent, 'download'); await fs.mkdir(temporary)
+  const tarPath = path.join(temporary, process.platform === 'win32' ? 'release.zip' : 'release.tar.gz')
+  await fs.writeFile(tarPath, 'not an archive')
+  await assert.rejects(prepareDownloadedCliUpgrade({ root: one.coreRoot, artifact: { tmp: temporary, tarPath, version: 'v1.2.4' } }))
+  await assert.rejects(fs.stat(temporary), { code: 'ENOENT' })
+  assert.equal(readCliSelection(f.installRoot), one.id)
+  assert.equal((await verifyCoreRelease(one.coreRoot)).version, '1.2.3')
+  assert.equal(readVersionMaintenance(f.dataDir), null)
+})
+
+test('release application rejects a valid payload from another container before executing its coordinator', async t => {
+  const f = await fixture(t)
+  const one = await installStandaloneCli({ sourceRoot: await f.source('1.2.3'), installRoot: f.installRoot, dataDir: f.dataDir })
+  const foreign = await prepareCliPayload({ sourceRoot: await f.source('1.2.4'), installRoot: path.join(f.parent, 'other-installation') })
+  await assert.rejects(applyPreparedCliUpgrade({ root: one.coreRoot, dataDir: f.dataDir, prepared: foreign }), /不属于/)
+  assert.equal(readCliSelection(f.installRoot), one.id)
+  assert.equal(readVersionMaintenance(f.dataDir), null)
+  assert.equal(inspectInstance(f.dataDir).state, 'stopped')
 })

@@ -15,6 +15,7 @@ import {
   getLatestVersion,
   getReleaseUrls,
   downloadAndExtract,
+  downloadRelease,
   writeVersionFile,
 } from './upgrade-lib/release.mjs'
 import { runSourceUpgrade, syncPythonDeps } from './upgrade-lib/source.mjs'
@@ -22,6 +23,9 @@ import { verifyReleasePackage } from './lib/release-package.mjs'
 import { detectMode as detectInstallScope } from './lib/mode.mjs'
 import { resolveCliDataDir } from './lib/instance.mjs'
 import { homedir } from 'node:os'
+import { locateCliInstallation } from './lib/cli-installation.mjs'
+import { applyDownloadedCliUpgrade } from './lib/standalone-cli-release.mjs'
+import { inspectInstance } from './lib/instance-runtime.mjs'
 import { openDesktopUpdate } from './lib/desktop-update-entry.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -101,7 +105,7 @@ async function runReleaseMode() {
   const current = getCurrentVersion(CRABOT_HOME)
   const { tag: latest, publishedAt } = await getLatestVersion()
 
-  if (current === latest) {
+  if (current?.replace(/^v/, '') === latest.replace(/^v/, '')) {
     try {
       await verifyReleasePackage(CRABOT_HOME, current)
       console.log(`Already up to date (${current}).`)
@@ -121,6 +125,11 @@ async function runReleaseMode() {
     return
   }
 
+  if (locateCliInstallation(CRABOT_HOME)) {
+    const artifact = await downloadRelease({ ...getReleaseUrls(latest), logger })
+    await applyDownloadedCliUpgrade({ root: CRABOT_HOME, dataDir: DATA_DIR, artifact, logger })
+    return
+  }
   await downloadAndExtract({ ...getReleaseUrls(latest), crabotHome: CRABOT_HOME, logger })
 
   console.log('Syncing Python deps ...')
@@ -173,6 +182,9 @@ async function main() {
     return
   }
 
+  const standalone = locateCliInstallation(CRABOT_HOME)
+  if (standalone && standalone.scope !== 'user') throw new Error('内置 system CLI 更新适配尚未就绪，未更改共享核心；请保留当前安装并联系管理员。')
+  if (standalone && inspectInstance(DATA_DIR).state !== 'stopped') throw new Error('实例尚未核验停止，请先运行 crabot stop。')
   if (isMmRunning()) {
     console.error('[upgrade] Module Manager appears to be running. Run `crabot stop` first.')
     process.exit(1)

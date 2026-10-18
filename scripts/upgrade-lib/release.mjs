@@ -114,19 +114,28 @@ export async function downloadRelease({ url, sha256Url, version, logger }) {
   }
 }
 
-// 解压 + 覆盖安装目录（必须在 stop 之后做：覆盖的是运行代码文件）。
-export async function extractRelease({ tmp, tarPath, version, crabotHome, logger }) {
+// Read-only archive staging. Caller owns tmp cleanup; never touches installed files.
+export async function stageRelease({ tmp, tarPath, version, logger }) {
   let stage = join(tmp, 'stage')
-  try {
-    logger?.info?.('Extracting release archive')
-    await extractArchive(tarPath, stage)
+  logger?.info?.('Extracting release archive')
+  await extractArchive(tarPath, stage)
+  if (tarPath.endsWith('.zip')) {
     const fs = await import('node:fs')
-    if (tarPath.endsWith('.zip')) {
-      const entries = fs.readdirSync(stage)
-      if (entries.length !== 1 || !fs.statSync(join(stage, entries[0])).isDirectory()) throw new Error('invalid release ZIP root')
-      stage = join(stage, entries[0])
-    }
-    await verifyReleasePackage(stage, version)
+    const entries = fs.readdirSync(stage)
+    if (entries.length !== 1 || !fs.statSync(join(stage, entries[0])).isDirectory()) throw new Error('invalid release ZIP root')
+    stage = join(stage, entries[0])
+  }
+  await verifyReleasePackage(stage, version)
+  return stage
+}
+
+// Legacy/source adapter only: replaces files after shutdown. Immutable CLI/App
+// payloads must use their own selector/OS installer and cannot call this path.
+export async function extractRelease({ tmp, tarPath, version, crabotHome, logger }) {
+  try {
+    if (existsSync(join(crabotHome, 'core-release.json'))) throw new Error('不可原地覆盖内置核心，请使用版本切换或桌面更新。')
+    const stage = await stageRelease({ tmp, tarPath, version, logger })
+    const fs = await import('node:fs')
     const retained = new Set(['data', 'instance.json', 'agent-venv', 'VERSION'])
     for (const name of fs.readdirSync(stage)) {
       if (retained.has(name) || (name === 'crabot.cmd' && existsSync(join(crabotHome, name)))) continue

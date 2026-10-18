@@ -7,6 +7,9 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { homedir } from 'node:os'
+import { locateCliInstallation } from './lib/cli-installation.mjs'
+import { prepareDownloadedCliUpgrade, applyPreparedCliUpgrade } from './lib/standalone-cli-release.mjs'
+import product from './lib/product-runtime.cjs'
 import { detectMode } from './upgrade-lib/mode.mjs'
 import { resolveCliDataDir } from './lib/instance.mjs'
 import { runScript } from './upgrade-lib/runner.mjs'
@@ -24,7 +27,6 @@ import {
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const CRABOT_HOME = resolve(__dirname, '..')
-const CLI = join(CRABOT_HOME, 'cli.mjs')
 const DATA_DIR = resolveCliDataDir({ homeDir: resolve(homedir(), '.crabot') })
 const STATUS_DIR = join(DATA_DIR, 'admin')
 const STATUS_FILE = join(STATUS_DIR, 'upgrade-status.json')
@@ -47,8 +49,7 @@ function readVersion(mode) {
       return null
     }
   }
-  const p = join(CRABOT_HOME, 'VERSION')
-  return existsSync(p) ? readFileSync(p, 'utf-8').trim() : null
+  return getCurrentVersion(CRABOT_HOME)
 }
 
 function writeStatus(patch) {
@@ -60,8 +61,9 @@ function writeStatus(patch) {
   writeFileSync(STATUS_FILE, JSON.stringify({ ...prev, ...patch }, null, 2))
 }
 
-function node(args) {
-  execFileSync(process.execPath, [CLI, ...args], { cwd: CRABOT_HOME, stdio: 'inherit' })
+function node(args, root = CRABOT_HOME) {
+  const runtime = root === CRABOT_HOME ? null : product.loadProductRuntime(root, { required: true })
+  execFileSync(runtime?.executables.node ?? process.execPath, [join(root, 'cli.mjs'), ...args], { cwd: CRABOT_HOME, stdio: 'inherit' })
 }
 
 function stamp() {
@@ -70,6 +72,8 @@ function stamp() {
 
 async function main() {
   const mode = detectMode(CRABOT_HOME) // 'release' | 'source'
+  const standalone = locateCliInstallation(CRABOT_HOME)
+  if (standalone && standalone.scope !== 'user') throw new Error('内置 system CLI 更新适配尚未就绪，未更改共享核心；请联系管理员。')
   const fromVersion = readVersion(mode)
   console.log(`[ui-upgrade] start mode=${mode} from=${fromVersion} at=${stamp()}`)
   writeStatus({
@@ -84,6 +88,7 @@ async function main() {
   // ========== 准备阶段（实例照常运行，最慢、最易失败的步骤都在这里；失败不停服务）==========
   let releaseArtifact = null
   let targetVersion = null
+  let preparedCli = null
   try {
     if (mode === 'source') {
       console.log('[ui-upgrade] (prepare) git pull --ff-only')
@@ -94,7 +99,7 @@ async function main() {
       const current = getCurrentVersion(CRABOT_HOME)
       const { tag } = await getLatestVersion()
       targetVersion = tag
-      if (current === tag) {
+      if (current?.replace(/^v/, '') === tag.replace(/^v/, '')) {
         try {
           await verifyReleasePackage(CRABOT_HOME, current)
           console.log(`[ui-upgrade] already up to date (${current})`)
@@ -106,6 +111,10 @@ async function main() {
         }
       }
       releaseArtifact = await downloadRelease({ ...getReleaseUrls(tag), logger })
+      if (standalone) {
+        preparedCli = await prepareDownloadedCliUpgrade({ root: CRABOT_HOME, artifact: releaseArtifact, logger })
+        releaseArtifact = null
+      }
     }
   } catch (err) {
     const msg = err?.message || String(err)
@@ -119,6 +128,13 @@ async function main() {
     writeStatus({ phase: 'restarting' })
     console.log('[ui-upgrade] (switch) stop')
     node(['stop'])
+
+    if (preparedCli) {
+      await applyPreparedCliUpgrade({ root: CRABOT_HOME, dataDir: DATA_DIR, prepared: preparedCli })
+      node(['start', '-d'], preparedCli.coreRoot)
+      writeStatus({ phase: 'done', to_version: preparedCli.version, finished_at: stamp() })
+      return
+    }
 
     if (mode === 'release' && releaseArtifact) {
       console.log('[ui-upgrade] (switch) extract release')
