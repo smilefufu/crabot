@@ -1,4 +1,5 @@
 import path from 'node:path'
+import { readSystemInitialPassword } from './lib/system-password.mjs'
 import { fileURLToPath } from 'node:url'
 import { createInterface } from 'node:readline/promises'
 import { parseSystemArguments } from './lib/system-arguments.mjs'
@@ -12,30 +13,6 @@ import { recoverSystemOperation } from './lib/system-recovery-cli.mjs'
 import { submitSystemOperation, systemOperationStage } from './lib/system-job-client.mjs'
 
 const root = fileURLToPath(new URL('../', import.meta.url))
-async function password() {
-  process.stdin.setEncoding('utf8')
-  if (!process.stdin.isTTY) throw systemError('首次开通请在管理员交互终端设置初始密码；不从命令参数或环境变量读取密码。')
-  const ask = prompt => new Promise((resolve, reject) => {
-    process.stdout.write(prompt); process.stdin.setRawMode(true); process.stdin.resume()
-    let value = ''
-    const onData = bytes => {
-      for (const character of bytes.toString()) {
-        if (character === '\r' || character === '\n' || character === '\u0003') {
-          process.stdin.setRawMode(false); process.stdin.removeListener('data', onData); process.stdin.pause(); process.stdout.write('\n')
-          if (character === '\u0003') reject(systemError('已取消开通。')); else resolve(value)
-          return
-        }
-        if (character === '\u007f' || character === '\b') value = value.slice(0, -1)
-        else if (value.length < 4096) value += character
-      }
-    }
-    process.stdin.on('data', onData)
-  })
-  const first = await ask('浏览器初始密码（输入不回显）：')
-  const second = await ask('再次输入：')
-  if (first.length < 4 || first !== second) throw systemError('密码至少4字符，且两次输入须相同；未开通用户。')
-  return first
-}
 
 try {
   const args = parseSystemArguments(process.argv.slice(3)), registry = new SystemRegistry()
@@ -76,7 +53,7 @@ try {
     if (args.operation === 'add') {
       registry.accountLookup(args.user)
       const existing = registry.read().find(entry => entry.user === args.user)
-      const initial = existing ? null : await password()
+      const initial = existing ? null : await readSystemInitialPassword()
       const entry = await registry.register(args.user, { autostart: args.autostart, assertAvailable: () => store.assertIdle(),
         prepare: value => runSystemUser(value, { root, action: 'prepare', input: { password: initial } }),
         configure: async (value, { reopening }) => {
