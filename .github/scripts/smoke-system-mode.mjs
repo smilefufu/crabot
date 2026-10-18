@@ -225,6 +225,15 @@ try {
     } finally { await fs.rm(hook, { force: true }); await new Promise(resolve => server.close(resolve)) }
   })
   if (archiveReport) restartedGeneration = await assertEmployeeRuntime(alice)
+  // The stopped Core still has a lingered user manager. Quiesce this disposable
+  // fixture UID before usermod, which correctly refuses any live process owner.
+  await phase('fixture-stop-user-manager-before-nss-change', async () => {
+    assert.equal((await state(carol)).state, 'stopped')
+    await run('/usr/bin/systemctl', ['stop', 'user@' + carol.uid + '.service'])
+    const processes = (await run('/usr/bin/ps', ['-eo', 'uid=,pid='])).stdout.trim().split('\n')
+      .map(line => line.trim().split(/\s+/).map(Number)).filter(([uid]) => uid === carol.uid)
+    assert.deepEqual(processes, [], 'NSS fault fixture must have no remaining UID-owned processes')
+  })
   // A real NSS identity change must fail this user before any privileged data action.
   let changedUid = Number((await run('/usr/bin/id', ['-u', carol.user])).stdout.trim()) + 10000
   while (await run('/usr/bin/getent', ['passwd', String(changedUid)]).then(() => true, () => false)) changedUid++

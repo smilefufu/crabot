@@ -2,7 +2,7 @@
 // Local runs never start MM. Isolated CI additionally checks real first start/stop.
 // No real model provider, desktop input or real user profile is used.
 import assert from 'node:assert/strict'
-import { promises as fs } from 'node:fs'
+import { constants, promises as fs } from 'node:fs'
 import path from 'node:path'
 import { tmpdir } from 'node:os'
 import { execFile } from 'node:child_process'
@@ -130,6 +130,24 @@ try {
   await verifyCoreRelease(payload); await verifyCoreRelease(core)
   console.log('CRABOT_INSTALLED_CLI ' + JSON.stringify({ platform: process.platform, arch: process.arch, version: release.version,
     duration_ms: durations, bundled_installer: true, repeated_install: true, repaired_payload: true, retained_damaged_payload: true, preserved_user_environment: true, no_host_tools: true, unchanged_payloads: true, installer_started_service: false, ci_first_start_stop: ciStartStop, no_service_started: !ciStartStop, final_stopped: true, unicode_spaced_paths: true }))
+} catch (error) {
+  if (process.env.GITHUB_ACTIONS === 'true') {
+    // Only fixed startup logs in this disposable, provider-free CI installation.
+    // Capture before cleanup so a failed first start has evidence beyond its deadline.
+    for (const name of ['logs/supervisor.boot.log', 'logs/mm.stdout.log', 'logs/mm.stderr.log', 'logs/admin-web.log', 'logs/crabot-agent.log', 'logs/memory-default.log']) {
+      let handle
+      try {
+        handle = await fs.open(path.join(data, name), constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0))
+        const stat = await handle.stat()
+        if (!stat.isFile() || stat.nlink !== 1 || (process.getuid && stat.uid !== process.getuid())) continue
+        const bytes = Buffer.alloc(Math.min(stat.size, 32768))
+        await handle.read(bytes, 0, bytes.length, stat.size - bytes.length)
+        console.error('CRABOT_CI_INSTALLED_STARTUP_LOG ' + name + '\n' + bytes.toString('utf8').split('\n').slice(-60).join('\n'))
+      } catch (probe) { console.error('CRABOT_CI_INSTALLED_STARTUP_LOG ' + name + ' ' + probe.code) }
+      finally { await handle?.close().catch(() => {}) }
+    }
+  }
+  throw error
 } finally {
   if (started) await stopInstalledCore() // Never delete an unsettled fixture or kill an unverified process.
   await fs.rm(temporary, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })

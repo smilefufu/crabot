@@ -8,7 +8,9 @@ function stop() {
   if (stopping) return
   stopping = true
   writeFileSync(process.env.TEST_MARKER, 'graceful')
-  setTimeout(() => process.exit(0), Number(process.env.TEST_STOP_DELAY || 100))
+  const delay = Number(process.env.TEST_STOP_DELAY || 100)
+  console.log('FIXTURE_SHUTDOWN ' + JSON.stringify({ delay_ms: delay }))
+  setTimeout(() => process.exit(0), delay)
 }
 process.on('message', message => {
   if (message?.type === 'crabot-shutdown' && message.generation === process.env.CRABOT_INSTANCE_GENERATION) stop()

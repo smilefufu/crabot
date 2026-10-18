@@ -17,5 +17,5 @@ if (Number(process.env.TEST_REGISTER_DELAY) > 0) {
 await runManagedCore({
   root: process.env.TEST_CORE_ROOT, dataDir: process.env.TEST_DATA_DIR,
   mmPort: Number(process.env.TEST_PORT), env: process.env,
-  stdio: ['ignore', 'inherit', 'inherit'], cleanup: code => process.exit(code),
+  stdio: ['ignore', 'inherit', 'inherit'], cleanup: code => process.exit(code), log: message => process.stdout.write(message),
 })

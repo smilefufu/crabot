@@ -41,7 +41,13 @@ async function fixture(t, delay = 100, registrationDelay = 0) {
     if (child.exitCode !== null || Date.now() > deadline) throw new Error('Fixture failed: ' + output)
     await pause(25)
   }
-  return { root, data, marker, child, exited, record }
+  return { root, data, marker, child, exited, record, snapshot: () => {
+    const observed = process => {
+      try { return identity.sameProcess(process, identity.inspectProcess(process.pid)) ? 'alive' : 'gone' }
+      catch { return 'unknown' }
+    }
+    return { shutdown_requested: existsSync(marker), controller: observed(record.controller), mm: observed(record.mm), output: output.slice(-3000) }
+  } }
 }
 
 test('verified controller and MM stop gracefully; a terminal waiting process holds no lifecycle lock', async t => {
@@ -132,9 +138,19 @@ test('legacy PID alone is not adopted and an MM shutdown window cannot be shorte
 })
 
 test('shutdown keeps the full MM window, exceeding the old Unix 15 second deadline', { timeout: 30_000 }, async t => {
-  const f = await fixture(t, 16_000)
-  const start = Date.now()
-  await stopInstance(f.data)
-  assert.ok(Date.now() - start >= 15_900)
-  assert.equal(readFileSync(f.marker, 'utf8'), 'graceful')
+  const started = Date.now(), events = []
+  let f, phase = 'fixture-starting'
+  const report = () => {
+    t.diagnostic('fixture-only shutdown timeout: ' + JSON.stringify({ phase, elapsed_ms: Date.now() - started, events, ...(f?.snapshot() ?? {}) }))
+  }
+  t.signal.addEventListener('abort', report, { once: true })
+  try {
+    f = await fixture(t, 16_000)
+    phase = 'stopping'
+    const start = Date.now()
+    await stopInstance(f.data, { log: message => { events.push({ elapsed_ms: Date.now() - started, message }) } })
+    phase = 'stopped'
+    assert.ok(Date.now() - start >= 15_900)
+    assert.equal(readFileSync(f.marker, 'utf8'), 'graceful')
+  } finally { t.signal.removeEventListener('abort', report) }
 })
