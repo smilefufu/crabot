@@ -14,6 +14,10 @@ import { verifyMaintenanceBackup } from './maintenance-backup.mjs'
 import cliLocation from './cli-location.cjs'
 import { inspectLegacyEntryFence, sealLegacyEntryFence } from './legacy-entry-fence.mjs'
 import { discoverLegacyRuntime, discoverSealedLegacyRuntime } from './legacy-runtime.mjs'
+import pythonSelection from './agent-python-selection.cjs'
+import { inspectLegacyPythonEnvironment } from './legacy-python.mjs'
+import { planLegacyPythonRebuild } from './legacy-python-rebuild.mjs'
+import { selectLegacyPythonRebuild } from './legacy-python-selection.mjs'
 
 const name = 'desktop-maintenance.json', recovering = new Set()
 const legacyVersions = JSON.parse(readFileSync(new URL('../desktop/legacy-releases.json', import.meta.url), 'utf8')).versions
@@ -45,6 +49,12 @@ export function readVersionMaintenance(dataDir) {
         && record.target_core !== undefined && uuid(source?.entry_fence_id) && /^[a-f0-9]{64}$/.test(source.fingerprint)
         && (source.scope === 'user' && record.system_operation_id === undefined && Object.keys(source).length === 3
           || source.scope === 'system' && uuid(record.system_operation_id) && /^[a-f0-9]{64}$/.test(source.manifest_fingerprint) && Object.keys(source).length === 4)
+    if (record.legacy_python !== undefined) {
+      const prepared = record.legacy_python
+      if (record.schema_version !== 2 || !prepared || prepared.status === 'absent' && Object.keys(prepared).length !== 1
+        || prepared.status === 'prepared' && Object.keys(prepared).length !== 2 || !['absent', 'prepared'].includes(prepared.status)) fail()
+      if (prepared.status === 'prepared') pythonSelection.verifyAgentEnvironmentReference(prepared.reference)
+    }
     if (!validSource || !uuid(record.id) || record.data_dir !== realpathSync(dataDir)
       || !path.isAbsolute(record.install_root) || !version(record.target_version)
       || record.target_core !== undefined && (!record.target_core || typeof record.target_core.root !== 'string'
@@ -167,6 +177,51 @@ export async function cancelPreparedLegacySystemVersionMaintenance(options) {
   if (current?.id !== record.id || current.phase !== record.phase) fail()
   rmSync(path.join(dataDir, name)); syncDirectory(dataDir)
   return { preparation_cancelled: true, service_started: false }
+}
+
+// Persist only a prepared environment reference while the old default is still
+// untouched. This grants neither deployment authority nor permission to start.
+export async function bindLegacyPythonMaintenance({ dataDir, id, prepared, inspectEnvironment = inspectLegacyPythonEnvironment }) {
+  dataDir = locked(management.requirePrivateDataRoot(dataDir))
+  const record = readVersionMaintenance(dataDir)
+  if (record?.schema_version !== 2 || record.id !== id || record.phase !== 'backed_up'
+    || inspectInstance(dataDir).state !== 'stopped' || pythonSelection.readAgentEnvironmentReference(dataDir)) fail()
+  const root = record.target_core.root, release = await verifyCoreRelease(root, { version: record.target_version })
+  if (release.inventory_sha256 !== record.target_core.inventory_sha256) fail()
+  await backupOf(dataDir, record)
+  const observed = await inspectEnvironment({ root, dataDir })
+  let value
+  if (observed.status === 'absent' && prepared === undefined) value = { status: 'absent' }
+  else {
+    const reference = pythonSelection.verifyAgentEnvironmentReference({ schema_version: 1, id: prepared?.id, directory: prepared?.directory,
+      source_fingerprint: prepared?.source_fingerprint, receipt_sha256: prepared?.receipt_sha256 })
+    const candidate = pythonSelection.verifyAgentEnvironmentCandidate(dataDir, reference), plan = planLegacyPythonRebuild(observed)
+    if (plan.source_fingerprint !== reference.source_fingerprint || JSON.stringify(plan.pins) !== JSON.stringify(candidate.receipt.pins)) fail()
+    value = { status: 'prepared', reference }
+  }
+  if (record.legacy_python && JSON.stringify(record.legacy_python) !== JSON.stringify(value)) fail()
+  record.legacy_python = value; write(dataDir, record); return record
+}
+// Selection is a data-changing step, after the surrounding takeover has sealed
+// old entry points. A lost publication result retains the same installing guard.
+export async function selectLegacyPythonMaintenance({ dataDir, id, inspectEnvironment = inspectLegacyPythonEnvironment, selectPrepared = selectLegacyPythonRebuild }) {
+  dataDir = locked(management.requirePrivateDataRoot(dataDir))
+  const record = readVersionMaintenance(dataDir)
+  if (record?.schema_version !== 2 || record.id !== id || record.phase !== 'installing' || !record.legacy_python
+    || inspectInstance(dataDir).state !== 'stopped') fail()
+  const root = record.target_core.root, release = await verifyCoreRelease(root, { version: record.target_version })
+  if (release.inventory_sha256 !== record.target_core.inventory_sha256) fail()
+  await backupOf(dataDir, record)
+  if (record.legacy_python.status === 'absent') {
+    if ((await inspectEnvironment({ root, dataDir })).status !== 'absent' || pythonSelection.readAgentEnvironmentReference(dataDir)) fail()
+    return { selected: false, environment_created: false }
+  }
+  const reference = record.legacy_python.reference
+  pythonSelection.verifyAgentEnvironmentCandidate(dataDir, reference)
+  await selectPrepared({ root, dataDir, prepared: reference, expectedFingerprint: reference.source_fingerprint })
+  const current = pythonSelection.readAgentEnvironmentReference(dataDir)
+  if (!current || Object.keys(reference).some(key => current[key] !== reference[key])) fail()
+  return { ...reference, selected: true }
 }
 
 // Bind an already verified immutable target before replacement begins. Existing

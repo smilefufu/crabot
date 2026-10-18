@@ -64,4 +64,4 @@ function readAgentEnvironmentSelection(dataDir) {
   const record = readAgentEnvironmentReference(dataDir)
   return record ? verifyAgentEnvironmentCandidate(dataDir, record) : null
 }
-module.exports = { selectionName, readAgentEnvironmentReference, readAgentEnvironmentSelection, verifyAgentEnvironmentCandidate }
+module.exports = { selectionName, readAgentEnvironmentReference, readAgentEnvironmentSelection, verifyAgentEnvironmentCandidate, verifyAgentEnvironmentReference }
