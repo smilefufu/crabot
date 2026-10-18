@@ -148,6 +148,7 @@ export interface MCPServerRegistryEntry {
   command: string
   args?: string[]
   env?: Record<string, string>
+  managed_runtime?: 'python' | 'node'
   is_builtin: boolean
   is_essential: boolean
   can_disable: boolean

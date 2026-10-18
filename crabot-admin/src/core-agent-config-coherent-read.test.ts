@@ -102,6 +102,28 @@ describe('core Agent config coherent reads', () => {
     expect(result.config).not.toHaveProperty('essential_tools')
   })
 
+  it('degrades only a broken managed MCP and retains the revision, custom config and registry enablement', async () => {
+    const resource = await makeAdmin(); resources.push(resource)
+    const subject = resource.admin as any
+    subject.rpcClient.callModuleManagerSensitive = vi.fn().mockResolvedValue({ verified: true })
+    subject.rpcClient.callModuleManager = vi.fn().mockResolvedValue({ module_id: 'crabot-agent', module_type: 'agent', port: 19002 })
+    subject.agentManager.configs.set('crabot-agent', { instance_id: 'crabot-agent', model_config: {} })
+    subject.configMutationCoordinator.readCommittedEpoch = vi.fn().mockResolvedValue({ revision: 9, generation: 2 })
+    subject.modelProviderManager.resolveModelConfig = vi.fn().mockResolvedValue({ endpoint: 'https://test.example', apikey: 'test', model_id: 'm', format: 'openai', provider_id: 'p' })
+    subject.modelProviderManager.resolveImageConfig = vi.fn().mockResolvedValue({ available: false, reason: 'none' })
+    const custom = { id: 'custom', name: 'custom', transport: 'stdio', command: '/custom/node', args: ['server.js'], env: { OWN_TOKEN: 'own' }, enabled: true }
+    const broken = { id: 'broken', name: 'broken', transport: 'stdio', command: '/invalid/node', managed_runtime: 'node', enabled: true }
+    subject.mcpServerManager.list = vi.fn().mockReturnValue([custom, broken])
+    subject.skillManager.list = vi.fn().mockReturnValue([])
+    subject.subAgentManager.listEnabled = vi.fn().mockReturnValue([])
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const result = await subject.handleGetAgentConfig({ instance_id: 'crabot-agent' }, { authorizationBearer: 'runtime' })
+    expect(result.config_revision).toBe(9)
+    expect(result.config.agent_config.mcp_servers).toEqual([expect.objectContaining({ id: 'custom', command: '/custom/node', env: { OWN_TOKEN: 'own' } })])
+    expect(broken.enabled).toBe(true)
+    expect(warning).toHaveBeenCalledWith(expect.stringContaining('broken'), expect.stringContaining('自定义'))
+  })
+
   it('does not return source-written config under the prior revision while coordinator outbox is active', async () => {
     const resource = await makeAdmin(); resources.push(resource)
     const subject = resource.admin as any

@@ -1,3 +1,4 @@
+import { resolveManagedMcpConfig } from './managed-mcp-runtime.js'
 import { adminWebTransport } from './admin-web-transport.js'
 import { parseChatMultipartMetadata } from 'crabot-client'
 import { correlateHttpRequest } from './http-diagnostics.js'
@@ -7969,16 +7970,17 @@ export class AdminModule extends ModuleBase {
 
     // 标准内置 Scrapling 使用产品运行环境；所有 Worker 消费同一份解析结果。
     const { resolveScraplingConfig } = require(path.join(CRABOT_HOME, 'scripts/lib/scrapling-runtime.cjs'))
-    const mcpServerConfigs = enabledMcpServers.flatMap((s) => {
+    const mcpServerConfigs = (await Promise.all(enabledMcpServers.map(async (s) => {
       try {
-        return [resolveScraplingConfig(
+        const config = resolveScraplingConfig(
           CRABOT_HOME, getDataRootDir(), s, this.mcpServerManager.toAgentConfig(s),
-        ) as ReturnType<MCPServerManager['toAgentConfig']>]
+        ) as ReturnType<MCPServerManager['toAgentConfig']>
+        return [await resolveManagedMcpConfig(CRABOT_HOME, getDataRootDir(), s, config)]
       } catch (error) {
         console.warn(`[Admin] MCP server "${s.name}" unavailable:`, error instanceof Error ? error.message : String(error))
         return []
       }
-    })
+    }))).flat()
 
     // subagents：startup pull 时就带上，避免 Agent 启动期 subagents 空窗。
     // 历史 bug：subagents 只走 push 不走 get_agent_config → agent 启动时 this.subAgents 为空，

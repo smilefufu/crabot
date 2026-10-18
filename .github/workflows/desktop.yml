@@ -112,14 +112,14 @@ jobs:
           node node_modules/typescript/bin/tsc -p tsconfig.cli.json
           node node_modules/vitest/vitest.mjs run src/cli/client.test.ts --maxWorkers=1 --minWorkers=1
           cd crabot-admin
-          node node_modules/vitest/vitest.mjs run src/chat-http-ws.test.ts src/chat-manager.test.ts src/chat-outbox-recovery.test.ts src/http-diagnostics.test.ts src/model-client-http.test.ts src/desktop-upgrade-http.test.ts src/version/upgrade-runner.test.ts src/version/version-service.test.ts src/desktop-auth.test.ts src/credentials.test.ts src/computer-use-setup-api.test.ts src/memory-access.test.ts src/voice-admin.test.ts --maxWorkers=1 --minWorkers=1
+          node node_modules/vitest/vitest.mjs run src/chat-http-ws.test.ts src/chat-manager.test.ts src/chat-outbox-recovery.test.ts src/http-diagnostics.test.ts src/model-client-http.test.ts src/desktop-upgrade-http.test.ts src/version/upgrade-runner.test.ts src/version/version-service.test.ts src/desktop-auth.test.ts src/credentials.test.ts src/computer-use-setup-api.test.ts src/memory-access.test.ts src/voice-admin.test.ts src/managed-mcp.test.ts src/managed-mcp-runtime.test.ts src/mcp-subagent-config-mutation.test.ts src/core-agent-config-coherent-read.test.ts --maxWorkers=1 --minWorkers=1
       - name: Web compilation and state regressions
         run: |
           cd crabot-admin/web
           pnpm install --frozen-lockfile
           node node_modules/typescript/bin/tsc -p tsconfig.json
           node node_modules/vite/bin/vite.js build
-          node node_modules/vitest/vitest.mjs run src/pages/Chat/index.test.tsx src/pages/DesktopWelcome.test.tsx src/services/server-state.test.ts src/services/desktop-host.test.ts src/components/ChangePasswordDialog.test.tsx src/components/DesktopDiagnosticsPanel.test.tsx src/pages/Settings/ComputerUseSetupCard.test.tsx src/pages/Settings/VersionUpgradeCard.test.tsx src/pages/Settings/DesktopVersionUpgradeCard.test.tsx --maxWorkers=1 --minWorkers=1
+          node node_modules/vitest/vitest.mjs run src/pages/Chat/index.test.tsx src/pages/MCPServers/MCPServerList.test.tsx src/pages/DesktopWelcome.test.tsx src/services/server-state.test.ts src/services/desktop-host.test.ts src/components/ChangePasswordDialog.test.tsx src/components/DesktopDiagnosticsPanel.test.tsx src/pages/Settings/ComputerUseSetupCard.test.tsx src/pages/Settings/VersionUpgradeCard.test.tsx src/pages/Settings/DesktopVersionUpgradeCard.test.tsx --maxWorkers=1 --minWorkers=1
       - name: Electron compilation and main-process state regressions
         working-directory: crabot-desktop
         run: |
@@ -145,6 +145,9 @@ jobs:
       - name: Execute real offline local capabilities
         if: steps.scope.outputs.full_runtime == 'true'
         run: node .github/scripts/smoke-product-runtime.mjs 2>&1 | tee .desktop-build/product-smoke.log
+      - name: Real isolated managed MCP dependencies and stdio connections
+        if: steps.scope.outputs.full_runtime == 'true'
+        run: node .github/scripts/smoke-managed-mcp.mjs 2>&1 | tee .desktop-build/managed-mcp-smoke.log
       - name: Standard Ubuntu runtime compatibility
         if: runner.os == 'Linux' && steps.scope.outputs.full_runtime == 'true'
         run: |
