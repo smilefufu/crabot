@@ -9,7 +9,7 @@ import { once } from 'node:events'
 import assert from 'node:assert/strict'
 
 const checkout = process.argv[2], mode = process.argv[3] ?? 'updater'
-const expectedCompletion = mode === 'updater' || mode === 'unreadable'
+const expectedCompletion = mode === 'updater' || mode === 'unreadable' || mode === 'cleanup-race'
 const { default: identity } = await import(pathToFileURL(path.join(checkout, 'scripts/lib/process-identity.cjs')))
 const root = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'crabot-maintenance-fixture-')))
 for (const directory of ['scripts', 'data', 'pids', 'crabot-core/dist', 'crabot-admin/dist']) await fs.mkdir(path.join(root, directory), { recursive: true })
@@ -56,10 +56,32 @@ try {
   console.log('CONTROLLED_UI_MAINTENANCE_STOP ' + JSON.stringify({ passed: true, completed: passed, mode, business_mm: false }))
 } finally {
   const files = await fs.readdir(path.join(root, 'pids'))
-  for (const file of files.reverse()) {
-    const expected = JSON.parse(await fs.readFile(path.join(root, 'pids', file), 'utf8'))
-    if (identity.sameProcess(expected, identity.inspectProcess(expected.pid))) { try { process.kill(expected.pid, 'SIGKILL') } catch {} }
+  const unresolved = []
+  if (mode === 'cleanup-race') {
+    const inspect = identity.inspectProcess, observed = new Set()
+    identity.inspectProcess = pid => {
+      if (!observed.has(pid)) { observed.add(pid); throw Object.assign(new Error('exiting fixture'), { code: 'CRABOT_PROCESS_IDENTITY' }) }
+      return inspect(pid)
+    }
   }
+  const cleanup = await Promise.allSettled(files.map(async file => {
+    const expected = JSON.parse(await fs.readFile(path.join(root, 'pids', file), 'utf8'))
+    const deadline = Date.now() + 5000
+    let settled = false
+    while (Date.now() < deadline) {
+      try {
+        const actual = identity.inspectProcess(expected.pid)
+        if (!identity.sameProcess(expected, actual)) { settled = true; break }
+        // Signal only the exact saved fixture identity; unknown/reused PIDs
+        // never receive a signal, even during test cleanup.
+        try { process.kill(expected.pid, 'SIGKILL') } catch (error) { if (!['ESRCH', 'EPERM', 'EACCES'].includes(error.code)) throw error }
+      } catch (error) { if (error.code !== 'CRABOT_PROCESS_IDENTITY') throw error }
+      await new Promise(resolve => setTimeout(resolve, 50))
+    }
+    if (!settled) unresolved.push(expected.pid)
+  }))
+  const errors = cleanup.filter(result => result.status === 'rejected').map(result => result.reason)
+  if (unresolved.length || errors.length) throw new AggregateError(errors, 'Fixture identity remained unknown; preserved at ' + root)
   await exited.catch(() => {})
   await fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
 }
