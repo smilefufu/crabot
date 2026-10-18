@@ -14,6 +14,7 @@ const safe = observation => observation && !observation.maintenance
   && (observation.state === 'stopped' || observation.state === 'running' && observation.ready === true)
 
 export function systemRecoveryOptions(plan, prior, selected) {
+  if (plan.kind === 'conversion') throw systemError('旧共享转换必须由专用恢复器核对来源、隔离与本人回执；未按批量或普通升级重放。', 'CRABOT_SYSTEM_CONVERSION_RECOVERY_REQUIRED')
   if (plan.kind !== 'upgrade') return { continue: true, cancel: true }
   if (selected === plan.source.id) {
     const rows = prior?.results ?? []

@@ -19,6 +19,14 @@ function processRecord(value, uid) {
     && Object.keys(value).every(key => ['pid', 'owner', 'started', 'executable', 'parent'].includes(key))
 }
 export function planSystemConversion({ installRoot, source, target, instances }) {
+  return validateSystemConversionPlan({ schema_version: 1, kind: 'conversion', id: randomUUID(), install_root: installRoot,
+    source: structuredClone(source), target: structuredClone(target), instances: structuredClone(instances) })
+}
+export function validateSystemConversionPlan(plan) {
+  const fields = ['schema_version', 'kind', 'id', 'install_root', 'source', 'target', 'instances']
+  if (!plan || plan.schema_version !== 1 || plan.kind !== 'conversion' || !uuid(plan.id)
+    || Object.keys(plan).length !== fields.length || fields.some(key => !Object.hasOwn(plan, key))) fail('旧共享转换计划格式不兼容。')
+  const { install_root: installRoot, source, target, instances } = plan
   if (!absolute(installRoot) || !source || Object.keys(source).length !== 3 || !versions.includes(source.version)
     || !absolute(source.installRoot) || source.installRoot === installRoot || !hash(source.code_fingerprint)
     || !target || Object.keys(target).length !== 2 || !hash(target.id)
@@ -36,11 +44,11 @@ export function planSystemConversion({ installRoot, source, target, instances })
         || value.mm_port !== 19000 + entry.port_offset || value.mm.pid === value.controller.pid
         || value.mm.parent !== value.controller.pid || value.mm.executable !== value.controller.executable || !['daemon', 'foreground'].includes(value.launch_kind))) fail('存在未核实的数据绑定或旧启动来源，未创建转换计划。')
   }
-  return { schema_version: 1, kind: 'conversion', id: randomUUID(), install_root: installRoot,
-    source: structuredClone(source), target: structuredClone(target), instances: structuredClone(instances) }
+  return plan
 }
 
 export async function executeSystemConversion(plan, operations) {
+  validateSystemConversionPlan(plan)
   const result = { schema_version: 1, kind: 'conversion', id: plan.id, phase: 'running', stage: 'preparing',
     results: plan.instances.map(({ entry, observation }) => ({ uid: entry.uid, user: entry.user,
       originally_running: observation.runtime_state === 'running', resume_required: observation.runtime_state === 'running',

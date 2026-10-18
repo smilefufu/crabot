@@ -44,7 +44,7 @@ export function readSystemBootId() {
 export function systemMaintenanceAllowsServiceStart(record, { entry, coreId, bootId, cgroup }) {
   if (record?.schema_version !== 1 || record.phase !== 'running' || record.current_uid !== entry.uid
     || !bootId || record.boot_id !== bootId || !cgroup.split('\n').some(line => line.endsWith('/crabot.service'))) return false
-  if (record.operation === 'upgrade') return record.allow_start?.uid === entry.uid && record.allow_start.core_id === coreId
+  if (['upgrade', 'conversion'].includes(record.operation)) return record.allow_start?.uid === entry.uid && record.allow_start.core_id === coreId
   return ['start', 'restart'].includes(record.operation)
 }
 export async function assertSystemServiceStartAllowed(entry, { root } = {}) {
