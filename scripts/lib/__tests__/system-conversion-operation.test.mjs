@@ -19,7 +19,7 @@ async function fixture(t) {
   await registry.update(() => [], { create: true })
   const entry = { ...account, data_dir: '/must-not-access/employee-data', port_offset: 100, enabled: true, autostart: false }
   const source = { version: 'v2026.10.15.1', installRoot: '/opt/crabot-old', code_fingerprint: 'a'.repeat(64) }
-  const observation = { user: entry.user, uid: entry.uid, port_offset: entry.port_offset, data_dir: entry.data_dir,
+  const observation = { user: entry.user, uid: entry.uid, port_offset: entry.port_offset, data_dir: entry.data_dir, data_directory: { device: '1', inode: '2' },
     install_root: source.installRoot, code_fingerprint: source.code_fingerprint, manifest_fingerprint: 'c'.repeat(64),
     runtime_state: 'stopped', data_binding: 'verified_stopped' }
   const plan = planSystemConversion({ installRoot: '/opt/crabot-managed', source, target: { id: 'b'.repeat(64), version: '1.2.4' }, instances: [{ entry, observation }] })

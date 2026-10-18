@@ -26,6 +26,8 @@ function fixture(t) {
 test('actual runtime definition establishes the owned custom directory without reading display metadata', options, async t => {
   const f = fixture(t), result = await f.discover()
   assert.equal(result.data_dir, f.data); assert.equal(result.data_binding, 'observed_running'); assert.equal(result.runtime_state, 'running')
+  const stat = fs.statSync(f.data, { bigint: true })
+  assert.deepEqual(result.data_directory, { device: stat.dev.toString(), inode: stat.ino.toString() })
   assert.equal(result.mm.pid, process.pid); assert.equal(f.calls(), 1); assert.equal(f.observations(), 2)
   assert.equal(JSON.stringify(result).includes('must-not-return'), false)
 })
@@ -97,4 +99,21 @@ test('no launcher establishes stopped only with the original private data and se
   fs.unlinkSync(path.join(f.data, 'mm.pid')); fs.renameSync(f.data, f.data + '-retained')
   await assert.rejects(f.use(() => assert.fail('missing data cannot authorize a replacement')), { code: 'CRABOT_DATA_MISSING' })
   assert.equal(fs.existsSync(f.data), false)
+})
+
+test('standard old 0755 data can be observed and stopped without changing existing permissions', options, async t => {
+  const f = await fencedFixture(t); fs.chmodSync(f.data, 0o755)
+  assert.equal((await f.use(snapshot => snapshot)).state, 'running')
+  f.snapshot.state = 'stopped'
+  assert.equal((await f.use(snapshot => snapshot)).state, 'stopped')
+  assert.equal(fs.statSync(f.data).mode & 0o777, 0o755)
+})
+
+test('a replacement directory at the identical original path cannot acquire the observed binding', options, async t => {
+  const f = await fencedFixture(t); f.snapshot.state = 'stopped'
+  fs.renameSync(f.data, f.data + '-retained'); fs.mkdirSync(f.data, { mode: 0o700 }); fs.mkdirSync(path.join(f.data, 'agent'))
+  let called = false
+  await assert.rejects(f.use(() => { called = true; return { accepted: true } }))
+  assert.equal(called, false)
+  assert.equal(fs.statSync(f.data + '-retained').mode & 0o777, 0o700)
 })

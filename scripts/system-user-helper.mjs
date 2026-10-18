@@ -34,7 +34,16 @@ try {
   let result
   if (permit.action === 'prepare' || permit.action === 'verify-provision') {
     const homePath = path.join(entry.home, '.crabot')
-    const home = permit.action === 'verify-provision' ? management.requirePrivateDataRoot(homePath) : management.ensurePrivateDataRoot(homePath)
+    let home
+    if (fs.existsSync(homePath)) {
+      const parent = fs.lstatSync(homePath)
+      if (!parent.isDirectory() || parent.isSymbolicLink() || parent.uid !== entry.uid || parent.mode & 0o7022
+        || (parent.mode & 0o700) !== 0o700 || fs.realpathSync(homePath) !== homePath) throw systemError('本人Crabot清单父目录无法核验，未修改。')
+      home = homePath
+    } else {
+      if (permit.action === 'verify-provision') throw systemError('原开通清单目录缺失，未重新初始化；请检查本人保留数据。')
+      home = management.ensurePrivateDataRoot(homePath)
+    }
     const manifest = path.join(home, 'instance.json'), existing = fs.existsSync(manifest)
     if (existing) {
       const previous = JSON.parse(fs.readFileSync(manifest, 'utf8'))

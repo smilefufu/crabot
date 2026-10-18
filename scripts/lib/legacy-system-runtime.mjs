@@ -1,7 +1,7 @@
 // Read-only operating evidence for a legacy system candidate. No returned field
 // authorizes stop/migration; conversion must fence sources and reverify this view.
 import fs from 'node:fs'
-import management from './desktop-management.cjs'
+import { inspectLegacySystemDataDirectory } from './legacy-system-directory.mjs'
 import { inspectInstance } from './instance-runtime.mjs'
 import { discoverFencedLegacySystemRelease } from './legacy-system-release.mjs'
 import path from 'node:path'
@@ -31,6 +31,7 @@ async function verifiedSystemRuntime(context, use, { observeAccount = discoverLe
     if (snapshot.state !== 'running') return use({ ...account, runtime_state: 'no_known_launcher' }, null)
     assertLegacyProcessesCurrent(snapshot)
     return use({ ...account, runtime_state: 'running', data_binding: 'observed_running', data_dir: dataDir,
+      data_directory: inspectLegacySystemDataDirectory(dataDir).identity,
       controller: snapshot.controller, mm: snapshot.mm, mm_port: snapshot.mm_port, launch_kind: snapshot.launch_kind }, rpc)
   }, { signal })
 }
@@ -45,12 +46,12 @@ export async function withFencedLegacySystemRuntime(context, expected, use, { ob
   discoverLegacySystemAccount(account, { discoverRelease: discoverFencedLegacySystemRelease }),
   observeProcesses = withVerifiedLegacyProcessGraph, signal } = {}) {
   if (expected?.runtime_state !== 'running' || expected.data_binding !== 'observed_running'
-    || typeof expected.data_dir !== 'string' || !path.isAbsolute(expected.data_dir)) fail()
+    || !expected.data_directory || typeof expected.data_dir !== 'string' || !path.isAbsolute(expected.data_dir)) fail()
   return verifiedSystemRuntime(context, async (snapshot, rpc) => {
     for (const key of ['uid', 'user', 'port_offset', 'install_root', 'code_fingerprint', 'manifest_fingerprint']) {
       if (snapshot[key] !== expected[key]) fail()
     }
-    const dataDir = management.requirePrivateDataRoot(expected.data_dir)
+    const dataDir = inspectLegacySystemDataDirectory(expected.data_dir, expected.data_directory).directory
     if (dataDir !== expected.data_dir) fail()
     if (snapshot.runtime_state === 'running') {
       if (snapshot.data_dir !== dataDir || snapshot.mm_port !== expected.mm_port

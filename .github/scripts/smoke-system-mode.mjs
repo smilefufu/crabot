@@ -143,6 +143,14 @@ try {
   }
   const [alice, bob, carol] = users
   const preserved = await fs.readFile(path.join(alice.data_dir, 'admin/credentials.json'))
+  await phase('legacy-readable-home-parent-preserved', async () => {
+    const parent = path.join(alice.home, '.crabot')
+    await run('/usr/bin/setpriv', ['--reuid=' + alice.uid, '--regid=' + alice.gid, '--init-groups', '--', '/bin/chmod', '0755', parent],
+      { env: { PATH: '/usr/bin:/bin', HOME: alice.home, USER: alice.user, LOGNAME: alice.user } })
+    await run(command, ['system', 'user', 'add', alice.user])
+    assert.equal((await fs.stat(parent)).mode & 0o7777, 0o755)
+    assert.equal((await fs.stat(alice.data_dir)).mode & 0o7777, 0o700)
+  })
   await phase('repeat-open-preserves-password', () => run(command, ['system', 'user', 'add', alice.user]))
   assert.deepEqual(await fs.readFile(path.join(alice.data_dir, 'admin/credentials.json')), preserved)
   await phase('employee-native-cli-start', () => asUser(alice, ['start', '-d']))

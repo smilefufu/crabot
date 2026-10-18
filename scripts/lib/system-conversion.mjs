@@ -3,6 +3,7 @@
 import path from 'node:path'
 import { readFileSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
+import { validLegacySystemDirectoryIdentity } from './legacy-system-directory.mjs'
 import { validateSystemEntries, systemError } from './system-registry.mjs'
 const versions = JSON.parse(readFileSync(new URL('../desktop/legacy-releases.json', import.meta.url), 'utf8')).versions
 const uuid = value => typeof value === 'string' && /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(value)
@@ -11,7 +12,7 @@ const absolute = value => typeof value === 'string' && path.posix.isAbsolute(val
 const fail = message => { throw systemError(message, 'CRABOT_SYSTEM_CONVERSION_UNVERIFIED') }
 const errorOf = error => ({ code: error.code ?? 'CRABOT_SYSTEM_CONVERSION_FAILED', message: error.message })
 const observationFields = ['user', 'uid', 'port_offset', 'install_root', 'code_fingerprint', 'manifest_fingerprint',
-  'data_dir', 'data_binding', 'runtime_state', 'controller', 'mm', 'mm_port', 'launch_kind']
+  'data_dir', 'data_directory', 'data_binding', 'runtime_state', 'controller', 'mm', 'mm_port', 'launch_kind']
 function processRecord(value, uid) {
   return value && Number.isSafeInteger(value.pid) && value.pid > 0 && value.owner === String(uid)
     && typeof value.started === 'string' && value.started.length > 0 && value.started.length < 256 && absolute(value.executable)
@@ -43,7 +44,7 @@ export function validateSystemConversionInstance(item, source) {
   const { entry, observation: value } = item
   if (!entry.enabled || !value || Object.keys(value).some(key => !observationFields.includes(key))
     || value.uid !== entry.uid || value.user !== entry.user || value.port_offset !== entry.port_offset || value.data_dir !== entry.data_dir
-    || value.install_root !== source.installRoot || value.code_fingerprint !== source.code_fingerprint || !hash(value.manifest_fingerprint)
+    || !validLegacySystemDirectoryIdentity(value.data_directory) || value.install_root !== source.installRoot || value.code_fingerprint !== source.code_fingerprint || !hash(value.manifest_fingerprint)
     || !['running', 'stopped'].includes(value.runtime_state)
     || value.data_binding !== (value.runtime_state === 'running' ? 'observed_running' : 'verified_stopped')
     || value.runtime_state === 'running' && (!processRecord(value.controller, entry.uid) || !processRecord(value.mm, entry.uid)

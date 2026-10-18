@@ -9,6 +9,7 @@ import { validateSystemConversionInstance } from './system-conversion.mjs'
 import { systemError } from './system-registry.mjs'
 import pythonSelection from './agent-python-selection.cjs'
 import { acquireCliLock, releaseCliLock } from './cli-lock.mjs'
+import { inspectLegacySystemDataDirectory, privatizeLegacySystemDataDirectory, assertLegacySystemDataLayout } from './legacy-system-directory.mjs'
 import { withFencedLegacySystemRuntime } from './legacy-system-runtime.mjs'
 import { withVerifiedLegacyProcessGraph } from './legacy-process-graph.mjs'
 import { inspectInstance } from './instance-runtime.mjs'
@@ -65,12 +66,14 @@ export async function maintainLegacySystemUser(entry, { action, source, observat
   if (['migrate', 'check-migration'].includes(action) && (!snapshot || Object.keys(snapshot).length !== 4 || !uuid(snapshot.id)
     || snapshot.system_operation_id !== operationId || !uuid(snapshot.backup?.id) || Object.keys(snapshot.backup).length !== 2
     || !/^[a-f0-9]{64}$/.test(snapshot.backup.sha256) || !/^[a-f0-9]{64}$/.test(snapshot.target_id))) fail()
-  const dataDir = management.requirePrivateDataRoot(entry.data_dir)
+  const dataDir = inspectLegacySystemDataDirectory(entry.data_dir, observation.data_directory).directory
   if (dataDir !== entry.data_dir || observation.data_dir !== dataDir) fail()
   const context = { account: { user: entry.user, uid: entry.uid, gid: entry.gid, home: entry.home }, release: source, port_offset_hint: entry.port_offset }
   const parameters = { dataDir, context, expected: observation, entryFenceId: sourceFenceId, operationId, targetRoot, runtimeOptions }
   const lock = await acquireCliLock(dataDir, 'system-legacy-' + action)
+  let diagnosticFd, diagnosticVerified = false
   try {
+    inspectLegacySystemDataDirectory(dataDir, observation.data_directory)
     const target = ['migrate', 'check-migration'].includes(action) ? cliLocation.assertSelectedCli(targetRoot) : cliLocation.locateCliInstallation(targetRoot)
     const release = await verifyCoreRelease(targetRoot)
     if (!target || target.scope !== 'system' || target.id !== release.inventory_sha256 || targetRoot !== target.coreRoot) fail()
@@ -83,6 +86,8 @@ export async function maintainLegacySystemUser(entry, { action, source, observat
     // The root role must require its durable migrated receipt before dispatching
     // this observation; a missing employee fence is never root completion proof.
     if (action === 'check-migration') {
+      management.requirePrivateDataRoot(dataDir)
+      assertLegacySystemDataLayout(dataDir)
       if (readVersionMaintenance(dataDir) || snapshot?.system_operation_id !== operationId || snapshot.target_id !== target.id
         || inspectInstance(dataDir).state !== 'stopped') fail()
       await processes(source.installRoot, value => { if (value.state !== 'stopped') fail() })
@@ -95,6 +100,15 @@ export async function maintainLegacySystemUser(entry, { action, source, observat
       return { verified: true, service_started: false }
     }
     if ((await withFencedLegacySystemRuntime(context, observation, value => value, runtimeOptions)).state !== 'stopped') fail()
+    assertLegacySystemDataLayout(dataDir)
+    if (['snapshot', 'cancel-preparation'].includes(action)) privatizeLegacySystemDataDirectory(dataDir, observation.data_directory)
+    management.requirePrivateDataRoot(dataDir)
+    const container = management.ensurePrivateDataRoot(path.join(dataDir, 'system-conversion'))
+    const directory = management.ensurePrivateDataRoot(path.join(container, operationId))
+    diagnosticFd = fs.openSync(path.join(directory, 'maintenance.log'), fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_APPEND | fs.constants.O_NOFOLLOW, 0o600)
+    const diagnostic = fs.fstatSync(diagnosticFd)
+    if (!diagnostic.isFile() || diagnostic.uid !== entry.uid || diagnostic.nlink !== 1 || (diagnostic.mode & 0o777) !== 0o600) fail()
+    diagnosticVerified = true; outputFd ??= diagnosticFd
     let record = readVersionMaintenance(dataDir)
     if (action === 'snapshot') {
       if (record) fail()
@@ -103,8 +117,6 @@ export async function maintainLegacySystemUser(entry, { action, source, observat
       if (hash(original) !== observation.manifest_fingerprint) fail()
       converted(original)
       record = await beginLegacySystemVersionMaintenance(parameters)
-      const container = management.ensurePrivateDataRoot(path.join(dataDir, 'system-conversion'))
-      const directory = management.ensurePrivateDataRoot(path.join(container, operationId))
       privateWrite(path.join(directory, 'legacy-instance.json'), original)
       const backup = await createMaintenanceBackup(dataDir); await recordVersionMaintenanceBackup(dataDir, record.id, backup)
       const python = await inspectEnvironment({ root: targetRoot, dataDir })
@@ -139,5 +151,13 @@ export async function maintainLegacySystemUser(entry, { action, source, observat
         if (verifyDataCompatibility(targetRoot, dataDir).length || !ownManifest(manifestFile, entry.uid).equals(next)) fail()
       } })
     return { migrated: true, service_started: false }
-  } finally { releaseCliLock(lock) }
+  } catch (error) {
+    if (diagnosticVerified) {
+      try { fs.writeSync(diagnosticFd, new Date().toISOString() + ' ' + (error.stack ?? 'Unknown conversion failure') + '\n') } catch {}
+    }
+    throw error
+  } finally {
+    if (diagnosticFd !== undefined) fs.closeSync(diagnosticFd)
+    releaseCliLock(lock)
+  }
 }

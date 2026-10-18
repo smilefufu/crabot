@@ -9,7 +9,6 @@ import { readSystemBootId } from './lib/system-context.mjs'
 import { coordinatorIsRunning } from './lib/system-coordinator.mjs'
 const reply = frame => fs.writeFileSync(4, JSON.stringify(frame) + '\n')
 const fail = () => { throw Object.assign(new Error('旧共享转换委托与当前根作业阶段不符，未派发本次动作。'), { code: 'CRABOT_SYSTEM_CONVERSION_PERMIT' }) }
-let outputFd
 try {
   if (process.platform !== 'linux' || process.argv.length !== 3) fail()
   const permit = readLegacySystemConversionPermit(), entry = permit.entry, actual = userInfo()
@@ -34,29 +33,17 @@ try {
     result = await stopFencedLegacySystemInstance({ account: { user, uid, gid, home }, release: permit.source,
       port_offset_hint: entry.port_offset }, { expected: permit.observation })
   } else {
-    const management = (await import('./lib/desktop-management.cjs')).default
-    management.requirePrivateDataRoot(entry.data_dir)
-    const container = management.ensurePrivateDataRoot(path.join(entry.data_dir, 'system-conversion'))
-    const directory = management.ensurePrivateDataRoot(path.join(container, permit.operation_id))
-    outputFd = fs.openSync(path.join(directory, 'maintenance.log'), fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_APPEND | fs.constants.O_NOFOLLOW, 0o600)
-    const stat = fs.fstatSync(outputFd)
-    if (!stat.isFile() || stat.uid !== entry.uid || stat.nlink !== 1 || (stat.mode & 0o777) !== 0o600) fail()
     const { maintainLegacySystemUser } = await import('./lib/system-legacy-data.mjs')
-    try {
-      result = await maintainLegacySystemUser(entry, { action: permit.action, source: permit.source, observation: permit.observation,
-        sourceFenceId: permit.source_fence_id, operationId: permit.operation_id,
-        targetRoot: path.join(permit.install_root, 'releases', permit.target.id), snapshot: permit.snapshot,
-        env: systemUserEnvironment(entry), outputFd })
-    } catch (error) {
-      fs.writeSync(outputFd, new Date().toISOString() + ' ' + (error.stack ?? 'Unknown conversion failure') + '\n')
-      throw error
-    }
+    result = await maintainLegacySystemUser(entry, { action: permit.action, source: permit.source, observation: permit.observation,
+      sourceFenceId: permit.source_fence_id, operationId: permit.operation_id,
+      targetRoot: path.join(permit.install_root, 'releases', permit.target.id), snapshot: permit.snapshot,
+      env: systemUserEnvironment(entry) })
   }
   reply({ ok: true, result })
 } catch (error) {
   const controlled = new Set(['CRABOT_SYSTEM_CONVERSION_PERMIT', 'CRABOT_LEGACY_SYSTEM_ACCOUNT', 'CRABOT_LEGACY_SYSTEM_RUNTIME',
-    'CRABOT_LEGACY_RUNTIME_UNVERIFIED', 'CRABOT_LEGACY_UNSUPPORTED', 'CRABOT_LEGACY_STOP_UNKNOWN', 'CRABOT_SYSTEM_CONVERSION_DATA']).has(error.code)
+    'CRABOT_LEGACY_RUNTIME_UNVERIFIED', 'CRABOT_LEGACY_UNSUPPORTED', 'CRABOT_LEGACY_STOP_UNKNOWN', 'CRABOT_SYSTEM_CONVERSION_DATA', 'CRABOT_LEGACY_SYSTEM_DIRECTORY', 'CRABOT_DATA_MISSING']).has(error.code)
   reply({ ok: false, code: controlled ? error.code : 'CRABOT_SYSTEM_CONVERSION_PERMIT',
-    message: controlled ? error.message : '旧实例转换结果尚未核验，原数据和保护已保留；详细诊断保存在员工本人目录。' })
+    message: controlled ? error.message : '旧实例转换结果尚未核验，原数据和保护已保留；请检查员工本人诊断与保留备份。' })
   process.exitCode = 1
-} finally { if (outputFd !== undefined) fs.closeSync(outputFd) }
+}

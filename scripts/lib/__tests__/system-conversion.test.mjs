@@ -11,7 +11,7 @@ function fixture({ fail, selectedAfterFailure, saveFailure, initiallyStopped = t
       data_dir: '/srv/employee' + uid, port_offset: 100 + index * 100, enabled: true, autostart: false }
     const running = index === 0 || !initiallyStopped
     const observation = { user: entry.user, uid, port_offset: entry.port_offset, install_root: source.installRoot,
-      code_fingerprint: source.code_fingerprint, manifest_fingerprint: 'c'.repeat(64), data_dir: entry.data_dir,
+      code_fingerprint: source.code_fingerprint, manifest_fingerprint: 'c'.repeat(64), data_dir: entry.data_dir, data_directory: { device: '1', inode: '2' },
       data_binding: running ? 'observed_running' : 'verified_stopped', runtime_state: running ? 'running' : 'stopped' }
     if (running) Object.assign(observation, { controller: { pid: uid + 10000, parent: 1, owner: String(uid), started: 'fixture-controller', executable: '/usr/bin/node' },
       mm: { pid: uid + 20000, parent: uid + 10000, owner: String(uid), started: 'fixture-mm', executable: '/usr/bin/node' }, mm_port: 19000 + entry.port_offset, launch_kind: 'daemon' })

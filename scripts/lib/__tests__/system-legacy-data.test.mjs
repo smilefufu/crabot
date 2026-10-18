@@ -5,6 +5,7 @@ import path from 'node:path'
 import { tmpdir, userInfo } from 'node:os'
 import { randomUUID, createHash } from 'node:crypto'
 import { maintainLegacySystemUser } from '../system-legacy-data.mjs'
+import { newCredentialsFromPassword, verifyPassword } from '../../../crabot-admin/dist/credentials.js'
 import { writeCoreRelease, verifyCoreRelease } from '../core-release.mjs'
 import { readVersionMaintenance, assertVersionMaintenanceAllowsStart } from '../version-maintenance.mjs'
 import { verifyMaintenanceBackup } from '../maintenance-backup.mjs'
@@ -32,6 +33,8 @@ async function fixture(t, { fails = false } = {}) {
   await fsp.rename(staging, targetRoot)
   await fsp.writeFile(path.join(install, 'cli-installation.json'), JSON.stringify({ schema_version: 1, scope: 'system', launcher_sha256: 'a'.repeat(64) }))
   const choose = id => fsp.writeFile(path.join(install, 'current-core'), id + '\n'); await choose(target.inventory_sha256)
+  for (const name of ['admin', 'agent', 'memory']) await fsp.mkdir(path.join(dataDir, name), { mode: 0o755 })
+  await fsp.writeFile(path.join(dataDir, 'admin/credentials.json'), JSON.stringify(await newCredentialsFromPassword('private-fixture-password', { is_temp: false, changed_via: 'start' })), { mode: 0o600 })
   await fsp.mkdir(path.join(dataDir, 'fixture')); await fsp.writeFile(path.join(dataDir, 'fixture/SCHEMA_VERSION'), 'v1'); await fsp.writeFile(path.join(dataDir, 'fixture/content'), 'before')
   const actual = userInfo(), entry = { user: actual.username, uid: actual.uid, gid: actual.gid, home: actual.homedir, data_dir: dataDir, port_offset: 100, enabled: true, autostart: false }
   const home = management.ensurePrivateDataRoot(path.join(parent, 'home-manifest-fixture')), manifestFile = path.join(home, 'instance.json')
@@ -40,7 +43,7 @@ async function fixture(t, { fails = false } = {}) {
   const source = { version: 'v2026.10.15.1', installRoot: sourceRoot, code_fingerprint: 'b'.repeat(64) }
   const observed = () => ({ user: entry.user, uid: entry.uid, port_offset: entry.port_offset, install_root: sourceRoot,
     code_fingerprint: source.code_fingerprint, manifest_fingerprint: hash(fs.readFileSync(manifestFile)), data_binding: 'unverified' })
-  const observation = { ...observed(), runtime_state: 'running', data_binding: 'observed_running', data_dir: dataDir,
+  const observation = { ...observed(), runtime_state: 'running', data_binding: 'observed_running', data_dir: dataDir, data_directory: { device: (await fsp.stat(dataDir, { bigint: true })).dev.toString(), inode: (await fsp.stat(dataDir, { bigint: true })).ino.toString() },
     controller: { pid: 10001, parent: 1, owner: String(entry.uid), started: 'preflight-controller-fixture', executable: process.execPath },
     mm: { pid: 10002, parent: 10001, owner: String(entry.uid), started: 'preflight-mm-fixture', executable: process.execPath }, mm_port: 19100, launch_kind: 'daemon' }
   const runtimeOptions = { observeAccount: async () => observed(), observeProcesses: async (_, use) => use({ state: 'stopped' }, null) }
@@ -151,4 +154,34 @@ for (const selection of ['absent', 'other']) test('all legacy snapshots and pre-
   await assert.rejects(f.invoke('migrate', { snapshot }), { code: 'CRABOT_CLI_INSTALLATION' })
   assert.deepEqual(await f.invoke('cancel-preparation'), { preparation_cancelled: true, service_started: false })
   assert.equal(await fsp.readFile(path.join(f.dataDir, 'fixture/content'), 'utf8'), 'before')
+})
+
+
+test('standard 0755 legacy data is privatized only after stopped-source and existing-credential checks, without changing children', options, async t => {
+  const f = await fixture(t), credentials = await fsp.readFile(path.join(f.dataDir, 'admin/credentials.json'))
+  await fsp.chmod(f.dataDir, 0o755)
+  const snapshot = await f.invoke('snapshot')
+  assert.equal((await fsp.stat(f.dataDir)).mode & 0o7777, 0o700)
+  for (const name of ['admin', 'agent', 'memory']) assert.equal((await fsp.stat(path.join(f.dataDir, name))).mode & 0o7777, 0o755)
+  assert.deepEqual(await fsp.readFile(path.join(f.dataDir, 'admin/credentials.json')), credentials)
+  assert.equal(await verifyPassword('private-fixture-password', JSON.parse(credentials)), true)
+  assert.equal((await fsp.stat(path.dirname(f.manifestFile))).mode & 0o7777, 0o700)
+  await f.invoke('cancel-preparation')
+  assert.equal((await fsp.stat(f.dataDir)).mode & 0o7777, 0o700)
+  assert.equal(snapshot.system_operation_id, f.operationId)
+})
+for (const changed of ['missing-admin', 'missing-credentials', 'invalid-credentials', 'remaining-process', 'directory-replaced']) test('invalid old data refuses before privacy or schema changes: ' + changed, options, async t => {
+  const f = await fixture(t); await fsp.chmod(f.dataDir, 0o755)
+  if (changed === 'missing-admin') await fsp.rename(path.join(f.dataDir, 'admin'), path.join(f.dataDir, 'old-admin'))
+  if (changed === 'missing-credentials') await fsp.rename(path.join(f.dataDir, 'admin/credentials.json'), path.join(f.dataDir, 'admin/old-credentials.json'))
+  if (changed === 'invalid-credentials') await fsp.writeFile(path.join(f.dataDir, 'admin/credentials.json'), '{}')
+  if (changed === 'remaining-process') f.params.runtimeOptions.observeProcesses = async (_, use) => use({ state: 'running', mm_port: 19100 }, { getDefinition: async () => { throw new Error('controlled active source') } })
+  if (changed === 'directory-replaced') {
+    await fsp.rename(f.dataDir, f.dataDir + '-retained'); await fsp.cp(f.dataDir + '-retained', f.dataDir, { recursive: true }); await fsp.chmod(f.dataDir, 0o755)
+  }
+  await assert.rejects(f.invoke('snapshot'))
+  assert.equal((await fsp.stat(f.dataDir)).mode & 0o7777, 0o755)
+  assert.equal(await fsp.readFile(path.join(f.dataDir, 'fixture/content'), 'utf8'), 'before')
+  assert.equal(readVersionMaintenance(f.dataDir), null)
+  await assert.rejects(fsp.stat(path.join(f.dataDir + '.desktop-backups')), { code: 'ENOENT' })
 })

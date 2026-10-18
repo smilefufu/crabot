@@ -11,7 +11,7 @@ import { readLegacySystemConversionPermit, readLegacySystemAccountPermit, readSy
 function fixture() {
   const entry = { user: 'alice', uid: 1001, gid: 1002, home: '/home/alice', data_dir: '/srv/alice', port_offset: 100, enabled: true, autostart: false }
   const source = { version: 'v2026.10.15.1', installRoot: '/opt/crabot-old', code_fingerprint: 'a'.repeat(64) }
-  const observation = { user: entry.user, uid: entry.uid, port_offset: entry.port_offset, data_dir: entry.data_dir,
+  const observation = { user: entry.user, uid: entry.uid, port_offset: entry.port_offset, data_dir: entry.data_dir, data_directory: { device: '1', inode: '2' },
     install_root: source.installRoot, code_fingerprint: source.code_fingerprint, manifest_fingerprint: 'c'.repeat(64), runtime_state: 'running', data_binding: 'observed_running',
     controller: { pid: 10000, parent: 1, owner: '1001', started: 'controller', executable: '/usr/bin/node' },
     mm: { pid: 10001, parent: 10000, owner: '1001', started: 'mm', executable: '/usr/bin/node' }, mm_port: 19100, launch_kind: 'daemon' }

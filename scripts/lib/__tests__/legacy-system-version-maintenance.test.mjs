@@ -34,7 +34,7 @@ async function fixture(t, { fails = false } = {}) {
   // Current-UID data protection fixture only. Shared root-code observation and
   // stopped process discovery are explicit observers, never root impersonation.
   const runtimeOptions = { observeAccount: async () => observed, observeProcesses: async (_, use) => use({ state: 'stopped' }, null) }
-  const expected = { ...observed, runtime_state: 'running', data_binding: 'observed_running', data_dir: dataDir }
+  const expected = { ...observed, runtime_state: 'running', data_binding: 'observed_running', data_dir: dataDir, data_directory: { device: (await fs.stat(dataDir, { bigint: true })).dev.toString(), inode: (await fs.stat(dataDir, { bigint: true })).ino.toString() } }
   const params = { dataDir, context, expected, entryFenceId: randomUUID(), operationId: randomUUID(), targetRoot: target, runtimeOptions }
   const begin = () => beginLegacySystemVersionMaintenance(params)
   const backedUp = async () => { const record = await begin(), backup = await createMaintenanceBackup(dataDir); await recordVersionMaintenanceBackup(dataDir, record.id, backup); return { record, backup } }
