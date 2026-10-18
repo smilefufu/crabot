@@ -6,9 +6,9 @@
 - P0–P4的内置环境、共享实例、SDK、OS peer与真实Electron边界已有四平台基础证据；受管MCP按稳定id隔离，五类真实stdio冲突依赖/离线连接/凭据过滤已验证。新HTTP文字、旧WS与业务权限契约保持；完整最新四平台结果继续收敛。
 - P5已接模型、主题、权限与本地诊断。用户指定mirror-xinshu经Admin解析/Agent adapter的两次短请求成功（输入63/输出19），生产配置未改；GUI引导到实际业务首答仍待验收。旧user的识别、精确停止、可逆入口隔离、旧Python独立重建/默认引用及内部schema2数据保护已接；失败不自动重放、不移动旧venv，完整接管/入口及启动源切换尚未完成。
 - P6已接登录自启动、同通道更新入口、活动核对、共享停机/备份/恢复和独立CLI完整归档升级。无GUI包使用同一Core及内置Node；真实HTTP/SHA/解包/crabot upgrade保留停止状态和依赖已验。普通版本维护与legacy接管来源分开，未知schema迁移保持保护。最终GUI安装按钮、全平台更新后健康仍待验收。
-- [System整体Spec](crabot-docs/superpowers/specs/2026-10-18-system-mode-experience-design.md)及批量语义已确认，[协议](crabot-docs/protocols/protocol-system.md)/[计划](crabot-docs/superpowers/plans/2026-10-18-system-mode-experience-implementation.md)先行。S1–S4注册/UID隔离/systemd/本人CLI/批量/共享更新/受保护恢复已接，System扩大130项通过。Linux真实root共享所有权及umask077检查通过；真实PTY复现并修复首次密码回显竞态，三UID完整托管仍待重验。
-- S5已有旧表候选与降UID发现、实际DataRoot观察、共享代码隔离/独立root事务及本人精确停止；相关67项通过、1项Linux专用待原生。专用转换纯协调器22项及上述System130项通过，区分legacy与sealed来源、全备份后切换、未知保持保护、成功用户独立前进。尚未接通root转换许可/作业、完整UID迁移/注册、已停止部署的可信绑定与全部实际启动源核验，不计完整转换通过。
-- P7原生39145289298的ARM Mac全链成功；Intel重建组前7项成功后达10分钟整步上限，预算改20分钟并补固定阶段日志，尚未计通过。Windows运行回归通过后在真实环境私有ACL处拒绝，限定新目录/标记用显式私有创建，离线重建/选择19项、产品23项通过（Windows专用各1项待原生）。最新83651750原生轮39147490023在跑；Linux较早轮的实际DEB/ASAR/原生会话/CLI共享、GUI崩溃重连及归档升级通过，不代表systemd已完成。
+- [System整体Spec](crabot-docs/superpowers/specs/2026-10-18-system-mode-experience-design.md)及批量语义已确认，[协议](crabot-docs/protocols/protocol-system.md)/[计划](crabot-docs/superpowers/plans/2026-10-18-system-mode-experience-implementation.md)先行。S1–S4注册/UID隔离/systemd/本人CLI/批量/共享更新/受保护恢复已接，System扩大146项通过。Linux真实root共享所有权及umask077检查通过；真实PTY复现并修复首次密码回显竞态，三UID完整托管仍待重验。
+- S5已有旧表候选与降UID发现、实际DataRoot观察、共享代码隔离/独立root事务及本人精确停止；相关67项通过、1项Linux专用待原生。专用转换纯协调器22项、受保护的原绑定注册16项及上述System146项通过，区分legacy与sealed来源、全备份后切换、未知保持保护、成功用户独立前进。尚未接通root转换许可/作业与完整UID迁移、已停止部署的可信绑定与全部实际启动源核验，不计完整转换通过。
+- P7原生39145289298的ARM Mac全链成功；Intel重建组前7项成功后达10分钟整步上限，预算改20分钟并补固定阶段日志，尚未计通过。Windows运行回归通过后在真实环境私有ACL处拒绝，限定新目录/标记用显式私有创建，离线重建/选择19项、产品23项通过（Windows专用各1项待原生）。83651750原生轮39147490023的Windows实际ACL、完整重建/默认切换/取消已通过，整套GUI/CLI及最终包继续；Linux较早轮的实际DEB/ASAR/原生会话/CLI共享、GUI崩溃重连及归档升级通过，不代表systemd已完成。
 - 本机候选18（0.1.0-desktop.14）Core约1.49GB、DMG674,531,820/ZIP693,087,012字节，完整往返验证；不含后续全部改动，不能作为最新发行。用户暂无签名证书，见[指南](crabot-docs/guides/desktop-release-signing.md)；最终签名、最低桌面OS/IME/权限、资源指标及真实业务分别验收。
 - 详细证据见[验收记录](crabot-docs/superpowers/plans/2026-10-17-desktop-application-validation.md)及System计划；源码、局部回归、构建、真实部署和产品验收分开记录，不计整项需求完成。
 

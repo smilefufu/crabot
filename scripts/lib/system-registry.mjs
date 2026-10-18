@@ -3,13 +3,15 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
-import { acquireCliLock, releaseCliLock } from './cli-lock.mjs'
+import { acquireCliLock, releaseCliLock, cliLockToken } from './cli-lock.mjs'
 
 export const systemDirectory = '/etc/crabot/system'
 export const systemError = (message, code = 'CRABOT_SYSTEM_UNVERIFIED') => Object.assign(new Error(message), { code })
 const fail = message => { throw systemError(message) }
 const fields = ['uid', 'gid', 'user', 'home', 'data_dir', 'port_offset', 'enabled', 'autostart']
 const absolute = value => typeof value === 'string' && path.posix.isAbsolute(value) && path.posix.normalize(value) === value && !/[\0\r\n]/.test(value)
+const uuid = value => typeof value === 'string' && /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(value)
+const digest = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value)
 const username = value => typeof value === 'string' && value.length <= 256 && /^[^\s\x00-\x1f\x7f/:.-][^\s\x00-\x1f\x7f/:]*$/.test(value)
 
 function validAccount(account) {
@@ -93,23 +95,64 @@ export class SystemRegistry {
     if (!value || value.schema_version !== 1 || Object.keys(value).length !== 2) fail('共享实例注册表缺失或不兼容，请联系管理员检查安装。')
     return validateSystemEntries(value.instances)
   }
+  #publish(entries) {
+    validateSystemEntries(entries)
+    const file = path.join(this.directory, 'instances.json'), temporary = file + '.tmp-' + randomUUID()
+    try {
+      fs.writeFileSync(temporary, JSON.stringify({ schema_version: 1, instances: entries }) + '\n', { flag: 'wx', mode: 0o644, flush: true })
+      fs.chmodSync(temporary, 0o644); fs.renameSync(temporary, file)
+      const fd = fs.openSync(this.directory, fs.constants.O_RDONLY)
+      try { fs.fsyncSync(fd) } finally { fs.closeSync(fd) }
+      return entries
+    } finally { fs.rmSync(temporary, { force: true }) }
+  }
   async update(change, { create = false } = {}) {
     this.authority(); this.initialize()
     const lock = await acquireCliLock(this.directory, 'system-register')
-    let temporary
     try {
       const file = path.join(this.directory, 'instances.json')
       const exists = fs.existsSync(file)
       const entries = exists ? this.read() : create ? [] : fail('共享实例注册表缺失，未修改。')
-      const updated = validateSystemEntries(await change(structuredClone(entries)))
-      temporary = file + '.tmp-' + randomUUID()
-      fs.writeFileSync(temporary, JSON.stringify({ schema_version: 1, instances: updated }) + '\n', { flag: 'wx', mode: 0o644, flush: true })
-      fs.chmodSync(temporary, 0o644)
-      fs.renameSync(temporary, file); temporary = undefined
-      const fd = fs.openSync(this.directory, fs.constants.O_RDONLY)
-      try { fs.fsyncSync(fd) } finally { fs.closeSync(fd) }
-      return updated
-    } finally { if (temporary) fs.rmSync(temporary, { force: true }); releaseCliLock(lock) }
+      return this.#publish(await change(structuredClone(entries)))
+    } finally { releaseCliLock(lock) }
+  }
+
+  // Metadata publication under the coordinator's existing lock. Never invokes
+  // normal provisioning, allocates an offset, or opens an employee data path.
+  async registerConverted(entry, { operationId } = {}) {
+    this.authority(); validateSystemEntries([entry])
+    if (!uuid(operationId)
+      || !cliLockToken(path.join(this.directory, 'cli.lock'))) fail('转换注册必须持有本次管理员作业锁。')
+    trustedDirectory(this.directory, this.ownerUid)
+    const jobs = path.join(this.directory, 'jobs'); trustedDirectory(jobs, this.ownerUid)
+    if ((fs.lstatSync(jobs).mode & 0o777) !== 0o700) fail('转换作业记录目录并非私有。')
+    const file = path.join(jobs, operationId + '.json')
+    if ((fs.lstatSync(file).mode & 0o777) !== 0o600) fail('转换作业记录并非私有。')
+    const job = readDocument(file, this.ownerUid), maintenance = readDocument(path.join(this.directory, 'maintenance.json'), this.ownerUid)
+    const progress = job?.progress, boot = process.platform === 'linux' ? fs.readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim() : null
+    if (job?.schema_version !== 1 || job.phase !== 'running' || job.plan?.schema_version !== 1 || job.plan.kind !== 'conversion' || job.plan.id !== operationId
+      || progress?.schema_version !== 1 || progress.id !== operationId || progress.phase !== 'running' || !uuid(progress.source_fence_id)
+      || progress.stage !== 'registration_dispatched' || progress.current_uid !== entry.uid || progress.allow_start !== undefined
+      || !Array.isArray(job.plan.instances) || !Array.isArray(progress.results)
+      || maintenance?.schema_version !== 1 || maintenance.id !== operationId || maintenance.operation !== 'conversion'
+      || maintenance.phase !== 'running' || maintenance.stage !== progress.stage || maintenance.current_uid !== entry.uid
+      || maintenance.allow_start !== undefined || !Array.isArray(maintenance.targets) || !maintenance.targets.includes(entry.uid)
+      || job.boot_id !== boot || maintenance.boot_id !== boot) fail('转换注册没有本次阶段的完整管理员记录，未发布绑定。')
+    const planned = job.plan.instances.find(item => item.entry?.uid === entry.uid), row = progress.results.find(item => item.uid === entry.uid)
+    if (!planned || JSON.stringify(planned.entry) !== JSON.stringify(entry) || row?.stopped !== true || row.migration_dispatched !== true || row.migrated !== true
+      || row.registration_dispatched !== true || row.snapshot?.system_operation_id !== operationId
+      || !uuid(row.snapshot.id)
+      || !uuid(row.snapshot.backup?.id)
+      || !digest(row.snapshot.backup?.sha256)
+      || row.snapshot.target_id !== job.plan.target?.id || !digest(row.snapshot.target_id)) fail('没有本人迁移成功回执，未初始化或替换绑定。')
+    this.verifyAccount(entry)
+    const entries = this.read(), existing = entries.find(current => current.uid === entry.uid || current.user === entry.user)
+    if (existing) {
+      if (JSON.stringify(existing) !== JSON.stringify(entry)) fail('已有受管绑定与本次转换不同，未覆盖。')
+      return structuredClone(existing)
+    }
+    this.#publish([...entries, structuredClone(entry)])
+    return structuredClone(entry)
   }
   verifyAccount(entry) {
     const actual = this.accountLookup(entry.user)
