@@ -315,6 +315,12 @@ sync_memory_deps() {
     return 0
   }
 
+  node --input-type=module - "$SCRIPT_DIR/scripts/lib/memory-deps.mjs" "$MEMORY_DIR" <<'NODE'
+import { pathToFileURL } from 'node:url'
+const { clearPreparedEnvironment } = await import(pathToFileURL(process.argv[2]).href)
+await clearPreparedEnvironment(process.argv[3])
+NODE
+
   mkdir -p "$DATA_DIR/memory"
 }
 

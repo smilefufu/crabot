@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { randomUUID } from 'node:crypto'
 import { fileDigest, optional, hash, writeAtomic, snapshot, sameSnapshot, createBackup, verifyBackup, restoreBackup, backupBytes, scopedPath, assertStopped } from './scoped-data.mjs'
 import { acquireCliLock, releaseCliLock } from '../lib/cli-lock.mjs'
 
@@ -19,10 +20,13 @@ export async function describeMigration(moduleDir, dataDir, fromVersion, toVersi
   const dataRoot = path.dirname(path.resolve(dataDir)), id = `${moduleId}-v${from}-v${to}`
   const scopeFile = path.join(moduleDir, 'upgrade/scope.mjs')
   if (!await optional(scopeFile)) throw new Error(`Missing migration scope adapter: ${moduleId}`)
-  const { migrationScope } = await import(pathToFileURL(scopeFile).href)
-  const existing = await optional(path.join(dataRoot, '.upgrade-migrations', id, 'plan.json'))
+  const adapterSha256 = await fileDigest(scopeFile)
+  const { migrationScope } = await import(`${pathToFileURL(scopeFile).href}?sha256=${adapterSha256}`)
+  const directory = path.join(dataRoot, '.upgrade-migrations', id)
+  const existing = await optional(path.join(directory, 'plan.json'))
   const saved = existing ? JSON.parse(existing).description : null
-  const scope = saved?.scope ?? await migrationScope({ dataRoot, from, to, transactionId: id })
+  const state = existing ? JSON.parse(await fs.readFile(path.join(directory, 'state.json'), 'utf8')) : null
+  const scope = saved && state.phase !== 'rolled_back' ? saved.scope : await migrationScope({ dataRoot, from, to, transactionId: id })
   if (!scope || !Array.isArray(scope.reads) || !Array.isArray(scope.writes)) throw new Error('Invalid migration scope adapter')
   scope.writes = [...new Set([...scope.writes.map(name => name.split(/[\\/]/).join(path.sep)), path.join(moduleId.slice(7), 'SCHEMA_VERSION')])].sort()
   scope.reads = [...new Set(scope.reads.map(name => name.split(/[\\/]/).join(path.sep)))].filter(name => !scope.writes.includes(name)).sort()
@@ -35,9 +39,22 @@ export async function describeMigration(moduleDir, dataDir, fromVersion, toVersi
     const script = path.join(moduleDir, 'upgrade', matches[0])
     scripts.push({ path: script, sha256: await fileDigest(script) })
   }
-  const description = { schema_version: 1, id, module_id: moduleId, data_root: dataRoot, from: fromVersion, to: toVersion, scope, scripts, adapter_sha256: await fileDigest(scopeFile) }
-  if (saved && JSON.stringify(saved) !== JSON.stringify(description)) throw new Error('Migration code or instance changed; preserve original recovery scope')
+  const description = { schema_version: 1, id, module_id: moduleId, data_root: dataRoot, from: fromVersion, to: toVersion, scope, scripts, adapter_sha256: adapterSha256 }
+  if (saved && (state.phase === 'rolled_back' || JSON.stringify(saved) !== JSON.stringify(description))) await verifyRolledBack(existing, state, description)
   return description
+}
+
+/** Only a proven rollback can release its original code binding; never mutate during preview. */
+async function verifyRolledBack(bytes, state, description) {
+  const plan = JSON.parse(bytes), saved = plan.description
+  if (state.schema_version !== 1 || state.plan_sha256 !== hash(bytes) || state.phase !== 'rolled_back'
+    || ['schema_version', 'id', 'module_id', 'data_root', 'from', 'to'].some(key => saved[key] !== description[key])) {
+    throw new Error('Migration code or instance changed; preserve original recovery scope')
+  }
+  const backup = path.join(description.data_root, '.upgrade-migrations', description.id, 'backup')
+  await verifyBackup(backup, saved.scope.writes, plan.original)
+  if (!sameSnapshot(plan.original, await snapshot(description.data_root, saved.scope.writes))
+    || !sameSnapshot(plan.inputs, await snapshot(description.data_root, saved.scope.reads))) throw new Error('Migration inputs changed; recovery review required')
 }
 
 export async function assertNoInterruptedMigrations(dataRoot) {
@@ -65,7 +82,16 @@ export async function executeMigration(description, runScript, options = {}) {
       state = JSON.parse(await fs.readFile(stateFile, 'utf8'))
       if (state.schema_version !== 1 || state.plan_sha256 !== hash(bytes)) throw new Error('Migration plan verification failed')
       const plan = JSON.parse(bytes)
-      if (JSON.stringify(plan.description) !== JSON.stringify(description)) throw new Error('Migration code or scope changed; preserve recovery materials')
+      if (JSON.stringify(plan.description) !== JSON.stringify(description)) {
+        await verifyRolledBack(bytes, state, description)
+        const history = path.join(root, '.upgrade-migrations-history')
+        await fs.mkdir(history, { recursive: true, mode: 0o700 })
+        await fs.rename(directory, path.join(history, `${id}-${randomUUID()}`))
+        bytes = null
+      }
+    }
+    if (bytes) {
+      const plan = JSON.parse(bytes)
       if (state.phase === 'completed') {
         const version = await optional(path.join(root, description.module_id.slice(7), 'SCHEMA_VERSION'))
         if (version?.toString().trim() !== description.to) throw new Error('Completed migration version changed; startup blocked')

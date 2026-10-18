@@ -82,7 +82,7 @@ installer_helper_hash() {
   case "$1" in
     scripts/installer-deps.mjs) echo d4fd4bed9aa55ab09c65f7f63ffb8bfe275fbfac953caca131e5504df67d72b7;;
     scripts/lib/install-network.mjs) echo a44aa06ead8e498fde4442919fd9fbbd8dd1b4af7c461d9b8ace955fe3ded18d;;
-    scripts/lib/memory-deps.mjs) echo a111398242b5ac856c988769f064d4d21b4d753a639e2e12619224f29daec1e4;;
+    scripts/lib/memory-deps.mjs) echo 8111670a37b3c61e752fff79158b11a03a52dd3324b54b83f5240feed644c8f9;;
     scripts/lib/run-bounded.mjs) echo 20cd05bbf043961f774a68d83c5c4ab5885a33dda0e36409788341b054132df7;;
     scripts/lib/toolchain.mjs) echo 7ce0955b964790804305e7d227228bea222cdabfe1bce84213e86a80f99cc886;;
     *) return 1;;

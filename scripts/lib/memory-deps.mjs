@@ -1,7 +1,7 @@
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile, rename } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
@@ -19,9 +19,11 @@ export async function prepareMemoryDependencies(directory, { dev = false, logger
   const deadline = Date.now() + 20 * 60_000
   const transport = await uvTransport(uv, directory)
   const originalLock = await readFile(join(directory, 'uv.lock'))
+  const originalProject = await readFile(join(directory, 'pyproject.toml'))
   const temporary = await mkdtemp(join(tmpdir(), 'crabot-memory-deps-'))
   const requirements = join(temporary, 'requirements.txt')
   const python = join(directory, '.venv', process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python')
+  let prepared = false
   try {
     if (transport.UV_OFFLINE === '1') {
       logger.info('Offline Memory: retaining the original frozen preparation path')
@@ -29,7 +31,7 @@ export async function prepareMemoryDependencies(directory, { dev = false, logger
       if (relocatable) await runBounded(uv, ['venv', '--relocatable', '--no-python-downloads', '--allow-existing', '.venv'], options)
       await runBounded(uv, ['sync', '--frozen', ...(dev ? [] : ['--no-dev']), ...(relocatable ? ['--no-editable'] : []), '--offline'], { ...options, timeout: Math.max(1, deadline - Date.now()) })
       await runBounded(uv, ['run', '--frozen', ...(dev ? [] : ['--no-dev']), ...(relocatable ? ['--no-editable'] : []), '--offline', 'python', '-c', 'import src.main'], { ...options, timeout: Math.max(1, deadline - Date.now()) })
-      if (relocatable) await recordPreparedEnvironment(directory)
+      prepared = true
       return
     }
     source ??= await selectPackageSource('python', { logger, env: { ...process.env, ...transport } })
@@ -65,26 +67,40 @@ export async function prepareMemoryDependencies(directory, { dev = false, logger
       // A frozen offline audit checks that uv recognizes this environment without fetching packages.
       await run(['run', '--frozen', ...(dev ? [] : ['--no-dev']), ...(relocatable ? ['--no-editable'] : []), '--offline', 'python', '-c', 'import src.main'])
     }, { logger, timeout: Math.max(1, deadline - Date.now()) })
-    if (relocatable) await recordPreparedEnvironment(directory)
+    prepared = true
   } catch (error) {
     if (error.code !== 'CRABOT_SOURCE_AWARE_LOCK') throw error
     if (relocatable) throw new Error('Relocatable Memory preparation requires pinned registry dependencies')
     logger.warn('Source-aware Memory lock: retaining the original frozen preparation path')
     await runBounded(uv, ['sync', '--frozen', ...(dev ? [] : ['--no-dev']), ...(relocatable ? ['--no-editable'] : [])], { cwd: directory, captureError: true, timeout: Math.max(1, deadline - Date.now()) })
-    if (relocatable) await recordPreparedEnvironment(directory)
+    prepared = true
   } finally {
     await rm(temporary, { recursive: true, force: true })
     if (!(await readFile(join(directory, 'uv.lock'))).equals(originalLock)) throw new Error('Memory preparation changed the frozen lockfile')
+    if (!(await readFile(join(directory, 'pyproject.toml'))).equals(originalProject)) throw new Error('Memory preparation changed the frozen project')
+    if (prepared) {
+      if (relocatable) await recordPreparedEnvironment(directory)
+      else await clearPreparedEnvironment(directory)
+    }
   }
+}
+
+export async function clearPreparedEnvironment(directory) {
+  await rm(join(directory, 'prepared-environment.json'), { force: true })
 }
 
 const digest = bytes => createHash('sha256').update(bytes).digest('hex')
 async function recordPreparedEnvironment(directory) {
-  await writeFile(join(directory, 'prepared-environment.json'), JSON.stringify({
+  const value = JSON.stringify({
     schema_version: 1, platform: process.platform, arch: process.arch,
     lock_sha256: digest(await readFile(join(directory, 'uv.lock'))),
     project_sha256: digest(await readFile(join(directory, 'pyproject.toml'))),
-  }))
+  })
+  const temporary = join(directory, `.prepared-environment-${randomUUID()}.tmp`)
+  try {
+    await writeFile(temporary, value, { flag: 'wx', mode: 0o600 })
+    await rename(temporary, join(directory, 'prepared-environment.json'))
+  } finally { await rm(temporary, { force: true }) }
 }
 
 /** Prepared environments contain a non-editable project and uv relocatable launchers. */

@@ -148,6 +148,7 @@ test('Memory keeps installed/explicit Python and pins only a missing default int
   const root = await mkdtemp(join(tmpdir(), 'crabot-python-request-test-'))
   t.after(() => rm(root, { recursive: true, force: true }))
   await writeFile(join(root, 'uv.lock'), 'unchanged frozen lock')
+  await writeFile(join(root, 'pyproject.toml'), '[project]')
   for (const mode of ['installed', 'missing', 'environment', 'pin', 'never', 'configured-never', 'configured-manual', 'configured-offline', 'io']) {
     const code = `
       import cp from 'node:child_process';import {syncBuiltinESMExports} from 'node:module';import {promisify} from 'node:util';import {EventEmitter} from 'node:events';import fs from 'node:fs';
