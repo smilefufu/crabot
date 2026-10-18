@@ -22,6 +22,10 @@ import selection from '../../scripts/lib/agent-python-selection.cjs'
 const require = createRequire(new URL('../../crabot-admin/package.json', import.meta.url)), AdmZip = require('adm-zip')
 const execute = promisify(execFile), root = await fs.realpath(process.argv[2]), core = await verifyCoreRelease(root)
 const runtime = product.loadProductRuntime(root, { required: true, full: true })
+for (const file of ['scripts/lib/version-maintenance.mjs', 'scripts/lib/legacy-python-rebuild.mjs', 'scripts/lib/legacy-python-selection.mjs', 'scripts/desktop/inspect-legacy-python.py']) {
+  assert.deepEqual(await fs.readFile(path.join(root, file)), await fs.readFile(new URL('../../' + file, import.meta.url)),
+    'This component probe requires a Core staged from the current tested sources: ' + file)
+}
 const parent = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'Crabot Python transaction ')))
 let lock
 try {
