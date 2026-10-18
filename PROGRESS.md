@@ -10,7 +10,7 @@
 - 旧 user 接管已有真实发行识别、五入口可逆阻断/seal和同连接单次精确停机组件；两版 Windows CRLF 原始字节与 Unix 分开验证，30项定向通过。旧Python已有只读观察与独立目录重建准备：精确版本wheel、安装后解释器/pip探针、失败/取消保持原环境；相关31项定向证据通过。现场92包只读检查，两个未登记文件已核对为官方uv旧bootstrap；未重建现场环境。完整接管、启动源、默认环境/命令切换及真实业务仍待完成。
 - P7 安装包构建/解包全量核验已接 CI；最新 GUI 候选18（.14）实际 DMG 674,531,820 / ZIP 693,087,012字节及 App/ASAR/Core/fuses往返通过；仅候选，不代表可信签名或实际安装。用户暂无签名证书，取得途径见[签名指南](crabot-docs/guides/desktop-release-signing.md)。最低桌面 OS、权限/IME及实际业务验收仍独立进行。
 - 原生 CI 39090630680（803b2c6f）两Mac完整成功；Linux夹具登记与Windows junction失败已定位修复。8f89d1f4新轮Linux已越过原故障；Windows的父进程崩溃夹具误设“普通子必存活”，已按Node/libuv Job语义只对指定故障子注入detached，保留忙/中断全部断言，并补身份未知时拒绝及释放句柄；16项本机定向通过，原生待重验。测试EOF/reset修复也待此轮完整验证。
-- 用户否决原 system 升级两个选项并要求整体优化；[完整体验 Spec](crabot-docs/superpowers/specs/2026-10-18-system-mode-experience-design.md)覆盖安装、员工开通、日常管理、自动协调维护与恢复，待书面确认，未据未确认方案新增 system 实现。
+- 用户否决原 system 升级两个选项并要求整体优化；[完整体验 Spec](crabot-docs/superpowers/specs/2026-10-18-system-mode-experience-design.md)覆盖安装、员工开通、日常管理、自动协调维护与恢复；按新需求补入管理员批量start/stop/restart，定义全体范围、原运行集合重启、逐项失败和维护互斥。修订待书面确认，未据未确认方案新增system实现。
 - 详细构建、原生与故障证据统一见[验收记录](crabot-docs/superpowers/plans/2026-10-17-desktop-application-validation.md)。阶段性回归、构建与真实部署/产品验收分别记录，不计整项需求完成。
 
 ### 任务默认目录文件授权：独立修复待审查
