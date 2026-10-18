@@ -64,7 +64,7 @@ it('actual restart entry never invokes stop when target migration scope is not r
 it('actual Web upgrade entry leaves the running build alone when isolated preparation fails', async () => {
   await scripts()
   await write('scripts/upgrade-lib/prepared-upgrade.mjs', 'export async function prepareUpgrade() { throw new Error("fixture preparation failure") }; export async function installPreparedUpgrade() { throw new Error("unexpected switch") }')
-  await write('scripts/upgrade-lib/release.mjs', 'export const getLatestVersion = async () => ({tag:"next"}); export const writeVersionFile = () => { throw new Error("unexpected version write") }')
+  await write('scripts/upgrade-lib/release.mjs', 'export const getCurrentVersion = () => null; export const getLatestVersion = async () => ({tag:"next"}); export const writeVersionFile = () => { throw new Error("unexpected version write") }')
   await write('dist/live.js', 'old build')
   await fs.copyFile(path.join(product, 'scripts/ui-upgrade.mjs'), path.join(home, 'scripts/ui-upgrade.mjs'))
   const result = spawnSync(process.execPath, [path.join(home, 'scripts/ui-upgrade.mjs')], { cwd: home, env: env(), encoding: 'utf8', timeout: 10000 })
@@ -128,3 +128,14 @@ it('actual compiled MM releases startup ownership after ingress and its exit pre
   expect(JSON.parse(await fs.readFile(path.join(data, 'cli.lock'), 'utf8')).command).toBe('later fixture')
   expect(await fs.readFile(path.join(data, 'mm.pid'), 'utf8')).toBe('2147483000')
 }, 12000)
+
+it.each(['upgrade.mjs', 'ui-upgrade.mjs'])('already current release is read-only and invokes no preparation or stop: %s', async entry => {
+  await scripts()
+  await write('scripts/upgrade-lib/prepared-upgrade.mjs', 'export async function prepareUpgrade() { throw new Error("unexpected reprepare") }; export async function installPreparedUpgrade() { throw new Error("unexpected switch") }')
+  await write('scripts/upgrade-lib/release.mjs', 'export const getCurrentVersion = () => "next"; export const getLatestVersion = async () => ({tag:"next"}); export const writeVersionFile = () => { throw new Error("unexpected version write") }')
+  await fs.copyFile(path.join(product, 'scripts', entry), path.join(home, 'scripts', entry))
+  const result = spawnSync(process.execPath, [path.join(home, 'scripts', entry), '--yes'], { cwd: home, env: env(), encoding: 'utf8', timeout: 10000 })
+  expect(result.status, result.stderr).toBe(0)
+  expect(result.stdout).toContain('already up to date')
+  await expect(fs.stat(path.join(data, 'calls.json'))).rejects.toThrow()
+})

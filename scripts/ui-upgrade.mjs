@@ -15,6 +15,7 @@ import { prepareUpgrade, installPreparedUpgrade } from './upgrade-lib/prepared-u
 import { acquireCliLock, releaseCliLock } from './lib/cli-lock.mjs'
 import { preflightRestart } from './upgrade-lib/preflight.mjs'
 import {
+  getCurrentVersion,
   getLatestVersion,
   writeVersionFile,
 } from './upgrade-lib/release.mjs'
@@ -84,6 +85,16 @@ async function main() {
   let targetVersion
   try {
     targetVersion = mode === 'release' ? (await getLatestVersion()).tag : undefined
+    if (mode === 'release' && getCurrentVersion(CRABOT_HOME) === targetVersion) {
+      try {
+        const current = await preflightRestart(CRABOT_HOME, DATA_DIR)
+        if (!current.modules.length && ['ready', 'not_applicable'].includes(current.shared.status)) {
+          writeStatus({ phase: 'done', to_version: targetVersion, finished_at: stamp() })
+          console.log(`[ui-upgrade] already up to date (${targetVersion})`)
+          return
+        }
+      } catch (error) { logger.warn(`Installed target needs repair: ${error.message}`) }
+    }
     prepared = await prepareUpgrade(CRABOT_HOME, DATA_DIR, { mode, version: targetVersion, logger })
     console.log(`[ui-upgrade] prepared product ${prepared.payload_bytes} bytes; scoped data backup ${prepared.preview.backup_bytes ?? 'legacy pending'}`)
     await preflightRestart(prepared.stage, DATA_DIR)

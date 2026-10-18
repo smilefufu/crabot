@@ -11,7 +11,8 @@ import { runScript } from './upgrade-lib/runner.mjs'
 import { runMigrations } from './upgrade-lib/migrate.mjs'
 import { assertStopped } from './upgrade-lib/scoped-data.mjs'
 import { prepareUpgrade, installPreparedUpgrade } from './upgrade-lib/prepared-upgrade.mjs'
-import { getLatestVersion, writeVersionFile } from './upgrade-lib/release.mjs'
+import { preflightRestart } from './upgrade-lib/preflight.mjs'
+import { getCurrentVersion, getLatestVersion, writeVersionFile } from './upgrade-lib/release.mjs'
 
 const CRABOT_HOME = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const DATA_DIR = resolveCliDataDir({ homeDir: resolve(homedir(), '.crabot') })
@@ -27,6 +28,15 @@ async function main() {
   const mode = detectMode(CRABOT_HOME)
   if (!await confirm()) return
   const version = mode === 'release' ? (await getLatestVersion()).tag : undefined
+  if (mode === 'release' && getCurrentVersion(CRABOT_HOME) === version) {
+    try {
+      const current = await preflightRestart(CRABOT_HOME, DATA_DIR)
+      if (!current.modules.length && ['ready', 'not_applicable'].includes(current.shared.status)) {
+        console.log(`[upgrade] already up to date (${version})`)
+        return
+      }
+    } catch (error) { console.warn(`[upgrade] installed target needs repair: ${error.message}`) }
+  }
   const prepared = await prepareUpgrade(CRABOT_HOME, DATA_DIR, { mode, version })
   console.log(`[upgrade] preparation ${prepared.reused ? 'reused' : 'complete'}; product ${prepared.payload_bytes} bytes; data backup ${prepared.preview.backup_bytes ?? 'legacy transaction: inspect original plan'} bytes`)
   // CLI retains its explicit stop contract; preparation never stops the instance.
