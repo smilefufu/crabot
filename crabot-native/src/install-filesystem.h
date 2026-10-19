@@ -1,5 +1,6 @@
 // Read-only OS volume facts. Never mount, chmod or grant system privileges.
 #ifndef _WIN32
+#include <sys/stat.h>
 #ifdef __APPLE__
 #include <sys/mount.h>
 #else
@@ -14,8 +15,15 @@ static napi_value InstallFilesystemCall(napi_env env, napi_callback_info info) {
     auto path = Text(env, args[0]);
     if (path.empty() || path.find('\0') != std::string::npos) throw std::runtime_error("Invalid installation directory");
     bool supported = false; std::string filesystem;
+#ifndef _WIN32
+    struct stat directory{};
+    if (stat(path.c_str(), &directory) || !S_ISDIR(directory.st_mode)) throw std::runtime_error("Installation directory does not exist");
+#endif
 #ifdef _WIN32
-    auto wide = PrivateFilePath(path); std::vector<wchar_t> volume(32768); wchar_t name[256]{}; DWORD flags = 0;
+    auto wide = PrivateFilePath(path);
+    const DWORD attributes = GetFileAttributesW(wide.c_str());
+    if (attributes == INVALID_FILE_ATTRIBUTES || !(attributes & FILE_ATTRIBUTE_DIRECTORY)) throw std::runtime_error("Installation directory does not exist");
+    std::vector<wchar_t> volume(32768); wchar_t name[256]{}; DWORD flags = 0;
     if (!GetVolumePathNameW(wide.c_str(), volume.data(), static_cast<DWORD>(volume.size()))
       || !GetVolumeInformationW(volume.data(), nullptr, 0, nullptr, nullptr, &flags, name, 256)) throw std::runtime_error("Cannot inspect installation volume");
     filesystem = "unsupported";

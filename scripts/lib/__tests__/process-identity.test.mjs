@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer, connect } from 'node:net'
-import { mkdtempSync, rmSync, statSync, symlinkSync } from 'node:fs'
+import { mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { once } from 'node:events'
@@ -113,4 +113,6 @@ test('installation filesystem facts come from the actual OS without changing tar
   assert.deepEqual(statSync(directory), before)
   for (const invalid of ['', 'bad\0path', 1, null]) assert.throws(() => identity.inspectInstallFilesystem(invalid), { code: 'CRABOT_INSTALL_FILESYSTEM' })
   assert.throws(() => identity.inspectInstallFilesystem(join(directory, 'missing')), { code: 'CRABOT_INSTALL_FILESYSTEM' })
+  const file = join(directory, 'ordinary-file'); writeFileSync(file, 'keep')
+  assert.throws(() => identity.inspectInstallFilesystem(file), { code: 'CRABOT_INSTALL_FILESYSTEM' })
 })
