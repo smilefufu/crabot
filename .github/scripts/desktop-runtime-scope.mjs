@@ -3,11 +3,11 @@ import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs'
 
 // Native identity, control, SDK and UI checks always run. Rebuild the full interpreter/
 // browser payload when its inputs or actual capability consumers change, or on manual final validation.
-const prefixes = ['crabot-agent/src/workers/', 'crabot-core/', 'crabot-memory/', 'crabot-shared/', 'crabot-mcp-tools/', 'crabot-native/', 'scripts/desktop/', 'scripts/scrapling/',
+const prefixes = ['crabot-admin/upgrade/', 'crabot-agent/src/workers/', 'crabot-core/', 'crabot-memory/', 'crabot-shared/', 'crabot-mcp-tools/', 'crabot-native/', 'scripts/desktop/', 'scripts/scrapling/',
   'scripts/computer-use/', 'crabot-desktop/tests/fixtures/first-model-', 'crabot-desktop/tests/fixtures/workspace-', 'scripts/lib/product-', 'scripts/lib/legacy-', 'scripts/lib/managed-mcp-', 'scripts/lib/scrapling-', 'scripts/lib/computer-use-',
   'scripts/lib/__tests__/legacy-python', 'scripts/lib/__tests__/system-', 'scripts/lib/system-', 'scripts/system', '.github/scripts/smoke-system',
   '.github/scripts/fixtures/product-']
-const files = new Set(['.gitattributes', 'scripts/prepare-product-runtime.mjs', 'scripts/prepare-scrapling.mjs', 'scripts/prepare-computer-use.mjs',
+const files = new Set(['crabot-admin/schema_version', 'crabot-admin/src/legacy-directory-migration.ts', 'crabot-admin/src/friend-permission-store.ts', 'scripts/lib/admin-data-compat.mjs', 'scripts/upgrade-lib/migrate.mjs', '.gitattributes', 'scripts/prepare-product-runtime.mjs', 'scripts/prepare-scrapling.mjs', 'scripts/prepare-computer-use.mjs',
   'scripts/build-native.mjs', 'crabot-desktop/src/main.ts', 'crabot-desktop/src/controller.ts', 'crabot-desktop/src/session-host.ts',
   '.github/scripts/smoke-migration-interruption.mjs', '.github/scripts/desktop-resources.mjs', '.github/scripts/desktop-disk.mjs', 'scripts/start.mjs', 'scripts/lib/cli-lock.mjs', 'scripts/lib/core-preflight.mjs', 'scripts/lib/core-preparation.mjs', 'scripts/lib/preflight-child.mjs', 'scripts/lib/preflight-state.cjs',
   'scripts/run-product-memory.mjs', 'scripts/lib/install-network.mjs', 'scripts/lib/run-bounded.mjs', 'scripts/upgrade-lib/runner.mjs',

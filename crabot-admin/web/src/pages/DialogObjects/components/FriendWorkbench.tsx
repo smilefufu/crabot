@@ -1,9 +1,11 @@
+import { storagePermissionFromFields } from '../../../components/storage-permission-form'
+import { StoragePermissionEditor } from '../../../components/StoragePermissionEditor'
 import React from 'react'
 import { Button } from '../../../components/Common/Button'
 import { Card } from '../../../components/Common/Card'
 import { Input } from '../../../components/Common/Input'
 import { Loading } from '../../../components/Common/Loading'
-import { parseMemoryScopes, summarizeFriendMemoryScopes, summarizeFriendStorage } from '../friend-permission-utils'
+import { parseMemoryScopes, summarizeFriendMemoryScopes } from '../friend-permission-utils'
 import { buildMemoryEntriesHref } from '../../Memory/memoryContextQuery'
 import { CliAccessEditor } from './CliAccessEditor'
 import { TemplateInitButton } from './TemplateInitButton'
@@ -40,13 +42,14 @@ interface FriendWorkbenchProps {
   editPerm: FriendPermission
   savingMetadata: boolean
   friendPermissionLoading: boolean
-  friendPermissionSource?: 'independent' | 'template' | 'unknown'
+  friendPermissionSource?: 'independent' | 'template' | 'directory_override' | 'unknown'
   friendPermissionState: 'idle' | 'loading' | 'ready' | 'unavailable'
   friendPermissionUnavailableMessage: string | null
   savingPermissions: boolean
   friendToolAccess: ToolAccessConfig
   friendCliAccess: CliAccessConfig
   friendStorageEnabled: boolean
+  friendStorageAll?: boolean
   friendStoragePath: string
   friendStorageAccess: 'read' | 'readwrite'
   friendMemoryMode: 'empty' | 'custom'
@@ -60,19 +63,19 @@ interface FriendWorkbenchProps {
   onFriendToolAccessChange: (category: ToolCategory, checked: boolean) => void
   onFriendCliAccessChange: (next: CliAccessConfig) => void
   onFriendStorageEnabledChange: (enabled: boolean) => void
+  onFriendStorageAllChange?: (all: boolean) => void
   onFriendStoragePathChange: (value: string) => void
   onFriendStorageAccessChange: (value: 'read' | 'readwrite') => void
   onFriendMemoryModeChange: (value: 'empty' | 'custom') => void
   onFriendMemoryScopesInputChange: (value: string) => void
   onSavePermissions: () => void
+  onResetPermissions?: () => void
   onOpenBindDrawer: () => void
   onRequestUnlink: (key: string) => void
   onCancelUnlink: () => void
   onConfirmUnlink: (identity: ChannelIdentity) => void
   onInitializeFromTemplate: (tpl: PermissionTemplate) => void
 }
-
-const DEFAULT_STORAGE_PATH = '/workspace'
 
 const PermissionSwitchRow: React.FC<{
   label: string
@@ -112,6 +115,7 @@ export const FriendWorkbench: React.FC<FriendWorkbenchProps> = ({
   friendToolAccess,
   friendCliAccess,
   friendStorageEnabled,
+  friendStorageAll = false,
   friendStoragePath,
   friendStorageAccess,
   friendMemoryMode,
@@ -125,11 +129,13 @@ export const FriendWorkbench: React.FC<FriendWorkbenchProps> = ({
   onFriendToolAccessChange,
   onFriendCliAccessChange,
   onFriendStorageEnabledChange,
+  onFriendStorageAllChange,
   onFriendStoragePathChange,
   onFriendStorageAccessChange,
   onFriendMemoryModeChange,
   onFriendMemoryScopesInputChange,
   onSavePermissions,
+  onResetPermissions,
   onOpenBindDrawer,
   onRequestUnlink,
   onCancelUnlink,
@@ -197,7 +203,7 @@ export const FriendWorkbench: React.FC<FriendWorkbenchProps> = ({
             <strong>好友权限</strong>
             <p>用于该好友的私聊及其本人发起的群请求。群内按同一个完整授权来源执行，不与群权限逐字段拼接；其他人插话不会取得此权限。</p>
             <div style={{ color: 'var(--text-secondary)', fontSize: '0.875rem' }}>
-              {friendPermissionSource === 'independent' ? '当前使用完整独立配置，不随模板变化。' : friendPermissionSource === 'template' ? '当前继承模板；保存后成为完整独立配置。' : '权限来源加载中。'}创建时的授权上限保留；请求 Worker 的后续动作还会复核当前授权。
+              {friendPermissionSource === 'independent' ? '当前使用完整独立配置，不随模板变化。' : friendPermissionSource === 'directory_override' ? '升级保留的目录范围；其余权限继承模板。' : friendPermissionSource === 'template' ? '当前继承模板；保存后成为完整独立配置。' : '权限来源加载中。'}创建时的授权上限保留；请求 Worker 的后续动作还会复核当前授权。
             </div>
           </div>
 
@@ -218,6 +224,7 @@ export const FriendWorkbench: React.FC<FriendWorkbenchProps> = ({
                   templates={availableTemplates}
                   onInitialize={onInitializeFromTemplate}
                 />
+                {onResetPermissions && <Button variant="secondary" disabled={savingPermissions} onClick={onResetPermissions}>重置为模板继承</Button>}
               </div>
 
               <div className="session-modal-section">
@@ -245,51 +252,8 @@ export const FriendWorkbench: React.FC<FriendWorkbenchProps> = ({
 
               <div className="session-modal-section">
                 <div style={{ fontWeight: 600 }}>额外目录权限</div>
-                <label className="session-permission-switch-row">
-                  <span className="session-permission-switch-value">
-                    <span>授权额外目录</span>
-                    <span>
-                      {friendStorageEnabled
-                        ? summarizeFriendStorage({
-                            workspace_path: friendStoragePath.trim() || DEFAULT_STORAGE_PATH,
-                            access: friendStorageAccess,
-                          })
-                        : '未授权额外目录'}
-                    </span>
-                  </span>
-                  <span className="toggle-switch">
-                    <input
-                      aria-label="授权额外目录"
-                      type="checkbox"
-                      checked={friendStorageEnabled}
-                      onChange={(event) => onFriendStorageEnabledChange(event.target.checked)}
-                    />
-                    <span className="toggle-track" />
-                  </span>
-                </label>
-                {friendStorageEnabled && (
-                  <div className="session-detail-grid">
-                    <Input
-                      label="额外目录路径"
-                      aria-label="额外目录路径"
-                      value={friendStoragePath}
-                      onChange={(event) => onFriendStoragePathChange(event.target.value)}
-                      help="file_io 开启后任务自有默认目录可读写；此处只配置额外目录。"
-                    />
-                    <label style={{ display: 'grid', gap: '0.35rem' }}>
-                      <span style={{ fontSize: '0.875rem', fontWeight: 500 }}>访问级别</span>
-                      <select
-                        aria-label="访问级别"
-                        value={friendStorageAccess}
-                        onChange={(event) => onFriendStorageAccessChange(event.target.value as 'read' | 'readwrite')}
-                        className="select"
-                      >
-                        <option value="read">只读</option>
-                        <option value="readwrite">读写</option>
-                      </select>
-                    </label>
-                  </div>
-                )}
+                <StoragePermissionEditor value={storagePermissionFromFields(friendStorageEnabled, friendStorageAll, friendStoragePath, friendStorageAccess)}
+                  onChange={storage => { onFriendStorageEnabledChange(!!storage); onFriendStorageAllChange?.(!!storage && 'scope' in storage); if (storage) { onFriendStorageAccessChange(storage.access); if ('workspace_path' in storage) onFriendStoragePathChange(storage.workspace_path) } }} />
               </div>
 
               <div className="session-modal-section">

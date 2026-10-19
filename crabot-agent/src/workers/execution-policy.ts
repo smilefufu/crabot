@@ -1,3 +1,4 @@
+import { isStoragePermission } from 'crabot-shared'
 import path from 'node:path'
 import { realpathSync } from 'node:fs'
 import type { ResolvedPermissions } from '../types.js'
@@ -6,13 +7,15 @@ import type { WorkerImplId } from './types.js'
 export function executionAdmission(impl: WorkerImplId, principal?: ResolvedPermissions | null, platform = process.platform): { status: 'allowed' | 'blocked' | 'unknown'; reasons: string[] } {
   if (!principal) return { status: 'unknown', reasons: ['缺少可信主体授权'] }
   if (impl === 'builtin') return { status: 'allowed', reasons: [] }
+  if (!isStoragePermission(principal.storage)) return { status: 'blocked', reasons: ['目录范围格式无法核验'] }
   const reasons: string[] = []
   if (!principal.tool_access.file_io || !principal.tool_access.shell) reasons.push('原生 CLI 需要 file_io 与 shell 授权')
-  let fullHost = false
-  if (platform === 'linux' || platform === 'darwin') {
+  let fullHost = !!principal.storage && 'scope' in principal.storage && principal.storage.scope === 'all'
+    && principal.storage.access === 'readwrite' && ['linux', 'darwin', 'win32'].includes(platform)
+  if (!fullHost && (platform === 'linux' || platform === 'darwin') && principal.storage && 'workspace_path' in principal.storage) {
     try { fullHost = principal.storage?.access === 'readwrite' && path.isAbsolute(principal.storage.workspace_path) && realpathSync(principal.storage.workspace_path) === '/' } catch { /* Unverifiable scope is not admission. */ }
   }
-  if (!fullHost) reasons.push('原生 CLI 需要可核实的 Linux/macOS 主机根目录读写范围；当前范围不受原生执行器约束')
+  if (!fullHost) reasons.push('原生 CLI 需要显式全目录或可核实的 Linux/macOS 主机根目录读写范围；当前范围不受原生执行器约束')
   return { status: reasons.length ? 'blocked' : 'allowed', reasons }
 }
 

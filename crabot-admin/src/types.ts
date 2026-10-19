@@ -77,10 +77,8 @@ export interface ToolAccessConfig {
 }
 
 /** 存储权限 */
-export interface StoragePermission {
-  workspace_path: string
-  access: 'read' | 'readwrite'
-}
+import type { StoragePermission } from 'crabot-shared'
+export type { StoragePermission, DirectoryStoragePermission, AllDirectoriesStoragePermission } from 'crabot-shared'
 
 /** 所有工具类别的键列表（用于遍历和验证） */
 export const TOOL_CATEGORIES: readonly ToolCategory[] = [
@@ -229,10 +227,11 @@ export interface ResolvedPermissions {
 export interface GetFriendPermissionResult {
   config: FriendPermissionConfig | null
   resolved: ResolvedPermissions | null
+  storage_override?: StoragePermission
 }
 
 export interface UpdateFriendPermissionBody {
-  config: Omit<FriendPermissionConfig, 'updated_at' | 'tool_access'> & { tool_access: ToolAccessUpdate }
+  config: (Omit<FriendPermissionConfig, 'updated_at' | 'tool_access'> & { tool_access: ToolAccessUpdate }) | null
 }
 
 // ============================================================================

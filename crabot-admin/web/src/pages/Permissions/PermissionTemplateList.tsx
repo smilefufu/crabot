@@ -169,7 +169,7 @@ export const PermissionTemplateList: React.FC = () => {
                       {/* Storage + Memory summary */}
                       <div style={{ display: 'flex', gap: '1rem', fontSize: '0.75rem', color: 'var(--text-tertiary)' }}>
                         {t.storage && (
-                          <span>文件: {t.storage.workspace_path} ({t.storage.access})</span>
+                          <span>文件: {'scope' in t.storage ? '允许所有目录' : t.storage.workspace_path} ({t.storage.access})</span>
                         )}
                         <span>Memory: {scopesDisplay}</span>
                       </div>

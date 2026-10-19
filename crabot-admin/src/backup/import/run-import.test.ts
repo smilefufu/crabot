@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import os from 'node:os'
@@ -158,4 +158,18 @@ describe('runCrabotImport P6-D agent 分类（§3.18.1）', () => {
     await runCrabotImport({ archivePath: archive, categories: ['config'], onConflict: 'skip', deps })
     expect(calls).toEqual(['ingest'])
   })
+})
+
+
+it('imports directory-only records by friend_id and rejects malformed mixed records before domain writes', async () => {
+  const record = { friend_id: 'old', storage_override: { scope: 'all', access: 'readwrite' } }
+  const archive = await makeArchive({ config: { 'friend-permission-configs.json': [record] } })
+  const upsert = vi.fn(async () => 'imported' as const), finalize = vi.fn(async () => {})
+  const result = await runCrabotImport({ archivePath: archive, categories: ['config'], onConflict: 'skip', deps: { upsertFriendPermission: upsert, finalize } })
+  expect(upsert).toHaveBeenCalledWith(record)
+  expect(result.results).toContainEqual({ kind: 'friend-permission', id: 'old', status: 'imported' })
+  const bad = await makeArchive({ config: { 'friend-permission-configs.json': [{ ...record, config: {} }], 'model_providers.json': [{ id: 'must-not-write' }] } })
+  const provider = vi.fn(async () => 'imported' as const)
+  await expect(runCrabotImport({ archivePath: bad, categories: ['config'], onConflict: 'overwrite', deps: { upsertProvider: provider, finalize } })).rejects.toThrow('好友权限备份格式无法核验')
+  expect(provider).not.toHaveBeenCalled()
 })

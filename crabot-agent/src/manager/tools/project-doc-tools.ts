@@ -128,7 +128,7 @@ export async function checkProjectFileAccess(deps: ProjectDocToolDeps, file: str
   const permissions = deps.managerPrincipalPermissions
   let explicit
   try {
-    if (permissions?.storage) normalizeAbsoluteDirectoryPath(permissions.storage.workspace_path, 'storage.workspace_path')
+    if (permissions?.storage && 'workspace_path' in permissions.storage) normalizeAbsoluteDirectoryPath(permissions.storage.workspace_path, 'storage.workspace_path')
     explicit = await checkFileAccess(permissions, file, process.cwd(), write)
   } catch { explicit = denied('PERMISSION_DENIED', '额外文件范围不是规范化绝对目录') }
   if (explicit.allowed || !permissions?.tool_access.file_io || !deps.managedWorkspace || write) return explicit

@@ -1,5 +1,5 @@
 import fs from 'node:fs/promises'
-import { RpcError, generateTimestamp } from 'crabot-shared'
+import { RpcError, generateTimestamp, isStoragePermission } from 'crabot-shared'
 import { CLI_DOMAINS, TOOL_CATEGORIES, type GroupSessionPermissionConfig } from './types.js'
 
 export interface GroupSessionConfigRecord {
@@ -24,10 +24,7 @@ export function parseGroupSessionConfig(value: unknown, updatedAt = generateTime
     || Object.entries(value.tool_access).some(([key, enabled]) => !(TOOL_CATEGORIES as readonly string[]).includes(key) || typeof enabled !== 'boolean'))) return invalid()
   if (value.cli_access !== undefined && (!isObject(value.cli_access)
     || Object.entries(value.cli_access).some(([key, access]) => !(CLI_DOMAINS as readonly string[]).includes(key) || !['none', 'read', 'write'].includes(access as string)))) return invalid()
-  if (value.storage !== undefined && value.storage !== null && (!isObject(value.storage)
-    || Object.keys(value.storage).some(key => !['workspace_path', 'access'].includes(key))
-    || typeof value.storage.workspace_path !== 'string' || !value.storage.workspace_path.trim()
-    || !['read', 'readwrite'].includes(value.storage.access as string))) return invalid()
+  if (value.storage !== undefined && !isStoragePermission(value.storage)) return invalid()
   if (value.memory_scopes !== undefined && (!Array.isArray(value.memory_scopes)
     || value.memory_scopes.some(scope => typeof scope !== 'string' || !scope.trim()))) return invalid()
   if (value.template_id !== undefined && (typeof value.template_id !== 'string' || !value.template_id.trim())) return invalid()

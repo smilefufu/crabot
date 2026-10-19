@@ -31,6 +31,7 @@ export interface FriendPermissionResolved {
 export interface FriendPermissionResponse {
   config: FriendPermissionConfig | null
   resolved: FriendPermissionResolved | null
+  storage_override?: StoragePermission
 }
 
 export type FriendPermissionUpdateConfig = Omit<FriendPermissionConfig, 'updated_at'>
@@ -76,9 +77,9 @@ export const friendService = {
 
   async updatePermissions(
     friendId: string,
-    config: FriendPermissionUpdateConfig
-  ): Promise<{ config: FriendPermissionConfig }> {
-    return api.put<{ config: FriendPermissionConfig }>(
+    config: FriendPermissionUpdateConfig | null
+  ): Promise<{ config: FriendPermissionConfig | null }> {
+    return api.put<{ config: FriendPermissionConfig | null }>(
       `/friends/${encodeURIComponent(friendId)}/permissions`,
       { config }
     )

@@ -27,7 +27,7 @@ describe('request spawn binds before any carrier side effect', () => {
   let originalResolve: WorkspaceManager['resolve']
   let provision: ReturnType<typeof vi.fn>, spawn: ReturnType<typeof vi.fn>, resolve: ReturnType<typeof vi.spyOn>, connection: ReturnType<typeof vi.fn>
   beforeEach(async () => {
-    root = await fs.mkdtemp(path.join(os.tmpdir(), 'request-spawn-')); await fs.mkdir(path.join(root, 'a')); await fs.mkdir(path.join(root, 'b'))
+    root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'request-spawn-'))); await fs.mkdir(path.join(root, 'a')); await fs.mkdir(path.join(root, 'b'))
     await fs.mkdir(path.join(root, 'data'), { mode: 0o700 }); await fs.mkdir(path.join(root, 'workspaces'), { mode: 0o700 })
     const permissions: ResolvedPermissions = { tool_access: { memory: true, messaging: true, task: true, mcp_skill: true, file_io: true, browser: true, shell: true, remote_exec: false, desktop: true }, cli_access: { provider: 'write', agent: 'write', mcp: 'write', skill: 'write', schedule: 'write', channel: 'write', friend: 'write', permission: 'write', config: 'write', undo: 'write' }, storage: { workspace_path: path.join(root, 'a'), access: 'read' }, memory_scopes: [] }
     group = { kind: 'group', subject_id: key, is_master: false, resolved: structuredClone(permissions) }
@@ -231,4 +231,10 @@ describe('request spawn binds before any carrier side effect', () => {
     moved.resolved.storage = { workspace_path: path.join(root, 'b'), access: 'read' }
     expect((await boundedRequestPermissions(friend!, moved)).storage?.access).toBe('read')
   })
+  it('an unauthorized explicit local directory fails before Worker creation and says no task executed', async () => {
+    await expect(harness.spawnRequestWorker({ ...params, workspace: path.join(root, 'unapproved') }, caller)).rejects.toThrow('Worker 未创建，任务未执行')
+    expect(provision).not.toHaveBeenCalled(); expect(spawn).not.toHaveBeenCalled()
+    expect((await ledger.getLedger(key)).workers).toHaveLength(0)
+  })
+
 })

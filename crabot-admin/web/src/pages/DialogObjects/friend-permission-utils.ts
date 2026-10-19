@@ -15,7 +15,7 @@ function cloneCliAccess(cliAccess: CliAccessConfig): CliAccessConfig {
 
 export function summarizeFriendStorage(storage: StoragePermission | null): string {
   if (!storage) return '未授权额外目录'
-  return `${storage.workspace_path} · ${storage.access === 'read' ? '只读' : '读写'}`
+  return `${'scope' in storage ? '允许所有目录' : storage.workspace_path} · ${storage.access === 'read' ? '只读' : '读写'}`
 }
 
 export function summarizeFriendMemoryScopes(sessionId: string, scopes: string[]): string {

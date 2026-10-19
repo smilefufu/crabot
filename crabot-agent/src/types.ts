@@ -222,10 +222,8 @@ export interface ToolAccessConfig {
   desktop: boolean
 }
 
-export interface StoragePermission {
-  workspace_path: string
-  access: 'read' | 'readwrite'
-}
+import type { StoragePermission } from 'crabot-shared'
+export type { StoragePermission, DirectoryStoragePermission, AllDirectoriesStoragePermission } from 'crabot-shared'
 
 // ============================================================================
 // CLI 访问权限（与 admin 端 types.ts CliAccessConfig 保持同构）

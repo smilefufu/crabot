@@ -1,9 +1,11 @@
+import { storagePermissionFromFields } from '../../components/storage-permission-form'
+import { StoragePermissionEditor } from '../../components/StoragePermissionEditor'
 import React, { useState } from 'react'
 import { Button } from '../../components/Common/Button'
 import { Tooltip } from '../../components/Common/Tooltip'
 import { useToast } from '../../contexts/ToastContext'
 import { permissionTemplateService } from '../../services/permission-template'
-import type { PermissionTemplate, ToolCategory, ToolAccessConfig, CliDomain, CliPerm, CliAccessConfig, StoragePermission } from '../../types'
+import type { PermissionTemplate, ToolCategory, ToolAccessConfig, CliDomain, CliPerm, CliAccessConfig } from '../../types'
 import { VISIBLE_TOOL_CATEGORIES, TOOL_CATEGORY_LABELS, CLI_DOMAINS, CLI_DOMAIN_LABELS, createCliAccessConfig, TOOL_ENTRY_EXPLANATIONS } from '../../types'
 
 interface PermissionTemplateFormProps {
@@ -30,6 +32,7 @@ interface FormState {
   tool_access: ToolAccessConfig
   cli_access: CliAccessConfig
   storage_enabled: boolean
+  storage_all: boolean
   workspace_path: string
   storage_access: 'read' | 'readwrite'
   memory_scopes_text: string
@@ -43,6 +46,7 @@ function buildInitialState(template?: PermissionTemplate): FormState {
       tool_access: { ...DEFAULT_TOOL_ACCESS },
       cli_access: createCliAccessConfig('none'),
       storage_enabled: false,
+      storage_all: false,
       workspace_path: '',
       storage_access: 'read',
       memory_scopes_text: '',
@@ -54,7 +58,8 @@ function buildInitialState(template?: PermissionTemplate): FormState {
     tool_access: { ...template.tool_access },
     cli_access: { ...template.cli_access },
     storage_enabled: template.storage !== null,
-    workspace_path: template.storage?.workspace_path ?? '',
+    storage_all: !!template.storage && 'scope' in template.storage,
+    workspace_path: template.storage && 'workspace_path' in template.storage ? template.storage.workspace_path : '',
     storage_access: template.storage?.access ?? 'read',
     memory_scopes_text: template.memory_scopes.join(', '),
   }
@@ -116,9 +121,7 @@ export const PermissionTemplateForm: React.FC<PermissionTemplateFormProps> = ({
       return
     }
 
-    const storage: StoragePermission | null = form.storage_enabled
-      ? { workspace_path: form.workspace_path.trim(), access: form.storage_access }
-      : null
+    const storage = storagePermissionFromFields(form.storage_enabled, form.storage_all, form.workspace_path.trim(), form.storage_access)
 
     const memory_scopes = form.memory_scopes_text.trim()
       ? form.memory_scopes_text.split(',').map(s => s.trim()).filter(Boolean)
@@ -284,50 +287,9 @@ export const PermissionTemplateForm: React.FC<PermissionTemplateFormProps> = ({
 
       {/* Storage */}
       <div style={hintStyle}>file_io 开启后，宿主核验的任务自有默认目录可读写；以下配置仅限制额外目录。关闭 file_io 会同时关闭两类文件入口。</div>
-      <div>
-        <label style={{
-          ...labelStyle,
-          display: 'flex',
-          alignItems: 'center',
-          gap: '0.5rem',
-        }}>
-          <input
-            type="checkbox"
-            checked={form.storage_enabled}
-            onChange={e => updateField('storage_enabled', e.target.checked)}
-            disabled={isSystem}
-            style={{ accentColor: 'var(--primary)' }}
-          />
-          授权额外目录
-        </label>
-        {!form.storage_enabled && <div style={hintStyle}>未授权额外目录</div>}
-        {form.storage_enabled && (
-          <div style={{ display: 'grid', gap: '0.5rem', marginTop: '0.5rem', paddingLeft: '1.5rem' }}>
-            <div>
-              <label style={labelStyle}>额外目录路径</label>
-              <input
-                className="input"
-                value={form.workspace_path}
-                onChange={e => updateField('workspace_path', e.target.value)}
-                placeholder="例如：./workspace"
-                disabled={isSystem}
-              />
-            </div>
-            <div>
-              <label style={labelStyle}>访问级别</label>
-              <select
-                className="input"
-                value={form.storage_access}
-                onChange={e => updateField('storage_access', e.target.value as 'read' | 'readwrite')}
-                disabled={isSystem}
-              >
-                <option value="read">只读 (read)</option>
-                <option value="readwrite">读写 (readwrite)</option>
-              </select>
-            </div>
-          </div>
-        )}
-      </div>
+      <StoragePermissionEditor value={storagePermissionFromFields(form.storage_enabled, form.storage_all, form.workspace_path, form.storage_access)}
+        disabled={isSystem} onChange={storage => setForm({ ...form, storage_enabled: !!storage, storage_all: !!storage && 'scope' in storage,
+          workspace_path: storage && 'workspace_path' in storage ? storage.workspace_path : form.workspace_path, storage_access: storage?.access ?? form.storage_access })} />
 
       {/* Memory Scopes */}
       <div>

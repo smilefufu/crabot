@@ -1,3 +1,4 @@
+import { assertAdminDataCompatibility } from '../lib/admin-data-compat.mjs'
 import { assertWorkspaceDataCompatibility } from '../lib/workspace-data-compat.mjs'
 import { prepareSharedRequests, previewSharedRequests } from './shared-requests.mjs'
 import { describeMigration, executeMigration, assertNoInterruptedMigrations, commitConvertedMigrations } from './migration-transaction.mjs'
@@ -100,6 +101,7 @@ export async function applyMigration(moduleDir, dataDir, fromVersion, toVersion,
 }
 
 export async function previewMigrations(crabotHome, dataDir) {
+  assertAdminDataCompatibility(crabotHome, dataDir)
   assertWorkspaceDataCompatibility(crabotHome, dataDir)
   await assertNoInterruptedMigrations(dataDir)
   const modules = []
@@ -116,6 +118,7 @@ export async function runMigrations(crabotHome, dataDir, runScriptFn, logger = c
   let lock
   if (!options.lockHeld) { await fs.mkdir(dataDir, { recursive: true }); lock = await acquireCliLock(dataDir, 'data-migration') }
   try {
+    assertAdminDataCompatibility(crabotHome, dataDir)
     assertWorkspaceDataCompatibility(crabotHome, dataDir)
     await assertNoInterruptedMigrations(dataDir)
     const targets = scanModules(crabotHome, dataDir)

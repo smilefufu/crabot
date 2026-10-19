@@ -1181,6 +1181,9 @@ export class WorkerHarness {
       })
     } catch (error) {
       if (!admitted && selectionFailure && error instanceof Error && error.message.startsWith('PERMISSION_DENIED:')) throw selectionFailure
+      if (!admitted && error instanceof Error && /^(PERMISSION_DENIED|CAPABILITY_UNKNOWN|EXECUTION_POLICY_UNSUPPORTED):/.test(error.message)) {
+        throw Object.assign(new Error(error.message + '；Worker 未创建，任务未执行。'), { code: error.message.split(':')[0] })
+      }
       throw error
     }
   }

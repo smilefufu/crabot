@@ -1,3 +1,4 @@
+import { parseFriendPermissionRecords, serializeFriendPermissionRecords } from './friend-permission-store.js'
 import { WorkspaceExecutionInventorySchema, WorkspaceIdSchema } from 'crabot-client'
 import { WorkspaceService } from './workspaces.js'
 import { resolveManagedMcpConfig } from './managed-mcp-runtime.js'
@@ -699,6 +700,7 @@ export class AdminModule extends ModuleBase {
   private schedules: Map<ScheduleId, Schedule> = new Map()
   private sessionConfigs: Map<string, GroupSessionPermissionConfig> = new Map()
   private friendPermissionConfigs: Map<FriendId, FriendPermissionConfig> = new Map()
+  private friendStorageOverrides = new Map<FriendId, import('./types.js').StoragePermission>()
 
   // 模型供应商管理器
   private modelProviderManager: ModelProviderManager
@@ -4289,6 +4291,7 @@ export class AdminModule extends ModuleBase {
 
     this.friends.delete(params.friend_id)
     this.friendPermissionConfigs.delete(params.friend_id)
+    this.friendStorageOverrides.delete(params.friend_id)
     await this.saveData()
 
     return { deleted: true }
@@ -5003,19 +5006,25 @@ export class AdminModule extends ModuleBase {
 
     try {
       const friendPermissionConfigsData = await fs.readFile(this.friendPermissionConfigsFilePath, 'utf-8')
-      const entries = JSON.parse(friendPermissionConfigsData) as Array<{ friend_id: FriendId; config: FriendPermissionConfig }>
+      const entries = parseFriendPermissionRecords(JSON.parse(friendPermissionConfigsData))
+      this.friendPermissionConfigs.clear()
+      this.friendStorageOverrides.clear()
       for (const entry of entries) {
         const friend = this.friends.get(entry.friend_id)
         if (!friend) {
           continue
         }
-        this.friendPermissionConfigs.set(
-          entry.friend_id,
-          this.normalizeFriendPermissionConfig(friend, entry.config)
-        )
+        if (entry.config) this.friendPermissionConfigs.set(entry.friend_id, this.normalizeFriendPermissionConfig(friend, entry.config))
+        else this.friendStorageOverrides.set(entry.friend_id, entry.storage_override)
       }
       console.log(`[Admin] Loaded ${this.friendPermissionConfigs.size} friend permission configs`)
-    } catch {
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+      const schema = await fs.lstat(path.join(this.adminConfig.data_dir, 'SCHEMA_VERSION')).catch(error => {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
+        throw error
+      })
+      if (schema) throw new Error('Admin 权限文件缺失，已保留原数据；请核验备份后恢复')
       console.log('[Admin] No existing friend permission configs data')
     }
 
@@ -5210,9 +5219,7 @@ export class AdminModule extends ModuleBase {
     const sessionConfigsArray = serializeGroupSessionConfigs(this.sessionConfigs)
     await this.atomicWriteFile(this.sessionConfigsFilePath, JSON.stringify(sessionConfigsArray, null, 2))
 
-    const friendPermissionConfigsArray = Array.from(this.friendPermissionConfigs.entries()).map(
-      ([friend_id, config]) => ({ friend_id, config })
-    )
+    const friendPermissionConfigsArray = serializeFriendPermissionRecords(this.friendPermissionConfigs, this.friendStorageOverrides)
     await this.atomicWriteFile(this.friendPermissionConfigsFilePath, JSON.stringify(friendPermissionConfigsArray, null, 2))
 
     const schedulesArray = Array.from(this.schedules.values())
@@ -9973,7 +9980,9 @@ export class AdminModule extends ModuleBase {
       return null
     }
     try {
-      return this.permissionTemplateManager.resolvePermissions(templateId, null)
+      const resolved = this.permissionTemplateManager.resolvePermissions(templateId, null)
+      const storage = this.friendStorageOverrides.get(friend.id)
+      return storage ? { ...resolved, storage: { ...storage } } : resolved
     } catch (error) {
       if (error instanceof Error && 'code' in error && error.code === 'NOT_FOUND') {
         return null
@@ -10121,13 +10130,14 @@ export class AdminModule extends ModuleBase {
       ? this.normalizeFriendPermissionConfig(friend, this.friendPermissionConfigs.get(friendId)!)
       : null
     const resolved = this.buildResolvedFriendPermissions(friend)
-    return { config, resolved }
+    const storage = friend.permission === 'master' ? undefined : this.friendStorageOverrides.get(friendId)
+    return { config, resolved, ...(storage ? { storage_override: { ...storage } } : {}) }
   }
 
   private async handleUpdateFriendPermission(
     friendId: FriendId,
     config: UpdateFriendPermissionBody['config'],
-  ): Promise<{ config: FriendPermissionConfig }> {
+  ): Promise<{ config: FriendPermissionConfig | null }> {
     const friend = this.friends.get(friendId)
     if (!friend) {
       throw new Error('Friend not found')
@@ -10135,6 +10145,23 @@ export class AdminModule extends ModuleBase {
     if (friend.permission === 'master') {
       throw new Error('Cannot update master friend permissions')
     }
+
+    if (config === null) {
+      const previous = this.friendPermissionConfigs.get(friendId), storage = this.friendStorageOverrides.get(friendId)
+      this.friendPermissionConfigs.delete(friendId)
+      this.friendStorageOverrides.delete(friendId)
+      try { await this.saveData() }
+      catch (error) {
+        if (this.friends.has(friendId) && !this.friendPermissionConfigs.has(friendId) && !this.friendStorageOverrides.has(friendId)) {
+          if (previous) this.friendPermissionConfigs.set(friendId, previous)
+          if (storage) this.friendStorageOverrides.set(friendId, storage)
+        }
+        throw error
+      }
+      return { config: null }
+    }
+    try { parseFriendPermissionRecords([{ friend_id: friendId, config: { ...config, updated_at: generateTimestamp() } }]) }
+    catch { throw new RpcError('INVALID_PARAMS', '目录或权限配置无效，请检查后重试') }
 
     // body.config 类型层 require cli_access（来自 Omit<FriendPermissionConfig, 'updated_at'>），
     // 但旧 client 可能未升级；在此做运行时兜底，避免破坏 forward-compat。
@@ -10148,6 +10175,7 @@ export class AdminModule extends ModuleBase {
     })
 
     this.friendPermissionConfigs.set(friendId, nextConfig)
+    this.friendStorageOverrides.delete(friendId)
     await this.saveData()
     return { config: nextConfig }
   }
@@ -12199,6 +12227,22 @@ export class AdminModule extends ModuleBase {
         return this.channelManager.upsertInstanceById(inst, config, onConflict)
       },
       upsertFriend: async (r) => this.upsertImportedRecord(this.friends as Map<string, { id: string }>, r as { id: string }, onConflict),
+      upsertFriendPermission: async (raw) => {
+        const [record] = parseFriendPermissionRecords([raw])
+        const friend = this.friends.get(record.friend_id)
+        if (!friend) throw new RpcError('NOT_FOUND', '好友不存在，未导入权限')
+        if (friend.permission === 'master') return 'skipped'
+        const exists = this.friendPermissionConfigs.has(friend.id) || this.friendStorageOverrides.has(friend.id)
+        if (exists && onConflict === 'skip') return 'skipped'
+        if (record.config) {
+          this.friendPermissionConfigs.set(friend.id, this.normalizeFriendPermissionConfig(friend, record.config))
+          this.friendStorageOverrides.delete(friend.id)
+        } else {
+          this.friendPermissionConfigs.delete(friend.id)
+          this.friendStorageOverrides.set(friend.id, record.storage_override)
+        }
+        return exists ? 'overwritten' : 'imported'
+      },
       upsertTask: async (r) => this.upsertImportedRecord(this.tasks as unknown as Map<string, { id: string }>, r as { id: string }, onConflict),
       upsertSessionConfig: async (r) => {
         const entry = parseGroupSessionConfigRecord(r)

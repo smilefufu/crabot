@@ -1,3 +1,4 @@
+import { assertAdminDataCompatibility } from './admin-data-compat.mjs'
 import { existsSync, readFileSync, mkdirSync } from 'node:fs'
 import { join, resolve, delimiter } from 'node:path'
 import { homedir } from 'node:os'
@@ -53,6 +54,7 @@ export async function applyStartupMigrations(root, dataDir, env, log = () => {},
 }
 
 export function verifyDataCompatibility(root, dataDir) {
+  assertAdminDataCompatibility(root, dataDir)
   assertWorkspaceDataCompatibility(root, dataDir)
   const pending = scanModules(root, dataDir)
   // Preflight the whole version set before the first module can mutate data.

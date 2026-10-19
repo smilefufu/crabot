@@ -1,3 +1,5 @@
+import { storagePermissionFromFields } from '../../components/storage-permission-form'
+import { StoragePermissionEditor } from '../../components/StoragePermissionEditor'
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Button } from '../../components/Common/Button'
 import { Drawer } from '../../components/Common/Drawer'
@@ -20,7 +22,6 @@ import {
   buildExplicitFriendPermissionConfig,
   parseMemoryScopes,
   summarizeFriendMemoryScopes,
-  summarizeFriendStorage,
 } from './friend-permission-utils'
 import { ObjectList, dialogObjectSelectionId } from './components/ObjectList'
 import { buildGroupPermissionOverrides, resolveGroupPermissions } from './group-permission-utils'
@@ -35,7 +36,6 @@ import type {
   Friend,
   FriendPermission,
   PermissionTemplate,
-  StoragePermission,
   ToolAccessConfig,
   ToolCategory,
 } from '../../types'
@@ -122,13 +122,14 @@ export const DialogObjectsPage: React.FC = () => {
   const [editPerm, setEditPerm] = useState<FriendPermission>('normal')
   const [savingFriendMetadata, setSavingFriendMetadata] = useState(false)
   const [friendPermissionLoading, setFriendPermissionLoading] = useState(false)
-  const [friendPermissionSource, setFriendPermissionSource] = useState<'independent' | 'template' | 'unknown'>('unknown')
+  const [friendPermissionSource, setFriendPermissionSource] = useState<'independent' | 'template' | 'directory_override' | 'unknown'>('unknown')
   const [friendPermissionState, setFriendPermissionState] = useState<FriendPermissionState>('idle')
   const [friendPermissionUnavailableMessage, setFriendPermissionUnavailableMessage] = useState<string | null>(null)
   const [savingFriendPermissions, setSavingFriendPermissions] = useState(false)
   const [friendToolAccess, setFriendToolAccess] = useState<ToolAccessConfig>(() => buildToolAccess(false))
   const [friendCliAccess, setFriendCliAccess] = useState<CliAccessConfig>(() => createCliAccessConfig('none'))
   const [friendStorageEnabled, setFriendStorageEnabled] = useState(false)
+  const [friendStorageAll, setFriendStorageAll] = useState(false)
   const [friendStoragePath, setFriendStoragePath] = useState('')
   const [friendStorageAccess, setFriendStorageAccess] = useState<'read' | 'readwrite'>('read')
   const [friendMemoryMode, setFriendMemoryMode] = useState<'empty' | 'custom'>('empty')
@@ -149,6 +150,7 @@ export const DialogObjectsPage: React.FC = () => {
   const [groupToolAccess, setGroupToolAccess] = useState<ToolAccessConfig>(() => buildToolAccess(false))
   const [groupCliAccess, setGroupCliAccess] = useState<CliAccessConfig>(() => createCliAccessConfig('none'))
   const [groupStorageEnabled, setGroupStorageEnabled] = useState(false)
+  const [groupStorageAll, setGroupStorageAll] = useState(false)
   const [groupStoragePath, setGroupStoragePath] = useState('')
   const [groupStorageAccess, setGroupStorageAccess] = useState<'read' | 'readwrite'>('read')
   const [groupMemoryMode, setGroupMemoryMode] = useState<'session' | 'custom'>('session')
@@ -161,6 +163,7 @@ export const DialogObjectsPage: React.FC = () => {
     setFriendToolAccess(buildToolAccess(false))
     setFriendCliAccess(createCliAccessConfig('none'))
     setFriendStorageEnabled(false)
+    setFriendStorageAll(false)
     setFriendStoragePath('')
     setFriendStorageAccess('read')
     setFriendMemoryMode('empty')
@@ -173,8 +176,9 @@ export const DialogObjectsPage: React.FC = () => {
     setGroupToolAccess({ ...tpl.tool_access, desktop: false })
     setGroupCliAccess({ ...tpl.cli_access })
     setGroupStorageEnabled(!!tpl.storage)
+    setGroupStorageAll(!!tpl.storage && 'scope' in tpl.storage)
     if (tpl.storage) {
-      setGroupStoragePath(tpl.storage.workspace_path)
+      setGroupStoragePath('workspace_path' in tpl.storage ? tpl.storage.workspace_path : '')
       setGroupStorageAccess(tpl.storage.access)
     }
     if (tpl.memory_scopes.length === 0) {
@@ -190,8 +194,9 @@ export const DialogObjectsPage: React.FC = () => {
     setFriendToolAccess({ ...tpl.tool_access })
     setFriendCliAccess({ ...tpl.cli_access })
     setFriendStorageEnabled(!!tpl.storage)
+    setFriendStorageAll(!!tpl.storage && 'scope' in tpl.storage)
     if (tpl.storage) {
-      setFriendStoragePath(tpl.storage.workspace_path)
+      setFriendStoragePath('workspace_path' in tpl.storage ? tpl.storage.workspace_path : '')
       setFriendStorageAccess(tpl.storage.access)
     }
     setFriendMemoryScopesInput(tpl.memory_scopes.join(', '))
@@ -371,12 +376,13 @@ export const DialogObjectsPage: React.FC = () => {
           notifyError('好友权限未返回可编辑配置')
           return
         }
-        setFriendPermissionSource(result.config ? 'independent' : 'template')
+        setFriendPermissionSource(result.config ? 'independent' : result.storage_override ? 'directory_override' : 'template')
         const resolved = result.resolved
         setFriendToolAccess(resolved.tool_access)
         setFriendCliAccess(resolved.cli_access ?? createCliAccessConfig('none'))
         setFriendStorageEnabled(resolved.storage !== null)
-        setFriendStoragePath(resolved.storage?.workspace_path ?? DEFAULT_STORAGE_PATH)
+        setFriendStorageAll(!!resolved.storage && 'scope' in resolved.storage)
+        setFriendStoragePath(resolved.storage && 'workspace_path' in resolved.storage ? resolved.storage.workspace_path : DEFAULT_STORAGE_PATH)
         setFriendStorageAccess(resolved.storage?.access ?? 'read')
         setFriendMemoryMode(resolved.memory_scopes.length === 0 ? 'empty' : 'custom')
         setFriendMemoryScopesInput(resolved.memory_scopes.join(', '))
@@ -398,7 +404,7 @@ export const DialogObjectsPage: React.FC = () => {
     return () => {
       active = false
     }
-  }, [domain, selectedItem, notifyError, resetFriendPermissionForm])
+  }, [domain, selectedItem, notifyError, resetFriendPermissionForm, refreshKey])
 
   const openAssignModal = async (target: QueueTarget, kind: QueueTargetKind) => {
     setAssignTarget(target)
@@ -533,6 +539,20 @@ export const DialogObjectsPage: React.FC = () => {
     }
   }
 
+  const handleResetFriendPermissions = async () => {
+    if (domain !== 'friends' || !selectedItem || friendPermissionState !== 'ready') return
+    const friend = selectedItem as DialogObjectFriend
+    if (friend.permission === 'master') return
+    setSavingFriendPermissions(true)
+    try {
+      await friendService.updatePermissions(friend.id, null)
+      setFriendPermissionState('loading')
+      triggerRefresh()
+      success('已重置为模板继承')
+    } catch (error) { notifyError(error instanceof Error ? error.message : '重置失败') }
+    finally { setSavingFriendPermissions(false) }
+  }
+
   const handleSaveFriendPermissions = async () => {
     if (domain !== 'friends' || !selectedItem) return
     const friend = selectedItem as DialogObjectFriend
@@ -541,7 +561,7 @@ export const DialogObjectsPage: React.FC = () => {
     try {
       setSavingFriendPermissions(true)
       const trimmedStoragePath = friendStoragePath.trim()
-      if (friendStorageEnabled && !trimmedStoragePath) {
+      if (friendStorageEnabled && !friendStorageAll && !trimmedStoragePath) {
         notifyError('存储路径不能为空')
         return
       }
@@ -557,12 +577,7 @@ export const DialogObjectsPage: React.FC = () => {
       await friendService.updatePermissions(friend.id, buildExplicitFriendPermissionConfig({
         tool_access: friendToolAccess,
         cli_access: friendCliAccess,
-        storage: friendStorageEnabled
-          ? {
-              workspace_path: trimmedStoragePath,
-              access: friendStorageAccess,
-            }
-          : null,
+        storage: storagePermissionFromFields(friendStorageEnabled, friendStorageAll, trimmedStoragePath, friendStorageAccess),
         memory_scopes: memoryScopes,
       }))
       setFriendPermissionSource('independent')
@@ -624,6 +639,7 @@ export const DialogObjectsPage: React.FC = () => {
     setGroupToolAccess(buildToolAccess(false))
     setGroupCliAccess(createCliAccessConfig('none'))
     setGroupStorageEnabled(false)
+    setGroupStorageAll(false)
     setGroupStoragePath('')
     setGroupStorageAccess('read')
     setGroupMemoryMode('session')
@@ -650,7 +666,8 @@ export const DialogObjectsPage: React.FC = () => {
       setGroupToolAccess(resolved.tool_access)
       setGroupCliAccess(resolved.cli_access ?? createCliAccessConfig('none'))
       setGroupStorageEnabled(resolved.storage !== null)
-      setGroupStoragePath(resolved.storage?.workspace_path ?? DEFAULT_STORAGE_PATH)
+      setGroupStorageAll(!!resolved.storage && 'scope' in resolved.storage)
+      setGroupStoragePath(resolved.storage && 'workspace_path' in resolved.storage ? resolved.storage.workspace_path : DEFAULT_STORAGE_PATH)
       setGroupStorageAccess(resolved.storage?.access ?? 'read')
       if (resolved.memory_scopes.length === 1 && resolved.memory_scopes[0] === group.id) {
         setGroupMemoryMode('session')
@@ -678,7 +695,7 @@ export const DialogObjectsPage: React.FC = () => {
     try {
       setGroupSaving(true)
       const trimmedStoragePath = groupStoragePath.trim()
-      if (groupStorageEnabled && !trimmedStoragePath) {
+      if (groupStorageEnabled && !groupStorageAll && !trimmedStoragePath) {
         notifyError('存储路径不能为空')
         return
       }
@@ -691,12 +708,7 @@ export const DialogObjectsPage: React.FC = () => {
         return
       }
 
-      const storage: StoragePermission | null = groupStorageEnabled
-        ? {
-            workspace_path: trimmedStoragePath,
-            access: groupStorageAccess,
-          }
-        : null
+      const storage = storagePermissionFromFields(groupStorageEnabled, groupStorageAll, trimmedStoragePath, groupStorageAccess)
 
       const config = buildGroupPermissionOverrides(editingGroup.id, groupTemplate, {
         tool_access: groupToolAccess,
@@ -798,6 +810,7 @@ export const DialogObjectsPage: React.FC = () => {
               friendToolAccess={friendToolAccess}
               friendCliAccess={friendCliAccess}
               friendStorageEnabled={friendStorageEnabled}
+              friendStorageAll={friendStorageAll}
               friendStoragePath={friendStoragePath}
               friendStorageAccess={friendStorageAccess}
               friendMemoryMode={friendMemoryMode}
@@ -818,11 +831,13 @@ export const DialogObjectsPage: React.FC = () => {
                   setFriendStoragePath(DEFAULT_STORAGE_PATH)
                 }
               }}
+              onFriendStorageAllChange={setFriendStorageAll}
               onFriendStoragePathChange={setFriendStoragePath}
               onFriendStorageAccessChange={setFriendStorageAccess}
               onFriendMemoryModeChange={setFriendMemoryMode}
               onFriendMemoryScopesInputChange={setFriendMemoryScopesInput}
               onSavePermissions={handleSaveFriendPermissions}
+              onResetPermissions={handleResetFriendPermissions}
               onOpenBindDrawer={() => setShowBindDrawer(true)}
               onRequestUnlink={setConfirmUnlinkKey}
               onCancelUnlink={() => setConfirmUnlinkKey(null)}
@@ -1039,57 +1054,8 @@ export const DialogObjectsPage: React.FC = () => {
 
                 <div style={{ display: 'grid', gap: '0.75rem' }}>
                   <div style={{ fontWeight: 600 }}>额外目录权限</div>
-                  <label className="session-permission-switch-row">
-                      <span className="session-permission-switch-value">
-                        <span>授权额外目录</span>
-                        <span>
-                          {groupStorageEnabled
-                          ? summarizeFriendStorage({
-                              workspace_path: groupStoragePath.trim() || DEFAULT_STORAGE_PATH,
-                              access: groupStorageAccess,
-                            })
-                          : '未授权额外目录'}
-                      </span>
-                    </span>
-                    <span className="toggle-switch">
-                      <input
-                        aria-label="授权额外目录"
-                        type="checkbox"
-                        checked={groupStorageEnabled}
-                        onChange={(event) => {
-                          const checked = event.target.checked
-                          setGroupStorageEnabled(checked)
-                          if (checked && !groupStoragePath.trim()) {
-                            setGroupStoragePath(DEFAULT_STORAGE_PATH)
-                          }
-                        }}
-                      />
-                      <span className="toggle-track" />
-                    </span>
-                  </label>
-                  {groupStorageEnabled && (
-                    <div className="session-detail-grid">
-                      <Input
-                        label="额外目录路径"
-                        aria-label="额外目录路径"
-                        value={groupStoragePath}
-                        onChange={(event) => setGroupStoragePath(event.target.value)}
-                        help="file_io 开启后任务自有默认目录可读写；此处只配置额外目录。"
-                      />
-                      <label style={{ display: 'grid', gap: '0.35rem' }}>
-                        <span style={{ fontSize: '0.875rem', fontWeight: 500 }}>访问级别</span>
-                        <select
-                          aria-label="访问级别"
-                          value={groupStorageAccess}
-                          onChange={(event) => setGroupStorageAccess(event.target.value as 'read' | 'readwrite')}
-                          className="select"
-                        >
-                          <option value="read">只读</option>
-                          <option value="readwrite">读写</option>
-                        </select>
-                      </label>
-                    </div>
-                  )}
+                  <StoragePermissionEditor value={storagePermissionFromFields(groupStorageEnabled, groupStorageAll, groupStoragePath, groupStorageAccess)}
+                    onChange={storage => { setGroupStorageEnabled(!!storage); setGroupStorageAll(!!storage && 'scope' in storage); if (storage) { setGroupStorageAccess(storage.access); if ('workspace_path' in storage) setGroupStoragePath(storage.workspace_path) } }} />
                 </div>
 
                 <div style={{ display: 'grid', gap: '0.75rem' }}>

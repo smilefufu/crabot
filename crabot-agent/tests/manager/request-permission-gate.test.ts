@@ -76,4 +76,18 @@ describe('Request operation checks keep complete sources and fixed ceilings', ()
     const wrong = new RequestPermissionGate(origin, ceiling, async () => ({ ...group, subject_id: 'other-group' }))
     expect((await wrong.authorize(async () => allowed)).allowed).toBe(false)
   })
+  it('reports safe directory denial without leaking other source roots or claiming database failure', async () => {
+    const { gate } = setup()
+    const result = await gate.authorize(file(path.join(directory, 'outside/item'), true))
+    expect(result).toMatchObject({ allowed: false, reason: expect.stringContaining('目录范围') })
+    if (!result.allowed) { expect(result.reason).not.toContain(directory); expect(result.reason).not.toContain('数据库') }
+  })
+
+  it('does not treat words inside an unverified path error as another permission category', async () => {
+    const { gate } = setup()
+    const result = await gate.authorize(async () => denied('PERMISSION_DENIED', '无法核实文件范围：/private/文件范围只读'))
+    expect(result).toMatchObject({ allowed: false, reason: expect.stringContaining('文件范围无法核验') })
+    if (!result.allowed) expect(result.reason).not.toContain('目录范围只读')
+  })
+
 })

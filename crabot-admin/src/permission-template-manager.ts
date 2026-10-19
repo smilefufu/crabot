@@ -2,6 +2,7 @@
  * PermissionTemplateManager - 权限模板 CRUD 管理
  */
 
+import { isStoragePermission, RpcError } from 'crabot-shared'
 import type {
   PermissionTemplate,
   ToolAccessConfig,
@@ -33,6 +34,8 @@ export class PermissionTemplateManager {
     if (normalized.tool_access && typeof normalized.tool_access.desktop !== 'boolean') {
       normalized = { ...normalized, tool_access: { ...normalized.tool_access, desktop: false } }
     }
+    if (normalized.storage === undefined) normalized = { ...normalized, storage: null }
+    if (!isStoragePermission(normalized.storage)) throw new Error('Invalid template storage permission')
     // cli_access 字段补默认（旧数据）
     if (!normalized.cli_access || !CLI_DOMAINS.every(d => d in normalized.cli_access)) {
       normalized = {
@@ -147,6 +150,7 @@ export class PermissionTemplateManager {
   }
 
   create(params: CreatePermissionTemplateParams): PermissionTemplate {
+    if (params.storage !== undefined && !isStoragePermission(params.storage)) throw new RpcError('INVALID_PARAMS', '目录范围无效，请选择全部目录或填写指定目录')
     const now = generateTimestamp()
     const id = generateId()
     const template: PermissionTemplate = {
@@ -166,6 +170,7 @@ export class PermissionTemplateManager {
   }
 
   update(id: string, params: Omit<UpdatePermissionTemplateParams, 'template_id'>): PermissionTemplate {
+    if (params.storage !== undefined && !isStoragePermission(params.storage)) throw new RpcError('INVALID_PARAMS', '目录范围无效，请选择全部目录或填写指定目录')
     const existing = this.templates.get(id)
     if (!existing) {
       throw Object.assign(new Error('Template not found'), { code: 'NOT_FOUND' })
