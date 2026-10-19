@@ -321,7 +321,7 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
       '补充/返工用 send_to_worker；复用持续无效时，关闭旧执行器后可新建，并在 prompt 中' +
       '交代当前完整要求、必要事实和产物位置，新执行器不自动继承旧上下文。异步语义:本工具在执行器化身创建完成后即返回' +
       '(不等执行器把任务做完),返回 worker_id;执行器每跑完一轮(转 idle)或结束时会作为' +
-      '事件唤醒你,事件带状态和待处置回合；用 get_worker_activity 读取原生会话。impl 缺省按部署偏好选择;workspace 缺省新建。',
+      '事件唤醒你,事件带状态和待处置回合；用 get_worker_activity 读取原生会话。impl 缺省按部署偏好选择;已知项目时必须指定该项目的实际 workspace 根，同项目执行器共享文件；确实无法确定项目时才省略，进入默认工作区的隔离任务目录。',
     inputSchema: {
       type: 'object',
       properties: {
@@ -334,7 +334,7 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
           description: '交给执行器的任务描述/初始输入。要它目标驱动就把目标写在这里',
         },
         impl: { type: 'string', enum: WORKER_IMPL_IDS as unknown as string[], description: '执行器实现,缺省按部署偏好' },
-        workspace: { type: 'string', description: '复用的 workspace 路径,缺省新建一个' },
+        workspace: { type: 'string', description: '已确认项目的实际目录；同项目复用同一路径。无法确定项目才省略，使用唯一默认工作区的隔离任务目录' },
       },
       required: ['title', 'prompt'],
     },

@@ -1560,6 +1560,32 @@ describe('ClaudeCodeAdapter.fork — streaming establishment without tmux', () =
     expect(states.filter((state) => state === 'exited')).toHaveLength(1)
   })
 
+  it('private project fork loads its settings and MCP paths without sending completion to the mainline', async () => {
+    const runtime = await fs.realpath(await fs.mkdtemp(path.join(dataDir, 'private-runtime-')))
+    await fs.chmod(runtime, 0o700)
+    const workspace = { root: await fs.realpath(workspaceRoot), workspace_id: randomUUID(), runtime_root: runtime }
+    const metaFile = path.join(dataDir, workerId, 'meta-1.json')
+    const previous = JSON.parse(await fs.readFile(metaFile, 'utf8'))
+    await fs.writeFile(metaFile, JSON.stringify({ ...previous, workspace_root: workspace.root, workspace_id: workspace.workspace_id, runtime_root: runtime }))
+    const argvFile = path.join(dataDir, 'private-fork-argv.jsonl')
+    const adapter = new ClaudeCodeAdapter({ dataDir, claudeConfigPath: fakeClaudeConfig(dataDir), tmux: new ForkOnlyTmux(),
+      claudeBin: `env FAKE_ARGV_FILE=${shQuote(argvFile)} FAKE_FORK_RUN_STOP_HOOK=1 node ${shQuote(FAKE_CLAUDE_FORK)}` })
+    try {
+      await adapter.provision(workspace, { skills: [], mcp_servers: [] })
+      const handle = await adapter.fork({ worker_id: workerId, seq: 1, session_ref: parentSessionId }, 'private side question', { ...forkOptions(), workspace })
+      await waitForState(adapter, handle, 'exited')
+      const args = JSON.parse((await fs.readFile(argvFile, 'utf8')).trim()) as string[]
+      expect(args[args.indexOf('--mcp-config') + 1]).toBe(path.join(runtime, '.mcp.json'))
+      expect(args[args.indexOf('--settings') + 1]).toBe(path.join(runtime, '.claude/settings.json'))
+      expect(args[args.indexOf('--plugin-dir') + 1]).toBe(path.join(runtime, 'claude-plugin'))
+      const forkEvents = await fs.readFile(path.join(dataDir, workerId, `fork-events-${handle.seq}.jsonl`), 'utf8')
+      expect(JSON.parse(forkEvents.trim())).toMatchObject({ kind: 'stop', source: 'crabot_cli_hook:' + path.basename(runtime) })
+      await expect(fs.stat(path.join(runtime, '.claude/events-cli.jsonl'))).rejects.toMatchObject({ code: 'ENOENT' })
+      expect(JSON.parse(await fs.readFile(path.join(dataDir, workerId, `meta-${handle.seq}.json`), 'utf8'))).toMatchObject({ workspace_id: workspace.workspace_id, runtime_root: runtime })
+      expect(await fs.readdir(workspaceRoot)).toEqual([])
+    } finally { await adapter.dispose() }
+  })
+
   it('30 秒契约 deadline 到期前无 init 时终止整个 fork 进程组并返回 timeout', async () => {
     const terminationFile = path.join(dataDir, 'terminated.log')
     const claudeBin = [

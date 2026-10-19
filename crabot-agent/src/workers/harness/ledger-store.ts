@@ -131,6 +131,7 @@ export class LedgerStore {
       const ledger = await this.readLedgerFileStrict(key)
       const index = ledger.workers.findIndex(w => w.worker_id === workerId)
       const prev = index >= 0 ? ledger.workers[index] : undefined
+      const workspaceBefore = prev?.workspace_id
       const next = mutator(prev)
       if (!next) return undefined
       assertWorkerLegacyShape(next)
@@ -152,6 +153,10 @@ export class LedgerStore {
         throw new Error(`[LedgerStore] worker_id mismatch: requested ${workerId}, received ${next.worker_id}`)
       }
       this.assertWorkerOwner(key, next)
+      this.assertWorkspaceBinding(next)
+      if (prev && workspaceBefore !== next.workspace_id) {
+        throw new Error(`[LedgerStore] workspace_id is immutable for worker ${workerId}`)
+      }
       if (prev && prev.manager_key !== next.manager_key) {
         throw new Error(`[LedgerStore] manager_key is immutable for worker ${workerId}`)
       }
@@ -200,6 +205,13 @@ export class LedgerStore {
     return join(this.ledgersDir, managerKeyToFilename(key))
   }
 
+  private assertWorkspaceBinding(worker: LedgerWorker): void {
+    const id = worker.workspace_id
+    if (id !== undefined && (typeof id !== 'string' || (id !== 'default' && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)))) {
+      throw new Error(`[LedgerStore] invalid workspace_id for worker ${worker.worker_id}`)
+    }
+  }
+
   private assertWorkerOwner(key: ManagerKey, worker: LedgerWorker): void {
     if (worker.manager_key !== key) {
       throw new Error(`[LedgerStore] manager_key mismatch: file ${key}, worker ${worker.worker_id} has ${worker.manager_key}`)
@@ -221,6 +233,7 @@ export class LedgerStore {
     })
     for (const worker of workers) {
       this.assertWorkerOwner(key, worker)
+      this.assertWorkspaceBinding(worker)
       assertWorkerLegacyShape(worker)
     }
     return { ledger: { ...ledger, workers }, archivedAmbiguousLegacy: archivedAmbiguousLegacy || legacyStatusMigrated }

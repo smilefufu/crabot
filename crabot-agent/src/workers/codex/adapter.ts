@@ -1,3 +1,5 @@
+import { assertCodexProjectConfiguration } from '../provision/codex-project-config.js'
+import { nativeRuntimeRoot, nativeEventChannel, nativeEventSource, runtimeWorkspace, verifyNativeBinding, verifyPrivateNativeRuntime, verifyNativeRuntimeMetadata } from '../provision/native-runtime.js'
 import { isStandardComputerUse } from '../../agent/computer-use-owner.js'
 /**
  * Codex WorkerAdapter.
@@ -34,7 +36,7 @@ import { TmuxDriver, type PaneSnapshot } from '../tmux/driver.js'
 import { commitInput, waitForPaneChange, type InputCommitDiagnostic, type InputMode } from '../tmux/input-commit.js'
 import { parseRawControlKeys } from '../tmux/raw-control.js'
 import { DEFAULT_PASTE_READY_TIMEOUT_MS, waitForPasteReady } from '../tmux/paste-ready.js'
-import { CliEventChannel } from '../cli-events.js'
+import { EVENTS_FILE_ENV, CliEventChannel } from '../cli-events.js'
 import { watchNativeSessionFile } from '../native-session-watch.js'
 import { OutputLog } from '../output-log.js'
 import { appendTmuxControlDiagnostic, type PasteReadiness, type TmuxControlEndpoint } from '../tmux/control-monitor.js'
@@ -59,7 +61,7 @@ import {
 } from './app-server-client.js'
 import { parse as parseToml, stringify as stringifyToml } from 'smol-toml'
 import { createHash } from 'node:crypto'
-import { assertWorkspaceFilesUntracked, materializeSkills, renderCodexMcpToml, writeSensitiveFileAtomic, type ProvisionSources } from '../provision/materialize.js'
+import { assertWorkspaceFilesUntracked, materializeSkills, readMaterializedSkills, renderCodexMcpToml, writeSensitiveFileAtomic, type ProvisionSources } from '../provision/materialize.js'
 import type {
   AdapterCapabilities,
   CapabilityBundle,
@@ -253,7 +255,7 @@ export { WorkerExitedError, CapabilityNotSupportedError }
 /** hook/notify 事件文件路径约定:workspace 内 .codex/events-cli.jsonl,与 cc 的
  * .claude/events-cli.jsonl 同构。provision 与 spawn 都按此约定定位,保持一致。 */
 export function eventsFilePath(ws: Workspace): string {
-  return join(ws.root, '.codex', 'events-cli.jsonl')
+  return join(nativeRuntimeRoot(ws), '.codex', 'events-cli.jsonl')
 }
 
 interface Runtime {
@@ -262,6 +264,8 @@ interface Runtime {
   readonly seq: number
   readonly dir: string
   readonly workspaceRoot: string
+  readonly runtimeRoot?: string
+  readonly workspaceId?: string
   /** 本 worker 专属的隔离 CODEX_HOME(= `<workspaceRoot>/.codex`),spawn/resume 全程不变。 */
   readonly codexHome: string
   readonly sessionName: string
@@ -312,10 +316,12 @@ interface Runtime {
 
 type CapturedPane = PaneSnapshot & { captured_at: string }
 
-function controlMeta(runtime: Runtime): Record<string, string> {
-  return runtime.controlEndpoint
-    ? { control_socket: runtime.controlEndpoint.socket_path, control_monitor_id: runtime.controlEndpoint.monitor_id }
-    : {}
+function runtimeMeta(runtime: Runtime): Record<string, string> {
+  return {
+    ...(runtime.controlEndpoint ? { control_socket: runtime.controlEndpoint.socket_path, control_monitor_id: runtime.controlEndpoint.monitor_id } : {}),
+    ...(runtime.runtimeRoot ? { runtime_root: runtime.runtimeRoot } : {}),
+    ...(runtime.workspaceId ? { workspace_id: runtime.workspaceId } : {}),
+  }
 }
 
 function controlDiagnosticPath(runtime: Pick<Runtime, 'dir' | 'seq'>): string {
@@ -760,14 +766,14 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     workspaceRoot: string,
     workspaceCodexHome: string,
     runtimeCodexHome: string,
-    operation: 'spawn' | 'resume',
+    operation: 'spawn' | 'resume' | 'fork',
   ): Promise<void> {
     const readToml = async (file: string): Promise<Record<string, unknown>> => {
       try {
         return asTable(parseToml(await fs.readFile(file, 'utf-8')))
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code === 'ENOENT') return {}
-        throw err
+        throw new Error(`CodexWorkerAdapter.${operation}: managed runtime configuration cannot be read or parsed`)
       }
     }
     // 此目录会成为交互式 worker 实际使用的 CODEX_HOME；即便它来自 admin runtime，也不能
@@ -784,23 +790,36 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       merged.model_providers = { ...provisioned.model_providers as object, ...translator.model_providers as object }
     }
     await writeSensitiveFileAtomic(join(runtimeCodexHome, 'config.toml'), stringifyToml(asTable(merged)))
+    if (workspaceCodexHome !== runtimeCodexHome) {
+      await materializeSkills(runtimeCodexHome, await readMaterializedSkills(join(workspaceCodexHome, '..'), '.codex/skills'), 'skills')
+    }
   }
 
-  async preflightProvision(ws: Workspace, _caps: CapabilityBundle): Promise<void> {
+  async preflightProvision(ws: Workspace, _caps: CapabilityBundle, connectionEnv?: Record<string, string>): Promise<void> {
     this.assertActive()
-    await assertWorkspaceFilesUntracked(ws.root, CODEX_CREDENTIAL_FILES, 'CodexWorkerAdapter.provision')
+    await verifyPrivateNativeRuntime(ws)
+    if (ws.runtime_root) {
+      const profile = join(nativeRuntimeRoot(ws), '.codex')
+      // Before the first provision there is no private config yet. The source supplies only root-marker policy.
+      const configured = await fs.stat(join(profile, 'config.toml')).then(() => profile, error => {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+        return this.codexHomeSource
+      })
+      await assertCodexProjectConfiguration(ws, configured, connectionEnv)
+    }
+    if (!ws.runtime_root) await assertWorkspaceFilesUntracked(ws.root, CODEX_CREDENTIAL_FILES, 'CodexWorkerAdapter.provision')
   }
 
   async provision(ws: Workspace, caps: CapabilityBundle): Promise<void> {
     this.assertActive()
-    const codexDir = join(ws.root, '.codex')
+    const provisionRoot = nativeRuntimeRoot(ws), codexDir = join(provisionRoot, '.codex')
     // 已跟踪的 credential target 必须在任何 provision 写入前拒绝；ignore 必须先于敏感文件落盘。
     await this.preflightProvision(ws, caps)
     await fs.mkdir(codexDir, { recursive: true })
     await assertNoCodexHookSources(codexDir)
     await fs.writeFile(join(codexDir, '.gitignore'), '*\n', 'utf-8')
 
-    const channel = new CliEventChannel(eventsFilePath(ws))
+    const channel = nativeEventChannel(ws, '.codex')
     // codex-docs: notify 只支持在"顶层用户配置"这层 config.toml 里声明,项目级
     // .codex/config.toml 里的 notify 会被 codex 忽略并打印启动告警(config-basic 限制清单
     // 明确包含 notify)。本 adapter 把 <ws.root>/.codex 整个目录当作这个 worker 专属的
@@ -875,7 +894,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
 
     // codex-docs: skills 支持 .codex/skills/(项目级)或 ~/.codex/skills/(个人级);本方案下
     // .codex/ 本身就是 CODEX_HOME,两个语义重合到同一目录。
-    await materializeSkills(ws.root, caps.skills, '.codex/skills')
+    await materializeSkills(provisionRoot, caps.skills, '.codex/skills')
 
   }
 
@@ -1191,6 +1210,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
 
   async spawn(spec: SpawnSpec): Promise<IncarnationHandle> {
     this.assertActive()
+    await verifyPrivateNativeRuntime(spec.workspace)
     const seq = 1
     if (this.runtimes.has(instanceKey({ worker_id: spec.worker_id, seq }))) {
       throw new Error(`CodexWorkerAdapter.spawn: worker_id ${spec.worker_id} already spawned in this process`)
@@ -1204,7 +1224,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     // workspace 的那份（notify/trust/mcp/skills 都在里面），整体替换会把它们全丢掉。
     // 且该化身后续的 session/rollout 都落在 runtime CODEX_HOME——runtime.codexHome 必须
     // 指向它，否则 pollForNewRollout 扑空、resume 抛 has no discovered rollout。
-    let codexHome = join(spec.workspace.root, '.codex')
+    let codexHome = join(nativeRuntimeRoot(spec.workspace), '.codex')
     const runtimeCodexHome = spec.connection_env?.CODEX_HOME
     if (runtimeCodexHome) {
       await this.mergeAdminProviderCodexHome(spec.workspace.root, codexHome, runtimeCodexHome, 'spawn')
@@ -1221,12 +1241,13 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     // 持久痕迹,同 worker_id 可安全重试。CODEX_HOME 经 tmux -e 传给会话进程(execFile 直传
     // argv,不经过 shell 插值,不需要额外转义);PATH 同样经 -e 显式前置 codexBin 所在真实
     // 目录(nvm 部署陷阱,见 buildEnv/resolveBinDir 注释),不依赖 tmux server 自身环境。
-    const eventChannel = new CliEventChannel(eventsFilePath(spec.workspace))
+    const eventChannel = nativeEventChannel(spec.workspace, '.codex')
     const eventWatchOffset = await eventChannel.endOffset()
     const stopBaseline = await this.initialStopBaseline(eventChannel)
     const spawnBin = (await this.resolveBinForCommand())?.cmd
     if (!spawnBin) throw new WorkerImplUnavailableError('CodexWorkerAdapter.spawn: no user-level codex installation')
-    const env = await this.buildEnv({ CODEX_HOME: spec.connection_env?.CODEX_HOME ?? codexHome, ...spec.connection_env, ...await workspaceGitBridgeEnv(dir, seq, spec.workspace_git), ...spec.execution_env })
+    const env = await this.buildEnv({ CODEX_HOME: spec.connection_env?.CODEX_HOME ?? codexHome, ...spec.connection_env, ...await workspaceGitBridgeEnv(dir, seq, spec.workspace_git), ...spec.execution_env, ...(spec.workspace.runtime_root ? { [EVENTS_FILE_ENV]: eventsFilePath(spec.workspace) } : {}) })
+    await assertCodexProjectConfiguration(spec.workspace, codexHome, spec.connection_env)
     await assertNoCodexHookSources(codexHome, 'spawn')
     await installGeneratedCodexHookConfiguration(codexHome, eventChannel, 'spawn')
     const command = `${spawnBin} --approve-for-me ${CODEX_NETWORK_ACCESS_OPT} ${CODEX_HOOK_TRUST_OPT}`
@@ -1251,6 +1272,8 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       seq,
       dir,
       workspaceRoot: spec.workspace.root,
+      runtimeRoot: spec.workspace.runtime_root,
+      workspaceId: spec.workspace.workspace_id,
       codexHome,
       sessionName,
       controlEndpoint,
@@ -1272,7 +1295,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       session_discovery: sessionDiscoveryStatus,
       workspace_root: spec.workspace.root,
       codex_home: codexHome,
-      ...controlMeta(runtime),
+      ...runtimeMeta(runtime),
     })
     this.runtimes.set(instanceKey(handle), runtime)
     try {
@@ -1343,6 +1366,8 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     if (!prevRuntime) {
       throw new Error(`CodexWorkerAdapter.resume: no such incarnation ${prev.worker_id}#${prev.seq} resident in this process`)
     }
+    const workspace = runtimeWorkspace(prevRuntime)
+    await verifyNativeBinding(workspace, opts?.workspace)
     const prevHandle: IncarnationHandle = { worker_id: prev.worker_id, incarnation_id: prev.incarnation_id, seq: prev.seq, impl: 'codex', session_ref: prev.session_ref }
     const { state: prevState } = await this.syncState(prevRuntime, prevHandle)
     if (prevState !== 'exited') {
@@ -1389,18 +1414,19 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       let resumeCodexHome = prevRuntime.codexHome
       const resumeRuntimeHome = opts?.connection_env?.CODEX_HOME
       if (resumeRuntimeHome) {
-        await this.mergeAdminProviderCodexHome(prevRuntime.workspaceRoot, join(prevRuntime.workspaceRoot, '.codex'), resumeRuntimeHome, 'resume')
+        await this.mergeAdminProviderCodexHome(prevRuntime.workspaceRoot, join(nativeRuntimeRoot(workspace), '.codex'), resumeRuntimeHome, 'resume')
         resumeCodexHome = resumeRuntimeHome
       }
 
       // 锁纪律与 spawn 一致:tmux newSession 成功之后才落 meta(running)+注册 runtime;
       // PATH 前置同 spawn(nvm 部署陷阱)。
-      const eventChannel = new CliEventChannel(eventsFilePath({ root: prevRuntime.workspaceRoot }))
+      const eventChannel = nativeEventChannel(workspace, '.codex')
       const eventWatchOffset = await eventChannel.endOffset()
       const stopBaseline = await this.initialStopBaseline(eventChannel)
       const resumeBin = (await this.resolveBinForCommand())?.cmd
       if (!resumeBin) throw new WorkerImplUnavailableError('CodexWorkerAdapter.resume: no user-level codex installation')
-      const env = await this.buildEnv({ ...opts?.connection_env, CODEX_HOME: resumeCodexHome, ...await workspaceGitBridgeEnv(dir, seq, opts?.workspace_git), ...opts?.execution_env })
+      const env = await this.buildEnv({ ...opts?.connection_env, CODEX_HOME: resumeCodexHome, ...await workspaceGitBridgeEnv(dir, seq, opts?.workspace_git), ...opts?.execution_env, ...(prevRuntime.runtimeRoot ? { [EVENTS_FILE_ENV]: eventsFilePath(workspace) } : {}) })
+      await assertCodexProjectConfiguration(workspace, resumeCodexHome, opts?.connection_env)
       await assertNoCodexHookSources(resumeCodexHome, 'resume')
       await installGeneratedCodexHookConfiguration(resumeCodexHome, eventChannel, 'resume')
       const command = `${resumeBin} --approve-for-me ${CODEX_NETWORK_ACCESS_OPT} ${CODEX_HOOK_TRUST_OPT} resume ${shQuote(prev.session_ref)}`
@@ -1416,6 +1442,8 @@ export class CodexWorkerAdapter implements WorkerAdapter {
         seq,
         dir,
         workspaceRoot: prevRuntime.workspaceRoot,
+        runtimeRoot: prevRuntime.runtimeRoot,
+        workspaceId: prevRuntime.workspaceId,
         codexHome: resumeCodexHome,
         sessionName,
         controlEndpoint,
@@ -1441,7 +1469,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
         session_discovery: prevRuntime.sessionDiscoveryStatus,
         workspace_root: prevRuntime.workspaceRoot,
         codex_home: resumeCodexHome,
-        ...controlMeta(runtime),
+        ...runtimeMeta(runtime),
       })
       this.runtimes.set(instanceKey(handle), runtime)
       try {
@@ -1510,6 +1538,8 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       throw new ForkEstablishmentError('fork_create', 'CodexWorkerAdapter.fork: no user-level codex installation', 'not_started')
     }
 
+    const workspace = runtimeWorkspace(prevRuntime)
+    await verifyNativeBinding(workspace, opts?.workspace)
     const dir = prevRuntime.dir
     let runtime!: Runtime
     await this.getMutex(prev.worker_id).run(async () => {
@@ -1520,12 +1550,14 @@ export class CodexWorkerAdapter implements WorkerAdapter {
         seq,
         dir,
         workspaceRoot: prevRuntime.workspaceRoot,
+        runtimeRoot: prevRuntime.runtimeRoot,
+        workspaceId: prevRuntime.workspaceId,
         codexHome: opts.connection_env?.CODEX_HOME ?? prevRuntime.codexHome,
         sessionName: '',
         sessionId: '',
         rolloutPath: undefined,
         outputLog: new OutputLog(join(dir, `output-${seq}.log`)),
-        eventChannel: new CliEventChannel(join(dir, `fork-events-${seq}.jsonl`)),
+        eventChannel: new CliEventChannel(join(dir, `fork-events-${seq}.jsonl`), nativeEventSource(workspace)),
         eventWatchOffset: 0,
         sessionDiscoveryStatus: 'placeholder',
         discoveryStartedAt: Date.now(),
@@ -1545,8 +1577,13 @@ export class CodexWorkerAdapter implements WorkerAdapter {
           ...opts.connection_env,
           ...await workspaceGitBridgeEnv(dir, runtime.seq, opts.workspace_git),
           ...opts.execution_env,
+          ...(prevRuntime.runtimeRoot ? { [EVENTS_FILE_ENV]: join(dir, `fork-events-${runtime.seq}.jsonl`) } : {}),
         })),
       }
+      if (prevRuntime.runtimeRoot && opts.connection_env?.CODEX_HOME) {
+        await this.mergeAdminProviderCodexHome(prevRuntime.workspaceRoot, join(prevRuntime.runtimeRoot, '.codex'), runtime.codexHome, 'fork')
+      }
+      await assertCodexProjectConfiguration(workspace, runtime.codexHome, opts.connection_env)
       client = new CodexAppServerClient({
         command: `${resolvedBin.cmd} app-server --stdio`,
         cwd: prevRuntime.workspaceRoot,
@@ -1665,6 +1702,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
         session_discovery: 'placeholder',
         workspace_root: prevRuntime.workspaceRoot,
         codex_home: runtime.codexHome,
+        ...runtimeMeta(runtime),
       })
       if (processExitBeforeEstablishment && !pendingCompletion) throw processExitBeforeEstablishment
       established = true
@@ -2174,22 +2212,23 @@ export class CodexWorkerAdapter implements WorkerAdapter {
    */
   private async buildColdRuntimeLocked(
     ref: { worker_id: string; incarnation_id?: string; seq: number; session_ref?: string },
-    meta: { session_id?: string; workspace_root?: string; ended_reason?: IncarnationEndReason; session_discovery?: 'discovered' | 'placeholder'; codex_home?: string; state?: WorkerContractState; wait_mode?: 'text' | 'action'; wait_reason?: string; startup_stalled?: boolean; control_socket?: string; control_monitor_id?: string },
+    meta: { session_id?: string; workspace_root?: string; runtime_root?: string; workspace_id?: string; ended_reason?: IncarnationEndReason; session_discovery?: 'discovered' | 'placeholder'; codex_home?: string; state?: WorkerContractState; wait_mode?: 'text' | 'action'; wait_reason?: string; startup_stalled?: boolean; control_socket?: string; control_monitor_id?: string },
     alive: boolean,
   ): Promise<Runtime> {
     const key = instanceKey(ref)
     const dir = join(this.deps.dataDir, ref.worker_id)
     const sessionName = `crabot-w-${ref.worker_id}-${ref.seq}`
     const workspaceRoot = meta.workspace_root ?? ''
+    verifyNativeRuntimeMetadata(meta)
     const sessionId = meta.session_id ?? ref.session_ref ?? ''
     // P6-B：admin_provider 的 CODEX_HOME 在 worker 级 runtime 目录（spawn/resume 时落了
     // meta.codex_home）；老 meta 没有该字段才回退 workspace 推导（existing_host 语义）。
-    const codexHome = meta.codex_home ?? (workspaceRoot ? join(workspaceRoot, '.codex') : '')
+    const codexHome = meta.codex_home ?? (workspaceRoot ? join(meta.runtime_root ?? workspaceRoot, '.codex') : '')
     const sessionDiscoveryStatus: 'discovered' | 'placeholder' = meta.session_discovery ?? 'placeholder'
     const rolloutPath =
       sessionDiscoveryStatus === 'discovered' && codexHome ? await findRolloutFileBySessionId(join(codexHome, 'sessions'), sessionId) : undefined
-    const eventsPath = workspaceRoot ? eventsFilePath({ root: workspaceRoot }) : join(dir, `.no-workspace-events-${ref.seq}.jsonl`)
-    const eventChannel = new CliEventChannel(eventsPath)
+    const eventsPath = workspaceRoot ? eventsFilePath({ root: workspaceRoot, runtime_root: meta.runtime_root }) : join(dir, `.no-workspace-events-${ref.seq}.jsonl`)
+    const eventChannel = new CliEventChannel(eventsPath, nativeEventSource({ root: workspaceRoot, runtime_root: meta.runtime_root }))
     const eventWatchOffset = await eventChannel.endOffset()
 
     let stopBaseline = 0
@@ -2204,6 +2243,8 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       seq: ref.seq,
       dir,
       workspaceRoot,
+      runtimeRoot: meta.runtime_root,
+      workspaceId: meta.workspace_id,
       codexHome,
       sessionName,
       controlEndpoint: meta.control_socket && meta.control_monitor_id
@@ -2237,6 +2278,8 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     | {
         session_id?: string
         workspace_root?: string
+        runtime_root?: string
+        workspace_id?: string
         ended_reason?: IncarnationEndReason
         session_discovery?: 'discovered' | 'placeholder'
         /** P6-B：admin_provider 形态下 CODEX_HOME 是 worker 级 runtime 目录（非 workspace）；
@@ -2296,7 +2339,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       session_discovery: runtime.sessionDiscoveryStatus,
       workspace_root: runtime.workspaceRoot,
       codex_home: runtime.codexHome,
-      ...controlMeta(runtime),
+      ...runtimeMeta(runtime),
       ...(state.kind === 'waiting_text' ? { wait_mode: 'text' as const } : {}),
       ...(state.kind === 'waiting_action' ? { wait_mode: 'action' as const, wait_reason: state.reason } : {}),
     })
@@ -2341,7 +2384,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       session_discovery: runtime.sessionDiscoveryStatus,
       workspace_root: runtime.workspaceRoot,
       codex_home: runtime.codexHome,
-      ...controlMeta(runtime),
+      ...runtimeMeta(runtime),
     })
     runtime.controlState = { kind: 'exited', reason: ended_reason }
     runtime.ended_reason = ended_reason

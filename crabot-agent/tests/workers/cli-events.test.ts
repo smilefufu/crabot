@@ -9,6 +9,21 @@ import { CliEventChannel, type CliEvent } from '../../src/workers/cli-events.js'
 const execFileAsync = promisify(execFile)
 
 describe('CliEventChannel', () => {
+  it('a private execution channel ignores merged legacy/project hooks and other worker sources', async () => {
+    const own = new CliEventChannel(filePath, 'crabot_cli_hook:worker-a')
+    await fs.writeFile(filePath, [
+      { ts: '1', kind: 'stop', source: 'crabot_cli_hook', raw: { session_id: 'old-project' } },
+      { ts: '2', kind: 'stop', source: 'crabot_cli_hook:worker-b', raw: { session_id: 'other-worker' } },
+      { ts: '3', kind: 'stop', source: 'crabot_cli_hook:worker-a', raw: { session_id: 'own-session' } },
+    ].map(value => JSON.stringify(value)).join('\n') + '\n')
+    expect(await own.readAll()).toEqual([{ ts: '3', kind: 'stop', raw: { session_id: 'own-session' } }])
+    const seen: CliEvent[] = [], stop = own.watch(event => { seen.push(event) })
+    try { await vi.waitFor(() => expect(seen).toHaveLength(1)) } finally { await stop() }
+    expect(seen[0].raw).toEqual({ session_id: 'own-session' })
+    expect(own.hookCommand('stop')).toContain('crabot_cli_hook:worker-a')
+  })
+
+
   let tempDir: string
   let filePath: string
 

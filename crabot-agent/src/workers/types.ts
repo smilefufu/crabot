@@ -162,7 +162,11 @@ export type InitialInputDisposition = 'accepted' | 'not_pasted' | 'pending_in_ui
 export type IncarnationEndReason =
   | 'completed' | 'failed' | 'killed' | 'superseded' | 'crashed' | 'pre_migration'
 
-export interface Workspace { readonly root: string }
+export interface Workspace {
+  readonly root: string
+  readonly workspace_id?: string
+  readonly runtime_root?: string
+}
 export interface TraceCursor { readonly offset: number }
 
 export interface SendInputOptions {
@@ -222,6 +226,8 @@ export type WorkerUiResponse =
   | { readonly kind: 'text'; readonly text: string }
 
 export interface ForkOptions {
+  /** Host-verified existing binding; never supplied by a model. */
+  readonly workspace?: Workspace
   readonly workspace_git?: WorkerWorkspaceGitContext
   readonly query_id: string
   /** Allocated by Harness before adapter.fork; direct adapter callers may omit it. */
@@ -375,6 +381,8 @@ export interface SpawnSpec {
 }
 
 export interface ResumeOptions {
+  /** Host-verified existing binding; never supplied by a model. */
+  readonly workspace?: Workspace
   readonly workspace_git?: WorkerWorkspaceGitContext
   readonly connection_env?: Record<string, string>
   /** Exact-incarnation Crabot CLI credential; never persisted with provider connection state. */
@@ -551,7 +559,7 @@ export interface WorkerAdapter {
    */
   connectionCapabilities?(): WorkerConnectionCapability[]
   /** 无副作用的 workspace/capability 前置检查；handoff 在触碰源化身前调用。 */
-  preflightProvision?(ws: Workspace, caps: CapabilityBundle): Promise<void>
+  preflightProvision?(ws: Workspace, caps: CapabilityBundle, connectionEnv?: Record<string, string>): Promise<void>
   provision(ws: Workspace, caps: CapabilityBundle): Promise<void>
   spawn(spec: SpawnSpec): Promise<IncarnationHandle>
   resume(prev: IncarnationRef, wakeInput: string, opts?: ResumeOptions): Promise<IncarnationHandle>

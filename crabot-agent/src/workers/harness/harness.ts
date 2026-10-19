@@ -1180,6 +1180,7 @@ export class WorkerHarness {
       }, p.principal_permissions, managed)
       const initial: LedgerWorker = {
         worker_id: workerId,
+        workspace_id: workspace.workspace_id,
         manager_key: p.managerKey,
         task: {
           id: workerId,
@@ -2241,9 +2242,10 @@ export class WorkerHarness {
       // Source material is read-only. No legacy adapter, resume/checkpoint replay, or
       // source kill is involved in this path.
       const material = await this.readLegacyHandoffMaterial(worker, legacy.workspace)
-      const workspace = await this.deps.workspaces.resolve(
+      const workspace = await this.deps.workspaces.resolveExisting(
         worker.worker_id,
         material.workspaceCandidate,
+        worker.workspace_id,
       )
       // Source reads may have waited past the synchronous deadline. Do not begin a new
       // provision/handoff after the caller has already received its timeout.
@@ -2904,6 +2906,7 @@ export class WorkerHarness {
     const workerContext = await this.contextStore.read(worker.worker_id)
     this.deps.assertExecutionPolicy?.(mainline.impl, workerContext?.principal_permissions)
     const gitPermissions = workerContext?.principal_permissions
+    const boundWorkspace = await this.deps.workspaces.resolveExisting(worker.worker_id, mainline.workspace, worker.workspace_id)
     const workspaceGit = (await this.checkWorkspaceGit(mainline.workspace, gitPermissions, undefined, this.managedWorkspaceScope(worker.worker_id, mainline.workspace))).current
     const gitContext: WorkerWorkspaceGitContext = {
       worker_id: worker.worker_id, incarnation_id: incarnationId, workspace_root: mainline.workspace, baseline: workspaceGit,
@@ -2943,6 +2946,7 @@ export class WorkerHarness {
     try {
       await this.inheritCliObservation(worker.worker_id, mainline.incarnation_id, incarnationId, mainline.impl)
       const returnedHandle = await adapter.resume(prevRef, appendWorkspaceGitObservation(text, workspaceGit), {
+        ...(worker.workspace_id ? { workspace: boundWorkspace } : {}),
         workspace_git: gitContext,
         ...(admission ? { connection_env: admission.env } : {}),
         ...await this.executionEnv(workerContext ?? {}, {
@@ -3130,7 +3134,7 @@ export class WorkerHarness {
         )
       }
 
-      workspace = { root: source.workspace }
+      workspace = await this.deps.workspaces.resolveExisting(worker.worker_id, source.workspace, worker.workspace_id)
       caps = this.deps.capabilityBundle
         ? await this.deps.capabilityBundle({
             worker_id: worker.worker_id,
@@ -3145,7 +3149,7 @@ export class WorkerHarness {
       }
       // tracked credential target 等确定性检查必须在 package / source stop 之前完成；preflightProvision
       // 不得写 workspace。正式 provision 仍在 source teardown 之后执行并重检，避免 TOCTOU 静默越界。
-      await newAdapter.preflightProvision?.(workspace, caps)
+      await newAdapter.preflightProvision?.(workspace, caps, admission?.env)
       const expiredAfterPreflight = this.expiredInboxDelivery(deadlineItem, source.seq)
       if (expiredAfterPreflight) {
         if (admission) void admission.dispose().catch(() => {})
@@ -6216,6 +6220,7 @@ export class WorkerHarness {
       readonly implId: WorkerImplId
       readonly ref: IncarnationRef
       readonly workspace: string
+      readonly workspaceId?: string
       readonly managerKey: ManagerKey
       readonly receipt: WorkerQueryReceipt
     }
@@ -6272,6 +6277,7 @@ export class WorkerHarness {
           session_ref: incarnation.session_ref,
         },
         workspace: incarnation.workspace,
+        workspaceId: found.worker.workspace_id,
         managerKey: found.managerKey,
         receipt,
       }
@@ -6307,6 +6313,7 @@ export class WorkerHarness {
       }, permissions)
       admission = await this.deps.admitWorkerConnection?.(prep.implId, workerId)
       const forkOptions: ForkOptions = {
+        ...(prep.workspaceId ? { workspace: await this.deps.workspaces.resolveExisting(workerId, prep.workspace, prep.workspaceId) } : {}),
         workspace_git: { worker_id: workerId, incarnation_id: forkIncarnationId, workspace_root: prep.workspace, baseline: forkGit },
         query_id: prep.receipt.query_id,
         incarnation_id: forkIncarnationId,

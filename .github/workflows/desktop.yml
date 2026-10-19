@@ -14,6 +14,10 @@ on:
       - 'crabot-native/**'
       - 'crabot-agent/src/core/runtime-env.ts'
       - 'crabot-agent/src/agent/mcp-connector.ts'
+      - 'crabot-agent/src/workers/**'
+      - 'crabot-agent/src/manager/bootstrap.ts'
+      - 'crabot-agent/src/manager/tools/worker-tools.ts'
+      - 'crabot-agent/tests/workers/**'
       - 'scripts/**'
       - 'install.sh'
       - 'install.ps1'
@@ -114,7 +118,7 @@ jobs:
       - name: Agent environment regressions
         run: |
           cd crabot-agent
-          node node_modules/vitest/vitest.mjs run tests/core/config-loader.test.ts tests/core/config-loader-slice0.test.ts tests/core/runtime-env.test.ts tests/core/child-env-guard.test.ts tests/utils/resolve-bash-path.test.ts tests/agent/mcp-connector.test.ts tests/mcp-connector-tool-defaults.test.ts tests/manager/tool-face.test.ts --maxWorkers=1 --minWorkers=1
+          node node_modules/vitest/vitest.mjs run tests/core/config-loader.test.ts tests/core/config-loader-slice0.test.ts tests/core/runtime-env.test.ts tests/core/child-env-guard.test.ts tests/utils/resolve-bash-path.test.ts tests/agent/mcp-connector.test.ts tests/mcp-connector-tool-defaults.test.ts tests/manager/tool-face.test.ts tests/workers/harness/project-workspaces.test.ts tests/workers/harness/workspace-manager.test.ts tests/workers/harness/ledger-store.test.ts tests/workers/private-project-provision.test.ts tests/workers/private-project-runtime.test.ts tests/workers/codex-project-config.test.ts --maxWorkers=1 --minWorkers=1
       - name: Shared HTTP and chat protocol regressions
         run: |
           node node_modules/typescript/bin/tsc -p tsconfig.cli.json

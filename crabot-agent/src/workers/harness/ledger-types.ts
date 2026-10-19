@@ -131,6 +131,8 @@ export interface WorkerRecoveryNotice {
 
 export interface LedgerWorker {
   worker_id: string
+  /** Stable project/default binding; absent only on historical workers. */
+  workspace_id?: string
   /** Immutable session owner: storage, lookup, routing and read model all use this field. */
   manager_key: ManagerKey
   task: {

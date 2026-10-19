@@ -28,7 +28,8 @@ if (argv.includes('-p')) {
   })
   if (process.env.FAKE_FORK_RUN_STOP_HOOK === '1') {
     try {
-      const settings = JSON.parse(readFileSync(join(process.cwd(), '.claude', 'settings.json'), 'utf-8'))
+      const settingsIndex = argv.indexOf('--settings')
+      const settings = JSON.parse(readFileSync(settingsIndex >= 0 ? argv[settingsIndex + 1] : join(process.cwd(), '.claude', 'settings.json'), 'utf-8'))
       const command = settings?.hooks?.Stop?.[0]?.hooks?.[0]?.command
       if (command) execFileSync('/bin/sh', ['-c', command], { stdio: 'ignore' })
     } catch (err) {

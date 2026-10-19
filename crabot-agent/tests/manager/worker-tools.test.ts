@@ -578,6 +578,8 @@ describe('spawn_worker', () => {
     expect(schema.properties?.title?.description).toContain('所属任务主题')
     expect(schema.properties?.title?.description).toContain('具体执行内容')
     expect(schema.properties?.title?.description).toContain('继续处理')
+    expect(spawnWorker.description).toContain('同项目执行器共享文件')
+    expect((spawnWorker.inputSchema.properties?.workspace as { description: string }).description).toContain('唯一默认工作区')
   })
 
   it('透传 managerKey/origin/report_to 到台账，异步返回简短确认（非完整 worker 记录）', async () => {

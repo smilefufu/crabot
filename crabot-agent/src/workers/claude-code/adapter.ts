@@ -1,3 +1,4 @@
+import { nativeRuntimeRoot, nativeEventChannel, nativeEventSource, runtimeWorkspace, verifyNativeBinding, verifyPrivateNativeRuntime, verifyNativeRuntimeMetadata } from '../provision/native-runtime.js'
 /**
  * Claude Code WorkerAdapter.
  *
@@ -151,6 +152,10 @@ const MCP_CONFIG_IGNORE_ENTRIES = [
 ] as const
 /** 只允许 provision 生成的 task-scoped MCP，禁止与宿主 user/local scope 求并集。 */
 const STRICT_MCP_CONFIG_ARGS = `--mcp-config ${MCP_CONFIG_FILE} --strict-mcp-config`
+function privateConfigArgs(workspace: Workspace): string {
+  if (!workspace.runtime_root) return STRICT_MCP_CONFIG_ARGS
+  return `--mcp-config ${shQuote(join(workspace.runtime_root, MCP_CONFIG_FILE))} --strict-mcp-config --settings ${shQuote(join(workspace.runtime_root, '.claude/settings.json'))} --plugin-dir ${shQuote(join(workspace.runtime_root, 'claude-plugin'))}`
+}
 
 /** 防止含凭据的 project MCP 配置被 worker 的普通 `git add -A` 带进仓库。 */
 async function ensureMcpConfigIgnored(workspaceRoot: string): Promise<void> {
@@ -199,7 +204,7 @@ function claudeConfigMutex(path: string): AsyncMutex {
 
 /** hook 事件文件路径约定:workspace 内 .claude/events-cli.jsonl。provision 与 spawn 都按此约定定位,保持一致。 */
 export function eventsFilePath(ws: Workspace): string {
-  return join(ws.root, '.claude', 'events-cli.jsonl')
+  return join(nativeRuntimeRoot(ws), '.claude', 'events-cli.jsonl')
 }
 
 interface Runtime {
@@ -208,6 +213,8 @@ interface Runtime {
   readonly seq: number
   readonly dir: string
   readonly workspaceRoot: string
+  readonly runtimeRoot?: string
+  readonly workspaceId?: string
   /** tmux 会话名;fork 化身不进 tmux,恒为空串。 */
   readonly sessionName: string
   readonly controlEndpoint?: TmuxControlEndpoint
@@ -295,10 +302,12 @@ function nativeSubagentTerminal(records: ReadonlyArray<ClaudeTraceRecord>): Work
   return 'running'
 }
 
-function controlMeta(runtime: Runtime): Record<string, string> {
-  return runtime.controlEndpoint
-    ? { control_socket: runtime.controlEndpoint.socket_path, control_monitor_id: runtime.controlEndpoint.monitor_id }
-    : {}
+function runtimeMeta(runtime: Runtime): Record<string, string> {
+  return {
+    ...(runtime.controlEndpoint ? { control_socket: runtime.controlEndpoint.socket_path, control_monitor_id: runtime.controlEndpoint.monitor_id } : {}),
+    ...(runtime.runtimeRoot ? { runtime_root: runtime.runtimeRoot } : {}),
+    ...(runtime.workspaceId ? { workspace_id: runtime.workspaceId } : {}),
+  }
 }
 
 function controlDiagnosticPath(runtime: Pick<Runtime, 'dir' | 'seq'>): string {
@@ -447,19 +456,20 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
 
   async preflightProvision(ws: Workspace, _caps: CapabilityBundle): Promise<void> {
     this.assertActive()
-    await assertWorkspaceFilesUntracked(ws.root, [MCP_CONFIG_FILE], 'ClaudeCodeAdapter.provision')
+    await verifyPrivateNativeRuntime(ws)
+    if (!ws.runtime_root) await assertWorkspaceFilesUntracked(ws.root, [MCP_CONFIG_FILE], 'ClaudeCodeAdapter.provision')
   }
 
   async provision(ws: Workspace, caps: CapabilityBundle): Promise<void> {
     this.assertActive()
-    const claudeDir = join(ws.root, '.claude')
+    const provisionRoot = nativeRuntimeRoot(ws), claudeDir = join(provisionRoot, '.claude')
     // 先做无副作用 tracked-target 检查，再确保普通 git add 不会收录凭据。
     await this.preflightProvision(ws, caps)
-    await ensureMcpConfigIgnored(ws.root)
+    if (!ws.runtime_root) await ensureMcpConfigIgnored(ws.root)
     // hook 写入目录必须先 mkdir——printf >> 对缺目录静默失败(Task 2 评审裁决)。
     await fs.mkdir(claudeDir, { recursive: true })
 
-    const channel = new CliEventChannel(eventsFilePath(ws))
+    const channel = nativeEventChannel(ws, '.claude')
     const settings = {
       hooks: {
         Stop: [{ hooks: [{ type: 'command', command: channel.hookCommand('stop') }] }],
@@ -472,9 +482,14 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     const mcpServers = caps.mcp_servers as unknown as ProvisionSources['mcpServers']
     await this.preAcceptStartupDialogs(ws.root, mcpServers.map((s) => s.name))
 
-    await materializeSkills(ws.root, caps.skills, '.claude/skills')
+    if (ws.runtime_root) {
+      const plugin = join(provisionRoot, 'claude-plugin')
+      await fs.mkdir(join(plugin, '.claude-plugin'), { recursive: true })
+      await fs.writeFile(join(plugin, '.claude-plugin/plugin.json'), JSON.stringify({ name: 'crabot-worker', version: '1.0.0' }) + '\n')
+      await materializeSkills(provisionRoot, caps.skills, 'claude-plugin/skills')
+    } else await materializeSkills(ws.root, caps.skills, '.claude/skills')
 
-    await writeSensitiveFileAtomic(join(ws.root, MCP_CONFIG_FILE), renderMcpJson(mcpServers))
+    await writeSensitiveFileAtomic(join(provisionRoot, MCP_CONFIG_FILE), renderMcpJson(mcpServers))
 
   }
 
@@ -915,6 +930,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
 
   async spawn(spec: SpawnSpec): Promise<IncarnationHandle> {
     this.assertActive()
+    await verifyPrivateNativeRuntime(spec.workspace)
     const seq = 1
     const sessionId = randomUUID()
     const handle: IncarnationHandle = { worker_id: spec.worker_id, incarnation_id: spec.incarnation_id, seq, impl: 'claude-code', session_ref: sessionId }
@@ -930,8 +946,8 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     // 不同 binary」的版本错配/command not found 由此杜绝。
     const spawnBin = await this.resolveBinForCommand()
     if (!spawnBin) throw new WorkerImplUnavailableError(`ClaudeCodeAdapter.spawn: no user-level claude installation`)
-    const command = `${spawnBin} ${STRICT_MCP_CONFIG_ARGS} --append-system-prompt ${shQuote(workspaceWorkerTaskInstructions(spec.workspace.root))} --session-id ${sessionId} --permission-mode auto`
-    const eventChannel = new CliEventChannel(eventsFilePath(spec.workspace))
+    const command = `${spawnBin} ${privateConfigArgs(spec.workspace)} --append-system-prompt ${shQuote(workspaceWorkerTaskInstructions(nativeRuntimeRoot(spec.workspace)))} --session-id ${sessionId} --permission-mode auto`
+    const eventChannel = nativeEventChannel(spec.workspace, '.claude')
     const eventWatchOffset = await eventChannel.endOffset()
     const stopBaseline = await this.initialStopBaseline(eventChannel)
 
@@ -941,7 +957,8 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       name: sessionName,
       cwd: spec.workspace.root,
       command,
-      env: { ...spec.connection_env, ...await workspaceGitBridgeEnv(dir, seq, spec.workspace_git), ...spec.execution_env },
+      env: { ...spec.connection_env, ...await workspaceGitBridgeEnv(dir, seq, spec.workspace_git), ...spec.execution_env,
+        ...(spec.workspace.runtime_root ? { [EVENTS_FILE_ENV]: eventsFilePath(spec.workspace) } : {}) },
       control_log_path: controlDiagnosticPath({ dir, seq }),
     })
 
@@ -951,6 +968,8 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       seq,
       dir,
       workspaceRoot: spec.workspace.root,
+      runtimeRoot: spec.workspace.runtime_root,
+      workspaceId: spec.workspace.workspace_id,
       sessionName,
       controlEndpoint,
       sessionId,
@@ -962,7 +981,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       connectionEnv: spec.connection_env,
     }
 
-    await writeMetaAtomic(dir, seq, { seq, state: 'running', session_id: sessionId, workspace_root: spec.workspace.root, ...controlMeta(runtime) })
+    await writeMetaAtomic(dir, seq, { seq, state: 'running', session_id: sessionId, workspace_root: spec.workspace.root, ...runtimeMeta(runtime) })
     this.runtimes.set(instanceKey(handle), runtime)
     try {
       await controlEndpoint.enableRemainOnExit?.()
@@ -1016,6 +1035,8 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     if (!prevRuntime) {
       throw new Error(`ClaudeCodeAdapter.resume: no such incarnation ${prev.worker_id}#${prev.seq} resident in this process`)
     }
+    const workspace = runtimeWorkspace(prevRuntime)
+    await verifyNativeBinding(workspace, opts?.workspace)
     const prevHandle: IncarnationHandle = { worker_id: prev.worker_id, incarnation_id: prev.incarnation_id, seq: prev.seq, impl: 'claude-code', session_ref: prev.session_ref }
     const { state: prevState } = await this.syncState(prevRuntime, prevHandle)
     if (prevState !== 'exited') {
@@ -1060,17 +1081,18 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       // 入口已校验 UUID 格式,拼接时再加引号转义,提高防御深度)。
       const resumeBin = await this.resolveBinForCommand()
       if (!resumeBin) throw new WorkerImplUnavailableError(`ClaudeCodeAdapter.resume: no user-level claude installation`)
-      const command = `${resumeBin} ${STRICT_MCP_CONFIG_ARGS} --append-system-prompt ${shQuote(workspaceWorkerTaskInstructions(prevRuntime.workspaceRoot))} --permission-mode auto --resume ${shQuote(prev.session_ref)}`
+      const command = `${resumeBin} ${privateConfigArgs(workspace)} --append-system-prompt ${shQuote(workspaceWorkerTaskInstructions(nativeRuntimeRoot(workspace)))} --permission-mode auto --resume ${shQuote(prev.session_ref)}`
 
       // 锁纪律与 spawn 一致:tmux newSession 成功之后才落 meta(running)+注册 runtime。
-      const eventChannel = new CliEventChannel(eventsFilePath({ root: prevRuntime.workspaceRoot }))
+      const eventChannel = nativeEventChannel(workspace, '.claude')
       const eventWatchOffset = await eventChannel.endOffset()
       const stopBaseline = await this.initialStopBaseline(eventChannel)
       const controlEndpoint = await this.tmux.newSession({
         name: sessionName,
         cwd: prevRuntime.workspaceRoot,
         command,
-        env: { ...opts?.connection_env, ...await workspaceGitBridgeEnv(dir, seq, opts?.workspace_git), ...opts?.execution_env },
+        env: { ...opts?.connection_env, ...await workspaceGitBridgeEnv(dir, seq, opts?.workspace_git), ...opts?.execution_env,
+          ...(prevRuntime.runtimeRoot ? { [EVENTS_FILE_ENV]: eventsFilePath(workspace) } : {}) },
         control_log_path: controlDiagnosticPath({ dir, seq }),
       })
       runtime = {
@@ -1079,6 +1101,8 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
         seq,
         dir,
         workspaceRoot: prevRuntime.workspaceRoot,
+        runtimeRoot: prevRuntime.runtimeRoot,
+        workspaceId: prevRuntime.workspaceId,
         sessionName,
         controlEndpoint,
         sessionId: prev.session_ref,
@@ -1091,7 +1115,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
         connectionEnv: opts?.connection_env,
       }
 
-      await writeMetaAtomic(dir, seq, { seq, state: 'running', session_id: prev.session_ref, workspace_root: prevRuntime.workspaceRoot, ...controlMeta(runtime) })
+      await writeMetaAtomic(dir, seq, { seq, state: 'running', session_id: prev.session_ref, workspace_root: prevRuntime.workspaceRoot, ...runtimeMeta(runtime) })
       this.runtimes.set(instanceKey(handle), runtime)
       try {
         await controlEndpoint.enableRemainOnExit?.()
@@ -1153,6 +1177,8 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       )
     }
 
+    const workspace = runtimeWorkspace(prevRuntime)
+    await verifyNativeBinding(workspace, opts?.workspace)
     const dir = prevRuntime.dir
     let runtime!: Runtime
     let forkEventsFile!: string
@@ -1166,10 +1192,12 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
         seq,
         dir,
         workspaceRoot: prevRuntime.workspaceRoot,
+        runtimeRoot: prevRuntime.runtimeRoot,
+        workspaceId: prevRuntime.workspaceId,
         sessionName: '',
         sessionId: '',
         outputLog: new OutputLog(outputFile),
-        eventChannel: new CliEventChannel(forkEventsFile),
+        eventChannel: new CliEventChannel(forkEventsFile, nativeEventSource(workspace)),
         eventWatchOffset: 0,
         controlState: { kind: 'running' },
         stopBaseline: 0,
@@ -1180,7 +1208,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
 
     let child: ChildProcess
     try {
-      const instructionPrompt = `${workspaceWorkerTaskInstructions(prevRuntime.workspaceRoot)}\n\n${QUERY_FORK_INSTRUCTION}`
+      const instructionPrompt = `${workspaceWorkerTaskInstructions(nativeRuntimeRoot(workspace))}\n\n${QUERY_FORK_INSTRUCTION}`
       const args = [
         '-p', forkInput,
         '--permission-mode', 'auto',
@@ -1189,7 +1217,8 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
         '--output-format', 'stream-json',
         '--verbose',
         '--include-partial-messages',
-        '--mcp-config', MCP_CONFIG_FILE,
+        '--mcp-config', prevRuntime.runtimeRoot ? join(prevRuntime.runtimeRoot, MCP_CONFIG_FILE) : MCP_CONFIG_FILE,
+        ...(prevRuntime.runtimeRoot ? ['--settings', join(prevRuntime.runtimeRoot, '.claude/settings.json'), '--plugin-dir', join(prevRuntime.runtimeRoot, 'claude-plugin')] : []),
         '--strict-mcp-config',
         '--append-system-prompt', instructionPrompt,
       ]
@@ -1256,6 +1285,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
           state: 'running',
           session_id: sessionId,
           workspace_root: prevRuntime.workspaceRoot,
+          ...runtimeMeta(runtime),
         })
         established = true
         resolveEstablished(handle)
@@ -1816,16 +1846,17 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
    */
   private async buildColdRuntimeLocked(
     ref: { worker_id: string; incarnation_id?: string; seq: number; session_ref?: string },
-    meta: { session_id?: string; workspace_root?: string; ended_reason?: IncarnationEndReason; state?: WorkerContractState; wait_mode?: 'text' | 'action'; wait_reason?: string; startup_stalled?: boolean; control_socket?: string; control_monitor_id?: string },
+    meta: { session_id?: string; workspace_root?: string; runtime_root?: string; workspace_id?: string; ended_reason?: IncarnationEndReason; state?: WorkerContractState; wait_mode?: 'text' | 'action'; wait_reason?: string; startup_stalled?: boolean; control_socket?: string; control_monitor_id?: string },
     alive: boolean,
   ): Promise<Runtime> {
     const key = instanceKey(ref)
     const dir = join(this.deps.dataDir, ref.worker_id)
     const sessionName = `crabot-w-${ref.worker_id}-${ref.seq}`
     const workspaceRoot = meta.workspace_root ?? ''
+    verifyNativeRuntimeMetadata(meta)
     const sessionId = meta.session_id ?? ref.session_ref ?? ''
-    const eventsPath = workspaceRoot ? eventsFilePath({ root: workspaceRoot }) : join(dir, `.no-workspace-events-${ref.seq}.jsonl`)
-    const eventChannel = new CliEventChannel(eventsPath)
+    const eventsPath = workspaceRoot ? eventsFilePath({ root: workspaceRoot, runtime_root: meta.runtime_root }) : join(dir, `.no-workspace-events-${ref.seq}.jsonl`)
+    const eventChannel = new CliEventChannel(eventsPath, nativeEventSource({ root: workspaceRoot, runtime_root: meta.runtime_root }))
     const eventWatchOffset = await eventChannel.endOffset()
 
     let stopBaseline = 0
@@ -1840,6 +1871,8 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       seq: ref.seq,
       dir,
       workspaceRoot,
+      runtimeRoot: meta.runtime_root,
+      workspaceId: meta.workspace_id,
       sessionName,
       controlEndpoint: meta.control_socket && meta.control_monitor_id
         ? { socket_path: meta.control_socket, monitor_id: meta.control_monitor_id }
@@ -1866,7 +1899,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     dir: string,
     seq: number,
   ): Promise<
-    { session_id?: string; workspace_root?: string; ended_reason?: IncarnationEndReason; state?: WorkerContractState; wait_mode?: 'text' | 'action'; wait_reason?: string; startup_stalled?: boolean; control_socket?: string; control_monitor_id?: string } | undefined
+    { session_id?: string; workspace_root?: string; runtime_root?: string; workspace_id?: string; ended_reason?: IncarnationEndReason; state?: WorkerContractState; wait_mode?: 'text' | 'action'; wait_reason?: string; startup_stalled?: boolean; control_socket?: string; control_monitor_id?: string } | undefined
   > {
     try {
       const raw = await fs.readFile(join(dir, `meta-${seq}.json`), 'utf-8')
@@ -1919,7 +1952,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       state: external,
       session_id: runtime.sessionId,
       workspace_root: runtime.workspaceRoot,
-      ...controlMeta(runtime),
+      ...runtimeMeta(runtime),
       ...(state.kind === 'waiting_text' ? { wait_mode: 'text' as const } : {}),
       ...(state.kind === 'waiting_action' ? { wait_mode: 'action' as const, wait_reason: state.reason } : {}),
     })
@@ -1963,7 +1996,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       session_id: runtime.sessionId,
       ended_reason,
       workspace_root: runtime.workspaceRoot,
-      ...controlMeta(runtime),
+      ...runtimeMeta(runtime),
     })
     runtime.controlState = { kind: 'exited', reason: ended_reason }
     runtime.ended_reason = ended_reason

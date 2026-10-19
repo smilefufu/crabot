@@ -104,7 +104,7 @@ export class WorkspaceCatalog {
       }
       const slug = name.replace(/[<>:"/\\|?*\x00-\x1f]/g, '-').replace(/[. ]+$/g, '').slice(0, 60) || 'project'
       const root = requested ?? path.join(file.storage_root, 'projects', slug + '-' + input.workspace_id)
-      if (root === file.storage_root || within(path.join(file.storage_root, 'default'), root)
+      if (within(root, this.dataRoot) || root === file.storage_root || within(path.join(file.storage_root, 'default'), root)
         || (within(this.dataRoot, root) && !within(file.storage_root, root))) throw badRequest()
       if (requested) await this.verifyDirectory(root)
       const same = file.workspaces.find(workspace => workspace.root === root)

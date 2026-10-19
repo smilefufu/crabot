@@ -1737,6 +1737,31 @@ describe('CodexWorkerAdapter.fork — app-server', () => {
     expect((turnRequest?.params.input as Array<{ text: string }>)[0].text).toContain('侧问问题')
   })
 
+  it('private project fork restores managed MCP configuration after operation-time provider refresh', async () => {
+    const runtime = await fs.realpath(await fs.mkdtemp(path.join(dataDir, 'private-runtime-')))
+    await fs.chmod(runtime, 0o700)
+    const workspace = { root: await fs.realpath(workspaceRoot), workspace_id: randomUUID(), runtime_root: runtime }
+    const adapter = new CodexWorkerAdapter({ dataDir, codexHomeSource: codexHome, tmux: new NoopTmux(), codexBin: appServerBin() })
+    const skill = path.join(dataDir, 'fixture-skill'); await fs.mkdir(skill); await fs.writeFile(path.join(skill, 'SKILL.md'), 'Frozen worker skill')
+    await adapter.provision(workspace, { skills: [{ id: 'worker-skill', name: 'worker-skill', skill_dir: skill }], mcp_servers: [{ name: 'project-tool', transport: 'stdio', command: 'fixture-command', env: { FIXTURE_KEY: 'private-fixture-value' } }] })
+    const metaFile = path.join(dataDir, workerId, 'meta-1.json')
+    const meta = JSON.parse(await fs.readFile(metaFile, 'utf8'))
+    await fs.writeFile(metaFile, JSON.stringify({ ...meta, workspace_root: workspace.root, workspace_id: workspace.workspace_id, runtime_root: runtime }))
+    // Admission refreshes the provider reference for every operation, preserving native sessions.
+    await fs.writeFile(path.join(codexHome, 'config.toml'), 'model_provider="crabot-admin"\n[model_providers.crabot-admin]\nname="fixture"\nbase_url="https://example.invalid"\nwire_api="responses"\nenv_key="FIXTURE_PROVIDER_KEY"\n')
+    try {
+      await adapter.detect()
+      const handle = await adapter.fork({ worker_id: workerId, seq: 1, session_ref: parentSessionId }, 'check shared project', { ...options(), workspace })
+      const config = parseToml(await fs.readFile(path.join(codexHome, 'config.toml'), 'utf8')) as any
+      expect(config.mcp_servers?.['project-tool']?.env).toEqual({ FIXTURE_KEY: 'private-fixture-value' })
+      expect(config.model_provider).toBe('crabot-admin')
+      expect(await fs.readFile(path.join(codexHome, 'skills/worker-skill/SKILL.md'), 'utf8')).toBe('Frozen worker skill')
+      expect(JSON.parse(await fs.readFile(path.join(dataDir, workerId, `meta-${handle.seq}.json`), 'utf8'))).toMatchObject({ workspace_id: workspace.workspace_id, runtime_root: runtime })
+      expect(await fs.readdir(workspaceRoot)).toEqual([])
+      await waitForState(adapter, handle, 'exited')
+    } finally { await adapter.dispose() }
+  })
+
   it('turn/start 明确拒绝时在同一次 fork 调用返回 query_submit 失败并收口进程', async () => {
     const terminationFile = path.join(dataDir, 'terminated.log')
     const adapter = new CodexWorkerAdapter({

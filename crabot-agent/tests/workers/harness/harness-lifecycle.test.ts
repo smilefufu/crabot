@@ -293,7 +293,9 @@ async function makeHarness(
   await fs.mkdir(workspacesRoot, { recursive: true })
 
   const ledger = new LedgerStore(ledgersDir)
-  const workspaces = new WorkspaceManager(workspacesRoot)
+  const profile = join(dataDir, 'profile')
+  await fs.mkdir(profile, { recursive: true })
+  const workspaces = new WorkspaceManager(workspacesRoot, profile)
 
   // onStateChange 接线契约(见 harness.ts 文件头):先建空壳 Map 传给 harness,harness 构造
   // 完成后再构造 adapter(把 harness.handleStateChange 接进去),最后把 adapter 塞回同一个
@@ -3906,9 +3908,10 @@ describe('WorkerHarness.killWorker', () => {
 
   it('保留候选恢复执行后，旧候选重新取得名额，不按缓存淘汰', async () => {
     const { harness, fake } = await makeHarness()
+    const project = join(dataDir, 'shared-project'); await fs.mkdir(project)
     const workers = []
     for (let i = 0; i < 4; i++) {
-      const worker = await harness.spawnWorker(spawnParams({ workspace: dataDir }))
+      const worker = await harness.spawnWorker(spawnParams({ workspace: project }))
       workers.push(worker)
       fake.emitStateChange({ worker_id: worker.worker_id, seq: 1, impl: 'builtin', session_ref: worker.incarnations[0].session_ref }, 'idle')
       await waitUntil(async () => (await harness.listWorkers(worker.manager_key)).every(item => item.task.status === 'halted'))
@@ -3916,7 +3919,7 @@ describe('WorkerHarness.killWorker', () => {
     const key = workers[0].manager_key
     const board = { manager_key: key, objectives: [{
       objective_id: 'scope', title: 'scope', completion_criteria: ['done'], updated_at: now(), work_items: [{
-        work_item_id: 'project', title: 'project', status: 'in_progress' as const, project_root: dataDir, next_action: 'continue', updated_at: now(),
+        work_item_id: 'project', title: 'project', status: 'in_progress' as const, project_root: project, next_action: 'continue', updated_at: now(),
       }],
     }], archive: [] }
     const original = harness.retireWorkerForContinuation.bind(harness)
@@ -4447,7 +4450,8 @@ describe('WorkerHarness.queryWorker', () => {
 
   it('capabilities().fork 为 true → 返回 started 并以同一 query_id 落 handle/ledger/receipt', async () => {
     const { harness, fake, workersDir } = await makeHarness({ caps: { fork: true } })
-    const worker = await harness.spawnWorker(spawnParams())
+    const project = join(dataDir, 'query-project'); await fs.mkdir(project)
+    const worker = await harness.spawnWorker(spawnParams({ workspace: project }))
     const latestRules = '# Fork 启动前的最新规则\n'
     const workspace = worker.incarnations[0].workspace
     await fs.writeFile(join(workspace, 'AGENTS.md'), latestRules)
@@ -4469,6 +4473,10 @@ describe('WorkerHarness.queryWorker', () => {
       query_id: result.query_id,
     })
     expect(w.task.status).toBe('running') // fork 不影响主线状态
+    expect(fake.forkCalls[0].opts.workspace).toEqual(fake.spawnCalls[0].workspace)
+    expect(w.workspace_id).toBe(worker.workspace_id)
+    expect(w.manager_key).toBe(worker.manager_key)
+    expect(w.origin).toEqual(worker.origin); expect(w.report_to).toEqual(worker.report_to)
 
     // forked_from 标记它不在主线化身链上(protocol-agent-v3 §3);session_ref 取
     // adapter.fork 返回的 handle 自己的引用,不是从主线(seq=1)照抄的(§6.1)。

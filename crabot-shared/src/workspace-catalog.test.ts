@@ -151,3 +151,8 @@ test('a private catalog larger than the native small-file limit remains readable
   assert.ok(stat.size > 65536)
   assert.equal((await new WorkspaceCatalog({ files, dataRoot: f.data }).snapshot()).workspaces.length, 37)
 })
+
+test('a project cannot contain application control data and private executor profiles', async t => {
+  const f = await fixture(t)
+  await assert.rejects(f.catalog.createProject({ workspace_id: randomUUID(), name: 'parent of application data', root: f.root }), { code: 'WORKSPACE_INVALID_REQUEST' })
+})
