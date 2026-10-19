@@ -1933,9 +1933,21 @@ describe('WorkerHarness.handleStateChange', () => {
     await expect(harness.requestWorkerStop(worker.worker_id)).resolves.toMatchObject({ status: 'verifying' })
     expect((await harness.listWorkers(`test::friend-1` as ManagerKey))[0].task.status).toBe('running')
 
-    fake.emitStateChange(handle, 'exited', undefined, 'killed')
-    await waitUntil(async () => (await harness.listWorkers(`test::friend-1` as ManagerKey))[0].task.status === 'closed')
+    const store = (harness as unknown as { controlOperationStore: WorkerControlOperationStore }).controlOperationStore
+    const transition = store.transition.bind(store), settling = deferred(), release = deferred()
+    vi.spyOn(store, 'transition').mockImplementation(async (...args) => {
+      if (args[2] === 'succeeded') { settling.resolve(); await release.promise }
+      return transition(...args)
+    })
+    try {
+      fake.emitStateChange(handle, 'exited', undefined, 'killed')
+      await settling.promise
+      expect((await harness.listWorkers(`test::friend-1` as ManagerKey))[0].task.status).toBe('closed')
+      expect(await harness.getWorkerControlOperations(worker.worker_id)).toMatchObject([{ status: 'verifying' }])
+    } finally { release.resolve() }
+    await waitUntil(async () => (await harness.getWorkerControlOperations(worker.worker_id)).length === 0)
     expect(await harness.getWorkerControlOperations(worker.worker_id)).toEqual([])
+    await (harness as any).deliverControlOperationNotifications(worker.worker_id)
   })
 
   it('已停止主线后的 fork stop 抛错由核验收口，不把整次 stop 判为 failed', async () => {
