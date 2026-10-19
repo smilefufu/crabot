@@ -98,6 +98,9 @@ function applyDesktopEnvironment(installation, env = process.env) {
       || env.DATA_DIR && fs.realpathSync.native(path.resolve(env.DATA_DIR)) !== installation.dataDir) fail()
   } catch { fail() }
   env.DATA_DIR = installation.dataDir
+  env.CRABOT_HOME = installation.coreRoot
+  env.CRABOT_PORT_OFFSET = '0'
+  env.CRABOT_DEV = 'false'
   env.CRABOT_PRODUCT_REQUIRED = '1'
 }
 module.exports = { readDesktopInstallation, readDesktopSelection, locateDesktopCore, locateDesktopGui, applyDesktopEnvironment }

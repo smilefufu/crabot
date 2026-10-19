@@ -12,6 +12,7 @@ import identity from '../process-identity.cjs'
 import location from '../cli-location.cjs'
 import entry from '../desktop-entry.cjs'
 import { writeCoreRelease, verifyCoreRelease } from '../core-release.mjs'
+import { resolveCliDataDir, resolveOffset } from '../instance.mjs'
 import { installDesktopCli } from '../desktop-cli-install.mjs'
 const windows = process.platform === 'win32', nativeName = windows ? 'crabot.exe' : 'crabot'
 const library = path.resolve(import.meta.dirname, '..'), binary = path.resolve(library, '../../crabot-native/build/Release')
@@ -156,4 +157,15 @@ test('installation root identity retains exact 64-bit file IDs rather than round
   assert.equal(desktop.readDesktopSelection(f.root).record.root_identity.ino, String(exact))
   inode = exact - 1n
   assert.throws(() => desktop.readDesktopSelection(f.root), { code: 'CRABOT_DESKTOP_INSTALLATION' })
+})
+
+
+test('desktop binding pins its Core and zero offset before stale CLI instance hints are read', async t => {
+  const f = await fixture(t), selected = desktop.readDesktopSelection(f.root), home = path.join(f.parent, 'old-cli-home')
+  await fs.mkdir(home); await fs.writeFile(path.join(home, 'instance.json'), JSON.stringify({ port_offset: 100 }))
+  const env = { CRABOT_HOME: 'stale-installation' }
+  desktop.applyDesktopEnvironment(selected, env)
+  assert.equal(resolveCliDataDir({ homeDir: home, env }), selected.dataDir)
+  assert.equal(resolveOffset(home, env), 0); assert.equal(env.CRABOT_PORT_OFFSET, '0')
+  assert.equal(env.CRABOT_HOME, selected.coreRoot); assert.equal(env.CRABOT_DEV, 'false')
 })
