@@ -96,6 +96,8 @@ jobs:
             node "$module/node_modules/typescript/bin/tsc" -p "$module/tsconfig.json"
           done
           pnpm --dir crabot-desktop install --frozen-lockfile
+          # Electron lazily installs on first require; complete it before test workers.
+          (cd crabot-desktop && node -e "require('electron')")
       - name: Linux workspace bind-mount boundary in a private mount namespace
         if: runner.os == 'Linux'
         timeout-minutes: 2
@@ -149,11 +151,11 @@ jobs:
       - name: Real sandboxed Electron window boundaries on Linux
         if: runner.os == 'Linux'
         working-directory: crabot-desktop
-        run: xvfb-run -a node --test tests/electron-boundary.test.mjs tests/installer-progress.test.mjs 2>&1 | tee ../.desktop-build/electron-boundary.log
+        run: xvfb-run -a node --test --test-concurrency=1 tests/electron-boundary.test.mjs tests/installer-progress.test.mjs 2>&1 | tee ../.desktop-build/electron-boundary.log
       - name: Real sandboxed Electron window boundaries on macOS and Windows
         if: runner.os != 'Linux'
         working-directory: crabot-desktop
-        run: node --test tests/electron-boundary.test.mjs tests/installer-progress.test.mjs 2>&1 | tee ../.desktop-build/electron-boundary.log
+        run: node --test --test-concurrency=1 tests/electron-boundary.test.mjs tests/installer-progress.test.mjs 2>&1 | tee ../.desktop-build/electron-boundary.log
       - name: Build locked browser and computer-use resources
         if: steps.scope.outputs.full_runtime == 'true'
         run: |
