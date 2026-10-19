@@ -1,19 +1,22 @@
 import fs from 'node:fs/promises'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { WorkspaceCatalog, WorkspaceError } from 'crabot-shared/dist/workspace-catalog.js'
-import { scanWorkspaceUsage } from 'crabot-shared/dist/workspace-usage.js'
+import { scanWorkspaceUsage, scanWorkspaceSetUsage } from 'crabot-shared/dist/workspace-usage.js'
 import type { WorkspaceCreateRequest, WorkspaceExecution, WorkspaceExecutionInventory, WorkspaceRecord, WorkspaceScanResult, WorkspaceSummary,
   WorkspaceUpdateRequest, WorkspaceUsage } from 'crabot-shared'
 import { WorkspaceCreateRequestSchema, WorkspaceIdSchema, WorkspaceUpdateRequestSchema, z } from 'crabot-client'
 
 const pending = (): WorkspaceUsage => ({ status: 'pending', file_count: 0, skipped_entries: 0 })
 type Scan = typeof scanWorkspaceUsage
-interface ScanJob { id: string; root: string; controller: AbortController }
+const totalKey = '@total'
+const scopeKey = (roots: string[]) => JSON.stringify([...new Set(roots)].sort())
+interface ScanJob { id: string; root: string; roots?: string[]; controller: AbortController }
 interface Observation { root: string; usage: WorkspaceUsage }
 
 /** Human management projection; never invokes an Agent, shell or task runner to scan. */
 export class WorkspaceService {
   private readonly catalog: WorkspaceCatalog
+  private readonly scanSet: typeof scanWorkspaceSetUsage
   private readonly scan: Scan
   private readonly execution?: () => Promise<WorkspaceExecutionInventory>
   private readonly observations = new Map<string, Observation>()
@@ -21,10 +24,11 @@ export class WorkspaceService {
   private draining?: Promise<void>
   private closed = false
 
-  constructor(options: { dataRoot: string; storageRoot?: string; scan?: Scan;
+  constructor(options: { dataRoot: string; storageRoot?: string; scan?: Scan; scanSet?: typeof scanWorkspaceSetUsage;
     execution?: () => Promise<WorkspaceExecutionInventory> }) {
     this.catalog = new WorkspaceCatalog({ ...options, files: require('../../scripts/lib/process-identity.cjs') })
     this.scan = options.scan ?? scanWorkspaceUsage
+    this.scanSet = options.scanSet ?? scanWorkspaceSetUsage
     this.execution = options.execution
   }
   initialize() { return this.catalog.initialize() }
@@ -53,15 +57,30 @@ export class WorkspaceService {
     return { workspace_id: id, usage: this.observed(record) }
   }
   async refresh(id: string): Promise<WorkspaceScanResult> {
-    if (this.closed) throw new WorkspaceError('WORKSPACE_UNAVAILABLE', '工作区统计正在停止，请稍候重试。')
+    this.checkScanning()
     const record = await this.catalog.get(id)
+    return { workspace_id: id, usage: this.enqueue(id, record.root) }
+  }
+  async totalUsage(): Promise<WorkspaceUsage> {
+    return this.observedScope(totalKey, scopeKey(await this.totalRoots()))
+  }
+  async refreshTotalUsage(): Promise<WorkspaceUsage> {
+    this.checkScanning()
+    const roots = await this.totalRoots()
+    return this.enqueue(totalKey, scopeKey(roots), roots)
+  }
+  private async totalRoots(): Promise<string[]> { return (await this.snapshot()).workspaces.map(record => record.root) }
+  private checkScanning(): void {
     if (this.closed) throw new WorkspaceError('WORKSPACE_UNAVAILABLE', '工作区统计正在停止，请稍候重试。')
+  }
+  private enqueue(id: string, root: string, roots?: string[]): WorkspaceUsage {
+    this.checkScanning()
     if (!this.jobs.has(id)) {
-      this.observations.set(id, { root: record.root, usage: { ...this.observed(record), status: 'measuring' } })
-      this.jobs.set(id, { id, root: record.root, controller: new AbortController() })
+      this.observations.set(id, { root, usage: { ...this.observedScope(id, root), status: 'measuring' } })
+      this.jobs.set(id, { id, root, roots, controller: new AbortController() })
       this.startDrain()
     }
-    return { workspace_id: id, usage: this.observed(record) }
+    return this.observedScope(id, root)
   }
   async close(): Promise<void> {
     this.closed = true
@@ -69,8 +88,11 @@ export class WorkspaceService {
     await this.draining
   }
   private observed(record: WorkspaceRecord): WorkspaceUsage {
-    const previous = this.observations.get(record.workspace_id)
-    return previous && previous.root === record.root ? { ...previous.usage } : pending()
+    return this.observedScope(record.workspace_id, record.root)
+  }
+  private observedScope(id: string, root: string): WorkspaceUsage {
+    const previous = this.observations.get(id)
+    return previous && previous.root === root ? { ...previous.usage } : pending()
   }
   private async executionSnapshot(): Promise<WorkspaceExecutionInventory> {
     try { if (this.execution) return await this.execution() } catch { /* Runtime is unavailable; registration and usage stay readable. */ }
@@ -98,9 +120,10 @@ export class WorkspaceService {
       const before = this.observations.get(job.id)!
       try {
         if (this.closed) throw new Error('scan stopped')
-        const usage = await this.scan(job.root, { signal: job.controller.signal })
-        const current = await this.catalog.get(job.id)
-        if (current.root !== job.root || job.controller.signal.aborted) throw new Error('scan superseded')
+        const options = { signal: job.controller.signal }
+        const usage = await (job.roots ? this.scanSet(job.roots, options) : this.scan(job.root, options))
+        const current = job.roots ? scopeKey(await this.totalRoots()) : (await this.catalog.get(job.id)).root
+        if (current !== job.root || job.controller.signal.aborted) throw new Error('scan superseded')
         this.observations.set(job.id, { root: job.root, usage })
       } catch {
         this.observations.set(job.id, { root: job.root, usage: { ...before.usage,
@@ -119,6 +142,12 @@ export class WorkspaceService {
       if (pathname === '/api/workspaces') {
         if (req.method === 'GET') send(200, await this.list())
         else if (req.method === 'POST') send(200, await this.create(WorkspaceCreateRequestSchema.parse(await readBody())))
+        else send(405, { code: 'WORKSPACE_METHOD_NOT_ALLOWED', message: '工作区不支持此操作。' })
+        return true
+      }
+      if (pathname === '/api/workspaces/usage' || pathname === '/api/workspaces/usage/refresh') {
+        if (pathname.endsWith('/refresh') && req.method === 'POST') { z.strictObject({}).parse(await readBody()); send(202, await this.refreshTotalUsage()) }
+        else if (!pathname.endsWith('/refresh') && req.method === 'GET') send(200, await this.totalUsage())
         else send(405, { code: 'WORKSPACE_METHOD_NOT_ALLOWED', message: '工作区不支持此操作。' })
         return true
       }

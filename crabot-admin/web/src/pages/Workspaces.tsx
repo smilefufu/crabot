@@ -95,6 +95,9 @@ function WorkspacePage({ scope }: { scope: string }) {
   const client = useMemo(() => new WorkspaceClient(getWebClient()), [scope])
   const query = useQuery({ queryKey: ['server', scope, 'workspaces'], queryFn: ({ signal }) => client.list({ signal }),
     refetchOnWindowFocus: true, refetchInterval: value => value.state.data?.items.some(item => item.usage.status === 'measuring') ? 1000 : false }, serverQueries)
+  const total = useQuery({ queryKey: ['server', scope, 'workspaces', 'usage'], queryFn: ({ signal }) => client.totalUsage({ signal }),
+    refetchOnWindowFocus: true, refetchInterval: value => value.state.data?.status === 'measuring' ? 1000 : false }, serverQueries)
+  const [totalRefreshing, setTotalRefreshing] = useState(false)
   const [searchParams] = useSearchParams()
   const [selected, setSelected] = useState(searchParams.get('workspace_id') ?? ''), [search, setSearch] = useState(''), [sort, setSort] = useState('name')
   const [error, setError] = useState(''), [creating, setCreating] = useState(false), [saving, setSaving] = useState(false)
@@ -121,18 +124,32 @@ function WorkspacePage({ scope }: { scope: string }) {
   async function refresh(id: string) {
     try { await client.refresh(id); await query.refetch() } catch (failure) { setError(message(failure)) }
   }
+  async function refreshTotal() {
+    setTotalRefreshing(true)
+    try { await client.refreshTotalUsage(); await total.refetch() } catch (failure) { setError(message(failure)) }
+    finally { setTotalRefreshing(false) }
+  }
   async function create(event: React.FormEvent) {
     event.preventDefault(); setSaving(true); setError('')
     try {
       const result = await client.create({ workspace_id: createId.current, name, description: purpose, ...(root.trim() ? { root: root.trim() } : {}) })
-      setCreating(false); setSelected(result.workspace.workspace_id); await query.refetch()
+      setCreating(false); setSelected(result.workspace.workspace_id); await query.refetch(); await total.refetch()
     } catch (failure) { setError(message(failure)) } finally { setSaving(false) }
   }
   return <MainLayout><div className="workspaces-page">
     <div className="workspace-heading"><div><h1>工作区</h1><p>每个项目长期使用一个工作区；未识别项目的任务放入默认工作区。</p></div>
-      <div className="workspace-actions"><Button variant="secondary" disabled={query.isFetching} onClick={() => void query.refetch()}>刷新列表与执行状态</Button>
+      <div className="workspace-actions"><Button variant="secondary" disabled={query.isFetching} onClick={() => { void query.refetch(); void total.refetch() }}>刷新列表与执行状态</Button>
         <Button onClick={() => { createId.current = projectId(); setName(''); setPurpose(''); setRoot(''); setCreating(true) }}>添加项目工作区</Button></div></div>
     {query.data && <p>{query.data.items.filter(item => item.workspace.kind === 'project').length} 个项目工作区 · 1 个默认工作区 · {query.data.items.filter(item => item.directory_status !== 'ready').length} 个目录待核实</p>}
+    <section aria-label="全部工作区空间">
+      <h2>全部工作区空间</h2>
+      <p>磁盘占用估算 {bytes(total.data?.allocated_bytes)} · 文件总大小 {bytes(total.data?.logical_bytes)} · {total.data ? statuses[total.data.status] : '正在读取'}</p>
+      {total.data?.status === 'partial' && <p>已统计下界 · {total.data.skipped_entries} 项未计入</p>}
+      {total.data?.measured_at && <p>统计时间：{new Date(total.data.measured_at).toLocaleString()}</p>}
+      <p className="workspace-note">按实际目录去重，包含隐藏文件和依赖；不等于删除后可释放的空间。</p>
+      {total.error && <p role="alert">{message(total.error)}</p>}
+      <Button variant="secondary" disabled={totalRefreshing || total.data?.status === 'measuring'} onClick={() => void refreshTotal()}>刷新汇总空间</Button>
+    </section>
     {(error || query.error) && <p role="alert">{error || message(query.error)} <Button variant="secondary" onClick={() => void query.refetch()}>重新读取</Button></p>}
     {creating && <Card title="添加项目工作区"><form onSubmit={create} className="workspace-form">
       <label>项目名称<input value={name} onChange={event => setName(event.target.value)} required maxLength={120} /></label>

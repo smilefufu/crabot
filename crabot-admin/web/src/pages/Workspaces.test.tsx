@@ -5,9 +5,9 @@ import { ClientError } from 'crabot-client'
 import { serverQueries, setServerScope } from '../services/server-state'
 import { Workspaces } from './Workspaces'
 
-const mocks = vi.hoisted(() => ({ list: vi.fn(), get: vi.fn(), refresh: vi.fn(), update: vi.fn(), create: vi.fn(), bridge: { revealWorkspaceFolder: undefined as undefined | ReturnType<typeof vi.fn> } }))
+const mocks = vi.hoisted(() => ({ list: vi.fn(), get: vi.fn(), refresh: vi.fn(), update: vi.fn(), create: vi.fn(), totalUsage: vi.fn(), refreshTotalUsage: vi.fn(), bridge: { revealWorkspaceFolder: undefined as undefined | ReturnType<typeof vi.fn> } }))
 vi.mock('crabot-client', async () => ({ ...await vi.importActual('crabot-client'), WorkspaceClient: class {
-  list = mocks.list; get = mocks.get; refresh = mocks.refresh; update = mocks.update; create = mocks.create
+  list = mocks.list; get = mocks.get; refresh = mocks.refresh; update = mocks.update; create = mocks.create; totalUsage = mocks.totalUsage; refreshTotalUsage = mocks.refreshTotalUsage
 } }))
 vi.mock('../services/api', () => ({ getWebClient: () => ({}) }))
 vi.mock('../services/desktop-host', () => ({ desktopBridge: mocks.bridge }))
@@ -16,7 +16,7 @@ const id = '12345678-1234-4123-8123-123456789abc'
 const workspace = { workspace_id: id, kind: 'project', name: 'Crabot', description: '桌面应用', root: '/projects/crabot', source: 'existing', created_at: '2026-10-19T00:00:00.000Z' }
 const item = { workspace, directory_status: 'ready', usage: { status: 'complete', logical_bytes: 1234, file_count: 1, skipped_entries: 0 }, execution: { status: 'unknown' } }
 const snapshot = { revision: 2, storage_root: '/workspaces', items: [item, { ...item, workspace: { ...workspace, workspace_id: 'default', kind: 'default', name: '默认工作区', root: '/workspaces/default', description: '' }, directory_status: 'missing', usage: { status: 'pending', file_count: 0, skipped_entries: 0 } }] }
-beforeEach(() => { serverQueries.clear(); setServerScope('workspace-test'); vi.resetAllMocks(); mocks.bridge.revealWorkspaceFolder = undefined; mocks.list.mockResolvedValue(structuredClone(snapshot)) })
+beforeEach(() => { serverQueries.clear(); setServerScope('workspace-test'); vi.resetAllMocks(); mocks.bridge.revealWorkspaceFolder = undefined; mocks.list.mockResolvedValue(structuredClone(snapshot)); mocks.totalUsage.mockResolvedValue({ status: 'pending', file_count: 0, skipped_entries: 0 }) })
 afterEach(() => { serverQueries.clear() })
 it('shows one row per project/default and does not invent zero space or idle execution for missing evidence', async () => {
   render(<MemoryRouter><Workspaces /></MemoryRouter>)
@@ -64,4 +64,17 @@ it('desktop folder opening sends only the selected identity and presents a faile
   fireEvent.click(screen.getByRole('button', { name: '在文件管理器打开' }))
   expect(await screen.findByRole('alert')).toHaveTextContent('目录暂时无法打开')
   expect(mocks.bridge.revealWorkspaceFolder).toHaveBeenCalledWith(id)
+})
+
+it('aggregate usage comes from the union endpoint; partial totals and missing allocation stay explicit', async () => {
+  const usage = { status: 'partial', logical_bytes: 2000, file_count: 2, skipped_entries: 1 }
+  mocks.refreshTotalUsage.mockResolvedValue({ ...usage, status: 'measuring' })
+  render(<MemoryRouter><Workspaces /></MemoryRouter>)
+  const total = await screen.findByRole('region', { name: '全部工作区空间' })
+  await waitFor(() => expect(total).toHaveTextContent('尚未统计')); expect(total).toHaveTextContent('未知')
+  mocks.totalUsage.mockResolvedValue(usage)
+  fireEvent.click(screen.getByRole('button', { name: '刷新汇总空间' }))
+  await waitFor(() => expect(total).toHaveTextContent('已统计下界'))
+  expect(total).toHaveTextContent('2 KiB'); expect(total).toHaveTextContent('1 项未计入')
+  expect(mocks.refreshTotalUsage).toHaveBeenCalledTimes(1)
 })

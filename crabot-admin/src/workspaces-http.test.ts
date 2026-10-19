@@ -79,3 +79,17 @@ it('associated-worker HTTP filtering validates the stable identity and preserves
   expect(response.status).toBe(200)
   expect(admin.callAgentRpc).toHaveBeenCalledWith('list_workers_admin', expect.objectContaining({ workspace_id: 'default', include_terminal: true, include_legacy: true }))
 })
+
+it('aggregate HTTP routes precede workspace-id parsing and preserve human authentication and strict refresh input', async () => {
+  const { client, endpoint } = await fixture()
+  expect((await client.totalUsage()).status).toBe('pending')
+  expect((await client.refreshTotalUsage()).status).toBe('measuring')
+  await vi.waitFor(async () => expect((await client.totalUsage()).status).toBe('complete'))
+  expect((await fetch(endpoint + '/workspaces/usage')).status).toBe(401)
+  const denied = await fetch(endpoint + '/workspaces/usage/refresh', { method: 'POST', headers: {
+    Authorization: 'Bearer fixture-internal', 'Content-Type': 'application/json' }, body: '{}' })
+  expect(denied.status).toBe(403)
+  const invalid = await fetch(endpoint + '/workspaces/usage/refresh', { method: 'POST', headers: {
+    Authorization: 'Bearer fixture-human', 'Content-Type': 'application/json' }, body: '{"root":"/"}' })
+  expect(invalid.status).toBe(400)
+})

@@ -91,3 +91,51 @@ it('one inventory read covers the complete list; only a ready complete empty bin
   execution.mockRejectedValueOnce(new Error('agent unreachable'))
   expect((await service.list()).items.every(item => item.execution.status === 'unknown')).toBe(true)
 })
+
+it('aggregate statistics use one union of registered roots, not a sum of project totals', async () => {
+  const { root, service } = await fixture()
+  const parent = path.join(root, 'workspaces', 'parent'), nested = path.join(parent, 'nested')
+  await fs.mkdir(nested, { recursive: true })
+  await fs.writeFile(path.join(nested, 'one'), Buffer.alloc(19))
+  await service.create({ workspace_id: randomUUID(), name: 'parent', root: parent })
+  await service.create({ workspace_id: randomUUID(), name: 'nested', root: nested })
+  expect((await service.totalUsage()).status).toBe('pending')
+  expect((await service.refreshTotalUsage()).status).toBe('measuring')
+  await vi.waitFor(async () => expect(await service.totalUsage()).toMatchObject({ status: 'complete', logical_bytes: 19, file_count: 1 }))
+  const snapshot = await service.list()
+  await service.update(snapshot.items[1].workspace.workspace_id, { expected_revision: snapshot.revision, name: 'renamed', description: '' })
+  expect((await service.totalUsage()).logical_bytes).toBe(19)
+  await service.create({ workspace_id: randomUUID(), name: 'another' })
+  expect((await service.totalUsage()).status).toBe('pending')
+})
+it('a superseded aggregate scan cannot publish the old root set; aggregate requests coalesce with bounded concurrency', async () => {
+  let release!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  const scanSet = vi.fn(async () => { await gate; return { status: 'complete' as const, logical_bytes: 87, file_count: 1, skipped_entries: 0 } })
+  const { service } = await fixture({ scanSet })
+  await service.refreshTotalUsage(); await service.refreshTotalUsage()
+  expect(scanSet).toHaveBeenCalledTimes(1)
+  await service.create({ workspace_id: randomUUID(), name: 'new scope' })
+  release()
+  await service.close()
+  expect((await service.totalUsage()).status).toBe('pending')
+  await expect(service.refreshTotalUsage()).rejects.toMatchObject({ code: 'WORKSPACE_UNAVAILABLE' })
+})
+
+it('project and aggregate scans share one serial queue and aggregate cancellation closes owned work', async () => {
+  let release!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  const scan = vi.fn(async () => { await gate; return { status: 'complete' as const, file_count: 0, skipped_entries: 0 } })
+  let aborted = false
+  const scanSet = vi.fn(async (_roots: readonly string[], { signal }: { signal?: AbortSignal } = {}) => {
+    await new Promise<void>((_resolve, reject) => signal!.addEventListener('abort', () => { aborted = true; reject(new Error('cancelled')) }, { once: true }))
+    return { status: 'complete' as const, file_count: 0, skipped_entries: 0 }
+  })
+  const { service } = await fixture({ scan, scanSet })
+  await service.refresh('default'); await service.refreshTotalUsage()
+  expect(scan).toHaveBeenCalledTimes(1); expect(scanSet).not.toHaveBeenCalled()
+  release()
+  await vi.waitFor(() => expect(scanSet).toHaveBeenCalledTimes(1))
+  await service.close()
+  expect(aborted).toBe(true); expect((await service.totalUsage()).status).toBe('failed')
+})

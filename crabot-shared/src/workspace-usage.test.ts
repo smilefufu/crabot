@@ -3,7 +3,9 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { scanWorkspaceUsage } from './workspace-usage.js'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
+import { scanWorkspaceUsage, scanWorkspaceSetUsage } from './workspace-usage.js'
 
 async function fixture(t: test.TestContext) {
   const root = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'workspace-usage-中文 space-')))
@@ -58,4 +60,41 @@ test('a registered root replaced by a link cannot become a scan of an unrelated 
   await fs.mkdir(outside); await fs.writeFile(path.join(outside, 'private.bin'), Buffer.alloc(99))
   await fs.symlink(outside, selected, process.platform === 'win32' ? 'junction' : 'dir')
   await assert.rejects(scanWorkspaceUsage(selected), { code: 'WORKSPACE_SCAN_STALE' })
+})
+
+test('aggregate usage deduplicates overlapping roots and hard links across separate projects', async t => {
+  const root = await fixture(t), a = path.join(root, 'a'), b = path.join(root, 'b')
+  await fs.mkdir(a); await fs.mkdir(b); await fs.mkdir(path.join(a, 'nested'))
+  await fs.writeFile(path.join(a, 'one'), Buffer.alloc(13)); await fs.writeFile(path.join(a, 'nested/two'), Buffer.alloc(17))
+  await fs.link(path.join(a, 'one'), path.join(b, 'shared'))
+  const usage = await scanWorkspaceSetUsage([a, path.join(a, 'nested'), b, a])
+  assert.equal(usage.logical_bytes, 30); assert.equal(usage.file_count, 2); assert.equal(usage.status, 'complete')
+  assert.equal((await scanWorkspaceUsage(a)).logical_bytes, 30)
+})
+test('aggregate missing roots are partial, but an entirely unavailable set never becomes successful zero', async t => {
+  const root = await fixture(t), missing = path.join(root, 'missing')
+  await fs.writeFile(path.join(root, 'visible'), Buffer.alloc(11))
+  const usage = await scanWorkspaceSetUsage([root, missing])
+  assert.equal(usage.status, 'partial'); assert.equal(usage.logical_bytes, 11); assert.ok(usage.skipped_entries > 0)
+  await assert.rejects(scanWorkspaceSetUsage([missing]), { code: 'WORKSPACE_DIRECTORY_MISSING' })
+})
+
+// The workflow runs this in a private Linux mount namespace; never mount on a developer host.
+test('Linux same-device bind mounts stay outside workspace statistics', {
+  skip: process.platform !== 'linux' || process.getuid?.() !== 0 || process.env.GITHUB_ACTIONS !== 'true',
+}, async t => {
+  const root = await fixture(t), project = path.join(root, 'project'), outside = path.join(root, 'outside')
+  const mounted = path.join(project, 'mounted space'), run = promisify(execFile)
+  await fs.mkdir(project); await fs.mkdir(outside); await fs.mkdir(mounted)
+  await fs.writeFile(path.join(project, 'visible'), Buffer.alloc(13))
+  await fs.writeFile(path.join(outside, 'must-not-follow'), Buffer.alloc(999))
+  await run('mount', ['--bind', outside, mounted])
+  try {
+    assert.equal((await fs.stat(project)).dev, (await fs.stat(mounted)).dev)
+    const usage = await scanWorkspaceUsage(project)
+    assert.equal(usage.logical_bytes, 13); assert.equal(usage.file_count, 1)
+    assert.equal(usage.status, 'partial'); assert.ok(usage.skipped_entries > 0)
+    const union = await scanWorkspaceSetUsage([project, outside])
+    assert.equal(union.logical_bytes, 1012); assert.equal(union.file_count, 2)
+  } finally { await run('umount', [mounted]) }
 })

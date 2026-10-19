@@ -38,3 +38,17 @@ test('workspace runtime inventory preserves incomplete evidence and validates co
   assert.equal(WorkspaceExecutionInventorySchema.safeParse({ ready: true, items: { arbitrary: { status: 'idle' } } }).success, false)
   assert.equal(WorkspaceExecutionInventorySchema.safeParse({ ready: true, items: { default: { status: 'idle', observed_at: 'not-a-time' } } }).success, false)
 })
+
+test('aggregate usage has a checked HTTP contract and never retries a failed refresh', async () => {
+  const usage = { status: 'partial', measured_at: '2026-10-19T00:00:00.000Z', logical_bytes: 17, file_count: 1, skipped_entries: 1 }
+  const f = fixture(usage)
+  assert.deepEqual(await f.client.totalUsage(), usage)
+  assert.equal(f.calls[0].url, 'http://localhost:3000/api/workspaces/usage')
+  await f.client.refreshTotalUsage()
+  assert.equal(f.calls[1].url, 'http://localhost:3000/api/workspaces/usage/refresh')
+  assert.equal(f.calls[1].options.method, 'POST'); assert.equal(f.calls[1].options.body, '{}')
+  await assert.rejects(fixture({ ...usage, logical_bytes: -1 }).client.totalUsage(), { kind: 'validation' })
+  const denied = fixture({ code: 'WORKSPACE_UNAVAILABLE', message: '维护中' }, 503)
+  await assert.rejects(denied.client.refreshTotalUsage(), { message: '维护中' })
+  assert.equal(denied.calls.length, 1)
+})
