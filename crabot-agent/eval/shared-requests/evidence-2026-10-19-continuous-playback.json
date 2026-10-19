@@ -1,0 +1,96 @@
+{
+  "date": "2026-10-19",
+  "protocol": "voice v0.9.0 / wire9",
+  "scope": "Synthetic identities/files and playback receipts; real configured LLM and TTS; no real microphone or device playback",
+  "model_calls": 15,
+  "model_cases": [
+    {
+      "id": "public-voice",
+      "status": "passed",
+      "checks": {
+        "no_hijack": true,
+        "worker_reached": true,
+        "bound_owner_unchanged": true,
+        "interruption_reached": true,
+        "no_private_shared_body": true,
+        "private_target": true,
+        "expected_effect": true,
+        "no_duplicate_unknown_send": true,
+        "worker_receipt": true,
+        "voice_tag_delivery": true,
+        "request_isolation": true,
+        "no_fixture_gaps": true
+      },
+      "requests": 1,
+      "first_voice_text_ms": 3370,
+      "reply_count": 1
+    },
+    {
+      "id": "public-voice-long",
+      "status": "passed",
+      "checks": {
+        "no_hijack": true,
+        "worker_reached": true,
+        "bound_owner_unchanged": true,
+        "interruption_reached": true,
+        "no_private_shared_body": true,
+        "private_target": true,
+        "expected_effect": true,
+        "no_duplicate_unknown_send": true,
+        "worker_receipt": true,
+        "voice_tag_delivery": true,
+        "request_isolation": true,
+        "no_fixture_gaps": true
+      },
+      "requests": 1,
+      "first_voice_text_ms": 2432,
+      "reply_count": 1
+    },
+    {
+      "id": "personal-voice-early-ack",
+      "status": "passed",
+      "checks": {
+        "no_hijack": true,
+        "worker_reached": true,
+        "bound_owner_unchanged": true,
+        "interruption_reached": true,
+        "no_private_shared_body": true,
+        "private_target": true,
+        "expected_effect": true,
+        "no_duplicate_unknown_send": true,
+        "worker_receipt": true,
+        "voice_tag_delivery": true,
+        "request_isolation": true,
+        "no_fixture_gaps": true,
+        "initial_ack_before_work": true,
+        "single_ack_and_result": true
+      },
+      "requests": 13,
+      "first_voice_text_ms": 2581,
+      "reply_count": 2
+    }
+  ],
+  "tts_realtime_consumer": {
+    "tts": "models/kokoro",
+    "characters": 649,
+    "segments": 40,
+    "first_pcm_ms": 264.861,
+    "playback_seconds": 175.75,
+    "wall_ms": 176195.228,
+    "peak_inflight_samples": 24000,
+    "transport_underrun_ms": 0,
+    "completed": true,
+    "exact_text": true,
+    "scope": "Real configured TTS; synthetic real-time sample consumer, no speaker/microphone or device playback"
+  },
+  "source_sha256": {
+    "crabot-agent/src/manager/prompt.ts": "09394756aeabbbeced5a629afebb4f6dff23c04e6c9abac8501b5169980912c3",
+    "crabot-channel-voice/src/reply-playback.ts": "617cb0f6c153ec43f8840b0e9f543af1fe13f6569b0fd29bd8bd6c20eedfcffd",
+    "crabot-agent/src/manager/voice-output.ts": "a2e37ba8f2a42b61a810c4b848bb8051a169778c31bfa8080bdfeea4554d888c"
+  },
+  "not_accepted_yet": [
+    "physical Android playback and listening quality",
+    "50 warm no-tool rounds median/P95 of terminal end-of-speech to actual first playback",
+    "joint deployment and device interruption regression"
+  ]
+}

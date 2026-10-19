@@ -208,7 +208,7 @@ export const PermissionTemplateForm: React.FC<PermissionTemplateFormProps> = ({
             const isMasterPrivate = template?.id === 'master_private'
             const disabled = isSystem || (isDesktop && !isMasterPrivate)
             const hint = isDesktop && !isMasterPrivate
-              ? '桌面控制（computer-use）仅 Master 私聊可开启'
+              ? '桌面控制（computer-use）仅 Master 的个人授权可开启'
               : TOOL_ENTRY_EXPLANATIONS[cat]
             return (
               <Tooltip key={cat} content={hint}>

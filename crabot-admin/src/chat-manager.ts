@@ -210,7 +210,7 @@ export class ChatManager {
 
   private setupWebSocket(ws: WebSocket, token: string): void {
     this.clientSessions.set(ws, { token, queue: Promise.resolve(), pending: 0 })
-    ws.on('message', (data) => this.queueClientOperation(ws, async () => {
+    ws.on('message', (data) => this.queueClientOperation(ws, 'inbound', async () => {
       try {
         const message = ChatClientMessageSchema.parse(JSON.parse(data.toString()))
         await this.onMessage(message)
@@ -236,16 +236,18 @@ export class ChatManager {
 
   // Each frame uses current server-side authority. Serializing per connection also
   // preserves order while credential/epoch checks await disk or native peer checks.
-  private queueClientOperation(ws: WebSocket, operation: () => void | Promise<void>): void {
+  private queueClientOperation(ws: WebSocket, direction: 'inbound' | 'outbound', operation: () => void | Promise<void>): void {
     const session = this.clientSessions.get(ws)
-    if (!session || this.activeClient !== ws || ws.readyState !== WebSocket.OPEN) return
+    if (!session || this.inboundAbort.signal.aborted || this.activeClient !== ws || ws.readyState !== WebSocket.OPEN) return
     if (session.pending >= 128) { ws.close(1013, 'Reconnect and refresh state'); return }
     session.pending++
     session.queue = session.queue.then(async () => {
-      if (this.activeClient !== ws || ws.readyState !== WebSocket.OPEN) return
+      // A received input belongs to its authenticated session even after the peer disconnects.
+      // Outbound pushes still require the current open socket.
+      if (this.inboundAbort.signal.aborted || (direction === 'outbound' && (this.activeClient !== ws || ws.readyState !== WebSocket.OPEN))) return
       let authorized = false
       try { authorized = !!await this.verifyJwt(session.token, this.jwtSecret, this.dataDir) } catch { /* fail closed */ }
-      if (this.activeClient !== ws || ws.readyState !== WebSocket.OPEN) return
+      if (this.inboundAbort.signal.aborted || (direction === 'outbound' && (this.activeClient !== ws || ws.readyState !== WebSocket.OPEN))) return
       if (!authorized) { ws.close(4401, 'Session expired'); return }
       await operation()
     }).catch(() => {
@@ -609,7 +611,7 @@ export class ChatManager {
 
   private pushToClient(message: ChatServerMessage): void {
     const client = this.activeClient
-    if (client) this.queueClientOperation(client, () => {
+    if (client) this.queueClientOperation(client, 'outbound', () => {
       // send 在 OPEN→CLOSING 竞态下可能同步抛错；推送是 best-effort，
       // 不能让异常冒泡污染调用方（尤其任务状态机 applyStatusTransition 钩子）
       try {

@@ -6,6 +6,7 @@ import os from 'node:os'
 import { createRequire } from 'node:module'
 import management from '../desktop-management.cjs'
 import { verifyDataCompatibility, applyStartupMigrations } from '../core-preparation.mjs'
+import { previewMigrations, runMigrations } from '../../upgrade-lib/migrate.mjs'
 import { WorkspaceCatalog } from '../../../crabot-shared/dist/workspace-catalog.js'
 const identity = createRequire(import.meta.url)('../process-identity.cjs')
 async function fixture(t, { catalog = true } = {}) {
@@ -30,6 +31,8 @@ test('new project/private runtime data requires an explicit target capability be
   await fs.writeFile(path.join(f.target, 'crabot-memory/schema_version'), 'v1')
   await fs.writeFile(path.join(f.target, 'crabot-memory/upgrade/from_v0_to_v1.mjs'), 'process.exit(0)')
   await assert.rejects(applyStartupMigrations(f.target, f.data, process.env), { code: 'CRABOT_DATA_NEWER_THAN_CODE' })
+  await assert.rejects(previewMigrations(f.target, f.data), { code: 'CRABOT_DATA_NEWER_THAN_CODE' })
+  await assert.rejects(runMigrations(f.target, f.data, async () => { throw new Error('must not execute') }, console, { lockHeld: true }), { code: 'CRABOT_DATA_NEWER_THAN_CODE' })
   await assert.rejects(fs.stat(path.join(f.data, 'memory/SCHEMA_VERSION')), { code: 'ENOENT' })
   assert.deepEqual(await fs.readFile(f.catalog), original)
   await f.declare([1])

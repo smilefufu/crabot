@@ -4,11 +4,12 @@ import http from 'node:http'
 import { pcm16Wave, speechWaveToPcm, synthesizeAudio, transcribeAudio } from './audio-client.js'
 import type { AudioServiceConnection } from './voice.js'
 
-test('complete speech WAV is validated before consumption; partial/multiple/empty/long WAV fails', () => {
+test('complete speech WAV accepts long segments while partial/multiple/empty or wrong-format WAV fails', () => {
   const pcm = Buffer.alloc(480, 1)
   const wave = pcm16Wave(pcm, 24000)
   assert.deepEqual(speechWaveToPcm(wave), pcm)
-  for (const data of [wave.subarray(0, wave.length - 1), Buffer.concat([wave, wave]), pcm16Wave(Buffer.alloc(100), 24000), pcm16Wave(Buffer.alloc(100, 1), 16000), pcm16Wave(Buffer.alloc(960002, 1), 24000)]) {
+  assert.equal(speechWaveToPcm(pcm16Wave(Buffer.alloc(960002, 1), 24000)).length, 960002)
+  for (const data of [wave.subarray(0, wave.length - 1), Buffer.concat([wave, wave]), pcm16Wave(Buffer.alloc(100), 24000), pcm16Wave(Buffer.alloc(100, 1), 16000)]) {
     assert.throws(() => speechWaveToPcm(data))
   }
 })

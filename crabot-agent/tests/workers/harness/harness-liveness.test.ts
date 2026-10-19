@@ -1,3 +1,4 @@
+import { BUILTIN_WORKER_PERMISSIONS } from '../../../src/workers/builtin/runtime.js'
 /**
  * 活性巡检(protocol-agent-v3 §6.3 第 3 条 / spec 2026-08-05-worker-liveness-sweep-design.md)。
  *
@@ -142,6 +143,7 @@ function spawnParams(overrides: Partial<SpawnWorkerParams> = {}): SpawnWorkerPar
     prompt: '把活干完',
     origin: { spawned_by_episode: 'wechat::sess-1', trigger_type: 'message' },
     report_to: { channel_id: 'wechat', session_id: 'sess-1' },
+    principal_permissions: { ...BUILTIN_WORKER_PERMISSIONS, storage: { workspace_path: overrides.workspace ?? dataDir, access: 'readwrite' } },
     ...overrides,
   }
 }

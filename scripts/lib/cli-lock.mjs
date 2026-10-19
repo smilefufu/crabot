@@ -63,3 +63,6 @@ export function hasInheritedCliLock(dataDir, token = process.env.CRABOT_CLI_LOCK
     return true
   } catch { return false }
 }
+
+// Shared migration helpers use the same native inherited-lock verification.
+export const inheritedCliLock = hasInheritedCliLock

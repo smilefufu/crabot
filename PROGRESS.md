@@ -1,13 +1,40 @@
 # Crabot 项目进度
 
+### 长回答连续播放：真人长答完整播出，首声与身份继续复核
+
+- 用户已确认后端/安卓配套设计及一处提示词文字；正式 Voice v0.9.0/wire9 先行发布。不增加通用 SSML 或新模型配置，普通 voice_reply 按需完整回答，宿主自动断句、单个 TTS 请求加一个预取，按实际播放游标保持最多一秒在途音频。
+- 原回答总字数、20/25/30秒累计播放限制已从普通输出移除；原60秒仅限制首次接纳，已接纳回应保持原请求/epoch，按首音频、合成、消费和收尾阶段检测卡住。reply_end 短返回与实际完成分离；只有真实全播才记 completed，取消和未知不自动重播。登记引导继续使用原有限预算。
+- Agent/Channel 新写交付 v3/回执 v2，旧记录保留验证；Android0.8.0/code17 使用 Long 计数、同一 AudioTrack、进度反馈和有限 journal 校验备份迁移。Shared/Channel/Agent/Admin/Core 编译、定向回归及两种 APK 构建通过；三分钟虚拟播放保持在途≤24000样本。真实模型短答、649字长故事和工具前单次接单通过；首可播文字约3.37/2.43/2.58秒，不含ASR/TTS/手机播放。
+- 当前Kokoro真实API分40段生成175.75秒音频，实时速率替身完整消费，首PCM约265毫秒、峰值24000在途样本、额外缓冲空档0。OnePlus7Pro实际单播放器181.094秒测试通过，完整消费4344000样本，gap_count/gap_ms均0；不采音、不接触配对或声音数据，仍不是整链真人听感/首声验收。
+- 联合部署代码132d696a、Android210a251（0.8.0/code17/wire9），原Node22下122项定向回归、前端8项/类型检查/生产打包通过。完整在线准备核验约2.07GB产品，数据迁移备份0字节，未扫描任务工作区；8模块均已恢复，Telegram一次局部重试后正常。APK签名相同，加密配对/声音文件覆盖安装前后摘要一致，首页已连接且麦克风关闭。真人停止及50轮首声仍待验收；见[脱敏证据](crabot-agent/eval/shared-requests/evidence-2026-10-19-continuous-playback.json)与[实施计划](crabot-docs/superpowers/plans/2026-10-19-continuous-long-voice-playback-implementation.md)。
+- 真人故事回答完整播出112.75秒/2706000样本，端侧gap_count/gap_ms均0，后台实际completed且样本一致；用户听感首声4–5秒，同机单调计时实为7104毫秒，仍需优化及50轮验收。同轮FuFu确实比对但0.4536低于0.50而显示陌生人；登记仍active且采集/身份代码未变，用户确认相同近距离。公开完整分段对照34/35正确、9个未登记均拒识，两种预处理对照无改善；根因待现场复核，未改样本、阈值或身份规则。
+- 升级恢复耗时超过预估：Admin退出至新进程约38秒、Voice约63秒；旧Agent退出等待约30秒，另有模块恢复时间。后续独立核对退出等待和启动阶段，不放宽当前恢复/交付语义、不与播放方案混改。额外Engine全集未完成，退避夹具expected 3 to be 5已在未改main复现，不计通过。
+
+### 统一升级与迁移减重：副本验证完成，PR 审查中
+
+- 用户要求解决通用升级成本，不能仅为语音做特例。已核实整模块复制、Memory重复备份、启动兜底与升级入口备份不一致，以及停机后准备过多；[修订稿](crabot-docs/superpowers/specs/2026-10-18-scoped-upgrade-migrations-design.md)提出按实际受影响范围备份、共同入口和提前准备，不引入热迁移/双写服务。
+- 正式 MM/Agent/Memory/Desktop 协议已先行同步。隔离分支实现范围备份、共享请求 v2/旧 v1 兼容、Memory 整链单份恢复材料与 CLI/Web/start/MM 共同入口；准备构建与运行产品分离，CLI 不自动停机，restart 先预检。升级库97项、Memory真实数据库/WAL与版本链10项、Core配置/切换22项、Agent请求/投递/门禁44项、安装/依赖/标记兼容65项通过（2026-10-19合计238项定向检查）。Node22完整构建/准备约69–74秒，临时安装已有旧产物时切换约1.14秒，Python重定位、CLI与Node依赖解析通过；未启动真实业务。
+- 副本计量：既有1435文件演练快照中21份旧台账，备份9,884,819字节、迁移约2.02秒；增加200GiB无关稀疏工作区/历史后实际IO不变、约2.00秒，禁止命名空间访问为0。63份合成台账约5.65秒；ready检查约3毫秒，无业务枚举/备份。冷准备曾因浏览器下载失败，临时安装未切换；完整通过证据使用目标核验的固定资源缓存，不代表冷网络或所有原生平台已验收。
+- 用户2026-10-19确认两处恢复修订，已先更新spec/MM协议：完整核验rolled_back后，修复版在锁下复核并原子归档旧事务，再建新尝试；未知写入继续拒绝。显式依赖准备成功、输入未变后才更新/清除可重定位标记，失败保留；dev同步成功同规则，过期启动仍拒绝。新增13项恢复、15项标记回归及238项相关复测通过，等待最新CI和复审。
+- 后续独立评估升级准备产物/旧代码保留策略（只清理已证明可淘汰的材料）、安装根为挂载点时跨设备切换、运行中预览数据变动时的提示与重试；不据理论风险扩大本次实现或自动删除旧备份。
+- 准备和测试期间原本机实例保持运行，未执行现场迁移、启停或安装APK。用户2026-10-19已明确授权本轮在CI和审查通过后本机升级及重启；操作前报告实际影响与预计时长，不重复请求已有授权。实现和验证记录见[实施计划](crabot-docs/superpowers/plans/2026-10-18-scoped-upgrade-migrations-implementation.md)。
+
+### 任务工作区管理：已纳入桌面化主任务
+
+- 用户要求在Web和GUI中查看任务目录及空间占用，识别可清理内容并进行受控清理，避免任务产物长期占用上百GB；不默认删除仍在使用的目录或业务成果。
+- 支持在界面设置任务工作区根目录，允许独立磁盘/目录，不能要求一直放在`.crabot/data`内。当前已有`WORKER_WORKSPACES_DIR`环境变量覆盖，缺少产品化管理入口；后续独立设计需处理原任务路径、归属授权及既有目录兼容。
+- 已纳入下述已确认的项目workspace及在线迁移工作；受控清理仍为独立follow-up，不在升级时删除任务产物。
+
 ### 桌面化方案：独立 worktree 推进桌面与兼容转换
+
 
 - 按已确认[中文Spec](crabot-docs/superpowers/specs/2026-10-17-desktop-application-design.md)及[计划](crabot-docs/superpowers/plans/2026-10-17-desktop-application-implementation.md)，仅在feat/desktop-application worktree开发；完整实现与验证前不推主仓main、不提前建PR，不部署/重启现场，保留无关WIP。 用户10/19进一步明确桌面整体安装目录可选、workspace独立；主Spec §19已记录，需细化布局/安装器/升级兼容后再实现，不采用额外DATA_DIR选择步骤。安装时选定安装位置，安装后workspace可迁移；保留Admin/MM在线、暂停执行层并核验停止、迁移后旧Worker永久关闭的[补充设计](crabot-docs/superpowers/specs/2026-10-19-desktop-workspace-relocation-design.md)已于10/19确认，按W0–W5持续实现，完整验收未完成。
 - Workspace按[已确认项目Spec](crabot-docs/superpowers/specs/2026-10-19-project-workspaces-and-inventory-design.md)实施：一个项目一个长期workspace，未知项目只用一个default；[正式协议](crabot-docs/protocols/protocol-workspaces.md)/[计划](crabot-docs/superpowers/plans/2026-10-19-project-workspaces-implementation.md)先行。登记、default任务内隔离、原子写/并发锁/CAS、项目复用和缺失目录不空重建已接；新Worker绑定及resume/fork/handoff保留身份、主体/来源/投递，CLI凭据/MCP/skills/事件在私有运行区，不改用户项目配置。
 - W3已接共享SDK/HTTP/项目列表详情/用途编辑、目录状态、关联Worker精确过滤及双向入口、按成功执行单调更新最近使用。执行投影覆盖完整绑定和主线/fork/子Agent/后台证据；启动或历史索引未就绪不伪报0/空闲。空间按重叠根/硬链接去重，单项/汇总串行合并，根范围变化拒绝迟到结果，缺失/部分/未知明确；桌面经固定标识/HTTP双查及实例、目录身份核验后打开文件夹。历史索引[补充Spec](crabot-docs/superpowers/specs/2026-10-19-workspace-history-index-design.md)被自动审批要求先确认新增持久化/关联契约，已交用户审阅且未实现，当前汇总不代表全部旧目录已覆盖。
 - 最新共享全套171项通过、1项Linux挂载条件跳过；Admin工作区服务/真实HTTP14、SDK4、工作区Web5及相关实际构建通过。W2已有Harness等252、Codex/provision/Manager224及扩大接续270项；本机arm64实际Codex0.149.1/Claude2.1.246各两执行器并行的私有MCP调用、skills及Stop事件、独立原生CI入口通过，模型仅loopback替身。四平台真实CLI独立矩阵39238914062全部通过（fe43dbac），TUI/真实Provider/文件管理器仍待验。Windows8a0646fb目录别名夹具失败，本机复现同步JS/异步原生realpath拼写差异并统一原生解析，23项共享/28项项目冷恢复通过，Windows独立矩阵35项项目/私有目录回归现通过；实际Claude通过，Codex实际MCP/模型成功但Stop未落盘。已改用选定Bash，并在冷恢复重装通知；另修含单引号路径的POSIX展开，83项通过/44项tmux条件跳过、本机两种真实CLI通过，Windows真实Codex/Claude修复重验均通过。
-- 已确认的回退保护补齐：目标Core须声明支持当前workspace格式，旧代码不能因Agent无SCHEMA_VERSION而静默打开新目录绑定；校验只读且先于所有模块迁移，保留数据/快照。版本、控制目录、链接及遗失登记失败明确拒绝，CLI/system调用链88项通过。新增现场旧项目目录授权兼容问题已纳入主任务，先对照历史/来源校验与迁移，不把storage=null全局放大、不改现场权限。
-- W4独立部分已补只读目录预检（绝对/外部链接、linked Git、项目venv、外部硬链接、不可读/特殊文件、目录/挂载变动）和可恢复扫描暂停/真实句柄收口，管理读取保持可用；尚未接完整迁移HTTP/持久协调器、执行层冻结/终态提交，不计在线迁移完成。Windows实际已分配空间及既有目录完整索引仍待。扩大Web旧Friend文案、Agent活动描述/Claude Stop hint/MCP选择器/未定义tail、Admin聊天超时均已独立定性为原源码基线，不假报全量绿；详细阶段与边界见[验收记录](crabot-docs/superpowers/plans/2026-10-17-desktop-application-validation.md)。未建PR或推产品main。
+- 已确认的回退保护补齐：目标Core须声明支持当前workspace格式，旧代码不能因Agent无SCHEMA_VERSION而静默打开新目录绑定；校验只读且先于所有模块迁移，保留数据/快照。版本、控制目录、链接及遗失登记失败明确拒绝，CLI/system调用链88项通过。新增现场旧对象目录授权兼容已纳入主任务。用户已书面修订：增设全目录选项，本版旧对象有效null一次转为显式全目录，新对象仍只用受管默认范围，file_io等开关及旧请求/Worker上限不改；[修订Spec](crabot-docs/superpowers/specs/2026-10-19-legacy-project-file-access-design.md)中的仅目录覆盖/继承及存储迁移细节待确认，未实现或改现场权限。
+- 合入main的请求完整来源与统一范围迁移，Agent/Core/Admin构建通过；升级库完整99通过/2项真实Core留隔离CI，维护/恢复81、请求派发25、项目Git6及Core全套181通过；修复system首启在模块schema不变时漏做请求准备，真实临时台账先红后绿。Agent全量既有重试夹具停滞，未改main独立限时50秒同样停滞，保留未完成记录并继续其余全套。main现行范围备份还需与桌面/system旧维护快照收口，不能沿用整Agent历史复制。8a0646fb完整原生ARM/Linux通过；Intel实际GUI首答、项目清单、崩溃接回及CLI停启已通过，但全job90分钟预算在最终GUI收尾前耗尽，按该实测只给Intel补15分钟；不把取消算验收通过。
+- W4独立部分已补只读目录预检（绝对/外部链接、linked Git、项目venv、外部硬链接、不可读/特殊文件、目录/挂载变动）和可恢复扫描暂停/真实句柄收口，管理读取保持可用；尚未接完整迁移HTTP/持久协调器、执行层冻结/终态提交，不计在线迁移完成。Windows实际已分配空间及既有目录完整索引仍待。最新main合并后Shared179、Core181、Web400及桌面63项通过，另有按平台/整实例条件跳过；Agent除已在main同样停滞的重试文件外，4320通过、34失败，14份失败文件在未改main逐条复现相同34项。Admin两项静态断言已在main复现；旧WS收帧后关闭连接的消息丢失确认为本分支回归，新增回归先红后绿，相关129项通过，Admin全量1452通过、仅余2项main同源静态断言失败，不假报全量绿；详细阶段与边界见[验收记录](crabot-docs/superpowers/plans/2026-10-17-desktop-application-validation.md)。未建PR或推产品main。
 - P0–P4内置环境、共享实例、SDK、OS peer及真实Electron边界已有四平台基础证据；受管MCP按稳定id隔离，五类真实stdio冲突依赖/离线连接/凭据过滤已验证。HTTP文字、旧WS与业务权限契约保持。39159925457四平台代码回归全部通过，但full_runtime=false，未执行整包及真实systemd，不能记为最新完整原生验收；模型配置加载器现加入完整范围触发条件。
 - P5已接模型、主题、权限与本地诊断；补齐内置文件/Python工作环境/空间不足说明和固定修复指南入口，控制器等31项及Web首次引导等15项通过，不新增恢复动作。mirror-xinshu经Admin解析/Agent adapter两次短请求成功（输入63/输出19），未改生产配置；真实Admin HTTP→引用存储/版本→Core双slot及Provider变更重解析等19项通过。明确缺模型的真实RpcCallError立即返回既有降级配置，网络/认证仍重试，50项回归和Agent编译通过。补整套实际GUI保存默认模型→UI发言→Manager/send_message→可见气泡与持久ack/交付的隔离CI，模型仅本地替身；补齐Manager必填post_send_action后真实工具面90项通过，77c53baa的ARM完整GUI首答、持久ack/交付通过（两次请求）；真实Provider完整GUI仍待。
 - P6已接登录自启动、同通道更新入口、活动核对、共享停机/备份/恢复和独立CLI完整归档升级；实际HTTP/SHA/解包/crabot upgrade保留停止状态与依赖已验。最终GUI安装按钮及全平台更新后健康仍待验收。普通CLI密码输入竞态/粘贴回车已修，19项含CRLF回归、真实PTY及临时DATA_DIR密码轮换验证通过，未启动MM。
@@ -29,6 +56,17 @@
 
 - PR #206 review 第3项已复核为真实回归：Channel 短暂重启时，get_capabilities 原位于发送重试外，导致普通渠道直接失败。只为该只读预检复用现有瞬态重试，不缓存能力、不改变 Voice 标签拒绝或发送后状态。
 - 三项回归先失败后通过，相关发送/私发/ask_human/目标观察28项与Agent构建通过；预检最多3次，永久错误立即返回，未确认能力前不发送。源码修复不代表已替换现场部署。
+
+### 语音整组：受控模型与播报验收通过，准备联合升级
+
+- 已确认整组设计与最终四处精简提示词；正式协议先行发布 v0.8.0 / wire8。所有者激活、请求级授权/插话隔离、异步任务回报与三项按需 voice 工具均已有候选；15/11/3 常驻目录不扩张，非语音、共享主控、Worker/daily/graph 不暴露管理工具。
+- 原 Master 请求固定权限上限及当前授权；设备三段自动引导、真实提示播放完成后采样、单人一致性与既有身份冲突检查、候选密文保存、普通好友提交、目录确认和原请求完成事件接通。重录成功前保旧，改名/撤销保联系人与好友；撤销设备清除待确认如实返回。样本不经 ASR/Agent，不借所有者认主或 human 凭据。
+- Voice 状态升 v4，v2/v3 迁移先核对备份；未接纳采样在断连/后台/撤权/重启后停止，已接纳结果沿原操作收口。结果私发保持原目标；公共完成后的待机恢复须关联原请求实际播放，其他通知不能代替。
+- 本轮 Shared149、Admin语音79、Agent相关314、Voice33、Core切换13、升级16、离线装配16及Web语音配置8通过；四个后端模块编译通过。Android0.7.0/code16/wire8：JVM26及只读模拟器10项通过，生产/测试APK构建完成，生产包不含公开测试录音；未覆盖安装用户手机。
+- 已精确应用用户确认的共享交办/设备采样提示职责文字，新增16次真实模型调用：首次添加与重录各只执行一次操作、提交后回报，均只有接单与完成两段播报，人工逐段核对和重复检查均通过。首段可播文字约3.43/2.25秒，尚未包含真实ASR/TTS/手机音频；首次添加一次无播报模型轮耗时63.7秒已如实保留。159项定向、17项离线、8种投影和实际输入审计通过；此前未执行与重复指引失败记录保留。证据：[全语音管理验证](crabot-agent/eval/shared-requests/evidence-2026-10-17-guided-management.json)。
+- 前置整仓检查、真正main失败对照、默认目录修复及1435文件隔离演练保留在[联合升级准备](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/plans/2026-10-17-voice-joint-upgrade-readiness.md)；演练不是全量备份。现场仍为wire5；原停机全量备份安排已中止，先完成通用升级修订及副本验证，现场切换另获授权。保留配对、FuFu、好友、历史和任务产物，不卸载/清数据、不部署半套协议。
+- 2026-10-18联合升级已停止：按授权清理未占用缓存/孤立临时文件，实际释放约14.9GiB，保留业务数据及进行中任务。旧APK与配对/声纹密文已备份且新旧签名一致；停机全量备份未完成校验即中止，不能称为已验证完整备份。已恢复停机前源码及25处已校验旧构建/依赖，8模块恢复运行；未执行数据迁移、覆盖业务数据或安装新APK。原ADB守护进程未重启但后续仍有USB掉线，不再将短时成功称为稳定恢复。后续先修通用升级流程，不再沿用停机全量备份安排。
+- 真人验收尚未进行：先单人唤醒/接单/任务回报与生命周期，再由两位真人分别完成登记/识别；单人自演不能证明多人效果。两端准备完成后再请用户录音。
 
 ### crabot check 运行状态误报：已修复
 
@@ -110,7 +148,7 @@
 - 语音当前以`<voice_reply>`增量投递，系统提示词、最终工具面、一次纠偏及交付判定已按确认稿条件化，其它渠道继续send_message。逐句TTS、连续PCM、started/completed、response_end接话及外发后禁止整请求重试已实现，重启不补播。旧轮8aecebaf三次SSE错误后总69.869秒超过60秒机会；0.5.1已修复超时关麦与首页原因，不能将该修复或最新成功播报当作延迟验收。原SSE错误映射502的四次授权重放均HTTP200，根因未复现，未据此更换模型。
 - 唯一普通语音群允许陌生人发言，逐片段保留好友/陌生人和全部内容；好友按当前ChannelIdentity解析，声纹不授予权限。重叠、无效分段/ASR失败仍整轮失败；授权快照整批入inbox，重启不复活回答机会。私聊及自然抢话/AEC属于后续范围。
 - Admin创建向导与WS/WSS共端口已部署；完整BASE_URL保留端口/路径前缀，HTTP/HTTPS推荐WS/WSS且可显式选择，同网允许局域网。内部Voice入口只监听loopback，二维码pin或系统CA/hostname失败不降级；历史v2需明确撤销重配，有效v3/v4配对可直接升级。扫码竖屏、现场核对与局域网WSS已通过；公网默认BASE_URL的Upgrade曾502，隧道未修改。
-- 创建向导与群准入分离仍按独立[10月12日修订稿](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/specs/2026-10-12-voice-creation-and-enrollment-separation-design.md)待确认。首次成功登记才形成联系人已由10月14日稿覆盖，其余创建阶段好友绑定/finish/group_ready改动未实施；当前未完成实例保留draft/auto_start=false，完成前仍检查登记与普通群名册准入。
+- 创建阶段本人手动登记/绑定已由10月15日整组确认稿替代：新增所有者自动关联后仍保留草稿及普通群准入；不纳入旧稿未确认的 group_ready 等独立设想。整组 wire6 尚未统一部署，现场仍按原版本运行。
 - 后端定向及集成构建/回归已完成，既有Admin/Web/Agent全量失败在未修改main复现；不声称整仓全量绿色，具体数字与历史联调见PR及[Android验证目录](https://github.com/smilefufu/crabot-voice-android/tree/main/docs/verification)。本次只改Android与进度记录，无后台产品代码或重启。
 - 后续验收：多位真人A/B/A、未知者短句误识率、三轮接话、唤醒误触发、50轮整体延迟、回声/AEC、功耗及Linux两UID隔离。公开文件和一次FuFu成功不能证明这些指标；整体流畅性仍待改善。
 

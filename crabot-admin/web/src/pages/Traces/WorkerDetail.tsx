@@ -19,6 +19,8 @@ import {
 import { describeWorkerTask, TONE_COLOR } from './worker-state'
 import { WorkerRuntime, runtimeEvent, runtimeEventText } from './WorkerRuntime'
 import { ExecutionFacts } from './ExecutionFacts'
+import { RequestAuthority } from './RequestAuthority'
+import type { WorkerRequestAuthorityView } from '../../services/agent-observability'
 
 const IMPL_LABEL: Record<WorkerIncarnation['impl'], string> = {
   builtin: '内置',
@@ -688,6 +690,7 @@ const WorkerDetailContent: React.FC = () => {
   const { workerId = '' } = useParams()
   const [worker, setWorker] = useState<LedgerWorker | null>(null)
   const [observations, setObservations] = useState<ExecutionObservation[]>([])
+  const [authority, setAuthority] = useState<WorkerRequestAuthorityView>()
   const [selectedSeq, setSelectedSeq] = useState<number | undefined>(undefined)
   const [managerDisplayName, setManagerDisplayName] = useState<string | null | undefined>(undefined)
   const [loading, setLoading] = useState(true)
@@ -698,6 +701,7 @@ const WorkerDetailContent: React.FC = () => {
     let inFlight = false
     setLoading(true)
     setWorker(null)
+    setAuthority(undefined)
     setManagerDisplayName(undefined)
     const managersRequest = agentObservabilityService.listManagers(1, 100).catch(() => undefined)
     const refresh = () => {
@@ -709,6 +713,7 @@ const WorkerDetailContent: React.FC = () => {
         if (cancelled) return
         setError(null)
         setWorker(result.worker)
+        setAuthority(result.request_authority)
         setObservations(result.execution_observations ?? [])
         setSelectedSeq((selected) => selected ?? mainlineIncarnation(result.worker.incarnations)?.seq)
         void managersRequest
@@ -792,6 +797,7 @@ const WorkerDetailContent: React.FC = () => {
         </div>
       </section>
 
+      <RequestAuthority authority={authority} binding={worker.origin.request} />
       <ExecutionFacts observation={observations.find(item => item.incarnation_id === selectedIncarnation?.incarnation_id)} />
 
       <div style={{ marginTop: 30 }}>

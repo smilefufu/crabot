@@ -48,7 +48,7 @@ function makeHarness(impl: WorkerImplId = 'builtin'): WorkerHarness {
     capabilities: () => ({ fork: true, revive: true, goalMode: false, subagent: false, structuredTrace: true }),
   } as unknown as WorkerAdapter
   return new WorkerHarness({ adapters: new Map([[impl, adapter]]), defaultImpl: impl, ledger,
-    workspaces: new WorkspaceManager(path.join(root, 'workspaces')), workersDir: path.join(root, 'workers'),
+    workspaces: new WorkspaceManager(path.join(root, 'workspaces'), path.join(root, 'data')), workersDir: path.join(root, 'workers'),
     now: () => new Date().toISOString(), onOperationNotification: async (_key, event) => { events.push(event) },
   })
 }
@@ -64,6 +64,7 @@ beforeEach(async () => {
   root = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'harness-workspace-git-')))
   workspace = path.join(root, 'workspace')
   await fs.mkdir(workspace)
+  await fs.mkdir(path.join(root, 'data'), { mode: 0o700 }); await fs.mkdir(path.join(root, 'workspaces'), { mode: 0o700 })
   ledger = new LedgerStore(path.join(root, 'ledgers'))
   seq = 0
   events = []
@@ -114,9 +115,17 @@ describe('Harness workspace Git contract', () => {
 
   it('denies automatic Git reads without file_io, including turn completion; explicit denial calls no inspector', async () => {
     const inspect = vi.spyOn(WorkspaceGitInspector.prototype, 'inspect')
-    const worker = await spawn(false)
+    const disabled = await spawn(false)
+    expect(disabled.incarnations[0].workspace_instructions).toMatchObject({ source: 'absent' })
+    expect(inspect).not.toHaveBeenCalled()
+    const worker = await spawn()
+    const { WorkerContextStore } = await import('../../../src/workers/harness/context-store.js')
+    const contexts = new WorkerContextStore(path.join(root, 'workers')), saved = await contexts.read(worker.worker_id)
+    // Historical tasks with file_io disabled may exist; observing them still does not read Git.
+    await contexts.write(worker.worker_id, { ...saved!, principal_permissions: { ...saved!.principal_permissions!, tool_access: { ...saved!.principal_permissions!.tool_access, file_io: false } } })
+    inspect.mockClear()
     const incarnation = worker.incarnations[0]
-    expect(incarnation).toMatchObject({ workspace_git: { state: { status: 'error', reason_code: 'access_denied' } } })
+    expect(incarnation.workspace_git).toBeDefined()
     await expect(harness.inspectWorkspaceGit(worker.worker_id, async (actual) => actual)).rejects.toThrow('file_io')
     harness.handleStateChange({ worker_id: worker.worker_id, incarnation_id: incarnation.incarnation_id, seq: 1,
       impl: 'builtin', session_ref: 'native-session' }, 'idle', { completionSource: 'builtin_end_turn' })

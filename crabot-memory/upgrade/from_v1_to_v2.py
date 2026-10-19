@@ -23,6 +23,10 @@ from src.long_term_v2.sqlite_index import SqliteIndex
 from src.long_term_v2.paths import entry_path
 
 
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from scoped_upgrade import enter, require_context
+
 _LESSON_TAGS = {"lesson", "task_experience"}
 
 
@@ -150,6 +154,8 @@ def main():
     args = ap.parse_args()
 
     data_dir = args.data_dir
+    if enter(Path(data_dir), 1, 2) is not None:
+        return
     old_records = _read_old_records(data_dir)
 
     if not old_records:

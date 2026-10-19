@@ -266,6 +266,8 @@ async function withStreamConsumptionRetry(
     }
     if (request) observe(request)
     const consumer = params.createTextConsumer?.()
+    const abortConsumer = () => { void consumer?.abort().catch(() => {}) }
+    if (consumer) params.signal?.addEventListener('abort', abortConsumer, { once: true })
     let firstChunkMs: number | undefined
     let chunkCount = 0
     try {
@@ -403,6 +405,8 @@ async function withStreamConsumptionRetry(
       attempt++
       // 下一轮 loop 会用全新 processor + 重新 call adapter.stream()，
       // 服务端生成新 response（partial 浪费，但 task 能完成）
+    } finally {
+      if (consumer) params.signal?.removeEventListener('abort', abortConsumer)
     }
   }
   // 循环条件耗尽（含 configSwitchBudget 路径）也要给出可诊断的放弃错误

@@ -1,9 +1,10 @@
 import { promises as fs, type BigIntStats } from 'fs'
 import { join, dirname } from 'path'
 import { randomUUID } from 'crypto'
-import { canonicalizeJson } from 'crabot-shared'
+import { canonicalizeJson, sha256CanonicalJson } from 'crabot-shared'
 import { AsyncMutex } from '../async-mutex'
-import type { Incarnation, LedgerWorker, LegacyArchivedIncarnation, ManagerKey, WorkerLedger } from './ledger-types'
+import { assertConversationRequestBinding } from './request-binding.js'
+import type { Incarnation, LedgerWorker, LegacyArchivedIncarnation, ManagerKey, WorkerLedger, RequestAwareWorkerLedgerFile } from './ledger-types'
 
 const FILE_SUFFIX = '.json'
 const LEDGER_CACHE_BYTES = 64 * 1024 * 1024
@@ -49,14 +50,20 @@ export function filenameToManagerKey(filename: string): ManagerKey | undefined {
   }
 }
 
-async function writeJsonAtomic(path: string, data: unknown): Promise<void> {
+async function writeJsonAtomic(path: string, data: unknown, privateFile = false): Promise<void> {
   const tmpPath = join(dirname(path), `.tmp-${randomUUID()}${FILE_SUFFIX}`)
-  await fs.writeFile(tmpPath, JSON.stringify(data, null, 2), 'utf-8')
-  await fs.rename(tmpPath, path)
+  try {
+    if (privateFile) {
+      const handle = await fs.open(tmpPath, 'wx', 0o600)
+      try { await handle.writeFile(JSON.stringify(data, null, 2)); await handle.sync() } finally { await handle.close() }
+    } else await fs.writeFile(tmpPath, JSON.stringify(data, null, 2), 'utf-8')
+    await fs.rename(tmpPath, path)
+  } catch (error) { await fs.rm(tmpPath, { force: true }).catch(() => undefined); throw error }
 }
 
 /** Session-scoped worker ledger store. It never scans the retired friend/group ledger directory. */
 export class LedgerStore {
+  private readonly requestAwareLedgers = new Set<ManagerKey>()
   private readonly ledgersDir: string
   private readonly mutexes = new Map<ManagerKey, AsyncMutex>()
   /** Serializes same-worker upserts across ledgers before either file can be written. */
@@ -132,9 +139,12 @@ export class LedgerStore {
       const index = ledger.workers.findIndex(w => w.worker_id === workerId)
       const prev = index >= 0 ? ledger.workers[index] : undefined
       const workspaceBefore = prev?.workspace_id
-      const next = mutator(prev)
+      const previousRequest = canonicalizeJson(prev?.origin.request ?? null)
+      const proposed = mutator(prev)
+      const next = proposed?.origin.request ? structuredClone(proposed) : proposed
       if (!next) return undefined
       assertWorkerLegacyShape(next)
+      if (prev && previousRequest !== canonicalizeJson(next.origin.request ?? null)) throw new Error(`[LedgerStore] request binding is immutable; historical Workers cannot acquire it: ${workerId}`)
       if (prev?.legacy_source) {
         assertLegacyWorker(prev)
         assertLegacyWorker(next)
@@ -166,7 +176,7 @@ export class LedgerStore {
       }
       if (index >= 0) ledger.workers[index] = next
       else ledger.workers.push(next)
-      await writeJsonAtomic(this.pathFor(key), ledger)
+      await this.writeLedgerFile(key, ledger)
       this.workerIndex.set(workerId, key)
       return next
     }))
@@ -213,6 +223,10 @@ export class LedgerStore {
   }
 
   private assertWorkerOwner(key: ManagerKey, worker: LedgerWorker): void {
+    if (worker.origin.request !== undefined) {
+      assertConversationRequestBinding(worker.origin.request)
+      if (worker.origin.trigger_type !== 'message' || worker.legacy_source) throw new Error('[LedgerStore] request binding requires a real human Worker source')
+    }
     if (worker.manager_key !== key) {
       throw new Error(`[LedgerStore] manager_key mismatch: file ${key}, worker ${worker.worker_id} has ${worker.manager_key}`)
     }
@@ -309,12 +323,36 @@ export class LedgerStore {
   private async parseLedgerFile(key: ManagerKey, raw: string): Promise<ReturnType<LedgerStore['assertLedger']>> {
     const filePath = this.pathFor(key)
     try {
-      const normalized = this.assertLedger(key, JSON.parse(raw) as WorkerLedger)
-      if (normalized.archivedAmbiguousLegacy) await writeJsonAtomic(filePath, normalized.ledger)
+      const physical = JSON.parse(raw)
+      const wrapped = physical && typeof physical === 'object' && !Array.isArray(physical) && Object.prototype.hasOwnProperty.call(physical, 'schema_version')
+      if (wrapped && (physical.schema_version !== 1 || Object.keys(physical).length !== 2 || !Object.prototype.hasOwnProperty.call(physical, 'ledger'))) throw new Error('Unsupported request-aware ledger envelope')
+      const normalized = this.assertLedger(key, wrapped ? physical.ledger : physical)
+      if (!wrapped && (this.requestAwareLedgers.has(key) || normalized.ledger.workers.some(worker => worker.origin.request !== undefined))) throw new Error('Request Worker ledger requires the versioned envelope')
+      if (wrapped) this.requestAwareLedgers.add(key)
+      if (normalized.archivedAmbiguousLegacy) await this.writeLedgerFile(key, normalized.ledger)
       return normalized
     } catch (err) {
       throw new Error(`[LedgerStore] invalid ledger ${filePath}: ${(err as Error).message}`)
     }
+  }
+
+  private async writeLedgerFile(key: ManagerKey, ledger: WorkerLedger): Promise<void> {
+    const filePath = this.pathFor(key)
+    const aware = this.requestAwareLedgers.has(key) || ledger.workers.some(worker => worker.origin.request !== undefined)
+    if (aware && !this.requestAwareLedgers.has(key)) {
+      let raw: string | undefined
+      try { raw = await fs.readFile(filePath, 'utf8') }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
+      if (raw !== undefined) {
+        const backup = `${filePath}.pre-request-${sha256CanonicalJson(raw)}.bak`
+        try { await fs.writeFile(backup, raw, { flag: 'wx', mode: 0o600 }) }
+        catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error }
+        if (await fs.readFile(backup, 'utf8') !== raw) throw new Error('Request ledger backup verification failed')
+      }
+    }
+    const physical: WorkerLedger | RequestAwareWorkerLedgerFile = aware ? { schema_version: 1, ledger } : ledger
+    await writeJsonAtomic(filePath, physical, aware)
+    if (aware) this.requestAwareLedgers.add(key)
   }
 
   private async scanAndBuildIndex(): Promise<void> {

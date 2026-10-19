@@ -1,6 +1,8 @@
 import { WorkspaceExecutionInventorySchema, WorkspaceIdSchema } from 'crabot-client'
 import { WorkspaceService } from './workspaces.js'
 import { resolveManagedMcpConfig } from './managed-mcp-runtime.js'
+import type { ConversationRequestSource } from 'crabot-shared'
+import type { VerifyMemoryAccessResult, VerifyMemoryRequestAccessResult } from 'crabot-shared'
 import { adminWebTransport } from './admin-web-transport.js'
 import { parseChatMultipartMetadata } from 'crabot-client'
 import { correlateHttpRequest } from './http-diagnostics.js'
@@ -195,6 +197,11 @@ import {
   createCliAccessConfig,
   type ResolvePrincipalPermissionsParams,
   type ResolvePrincipalPermissionsResult,
+  type ResolveRequestPermissionSourceParams,
+  type ResolveRequestPermissionSourceResult,
+  type RequestPermissionSource,
+  type ResolveRequestPermissionSourcesParams,
+  type ResolveRequestPermissionSourcesResult,
   type SetTaskGoalParams,
   type SetTaskGoalResult,
   type AppendTaskGoalAuditEntryParams,
@@ -859,6 +866,14 @@ export class AdminModule extends ModuleBase {
       terminalHosts: () => [...new Set(Object.values(os.networkInterfaces()).flatMap(addresses => (addresses ?? []).filter(a => !a.internal && a.family === 'IPv4' && !a.address.startsWith('169.254.')).map(a => `http://${a.address}:${this.adminConfig.web_port}`)))],
       closeGateway: id => this.voiceGateway.close(id),
       admissionReady: () => this.cutoverActivated,
+      ownerReady: () => this.dataLoaded,
+      friends: () => [...this.friends.values()],
+      persistFriend: async friend => {
+        if (!this.dataLoaded) throw new RpcError('SERVICE_UNAVAILABLE', '好友数据尚未加载')
+        this.friends.set(friend.id, friend)
+        for (const identity of friend.channel_identities) this.channelIdentityIndex.set(this.getChannelIdentityKey(identity), friend.id)
+        await this.saveData()
+      },
       verifyRuntime: async (id, bearer) => { await this.rpcClient.callModuleManagerSensitive('verify_voice_runtime', { expected_module_id: id }, this.config.moduleId, { authorizationBearer: bearer }) },
       verifyCore: async bearer => { await this.rpcClient.callModuleManagerSensitive('verify_core_agent_runtime', { expected_module_id: 'crabot-agent' }, this.config.moduleId, { authorizationBearer: bearer }) },
       verifyHuman: async bearer => {
@@ -871,12 +886,13 @@ export class AdminModule extends ModuleBase {
         const session = await this.resolveChannelSession(channelId, sessionId, this.getMasterPlatformUserIdsForChannel(channelId))
         return session.id === sessionId && session.channel_id === channelId && session.type === 'group' && sessionHasMasterParticipant(session, this.friends.values())
       },
-      channelAction: async (id, command, bearer) => {
+      channelAction: async (id, command, bearer, ownerActivation) => {
         const modules = await this.rpcClient.resolve({ module_id: id }, this.config.moduleId)
         if (!modules[0]) throw new RpcError('SERVICE_UNAVAILABLE', 'Voice Channel is not running')
-        return this.rpcClient.callSensitive(modules[0].port, 'voice_admin_action', { channel_id: id, command }, this.config.moduleId, { authorizationBearer: bearer })
+        return this.rpcClient.callSensitive(modules[0].port, 'voice_admin_action', { channel_id: id, command, ...(ownerActivation ? { owner_activation: ownerActivation } : {}) }, this.config.moduleId, { authorizationBearer: bearer })
       },
       publish: async payload => { await this.rpcClient.publishEvent({ id: generateId(), type: 'channel.voice_turn_authorized', source: this.config.moduleId, payload, timestamp: generateTimestamp() }, this.config.moduleId) },
+      publishManagement: async payload => { await this.rpcClient.publishEvent({ id: generateId(), type: 'channel.voice_management_ready', source: this.config.moduleId, payload, timestamp: generateTimestamp() }, this.config.moduleId) },
       configurationChanged: async () => {
         for (const instance of this.channelManager.listInstances().items.filter(i => i.implementation_id === 'channel-voice')) {
           this.voiceAdmin.turns.disconnect(instance.id)
@@ -1047,6 +1063,12 @@ export class AdminModule extends ModuleBase {
     this.registerMethod('sync_voice_terminal', (params: unknown, context?: RpcHandlerContext) => this.voiceAdmin.sync(params, context?.authorizationBearer))
     this.registerMethod('manage_voice_contacts', (params: unknown, context?: RpcHandlerContext) => this.voiceAdmin.manageContacts(params, context?.authorizationBearer))
     this.registerMethod('get_voice_management_result', (params: unknown, context?: RpcHandlerContext) => this.voiceAdmin.managementResult(params, context?.authorizationBearer))
+    this.registerMethod('voice_agent_action', (params: unknown, context?: RpcHandlerContext) => this.voiceAdmin.agent.action(params, context?.authorizationBearer))
+    this.registerMethod('get_pending_voice_agent_operations', async (params: unknown, context?: RpcHandlerContext) => {
+      await this.voiceAdmin.verifyAgentRuntime(context?.authorizationBearer)
+      if (!params || typeof params !== 'object' || Array.isArray(params) || Object.keys(params).length) throw new RpcError('INVALID_PARAMS', 'Expected empty parameters')
+      return { operations: this.voiceAdmin.turns.agentPending() }
+    })
     this.registerMethod('verify_voice_admin', (params: { channel_id: string }, context?: RpcHandlerContext) => this.voiceAdmin.verifyHuman(params, context?.authorizationBearer))
     this.registerMethod('verify_voice_agent', (params: { channel_id: string }, context?: RpcHandlerContext) => this.voiceAdmin.verifyAgent(params, context?.authorizationBearer))
 
@@ -1075,6 +1097,8 @@ export class AdminModule extends ModuleBase {
       await this.handleGetFriendPermission(params.friend_id)
     )
     this.registerMethod('resolve_principal_permissions', this.resolvePrincipalPermissions.bind(this))
+    this.registerMethod('resolve_request_permission_sources', this.handleResolveRequestPermissionSources.bind(this))
+    this.registerMethod('resolve_request_permission_source', this.handleResolveRequestPermissionSource.bind(this))
     this.registerMethod('get_group_session_config', this.handleGetGroupSessionConfig.bind(this))
     this.registerMethod('update_group_session_config', this.handleUpdateGroupSessionConfig.bind(this))
     this.registerMethod('delete_group_session_config', this.handleDeleteGroupSessionConfig.bind(this))
@@ -4197,7 +4221,7 @@ export class AdminModule extends ModuleBase {
   }
 
   private async handleUpdateFriend(params: UpdateFriendParams): Promise<{ friend: Friend }> {
-    const existing = this.friends.get(params.friend_id)
+    let existing = this.friends.get(params.friend_id)
     if (!existing) {
       throw new Error('Friend not found')
     }
@@ -4210,6 +4234,12 @@ export class AdminModule extends ModuleBase {
       if (existingMaster) {
         throw new Error('A master friend already exists')
       }
+    }
+
+    if (existing.permission === 'master' && params.permission === 'normal' && this.dataLoaded && this.voiceAdmin.owners.hasPendingTarget(existing.id)) {
+      await this.voiceAdmin.owners.noteFriendWithdrawal(existing.id)
+      existing = this.friends.get(params.friend_id)
+      if (!existing) throw new RpcError('CONFLICT', '好友在所有者关联期间发生变化')
     }
 
     const nextPermission = params.permission ?? existing.permission
@@ -4236,13 +4266,19 @@ export class AdminModule extends ModuleBase {
   }
 
   private async handleDeleteFriend(params: { friend_id: FriendId }): Promise<{ deleted: true }> {
-    const friend = this.friends.get(params.friend_id)
+    let friend = this.friends.get(params.friend_id)
     if (!friend) {
       throw new Error('Friend not found')
     }
 
     if (friend.permission === 'master') {
       throw new Error('Cannot delete master friend')
+    }
+
+    if (this.dataLoaded && this.voiceAdmin.owners.hasPendingTarget(friend.id)) {
+      await this.voiceAdmin.owners.noteFriendWithdrawal(friend.id)
+      friend = this.friends.get(params.friend_id)
+      if (!friend || friend.permission === 'master') throw new RpcError('CONFLICT', '好友在所有者关联期间发生变化')
     }
 
     // 清理索引
@@ -4296,7 +4332,7 @@ export class AdminModule extends ModuleBase {
     channel_id: ModuleId
     platform_user_id: string
   }): Promise<{ friend: Friend }> {
-    const existing = this.friends.get(params.friend_id)
+    let existing = this.friends.get(params.friend_id)
     if (!existing) {
       throw new Error('Friend not found')
     }
@@ -4308,6 +4344,12 @@ export class AdminModule extends ModuleBase {
 
     if (!hasIdentity) {
       throw new Error('Channel identity not found')
+    }
+
+    if (this.dataLoaded && this.voiceAdmin.owners.hasPendingTarget(existing.id)) {
+      await this.voiceAdmin.owners.noteIdentityUnlink(existing.id, params.channel_id, params.platform_user_id)
+      existing = this.friends.get(params.friend_id)
+      if (!existing?.channel_identities.some(identity => identity.channel_id === params.channel_id && identity.platform_user_id === params.platform_user_id)) throw new RpcError('CONFLICT', '好友渠道身份在所有者关联期间发生变化')
     }
 
     const friend: Friend = {
@@ -8120,13 +8162,13 @@ export class AdminModule extends ModuleBase {
     const credential = payload.agent_cli
     if (!route || !credential) throw new RpcError('FORBIDDEN', 'Agent CLI route is not allowed')
 
-    let execution: { valid: true; cli_access: 'none' | 'read' | 'write'; shell: boolean }
+    let execution: { valid: true; cli_access: 'none' | 'read' | 'write'; shell: boolean; request_verified?: true }
     try {
       const port = await this.ensureAgentPort()
       if (!port) throw new Error('Agent unavailable')
       execution = await this.rpcClient.call<
         { execution: AgentCliExecutionRef; domain: CliDomain; access: 'read' | 'write' },
-        { valid: true; cli_access: 'none' | 'read' | 'write'; shell: boolean }
+        { valid: true; cli_access: 'none' | 'read' | 'write'; shell: boolean; request_verified?: true }
       >(port, 'authorize_agent_cli_execution', {
         execution: credential.execution,
         domain: route.domain,
@@ -8141,6 +8183,11 @@ export class AdminModule extends ModuleBase {
     if (execution.valid !== true || !['none', 'read', 'write'].includes(execution.cli_access)
       || typeof execution.shell !== 'boolean') throw new RpcError('FORBIDDEN', 'Invalid execution authorization')
 
+    if (execution.request_verified === true) {
+      if (credential.execution.kind !== 'worker' || credential.target_session.type !== 'group'
+        || !execution.shell || !hasCliAccess(execution.cli_access, route.access)) throw new RpcError('FORBIDDEN', 'Invalid request authorization')
+      return { context: credential, shell: true, masterPrivate: false }
+    }
     const principal = await this.resolvePrincipalPermissions({
       ...(credential.target_session.type === 'private' && credential.creator_friend_id
         ? { sender_friend_id: credential.creator_friend_id }
@@ -9935,6 +9982,58 @@ export class AdminModule extends ModuleBase {
     }
   }
 
+  private async requireRequestSourceCaller(context?: RpcHandlerContext): Promise<void> {
+    const bearer = context?.authorizationBearer
+    if (!bearer) throw new RpcError('UNAUTHORIZED', 'Missing runtime credential')
+    try {
+      await this.rpcClient.callModuleManagerSensitive('verify_core_agent_runtime', { expected_module_id: 'crabot-agent' }, this.config.moduleId, { authorizationBearer: bearer })
+    } catch (error) {
+      const code = error && typeof error === 'object' && 'code' in error ? error.code : undefined
+      if (code === 'UNAUTHORIZED' || code === 'FORBIDDEN') throw new RpcError(code, 'Invalid core Agent credential')
+      throw new RpcError('SERVICE_UNAVAILABLE', 'Request source verifier unavailable', { retryable: true })
+    }
+    if (!this.dataLoaded) throw new RpcError('SERVICE_UNAVAILABLE', '好友权限数据尚未加载')
+  }
+
+  private validateRequestSource(value: unknown): ConversationRequestSource {
+    const keys = ['source_id', 'channel_id', 'session_id', 'session_type', 'platform_message_id', 'platform_user_id', 'sender_friend_id']
+    if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length !== keys.length || keys.some(key => !Object.prototype.hasOwnProperty.call(value, key))) throw new RpcError('INVALID_PARAMS', '请求来源不完整或包含未知字段')
+    const source = value as ConversationRequestSource
+    if (typeof source.source_id !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(source.source_id)
+      || source.session_type !== 'group' || [source.channel_id, source.session_id, source.platform_message_id, source.platform_user_id].some(item => typeof item !== 'string' || !item.trim())
+      || source.sender_friend_id !== null && (typeof source.sender_friend_id !== 'string' || !source.sender_friend_id.trim())) throw new RpcError('INVALID_PARAMS', '请求来源不完整或包含未知字段')
+    return source
+  }
+
+  /** Identity/role/config are read in one synchronous snapshot, without a private-scene resolver. */
+  private requestFriendSource(source: ConversationRequestSource): RequestPermissionSource | null {
+    if (source.sender_friend_id === null) return null
+    const friend = this.resolveFriendByChannelIdentity(source.channel_id, source.platform_user_id)
+    if (!friend || friend.id !== source.sender_friend_id || !friend.channel_identities.some(identity => identity.channel_id === source.channel_id && identity.platform_user_id === source.platform_user_id)) throw new RpcError('FORBIDDEN', '原发起人的渠道好友绑定已失效或变化')
+    const resolved = this.buildResolvedFriendPermissions(friend)
+    if (!resolved) throw new RpcError('SERVICE_UNAVAILABLE', '原发起人的完整权限不可用')
+    return { kind: 'friend', subject_id: friend.id, is_master: friend.permission === 'master', resolved }
+  }
+
+  /** Creation captures both complete sources; no personal authority enters the shared Manager. */
+  private async handleResolveRequestPermissionSources(params: ResolveRequestPermissionSourcesParams, context?: RpcHandlerContext): Promise<ResolveRequestPermissionSourcesResult> {
+    await this.requireRequestSourceCaller(context)
+    if (!params || typeof params !== 'object' || Array.isArray(params) || Object.keys(params).length !== 1 || !Object.prototype.hasOwnProperty.call(params, 'source')) throw new RpcError('INVALID_PARAMS', 'Invalid request source parameters')
+    const source = this.validateRequestSource(params.source)
+    const group = await this.resolvePrincipalPermissions({ channel_id: source.channel_id, session_id: source.session_id, session_type: 'group' })
+    return structuredClone({ group: { kind: 'group', subject_id: `${source.channel_id}::${source.session_id}`, is_master: false, resolved: group.resolved }, friend: this.requestFriendSource(source) })
+  }
+
+  /** Operation-time checks need only the selected complete source. */
+  private async handleResolveRequestPermissionSource(params: ResolveRequestPermissionSourceParams, context?: RpcHandlerContext): Promise<ResolveRequestPermissionSourceResult> {
+    await this.requireRequestSourceCaller(context)
+    if (!params || typeof params !== 'object' || Array.isArray(params) || Object.keys(params).length !== 2 || !Object.prototype.hasOwnProperty.call(params, 'source') || !Object.prototype.hasOwnProperty.call(params, 'kind') || !['group', 'friend'].includes(params.kind)) throw new RpcError('INVALID_PARAMS', 'Invalid single request source parameters')
+    const source = this.validateRequestSource(params.source)
+    if (params.kind === 'friend') return structuredClone({ source: this.requestFriendSource(source) })
+    const result = await this.resolvePrincipalPermissions({ channel_id: source.channel_id, session_id: source.session_id, session_type: 'group' })
+    return { source: { kind: 'group', subject_id: `${source.channel_id}::${source.session_id}`, is_master: false, resolved: result.resolved } }
+  }
+
   /**
    * 解析"消息发起人"的 effective permissions
    *
@@ -10580,9 +10679,9 @@ export class AdminModule extends ModuleBase {
   }
 
   private async handleVerifyMemoryAccess(
-    params: { caller_kind?: unknown },
+    params: { caller_kind?: unknown; master_request?: unknown },
     context?: RpcHandlerContext,
-  ): Promise<{ verified: true }> {
+  ): Promise<VerifyMemoryAccessResult | VerifyMemoryRequestAccessResult> {
     const bearer = context?.authorizationBearer
     if (!bearer) throw new RpcError('UNAUTHORIZED', 'Missing Memory credential')
     if (params.caller_kind === 'admin_web') {
@@ -10603,6 +10702,16 @@ export class AdminModule extends ModuleBase {
       }
     } else {
       throw new RpcError('INVALID_PARAMS', 'Invalid Memory caller kind')
+    }
+    if (Object.keys(params).some(key => key !== 'caller_kind' && key !== 'master_request')) throw new RpcError('INVALID_PARAMS', 'Unknown Memory verifier parameter')
+    if (params.master_request !== undefined) {
+      if (params.caller_kind !== 'core_agent') throw new RpcError('FORBIDDEN', 'Master request requires the core Agent')
+      const request = params.master_request as Record<string, unknown>
+      if (!request || typeof request !== 'object' || Array.isArray(request) || Object.keys(request).length !== 2
+        || !Object.prototype.hasOwnProperty.call(request, 'request_id') || typeof request.request_id !== 'string' || !/^[0-9a-f]{64}$/.test(request.request_id) || !Object.prototype.hasOwnProperty.call(request, 'source')) throw new RpcError('INVALID_PARAMS', 'Invalid Memory request context')
+      const permissions = await this.handleResolveRequestPermissionSource({ source: request.source as ConversationRequestSource, kind: 'friend' }, context)
+      if (!permissions.source?.is_master || permissions.source.resolved.tool_access.memory !== true) throw new RpcError('FORBIDDEN', 'Current Master Memory authority required')
+      return { verified: true, request_verified: true }
     }
     return { verified: true }
   }

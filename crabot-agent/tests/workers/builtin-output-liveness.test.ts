@@ -3,6 +3,7 @@ import { promises as fs } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { BuiltinWorkerAdapter } from '../../src/workers/builtin/adapter.js'
+import { BUILTIN_WORKER_PERMISSIONS } from '../../src/workers/builtin/runtime.js'
 import { WorkerHarness } from '../../src/workers/harness/harness.js'
 import { LedgerStore } from '../../src/workers/harness/ledger-store.js'
 import { WorkspaceManager } from '../../src/workers/harness/workspace-manager.js'
@@ -68,6 +69,7 @@ describe('Output -> builtin Adapter -> liveness sweep', () => {
     adapter = new BuiltinWorkerAdapter({ dataDir: join(dir, 'builtin'), onStateChange: harness.handleStateChange })
     adapters.set('builtin', adapter)
     const worker = await harness.spawnWorker({ managerKey: 'test::output-liveness', title: 'controlled download', prompt: 'read output',
+      principal_permissions: BUILTIN_WORKER_PERMISSIONS,
       origin: { trigger_type: 'message' }, report_to: { channel_id: 'test', session_id: 'output-liveness' } })
     workerId = worker.worker_id
     await vi.waitFor(() => expect(sleeps).toBe(6))

@@ -1,5 +1,6 @@
 import { BUILTIN_WORKER_PERMISSIONS } from '../../src/workers/builtin/runtime.js'
 import { startFirstModelProvider } from '../../../crabot-desktop/tests/fixtures/first-model-provider.mjs'
+import { VOICE_TOOL_NAMES, VOICE_FAMILY_DESCRIPTION } from '../../src/manager/tools/voice-tools.js'
 /**
  * manager 封闭工具面装配测试 —— protocol-agent-v3.md §4.3。
  *
@@ -148,6 +149,39 @@ describe('主体授权与角色能力分开执行', () => {
     }
     expect(rpc.mock.calls.map(entry => entry[1])).toEqual(['get_capabilities', 'send_message'])
   })
+  it('loads execute_request only from the existing crabot family with no extra core or external search result', async () => {
+    const state = createManagerToolFaceState()
+    const executeRequest = vi.fn(async () => ({ request_id: 'fixed', status: 'waiting' as const, delivery: 'requester_private' as const, worker_ids: [], body: 'PRIVATE_BODY' }))
+    const deps = makeDeps({ requestAuthorization: 'shared', executeRequest, faceState: state })
+    const initial = buildManagerToolFace(deps)
+    expect(initial.map(tool => tool.name)).toEqual([...NORMAL_MANAGER_CORE_NAMES])
+    const search = await initial.find(tool => tool.name === 'search_tools')!.call({ query: 'execute_request' })
+    expect(search.output).toContain('no_match')
+    const loaded = await initial.find(tool => tool.name === 'load_tool_family')!.call({ family: 'crabot' })
+    expect(loaded.output).toContain('execute_request')
+    const tool = buildManagerToolFace(deps).find(tool => tool.name === 'execute_request')!
+    expect(tool).toBeDefined()
+    const result = await tool.call({ source_id: 'current', delivery: 'requester_private' })
+    expect(result.output).toContain('[本人私发请求状态：正文不在共享上下文显示。不得要求返回正文或改发原群。]')
+    expect(result.output).not.toContain('PRIVATE_BODY')
+    expect(executeRequest).toHaveBeenCalledTimes(1)
+    expect((await tool.call({ source_id: 'current', delivery: 'origin', permission: 'master' })).isError).toBe(true)
+    expect(executeRequest).toHaveBeenCalledTimes(1)
+    executeRequest.mockRejectedValueOnce(new Error('SECRET_FAILURE_BODY'))
+    expect((await tool.call({ source_id: 'current', delivery: 'requester_private' })).output).not.toContain('SECRET_FAILURE_BODY')
+    for (const requestAuthorization of [undefined, 'request'] as const) {
+      expect(buildManagerToolFace(makeDeps({ requestAuthorization, executeRequest })).some(tool => tool.name === 'execute_request')).toBe(false)
+    }
+  })
+
+  it('uses the approved request guidance on the real lazy tool face without growing the core', async () => {
+    const tools = buildManagerToolFace(makeDeps({ requestAuthorization: 'shared', faceState: createManagerToolFaceState() }))
+    expect(tools.map(tool => tool.name)).toEqual([...NORMAL_MANAGER_CORE_NAMES])
+    const guide = await tools.find(tool => tool.name === 'load_guidance')!.call({ name: 'manager.delegation' })
+    expect(guide.output).toContain('另一人的新指令先独立核验')
+    expect(guide.output).not.toContain('1. 对照当前要求和已有成果')
+  })
+
   it('loaded Memory and permission introspection use current host authorization, including direct calls after a new turn', async () => {
     const memoryRpc = vi.fn(async () => ({ results: [] }))
     const callAdmin = vi.fn(async () => ({ config: null, resolved: null }))
@@ -1344,4 +1378,31 @@ it('desktop first-model substitute emits a call that satisfies the actual Manage
     expect(input.post_send_action).toBe('none')
     expect(input.channel_id).toBe('admin-web'); expect(input.session_id).toBe('admin-chat')
   } finally { await provider.close() }
+})
+
+describe('guided voice family projection', () => {
+  const port = () => ({ context: { request_id: 'a'.repeat(64), turn_id: '00112233-4455-4677-8899-aabbccddeeff', source: {} as never },
+    call: vi.fn(async () => ({ operation_id: null, status: 'completed' as const, catalog: { enrollment_revision: 0, contacts: [], registrations: [], pending_enrollment: null }, contacts: [] })) })
+  it('keeps the fixed core, loads voice only on demand and exposes it on the next turn', async () => {
+    const state = createManagerToolFaceState(), voiceManagement = port()
+    const deps = makeDeps({ faceState: state, requestAuthorization: 'request', voiceManagement })
+    const first = buildManagerToolFace(deps)
+    expect(first.some(tool => (VOICE_TOOL_NAMES as readonly string[]).includes(tool.name))).toBe(false)
+    const loader = first.find(tool => tool.name === 'load_tool_family')!
+    expect(JSON.stringify(loader.inputSchema)).toContain(VOICE_FAMILY_DESCRIPTION)
+    const result = JSON.parse((await loader.call({ family: 'voice' }, {})).output)
+    expect(result.status).toBe('loaded'); expect(result.loaded.sort()).toEqual([...VOICE_TOOL_NAMES].sort())
+    expect(first.some(tool => tool.name === 'manage_voice_contacts')).toBe(false)
+    expect(buildManagerToolFace(deps).filter(tool => (VOICE_TOOL_NAMES as readonly string[]).includes(tool.name))).toHaveLength(3)
+    expect(JSON.parse((await loader.call({ family: 'voice' }, {})).output).status).toBe('already_visible')
+    expect(buildManagerToolFace({ ...deps, faceState: createManagerToolFaceState() }).some(tool => tool.name === 'manage_voice_contacts')).toBe(false)
+    expect(state.catalog!.search(createManagerToolFaceState(), '记住声音', 5).loaded).toEqual([])
+  })
+  it.each(['shared', 'daily_reflection', 'memory_graph_rebuild'])('does not install the family for %s', profile => {
+    const state = createManagerToolFaceState()
+    const face = buildManagerToolFace(makeDeps({ faceState: state, voiceManagement: port(),
+      ...(profile === 'shared' ? { requestAuthorization: 'shared' as const } : { profile: profile as 'daily_reflection' | 'memory_graph_rebuild', isBuiltinDailyReflection: profile === 'daily_reflection' }) }))
+    expect(face.some(tool => (VOICE_TOOL_NAMES as readonly string[]).includes(tool.name))).toBe(false)
+    expect(state.catalog!.loadFamily(state, 'voice').status).toBe('unavailable')
+  })
 })

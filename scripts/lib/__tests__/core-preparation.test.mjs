@@ -53,6 +53,7 @@ test('common start migrations preserve success/failure schema settlement without
   mkdirSync(join(module, 'upgrade'), { recursive: true }); mkdirSync(moduleData)
   writeFileSync(join(module, 'schema_version'), 'v1')
   writeFileSync(join(moduleData, 'existing.json'), '{}')
+  writeFileSync(join(module, 'upgrade/scope.mjs'), `export const migrationScope = () => ({ reads: [], writes: ['fixture/SCHEMA_VERSION'] })`)
   const script = join(module, 'upgrade', 'from_v0_to_v1.mjs')
   writeFileSync(script, 'process.exit(1)')
   await assert.rejects(applyStartupMigrations(root, data, process.env), { code: 'CRABOT_MIGRATION_FAILED' })

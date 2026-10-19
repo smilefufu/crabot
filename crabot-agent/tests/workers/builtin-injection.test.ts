@@ -138,6 +138,7 @@ const FINISH: Turn = {
 describe('builtin worker 注入管道（harness → 工厂回退）', () => {
   let dataDir: string
   let nowValue: number
+  const stacks: Array<{ harness: WorkerHarness; builtinAdapter: BuiltinWorkerAdapter }> = []
 
   function now(): string {
     nowValue += 1000
@@ -147,9 +148,14 @@ describe('builtin worker 注入管道（harness → 工厂回退）', () => {
   beforeEach(async () => {
     dataDir = await fs.mkdtemp(join(tmpdir(), 'builtin-injection-'))
     nowValue = Date.parse('2026-01-01T00:00:00.000Z')
+    stacks.length = 0
   })
 
   afterEach(async () => {
+    for (const { harness, builtinAdapter } of stacks) {
+      await builtinAdapter.dispose()
+      await Promise.all([...(harness as any).stateChangeTails.values()])
+    }
     vi.restoreAllMocks()
     await fs.rm(dataDir, { recursive: true, force: true })
   })
@@ -174,6 +180,7 @@ describe('builtin worker 注入管道（harness → 工厂回退）', () => {
       resolveRuntime: factory,
     })
     adaptersMap.set('builtin', builtinAdapter)
+    stacks.push({ harness, builtinAdapter })
     return { harness, builtinAdapter, adaptersMap }
   }
 
@@ -199,6 +206,7 @@ describe('builtin worker 注入管道（harness → 工厂回退）', () => {
       managerKey,
       title: '干活',
       prompt: '把活干完',
+      principal_permissions: BUILTIN_WORKER_PERMISSIONS,
       origin: { spawned_by_episode: 'wechat::sess-1', trigger_type: 'message', creator_friend_id: 'friend-f1' },
       report_to: { channel_id: 'wechat', session_id: 'sess-1' },
       impl: 'builtin',
@@ -259,6 +267,7 @@ describe('builtin worker 注入管道（harness → 工厂回退）', () => {
       managerKey: (`test::${'friend-f2'}` as ManagerKey),
       title: 'cc 干活',
       prompt: '干',
+      principal_permissions: BUILTIN_WORKER_PERMISSIONS,
       origin: { spawned_by_episode: 'wechat::s', trigger_type: 'message' },
       report_to: { channel_id: 'wechat', session_id: 's' },
       impl: 'claude-code',
@@ -279,6 +288,7 @@ describe('builtin worker 注入管道（harness → 工厂回退）', () => {
         managerKey,
         title: '干活',
         prompt: '干',
+        principal_permissions: BUILTIN_WORKER_PERMISSIONS,
         origin: { spawned_by_episode: 'wechat::s', trigger_type: 'message' },
         report_to: { channel_id: 'wechat', session_id: 's' },
         impl: 'builtin',

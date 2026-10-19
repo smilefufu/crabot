@@ -695,7 +695,7 @@ describe('WorkerHarness.spawnWorker', () => {
 
   it('部分历史权限先按 fail-closed 默认规范化，再交给 capability provider 与 adapter', async () => {
     const partialPermissions = {
-      tool_access: { mcp_skill: true },
+      tool_access: { mcp_skill: true, file_io: true },
       cli_access: { mcp: 'read' },
       storage: null,
       memory_scopes: ['legacy'],
@@ -713,12 +713,10 @@ describe('WorkerHarness.spawnWorker', () => {
     expect(fake.spawnCalls[0].principal_permissions).toEqual(normalized)
   })
 
-  it('无 principal 的新 worker 仍在 provision 前落空 context，而非误作 legacy ENOENT', async () => {
-    const { harness, workersDir } = await makeHarness()
-    const worker = await harness.spawnWorker(spawnParams({ principal_permissions: undefined }))
-    expect(JSON.parse(await fs.readFile(join(workersDir, worker.worker_id, 'context.json'), 'utf-8'))).toEqual({
-      manager_key: 'test::friend-1',
-    })
+  it('缺少主体的新任务在准备文件前拒绝，且不调用 provision', async () => {
+    const { harness, fake } = await makeHarness()
+    await expect(harness.spawnWorker(spawnParams({ principal_permissions: undefined }))).rejects.toThrow('CAPABILITY_UNKNOWN')
+    expect(fake.provisionCalls).toHaveLength(0)
   })
 
   it('context 原子写失败时不调用 provision，并按既有 spawn_failed 语义落账', async () => {

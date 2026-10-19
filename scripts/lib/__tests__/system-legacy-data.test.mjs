@@ -26,6 +26,7 @@ async function fixture(t, { fails = false } = {}) {
     files: { 'bin/node': { size: (await fsp.stat(node)).size, sha256: nodeHash } }, path_entries: ['bin'], python_home: 'bin', memory_packages: 'bin', seed_wheels: [] }))
   await fsp.mkdir(path.join(staging, 'crabot-fixture/upgrade'), { recursive: true })
   await fsp.writeFile(path.join(staging, 'crabot-fixture/schema_version'), 'v2')
+  await fsp.writeFile(path.join(staging, 'crabot-fixture/upgrade/scope.mjs'), `export const migrationScope = () => ({ reads: [], writes: ['fixture/content', 'fixture/SCHEMA_VERSION'] })`)
   await fsp.writeFile(path.join(staging, 'crabot-fixture/upgrade/from_v1_to_v2.mjs'),
     "import fs from 'node:fs';const dir=process.argv.find(a=>a.startsWith('--data-dir=')).slice(11);fs.appendFileSync(dir+'/content',' changed');process.exit(" + (fails ? '13' : '0') + ");")
   await writeCoreRelease(staging, { schema_version: 1, version: '1.2.4', platform: process.platform, arch: process.arch, commit: '1'.repeat(40), source_dirty: false })
@@ -90,8 +91,9 @@ test('a failed real schema migration stays guarded and never updates the origina
   await assert.rejects(f.invoke('migrate', { snapshot }), { code: 'CRABOT_MIGRATION_FAILED' })
   assert.equal(readVersionMaintenance(f.dataDir).phase, 'verifying'); assert.throws(() => assertVersionMaintenanceAllowsStart(f.dataDir))
   await assert.rejects(f.invoke('migrate', { snapshot })); await assert.rejects(f.invoke('cancel-preparation'))
+  assert.equal(JSON.parse(await fsp.readFile(path.join(f.dataDir, '.upgrade-migrations/crabot-fixture-v1-v2/state.json'), 'utf8')).phase, 'rolled_back')
   assert.equal(await fsp.readFile(f.manifestFile, 'utf8'), f.original)
-  assert.equal(await fsp.readFile(path.join(f.dataDir, 'fixture/content'), 'utf8'), 'before changed')
+  assert.equal(await fsp.readFile(path.join(f.dataDir, 'fixture/content'), 'utf8'), 'before')
 })
 
 for (const changed of ['operation', 'snapshot', 'manifest', 'selection']) test('changed migration authority preserves data and dispatches no migration: ' + changed, options, async t => {

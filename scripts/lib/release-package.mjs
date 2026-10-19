@@ -16,6 +16,14 @@ export async function verifyReleasePackage(root, version, { run = runBounded } =
   const required = ['cli.mjs', 'package.json', 'dist/cli/main.js', 'scripts/start.mjs', 'crabot-memory/pyproject.toml', 'crabot-memory/uv.lock']
   if (!Object.hasOwn(legacy, version)) required.push('scripts/check-release.mjs')
   for (const file of required) if (!existsSync(join(root, file))) throw new Error(`Release package missing ${file}`)
+  const requestUpgradeFiles = ['crabot-agent/shared_request_version', 'crabot-agent/dist/manager/request-upgrade.js', 'crabot-admin/dist/shared-request-impact.js', 'scripts/prepare-shared-requests.mjs', 'scripts/upgrade-lib/shared-requests.mjs']
+  if (requestUpgradeFiles.some(file => existsSync(join(root, file)))) {
+    for (const file of requestUpgradeFiles) if (!existsSync(join(root, file))) throw new Error(`Release package incomplete: missing ${file}`)
+  }
+  if (existsSync(join(root, 'scripts/upgrade-lib/prepared-upgrade.mjs'))) {
+    const scopedUpgradeFiles = ['crabot-agent/dist/manager/request-runtime-metadata.js', 'scripts/upgrade-lib/scoped-data.mjs', 'scripts/upgrade-lib/migration-transaction.mjs', 'scripts/upgrade-lib/preflight.mjs', 'scripts/upgrade-lib/shared-requests-v1.mjs', 'scripts/execute-scoped-migration.mjs', 'crabot-memory/upgrade/scope.mjs', 'crabot-memory/upgrade/scoped_upgrade.py']
+    for (const file of scopedUpgradeFiles) if (!existsSync(join(root, file))) throw new Error(`Release package incomplete: missing ${file}`)
+  }
   const dependencyHelpers = ['scripts/installer-deps.mjs', 'scripts/prepare-memory.mjs', 'scripts/lib/install-network.mjs', 'scripts/lib/memory-deps.mjs', 'scripts/lib/run-bounded.mjs']
   if (dependencyHelpers.some(file => existsSync(join(root, file)))) {
     for (const file of dependencyHelpers) if (!existsSync(join(root, file))) throw new Error(`Release package incomplete: missing ${file}`)

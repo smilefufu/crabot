@@ -2,7 +2,7 @@ import { existsSync, readFileSync, mkdirSync } from 'node:fs'
 import { join, resolve, delimiter } from 'node:path'
 import { homedir } from 'node:os'
 import { randomBytes } from 'node:crypto'
-import { scanModules, applyMigration } from '../upgrade-lib/migrate.mjs'
+import { scanModules, runMigrations } from '../upgrade-lib/migrate.mjs'
 import { runScript } from '../upgrade-lib/runner.mjs'
 import product from './product-runtime.cjs'
 import management from './desktop-management.cjs'
@@ -41,18 +41,15 @@ export function prepareCoreEnvironment({ root, dataDir, source = process.env, lo
   return { env: prepared, runtime, managed }
 }
 
-// Original start-time migration semantics: caller has proved stopped state and owns
-// the lifecycle lock; upgrade/takeover adapters own their separate backup requirement.
+// Caller owns the lifecycle lock and stopped-state proof. All adapters use the
+// same scoped migrations and request preparation, before any business ingress.
 export async function applyStartupMigrations(root, dataDir, env, log = () => {}, { outputFd } = {}) {
   assertVersionMaintenanceAllowsStart(dataDir)
   const pending = verifyDataCompatibility(root, dataDir)
   if (readVersionMaintenance(dataDir)?.backup) await assertLocalMigrationData(dataDir, pending)
-  for (const migration of pending) {
-    log(`${migration.moduleId}: ${migration.dataVersion ?? 'fresh'} → ${migration.codeVersion}`)
-    const result = await applyMigration(join(root, migration.moduleId), migration.dataDir, migration.dataVersion,
-      migration.codeVersion, (script, directory) => runScript(script, directory, { root, env, outputFd }))
-    if (!result.ok) throw Object.assign(new Error(`Migration failed: ${migration.moduleId}/${result.failedAt}`), { code: 'CRABOT_MIGRATION_FAILED' })
-  }
+  const result = await runMigrations(root, dataDir, (script, directory, context) => runScript(script, directory, { ...context, root, env, outputFd }),
+    { info: log, warn: log, error: log }, { lockHeld: true })
+  if (!result.ok) throw Object.assign(new Error(`Migration failed: ${result.failedModule}/${result.failedAt}`), { code: 'CRABOT_MIGRATION_FAILED' })
 }
 
 export function verifyDataCompatibility(root, dataDir) {

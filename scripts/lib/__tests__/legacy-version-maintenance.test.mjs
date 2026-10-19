@@ -34,6 +34,7 @@ async function fixture(t, { fence = true, fail = false } = {}) {
     files: { [path.relative(target, node).split(path.sep).join('/')]: { size: (await fs.stat(node)).size, sha256: createHash('sha256').update(readFileSync(node)).digest('hex') } } }))
   await fs.mkdir(path.join(target, 'crabot-fixture/upgrade'), { recursive: true })
   await fs.writeFile(path.join(target, 'crabot-fixture/schema_version'), 'v2')
+  await fs.writeFile(path.join(target, 'crabot-fixture/upgrade/scope.mjs'), `export const migrationScope = () => ({ reads: [], writes: ['fixture/content', 'fixture/SCHEMA_VERSION'] })`)
   await fs.writeFile(path.join(target, 'crabot-fixture/upgrade/from_v1_to_v2.mjs'),
     "import{appendFileSync}from'node:fs';const dir=process.argv.find(a=>a.startsWith('--data-dir=')).slice(11);appendFileSync(dir+'/content',' changed');process.exit(" + (fail ? '13' : '0') + ");")
   await writeCoreRelease(target, { schema_version: 1, version: '1.2.4', platform: process.platform, arch: process.arch, commit: '1'.repeat(40), source_dirty: false })
@@ -105,7 +106,7 @@ for (const fail of [false, true]) test('legacy source migrates only once offline
     assert.throws(() => assertVersionMaintenanceAllowsStart(f.data), { code: 'CRABOT_MAINTENANCE_PENDING' })
   } else { await complete(); assert.equal(readVersionMaintenance(f.data), null) }
   await assert.rejects(complete())
-  assert.equal(await fs.readFile(path.join(f.data, 'fixture/content'), 'utf8'), 'before changed')
+  assert.equal(await fs.readFile(path.join(f.data, 'fixture/content'), 'utf8'), fail ? 'before' : 'before changed')
   assert.equal(await fs.readFile(path.join(backup.directory, 'data/fixture/content'), 'utf8'), 'before')
   assert.equal(await fs.readFile(path.join(f.data, 'agent-venv/keep'), 'utf8'), 'old Python unchanged')
   await assert.rejects(fs.lstat(path.join(f.data, 'instance-runtime.json')), { code: 'ENOENT' })

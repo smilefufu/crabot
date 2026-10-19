@@ -1,3 +1,4 @@
+import { ConversationRequestAuthority } from '../../src/manager/conversation-request-authority.js'
 /**
  * builtin worker 的**生产装配**（PR F 第 2 步）——spec
  * `2026-08-01-builtin-worker-injection-design.md`。
@@ -257,6 +258,47 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
     })
     return { workerId: worker.worker_id, workspace: worker.incarnations[0].workspace }
   }
+
+  it('request-bound production factory verifies the real ledger and runs a live guarded Write through the Engine', async () => {
+    const { internals } = boot(), stack = internals.managerStack!, runtime = internals as any
+    // This acceptance isolates Worker execution; request event routing is outside this test.
+    const harnessInternal = stack.harness as any
+    harnessInternal.deps.onEvent = async () => ({ consumed: true })
+    harnessInternal.deps.onOperationNotification = async () => ({ consumed: true })
+    vi.spyOn(ConfigLoader, 'getRuntimeBearer').mockReturnValue('fixture-runtime-bearer')
+    const key = 'wechat::request-production' as ManagerKey, workspace = join(tmpRoot, 'request-workspace')
+    await fs.mkdir(workspace)
+    const now = new Date().toISOString()
+    const friend = { id: 'owner', display_name: 'Owner', permission: 'master', created_at: now, updated_at: now,
+      channel_identities: [{ channel_id: 'wechat', platform_user_id: 'owner-platform' }] }
+    const group = { kind: 'group', subject_id: key, is_master: false, resolved: testPrincipal() } as any
+    group.resolved = structuredClone(group.resolved); group.resolved.tool_access.file_io = false; group.resolved.tool_access.shell = false; group.resolved.storage = null
+    const owner = { kind: 'friend', subject_id: 'owner', is_master: true, resolved: { ...testPrincipal(), storage: { workspace_path: workspace, access: 'readwrite' } } } as any
+    const rpc = vi.spyOn(runtime.rpcClient, 'call').mockImplementation(async (_port, method) => {
+      if (method === 'resolve_friend') return { friend }
+      throw new Error('unexpected fixture RPC')
+    })
+    vi.spyOn(runtime.rpcClient, 'callSensitive').mockImplementation(async (_port, method, params: any) => {
+      if (method === 'issue_agent_cli_credential') return { token: 'fixture-cli-token', expires_at: new Date(Date.now() + 60000).toISOString() }
+      if (method === 'resolve_request_permission_sources') return structuredClone({ group, friend: owner })
+      if (method === 'resolve_request_permission_source') return { source: structuredClone(params.kind === 'group' ? group : owner) }
+      throw new Error('unexpected sensitive fixture RPC')
+    })
+    const [source] = await stack.trustedHumanInputs.capture(key, [{ platform_message_id: 'original-request', session: { channel_id: 'wechat', session_id: 'request-production', type: 'group' },
+      sender: { platform_user_id: 'owner-platform', platform_display_name: 'Owner' }, content: { type: 'text', text: 'Write the result in my authorized workspace' }, features: { is_mention_crab: true }, platform_timestamp: now }])
+    const request = await stack.conversationRequests.forInputs(key, [source]).create({ source_id: source.source_id, delivery: 'origin' })
+    const authority = new ConversationRequestAuthority(stack.conversationRequests, key, request.request_id, 'request', async kind => structuredClone(kind === 'group' ? group : owner))
+    llm.queue.push({ toolCalls: [{ name: 'Write', id: 'request-write', input: { file_path: join(workspace, 'result.txt'), content: 'guarded Engine result' } }], stopReason: 'tool_use' }, { text: 'done', stopReason: 'end_turn' })
+    const { worker } = await stack.harness.spawnRequestWorker({ managerKey: key, title: 'guarded request', prompt: 'Write result', workspace, impl: 'builtin', origin: { trigger_type: 'message' }, report_to: { channel_id: 'wechat', session_id: 'request-production' } }, authority)
+    await waitUntil(async () => (await stack.harness.findWorker(worker.worker_id))?.worker.incarnations[0].state === 'idle')
+    expect(await fs.readFile(join(workspace, 'result.txt'), 'utf8')).toBe('guarded Engine result')
+    expect((await stack.requestGuard.load(worker.worker_id))!.request.request_id).toBe(request.request_id)
+    const stored = JSON.parse(await fs.readFile(join(stack.builtinDataDir, worker.worker_id, 'context.json'), 'utf8'))
+    expect(stored.request_runtime).toBeUndefined()
+    expect(stored.origin.request).toMatchObject({ request_id: request.request_id, execution_scope: 'request' })
+    expect(rpc).toHaveBeenCalled()
+    await stack.adapters.get('builtin')!.dispose()
+  })
 
   it('query_worker 返回的化身 ID 可直接读取真实分支活动，不会读到主线', async () => {
     const { internals } = boot()

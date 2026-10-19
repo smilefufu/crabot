@@ -8,7 +8,10 @@ import { beginVersionMaintenance, bindVersionMaintenanceTarget, recordVersionMai
 
 export async function prepareSystemStartupData({ root, dataDir, env }) {
   const migrations = verifyDataCompatibility(root, dataDir)
-  if (!migrations.length) return
+  if (!migrations.length) {
+    await applyStartupMigrations(root, dataDir, env)
+    return
+  }
   await assertLocalMigrationData(dataDir, migrations)
   const release = await verifyCoreRelease(root)
   const record = await beginVersionMaintenance(dataDir, root, release.version)

@@ -1,3 +1,6 @@
+import { bindWorkerRequestTool } from './worker-request-context.js'
+import { buildExecuteRequestTool } from './execute-request.js'
+import { buildVoiceTools, VOICE_TOOL_NAMES, VOICE_FAMILY_DESCRIPTION, type VoiceManagementPort } from './voice-tools.js'
 import { authorizeTool, roleAuthorization, entryAuthorization, allowed, denied } from '../../permissions/tool-authorization.js'
 /**
  * Manager 能力目录与 episode 工具投影 —— protocol-agent-v3.md §4.3。
@@ -42,6 +45,13 @@ import {
 } from './tool-catalog.js'
 
 export interface ToolFaceDeps {
+  readonly voiceManagement?: VoiceManagementPort
+  /** Host request boundary applied before catalog projection, including MCP refresh. */
+  readonly decorateTool?: (tool: ToolDefinition) => ToolDefinition
+  readonly workerRequestControl?: import('./worker-request-context.js').WorkerRequestControl
+  readonly requestGuard?: import('../../workers/harness/request-guard.js').WorkerRequestGuard
+  readonly requestAuthorization?: 'shared' | 'request'
+  readonly executeRequest?: (input: import('../conversation-request.js').ExecuteConversationRequestParams) => Promise<import('../conversation-request.js').ExecuteConversationRequestResult>
   readonly voice?: boolean
   readonly dailyReflection?: DailyReflection
   readonly describeExecutionTools?: DescribeExecutionTools
@@ -78,6 +88,8 @@ export interface ToolFaceDeps {
   readonly authorization?: () => MasterAuthorization | undefined
   readonly validateMasterAuthorization?: (auth: MasterAuthorization) => Promise<boolean>
   /** Episode-local delivery/control evidence used to close a Worker turn. */
+  readonly hasSuccessfulWorkerDelivery?: import('./worker-tools.js').WorkerToolsDeps['hasSuccessfulWorkerDelivery']
+  readonly onWorkerTurnInspected?: import('./worker-tools.js').WorkerToolsDeps['onWorkerTurnInspected']
   readonly hasSuccessfulSendMessageTo?: (target: { channel_id: string; session_id: string }) => boolean
   readonly onSuccessfulSendMessage?: (target: { channel_id: string; session_id: string }) => void
   readonly hasContinuedWorker?: (workerId: string) => boolean
@@ -265,6 +277,13 @@ function messagingToolToDefinition(tool: MessagingTool, deps: ToolFaceDeps): Too
       const args = Object.fromEntries(Object.entries(input).filter(([key]) => key !== 'intent' && key !== 'post_send_action'))
       try {
         const result = await tool.handler(args, context)
+        const text = result.content.map((block) => block.text).join('\n')
+        if (deps.requestAuthorization === 'request' && isHumanDelivery && !result.isError) {
+          let receipt: { platform_message_id?: unknown; sent_at?: unknown; error?: unknown; error_code?: unknown }
+          try { receipt = JSON.parse(text) } catch { return { output: 'DELIVERY_UNCONFIRMED', isError: true } }
+          if (!receipt || receipt.error !== undefined || receipt.error_code !== undefined) return { output: text, isError: true }
+          if (typeof receipt.platform_message_id !== 'string' || !receipt.platform_message_id || typeof receipt.sent_at !== 'string' || !Number.isFinite(Date.parse(receipt.sent_at))) return { output: 'DELIVERY_UNCONFIRMED', isError: true }
+        }
         if (result.observedSessionTargets?.length) {
           try {
             deps.onObservedSessionTargets?.(result.observedSessionTargets)
@@ -273,7 +292,9 @@ function messagingToolToDefinition(tool: MessagingTool, deps: ToolFaceDeps): Too
           }
         }
         if (!result.isError && postSendAction === 'spawn_worker') deps.onPostSendAction?.('spawn_worker')
-        const text = result.content.map((block) => block.text).join('\n')
+        if (tool.name === 'send_private_message' && !result.isError) {
+          for (const target of result.observedSessionTargets ?? []) deps.onSuccessfulSendMessage?.(target)
+        }
         if (isSendMessage && !result.isError) {
           const channelId = args.channel_id
           const sessionId = args.session_id
@@ -501,7 +522,7 @@ function buildLoadToolFamilyTool(catalog: ManagerToolCatalog, state: ManagerTool
       properties: { family: { type: 'string', minLength: 1, maxLength: 128,
         description: catalog.profile === 'daily_reflection'
           ? 'memory：记忆正文与已有 links 读取、候选写入、更新和增量建链（含 get_memory_detail、quick_capture、set_memory_links）；worker：执行器管理与执行条件。'
-          : 'memory：记忆；messaging：消息/历史/联系人/媒体；worker：执行器管理与执行条件；schedule：定时任务；crabot：部署/配置/权限查询。mcp：只列可用外部服务；mcp__服务名：完整加载该服务。',
+          : 'memory：记忆；messaging：消息/历史/联系人/媒体；worker：执行器管理与执行条件；schedule：定时任务；crabot：部署/配置/权限查询。mcp：只列可用外部服务；mcp__服务名：完整加载该服务。' + (catalog.tools.some(tool => (VOICE_TOOL_NAMES as readonly string[]).includes(tool.name)) ? '\n' + VOICE_FAMILY_DESCRIPTION : ''),
       } },
       required: ['family'],
     },
@@ -578,7 +599,8 @@ export function buildManagerToolFace(deps: ToolFaceDeps): ToolDefinition[] {
       // Refresh only between Engine turns. Requests already issued retain their own tool references.
       const catalog = state.catalog!.withExternalMcpTools(externalMcpTools
         .map(tool => wrapExternalMcpTool(tool, authorizeExternal))
-        .filter((tool): tool is ToolDefinition => tool !== undefined))
+        .filter((tool): tool is ToolDefinition => tool !== undefined)
+        .map(tool => deps.decorateTool?.(tool) ?? tool))
       const searchTool = authorizeTool(buildSearchToolsTool(catalog, state), roleAuthorization('manager'))
       const familyTool = authorizeTool(buildLoadToolFamilyTool(catalog, state), roleAuthorization('manager'))
       Object.assign(state, { catalog, searchTool, familyTool, externalMcpTools: [...externalMcpTools] })
@@ -591,6 +613,8 @@ export function buildManagerToolFace(deps: ToolFaceDeps): ToolDefinition[] {
   const memoryFace = buildManagerMemoryFace(deps.memoryServer)
   const memoryTools = dailyProfile ? protectDailyReflectionMemory(memoryFace) : memoryFace
   const workerTools = buildWorkerTools({
+    requestControl: deps.workerRequestControl,
+    requestGuard: deps.requestGuard,
     authorizeProjectRead: (workspaceRoot) => authorizeProjectRoot({ ...currentDeps().projectDocs, managerPrincipalPermissions: currentPrincipal() }, workspaceRoot, false),
     harness: deps.harness,
     voice: deps.voice,
@@ -603,6 +627,8 @@ export function buildManagerToolFace(deps: ToolFaceDeps): ToolDefinition[] {
     readWorkerSubagents: deps.readWorkerSubagents,
     readWorkerSubagentDetail: deps.readWorkerSubagentDetail,
     readWorkerSubagentTrace: deps.readWorkerSubagentTrace,
+    ...(deps.hasSuccessfulWorkerDelivery ? { hasSuccessfulWorkerDelivery: deps.hasSuccessfulWorkerDelivery } : {}),
+    ...(deps.onWorkerTurnInspected ? { onWorkerTurnInspected: deps.onWorkerTurnInspected } : {}),
     ...(deps.hasSuccessfulSendMessageTo ? { hasSuccessfulSendMessageTo: deps.hasSuccessfulSendMessageTo } : {}),
     ...(deps.hasContinuedWorker ? { hasContinuedWorker: deps.hasContinuedWorker } : {}),
     ...(deps.onWorkerContinuation ? { onWorkerContinuation: deps.onWorkerContinuation } : {}),
@@ -613,14 +639,18 @@ export function buildManagerToolFace(deps: ToolFaceDeps): ToolDefinition[] {
     ...(deps.workerImplSnapshot ? { workerImplSnapshot: deps.workerImplSnapshot } : {}),
     ...(deps.schedule ? { schedule: deps.schedule } : {}),
   })
-  const guidanceTool = createGuidanceTool('manager', { computerUse: deps.externalMcpTools?.some(tool => tool.traceMetadata?.computer_use_standard === true) })
+  const guidanceTool = createGuidanceTool('manager', { requestAware: deps.requestAuthorization !== undefined, computerUse: deps.externalMcpTools?.some(tool => tool.traceMetadata?.computer_use_standard === true) })
   const workboardTools = buildWorkboardTools(deps.workboard)
   const projectDocTools = buildProjectDocTools({ ...deps.projectDocs, get managerPrincipalPermissions() { return currentPrincipal() } })
 
+  let executionCapabilities = normalProfile || dailyProfile ? createExecutionCapabilitiesTool({ ...deps, workerContext: () => currentDeps().workerContext() }) : undefined
+  if (executionCapabilities && deps.workerRequestControl) executionCapabilities = bindWorkerRequestTool(executionCapabilities, deps.workerRequestControl)
   const builtinTools = [
+    ...(normalProfile && deps.requestAuthorization === 'request' && deps.voiceManagement ? buildVoiceTools({ context: deps.voiceManagement.context, call: input => currentDeps().voiceManagement!.call(input) }) : []),
     ...(normalProfile ? [guidanceTool] : []),
-    ...(normalProfile || dailyProfile ? [createExecutionCapabilitiesTool({ ...deps, workerContext: () => currentDeps().workerContext() })] : []),
+    ...(executionCapabilities ? [executionCapabilities] : []),
     ...(dailyProfile ? buildDailyReflectionTools(deps.dailyReflection) : []),
+    ...(normalProfile && deps.requestAuthorization === 'shared' && deps.executeRequest ? [buildExecuteRequestTool(input => currentDeps().executeRequest!(input))] : []),
     ...messagingTools,
     ...memoryTools,
     ...workerTools,
@@ -663,15 +693,17 @@ export function buildManagerToolFace(deps: ToolFaceDeps): ToolDefinition[] {
       return result
     } }
   })
-  assertClosedToolFace(builtinTools)
-  if (!deps.faceState) return builtinTools
+  const scopedBuiltinTools = builtinTools.map(tool => deps.decorateTool?.(tool) ?? tool)
+  assertClosedToolFace(scopedBuiltinTools)
+  if (!deps.faceState) return scopedBuiltinTools
 
   const profile = selectedProfile
   const wrappedMcpTools = externalMcpTools
     .map(tool => wrapExternalMcpTool(tool, authorizeExternal))
     .filter((tool): tool is ToolDefinition => tool !== undefined)
+    .map(tool => deps.decorateTool?.(tool) ?? tool)
   const catalog = new ManagerToolCatalog(
-    [...builtinTools.sort((a, b) => Number(CONDITIONAL_TOOLS.has(a.name)) - Number(CONDITIONAL_TOOLS.has(b.name)) || a.name.localeCompare(b.name)), ...wrappedMcpTools],
+    [...scopedBuiltinTools.sort((a, b) => Number(CONDITIONAL_TOOLS.has(a.name)) - Number(CONDITIONAL_TOOLS.has(b.name)) || a.name.localeCompare(b.name)), ...wrappedMcpTools],
     profile,
     undefined,
     undefined,
@@ -697,7 +729,8 @@ export function buildManagerToolFace(deps: ToolFaceDeps): ToolDefinition[] {
       messaging: messagingTools.map(tool => tool.name),
       worker: [...workerTools.map(tool => tool.name), 'get_execution_capabilities'],
       schedule: infoTools.filter(tool => tool.name.endsWith('_schedule') || tool.name === 'list_schedules').map(tool => tool.name),
-      crabot: ['inspect_crabot', 'get_friend_permissions'],
+      crabot: ['inspect_crabot', 'get_friend_permissions', 'execute_request'],
+      voice: deps.voiceManagement ? [...VOICE_TOOL_NAMES] : [],
     },
   )
   deps.faceState.catalog = catalog

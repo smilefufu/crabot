@@ -210,7 +210,7 @@ export class ChannelManager {
       name: instanceId,
       platform,
       auto_start: impl.id === 'channel-voice' ? false : params.auto_start ?? false,
-      ...(impl.id === 'channel-voice' ? { voice_setup: { status: 'draft' as const } } : {}),
+      ...(impl.id === 'channel-voice' ? { voice_setup: { status: 'draft' as const, owner_activation_required: true } } : {}),
       start_priority: 30,
       module_registered: false,
       created_at: now,
@@ -595,6 +595,7 @@ export class ChannelManager {
     return this.writeInstances(async () => {
       const instance = this.instances.get(id)
       if (instance?.implementation_id !== 'channel-voice') throw new Error('Voice instance required')
+      if (instance.voice_setup?.owner_activation_required === true && setup.owner_activation_required !== true) throw new Error('不能取消首次所有者激活要求')
       const updated = { ...instance, voice_setup: setup, auto_start: autoStart, updated_at: generateTimestamp() }
       const items = [...this.instances.values()].map(item => item.id === id ? updated : item)
       await this.atomicWriteFile(this.instancesFilePath, JSON.stringify(items, null, 2))

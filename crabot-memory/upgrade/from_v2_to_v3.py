@@ -23,6 +23,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import List
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from scoped_upgrade import enter, require_context
+
 
 def _now_ts() -> str:
     return datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -33,7 +36,10 @@ def deprecate_lancedb(data_dir: Path, log: List[str]) -> None:
     if not lancedb_dir.exists():
         log.append("short_term/lancedb: not present, skipped")
         return
-    deprecated = data_dir / f"lancedb.deprecated.{_now_ts()}"
+    retired = os.environ["CRABOT_MIGRATION_RETIRED_LANCEDB"]
+    deprecated = data_dir.parent / retired
+    if deprecated.exists():
+        raise RuntimeError("Declared retired LanceDB target already exists")
     lancedb_dir.rename(deprecated)
     log.append(f"short_term/lancedb: renamed to {deprecated.name}")
 
@@ -113,6 +119,7 @@ def clean_admin_embedding_refs(admin_dir: Path, log: List[str]) -> None:
 
 
 def migrate(data_dir: Path) -> None:
+    require_context(data_dir)
     log: List[str] = [f"=== v2 → v3 migration started at {datetime.now().isoformat()} ==="]
 
     # data_dir 期望是 .../data/memory/
@@ -138,7 +145,8 @@ def main() -> int:
         print(f"ERROR: data dir not found: {data_dir}", file=sys.stderr)
         return 1
     try:
-        migrate(data_dir)
+        if enter(data_dir, 2, 3) is None:
+            migrate(data_dir)
         return 0
     except Exception:
         traceback.print_exc()

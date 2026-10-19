@@ -114,10 +114,9 @@ export async function downloadRelease({ url, sha256Url, version, logger }) {
   }
 }
 
-// Read-only archive staging. Caller owns tmp cleanup; never touches installed files.
-export async function stageRelease({ tmp, tarPath, version, logger }) {
-  let stage = join(tmp, 'stage')
-  logger?.info?.('Extracting release archive')
+/** Extraction and integrity only; safe to use while the installed instance runs. */
+export async function unpackRelease({ tarPath, stage, version, logger }) {
+  logger?.info?.('Extracting release into preparation directory')
   await extractArchive(tarPath, stage)
   if (tarPath.endsWith('.zip')) {
     const fs = await import('node:fs')
@@ -129,14 +128,18 @@ export async function stageRelease({ tmp, tarPath, version, logger }) {
   return stage
 }
 
-// Legacy/source adapter only: replaces files after shutdown. Immutable CLI/App
-// payloads must use their own selector/OS installer and cannot call this path.
+export function stageRelease({ tmp, tarPath, version, logger }) {
+  return unpackRelease({ tarPath, stage: join(tmp, 'stage'), version, logger })
+}
+
+// 解压 + 覆盖安装目录（必须在 stop 之后做：覆盖的是运行代码文件）。
 export async function extractRelease({ tmp, tarPath, version, crabotHome, logger }) {
+  let stage = join(tmp, 'stage')
   try {
     if (existsSync(join(crabotHome, 'core-release.json'))) throw new Error('不可原地覆盖内置核心，请使用版本切换或桌面更新。')
-    const stage = await stageRelease({ tmp, tarPath, version, logger })
+    stage = await unpackRelease({ tarPath, stage, version, logger })
     const fs = await import('node:fs')
-    const retained = new Set(['data', 'instance.json', 'agent-venv', 'VERSION'])
+    const retained = new Set(['.git', '.env', 'data', 'instance.json', 'agent-venv', 'VERSION'])
     for (const name of fs.readdirSync(stage)) {
       if (retained.has(name) || (name === 'crabot.cmd' && existsSync(join(crabotHome, name)))) continue
       const target = join(crabotHome, name)

@@ -1,11 +1,11 @@
 import { test } from 'node:test'
+import { createHash } from 'node:crypto'
 import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, copyFileSync, chmodSync, symlinkSync, readlinkSync, existsSync, constants } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawnSync, spawn } from 'node:child_process'
-import { createHash } from 'node:crypto'
 import { createServer } from 'node:http'
 import { once } from 'node:events'
 import { readdirSync } from 'node:fs'
@@ -23,6 +23,17 @@ function bash(code, env = {}) {
     encoding: 'utf8', env: { ...process.env, INSTALLER: installer, ...env },
   })
 }
+test('installer helper pins match the shipped scripts on Unix and Windows', () => {
+  const shell = readFileSync(installer, 'utf8')
+  const powershell = readFileSync(new URL('../../../install.ps1', import.meta.url), 'utf8')
+  const entries = [...shell.matchAll(/(scripts\/[\w/.-]+)\) echo ([a-f0-9]{64})/g)]
+  assert.equal(entries.length, 5)
+  for (const [, name, expected] of entries) {
+    const actual = createHash('sha256').update(readFileSync(new URL(`../../../${name}`, import.meta.url))).digest('hex')
+    assert.equal(expected, actual, `${name}: Unix pin must match shipped helper`)
+    assert.ok(powershell.includes(`'${name}' = '${actual}'`), `${name}: Windows pin must match shipped helper`)
+  }
+})
 test('failed uv download is a failed prerequisite, without an installed message', unix, t => {
   const result = bash('curl() { return 22; }; ensure_uv', { HOME: fixture(t), PATH: '/usr/bin:/bin:/usr/sbin:/sbin' })
   assert.notEqual(result.status, 0, result.stdout + result.stderr)
@@ -291,4 +302,15 @@ test('PowerShell 5.1 and 7 remote complete releases bypass host prerequisites an
     { encoding: 'utf8', timeout: 120_000 })
     assert.equal(result.status, 0, shell + ': ' + result.stdout + result.stderr)
   }
+})
+
+test('request upgrade generation is complete or rejected before package acceptance', async t => {
+  const { verifyReleasePackage } = await import('../release-package.mjs')
+  const root = fixture(t)
+  const base = ['cli.mjs', 'package.json', 'dist/cli/main.js', 'scripts/start.mjs', 'crabot-memory/pyproject.toml', 'crabot-memory/uv.lock', 'scripts/prepare-scrapling.mjs', 'scripts/lib/scrapling-runtime.cjs', 'scripts/scrapling/runtime.json', 'scrapling-runtime.json']
+  const generation = ['crabot-agent/shared_request_version', 'crabot-agent/dist/manager/request-upgrade.js', 'crabot-admin/dist/shared-request-impact.js', 'scripts/prepare-shared-requests.mjs', 'scripts/upgrade-lib/shared-requests.mjs']
+  for (const file of [...base, generation[0]]) { mkdirSync(join(root, file, '..'), { recursive: true }); writeFileSync(join(root, file), '') }
+  await assert.rejects(verifyReleasePackage(root, 'v2026.10.12.4'), /missing crabot-agent\/dist\/manager\/request-upgrade/)
+  for (const file of generation.slice(1)) { mkdirSync(join(root, file, '..'), { recursive: true }); writeFileSync(join(root, file), '') }
+  await verifyReleasePackage(root, 'v2026.10.12.4', { run: async () => {} })
 })

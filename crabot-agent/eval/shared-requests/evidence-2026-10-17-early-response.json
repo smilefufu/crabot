@@ -1,0 +1,657 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-17",
+  "status": "approved_isolated_request_role_clarification_applied; controlled_model_duplicate_acknowledgement_regression_passed; not_deployed",
+  "model": "gpt-6.1-sol",
+  "format": "openai",
+  "scope": "Real configured model, public current product prompts and synthetic identities/files. Channel, Memory, MCP and audio playback receipts simulated; no live conversations, contact/voice data or deployment.",
+  "model_adapter_calls": 26,
+  "before_cases": [
+    {
+      "cohort": "crabot-voice-early-ack-before-20261017-1730",
+      "scenario": "personal-voice-early-ack",
+      "product_code": "8b711f380811f4b594d9ea46a479e16ea3fff97c",
+      "source_hashes": {
+        "crabot-agent/src/manager/prompt.ts": "494c3aed7820cc9918e672c1b1aa212924631b34234a4c4d23d1271f06d5e84e",
+        "crabot-agent/src/manager/loop.ts": "95c5bb1ff784d06e9759e9fc33f8c99588f9fd7655ed58e75f5d955dc08fb2b2",
+        "crabot-agent/src/manager/voice-output.ts": "47e991bde2592002839ec6622e01fc99314c06f1c58b326b73e148514a98f9bb",
+        "crabot-agent/src/manager/voice-output-port.ts": "882a81d9624eb3048f5b2851525348692bd22ba03a119e747579705518c068a4",
+        "crabot-agent/src/manager/tools/worker-tools.ts": "935c5c25c44b17dea7ba40a2f2ae888c56ea92956a709a670c70e6e84f997d9d",
+        "crabot-agent/src/manager/tools/tool-face.ts": "29a5707d4757588c60fe9551c22a27202ba2831cc797b3290ea552ee35365e4e",
+        "crabot-agent/src/manager/registry.ts": "d9d44e6ebacd4e42a8a6bd0aa8f15e883f963fd7203d1375491cf6684e7a5b5f",
+        "crabot-agent/src/manager/request-loop.ts": "6a61e9f4c66cf610abd01182ddd1415df6958c1dfc3763af9a00dec533ab4971",
+        "crabot-agent/src/manager/conversation-request-runner.ts": "ae22dc7f43e4a5e0cbf97dd94a623d87b68e4c2de5d66c50dac3472be9831561",
+        "crabot-agent/src/manager/bootstrap.ts": "bc75b16d51bd617ecd1ae9a6842fc5ba57fd4804ee43563567f2fcaf8acdc8b7",
+        "crabot-agent/src/guidance/content.ts": "b5bfc9de2e0c635f9b48cab5005e352c51451c344a8fd6e4ea3627cb6280990b",
+        "crabot-shared/src/permission-entries.ts": "944ba22530e5277ad56733a20c99389aae664cd04196dca9e2f7d2b7ba8d6681",
+        "crabot-agent/eval/shared-requests/runtime.mjs": "9b386f51860381cdf4a22996fee216b59e1d84cd224c8ec9207fd45db5adb47e"
+      },
+      "recorded_status": "failed",
+      "recorded_failed_checks": [
+        "expected_effect",
+        "initial_voice_ack"
+      ],
+      "model_adapter_calls": 12,
+      "first_manager_tool": {
+        "name": "load_tool_family",
+        "started_ms": 2344
+      },
+      "first_manager_work_tool": {
+        "name": "load_tool_family",
+        "started_ms": 2344
+      },
+      "first_voice_ms": {
+        "text_ms": 18489,
+        "completed_ms": 19327
+      },
+      "first_message_reply_ms": null,
+      "elapsed_ms": 29765,
+      "worker_turn_resolutions": [
+        "reported"
+      ],
+      "raw_artifact_sha256": {
+        "events.jsonl": "b68c68fba61de174b7d4143d5759d8dfa17ab89a54b26d4f764a3a6b70b3252f",
+        "result.json": "787ba31cfa8bfb6794619f434e91fcb3aeb0c46f0e33d9a1450b01db960c99cc"
+      }
+    },
+    {
+      "cohort": "crabot-message-early-ack-before-20261017-1740",
+      "scenario": "personal-message-early-ack",
+      "product_code": "8b711f380811f4b594d9ea46a479e16ea3fff97c",
+      "source_hashes": {
+        "crabot-agent/src/manager/prompt.ts": "494c3aed7820cc9918e672c1b1aa212924631b34234a4c4d23d1271f06d5e84e",
+        "crabot-agent/src/manager/loop.ts": "95c5bb1ff784d06e9759e9fc33f8c99588f9fd7655ed58e75f5d955dc08fb2b2",
+        "crabot-agent/src/manager/voice-output.ts": "47e991bde2592002839ec6622e01fc99314c06f1c58b326b73e148514a98f9bb",
+        "crabot-agent/src/manager/voice-output-port.ts": "882a81d9624eb3048f5b2851525348692bd22ba03a119e747579705518c068a4",
+        "crabot-agent/src/manager/tools/worker-tools.ts": "935c5c25c44b17dea7ba40a2f2ae888c56ea92956a709a670c70e6e84f997d9d",
+        "crabot-agent/src/manager/tools/tool-face.ts": "29a5707d4757588c60fe9551c22a27202ba2831cc797b3290ea552ee35365e4e",
+        "crabot-agent/src/manager/registry.ts": "d9d44e6ebacd4e42a8a6bd0aa8f15e883f963fd7203d1375491cf6684e7a5b5f",
+        "crabot-agent/src/manager/request-loop.ts": "6a61e9f4c66cf610abd01182ddd1415df6958c1dfc3763af9a00dec533ab4971",
+        "crabot-agent/src/manager/conversation-request-runner.ts": "ae22dc7f43e4a5e0cbf97dd94a623d87b68e4c2de5d66c50dac3472be9831561",
+        "crabot-agent/src/manager/bootstrap.ts": "bc75b16d51bd617ecd1ae9a6842fc5ba57fd4804ee43563567f2fcaf8acdc8b7",
+        "crabot-agent/src/guidance/content.ts": "b5bfc9de2e0c635f9b48cab5005e352c51451c344a8fd6e4ea3627cb6280990b",
+        "crabot-shared/src/permission-entries.ts": "944ba22530e5277ad56733a20c99389aae664cd04196dca9e2f7d2b7ba8d6681",
+        "crabot-agent/eval/shared-requests/runtime.mjs": "af5a6e70347d7b8d5520dde44f5bcc1d4a06b2ca8b96c98b78b50ef3fe4b47c0"
+      },
+      "recorded_status": "failed",
+      "recorded_failed_checks": [
+        "initial_ack_before_work"
+      ],
+      "model_adapter_calls": 14,
+      "first_manager_tool": {
+        "name": "load_tool_family",
+        "started_ms": 2385
+      },
+      "first_manager_work_tool": {
+        "name": "load_tool_family",
+        "started_ms": 2385
+      },
+      "first_voice_ms": {},
+      "first_message_reply_ms": 21639,
+      "elapsed_ms": 29184,
+      "worker_turn_resolutions": [
+        "reported"
+      ],
+      "raw_artifact_sha256": {
+        "events.jsonl": "5feac8cf9491bbd5d1b391b2877ffe0e4ec69eea34e87bbfe4ae3c5d560f776c",
+        "result.json": "63a106d49a59fd5d237f1ec0466c129d74369267fc8aedebe5ff66828047351e"
+      }
+    }
+  ],
+  "criterion_notes": [
+    "First Manager tool start is from production trace lifecycle, not streamed function header. Ordinary message delivery itself is excluded from the first work tool.",
+    "Voice first complete receipt is simulated, and is not microphone/TTS/phone-audio latency.",
+    "The first Voice baseline also failed the former exact-string token check: model spoke underscore characters as Chinese words. Raw failure is retained. Evaluation now permits spoken underscores and punctuation, while still rejecting wrong token characters/case/missing sections; five dedicated assertions cover this. This does not make late acknowledgement pass."
+  ],
+  "verification": {
+    "offline_tests": 14,
+    "includes": [
+      "ordinary message early and late acknowledgement",
+      "Voice early and late acknowledgement",
+      "final result independently verified",
+      "original Worker binding",
+      "muted/offline restore",
+      "two-result backlog",
+      "spoken token positive and negative examples"
+    ],
+    "agent_directed_passed": 75,
+    "excluded_existing_role_prompt_test": 1,
+    "agent_typescript_build": "passed",
+    "prompt_projection_checks": 8,
+    "exact_approved_replacements_only": true,
+    "actual_input_audits": "All five new runs passed prompt/isolation audit; functional duplicate acknowledgement remains separately failed.",
+    "core_tool_counts": [
+      15,
+      11,
+      3
+    ]
+  },
+  "product_prompts_changed": true,
+  "deployed": false,
+  "after_model_adapter_calls": 54,
+  "after_cohorts": [
+    {
+      "cohort": "crabot-common-ack-after-live-20261017-1905",
+      "base_commit": "4649bb2d9003bf2ea917e9cc888e7e6d40050879",
+      "source_hashes": {
+        "crabot-agent/src/manager/prompt.ts": "6fb20502ff6599f73dc383caa5e4cf53c21725be4aec153c01fae795e7847e5a",
+        "crabot-agent/src/manager/loop.ts": "95c5bb1ff784d06e9759e9fc33f8c99588f9fd7655ed58e75f5d955dc08fb2b2",
+        "crabot-agent/src/manager/voice-output.ts": "47e991bde2592002839ec6622e01fc99314c06f1c58b326b73e148514a98f9bb",
+        "crabot-agent/src/manager/voice-output-port.ts": "882a81d9624eb3048f5b2851525348692bd22ba03a119e747579705518c068a4",
+        "crabot-agent/src/manager/tools/worker-tools.ts": "935c5c25c44b17dea7ba40a2f2ae888c56ea92956a709a670c70e6e84f997d9d",
+        "crabot-agent/src/manager/tools/tool-face.ts": "29a5707d4757588c60fe9551c22a27202ba2831cc797b3290ea552ee35365e4e",
+        "crabot-agent/src/manager/registry.ts": "d9d44e6ebacd4e42a8a6bd0aa8f15e883f963fd7203d1375491cf6684e7a5b5f",
+        "crabot-agent/src/manager/request-loop.ts": "6a61e9f4c66cf610abd01182ddd1415df6958c1dfc3763af9a00dec533ab4971",
+        "crabot-agent/src/manager/conversation-request-runner.ts": "ae22dc7f43e4a5e0cbf97dd94a623d87b68e4c2de5d66c50dac3472be9831561",
+        "crabot-agent/src/manager/bootstrap.ts": "bc75b16d51bd617ecd1ae9a6842fc5ba57fd4804ee43563567f2fcaf8acdc8b7",
+        "crabot-agent/src/guidance/content.ts": "b5bfc9de2e0c635f9b48cab5005e352c51451c344a8fd6e4ea3627cb6280990b",
+        "crabot-shared/src/permission-entries.ts": "944ba22530e5277ad56733a20c99389aae664cd04196dca9e2f7d2b7ba8d6681",
+        "crabot-agent/eval/shared-requests/runtime.mjs": "830621e94b1f7a045e044cd978715247c568b258a52c0abf9222a5f77c803479"
+      },
+      "plan_sha256": "da6ad6d6dcb4686fcfae489e2744d5f6c90826049797889b0843252828825307",
+      "model_adapter_calls": 30,
+      "cases": [
+        {
+          "scenario": "personal-message-early-ack",
+          "recorded_status": "passed",
+          "recorded_checks": {
+            "no_hijack": true,
+            "worker_reached": true,
+            "bound_owner_unchanged": true,
+            "interruption_reached": true,
+            "no_private_shared_body": true,
+            "private_target": true,
+            "expected_effect": true,
+            "no_duplicate_unknown_send": true,
+            "worker_receipt": true,
+            "voice_tag_delivery": true,
+            "request_isolation": true,
+            "no_fixture_gaps": true,
+            "initial_ack_before_work": true
+          },
+          "model_adapter_calls": 16,
+          "elapsed_ms": 43468,
+          "first_voice_ms": {},
+          "first_message_reply_ms": 2954,
+          "first_manager_work_tool": {
+            "name": "load_tool_family",
+            "started_ms": 5106
+          },
+          "formal_reply_count": 3,
+          "inspection_status": "failed_duplicate_acknowledgement",
+          "inspection_note": "Shared Manager acknowledged promptly, then isolated request acknowledged again; final result delivered. Retain original recorded pass, do not call complete acceptance.",
+          "worker_turn_resolutions": [
+            "reported"
+          ],
+          "raw_artifact_sha256": {
+            "events.jsonl": "3acfdaa618850a121f629fbb5cedcee99c9ecd37d4b65121f5896c9c9e4648f9",
+            "result.json": "ab260af54fd0b8d0b910181b550ce9a66f8fac2cb04db85fc72daaec041eed19"
+          }
+        },
+        {
+          "scenario": "personal-voice-early-ack",
+          "recorded_status": "passed",
+          "recorded_checks": {
+            "no_hijack": true,
+            "worker_reached": true,
+            "bound_owner_unchanged": true,
+            "interruption_reached": true,
+            "no_private_shared_body": true,
+            "private_target": true,
+            "expected_effect": true,
+            "no_duplicate_unknown_send": true,
+            "worker_receipt": true,
+            "voice_tag_delivery": true,
+            "request_isolation": true,
+            "no_fixture_gaps": true,
+            "initial_ack_before_work": true
+          },
+          "model_adapter_calls": 13,
+          "elapsed_ms": 30402,
+          "first_voice_ms": {
+            "text_ms": 1881,
+            "completed_ms": 2214,
+            "canary_complete_ms": 24212
+          },
+          "first_message_reply_ms": null,
+          "first_manager_work_tool": {
+            "name": "load_tool_family",
+            "started_ms": 2535
+          },
+          "formal_reply_count": 2,
+          "inspection_status": "passed",
+          "inspection_note": "Original early-response/simple-answer/private-target purpose passed; voice completion is simulated.",
+          "worker_turn_resolutions": [
+            "reported"
+          ],
+          "raw_artifact_sha256": {
+            "events.jsonl": "24f5a6d00bff4fb7093239fa85e955bbbbc456b3cec18da03580fb698725a6f1",
+            "result.json": "dd55679e784154b38f0c2c70e1b2bcd157857d0af5b52763f0e7e708e2efe131"
+          }
+        },
+        {
+          "scenario": "public-voice",
+          "recorded_status": "passed",
+          "recorded_checks": {
+            "no_hijack": true,
+            "worker_reached": true,
+            "bound_owner_unchanged": true,
+            "interruption_reached": true,
+            "no_private_shared_body": true,
+            "private_target": true,
+            "expected_effect": true,
+            "no_duplicate_unknown_send": true,
+            "worker_receipt": true,
+            "voice_tag_delivery": true,
+            "request_isolation": true,
+            "no_fixture_gaps": true
+          },
+          "model_adapter_calls": 1,
+          "elapsed_ms": 3443,
+          "first_voice_ms": {
+            "text_ms": 2620,
+            "completed_ms": 2824
+          },
+          "first_message_reply_ms": null,
+          "first_manager_work_tool": null,
+          "formal_reply_count": 1,
+          "inspection_status": "passed",
+          "inspection_note": "Original early-response/simple-answer/private-target purpose passed; voice completion is simulated.",
+          "worker_turn_resolutions": [],
+          "raw_artifact_sha256": {
+            "events.jsonl": "bc8261541e1de80aa1dbb6fb3052d845a89cb4988be4c2637e1ec098fddd1ca3",
+            "result.json": "75530b7bdd5f7e384fe2b785db9667e2cd302f0812637f8c80bb21287c030119"
+          }
+        }
+      ]
+    },
+    {
+      "cohort": "crabot-common-ack-repeat-live-20261017-1908",
+      "base_commit": "4649bb2d9003bf2ea917e9cc888e7e6d40050879",
+      "source_hashes": {
+        "crabot-agent/src/manager/prompt.ts": "6fb20502ff6599f73dc383caa5e4cf53c21725be4aec153c01fae795e7847e5a",
+        "crabot-agent/src/manager/loop.ts": "95c5bb1ff784d06e9759e9fc33f8c99588f9fd7655ed58e75f5d955dc08fb2b2",
+        "crabot-agent/src/manager/voice-output.ts": "47e991bde2592002839ec6622e01fc99314c06f1c58b326b73e148514a98f9bb",
+        "crabot-agent/src/manager/voice-output-port.ts": "882a81d9624eb3048f5b2851525348692bd22ba03a119e747579705518c068a4",
+        "crabot-agent/src/manager/tools/worker-tools.ts": "935c5c25c44b17dea7ba40a2f2ae888c56ea92956a709a670c70e6e84f997d9d",
+        "crabot-agent/src/manager/tools/tool-face.ts": "29a5707d4757588c60fe9551c22a27202ba2831cc797b3290ea552ee35365e4e",
+        "crabot-agent/src/manager/registry.ts": "d9d44e6ebacd4e42a8a6bd0aa8f15e883f963fd7203d1375491cf6684e7a5b5f",
+        "crabot-agent/src/manager/request-loop.ts": "6a61e9f4c66cf610abd01182ddd1415df6958c1dfc3763af9a00dec533ab4971",
+        "crabot-agent/src/manager/conversation-request-runner.ts": "ae22dc7f43e4a5e0cbf97dd94a623d87b68e4c2de5d66c50dac3472be9831561",
+        "crabot-agent/src/manager/bootstrap.ts": "bc75b16d51bd617ecd1ae9a6842fc5ba57fd4804ee43563567f2fcaf8acdc8b7",
+        "crabot-agent/src/guidance/content.ts": "b5bfc9de2e0c635f9b48cab5005e352c51451c344a8fd6e4ea3627cb6280990b",
+        "crabot-shared/src/permission-entries.ts": "944ba22530e5277ad56733a20c99389aae664cd04196dca9e2f7d2b7ba8d6681",
+        "crabot-agent/eval/shared-requests/runtime.mjs": "830621e94b1f7a045e044cd978715247c568b258a52c0abf9222a5f77c803479"
+      },
+      "plan_sha256": "305924a739da534d96f7eefdd7979b8b92d168602b79624d5c91b04047428bb1",
+      "model_adapter_calls": 24,
+      "cases": [
+        {
+          "scenario": "personal-voice-early-ack",
+          "recorded_status": "passed",
+          "recorded_checks": {
+            "no_hijack": true,
+            "worker_reached": true,
+            "bound_owner_unchanged": true,
+            "interruption_reached": true,
+            "no_private_shared_body": true,
+            "private_target": true,
+            "expected_effect": true,
+            "no_duplicate_unknown_send": true,
+            "worker_receipt": true,
+            "voice_tag_delivery": true,
+            "request_isolation": true,
+            "no_fixture_gaps": true,
+            "initial_ack_before_work": true
+          },
+          "model_adapter_calls": 13,
+          "elapsed_ms": 32157,
+          "first_voice_ms": {
+            "text_ms": 1862,
+            "completed_ms": 2134,
+            "canary_complete_ms": 25952
+          },
+          "first_message_reply_ms": null,
+          "first_manager_work_tool": {
+            "name": "load_tool_family",
+            "started_ms": 2528
+          },
+          "formal_reply_count": 2,
+          "inspection_status": "passed",
+          "inspection_note": "Original early-response/simple-answer/private-target purpose passed; voice completion is simulated.",
+          "worker_turn_resolutions": [
+            "reported"
+          ],
+          "raw_artifact_sha256": {
+            "events.jsonl": "93c7bb4fef09839209b96621def5baec888dc5b1051ff5962d3b1d405fe5101c",
+            "result.json": "fb99bfd9ad21c3b033a535f364774c474d8d376b5eccb1f96d76cd89d15fb623"
+          }
+        },
+        {
+          "scenario": "private-delivery",
+          "recorded_status": "passed",
+          "recorded_checks": {
+            "no_hijack": true,
+            "worker_reached": true,
+            "bound_owner_unchanged": true,
+            "interruption_reached": true,
+            "no_private_shared_body": true,
+            "private_target": true,
+            "expected_effect": true,
+            "no_duplicate_unknown_send": true,
+            "worker_receipt": true,
+            "voice_tag_delivery": true,
+            "request_isolation": true,
+            "no_fixture_gaps": true
+          },
+          "model_adapter_calls": 11,
+          "elapsed_ms": 40975,
+          "first_voice_ms": {},
+          "first_message_reply_ms": 2487,
+          "first_manager_work_tool": {
+            "name": "load_tool_family",
+            "started_ms": 4548
+          },
+          "formal_reply_count": 3,
+          "inspection_status": "passed",
+          "inspection_note": "Original early-response/simple-answer/private-target purpose passed; voice completion is simulated.",
+          "worker_turn_resolutions": [],
+          "raw_artifact_sha256": {
+            "events.jsonl": "a339dbc2fc246d2fe20da7039561a513ec8a658a5f9901a2ef6feff50f781cf0",
+            "result.json": "1f71194bf10cfe28fccbba857e848d40de8915a430fd10571abfb3092428d136"
+          }
+        }
+      ]
+    }
+  ],
+  "timing_observations": {
+    "voice_before_first_text_ms": 18489,
+    "voice_after_first_text_ms": [
+      1881,
+      1862
+    ],
+    "ordinary_before_first_send_ms": 21639,
+    "ordinary_after_first_send_ms": 2954,
+    "simple_voice_first_text_ms": 2620,
+    "limitation": "Provider/model sample timings with simulated Channel/playback, no ASR/TTS/phone first-audio acceptance."
+  },
+  "remaining_issue": "Duplicate acknowledgement did not recur in the new controlled runs. Full B7, coordinated device acceptance, deployment and measured model-to-phone first audio remain outstanding.",
+  "total_model_adapter_calls": 111,
+  "real_tts_probe": {
+    "scope": "Current separately deployed local TTS API and production ReplyPlayback. Public test sentence only; transport and playback receipt simulated, no microphone or physical device.",
+    "before": {
+      "status": "failed",
+      "origin": "http://127.0.0.1:17782",
+      "model": "models/kokoro",
+      "input": "好，我帮你查一下。",
+      "first_audio_ms": null,
+      "frames": 0,
+      "samples": 0,
+      "physical_device": false,
+      "playback_receipt": "simulated",
+      "elapsed_ms": 106
+    },
+    "diagnosis": "External temporary service model directory no longer had the requested voice asset. Process listened but failed load_safetensors and terminated HTTP response. Why files disappeared is not established.",
+    "restored_asset": {
+      "file": "voices/zf_xiaobei.safetensors",
+      "bytes": 522320,
+      "sha256": "cbda378bbe266c735aa13c94c20b6224f2f8d0e16cf3abe612a4e6d93ebeab51",
+      "source_revision": "a71e4d38b236d968966a2002c4c895dbd12b1c3c",
+      "basis": "Previously recorded research model-manifest.json",
+      "mutation": "Only create the absent public voice file in the existing external temporary service directory after size/hash verification. No process restart, Crabot config edit, model manager or product asset packaging."
+    },
+    "after": {
+      "status": "passed",
+      "origin": "http://127.0.0.1:17782",
+      "model": "models/kokoro",
+      "input": "好，我帮你查一下。",
+      "first_audio_ms": 930,
+      "frames": 150,
+      "samples": 72000,
+      "physical_device": false,
+      "playback_receipt": "simulated",
+      "elapsed_ms": 4068
+    },
+    "raw_artifact_sha256": {
+      "before": "53d5a11e1a9a09ea990b9159db3a7866a41234e6c84bce290fa1371234a0339c",
+      "after": "6e8aba8e5bb96846f54e40045783730c353d39a212dacb6060cdedb24c1da662"
+    },
+    "limitations": [
+      "Not a combined model-to-device measurement; do not add independent timings and call it measured end-to-end latency.",
+      "Only the missing voice file was restored. Other assets in the temporary model directory remain absent; service uses its already loaded model, so restart readiness and persistent deployment are not verified."
+    ]
+  },
+  "duplicate_acknowledgement_fix": {
+    "authorization": "User confirmed the exact isolated request role sentence in chat before implementation.",
+    "scope": "Insert only the approved sentence after the first REQUEST_CONTEXT_PROMPT paragraph. Shared Manager owns acknowledgement; isolated request retains clarification/progress/final delivery to its fixed target. No new identity, authority, delivery state, tool or host-side deduplication protocol.",
+    "source_hashes": {
+      "crabot-agent/src/manager/prompt.ts": "f240cf053142776b929a11fe3524b6aa48fa6c8bcd65f30812b86bd5faea3c02",
+      "crabot-agent/src/manager/loop.ts": "95c5bb1ff784d06e9759e9fc33f8c99588f9fd7655ed58e75f5d955dc08fb2b2",
+      "crabot-agent/src/manager/voice-output.ts": "47e991bde2592002839ec6622e01fc99314c06f1c58b326b73e148514a98f9bb",
+      "crabot-agent/src/manager/voice-output-port.ts": "882a81d9624eb3048f5b2851525348692bd22ba03a119e747579705518c068a4",
+      "crabot-agent/src/manager/tools/worker-tools.ts": "935c5c25c44b17dea7ba40a2f2ae888c56ea92956a709a670c70e6e84f997d9d",
+      "crabot-agent/src/manager/tools/tool-face.ts": "29a5707d4757588c60fe9551c22a27202ba2831cc797b3290ea552ee35365e4e",
+      "crabot-agent/src/manager/registry.ts": "d9d44e6ebacd4e42a8a6bd0aa8f15e883f963fd7203d1375491cf6684e7a5b5f",
+      "crabot-agent/src/manager/request-loop.ts": "6a61e9f4c66cf610abd01182ddd1415df6958c1dfc3763af9a00dec533ab4971",
+      "crabot-agent/src/manager/conversation-request-runner.ts": "ae22dc7f43e4a5e0cbf97dd94a623d87b68e4c2de5d66c50dac3472be9831561",
+      "crabot-agent/src/manager/bootstrap.ts": "bc75b16d51bd617ecd1ae9a6842fc5ba57fd4804ee43563567f2fcaf8acdc8b7",
+      "crabot-agent/src/guidance/content.ts": "b5bfc9de2e0c635f9b48cab5005e352c51451c344a8fd6e4ea3627cb6280990b",
+      "crabot-shared/src/permission-entries.ts": "944ba22530e5277ad56733a20c99389aae664cd04196dca9e2f7d2b7ba8d6681",
+      "crabot-agent/eval/shared-requests/runtime.mjs": "0a0fb9276c63c14aa846be5ea02aae86972d32730e2716e157e5dd25f4586de2"
+    },
+    "cohorts": [
+      {
+        "cohort": "crabot-single-ack-live-20261017-1938",
+        "base_commit": "5a8b75bc0e7da2aa13aa933ccbeb0706031cdfc0",
+        "model": {
+          "model": "gpt-6.1-sol",
+          "format": "openai",
+          "provider_origin": "https://mirror.xinshu.ai",
+          "thinking": null
+        },
+        "plan_sha256": "a5288ddff77f17b2ec407df2399d311f52be9f3e7cc0e6f48f725d6b98e8ca82",
+        "model_adapter_calls": 23,
+        "cases": [
+          {
+            "scenario": "public-voice",
+            "recorded_status": "passed",
+            "recorded_checks": {
+              "no_hijack": true,
+              "worker_reached": true,
+              "bound_owner_unchanged": true,
+              "interruption_reached": true,
+              "no_private_shared_body": true,
+              "private_target": true,
+              "expected_effect": true,
+              "no_duplicate_unknown_send": true,
+              "worker_receipt": true,
+              "voice_tag_delivery": true,
+              "request_isolation": true,
+              "no_fixture_gaps": true
+            },
+            "model_adapter_calls": 1,
+            "elapsed_ms": 3462,
+            "first_voice_ms": {
+              "text_ms": 2838,
+              "completed_ms": 2852
+            },
+            "first_message_reply_ms": null,
+            "first_manager_work_tool": null,
+            "formal_reply_count": 1,
+            "inspection_status": "passed",
+            "inspection_note": "Direct answer only; no acknowledgement added.",
+            "worker_turn_resolutions": [],
+            "raw_artifact_sha256": {
+              "events.jsonl": "e275388eaf795551ad49a855bd2dfb0cf5fdd3f500f99897295ae60dd0f3ff78",
+              "result.json": "6f975f79c6aa9ba493706538f578f06a2b8f1c1d4d30d1dbb3df6c35a606998d"
+            }
+          },
+          {
+            "scenario": "personal-voice-early-ack",
+            "recorded_status": "passed",
+            "recorded_checks": {
+              "no_hijack": true,
+              "worker_reached": true,
+              "bound_owner_unchanged": true,
+              "interruption_reached": true,
+              "no_private_shared_body": true,
+              "private_target": true,
+              "expected_effect": true,
+              "no_duplicate_unknown_send": true,
+              "worker_receipt": true,
+              "voice_tag_delivery": true,
+              "request_isolation": true,
+              "no_fixture_gaps": true,
+              "initial_ack_before_work": true,
+              "single_ack_and_result": true
+            },
+            "model_adapter_calls": 13,
+            "elapsed_ms": 31189,
+            "first_voice_ms": {
+              "text_ms": 2025,
+              "completed_ms": 2254,
+              "canary_complete_ms": 24173
+            },
+            "first_message_reply_ms": null,
+            "first_manager_work_tool": {
+              "name": "load_tool_family",
+              "started_ms": 2559
+            },
+            "formal_reply_count": 2,
+            "inspection_status": "passed",
+            "inspection_note": "Manually inspected all formal replies: one acknowledgement plus one correct final result.",
+            "worker_turn_resolutions": [
+              "reported"
+            ],
+            "raw_artifact_sha256": {
+              "events.jsonl": "89df22e8d1d16225b79dd3341a0f2271c03942712c4b340adb7283d2b94501dd",
+              "result.json": "db816a6385b3dcba7151f9df33ffd11025262cf8b4246948bc4b9ba5004b2cdf"
+            }
+          },
+          {
+            "scenario": "personal-message-early-ack",
+            "recorded_status": "passed",
+            "recorded_checks": {
+              "no_hijack": true,
+              "worker_reached": true,
+              "bound_owner_unchanged": true,
+              "interruption_reached": true,
+              "no_private_shared_body": true,
+              "private_target": true,
+              "expected_effect": true,
+              "no_duplicate_unknown_send": true,
+              "worker_receipt": true,
+              "voice_tag_delivery": true,
+              "request_isolation": true,
+              "no_fixture_gaps": true,
+              "initial_ack_before_work": true,
+              "single_ack_and_result": true
+            },
+            "model_adapter_calls": 9,
+            "elapsed_ms": 29362,
+            "first_voice_ms": {},
+            "first_message_reply_ms": 2668,
+            "first_manager_work_tool": {
+              "name": "load_tool_family",
+              "started_ms": 5194
+            },
+            "formal_reply_count": 2,
+            "inspection_status": "passed",
+            "inspection_note": "Manually inspected all formal replies: one acknowledgement plus one correct final result.",
+            "worker_turn_resolutions": [],
+            "raw_artifact_sha256": {
+              "events.jsonl": "f3919ff6b4a4c5857a08cbff6154ce0738c871f22c194adeab47dd3111e2893a",
+              "result.json": "6708c758089dbb5c0f6aaf91fa62f7912f80cf70c8cdda7e83aa8da23ea9d87a"
+            }
+          }
+        ],
+        "raw_artifact_sha256": {
+          "plan.json": "8634609cab415bb47e4f239a8ff81945b541f9a0c62657635be1d49760a256da",
+          "summary.json": "dbad1c4dfbe8787aad69ccbd0a75d3af94cda01a75259fea5bd724c9a114a8c3"
+        }
+      },
+      {
+        "cohort": "crabot-single-ack-repeat-live-20261017-1941",
+        "base_commit": "5a8b75bc0e7da2aa13aa933ccbeb0706031cdfc0",
+        "model": {
+          "model": "gpt-6.1-sol",
+          "format": "openai",
+          "provider_origin": "https://mirror.xinshu.ai",
+          "thinking": null
+        },
+        "plan_sha256": "272c2fbdb84e1eb3e283c1ff18923368447f8fed2ff0f2f0044fc5ac0124c6f6",
+        "model_adapter_calls": 8,
+        "cases": [
+          {
+            "scenario": "personal-message-early-ack",
+            "recorded_status": "passed",
+            "recorded_checks": {
+              "no_hijack": true,
+              "worker_reached": true,
+              "bound_owner_unchanged": true,
+              "interruption_reached": true,
+              "no_private_shared_body": true,
+              "private_target": true,
+              "expected_effect": true,
+              "no_duplicate_unknown_send": true,
+              "worker_receipt": true,
+              "voice_tag_delivery": true,
+              "request_isolation": true,
+              "no_fixture_gaps": true,
+              "initial_ack_before_work": true,
+              "single_ack_and_result": true
+            },
+            "model_adapter_calls": 8,
+            "elapsed_ms": 33221,
+            "first_voice_ms": {},
+            "first_message_reply_ms": 3393,
+            "first_manager_work_tool": {
+              "name": "load_tool_family",
+              "started_ms": 5554
+            },
+            "formal_reply_count": 2,
+            "inspection_status": "passed",
+            "inspection_note": "Manually inspected all formal replies: one acknowledgement plus one correct final result.",
+            "worker_turn_resolutions": [],
+            "raw_artifact_sha256": {
+              "events.jsonl": "d24248a17b2ee00aff98d178df47afaa243723f32a7ae97b5fed3316202cfe04",
+              "result.json": "f0cefc2963d312126ed7359f6bced05d9d28afbc9486b56b7281018ce04212e2"
+            }
+          }
+        ],
+        "raw_artifact_sha256": {
+          "plan.json": "e7caa62b848a33d725f72c0698c2ec5a9dbebad473f1fdb3eaace68f82e50a9c",
+          "summary.json": "7a261730a25fa0f18349c3d572a4778e2d1397442ef1b4b70744c8655918338c"
+        }
+      }
+    ],
+    "new_model_adapter_calls": 31,
+    "regressions": {
+      "new_prompt_tests_failed_before_fix": 2,
+      "agent_directed_passed": 77,
+      "excluded_existing_role_prompt_test": 1,
+      "offline_tests_passed": 14,
+      "agent_typescript_build": "passed"
+    },
+    "prompt_audit": {
+      "profiles": 8,
+      "only_approved_insertion_in": [
+        "request",
+        "voice-request"
+      ],
+      "other_profiles_byte_identical": 6,
+      "core_tool_counts": [
+        15,
+        11,
+        3
+      ],
+      "all_four_runs_actual_inputs": "passed",
+      "raw_artifact_sha256": {
+        "prompt-audit.json": "f82d29c126b0a18d1ddfb59cb709e4af53a6e2d91a583e9951bcbdb65a9f8c39",
+        "actual-input-audit.json": "f10d7b73948bdb5e7815b1d0a6675fb88936b81a9219f27f9f99aa2581b413e5"
+      }
+    },
+    "inspection": "Original duplicate failure retained in after_cohorts. Two new ordinary-message runs each produced exactly one acknowledgement plus one correct result; the new Voice run did likewise and resolved its original Worker turn as reported. Simple Voice answered directly.",
+    "limits": "Channel and playback receipts simulated. No fresh ASR/TTS/phone listening test and no deployment. These controlled model samples verify behavior, not a protocol-level exactly-once guarantee."
+  }
+}

@@ -1,27 +1,26 @@
 #!/usr/bin/env node
 
-import './_preflight.mjs'
 
 import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { homedir } from 'node:os'
-import { locateCliInstallation } from './lib/cli-installation.mjs'
-import { prepareDownloadedCliUpgrade, applyPreparedCliUpgrade } from './lib/standalone-cli-release.mjs'
-import product from './lib/product-runtime.cjs'
 import { detectMode } from './upgrade-lib/mode.mjs'
+import { detectMode as detectInstallScope } from './lib/mode.mjs'
 import { resolveCliDataDir } from './lib/instance.mjs'
 import { runScript } from './upgrade-lib/runner.mjs'
 import { runMigrations } from './upgrade-lib/migrate.mjs'
-import { runSourceUpgrade, syncPythonDeps } from './upgrade-lib/source.mjs'
-import { verifyReleasePackage } from './lib/release-package.mjs'
+import { prepareUpgrade, installPreparedUpgrade } from './upgrade-lib/prepared-upgrade.mjs'
+import { acquireCliLock, releaseCliLock, cliLockToken } from './lib/cli-lock.mjs'
+import { locateCliInstallation } from './lib/cli-installation.mjs'
+import product from './lib/product-runtime.cjs'
+import { preflightRestart } from './upgrade-lib/preflight.mjs'
 import {
   getCurrentVersion,
   getLatestVersion,
   getReleaseUrls,
   downloadRelease,
-  extractRelease,
   writeVersionFile,
 } from './upgrade-lib/release.mjs'
 
@@ -49,7 +48,8 @@ function readVersion(mode) {
       return null
     }
   }
-  return getCurrentVersion(CRABOT_HOME)
+  const p = join(CRABOT_HOME, 'VERSION')
+  return existsSync(p) ? readFileSync(p, 'utf-8').trim() : null
 }
 
 function writeStatus(patch) {
@@ -61,9 +61,11 @@ function writeStatus(patch) {
   writeFileSync(STATUS_FILE, JSON.stringify({ ...prev, ...patch }, null, 2))
 }
 
-function node(args, root = CRABOT_HOME) {
+function node(args, lock, root = CRABOT_HOME) {
   const runtime = root === CRABOT_HOME ? null : product.loadProductRuntime(root, { required: true })
-  execFileSync(runtime?.executables.node ?? process.execPath, [join(root, 'cli.mjs'), ...args], { cwd: CRABOT_HOME, stdio: 'inherit' })
+  execFileSync(runtime?.executables.node ?? process.execPath, [join(root, 'cli.mjs'), ...args], {
+    cwd: CRABOT_HOME, stdio: 'inherit', env: { ...process.env, CRABOT_CLI_LOCK_HELD: cliLockToken(lock) },
+  })
 }
 
 function stamp() {
@@ -71,9 +73,10 @@ function stamp() {
 }
 
 async function main() {
-  const mode = detectMode(CRABOT_HOME) // 'release' | 'source'
+  if (detectInstallScope('/etc/crabot') === 'system' && process.getuid?.() !== 0) throw new Error('System upgrade requires an administrator; the running instance was not stopped')
   const standalone = locateCliInstallation(CRABOT_HOME)
-  if (standalone && standalone.scope !== 'user') throw new Error('内置 system CLI 更新适配尚未就绪，未更改共享核心；请联系管理员。')
+  if (standalone && standalone.scope !== 'user') throw new Error('共享核心升级请联系管理员，原实例保持运行。')
+  const mode = detectMode(CRABOT_HOME) // 'release' | 'source'
   const fromVersion = readVersion(mode)
   console.log(`[ui-upgrade] start mode=${mode} from=${fromVersion} at=${stamp()}`)
   writeStatus({
@@ -86,66 +89,61 @@ async function main() {
   })
 
   // ========== 准备阶段（实例照常运行，最慢、最易失败的步骤都在这里；失败不停服务）==========
-  let releaseArtifact = null
-  let targetVersion = null
-  let preparedCli = null
+  let prepared
+  let preparedCli
+  let targetVersion
   try {
-    if (mode === 'source') {
-      console.log('[ui-upgrade] (prepare) git pull --ff-only')
-      execFileSync('git', ['pull', '--ff-only'], { cwd: CRABOT_HOME, stdio: 'inherit' })
-      console.log('[ui-upgrade] (prepare) build：install + build 所有模块')
-      await runSourceUpgrade(CRABOT_HOME, logger)
-    } else {
-      const current = getCurrentVersion(CRABOT_HOME)
-      const { tag } = await getLatestVersion()
-      targetVersion = tag
-      if (current?.replace(/^v/, '') === tag.replace(/^v/, '')) {
-        try {
-          await verifyReleasePackage(CRABOT_HOME, current)
-          console.log(`[ui-upgrade] already up to date (${current})`)
-          writeStatus({ phase: 'done', to_version: current, finished_at: stamp() })
+    targetVersion = mode === 'release' ? (await getLatestVersion()).tag : undefined
+    if (mode === 'release' && getCurrentVersion(CRABOT_HOME) === targetVersion) {
+      try {
+        const current = await preflightRestart(CRABOT_HOME, DATA_DIR)
+        if (!current.modules.length && ['ready', 'not_applicable'].includes(current.shared.status)) {
+          writeStatus({ phase: 'done', to_version: targetVersion, finished_at: stamp() })
+          console.log(`[ui-upgrade] already up to date (${targetVersion})`)
           return
-        } catch (error) {
-          if (error.code === 'CRABOT_PREPARATION_CANCELLED') throw error
-          logger.warn(`Installed release is incomplete; repairing: ${error.message}`)
         }
-      }
-      releaseArtifact = await downloadRelease({ ...getReleaseUrls(tag), logger })
-      if (standalone) {
-        preparedCli = await prepareDownloadedCliUpgrade({ root: CRABOT_HOME, artifact: releaseArtifact, logger })
-        releaseArtifact = null
-      }
+      } catch (error) { logger.warn(`Installed target needs repair: ${error.message}`) }
+    }
+    if (standalone) {
+      const artifact = await downloadRelease({ ...getReleaseUrls(targetVersion), logger })
+      const { prepareDownloadedCliUpgrade } = await import('./lib/standalone-cli-release.mjs')
+      preparedCli = await prepareDownloadedCliUpgrade({ root: CRABOT_HOME, artifact, logger })
+    } else {
+      prepared = await prepareUpgrade(CRABOT_HOME, DATA_DIR, { mode, version: targetVersion, logger })
+      console.log(`[ui-upgrade] prepared product ${prepared.payload_bytes} bytes; scoped data backup ${prepared.preview.backup_bytes ?? 'legacy pending'}`)
+      await preflightRestart(prepared.stage, DATA_DIR)
     }
   } catch (err) {
     const msg = err?.message || String(err)
     console.error('[ui-upgrade] prepare FAILED（服务未停，无影响）:', msg)
     writeStatus({ phase: 'failed', error: `准备阶段失败，服务未停：${msg}`, finished_at: stamp() })
-    process.exit(1)
+    process.exitCode = 1
+    return
   }
 
-  // ========== 切换阶段（停机，尽量短：只做 stop + 落盘类操作 + start）==========
+  // ========== 切换阶段：同一实例操作锁；此时无需下载、解包、安装依赖或构建 ==========
+  let lock
+  let switchStarted = false
   try {
+    lock = await acquireCliLock(DATA_DIR, 'web-upgrade')
+    if (!preparedCli) await preflightRestart(prepared.stage, DATA_DIR)
     writeStatus({ phase: 'restarting' })
     console.log('[ui-upgrade] (switch) stop')
-    node(['stop'])
-
+    switchStarted = true
+    node(['stop'], lock)
     if (preparedCli) {
+      // The target coordinator acquires its own instance lock.
+      releaseCliLock(lock); lock = undefined
+      const { applyPreparedCliUpgrade } = await import('./lib/standalone-cli-release.mjs')
       await applyPreparedCliUpgrade({ root: CRABOT_HOME, dataDir: DATA_DIR, prepared: preparedCli })
-      node(['start', '-d'], preparedCli.coreRoot)
+      node(['start', '-d'], lock, preparedCli.coreRoot)
       writeStatus({ phase: 'done', to_version: preparedCli.version, finished_at: stamp() })
       return
     }
-
-    if (mode === 'release' && releaseArtifact) {
-      console.log('[ui-upgrade] (switch) extract release')
-      await extractRelease({ ...releaseArtifact, crabotHome: CRABOT_HOME, logger })
-      console.log('[ui-upgrade] (switch) sync python deps')
-      await syncPythonDeps(CRABOT_HOME, logger)
-      await verifyReleasePackage(CRABOT_HOME, targetVersion)
-    }
+    await installPreparedUpgrade(prepared, CRABOT_HOME, DATA_DIR)
 
     console.log('[ui-upgrade] (switch) run migrations')
-    const result = await runMigrations(CRABOT_HOME, DATA_DIR, runScript, logger)
+    const result = await runMigrations(CRABOT_HOME, DATA_DIR, runScript, logger, { lockHeld: true })
     if (!result.ok) {
       throw new Error(`migration failed in ${result.failedModule} at ${result.failedAt} (backup: ${result.backupPath ?? 'none'})`)
     }
@@ -155,20 +153,24 @@ async function main() {
     }
 
     console.log('[ui-upgrade] (switch) start -d')
-    node(['start', '-d'])
+    node(['start', '-d'], lock)
 
     writeStatus({ phase: 'done', to_version: readVersion(mode), finished_at: stamp() })
     console.log(`[ui-upgrade] done at=${stamp()}`)
   } catch (err) {
     const msg = err?.message || String(err)
     console.error('[ui-upgrade] switch FAILED:', msg)
-    writeStatus({ phase: 'failed', error: `切换阶段失败（已停机，需人工恢复）：${msg}`, finished_at: stamp() })
-    process.exit(1)
+    writeStatus({ phase: 'failed', error: `${switchStarted ? '停止/切换阶段失败，请检查实例状态' : '切换预检失败，服务未停'}：${msg}`, finished_at: stamp() })
+    process.exitCode = 1
+    return
+  } finally {
+    releaseCliLock(lock)
   }
+
 }
 
 main().catch((err) => {
   const msg = err?.message || String(err)
   writeStatus({ phase: 'failed', error: msg, finished_at: stamp() })
-  process.exit(1)
+  process.exitCode = 1
 })

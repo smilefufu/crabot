@@ -75,3 +75,5 @@ scrapling-runtime.json.*.tmp
 .product-runtime/
 product-runtime.json
 crabot-native/build/
+
+/crabot-memory/prepared-environment.json

@@ -363,6 +363,7 @@ export interface SpawnSpec {
   /** builtin 专用注入(外部 CLI adapter 忽略) */
   readonly builtin?: {
     readonly resolvedPermissions?: ResolvedPermissions
+    readonly requestCliAuthorization?: import('../engine/types.js').EngineOptions['requestCliAuthorization']
     readonly observeTools?: import('../engine/types.js').EngineOptions['onBeforeLlmCall']
     readonly adapter: LLMAdapter
     readonly model: string

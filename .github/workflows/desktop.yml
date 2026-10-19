@@ -42,7 +42,7 @@ defaults:
 jobs:
   runtime:
     name: Desktop foundation ${{ matrix.target }}
-    timeout-minutes: 90
+    timeout-minutes: ${{ matrix.target == 'darwin-x64' && 105 || 90 }}
     strategy:
       fail-fast: false
       matrix:
@@ -116,7 +116,7 @@ jobs:
           node --test scripts/lib/__tests__/legacy-runtime.test.mjs scripts/lib/__tests__/legacy-stop.test.mjs
           node --test scripts/lib/__tests__/maintenance-backup.test.mjs
           node --test scripts/lib/__tests__/version-maintenance.test.mjs scripts/lib/__tests__/legacy-python-maintenance.test.mjs scripts/lib/__tests__/legacy-version-maintenance.test.mjs scripts/lib/__tests__/desktop-update-entry.test.mjs scripts/lib/__tests__/desktop-cli-install.test.mjs
-          (cd scripts/upgrade-lib && node ../../node_modules/vitest/vitest.mjs run __tests__/release.test.mjs __tests__/extract.test.mjs __tests__/runner.test.mjs --maxWorkers=1 --minWorkers=1)
+          (cd scripts/upgrade-lib && node ../../node_modules/vitest/vitest.mjs run --maxWorkers=1 --minWorkers=1)
           cd crabot-core
           node node_modules/vitest/vitest.mjs run src/agent-venv.test.ts src/core-modules.test.ts src/shutdown-generation.test.ts src/module-management-secrets.test.ts --maxWorkers=1 --minWorkers=1
       - name: Agent environment regressions

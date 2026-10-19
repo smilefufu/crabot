@@ -7,6 +7,26 @@ import { describe, expect, it } from 'vitest'
 import { VoiceTagParser, TaggedVoiceOutput, type VoiceDeliveryRecord } from '../../src/manager/voice-output.js'
 
 describe('voice tag streaming', () => {
+  it('keeps subsequent blocks and response_end on the accepted response after the initial expiry', async () => {
+    let context = { channel_id: 'voice', session_id: 'group', turn_id: 'turn', connection_epoch: 'epoch', expires_at: new Date(Date.now() + 60000).toISOString() }
+    const binding = { channel_id: 'voice', session_id: 'group', response_id: 'different-from-turn' }
+    const events: import('crabot-shared').VoiceOutputParams[] = []
+    let preparations = 0
+    const output = new TaggedVoiceOutput({ isVoice: () => true, records: () => [], save() {},
+      prepare: async () => { preparations++; return { binding, connection_epoch: 'epoch', kind: 'reply', turn_id: 'turn' } },
+      send: async params => {
+        events.push(params)
+        return params.event.type === 'reply_end' ? { platform_message_id: params.event.playback_id, sent_at: new Date().toISOString(), played_samples: 480 } : { accepted: true }
+      },
+    }, () => context, () => {}, () => binding)
+    const consumer = output.consumer()
+    await consumer.write('<voice_reply>第一段。</voice_reply>')
+    context = { ...context, expires_at: new Date(Date.now() - 60000).toISOString() }
+    await consumer.write('<voice_reply>最后一段。</voice_reply>'); await consumer.finish(); await output.finishResponse()
+    expect(preparations).toBe(1)
+    expect(events.at(-1)).toMatchObject({ delivery_context: { binding }, event: { type: 'response_end' } })
+    expect(events.filter(item => item.event.type === 'reply_end')).toHaveLength(2)
+  })
   it('extracts only tagged text for every split, including adjacent tags', async () => {
     const source = 'internal<voice_reply>你好。</voice_reply>scratch<voice_reply>再见。</voice_reply>internal'
     for (let split = 0; split <= source.length; split++) {
@@ -17,13 +37,13 @@ describe('voice tag streaming', () => {
       expect(events.filter(e => e === 'end:')).toHaveLength(2)
     }
   })
-  it('counts Unicode characters across split surrogate pairs and enforces the exact bound', async () => {
+  it('preserves split surrogate pairs and accepts a long logical reply', async () => {
     const parser = new VoiceTagParser(async () => {})
     await parser.write('<voice_reply>')
     for (let i = 0; i < 120; i++) { await parser.write('😀'[0]); await parser.write('😀'[1]) }
     await parser.write('</voice_reply>'); parser.finish()
     const long = new VoiceTagParser(async () => {})
-    await expect(long.write('<voice_reply>' + '字'.repeat(121))).rejects.toThrow('120')
+    await long.write('<voice_reply>' + '字'.repeat(10000) + '</voice_reply>'); long.finish()
   })
 
   it('preserves partial playback evidence without reporting formal delivery', async () => {

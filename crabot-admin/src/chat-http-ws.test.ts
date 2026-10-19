@@ -14,13 +14,15 @@ describe('real loopback HTTP and legacy WS use the same chat admission', () => {
   let directory: string, manager: ChatManager, server: Server, endpoint: string
   let rpc: ReturnType<typeof vi.fn>
   let sessionValid: boolean
+  let verifySession: ReturnType<typeof vi.fn>
   const sockets: WebSocket[] = []
   beforeEach(async () => {
     directory = await mkdtemp(path.join(tmpdir(), 'crabot-chat-transport-'))
     const media = new MediaStore(directory); await media.init()
     rpc = vi.fn(async () => ({}))
     sessionValid = true
-    manager = new ChatManager(directory, { call: rpc, callSensitive: rpc } as never, async () => 12345, 'fixture-secret', async token => sessionValid && token === 'fixture-human' ? { sub: 'admin' } : null, media)
+    verifySession = vi.fn(async token => sessionValid && token === 'fixture-human' ? { sub: 'admin' } : null)
+    manager = new ChatManager(directory, { call: rpc, callSensitive: rpc } as never, async () => 12345, 'fixture-secret', verifySession, media)
     await manager.loadData()
     const handler = (AdminModule.prototype as any).handlePostChatMessageApi
     server = createServer((request, response) => {
@@ -70,6 +72,33 @@ describe('real loopback HTTP and legacy WS use the same chat admission', () => {
     expect(retry.message.message_id).toBe(firstId)
     await vi.waitFor(() => expect(rpc).toHaveBeenCalledOnce())
     expect(manager.getMessages(10)).toHaveLength(1)
+  })
+
+  it.each([true, false])('a received WS message survives client disconnect only while its session remains valid (%s)', async valid => {
+    const socket = new WebSocket(endpoint.replace('http:', 'ws:').replace(/\/api$/, '') + '/ws/chat?token=fixture-human')
+    sockets.push(socket); await once(socket, 'open')
+    let release!: () => void
+    const pending = new Promise<void>(resolve => { release = resolve })
+    verifySession.mockImplementationOnce(async () => {
+      await pending
+      return sessionValid ? { sub: 'admin' } : null
+    })
+    const serverSocket = (manager as any).activeClient
+    socket.send(JSON.stringify({ type: 'chat_message', request_id: 'disconnect-during-auth', content: 'received before disconnect' }))
+    await vi.waitFor(() => expect(verifySession).toHaveBeenCalledTimes(2))
+    socket.close(); await once(socket, 'close')
+    await vi.waitFor(() => expect((manager as any).activeClient).toBeNull())
+    sessionValid = valid
+    release()
+    await (manager as any).clientSessions.get(serverSocket).queue
+    if (valid) {
+      await vi.waitFor(() => expect(rpc).toHaveBeenCalledOnce())
+      expect(manager.getMessages(10)).toMatchObject([{ request_id: 'disconnect-during-auth' }])
+    } else {
+      expect(await verifySession.mock.results[1].value).toBeNull()
+      expect(manager.getMessages(10)).toEqual([])
+      expect(rpc).not.toHaveBeenCalled()
+    }
   })
 
   it('WS accepts a header without a token URL, and an invalid header never falls back to query authentication', async () => {

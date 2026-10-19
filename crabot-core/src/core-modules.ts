@@ -7,6 +7,7 @@ export interface BuildCoreModulesOpts {
   adminDir: string
   agentDir: string
   memoryDir: string
+  memoryPython?: string | null
   dataDir: string          // 顶层 DATA_DIR
   workspaceDir: string
   isDev: boolean
@@ -24,6 +25,7 @@ type CoreModule = ModuleDefinition & Record<string, unknown>
 
 export function buildCoreModules(o: BuildCoreModulesOpts): CoreModule[] {
   const agentHeapSnapshotSignal = process.platform === 'win32' ? '' : ' --heapsnapshot-signal=SIGUSR2'
+  const memoryEntry = o.isDev ? 'uv run --frozen python -m src.main' : 'uv run --frozen --no-dev python -m src.main'
   const modules: CoreModule[] = [
     {
       module_id: 'admin-web',
@@ -80,7 +82,7 @@ export function buildCoreModules(o: BuildCoreModulesOpts): CoreModule[] {
       version: '0.1.0',
       protocol_version: '0.4.0',
       entry: o.productRuntime ? 'node ../scripts/run-product-memory.mjs'
-        : o.isDev ? 'uv run --frozen python -m src.main' : 'uv run --frozen --no-dev python -m src.main',
+        : o.memoryPython ? `"${o.memoryPython}" -m src.main` : memoryEntry,
       cwd: o.memoryDir,
       data_dir: path.join(o.dataDir, 'memory'),
       auto_start: fs.existsSync(path.join(o.memoryDir, 'src', 'main.py')),

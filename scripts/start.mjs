@@ -12,6 +12,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { spawnSync } from 'node:child_process'
 import { homedir } from 'node:os'
 import net from 'node:net'
+import { probeMmHealthy } from './lib/mm-probe.mjs'
 import { checkSingleInstance } from './lib/pid.mjs'
 import { prepareCoreEnvironment, applyStartupMigrations } from './lib/core-preparation.mjs'
 import management from './lib/desktop-management.cjs'
@@ -173,9 +174,8 @@ console.log(`[crabot] Tmp-page proxy target: 127.0.0.1:${TMP_PAGE_PORT}`)
 console.log(`[crabot] Starting Module Manager (port ${MM_PORT})...`)
 console.log(`[crabot] Admin Web: http://localhost:${WEB_PORT}`)
 
-// Migration 兜底：start 自动跑缺失的 migration（覆盖 upgrade-time 漏跑场景）
-// 用 applyMigration 包装版（chainUpgrade + writeSchemaVersion 原子，不可能漏写
-// SCHEMA_VERSION）；user/source保留旧兜底，受管system启动额外保留迁移前备份及中断保护。
+// Start fallback shares scoped backup, migration and request preparation with upgrade.
+// Managed system startup also retains its administrator operation fence.
 try {
   if (cliLocation.locateCliInstallation(ROOT)?.scope === 'system') await prepareSystemStartupData({ root: ROOT, dataDir: DATA_DIR, env: process.env })
   else await applyStartupMigrations(ROOT, DATA_DIR, process.env, message => console.log(`[crabot] ${message}`))
@@ -183,10 +183,15 @@ try {
 catch (error) { console.error(`[crabot] ${error.message}`); process.exit(1) }
 
 if (!DAEMON_MODE) {
-  await runManagedCore({ root: ROOT, dataDir: DATA_DIR, mmPort: MM_PORT,
+  const { mm } = await runManagedCore({ root: ROOT, dataDir: DATA_DIR, mmPort: MM_PORT,
     env: process.env, stdio: ['inherit', 'inherit', 'inherit'],
     cleanup: code => process.exit(code), log: message => process.stdout.write(message) })
-  // Foreground waiting is presentation, not a lifecycle mutation. Stop/restart can now acquire the lock.
+  // Startup owns the operation lock until the actual child opens ingress or finishes.
+  const startupDeadline = Date.now() + 30_000
+  while (mm.exitCode === null && mm.signalCode === null && Date.now() < startupDeadline) {
+    if (await probeMmHealthy(MM_PORT)) break
+    await new Promise(resolve => setTimeout(resolve, 250))
+  }
   releaseCliLock(startupLock)
   startupLock = undefined
 } else {

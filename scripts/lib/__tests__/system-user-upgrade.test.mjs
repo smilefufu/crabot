@@ -29,6 +29,7 @@ async function fixture(t, { fail = false } = {}) {
       files: { 'bin/node': { size: (await fs.stat(node)).size, sha256: nodeHash } } }))
     await fs.mkdir(path.join(root, 'crabot-fixture/upgrade'), { recursive: true })
     await fs.writeFile(path.join(root, 'crabot-fixture/schema_version'), schema)
+  await fs.writeFile(path.join(root, 'crabot-fixture/upgrade/scope.mjs'), `export const migrationScope = () => ({ reads: [], writes: ['fixture/content', 'fixture/SCHEMA_VERSION'] })`)
     await fs.writeFile(path.join(root, 'crabot-fixture/upgrade/from_v1_to_v2.mjs'),
       "import{appendFileSync}from'node:fs';const dir=process.argv.find(a=>a.startsWith('--data-dir=')).slice(11);appendFileSync(dir+'/content',' changed');console.log('ordinary migration output');process.exit(" + (fail ? '13' : '0') + ");")
     await writeCoreRelease(root, { schema_version: 1, version, platform: process.platform, arch: process.arch, commit: 'a'.repeat(40), source_dirty: false })
@@ -63,7 +64,8 @@ test('a partially failed real migration remains fenced and a second invocation c
   assert.equal(readVersionMaintenance(f.data).phase, 'verifying')
   await assert.rejects(f.invoke('migrate', { snapshot }), { code: 'CRABOT_SYSTEM_OPERATION_INTERRUPTED' })
   await assert.rejects(f.invoke('cancel-preparation'))
-  assert.equal(await fs.readFile(path.join(f.data, 'fixture/content'), 'utf8'), 'before changed')
+  assert.equal(JSON.parse(await fs.readFile(path.join(f.data, '.upgrade-migrations/crabot-fixture-v1-v2/state.json'), 'utf8')).phase, 'rolled_back')
+  assert.equal(await fs.readFile(path.join(f.data, 'fixture/content'), 'utf8'), 'before')
   assert.equal(await fs.readFile(path.join(f.data, 'fixture/SCHEMA_VERSION'), 'utf8'), 'v1')
 })
 test('prepared data can be released only while the exact source is selected; cancellation never restores data', options, async t => {

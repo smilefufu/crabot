@@ -1,3 +1,4 @@
+import { preparedMemoryPython } from '../lib/memory-deps.mjs'
 import { spawn } from 'node:child_process'
 import { dirname, extname, basename, resolve } from 'node:path'
 import product from '../lib/product-runtime.cjs'
@@ -13,7 +14,8 @@ const RUNNERS = {
 // 可能带空格，必须用双引号包裹。
 const quoteWin = (s) => (/\s/.test(s) ? `"${s}"` : s)
 
-export function runScript(scriptPath, dataDir, { root, env: sourceEnv = process.env, outputFd } = {}) {
+export async function runScript(scriptPath, dataDir, options = {}) {
+  const { root, env: sourceEnv = process.env, outputFd, ...context } = options ?? {}
   if (outputFd !== undefined && (!Number.isInteger(outputFd) || outputFd < 0)) throw new Error('Invalid migration output descriptor')
   const ext = extname(scriptPath)
   const runner = RUNNERS[ext]
@@ -27,8 +29,13 @@ export function runScript(scriptPath, dataDir, { root, env: sourceEnv = process.
   const cwd = dirname(dirname(scriptPath))
   const runtime = product.loadProductRuntime(root ?? dirname(cwd), { required: sourceEnv.CRABOT_PRODUCT_REQUIRED === '1' })
   const memoryPython = ext === '.py' && basename(cwd) === 'crabot-memory'
+  const prepared = !runtime && memoryPython ? await preparedMemoryPython(cwd) : null
+  if (prepared) cmd = prepared
   const dev = sourceEnv.CRABOT_DEV === 'true'
-  const args = [...(memoryPython ? ['run', '--frozen', ...(dev ? [] : ['--no-dev']), 'python'] : baseArgs), scriptPath, `--data-dir=${dataDir}`]
+  let runnerArgs = baseArgs
+  if (prepared) runnerArgs = []
+  else if (memoryPython) runnerArgs = ['run', '--frozen', ...(dev ? [] : ['--no-dev']), 'python']
+  const args = [...runnerArgs, scriptPath, `--data-dir=${dataDir}`]
   let env = ext === '.py' ? { ...sourceEnv, PYTHONIOENCODING: 'utf-8' } : sourceEnv
   if (runtime) {
     env = product.productEnvironment(runtime, resolve(dataDir, '..'), sourceEnv)
@@ -48,10 +55,12 @@ export function runScript(scriptPath, dataDir, { root, env: sourceEnv = process.
     } else cmd = runtime.executables.node
   }
 
+  if (context.plan) env = { ...env, ...context.environment, CRABOT_MIGRATION_PLAN: context.plan, CRABOT_MIGRATION_PLAN_SHA256: context.planSha256 }
+
   return new Promise((resolve, reject) => {
-    const isWin = process.platform === 'win32'
+    const usesCommandShim = process.platform === 'win32' && cmd === 'npx'
     const stdio = ['ignore', outputFd ?? 'pipe', outputFd ?? 'pipe']
-    const proc = isWin && !runtime
+    const proc = usesCommandShim
       ? spawn(`${cmd} ${args.map(quoteWin).join(' ')}`, [], { cwd, env, stdio, shell: true })
       : spawn(cmd, args, { cwd, env, stdio })
     let stdout = ''

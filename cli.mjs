@@ -70,7 +70,7 @@ if (command === '_system-service') {
 }
 
 // 在加载含第三方静态 import 的入口前完成旧安装的依赖修复。
-if ((bootstrapCommands.has(command) && command !== 'help') || command === 'password') {
+if ((bootstrapCommands.has(command) && !['help', 'upgrade', 'restart'].includes(command)) || command === 'password') {
   await importPath(resolve(__dirname, 'scripts/_preflight.mjs'))
 }
 

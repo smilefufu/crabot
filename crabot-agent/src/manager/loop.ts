@@ -1,4 +1,5 @@
-import { TaggedVoiceOutput, type VoiceOutputPort } from './voice-output.js'
+import { requestInputsForMessages, type TrustedHumanInput } from './trusted-human-input.js'
+import { findVoiceDelivery, TaggedVoiceOutput, type VoiceOutputPort } from './voice-output.js'
 /**
  * ManagerLoop —— episode 生命周期(protocol-agent-v3.md §4.1/§4.2)。
  *
@@ -41,7 +42,7 @@ import {
 } from '../engine/index.js'
 import type { HumanMessageQueueLike, LLMRequestEvent } from '../engine/types.js'
 import { AsyncMutex } from '../workers/async-mutex'
-import type { TaskPriority } from '../workers/harness/ledger-types.js'
+import type { LedgerWorker, TaskPriority } from '../workers/harness/ledger-types.js'
 import { formatChannelMessageLine, type QuotedMessageEntry } from '../prompt-manager.js'
 import { prefetchQuotedMessages, type PrefetchQuotedDeps } from '../utils/quoted-message-prefetcher.js'
 import { splitManagerKey } from './principal.js'
@@ -72,7 +73,7 @@ import { DEFAULT_MAX_CONTEXT_TOKENS } from '../engine/query-loop.js'
 import { REMOTE_IMAGE_PREFETCH_TIMEOUT_MS, GroupInboundImageProjection, collectInboundImages, injectInboundImages, pruneImageRefs, readImageFileSync, toImageBlock, type ManagerImageRef } from './image-vision.js'
 import { fetchRemoteImage } from '../agent/media-resolver.js'
 import type { ImageBlock } from '../engine/index.js'
-import { assembleManagerSystemPrompt } from './prompt.js'
+import { assembleManagerSystemPrompt, VOICE_PENDING_RESULTS_PROMPT, VOICE_MANAGEMENT_RESULT_PROMPT } from './prompt.js'
 import { summarizeSpanInput, summarizeSpanOutput } from './span-summary.js'
 import type { ManagerSessionStore } from './session-store.js'
 import { dailyReflectionResultForTrace } from './daily-reflection.js'
@@ -111,6 +112,7 @@ export type WakeEvent =
   | {
       readonly kind: 'human_messages'
       readonly messages: ReadonlyArray<ChannelMessage>
+      readonly request_inputs?: ReadonlyArray<TrustedHumanInput>
       /**
        * P7 J additive:本批消息的**发言者**(§4.3 权限身份、§8.2 `creator_friend_id`)。
        * 与 schedule 的 `creatorFriendId` 同样只在唤醒事件上随行、**不作为独立字段进对话
@@ -134,6 +136,8 @@ export type WakeEvent =
     }
   | { readonly kind: 'worker_event'; readonly event: HarnessEvent; readonly dailyReflection?: { runId: string; scheduleId: string; targetSession: { channel_id: string; session_id: string; type: 'private' | 'group' } } }
   | { readonly kind: 'media_notification'; readonly text: string }
+  | { readonly kind: 'voice_delivery'; readonly results: ReadonlyArray<import('./voice-output.js').VoicePendingResult> }
+  | { readonly kind: 'voice_management'; readonly result: import('crabot-shared').VoiceAgentManagementResult }
   | {
       readonly kind: 'schedule'
       readonly reflectionWindow?: import('./daily-reflection-types.js').ReflectionWindow
@@ -185,6 +189,7 @@ export type WakeEvent =
   | {
       readonly kind: 'attention_flush'
       readonly messages: ReadonlyArray<ChannelMessage>
+      readonly request_inputs?: ReadonlyArray<TrustedHumanInput>
       /**
        * P7 J additive:与 `human_messages` 的同名字段逐字同义(见上)。
        * **群聊注意力放行走的是这一条**,漏带 friend 就等于群聊路径拿不到发起人身份
@@ -245,7 +250,9 @@ export interface EpisodeResult {
 }
 
 export interface ManagerLoopDeps {
+  readonly voiceRequest?: { request_id: string; delivery: 'origin' | 'requester_private' }
   readonly voiceOutput?: VoiceOutputPort
+  readonly voiceResponseEndOwner?: 'parent'
   readonly onSuccessfulVoiceReply?: (target: { channel_id: string; session_id: string }) => void
   readonly onToolFinished?: (event: Extract<import('../engine/types.js').EngineToolLifecycleEvent, { type: 'tool_finished' }>, readOnly: boolean) => void
   readonly dailyReflection?: import('./daily-reflection.js').DailyReflection
@@ -299,7 +306,7 @@ export interface ManagerLoopDeps {
    */
   readonly toolFace: (wakeEvent?: WakeEvent, faceState?: ManagerToolFaceState) => ReadonlyArray<ToolDefinition>
   /** System prompt inputs are stable for the whole dialogProfile revision. */
-  readonly promptInputs: () => { readonly dialogProfile?: string; readonly isGroup?: boolean; readonly adminPersonality?: string }
+  readonly promptInputs: () => { readonly dialogProfile?: string; readonly isGroup?: boolean; readonly adminPersonality?: string; readonly requestAuthorization?: 'shared' | 'request' }
   readonly harness: WorkerHarness
   readonly now: () => Date
   /**
@@ -409,6 +416,13 @@ export class ManagerLoop {
   private currentToolFaceState: ManagerToolFaceState | undefined
   private readonly deferredSettleHooks = new Map<TimedWakeEnvelope, (result: EpisodeResult) => void>()
   private readonly currentHumanInputs = new Map<string, ManagerEpisodeHumanInput>()
+  private readonly currentRequestInputs = new Map<string, TrustedHumanInput>()
+  private readonly requestVoiceContexts = new Map<string, import('crabot-shared').VoiceReplyContext>()
+  get requestInputs(): ReadonlyArray<TrustedHumanInput> { return structuredClone([...this.currentRequestInputs.values()]) }
+  voiceReplyContextForSource(sourceId: string): import('crabot-shared').VoiceReplyContext | undefined {
+    const context = this.requestVoiceContexts.get(sourceId)
+    return context && Date.parse(context.expires_at) > Date.now() ? structuredClone(context) : undefined
+  }
   private humanInputCoverage: 'complete' | 'partial' = 'complete'
   /** daily reflection 可能在 failed episode 后作为 carried wake 与新 primary 一同消费。 */
   private currentEpisodeEnvelopes: ReadonlyArray<TimedWakeEnvelope> = []
@@ -424,6 +438,7 @@ export class ManagerLoop {
   private voiceOutput?: TaggedVoiceOutput
   get isVoiceConversation(): boolean { return this.deps.voiceOutput?.isVoice() === true && this.currentToolProfile === 'normal' && !this.deps.isSystemThread }
   private currentVoiceReplyContext?: import('crabot-shared').VoiceReplyContext
+  private inspectedVoiceWorker?: { binding: import('crabot-shared').VoiceDeliveryBinding; humanTurnId?: string }
   get voiceReplyContext(): import('crabot-shared').VoiceReplyContext | undefined {
     return this.currentVoiceReplyContext && Date.parse(this.currentVoiceReplyContext.expires_at) > Date.now() ? this.currentVoiceReplyContext : undefined
   }
@@ -453,8 +468,26 @@ export class ManagerLoop {
     return this.currentEpisodeInjected !== null
   }
 
+  get hasSuccessfulHumanDelivery(): boolean { return this.successfulSendMessageTargetsInCurrentEpisode.size > 0 }
+
   hasSuccessfulSendMessageTo(target: { channel_id: string; session_id: string }): boolean {
     return this.successfulSendMessageTargetsInCurrentEpisode.has(`${target.channel_id}\u0000${target.session_id}`)
+  }
+
+  hasSuccessfulVoiceWorkerDelivery(workerId: string, turnId: string, requestId?: string): boolean {
+    return !!this.deps.voiceOutput && !!findVoiceDelivery(this.deps.voiceOutput, record => record.status === 'completed' && record.binding?.worker_id === workerId
+      && record.binding.worker_turn_id === turnId && (requestId === undefined || record.binding.request_id === requestId))
+  }
+
+  recordInspectedWorkerTurn(worker: LedgerWorker, turnId: string): void {
+    if (!this.isExecuting || !this.isVoiceConversation || worker.manager_key !== this.deps.key) return
+    const { channelId, sessionId } = splitManagerKey(this.deps.key)
+    if (worker.report_to.channel_id !== channelId || worker.report_to.session_id !== sessionId) return
+    const requestId = worker.origin.request?.request_id
+    if (this.deps.voiceRequest && this.deps.voiceRequest.request_id !== requestId) return
+    this.inspectedVoiceWorker = { humanTurnId: this.currentVoiceReplyContext?.turn_id,
+      binding: { channel_id: channelId, session_id: sessionId, response_id: `${worker.worker_id}:${turnId}`,
+        worker_id: worker.worker_id, worker_turn_id: turnId, ...(requestId ? { request_id: requestId } : {}) } }
   }
 
   recordSuccessfulSendMessage(target: { channel_id: string; session_id: string }): void { this.recordHumanDelivery(target) }
@@ -616,7 +649,9 @@ export class ManagerLoop {
     this.resumeCheckpoint = {
       ...this.resumeCheckpoint,
       state: { ...nextState, committedHumanMessageIds: [...committedIds], ...(imageRefs.size > 0 ? { imageRefs: [...imageRefs.values()] } : {}) },
-      envelopes,
+      envelopes: envelopes.map(envelope => isHumanWake(envelope.wake) && envelope.wake.request_inputs ? {
+        ...envelope, wake: { ...envelope.wake, request_inputs: envelope.wake.request_inputs.filter(input => this.currentRequestInputs.has(input.source_id)) },
+      } : envelope),
       wakeIndex: this.currentWakeEvent ? envelopes.indexOf(this.currentWakeEvent) : -1,
       ...(this.currentToolProfile ? { toolProfile: this.currentToolProfile } : {}),
       pending,
@@ -673,6 +708,12 @@ export class ManagerLoop {
   private recordHumanInputs(envelopes: ReadonlyArray<TimedWakeEnvelope>): void {
     for (const envelope of envelopes) {
       if (!isHumanWake(envelope.wake)) continue
+      for (const input of requestInputsForMessages(this.deps.key, envelope.wake.messages, envelope.wake.request_inputs)) {
+        if (!this.currentRequestInputs.has(input.source_id)) {
+          this.currentRequestInputs.set(input.source_id, structuredClone(input))
+          if (envelope.voice_reply_context) this.requestVoiceContexts.set(input.source_id, structuredClone(envelope.voice_reply_context))
+        }
+      }
       for (const message of envelope.wake.messages) {
         if (this.currentHumanInputs.has(message.platform_message_id)) continue
         this.currentHumanInputs.set(message.platform_message_id, {
@@ -891,6 +932,8 @@ export class ManagerLoop {
     this.contextRecoveryPending = false
     const episodeId = recovery?.episodeId ?? randomUUID()
     this.currentHumanInputs.clear()
+    this.currentRequestInputs.clear()
+    this.requestVoiceContexts.clear()
     this.humanInputCoverage = recovery ? 'partial' : 'complete'
     if (recovery) envelope = recovery.envelopes[recovery.wakeIndex]
     this.mailbox.clearContextAdmissions()
@@ -923,6 +966,7 @@ export class ManagerLoop {
     if (recovery) this.currentVoiceReplyContext = undefined
     else if (envelope && isHumanWake(envelope.wake)) this.currentVoiceReplyContext = envelope.voice_reply_context
     this.currentEpisodeEnvelopes = episodeEnvelopes
+    this.inspectedVoiceWorker = undefined
     this.currentToolProfile = toolProfile
     this.mailbox.setActiveProfile(toolProfile)
     this.currentToolFaceState = createManagerToolFaceState(managerToolLoadingModeForKey(this.deps.key))
@@ -933,9 +977,37 @@ export class ManagerLoop {
     this.postSendRecheckSequence = 0
     this.adminChatClaims = new Map()
     this.checkpointError = undefined
-    this.voiceOutput = this.isVoiceConversation && this.deps.voiceOutput ? new TaggedVoiceOutput(this.deps.voiceOutput, () => this.voiceReplyContext, record => {
-      this.recordHumanDelivery(record); this.deps.onSuccessfulVoiceReply?.(record)
-    }) : undefined
+    const pendingVoice = envelope?.wake.kind === 'voice_delivery' ? envelope.wake.results.filter(item => item.status !== 'completed') : undefined
+    let pendingVoiceIndex = 0
+    const ownedVoiceContext = () => {
+      const context = this.voiceReplyContext
+      if (!context) return undefined
+      const owned = [...this.currentEpisodeEnvelopes, ...(this.currentEpisodeInjected ?? [])]
+        .some(item => isHumanWake(item.wake) && item.voice_reply_context?.turn_id === context.turn_id)
+      return owned ? context : undefined
+    }
+    this.voiceOutput = this.isVoiceConversation && this.deps.voiceOutput ? new TaggedVoiceOutput(this.deps.voiceOutput, ownedVoiceContext, record => {
+      this.recordHumanDelivery(record)
+      if (!record.binding || !record.binding.worker_id && ownedVoiceContext()?.turn_id === record.turn_id) this.deps.onSuccessfulVoiceReply?.(record)
+    }, this.deps.voiceOutput.prepare ? () => {
+      if (this.deps.voiceRequest?.delivery === 'requester_private') return undefined
+      if (pendingVoice) return pendingVoice[0]?.binding
+      if (envelope?.wake.kind === 'voice_delivery') return undefined
+      const inspected = this.inspectedVoiceWorker
+      if (inspected && inspected.humanTurnId === this.currentVoiceReplyContext?.turn_id) return inspected.binding
+      const { channelId, sessionId } = splitManagerKey(this.deps.key)
+      const worker = [...this.currentEpisodeEnvelopes, ...(this.currentEpisodeInjected ?? [])].map(item => item.wake)
+        .filter((wake): wake is Extract<WakeEvent, { kind: 'worker_event' }> => wake.kind === 'worker_event')
+        .map(wake => wake.event).reverse().find(event => event.kind === 'turn_completed' && typeof event.detail?.turn_id === 'string')
+      const requestId = this.deps.voiceRequest?.request_id ?? (typeof worker?.detail?.request_id === 'string' ? worker.detail.request_id : undefined)
+      return { channel_id: channelId, session_id: sessionId,
+        response_id: worker ? `${worker.worker_id}:${worker.detail!.turn_id}` : this.currentVoiceReplyContext?.turn_id ?? episodeId,
+        ...(requestId ? { request_id: requestId } : {}),
+        ...(worker ? { worker_id: worker.worker_id, worker_turn_id: worker.detail!.turn_id as string } : {}) }
+    } : undefined, pendingVoice ? () => {
+      const item = pendingVoice[pendingVoiceIndex++]
+      return item ? findVoiceDelivery(this.deps.voiceOutput!, record => record.playback_id === item.delivery_id && record.status === 'queued') : undefined
+    } : undefined) : undefined
     this.successfulSendMessageTargetsInCurrentEpisode.clear()
     for (const item of episodeEnvelopes) {
       const hook = this.deferredSettleHooks.get(item)
@@ -1007,6 +1079,7 @@ export class ManagerLoop {
       }
       committedHumanMessages = committed.messageCount
       humanInputsCommitted = true
+      this.recordHumanInputs(committed.humanInputEnvelopes)
       if (committed.hasNewDirectHumanMessages || envelope?.voice_turn_id) this.deps.markPendingReply()
       // 已提交人类消息 id 的内存镜像:mid-episode 注入的投影判定用它(同步、无 store I/O)
       this.knownCommittedHumanIds = new Set(state.committedHumanMessageIds ?? [])
@@ -1078,7 +1151,7 @@ export class ManagerLoop {
       )
       this.currentTraceId = episodeId
       traceStarted = true
-      this.recordHumanInputs(committed.humanInputEnvelopes)
+      this.recordHumanInputs([])
       const initialTools = !recovery
         ? this.deps.toolFace(this.effectiveWakeForCurrentEpisode(), this.currentToolFaceState)
         : undefined
@@ -1214,7 +1287,7 @@ export class ManagerLoop {
       this.deps.store.clearCheckpoint(this.deps.key, episodeId)
       throw err
     } finally {
-      await this.voiceOutput?.finishResponse()
+      if (this.deps.voiceResponseEndOwner !== 'parent') await this.voiceOutput?.finishResponse()
       this.voiceOutput = undefined
       this.currentVoiceReplyContext = undefined
       this.automaticGuidance.clear()
@@ -1226,6 +1299,8 @@ export class ManagerLoop {
       this.currentEpisodeEnvelopes = []
       this.currentTraceId = undefined
       this.currentHumanInputs.clear()
+      this.currentRequestInputs.clear()
+      this.requestVoiceContexts.clear()
       this.tracedLlmResponses.clear()
       this.tracedUsageResponses.clear()
       this.tracedToolStarts.clear()
@@ -1521,7 +1596,7 @@ export class ManagerLoop {
       outcome: attempt.result.outcome,
       turns: totalTurnsUsed,
       consumedEvents,
-      repliedToHuman,
+      repliedToHuman: repliedToHuman || allSuccessfulSendMessageTargets.size > 0,
       successfulSendMessageTargets: [...allSuccessfulSendMessageTargets].map((key) => {
         const [channelId, sessionId] = key.split('\u0000')
         return { channel_id: channelId, session_id: sessionId }
@@ -2187,9 +2262,20 @@ export class ManagerLoop {
       isSystemThread: this.deps.isSystemThread,
       isBuiltinDailyReflection: isBuiltinDailyReflectionWake(effectiveWake),
       isGroup: extra.isGroup ?? false,
+      requestAuthorization: this.requestAuthorizationForWake(effectiveWake),
       dialogProfile: extra.dialogProfile,
       adminPersonality: extra.adminPersonality,
     })
+  }
+
+  private requestAuthorizationForWake(wake: WakeEvent | undefined): 'shared' | 'request' | undefined {
+    const extra = this.deps.promptInputs()
+    if (!extra.isGroup || this.deps.isSystemThread || wake?.kind === 'schedule' || this.currentToolProfile !== 'normal') return undefined
+    return extra.requestAuthorization ?? 'shared'
+  }
+
+  private renderManagerGuidance(name: GuidanceName): string {
+    return renderGuidance('manager', name, { requestAware: this.requestAuthorizationForWake(this.effectiveWakeForCurrentEpisode()) !== undefined })
   }
 
   private provideAutomaticGuidance(envelopes: ReadonlyArray<TimedWakeEnvelope>): string[] {
@@ -2199,13 +2285,13 @@ export class ManagerLoop {
       const name = automaticGuidanceForWake(wake)
       if (!name || this.automaticGuidance.has(name)) continue
       this.automaticGuidance.add(name)
-      texts.push(renderGuidance('manager', name))
+      texts.push(this.renderManagerGuidance(name))
     }
     return texts
   }
 
   private transientPromptCounts(): Map<string, number> {
-    const counts = new Map([...this.automaticGuidance].map(name => [renderGuidance('manager', name), 1]))
+    const counts = new Map([...this.automaticGuidance].map(name => [this.renderManagerGuidance(name), 1]))
     for (const item of [...this.currentEpisodeEnvelopes, ...(this.currentEpisodeInjected ?? [])]) {
       const prompt = transientSystemPromptForWake(item.wake)
       if (prompt) counts.set(prompt, (counts.get(prompt) ?? 0) + 1)
@@ -2607,6 +2693,10 @@ export function managerTriggerFromWake(envelope: TimedWakeEnvelope | undefined, 
       return { type: 'system', summary: `任务板空闲自省${mergedNote}` }
     case 'worker_event':
       return { type: 'worker_event', summary: `worker 事件:${wake.event.kind} (${wake.event.worker_id})${mergedNote}`, source: `worker:${wake.event.worker_id}` }
+    case 'voice_delivery':
+      return { type: 'system', summary: `语音结果投递${mergedNote}` }
+    case 'voice_management':
+      return { type: 'system', summary: `语音登记结果${mergedNote}` }
     case 'media_notification':
       return { type: 'worker_event', summary: `媒体下载完成${mergedNote}` }
     default: {
@@ -2973,12 +3063,17 @@ function projectHumanEnvelope(
   entries: ReadonlyArray<{ readonly message: ChannelMessage; readonly index: number }>,
 ): TimedWakeEnvelope {
   if (!isHumanWake(envelope.wake)) throw new Error('projectHumanEnvelope requires a human wake')
+  const messages = entries.map(({ message }) => message)
+  const first = messages[0]
+  const key = first ? `${first.session.channel_id}::${first.session.session_id}` as ManagerKey : undefined
   const humanOccurredAt = envelope.human_occurred_at
     ? entries.map(({ message, index }) => envelope.human_occurred_at?.[index] ?? { message_id: message.platform_message_id })
     : undefined
   return {
     ...envelope,
-    wake: { ...envelope.wake, messages: entries.map(({ message }) => message) },
+    wake: { ...envelope.wake, messages,
+      ...(envelope.wake.request_inputs ? { request_inputs: key ? requestInputsForMessages(key, messages, envelope.wake.request_inputs) : [] } : {}),
+    },
     ...(humanOccurredAt ? { human_occurred_at: humanOccurredAt } : {}),
   }
 }
@@ -3018,6 +3113,10 @@ function renderWakeEvent(event: WakeEvent, envelope: TimedWakeEnvelope, quotedMe
       )
     case 'worker_event':
       return renderWorkerEvent(event.event)
+    case 'voice_delivery':
+      return (event.results.some(item => item.status !== 'completed') ? VOICE_PENDING_RESULTS_PROMPT + '\n' : '') + JSON.stringify({ voice_delivery_results: event.results })
+    case 'voice_management':
+      return VOICE_MANAGEMENT_RESULT_PROMPT + '\n' + JSON.stringify(event.result)
     case 'media_notification':
       return `[媒体下载完成]\n${event.text}`
     case 'schedule':
@@ -3047,7 +3146,9 @@ function renderChannelMessages(
   const lines = messages.map((message, index) => {
     const occurred = envelope.human_occurred_at?.[index]?.occurred_at
     const prefix = occurred ? `[human occurred_at="${occurred}"]\n` : ''
-    return prefix + formatChannelMessageLine(message, {
+    const input = isHumanWake(envelope.wake) ? requestInputsForMessages(`${message.session.channel_id}::${message.session.session_id}` as ManagerKey, [message], envelope.wake.request_inputs)[0] : undefined
+    const source = input ? '[系统核验的原始输入定位；只定位，不授予权限]\n' + JSON.stringify({ source_id: input.source_id, platform_message_id: input.message.platform_message_id, identity_status: input.identity_status, sender_friend_id: input.sender_friend_id }) + '\n' : ''
+    return prefix + source + formatChannelMessageLine(message, {
       timezone: envelope.timezone,
       now: new Date(envelope.received_at),
       identity: resolveSenderIdentity({ msg: message, senderFriend: isHumanWake(envelope.wake) && envelope.wake.senderFriends ? envelope.wake.senderFriends.find(f => f.id === message.sender.friend_id) : friend }),

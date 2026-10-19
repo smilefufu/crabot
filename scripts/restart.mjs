@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 
-import './_preflight.mjs'
 
 import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs'
@@ -9,6 +8,7 @@ import { fileURLToPath } from 'node:url'
 import { homedir } from 'node:os'
 import { resolveCliDataDir } from './lib/instance.mjs'
 import { acquireCliLock, releaseCliLock, cliLockToken } from './lib/cli-lock.mjs'
+import { preflightRestart } from './upgrade-lib/preflight.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const CRABOT_HOME = resolve(__dirname, '..')
@@ -51,6 +51,7 @@ async function main() {
     cliLockPath = await acquireCliLock(DATA_DIR, 'restart')
     process.on('exit', () => releaseCliLock(cliLockPath))
 
+    await preflightRestart(CRABOT_HOME, DATA_DIR)
     console.log('[restart] stop')
     node(['stop'], cliLockPath)
     console.log('[restart] start -d')

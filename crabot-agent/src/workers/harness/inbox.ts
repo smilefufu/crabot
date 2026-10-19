@@ -56,6 +56,8 @@ export interface InboxItem {
   readonly onPending?: (reason: InboxDeliveryResult['reason']) => void | Promise<void>
   /** Recheck durable receipt state immediately before any adapter side effect. */
   readonly shouldDeliver?: () => boolean | Promise<boolean>
+  /** Host-only current caller check; pending human inputs are never replayed after restart. */
+  readonly authorize?: () => Promise<void>
   /** Prevent a producer retry from enqueueing the same durable item twice in one process. */
   readonly dedupe_key?: string
   /** Opaque, in-process-only authorization for one legacy continuation. */

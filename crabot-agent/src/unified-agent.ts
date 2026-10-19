@@ -1,3 +1,6 @@
+import { WorkerRequestToolScope } from './workers/harness/request-tools.js'
+import { selectSubAgentSkills } from './agent/subagent-tool-filter.js'
+import { getInternalHandler } from './hooks/internal-handlers.js'
 import { VoiceInbox } from './manager/voice-inbox.js'
 import type { VoiceTurnAuthorizedPayload, VoiceTurnResult } from 'crabot-shared'
 import { retireLegacyWorkerComputerUse } from './agent/computer-use-legacy.js'
@@ -572,6 +575,7 @@ interface AuthorizeAgentCliExecutionResult {
   valid: true
   cli_access: 'none' | 'read' | 'write'
   shell: boolean
+  request_verified?: true
 }
 
 /**
@@ -864,6 +868,8 @@ export class UnifiedAgent extends ModuleBase {
       subscriptions: [
         'channel.message_authorized',
         'channel.voice_turn_authorized',
+        'channel.voice_output_ready',
+        'channel.voice_management_ready',
         'admin.task_status_changed',
         'module_manager.module_stopped',
         'admin.friend_updated',
@@ -1193,18 +1199,19 @@ export class UnifiedAgent extends ModuleBase {
         return this.computerUseOwner.bindTools(this.mcpConnector.getAllTools().filter((tool) => {
           const category = tool.category
           return (category === 'desktop' || category === 'mcp_skill') && permissions.tool_access[category] === true
-        }), `manager:${access.managerKey}:${access.creatorFriendId ?? ''}`, async () => {
+        }), `manager:${access.managerKey}:${access.creatorFriendId ?? ''}${access.requestId ? ':' + access.requestId : ''}`, async () => {
           const target = access.targetSession
           if (!target || (target.type === 'private' && !access.creatorFriendId)) return false
-          const fresh = await this.resolvePrincipalPermissions(target.type === 'private' ? access.creatorFriendId : undefined, target.session_id, target.type, target.channel_id)
+          const fresh = access.requestPermissions ? await access.requestPermissions()
+            : await this.resolvePrincipalPermissions(target.type === 'private' ? access.creatorFriendId : undefined, target.session_id, target.type, target.channel_id)
           return this.desktopEnabled() && fresh?.tool_access.desktop === true
         })
       },
-      managerMcpToolAuthorization: async ({ targetSession, creatorFriendId, category }) => {
+      managerMcpToolAuthorization: async ({ targetSession, creatorFriendId, category, requestPermissions }) => {
         if (process.env.CRABOT_MANAGER_MCP_ENABLED !== '1' || !targetSession
           || (targetSession.type === 'private' && !creatorFriendId)
           || (category !== 'desktop' && category !== 'mcp_skill')) return false
-        const permissions = await this.resolvePrincipalPermissions(
+        const permissions = requestPermissions ? await requestPermissions() : await this.resolvePrincipalPermissions(
           targetSession.type === 'private' ? creatorFriendId : undefined,
           targetSession.session_id,
           targetSession.type,
@@ -1217,6 +1224,12 @@ export class UnifiedAgent extends ModuleBase {
       },
       // 发起人身份的解析原料：全是**既有**入口，本处只做注入，不新造解析逻辑。
       principalResolver: {
+        resolveChannelSender: async (channelId, platformUserId) => {
+          const result = await this.rpcClient.call<{ channel_id: string; platform_user_id: string }, { friend: Friend | null }>(
+            await this.getAdminPort(), 'resolve_friend', { channel_id: channelId, platform_user_id: platformUserId }, this.config.moduleId,
+          )
+          return result.friend
+        },
         getSessionType: async (channelId, sessionId) => {
           const result = await this.rpcClient.call<{ session_id: string }, {
             session: { id: string; channel_id: string; type: 'private' | 'group' }
@@ -1297,7 +1310,7 @@ export class UnifiedAgent extends ModuleBase {
         if (execution.kind !== 'worker' || !this.desktopEnabled()
           || !narrowWorkerPermissions(BUILTIN_WORKER_PERMISSIONS, context.principal_permissions ?? null).tool_access.desktop) return empty
         const scoped = this.computerUseOwner.workerConfig(`worker:${execution.worker_id}:${execution.incarnation_id}`, async method =>
-          this.desktopEnabled() && (method === 'list' || await this.desktopWorkerCurrent(execution.worker_id, execution.incarnation_id)))
+          this.desktopEnabled() && await this.desktopWorkerCurrent(execution.worker_id, execution.incarnation_id, method !== 'list'))
         return scoped?.env ?? empty
       },
       issueAgentCliCredential: (context) => this.issueAgentCliCredential(context),
@@ -1361,6 +1374,7 @@ export class UnifiedAgent extends ModuleBase {
    * manager 以为派活成功。
    */
   private buildBuiltinWorkerRuntime(ctx: BuiltinRuntimeContext): SpawnSpec['builtin'] {
+    if (ctx.origin?.request && !ctx.request_runtime) throw new Error('CAPABILITY_UNKNOWN: Verified request runtime is required')
     // 与现网 worker loop 同一个 slot（`initializeAgentLayer` 的 `model_config.powerful`），
     // 但取值时机不同：那边在装配期解析成 `sdkEnvWorker` 字段，这里每次起化身现读现解析。
     const connInfo = this.agentConfig?.model_config?.powerful
@@ -1378,13 +1392,14 @@ export class UnifiedAgent extends ModuleBase {
       // buildSystemPromptDynamic / buildToolsDynamic 同款语义）。
       systemPrompt: () => this.buildBuiltinWorkerSystemPrompt(ctx),
       tools: () => this.buildBuiltinWorkerTools(ctx),
+      ...(ctx.request_runtime ? { requestCliAuthorization: this.requestWorkerCliAuthorization(ctx) } : {}),
       observeTools: async tools => {
         const id = ctx.incarnation_id ?? ctx.workspace_git?.incarnation_id
         if (!id) throw new Error('CAPABILITY_UNKNOWN: 缺少执行化身身份')
         await persistObservation(observationFile(path.join(getAgentDataDir(), 'workers'), ctx.worker_id, id),
           requestObservation(tools, { role: 'worker', impl: 'builtin', source: 'builtin_request', worker_id: ctx.worker_id, incarnation_id: id,
             child_profiles: tools.some(tool => tool.name === 'delegate_task') ? (this.agentConfig?.subagents ?? []).map(profile => profile.name) : [],
-            skills: this.resolveMainlineWorkerSkills(ctx).map(skill => skill.name),
+            skills: this.requestWorkerSkills(ctx).map(skill => skill.name),
             constraints: ['主体授权为派发时快照；Worker 不提供记忆、人类投递、换工作目录或 goal 管理；主体开启标志不增加角色职责。'],
           }))
       },
@@ -1525,10 +1540,44 @@ export class UnifiedAgent extends ModuleBase {
         stopWorkerAgent: (entityId) => this.builtinSubagentRunner.stopAgent(ctx.worker_id, entityId),
       }
     }
-    return this.assembleBuiltinWorkerTools(ctx, bgOptions)
+    if (!ctx.request_runtime) return this.assembleBuiltinWorkerTools(ctx, bgOptions)
+    const scope: WorkerRequestToolScope = new WorkerRequestToolScope({
+      guard: ctx.request_runtime.guard, workerId: ctx.worker_id, ceilings: ctx.request_runtime.ceilings,
+      cwd: ctx.workspace.root,
+      rawTools: (permissions, includeDelegation) => this.assembleBuiltinWorkerTools(
+        { ...ctx, principal_permissions: permissions }, bgOptions, scope, includeDelegation),
+      skills: (permissions, childIds) => childIds
+        ? selectSubAgentSkills(this.agentConfig?.skills ?? [], childIds, permissions.tool_access.mcp_skill)
+        : this.resolveMainlineWorkerSkills({ ...ctx, principal_permissions: permissions }),
+      authorizeCommand: async (permissions, input) => {
+        const handler = getInternalHandler('cli-permission-gate')
+        if (!handler) throw new Error('CAPABILITY_UNKNOWN: CLI gate unavailable')
+        const result = await handler({ event: 'PreToolUse', toolName: 'Bash', toolInput: input,
+          workingDirectory: ctx.workspace.root }, { workingDirectory: ctx.workspace.root,
+          resolvedPermissions: permissions, senderIsMaster: false, sessionType: 'group' })
+        return result.action === 'continue' ? { allowed: true } : { allowed: false, reason: result.message ?? 'CLI permission denied' }
+      },
+    })
+    return scope.tools()
   }
 
-  private assembleBuiltinWorkerTools(ctx: BuiltinRuntimeContext, bgOptions?: ReturnType<AgentHandler['createBuiltinBgToolOptions']>): ReadonlyArray<EngineToolDefinition> {
+  private requestWorkerCliAuthorization(ctx: BuiltinRuntimeContext): NonNullable<NonNullable<SpawnSpec['builtin']>['requestCliAuthorization']> {
+    return async input => {
+      const bash = this.buildBuiltinWorkerTools(ctx).find(tool => tool.name === 'Bash')
+      if (!bash?.authorization) return { action: 'block', message: 'PERMISSION_DENIED: Shell unavailable' }
+      const decision = await bash.authorization.check(input.toolInput ?? {})
+      return decision.allowed ? { action: 'continue' } : { action: 'block', message: decision.reason }
+    }
+  }
+
+  private requestWorkerSkills(ctx: BuiltinRuntimeContext): SkillConfig[] {
+    if (!ctx.request_runtime) return this.resolveMainlineWorkerSkills(ctx)
+    const skills = new Map<string, SkillConfig>()
+    for (const source of ctx.request_runtime.ceilings) for (const skill of this.resolveMainlineWorkerSkills({ ...ctx, principal_permissions: source.resolved })) skills.set(skill.id, skill)
+    return [...skills.values()]
+  }
+
+  private assembleBuiltinWorkerTools(ctx: BuiltinRuntimeContext, bgOptions?: ReturnType<AgentHandler['createBuiltinBgToolOptions']>, requestTools?: WorkerRequestToolScope, includeDelegation = true): ReadonlyArray<EngineToolDefinition> {
     const tools: EngineToolDefinition[] = []
     const workspaceRoot = ctx.workspace.root
     const principalPerms = this.resolveWorkerPrincipalPermissions(ctx)
@@ -1600,17 +1649,18 @@ export class UnifiedAgent extends ModuleBase {
     effectiveTools.push(authorizeTool(createGuidanceTool('worker', { computerUse: effectiveTools.some(tool => tool.traceMetadata?.computer_use_standard === true) }), roleAuthorization('worker')))
     assertAuthorizedTools(effectiveTools)
     const subagents = this.agentConfig?.subagents ?? []
-    if (subagents.length === 0) return effectiveTools
-    const childPermissionConfig = this.getToolPermissionConfig(effectiveTools, workerPerms)
+    if (!includeDelegation || subagents.length === 0) return effectiveTools
+    const childPermissionConfig: ToolPermissionConfig = requestTools ? { mode: 'bypass' } : this.getToolPermissionConfig(effectiveTools, workerPerms)
     return [...effectiveTools, authorizeTool(createDelegateTaskTool({
       subAgents: subagents,
       runSubAgent: (subagent, input, toolContext) => this.builtinSubagentRunner.run(
         subagent,
         input,
         toolContext,
-        effectiveTools.filter((tool) => tool !== workspaceGitTool && tool.name !== 'load_guidance' && tool.category !== 'desktop'),
+        (requestTools ? requestTools.tools(false) : effectiveTools).filter((tool) => tool.name !== workspaceGitTool?.name && tool.name !== 'load_guidance' && tool.category !== 'desktop'),
         {
           permissionConfig: childPermissionConfig,
+          ...(requestTools ? { requestTools, requestCliAuthorization: this.requestWorkerCliAuthorization(ctx) } : {}),
           resolvedPermissions: { ...workerPerms, tool_access: { ...workerPerms.tool_access, desktop: false } },
           availableSkills: this.agentConfig?.skills ?? [],
           getCwd: () => workspaceRoot,
@@ -1665,9 +1715,11 @@ export class UnifiedAgent extends ModuleBase {
 
   /** Builtin owns its prompt and capabilities; Admin personality applies only to Manager. */
   private buildBuiltinWorkerSystemPrompt(ctx: BuiltinRuntimeContext): string {
-    const skillListing = buildWorkerSkillListing(this.resolveMainlineWorkerSkills(ctx))
+    const skillListing = buildWorkerSkillListing(this.requestWorkerSkills(ctx))
     return assembleBuiltinWorkerPrompt({
-      computerUse: this.computerUseOwner.available && narrowWorkerPermissions(BUILTIN_WORKER_PERMISSIONS, ctx.principal_permissions ?? null).tool_access.desktop,
+      computerUse: this.computerUseOwner.available && (ctx.request_runtime
+        ? ctx.request_runtime.ceilings.some(source => source.resolved.tool_access.desktop)
+        : narrowWorkerPermissions(BUILTIN_WORKER_PERMISSIONS, ctx.principal_permissions ?? null).tool_access.desktop),
       workspaceRoot: ctx.workspace.root,
       ...(skillListing ? { skillListing } : {}),
       imageAvailable: this.imageCapability.available,
@@ -1808,6 +1860,16 @@ export class UnifiedAgent extends ModuleBase {
       case 'admin.agent_config_invalidated':
         this.computerUseOwner.cancelSetupVerification()
         this.scheduleRuntimeConfigPull()
+        break
+
+      case 'channel.voice_output_ready':
+        this.assertRuntimeExecutionAdmission()
+        await this.requireManagerStack().registry.routeVoiceOutputReady(event.payload as import('crabot-shared').VoiceOutputReadyPayload)
+        break
+
+      case 'channel.voice_management_ready':
+        this.assertRuntimeExecutionAdmission()
+        await this.requireManagerStack().voiceManagementReady(event.payload as import('crabot-shared').VoiceAgentManagementReadyPayload)
         break
 
       case 'channel.voice_turn_authorized':
@@ -3681,6 +3743,7 @@ export class UnifiedAgent extends ModuleBase {
         return await this.requireManagerStack().harness.authorizeAgentCliExecution(
           params.execution,
           params.domain,
+          params.access,
         )
       }
       if (params.execution?.kind === 'legacy_task') {
@@ -3692,7 +3755,8 @@ export class UnifiedAgent extends ModuleBase {
           shell: permissions.tool_access.shell,
         }
       }
-    } catch {
+    } catch (error) {
+      if (error instanceof Error && error.message.startsWith('CAPABILITY_UNKNOWN')) throw new RpcError('CAPABILITY_UNKNOWN', 'Request authorization unavailable')
       // Execution existence and lifecycle are intentionally indistinguishable.
     }
     throw new RpcError('FORBIDDEN', 'Agent execution is not authorized')
@@ -4548,7 +4612,21 @@ export class UnifiedAgent extends ModuleBase {
         constraints: ['无该化身执行事实记录；不从当前配置补推历史工具。'] })
       return incarnation.incarnation_id ? readObservation(observationFile(path.join(getAgentDataDir(), 'workers'), found.worker.worker_id, incarnation.incarnation_id), fallback) : fallback
     }))
-    return { ...buildWorkerDetail(found), execution_observations: observations.filter((item): item is NonNullable<typeof item> => !!item) }
+    let requestAuthority: import('./manager/read-model.js').WorkerRequestAuthorityView | undefined
+    const binding = found.worker.origin.request
+    if (binding) {
+      requestAuthority = { status: 'unavailable', request_id: binding.request_id, execution_scope: binding.execution_scope }
+      try {
+        const bound = await this.requireManagerStack().requestGuard.load(params.worker_id)
+        if (bound) requestAuthority = { ...requestAuthority, status: 'verified',
+          initiator: { channel_id: bound.source.message.session.channel_id,
+            platform_user_id: bound.source.message.sender.platform_user_id,
+            display_name: bound.source.message.sender.platform_display_name, friend_id: bound.source.sender_friend_id },
+          permission_sources: structuredClone(bound.request.permission_sources), delivery: bound.request.delivery.kind }
+      } catch { /* Keep the Admin record readable; missing proof must never become inferred authority. */ }
+    }
+    return { ...buildWorkerDetail(found), ...(requestAuthority ? { request_authority: requestAuthority } : {}),
+      execution_observations: observations.filter((item): item is NonNullable<typeof item> => !!item) }
   }
 
   /** §8.3 get_worker_terminal：返回一次完整的 live/final/headless/unavailable 观察。 */
@@ -5763,11 +5841,20 @@ export class UnifiedAgent extends ModuleBase {
     return !this.runtimeClosing && !this.configStale && !!this.agentConfig?.mcp_servers?.some(isStandardComputerUse)
   }
 
-  private async desktopWorkerCurrent(workerId: string, incarnationId: string): Promise<boolean> {
-    const found = await this.managerStack?.ledger.findWorker(workerId)
-    const incarnation = found?.worker.incarnations.find(item => item.incarnation_id === incarnationId)
-    return found?.worker.task.status !== 'closed' && !!incarnation && incarnation.state !== 'exited'
-      && (incarnation.query_id !== undefined || [...found!.worker.incarnations].reverse().find(item => !item.query_id)?.incarnation_id === incarnationId)
+  private async desktopWorkerCurrent(workerId: string, incarnationId: string, requireLive = true): Promise<boolean> {
+    try {
+      const stack = this.managerStack
+      if (!stack) return false
+      const found = await stack.ledger.findWorker(workerId)
+      const incarnation = found?.worker.incarnations.find(item => item.incarnation_id === incarnationId)
+      if (!found || found.worker.task.status === 'closed') return false
+      if (requireLive && (!incarnation || incarnation.state === 'exited'
+        || incarnation.query_id === undefined && [...found.worker.incarnations].reverse().find(item => !item.query_id)?.incarnation_id !== incarnationId)) return false
+      if (!await stack.requestGuard.load(workerId)) return true
+      return await stack.requestGuard.runResource(workerId,
+        async source => source.resolved.tool_access.desktop ? { allowed: true } : { allowed: false, reason: 'Desktop permission denied' },
+        async () => true)
+    } catch { return false }
   }
 
   protected override async onStop(): Promise<void> {
