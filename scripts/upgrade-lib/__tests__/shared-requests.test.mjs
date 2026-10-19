@@ -3,7 +3,7 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { spawnSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { prepareSharedRequests } from '../shared-requests.mjs'
 import { runMigrations } from '../migrate.mjs'
@@ -222,9 +222,14 @@ it('migration never reads, hashes or backs up unrelated histories and a 100 GiB 
   const excluded = ['workspaces/large/deliverables.bin', 'agent/managers/old/history.jsonl', 'agent/observations/log.jsonl', 'agent/workers/old/input.json', 'agent/managers/old/checkpoint.json', 'admin/traces/old.json']
   for (const name of excluded) {
     await fs.mkdir(path.dirname(path.join(root, name)), { recursive: true })
-    const file = await fs.open(path.join(root, name), 'w')
-    await file.truncate(name.startsWith('workspaces/') ? 100 * 1024 ** 3 : 4096)
-    await file.close()
+    const filename = path.join(root, name)
+    await fs.writeFile(filename, '')
+    if (process.platform === 'win32' && name.startsWith('workspaces/')) {
+      execFileSync('fsutil.exe', ['sparse', 'setflag', filename], { windowsHide: true, timeout: 10000 })
+    }
+    const file = await fs.open(filename, 'r+')
+    try { await file.truncate(name.startsWith('workspaces/') ? 100 * 1024 ** 3 : 4096) }
+    finally { await file.close() }
   }
   const forbidden = filename => excluded.some(name => String(filename) === path.join(root, name))
   const originalRead = fs.readFile, originalOpen = fs.open, originalCopy = fs.copyFile

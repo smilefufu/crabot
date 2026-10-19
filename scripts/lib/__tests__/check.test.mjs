@@ -19,7 +19,7 @@ function services({ offset = 0, modules = [{ module_id: 'admin-web', port: 19042
   const web = `http://localhost:${3000 + offset}`
   const admin = modules.find((m) => m.module_id === 'admin-web')
   const fetchImpl = vi.fn(async (url, options = {}) => {
-    if (url === `${mm}/list_modules` && options.method === 'POST') {
+    if (url === `http://127.0.0.1:${19000 + offset}/list_modules` && options.method === 'POST') {
       if (discoveryFails) throw new Error('ECONNREFUSED')
       return Response.json({ success: true, data: { modules } })
     }
@@ -53,7 +53,7 @@ describe('crabot check', () => {
 
     for (const url of [
       `http://localhost:${19000 + offset}/health`,
-      `http://localhost:${19000 + offset}/list_modules`,
+      `http://127.0.0.1:${19000 + offset}/list_modules`,
       `http://localhost:${adminPort}/health`,
     ]) {
       expect(fetchImpl).toHaveBeenCalledWith(url, expect.objectContaining({
@@ -78,7 +78,7 @@ describe('crabot check', () => {
     await import('../../check.mjs')
 
     expect(fetchImpl.mock.calls.map(([url]) => url)).toEqual(expect.arrayContaining([
-      'http://localhost:19000/list_modules', 'http://localhost:19000/health', 'http://localhost:3000/health',
+      'http://127.0.0.1:19000/list_modules', 'http://localhost:19000/health', 'http://localhost:3000/health',
     ]))
     expect(fetchImpl).toHaveBeenCalledTimes(3)
     expect(lines()).toMatch(/\u001b\[31m●\u001b\[0m Admin \(RPC\).*\(port unavailable\)/)

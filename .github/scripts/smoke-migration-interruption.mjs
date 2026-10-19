@@ -44,8 +44,9 @@ let parent, childIdentity, controller
 try {
   const old = await installStandaloneCli({ sourceRoot: await source('1.2.3'), installRoot: installation, dataDir: data })
   const admin = path.join(data, 'admin'); await fs.mkdir(admin); await fs.writeFile(path.join(admin, 'SCHEMA_VERSION'), 'v1'); await fs.writeFile(path.join(admin, 'preferences'), 'before')
-  const migration = `import{existsSync,writeFileSync,appendFileSync}from'node:fs';const data=process.argv.find(a=>a.startsWith('--data-dir=')).slice(11);appendFileSync(data+'/invocations','one\\n');writeFileSync(data+'/child-pid',String(process.pid));const deadline=setTimeout(()=>clearInterval(gate),30000);const gate=setInterval(()=>{if(existsSync(data+'/finish')){clearInterval(gate);clearTimeout(deadline);writeFileSync(data+'/preferences','changed-once')}},20)`
-  const target = await prepareCliPayload({ sourceRoot: await source('1.2.4', { 'crabot-admin/schema_version': 'v2', 'crabot-admin/upgrade/from_v1_to_v2.mjs': migration }), installRoot: installation })
+  const control = path.join(parentDir, 'control'); await fs.mkdir(control)
+  const migration = `import{existsSync,writeFileSync,appendFileSync}from'node:fs';const data=process.argv.find(a=>a.startsWith('--data-dir=')).slice(11),control=${JSON.stringify(control)};appendFileSync(control+'/invocations','one\\n');writeFileSync(control+'/child-pid',String(process.pid));const deadline=setTimeout(()=>clearInterval(gate),30000);const gate=setInterval(()=>{if(existsSync(control+'/finish')){clearInterval(gate);clearTimeout(deadline);writeFileSync(data+'/preferences','changed-once')}},20)`
+  const target = await prepareCliPayload({ sourceRoot: await source('1.2.4', { 'crabot-admin/schema_version': 'v2', 'crabot-admin/upgrade/from_v1_to_v2.mjs': migration, 'crabot-admin/upgrade/scope.mjs': `export const migrationScope = async () => ({ reads: [], writes: ['admin/preferences'] })` }), installRoot: installation })
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => /^(PATH|HOME|USERPROFILE|SYSTEMROOT|WINDIR|TEMP|TMP|TMPDIR)$/i.test(key)))
   const parentCode = `
     import path from 'node:path';
@@ -57,8 +58,8 @@ try {
   `
   parent = spawn(process.execPath, ['--input-type=module', '-e', parentCode, old.coreRoot, target.coreRoot, data], { env, stdio: ['ignore', 'ignore', 'inherit'] })
   const deadline = Date.now() + 30000
-  while (!(await fs.stat(path.join(admin, 'child-pid')).catch(() => null))) { assert.ok(Date.now() < deadline && parent.exitCode === null, 'controlled migration did not start'); await new Promise(resolve => setTimeout(resolve, 20)) }
-  childIdentity = identity.inspectProcess(Number(await fs.readFile(path.join(admin, 'child-pid'), 'utf8')))
+  while (!(await fs.stat(path.join(control, 'child-pid')).catch(() => null))) { assert.ok(Date.now() < deadline && parent.exitCode === null, 'controlled migration did not start'); await new Promise(resolve => setTimeout(resolve, 20)) }
+  childIdentity = identity.inspectProcess(Number(await fs.readFile(path.join(control, 'child-pid'), 'utf8')))
   assert.equal(readVersionMaintenance(data).phase, 'verifying')
   const parentExit = once(parent, 'exit'); parent.kill('SIGKILL'); await parentExit
   assert.ok(identity.sameProcess(childIdentity, identity.inspectProcess(childIdentity.pid)), 'The controlled migration must still be active')
@@ -72,7 +73,7 @@ try {
   controller.startCore = async () => { starts++; throw new Error('Must not start before unknown migration is resolved') }
   await assert.rejects(controller.recoverVersion(), { code: 'CRABOT_MIGRATION_INTERRUPTED' })
   assert.equal(starts, 0)
-  await fs.writeFile(path.join(admin, 'finish'), 'finish-this-one-controlled-script')
+  await fs.writeFile(path.join(control, 'finish'), 'finish-this-one-controlled-script')
   const childDeadline = Date.now() + 30000
   while (identity.sameProcess(childIdentity, identity.inspectProcess(childIdentity.pid))) {
     assert.ok(Date.now() < childDeadline, 'The controlled migration did not settle')
@@ -82,7 +83,7 @@ try {
   assert.equal(starts, 0)
   assert.equal(await fs.readFile(path.join(admin, 'SCHEMA_VERSION'), 'utf8'), 'v1')
   assert.equal(await fs.readFile(path.join(admin, 'preferences'), 'utf8'), 'changed-once')
-  assert.equal((await fs.readFile(path.join(admin, 'invocations'), 'utf8')).trim(), 'one')
+  assert.equal((await fs.readFile(path.join(control, 'invocations'), 'utf8')).trim(), 'one')
   const maintenance = readVersionMaintenance(data)
   assert.equal(maintenance.phase, 'verifying')
   const backupRoot = path.join(data + '.desktop-backups', maintenance.backup.id)
