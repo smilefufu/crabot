@@ -34,7 +34,7 @@ export function assertSystemControlAvailable(entry, { directory = '/etc/crabot/s
   const record = JSON.parse(fs.readFileSync(file, 'utf8'))
   if (record.schema_version !== 1 || !Array.isArray(record.targets) || typeof record.id !== 'string') throw systemError('共享维护状态不兼容，未执行启停。')
   if (!record.targets.includes(entry.uid) || record.phase === 'completed' && !record.unsettled?.includes(entry.uid)) return
-  if (permit?.operation_id === record.id && permit.entry?.uid === entry.uid && ['start', 'stop', 'restart', 'snapshot', 'migrate', 'cancel-preparation', 'check-migration'].includes(permit.action)) return
+  if (permit?.operation_id === record.id && permit.entry?.uid === entry.uid && ['start', 'stop', 'restart', 'preflight-data', 'verify-snapshot', 'snapshot', 'migrate', 'cancel-preparation', 'check-migration'].includes(permit.action)) return
   throw systemError('管理员维护或批量作业正在进行：' + record.id + '；请用system status查看。', 'CRABOT_SYSTEM_BUSY')
 }
 

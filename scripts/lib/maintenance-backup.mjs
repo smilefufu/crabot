@@ -146,6 +146,14 @@ export async function assertLocalMigrationData(dataDir, migrations, coreRoot) {
   if (!cliLockToken(path.join(dataDir, 'cli.lock')) || inspectInstance(dataDir).state !== 'stopped') {
     fail('CRABOT_BACKUP_REQUIRES_STOP', '迁移范围检查需要持有操作锁并确认实例停止。')
   }
+  await inspectLocalMigrationData(dataDir, migrations, coreRoot)
+}
+
+// Read-only scope/entry inspection for online preflight. This never proves an
+// offline snapshot; the guarded entry above is still required before backup.
+export async function inspectLocalMigrationData(dataDir, migrations, coreRoot) {
+  if (!migrations.length) return
+  dataDir = realpathSync(dataDir)
   const unsupported = () => fail('CRABOT_BACKUP_SCOPE_UNVERIFIED', '迁移数据含无法由当前备份覆盖的链接或特殊文件；未继续迁移，请保留原部署。')
   async function inspect(file) {
     const stat = await fs.lstat(file).catch(error => { if (error.code === 'ENOENT') return null; throw error })

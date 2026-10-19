@@ -249,6 +249,24 @@ async function directoryIdentity(directory) {
   if (!stat.isDirectory() || stat.isSymbolicLink() || String(stat.uid) !== String(process.getuid()) || stat.mode & 0o022n) fail()
   return { dev: String(stat.dev), ino: String(stat.ino) }
 }
+// Root may have lost the final cancellation reply after its fence was removed.
+// Find only this operation's private journal; it grants no start authority.
+export async function findSystemScopedCancellation({ dataDir, operationId }) {
+  if (!process.getuid || process.getuid() === 0 || !uuid(operationId)) fail()
+  dataDir = management.requirePrivateDataRoot(dataDir)
+  if (!cliLockToken(path.join(dataDir, 'cli.lock'))) fail()
+  const parent = path.dirname(await scopedPath(dataDir, 'system-control/scoped-recovery/.scan'))
+  const names = await fs.readdir(parent).catch(error => { if (error.code === 'ENOENT') return []; throw error })
+  const matches = []
+  for (const id of names.filter(uuid)) {
+    const journal = await optionalDocument(dataDir, path.join(parent, id, 'cancel.json'))
+    if (journal?.value.operation_id !== operationId) continue
+    if (journal.value.id !== id || journal.value.data_dir !== dataDir) fail()
+    matches.push(id)
+  }
+  if (matches.length > 1) fail()
+  return matches[0] ?? null
+}
 // Only the pre-install, source-selected cancel role may call this component.
 // It archives unused recovery artifacts; it never restores data or starts Core.
 export async function cancelSystemScopedRecovery(options) {

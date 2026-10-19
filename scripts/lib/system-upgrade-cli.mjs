@@ -23,14 +23,16 @@ export async function runSystemUpgradeCli({ root, yes, logger }) {
   const artifact = await downloadRelease({ ...getReleaseUrls(tag), logger })
   const prepared = await prepareDownloadedCliPayload({ root, artifact, scope: 'system', logger })
   store.assertIdle()
+  const deployment = { install_root: source.root, source: { id: source.id, version: current.version }, target: { id: prepared.id, version: prepared.version } }
   const instances = []
   for (const entry of registry.read().filter(value => value.enabled)) {
     registry.verifyAccount(entry)
+    const preview = await runSystemUser(entry, { root: prepared.coreRoot, action: 'preflight-data', deployment })
+    if (preview?.preflighted !== true) throw systemError('本人范围预检没有返回成功结果，未进入维护。')
     instances.push({ entry, observation: await runSystemUser(entry, { root, action: 'inspect' }) })
   }
-  const plan = planSystemUpgrade({ installRoot: source.root, source: { id: source.id, version: current.version },
-    target: { id: prepared.id, version: prepared.version }, instances })
-  logger.info('共享升级 ' + current.version + ' → ' + prepared.version + '；' + instances.length + '个用户，范围备份保存在各自数据目录旁。')
+  const plan = planSystemUpgrade({ installRoot: source.root, source: deployment.source, target: deployment.target, instances })
+  logger.info('共享升级 ' + current.version + ' → ' + prepared.version + '；' + instances.length + '个用户，仅备份实际迁移的配置/数据库，恢复材料保存在各自数据目录内。')
   for (const item of instances) logger.info(item.entry.user + '\t' + item.observation.state + '\t' + (item.observation.state === 'running' ? '短暂停机后恢复' : '保持停止'))
   if (!yes) {
     if (!process.stdin.isTTY) throw systemError('新版已准备，未进入维护；非交互升级请显式提供--yes。')

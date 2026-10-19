@@ -27,17 +27,23 @@ export async function systemUpgradeOperations(plan, { root, registry, recovering
     checked(entry)
     return runSystemUser(entry, { root, action, operationId: plan.id, deployment, ...options })
   }
+  const snapshots = new Map()
   return {
     observe: entry => invoke(entry, 'inspect'),
     stop: (entry, previous) => invoke(entry, 'stop', { previous }),
-    snapshot: entry => invoke(entry, 'snapshot'),
+    snapshot: async entry => { const receipt = await invoke(entry, 'snapshot'); snapshots.set(entry.uid, receipt); return receipt },
     migrate: (entry, snapshot) => invoke(entry, 'migrate', { snapshot }),
     checkMigration: (entry, snapshot) => invoke(entry, 'check-migration', { snapshot }),
     cancelSnapshot: entry => invoke(entry, 'cancel-preparation'),
     startSource: entry => invoke(entry, 'start'), startTarget: entry => invoke(entry, 'start'),
     selected: async () => cliLocation.readCliSelection(plan.install_root),
     select: async expected => {
-      for (const item of plan.instances) if ((await invoke(item.entry, 'inspect')).state !== 'stopped') throw systemError('切换前用户停止状态发生变化。', 'CRABOT_SYSTEM_STOP_UNKNOWN')
+      for (const item of plan.instances) {
+        if ((await invoke(item.entry, 'inspect')).state !== 'stopped') throw systemError('切换前用户停止状态发生变化。', 'CRABOT_SYSTEM_STOP_UNKNOWN')
+        const snapshot = snapshots.get(item.entry.uid)
+        const proof = snapshot && await invoke(item.entry, 'verify-snapshot', { snapshot })
+        if (proof?.verified !== true || proof.service_started !== false) throw systemError('切换前范围恢复材料无法核验。')
+      }
       await selectCliPayload({ installRoot: plan.install_root, coreRoot: root, scope: 'system', id: plan.target.id,
         version: plan.target.version }, { expected })
     },

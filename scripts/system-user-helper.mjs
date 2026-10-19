@@ -65,7 +65,7 @@ try {
     if (!existing) fs.writeFileSync(manifest, JSON.stringify({ mode: 'system', port_offset: entry.port_offset,
       applied_cluster_version: null, applied_at: new Date().toISOString(), data_dir: dataDir, crabot_home: root }) + '\n', { flag: 'wx', mode: 0o600, flush: true })
     result = { prepared: true, credential_preserved: Boolean(credentials) }
-  } else if (['snapshot', 'migrate', 'cancel-preparation', 'check-migration'].includes(permit.action)) {
+  } else if (['preflight-data', 'verify-snapshot', 'snapshot', 'migrate', 'cancel-preparation', 'check-migration'].includes(permit.action)) {
     validateSystemDeployment(permit.deployment)
     assertSystemControlAvailable(entry, { permit })
     if (permit.action === 'migrate') {

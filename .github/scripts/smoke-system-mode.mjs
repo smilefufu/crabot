@@ -218,8 +218,16 @@ try {
         assert.deepEqual(await fs.readFile(path.join(entry.data_dir, 'admin/credentials.json')), snapshots.get(entry.uid))
         assert.equal((await fs.stat(entry.data_dir)).uid, entry.uid)
         await absent(path.join(entry.data_dir, 'desktop-maintenance.json'))
-        const backups = await fs.readdir(entry.data_dir + '.desktop-backups')
-        assert.ok(backups.some(name => !name.startsWith('.')))
+        await absent(entry.data_dir + '.desktop-backups')
+        const receipt = job.progress.results.find(row => row.uid === entry.uid).snapshot
+        assert.equal(receipt.backup.id, receipt.id)
+        const directory = path.join(entry.data_dir, 'system-control/scoped-recovery', receipt.id)
+        const prepared = await fs.readFile(path.join(directory, 'prepared.json'))
+        assert.equal(createHash('sha256').update(prepared).digest('hex'), receipt.backup.sha256)
+        const completed = JSON.parse(await fs.readFile(path.join(directory, 'completed.json'), 'utf8'))
+        assert.equal(completed.id, receipt.id); assert.equal(completed.operation_id, job.plan.id)
+        assert.equal(completed.prepared_sha256, receipt.backup.sha256)
+        assert.equal((await fs.stat(path.join(directory, 'completed.json'))).uid, entry.uid)
       }
       assert.notEqual(await assertEmployeeRuntime(alice), restartedGeneration)
     } finally { await fs.rm(hook, { force: true }); await new Promise(resolve => server.close(resolve)) }

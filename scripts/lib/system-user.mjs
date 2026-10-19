@@ -7,7 +7,7 @@ import { randomUUID } from 'node:crypto'
 import { systemError, validateSystemEntries, validateSystemAccount } from './system-registry.mjs'
 import { createLegacySystemConversionPermit, validateLegacySystemConversionPermit } from './system-conversion-permit.mjs'
 
-const helperActions = new Set(['prepare', 'verify-provision', 'inspect', 'start', 'stop', 'restart', 'disable', 'configure-service', 'snapshot', 'migrate', 'cancel-preparation', 'check-migration'])
+const helperActions = new Set(['prepare', 'verify-provision', 'inspect', 'start', 'stop', 'restart', 'disable', 'configure-service', 'preflight-data', 'verify-snapshot', 'snapshot', 'migrate', 'cancel-preparation', 'check-migration'])
 const safePath = '/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin'
 export function systemAccountEnvironment(account) {
   validateSystemAccount(account)
