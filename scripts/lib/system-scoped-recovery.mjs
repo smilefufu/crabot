@@ -176,8 +176,9 @@ async function verifyMaterials(dataDir, targetRoot, intent, plan) {
       || !sameSnapshot(value.backup_manifest, intent.shared.original) || !sameSnapshot(value.inputs, intent.shared.inputs)
       || digest(await fs.readFile(path.join(base, 'impact.json'))) !== value.impact_sha256) fail()
     await verifyMaterial(dataDir, path.join(base, 'backup'), value.write_scope, value.backup_manifest)
-    if (!sameSnapshot(value.backup_manifest, await snapshot(dataDir, value.write_scope))
-      || !sameSnapshot(value.inputs, await snapshot(dataDir, value.inputs.map(entry => entry.name)))) fail()
+    const current = await previewSharedRequests(targetRoot, dataDir)
+    if (current.status !== 'pending' || !sameSnapshot(value.inputs, current.entries)
+      || !sameSnapshot(value.backup_manifest, await snapshot(dataDir, value.write_scope))) fail()
   } else {
     const shared = await previewSharedRequests(targetRoot, dataDir)
     if (shared.status !== plan.shared.status || shared.status === 'ready'

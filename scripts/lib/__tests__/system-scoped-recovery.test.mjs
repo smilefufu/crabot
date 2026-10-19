@@ -137,3 +137,9 @@ test('a live writer blocks recovery preparation before any material or intent is
   for (const directory of ['.upgrade-migrations', 'system-control/scoped-recovery']) await assert.rejects(fs.stat(path.join(f.dataDir, directory)), { code: 'ENOENT' })
   assert.equal(await fs.readFile(path.join(f.dataDir, 'fixture/content'), 'utf8'), 'before')
 })
+test('new authority metadata after preparation invalidates the shared recovery reference', platformOptions, async t => {
+  const f = await fixture(t, { shared: true }), receipt = await prepareSystemScopedRecovery(f.options)
+  await fs.writeFile(path.join(f.dataDir, 'agent/worker-ledgers/channel%3A%3Anew.json'), JSON.stringify({ manager_key: 'channel::new', workers: [] }))
+  await assert.rejects(verifySystemScopedRecovery({ ...f.options, receipt }))
+  await assert.rejects(fs.stat(path.join(f.dataDir, 'agent/shared-request-upgrade.json')), { code: 'ENOENT' })
+})
