@@ -16,7 +16,7 @@ async function fixture(t, missingTray = false, installer = false) {
     'dist/bootstrap/scripts/lib/process-identity.cjs': 'module.exports={}', 'dist/bootstrap/crabot-native/build/Release/crabot-native.node': 'native fixture', 'dist/preload.cjs': 'module.exports={}', 'dist/assets/tray.png': 'fixture tray bytes',
     'node_modules/crabot-client/dist/index.js': 'export{}', 'node_modules/zod/package.json': '{}', 'node_modules/electron-updater/package.json': '{}' }
   if (installer) for (const file of ['dist/installer-main.js', 'dist/installer-preload.cjs', 'dist/installation-progress-window.js', 'dist/installation-entries.js',
-    'dist/bootstrap/scripts/lib/desktop-payload.mjs', 'dist/bootstrap/scripts/lib/core-release.mjs']) files[file] = 'installer fixture'
+    'dist/bootstrap/scripts/lib/desktop-payload.mjs', 'dist/bootstrap/scripts/lib/core-release.mjs', 'dist/bootstrap/scripts/lib/physical-fs.cjs']) files[file] = 'installer fixture'
   if (missingTray) delete files['dist/assets/tray.png']
   for (const [file, bytes] of Object.entries(files)) {
     await fs.mkdir(path.dirname(path.join(source, file)), { recursive: true }); await fs.writeFile(path.join(source, file), bytes)

@@ -1,9 +1,9 @@
 // Immutable core inventory shared by desktop and CLI artifacts. This detects
 // incomplete/mixed payloads; installer signatures authenticate their source.
 import { createHash } from 'node:crypto'
-import { createReadStream } from 'node:fs'
-import { promises as fs } from 'node:fs'
+import physicalFs from './physical-fs.cjs'
 import path from 'node:path'
+const { createReadStream, promises: fs } = physicalFs
 
 const excluded = new Set(['core-files.json', 'core-release.json', 'desktop-host.json'])
 const digest = bytes => createHash('sha256').update(bytes).digest('hex')

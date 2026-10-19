@@ -1,6 +1,6 @@
 // Offline payload integrity and fresh installation only. Existing deployments
 // use takeover/version maintenance; this entry never starts or migrates a Core.
-import { promises as fs, createReadStream, constants } from 'node:fs'
+import physicalFs from './physical-fs.cjs'
 import path from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import identity from './process-identity.cjs'
@@ -9,6 +9,7 @@ import installation from './desktop-installation.cjs'
 import { verifyCoreRelease } from './core-release.mjs'
 import { acquireCliLock, releaseCliLock } from './cli-lock.mjs'
 import { inspectInstance } from './instance-runtime.mjs'
+const { promises: fs, createReadStream, constants } = physicalFs
 const fail = (message, code = 'CRABOT_DESKTOP_INSTALLATION') => { throw Object.assign(new Error(message), { code }) }
 const pendingName = '.desktop-installing.json', payloadName = '.desktop-install-payload.json'
 const inside = (parent, child) => { const relative = path.relative(parent, child); return !relative || relative !== '..' && !relative.startsWith('..' + path.sep) && !path.isAbsolute(relative) }

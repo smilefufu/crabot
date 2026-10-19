@@ -11,6 +11,6 @@ export function verifyDesktopAsar(asar, archive, platform = process.platform) {
 export function verifyInstallerAsar(asar, archive, platform = process.platform) {
   const paths = platform === 'win32' ? path.win32 : path.posix
   for (const file of ['dist/installer-main.js', 'dist/installer-preload.cjs', 'dist/installation-progress-window.js', 'dist/installation-entries.js',
-    'dist/bootstrap/scripts/lib/desktop-payload.mjs', 'dist/bootstrap/scripts/lib/core-release.mjs', 'dist/bootstrap/scripts/lib/process-identity.cjs',
+    'dist/bootstrap/scripts/lib/desktop-payload.mjs', 'dist/bootstrap/scripts/lib/core-release.mjs', 'dist/bootstrap/scripts/lib/physical-fs.cjs', 'dist/bootstrap/scripts/lib/process-identity.cjs',
     'dist/bootstrap/crabot-native/build/Release/crabot-native.node', 'node_modules/crabot-client/dist/index.js', 'node_modules/zod/package.json']) asar.statFile(archive, paths.normalize(file))
 }
