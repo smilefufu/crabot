@@ -45,7 +45,7 @@ describe('production isolated request tool closure', () => {
     rpc = vi.fn(async (_port, method, params) => {
       if (method === 'resolve_request_permission_sources') return structuredClone({ group, friend })
       if (method === 'resolve_request_permission_source') return { source: structuredClone(current[params.kind as 'group' | 'friend']) }
-      if (method === 'get_capabilities') return voiceChannel ? { voice: { protocol_version: 8 } } : {}
+      if (method === 'get_capabilities') return voiceChannel ? { voice: { protocol_version: 9 } } : {}
       if (method === 'get_voice_output_state') return { channel_id: 'voice', session_id: 'group', connection_epoch: 'current-epoch', foreground: true, speech_enabled: voiceReady, activity: 'idle', current_turn_id: null }
       if (method === 'get_voice_playback_receipt') return { playback_id: params.playback_id, status: 'unknown' }
       if (method === 'voice_output') return params.event.type === 'reply_end' ? { platform_message_id: params.event.playback_id, played_samples: 480, sent_at: new Date().toISOString() } : { accepted: true }

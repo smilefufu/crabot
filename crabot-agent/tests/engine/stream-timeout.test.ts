@@ -22,6 +22,15 @@ async function drain<T>(gen: AsyncGenerator<T>, sink?: T[]): Promise<void> {
 }
 
 describe('withStreamTimeout', () => {
+  it('does not count downstream playback wait as provider idle time', async () => {
+    let signal!: AbortSignal
+    const gen = withStreamTimeout(async function* (s) { signal = s; yield 1; yield 2 }, undefined, { ttfbMs: 100, idleMs: 10 })
+    expect((await gen.next()).value).toBe(1)
+    await new Promise(resolve => setTimeout(resolve, 35))
+    expect(signal.aborted).toBe(false)
+    expect((await gen.next()).value).toBe(2)
+    await gen.return()
+  })
   it('在超时内正常透传所有 chunk', async () => {
     const out: number[] = []
     await drain(

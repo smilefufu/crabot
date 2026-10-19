@@ -10,6 +10,21 @@ const record = (status = 'queued') => ({ playback_id: randomUUID(), channel_id: 
   binding: { channel_id: 'voice', session_id: 'group', response_id: randomUUID(), request_id: 'request-a', worker_id: 'worker-a', worker_turn_id: 'turn-a' } }) as VoiceDeliveryRecord
 
 describe('durable voice delivery responsibility', () => {
+  it('restores long v3 text and completion without weakening legacy validation or replaying', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'voice-delivery-'))
+    try {
+      const send = vi.fn(), port = voiceOutputPort(directory, () => true, send)
+      const item = { ...record('completed'), text: '完整的长回答。'.repeat(100), played_samples: 3_000_000_000, sent_at: new Date().toISOString() }
+      port.save(item)
+      const file = join(directory, item.playback_id + '.json')
+      expect(JSON.parse(readFileSync(file, 'utf8')).storage_version).toBe(3)
+      expect(voiceOutputPort(directory, () => true, send).records()).toEqual([item])
+      expect(send).not.toHaveBeenCalled()
+      const legacy = JSON.stringify({ storage_version: 2, delivery: item }); writeFileSync(file, legacy)
+      expect(() => port.records()).toThrow('legacy')
+      expect(readFileSync(file, 'utf8')).toBe(legacy)
+    } finally { rmSync(directory, { recursive: true, force: true }) }
+  })
   it('retains all queued results across restart instead of the last three display records', () => {
     const directory = mkdtempSync(join(tmpdir(), 'voice-delivery-'))
     try {

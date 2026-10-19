@@ -9,15 +9,15 @@ vi.mock('./voice-channel.js', () => ({ VoiceChannel: class {
 } }))
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs() })
 
-it('registers the production entrypoint with the confirmed wire7 module version and consumes its runtime secret', async () => {
+it('registers the production entrypoint with the confirmed wire9 protocol and consumes its runtime secret', async () => {
   vi.stubEnv('Crabot_MODULE_ID', 'voice-entry-fixture')
   vi.stubEnv('Crabot_PORT', '19099')
   vi.stubEnv('CRABOT_VOICE_RUNTIME_BEARER', 'fixture-runtime-secret')
   vi.spyOn(process, 'on').mockReturnValue(process)
   await import('./main.js')
   await vi.waitFor(() => expect(fixture.register).toHaveBeenCalledWith('fixture-runtime-secret'))
-  expect(fixture.config).toHaveBeenCalledWith(expect.objectContaining({ protocolVersion: '0.8.0' }))
+  expect(fixture.config).toHaveBeenCalledWith(expect.objectContaining({ protocolVersion: '0.9.0' }))
   const descriptor = await fs.readFile(new URL('../crabot-module.yaml', import.meta.url), 'utf8')
-  expect(descriptor).toMatch(/^protocol_version: "0\.8\.0"$/m)
+  expect(descriptor).toMatch(/^protocol_version: "0\.9\.0"$/m)
   expect(process.env.CRABOT_VOICE_RUNTIME_BEARER).toBeUndefined()
 })

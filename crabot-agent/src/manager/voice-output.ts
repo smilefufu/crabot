@@ -2,6 +2,8 @@ import { randomUUID } from 'node:crypto'
 import { RpcCallError } from 'crabot-shared'
 import type { VoiceDeliveryBinding, VoicePlaybackContext, VoiceOutputState, VoiceOutputParams, VoiceOutputResult, VoiceReplyContext } from 'crabot-shared'
 import type { AssistantTextConsumer } from '../engine/llm-adapter-types.js'
+import { appendVoiceText, finishVoicePlayback } from './voice-output-flow.js'
+import type { VoicePlaybackReceipt } from 'crabot-shared'
 
 export interface VoiceDeliveryRecord {
   playback_id: string
@@ -31,6 +33,7 @@ export interface VoiceOutputPort {
   records(): VoiceDeliveryRecord[]
   find?(predicate: (record: VoiceDeliveryRecord) => boolean): VoiceDeliveryRecord | undefined
   state?(): Promise<VoiceOutputState>
+  receipt?(id: string): Promise<VoicePlaybackReceipt>
   deliver?(record: VoiceDeliveryRecord): Promise<boolean>
   updatePending?(): Promise<void>
   reconcile?(): Promise<void>
@@ -45,7 +48,6 @@ const OPEN = '<voice_reply>', CLOSE = '</voice_reply>'
 export class VoiceTagParser {
   private pending = ''
   private inside = false
-  private length = 0
   constructor(private readonly emit: (event: 'start' | 'text' | 'end', text?: string) => Promise<void>) {}
   async write(text: string): Promise<void> {
     this.pending += text
@@ -53,7 +55,7 @@ export class VoiceTagParser {
       if (!this.inside) {
         const at = this.pending.indexOf(OPEN)
         if (at < 0) { this.pending = this.partial(OPEN); return }
-        this.pending = this.pending.slice(at + OPEN.length); this.inside = true; this.length = 0
+        this.pending = this.pending.slice(at + OPEN.length); this.inside = true
         await this.emit('start')
       }
       const at = this.pending.indexOf('<')
@@ -77,8 +79,6 @@ export class VoiceTagParser {
   }
   private async body(text: string): Promise<void> {
     if (!text) return
-    this.length += Array.from(text).length
-    if (this.length > 120) throw new Error('Voice reply exceeds 120 characters')
     await this.emit('text', text)
   }
 }
@@ -107,6 +107,7 @@ export class TaggedVoiceOutput {
     let original: VoiceDeliveryRecord | undefined
     let record: VoiceDeliveryRecord | undefined, sequence = 0, committed = false, broken = false, queued = false
     let playbackContext: VoicePlaybackContext | undefined
+    const cancellation = new AbortController()
     const send = (event: VoiceOutputParams['event']) => this.port.send(playbackContext
       ? { delivery_context: playbackContext, event } : { voice_reply_context: context!, event })
     const save = (): void => { if (record) this.port.save(record) }
@@ -134,7 +135,13 @@ export class TaggedVoiceOutput {
         record = { playback_id: original?.playback_id ?? randomUUID(), channel_id: (binding ?? context!).channel_id, session_id: (binding ?? context!).session_id,
           turn_id: original?.turn_id ?? context?.turn_id ?? binding!.response_id, text: '', status: 'prepared', ...(binding ? { binding: structuredClone(original?.binding ?? binding), block_index: original?.block_index ?? blockIndex } : {}) }
         sequence = 0; if (!original) save()
-        playbackContext = binding ? await this.port.prepare?.(record, binding.worker_id ? undefined : context) : undefined
+        const previous = this.lastPlaybackContext
+        playbackContext = undefined
+        if (binding) {
+          const continuing = previous?.kind === 'reply' && previous.turn_id === context?.turn_id
+            && previous.connection_epoch === context?.connection_epoch && JSON.stringify(previous.binding) === JSON.stringify(binding)
+          playbackContext = continuing ? previous : await this.port.prepare?.(record, binding.worker_id ? undefined : context)
+        }
         queued = !!binding && !playbackContext
         if (playbackContext) this.lastPlaybackContext = playbackContext
         if (!queued) try { await send({ type: 'reply_start', playback_id: record.playback_id }) }
@@ -148,26 +155,25 @@ export class TaggedVoiceOutput {
         record.text += text!; record.status = queued ? 'prepared' : 'streaming'; if (!queued || !original) save()
         if (!queued) {
           committed = true; this.committedTurns.add(key)
-          await send({ type: 'reply_text', playback_id: record.playback_id, sequence: sequence++, text: text! })
+          sequence = await appendVoiceText(send, this.port.receipt, record.playback_id, sequence, text!, cancellation.signal)
         }
       } else if (event === 'end' && record) {
         if (!record.text.trim()) { await cancel(); return }
         if (queued) {
           record.status = 'queued'; save(); committed = true; this.committedTurns.add(key); record = undefined; return
         }
-        const result = await send({ type: 'reply_end', playback_id: record.playback_id })
-        if (!('platform_message_id' in result) || result.platform_message_id !== record.playback_id
-          || !Number.isSafeInteger(result.played_samples) || result.played_samples <= 0 || result.played_samples > 480000 || !Number.isFinite(Date.parse(result.sent_at))) throw new Error('Invalid voice completion receipt')
+        const result = await finishVoicePlayback(send, this.port.receipt, record.playback_id, cancellation.signal)
         record.status = 'completed'; record.played_samples = result.played_samples; record.sent_at = result.sent_at; save()
         this.completed = true; this.delivered(record); record = undefined
       }
     })
     const fail = async (error?: unknown): Promise<void> => {
+      cancellation.abort()
       broken = true; if (committed && key) this.disabledTurns.add(key)
       if (record && error instanceof RpcCallError && error.details) {
         const samples = error.details.played_samples, text = error.details.completed_text
-        if (Number.isSafeInteger(samples) && (samples as number) >= 0 && (samples as number) <= 480000) record.played_samples = samples as number
-        if (typeof text === 'string' && Array.from(text).length <= 120) record.completed_text = text
+        if (Number.isSafeInteger(samples) && (samples as number) >= 0) record.played_samples = samples as number
+        if (typeof text === 'string' && record.text.startsWith(text)) record.completed_text = text
       }
       await cancel()
     }
@@ -180,7 +186,8 @@ export class TaggedVoiceOutput {
   }
   async finishResponse(): Promise<void> {
     const context = this.context()
-    if (context) try { await this.port.send({ voice_reply_context: context, event: { type: 'response_end' } }) } catch { /* stale interaction is never revived */ }
-    else if (this.lastPlaybackContext) try { await this.port.send({ delivery_context: this.lastPlaybackContext, event: { type: 'response_end' } }) } catch { /* no stale replay */ }
+    if (this.lastPlaybackContext && (!context || this.lastPlaybackContext.turn_id === context.turn_id)) {
+      try { await this.port.send({ delivery_context: this.lastPlaybackContext, event: { type: 'response_end' } }) } catch { /* no stale replay */ }
+    } else if (context) try { await this.port.send({ voice_reply_context: context, event: { type: 'response_end' } }) } catch { /* stale interaction is never revived */ }
   }
 }

@@ -721,7 +721,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
       }, { state: async () => {
           const port = await deps.messagingDeps.resolveChannelPort(channelId)
           const caps = await deps.messagingDeps.rpcClient.call<{}, { voice?: { protocol_version: number } }>(port, 'get_capabilities', {}, deps.messagingDeps.moduleId, undefined, { timeoutMs: 3000 })
-          if (caps.voice?.protocol_version !== 8) throw new Error('Voice feedback protocol is not available')
+          if (caps.voice?.protocol_version !== 9) throw new Error('Voice feedback protocol is not available')
           voicePolicies.set(channelId, true)
           return call('get_voice_output_state', { channel_id: channelId, session_id: sessionId })
         },
@@ -832,7 +832,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
         try {
           const port = await deps.messagingDeps.resolveChannelPort(channelId)
           const caps = await deps.messagingDeps.rpcClient.call<{}, { voice?: { protocol_version: number } }>(port, 'get_capabilities', {}, deps.messagingDeps.moduleId, undefined, { timeoutMs: 3000 })
-          voicePolicies.set(channelId, caps.voice?.protocol_version === 8)
+          voicePolicies.set(channelId, caps.voice?.protocol_version === 9)
         } catch { /* no unverified voice exception */ }
       }
       const wake = envelope?.wake

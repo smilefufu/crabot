@@ -3,6 +3,29 @@ import { callNonStreaming, type LLMAdapter } from '../../src/engine/llm-adapter-
 import { TaggedVoiceOutput } from '../../src/manager/voice-output.js'
 
 describe('voice streaming and irreversible delivery', () => {
+  it('aborts a text consumer blocked on playback without waiting for another provider chunk', async () => {
+    vi.useFakeTimers()
+    try {
+      const cancellation = new AbortController(), events: string[] = []
+      const output = new TaggedVoiceOutput({ isVoice: () => true, save() {}, records: () => [],
+        receipt: async id => ({ playback_id: id, status: 'active' }),
+        send: async ({ event }) => {
+          events.push(event.type)
+          return event.type === 'reply_text' ? { accepted: false, code: 'VOICE_OUTPUT_BACKPRESSURE' } : { accepted: true }
+        },
+      }, () => ({ channel_id: 'voice', session_id: 'group', turn_id: 'turn', connection_epoch: 'epoch', expires_at: new Date(Date.now() + 60000).toISOString() }), () => {})
+      const stream = vi.fn(async function* () {
+        yield { type: 'message_start' as const, messageId: 'fixture' }
+        yield { type: 'text_delta' as const, text: '<voice_reply>正文。' }
+        yield { type: 'message_end' as const, stopReason: 'end_turn' as const }
+      })
+      const pending = callNonStreaming({ stream, updateConfig() {} }, { model: 'fixture', systemPrompt: 'fixture', messages: [], tools: [], signal: cancellation.signal, createTextConsumer: () => output.consumer() })
+      const rejected = expect(pending).rejects.toThrow('Aborted')
+      await vi.advanceTimersByTimeAsync(10); cancellation.abort(); await rejected
+      expect(stream).toHaveBeenCalledOnce()
+      expect(events).toEqual(['reply_start', 'reply_text', 'reply_cancel'])
+    } finally { vi.useRealTimers() }
+  })
   it('publishes only text_delta before response completion and never retries after committed audio text', async () => {
     const events: string[] = []
     const output = new TaggedVoiceOutput({ isVoice: () => true, save: () => {}, records: () => [], send: async ({ event }) => {

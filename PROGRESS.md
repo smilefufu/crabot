@@ -1,5 +1,12 @@
 # Crabot 项目进度
 
+### 长回答连续播放：wire9 候选实现与联测
+
+- 用户已确认后端/安卓配套设计及一处提示词文字；正式 Voice v0.9.0/wire9 先行发布。不增加通用 SSML 或新模型配置，普通 voice_reply 按需完整回答，宿主自动断句、单个 TTS 请求加一个预取，按实际播放游标保持最多一秒在途音频。
+- 原回答总字数、20/25/30秒累计播放限制已从普通输出移除；原60秒仅限制首次接纳，已接纳回应保持原请求/epoch，按首音频、合成、消费和收尾阶段检测卡住。reply_end 短返回与实际完成分离；只有真实全播才记 completed，取消和未知不自动重播。登记引导继续使用原有限预算。
+- Agent/Channel 新写交付 v3/回执 v2，旧记录保留验证；Android0.8.0/code17 使用 Long 计数、同一 AudioTrack、进度反馈和有限 journal 校验备份迁移。Shared/Channel/Agent/Admin/Core 编译、定向回归及两种 APK 构建通过；三分钟虚拟播放保持在途≤24000样本。真实模型短答、649字长故事和工具前单次接单通过；首可播文字约3.37/2.43/2.58秒，不含ASR/TTS/手机播放。
+- 当前Kokoro真实API分40段生成175.75秒音频，实时速率替身完整消费，首PCM约265毫秒、峰值24000在途样本、额外缓冲空档0；并非手机播放验收。隔离候选等待最终审查/PR，手机仍为原版本，现场实例未切换或重启。真机长于一分钟完整回答、停止及50轮首声统计待联合升级；见[脱敏证据](crabot-agent/eval/shared-requests/evidence-2026-10-19-continuous-playback.json)与[实施计划](crabot-docs/superpowers/plans/2026-10-19-continuous-long-voice-playback-implementation.md)。
+
 ### 统一升级与迁移减重：副本验证完成，PR 审查中
 
 - 用户要求解决通用升级成本，不能仅为语音做特例。已核实整模块复制、Memory重复备份、启动兜底与升级入口备份不一致，以及停机后准备过多；[修订稿](crabot-docs/superpowers/specs/2026-10-18-scoped-upgrade-migrations-design.md)提出按实际受影响范围备份、共同入口和提前准备，不引入热迁移/双写服务。

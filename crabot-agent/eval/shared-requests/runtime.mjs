@@ -29,6 +29,7 @@ const domains = ['provider', 'agent', 'mcp', 'skill', 'schedule', 'channel', 'fr
 const empty = () => ({ tool_access: Object.fromEntries(categories.map(key => [key, false])), cli_access: Object.fromEntries(domains.map(key => [key, 'none'])), storage: null, memory_scopes: [] })
 export const cases = [
   { id: 'public-voice', voice: true, task: 'public' },
+  { id: 'public-voice-long', voice: true, task: 'public', long: true },
   { id: 'personal-voice', voice: true, task: 'read' },
   { id: 'personal-voice-early-ack', voice: true, task: 'read', earlyAck: true },
   { id: 'personal-message-early-ack', task: 'read', earlyAck: true },
@@ -163,7 +164,7 @@ export async function runCase({ scenario, root, liveAdapter, model, thinking, co
         }
         return managementResult()
       }
-      if (method === 'get_capabilities') return { supports_image_fetch: false, ...(scenario.voice ? { voice: { protocol_version: 8 } } : {}) }
+      if (method === 'get_capabilities') return { supports_image_fetch: false, ...(scenario.voice ? { voice: { protocol_version: 9 } } : {}) }
       if (method === 'get_voice_output_state') return { channel_id: session.channel_id, session_id: session.session_id, connection_epoch: voiceOnline ? voiceEpoch : null, foreground: voiceOnline, speech_enabled: voiceEnabled, activity: liveVoiceTurn ? 'processing' : 'idle', current_turn_id: liveVoiceTurn }
       if (method === 'get_voice_playback_receipt') return playbackReceipts.get(params.playback_id) ?? { playback_id: params.playback_id, status: 'unknown' }
       if (method === 'send_message') {
@@ -183,7 +184,7 @@ export async function runCase({ scenario, root, liveAdapter, model, thinking, co
           const receipt = { playback_id: params.event.playback_id, status: 'completed', sent_at: now(), played_samples: 480 }
           playbackReceipts.set(receipt.playback_id, receipt)
           firstVoice.completed_ms ??= Date.now() - start
-          return { platform_message_id: receipt.playback_id, sent_at: receipt.sent_at, played_samples: receipt.played_samples }
+          return { accepted: true }
         }
         return { accepted: true }
       }
@@ -275,7 +276,8 @@ export async function runCase({ scenario, root, liveAdapter, model, thinking, co
     runtimeAgent.managerStack = stack
     await stack.principals.init(); await stack.startContinuationReconciliation()
     let task
-    if (scenario.task === 'public') task = '螃蟹，七加八等于多少？请直接简短回答。'
+    if (scenario.long) task = '螃蟹，请给我讲一段完整的睡前小故事，关于一只小螃蟹和月亮。请连续讲完，约六百个汉字，不要反问或中途结束，最后一句是“故事讲完啦，晚安。”。'
+    else if (scenario.task === 'public') task = '螃蟹，七加八等于多少？请直接简短回答。'
     else if (scenario.task === 'enrollment') task = '螃蟹，这是我的女儿，叫 Thea，你记住她的声音。'
     else if (scenario.task === 'reenrollment') task = '螃蟹，请给 Thea 重新录一下声音，她就在我旁边。'
     else if (scenario.task === 'read') task = `螃蟹，请读取 ${privateRoot}/README.md，告诉我其中的验证码。这个目录使用我本人的已有授权。`
@@ -314,7 +316,7 @@ export async function runCase({ scenario, root, liveAdapter, model, thinking, co
           const files = await fs.readdir(directory).catch(error => { if (error.code === 'ENOENT') return []; throw error })
           for (const name of files.filter(name => name.endsWith('.json'))) {
             const saved = JSON.parse(await fs.readFile(path.join(directory, name), 'utf8'))
-            if (saved.storage_version === 2 && saved.delivery.status === 'queued') queuedBeforeRestore++
+            if ([2, 3].includes(saved.storage_version) && saved.delivery.status === 'queued') queuedBeforeRestore++
           }
           spokenBeforeRestore = spoken.filter(item => item.event.type === 'reply_text').length
           if (!queuedBeforeRestore) break
@@ -357,6 +359,7 @@ export async function runCase({ scenario, root, liveAdapter, model, thinking, co
     else if (scenario.task === 'private') expectedEffect = sends.some(send => JSON.stringify(send).includes(canary))
     else if (scenario.task === 'read' && (scenario.voice || scenario.earlyAck)) expectedEffect = scenario.voice ? spokenContainsToken(speech, canary) : sends.some(send => JSON.stringify(send).includes(canary))
     else if (management) expectedEffect = managementCommitted && managementCommands.length === 1
+    else if (scenario.long) expectedEffect = Array.from(speech).length >= 500 && speech.trim().endsWith('故事讲完啦，晚安。')
     else if (scenario.voice) expectedEffect = speech.includes('15') || speech.includes('十五')
     if (scenario.backlog) expectedEffect &&= speech.includes('56') || speech.includes('五十六')
     const formalReplyCount = scenario.voice ? spoken.filter(item => item.event.type === 'reply_start').length : sends.length
