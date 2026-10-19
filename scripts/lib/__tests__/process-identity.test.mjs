@@ -16,7 +16,11 @@ test('native identity includes OS owner, precise creation identity and executabl
   assert.equal(identity.sameProcess({ ...self, started: 'reused PID' }, self), false)
   assert.ok(identity.listProcessIds().includes(process.pid))
   assert.ok(identity.inspectProcessArguments(process.pid).length > 0)
-  for (const pid of [-1, 0, NaN, Infinity, '1', 1.5]) assert.throws(() => identity.inspectProcess(pid))
+  assert.equal(identity.isProcessExited(process.pid), false)
+  for (const pid of [-1, 0, NaN, Infinity, '1', 1.5]) {
+    assert.throws(() => identity.inspectProcess(pid))
+    assert.throws(() => identity.isProcessExited(pid))
+  }
 })
 
 test('read-only directory ownership never substitutes for private bootstrap ACLs', t => {

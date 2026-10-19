@@ -23,11 +23,13 @@
 #include <fcntl.h>
 #else
 #include <unistd.h>
+#include <signal.h>
 #include <sys/socket.h>
 #include <sys/file.h>
 #include <fcntl.h>
 #ifdef __APPLE__
 #include <libproc.h>
+#include <sys/proc.h>
 #include <sys/un.h>
 #include <sys/sysctl.h>
 #include <netinet/in.h>
@@ -226,6 +228,51 @@ static std::vector<int> Children(int pid) {
   return {children.begin(), children.end()};
 }
 
+#ifndef _WIN32
+static bool PidAbsent(int pid) {
+  if (kill(pid, 0) == 0 || errno == EPERM) return false;
+  if (errno == ESRCH) return true;
+  throw std::runtime_error("Cannot confirm process absence");
+}
+#endif
+
+static bool Exited(int pid) {
+#ifdef _WIN32
+  HANDLE process = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+  if (!process) {
+    if (GetLastError() == ERROR_INVALID_PARAMETER) return true;
+    throw std::runtime_error("Cannot inspect process exit");
+  }
+  const DWORD status = WaitForSingleObject(process, 0);
+  CloseHandle(process);
+  if (status == WAIT_OBJECT_0) return true;
+  if (status == WAIT_TIMEOUT) return false;
+  throw std::runtime_error("Cannot confirm process exit");
+#elif __APPLE__
+  proc_bsdinfo info{};
+  if (proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, sizeof(info)) != sizeof(info)) {
+    if (PidAbsent(pid)) return true;
+    throw std::runtime_error("Cannot inspect process exit");
+  }
+  return info.pbi_status == SZOMB;
+#else
+  errno = 0;
+  std::ifstream file("/proc/" + std::to_string(pid) + "/stat");
+  if (!file) {
+    if (PidAbsent(pid)) return true;
+    throw std::runtime_error("Cannot inspect process exit");
+  }
+  const std::string stat(std::istreambuf_iterator<char>(file), {});
+  if (file.bad()) throw std::runtime_error("Cannot read process exit state");
+  const auto end = stat.rfind(')');
+  if (end == std::string::npos) throw std::runtime_error("Invalid process exit state");
+  std::istringstream fields(stat.substr(end + 2));
+  char state;
+  if (!(fields >> state)) throw std::runtime_error("Cannot read process exit state");
+  return state == 'Z' || state == 'X' || state == 'x';
+#endif
+}
+
 static napi_value String(napi_env env, const std::string& text) {
   napi_value value; napi_create_string_utf8(env, text.c_str(), text.size(), &value); return value;
 }
@@ -268,6 +315,11 @@ static napi_value ChildrenCall(napi_env env, napi_callback_info info) {
     napi_value result; napi_create_array(env, &result);
     for (uint32_t index = 0; index < children.size(); index++) napi_set_element(env, result, index, Number(env, children[index]));
     return result;
+  } catch (const std::exception& error) { napi_throw_error(env, "CRABOT_PROCESS_IDENTITY", error.what()); return nullptr; }
+}
+static napi_value ExitedCall(napi_env env, napi_callback_info info) {
+  try {
+    napi_value result; napi_get_boolean(env, Exited(Argument(env, info)), &result); return result;
   } catch (const std::exception& error) { napi_throw_error(env, "CRABOT_PROCESS_IDENTITY", error.what()); return nullptr; }
 }
 #ifndef _WIN32
@@ -434,6 +486,7 @@ static napi_value Initialize(napi_env env, napi_value exports) {
     {"inspectProcess", nullptr, InspectCall, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"listProcessIds", nullptr, PidsCall, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"listChildProcessIds", nullptr, ChildrenCall, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"isProcessExited", nullptr, ExitedCall, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"tryFileLock", nullptr, TryLock, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"releaseFileLock", nullptr, ReleaseLock, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"inspectProcessArguments", nullptr, ArgumentsCall, nullptr, nullptr, nullptr, napi_default, nullptr},
