@@ -42,6 +42,28 @@ async function storeProof(root, record) {
   }
   return { file, sha256: createHash('sha256').update(text).digest('hex') }
 }
+// Read-only proof for both the stopping coordinator and final pair commit.
+// It grants no migration, selection or lifecycle authority.
+export async function verifyPreparedDesktopPair(prepared) {
+  const own = installation.readDesktopSelection(prepared?.installRoot), selection = prepared?.selection
+  if (prepared.installRoot !== own.root || prepared.installation_id !== own.record.installation_id
+    || selection?.schema_version !== 1 || typeof selection.gui_id !== 'string' || !/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(selection.gui_id)
+    || typeof selection.core_id !== 'string' || !/^[a-f0-9]{64}$/.test(selection.core_id)
+    || prepared.coreRoot !== path.join(own.root, 'releases', selection.core_id)
+    || prepared.guiRoot !== path.join(own.root, 'app/releases', selection.gui_id)
+    || prepared.proof?.file !== path.join(own.root, 'app/payloads', selection.gui_id + '.json')
+    || !/^[a-f0-9]{64}$/.test(prepared.proof?.sha256 ?? '')) fail('已准备版本的安装绑定无法核验。')
+  management.requirePrivateDataRoot(path.dirname(prepared.proof.file))
+  const file = prepared.proof.file, stat = await fs.lstat(file)
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || stat.size > 64 * 1024 * 1024
+    || (process.platform === 'win32' ? !identity.isPrivateFile(file) : stat.uid !== process.getuid() || (stat.mode & 0o777) !== 0o600)) fail('已准备版本的完整清单无法核验。')
+  const text = await fs.readFile(file, 'utf8')
+  if (createHash('sha256').update(text).digest('hex') !== prepared.proof.sha256) fail('已准备版本的完整清单发生变化。')
+  const record = JSON.parse(text)
+  if (!same(record.selection, selection)) fail('已准备版本对与清单不一致。')
+  await verifyDesktopPrograms(prepared.coreRoot, prepared.guiRoot, record)
+  return own
+}
 export async function prepareDesktopPair({ payload, installRoot, signal, progress = () => {} }) {
   progress('verifying')
   const source = await verifyDesktopPayload(payload, { signal }), own = installation.readDesktopSelection(installRoot)

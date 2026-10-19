@@ -5,6 +5,9 @@ import { pathToFileURL } from 'node:url'
 import { ActivityClient, HttpClient, type DesktopHostState } from 'crabot-client'
 import { SessionHost, sameHostContext } from './session-host.js'
 import type { UpdateDownload } from './update-dialog.js'
+import type { PreparedInstallation } from './installation-entries.js'
+
+export type PreparedDesktopPair = PreparedInstallation & { source: PreparedInstallation['selection']; proof: { file: string; sha256: string } }
 
 export class DesktopController {
   readonly host: SessionHost
@@ -16,7 +19,7 @@ export class DesktopController {
   constructor(private readonly options: { coreRoot: string; dataRoot: string; appVersion: string; platform: 'darwin' | 'win32' | 'linux'; packaged?: boolean; verifyBinding?: () => void }) {
     this.host = new SessionHost(options)
   }
-  private load(file: string): Promise<any> { return import(pathToFileURL(path.join(this.options.coreRoot, file)).href) }
+  private load(file: string, root = this.options.coreRoot): Promise<any> { return import(pathToFileURL(path.join(root, file)).href) }
   private async verifyInstallation() {
     this.options.verifyBinding?.()
     if (this.options.packaged || existsSync(path.join(this.options.coreRoot, 'core-release.json'))) {
@@ -90,6 +93,64 @@ export class DesktopController {
       } finally { releaseCliLock(lock) }
     }).catch(error => { this.report(error); throw error })
     this.operation = pending.catch(() => {}).finally(() => { this.busy-- })
+    return pending
+  }
+  async applyPreparedPair(prepared: PreparedDesktopPair, replaceEntries: (source: PreparedInstallation, target: PreparedInstallation) => Promise<void>): Promise<{ executable: string; dataDir: string }> {
+    this.busy++
+    const pending = this.operation.then(async () => {
+      this.options.verifyBinding?.()
+      const { verifyPreparedDesktopPair } = await this.load('scripts/lib/desktop-pair-preparation.mjs')
+      const installation = await verifyPreparedDesktopPair(prepared)
+      if (installation.coreRoot !== this.options.coreRoot || installation.dataDir !== this.options.dataRoot
+        || installation.selection.version !== this.options.appVersion || JSON.stringify(installation.selection) !== JSON.stringify(prepared.source)) {
+        throw Object.assign(new Error('The prepared update belongs to another source installation'), { code: 'CRABOT_DESKTOP_INSTALLATION' })
+      }
+      // Target code executes only after its complete immutable payload is verified.
+      const root = prepared.coreRoot
+      const { acquireCliLock, releaseCliLock } = await this.load('scripts/lib/cli-lock.mjs', root)
+      const maintenance = await this.load('scripts/lib/version-maintenance.mjs', root)
+      const { stopInstance } = await this.load('scripts/lib/instance-controller.mjs', root)
+      const core = await this.load('scripts/lib/core-preparation.mjs', root)
+      const { inspectLocalMigrationData } = await this.load('scripts/lib/maintenance-backup.mjs', root)
+      const { previewMigrations } = await this.load('scripts/upgrade-lib/migrate.mjs', root)
+      const { default: selection } = await this.load('scripts/lib/desktop-installation.cjs')
+      const checkSource = () => {
+        this.options.verifyBinding?.()
+        const current = selection.readDesktopSelection(prepared.installRoot)
+        if (current.record.installation_id !== prepared.installation_id || JSON.stringify(current.selection) !== JSON.stringify(prepared.source)) {
+          throw Object.assign(new Error('The source pair changed'), { code: 'CRABOT_DESKTOP_INSTALLATION' })
+        }
+      }
+      const verifyData = async () => {
+        if (core.verifyDataCompatibility(root, this.options.dataRoot).length) throw Object.assign(new Error('Target data migration is incomplete'), { code: 'CRABOT_MIGRATION_FAILED' })
+        const preview = await previewMigrations(root, this.options.dataRoot)
+        return preview.modules.length === 0 && ['ready', 'not_applicable'].includes(preview.shared.status)
+      }
+      const lock = await acquireCliLock(this.options.dataRoot, 'desktop-paired-update')
+      let record
+      try {
+        checkSource(); await this.current()
+        await inspectLocalMigrationData(this.options.dataRoot, core.verifyDataCompatibility(root, this.options.dataRoot), root)
+        if (await this.updateActivity() !== 'idle') throw Object.assign(new Error('Current activity cannot be confirmed idle'), { code: 'CRABOT_UPDATE_BUSY' })
+        checkSource(); await this.current()
+        record = await maintenance.beginVersionMaintenance(this.options.dataRoot, this.options.coreRoot, prepared.selection.version, this.options.appVersion, { dataProtection: 'scoped' })
+        await maintenance.bindVersionMaintenanceTarget(this.options.dataRoot, record.id, root)
+        this.host.status('stopping', '正在停止共享实例并准备更新所需的数据转换。')
+        await stopInstance(this.options.dataRoot)
+        checkSource()
+        this.host.status('stopped', '共享实例已停止，正在更新数据。')
+        await maintenance.prepareScopedVersionMaintenance(this.options.dataRoot, record.id)
+        await maintenance.markVersionMaintenanceInstalling(this.options.dataRoot, record.id)
+        await maintenance.migrateStoppedVersionMaintenance({ dataDir: this.options.dataRoot, root, id: record.id,
+          migrate: () => core.applyStartupMigrations(root, this.options.dataRoot, { ...process.env,
+            DATA_DIR: this.options.dataRoot, CRABOT_HOME: root, CRABOT_PRODUCT_REQUIRED: '1' }),
+          verifyComplete: async () => { if (!await verifyData()) throw Object.assign(new Error('Target data completion is unconfirmed'), { code: 'CRABOT_MIGRATION_INTERRUPTED' }) } })
+      } finally { releaseCliLock(lock) }
+      this.host.status('stopped', '数据转换已核验，正在提交应用版本；启动保护保持。')
+      const { commitPreparedDesktopPair } = await this.load('scripts/lib/desktop-pair-commit.mjs')
+      return commitPreparedDesktopPair(prepared, { maintenanceId: record.id, verifyData, replaceEntries })
+    }).catch(error => { this.report(error); throw error })
+    this.operation = pending.then(() => {}, () => {}).finally(() => { this.busy-- })
     return pending
   }
   recoverVersion(): Promise<boolean> {

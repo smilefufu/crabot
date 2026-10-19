@@ -208,3 +208,118 @@ for (const code of ['CRABOT_BACKUP_SPACE', 'CRABOT_UPDATE_SPACE', 'ENOSPC']) tes
   assert.equal(state.phase, 'error'); assert.equal(state.code, code)
   assert.match(state.message, /磁盘空间不足/); assert.match(state.message, /保留/); assert.doesNotMatch(state.message, /private/)
 })
+
+async function pairedController(t, failure, commitBarrier) {
+  const root = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'paired-controller-')))
+  const uuid = '11111111-1111-4111-8111-111111111111'
+  const source = { schema_version: 1, version: '1.2.3', gui_id: uuid, core_id: 'a'.repeat(64) }
+  const target = { schema_version: 1, version: '1.2.4', gui_id: '22222222-2222-4222-8222-222222222222', core_id: 'b'.repeat(64) }
+  const sourceRoot = path.join(root, 'releases', source.core_id), targetRoot = path.join(root, 'releases', target.core_id), dataDir = path.join(root, 'data')
+  const prepared = { installRoot: root, installation_id: uuid, source, selection: target, coreRoot: targetRoot,
+    guiRoot: path.join(root, 'app/releases', target.gui_id), proof: { file: path.join(root, 'app/payloads', target.gui_id + '.json'), sha256: 'c'.repeat(64) } }
+  const own = { root, coreRoot: sourceRoot, dataDir, record: { installation_id: uuid }, selection: source }
+  const controller = new DesktopController({ coreRoot: sourceRoot, dataRoot: dataDir, appVersion: source.version, platform: process.platform })
+  t.after(async () => { controller.close(); await fs.rm(root, { recursive: true, force: true }) })
+  const calls = [], imports = []
+  let verified = false, locked = false, record, converted = false, selection = source
+  controller.current = async () => { calls.push('inspect'); return { state: 'stopped', mmAlive: false } }
+  controller.updateActivity = async () => { calls.push('activity'); return failure === 'active' ? 'active' : failure === 'unknown' ? 'unknown' : 'idle' }
+  controller.load = async (file, requestedRoot = sourceRoot) => {
+    imports.push({ file, root: requestedRoot })
+    if (requestedRoot === targetRoot) assert.equal(verified, true, 'target code must not execute before full proof')
+    if (file.endsWith('desktop-pair-preparation.mjs')) return { verifyPreparedDesktopPair: async actual => {
+      calls.push('proof'); assert.equal(actual, prepared)
+      if (failure === 'proof') throw Object.assign(new Error('bad payload'), { code: 'CRABOT_CORE_INTEGRITY' })
+      verified = true
+      return failure === 'source-mismatch' ? { ...own, coreRoot: '/another-source' } : own
+    } }
+    if (file.endsWith('desktop-installation.cjs')) return { default: { readDesktopSelection: () => { calls.push('source'); return { ...own, selection } } } }
+    if (file.endsWith('cli-lock.mjs')) return { acquireCliLock: async actual => {
+      calls.push('lock'); assert.equal(actual, dataDir); locked = true; return 'target-data-lock'
+    }, releaseCliLock: actual => { calls.push('unlock'); assert.equal(actual, 'target-data-lock'); locked = false } }
+    if (file.endsWith('maintenance-backup.mjs')) return { inspectLocalMigrationData: async (actual, pending, core) => {
+      calls.push('preflight'); assert.equal(locked, true); assert.equal(actual, dataDir); assert.deepEqual(pending, []); assert.equal(core, targetRoot)
+      if (failure === 'preflight') throw Object.assign(new Error('uncovered data'), { code: 'CRABOT_BACKUP_SCOPE_UNVERIFIED' })
+    } }
+    if (file.endsWith('instance-controller.mjs')) return { stopInstance: async actual => {
+      calls.push('stop'); assert.equal(locked, true); assert.equal(actual, dataDir)
+      if (failure === 'stop') throw new Error('not stopped')
+      if (failure === 'source-after-stop') selection = { ...source, gui_id: target.gui_id }
+    } }
+    if (file.endsWith('core-preparation.mjs')) return {
+      verifyDataCompatibility: () => failure === 'completion' && converted ? ['not completed'] : [],
+      applyStartupMigrations: async (actualRoot, actualData, env) => {
+        calls.push('run'); assert.equal(locked, true); assert.equal(record.phase, 'verifying')
+        assert.equal(actualRoot, targetRoot); assert.equal(actualData, dataDir)
+        assert.equal(env.DATA_DIR, dataDir); assert.equal(env.CRABOT_HOME, targetRoot); assert.equal(env.CRABOT_PRODUCT_REQUIRED, '1')
+        converted = true
+        if (failure === 'migration') throw Object.assign(new Error('unconfirmed conversion'), { code: 'CRABOT_MIGRATION_INTERRUPTED' })
+      },
+    }
+    if (file.endsWith('upgrade-lib/migrate.mjs')) return { previewMigrations: async () => ({ modules: [], shared: { status: 'ready' } }) }
+    if (file.endsWith('version-maintenance.mjs')) return {
+      beginVersionMaintenance: async (actualData, from, toVersion, fromVersion, options) => {
+        calls.push('begin'); assert.equal(locked, true); assert.equal(actualData, dataDir); assert.equal(from, sourceRoot)
+        assert.equal(toVersion, target.version); assert.equal(fromVersion, source.version); assert.deepEqual(options, { dataProtection: 'scoped' })
+        if (record) throw Object.assign(new Error('pending maintenance'), { code: 'CRABOT_MAINTENANCE_PENDING' })
+        return record = { id: uuid, phase: 'preparing' }
+      }, bindVersionMaintenanceTarget: async (actual, id, core) => { calls.push('bind'); assert.equal(core, targetRoot) },
+      prepareScopedVersionMaintenance: async () => { calls.push('prepare'); record.phase = 'prepared' },
+      markVersionMaintenanceInstalling: async () => { calls.push('installing'); record.phase = 'installing' },
+      migrateStoppedVersionMaintenance: async options => {
+        calls.push('migrate'); record.phase = 'verifying'; await options.migrate(); await options.verifyComplete(); calls.push('migrated')
+      },
+    }
+    if (file.endsWith('desktop-pair-commit.mjs')) return { commitPreparedDesktopPair: async (actual, options) => {
+      calls.push('commit'); assert.equal(locked, false, 'release data before commit acquires root then data')
+      assert.equal(record.phase, 'verifying'); assert.equal(actual, prepared); assert.equal(options.maintenanceId, record.id)
+      if (commitBarrier) await commitBarrier()
+      if (failure === 'commit') throw new Error('pair commit not confirmed')
+      assert.equal(await options.verifyData(), true); await options.replaceEntries(own, prepared)
+      return { executable: path.join(prepared.guiRoot, 'fixture-never-executed'), dataDir }
+    } }
+    throw new Error('Unexpected adapter: ' + file)
+  }
+  return { controller, prepared, calls, imports, targetRoot, record: () => record,
+    run: () => controller.applyPreparedPair(prepared, async () => { calls.push('entries') }) }
+}
+test('paired GUI update verifies before target imports and uses target locked migration without a broad backup or startup', async t => {
+  const f = await pairedController(t)
+  const result = await f.run()
+  assert.ok(result.executable.endsWith('fixture-never-executed'))
+  assert.deepEqual(f.calls, ['proof', 'lock', 'source', 'inspect', 'preflight', 'activity', 'source', 'inspect', 'begin', 'bind', 'stop', 'source', 'prepare', 'installing', 'migrate', 'run', 'migrated', 'unlock', 'commit', 'entries'])
+  assert.equal(f.record().phase, 'verifying')
+  assert.equal(f.controller.host.snapshot().phase, 'stopped')
+  assert.equal(f.imports.find(item => item.file.endsWith('version-maintenance.mjs')).root, f.targetRoot)
+  assert.equal(f.imports.find(item => item.file.endsWith('cli-lock.mjs')).root, f.targetRoot)
+})
+for (const failure of ['proof', 'source-mismatch', 'preflight', 'active', 'unknown', 'stop', 'source-after-stop', 'migration', 'completion', 'commit']) {
+  test('paired GUI update preserves its boundary on failure: ' + failure, async t => {
+    const f = await pairedController(t, failure)
+    await assert.rejects(f.run())
+    assert.equal(f.controller.host.snapshot().phase, 'error')
+    if (['proof', 'source-mismatch', 'preflight', 'active', 'unknown'].includes(failure)) {
+      assert.equal(f.calls.includes('begin'), false); assert.equal(f.calls.includes('stop'), false)
+    }
+    if (['proof', 'source-mismatch'].includes(failure)) assert.equal(f.imports.some(item => item.root === f.targetRoot), false)
+    if (['stop', 'source-after-stop'].includes(failure)) assert.equal(f.calls.includes('migrate'), false)
+    if (['migration', 'completion'].includes(failure)) {
+      assert.equal(f.record().phase, 'verifying'); assert.equal(f.calls.includes('commit'), false)
+      await assert.rejects(f.run()); assert.equal(f.calls.filter(item => item === 'run').length, 1)
+    }
+    if (failure === 'commit') { assert.equal(f.record().phase, 'verifying'); assert.equal(f.calls.includes('entries'), false) }
+  })
+}
+test('paired commit serializes later GUI stop and keeps its watcher suspended until completion', async t => {
+  let entered, release
+  const begun = new Promise(resolve => { entered = resolve }), barrier = new Promise(resolve => { release = resolve })
+  const f = await pairedController(t, undefined, async () => { entered(); await barrier })
+  const updating = f.run(); await begun
+  const stopping = f.controller.stop()
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(f.calls.filter(item => item === 'stop').length, 1)
+  assert.equal(f.controller.busy, 2)
+  release(); await updating; await stopping
+  assert.equal(f.calls.filter(item => item === 'stop').length, 2)
+  assert.ok(f.calls.lastIndexOf('stop') > f.calls.indexOf('entries'))
+})

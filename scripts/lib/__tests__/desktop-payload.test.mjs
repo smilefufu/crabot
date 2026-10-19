@@ -6,12 +6,13 @@ import { tmpdir } from 'node:os'
 import { randomUUID, createHash } from 'node:crypto'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import identity from '../process-identity.cjs'
 import installation from '../desktop-installation.cjs'
 import { writeCoreRelease, verifyCoreRelease } from '../core-release.mjs'
 import { sealDesktopPayload, verifyDesktopPayload, prepareDesktopInstallation, commitDesktopInstallation } from '../desktop-payload.mjs'
 const windows = process.platform === 'win32', launcher = windows ? 'crabot.exe' : 'crabot'
-async function fixture(t, { version = '1.2.3', schema } = {}) {
+async function fixture(t, { version = '1.2.3', schema, functional = false } = {}) {
   const parent = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'Crabot 离线安装 ')))
   t.after(() => fs.rm(parent, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }))
   const payload = path.join(parent, '离线包'), core = path.join(payload, 'core'), gui = path.join(payload, 'gui'), target = path.join(parent, '选择的 目录')
@@ -29,6 +30,29 @@ async function fixture(t, { version = '1.2.3', schema } = {}) {
     await fs.writeFile(path.join(core, 'crabot-fixture/schema_version'), schema)
     await fs.writeFile(path.join(core, 'crabot-fixture/upgrade/scope.mjs'), `if(import.meta.url.includes('.preparing-pair-'))throw new Error('temporary migration path');export const migrationScope=()=>({reads:[],writes:['fixture/content']})`)
     await fs.writeFile(path.join(core, 'crabot-fixture/upgrade/from_v1_to_v2.mjs'), `throw new Error('online preparation must not run scripts')`)
+  }
+  if (functional) {
+    // A finite Node migration fixture, not a full product environment. Other
+    // command slots alias Node and are never executed by this acceptance.
+    for (const name of ['lib', 'upgrade-lib']) {
+      const from = fileURLToPath(new URL('../../../scripts/' + name, import.meta.url))
+      await fs.cp(from, path.join(core, 'scripts', name), { recursive: true,
+        filter: file => !path.relative(from, file).split(path.sep).some(part => ['__tests__', 'node_modules'].includes(part)) })
+    }
+    await fs.mkdir(path.join(core, 'scripts/desktop'), { recursive: true })
+    for (const file of ['legacy-releases.json', 'legacy-python-bootstrap.json']) await fs.copyFile(new URL('../../desktop/' + file, import.meta.url), path.join(core, 'scripts/desktop', file))
+    const native = path.join(core, 'crabot-native/build/Release/crabot-native.node')
+    await fs.mkdir(path.dirname(native), { recursive: true })
+    await fs.copyFile(new URL('../../../crabot-native/build/Release/crabot-native.node', import.meta.url), native)
+    const relativeNode = path.relative(core, node).split(path.sep).join('/'), directory = path.posix.dirname(relativeNode)
+    await fs.writeFile(path.join(core, 'product-runtime.json'), JSON.stringify({ schema_version: 1, version,
+      platform: process.platform, arch: process.arch, versions: { node: process.versions.node, python: '3.12.12' },
+      executables: Object.fromEntries(['node', 'python', 'uv', 'bash', 'git', 'rg'].map(name => [name, relativeNode])),
+      path_entries: [directory], python_home: directory, memory_packages: directory, seed_wheels: [],
+      files: { [relativeNode]: { size: (await fs.stat(node)).size, sha256: createHash('sha256').update(await fs.readFile(node)).digest('hex') } } }))
+    await fs.writeFile(path.join(core, 'crabot-fixture/upgrade/scope.mjs'), `export const migrationScope=()=>({reads:[],writes:['fixture/content','fixture/executions']})`)
+    await fs.writeFile(path.join(core, 'crabot-fixture/upgrade/from_v1_to_v2.mjs'),
+      `import fs from 'node:fs';import path from 'node:path';const root=process.argv.find(arg=>arg.startsWith('--data-dir=')).slice(11);fs.writeFileSync(path.join(root,'content'),'converted by bundled Node');fs.appendFileSync(path.join(root,'executions'),'once\\n');`)
   }
   await writeCoreRelease(core, { schema_version: 1, version, platform: process.platform, arch: process.arch, commit: '1'.repeat(40), source_dirty: false })
   const release = await verifyCoreRelease(core), selection = { schema_version: 1, version, gui_id: randomUUID(), core_id: release.inventory_sha256 }
@@ -393,4 +417,36 @@ test('a GUI-only pair update reuses the selected immutable Core while replacing 
   assert.notEqual(selected.selection.gui_id, f.current.selection.gui_id)
   assert.equal((await fs.stat(f.current.coreRoot, { bigint: true })).ino, before.ino)
   assert.equal(f.maintenance.readVersionMaintenance(f.current.dataDir).phase, 'verifying')
+})
+
+
+test('actual GUI controller runs one scoped Node conversion and commits the stopped pair while retaining protection', { skip: process.env.CRABOT_PAIRED_CONTROLLER_TEST !== '1', timeout: 90_000 }, async t => {
+  const f = await fixture(t, { functional: true, schema: 'v1' })
+  const initial = await prepareDesktopInstallation({ payload: f.payload, installRoot: f.target }), current = await commitDesktopInstallation(initial)
+  await fs.mkdir(path.join(current.dataDir, 'fixture'))
+  await fs.writeFile(path.join(current.dataDir, 'fixture/SCHEMA_VERSION'), 'v1')
+  await fs.writeFile(path.join(current.dataDir, 'fixture/content'), 'before')
+  const next = await fixture(t, { version: '1.2.4', functional: true, schema: 'v2' })
+  const { prepareDesktopPair } = await import('../desktop-pair-preparation.mjs')
+  const prepared = await prepareDesktopPair({ payload: next.payload, installRoot: f.target })
+  // Explicitly run after desktop TypeScript compilation; the earlier generic
+  // runtime stage does not have dist/controller.js on a clean checkout.
+  // Target native DLLs are loaded in this child, which exits before Windows
+  // cleanup. No MM, GUI, model or system registration is started here.
+  const module = pathToFileURL(fileURLToPath(new URL('../../../crabot-desktop/dist/controller.js', import.meta.url))).href
+  const code = `import {DesktopController} from ${JSON.stringify(module)};const [prepared,current]=JSON.parse(process.argv[1]);const c=new DesktopController({coreRoot:current.coreRoot,dataRoot:current.dataDir,appVersion:current.selection.version,platform:process.platform});c.host.status('stopped');let entries=0;try{const selected=await c.applyPreparedPair(prepared,async()=>{entries++});console.log('PAIRED_CONTROLLER '+JSON.stringify({entries,phase:c.host.snapshot().phase,dataDir:selected.dataDir}));}finally{c.close()}`
+  const result = await promisify(execFile)(process.execPath, ['--input-type=module', '-e', code, JSON.stringify([prepared, current])],
+    { env: { ...process.env, PATH: '' }, timeout: 45_000, maxBuffer: 64 * 1024 })
+  const evidence = JSON.parse(result.stdout.split('\n').find(line => line.startsWith('PAIRED_CONTROLLER ')).slice('PAIRED_CONTROLLER '.length))
+  assert.deepEqual(evidence, { entries: 1, phase: 'stopped', dataDir: current.dataDir })
+  assert.deepEqual(installation.readDesktopSelection(f.target).selection, prepared.selection)
+  assert.equal(await fs.readFile(path.join(current.dataDir, 'fixture/content'), 'utf8'), 'converted by bundled Node')
+  assert.equal(await fs.readFile(path.join(current.dataDir, 'fixture/SCHEMA_VERSION'), 'utf8'), 'v2\n')
+  assert.equal(await fs.readFile(path.join(current.dataDir, 'fixture/executions'), 'utf8'), 'once\n')
+  const base = path.join(current.dataDir, '.upgrade-migrations/crabot-fixture-v1-v2')
+  assert.equal(await fs.readFile(path.join(base, 'backup/fixture/content'), 'utf8'), 'before')
+  assert.equal(JSON.parse(await fs.readFile(path.join(base, 'state.json'), 'utf8')).phase, 'completed')
+  assert.equal(JSON.parse(await fs.readFile(path.join(current.dataDir, 'desktop-maintenance.json'), 'utf8')).phase, 'verifying')
+  await assert.rejects(fs.stat(current.dataDir + '.desktop-backups'), { code: 'ENOENT' })
+  await assert.rejects(fs.stat(path.join(current.dataDir, 'mm.pid')), { code: 'ENOENT' })
 })

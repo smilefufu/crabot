@@ -1,18 +1,17 @@
 // Only the final stopped pair selection. The surrounding desktop coordinator owns data
 // migration, source GUI handoff and verified target startup/health.
 import path from 'node:path'
-import { createHash, randomUUID } from 'node:crypto'
+import { randomUUID } from 'node:crypto'
 import physicalFs from './physical-fs.cjs'
 import identity from './process-identity.cjs'
 import management from './desktop-management.cjs'
 import installation from './desktop-installation.cjs'
-import { verifyDesktopPrograms } from './desktop-payload.mjs'
+import { verifyPreparedDesktopPair } from './desktop-pair-preparation.mjs'
 import { readVersionMaintenance } from './version-maintenance.mjs'
 import { acquireCliLock, releaseCliLock, cliLockToken } from './cli-lock.mjs'
 import { assertStopped } from '../upgrade-lib/scoped-data.mjs'
 const { promises: fs } = physicalFs
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b)
-const digest = bytes => createHash('sha256').update(bytes).digest('hex')
 const fail = () => { throw Object.assign(new Error('版本对提交无法核验，原程序、数据与维护记录已保留。'), { code: 'CRABOT_DESKTOP_INSTALLATION' }) }
 function pair(value) {
   if (value?.schema_version !== 1 || Object.keys(value).join(',') !== 'schema_version,version,gui_id,core_id'
@@ -68,12 +67,7 @@ export async function commitPreparedDesktopPair(prepared, { maintenanceId, verif
     const verify = async () => {
       selectedState()
       await assertStopped(own.dataDir)
-      management.requirePrivateDataRoot(path.dirname(prepared.proof.file))
-      const proof = await privateText(prepared.proof.file)
-      if (digest(proof) !== prepared.proof.sha256) fail()
-      const record = JSON.parse(proof)
-      if (!same(record.selection, prepared.selection)) fail()
-      await verifyDesktopPrograms(prepared.coreRoot, prepared.guiRoot, record)
+      await verifyPreparedDesktopPair(prepared)
       if (await verifyData() !== true) fail()
       await assertStopped(own.dataDir)
       return selectedState()
