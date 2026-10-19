@@ -11,7 +11,12 @@ import { readInstanceRuntime, inspectInstance, clearInstanceRuntime, identity } 
 import { stopInstance } from '../instance-controller.mjs'
 
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms))
-async function fixture(t, delay = 100, registrationDelay = 0) {
+async function settleClose(closed, milliseconds) {
+  let timer
+  try { await Promise.race([closed, new Promise(resolve => { timer = setTimeout(resolve, milliseconds) })]) }
+  finally { clearTimeout(timer) }
+}
+async function fixture(t, delay = 100, registrationDelay = 0, { forceRegistrationFailure = false } = {}) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'crabot-instance-中文 space-')))
   const data = join(root, 'data'), marker = join(root, 'stopped'), ready = join(root, 'ready')
   mkdirSync(join(root, 'crabot-core', 'dist'), { recursive: true }); mkdirSync(data)
@@ -21,11 +26,11 @@ async function fixture(t, delay = 100, registrationDelay = 0) {
   const probe = createServer().listen(0, '127.0.0.1'); await once(probe, 'listening')
   const port = probe.address().port; await new Promise(resolve => probe.close(resolve))
   const child = spawn(process.execPath, [fileURLToPath(new URL('./fixtures/managed-core.mjs', import.meta.url))], {
-    env: { ...process.env, TEST_CORE_ROOT: root, TEST_DATA_DIR: data, TEST_PORT: String(port), TEST_MARKER: marker, TEST_READY: ready, TEST_STOP_DELAY: String(delay), TEST_REGISTER_DELAY: String(registrationDelay) },
+    env: { ...process.env, TEST_CORE_ROOT: root, TEST_DATA_DIR: data, TEST_PORT: String(port), TEST_MARKER: marker, TEST_READY: ready, TEST_STOP_DELAY: String(delay), TEST_REGISTER_DELAY: String(registrationDelay), TEST_IDENTITY_REPORT: join(root, 'identity-report.json'), TEST_FORCE_REGISTRATION_FAILURE: forceRegistrationFailure ? '1' : '' },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
   let output = ''; child.stdout.on('data', chunk => { output += chunk }); child.stderr.on('data', chunk => { output += chunk })
-  const exited = once(child, 'exit')
+  const exited = once(child, 'exit'), closed = once(child, 'close').catch(() => {})
   t.after(async () => {
     // Only fixture-owned identities are eligible for cleanup; production is never addressed.
     let record
@@ -33,12 +38,18 @@ async function fixture(t, delay = 100, registrationDelay = 0) {
     if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
     if (record?.mm && identity.sameProcess(record.mm, identity.inspectProcess(record.mm.pid))) process.kill(record.mm.pid, 'SIGKILL')
     await exited.catch(() => {})
+    await settleClose(closed, 3000)
     rmSync(root, { recursive: true, force: true })
   })
   const deadline = Date.now() + 10_000
   let record
   while (!existsSync(ready) || !(record = readInstanceRuntime(data))?.mm) {
-    if (child.exitCode !== null || Date.now() > deadline) throw new Error('Fixture failed: ' + output)
+    if (child.exitCode !== null || child.signalCode !== null || Date.now() > deadline) {
+      if (child.exitCode !== null || child.signalCode !== null) await settleClose(closed, 1000)
+      const read = name => { try { return JSON.parse(readFileSync(join(root, name), 'utf8')) } catch { return null } }
+      throw new Error('Fixture failed: ' + JSON.stringify({ exit_code: child.exitCode, signal: child.signalCode, ready: existsSync(ready),
+        identity: read('identity-report.json'), runtime: read('instance-runtime.json'), output: output.slice(-6000) }))
+    }
     await pause(25)
   }
   return { root, data, marker, child, exited, record, snapshot: () => {
@@ -153,4 +164,13 @@ test('shutdown keeps the full MM window, exceeding the old Unix 15 second deadli
     assert.ok(Date.now() - start >= 15_900)
     assert.equal(readFileSync(f.marker, 'utf8'), 'graceful')
   } finally { t.signal.removeEventListener('abort', report) }
+})
+
+
+test('failed startup fixture reports the exit and identity evidence before cleaning its own processes', async t => {
+  await assert.rejects(fixture(t, 100, 0, { forceRegistrationFailure: true }), error => {
+    assert.match(error.message, /"exit_code":1/)
+    assert.match(error.message, /"forced":true/)
+    return true
+  })
 })
