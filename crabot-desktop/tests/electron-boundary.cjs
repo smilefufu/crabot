@@ -165,11 +165,19 @@ async function main() {
   }
   await waitFor('document.body.textContent.includes("让 Crabot 准备好为你工作") && document.body.textContent.includes("添加模型服务")')
   const evidence = path.join(__dirname, '../../.desktop-build'); await fs.mkdir(evidence, { recursive: true })
-  await fs.writeFile(path.join(evidence, `welcome-${process.platform}-${process.arch}.png`), (await trusted.webContents.capturePage()).toPNG())
+  async function captureFixturePage(name) {
+    console.log('CRABOT_ELECTRON_CAPTURE ' + name + ' starting')
+    await trusted.webContents.executeJavaScript('document.fonts.ready.then(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))))')
+    const image = await trusted.webContents.capturePage()
+    assert.equal(image.isEmpty(), false, name + ': captured image must contain pixels')
+    await fs.writeFile(path.join(evidence, `${name}-${process.platform}-${process.arch}.png`), image.toPNG())
+    console.log('CRABOT_ELECTRON_CAPTURE ' + name + ' saved')
+  }
+  await captureFixturePage('welcome')
   nativeTheme.themeSource = 'light'
   await waitFor('matchMedia("(prefers-color-scheme: light)").matches')
   await trusted.webContents.executeJavaScript('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))')
-  await fs.writeFile(path.join(evidence, `welcome-light-${process.platform}-${process.arch}.png`), (await trusted.webContents.capturePage()).toPNG())
+  await captureFixturePage('welcome-light')
   await trusted.webContents.executeJavaScript('Array.from(document.querySelectorAll("a")).find(link=>link.textContent.includes("稍后设置")).click()')
   await waitFor('!!document.querySelector("textarea") && !document.querySelector("textarea").disabled')
   await trusted.webContents.executeJavaScript('document.querySelector("textarea").focus()')
@@ -184,7 +192,7 @@ async function main() {
   await trusted.webContents.executeJavaScript('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))')
   assert.equal(await trusted.webContents.executeJavaScript('document.querySelector("textarea").value'), '断线后保留的中文草稿')
   assert.equal(await trusted.webContents.executeJavaScript('localStorage.getItem("crabot_admin_token")'), null)
-  await fs.writeFile(path.join(evidence, `chat-${process.platform}-${process.arch}.png`), (await trusted.webContents.capturePage()).toPNG())
+  await captureFixturePage('chat')
   await trusted.webContents.executeJavaScript(`document.querySelector('a[href="/desktop/diagnostics"]').click()`)
   await waitFor('document.body.textContent.includes("报告时间")')
   await trusted.webContents.executeJavaScript('Array.from(document.querySelectorAll("button")).find(button=>button.textContent==="导出基础诊断").click()')
@@ -203,7 +211,7 @@ async function main() {
   assert.equal(await helpRequest, 'https://github.com/smilefufu/crabot-docs/blob/main/guides/desktop-usage.md')
   await waitFor('document.body.textContent.includes("内置运行文件未通过校验") && !!Array.from(document.querySelector(".desktop-status .desktop-diagnostics").querySelectorAll("button")).find(button=>button.textContent==="重新检查" && !button.disabled)')
   await trusted.webContents.executeJavaScript('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))')
-  await fs.writeFile(path.join(evidence, `diagnostics-${process.platform}-${process.arch}.png`), (await trusted.webContents.capturePage()).toPNG())
+  await captureFixturePage('diagnostics')
   console.log('CRABOT_ELECTRON_BOUNDARY ' + JSON.stringify({ electron: process.versions.electron, node: process.versions.node,
     sandbox: true, isolated_preload: true, current_frame_ipc: true, direct_http_header: true, direct_ws_header: true,
     foreign_frame_denied: true, redirect_token_absent: true, isolated_artifact_preview: true, built_react_app: true, reconnect_keeps_draft: true, independent_diagnostics: true, repair_help_ipc: true }))

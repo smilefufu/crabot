@@ -22,7 +22,7 @@ test('migration binding inspection is read-only, includes hidden dependencies, a
   assert.deepEqual(result.issues, []); assert.equal(result.files, 1); assert.equal(result.links, 1)
   assert.match(result.fingerprint, /^[a-f0-9]{64}$/)
   assert.deepEqual(await inspectWorkspaceRelocationTree(source, 'copy'), result)
-  assert.equal(await fs.readlink(path.join(source, 'relative-link')), 'node_modules/dependency')
+  assert.equal(path.normalize(await fs.readlink(path.join(source, 'relative-link'))), path.join('node_modules', 'dependency'))
   assert.equal(await fs.readFile(path.join(source, 'node_modules/dependency'), 'utf8'), 'kept dependency')
 })
 test('known absolute/escaping links, linked Git layouts and Python venvs are reported before any move', async t => {
