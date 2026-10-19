@@ -8,6 +8,7 @@ import product from './product-runtime.cjs'
 import management from './desktop-management.cjs'
 import cliLocation from './cli-location.cjs'
 import { assertLocalMigrationData } from './maintenance-backup.mjs'
+import { assertWorkspaceDataCompatibility } from './workspace-data-compat.mjs'
 import { readVersionMaintenance, assertVersionMaintenanceAllowsStart } from './version-maintenance.mjs'
 
 // Common preparation only: no password prompt, TTY, GUI, lifecycle lock or model calls.
@@ -55,6 +56,7 @@ export async function applyStartupMigrations(root, dataDir, env, log = () => {},
 }
 
 export function verifyDataCompatibility(root, dataDir) {
+  assertWorkspaceDataCompatibility(root, dataDir)
   const pending = scanModules(root, dataDir)
   // Preflight the whole version set before the first module can mutate data.
   // A rollback cannot turn a newer schema into an older one by relabelling it.
