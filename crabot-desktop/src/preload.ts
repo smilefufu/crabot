@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import { DesktopDiagnosticsSchema, DesktopHostStateSchema, z, type DesktopBridge } from 'crabot-client'
+import { DesktopDiagnosticsSchema, DesktopHostStateSchema, WorkspaceIdSchema, z, type DesktopBridge } from 'crabot-client'
 
 const stateCall = async (channel: string) => DesktopHostStateSchema.parse(await ipcRenderer.invoke(channel))
 const booleanCall = async (channel: string, value?: unknown) => z.boolean().parse(await ipcRenderer.invoke(channel, value))
@@ -21,6 +21,7 @@ const bridge: DesktopBridge = {
   openUpdateDialog: () => booleanCall('desktop:open-update'),
   openExternal: value => booleanCall('desktop:open-external', z.string().max(4096).parse(value)),
   revealDataFolder: () => booleanCall('desktop:reveal-data'),
+  revealWorkspaceFolder: id => booleanCall('desktop:reveal-workspace', WorkspaceIdSchema.parse(id)),
   getDiagnostics: async () => DesktopDiagnosticsSchema.parse(await ipcRenderer.invoke('desktop:diagnostics')),
   exportDiagnostics: id => booleanCall('desktop:export-diagnostics', z.uuid().parse(id)),
 }

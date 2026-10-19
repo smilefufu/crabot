@@ -1,3 +1,4 @@
+import { revealWorkspaceFolder } from './workspace-folder.js'
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, protocol, session, shell, Tray } from 'electron'
 import path from 'node:path'
 import { homedir } from 'node:os'
@@ -100,6 +101,7 @@ async function boot() {
   registerDesktopIpc({ ipc: ipcMain, contents: () => window?.webContents, controller, quit, diagnostics,
     openUpdateDialog: () => updates!.open(),
     openExternal: url => shell.openExternal(url), revealData: async () => !(await shell.openPath(dataRoot)),
+    revealWorkspace: id => revealWorkspaceFolder(controller!.host, id, value => shell.openPath(value)),
     exportDiagnostics: async id => {
       const report = reports.get(id)
       if (!report) return false

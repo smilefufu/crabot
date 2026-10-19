@@ -6,6 +6,7 @@ import { MainLayout } from '../components/Layout/MainLayout'
 import { Button } from '../components/Common/Button'
 import { Card } from '../components/Common/Card'
 import { getWebClient } from '../services/api'
+import { desktopBridge } from '../services/desktop-host'
 import { serverQueries, useServerScope } from '../services/server-state'
 import './Workspaces.css'
 
@@ -54,6 +55,13 @@ function WorkspaceDetails({ item, revision, client, refresh, onSaved }: {
   item: WorkspaceSummary; revision: number; client: WorkspaceClient; refresh(id: string): void; onSaved(): void
 }) {
   const { workspace, usage, execution } = item
+  const [opening, setOpening] = useState(false), [openError, setOpenError] = useState('')
+  async function openFolder() {
+    setOpening(true); setOpenError('')
+    try { if (!await desktopBridge?.revealWorkspaceFolder(workspace.workspace_id)) setOpenError('目录暂时无法打开，请刷新状态并检查目录是否可用。') }
+    catch { setOpenError('目录暂时无法打开，请刷新状态后重试。') }
+    finally { setOpening(false) }
+  }
   let executionLabel = '待核实'
   if (execution.status === 'running') executionLabel = '正在执行'
   else if (execution.status === 'idle') executionLabel = '当前空闲'
@@ -71,6 +79,8 @@ function WorkspaceDetails({ item, revision, client, refresh, onSaved }: {
       <dt>最近使用</dt><dd>{workspace.last_used_at ? new Date(workspace.last_used_at).toLocaleString() : '未知'}</dd>
     </dl>
     <p className="workspace-note">路径位于运行 Crabot 的电脑或服务器。空间是带时间的估算，可能包含共享数据块；不等于删除后可释放的空间。</p>
+    {desktopBridge?.revealWorkspaceFolder && <Button variant="secondary" disabled={opening || item.directory_status !== 'ready'} onClick={() => void openFolder()}>在文件管理器打开</Button>}
+    {openError && <p role="alert">{openError}</p>}
     <p><Link to={`/traces?tab=workers&workspace_id=${encodeURIComponent(workspace.workspace_id)}`}>查看关联执行器（含历史）</Link></p>
     <Button variant="secondary" disabled={usage.status === 'measuring' || item.directory_status !== 'ready'} onClick={() => refresh(workspace.workspace_id)}>刷新空间统计</Button>
     {workspace.kind === 'project' && <WorkspaceEditor key={workspace.workspace_id} client={client} record={workspace} initialRevision={revision} onSaved={onSaved} />}

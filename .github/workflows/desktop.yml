@@ -137,7 +137,7 @@ jobs:
         run: |
           node node_modules/typescript/bin/tsc -p tsconfig.json
           node build-preload.mjs
-          node --test tests/desktop-disk.test.mjs tests/desktop-resources.test.mjs tests/first-model-fixture.test.mjs tests/full-host-control.test.mjs tests/desktop-network.test.mjs tests/artifact-network.test.mjs tests/session-host.test.mjs tests/diagnostics.test.mjs tests/login-startup.test.mjs tests/controller.test.mjs tests/update-dialog.test.mjs tests/update-package.test.mjs
+          node --test tests/workspace-folder.test.mjs tests/desktop-disk.test.mjs tests/desktop-resources.test.mjs tests/first-model-fixture.test.mjs tests/full-host-control.test.mjs tests/desktop-network.test.mjs tests/artifact-network.test.mjs tests/session-host.test.mjs tests/diagnostics.test.mjs tests/login-startup.test.mjs tests/controller.test.mjs tests/update-dialog.test.mjs tests/update-package.test.mjs
       - name: Interrupted migration retains data and refuses automatic replay
         run: node .github/scripts/smoke-migration-interruption.mjs 2>&1 | tee .desktop-build/migration-interruption.log
       - name: Real sandboxed Electron window boundaries on Linux

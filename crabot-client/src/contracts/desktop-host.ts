@@ -32,6 +32,7 @@ export interface DesktopBridge {
   openUpdateDialog(): Promise<boolean>
   openExternal(url: string): Promise<boolean>
   revealDataFolder(): Promise<boolean>
+  revealWorkspaceFolder(workspace_id: string): Promise<boolean>
   getDiagnostics(): Promise<DesktopDiagnostics>
   exportDiagnostics(report_id: string): Promise<boolean>
 }
