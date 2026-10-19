@@ -3,6 +3,7 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import os from 'node:os'
 import { randomUUID } from 'node:crypto'
+import { parse as parseToml, stringify as stringifyToml } from 'smol-toml'
 import { WorkspaceManager } from '../../src/workers/harness/workspace-manager.js'
 import { ClaudeCodeAdapter } from '../../src/workers/claude-code/adapter.js'
 import { CodexWorkerAdapter } from '../../src/workers/codex/adapter.js'
@@ -57,10 +58,21 @@ it.each(['claude', 'codex'] as const)('%s uses the same verified private profile
     const primary = await first.spawn({ worker_id: workerId, prompt: 'first task', workspace })
     expect(primary.initial_input?.disposition).toBe('accepted')
     await first.kill(primary)
+    if (impl === 'codex') {
+      const file = path.join(workspace.runtime_root!, '.codex/config.toml')
+      const config = parseToml(await fs.readFile(file, 'utf8'))
+      config.notify = ['obsolete-core-notify']
+      await fs.writeFile(file, stringifyToml(config))
+    }
     await first.dispose()
     const resumed = await restarted.resume(primary, 'continue task', { workspace })
     expect(resumed.seq).toBe(2)
     expect(resumed.initial_input?.disposition).toBe('accepted')
+    if (impl === 'codex') {
+      const config = parseToml(await fs.readFile(path.join(workspace.runtime_root!, '.codex/config.toml'), 'utf8'))
+      expect(config.notify).not.toEqual(['obsolete-core-notify'])
+      expect(JSON.stringify(config.notify)).toContain('events-cli.jsonl')
+    }
     for (const launch of tmux.launches) {
       expect(launch.cwd).toBe(project)
       expect(launch.env![EVENTS_FILE_ENV]?.startsWith(workspace.runtime_root!)).toBe(true)

@@ -30,6 +30,7 @@ import { randomUUID } from 'crypto'
 import { homedir, tmpdir } from 'os'
 import { execFile } from 'child_process'
 import { buildChildEnv } from '../../core/runtime-env.js'
+import { resolveBashPath, BASH_NOT_FOUND_MESSAGE } from '../../utils/resolve-bash-path.js'
 import { connectionCapabilitiesFor } from '../connections/registry.js'
 import { promisify } from 'util'
 import { TmuxDriver, type PaneSnapshot } from '../tmux/driver.js'
@@ -140,6 +141,12 @@ function stripUntrustedCodexHookSources(config: Record<string, unknown>): void {
   delete config.allow_managed_hooks_only
 }
 
+function generatedCodexNotify(channel: CliEventChannel): string[] {
+  const bash = resolveBashPath()
+  if (!bash) throw new Error(BASH_NOT_FOUND_MESSAGE)
+  return [bash, '-c', `(${channel.hookCommand('stop')}) </dev/null`]
+}
+
 function generatedCodexPermissionRequestHooks(command: string): Record<string, unknown> {
   return {
     PermissionRequest: [{
@@ -175,6 +182,7 @@ async function installGeneratedCodexHookConfiguration(
   // 没有该段的配置，也不会让 worker 或 Codex 自己留下的 hook state 进入自动信任范围。
   stripUntrustedCodexHookSources(config)
   config.features = { ...asTable(config.features), hooks: true }
+  config.notify = generatedCodexNotify(channel)
   config.hooks = generatedCodexPermissionRequestHooks(channel.hookCommand('permission_request'))
   try {
     await fs.mkdir(codexDir, { recursive: true })
@@ -798,6 +806,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
   async preflightProvision(ws: Workspace, _caps: CapabilityBundle, connectionEnv?: Record<string, string>): Promise<void> {
     this.assertActive()
     await verifyPrivateNativeRuntime(ws)
+    if (!resolveBashPath()) throw new Error(BASH_NOT_FOUND_MESSAGE)
     if (ws.runtime_root) {
       const profile = join(nativeRuntimeRoot(ws), '.codex')
       // Before the first provision there is no private config yet. The source supplies only root-marker policy.
@@ -830,7 +839,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     // payload 落在 shell 的 $0 上。Stop 事件只需要 turn 边界标记,不解析这个 argv payload;
     // Claude Code hook 则由 stdin 接收并记录原始 JSON。Codex notify 的 stdin 必须显式关闭,
     // 否则 hook 会从 pane pty 读取并与 TUI 争抢输入。
-    const notify = ['/bin/sh', '-c', `(${channel.hookCommand('stop')}) </dev/null`]
+    const notify = generatedCodexNotify(channel)
 
     // codex 源码里交互式 TUI 判断"是否受信目录"的真实机制是 config.toml 的
     // [projects."<绝对路径>"] 表 + trust_level = "trusted"(取代不存在的 --skip-git-repo-check

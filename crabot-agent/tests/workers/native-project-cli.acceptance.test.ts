@@ -32,7 +32,7 @@ async function bothExecutors(operation: (marker: string) => Promise<Workspace>):
 
 // Opt-in real native CLI; no business MM, remote provider or user credential is used.
 it.skipIf(!process.env.CRABOT_TEST_CODEX_BIN)('real Codex loads two private MCP profiles in one shared project and writes separate native turn events', async () => {
-  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'native-project-cli-中文 space-')))
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "native-project-cli-中文 ' $space-")))
   cleanup.push(() => fs.rm(root, { recursive: true, force: true }))
   const data = path.join(root, 'data'), project = path.join(root, 'project'), home = path.join(root, 'home'), base = path.join(root, 'base')
   for (const directory of [data, project, home, base]) await fs.mkdir(directory)
@@ -98,7 +98,7 @@ it.skipIf(!process.env.CRABOT_TEST_CODEX_BIN)('real Codex loads two private MCP 
     expect(result.stdout, JSON.stringify({ stderr: result.stderr, evidence })).toContain('Private profile verified.')
     expect(await fs.readFile(markerFile, 'utf8')).toBe(marker + '\n')
     const events = await nativeEventChannel(workspace, '.codex').readAll()
-    expect(events.some(event => event.kind === 'stop')).toBe(true)
+    expect(events.some(event => event.kind === 'stop'), JSON.stringify({ stderr: result.stderr, marker })).toBe(true)
     return workspace
   })
   expect(profiles[0].workspace_id).toBe(profiles[1].workspace_id)
@@ -109,7 +109,7 @@ it.skipIf(!process.env.CRABOT_TEST_CODEX_BIN)('real Codex loads two private MCP 
 }, 100_000)
 
 it.skipIf(!process.env.CRABOT_TEST_CLAUDE_BIN)('real Claude Code uses private MCP settings and Stop hooks for two executors in one project', async () => {
-  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'native-claude-project-中文 space-')))
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "native-claude-project-中文 ' $space-")))
   cleanup.push(() => fs.rm(root, { recursive: true, force: true }))
   const data = path.join(root, 'data'), project = path.join(root, 'project'), home = path.join(root, 'home')
   for (const directory of [data, project, home]) await fs.mkdir(directory)

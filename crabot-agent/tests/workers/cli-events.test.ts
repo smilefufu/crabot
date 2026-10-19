@@ -4,7 +4,7 @@ import { promisify } from 'node:util'
 import * as fs from 'node:fs/promises'
 import * as os from 'node:os'
 import * as path from 'node:path'
-import { CliEventChannel, type CliEvent } from '../../src/workers/cli-events.js'
+import { CliEventChannel, EVENTS_FILE_ENV, type CliEvent } from '../../src/workers/cli-events.js'
 
 const execFileAsync = promisify(execFile)
 
@@ -49,6 +49,19 @@ describe('CliEventChannel', () => {
     expect(typeof events[0].ts).toBe('string')
     // ts should be a valid ISO-8601 UTC timestamp
     expect(events[0].ts).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/)
+  })
+
+  it.skipIf(process.platform === 'win32')('quoted and dollar-containing paths work in POSIX sh and Bash, including private redirection', async () => {
+    const special = path.join(tempDir, "quotes ' $dollar")
+    await fs.mkdir(special)
+    for (const [index, shell] of ['/bin/sh', '/bin/bash'].entries()) {
+      const original = path.join(special, `original-${index}.jsonl`), redirected = path.join(special, `fork-${index}.jsonl`)
+      const channel = new CliEventChannel(original, 'crabot_cli_hook:quoted-worker')
+      await execFileAsync(shell, ['-c', `(${channel.hookCommand('stop')}) </dev/null`], { env: { ...process.env, [EVENTS_FILE_ENV]: '' } })
+      await execFileAsync(shell, ['-c', `(${channel.hookCommand('notification')}) </dev/null`], { env: { ...process.env, [EVENTS_FILE_ENV]: redirected } })
+      expect((await channel.readAll()).map(event => event.kind)).toEqual(['stop'])
+      expect((await new CliEventChannel(redirected, 'crabot_cli_hook:quoted-worker').readAll()).map(event => event.kind)).toEqual(['notification'])
+    }
   })
 
   it('hookCommand 对不同 kind 各自产出可解析的独立事件', async () => {

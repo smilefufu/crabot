@@ -10,6 +10,7 @@ import { ForkEstablishmentError } from '../../src/workers/errors.js'
 import { TmuxDriver, type TmuxSessionSpec } from '../../src/workers/tmux/driver.js'
 import type { TmuxControlEndpoint } from '../../src/workers/tmux/control-monitor.js'
 import { CliEventChannel } from '../../src/workers/cli-events.js'
+import { resolveBashPath } from '../../src/utils/resolve-bash-path.js'
 import {
   createTmpPageMcpServerConfig,
   TMP_PAGE_BRIDGE_ENV,
@@ -428,7 +429,7 @@ describe('CodexWorkerAdapter.provision', () => {
 
       // notify:数组形式的程序契约,且指向本 workspace 的事件文件
       expect(Array.isArray(parsed.notify)).toBe(true)
-      expect(parsed.notify[0]).toBe('/bin/sh')
+      expect(parsed.notify[0]).toBe(resolveBashPath())
       expect(parsed.notify.join(' ')).toContain('events-cli.jsonl')
       expect(parsed.notify[2]).toContain('</dev/null')
 
