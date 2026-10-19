@@ -157,6 +157,7 @@ export interface ManagerRegistryDeps {
   readonly now: () => Date
   /** Once true, no new wake may create or enqueue work for a Manager episode. */
   readonly isClosing?: () => boolean
+  readonly assertExecutionAdmission?: () => void
   /** 仅用于计算当前事项期限，不缓存或注入任务板正文。 */
   readonly readCurrentWorkboard: (key: ManagerKey) => Promise<ManagerWorkboard>
   /** 人类消息渲染的时区(见 `ManagerLoopDeps.timezone`);不注入则退回 `resolveTimezone(undefined)`。 */
@@ -1462,6 +1463,7 @@ export class ManagerRegistry {
 
   private assertWakeAdmission(): void {
     if (this.disposed || this.deps.isClosing?.()) throw new Error('AGENT_SHUTTING_DOWN')
+    this.deps.assertExecutionAdmission?.()
   }
 
   private hasWakePreparation(key: ManagerKey): boolean {

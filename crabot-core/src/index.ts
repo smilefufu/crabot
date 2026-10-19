@@ -24,6 +24,7 @@ import {
   type RegisterParams,
   type SubscribeParams,
   type PublishEventParams,
+  assertWorkspaceExecutionAllowed,
   generateId,
   generateTimestamp,
   createSuccessResponse,
@@ -573,6 +574,10 @@ export class ModuleManager {
     }
   }
 
+  private assertWorkspaceStartAllowed(moduleId: ModuleId): void {
+    if (moduleId !== 'admin-web') assertWorkspaceExecutionAllowed(this.dataDir)
+  }
+
   private assertManagementOnlyAllowed(moduleId: ModuleId): void {
     if (!this.managementOnly || moduleId === 'admin-web') return
     throw Object.assign(new Error('Module Manager is in management-only cutover mode'), { code: 'MODULE_MANAGER_CUTOVER_INCOMPLETE' })
@@ -736,6 +741,7 @@ export class ModuleManager {
     this.assertManagementOnlyAllowed(params.module_id)
     this.assertAgentLifecycleAllowed(params.module_id)
     this.assertCoreLifecycleInput(params.module_id, params.entry_override, params.env)
+    this.assertWorkspaceStartAllowed(params.module_id)
     const trackingId = generateId()
     this.cancelAutoRestart(params.module_id)
 
@@ -781,6 +787,7 @@ export class ModuleManager {
     this.assertManagementOnlyAllowed(params.module_id)
     this.assertAgentLifecycleAllowed(params.module_id)
     this.assertCoreLifecycleInput(params.module_id, undefined, params.env)
+    this.assertWorkspaceStartAllowed(params.module_id)
     const trackingId = generateId()
     this.revokeRuntimeBearer(params.module_id)
     this.cancelAutoRestart(params.module_id)
@@ -1118,6 +1125,7 @@ export class ModuleManager {
     this.assertManagementOnlyAllowed(moduleId)
     this.assertAgentLifecycleAllowed(moduleId)
     this.assertCoreLifecycleInput(moduleId, entryOverride, envOverride)
+    this.assertWorkspaceStartAllowed(moduleId)
     const runtime = this.modules.get(moduleId)
     if (!runtime) {
       throw new Error(`Module definition not found: ${moduleId}`)
@@ -1134,6 +1142,7 @@ export class ModuleManager {
       }
     }
 
+    this.assertWorkspaceStartAllowed(moduleId)
     if (runtime.status === 'running' || runtime.status === 'starting') {
       throw new Error(`Module already running: ${moduleId}`)
     }
@@ -1169,6 +1178,7 @@ export class ModuleManager {
       }
       if (result.kind === 'allow_first_install') {
         const { mkdirSync, writeFileSync } = await import('node:fs')
+        this.assertWorkspaceStartAllowed(moduleId)
         mkdirSync(runtime.data_dir, { recursive: true })
         writeFileSync(`${runtime.data_dir}/SCHEMA_VERSION`, `${result.writeVersion}\n`)
         console.log(`[ModuleManager] ${moduleId}: wrote initial SCHEMA_VERSION = ${result.writeVersion}`)
@@ -1179,6 +1189,7 @@ export class ModuleManager {
       throw new Error(`Module Manager is shutting down; refusing to spawn ${moduleId}`)
     }
 
+    this.assertWorkspaceStartAllowed(moduleId)
     runtime.status = 'starting'
     runtime.health_check_failures = 0
 

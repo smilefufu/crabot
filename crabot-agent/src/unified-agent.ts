@@ -21,7 +21,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { tmpdir } from 'node:os'
 import { createHash } from 'node:crypto'
-import { ModuleBase, RpcError, generateId, sha256CanonicalJson, type AgentCliExecutionRef, type ModuleConfig, type Event, type ModuleId } from 'crabot-shared'
+import { assertWorkspaceExecutionAllowed, ModuleBase, RpcError, generateId, sha256CanonicalJson, type AgentCliExecutionRef, type ModuleConfig, type Event, type ModuleId } from 'crabot-shared'
 import { resolveTimezone } from './utils/time.js'
 import type {
   UnifiedAgentConfig,
@@ -983,6 +983,7 @@ export class UnifiedAgent extends ModuleBase {
   /** Central admission for every new runtime-config-dependent execution. */
   private assertRuntimeExecutionAdmission(): void {
     if (this.runtimeClosing) throw new Error('AGENT_SHUTTING_DOWN')
+    assertWorkspaceExecutionAllowed(getDataRootDir())
     if (!this.configAuthenticated || this.configStale) throw new Error('AGENT_RUNTIME_CONFIG_STALE')
     if (!this.hasRuntimeExecutionConfig()) throw new Error('Agent runtime config is not configured')
   }
