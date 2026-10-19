@@ -6,6 +6,7 @@
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import http from 'node:http'
+import path from 'node:path'
 import * as fs from 'node:fs/promises'
 import { WebSocket } from 'ws'
 import { AdminModule } from '../src/index.js'
@@ -17,12 +18,14 @@ describe('Admin Master Chat 集成测试', () => {
   let webPort: number
   let jwtToken: string
   let dataDir: string
+  let dataRoot: string
 
   beforeAll(async () => {
     // 密码从 .env 迁到 credentials.json
     process.env.CRABOT_JWT_SECRET = 'test-jwt-secret-at-least-32-chars-long'
 
-    dataDir = await fs.mkdtemp('/tmp/crabot-test-admin-chat-')
+    dataRoot = await fs.mkdtemp('/tmp/crabot-test-admin-chat-')
+    dataDir = path.join(dataRoot, 'admin')
 
     const cred = await newCredentialsFromPassword('test123', { is_temp: false, changed_via: 'start' })
     await writeCredentials(dataDir, cred)
@@ -65,7 +68,7 @@ describe('Admin Master Chat 集成测试', () => {
       await adminModule.stop()
     }
     if (dataDir) {
-      await fs.rm(dataDir, { recursive: true, force: true })
+      await fs.rm(dataRoot, { recursive: true, force: true })
     }
   })
 

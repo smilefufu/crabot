@@ -7,6 +7,7 @@ on:
     paths:
       - 'crabot-desktop/**'
       - 'crabot-client/**'
+      - 'crabot-shared/**'
       - 'crabot-admin/**'
       - 'src/cli/client*'
       - 'crabot-core/**'
@@ -95,6 +96,7 @@ jobs:
         timeout-minutes: 15
         run: |
           node --test crabot-client/tests/*.test.mjs
+          node --import ./crabot-shared/node_modules/tsx/dist/loader.mjs --test crabot-shared/src/workspace-catalog.test.ts crabot-shared/src/workspace-usage.test.ts
           node --test scripts/lib/__tests__/product-*.test.mjs scripts/lib/__tests__/agent-python-selection.test.mjs
           node --test scripts/lib/__tests__/cli-password-input.test.mjs scripts/lib/__tests__/instance-runtime.test.mjs scripts/lib/__tests__/cli-lock-native.test.mjs scripts/lib/__tests__/process-identity.test.mjs scripts/lib/__tests__/local-auth-transport.test.mjs scripts/lib/__tests__/stop-windows.test.mjs scripts/lib/__tests__/background-core.test.mjs scripts/lib/__tests__/supervisor-bootstrap.test.mjs scripts/lib/__tests__/mm-startup.test.mjs
           node --test scripts/lib/__tests__/system-*.test.mjs
@@ -118,14 +120,14 @@ jobs:
           node node_modules/typescript/bin/tsc -p tsconfig.cli.json
           node node_modules/vitest/vitest.mjs run src/cli/client.test.ts --maxWorkers=1 --minWorkers=1
           cd crabot-admin
-          node node_modules/vitest/vitest.mjs run src/chat-http-ws.test.ts src/chat-manager.test.ts src/chat-outbox-recovery.test.ts src/http-diagnostics.test.ts src/model-client-http.test.ts src/desktop-upgrade-http.test.ts src/version/upgrade-runner.test.ts src/version/version-service.test.ts src/desktop-auth.test.ts src/credentials.test.ts src/computer-use-setup-api.test.ts src/memory-access.test.ts src/voice-admin.test.ts src/managed-mcp.test.ts src/managed-mcp-runtime.test.ts src/mcp-subagent-config-mutation.test.ts src/core-agent-config-coherent-read.test.ts --maxWorkers=1 --minWorkers=1
+          node node_modules/vitest/vitest.mjs run src/workspaces.test.ts src/workspaces-http.test.ts src/chat-http-ws.test.ts src/chat-manager.test.ts src/chat-outbox-recovery.test.ts src/http-diagnostics.test.ts src/model-client-http.test.ts src/desktop-upgrade-http.test.ts src/version/upgrade-runner.test.ts src/version/version-service.test.ts src/desktop-auth.test.ts src/credentials.test.ts src/computer-use-setup-api.test.ts src/memory-access.test.ts src/voice-admin.test.ts src/managed-mcp.test.ts src/managed-mcp-runtime.test.ts src/mcp-subagent-config-mutation.test.ts src/core-agent-config-coherent-read.test.ts --maxWorkers=1 --minWorkers=1
       - name: Web compilation and state regressions
         run: |
           cd crabot-admin/web
           pnpm install --frozen-lockfile
           node node_modules/typescript/bin/tsc -p tsconfig.json
           node node_modules/vite/bin/vite.js build
-          node node_modules/vitest/vitest.mjs run src/pages/Chat/index.test.tsx src/pages/MCPServers/MCPServerList.test.tsx src/pages/DesktopWelcome.test.tsx src/services/server-state.test.ts src/services/desktop-host.test.ts src/components/ChangePasswordDialog.test.tsx src/components/DesktopDiagnosticsPanel.test.tsx src/pages/Settings/ComputerUseSetupCard.test.tsx src/pages/Settings/VersionUpgradeCard.test.tsx src/pages/Settings/DesktopVersionUpgradeCard.test.tsx --maxWorkers=1 --minWorkers=1
+          node node_modules/vitest/vitest.mjs run src/pages/Workspaces.test.tsx src/pages/Chat/index.test.tsx src/pages/MCPServers/MCPServerList.test.tsx src/pages/DesktopWelcome.test.tsx src/services/server-state.test.ts src/services/desktop-host.test.ts src/components/ChangePasswordDialog.test.tsx src/components/DesktopDiagnosticsPanel.test.tsx src/pages/Settings/ComputerUseSetupCard.test.tsx src/pages/Settings/VersionUpgradeCard.test.tsx src/pages/Settings/DesktopVersionUpgradeCard.test.tsx --maxWorkers=1 --minWorkers=1
       - name: Electron compilation and main-process state regressions
         working-directory: crabot-desktop
         run: |

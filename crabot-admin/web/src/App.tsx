@@ -41,6 +41,7 @@ import { isDesktop } from './services/desktop-host'
 import { DesktopDiagnosticsPanel } from './components/DesktopDiagnosticsPanel'
 import { MainLayout } from './components/Layout/MainLayout'
 import { DesktopPermissions } from './pages/DesktopPermissions'
+import { Workspaces } from './pages/Workspaces'
 
 const PrivateRoute: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const { isAuthenticated, isTemp } = useAuth()
@@ -73,6 +74,7 @@ const AppRoutes: React.FC = () => {
           </PrivateRoute>
         }
       />
+      <Route path="/workspaces" element={<PrivateRoute><Workspaces /></PrivateRoute>} />
       <Route
         path="/providers"
         element={

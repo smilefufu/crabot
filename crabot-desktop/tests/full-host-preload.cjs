@@ -56,9 +56,9 @@ function install() {
   app.once('will-quit', () => control.destroy())
   controlReader(control).on('line', command => {
     commands = commands.then(async () => {
-      if (command === 'capture_welcome' || command === 'capture_chat') {
+      if (command === 'capture_welcome' || command === 'capture_chat' || command === 'capture_workspaces') {
         if (process.env.GITHUB_ACTIONS !== 'true') throw new Error('Captures require synthetic isolated CI data')
-        const selector = command === 'capture_welcome' ? '.desktop-welcome' : '[data-msg-role="assistant"]'
+        const selector = command === 'capture_welcome' ? '.desktop-welcome' : command === 'capture_workspaces' ? '.workspace-facts' : '[data-msg-role="assistant"]'
         const deadline = Date.now() + 30_000
         let rendered = false
         while (Date.now() < deadline) {
@@ -71,6 +71,11 @@ function install() {
         fs.mkdirSync(directory, { recursive: true })
         fs.writeFileSync(path.join(directory, command + '-' + process.platform + '.png'), (await window.webContents.capturePage()).toPNG())
         emit(command, { captured: true }); return
+      }
+      if (command.startsWith('workspace:')) {
+        if (process.env.GITHUB_ACTIONS !== 'true') throw new Error('Workspace UI fixture requires synthetic isolated CI data')
+        const result = await require('./fixtures/workspace-renderer.cjs')(window, command.slice('workspace:'.length))
+        emit('workspace', result); return
       }
       if (command.startsWith('first_model:')) {
         const result = await require('./fixtures/first-model-renderer.cjs')(window, command.slice('first_model:'.length))

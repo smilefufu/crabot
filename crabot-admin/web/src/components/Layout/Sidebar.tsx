@@ -20,6 +20,7 @@ const navSections: NavSection[] = [
     label: 'AI 助手',
     items: [
       { to: '/chat', label: '聊天', match: '/chat' },
+  { to: '/workspaces', label: '工作区', match: '/workspaces' },
       { to: '/traces', label: '运行记录', match: '/traces' },
     ],
   },
@@ -58,6 +59,7 @@ const navSections: NavSection[] = [
 ]
 const desktopSections: NavSection[] = [{ label: 'Crabot', items: [
   { to: '/chat', label: '聊天', match: '/chat' },
+  { to: '/workspaces', label: '工作区', match: '/workspaces' },
   { to: '/traces', label: '任务与运行记录', match: '/traces' },
   { to: '/providers', label: '模型', match: '/providers' },
   { to: '/desktop/permissions', label: '权限与能力', match: '/desktop/permissions' },

@@ -127,7 +127,23 @@ test('actual Electron host shares its real core with CLI and distinguishes hide,
     console.log('CRABOT_FULL_HOST_FIRST_MODEL ' + JSON.stringify({ ...conversation, requests: provider.evidence.requests, same_generation: true, initial_ready_ms: initialReadyMs, first_model_flow_ms: Date.now() - firstModelStarted }))
     step('first_model_conversation')
     assert.equal((await gui.command('capture_chat')).captured, true)
-    const resources = { phase: 'after-first-model-conversation', ...await observeDesktopResources([
+    gui.send('workspace:create')
+    const workspace = await gui.next('workspace')
+    assert.equal(workspace.project_count, 1); assert.equal(workspace.default_count, 1)
+    assert.equal(workspace.workspace.source, 'managed')
+    const relativeWorkspace = path.relative(data, workspace.workspace.root)
+    assert.ok(relativeWorkspace && !relativeWorkspace.startsWith('..') && !path.isAbsolute(relativeWorkspace))
+    await writeFile(path.join(workspace.workspace.root, '.ci-workspace-artifact'), Buffer.alloc(123))
+    gui.send('workspace:usage')
+    const measuredWorkspace = await gui.next('workspace')
+    assert.equal(measuredWorkspace.workspace.workspace_id, workspace.workspace.workspace_id)
+    assert.equal(measuredWorkspace.usage.logical_bytes, 123); assert.equal(measuredWorkspace.usage.file_count, 1)
+    assert.equal((await gui.command('capture_workspaces')).captured, true)
+    console.log('CRABOT_FULL_HOST_WORKSPACE ' + JSON.stringify({ project_count: workspace.project_count,
+      default_count: workspace.default_count, logical_bytes: measuredWorkspace.usage.logical_bytes, source: workspace.workspace.source }))
+    step('workspace_inventory')
+
+    const resources = { phase: 'after-chat-and-workspace-inventory', ...await observeDesktopResources([
       identity.inspectProcess(gui.child.pid), instance.record.controller, instance.record.mm,
     ]) }
     await writeFile(path.join(root, '.desktop-build/desktop-resources.json'), JSON.stringify(resources) + '\n')
@@ -140,6 +156,14 @@ test('actual Electron host shares its real core with CLI and distinguishes hide,
     gui.child.kill('SIGKILL'); await gui.exited(); step('gui_crash_exited')
     assert.equal(inspectInstance(data).state, 'running')
     gui = await launch(); assert.equal((await gui.next('ready')).generation, first.generation); step('reattached')
+    gui.send('workspace:verify')
+    const restoredWorkspace = await gui.next('workspace')
+    assert.equal(restoredWorkspace.workspace.workspace_id, workspace.workspace.workspace_id)
+    assert.equal(restoredWorkspace.workspace.root, workspace.workspace.root)
+    assert.equal(restoredWorkspace.default_count, 1); assert.equal(restoredWorkspace.project_count, 1)
+    assert.equal((await readFile(path.join(restoredWorkspace.workspace.root, '.ci-workspace-artifact'))).length, 123)
+    step('workspace_inventory_reattached')
+
     await cli('stop')
     let stopped
     for (let attempt = 0; attempt < 80; attempt++) {

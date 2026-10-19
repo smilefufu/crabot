@@ -1,0 +1,24 @@
+import { z } from 'zod'
+import type { HttpClient, RequestOptions } from './http.js'
+import { WorkspaceCreateRequestSchema, WorkspaceGetResultSchema, WorkspaceIdSchema, WorkspaceListResultSchema,
+  WorkspaceRecordResultSchema, WorkspaceScanResultSchema, WorkspaceUpdateRequestSchema,
+  type WorkspaceCreateRequest, type WorkspaceUpdateRequest } from './contracts/workspaces.js'
+
+export class WorkspaceClient {
+  constructor(private readonly http: HttpClient) {}
+  list(options?: RequestOptions) { return this.http.request('/workspaces', WorkspaceListResultSchema, { ...options, method: 'GET' }) }
+  get(id: string, options?: RequestOptions) { return this.http.request(this.path(id), WorkspaceGetResultSchema, { ...options, method: 'GET' }) }
+  create(input: WorkspaceCreateRequest, options?: RequestOptions) {
+    return this.write('/workspaces', 'POST', WorkspaceCreateRequestSchema.parse(input), WorkspaceRecordResultSchema, options)
+  }
+  update(id: string, input: WorkspaceUpdateRequest, options?: RequestOptions) {
+    return this.write(this.path(id), 'PATCH', WorkspaceUpdateRequestSchema.parse(input), WorkspaceRecordResultSchema, options)
+  }
+  usage(id: string, options?: RequestOptions) { return this.http.request(this.path(id) + '/usage', WorkspaceScanResultSchema, { ...options, method: 'GET' }) }
+  refresh(id: string, options?: RequestOptions) { return this.write(this.path(id) + '/usage/refresh', 'POST', {}, WorkspaceScanResultSchema, options) }
+  private path(id: string) { return '/workspaces/' + encodeURIComponent(WorkspaceIdSchema.parse(id)) }
+  private write<T>(path: string, method: string, input: unknown, schema: z.ZodType<T>, options?: RequestOptions) {
+    const headers = new Headers(options?.headers); headers.set('Content-Type', 'application/json')
+    return this.http.request(path, schema, { ...options, method, headers, body: JSON.stringify(input) })
+  }
+}

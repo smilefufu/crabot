@@ -1,3 +1,4 @@
+import { WorkspaceService } from './workspaces.js'
 import { resolveManagedMcpConfig } from './managed-mcp-runtime.js'
 import { adminWebTransport } from './admin-web-transport.js'
 import { parseChatMultipartMetadata } from 'crabot-client'
@@ -703,6 +704,7 @@ export class AdminModule extends ModuleBase {
 
   // Channel 管理器
   private channelManager: ChannelManager
+  private workspaceService: WorkspaceService
   private voiceAdmin: VoiceAdmin
 
   // 模块安装器
@@ -791,6 +793,8 @@ export class AdminModule extends ModuleBase {
   ) {
     super(moduleConfig)
     this.adminConfig = { ...DEFAULT_ADMIN_CONFIG, ...adminConfig }
+    this.workspaceService = new WorkspaceService({ dataRoot: path.resolve(this.adminConfig.data_dir, '..'),
+      storageRoot: process.env.WORKER_WORKSPACES_DIR || undefined })
     this.configMutationCoordinator = new CoreAgentConfigMutationCoordinator(this.adminConfig.data_dir, {
       readSemanticSnapshot: () => this.readCoreAgentSemanticSnapshot(),
       // Initial/upgrade seeding may commit multiple serialized source changes before Admin has
@@ -1113,6 +1117,8 @@ export class AdminModule extends ModuleBase {
 
     // 确保数据目录存在
     await fs.mkdir(this.adminConfig.data_dir, { recursive: true })
+    try { await this.workspaceService.initialize() }
+    catch { console.warn('[Admin] Workspace catalog unavailable; management remains online and original records are retained') }
     await this.voiceAdmin.load()
     this.voiceAdmin.start()
     // Source managers must load before coordinator recovery so its semantic HMAC observes
@@ -1356,6 +1362,7 @@ export class AdminModule extends ModuleBase {
   }
 
   protected override async onStop(): Promise<void> {
+    await this.workspaceService.close()
     try { await this.desktopSessions?.close() }
     catch { console.warn('[DesktopAuth] Listener stopped; discovery cleanup incomplete, record retained') }
     this.voiceAdmin.stop()
@@ -1578,6 +1585,7 @@ export class AdminModule extends ModuleBase {
 
     const url = new URL(req.url ?? '/', `http://localhost:${this.adminConfig.web_port}`)
     const pathname = url.pathname
+    const workspaceRequest = pathname === '/api/workspaces' || pathname.startsWith('/api/workspaces/')
     if (pathname.startsWith('/api/')) correlateHttpRequest(req, res)
     let agentCliAuth: AgentCliWebAuth | undefined
 
@@ -1605,6 +1613,7 @@ export class AdminModule extends ModuleBase {
 
       const basicPayload = verifyJwt(token, this.jwtSecret)
       if (basicPayload?.sub === 'agent-cli') {
+        if (workspaceRequest) { sendJson(res, 403, { error: 'Human Admin credential required' }); return }
         try {
           agentCliAuth = await this.authorizeAgentCliRequest(basicPayload, req.method, pathname)
         } catch (error) {
@@ -1633,7 +1642,7 @@ export class AdminModule extends ModuleBase {
         }
         return
         }
-        if (pathname.startsWith('/api/chat/') && (payload.sub !== 'admin' || payload.agent_cli)) {
+        if ((pathname.startsWith('/api/chat/') || workspaceRequest) && (payload.sub !== 'admin' || payload.agent_cli)) {
           sendJson(res, 403, { error: 'Human Admin credential required' })
           return
         }
@@ -1642,6 +1651,7 @@ export class AdminModule extends ModuleBase {
 
     // 路由处理
     try {
+      if (workspaceRequest && await this.workspaceService.handleWeb(req, res, pathname, () => this.readJsonBody(req, 65536))) return
       if (await this.voiceAdmin.handleWeb(req, res, pathname, () => this.readJsonBody(req))) return
       if (pathname === '/api/auth/login' && req.method === 'POST') {
         await this.handleLogin(req, res)
