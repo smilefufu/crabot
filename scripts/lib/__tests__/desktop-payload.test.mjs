@@ -236,3 +236,161 @@ test('a cached program proof binds the full payload and cannot be silently repla
   assert.deepEqual(installation.readDesktopSelection(f.target).selection, f.selection)
   assert.equal(await fs.readFile(prepared.proof.file, 'utf8'), bytes.toString() + ' ')
 })
+
+async function stoppedPairFixture(t, { version = '1.2.4' } = {}) {
+  const f = await fixture(t), source = await prepareDesktopInstallation({ payload: f.payload, installRoot: f.target })
+  const current = await commitDesktopInstallation(source), next = await fixture(t, { version })
+  await fs.mkdir(path.join(current.dataDir, 'admin'))
+  await fs.writeFile(path.join(current.dataDir, 'admin/kept'), 'business data retained')
+  const { prepareDesktopPair } = await import('../desktop-pair-preparation.mjs')
+  const prepared = await prepareDesktopPair({ payload: next.payload, installRoot: f.target })
+  const maintenance = await import('../version-maintenance.mjs')
+  const { acquireCliLock, releaseCliLock } = await import('../cli-lock.mjs')
+  const lock = await acquireCliLock(current.dataDir, 'pair-commit-fixture')
+  let record, conversions = 0
+  try {
+    record = await maintenance.beginVersionMaintenance(current.dataDir, current.coreRoot, prepared.selection.version, current.selection.version, { dataProtection: 'scoped' })
+    await maintenance.bindVersionMaintenanceTarget(current.dataDir, record.id, prepared.coreRoot)
+    await maintenance.prepareScopedVersionMaintenance(current.dataDir, record.id)
+    await maintenance.markVersionMaintenanceInstalling(current.dataDir, record.id)
+    await maintenance.migrateStoppedVersionMaintenance({ dataDir: current.dataDir, root: prepared.coreRoot, id: record.id,
+      migrate: async () => { conversions++ }, verifyComplete: async () => {} })
+  } finally { releaseCliLock(lock) }
+  const { commitPreparedDesktopPair } = await import('../desktop-pair-commit.mjs')
+  const options = { maintenanceId: record.id, verifyData: async () => {
+    const { previewMigrations } = await import('../../upgrade-lib/migrate.mjs')
+    const preview = await previewMigrations(prepared.coreRoot, current.dataDir)
+    return preview.modules.length === 0 && preview.shared.status === 'not_applicable'
+  }, replaceEntries: async () => {} }
+  return { ...f, current, prepared, record, options, maintenance, conversions: () => conversions,
+    commit: (overrides = {}) => commitPreparedDesktopPair(prepared, { ...options, ...overrides }) }
+}
+test('stopped pair commit selects both exact programs and keeps protection until target health', async t => {
+  const f = await stoppedPairFixture(t), { cliLockToken } = await import('../cli-lock.mjs')
+  let replacements = 0
+  const selected = await f.commit({ replaceEntries: async (source, target) => {
+    replacements++
+    assert.deepEqual(source.selection, f.current.selection); assert.equal(target, f.prepared)
+    assert.ok(cliLockToken(path.join(f.target, 'cli.lock'))); assert.ok(cliLockToken(path.join(f.current.dataDir, 'cli.lock')))
+  } })
+  assert.deepEqual(selected.selection, f.prepared.selection)
+  const native = await promisify(execFile)(selected.command, ['help'], { env: { ...process.env, PATH: '' } })
+  assert.deepEqual(JSON.parse(native.stdout), { version: '1.2.4', required: '1' })
+  assert.equal(f.maintenance.readVersionMaintenance(selected.dataDir).phase, 'verifying')
+  assert.throws(() => f.maintenance.assertVersionMaintenanceAllowsStart(selected.dataDir), { code: 'CRABOT_MAINTENANCE_PENDING' })
+  assert.equal(await fs.readFile(path.join(selected.dataDir, 'admin/kept'), 'utf8'), 'business data retained')
+  await f.commit()
+  assert.equal(replacements, 1); assert.equal(f.conversions(), 1)
+  assert.equal(cliLockToken(path.join(f.target, 'cli.lock')), undefined)
+  assert.equal(cliLockToken(path.join(selected.dataDir, 'cli.lock')), undefined)
+  await assert.rejects(fs.stat(selected.dataDir + '.desktop-backups'), { code: 'ENOENT' })
+  await assert.rejects(fs.stat(path.join(selected.dataDir, 'mm.pid')), { code: 'ENOENT' })
+})
+for (const changed of ['unfinished-phase', 'wrong-maintenance', 'active-pid', 'core', 'gui', 'proof', 'source', 'third-selection', 'data-proof', 'foreign-intent', 'selected-without-intent']) {
+  test('pair commit preserves data and maintenance when preconditions fail: ' + changed, async t => {
+    const f = await stoppedPairFixture(t), selector = path.join(f.target, 'current-release.json')
+    let expected = await fs.readFile(selector, 'utf8'), overrides = {}, calls = 0
+    if (changed === 'unfinished-phase') {
+      const file = path.join(f.current.dataDir, 'desktop-maintenance.json'), record = f.maintenance.readVersionMaintenance(f.current.dataDir)
+      await fs.writeFile(file, JSON.stringify({ ...record, phase: 'installing' }))
+    } else if (changed === 'wrong-maintenance') overrides.maintenanceId = randomUUID()
+    else if (changed === 'active-pid') await fs.writeFile(path.join(f.current.dataDir, 'mm.pid'), String(process.pid))
+    else if (changed === 'core') await fs.appendFile(path.join(f.prepared.coreRoot, 'package.json'), ' ')
+    else if (changed === 'gui') await fs.appendFile(path.join(f.prepared.guiRoot, process.platform === 'darwin' ? 'Crabot.app/Contents/Resources/app.asar' : 'resources/app.asar'), 'changed')
+    else if (changed === 'proof') await fs.appendFile(f.prepared.proof.file, ' ')
+    else if (changed === 'source') f.prepared.source = { ...f.prepared.source, gui_id: randomUUID() }
+    else if (changed === 'data-proof') overrides.verifyData = async () => false
+    else if (changed === 'foreign-intent') {
+      const management = (await import('../desktop-management.cjs')).default
+      const parent = management.ensurePrivateDataRoot(path.join(f.target, 'app/updates'))
+      const directory = management.ensurePrivateDataRoot(path.join(parent, f.record.id)), file = path.join(directory, 'selection.json')
+      if (windows) identity.writePrivateFile(file, '{"foreign":true}\n')
+      else await fs.writeFile(file, '{"foreign":true}\n', { mode: 0o600 })
+    } else {
+      expected = JSON.stringify(changed === 'third-selection' ? { ...f.current.selection, gui_id: randomUUID() } : f.prepared.selection) + '\n'
+      await fs.writeFile(selector, expected)
+    }
+    await assert.rejects(f.commit({ ...overrides, replaceEntries: async () => { calls++ } }))
+    assert.equal(calls, 0); assert.equal(await fs.readFile(selector, 'utf8'), expected)
+    assert.equal(f.maintenance.readVersionMaintenance(f.current.dataDir).id, f.record.id)
+    assert.equal(await fs.readFile(path.join(f.current.dataDir, 'admin/kept'), 'utf8'), 'business data retained')
+  })
+}
+test('failed OS entry replacement retains its intent and can finish the same stopped pair without reconversion', async t => {
+  const f = await stoppedPairFixture(t)
+  let calls = 0
+  await assert.rejects(f.commit({ replaceEntries: async () => { calls++; throw new Error('OS response lost') } }), /OS response lost/)
+  assert.deepEqual(installation.readDesktopSelection(f.target).selection, f.current.selection)
+  const journal = path.join(f.target, 'app/updates', f.record.id, 'selection.json'), before = await fs.readFile(journal)
+  await f.commit({ replaceEntries: async () => { calls++ } })
+  assert.equal(calls, 2); assert.deepEqual(await fs.readFile(journal), before)
+  assert.equal(f.conversions(), 1); assert.equal(f.maintenance.readVersionMaintenance(f.current.dataDir).phase, 'verifying')
+})
+for (const changed of ['program', 'intent', 'maintenance', 'lock']) test('pair commit checks again after OS entry work: ' + changed, async t => {
+  const f = await stoppedPairFixture(t)
+  await assert.rejects(f.commit({ replaceEntries: async () => {
+    if (changed === 'program') await fs.appendFile(path.join(f.prepared.coreRoot, 'package.json'), ' ')
+    else if (changed === 'intent') await fs.appendFile(path.join(f.target, 'app/updates', f.record.id, 'selection.json'), ' ')
+    else if (changed === 'lock') {
+      const { releaseCliLock } = await import('../cli-lock.mjs'); releaseCliLock(path.join(f.current.dataDir, 'cli.lock'))
+    } else {
+      const file = path.join(f.current.dataDir, 'desktop-maintenance.json'), record = f.maintenance.readVersionMaintenance(f.current.dataDir)
+      await fs.writeFile(file, JSON.stringify({ ...record, id: randomUUID() }))
+    }
+  } }))
+  assert.deepEqual(installation.readDesktopSelection(f.target).selection, f.current.selection)
+  assert.throws(() => f.maintenance.assertVersionMaintenanceAllowsStart(f.current.dataDir), { code: 'CRABOT_MAINTENANCE_PENDING' })
+})
+test('pair selector rename with a lost reply can be verified and retried without opening old data', async t => {
+  const f = await stoppedPairFixture(t), rename = fs.rename, selector = path.join(f.target, 'current-release.json')
+  let lost = false
+  const fault = t.mock.method(fs, 'rename', async (...args) => {
+    await rename(...args)
+    if (args[1] === selector && !lost) { lost = true; throw new Error('selector reply lost') }
+  })
+  try { await assert.rejects(f.commit(), /selector reply lost/) } finally { fault.mock.restore() }
+  assert.equal(lost, true); assert.deepEqual(installation.readDesktopSelection(f.target).selection, f.prepared.selection)
+  assert.throws(() => f.maintenance.assertVersionMaintenanceAllowsStart(f.current.dataDir), { code: 'CRABOT_MAINTENANCE_PENDING' })
+  await f.commit()
+  assert.equal(f.conversions(), 1)
+  assert.equal(f.maintenance.readVersionMaintenance(f.current.dataDir).phase, 'verifying')
+})
+
+test('a changed maintenance fence discovered during final data verification cannot publish a new pair', async t => {
+  const f = await stoppedPairFixture(t)
+  let calls = 0
+  await assert.rejects(f.commit({ verifyData: async () => {
+    if (++calls === 2) {
+      const file = path.join(f.current.dataDir, 'desktop-maintenance.json'), record = f.maintenance.readVersionMaintenance(f.current.dataDir)
+      await fs.writeFile(file, JSON.stringify({ ...record, id: randomUUID() }))
+    }
+    return true
+  } }))
+  assert.deepEqual(installation.readDesktopSelection(f.target).selection, f.current.selection)
+})
+test('pair intent parent publication must be durable before OS entries or selector changes', { skip: windows }, async t => {
+  const f = await stoppedPairFixture(t), open = fs.open, parent = path.join(f.target, 'app/updates')
+  let reached = false, entries = false
+  const fault = t.mock.method(fs, 'open', async (...args) => {
+    const handle = await open(...args)
+    if (args[0] === parent) t.mock.method(handle, 'sync', async () => { reached = true; throw new Error('intent parent flush failed') })
+    return handle
+  })
+  try { await assert.rejects(f.commit({ replaceEntries: async () => { entries = true } }), /intent parent flush failed/) }
+  finally { fault.mock.restore() }
+  assert.equal(reached, true); assert.equal(entries, false)
+  assert.deepEqual(installation.readDesktopSelection(f.target).selection, f.current.selection)
+  assert.equal(f.maintenance.readVersionMaintenance(f.current.dataDir).phase, 'verifying')
+})
+
+
+test('a GUI-only pair update reuses the selected immutable Core while replacing the GUI identity', async t => {
+  const f = await stoppedPairFixture(t, { version: '1.2.3' })
+  assert.equal(f.prepared.coreRoot, f.current.coreRoot)
+  const before = await fs.stat(f.current.coreRoot, { bigint: true })
+  const selected = await f.commit()
+  assert.equal(selected.coreRoot, f.current.coreRoot)
+  assert.notEqual(selected.selection.gui_id, f.current.selection.gui_id)
+  assert.equal((await fs.stat(f.current.coreRoot, { bigint: true })).ino, before.ino)
+  assert.equal(f.maintenance.readVersionMaintenance(f.current.dataDir).phase, 'verifying')
+})

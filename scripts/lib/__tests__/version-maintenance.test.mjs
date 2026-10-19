@@ -289,3 +289,42 @@ for (const phase of ['preparing', 'prepared']) {
     await assert.rejects(fs.lstat(f.dataDir + '.desktop-backups'), { code: 'ENOENT' })
   })
 }
+
+
+test('stopped migration can finish while retaining protection for later pair selection and target health', async t => {
+  const f = await scopedFixture(t)
+  await bindVersionMaintenanceTarget(f.dataDir, f.record.id, f.target)
+  await prepareScopedVersionMaintenance(f.dataDir, f.record.id)
+  await markVersionMaintenanceInstalling(f.dataDir, f.record.id)
+  const { migrateStoppedVersionMaintenance } = await import('../version-maintenance.mjs')
+  let migrated = 0, verified = 0
+  const options = { dataDir: f.dataDir, root: f.target, id: f.record.id,
+    migrate: async () => { migrated++ }, verifyComplete: async () => { verified++ } }
+  await migrateStoppedVersionMaintenance(options)
+  assert.equal(migrated, 1); assert.equal(verified, 1)
+  assert.equal(readVersionMaintenance(f.dataDir).phase, 'verifying')
+  assert.throws(() => assertVersionMaintenanceAllowsStart(f.dataDir), { code: 'CRABOT_MAINTENANCE_PENDING' })
+  await assert.rejects(migrateStoppedVersionMaintenance(options), { code: 'CRABOT_MAINTENANCE_PENDING' })
+  assert.equal(migrated, 1)
+  releaseCliLock(f.lock)
+  await recoverVersionMaintenance({ dataDir: f.dataDir, root: f.target, appVersion: '1.2.4',
+    verifyCompatible: async () => {}, run: async () => { assertVersionMaintenanceAllowsStart(f.dataDir); return true } })
+  assert.equal(readVersionMaintenance(f.dataDir), null)
+})
+
+for (const failure of ['migration', 'completion', 'core-change', 'lost-lock', 'lost-lock-during-conversion']) test('retained stopped conversion never clears protection on failure: ' + failure, async t => {
+  const f = await scopedFixture(t)
+  await bindVersionMaintenanceTarget(f.dataDir, f.record.id, f.target)
+  await prepareScopedVersionMaintenance(f.dataDir, f.record.id)
+  await markVersionMaintenanceInstalling(f.dataDir, f.record.id)
+  const { migrateStoppedVersionMaintenance } = await import('../version-maintenance.mjs')
+  if (failure === 'lost-lock') releaseCliLock(f.lock)
+  await assert.rejects(migrateStoppedVersionMaintenance({ dataDir: f.dataDir, root: f.target, id: f.record.id,
+    migrate: async () => {
+      if (failure === 'migration') throw new Error('unknown dispatch')
+      if (failure === 'core-change') await fs.appendFile(path.join(f.target, 'package.json'), ' ')
+      if (failure === 'lost-lock-during-conversion') releaseCliLock(f.lock)
+    }, verifyComplete: async () => { if (failure === 'completion') throw new Error('no completion proof') } }))
+  assert.equal(readVersionMaintenance(f.dataDir).id, f.record.id)
+  assert.throws(() => assertVersionMaintenanceAllowsStart(f.dataDir), { code: 'CRABOT_MAINTENANCE_PENDING' })
+})

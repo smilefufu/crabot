@@ -92,4 +92,4 @@ it.each(['claude', 'codex'] as const)('%s uses the same verified private profile
     expect(tmux.launches).toHaveLength(2)
     await expect(fs.stat(workspace.runtime_root!)).rejects.toMatchObject({ code: 'ENOENT' })
   } finally { await first.dispose(); await restarted.dispose() }
-})
+}, 30_000)

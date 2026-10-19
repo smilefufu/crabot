@@ -332,14 +332,15 @@ export async function recoverVersionMaintenance({ dataDir, root, appVersion, ver
 }
 
 
-// Offline completion preserves the stopped state. Callers own version selection;
-// this is separate from GUI recovery that starts the service and verifies health.
-export async function completeStoppedVersionMaintenance({ dataDir, root, id, migrate, verifyComplete }) {
+// Run one stopped conversion without granting startup or clearing protection.
+// A paired GUI update still owns selection, handoff and target health.
+export async function migrateStoppedVersionMaintenance({ dataDir, root, id, migrate, verifyComplete }) {
   dataDir = locked(dataDir)
   const record = readVersionMaintenance(dataDir)
   root = realpathSync(root)
   if (record?.id !== id || record.phase !== 'installing' || record.target_core?.root !== root) fail()
   const verify = async () => {
+    locked(dataDir)
     if (inspectInstance(dataDir).state !== 'stopped') fail()
     if (record.schema_version === 3) return protectionOf(dataDir, record)
     const release = await verifyCoreRelease(root, { version: record.target_version })
@@ -354,8 +355,15 @@ export async function completeStoppedVersionMaintenance({ dataDir, root, id, mig
     await verifyComplete()
     await verify()
     if (readVersionMaintenance(dataDir)?.id !== record.id) fail()
-    rmSync(path.join(dataDir, name)); syncDirectory(dataDir)
   } finally { recovering.delete(record.id) }
+}
+
+// Existing offline callers finish here and keep their original stopped state.
+export async function completeStoppedVersionMaintenance(options) {
+  await migrateStoppedVersionMaintenance(options)
+  const dataDir = locked(options.dataDir), record = readVersionMaintenance(dataDir)
+  if (record?.id !== options.id || record.phase !== 'verifying') fail()
+  rmSync(path.join(dataDir, name)); syncDirectory(dataDir)
 }
 
 // Existing user-CLI adapter retains its entry and identical offline semantics.
