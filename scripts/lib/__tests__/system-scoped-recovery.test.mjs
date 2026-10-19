@@ -356,6 +356,50 @@ async function executeFixture(f, receipt, runScript) {
     migrate: () => executeSystemScopedMigrations({ ...f.options, receipt }, runScript),
     verifyComplete: () => verifyCompletedSystemScopedRecovery({ ...f.options, receipt }) })
 }
+for (const mode of [0o775, 0o777]) test('completion reads an owned Agent marker below the private instance without rewriting legacy directory mode: ' + mode.toString(8), platformOptions, async t => {
+  const f = await fixture(t, { shared: true })
+  const directory = path.join(f.dataDir, 'agent')
+  await fs.chmod(directory, mode)
+  const receipt = await prepareSystemScopedRecovery(f.options)
+  await executeFixture(f, receipt, async () => ({ exitCode: 0 }))
+  const { verifyCompletedSystemScopedRecovery } = await import('../system-scoped-recovery.mjs')
+  await verifyCompletedSystemScopedRecovery({ ...f.options, receipt })
+  assert.equal((await fs.stat(directory)).mode & 0o777, mode)
+  assert.equal((await fs.stat(f.dataDir)).mode & 0o777, 0o700)
+})
+
+test('an already-ready business marker keeps its original readable mode while control receipts remain private', platformOptions, async t => {
+  const f = await fixture(t, { shared: true })
+  const { prepareSharedRequests } = await import('../../upgrade-lib/shared-requests.mjs')
+  await prepareSharedRequests(f.target, f.dataDir, { info() {} }, { lockHeld: true })
+  const marker = path.join(f.dataDir, 'agent/shared-request-upgrade.json')
+  await fs.chmod(marker, 0o644)
+  const receipt = await prepareSystemScopedRecovery(f.options)
+  await executeFixture(f, receipt, async () => ({ exitCode: 0 }))
+  assert.equal((await fs.stat(marker)).mode & 0o777, 0o644)
+  assert.equal((await fs.stat(path.join(f.dataDir, 'system-control/scoped-recovery', f.record.id, 'completed.json'))).mode & 0o777, 0o600)
+})
+
+for (const changed of ['marker-link', 'marker-hardlink', 'foreign-agent-owner', 'writable-control-parent']) test('business marker compatibility still rejects substituted ownership, links and unsafe control paths: ' + changed, platformOptions, async t => {
+  const f = await fixture(t, { shared: true }), receipt = await prepareSystemScopedRecovery(f.options)
+  await executeFixture(f, receipt, async () => ({ exitCode: 0 }))
+  const { verifyCompletedSystemScopedRecovery } = await import('../system-scoped-recovery.mjs')
+  const marker = path.join(f.dataDir, 'agent/shared-request-upgrade.json')
+  if (changed === 'marker-link') {
+    await fs.rename(marker, marker + '.retained'); await fs.symlink(marker + '.retained', marker)
+  } else if (changed === 'marker-hardlink') await fs.link(marker, marker + '.linked')
+  else if (changed === 'writable-control-parent') await fs.chmod(path.join(f.dataDir, 'system-control/scoped-recovery'), 0o777)
+  else {
+    const original = fs.lstat
+    t.mock.method(fs, 'lstat', async (...args) => {
+      const stat = await original(...args)
+      if (args[0] === path.dirname(marker)) stat.uid = process.getuid() + 1
+      return stat
+    })
+  }
+  await assert.rejects(verifyCompletedSystemScopedRecovery({ ...f.options, receipt }))
+})
+
 test('a migration failure retains the execution claim and cannot dispatch the scripts again', platformOptions, async t => {
   const f = await fixture(t, { shared: true }), receipt = await prepareSystemScopedRecovery(f.options)
   const { executeSystemScopedMigrations, verifyCompletedSystemScopedRecovery } = await import('../system-scoped-recovery.mjs')

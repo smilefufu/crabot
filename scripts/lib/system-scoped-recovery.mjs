@@ -39,13 +39,25 @@ async function safeParents(root, file) {
 }
 async function readDocument(root, file) {
   await safeParents(root, file)
+  return readOwnedDocument(file, true)
+}
+async function readOwnedDocument(file, privateMode) {
   const handle = await fs.open(file, constants.O_RDONLY | constants.O_NOFOLLOW)
   try {
     const stat = await handle.stat()
-    if (!stat.isFile() || stat.uid !== process.getuid() || (stat.mode & 0o777) !== 0o600 || stat.nlink !== 1 || stat.size > 64 * 1024 * 1024) fail()
+    if (!stat.isFile() || stat.uid !== process.getuid() || privateMode && (stat.mode & 0o777) !== 0o600 || stat.nlink !== 1 || stat.size > 64 * 1024 * 1024) fail()
     const bytes = await handle.readFile(), value = JSON.parse(bytes)
     return { value, sha256: digest(bytes) }
   } finally { await handle.close() }
+}
+// A ready marker is existing business metadata, not a private control receipt.
+// Its owner-checked, non-linked Agent directory is protected by DATA_DIR's
+// verified private root; do not chmod or reject legacy business modes here.
+async function readSharedMarker(dataDir) {
+  const file = await scopedPath(dataDir, 'agent/shared-request-upgrade.json')
+  const directory = await fs.lstat(path.dirname(file))
+  if (!directory.isDirectory() || directory.isSymbolicLink() || directory.uid !== process.getuid()) fail()
+  return readOwnedDocument(file, false)
 }
 async function syncDirectory(directory) {
   const handle = await fs.open(directory, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW)
@@ -387,12 +399,12 @@ async function completedEvidence(dataDir, targetRoot, intent, plan) {
   const shared = await previewSharedRequests(targetRoot, dataDir)
   if (plan.shared.status === 'backup_prepared') {
     const material = await verifySharedMaterial(dataDir, intent, plan)
-    const marker = await readDocument(dataDir, path.join(dataDir, 'agent/shared-request-upgrade.json'))
+    const marker = await readSharedMarker(dataDir)
     if (shared.status !== 'ready' || marker.value.transaction !== 'shared-request-upgrade-v2' || marker.value.plan_sha256 !== material.sha256) fail()
   } else if (shared.status !== plan.shared.status) fail()
   const result = { status: shared.status }
   if (shared.status === 'ready') {
-    result.marker_sha256 = (await readDocument(dataDir, path.join(dataDir, 'agent/shared-request-upgrade.json'))).sha256
+    result.marker_sha256 = (await readSharedMarker(dataDir)).sha256
     if (plan.shared.status === 'ready' && result.marker_sha256 !== intent.shared.marker_sha256) fail()
   }
   return { modules, shared: result }
