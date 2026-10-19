@@ -1,3 +1,4 @@
+import { ExecutionAdmissions } from './core/execution-admissions.js'
 import { WorkerRequestToolScope } from './workers/harness/request-tools.js'
 import { selectSubAgentSkills } from './agent/subagent-tool-filter.js'
 import { getInternalHandler } from './hooks/internal-handlers.js'
@@ -823,6 +824,7 @@ export class UnifiedAgent extends ModuleBase {
   /** True after startup reconciliation has settled, even when it failed. */
   private managerReconciliationSettled = false
   private runtimeClosing = false
+  private readonly executionAdmissions = new ExecutionAdmissions()
   /** 每个 ManagerKey 至多一个任务板 notice 路由尝试；最新 revision 仍以 Store 为准。 */
   private readonly workboardNoticeDispatching = new Set<ManagerKey>()
   private readonly workboardNoticeRetryTimers = new Map<ManagerKey, ReturnType<typeof setTimeout>>()
@@ -978,6 +980,11 @@ export class UnifiedAgent extends ModuleBase {
    */
   isConfigured(): boolean {
     return !this.configStale && this.hasRuntimeExecutionConfig()
+  }
+
+  /** Internal relocation boundary: registration/admission settles before fixing the stop set. */
+  async quiesceExecutionAdmissions(): Promise<void> {
+    await Promise.all([this.executionAdmissions.closeAndDrain(), this.requireManagerStack().harness.quiesceExecutionAdmissions()])
   }
 
   /** Central admission for every new runtime-config-dependent execution. */
@@ -3601,6 +3608,10 @@ export class UnifiedAgent extends ModuleBase {
 
   /** §8.2：maintenance 走 Agent-owned system task；其他 Schedule 投递 instruction 或执行脚本。 */
   private async handleTriggerSchedule(params: TriggerScheduleParams): Promise<TriggerScheduleResult> {
+    return this.executionAdmissions.run(() => this.handleAdmittedTriggerSchedule(params))
+  }
+
+  private async handleAdmittedTriggerSchedule(params: TriggerScheduleParams): Promise<TriggerScheduleResult> {
     this.assertRuntimeExecutionAdmission()
     if (!params.trigger_id?.trim() || !params.schedule_name?.trim()
       || !params.target_session?.channel_id || !params.target_session.session_id

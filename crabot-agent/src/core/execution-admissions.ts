@@ -1,5 +1,5 @@
 /** Tracks runtime establishment only; drainage never proves executions have stopped. */
-export class WorkerExecutionAdmissions {
+export class ExecutionAdmissions {
   private closed = false
   private cleanupFailed = false
   private readonly pending = new Set<Promise<void>>()

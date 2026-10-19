@@ -1,3 +1,4 @@
+import { ExecutionAdmissions } from '../../src/core/execution-admissions.js'
 /**
  * agent 侧五个 v3 RPC handler(P5 Task 4)—— protocol-agent-v3.md §8.2 / §8.3。
  *
@@ -61,6 +62,7 @@ interface AgentUnderTest {
 
 function buildAgent(managerStack?: unknown): AgentUnderTest {
   const agent = Object.create(UnifiedAgent.prototype) as Record<string, unknown>
+  agent.executionAdmissions = new ExecutionAdmissions()
   agent.agentConfig = { model_config: { powerful: { apikey: 'test-key', model_id: 'test-model' } } }
   agent.config = { moduleId: 'test-agent' }
   agent.knownSecrets = []

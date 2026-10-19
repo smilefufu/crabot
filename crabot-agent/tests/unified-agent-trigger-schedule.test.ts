@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto'
+import { ExecutionAdmissions } from '../src/core/execution-admissions.js'
 import { describe, it, expect, vi } from 'vitest'
 import { ConfigLoader } from '../src/core/config-loader.js'
 
@@ -6,6 +8,8 @@ import type { AgentEventPublisher } from '../src/manager/events.js'
 import type { ManagerKey, LedgerWorker } from '../src/workers/harness/ledger-types.js'
 
 interface AgentUnderTest {
+  executionAdmissions: ExecutionAdmissions
+  quiesceExecutionAdmissions(): Promise<void>
   agentConfig: { model_config: Record<string, { apikey: string; model_id: string }> }
   config: { moduleId: string }
   configAuthenticated: boolean
@@ -61,12 +65,14 @@ function buildAgent(runMaintenance: () => Promise<void>) {
   }
 
   const agent = Object.create(UnifiedAgent.prototype) as AgentUnderTest
+  agent.executionAdmissions = new ExecutionAdmissions()
   agent.agentConfig = { model_config: { powerful: { apikey: 'test-key', model_id: 'test-model' } } }
   agent.config = { moduleId: 'test-agent' }
   // 直接 test fixture：构造函数默认 runtime_config_authenticated=true；Object.create 绕过构造函数，这里补齐。
   agent.configAuthenticated = true
   agent.configStale = false
   agent.managerStack = {
+    harness: { quiesceExecutionAdmissions: vi.fn(async () => {}) },
     ledger,
     principals: { managerKeyFor: () => managerKey },
     registry: { authorizeSchedule, admitSchedule },
@@ -281,5 +287,46 @@ describe('trigger_schedule memory_maintenance system task', () => {
       isBuiltin: undefined,
     })
     expect(fixture.ledger.upsertWorker).not.toHaveBeenCalled()
+  })
+})
+
+
+describe('workspace relocation Agent admission quiescence', () => {
+  it('waits for native maintenance registration but does not turn drainage into task completion', async () => {
+    const maintenance = deferred<void>(), admitted = deferred<void>(), release = deferred<void>()
+    const fixture = buildAgent(() => maintenance.promise)
+    const original = fixture.ledger.upsertWorker.getMockImplementation()!
+    fixture.ledger.upsertWorker.mockImplementationOnce(async (...args) => {
+      admitted.resolve(); await release.promise; return original(...args)
+    })
+    const params: TriggerScheduleParams = { ...TRIGGER_CONTEXT, schedule_id: 'maintenance', title: '维护', task_type: 'memory_maintenance', is_builtin: true }
+    const creating = fixture.agent.handleTriggerSchedule(params); await admitted.promise
+    let drained = false
+    const quiet = fixture.agent.quiesceExecutionAdmissions().then(() => { drained = true })
+    await Promise.resolve(); expect(drained).toBe(false)
+    await expect(fixture.agent.handleTriggerSchedule({ ...params, trigger_id: 'new' })).rejects.toMatchObject({ code: 'WORKSPACE_MAINTENANCE' })
+    release.resolve(); const result = await creating; await quiet
+    await waitUntil(() => fixture.workers.get(result.task_id!)?.task.status === 'running')
+    expect(fixture.workers.get(result.task_id!)).toMatchObject({ manager_key: fixture.managerKey, origin: { trigger_type: 'system' }, incarnations: [] })
+    maintenance.resolve()
+    await waitUntil(() => fixture.workers.get(result.task_id!)?.task.status === 'closed')
+  })
+
+  it('waits for an already admitted script startup and preserves its original permission target', async () => {
+    const started = deferred<void>(), release = deferred<void>(), fixture = buildAgent(async () => {})
+    const start = vi.fn(async () => { started.resolve(); await release.promise })
+    ;(fixture.agent as any).startScheduleScript = start
+    const source = 'printf ready'
+    const params: TriggerScheduleParams = { ...TRIGGER_CONTEXT, schedule_id: 'script', script: {
+      source, source_sha256: createHash('sha256').update(source).digest('hex'), timeout_seconds: 60, deliver_result: false,
+    } }
+    const creating = fixture.agent.handleTriggerSchedule(params); await started.promise
+    let drained = false
+    const quiet = fixture.agent.quiesceExecutionAdmissions().then(() => { drained = true })
+    await Promise.resolve(); expect(drained).toBe(false)
+    release.resolve(); await expect(creating).resolves.toEqual({ accepted: true }); await quiet
+    expect(fixture.authorizeSchedule).toHaveBeenCalledWith({ targetSession: params.target_session, creatorFriendId: params.creator_friend_id, isBuiltin: params.is_builtin, requireShell: true })
+    expect(start).toHaveBeenCalledWith(params)
+    expect(fixture.admitSchedule).not.toHaveBeenCalled()
   })
 })

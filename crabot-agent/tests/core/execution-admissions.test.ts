@@ -1,12 +1,12 @@
 import { expect, it } from 'vitest'
-import { WorkerExecutionAdmissions } from '../../../src/workers/harness/execution-admissions.js'
+import { ExecutionAdmissions } from '../../src/core/execution-admissions.js'
 function deferred() {
   let resolve!: () => void
   const promise = new Promise<void>(done => { resolve = done })
   return { promise, resolve }
 }
 it('registers admission before an action can synchronously request quiescence', async () => {
-  const admissions = new WorkerExecutionAdmissions(), finish = deferred()
+  const admissions = new ExecutionAdmissions(), finish = deferred()
   let drained = false, drain!: Promise<void>
   const operation = admissions.run(async () => {
     drain = admissions.closeAndDrain().then(() => { drained = true })
@@ -17,7 +17,7 @@ it('registers admission before an action can synchronously request quiescence', 
   finish.resolve(); await operation; await drain
 })
 it('also awaits late cleanup registered while an admitted operation is draining', async () => {
-  const admissions = new WorkerExecutionAdmissions(), action = deferred(), cleanup = deferred()
+  const admissions = new ExecutionAdmissions(), action = deferred(), cleanup = deferred()
   const operation = admissions.run(async () => { await action.promise; admissions.trackCleanup(cleanup.promise) })
   let drained = false
   const drain = admissions.closeAndDrain().then(() => { drained = true })

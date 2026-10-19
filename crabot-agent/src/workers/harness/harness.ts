@@ -1,4 +1,4 @@
-import { WorkerExecutionAdmissions } from './execution-admissions.js'
+import { ExecutionAdmissions } from '../../core/execution-admissions.js'
 import { projectWorkspaceExecution } from './workspace-execution.js'
 import { executionAdmission } from '../execution-policy.js'
 import { sha256CanonicalJson } from 'crabot-shared'
@@ -922,7 +922,7 @@ function continuationDelivery(
 }
 
 export class WorkerHarness {
-  private readonly executionAdmissions = new WorkerExecutionAdmissions()
+  private readonly executionAdmissions = new ExecutionAdmissions()
   private readonly requestSpawnMutexes = new Map<string, AsyncMutex>()
   private readonly pendingBgNotifications = new Map<string, number>()
   private readonly continuationObservations = new Map<string, { key: string; fact: WorkerExecutionFact; runtimeFact: WorkerExecutionFact; stoppedAt?: string; stopUnverified?: boolean }>()
