@@ -551,7 +551,18 @@ export interface WorkerRuntimeEvent {
   runtime: WorkerRuntimeSnapshot
 }
 
+/** Internal maintenance observation, never complete stop proof or process authority. */
+export interface WorkerProcessIdentity {
+  readonly pid: number
+  readonly parent: number
+  readonly started: string
+  readonly owner: string
+  readonly executable: string
+}
+
 export interface WorkerAdapter {
+  /** Fixed-job observation only. Unknown carriers reject without cold reconstruction or stops. */
+  captureExecutionProcesses?(h: IncarnationHandle): Promise<ReadonlyArray<WorkerProcessIdentity>>
   readRuntime?(handle: IncarnationHandle): Promise<WorkerRuntimeSnapshot | undefined>
   readonly implId: WorkerImplId
   detect(): Promise<DetectResult>

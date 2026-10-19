@@ -1,4 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import { join } from 'node:path'
+import type { WorkerProcessIdentity } from '../types.js'
 import { buildScrubbedChildEnv } from '../connections/secret-env.js'
 
 type JsonObject = Record<string, unknown>
@@ -225,6 +227,13 @@ export class CodexAppServerClient {
 
   notify(method: string, params: JsonObject): void {
     this.write({ method, params })
+  }
+
+  /** A protocol disconnect is not process exit; keep observing the actual child object. */
+  captureExecutionProcesses(): ReadonlyArray<WorkerProcessIdentity> {
+    if (this.processExited) throw Object.assign(new Error('app-server进程已退出，无法重新捕获其后代。'), { code: 'CRABOT_PROCESS_SCOPE' })
+    const { captureSpawnedProcessTree } = require(join(__dirname, '../../../../scripts/lib/spawned-process-tree.cjs'))
+    return captureSpawnedProcessTree(this.child)
   }
 
   async terminate(): Promise<boolean> {

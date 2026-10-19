@@ -4,6 +4,9 @@ import { randomUUID } from 'node:crypto'
 import * as fs from 'node:fs/promises'
 import * as os from 'node:os'
 import * as path from 'node:path'
+import { ClaudeCodeAdapter } from '../../src/workers/claude-code/adapter.js'
+import { CodexWorkerAdapter } from '../../src/workers/codex/adapter.js'
+import type { IncarnationHandle } from '../../src/workers/types.js'
 import { TmuxDriver } from '../../src/workers/tmux/driver.js'
 import { removeTmuxControlEndpoint, type TmuxControlEndpoint } from '../../src/workers/tmux/control-monitor.js'
 
@@ -92,7 +95,7 @@ describe.skipIf(process.platform === 'win32' || !hasTmuxBinary())('TmuxDriver pr
     const { default: tree } = await import('../../../scripts/lib/tmux-process-tree.cjs')
     const { default: processExit } = await import('../../../scripts/lib/known-process-exit.cjs')
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-private-carrier-'))
-    const socket = 'crabot-carrier-' + randomUUID(), name = 'crabot-w-scope-' + randomUUID()
+    const socket = 'crabot-carrier-' + randomUUID(), workerId = 'scope-' + randomUUID(), name = `crabot-w-${workerId}-1`
     const wrapper = path.join(directory, 'tmux-private'), ready = path.join(directory, 'ready')
     await fs.writeFile(wrapper, `#!/bin/sh\nexec tmux -L ${socket} "$@"\n`, { mode: 0o700 })
     const driver = new TmuxDriver({ tmuxBin: wrapper }), quote = (value: string) => "'" + value.replace(/'/g, "'\\''") + "'"
@@ -107,6 +110,13 @@ describe.skipIf(process.platform === 'win32' || !hasTmuxBinary())('TmuxDriver pr
       const scope = await tree.captureTmuxProcessTree(() => driver.readProcessCarrier(name))
       expect(scope).toMatchObject([{ pid: carrier.pane_pid, owner: native.inspectProcess(process.pid).owner }])
       expect(await driver.readProcessCarrier(name)).toEqual(carrier)
+      const adapters = [new ClaudeCodeAdapter({ dataDir: directory, tmux: driver, claudeConfigPath: path.join(directory, 'claude.json'), claudeProjectsDir: directory }),
+        new CodexWorkerAdapter({ dataDir: directory, tmux: driver, codexHomeSource: directory })]
+      for (const adapter of adapters) {
+        const h: IncarnationHandle = { worker_id: workerId, incarnation_id: 'fixed-' + adapter.implId, seq: 1, impl: adapter.implId, session_ref: 'observed-session' }
+        ;(adapter as any).runtimes.set(`${workerId}#1`, { worker_id: workerId, incarnation_id: h.incarnation_id, seq: 1, sessionName: name })
+        expect(await adapter.captureExecutionProcesses(h)).toEqual(scope)
+      }
       await expect(driver.readProcessCarrier('crabot-w-scope')).rejects.toThrow()
       await driver.killSession(name)
       await waitFor(async () => processExit.probeKnownProcessExit(scope).state === 'stopped')

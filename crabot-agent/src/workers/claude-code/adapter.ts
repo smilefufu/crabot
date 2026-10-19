@@ -82,6 +82,7 @@ import type {
   WorkerSubagentStatus,
   WorkerSubagentSummary,
   WorkerAdapter,
+  WorkerProcessIdentity,
   WorkerContractState,
   Workspace,
   WorkerTerminalView,
@@ -1710,6 +1711,27 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
         ...(endedAt ? { ended_at: endedAt } : {}),
       },
     }
+  }
+
+  /** Read only resident fixed-incarnation carriers; ensureRuntime also kills dead tmux sessions. */
+  async captureExecutionProcesses(h: IncarnationHandle): Promise<ReadonlyArray<WorkerProcessIdentity>> {
+    this.assertActive()
+    const runtime = this.runtimes.get(instanceKey(h))
+    const invalid = () => Object.assign(new Error('执行器化身与运行载体无法核验。'), { code: 'WORKER_CARRIER_UNVERIFIED' })
+    if (h.impl !== this.implId || !h.incarnation_id || !runtime || runtime.incarnation_id !== h.incarnation_id
+      || runtime.worker_id !== h.worker_id || runtime.seq !== h.seq) throw invalid()
+    let processes: ReadonlyArray<WorkerProcessIdentity>
+    if (runtime.headlessChild) {
+      const { captureSpawnedProcessTree } = require(join(__dirname, '../../../../scripts/lib/spawned-process-tree.cjs'))
+      processes = captureSpawnedProcessTree(runtime.headlessChild)
+    } else {
+      if (runtime.sessionName !== `crabot-w-${h.worker_id}-${h.seq}`) throw invalid()
+      const { captureTmuxProcessTree } = require(join(__dirname, '../../../../scripts/lib/tmux-process-tree.cjs'))
+      processes = await captureTmuxProcessTree(() => this.tmux.readProcessCarrier(runtime.sessionName))
+    }
+    this.assertActive()
+    if (this.runtimes.get(instanceKey(h)) !== runtime || runtime.incarnation_id !== h.incarnation_id) throw invalid()
+    return processes
   }
 
   async kill(h: IncarnationHandle): Promise<void> {

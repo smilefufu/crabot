@@ -80,6 +80,7 @@ import type {
   SendInputOptions,
   TraceCursor,
   WorkerAdapter,
+  WorkerProcessIdentity,
   WorkerContractState,
   WorkerSubagentSummary,
   Workspace,
@@ -2014,6 +2015,26 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       consumed = i + 1
     }
     return { sourceAvailable: true, events, nextCursor: { offset: consumed } }
+  }
+
+  /** Read only resident fixed-incarnation carriers; ensureRuntime also kills dead tmux sessions. */
+  async captureExecutionProcesses(h: IncarnationHandle): Promise<ReadonlyArray<WorkerProcessIdentity>> {
+    this.assertActive()
+    const runtime = this.runtimes.get(instanceKey(h))
+    const invalid = () => Object.assign(new Error('执行器化身与运行载体无法核验。'), { code: 'WORKER_CARRIER_UNVERIFIED' })
+    if (h.impl !== this.implId || !h.incarnation_id || !runtime || runtime.incarnation_id !== h.incarnation_id
+      || runtime.worker_id !== h.worker_id || runtime.seq !== h.seq) throw invalid()
+    let processes: ReadonlyArray<WorkerProcessIdentity>
+    if (runtime.headlessClient) {
+      processes = runtime.headlessClient.captureExecutionProcesses()
+    } else {
+      if (runtime.sessionName !== `crabot-w-${h.worker_id}-${h.seq}`) throw invalid()
+      const { captureTmuxProcessTree } = require(join(__dirname, '../../../../scripts/lib/tmux-process-tree.cjs'))
+      processes = await captureTmuxProcessTree(() => this.tmux.readProcessCarrier(runtime.sessionName))
+    }
+    this.assertActive()
+    if (this.runtimes.get(instanceKey(h)) !== runtime || runtime.incarnation_id !== h.incarnation_id) throw invalid()
+    return processes
   }
 
   async kill(h: IncarnationHandle): Promise<void> {
