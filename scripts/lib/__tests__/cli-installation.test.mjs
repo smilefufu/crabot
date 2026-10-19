@@ -259,6 +259,7 @@ test('offline CLI upgrade preserves dependencies and stopped state while verifyi
   const code = "import{writeFileSync}from'node:fs'; const dir=process.argv.find(a=>a.startsWith('--data-dir=')).slice(11); writeFileSync(dir+'/preferences','after');"
   const two = await prepareCliPayload({ sourceRoot: await f.source('1.2.4', {
     'crabot-admin/schema_version': 'v2', 'crabot-admin/upgrade/from_v1_to_v2.mjs': code,
+    'crabot-admin/upgrade/scope.mjs': "export const migrationScope = () => ({ reads: [], writes: ['admin/preferences'] })",
   }), installRoot: f.installRoot })
   const result = await applyStoppedCliUpgrade({ sourceRoot: one.coreRoot, targetRoot: two.coreRoot, dataDir: f.dataDir })
   assert.equal(result.service_started, false); assert.equal(result.health_verified, false)
@@ -309,16 +310,19 @@ test('a partially failed migration retains the exact selected target, backup and
   const code = "import{appendFileSync}from'node:fs'; const dir=process.argv.find(a=>a.startsWith('--data-dir=')).slice(11); appendFileSync(dir+'/preferences',' partial'); process.exit(13);"
   const two = await prepareCliPayload({ sourceRoot: await f.source('1.2.4', {
     'crabot-admin/schema_version': 'v2', 'crabot-admin/upgrade/from_v1_to_v2.mjs': code,
+    'crabot-admin/upgrade/scope.mjs': "export const migrationScope = () => ({ reads: [], writes: ['admin/preferences'] })",
   }), installRoot: f.installRoot })
   await assert.rejects(applyStoppedCliUpgrade({ sourceRoot: one.coreRoot, targetRoot: two.coreRoot, dataDir: f.dataDir }), { code: 'CRABOT_MIGRATION_FAILED' })
   const record = readVersionMaintenance(f.dataDir)
   assert.equal(record.phase, 'verifying'); assert.equal(record.target_core.root, two.coreRoot)
   assert.equal(readCliSelection(f.installRoot), two.id)
   assert.equal(await fs.readFile(path.join(f.dataDir, 'admin/SCHEMA_VERSION'), 'utf8'), 'v1')
-  assert.equal(await fs.readFile(path.join(f.dataDir, 'admin/preferences'), 'utf8'), 'before partial')
+  assert.equal(await fs.readFile(path.join(f.dataDir, 'admin/preferences'), 'utf8'), 'before')
+  const transaction = JSON.parse(await fs.readFile(path.join(f.dataDir, '.upgrade-migrations/crabot-admin-v1-v2/state.json'), 'utf8'))
+  assert.equal(transaction.phase, 'rolled_back')
   assert.throws(() => assertVersionMaintenanceAllowsStart(f.dataDir), { code: 'CRABOT_MAINTENANCE_PENDING' })
   await assert.rejects(applyStoppedCliUpgrade({ sourceRoot: one.coreRoot, targetRoot: two.coreRoot, dataDir: f.dataDir }))
-  assert.equal(await fs.readFile(path.join(f.dataDir, 'admin/preferences'), 'utf8'), 'before partial')
+  assert.equal(await fs.readFile(path.join(f.dataDir, 'admin/preferences'), 'utf8'), 'before')
   const directory = path.join(f.dataDir + '.desktop-backups', record.backup.id)
   await verifyMaintenanceBackup(directory, record.backup.sha256)
   assert.equal(await fs.readFile(path.join(directory, 'data/admin/preferences'), 'utf8'), 'before')
@@ -396,6 +400,7 @@ test('a data migration cannot follow an external module directory that the scope
   const code = "import{writeFileSync}from'node:fs'; const dir=process.argv.find(a=>a.startsWith('--data-dir=')).slice(11); writeFileSync(dir+'/preferences','external-after');"
   const two = await prepareCliPayload({ sourceRoot: await f.source('1.2.4', {
     'crabot-admin/schema_version': 'v2', 'crabot-admin/upgrade/from_v1_to_v2.mjs': code,
+    'crabot-admin/upgrade/scope.mjs': "export const migrationScope = () => ({ reads: [], writes: ['admin/preferences'] })",
   }), installRoot: f.installRoot })
   await assert.rejects(applyStoppedCliUpgrade({ sourceRoot: one.coreRoot, targetRoot: two.coreRoot, dataDir: f.dataDir }), { code: 'CRABOT_BACKUP_SCOPE_UNVERIFIED' })
   assert.equal(readCliSelection(f.installRoot), one.id)

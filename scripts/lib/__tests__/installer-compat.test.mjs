@@ -34,6 +34,24 @@ test('installer helper pins match the shipped scripts on Unix and Windows', () =
     assert.ok(powershell.includes(`'${name}' = '${actual}'`), `${name}: Windows pin must match shipped helper`)
   }
 })
+test('pinned helper checkout bytes stay LF even with Windows CRLF defaults', t => {
+  const root = fixture(t), attributes = fileURLToPath(new URL('../../../.gitattributes', import.meta.url))
+  const runGit = (args, input) => {
+    const result = spawnSync('git', ['-c', 'core.autocrlf=true', '-c', 'core.eol=crlf', ...args], { cwd: root, input })
+    assert.equal(result.status, 0, result.stderr?.toString())
+    return result.stdout
+  }
+  runGit(['init', '--quiet'])
+  writeFileSync(join(root, '.gitattributes'), existsSync(attributes) ? readFileSync(attributes) : '')
+  const shell = readFileSync(installer, 'utf8')
+  for (const [, name] of shell.matchAll(/(scripts\/[\w/.-]+)\) echo ([a-f0-9]{64})/g)) {
+    const original = readFileSync(new URL(`../../../${name}`, import.meta.url))
+    const blob = runGit(['hash-object', '-w', '--stdin'], original).toString().trim()
+    const checkout = runGit(['cat-file', '--filters', '--path=' + name, blob])
+    assert.equal(createHash('sha256').update(checkout).digest('hex'), createHash('sha256').update(original).digest('hex'), name)
+  }
+})
+
 test('failed uv download is a failed prerequisite, without an installed message', unix, t => {
   const result = bash('curl() { return 22; }; ensure_uv', { HOME: fixture(t), PATH: '/usr/bin:/bin:/usr/sbin:/sbin' })
   assert.notEqual(result.status, 0, result.stdout + result.stderr)
