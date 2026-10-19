@@ -353,9 +353,11 @@ static napi_value ReleaseLock(napi_env env, napi_callback_info info) {
 #include "local-pipe.h"
 #include "private-file.h"
 #include "user-path.h"
+#include "install-filesystem.h"
 
 static napi_value Initialize(napi_env env, napi_value exports) {
   napi_property_descriptor methods[] = {
+    {"inspectInstallFilesystem", nullptr, InstallFilesystemCall, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"inspectProcess", nullptr, InspectCall, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"listProcessIds", nullptr, PidsCall, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"tryFileLock", nullptr, TryLock, nullptr, nullptr, nullptr, napi_default, nullptr},

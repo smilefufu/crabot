@@ -2,6 +2,8 @@
 // claim release signing/notarization; final installers require the P6/P7 gates.
 import { promises as fs, constants } from 'node:fs'
 import path from 'node:path'
+import { randomUUID } from 'node:crypto'
+import { sealDesktopPayload } from '../lib/desktop-payload.mjs'
 import { fileURLToPath } from 'node:url'
 import { createRequire } from 'node:module'
 import { execFileSync } from 'node:child_process'
@@ -15,6 +17,8 @@ import { verifyDesktopAsar } from '../lib/desktop-asar.mjs'
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 const args = new Map(process.argv.slice(2).map(value => { const split = value.indexOf('='); return [value.slice(0, split), value.slice(split + 1)] }))
 if (args.get('--candidate') !== 'true' || !args.get('--core') || !args.get('--out')) throw new Error('Usage: package-application.mjs --candidate=true --core=<sealed-core> --out=<new-project-directory>')
+const paired = args.get('--layout') === 'paired'
+if (args.has('--layout') && !paired) throw new Error('Unsupported candidate layout')
 const core = await fs.realpath(path.resolve(args.get('--core'))), projectDir = path.resolve(args.get('--out'))
 if (!path.relative(root, projectDir).startsWith('.desktop-build' + path.sep)) throw new Error('Candidate project must be under .desktop-build')
 try { await fs.lstat(projectDir); throw new Error('Candidate project already exists') } catch (error) { if (error.code !== 'ENOENT') throw error }
@@ -34,6 +38,13 @@ const appIcon = path.join(root, 'crabot-desktop/assets/app.png')
 await fs.mkdir(path.dirname(projectDir), { recursive: true })
 await fs.mkdir(projectDir)
 await fs.mkdir(appDir)
+const selection = { schema_version: 1, version: release.version, gui_id: randomUUID(), core_id: release.inventory_sha256 }
+const offline = path.join(projectDir, 'offline'), pairedCore = path.join(offline, 'core')
+if (paired) {
+  await fs.mkdir(offline)
+  await fs.cp(core, pairedCore, { recursive: true, verbatimSymlinks: true, mode: constants.COPYFILE_FICLONE })
+  await fs.writeFile(path.join(pairedCore, 'desktop-host.json'), JSON.stringify({ schema_version: 2, platform: process.platform, arch: process.arch }) + '\n')
+}
 await fs.cp(path.join(root, 'crabot-desktop/dist'), path.join(appDir, 'dist'), { recursive: true })
 await fs.mkdir(path.join(projectDir, 'crabot-client'))
 for (const file of ['package.json', 'pnpm-lock.yaml']) await fs.copyFile(path.join(root, 'crabot-client', file), path.join(projectDir, 'crabot-client', file))
@@ -75,11 +86,14 @@ const configuration = {
   afterPack: async context => {
     const resources = process.platform === 'darwin' ? path.join(context.appOutDir, 'Crabot.app/Contents/Resources') : path.join(context.appOutDir, 'resources')
     packagedResources = resources
-    const packagedCore = path.join(resources, 'core')
+    const packagedCore = paired ? pairedCore : path.join(resources, 'core')
     // Electron's resource matcher prunes root node_modules and dotfiles. The
     // standalone core is an opaque verified payload, not an Electron app tree.
-    await fs.cp(core, packagedCore, { recursive: true, verbatimSymlinks: true, mode: constants.COPYFILE_FICLONE })
-    await fs.writeFile(path.join(packagedCore, 'desktop-host.json'), JSON.stringify({ schema_version: 1, platform: process.platform, arch: process.arch }) + '\n')
+    if (paired) await fs.writeFile(path.join(resources, 'desktop-release.json'), JSON.stringify(selection) + '\n')
+    else {
+      await fs.cp(core, packagedCore, { recursive: true, verbatimSymlinks: true, mode: constants.COPYFILE_FICLONE })
+      await fs.writeFile(path.join(packagedCore, 'desktop-host.json'), JSON.stringify({ schema_version: 1, platform: process.platform, arch: process.arch }) + '\n')
+    }
     await fs.writeFile(path.join(resources, 'candidate-only.json'), JSON.stringify({ ...release, candidate_only: true }) + '\n')
     product.loadProductRuntime(packagedCore, { required: true, full: true })
     scrapling.loadRuntime(packagedCore, { full: true })
@@ -92,10 +106,10 @@ await build({ projectDir, config: configuration, publish: 'never', targets: Plat
 checkSource()
 if (!packagedResources) throw new Error('Electron builder did not report its packaged resources')
 // Signing/packing must not invalidate immutable core bytes or vendor identity.
-product.loadProductRuntime(path.join(packagedResources, 'core'), { required: true, full: true })
-scrapling.loadRuntime(path.join(packagedResources, 'core'), { full: true })
-computerUse.loadRuntime(path.join(packagedResources, 'core'), { full: true })
-await verifyCoreRelease(path.join(packagedResources, 'core'), { version: release.version })
+product.loadProductRuntime(paired ? pairedCore : path.join(packagedResources, 'core'), { required: true, full: true })
+scrapling.loadRuntime(paired ? pairedCore : path.join(packagedResources, 'core'), { full: true })
+computerUse.loadRuntime(paired ? pairedCore : path.join(packagedResources, 'core'), { full: true })
+await verifyCoreRelease(paired ? pairedCore : path.join(packagedResources, 'core'), { version: release.version })
 const builderRequire = createRequire(createRequire(require.resolve('electron-builder')).resolve('app-builder-lib/package.json'))
 const asar = builderRequire('@electron/asar')
 verifyDesktopAsar(asar, path.join(packagedResources, 'app.asar'))
@@ -108,7 +122,13 @@ for (const key of [FuseV1Options.RunAsNode, FuseV1Options.EnableNodeOptionsEnvir
   if (fuses[key] !== 48) throw new Error('Packaged Electron executable fuse was not disabled: ' + key)
 }
 if (fuses[FuseV1Options.OnlyLoadAppFromAsar] !== 49) throw new Error('Packaged Electron must load only its ASAR')
-await fs.writeFile(path.join(projectDir, 'packaged-location.json'), JSON.stringify({ schema_version: 1,
+if (paired) {
+  const gui = path.resolve(packagedResources, process.platform === 'darwin' ? '../../..' : '..')
+  await fs.cp(gui, path.join(offline, 'gui'), { recursive: true, verbatimSymlinks: true, mode: constants.COPYFILE_FICLONE })
+  await sealDesktopPayload(offline)
+}
+await fs.writeFile(path.join(projectDir, 'packaged-location.json'), JSON.stringify({ schema_version: paired ? 2 : 1,
   executable: path.relative(projectDir, executable).split(path.sep).join('/'),
-  core: path.relative(projectDir, path.join(packagedResources, 'core')).split(path.sep).join('/') }, null, 2) + '\n')
+  core: path.relative(projectDir, paired ? pairedCore : path.join(packagedResources, 'core')).split(path.sep).join('/'),
+  ...(paired ? { payload: 'offline' } : {}) }, null, 2) + '\n')
 console.log('Unpacked development candidate created; final signing, installer and update acceptance remain required.')

@@ -17,30 +17,37 @@ function inside(relative) {
   assert.ok(from && from !== '..' && !from.startsWith('..' + path.sep) && !path.isAbsolute(from))
   return result
 }
-assert.equal(location.schema_version, 1)
+assert.ok([1, 2].includes(location.schema_version))
 const originalExecutable = inside(location.executable), originalCore = inside(location.core)
-// An app nested under the checkout can silently resolve missing dependencies
-// from ancestor node_modules. Run the exact candidate outside that tree.
-const platformRoot = path.dirname(process.platform === 'darwin'
-  ? path.dirname(path.dirname(originalExecutable)) : originalExecutable)
-for (const file of [originalExecutable, originalCore]) {
-  const relative = path.relative(platformRoot, file)
-  assert.ok(relative && relative !== '..' && !relative.startsWith('..' + path.sep) && !path.isAbsolute(relative))
+const temporary = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'Crabot 打包 ')))
+let executable, core, data
+if (location.schema_version === 2) {
+  // Programmatic backend acceptance; OS installer menus/registration are separate.
+  const { prepareDesktopInstallation, commitDesktopInstallation } = await import('../../scripts/lib/desktop-payload.mjs')
+  const prepared = await prepareDesktopInstallation({ payload: inside(location.payload), installRoot: path.join(temporary, '整体 安装'),
+    progress: phase => console.log('CRABOT_INSTALL_PREPARATION ' + JSON.stringify({ phase })) })
+  const selected = await commitDesktopInstallation(prepared)
+  executable = selected.executable; core = selected.coreRoot; data = selected.dataDir
+} else {
+  // An app nested under the checkout can silently resolve missing dependencies.
+  const platformRoot = path.dirname(process.platform === 'darwin' ? path.dirname(path.dirname(originalExecutable)) : originalExecutable)
+  for (const file of [originalExecutable, originalCore]) {
+    const relative = path.relative(platformRoot, file)
+    assert.ok(relative && relative !== '..' && !relative.startsWith('..' + path.sep) && !path.isAbsolute(relative))
+  }
+  const relocated = path.join(temporary, path.basename(platformRoot))
+  try { await fs.rename(platformRoot, relocated) }
+  catch (error) {
+    if (error.code !== 'EXDEV') throw error
+    await fs.cp(platformRoot, relocated, { recursive: true, verbatimSymlinks: true, mode: constants.COPYFILE_FICLONE })
+  }
+  executable = path.join(relocated, path.relative(platformRoot, originalExecutable))
+  core = path.join(relocated, path.relative(platformRoot, originalCore)); data = path.join(temporary, '实例 数据')
 }
-const temporary = await fs.mkdtemp(path.join(tmpdir(), 'Crabot 打包 '))
-const relocated = path.join(temporary, path.basename(platformRoot))
-try { await fs.rename(platformRoot, relocated) }
-catch (error) {
-  if (error.code !== 'EXDEV') throw error
-  await fs.cp(platformRoot, relocated, { recursive: true, verbatimSymlinks: true, mode: constants.COPYFILE_FICLONE })
-}
-const executable = path.join(relocated, path.relative(platformRoot, originalExecutable))
-const core = path.join(relocated, path.relative(platformRoot, originalCore))
 const fromCheckout = path.relative(project, core)
 assert.ok(path.isAbsolute(fromCheckout) || fromCheckout.startsWith('..' + path.sep))
 const { verifyCoreRelease } = await import(pathToFileURL(path.join(core, 'scripts/lib/core-release.mjs')))
 await verifyCoreRelease(core)
-const data = path.join(temporary, '实例 数据')
 const env = { ...process.env, DATA_DIR: data }
 delete env.ELECTRON_RUN_AS_NODE; delete env.NODE_OPTIONS; delete env.NODE_PATH; delete env.CRABOT_DEV; delete env.CRABOT_PORT_OFFSET
 const node = path.join(core, process.platform === 'win32' ? '.product-runtime/node/node.exe' : '.product-runtime/node/bin/node')
@@ -116,6 +123,7 @@ try {
   assert.equal((await inspectInstance()).state, 'stopped')
   gui.child.kill('SIGKILL'); await gui.exited()
   console.log('CRABOT_PACKAGED_BOOT ' + JSON.stringify({ platform: process.platform, arch: process.arch,
+    paired_offline_install: location.schema_version === 2, os_install_registration: false,
     packaged_asar_native_auth: true, installed_core_shared_with_cli: true, gui_crash_preserves_core: true, reattach_same_generation: true,
     cli_stop_stays_stopped: true, unicode_spaced_data: true, outside_checkout: true, registered_bundled_cli: true, release_signed: false }))
 } catch (error) {

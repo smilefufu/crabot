@@ -43,7 +43,9 @@ function readDesktopInstallation(root) {
 }
 function readDesktopSelection(root) {
   try {
-    const installation = readDesktopInstallation(root), selection = json(path.join(installation.root, 'current-release.json'), true)
+    const installation = readDesktopInstallation(root)
+    if (present(path.join(installation.root, '.desktop-installing.json'))) fail()
+    const selection = json(path.join(installation.root, 'current-release.json'), true)
     if (!keys(selection, ['schema_version', 'version', 'gui_id', 'core_id']) || selection.schema_version !== 1
       || !version(selection.version) || !uuid(selection.gui_id) || !digest(selection.core_id)) fail()
     const serialized = JSON.stringify({ schema_version: 1, version: selection.version, gui_id: selection.gui_id, core_id: selection.core_id }) + '\n'
@@ -80,6 +82,7 @@ function locateDesktopCore(coreRoot) {
   return selected
 }
 function locateDesktopGui(resources) {
+  resources = fs.realpathSync.native(resources)
   const guiRoot = path.resolve(resources, process.platform === 'darwin' ? '../../..' : '..')
   const root = path.resolve(guiRoot, '../../..')
   const registered = present(path.join(root, 'desktop-installation.json')) || present(path.join(root, 'current-release.json'))

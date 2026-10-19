@@ -11,6 +11,7 @@ function sameProcess(expected, actual) {
 
 module.exports = { ...native, sameProcess,
   inspectProcess: native.inspectProcess,
+  inspectInstallFilesystem: native.inspectInstallFilesystem,
   listProcessIds: native.listProcessIds,
   tryFileLock: native.tryFileLock,
   releaseFileLock: native.releaseFileLock,

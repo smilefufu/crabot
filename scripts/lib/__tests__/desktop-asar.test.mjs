@@ -12,7 +12,8 @@ const asar = builderRequire('@electron/asar')
 async function fixture(t, missingTray = false) {
   const parent = await fs.mkdtemp(path.join(tmpdir(), 'Crabot ASAR 中文 ')), source = path.join(parent, 'source'), archive = path.join(parent, 'app.asar')
   t.after(() => fs.rm(parent, { recursive: true, force: true }))
-  const files = { 'dist/main.js': 'export{}', 'dist/preload.cjs': 'module.exports={}', 'dist/assets/tray.png': 'fixture tray bytes',
+  const files = { 'dist/main.js': 'export{}', 'dist/bootstrap/scripts/lib/desktop-installation.cjs': 'module.exports={}',
+    'dist/bootstrap/scripts/lib/process-identity.cjs': 'module.exports={}', 'dist/bootstrap/crabot-native/build/Release/crabot-native.node': 'native fixture', 'dist/preload.cjs': 'module.exports={}', 'dist/assets/tray.png': 'fixture tray bytes',
     'node_modules/crabot-client/dist/index.js': 'export{}', 'node_modules/zod/package.json': '{}', 'node_modules/electron-updater/package.json': '{}' }
   if (missingTray) delete files['dist/assets/tray.png']
   for (const [file, bytes] of Object.entries(files)) {

@@ -104,3 +104,13 @@ test('Unix local peer is obtained from the OS, not from client-reported PID', { 
     rmSync(directory, { recursive: true, force: true })
   }
 })
+
+test('installation filesystem facts come from the actual OS without changing target permissions', t => {
+  const directory = mkdtempSync(join(tmpdir(), 'crabot-install-volume-'))
+  t.after(() => rmSync(directory, { recursive: true, force: true }))
+  const before = statSync(directory), facts = identity.inspectInstallFilesystem(directory)
+  assert.equal(typeof facts.supported, 'boolean'); assert.ok(facts.filesystem)
+  assert.deepEqual(statSync(directory), before)
+  for (const invalid of ['', 'bad\0path', 1, null]) assert.throws(() => identity.inspectInstallFilesystem(invalid), { code: 'CRABOT_INSTALL_FILESYSTEM' })
+  assert.throws(() => identity.inspectInstallFilesystem(join(directory, 'missing')), { code: 'CRABOT_INSTALL_FILESYSTEM' })
+})
