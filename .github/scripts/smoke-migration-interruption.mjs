@@ -18,6 +18,7 @@ const { assertVersionMaintenanceAllowsStart, readVersionMaintenance } = await lo
 const { verifyBackup } = await load('scripts/upgrade-lib/scoped-data.mjs')
 const { default: identity } = await load('scripts/lib/process-identity.cjs')
 const { default: management } = await load('scripts/lib/desktop-management.cjs')
+const { default: processExit } = await load('scripts/lib/known-process-exit.cjs')
 const { DesktopController } = await load('crabot-desktop/dist/controller.js')
 const parentDir = realpathSync(await fs.mkdtemp(path.join(tmpdir(), 'Crabot schema fence ')))
 const data = management.ensurePrivateDataRoot(path.join(parentDir, 'data')), installation = path.join(parentDir, 'installation')
@@ -40,7 +41,16 @@ async function source(version, additions = {}) {
   await writeCoreRelease(root, { schema_version: 1, version, platform: process.platform, arch: process.arch, commit: '1'.repeat(40), source_dirty: false })
   return root
 }
-let parent, childIdentity, controller
+async function waitForControlledExit(expected) {
+  const deadline = Date.now() + 30000
+  for (;;) {
+    const observed = processExit.probeKnownProcessExit([expected])
+    if (observed.state === 'stopped') return
+    assert.ok(Date.now() < deadline, `Controlled migration exit remains ${observed.state}`)
+    await new Promise(resolve => setTimeout(resolve, 20))
+  }
+}
+let parent, childIdentity, controller, primaryFailure
 try {
   const old = await installStandaloneCli({ sourceRoot: await source('1.2.3'), installRoot: installation, dataDir: data })
   const admin = path.join(data, 'admin'); await fs.mkdir(admin); await fs.writeFile(path.join(admin, 'SCHEMA_VERSION'), 'v1'); await fs.writeFile(path.join(admin, 'preferences'), 'before')
@@ -74,11 +84,7 @@ try {
   await assert.rejects(controller.recoverVersion(), { code: 'CRABOT_MIGRATION_INTERRUPTED' })
   assert.equal(starts, 0)
   await fs.writeFile(path.join(control, 'finish'), 'finish-this-one-controlled-script')
-  const childDeadline = Date.now() + 30000
-  while (identity.sameProcess(childIdentity, identity.inspectProcess(childIdentity.pid))) {
-    assert.ok(Date.now() < childDeadline, 'The controlled migration did not settle')
-    await new Promise(resolve => setTimeout(resolve, 20))
-  }
+  await waitForControlledExit(childIdentity)
   await assert.rejects(controller.recoverVersion(), { code: 'CRABOT_MIGRATION_INTERRUPTED' })
   assert.equal(starts, 0)
   assert.equal(await fs.readFile(path.join(admin, 'SCHEMA_VERSION'), 'utf8'), 'v1')
@@ -95,9 +101,23 @@ try {
   await assert.rejects(fs.lstat(data + '.desktop-backups'), { code: 'ENOENT' })
   console.log('CRABOT_SCHEMA_FENCE ' + JSON.stringify({ platform: process.platform, controlled_payload: true, orphan_fault_injected: windows, parent_crash: true, active_child_start_blocked: true,
     gui_recovery_replay_blocked_before_and_after_exit: true, script_invocations: 1, schema_marker_unchanged: true, backup_retained: true, business_mm_started: false }))
+} catch (error) {
+  primaryFailure = error
+  throw error
 } finally {
-  controller?.close()
-  if (parent && parent.exitCode === null && parent.signalCode === null) { const ended = once(parent, 'exit'); parent.kill('SIGKILL'); await ended }
-  if (childIdentity && identity.sameProcess(childIdentity, identity.inspectProcess(childIdentity.pid))) process.kill(childIdentity.pid, 'SIGKILL')
-  await fs.rm(parentDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+  try {
+    controller?.close()
+    if (parent && parent.exitCode === null && parent.signalCode === null) { const ended = once(parent, 'exit'); parent.kill('SIGKILL'); await ended }
+    if (childIdentity) {
+      if (processExit.probeKnownProcessExit([childIdentity]).state === 'running') {
+        assert.ok(identity.sameProcess(childIdentity, identity.inspectProcess(childIdentity.pid)), 'Controlled child identity changed before cleanup')
+        process.kill(childIdentity.pid, 'SIGKILL')
+      }
+      await waitForControlledExit(childIdentity)
+    }
+    await fs.rm(parentDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+  } catch (cleanupFailure) {
+    if (primaryFailure) throw new AggregateError([primaryFailure, cleanupFailure], 'Migration interruption and fixture cleanup failed')
+    throw cleanupFailure
+  }
 }
