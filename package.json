@@ -10,6 +10,7 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "@electron/asar": "3.4.1",
     "crabot-client": "file:./crabot-client",
     "commander": "^13.0.0",
     "js-yaml": "^4.2.0",

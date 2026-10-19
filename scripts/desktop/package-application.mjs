@@ -46,6 +46,7 @@ if (paired) {
   await fs.writeFile(path.join(pairedCore, 'desktop-host.json'), JSON.stringify({ schema_version: 2, platform: process.platform, arch: process.arch }) + '\n')
 }
 await fs.cp(path.join(root, 'crabot-desktop/dist'), path.join(appDir, 'dist'), { recursive: true })
+if (paired) await fs.writeFile(path.join(appDir, 'dist/desktop-release.json'), JSON.stringify(selection) + '\n')
 await fs.mkdir(path.join(projectDir, 'crabot-client'))
 for (const file of ['package.json', 'pnpm-lock.yaml']) await fs.copyFile(path.join(root, 'crabot-client', file), path.join(projectDir, 'crabot-client', file))
 await fs.cp(path.join(root, 'crabot-client/dist'), path.join(projectDir, 'crabot-client/dist'), { recursive: true })
@@ -115,7 +116,7 @@ computerUse.loadRuntime(paired ? pairedCore : path.join(packagedResources, 'core
 await verifyCoreRelease(paired ? pairedCore : path.join(packagedResources, 'core'), { version: release.version })
 const builderRequire = createRequire(createRequire(require.resolve('electron-builder')).resolve('app-builder-lib/package.json'))
 const asar = builderRequire('@electron/asar')
-verifyDesktopAsar(asar, path.join(packagedResources, 'app.asar'))
+verifyDesktopAsar(asar, path.join(packagedResources, 'app.asar'), process.platform, paired ? selection : undefined)
 
 const executable = process.platform === 'darwin' ? path.join(packagedResources, '../MacOS/Crabot')
   : path.join(packagedResources, '..', process.platform === 'win32' ? 'Crabot.exe' : 'crabot-desktop')

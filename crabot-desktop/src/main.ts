@@ -54,14 +54,24 @@ async function quit(): Promise<boolean> {
 function show() { window?.show(); window?.focus() }
 
 async function boot() {
+  // Resolve the protected GUI identity before external code or privileged UI.
+  // A failed pair binding must not fall back to Resources/core.
+  const verifier = app.isPackaged ? createRequire(import.meta.url)('./bootstrap/scripts/lib/desktop-installation.cjs') : null
+  const pin = verifier ? await readFile(path.join(directory, 'desktop-release.json'), 'utf8').catch(error => {
+    if (error.code === 'ENOENT') return undefined
+    throw error
+  }) : undefined
+  const discovered = verifier?.locateDesktopGui(process.resourcesPath)
+  if (pin !== undefined || discovered) {
+    const installation = verifier.locatePinnedDesktopGui(process.resourcesPath, pin)
+    const { verifyCoreRelease } = await import(pathToFileURL(path.join(directory, 'bootstrap/scripts/lib/core-release.mjs')).href)
+    const release = await verifyCoreRelease(installation.coreRoot, { version: installation.selection.version })
+    if (release.inventory_sha256 !== installation.selection.core_id) throw Object.assign(new Error('Protected Core identity changed'), { code: 'CRABOT_CORE_INTEGRITY' })
+    verifyBinding = () => { verifier.locatePinnedDesktopGui(process.resourcesPath, pin) }
+    coreRoot = installation.coreRoot
+    verifier.applyDesktopEnvironment(installation)
+  }
   try {
-    const verifier = app.isPackaged ? createRequire(import.meta.url)('./bootstrap/scripts/lib/desktop-installation.cjs') : null
-    const installation = verifier?.locateDesktopGui(process.resourcesPath)
-    if (installation) {
-      verifyBinding = () => { verifier.locateDesktopGui(process.resourcesPath) }
-      coreRoot = installation.coreRoot
-      verifier.applyDesktopEnvironment(installation)
-    }
     const { resolveCliDataDir } = await loadCore('scripts/lib/instance.mjs')
     dataRoot = path.resolve(resolveCliDataDir({ homeDir: path.join(homedir(), '.crabot') }))
     const management = (await loadCore('scripts/lib/desktop-management.cjs')).default
@@ -212,4 +222,9 @@ app.on('activate', show)
 app.on('before-quit', event => { if (!quitting) { event.preventDefault(); void quit() } })
 app.on('window-all-closed', () => { /* Tray owns the application lifetime. */ })
 app.on('will-quit', () => { updates?.close(); artifacts?.close(); controller?.close(); tray?.destroy() })
-void boot().catch(async () => { await dialog.showMessageBox({ type: 'error', message: 'Crabot 界面启动失败，请修复安装。' }); quitting = true; app.quit() })
+void boot().catch(async error => {
+  await app.whenReady()
+  await dialog.showMessageBox({ type: 'error', message: ['CRABOT_DESKTOP_INSTALLATION', 'CRABOT_CORE_INTEGRITY'].includes(error?.code)
+    ? 'Crabot 安装位置、内置文件或版本对未通过校验，请使用同版或更高版安装包修复。已有数据保留。' : 'Crabot 界面启动失败，请修复安装。' })
+  quitting = true; app.quit()
+})

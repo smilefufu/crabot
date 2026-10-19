@@ -92,6 +92,13 @@ function locateDesktopGui(resources) {
   if (fs.realpathSync.native(resources) !== selected.resources || guiRoot !== selected.guiRoot) fail()
   return selected
 }
+// The caller reads this pin from its own protected ASAR before importing Core.
+// Resources metadata remains a locator, never a replacement for that pin.
+function locatePinnedDesktopGui(resources, pinText) {
+  const selected = locateDesktopGui(resources)
+  if (!selected || typeof pinText !== 'string' || pinText !== JSON.stringify(selected.selection) + '\n') fail()
+  return selected
+}
 function applyDesktopEnvironment(installation, env = process.env) {
   try {
     if (env.CRABOT_DEV === 'true' || Number(env.CRABOT_PORT_OFFSET || 0) !== 0
@@ -103,4 +110,4 @@ function applyDesktopEnvironment(installation, env = process.env) {
   env.CRABOT_DEV = 'false'
   env.CRABOT_PRODUCT_REQUIRED = '1'
 }
-module.exports = { readDesktopInstallation, readDesktopSelection, locateDesktopCore, locateDesktopGui, applyDesktopEnvironment }
+module.exports = { readDesktopInstallation, readDesktopSelection, locateDesktopCore, locateDesktopGui, locatePinnedDesktopGui, applyDesktopEnvironment }

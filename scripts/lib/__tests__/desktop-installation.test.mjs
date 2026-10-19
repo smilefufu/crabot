@@ -169,3 +169,24 @@ test('desktop binding pins its Core and zero offset before stale CLI instance hi
   assert.equal(resolveOffset(home, env), 0); assert.equal(env.CRABOT_PORT_OFFSET, '0')
   assert.equal(env.CRABOT_HOME, selected.coreRoot); assert.equal(env.CRABOT_DEV, 'false')
 })
+
+test('a paired GUI must match its own protected ASAR declaration before any external Core can be used', async t => {
+  const f = await fixture(t), pin = JSON.stringify(f.selection) + '\n'
+  assert.equal(desktop.locatePinnedDesktopGui(f.resources, pin).coreRoot, f.coreRoot)
+  for (const text of [undefined, '', JSON.stringify(f.selection), JSON.stringify({ ...f.selection, gui_id: randomUUID() }) + '\n',
+    JSON.stringify({ ...f.selection, core_id: 'f'.repeat(64) }) + '\n', JSON.stringify({ ...f.selection, extra: true }) + '\n']) {
+    assert.throws(() => desktop.locatePinnedDesktopGui(f.resources, text), { code: 'CRABOT_DESKTOP_INSTALLATION' })
+  }
+  assert.deepEqual(await fs.readdir(path.join(f.root, 'data')), [])
+})
+test('changing outer pair declarations and selector together cannot change a protected GUI identity', async t => {
+  const f = await fixture(t), pin = JSON.stringify(f.selection) + '\n'
+  const changed = { ...f.selection, gui_id: randomUUID() }, moved = path.join(f.root, 'app/releases', changed.gui_id)
+  await fs.rename(f.guiRoot, moved)
+  const resources = path.join(moved, path.relative(f.guiRoot, f.resources))
+  await fs.writeFile(path.join(resources, 'desktop-release.json'), JSON.stringify(changed))
+  await fs.writeFile(path.join(f.root, 'current-release.json'), JSON.stringify(changed) + '\n')
+  assert.deepEqual(desktop.locateDesktopGui(resources).selection, changed)
+  assert.throws(() => desktop.locatePinnedDesktopGui(resources, pin), { code: 'CRABOT_DESKTOP_INSTALLATION' })
+  assert.deepEqual(await fs.readdir(path.join(f.root, 'data')), [])
+})

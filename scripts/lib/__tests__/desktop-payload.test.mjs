@@ -7,6 +7,8 @@ import { randomUUID, createHash } from 'node:crypto'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { createRequire } from 'node:module'
+import asar from '@electron/asar'
 import identity from '../process-identity.cjs'
 import installation from '../desktop-installation.cjs'
 import { writeCoreRelease, verifyCoreRelease } from '../core-release.mjs'
@@ -50,6 +52,15 @@ async function fixture(t, { version = '1.2.3', schema, functional = false } = {}
       executables: Object.fromEntries(['node', 'python', 'uv', 'bash', 'git', 'rg'].map(name => [name, relativeNode])),
       path_entries: [directory], python_home: directory, memory_packages: directory, seed_wheels: [],
       files: { [relativeNode]: { size: (await fs.stat(node)).size, sha256: createHash('sha256').update(await fs.readFile(node)).digest('hex') } } }))
+    // Keep the real parser self-contained in this minimal Node-only Core.
+    const require = createRequire(import.meta.url)
+    const tool = createRequire(new URL('../../../crabot-desktop/package.json', import.meta.url))
+    const { build } = await import(pathToFileURL(tool.resolve('esbuild')).href)
+    const parser = path.join(core, 'node_modules/@electron/asar')
+    await fs.mkdir(parser, { recursive: true })
+    await build({ entryPoints: [require.resolve('@electron/asar')], outfile: path.join(parser, 'index.cjs'), bundle: true,
+      platform: 'node', format: 'cjs', external: ['original-fs'], logLevel: 'silent' })
+    await fs.writeFile(path.join(parser, 'package.json'), JSON.stringify({ name: '@electron/asar', version: '3.4.1', main: 'index.cjs' }))
     await fs.writeFile(path.join(core, 'crabot-fixture/upgrade/scope.mjs'), `export const migrationScope=()=>({reads:[],writes:['fixture/content','fixture/executions']})`)
     await fs.writeFile(path.join(core, 'crabot-fixture/upgrade/from_v1_to_v2.mjs'),
       `import fs from 'node:fs';import path from 'node:path';const root=process.argv.find(arg=>arg.startsWith('--data-dir=')).slice(11);fs.writeFileSync(path.join(root,'content'),'converted by bundled Node');fs.appendFileSync(path.join(root,'executions'),'once\\n');`)
@@ -58,7 +69,11 @@ async function fixture(t, { version = '1.2.3', schema, functional = false } = {}
   const release = await verifyCoreRelease(core), selection = { schema_version: 1, version, gui_id: randomUUID(), core_id: release.inventory_sha256 }
   await fs.writeFile(path.join(core, 'desktop-host.json'), JSON.stringify({ schema_version: 2, platform: process.platform, arch: process.arch }))
   await fs.mkdir(path.dirname(exe), { recursive: true }); await fs.mkdir(resources, { recursive: true })
-  await fs.writeFile(exe, 'GUI fixture, never launched'); await fs.writeFile(path.join(resources, 'app.asar'), 'opaque GUI fixture bytes')
+  await fs.writeFile(exe, 'GUI fixture, never launched')
+  const asarInput = path.join(parent, 'asar-input')
+  await fs.mkdir(path.join(asarInput, 'dist'), { recursive: true })
+  await fs.writeFile(path.join(asarInput, 'dist/desktop-release.json'), JSON.stringify(selection) + '\n')
+  await asar.createPackage(asarInput, path.join(resources, 'app.asar'))
   const helper = path.join(resources, 'app.asar.unpacked/dist/bootstrap/crabot-native/build/Release/crabot-native.node')
   await fs.mkdir(path.dirname(helper), { recursive: true }); await fs.copyFile(new URL('../../../crabot-native/build/Release/crabot-native.node', import.meta.url), helper)
   await fs.writeFile(path.join(resources, 'desktop-release.json'), JSON.stringify(selection))

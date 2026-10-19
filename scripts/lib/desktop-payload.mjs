@@ -1,6 +1,8 @@
 // Offline byte integrity and fresh-install mutation. Read-only program checks
 // also serve prepared updates; the install entry never handles existing data.
 import physicalFs from './physical-fs.cjs'
+import asar from '@electron/asar'
+import { verifyDesktopPairAsar } from './desktop-asar.mjs'
 import path from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import identity from './process-identity.cjs'
@@ -87,6 +89,7 @@ export async function sealDesktopPayload(directory) {
   if (selection.schema_version !== 1 || selection.version !== core.version || selection.core_id !== core.inventory_sha256
     || !/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(selection.gui_id)
     || Object.keys(selection).join(',') !== 'schema_version,version,gui_id,core_id') fail('GUI 与 Core 载荷未成对。')
+  verifyDesktopPairAsar(asar, path.join(resources(path.join(directory, 'gui')), 'app.asar'), selection)
   const gui = await guiInventory(path.join(directory, 'gui'))
   const record = { schema_version: 1, platform: process.platform, arch: process.arch, selection, gui }
   await fs.writeFile(path.join(directory, 'desktop-payload.json'), JSON.stringify(record) + '\n', { flag: 'wx' })
@@ -103,6 +106,7 @@ export async function verifyDesktopPrograms(coreRoot, guiRoot, record, { signal 
     || !/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(pinned.gui_id)
     || Object.keys(pinned).join(',') !== 'schema_version,version,gui_id,core_id'
     || !same(await guiInventory(guiRoot, signal), record.gui)) fail('离线安装载荷不完整或已改变。', 'CRABOT_CORE_INTEGRITY')
+  verifyDesktopPairAsar(asar, path.join(resources(guiRoot), 'app.asar'), pinned)
   const coreFiles = JSON.parse(await fs.readFile(path.join(coreRoot, 'core-files.json'), 'utf8')).files
   const bytes = [...Object.values(coreFiles), ...Object.values(record.gui)].reduce((sum, file) => sum + BigInt(file.size ?? 0), 0n)
   signal?.throwIfAborted()

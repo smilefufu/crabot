@@ -8,6 +8,9 @@ importers:
 
   .:
     dependencies:
+      '@electron/asar':
+        specifier: 3.4.1
+        version: 3.4.1
       crabot-client:
         specifier: file:../crabot-client
         version: file:../crabot-client

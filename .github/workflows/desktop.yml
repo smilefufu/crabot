@@ -114,6 +114,9 @@ jobs:
           node --test scripts/lib/__tests__/desktop-session.test.mjs
           (cd scripts/lib && node node_modules/vitest/vitest.mjs run __tests__/check.test.mjs __tests__/mm-probe.test.mjs --maxWorkers=1 --minWorkers=1)
           node --test scripts/lib/__tests__/admin-data-compat.test.mjs scripts/lib/__tests__/core-preparation.test.mjs scripts/lib/__tests__/workspace-data-compat.test.mjs scripts/lib/__tests__/core-preflight.test.mjs scripts/lib/__tests__/installer-compat.test.mjs
+      - name: Installation and migration regressions
+        timeout-minutes: 15
+        run: |
           node --test scripts/lib/__tests__/desktop-asar.test.mjs scripts/lib/__tests__/archive-core.test.mjs scripts/lib/__tests__/core-release.test.mjs scripts/lib/__tests__/stage-core-imports.test.mjs scripts/lib/__tests__/desktop-installation.test.mjs scripts/lib/__tests__/desktop-payload.test.mjs scripts/lib/__tests__/cli-launcher.test.mjs scripts/lib/__tests__/cli-installation.test.mjs
           node --test scripts/lib/__tests__/legacy-desktop.test.mjs scripts/lib/__tests__/legacy-entry-fence.test.mjs scripts/lib/__tests__/legacy-system-*.test.mjs
           node --test scripts/lib/__tests__/legacy-mm-rpc.test.mjs
@@ -155,11 +158,11 @@ jobs:
       - name: Real sandboxed Electron window boundaries on Linux
         if: runner.os == 'Linux'
         working-directory: crabot-desktop
-        run: xvfb-run -a node --test --test-concurrency=1 tests/electron-boundary.test.mjs tests/installer-progress.test.mjs tests/paired-relaunch.test.mjs 2>&1 | tee ../.desktop-build/electron-boundary.log
+        run: xvfb-run -a node --test --test-concurrency=1 tests/electron-boundary.test.mjs tests/installer-progress.test.mjs tests/paired-relaunch.test.mjs tests/paired-binding.test.mjs 2>&1 | tee ../.desktop-build/electron-boundary.log
       - name: Real sandboxed Electron window boundaries on macOS and Windows
         if: runner.os != 'Linux'
         working-directory: crabot-desktop
-        run: node --test --test-concurrency=1 tests/electron-boundary.test.mjs tests/installer-progress.test.mjs tests/paired-relaunch.test.mjs 2>&1 | tee ../.desktop-build/electron-boundary.log
+        run: node --test --test-concurrency=1 tests/electron-boundary.test.mjs tests/installer-progress.test.mjs tests/paired-relaunch.test.mjs tests/paired-binding.test.mjs 2>&1 | tee ../.desktop-build/electron-boundary.log
       - name: Build locked browser and computer-use resources
         if: steps.scope.outputs.full_runtime == 'true'
         run: |
