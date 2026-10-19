@@ -46,7 +46,7 @@ export function prepareCoreEnvironment({ root, dataDir, source = process.env, lo
 export async function applyStartupMigrations(root, dataDir, env, log = () => {}, { outputFd } = {}) {
   assertVersionMaintenanceAllowsStart(dataDir)
   const pending = verifyDataCompatibility(root, dataDir)
-  if (readVersionMaintenance(dataDir)?.backup) await assertLocalMigrationData(dataDir, pending)
+  if (readVersionMaintenance(dataDir)?.backup) await assertLocalMigrationData(dataDir, pending, root)
   const result = await runMigrations(root, dataDir, (script, directory, context) => runScript(script, directory, { ...context, root, env, outputFd }),
     { info: log, warn: log, error: log }, { lockHeld: true })
   if (!result.ok) throw Object.assign(new Error(`Migration failed: ${result.failedModule}/${result.failedAt}`), { code: 'CRABOT_MIGRATION_FAILED' })

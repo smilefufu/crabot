@@ -9,6 +9,8 @@ import management from './desktop-management.cjs'
 import identity from './process-identity.cjs'
 import { cliLockToken } from './cli-lock.mjs'
 import { inspectInstance } from './instance-runtime.mjs'
+import { describeMigration } from '../upgrade-lib/migration-transaction.mjs'
+import { scopedPath } from '../upgrade-lib/scoped-data.mjs'
 
 const excluded = new Set(['workspaces', 'agent-venv', 'agent-environments', 'agent-tools', 'runtime-bases', 'mcp-envs', 'runtime-cache', 'logs', 'desktop-profile',
   'system-control', 'cli.lock', 'startup-preflight.json', 'mm.pid', 'instance-runtime.json', 'desktop-maintenance.json', '.DS_Store'])
@@ -138,7 +140,7 @@ export async function verifyMaintenanceBackup(directory, expectedHash) {
 
 // Backup deliberately does not follow references. Only maintenance migrations use
 // this stopped/locked preflight; normal source startup keeps its existing behavior.
-export async function assertLocalMigrationData(dataDir, migrations) {
+export async function assertLocalMigrationData(dataDir, migrations, coreRoot) {
   if (!migrations.length) return
   dataDir = realpathSync(dataDir)
   if (!cliLockToken(path.join(dataDir, 'cli.lock')) || inspectInstance(dataDir).state !== 'stopped') {
@@ -146,14 +148,23 @@ export async function assertLocalMigrationData(dataDir, migrations) {
   }
   const unsupported = () => fail('CRABOT_BACKUP_SCOPE_UNVERIFIED', '迁移数据含无法由当前备份覆盖的链接或特殊文件；未继续迁移，请保留原部署。')
   async function inspect(file) {
-    const stat = await fs.lstat(file)
+    const stat = await fs.lstat(file).catch(error => { if (error.code === 'ENOENT') return null; throw error })
+    if (!stat) return // A declared new output is covered by its original absence.
     if (stat.isSymbolicLink()) unsupported()
     if (stat.isDirectory()) {
       for (const entry of await fs.readdir(file)) await inspect(path.join(file, entry))
     } else if (!stat.isFile() || stat.nlink > 1) unsupported()
   }
   for (const migration of migrations) {
-    if (realpathSync(path.dirname(migration.dataDir)) !== dataDir) unsupported()
-    await inspect(path.join(dataDir, path.basename(migration.dataDir)))
+    if (!coreRoot || realpathSync(path.dirname(migration.dataDir)) !== dataDir) unsupported()
+    let description
+    try {
+      description = await describeMigration(path.join(coreRoot, migration.moduleId), migration.dataDir, migration.dataVersion, migration.codeVersion)
+    } catch { unsupported() }
+    for (const name of description.scope.writes) {
+      let file
+      try { file = await scopedPath(dataDir, name) } catch { unsupported() }
+      await inspect(file)
+    }
   }
 }

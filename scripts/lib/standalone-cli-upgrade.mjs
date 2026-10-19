@@ -33,7 +33,7 @@ export async function applyStoppedCliUpgrade({ sourceRoot, targetRoot, dataDir, 
     }
     await stopped(source.id)
     const migrations = verifyDataCompatibility(targetRoot, dataDir) // preflight every module before any data write
-    await assertLocalMigrationData(dataDir, migrations)
+    await assertLocalMigrationData(dataDir, migrations, targetRoot)
     const next = await verifyCoreRelease(targetRoot)
     const record = await beginVersionMaintenance(dataDir, sourceRoot, next.version)
     const backup = await createMaintenanceBackup(dataDir)

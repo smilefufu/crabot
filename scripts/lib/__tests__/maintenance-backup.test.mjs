@@ -96,13 +96,13 @@ for (const interruption of ['concurrent write', 'cancel']) test('an interrupted 
 
 
 test('migration coverage requires the lifecycle lock only when data needs migration', async t => {
-  const f = await fixture(t), pending = [{ dataDir: path.join(f.data, 'admin') }]
+  const f = await fixture(t), pending = [await declaredMigration(f, 'admin', ['admin/provider.json'])]
   await assertLocalMigrationData(f.data, [])
-  await assert.rejects(assertLocalMigrationData(f.data, pending), { code: 'CRABOT_BACKUP_REQUIRES_STOP' })
+  await assert.rejects(assertLocalMigrationData(f.data, pending, f.root), { code: 'CRABOT_BACKUP_REQUIRES_STOP' })
   const lock = await acquireCliLock(f.data, 'coverage-test'); t.after(() => releaseCliLock(lock))
-  await assertLocalMigrationData(f.data, pending)
+  await assertLocalMigrationData(f.data, pending, f.root)
   await fs.writeFile(path.join(f.data, 'mm.pid'), String(process.pid))
-  await assert.rejects(assertLocalMigrationData(f.data, pending), { code: 'CRABOT_BACKUP_REQUIRES_STOP' })
+  await assert.rejects(assertLocalMigrationData(f.data, pending, f.root), { code: 'CRABOT_BACKUP_REQUIRES_STOP' })
 })
 
 for (const kind of ['directory reference', 'hard-linked file']) test('migration never writes unbacked data through ' + kind, async t => {
@@ -111,7 +111,25 @@ for (const kind of ['directory reference', 'hard-linked file']) test('migration 
   if (kind === 'directory reference') await fs.symlink(external, path.join(f.data, 'admin/reference'), process.platform === 'win32' ? 'junction' : 'dir')
   else await fs.link(path.join(external, 'keep'), path.join(f.data, 'admin/reference'))
   const lock = await acquireCliLock(f.data, 'coverage-test'); t.after(() => releaseCliLock(lock))
-  await assert.rejects(assertLocalMigrationData(f.data, [{ dataDir: path.join(f.data, 'admin') }]), { code: 'CRABOT_BACKUP_SCOPE_UNVERIFIED' })
-  await assertLocalMigrationData(f.data, [{ dataDir: path.join(f.data, 'memory') }])
+  await assert.rejects(assertLocalMigrationData(f.data, [await declaredMigration(f, 'admin', ['admin/reference'])], f.root), { code: 'CRABOT_BACKUP_SCOPE_UNVERIFIED' })
+  await assertLocalMigrationData(f.data, [await declaredMigration(f, 'memory', ['memory/db.sqlite'])], f.root)
   assert.equal(await fs.readFile(path.join(external, 'keep'), 'utf8'), 'original')
+})
+
+async function declaredMigration(fixture, module, writes) {
+  const upgrade = path.join(fixture.root, 'crabot-' + module, 'upgrade')
+  await fs.mkdir(upgrade, { recursive: true })
+  await fs.writeFile(path.join(upgrade, 'scope.mjs'), 'export const migrationScope = () => (' + JSON.stringify({ reads: [], writes }) + ')\n')
+  await fs.writeFile(path.join(upgrade, 'from_v0_to_v1.mjs'), '')
+  return { moduleId: 'crabot-' + module, dataDir: path.join(fixture.data, module), dataVersion: null, codeVersion: 'v1' }
+}
+
+test('migration coverage ignores unrelated historical references and inspects only the declared write scope', async t => {
+  const f = await fixture(t), external = path.join(f.root, 'external')
+  await fs.mkdir(external); await fs.writeFile(path.join(external, 'keep'), 'must stay outside migration')
+  await fs.symlink(external, path.join(f.data, 'admin/old-history-reference'), process.platform === 'win32' ? 'junction' : 'dir')
+  const migration = await declaredMigration(f, 'admin', ['admin/provider.json'])
+  const lock = await acquireCliLock(f.data, 'scoped-coverage'); t.after(() => releaseCliLock(lock))
+  await assertLocalMigrationData(f.data, [migration], f.root)
+  assert.equal(await fs.readFile(path.join(external, 'keep'), 'utf8'), 'must stay outside migration')
 })

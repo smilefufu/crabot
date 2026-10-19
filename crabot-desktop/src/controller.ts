@@ -104,7 +104,7 @@ export class DesktopController {
           if (pending.length && maintenance.readVersionMaintenance(this.options.dataRoot)?.phase === 'verifying') {
             throw Object.assign(new Error('An earlier migration attempt has an unconfirmed result'), { code: 'CRABOT_MIGRATION_INTERRUPTED' })
           }
-          await assertLocalMigrationData(this.options.dataRoot, pending)
+          await assertLocalMigrationData(this.options.dataRoot, pending, this.options.coreRoot)
         },
         run: async () => { await this.startCore(); return this.host.snapshot().phase === 'ready' } })
       return true

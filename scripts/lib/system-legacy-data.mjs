@@ -112,7 +112,7 @@ export async function maintainLegacySystemUser(entry, { action, source, observat
     let record = readVersionMaintenance(dataDir)
     if (action === 'snapshot') {
       if (record) fail()
-      await assertLocalMigrationData(dataDir, verifyDataCompatibility(targetRoot, dataDir))
+      await assertLocalMigrationData(dataDir, verifyDataCompatibility(targetRoot, dataDir), targetRoot)
       const original = ownManifest(manifestFile, entry.uid)
       if (hash(original) !== observation.manifest_fingerprint) fail()
       converted(original)

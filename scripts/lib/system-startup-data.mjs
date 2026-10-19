@@ -12,7 +12,7 @@ export async function prepareSystemStartupData({ root, dataDir, env }) {
     await applyStartupMigrations(root, dataDir, env)
     return
   }
-  await assertLocalMigrationData(dataDir, migrations)
+  await assertLocalMigrationData(dataDir, migrations, root)
   const release = await verifyCoreRelease(root)
   const record = await beginVersionMaintenance(dataDir, root, release.version)
   const backup = await createMaintenanceBackup(dataDir)

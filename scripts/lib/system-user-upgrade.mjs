@@ -38,7 +38,7 @@ export async function maintainSystemUser(entry, { action, deployment, operationI
     }
     if (action === 'snapshot') {
       if (record) throw systemError('本人已有数据维护未完成，未创建另一份维护。', 'CRABOT_MAINTENANCE_PENDING')
-      await assertLocalMigrationData(dataDir, verifyDataCompatibility(targetRoot, dataDir))
+      await assertLocalMigrationData(dataDir, verifyDataCompatibility(targetRoot, dataDir), targetRoot)
       record = await beginVersionMaintenance(dataDir, sourceRoot, target.version, source.version, { systemOperationId: operationId })
       const backup = await createMaintenanceBackup(dataDir)
       await recordVersionMaintenanceBackup(dataDir, record.id, backup)
