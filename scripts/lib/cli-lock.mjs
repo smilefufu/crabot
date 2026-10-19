@@ -4,22 +4,25 @@ import { resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import native from './process-identity.cjs'
 import preflight from './preflight-state.cjs'
+import workspace from './workspace-maintenance.cjs'
 
 const handles = new Map()
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
 
-async function acquire(dataDir, command, waitMs, recoveryId) {
+async function acquire(dataDir, command, waitMs, recoveryId, workspaceAdmission = workspace.assertWorkspaceExecutionAllowed) {
+  workspaceAdmission(dataDir)
   mkdirSync(dataDir, { recursive: true })
   const path = resolve(dataDir, 'cli.lock')
   const deadline = Date.now() + waitMs
   const token = randomUUID()
   const owner = native.inspectProcess(process.pid)
   for (;;) {
+    workspaceAdmission(dataDir)
     let preparationBusy
     if (!handles.has(path)) {
       const handle = native.tryFileLock(path, JSON.stringify({ pid: process.pid, command, started_at: new Date().toISOString(), owner, token }))
       if (handle) {
-        try { preflight.assertSettled(dataDir, recoveryId) }
+        try { workspaceAdmission(dataDir); preflight.assertSettled(dataDir, recoveryId) }
         catch (error) {
           native.releaseFileLock(handle)
           if (error.code !== 'CRABOT_PREFLIGHT_BUSY') throw error
@@ -39,7 +42,15 @@ export function acquireCliLock(dataDir, command, waitMs = 5000) { return acquire
 // This does not authorize retrying schema migrations or other business work.
 export async function acquireStartupLock(dataDir, command = 'start', waitMs = 5000) {
   const previous = preflight.read(dataDir)
-  return acquire(dataDir, command, waitMs, previous?.id)
+  return acquire(dataDir, command, waitMs, previous?.id, () => {})
+}
+
+// Resume only the same private relocation intent; this lock performs no stop/move/replay.
+export async function acquireWorkspaceRelocationLock(dataDir, id, waitMs = 5000) {
+  const { readWorkspaceRelocationIntent } = await import('./workspace-relocation-intent.mjs')
+  return acquire(dataDir, 'workspace-relocation', waitMs, undefined, () => {
+    if (readWorkspaceRelocationIntent(dataDir)?.id !== id) throw workspace.failure()
+  })
 }
 
 export function releaseCliLock(path) {

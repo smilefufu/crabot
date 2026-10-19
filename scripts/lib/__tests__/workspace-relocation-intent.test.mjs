@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os'
 import { randomUUID } from 'node:crypto'
 import management from '../desktop-management.cjs'
 import native from '../process-identity.cjs'
-import { acquireCliLock, releaseCliLock } from '../cli-lock.mjs'
+import { acquireCliLock, acquireWorkspaceRelocationLock, releaseCliLock } from '../cli-lock.mjs'
 import { beginVersionMaintenance } from '../version-maintenance.mjs'
 import { writeCoreRelease } from '../core-release.mjs'
 import { WorkspaceCatalog } from '../../../crabot-shared/dist/workspace-catalog.js'
@@ -237,4 +237,39 @@ test('a known nonportable project environment blocks before publishing maintenan
     assertWorkspaceExecutionAllowed(f.data)
     assert.equal(await fs.readFile(path.join(f.source, 'default/pyvenv.cfg'), 'utf8'), 'user environment')
   } finally { releaseCliLock(lock) }
+})
+
+
+test('only the same private intent can reacquire its recovery lock while ordinary lifecycle is blocked', async t => {
+  const f = await fixture(t), initial = await acquireCliLock(f.data, 'workspace-relocation')
+  try { await beginWorkspaceRelocationIntent(f.input) } finally { releaseCliLock(initial) }
+  await assert.rejects(acquireCliLock(f.data, 'upgrade', 0), { code: 'WORKSPACE_MAINTENANCE' })
+  await assert.rejects(acquireWorkspaceRelocationLock(f.data, randomUUID(), 0), { code: 'WORKSPACE_MAINTENANCE' })
+  const recovery = await acquireWorkspaceRelocationLock(f.data, f.input.id, 0)
+  try { assert.equal((await beginWorkspaceRelocationIntent(f.input)).id, f.input.id) }
+  finally { releaseCliLock(recovery) }
+  await fs.writeFile(f.recordFile, 'broken')
+  await assert.rejects(acquireWorkspaceRelocationLock(f.data, f.input.id, 0), { code: 'WORKSPACE_RELOCATION_INVALID' })
+  assertWorkspaceStillProtected(f.data)
+})
+
+
+test('a changed intent at recovery lock acquisition is rejected and releases the native lock', async t => {
+  const f = await fixture(t), initial = await acquireCliLock(f.data, 'workspace-relocation')
+  try { await beginWorkspaceRelocationIntent(f.input) } finally { releaseCliLock(initial) }
+  const original = native.tryFileLock
+  const mocked = t.mock.method(native, 'tryFileLock', function(...args) {
+    const handle = original(...args)
+    if (handle) {
+      const current = JSON.parse(syncFs.readFileSync(f.recordFile, 'utf8'))
+      syncFs.writeFileSync(f.recordFile, JSON.stringify({ ...current, id: randomUUID() }))
+    }
+    return handle
+  })
+  await assert.rejects(acquireWorkspaceRelocationLock(f.data, f.input.id, 0), { code: 'WORKSPACE_MAINTENANCE' })
+  mocked.mock.restore()
+  const { acquireStartupLock } = await import('../cli-lock.mjs')
+  const management = await acquireStartupLock(f.data, 'management-start', 0)
+  releaseCliLock(management)
+  assertWorkspaceStillProtected(f.data)
 })

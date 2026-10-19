@@ -3,9 +3,10 @@ import { existsSync, readFileSync, mkdirSync } from 'node:fs'
 import { join, resolve, delimiter } from 'node:path'
 import { homedir } from 'node:os'
 import { randomBytes } from 'node:crypto'
-import { scanModules, runMigrations } from '../upgrade-lib/migrate.mjs'
+import { scanModules, runMigrations, previewMigrations } from '../upgrade-lib/migrate.mjs'
 import { runScript } from '../upgrade-lib/runner.mjs'
 import product from './product-runtime.cjs'
+import workspace from './workspace-maintenance.cjs'
 import management from './desktop-management.cjs'
 import cliLocation from './cli-location.cjs'
 import { assertLocalMigrationData } from './maintenance-backup.mjs'
@@ -47,6 +48,11 @@ export function prepareCoreEnvironment({ root, dataDir, source = process.env, lo
 export async function applyStartupMigrations(root, dataDir, env, log = () => {}, { outputFd } = {}) {
   assertVersionMaintenanceAllowsStart(dataDir)
   const pending = verifyDataCompatibility(root, dataDir)
+  if (workspace.workspaceMaintenancePending(dataDir)) {
+    const preview = await previewMigrations(root, dataDir)
+    if (preview.modules.length || !['ready', 'not_applicable'].includes(preview.shared.status)) throw workspace.failure()
+    return // Management recovery only: preserve the active intent and all business formats.
+  }
   if (readVersionMaintenance(dataDir)?.backup) await assertLocalMigrationData(dataDir, pending, root)
   const result = await runMigrations(root, dataDir, (script, directory, context) => runScript(script, directory, { ...context, root, env, outputFd }),
     { info: log, warn: log, error: log }, { lockHeld: true })

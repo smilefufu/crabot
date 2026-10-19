@@ -1,12 +1,14 @@
 // The service is already stopped and its UID owns the common lifecycle lock.
 // A failed first-start migration retains the same durable fence used by updates.
 import { verifyDataCompatibility, applyStartupMigrations } from './core-preparation.mjs'
+import workspace from './workspace-maintenance.cjs'
 import { verifyCoreRelease } from './core-release.mjs'
 import { assertLocalMigrationData } from './maintenance-backup.mjs'
 import { beginVersionMaintenance, bindVersionMaintenanceTarget, prepareScopedVersionMaintenance,
   markVersionMaintenanceInstalling, completeStoppedVersionMaintenance } from './version-maintenance.mjs'
 
 export async function prepareSystemStartupData({ root, dataDir, env }) {
+  if (workspace.workspaceMaintenancePending(dataDir)) return applyStartupMigrations(root, dataDir, env)
   const migrations = verifyDataCompatibility(root, dataDir)
   if (!migrations.length) {
     await applyStartupMigrations(root, dataDir, env)

@@ -114,3 +114,29 @@ test('per-UID system preparation never loads the shared administrator environmen
   assert.notEqual(result.env.CRABOT_JWT_SECRET, 'root-secret')
   assert.equal(result.env.HOME, '/home/alice')
 })
+
+
+test('management startup with relocation protection never converts an older module schema', async t => {
+  const { root, data } = fixture(t), module = join(root, 'crabot-fixture'), moduleData = join(data, 'fixture')
+  mkdirSync(join(module, 'upgrade'), { recursive: true }); mkdirSync(moduleData)
+  management.ensurePrivateDataRoot(join(data, 'workspace-control'))
+  writeFileSync(join(data, 'workspace-control/relocation.json'), 'pending')
+  writeFileSync(join(module, 'schema_version'), 'v1'); writeFileSync(join(moduleData, 'SCHEMA_VERSION'), 'v0\n')
+  writeFileSync(join(moduleData, 'existing.json'), 'preserved')
+  writeFileSync(join(module, 'upgrade/scope.mjs'), `export const migrationScope = () => ({ reads: [], writes: ['fixture/SCHEMA_VERSION'] })`)
+  writeFileSync(join(module, 'upgrade/from_v0_to_v1.mjs'), 'process.exit(0)')
+  await assert.rejects(applyStartupMigrations(root, data, process.env), { code: 'WORKSPACE_MAINTENANCE' })
+  assert.equal(readFileSync(join(moduleData, 'SCHEMA_VERSION'), 'utf8'), 'v0\n')
+  assert.equal(readFileSync(join(moduleData, 'existing.json'), 'utf8'), 'preserved')
+})
+
+test('management startup accepts an already current format without running startup migrations', async t => {
+  const { root, data } = fixture(t), module = join(root, 'crabot-fixture'), moduleData = join(data, 'fixture')
+  mkdirSync(module); mkdirSync(moduleData); management.ensurePrivateDataRoot(join(data, 'workspace-control'))
+  writeFileSync(join(module, 'schema_version'), 'v1'); writeFileSync(join(moduleData, 'SCHEMA_VERSION'), 'v1\n')
+  writeFileSync(join(data, 'workspace-control/relocation.json'), 'pending')
+  await applyStartupMigrations(root, data, process.env)
+  assert.equal(readFileSync(join(moduleData, 'SCHEMA_VERSION'), 'utf8'), 'v1\n')
+  assert.equal(readFileSync(join(data, 'workspace-control/relocation.json'), 'utf8'), 'pending')
+  assert.equal(existsSync(join(data, 'mm.pid')), false)
+})

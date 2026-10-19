@@ -11,7 +11,7 @@ import os from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { prepareSystemStartupData } from '../system-startup-data.mjs'
 import { acquireCliLock, releaseCliLock } from '../cli-lock.mjs'
-import { verifyDataCompatibility } from '../core-preparation.mjs'
+import { verifyDataCompatibility, applyStartupMigrations } from '../core-preparation.mjs'
 import management from '../desktop-management.cjs'
 
 const root = fileURLToPath(new URL('../../../', import.meta.url))
@@ -70,4 +70,22 @@ test('system first-start module migration uses only its common recovery scope', 
   await verifyBackup(path.join(transaction, 'backup'), plan.description.scope.writes, plan.original)
   assert.equal(await fs.readFile(path.join(transaction, 'backup/admin/preferences'), 'utf8'), 'before')
   await assert.rejects(fs.lstat(path.join(dataDir, 'mm.pid')), { code: 'ENOENT' })
+})
+
+
+test('management recovery during relocation cannot convert shared request authority or create an upgrade fence', async t => {
+  const temp = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'system-relocation-management-')))
+  t.after(() => fs.rm(temp, { recursive: true, force: true }))
+  const dataDir = management.ensurePrivateDataRoot(path.join(temp, 'data'))
+  await fs.mkdir(path.join(dataDir, 'agent/worker-ledgers'), { recursive: true })
+  const ledger = path.join(dataDir, 'agent/worker-ledgers/channel%3A%3Agroup.json'), original = JSON.stringify({ manager_key: 'channel::group', workers: [] })
+  await fs.writeFile(ledger, original)
+  management.ensurePrivateDataRoot(path.join(dataDir, 'workspace-control'))
+  await fs.writeFile(path.join(dataDir, 'workspace-control/relocation.json'), 'pending')
+  for (const prepare of [applyStartupMigrations, (code, data, env) => prepareSystemStartupData({ root: code, dataDir: data, env })]) {
+    await assert.rejects(prepare(root, dataDir, { ...process.env, DATA_DIR: dataDir }), { code: 'WORKSPACE_MAINTENANCE' })
+    assert.equal(await fs.readFile(ledger, 'utf8'), original)
+    assert.equal(readVersionMaintenance(dataDir), null)
+    await assert.rejects(fs.stat(path.join(dataDir, 'agent/shared-request-upgrade.json')), { code: 'ENOENT' })
+  }
 })

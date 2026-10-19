@@ -3,7 +3,8 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { tmpdir } from 'node:os'
-import { assertWorkspaceExecutionAllowed } from './workspace-maintenance.js'
+import { createRequire } from 'node:module'
+import { assertWorkspaceExecutionAllowed, workspaceMaintenancePending } from './workspace-maintenance.js'
 
 async function fixture(t: test.TestContext) {
   const root = await fs.mkdtemp(path.join(tmpdir(), 'crabot-workspace-fence-'))
@@ -66,4 +67,22 @@ test('an unreadable control directory blocks rather than claiming no job', { ski
   await fs.chmod(f.control, 0)
   try { assert.throws(() => assertWorkspaceExecutionAllowed(f.root), { code: 'WORKSPACE_MAINTENANCE' }) }
   finally { await fs.chmod(f.control, 0o700) }
+})
+
+
+test('the independent bootstrap guard matches Shared on absent, malformed, and replaced control paths', async t => {
+  const bootstrap = createRequire(import.meta.url)('../../scripts/lib/workspace-maintenance.cjs')
+  const f = await fixture(t)
+  const compare = (expected: boolean) => {
+    assert.equal(workspaceMaintenancePending(f.root), expected)
+    assert.equal(bootstrap.workspaceMaintenancePending(f.root), expected)
+    if (expected) assert.throws(() => bootstrap.assertWorkspaceExecutionAllowed(f.root), { code: 'WORKSPACE_MAINTENANCE' })
+    else bootstrap.assertWorkspaceExecutionAllowed(f.root)
+  }
+  compare(false)
+  await fs.mkdir(f.control); compare(false)
+  await fs.writeFile(f.record, 'broken'); compare(true)
+  await fs.rm(f.record); await fs.mkdir(f.record); compare(true)
+  await fs.rmdir(f.record); await fs.symlink(path.join(f.root, 'missing'), f.record, process.platform === 'win32' ? 'junction' : 'file'); compare(true)
+  await fs.rm(f.record); await fs.rmdir(f.control); await fs.writeFile(f.control, 'replaced'); compare(true)
 })
