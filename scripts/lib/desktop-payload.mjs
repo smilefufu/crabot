@@ -1,5 +1,5 @@
-// Offline payload integrity and fresh installation only. Existing deployments
-// use takeover/version maintenance; this entry never starts or migrates a Core.
+// Offline byte integrity and fresh-install mutation. Read-only program checks
+// also serve prepared updates; the install entry never handles existing data.
 import physicalFs from './physical-fs.cjs'
 import path from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
@@ -92,14 +92,10 @@ export async function sealDesktopPayload(directory) {
   await fs.writeFile(path.join(directory, 'desktop-payload.json'), JSON.stringify(record) + '\n', { flag: 'wx' })
   return record
 }
-export async function verifyDesktopPayload(directory, { signal } = {}) {
-  directory = await fs.realpath(directory)
-  const file = path.join(directory, 'desktop-payload.json'), stat = await fs.lstat(file)
-  if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 64 * 1024 * 1024) fail('离线安装清单无法核验。')
-  const record = JSON.parse(await fs.readFile(file, 'utf8'))
+// Byte integrity only. Callers own installation selection, trust and lifecycle.
+export async function verifyDesktopPrograms(coreRoot, guiRoot, record, { signal } = {}) {
   if (record.schema_version !== 1 || record.platform !== process.platform || record.arch !== process.arch
     || Object.keys(record).join(',') !== 'schema_version,platform,arch,selection,gui') fail('此离线安装包不适用于当前系统。')
-  const coreRoot = path.join(directory, 'core'), guiRoot = path.join(directory, 'gui')
   for (const root of [coreRoot, guiRoot]) { const stat = await fs.lstat(root); if (!stat.isDirectory() || stat.isSymbolicLink()) fail('离线载荷根被重定向。') }
   const core = await verifyPairedCore(coreRoot)
   const pinned = JSON.parse(await fs.readFile(path.join(resources(guiRoot), 'desktop-release.json'), 'utf8'))
@@ -110,6 +106,14 @@ export async function verifyDesktopPayload(directory, { signal } = {}) {
   const coreFiles = JSON.parse(await fs.readFile(path.join(coreRoot, 'core-files.json'), 'utf8')).files
   const bytes = [...Object.values(coreFiles), ...Object.values(record.gui)].reduce((sum, file) => sum + BigInt(file.size ?? 0), 0n)
   signal?.throwIfAborted()
+  return { bytes }
+}
+export async function verifyDesktopPayload(directory, { signal } = {}) {
+  directory = await fs.realpath(directory)
+  const file = path.join(directory, 'desktop-payload.json'), stat = await fs.lstat(file)
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 64 * 1024 * 1024) fail('离线安装清单无法核验。')
+  const record = JSON.parse(await fs.readFile(file, 'utf8')), coreRoot = path.join(directory, 'core'), guiRoot = path.join(directory, 'gui')
+  const { bytes } = await verifyDesktopPrograms(coreRoot, guiRoot, record, { signal })
   return { directory, record, coreRoot, guiRoot, bytes }
 }
 async function targetRoot(target, bytes) {
