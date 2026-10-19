@@ -1,4 +1,4 @@
-/** Tracks runtime establishment only; drainage never proves executions have stopped. */
+/** Tracks execution admission and submission; drainage never proves executions have stopped. */
 export class ExecutionAdmissions {
   private closed = false
   private cleanupFailed = false

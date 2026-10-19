@@ -27,7 +27,7 @@
 
 ### 桌面化方案：独立 worktree 开发中，尚未进入 PR
 
-- workspace：执行保护、私有持久意图、CLI互斥/只读管理恢复、Worker/日程接纳收口已有组件。Shared208通过/2条件跳过，CLI/版本89、system43、桌面43通过/4平台跳过；Agent原生任务/脚本及实际栈/RPC/Worker相关337通过。完整停止证明、不可逆关闭、文件切换、Admin独立协调和中断恢复仍待，详见[项目workspace计划](crabot-docs/superpowers/plans/2026-10-19-project-workspaces-implementation.md)。
+- workspace：执行保护、私有持久意图、CLI互斥/只读管理恢复、Worker/日程接纳收口已有组件。Shared208通过/2条件跳过，CLI/版本89、system43、桌面43通过/4平台跳过；Agent原生任务/脚本及实际栈/RPC/Worker相关347通过，覆盖输入/分支/UI在途提交与旧队列收口。完整停止证明、不可逆关闭、文件切换、Admin独立协调和中断恢复仍待，详见[项目workspace计划](crabot-docs/superpowers/plans/2026-10-19-project-workspaces-implementation.md)。
 
 - 边界：按[桌面Spec](crabot-docs/superpowers/specs/2026-10-17-desktop-application-design.md)、[安装根计划](crabot-docs/superpowers/plans/2026-10-19-desktop-install-root-implementation.md)在feat/desktop-application推进；完整测好前不推产品main/不提前PR，不部署或重启现场，不在本机启动第二业务MM（完整实例仅隔离CI）。Electron+React、业务HTTP/WS、最小IPC、GUI免额外密码、关闭窗口后台/退出停共享实例。整体安装根在安装时选，之后可迁workspace；不新增DATA_DIR选择步骤。
 - P0–P5：统一内置环境/隔离可写依赖、共享GUI/CLI、OS peer、SDK、首次模型/权限/诊断已有组件与部分四平台证据。稳定MCP id的五类真实隔离stdio连接通过。模型按Admin引用实时解析、Agent直连；mirror-xinshu仅两次短直连通过，真实Provider完整GUI尚未验收。隔离CI已有实际GUI配置→对话→持久ack/交付，模型为loopback替身，不能混称真实账号验收。

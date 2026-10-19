@@ -1486,8 +1486,14 @@ export class WorkerHarness {
     text: string,
     opts?: HarnessSendToWorkerOptions,
   ): Promise<SendToWorkerResult | void> {
-    this.deps.assertMaintenanceAdmission?.()
-    this.executionAdmissions.assertOpen()
+    return this.trackExecutionAdmission(() => this.sendToWorkerAdmitted(workerId, text, opts))
+  }
+
+  private async sendToWorkerAdmitted(
+    workerId: string,
+    text: string,
+    opts?: HarnessSendToWorkerOptions,
+  ): Promise<SendToWorkerResult | void> {
     const inbox = this.getInbox(workerId)
     let enqueued = true
     let receipt: WorkerInputDeliveryReceipt | undefined
@@ -1509,6 +1515,8 @@ export class WorkerHarness {
       // A queued worker lock or ledger read may have crossed the caller's deadline. Do not
       // create a redirect hold, receipt, or inbox item after the tool has timed out.
       this.assertSynchronousInputDeadline(synchronousDeadlineAt, deliveryId)
+      this.deps.assertMaintenanceAdmission?.()
+      this.executionAdmissions.assertOpen()
       if (!found) throw new WorkerNotFoundError(workerId)
       if (found.worker.task.status === 'closed') throw new TaskCancelledError(workerId)
       const mainline = requireMainlineIncarnation(found.worker)
@@ -2067,10 +2075,16 @@ export class WorkerHarness {
 
   /** Queue an untrusted wake only while the task is non-terminal; never revive it later. */
   async sendToActiveWorker(workerId: string, text: string): Promise<boolean> {
+    return this.trackExecutionAdmission(() => this.sendToActiveWorkerAdmitted(workerId, text))
+  }
+
+  private async sendToActiveWorkerAdmitted(workerId: string, text: string): Promise<boolean> {
     const inbox = this.getInbox(workerId)
     let queued = false
     await this.withLock(workerId, async () => {
       const found = await this.deps.ledger.findWorker(workerId)
+      this.deps.assertMaintenanceAdmission?.()
+      this.executionAdmissions.assertOpen()
       if (!found || isTerminalStatus(found.worker.task.status)) return
       if (!mainlineIncarnation(found.worker)) return
       inbox.enqueue({
@@ -2085,7 +2099,11 @@ export class WorkerHarness {
     return queued
   }
 
-  private async attemptInput(
+  private async attemptInput(...args: Parameters<WorkerHarness['attemptInputAdmitted']>): Promise<InputAttempt> {
+    return this.trackExecutionAdmission(() => this.attemptInputAdmitted(...args))
+  }
+
+  private async attemptInputAdmitted(
     adapter: WorkerAdapter,
     handle: IncarnationHandle,
     text: string,
@@ -2196,7 +2214,7 @@ export class WorkerHarness {
     // 真正的投递不占用 harness 的 per-worker 锁(见文件头说明);inbox 自身的锁保证同一
     // 信箱的并发 flush 不重复投递。deliver 内部对每个 item 重新取一次当前化身,避免用
     // 入队时刻的过期 handle 投递。
-    await inbox.flush(async (item) => {
+    await inbox.flush((item) => this.trackExecutionAdmission(async () => {
       const found = await this.deps.ledger.findWorker(workerId)
       if (!found) throw new WorkerNotFoundError(workerId)
       // 主线化身,不能用"数组最后一个"——fork 之后数组末尾是侧问分支,投递必须仍然打到
@@ -2280,7 +2298,7 @@ export class WorkerHarness {
         )
       }
       return this.settleInputAttempt(workerId, item.text, item.raw, attempt, item)
-    })
+    }))
   }
 
   private async continueLegacyWorker(...args: Parameters<WorkerHarness['continueLegacyWorkerAdmitted']>): Promise<ContinuationDelivery> {
@@ -3861,7 +3879,7 @@ export class WorkerHarness {
     deliveryId: string,
     onSettled: (settlement: { status: 'delivered' } | { status: 'dead_letter'; reason: string }) => Promise<void>,
   ): Promise<void> {
-    await this.withLock(workerId, async () => {
+    return this.trackExecutionAdmission(() => this.withLock(workerId, async () => {
       const found = await this.deps.ledger.findWorker(workerId)
       const incarnation = found?.worker.incarnations.find((item) => item.incarnation_id === incarnationId)
       if (!incarnation && (await this.queryReceiptStore.list(workerId)).some((receipt) => receipt.state === 'starting')) {
@@ -3890,7 +3908,7 @@ export class WorkerHarness {
         if (!(error instanceof WorkerExitedError)) throw error
         await onSettled({ status: 'dead_letter', reason: 'original execution branch exited before delivery' })
       }
-    })
+    }))
   }
 
   async getWorkerTurn(workerId: string, turnId?: string): Promise<StoredWorkerTurn | undefined> {
@@ -3949,7 +3967,7 @@ export class WorkerHarness {
     status: 'submitted'
     operation: WorkerControlOperation
   }> {
-    return this.withLock(workerId, async () => {
+    return this.trackExecutionAdmission(() => this.withLock(workerId, async () => {
       const snapshot = await this.getActiveUiSnapshot(workerId, snapshotId)
       const action = snapshot.actions.find((candidate) => candidate.action_id === actionId)
       if (!action) throw new Error('worker UI action is not available for this snapshot')
@@ -4007,7 +4025,7 @@ export class WorkerHarness {
         status: 'submitted',
         operation: settled,
       }
-    })
+    }))
   }
 
   private async getActiveUiSnapshot(workerId: string, snapshotId: string): Promise<WorkerUiSnapshot> {

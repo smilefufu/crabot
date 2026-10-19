@@ -5299,3 +5299,134 @@ describe('workspace relocation admission quiescence', () => {
     } finally { logging.mockRestore() }
   })
 })
+
+
+describe('workspace relocation input quiescence', () => {
+  it.each(['sendToWorker', 'sendToActiveWorker'] as const)('waits for admitted %s native input to settle', async method => {
+    const { harness, fake, ledger } = await makeHarness(), entered = deferred(), release = deferred()
+    const worker = await harness.spawnWorker(spawnParams()), send = fake.sendInput.bind(fake)
+    vi.spyOn(fake, 'sendInput').mockImplementation(async (...args) => { entered.resolve(); await release.promise; return send(...args) })
+    const pending = harness[method](worker.worker_id, 'already admitted')
+    await entered.promise
+    let drained = false
+    const quiet = harness.quiesceExecutionAdmissions().then(() => { drained = true })
+    await Promise.resolve(); await Promise.resolve()
+    const finishedEarly = drained
+    release.resolve(); await pending; await quiet
+    expect(finishedEarly).toBe(false)
+    const stored = (await ledger.findWorker(worker.worker_id))!.worker
+    expect(stored.origin).toEqual(worker.origin)
+    expect(stored.report_to).toEqual(worker.report_to)
+    expect(stored.task.status).not.toBe('closed')
+    expect(fake.killCalls).toHaveLength(0)
+  })
+
+  it('retains queued input when an old callback flushes after quiescence', async () => {
+    const { harness, fake } = await makeHarness(), worker = await harness.spawnWorker(spawnParams())
+    const inbox = (harness as any).getInbox(worker.worker_id)
+    inbox.enqueue({ text: 'old queued text', raw: false, enqueued_at: now() })
+    await harness.quiesceExecutionAdmissions()
+    await expect((harness as any).flushInbox(worker.worker_id)).rejects.toMatchObject({ code: 'WORKSPACE_MAINTENANCE' })
+    expect(fake.sendInputCalls).toHaveLength(0)
+    expect(inbox.pending).toBe(1)
+  })
+
+  it('rejects an active-worker wake before mutating its inbox after quiescence', async () => {
+    const { harness, fake } = await makeHarness(), worker = await harness.spawnWorker(spawnParams())
+    await harness.quiesceExecutionAdmissions()
+    await expect(harness.sendToActiveWorker(worker.worker_id, 'late wake')).rejects.toMatchObject({ code: 'WORKSPACE_MAINTENANCE' })
+    expect((harness as any).getInbox(worker.worker_id).pending).toBe(0)
+    expect(fake.sendInputCalls).toHaveLength(0)
+  })
+
+  it.each(['sendToWorker', 'sendToActiveWorker'] as const)('rechecks %s after waiting for a Worker lock', async method => {
+    const { harness, fake } = await makeHarness(), entered = deferred(), release = deferred()
+    const worker = await harness.spawnWorker(spawnParams())
+    const held = (harness as any).withLock(worker.worker_id, async () => { entered.resolve(); await release.promise })
+    await entered.promise
+    const rejected = expect(harness[method](worker.worker_id, 'not admitted to inbox')).rejects.toMatchObject({ code: 'WORKSPACE_MAINTENANCE' })
+    const quiet = harness.quiesceExecutionAdmissions()
+    release.resolve(); await held; await rejected; await quiet
+    expect((harness as any).getInbox(worker.worker_id).pending).toBe(0)
+    expect(fake.sendInputCalls).toHaveLength(0)
+  })
+
+  it('waits for branch input without changing its incarnation or receipt settlement', async () => {
+    const { harness, fake, ledger } = await makeHarness({ caps: { fork: true } }), entered = deferred(), release = deferred()
+    const worker = await harness.spawnWorker(spawnParams()), query = await harness.queryWorker(worker.worker_id, 'query')
+    const fork = (await ledger.findWorker(worker.worker_id))!.worker.incarnations.find(item => item.query_id === query.query_id)!
+    const settled = vi.fn(async () => {})
+    vi.spyOn(fake, 'sendInput').mockImplementation(async (handle, text, opts) => {
+      expect(handle).toMatchObject({ incarnation_id: fork.incarnation_id, query_id: query.query_id })
+      expect(text).toBe('branch notification')
+      entered.resolve(); await release.promise; await opts?.onAccepted?.()
+    })
+    const pending = harness.sendToExecutionBranch(worker.worker_id, fork.incarnation_id!, 'branch notification', 'same-delivery', settled)
+    await entered.promise
+    let drained = false
+    const quiet = harness.quiesceExecutionAdmissions().then(() => { drained = true })
+    await Promise.resolve(); await Promise.resolve(); const finishedEarly = drained
+    expect(settled).not.toHaveBeenCalled()
+    release.resolve(); await pending; await quiet
+    expect(finishedEarly).toBe(false)
+    expect(settled).toHaveBeenCalledTimes(1)
+    expect(settled).toHaveBeenCalledWith({ status: 'delivered' })
+    settled.mockClear()
+    await expect(harness.sendToExecutionBranch(worker.worker_id, fork.incarnation_id!, 'late', 'late-id', settled))
+      .rejects.toMatchObject({ code: 'WORKSPACE_MAINTENANCE' })
+    expect(settled).not.toHaveBeenCalled()
+  })
+
+  it('waits for an admitted one-time UI response, then rejects further responses', async () => {
+    const { harness, fake, ledger } = await makeHarness({ implId: 'claude-code', spawnInitialInput: {
+      control_state: 'waiting_action', disposition: 'not_pasted', report: {
+        waitReason: 'interaction_required', terminal: terminal('Choose'),
+        ui: { fingerprint: 'workspace-ui-once', actions: UI_ACTIONS },
+        notification: { type: 'terminal_interaction', title: 'Choose' },
+      },
+    } }), entered = deferred(), release = deferred()
+    const worker = await harness.spawnWorker(spawnParams({ impl: 'claude-code' }))
+    const snapshot = events.find(event => event.worker_id === worker.worker_id && event.kind === 'interaction_required')!.detail!.snapshot_id as string
+    const respond = fake.respondToUi.bind(fake)
+    vi.spyOn(fake, 'respondToUi').mockImplementation(async (...args) => { entered.resolve(); await release.promise; return respond(...args) })
+    const pending = harness.respondToWorkerUi(worker.worker_id, snapshot, 'confirm')
+    await entered.promise
+    let drained = false
+    const quiet = harness.quiesceExecutionAdmissions().then(() => { drained = true })
+    await Promise.resolve(); await Promise.resolve(); const finishedEarly = drained
+    release.resolve(); const result = await pending; await quiet
+    expect(finishedEarly).toBe(false)
+    expect(result).toMatchObject({ status: 'submitted', snapshot_id: snapshot, operation: { kind: 'ui_response', actor: 'manager', status: 'succeeded' } })
+    await expect(harness.respondToWorkerUi(worker.worker_id, snapshot, 'confirm')).rejects.toMatchObject({ code: 'WORKSPACE_MAINTENANCE' })
+    expect(fake.uiResponses).toHaveLength(1)
+    expect((await ledger.findWorker(worker.worker_id))!.worker.task.status).not.toBe('closed')
+  })
+
+  it('does not mistake a synchronous timeout reply for native input settlement', async () => {
+    const { harness, fake } = await makeHarness(), entered = deferred(), release = deferred()
+    const worker = await harness.spawnWorker(spawnParams()), send = fake.sendInput.bind(fake)
+    const input = vi.spyOn(fake, 'sendInput').mockImplementation(async (...args) => { entered.resolve(); await release.promise; return send(...args) })
+    try {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+      const pending = harness.sendToWorker(worker.worker_id, 'native ignores cancellation', { managerKey: 'test::friend-1' })
+      await entered.promise
+      await vi.advanceTimersByTimeAsync(INPUT_DELIVERY_TIMEOUT_MS)
+      expect(await pending).toMatchObject({ status: 'failed' })
+      let drained = false
+      const quiet = harness.quiesceExecutionAdmissions().then(() => { drained = true })
+      await Promise.resolve(); await Promise.resolve(); const finishedEarly = drained
+      release.resolve(); await quiet
+      expect(finishedEarly).toBe(false)
+      expect(input).toHaveBeenCalledTimes(1)
+      expect(fake.killCalls).toHaveLength(0)
+    } finally { release.resolve(); vi.useRealTimers() }
+  })
+
+  it('keeps the verified stop path available while inputs are quiesced', async () => {
+    const { harness, fake, ledger } = await makeHarness(), worker = await harness.spawnWorker(spawnParams())
+    await harness.quiesceExecutionAdmissions()
+    await harness.killWorker(worker.worker_id)
+    expect(fake.killCalls).toHaveLength(1)
+    expect((await ledger.findWorker(worker.worker_id))!.worker.task.closed?.by).toBe('manager_stop')
+  })
+})
