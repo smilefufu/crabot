@@ -27,7 +27,7 @@
 
 ### 桌面化方案：独立 worktree 开发中，尚未进入 PR
 
-- workspace：执行保护、私有意图与固定Worker范围提交、CLI互斥/管理恢复、Worker/日程/输入收口已有组件。范围绑定意图、不覆盖重选，任一残留记录保持维护；Shared211通过/2条件跳过，引导/准备101通过，Agent门禁/范围26与Core17通过，原Agent栈/RPC/生命周期相关370通过。独立协调接纳、完整停止证明、不可逆关闭、文件切换与中断恢复仍待，详见[项目workspace计划](crabot-docs/superpowers/plans/2026-10-19-project-workspaces-implementation.md)。
+- workspace：执行保护、私有意图与固定Worker范围提交、CLI互斥/管理恢复、Worker/日程/输入收口已有组件。范围绑定意图、不覆盖重选，任一残留记录保持维护；Shared211通过/2条件跳过，引导/准备101通过，Agent门禁/范围26与Core17通过，原Agent栈/RPC/生命周期相关370通过。OS只读子进程查询已在mac有限夹具验证；独立协调接纳、完整停止证明、不可逆关闭、文件切换与中断恢复仍待，详见[项目workspace计划](crabot-docs/superpowers/plans/2026-10-19-project-workspaces-implementation.md)。
 
 - 边界：按[桌面Spec](crabot-docs/superpowers/specs/2026-10-17-desktop-application-design.md)、[安装根计划](crabot-docs/superpowers/plans/2026-10-19-desktop-install-root-implementation.md)在feat/desktop-application推进；完整测好前不推产品main/不提前PR，不部署或重启现场，不在本机启动第二业务MM（完整实例仅隔离CI）。Electron+React、业务HTTP/WS、最小IPC、GUI免额外密码、关闭窗口后台/退出停共享实例。整体安装根在安装时选，之后可迁workspace；不新增DATA_DIR选择步骤。
 - 原生验收修复：c42的ARM/Linux通过；Windows NSIS引号修复已提交，新一轮更早的迁移符号链接错误码回归已修（本机20通过）；Intel桌面重启超时仍待完整复验。CI另证实端口JSON并发覆盖损坏，现按序原子替换并在MM停机时收口；真实文件/端口/生命周期64项及Core类型检查通过，不将其当作超时根因已完全解决。

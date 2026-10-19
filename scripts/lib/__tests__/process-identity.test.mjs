@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer, connect } from 'node:net'
-import { mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { once } from 'node:events'
@@ -115,4 +115,53 @@ test('installation filesystem facts come from the actual OS without changing tar
   assert.throws(() => identity.inspectInstallFilesystem(join(directory, 'missing')), { code: 'CRABOT_INSTALL_FILESYSTEM' })
   const file = join(directory, 'ordinary-file'); writeFileSync(file, 'keep')
   assert.throws(() => identity.inspectInstallFilesystem(file), { code: 'CRABOT_INSTALL_FILESYSTEM' })
+})
+
+
+async function startChildTreeFixture(t, source) {
+  const parent = spawn(process.execPath, ['-e', source], { stdio: ['ignore', 'ignore', 'inherit', 'ipc'] })
+  t.after(async () => {
+    if (parent.exitCode !== null || parent.signalCode !== null) return
+    const exited = once(parent, 'exit')
+    if (parent.connected) parent.send('stop'); else parent.kill()
+    await exited
+  })
+  const [childPid] = await once(parent, 'message')
+  return { parent, childPid }
+}
+
+test('native direct child enumeration preserves the real parent boundary', { timeout: 15_000 }, async t => {
+  const source = `const { spawn } = require('node:child_process');
+    const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+    const stop = () => child.kill();
+    child.once('spawn', () => process.send(child.pid));
+    child.once('exit', () => process.exit(0));
+    process.on('message', stop); process.on('SIGTERM', stop);`
+  const { parent, childPid } = await startChildTreeFixture(t, source)
+  assert.equal(identity.inspectProcess(childPid).parent, parent.pid)
+  assert.ok(identity.listChildProcessIds(parent.pid).includes(childPid))
+  const ownChildren = identity.listChildProcessIds(process.pid)
+  assert.ok(ownChildren.includes(parent.pid))
+  assert.ok(!ownChildren.includes(childPid))
+  for (const pid of [-1, 0, NaN, Infinity, '1', 1.5]) assert.throws(() => identity.listChildProcessIds(pid))
+})
+
+
+test('direct children created by a runtime thread remain in the process scope', { timeout: 15_000 }, async t => {
+  const workerSource = `const { parentPort } = require('node:worker_threads');
+    const child = require('node:child_process').spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+    child.once('spawn', () => parentPort.postMessage(child.pid));
+    child.once('exit', () => parentPort.postMessage('stopped'));
+    parentPort.on('message', () => child.kill());`
+  const source = `const worker = new (require('node:worker_threads').Worker)(${JSON.stringify(workerSource)}, { eval: true });
+    worker.on('message', value => typeof value === 'number' ? process.send(value) : process.exit(0));
+    process.on('message', () => worker.postMessage('stop'));
+    process.on('SIGTERM', () => worker.postMessage('stop'));`
+  const { parent, childPid } = await startChildTreeFixture(t, source)
+  assert.equal(identity.inspectProcess(childPid).parent, parent.pid)
+  assert.ok(identity.listChildProcessIds(parent.pid).includes(childPid))
+  if (process.platform === 'linux') {
+    const mainThreadChildren = readFileSync(`/proc/${parent.pid}/task/${parent.pid}/children`, 'utf8').trim().split(/\s+/).map(Number)
+    assert.ok(!mainThreadChildren.includes(childPid), 'Fixture must exercise a non-leader thread child list')
+  }
 })

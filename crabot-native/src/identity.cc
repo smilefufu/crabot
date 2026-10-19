@@ -161,6 +161,71 @@ static Identity Inspect(int pid) {
   return result;
 }
 
+// Read OS direct-parent PID metadata; callers separately bind creation/owner identity.
+static std::vector<int> Children(int pid) {
+  std::set<int> children;
+#ifdef _WIN32
+  HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+  if (snapshot == INVALID_HANDLE_VALUE) throw std::runtime_error("Cannot enumerate process children");
+  try {
+    PROCESSENTRY32 entry{}; entry.dwSize = sizeof(entry);
+    BOOL found = Process32First(snapshot, &entry);
+    while (found) {
+      if (entry.th32ParentProcessID == static_cast<DWORD>(pid) && entry.th32ProcessID > 0) {
+        if (entry.th32ProcessID > 2147483647) throw std::runtime_error("Unsupported child process identity");
+        children.insert(static_cast<int>(entry.th32ProcessID));
+      }
+      found = Process32Next(snapshot, &entry);
+    }
+    if (GetLastError() != ERROR_NO_MORE_FILES) throw std::runtime_error("Incomplete process child snapshot");
+  } catch (...) { CloseHandle(snapshot); throw; }
+  CloseHandle(snapshot);
+#elif __APPLE__
+  errno = 0;
+  int count = proc_listchildpids(pid, nullptr, 0);
+  if (count < 0 || errno || count > 1048576) throw std::runtime_error("Cannot enumerate process children");
+  size_t capacity = static_cast<size_t>(count) + 32;
+  for (;;) {
+    std::vector<int> values(capacity);
+    errno = 0;
+    count = proc_listchildpids(pid, values.data(), static_cast<int>(values.size() * sizeof(int)));
+    if (count < 0 || errno) throw std::runtime_error("Cannot enumerate process children");
+    if (static_cast<size_t>(count) < capacity) {
+      for (int index = 0; index < count; index++) if (values[index] > 0) children.insert(values[index]);
+      break;
+    }
+    if (capacity > 1048576) throw std::runtime_error("Process child snapshot is too large");
+    capacity *= 2;
+  }
+#else
+  const std::string tasksPath = "/proc/" + std::to_string(pid) + "/task";
+  DIR* tasks = opendir(tasksPath.c_str());
+  if (!tasks) throw std::runtime_error("Cannot enumerate process threads");
+  try {
+    for (;;) {
+      errno = 0;
+      auto entry = readdir(tasks);
+      if (!entry) {
+        if (errno) throw std::runtime_error("Incomplete process thread snapshot");
+        break;
+      }
+      const std::string name(entry->d_name);
+      if (name.empty() || name.find_first_not_of("0123456789") != std::string::npos) continue;
+      std::ifstream file(tasksPath + "/" + name + "/children");
+      if (!file) throw std::runtime_error("Cannot read process children");
+      int child;
+      while (file >> child) {
+        if (child <= 0) throw std::runtime_error("Invalid child process identity");
+        children.insert(child);
+      }
+      if (file.bad() || !file.eof()) throw std::runtime_error("Incomplete process child list");
+    }
+  } catch (...) { closedir(tasks); throw; }
+  closedir(tasks);
+#endif
+  return {children.begin(), children.end()};
+}
+
 static napi_value String(napi_env env, const std::string& text) {
   napi_value value; napi_create_string_utf8(env, text.c_str(), text.size(), &value); return value;
 }
@@ -194,6 +259,14 @@ static napi_value PidsCall(napi_env env, napi_callback_info) {
     auto pids = Pids(); napi_value result; napi_create_array(env, &result);
     unsigned index = 0;
     for (int pid : pids) if (pid > 0) napi_set_element(env, result, index++, Number(env, pid));
+    return result;
+  } catch (const std::exception& error) { napi_throw_error(env, "CRABOT_PROCESS_IDENTITY", error.what()); return nullptr; }
+}
+static napi_value ChildrenCall(napi_env env, napi_callback_info info) {
+  try {
+    const auto children = Children(Argument(env, info));
+    napi_value result; napi_create_array(env, &result);
+    for (uint32_t index = 0; index < children.size(); index++) napi_set_element(env, result, index, Number(env, children[index]));
     return result;
   } catch (const std::exception& error) { napi_throw_error(env, "CRABOT_PROCESS_IDENTITY", error.what()); return nullptr; }
 }
@@ -360,6 +433,7 @@ static napi_value Initialize(napi_env env, napi_value exports) {
     {"inspectInstallFilesystem", nullptr, InstallFilesystemCall, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"inspectProcess", nullptr, InspectCall, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"listProcessIds", nullptr, PidsCall, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"listChildProcessIds", nullptr, ChildrenCall, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"tryFileLock", nullptr, TryLock, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"releaseFileLock", nullptr, ReleaseLock, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"inspectProcessArguments", nullptr, ArgumentsCall, nullptr, nullptr, nullptr, napi_default, nullptr},
