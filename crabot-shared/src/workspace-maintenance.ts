@@ -10,13 +10,12 @@ export function workspaceMaintenancePending(dataRoot: string): boolean {
   } catch (error) {
     return (error as NodeJS.ErrnoException).code !== 'ENOENT'
   }
-  try {
-    // Any entry blocks: never trust a claimed completed phase, or follow a dangling link.
-    lstatSync(path.join(control, 'relocation.json'))
-    return true
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code !== 'ENOENT'
+  // Any known activity entry blocks, including an orphaned fixed set or dangling link.
+  for (const file of ['relocation.json', 'relocation-workers.json']) {
+    try { lstatSync(path.join(control, file)); return true }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return true }
   }
+  return false
 }
 
 export function assertWorkspaceExecutionAllowed(dataRoot: string): void {

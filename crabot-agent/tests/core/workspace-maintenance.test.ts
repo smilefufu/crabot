@@ -11,7 +11,7 @@ const config: UnifiedAgentConfig = {
   agent_config: { instance_id: 'crabot-agent', roles: [], system_prompt: 'fixture', model_config: { powerful: { endpoint: 'https://fixture.invalid', apikey: 'fixture', model_id: 'fixture', format: 'openai', provider_id: 'fixture' } } },
 }
 
-describe('workspace maintenance execution admission', () => {
+describe.each(['relocation.json', 'relocation-workers.json'])('workspace maintenance execution admission: %s', record => {
   afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs() })
 
   it('blocks messages, schedules, and Harness dispatch before metadata or ledger writes', async () => {
@@ -23,7 +23,7 @@ describe('workspace maintenance execution admission', () => {
     try {
       agent.assertRuntimeExecutionAdmission()
       await fs.mkdir(path.join(data, 'workspace-control'), { recursive: true })
-      await fs.writeFile(path.join(data, 'workspace-control/relocation.json'), 'fixed job')
+      await fs.writeFile(path.join(data, 'workspace-control', record), 'fixed job')
       await expect(agent.handleMessageReceived({ crab_display_name: 'must not cache' })).rejects.toMatchObject({ code: 'WORKSPACE_MAINTENANCE' })
       await expect(agent.handleTriggerSchedule({ schedule_id: 'script' })).rejects.toMatchObject({ code: 'WORKSPACE_MAINTENANCE' })
       await expect(agent.managerStack.harness.sendToWorker('old', 'new input')).rejects.toMatchObject({ code: 'WORKSPACE_MAINTENANCE' })
@@ -42,7 +42,7 @@ describe('workspace maintenance execution admission', () => {
     const loop = vi.spyOn(registry, 'getOrCreate')
     try {
       await fs.mkdir(path.join(data, 'workspace-control'), { recursive: true })
-      await fs.writeFile(path.join(data, 'workspace-control/relocation.json'), '{}')
+      await fs.writeFile(path.join(data, 'workspace-control', record), '{}')
       await expect(registry.routeHumanMessages('admin-web', 'admin-chat', [])).rejects.toMatchObject({ code: 'WORKSPACE_MAINTENANCE' })
       await expect(registry.routeMediaNotification({ channelId: 'admin-web', sessionId: 'admin-chat', text: 'late' })).rejects.toMatchObject({ code: 'WORKSPACE_MAINTENANCE' })
       await expect(registry.runWake('admin-web::admin-chat', undefined)).rejects.toMatchObject({ code: 'WORKSPACE_MAINTENANCE' })

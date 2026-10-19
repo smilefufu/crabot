@@ -4,6 +4,7 @@ import syncFs, { promises as fs } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import path from 'node:path'
 import { tmpdir } from 'node:os'
+import { createRequire } from 'node:module'
 import { randomUUID } from 'node:crypto'
 import management from '../desktop-management.cjs'
 import native from '../process-identity.cjs'
@@ -12,7 +13,7 @@ import { beginVersionMaintenance } from '../version-maintenance.mjs'
 import { writeCoreRelease } from '../core-release.mjs'
 import { WorkspaceCatalog } from '../../../crabot-shared/dist/workspace-catalog.js'
 import { assertWorkspaceExecutionAllowed } from '../../../crabot-shared/dist/workspace-maintenance.js'
-import { beginWorkspaceRelocationIntent, readWorkspaceRelocationIntent } from '../workspace-relocation-intent.mjs'
+import { beginWorkspaceRelocationIntent, readWorkspaceRelocationIntent, commitWorkspaceRelocationWorkers, readWorkspaceRelocationWorkers } from '../workspace-relocation-intent.mjs'
 
 async function fixture(t) {
   const root = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'crabot-relocation-intent-中文 space-')))
@@ -272,4 +273,208 @@ test('a changed intent at recovery lock acquisition is rejected and releases the
   const management = await acquireStartupLock(f.data, 'management-start', 0)
   releaseCliLock(management)
   assertWorkspaceStillProtected(f.data)
+})
+
+
+function workerSet() {
+  return [{ worker_id: 'a', manager_key: 'channel::session', task_id: 'a', workspace_id: 'default', incarnations: [
+    { incarnation_id: 'inc-a', impl: 'builtin', seq: 1, workspace: path.resolve('fixture-workspace'), started_at: '2026-10-20T00:00:00.000Z' },
+    { incarnation_id: 'inc-b', impl: 'codex', seq: 1, workspace: path.resolve('fixture-workspace'), started_at: '2026-10-20T00:00:00.000Z', forked_from: 'inc-a', query_id: 'query' },
+  ] }, { worker_id: 'native', manager_key: 'admin-web::system-tasks', task_id: 'native', incarnations: [] },
+  { worker_id: 'old', manager_key: 'other::session', task_id: 'old', incarnations: [
+    { incarnation_id: 'legacy-inc', impl: 'legacy', seq: 1, workspace: path.resolve('old-project'), started_at: '2026-01-01T00:00:00.000Z' },
+  ] }]
+}
+
+test('fixed Worker set requires the native lock and binds the first complete set to its intent', async t => {
+  const f = await fixture(t), lock = await acquireCliLock(f.data, 'workspace-relocation'), workers = workerSet()
+  const scopeFile = path.join(f.data, 'workspace-control/relocation-workers.json')
+  try { await beginWorkspaceRelocationIntent(f.input) } finally { releaseCliLock(lock) }
+  assert.throws(() => commitWorkspaceRelocationWorkers({ dataDir: f.data, id: f.input.id, workers }), { code: 'WORKSPACE_RELOCATION_INVALID' })
+  await assert.rejects(fs.stat(scopeFile), { code: 'ENOENT' })
+  const recoveredLock = await acquireWorkspaceRelocationLock(f.data, f.input.id)
+  try {
+    assert.equal(readWorkspaceRelocationWorkers(f.data, f.input.id), null)
+    const record = commitWorkspaceRelocationWorkers({ dataDir: f.data, id: f.input.id, workers })
+    assert.deepEqual(record.workers, workers)
+    assert.deepEqual(commitWorkspaceRelocationWorkers({ dataDir: f.data, id: f.input.id, workers }), record)
+    assert.deepEqual(readWorkspaceRelocationWorkers(f.data, f.input.id), record)
+    const raw = await fs.readFile(scopeFile, 'utf8')
+    assert.throws(() => commitWorkspaceRelocationWorkers({ dataDir: f.data, id: randomUUID(), workers }), { code: 'WORKSPACE_RELOCATION_INVALID' })
+    assert.throws(() => commitWorkspaceRelocationWorkers({ dataDir: f.data, id: f.input.id, workers: [] }), { code: 'WORKSPACE_RELOCATION_CONFLICT' })
+    assert.equal(await fs.readFile(scopeFile, 'utf8'), raw)
+    assert.equal(await fs.readFile(path.join(f.source, 'default/original.txt'), 'utf8'), 'user bytes')
+    assert.equal((await f.catalog.snapshot()).storage_root, f.source)
+    assert.throws(() => assertWorkspaceExecutionAllowed(f.data), { code: 'WORKSPACE_MAINTENANCE' })
+  } finally { releaseCliLock(recoveredLock) }
+})
+
+for (const damage of ['json', 'null', 'intent', 'workers', 'link', 'hardlink', 'large']) test('fixed Worker set damage retains protection: ' + damage, async t => {
+  const f = await fixture(t), lock = await acquireCliLock(f.data, 'workspace-relocation'), workers = workerSet()
+  const file = path.join(f.data, 'workspace-control/relocation-workers.json')
+  try {
+    await beginWorkspaceRelocationIntent(f.input)
+    const record = commitWorkspaceRelocationWorkers({ dataDir: f.data, id: f.input.id, workers })
+    if (damage === 'json') await fs.writeFile(file, 'broken')
+    if (damage === 'null') await fs.writeFile(file, 'null')
+    if (damage === 'intent') await fs.writeFile(file, JSON.stringify({ ...record, intent_sha256: '0'.repeat(64) }))
+    if (damage === 'workers') await fs.writeFile(file, JSON.stringify({ ...record, workers: [...workers, workers[0]] }))
+    if (damage === 'link') { const retained = path.join(f.root, 'retained-workers'); await fs.rename(file, retained); await fs.symlink(retained, file, 'file') }
+    if (damage === 'hardlink') await fs.link(file, path.join(f.root, 'second-link'))
+    if (damage === 'large') await fs.truncate(file, 32 * 1024 * 1024 + 1)
+    assert.throws(() => readWorkspaceRelocationWorkers(f.data, f.input.id), { code: 'WORKSPACE_RELOCATION_INVALID' })
+    assert.throws(() => commitWorkspaceRelocationWorkers({ dataDir: f.data, id: f.input.id, workers }), { code: 'WORKSPACE_RELOCATION_INVALID' })
+    assert.throws(() => assertWorkspaceExecutionAllowed(f.data), { code: 'WORKSPACE_MAINTENANCE' })
+  } finally { releaseCliLock(lock) }
+})
+
+for (const invalid of ['extra content', 'duplicate Worker', 'duplicate incarnation', 'sparse workers', 'sparse incarnations', 'unsorted', 'missing task', 'missing incarnation']) test('invalid fixed set is rejected before publication: ' + invalid, async t => {
+  const f = await fixture(t), lock = await acquireCliLock(f.data, 'workspace-relocation'), workers = workerSet()
+  try {
+    await beginWorkspaceRelocationIntent(f.input)
+    if (invalid === 'extra content') workers[0].prompt = 'never persist task content'
+    if (invalid === 'duplicate Worker') workers.push(workers[0])
+    if (invalid === 'duplicate incarnation') workers[0].incarnations.push(workers[0].incarnations[0])
+    if (invalid === 'sparse workers') workers.length++
+    if (invalid === 'sparse incarnations') workers[0].incarnations.length++
+    if (invalid === 'unsorted') workers.reverse()
+    if (invalid === 'missing task') delete workers[0].task_id
+    if (invalid === 'missing incarnation') delete workers[0].incarnations[0].incarnation_id
+    assert.throws(() => commitWorkspaceRelocationWorkers({ dataDir: f.data, id: f.input.id, workers }), { code: 'WORKSPACE_RELOCATION_INVALID' })
+    await assert.rejects(fs.stat(path.join(f.data, 'workspace-control/relocation-workers.json')), { code: 'ENOENT' })
+  } finally { releaseCliLock(lock) }
+})
+
+test('fixed set survives a lost publication reply and later id-bound native lock recovery', async t => {
+  const f = await fixture(t), workers = workerSet(), file = path.join(f.data, 'workspace-control/relocation-workers.json')
+  const lock = await acquireCliLock(f.data, 'workspace-relocation')
+  try { await beginWorkspaceRelocationIntent(f.input); commitWorkspaceRelocationWorkers({ dataDir: f.data, id: f.input.id, workers }) }
+  finally { releaseCliLock(lock) }
+  const raw = await fs.readFile(file, 'utf8'), recovered = await acquireWorkspaceRelocationLock(f.data, f.input.id)
+  try {
+    assert.deepEqual(commitWorkspaceRelocationWorkers({ dataDir: f.data, id: f.input.id, workers }), JSON.parse(raw))
+    assert.equal(await fs.readFile(file, 'utf8'), raw)
+  } finally { releaseCliLock(recovered) }
+})
+
+
+test('fixed set rejects a different original intent even when its id is unchanged', async t => {
+  const f = await fixture(t), lock = await acquireCliLock(f.data, 'workspace-relocation'), workers = workerSet()
+  try {
+    const intent = await beginWorkspaceRelocationIntent(f.input)
+    commitWorkspaceRelocationWorkers({ dataDir: f.data, id: f.input.id, workers })
+    await fs.writeFile(f.recordFile, JSON.stringify({ ...intent, created_at: '2026-10-21T00:00:00.000Z' }))
+    assert.throws(() => readWorkspaceRelocationWorkers(f.data, f.input.id), { code: 'WORKSPACE_RELOCATION_INVALID' })
+  } finally { releaseCliLock(lock) }
+})
+
+test('source replacement during fixed-set publication does not commit or overwrite user files', async t => {
+  const f = await fixture(t), lock = await acquireCliLock(f.data, 'workspace-relocation'), workers = workerSet()
+  const write = syncFs.writeFileSync, retained = path.join(f.root, 'retained-source')
+  try {
+    await beginWorkspaceRelocationIntent(f.input)
+    syncFs.writeFileSync = function(file, ...args) {
+      const result = write.call(this, file, ...args)
+      if (path.basename(String(file)).startsWith('.relocation-')) { syncFs.renameSync(f.source, retained); syncFs.mkdirSync(f.source) }
+      return result
+    }
+    assert.throws(() => commitWorkspaceRelocationWorkers({ dataDir: f.data, id: f.input.id, workers }), { code: 'WORKSPACE_RELOCATION_INVALID' })
+    assert.equal(await fs.readFile(path.join(retained, 'default/original.txt'), 'utf8'), 'user bytes')
+    await assert.rejects(fs.stat(path.join(f.data, 'workspace-control/relocation-workers.json')), { code: 'ENOENT' })
+  } finally { syncFs.writeFileSync = write; releaseCliLock(lock) }
+})
+
+test('an unknown fixed-set entry appearing at publication is preserved', async t => {
+  const f = await fixture(t), lock = await acquireCliLock(f.data, 'workspace-relocation'), workers = workerSet()
+  const link = syncFs.linkSync, file = path.join(f.data, 'workspace-control/relocation-workers.json')
+  try {
+    await beginWorkspaceRelocationIntent(f.input)
+    syncFs.linkSync = function(source, target, ...args) {
+      if (target === file) syncFs.writeFileSync(file, 'unknown owner', { mode: 0o600 })
+      return link.call(this, source, target, ...args)
+    }
+    assert.throws(() => commitWorkspaceRelocationWorkers({ dataDir: f.data, id: f.input.id, workers }), { code: 'WORKSPACE_RELOCATION_CONFLICT' })
+    assert.equal(await fs.readFile(file, 'utf8'), 'unknown owner')
+    assert.deepEqual((await fs.readdir(path.dirname(file))).filter(name => name.startsWith('.relocation-')), [])
+  } finally { syncFs.linkSync = link; releaseCliLock(lock) }
+})
+
+test('directory sync failure after fixed-set publication retains the first result', { skip: process.platform === 'win32' }, async t => {
+  const f = await fixture(t), lock = await acquireCliLock(f.data, 'workspace-relocation'), workers = workerSet()
+  const sync = syncFs.fsyncSync
+  try {
+    await beginWorkspaceRelocationIntent(f.input)
+    syncFs.fsyncSync = function(fd) {
+      if (syncFs.fstatSync(fd).isDirectory()) throw Object.assign(new Error('sync interrupted'), { code: 'EIO' })
+      return sync.call(this, fd)
+    }
+    assert.throws(() => commitWorkspaceRelocationWorkers({ dataDir: f.data, id: f.input.id, workers }), { code: 'EIO' })
+    syncFs.fsyncSync = sync
+    const record = readWorkspaceRelocationWorkers(f.data, f.input.id)
+    assert.deepEqual(record.workers, workers)
+    assert.deepEqual(commitWorkspaceRelocationWorkers({ dataDir: f.data, id: f.input.id, workers }), record)
+  } finally { syncFs.fsyncSync = sync; releaseCliLock(lock) }
+})
+
+test('actual Agent identity projection roundtrips through the private fixed-set validator and a fresh Node reader', async t => {
+  const f = await fixture(t), lock = await acquireCliLock(f.data, 'workspace-relocation')
+  try {
+    await beginWorkspaceRelocationIntent(f.input)
+    const { captureWorkspaceRelocationWorkers } = createRequire(import.meta.url)('../../../crabot-agent/dist/workers/harness/workspace-relocation-scope.js')
+    const workers = captureWorkspaceRelocationWorkers(workerSet().map(worker => ({ managerKey: worker.manager_key,
+      worker: { ...worker, task: { id: worker.task_id }, incarnations: worker.incarnations } })))
+    const record = commitWorkspaceRelocationWorkers({ dataDir: f.data, id: f.input.id, workers })
+    const script = 'import { readWorkspaceRelocationWorkers } from ' + JSON.stringify(new URL('../workspace-relocation-intent.mjs', import.meta.url).href)
+      + '; process.stdout.write(JSON.stringify(readWorkspaceRelocationWorkers(process.argv[1], process.argv[2])));'
+    const observed = JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e', script, f.data, f.input.id], { encoding: 'utf8' }))
+    assert.deepEqual(observed, record)
+  } finally { releaseCliLock(lock) }
+})
+
+
+test('oversized fixed set fails without publishing a partial membership list', async t => {
+  const f = await fixture(t), lock = await acquireCliLock(f.data, 'workspace-relocation')
+  try {
+    await beginWorkspaceRelocationIntent(f.input)
+    const workers = [{ worker_id: 'a'.repeat(32 * 1024 * 1024), manager_key: 'channel::session', task_id: 'a', incarnations: [] }]
+    assert.throws(() => commitWorkspaceRelocationWorkers({ dataDir: f.data, id: f.input.id, workers }), { code: 'WORKSPACE_RELOCATION_INVALID' })
+    assert.equal(readWorkspaceRelocationWorkers(f.data, f.input.id), null)
+    assert.deepEqual((await fs.readdir(path.dirname(f.recordFile))).filter(name => name.startsWith('.relocation-')), [])
+    assert.throws(() => assertWorkspaceExecutionAllowed(f.data), { code: 'WORKSPACE_MAINTENANCE' })
+  } finally { releaseCliLock(lock) }
+})
+
+
+test('a persisted fixed set cannot lose its fence when the initial intent is missing', async t => {
+  const f = await fixture(t), lock = await acquireCliLock(f.data, 'workspace-relocation')
+  try {
+    await beginWorkspaceRelocationIntent(f.input)
+    commitWorkspaceRelocationWorkers({ dataDir: f.data, id: f.input.id, workers: workerSet() })
+    await fs.unlink(f.recordFile)
+    assert.throws(() => assertWorkspaceExecutionAllowed(f.data), { code: 'WORKSPACE_MAINTENANCE' })
+    assert.throws(() => readWorkspaceRelocationIntent(f.data), { code: 'WORKSPACE_RELOCATION_INVALID' })
+    assert.throws(() => commitWorkspaceRelocationWorkers({ dataDir: f.data, id: f.input.id, workers: workerSet() }), { code: 'WORKSPACE_RELOCATION_INVALID' })
+    await assert.rejects(fs.stat(f.recordFile), { code: 'ENOENT' })
+    assert.equal(await fs.readFile(path.join(f.source, 'default/original.txt'), 'utf8'), 'user bytes')
+  } finally { releaseCliLock(lock) }
+})
+
+
+for (const change of ['missing', 'different']) test('fixed-set publication cannot report success after readback changes: ' + change, async t => {
+  const f = await fixture(t), lock = await acquireCliLock(f.data, 'workspace-relocation'), workers = workerSet()
+  const link = syncFs.linkSync, file = path.join(f.data, 'workspace-control/relocation-workers.json')
+  try {
+    await beginWorkspaceRelocationIntent(f.input)
+    syncFs.linkSync = function(source, target, ...args) {
+      const result = link.call(this, source, target, ...args)
+      if (target === file) {
+        if (change === 'missing') syncFs.unlinkSync(file)
+        else { const value = JSON.parse(syncFs.readFileSync(file, 'utf8')); value.workers = []; syncFs.writeFileSync(file, JSON.stringify(value)) }
+      }
+      return result
+    }
+    assert.throws(() => commitWorkspaceRelocationWorkers({ dataDir: f.data, id: f.input.id, workers }), { code: 'WORKSPACE_RELOCATION_INVALID' })
+    assert.throws(() => assertWorkspaceExecutionAllowed(f.data), { code: 'WORKSPACE_MAINTENANCE' })
+    assert.equal(await fs.readFile(path.join(f.source, 'default/original.txt'), 'utf8'), 'user bytes')
+  } finally { syncFs.linkSync = link; releaseCliLock(lock) }
 })

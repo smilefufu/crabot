@@ -4,7 +4,7 @@ import path from 'node:path'
 import { tmpdir } from 'node:os'
 import ModuleManager from './index.js'
 
-describe('workspace maintenance module admission', () => {
+describe.each(['relocation.json', 'relocation-workers.json'])('workspace maintenance module admission: %s', record => {
   async function fixture() {
     const data = await fs.mkdtemp(path.join(tmpdir(), 'crabot-mm-workspace-gate-'))
     const manager = new ModuleManager({ port: 0, modules: [], hotplug_allowed_types: ['channel'],
@@ -16,7 +16,7 @@ describe('workspace maintenance module admission', () => {
     })
     const freeze = async () => {
       await fs.mkdir(path.join(data, 'workspace-control'), { recursive: true })
-      await fs.writeFile(path.join(data, 'workspace-control/relocation.json'), 'fixed-job')
+      await fs.writeFile(path.join(data, 'workspace-control', record), 'fixed-job')
     }
     return { data, manager, freeze, cleanup: () => fs.rm(data, { recursive: true, force: true }) }
   }

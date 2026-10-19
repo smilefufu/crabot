@@ -1,4 +1,4 @@
-// Initial private intent only. It never authorizes a stop, move, closure or release of maintenance.
+// Private intent and fixed Worker set only; neither authorizes stopping, moving or releasing maintenance.
 import fs from 'node:fs'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
@@ -6,6 +6,7 @@ import native from './process-identity.cjs'
 import management from './desktop-management.cjs'
 import { cliLockToken } from './cli-lock.mjs'
 import { readVersionMaintenance } from './version-maintenance.mjs'
+import { sha256CanonicalJson } from '../../crabot-shared/dist/canonical-json.js'
 import { WorkspaceCatalog } from '../../crabot-shared/dist/workspace-catalog.js'
 import { inspectWorkspaceRelocationTarget } from '../../crabot-shared/dist/workspace-relocation-target.js'
 const uuid = value => typeof value === 'string' && /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(value)
@@ -33,22 +34,33 @@ function privateControl(control) {
     : stat.uid !== process.getuid() || (stat.mode & 0o777) !== 0o700)) fail()
   return true
 }
-function read(ctx) {
-  if (!privateControl(ctx.control)) return null
+function readPrivateJson(file, limit) {
   let before
-  try { before = fs.lstatSync(ctx.file, { bigint: true }) } catch (error) { if (error.code === 'ENOENT') return null; fail() }
+  try { before = fs.lstatSync(file, { bigint: true }) } catch (error) { if (error.code === 'ENOENT') return undefined; fail() }
   let fd
   try {
-    if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1n || before.size > 65536n) fail()
-    const owner = process.platform === 'win32' ? native.isPrivateFile(ctx.file)
+    if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1n || before.size > BigInt(limit)) fail()
+    const owner = process.platform === 'win32' ? native.isPrivateFile(file)
       : before.uid === BigInt(process.getuid()) && (before.mode & 0o777n) === 0o600n
     if (!owner) fail()
-    fd = fs.openSync(ctx.file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0))
+    fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0))
     const stat = fs.fstatSync(fd, { bigint: true })
     if (stat.dev !== before.dev || stat.ino !== before.ino || stat.size !== before.size) fail()
     const value = JSON.parse(fs.readFileSync(fd, 'utf8'))
-    const after = fs.lstatSync(ctx.file, { bigint: true })
+    const after = fs.lstatSync(file, { bigint: true })
     if (after.dev !== before.dev || after.ino !== before.ino || after.mtimeNs !== before.mtimeNs || after.ctimeNs !== before.ctimeNs) fail()
+    return value
+  } catch { fail() } finally { if (fd !== undefined) fs.closeSync(fd) }
+}
+function read(ctx) {
+  if (!privateControl(ctx.control)) return null
+  const value = readPrivateJson(ctx.file, 65536)
+  if (value === undefined) {
+    try { fs.lstatSync(path.join(ctx.control, 'relocation-workers.json')) }
+    catch (error) { if (error.code === 'ENOENT') return null; fail() }
+    fail()
+  }
+  try {
     if (value?.schema_version !== 1 || Object.keys(value).length !== 12 || !uuid(value.id) || value.phase !== 'freezing'
       || !Number.isSafeInteger(value.catalog_revision) || value.catalog_revision < 1
       || !validIdentity(value.data_root) || !same(value.data_root, identity(ctx.dataRoot))
@@ -57,7 +69,7 @@ function read(ctx) {
       || value.target_identity !== null && (!validIdentity(value.target_identity) || value.target_identity.path !== value.target)
       || typeof value.created_at !== 'string' || new Date(value.created_at).toISOString() !== value.created_at) fail()
     return value
-  } catch { fail() } finally { if (fd !== undefined) fs.closeSync(fd) }
+  } catch { fail() }
 }
 function syncDirectory(directory) {
   if (process.platform === 'win32') return
@@ -99,17 +111,91 @@ export async function beginWorkspaceRelocationIntent(options) {
     target_identity: preview.target_identity, target_ancestor: preview.target_ancestor, created_at: new Date().toISOString() }
   if (!same(controlIdentity, identity(ctx.control)) || !privateControl(ctx.control)) fail()
   if (read(ctx)) fail('WORKSPACE_RELOCATION_CONFLICT')
-  const temporary = path.join(ctx.control, '.relocation-' + randomUUID())
-  try {
-    const content = JSON.stringify(record) + '\n'
-    if (Buffer.byteLength(content) > 65536) fail()
-    if (process.platform === 'win32') { native.writePrivateFile(temporary, ''); fs.writeFileSync(temporary, content, { flag: 'r+', flush: true }) }
-    else fs.writeFileSync(temporary, content, { flag: 'wx', mode: 0o600, flush: true })
+  publishPrivateJson(ctx, ctx.file, record, 65536, () => {
     if (!same(dataIdentity, identity(ctx.dataRoot)) || !same(controlIdentity, identity(ctx.control)) || !privateControl(ctx.control)) fail()
     if (read(ctx)) fail('WORKSPACE_RELOCATION_CONFLICT')
-    // No replacement: even an unexpected entry appearing under the held lock is preserved.
-    try { fs.linkSync(temporary, ctx.file) } catch (error) { if (error.code === 'EEXIST') fail('WORKSPACE_RELOCATION_CONFLICT'); throw error }
+  })
+  const accepted = read(ctx)
+  if (!accepted || sha256CanonicalJson(accepted) !== sha256CanonicalJson(record)) fail()
+  return accepted
+}
+
+function publishPrivateJson(ctx, file, value, limit, verify) {
+  const temporary = path.join(ctx.control, '.relocation-' + randomUUID())
+  try {
+    const content = JSON.stringify(value) + '\n'
+    if (Buffer.byteLength(content) > limit) fail()
+    if (process.platform === 'win32') { native.writePrivateFile(temporary, ''); fs.writeFileSync(temporary, content, { flag: 'r+', flush: true }) }
+    else fs.writeFileSync(temporary, content, { flag: 'wx', mode: 0o600, flush: true })
+    verify()
+    // No replacement: preserve even an unexpected entry appearing under the held lock.
+    try { fs.linkSync(temporary, file) } catch (error) { if (error.code === 'EEXIST') fail('WORKSPACE_RELOCATION_CONFLICT'); throw error }
   } finally { fs.rmSync(temporary, { force: true }) }
   syncIntent(ctx)
-  return read(ctx)
+}
+
+const scopeLimit = 32 * 1024 * 1024
+const nonempty = value => typeof value === 'string' && value.length > 0 && !value.includes('\0')
+const integer = value => Number.isSafeInteger(value) && value >= 0
+const fields = (value, required, optional = []) => value && typeof value === 'object' && !Array.isArray(value)
+  && required.every(key => Object.hasOwn(value, key)) && Object.keys(value).every(key => required.includes(key) || optional.includes(key))
+function validWorkers(workers) {
+  if (!Array.isArray(workers)) return false
+  let previousWorker
+  for (const worker of workers) {
+    if (!fields(worker, ['worker_id', 'manager_key', 'task_id', 'incarnations'], ['workspace_id'])
+      || !nonempty(worker.worker_id) || previousWorker !== undefined && worker.worker_id <= previousWorker
+      || !nonempty(worker.manager_key) || !nonempty(worker.task_id)
+      || Object.hasOwn(worker, 'workspace_id') && !nonempty(worker.workspace_id) || !Array.isArray(worker.incarnations)) return false
+    previousWorker = worker.worker_id
+    let previousIncarnation
+    for (const item of worker.incarnations) {
+      if (!fields(item, ['incarnation_id', 'impl', 'seq', 'workspace', 'started_at'], ['forked_from', 'query_id'])
+        || !nonempty(item.incarnation_id) || previousIncarnation !== undefined && item.incarnation_id <= previousIncarnation
+        || !['builtin', 'claude-code', 'codex', 'legacy'].includes(item.impl) || !integer(item.seq)
+        || typeof item.workspace !== 'string' || item.workspace.includes('\0') || !nonempty(item.started_at)
+        || Object.hasOwn(item, 'forked_from') && !nonempty(item.forked_from) && !integer(item.forked_from)
+        || Object.hasOwn(item, 'query_id') && !nonempty(item.query_id)) return false
+      previousIncarnation = item.incarnation_id
+    }
+  }
+  return true
+}
+function readScope(ctx, intent) {
+  const value = readPrivateJson(path.join(ctx.control, 'relocation-workers.json'), scopeLimit)
+  if (value === undefined) {
+    if (sha256CanonicalJson(read(ctx)) !== sha256CanonicalJson(intent)) fail()
+    return null
+  }
+  try {
+    if (!fields(value, ['schema_version', 'intent_id', 'intent_sha256', 'workers', 'created_at']) || value.schema_version !== 1
+      || value.intent_id !== intent.id || value.intent_sha256 !== sha256CanonicalJson(intent) || !validWorkers(value.workers)
+      || typeof value.created_at !== 'string' || new Date(value.created_at).toISOString() !== value.created_at
+      || sha256CanonicalJson(read(ctx)) !== sha256CanonicalJson(intent)) fail()
+    return value
+  } catch { fail() }
+}
+export function readWorkspaceRelocationWorkers(dataDir, id) {
+  const ctx = context(dataDir), intent = read(ctx)
+  if (!intent || intent.id !== id) fail()
+  return readScope(ctx, intent)
+}
+export function commitWorkspaceRelocationWorkers({ dataDir, id, workers }) {
+  const ctx = context(dataDir, true), intent = read(ctx)
+  if (!intent || intent.id !== id || !validWorkers(workers)) fail()
+  const previous = readScope(ctx, intent)
+  if (previous) {
+    if (sha256CanonicalJson(previous.workers) !== sha256CanonicalJson(workers)) fail('WORKSPACE_RELOCATION_CONFLICT')
+    syncIntent(ctx)
+    return previous
+  }
+  const record = { schema_version: 1, intent_id: id, intent_sha256: sha256CanonicalJson(intent), workers, created_at: new Date().toISOString() }
+  const verify = () => {
+    if (!same(intent.source, identity(intent.source.path)) || sha256CanonicalJson(read(ctx)) !== record.intent_sha256) fail()
+  }
+  verify()
+  publishPrivateJson(ctx, path.join(ctx.control, 'relocation-workers.json'), record, scopeLimit, verify)
+  const accepted = readScope(ctx, intent)
+  if (!accepted || sha256CanonicalJson(accepted) !== sha256CanonicalJson(record)) fail()
+  return accepted
 }

@@ -86,3 +86,17 @@ test('the independent bootstrap guard matches Shared on absent, malformed, and r
   await fs.rmdir(f.record); await fs.symlink(path.join(f.root, 'missing'), f.record, process.platform === 'win32' ? 'junction' : 'file'); compare(true)
   await fs.rm(f.record); await fs.rmdir(f.control); await fs.writeFile(f.control, 'replaced'); compare(true)
 })
+
+
+for (const kind of ['file', 'directory', 'link']) test('an orphaned fixed Worker set keeps both guards closed: ' + kind, async t => {
+  const f = await fixture(t), scope = path.join(f.control, 'relocation-workers.json')
+  const bootstrap = createRequire(import.meta.url)('../../scripts/lib/workspace-maintenance.cjs')
+  await fs.mkdir(f.control)
+  if (kind === 'file') await fs.writeFile(scope, 'unverified fixed set')
+  if (kind === 'directory') await fs.mkdir(scope)
+  if (kind === 'link') await fs.symlink(path.join(f.root, 'missing'), scope, process.platform === 'win32' ? 'junction' : 'file')
+  assert.throws(() => assertWorkspaceExecutionAllowed(f.root), { code: 'WORKSPACE_MAINTENANCE' })
+  assert.throws(() => bootstrap.assertWorkspaceExecutionAllowed(f.root), { code: 'WORKSPACE_MAINTENANCE' })
+  await fs.rm(scope, { recursive: kind === 'directory' })
+  assertWorkspaceExecutionAllowed(f.root); bootstrap.assertWorkspaceExecutionAllowed(f.root)
+})
