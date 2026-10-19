@@ -27,7 +27,8 @@ const { readCliSelection, prepareCliPayload } = await import(pathToFileURL(join(
 const { inspectInstance } = await import(pathToFileURL(join(next, 'scripts/lib/instance-runtime.mjs')))
 const { readVersionMaintenance } = await import(pathToFileURL(join(next, 'scripts/lib/version-maintenance.mjs')))
 const { writeCoreRelease, verifyCoreRelease } = await import(pathToFileURL(join(next, 'scripts/lib/core-release.mjs')))
-const { verifyMaintenanceBackup } = await import(pathToFileURL(join(next, 'scripts/lib/maintenance-backup.mjs')))
+const { verifyBackup } = await import(pathToFileURL(join(next, 'scripts/upgrade-lib/scoped-data.mjs')))
+const { previewMigrations } = await import(pathToFileURL(join(next, 'scripts/upgrade-lib/migrate.mjs')))
 const { downloadRelease } = await import('../../scripts/upgrade-lib/release.mjs')
 const { applyDownloadedCliUpgrade } = await import('../../scripts/lib/standalone-cli-release.mjs')
 const execute = promisify(execFile)
@@ -126,14 +127,29 @@ try {
   for (const python of environments) assert.equal((await run(python, ['-I', '-X', 'utf8', '-B', '-c', 'import crabot_upgrade_probe; print(crabot_upgrade_probe.value)'])).trim(), '2026')
   const versionOutput = await run(one.command, ['--version'])
   assert.ok(versionOutput.includes(two.version))
-  const backups = await fs.readdir(dataDir + '.desktop-backups')
-  assert.equal(backups.length, 1)
-  await verifyMaintenanceBackup(join(dataDir + '.desktop-backups', backups[0]))
+  await assert.rejects(fs.lstat(dataDir + '.desktop-backups'), { code: 'ENOENT' })
+  const remaining = await previewMigrations(two.coreRoot, dataDir)
+  assert.equal(remaining.modules.length, 0); assert.equal(remaining.backup_bytes, 0)
+  const migrations = join(dataDir, '.upgrade-migrations')
+  const transactions = await fs.readdir(migrations).catch(error => { if (error.code === 'ENOENT') return []; throw error })
+  for (const name of transactions) {
+    const transaction = join(migrations, name), bytes = await fs.readFile(join(transaction, 'plan.json'))
+    const plan = JSON.parse(bytes), state = JSON.parse(await fs.readFile(join(transaction, 'state.json'), 'utf8'))
+    assert.equal(state.phase, 'completed'); assert.equal(state.plan_sha256, createHash('sha256').update(bytes).digest('hex'))
+    await verifyBackup(join(transaction, 'backup'), plan.description.scope.writes, plan.original)
+  }
+  if (remaining.shared.status === 'ready') {
+    const ready = JSON.parse(await fs.readFile(join(dataDir, 'agent/shared-request-upgrade.json'), 'utf8'))
+    const transaction = join(dataDir, ready.transaction), plan = JSON.parse(await fs.readFile(join(transaction, 'plan.json'), 'utf8'))
+    // This fresh fixture has no old request transaction to preserve.
+    assert.equal(plan.schema_version, 2)
+    await verifyBackup(join(transaction, 'backup'), plan.write_scope, plan.backup_manifest)
+  }
   assert.equal((await verifyCoreRelease(one.coreRoot)).version, one.version)
   assert.equal((await verifyCoreRelease(two.coreRoot)).version, two.version)
   updateComplete = true
   console.log(JSON.stringify({ platform: process.platform, arch: process.arch, from: one.version, to: two.version,
-    target_bundled_node: true, actual_cli_upgrade_command: cliCommand, synthetic_previous_release: cliCommand, full_archive_download_checksum_extract: Boolean(archiveArgument), native_command_selected_target: true, scoped_backup_verified: true,
+    target_bundled_node: true, actual_cli_upgrade_command: cliCommand, synthetic_previous_release: cliCommand, full_archive_download_checksum_extract: Boolean(archiveArgument), native_command_selected_target: true, common_migration_receipts_verified: true, duplicate_outer_backup: false,
     stable_agent_and_mcp_python_preserved: true, workspaces_preserved: true, immutable_payloads_verified: true,
     no_mm_started: true, health_verified: false }))
 } finally {

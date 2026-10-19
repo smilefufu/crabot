@@ -9,7 +9,7 @@ import { writeCoreRelease, verifyCoreRelease } from '../core-release.mjs'
 import { createMaintenanceBackup } from '../maintenance-backup.mjs'
 import { prepareCoreEnvironment } from '../core-preparation.mjs'
 import { assertVersionMaintenanceAllowsStart, beginVersionMaintenance, readVersionMaintenance,
-  recordVersionMaintenanceBackup, markVersionMaintenanceInstalling, recoverVersionMaintenance, bindVersionMaintenanceTarget, cancelPreparedVersionMaintenance } from '../version-maintenance.mjs'
+  recordVersionMaintenanceBackup, markVersionMaintenanceInstalling, recoverVersionMaintenance, bindVersionMaintenanceTarget, cancelPreparedVersionMaintenance, prepareScopedVersionMaintenance, completeStoppedVersionMaintenance } from '../version-maintenance.mjs'
 
 async function fixture(t) {
   const temporary = await fs.mkdtemp(path.join(tmpdir(), 'Crabot 版本维护 '))
@@ -197,3 +197,95 @@ test('a system preparation is linked to one deployment operation and cannot be c
     assert.equal(readVersionMaintenance(f.dataDir), null)
   } finally { releaseCliLock(lock) }
 })
+
+
+async function scopedFixture(t) {
+  const f = await fixture(t), target = await immutableTarget(f)
+  const lock = await acquireCliLock(f.dataDir, 'scoped-maintenance-fixture')
+  const record = await beginVersionMaintenance(f.dataDir, f.root, '1.2.4', undefined, { dataProtection: 'scoped' })
+  return { ...f, target, lock, record }
+}
+test('scoped maintenance prepares only after binding the complete target and never claims an outer backup', async t => {
+  const f = await scopedFixture(t)
+  assert.equal(f.record.schema_version, 3); assert.equal(f.record.data_protection, 'scoped')
+  await assert.rejects(prepareScopedVersionMaintenance(f.dataDir, f.record.id), { code: 'CRABOT_MAINTENANCE_PENDING' })
+  await assert.rejects(markVersionMaintenanceInstalling(f.dataDir, f.record.id), { code: 'CRABOT_MAINTENANCE_PENDING' })
+  await assert.rejects(recordVersionMaintenanceBackup(f.dataDir, f.record.id, { id: f.record.id, sha256: 'a'.repeat(64) }), { code: 'CRABOT_MAINTENANCE_PENDING' })
+  await bindVersionMaintenanceTarget(f.dataDir, f.record.id, f.target)
+  const prepared = await prepareScopedVersionMaintenance(f.dataDir, f.record.id)
+  assert.equal(prepared.phase, 'prepared'); assert.equal(prepared.backup, null)
+  assert.throws(() => assertVersionMaintenanceAllowsStart(f.dataDir), { code: 'CRABOT_MAINTENANCE_PENDING' })
+  await assert.rejects(fs.lstat(f.dataDir + '.desktop-backups'), { code: 'ENOENT' })
+})
+for (const change of ['unknown-migration', 'changed-target']) {
+  test('scoped prepared maintenance refuses before installing when ' + change, async t => {
+    const f = await scopedFixture(t)
+    await bindVersionMaintenanceTarget(f.dataDir, f.record.id, f.target)
+    await prepareScopedVersionMaintenance(f.dataDir, f.record.id)
+    if (change === 'changed-target') await fs.appendFile(path.join(f.target, 'package.json'), ' ')
+    else {
+      await fs.mkdir(path.join(f.dataDir, '.upgrade-migrations/interrupted'), { recursive: true })
+      await fs.writeFile(path.join(f.dataDir, '.upgrade-migrations/interrupted/state.json'), JSON.stringify({ schema_version: 1, phase: 'running', plan_sha256: 'a'.repeat(64) }))
+    }
+    await assert.rejects(markVersionMaintenanceInstalling(f.dataDir, f.record.id))
+    assert.equal(readVersionMaintenance(f.dataDir).phase, 'prepared')
+    assert.throws(() => assertVersionMaintenanceAllowsStart(f.dataDir), { code: 'CRABOT_MAINTENANCE_PENDING' })
+  })
+}
+for (const phase of ['preparing', 'prepared']) {
+  test('only the exact source can resume scoped maintenance before installation: ' + phase, async t => {
+    const f = await scopedFixture(t)
+    await bindVersionMaintenanceTarget(f.dataDir, f.record.id, f.target)
+    if (phase === 'prepared') await prepareScopedVersionMaintenance(f.dataDir, f.record.id)
+    releaseCliLock(f.lock)
+    let ran = false
+    await recoverVersionMaintenance({ dataDir: f.dataDir, root: f.root, appVersion: '1.2.3', verifyCompatible: async () => {}, run: async () => {
+      assertVersionMaintenanceAllowsStart(f.dataDir); ran = true; return true
+    } })
+    assert.equal(ran, true); assert.equal(readVersionMaintenance(f.dataDir), null)
+    assert.equal(await fs.readFile(path.join(f.dataDir, 'admin/config'), 'utf8'), 'preserved')
+  })
+}
+test('scoped offline completion retains its fence and recovery material when migration result is unknown', async t => {
+  const f = await scopedFixture(t)
+  await bindVersionMaintenanceTarget(f.dataDir, f.record.id, f.target)
+  await prepareScopedVersionMaintenance(f.dataDir, f.record.id)
+  await markVersionMaintenanceInstalling(f.dataDir, f.record.id)
+  let verified = false
+  await assert.rejects(completeStoppedVersionMaintenance({ dataDir: f.dataDir, root: f.target, id: f.record.id,
+    migrate: async () => { throw new Error('unknown migration result') }, verifyComplete: async () => { verified = true } }), /unknown migration result/)
+  assert.equal(verified, false); assert.equal(readVersionMaintenance(f.dataDir).phase, 'verifying')
+  releaseCliLock(f.lock)
+  let ran = false
+  await assert.rejects(recoverVersionMaintenance({ dataDir: f.dataDir, root: f.root, appVersion: '1.2.3', verifyCompatible: async () => {}, run: async () => { ran = true; return true } }))
+  assert.equal(ran, false); assert.throws(() => assertVersionMaintenanceAllowsStart(f.dataDir), { code: 'CRABOT_MAINTENANCE_PENDING' })
+})
+for (const invalid of ['backup', 'protection', 'target', 'legacy-phase']) {
+  test('scoped maintenance rejects incompatible persisted combinations: ' + invalid, async t => {
+    const f = await scopedFixture(t)
+    await bindVersionMaintenanceTarget(f.dataDir, f.record.id, f.target)
+    await prepareScopedVersionMaintenance(f.dataDir, f.record.id)
+    const file = path.join(f.dataDir, 'desktop-maintenance.json'), record = readVersionMaintenance(f.dataDir)
+    if (invalid === 'backup') record.backup = { id: record.id, sha256: 'a'.repeat(64) }
+    if (invalid === 'protection') delete record.data_protection
+    if (invalid === 'target') delete record.target_core
+    if (invalid === 'legacy-phase') record.phase = 'backed_up'
+    await fs.writeFile(file, JSON.stringify(record))
+    assert.throws(() => readVersionMaintenance(f.dataDir), { code: 'CRABOT_MAINTENANCE_PENDING' })
+  })
+}
+
+
+for (const phase of ['preparing', 'prepared']) {
+  test('scoped pre-install cancellation keeps current data and clears only its own fence: ' + phase, async t => {
+    const f = await scopedFixture(t)
+    await bindVersionMaintenanceTarget(f.dataDir, f.record.id, f.target)
+    if (phase === 'prepared') await prepareScopedVersionMaintenance(f.dataDir, f.record.id)
+    await fs.writeFile(path.join(f.dataDir, 'admin/config'), 'current data')
+    assert.deepEqual(await cancelPreparedVersionMaintenance({ dataDir: f.dataDir, root: f.root, id: f.record.id,
+      verifyCompatible: async () => {} }), { preparation_cancelled: true, service_started: false })
+    assert.equal(readVersionMaintenance(f.dataDir), null)
+    assert.equal(await fs.readFile(path.join(f.dataDir, 'admin/config'), 'utf8'), 'current data')
+    await assert.rejects(fs.lstat(f.dataDir + '.desktop-backups'), { code: 'ENOENT' })
+  })
+}

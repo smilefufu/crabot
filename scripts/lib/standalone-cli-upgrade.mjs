@@ -7,8 +7,8 @@ import { readStandaloneCliBinding } from './standalone-cli-install.mjs'
 import { acquireCliLock, releaseCliLock } from './cli-lock.mjs'
 import { inspectInstance } from './instance-runtime.mjs'
 import { verifyCoreRelease } from './core-release.mjs'
-import { createMaintenanceBackup, assertLocalMigrationData } from './maintenance-backup.mjs'
-import { beginVersionMaintenance, bindVersionMaintenanceTarget, recordVersionMaintenanceBackup,
+import { assertLocalMigrationData } from './maintenance-backup.mjs'
+import { beginVersionMaintenance, bindVersionMaintenanceTarget, prepareScopedVersionMaintenance,
   markVersionMaintenanceInstalling, completeStoppedCliVersionMaintenance } from './version-maintenance.mjs'
 import { applyStartupMigrations, verifyDataCompatibility } from './core-preparation.mjs'
 import management from './desktop-management.cjs'
@@ -35,10 +35,9 @@ export async function applyStoppedCliUpgrade({ sourceRoot, targetRoot, dataDir, 
     const migrations = verifyDataCompatibility(targetRoot, dataDir) // preflight every module before any data write
     await assertLocalMigrationData(dataDir, migrations, targetRoot)
     const next = await verifyCoreRelease(targetRoot)
-    const record = await beginVersionMaintenance(dataDir, sourceRoot, next.version)
-    const backup = await createMaintenanceBackup(dataDir)
-    await recordVersionMaintenanceBackup(dataDir, record.id, backup)
+    const record = await beginVersionMaintenance(dataDir, sourceRoot, next.version, undefined, { dataProtection: 'scoped' })
     await bindVersionMaintenanceTarget(dataDir, record.id, targetRoot)
+    await prepareScopedVersionMaintenance(dataDir, record.id)
     await stopped(source.id)
     await markVersionMaintenanceInstalling(dataDir, record.id)
     await selectCliPayload({ installRoot: source.root, coreRoot: targetRoot, id: target.id, version: next.version, scope: 'user' },
@@ -49,6 +48,6 @@ export async function applyStoppedCliUpgrade({ sourceRoot, targetRoot, dataDir, 
         await stopped(target.id)
         if (verifyDataCompatibility(targetRoot, dataDir).length) fail('迁移尚未完成，已保留维护记录及备份。')
       } })
-    return { version: next.version, coreRoot: targetRoot, backup: backup.directory, service_started: false, health_verified: false }
+    return { version: next.version, coreRoot: targetRoot, backup: null, service_started: false, health_verified: false }
   } finally { releaseCliLock(lock) }
 }

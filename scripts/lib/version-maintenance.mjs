@@ -11,6 +11,8 @@ import { acquireStartupLock, releaseCliLock, cliLockToken } from './cli-lock.mjs
 import { verifyCoreRelease } from './core-release.mjs'
 import { inspectInstance } from './instance-runtime.mjs'
 import { verifyMaintenanceBackup } from './maintenance-backup.mjs'
+import { previewMigrations } from '../upgrade-lib/migrate.mjs'
+import { assertNoInterruptedMigrations } from '../upgrade-lib/migration-transaction.mjs'
 import cliLocation from './cli-location.cjs'
 import { inspectLegacyEntryFence, sealLegacyEntryFence } from './legacy-entry-fence.mjs'
 import { discoverLegacyRuntime, discoverSealedLegacyRuntime } from './legacy-runtime.mjs'
@@ -43,7 +45,7 @@ export function readVersionMaintenance(dataDir) {
     if (!stat.isFile() || stat.size > 65_536 || !privateFile) fail()
     const record = JSON.parse(readFileSync(file, 'utf8'))
     const source = record.legacy_source
-    const validSource = record.schema_version === 1
+    const validSource = [1, 3].includes(record.schema_version)
       ? version(record.source_version) && /^[a-f0-9]{64}$/.test(record.source_inventory_sha256) && source === undefined
       : record.schema_version === 2 && legacyVersions.includes(record.source_version) && record.source_inventory_sha256 === undefined
         && record.target_core !== undefined && uuid(source?.entry_fence_id) && /^[a-f0-9]{64}$/.test(source.fingerprint)
@@ -55,13 +57,18 @@ export function readVersionMaintenance(dataDir) {
         || prepared.status === 'prepared' && Object.keys(prepared).length !== 2 || !['absent', 'prepared'].includes(prepared.status)) fail()
       if (prepared.status === 'prepared') pythonSelection.verifyAgentEnvironmentReference(prepared.reference)
     }
+    const scoped = record.schema_version === 3
+    const phases = scoped ? ['preparing', 'prepared', 'installing', 'verifying'] : ['preparing', 'backed_up', 'installing', 'verifying']
+    if (scoped && (record.data_protection !== 'scoped' || record.backup !== null
+      || record.phase !== 'preparing' && !record.target_core)) fail()
+    if (!scoped && record.data_protection !== undefined) fail()
     if (!validSource || !uuid(record.id) || record.data_dir !== realpathSync(dataDir)
       || !path.isAbsolute(record.install_root) || !version(record.target_version)
       || record.target_core !== undefined && (!record.target_core || typeof record.target_core.root !== 'string'
         || !path.isAbsolute(record.target_core.root) || !/^[a-f0-9]{64}$/.test(record.target_core.inventory_sha256)
         || Object.keys(record.target_core).some(key => !['root', 'inventory_sha256'].includes(key)))
       || record.system_operation_id !== undefined && !uuid(record.system_operation_id)
-      || !['preparing', 'backed_up', 'installing', 'verifying'].includes(record.phase)
+      || !phases.includes(record.phase)
       || record.backup !== null && (!uuid(record.backup?.id) || !/^[a-f0-9]{64}$/.test(record.backup?.sha256))) fail()
     return record
   } catch { fail() }
@@ -83,14 +90,15 @@ export function assertVersionMaintenanceAllowsStart(dataDir) {
     fail()
   }
 }
-export async function beginVersionMaintenance(dataDir, root, targetVersion, sourceVersion, { systemOperationId } = {}) {
+export async function beginVersionMaintenance(dataDir, root, targetVersion, sourceVersion, { systemOperationId, dataProtection } = {}) {
   dataDir = locked(dataDir)
   management.ensurePrivateDataRoot(dataDir)
-  if (readVersionMaintenance(dataDir) || !version(targetVersion) || systemOperationId !== undefined && !uuid(systemOperationId)) fail()
+  if (readVersionMaintenance(dataDir) || !version(targetVersion) || systemOperationId !== undefined && !uuid(systemOperationId)
+    || dataProtection !== undefined && dataProtection !== 'scoped') fail()
   const release = await verifyCoreRelease(root, { version: sourceVersion })
-  const record = { schema_version: 1, id: randomUUID(), data_dir: dataDir, install_root: realpathSync(root),
+  const record = { schema_version: dataProtection === 'scoped' ? 3 : 1, id: randomUUID(), data_dir: dataDir, install_root: realpathSync(root),
     source_version: release.version, target_version: targetVersion, source_inventory_sha256: release.inventory_sha256,
-    phase: 'preparing', backup: null, ...(systemOperationId ? { system_operation_id: systemOperationId } : {}) }
+    phase: 'preparing', backup: null, ...(dataProtection ? { data_protection: dataProtection } : {}), ...(systemOperationId ? { system_operation_id: systemOperationId } : {}) }
   write(dataDir, record, true); return record
 }
 // Explicit legacy-user adapter. The ordinary sealed source path above remains
@@ -239,6 +247,23 @@ export async function bindVersionMaintenanceTarget(dataDir, id, root) {
   record.target_core = { root, inventory_sha256: release.inventory_sha256 }
   write(dataDir, record); return record
 }
+// This is a preparation check, never a backup receipt. The common migration
+// executor creates and verifies each exact recovery scope before its first write.
+export async function prepareScopedVersionMaintenance(dataDir, id) {
+  dataDir = locked(dataDir)
+  const record = readVersionMaintenance(dataDir)
+  if (record?.schema_version !== 3 || record.id !== id || record.phase !== 'preparing' || !record.target_core
+    || inspectInstance(dataDir).state !== 'stopped') fail()
+  await protectionOf(dataDir, record)
+  record.phase = 'prepared'; write(dataDir, record); return record
+}
+async function protectionOf(dataDir, record) {
+  if (record.schema_version !== 3) return backupOf(dataDir, record)
+  if (!record.target_core || inspectInstance(dataDir).state !== 'stopped') fail()
+  const release = await verifyCoreRelease(record.target_core.root, { version: record.target_version })
+  if (release.inventory_sha256 !== record.target_core.inventory_sha256) fail()
+  await previewMigrations(record.target_core.root, dataDir)
+}
 async function backupOf(dataDir, record) {
   if (!record.backup) fail()
   const directory = path.join(dataDir + '.desktop-backups', record.backup.id)
@@ -248,7 +273,7 @@ async function backupOf(dataDir, record) {
 export async function recordVersionMaintenanceBackup(dataDir, id, backup) {
   dataDir = locked(dataDir)
   const record = readVersionMaintenance(dataDir)
-  if (record?.id !== id || record.phase !== 'preparing' || !uuid(backup.id) || !/^[a-f0-9]{64}$/.test(backup.sha256)) fail()
+  if (record?.schema_version === 3 || record?.id !== id || record.phase !== 'preparing' || !uuid(backup.id) || !/^[a-f0-9]{64}$/.test(backup.sha256)) fail()
   record.backup = { id: backup.id, sha256: backup.sha256 }
   await backupOf(dataDir, record)
   record.phase = 'backed_up'; write(dataDir, record)
@@ -256,8 +281,8 @@ export async function recordVersionMaintenanceBackup(dataDir, id, backup) {
 export async function markVersionMaintenanceInstalling(dataDir, id) {
   dataDir = locked(dataDir)
   const record = readVersionMaintenance(dataDir)
-  if (record?.id !== id || record.phase !== 'backed_up') fail()
-  await backupOf(dataDir, record)
+  if (record?.id !== id || record.phase !== (record.schema_version === 3 ? 'prepared' : 'backed_up')) fail()
+  await protectionOf(dataDir, record)
   if (record.schema_version === 2) {
     const source = await legacyUserSource(record)
     if (source.phase === 'fenced') await sealLegacyEntryFence(record.install_root, source.id)
@@ -275,17 +300,21 @@ export async function recoverVersionMaintenance({ dataDir, root, appVersion, ver
     if (!record) return false
     // Legacy takeover owns entry/startup and environment selection as well as
     // data. The ordinary updater must never auto-resume just its target Core.
-    if (record.schema_version !== 1) fail()
+    if (![1, 3].includes(record.schema_version)) fail()
     root = realpathSync(root)
     const exactSource = record.install_root === root, exactTarget = (record.target_core?.root ?? record.install_root) === root
     if (!exactSource && !exactTarget) fail()
     const release = await verifyCoreRelease(root, { version: appVersion })
-    const previous = exactSource && ['preparing', 'backed_up'].includes(record.phase) && appVersion === record.source_version
+    const previous = exactSource && ['preparing', 'backed_up', 'prepared'].includes(record.phase) && appVersion === record.source_version
       && release.inventory_sha256 === record.source_inventory_sha256
     if (!previous && (!exactTarget || appVersion !== record.target_version
       || record.target_core && release.inventory_sha256 !== record.target_core.inventory_sha256)) fail()
     const expectedInventory = previous ? record.source_inventory_sha256 : record.target_core?.inventory_sha256
-    if (record.backup) await backupOf(dataDir, record)
+    if (record.schema_version === 3) {
+      try { await assertNoInterruptedMigrations(dataDir) }
+      catch (error) { throw Object.assign(error, { code: 'CRABOT_MIGRATION_INTERRUPTED' }) }
+      if (!previous) await protectionOf(dataDir, record)
+    } else if (record.backup) await backupOf(dataDir, record)
     else if (!previous) fail()
     await verifyCompatible()
     recovering.add(record.id)
@@ -312,6 +341,7 @@ export async function completeStoppedVersionMaintenance({ dataDir, root, id, mig
   if (record?.id !== id || record.phase !== 'installing' || record.target_core?.root !== root) fail()
   const verify = async () => {
     if (inspectInstance(dataDir).state !== 'stopped') fail()
+    if (record.schema_version === 3) return protectionOf(dataDir, record)
     const release = await verifyCoreRelease(root, { version: record.target_version })
     if (release.inventory_sha256 !== record.target_core.inventory_sha256) fail()
     await backupOf(dataDir, record)
@@ -336,14 +366,15 @@ export function completeStoppedCliVersionMaintenance(options) { return completeS
 export async function cancelPreparedVersionMaintenance({ dataDir, root, id, verifyCompatible, systemOperationId }) {
   dataDir = locked(dataDir); root = realpathSync(root)
   const record = readVersionMaintenance(dataDir)
-  if (record?.schema_version !== 1 || record.id !== id || !['preparing', 'backed_up'].includes(record.phase) || record.install_root !== root
+  if (![1, 3].includes(record?.schema_version) || record.id !== id || !['preparing', 'backed_up', 'prepared'].includes(record.phase) || record.install_root !== root
     || systemOperationId !== undefined && record.system_operation_id !== systemOperationId
     || inspectInstance(dataDir).state !== 'stopped') fail()
   const verify = async () => {
     cliLocation.assertSelectedCli(root)
     const release = await verifyCoreRelease(root, { version: record.source_version })
     if (release.inventory_sha256 !== record.source_inventory_sha256 || inspectInstance(dataDir).state !== 'stopped') fail()
-    if (record.backup) await backupOf(dataDir, record)
+    if (record.schema_version === 3) await assertNoInterruptedMigrations(dataDir)
+    else if (record.backup) await backupOf(dataDir, record)
   }
   await verify()
   await verifyCompatible()

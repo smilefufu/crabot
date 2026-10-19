@@ -14,7 +14,7 @@ import management from '../desktop-management.cjs'
 import { applyPreparedCliUpgrade, prepareDownloadedCliUpgrade } from '../standalone-cli-release.mjs'
 import { applyStoppedCliUpgrade } from '../standalone-cli-upgrade.mjs'
 import { readVersionMaintenance, assertVersionMaintenanceAllowsStart } from '../version-maintenance.mjs'
-import { verifyMaintenanceBackup } from '../maintenance-backup.mjs'
+import { verifyBackup } from '../../upgrade-lib/scoped-data.mjs'
 import { inspectInstance } from '../instance-runtime.mjs'
 import { installStandaloneCli } from '../standalone-cli-install.mjs'
 
@@ -261,16 +261,33 @@ test('offline CLI upgrade preserves dependencies and stopped state while verifyi
     'crabot-admin/schema_version': 'v2', 'crabot-admin/upgrade/from_v1_to_v2.mjs': code,
     'crabot-admin/upgrade/scope.mjs': "export const migrationScope = () => ({ reads: [], writes: ['admin/preferences'] })",
   }), installRoot: f.installRoot })
-  const result = await applyStoppedCliUpgrade({ sourceRoot: one.coreRoot, targetRoot: two.coreRoot, dataDir: f.dataDir })
+  const unrelated = path.join(f.dataDir, 'agent/traces')
+  await fs.mkdir(unrelated, { recursive: true })
+  const sparse = await fs.open(path.join(unrelated, 'unrelated-large-history'), 'wx')
+  try { await sparse.truncate(windows ? 1024 : 200 * 1024 ** 3) } finally { await sparse.close() }
+  const guards = ['readdir', 'lstat', 'open', 'readFile', 'copyFile'].map(method => {
+    const original = fs[method]
+    return t.mock.method(fs, method, async (...args) => {
+      if (typeof args[0] === 'string' && (args[0] === unrelated || args[0].startsWith(unrelated + path.sep))) throw new Error('unrelated history namespace accessed')
+      return original(...args)
+    })
+  })
+  let result
+  try { result = await applyStoppedCliUpgrade({ sourceRoot: one.coreRoot, targetRoot: two.coreRoot, dataDir: f.dataDir }) }
+  finally { guards.forEach(guard => guard.mock.restore()) }
   assert.equal(result.service_started, false); assert.equal(result.health_verified, false)
   assert.equal(inspectInstance(f.dataDir).state, 'stopped')
   assert.equal(readCliSelection(f.installRoot), two.id)
   assert.equal(readVersionMaintenance(f.dataDir), null)
   assert.equal(await fs.readFile(path.join(f.dataDir, 'admin/SCHEMA_VERSION'), 'utf8'), 'v2\n')
   assert.equal(await fs.readFile(path.join(f.dataDir, 'admin/preferences'), 'utf8'), 'after')
-  const backup = await verifyMaintenanceBackup(result.backup)
-  assert.equal(backup.source, f.dataDir)
-  assert.equal(await fs.readFile(path.join(result.backup, 'data/admin/preferences'), 'utf8'), 'before')
+  assert.equal(result.backup, null)
+  await assert.rejects(fs.lstat(f.dataDir + '.desktop-backups'), { code: 'ENOENT' })
+  const transactionRoot = path.join(f.dataDir, '.upgrade-migrations/crabot-admin-v1-v2')
+  const plan = JSON.parse(await fs.readFile(path.join(transactionRoot, 'plan.json'), 'utf8'))
+  await verifyBackup(path.join(transactionRoot, 'backup'), plan.description.scope.writes, plan.original)
+  assert.deepEqual(plan.description.scope.writes.sort(), [path.join('admin', 'SCHEMA_VERSION'), path.join('admin', 'preferences')].sort())
+  assert.equal(await fs.readFile(path.join(transactionRoot, 'backup/admin/preferences'), 'utf8'), 'before')
   for (const directory of ['agent-venv', 'mcp-envs/server', 'workspaces/task']) {
     assert.equal(await fs.readFile(path.join(f.dataDir, directory, 'keep'), 'utf8'), 'user dependency')
   }
@@ -323,9 +340,12 @@ test('a partially failed migration retains the exact selected target, backup and
   assert.throws(() => assertVersionMaintenanceAllowsStart(f.dataDir), { code: 'CRABOT_MAINTENANCE_PENDING' })
   await assert.rejects(applyStoppedCliUpgrade({ sourceRoot: one.coreRoot, targetRoot: two.coreRoot, dataDir: f.dataDir }))
   assert.equal(await fs.readFile(path.join(f.dataDir, 'admin/preferences'), 'utf8'), 'before')
-  const directory = path.join(f.dataDir + '.desktop-backups', record.backup.id)
-  await verifyMaintenanceBackup(directory, record.backup.sha256)
-  assert.equal(await fs.readFile(path.join(directory, 'data/admin/preferences'), 'utf8'), 'before')
+  assert.equal(record.schema_version, 3); assert.equal(record.backup, null)
+  const directory = path.join(f.dataDir, '.upgrade-migrations/crabot-admin-v1-v2')
+  const plan = JSON.parse(await fs.readFile(path.join(directory, 'plan.json'), 'utf8'))
+  await verifyBackup(path.join(directory, 'backup'), plan.description.scope.writes, plan.original)
+  assert.equal(await fs.readFile(path.join(directory, 'backup/admin/preferences'), 'utf8'), 'before')
+  await assert.rejects(fs.lstat(f.dataDir + '.desktop-backups'), { code: 'ENOENT' })
 })
 
 
@@ -431,4 +451,19 @@ test('user read-only Core publication retains writable private staging until ren
     const releases = path.join(f.installRoot, 'releases')
     for (const name of await fs.readdir(releases).catch(() => [])) if (name.startsWith('.preparing-')) await fs.chmod(path.join(releases, name), 0o700)
   }
+})
+
+
+test('code-only CLI replacement creates no outer data backup and keeps the service stopped', async t => {
+  const f = await fixture(t)
+  const one = await installStandaloneCli({ sourceRoot: await f.source('1.2.3'), installRoot: f.installRoot, dataDir: f.dataDir })
+  const two = await prepareCliPayload({ sourceRoot: await f.source('1.2.4'), installRoot: f.installRoot })
+  await fs.mkdir(path.join(f.dataDir, 'agent/traces'), { recursive: true })
+  await fs.writeFile(path.join(f.dataDir, 'agent/traces/keep'), 'untouched history')
+  const result = await applyStoppedCliUpgrade({ sourceRoot: one.coreRoot, targetRoot: two.coreRoot, dataDir: f.dataDir })
+  assert.equal(result.backup, null); assert.equal(result.service_started, false)
+  assert.equal(readCliSelection(f.installRoot), two.id)
+  assert.equal(readVersionMaintenance(f.dataDir), null)
+  for (const directory of [f.dataDir + '.desktop-backups', path.join(f.dataDir, '.upgrade-migrations')]) await assert.rejects(fs.lstat(directory), { code: 'ENOENT' })
+  assert.equal(await fs.readFile(path.join(f.dataDir, 'agent/traces/keep'), 'utf8'), 'untouched history')
 })
