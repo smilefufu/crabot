@@ -71,8 +71,10 @@ export async function* withStreamTimeout<T>(
     arm(ttfbMs)
     for await (const chunk of makeStream(ctrl.signal)) {
       phase = 'idle'
-      arm(idleMs)
+      if (timer) clearTimeout(timer)
       yield chunk
+      // Downstream playback/backpressure is not time spent waiting for the provider.
+      arm(idleMs)
     }
   } catch (err) {
     // 超时触发的 abort（且非用户取消）→ 翻译成可重试错误；用户取消原样抛出

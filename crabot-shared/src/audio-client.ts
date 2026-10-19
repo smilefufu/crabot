@@ -35,7 +35,7 @@ export function speechWaveToPcm(wave: Buffer): Buffer {
     offset = start + size + (size % 2)
     if (offset > wave.length) throw new Error('Incomplete WAV padding')
   }
-  if (!format || !data?.length || data.length % format.alignment || data.length / format.alignment > 480000) throw new Error('Invalid/empty speech or speech longer than 20 seconds')
+  if (!format || !data?.length || data.length % format.alignment) throw new Error('Invalid/empty speech')
   const pcm = Buffer.alloc(data.length / format.alignment * 2)
   let audible = false
   for (let i = 0; i < pcm.length / 2; i++) {

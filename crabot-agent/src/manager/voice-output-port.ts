@@ -3,17 +3,18 @@ import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import type { VoiceOutputParams, VoiceOutputResult, VoiceOutputState, VoicePlaybackReceipt } from 'crabot-shared'
 import { findVoiceDelivery, type VoiceDeliveryRecord, type VoiceOutputPort } from './voice-output.js'
+import { appendVoiceText, finishVoicePlayback } from './voice-output-flow.js'
 
 function validate(record: VoiceDeliveryRecord): void {
   if (!record || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(record.playback_id) || !record.channel_id || !record.session_id
-    || typeof record.text !== 'string' || Array.from(record.text).length > 120
+    || typeof record.text !== 'string'
     || !['prepared', 'queued', 'streaming', 'completed', 'failed', 'unknown'].includes(record.status)) throw new Error('Invalid voice delivery record; original file preserved')
   if (typeof record.turn_id !== 'string' || !record.turn_id || (record.block_index !== undefined && (!Number.isSafeInteger(record.block_index) || record.block_index < 0))) throw new Error('Invalid voice result identity')
   if (record.receipt_handled !== undefined && (typeof record.receipt_handled !== 'boolean' || record.status !== 'completed')) throw new Error('Invalid voice receipt handling state')
   const binding = record.binding
   if (binding && (binding.channel_id !== record.channel_id || binding.session_id !== record.session_id || !binding.response_id
     || (!!binding.worker_id !== !!binding.worker_turn_id))) throw new Error('Voice delivery binding differs from its target')
-  if (binding && record.status === 'completed' && (!Number.isSafeInteger(record.played_samples) || record.played_samples! <= 0 || record.played_samples! > 480000 || !record.sent_at || !Number.isFinite(Date.parse(record.sent_at)))) throw new Error('Completed voice delivery has no valid playback receipt')
+  if (binding && record.status === 'completed' && (!Number.isSafeInteger(record.played_samples) || record.played_samples! <= 0 || !record.sent_at || !Number.isFinite(Date.parse(record.sent_at)))) throw new Error('Completed voice delivery has no valid playback receipt')
   if (record.status === 'queued' && (!binding || !record.text.trim())) throw new Error('Queued voice result has no verified binding or text')
 }
 
@@ -28,10 +29,11 @@ export function voiceOutputPort(directory: string, isVoice: () => boolean,
     .map(name => ({ name, time: fs.statSync(path.join(directory, name)).mtimeMs })).sort((a, b) => a.time - b.time).map(item => item.name) : []
   const read = (name: string): VoiceDeliveryRecord => {
     const raw = JSON.parse(fs.readFileSync(path.join(directory, name), 'utf8'))
-    if (raw.storage_version !== undefined && raw.storage_version !== 2) throw new Error('Unsupported voice delivery version; original file preserved')
+    if (raw.storage_version !== undefined && ![2, 3].includes(raw.storage_version)) throw new Error('Unsupported voice delivery version; original file preserved')
     if (raw.storage_version === undefined && raw.binding !== undefined) throw new Error('Bound voice delivery requires its versioned format; original file preserved')
-    const record: VoiceDeliveryRecord = raw.storage_version === 2 ? raw.delivery : raw
+    const record: VoiceDeliveryRecord = raw.storage_version !== undefined ? raw.delivery : raw
     validate(record)
+    if (raw.storage_version !== 3 && (Array.from(record.text).length > 120 || (record.played_samples ?? 0) > 480000)) throw new Error('Invalid legacy voice delivery text or receipt; original file preserved')
     if (name !== record.playback_id + '.json') throw new Error('Voice delivery filename differs from its identity')
     if (record.status === 'prepared' || record.status === 'streaming') record.status = 'unknown'
     return record
@@ -49,7 +51,7 @@ export function voiceOutputPort(directory: string, isVoice: () => boolean,
   }
   const port: VoiceOutputPort = { isVoice, send, records,
     find: predicate => { for (const name of files()) { const record = read(name); if (predicate(record)) return record } return undefined },
-    ...(transport ? { state: transport.state, prepare: async (record: VoiceDeliveryRecord, reply?: import('crabot-shared').VoiceReplyContext) => {
+    ...(transport ? { state: transport.state, receipt: transport.receipt, prepare: async (record: VoiceDeliveryRecord, reply?: import('crabot-shared').VoiceReplyContext) => {
       let state: VoiceOutputState
       try { state = await transport.state() } catch { return undefined }
       if (state.channel_id !== record.channel_id || state.session_id !== record.session_id) throw new Error('Voice availability target differs')
@@ -92,9 +94,8 @@ export function voiceOutputPort(directory: string, isVoice: () => boolean,
         try {
           await output({ type: 'reply_start', playback_id: record.playback_id }); started = true
           record.status = 'streaming'; port.save(record); textSent = true
-          await output({ type: 'reply_text', playback_id: record.playback_id, sequence: 0, text: record.text })
-          const receipt = await output({ type: 'reply_end', playback_id: record.playback_id })
-          if (!('platform_message_id' in receipt) || receipt.platform_message_id !== record.playback_id || !Number.isSafeInteger(receipt.played_samples) || receipt.played_samples <= 0 || receipt.played_samples > 480000 || !Number.isFinite(Date.parse(receipt.sent_at))) throw new Error('Invalid voice completion receipt')
+          await appendVoiceText(output, transport.receipt, record.playback_id, 0, record.text)
+          const receipt = await finishVoicePlayback(output, transport.receipt, record.playback_id)
           record.status = 'completed'; record.played_samples = receipt.played_samples; record.sent_at = receipt.sent_at; port.save(record); return true
         } catch {
           record.status = textSent ? 'unknown' : 'queued'; port.save(record)
@@ -110,7 +111,7 @@ export function voiceOutputPort(directory: string, isVoice: () => boolean,
     let descriptor: number | undefined
     try {
       descriptor = fs.openSync(temp, 'wx', 0o600)
-      fs.writeFileSync(descriptor, JSON.stringify(record.binding ? { storage_version: 2, delivery: record } : record))
+      fs.writeFileSync(descriptor, JSON.stringify({ storage_version: 3, delivery: record }))
       fs.fsyncSync(descriptor); fs.closeSync(descriptor); descriptor = undefined
       fs.renameSync(temp, filename)
     } finally { if (descriptor !== undefined) fs.closeSync(descriptor); fs.rmSync(temp, { force: true }) }

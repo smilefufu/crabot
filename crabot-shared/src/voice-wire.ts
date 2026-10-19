@@ -8,9 +8,9 @@ export const VOICE_MAX_SAMPLES = 240000
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 export class VoiceProtocolVersionError extends Error {
-  constructor() { super('语音协议版本不兼容，需要 protocol_version=8；请更新手机，保留配对和声纹') }
+  constructor() { super('语音协议版本不兼容，需要 protocol_version=9；请更新手机，保留配对和声纹') }
 }
-function version(value: unknown): void { if (value !== 8) throw new VoiceProtocolVersionError() }
+function version(value: unknown): void { if (value !== 9) throw new VoiceProtocolVersionError() }
 
 function invalid(): never { throw new Error('Invalid voice protocol payload') }
 function object(value: unknown): Record<string, unknown> {
@@ -130,7 +130,9 @@ export function parseVoiceClientControl(data: string): VoiceClientControl {
     case 'guided_playback': {
       fields(v, ['type', 'operation_id', 'playback_id', 'status'], ['played_samples']); assertVoiceUuid(v.operation_id)
       const { operation_id, ...report } = v
-      parseVoiceClientControl(JSON.stringify({ ...report, type: 'playback' })); break
+      parseVoiceClientControl(JSON.stringify({ ...report, type: 'playback' }))
+      if (v.played_samples !== undefined) integer(v.played_samples, 0, 480000)
+      break
     }
     case 'contact_action': fields(v, ['type', 'request']); validateVoiceManagementRequest(v.request); break
     case 'contact_action_query': fields(v, ['type', 'request_id']); assertVoiceUuid(v.request_id); break
@@ -156,10 +158,12 @@ export function parseVoiceClientControl(data: string): VoiceClientControl {
     case 'playback':
       fields(v, ['type', 'playback_id', 'status'], ['played_samples']); assertVoiceUuid(v.playback_id)
       oneOf(v.status, ['started', 'completed', 'interrupted', 'failed'])
-      if (v.played_samples !== undefined) integer(v.played_samples, 0, 480000)
+      if (v.played_samples !== undefined) integer(v.played_samples)
       if (v.status === 'completed' && (v.played_samples === undefined || v.played_samples === 0)) invalid()
       if (v.status === 'started' && (v.played_samples === undefined || v.played_samples === 0)) invalid()
       break
+    case 'playback_progress':
+      fields(v, ['type', 'playback_id', 'played_samples']); assertVoiceUuid(v.playback_id); integer(v.played_samples); break
     case 'enrollment_done':
       fields(v, ['type', 'registration_id', 'model_id', 'enrollment_revision'])
       string(v.registration_id); string(v.model_id); integer(v.enrollment_revision); break

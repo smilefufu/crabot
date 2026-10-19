@@ -7,6 +7,23 @@ import { PlaybackReceipts } from './playback-receipts.js'
 
 const binding = { channel_id: 'voice', session_id: 'group', response_id: 'original-response', worker_id: 'worker', worker_turn_id: 'worker-turn' }
 describe('playback facts survive reconnect without replay instructions', () => {
+  it('persists long v2 completion but never restores active or rewrites valid v1 history', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'voice-receipt-'))
+    try {
+      const id = randomUUID(), store = new PlaybackReceipts(directory)
+      store.prepare(id, 'terminal-a', binding); store.ending(id, 3_000_000_000)
+      store.report({ playback_id: id, status: 'completed', played_samples: 3_000_000_000 }, 'terminal-a')
+      expect(new PlaybackReceipts(directory).get(id, 'voice', 'group').played_samples).toBe(3_000_000_000)
+      const file = join(directory, id + '.json'), raw = JSON.parse(readFileSync(file, 'utf8'))
+      expect(raw.storage_version).toBe(2)
+      raw.receipt.status = 'active'; writeFileSync(file, JSON.stringify(raw))
+      expect(() => store.get(id, 'voice', 'group')).toThrow()
+      raw.storage_version = 1; raw.expected_samples = 480; raw.receipt.status = 'completed'; raw.receipt.played_samples = 480
+      const legacy = JSON.stringify(raw); writeFileSync(file, legacy)
+      expect(store.get(id, 'voice', 'group').status).toBe('completed')
+      expect(readFileSync(file, 'utf8')).toBe(legacy)
+    } finally { rmSync(directory, { recursive: true, force: true }) }
+  })
   it('requires original preparation, same terminal, final sample count and actual completion', () => {
     const directory = mkdtempSync(join(tmpdir(), 'voice-receipt-'))
     try {

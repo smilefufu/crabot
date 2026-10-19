@@ -102,7 +102,7 @@ describe('Voice Channel with loopback WS, service adapters and durable Admin/cor
     })
     await new Promise<void>(resolve => admin.listen(0, resolve))
     const reserve = net.createServer(); await new Promise<void>(resolve => reserve.listen(0, resolve)); port = (reserve.address() as AddressInfo).port; await new Promise<void>(resolve => reserve.close(() => resolve()))
-    channel = new VoiceChannel({ moduleId: channelId, moduleType: 'channel', version: '0.1.0', protocolVersion: '0.8.0', port }, path.join(dir, 'terminal'), runtime)
+    channel = new VoiceChannel({ moduleId: channelId, moduleType: 'channel', version: '0.1.0', protocolVersion: '0.9.0', port }, path.join(dir, 'terminal'), runtime)
     // Resolve only the isolated test Admin. All HTTP RPCs and terminal frames remain real.
     const client = (channel as unknown as { rpcClient: RpcClient }).rpcClient
     client.publishEvent = vi.fn(async () => 0)
@@ -121,11 +121,11 @@ describe('Voice Channel with loopback WS, service adapters and durable Admin/cor
   }
   async function pair() {
     const pairing = await rpc.callSensitive<any, any>(port, 'voice_admin_action', { channel_id: channelId, command: { action: 'create_pairing' } }, 'isolated-admin', { authorizationBearer: human })
-    const phone = await connect(); phone.send({ type: 'pair', protocol_version: 8, nonce: pairing.pairing.nonce, owner: { profile_id: randomUUID(), display_name: 'Fixture owner', model_id: VOICE_MODEL_VERSIONS.embedding } })
+    const phone = await connect(); phone.send({ type: 'pair', protocol_version: 9, nonce: pairing.pairing.nonce, owner: { profile_id: randomUUID(), display_name: 'Fixture owner', model_id: VOICE_MODEL_VERSIONS.embedding } })
     const waiting = await phone.wait('pair_waiting'); expect(waiting.verification_code).toBe(pairing.pairing.verification_code)
     await rpc.callSensitive(port, 'voice_admin_action', { channel_id: channelId, command: { action: 'confirm_pairing', pairing_id: waiting.pairing_id } }, 'isolated-admin', { authorizationBearer: human })
     const credential = (await phone.wait('paired')).credential, live = await connect()
-    live.send({ type: 'hello', protocol_version: 8, credential, models: { embedding: VOICE_MODEL_VERSIONS.embedding, segmentation: VOICE_MODEL_VERSIONS.segmentation }, aec_verified: true })
+    live.send({ type: 'hello', protocol_version: 9, credential, models: { embedding: VOICE_MODEL_VERSIONS.embedding, segmentation: VOICE_MODEL_VERSIONS.segmentation }, aec_verified: true })
     const hello = await live.wait('hello'); expect(JSON.stringify(hello)).not.toContain('provider-secret')
     live.send({ type: 'heartbeat', foreground: true, microphone: 'closed', playback: 'idle' })
     await live.wait('catalog_confirmed')
@@ -201,7 +201,7 @@ describe('Voice Channel with loopback WS, service adapters and durable Admin/cor
   })
   it('rejects a v2 handshake with an explicit version error', async () => {
     const phone = await connect(); phone.send({ type: 'hello', protocol_version: 2, credential: 'old', models: VOICE_MODEL_VERSIONS, aec_verified: false })
-    const error = await phone.wait('error'); expect(error.code).toBe('VOICE_VERSION_UNSUPPORTED'); expect(error.message).toContain('protocol_version=8')
+    const error = await phone.wait('error'); expect(error.code).toBe('VOICE_VERSION_UNSUPPORTED'); expect(error.message).toContain('protocol_version=9')
   })
   it('keeps a contact in the roster without an active sample and resolves current bindings', async () => {
     const contact = store.registrations(channelId).contacts[0]
@@ -238,7 +238,7 @@ describe('Voice Channel with loopback WS, service adapters and durable Admin/cor
     expect((await phone.wait('error')).code).toBe('VOICE_CATALOG_NOT_READY')
     expect(asrCalls).toBe(0)
   })
-  it('returns delivery success only after started, all audio and completed; an interrupted second attempt never replays', async () => {
+  it('accepts end promptly and exposes delivery only after real completion; interrupted output never replays', async () => {
     const { phone, hello } = await pair(), status = await turn(phone)
     const context: VoiceReplyContext = { channel_id: channelId, session_id: voiceSessionId(channelId), turn_id: status.turn_id, connection_epoch: hello.connection_epoch, expires_at: new Date(Date.now() + 50000).toISOString() }
     const output = (event: any, token = core) => rpc.callSensitive<any, any>(port, 'voice_output', { voice_reply_context: context, event }, 'untrusted-source', { authorizationBearer: token, timeoutMs: 30000 })
@@ -249,12 +249,19 @@ describe('Voice Channel with loopback WS, service adapters and durable Admin/cor
       await output({ type: 'reply_text', playback_id, sequence: 0, text })
       return output({ type: 'reply_end', playback_id })
     }
-    let settled = false; const first = send().then(result => { settled = true; return result })
+    const receipt = (id: string) => rpc.callSensitive<any, any>(port, 'get_voice_playback_receipt', { channel_id: channelId, session_id: voiceSessionId(channelId), playback_id: id }, 'agent', { authorizationBearer: core })
+    const first = send()
     const start = await phone.wait('playback_start'); await vi.waitFor(() => expect(phone.frames.length).toBeGreaterThan(0)); phone.send({ type: 'playback', playback_id: start.playback_id, status: 'started', played_samples: 480 })
-    const end = await phone.wait('playback_end'); expect(settled).toBe(false)
-    phone.send({ type: 'playback', playback_id: start.playback_id, status: 'completed', played_samples: end.sample_count }); expect(await first).toMatchObject({ platform_message_id: start.playback_id })
+    const end = await phone.wait('playback_end'); expect(await first).toEqual({ accepted: true })
+    expect(await receipt(start.playback_id)).toMatchObject({ status: 'active' })
+    phone.send({ type: 'playback', playback_id: start.playback_id, status: 'completed', played_samples: end.sample_count })
+    await vi.waitFor(async () => expect(await receipt(start.playback_id)).toMatchObject({ status: 'completed', played_samples: end.sample_count }))
+    // Accepted output remains bound to its original response after the input reservation expires.
+    context.expires_at = new Date(Date.now() - 1000).toISOString()
     const second = send('第二段。'); void second.catch(() => {}); const playing = await phone.wait('playback_start')
-    phone.send({ type: 'playback', playback_id: playing.playback_id, status: 'interrupted' }); await expect(second).rejects.toThrow()
+    expect(await second).toEqual({ accepted: true })
+    phone.send({ type: 'playback', playback_id: playing.playback_id, status: 'interrupted' })
+    await vi.waitFor(async () => expect(await receipt(playing.playback_id)).toMatchObject({ status: 'interrupted' }))
     expect(ttsCalls).toBe(3)
     phone.send({ type: 'cancel', turn_id: status.turn_id }); await new Promise(resolve => setTimeout(resolve, 10)); await expect(send()).rejects.toThrow(); expect(ttsCalls).toBe(3)
   })
@@ -279,9 +286,10 @@ describe('Voice Channel with loopback WS, service adapters and durable Admin/cor
     const completion = output({ type: 'reply_end', playback_id: id }); void completion.catch(() => {})
     await phone.wait('playback_start'); const end = await phone.wait('playback_end')
     const receipt = () => rpc.callSensitive<any, any>(port, 'get_voice_playback_receipt', { channel_id: channelId, session_id: voiceSessionId(channelId), playback_id: id }, 'agent', { authorizationBearer: core })
-    expect(await receipt()).toMatchObject({ status: 'unknown' })
+    expect(await receipt()).toMatchObject({ status: 'active' })
     phone.send({ type: 'playback', playback_id: id, status: 'completed', played_samples: end.sample_count })
-    expect(await completion).toMatchObject({ platform_message_id: id, played_samples: end.sample_count })
+    expect(await completion).toEqual({ accepted: true })
+    await vi.waitFor(async () => expect(await receipt()).toMatchObject({ status: 'completed', played_samples: end.sample_count }))
     expect(await receipt()).toMatchObject({ status: 'completed', played_samples: end.sample_count })
     await phone.wait('playback_confirmed')
   })

@@ -12,7 +12,7 @@ describe('continuous sentence playback', () => {
   it('sends first audio before text ends and stitches sentence tails into one verified playback', async () => {
     const frames: number[] = [], starts: string[] = [], endings: number[] = []
     const play = new ReplyPlayback('playback', { provider_id: 'fixture', format: 'mlx-audio-http', endpoint: 'http://fixture', model_id: 'fixture', voice: 'fixture' }, {
-      valid: () => {}, start: text => { starts.push(text) }, audio: (seq, pcm) => { expect(seq).toBe(frames.length); frames.push(pcm.length / 2) },
+      valid: () => {}, start: text => { starts.push(text) }, text() {}, audio: (seq, pcm) => { expect(seq).toBe(frames.length); frames.push(pcm.length / 2) },
       end: (_, count) => { endings.push(count) }, cancel: () => {},
     })
     play.append(0, '第一句。'); await vi.waitFor(() => expect(frames).toEqual([480]))

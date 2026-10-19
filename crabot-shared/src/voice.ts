@@ -1,4 +1,4 @@
-// protocol-voice.md v0.8.0 (implementation in progress): shared terminal, configuration and admission contracts.
+// protocol-voice.md v0.9.0: shared terminal, configuration and admission contracts.
 import type { ModuleId, SessionId, FriendId } from './base-protocol.js'
 import type { ChannelMessage, Friend } from './channel-protocol.js'
 import type { ConversationRequestSource } from './conversation-request-source.js'
@@ -69,6 +69,10 @@ export interface VoicePlaybackReport {
   status: 'started' | 'completed' | 'interrupted' | 'failed'
   played_samples?: number
 }
+export interface VoicePlaybackProgress {
+  playback_id: string
+  played_samples: number
+}
 export interface GetVoicePlaybackReceiptParams {
   channel_id: ModuleId
   session_id: SessionId
@@ -76,7 +80,7 @@ export interface GetVoicePlaybackReceiptParams {
 }
 export interface VoicePlaybackReceipt {
   playback_id: string
-  status: 'unknown' | 'completed' | 'interrupted' | 'failed'
+  status: 'active' | 'unknown' | 'completed' | 'interrupted' | 'failed'
   played_samples?: number
   sent_at?: string
 }
@@ -87,11 +91,12 @@ export interface VoiceOutputReadyPayload {
 }
 export type VoiceOutputResult =
   | { accepted: true }
+  | { accepted: false; code: 'VOICE_OUTPUT_BACKPRESSURE' }
   | { platform_message_id: string; sent_at: string; played_samples: number }
 export interface VerifyVoiceAgentParams { channel_id: ModuleId }
 export interface VerifyVoiceAgentResult { verified: true }
 export interface VoiceChannelCapability {
-  protocol_version: 8
+  protocol_version: 9
   send_timeout_ms: 30000
 }
 export type AudioServiceFormat = 'sherpa-offline-ws' | 'mlx-audio-http' | 'openai-audio'
@@ -274,7 +279,7 @@ export type VoiceAdminAction =
   | { action: 'cancel_enrollment'; registration_id: string; request_id: string; expected_revision: number }
 export interface VoiceAdminActionParams { channel_id: ModuleId; command: VoiceAdminAction; owner_activation?: VoiceOwnerActivation }
 export interface VoicePairing {
-  protocol_version: 8
+  protocol_version: 9
   channel_id: ModuleId
   pairing_id: string
   url: string
@@ -310,8 +315,8 @@ export type VoiceAdminActionResult =
 
 export interface VoiceModelVersions { segmentation: string; embedding: string }
 export type VoiceClientControl =
-  | { type: 'pair'; protocol_version: 8; nonce: string; owner: VoiceDeviceOwner }
-  | { type: 'hello'; protocol_version: 8; credential: string; models: VoiceModelVersions; aec_verified: boolean; owner?: VoiceDeviceOwner }
+  | { type: 'pair'; protocol_version: 9; nonce: string; owner: VoiceDeviceOwner }
+  | { type: 'hello'; protocol_version: 9; credential: string; models: VoiceModelVersions; aec_verified: boolean; owner?: VoiceDeviceOwner }
   | { type: 'heartbeat'; foreground: boolean; microphone: 'closed' | 'wake' | 'recording'; playback: 'idle' | 'playing'; enrollment_revision: number; speech_enabled: boolean; activity: VoiceOutputState['activity'] }
   | { type: 'owner_saved'; saved: VoiceOwnerSaved }
   | { type: 'guided_prompt'; operation_id: string; step: 1 | 2 | 3 }
@@ -325,6 +330,7 @@ export type VoiceClientControl =
   | { type: 'turn_end'; turn_id: string; audio_sample_count: number; sample_rate: 16000; models: VoiceModelVersions; enrollment_revision: number; segments: VoiceSegment[] }
   | { type: 'cancel'; turn_id?: string; playback_id?: string }
   | ({ type: 'playback' } & VoicePlaybackReport)
+  | ({ type: 'playback_progress' } & VoicePlaybackProgress)
   | { type: 'playback_ready'; playback_id: string; accepted: boolean }
   | { type: 'enrollment_done'; registration_id: string; model_id: string; enrollment_revision: number }
   | { type: 'registration_cleared'; registration_id: string; enrollment_revision: number }
@@ -341,10 +347,11 @@ export type VoiceServerControl =
   | { type: 'turn_ready'; turn_id: string }
   | { type: 'turn_status'; turn_id: string; status: VoiceTurnStatus; payload_sha256?: string; reason?: string }
   | { type: 'playback_prepare'; playback_id: string; context: VoicePlaybackContext }
-  | { type: 'playback_start'; playback_id: string; turn_id: string; text: string }
+  | { type: 'playback_start'; playback_id: string; turn_id: string }
+  | { type: 'playback_text'; playback_id: string; sequence: number; text: string }
   | { type: 'playback_confirmed'; playback_id: string }
   | { type: 'pending_results'; count: number }
-  | { type: 'playback_end'; playback_id: string; text: string; sample_count: number }
+  | { type: 'playback_end'; playback_id: string; sample_count: number; text_segment_count: number }
   | { type: 'response_end'; turn_id: string }
   | { type: 'playback_cancel'; playback_id: string }
   | { type: 'enroll'; task: VoiceEnrollmentTask }

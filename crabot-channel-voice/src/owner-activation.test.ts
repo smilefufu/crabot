@@ -57,21 +57,21 @@ it('initial human pairing through real RPC/WS requires phone save before one dur
       publish: async () => { throw new Error('No business input in activation fixture') }, configurationChanged: async () => {}, testAudio: async () => { throw new Error('No audio provider in activation fixture') }, enrollmentModelId: VOICE_MODEL_VERSIONS.embedding,
     })
     await admin.load()
-    channel = new VoiceChannel({ moduleId: channelId, moduleType: 'channel', version: '0.1.0', protocolVersion: '0.8.0', port: channelPort }, path.join(directory, 'terminal'), runtime)
+    channel = new VoiceChannel({ moduleId: channelId, moduleType: 'channel', version: '0.1.0', protocolVersion: '0.9.0', port: channelPort }, path.join(directory, 'terminal'), runtime)
     const client = (channel as unknown as { rpcClient: RpcClient }).rpcClient
     client.resolve = async () => [{ port: adminPort }] as never
     await channel.start()
     const created = await admin.action(channelId, { action: 'create_pairing' }, human)
     if (created.action !== 'create_pairing') throw new Error('No QR')
     const owner = { profile_id: randomUUID(), display_name: 'Owner fixture', model_id: VOICE_MODEL_VERSIONS.embedding }
-    const pair = await phone({ type: 'pair', protocol_version: 8, nonce: created.pairing.nonce, owner })
+    const pair = await phone({ type: 'pair', protocol_version: 9, nonce: created.pairing.nonce, owner })
     const waiting = await pair.wait('pair_waiting')
     expect(waiting.verification_code).toBe(created.pairing.verification_code)
     await admin.action(channelId, { action: 'confirm_pairing', pairing_id: waiting.pairing_id }, human)
     const paired = await pair.wait('paired'), activation = paired.owner_activation as VoiceOwnerActivation
     expect(activation.status).toBe('pending'); expect(friends.size).toBe(0)
     expect((await admin.getConfig({ channel_id: channelId }, runtime)).contacts).toEqual([])
-    const live = await phone({ type: 'hello', protocol_version: 8, credential: paired.credential, models: VOICE_MODEL_VERSIONS, aec_verified: false, owner })
+    const live = await phone({ type: 'hello', protocol_version: 9, credential: paired.credential, models: VOICE_MODEL_VERSIONS, aec_verified: false, owner })
     expect((await live.wait('hello')).setup_status).toBe('draft')
     live.socket.send(JSON.stringify({ type: 'heartbeat', foreground: true, microphone: 'closed', playback: 'idle', enrollment_revision: 0, speech_enabled: false, activity: 'idle' }))
     // Phone persistence is simulated here; actual Keystore save-before-ack is covered by Android isolated storage tests.
