@@ -2,9 +2,13 @@
  * PortAllocator 单元测试
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { PortAllocator } from './port-allocator.js'
+import ModuleManager from './index.js'
 import fs from 'node:fs/promises'
+import { writeFileSync } from 'node:fs'
+import path from 'node:path'
+import { tmpdir } from 'node:os'
 
 const TEST_DATA_DIR = './test-data/port-allocator-test'
 const TEST_PORT_START = 19901
@@ -34,6 +38,7 @@ describe('PortAllocator', () => {
   })
 
   afterEach(async () => {
+    await allocator.flush()
     try {
       await fs.rm(TEST_DATA_DIR, { recursive: true, force: true })
     } catch {
@@ -106,5 +111,100 @@ describe('PortAllocator', () => {
       // 不应该抛出错误
       expect(() => allocator.release('module-nonexistent')).not.toThrow()
     })
+  })
+})
+
+
+describe('PortAllocator persistence during startup', () => {
+  let directory: string
+  beforeEach(async () => { directory = await fs.mkdtemp(path.join(tmpdir(), 'crabot-port-persistence-')) })
+  afterEach(async () => { vi.restoreAllMocks(); await fs.rm(directory, { recursive: true, force: true }) })
+
+  it('keeps the previous complete file readable while its replacement is being written', async () => {
+    const file = path.join(directory, 'port-allocations.json')
+    const original = [{ module_id: 'admin-web', port: 19901, allocated_at: '2026-10-20T00:00:00.000Z' }]
+    await fs.writeFile(file, JSON.stringify(original))
+    const allocator = new PortAllocator({ range_start: 19901, range_end: 19910 }, directory)
+    await allocator.initialize()
+    let entered!: () => void, release!: () => void, finish!: () => void
+    const writing = new Promise<void>(resolve => { entered = resolve })
+    const held = new Promise<void>(resolve => { release = resolve })
+    const completed = new Promise<void>(resolve => { finish = resolve })
+    vi.spyOn(fs, 'writeFile').mockImplementation(async (target, content) => {
+      writeFileSync(target as string, '[')
+      entered(); await held
+      writeFileSync(target as string, content as string); finish()
+    })
+    allocator.allocate('crabot-agent')
+    await writing
+    let readable: unknown
+    try { readable = JSON.parse(await fs.readFile(file, 'utf8')) }
+    catch { readable = 'partial JSON' }
+    finally { release(); await completed }
+    await allocator.flush()
+    expect(readable).toEqual(original)
+    const restored = new PortAllocator({ range_start: 19901, range_end: 19910 }, directory)
+    await restored.initialize()
+    expect(restored.get('admin-web')).toBe(19901)
+    expect(restored.get('crabot-agent')).toBe(19902)
+  })
+
+  it('does not let a delayed older snapshot replace newer allocations', async () => {
+    const allocator = new PortAllocator({ range_start: 19901, range_end: 19910 }, directory)
+    let entered!: () => void, release!: () => void
+    const writing = new Promise<void>(resolve => { entered = resolve })
+    const held = new Promise<void>(resolve => { release = resolve })
+    vi.spyOn(fs, 'mkdir').mockResolvedValue(undefined)
+    let writes = 0
+    vi.spyOn(fs, 'writeFile').mockImplementation(async (target, content) => {
+      if (++writes === 1) { entered(); await held }
+      writeFileSync(target as string, content as string)
+    })
+    allocator.allocate('admin-web'); await writing
+    allocator.allocate('crabot-agent')
+    // A concurrent writer can finish the shorter/newer snapshot while the first is paused.
+    for (let turn = 0; turn < 5; turn++) await Promise.resolve()
+    release(); await allocator.flush()
+    const restored = new PortAllocator({ range_start: 19901, range_end: 19910 }, directory)
+    await restored.initialize()
+    expect(restored.get('admin-web')).toBe(19901)
+    expect(restored.get('crabot-agent')).toBe(19902)
+  })
+
+  it('retains the last complete file on publication failure and permits a later save', async () => {
+    const file = path.join(directory, 'port-allocations.json'), original = '[]'
+    await fs.writeFile(file, original)
+    const allocator = new PortAllocator({ range_start: 19901, range_end: 19910 }, directory)
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    vi.spyOn(fs, 'rename').mockRejectedValueOnce(Object.assign(new Error('disk full'), { code: 'ENOSPC' }))
+    allocator.allocate('admin-web')
+    await allocator.flush()
+    expect(await fs.readFile(file, 'utf8')).toBe(original)
+    expect(await fs.readdir(directory)).toEqual(['port-allocations.json'])
+    allocator.allocate('crabot-agent')
+    await allocator.flush()
+    const restored = new PortAllocator({ range_start: 19901, range_end: 19910 }, directory)
+    await restored.initialize()
+    expect(restored.get('admin-web')).toBe(19901)
+    expect(restored.get('crabot-agent')).toBe(19902)
+  })
+
+  it('finishes pending port publication before MM shutdown completes', async () => {
+    const mm = new ModuleManager({ modules: [] }, directory) as any
+    let entered!: () => void, release!: () => void
+    const writing = new Promise<void>(resolve => { entered = resolve })
+    const held = new Promise<void>(resolve => { release = resolve })
+    const write = fs.writeFile.bind(fs)
+    vi.spyOn(fs, 'writeFile').mockImplementation(async (...args) => { entered(); await held; return write(...args) })
+    mm.portAllocator.allocate('admin-web'); await writing
+    let stopped = false
+    const stop = mm.stop().then(() => { stopped = true })
+    for (let turn = 0; turn < 8; turn++) await Promise.resolve()
+    const finishedEarly = stopped
+    release(); await stop
+    await mm.portAllocator.flush()
+    expect(finishedEarly).toBe(false)
+    expect(JSON.parse(await fs.readFile(path.join(directory, 'port-allocations.json'), 'utf8')))
+      .toMatchObject([{ module_id: 'admin-web' }])
   })
 })

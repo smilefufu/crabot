@@ -125,7 +125,7 @@ jobs:
           node --test scripts/lib/__tests__/version-maintenance.test.mjs scripts/lib/__tests__/legacy-python-maintenance.test.mjs scripts/lib/__tests__/legacy-version-maintenance.test.mjs scripts/lib/__tests__/desktop-update-entry.test.mjs scripts/lib/__tests__/desktop-cli-install.test.mjs
           (cd scripts/upgrade-lib && node ../../node_modules/vitest/vitest.mjs run --maxWorkers=1 --minWorkers=1)
           cd crabot-core
-          node node_modules/vitest/vitest.mjs run src/workspace-maintenance.test.ts src/agent-venv.test.ts src/core-modules.test.ts src/shutdown-generation.test.ts src/module-management-secrets.test.ts --maxWorkers=1 --minWorkers=1
+          node node_modules/vitest/vitest.mjs run src/port-allocator.test.ts src/workspace-maintenance.test.ts src/agent-venv.test.ts src/core-modules.test.ts src/shutdown-generation.test.ts src/module-management-secrets.test.ts --maxWorkers=1 --minWorkers=1
       - name: Agent environment regressions
         run: |
           cd crabot-agent

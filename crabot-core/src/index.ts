@@ -312,6 +312,8 @@ export class ModuleManager {
       })
     }
 
+    await this.portAllocator.flush()
+
     console.log('[ModuleManager] Stopped')
   }
 
