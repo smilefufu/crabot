@@ -6,7 +6,7 @@ import { WorkspaceError } from './workspace-catalog.js'
 import { workspaceMountBoundary } from './workspace-mounts.js'
 
 type BindingIssue = 'absolute_link' | 'external_link' | 'git_worktree' | 'python_environment' | 'external_hardlink' | 'mount_point' | 'special_file' | 'unreadable'
-interface RelocationInspection {
+export interface RelocationInspection {
   root: string
   fingerprint: string
   files: number
