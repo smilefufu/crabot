@@ -12,7 +12,7 @@ import { verifyDataCompatibility } from './core-preparation.mjs'
 import cliLocation from './cli-location.cjs'
 import { previewMigrations } from '../upgrade-lib/migrate.mjs'
 import { describeScopedPreparation } from '../upgrade-lib/scoped-preparation.mjs'
-import { prepareMigration } from '../upgrade-lib/migration-transaction.mjs'
+import { prepareMigration, executeMigration } from '../upgrade-lib/migration-transaction.mjs'
 import { prepareSharedRequests, previewSharedRequests } from '../upgrade-lib/shared-requests.mjs'
 import { ledgerValue } from '../upgrade-lib/shared-requests-v1.mjs'
 import { snapshot, sameSnapshot, verifyBackup, writeAtomic, assertStopped, scopedPath } from '../upgrade-lib/scoped-data.mjs'
@@ -73,7 +73,7 @@ async function verifyMaterial(dataDir, directory, scope, original) {
   }
   await verifyBackup(directory, scope, original)
 }
-async function syncMaterials(dataDir, control, intent, plan) {
+async function syncFiles(dataDir, control, materials) {
   const directories = new Set()
   const addParents = directory => {
     const relative = path.relative(dataDir, directory)
@@ -85,8 +85,6 @@ async function syncMaterials(dataDir, control, intent, plan) {
     }
   }
   addParents(control)
-  const materials = intent.modules.map(entry => ({ directory: path.join(moduleDirectory(dataDir, entry.description.id), 'backup'), original: entry.original }))
-  if (plan.shared.status === 'backup_prepared') materials.push({ directory: path.join(dataDir, 'shared-request-upgrade-v2/backup'), original: intent.shared.original })
   for (const material of materials) {
     addParents(material.directory)
     for (const entry of material.original) {
@@ -96,7 +94,7 @@ async function syncMaterials(dataDir, control, intent, plan) {
       const handle = await fs.open(file, constants.O_RDONLY | constants.O_NOFOLLOW)
       try {
         const stat = await handle.stat()
-        if (!stat.isFile() || stat.uid !== process.getuid() || stat.nlink !== 1) fail()
+        if (!stat.isFile() || stat.uid !== process.getuid() || material.independent !== false && stat.nlink !== 1) fail()
         await handle.sync()
       } finally { await handle.close() }
       addParents(path.dirname(file))
@@ -105,6 +103,11 @@ async function syncMaterials(dataDir, control, intent, plan) {
   for (const directory of [...directories].sort((a, b) => b.split(path.sep).length - a.split(path.sep).length)) {
     await syncDirectory(directory)
   }
+}
+async function syncMaterials(dataDir, control, intent, plan) {
+  const materials = intent.modules.map(entry => ({ directory: path.join(moduleDirectory(dataDir, entry.description.id), 'backup'), original: entry.original }))
+  if (plan.shared.status === 'backup_prepared') materials.push({ directory: path.join(dataDir, 'shared-request-upgrade-v2/backup'), original: intent.shared.original })
+  await syncFiles(dataDir, control, materials)
 }
 const moduleDirectory = (root, id) => path.join(root, '.upgrade-migrations', id)
 export async function prepareSystemScopedRecovery(options) {
@@ -150,49 +153,58 @@ export async function prepareSystemScopedRecovery(options) {
   await publishDocument(path.join(directory, 'prepared.json'), plan)
   return { id: record.id, sha256: (await readDocument(dataDir, path.join(directory, 'prepared.json'))).sha256 }
 }
-export async function verifySystemScopedRecovery(options) {
-  const { dataDir, targetRoot, directory } = context(options)
+async function preparedEvidence(options, { dataDir, targetRoot, directory }) {
   const receipt = options.receipt
   if (receipt?.id !== options.maintenanceId || !hash(receipt.sha256)) fail()
-  await assertStopped(dataDir)
   const prepared = await readDocument(dataDir, path.join(directory, 'prepared.json')), plan = prepared.value
   const saved = await readDocument(dataDir, path.join(directory, 'intent.json')), intent = saved.value
   if (prepared.sha256 !== receipt.sha256 || plan.schema_version !== 1 || plan.id !== receipt.id || plan.intent_sha256 !== saved.sha256
     || intent.schema_version !== 1 || intent.id !== receipt.id || intent.operation_id !== options.operationId || intent.data_dir !== dataDir
     || intent.target_core?.root !== targetRoot || intent.target_core.inventory_sha256 !== options.targetInventory
     || intent.source_inventory_sha256 !== options.sourceInventory || !Array.isArray(intent.modules) || plan.modules?.length !== intent.modules.length) fail()
-  await verifyTarget(targetRoot, intent.target_core.inventory_sha256)
+  return { intent, plan, sha256: prepared.sha256 }
+}
+export async function verifySystemScopedRecovery(options) {
+  const current = context(options), { dataDir, targetRoot } = current
+  await assertStopped(dataDir)
+  const { intent, plan } = await preparedEvidence(options, current)
+  await verifyTarget(targetRoot, options.targetInventory)
   await verifyMaterials(dataDir, targetRoot, intent, plan)
   return { verified: true, service_started: false }
 }
+async function verifyModuleMaterial(dataDir, entry, reference, phase) {
+  if (reference.id !== entry.description.id || !/^crabot-[a-z0-9-]+-v\d+-v\d+$/.test(reference.id)) fail()
+  const base = moduleDirectory(dataDir, reference.id), material = await readDocument(dataDir, path.join(base, 'plan.json'))
+  const state = await readDocument(dataDir, path.join(base, 'state.json'))
+  if (material.sha256 !== reference.sha256 || state.value.schema_version !== 1 || state.value.plan_sha256 !== material.sha256 || state.value.phase !== phase
+    || JSON.stringify(material.value.description) !== JSON.stringify(entry.description)
+    || !sameSnapshot(material.value.original, entry.original) || !sameSnapshot(material.value.inputs, entry.inputs)) fail()
+  await verifyMaterial(dataDir, path.join(base, 'backup'), entry.description.scope.writes, entry.original)
+  return state.sha256
+}
+async function verifySharedMaterial(dataDir, intent, plan) {
+  const base = path.join(dataDir, 'shared-request-upgrade-v2'), material = await readDocument(dataDir, path.join(base, 'plan.json')), value = material.value
+  if (material.sha256 !== plan.shared.sha256 || value.schema_version !== 2
+    || JSON.stringify([...value.write_scope].sort()) !== JSON.stringify([...intent.shared.writes].sort())
+    || !sameSnapshot(value.backup_manifest, intent.shared.original) || !sameSnapshot(value.inputs, intent.shared.inputs)
+    || digest(await fs.readFile(path.join(base, 'impact.json'))) !== value.impact_sha256) fail()
+  await verifyMaterial(dataDir, path.join(base, 'backup'), value.write_scope, value.backup_manifest)
+  return { value, sha256: material.sha256 }
+}
 async function verifyMaterials(dataDir, targetRoot, intent, plan) {
   for (let index = 0; index < intent.modules.length; index++) {
-    const entry = intent.modules[index], reference = plan.modules[index]
-    if (reference.id !== entry.description.id || !/^crabot-[a-z0-9-]+-v\d+-v\d+$/.test(reference.id)) fail()
-    const base = moduleDirectory(dataDir, reference.id), material = await readDocument(dataDir, path.join(base, 'plan.json'))
-    const state = (await readDocument(dataDir, path.join(base, 'state.json'))).value
-    if (material.sha256 !== reference.sha256 || state.schema_version !== 1 || state.plan_sha256 !== material.sha256 || state.phase !== 'prepared'
-      || JSON.stringify(material.value.description) !== JSON.stringify(entry.description)
-      || !sameSnapshot(material.value.original, entry.original) || !sameSnapshot(material.value.inputs, entry.inputs)) fail()
-    await verifyMaterial(dataDir, path.join(base, 'backup'), entry.description.scope.writes, entry.original)
+    const entry = intent.modules[index]
+    await verifyModuleMaterial(dataDir, entry, plan.modules[index], 'prepared')
     if (!sameSnapshot(entry.original, await snapshot(dataDir, entry.description.scope.writes))
       || !sameSnapshot(entry.inputs, await snapshot(dataDir, entry.description.scope.reads))) fail()
   }
+  const shared = await previewSharedRequests(targetRoot, dataDir)
   if (plan.shared.status === 'backup_prepared') {
-    const base = path.join(dataDir, 'shared-request-upgrade-v2'), material = await readDocument(dataDir, path.join(base, 'plan.json')), value = material.value
-    if (material.sha256 !== plan.shared.sha256 || value.schema_version !== 2
-      || JSON.stringify([...value.write_scope].sort()) !== JSON.stringify([...intent.shared.writes].sort())
-      || !sameSnapshot(value.backup_manifest, intent.shared.original) || !sameSnapshot(value.inputs, intent.shared.inputs)
-      || digest(await fs.readFile(path.join(base, 'impact.json'))) !== value.impact_sha256) fail()
-    await verifyMaterial(dataDir, path.join(base, 'backup'), value.write_scope, value.backup_manifest)
-    const current = await previewSharedRequests(targetRoot, dataDir)
-    if (current.status !== 'pending' || !sameSnapshot(value.inputs, current.entries)
+    const { value } = await verifySharedMaterial(dataDir, intent, plan)
+    if (shared.status !== 'pending' || !sameSnapshot(value.inputs, shared.entries)
       || !sameSnapshot(value.backup_manifest, await snapshot(dataDir, value.write_scope))) fail()
-  } else {
-    const shared = await previewSharedRequests(targetRoot, dataDir)
-    if (shared.status !== plan.shared.status || shared.status === 'ready'
-      && digest(await fs.readFile(path.join(dataDir, 'agent/shared-request-upgrade.json'))) !== intent.shared.marker_sha256) fail()
-  }
+  } else if (shared.status !== plan.shared.status || shared.status === 'ready'
+    && digest(await fs.readFile(path.join(dataDir, 'agent/shared-request-upgrade.json'))) !== intent.shared.marker_sha256) fail()
 }
 
 async function optionalDocument(dataDir, file) {
@@ -309,4 +321,76 @@ export async function cancelSystemScopedRecovery(options) {
   if (record) await cancelPreparedVersionMaintenance({ dataDir, root: sourceRoot, id: record.id, systemOperationId: options.operationId, verifyCompatible })
   journal.phase = 'completed'; await publishDocument(path.join(directory, 'cancel.json'), journal)
   return { preparation_cancelled: true, service_started: false }
+}
+
+
+// This is the stopped system path only. Default CLI/start migration order is
+// unchanged; the authenticated Root coordinator owns the all-UID switch barrier.
+export async function executeSystemScopedMigrations(options, runScript) {
+  const current = context(options), { dataDir, targetRoot, directory } = current
+  const record = readVersionMaintenance(dataDir)
+  if (record?.schema_version !== 3 || record.id !== options.maintenanceId || record.phase !== 'verifying'
+    || record.system_operation_id !== options.operationId || record.source_inventory_sha256 !== options.sourceInventory
+    || record.target_core?.root !== targetRoot || record.target_core.inventory_sha256 !== options.targetInventory) fail()
+  cliLocation.assertSelectedCli(targetRoot)
+  await assertStopped(dataDir); await verifyTarget(targetRoot, options.targetInventory)
+  const { intent, plan, sha256 } = await preparedEvidence(options, current)
+  await verifyMaterials(dataDir, targetRoot, intent, plan)
+  // An unknown dispatch is not replayable, even if a schema still looks old.
+  const execution = await fs.open(path.join(directory, 'execution.json'), 'wx', 0o600)
+  try { await execution.writeFile(JSON.stringify({ schema_version: 1, id: record.id, operation_id: options.operationId, prepared_sha256: sha256 }) + '\n'); await execution.sync() }
+  finally { await execution.close() }
+  await syncDirectory(directory)
+  await prepareSharedRequests(targetRoot, dataDir, { info() {} }, { lockHeld: true })
+  for (const entry of intent.modules) {
+    cliLocation.assertSelectedCli(targetRoot); await verifyTarget(targetRoot, options.targetInventory)
+    const result = await executeMigration(entry.description, runScript, { lockHeld: true })
+    if (!result.ok) throw Object.assign(new Error('本人数据迁移未完成，维护保护与材料已保留。'), { code: 'CRABOT_MIGRATION_FAILED' })
+  }
+  const writes = [...intent.shared.writes]
+  for (const entry of intent.modules) writes.push(...entry.description.scope.writes,
+    path.join('.upgrade-migrations', entry.description.id, 'state.json'))
+  await syncFiles(dataDir, directory, [{ directory: dataDir, original: await snapshot(dataDir, writes), independent: false }])
+  const evidence = await completedEvidence(dataDir, targetRoot, intent, plan)
+  await assertStopped(dataDir); cliLocation.assertSelectedCli(targetRoot); await verifyTarget(targetRoot, options.targetInventory)
+  await publishDocument(path.join(directory, 'completed.json'), { schema_version: 1, id: record.id, operation_id: options.operationId,
+    prepared_sha256: sha256, target_inventory_sha256: options.targetInventory, ...evidence })
+  return { migrated: true, service_started: false }
+}
+async function completedEvidence(dataDir, targetRoot, intent, plan) {
+  const modules = []
+  for (let index = 0; index < intent.modules.length; index++) {
+    const entry = intent.modules[index], reference = plan.modules[index]
+    const stateHash = await verifyModuleMaterial(dataDir, entry, reference, 'completed')
+    if (!sameSnapshot(entry.inputs, await snapshot(dataDir, entry.description.scope.reads))
+      || (await fs.readFile(await scopedPath(dataDir, path.join(entry.description.module_id.slice(7), 'SCHEMA_VERSION')), 'utf8')).trim() !== entry.description.to) fail()
+    modules.push({ id: reference.id, state_sha256: stateHash })
+  }
+  const shared = await previewSharedRequests(targetRoot, dataDir)
+  if (plan.shared.status === 'backup_prepared') {
+    const material = await verifySharedMaterial(dataDir, intent, plan)
+    const marker = await readDocument(dataDir, path.join(dataDir, 'agent/shared-request-upgrade.json'))
+    if (shared.status !== 'ready' || marker.value.transaction !== 'shared-request-upgrade-v2' || marker.value.plan_sha256 !== material.sha256) fail()
+  } else if (shared.status !== plan.shared.status) fail()
+  const result = { status: shared.status }
+  if (shared.status === 'ready') {
+    result.marker_sha256 = (await readDocument(dataDir, path.join(dataDir, 'agent/shared-request-upgrade.json'))).sha256
+    if (plan.shared.status === 'ready' && result.marker_sha256 !== intent.shared.marker_sha256) fail()
+  }
+  return { modules, shared: result }
+}
+// An offline proof only: the caller still requires Root's durable successful
+// migration dispatch before it may start the previously running instance.
+export async function verifyCompletedSystemScopedRecovery(options) {
+  const current = context(options), { dataDir, targetRoot, directory } = current
+  await assertStopped(dataDir); cliLocation.assertSelectedCli(targetRoot); await verifyTarget(targetRoot, options.targetInventory)
+  const { intent, plan, sha256 } = await preparedEvidence(options, current)
+  const execution = (await readDocument(dataDir, path.join(directory, 'execution.json'))).value
+  const completed = (await readDocument(dataDir, path.join(directory, 'completed.json'))).value
+  if (execution.schema_version !== 1 || execution.id !== options.maintenanceId || execution.operation_id !== options.operationId || execution.prepared_sha256 !== sha256
+    || completed.schema_version !== 1 || completed.id !== options.maintenanceId || completed.operation_id !== options.operationId
+    || completed.prepared_sha256 !== sha256 || completed.target_inventory_sha256 !== options.targetInventory) fail()
+  const evidence = await completedEvidence(dataDir, targetRoot, intent, plan)
+  if (JSON.stringify(completed.modules) !== JSON.stringify(evidence.modules) || JSON.stringify(completed.shared) !== JSON.stringify(evidence.shared)) fail()
+  return { verified: true, service_started: false }
 }
