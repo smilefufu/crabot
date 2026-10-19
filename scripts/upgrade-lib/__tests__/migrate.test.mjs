@@ -8,8 +8,8 @@ describe('scanModules', () => {
   let crabotHome, dataDir
 
   beforeEach(() => {
-    crabotHome = realpathSync(mkdtempSync(join(tmpdir(), 'crabot-home-')))
-    dataDir = realpathSync(mkdtempSync(join(tmpdir(), 'crabot-data-')))
+    crabotHome = realpathSync.native(mkdtempSync(join(tmpdir(), 'crabot-home-')))
+    dataDir = realpathSync.native(mkdtempSync(join(tmpdir(), 'crabot-data-')))
   })
 
   afterEach(() => {
@@ -88,8 +88,8 @@ describe('chainUpgrade', () => {
   let moduleDir, dataDir, calls
 
   beforeEach(() => {
-    moduleDir = realpathSync(mkdtempSync(join(tmpdir(), 'crabot-mod-')))
-    dataDir = realpathSync(mkdtempSync(join(tmpdir(), 'crabot-data-')))
+    moduleDir = realpathSync.native(mkdtempSync(join(tmpdir(), 'crabot-mod-')))
+    dataDir = realpathSync.native(mkdtempSync(join(tmpdir(), 'crabot-data-')))
     mkdirSync(join(moduleDir, 'upgrade'))
     calls = []
   })
@@ -165,7 +165,7 @@ describe('writeSchemaVersion', () => {
   let dataDir
 
   beforeEach(() => {
-    dataDir = realpathSync(mkdtempSync(join(tmpdir(), 'crabot-sv-')))
+    dataDir = realpathSync.native(mkdtempSync(join(tmpdir(), 'crabot-sv-')))
   })
 
   afterEach(() => {
@@ -192,8 +192,8 @@ describe('runMigrations', () => {
   let crabotHome, dataDir, logs
 
   beforeEach(() => {
-    crabotHome = realpathSync(mkdtempSync(join(tmpdir(), 'crabot-rm-h-')))
-    dataDir = realpathSync(mkdtempSync(join(tmpdir(), 'crabot-rm-d-')))
+    crabotHome = realpathSync.native(mkdtempSync(join(tmpdir(), 'crabot-rm-h-')))
+    dataDir = realpathSync.native(mkdtempSync(join(tmpdir(), 'crabot-rm-d-')))
     logs = { info: [], warn: [], error: [] }
   })
 
@@ -269,8 +269,8 @@ describe('applyMigration', () => {
   let crabotHome, dataDir, moduleDir, moduleData
 
   beforeEach(() => {
-    crabotHome = realpathSync(mkdtempSync(join(tmpdir(), 'crabot-am-h-')))
-    dataDir = realpathSync(mkdtempSync(join(tmpdir(), 'crabot-am-d-')))
+    crabotHome = realpathSync.native(mkdtempSync(join(tmpdir(), 'crabot-am-h-')))
+    dataDir = realpathSync.native(mkdtempSync(join(tmpdir(), 'crabot-am-d-')))
     moduleDir = join(crabotHome, 'crabot-memory')
     moduleData = join(dataDir, 'memory')
     mkdirSync(moduleDir, { recursive: true })
