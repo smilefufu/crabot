@@ -2,7 +2,7 @@ import { it, expect, beforeEach, afterEach, vi } from 'vitest'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import os from 'node:os'
-import { describeMigration, executeMigration, assertNoInterruptedMigrations } from '../migration-transaction.mjs'
+import { describeMigration, executeMigration, prepareMigration, assertNoInterruptedMigrations } from '../migration-transaction.mjs'
 import { previewMigrations } from '../migrate.mjs'
 import { fileURLToPath } from 'node:url'
 const home = fileURLToPath(new URL('../../../', import.meta.url))
@@ -77,12 +77,14 @@ it('crash with unknown writes stays blocked even if SCHEMA_VERSION was advanced;
   await expect(assertNoInterruptedMigrations(path.join(root, 'data'))).rejects.toThrow('startup blocked')
   const convert = vi.fn()
   await expect(executeMigration(d, convert)).rejects.toThrow('startup blocked')
+  await expect(prepareMigration(d)).rejects.toThrow('startup blocked')
   expect(convert).not.toHaveBeenCalled()
 })
 it('active instance and competing operation cannot enter conversion', async () => {
   await adapter()
   await fs.writeFile(path.join(root, 'data/mm.pid'), String(process.pid))
   await expect(executeMigration(await description(), vi.fn())).rejects.toThrow('Stop Crabot')
+  await expect(prepareMigration(await description())).rejects.toThrow('Stop Crabot')
   await expect(fs.stat(path.join(root, 'data/.upgrade-migrations'))).rejects.toThrow()
 })
 it('all supported Memory chains declare cross-module cleanup, SQLite companions and deterministic rename targets', async () => {
@@ -230,4 +232,53 @@ it('interruption after archive but before new transaction leaves original eviden
   await assertNoInterruptedMigrations(path.join(root, 'data'))
   expect((await executeMigration(await description(), convert)).ok).toBe(true)
   expect(await fs.readdir(path.join(root, 'data/.upgrade-migrations-history'))).toHaveLength(1)
+})
+
+
+it('prepares the exact common recovery material without scripts or a schema commit, then reuses it once', async () => {
+  await adapter()
+  const d = await description(), copy = vi.spyOn(fs, 'copyFile')
+  const prepared = await prepareMigration(d)
+  expect(prepared).toMatchObject({ ok: true, prepared: true })
+  expect(await fs.readFile(path.join(root, 'data/test/SCHEMA_VERSION'), 'utf8')).toBe('v1\n')
+  expect(await fs.readFile(path.join(root, 'data/test/original'), 'utf8')).toBe('original')
+  await expect(fs.stat(path.join(root, 'data/test/new'))).rejects.toThrow()
+  const count = copy.mock.calls.length
+  expect(count).toBeGreaterThan(0)
+  expect((await prepareMigration(d)).prepared).toBe(true)
+  const convert = vi.fn(async () => ({ exitCode: 0 }))
+  expect((await executeMigration(d, convert)).ok).toBe(true)
+  expect(convert).toHaveBeenCalledTimes(2)
+  expect(copy).toHaveBeenCalledTimes(count)
+  expect(await fs.readFile(path.join(root, 'data/test/SCHEMA_VERSION'), 'utf8')).toBe('v3\n')
+  expect(await fs.readdir(path.join(root, 'data/.upgrade-migrations'))).toEqual([d.id])
+})
+it('changed inputs after common backup preparation refuse conversion without replacing the original material', async () => {
+  await adapter(['test/original'], ['test/input'])
+  await fs.writeFile(path.join(root, 'data/test/input'), 'before')
+  const d = await description()
+  const prepared = await prepareMigration(d)
+  await fs.writeFile(path.join(root, 'data/test/input'), 'changed')
+  const convert = vi.fn()
+  await expect(executeMigration(d, convert)).rejects.toThrow('inputs changed')
+  expect(convert).not.toHaveBeenCalled()
+  expect(await fs.readFile(path.join(prepared.backupPath, 'test/original'), 'utf8')).toBe('original')
+  expect(await fs.readFile(path.join(root, 'data/test/SCHEMA_VERSION'), 'utf8')).toBe('v1\n')
+})
+it('backup preparation cannot turn a proven conversion into an early schema commit', async () => {
+  await adapter()
+  const d = await description()
+  await executeMigration(d, async () => ({ exitCode: 0 }), { advanceVersion: false })
+  await expect(prepareMigration(d)).rejects.toThrow('already converted')
+  expect(await fs.readFile(path.join(root, 'data/test/SCHEMA_VERSION'), 'utf8')).toBe('v1\n')
+  expect(JSON.parse(await fs.readFile(path.join(root, 'data/.upgrade-migrations', d.id, 'state.json'), 'utf8')).phase).toBe('converted')
+})
+
+it('changed target scripts refuse common preparation before a recovery directory is created', async () => {
+  await adapter()
+  const d = await description()
+  await fs.appendFile(d.scripts[0].path, '// changed')
+  await expect(prepareMigration(d)).rejects.toThrow('script changed')
+  await expect(fs.stat(path.join(root, 'data/.upgrade-migrations'))).rejects.toThrow()
+  expect(await fs.readFile(path.join(root, 'data/test/SCHEMA_VERSION'), 'utf8')).toBe('v1\n')
 })

@@ -69,6 +69,13 @@ export async function assertNoInterruptedMigrations(dataRoot) {
   }
 }
 
+// Shared installation switching may need all employee recovery scopes ready
+// before selecting Core. This uses the same plan/material; no migration runs.
+export async function prepareMigration(description, options = {}) {
+  for (const script of description.scripts) if (await fileDigest(script.path) !== script.sha256) throw new Error('Migration script changed')
+  return executeMigration(description, () => { throw new Error('Backup preparation cannot run migration scripts') }, { ...options, prepareOnly: true })
+}
+
 /** A version chain owns one verified backup. No product preparation or business execution here. */
 export async function executeMigration(description, runScript, options = {}) {
   const { data_root: root, id, scope } = description
@@ -93,6 +100,7 @@ export async function executeMigration(description, runScript, options = {}) {
     if (bytes) {
       const plan = JSON.parse(bytes)
       if (state.phase === 'completed') {
+        if (options.prepareOnly) throw new Error('Migration already completed; no preparation required')
         const version = await optional(path.join(root, description.module_id.slice(7), 'SCHEMA_VERSION'))
         if (version?.toString().trim() !== description.to) throw new Error('Completed migration version changed; startup blocked')
         return { ok: true, backupPath: backup }
@@ -100,6 +108,7 @@ export async function executeMigration(description, runScript, options = {}) {
       if (!['prepared', 'rolled_back', 'converted'].includes(state.phase)) throw new Error('Interrupted migration requires scoped recovery; startup blocked')
       await verifyBackup(backup, scope.writes, plan.original)
       if (state.phase === 'converted') {
+        if (options.prepareOnly) throw new Error('Migration already converted; preparation cannot commit its version')
         const schemaName = path.join(description.module_id.slice(7), 'SCHEMA_VERSION')
         const currentSchema = await snapshot(root, [schemaName])
         const originalSchema = plan.original.filter(entry => entry.name === schemaName)
@@ -130,6 +139,10 @@ export async function executeMigration(description, runScript, options = {}) {
       await writeAtomic(planFile, bytes)
     }
     const plan = JSON.parse(bytes), stateBase = { schema_version: 1, plan_sha256: hash(bytes) }
+    if (options.prepareOnly) {
+      await writeAtomic(stateFile, JSON.stringify({ ...stateBase, phase: 'prepared' }))
+      return { ok: true, prepared: true, backupPath: backup, backup_bytes: backupBytes(plan.original) }
+    }
     await writeAtomic(stateFile, JSON.stringify({ ...stateBase, phase: 'running' }))
     let failedAt = 'validation'
     try {
