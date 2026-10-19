@@ -52,3 +52,17 @@ export function assertWorkspaceRelocationWorkersCurrent(
 ): void {
   if (sha256CanonicalJson(expected) !== sha256CanonicalJson(captureWorkspaceRelocationWorkers(entries))) invalid()
 }
+
+
+/** Submission receipts only. None of these states proves an execution exited. */
+export interface WorkspaceRelocationStopResult {
+  readonly worker_id: string
+  readonly incarnation_id: string
+  readonly status: 'submitted' | 'unknown' | 'unavailable'
+}
+
+/** Supplied only by the authenticated fixed job; prepare persists before any stop. */
+export interface WorkspaceRelocationStopJournal {
+  prepare(workers: ReadonlyArray<WorkspaceRelocationWorker>): Promise<'dispatch' | 'observe'>
+  complete(results: ReadonlyArray<WorkspaceRelocationStopResult>): Promise<void>
+}

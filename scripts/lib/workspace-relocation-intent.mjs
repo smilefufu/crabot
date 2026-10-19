@@ -1,4 +1,4 @@
-// Private intent and fixed Worker set only; neither authorizes stopping, moving or releasing maintenance.
+// Private fixed-job records only; submission receipts never prove exit or authorize moving/releasing maintenance.
 import fs from 'node:fs'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
@@ -56,9 +56,11 @@ function read(ctx) {
   if (!privateControl(ctx.control)) return null
   const value = readPrivateJson(ctx.file, 65536)
   if (value === undefined) {
-    try { fs.lstatSync(path.join(ctx.control, 'relocation-workers.json')) }
-    catch (error) { if (error.code === 'ENOENT') return null; fail() }
-    fail()
+    for (const file of ['relocation-workers.json', 'relocation-stop-attempt.json', 'relocation-stop-submission.json']) {
+      try { fs.lstatSync(path.join(ctx.control, file)); fail() }
+      catch (error) { if (error.code !== 'ENOENT') fail() }
+    }
+    return null
   }
   try {
     if (value?.schema_version !== 1 || Object.keys(value).length !== 12 || !uuid(value.id) || value.phase !== 'freezing'
@@ -162,6 +164,7 @@ function validWorkers(workers) {
   return true
 }
 function readScope(ctx, intent) {
+  if (!intent) fail()
   const value = readPrivateJson(path.join(ctx.control, 'relocation-workers.json'), scopeLimit)
   if (value === undefined) {
     if (sha256CanonicalJson(read(ctx)) !== sha256CanonicalJson(intent)) fail()
@@ -197,5 +200,87 @@ export function commitWorkspaceRelocationWorkers({ dataDir, id, workers }) {
   publishPrivateJson(ctx, path.join(ctx.control, 'relocation-workers.json'), record, scopeLimit, verify)
   const accepted = readScope(ctx, intent)
   if (!accepted || sha256CanonicalJson(accepted) !== sha256CanonicalJson(record)) fail()
+  return accepted
+}
+
+
+function stoppingContext(dataDir, id, locked = false) {
+  const ctx = context(dataDir, locked), intent = read(ctx)
+  if (!intent || intent.id !== id) fail()
+  const scope = readScope(ctx, intent)
+  if (!scope) fail()
+  return { ctx, intent, scope }
+}
+function readStopAttempt(ctx, intent, scope) {
+  const value = readPrivateJson(path.join(ctx.control, 'relocation-stop-attempt.json'), 65536)
+  if (value === undefined) {
+    if (readPrivateJson(path.join(ctx.control, 'relocation-stop-submission.json'), scopeLimit) !== undefined) fail()
+    return null
+  }
+  if (!fields(value, ['schema_version', 'intent_id', 'intent_sha256', 'workers_sha256', 'created_at']) || value.schema_version !== 1
+    || value.intent_id !== intent.id || value.intent_sha256 !== sha256CanonicalJson(intent)
+    || value.workers_sha256 !== sha256CanonicalJson(scope) || !validDate(value.created_at)) fail()
+  return value
+}
+const validDate = value => typeof value === 'string' && Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value
+function stopResults(scope, results) {
+  if (!Array.isArray(results)) fail()
+  const sorted = Array.from(results, item => {
+    if (!fields(item, ['worker_id', 'incarnation_id', 'status']) || !nonempty(item.worker_id) || !nonempty(item.incarnation_id)
+      || !['submitted', 'unknown', 'unavailable'].includes(item.status)) fail()
+    return { worker_id: item.worker_id, incarnation_id: item.incarnation_id, status: item.status }
+  }).sort((a, b) => {
+    if (a.worker_id !== b.worker_id) return a.worker_id < b.worker_id ? -1 : 1
+    if (a.incarnation_id !== b.incarnation_id) return a.incarnation_id < b.incarnation_id ? -1 : 1
+    return 0
+  })
+  const expected = scope.workers.flatMap(worker => worker.incarnations.map(item => ({ worker_id: worker.worker_id, incarnation_id: item.incarnation_id })))
+  if (sha256CanonicalJson(sorted.map(({ worker_id, incarnation_id }) => ({ worker_id, incarnation_id }))) !== sha256CanonicalJson(expected)) fail()
+  return sorted
+}
+function readStopSubmission(ctx, attempt, scope) {
+  const value = readPrivateJson(path.join(ctx.control, 'relocation-stop-submission.json'), scopeLimit)
+  if (value === undefined) return null
+  if (!attempt || !fields(value, ['schema_version', 'intent_id', 'attempt_sha256', 'results', 'created_at']) || value.schema_version !== 1
+    || value.intent_id !== attempt.intent_id || value.attempt_sha256 !== sha256CanonicalJson(attempt) || !validDate(value.created_at)
+    || sha256CanonicalJson(value.results) !== sha256CanonicalJson(stopResults(scope, value.results))) fail()
+  return value
+}
+export function readWorkspaceRelocationStops(dataDir, id) {
+  const { ctx, intent, scope } = stoppingContext(dataDir, id), attempt = readStopAttempt(ctx, intent, scope)
+  const submission = readStopSubmission(ctx, attempt, scope)
+  if (sha256CanonicalJson(readScope(ctx, read(ctx))) !== sha256CanonicalJson(scope)) fail()
+  return { attempt, submission }
+}
+export function prepareWorkspaceRelocationStops({ dataDir, id, workers }) {
+  const { ctx, intent, scope } = stoppingContext(dataDir, id, true)
+  if (sha256CanonicalJson(workers) !== sha256CanonicalJson(scope.workers)) fail()
+  const previous = readWorkspaceRelocationStops(dataDir, id)
+  if (previous.attempt) { syncIntent(ctx); return { dispatch: 'observe', attempt: previous.attempt } }
+  const record = { schema_version: 1, intent_id: id, intent_sha256: sha256CanonicalJson(intent), workers_sha256: sha256CanonicalJson(scope), created_at: new Date().toISOString() }
+  publishPrivateJson(ctx, path.join(ctx.control, 'relocation-stop-attempt.json'), record, 65536, () => {
+    if (!same(intent.source, identity(intent.source.path)) || sha256CanonicalJson(readScope(ctx, read(ctx))) !== record.workers_sha256) fail()
+    if (readWorkspaceRelocationStops(dataDir, id).attempt) fail('WORKSPACE_RELOCATION_CONFLICT')
+  })
+  const accepted = readWorkspaceRelocationStops(dataDir, id)
+  if (sha256CanonicalJson(accepted.attempt) !== sha256CanonicalJson(record)) fail()
+  return { dispatch: 'dispatch', attempt: accepted.attempt }
+}
+export function completeWorkspaceRelocationStops({ dataDir, id, results }) {
+  const { ctx, intent, scope } = stoppingContext(dataDir, id, true), previous = readWorkspaceRelocationStops(dataDir, id)
+  if (!previous.attempt) fail()
+  const canonical = stopResults(scope, results)
+  if (previous.submission) {
+    if (sha256CanonicalJson(previous.submission.results) !== sha256CanonicalJson(canonical)) fail('WORKSPACE_RELOCATION_CONFLICT')
+    syncIntent(ctx); return previous.submission
+  }
+  const record = { schema_version: 1, intent_id: id, attempt_sha256: sha256CanonicalJson(previous.attempt), results: canonical, created_at: new Date().toISOString() }
+  publishPrivateJson(ctx, path.join(ctx.control, 'relocation-stop-submission.json'), record, scopeLimit, () => {
+    if (!same(intent.source, identity(intent.source.path))) fail()
+    const current = readWorkspaceRelocationStops(dataDir, id)
+    if (sha256CanonicalJson(current.attempt) !== record.attempt_sha256 || current.submission) fail()
+  })
+  const accepted = readWorkspaceRelocationStops(dataDir, id).submission
+  if (sha256CanonicalJson(accepted) !== sha256CanonicalJson(record)) fail()
   return accepted
 }

@@ -13,7 +13,7 @@ import { beginVersionMaintenance } from '../version-maintenance.mjs'
 import { writeCoreRelease } from '../core-release.mjs'
 import { WorkspaceCatalog } from '../../../crabot-shared/dist/workspace-catalog.js'
 import { assertWorkspaceExecutionAllowed } from '../../../crabot-shared/dist/workspace-maintenance.js'
-import { beginWorkspaceRelocationIntent, readWorkspaceRelocationIntent, commitWorkspaceRelocationWorkers, readWorkspaceRelocationWorkers } from '../workspace-relocation-intent.mjs'
+import { beginWorkspaceRelocationIntent, readWorkspaceRelocationIntent, commitWorkspaceRelocationWorkers, readWorkspaceRelocationWorkers, prepareWorkspaceRelocationStops, completeWorkspaceRelocationStops, readWorkspaceRelocationStops } from '../workspace-relocation-intent.mjs'
 
 async function fixture(t) {
   const root = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'crabot-relocation-intent-中文 space-')))
@@ -477,4 +477,138 @@ for (const change of ['missing', 'different']) test('fixed-set publication canno
     assert.throws(() => assertWorkspaceExecutionAllowed(f.data), { code: 'WORKSPACE_MAINTENANCE' })
     assert.equal(await fs.readFile(path.join(f.source, 'default/original.txt'), 'utf8'), 'user bytes')
   } finally { syncFs.linkSync = link; releaseCliLock(lock) }
+})
+
+
+for (const file of ['relocation-stop-attempt.json', 'relocation-stop-submission.json']) test('orphaned stop evidence keeps all execution entry points fenced: ' + file, async t => {
+  const f = await fixture(t)
+  await fs.writeFile(path.join(f.data, 'workspace-control', file), '{}', { mode: 0o600 })
+  assertWorkspaceStillProtected(f.data)
+  assert.throws(() => readWorkspaceRelocationIntent(f.data), { code: 'WORKSPACE_RELOCATION_INVALID' })
+})
+
+
+const submissionResults = workers => workers.flatMap(worker => worker.incarnations.map(item => ({
+  worker_id: worker.worker_id, incarnation_id: item.incarnation_id, status: item.impl === 'legacy' ? 'unavailable' : 'submitted',
+})))
+
+test('stopping records durably bind one dispatch and full submission results, without claiming exit', async t => {
+  const f = await fixture(t), workers = workerSet(), lock = await acquireCliLock(f.data, 'workspace-relocation')
+  try {
+    await beginWorkspaceRelocationIntent(f.input)
+    assert.throws(() => prepareWorkspaceRelocationStops({ dataDir: f.data, id: f.input.id, workers }), { code: 'WORKSPACE_RELOCATION_INVALID' })
+    commitWorkspaceRelocationWorkers({ dataDir: f.data, id: f.input.id, workers })
+    const first = prepareWorkspaceRelocationStops({ dataDir: f.data, id: f.input.id, workers })
+    assert.equal(first.dispatch, 'dispatch')
+    assert.deepEqual(readWorkspaceRelocationStops(f.data, f.input.id), { attempt: first.attempt, submission: null })
+    assert.deepEqual(prepareWorkspaceRelocationStops({ dataDir: f.data, id: f.input.id, workers }), { dispatch: 'observe', attempt: first.attempt })
+    const results = submissionResults(workers); results[0].status = 'unknown'
+    const complete = completeWorkspaceRelocationStops({ dataDir: f.data, id: f.input.id, results: [...results].reverse() })
+    assert.deepEqual(complete.results, results)
+    assert.deepEqual(completeWorkspaceRelocationStops({ dataDir: f.data, id: f.input.id, results }), complete)
+    assert.deepEqual(readWorkspaceRelocationStops(f.data, f.input.id), { attempt: first.attempt, submission: complete })
+    const entry = new URL('../workspace-relocation-intent.mjs', import.meta.url).href
+    const fresh = execFileSync(process.execPath, ['--input-type=module', '-e',
+      `const m = await import(process.argv[1]); process.stdout.write(JSON.stringify(m.readWorkspaceRelocationStops(process.argv[2], process.argv[3])))`, entry, f.data, f.input.id], { encoding: 'utf8' })
+    assert.deepEqual(JSON.parse(fresh), { attempt: first.attempt, submission: complete })
+    assert.equal((await f.catalog.snapshot()).storage_root, f.source)
+    assert.equal(await fs.readFile(path.join(f.source, 'default/original.txt'), 'utf8'), 'user bytes')
+    assertWorkspaceStillProtected(f.data)
+  } finally { releaseCliLock(lock) }
+})
+
+for (const invalid of ['missing', 'duplicate', 'replacement', 'extra content', 'sparse', 'claimed stopped']) test('invalid stop submission never shrinks or inflates fixed evidence: ' + invalid, async t => {
+  const f = await fixture(t), workers = workerSet(), lock = await acquireCliLock(f.data, 'workspace-relocation')
+  try {
+    await beginWorkspaceRelocationIntent(f.input); commitWorkspaceRelocationWorkers({ dataDir: f.data, id: f.input.id, workers })
+    prepareWorkspaceRelocationStops({ dataDir: f.data, id: f.input.id, workers })
+    const results = submissionResults(workers)
+    if (invalid === 'missing') results.pop()
+    if (invalid === 'duplicate') results.push(results[0])
+    if (invalid === 'replacement') results[0].incarnation_id = 'replacement'
+    if (invalid === 'extra content') results[0].message = 'do not persist exception content'
+    if (invalid === 'sparse') delete results[0]
+    if (invalid === 'claimed stopped') results[0].status = 'stopped'
+    assert.throws(() => completeWorkspaceRelocationStops({ dataDir: f.data, id: f.input.id, results }), { code: 'WORKSPACE_RELOCATION_INVALID' })
+    assert.equal(readWorkspaceRelocationStops(f.data, f.input.id).submission, null)
+    assertWorkspaceStillProtected(f.data)
+  } finally { releaseCliLock(lock) }
+})
+
+for (const damage of ['attempt json', 'attempt scope', 'attempt link', 'attempt hardlink', 'submission attempt', 'missing upstream', 'missing attempt']) test('damaged stop records preserve maintenance and never authorize redispatch: ' + damage, async t => {
+  const f = await fixture(t), workers = workerSet(), lock = await acquireCliLock(f.data, 'workspace-relocation')
+  const file = path.join(f.data, 'workspace-control/relocation-stop-attempt.json'), submitted = path.join(f.data, 'workspace-control/relocation-stop-submission.json')
+  try {
+    await beginWorkspaceRelocationIntent(f.input); commitWorkspaceRelocationWorkers({ dataDir: f.data, id: f.input.id, workers })
+    const { attempt } = prepareWorkspaceRelocationStops({ dataDir: f.data, id: f.input.id, workers })
+    const result = completeWorkspaceRelocationStops({ dataDir: f.data, id: f.input.id, results: submissionResults(workers) })
+    if (damage === 'attempt json') await fs.writeFile(file, '{broken')
+    if (damage === 'attempt scope') await fs.writeFile(file, JSON.stringify({ ...attempt, workers_sha256: '0'.repeat(64) }))
+    if (damage === 'attempt link') { const original = path.join(f.root, 'retained-attempt'); await fs.rename(file, original); await fs.symlink(original, file, 'file') }
+    if (damage === 'attempt hardlink') await fs.link(file, path.join(f.root, 'hardlink'))
+    if (damage === 'submission attempt') await fs.writeFile(submitted, JSON.stringify({ ...result, attempt_sha256: '0'.repeat(64) }))
+    if (damage === 'missing upstream') await fs.rm(path.join(f.data, 'workspace-control/relocation-workers.json'))
+    if (damage === 'missing attempt') await fs.rm(file)
+    assert.throws(() => readWorkspaceRelocationStops(f.data, f.input.id), { code: 'WORKSPACE_RELOCATION_INVALID' })
+    assert.throws(() => prepareWorkspaceRelocationStops({ dataDir: f.data, id: f.input.id, workers }), { code: 'WORKSPACE_RELOCATION_INVALID' })
+    assertWorkspaceStillProtected(f.data)
+  } finally { releaseCliLock(lock) }
+})
+
+test('a lost stop-attempt reply is observed after reacquiring the lock and never redispatched', async t => {
+  const f = await fixture(t), workers = workerSet(), lock = await acquireCliLock(f.data, 'workspace-relocation')
+  try {
+    await beginWorkspaceRelocationIntent(f.input); commitWorkspaceRelocationWorkers({ dataDir: f.data, id: f.input.id, workers })
+    const original = syncFs.linkSync
+    const link = t.mock.method(syncFs, 'linkSync', (...args) => { original(...args); throw new Error('reply lost after publication') })
+    assert.throws(() => prepareWorkspaceRelocationStops({ dataDir: f.data, id: f.input.id, workers }), /reply lost/)
+    link.mock.restore()
+  } finally { releaseCliLock(lock) }
+  const recovered = await acquireWorkspaceRelocationLock(f.data, f.input.id)
+  try { assert.equal(prepareWorkspaceRelocationStops({ dataDir: f.data, id: f.input.id, workers }).dispatch, 'observe') }
+  finally { releaseCliLock(recovered) }
+})
+
+
+test('stop attempt and submission writes require the actual lock, exact fixed set and original receipt', async t => {
+  const f = await fixture(t), workers = workerSet(), lock = await acquireCliLock(f.data, 'workspace-relocation')
+  try { await beginWorkspaceRelocationIntent(f.input); commitWorkspaceRelocationWorkers({ dataDir: f.data, id: f.input.id, workers }) }
+  finally { releaseCliLock(lock) }
+  const options = { dataDir: f.data, id: f.input.id }
+  assert.throws(() => prepareWorkspaceRelocationStops({ ...options, workers }), { code: 'WORKSPACE_RELOCATION_INVALID' })
+  assert.throws(() => completeWorkspaceRelocationStops({ ...options, results: submissionResults(workers) }), { code: 'WORKSPACE_RELOCATION_INVALID' })
+  const recovered = await acquireWorkspaceRelocationLock(f.data, f.input.id)
+  try {
+    assert.throws(() => prepareWorkspaceRelocationStops({ ...options, workers: [] }), { code: 'WORKSPACE_RELOCATION_INVALID' })
+    assert.throws(() => completeWorkspaceRelocationStops({ ...options, results: submissionResults(workers) }), { code: 'WORKSPACE_RELOCATION_INVALID' })
+    prepareWorkspaceRelocationStops({ ...options, workers })
+    const results = submissionResults(workers), original = completeWorkspaceRelocationStops({ ...options, results })
+    results[0].status = 'unknown'
+    assert.throws(() => completeWorkspaceRelocationStops({ ...options, results }), { code: 'WORKSPACE_RELOCATION_CONFLICT' })
+    assert.deepEqual(readWorkspaceRelocationStops(f.data, f.input.id).submission, original)
+  } finally { releaseCliLock(recovered) }
+})
+
+test('a published stop receipt survives an interrupted directory flush and keeps its first result', async t => {
+  const f = await fixture(t), workers = workerSet(), lock = await acquireCliLock(f.data, 'workspace-relocation')
+  try {
+    await beginWorkspaceRelocationIntent(f.input); commitWorkspaceRelocationWorkers({ dataDir: f.data, id: f.input.id, workers })
+    prepareWorkspaceRelocationStops({ dataDir: f.data, id: f.input.id, workers })
+    const original = syncFs.fsyncSync
+    const flush = t.mock.method(syncFs, 'fsyncSync', fd => {
+      if (syncFs.fstatSync(fd).isDirectory()) throw new Error('directory flush interrupted')
+      return original(fd)
+    })
+    if (process.platform === 'win32') {
+      // Windows has native private ACLs and no Node directory fsync; inject after the atomic link instead.
+      flush.mock.restore()
+      const link = syncFs.linkSync
+      t.mock.method(syncFs, 'linkSync', (...args) => { link(...args); throw new Error('directory flush interrupted') })
+    }
+    assert.throws(() => completeWorkspaceRelocationStops({ dataDir: f.data, id: f.input.id, results: submissionResults(workers) }), /directory flush interrupted/)
+    t.mock.restoreAll()
+    const stored = readWorkspaceRelocationStops(f.data, f.input.id).submission
+    assert.deepEqual(completeWorkspaceRelocationStops({ dataDir: f.data, id: f.input.id, results: submissionResults(workers) }), stored)
+    assertWorkspaceStillProtected(f.data)
+  } finally { t.mock.restoreAll(); releaseCliLock(lock) }
 })

@@ -88,8 +88,9 @@ test('the independent bootstrap guard matches Shared on absent, malformed, and r
 })
 
 
-for (const kind of ['file', 'directory', 'link']) test('an orphaned fixed Worker set keeps both guards closed: ' + kind, async t => {
-  const f = await fixture(t), scope = path.join(f.control, 'relocation-workers.json')
+for (const record of ['relocation-workers.json', 'relocation-stop-attempt.json', 'relocation-stop-submission.json'])
+for (const kind of ['file', 'directory', 'link']) test('orphaned evidence keeps both guards closed: ' + record + '/' + kind, async t => {
+  const f = await fixture(t), scope = path.join(f.control, record)
   const bootstrap = createRequire(import.meta.url)('../../scripts/lib/workspace-maintenance.cjs')
   await fs.mkdir(f.control)
   if (kind === 'file') await fs.writeFile(scope, 'unverified fixed set')

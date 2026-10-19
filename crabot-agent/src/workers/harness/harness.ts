@@ -1,4 +1,4 @@
-import { captureWorkspaceRelocationWorkers, type WorkspaceRelocationWorker } from './workspace-relocation-scope.js'
+import { captureWorkspaceRelocationWorkers, assertWorkspaceRelocationWorkersCurrent, type WorkspaceRelocationWorker, type WorkspaceRelocationStopJournal, type WorkspaceRelocationStopResult } from './workspace-relocation-scope.js'
 import { ExecutionAdmissions } from '../../core/execution-admissions.js'
 import { projectWorkspaceExecution } from './workspace-execution.js'
 import { executionAdmission } from '../execution-policy.js'
@@ -926,6 +926,10 @@ function continuationDelivery(
 
 export class WorkerHarness {
   private readonly executionAdmissions = new ExecutionAdmissions()
+  private readonly workspaceRelocationStopWorkers = new Set<string>()
+  private workspaceRelocationStop?: { fingerprint: string; pending: Promise<{
+    dispatch: 'dispatch' | 'observe'; results: ReadonlyArray<WorkspaceRelocationStopResult>
+  }> }
   private readonly requestSpawnMutexes = new Map<string, AsyncMutex>()
   private readonly pendingBgNotifications = new Map<string, number>()
   private readonly continuationObservations = new Map<string, { key: string; fact: WorkerExecutionFact; runtimeFact: WorkerExecutionFact; stoppedAt?: string; stopUnverified?: boolean }>()
@@ -1143,6 +1147,68 @@ export class WorkerHarness {
     const entries = await this.deps.ledger.listAllWorkers()
     assertReady()
     return captureWorkspaceRelocationWorkers(entries)
+  }
+
+  /** Internal submission only; the fixed job still must verify the complete OS/module scope. */
+  requestWorkspaceRelocationStops(
+    expected: ReadonlyArray<WorkspaceRelocationWorker>,
+    journal: WorkspaceRelocationStopJournal,
+  ): Promise<{ dispatch: 'dispatch' | 'observe'; results: ReadonlyArray<WorkspaceRelocationStopResult> }> {
+    const fingerprint = sha256CanonicalJson(expected)
+    if (this.workspaceRelocationStop) {
+      if (this.workspaceRelocationStop.fingerprint !== fingerprint) {
+        return Promise.reject(Object.assign(new Error('迁移停止范围不能更换。'), { code: 'WORKSPACE_MAINTENANCE' }))
+      }
+      return this.workspaceRelocationStop.pending
+    }
+    // Install the single operation before invoking a journal or adapter that can synchronously reenter.
+    const pending = Promise.resolve().then(async () => {
+      const scope = await this.captureWorkspaceRelocationScope()
+      if (sha256CanonicalJson(scope) !== fingerprint) {
+        throw Object.assign(new Error('执行器稳定身份已变化，不能按旧范围停止。'), { code: 'WORKSPACE_MAINTENANCE' })
+      }
+      for (const worker of scope) this.workspaceRelocationStopWorkers.add(worker.worker_id)
+      const dispatch = await journal.prepare(scope)
+      if (dispatch !== 'dispatch' && dispatch !== 'observe') throw new Error('Invalid relocation stop journal acknowledgement')
+      const entries = await this.deps.ledger.listAllWorkers()
+      assertWorkspaceRelocationWorkersCurrent(scope, entries)
+      if (this.deps.isWorkspaceRelocationReady?.() !== true) throw new Error('执行器已进入关闭流程，停止结果尚待核验。')
+      if (dispatch === 'observe') return { dispatch, results: [] }
+      const results: WorkspaceRelocationStopResult[] = []
+      for (const worker of scope) {
+        for (const fixed of worker.incarnations) {
+          const incarnation = await this.withLock(worker.worker_id, async () => {
+            const current = await this.deps.ledger.findWorker(worker.worker_id)
+            assertWorkspaceRelocationWorkersCurrent([worker], current ? [current] : [])
+            return current!.worker.incarnations.find(item => item.incarnation_id === fixed.incarnation_id)!
+          })
+          const target = { worker_id: worker.worker_id, incarnation_id: fixed.incarnation_id }
+          if (!isExecutableIncarnation(incarnation)) {
+            results.push({ ...target, status: 'unavailable' })
+            continue
+          }
+          const adapter = this.deps.adapters.get(incarnation.impl)
+          if (!adapter) {
+            results.push({ ...target, status: 'unavailable' })
+            continue
+          }
+          try {
+            const stop = adapter.stop?.bind(adapter) ?? adapter.kill.bind(adapter)
+            // Do not hold a Worker lock while native callbacks settle their own ledger observations.
+            await stop(handleForIncarnation(worker.worker_id, incarnation))
+            results.push({ ...target, status: 'submitted' })
+          } catch {
+            // A rejected submission can already have reached the carrier. It is not a proved failure/exit.
+            results.push({ ...target, status: 'unknown' })
+          }
+        }
+      }
+      assertWorkspaceRelocationWorkersCurrent(scope, await this.deps.ledger.listAllWorkers())
+      await journal.complete(results)
+      return { dispatch, results }
+    })
+    this.workspaceRelocationStop = { fingerprint, pending }
+    return pending
   }
 
   private trackExecutionAdmission<T>(action: () => Promise<T>): Promise<T> {
@@ -6185,6 +6251,7 @@ export class WorkerHarness {
     } catch (error) {
       return this.settleControlOperation(current, 'unknown', error instanceof Error ? error.message : String(error))
     }
+    if (operation.kind === 'stop' && this.workspaceRelocationStopWorkers.has(operation.worker_id)) return current
     // `cancelAfterVerifiedStop` / `supersedeAfterVerifiedStop` writes ledger truth before the
     // operation becomes succeeded, so restart reconciliation can complete either boundary.
     if (operation.kind === 'stop' && !handoffSupersede && found?.worker.task.status === 'closed') {
@@ -6855,7 +6922,9 @@ export class WorkerHarness {
         // 2026-08-31 状态机修正:化身退出落 halted(粗分类停因进 evidence);manager 发起的
         // 停止(killed)事实成立即 closed,stop operation 的核验判据依赖这一点。
         const reason = report?.endReason
-        if (reason === 'killed') {
+        if (reason === 'killed' && this.workspaceRelocationStopWorkers.has(h.worker_id)) {
+          desired = worker.task.status
+        } else if (reason === 'killed') {
           desired = 'closed'
         } else if (reason === 'superseded') {
           desired = 'running' // 占位:任务状态由化身链新成员决定(与既有语义一致)
@@ -7029,7 +7098,7 @@ export class WorkerHarness {
       const unverifiedStop = state === 'exited' && target.incarnation_id !== undefined &&
         await this.shouldPreserveTaskForUnverifiedStop(h.worker_id, target.incarnation_id, endReason)
       const preserveTaskForStop = state === 'exited' && (
-        pendingStop || unverifiedStop
+        pendingStop || unverifiedStop || this.workspaceRelocationStopWorkers.has(h.worker_id)
       )
       // 2026-08-31 状态机修正:化身停止(idle/exited)一律落 halted,停因进 evidence——
       // ended_reason 细节留在化身记录上;closed 只由 manager 处置产生(killed);

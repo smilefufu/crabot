@@ -5475,3 +5475,159 @@ describe('workspace relocation scope capture', () => {
     expect(changed.fake.killCalls).toHaveLength(0)
   })
 })
+
+
+describe('workspace relocation stop submission', () => {
+  function journal() {
+    return { prepare: vi.fn(async () => 'dispatch' as 'dispatch' | 'observe'),
+      complete: vi.fn(async (_results: unknown) => {}) }
+  }
+
+  it('waits for durable intent before stopping and preserves task truth through synchronous killed callbacks', async () => {
+    const { harness, fake, ledger } = await makeHarness({}, { isWorkspaceRelocationReady: () => true })
+    const worker = await harness.spawnWorker(spawnParams()), scope = await harness.captureWorkspaceRelocationScope()
+    const entered = deferred(), release = deferred(), log = journal()
+    log.prepare.mockImplementation(async () => { entered.resolve(); await release.promise; return 'dispatch' })
+    const stop = vi.spyOn(fake, 'stop').mockImplementation(async h => {
+      fake.emitStateChange(h, 'exited', undefined, 'killed')
+      await (harness as any).stateChangeTails.get(`${h.worker_id}#${h.impl}#${h.seq}`)
+    })
+    const pending = harness.requestWorkspaceRelocationStops(scope, log)
+    await entered.promise
+    expect(stop).not.toHaveBeenCalled()
+    release.resolve(); const result = await pending
+    expect(result).toMatchObject({ dispatch: 'dispatch', results: [{ worker_id: worker.worker_id, status: 'submitted' }] })
+    const saved = (await ledger.findWorker(worker.worker_id))!.worker
+    expect(saved.incarnations[0].state).toBe('exited')
+    expect(saved.task.status).toBe('running')
+    expect(saved.task.closed).toBeUndefined()
+    expect(saved.origin).toEqual(worker.origin); expect(saved.report_to).toEqual(worker.report_to)
+    expect(await harness.getWorkerControlOperations(worker.worker_id)).toEqual([])
+    expect(log.complete).toHaveBeenCalledWith(result.results)
+  })
+
+  it('issues no stop if the fixed identity set changed while registering', async () => {
+    const { harness, fake, ledger } = await makeHarness({}, { isWorkspaceRelocationReady: () => true })
+    const worker = await harness.spawnWorker(spawnParams()), scope = await harness.captureWorkspaceRelocationScope()
+    const log = journal()
+    log.prepare.mockImplementation(async () => {
+      await ledger.upsertWorker(worker.manager_key, worker.worker_id, previous => ({ ...previous!,
+        incarnations: previous!.incarnations.map(item => ({ ...item, incarnation_id: 'replacement' })) }))
+      return 'dispatch'
+    })
+    await expect(harness.requestWorkspaceRelocationStops(scope, log)).rejects.toMatchObject({ code: 'WORKSPACE_MAINTENANCE' })
+    expect(fake.killCalls).toHaveLength(0); expect(log.complete).not.toHaveBeenCalled()
+  })
+
+  it('issues no stop when persistence fails and never retries a failed single operation', async () => {
+    const { harness, fake } = await makeHarness({}, { isWorkspaceRelocationReady: () => true })
+    await harness.spawnWorker(spawnParams()); const scope = await harness.captureWorkspaceRelocationScope(), log = journal()
+    log.prepare.mockRejectedValue(new Error('disk full'))
+    const pending = harness.requestWorkspaceRelocationStops(scope, log)
+    await expect(pending).rejects.toThrow('disk full')
+    expect(harness.requestWorkspaceRelocationStops(scope, log)).toBe(pending)
+    await expect(pending).rejects.toThrow('disk full')
+    expect(log.prepare).toHaveBeenCalledTimes(1); expect(fake.killCalls).toHaveLength(0)
+  })
+
+  it('shares an in-flight attempt, includes forks and historical exits, and records individual submission uncertainty', async () => {
+    const { harness, fake, ledger } = await makeHarness({}, { isWorkspaceRelocationReady: () => true })
+    const first = await harness.spawnWorker(spawnParams()), second = await harness.spawnWorker(spawnParams())
+    await ledger.upsertWorker(first.manager_key, first.worker_id, previous => ({ ...previous!, incarnations: [
+      ...previous!.incarnations,
+      { ...previous!.incarnations[0], incarnation_id: 'history', seq: 2, state: 'exited', ended_at: now(), ended_reason: 'completed' },
+      { ...previous!.incarnations[0], incarnation_id: 'fork', seq: 3, forked_from: previous!.incarnations[0].incarnation_id, query_id: 'query' },
+    ] }))
+    const scope = await harness.captureWorkspaceRelocationScope(), log = journal(), entered = deferred(), release = deferred()
+    log.prepare.mockImplementation(async () => { entered.resolve(); await release.promise; return 'dispatch' })
+    const stop = vi.spyOn(fake, 'stop').mockImplementation(async h => { if (h.worker_id === first.worker_id && h.seq === 1) throw new Error('reply lost') })
+    const pending = harness.requestWorkspaceRelocationStops(scope, log); await entered.promise
+    expect(harness.requestWorkspaceRelocationStops(scope, log)).toBe(pending)
+    await expect(harness.requestWorkspaceRelocationStops([], log)).rejects.toMatchObject({ code: 'WORKSPACE_MAINTENANCE' })
+    release.resolve(); const result = await pending
+    expect(stop).toHaveBeenCalledTimes(4)
+    expect(stop.mock.calls.map(([h]) => [h.worker_id, h.incarnation_id])).toEqual(expect.arrayContaining([
+      [first.worker_id, 'history'], [first.worker_id, 'fork'], [second.worker_id, second.incarnations[0].incarnation_id],
+    ]))
+    expect(result.results.filter(item => item.status === 'unknown')).toEqual([{ worker_id: first.worker_id,
+      incarnation_id: first.incarnations[0].incarnation_id, status: 'unknown' }])
+    expect(log.prepare).toHaveBeenCalledTimes(1)
+    expect((await ledger.findWorker(first.worker_id))!.worker.task.status).toBe('running')
+    expect(JSON.stringify(result)).not.toContain('reply lost')
+  })
+
+  it('refuses a replacement discovered between two stop submissions rather than stopping the replacement', async () => {
+    const { harness, fake, ledger } = await makeHarness({}, { isWorkspaceRelocationReady: () => true })
+    await harness.spawnWorker(spawnParams()); await harness.spawnWorker(spawnParams())
+    const scope = await harness.captureWorkspaceRelocationScope(), log = journal()
+    const stop = vi.spyOn(fake, 'stop').mockImplementation(async h => {
+      if (h.worker_id !== scope[0].worker_id) throw new Error('must not reach the replacement')
+      await ledger.upsertWorker(scope[1].manager_key, scope[1].worker_id, previous => ({ ...previous!,
+        incarnations: previous!.incarnations.map(item => ({ ...item, incarnation_id: 'replacement-after-first-stop' })) }))
+    })
+    await expect(harness.requestWorkspaceRelocationStops(scope, log)).rejects.toMatchObject({ code: 'WORKSPACE_MAINTENANCE' })
+    expect(stop).toHaveBeenCalledTimes(1); expect(log.complete).not.toHaveBeenCalled()
+  })
+
+  it('records a late CLI killed result without manager_stop closure and defers a simultaneous ordinary stop receipt', async () => {
+    const { harness, fake, ledger } = await makeHarness({}, { isWorkspaceRelocationReady: () => true })
+    const worker = await harness.spawnWorker(spawnParams()), scope = await harness.captureWorkspaceRelocationScope(), log = journal()
+    const entered = deferred(), release = deferred()
+    log.prepare.mockImplementation(async () => { entered.resolve(); await release.promise; return 'dispatch' })
+    const pending = harness.requestWorkspaceRelocationStops(scope, log); await entered.promise
+    const h = { worker_id: worker.worker_id, ...worker.incarnations[0], session_ref: 'ref' } as IncarnationHandle
+    await (harness as any).recordCliInputResult(h, 'exited', { endReason: 'killed' })
+    expect((await ledger.findWorker(worker.worker_id))!.worker.task.status).toBe('running')
+    const operation = await harness.requestWorkerStop(worker.worker_id)
+    expect(operation.status).toBe('verifying')
+    expect((await ledger.findWorker(worker.worker_id))!.worker.task.closed).toBeUndefined()
+    release.resolve(); await pending
+    expect(await harness.getWorkerControlOperations(worker.worker_id)).toMatchObject([{ status: 'verifying' }])
+    expect(fake.killCalls.length).toBeGreaterThan(0)
+    await Promise.all((harness as any).stateChangeTails.values())
+  })
+
+  it('joins the real private journal, native lock and actual Ledger without moving files or closing Workers', async () => {
+    const { WorkspaceCatalog } = await import('../../../../crabot-shared/dist/workspace-catalog.js')
+    const { default: native } = await import('../../../../scripts/lib/process-identity.cjs')
+    const { default: management } = await import('../../../../scripts/lib/desktop-management.cjs')
+    const { acquireCliLock, releaseCliLock } = await import('../../../../scripts/lib/cli-lock.mjs')
+    const relocation = await import('../../../../scripts/lib/workspace-relocation-intent.mjs')
+    const privateData = management.ensurePrivateDataRoot(await fs.realpath(dataDir))
+    const catalog = new WorkspaceCatalog({ dataRoot: privateData, files: native }); await catalog.initialize()
+    const { harness, fake, ledger } = await makeHarness({}, { isWorkspaceRelocationReady: () => true })
+    const worker = await harness.spawnWorker(spawnParams()), scope = await harness.captureWorkspaceRelocationScope()
+    const snapshot = await catalog.snapshot(), id = 'a3c5871e-9992-480b-b0b7-81d5fb1d35e0', lock = await acquireCliLock(privateData, 'workspace-relocation')
+    try {
+      await relocation.beginWorkspaceRelocationIntent({ dataDir: privateData, id, target: join(dataDir, 'relocated'),
+        expectedRevision: snapshot.revision, protectedRoots: [join(privateData, 'workspace-control')] })
+      relocation.commitWorkspaceRelocationWorkers({ dataDir: privateData, id, workers: scope })
+      const log = { prepare: async (workers: typeof scope) => relocation.prepareWorkspaceRelocationStops({ dataDir: privateData, id, workers }).dispatch,
+        complete: async (results: unknown) => { relocation.completeWorkspaceRelocationStops({ dataDir: privateData, id, results }); throw new Error('reply lost after receipt publication') } }
+      const stop = vi.spyOn(fake, 'stop').mockImplementation(async h => {
+        fake.emitStateChange(h, 'exited', undefined, 'killed')
+        await (harness as any).stateChangeTails.get(`${h.worker_id}#${h.impl}#${h.seq}`)
+      })
+      await expect(harness.requestWorkspaceRelocationStops(scope, log)).rejects.toThrow('reply lost')
+      expect(stop).toHaveBeenCalledTimes(1)
+      const stored = relocation.readWorkspaceRelocationStops(privateData, id)
+      expect(stored.submission.results).toEqual([{ worker_id: worker.worker_id,
+        incarnation_id: worker.incarnations[0].incarnation_id, status: 'submitted' }])
+      const freshHarness = new WorkerHarness((harness as any).deps)
+      expect(await freshHarness.requestWorkspaceRelocationStops(scope, log)).toEqual({ dispatch: 'observe', results: [] })
+      expect(stop).toHaveBeenCalledTimes(1)
+      expect((await ledger.findWorker(worker.worker_id))!.worker.task.closed).toBeUndefined()
+      expect(await catalog.snapshot()).toEqual(snapshot)
+      await expect(fs.stat(join(dataDir, 'relocated'))).rejects.toMatchObject({ code: 'ENOENT' })
+    } finally { releaseCliLock(lock) }
+  })
+
+  it('never repeats an already registered attempt or pretends that its executions stopped', async () => {
+    const { harness, fake, ledger } = await makeHarness({}, { isWorkspaceRelocationReady: () => true })
+    const worker = await harness.spawnWorker(spawnParams()), scope = await harness.captureWorkspaceRelocationScope(), log = journal()
+    log.prepare.mockResolvedValue('observe')
+    expect(await harness.requestWorkspaceRelocationStops(scope, log)).toEqual({ dispatch: 'observe', results: [] })
+    expect(fake.killCalls).toHaveLength(0); expect(log.complete).not.toHaveBeenCalled()
+    expect((await ledger.findWorker(worker.worker_id))!.worker.task.status).toBe('running')
+  })
+})
