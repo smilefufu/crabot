@@ -54,7 +54,7 @@ try {
     } else if (permit.action === 'verify-provision') throw systemError('原开通绑定缺失，未重新初始化；请检查本人保留数据。')
     const dataDir = existing || permit.action === 'verify-provision' ? management.requirePrivateDataRoot(entry.data_dir) : management.ensurePrivateDataRoot(entry.data_dir)
     lock = await acquireCliLock(dataDir, 'system-provision')
-    if (inspectInstance(dataDir).state !== 'stopped') throw systemError('现有实例尚未停止，未修改开通配置。')
+    if (permit.action === 'prepare' && inspectInstance(dataDir).state !== 'stopped') throw systemError('现有实例尚未停止，未修改开通配置。')
     const { readCredentials, writeCredentials, newCredentialsFromPassword } = await import(new URL('../crabot-admin/dist/credentials.js', import.meta.url))
     const credentials = await readCredentials(path.join(dataDir, 'admin'))
     if (!credentials) {

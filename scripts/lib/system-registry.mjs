@@ -159,7 +159,7 @@ export class SystemRegistry {
     if (actual.uid !== entry.uid || actual.gid !== entry.gid || actual.home !== entry.home || actual.user !== entry.user) fail('Linux用户身份已变化，保留原绑定，请管理员检查。')
     return actual
   }
-  async register(user, { autostart, prepare = async () => {}, configure = async () => {}, assertAvailable = () => {} } = {}) {
+  async register(user, { autostart, prepare = async () => {}, verify = async () => {}, configure = async () => {}, assertAvailable = () => {} } = {}) {
     this.authority()
     this.accountLookup(user)
     if (autostart !== undefined && typeof autostart !== 'boolean') fail('自启动选项不兼容。')
@@ -170,6 +170,7 @@ export class SystemRegistry {
       selected = entries.find(entry => entry.user === user)
       if (selected) {
         this.verifyAccount(selected)
+        await verify(selected)
         const reopening = !selected.enabled
         selected.enabled = true
         if (autostart !== undefined) selected.autostart = autostart

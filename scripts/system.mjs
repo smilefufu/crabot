@@ -56,8 +56,8 @@ try {
       const initial = existing ? null : await readSystemInitialPassword()
       const entry = await registry.register(args.user, { autostart: args.autostart, assertAvailable: () => store.assertIdle(),
         prepare: value => runSystemUser(value, { root, action: 'prepare', input: { password: initial } }),
-        configure: async (value, { reopening }) => {
-          if (reopening) await runSystemUser(value, { root, action: 'verify-provision' })
+        verify: value => runSystemUser(value, { root, action: 'verify-provision' }),
+        configure: async value => {
           if (systemdAvailable()) {
             await ensureSystemUserManager(value)
             await runSystemUser(value, { root, action: 'configure-service' })

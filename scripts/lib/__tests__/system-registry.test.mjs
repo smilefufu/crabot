@@ -125,3 +125,14 @@ test('an explicit unchanged autostart flag still reconciles the actual service a
   await registry.register('alice', { autostart: false, configure: () => { configured++ } })
   assert.equal(configured, 1)
 })
+
+test('every repeated opening verifies existing employee data before reporting success or changing flags', options, async t => {
+  const { registry } = fixture(t); await registry.update(() => [entry()], { create: true })
+  let verified = 0
+  await registry.register('alice', { verify: value => { verified++; assert.deepEqual(value, entry()) },
+    prepare: () => assert.fail('must not initialize a registered instance') })
+  assert.equal(verified, 1)
+  await assert.rejects(registry.register('alice', { autostart: true, verify: () => { throw new Error('data directory missing') } }), /data directory missing/)
+  assert.deepEqual(registry.read(), [entry()])
+  await registry.register('bob', { verify: () => assert.fail('new user has no existing data to verify') })
+})
