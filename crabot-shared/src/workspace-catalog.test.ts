@@ -98,7 +98,7 @@ test('user project files survive registration; corrupt and missing established c
 test('independent Node processes serialize catalog changes through the OS lock', { timeout: 15_000 }, async t => {
   const f = await fixture(t)
   const script = `const { createRequire } = await import('node:module');const files=createRequire(import.meta.url)(process.argv[4]);const { WorkspaceCatalog } = await import(process.argv[1]);const catalog=new WorkspaceCatalog({files,dataRoot:process.argv[2]});await catalog.createProject({workspace_id:process.argv[3],name:'parallel project'});`
-  const loader = fileURLToPath(new URL('../node_modules/tsx/dist/loader.mjs', import.meta.url))
+  const loader = new URL('../node_modules/tsx/dist/loader.mjs', import.meta.url).href
   await Promise.all(Array.from({ length: 4 }, () => promisify(execFile)(process.execPath,
     ['--import', loader, '--input-type=module', '-e', script, new URL('./workspace-catalog.ts', import.meta.url).href, f.data, randomUUID(), nativePath],
     { timeout: 10_000 })))
