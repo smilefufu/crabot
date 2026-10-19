@@ -140,6 +140,17 @@ export class WorkspaceCatalog {
     })
   }
 
+  async markUsed(id: string, at: string): Promise<void> {
+    if (!Number.isFinite(Date.parse(at)) || new Date(at).toISOString() !== at) throw badRequest()
+    await this.lock(async () => {
+      const file = await this.required(), record = file.workspaces.find(item => item.workspace_id === id)
+      if (!record) throw new WorkspaceError('WORKSPACE_NOT_FOUND', '工作区不存在。')
+      if (record.last_used_at && Date.parse(record.last_used_at) >= Date.parse(at)) return
+      record.last_used_at = at
+      file.revision++; await this.write(file)
+    })
+  }
+
   async resolveProject(id: string): Promise<WorkspaceRecord> {
     const record = await this.get(id)
     if (record.kind !== 'project') throw badRequest()
@@ -215,6 +226,7 @@ export class WorkspaceCatalog {
         if (!record || (record.workspace_id !== 'default' && !uuid.test(record.workspace_id)) || ids.has(record.workspace_id) || roots.has(record.root)
           || !['project', 'default'].includes(record.kind) || !['managed', 'existing'].includes(record.source)
           || !path.isAbsolute(record.root) || text(record.name, 120) !== record.name || text(record.description, 2000, true) !== record.description
+          || (record.last_used_at !== undefined && (typeof record.last_used_at !== 'string' || !Number.isFinite(Date.parse(record.last_used_at))))
           || !Number.isFinite(Date.parse(record.created_at)) || ((record.kind === 'default') !== (record.workspace_id === 'default'))
           || (record.kind === 'default' && record.root !== path.join(file.storage_root, 'default'))) throw invalid()
         ids.add(record.workspace_id); roots.add(record.root)

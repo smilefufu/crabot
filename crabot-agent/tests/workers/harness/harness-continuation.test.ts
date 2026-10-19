@@ -310,6 +310,8 @@ it.each(['resume', 'handoff'] as const)('project identity, shared files and auth
   await harness.sendToWorker(worker.worker_id, 'continue the project')
   const current = (await harness.listWorkers(worker.manager_key)).find(item => item.worker_id === worker.worker_id)!
   expect(current.workspace_id).toBe(worker.workspace_id)
+  const catalog = JSON.parse(await fs.readFile(join(dataDir, 'profile/workspace-control/catalog.json'), 'utf8'))
+  expect(catalog.workspaces.find((item: { workspace_id: string }) => item.workspace_id === worker.workspace_id).last_used_at).toBe(current.updated_at)
   expect(current.manager_key).toBe(worker.manager_key)
   expect(current.origin).toEqual(worker.origin); expect(current.report_to).toEqual(worker.report_to)
   expect(current.incarnations.every(item => item.workspace === project)).toBe(true)

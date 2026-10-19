@@ -166,3 +166,20 @@ test('a missing established default root is reported and never recreated for new
   await assert.rejects(f.catalog.resolveDefaultTask('new-task'), { code: 'WORKSPACE_DIRECTORY_MISSING' })
   await assert.rejects(fs.stat(root), { code: 'ENOENT' })
 })
+
+test('last use is a monotone host observation independent of metadata edits and worker retention', async t => {
+  const f = await fixture(t), id = randomUUID()
+  const created = await f.catalog.createProject({ workspace_id: id, name: '项目', description: 'purpose' })
+  assert.equal(created.workspace.last_used_at, undefined)
+  await f.catalog.markUsed(id, '2026-10-19T01:00:00.000Z')
+  await f.catalog.markUsed(id, '2026-10-19T00:00:00.000Z')
+  const saved = await f.catalog.get(id)
+  assert.equal(saved.last_used_at, '2026-10-19T01:00:00.000Z')
+  assert.equal(saved.description, 'purpose'); assert.equal(saved.root, created.workspace.root)
+  await assert.rejects(f.catalog.markUsed(id, 'not-a-time'), { code: 'WORKSPACE_INVALID_REQUEST' })
+  assert.equal((await new WorkspaceCatalog({ files, dataRoot: f.data }).get(id)).last_used_at, saved.last_used_at)
+  const file = path.join(f.data, 'workspace-control/catalog.json'), state = JSON.parse(await fs.readFile(file, 'utf8'))
+  state.workspaces[0].last_used_at = 42
+  await fs.writeFile(file, JSON.stringify(state))
+  await assert.rejects(f.catalog.snapshot(), { code: 'WORKSPACE_STATE_INVALID' })
+})

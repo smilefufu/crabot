@@ -4475,6 +4475,8 @@ describe('WorkerHarness.queryWorker', () => {
     expect(w.task.status).toBe('running') // fork 不影响主线状态
     expect(fake.forkCalls[0].opts.workspace).toEqual(fake.spawnCalls[0].workspace)
     expect(w.workspace_id).toBe(worker.workspace_id)
+    const catalog = JSON.parse(await fs.readFile(join(dataDir, 'profile/workspace-control/catalog.json'), 'utf8'))
+    expect(catalog.workspaces.find((item: { workspace_id: string }) => item.workspace_id === worker.workspace_id).last_used_at).toBe(w.updated_at)
     expect(w.manager_key).toBe(worker.manager_key)
     expect(w.origin).toEqual(worker.origin); expect(w.report_to).toEqual(worker.report_to)
 
@@ -5218,4 +5220,18 @@ it('unindexed historical workers cannot become a false zero or idle workspace in
   const observe = vi.spyOn(harness, 'getWorkerExecutionObservation')
   expect(await harness.getWorkspaceExecutionInventory()).toEqual({ ready: false, items: {} })
   expect(observe).not.toHaveBeenCalled()
+})
+
+it('last use follows committed execution; auxiliary persistence failure never turns an accepted spawn into failure', async () => {
+  const { harness } = await makeHarness()
+  const first = await harness.spawnWorker(spawnParams())
+  const file = join(dataDir, 'profile/workspace-control/catalog.json')
+  const snapshot = JSON.parse(await fs.readFile(file, 'utf8'))
+  expect(snapshot.workspaces.find((item: { workspace_id: string }) => item.workspace_id === first.workspace_id).last_used_at).toBe(first.updated_at)
+  const workspaceManager = (harness as unknown as { deps: { workspaces: WorkspaceManager } }).deps.workspaces
+  vi.spyOn(workspaceManager, 'markUsed').mockRejectedValueOnce(new Error('disk full'))
+  const second = await harness.spawnWorker(spawnParams())
+  expect(second.task.status).toBe('running')
+  expect(second.incarnations[0].state).toBe('running')
+  expect(JSON.parse(await fs.readFile(file, 'utf8')).workspaces[0].last_used_at).toBe(snapshot.workspaces[0].last_used_at)
 })

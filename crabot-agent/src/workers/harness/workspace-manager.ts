@@ -46,6 +46,8 @@ export class WorkspaceManager {
     return { root: project.root, workspace_id: project.workspace_id, runtime_root: await this.runtimeRoot(taskId, true) }
   }
 
+  markUsed(id: string, at: string): Promise<void> { return this.records().markUsed(id, at) }
+
   /** Existing ledgers keep their cwd. An established binding never creates a replacement project/profile. */
   async resolveExisting(taskId: string, requested: string, workspaceId?: string): Promise<Workspace> {
     this.validateTaskId(taskId)

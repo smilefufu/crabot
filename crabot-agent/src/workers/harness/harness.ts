@@ -1356,6 +1356,7 @@ export class WorkerHarness {
         inbox.hold('input_pending')
       }
 
+      await this.noteWorkspaceUse(workspace.workspace_id, now)
       await this.appendEvent(workerId, 1, 'lifecycle_changed', { change: 'spawned', impl }, spawned?.task.status)
       const uiSnapshot = await this.prepareUiSnapshot(spawnedHandle, p.managerKey, initialInput?.report, now)
       const turnOutcome = await this.createInitialInputTurn(p.managerKey, spawnedHandle, initialInput, now,
@@ -3036,6 +3037,7 @@ export class WorkerHarness {
     const inbox = this.getInbox(worker.worker_id)
     inbox.release()
     const replayedConsumed = inbox.requeueConsumed()
+    await this.noteWorkspaceUse(worker.workspace_id, now)
     await this.appendEvent(worker.worker_id, newHandle.seq, 'lifecycle_changed', { change: 'resumed', from_seq: mainline.seq }, revived?.task.status)
     const uiSnapshot = await this.prepareUiSnapshot(newHandle, managerKey, initialInput?.report, now)
     const turnOutcome = await this.createInitialInputTurn(managerKey, newHandle, initialInput, now,
@@ -3333,6 +3335,7 @@ export class WorkerHarness {
       }
     })
 
+    await this.noteWorkspaceUse(worker.workspace_id, now)
     this.bumpInputOwnershipRevision(worker.worker_id)
     const inbox = this.getInbox(worker.worker_id)
     inbox.release()
@@ -3412,6 +3415,12 @@ export class WorkerHarness {
       ...(incarnation.query_id ? { query_id: incarnation.query_id } : {}),
     }
     return adapter.readTerminal(handle)
+  }
+
+  private async noteWorkspaceUse(workspaceId: string | undefined, at: string): Promise<void> {
+    if (!workspaceId) return
+    try { await this.deps.workspaces.markUsed(workspaceId, at) }
+    catch { console.warn('[WorkerHarness] workspace last-use persistence failed; running execution is preserved') }
   }
 
   async getWorkspaceExecutionInventory(): Promise<import('crabot-shared').WorkspaceExecutionInventory> {
@@ -6411,6 +6420,7 @@ export class WorkerHarness {
           forkHandle!.seq,
           this.deps.now(),
         )
+        await this.noteWorkspaceUse(prep.workspaceId, now)
         if (admission) {
           this.connectionDisposers.set(`${workerId}:${forkHandle!.seq}`, admission.dispose)
           admission = undefined
