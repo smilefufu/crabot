@@ -46,7 +46,7 @@ Section "安装 Crabot"
   StrCpy $INSTDIR "$PLUGINSDIR\crabot-installer"
   SetOutPath "$INSTDIR"
   !insertmacro extractEmbeddedAppPackage
-  ExecWait '$"$INSTDIR\${APP_EXECUTABLE_FILENAME}$" $"--install-root=$CrabotTarget\.$"' $0
+  ExecWait '"$INSTDIR\${APP_EXECUTABLE_FILENAME}" "--install-root=$CrabotTarget\."' $0
   SetOutPath "$EXEDIR"
   RMDir /r "$PLUGINSDIR\crabot-installer"
   StrCpy $INSTDIR "$CrabotTarget"
