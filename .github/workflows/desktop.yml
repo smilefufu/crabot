@@ -123,6 +123,12 @@ jobs:
         run: |
           cd crabot-agent
           node node_modules/vitest/vitest.mjs run tests/core/config-loader.test.ts tests/core/config-loader-slice0.test.ts tests/core/runtime-env.test.ts tests/core/child-env-guard.test.ts tests/utils/resolve-bash-path.test.ts tests/agent/mcp-connector.test.ts tests/mcp-connector-tool-defaults.test.ts tests/manager/tool-face.test.ts tests/workers/harness/project-workspaces.test.ts tests/workers/harness/workspace-execution.test.ts tests/manager/read-model.test.ts tests/workers/harness/workspace-manager.test.ts tests/workers/harness/ledger-store.test.ts tests/workers/private-project-provision.test.ts tests/workers/private-project-runtime.test.ts tests/workers/codex-project-config.test.ts --maxWorkers=1 --minWorkers=1
+      - name: Real Codex and Claude private workspace CLI acceptance
+        if: runner.os != 'Windows'
+        timeout-minutes: 6
+        run: |
+          npm install --prefix .desktop-build/native-cli-tools --no-package-lock --no-audit --no-fund @openai/codex@0.149.1 @anthropic-ai/claude-code@2.1.246
+          node .github/scripts/native-project-cli-acceptance.mjs 2>&1 | tee .desktop-build/workspace-native-cli.log
       - name: Shared HTTP and chat protocol regressions
         run: |
           node node_modules/typescript/bin/tsc -p tsconfig.cli.json
