@@ -28,7 +28,8 @@ function json(file, privateFile = false) {
 function readDesktopInstallation(root) {
   try {
     root = path.resolve(root)
-    const stat = directory(root, true), canonical = fs.realpathSync.native(root)
+    directory(root, true)
+    const stat = fs.lstatSync(root, { bigint: true }), canonical = fs.realpathSync.native(root)
     const record = json(path.join(root, 'desktop-installation.json'), true)
     if (!keys(record, ['schema_version', 'installation_id', 'owner', 'install_root', 'root_identity', 'paths'])
       || record.schema_version !== 1 || !uuid(record.installation_id) || record.owner !== identity.inspectProcess(process.pid).owner

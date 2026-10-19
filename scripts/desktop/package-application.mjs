@@ -89,7 +89,10 @@ const configuration = {
     const packagedCore = paired ? pairedCore : path.join(resources, 'core')
     // Electron's resource matcher prunes root node_modules and dotfiles. The
     // standalone core is an opaque verified payload, not an Electron app tree.
-    if (paired) await fs.writeFile(path.join(resources, 'desktop-release.json'), JSON.stringify(selection) + '\n')
+    if (paired) {
+      await fs.writeFile(path.join(resources, 'desktop-release.json'), JSON.stringify(selection) + '\n')
+      await fs.copyFile(appIcon, path.join(resources, 'crabot.png'))
+    }
     else {
       await fs.cp(core, packagedCore, { recursive: true, verbatimSymlinks: true, mode: constants.COPYFILE_FICLONE })
       await fs.writeFile(path.join(packagedCore, 'desktop-host.json'), JSON.stringify({ schema_version: 1, platform: process.platform, arch: process.arch }) + '\n')

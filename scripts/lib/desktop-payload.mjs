@@ -165,7 +165,7 @@ export async function prepareDesktopInstallation({ payload, installRoot, signal,
       if ((await fs.readdir(installRoot)).some(name => name !== 'cli.lock')) fail('安装目录在准备期间发生变化，未覆盖。')
       for (const name of ['app/releases', 'releases', 'bin']) await fs.mkdir(path.join(installRoot, name), { recursive: true, mode: 0o700 })
       management.ensurePrivateDataRoot(path.join(installRoot, 'data'))
-      const stat = await fs.lstat(installRoot)
+      const stat = await fs.lstat(installRoot, { bigint: true })
       await privateJson(metadata, { schema_version: 1, installation_id: randomUUID(), owner: identity.inspectProcess(process.pid).owner,
         install_root: installRoot, root_identity: { dev: String(stat.dev), ino: String(stat.ino) }, paths: { app: 'app/releases', core: 'releases', data: 'data', bin: 'bin' } })
     }

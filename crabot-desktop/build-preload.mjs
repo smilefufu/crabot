@@ -11,3 +11,5 @@ for (const file of ['scripts/lib/desktop-installation.cjs', 'scripts/lib/process
   await mkdir(destination.slice(0, destination.lastIndexOf('/')), { recursive: true })
   await copyFile('../' + file, destination)
 }
+
+await build({ entryPoints: ['src/installer-preload.ts'], outfile: 'dist/installer-preload.cjs', bundle: true, platform: 'node', format: 'cjs', target: 'es2022', external: ['electron'], sourcemap: false })

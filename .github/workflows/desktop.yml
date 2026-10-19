@@ -143,17 +143,17 @@ jobs:
         run: |
           node node_modules/typescript/bin/tsc -p tsconfig.json
           node build-preload.mjs
-          node --test tests/workspace-folder.test.mjs tests/desktop-disk.test.mjs tests/desktop-resources.test.mjs tests/first-model-fixture.test.mjs tests/full-host-control.test.mjs tests/desktop-network.test.mjs tests/artifact-network.test.mjs tests/session-host.test.mjs tests/diagnostics.test.mjs tests/login-startup.test.mjs tests/controller.test.mjs tests/update-dialog.test.mjs tests/update-package.test.mjs
+          node --test tests/installation-entries.test.mjs tests/workspace-folder.test.mjs tests/desktop-disk.test.mjs tests/desktop-resources.test.mjs tests/first-model-fixture.test.mjs tests/full-host-control.test.mjs tests/desktop-network.test.mjs tests/artifact-network.test.mjs tests/session-host.test.mjs tests/diagnostics.test.mjs tests/login-startup.test.mjs tests/controller.test.mjs tests/update-dialog.test.mjs tests/update-package.test.mjs
       - name: Interrupted migration retains data and refuses automatic replay
         run: node .github/scripts/smoke-migration-interruption.mjs 2>&1 | tee .desktop-build/migration-interruption.log
       - name: Real sandboxed Electron window boundaries on Linux
         if: runner.os == 'Linux'
         working-directory: crabot-desktop
-        run: xvfb-run -a node --test tests/electron-boundary.test.mjs 2>&1 | tee ../.desktop-build/electron-boundary.log
+        run: xvfb-run -a node --test tests/electron-boundary.test.mjs tests/installer-progress.test.mjs 2>&1 | tee ../.desktop-build/electron-boundary.log
       - name: Real sandboxed Electron window boundaries on macOS and Windows
         if: runner.os != 'Linux'
         working-directory: crabot-desktop
-        run: node --test tests/electron-boundary.test.mjs 2>&1 | tee ../.desktop-build/electron-boundary.log
+        run: node --test tests/electron-boundary.test.mjs tests/installer-progress.test.mjs 2>&1 | tee ../.desktop-build/electron-boundary.log
       - name: Build locked browser and computer-use resources
         if: steps.scope.outputs.full_runtime == 'true'
         run: |
@@ -216,6 +216,18 @@ jobs:
         if: steps.scope.outputs.full_runtime == 'true'
         timeout-minutes: 10
         run: node scripts/desktop/package-application.mjs --candidate=true --layout=paired "--core=.desktop-build/安装 候选/core" "--out=.desktop-build/安装 候选/paired" 2>&1 | tee .desktop-build/paired-package.log
+      - name: Build independent offline installer host
+        if: steps.scope.outputs.full_runtime == 'true'
+        timeout-minutes: 15
+        run: node scripts/desktop/package-offline-installer.mjs --candidate=true --distribute=${{ runner.os != 'Linux' }} "--paired=.desktop-build/安装 候选/paired" "--out=.desktop-build/安装 候选/installer" 2>&1 | tee .desktop-build/offline-installer.log
+      - name: Verify actual installer ASAR without business startup on Linux
+        if: runner.os == 'Linux' && steps.scope.outputs.full_runtime == 'true'
+        timeout-minutes: 6
+        run: xvfb-run -a node .github/scripts/verify-offline-installer-host.mjs ".desktop-build/安装 候选/installer" 2>&1 | tee .desktop-build/installer-host-probe.log
+      - name: Verify actual installer ASAR without business startup on macOS and Windows
+        if: runner.os != 'Linux' && steps.scope.outputs.full_runtime == 'true'
+        timeout-minutes: 6
+        run: node .github/scripts/verify-offline-installer-host.mjs ".desktop-build/安装 候选/installer" 2>&1 | tee .desktop-build/installer-host-probe.log
       - name: Boot actual offline-prepared pair on Linux
         if: runner.os == 'Linux' && steps.scope.outputs.full_runtime == 'true'
         timeout-minutes: 10

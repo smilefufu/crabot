@@ -5,16 +5,18 @@ import path from 'node:path'
 import { tmpdir } from 'node:os'
 import { createRequire } from 'node:module'
 import vm from 'node:vm'
-import { verifyDesktopAsar } from '../desktop-asar.mjs'
+import { verifyDesktopAsar, verifyInstallerAsar } from '../desktop-asar.mjs'
 const desktopRequire = createRequire(new URL('../../../crabot-desktop/package.json', import.meta.url))
 const builderRequire = createRequire(createRequire(desktopRequire.resolve('electron-builder')).resolve('app-builder-lib/package.json'))
 const asar = builderRequire('@electron/asar')
-async function fixture(t, missingTray = false) {
+async function fixture(t, missingTray = false, installer = false) {
   const parent = await fs.mkdtemp(path.join(tmpdir(), 'Crabot ASAR 中文 ')), source = path.join(parent, 'source'), archive = path.join(parent, 'app.asar')
   t.after(() => fs.rm(parent, { recursive: true, force: true }))
   const files = { 'dist/main.js': 'export{}', 'dist/bootstrap/scripts/lib/desktop-installation.cjs': 'module.exports={}',
     'dist/bootstrap/scripts/lib/process-identity.cjs': 'module.exports={}', 'dist/bootstrap/crabot-native/build/Release/crabot-native.node': 'native fixture', 'dist/preload.cjs': 'module.exports={}', 'dist/assets/tray.png': 'fixture tray bytes',
     'node_modules/crabot-client/dist/index.js': 'export{}', 'node_modules/zod/package.json': '{}', 'node_modules/electron-updater/package.json': '{}' }
+  if (installer) for (const file of ['dist/installer-main.js', 'dist/installer-preload.cjs', 'dist/installation-progress-window.js', 'dist/installation-entries.js',
+    'dist/bootstrap/scripts/lib/desktop-payload.mjs', 'dist/bootstrap/scripts/lib/core-release.mjs']) files[file] = 'installer fixture'
   if (missingTray) delete files['dist/assets/tray.png']
   for (const [file, bytes] of Object.entries(files)) {
     await fs.mkdir(path.dirname(path.join(source, file)), { recursive: true }); await fs.writeFile(path.join(source, file), bytes)
@@ -43,4 +45,10 @@ test('missing tray bytes still fail candidate/installer verification on both nat
   const archive = await fixture(t, true)
   assert.throws(() => verifyDesktopAsar(asar, archive), /tray\.png.*not found/)
   assert.throws(() => verifyDesktopAsar(windowsFilesystem(archive), archive, 'win32'), /tray\.png.*not found/)
+})
+
+test('installer ASAR independently verifies its trusted backend instead of executing the unverified payload Core', async t => {
+  const complete = await fixture(t, false, true), ordinary = await fixture(t)
+  verifyInstallerAsar(asar, complete); verifyInstallerAsar(windowsFilesystem(complete), complete, 'win32')
+  assert.throws(() => verifyInstallerAsar(asar, ordinary), /installer-main.*not found/)
 })

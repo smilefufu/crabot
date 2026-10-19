@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { promises as fs, constants } from 'node:fs'
+import { promises as fs, constants, default as fsSync } from 'node:fs'
 import path from 'node:path'
 import { tmpdir } from 'node:os'
 import { randomUUID } from 'node:crypto'
@@ -26,7 +26,7 @@ async function fixture(t) {
   const root = management.ensurePrivateDataRoot(path.join(parent, '完整 安装'))
   for (const part of ['app/releases', 'releases', 'bin']) await fs.mkdir(path.join(root, part), { recursive: true })
   management.ensurePrivateDataRoot(path.join(root, 'data'))
-  const stat = await fs.stat(root)
+  const stat = await fs.stat(root, { bigint: true })
   const record = { schema_version: 1, installation_id: randomUUID(), owner: identity.inspectProcess(process.pid).owner,
     install_root: root, root_identity: { dev: String(stat.dev), ino: String(stat.ino) }, paths: { app: 'app/releases', core: 'releases', data: 'data', bin: 'bin' } }
   await privateJson(path.join(root, 'desktop-installation.json'), record)
@@ -140,4 +140,20 @@ test('desktop command registration targets the stable root command, not a retain
   }
   assert.equal((await installDesktopCli({ coreRoot: f.coreRoot, dataDir: path.join(f.root, 'data'), home, env })).command, installed.command)
   await assert.rejects(fs.lstat(path.join(f.root, 'current-core')), { code: 'ENOENT' })
+})
+
+
+test('installation root identity retains exact 64-bit file IDs rather than rounded Number values', async t => {
+  const f = await fixture(t), file = path.join(f.root, 'desktop-installation.json'), exact = 9007199254740993n
+  await fs.writeFile(file, JSON.stringify({ ...f.record, root_identity: { ...f.record.root_identity, ino: String(exact) } }))
+  const lstat = fsSync.lstatSync
+  let inode = exact
+  t.mock.method(fsSync, 'lstatSync', (name, options) => {
+    const stat = lstat(name, options)
+    if (name !== f.root) return stat
+    const value = Object.create(stat); value.ino = options?.bigint ? inode : Number(inode); return value
+  })
+  assert.equal(desktop.readDesktopSelection(f.root).record.root_identity.ino, String(exact))
+  inode = exact - 1n
+  assert.throws(() => desktop.readDesktopSelection(f.root), { code: 'CRABOT_DESKTOP_INSTALLATION' })
 })
