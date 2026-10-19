@@ -244,6 +244,7 @@ describe('P5 集成：manager 栈启动接线（Task 6）', () => {
     for (const m of [
       'trigger_schedule',
       'list_workers_admin',
+      'get_workspace_execution_admin',
       'get_worker_detail',
       'get_worker_terminal',
       'get_worker_trace',
@@ -256,6 +257,7 @@ describe('P5 集成：manager 栈启动接线（Task 6）', () => {
     const result = await rpc<{ items: unknown[]; pagination: { total_items: number } }>('list_workers_admin', {})
     expect(result.items).toEqual([])
     expect(result.pagination.total_items).toBe(0)
+    expect(await rpc('get_workspace_execution_admin', {})).toEqual({ ready: false, items: {} })
 
     // 台账根按 §7 从 $DATA_DIR 派生（不是从别处推的）
     const stack = internals.managerStack

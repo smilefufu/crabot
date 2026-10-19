@@ -34,7 +34,7 @@ it('lists stable projects and one default; absent runtime evidence does not fabr
   expect(item.directory_status).toBe('ready')
   await fs.rm(workspace.root, { recursive: true })
   expect((await service.get(workspace.workspace_id)).item.directory_status).toBe('missing')
-  expect((await service.get('default')).item.directory_status).toBe('missing')
+  expect((await service.get('default')).item.directory_status).toBe('ready')
 })
 it('accepted refresh runs independently, coalesces requests and exposes bounded real metadata results', async () => {
   let release!: () => void
@@ -76,4 +76,18 @@ it('shutdown cancels in-flight and queued scans, waits for owned handles and rej
   await service.close()
   expect(cancelled).toBe(1); expect(scan).toHaveBeenCalledTimes(1)
   await expect(service.refresh(a.workspace_id)).rejects.toMatchObject({ code: 'WORKSPACE_UNAVAILABLE' })
+})
+
+it('one inventory read covers the complete list; only a ready complete empty binding is idle', async () => {
+  const execution = vi.fn(async () => ({ ready: true, items: { default: { status: 'running' as const, worker_count: 2 } } }))
+  const { service } = await fixture({ execution })
+  const project = (await service.create({ workspace_id: randomUUID(), name: '项目' })).workspace
+  const result = await service.list()
+  expect(execution).toHaveBeenCalledTimes(1)
+  expect(result.items.find(item => item.workspace.workspace_id === 'default')!.execution).toMatchObject({ status: 'running', worker_count: 2 })
+  expect(result.items.find(item => item.workspace.workspace_id === project.workspace_id)!.execution).toMatchObject({ status: 'idle', worker_count: 0 })
+  execution.mockResolvedValueOnce({ ready: false, items: {} } as never)
+  expect((await service.list()).items.every(item => item.execution.status === 'unknown' && item.execution.worker_count === undefined)).toBe(true)
+  execution.mockRejectedValueOnce(new Error('agent unreachable'))
+  expect((await service.list()).items.every(item => item.execution.status === 'unknown')).toBe(true)
 })

@@ -278,7 +278,7 @@ async function makeHarness(
   fakeOpts: FakeAdapterOpts = {},
   depsOverrides: Partial<Pick<
     HarnessDeps,
-    'hasRunningBg' | 'listWorkerBackground' | 'readReviewBackgrounds' | 'hasPendingWorkerNotification' | 'capabilityBundle' | 'onEvent' | 'onOperationNotification' | 'onNativeActivityCollected' | 'admitWorkerConnection' | 'redactFailureReason' | 'mintActivityCursor'
+    'isExecutionReady' | 'hasRunningBg' | 'listWorkerBackground' | 'readReviewBackgrounds' | 'hasPendingWorkerNotification' | 'capabilityBundle' | 'onEvent' | 'onOperationNotification' | 'onNativeActivityCollected' | 'admitWorkerConnection' | 'redactFailureReason' | 'mintActivityCursor'
   >> = {},
 ): Promise<{
   harness: WorkerHarness
@@ -5193,4 +5193,29 @@ describe('historical ledger startup and candidate budgets', () => {
     expect(fake.killCalls).toHaveLength(0)
   })
 
+})
+
+it('workspace inventory does not publish empty idle before reconciliation or keep evidence after execution readiness changes', async () => {
+  let ready = false
+  const { harness, ledger } = await makeHarness({}, { isExecutionReady: () => ready })
+  const list = vi.spyOn(ledger, 'listAllWorkers')
+  expect(await harness.getWorkspaceExecutionInventory()).toEqual({ ready: false, items: {} })
+  expect(list).not.toHaveBeenCalled()
+  ready = true
+  await harness.spawnWorker(spawnParams())
+  expect((await harness.getWorkspaceExecutionInventory()).items.default).toMatchObject({ status: 'running', worker_count: 1, running_worker_count: 1 })
+  const read = vi.spyOn(harness, 'getWorkerExecutionObservation')
+  read.mockImplementationOnce(async () => { ready = false; return { observed_at: now(), state: 'idle', reasons: [], active_subagents: [], active_background: [], notification_pending: false, unavailable_reasons: [] } })
+  expect(await harness.getWorkspaceExecutionInventory()).toEqual({ ready: false, items: {} })
+  read.mockRestore()
+})
+
+it('unindexed historical workers cannot become a false zero or idle workspace inventory', async () => {
+  const { harness, ledger } = await makeHarness({}, { isExecutionReady: () => true })
+  const worker = await harness.spawnWorker(spawnParams())
+  const legacy = structuredClone(worker); legacy.worker_id = 'historical-worker'; delete legacy.workspace_id
+  vi.spyOn(ledger, 'listAllWorkers').mockResolvedValue([{ managerKey: worker.manager_key, worker: legacy }])
+  const observe = vi.spyOn(harness, 'getWorkerExecutionObservation')
+  expect(await harness.getWorkspaceExecutionInventory()).toEqual({ ready: false, items: {} })
+  expect(observe).not.toHaveBeenCalled()
 })

@@ -1,5 +1,6 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, afterEach, expect, it, vi } from 'vitest'
+import { MemoryRouter } from 'react-router-dom'
 import { ClientError } from 'crabot-client'
 import { serverQueries, setServerScope } from '../services/server-state'
 import { Workspaces } from './Workspaces'
@@ -17,12 +18,13 @@ const snapshot = { revision: 2, storage_root: '/workspaces', items: [item, { ...
 beforeEach(() => { serverQueries.clear(); setServerScope('workspace-test'); vi.resetAllMocks(); mocks.list.mockResolvedValue(structuredClone(snapshot)) })
 afterEach(() => { serverQueries.clear() })
 it('shows one row per project/default and does not invent zero space or idle execution for missing evidence', async () => {
-  render(<Workspaces />)
+  render(<MemoryRouter><Workspaces /></MemoryRouter>)
   fireEvent.click(await screen.findByRole('button', { name: /Crabot 桌面应用/ }))
   expect(screen.getByText(/1 个项目工作区 · 1 个默认工作区/)).toBeInTheDocument()
   expect(screen.getByText('待核实')).toBeInTheDocument()
   expect(screen.getAllByText('未知').length).toBeGreaterThan(0)
   expect(screen.queryByText('当前空闲')).toBeNull()
+  expect(screen.getByRole('link', { name: '查看关联执行器（含历史）' })).toHaveAttribute('href', `/traces?tab=workers&workspace_id=${id}`)
   fireEvent.change(screen.getByLabelText('搜索工作区'), { target: { value: '无此项目' } })
   expect(screen.getByText('没有匹配的工作区。')).toBeInTheDocument()
 })
@@ -31,7 +33,7 @@ it('CAS conflict retains the draft, shows the latest metadata and requires a new
   const latest = { ...workspace, name: '同事的新名称', description: '新用途' }
   mocks.get.mockResolvedValue({ revision: 3, item: { ...item, workspace: latest } })
   mocks.update.mockResolvedValueOnce({ revision: 4, workspace: { ...latest, name: '我的草稿' } })
-  render(<Workspaces />); fireEvent.click(await screen.findByRole('button', { name: /Crabot 桌面应用/ }))
+  render(<MemoryRouter><Workspaces /></MemoryRouter>); fireEvent.click(await screen.findByRole('button', { name: /Crabot 桌面应用/ }))
   fireEvent.change(screen.getByLabelText('工作区名称'), { target: { value: '我的草稿' } })
   fireEvent.click(screen.getByRole('button', { name: '保存名称与用途' }))
   fireEvent.click(await screen.findByRole('button', { name: '读取最新信息，保留草稿' }))
@@ -44,7 +46,7 @@ it('CAS conflict retains the draft, shows the latest metadata and requires a new
 })
 it('a lost create response keeps a stable project identity for an explicit retry', async () => {
   mocks.create.mockRejectedValueOnce(new ClientError('unreachable', '连接中断')).mockResolvedValueOnce({ revision: 3, workspace })
-  render(<Workspaces />); fireEvent.click(await screen.findByRole('button', { name: '添加项目工作区' }))
+  render(<MemoryRouter><Workspaces /></MemoryRouter>); fireEvent.click(await screen.findByRole('button', { name: '添加项目工作区' }))
   fireEvent.change(screen.getByLabelText('项目名称'), { target: { value: '新项目' } })
   fireEvent.click(screen.getByRole('button', { name: '保存工作区' }))
   expect(await screen.findByRole('alert')).toHaveTextContent('连接中断')

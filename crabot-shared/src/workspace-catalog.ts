@@ -80,6 +80,7 @@ export class WorkspaceCatalog {
         workspace_id: 'default', kind: 'default', name: '默认工作区', description: '',
         root: path.join(this.initialRoot, 'default'), source: 'managed', created_at: new Date().toISOString(),
       }] }
+      await this.ensureDirectory(file.workspaces[0].root)
       await this.write(file)
     })
   }
@@ -150,6 +151,7 @@ export class WorkspaceCatalog {
     if (!taskId || taskId === '.' || taskId === '..' || /[\\/\0]/.test(taskId)) throw badRequest()
     await this.initialize()
     const workspace = await this.get('default'), root = path.join(workspace.root, 'tasks', taskId)
+    await this.verifyDirectory(workspace.root)
     await this.ensureDirectory(root)
     return { workspace_id: workspace.workspace_id, root }
   }

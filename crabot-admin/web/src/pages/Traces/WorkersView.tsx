@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import { Loading } from '../../components/Common/Loading'
 import { agentObservabilityService, type LedgerWorker, type WorkerTaskStatus } from '../../services/agent-observability'
 import { describeWorkerTask, TONE_COLOR } from './worker-state'
@@ -37,6 +37,8 @@ function implementationLabel(worker: LedgerWorker): string {
 }
 
 export const WorkersView: React.FC = () => {
+  const [searchParams, setSearchParams] = useSearchParams()
+  const workspaceId = searchParams.get('workspace_id') || undefined
   const [items, setItems] = useState<LedgerWorker[]>([])
   const [page, setPage] = useState(1)
   const [totalPages, setTotalPages] = useState(1)
@@ -46,8 +48,8 @@ export const WorkersView: React.FC = () => {
   const [status, setStatus] = useState<string>('')
   const [managerKey, setManagerKey] = useState('')
   const [query, setQuery] = useState('')
-  const [includeTerminal, setIncludeTerminal] = useState(false)
-  const [includeLegacy, setIncludeLegacy] = useState(false)
+  const [includeTerminal, setIncludeTerminal] = useState(Boolean(workspaceId))
+  const [includeLegacy, setIncludeLegacy] = useState(Boolean(workspaceId))
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
@@ -56,6 +58,7 @@ export const WorkersView: React.FC = () => {
     setLoading(true)
     setError(null)
     agentObservabilityService.listWorkers({
+      ...(workspaceId ? { workspace_id: workspaceId } : {}),
       ...(status ? { status } : {}),
       ...(managerKey ? { manager_key: managerKey } : {}),
       ...(query.trim() ? { q: query.trim() } : {}),
@@ -79,10 +82,11 @@ export const WorkersView: React.FC = () => {
       setItems([])
     }).finally(() => { if (!cancelled) setLoading(false) })
     return () => { cancelled = true }
-  }, [page, status, managerKey, query, includeTerminal, includeLegacy])
+  }, [page, status, managerKey, query, includeTerminal, includeLegacy, workspaceId])
 
   return (
     <section className="trace-list" aria-label="执行器列表">
+      {workspaceId && <p>当前仅显示此工作区的关联执行器。<button onClick={() => { const next = new URLSearchParams(searchParams); next.delete('workspace_id'); setSearchParams(next); setPage(1) }}>清除工作区过滤</button></p>}
       <div className="trace-filters">
         <input
           className="trace-control trace-control--search"

@@ -27,7 +27,7 @@ async function fixture() {
   cleanup.push(() => new Promise<void>(resolve => server.close(() => resolve())))
   const endpoint = `http://127.0.0.1:${(server.address() as { port: number }).port}/api`
   const client = new WorkspaceClient(new HttpClient({ endpoint, token: () => 'fixture-human' }))
-  return { root, service, endpoint, client }
+  return { root, service, endpoint, client, admin }
 }
 it('the real Admin router exposes the shared SDK contract and rejects nonhuman identities before mutation', async () => {
   const { endpoint, client } = await fixture()
@@ -67,4 +67,15 @@ it('invalid JSON, field injection and invalid identifiers fail without creating 
   }
   expect((await fetch(endpoint + '/workspaces/not-an-id', { headers: { Authorization: 'Bearer fixture-human' } })).status).toBe(400)
   expect((await client.list()).items).toHaveLength(1)
+})
+
+it('associated-worker HTTP filtering validates the stable identity and preserves explicit terminal visibility', async () => {
+  const { endpoint, admin } = await fixture()
+  admin.callAgentRpc = vi.fn(async () => ({ items: [], pagination: { page: 1, page_size: 20, total_items: 0, total_pages: 0 } }))
+  const headers = { Authorization: 'Bearer fixture-human' }
+  expect((await fetch(endpoint + '/agent/workers?workspace_id=invalid', { headers })).status).toBe(400)
+  expect(admin.callAgentRpc).not.toHaveBeenCalled()
+  const response = await fetch(endpoint + '/agent/workers?workspace_id=default&include_terminal=true&include_legacy=true', { headers })
+  expect(response.status).toBe(200)
+  expect(admin.callAgentRpc).toHaveBeenCalledWith('list_workers_admin', expect.objectContaining({ workspace_id: 'default', include_terminal: true, include_legacy: true }))
 })

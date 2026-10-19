@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { Link, useSearchParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { ClientError, WorkspaceClient, type WorkspaceRecord, type WorkspaceSummary, type WorkspaceUsage } from 'crabot-client'
 import { MainLayout } from '../components/Layout/MainLayout'
@@ -66,9 +67,11 @@ function WorkspaceDetails({ item, revision, client, refresh, onSaved }: {
       <dt>磁盘占用估算</dt><dd>{bytes(usage.allocated_bytes)}</dd><dt>文件总大小</dt><dd>{bytes(usage.logical_bytes)}</dd>
       <dt>统计状态</dt><dd>{statuses[usage.status]}{usage.measured_at && ' · ' + new Date(usage.measured_at).toLocaleString()}{usage.skipped_entries > 0 && ` · ${usage.skipped_entries} 项未计入`}</dd>
       <dt>执行占用</dt><dd>{executionLabel}{execution.worker_count !== undefined && ` · ${execution.worker_count} 个关联执行器`}</dd>
+      <dt>观察时间</dt><dd>{execution.observed_at ? new Date(execution.observed_at).toLocaleString() : '未知'}</dd>
       <dt>最近使用</dt><dd>{workspace.last_used_at ? new Date(workspace.last_used_at).toLocaleString() : '未知'}</dd>
     </dl>
     <p className="workspace-note">路径位于运行 Crabot 的电脑或服务器。空间是带时间的估算，可能包含共享数据块；不等于删除后可释放的空间。</p>
+    <p><Link to={`/traces?tab=workers&workspace_id=${encodeURIComponent(workspace.workspace_id)}`}>查看关联执行器（含历史）</Link></p>
     <Button variant="secondary" disabled={usage.status === 'measuring' || item.directory_status !== 'ready'} onClick={() => refresh(workspace.workspace_id)}>刷新空间统计</Button>
     {workspace.kind === 'project' && <WorkspaceEditor key={workspace.workspace_id} client={client} record={workspace} initialRevision={revision} onSaved={onSaved} />}
   </Card>
@@ -82,7 +85,8 @@ function WorkspacePage({ scope }: { scope: string }) {
   const client = useMemo(() => new WorkspaceClient(getWebClient()), [scope])
   const query = useQuery({ queryKey: ['server', scope, 'workspaces'], queryFn: ({ signal }) => client.list({ signal }),
     refetchOnWindowFocus: true, refetchInterval: value => value.state.data?.items.some(item => item.usage.status === 'measuring') ? 1000 : false }, serverQueries)
-  const [selected, setSelected] = useState(''), [search, setSearch] = useState(''), [sort, setSort] = useState('name')
+  const [searchParams] = useSearchParams()
+  const [selected, setSelected] = useState(searchParams.get('workspace_id') ?? ''), [search, setSearch] = useState(''), [sort, setSort] = useState('name')
   const [error, setError] = useState(''), [creating, setCreating] = useState(false), [saving, setSaving] = useState(false)
   const [name, setName] = useState(''), [purpose, setPurpose] = useState(''), [root, setRoot] = useState('')
   const createId = useRef(''), requested = useRef(new Set<string>())
@@ -116,7 +120,8 @@ function WorkspacePage({ scope }: { scope: string }) {
   }
   return <MainLayout><div className="workspaces-page">
     <div className="workspace-heading"><div><h1>工作区</h1><p>每个项目长期使用一个工作区；未识别项目的任务放入默认工作区。</p></div>
-      <Button onClick={() => { createId.current = projectId(); setName(''); setPurpose(''); setRoot(''); setCreating(true) }}>添加项目工作区</Button></div>
+      <div className="workspace-actions"><Button variant="secondary" disabled={query.isFetching} onClick={() => void query.refetch()}>刷新列表与执行状态</Button>
+        <Button onClick={() => { createId.current = projectId(); setName(''); setPurpose(''); setRoot(''); setCreating(true) }}>添加项目工作区</Button></div></div>
     {query.data && <p>{query.data.items.filter(item => item.workspace.kind === 'project').length} 个项目工作区 · 1 个默认工作区 · {query.data.items.filter(item => item.directory_status !== 'ready').length} 个目录待核实</p>}
     {(error || query.error) && <p role="alert">{error || message(query.error)} <Button variant="secondary" onClick={() => void query.refetch()}>重新读取</Button></p>}
     {creating && <Card title="添加项目工作区"><form onSubmit={create} className="workspace-form">

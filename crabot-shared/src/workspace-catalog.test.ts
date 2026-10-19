@@ -29,7 +29,7 @@ test('read-only discovery does not create storage; initialization has exactly on
   const state = await f.catalog.snapshot()
   assert.equal(state.workspaces.length, 1)
   assert.equal(state.workspaces[0].workspace_id, 'default')
-  await assert.rejects(fs.stat(state.workspaces[0].root), { code: 'ENOENT' })
+  assert.equal((await fs.stat(state.workspaces[0].root)).isDirectory(), true)
   const a = await f.catalog.resolveDefaultTask('worker-a'), b = await f.catalog.resolveDefaultTask('worker-b')
   assert.notEqual(a.root, b.root)
   assert.equal(a.workspace_id, 'default'); assert.equal(b.workspace_id, 'default')
@@ -155,4 +155,14 @@ test('a private catalog larger than the native small-file limit remains readable
 test('a project cannot contain application control data and private executor profiles', async t => {
   const f = await fixture(t)
   await assert.rejects(f.catalog.createProject({ workspace_id: randomUUID(), name: 'parent of application data', root: f.root }), { code: 'WORKSPACE_INVALID_REQUEST' })
+})
+
+test('a missing established default root is reported and never recreated for new tasks', async t => {
+  const f = await fixture(t)
+  await f.catalog.initialize()
+  const root = (await f.catalog.get('default')).root
+  await fs.rm(root, { recursive: true, force: true })
+  await f.catalog.initialize()
+  await assert.rejects(f.catalog.resolveDefaultTask('new-task'), { code: 'WORKSPACE_DIRECTORY_MISSING' })
+  await assert.rejects(fs.stat(root), { code: 'ENOENT' })
 })

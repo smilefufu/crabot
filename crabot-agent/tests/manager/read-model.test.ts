@@ -537,3 +537,11 @@ describe('buildManagerAdminSummaries（P6-A §7）', () => {
     expect(empty.pagination).toMatchObject({ page: 1, page_size: 100, total_items: 0 })
   })
 })
+
+it('workspace identity filters complete terminal history before paging and counting; legacy titles and cwd do not bind', () => {
+  const a = entry(ALICE, 'a', { status: 'closed' }), b = entry(BOB, 'b'), legacy = entry(ALICE, 'legacy')
+  a.worker.workspace_id = 'default'; b.worker.workspace_id = '12345678-1234-4123-8123-123456789abc'
+  const result = filterAndPageWorkers([a, b, legacy], { workspace_id: 'default', include_terminal: true, include_legacy: true, pagination: { page: 1, page_size: 1 } })
+  expect(result.items).toEqual([a.worker]); expect(result.pagination.total_items).toBe(1)
+  expect(result.total_terminal).toBe(1); expect(result.total_active).toBe(0)
+})

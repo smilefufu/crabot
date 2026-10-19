@@ -1,3 +1,4 @@
+import { projectWorkspaceExecution } from './workspace-execution.js'
 import { createHash } from 'node:crypto'
 import { executionObservation, persistObservation, observationFile, readObservation } from '../../permissions/execution-observation.js'
 /**
@@ -3411,6 +3412,15 @@ export class WorkerHarness {
       ...(incarnation.query_id ? { query_id: incarnation.query_id } : {}),
     }
     return adapter.readTerminal(handle)
+  }
+
+  async getWorkspaceExecutionInventory(): Promise<import('crabot-shared').WorkspaceExecutionInventory> {
+    if (this.deps.isExecutionReady?.() !== true) return { ready: false, items: {} }
+    const workers = (await this.deps.ledger.listAllWorkers()).map(entry => entry.worker)
+    // Until historical roots are indexed, an absent binding cannot be reported as zero occupants.
+    if (workers.some(worker => worker.workspace_id === undefined)) return { ready: false, items: {} }
+    const items = await projectWorkspaceExecution(workers, id => this.getWorkerExecutionObservation(id))
+    return this.deps.isExecutionReady?.() === true ? { ready: true, items } : { ready: false, items: {} }
   }
 
   /** Read-only: no reconciliation, health probe, delivery or lifecycle mutation. */

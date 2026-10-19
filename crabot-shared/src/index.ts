@@ -130,5 +130,5 @@ export { testAudioService } from './audio-client.js'
 export { parseVoiceConnection, voiceTerminalEntry, voiceSetupStatus } from './voice-connection.js'
 export * from './computer-use.js'
 
-export type { WorkspaceRecord, WorkspaceUsage, WorkspaceExecution, WorkspaceSummary, WorkspaceListResult,
+export type { WorkspaceRecord, WorkspaceUsage, WorkspaceExecution, WorkspaceExecutionInventory, WorkspaceSummary, WorkspaceListResult,
   WorkspaceCreateRequest, WorkspaceUpdateRequest, WorkspaceRecordResult, WorkspaceGetResult, WorkspaceScanResult } from './workspace-types.js'

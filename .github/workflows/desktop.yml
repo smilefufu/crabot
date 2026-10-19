@@ -118,7 +118,7 @@ jobs:
       - name: Agent environment regressions
         run: |
           cd crabot-agent
-          node node_modules/vitest/vitest.mjs run tests/core/config-loader.test.ts tests/core/config-loader-slice0.test.ts tests/core/runtime-env.test.ts tests/core/child-env-guard.test.ts tests/utils/resolve-bash-path.test.ts tests/agent/mcp-connector.test.ts tests/mcp-connector-tool-defaults.test.ts tests/manager/tool-face.test.ts tests/workers/harness/project-workspaces.test.ts tests/workers/harness/workspace-manager.test.ts tests/workers/harness/ledger-store.test.ts tests/workers/private-project-provision.test.ts tests/workers/private-project-runtime.test.ts tests/workers/codex-project-config.test.ts --maxWorkers=1 --minWorkers=1
+          node node_modules/vitest/vitest.mjs run tests/core/config-loader.test.ts tests/core/config-loader-slice0.test.ts tests/core/runtime-env.test.ts tests/core/child-env-guard.test.ts tests/utils/resolve-bash-path.test.ts tests/agent/mcp-connector.test.ts tests/mcp-connector-tool-defaults.test.ts tests/manager/tool-face.test.ts tests/workers/harness/project-workspaces.test.ts tests/workers/harness/workspace-execution.test.ts tests/manager/read-model.test.ts tests/workers/harness/workspace-manager.test.ts tests/workers/harness/ledger-store.test.ts tests/workers/private-project-provision.test.ts tests/workers/private-project-runtime.test.ts tests/workers/codex-project-config.test.ts --maxWorkers=1 --minWorkers=1
       - name: Shared HTTP and chat protocol regressions
         run: |
           node node_modules/typescript/bin/tsc -p tsconfig.cli.json
@@ -131,7 +131,7 @@ jobs:
           pnpm install --frozen-lockfile
           node node_modules/typescript/bin/tsc -p tsconfig.json
           node node_modules/vite/bin/vite.js build
-          node node_modules/vitest/vitest.mjs run src/pages/Workspaces.test.tsx src/pages/Chat/index.test.tsx src/pages/MCPServers/MCPServerList.test.tsx src/pages/DesktopWelcome.test.tsx src/services/server-state.test.ts src/services/desktop-host.test.ts src/components/ChangePasswordDialog.test.tsx src/components/DesktopDiagnosticsPanel.test.tsx src/pages/Settings/ComputerUseSetupCard.test.tsx src/pages/Settings/VersionUpgradeCard.test.tsx src/pages/Settings/DesktopVersionUpgradeCard.test.tsx --maxWorkers=1 --minWorkers=1
+          node node_modules/vitest/vitest.mjs run src/pages/Workspaces.test.tsx src/pages/Traces/WorkersView.test.tsx src/pages/Chat/index.test.tsx src/pages/MCPServers/MCPServerList.test.tsx src/pages/DesktopWelcome.test.tsx src/services/server-state.test.ts src/services/desktop-host.test.ts src/components/ChangePasswordDialog.test.tsx src/components/DesktopDiagnosticsPanel.test.tsx src/pages/Settings/ComputerUseSetupCard.test.tsx src/pages/Settings/VersionUpgradeCard.test.tsx src/pages/Settings/DesktopVersionUpgradeCard.test.tsx --maxWorkers=1 --minWorkers=1
       - name: Electron compilation and main-process state regressions
         working-directory: crabot-desktop
         run: |

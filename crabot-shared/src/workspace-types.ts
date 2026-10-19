@@ -19,8 +19,13 @@ export interface WorkspaceUsage {
 }
 export interface WorkspaceExecution {
   status: 'running' | 'idle' | 'unknown'
+  observed_at?: string
   worker_count?: number
   running_worker_count?: number
+}
+export interface WorkspaceExecutionInventory {
+  ready: boolean
+  items: Record<string, WorkspaceExecution>
 }
 export interface WorkspaceSummary {
   workspace: WorkspaceRecord

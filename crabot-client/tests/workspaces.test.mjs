@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { HttpClient, WorkspaceClient, WorkspaceSummarySchema } from '../dist/index.js'
+import { HttpClient, WorkspaceClient, WorkspaceSummarySchema, WorkspaceExecutionInventorySchema } from '../dist/index.js'
 const id = '12345678-1234-4123-8123-123456789abc'
 const record = { workspace_id: id, kind: 'project', name: '项目', description: '', root: '/projects/demo', source: 'managed', created_at: '2026-10-19T00:00:00.000Z' }
 function fixture(body, status = 200) {
@@ -30,4 +30,11 @@ test('unknown execution and pending usage retain missing evidence; malformed cou
     const f = fixture({ revision: 1, item: invalid })
     await assert.rejects(f.client.get(id), { kind: 'validation' })
   }
+})
+
+test('workspace runtime inventory preserves incomplete evidence and validates counts, identities and observation times', () => {
+  assert.deepEqual(WorkspaceExecutionInventorySchema.parse({ ready: false, items: {} }), { ready: false, items: {} })
+  assert.equal(WorkspaceExecutionInventorySchema.parse({ ready: true, items: { default: { status: 'unknown', worker_count: 1 } } }).items.default.running_worker_count, undefined)
+  assert.equal(WorkspaceExecutionInventorySchema.safeParse({ ready: true, items: { arbitrary: { status: 'idle' } } }).success, false)
+  assert.equal(WorkspaceExecutionInventorySchema.safeParse({ ready: true, items: { default: { status: 'idle', observed_at: 'not-a-time' } } }).success, false)
 })

@@ -1,3 +1,4 @@
+import { WorkspaceExecutionInventorySchema, WorkspaceIdSchema } from 'crabot-client'
 import { WorkspaceService } from './workspaces.js'
 import { resolveManagedMcpConfig } from './managed-mcp-runtime.js'
 import { adminWebTransport } from './admin-web-transport.js'
@@ -794,7 +795,8 @@ export class AdminModule extends ModuleBase {
     super(moduleConfig)
     this.adminConfig = { ...DEFAULT_ADMIN_CONFIG, ...adminConfig }
     this.workspaceService = new WorkspaceService({ dataRoot: path.resolve(this.adminConfig.data_dir, '..'),
-      storageRoot: process.env.WORKER_WORKSPACES_DIR || undefined })
+      storageRoot: process.env.WORKER_WORKSPACES_DIR || undefined,
+      execution: async () => WorkspaceExecutionInventorySchema.parse(await this.callAgentRpc('get_workspace_execution_admin', {})) })
     this.configMutationCoordinator = new CoreAgentConfigMutationCoordinator(this.adminConfig.data_dir, {
       readSemanticSnapshot: () => this.readCoreAgentSemanticSnapshot(),
       // Initial/upgrade seeding may commit multiple serialized source changes before Admin has
@@ -11422,6 +11424,8 @@ export class AdminModule extends ModuleBase {
     // 单个即单值（沿用 parseAccessibleScopes 的 getAll 惯例，不另发明逗号分隔语法）。
     const statuses = url.searchParams.getAll('status').filter(Boolean)
     const managerKey = url.searchParams.get('manager_key') || undefined
+    const workspaceId = url.searchParams.get('workspace_id') || undefined
+    if (workspaceId && !WorkspaceIdSchema.safeParse(workspaceId).success) { sendJson(res, 400, { error: 'Invalid workspace_id' }); return }
     const impl = url.searchParams.get('impl') || undefined
     const q = url.searchParams.get('q')?.trim() || undefined
     const includeTerminal = url.searchParams.get('include_terminal') === 'true'
@@ -11436,6 +11440,7 @@ export class AdminModule extends ModuleBase {
         status?: string | string[]
         impl?: string
         manager_key?: string
+        workspace_id?: string
         q?: string
         include_terminal?: boolean
         include_legacy?: boolean
@@ -11447,6 +11452,7 @@ export class AdminModule extends ModuleBase {
       ...(statuses.length === 1 ? { status: statuses[0] } : {}),
       ...(statuses.length > 1 ? { status: statuses } : {}),
       ...(managerKey ? { manager_key: managerKey } : {}),
+      ...(workspaceId ? { workspace_id: workspaceId } : {}),
       ...(impl ? { impl } : {}),
       ...(q ? { q } : {}),
       ...(includeTerminal ? { include_terminal: true } : {}),

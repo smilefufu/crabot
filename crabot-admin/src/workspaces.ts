@@ -2,7 +2,7 @@ import fs from 'node:fs/promises'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { WorkspaceCatalog, WorkspaceError } from 'crabot-shared/dist/workspace-catalog.js'
 import { scanWorkspaceUsage } from 'crabot-shared/dist/workspace-usage.js'
-import type { WorkspaceCreateRequest, WorkspaceExecution, WorkspaceRecord, WorkspaceScanResult, WorkspaceSummary,
+import type { WorkspaceCreateRequest, WorkspaceExecution, WorkspaceExecutionInventory, WorkspaceRecord, WorkspaceScanResult, WorkspaceSummary,
   WorkspaceUpdateRequest, WorkspaceUsage } from 'crabot-shared'
 import { WorkspaceCreateRequestSchema, WorkspaceIdSchema, WorkspaceUpdateRequestSchema, z } from 'crabot-client'
 
@@ -15,14 +15,14 @@ interface Observation { root: string; usage: WorkspaceUsage }
 export class WorkspaceService {
   private readonly catalog: WorkspaceCatalog
   private readonly scan: Scan
-  private readonly execution?: (workspace: WorkspaceRecord) => Promise<WorkspaceExecution>
+  private readonly execution?: () => Promise<WorkspaceExecutionInventory>
   private readonly observations = new Map<string, Observation>()
   private readonly jobs = new Map<string, ScanJob>()
   private draining?: Promise<void>
   private closed = false
 
   constructor(options: { dataRoot: string; storageRoot?: string; scan?: Scan;
-    execution?: (workspace: WorkspaceRecord) => Promise<WorkspaceExecution> }) {
+    execution?: () => Promise<WorkspaceExecutionInventory> }) {
     this.catalog = new WorkspaceCatalog({ ...options, files: require('../../scripts/lib/process-identity.cjs') })
     this.scan = options.scan ?? scanWorkspaceUsage
     this.execution = options.execution
@@ -39,13 +39,14 @@ export class WorkspaceService {
   update(id: string, input: WorkspaceUpdateRequest) { return this.catalog.update(id, input) }
   async list() {
     const snapshot = await this.snapshot(), items: WorkspaceSummary[] = []
-    for (const record of snapshot.workspaces) items.push(await this.summary(record))
+    const execution = await this.executionSnapshot()
+    for (const record of snapshot.workspaces) items.push(await this.summary(record, execution))
     return { revision: snapshot.revision, storage_root: snapshot.storage_root, items }
   }
   async get(id: string) {
     const snapshot = await this.snapshot(), record = snapshot.workspaces.find(item => item.workspace_id === id)
     if (!record) throw new WorkspaceError('WORKSPACE_NOT_FOUND', '工作区不存在。')
-    return { revision: snapshot.revision, item: await this.summary(record) }
+    return { revision: snapshot.revision, item: await this.summary(record, await this.executionSnapshot()) }
   }
   async usage(id: string): Promise<WorkspaceScanResult> {
     const record = await this.catalog.get(id)
@@ -71,14 +72,18 @@ export class WorkspaceService {
     const previous = this.observations.get(record.workspace_id)
     return previous && previous.root === record.root ? { ...previous.usage } : pending()
   }
-  private async summary(workspace: WorkspaceRecord): Promise<WorkspaceSummary> {
+  private async executionSnapshot(): Promise<WorkspaceExecutionInventory> {
+    try { if (this.execution) return await this.execution() } catch { /* Runtime is unavailable; registration and usage stay readable. */ }
+    return { ready: false, items: {} }
+  }
+  private async summary(workspace: WorkspaceRecord, inventory: WorkspaceExecutionInventory): Promise<WorkspaceSummary> {
     let directory_status: WorkspaceSummary['directory_status'] = 'ready'
     try {
       const stat = await fs.lstat(workspace.root)
       if (!stat.isDirectory() || stat.isSymbolicLink() || await fs.realpath(workspace.root) !== workspace.root) directory_status = 'unavailable'
     } catch (error) { directory_status = (error as NodeJS.ErrnoException).code === 'ENOENT' ? 'missing' : 'unavailable' }
     let execution: WorkspaceExecution = { status: 'unknown' }
-    try { if (this.execution) execution = await this.execution(workspace) } catch { /* Keep unavailable runtime evidence explicit. */ }
+    if (inventory.ready) execution = inventory.items[workspace.workspace_id] ?? { status: 'idle', observed_at: new Date().toISOString(), worker_count: 0, running_worker_count: 0 }
     return { workspace, directory_status, usage: this.observed(workspace), execution }
   }
   private startDrain(): void {

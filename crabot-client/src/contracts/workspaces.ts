@@ -16,8 +16,9 @@ export const WorkspaceUsageSchema = z.object({
   file_count: Count, skipped_entries: Count,
 })
 export const WorkspaceExecutionSchema = z.object({
-  status: z.enum(['running', 'idle', 'unknown']), worker_count: Count.optional(), running_worker_count: Count.optional(),
+  status: z.enum(['running', 'idle', 'unknown']), observed_at: z.iso.datetime().optional(), worker_count: Count.optional(), running_worker_count: Count.optional(),
 })
+export const WorkspaceExecutionInventorySchema = z.object({ ready: z.boolean(), items: z.record(WorkspaceIdSchema, WorkspaceExecutionSchema) })
 export const WorkspaceSummarySchema = z.object({
   workspace: WorkspaceRecordSchema, directory_status: z.enum(['ready', 'missing', 'unavailable']),
   usage: WorkspaceUsageSchema, execution: WorkspaceExecutionSchema,
@@ -42,3 +43,5 @@ export type WorkspaceUpdateRequest = z.infer<typeof WorkspaceUpdateRequestSchema
 export type WorkspaceRecordResult = z.infer<typeof WorkspaceRecordResultSchema>
 export type WorkspaceGetResult = z.infer<typeof WorkspaceGetResultSchema>
 export type WorkspaceScanResult = z.infer<typeof WorkspaceScanResultSchema>
+
+export type WorkspaceExecutionInventory = z.infer<typeof WorkspaceExecutionInventorySchema>

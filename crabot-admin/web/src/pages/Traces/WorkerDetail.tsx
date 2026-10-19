@@ -809,7 +809,9 @@ const WorkerDetailContent: React.FC = () => {
         <summary style={{ cursor: 'pointer' }}>运行上下文</summary>
         <div style={{ display: 'grid', gap: 4, marginTop: 10 }}>
           <div>所属会话：<Link to={`/traces/managers/${encodeURIComponent(worker.manager_key)}`}>{managerDisplayName === undefined ? '正在读取名称…' : managerDisplayName ?? '名称暂不可用'}</Link></div>
-          {mainline?.workspace && <div>工作区：<span style={{ fontFamily: 'var(--font-mono)' }}>{mainline.workspace}</span></div>}
+          {mainline?.workspace && <div>工作区：{worker.workspace_id
+            ? <Link to={`/workspaces?workspace_id=${encodeURIComponent(worker.workspace_id)}`}>{mainline.workspace}</Link>
+            : <span style={{ fontFamily: 'var(--font-mono)' }}>{mainline.workspace}（历史记录未关联项目）</span>}</div>}
           <div>来源：{ORIGIN_LABEL[worker.origin.trigger_type]}{worker.origin.spawned_by_episode ? ` · 执行轮次 ${worker.origin.spawned_by_episode.slice(0, 8)}` : ''}</div>
         </div>
       </details>
