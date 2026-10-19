@@ -13,11 +13,12 @@ export class DesktopController {
   private polling?: ReturnType<typeof setInterval>
   private checking = false
   private retries = 0
-  constructor(private readonly options: { coreRoot: string; dataRoot: string; appVersion: string; platform: 'darwin' | 'win32' | 'linux'; packaged?: boolean }) {
+  constructor(private readonly options: { coreRoot: string; dataRoot: string; appVersion: string; platform: 'darwin' | 'win32' | 'linux'; packaged?: boolean; verifyBinding?: () => void }) {
     this.host = new SessionHost(options)
   }
   private load(file: string): Promise<any> { return import(pathToFileURL(path.join(this.options.coreRoot, file)).href) }
   private async verifyInstallation() {
+    this.options.verifyBinding?.()
     if (this.options.packaged || existsSync(path.join(this.options.coreRoot, 'core-release.json'))) {
       this.host.status('discovering', '正在校验内置组件和应用版本。')
       const { verifyCoreRelease } = await this.load('scripts/lib/core-release.mjs')

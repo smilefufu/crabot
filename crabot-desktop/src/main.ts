@@ -1,8 +1,9 @@
 import { revealWorkspaceFolder } from './workspace-folder.js'
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, protocol, session, shell, Tray } from 'electron'
 import path from 'node:path'
+import { createRequire } from 'node:module'
 import { homedir } from 'node:os'
-import { access, readFile, writeFile, rename, rm } from 'node:fs/promises'
+import { access, mkdir, readFile, writeFile, rename, rm } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import type { DesktopDiagnostics } from 'crabot-client'
 import { pathToFileURL, fileURLToPath } from 'node:url'
@@ -22,7 +23,7 @@ app.setName('Crabot')
 if (process.platform === 'linux') app.setDesktopName('crabot.desktop')
 protocol.registerSchemesAsPrivileged([{ scheme: 'app', privileges: { standard: true, secure: true, supportFetchAPI: true } }])
 const directory = path.dirname(fileURLToPath(import.meta.url))
-const coreRoot = app.isPackaged ? path.join(process.resourcesPath, 'core') : path.resolve(app.getAppPath(), '..')
+let coreRoot = app.isPackaged ? path.join(process.resourcesPath, 'core') : path.resolve(app.getAppPath(), '..')
 const loadCore = (file: string) => import(pathToFileURL(path.join(coreRoot, file)).href)
 let window: BrowserWindow | undefined, tray: Tray | undefined, controller: DesktopController | undefined
 let dataRoot = path.join(homedir(), '.crabot/data'), initialError: unknown, quitting = false
@@ -31,6 +32,7 @@ let artifacts: ArtifactWindows | undefined
 let updates: UpdateDialog | undefined
 let updateRequested = process.argv.includes('--check-updates')
 let installingCli = false
+let verifyBinding: (() => void) | undefined
 
 async function quit(): Promise<boolean> {
   if (pendingQuit) return pendingQuit
@@ -53,11 +55,21 @@ function show() { window?.show(); window?.focus() }
 
 async function boot() {
   try {
+    const verifier = app.isPackaged ? createRequire(import.meta.url)('./bootstrap/scripts/lib/desktop-installation.cjs') : null
+    const installation = verifier?.locateDesktopGui(process.resourcesPath)
+    if (installation) {
+      verifyBinding = () => { verifier.locateDesktopGui(process.resourcesPath) }
+      coreRoot = installation.coreRoot
+      verifier.applyDesktopEnvironment(installation)
+    }
     const { resolveCliDataDir } = await loadCore('scripts/lib/instance.mjs')
     dataRoot = path.resolve(resolveCliDataDir({ homeDir: path.join(homedir(), '.crabot') }))
     const management = (await loadCore('scripts/lib/desktop-management.cjs')).default
     dataRoot = management.ensurePrivateDataRoot(dataRoot)
     app.setPath('userData', path.join(dataRoot, 'desktop-profile'))
+    app.setPath('sessionData', path.join(dataRoot, 'desktop-profile'))
+    await mkdir(path.join(dataRoot, 'desktop-profile/tmp'), { recursive: true, mode: 0o700 })
+    app.setPath('temp', path.join(dataRoot, 'desktop-profile/tmp'))
   } catch (error) { initialError = error }
   if (!app.requestSingleInstanceLock()) { quitting = true; app.quit(); return }
   app.on('second-instance', (_event, args) => {
@@ -71,7 +83,7 @@ async function boot() {
   let startupState: StartupState = await startup.get().catch(() => ({ supported: app.isPackaged, enabled: false, approvalRequired: false }))
   const background = process.argv.includes('--background') || startup.launchedAtLogin()
   await access(path.join(coreRoot, 'crabot-admin/dist/web/desktop.html'))
-  controller = new DesktopController({ coreRoot, dataRoot, appVersion: app.getVersion(), platform: process.platform as 'darwin' | 'win32' | 'linux', packaged: app.isPackaged })
+  controller = new DesktopController({ coreRoot, dataRoot, appVersion: app.getVersion(), platform: process.platform as 'darwin' | 'win32' | 'linux', packaged: app.isPackaged, verifyBinding })
   let driver = null, configurationError = false
   try { driver = await createUpdateDriver({ resources: process.resourcesPath, cacheRoot: path.join(dataRoot, 'runtime-cache'), packaged: app.isPackaged,
     beginExit: () => { quitting = true; return () => { quitting = false } } }) }

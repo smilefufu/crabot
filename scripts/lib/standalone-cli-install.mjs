@@ -70,7 +70,7 @@ async function checkData(dataDir, installRoot, selected) {
 export async function installStandaloneCli({ sourceRoot, installRoot, dataDir, scope = 'user', version }) {
   installRoot = path.resolve(installRoot)
   if (scope === 'user' && detectMode() === 'system') fail('此机器使用 system 安装，请通过现有命令或联系系统管理员管理。')
-  for (const file of ['cli.mjs', '.git', 'core-release.json']) if (await present(path.join(installRoot, file))) fail('发现已有代码安装，请使用已有升级或显式接管流程，未覆盖原入口。')
+  for (const file of ['cli.mjs', '.git', 'core-release.json', 'desktop-installation.json', 'current-release.json']) if (await present(path.join(installRoot, file))) fail('发现已有代码安装，请使用已有升级或显式接管流程，未覆盖原入口。')
   let selected = null
   if (await present(path.join(installRoot, 'cli-installation.json'))) selected = readCliSelection(installRoot)
   if (selected) {

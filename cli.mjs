@@ -28,7 +28,13 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 // A retained immutable version is not an alternate writable instance entry.
 const { default: cliLocation } = await import(new URL('./scripts/lib/cli-location.cjs', import.meta.url))
 let cliInstallation
-try { cliInstallation = cliLocation.assertSelectedCli(__dirname) }
+try {
+  cliInstallation = cliLocation.assertSelectedCli(__dirname)
+  if (cliInstallation?.scope === 'desktop') {
+    const { default: desktopInstallation } = await import(new URL('./scripts/lib/desktop-installation.cjs', import.meta.url))
+    desktopInstallation.applyDesktopEnvironment(cliInstallation)
+  }
+}
 catch (error) { console.error('[crabot] ' + error.message); process.exit(1) }
 
 // Windows 上 ESM dynamic import 不接受 C:\... 绝对路径，必须转 file:///C:/...

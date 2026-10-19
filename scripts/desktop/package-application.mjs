@@ -62,7 +62,7 @@ const configuration = {
   directories: { app: appDir, output: path.join(projectDir, 'unpacked') },
   electronDist: path.join(path.dirname(require.resolve('electron/package.json')), 'dist'),
   files: ['dist/**/*', 'package.json', '!**/*.map'],
-  asar: true, npmRebuild: false, publish: null,
+  asar: true, asarUnpack: ['dist/bootstrap/**/*.node'], npmRebuild: false, publish: null,
   electronFuses: { runAsNode: false, enableCookieEncryption: true, enableNodeOptionsEnvironmentVariable: false,
     enableNodeCliInspectArguments: false, enableEmbeddedAsarIntegrityValidation: process.platform !== 'linux',
     onlyLoadAppFromAsar: true, grantFileProtocolExtraPrivileges: false },

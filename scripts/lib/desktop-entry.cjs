@@ -7,6 +7,8 @@ function sameFile(a, b) {
 }
 
 function loadDesktopEntry(root) {
+  const desktop = require('./desktop-installation.cjs').locateDesktopCore(root)
+  if (desktop) return { executable: desktop.executable, development: false }
   const marker = join(root, 'desktop-host.json')
   if (existsSync(marker)) {
     const description = JSON.parse(readFileSync(marker, 'utf8'))

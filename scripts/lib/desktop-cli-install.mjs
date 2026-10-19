@@ -5,6 +5,7 @@ import path from 'node:path'
 import { homedir } from 'node:os'
 import { randomUUID } from 'node:crypto'
 import desktop from './desktop-entry.cjs'
+import installation from './desktop-installation.cjs'
 import identity from './process-identity.cjs'
 import management from './desktop-management.cjs'
 import { verifyCoreRelease } from './core-release.mjs'
@@ -16,6 +17,7 @@ import { notifyCliPathChange } from './cli-path-notification.mjs'
 const start = '# >>> Crabot desktop CLI >>>', end = '# <<< Crabot desktop CLI <<<'
 const pathBlock = `${start}\ncase ":$PATH:" in\n  *":$HOME/.local/bin:"*) ;;\n  *) export PATH="$HOME/.local/bin:$PATH" ;;\nesac\n${end}`
 const windowsCommand = '@echo off\r\nsetlocal DisableDelayedExpansion\r\nset "CRABOT_CLI_ROOT=%~dp0.crabot-desktop-core"\r\n"%CRABOT_CLI_ROOT%\\.product-runtime\\node\\node.exe" "%CRABOT_CLI_ROOT%\\cli.mjs" %*\r\nexit /b %errorlevel%\r\n'
+const windowsPairedCommand = '@echo off\r\nsetlocal DisableDelayedExpansion\r\n"%~dp0.crabot-desktop-core\\bin\\crabot.exe" %*\r\nexit /b %errorlevel%\r\n'
 const fail = message => { throw Object.assign(new Error(message), { code: 'CRABOT_CLI_INSTALL_REQUIRED' }) }
 async function stat(file) { try { return await fs.lstat(file) } catch (error) { if (error.code === 'ENOENT') return null; throw error } }
 async function regular(file) {
@@ -90,6 +92,9 @@ export async function installDesktopCli({ coreRoot, dataDir, home = homedir(), e
   if (detectMode() === 'system' || env.CRABOT_DEV === 'true' || Number(env.CRABOT_PORT_OFFSET ?? 0) !== 0) fail('此部署继续使用已有管理命令；请先确认部署来源。')
   if (!desktop.loadDesktopEntry(coreRoot) || !(await stat(path.join(coreRoot, 'desktop-host.json')))?.isFile()) fail('命令安装需要完整的桌面发行。')
   await verifyCoreRelease(coreRoot)
+  const paired = installation.locateDesktopCore(coreRoot)
+  if (paired && paired.dataDir !== await fs.realpath(dataDir)) fail('命令必须使用桌面安装内的同一份数据，未修改已有入口。')
+  const registeredRoot = paired?.root ?? coreRoot
   if (!identity.isOwnedDirectory(home)) fail('无法确认当前用户目录。')
   const windows = process.platform === 'win32'
   const prefix = windows ? path.join(env.LOCALAPPDATA || path.join(home, 'AppData/Local'), 'Crabot/cli') : path.join(home, '.local/bin')
@@ -98,6 +103,7 @@ export async function installDesktopCli({ coreRoot, dataDir, home = homedir(), e
   let shellFiles
   try {
     assertVersionMaintenanceAllowsStart(dataDir)
+    if (paired) installation.locateDesktopCore(coreRoot)
     if (windows) management.ensurePrivateDataRoot(prefix)
     else await ownedDirectory(prefix)
     const previous = await regular(metadata)
@@ -105,15 +111,16 @@ export async function installDesktopCli({ coreRoot, dataDir, home = homedir(), e
     if (previous) {
       try {
         const value = JSON.parse(previous.text)
-        if (value.schema_version !== 1 || typeof value.core_root !== 'string' || !path.isAbsolute(value.core_root)) throw new Error()
-        previousRoot = value.core_root
+        if (![1, 2].includes(value.schema_version) || typeof (value.install_root ?? value.core_root) !== 'string' || !path.isAbsolute(value.install_root ?? value.core_root)) throw new Error()
+        if (value.schema_version === 2 && (!value.install_root || value.core_root) || value.schema_version === 1 && (!value.core_root || value.install_root)) throw new Error()
+        previousRoot = value.install_root ?? value.core_root
       } catch { fail('命令注册记录无法核对，请保留现有入口并检查安装。') }
     }
     const priorPath = windows ? identity.readUserPath() : null
     const search = [...(env.PATH || env.Path || '').split(path.delimiter), ...(windows ? (priorPath || '').split(';') : [])]
     const directories = search.filter(Boolean).map(value => windows ? value.replace(/^"|"$/g, '').replace(/%([^%]+)%/g,
       (all, key) => Object.entries(env).find(([name]) => name.toLowerCase() === key.toLowerCase())?.[1] ?? all) : value)
-    const allowed = [await fs.realpath(prefix), await fs.realpath(path.join(coreRoot, 'bin'))]
+    const allowed = [await fs.realpath(prefix), await fs.realpath(path.join(registeredRoot, 'bin'))]
     for (const directory of new Set(directories)) {
       if (allowed.includes(await fs.realpath(directory).catch(() => path.resolve(directory)))) continue
       for (const name of windows ? ['crabot.exe', 'crabot.cmd', 'crabot.bat'] : ['crabot']) {
@@ -122,14 +129,14 @@ export async function installDesktopCli({ coreRoot, dataDir, home = homedir(), e
     }
     const changes = windows ? [] : await shellChanges(home, env)
     if (windows) {
-      const command = await regular(entry)
-      if (command && command.text !== windowsCommand) fail('发现已有自定义命令入口，请先完成旧安装接管。')
-      await link(path.join(prefix, '.crabot-desktop-core'), coreRoot, previousRoot, true)
-      if (!command) await publish(entry, windowsCommand, null)
+      const command = await regular(entry), text = paired ? windowsPairedCommand : windowsCommand
+      if (command && command.text !== windowsCommand && command.text !== windowsPairedCommand) fail('发现已有自定义命令入口，请先完成旧安装接管。')
+      await link(path.join(prefix, '.crabot-desktop-core'), registeredRoot, previousRoot, true)
+      if (command?.text !== text) await publish(entry, text, command)
       identity.appendUserPathDirectory(prefix, priorPath)
-    } else await link(entry, path.join(coreRoot, 'bin/crabot'), previousRoot && path.join(previousRoot, 'bin/crabot'))
+    } else await link(entry, path.join(registeredRoot, 'bin/crabot'), previousRoot && path.join(previousRoot, 'bin/crabot'))
     for (const change of changes) await publish(change.file, change.text, change.previous)
-    await publish(metadata, JSON.stringify({ schema_version: 1, core_root: coreRoot }) + '\n', previous)
+    await publish(metadata, JSON.stringify(paired ? { schema_version: 2, install_root: registeredRoot } : { schema_version: 1, core_root: coreRoot }) + '\n', previous)
     shellFiles = changes.map(change => change.file)
   } finally { releaseCliLock(lock) }
   // OS notification can wait on unrelated windows; registration is complete and

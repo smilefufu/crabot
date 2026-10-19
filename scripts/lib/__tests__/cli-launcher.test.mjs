@@ -55,3 +55,25 @@ test('POSIX exec preserves the command PID and forwards foreground signals direc
   const result = once(child, 'exit'); child.kill('SIGTERM')
   assert.deepEqual(await result, [23, null])
 })
+
+test('desktop native command reads the GUI/Core pair with no second selector or system Node fallback', async t => {
+  const f = await fixture(t), root = path.join(f.directory, '桌面整体 安装'), id = 'c'.repeat(64)
+  await fs.mkdir(path.join(root, 'bin'), { recursive: true }); await fs.mkdir(path.join(root, 'releases'))
+  const command = path.join(root, 'bin', name), payload = path.join(root, 'releases', id)
+  await fs.copyFile(f.executable, command); if (!windows) await fs.chmod(command, 0o755)
+  await fs.rename(f.root, payload)
+  await fs.writeFile(path.join(root, 'desktop-installation.json'), '{}')
+  const selected = { schema_version: 1, version: '1.2.3', gui_id: '12345678-1234-1234-1234-123456789abc', core_id: id }
+  const file = path.join(root, 'current-release.json'), text = JSON.stringify(selected) + '\n'
+  await fs.writeFile(file, text)
+  const { stdout } = await promisify(execFile)(command, ['status'], { env: { ...process.env, PATH: '' } })
+  assert.equal(JSON.parse(stdout).exe, path.join(payload, path.relative(f.root, f.node)))
+  for (const broken of [JSON.stringify({ ...selected, core_id: '../escape' }) + '\n', text.replace('"core_id"', '"extra":0,"core_id"'), text + text, '{}\n']) {
+    await fs.writeFile(file, broken)
+    await assert.rejects(promisify(execFile)(command, []), { code: 127 })
+  }
+  await fs.writeFile(file, text); await fs.writeFile(path.join(root, 'current-core'), id + '\n')
+  await assert.rejects(promisify(execFile)(command, []), { code: 127 })
+  await fs.rm(path.join(root, 'current-core')); await fs.rm(file)
+  await assert.rejects(promisify(execFile)(command, []), { code: 127 })
+})

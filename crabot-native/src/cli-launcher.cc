@@ -8,6 +8,7 @@
 #include <vector>
 #include <stdexcept>
 #include <cstdlib>
+#include <regex>
 #ifdef _WIN32
 #include <windows.h>
 #else
@@ -37,7 +38,19 @@ static fs::path Executable() {
 static fs::path Payload() {
   auto root = Executable().parent_path().parent_path();
   auto selector = root / "current-core";
-  if (fs::exists(selector)) {
+  auto desktop = root / "desktop-installation.json", pair = root / "current-release.json";
+  if (fs::exists(fs::symlink_status(desktop)) || fs::exists(fs::symlink_status(pair))) {
+    if (!fs::is_regular_file(fs::symlink_status(desktop)) || fs::exists(fs::symlink_status(selector))
+        || !fs::is_regular_file(fs::symlink_status(pair)) || fs::file_size(pair) > 1024) throw std::runtime_error("Invalid Crabot desktop selection");
+    std::ifstream input(pair, std::ios::binary);
+    std::string text((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+    // The atomic writer and JS reader share this fixed ASCII serialization.
+    // This bounded record is not a general JSON/configuration parser.
+    static const std::regex format(R"pair(\{"schema_version":1,"version":"[0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9_.-]+)?","gui_id":"[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}","core_id":"([a-f0-9]{64})"\}\n)pair");
+    std::smatch matched;
+    if (!std::regex_match(text, matched, format)) throw std::runtime_error("Invalid Crabot desktop version pair");
+    root /= fs::path("releases") / matched[1].str();
+  } else if (fs::exists(selector)) {
     if (!fs::is_regular_file(fs::symlink_status(selector)) || fs::file_size(selector) > 66) throw std::runtime_error("Invalid Crabot version selector");
     std::ifstream input(selector); std::string id;
     std::getline(input, id);

@@ -40,7 +40,12 @@ function readCliSelection(root) {
 function locateCliInstallation(coreRoot) {
   coreRoot = realpathSync(coreRoot)
   const releases = path.dirname(coreRoot), root = path.dirname(releases)
-  if (path.basename(releases) !== 'releases' || !existsSync(path.join(root, 'cli-installation.json'))) return null
+  if (path.basename(releases) !== 'releases') return null
+  if (existsSync(path.join(root, 'desktop-installation.json')) || existsSync(path.join(root, 'current-release.json')) || existsSync(path.join(coreRoot, 'desktop-host.json'))) {
+    const desktop = require('./desktop-installation.cjs').locateDesktopCore(coreRoot)
+    if (desktop) return { ...desktop, id: desktop.selection.core_id, scope: 'desktop', selected: true }
+  }
+  if (!existsSync(path.join(root, 'cli-installation.json'))) return null
   try {
     const record = readCliMetadata(root), id = path.basename(coreRoot), release = json(path.join(coreRoot, 'core-release.json'))
     if (!identifier(id) || release.inventory_sha256 !== id) throw new Error()
