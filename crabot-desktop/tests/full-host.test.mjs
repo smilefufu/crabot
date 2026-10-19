@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn, execFile } from 'node:child_process'
 import { createRequire } from 'node:module'
-import { mkdtemp, rm, readFile, writeFile, mkdir } from 'node:fs/promises'
+import { mkdtemp, rm, readFile, writeFile, mkdir, realpath } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -131,7 +131,7 @@ test('actual Electron host shares its real core with CLI and distinguishes hide,
     const workspace = await gui.next('workspace')
     assert.equal(workspace.project_count, 1); assert.equal(workspace.default_count, 1)
     assert.equal(workspace.workspace.source, 'managed')
-    const relativeWorkspace = path.relative(data, workspace.workspace.root)
+    const relativeWorkspace = path.relative(await realpath(data), await realpath(workspace.workspace.root))
     assert.ok(relativeWorkspace && !relativeWorkspace.startsWith('..') && !path.isAbsolute(relativeWorkspace))
     await writeFile(path.join(workspace.workspace.root, '.ci-workspace-artifact'), Buffer.alloc(123))
     gui.send('workspace:usage')
