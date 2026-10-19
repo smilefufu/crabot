@@ -278,7 +278,7 @@ async function makeHarness(
   fakeOpts: FakeAdapterOpts = {},
   depsOverrides: Partial<Pick<
     HarnessDeps,
-    'isExecutionReady' | 'hasRunningBg' | 'listWorkerBackground' | 'readReviewBackgrounds' | 'hasPendingWorkerNotification' | 'capabilityBundle' | 'onEvent' | 'onOperationNotification' | 'onNativeActivityCollected' | 'admitWorkerConnection' | 'redactFailureReason' | 'mintActivityCursor'
+    'isExecutionReady' | 'isWorkspaceRelocationReady' | 'hasRunningBg' | 'listWorkerBackground' | 'readReviewBackgrounds' | 'hasPendingWorkerNotification' | 'capabilityBundle' | 'onEvent' | 'onOperationNotification' | 'onNativeActivityCollected' | 'admitWorkerConnection' | 'redactFailureReason' | 'mintActivityCursor'
   >> = {},
 ): Promise<{
   harness: WorkerHarness
@@ -5400,6 +5400,7 @@ describe('workspace relocation input quiescence', () => {
     await expect(harness.respondToWorkerUi(worker.worker_id, snapshot, 'confirm')).rejects.toMatchObject({ code: 'WORKSPACE_MAINTENANCE' })
     expect(fake.uiResponses).toHaveLength(1)
     expect((await ledger.findWorker(worker.worker_id))!.worker.task.status).not.toBe('closed')
+    await (harness as any).deliverControlOperationNotifications(worker.worker_id)
   })
 
   it('does not mistake a synchronous timeout reply for native input settlement', async () => {
@@ -5419,6 +5420,8 @@ describe('workspace relocation input quiescence', () => {
       expect(finishedEarly).toBe(false)
       expect(input).toHaveBeenCalledTimes(1)
       expect(fake.killCalls).toHaveLength(0)
+      vi.useRealTimers()
+      await waitUntil(async () => (await harness.readWorkerEvents(worker.worker_id)).some(event => event.kind === 'input_delivery_failed'))
     } finally { release.resolve(); vi.useRealTimers() }
   })
 
@@ -5428,5 +5431,35 @@ describe('workspace relocation input quiescence', () => {
     await harness.killWorker(worker.worker_id)
     expect(fake.killCalls).toHaveLength(1)
     expect((await ledger.findWorker(worker.worker_id))!.worker.task.closed?.by).toBe('manager_stop')
+    await (harness as any).deliverControlOperationNotifications(worker.worker_id)
+  })
+})
+
+
+describe('workspace relocation scope capture', () => {
+  it('fixes the full identity set only after admitted spawn commits, without stop or closure', async () => {
+    const { harness, fake, ledger } = await makeHarness({}, { isWorkspaceRelocationReady: () => true })
+    const entered = deferred(), release = deferred(), spawn = fake.spawn.bind(fake)
+    vi.spyOn(fake, 'spawn').mockImplementation(async spec => { entered.resolve(); await release.promise; return spawn(spec) })
+    const pending = harness.spawnWorker(spawnParams()); await entered.promise
+    let captured = false
+    const capture = harness.captureWorkspaceRelocationScope().then(scope => { captured = true; return scope })
+    await Promise.resolve(); await Promise.resolve(); const finishedEarly = captured
+    release.resolve(); const worker = await pending, scope = await capture
+    expect(finishedEarly).toBe(false)
+    expect(scope).toHaveLength(1)
+    expect(scope[0]).toMatchObject({ worker_id: worker.worker_id, manager_key: worker.manager_key,
+      incarnations: [{ incarnation_id: worker.incarnations[0].incarnation_id, workspace: worker.incarnations[0].workspace }] })
+    expect((await ledger.findWorker(worker.worker_id))!.worker.task.status).toBe('running')
+    expect(fake.killCalls).toHaveLength(0)
+  })
+
+  it('refuses capture before startup reconciliation or when readiness changes during the read', async () => {
+    const early = await makeHarness({}, { isWorkspaceRelocationReady: () => false })
+    await expect(early.harness.captureWorkspaceRelocationScope()).rejects.toMatchObject({ code: 'WORKSPACE_MAINTENANCE' })
+    let checks = 0
+    const changed = await makeHarness({}, { isWorkspaceRelocationReady: () => ++checks === 1 })
+    await expect(changed.harness.captureWorkspaceRelocationScope()).rejects.toMatchObject({ code: 'WORKSPACE_MAINTENANCE' })
+    expect(changed.fake.killCalls).toHaveLength(0)
   })
 })

@@ -27,10 +27,10 @@
 
 ### 桌面化方案：独立 worktree 开发中，尚未进入 PR
 
-- workspace：执行保护、私有持久意图、CLI互斥/只读管理恢复、Worker/日程接纳收口已有组件。Shared208通过/2条件跳过，CLI/版本89、system43、桌面43通过/4平台跳过；Agent原生任务/脚本及实际栈/RPC/Worker相关347通过，覆盖输入/分支/UI在途提交与旧队列收口。完整停止证明、不可逆关闭、文件切换、Admin独立协调和中断恢复仍待，详见[项目workspace计划](crabot-docs/superpowers/plans/2026-10-19-project-workspaces-implementation.md)。
+- workspace：执行保护、私有持久意图、CLI互斥/只读管理恢复、Worker/日程接纳收口已有组件。Shared208通过/2条件跳过，CLI/版本89、system43、桌面43通过/4平台跳过；Agent原生任务/脚本及实际栈/RPC/Worker相关370通过，覆盖输入/分支/UI在途提交、旧队列收口及完整固定身份集合捕获/比对。集合持久提交、完整停止证明、不可逆关闭、文件切换、Admin独立协调和中断恢复仍待，详见[项目workspace计划](crabot-docs/superpowers/plans/2026-10-19-project-workspaces-implementation.md)。
 
 - 边界：按[桌面Spec](crabot-docs/superpowers/specs/2026-10-17-desktop-application-design.md)、[安装根计划](crabot-docs/superpowers/plans/2026-10-19-desktop-install-root-implementation.md)在feat/desktop-application推进；完整测好前不推产品main/不提前PR，不部署或重启现场，不在本机启动第二业务MM（完整实例仅隔离CI）。Electron+React、业务HTTP/WS、最小IPC、GUI免额外密码、关闭窗口后台/退出停共享实例。整体安装根在安装时选，之后可迁workspace；不新增DATA_DIR选择步骤。
-- 原生验收修复：c42的ARM/Linux通过；Windows NSIS引号修复已提交，Intel桌面重启超时仍待完整复验。CI另证实端口JSON并发覆盖损坏，现按序原子替换并在MM停机时收口；真实文件/端口/生命周期64项及Core类型检查通过，不将其当作超时根因已完全解决。
+- 原生验收修复：c42的ARM/Linux通过；Windows NSIS引号修复已提交，新一轮更早的迁移符号链接错误码回归已修（本机20通过）；Intel桌面重启超时仍待完整复验。CI另证实端口JSON并发覆盖损坏，现按序原子替换并在MM停机时收口；真实文件/端口/生命周期64项及Core类型检查通过，不将其当作超时根因已完全解决。
 - P0–P5：统一内置环境/隔离可写依赖、共享GUI/CLI、OS peer、SDK、首次模型/权限/诊断已有组件与部分四平台证据。稳定MCP id的五类真实隔离stdio连接通过。模型按Admin引用实时解析、Agent直连；mirror-xinshu仅两次短直连通过，真实Provider完整GUI尚未验收。隔离CI已有实际GUI配置→对话→持久ack/交付，模型为loopback替身，不能混称真实账号验收。
 - I1/I2：严格整体根身份、稳定原生命令、唯一GUI/Core版本对、离线准备/安装向导和受控OS入口已接。517bcb01实际安装宿主ASAR在仓库外验证backend、完整载荷、沙箱preload/fuse通过，无业务MM/实际系统注册；不计完整安装验收。旧CLI接管、正式通道、保留式卸载及Ubuntu默认沙箱授权仍未收口。
 - I3：独立CLI/system首启及管理员范围恢复改用schema3/唯一共同材料，旧schema1/2恢复保留。真实Node迁移不访问无关200GiB历史；完整Core归档与实际crabot upgrade回环/SHA/解包/选择、Python/workspace保留已验，无本地MM。System共享请求用原Admin输入先封装，再执行独立模块；Root只持id/hash等运维摘要，未知结果不重放。取消只归档未用材料，旧宽备份继续原核验。

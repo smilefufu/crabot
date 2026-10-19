@@ -987,6 +987,12 @@ export class UnifiedAgent extends ModuleBase {
     await Promise.all([this.executionAdmissions.closeAndDrain(), this.requireManagerStack().harness.quiesceExecutionAdmissions()])
   }
 
+  /** Internal only; the fixed job still owns authorization, persistence and stop proof. */
+  async captureWorkspaceRelocationScope() {
+    await this.quiesceExecutionAdmissions()
+    return this.requireManagerStack().harness.captureWorkspaceRelocationScope()
+  }
+
   /** Central admission for every new runtime-config-dependent execution. */
   private assertRuntimeExecutionAdmission(): void {
     if (this.runtimeClosing) throw new Error('AGENT_SHUTTING_DOWN')

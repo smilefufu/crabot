@@ -1,3 +1,4 @@
+import { captureWorkspaceRelocationWorkers, type WorkspaceRelocationWorker } from './workspace-relocation-scope.js'
 import { ExecutionAdmissions } from '../../core/execution-admissions.js'
 import { projectWorkspaceExecution } from './workspace-execution.js'
 import { executionAdmission } from '../execution-policy.js'
@@ -781,6 +782,8 @@ export interface HarnessDeps {
   readonly hasRunningBg?: (workerId: string, scope?: 'all') => Promise<boolean>
   /** Read-only execution projection waits for startup carrier and background reconciliation. */
   readonly isExecutionReady?: () => boolean
+  /** Startup reconciliation only; an active maintenance fence does not undo it. */
+  readonly isWorkspaceRelocationReady?: () => boolean
   readonly listWorkerBackground?: (workerId: string) => Promise<Array<{
     entity_id: string
     type?: 'shell' | 'agent'
@@ -1127,6 +1130,20 @@ export class WorkerHarness {
 
   // Called only by the verified relocation coordinator, before fixing its stop set.
   async quiesceExecutionAdmissions(): Promise<void> { await this.executionAdmissions.closeAndDrain() }
+
+  /** Internal capture only. The coordinator must durably fix this set before sending stops. */
+  async captureWorkspaceRelocationScope(): Promise<ReadonlyArray<WorkspaceRelocationWorker>> {
+    const assertReady = () => {
+      if (this.deps.isWorkspaceRelocationReady?.() !== true) {
+        throw Object.assign(new Error('执行器启动对账尚未完成，不能固定迁移范围。'), { code: 'WORKSPACE_MAINTENANCE' })
+      }
+    }
+    assertReady()
+    await this.quiesceExecutionAdmissions()
+    const entries = await this.deps.ledger.listAllWorkers()
+    assertReady()
+    return captureWorkspaceRelocationWorkers(entries)
+  }
 
   private trackExecutionAdmission<T>(action: () => Promise<T>): Promise<T> {
     this.deps.assertMaintenanceAdmission?.()

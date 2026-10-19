@@ -1,3 +1,4 @@
+import { captureWorkspaceRelocationWorkers, type WorkspaceRelocationWorker } from '../src/workers/harness/workspace-relocation-scope.js'
 import { createHash } from 'node:crypto'
 import { ExecutionAdmissions } from '../src/core/execution-admissions.js'
 import { describe, it, expect, vi } from 'vitest'
@@ -10,6 +11,7 @@ import type { ManagerKey, LedgerWorker } from '../src/workers/harness/ledger-typ
 interface AgentUnderTest {
   executionAdmissions: ExecutionAdmissions
   quiesceExecutionAdmissions(): Promise<void>
+  captureWorkspaceRelocationScope(): Promise<ReadonlyArray<WorkspaceRelocationWorker>>
   agentConfig: { model_config: Record<string, { apikey: string; model_id: string }> }
   config: { moduleId: string }
   configAuthenticated: boolean
@@ -72,7 +74,8 @@ function buildAgent(runMaintenance: () => Promise<void>) {
   agent.configAuthenticated = true
   agent.configStale = false
   agent.managerStack = {
-    harness: { quiesceExecutionAdmissions: vi.fn(async () => {}) },
+    harness: { quiesceExecutionAdmissions: vi.fn(async () => {}),
+      captureWorkspaceRelocationScope: vi.fn(async () => captureWorkspaceRelocationWorkers([...workers.values()].map(worker => ({ managerKey: worker.manager_key, worker })))) },
     ledger,
     principals: { managerKeyFor: () => managerKey },
     registry: { authorizeSchedule, admitSchedule },
@@ -329,4 +332,23 @@ describe('workspace relocation Agent admission quiescence', () => {
     expect(start).toHaveBeenCalledWith(params)
     expect(fixture.admitSchedule).not.toHaveBeenCalled()
   })
+})
+
+
+it('captures native task identity only after UnifiedAgent registration drains', async () => {
+  const maintenance = deferred<void>(), admitted = deferred<void>(), release = deferred<void>()
+  const fixture = buildAgent(() => maintenance.promise), original = fixture.ledger.upsertWorker.getMockImplementation()!
+  fixture.ledger.upsertWorker.mockImplementationOnce(async (...args) => { admitted.resolve(); await release.promise; return original(...args) })
+  const params: TriggerScheduleParams = { ...TRIGGER_CONTEXT, schedule_id: 'maintenance-scope', title: '维护', task_type: 'memory_maintenance', is_builtin: true }
+  const creating = fixture.agent.handleTriggerSchedule(params); await admitted.promise
+  let captured = false
+  const capture = fixture.agent.captureWorkspaceRelocationScope().then(scope => { captured = true; return scope })
+  await Promise.resolve(); await Promise.resolve(); const finishedEarly = captured
+  release.resolve(); await creating; const scope = await capture
+  expect(finishedEarly).toBe(false)
+  expect(scope).toHaveLength(1)
+  expect(scope[0]).toMatchObject({ manager_key: fixture.managerKey, incarnations: [] })
+  expect(fixture.workers.get(scope[0].worker_id)?.task.status).toBe('running')
+  maintenance.resolve()
+  await vi.waitFor(() => expect(fixture.workers.get(scope[0].worker_id)?.task.status).toBe('closed'))
 })

@@ -565,6 +565,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     issueAgentCliCredential: deps.issueAgentCliCredential,
     hasRunningBg: deps.hasRunningBg,
     isExecutionReady: () => candidatesReady && !candidatesClosing && !deps.isClosing?.() && !maintenancePending(),
+    isWorkspaceRelocationReady: () => candidatesReady && !candidatesClosing && !deps.isClosing?.(),
     listWorkerBackground: deps.listWorkerBackground,
     hasPendingWorkerNotification: deps.hasPendingWorkerNotification,
     readReviewBackgrounds: deps.readReviewBackgrounds,

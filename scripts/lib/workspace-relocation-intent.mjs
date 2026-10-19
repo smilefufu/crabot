@@ -37,11 +37,12 @@ function read(ctx) {
   if (!privateControl(ctx.control)) return null
   let before
   try { before = fs.lstatSync(ctx.file, { bigint: true }) } catch (error) { if (error.code === 'ENOENT') return null; fail() }
-  const owner = process.platform === 'win32' ? native.isPrivateFile(ctx.file)
-    : before.uid === BigInt(process.getuid()) && (before.mode & 0o777n) === 0o600n
-  if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1n || before.size > 65536n || !owner) fail()
   let fd
   try {
+    if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1n || before.size > 65536n) fail()
+    const owner = process.platform === 'win32' ? native.isPrivateFile(ctx.file)
+      : before.uid === BigInt(process.getuid()) && (before.mode & 0o777n) === 0o600n
+    if (!owner) fail()
     fd = fs.openSync(ctx.file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0))
     const stat = fs.fstatSync(fd, { bigint: true })
     if (stat.dev !== before.dev || stat.ino !== before.ino || stat.size !== before.size) fail()
