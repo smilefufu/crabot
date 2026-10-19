@@ -65,5 +65,8 @@ export async function inspectWorkspaceRelocationTarget(source: string, target: s
     || selected && finalTarget && (selected.dev !== finalTarget.dev || selected.ino !== finalTarget.ino || finalTarget.isSymbolicLink())) throw stale()
   if (finalTarget) await assertEmpty(target)
   if ((await inspectWorkspaceRelocationTree(source, mode, options)).fingerprint !== inspection.fingerprint) throw stale()
-  return { mode, source, target, target_exists: !!selected, available_bytes: space.bsize * space.bavail, usage, inspection }
+  const identity = (directory: string, stat: typeof original) => ({ path: directory, dev: stat.dev.toString(), ino: stat.ino.toString() })
+  return { mode, source, target, target_exists: !!selected, available_bytes: space.bsize * space.bavail, usage, inspection,
+    source_identity: identity(source, finalSource), target_identity: finalTarget ? identity(target, finalTarget) : null,
+    target_ancestor: identity(parent, finalParent) }
 }
