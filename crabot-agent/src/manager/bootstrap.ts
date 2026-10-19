@@ -558,6 +558,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     redactFailureReason: deps.redactFailureReason,
     builtinSpawnDefaults: resolveBuiltinRuntime,
     assertExecutionAdmission: deps.assertExecutionAdmission,
+    assertMaintenanceAdmission: () => assertWorkspaceExecutionAllowed(deps.dataRoot),
     assertExecutionPolicy: deps.assertExecutionPolicy,
     capabilityBundle: deps.capabilityBundle,
     computerUseEnv: deps.computerUseEnv,

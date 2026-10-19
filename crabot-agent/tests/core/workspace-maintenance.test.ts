@@ -26,6 +26,7 @@ describe('workspace maintenance execution admission', () => {
       await fs.writeFile(path.join(data, 'workspace-control/relocation.json'), 'fixed job')
       await expect(agent.handleMessageReceived({ crab_display_name: 'must not cache' })).rejects.toMatchObject({ code: 'WORKSPACE_MAINTENANCE' })
       await expect(agent.handleTriggerSchedule({ schedule_id: 'script' })).rejects.toMatchObject({ code: 'WORKSPACE_MAINTENANCE' })
+      await expect(agent.managerStack.harness.sendToWorker('old', 'new input')).rejects.toMatchObject({ code: 'WORKSPACE_MAINTENANCE' })
       await expect(agent.managerStack.harness.spawnWorker({ managerKey: 'admin-web::admin-chat', title: 'new', prompt: 'new',
         origin: { trigger_type: 'human' }, report_to: { channel_id: 'admin-web', session_id: 'admin-chat' },
       })).rejects.toMatchObject({ code: 'WORKSPACE_MAINTENANCE' })

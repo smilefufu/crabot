@@ -1,3 +1,4 @@
+import { WorkerExecutionAdmissions } from './execution-admissions.js'
 import { projectWorkspaceExecution } from './workspace-execution.js'
 import { executionAdmission } from '../execution-policy.js'
 import { sha256CanonicalJson } from 'crabot-shared'
@@ -743,6 +744,7 @@ export interface HarnessDeps {
   readonly builtinSpawnDefaults?: BuiltinRuntimeFactory
   /** Rejects new spawn/resume/handoff while runtime config is stale; running incarnations remain untouched. */
   readonly assertExecutionAdmission?: () => void
+  readonly assertMaintenanceAdmission?: () => void
   readonly assertExecutionPolicy?: (impl: WorkerImplId, principal?: ResolvedPermissions, newWorker?: boolean) => void
   /**
    * P6-B §6.5：显式/接续目标 impl 的 activation registry gate（唯一 ready 判定点）。
@@ -920,6 +922,7 @@ function continuationDelivery(
 }
 
 export class WorkerHarness {
+  private readonly executionAdmissions = new WorkerExecutionAdmissions()
   private readonly requestSpawnMutexes = new Map<string, AsyncMutex>()
   private readonly pendingBgNotifications = new Map<string, number>()
   private readonly continuationObservations = new Map<string, { key: string; fact: WorkerExecutionFact; runtimeFact: WorkerExecutionFact; stoppedAt?: string; stopUnverified?: boolean }>()
@@ -1122,6 +1125,14 @@ export class WorkerHarness {
     })
   }
 
+  // Called only by the verified relocation coordinator, before fixing its stop set.
+  async quiesceExecutionAdmissions(): Promise<void> { await this.executionAdmissions.closeAndDrain() }
+
+  private trackExecutionAdmission<T>(action: () => Promise<T>): Promise<T> {
+    this.deps.assertMaintenanceAdmission?.()
+    return this.executionAdmissions.run(action)
+  }
+
   async spawnWorker(p: SpawnWorkerParams): Promise<LedgerWorker> {
     if (p.origin.request) throw new Error('REQUEST_SPAWN_REQUIRES_BOUND_ADMISSION')
     return this.spawnWorkerInternal(p, `w-${randomUUID()}`)
@@ -1188,7 +1199,11 @@ export class WorkerHarness {
     }
   }
 
-  private async spawnWorkerInternal(p: SpawnWorkerParams, workerId: string, beforeProvision?: () => Promise<void>, authorizeFile?: (file: string, write: boolean, managed: ManagedWorkspaceScope) => Promise<void>): Promise<LedgerWorker> {
+  private async spawnWorkerInternal(...args: Parameters<WorkerHarness['spawnWorkerAdmitted']>): Promise<LedgerWorker> {
+    return this.trackExecutionAdmission(() => this.spawnWorkerAdmitted(...args))
+  }
+
+  private async spawnWorkerAdmitted(p: SpawnWorkerParams, workerId: string, beforeProvision?: () => Promise<void>, authorizeFile?: (file: string, write: boolean, managed: ManagedWorkspaceScope) => Promise<void>): Promise<LedgerWorker> {
     this.deps.assertExecutionAdmission?.()
     if (!p.principal_permissions) throw Object.assign(new Error('CAPABILITY_UNKNOWN: Worker principal unavailable'), { code: 'CAPABILITY_UNKNOWN' })
     const incarnationId = randomUUID()
@@ -1471,6 +1486,8 @@ export class WorkerHarness {
     text: string,
     opts?: HarnessSendToWorkerOptions,
   ): Promise<SendToWorkerResult | void> {
+    this.deps.assertMaintenanceAdmission?.()
+    this.executionAdmissions.assertOpen()
     const inbox = this.getInbox(workerId)
     let enqueued = true
     let receipt: WorkerInputDeliveryReceipt | undefined
@@ -2266,7 +2283,11 @@ export class WorkerHarness {
     })
   }
 
-  private async continueLegacyWorker(
+  private async continueLegacyWorker(...args: Parameters<WorkerHarness['continueLegacyWorkerAdmitted']>): Promise<ContinuationDelivery> {
+    return this.trackExecutionAdmission(() => this.continueLegacyWorkerAdmitted(...args))
+  }
+
+  private async continueLegacyWorkerAdmitted(
     workerId: string,
     item: InboxItem,
   ): Promise<ContinuationDelivery> {
@@ -2977,7 +2998,11 @@ export class WorkerHarness {
   }
 
   /** capabilities().revive===true 分支:adapter.resume 拉起新化身,session 满保真接续。 */
-  private async reviveIncarnation(
+  private async reviveIncarnation(...args: Parameters<WorkerHarness['reviveIncarnationAdmitted']>): Promise<ContinuationDelivery> {
+    return this.trackExecutionAdmission(() => this.reviveIncarnationAdmitted(...args))
+  }
+
+  private async reviveIncarnationAdmitted(
     managerKey: ManagerKey,
     worker: LedgerWorker,
     mainline: ExecutableIncarnation,
@@ -3150,7 +3175,11 @@ export class WorkerHarness {
    * 顺序对齐 protocol-agent-v3 §5.3"跨实现切换":目标实现先完成无副作用 provision pre-flight
    * → Harness 持久化交接包 → (若仍存活)stop 核验并标 superseded → 同 workspace provision+spawn 新实现 → 化身链 +1。
    */
-  private async handoffIncarnation(
+  private async handoffIncarnation(...args: Parameters<WorkerHarness['handoffIncarnationAdmitted']>): Promise<HandoffResult> {
+    return this.trackExecutionAdmission(() => this.handoffIncarnationAdmitted(...args))
+  }
+
+  private async handoffIncarnationAdmitted(
     managerKey: ManagerKey,
     worker: LedgerWorker,
     source: ExecutableIncarnation,
@@ -6399,6 +6428,14 @@ export class WorkerHarness {
     question: string,
     opts?: { readonly managerKey?: ManagerKey; readonly authorize?: () => Promise<void> },
   ): Promise<QueryWorkerStartedResult> {
+    return this.trackExecutionAdmission(() => this.queryWorkerAdmitted(workerId, question, opts))
+  }
+
+  private async queryWorkerAdmitted(
+    workerId: string,
+    question: string,
+    opts?: { readonly managerKey?: ManagerKey; readonly authorize?: () => Promise<void> },
+  ): Promise<QueryWorkerStartedResult> {
     this.deps.assertExecutionAdmission?.()
     interface QueryPrep {
       readonly adapter: WorkerAdapter
@@ -6686,7 +6723,9 @@ export class WorkerHarness {
       return await Promise.race([forkPromise, timeout])
     } catch (error) {
       if (error instanceof ForkEstablishmentError && error.stage === 'timeout') {
-        void forkPromise.then((handle) => adapter.kill(handle)).catch((lateError) => {
+        const cleanup = forkPromise.then((handle) => adapter.kill(handle))
+        this.executionAdmissions.trackCleanup(cleanup)
+        void cleanup.catch((lateError) => {
           console.error('[WorkerHarness] late query fork cleanup failed:', lateError)
         })
       }

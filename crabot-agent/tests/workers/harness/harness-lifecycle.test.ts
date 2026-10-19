@@ -5233,3 +5233,69 @@ it('last use follows committed execution; auxiliary persistence failure never tu
   expect(second.incarnations[0].state).toBe('running')
   expect(JSON.parse(await fs.readFile(file, 'utf8')).workspaces[0].last_used_at).toBe(snapshot.workspaces[0].last_used_at)
 })
+
+
+describe('workspace relocation admission quiescence', () => {
+  function deferred<T = void>() {
+    let resolve!: (value: T) => void
+    const promise = new Promise<T>(done => { resolve = done })
+    return { promise, resolve }
+  }
+
+  it('waits for an admitted spawn ledger commit without stopping or closing it', async () => {
+    const { harness, fake, ledger } = await makeHarness(), started = deferred(), ready = deferred()
+    const spawn = fake.spawn.bind(fake)
+    vi.spyOn(fake, 'spawn').mockImplementation(async spec => { started.resolve(); await ready.promise; return spawn(spec) })
+    const pending = harness.spawnWorker(spawnParams()); await started.promise
+    let drained = false
+    const settled = (harness as any).quiesceExecutionAdmissions().then(() => { drained = true })
+    await Promise.resolve(); expect(drained).toBe(false)
+    await expect(harness.spawnWorker(spawnParams())).rejects.toMatchObject({ code: 'WORKSPACE_MAINTENANCE' })
+    ready.resolve(); const worker = await pending; await settled
+    const stored = await ledger.findWorker(worker.worker_id)
+    expect(stored?.worker.task.status).toBe('running')
+    expect(stored?.worker.manager_key).toBe('test::friend-1')
+    expect(stored?.worker.origin).toEqual(worker.origin)
+    expect(stored?.worker.report_to).toEqual(worker.report_to)
+    expect(fake.killCalls).toHaveLength(0)
+  })
+
+  it('waits for an admitted query to establish and commit its fork', async () => {
+    const { harness, fake, ledger } = await makeHarness({ caps: { fork: true } }), started = deferred(), ready = deferred()
+    const worker = await harness.spawnWorker(spawnParams()), fork = fake.fork.bind(fake)
+    vi.spyOn(fake, 'fork').mockImplementation(async (...args) => { started.resolve(); await ready.promise; return fork(...args) })
+    const pending = harness.queryWorker(worker.worker_id, 'status'); await started.promise
+    let drained = false
+    const settled = (harness as any).quiesceExecutionAdmissions().then(() => { drained = true })
+    await Promise.resolve(); expect(drained).toBe(false)
+    ready.resolve(); const query = await pending; await settled
+    const stored = await ledger.findWorker(worker.worker_id)
+    expect(stored?.worker.incarnations.some(item => item.query_id === query.query_id)).toBe(true)
+    expect(stored?.worker.task.status).not.toBe('closed')
+  })
+
+  it('retains a timed-out native fork until its late cleanup actually settles', async () => {
+    const { harness, fake } = await makeHarness(), fork = deferred<IncarnationHandle>(), kill = deferred(), started = deferred()
+    vi.spyOn(fake, 'kill').mockImplementation(async () => { started.resolve(); await kill.promise })
+    await expect((harness as any).awaitForkEstablishment(fork.promise, fake, 1)).rejects.toThrow('deadline')
+    let drained = false
+    const settled = (harness as any).quiesceExecutionAdmissions().then(() => { drained = true })
+    await Promise.resolve(); expect(drained).toBe(false)
+    fork.resolve({ worker_id: 'late', seq: 2, impl: 'builtin', session_ref: 'late-session' })
+    await started.promise; expect(drained).toBe(false)
+    kill.resolve(); await settled; expect(drained).toBe(true)
+  })
+
+  it('refuses quiescence if cleanup of a late native fork fails', async () => {
+    const { harness, fake } = await makeHarness(), fork = deferred<IncarnationHandle>()
+    vi.spyOn(fake, 'kill').mockRejectedValue(new Error('stop unknown'))
+    const logging = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      await expect((harness as any).awaitForkEstablishment(fork.promise, fake, 1)).rejects.toThrow('deadline')
+      const settled = (harness as any).quiesceExecutionAdmissions()
+      fork.resolve({ worker_id: 'late', seq: 2, impl: 'builtin', session_ref: 'late-session' })
+      await expect(settled).rejects.toMatchObject({ code: 'WORKSPACE_MAINTENANCE' })
+      await expect(harness.spawnWorker(spawnParams())).rejects.toMatchObject({ code: 'WORKSPACE_MAINTENANCE' })
+    } finally { logging.mockRestore() }
+  })
+})
