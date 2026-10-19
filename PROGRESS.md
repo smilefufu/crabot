@@ -3,6 +3,7 @@
 ### 桌面化方案：独立 worktree 推进桌面与兼容转换
 
 - 按已确认[中文Spec](crabot-docs/superpowers/specs/2026-10-17-desktop-application-design.md)及[计划](crabot-docs/superpowers/plans/2026-10-17-desktop-application-implementation.md)，仅在feat/desktop-application worktree开发；完整实现与验证前不推主仓main、不提前建PR，不部署/重启现场，保留无关WIP。 用户10/19进一步明确桌面整体安装目录可选、workspace独立；主Spec §19已记录，需细化布局/安装器/升级兼容后再实现，不采用额外DATA_DIR选择步骤。安装时选定安装位置，安装后workspace可迁移；保留Admin/MM在线、暂停执行层并核验停止、迁移后旧Worker永久关闭的[补充设计](crabot-docs/superpowers/specs/2026-10-19-desktop-workspace-relocation-design.md)待审阅，尚未实现。
+- Workspace按用户明确要求纠偏为项目级：同项目多执行器共用长期workspace；未知项目只进一个默认workspace。新增项目/用途/目录/空间/执行占用管理见[草案](crabot-docs/superpowers/specs/2026-10-19-project-workspaces-and-inventory-design.md)。不按旧Worker目录模型实施，不擅自移动旧文件；私有CLI配置/事件需隔离，具体落地未实现。
 - P0–P4内置环境、共享实例、SDK、OS peer及真实Electron边界已有四平台基础证据；受管MCP按稳定id隔离，五类真实stdio冲突依赖/离线连接/凭据过滤已验证。HTTP文字、旧WS与业务权限契约保持。39159925457四平台代码回归全部通过，但full_runtime=false，未执行整包及真实systemd，不能记为最新完整原生验收；模型配置加载器现加入完整范围触发条件。
 - P5已接模型、主题、权限与本地诊断；补齐内置文件/Python工作环境/空间不足说明和固定修复指南入口，控制器等31项及Web首次引导等15项通过，不新增恢复动作。mirror-xinshu经Admin解析/Agent adapter两次短请求成功（输入63/输出19），未改生产配置；真实Admin HTTP→引用存储/版本→Core双slot及Provider变更重解析等19项通过。明确缺模型的真实RpcCallError立即返回既有降级配置，网络/认证仍重试，50项回归和Agent编译通过。补整套实际GUI保存默认模型→UI发言→Manager/send_message→可见气泡与持久ack/交付的隔离CI，模型仅本地替身；补齐Manager必填post_send_action后真实工具面90项通过，77c53baa的ARM完整GUI首答、持久ack/交付通过（两次请求）；真实Provider完整GUI仍待。
 - P6已接登录自启动、同通道更新入口、活动核对、共享停机/备份/恢复和独立CLI完整归档升级；实际HTTP/SHA/解包/crabot upgrade保留停止状态与依赖已验。最终GUI安装按钮及全平台更新后健康仍待验收。普通CLI密码输入竞态/粘贴回车已修，19项含CRLF回归、真实PTY及临时DATA_DIR密码轮换验证通过，未启动MM。
