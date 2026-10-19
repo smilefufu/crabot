@@ -8,7 +8,6 @@ import product from '../lib/product-runtime.cjs'
 import scrapling from '../lib/scrapling-runtime.cjs'
 import computerUse from '../lib/computer-use-runtime.cjs'
 import { writeCoreRelease, verifyCoreRelease } from '../lib/core-release.mjs'
-import { readWorkspaceDataVersions } from '../lib/workspace-data-compat.mjs'
 
 const excluded = new Set(['node_modules', 'node_modules_link_check', '.git', '.env', '.venv', '__pycache__', '__tests__', 'tests', 'test'])
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
@@ -137,6 +136,9 @@ try {
     || !sourceDirty && execFileSync('git', ['status', '--porcelain'], { cwd: root, encoding: 'utf8' }).trim()) {
     throw new Error('Sources changed while staging; build a fresh candidate from committed sources')
   }
+  // This reader transitively loads the native helper. Load it only after the
+  // compiler has finished; Windows cannot replace a DLL loaded by this parent.
+  const { readWorkspaceDataVersions } = await import('../lib/workspace-data-compat.mjs')
   if (!readWorkspaceDataVersions(output).includes(1)) throw new Error('Staged Core is missing its workspace data compatibility declaration')
   const inventory = await writeCoreRelease(output, { schema_version: 1, version, platform: process.platform, arch: process.arch, commit, source_dirty: sourceDirty })
   await verifyCoreRelease(output, { version })

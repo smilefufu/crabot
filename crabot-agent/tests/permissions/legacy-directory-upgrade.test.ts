@@ -13,6 +13,8 @@ import { BUILTIN_WORKER_PERMISSIONS } from '../../src/workers/builtin/runtime.js
 import type { SpawnSpec, WorkerAdapter } from '../../src/workers/types.js'
 const home = fileURLToPath(new URL('../../../', import.meta.url))
 const { default: AdminModule } = createRequire(import.meta.url)(path.join(home, 'crabot-admin/dist/index.js'))
+// Includes a real Node migration child (bounded at 10s) plus Harness/file I/O.
+// Keep the test bounded while allowing slower native CI to finish cleanup.
 it('real old metadata upgrade and Admin reload dispatch into an existing project with actual guarded Write/Read', async () => {
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'legacy-directory-dispatch-')))
   const data = path.join(root, 'instance'), adminData = path.join(data, 'admin'), project = path.join(root, 'existing-project'), limited = path.join(root, 'limited')
@@ -60,4 +62,4 @@ it('real old metadata upgrade and Admin reload dispatch into an existing project
     await fs.unlink(path.join(adminData, 'friend-permission-configs.json'))
     await expect(admin.loadData()).rejects.toThrow('Admin 权限文件缺失')
   } finally { await stack?.dispose(); vi.unstubAllEnvs(); vi.restoreAllMocks(); await fs.rm(root, { recursive: true, force: true }) }
-})
+}, 30_000)
