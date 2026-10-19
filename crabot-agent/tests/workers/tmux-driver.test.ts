@@ -5,6 +5,7 @@ import * as fs from 'node:fs/promises'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import { TmuxDriver } from '../../src/workers/tmux/driver.js'
+import { removeTmuxControlEndpoint, type TmuxControlEndpoint } from '../../src/workers/tmux/control-monitor.js'
 
 function detectTmux(): boolean {
   try {
@@ -39,6 +40,81 @@ describe('TmuxDriver.capturePane', () => {
     expect(run).toHaveBeenCalledWith(['capture-pane', '-p', '-J', '-t', 'crabot-w-test-race'])
     expect(run).toHaveBeenCalledWith(['capture-pane', '-p', '-e', '-t', 'crabot-w-test-race'])
     expect(run.mock.invocationCallOrder[0]).toBeLessThan(isAlive.mock.invocationCallOrder[0])
+  })
+})
+
+describe('TmuxDriver.readProcessCarrier', () => {
+  const name = 'crabot-w-scope-one'
+  it('reads only the exact registered session and returns identity metadata without pane text', async () => {
+    const driver = new TmuxDriver(), run = vi.fn(async () => ({ stdout: `${name}\t$7\t%12\t123\t0\t99\n`, stderr: '' }))
+    ;(driver as any).run = run
+    expect(await driver.readProcessCarrier(name)).toEqual({ session_name: name, session_id: '$7', pane_id: '%12', pane_pid: 123, dead: false, server_pid: 99 })
+    expect(run.mock.calls[0][0]).toEqual(['list-panes', '-s', '-t', '=' + name, '-F', '#{session_name}\t#{session_id}\t#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{pid}'])
+  })
+  it.each(['', 'crabot-w-scope', 'other', 'crabot-w-scope-one:0', 'crabot-w-scope-one\nnext'])('rejects an invalid or ambiguous carrier observation: %j', async value => {
+    const driver = new TmuxDriver(), run = vi.fn(async () => ({ stdout: value, stderr: '' })); (driver as any).run = run
+    await expect(driver.readProcessCarrier(name)).rejects.toThrow()
+  })
+  it.each(['bad session', 'bad pane', 'bad pid', 'bad dead', 'bad server', 'multiple panes'])('does not turn %s into a guessed process', async damage => {
+    const values = [name, '$7', '%12', '123', '0', '99']
+    if (damage === 'bad session') values[1] = '$-1'
+    if (damage === 'bad pane') values[2] = '12'
+    if (damage === 'bad pid') values[3] = '0'
+    if (damage === 'bad dead') values[4] = 'unknown'
+    if (damage === 'bad server') values[5] = '2147483648'
+    const line = values.join('\t'), driver = new TmuxDriver()
+    ;(driver as any).run = vi.fn(async () => ({ stdout: damage === 'multiple panes' ? line + '\n' + line : line, stderr: '' }))
+    await expect(driver.readProcessCarrier(name)).rejects.toThrow()
+  })
+  it('rejects otherwise valid metadata from a prefix-matched different session', async () => {
+    const driver = new TmuxDriver(); (driver as any).run = vi.fn(async () => ({ stdout: `${name}-other\t$7\t%12\t123\t0\t99\n`, stderr: '' }))
+    await expect(driver.readProcessCarrier(name)).rejects.toMatchObject({ code: 'WORKER_CARRIER_UNVERIFIED' })
+  })
+  it('rejects tmux target selectors before calling the command and propagates native query failures', async () => {
+    const driver = new TmuxDriver(), run = vi.fn(async () => { throw new Error('tmux unavailable') }); (driver as any).run = run
+    await expect(driver.readProcessCarrier('crabot-w-scope-one:0')).rejects.toThrow()
+    expect(run).not.toHaveBeenCalled()
+    await expect(driver.readProcessCarrier(name)).rejects.toThrow('tmux unavailable')
+  })
+  it('preserves dead-pane status without interpreting its retained PID as a live execution', async () => {
+    const driver = new TmuxDriver(); (driver as any).run = vi.fn(async () => ({ stdout: `${name}\t$7\t%12\t123\t1\t99\n`, stderr: '' }))
+    expect(await driver.readProcessCarrier(name)).toMatchObject({ dead: true, pane_pid: 123 })
+  })
+})
+
+function hasTmuxBinary(): boolean {
+  try { execFileSync('tmux', ['-V'], { stdio: 'ignore' }); return true } catch { return false }
+}
+
+describe.skipIf(process.platform === 'win32' || !hasTmuxBinary())('TmuxDriver private process carrier', () => {
+  it('binds the exact private pane to a real OS scope without using the default tmux server', async () => {
+    const { default: native } = await import('../../../scripts/lib/process-identity.cjs')
+    const { default: tree } = await import('../../../scripts/lib/tmux-process-tree.cjs')
+    const { default: processExit } = await import('../../../scripts/lib/known-process-exit.cjs')
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-private-carrier-'))
+    const socket = 'crabot-carrier-' + randomUUID(), name = 'crabot-w-scope-' + randomUUID()
+    const wrapper = path.join(directory, 'tmux-private'), ready = path.join(directory, 'ready')
+    await fs.writeFile(wrapper, `#!/bin/sh\nexec tmux -L ${socket} "$@"\n`, { mode: 0o700 })
+    const driver = new TmuxDriver({ tmuxBin: wrapper }), quote = (value: string) => "'" + value.replace(/'/g, "'\\''") + "'"
+    const source = `require('node:fs').writeFileSync(${JSON.stringify(ready)},String(process.pid));const timer=setInterval(()=>{},1000);setTimeout(()=>clearInterval(timer),30000)`
+    let endpoint: TmuxControlEndpoint | undefined
+    try {
+      endpoint = await driver.newSession({ name, cwd: directory, command: quote(process.execPath) + ' -e ' + quote(source) })
+      await waitFor(async () => (await fs.stat(ready).catch(() => null)) !== null)
+      const carrier = await driver.readProcessCarrier(name)
+      expect(carrier).toMatchObject({ session_name: name, pane_pid: Number(await fs.readFile(ready, 'utf8')), dead: false })
+      expect(carrier.server_pid).not.toBe(carrier.pane_pid)
+      const scope = await tree.captureTmuxProcessTree(() => driver.readProcessCarrier(name))
+      expect(scope).toMatchObject([{ pid: carrier.pane_pid, owner: native.inspectProcess(process.pid).owner }])
+      expect(await driver.readProcessCarrier(name)).toEqual(carrier)
+      await expect(driver.readProcessCarrier('crabot-w-scope')).rejects.toThrow()
+      await driver.killSession(name)
+      await waitFor(async () => processExit.probeKnownProcessExit(scope).state === 'stopped')
+    } finally {
+      try { execFileSync(wrapper, ['kill-server'], { stdio: 'ignore', timeout: 5000 }) } catch { /* The private server exits after its last session. */ }
+      if (endpoint) await removeTmuxControlEndpoint(endpoint)
+      await fs.rm(directory, { recursive: true, force: true })
+    }
   })
 })
 

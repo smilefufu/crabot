@@ -54,6 +54,16 @@ export interface PaneSnapshot {
   captured_at?: string
 }
 
+/** Internal carrier metadata only; a dead pane's PID is never a new process target. */
+export interface TmuxProcessCarrier {
+  readonly session_name: string
+  readonly session_id: string
+  readonly pane_id: string
+  readonly pane_pid: number
+  readonly dead: boolean
+  readonly server_pid: number
+}
+
 export type TmuxSession = TmuxControlEndpoint & {
   /** 仅在 adapter 已持久化可重建 meta 后调用，避免无主 dead pane。 */
   enableRemainOnExit?: () => Promise<void>
@@ -265,6 +275,22 @@ exec ${spec.command}
     } catch {
       return null
     }
+  }
+
+  /** No prefix selection, full-server enumeration or terminal contents. Not stop/ownership proof. */
+  async readProcessCarrier(name: string): Promise<TmuxProcessCarrier> {
+    const invalid = () => Object.assign(new Error('执行器tmux载体无法唯一核验，已保留维护保护。'), { code: 'WORKER_CARRIER_UNVERIFIED' })
+    if (!/^crabot-w-[A-Za-z0-9_-]+$/.test(name)) throw invalid()
+    const format = '#{session_name}\t#{session_id}\t#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{pid}'
+    const { stdout } = await this.run(['list-panes', '-s', '-t', '=' + name, '-F', format])
+    const lines = stdout.replace(/\r?\n$/, '').split(/\r?\n/)
+    if (lines.length !== 1) throw invalid()
+    const fields = lines[0].split('\t')
+    const pid = (value: string) => /^[1-9][0-9]*$/.test(value) && Number.isSafeInteger(Number(value)) && Number(value) <= 2147483647
+    if (fields.length !== 6 || fields[0] !== name || !/^\$[0-9]+$/.test(fields[1]) || !/^%[0-9]+$/.test(fields[2])
+      || !pid(fields[3]) || !['0', '1'].includes(fields[4]) || !pid(fields[5])) throw invalid()
+    return Object.freeze({ session_name: name, session_id: fields[1], pane_id: fields[2], pane_pid: Number(fields[3]),
+      dead: fields[4] === '1', server_pid: Number(fields[5]) })
   }
 
   async killSession(name: string): Promise<void> {

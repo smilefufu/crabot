@@ -1,0 +1,59 @@
+// A read-only ancestry observation rooted in already verified launch identities.
+// It does not send signals or prove that a whole shutdown window is complete.
+const native = require('./process-identity.cjs')
+const fail = () => { throw Object.assign(new Error('执行进程范围无法完整核验，已保留文件与维护保护。'), { code: 'CRABOT_PROCESS_SCOPE' }) }
+const validPid = pid => Number.isInteger(pid) && pid > 0 && pid <= 2147483647
+const valid = item => item && validPid(item.pid) && (item.parent === 0 || validPid(item.parent))
+  && typeof item.owner === 'string' && item.owner && typeof item.executable === 'string' && item.executable
+  && typeof item.started === 'string' && /^\d+(?::\d+)?$/.test(item.started)
+function atLeast(child, parent) {
+  const a = child.split(':').map(BigInt), b = parent.split(':').map(BigInt)
+  if (a.length !== b.length) fail()
+  for (let i = 0; i < a.length; i++) { if (a[i] !== b[i]) return a[i] > b[i] }
+  return true
+}
+function captureOwnedProcessTree(roots, api = native) {
+  try {
+    const self = api.inspectProcess(process.pid)
+    if (!valid(self) || !Array.isArray(roots) || roots.length > 32768) fail()
+    for (const root of roots) if (!valid(root) || root.owner !== self.owner || root.pid === process.pid) fail()
+    const observed = new Map(), parents = new Map(), pending = []
+    const read = expected => {
+      const current = api.inspectProcess(expected.pid)
+      if (!valid(current) || current.pid !== expected.pid || current.owner !== self.owner || current.started !== expected.started) fail()
+      return current
+    }
+    const remember = current => {
+      const previous = observed.get(current.pid)
+      if (previous) { if (previous.started !== current.started || previous.owner !== current.owner) fail(); return }
+      if (observed.size >= 32768) fail()
+      observed.set(current.pid, current); pending.push(current)
+    }
+    for (const root of roots) remember(read(root))
+    for (let offset = 0; offset < pending.length; offset++) {
+      const parent = read(pending[offset]), children = api.listChildProcessIds(parent.pid)
+      if (!Array.isArray(children) || children.length > 32768 || new Set(children).size !== children.length) fail()
+      for (const pid of children) {
+        if (!validPid(pid) || pid === process.pid) fail()
+        const child = api.inspectProcess(pid)
+        if (!valid(child) || child.pid !== pid || child.owner !== self.owner || child.parent !== parent.pid
+          || !atLeast(child.started, parent.started)) fail()
+        let ancestor = parent.pid
+        while (parents.has(ancestor)) { if (ancestor === pid) fail(); ancestor = parents.get(ancestor) }
+        if (ancestor === pid) fail()
+        parents.set(pid, parent.pid)
+        remember(child)
+      }
+      read(parent) // A reused/disappeared parent cannot vouch for its former child list.
+    }
+    const result = []
+    for (const expected of observed.values()) {
+      const current = read(expected)
+      if (parents.has(current.pid) && current.parent !== parents.get(current.pid)) fail()
+      const { pid, parent, started, owner, executable } = current
+      result.push(Object.freeze({ pid, parent, started, owner, executable }))
+    }
+    return Object.freeze(result.sort((a, b) => a.pid - b.pid))
+  } catch { fail() }
+}
+module.exports = { captureOwnedProcessTree }
