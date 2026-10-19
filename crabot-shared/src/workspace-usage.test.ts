@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
+import { inspectWorkspaceRelocationTree } from './workspace-relocation-files.js'
 import { scanWorkspaceUsage, scanWorkspaceSetUsage } from './workspace-usage.js'
 
 async function fixture(t: test.TestContext) {
@@ -96,5 +97,7 @@ test('Linux same-device bind mounts stay outside workspace statistics', {
     assert.equal(usage.status, 'partial'); assert.ok(usage.skipped_entries > 0)
     const union = await scanWorkspaceSetUsage([project, outside])
     assert.equal(union.logical_bytes, 1012); assert.equal(union.file_count, 2)
+    const inspection = await inspectWorkspaceRelocationTree(project, 'copy')
+    assert.ok(inspection.issues.some(issue => issue.path === 'mounted space' && issue.reason === 'mount_point'))
   } finally { await run('umount', [mounted]) }
 })

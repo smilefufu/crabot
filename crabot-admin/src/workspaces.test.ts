@@ -139,3 +139,34 @@ it('project and aggregate scans share one serial queue and aggregate cancellatio
   await service.close()
   expect(aborted).toBe(true); expect((await service.totalUsage()).status).toBe('failed')
 })
+
+it('maintenance pauses only scan access, drains owned handles, keeps management readable and resumes on explicit release', async () => {
+  let release!: () => void, closed = false, started!: () => void
+  const seen = new Promise<void>(resolve => { started = resolve })
+  const handleGate = new Promise<void>(resolve => { release = resolve })
+  const scan = vi.fn(async (_root: string, { signal }: { signal?: AbortSignal } = {}) => {
+    if (scan.mock.calls.length > 1) return { status: 'complete' as const, logical_bytes: 23, file_count: 1, skipped_entries: 0 }
+    const handle = await fs.open(path.join(_root, 'open-file'), 'w')
+    try {
+      started()
+      await new Promise<void>((_resolve, reject) => signal!.addEventListener('abort', () => reject(new Error('cancelled')), { once: true }))
+      return { status: 'complete' as const, file_count: 0, skipped_entries: 0 }
+    } finally { await handleGate; await handle.close(); closed = true }
+  })
+  const { service } = await fixture({ scan })
+  await service.refresh('default'); await seen
+  let pause: Promise<void> | undefined
+  try {
+    pause = service.pauseScanning()
+    await expect(service.refresh('default')).rejects.toMatchObject({ code: 'WORKSPACE_UNAVAILABLE' })
+    await expect(service.refreshTotalUsage()).rejects.toMatchObject({ code: 'WORKSPACE_UNAVAILABLE' })
+    expect(() => service.resumeScanning()).toThrow()
+    expect((await service.list()).items).toHaveLength(1); expect(closed).toBe(false)
+  } finally { release(); await pause }
+  expect(closed).toBe(true)
+  expect((await service.usage('default')).usage.status).toBe('failed')
+  service.resumeScanning(); await service.refresh('default')
+  expect((await settled(service, 'default')).logical_bytes).toBe(23)
+  await service.close()
+  expect(() => service.resumeScanning()).toThrow()
+})

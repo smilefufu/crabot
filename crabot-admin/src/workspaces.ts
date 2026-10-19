@@ -23,6 +23,7 @@ export class WorkspaceService {
   private readonly jobs = new Map<string, ScanJob>()
   private draining?: Promise<void>
   private closed = false
+  private paused = false
 
   constructor(options: { dataRoot: string; storageRoot?: string; scan?: Scan; scanSet?: typeof scanWorkspaceSetUsage;
     execution?: () => Promise<WorkspaceExecutionInventory> }) {
@@ -71,7 +72,7 @@ export class WorkspaceService {
   }
   private async totalRoots(): Promise<string[]> { return (await this.snapshot()).workspaces.map(record => record.root) }
   private checkScanning(): void {
-    if (this.closed) throw new WorkspaceError('WORKSPACE_UNAVAILABLE', '工作区统计正在停止，请稍候重试。')
+    if (this.closed || this.paused) throw new WorkspaceError('WORKSPACE_UNAVAILABLE', this.paused ? '工作区维护期间空间统计已暂停。' : '工作区统计正在停止，请稍候重试。')
   }
   private enqueue(id: string, root: string, roots?: string[]): WorkspaceUsage {
     this.checkScanning()
@@ -82,8 +83,21 @@ export class WorkspaceService {
     }
     return this.observedScope(id, root)
   }
+  /** Host coordination only: drain file access while Admin and read-only snapshots stay online. */
+  async pauseScanning(): Promise<void> {
+    this.paused = true
+    await this.drainScans()
+  }
+  resumeScanning(): void {
+    if (this.closed) throw new WorkspaceError('WORKSPACE_UNAVAILABLE', '工作区统计已经停止。')
+    if (this.draining) throw new WorkspaceError('WORKSPACE_BUSY', '工作区扫描句柄尚未全部关闭。')
+    this.paused = false
+  }
   async close(): Promise<void> {
     this.closed = true
+    await this.drainScans()
+  }
+  private async drainScans(): Promise<void> {
     for (const job of this.jobs.values()) job.controller.abort()
     await this.draining
   }
@@ -119,7 +133,7 @@ export class WorkspaceService {
       const job = this.jobs.values().next().value as ScanJob
       const before = this.observations.get(job.id)!
       try {
-        if (this.closed) throw new Error('scan stopped')
+        if (this.closed || this.paused) throw new Error('scan stopped')
         const options = { signal: job.controller.signal }
         const usage = await (job.roots ? this.scanSet(job.roots, options) : this.scan(job.root, options))
         const current = job.roots ? scopeKey(await this.totalRoots()) : (await this.catalog.get(job.id)).root

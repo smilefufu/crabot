@@ -1,0 +1,73 @@
+name: Workspace native CLI
+
+on:
+  push:
+    branches: ['feat/desktop-*']
+    paths:
+      - 'crabot-agent/src/workers/**'
+      - 'crabot-agent/tests/workers/**'
+      - 'crabot-shared/src/workspace*'
+      - '.github/scripts/native-project-cli-acceptance.mjs'
+      - '.github/workflows/workspace-native-cli.yml'
+  pull_request:
+    paths:
+      - 'crabot-agent/src/workers/**'
+      - 'crabot-agent/tests/workers/**'
+      - 'crabot-shared/src/workspace*'
+      - '.github/scripts/native-project-cli-acceptance.mjs'
+      - '.github/workflows/workspace-native-cli.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+concurrency:
+  group: workspace-native-cli-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  native-cli:
+    name: Private workspace CLI ${{ matrix.target }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: linux-x64
+          - os: macos-14
+            target: darwin-arm64
+          - os: macos-15-intel
+            target: darwin-x64
+          - os: windows-latest
+            target: win32-x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.3'
+      - name: Build OS identity helper and frozen Agent dependencies
+        run: |
+          mkdir -p .desktop-build
+          node scripts/build-native.mjs
+          pnpm --dir crabot-shared install --frozen-lockfile
+          node crabot-shared/node_modules/typescript/bin/tsc -p crabot-shared/tsconfig.json
+          pnpm --dir crabot-agent install --frozen-lockfile
+      - name: Project binding and private native runtime regressions
+        working-directory: crabot-agent
+        run: node node_modules/vitest/vitest.mjs run tests/workers/harness/workspace-manager.test.ts tests/workers/harness/project-workspaces.test.ts tests/workers/private-project-provision.test.ts tests/workers/private-project-runtime.test.ts tests/workers/codex-project-config.test.ts --maxWorkers=1 --minWorkers=1
+      - name: Install pinned acceptance-only native CLIs
+        run: npm install --prefix .desktop-build/native-cli-tools --no-package-lock --no-audit --no-fund @openai/codex@0.149.1 @anthropic-ai/claude-code@2.1.246
+      - name: Execute real native CLI against loopback-only model and MCP sentinels
+        run: node .github/scripts/native-project-cli-acceptance.mjs 2>&1 | tee .desktop-build/workspace-native-cli.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: workspace-native-cli-${{ matrix.target }}
+          path: .desktop-build/workspace-native-cli.log
+          if-no-files-found: ignore
