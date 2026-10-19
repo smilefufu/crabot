@@ -107,3 +107,95 @@ export async function registerInstallationEntries(prepared: PreparedInstallation
   await writeUnchanged(path.join(applications, 'crabot.desktop'), desktopApplicationEntry(path.join(prepared.guiRoot, 'crabot-desktop'),
     path.join(prepared.guiRoot, 'resources/crabot.png'), prepared.installation_id))
 }
+
+function assertPairMember(prepared: PreparedInstallation, root: string, installationId: string) {
+  const value = prepared.selection
+  if (!value || value.schema_version !== 1 || Object.keys(value).sort().join(',') !== 'core_id,gui_id,schema_version,version'
+    || !/^\d+\.\d+\.\d+(?:-[\w.-]+)?$/.test(value.version) || !/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(value.gui_id)
+    || !/^[a-f0-9]{64}$/.test(value.core_id) || prepared.installRoot !== root || prepared.installation_id !== installationId
+    || prepared.guiRoot !== path.join(root, 'app/releases', value.gui_id) || prepared.coreRoot !== path.join(root, 'releases', value.core_id)) fail()
+}
+const samePair = (a: PreparedInstallation['selection'], b: PreparedInstallation['selection']) =>
+  a.schema_version === b.schema_version && a.version === b.version && a.gui_id === b.gui_id && a.core_id === b.core_id
+async function entryStat(file: string) {
+  try { return await fs.lstat(file, { bigint: true }) }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error }
+}
+async function replaceMenuText(file: string, source: string, target: string) {
+  const stat = await entryStat(file)
+  if (!stat) return // The existing target-only registration safely creates it.
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1n || stat.size > 16_384n
+    || (process.platform === 'win32' ? !identity.isOwnedFile(file) : stat.uid !== BigInt(process.getuid!()))) fail()
+  const current = await fs.readFile(file, 'utf8')
+  if (current === target) return
+  if (current !== source) fail()
+  const temporary = file + '.tmp-' + randomUUID()
+  try {
+    if (process.platform === 'win32') identity.writePrivateFile(temporary, target)
+    else await fs.writeFile(temporary, target, { flag: 'wx', mode: 0o600, flush: true })
+    const latest = await fs.lstat(file, { bigint: true })
+    if (!latest.isFile() || latest.isSymbolicLink() || latest.dev !== stat.dev || latest.ino !== stat.ino
+      || await fs.readFile(file, 'utf8') !== source) fail()
+    await fs.rename(temporary, file)
+    if (process.platform !== 'win32') {
+      const directory = await fs.open(path.dirname(file), 'r'); try { await directory.sync() } finally { await directory.close() }
+    }
+  } finally { await fs.rm(temporary, { force: true }) }
+}
+
+// Existing installation only. Caller owns verified program bytes and the common
+// maintenance/selection lock. Source/target recognition is separate from fresh
+// registration, which is reused only after the entry is absent or at its target.
+export async function replaceInstallationEntries(source: PreparedInstallation, prepared: PreparedInstallation,
+  options: Parameters<typeof registerInstallationEntries>[1]) {
+  const root = installation.readDesktopSelection(prepared.installRoot), { home, platform, env, shell } = options
+  assertPairMember(source, root.root, root.record.installation_id); assertPairMember(prepared, root.root, root.record.installation_id)
+  if (!samePair(root.selection, source.selection) && !samePair(root.selection, prepared.selection)) fail()
+  for (const directory of [prepared.guiRoot, prepared.coreRoot]) {
+    const stat = await fs.lstat(directory)
+    if (!stat.isDirectory() || stat.isSymbolicLink() || !identity.isOwnedDirectory(directory)) fail()
+  }
+  const locator = await readInstallationLocator(home, platform, env)
+  if (!locator || locator.install_root !== root.root || locator.installation_id !== prepared.installation_id) fail()
+  const registration = integrationRoot(home, platform, env)
+  await ownedDirectory(registration)
+  await writeUnchanged(path.join(registration, 'installation.json'), JSON.stringify({ schema_version: 1, owner: identity.inspectProcess(process.pid).owner,
+    install_root: root.root, installation_id: prepared.installation_id }) + '\n')
+  if (platform === 'darwin') {
+    const alias = path.join(home, 'Applications/Crabot.app'), stat = await entryStat(alias)
+    const application = path.join(prepared.guiRoot, 'Crabot.app')
+    if (stat) {
+      if (!stat.isSymbolicLink() || stat.uid !== BigInt(process.getuid!())) fail()
+      const existing = path.resolve(path.dirname(alias), await fs.readlink(alias))
+      if (existing !== application) {
+        if (existing !== path.join(source.guiRoot, 'Crabot.app')) fail()
+        const temporary = path.join(path.dirname(alias), '.Crabot-update-' + randomUUID() + '.app')
+        try {
+          await fs.symlink(application, temporary, 'dir')
+          const latest = await fs.lstat(alias, { bigint: true })
+          if (!latest.isSymbolicLink() || latest.dev !== stat.dev || latest.ino !== stat.ino
+            || path.resolve(path.dirname(alias), await fs.readlink(alias)) !== existing) fail()
+          await fs.rename(temporary, alias)
+        } finally { await fs.rm(temporary, { force: true }) }
+      }
+    }
+  } else if (platform === 'win32') {
+    const entry = path.join(env.APPDATA || path.join(home, 'AppData/Roaming'), 'Microsoft/Windows/Start Menu/Programs/Crabot.lnk')
+    const stat = await present(entry), executable = path.join(prepared.guiRoot, 'Crabot.exe')
+    if (stat) {
+      if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || !identity.isOwnedFile(entry)) fail()
+      const shortcut = shell.readShortcutLink(entry)
+      if (![path.join(source.guiRoot, 'Crabot.exe'), executable].includes(shortcut.target) || shortcut.args) fail()
+      if (!shell.writeShortcutLink(entry, 'update', { target: executable, cwd: prepared.guiRoot, icon: executable, iconIndex: 0, appUserModelId: 'com.crabot.desktop' })) fail()
+    }
+  } else if (platform === 'linux') {
+    const entry = path.join(env.XDG_DATA_HOME || path.join(home, '.local/share'), 'applications/crabot.desktop')
+    const text = (member: PreparedInstallation) => desktopApplicationEntry(path.join(member.guiRoot, 'crabot-desktop'),
+      path.join(member.guiRoot, 'resources/crabot.png'), member.installation_id)
+    await replaceMenuText(entry, text(source), text(prepared))
+  } else fail()
+  await registerInstallationEntries(prepared, options)
+  const current = installation.readDesktopSelection(prepared.installRoot)
+  if (current.record.installation_id !== root.record.installation_id
+    || !samePair(current.selection, source.selection) && !samePair(current.selection, prepared.selection)) fail()
+}
