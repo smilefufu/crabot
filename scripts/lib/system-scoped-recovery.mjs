@@ -6,11 +6,15 @@ import path from 'node:path'
 import { createHash } from 'node:crypto'
 import management from './desktop-management.cjs'
 import { cliLockToken } from './cli-lock.mjs'
-import { readVersionMaintenance } from './version-maintenance.mjs'
+import { readVersionMaintenance, cancelPreparedVersionMaintenance } from './version-maintenance.mjs'
 import { verifyCoreRelease } from './core-release.mjs'
+import { verifyDataCompatibility } from './core-preparation.mjs'
+import cliLocation from './cli-location.cjs'
+import { previewMigrations } from '../upgrade-lib/migrate.mjs'
 import { describeScopedPreparation } from '../upgrade-lib/scoped-preparation.mjs'
 import { prepareMigration } from '../upgrade-lib/migration-transaction.mjs'
 import { prepareSharedRequests, previewSharedRequests } from '../upgrade-lib/shared-requests.mjs'
+import { ledgerValue } from '../upgrade-lib/shared-requests-v1.mjs'
 import { snapshot, sameSnapshot, verifyBackup, writeAtomic, assertStopped, scopedPath } from '../upgrade-lib/scoped-data.mjs'
 const digest = bytes => createHash('sha256').update(bytes).digest('hex')
 const uuid = value => typeof value === 'string' && /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(value)
@@ -43,11 +47,19 @@ async function readDocument(root, file) {
     return { value, sha256: digest(bytes) }
   } finally { await handle.close() }
 }
+async function syncDirectory(directory) {
+  const handle = await fs.open(directory, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW)
+  try {
+    const stat = await handle.stat()
+    if (!stat.isDirectory() || stat.uid !== process.getuid()) fail()
+    await handle.sync()
+  } finally { await handle.close() }
+}
 async function publishDocument(file, value) {
   await writeAtomic(file, JSON.stringify(value) + '\n')
-  const directory = await fs.open(path.dirname(file), 'r')
-  try { await directory.sync() } finally { await directory.close() }
+  await syncDirectory(path.dirname(file))
 }
+
 async function verifyTarget(root, expected) {
   const release = await verifyCoreRelease(root)
   if (release.inventory_sha256 !== expected) fail()
@@ -91,12 +103,7 @@ async function syncMaterials(dataDir, control, intent, plan) {
     }
   }
   for (const directory of [...directories].sort((a, b) => b.split(path.sep).length - a.split(path.sep).length)) {
-    const handle = await fs.open(directory, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW)
-    try {
-      const stat = await handle.stat()
-      if (!stat.isDirectory() || stat.uid !== process.getuid()) fail()
-      await handle.sync()
-    } finally { await handle.close() }
+    await syncDirectory(directory)
   }
 }
 const moduleDirectory = (root, id) => path.join(root, '.upgrade-migrations', id)
@@ -107,6 +114,8 @@ export async function prepareSystemScopedRecovery(options) {
     || record.system_operation_id !== options.operationId || record.target_core?.root !== targetRoot
     || record.source_inventory_sha256 !== options.sourceInventory || record.target_core.inventory_sha256 !== options.targetInventory) fail()
   await assertStopped(dataDir); await verifyTarget(targetRoot, record.target_core.inventory_sha256)
+  await assertUnchangedPreparationTransactions(dataDir, new Set())
+  await assertNoPartialSharedConversion(dataDir)
   const description = await describeScopedPreparation(targetRoot, dataDir), modules = []
   for (const entry of description.modules) modules.push({ description: entry,
     original: await snapshot(dataDir, entry.scope.writes), inputs: await snapshot(dataDir, entry.scope.reads) })
@@ -184,4 +193,120 @@ async function verifyMaterials(dataDir, targetRoot, intent, plan) {
     if (shared.status !== plan.shared.status || shared.status === 'ready'
       && digest(await fs.readFile(path.join(dataDir, 'agent/shared-request-upgrade.json'))) !== intent.shared.marker_sha256) fail()
   }
+}
+
+async function optionalDocument(dataDir, file) {
+  try { return await readDocument(dataDir, file) } catch (error) { if (error.code === 'ENOENT') return null; throw error }
+}
+async function assertNoPartialSharedConversion(dataDir) {
+  try {
+    const ready = await scopedPath(dataDir, 'agent/shared-request-upgrade.json')
+    if (await fs.lstat(ready).catch(error => { if (error.code === 'ENOENT') return null; throw error })) return
+    const directory = await scopedPath(dataDir, 'agent/worker-ledgers/.scope-probe')
+    const names = await fs.readdir(path.dirname(directory)).catch(error => { if (error.code === 'ENOENT') return []; throw error })
+    for (const name of names.filter(name => name.endsWith('.json') && !name.startsWith('.tmp-'))) {
+      const relative = path.join('agent/worker-ledgers', name)
+      if (ledgerValue(await fs.readFile(await scopedPath(dataDir, relative)), relative).wrapped) fail()
+    }
+  } catch { fail() }
+}
+async function assertUnchangedPreparationTransactions(dataDir, owned) {
+  const names = await fs.readdir(path.join(dataDir, '.upgrade-migrations')).catch(error => { if (error.code === 'ENOENT') return []; throw error })
+  for (const id of names) {
+    const saved = await optionalDocument(dataDir, path.join(moduleDirectory(dataDir, id), 'state.json'))
+    if (!saved && owned.has(id)) continue // A failed backup cannot have dispatched a script.
+    const state = saved?.value
+    if (state?.schema_version !== 1 || !hash(state.plan_sha256) || !['prepared', 'rolled_back', 'completed'].includes(state.phase)
+      || owned.has(id) && state.phase === 'completed') fail()
+  }
+}
+async function unchangedIntentData(dataDir, targetRoot, intent) {
+  for (const entry of intent.modules) {
+    if (!sameSnapshot(entry.original, await snapshot(dataDir, entry.description.scope.writes))
+      || !sameSnapshot(entry.inputs, await snapshot(dataDir, entry.description.scope.reads))) fail()
+  }
+  const shared = await previewSharedRequests(targetRoot, dataDir)
+  if (shared.status !== intent.shared.status) fail()
+  if (shared.status === 'pending' && (!sameSnapshot(shared.entries, intent.shared.inputs)
+    || !sameSnapshot(intent.shared.original, await snapshot(dataDir, intent.shared.writes)))) fail()
+  if (shared.status === 'ready' && digest(await fs.readFile(path.join(dataDir, 'agent/shared-request-upgrade.json'))) !== intent.shared.marker_sha256) fail()
+}
+async function directoryIdentity(directory) {
+  const stat = await fs.lstat(directory, { bigint: true }).catch(error => { if (error.code === 'ENOENT') return null; throw error })
+  if (!stat) return null
+  if (!stat.isDirectory() || stat.isSymbolicLink() || String(stat.uid) !== String(process.getuid()) || stat.mode & 0o022n) fail()
+  return { dev: String(stat.dev), ino: String(stat.ino) }
+}
+// Only the pre-install, source-selected cancel role may call this component.
+// It archives unused recovery artifacts; it never restores data or starts Core.
+export async function cancelSystemScopedRecovery(options) {
+  const { dataDir, targetRoot, directory } = context(options), sourceRoot = realpathSync(options.sourceRoot)
+  await assertStopped(dataDir); cliLocation.assertSelectedCli(sourceRoot); await verifyTarget(sourceRoot, options.sourceInventory)
+  const record = readVersionMaintenance(dataDir)
+  if (record && (record.schema_version !== 3 || record.id !== options.maintenanceId || record.system_operation_id !== options.operationId
+    || !['preparing', 'prepared'].includes(record.phase) || record.install_root !== sourceRoot
+    || record.source_inventory_sha256 !== options.sourceInventory || record.target_core?.root !== targetRoot
+    || record.target_core.inventory_sha256 !== options.targetInventory)) fail()
+  const saved = await optionalDocument(dataDir, path.join(directory, 'intent.json')), intent = saved?.value
+  if (intent && (intent.schema_version !== 1 || intent.id !== options.maintenanceId || intent.operation_id !== options.operationId || intent.data_dir !== dataDir
+    || intent.source_inventory_sha256 !== options.sourceInventory || intent.target_core?.root !== targetRoot
+    || intent.target_core.inventory_sha256 !== options.targetInventory || !Array.isArray(intent.modules))) fail()
+  const owned = new Set(intent?.modules.map(entry => entry.description.id) ?? [])
+  for (const id of owned) if (!/^crabot-[a-z0-9-]+-v\d+-v\d+$/.test(id)) fail()
+  await assertUnchangedPreparationTransactions(dataDir, owned)
+  await assertNoPartialSharedConversion(dataDir)
+  if (intent) await unchangedIntentData(dataDir, targetRoot, intent)
+  const prepared = await optionalDocument(dataDir, path.join(directory, 'prepared.json'))
+  if (prepared && (!intent || prepared.value.intent_sha256 !== saved.sha256 || prepared.value.id !== options.maintenanceId
+    || options.receipt && (options.receipt.id !== options.maintenanceId || options.receipt.sha256 !== prepared.sha256))) fail()
+  let journal = (await optionalDocument(dataDir, path.join(directory, 'cancel.json')))?.value
+  const bindings = { schema_version: 1, id: options.maintenanceId, operation_id: options.operationId, data_dir: dataDir,
+    source_root: sourceRoot, source_inventory_sha256: options.sourceInventory, target_inventory_sha256: options.targetInventory,
+    intent_sha256: saved?.sha256 ?? null }
+  if (journal && (Object.entries(bindings).some(([key, value]) => journal[key] !== value)
+    || !['archiving', 'finalizing', 'completed'].includes(journal.phase) || !Array.isArray(journal.items))) fail()
+  if (!record && !journal) fail()
+  const sourceFor = item => item.kind === 'module' ? moduleDirectory(dataDir, item.id) : path.join(dataDir, 'shared-request-upgrade-v2')
+  const destinationFor = item => path.join(directory, 'retained', item.kind === 'module' ? 'module-' + item.id : 'shared-request-upgrade-v2')
+  if (!journal) {
+    management.ensurePrivateDataRoot(directory)
+    const candidates = [...owned].map(id => ({ kind: 'module', id }))
+    if (intent?.shared.status === 'pending') candidates.push({ kind: 'shared', id: 'shared-request-upgrade-v2' })
+    const items = []
+    for (const item of candidates) {
+      const from = sourceFor(item), identity = await directoryIdentity(from)
+      if (identity) { await safeParents(dataDir, path.join(from, '.archive-proof')); items.push({ ...item, identity, archived: false }) }
+    }
+    journal = { ...bindings, phase: 'archiving', items }
+    await publishDocument(path.join(directory, 'cancel.json'), journal)
+    for (let current = directory; ; current = path.dirname(current)) { await syncDirectory(current); if (current === dataDir) break }
+  }
+  if (journal.phase === 'completed') {
+    if (record) fail()
+    return { preparation_cancelled: true, service_started: false }
+  }
+  management.ensurePrivateDataRoot(path.join(directory, 'retained'))
+  for (const item of journal.items) {
+    const valid = item.kind === 'module' ? owned.has(item.id)
+      : item.kind === 'shared' && item.id === 'shared-request-upgrade-v2' && intent?.shared.status === 'pending'
+    if (!valid) fail()
+    const from = sourceFor(item), destination = destinationFor(item), source = await directoryIdentity(from), retained = await directoryIdentity(destination)
+    const matches = actual => actual && actual.dev === item.identity?.dev && actual.ino === item.identity?.ino
+    if (source && retained || source && !matches(source) || retained && !matches(retained) || !source && !retained) fail()
+    if (source) {
+      await safeParents(dataDir, path.join(from, '.archive-proof'))
+      await fs.rename(from, destination)
+      await syncDirectory(path.dirname(from)); await syncDirectory(path.dirname(destination))
+    }
+    item.archived = true
+    await publishDocument(path.join(directory, 'cancel.json'), journal)
+  }
+  journal.phase = 'finalizing'; await publishDocument(path.join(directory, 'cancel.json'), journal)
+  if (intent) await unchangedIntentData(dataDir, targetRoot, intent)
+  await assertUnchangedPreparationTransactions(dataDir, new Set())
+  const verifyCompatible = async () => { verifyDataCompatibility(sourceRoot, dataDir); await previewMigrations(sourceRoot, dataDir) }
+  await verifyCompatible(); cliLocation.assertSelectedCli(sourceRoot); await verifyTarget(sourceRoot, options.sourceInventory)
+  if (record) await cancelPreparedVersionMaintenance({ dataDir, root: sourceRoot, id: record.id, systemOperationId: options.operationId, verifyCompatible })
+  journal.phase = 'completed'; await publishDocument(path.join(directory, 'cancel.json'), journal)
+  return { preparation_cancelled: true, service_started: false }
 }
