@@ -183,3 +183,18 @@ test('last use is a monotone host observation independent of metadata edits and 
   await fs.writeFile(file, JSON.stringify(state))
   await assert.rejects(f.catalog.snapshot(), { code: 'WORKSPACE_STATE_INVALID' })
 })
+
+test('case-insensitive directory aliases normalize to the same native identity before strict checks', async t => {
+  const f = await fixture(t), alias = path.join(f.root, 'DATA')
+  try { await fs.stat(alias) } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    t.skip('case-sensitive filesystem has no such alias'); return
+  }
+  const catalog = new WorkspaceCatalog({ files, dataRoot: alias })
+  await catalog.initialize()
+  assert.equal((await catalog.get('default')).root, path.join(await fs.realpath(f.data), 'workspaces', 'default'))
+  await fs.writeFile(path.join((await catalog.get('default')).root, 'kept'), 'content')
+  const cold = new WorkspaceCatalog({ files, dataRoot: f.data })
+  assert.equal((await cold.snapshot()).revision, (await catalog.snapshot()).revision)
+  assert.equal(await fs.readFile(path.join((await cold.get('default')).root, 'kept'), 'utf8'), 'content')
+})

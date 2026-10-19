@@ -27,7 +27,7 @@ const badRequest = () => new WorkspaceError('WORKSPACE_INVALID_REQUEST', '工作
 
 function canonicalLocation(directory: string): string {
   const resolved = path.resolve(directory)
-  try { return realpathSync(resolved) }
+  try { return realpathSync.native(resolved) }
   catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
     const parent = path.dirname(resolved)
