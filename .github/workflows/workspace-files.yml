@@ -10,6 +10,7 @@ on:
       - 'scripts/lib/process-identity.cjs'
       - 'scripts/lib/run-bounded.mjs'
       - 'scripts/lib/__tests__/workspace-*'
+      - 'scripts/lib/__tests__/directory-*.test.mjs'
       - 'scripts/workspace-copy-host.mjs'
       - '.github/workflows/workspace-files.yml'
   workflow_dispatch:
