@@ -21,21 +21,31 @@ export function createWorkspaceWorkerJournal(coordinator, context) {
       const result = await transport.call(operation, payload)
       const validResult = operation === 'prepare' ? result === 'dispatch' || result === 'observe' : result === true
       if (!validResult) throw failure()
-      const actual = readWorkspaceRelocationStops(dataDir, id)
-      if (operation === 'prepare') {
-        if (!actual.attempt || hadAttempt && result === 'dispatch'
-          || sha256CanonicalJson({ workers: readWorkspaceRelocationWorkers(dataDir, id).workers }) !== expected) throw failure()
-      } else if (!actual.submission || sha256CanonicalJson({ results: actual.submission.results }) !== expected) throw failure()
+      if (operation === 'capture') {
+        const fixed = readWorkspaceRelocationWorkers(dataDir, id)
+        if (!fixed || sha256CanonicalJson({ workers: fixed.workers }) !== expected) throw failure()
+      } else {
+        const actual = readWorkspaceRelocationStops(dataDir, id)
+        if (operation === 'prepare') {
+          if (!actual.attempt || hadAttempt && result === 'dispatch'
+            || sha256CanonicalJson({ workers: readWorkspaceRelocationWorkers(dataDir, id).workers }) !== expected) throw failure()
+        } else if (!actual.submission || sha256CanonicalJson({ results: actual.submission.results }) !== expected) throw failure()
+      }
       transport.verify()
       return result
     } catch { transport.close(); throw failure() }
   }
-  return Object.freeze({ prepare: workers => acknowledged('prepare', { workers }),
+  return Object.freeze({ capture: async workers => { await acknowledged('capture', { workers }) }, prepare: workers => acknowledged('prepare', { workers }),
     complete: async results => { await acknowledged('complete', { results }) }, close: transport.close })
 }
 export function serveWorkspaceWorkerJournal(context) {
   const args = { dataDir: context.dataDir, id: context.id }
   return serveWorkspaceJournal(context, 'worker', {
+    capture(payload) {
+      if (!fields(payload, ['workers'])) throw failure()
+      commitWorkspaceRelocationWorkers({ ...args, workers: payload.workers })
+      return true
+    },
     prepare(payload) {
       if (!fields(payload, ['workers'])) throw failure()
       commitWorkspaceRelocationWorkers({ ...args, workers: payload.workers })

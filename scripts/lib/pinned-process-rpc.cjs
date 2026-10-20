@@ -6,13 +6,14 @@ const { randomUUID } = require('node:crypto')
 const identity = require('./process-identity.cjs')
 const unavailable = () => Object.assign(new Error('固定进程连接无法继续核验，未重试请求。'), { code: 'CRABOT_PROCESS_RPC' })
 
-async function openPinnedProcessRpc(expected, port, { signal, timeoutMs = 5000, source = 'module-manager' } = {}) {
+async function openPinnedProcessRpc(expected, port, { signal, timeoutMs = 5000, source = 'module-manager', maxResponseBytes = 256 * 1024 } = {}) {
   expected = Object.freeze({ ...expected })
   let socket, closed = false, used = false, pending = false
   const agent = new Agent({ keepAlive: true, maxSockets: 1, maxFreeSockets: 1 })
   const deadline = () => AbortSignal.any([AbortSignal.timeout(timeoutMs), ...(signal ? [signal] : [])])
   function verify() {
     if (closed || typeof source !== 'string' || !source || source.includes('\0') || !Number.isInteger(port) || port < 1 || port > 65535
+      || !Number.isInteger(maxResponseBytes) || maxResponseBytes < 1 || maxResponseBytes > 32 * 1024 * 1024
       || !Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 2147483647
       || expected.owner !== identity.inspectProcess(process.pid).owner
       || !identity.sameProcess(expected, identity.inspectProcess(expected.pid))
@@ -49,7 +50,7 @@ async function openPinnedProcessRpc(expected, port, { signal, timeoutMs = 5000, 
             const chunks = []; let size = 0
             for await (const chunk of response) {
               size += chunk.length
-              if (size > 256 * 1024) { response.destroy(); throw unavailable() }
+              if (size > maxResponseBytes) { response.destroy(); throw unavailable() }
               chunks.push(chunk)
             }
             const value = JSON.parse(Buffer.concat(chunks).toString('utf8'))

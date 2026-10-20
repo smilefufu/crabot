@@ -24,6 +24,7 @@ import {
   type RegisterParams,
   type SubscribeParams,
   type PublishEventParams,
+  type WorkspaceRelocationWorker,
   type VerifyWorkspaceRelocationRequestParams,
   type VerifyWorkspaceRelocationRequestResult,
   type VerifyWorkspaceRelocationCoordinatorParams,
@@ -130,6 +131,7 @@ interface ManagedChildState {
 }
 
 interface WorkspaceCoordinatorGrant {
+  capture?: Promise<ReadonlyArray<WorkspaceRelocationWorker>>
   token: string
   revoke?: () => void
   proof: Omit<VerifyWorkspaceRelocationCoordinatorResult, 'verified' | 'action'>
@@ -1304,6 +1306,51 @@ export class ModuleManager {
     child.once('exit', revoke); child.once('error', revoke); child.once('disconnect', revoke)
     agentChild.once('exit', revoke); agentChild.once('error', revoke)
     return { authorizationBearer: grant.token }
+  }
+
+  private async captureWorkspaceRelocationWorkersForCoordinator(
+    child: ChildProcess, request: VerifyWorkspaceRelocationRequestParams, bearer?: string,
+  ): Promise<ReadonlyArray<WorkspaceRelocationWorker>> {
+    await this.authorizeWorkspaceRelocationCoordinator(child, request, bearer)
+    const grant = this.workspaceCoordinatorGrant
+    const unavailable = () => Object.assign(new Error('执行器范围未能经原协调器确认，已保留维护保护；未重发捕获。'), { code: 'SERVICE_UNAVAILABLE' })
+    if (!grant || grant.child !== child) throw unavailable()
+    this.assertWorkspaceCoordinatorGrantCurrent(grant)
+    if (!grant.capture) grant.capture = Promise.resolve().then(async () => {
+      let rpc: { call(method: string, params: unknown, options: { authorizationBearer: string }): Promise<unknown>; close(): void } | undefined
+      let journal: { capture(workers: unknown): Promise<void>; close(): void } | undefined
+      try {
+        this.assertWorkspaceCoordinatorGrantCurrent(grant)
+        const native = require('../../scripts/lib/process-identity.cjs'), { captureSpawnedProcessTree } = require('../../scripts/lib/spawned-process-tree.cjs')
+        const processes: WorkspaceModuleScope['processes'] = captureSpawnedProcessTree(grant.agent.child)
+        const listeners = processes.filter(item => native.sameProcess(item, native.inspectProcess(item.pid)) && native.listListeningTcpPorts(item.pid).includes(grant.agent.port))
+        if (listeners.length !== 1) throw unavailable()
+        const { openModuleRuntimeRpc } = require('../../scripts/lib/module-runtime-rpc.cjs')
+        const connection = await openModuleRuntimeRpc(listeners[0], grant.agent.port,
+          { instance_id: this.runtimeRegistry.getInstanceId(), module_id: 'crabot-agent', runtime_id: grant.agent.runtimeId },
+          { timeoutMs: 30000, maxResponseBytes: 32 * 1024 * 1024 })
+        rpc = connection
+        this.assertWorkspaceCoordinatorGrantCurrent(grant)
+        const result = await connection.call('capture_workspace_relocation_workers',
+          { intent_id: grant.proof.intent_id, launch_id: grant.proof.launch_id }, { authorizationBearer: grant.token })
+        this.assertWorkspaceCoordinatorGrantCurrent(grant)
+        if (!result || typeof result !== 'object' || Array.isArray(result) || Object.keys(result).length !== 1
+          || !Object.prototype.hasOwnProperty.call(result, 'workers') || !Array.isArray(result.workers)) throw unavailable()
+        const records = require('../../scripts/lib/workspace-relocation-intent.mjs')
+        const { launch } = records.readWorkspaceRelocationCoordinator(this.dataDir, grant.proof.intent_id)
+        const { createWorkspaceWorkerJournal } = require('../../scripts/lib/workspace-worker-journal.mjs')
+        const channel = createWorkspaceWorkerJournal(child, { dataDir: this.dataDir, id: grant.proof.intent_id, launch })
+        journal = channel
+        await channel.capture(result.workers)
+        this.assertWorkspaceCoordinatorGrantCurrent(grant)
+        const workers: WorkspaceRelocationWorker[] = records.readWorkspaceRelocationWorkers(this.dataDir, grant.proof.intent_id).workers
+        if (sha256CanonicalJson(workers) !== sha256CanonicalJson(result.workers)) throw unavailable()
+        return Object.freeze(workers.map(worker => Object.freeze({ ...worker,
+          incarnations: Object.freeze(worker.incarnations.map(incarnation => Object.freeze({ ...incarnation }))) })))
+      } catch { throw unavailable() }
+      finally { journal?.close(); rpc?.close() }
+    })
+    return grant.capture
   }
 
   private handleVerifyWorkspaceRelocationCoordinator(

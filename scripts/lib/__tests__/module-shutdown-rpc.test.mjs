@@ -137,3 +137,18 @@ test('the neutral pinned connection uses its fixed diagnostic source without cha
   assert.equal(f.calls[0].body.source, 'crabot-agent')
   assert.deepEqual(f.calls[0].body.params, { action: 'capture_workers' })
 })
+
+test('a full scope may opt into a bounded response size without changing the default', async t => {
+  const f = await fixture(t, (req, res, body) => res.end(JSON.stringify({ id: body.id, success: true, data: { payload: 'x'.repeat(300 * 1024) } })))
+  const rpc = await transport.openPinnedProcessRpc(f.process, f.port, { maxResponseBytes: 1024 * 1024 })
+  t.after(() => rpc.close())
+  assert.equal((await rpc.call('capture_workspace_relocation_workers', {})).payload.length, 300 * 1024)
+  const ordinary = await transport.openPinnedProcessRpc(f.process, f.port)
+  t.after(() => ordinary.close())
+  await assert.rejects(ordinary.call('capture_workspace_relocation_workers', {}))
+})
+for (const limit of [0, -1, 1.5, 32 * 1024 * 1024 + 1]) test('invalid full scope response budget is rejected before transmission: ' + limit, async t => {
+  const f = await fixture(t)
+  await assert.rejects(transport.openPinnedProcessRpc(f.process, f.port, { maxResponseBytes: limit }))
+  assert.equal(f.calls.length, 0)
+})
