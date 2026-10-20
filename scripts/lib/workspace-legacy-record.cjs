@@ -3,8 +3,13 @@ const fs = require('node:fs')
 const path = require('node:path')
 const { createHash } = require('node:crypto')
 const native = require('./process-identity.cjs')
-const management = require('./desktop-management.cjs')
 const fail = () => { throw Object.assign(new Error('旧执行兼容材料无法核验，原记录和维护保护已保留。'), { code: 'WORKSPACE_MAINTENANCE' }) }
+function requireOwnedDataRoot(directory) {
+  directory = path.resolve(directory)
+  const stat = fs.lstatSync(directory)
+  if (!stat.isDirectory() || stat.isSymbolicLink() || (process.platform === 'win32' ? !native.isOwnedDirectory(directory) : stat.uid !== process.getuid())) fail()
+  return fs.realpathSync.native(directory)
+}
 const version = stat => [stat.dev, stat.ino, stat.size, stat.mode, stat.uid, stat.gid, stat.nlink, stat.mtimeNs, stat.ctimeNs].join(':')
 const identity = directory => {
   const stat = fs.lstatSync(directory, { bigint: true })
@@ -28,9 +33,25 @@ function optional(file, limit) {
     return { value: JSON.parse(content), sha256: createHash('sha256').update(content).digest('hex') }
   } finally { fs.closeSync(fd) }
 }
+function validateBoundary(value) {
+  const text = value => typeof value === 'string' && value.length > 0 && value.length <= 4096 && !value.includes('\0')
+  const time = value => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value)
+    && Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value
+  if (!value || Object.keys(value).sort().join(',') !== 'captured_at,entries,schema_version' || value.schema_version !== 1
+    || !time(value.captured_at) || !Array.isArray(value.entries) || value.entries.length > 32768) fail()
+  const ids = new Set()
+  for (const entry of value.entries) {
+    if (!entry || Object.keys(entry).sort().join(',') !== 'evidence_sha256,incarnation_id,worker_id'
+      || !text(entry.worker_id) || !text(entry.incarnation_id) || typeof entry.evidence_sha256 !== 'string'
+      || !/^[a-f0-9]{64}$/.test(entry.evidence_sha256)) fail()
+    const id = JSON.stringify([entry.worker_id, entry.incarnation_id])
+    if (ids.has(id)) fail()
+    ids.add(id)
+  }
+}
 function readWorkspaceLegacyExecutions(dataDir) {
   try {
-    const root = management.requirePrivateDataRoot(dataDir), rootIdentity = identity(root), control = path.join(root, 'workspace-control')
+    const root = requireOwnedDataRoot(dataDir), rootIdentity = identity(root), control = path.join(root, 'workspace-control')
     let stat
     try { stat = fs.lstatSync(control) } catch (error) { if (error.code === 'ENOENT') return null; throw error }
     const controlIdentity = identity(control)
@@ -38,9 +59,10 @@ function readWorkspaceLegacyExecutions(dataDir) {
     const body = optional(path.join(control, 'legacy-executions.json'), 32 * 1024 * 1024), ready = optional(path.join(control, 'legacy-executions.ready'), 1024)
     if (rootIdentity !== identity(root) || controlIdentity !== identity(control)) fail()
     if (!body) { if (ready) fail(); return null }
+    validateBoundary(body.value)
     if (ready && (!ready.value || Object.keys(ready.value).sort().join(',') !== 'schema_version,sha256'
       || ready.value.schema_version !== 1 || ready.value.sha256 !== body.sha256)) fail()
     return { status: ready ? 'ready' : 'prepared', value: body.value, sha256: body.sha256 }
   } catch { fail() }
 }
-module.exports = { readWorkspaceLegacyExecutions }
+module.exports = { readWorkspaceLegacyExecutions, requireOwnedDataRoot }

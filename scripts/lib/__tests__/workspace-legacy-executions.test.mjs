@@ -5,6 +5,7 @@ import path from 'node:path'
 import os from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { createRequire } from 'node:module'
+import { createHash } from 'node:crypto'
 import management from '../desktop-management.cjs'
 import { acquireCliLock, releaseCliLock } from '../cli-lock.mjs'
 import { prepareWorkspaceLegacyExecutions, previewWorkspaceLegacyExecutions } from '../workspace-legacy-executions.mjs'
@@ -129,4 +130,83 @@ for (const damage of ['malformed ledger', 'unknown envelope', 'wrong owner key',
   if (damage === 'ledger directory link') { await fs.rename(f.dir, f.dir + '.old'); await fs.symlink(f.dir + '.old', f.dir, process.platform === 'win32' ? 'junction' : 'dir') }
   await assert.rejects(prepareWorkspaceLegacyExecutions(home, f.data))
   await assert.rejects(fs.stat(f.boundary), { code: 'ENOENT' })
+})
+test('read-only preview never loads executable code from the target Core', async t => {
+  const f = await fixture(t), target = path.join(f.root, 'preview-target'), marker = path.join(f.root, 'executed-target')
+  const module = path.join(target, 'crabot-agent/dist/workers/harness')
+  await fs.mkdir(module, { recursive: true })
+  await fs.writeFile(path.join(target, 'crabot-agent/workspace-legacy-execution-version'), '1\n')
+  await fs.writeFile(path.join(module, 'workspace-legacy-executions.js'), `require('node:fs').writeFileSync(${JSON.stringify(marker)},'executed');module.exports={}`)
+  assert.equal((await previewWorkspaceLegacyExecutions(target, f.data)).status, 'pending')
+  await assert.rejects(fs.stat(marker), { code: 'ENOENT' })
+  await prepareWorkspaceLegacyExecutions(home, f.data)
+  assert.equal((await previewWorkspaceLegacyExecutions(target, f.data)).status, 'ready')
+  await assert.rejects(fs.stat(marker), { code: 'ENOENT' })
+})
+test('common stopped migration preparation fixes the boundary before its first successful return', async t => {
+  const f = await fixture(t), { runMigrations } = await import('../../upgrade-lib/migrate.mjs')
+  const result = await runMigrations(home, f.data, async () => { throw new Error('no module migration should run for empty Admin/Memory') }, { info() {}, warn() {}, error() {} })
+  assert.equal(result.ok, true)
+  const first = records.readWorkspaceLegacyExecutions(f.data)
+  assert.equal(first?.status, 'ready'); assert.equal(first.value.entries.length, 1)
+  const bytes = await fs.readFile(f.boundary)
+  const ledger = new LedgerStore(f.dir), old = (await ledger.listAllWorkers())[0]
+  assert.equal(createLegacyWorkspaceExecutionMatcher(first.value)(old.managerKey, old.worker, old.worker.incarnations[0].incarnation_id), true)
+  assert.equal((await runMigrations(home, f.data, async () => { throw new Error('must not replay') }, { info() {}, warn() {}, error() {} })).ok, true)
+  assert.deepEqual(await fs.readFile(f.boundary), bytes)
+})
+for (const damage of ['schema', 'date', 'duplicate', 'extra entry', 'extra header']) test('neutral preview rejects malformed original evidence even when its byte digest matches: ' + damage, async t => {
+  const f = await fixture(t); await prepareWorkspaceLegacyExecutions(home, f.data)
+  const body = JSON.parse(await fs.readFile(f.boundary, 'utf8'))
+  if (damage === 'schema') body.schema_version = 2
+  if (damage === 'date') body.captured_at = 'invalid'
+  if (damage === 'duplicate') body.entries.push(body.entries[0])
+  if (damage === 'extra entry') body.entries[0].allow_current = true
+  if (damage === 'extra header') body.allow_all = true
+  const bytes = JSON.stringify(body) + '\n'
+  await fs.writeFile(f.boundary, bytes)
+  await fs.writeFile(f.ready, JSON.stringify({ schema_version: 1, sha256: createHash('sha256').update(bytes).digest('hex') }))
+  await assert.rejects(previewWorkspaceLegacyExecutions(home, f.data))
+  await assert.rejects(prepareWorkspaceLegacyExecutions(home, f.data))
+  assert.equal(await fs.readFile(f.boundary, 'utf8'), bytes)
+})
+test('corrupt existing legacy material rejects the entire common migration before any module script or schema write', async t => {
+  const f = await fixture(t); await prepareWorkspaceLegacyExecutions(home, f.data)
+  await fs.writeFile(f.boundary, '{invalid')
+  const directory = path.join(f.data, 'memory'); await fs.mkdir(directory)
+  await fs.writeFile(path.join(directory, 'SCHEMA_VERSION'), 'v4\n')
+  const { runMigrations } = await import('../../upgrade-lib/migrate.mjs')
+  let dispatched = false
+  await assert.rejects(runMigrations(home, f.data, async () => { dispatched = true; return { exitCode: 0 } }, { info() {}, warn() {}, error() {} }))
+  assert.equal(dispatched, false); assert.equal(await fs.readFile(path.join(directory, 'SCHEMA_VERSION'), 'utf8'), 'v4\n')
+})
+test('first-start fallback shares the real held-lock migration entry and fixed legacy boundary', async t => {
+  const f = await fixture(t), { applyStartupMigrations } = await import('../core-preparation.mjs'), lock = await acquireCliLock(f.data, 'test-start')
+  try {
+    await applyStartupMigrations(home, f.data, { PATH: '' })
+    const first = records.readWorkspaceLegacyExecutions(f.data)
+    assert.equal(first?.status, 'ready'); assert.equal(first.value.entries.length, 1)
+  } finally { releaseCliLock(lock) }
+})
+test('the original data root cannot be replaced while stopped-state inspection awaits filesystem reads', { skip: process.platform === 'win32' }, async t => {
+  const f = await fixture(t), syncFs = require('node:fs'), originalRead = fs.readFile, lock = await acquireCliLock(f.data, 'test-root')
+  let replaced = false
+  fs.readFile = async function(file, ...args) {
+    if (file === path.join(f.data, 'mm.pid') && !replaced) {
+      syncFs.renameSync(f.data, f.data + '-original'); syncFs.mkdirSync(f.data, { mode: 0o700 }); replaced = true
+    }
+    return originalRead.call(this, file, ...args)
+  }
+  try { await assert.rejects(prepareWorkspaceLegacyExecutions(home, f.data, { lockHeld: true })) }
+  finally { fs.readFile = originalRead; releaseCliLock(lock) }
+  assert.equal(replaced, true)
+  await assert.rejects(fs.stat(f.boundary), { code: 'ENOENT' })
+  assert.equal(await fs.readFile(path.join(f.data + '-original', 'agent/worker-ledgers', managerKeyToFilename(manager)), 'utf8'), JSON.stringify({ manager_key: manager, workers: [f.worker] }))
+})
+test('an existing owned CLI data directory keeps its original 0755 mode; only new control material is private', { skip: process.platform === 'win32' }, async t => {
+  const f = await fixture(t); await fs.chmod(f.data, 0o755)
+  assert.equal((await prepareWorkspaceLegacyExecutions(home, f.data)).status, 'ready')
+  assert.equal((await fs.stat(f.data)).mode & 0o777, 0o755)
+  assert.equal((await fs.stat(f.control)).mode & 0o777, 0o700)
+  assert.equal((await fs.stat(f.boundary)).mode & 0o777, 0o600)
 })

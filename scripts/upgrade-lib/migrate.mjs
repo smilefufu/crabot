@@ -1,3 +1,4 @@
+import { previewWorkspaceLegacyExecutions, prepareWorkspaceLegacyExecutions } from '../lib/workspace-legacy-executions.mjs'
 import { assertAdminDataCompatibility } from '../lib/admin-data-compat.mjs'
 import { assertWorkspaceDataCompatibility } from '../lib/workspace-data-compat.mjs'
 import { prepareSharedRequests, previewSharedRequests } from './shared-requests.mjs'
@@ -121,6 +122,7 @@ export async function runMigrations(crabotHome, dataDir, runScriptFn, logger = c
     assertAdminDataCompatibility(crabotHome, dataDir)
     assertWorkspaceDataCompatibility(crabotHome, dataDir)
     await assertNoInterruptedMigrations(dataDir)
+    await previewWorkspaceLegacyExecutions(crabotHome, dataDir)
     const targets = scanModules(crabotHome, dataDir)
     // Fail unknown adapters/scripts before writing any module or stopping any service.
     let descriptions = await Promise.all(targets.map(t => describeMigration(join(crabotHome, t.moduleId), t.dataDir, t.dataVersion, t.codeVersion)))
@@ -137,6 +139,7 @@ export async function runMigrations(crabotHome, dataDir, runScriptFn, logger = c
       migrated.push(description.module_id)
     }
     await prepareSharedRequests(crabotHome, dataDir, logger, { lockHeld: true })
+    await prepareWorkspaceLegacyExecutions(crabotHome, dataDir, { lockHeld: true })
     return { ok: true, migrated, skipped: [] }
   } finally { releaseCliLock(lock) }
 }

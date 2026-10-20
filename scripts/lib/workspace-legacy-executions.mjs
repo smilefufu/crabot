@@ -4,7 +4,6 @@ import path from 'node:path'
 import { createRequire } from 'node:module'
 import { randomUUID } from 'node:crypto'
 import native from './process-identity.cjs'
-import management from './desktop-management.cjs'
 import records from './workspace-legacy-record.cjs'
 import { acquireCliLock, cliLockToken, hasInheritedCliLock, releaseCliLock } from './cli-lock.mjs'
 import { assertStopped } from '../upgrade-lib/scoped-data.mjs'
@@ -16,13 +15,12 @@ function capabilities(root) {
   const file = path.join(root, 'crabot-agent/workspace-legacy-execution-version'), stat = optionalStat(file)
   if (!stat) return null
   if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1n || stat.size > 64n || fs.readFileSync(file, 'utf8') !== '1\n') fail()
-  return require(path.join(root, 'crabot-agent/dist/workers/harness/workspace-legacy-executions.js'))
+  return true
 }
 export async function previewWorkspaceLegacyExecutions(root, dataDir) {
-  const code = capabilities(root)
-  if (!code) return { status: 'not_applicable' }
-  const record = records.readWorkspaceLegacyExecutions(dataDir)
-  if (record) { code.createLegacyWorkspaceExecutionMatcher(record.value); return record }
+  if (!capabilities(root)) return { status: 'not_applicable' }
+  const record = optionalStat(dataDir) ? records.readWorkspaceLegacyExecutions(dataDir) : null
+  if (record) return record
   return { status: 'pending' }
 }
 function captureInputs(root, dataDir) {
@@ -76,19 +74,30 @@ function sync(directory) {
   const fd = fs.openSync(directory, 'r'); try { fs.fsyncSync(fd) } finally { fs.closeSync(fd) }
 }
 export async function prepareWorkspaceLegacyExecutions(root, dataDir, { lockHeld = false } = {}) {
-  const code = capabilities(root)
-  if (!code) return { status: 'not_applicable' }
+  if (!capabilities(root)) return { status: 'not_applicable' }
   let lock
   try {
-    const dataRoot = management.requirePrivateDataRoot(dataDir)
+    const requestedDataRoot = path.resolve(dataDir), dataRoot = records.requireOwnedDataRoot(requestedDataRoot)
+    const dataIdentity = fs.lstatSync(dataRoot, { bigint: true })
+    const assertDataRoot = () => {
+      if (records.requireOwnedDataRoot(requestedDataRoot) !== dataRoot) fail()
+      const current = fs.lstatSync(dataRoot, { bigint: true })
+      if (current.dev !== dataIdentity.dev || current.ino !== dataIdentity.ino) fail()
+    }
     if (!lockHeld) lock = await acquireCliLock(dataRoot, 'legacy-execution-upgrade')
-    const held = () => cliLockToken(path.join(dataRoot, 'cli.lock')) || (hasInheritedCliLock(dataRoot) ? process.env.CRABOT_CLI_LOCK_HELD : null)
+    const held = () => cliLockToken(path.join(requestedDataRoot, 'cli.lock')) || cliLockToken(path.join(dataRoot, 'cli.lock'))
+      || (hasInheritedCliLock(dataRoot) ? process.env.CRABOT_CLI_LOCK_HELD : null)
     const token = held()
     if (!token) fail()
     const initial = await previewWorkspaceLegacyExecutions(root, dataRoot)
+    assertDataRoot()
+    if (held() !== token) fail()
     if (initial.status === 'ready') return initial
     await assertStopped(dataRoot)
-    const dataIdentity = fs.statSync(dataRoot, { bigint: true }), control = path.join(dataRoot, 'workspace-control')
+    assertDataRoot()
+    if (held() !== token) fail()
+    const code = require(path.join(path.resolve(root), 'crabot-agent/dist/workers/harness/workspace-legacy-executions.js'))
+    const control = path.join(dataRoot, 'workspace-control')
     if (!optionalStat(control)) {
       if (process.platform === 'win32') native.createPrivateDirectory(control)
       else fs.mkdirSync(control, { mode: 0o700 })
@@ -96,6 +105,7 @@ export async function prepareWorkspaceLegacyExecutions(root, dataDir, { lockHeld
     records.readWorkspaceLegacyExecutions(dataRoot) // Establish strict control-directory ownership before writing.
     const controlIdentity = fs.statSync(control, { bigint: true })
     const assertCurrent = () => {
+      assertDataRoot()
       const data = fs.lstatSync(dataRoot, { bigint: true }), parent = fs.lstatSync(control, { bigint: true })
       if (held() !== token || !data.isDirectory() || data.isSymbolicLink() || data.dev !== dataIdentity.dev || data.ino !== dataIdentity.ino
         || !parent.isDirectory() || parent.isSymbolicLink() || parent.dev !== controlIdentity.dev || parent.ino !== controlIdentity.ino) fail()
