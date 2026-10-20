@@ -42,4 +42,4 @@ jobs:
       - run: node scripts/build-native.mjs
       - run: pnpm --dir crabot-shared install --frozen-lockfile
       - run: pnpm --dir crabot-shared build
-      - run: node --test scripts/lib/__tests__/workspace-file-metadata.test.mjs scripts/lib/__tests__/workspace-copy.test.mjs scripts/lib/__tests__/directory-move.test.mjs
+      - run: node --test scripts/lib/__tests__/workspace-file-metadata.test.mjs scripts/lib/__tests__/workspace-copy.test.mjs scripts/lib/__tests__/directory-move.test.mjs scripts/lib/__tests__/directory-pin.test.mjs
