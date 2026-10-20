@@ -111,8 +111,11 @@ static napi_value CopyPinnedDirectoryMetadata(napi_env env, napi_callback_info i
       || GetSecurityInfo(write, SE_FILE_OBJECT, fields, &targetOwner, &targetGroup, nullptr, &targetLabel, &targetDescriptor) != ERROR_SUCCESS
       || !sourceOwner || !sourceGroup || !targetOwner || !targetGroup
       || !EqualSid(sourceOwner, targetOwner) || !EqualSid(sourceGroup, targetGroup)) throw std::runtime_error("Cannot preserve pinned directory ownership");
-    FILE_BASIC_INFO basic{};
-    if (!GetFileInformationByHandleEx(source->handles.back(), FileBasicInfo, &basic, sizeof(basic))) throw std::runtime_error("Cannot read pinned directory metadata");
+    FILE_BASIC_INFO basic{}; SECURITY_DESCRIPTOR_CONTROL control = 0; DWORD revision = 0;
+    if (!GetFileInformationByHandleEx(source->handles.back(), FileBasicInfo, &basic, sizeof(basic))
+      || !GetSecurityDescriptorControl(sourceDescriptor, &control, &revision)
+      || !SetSecurityDescriptorControl(sourceDescriptor, SE_DACL_AUTO_INHERIT_REQ,
+        (control & SE_DACL_AUTO_INHERITED) ? SE_DACL_AUTO_INHERIT_REQ : 0)) throw std::runtime_error("Cannot read pinned directory metadata");
     if ((!sourceLabel || !sourceLabel->AceCount) && targetLabel && targetLabel->AceCount) throw std::runtime_error("Cannot remove an existing target access label");
     // Preserve the source inheritance model instead of converting legacy ACLs or propagating changes to children.
     // The full target path remains fixed by its live root/ancestor handles throughout this path-only API.
