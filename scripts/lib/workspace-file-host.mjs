@@ -44,7 +44,7 @@ export async function launchWorkspaceFileHost(options) {
     const entry = fileURLToPath(new URL('../workspace-file-host.mjs', import.meta.url))
     const allowed = new Set(['PATH', 'HOME', 'USERPROFILE', 'SYSTEMROOT', 'WINDIR', 'LANG', 'LC_ALL', 'LC_CTYPE', 'TZ', 'TMPDIR', 'TMP', 'TEMP'])
     const env = Object.fromEntries(Object.entries(process.env).filter(([key, value]) => value !== undefined && allowed.has(key.toUpperCase())))
-    child = spawn(process.execPath, [entry], { cwd: path.dirname(entry), env, stdio: ['ignore', 'ignore', 'ignore', 'ipc'] })
+    child = spawn(process.execPath, [entry], { cwd: path.dirname(entry), env, stdio: ['ignore', 'ignore', 'ignore', 'ipc'], windowsHide: true })
     await once(child, 'spawn')
     const host = registerWorkspaceRelocationFileHost({ ...options, process: native.inspectProcess(child.pid) })
     if (host.dispatch !== 'dispatch') throw failure()

@@ -223,7 +223,15 @@ for (const scenario of ['normal', 'unexpected-path', 'lost-reply']) test('actual
 for (const mode of ['confirmed', 'lost reply', 'unexpected payload', 'exited Host']) test('fixed file journal starts only one idle Host: ' + mode, { timeout: 25000 }, async t => {
   const f = await fixture(t), { child, launch } = await f.launch(), context = { dataDir: f.data, id: f.id, launch }
   const workers = createWorkspaceWorkerJournal(child, context), modules = createWorkspaceModuleJournal(child, context), processes = createWorkspaceProcessJournal(child, context)
-  let files = createWorkspaceFileJournal(child, context), host
+  let files = createWorkspaceFileJournal(child, context), host, hostExited = false, failed
+  const confirmHostExit = async () => {
+    const deadline = Date.now() + 2000; let last
+    do {
+      try { if (native.isProcessExited(host.pid) === true) { hostExited = true; return } } catch (error) { last = error }
+      await new Promise(resolve => setTimeout(resolve, 10))
+    } while (Date.now() < deadline)
+    assert.fail('Host Kernel exit was not confirmed: ' + (last?.code ?? 'still active'))
+  }
   try {
     await workers.capture([]); await workers.captureProcesses([]); await modules.capture([])
     await processes.prepare(); await processes.observe([]); await processes.complete()
@@ -245,6 +253,10 @@ for (const mode of ['confirmed', 'lost reply', 'unexpected payload', 'exited Hos
       assert.ok(readWorkspaceRelocationFileActors(f.data, f.id).permission)
       files.close(); files = createWorkspaceFileJournal(child, context)
     }
+    const describeChildren = () => native.listChildProcessIds(child.pid).map(pid => {
+      try { return { process: native.inspectProcess(pid), argv: native.inspectProcessArguments(pid) } } catch (error) { return { pid, unavailable: error.code } }
+    })
+    const initialChildren = describeChildren()
     const first = await files.prepareHost(); host = first.actors.host.process
     assert.equal(first.dispatch, mode === 'lost reply' ? 'observe' : 'dispatch')
     assert.equal(host.parent, child.pid); assert.ok(native.sameProcess(host, native.inspectProcess(host.pid)))
@@ -252,23 +264,26 @@ for (const mode of ['confirmed', 'lost reply', 'unexpected payload', 'exited Hos
     const second = await files.prepareHost()
     assert.equal(second.dispatch, 'observe'); assert.deepEqual(second.actors, first.actors)
     assert.deepEqual(fs.readFileSync(path.join(f.data, 'workspace-control/relocation-file-actors.jsonl')), bytes)
-    assert.deepEqual(native.listChildProcessIds(child.pid), [host.pid])
+    assert.deepEqual(native.listChildProcessIds(child.pid), [host.pid], JSON.stringify({ initial: initialChildren, current: describeChildren() }))
     const plan = readWorkspaceRelocationFilePlan(f.data, f.id)
     assert.equal(fs.existsSync(plan.staging_path), false); assert.equal(fs.existsSync(path.join(f.root, 'new')), false)
     assert.equal(fs.readFileSync(f.marker, 'utf8'), 'original work'); assert.deepEqual(await f.catalog.snapshot(), f.before)
     if (mode === 'exited Host') {
       native.terminateKnownProcess(host)
-      const deadline = Date.now() + 2000
-      while (!native.isProcessExited(host.pid) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10))
-      assert.equal(native.isProcessExited(host.pid), true)
+      await confirmHostExit()
       await assert.rejects(files.prepareHost(), { code: 'CRABOT_WORKSPACE_JOURNAL_UNAVAILABLE' })
       assert.deepEqual(native.listChildProcessIds(child.pid), [])
       assert.deepEqual(fs.readFileSync(path.join(f.data, 'workspace-control/relocation-file-actors.jsonl')), bytes)
     }
     await f.close()
-    const deadline = Date.now() + 2000
-    while (!native.isProcessExited(host.pid) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10))
-    assert.equal(native.isProcessExited(host.pid), true)
+    if (!hostExited) await confirmHostExit()
     assert.deepEqual(readWorkspaceRelocationFileActors(f.data, f.id), first.actors)
-  } finally { workers.close(); modules.close(); processes.close(); files.close(); if (host) native.terminateKnownProcess(host) }
+  } catch (error) { failed = error; throw error }
+  finally {
+    workers.close(); modules.close(); processes.close(); files.close()
+    if (host && !hostExited) try { native.terminateKnownProcess(host) } catch (error) {
+      if (!failed) throw error
+      t.diagnostic('Host cleanup also remained unverified: ' + error.code)
+    }
+  }
 })

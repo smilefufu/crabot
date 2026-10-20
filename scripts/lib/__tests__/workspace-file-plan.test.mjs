@@ -14,12 +14,14 @@ import { WorkspaceCatalog } from '../../../crabot-shared/dist/workspace-catalog.
 import { sha256CanonicalJson } from '../../../crabot-shared/dist/canonical-json.js'
 import * as records from '../workspace-relocation-intent.mjs'
 
-async function fixture(t, { exitEvidence = true } = {}) {
+async function fixture(t, { exitEvidence = true, crossVolume = false } = {}) {
   const root = fs.realpathSync.native(fs.mkdtempSync(path.join(tmpdir(), 'workspace-file-plan-中文 space-')))
   const data = management.ensurePrivateDataRoot(path.join(root, 'data')), id = randomUUID()
   const catalog = new WorkspaceCatalog({ dataRoot: data, files: native }); await catalog.initialize()
-  const before = await catalog.snapshot(), source = before.storage_root, target = path.join(root, 'new')
+  const targetRoot = crossVolume ? fs.mkdtempSync('/dev/shm/crabot-file-tools-') : root
+  const before = await catalog.snapshot(), source = before.storage_root, target = path.join(targetRoot, 'new')
   fs.writeFileSync(path.join(source, 'default/file'), 'original bytes')
+  if (crossVolume) fs.writeFileSync(path.join(source, 'default/finite-archive.bin'), Buffer.alloc(1024 * 1024, 7))
   const lock = await acquireCliLock(data, 'workspace-relocation')
   await records.beginWorkspaceRelocationIntent({ dataDir: data, id, target, expectedRevision: before.revision, protectedRoots: [] })
   records.commitWorkspaceRelocationWorkers({ dataDir: data, id, workers: [] })
@@ -27,20 +29,30 @@ async function fixture(t, { exitEvidence = true } = {}) {
   records.commitWorkspaceRelocationModules({ dataDir: data, id, modules: [] })
   const entry = new URL('../workspace-coordinator-entry.mjs', import.meta.url).href
   const module = new URL('../workspace-relocation-intent.mjs', import.meta.url).href
+  const hostCode = `import {spawnWorkspaceTar} from ${JSON.stringify(new URL('../workspace-tar.mjs', import.meta.url).href)};
+    let actors=[];const stop=async()=>{for(const actor of actors){actor.cancel();actor.child.stdout.resume();if(actor.child.exitCode===null&&actor.child.signalCode===null)actor.child.kill('SIGTERM')}await Promise.all(actors.map(actor=>actor.closed))};
+    process.on('message',async message=>{try{let result;if(message==='tools-create'){actors=[await spawnWorkspaceTar('pack'),await spawnWorkspaceTar('unpack')];result=actors.map((actor,index)=>({role:index?'unpack':'pack',process:actor.identity}))}
+      else if(message==='tools-pack'){actors[0].child.stdin.end();await actors[0].permit();result=true}
+      else if(message==='tools-stop'){await stop();result=true}else throw new Error('finite unknown operation');process.send({result})}catch(error){process.send({error:error.code??error.message})}});
+    process.once('disconnect',async()=>{await stop();process.exit(0)});process.send('ready');setTimeout(()=>process.exit(3),30000);`
   const code = `import fs from 'node:fs';import{spawn}from'node:child_process';import{once}from'node:events';import native from ${JSON.stringify(new URL('../process-identity.cjs', import.meta.url).href)};import{enterWorkspaceRelocationCoordinator}from ${JSON.stringify(entry)};import * as records from ${JSON.stringify(module)};
     const context=await enterWorkspaceRelocationCoordinator(), args={dataDir:context.dataDir,id:context.id};
     if(${exitEvidence}){records.prepareWorkspaceRelocationProcessStops(args);records.observeWorkspaceRelocationProcesses({...args,processes:[]});
       records.prepareWorkspaceRelocationStops({...args,workers:[]});records.completeWorkspaceRelocationStops({...args,results:[]});
       records.prepareWorkspaceRelocationModuleStops({...args,modules:[]});records.completeWorkspaceRelocationModuleStops({...args,results:[]});
       records.completeWorkspaceRelocationProcessStops(args);records.commitWorkspaceRelocationExecutionExit(args)}
-    let host,hostIdentity,hostEnded;
-    async function ensureHost(){if(host)return;host=spawn(process.execPath,['-e','process.send(\"ready\");setTimeout(()=>{},30000)'],{stdio:['ignore','ignore','ignore','ipc']});hostEnded=once(host,'exit');await once(host,'message');hostIdentity=native.inspectProcess(host.pid);process.send({kind:'fixture-actor',identity:hostIdentity})}
+    let host,hostIdentity,hostEnded,tools;
+    async function ensureHost(){if(host)return;host=spawn(process.execPath,['--input-type=module','-e',${JSON.stringify(hostCode)}],{cwd:${JSON.stringify(source)},stdio:['ignore','ignore','ignore','ipc']});hostEnded=once(host,'exit');await once(host,'message');hostIdentity=native.inspectProcess(host.pid);process.send({kind:'fixture-actor',identity:hostIdentity})}
     process.send({kind:'fixture-ready'});process.on('message',async message=>{if(message.kind!=='command')return;
       const sync=fs.fsyncSync;try{if(message.operation==='unlock')context.release();
         if(message.operation==='fail-sync')fs.fsyncSync=fd=>{if(fs.fstatSync(fd).isDirectory())throw Object.assign(new Error('finite sync failure'),{code:'EIO'});return sync(fd)};
         let result;
         if(['host-launch','host-launch-preload','host-launch-extra','host-launch-after-unlock'].includes(message.operation)){if(message.operation==='host-launch-preload')process.env.NODE_OPTIONS='--require '+JSON.stringify(${JSON.stringify(path.join(root, 'host-preload.cjs'))});const {launchWorkspaceFileHost}=await import(${JSON.stringify(new URL('../workspace-file-host.mjs', import.meta.url).href)});if(message.operation==='host-launch-after-unlock')context.release();const launched=await launchWorkspaceFileHost(message.operation==='host-launch-extra'?{...args,entry:'not-accepted'}:args);if(launched.child){host=launched.child;hostIdentity=launched.host;hostEnded=once(host,'exit');process.send({kind:'fixture-actor',identity:hostIdentity})}result={dispatch:launched.dispatch,host:launched.host}}
         else if(message.operation==='actors-prepare')result=records.prepareWorkspaceRelocationFileActors(args);
+        else if(message.operation==='tools-create'||message.operation==='tools-pack'||message.operation==='tools-stop'){await ensureHost();const response=once(host,'message');host.send(message.operation);const [reply]=await response;if(reply.error)throw new Error(reply.error);if(message.operation==='tools-create')tools=reply.result;result=reply.result}
+        else if(message.operation==='tools-permit')result=records.permitWorkspaceRelocationCopyTools(args);
+        else if(message.operation==='tools-complete')result=records.completeWorkspaceRelocationCopyTools(args);
+        else if(message.operation.startsWith('tools-register')){const selected=structuredClone(tools);if(message.operation==='tools-register-parent')selected[0].process.parent=process.pid;if(message.operation==='tools-register-generation')selected[0].process.started='replaced';if(message.operation==='tools-register-owner')selected[0].process.owner='other';if(message.operation==='tools-register-role')selected[0].role='copy';if(message.operation==='tools-register-duplicate')selected[1].process=selected[0].process;result=records.registerWorkspaceRelocationCopyTools({...args,tools:selected})}
         else if(message.operation==='host-permit')result=records.permitWorkspaceRelocationFileHost(args);
         else if(message.operation==='host-stop'){native.terminateKnownProcess(hostIdentity);await hostEnded;result={stopped:true}}
         else if(message.operation.startsWith('host-')){
@@ -63,7 +75,7 @@ async function fixture(t, { exitEvidence = true } = {}) {
     releaseCliLock(lock)
     for (const message of messages) if (message.kind === 'fixture-actor') native.terminateKnownProcess(message.identity)
     if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
-    await exited; fs.rmSync(root, { recursive: true, force: true })
+    await exited; fs.rmSync(root, { recursive: true, force: true }); if (crossVolume) fs.rmSync(targetRoot, { recursive: true, force: true })
   })
   await once(child, 'spawn')
   const launch = records.commitWorkspaceRelocationCoordinator({ dataDir: data, id, launchId: randomUUID(), coordinator: native.inspectProcess(child.pid) })
@@ -274,4 +286,74 @@ test('correct private material hashes cannot authorize a different real child an
   assert.equal(records.readWorkspaceRelocationFileActors(f.data, f.id).permission, null)
   assert.deepEqual(fs.readFileSync(path.join(f.data, 'workspace-control/relocation-file-actors.jsonl')), bytes)
   assert.equal(fs.existsSync(f.target), false)
+})
+
+
+const crossVolumeTools = { skip: process.platform !== 'linux' || !fs.existsSync('/dev/shm') || fs.statSync(tmpdir()).dev === fs.statSync('/dev/shm').dev }
+async function toolsFixture(t, permitHost = true) {
+  const f = await fixture(t, { crossVolume: true })
+  assert.equal((await f.command()).result.plan.mode, 'copy')
+  await f.command('actors-prepare'); await f.command('host-register')
+  if (permitHost) await f.command('host-permit')
+  const created = await f.command('tools-create'); assert.equal(created.error, undefined)
+  return { ...f, tools: created.result, actorsFile: path.join(f.data, 'workspace-control/relocation-file-actors.jsonl') }
+}
+
+test('real copy tools register and permit once, and exec remains active until the whole set exits', crossVolumeTools, async t => {
+  const f = await toolsFixture(t)
+  assert.equal((await f.command('tools-complete')).error?.code, 'WORKSPACE_RELOCATION_INVALID')
+  assert.equal((await f.command('tools-register')).result.dispatch, 'dispatch')
+  assert.equal((await f.command('tools-complete')).error?.code, 'WORKSPACE_RELOCATION_INVALID')
+  assert.equal((await f.command('tools-permit')).result.dispatch, 'dispatch')
+  const before = fs.readFileSync(f.actorsFile)
+  assert.equal((await f.command('tools-register')).result.dispatch, 'observe'); assert.equal((await f.command('tools-permit')).result.dispatch, 'observe')
+  assert.deepEqual(fs.readFileSync(f.actorsFile), before)
+  assert.equal((await f.command('tools-pack')).error, undefined)
+  const pack = f.tools[0].process, deadline = Date.now() + 2000
+  while (native.inspectProcess(pack.pid)?.executable === pack.executable && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10))
+  const current = native.inspectProcess(pack.pid)
+  assert.equal(current.started, pack.started); assert.notEqual(current.executable, pack.executable)
+  assert.equal((await f.command('tools-complete')).error?.code, 'WORKSPACE_RELOCATION_INVALID')
+  assert.equal((await f.command('tools-stop')).error, undefined)
+  assert.equal((await f.command('tools-complete')).result.dispatch, 'dispatch')
+  const completed = fs.readFileSync(f.actorsFile), facts = records.readWorkspaceRelocationFileActors(f.data, f.id)
+  assert.equal(facts.tool_exit.type, 'copy_tools_exited')
+  assert.equal((await f.command('tools-complete')).result.dispatch, 'observe')
+  assert.equal((await f.command('tools-permit')).error?.code, 'WORKSPACE_RELOCATION_INVALID')
+  assert.deepEqual(fs.readFileSync(f.actorsFile), completed)
+  assert.equal(fs.existsSync(f.target), false); assert.equal(fs.existsSync(records.readWorkspaceRelocationFilePlan(f.data, f.id).staging_path), false)
+  assert.equal(fs.readFileSync(path.join(f.source, 'default/file'), 'utf8'), 'original bytes')
+  assert.deepEqual(await f.catalog.snapshot(), f.before)
+})
+
+for (const mode of ['parent', 'generation', 'owner', 'role', 'duplicate']) test('copy tool registration rejects ' + mode, crossVolumeTools, async t => {
+  const f = await toolsFixture(t), before = fs.readFileSync(f.actorsFile)
+  assert.equal((await f.command('tools-register-' + mode)).error?.code, 'WORKSPACE_RELOCATION_INVALID')
+  assert.deepEqual(fs.readFileSync(f.actorsFile), before); assert.equal(records.readWorkspaceRelocationFileActors(f.data, f.id).tools, null)
+  await f.command('tools-stop')
+})
+
+test('unpermitted Host cannot register tools and cancellation never grants later permission', crossVolumeTools, async t => {
+  const f = await toolsFixture(t, false)
+  assert.equal((await f.command('tools-register')).error?.code, 'WORKSPACE_RELOCATION_INVALID')
+  await f.command('host-permit'); assert.equal((await f.command('tools-register')).result.dispatch, 'dispatch')
+  await f.command('tools-stop'); assert.equal((await f.command('tools-complete')).result.dispatch, 'dispatch')
+  const facts = records.readWorkspaceRelocationFileActors(f.data, f.id)
+  assert.equal(facts.tool_permission, null); assert.equal(facts.tool_exit.type, 'copy_tools_exited')
+  assert.equal((await f.command('tools-permit')).error?.code, 'WORKSPACE_RELOCATION_INVALID')
+})
+
+for (const damage of ['hash', 'null', 'role', 'extra', 'reordered']) test('copy tool chain remains fenced after damage: ' + damage, crossVolumeTools, async t => {
+  const f = await toolsFixture(t); await f.command('tools-register'); await f.command('tools-permit'); await f.command('tools-stop')
+  const rows = fs.readFileSync(f.actorsFile, 'utf8').trimEnd().split('\n').map(JSON.parse)
+  if (damage === 'hash') rows[3].previous_sha256 = '0'.repeat(64)
+  else if (damage === 'null') rows[3] = null
+  else if (damage === 'role') rows[3].tools[0].role = 'copy'
+  else if (damage === 'extra') rows[3].command = 'not accepted'
+  else rows.reverse()
+  fs.writeFileSync(f.actorsFile, rows.map(JSON.stringify).join('\n') + '\n')
+  const bytes = fs.readFileSync(f.actorsFile)
+  assert.throws(() => records.readWorkspaceRelocationFileActors(f.data, f.id), { code: 'WORKSPACE_RELOCATION_INVALID' })
+  assert.equal((await f.command('tools-complete')).error?.code, 'WORKSPACE_RELOCATION_INVALID')
+  assert.deepEqual(fs.readFileSync(f.actorsFile), bytes)
 })

@@ -866,17 +866,25 @@ export async function prepareWorkspaceRelocationFilePlan({ dataDir, id, signal }
 }
 
 
+function validCopyTools(tools, host) {
+  const roles = process.platform === 'win32' ? ['copy'] : ['pack', 'unpack']
+  return ['darwin', 'linux', 'win32'].includes(process.platform) && Array.isArray(tools) && tools.length === roles.length && new Set(tools.map(item => item?.process?.pid)).size === roles.length
+    && tools.every((item, index) => fields(item, ['role', 'process']) && item.role === roles[index] && validCoordinatorProcess(item.process)
+      && item.process.parent === host.pid && item.process.pid !== host.pid && item.process.owner === host.owner)
+}
+
 /** File actor facts are separate from the earlier business execution-exit fact. */
 export function readWorkspaceRelocationFileActors(dataDir, id) {
   const { ctx } = coordinatorContext(dataDir, id), plan = readWorkspaceRelocationFilePlan(dataDir, id)
   if (!plan) fail()
+  const empty = { attempt: null, host: null, permission: null, tools: null, tool_permission: null, tool_exit: null }
   const text = readPrivateText(path.join(ctx.control, fileActorsFile), 65536)
-  if (text === undefined) return { attempt: null, host: null, permission: null }
+  if (text === undefined) return empty
   const coordinator = readWorkspaceRelocationCoordinator(dataDir, id)
   try {
     if (!text.endsWith('\n')) fail()
-    const rows = text.slice(0, -1).split('\n').map(JSON.parse), [attempt, host, permission] = rows
-    if (rows.length < 1 || rows.length > 3 || rows.length > 1 && !host || rows.length > 2 && !permission || !coordinator.ready
+    const rows = text.slice(0, -1).split('\n').map(JSON.parse), [attempt, host, permission, tools] = rows
+    if (rows.length < 1 || rows.length > 6 || rows.some(row => !row) || !coordinator.ready
       || !fields(attempt, ['type', 'schema_version', 'intent_id', 'plan_sha256', 'coordinator_sha256', 'created_at'])
       || attempt.type !== 'attempt' || attempt.schema_version !== 1 || attempt.intent_id !== id
       || attempt.plan_sha256 !== sha256CanonicalJson(plan) || attempt.coordinator_sha256 !== sha256CanonicalJson(coordinator)
@@ -887,9 +895,21 @@ export function readWorkspaceRelocationFileActors(dataDir, id) {
       || path.normalize(host.process.executable) !== path.normalize(coordinator.launch.process.executable) || !validDate(host.created_at))) fail()
     if (permission && (!fields(permission, ['type', 'previous_sha256', 'created_at']) || permission.type !== 'host_permitted'
       || permission.previous_sha256 !== sha256CanonicalJson(host) || !validDate(permission.created_at))) fail()
-    return { attempt, host: host ?? null, permission: permission ?? null }
+    if (tools && (!fields(tools, ['type', 'previous_sha256', 'platform', 'tools', 'created_at']) || tools.type !== 'copy_tools'
+      || plan.mode !== 'copy' || tools.platform !== process.platform || tools.previous_sha256 !== sha256CanonicalJson(permission)
+      || !validCopyTools(tools.tools, host.process) || !validDate(tools.created_at))) fail()
+    let tool_permission = null, tool_exit = null, previous = tools
+    for (const row of rows.slice(4)) {
+      if (!fields(row, ['type', 'previous_sha256', 'created_at']) || row.previous_sha256 !== sha256CanonicalJson(previous) || !validDate(row.created_at)) fail()
+      if (row.type === 'copy_tools_permitted' && !tool_permission && !tool_exit) tool_permission = row
+      else if (row.type === 'copy_tools_exited' && !tool_exit) tool_exit = row
+      else fail()
+      previous = row
+    }
+    return { attempt, host: host ?? null, permission: permission ?? null, tools: tools ?? null, tool_permission, tool_exit }
   } catch { fail() }
 }
+
 function syncFileActors(ctx) {
   const file = path.join(ctx.control, fileActorsFile), before = fs.lstatSync(file, { bigint: true })
   const fd = fs.openSync(file, fs.constants.O_WRONLY | (fs.constants.O_NOFOLLOW ?? 0))
@@ -928,7 +948,7 @@ function appendFileActor(dataDir, id, previous, record) {
   } finally { fs.closeSync(fd) }
   syncIntent(ctx)
   const result = readWorkspaceRelocationFileActors(dataDir, id)
-  if (sha256CanonicalJson(result.permission ?? result.host) !== sha256CanonicalJson(record)) fail()
+  if (sha256CanonicalJson(result.tool_exit ?? result.tool_permission ?? result.tools ?? result.permission ?? result.host) !== sha256CanonicalJson(record)) fail()
   return result
 }
 export function registerWorkspaceRelocationFileHost({ dataDir, id, process: host }) {
@@ -954,4 +974,38 @@ export function permitWorkspaceRelocationFileHost({ dataDir, id }) {
   if (!native.sameProcess(host, current) || current.parent !== process.pid) fail()
   const record = { type: 'host_permitted', previous_sha256: sha256CanonicalJson(previous.host), created_at: new Date().toISOString() }
   return { dispatch: 'dispatch', permission: appendFileActor(dataDir, id, previous, record).permission }
+}
+
+
+export function registerWorkspaceRelocationCopyTools({ dataDir, id, tools }) {
+  const { ctx, verify } = workspaceFileCoordinatorContext(dataDir, id); verify()
+  const previous = readWorkspaceRelocationFileActors(dataDir, id)
+  if (!previous.permission || readWorkspaceRelocationFilePlan(dataDir, id).mode !== 'copy' || !validCopyTools(tools, previous.host.process)) fail()
+  if (previous.tools) {
+    if (sha256CanonicalJson(previous.tools.tools) !== sha256CanonicalJson(tools)) fail()
+    syncFileActors(ctx); return { dispatch: 'observe', tools: previous.tools }
+  }
+  if (!native.sameProcess(previous.host.process, native.inspectProcess(previous.host.process.pid))) fail()
+  for (const item of tools) if (!native.sameProcess(item.process, native.inspectProcess(item.process.pid))) fail()
+  const record = { type: 'copy_tools', previous_sha256: sha256CanonicalJson(previous.permission), platform: process.platform, tools, created_at: new Date().toISOString() }
+  return { dispatch: 'dispatch', tools: appendFileActor(dataDir, id, previous, record).tools }
+}
+export function permitWorkspaceRelocationCopyTools({ dataDir, id }) {
+  const { ctx, verify } = workspaceFileCoordinatorContext(dataDir, id); verify()
+  const previous = readWorkspaceRelocationFileActors(dataDir, id)
+  if (!previous.tools || previous.tool_exit) fail()
+  if (previous.tool_permission) { syncFileActors(ctx); return { dispatch: 'observe', permission: previous.tool_permission } }
+  if (!native.sameProcess(previous.host.process, native.inspectProcess(previous.host.process.pid))) fail()
+  for (const item of previous.tools.tools) if (!native.sameProcess(item.process, native.inspectProcess(item.process.pid))) fail()
+  const record = { type: 'copy_tools_permitted', previous_sha256: sha256CanonicalJson(previous.tools), created_at: new Date().toISOString() }
+  return { dispatch: 'dispatch', permission: appendFileActor(dataDir, id, previous, record).tool_permission }
+}
+export function completeWorkspaceRelocationCopyTools({ dataDir, id }) {
+  const { ctx, verify } = workspaceFileCoordinatorContext(dataDir, id); verify()
+  const previous = readWorkspaceRelocationFileActors(dataDir, id)
+  if (!previous.tools) fail()
+  if (previous.tool_exit) { syncFileActors(ctx); return { dispatch: 'observe', completion: previous.tool_exit } }
+  if (knownProcessExit.probeKnownProcessExit(previous.tools.tools.map(item => item.process)).state !== 'stopped') fail()
+  const record = { type: 'copy_tools_exited', previous_sha256: sha256CanonicalJson(previous.tool_permission ?? previous.tools), created_at: new Date().toISOString() }
+  return { dispatch: 'dispatch', completion: appendFileActor(dataDir, id, previous, record).tool_exit }
 }
