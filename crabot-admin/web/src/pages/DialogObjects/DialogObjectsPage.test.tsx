@@ -699,7 +699,9 @@ describe('DialogObjectsPage', () => {
 
     expect(await screen.findByRole('heading', { name: '好友详情' })).toBeInTheDocument()
 
+    await waitFor(() => expect(screen.getByLabelText('显示名称')).toHaveValue('Alice'))
     fireEvent.change(screen.getByLabelText('显示名称'), { target: { value: 'Alice Renamed' } })
+    expect(screen.getByRole('button', { name: '保存基础信息' })).toBeEnabled()
     fireEvent.click(screen.getByRole('button', { name: '保存基础信息' }))
 
     await waitFor(() => {

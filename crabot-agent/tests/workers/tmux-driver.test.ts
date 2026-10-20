@@ -213,12 +213,16 @@ describe.skipIf(process.platform === 'win32' || !hasTmuxBinary())('TmuxDriver', 
       }
     })
 
+    const release = path.join(tempDir, 'allow-exit')
+    const quote = (value: string) => "'" + value.replace(/'/g, "'\\''") + "'"
+    const program = `const fs=require('node:fs');const timer=setInterval(()=>{if(fs.existsSync(${JSON.stringify(release)})){clearInterval(timer);process.stdout.write('final frame');process.exit(0)}},10);setTimeout(()=>process.exit(2),30000).unref()`
     const session = await driver.newSession({
       name: sessionName,
       cwd: tempDir,
-      command: `bash -c 'printf "final frame"'`,
+      command: quote(process.execPath) + ' -e ' + quote(program),
     })
-    await session.enableRemainOnExit?.()
+    await session.enableRemainOnExit!()
+    await fs.writeFile(release, 'exit-after-owner-enabled')
 
     await waitFor(async () => !(await driver.isAlive(sessionName)))
     await expect(driver.capturePane(sessionName)).resolves.toMatchObject({
@@ -282,7 +286,7 @@ describe.skipIf(process.platform === 'win32' || !hasTmuxBinary())('TmuxDriver op
       expect(await driver.readOptionalProcessCarrier(missing)).toBeNull()
       await expect(fs.stat(socket)).rejects.toMatchObject({ code: 'ENOENT' })
       const program = `require('node:fs').writeFileSync(${JSON.stringify(ready)},String(process.pid));setInterval(()=>{},1000);setTimeout(()=>process.exit(0),30000).unref()`
-      execFileSync('tmux', ['-S', socket, '-f', '/dev/null', 'new-session', '-d', '-s', active, quote(process.execPath) + ' -e ' + quote(program)], { env, stdio: ['ignore', 'pipe', 'pipe'] })
+      execFileSync('tmux', ['-S', socket, '-f', '/dev/null', 'new-session', '-d', '-s', active, 'exec ' + quote(process.execPath) + ' -e ' + quote(program)], { env, stdio: ['ignore', 'pipe', 'pipe'] })
       created = true
       expect(execFileSync('tmux', ['-S', socket, 'display-message', '-p', '-t', '=' + active, '#{socket_path}'], { env, encoding: 'utf8' }).trim()).toBe(socket)
       await waitFor(async () => (await fs.stat(ready).catch(() => null)) !== null)
