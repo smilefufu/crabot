@@ -60,7 +60,7 @@ function read(ctx) {
   if (!privateControl(ctx.control)) return null
   const value = readPrivateJson(ctx.file, 65536)
   if (value === undefined) {
-    for (const file of ['relocation-workers.json', 'relocation-worker-processes.json', 'relocation-stop-attempt.json', 'relocation-stop-submission.json', 'relocation-modules.json', 'relocation-module-stop-attempt.json', 'relocation-module-processes', 'relocation-module-stop-submission.json', 'relocation-coordinator.json', 'relocation-coordinator-ready.json', 'relocation-process-stop.jsonl', 'relocation-execution-exit.json', 'relocation-files.json']) {
+    for (const file of ['relocation-workers.json', 'relocation-worker-processes.json', 'relocation-stop-attempt.json', 'relocation-stop-submission.json', 'relocation-modules.json', 'relocation-module-stop-attempt.json', 'relocation-module-processes', 'relocation-module-stop-submission.json', 'relocation-coordinator.json', 'relocation-coordinator-ready.json', 'relocation-process-stop.jsonl', 'relocation-execution-exit.json', 'relocation-files.json', 'relocation-file-actors.jsonl']) {
       try { fs.lstatSync(path.join(ctx.control, file)); fail() }
       catch (error) { if (error.code !== 'ENOENT') fail() }
     }
@@ -178,7 +178,7 @@ function readScope(ctx, intent) {
   if (!intent) fail()
   const value = readPrivateJson(path.join(ctx.control, 'relocation-workers.json'), scopeLimit)
   if (value === undefined) {
-    absent(ctx, ['relocation-worker-processes.json', 'relocation-stop-attempt.json', 'relocation-stop-submission.json', ...moduleFiles, processStopFile, executionExitFile, filePlanFile])
+    absent(ctx, ['relocation-worker-processes.json', 'relocation-stop-attempt.json', 'relocation-stop-submission.json', ...moduleFiles, processStopFile, executionExitFile, filePlanFile, fileActorsFile])
     if (sha256CanonicalJson(read(ctx)) !== sha256CanonicalJson(intent)) fail()
     return null
   }
@@ -227,7 +227,7 @@ function stoppingContext(dataDir, id, locked = false) {
 function readStopAttempt(ctx, intent, scope) {
   const value = readPrivateJson(path.join(ctx.control, 'relocation-stop-attempt.json'), 65536)
   if (value === undefined) {
-    absent(ctx, ['relocation-stop-submission.json', executionExitFile, filePlanFile])
+    absent(ctx, ['relocation-stop-submission.json', executionExitFile, filePlanFile, fileActorsFile])
     return null
   }
   if (!fields(value, ['schema_version', 'intent_id', 'intent_sha256', 'workers_sha256', 'created_at']) || value.schema_version !== 1
@@ -318,7 +318,7 @@ function validProcesses(processes) {
 export function readWorkspaceRelocationProcesses(dataDir, id) {
   const { ctx, intent, scope } = stoppingContext(dataDir, id)
   const value = readPrivateJson(path.join(ctx.control, 'relocation-worker-processes.json'), scopeLimit)
-  if (value === undefined) { absent(ctx, [processStopFile, executionExitFile, filePlanFile]); return null }
+  if (value === undefined) { absent(ctx, [processStopFile, executionExitFile, filePlanFile, fileActorsFile]); return null }
   if (!fields(value, ['schema_version', 'intent_id', 'intent_sha256', 'workers_sha256', 'processes', 'created_at'])
     || value.schema_version !== 1 || value.intent_id !== id || value.intent_sha256 !== sha256CanonicalJson(intent)
     || value.workers_sha256 !== sha256CanonicalJson(scope) || !validProcesses(value.processes) || !validDate(value.created_at)
@@ -372,7 +372,7 @@ function absent(ctx, names) {
 }
 function readModules(ctx, intent, workers) {
   const value = readPrivateJson(path.join(ctx.control, moduleFiles[0]), scopeLimit)
-  if (value === undefined) { absent(ctx, [...moduleFiles.slice(1), processStopFile, executionExitFile, filePlanFile]); return null }
+  if (value === undefined) { absent(ctx, [...moduleFiles.slice(1), processStopFile, executionExitFile, filePlanFile, fileActorsFile]); return null }
   if (!fields(value, ['schema_version', 'intent_id', 'intent_sha256', 'workers_sha256', 'modules', 'created_at']) || value.schema_version !== 1
     || value.intent_id !== intent.id || value.intent_sha256 !== sha256CanonicalJson(intent) || value.workers_sha256 !== sha256CanonicalJson(workers)
     || !validModules(value.modules) || !validDate(value.created_at)) fail()
@@ -560,11 +560,11 @@ export function readWorkspaceRelocationCoordinator(dataDir, id) {
   const { ctx, intent } = coordinatorContext(dataDir, id)
   const launch = readPrivateJson(path.join(ctx.control, coordinatorFile), 65536)
   const ready = readPrivateJson(path.join(ctx.control, coordinatorReadyFile), 65536)
-  if (ready === undefined) absent(ctx, [executionExitFile, filePlanFile])
+  if (ready === undefined) absent(ctx, [executionExitFile, filePlanFile, fileActorsFile])
   try {
     if (launch === undefined) {
       if (ready !== undefined || sha256CanonicalJson(read(ctx)) !== sha256CanonicalJson(intent)) fail()
-      absent(ctx, [executionExitFile, filePlanFile])
+      absent(ctx, [executionExitFile, filePlanFile, fileActorsFile])
       return { launch: null, ready: null }
     }
     if (!fields(launch, ['schema_version', 'intent_id', 'intent_sha256', 'launch_id', 'parent', 'process', 'created_at'])
@@ -648,7 +648,7 @@ function processStoppingContext(dataDir, id, locked = false) {
 export function readWorkspaceRelocationProcessStops(dataDir, id) {
   const { ctx, modules, processes } = processStoppingContext(dataDir, id)
   const text = readPrivateText(path.join(ctx.control, processStopFile), scopeLimit)
-  if (text === undefined) { absent(ctx, [executionExitFile, filePlanFile]); return { attempt: null, observations: [], completion: null } }
+  if (text === undefined) { absent(ctx, [executionExitFile, filePlanFile, fileActorsFile]); return { attempt: null, observations: [], completion: null } }
   try {
     if (!text.endsWith('\n')) fail()
     const lines = text.slice(0, -1).split('\n')
@@ -736,7 +736,7 @@ export function completeWorkspaceRelocationProcessStops({ dataDir, id }) {
 }
 
 
-const executionExitFile = 'relocation-execution-exit.json', filePlanFile = 'relocation-files.json'
+const executionExitFile = 'relocation-execution-exit.json', filePlanFile = 'relocation-files.json', fileActorsFile = 'relocation-file-actors.jsonl'
 function workspaceExecutionExitMaterial(dataDir, id) {
   const coordinator = readWorkspaceRelocationCoordinator(dataDir, id), workers = readWorkspaceRelocationStops(dataDir, id)
   const modules = readWorkspaceRelocationModuleStops(dataDir, id), processes = readWorkspaceRelocationProcessStops(dataDir, id)
@@ -753,7 +753,7 @@ function workspaceExecutionExitMaterial(dataDir, id) {
 export function readWorkspaceRelocationExecutionExit(dataDir, id) {
   const { ctx, intent } = coordinatorContext(dataDir, id)
   const record = readPrivateJson(path.join(ctx.control, executionExitFile), 65536)
-  if (record === undefined) { absent(ctx, [filePlanFile]); return null }
+  if (record === undefined) { absent(ctx, [filePlanFile, fileActorsFile]); return null }
   const { hashes } = workspaceExecutionExitMaterial(dataDir, id)
   if (!fields(record, ['schema_version', 'intent_id', 'intent_sha256', ...Object.keys(hashes), 'created_at'])
     || record.schema_version !== 1 || record.intent_id !== id || record.intent_sha256 !== sha256CanonicalJson(intent)
@@ -795,7 +795,7 @@ function validFileObservation(value, intent) {
 /** Historical preparation plan only; first dispatch still requires the original live coordinator. */
 export function readWorkspaceRelocationFilePlan(dataDir, id) {
   const { ctx, intent } = coordinatorContext(dataDir, id), record = readPrivateJson(path.join(ctx.control, filePlanFile), 65536)
-  if (record === undefined) return null
+  if (record === undefined) { absent(ctx, [fileActorsFile]); return null }
   const exit = readWorkspaceRelocationExecutionExit(dataDir, id)
   if (!exit || !fields(record, ['schema_version', 'intent_id', 'intent_sha256', 'execution_exit_sha256', 'catalog_sha256',
     'mode', 'source_observation', 'staging_parent', 'staging_parent_native_id', 'staging_path', 'created_at'])
@@ -810,7 +810,7 @@ export function readWorkspaceRelocationFilePlan(dataDir, id) {
   validFileObservation(record.source_observation, intent)
   return record
 }
-export async function prepareWorkspaceRelocationFilePlan({ dataDir, id, signal }) {
+function workspaceFileCoordinatorContext(dataDir, id, signal) {
   const { ctx, intent } = coordinatorContext(dataDir, id, true), token = cliLockToken(path.join(ctx.dataRoot, 'cli.lock'))
   const material = workspaceExecutionExitMaterial(dataDir, id), exit = readWorkspaceRelocationExecutionExit(dataDir, id)
   const verify = () => {
@@ -823,6 +823,10 @@ export async function prepareWorkspaceRelocationFilePlan({ dataDir, id, signal }
       || sha256CanonicalJson(readWorkspaceRelocationExecutionExit(dataDir, id)) !== sha256CanonicalJson(exit)
       || knownProcessExit.probeKnownProcessExit(current.processes).state !== 'stopped') fail()
   }
+  return { ctx, intent, exit, verify }
+}
+export async function prepareWorkspaceRelocationFilePlan({ dataDir, id, signal }) {
+  const { ctx, intent, exit, verify } = workspaceFileCoordinatorContext(dataDir, id, signal)
   verify()
   const previous = readWorkspaceRelocationFilePlan(dataDir, id)
   if (previous) { syncIntent(ctx); return { dispatch: 'observe', plan: previous } }
@@ -859,4 +863,95 @@ export async function prepareWorkspaceRelocationFilePlan({ dataDir, id, signal }
   const accepted = readWorkspaceRelocationFilePlan(dataDir, id)
   if (sha256CanonicalJson(accepted) !== sha256CanonicalJson(record)) fail()
   return { dispatch: 'dispatch', plan: accepted }
+}
+
+
+/** File actor facts are separate from the earlier business execution-exit fact. */
+export function readWorkspaceRelocationFileActors(dataDir, id) {
+  const { ctx } = coordinatorContext(dataDir, id), plan = readWorkspaceRelocationFilePlan(dataDir, id)
+  if (!plan) fail()
+  const text = readPrivateText(path.join(ctx.control, fileActorsFile), 65536)
+  if (text === undefined) return { attempt: null, host: null, permission: null }
+  const coordinator = readWorkspaceRelocationCoordinator(dataDir, id)
+  try {
+    if (!text.endsWith('\n')) fail()
+    const rows = text.slice(0, -1).split('\n').map(JSON.parse), [attempt, host, permission] = rows
+    if (rows.length < 1 || rows.length > 3 || rows.length > 1 && !host || rows.length > 2 && !permission || !coordinator.ready
+      || !fields(attempt, ['type', 'schema_version', 'intent_id', 'plan_sha256', 'coordinator_sha256', 'created_at'])
+      || attempt.type !== 'attempt' || attempt.schema_version !== 1 || attempt.intent_id !== id
+      || attempt.plan_sha256 !== sha256CanonicalJson(plan) || attempt.coordinator_sha256 !== sha256CanonicalJson(coordinator)
+      || !validDate(attempt.created_at)) fail()
+    if (host && (!fields(host, ['type', 'previous_sha256', 'process', 'created_at']) || host.type !== 'host'
+      || host.previous_sha256 !== sha256CanonicalJson(attempt) || !validCoordinatorProcess(host.process)
+      || host.process.pid === coordinator.launch.process.pid || host.process.parent !== coordinator.launch.process.pid
+      || path.normalize(host.process.executable) !== path.normalize(coordinator.launch.process.executable) || !validDate(host.created_at))) fail()
+    if (permission && (!fields(permission, ['type', 'previous_sha256', 'created_at']) || permission.type !== 'host_permitted'
+      || permission.previous_sha256 !== sha256CanonicalJson(host) || !validDate(permission.created_at))) fail()
+    return { attempt, host: host ?? null, permission: permission ?? null }
+  } catch { fail() }
+}
+function syncFileActors(ctx) {
+  const file = path.join(ctx.control, fileActorsFile), before = fs.lstatSync(file, { bigint: true })
+  const fd = fs.openSync(file, fs.constants.O_WRONLY | (fs.constants.O_NOFOLLOW ?? 0))
+  try {
+    const opened = fs.fstatSync(fd, { bigint: true })
+    if (opened.dev !== before.dev || opened.ino !== before.ino || opened.nlink !== 1n) fail()
+    fs.fsyncSync(fd)
+  } finally { fs.closeSync(fd) }
+  syncIntent(ctx)
+}
+export function prepareWorkspaceRelocationFileActors({ dataDir, id }) {
+  const { ctx, verify } = workspaceFileCoordinatorContext(dataDir, id); verify()
+  const previous = readWorkspaceRelocationFileActors(dataDir, id)
+  if (previous.attempt) { syncFileActors(ctx); return { dispatch: 'observe', attempt: previous.attempt } }
+  const record = { type: 'attempt', schema_version: 1, intent_id: id, plan_sha256: sha256CanonicalJson(readWorkspaceRelocationFilePlan(dataDir, id)),
+    coordinator_sha256: sha256CanonicalJson(readWorkspaceRelocationCoordinator(dataDir, id)), created_at: new Date().toISOString() }
+  publishPrivateJson(ctx, path.join(ctx.control, fileActorsFile), record, 65536, () => { verify(); if (readWorkspaceRelocationFileActors(dataDir, id).attempt) fail() })
+  const accepted = readWorkspaceRelocationFileActors(dataDir, id).attempt
+  if (sha256CanonicalJson(accepted) !== sha256CanonicalJson(record)) fail()
+  return { dispatch: 'dispatch', attempt: accepted }
+}
+function appendFileActor(dataDir, id, previous, record) {
+  const { ctx, verify } = workspaceFileCoordinatorContext(dataDir, id), file = path.join(ctx.control, fileActorsFile)
+  verify()
+  if (sha256CanonicalJson(readWorkspaceRelocationFileActors(dataDir, id)) !== sha256CanonicalJson(previous)) fail()
+  const before = fs.lstatSync(file, { bigint: true }), bytes = Buffer.from(JSON.stringify(record) + '\n')
+  if (before.size + BigInt(bytes.length) > 65536n) fail()
+  const fd = fs.openSync(file, fs.constants.O_WRONLY | fs.constants.O_APPEND | (fs.constants.O_NOFOLLOW ?? 0))
+  try {
+    const opened = fs.fstatSync(fd, { bigint: true })
+    if (opened.dev !== before.dev || opened.ino !== before.ino || opened.size !== before.size || opened.nlink !== 1n
+      || opened.mtimeNs !== before.mtimeNs || opened.ctimeNs !== before.ctimeNs) fail()
+    verify()
+    for (let offset = 0; offset < bytes.length;) { const written = fs.writeSync(fd, bytes, offset, bytes.length - offset); if (!written) fail(); offset += written }
+    fs.fsyncSync(fd)
+  } finally { fs.closeSync(fd) }
+  syncIntent(ctx)
+  const result = readWorkspaceRelocationFileActors(dataDir, id)
+  if (sha256CanonicalJson(result.permission ?? result.host) !== sha256CanonicalJson(record)) fail()
+  return result
+}
+export function registerWorkspaceRelocationFileHost({ dataDir, id, process: host }) {
+  const { ctx, verify } = workspaceFileCoordinatorContext(dataDir, id); verify()
+  const previous = readWorkspaceRelocationFileActors(dataDir, id)
+  if (!previous.attempt || !validCoordinatorProcess(host)) fail()
+  if (previous.host) {
+    if (sha256CanonicalJson(previous.host.process) !== sha256CanonicalJson(host)) fail()
+    syncFileActors(ctx); return { dispatch: 'observe', host: previous.host }
+  }
+  const self = native.inspectProcess(process.pid)
+  if (host.pid === self.pid || host.parent !== self.pid || path.normalize(host.executable) !== path.normalize(self.executable)
+    || !native.sameProcess(host, native.inspectProcess(host.pid))) fail()
+  const record = { type: 'host', previous_sha256: sha256CanonicalJson(previous.attempt), process: host, created_at: new Date().toISOString() }
+  return { dispatch: 'dispatch', host: appendFileActor(dataDir, id, previous, record).host }
+}
+export function permitWorkspaceRelocationFileHost({ dataDir, id }) {
+  const { ctx, verify } = workspaceFileCoordinatorContext(dataDir, id); verify()
+  const previous = readWorkspaceRelocationFileActors(dataDir, id)
+  if (!previous.host) fail()
+  if (previous.permission) { syncFileActors(ctx); return { dispatch: 'observe', permission: previous.permission } }
+  const host = previous.host.process, current = native.inspectProcess(host.pid)
+  if (!native.sameProcess(host, current) || current.parent !== process.pid) fail()
+  const record = { type: 'host_permitted', previous_sha256: sha256CanonicalJson(previous.host), created_at: new Date().toISOString() }
+  return { dispatch: 'dispatch', permission: appendFileActor(dataDir, id, previous, record).permission }
 }

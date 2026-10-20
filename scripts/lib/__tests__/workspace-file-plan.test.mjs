@@ -26,16 +26,32 @@ async function fixture(t, { exitEvidence = true } = {}) {
   records.commitWorkspaceRelocationModules({ dataDir: data, id, modules: [] })
   const entry = new URL('../workspace-coordinator-entry.mjs', import.meta.url).href
   const module = new URL('../workspace-relocation-intent.mjs', import.meta.url).href
-  const code = `import fs from 'node:fs';import{enterWorkspaceRelocationCoordinator}from ${JSON.stringify(entry)};import * as records from ${JSON.stringify(module)};
+  const code = `import fs from 'node:fs';import{spawn}from'node:child_process';import{once}from'node:events';import native from ${JSON.stringify(new URL('../process-identity.cjs', import.meta.url).href)};import{enterWorkspaceRelocationCoordinator}from ${JSON.stringify(entry)};import * as records from ${JSON.stringify(module)};
     const context=await enterWorkspaceRelocationCoordinator(), args={dataDir:context.dataDir,id:context.id};
     if(${exitEvidence}){records.prepareWorkspaceRelocationProcessStops(args);records.observeWorkspaceRelocationProcesses({...args,processes:[]});
       records.prepareWorkspaceRelocationStops({...args,workers:[]});records.completeWorkspaceRelocationStops({...args,results:[]});
       records.prepareWorkspaceRelocationModuleStops({...args,modules:[]});records.completeWorkspaceRelocationModuleStops({...args,results:[]});
       records.completeWorkspaceRelocationProcessStops(args);records.commitWorkspaceRelocationExecutionExit(args)}
+    let host,hostIdentity,hostEnded;
+    async function ensureHost(){if(host)return;host=spawn(process.execPath,['-e','process.send(\"ready\");setTimeout(()=>{},30000)'],{stdio:['ignore','ignore','ignore','ipc']});hostEnded=once(host,'exit');await once(host,'message');hostIdentity=native.inspectProcess(host.pid);process.send({kind:'fixture-actor',identity:hostIdentity})}
     process.send({kind:'fixture-ready'});process.on('message',async message=>{if(message.kind!=='command')return;
       const sync=fs.fsyncSync;try{if(message.operation==='unlock')context.release();
         if(message.operation==='fail-sync')fs.fsyncSync=fd=>{if(fs.fstatSync(fd).isDirectory())throw Object.assign(new Error('finite sync failure'),{code:'EIO'});return sync(fd)};
-        const result=await records.prepareWorkspaceRelocationFilePlan(args);process.send({kind:'result',result})}
+        let result;
+        if(message.operation==='actors-prepare')result=records.prepareWorkspaceRelocationFileActors(args);
+        else if(message.operation==='host-permit')result=records.permitWorkspaceRelocationFileHost(args);
+        else if(message.operation==='host-stop'){native.terminateKnownProcess(hostIdentity);await hostEnded;result={stopped:true}}
+        else if(message.operation.startsWith('host-')){
+          await ensureHost();let selected={...hostIdentity};
+          if(message.operation==='host-generation')selected.started='replaced';
+          if(message.operation==='host-parent')selected=native.inspectProcess(process.pid);
+          if(message.operation==='host-owner')selected.owner='other-owner';
+          if(message.operation==='host-executable')selected.executable='other-executable';
+          if(message.operation==='host-write-failure'){const write=fs.writeSync;fs.writeSync=(fd,bytes,offset,length)=>{write(fd,bytes,offset,Math.min(length,9));throw Object.assign(new Error('finite append failure'),{code:'EIO'})};try{result=records.registerWorkspaceRelocationFileHost({...args,process:selected})}finally{fs.writeSync=write}}
+          else if(message.operation==='host-sync-failure'){const inode=fs.lstatSync(args.dataDir+'/workspace-control/relocation-file-actors.jsonl',{bigint:true}).ino;fs.fsyncSync=fd=>{if(fs.fstatSync(fd,{bigint:true}).ino===inode)throw Object.assign(new Error('finite sync failure'),{code:'EIO'});return sync(fd)};result=records.registerWorkspaceRelocationFileHost({...args,process:selected})}
+          else result=records.registerWorkspaceRelocationFileHost({...args,process:selected});
+        }else result=await records.prepareWorkspaceRelocationFilePlan(args);
+        process.send({kind:'result',result})}
       catch(error){process.send({kind:'result',error:{code:error.code,message:error.message}})}finally{fs.fsyncSync=sync}});
     process.once('disconnect',()=>{context.release();process.exit(0)});setTimeout(()=>process.exit(3),30000);`
   const child = spawn(process.execPath, ['--input-type=module', '-e', code], { stdio: ['ignore', 'ignore', 'pipe', 'ipc'] })
@@ -43,6 +59,7 @@ async function fixture(t, { exitEvidence = true } = {}) {
   const messages = []; child.on('message', message => messages.push(message))
   t.after(async () => {
     releaseCliLock(lock)
+    for (const message of messages) if (message.kind === 'fixture-actor') native.terminateKnownProcess(message.identity)
     if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
     await exited; fs.rmSync(root, { recursive: true, force: true })
   })
@@ -130,4 +147,75 @@ test('a retained file plan prevents reconstruction of a missing original exit pr
   const bytes = fs.readFileSync(f.file)
   assert.throws(() => records.readWorkspaceRelocationFilePlan(f.data, f.id), { code: 'WORKSPACE_RELOCATION_INVALID' })
   assert.equal((await f.command()).error?.code, 'WORKSPACE_RELOCATION_INVALID'); assert.deepEqual(fs.readFileSync(f.file), bytes)
+})
+
+
+test('original file-host attempt, actual child identity and permission are durable once without filesystem effects', async t => {
+  const f = await fixture(t), file = path.join(f.data, 'workspace-control/relocation-file-actors.jsonl')
+  assert.equal((await f.command('actors-prepare')).error?.code, 'WORKSPACE_RELOCATION_INVALID')
+  assert.equal(fs.existsSync(file), false)
+  await f.command()
+  assert.equal((await f.command('actors-prepare')).result.dispatch, 'dispatch')
+  assert.equal((await f.command('host-permit')).error?.code, 'WORKSPACE_RELOCATION_INVALID')
+  const host = (await f.command('host-register')).result.host
+  assert.equal(host.process.parent, f.child.pid); assert.equal(native.isProcessExited(host.process.pid), false)
+  assert.equal((await f.command('host-permit')).result.dispatch, 'dispatch')
+  const bytes = fs.readFileSync(file)
+  assert.equal((await f.command('host-register')).result.dispatch, 'observe')
+  assert.equal((await f.command('host-permit')).result.dispatch, 'observe')
+  assert.equal((await f.command('actors-prepare')).result.dispatch, 'observe')
+  assert.deepEqual(fs.readFileSync(file), bytes)
+  const result = records.readWorkspaceRelocationFileActors(f.data, f.id)
+  assert.deepEqual(result.host, host); assert.equal(result.permission.type, 'host_permitted')
+  assert.deepEqual(await f.catalog.snapshot(), f.before); assert.equal(fs.existsSync(f.target), false)
+  assert.equal(fs.readFileSync(path.join(f.source, 'default/file'), 'utf8'), 'original bytes')
+})
+
+for (const kind of ['generation', 'parent', 'owner', 'executable']) test('file host cannot claim another incarnation or role: ' + kind, async t => {
+  const f = await fixture(t); await f.command(); await f.command('actors-prepare')
+  const file = path.join(f.data, 'workspace-control/relocation-file-actors.jsonl'), bytes = fs.readFileSync(file)
+  assert.equal((await f.command('host-' + kind)).error?.code, 'WORKSPACE_RELOCATION_INVALID')
+  assert.deepEqual(fs.readFileSync(file), bytes); assert.equal(records.readWorkspaceRelocationFileActors(f.data, f.id).host, null)
+})
+
+test('an exited recorded file host cannot be permitted again or replaced with a new child', async t => {
+  const f = await fixture(t); await f.command(); await f.command('actors-prepare'); await f.command('host-register'); await f.command('host-stop')
+  const file = path.join(f.data, 'workspace-control/relocation-file-actors.jsonl'), bytes = fs.readFileSync(file)
+  assert.equal((await f.command('host-permit')).error?.code, 'WORKSPACE_RELOCATION_INVALID')
+  assert.equal((await f.command('host-register')).result.dispatch, 'observe'); assert.deepEqual(fs.readFileSync(file), bytes)
+  assert.equal(records.readWorkspaceRelocationFileActors(f.data, f.id).permission, null)
+})
+
+for (const damage of ['truncated', 'hash', 'extra', 'null-host', 'null-permission', 'hardlink', 'missing-plan']) test('damaged file actor records stay fenced without reconstruction: ' + damage, async t => {
+  const f = await fixture(t); await f.command(); await f.command('actors-prepare'); await f.command('host-register')
+  const file = path.join(f.data, 'workspace-control/relocation-file-actors.jsonl')
+  if (damage === 'truncated') fs.appendFileSync(file, '{')
+  else if (damage === 'hardlink') fs.linkSync(file, path.join(f.root, 'retained-actor-link'))
+  else if (damage === 'missing-plan') fs.unlinkSync(f.file)
+  else {
+    const rows = fs.readFileSync(file, 'utf8').trimEnd().split('\n').map(JSON.parse)
+    if (damage === 'hash') rows[1].previous_sha256 = '0'.repeat(64); else if (damage === 'null-host') rows[1] = null; else if (damage === 'null-permission') rows.push(null); else rows[0].command = 'untrusted'
+    fs.writeFileSync(file, rows.map(JSON.stringify).join('\n') + '\n')
+  }
+  const bytes = fs.readFileSync(file)
+  assert.throws(() => records.readWorkspaceRelocationFileActors(f.data, f.id), { code: 'WORKSPACE_RELOCATION_INVALID' })
+  assert.equal((await f.command('actors-prepare')).error?.code, 'WORKSPACE_RELOCATION_INVALID')
+  assert.equal((await f.command('host-permit')).error?.code, 'WORKSPACE_RELOCATION_INVALID')
+  if (damage === 'missing-plan') { assert.equal((await f.command()).error?.code, 'WORKSPACE_RELOCATION_INVALID'); assert.equal(fs.existsSync(f.file), false) }
+  assert.deepEqual(fs.readFileSync(file), bytes)
+})
+
+test('partial actor append is never truncated or replayed after an I/O failure', async t => {
+  const f = await fixture(t); await f.command(); await f.command('actors-prepare')
+  assert.equal((await f.command('host-write-failure')).error?.code, 'EIO')
+  const file = path.join(f.data, 'workspace-control/relocation-file-actors.jsonl'), bytes = fs.readFileSync(file)
+  assert.equal((await f.command('host-register')).error?.code, 'WORKSPACE_RELOCATION_INVALID')
+  assert.deepEqual(fs.readFileSync(file), bytes)
+})
+
+test('an unconfirmed complete actor append is synced on observation without registering a replacement', async t => {
+  const f = await fixture(t); await f.command(); await f.command('actors-prepare')
+  assert.equal((await f.command('host-sync-failure')).error?.code, 'EIO')
+  const file = path.join(f.data, 'workspace-control/relocation-file-actors.jsonl'), bytes = fs.readFileSync(file)
+  assert.equal((await f.command('host-register')).result.dispatch, 'observe'); assert.deepEqual(fs.readFileSync(file), bytes)
 })
