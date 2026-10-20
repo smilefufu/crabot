@@ -179,18 +179,21 @@ test('failed startup fixture reports the exit and identity evidence before clean
   })
 })
 
-test('Windows repeated Unicode-path registration retains exact parent identity through delayed startup', { skip: process.platform !== 'win32', timeout: 30000 }, async t => {
-  for (let iteration = 0; iteration < 8; iteration++) {
-    try {
-      const f = await fixture(t, 100, 250)
-      assert.equal(inspectInstance(f.data).state, 'running')
-      await stopInstance(f.data)
-      assert.equal(readFileSync(f.marker, 'utf8'), 'graceful')
-      assert.equal(readInstanceRuntime(f.data), null)
-      await f.exited
-    } catch (error) {
-      t.diagnostic('Windows registration iteration ' + (iteration + 1))
-      throw error
-    }
-  }
+for (let iteration = 0; iteration < 8; iteration++) test('Windows repeated Unicode-path registration retains exact parent identity through delayed startup: ' + (iteration + 1), { skip: process.platform !== 'win32', timeout: 30000 }, async t => {
+  const began = Date.now(); let phase = 'ready', f
+  const diagnostic = () => t.diagnostic(JSON.stringify({ iteration: iteration + 1, phase, elapsed_ms: Date.now() - began, ...(f ? f.snapshot() : {}) }))
+  t.signal.addEventListener('abort', diagnostic, { once: true })
+  try {
+    f = await fixture(t, 100, 250)
+    t.diagnostic('ready_ms=' + (Date.now() - began))
+    assert.equal(inspectInstance(f.data).state, 'running')
+    phase = 'stop'
+    const stopping = Date.now()
+    await stopInstance(f.data)
+    t.diagnostic('stop_ms=' + (Date.now() - stopping))
+    assert.equal(readFileSync(f.marker, 'utf8'), 'graceful')
+    assert.equal(readInstanceRuntime(f.data), null)
+    await f.exited
+  } catch (error) { diagnostic(); throw error }
+  finally { t.signal.removeEventListener('abort', diagnostic) }
 })
