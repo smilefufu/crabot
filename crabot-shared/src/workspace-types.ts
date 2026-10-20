@@ -135,3 +135,12 @@ export interface CompleteWorkspaceRelocationWorkerStopsParams {
 export interface CompleteWorkspaceRelocationWorkerStopsResult {
   recorded: true
 }
+
+export interface StopWorkspaceRelocationWorkersParams {
+  intent_id: string
+  launch_id: string
+}
+export interface StopWorkspaceRelocationWorkersResult {
+  dispatch: WorkspaceRelocationStopDispatch
+  results: ReadonlyArray<WorkspaceRelocationStopResult>
+}

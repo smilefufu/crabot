@@ -1,5 +1,6 @@
+import { createWorkspaceRelocationStopJournal } from './core/workspace-relocation-stop-journal.js'
 import { verifyWorkspaceRelocationAuthority } from './core/workspace-relocation-authority.js'
-import type { CaptureWorkspaceRelocationWorkersParams, CaptureWorkspaceRelocationWorkersResult, RpcHandlerContext } from 'crabot-shared'
+import type { CaptureWorkspaceRelocationWorkersParams, CaptureWorkspaceRelocationWorkersResult, StopWorkspaceRelocationWorkersParams, StopWorkspaceRelocationWorkersResult, RpcHandlerContext } from 'crabot-shared'
 import { ExecutionAdmissions } from './core/execution-admissions.js'
 import { WorkerRequestToolScope } from './workers/harness/request-tools.js'
 import { selectSubAgentSkills } from './agent/subagent-tool-filter.js'
@@ -1015,6 +1016,22 @@ export class UnifiedAgent extends ModuleBase {
     return { workers }
   }
 
+  private async handleStopWorkspaceRelocationWorkers(params: StopWorkspaceRelocationWorkersParams, context?: RpcHandlerContext): Promise<StopWorkspaceRelocationWorkersResult> {
+    const binding = await createWorkspaceRelocationStopJournal({ dataDir: getDataRootDir(), moduleManagerPort: this.rpcClient.moduleManagerTargetPort,
+      params, bearer: context?.authorizationBearer })
+    if (this.runtimeClosing) throw new RpcError('WORKSPACE_MAINTENANCE', 'Agent正在关闭，不能提交迁移停止。')
+    try {
+      await this.quiesceExecutionAdmissions()
+      const result = await this.requireManagerStack().harness.requestWorkspaceRelocationStops(binding.workers, binding.journal)
+      await binding.verify()
+      if (this.runtimeClosing) throw new RpcError('WORKSPACE_MAINTENANCE', 'Agent正在关闭，停止结果仍待核验。')
+      return result
+    } catch (error) {
+      if (error instanceof RpcError) throw error
+      throw new RpcError('WORKSPACE_MAINTENANCE', '固定执行器范围或启动对账无法核实，已保留维护保护。')
+    }
+  }
+
   /** Central admission for every new runtime-config-dependent execution. */
   private assertRuntimeExecutionAdmission(): void {
     if (this.runtimeClosing) throw new Error('AGENT_SHUTTING_DOWN')
@@ -1862,6 +1879,7 @@ export class UnifiedAgent extends ModuleBase {
     // Manager/Worker（v3）接口：§8.2 调度触发 + §8.3 task 读模型四件套。
     this.registerMethod('trigger_schedule', this.handleTriggerSchedule.bind(this))
     this.registerMethod('authorize_agent_cli_execution', this.handleAuthorizeAgentCliExecution.bind(this))
+    this.registerMethod('stop_workspace_relocation_workers', this.handleStopWorkspaceRelocationWorkers.bind(this))
     this.registerMethod('capture_workspace_relocation_workers', this.handleCaptureWorkspaceRelocationWorkers.bind(this))
     this.registerMethod('get_workspace_execution_admin', async () => this.requireManagerStack().harness.getWorkspaceExecutionInventory())
     this.registerMethod('list_workers_admin', this.handleListWorkersAdmin.bind(this))

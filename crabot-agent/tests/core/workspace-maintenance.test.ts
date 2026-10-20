@@ -8,15 +8,9 @@ import { randomUUID } from 'node:crypto'
 import { RpcError } from 'crabot-shared'
 import { verifyWorkspaceRelocationAuthority } from '../../src/core/workspace-relocation-authority.js'
 import type { LedgerWorker } from '../../src/workers/harness/ledger-types.js'
-import type { UnifiedAgentConfig } from '../../src/types.js'
+import { relocationAgentConfig as config } from './fixtures/relocation-agent-config.js'
 
 vi.mock('../../src/core/workspace-relocation-authority.js', () => ({ verifyWorkspaceRelocationAuthority: vi.fn() }))
-
-const config: UnifiedAgentConfig = {
-  module_id: 'crabot-agent', module_type: 'agent', version: '0.2.0', protocol_version: '3.4.0', port: 19999,
-  orchestration: { front_context_recent_messages_window_hours: 1, front_context_recent_messages_max_cap: 1, front_context_short_term_memory_window_hours: 1, front_context_short_term_memory_max_cap: 1, worker_recent_messages_window_hours: 1, worker_recent_messages_max_cap: 1, worker_short_term_memory_window_hours: 1, worker_short_term_memory_max_cap: 1, worker_long_term_memory_limit: 1, front_agent_timeout: 1, session_state_ttl: 1, worker_config_refresh_interval: 1, front_agent_queue_max_length: 1, front_agent_queue_timeout: 1 },
-  agent_config: { instance_id: 'crabot-agent', roles: [], system_prompt: 'fixture', model_config: { powerful: { endpoint: 'https://fixture.invalid', apikey: 'fixture', model_id: 'fixture', format: 'openai', provider_id: 'fixture' } } },
-}
 
 describe.each(['relocation.json', 'relocation-workers.json'])('workspace maintenance execution admission: %s', record => {
   afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs() })
