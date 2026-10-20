@@ -23,6 +23,7 @@ function terminateKnownProcess(expected) {
 }
 
 module.exports = { ...native, sameProcess, terminateKnownProcess,
+  renameDirectoryNoReplace: native.renameDirectoryNoReplace,
   inspectProcess: native.inspectProcess,
   inspectInstallFilesystem: native.inspectInstallFilesystem,
   listProcessIds: native.listProcessIds,

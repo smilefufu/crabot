@@ -28,6 +28,7 @@ for (const [file, expected] of [
   ['scripts/workspace-relocation-coordinator.mjs', true],
   ['scripts/lib/workspace-coordinator-launch.mjs', true],
   ['scripts/lib/known-process-stop.cjs', true],
+  ['scripts/lib/process-identity.cjs', true],
   ['crabot-agent/src/engine/host-process.ts', true],
   ['crabot-agent/src/engine/bg-entities/bg-shell.ts', true],
   ['crabot-agent/src/unified-agent.ts', true],
