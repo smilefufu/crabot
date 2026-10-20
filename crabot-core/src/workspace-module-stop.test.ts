@@ -27,6 +27,7 @@ async function fixture(withChild = false, privateJournal = false) {
     const server=http.createServer(async(req,res)=>{let text='';for await(const part of req)text+=part;
       const body=JSON.parse(text);calls.push(req.url);fs.writeFileSync(process.env.FIXTURE_CALLS,JSON.stringify(calls));
       const data=req.url==='/get_runtime_identity'?{instance_id:process.env.CRABOT_INSTANCE_ID,module_id:process.env.Crabot_MODULE_ID,runtime_id:process.env.CRABOT_MODULE_RUNTIME_ID}:{};
+      if(req.url==='/fixture_add_child'){const child=require('node:child_process').spawn(process.execPath,['-e','setTimeout(()=>{},20000)'],{detached:true,stdio:'ignore'});child.unref();data.pid=child.pid}
       res.end(JSON.stringify({id:body.id,success:true,data}));
       if(req.url==='/shutdown'){clearInterval(timer);setTimeout(()=>server.close(),10)}
     });server.listen(Number(process.env.Crabot_PORT),'127.0.0.1',()=>fs.writeFileSync(process.env.FIXTURE_READY,'ready'));`)
@@ -120,6 +121,64 @@ describe('workspace planned execution module stops', () => {
       } finally { f.manager.modules.get('fixture-memory').port = f.scope[0].module_port; await f.cleanup() }
     }, nativeTimeout)
   }
+  it.each(['pid', 'parent', 'started', 'owner', 'executable', 'runtime_id', 'module_port'])('still rejects a changed original module/root binding: %s', async field => {
+    const f = await fixture(false, true), rootPid = f.manager.processes.get('fixture-memory').pid
+    try {
+      const expected = f.scope.map((item: any) => {
+        if (item.module_id !== 'fixture-memory') return item
+        if (field === 'runtime_id') return { ...item, runtime_id: 'other-runtime' }
+        if (field === 'module_port') return { ...item, module_port: item.module_port + 1 }
+        return { ...item, processes: item.processes.map((process: any) => process.pid !== rootPid ? process : {
+          ...process, [field]: field === 'pid' || field === 'parent' ? process[field] + 1 : 'changed-' + process[field],
+        }) }
+      })
+      await expect(f.manager.requestWorkspaceRelocationModuleStops(expected, f.journal)).rejects.toMatchObject({ code: 'CRABOT_WORKSPACE_MODULE_SCOPE' })
+      expect(f.journal.prepare).not.toHaveBeenCalled()
+      expect(f.manager.processes.get('fixture-memory').exitCode).toBeNull()
+      expect(await fs.readFile(f.marker, 'utf8').catch(() => '[]')).not.toContain('/shutdown')
+    } finally { await f.cleanup() }
+  }, nativeTimeout)
+
+  it.each(['exit before stop', 'appear before stop', 'exit after prepare', 'appear after prepare'])('keeps the original module root and complete observation history when descendants %s', async change => {
+    const f = await fixture(true, true), native = require('../../scripts/lib/process-identity.cjs')
+    const { probeKnownProcessExit } = require('../../scripts/lib/known-process-exit.cjs')
+    const target = f.scope.find((item: any) => item.module_id === 'fixture-memory'), rootPid = f.manager.processes.get('fixture-memory').pid
+    const originalChild = target.processes.find((item: any) => item.pid !== rootPid && !target.processes.some((other: any) => other.parent === item.pid))
+    let extra: any
+    const update = async () => {
+      if (change.startsWith('exit')) {
+        expect(originalChild).toBeTruthy()
+        native.terminateKnownProcess(originalChild)
+        await vi.waitFor(() => expect(probeKnownProcessExit([originalChild]).state).toBe('stopped'))
+      } else {
+        const reply = await fetch(`http://127.0.0.1:${target.module_port}/fixture_add_child`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: randomUUID() }),
+        }).then(response => response.json()) as any
+        await vi.waitFor(() => { extra = native.inspectProcess(reply.data.pid); expect(extra).toBeTruthy() })
+        expect(target.processes.some((item: any) => item.pid === extra.parent)).toBe(true)
+        expect(target.processes.some((item: any) => item.pid === extra.pid)).toBe(false)
+      }
+    }
+    try {
+      if (change.endsWith('before stop')) await update()
+      else {
+        const prepare = f.journal.prepare.getMockImplementation()!
+        f.journal.prepare.mockImplementation(async scope => { const result = await prepare(scope); await update(); return result })
+      }
+      const result = await f.manager.requestWorkspaceRelocationModuleStops(f.scope, f.journal)
+      expect(result.dispatch).toBe('dispatch')
+      expect(result.results.find((item: any) => item.module_id === 'fixture-memory')).toMatchObject({ status: 'known_scope_exited' })
+      expect(f.relocation.readWorkspaceRelocationModules(f.data, f.jobId).modules).toEqual(f.scope)
+      const stored = f.relocation.readWorkspaceRelocationModuleStops(f.data, f.jobId)
+      const known = stored.observations.filter((item: any) => item.module_id === 'fixture-memory').at(-1).processes
+      expect(known).toEqual(expect.arrayContaining(target.processes))
+      if (extra) expect(known).toEqual(expect.arrayContaining([expect.objectContaining({ pid: extra.pid, started: extra.started })]))
+      expect(probeKnownProcessExit(known).state).toBe('stopped')
+      expect(f.manager.processes.get('admin-web').exitCode).toBeNull()
+      await expect(fs.stat(path.join(path.dirname(f.data), 'relocated'))).rejects.toMatchObject({ code: 'ENOENT' })
+    } finally { if (extra) native.terminateKnownProcess(extra); await f.cleanup() }
+  }, nativeTimeout)
+
   it('joins the actual private module journal and native lock without moving workspace files', async () => {
     const f = await fixture(true, true)
     try {
@@ -153,17 +212,17 @@ describe('workspace planned execution module stops', () => {
       expect(JSON.parse(await fs.readFile(f.marker, 'utf8'))).toEqual(['/get_runtime_identity', '/shutdown'])
     } finally { await f.cleanup() }
   }, nativeTimeout)
-  it.each(['normal', 'lock lost', 'receipt reply lost', 'false persistence ack'])('uses the independent coordinator native lock for the real module journal across IPC: %s', async mode => {
+  it.each(['normal', 'lock lost', 'receipt reply lost', 'false persistence ack', 'capture only', 'capture false ack', 'capture lock lost', 'capture reply lost', 'captured scope then stopped descendant'])('uses the independent coordinator native lock for the real module journal across IPC: %s', async mode => {
     const f = await fixture(true, true)
     const locks = await import('../../scripts/lib/cli-lock.mjs'), native = require('../../scripts/lib/process-identity.cjs')
     const { sha256CanonicalJson } = await import('crabot-shared')
     const entry = new URL('../../scripts/lib/workspace-coordinator-entry.mjs', import.meta.url).href
     const bridge = new URL('../../scripts/lib/workspace-module-journal.mjs', import.meta.url).href
     const code = `import{enterWorkspaceRelocationCoordinator}from ${JSON.stringify(entry)};import{serveWorkspaceModuleJournal}from ${JSON.stringify(bridge)};
-      const context=await enterWorkspaceRelocationCoordinator(),server=${JSON.stringify(mode)}==='false persistence ack'?{close(){}}:serveWorkspaceModuleJournal(context);
-      if(${JSON.stringify(mode)}==='false persistence ack')process.on('message',message=>{if(message.kind==='workspace_module_journal_request')process.send({kind:'workspace_module_journal_reply',request_id:message.request_id,launch_id:message.launch_id,operation:message.operation,ok:true,result:message.operation==='prepare'?'dispatch':true})});
-      if(${JSON.stringify(mode)}==='receipt reply lost'){const send=process.send.bind(process);process.send=(message,callback)=>message.kind==='workspace_module_journal_reply'&&message.operation==='complete'?(callback?.(null),false):send(message,callback)}
-      if(${JSON.stringify(mode)}==='lock lost')context.release();
+      const context=await enterWorkspaceRelocationCoordinator(),server=['false persistence ack','capture false ack'].includes(${JSON.stringify(mode)})?{close(){}}:serveWorkspaceModuleJournal(context);
+      if(['false persistence ack','capture false ack'].includes(${JSON.stringify(mode)}))process.on('message',message=>{if(message.kind==='workspace_module_journal_request')process.send({kind:'workspace_module_journal_reply',request_id:message.request_id,launch_id:message.launch_id,operation:message.operation,ok:true,result:message.operation==='prepare'?'dispatch':true})});
+      if(['receipt reply lost','capture reply lost'].includes(${JSON.stringify(mode)})){const send=process.send.bind(process),lost=${JSON.stringify(mode)}==='capture reply lost'?'capture':'complete';process.send=(message,callback)=>message.kind==='workspace_module_journal_reply'&&message.operation===lost?(callback?.(null),false):send(message,callback)}
+      if(['lock lost','capture lock lost'].includes(${JSON.stringify(mode)}))context.release();
       process.send({kind:'fixture-serving'});process.on('message',m=>{if(m.kind==='fixture-exit'){server.close();context.release();process.exit(0)}});setTimeout(()=>process.exit(2),30000);`
     const child = spawn(process.execPath, ['--input-type=module', '-e', code], { stdio: ['ignore', 'ignore', 'pipe', 'ipc'] })
     let output = ''; child.stderr.on('data', bytes => { output += bytes.toString() })
@@ -180,6 +239,32 @@ describe('workspace planned execution module stops', () => {
       journal = createWorkspaceModuleJournal(child, { dataDir: f.data, id: f.jobId, launch })
       expect(locks.cliLockToken(path.join(f.data, 'cli.lock'))).toBeUndefined()
       expect(() => f.relocation.commitWorkspaceRelocationModules({ dataDir: f.data, id: f.jobId, modules: f.scope })).toThrow()
+      if (mode.startsWith('capture ')) {
+        const captured = journal.capture(f.scope)
+        if (mode === 'capture only') await captured
+        else await expect(captured).rejects.toMatchObject({ code: 'CRABOT_WORKSPACE_JOURNAL_UNAVAILABLE' })
+        const fixed = f.relocation.readWorkspaceRelocationModules(f.data, f.jobId)
+        if (mode === 'capture only' || mode === 'capture reply lost') {
+          expect(fixed.modules).toEqual(f.scope)
+          expect(f.relocation.readWorkspaceRelocationModuleStops(f.data, f.jobId).attempt).toBeNull()
+          if (mode === 'capture only') { await journal.capture(f.scope); expect(f.relocation.readWorkspaceRelocationModules(f.data, f.jobId)).toEqual(fixed) }
+        } else expect(fixed).toBeNull()
+        expect(f.manager.processes.get('fixture-memory').exitCode).toBeNull()
+        expect(f.manager.processes.get('admin-web').exitCode).toBeNull()
+        await expect(fs.stat(path.join(f.data, 'workspace-control/relocation-module-stop-attempt.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+        expect(await fs.readFile(f.marker, 'utf8').catch(() => '[]')).not.toContain('/shutdown')
+        return
+      }
+      if (mode === 'captured scope then stopped descendant') {
+        await journal.capture(f.scope)
+        expect(f.relocation.readWorkspaceRelocationModuleStops(f.data, f.jobId).attempt).toBeNull()
+        const module = f.scope.find((item: any) => item.module_id === 'fixture-memory'), rootPid = f.manager.processes.get('fixture-memory').pid
+        const descendant = module.processes.find((item: any) => item.pid !== rootPid && !module.processes.some((other: any) => other.parent === item.pid))
+        expect(descendant).toBeTruthy()
+        native.terminateKnownProcess(descendant)
+        const { probeKnownProcessExit } = require('../../scripts/lib/known-process-exit.cjs')
+        await vi.waitFor(() => expect(probeKnownProcessExit([descendant]).state).toBe('stopped'))
+      }
       const pending = f.manager.requestWorkspaceRelocationModuleStops(f.scope, journal)
       if (mode === 'lock lost' || mode === 'false persistence ack') {
         await expect(pending).rejects.toMatchObject({ code: 'CRABOT_WORKSPACE_JOURNAL_UNAVAILABLE' })

@@ -1626,11 +1626,19 @@ export class ModuleManager {
       return this.workspaceModuleStop.pending
     }
     const pending = Promise.resolve().then(async (): Promise<WorkspaceModuleStopResponse> => {
-      const scope = await this.captureWorkspaceRelocationModules()
-      if (sha256CanonicalJson(scope) !== fingerprint) throw failure()
+      const scope = expected
+      // Descendants can exit or appear while Workers settle; retain the original known set.
+      const bindingKey = (items: ReadonlyArray<WorkspaceModuleScope>): string => sha256CanonicalJson(items.map(item => {
+        const rootPid = this.processes.get(item.module_id)?.pid
+        const root = item.processes.find(process => process.pid === rootPid)
+        if (item.runtime_id && !root) throw failure()
+        return { ...item, processes: root ? [root] : [] }
+      }))
+      const bindings = bindingKey(scope)
+      if (bindingKey(await this.captureWorkspaceRelocationModules()) !== bindings) throw failure()
       const dispatch = await journal.prepare(scope)
       if (dispatch === 'observe') return { dispatch, results: [] }
-      if (dispatch !== 'dispatch' || sha256CanonicalJson(await this.captureWorkspaceRelocationModules()) !== fingerprint) throw failure()
+      if (dispatch !== 'dispatch' || bindingKey(await this.captureWorkspaceRelocationModules()) !== bindings) throw failure()
       const verifySet = (): void => {
         if (!workspaceMaintenancePending(this.dataDir) || this.isShuttingDown
           || JSON.stringify([...this.modules.keys()].filter(id => id !== 'admin-web').sort()) !== JSON.stringify(scope.map(item => item.module_id))) throw failure()
