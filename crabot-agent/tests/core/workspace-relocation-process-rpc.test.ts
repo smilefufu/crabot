@@ -81,6 +81,24 @@ describe('Agent fixed native process capture RPC', () => {
       await ended; await f.cleanup()
     }
   }, 30000)
+  it('captures actual current child exit through HTTP without any legacy boundary or task mutation', async () => {
+    const f = await fixture('normal', 'claude-code'), adapter = f.agent.managerStack.adapters.get('claude-code')
+    const child = spawn(process.execPath, ['-e', 'process.send("ready");process.on("message",()=>process.exit(0));setTimeout(()=>process.exit(0),30000)'], { stdio: ['ignore', 'ignore', 'inherit', 'ipc'] })
+    const ended = once(child, 'exit')
+    try {
+      await once(child, 'message'); child.send('end'); await ended
+      adapter.runtimes.set('worker#1', { worker_id: 'worker', incarnation_id: 'inc', seq: 1,
+        workspaceRoot: path.join(f.data, 'project'), headlessChild: child, controlState: { kind: 'exited' } })
+      const result = await f.call()
+      expect(result.success).toBe(true); expect(result.data).toEqual({ processes: [] })
+      expect(await f.agent.managerStack.ledger.listAllWorkers()).toEqual(f.before)
+      await expect(fs.stat(path.join(f.data, 'workspace-control/legacy-executions.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+      expect(f.records.readWorkspaceRelocationStops(f.data, f.params.intent_id).attempt).toBeNull(); expect(f.stop).not.toHaveBeenCalled()
+    } finally {
+      adapter.runtimes.delete('worker#1'); if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
+      await ended; await f.cleanup()
+    }
+  }, 30000)
   it('keeps an unknown cold CLI carrier unknown without rebuilding or writing it', async () => {
     const f = await fixture('normal', 'claude-code'), adapter = f.agent.managerStack.adapters.get('claude-code')
     const rebuild = vi.spyOn(adapter, 'ensureRuntime')

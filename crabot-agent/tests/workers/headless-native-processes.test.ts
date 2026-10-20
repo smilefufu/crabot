@@ -15,7 +15,7 @@ for (const mode of ['code', 'signal'] as const) it('observes actual child ' + mo
     if (mode === 'code') child.send('end')
     else child.kill('SIGTERM')
     await ended
-    expect(captureHeadlessNativeProcesses(child, true)).toEqual([])
+    expect(captureHeadlessNativeProcesses(child, true)).toEqual({ carrier_exited: true })
     expect(Object.isFrozen(captureHeadlessNativeProcesses(child, true))).toBe(true)
     expect(() => captureHeadlessNativeProcesses(child)).toThrow()
     expect(() => captureHeadlessNativeProcesses(child, false as any)).toThrow()

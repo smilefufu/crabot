@@ -5590,6 +5590,24 @@ describe('workspace relocation CLI process capture', () => {
       expect.objectContaining({ incarnation_id: 'original-ended-fork', forked_from: f.worker.incarnations[0].incarnation_id, query_id: 'original-query' }), true]]))
     expect(await f.ledger.listAllWorkers()).toEqual(before); expect(f.fake.killCalls).toEqual([])
   })
+  it('consumes an explicit current carrier exit without a legacy boundary and rechecks it at the end', async () => {
+    const f = await nativeWorker(), before = await f.ledger.listAllWorkers(), capture = vi.fn(async () => Object.freeze({ carrier_exited: true as const }))
+    ;(f.fake as WorkerAdapter).captureExecutionProcesses = capture
+    expect(await f.harness.captureWorkspaceRelocationProcesses(await f.harness.captureWorkspaceRelocationScope())).toEqual([])
+    expect(capture).toHaveBeenCalledTimes(2)
+    expect(await f.ledger.listAllWorkers()).toEqual(before); expect(f.fake.killCalls).toEqual([])
+  })
+  it.each([{}, { carrier_exited: false }, { carrier_exited: true, extra: true }])('refuses a malformed current exit observation: %j', async value => {
+    const f = await nativeWorker()
+    ;(f.fake as any).captureExecutionProcesses = vi.fn(async () => value)
+    await expect(f.harness.captureWorkspaceRelocationProcesses(await f.harness.captureWorkspaceRelocationScope())).rejects.toMatchObject({ code: 'WORKSPACE_MAINTENANCE' })
+  })
+  it('rejects a current exit that changes before its final confirmation', async () => {
+    const f = await nativeWorker(), capture = vi.fn().mockResolvedValueOnce({ carrier_exited: true }).mockResolvedValueOnce([])
+    ;(f.fake as WorkerAdapter).captureExecutionProcesses = capture
+    await expect(f.harness.captureWorkspaceRelocationProcesses(await f.harness.captureWorkspaceRelocationScope())).rejects.toMatchObject({ code: 'WORKSPACE_MAINTENANCE' })
+    expect(capture).toHaveBeenCalledTimes(2); expect(f.fake.killCalls).toEqual([])
+  })
   it('uses only the fixed old boundary for an empty current carrier observation', async () => {
     const f = await endedLegacyWorker(), before = await f.ledger.listAllWorkers(), capture = vi.fn(async (_handle: IncarnationHandle, _fixed: unknown, _legacy?: true) => [])
     ;(f.fake as WorkerAdapter).captureExecutionProcesses = capture

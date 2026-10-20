@@ -82,7 +82,7 @@ import type {
   SendInputOptions,
   TraceCursor,
   WorkerAdapter,
-  WorkerProcessIdentity,
+  WorkerProcessObservation,
   WorkerContractState,
   WorkerSubagentSummary,
   Workspace,
@@ -2020,7 +2020,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
   }
 
   /** Read-only fixed carrier; cold metadata needs the original scope, never ensureRuntime side effects. */
-  async captureExecutionProcesses(h: IncarnationHandle, fixed?: WorkspaceRelocationIncarnation, legacyEnded?: true): Promise<ReadonlyArray<WorkerProcessIdentity>> {
+  async captureExecutionProcesses(h: IncarnationHandle, fixed?: WorkspaceRelocationIncarnation, legacyEnded?: true): Promise<WorkerProcessObservation> {
     h = Object.freeze({ ...h })
     fixed = fixed ? Object.freeze({ ...fixed }) : undefined
     this.assertActive()
@@ -2035,9 +2035,9 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     }
     if (runtime.incarnation_id !== h.incarnation_id || runtime.worker_id !== h.worker_id || runtime.seq !== h.seq
       || fixed && runtime.workspaceRoot !== fixed.workspace) throw invalid()
-    let processes: ReadonlyArray<WorkerProcessIdentity>
+    let processes: WorkerProcessObservation
     if (runtime.headlessClient) {
-      processes = runtime.headlessClient.captureExecutionProcesses(legacyEnded && runtime.controlState.kind === 'exited' ? true : undefined)
+      processes = runtime.headlessClient.captureExecutionProcesses(fixed && runtime.controlState?.kind === 'exited' ? true : undefined)
     } else {
       if (runtime.sessionName !== `crabot-w-${h.worker_id}-${h.seq}`) throw invalid()
       if (legacyEnded && fixed && runtime.controlState.kind === 'exited') {

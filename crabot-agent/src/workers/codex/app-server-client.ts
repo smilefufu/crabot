@@ -1,6 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { captureHeadlessNativeProcesses } from '../headless-native-processes.js'
-import type { WorkerProcessIdentity } from '../types.js'
+import type { WorkerProcessObservation } from '../types.js'
 import { buildScrubbedChildEnv } from '../connections/secret-env.js'
 
 type JsonObject = Record<string, unknown>
@@ -230,9 +230,9 @@ export class CodexAppServerClient {
   }
 
   /** A protocol disconnect is not process exit; keep observing the actual child object. */
-  captureExecutionProcesses(legacyEnded?: true): ReadonlyArray<WorkerProcessIdentity> {
-    if (this.processExited && legacyEnded !== true) throw Object.assign(new Error('app-server进程已退出，无法重新捕获其后代。'), { code: 'CRABOT_PROCESS_SCOPE' })
-    return captureHeadlessNativeProcesses(this.child, legacyEnded)
+  captureExecutionProcesses(allowObservedExit?: true): WorkerProcessObservation {
+    if (this.processExited && allowObservedExit !== true) throw Object.assign(new Error('app-server进程已退出，无法重新捕获其后代。'), { code: 'CRABOT_PROCESS_SCOPE' })
+    return captureHeadlessNativeProcesses(this.child, allowObservedExit)
   }
 
   async terminate(): Promise<boolean> {

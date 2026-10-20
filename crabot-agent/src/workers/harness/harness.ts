@@ -107,6 +107,7 @@ import type {
   InspectWorkspaceGitResult,
   WorkerWorkspaceGitContext,
   WorkerProcessIdentity,
+  WorkerCarrierExit,
 } from '../types'
 import type { BuiltinRuntimeFactory } from '../builtin/runtime'
 import { BUILTIN_WORKER_PERMISSIONS, narrowWorkerPermissions, workerCliExecutionPermissions } from '../builtin/runtime'
@@ -1157,6 +1158,9 @@ export class WorkerHarness {
     const failure = () => Object.assign(new Error('迁移执行进程与固定范围无法核验，已保留维护保护。'), { code: 'WORKSPACE_MAINTENANCE' })
     const matchesLegacy = legacy === undefined ? () => false : createLegacyWorkspaceExecutionMatcher(legacy)
     const legacyAbsences: Array<{ worker_id: string; incarnation_id: string; manager_key: ManagerKey }> = []
+    const currentExitChecks: Array<() => Promise<void>> = []
+    const carrierExited = (value: unknown): value is WorkerCarrierExit => !!value && typeof value === 'object'
+      && !Array.isArray(value) && Object.keys(value).join(',') === 'carrier_exited' && (value as WorkerCarrierExit).carrier_exited === true
     const scope = await this.captureWorkspaceRelocationScope()
     if (sha256CanonicalJson(scope) !== fingerprint) throw failure()
     const adapters = new Map(this.deps.adapters)
@@ -1171,13 +1175,22 @@ export class WorkerHarness {
         const adapter = adapters.get(incarnation.impl)
         if (!adapter?.captureExecutionProcesses || adapter.implId !== fixed.impl) throw failure()
         const legacyEnded = matchesLegacy(current!.managerKey, current!.worker, fixed.incarnation_id)
-        const observed = await adapter.captureExecutionProcesses(Object.freeze(handleForIncarnation(worker.worker_id, incarnation)), fixed, legacyEnded ? true : undefined)
-        if (this.deps.adapters.get(fixed.impl) !== adapter || !Array.isArray(observed) || observed.length === 0 && !legacyEnded
+        const handle = Object.freeze(handleForIncarnation(worker.worker_id, incarnation)), capture = adapter.captureExecutionProcesses
+        const observed = await capture.call(adapter, handle, fixed, legacyEnded ? true : undefined)
+        if (this.deps.adapters.get(fixed.impl) !== adapter) throw failure()
+        if (carrierExited(observed)) {
+          currentExitChecks.push(async () => {
+            if (adapter.captureExecutionProcesses !== capture || !carrierExited(await capture.call(adapter, handle, fixed))) throw failure()
+          })
+          continue
+        }
+        if (!Array.isArray(observed) || observed.length === 0 && !legacyEnded
           || processes.length + observed.length > 32768) throw failure()
         if (observed.length === 0) legacyAbsences.push({ worker_id: worker.worker_id, incarnation_id: fixed.incarnation_id, manager_key: worker.manager_key })
         processes.push(...observed)
       }
     }
+    for (const check of currentExitChecks) await check()
     if (sha256CanonicalJson(await this.captureWorkspaceRelocationScope()) !== fingerprint) throw failure()
     if (legacyAbsences.length) {
       const latest = await this.deps.ledger.listAllWorkers()

@@ -326,13 +326,13 @@ describe.each(['claude-code', 'codex'] as const)('%s resident legacy headless', 
       expect(f.child.exitCode).toBeNull(); expect(f.child.signalCode).toBeNull(); expect(f.tmux.killSession).not.toHaveBeenCalled()
     } finally { await f.close() }
   })
-  it.skipIf(skip)('consumes actual child exit only with the original context and exited runtime', async () => {
+  it.skipIf(skip)('consumes actual child exit only with fixed scope and exited runtime', async () => {
     const f = await residentHeadless(impl), rebuild = vi.spyOn(f.adapter as any, 'ensureRuntime')
     try {
       await f.close()
-      await expect(f.adapter.captureExecutionProcesses!(f.h, f.fixed)).rejects.toBeDefined()
+      await expect(f.adapter.captureExecutionProcesses!(f.h)).rejects.toBeDefined()
       const result = await f.adapter.captureExecutionProcesses!(f.h, f.fixed, true)
-      expect(result).toEqual([]); expect(Object.isFrozen(result)).toBe(true)
+      expect(result).toEqual({ carrier_exited: true }); expect(Object.isFrozen(result)).toBe(true)
       expect(rebuild).not.toHaveBeenCalled(); expect(f.tmux.readProcessCarrier).not.toHaveBeenCalled(); expect(f.tmux.killSession).not.toHaveBeenCalled()
     } finally { await f.close() }
   })
@@ -417,5 +417,18 @@ describe.each(['claude-code', 'codex'] as const)('%s resident legacy headed meta
     })
     await expect(f.adapter.captureExecutionProcesses!(f.h, f.fixed, change === 'ordinary strict path' ? undefined : true)).rejects.toBeDefined()
     expect(f.tmux.killSession).not.toHaveBeenCalled()
+  })
+})
+
+describe.each(['claude-code', 'codex'] as const)('%s current physical carrier exit', impl => {
+  it.skipIf(process.platform === 'win32' && impl === 'codex')('uses actual exit in the fixed job without legacy compatibility', async () => {
+    const f = await residentHeadless(impl)
+    try {
+      expect(await f.adapter.captureExecutionProcesses!(f.h, f.fixed)).toMatchObject([{ pid: f.child.pid }])
+      await f.close()
+      await expect(f.adapter.captureExecutionProcesses!(f.h)).rejects.toBeDefined()
+      expect(await f.adapter.captureExecutionProcesses!(f.h, f.fixed)).toEqual({ carrier_exited: true })
+      expect(f.tmux.readOptionalProcessCarrier).not.toHaveBeenCalled(); expect(f.tmux.killSession).not.toHaveBeenCalled()
+    } finally { await f.close() }
   })
 })
