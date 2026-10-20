@@ -30,7 +30,7 @@
 - workspace：执行保护、私有固定Worker/模块范围、原生实例锁和计划停止已有组件；已知集合退出与全局停止证明分开。独立协调接纳、不可逆关闭、文件切换/中断恢复仍待，详见[项目workspace计划](crabot-docs/superpowers/plans/2026-10-19-project-workspaces-implementation.md)。
 
 - 边界：按[桌面Spec](crabot-docs/superpowers/specs/2026-10-17-desktop-application-design.md)、[安装根计划](crabot-docs/superpowers/plans/2026-10-19-desktop-install-root-implementation.md)在feat/desktop-application推进；完整测好前不推产品main/不提前PR，不部署或重启现场，不在本机启动第二业务MM（完整实例仅隔离CI）。Electron+React、业务HTTP/WS、最小IPC、GUI免额外密码、关闭窗口后台/退出停共享实例。整体安装根在安装时选，之后可迁workspace；不新增DATA_DIR选择步骤。
-- 原生验收修复：c42的ARM/Linux通过；Windows NSIS引号修复已提交，新一轮更早的迁移符号链接错误码回归已修（本机20通过）；Intel桌面重启超时仍待完整复验。CI另证实端口JSON并发覆盖损坏，现按序原子替换并在MM停机时收口；真实文件/端口/生命周期64项及Core类型检查通过，不将其当作超时根因已完全解决。
+- 原生验收修复：c42的ARM/Linux通过；Windows NSIS引号修复已提交，新一轮更早的迁移符号链接错误码回归已修（本机20通过）；后续Intel矩阵已通过共享Core与GUI崩溃重接，最后CLI升级仍待完整复验。CI另证实端口JSON并发覆盖损坏，现按序原子替换并在MM停机时收口；真实文件/端口/生命周期64项及Core类型检查通过，不将其当作超时根因已完全解决。
 - P0–P5：统一内置环境/隔离可写依赖、共享GUI/CLI、OS peer、SDK、首次模型/权限/诊断已有组件与部分四平台证据。稳定MCP id的五类真实隔离stdio连接通过。模型按Admin引用实时解析、Agent直连；mirror-xinshu仅两次短直连通过，真实Provider完整GUI尚未验收。隔离CI已有实际GUI配置→对话→持久ack/交付，模型为loopback替身，不能混称真实账号验收。
 - I1/I2：严格整体根身份、稳定原生命令、唯一GUI/Core版本对、离线准备/安装向导和受控OS入口已接。517bcb01实际安装宿主ASAR在仓库外验证backend、完整载荷、沙箱preload/fuse通过，无业务MM/实际系统注册；不计完整安装验收。旧CLI接管、正式通道、保留式卸载及Ubuntu默认沙箱授权仍未收口。
 - I3：独立CLI/system首启及管理员范围恢复改用schema3/唯一共同材料，旧schema1/2恢复保留。真实Node迁移不访问无关200GiB历史；完整Core归档与实际crabot upgrade回环/SHA/解包/选择、Python/workspace保留已验，无本地MM。System共享请求用原Admin输入先封装，再执行独立模块；Root只持id/hash等运维摘要，未知结果不重放。取消只归档未用材料，旧宽备份继续原核验。
@@ -40,7 +40,7 @@
 - W4：保护/收口、完整固定集合、实际子进程协调入口、专用内存授权、Agent固定MM核验/维护范围捕获RPC、MM可信捕获/停止委派及材料桥、Agent专用停止RPC、独立journal/父读回已接；Core关联135、Agent关联303及追加2、私有记录/入口/原生锁181项与类型通过。未知保护、不重发、Admin在线；这些是组件证据。完整Worker/载体全局停止证明、可靠HTTP/独立驱动、离线永久关闭、文件切换/恢复和平台ACL仍待。
 - 权限兼容按[确认Spec](crabot-docs/superpowers/specs/2026-10-19-legacy-project-file-access-design.md)：旧对象有效null一次转显式全目录，新对象仅受管默认范围；仅storage覆盖，其余模板继承、明确限制和旧请求/Worker上限保留。实际旧元数据→Admin重载→生产Harness→Write/Read及受限拒绝通过，未改现场权限。
 - System按[确认Spec](crabot-docs/superpowers/specs/2026-10-18-system-mode-experience-design.md)/[协议](crabot-docs/protocols/protocol-system.md)/[计划](crabot-docs/superpowers/plans/2026-10-18-system-mode-experience-implementation.md)：S1–S4注册/UID/systemd/本人CLI/批量/升级/受保护恢复已接，多轮真实三UID已验；新增范围材料接线仍需当前head整机重验。S5已有旧表/降UID发现、真实目录/精确停机、入口隔离/交接、专用数据与Python组件；完整旧共享转换协调、全部启动源、恢复和真实旧发行多UID尚未完成。自定义DATA_DIR/旧停止目录映射提案已撤回；旧Node指纹恢复补充未获确认且未实现，不作全局门禁。代码/环境在线准备，最终仅因一致性备份实际迁移配置/数据库及切换而停止。
-- 原生矩阵：9a4b80d8 ARM/Intel/Linux整包通过；同快照Windows在有限controller登记夹具提前退出，914f43ad已补登记错误日志和正确runtime读取，身份要求不放宽，根因待新矩阵。6f0086eb真实私有workspace CLI四平台通过。后续协调接线仍待当前head完整矩阵；真实Provider/TUI、签名和目标系统权限独立验收，不把旧成功或组件通过计作本次全部完成。
+- 原生矩阵：9a4b80d8 ARM/Intel/Linux整包通过；同快照Windows在有限controller登记夹具提前退出，914f43ad已补登记错误日志和正确runtime读取，身份要求不放宽，根因待新矩阵。6f0086eb真实私有workspace CLI四平台通过。a92 ARM/Linux整包通过，Intel已过实际GUI配对/共享Core/崩溃重接及558MB CLI归档核验，实际CLI升级阶段在105分钟Job上限被取消；仅该CI上限调135分钟，产品期限不变。后续协调接线仍待当前head完整矩阵；真实Provider/TUI、签名和目标系统权限独立验收，不把旧成功或组件通过计作本次全部完成。
 - 回归边界：此前Agent4320通过/34失败在未改main逐条复现，另有main同样停滞的重试用例；Admin两项静态失败亦同源。分支WS关闭丢消息回归已修并验证。签名/公证、macOS14/Windows11/Ubuntu GNOME24.04与26.04、真实OS权限/IME、资源指标、最终模型业务和完整迁移/更新均分别验收；[签名指南](crabot-docs/guides/desktop-release-signing.md)。当前Core21及4fa/517等旧包均不含全部最新代码。
 - 逐项证据、旧候选及基线记录见[验收记录](crabot-docs/superpowers/plans/2026-10-17-desktop-application-validation.md)、安装根和System计划。保留数据/依赖/解释器基底的卸载未完成；源码、构建、签名、部署、运行与产品验收分别报告。整项需求未完成。
 
