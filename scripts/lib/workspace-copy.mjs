@@ -18,6 +18,8 @@ const checkCancelled = signal => { if (signal?.aborted) throw Object.assign(new 
 export async function inspectWorkspaceCopySource(source, { signal } = {}) {
   checkCancelled(signal)
   const original = await fs.lstat(source, { bigint: true })
+  const account = process.platform === 'win32' ? { owner: native.inspectProcess(process.pid).owner, group: native.inspectCurrentPrimaryGroup() } : null
+  const nativeId = process.platform === 'win32' ? native.inspectDirectoryFileId(source) : undefined
   const tree = await inspectWorkspaceRelocationTree(source, 'copy', { signal })
   if (tree.issues.length) throw fail()
   const hash = createHash('sha256'); let entries = 0
@@ -32,6 +34,7 @@ export async function inspectWorkspaceCopySource(source, { signal } = {}) {
       throw Object.assign(new Error('当前系统用户无法保留部分文件的所有者或用户组；未开始复制。'), { code: 'WORKSPACE_COPY_OWNER_UNSUPPORTED' })
     }
     const metadata = await inspectWorkspaceFileMetadata(file, { signal })
+    if (account && (metadata.owner !== account.owner || metadata.group !== account.group)) throw Object.assign(new Error('当前系统用户无法保留部分文件的所有者或用户组；未开始复制。'), { code: 'WORKSPACE_COPY_OWNER_UNSUPPORTED', path: relative })
     if (metadata.copy_blockers.length) throw Object.assign(new Error('工作区含当前跨盘复制不支持的文件属性；原目录保留。'), { code: 'WORKSPACE_COPY_METADATA_UNSUPPORTED', path: relative, blockers: metadata.copy_blockers })
     hash.update(JSON.stringify([relative, metadata.fingerprint]) + '\n'); entries++
     if (stat.isDirectory()) for (const name of (await fs.readdir(file)).sort()) await visit(path.join(relative, name))
@@ -39,7 +42,8 @@ export async function inspectWorkspaceCopySource(source, { signal } = {}) {
   await visit('')
   if ((await inspectWorkspaceRelocationTree(source, 'copy', { signal })).fingerprint !== tree.fingerprint) throw fail()
   if (!sameRoot(original, await fs.lstat(source, { bigint: true }))) throw fail()
-  return { source_identity: { dev: original.dev.toString(), ino: original.ino.toString() }, tree_fingerprint: tree.fingerprint, metadata_fingerprint: hash.digest('hex'), entries }
+  if (nativeId !== undefined && native.inspectDirectoryFileId(source) !== nativeId) throw fail()
+  return { source_identity: { dev: original.dev.toString(), ino: original.ino.toString(), ...(nativeId ? { native_id: nativeId } : {}) }, tree_fingerprint: tree.fingerprint, metadata_fingerprint: hash.digest('hex'), entries }
 }
 
 export async function copyWorkspaceToStaging(source, container, { signal } = {}) {
@@ -49,47 +53,67 @@ export async function copyWorkspaceToStaging(source, container, { signal } = {})
     || within(source, container) || within(container, source)
     || await fs.realpath(path.dirname(container)) !== path.dirname(container)) throw fail()
   const before = await inspectWorkspaceCopySource(source, { signal })
-  if (process.platform === 'win32') throw Object.assign(new Error('Windows 跨盘文件复制仍在原生核验中，未创建暂存或修改源目录。'), { code: 'WORKSPACE_COPY_PLATFORM_UNVERIFIED' })
   checkCancelled(signal)
-  // mkdir is exclusive; even an existing empty directory is never adopted or overwritten.
-  let created
-  if (process.platform === 'win32') native.createPrivateDirectory(container)
-  else created = native.createPrivateStagingDirectory(container)
-  const identity = await fs.lstat(container, { bigint: true }), target = path.join(container, 'tree')
-  if (!identity.ino || created && (created.dev !== identity.dev.toString() || created.ino !== identity.ino.toString())
-    || await fs.realpath(container) !== container
-    || process.platform === 'win32' && !native.isPrivateDirectory(container)
-    || process.platform !== 'win32' && (identity.mode & 0o777n) !== 0o700n) throw fail()
-  const checkContainer = async () => {
-    const current = await fs.lstat(container, { bigint: true })
-    if (!sameRoot(identity, current) || await fs.realpath(container) !== container
+  let sourcePin, containerPin, treePin
+  try {
+    if (process.platform === 'win32') {
+      sourcePin = native.pinDirectory(source)
+      if (sourcePin.identity !== before.source_identity.native_id) throw fail()
+    }
+    // mkdir is exclusive; even an existing empty directory is never adopted or overwritten.
+    let created
+    if (process.platform === 'win32') native.createPrivateDirectory(container)
+    else created = native.createPrivateStagingDirectory(container)
+    const identity = await fs.lstat(container, { bigint: true }), target = path.join(container, 'tree')
+    if (!identity.ino || created && (created.dev !== identity.dev.toString() || created.ino !== identity.ino.toString())
+      || await fs.realpath(container) !== container
       || process.platform === 'win32' && !native.isPrivateDirectory(container)
-      || process.platform !== 'win32' && (current.mode & 0o777n) !== 0o700n) throw fail()
+      || process.platform !== 'win32' && (identity.mode & 0o777n) !== 0o700n) throw fail()
+    if (process.platform === 'win32') {
+      containerPin = native.pinDirectory(container)
+      if ((await fs.readdir(container)).length) throw fail()
+    }
+    const checkContainer = async () => {
+      const current = await fs.lstat(container, { bigint: true })
+      if (!sameRoot(identity, current) || await fs.realpath(container) !== container
+        || process.platform === 'win32' && !native.isPrivateDirectory(container)
+        || process.platform !== 'win32' && (current.mode & 0o777n) !== 0o700n) throw fail()
+    }
+    checkCancelled(signal); await checkContainer()
+    const allowed = new Set(['PATH', 'LANG', 'LC_ALL', 'LC_CTYPE', 'TZ', 'TMPDIR', 'TMP', 'TEMP', 'SYSTEMROOT', 'WINDIR'])
+    const env = Object.fromEntries(Object.entries(process.env).filter(([key, value]) => value !== undefined && allowed.has(key.toUpperCase())))
+    const options = { cwd: path.dirname(fileURLToPath(import.meta.url)), env, signal, captureError: true }
+    if (process.platform === 'darwin' || process.platform === 'linux') {
+      const sourceFd = await fs.open(source, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW)
+      let targetFd
+      try {
+        targetFd = await fs.open(container, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW)
+        const opened = await sourceFd.stat({ bigint: true }), staged = await targetFd.stat({ bigint: true })
+        if (!opened.isDirectory() || opened.dev.toString() !== before.source_identity.dev || opened.ino.toString() !== before.source_identity.ino
+          || !sameRoot(identity, staged)) throw fail()
+        await runBounded(process.execPath, [fileURLToPath(new URL('../workspace-copy-host.mjs', import.meta.url)),
+          opened.dev.toString(), opened.ino.toString(), staged.dev.toString(), staged.ino.toString()],
+        { ...options, extraFileDescriptors: [sourceFd.fd, targetFd.fd] })
+      } finally { try { await targetFd?.close() } finally { await sourceFd.close() } }
+    } else if (process.platform === 'win32') {
+      native.createPrivateDirectory(target); treePin = native.pinDirectory(target)
+      await runBounded(path.join(process.env.SystemRoot, 'System32/robocopy.exe'), [source, target, '/E', '/COPY:DATS', '/DCOPY:DATE',
+        '/SL', '/SJ', '/R:0', '/W:0', '/NFL', '/NDL', '/NJH', '/NJS', '/NP'], { ...options, successCodes: [0, 1, 2, 3, 4, 5, 6, 7] })
+      checkCancelled(signal)
+      native.copyPinnedDirectoryMetadata(sourcePin, treePin)
+      if (native.inspectDirectoryFileId(source) !== sourcePin.identity || native.inspectDirectoryFileId(target) !== treePin.identity
+        || native.inspectDirectoryFileId(container) !== containerPin.identity) throw fail()
+    } else throw fail()
+    checkCancelled(signal); await checkContainer()
+    const currentSource = await fs.lstat(source, { bigint: true })
+    if (!currentSource.isDirectory() || currentSource.isSymbolicLink() || currentSource.dev.toString() !== before.source_identity.dev
+      || currentSource.ino.toString() !== before.source_identity.ino || await fs.realpath(source) !== source) throw fail()
+    const proof = await verifyWorkspaceRelocationCopy(source, target, { signal })
+    if (proof.source_fingerprint !== before.tree_fingerprint || proof.metadata_fingerprint !== before.metadata_fingerprint
+      || proof.metadata_entries !== before.entries) throw fail()
+    await checkContainer(); checkCancelled(signal)
+    return { target, container_identity: { dev: identity.dev.toString(), ino: identity.ino.toString() }, ...proof }
+  } finally {
+    for (const pin of [treePin, containerPin, sourcePin]) if (pin) native.releaseDirectoryPin(pin)
   }
-  checkCancelled(signal); await checkContainer()
-  const options = { cwd: path.dirname(fileURLToPath(import.meta.url)), signal, captureError: true }
-  if (process.platform === 'darwin' || process.platform === 'linux') {
-    const sourceFd = await fs.open(source, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW)
-    let targetFd
-    try {
-      targetFd = await fs.open(container, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW)
-      const opened = await sourceFd.stat({ bigint: true }), staged = await targetFd.stat({ bigint: true })
-      if (!opened.isDirectory() || opened.dev.toString() !== before.source_identity.dev || opened.ino.toString() !== before.source_identity.ino
-        || !sameRoot(identity, staged)) throw fail()
-      const allowed = new Set(['PATH', 'LANG', 'LC_ALL', 'LC_CTYPE', 'TZ', 'TMPDIR', 'TMP', 'TEMP', 'SYSTEMROOT', 'WINDIR'])
-      const env = Object.fromEntries(Object.entries(process.env).filter(([key, value]) => value !== undefined && allowed.has(key.toUpperCase())))
-      await runBounded(process.execPath, [fileURLToPath(new URL('../workspace-copy-host.mjs', import.meta.url)),
-        opened.dev.toString(), opened.ino.toString(), staged.dev.toString(), staged.ino.toString()],
-      { ...options, env, extraFileDescriptors: [sourceFd.fd, targetFd.fd] })
-    } finally { try { await targetFd?.close() } finally { await sourceFd.close() } }
-  } else throw fail()
-  checkCancelled(signal); await checkContainer()
-  const currentSource = await fs.lstat(source, { bigint: true })
-  if (!currentSource.isDirectory() || currentSource.isSymbolicLink() || currentSource.dev.toString() !== before.source_identity.dev
-    || currentSource.ino.toString() !== before.source_identity.ino || await fs.realpath(source) !== source) throw fail()
-  const proof = await verifyWorkspaceRelocationCopy(source, target, { signal })
-  if (proof.source_fingerprint !== before.tree_fingerprint || proof.metadata_fingerprint !== before.metadata_fingerprint
-    || proof.metadata_entries !== before.entries) throw fail()
-  await checkContainer(); checkCancelled(signal)
-  return { target, container_identity: { dev: identity.dev.toString(), ino: identity.ino.toString() }, ...proof }
 }

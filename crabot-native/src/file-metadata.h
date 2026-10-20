@@ -49,13 +49,21 @@ static std::string MetadataXattrs(const std::string& path) {
   return result;
 }
 #else
-static std::string MetadataSecurity(HANDLE file, std::vector<std::string>& blockers) {
+static std::string MetadataSid(PSID sid) {
+  LPSTR text = nullptr;
+  if (!sid || !ConvertSidToStringSidA(sid, &text)) throw std::runtime_error("Cannot identify metadata owner or group");
+  std::string result(text); LocalFree(text); return result;
+}
+static std::string MetadataSecurity(HANDLE file, std::vector<std::string>& blockers, std::string& owner, std::string& group) {
   PSECURITY_DESCRIPTOR descriptor = nullptr;
   const DWORD fields = OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION
     | LABEL_SECURITY_INFORMATION | ATTRIBUTE_SECURITY_INFORMATION | SCOPE_SECURITY_INFORMATION;
-  if (GetSecurityInfo(file, SE_FILE_OBJECT, fields, nullptr, nullptr, nullptr, nullptr, &descriptor) != ERROR_SUCCESS) {
+  PSID ownerSid = nullptr, groupSid = nullptr;
+  if (GetSecurityInfo(file, SE_FILE_OBJECT, fields, &ownerSid, &groupSid, nullptr, nullptr, &descriptor) != ERROR_SUCCESS) {
     throw std::runtime_error("Cannot inspect file owner and access ACL");
   }
+  try { owner = MetadataSid(ownerSid); group = MetadataSid(groupSid); }
+  catch (...) { LocalFree(descriptor); throw; }
   BOOL present = FALSE, defaulted = FALSE; PACL access = nullptr;
   if (!GetSecurityDescriptorSacl(descriptor, &present, &access, &defaulted)) { LocalFree(descriptor); throw std::runtime_error("Cannot inspect access security labels"); }
   if (present && access) for (DWORD i = 0; i < access->AceCount; i++) {
@@ -70,6 +78,23 @@ static std::string MetadataSecurity(HANDLE file, std::vector<std::string>& block
   LocalFree(descriptor);
   if (!ok) throw std::runtime_error("Cannot serialize file access ACL");
   std::string result(text); LocalFree(text); return result;
+}
+static napi_value InspectCurrentPrimaryGroup(napi_env env, napi_callback_info info) {
+  HANDLE token = nullptr;
+  try {
+    size_t argc = 1; napi_value args[1]; napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    if (argc != 0 || !OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) throw std::runtime_error("Cannot query current primary group");
+    DWORD size = 0; GetTokenInformation(token, TokenPrimaryGroup, nullptr, 0, &size);
+    if (!size || size > 65536) throw std::runtime_error("Current primary group is unavailable");
+    std::vector<unsigned char> data(size);
+    if (!GetTokenInformation(token, TokenPrimaryGroup, data.data(), size, &size)) throw std::runtime_error("Cannot read current primary group");
+    const auto group = MetadataSid(reinterpret_cast<TOKEN_PRIMARY_GROUP*>(data.data())->PrimaryGroup);
+    CloseHandle(token); token = nullptr;
+    napi_value value; napi_create_string_utf8(env, group.data(), group.size(), &value); return value;
+  } catch (const std::exception& error) {
+    if (token) CloseHandle(token);
+    napi_throw_error(env, "CRABOT_FILE_METADATA", error.what()); return nullptr;
+  }
 }
 static std::string MetadataWindowsEas(HANDLE file) {
   using Query = NTSTATUS(NTAPI*)(HANDLE, PIO_STATUS_BLOCK, PVOID, ULONG, BOOLEAN, PVOID, ULONG, PULONG, BOOLEAN);
@@ -105,7 +130,7 @@ static napi_value InspectFileMetadata(napi_env env, napi_callback_info info) {
     if (argc != 1) throw std::runtime_error("Expected exactly one absolute file path");
     const auto path = Text(env, args[0]);
     if (!MoveAbsolutePath(path)) throw std::runtime_error("Expected an absolute file path without trailing separators");
-    std::string data; std::vector<std::string> streams, blockers;
+    std::string data, owner, group; std::vector<std::string> streams, blockers;
 #ifdef _WIN32
     const auto wide = MoveWidePath(path);
     HANDLE file = CreateFileW(wide.c_str(), FILE_READ_EA | FILE_READ_ATTRIBUTES | READ_CONTROL,
@@ -116,8 +141,11 @@ static napi_value InspectFileMetadata(napi_env env, napi_callback_info info) {
       FILE_ATTRIBUTE_TAG_INFO attributes{};
       if (!GetFileInformationByHandleEx(file, FileAttributeTagInfo, &attributes, sizeof(attributes))
           || (attributes.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) throw std::runtime_error("Reparse-point metadata is not supported");
-      MetadataPart(data, std::to_string(attributes.FileAttributes)); MetadataPart(data, MetadataSecurity(file, blockers));
+      MetadataPart(data, std::to_string(attributes.FileAttributes)); MetadataPart(data, MetadataSecurity(file, blockers, owner, group));
       MetadataPart(data, MetadataWindowsEas(file));
+      const DWORD unsupported = FILE_ATTRIBUTE_COMPRESSED | FILE_ATTRIBUTE_ENCRYPTED | FILE_ATTRIBUTE_SPARSE_FILE
+        | FILE_ATTRIBUTE_INTEGRITY_STREAM | FILE_ATTRIBUTE_NO_SCRUB_DATA;
+      if (attributes.FileAttributes & unsupported) blockers.push_back("windows_file_flags");
       WIN32_FIND_STREAM_DATA stream{};
       HANDLE search = FindFirstStreamW(wide.c_str(), FindStreamInfoStandard, &stream, 0);
       if (search == INVALID_HANDLE_VALUE) {
@@ -146,6 +174,7 @@ static napi_value InspectFileMetadata(napi_env env, napi_callback_info info) {
     if (lstat(path.c_str(), &stat) || (!S_ISREG(stat.st_mode) && !S_ISDIR(stat.st_mode) && !S_ISLNK(stat.st_mode))) {
       throw std::runtime_error("Cannot inspect ordinary file, directory or link metadata");
     }
+    owner = std::to_string(stat.st_uid); group = std::to_string(stat.st_gid);
     MetadataPart(data, std::to_string(stat.st_mode)); MetadataPart(data, std::to_string(stat.st_uid)); MetadataPart(data, std::to_string(stat.st_gid));
     MetadataPart(data, MetadataXattrs(path));
 #ifdef __APPLE__
@@ -187,6 +216,9 @@ static napi_value InspectFileMetadata(napi_env env, napi_callback_info info) {
     napi_set_named_property(env, result, "streams", names);
     napi_value blocked; napi_create_array_with_length(env, blockers.size(), &blocked);
     for (size_t i = 0; i < blockers.size(); i++) { napi_value name; napi_create_string_utf8(env, blockers[i].data(), blockers[i].size(), &name); napi_set_element(env, blocked, i, name); }
-    napi_set_named_property(env, result, "copy_blockers", blocked); return result;
+    napi_set_named_property(env, result, "copy_blockers", blocked);
+    napi_value ownerValue, groupValue;
+    napi_create_string_utf8(env, owner.data(), owner.size(), &ownerValue); napi_set_named_property(env, result, "owner", ownerValue);
+    napi_create_string_utf8(env, group.data(), group.size(), &groupValue); napi_set_named_property(env, result, "group", groupValue); return result;
   } catch (const std::exception& error) { napi_throw_error(env, "CRABOT_FILE_METADATA", error.what()); return nullptr; }
 }

@@ -563,6 +563,7 @@ static napi_value ReleaseLock(napi_env env, napi_callback_info info) {
 static napi_value Initialize(napi_env env, napi_value exports) {
   napi_property_descriptor methods[] = {
 #ifdef _WIN32
+    {"inspectCurrentPrimaryGroup", nullptr, InspectCurrentPrimaryGroup, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"inspectDirectoryFileId", nullptr, InspectDirectoryFileId, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"copyPinnedDirectoryMetadata", nullptr, CopyPinnedDirectoryMetadata, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"pinDirectory", nullptr, PinDirectory, nullptr, nullptr, nullptr, napi_default, nullptr},

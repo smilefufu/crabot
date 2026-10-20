@@ -17,7 +17,7 @@ async function fixture(t) {
   return { root, source, container }
 }
 
-test('actual OS copy keeps hidden bytes, empty directories and source identity before independent verification', { skip: process.platform === 'win32' }, async t => {
+test('actual OS copy keeps hidden bytes, empty directories and source identity before independent verification', async t => {
   const { source, container } = await fixture(t), original = await fs.lstat(source, { bigint: true })
   const preview = await inspectWorkspaceCopySource(source), copied = await copyWorkspaceToStaging(source, container)
   assert.equal(copied.files, 2); assert.equal(copied.verified_bytes, 10)
@@ -97,7 +97,7 @@ test('macOS staging removes inherited ACL only on the new private container', { 
   } finally { execFileSync('/bin/chmod', ['-N', root]) }
 })
 
-test('two concurrent copies cannot adopt the same staging container', { skip: process.platform === 'win32' }, async t => {
+test('two concurrent copies cannot adopt the same staging container', async t => {
   const { source, container } = await fixture(t)
   const results = await Promise.allSettled([copyWorkspaceToStaging(source, container), copyWorkspaceToStaging(source, container)])
   assert.equal(results.filter(item => item.status === 'fulfilled').length, 1)
@@ -144,13 +144,6 @@ for (const replace of ['source', 'container']) test('pinned POSIX copy never fol
 })
 
 
-test('unverified Windows physical copying remains closed before any staging or source change', { skip: process.platform !== 'win32' }, async t => {
-  const { source, container } = await fixture(t)
-  await assert.rejects(copyWorkspaceToStaging(source, container), { code: 'WORKSPACE_COPY_PLATFORM_UNVERIFIED' })
-  await assert.rejects(fs.stat(container), { code: 'ENOENT' })
-  assert.equal(await fs.readFile(path.join(source, '.git/config'), 'utf8'), '[core]\n')
-})
-
 test('oversized macOS resource-fork metadata is rejected before staging without allocating an unbounded snapshot', { skip: process.platform !== 'darwin' }, async t => {
   const { source, container } = await fixture(t), file = path.join(source, 'file')
   await fs.writeFile(file + '/..namedfork/rsrc', Buffer.alloc(17 * 1024 * 1024, 7))
@@ -175,4 +168,46 @@ test('POSIX copy ignores unrelated tool options inherited from the user environm
     const result = await copyWorkspaceToStaging(source, container)
     assert.equal(await fs.readFile(path.join(result.target, '.git/config'), 'utf8'), '[core]\n')
   } finally { if (old === undefined) delete process.env.TAR_OPTIONS; else process.env.TAR_OPTIONS = old }
+})
+
+
+test('bounded runner snapshots only the explicit OS copy success codes while keeping the default strict', async () => {
+  const successCodes = [1], running = runBounded(process.execPath, ['-e', 'setTimeout(()=>process.exit(1),50)'], { successCodes })
+  successCodes.length = 0; await running
+  await assert.rejects(runBounded(process.execPath, ['-e', 'process.exit(8)'], { successCodes: [0, 1, 2, 3, 4, 5, 6, 7] }))
+})
+
+test('actual Windows copy retains named-stream bytes and read-only file attributes', { skip: process.platform !== 'win32' }, async t => {
+  const { source, container } = await fixture(t), file = path.join(source, 'file')
+  await fs.writeFile(file + ':Zone.Identifier', '[ZoneTransfer]\r\nZoneId=3\r\n')
+  await fs.chmod(file, 0o444)
+  const result = await copyWorkspaceToStaging(source, container), copied = path.join(result.target, 'file')
+  assert.equal(await fs.readFile(copied + ':Zone.Identifier', 'utf8'), '[ZoneTransfer]\r\nZoneId=3\r\n')
+  assert.equal((await fs.stat(copied)).mode & 0o200, 0)
+  assert.deepEqual(await fs.readFile(file), Buffer.from([0, 255, 7]))
+})
+
+test('Windows copy holds source, container and payload identities through metadata verification', { skip: process.platform !== 'win32' }, async t => {
+  const { root, source, container } = await fixture(t), native = (await import('../process-identity.cjs')).default
+  const copy = native.copyPinnedDirectoryMetadata; let observed = false
+  t.mock.method(native, 'copyPinnedDirectoryMetadata', (...args) => {
+    observed = true
+    for (const directory of [source, container, path.join(container, 'tree')]) {
+      assert.throws(() => native.renameDirectoryNoReplace(directory, path.join(root, 'unexpected-move')), { code: 'CRABOT_DIRECTORY_MOVE' })
+    }
+    return copy(...args)
+  })
+  await copyWorkspaceToStaging(source, container)
+  assert.equal(observed, true)
+  await fs.rename(container, path.join(root, 'released-stage'))
+})
+
+test('Windows failed tool launch releases every directory lock and retains original and staged directories', { skip: process.platform !== 'win32' }, async t => {
+  const { root, source, container } = await fixture(t), old = process.env.SystemRoot
+  process.env.SystemRoot = path.join(root, 'missing-system')
+  try { await assert.rejects(copyWorkspaceToStaging(source, container), { code: 'ENOENT' }) }
+  finally { if (old === undefined) delete process.env.SystemRoot; else process.env.SystemRoot = old }
+  assert.deepEqual(await fs.readFile(path.join(source, 'file')), Buffer.from([0, 255, 7]))
+  assert.deepEqual(await fs.readdir(path.join(container, 'tree')), [])
+  await fs.rename(source, path.join(root, 'released-source')); await fs.rename(container, path.join(root, 'released-stage'))
 })

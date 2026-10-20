@@ -1,7 +1,9 @@
 import { spawn } from 'node:child_process'
 
 // detached 创建专属进程组；只能终止本次准备命令拥有的进程。
-export function runBounded(command, args, { cwd, env = process.env, timeout = 20 * 60_000, signal, shell = false, captureError = false, extraFileDescriptors = [] } = {}) {
+export function runBounded(command, args, { cwd, env = process.env, timeout = 20 * 60_000, signal, shell = false, captureError = false, extraFileDescriptors = [], successCodes = [0] } = {}) {
+  const accepted = new Set(successCodes)
+  if (!accepted.size || [...accepted].some(code => !Number.isInteger(code) || code < 0 || code > 255)) throw new Error('Invalid command success codes')
   const descriptors = [...extraFileDescriptors]
   if (descriptors.some(fd => !Number.isInteger(fd) || fd < 0)) throw new Error('Invalid inherited file descriptors')
   return new Promise((done, fail) => {
@@ -28,12 +30,12 @@ export function runBounded(command, args, { cwd, env = process.env, timeout = 20
     if (signal?.aborted) abort()
     child.on('error', err => { reason = err })
     child.on('close', code => {
-      if (reason || code !== 0) killOwned(true)
+      if (reason || !accepted.has(code)) killOwned(true)
       clearTimeout(timer); clearTimeout(forceTimer)
       signal?.removeEventListener('abort', abort)
       process.removeListener('SIGINT', abort)
       process.removeListener('SIGTERM', abort)
-      if (reason || code !== 0) {
+      if (reason || !accepted.has(code)) {
         const error = reason ?? new Error(`${command} exited with code ${code}`)
         if (captureError) error.stderr = stderr
         fail(error)
