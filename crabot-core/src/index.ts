@@ -52,7 +52,7 @@ import { scheduleRestart } from './restart-policy.js'
 import { checkDiskLow } from './disk-watcher.js'
 import { resolveExecutable } from './executable-resolver.js'
 import { terminateProcessTree, waitForProcessTreeExit } from './process-tree.js'
-import { ModuleRuntimeRegistry } from './module-runtime-registry.js'
+import { ModuleRuntimeRegistry, probeProcessStartIdentity } from './module-runtime-registry.js'
 import type { OrphanTerminationCandidate } from './module-runtime-registry.js'
 
 // ============================================================================
@@ -72,6 +72,21 @@ interface EventSubscription {
 
 export interface ModuleManagerOptions {
   confirmOrphanTermination?: (candidate: OrphanTerminationCandidate) => Promise<boolean>
+}
+
+// Internal maintenance observations; not an RPC payload or a global exit receipt.
+interface WorkspaceModuleScope {
+  readonly instance_id: string
+  readonly module_id: string
+  readonly module_port: number
+  readonly runtime_id?: string
+  readonly processes: ReadonlyArray<{
+    readonly pid: number
+    readonly parent: number
+    readonly started: string
+    readonly owner: string
+    readonly executable: string
+  }>
 }
 
 interface ManagedChildState {
@@ -1119,6 +1134,73 @@ export class ModuleManager {
   // ============================================================================
   // 进程管理
   // ============================================================================
+
+  async captureWorkspaceRelocationModules(): Promise<ReadonlyArray<WorkspaceModuleScope>> {
+    const fail = (): never => { throw Object.assign(new Error('执行模块范围无法完整核验，保留维护保护。'), { code: 'CRABOT_WORKSPACE_MODULE_SCOPE' }) }
+    const requireFence = (): void => { if (!workspaceMaintenancePending(this.dataDir) || this.isShuttingDown) fail() }
+    const executionQueues = (): Promise<void>[] => [...this.lifecycleQueues]
+      .filter(([id]) => id !== 'admin-web').map(([, pending]) => pending)
+    requireFence()
+    for (;;) {
+      const pending = executionQueues()
+      if (!pending.length) break
+      await Promise.all(pending)
+      requireFence()
+    }
+    const snapshots = [...this.modules].filter(([id]) => id !== 'admin-web').map(([id, runtime]) => {
+      const child = this.processes.get(id)
+      const state = child ? this.childStates.get(child) : undefined
+      return { id, runtime, port: runtime.port, child, state, runtimeId: state?.runtimeId, rootPid: state?.rootPid }
+    }).sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0)
+    const verifySnapshots = (): void => {
+      requireFence()
+      if (executionQueues().length || [...this.modules.keys()].filter(id => id !== 'admin-web').length !== snapshots.length) fail()
+      for (const id of this.processes.keys()) if (id !== 'admin-web' && !snapshots.some(item => item.id === id)) fail()
+      for (const item of snapshots) {
+        if (this.modules.get(item.id) !== item.runtime || item.runtime.port !== item.port || this.processes.get(item.id) !== item.child) fail()
+        if (!item.child) {
+          if (item.runtime.pid !== undefined || item.runtime.status === 'running' || item.runtime.status === 'starting') fail()
+          continue
+        }
+        const state = item.state
+        if (!state || this.childStates.get(item.child) !== state || state.moduleId !== item.id || state.child !== item.child
+          || state.runtimeId !== item.runtimeId || state.rootPid !== item.rootPid || state.rootPid !== item.child.pid || state.rootExited || state.finalizeStarted || state.termination || state.forceTermination
+          || item.child.exitCode !== null || item.child.signalCode !== null) fail()
+      }
+    }
+    verifySnapshots()
+    const records = (await this.runtimeRegistry.listRecords()).filter(record => record.module_id !== 'admin-web')
+    const recordKey = (items: typeof records): string => JSON.stringify([...items].sort((a, b) => a.runtime_id < b.runtime_id ? -1 : a.runtime_id > b.runtime_id ? 1 : 0))
+    const originalRecords = recordKey(records), instanceId = this.runtimeRegistry.getInstanceId()
+    verifySnapshots()
+    if (records.length !== snapshots.filter(item => item.child).length) fail()
+    const { captureSpawnedProcessTree } = require('../../scripts/lib/spawned-process-tree.cjs')
+    const { inspectProcess, sameProcess } = require('../../scripts/lib/process-identity.cjs')
+    const result: WorkspaceModuleScope[] = [], seenPids = new Set<number>()
+    for (const item of snapshots) {
+      const matching = records.filter(record => record.module_id === item.id)
+      if (!item.child) {
+        if (matching.length) fail()
+        result.push(Object.freeze({ instance_id: instanceId, module_id: item.id, module_port: item.port, processes: Object.freeze([]) }))
+        continue
+      }
+      const state = item.state!, record = matching[0]
+      if (matching.length !== 1 || record.instance_id !== instanceId || record.runtime_id !== state.runtimeId
+        || record.root_pid !== state.rootPid || record.module_port !== item.port) fail()
+      if (await probeProcessStartIdentity(record.root_pid) !== record.process_start_identity) fail()
+      verifySnapshots()
+      const processes: WorkspaceModuleScope['processes'] = captureSpawnedProcessTree(item.child)
+      if (await probeProcessStartIdentity(record.root_pid) !== record.process_start_identity) fail()
+      verifySnapshots()
+      const root = processes.find(process => process.pid === record.root_pid)
+      if (!root || !sameProcess(root, inspectProcess(record.root_pid))) fail()
+      for (const process of processes) { if (seenPids.has(process.pid)) fail(); seenPids.add(process.pid) }
+      result.push(Object.freeze({ instance_id: instanceId, module_id: item.id, module_port: item.port, runtime_id: state.runtimeId, processes }))
+    }
+    if (recordKey((await this.runtimeRegistry.listRecords()).filter(record => record.module_id !== 'admin-web')) !== originalRecords) fail()
+    verifySnapshots()
+    return Object.freeze(result)
+  }
 
   private async startModuleProcess(
     moduleId: ModuleId,

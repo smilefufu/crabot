@@ -280,6 +280,7 @@ async function makeHarness(
     HarnessDeps,
     'isExecutionReady' | 'isWorkspaceRelocationReady' | 'hasRunningBg' | 'listWorkerBackground' | 'readReviewBackgrounds' | 'hasPendingWorkerNotification' | 'capabilityBundle' | 'onEvent' | 'onOperationNotification' | 'onNativeActivityCollected' | 'admitWorkerConnection' | 'redactFailureReason' | 'mintActivityCursor'
   >> = {},
+  dataRoot = dataDir,
 ): Promise<{
   harness: WorkerHarness
   fake: FakeAdapter
@@ -287,13 +288,13 @@ async function makeHarness(
   ledger: LedgerStore
   workersDir: string
 }> {
-  const ledgersDir = join(dataDir, 'ledgers')
-  const workspacesRoot = join(dataDir, 'workspaces')
-  const workersDir = join(dataDir, 'workers')
+  const ledgersDir = join(dataRoot, 'ledgers')
+  const workspacesRoot = join(dataRoot, 'workspaces')
+  const workersDir = join(dataRoot, 'workers')
   await fs.mkdir(workspacesRoot, { recursive: true })
 
   const ledger = new LedgerStore(ledgersDir)
-  const profile = join(dataDir, 'profile')
+  const profile = join(dataRoot, 'profile')
   await fs.mkdir(profile, { recursive: true })
   const workspaces = new WorkspaceManager(workspacesRoot, profile)
 
@@ -3783,6 +3784,7 @@ describe('WorkerHarness.killWorker', () => {
     const worker = await harness.spawnWorker(spawnParams())
     fake.emitStateChange({ worker_id: worker.worker_id, seq: 1, impl: 'builtin', session_ref: worker.incarnations[0].session_ref }, 'idle')
     await waitUntil(async () => (await harness.listWorkers(worker.manager_key))[0].task.status === 'halted')
+    await Promise.all((harness as any).stateChangeTails.values())
     const state = vi.spyOn(fake, 'state')
     const listSubagents = vi.fn(async () => [])
     Object.assign(fake, { listSubagents })
@@ -5593,9 +5595,9 @@ describe('workspace relocation stop submission', () => {
     const { default: management } = await import('../../../../scripts/lib/desktop-management.cjs')
     const { acquireCliLock, releaseCliLock } = await import('../../../../scripts/lib/cli-lock.mjs')
     const relocation = await import('../../../../scripts/lib/workspace-relocation-intent.mjs')
-    const privateData = management.ensurePrivateDataRoot(await fs.realpath(dataDir))
+    const privateData = management.ensurePrivateDataRoot(join(await fs.realpath(dataDir), 'private-instance'))
     const catalog = new WorkspaceCatalog({ dataRoot: privateData, files: native }); await catalog.initialize()
-    const { harness, fake, ledger } = await makeHarness({}, { isWorkspaceRelocationReady: () => true })
+    const { harness, fake, ledger } = await makeHarness({}, { isWorkspaceRelocationReady: () => true }, privateData)
     const worker = await harness.spawnWorker(spawnParams()), scope = await harness.captureWorkspaceRelocationScope()
     const snapshot = await catalog.snapshot(), id = 'a3c5871e-9992-480b-b0b7-81d5fb1d35e0', lock = await acquireCliLock(privateData, 'workspace-relocation')
     try {

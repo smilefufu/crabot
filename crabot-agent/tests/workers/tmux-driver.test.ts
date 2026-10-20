@@ -128,7 +128,7 @@ describe.skipIf(process.platform === 'win32' || !hasTmuxBinary())('TmuxDriver pr
   })
 })
 
-describe('TmuxDriver command deadlines', () => {
+describe.skipIf(process.platform === 'win32')('TmuxDriver POSIX command deadlines', () => {
   it('bounds both execFile tmux commands and load-buffer stdin processes', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'tmux-driver-timeout-'))
     const hangingBin = path.join(tempDir, 'tmux-hanging.sh')

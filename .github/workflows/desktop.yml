@@ -119,13 +119,13 @@ jobs:
         run: |
           node --test scripts/lib/__tests__/desktop-asar.test.mjs scripts/lib/__tests__/archive-core.test.mjs scripts/lib/__tests__/core-release.test.mjs scripts/lib/__tests__/stage-core-imports.test.mjs scripts/lib/__tests__/desktop-installation.test.mjs scripts/lib/__tests__/desktop-payload.test.mjs scripts/lib/__tests__/cli-launcher.test.mjs scripts/lib/__tests__/cli-installation.test.mjs
           node --test scripts/lib/__tests__/legacy-desktop.test.mjs scripts/lib/__tests__/legacy-entry-fence.test.mjs scripts/lib/__tests__/legacy-system-*.test.mjs
-          node --test scripts/lib/__tests__/legacy-mm-rpc.test.mjs
+          node --test scripts/lib/__tests__/legacy-mm-rpc.test.mjs scripts/lib/__tests__/module-shutdown-rpc.test.mjs
           node --test scripts/lib/__tests__/legacy-runtime.test.mjs scripts/lib/__tests__/legacy-stop.test.mjs
           node --test scripts/lib/__tests__/maintenance-backup.test.mjs
           node --test scripts/lib/__tests__/version-maintenance.test.mjs scripts/lib/__tests__/legacy-python-maintenance.test.mjs scripts/lib/__tests__/legacy-version-maintenance.test.mjs scripts/lib/__tests__/desktop-update-entry.test.mjs scripts/lib/__tests__/desktop-cli-install.test.mjs
           (cd scripts/upgrade-lib && node ../../node_modules/vitest/vitest.mjs run --maxWorkers=1 --minWorkers=1)
           cd crabot-core
-          node node_modules/vitest/vitest.mjs run src/port-allocator.test.ts src/workspace-maintenance.test.ts src/agent-venv.test.ts src/core-modules.test.ts src/shutdown-generation.test.ts src/module-management-secrets.test.ts --maxWorkers=1 --minWorkers=1
+          node node_modules/vitest/vitest.mjs run src/port-allocator.test.ts src/workspace-maintenance.test.ts src/workspace-module-scope.test.ts src/agent-venv.test.ts src/core-modules.test.ts src/shutdown-generation.test.ts src/module-management-secrets.test.ts --maxWorkers=1 --minWorkers=1
       - name: Agent environment regressions
         run: |
           cd crabot-agent
