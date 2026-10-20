@@ -9,8 +9,9 @@ import { once } from 'node:events'
 import { WorkspaceCatalog } from 'crabot-shared/dist/workspace-catalog.js'
 import { sha256CanonicalJson } from 'crabot-shared'
 import ModuleManager from './index.js'
+import { relocationAgentConfig } from '../../crabot-agent/tests/core/fixtures/relocation-agent-config.js'
 
-async function fixture(options: { wrongRuntime?: boolean; result?: string; withAgent?: boolean; agentResult?: string } = {}) {
+async function fixture(options: { wrongRuntime?: boolean; result?: string; withAgent?: boolean; agentResult?: string; actualAgent?: boolean } = {}) {
   const root = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'crabot-current-admin-')))
   const native = require('../../scripts/lib/process-identity.cjs'), management = require('../../scripts/lib/desktop-management.cjs')
   const data = management.ensurePrivateDataRoot(path.join(root, 'data')), script = path.join(data, 'finite-admin.cjs'), callsFile = path.join(data, 'calls.json')
@@ -28,44 +29,78 @@ async function fixture(options: { wrongRuntime?: boolean; result?: string; withA
     });server.listen(Number(process.env.Crabot_PORT),'127.0.0.1',()=>fs.writeFileSync(process.env.FIXTURE_READY,'ready'));
     setTimeout(()=>process.exit(0),30000).unref();`)
   const manager = new ModuleManager({ port: 0, modules: [], shutdown_timeout: 0.1 }, data) as any
-  manager.managementOnly = false
-  const runtime = { module_id: 'admin-web', module_type: 'admin', entry: `"${process.execPath}" "${script}"`,
-    env: { FIXTURE_CALLS: callsFile, FIXTURE_READY: path.join(data, 'ready'), ...(options.wrongRuntime ? { FIXTURE_WRONG_RUNTIME: '1' } : {}),
- ...(options.result ? { FIXTURE_RESULT: options.result } : {}) },
-    port, auto_start: false, auto_restart: false, skip_health_check: true, start_priority: 1, status: 'stopped' }
-  manager.modules.set('admin-web', runtime); await manager.startModuleProcess('admin-web')
-  await vi.waitFor(async () => expect(await fs.readFile(path.join(data, 'ready'), 'utf8')).toBe('ready'))
-  if (options.withAgent) {
-    const agentPort = http.createServer(); await new Promise<void>(resolve => agentPort.listen(0, '127.0.0.1', resolve))
-    const agentScript = path.join(data, 'finite-agent.cjs'), agentReady = path.join(data, 'agent-ready')
-    await fs.writeFile(agentScript, `const fs=require('node:fs'),http=require('node:http'),calls=[];
-      http.createServer(async(req,res)=>{let text='';for await(const part of req)text+=part;const body=JSON.parse(text);
-        calls.push({method:body.method,header_present:Boolean(req.headers.authorization),body});fs.writeFileSync(process.env.FIXTURE_CALLS,JSON.stringify(calls));
-        if(req.url!=='/get_runtime_identity'&&process.env.FIXTURE_RESULT==='disconnect'){req.socket.destroy();return}
-        let data=req.url==='/get_runtime_identity'?{instance_id:process.env.CRABOT_INSTANCE_ID,module_id:'crabot-agent',runtime_id:process.env.FIXTURE_RESULT==='wrong-runtime'?'other':process.env.CRABOT_MODULE_RUNTIME_ID}:{workers:[]};
-        if(req.url!=='/get_runtime_identity'&&process.env.FIXTURE_RESULT==='extra')data.extra=true;
-        if(req.url!=='/get_runtime_identity'&&process.env.FIXTURE_RESULT==='bad-worker')data.workers=[{worker_id:'bad'}];
-        if(req.url!=='/get_runtime_identity'&&['large','one-worker'].includes(process.env.FIXTURE_RESULT))data.workers=Array.from({length:process.env.FIXTURE_RESULT==='large'?1500:1},(_,i)=>({worker_id:String(i).padStart(5,'0'),manager_key:'channel::session',task_id:'task-'+i,incarnations:[{incarnation_id:'inc-'+i,impl:'builtin',seq:1,workspace:'fixture/'+('a'.repeat(120)),started_at:new Date().toISOString()}]}));
-        res.end(JSON.stringify({id:body.id,success:true,data}));
-      }).listen(Number(process.env.Crabot_PORT),'127.0.0.1',()=>fs.writeFileSync(process.env.FIXTURE_READY,'ready'));setTimeout(()=>process.exit(0),30000).unref();`)
-    const agent = { module_id: 'crabot-agent', module_type: 'agent', entry: `"${process.execPath}" "${agentScript}"`,
-      env: { FIXTURE_CALLS: path.join(data, 'agent-calls.json'), FIXTURE_READY: agentReady, FIXTURE_RESULT: options.agentResult ?? '' },
-      port: (agentPort.address() as { port: number }).port, auto_start: false, auto_restart: false, skip_health_check: true, start_priority: 1, status: 'stopped' }
-    await new Promise<void>(resolve => agentPort.close(() => resolve()))
-    manager.modules.set('crabot-agent', agent); await manager.startModuleProcess('crabot-agent')
-    await vi.waitFor(async () => expect(await fs.readFile(agentReady, 'utf8')).toBe('ready'), { timeout: 10000 })
+  let host: ReturnType<typeof http.createServer> | undefined
+  const cleanup = async () => {
+    vi.restoreAllMocks()
+    const admin = manager.modules.get('admin-web'); if (admin) admin.port = port
+    try { await manager.stop() }
+    finally { if (host) { host.closeAllConnections(); await new Promise<void>(resolve => host!.close(() => resolve())) } }
+    await fs.rm(root, { recursive: true, force: true })
   }
-  const catalog = new WorkspaceCatalog({ dataRoot: data, files: native }); await catalog.initialize()
-  const locks = await import('../../scripts/lib/cli-lock.mjs'), relocation = await import('../../scripts/lib/workspace-relocation-intent.mjs')
-  const lock = await locks.acquireCliLock(data, 'workspace-relocation'); let intent
-  try { intent = await relocation.beginWorkspaceRelocationIntent({ dataDir: data, id: randomUUID(), target: path.join(root, 'relocated'),
-    expectedRevision: (await catalog.snapshot()).revision, protectedRoots: [path.join(data, 'workspace-control')] }) }
-  finally { locks.releaseCliLock(lock) }
-  const params = { intent_id: intent.id, intent_sha256: sha256CanonicalJson(intent) }
-  const calls = async (): Promise<any[]> => JSON.parse(await fs.readFile(callsFile, 'utf8').catch(() => '[]'))
-  return { root, data, manager, runtime, port, params, calls, cleanup: async () => {
-    vi.restoreAllMocks(); runtime.port = port; await manager.stop(); await fs.rm(root, { recursive: true, force: true })
-  } }
+  try {
+    if (options.actualAgent) {
+      host = http.createServer((req, res) => { void manager.handleRequest(req, res) })
+      await new Promise<void>(resolve => host!.listen(0, '127.0.0.1', resolve))
+      manager.config.port = (host.address() as { port: number }).port
+    }
+    manager.managementOnly = false
+    const runtime = { module_id: 'admin-web', module_type: 'admin', entry: `"${process.execPath}" "${script}"`,
+      env: { FIXTURE_CALLS: callsFile, FIXTURE_READY: path.join(data, 'ready'), ...(options.wrongRuntime ? { FIXTURE_WRONG_RUNTIME: '1' } : {}),
+   ...(options.result ? { FIXTURE_RESULT: options.result } : {}) },
+      port, auto_start: false, auto_restart: false, skip_health_check: true, start_priority: 1, status: 'stopped' }
+    manager.modules.set('admin-web', runtime); await manager.startModuleProcess('admin-web')
+    await vi.waitFor(async () => expect(await fs.readFile(path.join(data, 'ready'), 'utf8')).toBe('ready'))
+    if (options.withAgent || options.actualAgent) {
+      const agentPort = http.createServer(); await new Promise<void>(resolve => agentPort.listen(0, '127.0.0.1', resolve))
+      const agentScript = path.join(data, 'finite-agent.cjs'), agentReady = path.join(data, 'agent-ready')
+      await fs.writeFile(agentScript, `const fs=require('node:fs'),http=require('node:http'),calls=[];
+        http.createServer(async(req,res)=>{let text='';for await(const part of req)text+=part;const body=JSON.parse(text);
+          calls.push({method:body.method,header_present:Boolean(req.headers.authorization),body});fs.writeFileSync(process.env.FIXTURE_CALLS,JSON.stringify(calls));
+          if(req.url!=='/get_runtime_identity'&&process.env.FIXTURE_RESULT==='disconnect'){req.socket.destroy();return}
+          let data=req.url==='/get_runtime_identity'?{instance_id:process.env.CRABOT_INSTANCE_ID,module_id:'crabot-agent',runtime_id:process.env.FIXTURE_RESULT==='wrong-runtime'?'other':process.env.CRABOT_MODULE_RUNTIME_ID}:{workers:[]};
+          if(req.url!=='/get_runtime_identity'&&process.env.FIXTURE_RESULT==='extra')data.extra=true;
+          if(req.url!=='/get_runtime_identity'&&process.env.FIXTURE_RESULT==='bad-worker')data.workers=[{worker_id:'bad'}];
+          if(req.url!=='/get_runtime_identity'&&['large','one-worker','false-stop-reply'].includes(process.env.FIXTURE_RESULT))data.workers=Array.from({length:process.env.FIXTURE_RESULT==='large'?1500:1},(_,i)=>({worker_id:String(i).padStart(5,'0'),manager_key:'channel::session',task_id:'task-'+i,incarnations:[{incarnation_id:'inc-'+i,impl:'builtin',seq:1,workspace:'fixture/'+('a'.repeat(120)),started_at:new Date().toISOString()}]}));
+          if(req.url==='/stop_workspace_relocation_workers'&&process.env.FIXTURE_RESULT==='false-stop-reply')data={dispatch:'dispatch',results:[{worker_id:'00000',incarnation_id:'inc-0',status:'submitted'}]};
+        res.end(JSON.stringify({id:body.id,success:true,data}));
+        }).listen(Number(process.env.Crabot_PORT),'127.0.0.1',()=>fs.writeFileSync(process.env.FIXTURE_READY,'ready'));setTimeout(()=>process.exit(0),30000).unref();`)
+      if (options.actualAgent) {
+        const entry = path.resolve('../crabot-agent/dist/unified-agent.js')
+        await fs.access(entry)
+        await fs.writeFile(agentScript, `const fs=require('node:fs'),http=require('node:http'),{UnifiedAgent}=require(${JSON.stringify(entry)}),calls=[];
+          const config=${JSON.stringify(relocationAgentConfig)};config.port=Number(process.env.Crabot_PORT);const agent=new UnifiedAgent(config);
+          agent.managerStack.harness.deps.isWorkspaceRelocationReady=()=>true;
+          agent.managerStack.adapters.get('builtin').stop=async()=>{fs.appendFileSync(process.env.FIXTURE_STOPS,'stop\\n')};
+          const server=http.createServer((req,res)=>{
+            let text='';req.on('data',part=>text+=part);req.on('end',()=>{const body=JSON.parse(text);calls.push({method:body.method,header_present:Boolean(req.headers.authorization),body});fs.writeFileSync(process.env.FIXTURE_CALLS,JSON.stringify(calls))});
+            if(req.url==='/shutdown'){req.on('end',async()=>{await agent.managerStack.dispose();res.end(JSON.stringify({id:JSON.parse(text).id,success:true,data:{}}));setTimeout(()=>process.exit(0),25)});return}
+            if(req.url==='/stop_workspace_relocation_workers'&&['lost-stop-reply','extra-stop-reply'].includes(process.env.FIXTURE_RESULT)){
+            const end=res.end.bind(res);res.end=(body,...args)=>{if(process.env.FIXTURE_RESULT==='lost-stop-reply'){req.socket.destroy();return res}const value=JSON.parse(body.toString());value.data.extra=true;return end(JSON.stringify(value),...args)};
+          }
+          void agent.handleRequest(req,res);
+          });
+          (async()=>{const at='2026-10-20T00:00:00.000Z';await agent.managerStack.ledger.upsertWorker('channel::session','worker',()=>({worker_id:'worker',manager_key:'channel::session',task:{id:'task',title:'private task',status:'running',created_at:at},origin:{trigger_type:'message',creator_friend_id:'unchanged'},report_to:{channel_id:'channel',session_id:'session'},incarnations:[{incarnation_id:'inc',impl:'builtin',seq:1,state:'running',workspace:process.env.FIXTURE_WORKSPACE,session_ref:'fixture',started_at:at}],updated_at:at}));
+            server.listen(Number(process.env.Crabot_PORT),'127.0.0.1',()=>fs.writeFileSync(process.env.FIXTURE_READY,'ready'))})().catch(error=>{console.error(error);process.exit(1)});
+          setTimeout(()=>process.exit(0),30000).unref();`)
+      }
+      const agent = { module_id: 'crabot-agent', module_type: 'agent', entry: `"${process.execPath}" "${agentScript}"`,
+        env: { FIXTURE_CALLS: path.join(data, 'agent-calls.json'), FIXTURE_READY: agentReady, FIXTURE_RESULT: options.agentResult ?? '',
+          DATA_DIR: data, CRABOT_AGENT_DATA_DIR: path.join(data, 'agent'), WORKER_WORKSPACES_DIR: path.join(data, 'workspaces'), FIXTURE_WORKSPACE: path.join(data, 'project'), FIXTURE_STOPS: path.join(data, 'stops.txt') },
+        port: (agentPort.address() as { port: number }).port, auto_start: false, auto_restart: false, skip_health_check: true, start_priority: 1, status: 'stopped' }
+      await new Promise<void>(resolve => agentPort.close(() => resolve()))
+      manager.modules.set('crabot-agent', agent); await manager.startModuleProcess('crabot-agent')
+      await vi.waitFor(async () => expect(await fs.readFile(agentReady, 'utf8')).toBe('ready'), { timeout: 10000 })
+    }
+    const catalog = new WorkspaceCatalog({ dataRoot: data, files: native }); await catalog.initialize()
+    const locks = await import('../../scripts/lib/cli-lock.mjs'), relocation = await import('../../scripts/lib/workspace-relocation-intent.mjs')
+    const lock = await locks.acquireCliLock(data, 'workspace-relocation'); let intent
+    try { intent = await relocation.beginWorkspaceRelocationIntent({ dataDir: data, id: randomUUID(), target: path.join(root, 'relocated'),
+      expectedRevision: (await catalog.snapshot()).revision, protectedRoots: [path.join(data, 'workspace-control')] }) }
+    finally { locks.releaseCliLock(lock) }
+    const params = { intent_id: intent.id, intent_sha256: sha256CanonicalJson(intent) }
+    const calls = async (): Promise<any[]> => JSON.parse(await fs.readFile(callsFile, 'utf8').catch(() => '[]'))
+    return { root, data, manager, runtime, port, params, calls, cleanup }
+  } catch (error) { await cleanup(); throw error }
 }
 describe('MM consumes a human intent proof only from its current Admin runtime', () => {
   it('verifies the actual spawned Admin/runtime and own intent without stopping or creating a coordinator', async () => {
@@ -444,5 +479,92 @@ describe('MM sensitive Worker stop journal bridge', () => {
         expect(f.records.readWorkspaceRelocationStops(f.data, f.params.intent_id).submission).toEqual(first)
       }
     } finally { await f.cleanup() }
+  }, 30000)
+})
+
+
+describe('MM delegates actual fixed Agent stop code through finite native processes', () => {
+  it('refuses to submit stops before the original capture has been confirmed', async () => {
+    const f = await fixture({ actualAgent: true }), c = await coordinator(f)
+    try {
+      await f.manager.authorizeWorkspaceRelocationCoordinator(c.child, f.params, 'fixture-human')
+      await expect(f.manager.stopWorkspaceRelocationWorkersForCoordinator(c.child)).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
+      await expect(fs.stat(path.join(f.data, 'stops.txt'))).rejects.toMatchObject({ code: 'ENOENT' })
+      await expect(fs.stat(path.join(f.data, 'workspace-control/relocation-workers.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+    } finally { await c.cleanup(); await f.cleanup() }
+  }, 30000)
+  it('only observes a prior attempt through actual Agent code', async () => {
+    const f = await fixture({ actualAgent: true }), c = await coordinator(f)
+    try {
+      await f.manager.captureWorkspaceRelocationWorkersForCoordinator(c.child, f.params, 'fixture-human')
+      await f.manager.handlePrepareWorkspaceRelocationWorkerStops({ intent_id: f.params.intent_id, launch_id: c.launch.launch_id },
+        { authorizationBearer: f.manager.workspaceCoordinatorGrant.token })
+      expect(await f.manager.stopWorkspaceRelocationWorkersForCoordinator(c.child)).toEqual({ dispatch: 'observe', results: [] })
+      await expect(fs.stat(path.join(f.data, 'stops.txt'))).rejects.toMatchObject({ code: 'ENOENT' })
+      const records = await import('../../scripts/lib/workspace-relocation-intent.mjs')
+      expect(records.readWorkspaceRelocationStops(f.data, f.params.intent_id).submission).toBeNull()
+    } finally { await c.cleanup(); await f.cleanup() }
+  }, 30000)
+  for (const result of ['lost-stop-reply', 'extra-stop-reply']) it(`never reissues the actual Agent stop after uncertain response: ${result}`, async () => {
+    const f = await fixture({ actualAgent: true, agentResult: result }), c = await coordinator(f)
+    try {
+      await f.manager.captureWorkspaceRelocationWorkersForCoordinator(c.child, f.params, 'fixture-human')
+      await expect(f.manager.stopWorkspaceRelocationWorkersForCoordinator(c.child)).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
+      await expect(f.manager.stopWorkspaceRelocationWorkersForCoordinator(c.child)).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
+      expect(await fs.readFile(path.join(f.data, 'stops.txt'), 'utf8')).toBe('stop\n')
+      const calls = JSON.parse(await fs.readFile(path.join(f.data, 'agent-calls.json'), 'utf8'))
+      expect(calls.filter((item: any) => item.method === 'stop_workspace_relocation_workers')).toHaveLength(1)
+      const records = await import('../../scripts/lib/workspace-relocation-intent.mjs')
+      expect(records.readWorkspaceRelocationStops(f.data, f.params.intent_id).submission.results).toEqual([{ worker_id: 'worker', incarnation_id: 'inc', status: 'submitted' }])
+    } finally { await c.cleanup(); await f.cleanup() }
+  }, 30000)
+  it('independently rejects a plausible response without any actual attempt or complete receipt', async () => {
+    const f = await fixture({ withAgent: true, agentResult: 'false-stop-reply' }), c = await coordinator(f)
+    try {
+      await f.manager.captureWorkspaceRelocationWorkersForCoordinator(c.child, f.params, 'fixture-human')
+      await expect(f.manager.stopWorkspaceRelocationWorkersForCoordinator(c.child)).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
+      const records = await import('../../scripts/lib/workspace-relocation-intent.mjs')
+      expect(records.readWorkspaceRelocationStops(f.data, f.params.intent_id).attempt).toBeNull()
+    } finally { await c.cleanup(); await f.cleanup() }
+  }, 30000)
+
+  it('rejects a replaced Agent lifecycle after the real handshake before forwarding the stop bearer', async () => {
+    const f = await fixture({ actualAgent: true }), c = await coordinator(f)
+    const state = f.manager.childStates.get(f.manager.processes.get('crabot-agent')), previous = state.intentionalReason
+    try {
+      await f.manager.captureWorkspaceRelocationWorkersForCoordinator(c.child, f.params, 'fixture-human')
+      const transport = require('../../scripts/lib/module-runtime-rpc.cjs'), open = transport.openModuleRuntimeRpc
+      vi.spyOn(transport, 'openModuleRuntimeRpc').mockImplementation(async (...args: any[]) => {
+        const rpc = await open(...args)
+        if (args[2].module_id === 'crabot-agent') state.intentionalReason = 'shutdown'
+        return rpc
+      })
+      await expect(f.manager.stopWorkspaceRelocationWorkersForCoordinator(c.child)).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
+      const calls = JSON.parse(await fs.readFile(path.join(f.data, 'agent-calls.json'), 'utf8'))
+      expect(calls.map((item: any) => [item.method, item.header_present])).toEqual([
+        ['get_runtime_identity', false], ['capture_workspace_relocation_workers', true], ['get_runtime_identity', false],
+      ])
+      expect(f.manager.workspaceCoordinatorGrant).toBeUndefined()
+      await expect(fs.stat(path.join(f.data, 'stops.txt'))).rejects.toMatchObject({ code: 'ENOENT' })
+    } finally { state.intentionalReason = previous; await c.cleanup(); await f.cleanup() }
+  }, 30000)
+  it('joins real MM and compiled Agent RPC/Harness/journals, keeps one stop and never rechecks the browser credential', async () => {
+    const f = await fixture({ actualAgent: true }), c = await coordinator(f)
+    try {
+      const scope = await f.manager.captureWorkspaceRelocationWorkersForCoordinator(c.child, f.params, 'fixture-human')
+      expect(scope.map((worker: any) => worker.worker_id)).toEqual(['worker'])
+      const verifyHuman = vi.spyOn(f.manager, 'verifyWorkspaceRelocationRequest').mockRejectedValue(new Error('browser already closed'))
+      const first = await f.manager.stopWorkspaceRelocationWorkersForCoordinator(c.child)
+      expect(first).toEqual({ dispatch: 'dispatch', results: [{ worker_id: 'worker', incarnation_id: 'inc', status: 'submitted' }] })
+      expect(await f.manager.stopWorkspaceRelocationWorkersForCoordinator(c.child)).toBe(first)
+      expect(verifyHuman).not.toHaveBeenCalled()
+      expect(await fs.readFile(path.join(f.data, 'stops.txt'), 'utf8')).toBe('stop\n')
+      const records = await import('../../scripts/lib/workspace-relocation-intent.mjs')
+      expect(records.readWorkspaceRelocationStops(f.data, f.params.intent_id).submission.results).toEqual(first.results)
+      const ledgerFiles = await fs.readdir(path.join(f.data, 'agent', 'worker-ledgers'))
+      expect(ledgerFiles.length).toBeGreaterThan(0)
+      expect(f.manager.processes.get('admin-web').exitCode).toBeNull()
+      await expect(fs.stat(path.join(f.root, 'relocated'))).rejects.toMatchObject({ code: 'ENOENT' })
+    } finally { await c.cleanup(); await f.cleanup() }
   }, 30000)
 })
