@@ -1005,3 +1005,17 @@ test('an empty initial CLI scope is retained as an observation without inventing
   assert.equal(readWorkspaceRelocationStops(f.data, f.input.id).attempt, null)
   assertWorkspaceStillProtected(f.data)
 })
+
+
+test('cross-volume unsupported source metadata is rejected before publishing maintenance or stopping execution', { skip: process.platform !== 'linux' }, async t => {
+  const f = await fixture(t), target = path.join('/dev/shm', 'crabot-preflight-' + randomUUID())
+  if (!syncFs.existsSync('/dev/shm') || syncFs.statSync('/dev/shm').dev === syncFs.statSync(f.source).dev) { t.skip('requires a distinct writable fixture filesystem'); return }
+  const file = path.join(f.source, 'default/original.txt'), lock = await acquireCliLock(f.data, 'workspace-relocation')
+  execFileSync('chattr', ['+d', file])
+  try {
+    await assert.rejects(beginWorkspaceRelocationIntent({ ...f.input, target }), { code: 'WORKSPACE_COPY_METADATA_UNSUPPORTED' })
+    assert.equal(readWorkspaceRelocationIntent(f.data), null); assertWorkspaceExecutionAllowed(f.data)
+    assert.equal(syncFs.existsSync(target), false); assert.deepEqual(await f.catalog.snapshot(), f.snapshot)
+    assert.equal(await fs.readFile(file, 'utf8'), 'user bytes')
+  } finally { execFileSync('chattr', ['-d', file]); releaseCliLock(lock) }
+})

@@ -13,6 +13,9 @@ import { readWorkspaceRelocationExecutionExit, beginWorkspaceRelocationIntent, r
 import { launchWorkspaceRelocationCoordinator } from '../workspace-coordinator-launch.mjs'
 import { createWorkspaceWorkerJournal } from '../workspace-worker-journal.mjs'
 import { createWorkspaceModuleJournal } from '../workspace-module-journal.mjs'
+import { createWorkspaceFileJournal } from '../workspace-file-journal.mjs'
+import { createWorkspaceJournalClient } from '../workspace-coordinator-journal.mjs'
+import { readWorkspaceRelocationFilePlan } from '../workspace-relocation-intent.mjs'
 import { createWorkspaceProcessJournal } from '../workspace-process-journal.mjs'
 import { WorkspaceCatalog } from '../../../crabot-shared/dist/workspace-catalog.js'
 import { sha256CanonicalJson } from '../../../crabot-shared/dist/canonical-json.js'
@@ -180,3 +183,38 @@ for (const damage of ['hash', 'extra', 'hardlink', 'missing Native journal', 'mi
     } finally { worker.close(); modules.close(); processes.close() }
   })
 }
+
+
+for (const scenario of ['normal', 'unexpected-path', 'lost-reply']) test('actual fixed coordinator file-plan channel: ' + scenario, { timeout: 25000 }, async t => {
+  const f = await fixture(t), { child, launch } = await f.launch(), context = { dataDir: f.data, id: f.id, launch }
+  const worker = createWorkspaceWorkerJournal(child, context), modules = createWorkspaceModuleJournal(child, context), processes = createWorkspaceProcessJournal(child, context)
+  let files = createWorkspaceFileJournal(child, context)
+  try {
+    await worker.capture([]); await worker.captureProcesses([]); await modules.capture([])
+    await processes.prepare(); await processes.observe([]); await processes.complete()
+    await worker.prepare([]); await worker.complete([]); await modules.prepare([]); await modules.complete([])
+    await processes.confirmExecutionExit()
+    if (scenario === 'unexpected-path') {
+      const invalid = createWorkspaceJournalClient(child, context, 'file')
+      try { await assert.rejects(invalid.call('prepare', { target: path.join(f.root, 'untrusted') }), { code: 'CRABOT_WORKSPACE_JOURNAL_UNAVAILABLE' }) } finally { invalid.close() }
+      assert.equal(readWorkspaceRelocationFilePlan(f.data, f.id), null)
+    }
+    if (scenario === 'lost-reply') {
+      const emit = child.emit; let dropped = false
+      const mock = t.mock.method(child, 'emit', function(event, ...args) {
+        if (event === 'message' && args[0]?.kind === 'workspace_file_journal_reply' && !dropped) { dropped = true; return emit.call(this, event, { ...args[0], ok: false }, ...args.slice(1)) }
+        return emit.call(this, event, ...args)
+      })
+      try { await assert.rejects(files.prepare(), { code: 'CRABOT_WORKSPACE_JOURNAL_UNAVAILABLE' }); assert.equal(dropped, true) } finally { mock.mock.restore() }
+      assert.ok(readWorkspaceRelocationFilePlan(f.data, f.id)); files.close(); files = createWorkspaceFileJournal(child, context)
+    }
+    const result = await files.prepare()
+    assert.equal(result.dispatch, scenario === 'lost-reply' ? 'observe' : 'dispatch')
+    assert.deepEqual(result.plan, readWorkspaceRelocationFilePlan(f.data, f.id))
+    const first = fs.readFileSync(path.join(f.data, 'workspace-control/relocation-files.json'))
+    assert.equal((await files.prepare()).dispatch, 'observe')
+    assert.deepEqual(fs.readFileSync(path.join(f.data, 'workspace-control/relocation-files.json')), first)
+    assert.equal(fs.existsSync(result.plan.staging_path), false); assert.equal(fs.existsSync(path.join(f.root, 'new')), false)
+    assert.equal(fs.readFileSync(f.marker, 'utf8'), 'original work'); assert.deepEqual(await f.catalog.snapshot(), f.before)
+  } finally { worker.close(); modules.close(); processes.close(); files.close() }
+})

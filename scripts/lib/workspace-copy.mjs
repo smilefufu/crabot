@@ -15,36 +15,39 @@ const sameRoot = (a, b) => a.isDirectory() && !a.isSymbolicLink() && a.dev === b
 const checkCancelled = signal => { if (signal?.aborted) throw Object.assign(new Error('工作区复制已取消，原目录保留。'), { code: 'CRABOT_PREPARATION_CANCELLED' }) }
 
 /** Read-only source capability checks, callable before execution is stopped. No target is created. */
-export async function inspectWorkspaceCopySource(source, { signal } = {}) {
+export async function inspectWorkspaceFileSource(source, mode, { signal } = {}) {
+  if (mode !== 'copy' && mode !== 'rename') throw fail()
   checkCancelled(signal)
   const original = await fs.lstat(source, { bigint: true })
-  const account = process.platform === 'win32' ? { owner: native.inspectProcess(process.pid).owner, group: native.inspectCurrentPrimaryGroup() } : null
+  const account = mode === 'copy' && process.platform === 'win32' ? { owner: native.inspectProcess(process.pid).owner, group: native.inspectCurrentPrimaryGroup() } : null
   const nativeId = process.platform === 'win32' ? native.inspectDirectoryFileId(source) : undefined
-  const tree = await inspectWorkspaceRelocationTree(source, 'copy', { signal })
+  const tree = await inspectWorkspaceRelocationTree(source, mode, { signal })
   if (tree.issues.length) throw fail()
   const hash = createHash('sha256'); let entries = 0
   async function visit(relative) {
     checkCancelled(signal)
     const file = path.join(source, relative), stat = await fs.lstat(file, { bigint: true })
-    if (process.platform === 'win32' && stat.isFile() && stat.nlink > 1n) {
+    if (mode === 'copy' && process.platform === 'win32' && stat.isFile() && stat.nlink > 1n) {
       throw Object.assign(new Error('当前 Windows 跨盘复制不能可靠保留内部硬链接；请保留原位置或选择同卷迁移。'), { code: 'WORKSPACE_COPY_LINK_UNSUPPORTED' })
     }
-    if (process.platform !== 'win32' && process.getuid() !== 0
+    if (mode === 'copy' && process.platform !== 'win32' && process.getuid() !== 0
       && (stat.uid !== BigInt(process.getuid()) || ![process.getgid(), ...process.getgroups()].some(gid => BigInt(gid) === stat.gid))) {
       throw Object.assign(new Error('当前系统用户无法保留部分文件的所有者或用户组；未开始复制。'), { code: 'WORKSPACE_COPY_OWNER_UNSUPPORTED' })
     }
     const metadata = await inspectWorkspaceFileMetadata(file, { signal })
-    if (account && (metadata.owner !== account.owner || metadata.group !== account.group)) throw Object.assign(new Error('当前系统用户无法保留部分文件的所有者或用户组；未开始复制。'), { code: 'WORKSPACE_COPY_OWNER_UNSUPPORTED', path: relative })
-    if (metadata.copy_blockers.length) throw Object.assign(new Error('工作区含当前跨盘复制不支持的文件属性；原目录保留。'), { code: 'WORKSPACE_COPY_METADATA_UNSUPPORTED', path: relative, blockers: metadata.copy_blockers })
+    if (mode === 'copy' && account && (metadata.owner !== account.owner || metadata.group !== account.group)) throw Object.assign(new Error('当前系统用户无法保留部分文件的所有者或用户组；未开始复制。'), { code: 'WORKSPACE_COPY_OWNER_UNSUPPORTED', path: relative })
+    if (mode === 'copy' && metadata.copy_blockers.length) throw Object.assign(new Error('工作区含当前跨盘复制不支持的文件属性；原目录保留。'), { code: 'WORKSPACE_COPY_METADATA_UNSUPPORTED', path: relative, blockers: metadata.copy_blockers })
     hash.update(JSON.stringify([relative, metadata.fingerprint]) + '\n'); entries++
     if (stat.isDirectory()) for (const name of (await fs.readdir(file)).sort()) await visit(path.join(relative, name))
   }
   await visit('')
-  if ((await inspectWorkspaceRelocationTree(source, 'copy', { signal })).fingerprint !== tree.fingerprint) throw fail()
+  if ((await inspectWorkspaceRelocationTree(source, mode, { signal })).fingerprint !== tree.fingerprint) throw fail()
   if (!sameRoot(original, await fs.lstat(source, { bigint: true }))) throw fail()
   if (nativeId !== undefined && native.inspectDirectoryFileId(source) !== nativeId) throw fail()
   return { source_identity: { dev: original.dev.toString(), ino: original.ino.toString(), ...(nativeId ? { native_id: nativeId } : {}) }, tree_fingerprint: tree.fingerprint, metadata_fingerprint: hash.digest('hex'), entries }
 }
+
+export const inspectWorkspaceCopySource = (source, options) => inspectWorkspaceFileSource(source, 'copy', options)
 
 export async function copyWorkspaceToStaging(source, container, { signal } = {}) {
   checkCancelled(signal)

@@ -16,7 +16,7 @@ export function workspaceMaintenancePending(dataRoot: string): boolean {
     'relocation-stop-attempt.json', 'relocation-stop-submission.json',
     'relocation-modules.json', 'relocation-module-stop-attempt.json',
     'relocation-module-processes', 'relocation-module-stop-submission.json',
-    'relocation-coordinator.json', 'relocation-coordinator-ready.json', 'relocation-process-stop.jsonl', 'relocation-execution-exit.json',
+    'relocation-coordinator.json', 'relocation-coordinator-ready.json', 'relocation-process-stop.jsonl', 'relocation-execution-exit.json', 'relocation-files.json',
   ]) {
     try { lstatSync(path.join(control, file)); return true }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return true }

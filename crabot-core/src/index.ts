@@ -159,6 +159,11 @@ interface WorkspaceStopSequenceResult {
   readonly moduleSubmission: WorkspaceModuleStopResponse
 }
 
+interface WorkspaceFilePreparationResult {
+  readonly coordinator: ChildProcess
+  readonly plan_sha256: string
+}
+
 interface WorkspaceCoordinatorGrant {
   capture?: Promise<ReadonlyArray<WorkspaceRelocationWorker>>
   workersHash?: string
@@ -195,6 +200,7 @@ export class ModuleManager {
   private readonly processes: Map<ModuleId, ChildProcess> = new Map()
   private workspaceCoordinatorGrant?: WorkspaceCoordinatorGrant
   private workspaceStopSequence?: { fingerprint: string; pending: Promise<WorkspaceStopSequenceResult> }
+  private workspaceFilePreparation?: { fingerprint: string; pending: Promise<WorkspaceFilePreparationResult> }
   private workspaceModuleStop?: { fingerprint: string; pending: Promise<WorkspaceModuleStopResponse> }
   private readonly childStates: WeakMap<ChildProcess, ManagedChildState> = new WeakMap()
   private readonly lifecycleQueues: Map<ModuleId, Promise<void>> = new Map()
@@ -1417,6 +1423,57 @@ export class ModuleManager {
       } finally { active = false; journal?.close(); processJournal?.close() }
     })
     this.workspaceStopSequence = { fingerprint, pending }
+    return pending
+  }
+
+  /** Prepare the original file plan after the complete stop sequence; no file effects or root selection. */
+  private prepareWorkspaceRelocationFiles(request: VerifyWorkspaceRelocationRequestParams, bearer?: string): Promise<WorkspaceFilePreparationResult> {
+    request = Object.freeze({ ...request })
+    const fingerprint = sha256CanonicalJson(request)
+    const failure = () => Object.assign(new Error('迁移文件准备未能确认，已保留原目录、计划与维护保护；未重放。'), { code: 'SERVICE_UNAVAILABLE' })
+    if (this.workspaceFilePreparation) {
+      if (this.workspaceFilePreparation.fingerprint !== fingerprint) return Promise.reject(Object.assign(new Error('Workspace file intent cannot change'), { code: 'FORBIDDEN' }))
+      return this.workspaceFilePreparation.pending
+    }
+    const pending = Promise.resolve().then(async (): Promise<WorkspaceFilePreparationResult> => {
+      let child: ChildProcess | undefined
+      let journal: { prepare(): Promise<{ plan: unknown }>; close(): void } | undefined
+      try {
+        child = (await this.submitWorkspaceRelocationStops(request, bearer)).coordinator
+        const records = require('../../scripts/lib/workspace-relocation-intent.mjs'), native = require('../../scripts/lib/process-identity.cjs')
+        const coordinator = records.readWorkspaceRelocationCoordinator(this.dataDir, request.intent_id)
+        const modules: ReadonlyArray<WorkspaceModuleScope> = records.readWorkspaceRelocationModules(this.dataDir, request.intent_id).modules
+        const verify = (): void => {
+          if (this.isShuttingDown || !child!.connected || child!.exitCode !== null || child!.signalCode !== null
+            || sha256CanonicalJson(records.readWorkspaceRelocationIntent(this.dataDir)) !== request.intent_sha256
+            || sha256CanonicalJson(records.readWorkspaceRelocationCoordinator(this.dataDir, request.intent_id)) !== sha256CanonicalJson(coordinator)
+            || !records.readWorkspaceRelocationExecutionExit(this.dataDir, request.intent_id)
+            || !native.sameProcess(coordinator.launch.parent, native.inspectProcess(process.pid))
+            || !native.sameProcess(coordinator.launch.process, native.inspectProcess(child!.pid))
+            || JSON.stringify([...this.modules.keys()].filter(id => id !== 'admin-web').sort()) !== JSON.stringify(modules.map(item => item.module_id))
+            || [...this.processes.keys()].some(id => id !== 'admin-web') || [...this.lifecycleQueues.keys()].some(id => id !== 'admin-web')) throw failure()
+          for (const item of modules) {
+            const runtime = this.modules.get(item.module_id)
+            if (!runtime || runtime.port !== item.module_port || runtime.pid !== undefined || runtime.status === 'running' || runtime.status === 'starting') throw failure()
+          }
+        }
+        const verifyStopped = async (): Promise<void> => {
+          verify()
+          if ((await this.runtimeRegistry.listRecords()).some(record => record.module_id !== 'admin-web')) throw failure()
+          verify()
+        }
+        await verifyStopped()
+        const { createWorkspaceFileJournal } = require('../../scripts/lib/workspace-file-journal.mjs')
+        journal = createWorkspaceFileJournal(child, { dataDir: this.dataDir, id: request.intent_id, launch: coordinator.launch })
+        const result = await journal!.prepare()
+        await verifyStopped()
+        return Object.freeze({ coordinator: child, plan_sha256: sha256CanonicalJson(result.plan) })
+      } catch {
+        await this.closeWorkspaceCoordinatorChannel(child)
+        throw failure()
+      } finally { journal?.close() }
+    })
+    this.workspaceFilePreparation = { fingerprint, pending }
     return pending
   }
 
