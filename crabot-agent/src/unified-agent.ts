@@ -987,7 +987,7 @@ export class UnifiedAgent extends ModuleBase {
 
   /** Internal relocation boundary: registration/admission settles before fixing the stop set. */
   async quiesceExecutionAdmissions(): Promise<void> {
-    await Promise.all([this.executionAdmissions.closeAndDrain(), this.requireManagerStack().harness.quiesceExecutionAdmissions()])
+    await Promise.all([this.executionAdmissions.closeAndDrain(), this.requireManagerStack().harness.quiesceExecutionAdmissions(), this.builtinBgRegistry.quiesceExecutionAdmissions()])
   }
 
   /** Internal only; the fixed job still owns authorization, persistence and stop proof. */

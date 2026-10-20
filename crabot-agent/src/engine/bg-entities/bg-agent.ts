@@ -16,7 +16,8 @@ import type { LLMAdapter } from '../llm-adapter.js'
 import type { ToolDefinition, ToolPermissionConfig, EngineOptions, EngineResult, EngineMessage } from '../types.js'
 import { runEngine } from '../query-loop.js'
 import { getErrorMessage } from '../tools/utils.js'
-import { getBgEntitiesLogsDir } from '../../core/data-paths.js'
+import { getBgEntitiesLogsDir, getDataRootDir } from '../../core/data-paths.js'
+import { assertWorkspaceExecutionAllowed } from 'crabot-shared'
 import type { BgEntityRegistry } from './registry.js'
 import type { BgEntityOwner, BgAgentRegistryRecord } from './types.js'
 import { BG_EXIT_RETRY_DELAYS_MS } from './types.js'
@@ -144,6 +145,11 @@ export interface SpawnPersistentAgentOpts {
  * @returns The generated entity_id (format: `agent_<12 hex chars>`)
  */
 export async function spawnPersistentAgent(opts: SpawnPersistentAgentOpts): Promise<string> {
+  assertWorkspaceExecutionAllowed(getDataRootDir())
+  return opts.registry.runExecutionAdmission(() => startPersistentAgent(opts))
+}
+
+async function startPersistentAgent(opts: SpawnPersistentAgentOpts): Promise<string> {
   const entity_id = `agent_${randomBytes(6).toString('hex')}`
   const logsDir = getBgEntitiesLogsDir()
   await fs.promises.mkdir(logsDir, { recursive: true })

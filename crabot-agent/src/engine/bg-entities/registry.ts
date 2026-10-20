@@ -8,6 +8,7 @@
 
 import fs from 'node:fs/promises'
 import path from 'node:path'
+import { ExecutionAdmissions } from '../../core/execution-admissions.js'
 import { getBgEntitiesRegistryPath } from '../../core/data-paths'
 import {
   exitcodeFileForLog,
@@ -74,12 +75,22 @@ function isWorkerOwnedBuiltinAgent(record: BgEntityRecord): boolean {
 
 export class BgEntityRegistry {
   private readonly mutex = new AsyncMutex()
+  private readonly executionAdmissions = new ExecutionAdmissions()
 
   constructor(private readonly registryPath: string = getBgEntitiesRegistryPath()) {}
 
   // -------------------------------------------------------------------------
   // Public API
   // -------------------------------------------------------------------------
+
+  /** Counts startup/registration only; normal exit updates remain available during maintenance. */
+  runExecutionAdmission<T>(start: () => Promise<T>): Promise<T> {
+    return this.executionAdmissions.run(start)
+  }
+
+  quiesceExecutionAdmissions(): Promise<void> {
+    return this.executionAdmissions.closeAndDrain()
+  }
 
   async register(record: BgEntityRecord): Promise<void> {
     await this.mutex.run(async () => {

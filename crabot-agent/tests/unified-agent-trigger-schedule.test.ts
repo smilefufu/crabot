@@ -1,6 +1,7 @@
 import { captureWorkspaceRelocationWorkers, type WorkspaceRelocationWorker } from '../src/workers/harness/workspace-relocation-scope.js'
 import { createHash } from 'node:crypto'
 import { ExecutionAdmissions } from '../src/core/execution-admissions.js'
+import { BgEntityRegistry } from '../src/engine/bg-entities/registry.js'
 import { describe, it, expect, vi } from 'vitest'
 import { ConfigLoader } from '../src/core/config-loader.js'
 
@@ -10,6 +11,7 @@ import type { ManagerKey, LedgerWorker } from '../src/workers/harness/ledger-typ
 
 interface AgentUnderTest {
   executionAdmissions: ExecutionAdmissions
+  builtinBgRegistry: BgEntityRegistry
   quiesceExecutionAdmissions(): Promise<void>
   captureWorkspaceRelocationScope(): Promise<ReadonlyArray<WorkspaceRelocationWorker>>
   agentConfig: { model_config: Record<string, { apikey: string; model_id: string }> }
@@ -68,6 +70,7 @@ function buildAgent(runMaintenance: () => Promise<void>) {
 
   const agent = Object.create(UnifiedAgent.prototype) as AgentUnderTest
   agent.executionAdmissions = new ExecutionAdmissions()
+  agent.builtinBgRegistry = new BgEntityRegistry()
   agent.agentConfig = { model_config: { powerful: { apikey: 'test-key', model_id: 'test-model' } } }
   agent.config = { moduleId: 'test-agent' }
   // 直接 test fixture：构造函数默认 runtime_config_authenticated=true；Object.create 绕过构造函数，这里补齐。
