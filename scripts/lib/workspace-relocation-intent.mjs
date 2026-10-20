@@ -55,7 +55,7 @@ function read(ctx) {
   if (!privateControl(ctx.control)) return null
   const value = readPrivateJson(ctx.file, 65536)
   if (value === undefined) {
-    for (const file of ['relocation-workers.json', 'relocation-stop-attempt.json', 'relocation-stop-submission.json', 'relocation-modules.json', 'relocation-module-stop-attempt.json', 'relocation-module-processes', 'relocation-module-stop-submission.json']) {
+    for (const file of ['relocation-workers.json', 'relocation-stop-attempt.json', 'relocation-stop-submission.json', 'relocation-modules.json', 'relocation-module-stop-attempt.json', 'relocation-module-processes', 'relocation-module-stop-submission.json', 'relocation-coordinator.json', 'relocation-coordinator-ready.json']) {
       try { fs.lstatSync(path.join(ctx.control, file)); fail() }
       catch (error) { if (error.code !== 'ENOENT') fail() }
     }
@@ -494,6 +494,89 @@ export function completeWorkspaceRelocationModuleStops({ dataDir, id, results })
     if (!same(intent.source, identity(intent.source.path)) || sha256CanonicalJson(readWorkspaceRelocationModuleStops(dataDir, id)) !== sha256CanonicalJson(previous)) fail()
   })
   const accepted = readWorkspaceRelocationModuleStops(dataDir, id).submission
+  if (sha256CanonicalJson(accepted) !== sha256CanonicalJson(record)) fail()
+  return accepted
+}
+
+
+const coordinatorFile = 'relocation-coordinator.json', coordinatorReadyFile = 'relocation-coordinator-ready.json'
+function validCoordinatorProcess(value) {
+  return fields(value, ['pid', 'parent', 'owner', 'started', 'executable'])
+    && Number.isInteger(value.pid) && value.pid > 0 && value.pid <= 2147483647
+    && Number.isInteger(value.parent) && value.parent >= 0 && value.parent <= 2147483647
+    && value.owner === native.inspectProcess(process.pid).owner && nonempty(value.started) && nonempty(value.executable)
+}
+const isoTime = value => typeof value === 'string' && new Date(value).toISOString() === value
+function coordinatorContext(dataDir, id, locked = false) {
+  const ctx = context(dataDir, locked), intent = read(ctx)
+  if (!intent || intent.id !== id) fail()
+  return { ctx, intent }
+}
+export function readWorkspaceRelocationCoordinator(dataDir, id) {
+  const { ctx, intent } = coordinatorContext(dataDir, id)
+  const launch = readPrivateJson(path.join(ctx.control, coordinatorFile), 65536)
+  const ready = readPrivateJson(path.join(ctx.control, coordinatorReadyFile), 65536)
+  try {
+    if (launch === undefined) {
+      if (ready !== undefined || sha256CanonicalJson(read(ctx)) !== sha256CanonicalJson(intent)) fail()
+      return { launch: null, ready: null }
+    }
+    if (!fields(launch, ['schema_version', 'intent_id', 'intent_sha256', 'launch_id', 'parent', 'process', 'created_at'])
+      || launch.schema_version !== 1 || launch.intent_id !== id || launch.intent_sha256 !== sha256CanonicalJson(intent)
+      || !uuid(launch.launch_id) || !validCoordinatorProcess(launch.parent) || !validCoordinatorProcess(launch.process)
+      || launch.process.pid === launch.parent.pid || launch.process.parent !== launch.parent.pid || !isoTime(launch.created_at)) fail()
+    if (ready !== undefined && (!fields(ready, ['schema_version', 'launch_sha256', 'acquired_at']) || ready.schema_version !== 1
+      || ready.launch_sha256 !== sha256CanonicalJson(launch) || !isoTime(ready.acquired_at))) fail()
+    if (sha256CanonicalJson(read(ctx)) !== sha256CanonicalJson(intent)) fail()
+    return { launch, ready: ready ?? null }
+  } catch { fail() }
+}
+export function commitWorkspaceRelocationCoordinator({ dataDir, id, launchId, coordinator }) {
+  const { ctx, intent } = coordinatorContext(dataDir, id, true), operationToken = cliLockToken(path.join(ctx.dataRoot, 'cli.lock'))
+  const parent = native.inspectProcess(process.pid), child = { ...coordinator }
+  const verify = () => {
+    if (!uuid(launchId) || !validCoordinatorProcess(child) || child.pid === parent.pid || child.parent !== parent.pid) fail()
+    let current
+    try { current = native.inspectProcess(child.pid) } catch { fail() }
+    if (!native.sameProcess(child, current) || current.parent !== parent.pid || !native.sameProcess(parent, native.inspectProcess(parent.pid))
+      || !operationToken || cliLockToken(path.join(ctx.dataRoot, 'cli.lock')) !== operationToken
+      || sha256CanonicalJson(read(ctx)) !== sha256CanonicalJson(intent)) fail()
+  }
+  verify()
+  const previous = readWorkspaceRelocationCoordinator(dataDir, id)
+  if (previous.launch) {
+    if (previous.launch.launch_id !== launchId || sha256CanonicalJson(previous.launch.parent) !== sha256CanonicalJson(parent)
+      || sha256CanonicalJson(previous.launch.process) !== sha256CanonicalJson(child)) fail('WORKSPACE_RELOCATION_CONFLICT')
+    syncIntent(ctx); return previous.launch
+  }
+  const record = { schema_version: 1, intent_id: id, intent_sha256: sha256CanonicalJson(intent), launch_id: launchId,
+    parent, process: child, created_at: new Date().toISOString() }
+  publishPrivateJson(ctx, path.join(ctx.control, coordinatorFile), record, 65536, () => {
+    verify(); if (readWorkspaceRelocationCoordinator(dataDir, id).launch) fail('WORKSPACE_RELOCATION_CONFLICT')
+  })
+  const accepted = readWorkspaceRelocationCoordinator(dataDir, id).launch
+  if (sha256CanonicalJson(accepted) !== sha256CanonicalJson(record)) fail()
+  return accepted
+}
+export function commitWorkspaceRelocationCoordinatorReady({ dataDir, id }) {
+  const { ctx, intent } = coordinatorContext(dataDir, id, true), previous = readWorkspaceRelocationCoordinator(dataDir, id)
+  const operationToken = cliLockToken(path.join(ctx.dataRoot, 'cli.lock')), launch = previous.launch
+  if (!launch) fail()
+  const verify = () => {
+    const self = native.inspectProcess(process.pid)
+    if (!native.sameProcess(launch.process, self) || self.parent !== launch.parent.pid
+      || !native.sameProcess(launch.parent, native.inspectProcess(launch.parent.pid))
+      || !operationToken || cliLockToken(path.join(ctx.dataRoot, 'cli.lock')) !== operationToken
+      || sha256CanonicalJson(read(ctx)) !== sha256CanonicalJson(intent)
+      || sha256CanonicalJson(readWorkspaceRelocationCoordinator(dataDir, id).launch) !== sha256CanonicalJson(launch)) fail()
+  }
+  verify()
+  if (previous.ready) { syncIntent(ctx); return previous.ready }
+  const record = { schema_version: 1, launch_sha256: sha256CanonicalJson(launch), acquired_at: new Date().toISOString() }
+  publishPrivateJson(ctx, path.join(ctx.control, coordinatorReadyFile), record, 65536, () => {
+    verify(); if (readWorkspaceRelocationCoordinator(dataDir, id).ready) fail('WORKSPACE_RELOCATION_CONFLICT')
+  })
+  const accepted = readWorkspaceRelocationCoordinator(dataDir, id).ready
   if (sha256CanonicalJson(accepted) !== sha256CanonicalJson(record)) fail()
   return accepted
 }

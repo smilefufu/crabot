@@ -1,7 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import syncFs, { promises as fs } from 'node:fs'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
+import { once } from 'node:events'
 import path from 'node:path'
 import { tmpdir } from 'node:os'
 import { createRequire } from 'node:module'
@@ -13,7 +14,7 @@ import { beginVersionMaintenance } from '../version-maintenance.mjs'
 import { writeCoreRelease } from '../core-release.mjs'
 import { WorkspaceCatalog } from '../../../crabot-shared/dist/workspace-catalog.js'
 import { assertWorkspaceExecutionAllowed } from '../../../crabot-shared/dist/workspace-maintenance.js'
-import { commitWorkspaceRelocationModules, readWorkspaceRelocationModules, prepareWorkspaceRelocationModuleStops, observeWorkspaceRelocationModuleProcesses, completeWorkspaceRelocationModuleStops, readWorkspaceRelocationModuleStops, beginWorkspaceRelocationIntent, readWorkspaceRelocationIntent, commitWorkspaceRelocationWorkers, readWorkspaceRelocationWorkers, prepareWorkspaceRelocationStops, completeWorkspaceRelocationStops, readWorkspaceRelocationStops } from '../workspace-relocation-intent.mjs'
+import { commitWorkspaceRelocationCoordinator, commitWorkspaceRelocationCoordinatorReady, readWorkspaceRelocationCoordinator, commitWorkspaceRelocationModules, readWorkspaceRelocationModules, prepareWorkspaceRelocationModuleStops, observeWorkspaceRelocationModuleProcesses, completeWorkspaceRelocationModuleStops, readWorkspaceRelocationModuleStops, beginWorkspaceRelocationIntent, readWorkspaceRelocationIntent, commitWorkspaceRelocationWorkers, readWorkspaceRelocationWorkers, prepareWorkspaceRelocationStops, completeWorkspaceRelocationStops, readWorkspaceRelocationStops } from '../workspace-relocation-intent.mjs'
 
 async function fixture(t, beforeCleanup = () => {}) {
   const root = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'crabot-relocation-intent-中文 space-')))
@@ -480,7 +481,7 @@ for (const change of ['missing', 'different']) test('fixed-set publication canno
 })
 
 
-for (const file of ['relocation-stop-attempt.json', 'relocation-stop-submission.json', 'relocation-modules.json', 'relocation-module-stop-attempt.json', 'relocation-module-processes', 'relocation-module-stop-submission.json']) test('orphaned stop evidence keeps all execution entry points fenced: ' + file, async t => {
+for (const file of ['relocation-stop-attempt.json', 'relocation-stop-submission.json', 'relocation-modules.json', 'relocation-module-stop-attempt.json', 'relocation-module-processes', 'relocation-module-stop-submission.json', 'relocation-coordinator.json', 'relocation-coordinator-ready.json']) test('orphaned stop evidence keeps all execution entry points fenced: ' + file, async t => {
   const f = await fixture(t)
   await fs.writeFile(path.join(f.data, 'workspace-control', file), '{}', { mode: 0o600 })
   assertWorkspaceStillProtected(f.data)
@@ -790,4 +791,113 @@ test('asynchronous version loading cannot borrow a later operation lock from the
   const replacement = await acquireCliLock(f.data, 'different-operation')
   try { await rejected; assert.equal(readWorkspaceRelocationIntent(f.data), null) }
   finally { releaseCliLock(replacement) }
+})
+
+async function coordinatorChild(t) {
+  const entry = new URL('../workspace-relocation-intent.mjs', import.meta.url).href
+  const locks = new URL('../cli-lock.mjs', import.meta.url).href
+  const code = `import {commitWorkspaceRelocationCoordinatorReady} from ${JSON.stringify(entry)};
+    import {acquireWorkspaceRelocationLock} from ${JSON.stringify(locks)};
+    setTimeout(()=>process.exit(0),30000);
+    process.on('message',async({dataDir,id,withoutLock})=>{try{if(!withoutLock)await acquireWorkspaceRelocationLock(dataDir,id);const ready=commitWorkspaceRelocationCoordinatorReady({dataDir,id});
+      process.send({ready});}catch(error){process.send({error:{code:error.code,message:error.message}})}});`
+  const child = spawn(process.execPath, ['--input-type=module', '-e', code], { stdio: ['ignore', 'pipe', 'pipe', 'ipc'] })
+  const exited = once(child, 'exit'); void exited.catch(() => {})
+  t.after(async () => { if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL'); await exited })
+  await once(child, 'spawn')
+  return { child, process: native.inspectProcess(child.pid), exited }
+}
+
+test('coordinator launch requires the actual lock and actual child identity without granting any file action', async t => {
+  let lock
+  const c = await coordinatorChild(t), f = await fixture(t, () => releaseCliLock(lock))
+  lock = await acquireCliLock(f.data, 'workspace-relocation'); await beginWorkspaceRelocationIntent(f.input); releaseCliLock(lock)
+  const args = { dataDir: f.data, id: f.input.id, launchId: randomUUID(), coordinator: c.process }
+  assert.throws(() => commitWorkspaceRelocationCoordinator(args), { code: 'WORKSPACE_RELOCATION_INVALID' })
+  lock = await acquireWorkspaceRelocationLock(f.data, f.input.id)
+  for (const patch of [{ parent: -1 }, { started: 'other' }, { owner: 'other' }, { pid: process.pid }]) {
+    assert.throws(() => commitWorkspaceRelocationCoordinator({ ...args, coordinator: { ...c.process, ...patch } }), { code: 'WORKSPACE_RELOCATION_INVALID' })
+  }
+  const first = commitWorkspaceRelocationCoordinator(args)
+  assert.deepEqual(commitWorkspaceRelocationCoordinator(args), first)
+  assert.deepEqual(readWorkspaceRelocationCoordinator(f.data, f.input.id), { launch: first, ready: null })
+  assert.throws(() => commitWorkspaceRelocationCoordinator({ ...args, launchId: randomUUID() }), { code: 'WORKSPACE_RELOCATION_CONFLICT' })
+  assert.throws(() => commitWorkspaceRelocationCoordinatorReady({ dataDir: f.data, id: f.input.id }), { code: 'WORKSPACE_RELOCATION_INVALID' })
+  assert.equal(await fs.readFile(path.join(f.source, 'default/original.txt'), 'utf8'), 'user bytes')
+  assert.deepEqual(await f.catalog.snapshot(), f.snapshot)
+})
+
+test('only the fixed coordinator publishes readiness under its own native lock and history survives its exit', async t => {
+  let lock
+  const c = await coordinatorChild(t), f = await fixture(t, () => releaseCliLock(lock))
+  lock = await acquireCliLock(f.data, 'workspace-relocation'); await beginWorkspaceRelocationIntent(f.input)
+  const launch = commitWorkspaceRelocationCoordinator({ dataDir: f.data, id: f.input.id, launchId: randomUUID(), coordinator: c.process })
+  releaseCliLock(lock)
+  const reply = once(c.child, 'message', { signal: AbortSignal.timeout(10000) })
+  c.child.send({ dataDir: f.data, id: f.input.id })
+  const [response] = await reply
+  assert.equal(response.error, undefined)
+  const result = readWorkspaceRelocationCoordinator(f.data, f.input.id)
+  assert.deepEqual(result.ready, response.ready)
+  assert.deepEqual(result.launch, launch)
+  await assert.rejects(acquireWorkspaceRelocationLock(f.data, f.input.id, 0), /another crabot CLI operation/)
+  c.child.kill('SIGKILL'); await c.exited
+  assert.deepEqual(readWorkspaceRelocationCoordinator(f.data, f.input.id), result)
+  assertWorkspaceStillProtected(f.data)
+  await assert.rejects(fs.stat(f.input.target), { code: 'ENOENT' })
+})
+
+for (const damage of ['hash', 'extra', 'hardlink', 'missing-launch', 'null-launch', 'null-ready']) test('coordinator handoff rejects damaged or orphaned identity: ' + damage, async t => {
+  let lock
+  const c = await coordinatorChild(t), f = await fixture(t, () => releaseCliLock(lock))
+  lock = await acquireCliLock(f.data, 'workspace-relocation'); await beginWorkspaceRelocationIntent(f.input)
+  const record = commitWorkspaceRelocationCoordinator({ dataDir: f.data, id: f.input.id, launchId: randomUUID(), coordinator: c.process })
+  const file = path.join(f.data, 'workspace-control/relocation-coordinator.json')
+  if (damage === 'hash') await fs.writeFile(file, JSON.stringify({ ...record, intent_sha256: '0'.repeat(64) }))
+  if (damage === 'extra') await fs.writeFile(file, JSON.stringify({ ...record, token: 'not-allowed' }))
+  if (damage === 'null-launch') await fs.writeFile(file, 'null')
+  if (damage === 'null-ready') {
+    const invalid = path.join(f.data, 'workspace-control/relocation-coordinator-ready.json')
+    if (process.platform === 'win32') native.writePrivateFile(invalid, 'null')
+    else await fs.writeFile(invalid, 'null', { mode: 0o600 })
+  }
+  if (damage === 'hardlink') await fs.link(file, path.join(f.root, 'outside-launch'))
+  if (damage === 'missing-launch') {
+    await fs.rm(file);
+    const orphan = path.join(f.data, 'workspace-control/relocation-coordinator-ready.json')
+    if (process.platform === 'win32') native.writePrivateFile(orphan, '{}')
+    else await fs.writeFile(orphan, '{}', { mode: 0o600 })
+  }
+  assert.throws(() => readWorkspaceRelocationCoordinator(f.data, f.input.id), { code: 'WORKSPACE_RELOCATION_INVALID' })
+  assertWorkspaceStillProtected(f.data)
+})
+
+test('coordinator launch publication reply loss preserves the first child and launch without replacing it', async t => {
+  let lock
+  const c = await coordinatorChild(t), f = await fixture(t, () => releaseCliLock(lock))
+  lock = await acquireCliLock(f.data, 'workspace-relocation'); await beginWorkspaceRelocationIntent(f.input)
+  const input = { dataDir: f.data, id: f.input.id, launchId: randomUUID(), coordinator: c.process }, link = syncFs.linkSync
+  const mocked = t.mock.method(syncFs, 'linkSync', (source, target) => {
+    link(source, target); throw Object.assign(new Error('reply lost'), { code: 'EIO' })
+  })
+  try { assert.throws(() => commitWorkspaceRelocationCoordinator(input), { code: 'EIO' }) }
+  finally { mocked.mock.restore() }
+  const first = readWorkspaceRelocationCoordinator(f.data, f.input.id)
+  assert.equal(first.launch.launch_id, input.launchId)
+  assert.deepEqual(commitWorkspaceRelocationCoordinator(input), first.launch)
+  assertWorkspaceStillProtected(f.data)
+})
+
+test('the real coordinator cannot publish readiness before taking over its own native lock', async t => {
+  let lock
+  const c = await coordinatorChild(t), f = await fixture(t, () => releaseCliLock(lock))
+  lock = await acquireCliLock(f.data, 'workspace-relocation'); await beginWorkspaceRelocationIntent(f.input)
+  commitWorkspaceRelocationCoordinator({ dataDir: f.data, id: f.input.id, launchId: randomUUID(), coordinator: c.process })
+  releaseCliLock(lock)
+  const reply = once(c.child, 'message', { signal: AbortSignal.timeout(10000) })
+  c.child.send({ dataDir: f.data, id: f.input.id, withoutLock: true })
+  const [response] = await reply
+  assert.equal(response.error?.code, 'WORKSPACE_RELOCATION_INVALID')
+  assert.equal(readWorkspaceRelocationCoordinator(f.data, f.input.id).ready, null)
+  assertWorkspaceStillProtected(f.data)
 })

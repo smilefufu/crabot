@@ -13,6 +13,7 @@ function workspaceMaintenancePending(dataRoot) {
     'relocation-stop-attempt.json', 'relocation-stop-submission.json',
     'relocation-modules.json', 'relocation-module-stop-attempt.json',
     'relocation-module-processes', 'relocation-module-stop-submission.json',
+    'relocation-coordinator.json', 'relocation-coordinator-ready.json',
   ]) {
     try { lstatSync(path.join(control, file)); return true }
     catch (error) { if (error.code !== 'ENOENT') return true }
