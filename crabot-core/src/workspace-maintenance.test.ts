@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import ModuleManager from './index.js'
 import { ModuleRuntimeRegistry } from './module-runtime-registry.js'
 
-describe.each(['relocation.json', 'relocation-workers.json', 'relocation-stop-attempt.json', 'relocation-stop-submission.json', 'relocation-modules.json', 'relocation-module-stop-attempt.json', 'relocation-module-processes', 'relocation-module-stop-submission.json', 'relocation-coordinator.json', 'relocation-coordinator-ready.json'])('workspace maintenance module admission: %s', record => {
+describe.each(['relocation.json', 'relocation-workers.json', 'relocation-worker-processes.json', 'relocation-stop-attempt.json', 'relocation-stop-submission.json', 'relocation-modules.json', 'relocation-module-stop-attempt.json', 'relocation-module-processes', 'relocation-module-stop-submission.json', 'relocation-coordinator.json', 'relocation-coordinator-ready.json'])('workspace maintenance module admission: %s', record => {
   async function fixture() {
     const data = await fs.mkdtemp(path.join(tmpdir(), 'crabot-mm-workspace-gate-'))
     const manager = new ModuleManager({ port: 0, modules: [], hotplug_allowed_types: ['channel'],

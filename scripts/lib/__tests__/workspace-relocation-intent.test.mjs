@@ -14,7 +14,7 @@ import { beginVersionMaintenance } from '../version-maintenance.mjs'
 import { writeCoreRelease } from '../core-release.mjs'
 import { WorkspaceCatalog } from '../../../crabot-shared/dist/workspace-catalog.js'
 import { assertWorkspaceExecutionAllowed } from '../../../crabot-shared/dist/workspace-maintenance.js'
-import { commitWorkspaceRelocationCoordinator, commitWorkspaceRelocationCoordinatorReady, readWorkspaceRelocationCoordinator, commitWorkspaceRelocationModules, readWorkspaceRelocationModules, prepareWorkspaceRelocationModuleStops, observeWorkspaceRelocationModuleProcesses, completeWorkspaceRelocationModuleStops, readWorkspaceRelocationModuleStops, beginWorkspaceRelocationIntent, readWorkspaceRelocationIntent, commitWorkspaceRelocationWorkers, readWorkspaceRelocationWorkers, prepareWorkspaceRelocationStops, completeWorkspaceRelocationStops, readWorkspaceRelocationStops } from '../workspace-relocation-intent.mjs'
+import { commitWorkspaceRelocationProcesses, readWorkspaceRelocationProcesses, commitWorkspaceRelocationCoordinator, commitWorkspaceRelocationCoordinatorReady, readWorkspaceRelocationCoordinator, commitWorkspaceRelocationModules, readWorkspaceRelocationModules, prepareWorkspaceRelocationModuleStops, observeWorkspaceRelocationModuleProcesses, completeWorkspaceRelocationModuleStops, readWorkspaceRelocationModuleStops, beginWorkspaceRelocationIntent, readWorkspaceRelocationIntent, commitWorkspaceRelocationWorkers, readWorkspaceRelocationWorkers, prepareWorkspaceRelocationStops, completeWorkspaceRelocationStops, readWorkspaceRelocationStops } from '../workspace-relocation-intent.mjs'
 
 async function fixture(t, beforeCleanup = () => {}) {
   const root = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'crabot-relocation-intent-中文 space-')))
@@ -902,7 +902,7 @@ test('the real coordinator cannot publish readiness before taking over its own n
   assertWorkspaceStillProtected(f.data)
 })
 
-for (const dependent of ['relocation-stop-attempt.json', 'relocation-stop-submission.json', 'relocation-modules.json', 'relocation-module-stop-attempt.json', 'relocation-module-processes', 'relocation-module-stop-submission.json']) test('an existing intent cannot reconstruct a missing Worker scope over downstream evidence: ' + dependent, async t => {
+for (const dependent of ['relocation-worker-processes.json', 'relocation-stop-attempt.json', 'relocation-stop-submission.json', 'relocation-modules.json', 'relocation-module-stop-attempt.json', 'relocation-module-processes', 'relocation-module-stop-submission.json']) test('an existing intent cannot reconstruct a missing Worker scope over downstream evidence: ' + dependent, async t => {
   let lock
   const f = await fixture(t, () => releaseCliLock(lock))
   lock = await acquireCliLock(f.data, 'workspace-relocation'); await beginWorkspaceRelocationIntent(f.input)
@@ -913,5 +913,95 @@ for (const dependent of ['relocation-stop-attempt.json', 'relocation-stop-submis
   assert.throws(() => readWorkspaceRelocationWorkers(f.data, f.input.id), { code: 'WORKSPACE_RELOCATION_INVALID' })
   await assert.rejects(fs.stat(workersFile), { code: 'ENOENT' })
   assert.equal(await fs.readFile(orphan, 'utf8'), '{}')
+  assertWorkspaceStillProtected(f.data)
+})
+
+
+async function processFixture(t) {
+  const f = await moduleFixture(t)
+  return { ...f, processes: f.modules[0].processes, file: path.join(f.data, 'workspace-control/relocation-worker-processes.json') }
+}
+test('the first CLI process observation is lock-bound, immutable and independent from exit or Worker closure', async t => {
+  const f = await processFixture(t), before = await f.catalog.snapshot()
+  const input = { ...f.options, processes: f.processes }
+  const original = commitWorkspaceRelocationProcesses(input)
+  assert.deepEqual(readWorkspaceRelocationProcesses(f.data, f.input.id), original)
+  assert.deepEqual(commitWorkspaceRelocationProcesses(input), original)
+  assert.deepEqual(original.processes, f.processes)
+  assert.equal(readWorkspaceRelocationStops(f.data, f.input.id).attempt, null)
+  assert.throws(() => commitWorkspaceRelocationProcesses({ ...input, processes: [] }), { code: 'WORKSPACE_RELOCATION_CONFLICT' })
+  releaseCliLock(f.lock)
+  assert.throws(() => commitWorkspaceRelocationProcesses(input), { code: 'WORKSPACE_RELOCATION_INVALID' })
+  assert.deepEqual(readWorkspaceRelocationProcesses(f.data, f.input.id), original)
+  assert.deepEqual(await f.catalog.snapshot(), before)
+  assert.equal(await fs.readFile(path.join(f.source, 'default/original.txt'), 'utf8'), 'user bytes')
+  assertWorkspaceStillProtected(f.data)
+})
+for (const change of ['extra field', 'duplicate', 'wrong owner', 'self', 'unsorted', 'bad parent', 'bad pid', 'empty start']) test('bad CLI process scope is not published: ' + change, async t => {
+  const f = await processFixture(t), processes = structuredClone(f.processes)
+  if (change === 'extra field') processes[0].secret = 'never copy'
+  if (change === 'duplicate') processes.push({ ...processes[0] })
+  if (change === 'wrong owner') processes[0].owner = 'another-owner'
+  if (change === 'self') processes[0].pid = process.pid
+  if (change === 'unsorted') processes.push({ ...processes[0], pid: processes[0].pid - 1 })
+  if (change === 'bad parent') processes[0].parent = -1
+  if (change === 'bad pid') processes[0].pid = 0
+  if (change === 'empty start') processes[0].started = ''
+  assert.throws(() => commitWorkspaceRelocationProcesses({ ...f.options, processes }), { code: 'WORKSPACE_RELOCATION_INVALID' })
+  assert.equal(readWorkspaceRelocationProcesses(f.data, f.input.id), null)
+  await assert.rejects(fs.stat(f.file), { code: 'ENOENT' })
+})
+for (const attempt of ['Worker', 'module']) test('a missing pre-stop CLI observation cannot be added after a ' + attempt + ' stop attempt', async t => {
+  const f = await processFixture(t)
+  if (attempt === 'Worker') prepareWorkspaceRelocationStops({ ...f.options, workers: [] })
+  else { commitWorkspaceRelocationModules({ ...f.options, modules: f.modules }); prepareWorkspaceRelocationModuleStops({ ...f.options, modules: f.modules }) }
+  assert.throws(() => commitWorkspaceRelocationProcesses({ ...f.options, processes: f.processes }), { code: 'WORKSPACE_RELOCATION_INVALID' })
+  await assert.rejects(fs.stat(f.file), { code: 'ENOENT' })
+  assertWorkspaceStillProtected(f.data)
+})
+for (const change of ['missing Worker scope', 'changed Worker scope', 'missing intent', 'hardlink', 'control replaced']) test('CLI process scope cannot survive unverifiable upstream materials: ' + change, async t => {
+  const f = await processFixture(t)
+  commitWorkspaceRelocationProcesses({ ...f.options, processes: f.processes })
+  const control = path.dirname(f.file), workers = path.join(control, 'relocation-workers.json')
+  if (change === 'missing Worker scope') await fs.rm(workers)
+  if (change === 'changed Worker scope') {
+    const record = JSON.parse(await fs.readFile(workers, 'utf8')); record.workers = workerSet(); await fs.writeFile(workers, JSON.stringify(record))
+  }
+  if (change === 'missing intent') await fs.rm(f.recordFile)
+  if (change === 'hardlink') await fs.link(f.file, path.join(f.root, 'extra-link'))
+  if (change === 'control replaced') {
+    await fs.rename(control, control + '-old')
+    if (process.platform === 'win32') native.createPrivateDirectory(control)
+    else await fs.mkdir(control, { mode: 0o700 })
+    for (const file of await fs.readdir(control + '-old')) await fs.rename(path.join(control + '-old', file), path.join(control, file))
+  }
+  assert.throws(() => readWorkspaceRelocationProcesses(f.data, f.input.id), { code: 'WORKSPACE_RELOCATION_INVALID' })
+  assert.throws(() => commitWorkspaceRelocationProcesses({ ...f.options, processes: f.processes }), { code: 'WORKSPACE_RELOCATION_INVALID' })
+  assertWorkspaceStillProtected(f.data)
+})
+test('published CLI process scope is retained after a lost publication acknowledgement', async t => {
+  const f = await processFixture(t), original = syncFs.linkSync
+  t.mock.method(syncFs, 'linkSync', (...args) => { original(...args); throw new Error('reply lost after publication') })
+  assert.throws(() => commitWorkspaceRelocationProcesses({ ...f.options, processes: f.processes }), /reply lost/)
+  t.mock.restoreAll()
+  const stored = readWorkspaceRelocationProcesses(f.data, f.input.id)
+  assert.ok(stored)
+  assert.deepEqual(commitWorkspaceRelocationProcesses({ ...f.options, processes: f.processes }), stored)
+  assertWorkspaceStillProtected(f.data)
+})
+
+test('no lock means zero initial CLI observation publication, including an empty scope', async t => {
+  const f = await processFixture(t)
+  releaseCliLock(f.lock)
+  assert.throws(() => commitWorkspaceRelocationProcesses({ ...f.options, processes: [] }), { code: 'WORKSPACE_RELOCATION_INVALID' })
+  assert.equal(readWorkspaceRelocationProcesses(f.data, f.input.id), null)
+  await assert.rejects(fs.stat(f.file), { code: 'ENOENT' })
+})
+test('an empty initial CLI scope is retained as an observation without inventing a stop attempt', async t => {
+  const f = await processFixture(t)
+  const record = commitWorkspaceRelocationProcesses({ ...f.options, processes: [] })
+  assert.deepEqual(record.processes, [])
+  assert.deepEqual(readWorkspaceRelocationProcesses(f.data, f.input.id), record)
+  assert.equal(readWorkspaceRelocationStops(f.data, f.input.id).attempt, null)
   assertWorkspaceStillProtected(f.data)
 })

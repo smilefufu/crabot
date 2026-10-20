@@ -175,8 +175,8 @@ async function coordinator(f: Awaited<ReturnType<typeof fixture>>, journal = 'no
   const journalEntry = new URL('../../scripts/lib/workspace-worker-journal.mjs', import.meta.url).href
   const code = `import{enterWorkspaceRelocationCoordinator}from ${JSON.stringify(entry)};import{serveWorkspaceWorkerJournal}from ${JSON.stringify(journalEntry)};const context=await enterWorkspaceRelocationCoordinator();let serving;
     if(${JSON.stringify(journal)}==='false-ack')process.on('message',m=>{if(m.kind==='workspace_worker_journal_request')process.send({kind:'workspace_worker_journal_reply',request_id:m.request_id,launch_id:m.launch_id,operation:m.operation,ok:true,result:true})});
-    else{if(['drop-reply','drop-prepare','drop-complete'].includes(${JSON.stringify(journal)})){const send=process.send.bind(process);let dropped=false;process.send=(m,cb)=>{
-      const op={'drop-reply':'capture','drop-prepare':'prepare','drop-complete':'complete'}[${JSON.stringify(journal)}];
+    else{if(['drop-reply','drop-prepare','drop-complete','drop-processes'].includes(${JSON.stringify(journal)})){const send=process.send.bind(process);let dropped=false;process.send=(m,cb)=>{
+      const op={'drop-reply':'capture','drop-prepare':'prepare','drop-complete':'complete','drop-processes':'capture_processes'}[${JSON.stringify(journal)}];
       if(!dropped&&m.kind==='workspace_worker_journal_reply'&&m.operation===op){dropped=true;cb?.(null);return true}return send(m,cb)}}serving=serveWorkspaceWorkerJournal(context)}
     process.on('message',m=>{if(m.kind==='fixture-change-policy'){
       if(m.policy==='lost-lock')context.release();
@@ -566,5 +566,68 @@ describe('MM delegates actual fixed Agent stop code through finite native proces
       expect(f.manager.processes.get('admin-web').exitCode).toBeNull()
       await expect(fs.stat(path.join(f.root, 'relocated'))).rejects.toMatchObject({ code: 'ENOENT' })
     } finally { await c.cleanup(); await f.cleanup() }
+  }, 30000)
+})
+
+
+describe('fixed coordinator first CLI process observation journal', () => {
+  async function observationFixture(policy = 'normal', seed?: unknown[]) {
+    const f = await fixture()
+    let c: Awaited<ReturnType<typeof coordinator>> | undefined, journal: any
+    const cleanup = async () => { journal?.close(); await c?.cleanup(); await f.cleanup() }
+    try {
+      const records = await import('../../scripts/lib/workspace-relocation-intent.mjs'), locks = await import('../../scripts/lib/cli-lock.mjs')
+      const lock = await locks.acquireWorkspaceRelocationLock(f.data, f.params.intent_id)
+      try {
+        records.commitWorkspaceRelocationWorkers({ dataDir: f.data, id: f.params.intent_id, workers: [] })
+        if (seed) records.commitWorkspaceRelocationProcesses({ dataDir: f.data, id: f.params.intent_id, processes: seed })
+      } finally { locks.releaseCliLock(lock) }
+      c = await coordinator(f, policy)
+      const { createWorkspaceWorkerJournal } = await import('../../scripts/lib/workspace-worker-journal.mjs')
+      journal = createWorkspaceWorkerJournal(c.child, { dataDir: f.data, id: f.params.intent_id, launch: c.launch })
+      return { ...f, c, records, journal, cleanup }
+    } catch (error) { await cleanup(); throw error }
+  }
+  it('publishes through the independently locked child and reads back the original observation', async () => {
+    const f = await observationFixture()
+    try {
+      await f.journal.captureProcesses([])
+      const first = f.records.readWorkspaceRelocationProcesses(f.data, f.params.intent_id)
+      expect(first.processes).toEqual([])
+      await f.journal.captureProcesses([])
+      expect(f.records.readWorkspaceRelocationProcesses(f.data, f.params.intent_id)).toEqual(first)
+      expect(f.records.readWorkspaceRelocationStops(f.data, f.params.intent_id).attempt).toBeNull()
+    } finally { await f.cleanup() }
+  }, 30000)
+  it('does not accept a false acknowledgement for a different original process set', async () => {
+    const native = require('../../scripts/lib/process-identity.cjs'), self = native.inspectProcess(process.pid)
+    const seed = [{ pid: 881100, parent: process.pid, started: '100', owner: self.owner, executable: self.executable }]
+    const f = await observationFixture('false-ack', seed)
+    try {
+      await expect(f.journal.captureProcesses([])).rejects.toMatchObject({ code: 'CRABOT_WORKSPACE_JOURNAL_UNAVAILABLE' })
+      expect(f.records.readWorkspaceRelocationProcesses(f.data, f.params.intent_id).processes).toEqual(seed)
+    } finally { await f.cleanup() }
+  }, 30000)
+  it('preserves a published first observation after its actual IPC reply is lost', async () => {
+    const f = await observationFixture('drop-processes')
+    let recovered: any
+    try {
+      await expect(f.journal.captureProcesses([])).rejects.toMatchObject({ code: 'CRABOT_WORKSPACE_JOURNAL_UNAVAILABLE' })
+      const original = f.records.readWorkspaceRelocationProcesses(f.data, f.params.intent_id)
+      expect(original.processes).toEqual([])
+      const { createWorkspaceWorkerJournal } = await import('../../scripts/lib/workspace-worker-journal.mjs')
+      recovered = createWorkspaceWorkerJournal(f.c.child, { dataDir: f.data, id: f.params.intent_id, launch: f.c.launch })
+      await recovered.captureProcesses([])
+      expect(f.records.readWorkspaceRelocationProcesses(f.data, f.params.intent_id)).toEqual(original)
+      expect(f.records.readWorkspaceRelocationStops(f.data, f.params.intent_id).attempt).toBeNull()
+    } finally { recovered?.close(); await f.cleanup() }
+  }, 30000)
+  for (const policy of ['lost-lock', 'false-ack']) it('rejects first observation confirmation without real persistence: ' + policy, async () => {
+    const f = await observationFixture(policy)
+    try {
+      await expect(f.journal.captureProcesses([])).rejects.toMatchObject({ code: 'CRABOT_WORKSPACE_JOURNAL_UNAVAILABLE' })
+      expect(f.records.readWorkspaceRelocationProcesses(f.data, f.params.intent_id)).toBeNull()
+      expect(f.records.readWorkspaceRelocationStops(f.data, f.params.intent_id).attempt).toBeNull()
+    } finally { await f.cleanup() }
   }, 30000)
 })

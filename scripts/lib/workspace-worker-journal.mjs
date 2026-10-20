@@ -1,6 +1,7 @@
 // Worker stop policy: stable full identities and submission receipts, never closure or exit proof.
 import { createWorkspaceJournalClient, serveWorkspaceJournal, journalFields as fields, workspaceJournalFailure as failure } from './workspace-coordinator-journal.mjs'
 import { readWorkspaceRelocationWorkers, readWorkspaceRelocationStops, commitWorkspaceRelocationWorkers,
+  readWorkspaceRelocationProcesses, commitWorkspaceRelocationProcesses,
   prepareWorkspaceRelocationStops, completeWorkspaceRelocationStops } from './workspace-relocation-intent.mjs'
 import { sha256CanonicalJson } from '../../crabot-shared/dist/canonical-json.js'
 
@@ -24,6 +25,9 @@ export function createWorkspaceWorkerJournal(coordinator, context) {
       if (operation === 'capture') {
         const fixed = readWorkspaceRelocationWorkers(dataDir, id)
         if (!fixed || sha256CanonicalJson({ workers: fixed.workers }) !== expected) throw failure()
+      } else if (operation === 'capture_processes') {
+        const fixed = readWorkspaceRelocationProcesses(dataDir, id)
+        if (!fixed || sha256CanonicalJson({ processes: fixed.processes }) !== expected) throw failure()
       } else {
         const actual = readWorkspaceRelocationStops(dataDir, id)
         if (operation === 'prepare') {
@@ -35,7 +39,8 @@ export function createWorkspaceWorkerJournal(coordinator, context) {
       return result
     } catch { transport.close(); throw failure() }
   }
-  return Object.freeze({ capture: async workers => { await acknowledged('capture', { workers }) }, prepare: workers => acknowledged('prepare', { workers }),
+  return Object.freeze({ capture: async workers => { await acknowledged('capture', { workers }) },
+    captureProcesses: async processes => { await acknowledged('capture_processes', { processes }) }, prepare: workers => acknowledged('prepare', { workers }),
     complete: async results => { await acknowledged('complete', { results }) }, close: transport.close })
 }
 export function serveWorkspaceWorkerJournal(context) {
@@ -44,6 +49,11 @@ export function serveWorkspaceWorkerJournal(context) {
     capture(payload) {
       if (!fields(payload, ['workers'])) throw failure()
       commitWorkspaceRelocationWorkers({ ...args, workers: payload.workers })
+      return true
+    },
+    capture_processes(payload) {
+      if (!fields(payload, ['processes'])) throw failure()
+      commitWorkspaceRelocationProcesses({ ...args, processes: payload.processes })
       return true
     },
     prepare(payload) {

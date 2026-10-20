@@ -12,7 +12,7 @@ import { relocationAgentConfig as config } from './fixtures/relocation-agent-con
 
 vi.mock('../../src/core/workspace-relocation-authority.js', () => ({ verifyWorkspaceRelocationAuthority: vi.fn() }))
 
-describe.each(['relocation.json', 'relocation-workers.json'])('workspace maintenance execution admission: %s', record => {
+describe.each(['relocation.json', 'relocation-workers.json', 'relocation-worker-processes.json'])('workspace maintenance execution admission: %s', record => {
   afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs() })
 
   it('blocks messages, schedules, and Harness dispatch before metadata or ledger writes', async () => {

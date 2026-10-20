@@ -55,7 +55,7 @@ function read(ctx) {
   if (!privateControl(ctx.control)) return null
   const value = readPrivateJson(ctx.file, 65536)
   if (value === undefined) {
-    for (const file of ['relocation-workers.json', 'relocation-stop-attempt.json', 'relocation-stop-submission.json', 'relocation-modules.json', 'relocation-module-stop-attempt.json', 'relocation-module-processes', 'relocation-module-stop-submission.json', 'relocation-coordinator.json', 'relocation-coordinator-ready.json']) {
+    for (const file of ['relocation-workers.json', 'relocation-worker-processes.json', 'relocation-stop-attempt.json', 'relocation-stop-submission.json', 'relocation-modules.json', 'relocation-module-stop-attempt.json', 'relocation-module-processes', 'relocation-module-stop-submission.json', 'relocation-coordinator.json', 'relocation-coordinator-ready.json']) {
       try { fs.lstatSync(path.join(ctx.control, file)); fail() }
       catch (error) { if (error.code !== 'ENOENT') fail() }
     }
@@ -169,7 +169,7 @@ function readScope(ctx, intent) {
   if (!intent) fail()
   const value = readPrivateJson(path.join(ctx.control, 'relocation-workers.json'), scopeLimit)
   if (value === undefined) {
-    absent(ctx, ['relocation-stop-attempt.json', 'relocation-stop-submission.json', ...moduleFiles])
+    absent(ctx, ['relocation-worker-processes.json', 'relocation-stop-attempt.json', 'relocation-stop-submission.json', ...moduleFiles])
     if (sha256CanonicalJson(read(ctx)) !== sha256CanonicalJson(intent)) fail()
     return null
   }
@@ -198,7 +198,7 @@ export function commitWorkspaceRelocationWorkers({ dataDir, id, workers }) {
   const record = { schema_version: 1, intent_id: id, intent_sha256: sha256CanonicalJson(intent), workers, created_at: new Date().toISOString() }
   const verify = () => {
     if (!same(intent.source, identity(intent.source.path)) || sha256CanonicalJson(read(ctx)) !== record.intent_sha256) fail()
-    absent(ctx, ['relocation-stop-attempt.json', 'relocation-stop-submission.json', ...moduleFiles])
+    absent(ctx, ['relocation-worker-processes.json', 'relocation-stop-attempt.json', 'relocation-stop-submission.json', ...moduleFiles])
   }
   verify()
   publishPrivateJson(ctx, path.join(ctx.control, 'relocation-workers.json'), record, scopeLimit, verify)
@@ -305,6 +305,39 @@ function validProcesses(processes) {
   }
   return true
 }
+/** First pre-stop observation only; this never proves global ownership or execution exit. */
+export function readWorkspaceRelocationProcesses(dataDir, id) {
+  const { ctx, intent, scope } = stoppingContext(dataDir, id)
+  const value = readPrivateJson(path.join(ctx.control, 'relocation-worker-processes.json'), scopeLimit)
+  if (value === undefined) return null
+  if (!fields(value, ['schema_version', 'intent_id', 'intent_sha256', 'workers_sha256', 'processes', 'created_at'])
+    || value.schema_version !== 1 || value.intent_id !== id || value.intent_sha256 !== sha256CanonicalJson(intent)
+    || value.workers_sha256 !== sha256CanonicalJson(scope) || !validProcesses(value.processes) || !validDate(value.created_at)
+    || sha256CanonicalJson(readWorkspaceRelocationWorkers(dataDir, id)) !== value.workers_sha256) fail()
+  return value
+}
+export function commitWorkspaceRelocationProcesses({ dataDir, id, processes }) {
+  const { ctx, intent, scope } = stoppingContext(dataDir, id, true)
+  if (!validProcesses(processes)) fail()
+  const previous = readWorkspaceRelocationProcesses(dataDir, id)
+  if (previous) {
+    if (sha256CanonicalJson(previous.processes) !== sha256CanonicalJson(processes)) fail('WORKSPACE_RELOCATION_CONFLICT')
+    syncIntent(ctx); return previous
+  }
+  const record = { schema_version: 1, intent_id: id, intent_sha256: sha256CanonicalJson(intent),
+    workers_sha256: sha256CanonicalJson(scope), processes, created_at: new Date().toISOString() }
+  const verify = () => {
+    if (!same(intent.source, identity(intent.source.path)) || sha256CanonicalJson(readWorkspaceRelocationWorkers(dataDir, id)) !== record.workers_sha256) fail()
+    absent(ctx, ['relocation-stop-attempt.json', 'relocation-stop-submission.json',
+      'relocation-module-stop-attempt.json', 'relocation-module-processes', 'relocation-module-stop-submission.json'])
+  }
+  verify()
+  publishPrivateJson(ctx, path.join(ctx.control, 'relocation-worker-processes.json'), record, scopeLimit, verify)
+  const accepted = readWorkspaceRelocationProcesses(dataDir, id)
+  if (sha256CanonicalJson(accepted) !== sha256CanonicalJson(record)) fail()
+  return accepted
+}
+
 function validModules(modules) {
   if (!Array.isArray(modules)) return false
   let previous, instance
