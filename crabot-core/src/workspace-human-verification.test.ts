@@ -1053,6 +1053,7 @@ describe('MM submits one fixed workspace stop sequence', () => {
       const denied = await fetch(`http://127.0.0.1:${f.port}/api/friends`, { method: 'POST', headers, body: '{}' })
       expect(denied.status).toBe(503); expect(await denied.json()).toMatchObject({ code: 'WORKSPACE_MAINTENANCE' })
       const processStops = records.readWorkspaceRelocationProcessStops(f.data, f.params.intent_id)
+      expect(records.readWorkspaceRelocationExecutionExit(f.data, f.params.intent_id)?.intent_id).toBe(f.params.intent_id)
       expect(processStops.completion?.type).toBe('known_scope_exited')
       expect(processStops.observations.at(-1).processes.length).toBeGreaterThan(0)
       expect(child!.connected).toBe(true); expect(f.manager.workspaceCoordinatorGrant).toBeUndefined()
@@ -1080,6 +1081,7 @@ describe('MM submits one fixed workspace stop sequence', () => {
       expect(initial.processes.some((item: any) => item.pid === witness.process.pid)).toBe(false)
       expect(stopped.observations.at(-1).processes).toContainEqual(expect.objectContaining({ pid: witness.process.pid, started: witness.process.started, owner: witness.process.owner }))
       expect(stopped.completion.type).toBe('known_scope_exited')
+      expect(records.readWorkspaceRelocationExecutionExit(f.data, f.params.intent_id)?.intent_id).toBe(f.params.intent_id)
       expect(f.manager.processes.has('crabot-agent')).toBe(false); expect(f.manager.processes.get('admin-web').exitCode).toBeNull()
       expect(await fs.readFile(path.join(f.data, 'project/orphan.txt'), 'utf8')).toContain('orphan active')
       expect(await fs.readFile(ledger)).toEqual(before)
@@ -1090,7 +1092,7 @@ describe('MM submits one fixed workspace stop sequence', () => {
       await f.manager.closeWorkspaceCoordinatorChannel(child); locks.releaseCliLock(lock); await f.cleanup()
     }
   }, timeout)
-  it.each(['prepare', 'new descendant observation'])('retains an actual process journal with an uncertain %s reply before further stops', async phase => {
+  it.each(['prepare', 'new descendant observation', 'execution exit'])('retains an actual process journal with an uncertain %s reply before further stops', async phase => {
     const orphan = phase === 'new descendant observation'
     const f = await fixture({ actualAgent: true, processLifetimeMs: 120000, backgroundShell: orphan, orphanDuringStop: orphan })
     const locks = require('../../scripts/lib/cli-lock.mjs'), records = require('../../scripts/lib/workspace-relocation-intent.mjs')
@@ -1103,7 +1105,8 @@ describe('MM submits one fixed workspace stop sequence', () => {
         const message = args[0]
         if (event === 'message' && message?.kind === 'workspace_process_journal_reply') {
           if (message.operation === 'observe') observations++
-          if (phase === 'prepare' && message.operation === 'prepare' || orphan && message.operation === 'observe' && observations === 2) {
+          if (phase === 'prepare' && message.operation === 'prepare' || orphan && message.operation === 'observe' && observations === 2
+            || phase === 'execution exit' && message.operation === 'execution_exit') {
             return emit(event, { ...message, ok: false })
           }
         }
@@ -1118,11 +1121,22 @@ describe('MM submits one fixed workspace stop sequence', () => {
       expect(f.manager.submitWorkspaceRelocationStops(f.params, 'fixture-human')).toBe(first)
       await expect(first).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
       const stored = records.readWorkspaceRelocationProcessStops(f.data, f.params.intent_id)
-      expect(stored.attempt).not.toBeNull(); expect(stored.completion).toBeNull()
-      expect(modules).not.toHaveBeenCalled(); expect(signals).not.toHaveBeenCalled()
-      expect(f.manager.processes.get('admin-web').exitCode).toBeNull(); expect(f.manager.processes.get('crabot-agent').exitCode).toBeNull()
-      if (phase === 'prepare') expect(stop).not.toHaveBeenCalled()
-      else expect(stored.observations.length).toBeGreaterThan(1)
+      expect(stored.attempt).not.toBeNull()
+      if (phase === 'execution exit') {
+        expect(stored.completion.type).toBe('known_scope_exited')
+        expect(records.readWorkspaceRelocationExecutionExit(f.data, f.params.intent_id)?.intent_id).toBe(f.params.intent_id)
+        expect(modules).toHaveBeenCalledOnce(); expect(stop).toHaveBeenCalledOnce()
+        expect(f.manager.processes.has('crabot-agent')).toBe(false)
+        const count = signals.mock.calls.length
+        await expect(first).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' }); expect(signals.mock.calls).toHaveLength(count)
+      } else {
+        expect(stored.completion).toBeNull(); expect(records.readWorkspaceRelocationExecutionExit(f.data, f.params.intent_id)).toBeNull()
+        expect(modules).not.toHaveBeenCalled(); expect(signals).not.toHaveBeenCalled()
+        expect(f.manager.processes.get('crabot-agent').exitCode).toBeNull()
+        if (phase === 'prepare') expect(stop).not.toHaveBeenCalled()
+        else expect(stored.observations.length).toBeGreaterThan(1)
+      }
+      expect(f.manager.processes.get('admin-web').exitCode).toBeNull()
       await expect(fs.stat(path.join(f.root, 'relocated'))).rejects.toMatchObject({ code: 'ENOENT' })
     } finally {
       for (const item of records.readWorkspaceRelocationProcessStops(f.data, f.params.intent_id).observations.at(-1)?.processes ?? []) native.terminateKnownProcess(item)

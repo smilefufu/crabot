@@ -42,7 +42,7 @@ defaults:
 jobs:
   runtime:
     name: Desktop foundation ${{ matrix.target }}
-    timeout-minutes: ${{ matrix.target == 'darwin-x64' && 135 || 90 }}
+    timeout-minutes: ${{ (matrix.target == 'darwin-x64' || matrix.target == 'win32-x64') && 135 || 90 }}
     strategy:
       fail-fast: false
       matrix:

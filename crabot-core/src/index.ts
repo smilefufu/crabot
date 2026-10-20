@@ -1344,7 +1344,7 @@ export class ModuleManager {
     const pending = Promise.resolve().then(async (): Promise<WorkspaceStopSequenceResult> => {
       let child: ChildProcess | undefined
       let journal: (WorkspaceModuleStopJournal & { close(): void }) | undefined
-      let processJournal: { prepare(): Promise<'dispatch' | 'observe'>; observe(processes: ReadonlyArray<WorkerProcessIdentity>): Promise<void>; complete(): Promise<void>; close(): void } | undefined
+      let processJournal: { prepare(): Promise<'dispatch' | 'observe'>; observe(processes: ReadonlyArray<WorkerProcessIdentity>): Promise<void>; complete(): Promise<void>; confirmExecutionExit(): Promise<void>; close(): void } | undefined
       let active = true
       try {
         child = await this.launchWorkspaceRelocationCoordinator(request, bearer)
@@ -1390,6 +1390,23 @@ export class ModuleManager {
         }, { ...native, terminateKnownProcess: (target: WorkerProcessIdentity) => { verify(); return native.terminateKnownProcess(target) } })
         if (!submissions) throw failure()
         await processJournal!.complete(); verify()
+        const assertModulesStopped = (): void => {
+          verify()
+          if (JSON.stringify([...this.modules.keys()].filter(id => id !== 'admin-web').sort()) !== JSON.stringify(modules.map(item => item.module_id))
+            || [...this.processes.keys()].some(id => id !== 'admin-web') || [...this.lifecycleQueues.keys()].some(id => id !== 'admin-web')) throw failure()
+          for (const item of modules) {
+            const runtime = this.modules.get(item.module_id)
+            if (!runtime || runtime.port !== item.module_port || runtime.pid !== undefined || runtime.status === 'running' || runtime.status === 'starting') throw failure()
+          }
+        }
+        const verifyStoppedModules = async (): Promise<void> => {
+          assertModulesStopped()
+          if ((await this.runtimeRegistry.listRecords()).some(record => record.module_id !== 'admin-web')) throw failure()
+          assertModulesStopped()
+        }
+        await verifyStoppedModules()
+        await processJournal!.confirmExecutionExit()
+        await verifyStoppedModules()
         if (sha256CanonicalJson(records.readWorkspaceRelocationModuleStops(this.dataDir, request.intent_id).submission?.results) !== sha256CanonicalJson(submissions.moduleSubmission.results)
           || !records.readWorkspaceRelocationProcessStops(this.dataDir, request.intent_id).completion) throw failure()
         return Object.freeze({ coordinator: child, ...submissions })

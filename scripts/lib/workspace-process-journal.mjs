@@ -1,6 +1,6 @@
 // CLI/background known-scope policy; never a Worker closure or global-exit permit.
 import { createWorkspaceJournalClient, serveWorkspaceJournal, journalFields as fields, workspaceJournalFailure as failure } from './workspace-coordinator-journal.mjs'
-import { readWorkspaceRelocationProcessStops, prepareWorkspaceRelocationProcessStops,
+import { readWorkspaceRelocationExecutionExit, commitWorkspaceRelocationExecutionExit, readWorkspaceRelocationProcessStops, prepareWorkspaceRelocationProcessStops,
   observeWorkspaceRelocationProcesses, completeWorkspaceRelocationProcessStops } from './workspace-relocation-intent.mjs'
 import { sha256CanonicalJson } from '../../crabot-shared/dist/canonical-json.js'
 
@@ -13,6 +13,8 @@ export function createWorkspaceProcessJournal(coordinator, context) {
       const actual = readWorkspaceRelocationProcessStops(dataDir, id)
       if (operation === 'prepare') {
         if (!actual.attempt || !['dispatch', 'observe'].includes(result) || hadAttempt && result === 'dispatch') throw failure()
+      } else if (operation === 'execution_exit') {
+        if (result !== true || !readWorkspaceRelocationExecutionExit(dataDir, id)) throw failure()
       } else if (result !== true || (operation === 'observe'
         ? sha256CanonicalJson({ processes: actual.observations.at(-1)?.processes }) !== expected : !actual.completion)) throw failure()
       transport.verify()
@@ -21,7 +23,8 @@ export function createWorkspaceProcessJournal(coordinator, context) {
   }
   return Object.freeze({ prepare: () => acknowledged('prepare', {}),
     observe: async processes => { await acknowledged('observe', { processes }) },
-    complete: async () => { await acknowledged('complete', {}) }, close: transport.close })
+    complete: async () => { await acknowledged('complete', {}) },
+    confirmExecutionExit: async () => { await acknowledged('execution_exit', {}) }, close: transport.close })
 }
 export function serveWorkspaceProcessJournal(context) {
   const args = { dataDir: context.dataDir, id: context.id }
@@ -33,6 +36,10 @@ export function serveWorkspaceProcessJournal(context) {
     observe(payload) {
       if (!fields(payload, ['processes'])) throw failure()
       observeWorkspaceRelocationProcesses({ ...args, processes: payload.processes }); return true
+    },
+    execution_exit(payload) {
+      if (!fields(payload, [])) throw failure()
+      commitWorkspaceRelocationExecutionExit(args); return true
     },
     complete(payload) {
       if (!fields(payload, [])) throw failure()

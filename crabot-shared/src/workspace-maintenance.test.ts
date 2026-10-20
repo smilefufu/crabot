@@ -88,7 +88,7 @@ test('the independent bootstrap guard matches Shared on absent, malformed, and r
 })
 
 
-for (const record of ['relocation-workers.json', 'relocation-worker-processes.json', 'relocation-stop-attempt.json', 'relocation-stop-submission.json', 'relocation-modules.json', 'relocation-module-stop-attempt.json', 'relocation-module-processes', 'relocation-module-stop-submission.json', 'relocation-coordinator.json', 'relocation-coordinator-ready.json', 'relocation-process-stop.jsonl'])
+for (const record of ['relocation-workers.json', 'relocation-worker-processes.json', 'relocation-stop-attempt.json', 'relocation-stop-submission.json', 'relocation-modules.json', 'relocation-module-stop-attempt.json', 'relocation-module-processes', 'relocation-module-stop-submission.json', 'relocation-coordinator.json', 'relocation-coordinator-ready.json', 'relocation-process-stop.jsonl', 'relocation-execution-exit.json'])
 for (const kind of ['file', 'directory', 'link']) test('orphaned evidence keeps both guards closed: ' + record + '/' + kind, async t => {
   const f = await fixture(t), scope = path.join(f.control, record)
   const bootstrap = createRequire(import.meta.url)('../../scripts/lib/workspace-maintenance.cjs')
