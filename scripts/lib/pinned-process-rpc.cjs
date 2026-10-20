@@ -6,13 +6,13 @@ const { randomUUID } = require('node:crypto')
 const identity = require('./process-identity.cjs')
 const unavailable = () => Object.assign(new Error('固定进程连接无法继续核验，未重试请求。'), { code: 'CRABOT_PROCESS_RPC' })
 
-async function openPinnedProcessRpc(expected, port, { signal, timeoutMs = 5000 } = {}) {
+async function openPinnedProcessRpc(expected, port, { signal, timeoutMs = 5000, source = 'module-manager' } = {}) {
   expected = Object.freeze({ ...expected })
   let socket, closed = false, used = false, pending = false
   const agent = new Agent({ keepAlive: true, maxSockets: 1, maxFreeSockets: 1 })
   const deadline = () => AbortSignal.any([AbortSignal.timeout(timeoutMs), ...(signal ? [signal] : [])])
   function verify() {
-    if (closed || !Number.isInteger(port) || port < 1 || port > 65535
+    if (closed || typeof source !== 'string' || !source || source.includes('\0') || !Number.isInteger(port) || port < 1 || port > 65535
       || !Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 2147483647
       || expected.owner !== identity.inspectProcess(process.pid).owner
       || !identity.sameProcess(expected, identity.inspectProcess(expected.pid))
@@ -38,7 +38,7 @@ async function openPinnedProcessRpc(expected, port, { signal, timeoutMs = 5000 }
       if (pending || socket.destroyed || typeof method !== 'string' || !/^[a-z][a-z0-9_]*$/.test(method)) throw unavailable()
       if (authorizationBearer !== undefined && (typeof authorizationBearer !== 'string' || !authorizationBearer || /[\r\n]/.test(authorizationBearer))) throw unavailable()
       pending = true
-      const id = randomUUID(), text = JSON.stringify({ id, source: 'module-manager', method, params, timestamp: new Date().toISOString() })
+      const id = randomUUID(), text = JSON.stringify({ id, source, method, params, timestamp: new Date().toISOString() })
       const result = await new Promise((resolve, reject) => {
         const req = request({ host: '127.0.0.1', port, path: '/' + method, method: 'POST', agent,
           headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(text),

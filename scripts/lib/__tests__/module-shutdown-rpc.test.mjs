@@ -127,3 +127,13 @@ for (const bearer of ['', 'bad\r\nheader']) test('invalid request bearer is refu
   await assert.rejects(rpc.call('verify_workspace_relocation_request', {}, { authorizationBearer: bearer }))
   assert.equal(f.calls.length, 1)
 })
+
+test('the neutral pinned connection uses its fixed diagnostic source without changing params', async t => {
+  const f = await fixture(t), options = { source: 'crabot-agent' }
+  const opened = transport.openPinnedProcessRpc(f.process, f.port, options)
+  options.source = 'changed-after-open'
+  const rpc = await opened; t.after(() => rpc.close())
+  await rpc.call('verify_workspace_relocation_coordinator', { action: 'capture_workers' })
+  assert.equal(f.calls[0].body.source, 'crabot-agent')
+  assert.deepEqual(f.calls[0].body.params, { action: 'capture_workers' })
+})
