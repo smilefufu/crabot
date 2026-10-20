@@ -11,7 +11,12 @@ export function workspaceMaintenancePending(dataRoot: string): boolean {
     return (error as NodeJS.ErrnoException).code !== 'ENOENT'
   }
   // Any known activity entry blocks, including an orphaned fixed set or dangling link.
-  for (const file of ['relocation.json', 'relocation-workers.json', 'relocation-stop-attempt.json', 'relocation-stop-submission.json']) {
+  for (const file of [
+    'relocation.json', 'relocation-workers.json',
+    'relocation-stop-attempt.json', 'relocation-stop-submission.json',
+    'relocation-modules.json', 'relocation-module-stop-attempt.json',
+    'relocation-module-processes', 'relocation-module-stop-submission.json',
+  ]) {
     try { lstatSync(path.join(control, file)); return true }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return true }
   }

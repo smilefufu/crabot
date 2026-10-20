@@ -56,7 +56,7 @@ function read(ctx) {
   if (!privateControl(ctx.control)) return null
   const value = readPrivateJson(ctx.file, 65536)
   if (value === undefined) {
-    for (const file of ['relocation-workers.json', 'relocation-stop-attempt.json', 'relocation-stop-submission.json']) {
+    for (const file of ['relocation-workers.json', 'relocation-stop-attempt.json', 'relocation-stop-submission.json', 'relocation-modules.json', 'relocation-module-stop-attempt.json', 'relocation-module-processes', 'relocation-module-stop-submission.json']) {
       try { fs.lstatSync(path.join(ctx.control, file)); fail() }
       catch (error) { if (error.code !== 'ENOENT') fail() }
     }
@@ -281,6 +281,217 @@ export function completeWorkspaceRelocationStops({ dataDir, id, results }) {
     if (sha256CanonicalJson(current.attempt) !== record.attempt_sha256 || current.submission) fail()
   })
   const accepted = readWorkspaceRelocationStops(dataDir, id).submission
+  if (sha256CanonicalJson(accepted) !== sha256CanonicalJson(record)) fail()
+  return accepted
+}
+
+const moduleFiles = ['relocation-modules.json', 'relocation-module-stop-attempt.json', 'relocation-module-processes', 'relocation-module-stop-submission.json']
+const processKey = item => JSON.stringify([item.pid, item.started, item.owner])
+function validProcesses(processes) {
+  if (!Array.isArray(processes) || processes.length > 32768) return false
+  const owner = native.inspectProcess(process.pid).owner, seen = new Set()
+  let previous
+  for (const item of processes) {
+    if (!fields(item, ['pid', 'parent', 'started', 'owner', 'executable'])
+      || !Number.isInteger(item.pid) || item.pid < 1 || item.pid > 2147483647 || item.pid === process.pid
+      || !Number.isInteger(item.parent) || item.parent < 0 || item.parent > 2147483647
+      || !nonempty(item.started) || item.owner !== owner || !nonempty(item.executable) || seen.has(processKey(item))
+      || previous && (item.pid < previous.pid || item.pid === previous.pid && item.started <= previous.started)) return false
+    seen.add(processKey(item)); previous = item
+  }
+  return true
+}
+function validModules(modules) {
+  if (!Array.isArray(modules)) return false
+  let previous, instance
+  const pids = new Set(), runtimes = new Set()
+  for (const item of modules) {
+    if (!fields(item, ['instance_id', 'module_id', 'module_port', 'processes'], ['runtime_id'])
+      || !nonempty(item.instance_id) || instance !== undefined && instance !== item.instance_id
+      || !nonempty(item.module_id) || item.module_id === 'admin-web' || previous !== undefined && item.module_id <= previous
+      || !Number.isInteger(item.module_port) || item.module_port < 1 || item.module_port > 65535 || !validProcesses(item.processes)
+      || Object.hasOwn(item, 'runtime_id') && (!nonempty(item.runtime_id) || runtimes.has(item.runtime_id))
+      || Boolean(item.runtime_id) !== Boolean(item.processes.length)) return false
+    for (const process of item.processes) { if (pids.has(process.pid)) return false; pids.add(process.pid) }
+    if (item.runtime_id) runtimes.add(item.runtime_id)
+    previous = item.module_id; instance = item.instance_id
+  }
+  return true
+}
+function absent(ctx, names) {
+  for (const name of names) {
+    try { fs.lstatSync(path.join(ctx.control, name)); fail() }
+    catch (error) { if (error.code !== 'ENOENT') fail() }
+  }
+}
+function readModules(ctx, intent, workers) {
+  const value = readPrivateJson(path.join(ctx.control, moduleFiles[0]), scopeLimit)
+  if (value === undefined) { absent(ctx, moduleFiles.slice(1)); return null }
+  if (!fields(value, ['schema_version', 'intent_id', 'intent_sha256', 'workers_sha256', 'modules', 'created_at']) || value.schema_version !== 1
+    || value.intent_id !== intent.id || value.intent_sha256 !== sha256CanonicalJson(intent) || value.workers_sha256 !== sha256CanonicalJson(workers)
+    || !validModules(value.modules) || !validDate(value.created_at)) fail()
+  return value
+}
+export function readWorkspaceRelocationModules(dataDir, id) {
+  const { ctx, intent, scope } = stoppingContext(dataDir, id)
+  return readModules(ctx, intent, scope)
+}
+export function commitWorkspaceRelocationModules({ dataDir, id, modules }) {
+  const { ctx, intent, scope } = stoppingContext(dataDir, id, true)
+  if (!validModules(modules)) fail()
+  const previous = readModules(ctx, intent, scope)
+  if (previous) {
+    if (sha256CanonicalJson(previous.modules) !== sha256CanonicalJson(modules)) fail('WORKSPACE_RELOCATION_CONFLICT')
+    syncIntent(ctx); return previous
+  }
+  const record = { schema_version: 1, intent_id: id, intent_sha256: sha256CanonicalJson(intent), workers_sha256: sha256CanonicalJson(scope), modules, created_at: new Date().toISOString() }
+  publishPrivateJson(ctx, path.join(ctx.control, moduleFiles[0]), record, scopeLimit, () => {
+    if (!same(intent.source, identity(intent.source.path)) || sha256CanonicalJson(readScope(ctx, read(ctx))) !== record.workers_sha256
+      || readModules(ctx, intent, scope)) fail()
+  })
+  const accepted = readWorkspaceRelocationModules(dataDir, id)
+  if (sha256CanonicalJson(accepted) !== sha256CanonicalJson(record)) fail()
+  return accepted
+}
+function moduleStoppingContext(dataDir, id, locked = false) {
+  const result = stoppingContext(dataDir, id, locked), modules = readModules(result.ctx, result.intent, result.scope)
+  if (!modules) fail()
+  return { ...result, modules }
+}
+function readModuleAttempt(ctx, modules) {
+  const value = readPrivateJson(path.join(ctx.control, moduleFiles[1]), 65536)
+  if (value === undefined) { absent(ctx, moduleFiles.slice(2)); return null }
+  if (!fields(value, ['schema_version', 'intent_id', 'modules_sha256', 'processes_root', 'created_at']) || value.schema_version !== 1
+    || value.intent_id !== modules.intent_id || value.modules_sha256 !== sha256CanonicalJson(modules) || !validDate(value.created_at)
+    || !validIdentity(value.processes_root) || value.processes_root.path !== path.join(ctx.control, moduleFiles[2])
+    || !privateControl(value.processes_root.path) || !same(value.processes_root, identity(value.processes_root.path))) fail()
+  return value
+}
+function extendsProcesses(previous, current) {
+  const keys = new Set(current.map(item => sha256CanonicalJson(item)))
+  return previous.every(item => keys.has(sha256CanonicalJson(item)))
+}
+function readModuleObservations(ctx, attempt, modules) {
+  if (!attempt) return []
+  const directory = attempt.processes_root.path, entries = fs.readdirSync(directory, { withFileTypes: true }).sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0)
+  if (entries.length > 32768) fail()
+  const observations = [], latest = new Map(modules.modules.map(item => [item.module_id, item.processes]))
+  const owners = new Map(modules.modules.flatMap(item => item.processes.map(process => [processKey(process), item.module_id])))
+  let size = 0, previous = null
+  for (const [index, entry] of entries.entries()) {
+    if (!entry.isFile() || entry.name !== String(index).padStart(8, '0') + '.json') fail()
+    const file = path.join(directory, entry.name)
+    size += fs.lstatSync(file).size
+    if (size > scopeLimit) fail()
+    const value = readPrivateJson(file, scopeLimit)
+    if (!value || !fields(value, ['schema_version', 'intent_id', 'attempt_sha256', 'sequence', 'module_id', 'previous_sha256', 'processes', 'created_at'])
+      || value.schema_version !== 1 || value.intent_id !== attempt.intent_id || value.attempt_sha256 !== sha256CanonicalJson(attempt)
+      || value.sequence !== index || value.previous_sha256 !== previous || !validDate(value.created_at) || !validProcesses(value.processes)
+      || !modules.modules.some(item => item.module_id === value.module_id && item.runtime_id)
+      || !extendsProcesses(latest.get(value.module_id), value.processes)) fail()
+    for (const process of value.processes) {
+      const owner = owners.get(processKey(process))
+      if (owner !== undefined && owner !== value.module_id) fail()
+      owners.set(processKey(process), value.module_id)
+    }
+    latest.set(value.module_id, value.processes); observations.push(value); previous = sha256CanonicalJson(value)
+  }
+  if (!same(attempt.processes_root, identity(directory)) || !privateControl(directory)) fail()
+  return observations
+}
+function moduleStopResults(modules, results, observations) {
+  if (!Array.isArray(results) || results.length !== modules.modules.length) fail()
+  const sorted = Array.from(results).sort((a, b) => a.module_id < b.module_id ? -1 : a.module_id > b.module_id ? 1 : 0)
+  for (const [index, item] of sorted.entries()) {
+    const target = modules.modules[index]
+    if (!fields(item, ['module_id', 'shutdown', 'status'], ['runtime_id']) || item.module_id !== target.module_id || item.runtime_id !== target.runtime_id
+      || !['not_submitted', 'submitted', 'unknown'].includes(item.shutdown) || !['inactive', 'known_scope_exited', 'unknown'].includes(item.status)
+      || !target.runtime_id && item.shutdown !== 'not_submitted'
+      || item.status === 'inactive' && (target.runtime_id || target.processes.length)
+      || item.status === 'known_scope_exited' && (!target.runtime_id || !observations.some(value => value.module_id === item.module_id))) fail()
+  }
+  return sorted
+}
+function readModuleSubmission(ctx, attempt, modules, observations) {
+  const value = readPrivateJson(path.join(ctx.control, moduleFiles[3]), scopeLimit)
+  if (value === undefined) return null
+  if (!attempt || !fields(value, ['schema_version', 'intent_id', 'attempt_sha256', 'observations_sha256', 'results', 'created_at'])
+    || value.schema_version !== 1 || value.intent_id !== attempt.intent_id || value.attempt_sha256 !== sha256CanonicalJson(attempt) || !validDate(value.created_at)) fail()
+  const prefix = value.observations_sha256 === null ? [] : observations.slice(0, observations.findIndex(item => sha256CanonicalJson(item) === value.observations_sha256) + 1)
+  if (value.observations_sha256 !== null && !prefix.length
+    || sha256CanonicalJson(value.results) !== sha256CanonicalJson(moduleStopResults(modules, value.results, prefix))) fail()
+  return value
+}
+export function readWorkspaceRelocationModuleStops(dataDir, id) {
+  const { ctx, modules } = moduleStoppingContext(dataDir, id), attempt = readModuleAttempt(ctx, modules)
+  const observations = readModuleObservations(ctx, attempt, modules), submission = readModuleSubmission(ctx, attempt, modules, observations)
+  if (sha256CanonicalJson(readWorkspaceRelocationModules(dataDir, id)) !== sha256CanonicalJson(modules)) fail()
+  return { attempt, observations, submission }
+}
+export function prepareWorkspaceRelocationModuleStops({ dataDir, id, modules: expected }) {
+  const { ctx, intent, modules } = moduleStoppingContext(dataDir, id, true)
+  if (sha256CanonicalJson(expected) !== sha256CanonicalJson(modules.modules)) fail()
+  const previous = readWorkspaceRelocationModuleStops(dataDir, id)
+  if (previous.attempt) { syncDirectory(previous.attempt.processes_root.path); syncIntent(ctx); return { dispatch: 'observe', attempt: previous.attempt } }
+  const directory = path.join(ctx.control, moduleFiles[2])
+  if (process.platform === 'win32') native.createPrivateDirectory(directory)
+  else fs.mkdirSync(directory, { mode: 0o700 })
+  syncDirectory(directory)
+  const record = { schema_version: 1, intent_id: id, modules_sha256: sha256CanonicalJson(modules), processes_root: identity(directory), created_at: new Date().toISOString() }
+  publishPrivateJson(ctx, path.join(ctx.control, moduleFiles[1]), record, 65536, () => {
+    if (!same(intent.source, identity(intent.source.path)) || !same(record.processes_root, identity(directory)) || !privateControl(directory)
+      || sha256CanonicalJson(readWorkspaceRelocationModules(dataDir, id)) !== record.modules_sha256
+      || readPrivateJson(path.join(ctx.control, moduleFiles[1]), 65536) !== undefined) fail()
+  })
+  const accepted = readWorkspaceRelocationModuleStops(dataDir, id)
+  if (sha256CanonicalJson(accepted.attempt) !== sha256CanonicalJson(record)) fail()
+  return { dispatch: 'dispatch', attempt: accepted.attempt }
+}
+export function observeWorkspaceRelocationModuleProcesses({ dataDir, id, moduleId, processes }) {
+  const { ctx, intent, modules } = moduleStoppingContext(dataDir, id, true), previous = readWorkspaceRelocationModuleStops(dataDir, id)
+  const target = modules.modules.find(item => item.module_id === moduleId)
+  if (!previous.attempt || !target?.runtime_id || !validProcesses(processes)) fail()
+  const latest = previous.observations.filter(item => item.module_id === moduleId).at(-1)
+  if (!extendsProcesses(latest?.processes ?? target.processes, processes)) fail()
+  if (latest && sha256CanonicalJson(latest.processes) === sha256CanonicalJson(processes)) {
+    syncDirectory(previous.attempt.processes_root.path); syncIntent(ctx); return latest
+  }
+  const otherProcesses = [
+    ...modules.modules.filter(item => item.module_id !== moduleId).flatMap(item => item.processes),
+    ...previous.observations.filter(item => item.module_id !== moduleId).flatMap(item => item.processes),
+  ]
+  const otherKeys = new Set(otherProcesses.map(processKey))
+  if (processes.some(item => otherKeys.has(processKey(item))) || previous.observations.length >= 32768) fail()
+  const record = { schema_version: 1, intent_id: id, attempt_sha256: sha256CanonicalJson(previous.attempt), sequence: previous.observations.length,
+    module_id: moduleId, previous_sha256: previous.observations.length ? sha256CanonicalJson(previous.observations.at(-1)) : null,
+    processes, created_at: new Date().toISOString() }
+  const directory = previous.attempt.processes_root.path
+  const bytes = fs.readdirSync(directory).reduce((sum, name) => sum + fs.lstatSync(path.join(directory, name)).size, 0)
+  if (bytes + Buffer.byteLength(JSON.stringify(record) + '\n') > scopeLimit) fail()
+  const file = path.join(previous.attempt.processes_root.path, String(record.sequence).padStart(8, '0') + '.json')
+  publishPrivateJson(ctx, file, record, scopeLimit, () => {
+    const current = readWorkspaceRelocationModuleStops(dataDir, id)
+    if (!same(intent.source, identity(intent.source.path)) || sha256CanonicalJson(current) !== sha256CanonicalJson(previous)) fail()
+  })
+  syncDirectory(previous.attempt.processes_root.path); syncIntent(ctx)
+  const accepted = readWorkspaceRelocationModuleStops(dataDir, id).observations.at(-1)
+  if (sha256CanonicalJson(accepted) !== sha256CanonicalJson(record)) fail()
+  return accepted
+}
+export function completeWorkspaceRelocationModuleStops({ dataDir, id, results }) {
+  const { ctx, intent, modules } = moduleStoppingContext(dataDir, id, true), previous = readWorkspaceRelocationModuleStops(dataDir, id)
+  if (!previous.attempt) fail()
+  const canonical = moduleStopResults(modules, results, previous.observations)
+  if (previous.submission) {
+    if (sha256CanonicalJson(previous.submission.results) !== sha256CanonicalJson(canonical)) fail('WORKSPACE_RELOCATION_CONFLICT')
+    syncIntent(ctx); return previous.submission
+  }
+  const record = { schema_version: 1, intent_id: id, attempt_sha256: sha256CanonicalJson(previous.attempt),
+    observations_sha256: previous.observations.length ? sha256CanonicalJson(previous.observations.at(-1)) : null, results: canonical, created_at: new Date().toISOString() }
+  publishPrivateJson(ctx, path.join(ctx.control, moduleFiles[3]), record, scopeLimit, () => {
+    if (!same(intent.source, identity(intent.source.path)) || sha256CanonicalJson(readWorkspaceRelocationModuleStops(dataDir, id)) !== sha256CanonicalJson(previous)) fail()
+  })
+  const accepted = readWorkspaceRelocationModuleStops(dataDir, id).submission
   if (sha256CanonicalJson(accepted) !== sha256CanonicalJson(record)) fail()
   return accepted
 }

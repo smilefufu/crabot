@@ -8,7 +8,12 @@ function workspaceMaintenancePending(dataRoot) {
     const parent = lstatSync(control)
     if (!parent.isDirectory() || parent.isSymbolicLink()) return true
   } catch (error) { return error.code !== 'ENOENT' }
-  for (const file of ['relocation.json', 'relocation-workers.json', 'relocation-stop-attempt.json', 'relocation-stop-submission.json']) {
+  for (const file of [
+    'relocation.json', 'relocation-workers.json',
+    'relocation-stop-attempt.json', 'relocation-stop-submission.json',
+    'relocation-modules.json', 'relocation-module-stop-attempt.json',
+    'relocation-module-processes', 'relocation-module-stop-submission.json',
+  ]) {
     try { lstatSync(path.join(control, file)); return true }
     catch (error) { if (error.code !== 'ENOENT') return true }
   }

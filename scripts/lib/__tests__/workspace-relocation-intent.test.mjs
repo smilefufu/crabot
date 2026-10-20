@@ -13,11 +13,11 @@ import { beginVersionMaintenance } from '../version-maintenance.mjs'
 import { writeCoreRelease } from '../core-release.mjs'
 import { WorkspaceCatalog } from '../../../crabot-shared/dist/workspace-catalog.js'
 import { assertWorkspaceExecutionAllowed } from '../../../crabot-shared/dist/workspace-maintenance.js'
-import { beginWorkspaceRelocationIntent, readWorkspaceRelocationIntent, commitWorkspaceRelocationWorkers, readWorkspaceRelocationWorkers, prepareWorkspaceRelocationStops, completeWorkspaceRelocationStops, readWorkspaceRelocationStops } from '../workspace-relocation-intent.mjs'
+import { commitWorkspaceRelocationModules, readWorkspaceRelocationModules, prepareWorkspaceRelocationModuleStops, observeWorkspaceRelocationModuleProcesses, completeWorkspaceRelocationModuleStops, readWorkspaceRelocationModuleStops, beginWorkspaceRelocationIntent, readWorkspaceRelocationIntent, commitWorkspaceRelocationWorkers, readWorkspaceRelocationWorkers, prepareWorkspaceRelocationStops, completeWorkspaceRelocationStops, readWorkspaceRelocationStops } from '../workspace-relocation-intent.mjs'
 
-async function fixture(t) {
+async function fixture(t, beforeCleanup = () => {}) {
   const root = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'crabot-relocation-intent-中文 space-')))
-  t.after(() => fs.rm(root, { recursive: true, force: true }))
+  t.after(async () => { await beforeCleanup(); await fs.rm(root, { recursive: true, force: true }) })
   const data = management.ensurePrivateDataRoot(path.join(root, 'data'))
   const catalog = new WorkspaceCatalog({ dataRoot: data, files: native })
   await catalog.initialize()
@@ -480,7 +480,7 @@ for (const change of ['missing', 'different']) test('fixed-set publication canno
 })
 
 
-for (const file of ['relocation-stop-attempt.json', 'relocation-stop-submission.json']) test('orphaned stop evidence keeps all execution entry points fenced: ' + file, async t => {
+for (const file of ['relocation-stop-attempt.json', 'relocation-stop-submission.json', 'relocation-modules.json', 'relocation-module-stop-attempt.json', 'relocation-module-processes', 'relocation-module-stop-submission.json']) test('orphaned stop evidence keeps all execution entry points fenced: ' + file, async t => {
   const f = await fixture(t)
   await fs.writeFile(path.join(f.data, 'workspace-control', file), '{}', { mode: 0o600 })
   assertWorkspaceStillProtected(f.data)
@@ -611,4 +611,168 @@ test('a published stop receipt survives an interrupted directory flush and keeps
     assert.deepEqual(completeWorkspaceRelocationStops({ dataDir: f.data, id: f.input.id, results: submissionResults(workers) }), stored)
     assertWorkspaceStillProtected(f.data)
   } finally { t.mock.restoreAll(); releaseCliLock(lock) }
+})
+
+
+function moduleSet() {
+  const self = native.inspectProcess(process.pid)
+  return [{ instance_id: 'fixture-instance', module_id: 'fixture-memory', module_port: 19911, runtime_id: 'fixture-runtime',
+    processes: [{ pid: 881100, parent: process.pid, started: '100', owner: self.owner, executable: self.executable }] },
+    { instance_id: 'fixture-instance', module_id: 'stopped-channel', module_port: 19912, processes: [] }]
+}
+async function moduleFixture(t) {
+  let lock
+  const f = await fixture(t, () => releaseCliLock(lock))
+  lock = await acquireCliLock(f.data, 'workspace-relocation')
+  await beginWorkspaceRelocationIntent(f.input)
+  commitWorkspaceRelocationWorkers({ dataDir: f.data, id: f.input.id, workers: [] })
+  const options = { dataDir: f.data, id: f.input.id }, modules = moduleSet()
+  return { ...f, lock, options, modules }
+}
+function moduleResults(modules) {
+  return modules.map(item => ({ module_id: item.module_id, ...(item.runtime_id ? { runtime_id: item.runtime_id } : {}),
+    shutdown: item.runtime_id ? 'submitted' : 'not_submitted', status: item.runtime_id ? 'known_scope_exited' : 'inactive' }))
+}
+test('module scope, attempt, monotonic observations and result stay bound without replacing first evidence', async t => {
+  const f = await moduleFixture(t)
+  const record = commitWorkspaceRelocationModules({ ...f.options, modules: f.modules })
+  assert.deepEqual(readWorkspaceRelocationModules(f.data, f.input.id), record)
+  assert.deepEqual(commitWorkspaceRelocationModules({ ...f.options, modules: f.modules }), record)
+  assert.equal(prepareWorkspaceRelocationModuleStops({ ...f.options, modules: f.modules }).dispatch, 'dispatch')
+  const first = observeWorkspaceRelocationModuleProcesses({ ...f.options, moduleId: 'fixture-memory', processes: f.modules[0].processes })
+  const processes = [...f.modules[0].processes, { ...f.modules[0].processes[0], pid: 881101, parent: 881100, started: '101' }]
+  const second = observeWorkspaceRelocationModuleProcesses({ ...f.options, moduleId: 'fixture-memory', processes })
+  assert.deepEqual(observeWorkspaceRelocationModuleProcesses({ ...f.options, moduleId: 'fixture-memory', processes }), second)
+  assert.equal(first.sequence, 0); assert.equal(second.sequence, 1)
+  const results = moduleResults(f.modules), receipt = completeWorkspaceRelocationModuleStops({ ...f.options, results })
+  assert.deepEqual(completeWorkspaceRelocationModuleStops({ ...f.options, results }), receipt)
+  const stored = readWorkspaceRelocationModuleStops(f.data, f.input.id)
+  assert.deepEqual(stored.observations, [first, second]); assert.deepEqual(stored.submission, receipt)
+  assert.equal(prepareWorkspaceRelocationModuleStops({ ...f.options, modules: f.modules }).dispatch, 'observe')
+  results[0].status = 'unknown'
+  assert.throws(() => completeWorkspaceRelocationModuleStops({ ...f.options, results }), { code: 'WORKSPACE_RELOCATION_CONFLICT' })
+  assertWorkspaceStillProtected(f.data)
+})
+for (const kind of ['missing original', 'wrong owner', 'changed generation', 'duplicate', 'extra content', 'inactive module']) test('invalid process observation cannot shrink or retarget a module: ' + kind, async t => {
+  const f = await moduleFixture(t)
+  commitWorkspaceRelocationModules({ ...f.options, modules: f.modules }); prepareWorkspaceRelocationModuleStops({ ...f.options, modules: f.modules })
+  const processes = structuredClone(f.modules[0].processes)
+  if (kind === 'missing original') processes.length = 0
+  if (kind === 'wrong owner') processes[0].owner = 'another-user'
+  if (kind === 'changed generation') processes[0].started = 'replacement'
+  if (kind === 'duplicate') processes.push(processes[0])
+  if (kind === 'extra content') processes[0].secret = 'never persist business content'
+  assert.throws(() => observeWorkspaceRelocationModuleProcesses({ ...f.options, moduleId: kind === 'inactive module' ? 'stopped-channel' : 'fixture-memory', processes }), { code: 'WORKSPACE_RELOCATION_INVALID' })
+  assert.deepEqual(readWorkspaceRelocationModuleStops(f.data, f.input.id).observations, [])
+})
+for (const kind of ['missing worker scope', 'missing module scope', 'missing attempt', 'broken observation', 'missing observation', 'observation hardlink', 'extra file', 'observation directory replaced']) test('damaged module materials do not authorize a fresh attempt: ' + kind, async t => {
+  const f = await moduleFixture(t)
+  commitWorkspaceRelocationModules({ ...f.options, modules: f.modules }); prepareWorkspaceRelocationModuleStops({ ...f.options, modules: f.modules })
+  observeWorkspaceRelocationModuleProcesses({ ...f.options, moduleId: 'fixture-memory', processes: f.modules[0].processes })
+  completeWorkspaceRelocationModuleStops({ ...f.options, results: moduleResults(f.modules) })
+  const control = path.join(f.data, 'workspace-control'), observations = path.join(control, 'relocation-module-processes'), first = path.join(observations, '00000000.json')
+  if (kind === 'missing worker scope') await fs.rm(path.join(control, 'relocation-workers.json'))
+  if (kind === 'missing module scope') await fs.rm(path.join(control, 'relocation-modules.json'))
+  if (kind === 'missing attempt') await fs.rm(path.join(control, 'relocation-module-stop-attempt.json'))
+  if (kind === 'broken observation') await fs.writeFile(first, '{broken')
+  if (kind === 'missing observation') await fs.rm(first)
+  if (kind === 'observation hardlink') await fs.link(first, path.join(f.root, 'borrowed-record'))
+  if (kind === 'extra file') await fs.writeFile(path.join(observations, 'unknown.json'), '{}')
+  if (kind === 'observation directory replaced') { await fs.rename(observations, path.join(f.root, 'retained-observations')); await fs.mkdir(observations, { mode: 0o700 }) }
+  assert.throws(() => readWorkspaceRelocationModuleStops(f.data, f.input.id), { code: 'WORKSPACE_RELOCATION_INVALID' })
+  assert.throws(() => prepareWorkspaceRelocationModuleStops({ ...f.options, modules: f.modules }), { code: 'WORKSPACE_RELOCATION_INVALID' })
+  assertWorkspaceStillProtected(f.data)
+})
+
+
+test('cross-module ownership conflict is rejected before publishing a corrupt observation', async t => {
+  const f = await moduleFixture(t)
+  f.modules[1] = { ...f.modules[1], runtime_id: 'other-runtime', processes: [{ ...f.modules[0].processes[0], pid: 881102 }] }
+  commitWorkspaceRelocationModules({ ...f.options, modules: f.modules }); prepareWorkspaceRelocationModuleStops({ ...f.options, modules: f.modules })
+  const processes = [...f.modules[0].processes, ...f.modules[1].processes]
+  assert.throws(() => observeWorkspaceRelocationModuleProcesses({ ...f.options, moduleId: 'fixture-memory', processes }), { code: 'WORKSPACE_RELOCATION_INVALID' })
+  assert.deepEqual(readWorkspaceRelocationModuleStops(f.data, f.input.id).observations, [])
+})
+for (const kind of ['missing', 'duplicate', 'wrong runtime', 'extra content', 'sparse', 'false inactive']) test('module receipt requires the complete exact module results: ' + kind, async t => {
+  const f = await moduleFixture(t)
+  commitWorkspaceRelocationModules({ ...f.options, modules: f.modules }); prepareWorkspaceRelocationModuleStops({ ...f.options, modules: f.modules })
+  observeWorkspaceRelocationModuleProcesses({ ...f.options, moduleId: 'fixture-memory', processes: f.modules[0].processes })
+  const results = moduleResults(f.modules)
+  if (kind === 'missing') results.pop()
+  if (kind === 'duplicate') results[1] = results[0]
+  if (kind === 'wrong runtime') results[0].runtime_id = 'replacement'
+  if (kind === 'extra content') results[0].secret = 'never persist business content'
+  if (kind === 'sparse') delete results[0]
+  if (kind === 'false inactive') results[0].status = 'inactive'
+  assert.throws(() => completeWorkspaceRelocationModuleStops({ ...f.options, results }), { code: 'WORKSPACE_RELOCATION_INVALID' })
+  assert.equal(readWorkspaceRelocationModuleStops(f.data, f.input.id).submission, null)
+})
+test('module writes require the actual native lock and do not create observation storage without it', async t => {
+  const f = await moduleFixture(t)
+  releaseCliLock(f.lock)
+  assert.throws(() => commitWorkspaceRelocationModules({ ...f.options, modules: f.modules }), { code: 'WORKSPACE_RELOCATION_INVALID' })
+  assert.throws(() => prepareWorkspaceRelocationModuleStops({ ...f.options, modules: f.modules }), { code: 'WORKSPACE_RELOCATION_INVALID' })
+  assert.throws(() => observeWorkspaceRelocationModuleProcesses({ ...f.options, moduleId: 'fixture-memory', processes: f.modules[0].processes }), { code: 'WORKSPACE_RELOCATION_INVALID' })
+  assert.throws(() => completeWorkspaceRelocationModuleStops({ ...f.options, results: moduleResults(f.modules) }), { code: 'WORKSPACE_RELOCATION_INVALID' })
+  assert.equal(readWorkspaceRelocationModules(f.data, f.input.id), null)
+})
+test('a lost module attempt reply resumes only observation after reacquiring the original job lock', async t => {
+  const f = await moduleFixture(t)
+  commitWorkspaceRelocationModules({ ...f.options, modules: f.modules })
+  const original = syncFs.linkSync
+  const link = t.mock.method(syncFs, 'linkSync', (...args) => { original(...args); if (String(args[1]).endsWith('relocation-module-stop-attempt.json')) throw new Error('module attempt reply lost') })
+  assert.throws(() => prepareWorkspaceRelocationModuleStops({ ...f.options, modules: f.modules }), /reply lost/)
+  link.mock.restore(); releaseCliLock(f.lock)
+  const recovered = await acquireWorkspaceRelocationLock(f.data, f.input.id)
+  try { assert.equal(prepareWorkspaceRelocationModuleStops({ ...f.options, modules: f.modules }).dispatch, 'observe') }
+  finally { releaseCliLock(recovered) }
+})
+test('read-only observations can extend an unknown receipt without replacing its original result', async t => {
+  const f = await moduleFixture(t)
+  commitWorkspaceRelocationModules({ ...f.options, modules: f.modules }); prepareWorkspaceRelocationModuleStops({ ...f.options, modules: f.modules })
+  observeWorkspaceRelocationModuleProcesses({ ...f.options, moduleId: 'fixture-memory', processes: f.modules[0].processes })
+  const results = moduleResults(f.modules); results[0].status = 'unknown'; results[0].shutdown = 'unknown'
+  const receipt = completeWorkspaceRelocationModuleStops({ ...f.options, results })
+  observeWorkspaceRelocationModuleProcesses({ ...f.options, moduleId: 'fixture-memory', processes: [...f.modules[0].processes, { ...f.modules[0].processes[0], pid: 881101, parent: 881100, started: '101' }] })
+  const current = readWorkspaceRelocationModuleStops(f.data, f.input.id)
+  assert.equal(current.observations.length, 2); assert.deepEqual(current.submission, receipt)
+  assert.equal(prepareWorkspaceRelocationModuleStops({ ...f.options, modules: f.modules }).dispatch, 'observe')
+})
+
+test('an observation published before acknowledgement loss keeps its first sequence and content', async t => {
+  const f = await moduleFixture(t)
+  commitWorkspaceRelocationModules({ ...f.options, modules: f.modules }); prepareWorkspaceRelocationModuleStops({ ...f.options, modules: f.modules })
+  const directory = path.join(f.data, 'workspace-control/relocation-module-processes'), inode = syncFs.statSync(directory).ino
+  if (process.platform === 'win32') {
+    const original = syncFs.linkSync
+    t.mock.method(syncFs, 'linkSync', (...args) => { original(...args); if (String(args[1]).endsWith('00000000.json')) throw new Error('observation acknowledgement lost') })
+  } else {
+    const original = syncFs.fsyncSync
+    t.mock.method(syncFs, 'fsyncSync', fd => { const stat = syncFs.fstatSync(fd); if (stat.isDirectory() && stat.ino === inode) throw new Error('observation acknowledgement lost'); return original(fd) })
+  }
+  assert.throws(() => observeWorkspaceRelocationModuleProcesses({ ...f.options, moduleId: 'fixture-memory', processes: f.modules[0].processes }), /acknowledgement lost/)
+  t.mock.restoreAll()
+  const original = readWorkspaceRelocationModuleStops(f.data, f.input.id).observations[0]
+  assert.deepEqual(observeWorkspaceRelocationModuleProcesses({ ...f.options, moduleId: 'fixture-memory', processes: f.modules[0].processes }), original)
+  assert.equal(readWorkspaceRelocationModuleStops(f.data, f.input.id).observations.length, 1)
+  assert.equal(prepareWorkspaceRelocationModuleStops({ ...f.options, modules: f.modules }).dispatch, 'observe')
+})
+for (const kind of ['admin', 'self process', 'duplicate runtime', 'extra content', 'missing processes']) test('invalid fixed modules never publish new authority: ' + kind, async t => {
+  const f = await moduleFixture(t), modules = structuredClone(f.modules)
+  if (kind === 'admin') modules[0].module_id = 'admin-web'
+  if (kind === 'self process') modules[0].processes[0].pid = process.pid
+  if (kind === 'duplicate runtime') modules[1] = { ...modules[1], runtime_id: modules[0].runtime_id, processes: [{ ...modules[0].processes[0], pid: 881102 }] }
+  if (kind === 'extra content') modules[0].apikey = 'never persist credentials'
+  if (kind === 'missing processes') modules[0].processes = []
+  assert.throws(() => commitWorkspaceRelocationModules({ ...f.options, modules }), { code: 'WORKSPACE_RELOCATION_INVALID' })
+  assert.equal(readWorkspaceRelocationModules(f.data, f.input.id), null)
+})
+test('an observation directory replaced before its first entry cannot restart a fresh chain', async t => {
+  const f = await moduleFixture(t)
+  commitWorkspaceRelocationModules({ ...f.options, modules: f.modules }); prepareWorkspaceRelocationModuleStops({ ...f.options, modules: f.modules })
+  const directory = path.join(f.data, 'workspace-control/relocation-module-processes')
+  await fs.rename(directory, path.join(f.root, 'first-observation-directory'))
+  management.ensurePrivateDataRoot(directory)
+  assert.throws(() => observeWorkspaceRelocationModuleProcesses({ ...f.options, moduleId: 'fixture-memory', processes: f.modules[0].processes }), { code: 'WORKSPACE_RELOCATION_INVALID' })
+  assert.throws(() => prepareWorkspaceRelocationModuleStops({ ...f.options, modules: f.modules }), { code: 'WORKSPACE_RELOCATION_INVALID' })
 })

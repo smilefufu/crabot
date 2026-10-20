@@ -4,18 +4,21 @@ import path from 'node:path'
 import { tmpdir } from 'node:os'
 import http from 'node:http'
 import { once } from 'node:events'
+import { randomUUID } from 'node:crypto'
 import ModuleManager from './index.js'
 import { canonicalizeJson } from 'crabot-shared'
 
-async function fixture(withChild = false) {
-  const data = await fs.mkdtemp(path.join(tmpdir(), 'crabot-module-stop-'))
+async function fixture(withChild = false, privateJournal = false) {
+  const root = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'crabot-module-stop-')))
+  const management = require('../../scripts/lib/desktop-management.cjs')
+  const data = management.ensurePrivateDataRoot(path.join(root, 'data'))
   const reserve = http.createServer()
   await new Promise<void>(resolve => reserve.listen(0, '127.0.0.1', resolve))
   const port = (reserve.address() as { port: number }).port
   await new Promise<void>(resolve => reserve.close(() => resolve()))
   const script = path.join(data, 'finite-module.cjs'), marker = path.join(data, 'shutdown.json')
   await fs.writeFile(script, `const fs=require('node:fs'),http=require('node:http');
-    const timer=setInterval(()=>{},1000),calls=[];
+    const timer=setInterval(()=>{},1000),calls=[];setTimeout(()=>process.exit(0),30000).unref();
     if(process.env.FIXTURE_DESCENDANT){const child=require('node:child_process').spawn(process.execPath,['-e','setTimeout(()=>{},20000)'],{detached:true,stdio:'ignore'});child.unref()}
     const server=http.createServer(async(req,res)=>{let text='';for await(const part of req)text+=part;
       const body=JSON.parse(text);calls.push(req.url);fs.writeFileSync(process.env.FIXTURE_CALLS,JSON.stringify(calls));
@@ -26,17 +29,40 @@ async function fixture(withChild = false) {
   const manager = new ModuleManager({ port: 0, modules: [], shutdown_timeout: 0.5 }, data) as any
   manager.managementOnly = false
   for (const id of ['fixture-memory', 'stopped-channel', 'admin-web']) manager.modules.set(id, {
-    module_id: id, module_type: 'service', entry: id === 'admin-web' ? `"${process.execPath}" -e "setInterval(()=>{},1000)"` : `"${process.execPath}" "${script}"`,
+    module_id: id, module_type: 'service', entry: id === 'admin-web' ? `"${process.execPath}" -e "setInterval(()=>{},1000);setTimeout(()=>process.exit(0),30000).unref()"` : `"${process.execPath}" "${script}"`,
     env: { FIXTURE_READY: path.join(data, 'ready'), FIXTURE_CALLS: marker, ...(withChild && id === 'fixture-memory' ? { FIXTURE_DESCENDANT: '1' } : {}) }, auto_start: false, auto_restart: true,
     skip_health_check: true, start_priority: 1, status: 'stopped', port: id === 'fixture-memory' ? port : port + 1,
   })
   await manager.startModuleProcess('fixture-memory'); await manager.startModuleProcess('admin-web')
   await vi.waitFor(async () => expect(await fs.readFile(path.join(data, 'ready'), 'utf8')).toBe('ready'))
   manager.modules.get('fixture-memory').skip_health_check = false
-  await fs.mkdir(path.join(data, 'workspace-control')); await fs.writeFile(path.join(data, 'workspace-control/relocation.json'), 'fixture')
+  let lock: string | undefined, relocation: any, jobId: string | undefined
+  const locks = await import('../../scripts/lib/cli-lock.mjs')
+  if (privateJournal) {
+    const { WorkspaceCatalog } = await import('../../crabot-shared/dist/workspace-catalog.js')
+    const native = require('../../scripts/lib/process-identity.cjs'), catalog = new WorkspaceCatalog({ dataRoot: data, files: native })
+    await catalog.initialize()
+    const snapshot = await catalog.snapshot()
+    relocation = await import('../../scripts/lib/workspace-relocation-intent.mjs')
+    lock = await locks.acquireCliLock(data, 'workspace-relocation'); jobId = randomUUID()
+    await relocation.beginWorkspaceRelocationIntent({ dataDir: data, id: jobId, target: path.join(root, 'relocated'),
+      expectedRevision: snapshot.revision, protectedRoots: [path.join(data, 'workspace-control')] })
+    relocation.commitWorkspaceRelocationWorkers({ dataDir: data, id: jobId, workers: [] })
+  } else {
+    management.ensurePrivateDataRoot(path.join(data, 'workspace-control'))
+    await fs.writeFile(path.join(data, 'workspace-control/relocation.json'), 'fixture')
+  }
   const scope = await manager.captureWorkspaceRelocationModules()
-  const journal = { prepare: vi.fn(async () => 'dispatch'), observe: vi.fn(async () => undefined), complete: vi.fn(async () => undefined) }
-  return { data, manager, scope, journal, marker, cleanup: async () => {
+  const journal = { prepare: vi.fn(async (modules: typeof scope) => {
+    if (!relocation) return 'dispatch'
+    relocation.commitWorkspaceRelocationModules({ dataDir: data, id: jobId, modules })
+    return relocation.prepareWorkspaceRelocationModuleStops({ dataDir: data, id: jobId, modules }).dispatch
+  }), observe: vi.fn(async (moduleId: string, processes: any) => {
+    if (relocation) relocation.observeWorkspaceRelocationModuleProcesses({ dataDir: data, id: jobId, moduleId, processes })
+  }), complete: vi.fn(async (results: any) => {
+    if (relocation) relocation.completeWorkspaceRelocationModuleStops({ dataDir: data, id: jobId, results })
+  }) }
+  return { data, manager, scope, journal, marker, relocation, jobId, cleanup: async () => {
     vi.restoreAllMocks()
     for (const child of manager.processes.values()) {
       const state = manager.childStates.get(child)
@@ -47,7 +73,8 @@ async function fixture(withChild = false) {
       const processes = scope.flatMap((item: any) => item.processes)
       for (const process of processes) native.terminateKnownProcess(process)
       await vi.waitFor(() => expect(probeKnownProcessExit(processes).state).toBe('stopped'), { timeout: 5000 })
-      await fs.rm(data, { recursive: true, force: true })
+      locks.releaseCliLock(lock)
+      await fs.rm(root, { recursive: true, force: true })
     }
   } }
 }
@@ -89,6 +116,39 @@ describe('workspace planned execution module stops', () => {
       } finally { f.manager.modules.get('fixture-memory').port = f.scope[0].module_port; await f.cleanup() }
     })
   }
+  it('joins the actual private module journal and native lock without moving workspace files', async () => {
+    const f = await fixture(true, true)
+    try {
+      const result = await f.manager.requestWorkspaceRelocationModuleStops(f.scope, f.journal)
+      const stored = f.relocation.readWorkspaceRelocationModuleStops(f.data, f.jobId)
+      expect(stored.submission.results).toEqual(result.results)
+      expect(stored.observations[0].processes).toEqual(f.scope[0].processes)
+      expect(f.relocation.prepareWorkspaceRelocationModuleStops({ dataDir: f.data, id: f.jobId, modules: f.scope }).dispatch).toBe('observe')
+      expect(f.manager.processes.get('admin-web').exitCode).toBeNull()
+      expect(await fs.stat(path.join(f.data, 'workspaces/default'))).toBeTruthy()
+      await expect(fs.stat(path.join(path.dirname(f.data), 'relocated'))).rejects.toMatchObject({ code: 'ENOENT' })
+    } finally { await f.cleanup() }
+  })
+  it('retains the actual private receipt after a lost reply and reacquires only observation authority', async () => {
+    const f = await fixture(false, true), publish = f.journal.complete.getMockImplementation()!
+    const locks = await import('../../scripts/lib/cli-lock.mjs')
+    try {
+      f.journal.complete.mockImplementation(async results => { await publish(results); throw new Error('persisted reply lost') })
+      const pending = f.manager.requestWorkspaceRelocationModuleStops(f.scope, f.journal)
+      await expect(pending).rejects.toThrow('persisted reply lost')
+      const stored = f.relocation.readWorkspaceRelocationModuleStops(f.data, f.jobId)
+      expect(stored.submission.results[0].status).toBe('known_scope_exited')
+      locks.releaseCliLock(path.join(f.data, 'cli.lock'))
+      const recovered = await locks.acquireWorkspaceRelocationLock(f.data, f.jobId)
+      try {
+        expect(f.relocation.prepareWorkspaceRelocationModuleStops({ dataDir: f.data, id: f.jobId, modules: f.scope }).dispatch).toBe('observe')
+        expect(f.relocation.readWorkspaceRelocationModuleStops(f.data, f.jobId).submission).toEqual(stored.submission)
+        expect(f.manager.requestWorkspaceRelocationModuleStops(f.scope, f.journal)).toBe(pending)
+        await expect(pending).rejects.toThrow('persisted reply lost')
+      } finally { locks.releaseCliLock(recovered) }
+      expect(JSON.parse(await fs.readFile(f.marker, 'utf8'))).toEqual(['/get_runtime_identity', '/shutdown'])
+    } finally { await f.cleanup() }
+  })
   it('keeps an unplanned maintenance crash out of the legacy tree fallback', async () => {
     const f = await fixture(), legacy = vi.spyOn(f.manager, 'terminateChildTree')
     const child = f.manager.processes.get('fixture-memory'), state = f.manager.childStates.get(child)

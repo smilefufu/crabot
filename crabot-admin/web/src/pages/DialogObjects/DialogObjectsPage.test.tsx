@@ -738,7 +738,7 @@ describe('DialogObjectsPage', () => {
     expect(await screen.findByRole('heading', { name: '好友详情' })).toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('button', { name: '绑定新身份' }))
-    fireEvent.change(screen.getByLabelText('Channel ID'), { target: { value: 'wechat-alt' } })
+    fireEvent.change(await screen.findByLabelText('Channel ID'), { target: { value: 'wechat-alt' } })
     fireEvent.change(screen.getByLabelText('平台用户 ID'), { target: { value: 'alice-alt' } })
     fireEvent.change(screen.getByLabelText('平台显示名称（可选）'), { target: { value: 'Alice Alt' } })
     fireEvent.click(screen.getByRole('button', { name: '绑定' }))
