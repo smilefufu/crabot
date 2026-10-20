@@ -58,7 +58,7 @@ const inspectInstance = async () => JSON.parse((await promisify(execFile)(node, 
   'import{pathToFileURL}from"node:url";const m=await import(pathToFileURL(process.argv[1]));console.log(JSON.stringify(m.inspectInstance(process.argv[2])))',
   path.join(core, 'scripts/lib/instance-runtime.mjs'), data], { env, timeout: 30_000 })).stdout)
 
-const children = []
+const children = [], guiDiagnostics = []
 async function waitForExit(child) {
   try {
     if (child.exitCode === null && child.signalCode === null) await once(child, 'exit', { signal: AbortSignal.timeout(30_000) })
@@ -91,13 +91,15 @@ function launch() {
     }
     throw new Error('Packaged phase timed out: ' + expected + '\n' + output)
   }
+  guiDiagnostics.push(() => ({ phases, output }))
   return { child, exited: () => waitForExit(child), phase }
 }
 try {
   let gui = launch(); await gui.phase('ready')
   const first = await inspectInstance()
   assert.equal(first.state, 'running'); assert.equal(await fs.realpath(first.record.install_root), await fs.realpath(core))
-  assert.equal(JSON.parse(await cli('status', '--json')).running, true)
+  const firstStatus = JSON.parse(await cli('status', '--json')), afterStatus = await inspectInstance()
+  assert.equal(firstStatus.running, true, JSON.stringify({ cli_status: firstStatus, before_status: first, after_status: afterStatus }))
   const cliHome = path.join(temporary, '命令 用户')
   const registrationEnv = { ...env, HOME: cliHome, SHELL: process.platform === 'darwin' ? '/bin/zsh' : '/bin/bash',
     LOCALAPPDATA: path.join(cliHome, 'AppData/Local'), PATH: process.platform === 'win32' ? path.join(process.env.SystemRoot, 'System32') : '/usr/bin:/bin' }
@@ -127,10 +129,19 @@ try {
     packaged_asar_native_auth: true, installed_core_shared_with_cli: true, gui_crash_preserves_core: true, reattach_same_generation: true,
     cli_stop_stays_stopped: true, unicode_spaced_data: true, outside_checkout: true, registered_bundled_cli: true, release_signed: false }))
 } catch (error) {
-  for (const file of ['supervisor.boot.log', 'mm.stdout.log', 'mm.stderr.log']) {
-    const contents = await fs.readFile(path.join(data, 'logs', file)).catch(() => null)
-    if (contents) await fs.writeFile(path.join(path.dirname(project), 'packaged-' + file), contents.subarray(-128_000))
-  }
+  // The artifact uploader collects .desktop-build/*.log; the pair can be nested below it.
+  // Preserve bounded fixture diagnostics without replacing the original assertion on a logging failure.
+  const diagnostics = path.resolve('.desktop-build')
+  try {
+    await fs.mkdir(diagnostics, { recursive: true })
+    await Promise.allSettled([
+      ...['supervisor.boot.log', 'mm.stdout.log', 'mm.stderr.log'].map(async file => {
+        const contents = await fs.readFile(path.join(data, 'logs', file)).catch(() => null)
+        if (contents) await fs.writeFile(path.join(diagnostics, 'packaged-' + file), contents.subarray(-128_000))
+      }),
+      fs.writeFile(path.join(diagnostics, 'packaged-gui.log'), guiDiagnostics.map(read => JSON.stringify(read())).join('\n')),
+    ])
+  } catch { console.error('Packaged fixture diagnostics could not be preserved') }
   throw error
 } finally {
   for (const child of children) if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
