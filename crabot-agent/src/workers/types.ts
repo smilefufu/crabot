@@ -1,4 +1,4 @@
-import type { WorkspaceRelocationIncarnation } from 'crabot-shared'
+import type { WorkspaceRelocationIncarnation, WorkerProcessIdentity } from 'crabot-shared'
 import type { ModelFormat } from 'crabot-shared'
 import type { ToolDefinition, LLMAdapter } from '../engine/index.js'
 import type { LLMThinkingConfig } from '../engine/llm-adapter-types.js'
@@ -553,13 +553,7 @@ export interface WorkerRuntimeEvent {
 }
 
 /** Internal maintenance observation, never complete stop proof or process authority. */
-export interface WorkerProcessIdentity {
-  readonly pid: number
-  readonly parent: number
-  readonly started: string
-  readonly owner: string
-  readonly executable: string
-}
+export type { WorkerProcessIdentity } from 'crabot-shared'
 
 export interface WorkerAdapter {
   /** Fixed-job observation only. Fixed mainlines may read cold metadata without rebuilding a runtime. Unknown rejects. */

@@ -144,3 +144,19 @@ export interface StopWorkspaceRelocationWorkersResult {
   dispatch: WorkspaceRelocationStopDispatch
   results: ReadonlyArray<WorkspaceRelocationStopResult>
 }
+
+/** Native process observation; protocol-agent-v3 §6.1. This is not an exit proof. */
+export interface WorkerProcessIdentity {
+  readonly pid: number
+  readonly parent: number
+  readonly started: string
+  readonly owner: string
+  readonly executable: string
+}
+export interface CaptureWorkspaceRelocationProcessesParams {
+  intent_id: string
+  launch_id: string
+}
+export interface CaptureWorkspaceRelocationProcessesResult {
+  processes: ReadonlyArray<WorkerProcessIdentity>
+}

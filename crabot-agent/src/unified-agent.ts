@@ -1,6 +1,6 @@
 import { createWorkspaceRelocationStopJournal } from './core/workspace-relocation-stop-journal.js'
 import { verifyWorkspaceRelocationAuthority } from './core/workspace-relocation-authority.js'
-import type { CaptureWorkspaceRelocationWorkersParams, CaptureWorkspaceRelocationWorkersResult, StopWorkspaceRelocationWorkersParams, StopWorkspaceRelocationWorkersResult, RpcHandlerContext } from 'crabot-shared'
+import type { CaptureWorkspaceRelocationProcessesParams, CaptureWorkspaceRelocationProcessesResult, CaptureWorkspaceRelocationWorkersParams, CaptureWorkspaceRelocationWorkersResult, StopWorkspaceRelocationWorkersParams, StopWorkspaceRelocationWorkersResult, RpcHandlerContext } from 'crabot-shared'
 import { ExecutionAdmissions } from './core/execution-admissions.js'
 import { WorkerRequestToolScope } from './workers/harness/request-tools.js'
 import { selectSubAgentSkills } from './agent/subagent-tool-filter.js'
@@ -1016,6 +1016,42 @@ export class UnifiedAgent extends ModuleBase {
     return { workers }
   }
 
+  private async handleCaptureWorkspaceRelocationProcesses(params: CaptureWorkspaceRelocationProcessesParams, context?: RpcHandlerContext): Promise<CaptureWorkspaceRelocationProcessesResult> {
+    const bearer = context?.authorizationBearer
+    if (typeof bearer !== 'string' || !bearer) throw new RpcError('UNAUTHORIZED', '缺少迁移协调凭据。')
+    if (!params || typeof params !== 'object' || Array.isArray(params) || Object.keys(params).length !== 2
+      || !Object.keys(params).every(key => key === 'intent_id' || key === 'launch_id')) {
+      throw new RpcError('INVALID_PARAMS', '迁移进程捕获只接受固定作业标识。')
+    }
+    const dataDir = getDataRootDir()
+    const request = Object.freeze({ intent_id: params.intent_id, launch_id: params.launch_id, action: 'capture_workers' as const })
+    const verify = () => verifyWorkspaceRelocationAuthority({ dataDir, moduleManagerPort: this.rpcClient.moduleManagerTargetPort, params: request, bearer })
+    const proof = await verify()
+    if (this.runtimeClosing) throw new RpcError('WORKSPACE_MAINTENANCE', 'Agent正在关闭，不能捕获执行进程。')
+    const readFixed = () => {
+      try {
+        const records = require(path.join(__dirname, '../../scripts/lib/workspace-relocation-intent.mjs'))
+        const fixed = records.readWorkspaceRelocationWorkers(dataDir, request.intent_id)
+        if (!fixed || records.readWorkspaceRelocationStops(dataDir, request.intent_id).attempt) throw new Error('not pre-stop')
+        const modules = records.readWorkspaceRelocationModules(dataDir, request.intent_id)
+        if (modules && records.readWorkspaceRelocationModuleStops(dataDir, request.intent_id).attempt) throw new Error('module stop started')
+        return fixed
+      } catch { throw new RpcError('SERVICE_UNAVAILABLE', '原固定范围或停止前状态无法核实，已保留维护保护。') }
+    }
+    const fixed = readFixed()
+    let processes
+    try {
+      await this.quiesceExecutionAdmissions()
+      processes = await this.requireManagerStack().harness.captureWorkspaceRelocationProcesses(fixed.workers)
+    } catch { throw new RpcError('WORKSPACE_MAINTENANCE', '执行进程范围或启动对账无法核实，已保留维护保护。') }
+    if (sha256CanonicalJson(readFixed()) !== sha256CanonicalJson(fixed)) throw new RpcError('SERVICE_UNAVAILABLE', '原固定执行器范围已变化。')
+    const current = await verify()
+    if (sha256CanonicalJson(current) !== sha256CanonicalJson(proof)) throw new RpcError('FORBIDDEN', '迁移授权在进程捕获期间已变化。')
+    if (sha256CanonicalJson(readFixed()) !== sha256CanonicalJson(fixed)) throw new RpcError('SERVICE_UNAVAILABLE', '原固定执行器范围已变化。')
+    if (this.runtimeClosing) throw new RpcError('WORKSPACE_MAINTENANCE', 'Agent正在关闭，不能发布执行进程。')
+    return { processes }
+  }
+
   private async handleStopWorkspaceRelocationWorkers(params: StopWorkspaceRelocationWorkersParams, context?: RpcHandlerContext): Promise<StopWorkspaceRelocationWorkersResult> {
     const binding = await createWorkspaceRelocationStopJournal({ dataDir: getDataRootDir(), moduleManagerPort: this.rpcClient.moduleManagerTargetPort,
       params, bearer: context?.authorizationBearer })
@@ -1880,6 +1916,7 @@ export class UnifiedAgent extends ModuleBase {
     this.registerMethod('trigger_schedule', this.handleTriggerSchedule.bind(this))
     this.registerMethod('authorize_agent_cli_execution', this.handleAuthorizeAgentCliExecution.bind(this))
     this.registerMethod('stop_workspace_relocation_workers', this.handleStopWorkspaceRelocationWorkers.bind(this))
+    this.registerMethod('capture_workspace_relocation_processes', this.handleCaptureWorkspaceRelocationProcesses.bind(this))
     this.registerMethod('capture_workspace_relocation_workers', this.handleCaptureWorkspaceRelocationWorkers.bind(this))
     this.registerMethod('get_workspace_execution_admin', async () => this.requireManagerStack().harness.getWorkspaceExecutionInventory())
     this.registerMethod('list_workers_admin', this.handleListWorkersAdmin.bind(this))

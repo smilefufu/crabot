@@ -137,6 +137,7 @@ export type { WorkspaceRecord, WorkspaceUsage, WorkspaceExecution, WorkspaceExec
   VerifyWorkspaceRelocationRequestParams, VerifyWorkspaceRelocationRequestResult,
   WorkspaceRelocationCoordinatorAction, VerifyWorkspaceRelocationCoordinatorParams, VerifyWorkspaceRelocationCoordinatorResult,
   WorkspaceRelocationImplementation, WorkspaceRelocationIncarnation, WorkspaceRelocationWorker,
+  WorkerProcessIdentity, CaptureWorkspaceRelocationProcessesParams, CaptureWorkspaceRelocationProcessesResult,
   CaptureWorkspaceRelocationWorkersParams, CaptureWorkspaceRelocationWorkersResult,
   WorkspaceRelocationStopDispatch, WorkspaceRelocationStopStatus, WorkspaceRelocationStopResult,
   PrepareWorkspaceRelocationWorkerStopsParams, PrepareWorkspaceRelocationWorkerStopsResult,

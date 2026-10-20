@@ -14,7 +14,7 @@ export async function relocationMmFixture(mode = 'normal', withJournal = false) 
   const records = await import('../../../../scripts/lib/workspace-relocation-intent.mjs'), locks = await import('../../../../scripts/lib/cli-lock.mjs')
   const data = management.ensurePrivateDataRoot(path.join(root, 'data')), calls: any[] = [], sockets = new Set()
   const id = randomUUID(), entry = new URL('../../../../scripts/lib/workspace-coordinator-entry.mjs', import.meta.url).href
-  let child: ReturnType<typeof spawn> | undefined, exited: Promise<unknown> | undefined, lock: string | undefined, launch: any, intent: any, journal: any
+  let child: ReturnType<typeof spawn> | undefined, exited: Promise<unknown> | undefined, lock: string | undefined, launch: any, intent: any, journal: any, moduleJournal: any
   let authorized = true, dropped = false
   const server = http.createServer(async (req, res) => {
     let text = ''; for await (const bytes of req) text += bytes
@@ -29,6 +29,10 @@ export async function relocationMmFixture(mode = 'normal', withJournal = false) 
     try {
       let result: any
       if (body.method === 'verify_workspace_relocation_coordinator') {
+        if (mode === 'scope-change-on-second-proof' && calls.filter(call => call.body.method === 'verify_workspace_relocation_coordinator').length === 2) {
+          const file = path.join(data, 'workspace-control/relocation-workers.json'), stored = JSON.parse(await fs.readFile(file, 'utf8'))
+          await fs.writeFile(file, JSON.stringify({ ...stored, created_at: new Date(Date.parse(stored.created_at) + 1000).toISOString() }))
+        }
         result = { verified: mode !== 'false', intent_id: id, intent_sha256: mode === 'hash' ? '0'.repeat(64) : sha256CanonicalJson(intent),
           launch_id: launch.launch_id, launch_sha256: sha256CanonicalJson(launch), action: body.params.action, ...(mode === 'extra' ? { untrusted: true } : {}) }
       } else if (body.method === 'prepare_workspace_relocation_worker_stops' && journal) {
@@ -51,7 +55,7 @@ export async function relocationMmFixture(mode = 'normal', withJournal = false) 
   })
   server.on('connection', socket => sockets.add(socket))
   const cleanup = async () => {
-    journal?.close()
+    moduleJournal?.close(); journal?.close()
     locks.releaseCliLock(lock)
     if (child?.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
     await exited?.catch(() => {})
@@ -65,7 +69,8 @@ export async function relocationMmFixture(mode = 'normal', withJournal = false) 
     lock = await locks.acquireCliLock(data, 'workspace-relocation')
     intent = await records.beginWorkspaceRelocationIntent({ dataDir: data, id, target: path.join(root, 'relocated'), expectedRevision: (await catalog.snapshot()).revision, protectedRoots: [] })
     const journalEntry = new URL('../../../../scripts/lib/workspace-worker-journal.mjs', import.meta.url).href
-    child = spawn(process.execPath, ['--input-type=module', '-e', `import{enterWorkspaceRelocationCoordinator}from ${JSON.stringify(entry)};import{serveWorkspaceWorkerJournal}from ${JSON.stringify(journalEntry)};const context=await enterWorkspaceRelocationCoordinator();if(${withJournal})serveWorkspaceWorkerJournal(context);process.send({kind:'fixture-ready'});setTimeout(()=>process.exit(0),30000);`], { stdio: ['ignore', 'ignore', 'pipe', 'ipc'] })
+    const moduleJournalEntry = new URL('../../../../scripts/lib/workspace-module-journal.mjs', import.meta.url).href
+    child = spawn(process.execPath, ['--input-type=module', '-e', `import{enterWorkspaceRelocationCoordinator}from ${JSON.stringify(entry)};import{serveWorkspaceWorkerJournal}from ${JSON.stringify(journalEntry)};import{serveWorkspaceModuleJournal}from ${JSON.stringify(moduleJournalEntry)};const context=await enterWorkspaceRelocationCoordinator();if(${withJournal})serveWorkspaceWorkerJournal(context);if(${JSON.stringify(mode)}==='module-stop-started')serveWorkspaceModuleJournal(context);process.send({kind:'fixture-ready'});setTimeout(()=>process.exit(0),30000);`], { stdio: ['ignore', 'ignore', 'pipe', 'ipc'] })
     const messages: any[] = []; let errors = ''
     child.on('message', message => messages.push(message)); child.stderr!.on('data', bytes => { errors += bytes.toString() })
     exited = once(child, 'exit'); void exited.catch(() => {})
@@ -82,7 +87,11 @@ export async function relocationMmFixture(mode = 'normal', withJournal = false) 
       const { createWorkspaceWorkerJournal } = await import('../../../../scripts/lib/workspace-worker-journal.mjs')
       journal = createWorkspaceWorkerJournal(child, { dataDir: data, id, launch })
     }
+    if (mode === 'module-stop-started') {
+      const { createWorkspaceModuleJournal } = await import('../../../../scripts/lib/workspace-module-journal.mjs')
+      moduleJournal = createWorkspaceModuleJournal(child, { dataDir: data, id, launch })
+    }
     const params = { intent_id: id, launch_id: launch.launch_id, action: 'capture_workers' as const }
-    return { root, data, calls, sockets, launch, intent, records, journal, revoke: () => { authorized = false }, options: { dataDir: data, moduleManagerPort: port, params, bearer: 'fixture-coordinator' }, cleanup }
+    return { root, data, calls, sockets, launch, intent, records, journal, moduleJournal, revoke: () => { authorized = false }, options: { dataDir: data, moduleManagerPort: port, params, bearer: 'fixture-coordinator' }, cleanup }
   } catch (error) { await cleanup(); throw error }
 }
