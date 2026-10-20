@@ -1266,6 +1266,41 @@ export class ModuleManager {
     } finally { rpc?.close() }
   }
 
+  /** Fixed host startup only; subsequent scope capture still owns Agent grant authorization. */
+  private async launchWorkspaceRelocationCoordinator(
+    request: VerifyWorkspaceRelocationRequestParams, bearer?: string,
+  ): Promise<ChildProcess> {
+    request = Object.freeze({ ...request })
+    const unavailable = () => Object.assign(new Error('固定迁移宿主未能接纳，原目录和维护记录已保留。'), { code: 'SERVICE_UNAVAILABLE' })
+    const { cliLockToken } = require('../../scripts/lib/cli-lock.mjs')
+    const lock = path.resolve(this.dataDir, 'cli.lock'), token = cliLockToken(lock)
+    if (!token || this.isShuttingDown) throw unavailable()
+    await this.verifyWorkspaceRelocationRequest(request, bearer)
+    if (cliLockToken(lock) !== token || this.isShuttingDown) throw unavailable()
+    let child: ChildProcess | undefined
+    try {
+      const launcher = require('../../scripts/lib/workspace-coordinator-launch.mjs')
+      const host: { child: ChildProcess } = await launcher.launchWorkspaceRelocationCoordinator({ dataDir: this.dataDir, id: request.intent_id })
+      child = host.child
+      const { readWorkspaceRelocationIntent } = require('../../scripts/lib/workspace-relocation-intent.mjs')
+      if (this.isShuttingDown || sha256CanonicalJson(readWorkspaceRelocationIntent(this.dataDir)) !== request.intent_sha256) throw unavailable()
+      return child
+    } catch {
+      // No grant or journal action has been handed to a driver at this point.
+      try { if (child?.connected) child.disconnect() } catch { /* Preserve uncertainty and the first records. */ }
+      if (child && child.exitCode === null && child.signalCode === null) {
+        const pending = child
+        await new Promise<void>(resolve => {
+          const done = () => { clearTimeout(timer); pending.off('exit', done); resolve() }
+          const timer = setTimeout(done, 2000)
+          pending.once('exit', done)
+          if (pending.exitCode !== null || pending.signalCode !== null) done()
+        })
+      }
+      throw unavailable()
+    }
+  }
+
   private assertWorkspaceCoordinatorGrantCurrent(grant: WorkspaceCoordinatorGrant): void {
     const unavailable = () => Object.assign(new Error('迁移协调授权无法核实，已保留维护保护。'), { code: 'SERVICE_UNAVAILABLE' })
     const forbidden = () => {
