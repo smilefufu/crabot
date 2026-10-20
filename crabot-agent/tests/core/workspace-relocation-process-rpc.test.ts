@@ -4,7 +4,8 @@ import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import fs from 'node:fs/promises'
 import path from 'node:path'
-import { randomUUID } from 'node:crypto'
+import { randomUUID, createHash } from 'node:crypto'
+import { captureLegacyWorkspaceExecutions } from '../../src/workers/harness/workspace-legacy-executions.js'
 import { UnifiedAgent } from '../../src/unified-agent.js'
 import { captureWorkspaceRelocationWorkers } from '../../src/workers/harness/workspace-relocation-scope.js'
 import type { LedgerWorker } from '../../src/workers/harness/ledger-types.js'
@@ -90,6 +91,50 @@ describe('Agent fixed native process capture RPC', () => {
       expect(f.records.readWorkspaceRelocationStops(f.data, f.params.intent_id).attempt).toBeNull()
     } finally { await f.cleanup() }
   }, 30000)
+  async function writeLegacyBoundary(f: Awaited<ReturnType<typeof fixture>>, ready = true, capturedAt = '2026-10-20T00:02:00.000Z') {
+    const value = captureLegacyWorkspaceExecutions(await f.agent.managerStack.ledger.listAllWorkers(), capturedAt)
+    const bytes = JSON.stringify(value), dir = path.join(f.data, 'workspace-control')
+    await fs.writeFile(path.join(dir, 'legacy-executions.json'), bytes, { mode: 0o600 })
+    if (ready) await fs.writeFile(path.join(dir, 'legacy-executions.ready'), JSON.stringify({ schema_version: 1, sha256: createHash('sha256').update(bytes).digest('hex') }), { mode: 0o600 })
+    return value
+  }
+  it('consumes a real ready boundary through Harness and cold Claude metadata without stopping or rebuilding', async () => {
+    const f = await fixture('normal', 'claude-code'), adapter = f.agent.managerStack.adapters.get('claude-code')
+    try {
+      await f.agent.managerStack.ledger.upsertWorker('channel::session', 'worker', (worker: LedgerWorker) => ({ ...worker,
+        incarnations: worker.incarnations.map(item => ({ ...item, state: 'exited', ended_reason: 'completed', ended_at: '2026-10-20T00:01:00.000Z' })) }))
+      const dir = path.join(adapter.deps.dataDir, 'worker'); await fs.mkdir(dir, { recursive: true })
+      const file = path.join(dir, 'meta-1.json'); await fs.writeFile(file, JSON.stringify({ seq: 1, session_id: 'fixture', workspace_root: path.join(f.data, 'project'), state: 'exited' }))
+      await writeLegacyBoundary(f)
+      const capture = vi.spyOn(adapter.tmux, 'readOptionalProcessCarrier').mockResolvedValue(null), rebuild = vi.spyOn(adapter, 'ensureRuntime')
+      const before = await fs.readFile(file), result = await f.call()
+      expect(result.success).toBe(true); expect(result.data).toEqual({ processes: [] })
+      expect(capture).toHaveBeenCalledTimes(2); expect(rebuild).not.toHaveBeenCalled(); expect(f.stop).not.toHaveBeenCalled()
+      expect(await fs.readFile(file)).toEqual(before)
+      expect(f.records.readWorkspaceRelocationStops(f.data, f.params.intent_id).attempt).toBeNull()
+    } finally { await f.cleanup() }
+  }, 30000)
+  it.each(['prepared', 'corrupt'])('refuses %s legacy material before observing any carrier', async mode => {
+    const f = await fixture(), capture = vi.spyOn(f.harness, 'captureWorkspaceRelocationProcesses')
+    try {
+      await writeLegacyBoundary(f, mode !== 'prepared')
+      if (mode === 'corrupt') await fs.appendFile(path.join(f.data, 'workspace-control/legacy-executions.json'), 'broken')
+      expect((await f.call()).error?.code).toBe('SERVICE_UNAVAILABLE')
+      expect(capture).not.toHaveBeenCalled(); expect(f.stop).not.toHaveBeenCalled()
+    } finally { await f.cleanup() }
+  }, 30000)
+  it('rejects a valid but replaced legacy boundary while the current carrier observation awaits', async () => {
+    const f = await fixture(); let release!: () => void, response: Promise<any> | undefined
+    const wait = new Promise<void>(resolve => { release = resolve })
+    await writeLegacyBoundary(f)
+    const capture = vi.spyOn(f.harness, 'captureWorkspaceRelocationProcesses').mockImplementation(async () => { await wait; return [] })
+    try {
+      response = f.call(); await vi.waitFor(() => expect(capture).toHaveBeenCalledOnce())
+      await writeLegacyBoundary(f, true, '2026-10-20T00:03:00.000Z'); release()
+      expect((await response).error?.code).toBe('SERVICE_UNAVAILABLE'); expect(f.stop).not.toHaveBeenCalled()
+    } finally { release(); await response?.catch(() => {}); await f.cleanup() }
+  }, 30000)
+
   it('waits for actual Agent admissions to settle before reading CLI carriers', async () => {
     const f = await fixture()
     let release!: () => void, response: Promise<any> | undefined

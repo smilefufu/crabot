@@ -10,15 +10,6 @@ import type { IncarnationHandle } from '../../src/workers/types.js'
 import { TmuxDriver } from '../../src/workers/tmux/driver.js'
 import { removeTmuxControlEndpoint, type TmuxControlEndpoint } from '../../src/workers/tmux/control-monitor.js'
 
-function detectTmux(): boolean {
-  try {
-    execFileSync('tmux', ['display-message', '-p', '#S'], { stdio: 'ignore' })
-    return true
-  } catch {
-    return false
-  }
-}
-
 async function waitFor(check: () => Promise<boolean>, timeoutMs = 5000): Promise<void> {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
@@ -147,18 +138,23 @@ describe.skipIf(process.platform === 'win32')('TmuxDriver POSIX command deadline
   })
 })
 
-describe.skipIf(!detectTmux())('TmuxDriver', () => {
-  const driver = new TmuxDriver()
+describe.skipIf(process.platform === 'win32' || !hasTmuxBinary())('TmuxDriver', () => {
+  let driver: TmuxDriver
+  let wrapper: string
   let tempDir: string
   let sessionName: string
 
   beforeEach(async () => {
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'tmux-driver-test-'))
     sessionName = `crabot-w-test-${randomUUID().slice(0, 8)}`
+    wrapper = path.join(tempDir, 'tmux-private')
+    await fs.writeFile(wrapper, `#!/bin/sh\nexec tmux -S '${path.join(tempDir, 'private.sock')}' -f /dev/null "$@"\n`, { mode: 0o700 })
+    driver = new TmuxDriver({ tmuxBin: wrapper })
   })
 
   afterEach(async () => {
     await driver.killSession(sessionName)
+    try { execFileSync(wrapper, ['kill-server'], { stdio: 'ignore', timeout: 5000 }) } catch { /* Only this test's private server. */ }
     await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {})
   })
 

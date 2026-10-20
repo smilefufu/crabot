@@ -175,6 +175,7 @@ import { isWorkerRuntimeEvent } from '../builtin/runtime-observation.js'
 import { reviewFingerprint, type IdleReviewFacts, type ReviewBackgroundFacts } from './idle-review-facts.js'
 import { readLegacyTraces } from '../legacy-source-reader.js'
 import { isLegacyContinuationAuth, type LegacyContinuationAuth } from './legacy-continuation-auth.js'
+import { createLegacyWorkspaceExecutionMatcher, type LegacyWorkspaceExecutions } from './workspace-legacy-executions.js'
 import { applyStatusTransition, canTransition, isTerminalStatus } from './task-status'
 import { selectWorkerView, resolveWorkerProjects, type WorkerExecutionFact, type WorkerViewSelection, type WorkerViewFacts } from '../../manager/worker-candidates.js'
 import type { ManagerWorkboard } from '../../manager/workboard-store.js'
@@ -1151,9 +1152,11 @@ export class WorkerHarness {
   }
 
   /** Read-only CLI carriers; builtin/Agent-native processes still require the actual module scope. */
-  async captureWorkspaceRelocationProcesses(expected: ReadonlyArray<WorkspaceRelocationWorker>): Promise<ReadonlyArray<WorkerProcessIdentity>> {
+  async captureWorkspaceRelocationProcesses(expected: ReadonlyArray<WorkspaceRelocationWorker>, legacy?: LegacyWorkspaceExecutions): Promise<ReadonlyArray<WorkerProcessIdentity>> {
     const fingerprint = sha256CanonicalJson(expected)
     const failure = () => Object.assign(new Error('迁移执行进程与固定范围无法核验，已保留维护保护。'), { code: 'WORKSPACE_MAINTENANCE' })
+    const matchesLegacy = legacy === undefined ? () => false : createLegacyWorkspaceExecutionMatcher(legacy)
+    const legacyAbsences: Array<{ worker_id: string; incarnation_id: string; manager_key: ManagerKey }> = []
     const scope = await this.captureWorkspaceRelocationScope()
     if (sha256CanonicalJson(scope) !== fingerprint) throw failure()
     const adapters = new Map(this.deps.adapters)
@@ -1167,15 +1170,26 @@ export class WorkerHarness {
         if (!isExecutableIncarnation(incarnation)) throw failure()
         const adapter = adapters.get(incarnation.impl)
         if (!adapter?.captureExecutionProcesses || adapter.implId !== fixed.impl) throw failure()
-        const observed = await adapter.captureExecutionProcesses(Object.freeze(handleForIncarnation(worker.worker_id, incarnation)), fixed)
-        if (this.deps.adapters.get(fixed.impl) !== adapter || !Array.isArray(observed) || observed.length === 0
+        const legacyEnded = matchesLegacy(current!.managerKey, current!.worker, fixed.incarnation_id)
+        const observed = await adapter.captureExecutionProcesses(Object.freeze(handleForIncarnation(worker.worker_id, incarnation)), fixed, legacyEnded ? true : undefined)
+        if (this.deps.adapters.get(fixed.impl) !== adapter || !Array.isArray(observed) || observed.length === 0 && !legacyEnded
           || processes.length + observed.length > 32768) throw failure()
+        if (observed.length === 0) legacyAbsences.push({ worker_id: worker.worker_id, incarnation_id: fixed.incarnation_id, manager_key: worker.manager_key })
         processes.push(...observed)
       }
     }
     if (sha256CanonicalJson(await this.captureWorkspaceRelocationScope()) !== fingerprint) throw failure()
+    if (legacyAbsences.length) {
+      const latest = await this.deps.ledger.listAllWorkers()
+      assertWorkspaceRelocationWorkersCurrent(scope, latest)
+      const workers = new Map(latest.map(item => [item.worker.worker_id, item]))
+      for (const absent of legacyAbsences) {
+        const current = workers.get(absent.worker_id)
+        if (!current || current.managerKey !== absent.manager_key || !matchesLegacy(current.managerKey, current.worker, absent.incarnation_id)) throw failure()
+      }
+    }
     if ([...adapters].some(([impl, adapter]) => this.deps.adapters.get(impl) !== adapter)) throw failure()
-    // Reobserve the combined live roots after every adapter read; never infer exit from ledger state.
+    // Reobserve the combined live roots after every adapter read; legacy absence is not a process exit proof.
     const { captureOwnedProcessTree } = require(join(__dirname, '../../../../scripts/lib/owned-process-tree.cjs'))
     return captureOwnedProcessTree(processes)
   }

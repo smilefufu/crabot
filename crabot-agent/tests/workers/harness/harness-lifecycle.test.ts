@@ -12,6 +12,7 @@ import { WorkspaceManager } from '../../../src/workers/harness/workspace-manager
 import { NativeActivityStore } from '../../../src/workers/harness/native-activity-store'
 import { WorkerTurnStore } from '../../../src/workers/harness/worker-turn-store'
 import { WorkspaceGitInspector } from '../../../src/workers/harness/workspace-git-inspector'
+import { captureLegacyWorkspaceExecutions } from '../../../src/workers/harness/workspace-legacy-executions'
 import { DailyReflectionEvidence } from '../../../src/manager/daily-reflection-evidence'
 import { ManagerSessionStore } from '../../../src/manager/session-store'
 import type { DailyReflectionState } from '../../../src/manager/daily-reflection-types'
@@ -5564,6 +5565,52 @@ describe('workspace relocation CLI process capture', () => {
       expect(f.fake.killCalls).toEqual([]); expect(claude.killCalls).toEqual([])
     } finally { if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL'); await ended }
   }, 30000)
+
+  async function endedLegacyWorker() {
+    const f = await nativeWorker()
+    const end = new Date(Date.parse(f.worker.incarnations[0].started_at) + 1000).toISOString()
+    await f.ledger.upsertWorker(f.worker.manager_key, f.worker.worker_id, worker => ({ ...worker!,
+      incarnations: worker!.incarnations.map(item => ({ ...item, state: 'exited', ended_at: end, ended_reason: 'completed' })) }))
+    const legacy = captureLegacyWorkspaceExecutions(await f.ledger.listAllWorkers(), end)
+    const scope = await f.harness.captureWorkspaceRelocationScope()
+    return { ...f, legacy, scope }
+  }
+  it('uses only the fixed old boundary for an empty current carrier observation', async () => {
+    const f = await endedLegacyWorker(), before = await f.ledger.listAllWorkers(), capture = vi.fn(async (_handle: IncarnationHandle, _fixed: unknown, _legacy?: true) => [])
+    ;(f.fake as WorkerAdapter).captureExecutionProcesses = capture
+    expect(await (f.harness.captureWorkspaceRelocationProcesses as any)(f.scope, f.legacy)).toEqual([])
+    expect(capture).toHaveBeenCalledTimes(1); expect(capture.mock.calls[0][2]).toBe(true)
+    expect(await f.ledger.listAllWorkers()).toEqual(before); expect(f.fake.killCalls).toEqual([])
+  })
+  it('rejects an adapter replaced during the final legacy-ledger recheck', async () => {
+    const f = await endedLegacyWorker(), original = f.ledger.listAllWorkers.bind(f.ledger)
+    let observed = false, readsAfterObservation = 0
+    ;(f.fake as WorkerAdapter).captureExecutionProcesses = vi.fn(async () => { observed = true; return [] })
+    vi.spyOn(f.ledger, 'listAllWorkers').mockImplementation(async () => {
+      const entries = await original()
+      if (observed && ++readsAfterObservation === 2) f.adaptersMap.set('codex', new FakeAdapter({ implId: 'codex' }))
+      return entries
+    })
+    await expect(f.harness.captureWorkspaceRelocationProcesses(f.scope, f.legacy)).rejects.toMatchObject({ code: 'WORKSPACE_MAINTENANCE' })
+    expect(readsAfterObservation).toBe(2); expect(f.fake.killCalls).toEqual([])
+  })
+  it.each(['missing boundary', 'empty boundary', 'changed evidence', 'new execution', 'failed observation', 'changed during observation'])('never grants a legacy empty observation for %s', async change => {
+    const f = await endedLegacyWorker(); let legacy: unknown = f.legacy
+    if (change === 'missing boundary') legacy = undefined
+    if (change === 'empty boundary') legacy = { ...f.legacy, entries: [] }
+    if (change === 'changed evidence') await f.ledger.upsertWorker(f.worker.manager_key, f.worker.worker_id, worker => ({ ...worker!,
+      incarnations: worker!.incarnations.map(item => ({ ...item, ended_reason: 'failed' })) }))
+    if (change === 'new execution') await f.ledger.upsertWorker(f.worker.manager_key, 'post-upgrade-worker', () => ({ ...f.worker, worker_id: 'post-upgrade-worker', task: { ...f.worker.task, id: 'post-upgrade-task' }, incarnations: f.worker.incarnations.map(item => ({ ...item, incarnation_id: 'post-upgrade-incarnation' })) }))
+    ;(f.fake as WorkerAdapter).captureExecutionProcesses = vi.fn(async () => {
+      if (change === 'failed observation') throw new Error('current carrier unknown')
+      if (change === 'changed during observation') await f.ledger.upsertWorker(f.worker.manager_key, f.worker.worker_id, worker => ({ ...worker!,
+        incarnations: worker!.incarnations.map(item => ({ ...item, state: 'running' })) }))
+      return []
+    })
+    const scope = await f.harness.captureWorkspaceRelocationScope()
+    await expect((f.harness.captureWorkspaceRelocationProcesses as any)(scope, legacy)).rejects.toBeDefined()
+    expect(f.fake.killCalls).toEqual([])
+  })
 
   it('does not ask builtin or legacy to vouch for the separate Agent/module process tree', async () => {
     const f = await makeHarness({}, { isWorkspaceRelocationReady: () => true })

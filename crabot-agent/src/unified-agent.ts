@@ -1035,19 +1035,22 @@ export class UnifiedAgent extends ModuleBase {
         if (!fixed || records.readWorkspaceRelocationStops(dataDir, request.intent_id).attempt) throw new Error('not pre-stop')
         const modules = records.readWorkspaceRelocationModules(dataDir, request.intent_id)
         if (modules && records.readWorkspaceRelocationModuleStops(dataDir, request.intent_id).attempt) throw new Error('module stop started')
-        return fixed
+        const { readWorkspaceLegacyExecutions } = require(path.join(__dirname, '../../scripts/lib/workspace-legacy-record.cjs'))
+        const legacy = readWorkspaceLegacyExecutions(dataDir)
+        if (legacy && legacy.status !== 'ready') throw new Error('legacy boundary not ready')
+        return { scope: fixed, legacy }
       } catch { throw new RpcError('SERVICE_UNAVAILABLE', '原固定范围或停止前状态无法核实，已保留维护保护。') }
     }
-    const fixed = readFixed()
+    const initial = readFixed()
     let processes
     try {
       await this.quiesceExecutionAdmissions()
-      processes = await this.requireManagerStack().harness.captureWorkspaceRelocationProcesses(fixed.workers)
+      processes = await this.requireManagerStack().harness.captureWorkspaceRelocationProcesses(initial.scope.workers, initial.legacy?.value)
     } catch { throw new RpcError('WORKSPACE_MAINTENANCE', '执行进程范围或启动对账无法核实，已保留维护保护。') }
-    if (sha256CanonicalJson(readFixed()) !== sha256CanonicalJson(fixed)) throw new RpcError('SERVICE_UNAVAILABLE', '原固定执行器范围已变化。')
+    if (sha256CanonicalJson(readFixed()) !== sha256CanonicalJson(initial)) throw new RpcError('SERVICE_UNAVAILABLE', '原固定执行器范围已变化。')
     const current = await verify()
     if (sha256CanonicalJson(current) !== sha256CanonicalJson(proof)) throw new RpcError('FORBIDDEN', '迁移授权在进程捕获期间已变化。')
-    if (sha256CanonicalJson(readFixed()) !== sha256CanonicalJson(fixed)) throw new RpcError('SERVICE_UNAVAILABLE', '原固定执行器范围已变化。')
+    if (sha256CanonicalJson(readFixed()) !== sha256CanonicalJson(initial)) throw new RpcError('SERVICE_UNAVAILABLE', '原固定执行器范围已变化。')
     if (this.runtimeClosing) throw new RpcError('WORKSPACE_MAINTENANCE', 'Agent正在关闭，不能发布执行进程。')
     return { processes }
   }

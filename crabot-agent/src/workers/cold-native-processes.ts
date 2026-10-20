@@ -36,21 +36,28 @@ async function readMetadata(dataDir: string, workerId: string, seq: number) {
   } finally { await handle.close() }
 }
 
-/** Exact live cold mainline only; absence/dead/headless remain unknown, with no runtime rebuild. */
+/** Read-only cold mainline; legacy absence still needs the caller's original upgrade boundary. */
 export async function captureColdNativeProcesses(dataDir: string, h: IncarnationHandle, fixed: WorkspaceRelocationIncarnation,
-  readCarrier: () => Promise<TmuxProcessCarrier>, isCurrent: () => boolean): Promise<ReadonlyArray<WorkerProcessIdentity>> {
+  readCarrier: () => Promise<TmuxProcessCarrier | null>, isCurrent: () => boolean, legacyEnded?: true): Promise<ReadonlyArray<WorkerProcessIdentity>> {
   try {
     if (!/^[A-Za-z0-9_-]+$/.test(h.worker_id) || !Number.isSafeInteger(h.seq) || h.seq < 1
       || fixed.forked_from !== undefined || fixed.query_id !== undefined || h.query_id !== undefined) throw invalid()
     const first = await readMetadata(dataDir, h.worker_id, h.seq)
     if (first.value.seq !== h.seq || first.value.workspace_root !== fixed.workspace
       || h.session_ref && first.value.session_id !== h.session_ref || !isCurrent()) throw invalid()
-    const { captureTmuxProcessTree } = require(path.join(__dirname, '../../../scripts/lib/tmux-process-tree.cjs'))
-    const processes = await captureTmuxProcessTree(async () => {
+    const observe = async () => {
       const carrier = await readCarrier()
-      if (carrier.session_name !== `crabot-w-${h.worker_id}-${h.seq}` || !isCurrent()) throw invalid()
+      if (carrier && carrier.session_name !== `crabot-w-${h.worker_id}-${h.seq}` || !isCurrent()) throw invalid()
       return carrier
-    })
+    }
+    if (legacyEnded && await observe() === null) {
+      if (first.value.state !== 'exited' || await observe() !== null) throw invalid()
+      const last = await readMetadata(dataDir, h.worker_id, h.seq)
+      if (first.version !== last.version || !isCurrent()) throw invalid()
+      return Object.freeze([])
+    }
+    const { captureTmuxProcessTree } = require(path.join(__dirname, '../../../scripts/lib/tmux-process-tree.cjs'))
+    const processes = await captureTmuxProcessTree(observe)
     const last = await readMetadata(dataDir, h.worker_id, h.seq)
     if (first.version !== last.version || !isCurrent()) throw invalid()
     return processes
