@@ -14,7 +14,7 @@ function optionalStat(file) { try { return fs.lstatSync(file, { bigint: true }) 
 function capabilities(root) {
   const file = path.join(root, 'crabot-agent/workspace-legacy-execution-version'), stat = optionalStat(file)
   if (!stat) return null
-  if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1n || stat.size > 64n || fs.readFileSync(file, 'utf8') !== '1\n') fail()
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1n || stat.size > 64n || !['1\n', '1\r\n'].includes(fs.readFileSync(file, 'utf8'))) fail()
   return true
 }
 export async function previewWorkspaceLegacyExecutions(root, dataDir) {

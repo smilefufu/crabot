@@ -27,6 +27,20 @@ async function fixture(t) {
   const control = path.join(data, 'workspace-control'), boundary = path.join(control, 'legacy-executions.json'), ready = path.join(control, 'legacy-executions.ready')
   return { root, data, dir, worker, file, save, control, boundary, ready }
 }
+for (const ending of ['\n', '\r\n']) test('capability text accepts the checkout line ending: ' + JSON.stringify(ending), async t => {
+  const f = await fixture(t), target = path.join(f.root, 'target')
+  await fs.mkdir(path.join(target, 'crabot-agent'), { recursive: true })
+  await fs.writeFile(path.join(target, 'crabot-agent/workspace-legacy-execution-version'), '1' + ending)
+  assert.deepEqual(await previewWorkspaceLegacyExecutions(target, f.data), { status: 'pending' })
+  await assert.rejects(fs.stat(f.control), { code: 'ENOENT' })
+})
+for (const content of ['1', '1 \n', ' 1\n', '\ufeff1\n', '2\n', '1\n\n', '1\r\r\n', '1\0\n']) test('malformed capability text remains rejected: ' + JSON.stringify(content), async t => {
+  const f = await fixture(t), target = path.join(f.root, 'target')
+  await fs.mkdir(path.join(target, 'crabot-agent'), { recursive: true })
+  await fs.writeFile(path.join(target, 'crabot-agent/workspace-legacy-execution-version'), content)
+  await assert.rejects(previewWorkspaceLegacyExecutions(target, f.data), { code: 'WORKSPACE_MAINTENANCE' })
+  await assert.rejects(fs.stat(f.control), { code: 'ENOENT' })
+})
 test('stopped common upgrade fixes old deterministic identities, leaves original ledgers byte-for-byte and never widens on repeat', async t => {
   const f = await fixture(t), original = await fs.readFile(f.file), lock = await acquireCliLock(f.data, 'test')
   try {
