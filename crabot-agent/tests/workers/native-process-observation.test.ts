@@ -1,8 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { promises as fs } from 'node:fs'
-import { spawn } from 'node:child_process'
+import { spawn, execFileSync } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
+import { TmuxDriver } from '../../src/workers/tmux/driver.js'
+import { removeTmuxControlEndpoint, type TmuxControlEndpoint } from '../../src/workers/tmux/control-monitor.js'
 import { once } from 'node:events'
 import { join } from 'node:path'
+import type { WorkspaceRelocationIncarnation } from 'crabot-shared'
 import { tmpdir } from 'node:os'
 import { ClaudeCodeAdapter } from '../../src/workers/claude-code/adapter.js'
 import { CodexWorkerAdapter } from '../../src/workers/codex/adapter.js'
@@ -86,3 +90,143 @@ it.skipIf(process.platform === 'win32')('Codex app-server observes its actual pr
   } finally { expect(await client.terminate()).toBe(true) }
   expect(() => client.captureExecutionProcesses()).toThrow('已退出')
 })
+
+function fixedIncarnation(h: IncarnationHandle): WorkspaceRelocationIncarnation {
+  return { incarnation_id: h.incarnation_id!, impl: h.impl, seq: h.seq, workspace: join(directory, 'project'), started_at: '2026-10-20T00:00:00.000Z' }
+}
+async function coldMetadata(f: ReturnType<typeof make>, fixed: WorkspaceRelocationIncarnation) {
+  f.runtimes.clear()
+  await fs.mkdir(join(directory, 'worker'))
+  const file = join(directory, 'worker', 'meta-1.json')
+  await fs.writeFile(file, JSON.stringify({ seq: 1, session_id: f.h.session_ref, workspace_root: fixed.workspace, state: 'running' }))
+  return file
+}
+async function finiteCarrier(f: ReturnType<typeof make>) {
+  const child = spawn(process.execPath, ['-e', 'process.send("ready");setTimeout(()=>process.exit(0),30000)'], { stdio: ['ignore', 'ignore', 'inherit', 'ipc'] })
+  const exited = once(child, 'exit'); void exited.catch(() => {})
+  await once(child, 'message')
+  const carrier = { session_name: 'crabot-w-worker-1', session_id: '$1', pane_id: '%1', pane_pid: child.pid, dead: false, server_pid: process.pid }
+  f.tmux.readProcessCarrier.mockResolvedValue(carrier)
+  return { carrier, child, close: async () => { if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL'); await exited } }
+}
+
+describe.each(['claude-code', 'codex'] as const)('%s fixed cold mainline observation', impl => {
+  it('uses the original bounded metadata and actual kernel tree without reconstructing, stopping or rewriting', async () => {
+    const f = make(impl), fixed = fixedIncarnation(f.h), file = await coldMetadata(f, fixed), live = await finiteCarrier(f)
+    const rebuild = vi.spyOn(f.adapter as any, 'ensureRuntime'), before = await fs.readFile(file)
+    try {
+      const observed = await (f.adapter.captureExecutionProcesses as any)(f.h, fixed)
+      expect(observed).toMatchObject([{ pid: live.child.pid, parent: process.pid }])
+      expect(f.runtimes.size).toBe(0); expect(rebuild).not.toHaveBeenCalled(); expect(f.tmux.killSession).not.toHaveBeenCalled()
+      expect(await fs.readFile(file)).toEqual(before)
+      expect(live.child.exitCode).toBeNull()
+    } finally { await live.close() }
+  }, 30000)
+  for (const damage of ['fixed identity', 'fixed impl', 'fixed seq', 'unsafe Worker', 'unsafe seq', 'fork', 'query', 'wrong seq', 'wrong workspace', 'wrong session', 'missing', 'broken', 'null', 'oversize', 'hard link']) it(`refuses unverifiable cold metadata before querying tmux: ${damage}`, async () => {
+    const f = make(impl), fixed = fixedIncarnation(f.h), file = await coldMetadata(f, fixed), rebuild = vi.spyOn(f.adapter as any, 'ensureRuntime')
+    if (damage === 'fixed identity') (fixed as any).incarnation_id = 'replacement'
+    else if (damage === 'fixed impl') (fixed as any).impl = impl === 'codex' ? 'claude-code' : 'codex'
+    else if (damage === 'fixed seq') (fixed as any).seq = 2
+    else if (damage === 'unsafe Worker') (f.h as any).worker_id = '../other'
+    else if (damage === 'unsafe seq') { (f.h as any).seq = 0; (fixed as any).seq = 0 }
+    else if (damage === 'fork') (fixed as any).forked_from = 'main'
+    else if (damage === 'query') (fixed as any).query_id = 'query'
+    else if (damage === 'missing') await fs.unlink(file)
+    else if (damage === 'broken') await fs.writeFile(file, '{broken')
+    else if (damage === 'null') await fs.writeFile(file, 'null')
+    else if (damage === 'oversize') await fs.writeFile(file, 'x'.repeat(65537))
+    else if (damage === 'hard link') await fs.link(file, join(directory, 'linked-meta.json'))
+    else {
+      const value = JSON.parse(await fs.readFile(file, 'utf8'))
+      if (damage === 'wrong seq') value.seq = 2
+      else if (damage === 'wrong workspace') value.workspace_root = join(directory, 'other')
+      else if (damage === 'wrong session') value.session_id = 'other-session'
+      await fs.writeFile(file, JSON.stringify(value))
+    }
+    await expect((f.adapter.captureExecutionProcesses as any)(f.h, fixed)).rejects.toMatchObject({ code: 'WORKER_CARRIER_UNVERIFIED' })
+    expect(f.tmux.readProcessCarrier).not.toHaveBeenCalled(); expect(rebuild).not.toHaveBeenCalled(); expect(f.tmux.killSession).not.toHaveBeenCalled()
+  })
+  it('rejects a linked Worker directory instead of reading another directory', async () => {
+    const f = make(impl), fixed = fixedIncarnation(f.h), file = await coldMetadata(f, fixed)
+    const target = join(directory, 'linked-worker')
+    await fs.rename(join(directory, 'worker'), target)
+    await fs.symlink(target, join(directory, 'worker'), process.platform === 'win32' ? 'junction' : 'dir')
+    await expect((f.adapter.captureExecutionProcesses as any)(f.h, fixed)).rejects.toMatchObject({ code: 'WORKER_CARRIER_UNVERIFIED' })
+    expect(f.tmux.readProcessCarrier).not.toHaveBeenCalled()
+    expect(await fs.readFile(join(target, 'meta-1.json'), 'utf8')).toContain('native-session')
+  })
+  it.skipIf(process.platform === 'win32')('rejects a linked metadata file before opening another file', async () => {
+    const f = make(impl), fixed = fixedIncarnation(f.h), file = await coldMetadata(f, fixed), target = join(directory, 'other-meta.json')
+    await fs.rename(file, target); await fs.symlink(target, file)
+    await expect((f.adapter.captureExecutionProcesses as any)(f.h, fixed)).rejects.toMatchObject({ code: 'WORKER_CARRIER_UNVERIFIED' })
+    expect(f.tmux.readProcessCarrier).not.toHaveBeenCalled()
+  })
+  it.each(['metadata changed', 'resident appeared', 'adapter disposed'])('refuses a concurrent change: %s', async change => {
+    const f = make(impl), fixed = fixedIncarnation(f.h), file = await coldMetadata(f, fixed), live = await finiteCarrier(f)
+    let changed = false
+    f.tmux.readProcessCarrier.mockImplementation(async () => {
+      if (!changed) {
+        changed = true
+        if (change === 'metadata changed') {
+          const value = JSON.parse(await fs.readFile(file, 'utf8')); value.state = 'idle'; await fs.writeFile(file, JSON.stringify(value))
+        } else if (change === 'resident appeared') f.runtimes.set('worker#1', f.runtime)
+        else await f.adapter.dispose()
+      }
+      return live.carrier
+    })
+    try {
+      await expect((f.adapter.captureExecutionProcesses as any)(f.h, fixed)).rejects.toMatchObject({ code: 'WORKER_CARRIER_UNVERIFIED' })
+      expect(f.tmux.readProcessCarrier).toHaveBeenCalledTimes(change === 'metadata changed' ? 2 : 1)
+      expect(f.tmux.killSession).not.toHaveBeenCalled(); expect(live.child.exitCode).toBeNull()
+    } finally { await live.close() }
+  }, 30000)
+  it.each(['handle', 'fixed context'])('freezes the original caller %s before waiting for carrier facts', async target => {
+    const f = make(impl), fixed = fixedIncarnation(f.h)
+    await coldMetadata(f, fixed)
+    const live = await finiteCarrier(f)
+    f.tmux.readProcessCarrier.mockImplementation(async () => {
+      if (target === 'handle') (f.h as any).worker_id = 'replacement'
+      else (fixed as any).workspace = join(directory, 'replacement')
+      return live.carrier
+    })
+    try { expect(await (f.adapter.captureExecutionProcesses as any)(f.h, fixed)).toMatchObject([{ pid: live.child.pid }]) }
+    finally { await live.close() }
+  }, 30000)
+})
+
+function hasPrivateTmuxSupport(): boolean {
+  if (process.platform === 'win32') return false
+  try { execFileSync('tmux', ['-V'], { stdio: 'ignore' }); return true } catch { return false }
+}
+it.skipIf(!hasPrivateTmuxSupport())('joins cold adapters to an actual private tmux pane without using the default server', async () => {
+  const socket = 'crabot-cold-' + randomUUID(), workerId = 'cold-' + randomUUID(), name = `crabot-w-${workerId}-1`
+  const wrapper = join(directory, 'tmux-private'), ready = join(directory, 'tmux-ready')
+  await fs.writeFile(wrapper, `#!/bin/sh\nexec tmux -L ${socket} "$@"\n`, { mode: 0o700 })
+  const driver = new TmuxDriver({ tmuxBin: wrapper }), quote = (value: string) => "'" + value.replace(/'/g, "'\\''") + "'"
+  const source = `require('node:fs').writeFileSync(${JSON.stringify(ready)},String(process.pid));setTimeout(()=>process.exit(0),30000)`
+  let endpoint: TmuxControlEndpoint | undefined
+  try {
+    endpoint = await driver.newSession({ name, cwd: directory, command: quote(process.execPath) + ' -e ' + quote(source) })
+    const deadline = Date.now() + 5000
+    while (!await fs.stat(ready).catch(() => null)) { expect(Date.now()).toBeLessThan(deadline); await new Promise(resolve => setTimeout(resolve, 10)) }
+    const pid = Number(await fs.readFile(ready, 'utf8'))
+    for (const impl of ['claude-code', 'codex'] as const) {
+      const root = join(directory, impl), worker = join(root, workerId), file = join(worker, 'meta-1.json')
+      await fs.mkdir(worker, { recursive: true })
+      const h: IncarnationHandle = { worker_id: workerId, incarnation_id: 'fixed-' + impl, impl, seq: 1, session_ref: 'private-session' }
+      const fixed = fixedIncarnation(h)
+      await fs.writeFile(file, JSON.stringify({ seq: 1, workspace_root: fixed.workspace, session_id: h.session_ref, state: 'running' }))
+      const adapter = impl === 'claude-code' ? new ClaudeCodeAdapter({ dataDir: root, tmux: driver, claudeConfigPath: join(root, 'claude.json'), claudeProjectsDir: root })
+        : new CodexWorkerAdapter({ dataDir: root, tmux: driver, codexHomeSource: root })
+      const rebuild = vi.spyOn(adapter as any, 'ensureRuntime'), before = await fs.readFile(file)
+      try {
+        expect(await adapter.captureExecutionProcesses(h, fixed)).toMatchObject([{ pid }])
+        expect((adapter as any).runtimes.size).toBe(0); expect(rebuild).not.toHaveBeenCalled()
+        expect(await fs.readFile(file)).toEqual(before)
+      } finally { await adapter.dispose() }
+    }
+  } finally {
+    try { execFileSync(wrapper, ['kill-server'], { stdio: 'ignore', timeout: 5000 }) } catch { /* Only this private socket. */ }
+    if (endpoint) await removeTmuxControlEndpoint(endpoint)
+  }
+}, 30000)

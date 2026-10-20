@@ -1,3 +1,4 @@
+import type { WorkspaceRelocationIncarnation } from 'crabot-shared'
 import type { ModelFormat } from 'crabot-shared'
 import type { ToolDefinition, LLMAdapter } from '../engine/index.js'
 import type { LLMThinkingConfig } from '../engine/llm-adapter-types.js'
@@ -561,8 +562,8 @@ export interface WorkerProcessIdentity {
 }
 
 export interface WorkerAdapter {
-  /** Fixed-job observation only. Unknown carriers reject without cold reconstruction or stops. */
-  captureExecutionProcesses?(h: IncarnationHandle): Promise<ReadonlyArray<WorkerProcessIdentity>>
+  /** Fixed-job observation only. Fixed mainlines may read cold metadata without rebuilding a runtime. Unknown rejects. */
+  captureExecutionProcesses?(h: IncarnationHandle, fixed?: WorkspaceRelocationIncarnation): Promise<ReadonlyArray<WorkerProcessIdentity>>
   readRuntime?(handle: IncarnationHandle): Promise<WorkerRuntimeSnapshot | undefined>
   readonly implId: WorkerImplId
   detect(): Promise<DetectResult>

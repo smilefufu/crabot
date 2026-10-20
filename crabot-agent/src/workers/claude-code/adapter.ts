@@ -1,3 +1,5 @@
+import type { WorkspaceRelocationIncarnation } from 'crabot-shared'
+import { captureColdNativeProcesses } from '../cold-native-processes.js'
 import { nativeRuntimeRoot, nativeEventChannel, nativeEventSource, runtimeWorkspace, verifyNativeBinding, verifyPrivateNativeRuntime, verifyNativeRuntimeMetadata } from '../provision/native-runtime.js'
 /**
  * Claude Code WorkerAdapter.
@@ -1713,13 +1715,21 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     }
   }
 
-  /** Read only resident fixed-incarnation carriers; ensureRuntime also kills dead tmux sessions. */
-  async captureExecutionProcesses(h: IncarnationHandle): Promise<ReadonlyArray<WorkerProcessIdentity>> {
+  /** Read-only fixed carrier; cold mainlines need their original scope, never ensureRuntime side effects. */
+  async captureExecutionProcesses(h: IncarnationHandle, fixed?: WorkspaceRelocationIncarnation): Promise<ReadonlyArray<WorkerProcessIdentity>> {
+    h = Object.freeze({ ...h })
+    fixed = fixed ? Object.freeze({ ...fixed }) : undefined
     this.assertActive()
     const runtime = this.runtimes.get(instanceKey(h))
     const invalid = () => Object.assign(new Error('执行器化身与运行载体无法核验。'), { code: 'WORKER_CARRIER_UNVERIFIED' })
-    if (h.impl !== this.implId || !h.incarnation_id || !runtime || runtime.incarnation_id !== h.incarnation_id
-      || runtime.worker_id !== h.worker_id || runtime.seq !== h.seq) throw invalid()
+    if (h.impl !== this.implId || !h.incarnation_id || fixed && (fixed.incarnation_id !== h.incarnation_id || fixed.impl !== h.impl || fixed.seq !== h.seq)) throw invalid()
+    if (!runtime) {
+      if (!fixed) throw invalid()
+      return captureColdNativeProcesses(this.deps.dataDir, h, fixed, () => this.tmux.readProcessCarrier(`crabot-w-${h.worker_id}-${h.seq}`),
+        () => { this.assertActive(); return !this.runtimes.has(instanceKey(h)) })
+    }
+    if (runtime.incarnation_id !== h.incarnation_id || runtime.worker_id !== h.worker_id || runtime.seq !== h.seq
+      || fixed && runtime.workspaceRoot !== fixed.workspace) throw invalid()
     let processes: ReadonlyArray<WorkerProcessIdentity>
     if (runtime.headlessChild) {
       const { captureSpawnedProcessTree } = require(join(__dirname, '../../../../scripts/lib/spawned-process-tree.cjs'))
