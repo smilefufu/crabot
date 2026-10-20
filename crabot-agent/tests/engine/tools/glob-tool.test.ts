@@ -74,6 +74,26 @@ describe('createGlobTool', () => {
     expect(result.output).toBe('file.ts')
   })
 
+  it.each(['src/*.ts', 'src/**/*.ts'])('anchors directory-qualified pattern %s to the search base', async (pattern) => {
+    createFiles(['src/a.ts', 'src/b.ts', 'other/src/unrelated.ts'])
+    const tool = createGlobTool(() => tempDir)
+
+    const result = await tool.call({ pattern }, {})
+
+    expect(result.isError).toBe(false)
+    expect(result.output.split('\n')).toEqual(['src/a.ts', 'src/b.ts'])
+  })
+
+  it('anchors a pattern to an explicit base outside the worker cwd', async () => {
+    createFiles(['project/logs/authorized/result.json', 'worker/placeholder.txt'])
+    const tool = createGlobTool(() => join(tempDir, 'worker'))
+
+    const result = await tool.call({ pattern: 'authorized/*', path: '../project/logs' }, {})
+
+    expect(result.isError).toBe(false)
+    expect(result.output).toBe('authorized/result.json')
+  })
+
   it('ignores node_modules and .git', async () => {
     createFiles([
       'src/a.ts',

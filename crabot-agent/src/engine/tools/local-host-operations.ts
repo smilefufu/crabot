@@ -509,7 +509,7 @@ async function globOperation(input: Record<string, unknown>): Promise<LocalOpera
   const args = ['--no-config', '--no-ignore', '--hidden', '--files', '--no-messages', '--glob', pattern]
   for (const glob of DEFAULT_EXCLUDE_GLOBS) args.push('--glob', glob)
   for (const glob of getProtectedExcludeGlobs(searchRoot)) args.push('--glob', glob)
-  args.push(searchRoot)
+  args.push('.')
 
   const candidates: string[] = []
   let count = 0
@@ -522,7 +522,7 @@ async function globOperation(input: Record<string, unknown>): Promise<LocalOpera
       pending = pending.slice(newline + 1)
       if (full) {
         count++
-        addGlobCandidate(candidates, relative(searchRoot, full))
+        addGlobCandidate(candidates, relative(searchRoot, path.resolve(searchRoot, full)))
       }
       newline = pending.indexOf('\n')
     }
@@ -530,6 +530,7 @@ async function globOperation(input: Record<string, unknown>): Promise<LocalOpera
   }
   const outcome = await runHostProcess({
     argv: [rgPath, '--max-filesize=10M', '--threads=1', ...args],
+    cwd: searchRoot,
     // The outer helper owns the process group and must reap rg if it times out or dies.
     detached: false,
     captureStdout: false,
@@ -538,7 +539,7 @@ async function globOperation(input: Record<string, unknown>): Promise<LocalOpera
   })
   if (pending) {
     count++
-    addGlobCandidate(candidates, relative(searchRoot, pending))
+    addGlobCandidate(candidates, relative(searchRoot, path.resolve(searchRoot, pending)))
   }
   if (outcome.kind === 'spawn_error') return { result: { output: `Glob error: ${outcome.message ?? 'ripgrep spawn failed'}`, isError: true } }
   if (outcome.kind === 'timed_out') {
@@ -606,6 +607,9 @@ async function grepOperation(input: Record<string, unknown>): Promise<LocalOpera
   const outputMode = asString(input, 'output_mode') ?? 'files_with_matches'
   const contextLines = asFiniteInteger(input.context, 0)
   const headLimit = asFiniteInteger(input.head_limit, 250)
+  const isDirectory = (await fs.stat(searchRoot)).isDirectory()
+  const searchCwd = isDirectory ? searchRoot : path.dirname(searchRoot)
+  const searchTarget = isDirectory ? '.' : `.${path.sep}${path.basename(searchRoot)}`
   const args = ['--no-config', '--no-ignore', '--hidden', `--max-columns=${MAX_GREP_COLUMNS}`]
   if (glob) args.push('--glob', glob)
   for (const excluded of DEFAULT_EXCLUDE_GLOBS) args.push('--glob', excluded)
@@ -616,10 +620,10 @@ async function grepOperation(input: Record<string, unknown>): Promise<LocalOpera
     args.push('--line-number', '--with-filename')
     if (contextLines > 0) args.push('--context', String(contextLines))
   }
-  args.push('-e', pattern, searchRoot)
+  args.push('-e', pattern, '--', searchTarget)
   let result
   try {
-    result = await runRipgrep(args, { maxBytes: 2 * 1024 * 1024, timeoutMs: 60_000, detached: false })
+    result = await runRipgrep(args, { cwd: searchCwd, maxBytes: 2 * 1024 * 1024, timeoutMs: 60_000, detached: false })
   } catch (error) {
     return { result: { output: `Grep error: ${error instanceof Error ? error.message : String(error)}`, isError: true } }
   }
@@ -628,7 +632,8 @@ async function grepOperation(input: Record<string, unknown>): Promise<LocalOpera
   if (result.exitCode === 2 && !result.stdout) {
     return { result: { output: `Grep error: ${stderr || 'ripgrep exited with code 2'}`, isError: true } }
   }
-  let output = formatGrepOutput(result.stdout, headLimit)
+  const absoluteOutput = result.stdout.replace(/^\.[\\/]/gm, () => path.join(searchCwd, path.sep))
+  let output = formatGrepOutput(absoluteOutput, headLimit)
   if (result.truncated && !result.timedOut && !output.endsWith(grepTruncationHint())) output += grepTruncationHint()
   if (result.timedOut) output += '\n[搜索超时，结果可能不完整。请用更具体的 path / glob 缩小范围。]'
   return { result: { output, isError: false } }

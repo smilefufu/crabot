@@ -1,0 +1,359 @@
+{
+  "date": "2026-10-20",
+  "conclusion": "局部行为改善，整条主控→执行器链路尚未达标，整体请求成本下降未获验证；不据此宣称生产效果或因果结论。",
+  "method": {
+    "model": "gpt-6.1-sol",
+    "baseline_commit": "fc29ff6b9bb27fefbc9cdf98dc65306185c93100",
+    "conditions_hash": "c95f9770c7c2b0e82bdb9b2bac7d2be9cf7e052861a1dff7a1f89455a42179eb",
+    "cases_hash": "451e708afec1ec3455b5829892ec87b8b64f063d1a0a25193bbaa3d61fa8ee58",
+    "runner_hash": "a26d26871ebfcabb53d97ac36b6fdf3f82bf0187c85b4cac8ebbfea74e90b2ed",
+    "planned_trajectories": 24,
+    "repetitions_per_variant_per_case": 2,
+    "tools_identical_between_variants": true,
+    "production_tool_executions": 0,
+    "payload": "实际产品提示词和内置工具定义，六组人工场景；未发送生产 trace 或真实业务文件。",
+    "scope": "Manager 使用相关工具子集和适配器驱动，非完整 ManagerLoop；Worker 不包含外部 MCP、child 或真实投递。"
+  },
+  "execution": {
+    "completed": 22,
+    "incomplete": 2,
+    "network_errors": 2,
+    "token_truncations": 0,
+    "request_budget_exhaustions": 0,
+    "fixture_gaps": 2,
+    "observed_state_violations": 0,
+    "requests_corrected_batch": 132,
+    "requests_invalidated_batch": 87,
+    "requests_combined": 219,
+    "authorized_request_cap": 384,
+    "invalidated_batch": "replay-v2：模拟器漏处理 receipt && save，全部保留但不用于行为效果或完成率结论。",
+    "automatic_fixture_gap_flags": 0,
+    "manually_identified_contaminated_trajectories": 2,
+    "usable_individual_trajectories": 20
+  },
+  "paired_results": {
+    "valid_pairs": 8,
+    "unnecessary_containing_calls": {
+      "baseline": 6,
+      "candidate": 4
+    },
+    "model_requests": {
+      "baseline": 38,
+      "candidate": 39
+    },
+    "by_case": [
+      {
+        "case": "manager-handoff",
+        "valid_pairs": 1,
+        "unnecessary_containing_calls": {
+          "baseline": 1,
+          "candidate": 3
+        },
+        "model_requests": {
+          "baseline": 12,
+          "candidate": 12
+        }
+      },
+      {
+        "case": "worker-known-method",
+        "valid_pairs": 0,
+        "unnecessary_containing_calls": {
+          "baseline": 0,
+          "candidate": 0
+        },
+        "model_requests": {
+          "baseline": 0,
+          "candidate": 0
+        }
+      },
+      {
+        "case": "readonly-code",
+        "valid_pairs": 2,
+        "unnecessary_containing_calls": {
+          "baseline": 0,
+          "candidate": 0
+        },
+        "model_requests": {
+          "baseline": 5,
+          "candidate": 6
+        }
+      },
+      {
+        "case": "fresh-statistics",
+        "valid_pairs": 2,
+        "unnecessary_containing_calls": {
+          "baseline": 0,
+          "candidate": 0
+        },
+        "model_requests": {
+          "baseline": 4,
+          "candidate": 4
+        }
+      },
+      {
+        "case": "changed-owner",
+        "valid_pairs": 2,
+        "unnecessary_containing_calls": {
+          "baseline": 3,
+          "candidate": 0
+        },
+        "model_requests": {
+          "baseline": 12,
+          "candidate": 12
+        }
+      },
+      {
+        "case": "unknown-previous-write",
+        "valid_pairs": 1,
+        "unnecessary_containing_calls": {
+          "baseline": 2,
+          "candidate": 1
+        },
+        "model_requests": {
+          "baseline": 5,
+          "candidate": 5
+        }
+      }
+    ]
+  },
+  "manual_adjudication": {
+    "reviewed": "核对24条轨迹的工具输入、回包、终态与最终回答；主控结果另核对 send_message 正文，不将空 end_turn 当投递。",
+    "completed_answer_consistency": "22条有最终回答的轨迹均与模拟终态一致；其中两条基线受模拟器不支持的写法污染，不用于效果比较。2条502缺失同样不算模型失败。",
+    "direct_worker": "已验证方法场景两条基线分别遇502和模拟器缺口，没有完整有效配对；新版两条均无标记的多余检查，仅作单版观察。容器变化两配对合计3→0；未知前次写入一有效配对2→1，仍加载一次项目指南。",
+    "manager_counterexample": "仅一组完整配对：baseline-2为1次，新版candidate-2为3次；新版两次均加载项目指南、查看目录及部署历史。委托仍出现读取项目规则和完成证据入口的要求，不能单凭此实验确定唯一成因。",
+    "required_checks": "候选均保留当前容器核实、对应交易回执和写后保存；未知写入两次均先查 tx-previous，未重复 add；动态统计两次均查新值28/7/112。",
+    "readonly_no_demonstrated_gain": "只读源码与动态统计各两组完整配对，旧/新均无多余检查；不能把维持表现说成改善。",
+    "fixture_exclusions": {
+      "worker-known-method-baseline-2": {
+        "kind": "simulator_shell_substitution",
+        "reason": "合法的 inspect=$(python3 ... --target user-17) 被模拟器当成缺目标参数；其后补读和检查受错误回包污染。"
+      },
+      "unknown-previous-write-baseline-2": {
+        "kind": "simulator_subcommand_help",
+        "reason": "模拟器只支持顶层 --help，inspect --help 被当成缺目标参数；保守剔除整条及其配对，避免把模拟器限制当模型低效。"
+      }
+    },
+    "unsupported_shell_boundary": "自动fixture_gap未识别命令替换和子命令help缺口，人工复核后剔除；不因模拟器显示completed/goal_verified就计入有效样本。"
+  },
+  "limitations": [
+    "每场景每版仅两次；两条基线502、另两条基线有模拟器缺口，剔除对应配对后仅8组有效配对，没有显著性或稳定性结论。",
+    "场景明确提供已验证路径、有效规则与历史盘点不是新要求的线索；不等价复现真实历史对话。",
+    "unnecessary只计包含多余检查的调用；混合Bash可能同时做有效工作，不能按整次费用或耗时折算。",
+    "有效配对模型请求38→39，不能声称整体调用成本下降；未测生产token费用或线上开工时延。",
+    "三处提示词合并比较，不能归因某一条；搜索修复效果由独立真实rg回归验证，不由模拟器证明。"
+  ],
+  "verification": {
+    "focused_tests": 67,
+    "simulator_tests": 7,
+    "compiled_search_cases": 8,
+    "agent_build": "passed",
+    "diff_check": "passed",
+    "preexisting_role_prompt_assertions": 2,
+    "deployment": "本轮未部署或重启。"
+  },
+  "trajectories": [
+    {
+      "id": "changed-owner-baseline-1",
+      "status": "completed",
+      "goal_verified_simulated": true,
+      "unnecessary_containing_calls": 1,
+      "requests": 6,
+      "eligible_for_behavior_comparison": true
+    },
+    {
+      "id": "changed-owner-baseline-2",
+      "status": "completed",
+      "goal_verified_simulated": true,
+      "unnecessary_containing_calls": 2,
+      "requests": 6,
+      "eligible_for_behavior_comparison": true
+    },
+    {
+      "id": "changed-owner-candidate-1",
+      "status": "completed",
+      "goal_verified_simulated": true,
+      "unnecessary_containing_calls": 0,
+      "requests": 6,
+      "eligible_for_behavior_comparison": true
+    },
+    {
+      "id": "changed-owner-candidate-2",
+      "status": "completed",
+      "goal_verified_simulated": true,
+      "unnecessary_containing_calls": 0,
+      "requests": 6,
+      "eligible_for_behavior_comparison": true
+    },
+    {
+      "id": "fresh-statistics-baseline-1",
+      "status": "completed",
+      "goal_verified_simulated": true,
+      "unnecessary_containing_calls": 0,
+      "requests": 2,
+      "eligible_for_behavior_comparison": true
+    },
+    {
+      "id": "fresh-statistics-baseline-2",
+      "status": "completed",
+      "goal_verified_simulated": true,
+      "unnecessary_containing_calls": 0,
+      "requests": 2,
+      "eligible_for_behavior_comparison": true
+    },
+    {
+      "id": "fresh-statistics-candidate-1",
+      "status": "completed",
+      "goal_verified_simulated": true,
+      "unnecessary_containing_calls": 0,
+      "requests": 2,
+      "eligible_for_behavior_comparison": true
+    },
+    {
+      "id": "fresh-statistics-candidate-2",
+      "status": "completed",
+      "goal_verified_simulated": true,
+      "unnecessary_containing_calls": 0,
+      "requests": 2,
+      "eligible_for_behavior_comparison": true
+    },
+    {
+      "id": "manager-handoff-baseline-1",
+      "status": "incomplete",
+      "goal_verified_simulated": false,
+      "unnecessary_containing_calls": 0,
+      "requests": 4,
+      "error": "provider HTTP 502 overload",
+      "eligible_for_behavior_comparison": false
+    },
+    {
+      "id": "manager-handoff-baseline-2",
+      "status": "completed",
+      "goal_verified_simulated": true,
+      "unnecessary_containing_calls": 1,
+      "requests": 12,
+      "eligible_for_behavior_comparison": true
+    },
+    {
+      "id": "manager-handoff-candidate-1",
+      "status": "completed",
+      "goal_verified_simulated": true,
+      "unnecessary_containing_calls": 3,
+      "requests": 15,
+      "eligible_for_behavior_comparison": true
+    },
+    {
+      "id": "manager-handoff-candidate-2",
+      "status": "completed",
+      "goal_verified_simulated": true,
+      "unnecessary_containing_calls": 3,
+      "requests": 12,
+      "eligible_for_behavior_comparison": true
+    },
+    {
+      "id": "readonly-code-baseline-1",
+      "status": "completed",
+      "goal_verified_simulated": true,
+      "unnecessary_containing_calls": 0,
+      "requests": 3,
+      "eligible_for_behavior_comparison": true
+    },
+    {
+      "id": "readonly-code-baseline-2",
+      "status": "completed",
+      "goal_verified_simulated": true,
+      "unnecessary_containing_calls": 0,
+      "requests": 2,
+      "eligible_for_behavior_comparison": true
+    },
+    {
+      "id": "readonly-code-candidate-1",
+      "status": "completed",
+      "goal_verified_simulated": true,
+      "unnecessary_containing_calls": 0,
+      "requests": 3,
+      "eligible_for_behavior_comparison": true
+    },
+    {
+      "id": "readonly-code-candidate-2",
+      "status": "completed",
+      "goal_verified_simulated": true,
+      "unnecessary_containing_calls": 0,
+      "requests": 3,
+      "eligible_for_behavior_comparison": true
+    },
+    {
+      "id": "unknown-previous-write-baseline-1",
+      "status": "completed",
+      "goal_verified_simulated": true,
+      "unnecessary_containing_calls": 2,
+      "requests": 5,
+      "eligible_for_behavior_comparison": true
+    },
+    {
+      "id": "unknown-previous-write-baseline-2",
+      "status": "completed",
+      "goal_verified_simulated": true,
+      "unnecessary_containing_calls": 2,
+      "requests": 7,
+      "eligible_for_behavior_comparison": false,
+      "manual_exclusion": {
+        "kind": "simulator_subcommand_help",
+        "reason": "模拟器只支持顶层 --help，inspect --help 被当成缺目标参数；保守剔除整条及其配对，避免把模拟器限制当模型低效。"
+      }
+    },
+    {
+      "id": "unknown-previous-write-candidate-1",
+      "status": "completed",
+      "goal_verified_simulated": true,
+      "unnecessary_containing_calls": 1,
+      "requests": 5,
+      "eligible_for_behavior_comparison": true
+    },
+    {
+      "id": "unknown-previous-write-candidate-2",
+      "status": "completed",
+      "goal_verified_simulated": true,
+      "unnecessary_containing_calls": 1,
+      "requests": 5,
+      "eligible_for_behavior_comparison": true
+    },
+    {
+      "id": "worker-known-method-baseline-1",
+      "status": "incomplete",
+      "goal_verified_simulated": false,
+      "unnecessary_containing_calls": 2,
+      "requests": 4,
+      "error": "provider HTTP 502 overload",
+      "eligible_for_behavior_comparison": false
+    },
+    {
+      "id": "worker-known-method-baseline-2",
+      "status": "completed",
+      "goal_verified_simulated": true,
+      "unnecessary_containing_calls": 4,
+      "requests": 8,
+      "eligible_for_behavior_comparison": false,
+      "manual_exclusion": {
+        "kind": "simulator_shell_substitution",
+        "reason": "合法的 inspect=$(python3 ... --target user-17) 被模拟器当成缺目标参数；其后补读和检查受错误回包污染。"
+      }
+    },
+    {
+      "id": "worker-known-method-candidate-1",
+      "status": "completed",
+      "goal_verified_simulated": true,
+      "unnecessary_containing_calls": 0,
+      "requests": 6,
+      "eligible_for_behavior_comparison": true
+    },
+    {
+      "id": "worker-known-method-candidate-2",
+      "status": "completed",
+      "goal_verified_simulated": true,
+      "unnecessary_containing_calls": 0,
+      "requests": 6,
+      "eligible_for_behavior_comparison": true
+    }
+  ],
+  "evidence": "worker-prework-audit-20261020/replay-v3：冻结plan/conditions、24张轨迹卡片和journal；原始记录保存在本任务观察目录，仓库只保存精简结果。"
+}
