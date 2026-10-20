@@ -3,6 +3,7 @@ import http from 'node:http'
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import fs from 'node:fs/promises'
+import { existsSync } from 'node:fs'
 import path from 'node:path'
 import { randomUUID, createHash } from 'node:crypto'
 import { captureLegacyWorkspaceExecutions } from '../../src/workers/harness/workspace-legacy-executions.js'
@@ -112,8 +113,15 @@ describe('Agent fixed native process capture RPC', () => {
   async function writeLegacyBoundary(f: Awaited<ReturnType<typeof fixture>>, ready = true, capturedAt = '2026-10-20T00:02:00.000Z') {
     const value = captureLegacyWorkspaceExecutions(await f.agent.managerStack.ledger.listAllWorkers(), capturedAt)
     const bytes = JSON.stringify(value), dir = path.join(f.data, 'workspace-control')
-    await fs.writeFile(path.join(dir, 'legacy-executions.json'), bytes, { mode: 0o600 })
-    if (ready) await fs.writeFile(path.join(dir, 'legacy-executions.ready'), JSON.stringify({ schema_version: 1, sha256: createHash('sha256').update(bytes).digest('hex') }), { mode: 0o600 })
+    const write = async (name: string, content: string) => {
+      const file = path.join(dir, name)
+      if (process.platform === 'win32' && !existsSync(file)) {
+        require('../../../scripts/lib/process-identity.cjs').writePrivateFile(file, content)
+      } else await fs.writeFile(file, content, { mode: 0o600 })
+    }
+    await write('legacy-executions.json', bytes)
+    if (ready) await write('legacy-executions.ready', JSON.stringify({ schema_version: 1, sha256: createHash('sha256').update(bytes).digest('hex') }))
+    expect(require('../../../scripts/lib/workspace-legacy-record.cjs').readWorkspaceLegacyExecutions(f.data)?.status).toBe(ready ? 'ready' : 'prepared')
     return value
   }
   it('consumes a real ready boundary through Harness and cold Claude metadata without stopping or rebuilding', async () => {
