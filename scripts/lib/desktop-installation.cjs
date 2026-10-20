@@ -42,15 +42,26 @@ function readDesktopInstallation(root) {
     return { root: canonical, record, dataDir: path.join(canonical, 'data'), command: path.join(canonical, 'bin', process.platform === 'win32' ? 'crabot.exe' : 'crabot') }
   } catch { fail() }
 }
+function readPairSelection(installation) {
+  const selection = json(path.join(installation.root, 'current-release.json'), true)
+  if (!keys(selection, ['schema_version', 'version', 'gui_id', 'core_id']) || selection.schema_version !== 1
+    || !version(selection.version) || !uuid(selection.gui_id) || !digest(selection.core_id)) fail()
+  const serialized = JSON.stringify({ schema_version: 1, version: selection.version, gui_id: selection.gui_id, core_id: selection.core_id }) + '\n'
+  if (Buffer.byteLength(serialized) > 1024 || fs.readFileSync(path.join(installation.root, 'current-release.json'), 'utf8') !== serialized) fail()
+  return selection
+}
+// Repair diagnostics only. This reference has no executable or code-loading context.
+function readDesktopPairReference(root) {
+  try {
+    const installation = readDesktopInstallation(root), selection = readPairSelection(installation)
+    return { installation_id: installation.record.installation_id, install_root: installation.root, data_dir: installation.dataDir, selection }
+  } catch { fail() }
+}
 function readDesktopSelection(root) {
   try {
     const installation = readDesktopInstallation(root)
     if (present(path.join(installation.root, '.desktop-installing.json'))) fail()
-    const selection = json(path.join(installation.root, 'current-release.json'), true)
-    if (!keys(selection, ['schema_version', 'version', 'gui_id', 'core_id']) || selection.schema_version !== 1
-      || !version(selection.version) || !uuid(selection.gui_id) || !digest(selection.core_id)) fail()
-    const serialized = JSON.stringify({ schema_version: 1, version: selection.version, gui_id: selection.gui_id, core_id: selection.core_id }) + '\n'
-    if (Buffer.byteLength(serialized) > 1024 || fs.readFileSync(path.join(installation.root, 'current-release.json'), 'utf8') !== serialized) fail()
+    const selection = readPairSelection(installation)
     const guiRoot = path.join(installation.root, 'app/releases', selection.gui_id)
     const coreRoot = path.join(installation.root, 'releases', selection.core_id)
     directory(guiRoot); directory(coreRoot)
@@ -101,6 +112,10 @@ function locatePinnedDesktopGui(resources, pinText) {
 }
 function applyDesktopEnvironment(installation, env = process.env) {
   try {
+    if (!installation || typeof installation.root !== 'string' || !path.isAbsolute(installation.root)
+      || installation.dataDir !== path.join(installation.root, 'data') || !digest(installation.selection?.core_id)
+      || installation.coreRoot !== path.join(installation.root, 'releases', installation.selection.core_id)
+      || typeof installation.executable !== 'string' || !path.isAbsolute(installation.executable)) fail()
     if (env.CRABOT_DEV === 'true' || Number(env.CRABOT_PORT_OFFSET || 0) !== 0
       || env.DATA_DIR && fs.realpathSync.native(path.resolve(env.DATA_DIR)) !== installation.dataDir) fail()
   } catch { fail() }
@@ -110,4 +125,4 @@ function applyDesktopEnvironment(installation, env = process.env) {
   env.CRABOT_DEV = 'false'
   env.CRABOT_PRODUCT_REQUIRED = '1'
 }
-module.exports = { readDesktopInstallation, readDesktopSelection, locateDesktopCore, locateDesktopGui, locatePinnedDesktopGui, applyDesktopEnvironment }
+module.exports = { readDesktopInstallation, readDesktopPairReference, readDesktopSelection, locateDesktopCore, locateDesktopGui, locatePinnedDesktopGui, applyDesktopEnvironment }

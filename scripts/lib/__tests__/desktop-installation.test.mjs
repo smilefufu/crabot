@@ -190,3 +190,51 @@ test('changing outer pair declarations and selector together cannot change a pro
   assert.throws(() => desktop.locatePinnedDesktopGui(resources, pin), { code: 'CRABOT_DESKTOP_INSTALLATION' })
   assert.deepEqual(await fs.readdir(path.join(f.root, 'data')), [])
 })
+
+for (const damage of ['missing GUI', 'missing Core', 'missing pin', 'changed pin']) test('repair can read the original installation reference without treating damaged programs as executable authority: ' + damage, async t => {
+  const f = await fixture(t), data = path.join(f.root, 'data'), sentinel = path.join(data, 'user-state.json')
+  await fs.writeFile(sentinel, '{"keep":"original user state"}')
+  const selected = await fs.readFile(path.join(f.root, 'current-release.json')), rootRecord = await fs.readFile(path.join(f.root, 'desktop-installation.json'))
+  if (damage === 'missing GUI') await fs.rm(f.guiRoot, { recursive: true })
+  if (damage === 'missing Core') await fs.rm(f.coreRoot, { recursive: true })
+  if (damage === 'missing pin') await fs.rm(path.join(f.resources, 'desktop-release.json'))
+  if (damage === 'changed pin') await fs.writeFile(path.join(f.resources, 'desktop-release.json'), JSON.stringify({ ...f.selection, core_id: 'a'.repeat(64) }))
+  assert.deepEqual(desktop.readDesktopPairReference(f.root), { installation_id: f.record.installation_id, install_root: f.root, data_dir: data, selection: f.selection })
+  assert.throws(() => desktop.readDesktopSelection(f.root), { code: 'CRABOT_DESKTOP_INSTALLATION' })
+  assert.equal(await fs.readFile(sentinel, 'utf8'), '{"keep":"original user state"}')
+  assert.deepEqual(await fs.readFile(path.join(f.root, 'current-release.json')), selected)
+  assert.deepEqual(await fs.readFile(path.join(f.root, 'desktop-installation.json')), rootRecord)
+  assert.deepEqual(await fs.readdir(data), ['user-state.json'])
+})
+test('repair references can inspect a pending install but cannot authorize ordinary startup or clear protection', async t => {
+  const f = await fixture(t), pending = path.join(f.root, '.desktop-installing.json')
+  await fs.writeFile(pending, 'pending evidence')
+  const reference = desktop.readDesktopPairReference(f.root)
+  assert.equal(reference.install_root, f.root); assert.deepEqual(reference.selection, f.selection)
+  for (const key of ['executable', 'resources', 'coreRoot', 'guiRoot', 'dataDir']) assert.equal(Object.hasOwn(reference, key), false)
+  assert.throws(() => desktop.readDesktopSelection(f.root), { code: 'CRABOT_DESKTOP_INSTALLATION' })
+  assert.equal(await fs.readFile(pending, 'utf8'), 'pending evidence')
+})
+test('repair references retain strict owner, selector and data-directory checks without replacing anything', async t => {
+  const f = await fixture(t), selector = path.join(f.root, 'current-release.json'), installation = path.join(f.root, 'desktop-installation.json')
+  for (const selection of [{ ...f.selection, gui_id: '../elsewhere' }, { ...f.selection, extra: true }, { ...f.selection, schema_version: 2 }]) {
+    await fs.writeFile(selector, JSON.stringify(selection) + '\n')
+    assert.throws(() => desktop.readDesktopPairReference(f.root), { code: 'CRABOT_DESKTOP_INSTALLATION' })
+  }
+  await fs.writeFile(selector, JSON.stringify(f.selection))
+  assert.throws(() => desktop.readDesktopPairReference(f.root), { code: 'CRABOT_DESKTOP_INSTALLATION' })
+  await fs.writeFile(selector, JSON.stringify(f.selection) + '\n')
+  await fs.writeFile(installation, JSON.stringify({ ...f.record, owner: 'different-account' }) + '\n')
+  assert.throws(() => desktop.readDesktopPairReference(f.root), { code: 'CRABOT_DESKTOP_INSTALLATION' })
+  await fs.writeFile(installation, JSON.stringify(f.record) + '\n')
+  await fs.rmdir(path.join(f.root, 'data'))
+  assert.throws(() => desktop.readDesktopPairReference(f.root), { code: 'CRABOT_DESKTOP_INSTALLATION' })
+  await assert.rejects(fs.stat(path.join(f.root, 'data')), { code: 'ENOENT' })
+})
+
+test('a repair reference cannot accidentally become startup environment or select a default empty instance', async t => {
+  const f = await fixture(t), reference = desktop.readDesktopPairReference(f.root), env = { PATH: 'unchanged' }
+  assert.throws(() => desktop.applyDesktopEnvironment(reference, env), { code: 'CRABOT_DESKTOP_INSTALLATION' })
+  assert.deepEqual(env, { PATH: 'unchanged' })
+  assert.deepEqual(await fs.readdir(path.join(f.root, 'data')), [])
+})
