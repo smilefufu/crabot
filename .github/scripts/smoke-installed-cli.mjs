@@ -98,7 +98,21 @@ try {
     const credentialScript = 'import{pathToFileURL}from"node:url";const m=await import(pathToFileURL(process.argv[1]));await m.writeCredentials(process.argv[2],await m.newCredentialsFromPassword("isolated-cli-smoke-password",{is_temp:false,changed_via:"start"}))'
     await execute(node, ['--input-type=module', '-e', credentialScript, path.join(payload, 'crabot-admin/dist/credentials.js'), path.join(data, 'admin')], { env, timeout: 30_000 })
     started = true
-    await execute(command, ['start', '-d'], { env, timeout: 180_000, maxBuffer: 4 * 1024 * 1024 })
+    console.log('CRABOT_CI_INSTALLED_STARTUP ' + JSON.stringify({ phase: 'invoke', at: new Date().toISOString() }))
+    const starting = execute(command, ['start', '-d'], { env, timeout: 180_000, maxBuffer: 4 * 1024 * 1024 })
+    // Recognize only a fixed phase; never forward child output, arguments or paths.
+    const waitMessage = '[crabot] Starting in background; waiting for MM and Admin (up to 30s)...'
+    let outputTail = ''
+    function observeWait(chunk) {
+      const text = outputTail + chunk.toString()
+      if (text.includes(waitMessage)) {
+        console.log('CRABOT_CI_INSTALLED_STARTUP ' + JSON.stringify({ phase: 'health_wait', at: new Date().toISOString() }))
+        starting.child.stdout.off('data', observeWait)
+        outputTail = ''
+      } else outputTail = text.slice(1 - waitMessage.length)
+    }
+    starting.child.stdout.on('data', observeWait)
+    await starting
     await checkInstalledServices()
     await stopInstalledCore()
     await installPhase('after-stop')
