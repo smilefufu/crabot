@@ -131,3 +131,34 @@ test('processes from different Linux boots cannot share an ancestry observation 
   f.values.set(11, root); f.values.set(12, info(12, 11, '22222222-2222-4222-8222-222222222222\n:101')); f.children.set(12, [])
   assert.throws(() => captureOwnedProcessTree([root], f.api), { code: 'CRABOT_PROCESS_SCOPE' })
 })
+
+for (const unreadable of [false, true]) test('a newly enumerated child with independent kernel exit proof is absent from the live tree: unreadable=' + unreadable, () => {
+  const f = fixture()
+  if (unreadable) f.values.set(12, new Error('no executable image after exit'))
+  else f.values.delete(12)
+  const exits = []
+  f.api.isProcessExited = pid => { exits.push(pid); return pid === 12 }
+  assert.deepEqual(captureOwnedProcessTree([info(11)], f.api).map(item => item.pid), [11])
+  assert.deepEqual(exits, [12]); assert.equal(f.queried.includes(13), false)
+})
+for (const result of [false, undefined, 'true', 'throws']) test('missing child image without definite kernel exit remains unknown: ' + result, () => {
+  const f = fixture(); f.values.delete(12)
+  f.api.isProcessExited = () => { if (result === 'throws') throw new Error('kernel unavailable'); return result }
+  assert.throws(() => captureOwnedProcessTree([info(11)], f.api), { code: 'CRABOT_PROCESS_SCOPE' })
+})
+test('kernel exit cannot excuse a readable child with wrong ancestry or an invalid root', () => {
+  const f = fixture(); f.values.set(12, info(12, 999, '101')); f.api.isProcessExited = () => true
+  assert.throws(() => captureOwnedProcessTree([info(11)], f.api), { code: 'CRABOT_PROCESS_SCOPE' })
+  f.values.delete(11)
+  assert.throws(() => captureOwnedProcessTree([info(11)], f.api), { code: 'CRABOT_PROCESS_SCOPE' })
+})
+test('Linux keeps an unreaped exited child in the child list without making a live module unobservable', { skip: process.platform !== 'linux', timeout: 30000 }, async t => {
+  const script = `const child=require('node:child_process').spawn(process.execPath,['-e','process.exit(0)'],{stdio:'ignore'});child.once('spawn',()=>{process.send({pid:child.pid});Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,15000)});setInterval(()=>{},1000);setTimeout(()=>process.exit(0),20000).unref()`
+  const root = spawn(process.execPath, ['-e', script], { stdio: ['ignore', 'ignore', 'inherit', 'ipc'] }), ended = once(root, 'exit')
+  t.after(async () => { if (root.exitCode === null && root.signalCode === null) root.kill('SIGKILL'); await ended })
+  const [{ pid }] = await once(root, 'message'), expected = native.inspectProcess(root.pid), deadline = Date.now() + 5000
+  while (!native.isProcessExited(pid)) { assert.ok(Date.now() < deadline, 'fixture did not exit'); await new Promise(resolve => setTimeout(resolve, 10)) }
+  assert.ok(native.listChildProcessIds(root.pid).includes(pid)); assert.equal(native.inspectProcess(pid), null)
+  assert.deepEqual(captureOwnedProcessTree([expected]).map(item => item.pid), [root.pid])
+  assert.equal(root.exitCode, null)
+})

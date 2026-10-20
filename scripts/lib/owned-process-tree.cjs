@@ -40,7 +40,12 @@ function captureOwnedProcessTree(roots, api = native) {
       if (!Array.isArray(children) || children.length > 32768 || new Set(children).size !== children.length) fail()
       for (const pid of children) {
         if (!validPid(pid) || pid === process.pid) fail()
-        const child = api.inspectProcess(pid)
+        let child
+        try { child = api.inspectProcess(pid) } catch { /* An independent kernel exit check is still required below. */ }
+        if (child == null) {
+          if (api.isProcessExited?.(pid) === true) continue
+          fail()
+        }
         if (!valid(child) || child.pid !== pid || child.owner !== self.owner || child.parent !== parent.pid
           || !atLeast(child.started, parent.started)) fail()
         let ancestor = parent.pid
