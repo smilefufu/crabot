@@ -37,6 +37,7 @@ export async function runManagedCore({ root, dataDir, mmPort, env, stdio, cleanu
     await once(mm, 'spawn')
     recordMmProcess(dataDir, record.generation, mm.pid)
   } catch (error) {
+    log(`[controller] MM registration failed: ${error.code ?? 'UNKNOWN'} ${error.message}\n`)
     // Spawn succeeded but ownership could not be recorded: stop only this concrete child handle.
     if (mm.exitCode === null && mm.signalCode === null) mm.kill('SIGKILL')
     finish(1); throw error

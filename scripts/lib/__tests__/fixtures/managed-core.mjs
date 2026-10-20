@@ -1,4 +1,4 @@
-import { writeFileSync } from 'node:fs'
+import { writeFileSync, appendFileSync } from 'node:fs'
 import { runManagedCore } from '../../managed-core.mjs'
 import identity from '../../process-identity.cjs'
 
@@ -24,5 +24,8 @@ identity.inspectProcess = pid => {
 await runManagedCore({
   root: process.env.TEST_CORE_ROOT, dataDir: process.env.TEST_DATA_DIR,
   mmPort: Number(process.env.TEST_PORT), env: process.env,
-  stdio: ['ignore', 'inherit', 'inherit'], cleanup: code => process.exit(code), log: message => process.stdout.write(message),
+  stdio: ['ignore', 'inherit', 'inherit'], cleanup: code => process.exit(code), log: message => {
+    if (process.env.TEST_CONTROLLER_LOG) appendFileSync(process.env.TEST_CONTROLLER_LOG, message)
+    process.stdout.write(message)
+  },
 })

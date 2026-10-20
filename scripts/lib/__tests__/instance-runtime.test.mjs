@@ -26,7 +26,7 @@ async function fixture(t, delay = 100, registrationDelay = 0, { forceRegistratio
   const probe = createServer().listen(0, '127.0.0.1'); await once(probe, 'listening')
   const port = probe.address().port; await new Promise(resolve => probe.close(resolve))
   const child = spawn(process.execPath, [fileURLToPath(new URL('./fixtures/managed-core.mjs', import.meta.url))], {
-    env: { ...process.env, TEST_CORE_ROOT: root, TEST_DATA_DIR: data, TEST_PORT: String(port), TEST_MARKER: marker, TEST_READY: ready, TEST_STOP_DELAY: String(delay), TEST_REGISTER_DELAY: String(registrationDelay), TEST_IDENTITY_REPORT: join(root, 'identity-report.json'), TEST_FORCE_REGISTRATION_FAILURE: forceRegistrationFailure ? '1' : '' },
+    env: { ...process.env, TEST_CORE_ROOT: root, TEST_DATA_DIR: data, TEST_PORT: String(port), TEST_MARKER: marker, TEST_READY: ready, TEST_STOP_DELAY: String(delay), TEST_REGISTER_DELAY: String(registrationDelay), TEST_IDENTITY_REPORT: join(root, 'identity-report.json'), TEST_FORCE_REGISTRATION_FAILURE: forceRegistrationFailure ? '1' : '', TEST_CONTROLLER_LOG: join(root, 'controller.log') },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
   let output = ''; child.stdout.on('data', chunk => { output += chunk }); child.stderr.on('data', chunk => { output += chunk })
@@ -47,8 +47,9 @@ async function fixture(t, delay = 100, registrationDelay = 0, { forceRegistratio
     if (child.exitCode !== null || child.signalCode !== null || Date.now() > deadline) {
       if (child.exitCode !== null || child.signalCode !== null) await settleClose(closed, 1000)
       const read = name => { try { return JSON.parse(readFileSync(join(root, name), 'utf8')) } catch { return null } }
+      const controllerLog = existsSync(join(root, 'controller.log')) ? readFileSync(join(root, 'controller.log'), 'utf8').slice(-6000) : ''
       throw new Error('Fixture failed: ' + JSON.stringify({ exit_code: child.exitCode, signal: child.signalCode, ready: existsSync(ready),
-        identity: read('identity-report.json'), runtime: read('instance-runtime.json'), output: output.slice(-6000) }))
+        identity: read('identity-report.json'), runtime: read('data/instance-runtime.json'), controller_log: controllerLog, output: output.slice(-6000) }))
     }
     await pause(25)
   }
@@ -171,6 +172,9 @@ test('failed startup fixture reports the exit and identity evidence before clean
   await assert.rejects(fixture(t, 100, 0, { forceRegistrationFailure: true }), error => {
     assert.match(error.message, /"exit_code":1/)
     assert.match(error.message, /"forced":true/)
+    const report = JSON.parse(error.message.slice('Fixture failed: '.length))
+    assert.equal(report.runtime.mm, null)
+    assert.match(report.controller_log, /MM registration failed.*CRABOT_INSTANCE_UNVERIFIED/)
     return true
   })
 })
