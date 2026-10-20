@@ -231,6 +231,8 @@ export class ModuleManager {
 
     await this.runtimeRegistry.initialize()
     await this.runtimeRegistry.recoverOrphans({
+      // Maintenance recovery must retain execution evidence for its fixed job.
+      moduleId: workspaceMaintenancePending(this.dataDir) ? 'admin-web' : undefined,
       currentRuntimeIds: this.currentRuntimeIds(),
       gracefulTimeoutMs: this.config.shutdown_timeout * 1000,
     })

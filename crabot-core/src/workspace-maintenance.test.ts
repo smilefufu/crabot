@@ -3,6 +3,7 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import { tmpdir } from 'node:os'
 import ModuleManager from './index.js'
+import { ModuleRuntimeRegistry } from './module-runtime-registry.js'
 
 describe.each(['relocation.json', 'relocation-workers.json', 'relocation-stop-attempt.json', 'relocation-stop-submission.json', 'relocation-modules.json', 'relocation-module-stop-attempt.json', 'relocation-module-processes', 'relocation-module-stop-submission.json'])('workspace maintenance module admission: %s', record => {
   async function fixture() {
@@ -20,6 +21,31 @@ describe.each(['relocation.json', 'relocation-workers.json', 'relocation-stop-at
     }
     return { data, manager, freeze, cleanup: async () => { manager.processes.clear(); await manager.stop(); await fs.rm(data, { recursive: true, force: true }) } }
   }
+
+
+  it('restores only management orphans and retains business runtime evidence during maintenance startup', async () => {
+    const f = await fixture(), terminate = vi.fn(async () => undefined)
+    const registry = new ModuleRuntimeRegistry(f.data, {
+      probeProcessStartIdentity: async pid => 'fixture-birth-' + pid,
+      terminateProcessTree: terminate,
+      probeRuntimeIdentity: async () => null,
+    })
+    f.manager.runtimeRegistry = registry
+    try {
+      await registry.initialize()
+      await registry.recordSpawn({ runtimeId: 'fixed-admin', moduleId: 'admin-web', rootPid: 71001, modulePort: 19801 })
+      await registry.recordSpawn({ runtimeId: 'fixed-business', moduleId: 'memory', rootPid: 71002, modulePort: 19802 })
+      const file = path.join(f.data, 'module-runtime-registry/records/fixed-business.json')
+      const before = await fs.readFile(file)
+      await f.freeze()
+      await f.manager.start()
+      expect(f.manager.server.listening).toBe(true)
+      expect(terminate.mock.calls.map(call => call[0])).toEqual([71001])
+      expect(await fs.readFile(file)).toEqual(before)
+      expect((await registry.listRecords()).map(item => item.runtime_id)).toEqual(['fixed-business'])
+      expect(f.manager.processes.size).toBe(0)
+    } finally { await f.cleanup() }
+  })
 
   it('rejects ordinary business start/restart before queueing but permits Admin and stop requests', async () => {
     const f = await fixture(), enqueue = vi.spyOn(f.manager, 'enqueueLifecycle').mockResolvedValue(undefined)
@@ -92,4 +118,16 @@ describe.each(['relocation.json', 'relocation-workers.json', 'relocation-stop-at
     } finally { release(); await f.cleanup() }
   })
 
+})
+
+it('retains ordinary all-module orphan recovery when no workspace maintenance is pending', async () => {
+  const data = await fs.mkdtemp(path.join(tmpdir(), 'crabot-mm-no-workspace-gate-'))
+  const manager = new ModuleManager({ port: 0, modules: [] }, data) as any
+  const recover = vi.spyOn(manager.runtimeRegistry, 'recoverOrphans').mockResolvedValue(undefined)
+  try {
+    await manager.start()
+    expect(recover).toHaveBeenCalledTimes(1)
+    expect(recover.mock.calls[0][0].moduleId).toBeUndefined()
+    expect(manager.server.listening).toBe(true)
+  } finally { await manager.stop(); await fs.rm(data, { recursive: true, force: true }) }
 })
