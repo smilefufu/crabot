@@ -12,6 +12,7 @@ import { beginWorkspaceRelocationIntent, readWorkspaceRelocationCoordinator, rea
 import { launchWorkspaceRelocationCoordinator } from '../workspace-coordinator-launch.mjs'
 import { createWorkspaceWorkerJournal } from '../workspace-worker-journal.mjs'
 import { createWorkspaceModuleJournal } from '../workspace-module-journal.mjs'
+import { createWorkspaceProcessJournal } from '../workspace-process-journal.mjs'
 import { WorkspaceCatalog } from '../../../crabot-shared/dist/workspace-catalog.js'
 import { sha256CanonicalJson } from '../../../crabot-shared/dist/canonical-json.js'
 
@@ -43,6 +44,7 @@ test('the actual fixed script owns the lock and serves the first journals before
   const f = await fixture(t), result = await f.launch(), { child, launch, ready } = result
   const worker = createWorkspaceWorkerJournal(child, { dataDir: f.data, id: f.id, launch })
   const modules = createWorkspaceModuleJournal(child, { dataDir: f.data, id: f.id, launch })
+  const processes = createWorkspaceProcessJournal(child, { dataDir: f.data, id: f.id, launch })
   try {
     assert.equal(cliLockToken(f.lock), undefined)
     assert.ok(native.sameProcess(launch.process, native.inspectProcess(child.pid)))
@@ -50,6 +52,8 @@ test('the actual fixed script owns the lock and serves the first journals before
     assert.deepEqual(readWorkspaceRelocationCoordinator(f.data, f.id), { launch, ready })
     await assert.rejects(acquireWorkspaceRelocationLock(f.data, f.id, 0), /another crabot CLI operation/)
     await worker.capture([]); await worker.captureProcesses([]); await modules.capture([])
+    assert.equal(await processes.prepare(), 'dispatch'); assert.equal(await processes.prepare(), 'observe')
+    await processes.observe([]); await processes.complete()
     assert.deepEqual(readWorkspaceRelocationWorkers(f.data, f.id).workers, [])
     assert.deepEqual(readWorkspaceRelocationModules(f.data, f.id).modules, [])
     assert.equal(readWorkspaceRelocationStops(f.data, f.id).attempt, null)
@@ -61,7 +65,7 @@ test('the actual fixed script owns the lock and serves the first journals before
     await f.close()
     assert.equal(sha256CanonicalJson(readWorkspaceRelocationCoordinator(f.data, f.id)), beforeHash)
     const lock = await acquireWorkspaceRelocationLock(f.data, f.id, 0); releaseCliLock(lock)
-  } finally { worker.close(); modules.close() }
+  } finally { worker.close(); modules.close(); processes.close() }
 })
 
 for (const mode of ['missing lock', 'wrong id', 'extra entry']) test('rejects before publishing a new launch: ' + mode, async t => {

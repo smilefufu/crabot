@@ -1332,7 +1332,7 @@ export class ModuleManager {
     }
   }
 
-  /** One internal submission sequence; its results never authorize closing Workers or moving files. */
+  /** One submission/known-scope sequence; this is never a global-exit or file-move permit. */
   private submitWorkspaceRelocationStops(request: VerifyWorkspaceRelocationRequestParams, bearer?: string): Promise<WorkspaceStopSequenceResult> {
     request = Object.freeze({ ...request })
     const fingerprint = sha256CanonicalJson(request)
@@ -1344,37 +1344,60 @@ export class ModuleManager {
     const pending = Promise.resolve().then(async (): Promise<WorkspaceStopSequenceResult> => {
       let child: ChildProcess | undefined
       let journal: (WorkspaceModuleStopJournal & { close(): void }) | undefined
+      let processJournal: { prepare(): Promise<'dispatch' | 'observe'>; observe(processes: ReadonlyArray<WorkerProcessIdentity>): Promise<void>; complete(): Promise<void>; close(): void } | undefined
+      let active = true
       try {
         child = await this.launchWorkspaceRelocationCoordinator(request, bearer)
         await this.quiesceWorkspaceRelocationWeb(request, bearer)
         await this.captureWorkspaceRelocationWorkersForCoordinator(child, request, bearer)
-        await this.captureWorkspaceRelocationProcessesForCoordinator(child)
+        const processes = await this.captureWorkspaceRelocationProcessesForCoordinator(child)
         const modules = await this.captureWorkspaceRelocationModulesForCoordinator(child)
-        const workerSubmission = await this.stopWorkspaceRelocationWorkersForCoordinator(child)
         const grant = this.workspaceCoordinatorGrant
         if (!grant || grant.child !== child) throw failure()
         this.assertWorkspaceCoordinatorGrantCurrent(grant)
         const records = require('../../scripts/lib/workspace-relocation-intent.mjs')
         const coordinator = records.readWorkspaceRelocationCoordinator(this.dataDir, request.intent_id)
-        const { createWorkspaceModuleJournal } = require('../../scripts/lib/workspace-module-journal.mjs')
-        journal = createWorkspaceModuleJournal(child, { dataDir: this.dataDir, id: request.intent_id, launch: coordinator.launch })
-        const moduleSubmission = await this.requestWorkspaceRelocationModuleStops(modules, journal!)
-        // Planned Agent exit revokes its grant; only the original coordinator/material binding continues.
         const native = require('../../scripts/lib/process-identity.cjs')
-        if (this.isShuttingDown || !child.connected || child.exitCode !== null || child.signalCode !== null
-          || sha256CanonicalJson(records.readWorkspaceRelocationIntent(this.dataDir)) !== request.intent_sha256
-          || sha256CanonicalJson(records.readWorkspaceRelocationCoordinator(this.dataDir, request.intent_id)) !== sha256CanonicalJson(coordinator)
-          || sha256CanonicalJson(records.readWorkspaceRelocationWorkers(this.dataDir, request.intent_id)) !== grant.workersHash
-          || sha256CanonicalJson(records.readWorkspaceRelocationProcesses(this.dataDir, request.intent_id)) !== grant.processesHash
-          || sha256CanonicalJson(records.readWorkspaceRelocationModules(this.dataDir, request.intent_id)) !== grant.modulesHash
-          || sha256CanonicalJson(records.readWorkspaceRelocationModuleStops(this.dataDir, request.intent_id).submission?.results) !== sha256CanonicalJson(moduleSubmission.results)
-          || !native.sameProcess(coordinator.launch.parent, native.inspectProcess(process.pid))
-          || !native.sameProcess(coordinator.launch.process, native.inspectProcess(child.pid))) throw failure()
-        return Object.freeze({ coordinator: child, workerSubmission, moduleSubmission })
+        const verify = (): void => {
+          // Planned Agent exit revokes its grant; only original coordinator/material identity continues.
+          if (!active || this.isShuttingDown || !child!.connected || child!.exitCode !== null || child!.signalCode !== null
+            || sha256CanonicalJson(records.readWorkspaceRelocationIntent(this.dataDir)) !== request.intent_sha256
+            || sha256CanonicalJson(records.readWorkspaceRelocationCoordinator(this.dataDir, request.intent_id)) !== sha256CanonicalJson(coordinator)
+            || sha256CanonicalJson(records.readWorkspaceRelocationWorkers(this.dataDir, request.intent_id)) !== grant.workersHash
+            || sha256CanonicalJson(records.readWorkspaceRelocationProcesses(this.dataDir, request.intent_id)) !== grant.processesHash
+            || sha256CanonicalJson(records.readWorkspaceRelocationModules(this.dataDir, request.intent_id)) !== grant.modulesHash
+            || !native.sameProcess(coordinator.launch.parent, native.inspectProcess(process.pid))
+            || !native.sameProcess(coordinator.launch.process, native.inspectProcess(child!.pid))) throw failure()
+        }
+        const { createWorkspaceModuleJournal } = require('../../scripts/lib/workspace-module-journal.mjs')
+        const { createWorkspaceProcessJournal } = require('../../scripts/lib/workspace-process-journal.mjs')
+        const context = { dataDir: this.dataDir, id: request.intent_id, launch: coordinator.launch }
+        journal = createWorkspaceModuleJournal(child, context)
+        processJournal = createWorkspaceProcessJournal(child, context)
+        verify()
+        if (await processJournal!.prepare() !== 'dispatch') throw failure()
+        let submissions: Pick<WorkspaceStopSequenceResult, 'workerSubmission' | 'moduleSubmission'> | undefined
+        const { stopKnownProcessScope } = require('../../scripts/lib/known-process-stop.cjs')
+        await stopKnownProcessScope(processes, { timeoutMs: Math.max(1, Math.round(this.config.shutdown_timeout * 1000)),
+          onObserved: async (observed: ReadonlyArray<WorkerProcessIdentity>) => { verify(); await processJournal!.observe(observed); verify() },
+          submit: async () => {
+            verify()
+            const workerSubmission = await this.stopWorkspaceRelocationWorkersForCoordinator(child!)
+            verify(); this.assertWorkspaceCoordinatorGrantCurrent(grant)
+            const moduleSubmission = await this.requestWorkspaceRelocationModuleStops(modules, journal!)
+            verify(); submissions = { workerSubmission, moduleSubmission }
+          },
+        }, { ...native, terminateKnownProcess: (target: WorkerProcessIdentity) => { verify(); return native.terminateKnownProcess(target) } })
+        if (!submissions) throw failure()
+        await processJournal!.complete(); verify()
+        if (sha256CanonicalJson(records.readWorkspaceRelocationModuleStops(this.dataDir, request.intent_id).submission?.results) !== sha256CanonicalJson(submissions.moduleSubmission.results)
+          || !records.readWorkspaceRelocationProcessStops(this.dataDir, request.intent_id).completion) throw failure()
+        return Object.freeze({ coordinator: child, ...submissions })
       } catch {
+        active = false
         await this.closeWorkspaceCoordinatorChannel(child)
         throw failure()
-      } finally { journal?.close() }
+      } finally { active = false; journal?.close(); processJournal?.close() }
     })
     this.workspaceStopSequence = { fingerprint, pending }
     return pending

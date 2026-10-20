@@ -115,7 +115,7 @@ jobs:
           node --test scripts/lib/__tests__/system-*.test.mjs
           node --test scripts/lib/__tests__/desktop-session.test.mjs
           (cd scripts/lib && node node_modules/vitest/vitest.mjs run __tests__/check.test.mjs __tests__/mm-probe.test.mjs --maxWorkers=1 --minWorkers=1)
-          node --test scripts/lib/__tests__/workspace-relocation-intent.test.mjs scripts/lib/__tests__/workspace-coordinator-entry.test.mjs scripts/lib/__tests__/workspace-coordinator-launch.test.mjs scripts/lib/__tests__/admin-data-compat.test.mjs scripts/lib/__tests__/core-preparation.test.mjs scripts/lib/__tests__/workspace-data-compat.test.mjs scripts/lib/__tests__/workspace-legacy-executions.test.mjs scripts/lib/__tests__/core-preflight.test.mjs scripts/lib/__tests__/installer-compat.test.mjs
+          node --test scripts/lib/__tests__/workspace-relocation-intent.test.mjs scripts/lib/__tests__/workspace-process-stop.test.mjs scripts/lib/__tests__/workspace-coordinator-entry.test.mjs scripts/lib/__tests__/workspace-coordinator-launch.test.mjs scripts/lib/__tests__/admin-data-compat.test.mjs scripts/lib/__tests__/core-preparation.test.mjs scripts/lib/__tests__/workspace-data-compat.test.mjs scripts/lib/__tests__/workspace-legacy-executions.test.mjs scripts/lib/__tests__/core-preflight.test.mjs scripts/lib/__tests__/installer-compat.test.mjs
       - name: Installation and migration regressions
         timeout-minutes: 15
         run: |

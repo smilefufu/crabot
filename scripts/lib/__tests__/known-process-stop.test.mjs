@@ -140,3 +140,26 @@ test('a failed new-descendant acknowledgement during graceful shutdown never sen
   assert.equal(requests, 1); assert.deepEqual(signals, [])
   assert.equal(probeKnownProcessExit([descendant]).state, 'running')
 })
+
+test('an empty known scope still executes the fixed submission once, with an explicit observation', async () => {
+  const observations = []; let submitted = 0
+  const result = await stopKnownProcessScope([], { timeoutMs: 80,
+    onObserved: async items => observations.push(items), submit: async () => { submitted++ } })
+  assert.equal(submitted, 1); assert.deepEqual(observations, [[]]); assert.deepEqual(result, [])
+})
+
+test('a failed fixed submission propagates before any native termination', async t => {
+  const f = await fixture(t), signals = []; let submitted = 0
+  await assert.rejects(stopKnownProcessScope(f.initial, { timeoutMs: 80, onObserved: f.remember,
+    submit: async () => { submitted++; throw new Error('fixed submission failed') } },
+    { ...native, terminateKnownProcess: item => signals.push(item.pid) }), /fixed submission failed/)
+  assert.equal(submitted, 1); assert.deepEqual(signals, [])
+  assert.equal(probeKnownProcessExit(f.initial).state, 'running')
+})
+
+test('ordinary graceful RPC and fixed submission callbacks cannot be mixed', async t => {
+  const f = await fixture(t); let calls = 0
+  await assert.rejects(stopKnownProcessScope(f.initial, { timeoutMs: 80, onObserved: f.remember,
+    graceful: async () => { calls++ }, submit: async () => { calls++ } }), { code: 'CRABOT_PROCESS_SCOPE_STOP' })
+  assert.equal(calls, 0)
+})

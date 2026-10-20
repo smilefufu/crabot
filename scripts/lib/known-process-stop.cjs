@@ -5,10 +5,10 @@ const { probeKnownProcessExit } = require('./known-process-exit.cjs')
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms))
 const fail = () => { throw Object.assign(new Error('已知进程停止尚不能核实，保留维护保护。'), { code: 'CRABOT_PROCESS_SCOPE_STOP' }) }
 const key = item => JSON.stringify([item.pid, item.started, item.owner])
-async function stopKnownProcessScope(initial, { timeoutMs, onObserved, graceful }, api = native) {
-  if (!Array.isArray(initial) || !initial.length || !Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 2147483647
+async function stopKnownProcessScope(initial, { timeoutMs, onObserved, graceful, submit }, api = native) {
+  if (!Array.isArray(initial) || !initial.length && !submit || submit !== undefined && (typeof submit !== 'function' || graceful !== undefined) || !Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 2147483647
     || typeof onObserved !== 'function') fail()
-  const observationEnd = Date.now() + timeoutMs + 5000
+  let observationEnd = Date.now() + timeoutMs + 5000
   const known = new Map(), signalled = new Set()
   let dirty = true
   function remember(item) {
@@ -48,17 +48,20 @@ async function stopKnownProcessScope(initial, { timeoutMs, onObserved, graceful 
       dirty = false // Reobserve after acknowledgement, before any signal or shutdown request.
     }
   }
-  if (!(await observe()).length) return snapshot()
-  const gracefulEnd = Date.now() + timeoutMs
-  let gracefulSettled = false
-  const closing = Promise.resolve().then(() => graceful?.()).catch(() => {
-    // A lost shutdown reply is never retried; keep observing its known scope.
+  if (!(await observe()).length && !submit) return snapshot()
+  let gracefulEnd = Date.now() + timeoutMs
+  let gracefulSettled = false, submissionFailure
+  const closing = Promise.resolve().then(() => submit ? submit() : graceful?.()).catch(error => {
+    // Fixed submissions propagate failure; only ordinary shutdown RPC loss is observational.
+    if (submit) submissionFailure = { error }
   }).finally(() => { gracefulSettled = true })
   while (!gracefulSettled) {
     await observe() // The original parent may create descendants before its shutdown reply settles.
     if (!gracefulSettled) await delay(25)
   }
   await closing
+  if (submissionFailure) throw submissionFailure.error
+  if (submit) { gracefulEnd = Date.now() + timeoutMs; observationEnd = gracefulEnd + 5000 }
   for (;;) {
     if (!(await observe()).length) return snapshot()
     if (Date.now() >= gracefulEnd) break

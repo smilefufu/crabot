@@ -12,7 +12,7 @@ import { sha256CanonicalJson } from 'crabot-shared'
 import ModuleManager from './index.js'
 import { relocationAgentConfig } from '../../crabot-agent/tests/core/fixtures/relocation-agent-config.js'
 
-async function fixture(options: { wrongRuntime?: boolean; result?: string; withAgent?: boolean; agentResult?: string; actualAgent?: boolean; processLifetimeMs?: number; backgroundShell?: boolean; actualAdmin?: boolean; quiesceResult?: string } = {}) {
+async function fixture(options: { wrongRuntime?: boolean; result?: string; withAgent?: boolean; agentResult?: string; actualAgent?: boolean; processLifetimeMs?: number; backgroundShell?: boolean; actualAdmin?: boolean; quiesceResult?: string; orphanDuringStop?: boolean } = {}) {
   const root = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'crabot-current-admin-')))
   const native = require('../../scripts/lib/process-identity.cjs'), management = require('../../scripts/lib/desktop-management.cjs')
   const data = management.ensurePrivateDataRoot(path.join(root, 'data')), script = path.join(data, 'finite-admin.cjs'), callsFile = path.join(data, 'calls.json')
@@ -103,12 +103,28 @@ async function fixture(options: { wrongRuntime?: boolean; result?: string; withA
         await fs.access(entry)
         if (options.backgroundShell) {
           await fs.mkdir(path.join(data, 'project'))
-          await fs.writeFile(path.join(data, 'finite-background.cjs'), `const fs=require('node:fs'),file=${JSON.stringify(path.join(data, 'project/background.txt'))};fs.writeFileSync(file,'active\\n');setInterval(()=>fs.appendFileSync(file,'x'),50);setTimeout(()=>process.exit(0),120000);`)
+          if (options.orphanDuringStop) {
+            await fs.writeFile(path.join(data, 'finite-orphan.cjs'), `const fs=require('node:fs'),native=require(${JSON.stringify(path.resolve('../scripts/lib/process-identity.cjs'))});
+              fs.writeFileSync(${JSON.stringify(path.join(data, 'orphan-ready.json'))},JSON.stringify({process:native.inspectProcess(process.pid),parent:Number(process.argv[2])}));
+              const file=${JSON.stringify(path.join(data, 'project/orphan.txt'))};fs.writeFileSync(file,'orphan active');setInterval(()=>fs.appendFileSync(file,'x'),50);setTimeout(()=>process.exit(0),20000);`)
+          }
+          await fs.writeFile(path.join(data, 'finite-background.cjs'), `const fs=require('node:fs'),file=${JSON.stringify(path.join(data, 'project/background.txt'))};fs.writeFileSync(file,'active\\n');setInterval(()=>fs.appendFileSync(file,'x'),50);setTimeout(()=>process.exit(0),120000);
+            ${options.orphanDuringStop ? `const timer=setInterval(()=>{
+              if(!fs.existsSync(${JSON.stringify(path.join(data, 'stops.txt'))}))return;clearInterval(timer);
+              const child=require('node:child_process').spawn(process.execPath,[${JSON.stringify(path.join(data, 'finite-orphan.cjs'))},String(process.pid)],{detached:true,stdio:'ignore'});child.unref();
+              const end=Date.now()+4000;setInterval(()=>{let observed=false;try{observed=fs.readFileSync(${JSON.stringify(path.join(data, 'workspace-control/relocation-process-stop.jsonl'))},'utf8').trimEnd().split('\\n').map(line=>JSON.parse(line)).some(row=>row.processes?.some(item=>item.pid===child.pid))}catch{}
+                if(observed||Date.now()>=end)process.exit(0)},10)
+            },10);` : ''}`)
         }
         await fs.writeFile(agentScript, `const fs=require('node:fs'),http=require('node:http'),{UnifiedAgent}=require(${JSON.stringify(entry)}),calls=[];
           const config=${JSON.stringify(relocationAgentConfig)};config.port=Number(process.env.Crabot_PORT);const agent=new UnifiedAgent(config);
           agent.managerStack.harness.deps.isWorkspaceRelocationReady=()=>true;
-          agent.managerStack.adapters.get('builtin').stop=async()=>{fs.appendFileSync(process.env.FIXTURE_STOPS,'stop\\n')};
+          agent.managerStack.adapters.get('builtin').stop=async()=>{fs.appendFileSync(process.env.FIXTURE_STOPS,'stop\\n');
+            if(process.env.FIXTURE_ORPHAN_READY){const native=require(${JSON.stringify(path.resolve('../scripts/lib/process-identity.cjs'))}),end=Date.now()+8000;for(;;){
+              let witness;try{witness=JSON.parse(fs.readFileSync(process.env.FIXTURE_ORPHAN_READY,'utf8'))}catch{}
+              if(witness&&native.isProcessExited(witness.parent))break;if(Date.now()>=end)throw new Error('finite background parent did not exit');await new Promise(resolve=>setTimeout(resolve,20));
+            }}
+          };
           const server=http.createServer((req,res)=>{
             let text='';req.on('data',part=>text+=part);req.on('end',()=>{const body=JSON.parse(text);calls.push({method:body.method,header_present:Boolean(req.headers.authorization),body});fs.writeFileSync(process.env.FIXTURE_CALLS,JSON.stringify(calls))});
             if(req.url==='/shutdown'){req.on('end',async()=>{await agent.managerStack.dispose();res.end(JSON.stringify({id:JSON.parse(text).id,success:true,data:{}}));setTimeout(()=>process.exit(0),25)});return}
@@ -139,7 +155,7 @@ async function fixture(options: { wrongRuntime?: boolean; result?: string; withA
       const agent = { module_id: 'crabot-agent', module_type: 'agent', entry: `"${process.execPath}" "${agentScript}"`,
         env: { FIXTURE_CALLS: path.join(data, 'agent-calls.json'), FIXTURE_READY: agentReady, FIXTURE_RESULT: options.agentResult ?? '',
           DATA_DIR: data, CRABOT_AGENT_DATA_DIR: path.join(data, 'agent'), WORKER_WORKSPACES_DIR: path.join(data, 'workspaces'), FIXTURE_WORKSPACE: path.join(data, 'project'), FIXTURE_STOPS: path.join(data, 'stops.txt'),
-          ...(options.backgroundShell ? { FIXTURE_BG_COMMAND: `"${process.execPath.replaceAll('\\', '/')}" "${path.join(data, 'finite-background.cjs').replaceAll('\\', '/')}"`, FIXTURE_BG_READY: path.join(data, 'background-ready.json') } : {}) },
+          ...(options.backgroundShell ? { FIXTURE_BG_COMMAND: `"${process.execPath.replaceAll('\\', '/')}" "${path.join(data, 'finite-background.cjs').replaceAll('\\', '/')}"`, FIXTURE_BG_READY: path.join(data, 'background-ready.json'), ...(options.orphanDuringStop ? { FIXTURE_ORPHAN_READY: path.join(data, 'orphan-ready.json') } : {}) } : {}) },
         port: (agentPort.address() as { port: number }).port, auto_start: false, auto_restart: false, skip_health_check: true, start_priority: 1, status: 'stopped' }
       await new Promise<void>(resolve => agentPort.close(() => resolve()))
       manager.modules.set('crabot-agent', agent); await manager.startModuleProcess('crabot-agent')
@@ -1036,6 +1052,9 @@ describe('MM submits one fixed workspace stop sequence', () => {
       expect((await fetch(`http://127.0.0.1:${f.port}/api/friends`, { headers })).status).toBe(200)
       const denied = await fetch(`http://127.0.0.1:${f.port}/api/friends`, { method: 'POST', headers, body: '{}' })
       expect(denied.status).toBe(503); expect(await denied.json()).toMatchObject({ code: 'WORKSPACE_MAINTENANCE' })
+      const processStops = records.readWorkspaceRelocationProcessStops(f.data, f.params.intent_id)
+      expect(processStops.completion?.type).toBe('known_scope_exited')
+      expect(processStops.observations.at(-1).processes.length).toBeGreaterThan(0)
       expect(child!.connected).toBe(true); expect(f.manager.workspaceCoordinatorGrant).toBeUndefined()
       expect(require('../../scripts/lib/known-process-exit.cjs').probeKnownProcessExit(records.readWorkspaceRelocationProcesses(f.data, f.params.intent_id).processes).state).toBe('stopped')
       expect(await fs.readFile(ledger)).toEqual(before); expect(await fs.readFile(path.join(f.data, 'stops.txt'), 'utf8')).toBe('stop\n')
@@ -1043,6 +1062,70 @@ describe('MM submits one fixed workspace stop sequence', () => {
       await expect(fs.stat(path.join(f.root, 'relocated'))).rejects.toMatchObject({ code: 'ENOENT' })
     } finally {
       if (child?.connected) { const ended = once(child, 'exit'); child.disconnect(); await ended }
+      locks.releaseCliLock(lock); await f.cleanup()
+    }
+  }, timeout)
+  it('retains a background descendant created during Worker stop after its parent and Agent exit', async () => {
+    const f = await fixture({ actualAgent: true, actualAdmin: true, backgroundShell: true, orphanDuringStop: true, processLifetimeMs: 120000 })
+    const locks = require('../../scripts/lib/cli-lock.mjs'), records = require('../../scripts/lib/workspace-relocation-intent.mjs')
+    const native = require('../../scripts/lib/process-identity.cjs'), lock = await locks.acquireWorkspaceRelocationLock(f.data, f.params.intent_id)
+    const ledger = path.join(f.data, 'agent/worker-ledgers/channel%3A%3Asession.json'), before = await fs.readFile(ledger)
+    let child: ReturnType<typeof spawn> | undefined
+    try {
+      const result = await f.manager.submitWorkspaceRelocationStops(f.params, 'fixture-human'); child = result.coordinator
+      const witness = JSON.parse(await fs.readFile(path.join(f.data, 'orphan-ready.json'), 'utf8'))
+      const initial = records.readWorkspaceRelocationProcesses(f.data, f.params.intent_id)
+      const stopped = records.readWorkspaceRelocationProcessStops(f.data, f.params.intent_id)
+      expect(native.isProcessExited(witness.parent)).toBe(true); expect(native.isProcessExited(witness.process.pid)).toBe(true)
+      expect(initial.processes.some((item: any) => item.pid === witness.process.pid)).toBe(false)
+      expect(stopped.observations.at(-1).processes).toContainEqual(expect.objectContaining({ pid: witness.process.pid, started: witness.process.started, owner: witness.process.owner }))
+      expect(stopped.completion.type).toBe('known_scope_exited')
+      expect(f.manager.processes.has('crabot-agent')).toBe(false); expect(f.manager.processes.get('admin-web').exitCode).toBeNull()
+      expect(await fs.readFile(path.join(f.data, 'project/orphan.txt'), 'utf8')).toContain('orphan active')
+      expect(await fs.readFile(ledger)).toEqual(before)
+      await expect(fs.stat(path.join(f.root, 'relocated'))).rejects.toMatchObject({ code: 'ENOENT' })
+    } finally {
+      const witness = await fs.readFile(path.join(f.data, 'orphan-ready.json'), 'utf8').then(JSON.parse).catch(() => undefined)
+      if (witness) native.terminateKnownProcess(witness.process)
+      await f.manager.closeWorkspaceCoordinatorChannel(child); locks.releaseCliLock(lock); await f.cleanup()
+    }
+  }, timeout)
+  it.each(['prepare', 'new descendant observation'])('retains an actual process journal with an uncertain %s reply before further stops', async phase => {
+    const orphan = phase === 'new descendant observation'
+    const f = await fixture({ actualAgent: true, processLifetimeMs: 120000, backgroundShell: orphan, orphanDuringStop: orphan })
+    const locks = require('../../scripts/lib/cli-lock.mjs'), records = require('../../scripts/lib/workspace-relocation-intent.mjs')
+    const native = require('../../scripts/lib/process-identity.cjs'), lock = await locks.acquireWorkspaceRelocationLock(f.data, f.params.intent_id)
+    const launch = f.manager.launchWorkspaceRelocationCoordinator.bind(f.manager), modules = vi.spyOn(f.manager, 'requestWorkspaceRelocationModuleStops')
+    const stop = vi.spyOn(f.manager, 'stopWorkspaceRelocationWorkersForCoordinator'), signals = vi.spyOn(native, 'terminateKnownProcess')
+    vi.spyOn(f.manager, 'launchWorkspaceRelocationCoordinator').mockImplementation(async (...args: unknown[]) => {
+      const child = await launch(...args), emit = child.emit.bind(child); let observations = 0
+      vi.spyOn(child, 'emit').mockImplementation((event: string | symbol, ...args: any[]) => {
+        const message = args[0]
+        if (event === 'message' && message?.kind === 'workspace_process_journal_reply') {
+          if (message.operation === 'observe') observations++
+          if (phase === 'prepare' && message.operation === 'prepare' || orphan && message.operation === 'observe' && observations === 2) {
+            return emit(event, { ...message, ok: false })
+          }
+        }
+        return emit(event, ...args)
+      })
+      return child
+    })
+    try {
+      const first = f.manager.submitWorkspaceRelocationStops(f.params, 'fixture-human')
+      await expect(first).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
+      if (stop.mock.results[0]) await Promise.resolve(stop.mock.results[0].value).catch(() => undefined)
+      expect(f.manager.submitWorkspaceRelocationStops(f.params, 'fixture-human')).toBe(first)
+      await expect(first).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
+      const stored = records.readWorkspaceRelocationProcessStops(f.data, f.params.intent_id)
+      expect(stored.attempt).not.toBeNull(); expect(stored.completion).toBeNull()
+      expect(modules).not.toHaveBeenCalled(); expect(signals).not.toHaveBeenCalled()
+      expect(f.manager.processes.get('admin-web').exitCode).toBeNull(); expect(f.manager.processes.get('crabot-agent').exitCode).toBeNull()
+      if (phase === 'prepare') expect(stop).not.toHaveBeenCalled()
+      else expect(stored.observations.length).toBeGreaterThan(1)
+      await expect(fs.stat(path.join(f.root, 'relocated'))).rejects.toMatchObject({ code: 'ENOENT' })
+    } finally {
+      for (const item of records.readWorkspaceRelocationProcessStops(f.data, f.params.intent_id).observations.at(-1)?.processes ?? []) native.terminateKnownProcess(item)
       locks.releaseCliLock(lock); await f.cleanup()
     }
   }, timeout)

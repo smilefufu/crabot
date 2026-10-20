@@ -7,7 +7,7 @@ import { readWorkspaceRelocationCoordinator } from './workspace-relocation-inten
 import { sha256CanonicalJson } from '../../crabot-shared/dist/canonical-json.js'
 
 function kinds(namespace) {
-  if (namespace !== 'module' && namespace !== 'worker') throw workspaceJournalFailure()
+  if (namespace !== 'module' && namespace !== 'worker' && namespace !== 'process') throw workspaceJournalFailure()
   return { requestKind: `workspace_${namespace}_journal_request`, replyKind: `workspace_${namespace}_journal_reply` }
 }
 export const workspaceJournalFailure = () => Object.assign(new Error('迁移材料确认不可用，维护保护已保留；未重发操作。'), { code: 'CRABOT_WORKSPACE_JOURNAL_UNAVAILABLE' })
