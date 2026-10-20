@@ -1,6 +1,7 @@
 import { parseFriendPermissionRecords, serializeFriendPermissionRecords } from './friend-permission-store.js'
 import { WorkspaceExecutionInventorySchema, WorkspaceIdSchema } from 'crabot-client'
 import { WorkspaceService } from './workspaces.js'
+import type { VerifyWorkspaceRelocationRequestParams, VerifyWorkspaceRelocationRequestResult } from 'crabot-shared'
 import { resolveManagedMcpConfig } from './managed-mcp-runtime.js'
 import type { ConversationRequestSource } from 'crabot-shared'
 import type { VerifyMemoryAccessResult, VerifyMemoryRequestAccessResult } from 'crabot-shared'
@@ -1013,6 +1014,8 @@ export class AdminModule extends ModuleBase {
     this.registerMethod('get_task_messages', this.handleGetTaskMessages.bind(this))
     this.registerMethod('get_task_stats', this.handleGetTaskStats.bind(this))
     this.registerMethod('delete_task', this.handleDeleteTask.bind(this))
+
+    this.registerMethod('verify_workspace_relocation_request', this.handleVerifyWorkspaceRelocationRequest.bind(this))
 
     // Schedule 管理
     this.registerMethod('create_schedule', this.handleCreateSchedule.bind(this))
@@ -3192,6 +3195,32 @@ export class AdminModule extends ModuleBase {
   private async verifyHumanToken(token: string): Promise<JwtPayload | null> {
     const payload = await this.verifyAuthenticatedToken(token)
     return payload?.sub === 'admin' && !payload.agent_cli ? payload : null
+  }
+
+  private async handleVerifyWorkspaceRelocationRequest(
+    params: VerifyWorkspaceRelocationRequestParams, context?: RpcHandlerContext,
+  ): Promise<VerifyWorkspaceRelocationRequestResult> {
+    const bearer = context?.authorizationBearer
+    if (!bearer || !await this.verifyHumanToken(bearer)) {
+      throw new RpcError(this.isNonHumanToken(bearer) ? 'FORBIDDEN' : 'UNAUTHORIZED', 'Human Admin credential required')
+    }
+    if (!params || typeof params !== 'object' || Array.isArray(params) || Object.keys(params).length !== 2
+      || !Object.keys(params).every(key => key === 'intent_id' || key === 'intent_sha256')
+      || typeof params.intent_id !== 'string' || !/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(params.intent_id)
+      || typeof params.intent_sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(params.intent_sha256)) {
+      throw new RpcError('INVALID_PARAMS', 'Invalid workspace relocation request')
+    }
+    let intent: { id: string } | null, fingerprint: string | undefined
+    try {
+      const { readWorkspaceRelocationIntent } = require('../../scripts/lib/workspace-relocation-intent.mjs')
+      intent = readWorkspaceRelocationIntent(path.resolve(this.adminConfig.data_dir, '..'))
+      if (intent) fingerprint = sha256CanonicalJson(intent)
+    } catch { throw new RpcError('SERVICE_UNAVAILABLE', 'Workspace relocation record is unavailable') }
+    if (!intent || !fingerprint) throw new RpcError('SERVICE_UNAVAILABLE', 'Workspace relocation record is unavailable')
+    if (intent.id !== params.intent_id || fingerprint !== params.intent_sha256) {
+      throw new RpcError('FORBIDDEN', 'Workspace relocation request does not match the fixed intent')
+    }
+    return { verified: true, intent_id: intent.id, intent_sha256: fingerprint }
   }
 
   private isNonHumanToken(token: string | undefined): boolean {

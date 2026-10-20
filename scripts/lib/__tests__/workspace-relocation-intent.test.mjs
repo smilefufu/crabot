@@ -776,3 +776,18 @@ test('an observation directory replaced before its first entry cannot restart a 
   assert.throws(() => observeWorkspaceRelocationModuleProcesses({ ...f.options, moduleId: 'fixture-memory', processes: f.modules[0].processes }), { code: 'WORKSPACE_RELOCATION_INVALID' })
   assert.throws(() => prepareWorkspaceRelocationModuleStops({ ...f.options, modules: f.modules }), { code: 'WORKSPACE_RELOCATION_INVALID' })
 })
+
+test('the read-only record API loads from the actual CommonJS Node backend without awaiting upgrade code', () => {
+  const file = createRequire(import.meta.url).resolve('../workspace-relocation-intent.mjs')
+  assert.equal(execFileSync(process.execPath, ['-e', 'process.stdout.write(typeof require(process.argv[1]).readWorkspaceRelocationIntent)', file], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }), 'function')
+})
+
+test('asynchronous version loading cannot borrow a later operation lock from the same process', async t => {
+  const f = await fixture(t), lock = await acquireCliLock(f.data, 'workspace-relocation')
+  const pending = beginWorkspaceRelocationIntent(f.input)
+  const rejected = assert.rejects(pending, { code: 'WORKSPACE_RELOCATION_INVALID' })
+  releaseCliLock(lock)
+  const replacement = await acquireCliLock(f.data, 'different-operation')
+  try { await rejected; assert.equal(readWorkspaceRelocationIntent(f.data), null) }
+  finally { releaseCliLock(replacement) }
+})

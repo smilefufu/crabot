@@ -18,6 +18,7 @@ const SENSITIVE_METHODS: SensitiveRpcMethod[] = [
   'get_voice_config', 'submit_voice_turn', 'get_voice_turn_status', 'get_authorized_voice_turn', 'confirm_voice_turn',
   'verify_voice_runtime', 'register_voice_runtime', 'voice_admin_action', 'verify_voice_admin', 'sync_voice_terminal',
   'verify_memory_access',
+  'verify_workspace_relocation_request',
   'get_agent_config',
   'resolve_worker_connection',
   'verify_core_agent_runtime',
@@ -115,6 +116,13 @@ test('ordinary call rejects a sensitive method before network I/O or trace creat
     }),
     (error: unknown) => (error as { code?: string }).code === 'SENSITIVE_RPC_REQUIRES_NO_TRACE_TRANSPORT',
   )
+})
+
+test('workspace relocation human verification cannot use ordinary traced transport', async () => {
+  const client = new RpcClient(), trace = { startSpan: () => { throw new Error('trace must not start') }, endSpan: () => {} }
+  await assert.rejects(client.call(1, 'verify_workspace_relocation_request', { intent_id: 'fixed' }, 'forged-source', {
+    traceStore: trace, traceId: 'fixture',
+  }), (error: unknown) => (error as { code?: string }).code === 'SENSITIVE_RPC_REQUIRES_NO_TRACE_TRANSPORT')
 })
 
 test('callSensitive rejects methods outside the sensitive closure before network I/O', async () => {

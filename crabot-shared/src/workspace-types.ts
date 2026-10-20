@@ -1,4 +1,4 @@
-/** Canonical fields: protocol-workspaces §2. */
+/** Canonical fields: protocol-workspaces. */
 export interface WorkspaceRecord {
   workspace_id: string
   kind: 'project' | 'default'
@@ -60,4 +60,14 @@ export interface WorkspaceGetResult {
 export interface WorkspaceScanResult {
   workspace_id: string
   usage: WorkspaceUsage
+}
+
+export interface VerifyWorkspaceRelocationRequestParams {
+  intent_id: string
+  intent_sha256: string
+}
+export interface VerifyWorkspaceRelocationRequestResult {
+  verified: true
+  intent_id: string
+  intent_sha256: string
 }

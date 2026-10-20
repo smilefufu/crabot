@@ -5,7 +5,6 @@ import { randomUUID } from 'node:crypto'
 import native from './process-identity.cjs'
 import management from './desktop-management.cjs'
 import { cliLockToken } from './cli-lock.mjs'
-import { readVersionMaintenance } from './version-maintenance.mjs'
 import { sha256CanonicalJson } from '../../crabot-shared/dist/canonical-json.js'
 import { WorkspaceCatalog } from '../../crabot-shared/dist/workspace-catalog.js'
 import { inspectWorkspaceRelocationTarget } from '../../crabot-shared/dist/workspace-relocation-target.js'
@@ -82,9 +81,12 @@ function syncIntent(ctx) { syncDirectory(ctx.control); syncDirectory(ctx.dataRoo
 export function readWorkspaceRelocationIntent(dataDir) { return read(context(dataDir)) }
 
 export async function beginWorkspaceRelocationIntent(options) {
-  const ctx = context(options.dataDir, true)
+  const ctx = context(options.dataDir, true), operationToken = cliLockToken(path.join(ctx.dataRoot, 'cli.lock'))
+  const dataIdentity = identity(ctx.dataRoot)
   if (!uuid(options.id) || !absolute(options.target) || !Number.isSafeInteger(options.expectedRevision) || options.expectedRevision < 1
     || !Array.isArray(options.protectedRoots) || options.protectedRoots.some(root => !absolute(root))) fail()
+  const { readVersionMaintenance } = await import('./version-maintenance.mjs')
+  if (!operationToken || cliLockToken(path.join(ctx.dataRoot, 'cli.lock')) !== operationToken || !same(dataIdentity, identity(ctx.dataRoot))) fail()
   if (readVersionMaintenance(ctx.dataRoot)) fail('WORKSPACE_RELOCATION_CONFLICT')
   const requestedTarget = path.resolve(options.target)
   const current = read(ctx)
@@ -93,7 +95,6 @@ export async function beginWorkspaceRelocationIntent(options) {
     syncIntent(ctx)
     return current
   }
-  const dataIdentity = identity(ctx.dataRoot)
   const catalog = new WorkspaceCatalog({ dataRoot: ctx.dataRoot, storageRoot: process.env.WORKER_WORKSPACES_DIR, files: native })
   const snapshot = await catalog.snapshot()
   if (snapshot.revision !== options.expectedRevision) fail('WORKSPACE_REVISION_CONFLICT')
@@ -114,7 +115,8 @@ export async function beginWorkspaceRelocationIntent(options) {
   if (!same(controlIdentity, identity(ctx.control)) || !privateControl(ctx.control)) fail()
   if (read(ctx)) fail('WORKSPACE_RELOCATION_CONFLICT')
   publishPrivateJson(ctx, ctx.file, record, 65536, () => {
-    if (!same(dataIdentity, identity(ctx.dataRoot)) || !same(controlIdentity, identity(ctx.control)) || !privateControl(ctx.control)) fail()
+    if (cliLockToken(path.join(ctx.dataRoot, 'cli.lock')) !== operationToken
+      || !same(dataIdentity, identity(ctx.dataRoot)) || !same(controlIdentity, identity(ctx.control)) || !privateControl(ctx.control)) fail()
     if (read(ctx)) fail('WORKSPACE_RELOCATION_CONFLICT')
   })
   const accepted = read(ctx)
