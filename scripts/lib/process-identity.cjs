@@ -9,7 +9,20 @@ function sameProcess(expected, actual) {
     && path.normalize(expected.executable) === path.normalize(actual.executable))
 }
 
-module.exports = { ...native, sameProcess,
+// One known target only. A successful submission is never an exit/whole-tree receipt.
+function terminateKnownProcess(expected) {
+  const pid = value => Number.isInteger(value) && value > 0 && value <= 2147483647
+  const text = value => typeof value === 'string' && value.length > 0 && !value.includes('\0')
+  if (!expected || typeof expected !== 'object' || Array.isArray(expected) || Object.keys(expected).length !== 5
+    || !['pid', 'parent', 'owner', 'started', 'executable'].every(key => Object.hasOwn(expected, key))
+    || !pid(expected.pid) || expected.parent !== 0 && !pid(expected.parent)
+    || !text(expected.owner) || !text(expected.started) || !text(expected.executable)) {
+    throw Object.assign(new Error('进程身份无法核验，未发送终止请求。'), { code: 'CRABOT_PROCESS_SIGNAL' })
+  }
+  return native.terminateProcessGeneration(expected.pid, expected.started, expected.owner)
+}
+
+module.exports = { ...native, sameProcess, terminateKnownProcess,
   inspectProcess: native.inspectProcess,
   inspectInstallFilesystem: native.inspectInstallFilesystem,
   listProcessIds: native.listProcessIds,

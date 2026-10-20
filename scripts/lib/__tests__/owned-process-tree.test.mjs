@@ -119,3 +119,15 @@ test('a child that reparents during capture cannot silently leave a partial succ
   f.api.listChildProcessIds = pid => { const children = read(pid); if (pid === 13) f.values.set(12, info(12, 1, '101')); return children }
   assert.throws(() => captureOwnedProcessTree([info(11)], f.api), { code: 'CRABOT_PROCESS_SCOPE' })
 })
+
+
+for (const newline of ['', '\n']) test('Linux boot identity and ticks remain opaque while creation ordering uses integer ticks: ' + JSON.stringify(newline), () => {
+  const f = fixture(), boot = '11111111-1111-4111-8111-111111111111' + newline
+  f.values.set(11, info(11, 1, boot + ':100')); f.values.set(12, info(12, 11, boot + ':101')); f.children.set(12, [])
+  assert.equal(captureOwnedProcessTree([info(11, 1, boot + ':100')], f.api).length, 2)
+})
+test('processes from different Linux boots cannot share an ancestry observation even when ticks look newer', () => {
+  const f = fixture(), root = info(11, 1, '11111111-1111-4111-8111-111111111111\n:100')
+  f.values.set(11, root); f.values.set(12, info(12, 11, '22222222-2222-4222-8222-222222222222\n:101')); f.children.set(12, [])
+  assert.throws(() => captureOwnedProcessTree([root], f.api), { code: 'CRABOT_PROCESS_SCOPE' })
+})

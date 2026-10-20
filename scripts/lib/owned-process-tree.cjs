@@ -3,13 +3,18 @@
 const native = require('./process-identity.cjs')
 const fail = () => { throw Object.assign(new Error('执行进程范围无法完整核验，已保留文件与维护保护。'), { code: 'CRABOT_PROCESS_SCOPE' }) }
 const validPid = pid => Number.isInteger(pid) && pid > 0 && pid <= 2147483647
+const linuxBirth = /^([0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12})\n?:([0-9]+)$/
 const valid = item => item && validPid(item.pid) && (item.parent === 0 || validPid(item.parent))
   && typeof item.owner === 'string' && item.owner && typeof item.executable === 'string' && item.executable
-  && typeof item.started === 'string' && /^\d+(?::\d+)?$/.test(item.started)
+  && typeof item.started === 'string' && (/^\d+(?::\d+)?$/.test(item.started) || linuxBirth.test(item.started))
 function atLeast(child, parent) {
-  const a = child.split(':').map(BigInt), b = parent.split(':').map(BigInt)
-  if (a.length !== b.length) fail()
-  for (let i = 0; i < a.length; i++) { if (a[i] !== b[i]) return a[i] > b[i] }
+  const parts = value => {
+    const linux = linuxBirth.exec(value)
+    return linux ? { boot: linux[1], time: [BigInt(linux[2])] } : { boot: '', time: value.split(':').map(BigInt) }
+  }
+  const a = parts(child), b = parts(parent)
+  if (a.boot !== b.boot || a.time.length !== b.time.length) fail()
+  for (let i = 0; i < a.time.length; i++) { if (a.time[i] !== b.time[i]) return a.time[i] > b.time[i] }
   return true
 }
 function captureOwnedProcessTree(roots, api = native) {

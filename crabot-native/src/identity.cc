@@ -35,6 +35,7 @@
 #include <netinet/in.h>
 #else
 #include <dirent.h>
+#include <sys/syscall.h>
 #include <sys/stat.h>
 #endif
 #endif
@@ -427,6 +428,81 @@ static std::string Text(napi_env env, napi_value value) {
   std::vector<char> buffer(size + 1); napi_get_value_string_utf8(env, value, buffer.data(), buffer.size(), &size);
   return std::string(buffer.data(), size);
 }
+// Liveness uses creation identity and owner; exec/reparenting do not create a new process.
+static bool CurrentOwnedGeneration(int pid, const std::string& started, const std::string& owner) {
+  const auto current = Inspect(pid);
+  if (!current.pid) {
+    if (Exited(pid)) return false;
+    throw std::runtime_error("Cannot verify a live process generation");
+  }
+  if (current.started != started) return false;
+  if (current.owner != owner) throw std::runtime_error("Process owner changed; no termination sent");
+  return true;
+}
+static bool TerminateGeneration(int pid, const std::string& started, const std::string& owner) {
+#ifdef _WIN32
+  const int selfPid = static_cast<int>(GetCurrentProcessId());
+#else
+  const int selfPid = getpid();
+#endif
+  if (pid == selfPid || owner != Inspect(selfPid).owner) throw std::runtime_error("Cannot terminate self or another OS owner");
+  if (Exited(pid)) return false;
+#ifdef _WIN32
+  HANDLE target = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE | PROCESS_TERMINATE, FALSE, pid);
+  if (!target) {
+    if (GetLastError() == ERROR_INVALID_PARAMETER || Exited(pid)) return false;
+    throw std::runtime_error("Cannot open the verified process for termination");
+  }
+  try {
+    bool submitted = false;
+    const DWORD state = WaitForSingleObject(target, 0);
+    if (state != WAIT_OBJECT_0 && state != WAIT_TIMEOUT) throw std::runtime_error("Cannot inspect the verified process handle");
+    if (state == WAIT_TIMEOUT && CurrentOwnedGeneration(pid, started, owner)) {
+      if (TerminateProcess(target, 1)) submitted = true;
+      else if (WaitForSingleObject(target, 0) != WAIT_OBJECT_0) throw std::runtime_error("Cannot terminate the verified process");
+    }
+    CloseHandle(target);
+    return submitted;
+  } catch (...) { CloseHandle(target); throw; }
+#elif defined(__APPLE__)
+  if (!CurrentOwnedGeneration(pid, started, owner)) return false;
+  if (kill(pid, SIGKILL) == 0) return true;
+  if (errno == ESRCH) return false;
+  throw std::runtime_error("Cannot terminate the verified process");
+#else
+#if defined(SYS_pidfd_open) && defined(SYS_pidfd_send_signal)
+  const int target = static_cast<int>(syscall(SYS_pidfd_open, pid, 0));
+  if (target < 0) {
+    if (errno == ESRCH) return false;
+    throw std::runtime_error("Cannot bind the verified process with pidfd");
+  }
+  try {
+    bool submitted = false;
+    if (CurrentOwnedGeneration(pid, started, owner)) {
+      if (syscall(SYS_pidfd_send_signal, target, SIGKILL, nullptr, 0) == 0) submitted = true;
+      else if (errno != ESRCH) throw std::runtime_error("Cannot terminate the verified process through pidfd");
+    }
+    close(target);
+    return submitted;
+  } catch (...) { close(target); throw; }
+#else
+  throw std::runtime_error("Kernel-bound process termination is unavailable");
+#endif
+#endif
+}
+static napi_value TerminateGenerationCall(napi_env env, napi_callback_info info) {
+  try {
+    size_t argc = 3; napi_value args[3]; double pid;
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    if (argc != 3 || napi_get_value_double(env, args[0], &pid) != napi_ok || !std::isfinite(pid)
+      || pid < 1 || pid > 2147483647 || pid != static_cast<int>(pid)) throw std::runtime_error("Expected a positive process ID and its creation identity/owner");
+    const auto started = Text(env, args[1]), owner = Text(env, args[2]);
+    if (started.empty() || owner.empty() || started.size() > 512 || owner.size() > 512
+      || started.find('\0') != std::string::npos || owner.find('\0') != std::string::npos) throw std::runtime_error("Invalid process creation identity/owner");
+    napi_value result; napi_get_boolean(env, TerminateGeneration(static_cast<int>(pid), started, owner), &result); return result;
+  } catch (const std::exception& error) { napi_throw_error(env, "CRABOT_PROCESS_SIGNAL", error.what()); return nullptr; }
+}
+
 static napi_value TryLock(napi_env env, napi_callback_info info) {
   FileLock* lock = nullptr;
   try {
@@ -487,6 +563,7 @@ static napi_value Initialize(napi_env env, napi_value exports) {
     {"listProcessIds", nullptr, PidsCall, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"listChildProcessIds", nullptr, ChildrenCall, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"isProcessExited", nullptr, ExitedCall, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"terminateProcessGeneration", nullptr, TerminateGenerationCall, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"tryFileLock", nullptr, TryLock, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"releaseFileLock", nullptr, ReleaseLock, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"inspectProcessArguments", nullptr, ArgumentsCall, nullptr, nullptr, nullptr, napi_default, nullptr},
