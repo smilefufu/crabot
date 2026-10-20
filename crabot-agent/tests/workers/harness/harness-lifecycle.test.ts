@@ -2,6 +2,9 @@ import { BUILTIN_WORKER_PERMISSIONS } from '../../../src/workers/builtin/runtime
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { promises as fs } from 'fs'
 import { tmpdir } from 'os'
+import { spawn } from 'node:child_process'
+import { once } from 'node:events'
+import { randomUUID } from 'node:crypto'
 import { join } from 'path'
 import { INPUT_DELIVERY_TIMEOUT_MS, WorkerHarness, WorkerNotFoundError, TaskCancelledError, type HarnessDeps, type SpawnWorkerParams } from '../../../src/workers/harness/harness'
 import { LedgerStore } from '../../../src/workers/harness/ledger-store'
@@ -5624,6 +5627,68 @@ describe('workspace relocation stop submission', () => {
     } finally { releaseCliLock(lock) }
   })
 
+  it.each(['normal', 'lock lost', 'receipt reply lost', 'false persistence ack'])('uses an independent coordinator for the actual Worker stop journal: %s', async mode => {
+    const { WorkspaceCatalog } = await import('../../../../crabot-shared/dist/workspace-catalog.js')
+    const { sha256CanonicalJson } = await import('crabot-shared')
+    const { default: native } = await import('../../../../scripts/lib/process-identity.cjs')
+    const { default: management } = await import('../../../../scripts/lib/desktop-management.cjs')
+    const locks = await import('../../../../scripts/lib/cli-lock.mjs'), relocation = await import('../../../../scripts/lib/workspace-relocation-intent.mjs')
+    const privateData = management.ensurePrivateDataRoot(join(await fs.realpath(dataDir), 'private-coordinator-instance'))
+    const catalog = new WorkspaceCatalog({ dataRoot: privateData, files: native }); await catalog.initialize()
+    const { harness, fake, ledger } = await makeHarness({}, { isWorkspaceRelocationReady: () => true }, privateData)
+    const worker = await harness.spawnWorker(spawnParams()), scope = await harness.captureWorkspaceRelocationScope(), snapshot = await catalog.snapshot()
+    const id = randomUUID(), lock = await locks.acquireCliLock(privateData, 'workspace-relocation')
+    await relocation.beginWorkspaceRelocationIntent({ dataDir: privateData, id, target: join(dataDir, 'relocated'), expectedRevision: snapshot.revision, protectedRoots: [] })
+    const entry = new URL('../../../../scripts/lib/workspace-coordinator-entry.mjs', import.meta.url).href
+    const bridge = new URL('../../../../scripts/lib/workspace-worker-journal.mjs', import.meta.url).href
+    const code = `import{enterWorkspaceRelocationCoordinator}from ${JSON.stringify(entry)};import{serveWorkspaceWorkerJournal}from ${JSON.stringify(bridge)};
+      const context=await enterWorkspaceRelocationCoordinator();
+      if(${JSON.stringify(mode)}==='false persistence ack')process.on('message',m=>{if(m.kind==='workspace_worker_journal_request')process.send({kind:'workspace_worker_journal_reply',request_id:m.request_id,launch_id:m.launch_id,operation:m.operation,ok:true,result:m.operation==='prepare'?'dispatch':true})});
+      else serveWorkspaceWorkerJournal(context);
+      if(${JSON.stringify(mode)}==='receipt reply lost'){const send=process.send.bind(process);process.send=(m,cb)=>m.kind==='workspace_worker_journal_reply'&&m.operation==='complete'?(cb?.(null),false):send(m,cb)}
+      if(${JSON.stringify(mode)}==='lock lost')context.release();process.send({kind:'fixture-serving'});setTimeout(()=>process.exit(2),30000);`
+    const child = spawn(process.execPath, ['--input-type=module', '-e', code], { stdio: ['ignore', 'ignore', 'pipe', 'ipc'] })
+    let output = ''; child.stderr.on('data', bytes => { output += bytes.toString() })
+    const exited = once(child, 'exit'); void exited.catch(() => {})
+    let journal: any, recovered: any
+    const stop = vi.spyOn(fake, 'stop').mockImplementation(async h => {
+      fake.emitStateChange(h, 'exited', undefined, 'killed')
+      await (harness as any).stateChangeTails.get(`${h.worker_id}#${h.impl}#${h.seq}`)
+    })
+    try {
+      await once(child, 'spawn')
+      const launchId = randomUUID(), launch = relocation.commitWorkspaceRelocationCoordinator({ dataDir: privateData, id, launchId, coordinator: native.inspectProcess(child.pid) })
+      const messages: any[] = []; child.on('message', message => messages.push(message))
+      locks.releaseCliLock(lock)
+      child.send({ kind: 'workspace_relocation_start', data_dir: privateData, intent_id: id, launch_id: launchId, launch_sha256: sha256CanonicalJson(launch) })
+      await vi.waitFor(() => expect(messages.some(item => item.kind === 'fixture-serving'), output).toBe(true), { timeout: 10000 })
+      const { createWorkspaceWorkerJournal } = await import('../../../../scripts/lib/workspace-worker-journal.mjs')
+      journal = createWorkspaceWorkerJournal(child, { dataDir: privateData, id, launch })
+      const pending = harness.requestWorkspaceRelocationStops(scope, journal)
+      if (mode === 'lock lost' || mode === 'false persistence ack') {
+        await expect(pending).rejects.toMatchObject({ code: 'CRABOT_WORKSPACE_JOURNAL_UNAVAILABLE' })
+        expect(stop).not.toHaveBeenCalled(); expect(relocation.readWorkspaceRelocationWorkers(privateData, id)).toBeNull()
+      } else {
+        if (mode === 'receipt reply lost') {
+          await expect(pending).rejects.toMatchObject({ code: 'CRABOT_WORKSPACE_JOURNAL_UNAVAILABLE' })
+          expect(harness.requestWorkspaceRelocationStops(scope, journal)).toBe(pending)
+          const fresh = new WorkerHarness((harness as any).deps)
+          recovered = createWorkspaceWorkerJournal(child, { dataDir: privateData, id, launch })
+          expect(await fresh.requestWorkspaceRelocationStops(scope, recovered)).toEqual({ dispatch: 'observe', results: [] })
+        } else expect((await pending).dispatch).toBe('dispatch')
+        expect(stop).toHaveBeenCalledTimes(1)
+        expect(relocation.readWorkspaceRelocationStops(privateData, id).submission.results).toEqual([{ worker_id: worker.worker_id, incarnation_id: worker.incarnations[0].incarnation_id, status: 'submitted' }])
+      }
+      const current = (await ledger.findWorker(worker.worker_id))!.worker
+      expect(current.task.closed).toBeUndefined(); expect(current.origin).toEqual(worker.origin)
+      expect(await catalog.snapshot()).toEqual(snapshot)
+      await expect(fs.stat(join(dataDir, 'relocated'))).rejects.toMatchObject({ code: 'ENOENT' })
+    } finally {
+      journal?.close(); recovered?.close(); locks.releaseCliLock(lock)
+      if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
+      await exited
+    }
+  }, 30000)
   it('never repeats an already registered attempt or pretends that its executions stopped', async () => {
     const { harness, fake, ledger } = await makeHarness({}, { isWorkspaceRelocationReady: () => true })
     const worker = await harness.spawnWorker(spawnParams()), scope = await harness.captureWorkspaceRelocationScope(), log = journal()

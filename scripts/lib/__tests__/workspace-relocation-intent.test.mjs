@@ -901,3 +901,17 @@ test('the real coordinator cannot publish readiness before taking over its own n
   assert.equal(readWorkspaceRelocationCoordinator(f.data, f.input.id).ready, null)
   assertWorkspaceStillProtected(f.data)
 })
+
+for (const dependent of ['relocation-stop-attempt.json', 'relocation-stop-submission.json', 'relocation-modules.json', 'relocation-module-stop-attempt.json', 'relocation-module-processes', 'relocation-module-stop-submission.json']) test('an existing intent cannot reconstruct a missing Worker scope over downstream evidence: ' + dependent, async t => {
+  let lock
+  const f = await fixture(t, () => releaseCliLock(lock))
+  lock = await acquireCliLock(f.data, 'workspace-relocation'); await beginWorkspaceRelocationIntent(f.input)
+  const orphan = path.join(f.data, 'workspace-control', dependent), workersFile = path.join(f.data, 'workspace-control/relocation-workers.json')
+  if (process.platform === 'win32') native.writePrivateFile(orphan, '{}')
+  else await fs.writeFile(orphan, '{}', { mode: 0o600 })
+  assert.throws(() => commitWorkspaceRelocationWorkers({ dataDir: f.data, id: f.input.id, workers: workerSet() }), { code: 'WORKSPACE_RELOCATION_INVALID' })
+  assert.throws(() => readWorkspaceRelocationWorkers(f.data, f.input.id), { code: 'WORKSPACE_RELOCATION_INVALID' })
+  await assert.rejects(fs.stat(workersFile), { code: 'ENOENT' })
+  assert.equal(await fs.readFile(orphan, 'utf8'), '{}')
+  assertWorkspaceStillProtected(f.data)
+})

@@ -169,6 +169,7 @@ function readScope(ctx, intent) {
   if (!intent) fail()
   const value = readPrivateJson(path.join(ctx.control, 'relocation-workers.json'), scopeLimit)
   if (value === undefined) {
+    absent(ctx, ['relocation-stop-attempt.json', 'relocation-stop-submission.json', ...moduleFiles])
     if (sha256CanonicalJson(read(ctx)) !== sha256CanonicalJson(intent)) fail()
     return null
   }
@@ -197,6 +198,7 @@ export function commitWorkspaceRelocationWorkers({ dataDir, id, workers }) {
   const record = { schema_version: 1, intent_id: id, intent_sha256: sha256CanonicalJson(intent), workers, created_at: new Date().toISOString() }
   const verify = () => {
     if (!same(intent.source, identity(intent.source.path)) || sha256CanonicalJson(read(ctx)) !== record.intent_sha256) fail()
+    absent(ctx, ['relocation-stop-attempt.json', 'relocation-stop-submission.json', ...moduleFiles])
   }
   verify()
   publishPrivateJson(ctx, path.join(ctx.control, 'relocation-workers.json'), record, scopeLimit, verify)
