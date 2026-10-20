@@ -13,7 +13,7 @@ async function openPinnedProcessRpc(expected, port, { signal, timeoutMs = 5000 }
   const deadline = () => AbortSignal.any([AbortSignal.timeout(timeoutMs), ...(signal ? [signal] : [])])
   function verify() {
     if (closed || !Number.isInteger(port) || port < 1 || port > 65535
-      || !Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 120000
+      || !Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 2147483647
       || expected.owner !== identity.inspectProcess(process.pid).owner
       || !identity.sameProcess(expected, identity.inspectProcess(expected.pid))
       || !identity.listListeningTcpPorts(expected.pid).includes(port)) throw unavailable()

@@ -26,6 +26,7 @@ import {
   type PublishEventParams,
   assertWorkspaceExecutionAllowed,
   workspaceMaintenancePending,
+  sha256CanonicalJson,
   generateId,
   generateTimestamp,
   createSuccessResponse,
@@ -89,6 +90,22 @@ interface WorkspaceModuleScope {
   }>
 }
 
+interface WorkspaceModuleStopResult {
+  module_id: string
+  runtime_id?: string
+  shutdown: 'not_submitted' | 'submitted' | 'unknown'
+  status: 'inactive' | 'known_scope_exited' | 'unknown'
+}
+interface WorkspaceModuleStopJournal {
+  prepare(modules: ReadonlyArray<WorkspaceModuleScope>): Promise<'dispatch' | 'observe'>
+  observe(moduleId: string, processes: WorkspaceModuleScope['processes']): Promise<void>
+  complete(results: ReadonlyArray<WorkspaceModuleStopResult>): Promise<void>
+}
+interface WorkspaceModuleStopResponse {
+  dispatch: 'dispatch' | 'observe'
+  results: ReadonlyArray<WorkspaceModuleStopResult>
+}
+
 interface ManagedChildState {
   moduleId: ModuleId
   runtimeId: string
@@ -117,6 +134,7 @@ export class ModuleManager {
   private readonly portAllocator: PortAllocator
   private readonly modules: Map<ModuleId, ModuleRuntime> = new Map()
   private readonly processes: Map<ModuleId, ChildProcess> = new Map()
+  private workspaceModuleStop?: { fingerprint: string; pending: Promise<WorkspaceModuleStopResponse> }
   private readonly childStates: WeakMap<ChildProcess, ManagedChildState> = new WeakMap()
   private readonly lifecycleQueues: Map<ModuleId, Promise<void>> = new Map()
   private readonly restartTimers: Map<ModuleId, NodeJS.Timeout> = new Map()
@@ -1202,6 +1220,101 @@ export class ModuleManager {
     return Object.freeze(result)
   }
 
+  requestWorkspaceRelocationModuleStops(
+    expected: ReadonlyArray<WorkspaceModuleScope>, journal: WorkspaceModuleStopJournal,
+  ): Promise<WorkspaceModuleStopResponse> {
+    const fingerprint = sha256CanonicalJson(expected)
+    const failure = () => Object.assign(new Error('迁移模块停止范围不能更换，保留维护保护。'), { code: 'CRABOT_WORKSPACE_MODULE_SCOPE' })
+    if (this.workspaceModuleStop) {
+      if (this.workspaceModuleStop.fingerprint !== fingerprint) return Promise.reject(failure())
+      return this.workspaceModuleStop.pending
+    }
+    const pending = Promise.resolve().then(async (): Promise<WorkspaceModuleStopResponse> => {
+      const scope = await this.captureWorkspaceRelocationModules()
+      if (sha256CanonicalJson(scope) !== fingerprint) throw failure()
+      const dispatch = await journal.prepare(scope)
+      if (dispatch === 'observe') return { dispatch, results: [] }
+      if (dispatch !== 'dispatch' || sha256CanonicalJson(await this.captureWorkspaceRelocationModules()) !== fingerprint) throw failure()
+      const verifySet = (): void => {
+        if (!workspaceMaintenancePending(this.dataDir) || this.isShuttingDown
+          || JSON.stringify([...this.modules.keys()].filter(id => id !== 'admin-web').sort()) !== JSON.stringify(scope.map(item => item.module_id))) throw failure()
+      }
+      const results: WorkspaceModuleStopResult[] = []
+      for (const item of scope) {
+        verifySet()
+        results.push(await this.enqueueLifecycle(item.module_id, () => this.stopWorkspaceRelocationModule(item, journal)))
+      }
+      verifySet()
+      await journal.complete(results)
+      return { dispatch, results }
+    })
+    this.workspaceModuleStop = { fingerprint, pending }
+    return pending
+  }
+
+  private async stopWorkspaceRelocationModule(
+    scope: WorkspaceModuleScope, journal: WorkspaceModuleStopJournal,
+  ): Promise<WorkspaceModuleStopResult> {
+    const result: WorkspaceModuleStopResult = { module_id: scope.module_id,
+      ...(scope.runtime_id ? { runtime_id: scope.runtime_id } : {}), shutdown: 'not_submitted', status: 'unknown' }
+    const runtime = this.modules.get(scope.module_id), child = this.processes.get(scope.module_id)
+    const state = child ? this.childStates.get(child) : undefined
+    if (!workspaceMaintenancePending(this.dataDir) || this.isShuttingDown || !runtime || runtime.port !== scope.module_port) return result
+    if (!scope.runtime_id) {
+      if (!child && !runtime.pid && runtime.status !== 'running' && runtime.status !== 'starting' && !scope.processes.length) result.status = 'inactive'
+      return result
+    }
+    if (!child || !state || state.runtimeId !== scope.runtime_id || state.rootPid !== child.pid || state.finalizeStarted
+      || state.termination || state.rootExited || !scope.processes.some(item => item.pid === child.pid)) return result
+    this.cancelAutoRestart(scope.module_id)
+    this.revokeRuntimeBearer(scope.module_id)
+    state.intentionalReason = 'shutdown'
+    // Install before any asynchronous RPC or exit callback can enter ordinary tree finalization.
+    state.termination = Promise.resolve().then(async () => {
+      const native = require('../../scripts/lib/process-identity.cjs')
+      const { openModuleShutdownRpc } = require('../../scripts/lib/module-shutdown-rpc.cjs')
+      const { stopKnownProcessScope } = require('../../scripts/lib/known-process-stop.cjs')
+      const timeoutMs = Math.max(1, Math.round(this.config.shutdown_timeout * 1000))
+      const assertCurrent = (): void => {
+        if (!workspaceMaintenancePending(this.dataDir) || this.isShuttingDown || this.modules.get(scope.module_id) !== runtime
+          || this.processes.get(scope.module_id) !== child || this.childStates.get(child) !== state
+          || state.runtimeId !== scope.runtime_id || runtime.port !== scope.module_port) {
+          throw new Error('Fixed module maintenance ownership changed')
+        }
+      }
+      let rpc: { shutdown(): Promise<void>; close(): void } | undefined
+      try {
+        assertCurrent()
+        if (!runtime.skip_health_check) {
+          const listeners = scope.processes.filter(item => native.sameProcess(item, native.inspectProcess(item.pid))
+            && native.listListeningTcpPorts(item.pid).includes(scope.module_port))
+          if (listeners.length !== 1) throw new Error('Cannot verify the fixed module listener')
+          rpc = await openModuleShutdownRpc(listeners[0], scope.module_port, {
+            instance_id: scope.instance_id, module_id: scope.module_id, runtime_id: scope.runtime_id,
+          }, { timeoutMs })
+        }
+        await stopKnownProcessScope(scope.processes, { timeoutMs,
+          onObserved: async (processes: WorkspaceModuleScope['processes']) => { assertCurrent(); await journal.observe(scope.module_id, processes) },
+          graceful: rpc ? async () => {
+            assertCurrent()
+            result.shutdown = 'unknown'
+            await rpc!.shutdown()
+            result.shutdown = 'submitted'
+          } : undefined,
+        }, { ...native, terminateKnownProcess: (process: WorkspaceModuleScope['processes'][number]) => {
+          assertCurrent(); return native.terminateKnownProcess(process)
+        } })
+        assertCurrent()
+      } finally { rpc?.close() }
+    })
+    try {
+      await state.termination
+      await this.beginChildFinalize(state, null, null)
+      result.status = 'known_scope_exited'
+    } catch { runtime.status = 'error' }
+    return result
+  }
+
   private async startModuleProcess(
     moduleId: ModuleId,
     entryOverride?: string,
@@ -1675,6 +1788,9 @@ export class ModuleManager {
 
 
     try {
+      if (this.workspaceRecoveryPaused(state.moduleId) && !state.intentionalReason && !state.termination) {
+        throw Object.assign(new Error('迁移期间模块意外退出，进程范围尚待核验。'), { code: 'CRABOT_WORKSPACE_MODULE_SCOPE' })
+      }
       await this.ensureChildTreeTerminated(state)
       await this.runtimeRegistry.removeRuntime(state.runtimeId)
       const isCurrent = this.processes.get(state.moduleId) === state.child

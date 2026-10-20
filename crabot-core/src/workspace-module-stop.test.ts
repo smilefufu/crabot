@@ -1,0 +1,118 @@
+import { describe, it, expect, vi } from 'vitest'
+import fs from 'node:fs/promises'
+import path from 'node:path'
+import { tmpdir } from 'node:os'
+import http from 'node:http'
+import { once } from 'node:events'
+import ModuleManager from './index.js'
+import { canonicalizeJson } from 'crabot-shared'
+
+async function fixture(withChild = false) {
+  const data = await fs.mkdtemp(path.join(tmpdir(), 'crabot-module-stop-'))
+  const reserve = http.createServer()
+  await new Promise<void>(resolve => reserve.listen(0, '127.0.0.1', resolve))
+  const port = (reserve.address() as { port: number }).port
+  await new Promise<void>(resolve => reserve.close(() => resolve()))
+  const script = path.join(data, 'finite-module.cjs'), marker = path.join(data, 'shutdown.json')
+  await fs.writeFile(script, `const fs=require('node:fs'),http=require('node:http');
+    const timer=setInterval(()=>{},1000),calls=[];
+    if(process.env.FIXTURE_DESCENDANT){const child=require('node:child_process').spawn(process.execPath,['-e','setTimeout(()=>{},20000)'],{detached:true,stdio:'ignore'});child.unref()}
+    const server=http.createServer(async(req,res)=>{let text='';for await(const part of req)text+=part;
+      const body=JSON.parse(text);calls.push(req.url);fs.writeFileSync(process.env.FIXTURE_CALLS,JSON.stringify(calls));
+      const data=req.url==='/get_runtime_identity'?{instance_id:process.env.CRABOT_INSTANCE_ID,module_id:process.env.Crabot_MODULE_ID,runtime_id:process.env.CRABOT_MODULE_RUNTIME_ID}:{};
+      res.end(JSON.stringify({id:body.id,success:true,data}));
+      if(req.url==='/shutdown'){clearInterval(timer);setTimeout(()=>server.close(),10)}
+    });server.listen(Number(process.env.Crabot_PORT),'127.0.0.1',()=>fs.writeFileSync(process.env.FIXTURE_READY,'ready'));`)
+  const manager = new ModuleManager({ port: 0, modules: [], shutdown_timeout: 0.5 }, data) as any
+  manager.managementOnly = false
+  for (const id of ['fixture-memory', 'stopped-channel', 'admin-web']) manager.modules.set(id, {
+    module_id: id, module_type: 'service', entry: id === 'admin-web' ? `"${process.execPath}" -e "setInterval(()=>{},1000)"` : `"${process.execPath}" "${script}"`,
+    env: { FIXTURE_READY: path.join(data, 'ready'), FIXTURE_CALLS: marker, ...(withChild && id === 'fixture-memory' ? { FIXTURE_DESCENDANT: '1' } : {}) }, auto_start: false, auto_restart: true,
+    skip_health_check: true, start_priority: 1, status: 'stopped', port: id === 'fixture-memory' ? port : port + 1,
+  })
+  await manager.startModuleProcess('fixture-memory'); await manager.startModuleProcess('admin-web')
+  await vi.waitFor(async () => expect(await fs.readFile(path.join(data, 'ready'), 'utf8')).toBe('ready'))
+  manager.modules.get('fixture-memory').skip_health_check = false
+  await fs.mkdir(path.join(data, 'workspace-control')); await fs.writeFile(path.join(data, 'workspace-control/relocation.json'), 'fixture')
+  const scope = await manager.captureWorkspaceRelocationModules()
+  const journal = { prepare: vi.fn(async () => 'dispatch'), observe: vi.fn(async () => undefined), complete: vi.fn(async () => undefined) }
+  return { data, manager, scope, journal, marker, cleanup: async () => {
+    vi.restoreAllMocks()
+    for (const child of manager.processes.values()) {
+      const state = manager.childStates.get(child)
+      if (!state.finalizeStarted) state.termination = undefined
+    }
+    try { await manager.stop() } finally {
+      const native = require('../../scripts/lib/process-identity.cjs'), { probeKnownProcessExit } = require('../../scripts/lib/known-process-exit.cjs')
+      const processes = scope.flatMap((item: any) => item.processes)
+      for (const process of processes) native.terminateKnownProcess(process)
+      await vi.waitFor(() => expect(probeKnownProcessExit(processes).state).toBe('stopped'), { timeout: 5000 })
+      await fs.rm(data, { recursive: true, force: true })
+    }
+  } }
+}
+
+describe('workspace planned execution module stops', () => {
+  it('uses runtime-bound shutdown and known-scope proof while Admin stays alive', async () => {
+    const f = await fixture(true), legacy = vi.spyOn(f.manager, 'terminateChildTree')
+    try {
+      const admin = f.manager.processes.get('admin-web')
+      const result = await f.manager.requestWorkspaceRelocationModuleStops(JSON.parse(canonicalizeJson(f.scope)), f.journal)
+      expect(result).toEqual({ dispatch: 'dispatch', results: [
+        { module_id: 'fixture-memory', runtime_id: f.scope[0].runtime_id, shutdown: 'submitted', status: 'known_scope_exited' },
+        { module_id: 'stopped-channel', shutdown: 'not_submitted', status: 'inactive' },
+      ] })
+      expect(JSON.parse(await fs.readFile(f.marker, 'utf8'))).toEqual(['/get_runtime_identity', '/shutdown'])
+      expect(legacy).not.toHaveBeenCalled(); expect(admin.exitCode).toBeNull()
+      expect(f.manager.processes.has('fixture-memory')).toBe(false)
+      expect((await f.manager.runtimeRegistry.listRecords()).map((item: any) => item.module_id)).toEqual(['admin-web'])
+      expect(f.manager.restartTimers.size).toBe(0)
+      expect(f.scope[0].processes).toHaveLength(2)
+      expect(f.journal.observe).toHaveBeenCalledWith('fixture-memory', f.scope[0].processes)
+      expect(f.journal.complete).toHaveBeenCalledWith(result.results)
+    } finally { await f.cleanup() }
+  })
+  for (const kind of ['prepare fails', 'scope changed after acknowledgement', 'observe only', 'process observation not acknowledged']) {
+    it(`does not turn uncertainty into shutdown: ${kind}`, async () => {
+      const f = await fixture()
+      try {
+        if (kind === 'prepare fails') f.journal.prepare.mockRejectedValue(new Error('storage unavailable'))
+        if (kind === 'scope changed after acknowledgement') f.journal.prepare.mockImplementation(async () => { f.manager.modules.get('fixture-memory').port++; return 'dispatch' })
+        if (kind === 'observe only') f.journal.prepare.mockResolvedValue('observe')
+        if (kind === 'process observation not acknowledged') f.journal.observe.mockRejectedValue(new Error('storage unavailable'))
+        const pending = f.manager.requestWorkspaceRelocationModuleStops(f.scope, f.journal)
+        if (kind === 'prepare fails' || kind === 'scope changed after acknowledgement') await expect(pending).rejects.toBeTruthy()
+        else if (kind === 'observe only') expect(await pending).toEqual({ dispatch: 'observe', results: [] })
+        else expect((await pending).results[0]).toMatchObject({ status: 'unknown', shutdown: 'not_submitted' })
+        expect(f.manager.processes.get('fixture-memory').exitCode).toBeNull()
+        expect(await fs.readFile(f.marker, 'utf8').catch(() => '[]')).not.toContain('/shutdown')
+      } finally { f.manager.modules.get('fixture-memory').port = f.scope[0].module_port; await f.cleanup() }
+    })
+  }
+  it('keeps an unplanned maintenance crash out of the legacy tree fallback', async () => {
+    const f = await fixture(), legacy = vi.spyOn(f.manager, 'terminateChildTree')
+    const child = f.manager.processes.get('fixture-memory'), state = f.manager.childStates.get(child)
+    try {
+      const exited = once(child, 'exit'); child.kill('SIGKILL'); await exited; await state.finalized
+      expect(legacy).not.toHaveBeenCalled()
+      expect(state.finalizeError).toMatchObject({ code: 'CRABOT_WORKSPACE_MODULE_SCOPE' })
+      expect(f.manager.processes.get('fixture-memory')).toBe(child)
+      expect((await f.manager.runtimeRegistry.listRecords()).some((item: any) => item.runtime_id === state.runtimeId)).toBe(true)
+    } finally {
+      if (child.exitCode !== null || child.signalCode !== null) f.manager.processes.delete('fixture-memory')
+      await f.cleanup()
+    }
+  })
+  it('never submits again after the result acknowledgement is lost', async () => {
+    const f = await fixture()
+    try {
+      f.journal.complete.mockRejectedValue(new Error('result reply lost'))
+      const first = f.manager.requestWorkspaceRelocationModuleStops(f.scope, f.journal)
+      await expect(first).rejects.toThrow('result reply lost')
+      expect(f.manager.requestWorkspaceRelocationModuleStops(f.scope, f.journal)).toBe(first)
+      await expect(first).rejects.toThrow('result reply lost')
+      expect(f.journal.prepare).toHaveBeenCalledTimes(1)
+      expect(JSON.parse(await fs.readFile(f.marker, 'utf8'))).toEqual(['/get_runtime_identity', '/shutdown'])
+    } finally { await f.cleanup() }
+  })
+})
