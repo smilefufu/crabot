@@ -73,6 +73,16 @@ export interface VerifyWorkspaceRelocationRequestResult {
 }
 
 
+export interface QuiesceWorkspaceRelocationWebParams {
+  intent_id: string
+  intent_sha256: string
+}
+export interface QuiesceWorkspaceRelocationWebResult {
+  quiesced: true
+  intent_id: string
+  intent_sha256: string
+}
+
 export type WorkspaceRelocationCoordinatorAction = 'capture_workers' | 'stop_workers'
 export interface VerifyWorkspaceRelocationCoordinatorParams {
   intent_id: string

@@ -2,7 +2,7 @@ import { parseFriendPermissionRecords, serializeFriendPermissionRecords } from '
 import { WorkspaceExecutionInventorySchema, WorkspaceIdSchema } from 'crabot-client'
 import { WorkspaceService } from './workspaces.js'
 import { WorkspaceWebAdmissions, requiresWorkspaceWebAdmission } from './workspace-web-admissions.js'
-import type { VerifyWorkspaceRelocationRequestParams, VerifyWorkspaceRelocationRequestResult } from 'crabot-shared'
+import type { VerifyWorkspaceRelocationRequestParams, VerifyWorkspaceRelocationRequestResult, QuiesceWorkspaceRelocationWebParams, QuiesceWorkspaceRelocationWebResult } from 'crabot-shared'
 import { resolveManagedMcpConfig } from './managed-mcp-runtime.js'
 import type { ConversationRequestSource } from 'crabot-shared'
 import type { VerifyMemoryAccessResult, VerifyMemoryRequestAccessResult } from 'crabot-shared'
@@ -1018,6 +1018,7 @@ export class AdminModule extends ModuleBase {
     this.registerMethod('delete_task', this.handleDeleteTask.bind(this))
 
     this.registerMethod('verify_workspace_relocation_request', this.handleVerifyWorkspaceRelocationRequest.bind(this))
+    this.registerMethod('quiesce_workspace_relocation_web', this.handleQuiesceWorkspaceRelocationWeb.bind(this))
 
     // Schedule 管理
     this.registerMethod('create_schedule', this.handleCreateSchedule.bind(this))
@@ -3227,6 +3228,27 @@ export class AdminModule extends ModuleBase {
   private async handleVerifyWorkspaceRelocationRequest(
     params: VerifyWorkspaceRelocationRequestParams, context?: RpcHandlerContext,
   ): Promise<VerifyWorkspaceRelocationRequestResult> {
+    return { verified: true, ...await this.requireHumanWorkspaceRelocationIntent(params, context) }
+  }
+
+  private async handleQuiesceWorkspaceRelocationWeb(
+    params: QuiesceWorkspaceRelocationWebParams, context?: RpcHandlerContext,
+  ): Promise<QuiesceWorkspaceRelocationWebResult> {
+    const proof = await this.requireHumanWorkspaceRelocationIntent(params, context)
+    try {
+      await this.quiesceWorkspaceWebAccess()
+      const { readWorkspaceRelocationIntent } = require('../../scripts/lib/workspace-relocation-intent.mjs')
+      const intent = readWorkspaceRelocationIntent(path.resolve(this.adminConfig.data_dir, '..'))
+      if (!intent || intent.id !== proof.intent_id || sha256CanonicalJson(intent) !== proof.intent_sha256) throw new Error('Original workspace intent changed')
+      return { quiesced: true, ...proof }
+    } catch { throw new RpcError('SERVICE_UNAVAILABLE', '管理面请求或文件句柄收口无法核实，已保留原维护保护。') }
+  }
+
+  /** Same human and fixed-intent assertion; actions keep their own side effects and result types. */
+  private async requireHumanWorkspaceRelocationIntent(
+    params: VerifyWorkspaceRelocationRequestParams, context?: RpcHandlerContext,
+  ): Promise<VerifyWorkspaceRelocationRequestParams> {
+    params = params && typeof params === 'object' && !Array.isArray(params) ? Object.freeze({ ...params }) : params
     const bearer = context?.authorizationBearer
     if (!bearer || !await this.verifyHumanToken(bearer)) {
       throw new RpcError(this.isNonHumanToken(bearer) ? 'FORBIDDEN' : 'UNAUTHORIZED', 'Human Admin credential required')
@@ -3247,7 +3269,7 @@ export class AdminModule extends ModuleBase {
     if (intent.id !== params.intent_id || fingerprint !== params.intent_sha256) {
       throw new RpcError('FORBIDDEN', 'Workspace relocation request does not match the fixed intent')
     }
-    return { verified: true, intent_id: intent.id, intent_sha256: fingerprint }
+    return { intent_id: intent.id, intent_sha256: fingerprint }
   }
 
   private isNonHumanToken(token: string | undefined): boolean {

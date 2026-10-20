@@ -3,15 +3,17 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import { tmpdir } from 'node:os'
 import { createHmac, randomUUID } from 'node:crypto'
-import { createServer } from 'node:http'
+import { createServer, request as httpRequest } from 'node:http'
 import { once } from 'node:events'
 import { sha256CanonicalJson, RpcClient } from 'crabot-shared'
 import { WorkspaceCatalog } from 'crabot-shared/dist/workspace-catalog.js'
 import AdminModule from './index.js'
+import { WorkspaceService } from './workspaces.js'
 import { newCredentialsFromPassword, writeCredentials } from './credentials.js'
 
 const cleanup: string[] = []
-afterEach(async () => { for (const root of cleanup.splice(0)) await fs.rm(root, { recursive: true, force: true }) })
+const services: WorkspaceService[] = []
+afterEach(async () => { vi.restoreAllMocks(); for (const service of services.splice(0)) await service.close(); for (const root of cleanup.splice(0)) await fs.rm(root, { recursive: true, force: true }) })
 async function fixture() {
   const root = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'crabot-relocation-human-'))); cleanup.push(root)
   const management = require('../../scripts/lib/desktop-management.cjs'), native = require('../../scripts/lib/process-identity.cjs')
@@ -27,6 +29,7 @@ async function fixture() {
   const admin = Object.create(AdminModule.prototype) as any, secret = randomUUID()
   const desktop = { session_id: 'fixture-session', instance_id: 'fixture-instance', generation: 'fixture-generation' }
   admin.adminConfig = { data_dir: adminData }; admin.jwtSecret = secret
+  const service = new WorkspaceService({ dataRoot: data }); await service.initialize(); services.push(service); admin.workspaceService = service
   admin.desktopSessions = { validate: vi.fn((claims: unknown) => JSON.stringify(claims) === JSON.stringify(desktop)) }
   const jwt = (payload: Record<string, unknown>, key = secret) => {
     const header = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url')
@@ -34,7 +37,7 @@ async function fixture() {
     return `${header}.${body}.${createHmac('sha256', key).update(`${header}.${body}`).digest('base64url')}`
   }
   const params = { intent_id: id, intent_sha256: sha256CanonicalJson(intent) }, token = jwt({ sub: 'admin', e: 0, desktop })
-  return { root, data, adminData, admin, desktop, jwt, params, token, file: path.join(data, 'workspace-control/relocation.json') }
+  return { root, data, adminData, admin, service, desktop, jwt, params, token, file: path.join(data, 'workspace-control/relocation.json') }
 }
 describe('human authorization for one fixed workspace relocation intent', () => {
   it('accepts a registered desktop session without configuring another password or changing files', async () => {
@@ -114,5 +117,78 @@ describe('human authorization for one fixed workspace relocation intent', () => 
     await fs.rm(f.file)
     await expect(f.admin.handleVerifyWorkspaceRelocationRequest(f.params, { authorizationBearer: f.token })).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
     await expect(fs.stat(f.file)).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+})
+
+
+describe('human-authorized Admin Web quiescence for the fixed workspace intent', () => {
+  it('uses the actual sensitive HTTP envelope and pauses real scans without changing the job or requiring a GUI password', async () => {
+    const f = await fixture(), bodies: string[] = [], before = await fs.readFile(f.file)
+    f.admin.methodHandlers = new Map([['quiesce_workspace_relocation_web', f.admin.handleQuiesceWorkspaceRelocationWeb.bind(f.admin)]])
+    const server = createServer((req, res) => {
+      let body = ''; req.on('data', part => { body += part }); req.on('end', () => bodies.push(body))
+      void f.admin.handleRequest(req, res)
+    })
+    server.listen(0, '127.0.0.1'); await once(server, 'listening')
+    try {
+      const port = (server.address() as { port: number }).port, rpc = new RpcClient()
+      expect(await rpc.callSensitive(port, 'quiesce_workspace_relocation_web', f.params, 'module-manager', { authorizationBearer: f.token })).toEqual({ quiesced: true, ...f.params })
+      expect(await rpc.callSensitive(port, 'quiesce_workspace_relocation_web', f.params, 'module-manager', { authorizationBearer: f.token })).toEqual({ quiesced: true, ...f.params })
+      expect(bodies.every(body => !body.includes(f.token))).toBe(true)
+      await expect(f.service.refresh('default')).rejects.toMatchObject({ code: 'WORKSPACE_UNAVAILABLE' })
+      expect(await fs.readFile(f.file)).toEqual(before)
+      await expect(fs.stat(path.join(f.adminData, 'credentials.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+      for (const source of ['admin-web', 'module-manager']) {
+        const response = await fetch(`http://127.0.0.1:${port}/quiesce_workspace_relocation_web`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: randomUUID(), source, params: { ...f.params, authorizationBearer: f.token } }) })
+        expect(response.status).toBe(401)
+      }
+    } finally { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())) }
+  })
+  it('rejects bad authority, request shape, foreign jobs and damaged records before any quiescence', async () => {
+    const f = await fixture(), drain = vi.spyOn(f.admin, 'quiesceWorkspaceWebAccess')
+    for (const bearer of ['', 'opaque-agent-coordinator', f.jwt({ sub: 'internal' }), f.jwt({ sub: 'agent-cli', e: 0, agent_cli: {} })]) {
+      await expect(f.admin.handleQuiesceWorkspaceRelocationWeb(f.params, { authorizationBearer: bearer, source: 'module-manager' })).rejects.toMatchObject({ code: bearer.includes('.') ? 'FORBIDDEN' : 'UNAUTHORIZED' })
+    }
+    await expect(f.admin.handleQuiesceWorkspaceRelocationWeb({ ...f.params, pid: process.pid }, { authorizationBearer: f.token })).rejects.toMatchObject({ code: 'INVALID_PARAMS' })
+    await expect(f.admin.handleQuiesceWorkspaceRelocationWeb({ ...f.params, intent_id: randomUUID() }, { authorizationBearer: f.token })).rejects.toMatchObject({ code: 'FORBIDDEN' })
+    await fs.writeFile(f.file, '{broken')
+    await expect(f.admin.handleQuiesceWorkspaceRelocationWeb(f.params, { authorizationBearer: f.token })).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
+    expect(drain).not.toHaveBeenCalled()
+  })
+  it.each(['verify', 'quiesce'])('fixes original params before asynchronous authentication: %s', async kind => {
+    const f = await fixture(), params = { ...f.params }
+    f.admin.verifyHumanToken = vi.fn(async () => { params.intent_id = randomUUID(); return { sub: 'admin' } })
+    const method = kind === 'verify' ? 'handleVerifyWorkspaceRelocationRequest' : 'handleQuiesceWorkspaceRelocationWeb'
+    expect(await f.admin[method](params, { authorizationBearer: f.token })).toEqual({ [kind === 'verify' ? 'verified' : 'quiesced']: true, ...f.params })
+  })
+  it('keeps an accepted drainage running after the actual client disconnects', async () => {
+    const f = await fixture()
+    let release!: () => void, entered!: () => void, finished = false
+    const hold = new Promise<void>(resolve => { release = resolve }), started = new Promise<void>(resolve => { entered = resolve })
+    const pause = f.service.pauseScanning.bind(f.service)
+    vi.spyOn(f.service, 'pauseScanning').mockImplementation(async () => { await pause(); entered(); await hold })
+    f.admin.methodHandlers = new Map([['quiesce_workspace_relocation_web', f.admin.handleQuiesceWorkspaceRelocationWeb.bind(f.admin)]])
+    const server = createServer((req, res) => { void f.admin.handleRequest(req, res).then(() => { finished = true }) })
+    server.listen(0, '127.0.0.1'); await once(server, 'listening')
+    const req = httpRequest(`http://127.0.0.1:${(server.address() as { port: number }).port}/quiesce_workspace_relocation_web`, { method: 'POST', headers: {
+      Authorization: 'Bearer ' + f.token, 'Content-Type': 'application/json' } })
+    req.on('error', () => {}); req.end(JSON.stringify({ id: randomUUID(), source: 'module-manager', params: f.params }))
+    try {
+      await started; req.destroy(); expect(finished).toBe(false)
+      release(); await vi.waitFor(() => expect(finished).toBe(true))
+      await expect(f.service.refresh('default')).rejects.toMatchObject({ code: 'WORKSPACE_UNAVAILABLE' })
+    } finally { release(); req.destroy(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())) }
+  })
+  it('keeps admission closed when the original private intent changes during drainage', async () => {
+    const f = await fixture(), pause = f.service.pauseScanning.bind(f.service)
+    vi.spyOn(f.service, 'pauseScanning').mockImplementation(async () => {
+      await pause()
+      const intent = JSON.parse(await fs.readFile(f.file, 'utf8'))
+      await fs.writeFile(f.file, JSON.stringify({ ...intent, created_at: new Date(Date.parse(intent.created_at) + 1000).toISOString() }))
+    })
+    await expect(f.admin.handleQuiesceWorkspaceRelocationWeb(f.params, { authorizationBearer: f.token })).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
+    await expect(f.service.refresh('default')).rejects.toMatchObject({ code: 'WORKSPACE_UNAVAILABLE' })
+    await expect(fs.stat(path.join(f.root, 'relocated'))).rejects.toMatchObject({ code: 'ENOENT' })
   })
 })
