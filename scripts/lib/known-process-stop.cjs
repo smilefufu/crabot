@@ -50,7 +50,15 @@ async function stopKnownProcessScope(initial, { timeoutMs, onObserved, graceful 
   }
   if (!(await observe()).length) return snapshot()
   const gracefulEnd = Date.now() + timeoutMs
-  try { await graceful?.() } catch { /* A lost shutdown reply is never retried; observe its known scope. */ }
+  let gracefulSettled = false
+  const closing = Promise.resolve().then(() => graceful?.()).catch(() => {
+    // A lost shutdown reply is never retried; keep observing its known scope.
+  }).finally(() => { gracefulSettled = true })
+  while (!gracefulSettled) {
+    await observe() // The original parent may create descendants before its shutdown reply settles.
+    if (!gracefulSettled) await delay(25)
+  }
+  await closing
   for (;;) {
     if (!(await observe()).length) return snapshot()
     if (Date.now() >= gracefulEnd) break

@@ -27,6 +27,7 @@ after(() => { if (root) fs.rmSync(root, { recursive: true, force: true }) })
 for (const [file, expected] of [
   ['scripts/workspace-relocation-coordinator.mjs', true],
   ['scripts/lib/workspace-coordinator-launch.mjs', true],
+  ['scripts/lib/known-process-stop.cjs', true],
   ['crabot-agent/src/engine/host-process.ts', true],
   ['crabot-agent/src/engine/bg-entities/bg-shell.ts', true],
   ['crabot-agent/src/unified-agent.ts', true],
