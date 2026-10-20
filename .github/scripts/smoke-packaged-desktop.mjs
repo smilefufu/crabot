@@ -51,7 +51,12 @@ await verifyCoreRelease(core)
 const env = { ...process.env, DATA_DIR: data }
 delete env.ELECTRON_RUN_AS_NODE; delete env.NODE_OPTIONS; delete env.NODE_PATH; delete env.CRABOT_DEV; delete env.CRABOT_PORT_OFFSET
 const node = path.join(core, process.platform === 'win32' ? '.product-runtime/node/node.exe' : '.product-runtime/node/bin/node')
-const cli = async (...args) => (await promisify(execFile)(node, [path.join(core, 'cli.mjs'), ...args], { env, cwd: core, timeout: 90_000, maxBuffer: 2 * 1024 * 1024 })).stdout
+const cliDiagnostics = []
+const cli = async (...args) => {
+  const result = await promisify(execFile)(node, [path.join(core, 'cli.mjs'), ...args], { env, cwd: core, timeout: 90_000, maxBuffer: 2 * 1024 * 1024 })
+  cliDiagnostics.push({ command: args[0], stderr: result.stderr.slice(-32_000) })
+  return result.stdout
+}
 // Run bundled native readers in short-lived children: Windows keeps a loaded
 // DLL mapped until process exit, including when the containing app is removed.
 const inspectInstance = async () => JSON.parse((await promisify(execFile)(node, ['--input-type=module', '-e',
@@ -140,6 +145,7 @@ try {
         if (contents) await fs.writeFile(path.join(diagnostics, 'packaged-' + file), contents.subarray(-128_000))
       }),
       fs.writeFile(path.join(diagnostics, 'packaged-gui.log'), guiDiagnostics.map(read => JSON.stringify(read())).join('\n')),
+      fs.writeFile(path.join(diagnostics, 'packaged-cli.log'), JSON.stringify(cliDiagnostics)),
     ])
   } catch { console.error('Packaged fixture diagnostics could not be preserved') }
   throw error
