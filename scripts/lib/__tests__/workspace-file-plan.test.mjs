@@ -14,7 +14,7 @@ import { sha256CanonicalJson } from '../../../crabot-shared/dist/canonical-json.
 import * as records from '../workspace-relocation-intent.mjs'
 
 async function fixture(t, { exitEvidence = true } = {}) {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(tmpdir(), 'workspace-file-plan-中文 space-')))
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(tmpdir(), 'workspace-file-plan-中文 space-')))
   const data = management.ensurePrivateDataRoot(path.join(root, 'data')), id = randomUUID()
   const catalog = new WorkspaceCatalog({ dataRoot: data, files: native }); await catalog.initialize()
   const before = await catalog.snapshot(), source = before.storage_root, target = path.join(root, 'new')
