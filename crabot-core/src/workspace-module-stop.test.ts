@@ -9,6 +9,9 @@ import { randomUUID } from 'node:crypto'
 import ModuleManager from './index.js'
 import { canonicalizeJson } from 'crabot-shared'
 
+// This covers real setup, native identity probes and cleanup; production limits stay in MM.
+const nativeTimeout = process.platform === 'win32' ? 30_000 : 5_000
+
 async function fixture(withChild = false, privateJournal = false) {
   const root = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'crabot-module-stop-')))
   const management = require('../../scripts/lib/desktop-management.cjs')
@@ -99,7 +102,7 @@ describe('workspace planned execution module stops', () => {
       expect(f.journal.observe).toHaveBeenCalledWith('fixture-memory', f.scope[0].processes)
       expect(f.journal.complete).toHaveBeenCalledWith(result.results)
     } finally { await f.cleanup() }
-  })
+  }, nativeTimeout)
   for (const kind of ['prepare fails', 'scope changed after acknowledgement', 'observe only', 'process observation not acknowledged']) {
     it(`does not turn uncertainty into shutdown: ${kind}`, async () => {
       const f = await fixture()
@@ -115,7 +118,7 @@ describe('workspace planned execution module stops', () => {
         expect(f.manager.processes.get('fixture-memory').exitCode).toBeNull()
         expect(await fs.readFile(f.marker, 'utf8').catch(() => '[]')).not.toContain('/shutdown')
       } finally { f.manager.modules.get('fixture-memory').port = f.scope[0].module_port; await f.cleanup() }
-    })
+    }, nativeTimeout)
   }
   it('joins the actual private module journal and native lock without moving workspace files', async () => {
     const f = await fixture(true, true)
@@ -129,7 +132,7 @@ describe('workspace planned execution module stops', () => {
       expect(await fs.stat(path.join(f.data, 'workspaces/default'))).toBeTruthy()
       await expect(fs.stat(path.join(path.dirname(f.data), 'relocated'))).rejects.toMatchObject({ code: 'ENOENT' })
     } finally { await f.cleanup() }
-  })
+  }, nativeTimeout)
   it('retains the actual private receipt after a lost reply and reacquires only observation authority', async () => {
     const f = await fixture(false, true), publish = f.journal.complete.getMockImplementation()!
     const locks = await import('../../scripts/lib/cli-lock.mjs')
@@ -149,7 +152,7 @@ describe('workspace planned execution module stops', () => {
       } finally { locks.releaseCliLock(recovered) }
       expect(JSON.parse(await fs.readFile(f.marker, 'utf8'))).toEqual(['/get_runtime_identity', '/shutdown'])
     } finally { await f.cleanup() }
-  })
+  }, nativeTimeout)
   it.each(['normal', 'lock lost', 'receipt reply lost', 'false persistence ack'])('uses the independent coordinator native lock for the real module journal across IPC: %s', async mode => {
     const f = await fixture(true, true)
     const locks = await import('../../scripts/lib/cli-lock.mjs'), native = require('../../scripts/lib/process-identity.cjs')
@@ -222,7 +225,7 @@ describe('workspace planned execution module stops', () => {
       if (child.exitCode !== null || child.signalCode !== null) f.manager.processes.delete('fixture-memory')
       await f.cleanup()
     }
-  })
+  }, nativeTimeout)
   it('never submits again after the result acknowledgement is lost', async () => {
     const f = await fixture()
     try {
@@ -234,5 +237,5 @@ describe('workspace planned execution module stops', () => {
       expect(f.journal.prepare).toHaveBeenCalledTimes(1)
       expect(JSON.parse(await fs.readFile(f.marker, 'utf8'))).toEqual(['/get_runtime_identity', '/shutdown'])
     } finally { await f.cleanup() }
-  })
+  }, nativeTimeout)
 })

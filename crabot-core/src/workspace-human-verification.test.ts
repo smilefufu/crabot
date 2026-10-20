@@ -10,7 +10,7 @@ import { WorkspaceCatalog } from 'crabot-shared/dist/workspace-catalog.js'
 import { sha256CanonicalJson } from 'crabot-shared'
 import ModuleManager from './index.js'
 
-async function fixture(options: { wrongRuntime?: boolean; delayIdentity?: boolean; result?: string; withAgent?: boolean } = {}) {
+async function fixture(options: { wrongRuntime?: boolean; result?: string; withAgent?: boolean } = {}) {
   const root = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'crabot-current-admin-')))
   const native = require('../../scripts/lib/process-identity.cjs'), management = require('../../scripts/lib/desktop-management.cjs')
   const data = management.ensurePrivateDataRoot(path.join(root, 'data')), script = path.join(data, 'finite-admin.cjs'), callsFile = path.join(data, 'calls.json')
@@ -24,14 +24,14 @@ async function fixture(options: { wrongRuntime?: boolean; delayIdentity?: boolea
       if(req.url!=='/get_runtime_identity'&&process.env.FIXTURE_RESULT==='false')data.verified=false;
       if(req.url!=='/get_runtime_identity'&&process.env.FIXTURE_RESULT==='hash')data.intent_sha256='0'.repeat(64);
       if(req.url!=='/get_runtime_identity'&&process.env.FIXTURE_RESULT==='extra')data.unexpected='do-not-trust';
-      setTimeout(()=>res.end(JSON.stringify({id:body.id,success:true,data})),req.url==='/get_runtime_identity'&&process.env.FIXTURE_DELAY_IDENTITY?200:0);
+      setTimeout(()=>res.end(JSON.stringify({id:body.id,success:true,data})),0);
     });server.listen(Number(process.env.Crabot_PORT),'127.0.0.1',()=>fs.writeFileSync(process.env.FIXTURE_READY,'ready'));
     setTimeout(()=>process.exit(0),30000).unref();`)
   const manager = new ModuleManager({ port: 0, modules: [], shutdown_timeout: 0.1 }, data) as any
   manager.managementOnly = false
   const runtime = { module_id: 'admin-web', module_type: 'admin', entry: `"${process.execPath}" "${script}"`,
     env: { FIXTURE_CALLS: callsFile, FIXTURE_READY: path.join(data, 'ready'), ...(options.wrongRuntime ? { FIXTURE_WRONG_RUNTIME: '1' } : {}),
-      ...(options.delayIdentity ? { FIXTURE_DELAY_IDENTITY: '1' } : {}), ...(options.result ? { FIXTURE_RESULT: options.result } : {}) },
+ ...(options.result ? { FIXTURE_RESULT: options.result } : {}) },
     port, auto_start: false, auto_restart: false, skip_health_check: true, start_priority: 1, status: 'stopped' }
   manager.modules.set('admin-web', runtime); await manager.startModuleProcess('admin-web')
   await vi.waitFor(async () => expect(await fs.readFile(path.join(data, 'ready'), 'utf8')).toBe('ready'))
@@ -95,13 +95,15 @@ describe('MM consumes a human intent proof only from its current Admin runtime',
     } finally { await f.cleanup() }
   }, 30_000)
   it('rechecks the current Admin after the identity response before forwarding a credential', async () => {
-    const f = await fixture({ delayIdentity: true })
-    try {
-      const pending = f.manager.verifyWorkspaceRelocationRequest(f.params, 'fixture-human')
-      const rejected = expect(pending).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
-      await vi.waitFor(async () => expect(await f.calls()).toHaveLength(1))
+    const f = await fixture(), transport = require('../../scripts/lib/module-runtime-rpc.cjs')
+    const open = transport.openModuleRuntimeRpc
+    vi.spyOn(transport, 'openModuleRuntimeRpc').mockImplementation(async (...args: unknown[]) => {
+      const rpc = await open(...args)
       f.runtime.port++
-      await rejected
+      return rpc
+    })
+    try {
+      await expect(f.manager.verifyWorkspaceRelocationRequest(f.params, 'fixture-human')).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
       expect((await f.calls()).map(item => item.authorization)).toEqual([undefined])
     } finally { await f.cleanup() }
   }, 30_000)

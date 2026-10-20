@@ -4,6 +4,9 @@ import path from 'node:path'
 import { tmpdir } from 'node:os'
 import ModuleManager from './index.js'
 
+// Native Windows registry/cleanup queries share the existing finite-process budget.
+const nativeTimeout = process.platform === 'win32' ? 30_000 : 5_000
+
 async function fixture() {
   const data = await fs.mkdtemp(path.join(tmpdir(), 'crabot-module-scope-'))
   const script = path.join(data, 'finite-module.cjs')
@@ -57,7 +60,7 @@ describe('fixed workspace execution module scope', () => {
       expect(child.exitCode).toBeNull(); expect(admin.exitCode).toBeNull()
       expect(await f.manager.runtimeRegistry.listRecords()).toEqual(before)
     } finally { await f.cleanup() }
-  })
+  }, nativeTimeout)
   it('drains previously admitted lifecycle work before fixing the module set', async () => {
     const f = await fixture()
     let release!: () => void
@@ -100,6 +103,6 @@ describe('fixed workspace execution module scope', () => {
         await expect(f.manager.captureWorkspaceRelocationModules()).rejects.toMatchObject({ code: 'CRABOT_WORKSPACE_MODULE_SCOPE' })
         expect(child.exitCode).toBeNull()
       } finally { await f.cleanup() }
-    })
+    }, nativeTimeout)
   }
 })
