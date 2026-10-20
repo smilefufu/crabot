@@ -15,7 +15,7 @@ import { createWorkspaceWorkerJournal } from '../workspace-worker-journal.mjs'
 import { createWorkspaceModuleJournal } from '../workspace-module-journal.mjs'
 import { createWorkspaceFileJournal } from '../workspace-file-journal.mjs'
 import { createWorkspaceJournalClient } from '../workspace-coordinator-journal.mjs'
-import { readWorkspaceRelocationFilePlan } from '../workspace-relocation-intent.mjs'
+import { readWorkspaceRelocationFilePlan, readWorkspaceRelocationFileActors } from '../workspace-relocation-intent.mjs'
 import { createWorkspaceProcessJournal } from '../workspace-process-journal.mjs'
 import { WorkspaceCatalog } from '../../../crabot-shared/dist/workspace-catalog.js'
 import { sha256CanonicalJson } from '../../../crabot-shared/dist/canonical-json.js'
@@ -217,4 +217,58 @@ for (const scenario of ['normal', 'unexpected-path', 'lost-reply']) test('actual
     assert.equal(fs.existsSync(result.plan.staging_path), false); assert.equal(fs.existsSync(path.join(f.root, 'new')), false)
     assert.equal(fs.readFileSync(f.marker, 'utf8'), 'original work'); assert.deepEqual(await f.catalog.snapshot(), f.before)
   } finally { worker.close(); modules.close(); processes.close(); files.close() }
+})
+
+
+for (const mode of ['confirmed', 'lost reply', 'unexpected payload', 'exited Host']) test('fixed file journal starts only one idle Host: ' + mode, { timeout: 25000 }, async t => {
+  const f = await fixture(t), { child, launch } = await f.launch(), context = { dataDir: f.data, id: f.id, launch }
+  const workers = createWorkspaceWorkerJournal(child, context), modules = createWorkspaceModuleJournal(child, context), processes = createWorkspaceProcessJournal(child, context)
+  let files = createWorkspaceFileJournal(child, context), host
+  try {
+    await workers.capture([]); await workers.captureProcesses([]); await modules.capture([])
+    await processes.prepare(); await processes.observe([]); await processes.complete()
+    await workers.prepare([]); await workers.complete([]); await modules.prepare([]); await modules.complete([])
+    await processes.confirmExecutionExit()
+    await files.prepare()
+    if (mode === 'unexpected payload') {
+      const invalid = createWorkspaceJournalClient(child, context, 'file')
+      try { await assert.rejects(invalid.call('prepare_host', { entry: 'not-accepted' }), { code: 'CRABOT_WORKSPACE_JOURNAL_UNAVAILABLE' }) } finally { invalid.close() }
+      assert.equal(readWorkspaceRelocationFileActors(f.data, f.id).attempt, null)
+    }
+    if (mode === 'lost reply') {
+      const emit = child.emit; let dropped = false
+      const mock = t.mock.method(child, 'emit', function(event, ...args) {
+        if (event === 'message' && args[0]?.kind === 'workspace_file_journal_reply' && args[0]?.operation === 'prepare_host' && !dropped) { dropped = true; return emit.call(this, event, { ...args[0], ok: false }, ...args.slice(1)) }
+        return emit.call(this, event, ...args)
+      })
+      try { await assert.rejects(files.prepareHost(), { code: 'CRABOT_WORKSPACE_JOURNAL_UNAVAILABLE' }); assert.equal(dropped, true) } finally { mock.mock.restore() }
+      assert.ok(readWorkspaceRelocationFileActors(f.data, f.id).permission)
+      files.close(); files = createWorkspaceFileJournal(child, context)
+    }
+    const first = await files.prepareHost(); host = first.actors.host.process
+    assert.equal(first.dispatch, mode === 'lost reply' ? 'observe' : 'dispatch')
+    assert.equal(host.parent, child.pid); assert.ok(native.sameProcess(host, native.inspectProcess(host.pid)))
+    const bytes = fs.readFileSync(path.join(f.data, 'workspace-control/relocation-file-actors.jsonl'))
+    const second = await files.prepareHost()
+    assert.equal(second.dispatch, 'observe'); assert.deepEqual(second.actors, first.actors)
+    assert.deepEqual(fs.readFileSync(path.join(f.data, 'workspace-control/relocation-file-actors.jsonl')), bytes)
+    assert.deepEqual(native.listChildProcessIds(child.pid), [host.pid])
+    const plan = readWorkspaceRelocationFilePlan(f.data, f.id)
+    assert.equal(fs.existsSync(plan.staging_path), false); assert.equal(fs.existsSync(path.join(f.root, 'new')), false)
+    assert.equal(fs.readFileSync(f.marker, 'utf8'), 'original work'); assert.deepEqual(await f.catalog.snapshot(), f.before)
+    if (mode === 'exited Host') {
+      native.terminateKnownProcess(host)
+      const deadline = Date.now() + 2000
+      while (!native.isProcessExited(host.pid) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10))
+      assert.equal(native.isProcessExited(host.pid), true)
+      await assert.rejects(files.prepareHost(), { code: 'CRABOT_WORKSPACE_JOURNAL_UNAVAILABLE' })
+      assert.deepEqual(native.listChildProcessIds(child.pid), [])
+      assert.deepEqual(fs.readFileSync(path.join(f.data, 'workspace-control/relocation-file-actors.jsonl')), bytes)
+    }
+    await f.close()
+    const deadline = Date.now() + 2000
+    while (!native.isProcessExited(host.pid) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10))
+    assert.equal(native.isProcessExited(host.pid), true)
+    assert.deepEqual(readWorkspaceRelocationFileActors(f.data, f.id), first.actors)
+  } finally { workers.close(); modules.close(); processes.close(); files.close(); if (host) native.terminateKnownProcess(host) }
 })

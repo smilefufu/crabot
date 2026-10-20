@@ -162,6 +162,7 @@ interface WorkspaceStopSequenceResult {
 interface WorkspaceFilePreparationResult {
   readonly coordinator: ChildProcess
   readonly plan_sha256: string
+  readonly file_actors_sha256: string
 }
 
 interface WorkspaceCoordinatorGrant {
@@ -1426,7 +1427,7 @@ export class ModuleManager {
     return pending
   }
 
-  /** Prepare the original file plan after the complete stop sequence; no file effects or root selection. */
+  /** Bind the fixed file plan and idle host after the complete stop sequence; no file effects or root selection. */
   private prepareWorkspaceRelocationFiles(request: VerifyWorkspaceRelocationRequestParams, bearer?: string): Promise<WorkspaceFilePreparationResult> {
     request = Object.freeze({ ...request })
     const fingerprint = sha256CanonicalJson(request)
@@ -1437,7 +1438,7 @@ export class ModuleManager {
     }
     const pending = Promise.resolve().then(async (): Promise<WorkspaceFilePreparationResult> => {
       let child: ChildProcess | undefined
-      let journal: { prepare(): Promise<{ plan: unknown }>; close(): void } | undefined
+      let journal: { prepare(): Promise<{ plan: unknown }>; prepareHost(): Promise<{ actors: unknown }>; close(): void } | undefined
       try {
         child = (await this.submitWorkspaceRelocationStops(request, bearer)).coordinator
         const records = require('../../scripts/lib/workspace-relocation-intent.mjs'), native = require('../../scripts/lib/process-identity.cjs')
@@ -1467,7 +1468,9 @@ export class ModuleManager {
         journal = createWorkspaceFileJournal(child, { dataDir: this.dataDir, id: request.intent_id, launch: coordinator.launch })
         const result = await journal!.prepare()
         await verifyStopped()
-        return Object.freeze({ coordinator: child, plan_sha256: sha256CanonicalJson(result.plan) })
+        const preparedHost = await journal!.prepareHost()
+        await verifyStopped()
+        return Object.freeze({ coordinator: child, plan_sha256: sha256CanonicalJson(result.plan), file_actors_sha256: sha256CanonicalJson(preparedHost.actors) })
       } catch {
         await this.closeWorkspaceCoordinatorChannel(child)
         throw failure()

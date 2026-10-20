@@ -22,6 +22,8 @@ const wait = async predicate => {
 
 test('Windows copy is suspended and retains private root locks before one explicit resume', { skip: process.platform !== 'win32', timeout: 20000 }, async t => {
   const f = fixture(t), file = path.join(f.source, '.hidden')
+  const longRelative = path.join(...Array(12).fill('long-目录-segment'), 'preserved.txt'), longSource = path.join(f.source, longRelative)
+  assert.ok(longSource.length > 260); fs.mkdirSync(path.dirname(longSource), { recursive: true }); fs.writeFileSync(longSource, 'long path bytes')
   fs.writeFileSync(file + ':Zone.Identifier', '[ZoneTransfer]\r\nZoneId=3\r\n'); fs.chmodSync(file, 0o444)
   execFileSync(path.join(process.env.SystemRoot, 'System32/attrib.exe'), ['+H', file])
   const job = native.createWorkspaceCopyJob(f.a, f.b); f.jobs.push(job)
@@ -36,6 +38,7 @@ test('Windows copy is suspended and retains private root locks before one explic
   const result = native.inspectWorkspaceCopyJob(job)
   assert.ok(result.exit_code >= 0 && result.exit_code <= 7, JSON.stringify(result)); assert.deepEqual(result.process, before.process)
   assert.equal(fs.readFileSync(path.join(f.target, '.hidden'), 'utf8'), 'original bytes')
+  assert.equal(fs.readFileSync(path.join(f.target, longRelative), 'utf8'), 'long path bytes')
   assert.equal(fs.readFileSync(path.join(f.target, '.hidden:Zone.Identifier'), 'utf8'), '[ZoneTransfer]\r\nZoneId=3\r\n')
   assert.equal(fs.statSync(path.join(f.target, '.hidden')).mode & 0o200, 0)
   assert.deepEqual(fs.readdirSync(path.join(f.target, 'empty')), []); assert.equal(fs.readFileSync(file, 'utf8'), 'original bytes')

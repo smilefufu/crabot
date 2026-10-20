@@ -1221,18 +1221,19 @@ describe('MM requires original Admin quiescence before execution capture', () =>
 
 
 describe('MM prepares the original fixed workspace file plan', () => {
+  const native = require('../../scripts/lib/process-identity.cjs')
   const timeout = process.platform === 'win32' ? 90000 : 30000
-  for (const mode of ['confirmed', 'lost acknowledgement']) it('retains Admin and never repeats file preparation: ' + mode, async () => {
+  for (const mode of ['confirmed', 'lost acknowledgement', 'lost Host acknowledgement']) it('retains Admin and never repeats file preparation: ' + mode, async () => {
     const f = await fixture({ actualAgent: true, actualAdmin: true, processLifetimeMs: 120000 }), locks = require('../../scripts/lib/cli-lock.mjs')
     const records = await import('../../scripts/lib/workspace-relocation-intent.mjs'), lock = await locks.acquireWorkspaceRelocationLock(f.data, f.params.intent_id)
     const launch = f.manager.launchWorkspaceRelocationCoordinator.bind(f.manager)
     let child: ReturnType<typeof spawn> | undefined
     vi.spyOn(f.manager, 'launchWorkspaceRelocationCoordinator').mockImplementation(async (...args: any[]) => {
       child = await launch(...args)
-      if (mode === 'lost acknowledgement') {
+      if (mode !== 'confirmed') {
         const emit = child!.emit.bind(child); let rejected = false
         vi.spyOn(child!, 'emit').mockImplementation((event: any, ...args: any[]) => {
-          if (event === 'message' && args[0]?.kind === 'workspace_file_journal_reply' && !rejected) { rejected = true; return emit(event, { ...args[0], ok: false }) }
+          if (event === 'message' && args[0]?.kind === 'workspace_file_journal_reply' && args[0]?.operation === (mode === 'lost Host acknowledgement' ? 'prepare_host' : 'prepare') && !rejected) { rejected = true; return emit(event, { ...args[0], ok: false }) }
           return emit(event, ...args)
         })
       }
@@ -1244,15 +1245,22 @@ describe('MM prepares the original fixed workspace file plan', () => {
       const first = f.manager.prepareWorkspaceRelocationFiles(f.params, 'fixture-human')
       expect(f.manager.prepareWorkspaceRelocationFiles({ ...f.params }, 'fixture-human')).toBe(first)
       await expect(f.manager.prepareWorkspaceRelocationFiles({ ...f.params, intent_id: randomUUID() }, 'fixture-human')).rejects.toMatchObject({ code: 'FORBIDDEN' })
-      if (mode === 'lost acknowledgement') await expect(first).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
+      if (mode !== 'confirmed') await expect(first).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
       else {
         const result = await first
+        expect(result.file_actors_sha256).toBe(sha256CanonicalJson(records.readWorkspaceRelocationFileActors(f.data, f.params.intent_id)))
         expect(result.coordinator).toBe(child); expect(result.plan_sha256).toBe(sha256CanonicalJson(records.readWorkspaceRelocationFilePlan(f.data, f.params.intent_id)))
       }
       const plan = records.readWorkspaceRelocationFilePlan(f.data, f.params.intent_id)
       expect(plan.intent_id).toBe(f.params.intent_id); expect(plan.mode).toBe('rename')
       expect(stop).toHaveBeenCalledOnce(); expect(f.manager.prepareWorkspaceRelocationFiles(f.params, 'fixture-human')).toBe(first)
-      if (mode === 'lost acknowledgement') { await expect(first).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' }); expect(child!.connected).toBe(false) }
+      if (mode !== 'confirmed') { await expect(first).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' }); expect(child!.connected).toBe(false) }
+      const actors = records.readWorkspaceRelocationFileActors(f.data, f.params.intent_id)
+      if (mode === 'lost acknowledgement') expect(actors.attempt).toBeNull()
+      else {
+        expect(actors.permission).not.toBeNull(); expect(actors.host.process.parent).toBe(child!.pid)
+        if (mode === 'confirmed') expect(native.sameProcess(actors.host.process, native.inspectProcess(actors.host.process.pid))).toBe(true)
+      }
       expect(await fs.readFile(ledger)).toEqual(before); expect(f.manager.processes.get('admin-web')).toBe(admin); expect(admin.exitCode).toBeNull()
       expect(f.manager.processes.has('crabot-agent')).toBe(false)
       await expect(fs.stat(plan.staging_path)).rejects.toMatchObject({ code: 'ENOENT' })

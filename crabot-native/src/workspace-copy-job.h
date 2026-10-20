@@ -122,7 +122,8 @@ static napi_value CreateWorkspaceCopyJob(napi_env env, napi_callback_info info) 
     const DWORD tempSize = GetTempPathW(static_cast<DWORD>(temporary.size()), temporary.data());
     if (!systemSize || systemSize >= system.size() || !windowsSize || windowsSize >= windows.size() || !tempSize || tempSize >= temporary.size()) throw WorkspaceCopyError("Cannot resolve Windows copy environment");
     const std::wstring directory(system.data()), executable = directory + L"\\robocopy.exe";
-    std::wstring command = WorkspaceCopyQuote(executable) + L" " + WorkspaceCopyQuote(source->path) + L" " + WorkspaceCopyQuote(target->path)
+    // Robocopy parses the extended-length prefix as a network path; local DOS pins retain their original native paths.
+    std::wstring command = WorkspaceCopyQuote(executable) + L" " + WorkspaceCopyQuote(source->path.substr(4)) + L" " + WorkspaceCopyQuote(target->path.substr(4))
       + L" /E /COPY:DATS /DCOPY:DATE /SL /SJ /R:0 /W:0 /NFL /NDL /NJH /NJS /NP";
     if (command.size() >= 32767) throw std::runtime_error("Workspace copy command is too long");
     std::vector<wchar_t> commandLine(command.begin(), command.end()); commandLine.push_back(0);
