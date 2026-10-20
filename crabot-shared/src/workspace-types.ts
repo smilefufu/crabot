@@ -87,3 +87,28 @@ export interface VerifyWorkspaceRelocationCoordinatorResult {
   launch_sha256: string
   action: WorkspaceRelocationCoordinatorAction
 }
+
+export type WorkspaceRelocationImplementation = 'builtin' | 'claude-code' | 'codex' | 'legacy'
+export interface WorkspaceRelocationIncarnation {
+  readonly incarnation_id: string
+  readonly impl: WorkspaceRelocationImplementation
+  readonly seq: number
+  readonly workspace: string
+  readonly started_at: string
+  readonly forked_from?: number | string
+  readonly query_id?: string
+}
+export interface WorkspaceRelocationWorker {
+  readonly worker_id: string
+  readonly manager_key: `${string}::${string}`
+  readonly task_id: string
+  readonly workspace_id?: string
+  readonly incarnations: ReadonlyArray<WorkspaceRelocationIncarnation>
+}
+export interface CaptureWorkspaceRelocationWorkersParams {
+  intent_id: string
+  launch_id: string
+}
+export interface CaptureWorkspaceRelocationWorkersResult {
+  workers: ReadonlyArray<WorkspaceRelocationWorker>
+}

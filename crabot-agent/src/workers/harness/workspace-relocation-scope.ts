@@ -1,22 +1,8 @@
 import { sha256CanonicalJson } from 'crabot-shared'
-import type { Incarnation, LedgerWorker, ManagerKey } from './ledger-types.js'
+import type { LedgerWorker, ManagerKey } from './ledger-types.js'
 
-/** Internal identity set only; never a stop receipt, a business permission or task content. */
-export interface WorkspaceRelocationWorker {
-  readonly worker_id: string
-  readonly manager_key: ManagerKey
-  readonly task_id: LedgerWorker['task']['id']
-  readonly workspace_id?: string
-  readonly incarnations: ReadonlyArray<{
-    readonly incarnation_id: string
-    readonly impl: Incarnation['impl']
-    readonly seq: number
-    readonly workspace: string
-    readonly started_at: string
-    readonly forked_from?: Incarnation['forked_from']
-    readonly query_id?: string
-  }>
-}
+import type { WorkspaceRelocationWorker } from 'crabot-shared'
+export type { WorkspaceRelocationWorker } from 'crabot-shared'
 
 function invalid(): never {
   throw Object.assign(new Error('执行器集合或稳定身份无法核验，已保留维护保护。'), { code: 'WORKSPACE_MAINTENANCE' })

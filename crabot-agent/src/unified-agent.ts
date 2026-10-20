@@ -1,3 +1,5 @@
+import { verifyWorkspaceRelocationAuthority } from './core/workspace-relocation-authority.js'
+import type { CaptureWorkspaceRelocationWorkersParams, CaptureWorkspaceRelocationWorkersResult, RpcHandlerContext } from 'crabot-shared'
 import { ExecutionAdmissions } from './core/execution-admissions.js'
 import { WorkerRequestToolScope } from './workers/harness/request-tools.js'
 import { selectSubAgentSkills } from './agent/subagent-tool-filter.js'
@@ -993,6 +995,26 @@ export class UnifiedAgent extends ModuleBase {
     return this.requireManagerStack().harness.captureWorkspaceRelocationScope()
   }
 
+  private async handleCaptureWorkspaceRelocationWorkers(params: CaptureWorkspaceRelocationWorkersParams, context?: RpcHandlerContext): Promise<CaptureWorkspaceRelocationWorkersResult> {
+    const bearer = context?.authorizationBearer
+    if (typeof bearer !== 'string' || !bearer) throw new RpcError('UNAUTHORIZED', '缺少迁移协调凭据。')
+    if (!params || typeof params !== 'object' || Array.isArray(params) || Object.keys(params).length !== 2
+      || !Object.keys(params).every(key => key === 'intent_id' || key === 'launch_id')) {
+      throw new RpcError('INVALID_PARAMS', '迁移范围捕获只接受固定作业标识。')
+    }
+    const request = Object.freeze({ intent_id: params.intent_id, launch_id: params.launch_id, action: 'capture_workers' as const })
+    const verify = () => verifyWorkspaceRelocationAuthority({ dataDir: getDataRootDir(), moduleManagerPort: this.rpcClient.moduleManagerTargetPort, params: request, bearer })
+    const proof = await verify()
+    if (this.runtimeClosing) throw new RpcError('WORKSPACE_MAINTENANCE', 'Agent正在关闭，不能固定执行器范围。')
+    let workers
+    try { workers = await this.captureWorkspaceRelocationScope() }
+    catch { throw new RpcError('WORKSPACE_MAINTENANCE', '执行器接纳或启动对账未能完成，已保留维护保护。') }
+    const current = await verify()
+    if (sha256CanonicalJson(current) !== sha256CanonicalJson(proof)) throw new RpcError('FORBIDDEN', '迁移授权在执行收口期间已变化。')
+    if (this.runtimeClosing) throw new RpcError('WORKSPACE_MAINTENANCE', 'Agent正在关闭，不能发布执行器范围。')
+    return { workers }
+  }
+
   /** Central admission for every new runtime-config-dependent execution. */
   private assertRuntimeExecutionAdmission(): void {
     if (this.runtimeClosing) throw new Error('AGENT_SHUTTING_DOWN')
@@ -1840,6 +1862,7 @@ export class UnifiedAgent extends ModuleBase {
     // Manager/Worker（v3）接口：§8.2 调度触发 + §8.3 task 读模型四件套。
     this.registerMethod('trigger_schedule', this.handleTriggerSchedule.bind(this))
     this.registerMethod('authorize_agent_cli_execution', this.handleAuthorizeAgentCliExecution.bind(this))
+    this.registerMethod('capture_workspace_relocation_workers', this.handleCaptureWorkspaceRelocationWorkers.bind(this))
     this.registerMethod('get_workspace_execution_admin', async () => this.requireManagerStack().harness.getWorkspaceExecutionInventory())
     this.registerMethod('list_workers_admin', this.handleListWorkersAdmin.bind(this))
     this.registerMethod('list_managers_admin', this.handleListManagersAdmin.bind(this))

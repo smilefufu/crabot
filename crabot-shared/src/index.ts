@@ -135,7 +135,9 @@ export * from './computer-use.js'
 export type { WorkspaceRecord, WorkspaceUsage, WorkspaceExecution, WorkspaceExecutionInventory, WorkspaceSummary, WorkspaceListResult,
   WorkspaceCreateRequest, WorkspaceUpdateRequest, WorkspaceRecordResult, WorkspaceGetResult, WorkspaceScanResult,
   VerifyWorkspaceRelocationRequestParams, VerifyWorkspaceRelocationRequestResult,
-  WorkspaceRelocationCoordinatorAction, VerifyWorkspaceRelocationCoordinatorParams, VerifyWorkspaceRelocationCoordinatorResult } from './workspace-types.js'
+  WorkspaceRelocationCoordinatorAction, VerifyWorkspaceRelocationCoordinatorParams, VerifyWorkspaceRelocationCoordinatorResult,
+  WorkspaceRelocationImplementation, WorkspaceRelocationIncarnation, WorkspaceRelocationWorker,
+  CaptureWorkspaceRelocationWorkersParams, CaptureWorkspaceRelocationWorkersResult } from './workspace-types.js'
 
 export { isStoragePermission, type StoragePermission, type DirectoryStoragePermission, type AllDirectoriesStoragePermission } from './storage-permission.js'
 
