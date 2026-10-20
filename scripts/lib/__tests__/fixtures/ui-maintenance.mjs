@@ -39,7 +39,7 @@ const waitForAdminWarmup = delayedAdmin ? `
 while(!existsSync(${JSON.stringify(path.join(root, 'admin-warming'))}))await new Promise(resolve=>setTimeout(resolve,25));
 ` : ''
 await fs.writeFile(path.join(root, 'package.json'), '{"type":"module"}')
-await fs.writeFile(path.join(root, 'cli.mjs'), prefix('cli') + `import{existsSync}from'node:fs';${elapsedGraceClock}import{stopInstance}from ${JSON.stringify(url('scripts/lib/instance-controller.mjs'))};${mode === 'unreadable' ? "identity.inspectProcessArguments=()=>{throw new Error('unreadable fixture')}" : ''};try{await stopInstance(${JSON.stringify(path.join(root, 'data'))});writeFileSync(${JSON.stringify(path.join(root, 'done'))},'stopped')}catch(error){if(${JSON.stringify(mode)}!=='unreadable'||error.code!=='CRABOT_STOP_UNKNOWN')throw error;writeFileSync(${JSON.stringify(path.join(root, 'done'))},'unknown-before-stop')};`)
+await fs.writeFile(path.join(root, 'cli.mjs'), prefix('cli') + `import{existsSync}from'node:fs';${elapsedGraceClock}import{stopInstance}from ${JSON.stringify(url('scripts/lib/instance-controller.mjs'))};${mode === 'unreadable' ? "identity.inspectProcessArguments=()=>{throw new Error('unreadable fixture')}" : ''};try{await stopInstance(${JSON.stringify(path.join(root, 'data'))},{log:phase=>writeFileSync(${JSON.stringify(path.join(root, 'stop-phase'))},phase)});writeFileSync(${JSON.stringify(path.join(root, 'done'))},'stopped')}catch(error){if(${JSON.stringify(mode)}!=='unreadable'||error.code!=='CRABOT_STOP_UNKNOWN')throw error;writeFileSync(${JSON.stringify(path.join(root, 'done'))},'unknown-before-stop')};`)
 await fs.writeFile(path.join(root, 'scripts/ui-upgrade.mjs'), prefix('updater') + `import{spawn}from'node:child_process';const child=spawn(process.execPath,[${JSON.stringify(path.join(root, 'cli.mjs'))},'stop'],{stdio:'inherit'});child.on('exit',code=>process.exit(code??1));`)
 const updaterArgs = [path.join(root, 'scripts/ui-upgrade.mjs'), ...(mode === 'extra-args' ? ['unexpected'] : [])]
 await fs.writeFile(path.join(root, 'crabot-admin/dist/main.js'), prefix('admin') + `import{spawn}from'node:child_process';import{existsSync}from'node:fs';${adminWarmup}process.once('message',()=>{writeFileSync(${JSON.stringify(path.join(root, 'admin-start-received'))},'received');const child=spawn(process.execPath,${JSON.stringify(updaterArgs)},{detached:true,stdio:'inherit'});child.unref()});writeFileSync(${JSON.stringify(path.join(root, 'admin-ready'))},'ready');process.send('ready');setInterval(()=>{},1000);`)
@@ -104,7 +104,19 @@ try {
     }
     await new Promise(resolve => setTimeout(resolve, 50))
   }
-  const diagnostic = 'mode=' + mode + '; markers=' + JSON.stringify(await fs.readdir(root)) + '; ' + stderr
+  const actors = {}
+  for (const role of ['controller', 'mm', 'admin', 'updater', 'cli']) {
+    try {
+      const expected = JSON.parse(await fs.readFile(path.join(root, 'pids', role + '.json'), 'utf8'))
+      let state = 'unknown', kernelExited = null
+      try { state = identity.sameProcess(expected, identity.inspectProcess(expected.pid)) ? 'alive' : 'gone' } catch { /* Diagnosis does not promote missing identity. */ }
+      try { kernelExited = identity.isProcessExited(expected.pid) } catch { /* Preserve unknown. */ }
+      actors[role] = { pid: expected.pid, state, kernel_exited: kernelExited }
+    } catch { actors[role] = { state: 'not_registered' } }
+  }
+  const stopPhase = await fs.readFile(path.join(root, 'stop-phase'), 'utf8').catch(() => null)
+  const diagnostic = 'mode=' + mode + '; markers=' + JSON.stringify(await fs.readdir(root))
+    + '; stop=' + JSON.stringify({ phase: stopPhase, actors }) + '; ' + stderr
   assert.equal(attempted, true, 'Fixture never exercised its stop CLI; ' + diagnostic)
   assert.equal(passed, expectedCompletion, 'Incorrect maintenance ownership; ' + diagnostic)
   if (!expectedCompletion) assert.equal(negativeSettled, true, 'Untrusted helper did not provably settle after fake Core exit; ' + diagnostic)

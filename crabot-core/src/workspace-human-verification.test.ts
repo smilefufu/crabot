@@ -35,7 +35,20 @@ async function fixture(options: { wrongRuntime?: boolean; result?: string; withA
     vi.restoreAllMocks()
     const admin = manager.modules.get('admin-web'); if (admin) admin.port = port
     try { await manager.stop() }
-    finally { if (host) { host.closeAllConnections(); await new Promise<void>(resolve => host!.close(() => resolve())) } }
+    catch (error) {
+      const actors = [...manager.processes].map(([id, child]: [string, any]) => {
+        let actual = null, kernelExited = null, group = null
+        try { actual = native.inspectProcess(child.pid) } catch { /* Diagnostic only. */ }
+        try { kernelExited = native.isProcessExited(child.pid) } catch { /* Preserve unknown. */ }
+        if (process.platform !== 'win32') {
+          try { process.kill(-child.pid, 0); group = 'alive' } catch (probe) { group = (probe as NodeJS.ErrnoException).code }
+        }
+        return { module_id: id, pid: child.pid, exit_code: child.exitCode, signal: child.signalCode,
+          actual_started: actual?.started, actual_owner: actual?.owner, kernel_exited: kernelExited, group_probe: group }
+      })
+      console.error('[Workspace fixture cleanup] ' + JSON.stringify({ code: (error as NodeJS.ErrnoException).code, actors }))
+      throw error
+    } finally { if (host) { host.closeAllConnections(); await new Promise<void>(resolve => host!.close(() => resolve())) } }
     await fs.rm(root, { recursive: true, force: true })
   }
   try {
