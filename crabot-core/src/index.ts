@@ -6,7 +6,7 @@
  * @see crabot-docs/protocols/protocol-module-manager.md
  */
 
-import { spawn, type ChildProcess } from 'node:child_process'
+import { spawn, ChildProcess } from 'node:child_process'
 import crypto from 'node:crypto'
 import http from 'node:http'
 import fs from 'node:fs'
@@ -26,6 +26,8 @@ import {
   type PublishEventParams,
   type VerifyWorkspaceRelocationRequestParams,
   type VerifyWorkspaceRelocationRequestResult,
+  type VerifyWorkspaceRelocationCoordinatorParams,
+  type VerifyWorkspaceRelocationCoordinatorResult,
   assertWorkspaceExecutionAllowed,
   workspaceMaintenancePending,
   sha256CanonicalJson,
@@ -127,6 +129,23 @@ interface ManagedChildState {
   logEnded: boolean
 }
 
+interface WorkspaceCoordinatorGrant {
+  token: string
+  revoke?: () => void
+  proof: Omit<VerifyWorkspaceRelocationCoordinatorResult, 'verified' | 'action'>
+  readyHash: string
+  child: ChildProcess
+  identity: WorkspaceModuleScope['processes'][number]
+  agent: {
+    child: ChildProcess
+    state: ManagedChildState
+    runtime: ModuleRuntime
+    identity: WorkspaceModuleScope['processes'][number]
+    port: number
+    runtimeId: string
+  }
+}
+
 // ============================================================================
 // Module Manager 类
 // ============================================================================
@@ -136,6 +155,7 @@ export class ModuleManager {
   private readonly portAllocator: PortAllocator
   private readonly modules: Map<ModuleId, ModuleRuntime> = new Map()
   private readonly processes: Map<ModuleId, ChildProcess> = new Map()
+  private workspaceCoordinatorGrant?: WorkspaceCoordinatorGrant
   private workspaceModuleStop?: { fingerprint: string; pending: Promise<WorkspaceModuleStopResponse> }
   private readonly childStates: WeakMap<ChildProcess, ManagedChildState> = new WeakMap()
   private readonly lifecycleQueues: Map<ModuleId, Promise<void>> = new Map()
@@ -179,6 +199,7 @@ export class ModuleManager {
     // 注册所有方法处理器
     this.registerMethod('register', this.handleRegisterUnauthenticated.bind(this))
     this.registerMethod('register_core_agent', this.handleRegisterCoreAgent.bind(this))
+    this.registerMethod('verify_workspace_relocation_coordinator', this.handleVerifyWorkspaceRelocationCoordinator.bind(this))
     this.registerMethod('verify_core_agent_runtime', this.handleVerifyCoreAgentRuntime.bind(this))
     this.registerMethod('verify_voice_runtime', this.handleVerifyVoiceRuntime.bind(this))
     this.registerMethod('register_voice_runtime', this.handleRegisterVoiceRuntime.bind(this))
@@ -1211,6 +1232,97 @@ export class ModuleManager {
       if ((error as { code?: string }).code === 'FORBIDDEN') throw error
       throw unavailable()
     } finally { rpc?.close() }
+  }
+
+  private assertWorkspaceCoordinatorGrantCurrent(grant: WorkspaceCoordinatorGrant): void {
+    const unavailable = () => Object.assign(new Error('迁移协调授权无法核实，已保留维护保护。'), { code: 'SERVICE_UNAVAILABLE' })
+    const forbidden = () => {
+      if (this.workspaceCoordinatorGrant === grant) grant.revoke?.()
+      return Object.assign(new Error('Workspace coordinator binding revoked'), { code: 'FORBIDDEN' })
+    }
+    const agent = grant.agent
+    if (this.isShuttingDown) throw unavailable()
+    if (!grant.child.connected || grant.child.exitCode !== null || grant.child.signalCode !== null || grant.child.pid !== grant.identity.pid
+      || this.modules.get('crabot-agent') !== agent.runtime || agent.runtime.module_id !== 'crabot-agent' || agent.runtime.module_type !== 'agent'
+      || this.processes.get('crabot-agent') !== agent.child || this.childStates.get(agent.child) !== agent.state
+      || agent.runtime.port !== agent.port || agent.runtime.pid !== agent.identity.pid || agent.child.pid !== agent.identity.pid
+      || agent.state.moduleId !== 'crabot-agent' || agent.state.runtimeId !== agent.runtimeId || agent.state.rootPid !== agent.identity.pid
+      || !agent.state.reachedRunning || agent.state.rootExited || agent.state.finalizeStarted || agent.state.intentionalReason
+      || agent.state.termination || agent.state.forceTermination || agent.child.exitCode !== null || agent.child.signalCode !== null) throw forbidden()
+    try {
+      const native = require('../../scripts/lib/process-identity.cjs')
+      const records = require('../../scripts/lib/workspace-relocation-intent.mjs')
+      const intent = records.readWorkspaceRelocationIntent(this.dataDir), current = records.readWorkspaceRelocationCoordinator(this.dataDir, grant.proof.intent_id)
+      if (!intent || !current.launch || !current.ready || intent.id !== grant.proof.intent_id
+        || sha256CanonicalJson(intent) !== grant.proof.intent_sha256 || current.launch.launch_id !== grant.proof.launch_id
+        || sha256CanonicalJson(current.launch) !== grant.proof.launch_sha256 || sha256CanonicalJson(current.ready) !== grant.readyHash) throw unavailable()
+      const self = native.inspectProcess(process.pid), coordinator = native.inspectProcess(grant.identity.pid)
+      if (grant.identity.owner !== self.owner || agent.identity.owner !== self.owner
+        || !native.sameProcess(current.launch.parent, self) || !native.sameProcess(current.launch.process, grant.identity)
+        || !native.sameProcess(grant.identity, coordinator) || coordinator.parent !== self.pid
+        || !native.sameProcess(agent.identity, native.inspectProcess(agent.identity.pid))) throw forbidden()
+    } catch (error) {
+      if ((error as { code?: string }).code === 'FORBIDDEN') throw error
+      throw unavailable()
+    }
+  }
+
+  private async authorizeWorkspaceRelocationCoordinator(
+    child: ChildProcess, request: VerifyWorkspaceRelocationRequestParams, bearer?: string,
+  ): Promise<{ authorizationBearer: string }> {
+    request = Object.freeze({ ...request })
+    await this.verifyWorkspaceRelocationRequest(request, bearer)
+    const unavailable = () => Object.assign(new Error('迁移协调授权无法核实，已保留维护保护。'), { code: 'SERVICE_UNAVAILABLE' })
+    const agentChild = this.processes.get('crabot-agent'), runtime = this.modules.get('crabot-agent')
+    const state = agentChild ? this.childStates.get(agentChild) : undefined
+    if (!(child instanceof ChildProcess) || !child.pid || !agentChild?.pid || !runtime || !state) throw unavailable()
+    let grant: WorkspaceCoordinatorGrant
+    try {
+      const native = require('../../scripts/lib/process-identity.cjs'), records = require('../../scripts/lib/workspace-relocation-intent.mjs')
+      const current = records.readWorkspaceRelocationCoordinator(this.dataDir, request.intent_id)
+      if (!current.launch || !current.ready) throw unavailable()
+      grant = { token: crypto.randomBytes(32).toString('hex'),
+        proof: { intent_id: request.intent_id, intent_sha256: request.intent_sha256, launch_id: current.launch.launch_id, launch_sha256: sha256CanonicalJson(current.launch) },
+        readyHash: sha256CanonicalJson(current.ready), child, identity: native.inspectProcess(child.pid),
+        agent: { child: agentChild, state, runtime, identity: native.inspectProcess(agentChild.pid), port: runtime.port, runtimeId: state.runtimeId } }
+      this.assertWorkspaceCoordinatorGrantCurrent(grant)
+    } catch { throw unavailable() }
+    const previous = this.workspaceCoordinatorGrant
+    if (previous) {
+      this.assertWorkspaceCoordinatorGrantCurrent(previous)
+      if (previous.child !== child || previous.agent.child !== agentChild || sha256CanonicalJson(previous.proof) !== sha256CanonicalJson(grant.proof)) throw unavailable()
+      return { authorizationBearer: previous.token }
+    }
+    this.workspaceCoordinatorGrant = grant
+    const revoke = () => {
+      if (this.workspaceCoordinatorGrant === grant) this.workspaceCoordinatorGrant = undefined
+      child.off('exit', revoke); child.off('error', revoke); child.off('disconnect', revoke)
+      agentChild.off('exit', revoke); agentChild.off('error', revoke)
+      grant.revoke = undefined
+    }
+    grant.revoke = revoke
+    child.once('exit', revoke); child.once('error', revoke); child.once('disconnect', revoke)
+    agentChild.once('exit', revoke); agentChild.once('error', revoke)
+    return { authorizationBearer: grant.token }
+  }
+
+  private handleVerifyWorkspaceRelocationCoordinator(
+    params: VerifyWorkspaceRelocationCoordinatorParams, context?: RpcHandlerContext,
+  ): VerifyWorkspaceRelocationCoordinatorResult {
+    const bearer = context?.authorizationBearer, grant = this.workspaceCoordinatorGrant
+    if (!bearer) throw Object.assign(new Error('Coordinator credential required'), { code: 'UNAUTHORIZED' })
+    if (!grant) throw Object.assign(new Error('Coordinator credential revoked'), { code: 'FORBIDDEN' })
+    const supplied = Buffer.from(bearer), expected = Buffer.from(grant.token)
+    if (supplied.length !== expected.length || !crypto.timingSafeEqual(supplied, expected)) throw Object.assign(new Error('Invalid coordinator credential'), { code: 'FORBIDDEN' })
+    const uuid = (value: unknown) => typeof value === 'string' && /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(value)
+    if (!params || typeof params !== 'object' || Array.isArray(params) || Object.keys(params).length !== 3
+      || !Object.keys(params).every(key => key === 'intent_id' || key === 'launch_id' || key === 'action')
+      || !uuid(params.intent_id) || !uuid(params.launch_id) || !['capture_workers', 'stop_workers'].includes(params.action)) {
+      throw Object.assign(new Error('Invalid coordinator verification parameters'), { code: 'INVALID_PARAMS' })
+    }
+    if (params.intent_id !== grant.proof.intent_id || params.launch_id !== grant.proof.launch_id) throw Object.assign(new Error('Coordinator job mismatch'), { code: 'FORBIDDEN' })
+    this.assertWorkspaceCoordinatorGrantCurrent(grant)
+    return { verified: true, ...grant.proof, action: params.action }
   }
 
   async captureWorkspaceRelocationModules(): Promise<ReadonlyArray<WorkspaceModuleScope>> {

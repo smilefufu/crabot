@@ -71,3 +71,19 @@ export interface VerifyWorkspaceRelocationRequestResult {
   intent_id: string
   intent_sha256: string
 }
+
+
+export type WorkspaceRelocationCoordinatorAction = 'capture_workers' | 'stop_workers'
+export interface VerifyWorkspaceRelocationCoordinatorParams {
+  intent_id: string
+  launch_id: string
+  action: WorkspaceRelocationCoordinatorAction
+}
+export interface VerifyWorkspaceRelocationCoordinatorResult {
+  verified: true
+  intent_id: string
+  intent_sha256: string
+  launch_id: string
+  launch_sha256: string
+  action: WorkspaceRelocationCoordinatorAction
+}
