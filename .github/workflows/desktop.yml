@@ -145,7 +145,12 @@ jobs:
         timeout-minutes: 15
         run: |
           cd crabot-core
-          node node_modules/vitest/vitest.mjs run src/workspace-human-verification.test.ts --testNamePattern "^(?!.*(?:MM consumes a human intent|MM dedicated fixed coordinator|MM delegates capture only|MM sensitive Worker stop))" --maxWorkers=1 --minWorkers=1
+          node node_modules/vitest/vitest.mjs run src/workspace-human-verification.test.ts --testNamePattern "^(?!.*(?:MM consumes a human intent|MM dedicated fixed coordinator|MM delegates capture only|MM sensitive Worker stop|MM launches the actual fixed coordinator|MM submits one fixed workspace stop sequence|MM requires original Admin quiescence))" --maxWorkers=1 --minWorkers=1
+      - name: Workspace fixed host and actual Admin quiescence regressions
+        timeout-minutes: 15
+        run: |
+          cd crabot-core
+          node node_modules/vitest/vitest.mjs run src/workspace-human-verification.test.ts --testNamePattern "MM launches the actual fixed coordinator|MM submits one fixed workspace stop sequence|MM requires original Admin quiescence" --maxWorkers=1 --minWorkers=1
       - name: Agent environment regressions
         run: |
           cd crabot-agent

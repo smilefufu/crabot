@@ -37,6 +37,8 @@ import {
   type CompleteWorkspaceRelocationWorkerStopsResult,
   type VerifyWorkspaceRelocationRequestParams,
   type VerifyWorkspaceRelocationRequestResult,
+  type QuiesceWorkspaceRelocationWebParams,
+  type QuiesceWorkspaceRelocationWebResult,
   type VerifyWorkspaceRelocationCoordinatorParams,
   type VerifyWorkspaceRelocationCoordinatorResult,
   assertWorkspaceExecutionAllowed,
@@ -1220,7 +1222,24 @@ export class ModuleManager {
   private async verifyWorkspaceRelocationRequest(
     params: VerifyWorkspaceRelocationRequestParams, bearer?: string,
   ): Promise<VerifyWorkspaceRelocationRequestResult> {
-    const unavailable = () => Object.assign(new Error('迁移请求无法经当前Admin核验，已保留维护保护。'), { code: 'SERVICE_UNAVAILABLE' })
+    return { verified: true, ...await this.callWorkspaceRelocationAdmin('verify_workspace_relocation_request', params, bearer) }
+  }
+
+  private async quiesceWorkspaceRelocationWeb(
+    params: QuiesceWorkspaceRelocationWebParams, bearer?: string,
+  ): Promise<QuiesceWorkspaceRelocationWebResult> {
+    return { quiesced: true, ...await this.callWorkspaceRelocationAdmin('quiesce_workspace_relocation_web', params, bearer) }
+  }
+
+  /** Shared current-Admin connection/intent proof; each caller retains its own action and result tag. */
+  private async callWorkspaceRelocationAdmin(
+    method: 'verify_workspace_relocation_request' | 'quiesce_workspace_relocation_web',
+    params: VerifyWorkspaceRelocationRequestParams, bearer?: string,
+  ): Promise<VerifyWorkspaceRelocationRequestParams> {
+    params = Object.freeze({ ...params })
+    const field = method === 'verify_workspace_relocation_request' ? 'verified' : 'quiesced'
+    const timeoutMs = method === 'verify_workspace_relocation_request' ? 1500 : 30000
+    const unavailable = () => Object.assign(new Error('当前Admin固定请求无法确认，已保留维护保护。'), { code: 'SERVICE_UNAVAILABLE' })
     if (typeof bearer !== 'string' || !bearer) throw Object.assign(new Error('Human Admin credential required'), { code: 'UNAUTHORIZED' })
     const runtime = this.modules.get('admin-web'), child = this.processes.get('admin-web')
     const state = child ? this.childStates.get(child) : undefined
@@ -1248,14 +1267,14 @@ export class ModuleManager {
       const listeners = processes.filter(item => native.sameProcess(item, native.inspectProcess(item.pid)) && native.listListeningTcpPorts(item.pid).includes(port))
       if (listeners.length !== 1) throw unavailable()
       const { openModuleRuntimeRpc } = require('../../scripts/lib/module-runtime-rpc.cjs')
-      rpc = await openModuleRuntimeRpc(listeners[0], port, { instance_id: record.instance_id, module_id: 'admin-web', runtime_id: runtimeId }, { timeoutMs: 1500 })
+      rpc = await openModuleRuntimeRpc(listeners[0], port, { instance_id: record.instance_id, module_id: 'admin-web', runtime_id: runtimeId }, { timeoutMs })
       verifyCurrent()
-      const response = await rpc!.call('verify_workspace_relocation_request', params, { authorizationBearer: bearer })
+      const response = await rpc!.call(method, params, { authorizationBearer: bearer })
       verifyCurrent()
       if (!response || typeof response !== 'object' || Array.isArray(response) || Object.keys(response).length !== 3
-        || !Object.keys(response).every(key => key === 'verified' || key === 'intent_id' || key === 'intent_sha256')) throw unavailable()
-      const verified = response as Partial<VerifyWorkspaceRelocationRequestResult>
-      if (verified.verified !== true || verified.intent_id !== params.intent_id || verified.intent_sha256 !== params.intent_sha256) throw unavailable()
+        || !Object.keys(response).every(key => key === field || key === 'intent_id' || key === 'intent_sha256')) throw unavailable()
+      const result = response as Record<string, unknown>
+      if (result[field] !== true || result.intent_id !== params.intent_id || result.intent_sha256 !== params.intent_sha256) throw unavailable()
       if (sha256CanonicalJson((await this.runtimeRegistry.listRecords()).filter(record => record.module_id === 'admin-web')) !== fingerprint) throw unavailable()
       verifyCurrent()
       if (!native.sameProcess(root, native.inspectProcess(rootPid))) throw unavailable()
@@ -1266,7 +1285,7 @@ export class ModuleManager {
       if (intent.id !== params.intent_id || intentHash !== params.intent_sha256) {
         throw Object.assign(new Error('Workspace request does not match this instance'), { code: 'FORBIDDEN' })
       }
-      return { verified: true, intent_id: intent.id, intent_sha256: intentHash }
+      return { intent_id: intent.id, intent_sha256: intentHash }
     } catch (error) {
       if ((error as { code?: string }).code === 'FORBIDDEN') throw error
       throw unavailable()
@@ -1327,6 +1346,7 @@ export class ModuleManager {
       let journal: (WorkspaceModuleStopJournal & { close(): void }) | undefined
       try {
         child = await this.launchWorkspaceRelocationCoordinator(request, bearer)
+        await this.quiesceWorkspaceRelocationWeb(request, bearer)
         await this.captureWorkspaceRelocationWorkersForCoordinator(child, request, bearer)
         await this.captureWorkspaceRelocationProcessesForCoordinator(child)
         const modules = await this.captureWorkspaceRelocationModulesForCoordinator(child)
