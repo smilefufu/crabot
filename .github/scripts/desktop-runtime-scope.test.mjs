@@ -27,6 +27,7 @@ after(() => { if (root) fs.rmSync(root, { recursive: true, force: true }) })
 for (const [file, expected] of [
   ['scripts/workspace-relocation-coordinator.mjs', true],
   ['scripts/workspace-copy-host.mjs', true],
+  ['scripts/workspace-file-host.mjs', true],
   ['scripts/lib/workspace-coordinator-launch.mjs', true],
   ['scripts/lib/known-process-stop.cjs', true],
   ['scripts/lib/process-identity.cjs', true],

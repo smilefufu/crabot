@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os'
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { randomUUID } from 'node:crypto'
+import { fileURLToPath } from 'node:url'
 import native from '../process-identity.cjs'
 import management from '../desktop-management.cjs'
 import { acquireCliLock, acquireWorkspaceRelocationLock, releaseCliLock } from '../cli-lock.mjs'
@@ -38,7 +39,8 @@ async function fixture(t, { exitEvidence = true } = {}) {
       const sync=fs.fsyncSync;try{if(message.operation==='unlock')context.release();
         if(message.operation==='fail-sync')fs.fsyncSync=fd=>{if(fs.fstatSync(fd).isDirectory())throw Object.assign(new Error('finite sync failure'),{code:'EIO'});return sync(fd)};
         let result;
-        if(message.operation==='actors-prepare')result=records.prepareWorkspaceRelocationFileActors(args);
+        if(['host-launch','host-launch-preload','host-launch-extra','host-launch-after-unlock'].includes(message.operation)){if(message.operation==='host-launch-preload')process.env.NODE_OPTIONS='--require '+JSON.stringify(${JSON.stringify(path.join(root, 'host-preload.cjs'))});const {launchWorkspaceFileHost}=await import(${JSON.stringify(new URL('../workspace-file-host.mjs', import.meta.url).href)});if(message.operation==='host-launch-after-unlock')context.release();const launched=await launchWorkspaceFileHost(message.operation==='host-launch-extra'?{...args,entry:'not-accepted'}:args);if(launched.child){host=launched.child;hostIdentity=launched.host;hostEnded=once(host,'exit');process.send({kind:'fixture-actor',identity:hostIdentity})}result={dispatch:launched.dispatch,host:launched.host}}
+        else if(message.operation==='actors-prepare')result=records.prepareWorkspaceRelocationFileActors(args);
         else if(message.operation==='host-permit')result=records.permitWorkspaceRelocationFileHost(args);
         else if(message.operation==='host-stop'){native.terminateKnownProcess(hostIdentity);await hostEnded;result={stopped:true}}
         else if(message.operation.startsWith('host-')){
@@ -218,4 +220,58 @@ test('an unconfirmed complete actor append is synced on observation without regi
   assert.equal((await f.command('host-sync-failure')).error?.code, 'EIO')
   const file = path.join(f.data, 'workspace-control/relocation-file-actors.jsonl'), bytes = fs.readFileSync(file)
   assert.equal((await f.command('host-register')).result.dispatch, 'observe'); assert.deepEqual(fs.readFileSync(file), bytes)
+})
+
+
+for (const scenario of ['normal', 'blocked preload']) test('actual fixed file host enters once through the original coordinator: ' + scenario, async t => {
+  const f = await fixture(t), marker = path.join(f.root, 'inherited-loader-ran')
+  fs.writeFileSync(path.join(f.root, 'host-preload.cjs'), 'require("node:fs").writeFileSync(' + JSON.stringify(marker) + ',"must not load")')
+  await f.command()
+  const launched = await f.command(scenario === 'blocked preload' ? 'host-launch-preload' : 'host-launch')
+  assert.equal(launched.error, undefined, JSON.stringify(launched.error)); assert.equal(launched.result.dispatch, 'dispatch')
+  assert.equal(launched.result.host.parent, f.child.pid); assert.equal(native.isProcessExited(launched.result.host.pid), false)
+  assert.equal(fs.existsSync(marker), false)
+  const actors = records.readWorkspaceRelocationFileActors(f.data, f.id), bytes = fs.readFileSync(path.join(f.data, 'workspace-control/relocation-file-actors.jsonl'))
+  assert.equal(actors.permission.type, 'host_permitted')
+  const again = await f.command('host-launch'); assert.equal(again.result.dispatch, 'observe'); assert.deepEqual(again.result.host, launched.result.host)
+  assert.deepEqual(fs.readFileSync(path.join(f.data, 'workspace-control/relocation-file-actors.jsonl')), bytes)
+  assert.equal(native.listChildProcessIds(f.child.pid).filter(pid => pid === launched.result.host.pid).length, 1)
+  assert.equal(fs.existsSync(f.target), false); assert.equal(fs.readFileSync(path.join(f.source, 'default/file'), 'utf8'), 'original bytes')
+})
+
+
+for (const scenario of ['host-launch-extra', 'host-launch-after-unlock']) test('fixed file host rejects unsafe launch before a child exists: ' + scenario, async t => {
+  const f = await fixture(t); await f.command()
+  assert.equal((await f.command(scenario)).error?.code, 'CRABOT_WORKSPACE_FILE_HOST')
+  assert.equal(records.readWorkspaceRelocationFileActors(f.data, f.id).attempt, null)
+  assert.deepEqual(native.listChildProcessIds(f.child.pid), [])
+})
+
+test('an exited fixed file host is observed without automatically creating or permitting its replacement', async t => {
+  const f = await fixture(t); await f.command(); const started = await f.command('host-launch'); await f.command('host-stop')
+  const bytes = fs.readFileSync(path.join(f.data, 'workspace-control/relocation-file-actors.jsonl'))
+  const observed = await f.command('host-launch')
+  assert.equal(observed.result.dispatch, 'observe'); assert.deepEqual(observed.result.host, started.result.host)
+  assert.equal(native.isProcessExited(started.result.host.pid), true); assert.deepEqual(native.listChildProcessIds(f.child.pid), [])
+  assert.deepEqual(fs.readFileSync(path.join(f.data, 'workspace-control/relocation-file-actors.jsonl')), bytes)
+})
+
+test('the fixed file script cannot enter without a parent IPC channel', { timeout: 15000 }, async t => {
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(tmpdir(), 'workspace-host-no-ipc-'))), data = path.join(root, 'must-not-create')
+  const child = spawn(process.execPath, [fileURLToPath(new URL('../../workspace-file-host.mjs', import.meta.url))], { env: { ...process.env, DATA_DIR: data, NODE_OPTIONS: '', NODE_PATH: '' }, stdio: 'ignore' }), ended = once(child, 'exit')
+  t.after(async () => { if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL'); await ended; fs.rmSync(root, { recursive: true, force: true }) })
+  assert.equal((await ended)[0], 1); assert.equal(fs.existsSync(data), false)
+})
+
+test('correct private material hashes cannot authorize a different real child and parent', { timeout: 30000 }, async t => {
+  const f = await fixture(t); await f.command(); await f.command('actors-prepare'); await f.command('host-register')
+  const actors = records.readWorkspaceRelocationFileActors(f.data, f.id), bytes = fs.readFileSync(path.join(f.data, 'workspace-control/relocation-file-actors.jsonl'))
+  const child = spawn(process.execPath, [fileURLToPath(new URL('../../workspace-file-host.mjs', import.meta.url))], { env: { ...process.env, NODE_OPTIONS: '', NODE_PATH: '' }, stdio: ['ignore', 'ignore', 'ignore', 'ipc'] }), ended = once(child, 'exit')
+  t.after(async () => { if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL'); await ended })
+  await once(child, 'spawn')
+  child.send({ kind: 'workspace_file_host_start', data_dir: f.data, intent_id: f.id, attempt_sha256: sha256CanonicalJson(actors.attempt), host_sha256: sha256CanonicalJson(actors.host) })
+  assert.equal((await ended)[0], 1)
+  assert.equal(records.readWorkspaceRelocationFileActors(f.data, f.id).permission, null)
+  assert.deepEqual(fs.readFileSync(path.join(f.data, 'workspace-control/relocation-file-actors.jsonl')), bytes)
+  assert.equal(fs.existsSync(f.target), false)
 })
