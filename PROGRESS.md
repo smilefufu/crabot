@@ -27,6 +27,10 @@
 
 ### 桌面化方案：独立 worktree 开发中，尚未进入 PR
 
+- 2026-10-20磁盘故障：故障期间本机整包构建/开发验收曾暂停。16:00实测仅174MiB空闲，Docker 15:59写入I/O错误、16:00 VM停止。只删除本任务5份旧候选（构建目录19GiB降至11GiB），16:02实测21GiB、16:04系统记录约166GiB空闲；额外约145GiB归属尚未证实，不能全归因于构建或缓存回收。
+- 按用户明确授权恢复Docker：先对未被打开的原Docker.raw创建APFS写时复制恢复副本；官方重启超时后仅终止卡住的已核验Docker后台，启动原数据引擎。事故前13容器已运行、7项health通过，3网页200/4端口可达/小文件写入fsync通过；5个事故前已停用容器未重启。不做prune/重置/删卷，不宣称全部业务数据已核验无损。恢复证据与当前盘副本在用户Docker recovery目录。
+- 空间调查：OS记录的服务回收合计约3.8GiB；完整有限FSEvents历史11622条无丢弃/未触及上限，但不保存历史文件尺寸及当时打开文件清单，尚不足以定位剩余差额。用户已明确没有手动清理。补查发现16:02:23系统Spotlight旧进程索引合并失败、3条unlink/40条close后新进程启动，时间与释放窗口相符；路径隐去且无历史尺寸，仍不认定145GiB全部来自它。用户已明确要求继续构建并关注磁盘：本任务采用本地命令资源保护，启动需40GiB空闲、运行低于30GiB中止该命令，构建目录留存上限20GiB；复用现有环境，不累积完整候选。不以部分打包脚本的预检代替整个开发过程的资源控制。
+
 - workspace：执行保护、同一协调作业的Worker/CLI原生/模块范围、独立持锁落盘与计划停止已有接线；原root与动态后代分别核验，已知集合退出与全局停止证明仍分开。旧版明确结束执行兼容已获确认，证据/原锁落盘组件已验（Agent392、文件/锁27），共同升级/首启兜底已接（相关47、升级112/2条件跳过）；System专用完成证明与当前载体消费仍待。独立协调接纳、不可逆关闭、文件切换/中断恢复仍待，详见[项目workspace计划](crabot-docs/superpowers/plans/2026-10-19-project-workspaces-implementation.md)。
 
 - 边界：按[桌面Spec](crabot-docs/superpowers/specs/2026-10-17-desktop-application-design.md)、[安装根计划](crabot-docs/superpowers/plans/2026-10-19-desktop-install-root-implementation.md)在feat/desktop-application推进；完整测好前不推产品main/不提前PR，不部署或重启现场，不在本机启动第二业务MM（完整实例仅隔离CI）。Electron+React、业务HTTP/WS、最小IPC、GUI免额外密码、关闭窗口后台/退出停共享实例。整体安装根在安装时选，之后可迁workspace；不新增DATA_DIR选择步骤。

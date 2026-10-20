@@ -293,6 +293,26 @@ exec ${spec.command}
       dead: fields[4] === '1', server_pid: Number(fields[5]) })
   }
 
+  /** Exact observation only; null is not an exit/ownership proof and never bypasses legacy evidence checks. */
+  async readOptionalProcessCarrier(name: string): Promise<TmuxProcessCarrier | null> {
+    const invalid = () => Object.assign(new Error('执行器tmux载体状态无法核验，已保留维护保护。'), { code: 'WORKER_CARRIER_UNVERIFIED' })
+    if (!/^crabot-w-[A-Za-z0-9_-]+$/.test(name)) throw invalid()
+    let presence: { stdout: string; stderr: string }
+    try {
+      presence = await this.run(['-N', 'has-session', '-t', '=' + name], true)
+    } catch (error) {
+      const result = error as { code?: unknown; signal?: unknown; killed?: unknown; stdout?: unknown; stderr?: unknown }
+      const message = typeof result.stderr === 'string' ? result.stderr.trim() : ''
+      const absent = message === `can't find session: ${name}` || message === `can't find session: =${name}`
+        || /^no server running on [^\r\n]+$/.test(message)
+        || /^error connecting to [^\r\n]+ \(No such file or directory\)$/.test(message)
+      if (result.code === 1 && result.signal == null && result.killed !== true && result.stdout === '' && absent) return null
+      throw error
+    }
+    if (presence.stdout !== '' || presence.stderr !== '') throw invalid()
+    return this.readProcessCarrier(name)
+  }
+
   async killSession(name: string): Promise<void> {
     try {
       await this.run(['kill-session', '-t', name])
@@ -301,9 +321,9 @@ exec ${spec.command}
     }
   }
 
-  private run(args: string[]): Promise<{ stdout: string; stderr: string }> {
+  private run(args: string[], cLocale = false): Promise<{ stdout: string; stderr: string }> {
     return execFileAsync(this.tmuxBin, args, {
-      env: buildChildEnv(),
+      env: cLocale ? { ...buildChildEnv(), LC_ALL: 'C', LANG: 'C' } : buildChildEnv(),
       timeout: this.commandTimeoutMs,
       killSignal: 'SIGKILL',
     })

@@ -231,3 +231,76 @@ describe.skipIf(!detectTmux())('TmuxDriver', () => {
     })
   })
 })
+
+describe('TmuxDriver exact optional process carrier', () => {
+  const name = 'crabot-w-legacy-one'
+  const absent = (stderr: string) => Object.assign(new Error('native query returned no carrier'), { code: 1, signal: null, killed: false, stdout: '', stderr })
+  it.each([`can't find session: ${name}\n`, `can't find session: =${name}\n`, 'no server running on /fixture/private.sock\n', 'error connecting to /fixture/private.sock (No such file or directory)\n'])('recognizes only definite native absence: %j', async stderr => {
+    const driver = new TmuxDriver(), run = vi.fn().mockRejectedValue(absent(stderr)); (driver as any).run = run
+    expect(await driver.readOptionalProcessCarrier(name)).toBeNull()
+    expect(run).toHaveBeenCalledTimes(1)
+    expect(run).toHaveBeenCalledWith(['-N', 'has-session', '-t', '=' + name], true)
+  })
+  it.each(['permission', 'spawn missing', 'timeout', 'signal', 'wrong target', 'ambiguous output', 'unsupported command', 'wrong status'])('preserves unknown without interpreting it as absence: %s', kind => {
+    const error = absent(`can't find session: ${name}\n`)
+    if (kind === 'permission') error.stderr = 'permission denied\n'
+    if (kind === 'spawn missing') (error as any).code = 'ENOENT'
+    if (kind === 'timeout') error.killed = true
+    if (kind === 'signal') (error as any).signal = 'SIGKILL'
+    if (kind === 'wrong target') error.stderr = "can't find session: unrelated\n"
+    if (kind === 'ambiguous output') error.stdout = 'unexpected output'
+    if (kind === 'unsupported command') error.stderr = 'unknown option -- N\n'
+    if (kind === 'wrong status') error.code = 2
+    const driver = new TmuxDriver(); (driver as any).run = vi.fn().mockRejectedValue(error)
+    return expect(driver.readOptionalProcessCarrier(name)).rejects.toBe(error)
+  })
+  it('reads current exact identity through the original strict reader after presence succeeds', async () => {
+    const driver = new TmuxDriver(), run = vi.fn().mockResolvedValueOnce({ stdout: '', stderr: '' })
+      .mockResolvedValueOnce({ stdout: `${name}\t$7\t%12\t123\t0\t99\n`, stderr: '' }); (driver as any).run = run
+    expect(await driver.readOptionalProcessCarrier(name)).toMatchObject({ session_name: name, pane_pid: 123, dead: false })
+    expect(run).toHaveBeenCalledTimes(2)
+    expect(run.mock.calls[1][0]).toEqual(['list-panes', '-s', '-t', '=' + name, '-F', '#{session_name}\t#{session_id}\t#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{pid}'])
+  })
+  it('keeps an observation lost after successful presence unknown', async () => {
+    const error = absent(`can't find session: ${name}\n`), driver = new TmuxDriver()
+    ;(driver as any).run = vi.fn().mockResolvedValueOnce({ stdout: '', stderr: '' }).mockRejectedValueOnce(error)
+    await expect(driver.readOptionalProcessCarrier(name)).rejects.toBe(error)
+  })
+  it('rejects selectors without executing a query', async () => {
+    const driver = new TmuxDriver(), run = vi.fn(); (driver as any).run = run
+    await expect(driver.readOptionalProcessCarrier(name + ':0')).rejects.toThrow()
+    expect(run).not.toHaveBeenCalled()
+  })
+})
+
+describe.skipIf(process.platform === 'win32' || !hasTmuxBinary())('TmuxDriver optional carrier on a private socket', () => {
+  it('observes absent server, absent exact target, live target and stopped server without creating or touching another server', async () => {
+    const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-optional-tmux-')))
+    const socket = path.join(directory, 'private.sock'), wrapper = path.join(directory, 'tmux-private'), ready = path.join(directory, 'node-ready')
+    const active = 'crabot-w-active-' + randomUUID() + '-1', missing = 'crabot-w-missing-' + randomUUID() + '-1'
+    const quote = (value: string) => "'" + value.replace(/'/g, "'\\''") + "'"
+    await fs.writeFile(wrapper, `#!/bin/sh\nexec tmux -S ${quote(socket)} "$@"\n`, { mode: 0o700 })
+    const env = { PATH: process.env.PATH ?? '/usr/bin:/bin', SHELL: '/bin/sh', LC_ALL: 'C' }, driver = new TmuxDriver({ tmuxBin: wrapper })
+    let created = false
+    try {
+      expect(await driver.readOptionalProcessCarrier(missing)).toBeNull()
+      await expect(fs.stat(socket)).rejects.toMatchObject({ code: 'ENOENT' })
+      const program = `require('node:fs').writeFileSync(${JSON.stringify(ready)},String(process.pid));setInterval(()=>{},1000);setTimeout(()=>process.exit(0),30000).unref()`
+      execFileSync('tmux', ['-S', socket, '-f', '/dev/null', 'new-session', '-d', '-s', active, quote(process.execPath) + ' -e ' + quote(program)], { env, stdio: ['ignore', 'pipe', 'pipe'] })
+      created = true
+      expect(execFileSync('tmux', ['-S', socket, 'display-message', '-p', '-t', '=' + active, '#{socket_path}'], { env, encoding: 'utf8' }).trim()).toBe(socket)
+      await waitFor(async () => (await fs.stat(ready).catch(() => null)) !== null)
+      expect(await driver.readOptionalProcessCarrier(missing)).toBeNull()
+      const carrier = await driver.readOptionalProcessCarrier(active)
+      expect(carrier).toMatchObject({ session_name: active, pane_pid: Number(await fs.readFile(ready, 'utf8')), dead: false })
+      const { default: tree } = await import('../../../scripts/lib/tmux-process-tree.cjs')
+      expect(await tree.captureTmuxProcessTree(() => driver.readProcessCarrier(active))).toMatchObject([{ pid: carrier!.pane_pid }])
+      expect(await driver.readOptionalProcessCarrier(active)).toEqual(carrier)
+      execFileSync('tmux', ['-S', socket, 'kill-server'], { env, stdio: ['ignore', 'pipe', 'pipe'] }); created = false
+      await waitFor(async () => await driver.readOptionalProcessCarrier(active) === null)
+    } finally {
+      if (created) try { execFileSync('tmux', ['-S', socket, 'kill-server'], { env, stdio: ['ignore', 'pipe', 'pipe'] }) } catch { /* The finite pane may already have exited. */ }
+      await fs.rm(directory, { recursive: true, force: true })
+    }
+  }, 30000)
+})
