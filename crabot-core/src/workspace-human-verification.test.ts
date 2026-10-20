@@ -12,7 +12,7 @@ import { sha256CanonicalJson } from 'crabot-shared'
 import ModuleManager from './index.js'
 import { relocationAgentConfig } from '../../crabot-agent/tests/core/fixtures/relocation-agent-config.js'
 
-async function fixture(options: { wrongRuntime?: boolean; result?: string; withAgent?: boolean; agentResult?: string; actualAgent?: boolean; processLifetimeMs?: number; backgroundShell?: boolean; actualAdmin?: boolean; quiesceResult?: string; orphanDuringStop?: boolean } = {}) {
+async function fixture(options: { wrongRuntime?: boolean; result?: string; withAgent?: boolean; agentResult?: string; actualAgent?: boolean; processLifetimeMs?: number; backgroundShell?: boolean; actualAdmin?: boolean; adminReadyDelayMs?: number; quiesceResult?: string; orphanDuringStop?: boolean } = {}) {
   const root = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'crabot-current-admin-')))
   const native = require('../../scripts/lib/process-identity.cjs'), management = require('../../scripts/lib/desktop-management.cjs')
   const data = management.ensurePrivateDataRoot(path.join(root, 'data')), script = path.join(data, 'finite-admin.cjs'), callsFile = path.join(data, 'calls.json')
@@ -46,7 +46,7 @@ async function fixture(options: { wrongRuntime?: boolean; result?: string; withA
       admin.cutoverActivated=true;admin.verifyAuthenticatedToken=async token=>token==='fixture-human'?{sub:'admin'}:null;
       const server=http.createServer((req,res)=>{let text='';req.on('data',part=>text+=part);req.on('end',()=>{let body;try{if(text)body=JSON.parse(text)}catch{}calls.push({method:req.url,authorization:req.headers.authorization?'present':undefined,body});fs.writeFileSync(process.env.FIXTURE_CALLS,JSON.stringify(calls))});
         const handling=req.url.startsWith('/api/')?admin.handleWebRequest(req,res):admin.handleRequest(req,res);void handling.catch(()=>{if(!res.headersSent)res.writeHead(500);res.end('{}')})
-      });(async()=>{await admin.workspaceService.initialize();server.listen(Number(process.env.Crabot_PORT),'127.0.0.1',()=>fs.writeFileSync(process.env.FIXTURE_READY,'ready'))})().catch(error=>{console.error(error);process.exit(1)});
+      });(async()=>{await admin.workspaceService.initialize();await new Promise(resolve=>setTimeout(resolve,${options.adminReadyDelayMs ?? 0}));server.listen(Number(process.env.Crabot_PORT),'127.0.0.1',()=>fs.writeFileSync(process.env.FIXTURE_READY,'ready'))})().catch(error=>{console.error(error);process.exit(1)});
       setTimeout(()=>process.exit(0),${options.processLifetimeMs ?? 30000}).unref();`)
   }
   const manager = new ModuleManager({ port: 0, modules: [], shutdown_timeout: 0.1 }, data) as any
@@ -83,7 +83,7 @@ async function fixture(options: { wrongRuntime?: boolean; result?: string; withA
    ...(options.result ? { FIXTURE_RESULT: options.result } : {}) },
       port, auto_start: false, auto_restart: false, skip_health_check: true, start_priority: 1, status: 'stopped' }
     manager.modules.set('admin-web', runtime); await manager.startModuleProcess('admin-web')
-    await vi.waitFor(async () => expect(await fs.readFile(path.join(data, 'ready'), 'utf8')).toBe('ready'))
+    await vi.waitFor(async () => expect(await fs.readFile(path.join(data, 'ready'), 'utf8')).toBe('ready'), { timeout: 10000 })
     if (options.withAgent || options.actualAgent) {
       const agentPort = http.createServer(); await new Promise<void>(resolve => agentPort.listen(0, '127.0.0.1', resolve))
       const agentScript = path.join(data, 'finite-agent.cjs'), agentReady = path.join(data, 'agent-ready')
@@ -1033,7 +1033,7 @@ describe('MM launches the actual fixed coordinator under the original human inte
 describe('MM submits one fixed workspace stop sequence', () => {
   const timeout = process.platform === 'win32' ? 90000 : 30000
   it('joins concurrent callers to the real fixed host, scopes and first submissions while retaining Admin', async () => {
-    const f = await fixture({ actualAgent: true, actualAdmin: true, processLifetimeMs: 120000, backgroundShell: true }), locks = require('../../scripts/lib/cli-lock.mjs')
+    const f = await fixture({ actualAgent: true, actualAdmin: true, adminReadyDelayMs: 1200, processLifetimeMs: 120000, backgroundShell: true }), locks = require('../../scripts/lib/cli-lock.mjs')
     const records = await import('../../scripts/lib/workspace-relocation-intent.mjs'), lock = await locks.acquireWorkspaceRelocationLock(f.data, f.params.intent_id)
     const launch = vi.spyOn(f.manager, 'launchWorkspaceRelocationCoordinator'), stop = vi.spyOn(f.manager, 'stopWorkspaceRelocationWorkersForCoordinator')
     let child: ReturnType<typeof spawn> | undefined

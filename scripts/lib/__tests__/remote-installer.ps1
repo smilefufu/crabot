@@ -7,6 +7,27 @@ try {
     $env:TEMP = $temporary
     $installed = Join-Path $temporary 'installed'
     . $Installer -Version fixture -InstallDir $installed
+    Add-Type -TypeDefinition @'
+using System.IO;
+using System.Threading;
+public static class CrabotInstallerSharingLock {
+    public static Thread Hold(string path) {
+        var stream = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None);
+        var thread = new Thread(() => { Thread.Sleep(400); stream.Dispose(); });
+        thread.IsBackground = true;
+        thread.Start();
+        return thread;
+    }
+}
+'@
+    $script:OriginalNativeSuccess = ${function:Assert-NativeSuccess}
+    function Assert-NativeSuccess($stage) {
+        if ($stage -eq 'Bundled CLI installation' -and $script:Mode -eq 'complete') {
+            # Hold a real file through the first cleanup attempt, as an exiting process or scanner can.
+            $script:CleanupHold = [CrabotInstallerSharingLock]::Hold((Join-Path $bundledSource 'cleanup-lock'))
+        }
+        & $script:OriginalNativeSuccess $stage
+    }
     function Ensure-Node { throw 'UNEXPECTED_HOST_NODE' }
     function Ensure-Uv { throw 'UNEXPECTED_HOST_UV' }
     function Ensure-Bash { throw 'UNEXPECTED_HOST_BASH' }
@@ -43,7 +64,12 @@ try {
         if (-not $failure -or $failure.Exception.Message -notmatch $expected) { throw "Unexpected $script:Mode result: $failure" }
         if ((Test-Path -LiteralPath $env:CRABOT_TEST_BUNDLED_ENTRY) -ne ($script:Mode -eq 'complete')) { throw 'Bundled Node selection was incorrect' }
         if (Test-Path -LiteralPath $installed) { throw 'Failed preparation modified installation' }
-        if (Get-ChildItem -LiteralPath $temporary -Filter 'crabot-install-*') { throw 'Download staging was not cleaned' }
+        if ($script:CleanupHold) { $script:CleanupHold.Join(); $script:CleanupHold = $null }
+        $remaining = @(Get-ChildItem -LiteralPath $temporary -Filter 'crabot-install-*')
+        if ($remaining.Count) {
+            $diagnostic = @($remaining | Get-ChildItem -Recurse -Force | Select-Object Name, Attributes)
+            throw ('Download staging was not cleaned: ' + ($diagnostic | ConvertTo-Json -Compress))
+        }
     }
 } finally {
     $env:TEMP = $originalTemp

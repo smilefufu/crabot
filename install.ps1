@@ -357,8 +357,22 @@ function Get-ReleasePackage([string]$releaseVersion) {
         if (-not (Test-Path -LiteralPath $root -PathType Container)) { throw 'Invalid release archive root' }
         return [pscustomobject]@{ Root = $root; Temporary = $temporary; Version = $releaseVersion }
     } catch {
-        Remove-Item -LiteralPath $temporary -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-InstallerTemporaryDirectory $temporary
         throw
+    }
+}
+
+# Only installer-owned temporary roots are passed here. An exited image/scanner can briefly retain a handle.
+function Remove-InstallerTemporaryDirectory([string]$directory) {
+    for ($attempt = 0; $attempt -lt 10; $attempt++) {
+        if (-not (Test-Path -LiteralPath $directory)) { return }
+        try {
+            Remove-Item -LiteralPath $directory -Recurse -Force -ErrorAction Stop
+            return
+        } catch {
+            if ($attempt -eq 9) { Write-Warn 'Installer temporary files could not be removed; installation data was preserved.'; return }
+            Start-Sleep -Milliseconds 100
+        }
     }
 }
 
@@ -562,7 +576,7 @@ Write-Info "Run 'crabot --help' for all commands."
 Write-Warn "If a new terminal cannot find crabot, restart Windows Explorer or sign out and back in to refresh the user PATH."
 
 } finally {
-    if ($downloadedRelease) { Remove-Item -LiteralPath $downloadedRelease.Temporary -Recurse -Force -ErrorAction SilentlyContinue }
+    if ($downloadedRelease) { Remove-InstallerTemporaryDirectory $downloadedRelease.Temporary }
     if ($script:InstallerHelperTemp) { Remove-Item -LiteralPath $script:InstallerHelperTemp -Recurse -Force -ErrorAction SilentlyContinue }
 }
 }
