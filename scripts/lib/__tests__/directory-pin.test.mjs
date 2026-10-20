@@ -93,3 +93,32 @@ test('Windows preserves a protected root access ACL and explicit integrity label
     assert.deepEqual(await inspectWorkspaceFileMetadata(source), before)
   } finally { native.releaseDirectoryPin(b); native.releaseDirectoryPin(a) }
 })
+
+for (const style of ['legacy', 'modern', 'protected']) test('Windows retains ' + style + ' ACL model when a private staging root has a different parent', { skip: process.platform !== 'win32' }, async t => {
+  const { root, source } = await fixture(t), parent = path.join(root, 'private-parent'), target = path.join(parent, 'target')
+  native.createPrivateDirectory(parent); native.createPrivateDirectory(target)
+  const icacls = path.join(process.env.SystemRoot, 'System32/icacls.exe')
+  if (style !== 'legacy') execFileSync(icacls, [source, '/inheritance:' + (style === 'modern' ? 'e' : 'd')])
+  await fs.utimes(source, 1700000000, 1700000000)
+  const { inspectWorkspaceFileMetadata } = await import('../workspace-file-metadata.mjs')
+  const before = await inspectWorkspaceFileMetadata(source), a = native.pinDirectory(source), b = native.pinDirectory(target)
+  try {
+    native.copyPinnedDirectoryMetadata(a, b)
+    const after = await inspectWorkspaceFileMetadata(target)
+    if (after.fingerprint !== before.fingerprint) t.diagnostic(JSON.stringify({ style,
+      source: native.inspectFileMetadata(source).metadata.toString('utf8'), target: native.inspectFileMetadata(target).metadata.toString('utf8') }))
+    assert.deepEqual(after, before)
+    assert.deepEqual(await inspectWorkspaceFileMetadata(source), before)
+  } finally { native.releaseDirectoryPin(b); native.releaseDirectoryPin(a) }
+})
+
+test('Windows never silently removes a preexisting target access label', { skip: process.platform !== 'win32' }, async t => {
+  const { root, source } = await fixture(t), target = path.join(root, 'target'); native.createPrivateDirectory(target)
+  execFileSync(path.join(process.env.SystemRoot, 'System32/icacls.exe'), [target, '/setintegritylevel', 'L'])
+  const { inspectWorkspaceFileMetadata } = await import('../workspace-file-metadata.mjs')
+  const before = await inspectWorkspaceFileMetadata(target), a = native.pinDirectory(source), b = native.pinDirectory(target)
+  try {
+    assert.throws(() => native.copyPinnedDirectoryMetadata(a, b), { code: 'CRABOT_DIRECTORY_METADATA' })
+    assert.deepEqual(await inspectWorkspaceFileMetadata(target), before)
+  } finally { native.releaseDirectoryPin(b); native.releaseDirectoryPin(a) }
+})

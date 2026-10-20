@@ -105,17 +105,19 @@ static napi_value CopyPinnedDirectoryMetadata(napi_env env, napi_callback_info i
       FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
     if (write == INVALID_HANDLE_VALUE || DirectoryIdText(PinnedDirectoryId(write)) != target->identity
       || DirectoryIdText(PinnedDirectoryId(source->handles.back())) != source->identity) throw std::runtime_error("Pinned directory identity changed");
-    PSID sourceOwner = nullptr, sourceGroup = nullptr, targetOwner = nullptr, targetGroup = nullptr; PACL sourceAcl = nullptr, sourceLabel = nullptr;
+    PSID sourceOwner = nullptr, sourceGroup = nullptr, targetOwner = nullptr, targetGroup = nullptr; PACL sourceLabel = nullptr, targetLabel = nullptr;
     const DWORD fields = OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION;
-    if (GetSecurityInfo(source->handles.back(), SE_FILE_OBJECT, fields, &sourceOwner, &sourceGroup, &sourceAcl, &sourceLabel, &sourceDescriptor) != ERROR_SUCCESS
-      || GetSecurityInfo(write, SE_FILE_OBJECT, fields, &targetOwner, &targetGroup, nullptr, nullptr, &targetDescriptor) != ERROR_SUCCESS
+    if (GetSecurityInfo(source->handles.back(), SE_FILE_OBJECT, fields, &sourceOwner, &sourceGroup, nullptr, &sourceLabel, &sourceDescriptor) != ERROR_SUCCESS
+      || GetSecurityInfo(write, SE_FILE_OBJECT, fields, &targetOwner, &targetGroup, nullptr, &targetLabel, &targetDescriptor) != ERROR_SUCCESS
       || !sourceOwner || !sourceGroup || !targetOwner || !targetGroup
       || !EqualSid(sourceOwner, targetOwner) || !EqualSid(sourceGroup, targetGroup)) throw std::runtime_error("Cannot preserve pinned directory ownership");
-    FILE_BASIC_INFO basic{}; SECURITY_DESCRIPTOR_CONTROL control = 0; DWORD revision = 0;
-    if (!GetFileInformationByHandleEx(source->handles.back(), FileBasicInfo, &basic, sizeof(basic))
-      || !GetSecurityDescriptorControl(sourceDescriptor, &control, &revision)) throw std::runtime_error("Cannot read pinned directory metadata");
-    const DWORD protection = (control & SE_DACL_PROTECTED) ? PROTECTED_DACL_SECURITY_INFORMATION : UNPROTECTED_DACL_SECURITY_INFORMATION;
-    if (SetSecurityInfo(write, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION | protection, nullptr, nullptr, sourceAcl, sourceLabel) != ERROR_SUCCESS
+    FILE_BASIC_INFO basic{};
+    if (!GetFileInformationByHandleEx(source->handles.back(), FileBasicInfo, &basic, sizeof(basic))) throw std::runtime_error("Cannot read pinned directory metadata");
+    if ((!sourceLabel || !sourceLabel->AceCount) && targetLabel && targetLabel->AceCount) throw std::runtime_error("Cannot remove an existing target access label");
+    // Preserve the source inheritance model instead of converting legacy ACLs or propagating changes to children.
+    // The full target path remains fixed by its live root/ancestor handles throughout this path-only API.
+    if (!SetFileSecurityW(target->path.c_str(), DACL_SECURITY_INFORMATION, sourceDescriptor)
+      || (sourceLabel && sourceLabel->AceCount && SetSecurityInfo(write, SE_FILE_OBJECT, LABEL_SECURITY_INFORMATION, nullptr, nullptr, nullptr, sourceLabel) != ERROR_SUCCESS)
       || !SetFileInformationByHandle(write, FileBasicInfo, &basic, sizeof(basic))) throw std::runtime_error("Cannot preserve pinned directory metadata");
     LocalFree(sourceDescriptor); sourceDescriptor = nullptr; LocalFree(targetDescriptor); targetDescriptor = nullptr;
     CloseHandle(write); write = INVALID_HANDLE_VALUE;
