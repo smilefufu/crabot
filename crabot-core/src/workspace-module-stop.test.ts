@@ -4,6 +4,7 @@ import path from 'node:path'
 import { tmpdir } from 'node:os'
 import http from 'node:http'
 import { once } from 'node:events'
+import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import ModuleManager from './index.js'
 import { canonicalizeJson } from 'crabot-shared'
@@ -149,6 +150,65 @@ describe('workspace planned execution module stops', () => {
       expect(JSON.parse(await fs.readFile(f.marker, 'utf8'))).toEqual(['/get_runtime_identity', '/shutdown'])
     } finally { await f.cleanup() }
   })
+  it.each(['normal', 'lock lost', 'receipt reply lost', 'false persistence ack'])('uses the independent coordinator native lock for the real module journal across IPC: %s', async mode => {
+    const f = await fixture(true, true)
+    const locks = await import('../../scripts/lib/cli-lock.mjs'), native = require('../../scripts/lib/process-identity.cjs')
+    const { sha256CanonicalJson } = await import('crabot-shared')
+    const entry = new URL('../../scripts/lib/workspace-coordinator-entry.mjs', import.meta.url).href
+    const bridge = new URL('../../scripts/lib/workspace-module-journal.mjs', import.meta.url).href
+    const code = `import{enterWorkspaceRelocationCoordinator}from ${JSON.stringify(entry)};import{serveWorkspaceModuleJournal}from ${JSON.stringify(bridge)};
+      const context=await enterWorkspaceRelocationCoordinator(),server=${JSON.stringify(mode)}==='false persistence ack'?{close(){}}:serveWorkspaceModuleJournal(context);
+      if(${JSON.stringify(mode)}==='false persistence ack')process.on('message',message=>{if(message.kind==='workspace_module_journal_request')process.send({kind:'workspace_module_journal_reply',request_id:message.request_id,launch_id:message.launch_id,operation:message.operation,ok:true,result:message.operation==='prepare'?'dispatch':true})});
+      if(${JSON.stringify(mode)}==='receipt reply lost'){const send=process.send.bind(process);process.send=(message,callback)=>message.kind==='workspace_module_journal_reply'&&message.operation==='complete'?(callback?.(null),false):send(message,callback)}
+      if(${JSON.stringify(mode)}==='lock lost')context.release();
+      process.send({kind:'fixture-serving'});process.on('message',m=>{if(m.kind==='fixture-exit'){server.close();context.release();process.exit(0)}});setTimeout(()=>process.exit(2),30000);`
+    const child = spawn(process.execPath, ['--input-type=module', '-e', code], { stdio: ['ignore', 'ignore', 'pipe', 'ipc'] })
+    let output = ''; child.stderr.on('data', bytes => { output += bytes.toString() })
+    const exited = once(child, 'exit'); void exited.catch(() => {})
+    let journal: any
+    try {
+      await once(child, 'spawn')
+      const launchId = randomUUID(), launch = f.relocation.commitWorkspaceRelocationCoordinator({ dataDir: f.data, id: f.jobId, launchId, coordinator: native.inspectProcess(child.pid) })
+      const messages: any[] = []; child.on('message', message => messages.push(message))
+      locks.releaseCliLock(path.join(f.data, 'cli.lock'))
+      child.send({ kind: 'workspace_relocation_start', data_dir: f.data, intent_id: f.jobId, launch_id: launchId, launch_sha256: sha256CanonicalJson(launch) })
+      await vi.waitFor(() => expect(messages.some(item => item.kind === 'fixture-serving'), output).toBe(true), { timeout: 10000 })
+      const { createWorkspaceModuleJournal } = await import('../../scripts/lib/workspace-module-journal.mjs')
+      journal = createWorkspaceModuleJournal(child, { dataDir: f.data, id: f.jobId, launch })
+      expect(locks.cliLockToken(path.join(f.data, 'cli.lock'))).toBeUndefined()
+      expect(() => f.relocation.commitWorkspaceRelocationModules({ dataDir: f.data, id: f.jobId, modules: f.scope })).toThrow()
+      const pending = f.manager.requestWorkspaceRelocationModuleStops(f.scope, journal)
+      if (mode === 'lock lost' || mode === 'false persistence ack') {
+        await expect(pending).rejects.toMatchObject({ code: 'CRABOT_WORKSPACE_JOURNAL_UNAVAILABLE' })
+        expect(f.relocation.readWorkspaceRelocationModules(f.data, f.jobId)).toBeNull()
+        await expect(fs.stat(path.join(f.data, 'workspace-control/relocation-module-stop-attempt.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+        expect(f.manager.processes.get('fixture-memory').exitCode).toBeNull()
+        expect(await fs.readFile(f.marker, 'utf8').catch(() => '[]')).not.toContain('/shutdown')
+      } else {
+        if (mode === 'receipt reply lost') {
+          await expect(pending).rejects.toMatchObject({ code: 'CRABOT_WORKSPACE_JOURNAL_UNAVAILABLE' })
+          expect(f.manager.requestWorkspaceRelocationModuleStops(f.scope, journal)).toBe(pending)
+          await expect(pending).rejects.toMatchObject({ code: 'CRABOT_WORKSPACE_JOURNAL_UNAVAILABLE' })
+        } else {
+          const result = await pending
+          expect(f.relocation.readWorkspaceRelocationModuleStops(f.data, f.jobId).submission.results).toEqual(result.results)
+        }
+        const stored = f.relocation.readWorkspaceRelocationModuleStops(f.data, f.jobId)
+        expect(stored.observations[0].processes).toEqual(f.scope[0].processes)
+        expect(stored.submission.results[0].status).toBe('known_scope_exited')
+        journal.close()
+        await expect(locks.acquireWorkspaceRelocationLock(f.data, f.jobId, 0)).rejects.toThrow(/another crabot CLI operation/)
+        expect(JSON.parse(await fs.readFile(f.marker, 'utf8'))).toEqual(['/get_runtime_identity', '/shutdown'])
+      }
+      expect(f.manager.processes.get('admin-web').exitCode).toBeNull()
+      await expect(fs.stat(path.join(path.dirname(f.data), 'relocated'))).rejects.toMatchObject({ code: 'ENOENT' })
+    } finally {
+      journal?.close()
+      if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
+      await exited
+      await f.cleanup()
+    }
+  }, 30000)
   it('keeps an unplanned maintenance crash out of the legacy tree fallback', async () => {
     const f = await fixture(), legacy = vi.spyOn(f.manager, 'terminateChildTree')
     const child = f.manager.processes.get('fixture-memory'), state = f.manager.childStates.get(child)
