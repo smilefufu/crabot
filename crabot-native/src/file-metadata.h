@@ -10,7 +10,10 @@
 #endif
 #endif
 
+static constexpr size_t MetadataLimit = 16 * 1024 * 1024;
+
 static void MetadataPart(std::string& output, const std::string& value) {
+  if (value.size() > MetadataLimit || output.size() + value.size() + 32 > MetadataLimit) throw std::runtime_error("File metadata exceeds bounded verification limit");
   output += std::to_string(value.size()) + ':' + value;
 }
 #ifndef _WIN32
@@ -24,6 +27,7 @@ static std::string MetadataXattrs(const std::string& path) {
 #endif
   auto size = list(nullptr, 0);
   if (size < 0) throw std::runtime_error("Cannot enumerate file extended attributes");
+  if (static_cast<size_t>(size) > MetadataLimit) throw std::runtime_error("File metadata exceeds bounded verification limit");
   std::vector<char> bytes(static_cast<size_t>(size));
   if (list(bytes.data(), bytes.size()) != size) throw std::runtime_error("File extended attributes changed");
   std::vector<std::string> names;
@@ -37,6 +41,7 @@ static std::string MetadataXattrs(const std::string& path) {
   for (const auto& name : names) {
     auto length = read(name.c_str(), nullptr, 0);
     if (length < 0) throw std::runtime_error("Cannot read file extended attribute");
+    if (static_cast<size_t>(length) > MetadataLimit) throw std::runtime_error("File metadata exceeds bounded verification limit");
     std::string value(static_cast<size_t>(length), '\0');
     if (read(name.c_str(), value.data(), value.size()) != length) throw std::runtime_error("File extended attribute changed");
     MetadataPart(result, name); MetadataPart(result, value);
@@ -90,7 +95,7 @@ static napi_value InspectFileMetadata(napi_env env, napi_callback_info info) {
     if (argc != 1) throw std::runtime_error("Expected exactly one absolute file path");
     const auto path = Text(env, args[0]);
     if (!MoveAbsolutePath(path)) throw std::runtime_error("Expected an absolute file path without trailing separators");
-    std::string data; std::vector<std::string> streams;
+    std::string data; std::vector<std::string> streams, blockers;
 #ifdef _WIN32
     const auto wide = MoveWidePath(path);
     HANDLE file = CreateFileW(wide.c_str(), FILE_READ_EA | FILE_READ_ATTRIBUTES | READ_CONTROL,
@@ -135,12 +140,14 @@ static napi_value InspectFileMetadata(napi_env env, napi_callback_info info) {
     MetadataPart(data, MetadataXattrs(path));
 #ifdef __APPLE__
     MetadataPart(data, std::to_string(stat.st_flags));
+    if (stat.st_flags & (UF_IMMUTABLE | UF_APPEND | SF_IMMUTABLE | SF_APPEND)) blockers.push_back("immutable_or_append");
+    if (stat.st_flags & 0xffff0000u) blockers.push_back("system_file_flags");
     errno = 0; acl_t acl = acl_get_link_np(path.c_str(), ACL_TYPE_EXTENDED);
     if (!acl && errno != ENOENT) throw std::runtime_error("Cannot inspect file access ACL");
     std::string encoded;
     if (acl) {
       auto size = acl_size(acl);
-      if (size < 0) { acl_free(acl); throw std::runtime_error("Cannot size file access ACL"); }
+      if (size < 0 || static_cast<size_t>(size) > MetadataLimit) { acl_free(acl); throw std::runtime_error("Cannot size bounded file access ACL"); }
       encoded.resize(static_cast<size_t>(size));
       auto copied = acl_copy_ext(encoded.data(), acl, encoded.size()); acl_free(acl);
       if (copied < 0) throw std::runtime_error("Cannot serialize file access ACL");
@@ -156,6 +163,7 @@ static napi_value InspectFileMetadata(napi_env env, napi_callback_info info) {
     const uint64_t flags = STATX_ATTR_COMPRESSED | STATX_ATTR_IMMUTABLE | STATX_ATTR_APPEND
       | STATX_ATTR_NODUMP | STATX_ATTR_ENCRYPTED | STATX_ATTR_VERITY;
     MetadataPart(data, std::to_string(extended.stx_attributes & flags));
+    if (extended.stx_attributes & flags) blockers.push_back("linux_file_flags");
 #else
     throw std::runtime_error("Linux filesystem attribute inspection is unavailable");
 #endif
@@ -166,6 +174,9 @@ static napi_value InspectFileMetadata(napi_env env, napi_callback_info info) {
     napi_create_buffer_copy(env, data.size(), data.data(), nullptr, &bytes); napi_set_named_property(env, result, "metadata", bytes);
     napi_create_array_with_length(env, streams.size(), &names);
     for (size_t i = 0; i < streams.size(); i++) { napi_value name; napi_create_string_utf8(env, streams[i].data(), streams[i].size(), &name); napi_set_element(env, names, i, name); }
-    napi_set_named_property(env, result, "streams", names); return result;
+    napi_set_named_property(env, result, "streams", names);
+    napi_value blocked; napi_create_array_with_length(env, blockers.size(), &blocked);
+    for (size_t i = 0; i < blockers.size(); i++) { napi_value name; napi_create_string_utf8(env, blockers[i].data(), blockers[i].size(), &name); napi_set_element(env, blocked, i, name); }
+    napi_set_named_property(env, result, "copy_blockers", blocked); return result;
   } catch (const std::exception& error) { napi_throw_error(env, "CRABOT_FILE_METADATA", error.what()); return nullptr; }
 }

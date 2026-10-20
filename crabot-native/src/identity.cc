@@ -557,9 +557,15 @@ static napi_value ReleaseLock(napi_env env, napi_callback_info info) {
 #include "install-filesystem.h"
 #include "directory-move.h"
 #include "file-metadata.h"
+#include "directory-access.h"
 
 static napi_value Initialize(napi_env env, napi_value exports) {
   napi_property_descriptor methods[] = {
+#ifndef _WIN32
+    {"copyDirectoryTimesFd", nullptr, CopyDirectoryTimesFd, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"enterDirectoryFd", nullptr, EnterDirectoryFd, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"createPrivateStagingDirectory", nullptr, CreatePrivateStagingDirectory, nullptr, nullptr, nullptr, napi_default, nullptr},
+#endif
     {"inspectFileMetadata", nullptr, InspectFileMetadata, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"renameDirectoryNoReplace", nullptr, RenameDirectoryNoReplace, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"inspectInstallFilesystem", nullptr, InstallFilesystemCall, nullptr, nullptr, nullptr, napi_default, nullptr},

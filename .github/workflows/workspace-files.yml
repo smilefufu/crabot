@@ -1,0 +1,45 @@
+name: Workspace filesystem
+
+on:
+  push:
+    branches: ['feat/desktop-*']
+    paths:
+      - 'crabot-native/**'
+      - 'crabot-shared/src/workspace-*'
+      - 'scripts/lib/workspace-*'
+      - 'scripts/lib/process-identity.cjs'
+      - 'scripts/lib/run-bounded.mjs'
+      - 'scripts/lib/__tests__/workspace-*'
+      - 'scripts/workspace-copy-host.mjs'
+      - '.github/workflows/workspace-files.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: workspace-files-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  files:
+    name: Native workspace files ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-14, macos-15-intel, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.3'
+      - run: node scripts/build-native.mjs
+      - run: pnpm --dir crabot-shared install --frozen-lockfile
+      - run: pnpm --dir crabot-shared build
+      - run: node --test scripts/lib/__tests__/workspace-file-metadata.test.mjs scripts/lib/__tests__/workspace-copy.test.mjs scripts/lib/__tests__/directory-move.test.mjs

@@ -1,0 +1,178 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import fs from 'node:fs/promises'
+import path from 'node:path'
+import { tmpdir } from 'node:os'
+import { execFileSync } from 'node:child_process'
+import { inspectWorkspaceCopySource, copyWorkspaceToStaging } from '../workspace-copy.mjs'
+import { runBounded } from '../run-bounded.mjs'
+
+async function fixture(t) {
+  const root = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'crabot-staging-copy-中文 space-')))
+  t.after(() => fs.rm(root, { recursive: true, force: true }))
+  const source = path.join(root, 'source'), container = path.join(root, 'staging')
+  await fs.mkdir(source, { mode: 0o750 }); await fs.mkdir(path.join(source, '.git')); await fs.mkdir(path.join(source, 'empty'))
+  await fs.writeFile(path.join(source, '.git/config'), '[core]\n', { mode: 0o600 })
+  await fs.writeFile(path.join(source, 'file'), Buffer.from([0, 255, 7]), { mode: 0o640 })
+  return { root, source, container }
+}
+
+test('actual OS copy keeps hidden bytes, empty directories and source identity before independent verification', { skip: process.platform === 'win32' }, async t => {
+  const { source, container } = await fixture(t), original = await fs.lstat(source, { bigint: true })
+  const preview = await inspectWorkspaceCopySource(source), copied = await copyWorkspaceToStaging(source, container)
+  assert.equal(copied.files, 2); assert.equal(copied.verified_bytes, 10)
+  assert.equal(copied.metadata_fingerprint, preview.metadata_fingerprint)
+  assert.deepEqual(await fs.readFile(path.join(copied.target, 'file')), Buffer.from([0, 255, 7]))
+  assert.deepEqual(await fs.readdir(path.join(copied.target, 'empty')), [])
+  assert.equal((await fs.lstat(source, { bigint: true })).ino, original.ino)
+  assert.notEqual((await fs.lstat(copied.target, { bigint: true })).ino, original.ino)
+  assert.equal(await fs.readFile(path.join(source, '.git/config'), 'utf8'), '[core]\n')
+})
+
+for (const existing of ['empty directory', 'nonempty directory', 'file']) test('existing staging is never adopted or replaced: ' + existing, async t => {
+  const { source, container } = await fixture(t)
+  if (existing === 'file') await fs.writeFile(container, 'user content')
+  else { await fs.mkdir(container); if (existing === 'nonempty directory') await fs.writeFile(path.join(container, 'keep'), 'user content') }
+  const before = await fs.lstat(container, { bigint: true })
+  await assert.rejects(copyWorkspaceToStaging(source, container))
+  assert.equal((await fs.lstat(container, { bigint: true })).ino, before.ino)
+  if (existing === 'file') assert.equal(await fs.readFile(container, 'utf8'), 'user content')
+  if (existing === 'nonempty directory') assert.equal(await fs.readFile(path.join(container, 'keep'), 'utf8'), 'user content')
+})
+
+test('structural blockers and overlapping targets are rejected before creating staging', async t => {
+  const { root, source, container } = await fixture(t)
+  await fs.writeFile(path.join(source, 'pyvenv.cfg'), 'not safely relocatable')
+  await assert.rejects(copyWorkspaceToStaging(source, container), { code: 'WORKSPACE_COPY_UNVERIFIED' })
+  await assert.rejects(fs.stat(container), { code: 'ENOENT' })
+  await assert.rejects(copyWorkspaceToStaging(source, path.join(source, 'staging')), { code: 'WORKSPACE_COPY_UNVERIFIED' })
+  await assert.rejects(copyWorkspaceToStaging(source, root), { code: 'WORKSPACE_COPY_UNVERIFIED' })
+})
+
+test('POSIX internal hardlinks and relative links retain their topology', { skip: process.platform === 'win32' }, async t => {
+  const { source, container } = await fixture(t)
+  await fs.link(path.join(source, 'file'), path.join(source, 'hard link'))
+  await fs.symlink('file', path.join(source, 'relative'))
+  const result = await copyWorkspaceToStaging(source, container)
+  assert.equal(await fs.readlink(path.join(result.target, 'relative')), 'file')
+  assert.equal((await fs.lstat(path.join(result.target, 'file'), { bigint: true })).ino, (await fs.lstat(path.join(result.target, 'hard link'), { bigint: true })).ino)
+})
+
+test('actual macOS copy retains access ACLs and binary extended attributes', { skip: process.platform !== 'darwin' }, async t => {
+  const { source, container } = await fixture(t), file = path.join(source, 'file')
+  execFileSync('/usr/bin/xattr', ['-wx', 'org.crabot.fixture', '00ff0100', file])
+  execFileSync('/bin/chmod', ['+a', 'everyone deny delete', file])
+  let target
+  try {
+    const result = await copyWorkspaceToStaging(source, container); target = path.join(result.target, 'file')
+    assert.equal(execFileSync('/usr/bin/xattr', ['-px', 'org.crabot.fixture', target], { encoding: 'utf8' }).replace(/\s/g, ''), '00FF0100')
+  } finally {
+    execFileSync('/bin/chmod', ['-N', file])
+    // The failed stage is retained too; drop only this fixture ACL to allow fixture cleanup.
+    try { execFileSync('/bin/chmod', ['-N', target ?? path.join(container, 'tree/file')], { stdio: 'ignore' }) } catch {}
+  }
+})
+
+test('pre-cancelled copy has no filesystem side effects', async t => {
+  const { source, container } = await fixture(t), controller = new AbortController(); controller.abort()
+  await assert.rejects(copyWorkspaceToStaging(source, container, { signal: controller.signal }), { code: 'CRABOT_PREPARATION_CANCELLED' })
+  await assert.rejects(fs.stat(container), { code: 'ENOENT' })
+})
+
+test('bounded runner retains strict exit-code handling and rejects invalid inherited descriptors before spawn', async () => {
+  await runBounded(process.execPath, ['-e', 'process.exit(0)'])
+  for (const code of [1, 8]) await assert.rejects(runBounded(process.execPath, ['-e', 'process.exit(' + code + ')']))
+  for (const fd of [-1, 1.5, NaN, '3']) assert.throws(() => runBounded(process.execPath, ['-e', 'process.exit(0)'], { extraFileDescriptors: [fd] }))
+})
+
+test('macOS staging removes inherited ACL only on the new private container', { skip: process.platform !== 'darwin' }, async t => {
+  const { root, source, container } = await fixture(t)
+  execFileSync('/bin/chmod', ['+a', 'everyone allow list,search,readattr,readextattr,readsecurity,file_inherit,directory_inherit', root])
+  try {
+    const result = await copyWorkspaceToStaging(source, container)
+    assert.equal((await fs.lstat(container)).mode & 0o777, 0o700)
+    assert.doesNotMatch(execFileSync('/bin/ls', ['-lde', container], { encoding: 'utf8' }), /\n\s*\d+:/)
+    assert.match(execFileSync('/bin/ls', ['-lde', root], { encoding: 'utf8' }), /\n\s*\d+:/)
+    assert.equal(await fs.readFile(path.join(result.target, '.git/config'), 'utf8'), '[core]\n')
+  } finally { execFileSync('/bin/chmod', ['-N', root]) }
+})
+
+test('two concurrent copies cannot adopt the same staging container', { skip: process.platform === 'win32' }, async t => {
+  const { source, container } = await fixture(t)
+  const results = await Promise.allSettled([copyWorkspaceToStaging(source, container), copyWorkspaceToStaging(source, container)])
+  assert.equal(results.filter(item => item.status === 'fulfilled').length, 1)
+  assert.equal(results.filter(item => item.status === 'rejected').length, 1)
+  assert.equal(await fs.readFile(path.join(source, '.git/config'), 'utf8'), '[core]\n')
+})
+
+test('Windows internal hardlinks are rejected before staging rather than copied as unrelated files', { skip: process.platform !== 'win32' }, async t => {
+  const { source, container } = await fixture(t)
+  await fs.link(path.join(source, 'file'), path.join(source, 'hard'))
+  await assert.rejects(copyWorkspaceToStaging(source, container), { code: 'WORKSPACE_COPY_LINK_UNSUPPORTED' })
+  await assert.rejects(fs.stat(container), { code: 'ENOENT' })
+})
+
+test('Linux filesystem flags unsupported by archive copy are reported before staging', { skip: process.platform !== 'linux' }, async t => {
+  const { source, container } = await fixture(t), file = path.join(source, 'file')
+  execFileSync('chattr', ['+d', file])
+  try {
+    await assert.rejects(copyWorkspaceToStaging(source, container), { code: 'WORKSPACE_COPY_METADATA_UNSUPPORTED' })
+    await assert.rejects(fs.stat(container), { code: 'ENOENT' })
+  } finally { execFileSync('chattr', ['-d', file]) }
+})
+
+for (const replace of ['source', 'container']) test('pinned POSIX copy never follows a replaced ' + replace + ' root', { skip: process.platform === 'win32' }, async t => {
+  const { root, source, container } = await fixture(t), outside = path.join(root, 'outside'), retained = path.join(root, 'retained-original')
+  await fs.mkdir(outside); await fs.writeFile(path.join(outside, 'canary'), 'must not change')
+  const open = fs.open.bind(fs); let changed = false
+  t.mock.method(fs, 'open', async (...args) => {
+    const handle = await open(...args)
+    if (!changed && args[0] === (replace === 'source' ? source : container)) {
+      changed = true
+      await fs.rename(args[0], retained); await fs.symlink(outside, args[0], 'dir')
+    }
+    return handle
+  })
+  await assert.rejects(copyWorkspaceToStaging(source, container), { code: 'WORKSPACE_COPY_UNVERIFIED' })
+  assert.equal(changed, true)
+  assert.deepEqual(await fs.readdir(outside), ['canary'])
+  assert.equal(await fs.readFile(path.join(outside, 'canary'), 'utf8'), 'must not change')
+  const staged = replace === 'source' ? path.join(container, 'tree') : path.join(retained, 'tree')
+  assert.equal(await fs.readFile(path.join(staged, '.git/config'), 'utf8'), '[core]\n')
+  const original = replace === 'source' ? retained : source
+  assert.equal(await fs.readFile(path.join(original, '.git/config'), 'utf8'), '[core]\n')
+})
+
+
+test('unverified Windows physical copying remains closed before any staging or source change', { skip: process.platform !== 'win32' }, async t => {
+  const { source, container } = await fixture(t)
+  await assert.rejects(copyWorkspaceToStaging(source, container), { code: 'WORKSPACE_COPY_PLATFORM_UNVERIFIED' })
+  await assert.rejects(fs.stat(container), { code: 'ENOENT' })
+  assert.equal(await fs.readFile(path.join(source, '.git/config'), 'utf8'), '[core]\n')
+})
+
+test('oversized macOS resource-fork metadata is rejected before staging without allocating an unbounded snapshot', { skip: process.platform !== 'darwin' }, async t => {
+  const { source, container } = await fixture(t), file = path.join(source, 'file')
+  await fs.writeFile(file + '/..namedfork/rsrc', Buffer.alloc(17 * 1024 * 1024, 7))
+  await assert.rejects(copyWorkspaceToStaging(source, container), { code: 'CRABOT_FILE_METADATA' })
+  await assert.rejects(fs.stat(container), { code: 'ENOENT' })
+  assert.deepEqual(await fs.readFile(file), Buffer.from([0, 255, 7]))
+})
+
+test('POSIX Native directory operations reject malformed descriptors before changing cwd or timestamps', { skip: process.platform === 'win32' }, async t => {
+  const native = (await import('../process-identity.cjs')).default, cwd = process.cwd()
+  for (const fd of [-1, 0.5, NaN, Infinity, '3']) {
+    assert.throws(() => native.enterDirectoryFd(fd, '0', '0'), { code: 'CRABOT_DIRECTORY_FD' })
+    assert.throws(() => native.copyDirectoryTimesFd(fd, fd), { code: 'CRABOT_DIRECTORY_TIMES' })
+  }
+  assert.equal(process.cwd(), cwd)
+})
+
+test('POSIX copy ignores unrelated tool options inherited from the user environment', { skip: process.platform === 'win32' }, async t => {
+  const { source, container } = await fixture(t), old = process.env.TAR_OPTIONS
+  process.env.TAR_OPTIONS = '--crabot-not-an-option'
+  try {
+    const result = await copyWorkspaceToStaging(source, container)
+    assert.equal(await fs.readFile(path.join(result.target, '.git/config'), 'utf8'), '[core]\n')
+  } finally { if (old === undefined) delete process.env.TAR_OPTIONS; else process.env.TAR_OPTIONS = old }
+})

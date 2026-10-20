@@ -15,6 +15,7 @@ export async function inspectWorkspaceFileMetadata(file, { signal } = {}) {
   const before = await fs.lstat(file, { bigint: true }), first = native.inspectFileMetadata(file)
   const valid = value => value && Buffer.isBuffer(value.metadata) && Array.isArray(value.streams)
     && value.streams.every(name => typeof name === 'string' && /^:[^/\\:\0]+$/u.test(name))
+    && Array.isArray(value.copy_blockers) && value.copy_blockers.every(item => ['immutable_or_append', 'system_file_flags', 'linux_file_flags'].includes(item))
     && new Set(value.streams).size === value.streams.length
     && (process.platform === 'win32' || value.streams.length === 0)
   if (!valid(first)) throw unverified()
@@ -35,8 +36,8 @@ export async function inspectWorkspaceFileMetadata(file, { signal } = {}) {
   check()
   const last = native.inspectFileMetadata(file), after = await fs.lstat(file, { bigint: true })
   if (!valid(last) || !same(before, after) || !first.metadata.equals(last.metadata)
-    || JSON.stringify(first.streams) !== JSON.stringify(last.streams)) throw unverified()
-  return { fingerprint: hash.digest('hex'), named_streams: first.streams.length }
+    || JSON.stringify(first.streams) !== JSON.stringify(last.streams) || JSON.stringify(first.copy_blockers) !== JSON.stringify(last.copy_blockers)) throw unverified()
+  return { fingerprint: hash.digest('hex'), named_streams: first.streams.length, copy_blockers: first.copy_blockers }
 }
 
 /** Content plus owner, access ACL, attributes and named-stream checks; it does not create files or permit closing Workers, selecting a root or deleting a source. */

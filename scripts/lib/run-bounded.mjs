@@ -1,9 +1,11 @@
 import { spawn } from 'node:child_process'
 
 // detached 创建专属进程组；只能终止本次准备命令拥有的进程。
-export function runBounded(command, args, { cwd, env = process.env, timeout = 20 * 60_000, signal, shell = false, captureError = false } = {}) {
+export function runBounded(command, args, { cwd, env = process.env, timeout = 20 * 60_000, signal, shell = false, captureError = false, extraFileDescriptors = [] } = {}) {
+  const descriptors = [...extraFileDescriptors]
+  if (descriptors.some(fd => !Number.isInteger(fd) || fd < 0)) throw new Error('Invalid inherited file descriptors')
   return new Promise((done, fail) => {
-    const child = spawn(command, args, { cwd, env, shell, windowsHide: true, stdio: captureError ? ['inherit', 'inherit', 'pipe'] : 'inherit', detached: process.platform !== 'win32' })
+    const child = spawn(command, args, { cwd, env, shell, windowsHide: true, stdio: descriptors.length || captureError ? ['inherit', 'inherit', captureError ? 'pipe' : 'inherit', ...descriptors] : 'inherit', detached: process.platform !== 'win32' })
     let stderr = ''
     if (captureError) child.stderr.on('data', data => { process.stderr.write(data); stderr = (stderr + data).slice(-65536) })
     let reason
