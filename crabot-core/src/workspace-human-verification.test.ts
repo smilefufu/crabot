@@ -12,7 +12,7 @@ import { sha256CanonicalJson } from 'crabot-shared'
 import ModuleManager from './index.js'
 import { relocationAgentConfig } from '../../crabot-agent/tests/core/fixtures/relocation-agent-config.js'
 
-async function fixture(options: { wrongRuntime?: boolean; result?: string; withAgent?: boolean; agentResult?: string; actualAgent?: boolean; processLifetimeMs?: number } = {}) {
+async function fixture(options: { wrongRuntime?: boolean; result?: string; withAgent?: boolean; agentResult?: string; actualAgent?: boolean; processLifetimeMs?: number; backgroundShell?: boolean } = {}) {
   const root = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'crabot-current-admin-')))
   const native = require('../../scripts/lib/process-identity.cjs'), management = require('../../scripts/lib/desktop-management.cjs')
   const data = management.ensurePrivateDataRoot(path.join(root, 'data')), script = path.join(data, 'finite-admin.cjs'), callsFile = path.join(data, 'calls.json')
@@ -68,6 +68,10 @@ async function fixture(options: { wrongRuntime?: boolean; result?: string; withA
       if (options.actualAgent) {
         const entry = path.resolve('../crabot-agent/dist/unified-agent.js')
         await fs.access(entry)
+        if (options.backgroundShell) {
+          await fs.mkdir(path.join(data, 'project'))
+          await fs.writeFile(path.join(data, 'finite-background.cjs'), `const fs=require('node:fs'),file=${JSON.stringify(path.join(data, 'project/background.txt'))};fs.writeFileSync(file,'active\\n');setInterval(()=>fs.appendFileSync(file,'x'),50);setTimeout(()=>process.exit(0),120000);`)
+        }
         await fs.writeFile(agentScript, `const fs=require('node:fs'),http=require('node:http'),{UnifiedAgent}=require(${JSON.stringify(entry)}),calls=[];
           const config=${JSON.stringify(relocationAgentConfig)};config.port=Number(process.env.Crabot_PORT);const agent=new UnifiedAgent(config);
           agent.managerStack.harness.deps.isWorkspaceRelocationReady=()=>true;
@@ -89,13 +93,20 @@ async function fixture(options: { wrongRuntime?: boolean; result?: string; withA
           }
           void agent.handleRequest(req,res);
           });
-          (async()=>{const at='2026-10-20T00:00:00.000Z';await agent.managerStack.ledger.upsertWorker('channel::session','worker',()=>({worker_id:'worker',manager_key:'channel::session',task:{id:'task',title:'private task',status:'running',created_at:at},origin:{trigger_type:'message',creator_friend_id:'unchanged'},report_to:{channel_id:'channel',session_id:'session'},incarnations:[{incarnation_id:'inc',impl:'builtin',seq:1,state:'running',workspace:process.env.FIXTURE_WORKSPACE,session_ref:'fixture',started_at:at}],updated_at:at}));
+          (async()=>{
+            if(process.env.FIXTURE_BG_COMMAND){
+              const{spawnPersistentShell}=require(${JSON.stringify(path.resolve('../crabot-agent/dist/engine/bg-entities/bg-shell.js'))});
+              const id=await spawnPersistentShell({command:process.env.FIXTURE_BG_COMMAND,cwd:process.env.FIXTURE_WORKSPACE,owner:{friend_id:'unchanged',worker_id:'worker',incarnation_id:'inc'},spawned_by_task_id:'task',registry:agent.builtinBgRegistry});
+              const record=await agent.builtinBgRegistry.get(id);fs.writeFileSync(process.env.FIXTURE_BG_READY,JSON.stringify({entity_id:id,pid:record.pid}));
+            }
+            const at='2026-10-20T00:00:00.000Z';await agent.managerStack.ledger.upsertWorker('channel::session','worker',()=>({worker_id:'worker',manager_key:'channel::session',task:{id:'task',title:'private task',status:'running',created_at:at},origin:{trigger_type:'message',creator_friend_id:'unchanged'},report_to:{channel_id:'channel',session_id:'session'},incarnations:[{incarnation_id:'inc',impl:'builtin',seq:1,state:${JSON.stringify(options.backgroundShell ? 'idle' : 'running')},workspace:process.env.FIXTURE_WORKSPACE,session_ref:'fixture',started_at:at}],updated_at:at}));
             server.listen(Number(process.env.Crabot_PORT),'127.0.0.1',()=>fs.writeFileSync(process.env.FIXTURE_READY,'ready'))})().catch(error=>{console.error(error);process.exit(1)});
           setTimeout(()=>process.exit(0),${options.processLifetimeMs ?? 30000}).unref();`)
       }
       const agent = { module_id: 'crabot-agent', module_type: 'agent', entry: `"${process.execPath}" "${agentScript}"`,
         env: { FIXTURE_CALLS: path.join(data, 'agent-calls.json'), FIXTURE_READY: agentReady, FIXTURE_RESULT: options.agentResult ?? '',
-          DATA_DIR: data, CRABOT_AGENT_DATA_DIR: path.join(data, 'agent'), WORKER_WORKSPACES_DIR: path.join(data, 'workspaces'), FIXTURE_WORKSPACE: path.join(data, 'project'), FIXTURE_STOPS: path.join(data, 'stops.txt') },
+          DATA_DIR: data, CRABOT_AGENT_DATA_DIR: path.join(data, 'agent'), WORKER_WORKSPACES_DIR: path.join(data, 'workspaces'), FIXTURE_WORKSPACE: path.join(data, 'project'), FIXTURE_STOPS: path.join(data, 'stops.txt'),
+          ...(options.backgroundShell ? { FIXTURE_BG_COMMAND: `"${process.execPath.replaceAll('\\', '/')}" "${path.join(data, 'finite-background.cjs').replaceAll('\\', '/')}"`, FIXTURE_BG_READY: path.join(data, 'background-ready.json') } : {}) },
         port: (agentPort.address() as { port: number }).port, auto_start: false, auto_restart: false, skip_health_check: true, start_priority: 1, status: 'stopped' }
       await new Promise<void>(resolve => agentPort.close(() => resolve()))
       manager.modules.set('crabot-agent', agent); await manager.startModuleProcess('crabot-agent')
@@ -890,7 +901,7 @@ describe('MM launches the actual fixed coordinator under the original human inte
   // Match MM's production loader so the parent owns the same in-memory lock handle.
   const timeout = process.platform === 'win32' ? 90000 : 30000
   it('joins actual fixed-host scope journals and planned module exit while Admin remains online', async () => {
-    const f = await fixture({ actualAgent: true, processLifetimeMs: 120000 }), locks = require('../../scripts/lib/cli-lock.mjs')
+    const f = await fixture({ actualAgent: true, processLifetimeMs: 120000, backgroundShell: true }), locks = require('../../scripts/lib/cli-lock.mjs')
     const records = await import('../../scripts/lib/workspace-relocation-intent.mjs'), { createWorkspaceModuleJournal } = await import('../../scripts/lib/workspace-module-journal.mjs')
     const lock = await locks.acquireWorkspaceRelocationLock(f.data, f.params.intent_id)
     let child: ReturnType<typeof spawn> | undefined, journal: any
@@ -901,7 +912,10 @@ describe('MM launches the actual fixed coordinator under the original human inte
       expect(locks.cliLockToken(lock)).toBeUndefined(); expect(f.manager.workspaceCoordinatorGrant).toBeUndefined()
       const workers = await f.manager.captureWorkspaceRelocationWorkersForCoordinator(child, f.params, 'fixture-human')
       expect(workers.map((item: any) => item.worker_id)).toEqual(['worker'])
-      expect(await f.manager.captureWorkspaceRelocationProcessesForCoordinator(child)).toEqual([])
+      const background = JSON.parse(await fs.readFile(path.join(f.data, 'background-ready.json'), 'utf8'))
+      const processes = await f.manager.captureWorkspaceRelocationProcessesForCoordinator(child)
+      expect(processes).toEqual(expect.arrayContaining([expect.objectContaining({ pid: background.pid })]))
+      expect(require('../../scripts/lib/known-process-exit.cjs').probeKnownProcessExit(processes).state).toBe('running')
       const modules = await f.manager.captureWorkspaceRelocationModulesForCoordinator(child)
       const submission = await f.manager.stopWorkspaceRelocationWorkersForCoordinator(child)
       expect(submission).toEqual({ dispatch: 'dispatch', results: [{ worker_id: 'worker', incarnation_id: 'inc', status: 'submitted' }] })
@@ -914,6 +928,8 @@ describe('MM launches the actual fixed coordinator under the original human inte
       expect(f.manager.workspaceCoordinatorGrant).toBeUndefined()
       expect(f.manager.processes.get('admin-web')).toBe(admin)
       expect(require('../../scripts/lib/known-process-exit.cjs').probeKnownProcessExit(modules[0].processes).state).toBe('stopped')
+      expect(require('../../scripts/lib/known-process-exit.cjs').probeKnownProcessExit(processes).state).toBe('stopped')
+      expect(await fs.readFile(path.join(f.data, 'project/background.txt'), 'utf8')).toMatch(/^active\n[x]*$/)
       const calls = await f.calls()
       expect(calls.filter(item => item.method === '/verify_workspace_relocation_request')).toHaveLength(2)
       expect(JSON.stringify(calls.map(item => item.body))).not.toContain('fixture-human')

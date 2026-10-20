@@ -1045,7 +1045,10 @@ export class UnifiedAgent extends ModuleBase {
     let processes
     try {
       await this.quiesceExecutionAdmissions()
-      processes = await this.requireManagerStack().harness.captureWorkspaceRelocationProcesses(initial.scope.workers, initial.legacy?.value)
+      const workers = await this.requireManagerStack().harness.captureWorkspaceRelocationProcesses(initial.scope.workers, initial.legacy?.value)
+      const background = await this.builtinBgRegistry.captureWorkspaceShellProcesses()
+      const { captureOwnedProcessTree } = require(path.join(__dirname, '../../scripts/lib/owned-process-tree.cjs'))
+      processes = captureOwnedProcessTree([...workers, ...background])
     } catch { throw new RpcError('WORKSPACE_MAINTENANCE', '执行进程范围或启动对账无法核实，已保留维护保护。') }
     if (sha256CanonicalJson(readFixed()) !== sha256CanonicalJson(initial)) throw new RpcError('SERVICE_UNAVAILABLE', '原固定执行器范围已变化。')
     const current = await verify()

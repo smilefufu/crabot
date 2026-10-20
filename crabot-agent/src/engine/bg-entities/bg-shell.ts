@@ -298,6 +298,7 @@ async function startPersistentShell(opts: SpawnPersistentShellOpts): Promise<str
   }
 
   await opts.registry.register(record)
+  opts.registry.trackShellProcess(record, child)
 
   // Unblock the exit/error handlers — they will now apply any pending update.
   resolveRegistered()
@@ -603,6 +604,7 @@ async function startShellWithGrace(opts: RunShellWithGraceOpts): Promise<RunShel
     last_activity_at: now,
   }
   await opts.registry.register(record)
+  opts.registry.trackShellProcess(record, child)
   resolveRegistered()
   return { kind: 'background', entity_id }
 }

@@ -8,6 +8,8 @@
 
 import fs from 'node:fs/promises'
 import path from 'node:path'
+import { sha256CanonicalJson, type WorkerProcessIdentity } from 'crabot-shared'
+import { captureHeadlessNativeProcesses } from '../../workers/headless-native-processes.js'
 import { ExecutionAdmissions } from '../../core/execution-admissions.js'
 import { getBgEntitiesRegistryPath } from '../../core/data-paths'
 import {
@@ -73,9 +75,18 @@ function isWorkerOwnedBuiltinAgent(record: BgEntityRecord): boolean {
 // Registry
 // ---------------------------------------------------------------------------
 
+interface ShellProcessBinding {
+  readonly fingerprint: string
+  readonly pid: number
+  child?: Parameters<typeof captureHeadlessNativeProcesses>[0]
+  exited: boolean
+  removed: boolean
+}
+
 export class BgEntityRegistry {
   private readonly mutex = new AsyncMutex()
   private readonly executionAdmissions = new ExecutionAdmissions()
+  private readonly shellProcesses = new Map<string, ShellProcessBinding>()
 
   constructor(private readonly registryPath: string = getBgEntitiesRegistryPath()) {}
 
@@ -90,6 +101,72 @@ export class BgEntityRegistry {
 
   quiesceExecutionAdmissions(): Promise<void> {
     return this.executionAdmissions.closeAndDrain()
+  }
+
+  /** Current real child only; stable registration is bound before startup admission settles. */
+  trackShellProcess(record: BgShellRegistryRecord, child: Parameters<typeof captureHeadlessNativeProcesses>[0]): void {
+    if (child.pid !== record.pid || this.shellProcesses.has(record.entity_id)) {
+      throw Object.assign(new Error('后台Shell载体不能更换。'), { code: 'WORKSPACE_MAINTENANCE' })
+    }
+    const binding: ShellProcessBinding = { fingerprint: this.shellFingerprint(record), pid: record.pid, child, exited: false, removed: false }
+    this.shellProcesses.set(record.entity_id, binding)
+    const settle = () => {
+      try {
+        if (!('carrier_exited' in captureHeadlessNativeProcesses(child, true))) return
+        binding.exited = true
+        binding.child = undefined // Release exit listeners and their Worker closures, retaining only the observed fact.
+        if (binding.removed && this.shellProcesses.get(record.entity_id) === binding) this.shellProcesses.delete(record.entity_id)
+      } catch { /* Keep an unverifiable carrier; never promote it to an exit fact. */ }
+    }
+    if (child.exitCode !== null || child.signalCode !== null) settle()
+    else child.once('exit', settle)
+  }
+
+  private shellFingerprint(record: BgShellRegistryRecord): string {
+    const { status, exit_code, ended_at, last_activity_at, exit_notification, ...stable } = record
+    return sha256CanonicalJson(stable)
+  }
+
+  /** Observed roots only; descendants, module exit and the whole closing window remain separate. */
+  async captureWorkspaceShellProcesses(): Promise<ReadonlyArray<WorkerProcessIdentity>> {
+    const failure = () => Object.assign(new Error('后台Shell原生范围无法核实，已保留维护保护。'), { code: 'WORKSPACE_MAINTENANCE' })
+    try {
+      await this.quiesceExecutionAdmissions()
+      const read = async () => {
+        const file = await this.readFile()
+        if (!file || !file.entities || typeof file.entities !== 'object' || Array.isArray(file.entities)) throw failure()
+        const entries = Object.entries(file.entities), records = entries.map(([, record]) => record)
+        if (entries.length > 32768 || entries.some(([id, record]) => !record || !id || record.entity_id !== id
+          || record.type !== 'shell' && record.type !== 'agent')) throw failure()
+        return records.filter((record): record is BgShellRegistryRecord => record.type === 'shell').sort((a, b) => a.entity_id < b.entity_id ? -1 : a.entity_id > b.entity_id ? 1 : 0)
+      }
+      const records = await read(), fingerprint = (items: BgShellRegistryRecord[]) => sha256CanonicalJson(items.map(record => this.shellFingerprint(record)))
+      const original = fingerprint(records), bindings = new Map(this.shellProcesses), processes: WorkerProcessIdentity[] = []
+      for (const record of records) {
+        if (!Number.isInteger(record.pid) || record.pid < 1 || record.pid > 2147483647) throw failure()
+        const current = bindings.get(record.entity_id)
+        if (current) {
+          if (current.fingerprint !== this.shellFingerprint(record) || current.pid !== record.pid) throw failure()
+          if (!current.exited) {
+            if (!current.child || current.child.pid !== record.pid) throw failure()
+            const observed = captureHeadlessNativeProcesses(current.child, true)
+            if (!('carrier_exited' in observed)) processes.push(...observed)
+          }
+        } else {
+          const native = require(path.join(__dirname, '../../../../scripts/lib/process-identity.cjs'))
+          if (native.isProcessExited(record.pid) !== true) throw failure()
+        }
+      }
+      const registered = new Set(records.map(record => record.entity_id))
+      for (const [id, binding] of bindings) {
+        if (!registered.has(id) && !binding.exited
+          && (!binding.child || !('carrier_exited' in captureHeadlessNativeProcesses(binding.child, true)))) throw failure()
+      }
+      if (fingerprint(await read()) !== original || this.shellProcesses.size !== bindings.size
+        || [...bindings].some(([id, binding]) => this.shellProcesses.get(id) !== binding)) throw failure()
+      const { captureOwnedProcessTree } = require(path.join(__dirname, '../../../../scripts/lib/owned-process-tree.cjs'))
+      return captureOwnedProcessTree(processes)
+    } catch { throw failure() }
   }
 
   async register(record: BgEntityRecord): Promise<void> {
@@ -344,6 +421,12 @@ export class BgEntityRegistry {
       // 跳过无操作时的写盘——既减少 IO，也避免在没有 registry.json 的干净环境触发 ENOENT 噪声
       if (removed.length > 0) {
         await this.writeAtomic({ entities: entries })
+        for (const id of removed) {
+          const binding = this.shellProcesses.get(id)
+          if (!binding) continue
+          binding.removed = true
+          if (binding.exited) this.shellProcesses.delete(id)
+        }
       }
     })
     return removed

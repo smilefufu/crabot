@@ -12,12 +12,19 @@ import { captureWorkspaceRelocationWorkers } from '../../src/workers/harness/wor
 import type { LedgerWorker } from '../../src/workers/harness/ledger-types.js'
 import { relocationMmFixture } from './fixtures/relocation-mm.js'
 import { relocationAgentConfig } from './fixtures/relocation-agent-config.js'
+import { spawnPersistentShell, killShellTree } from '../../src/engine/bg-entities/bg-shell.js'
+import type { BgShellRegistryRecord } from '../../src/engine/bg-entities/types.js'
 
-async function fixture(mode = 'normal', impl: 'builtin' | 'claude-code' = 'builtin') {
-  const mm = await relocationMmFixture(mode, true)
+async function fixture(mode = 'normal', impl: 'builtin' | 'claude-code' = 'builtin', beforeIntent?: (agent: any, data: string) => Promise<void>) {
+  let preparedAgent: any
+  const mm = await relocationMmFixture(mode, true, beforeIntent ? async (data, port) => {
+    vi.stubEnv('DATA_DIR', data); vi.stubEnv('CRABOT_AGENT_DATA_DIR', path.join(data, 'agent')); vi.stubEnv('CRABOT_MM_PORT', String(port))
+    preparedAgent = new UnifiedAgent(relocationAgentConfig) as any
+    await beforeIntent(preparedAgent, data)
+  } : undefined)
   vi.stubEnv('DATA_DIR', mm.data); vi.stubEnv('CRABOT_AGENT_DATA_DIR', path.join(mm.data, 'agent'))
   vi.stubEnv('CRABOT_MM_PORT', String(mm.options.moduleManagerPort))
-  const agent = new UnifiedAgent(relocationAgentConfig) as any, harness = agent.managerStack.harness
+  const agent = preparedAgent ?? new UnifiedAgent(relocationAgentConfig) as any, harness = agent.managerStack.harness
   harness.deps.isWorkspaceRelocationReady = () => true
   const stop = vi.spyOn(harness.deps.adapters.get('builtin'), 'stop').mockResolvedValue(undefined)
   const server = http.createServer((req, res) => { void agent.handleRequest(req, res) })
@@ -98,6 +105,27 @@ describe('Agent fixed native process capture RPC', () => {
     } finally {
       adapter.runtimes.delete('worker#1'); if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
       await ended; await f.cleanup()
+    }
+  }, 30000)
+  it('includes the real registered builtin background Shell through authenticated HTTP without changing its owner or stopping it', async () => {
+    let exited!: () => void
+    const ended = new Promise<void>(resolve => { exited = resolve })
+    let record!: BgShellRegistryRecord
+    const f = await fixture('normal', 'builtin', async (agent, data) => {
+      const id = await spawnPersistentShell({ command: `"${process.execPath}" -e 'setTimeout(()=>{},30000)'`, cwd: data,
+        owner: { friend_id: 'unchanged', worker_id: 'worker', incarnation_id: 'inc' }, spawned_by_task_id: 'task', registry: agent.builtinBgRegistry, onExit: exited })
+      record = await agent.builtinBgRegistry.get(id) as BgShellRegistryRecord
+    }), registry = f.agent.builtinBgRegistry
+    try {
+      const before = await registry.get(record.entity_id), result = await f.call()
+      expect(result.success).toBe(true)
+      expect(result.data.processes).toEqual(expect.arrayContaining([expect.objectContaining({ pid: record.pid })]))
+      expect(await registry.get(record.entity_id)).toEqual(before); expect(f.stop).not.toHaveBeenCalled()
+      expect(await f.agent.managerStack.ledger.listAllWorkers()).toEqual(f.before)
+      expect(f.records.readWorkspaceRelocationProcesses(f.data, f.params.intent_id)).toBeNull()
+    } finally {
+      if (record) { killShellTree(record.pgid); await ended }
+      await f.cleanup()
     }
   }, 30000)
   it('keeps an unknown cold CLI carrier unknown without rebuilding or writing it', async () => {

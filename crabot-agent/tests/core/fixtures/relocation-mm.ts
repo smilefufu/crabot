@@ -8,7 +8,7 @@ import { randomUUID } from 'node:crypto'
 import { WorkspaceCatalog } from 'crabot-shared/dist/workspace-catalog.js'
 import { sha256CanonicalJson } from 'crabot-shared'
 
-export async function relocationMmFixture(mode = 'normal', withJournal = false) {
+export async function relocationMmFixture(mode = 'normal', withJournal = false, beforeIntent?: (data: string, port: number) => Promise<void>) {
   const root = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'crabot-agent-relocation-auth-')))
   const native = require('../../../../scripts/lib/process-identity.cjs'), management = require('../../../../scripts/lib/desktop-management.cjs')
   const records = await import('../../../../scripts/lib/workspace-relocation-intent.mjs'), locks = await import('../../../../scripts/lib/cli-lock.mjs')
@@ -66,6 +66,7 @@ export async function relocationMmFixture(mode = 'normal', withJournal = false) 
     await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
     const port = (server.address() as { port: number }).port
     const catalog = new WorkspaceCatalog({ dataRoot: data, files: native }); await catalog.initialize()
+    await beforeIntent?.(data, port)
     lock = await locks.acquireCliLock(data, 'workspace-relocation')
     intent = await records.beginWorkspaceRelocationIntent({ dataDir: data, id, target: path.join(root, 'relocated'), expectedRevision: (await catalog.snapshot()).revision, protectedRoots: [] })
     const journalEntry = new URL('../../../../scripts/lib/workspace-worker-journal.mjs', import.meta.url).href
