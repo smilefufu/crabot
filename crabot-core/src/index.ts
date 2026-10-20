@@ -25,6 +25,12 @@ import {
   type SubscribeParams,
   type PublishEventParams,
   type WorkspaceRelocationWorker,
+  type WorkspaceRelocationStopResult,
+  type WorkspaceRelocationStopDispatch,
+  type PrepareWorkspaceRelocationWorkerStopsParams,
+  type PrepareWorkspaceRelocationWorkerStopsResult,
+  type CompleteWorkspaceRelocationWorkerStopsParams,
+  type CompleteWorkspaceRelocationWorkerStopsResult,
   type VerifyWorkspaceRelocationRequestParams,
   type VerifyWorkspaceRelocationRequestResult,
   type VerifyWorkspaceRelocationCoordinatorParams,
@@ -130,8 +136,15 @@ interface ManagedChildState {
   logEnded: boolean
 }
 
+interface WorkspaceWorkerStopJournal {
+  prepare(workers: ReadonlyArray<WorkspaceRelocationWorker>): Promise<WorkspaceRelocationStopDispatch>
+  complete(results: ReadonlyArray<WorkspaceRelocationStopResult>): Promise<void>
+  close(): void
+}
+
 interface WorkspaceCoordinatorGrant {
   capture?: Promise<ReadonlyArray<WorkspaceRelocationWorker>>
+  revoked?: boolean
   token: string
   revoke?: () => void
   proof: Omit<VerifyWorkspaceRelocationCoordinatorResult, 'verified' | 'action'>
@@ -202,6 +215,8 @@ export class ModuleManager {
     this.registerMethod('register', this.handleRegisterUnauthenticated.bind(this))
     this.registerMethod('register_core_agent', this.handleRegisterCoreAgent.bind(this))
     this.registerMethod('verify_workspace_relocation_coordinator', this.handleVerifyWorkspaceRelocationCoordinator.bind(this))
+    this.registerMethod('prepare_workspace_relocation_worker_stops', this.handlePrepareWorkspaceRelocationWorkerStops.bind(this))
+    this.registerMethod('complete_workspace_relocation_worker_stops', this.handleCompleteWorkspaceRelocationWorkerStops.bind(this))
     this.registerMethod('verify_core_agent_runtime', this.handleVerifyCoreAgentRuntime.bind(this))
     this.registerMethod('verify_voice_runtime', this.handleVerifyVoiceRuntime.bind(this))
     this.registerMethod('register_voice_runtime', this.handleRegisterVoiceRuntime.bind(this))
@@ -1244,7 +1259,7 @@ export class ModuleManager {
     }
     const agent = grant.agent
     if (this.isShuttingDown) throw unavailable()
-    if (!grant.child.connected || grant.child.exitCode !== null || grant.child.signalCode !== null || grant.child.pid !== grant.identity.pid
+    if (grant.revoked || !grant.child.connected || grant.child.exitCode !== null || grant.child.signalCode !== null || grant.child.pid !== grant.identity.pid
       || this.modules.get('crabot-agent') !== agent.runtime || agent.runtime.module_id !== 'crabot-agent' || agent.runtime.module_type !== 'agent'
       || this.processes.get('crabot-agent') !== agent.child || this.childStates.get(agent.child) !== agent.state
       || agent.runtime.port !== agent.port || agent.runtime.pid !== agent.identity.pid || agent.child.pid !== agent.identity.pid
@@ -1297,6 +1312,7 @@ export class ModuleManager {
     }
     this.workspaceCoordinatorGrant = grant
     const revoke = () => {
+      grant.revoked = true
       if (this.workspaceCoordinatorGrant === grant) this.workspaceCoordinatorGrant = undefined
       child.off('exit', revoke); child.off('error', revoke); child.off('disconnect', revoke)
       agentChild.off('exit', revoke); agentChild.off('error', revoke)
@@ -1353,14 +1369,65 @@ export class ModuleManager {
     return grant.capture
   }
 
-  private handleVerifyWorkspaceRelocationCoordinator(
-    params: VerifyWorkspaceRelocationCoordinatorParams, context?: RpcHandlerContext,
-  ): VerifyWorkspaceRelocationCoordinatorResult {
-    const bearer = context?.authorizationBearer, grant = this.workspaceCoordinatorGrant
+  private requireWorkspaceCoordinatorGrant(bearer?: string): WorkspaceCoordinatorGrant {
+    const grant = this.workspaceCoordinatorGrant
     if (!bearer) throw Object.assign(new Error('Coordinator credential required'), { code: 'UNAUTHORIZED' })
     if (!grant) throw Object.assign(new Error('Coordinator credential revoked'), { code: 'FORBIDDEN' })
     const supplied = Buffer.from(bearer), expected = Buffer.from(grant.token)
     if (supplied.length !== expected.length || !crypto.timingSafeEqual(supplied, expected)) throw Object.assign(new Error('Invalid coordinator credential'), { code: 'FORBIDDEN' })
+    return grant
+  }
+
+  private openWorkspaceRelocationWorkerJournal(grant: WorkspaceCoordinatorGrant): { workers: ReadonlyArray<WorkspaceRelocationWorker>; journal: WorkspaceWorkerStopJournal } {
+    this.assertWorkspaceCoordinatorGrantCurrent(grant)
+    const records = require('../../scripts/lib/workspace-relocation-intent.mjs')
+    const scope = records.readWorkspaceRelocationWorkers(this.dataDir, grant.proof.intent_id)
+    if (!scope) throw new Error('Fixed Worker scope required')
+    const { launch } = records.readWorkspaceRelocationCoordinator(this.dataDir, grant.proof.intent_id)
+    const { createWorkspaceWorkerJournal } = require('../../scripts/lib/workspace-worker-journal.mjs')
+    return { workers: scope.workers, journal: createWorkspaceWorkerJournal(grant.child, { dataDir: this.dataDir, id: grant.proof.intent_id, launch }) }
+  }
+
+  private async handlePrepareWorkspaceRelocationWorkerStops(params: PrepareWorkspaceRelocationWorkerStopsParams, context?: RpcHandlerContext): Promise<PrepareWorkspaceRelocationWorkerStopsResult> {
+    const grant = this.requireWorkspaceCoordinatorGrant(context?.authorizationBearer)
+    if (!params || typeof params !== 'object' || Array.isArray(params) || Object.keys(params).length !== 2
+      || !Object.keys(params).every(key => key === 'intent_id' || key === 'launch_id')) {
+      throw Object.assign(new Error('Invalid Worker stop preparation params'), { code: 'INVALID_PARAMS' })
+    }
+    this.handleVerifyWorkspaceRelocationCoordinator({ ...params, action: 'stop_workers' }, context)
+    let channel: WorkspaceWorkerStopJournal | undefined
+    try {
+      const { journal, workers } = this.openWorkspaceRelocationWorkerJournal(grant)
+      channel = journal
+      const dispatch = await journal.prepare(workers)
+      this.assertWorkspaceCoordinatorGrantCurrent(grant)
+      return { dispatch }
+    } catch { throw Object.assign(new Error('停止尝试未能确认，已保留维护保护。'), { code: 'SERVICE_UNAVAILABLE' }) }
+    finally { channel?.close() }
+  }
+
+  private async handleCompleteWorkspaceRelocationWorkerStops(params: CompleteWorkspaceRelocationWorkerStopsParams, context?: RpcHandlerContext): Promise<CompleteWorkspaceRelocationWorkerStopsResult> {
+    const grant = this.requireWorkspaceCoordinatorGrant(context?.authorizationBearer)
+    if (!params || typeof params !== 'object' || Array.isArray(params) || Object.keys(params).length !== 3
+      || !Object.keys(params).every(key => key === 'intent_id' || key === 'launch_id' || key === 'results') || !Array.isArray(params.results)) {
+      throw Object.assign(new Error('Invalid Worker stop completion params'), { code: 'INVALID_PARAMS' })
+    }
+    this.handleVerifyWorkspaceRelocationCoordinator({ intent_id: params.intent_id, launch_id: params.launch_id, action: 'stop_workers' }, context)
+    let channel: WorkspaceWorkerStopJournal | undefined
+    try {
+      const { journal } = this.openWorkspaceRelocationWorkerJournal(grant)
+      channel = journal
+      await journal.complete(params.results)
+      this.assertWorkspaceCoordinatorGrantCurrent(grant)
+      return { recorded: true }
+    } catch { throw Object.assign(new Error('停止提交回执未能确认，已保留维护保护。'), { code: 'SERVICE_UNAVAILABLE' }) }
+    finally { channel?.close() }
+  }
+
+  private handleVerifyWorkspaceRelocationCoordinator(
+    params: VerifyWorkspaceRelocationCoordinatorParams, context?: RpcHandlerContext,
+  ): VerifyWorkspaceRelocationCoordinatorResult {
+    const grant = this.requireWorkspaceCoordinatorGrant(context?.authorizationBearer)
     const uuid = (value: unknown) => typeof value === 'string' && /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(value)
     if (!params || typeof params !== 'object' || Array.isArray(params) || Object.keys(params).length !== 3
       || !Object.keys(params).every(key => key === 'intent_id' || key === 'launch_id' || key === 'action')

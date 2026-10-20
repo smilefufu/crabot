@@ -112,3 +112,26 @@ export interface CaptureWorkspaceRelocationWorkersParams {
 export interface CaptureWorkspaceRelocationWorkersResult {
   workers: ReadonlyArray<WorkspaceRelocationWorker>
 }
+
+export type WorkspaceRelocationStopDispatch = 'dispatch' | 'observe'
+export type WorkspaceRelocationStopStatus = 'submitted' | 'unknown' | 'unavailable'
+export interface WorkspaceRelocationStopResult {
+  readonly worker_id: string
+  readonly incarnation_id: string
+  readonly status: WorkspaceRelocationStopStatus
+}
+export interface PrepareWorkspaceRelocationWorkerStopsParams {
+  intent_id: string
+  launch_id: string
+}
+export interface PrepareWorkspaceRelocationWorkerStopsResult {
+  dispatch: WorkspaceRelocationStopDispatch
+}
+export interface CompleteWorkspaceRelocationWorkerStopsParams {
+  intent_id: string
+  launch_id: string
+  results: ReadonlyArray<WorkspaceRelocationStopResult>
+}
+export interface CompleteWorkspaceRelocationWorkerStopsResult {
+  recorded: true
+}

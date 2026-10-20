@@ -21,6 +21,7 @@ const SENSITIVE_METHODS: SensitiveRpcMethod[] = [
   'verify_workspace_relocation_request',
   'verify_workspace_relocation_coordinator',
   'capture_workspace_relocation_workers',
+  'prepare_workspace_relocation_worker_stops', 'complete_workspace_relocation_worker_stops',
   'get_agent_config',
   'resolve_worker_connection',
   'verify_core_agent_runtime',
@@ -122,7 +123,7 @@ test('ordinary call rejects a sensitive method before network I/O or trace creat
 
 test('workspace relocation RPCs cannot use ordinary traced transport', async () => {
   const client = new RpcClient(), trace = { startSpan: () => { throw new Error('trace must not start') }, endSpan: () => {} }
-  for (const method of ['verify_workspace_relocation_request', 'verify_workspace_relocation_coordinator', 'capture_workspace_relocation_workers']) await assert.rejects(client.call(1, method, { intent_id: 'fixed' }, 'forged-source', {
+  for (const method of ['verify_workspace_relocation_request', 'verify_workspace_relocation_coordinator', 'capture_workspace_relocation_workers', 'prepare_workspace_relocation_worker_stops', 'complete_workspace_relocation_worker_stops']) await assert.rejects(client.call(1, method, { intent_id: 'fixed' }, 'forged-source', {
     traceStore: trace, traceId: 'fixture',
   }), (error: unknown) => (error as { code?: string }).code === 'SENSITIVE_RPC_REQUIRES_NO_TRACE_TRANSPORT')
 })

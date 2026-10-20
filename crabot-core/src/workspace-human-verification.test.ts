@@ -45,7 +45,7 @@ async function fixture(options: { wrongRuntime?: boolean; result?: string; withA
         let data=req.url==='/get_runtime_identity'?{instance_id:process.env.CRABOT_INSTANCE_ID,module_id:'crabot-agent',runtime_id:process.env.FIXTURE_RESULT==='wrong-runtime'?'other':process.env.CRABOT_MODULE_RUNTIME_ID}:{workers:[]};
         if(req.url!=='/get_runtime_identity'&&process.env.FIXTURE_RESULT==='extra')data.extra=true;
         if(req.url!=='/get_runtime_identity'&&process.env.FIXTURE_RESULT==='bad-worker')data.workers=[{worker_id:'bad'}];
-        if(req.url!=='/get_runtime_identity'&&process.env.FIXTURE_RESULT==='large')data.workers=Array.from({length:1500},(_,i)=>({worker_id:String(i).padStart(5,'0'),manager_key:'channel::session',task_id:'task-'+i,incarnations:[{incarnation_id:'inc-'+i,impl:'builtin',seq:1,workspace:'fixture/'+('a'.repeat(120)),started_at:new Date().toISOString()}]}));
+        if(req.url!=='/get_runtime_identity'&&['large','one-worker'].includes(process.env.FIXTURE_RESULT))data.workers=Array.from({length:process.env.FIXTURE_RESULT==='large'?1500:1},(_,i)=>({worker_id:String(i).padStart(5,'0'),manager_key:'channel::session',task_id:'task-'+i,incarnations:[{incarnation_id:'inc-'+i,impl:'builtin',seq:1,workspace:'fixture/'+('a'.repeat(120)),started_at:new Date().toISOString()}]}));
         res.end(JSON.stringify({id:body.id,success:true,data}));
       }).listen(Number(process.env.Crabot_PORT),'127.0.0.1',()=>fs.writeFileSync(process.env.FIXTURE_READY,'ready'));setTimeout(()=>process.exit(0),30000).unref();`)
     const agent = { module_id: 'crabot-agent', module_type: 'agent', entry: `"${process.execPath}" "${agentScript}"`,
@@ -138,9 +138,15 @@ async function coordinator(f: Awaited<ReturnType<typeof fixture>>, journal = 'no
   const locks = await import('../../scripts/lib/cli-lock.mjs'), relocation = await import('../../scripts/lib/workspace-relocation-intent.mjs')
   const native = require('../../scripts/lib/process-identity.cjs'), entry = new URL('../../scripts/lib/workspace-coordinator-entry.mjs', import.meta.url).href
   const journalEntry = new URL('../../scripts/lib/workspace-worker-journal.mjs', import.meta.url).href
-  const code = `import{enterWorkspaceRelocationCoordinator}from ${JSON.stringify(entry)};import{serveWorkspaceWorkerJournal}from ${JSON.stringify(journalEntry)};const context=await enterWorkspaceRelocationCoordinator();
+  const code = `import{enterWorkspaceRelocationCoordinator}from ${JSON.stringify(entry)};import{serveWorkspaceWorkerJournal}from ${JSON.stringify(journalEntry)};const context=await enterWorkspaceRelocationCoordinator();let serving;
     if(${JSON.stringify(journal)}==='false-ack')process.on('message',m=>{if(m.kind==='workspace_worker_journal_request')process.send({kind:'workspace_worker_journal_reply',request_id:m.request_id,launch_id:m.launch_id,operation:m.operation,ok:true,result:true})});
-    else{if(${JSON.stringify(journal)}==='drop-reply'){const send=process.send.bind(process);process.send=(m,cb)=>m.kind==='workspace_worker_journal_reply'&&m.operation==='capture'?(cb?.(null),true):send(m,cb)}serveWorkspaceWorkerJournal(context)}
+    else{if(['drop-reply','drop-prepare','drop-complete'].includes(${JSON.stringify(journal)})){const send=process.send.bind(process);let dropped=false;process.send=(m,cb)=>{
+      const op={'drop-reply':'capture','drop-prepare':'prepare','drop-complete':'complete'}[${JSON.stringify(journal)}];
+      if(!dropped&&m.kind==='workspace_worker_journal_reply'&&m.operation===op){dropped=true;cb?.(null);return true}return send(m,cb)}}serving=serveWorkspaceWorkerJournal(context)}
+    process.on('message',m=>{if(m.kind==='fixture-change-policy'){
+      if(m.policy==='lost-lock')context.release();
+      if(m.policy==='false-ack'){serving.close();process.on('message',r=>{if(r.kind==='workspace_worker_journal_request')process.send({kind:'workspace_worker_journal_reply',request_id:r.request_id,launch_id:r.launch_id,operation:r.operation,ok:true,result:'dispatch'})})}
+      process.send({kind:'fixture-policy-changed'})}});
     if(${JSON.stringify(journal)}==='lost-lock')context.release();process.send({kind:'fixture-ready'});setTimeout(()=>process.exit(0),30000);`
   const child = spawn(process.execPath, ['--input-type=module', '-e', code], { stdio: ['ignore', 'ignore', 'pipe', 'ipc'] })
   let output = ''; child.stderr.on('data', bytes => { output += bytes.toString() })
@@ -323,5 +329,120 @@ describe('MM delegates capture only to the fixed Agent and persists through its 
       else expect(records.readWorkspaceRelocationWorkers(f.data, f.params.intent_id)).toBeNull()
       await expect(fs.stat(path.join(f.data, 'workspace-control/relocation-stop-attempt.json'))).rejects.toMatchObject({ code: 'ENOENT' })
     } finally { await c.cleanup(); await f.cleanup() }
+  }, 30000)
+})
+
+
+async function workerStopBridgeFixture(journal = 'normal', capture = true) {
+  const f = await fixture({ withAgent: true, agentResult: 'one-worker' }), c = await coordinator(f, journal)
+  const auth = await f.manager.authorizeWorkspaceRelocationCoordinator(c.child, f.params, 'fixture-human')
+  const params = { intent_id: f.params.intent_id, launch_id: c.launch.launch_id }
+  if (capture) await f.manager.captureWorkspaceRelocationWorkersForCoordinator(c.child, f.params, 'fixture-human')
+  const server = http.createServer((req, res) => { void f.manager.handleRequest(req, res) })
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+  const url = `http://127.0.0.1:${(server.address() as { port: number }).port}`
+  const call = async (method: string, input = params, bearer = auth.authorizationBearer) => {
+    const response = await fetch(url + '/' + method, { method: 'POST', headers: { 'Content-Type': 'application/json', ...(bearer ? { Authorization: 'Bearer ' + bearer } : {}) },
+      body: JSON.stringify({ id: randomUUID(), source: 'crabot-agent', method, params: input }) })
+    const result = await response.json() as any
+    if (!result.success) throw Object.assign(new Error('finite bridge response rejected'), { code: result.error?.code })
+    return result.data
+  }
+  return { ...f, c, auth, params, call, records: await import('../../scripts/lib/workspace-relocation-intent.mjs'), cleanup: async () => {
+    server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve()))
+    await c.cleanup(); await f.cleanup()
+  } }
+}
+
+const prepareStops = 'prepare_workspace_relocation_worker_stops', completeStops = 'complete_workspace_relocation_worker_stops'
+const submittedResult = { worker_id: '00000', incarnation_id: 'inc-0', status: 'submitted' }
+describe('MM sensitive Worker stop journal bridge', () => {
+  it('confirms one durable attempt and the original complete submission without dispatching any Worker stop', async () => {
+    const f = await workerStopBridgeFixture()
+    try {
+      expect(await f.call(prepareStops)).toEqual({ dispatch: 'dispatch' })
+      expect(await f.call(prepareStops)).toEqual({ dispatch: 'observe' })
+      const input = { ...f.params, results: [submittedResult] }
+      expect(await f.call(completeStops, input)).toEqual({ recorded: true })
+      const first = f.records.readWorkspaceRelocationStops(f.data, f.params.intent_id)
+      expect(first.submission.results).toEqual([submittedResult])
+      expect(await f.call(completeStops, input)).toEqual({ recorded: true })
+      expect(f.records.readWorkspaceRelocationStops(f.data, f.params.intent_id)).toEqual(first)
+      const calls = JSON.parse(await fs.readFile(path.join(f.data, 'agent-calls.json'), 'utf8'))
+      expect(calls.map((item: any) => item.method)).toEqual(['get_runtime_identity', 'capture_workspace_relocation_workers'])
+    } finally { await f.cleanup() }
+  }, 30000)
+  for (const mode of ['missing header', 'wrong bearer', 'wrong job', 'extra field']) it(`refuses before any attempt: ${mode}`, async () => {
+    const f = await workerStopBridgeFixture()
+    try {
+      const input: typeof f.params & { token?: string; workers?: unknown[] } = { ...f.params }
+      let bearer = f.auth.authorizationBearer, code = 'FORBIDDEN'
+      if (mode === 'missing header') { input.token = bearer; bearer = ''; code = 'UNAUTHORIZED' }
+      else if (mode === 'wrong bearer') bearer = 'forged'
+      else if (mode === 'wrong job') input.intent_id = randomUUID()
+      else if (mode === 'extra field') { input.workers = []; code = 'INVALID_PARAMS' }
+      await expect(f.call(prepareStops, input, bearer)).rejects.toMatchObject({ code })
+      expect(f.records.readWorkspaceRelocationStops(f.data, f.params.intent_id).attempt).toBeNull()
+    } finally { await f.cleanup() }
+  }, 30000)
+  for (const policy of ['lost-lock', 'false-ack']) it(`does not accept an unverified stop attempt confirmation: ${policy}`, async () => {
+    const f = await workerStopBridgeFixture()
+    let acknowledged = false
+    const receive = (message: any) => { if (message.kind === 'fixture-policy-changed') acknowledged = true }
+    f.c.child.on('message', receive)
+    try {
+      f.c.child.send({ kind: 'fixture-change-policy', policy })
+      await vi.waitFor(() => expect(acknowledged).toBe(true))
+      await expect(f.call(prepareStops)).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
+      expect(f.records.readWorkspaceRelocationStops(f.data, f.params.intent_id).attempt).toBeNull()
+    } finally { f.c.child.off('message', receive); await f.cleanup() }
+  }, 30000)
+  it('requires an existing fixed scope rather than creating one from request params', async () => {
+    const f = await workerStopBridgeFixture('normal', false)
+    try {
+      await expect(f.call(prepareStops)).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
+      expect(f.records.readWorkspaceRelocationWorkers(f.data, f.params.intent_id)).toBeNull()
+    } finally { await f.cleanup() }
+  }, 30000)
+  it('refuses incomplete or conflicting submissions and preserves the first complete receipt', async () => {
+    const f = await workerStopBridgeFixture()
+    try {
+      await f.call(prepareStops)
+      await expect(f.call(completeStops, { ...f.params, results: [] })).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
+      expect(f.records.readWorkspaceRelocationStops(f.data, f.params.intent_id).submission).toBeNull()
+      await f.call(completeStops, { ...f.params, results: [submittedResult] })
+      const first = f.records.readWorkspaceRelocationStops(f.data, f.params.intent_id).submission
+      await expect(f.call(completeStops, { ...f.params, results: [{ ...submittedResult, status: 'unknown' }] })).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
+      expect(f.records.readWorkspaceRelocationStops(f.data, f.params.intent_id).submission).toEqual(first)
+    } finally { await f.cleanup() }
+  }, 30000)
+  it('rejects an in-flight confirmation after its grant is explicitly revoked even while native processes remain alive', async () => {
+    const f = await workerStopBridgeFixture(), grant = f.manager.workspaceCoordinatorGrant
+    const revoke = (message: any) => { if (message.kind === 'workspace_worker_journal_reply' && message.operation === 'prepare' && message.ok) grant.revoke() }
+    f.c.child.on('message', revoke)
+    try {
+      await expect(f.call(prepareStops)).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
+      expect(f.records.readWorkspaceRelocationStops(f.data, f.params.intent_id).attempt).not.toBeNull()
+      expect(f.manager.workspaceCoordinatorGrant).toBeUndefined()
+      expect(f.c.child.exitCode).toBeNull()
+    } finally { f.c.child.off('message', revoke); await f.cleanup() }
+  }, 30000)
+  for (const journal of ['drop-prepare', 'drop-complete']) it(`retains durable material after a lost acknowledgement: ${journal}`, async () => {
+    const f = await workerStopBridgeFixture(journal)
+    try {
+      if (journal === 'drop-prepare') {
+        await expect(f.call(prepareStops)).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
+        expect(f.records.readWorkspaceRelocationStops(f.data, f.params.intent_id).attempt).not.toBeNull()
+        expect(await f.call(prepareStops)).toEqual({ dispatch: 'observe' })
+      } else {
+        await f.call(prepareStops)
+        const input = { ...f.params, results: [submittedResult] }
+        await expect(f.call(completeStops, input)).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
+        const first = f.records.readWorkspaceRelocationStops(f.data, f.params.intent_id).submission
+        expect(first.results).toEqual([submittedResult])
+        expect(await f.call(completeStops, input)).toEqual({ recorded: true })
+        expect(f.records.readWorkspaceRelocationStops(f.data, f.params.intent_id).submission).toEqual(first)
+      }
+    } finally { await f.cleanup() }
   }, 30000)
 })

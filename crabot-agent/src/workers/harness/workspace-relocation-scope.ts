@@ -1,8 +1,8 @@
 import { sha256CanonicalJson } from 'crabot-shared'
 import type { LedgerWorker, ManagerKey } from './ledger-types.js'
 
-import type { WorkspaceRelocationWorker } from 'crabot-shared'
-export type { WorkspaceRelocationWorker } from 'crabot-shared'
+import type { WorkspaceRelocationWorker, WorkspaceRelocationStopResult } from 'crabot-shared'
+export type { WorkspaceRelocationWorker, WorkspaceRelocationStopResult } from 'crabot-shared'
 
 function invalid(): never {
   throw Object.assign(new Error('执行器集合或稳定身份无法核验，已保留维护保护。'), { code: 'WORKSPACE_MAINTENANCE' })
@@ -39,13 +39,6 @@ export function assertWorkspaceRelocationWorkersCurrent(
   if (sha256CanonicalJson(expected) !== sha256CanonicalJson(captureWorkspaceRelocationWorkers(entries))) invalid()
 }
 
-
-/** Submission receipts only. None of these states proves an execution exited. */
-export interface WorkspaceRelocationStopResult {
-  readonly worker_id: string
-  readonly incarnation_id: string
-  readonly status: 'submitted' | 'unknown' | 'unavailable'
-}
 
 /** Supplied only by the authenticated fixed job; prepare persists before any stop. */
 export interface WorkspaceRelocationStopJournal {

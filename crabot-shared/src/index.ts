@@ -137,7 +137,10 @@ export type { WorkspaceRecord, WorkspaceUsage, WorkspaceExecution, WorkspaceExec
   VerifyWorkspaceRelocationRequestParams, VerifyWorkspaceRelocationRequestResult,
   WorkspaceRelocationCoordinatorAction, VerifyWorkspaceRelocationCoordinatorParams, VerifyWorkspaceRelocationCoordinatorResult,
   WorkspaceRelocationImplementation, WorkspaceRelocationIncarnation, WorkspaceRelocationWorker,
-  CaptureWorkspaceRelocationWorkersParams, CaptureWorkspaceRelocationWorkersResult } from './workspace-types.js'
+  CaptureWorkspaceRelocationWorkersParams, CaptureWorkspaceRelocationWorkersResult,
+  WorkspaceRelocationStopDispatch, WorkspaceRelocationStopStatus, WorkspaceRelocationStopResult,
+  PrepareWorkspaceRelocationWorkerStopsParams, PrepareWorkspaceRelocationWorkerStopsResult,
+  CompleteWorkspaceRelocationWorkerStopsParams, CompleteWorkspaceRelocationWorkerStopsResult } from './workspace-types.js'
 
 export { isStoragePermission, type StoragePermission, type DirectoryStoragePermission, type AllDirectoriesStoragePermission } from './storage-permission.js'
 
