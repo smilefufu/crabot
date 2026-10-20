@@ -155,6 +155,9 @@ interface WorkspaceCoordinatorGrant {
   capture?: Promise<ReadonlyArray<WorkspaceRelocationWorker>>
   workersHash?: string
   captureProcesses?: Promise<ReadonlyArray<WorkerProcessIdentity>>
+  processesHash?: string
+  captureModules?: Promise<ReadonlyArray<WorkspaceModuleScope>>
+  modulesHash?: string
   stop?: Promise<StopWorkspaceRelocationWorkersResult>
   revoked?: boolean
   token: string
@@ -1286,6 +1289,8 @@ export class ModuleManager {
         || sha256CanonicalJson(intent) !== grant.proof.intent_sha256 || current.launch.launch_id !== grant.proof.launch_id
         || sha256CanonicalJson(current.launch) !== grant.proof.launch_sha256 || sha256CanonicalJson(current.ready) !== grant.readyHash) throw unavailable()
       if (grant.workersHash && sha256CanonicalJson(records.readWorkspaceRelocationWorkers(this.dataDir, grant.proof.intent_id)) !== grant.workersHash) throw unavailable()
+      if (grant.processesHash && sha256CanonicalJson(records.readWorkspaceRelocationProcesses(this.dataDir, grant.proof.intent_id)) !== grant.processesHash) throw unavailable()
+      if (grant.modulesHash && sha256CanonicalJson(records.readWorkspaceRelocationModules(this.dataDir, grant.proof.intent_id)) !== grant.modulesHash) throw unavailable()
       const self = native.inspectProcess(process.pid), coordinator = native.inspectProcess(grant.identity.pid)
       if (grant.identity.owner !== self.owner || agent.identity.owner !== self.owner
         || !native.sameProcess(current.launch.parent, self) || !native.sameProcess(current.launch.process, grant.identity)
@@ -1436,11 +1441,43 @@ export class ModuleManager {
         this.assertWorkspaceCoordinatorGrantCurrent(grant)
         const fixed = records.readWorkspaceRelocationProcesses(this.dataDir, grant.proof.intent_id)
         if (!fixed || fixed.workers_sha256 !== grant.workersHash || sha256CanonicalJson(fixed.processes) !== sha256CanonicalJson(processes)) throw unavailable()
+        grant.processesHash = sha256CanonicalJson(fixed)
         return processes
       } catch { throw unavailable() }
       finally { journal?.close(); rpc?.close() }
     })
     return grant.captureProcesses
+  }
+
+  private async captureWorkspaceRelocationModulesForCoordinator(child: ChildProcess): Promise<ReadonlyArray<WorkspaceModuleScope>> {
+    const grant = this.workspaceCoordinatorGrant
+    const unavailable = () => Object.assign(new Error('原执行模块范围无法确认，已保留维护保护；未重新捕获。'), { code: 'SERVICE_UNAVAILABLE' })
+    if (!grant || grant.child !== child || !grant.captureProcesses) throw unavailable()
+    const capture = grant.captureProcesses
+    this.assertWorkspaceCoordinatorGrantCurrent(grant)
+    if (!grant.captureModules) grant.captureModules = Promise.resolve().then(async () => {
+      let journal: { capture(modules: ReadonlyArray<WorkspaceModuleScope>): Promise<void>; close(): void } | undefined
+      try {
+        await capture
+        this.assertWorkspaceCoordinatorGrantCurrent(grant)
+        if (!grant.processesHash) throw unavailable()
+        const scope = await this.captureWorkspaceRelocationModules()
+        this.assertWorkspaceCoordinatorGrantCurrent(grant)
+        const records = require('../../scripts/lib/workspace-relocation-intent.mjs')
+        const { launch } = records.readWorkspaceRelocationCoordinator(this.dataDir, grant.proof.intent_id)
+        const { createWorkspaceModuleJournal } = require('../../scripts/lib/workspace-module-journal.mjs')
+        const channel = createWorkspaceModuleJournal(child, { dataDir: this.dataDir, id: grant.proof.intent_id, launch })
+        journal = channel
+        await channel.capture(scope)
+        this.assertWorkspaceCoordinatorGrantCurrent(grant)
+        const fixed = records.readWorkspaceRelocationModules(this.dataDir, grant.proof.intent_id)
+        if (!fixed || fixed.workers_sha256 !== grant.workersHash || sha256CanonicalJson(fixed.modules) !== sha256CanonicalJson(scope)) throw unavailable()
+        grant.modulesHash = sha256CanonicalJson(fixed)
+        return scope
+      } catch { throw unavailable() }
+      finally { journal?.close() }
+    })
+    return grant.captureModules
   }
 
   private async stopWorkspaceRelocationWorkersForCoordinator(child: ChildProcess): Promise<StopWorkspaceRelocationWorkersResult> {

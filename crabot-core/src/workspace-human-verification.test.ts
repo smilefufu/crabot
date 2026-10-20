@@ -182,13 +182,15 @@ async function coordinator(f: Awaited<ReturnType<typeof fixture>>, journal = 'no
   const locks = await import('../../scripts/lib/cli-lock.mjs'), relocation = await import('../../scripts/lib/workspace-relocation-intent.mjs')
   const native = require('../../scripts/lib/process-identity.cjs'), entry = new URL('../../scripts/lib/workspace-coordinator-entry.mjs', import.meta.url).href
   const journalEntry = new URL('../../scripts/lib/workspace-worker-journal.mjs', import.meta.url).href
-  const code = `import{enterWorkspaceRelocationCoordinator}from ${JSON.stringify(entry)};import{serveWorkspaceWorkerJournal}from ${JSON.stringify(journalEntry)};const context=await enterWorkspaceRelocationCoordinator();let serving;
+  const moduleJournalEntry = new URL('../../scripts/lib/workspace-module-journal.mjs', import.meta.url).href
+  const code = `import{enterWorkspaceRelocationCoordinator}from ${JSON.stringify(entry)};import{serveWorkspaceWorkerJournal}from ${JSON.stringify(journalEntry)};import{serveWorkspaceModuleJournal}from ${JSON.stringify(moduleJournalEntry)};const context=await enterWorkspaceRelocationCoordinator();let serving;const moduleServing=serveWorkspaceModuleJournal(context);
     if(${JSON.stringify(journal)}==='false-ack')process.on('message',m=>{if(m.kind==='workspace_worker_journal_request')process.send({kind:'workspace_worker_journal_reply',request_id:m.request_id,launch_id:m.launch_id,operation:m.operation,ok:true,result:true})});
-    else{if(['drop-reply','drop-prepare','drop-complete','drop-processes'].includes(${JSON.stringify(journal)})){const send=process.send.bind(process);let dropped=false;process.send=(m,cb)=>{
-      const op={'drop-reply':'capture','drop-prepare':'prepare','drop-complete':'complete','drop-processes':'capture_processes'}[${JSON.stringify(journal)}];
-      if(!dropped&&m.kind==='workspace_worker_journal_reply'&&m.operation===op){dropped=true;cb?.(null);return true}return send(m,cb)}}serving=serveWorkspaceWorkerJournal(context)}
+    else{if(['drop-reply','drop-prepare','drop-complete','drop-processes','drop-module-capture'].includes(${JSON.stringify(journal)})){const send=process.send.bind(process);let dropped=false;process.send=(m,cb)=>{
+      const op={'drop-reply':'capture','drop-prepare':'prepare','drop-complete':'complete','drop-processes':'capture_processes','drop-module-capture':'capture'}[${JSON.stringify(journal)}];
+      if(!dropped&&m.kind===(${JSON.stringify(journal)}==='drop-module-capture'?'workspace_module_journal_reply':'workspace_worker_journal_reply')&&m.operation===op){dropped=true;cb?.(null);return true}return send(m,cb)}}serving=serveWorkspaceWorkerJournal(context)}
     process.on('message',m=>{if(m.kind==='fixture-change-policy'){
       if(m.policy==='lost-lock')context.release();
+      if(m.policy==='false-module-ack'){moduleServing.close();process.on('message',r=>{if(r.kind==='workspace_module_journal_request')process.send({kind:'workspace_module_journal_reply',request_id:r.request_id,launch_id:r.launch_id,operation:r.operation,ok:true,result:true})})}
       if(m.policy==='false-ack'){serving.close();process.on('message',r=>{if(r.kind==='workspace_worker_journal_request')process.send({kind:'workspace_worker_journal_reply',request_id:r.request_id,launch_id:r.launch_id,operation:r.operation,ok:true,result:r.operation==='prepare'?'dispatch':true})})}
       process.send({kind:'fixture-policy-changed'})}});
     if(${JSON.stringify(journal)}==='lost-lock')context.release();process.send({kind:'fixture-ready'});setTimeout(()=>process.exit(0),30000);`
@@ -749,6 +751,135 @@ describe('MM delegates fixed Native observation through actual Agent and coordin
       await expect(fs.stat(path.join(f.data, 'workspace-control/relocation-worker-processes.json'))).rejects.toMatchObject({ code: 'ENOENT' })
       expect(f.manager.workspaceCoordinatorGrant).toBeUndefined()
     } finally { state.intentionalReason = previous; await c.cleanup(); await f.cleanup() }
+  }, 30000)
+
+})
+
+
+describe('MM fixes execution modules in the same original coordinator job', () => {
+  it('requires the original Native capture before observing or fixing execution modules', async () => {
+    const f = await fixture({ actualAgent: true }), c = await coordinator(f)
+    const capture = vi.spyOn(f.manager, 'captureWorkspaceRelocationModules')
+    try {
+      await f.manager.captureWorkspaceRelocationWorkersForCoordinator(c.child, f.params, 'fixture-human')
+      await expect(f.manager.captureWorkspaceRelocationModulesForCoordinator(c.child)).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
+      expect(capture).not.toHaveBeenCalled()
+    } finally { await c.cleanup(); await f.cleanup() }
+  }, 30000)
+  it('fixes actual non-Admin module roots once through the child lock without any stop or browser recheck', async () => {
+    const f = await fixture({ actualAgent: true }), c = await coordinator(f)
+    try {
+      await f.manager.captureWorkspaceRelocationWorkersForCoordinator(c.child, f.params, 'fixture-human')
+      await f.manager.captureWorkspaceRelocationProcessesForCoordinator(c.child)
+      vi.spyOn(f.manager, 'verifyWorkspaceRelocationRequest').mockRejectedValue(new Error('browser login has since expired'))
+      const first = await f.manager.captureWorkspaceRelocationModulesForCoordinator(c.child)
+      expect(first.map((item: any) => item.module_id)).toEqual(['crabot-agent'])
+      expect(first[0].processes.some((item: any) => item.pid === f.manager.processes.get('crabot-agent').pid)).toBe(true)
+      expect(Object.isFrozen(first)).toBe(true); expect(Object.isFrozen(first[0].processes[0])).toBe(true)
+      expect(await f.manager.captureWorkspaceRelocationModulesForCoordinator(c.child)).toBe(first)
+      const records = await import('../../scripts/lib/workspace-relocation-intent.mjs')
+      expect(records.readWorkspaceRelocationModules(f.data, f.params.intent_id).modules).toEqual(first)
+      expect(records.readWorkspaceRelocationModuleStops(f.data, f.params.intent_id).attempt).toBeNull()
+      expect(records.readWorkspaceRelocationStops(f.data, f.params.intent_id).attempt).toBeNull()
+      expect(f.manager.processes.get('admin-web').exitCode).toBeNull()
+      await expect(fs.stat(path.join(f.data, 'stops.txt'))).rejects.toMatchObject({ code: 'ENOENT' })
+    } finally { await c.cleanup(); await f.cleanup() }
+  }, 30000)
+  it('rejects a replaced original Native record before reading module roots', async () => {
+    const f = await fixture({ actualAgent: true }), c = await coordinator(f)
+    const capture = vi.spyOn(f.manager, 'captureWorkspaceRelocationModules')
+    try {
+      await f.manager.captureWorkspaceRelocationWorkersForCoordinator(c.child, f.params, 'fixture-human')
+      await f.manager.captureWorkspaceRelocationProcessesForCoordinator(c.child)
+      const file = path.join(f.data, 'workspace-control/relocation-worker-processes.json'), original = JSON.parse(await fs.readFile(file, 'utf8'))
+      await fs.writeFile(file, JSON.stringify({ ...original, created_at: new Date(Date.parse(original.created_at) + 1000).toISOString() }))
+      await expect(f.manager.captureWorkspaceRelocationModulesForCoordinator(c.child)).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
+      expect(capture).not.toHaveBeenCalled()
+      await expect(fs.stat(path.join(f.data, 'workspace-control/relocation-modules.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+    } finally { await c.cleanup(); await f.cleanup() }
+  }, 30000)
+  for (const policy of ['lost-lock', 'false-module-ack']) it('rejects a module capture without actual locked persistence: ' + policy, async () => {
+    const f = await fixture({ actualAgent: true }), c = await coordinator(f)
+    let acknowledged = false
+    const receive = (message: any) => { if (message.kind === 'fixture-policy-changed') acknowledged = true }
+    c.child.on('message', receive)
+    try {
+      await f.manager.captureWorkspaceRelocationWorkersForCoordinator(c.child, f.params, 'fixture-human')
+      await f.manager.captureWorkspaceRelocationProcessesForCoordinator(c.child)
+      c.child.send({ kind: 'fixture-change-policy', policy }); await vi.waitFor(() => expect(acknowledged).toBe(true))
+      await expect(f.manager.captureWorkspaceRelocationModulesForCoordinator(c.child)).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
+      const records = await import('../../scripts/lib/workspace-relocation-intent.mjs')
+      expect(records.readWorkspaceRelocationModules(f.data, f.params.intent_id)).toBeNull()
+      expect(records.readWorkspaceRelocationStops(f.data, f.params.intent_id).attempt).toBeNull()
+    } finally { c.child.off('message', receive); await c.cleanup(); await f.cleanup() }
+  }, 30000)
+  it('keeps the first module capture and failure when its actual IPC reply is lost', async () => {
+    const f = await fixture({ actualAgent: true }), c = await coordinator(f, 'drop-module-capture')
+    const capture = vi.spyOn(f.manager, 'captureWorkspaceRelocationModules')
+    try {
+      await f.manager.captureWorkspaceRelocationWorkersForCoordinator(c.child, f.params, 'fixture-human')
+      await f.manager.captureWorkspaceRelocationProcessesForCoordinator(c.child)
+      await expect(f.manager.captureWorkspaceRelocationModulesForCoordinator(c.child)).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
+      const records = await import('../../scripts/lib/workspace-relocation-intent.mjs'), first = records.readWorkspaceRelocationModules(f.data, f.params.intent_id)
+      expect(first.modules.map((item: any) => item.module_id)).toEqual(['crabot-agent'])
+      await expect(f.manager.captureWorkspaceRelocationModulesForCoordinator(c.child)).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
+      expect(capture).toHaveBeenCalledOnce()
+      expect(records.readWorkspaceRelocationModules(f.data, f.params.intent_id)).toEqual(first)
+      expect(records.readWorkspaceRelocationModuleStops(f.data, f.params.intent_id).attempt).toBeNull()
+    } finally { await c.cleanup(); await f.cleanup() }
+  }, 30000)
+  it('rechecks original Native evidence after the actual lifecycle queue settles', async () => {
+    const f = await fixture({ actualAgent: true }), c = await coordinator(f)
+    let release!: () => void, response: Promise<any> | undefined
+    const wait = new Promise<void>(resolve => { release = resolve }), held = wait.finally(() => f.manager.lifecycleQueues.delete('fixture-held'))
+    const capture = vi.spyOn(f.manager, 'captureWorkspaceRelocationModules')
+    try {
+      await f.manager.captureWorkspaceRelocationWorkersForCoordinator(c.child, f.params, 'fixture-human')
+      await f.manager.captureWorkspaceRelocationProcessesForCoordinator(c.child)
+      f.manager.lifecycleQueues.set('fixture-held', held)
+      response = f.manager.captureWorkspaceRelocationModulesForCoordinator(c.child)
+      const rejected = expect(response).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
+      await vi.waitFor(() => expect(capture).toHaveBeenCalledOnce())
+      await expect(fs.stat(path.join(f.data, 'workspace-control/relocation-modules.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+      const file = path.join(f.data, 'workspace-control/relocation-worker-processes.json'), original = JSON.parse(await fs.readFile(file, 'utf8'))
+      await fs.writeFile(file, JSON.stringify({ ...original, created_at: new Date(Date.parse(original.created_at) + 1000).toISOString() }))
+      release(); await held; await rejected
+      await expect(fs.stat(path.join(f.data, 'workspace-control/relocation-modules.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+    } finally { release(); await held; await response?.catch(() => {}); await c.cleanup(); await f.cleanup() }
+  }, 30000)
+  it('checks the original module record even when returning its previously captured scope', async () => {
+    const f = await fixture({ actualAgent: true }), c = await coordinator(f)
+    const capture = vi.spyOn(f.manager, 'captureWorkspaceRelocationModules')
+    try {
+      await f.manager.captureWorkspaceRelocationWorkersForCoordinator(c.child, f.params, 'fixture-human')
+      await f.manager.captureWorkspaceRelocationProcessesForCoordinator(c.child)
+      await f.manager.captureWorkspaceRelocationModulesForCoordinator(c.child)
+      const file = path.join(f.data, 'workspace-control/relocation-modules.json'), original = JSON.parse(await fs.readFile(file, 'utf8'))
+      await fs.writeFile(file, JSON.stringify({ ...original, created_at: new Date(Date.parse(original.created_at) + 1000).toISOString() }))
+      await expect(f.manager.captureWorkspaceRelocationModulesForCoordinator(c.child)).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
+      expect(capture).toHaveBeenCalledOnce()
+    } finally { await c.cleanup(); await f.cleanup() }
+  }, 30000)
+  it('joins the actual fixed captures, Worker submission and module exit while Admin remains available', async () => {
+    const f = await fixture({ actualAgent: true }), c = await coordinator(f)
+    let journal: any
+    try {
+      await f.manager.captureWorkspaceRelocationWorkersForCoordinator(c.child, f.params, 'fixture-human')
+      await f.manager.captureWorkspaceRelocationProcessesForCoordinator(c.child)
+      const modules = await f.manager.captureWorkspaceRelocationModulesForCoordinator(c.child)
+      expect((await f.manager.stopWorkspaceRelocationWorkersForCoordinator(c.child)).dispatch).toBe('dispatch')
+      const { createWorkspaceModuleJournal } = await import('../../scripts/lib/workspace-module-journal.mjs')
+      journal = createWorkspaceModuleJournal(c.child, { dataDir: f.data, id: f.params.intent_id, launch: c.launch })
+      const result = await f.manager.requestWorkspaceRelocationModuleStops(modules, journal)
+      expect(result.results).toEqual([expect.objectContaining({ module_id: 'crabot-agent', status: 'known_scope_exited' })])
+      const { probeKnownProcessExit } = require('../../scripts/lib/known-process-exit.cjs')
+      expect(probeKnownProcessExit(modules[0].processes).state).toBe('stopped')
+      expect(f.manager.workspaceCoordinatorGrant).toBeUndefined()
+      expect(f.manager.processes.get('admin-web').exitCode).toBeNull()
+      expect((await f.manager.verifyWorkspaceRelocationRequest(f.params, 'fixture-human')).verified).toBe(true)
+      expect(await fs.readFile(path.join(f.data, 'stops.txt'), 'utf8')).toBe('stop\n')
+      await expect(fs.stat(path.join(f.root, 'relocated'))).rejects.toMatchObject({ code: 'ENOENT' })
+    } finally { journal?.close(); await c.cleanup(); await f.cleanup() }
   }, 30000)
 
 })
