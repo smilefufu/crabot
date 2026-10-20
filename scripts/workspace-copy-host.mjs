@@ -3,6 +3,7 @@ import fs from 'node:fs'
 import { spawn } from 'node:child_process'
 import { finished } from 'node:stream/promises'
 import native from './lib/process-identity.cjs'
+import { syncWorkspaceDirectoryFd } from './lib/workspace-sync.mjs'
 
 if (process.platform !== 'darwin' && process.platform !== 'linux'
   || process.argv.length !== 6 || !process.argv.slice(2).every(value => /^(?:0|[1-9][0-9]*)$/.test(value))) {
@@ -46,7 +47,11 @@ try {
   const transport = finished(unpack.child.stdin).catch(() => { stop() })
   const results = await Promise.all([pack.closed, unpack.closed, transport])
   if (failed || results[0] !== true || results[1] !== true) process.exitCode = 1
-  else native.copyDirectoryTimesFd(3, treeFd)
+  else {
+    native.copyDirectoryTimesFd(3, treeFd)
+    syncWorkspaceDirectoryFd(treeFd, { dev: tree.dev.toString(), ino: tree.ino.toString() })
+    fs.fsyncSync(4)
+  }
 } catch (error) {
   stop(); process.exitCode = 1; console.error('Workspace copy host failed: ' + (error.code ?? 'unverified'))
   await Promise.all(completions)

@@ -11,6 +11,9 @@ on:
       - 'scripts/lib/run-bounded.mjs'
       - 'scripts/lib/__tests__/workspace-*'
       - 'scripts/lib/__tests__/directory-*.test.mjs'
+      - 'scripts/lib/__tests__/instance-runtime.test.mjs'
+      - 'scripts/lib/instance-*.mjs'
+      - 'scripts/lib/managed-core.mjs'
       - 'scripts/workspace-copy-host.mjs'
       - '.github/workflows/workspace-files.yml'
   workflow_dispatch:
@@ -43,5 +46,11 @@ jobs:
       - run: node scripts/build-native.mjs
       - run: pnpm --dir crabot-shared install --frozen-lockfile
       - run: pnpm --dir crabot-shared build
-      - run: node --test scripts/lib/__tests__/workspace-file-metadata.test.mjs scripts/lib/__tests__/workspace-copy.test.mjs scripts/lib/__tests__/workspace-file-plan.test.mjs scripts/lib/__tests__/workspace-coordinator-launch.test.mjs scripts/lib/__tests__/directory-move.test.mjs scripts/lib/__tests__/directory-pin.test.mjs
+      - name: Windows delayed instance registration regression
+        if: runner.os == 'Windows'
+        run: |
+          pnpm --dir crabot-core install --frozen-lockfile
+          pnpm --dir crabot-core build
+          node --test --test-name-pattern='Windows repeated Unicode-path registration' scripts/lib/__tests__/instance-runtime.test.mjs
+      - run: node --test scripts/lib/__tests__/workspace-file-metadata.test.mjs scripts/lib/__tests__/workspace-copy.test.mjs scripts/lib/__tests__/workspace-sync.test.mjs scripts/lib/__tests__/workspace-file-plan.test.mjs scripts/lib/__tests__/workspace-coordinator-launch.test.mjs scripts/lib/__tests__/directory-move.test.mjs scripts/lib/__tests__/directory-pin.test.mjs
       - run: node --test --test-name-pattern='cross-volume unsupported source metadata' scripts/lib/__tests__/workspace-relocation-intent.test.mjs
