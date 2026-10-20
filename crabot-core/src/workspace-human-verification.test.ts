@@ -980,3 +980,65 @@ describe('MM launches the actual fixed coordinator under the original human inte
     } finally { f.manager.isShuttingDown = false; locks.releaseCliLock(lock); await f.cleanup() }
   }, timeout)
 })
+
+describe('MM submits one fixed workspace stop sequence', () => {
+  const timeout = process.platform === 'win32' ? 90000 : 30000
+  it('joins concurrent callers to the real fixed host, scopes and first submissions while retaining Admin', async () => {
+    const f = await fixture({ actualAgent: true, processLifetimeMs: 120000, backgroundShell: true }), locks = require('../../scripts/lib/cli-lock.mjs')
+    const records = await import('../../scripts/lib/workspace-relocation-intent.mjs'), lock = await locks.acquireWorkspaceRelocationLock(f.data, f.params.intent_id)
+    const launch = vi.spyOn(f.manager, 'launchWorkspaceRelocationCoordinator'), stop = vi.spyOn(f.manager, 'stopWorkspaceRelocationWorkersForCoordinator')
+    let child: ReturnType<typeof spawn> | undefined
+    try {
+      const ledger = path.join(f.data, 'agent/worker-ledgers/channel%3A%3Asession.json'), before = await fs.readFile(ledger), admin = f.manager.processes.get('admin-web')
+      const first = f.manager.submitWorkspaceRelocationStops(f.params, 'fixture-human')
+      expect(f.manager.submitWorkspaceRelocationStops({ ...f.params }, 'fixture-human')).toBe(first)
+      await expect(f.manager.submitWorkspaceRelocationStops({ ...f.params, intent_id: randomUUID() }, 'fixture-human')).rejects.toMatchObject({ code: 'FORBIDDEN' })
+      const result = await first; child = result.coordinator
+      expect(result.workerSubmission).toEqual({ dispatch: 'dispatch', results: [{ worker_id: 'worker', incarnation_id: 'inc', status: 'submitted' }] })
+      expect(result.moduleSubmission.results).toEqual([expect.objectContaining({ module_id: 'crabot-agent', status: 'known_scope_exited' })])
+      expect(launch).toHaveBeenCalledOnce(); expect(stop).toHaveBeenCalledOnce()
+      expect(child!.connected).toBe(true); expect(f.manager.workspaceCoordinatorGrant).toBeUndefined()
+      expect(require('../../scripts/lib/known-process-exit.cjs').probeKnownProcessExit(records.readWorkspaceRelocationProcesses(f.data, f.params.intent_id).processes).state).toBe('stopped')
+      expect(await fs.readFile(ledger)).toEqual(before); expect(await fs.readFile(path.join(f.data, 'stops.txt'), 'utf8')).toBe('stop\n')
+      expect(f.manager.processes.get('admin-web')).toBe(admin); expect(admin.exitCode).toBeNull()
+      await expect(fs.stat(path.join(f.root, 'relocated'))).rejects.toMatchObject({ code: 'ENOENT' })
+    } finally {
+      if (child?.connected) { const ended = once(child, 'exit'); child.disconnect(); await ended }
+      locks.releaseCliLock(lock); await f.cleanup()
+    }
+  }, timeout)
+  it('keeps the first capture failure and disconnects only its fixed host before any stop', async () => {
+    const f = await fixture({ actualAgent: true, processLifetimeMs: 120000 }), locks = require('../../scripts/lib/cli-lock.mjs')
+    const records = await import('../../scripts/lib/workspace-relocation-intent.mjs'), lock = await locks.acquireWorkspaceRelocationLock(f.data, f.params.intent_id)
+    const capture = vi.spyOn(f.manager, 'captureWorkspaceRelocationProcessesForCoordinator').mockRejectedValue(new Error('fixture original observation unknown'))
+    const stop = vi.spyOn(f.manager, 'stopWorkspaceRelocationWorkersForCoordinator')
+    try {
+      const first = f.manager.submitWorkspaceRelocationStops(f.params, 'fixture-human')
+      await expect(first).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
+      expect(f.manager.submitWorkspaceRelocationStops(f.params, 'fixture-human')).toBe(first)
+      await expect(first).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
+      expect(capture).toHaveBeenCalledOnce(); expect(stop).not.toHaveBeenCalled()
+      expect(records.readWorkspaceRelocationWorkers(f.data, f.params.intent_id)).not.toBeNull()
+      expect(records.readWorkspaceRelocationStops(f.data, f.params.intent_id).attempt).toBeNull()
+      expect(records.readWorkspaceRelocationModules(f.data, f.params.intent_id)).toBeNull()
+      const { launch } = records.readWorkspaceRelocationCoordinator(f.data, f.params.intent_id)
+      expect(require('../../scripts/lib/process-identity.cjs').isProcessExited(launch!.process.pid)).toBe(true)
+      expect(f.manager.processes.get('admin-web').exitCode).toBeNull(); expect(f.manager.processes.get('crabot-agent').exitCode).toBeNull()
+    } finally { locks.releaseCliLock(lock); await f.cleanup() }
+  }, timeout)
+  it('preserves an actual Worker submission whose HTTP reply was lost without stopping modules or replaying', async () => {
+    const f = await fixture({ actualAgent: true, processLifetimeMs: 120000, agentResult: 'lost-stop-reply' }), locks = require('../../scripts/lib/cli-lock.mjs')
+    const records = await import('../../scripts/lib/workspace-relocation-intent.mjs'), lock = await locks.acquireWorkspaceRelocationLock(f.data, f.params.intent_id)
+    const modules = vi.spyOn(f.manager, 'requestWorkspaceRelocationModuleStops')
+    try {
+      const first = f.manager.submitWorkspaceRelocationStops(f.params, 'fixture-human')
+      await expect(first).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
+      expect(f.manager.submitWorkspaceRelocationStops(f.params, 'fixture-human')).toBe(first)
+      await expect(first).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
+      expect(await fs.readFile(path.join(f.data, 'stops.txt'), 'utf8')).toBe('stop\n')
+      expect(records.readWorkspaceRelocationStops(f.data, f.params.intent_id).submission.results).toEqual([{ worker_id: 'worker', incarnation_id: 'inc', status: 'submitted' }])
+      expect(records.readWorkspaceRelocationModuleStops(f.data, f.params.intent_id).attempt).toBeNull(); expect(modules).not.toHaveBeenCalled()
+      expect(f.manager.processes.get('admin-web').exitCode).toBeNull(); expect(f.manager.processes.get('crabot-agent').exitCode).toBeNull()
+    } finally { locks.releaseCliLock(lock); await f.cleanup() }
+  }, timeout)
+})

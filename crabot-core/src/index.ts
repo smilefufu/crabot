@@ -151,6 +151,12 @@ interface WorkspaceWorkerStopJournal {
   close(): void
 }
 
+interface WorkspaceStopSequenceResult {
+  readonly coordinator: ChildProcess
+  readonly workerSubmission: StopWorkspaceRelocationWorkersResult
+  readonly moduleSubmission: WorkspaceModuleStopResponse
+}
+
 interface WorkspaceCoordinatorGrant {
   capture?: Promise<ReadonlyArray<WorkspaceRelocationWorker>>
   workersHash?: string
@@ -186,6 +192,7 @@ export class ModuleManager {
   private readonly modules: Map<ModuleId, ModuleRuntime> = new Map()
   private readonly processes: Map<ModuleId, ChildProcess> = new Map()
   private workspaceCoordinatorGrant?: WorkspaceCoordinatorGrant
+  private workspaceStopSequence?: { fingerprint: string; pending: Promise<WorkspaceStopSequenceResult> }
   private workspaceModuleStop?: { fingerprint: string; pending: Promise<WorkspaceModuleStopResponse> }
   private readonly childStates: WeakMap<ChildProcess, ManagedChildState> = new WeakMap()
   private readonly lifecycleQueues: Map<ModuleId, Promise<void>> = new Map()
@@ -1287,18 +1294,70 @@ export class ModuleManager {
       return child
     } catch {
       // No grant or journal action has been handed to a driver at this point.
-      try { if (child?.connected) child.disconnect() } catch { /* Preserve uncertainty and the first records. */ }
-      if (child && child.exitCode === null && child.signalCode === null) {
-        const pending = child
-        await new Promise<void>(resolve => {
-          const done = () => { clearTimeout(timer); pending.off('exit', done); resolve() }
-          const timer = setTimeout(done, 2000)
-          pending.once('exit', done)
-          if (pending.exitCode !== null || pending.signalCode !== null) done()
-        })
-      }
+      await this.closeWorkspaceCoordinatorChannel(child)
       throw unavailable()
     }
+  }
+
+  /** Neutral channel cleanup only; no business shutdown, signal, rollback or record deletion. */
+  private async closeWorkspaceCoordinatorChannel(child?: ChildProcess): Promise<void> {
+    try { if (child?.connected) child.disconnect() } catch { /* Preserve uncertainty and the first records. */ }
+    if (child && child.exitCode === null && child.signalCode === null) {
+      const pending = child
+      await new Promise<void>(resolve => {
+        const done = () => { clearTimeout(timer); pending.off('exit', done); resolve() }
+        const timer = setTimeout(done, 2000)
+        pending.once('exit', done)
+        if (pending.exitCode !== null || pending.signalCode !== null) done()
+      })
+    }
+  }
+
+  /** One internal submission sequence; its results never authorize closing Workers or moving files. */
+  private submitWorkspaceRelocationStops(request: VerifyWorkspaceRelocationRequestParams, bearer?: string): Promise<WorkspaceStopSequenceResult> {
+    request = Object.freeze({ ...request })
+    const fingerprint = sha256CanonicalJson(request)
+    const failure = () => Object.assign(new Error('迁移停止提交段未能确认，已保留原记录和维护保护；未重放。'), { code: 'SERVICE_UNAVAILABLE' })
+    if (this.workspaceStopSequence) {
+      if (this.workspaceStopSequence.fingerprint !== fingerprint) return Promise.reject(Object.assign(new Error('Workspace stop intent cannot change'), { code: 'FORBIDDEN' }))
+      return this.workspaceStopSequence.pending
+    }
+    const pending = Promise.resolve().then(async (): Promise<WorkspaceStopSequenceResult> => {
+      let child: ChildProcess | undefined
+      let journal: (WorkspaceModuleStopJournal & { close(): void }) | undefined
+      try {
+        child = await this.launchWorkspaceRelocationCoordinator(request, bearer)
+        await this.captureWorkspaceRelocationWorkersForCoordinator(child, request, bearer)
+        await this.captureWorkspaceRelocationProcessesForCoordinator(child)
+        const modules = await this.captureWorkspaceRelocationModulesForCoordinator(child)
+        const workerSubmission = await this.stopWorkspaceRelocationWorkersForCoordinator(child)
+        const grant = this.workspaceCoordinatorGrant
+        if (!grant || grant.child !== child) throw failure()
+        this.assertWorkspaceCoordinatorGrantCurrent(grant)
+        const records = require('../../scripts/lib/workspace-relocation-intent.mjs')
+        const coordinator = records.readWorkspaceRelocationCoordinator(this.dataDir, request.intent_id)
+        const { createWorkspaceModuleJournal } = require('../../scripts/lib/workspace-module-journal.mjs')
+        journal = createWorkspaceModuleJournal(child, { dataDir: this.dataDir, id: request.intent_id, launch: coordinator.launch })
+        const moduleSubmission = await this.requestWorkspaceRelocationModuleStops(modules, journal!)
+        // Planned Agent exit revokes its grant; only the original coordinator/material binding continues.
+        const native = require('../../scripts/lib/process-identity.cjs')
+        if (this.isShuttingDown || !child.connected || child.exitCode !== null || child.signalCode !== null
+          || sha256CanonicalJson(records.readWorkspaceRelocationIntent(this.dataDir)) !== request.intent_sha256
+          || sha256CanonicalJson(records.readWorkspaceRelocationCoordinator(this.dataDir, request.intent_id)) !== sha256CanonicalJson(coordinator)
+          || sha256CanonicalJson(records.readWorkspaceRelocationWorkers(this.dataDir, request.intent_id)) !== grant.workersHash
+          || sha256CanonicalJson(records.readWorkspaceRelocationProcesses(this.dataDir, request.intent_id)) !== grant.processesHash
+          || sha256CanonicalJson(records.readWorkspaceRelocationModules(this.dataDir, request.intent_id)) !== grant.modulesHash
+          || sha256CanonicalJson(records.readWorkspaceRelocationModuleStops(this.dataDir, request.intent_id).submission?.results) !== sha256CanonicalJson(moduleSubmission.results)
+          || !native.sameProcess(coordinator.launch.parent, native.inspectProcess(process.pid))
+          || !native.sameProcess(coordinator.launch.process, native.inspectProcess(child.pid))) throw failure()
+        return Object.freeze({ coordinator: child, workerSubmission, moduleSubmission })
+      } catch {
+        await this.closeWorkspaceCoordinatorChannel(child)
+        throw failure()
+      } finally { journal?.close() }
+    })
+    this.workspaceStopSequence = { fingerprint, pending }
+    return pending
   }
 
   private assertWorkspaceCoordinatorGrantCurrent(grant: WorkspaceCoordinatorGrant): void {
