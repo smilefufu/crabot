@@ -15,12 +15,14 @@ async function fixture(t) {
 
 test('Windows pins the actual 128-bit root identity and each ancestor against replacement until explicit release', { skip: process.platform !== 'win32' }, async t => {
   const { root, source, moved } = await fixture(t), target = path.join(root, 'target')
+  const sibling = path.join(root, 'sibling'), renamedSibling = path.join(root, 'renamed-sibling'); await fs.mkdir(sibling)
   const before = native.inspectDirectoryFileId(source), pin = native.pinDirectory(source)
   try {
     assert.equal(pin.identity, before); assert.match(pin.identity, /^\d+:[a-f0-9]{32}$/)
     await assert.rejects(fs.rename(source, target))
     await assert.rejects(fs.rename(root, moved))
     assert.equal(native.inspectDirectoryFileId(source), before)
+    await fs.rename(sibling, renamedSibling); await fs.rename(renamedSibling, sibling)
     // A directory pin is not an execution stop or a file write fence.
     await fs.writeFile(path.join(source, 'new-file'), 'still writable')
     assert.equal(await fs.readFile(path.join(source, 'new-file'), 'utf8'), 'still writable')

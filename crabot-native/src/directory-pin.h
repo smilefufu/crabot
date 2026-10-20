@@ -56,7 +56,7 @@ static napi_value PinDirectory(napi_env env, napi_callback_info info) {
       start = end + 1;
     }
     for (size_t i = 0; i < paths.size(); i++) {
-      const auto access = FILE_READ_ATTRIBUTES | (i + 1 == paths.size() ? READ_CONTROL : 0);
+      const auto access = FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | (i + 1 == paths.size() ? READ_CONTROL : 0);
       HANDLE file = CreateFileW(paths[i].c_str(), access, FILE_SHARE_READ | FILE_SHARE_WRITE,
         nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
       if (file == INVALID_HANDLE_VALUE) throw std::runtime_error("Cannot pin directory against path replacement");
@@ -76,8 +76,9 @@ static napi_value PinDirectory(napi_env env, napi_callback_info info) {
 static napi_value ReleaseDirectoryPin(napi_env env, napi_callback_info info) {
   try {
     size_t argc = 2; napi_value args[2]; napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
-    bool tagged = false; void* data = nullptr;
-    if (argc != 1 || napi_check_object_type_tag(env, args[0], &DirectoryPinTag, &tagged) != napi_ok || !tagged
+    bool tagged = false; void* data = nullptr; napi_valuetype type = napi_undefined;
+    if (argc == 1) napi_typeof(env, args[0], &type);
+    if (argc != 1 || type != napi_object || napi_check_object_type_tag(env, args[0], &DirectoryPinTag, &tagged) != napi_ok || !tagged
       || napi_unwrap(env, args[0], &data) != napi_ok || !data) throw std::runtime_error("Expected an owned directory pin");
     static_cast<DirectoryPin*>(data)->Close();
     napi_value value; napi_get_undefined(env, &value); return value;
