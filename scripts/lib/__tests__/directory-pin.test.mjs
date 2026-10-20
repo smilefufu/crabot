@@ -57,7 +57,14 @@ test('Windows copies pinned root ACL, attributes and timestamps without changing
   const before = await inspectWorkspaceFileMetadata(source), sourcePin = native.pinDirectory(source), targetPin = native.pinDirectory(target)
   try {
     native.copyPinnedDirectoryMetadata(sourcePin, targetPin)
-    assert.deepEqual(await inspectWorkspaceFileMetadata(target), before)
+    const copied = await inspectWorkspaceFileMetadata(target)
+    if (copied.fingerprint !== before.fingerprint) {
+      const details = async directory => ({ mtime_ns: (await fs.lstat(directory, { bigint: true })).mtimeNs.toString(),
+        // This controlled fixture has no user attributes or content in its directory metadata.
+        metadata: native.inspectFileMetadata(directory).metadata.toString('utf8') })
+      t.diagnostic(JSON.stringify({ source: await details(source), target: await details(target) }))
+    }
+    assert.deepEqual(copied, before)
     assert.deepEqual(await inspectWorkspaceFileMetadata(source), before)
     assert.throws(() => native.copyPinnedDirectoryMetadata(sourcePin, sourcePin), { code: 'CRABOT_DIRECTORY_METADATA' })
   } finally { native.releaseDirectoryPin(targetPin); native.releaseDirectoryPin(sourcePin) }
