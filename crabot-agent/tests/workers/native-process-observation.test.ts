@@ -344,3 +344,32 @@ describe.each(['claude-code', 'codex'] as const)('%s resident legacy headless', 
     } finally { await f.close() }
   })
 })
+
+describe.each(['claude-code', 'codex'] as const)('%s fixed legacy cold fork', impl => {
+  it.each([false, true])('retains the ended original fork and optional query identity: %s', async query => {
+    const f = make(impl), fixed = { ...fixedIncarnation(f.h), forked_from: query ? 'original-parent' : 1, ...(query ? { query_id: 'original-query' } : {}) }
+    if (query) f.h.query_id = fixed.query_id
+    const file = await coldMetadata(f, fixed), value = JSON.parse(await fs.readFile(file, 'utf8'))
+    await fs.writeFile(file, JSON.stringify({ ...value, state: 'exited' }))
+    const before = await fs.readFile(file), rebuild = vi.spyOn(f.adapter as any, 'ensureRuntime')
+    f.tmux.readOptionalProcessCarrier.mockResolvedValue(null)
+    expect(await f.adapter.captureExecutionProcesses!(f.h, fixed, true)).toEqual([])
+    expect(f.tmux.readOptionalProcessCarrier).toHaveBeenCalledTimes(2)
+    expect(rebuild).not.toHaveBeenCalled(); expect(f.tmux.killSession).not.toHaveBeenCalled()
+    expect(f.runtimes.size).toBe(0); expect(await fs.readFile(file)).toEqual(before)
+  })
+  it.each(['query mismatch', 'active metadata', 'unexpected headed carrier', 'native error'])('rejects cold fork conflict: %s', async change => {
+    const f = make(impl), fixed = { ...fixedIncarnation(f.h), forked_from: 'original-parent', query_id: 'original-query' }
+    f.h.query_id = change === 'query mismatch' ? 'different-query' : fixed.query_id
+    const file = await coldMetadata(f, fixed), value = JSON.parse(await fs.readFile(file, 'utf8'))
+    await fs.writeFile(file, JSON.stringify({ ...value, state: change === 'active metadata' ? 'running' : 'exited' }))
+    const live = change === 'unexpected headed carrier' ? await finiteCarrier(f) : undefined
+    f.tmux.readOptionalProcessCarrier.mockResolvedValue(live?.carrier ?? null)
+    if (change === 'native error') f.tmux.readOptionalProcessCarrier.mockRejectedValue(new Error('native unavailable'))
+    try {
+      await expect(f.adapter.captureExecutionProcesses!(f.h, fixed, true)).rejects.toMatchObject({ code: 'WORKER_CARRIER_UNVERIFIED' })
+      expect(f.tmux.killSession).not.toHaveBeenCalled()
+      if (live) expect(live.child.exitCode).toBeNull()
+    } finally { await live?.close() }
+  })
+})

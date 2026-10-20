@@ -556,7 +556,7 @@ export interface WorkerRuntimeEvent {
 export type { WorkerProcessIdentity } from 'crabot-shared'
 
 export interface WorkerAdapter {
-  /** Fixed-job observation only. Fixed mainlines may read cold metadata without rebuilding a runtime. Unknown rejects. */
+  /** Fixed-job observation only. Cold reads need the original scope; legacy absence needs the qualified context. Unknown rejects. */
   captureExecutionProcesses?(h: IncarnationHandle, fixed?: WorkspaceRelocationIncarnation, legacyEnded?: true): Promise<ReadonlyArray<WorkerProcessIdentity>>
   readRuntime?(handle: IncarnationHandle): Promise<WorkerRuntimeSnapshot | undefined>
   readonly implId: WorkerImplId

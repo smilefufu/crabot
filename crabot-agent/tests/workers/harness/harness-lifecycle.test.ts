@@ -5575,6 +5575,21 @@ describe('workspace relocation CLI process capture', () => {
     const scope = await f.harness.captureWorkspaceRelocationScope()
     return { ...f, legacy, scope }
   }
+  it('retains the original ended fork relation and query identity without changing source or delivery', async () => {
+    const f = await nativeWorker(), end = new Date(Date.parse(f.worker.incarnations[0].started_at) + 1000).toISOString()
+    await f.ledger.upsertWorker(f.worker.manager_key, f.worker.worker_id, worker => {
+      const main = { ...worker!.incarnations[0], state: 'exited' as const, ended_at: end, ended_reason: 'completed' as const }
+      return { ...worker!, incarnations: [main, { ...main, incarnation_id: 'original-ended-fork', seq: 2, forked_from: main.incarnation_id, query_id: 'original-query' }] }
+    })
+    const before = await f.ledger.listAllWorkers(), legacy = captureLegacyWorkspaceExecutions(before, end), scope = await f.harness.captureWorkspaceRelocationScope()
+    const capture = vi.fn(async (_handle: IncarnationHandle, _fixed: unknown, _legacy?: true) => [])
+    ;(f.fake as WorkerAdapter).captureExecutionProcesses = capture
+    expect(await f.harness.captureWorkspaceRelocationProcesses(scope, legacy)).toEqual([])
+    expect(capture).toHaveBeenCalledTimes(2); expect(capture.mock.calls.every(call => call[2] === true)).toBe(true)
+    expect(capture.mock.calls).toEqual(expect.arrayContaining([[expect.objectContaining({ incarnation_id: 'original-ended-fork', query_id: 'original-query' }),
+      expect.objectContaining({ incarnation_id: 'original-ended-fork', forked_from: f.worker.incarnations[0].incarnation_id, query_id: 'original-query' }), true]]))
+    expect(await f.ledger.listAllWorkers()).toEqual(before); expect(f.fake.killCalls).toEqual([])
+  })
   it('uses only the fixed old boundary for an empty current carrier observation', async () => {
     const f = await endedLegacyWorker(), before = await f.ledger.listAllWorkers(), capture = vi.fn(async (_handle: IncarnationHandle, _fixed: unknown, _legacy?: true) => [])
     ;(f.fake as WorkerAdapter).captureExecutionProcesses = capture

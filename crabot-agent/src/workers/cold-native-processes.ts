@@ -36,12 +36,13 @@ async function readMetadata(dataDir: string, workerId: string, seq: number) {
   } finally { await handle.close() }
 }
 
-/** Read-only cold mainline; legacy absence still needs the caller's original upgrade boundary. */
+/** Read-only cold metadata; legacy absence still needs the caller's original upgrade boundary. */
 export async function captureColdNativeProcesses(dataDir: string, h: IncarnationHandle, fixed: WorkspaceRelocationIncarnation,
   readCarrier: () => Promise<TmuxProcessCarrier | null>, isCurrent: () => boolean, legacyEnded?: true): Promise<ReadonlyArray<WorkerProcessIdentity>> {
   try {
+    const fork = fixed.forked_from !== undefined || fixed.query_id !== undefined || h.query_id !== undefined
     if (!/^[A-Za-z0-9_-]+$/.test(h.worker_id) || !Number.isSafeInteger(h.seq) || h.seq < 1
-      || fixed.forked_from !== undefined || fixed.query_id !== undefined || h.query_id !== undefined) throw invalid()
+      || fork && !legacyEnded || fixed.query_id !== h.query_id) throw invalid()
     const first = await readMetadata(dataDir, h.worker_id, h.seq)
     if (first.value.seq !== h.seq || first.value.workspace_root !== fixed.workspace
       || h.session_ref && first.value.session_id !== h.session_ref || !isCurrent()) throw invalid()
@@ -56,6 +57,7 @@ export async function captureColdNativeProcesses(dataDir: string, h: Incarnation
       if (first.version !== last.version || !isCurrent()) throw invalid()
       return Object.freeze([])
     }
+    if (fork) throw invalid() // A cold headless fork must not claim an unexpected headed carrier.
     const { captureTmuxProcessTree } = require(path.join(__dirname, '../../../scripts/lib/tmux-process-tree.cjs'))
     const processes = await captureTmuxProcessTree(observe)
     const last = await readMetadata(dataDir, h.worker_id, h.seq)

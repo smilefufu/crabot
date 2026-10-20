@@ -2019,7 +2019,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     return { sourceAvailable: true, events, nextCursor: { offset: consumed } }
   }
 
-  /** Read-only fixed carrier; cold mainlines need their original scope, never ensureRuntime side effects. */
+  /** Read-only fixed carrier; cold metadata needs the original scope, never ensureRuntime side effects. */
   async captureExecutionProcesses(h: IncarnationHandle, fixed?: WorkspaceRelocationIncarnation, legacyEnded?: true): Promise<ReadonlyArray<WorkerProcessIdentity>> {
     h = Object.freeze({ ...h })
     fixed = fixed ? Object.freeze({ ...fixed }) : undefined
