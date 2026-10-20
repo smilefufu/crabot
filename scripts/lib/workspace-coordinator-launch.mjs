@@ -19,7 +19,7 @@ function environment() {
 }
 
 export async function launchWorkspaceRelocationCoordinator(options) {
-  let child, identity, clear = () => {}
+  let child, identity, stage = 'validate', clear = () => {}
   try {
     if (!fields(options, ['dataDir', 'id']) || process.versions.electron) throw failure()
     const { dataDir, id } = options, lock = path.resolve(dataDir, 'cli.lock'), token = cliLockToken(lock)
@@ -31,8 +31,10 @@ export async function launchWorkspaceRelocationCoordinator(options) {
         || !native.sameProcess(parent, native.inspectProcess(process.pid))) throw failure()
     }
     verifyParent()
+    stage = 'spawn'
     child = spawn(process.execPath, [entry], { env: environment(), stdio: ['ignore', 'ignore', 'ignore', 'ipc'], windowsHide: true, detached: process.platform !== 'win32' })
     child.on('error', () => {}) // The handoff/client owns diagnostics; a later IPC error must not crash MM.
+    stage = 'capture-child'
     identity = captureSpawnedProcessTree(child).find(item => item.pid === child.pid)
     if (!identity) throw failure()
     let launch, launchHash, readyHash, resolveReady, rejectReady, settled = false
@@ -61,15 +63,18 @@ export async function launchWorkspaceRelocationCoordinator(options) {
     clear = () => { clearTimeout(timer); child.off('message', receive); child.off('exit', reject); child.off('error', reject) }
     child.on('message', receive); child.once('exit', reject); child.once('error', reject)
     verifyParent()
+    stage = 'publish-launch'
     launch = commitWorkspaceRelocationCoordinator({ dataDir, id, launchId: randomUUID(), coordinator: identity })
     launchHash = sha256CanonicalJson(launch)
     verifyParent()
+    stage = 'release-parent-lock'
     releaseCliLock(lock)
     child.send({ kind: 'workspace_relocation_start', data_dir: dataDir, intent_id: id, launch_id: launch.launch_id, launch_sha256: launchHash }, error => { if (error) reject() })
+    stage = 'await-ready'
     const result = await ready
     verify(); clear()
     return result
-  } catch {
+  } catch (cause) {
     clear()
     if (identity && child && child.exitCode === null && child.signalCode === null) {
       try { native.terminateKnownProcess(identity) } catch { /* Unknown exit retains all evidence. */ }
@@ -80,6 +85,7 @@ export async function launchWorkspaceRelocationCoordinator(options) {
         if (child.exitCode !== null || child.signalCode !== null) done()
       })
     }
-    throw failure()
+    const error = failure(); error.cause = cause; error.stage = stage
+    throw error
   }
 }

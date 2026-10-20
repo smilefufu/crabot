@@ -3,18 +3,34 @@
 
 // A single fixed system copier, atomically attached to its own job before any thread runs.
 struct WorkspaceCopyJob {
-  HANDLE job = nullptr, process = nullptr, thread = nullptr;
+  HANDLE job = nullptr, process = nullptr, thread = nullptr, output = nullptr;
+  std::string diagnostic;
   std::vector<HANDLE> pins;
   Identity identity;
   std::wstring target;
   bool resumed = false;
+  void Drain() {
+    char bytes[4096];
+    for (size_t i = 0; output && i < 16; i++) {
+      DWORD available = 0, read = 0;
+      if (!PeekNamedPipe(output, nullptr, 0, nullptr, &available, nullptr)) {
+        if (GetLastError() == ERROR_BROKEN_PIPE) return;
+        throw std::runtime_error("Cannot observe workspace copy output");
+      }
+      if (!available) return;
+      if (!ReadFile(output, bytes, available < sizeof(bytes) ? available : sizeof(bytes), &read, nullptr)) throw std::runtime_error("Cannot read workspace copy output");
+      diagnostic.append(bytes, read);
+      if (diagnostic.size() > 32768) diagnostic.erase(0, diagnostic.size() - 32768);
+    }
+  }
   void Close() {
     if (job) TerminateJobObject(job, 1);
     if (process) WaitForSingleObject(process, 5000);
     if (job) CloseHandle(job);
     if (thread) CloseHandle(thread);
     if (process) CloseHandle(process);
-    job = process = thread = nullptr;
+    if (output) CloseHandle(output);
+    job = process = thread = output = nullptr;
     for (auto it = pins.rbegin(); it != pins.rend(); ++it) CloseHandle(*it);
     pins.clear();
   }
@@ -127,8 +143,10 @@ static napi_value CreateWorkspaceCopyJob(napi_env env, napi_callback_info info) 
     startup.initialized = true;
     SECURITY_ATTRIBUTES security{sizeof(security), nullptr, TRUE};
     startup.input = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, &security, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    startup.output = CreateFileW(L"NUL", GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, &security, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (startup.input == INVALID_HANDLE_VALUE || startup.output == INVALID_HANDLE_VALUE) throw WorkspaceCopyError("Cannot isolate workspace copy stdio");
+    HANDLE pipe = nullptr;
+    if (!CreatePipe(&pipe, &startup.output, &security, 0)) throw WorkspaceCopyError("Cannot isolate workspace copy output");
+    job->output = pipe;
+    if (startup.input == INVALID_HANDLE_VALUE || !SetHandleInformation(job->output, HANDLE_FLAG_INHERIT, 0)) throw WorkspaceCopyError("Cannot isolate workspace copy stdio");
     HANDLE inherited[] = {startup.input, startup.output};
     if (!UpdateProcThreadAttribute(startup.list, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherited, sizeof(inherited), nullptr, nullptr)
       || !UpdateProcThreadAttribute(startup.list, 0, PROC_THREAD_ATTRIBUTE_JOB_LIST, &job->job, sizeof(job->job), nullptr, nullptr)) throw WorkspaceCopyError("Cannot bind workspace copy at creation");
@@ -151,6 +169,7 @@ static napi_value InspectWorkspaceCopyJob(napi_env env, napi_callback_info info)
     size_t argc = 2; napi_value args[2]; napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
     if (argc != 1) throw std::runtime_error("Expected an owned workspace copy job");
     auto job = OwnedWorkspaceCopyJob(env, args[0]);
+    job->Drain();
     const DWORD wait = WaitForSingleObject(job->process, 0);
     JOBOBJECT_BASIC_ACCOUNTING_INFORMATION accounting{};
     if (wait == WAIT_FAILED || !QueryInformationJobObject(job->job, JobObjectBasicAccountingInformation, &accounting, sizeof(accounting), nullptr)) throw WorkspaceCopyError("Cannot observe workspace copy job");
@@ -160,7 +179,9 @@ static napi_value InspectWorkspaceCopyJob(napi_env env, napi_callback_info info)
     Property(env, result, "state", String(env, exited ? "exited" : job->resumed ? "running" : "suspended"));
     napi_value code; napi_get_null(env, &code);
     if (exited) { DWORD exitCode = 0; if (!GetExitCodeProcess(job->process, &exitCode)) throw WorkspaceCopyError("Cannot inspect workspace copy exit"); napi_create_uint32(env, exitCode, &code); }
-    Property(env, result, "exit_code", code); return result;
+    Property(env, result, "exit_code", code);
+    napi_value diagnostic; napi_create_string_latin1(env, job->diagnostic.data(), job->diagnostic.size(), &diagnostic);
+    Property(env, result, "diagnostic", diagnostic); return result;
   } catch (const std::exception& error) { napi_throw_error(env, "CRABOT_WINDOWS_COPY_ACTOR", error.what()); return nullptr; }
 }
 static napi_value ResumeWorkspaceCopyJob(napi_env env, napi_callback_info info) {
