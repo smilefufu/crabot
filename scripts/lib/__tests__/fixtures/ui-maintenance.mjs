@@ -9,7 +9,7 @@ import { once } from 'node:events'
 import assert from 'node:assert/strict'
 
 const checkout = process.argv[2], mode = process.argv[3] ?? 'updater'
-const expectedCompletion = mode === 'updater' || mode === 'unreadable' || mode === 'cleanup-race' || mode === 'registration-delay' || mode === 'admin-registration-delay'
+const expectedCompletion = mode === 'updater' || mode === 'registry-delay' || mode === 'unreadable' || mode === 'cleanup-race' || mode === 'registration-delay' || mode === 'admin-registration-delay'
 const { default: identity } = await import(pathToFileURL(path.join(checkout, 'scripts/lib/process-identity.cjs')))
 const root = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'crabot-maintenance-fixture-')))
 for (const directory of ['scripts', 'data', 'pids', 'crabot-core/dist', 'crabot-admin/dist']) await fs.mkdir(path.join(root, directory), { recursive: true })
@@ -50,7 +50,7 @@ import{ModuleRuntimeRegistry}from ${JSON.stringify(url('crabot-core/dist/module-
 const registry=new ModuleRuntimeRegistry(${JSON.stringify(path.join(root, 'data'))});await registry.initialize();
 const admin=spawn(process.execPath,[${JSON.stringify(path.join(root, 'crabot-admin/dist/main.js'))}],{stdio:['ignore','inherit','inherit','ipc']});
 const adminReady=once(admin,'message');void adminReady.catch(()=>{});
-const runtimeId=registry.createRuntimeId();await registry.recordSpawn({moduleId:${JSON.stringify(mode === 'agent-parent' ? 'crabot-agent' : 'admin-web')},runtimeId,rootPid:admin.pid,modulePort:23456});
+const runtimeId=registry.createRuntimeId();${mode === 'registry-delay' ? 'await new Promise(resolve=>setTimeout(resolve,16000));' : ''}await registry.recordSpawn({moduleId:${JSON.stringify(mode === 'agent-parent' ? 'crabot-agent' : 'admin-web')},runtimeId,rootPid:admin.pid,modulePort:23456});
 let stopping=false;async function stop(){if(stopping)return;stopping=true;const exited=once(admin,'exit');admin.kill();await exited;await registry.removeRuntime(runtimeId);process.exit(0)}
 process.on('SIGTERM',stop);createServer((req,res)=>{if(req.url==='/shutdown'){res.end(JSON.stringify({success:true}));void stop()}else res.end('{}')}).listen(${port},'127.0.0.1',async()=>{
 writeFileSync(${JSON.stringify(path.join(root, 'mm-listening'))},'listening');
@@ -81,6 +81,16 @@ async function actorSettled(role) {
   } catch { return false } // Unknown is never proof of exit, including fixtures.
 }
 try {
+  // Preparing the fake registry is not a stop attempt. Keep its bounded readiness
+  // wait separate from the unchanged maintenance assertion window below.
+  const startupDeadline = Date.now() + 30000
+  let armed = false
+  while (Date.now() < startupDeadline) {
+    if (await fs.access(path.join(root, 'admin-start-sent')).then(() => true, () => false)) { armed = true; break }
+    if (child.exitCode !== null || child.signalCode !== null) break
+    await new Promise(resolve => setTimeout(resolve, 50))
+  }
+  assert.equal(armed, true, 'Fixture never armed maintenance; mode=' + mode + '; markers=' + JSON.stringify(await fs.readdir(root)))
   const deadline = Date.now() + 15000
   while (Date.now() < deadline) {
     attempted = await fs.access(path.join(root, 'pids/cli.json')).then(() => true, () => false)
