@@ -106,6 +106,7 @@ import type {
   WorkspaceGitCheck,
   InspectWorkspaceGitResult,
   WorkerWorkspaceGitContext,
+  WorkerProcessIdentity,
 } from '../types'
 import type { BuiltinRuntimeFactory } from '../builtin/runtime'
 import { BUILTIN_WORKER_PERMISSIONS, narrowWorkerPermissions, workerCliExecutionPermissions } from '../builtin/runtime'
@@ -1147,6 +1148,36 @@ export class WorkerHarness {
     const entries = await this.deps.ledger.listAllWorkers()
     assertReady()
     return captureWorkspaceRelocationWorkers(entries)
+  }
+
+  /** Read-only CLI carriers; builtin/Agent-native processes still require the actual module scope. */
+  async captureWorkspaceRelocationProcesses(expected: ReadonlyArray<WorkspaceRelocationWorker>): Promise<ReadonlyArray<WorkerProcessIdentity>> {
+    const fingerprint = sha256CanonicalJson(expected)
+    const failure = () => Object.assign(new Error('迁移执行进程与固定范围无法核验，已保留维护保护。'), { code: 'WORKSPACE_MAINTENANCE' })
+    const scope = await this.captureWorkspaceRelocationScope()
+    if (sha256CanonicalJson(scope) !== fingerprint) throw failure()
+    const adapters = new Map(this.deps.adapters)
+    const processes: WorkerProcessIdentity[] = []
+    for (const worker of scope) {
+      const current = await this.deps.ledger.findWorker(worker.worker_id)
+      assertWorkspaceRelocationWorkersCurrent([worker], current ? [current] : [])
+      for (const fixed of worker.incarnations) {
+        if (fixed.impl === 'builtin' || fixed.impl === 'legacy') continue
+        const incarnation = current!.worker.incarnations.find(item => item.incarnation_id === fixed.incarnation_id)!
+        if (!isExecutableIncarnation(incarnation)) throw failure()
+        const adapter = adapters.get(incarnation.impl)
+        if (!adapter?.captureExecutionProcesses || adapter.implId !== fixed.impl) throw failure()
+        const observed = await adapter.captureExecutionProcesses(Object.freeze(handleForIncarnation(worker.worker_id, incarnation)), fixed)
+        if (this.deps.adapters.get(fixed.impl) !== adapter || !Array.isArray(observed) || observed.length === 0
+          || processes.length + observed.length > 32768) throw failure()
+        processes.push(...observed)
+      }
+    }
+    if (sha256CanonicalJson(await this.captureWorkspaceRelocationScope()) !== fingerprint) throw failure()
+    if ([...adapters].some(([impl, adapter]) => this.deps.adapters.get(impl) !== adapter)) throw failure()
+    // Reobserve the combined live roots after every adapter read; never infer exit from ledger state.
+    const { captureOwnedProcessTree } = require(join(__dirname, '../../../../scripts/lib/owned-process-tree.cjs'))
+    return captureOwnedProcessTree(processes)
   }
 
   /** Internal submission only; the fixed job still must verify the complete OS/module scope. */

@@ -5482,6 +5482,104 @@ describe('workspace relocation scope capture', () => {
 })
 
 
+describe('workspace relocation CLI process capture', () => {
+  async function nativeWorker() {
+    const f = await makeHarness({ implId: 'codex' }, { isWorkspaceRelocationReady: () => true })
+    const worker = await f.harness.spawnWorker(spawnParams({ impl: 'codex' }))
+    return { ...f, worker }
+  }
+
+  it('keeps closed historical incarnations and forks in the read-only Native observation', async () => {
+    const f = await nativeWorker()
+    const child = spawn(process.execPath, ['-e', 'process.send("ready");setTimeout(()=>process.exit(0),30000)'], { stdio: ['ignore', 'ignore', 'inherit', 'ipc'] })
+    const ended = once(child, 'exit')
+    try {
+      await once(child, 'message')
+      await f.ledger.upsertWorker(f.worker.manager_key, f.worker.worker_id, worker => ({ ...worker!, task: { ...worker!.task, status: 'closed' },
+        incarnations: [ { ...worker!.incarnations[0], state: 'exited' }, { ...worker!.incarnations[0], incarnation_id: 'fixed-fork', forked_from: worker!.incarnations[0].incarnation_id, query_id: 'fixed-query', state: 'exited' } ] }))
+      const before = await f.ledger.listAllWorkers(), scope = await f.harness.captureWorkspaceRelocationScope()
+      const { captureSpawnedProcessTree } = require('../../../../scripts/lib/spawned-process-tree.cjs')
+      const capture = vi.fn(async () => captureSpawnedProcessTree(child))
+      ;(f.fake as WorkerAdapter).captureExecutionProcesses = capture
+      const processes = await f.harness.captureWorkspaceRelocationProcesses(scope)
+      expect(processes).toMatchObject([{ pid: child.pid, parent: process.pid }])
+      expect(capture).toHaveBeenCalledTimes(2)
+      expect(capture.mock.calls.map(([handle, fixed]) => [handle.incarnation_id, fixed.incarnation_id])).toEqual(scope[0].incarnations.map(inc => [inc.incarnation_id, inc.incarnation_id]))
+      expect(capture.mock.calls.find(([handle]) => handle.query_id === 'fixed-query')).toBeDefined()
+      expect(Object.isFrozen(processes)).toBe(true); expect(Object.isFrozen(processes[0])).toBe(true)
+      expect(child.exitCode).toBeNull(); expect(f.fake.killCalls).toEqual([])
+      expect(await f.ledger.listAllWorkers()).toEqual(before)
+    } finally { if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL'); await ended }
+  }, 30000)
+
+  it.each(['missing adapter', 'missing observer', 'empty observer', 'failed observer', 'replaced adapter', 'bad Native identity'])('refuses %s without stopping or closing', async change => {
+    const f = await nativeWorker(), scope = await f.harness.captureWorkspaceRelocationScope(), before = await f.ledger.listAllWorkers()
+    const capture = vi.fn(async () => {
+      if (change === 'failed observer') throw new Error('unknown Native observation')
+      if (change === 'replaced adapter') f.adaptersMap.set('codex', new FakeAdapter({ implId: 'codex' }))
+      return change === 'bad Native identity' ? [{ pid: process.pid, parent: 0, started: 'wrong', owner: 'wrong', executable: 'wrong' }] : []
+    })
+    if (change !== 'missing observer') (f.fake as WorkerAdapter).captureExecutionProcesses = capture
+    if (change === 'missing adapter') f.adaptersMap.delete('codex')
+    await expect(f.harness.captureWorkspaceRelocationProcesses(scope)).rejects.toBeDefined()
+    expect(f.fake.killCalls).toEqual([]); expect(await f.ledger.listAllWorkers()).toEqual(before)
+  })
+
+  it.each(['new Worker', 'new incarnation', 'changed root', 'closing Agent'])('refuses %s that appears while a carrier is observed', async change => {
+    let ready = true
+    const f = await makeHarness({ implId: 'codex' }, { isWorkspaceRelocationReady: () => ready })
+    const worker = await f.harness.spawnWorker(spawnParams({ impl: 'codex' })), scope = await f.harness.captureWorkspaceRelocationScope()
+    ;(f.fake as WorkerAdapter).captureExecutionProcesses = vi.fn(async () => {
+      if (change === 'closing Agent') ready = false
+      else if (change === 'new Worker') await f.ledger.upsertWorker(worker.manager_key, 'unexpected', () => ({ ...worker, worker_id: 'unexpected' }))
+      else await f.ledger.upsertWorker(worker.manager_key, worker.worker_id, current => ({ ...current!, incarnations: change === 'new incarnation'
+        ? [...current!.incarnations, { ...current!.incarnations[0], incarnation_id: 'unexpected' }]
+        : current!.incarnations.map(inc => ({ ...inc, workspace: '/changed-root' })) }))
+      // Even a nonempty observation cannot suppress a changed scope or closing Agent.
+      return [{ pid: process.pid, parent: process.ppid, started: '1', owner: 'fixture', executable: 'fixture' }]
+    })
+    await expect(f.harness.captureWorkspaceRelocationProcesses(scope)).rejects.toMatchObject({ code: 'WORKSPACE_MAINTENANCE' })
+    expect(f.fake.killCalls).toEqual([])
+  })
+
+  it('refuses an earlier adapter replaced while a later implementation is observed', async () => {
+    const f = await nativeWorker()
+    const claude = new FakeAdapter({ implId: 'claude-code' })
+    f.adaptersMap.set('claude-code', claude)
+    await f.harness.spawnWorker(spawnParams({ impl: 'claude-code' }))
+    const scope = await f.harness.captureWorkspaceRelocationScope()
+    const ordered = scope.map(worker => worker.incarnations[0].impl)
+    const child = spawn(process.execPath, ['-e', 'process.send("ready");setTimeout(()=>process.exit(0),30000)'], { stdio: ['ignore', 'ignore', 'inherit', 'ipc'] })
+    const ended = once(child, 'exit')
+    try {
+      await once(child, 'message')
+      const { captureSpawnedProcessTree } = require('../../../../scripts/lib/spawned-process-tree.cjs')
+      const first = f.adaptersMap.get(ordered[0])!, last = f.adaptersMap.get(ordered[1])!
+      first.captureExecutionProcesses = vi.fn(async () => captureSpawnedProcessTree(child))
+      last.captureExecutionProcesses = vi.fn(async () => {
+        f.adaptersMap.set(ordered[0], new FakeAdapter({ implId: ordered[0] }))
+        return captureSpawnedProcessTree(child)
+      })
+      await expect(f.harness.captureWorkspaceRelocationProcesses(scope)).rejects.toMatchObject({ code: 'WORKSPACE_MAINTENANCE' })
+      expect(f.fake.killCalls).toEqual([]); expect(claude.killCalls).toEqual([])
+    } finally { if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL'); await ended }
+  }, 30000)
+
+  it('does not ask builtin or legacy to vouch for the separate Agent/module process tree', async () => {
+    const f = await makeHarness({}, { isWorkspaceRelocationReady: () => true })
+    const worker = await f.harness.spawnWorker(spawnParams())
+    const legacy: LegacyIncarnation = { incarnation_id: 'history', impl: 'legacy', seq: 1, state: 'exited', workspace: dataDir,
+      started_at: now(), ended_at: now(), ended_reason: 'pre_migration' }
+    await f.ledger.importLegacyWorker(worker.manager_key, { ...worker, worker_id: 'historical-worker',
+      task: { ...worker.task, id: 'historical-task', status: 'closed' }, incarnations: [legacy],
+      legacy_source: { kind: 'v2_admin_task', admin_task_id: 'old-task', trace_ids: [], imported_at: now() } })
+    const capture = vi.fn(async () => { throw new Error('builtin is covered by Agent scope') })
+    ;(f.fake as WorkerAdapter).captureExecutionProcesses = capture
+    expect(await f.harness.captureWorkspaceRelocationProcesses(await f.harness.captureWorkspaceRelocationScope())).toEqual([])
+    expect(capture).not.toHaveBeenCalled(); expect(f.fake.killCalls).toEqual([])
+  })
+})
+
 describe('workspace relocation stop submission', () => {
   function journal() {
     return { prepare: vi.fn(async () => 'dispatch' as 'dispatch' | 'observe'),
