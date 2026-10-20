@@ -1,5 +1,5 @@
 import type { WorkspaceRelocationIncarnation } from 'crabot-shared'
-import { captureColdNativeProcesses } from '../cold-native-processes.js'
+import { captureMetadataNativeProcesses } from '../cold-native-processes.js'
 import { captureHeadlessNativeProcesses } from '../headless-native-processes.js'
 import { nativeRuntimeRoot, nativeEventChannel, nativeEventSource, runtimeWorkspace, verifyNativeBinding, verifyPrivateNativeRuntime, verifyNativeRuntimeMetadata } from '../provision/native-runtime.js'
 /**
@@ -1726,7 +1726,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     if (legacyEnded !== undefined && (legacyEnded !== true || !fixed) || h.impl !== this.implId || !h.incarnation_id || fixed && (fixed.incarnation_id !== h.incarnation_id || fixed.impl !== h.impl || fixed.seq !== h.seq)) throw invalid()
     if (!runtime) {
       if (!fixed) throw invalid()
-      return captureColdNativeProcesses(this.deps.dataDir, h, fixed,
+      return captureMetadataNativeProcesses(this.deps.dataDir, h, fixed,
         () => legacyEnded ? this.tmux.readOptionalProcessCarrier(`crabot-w-${h.worker_id}-${h.seq}`) : this.tmux.readProcessCarrier(`crabot-w-${h.worker_id}-${h.seq}`),
         () => { this.assertActive(); return !this.runtimes.has(instanceKey(h)) }, legacyEnded)
     }
@@ -1737,8 +1737,19 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       processes = captureHeadlessNativeProcesses(runtime.headlessChild, legacyEnded && runtime.controlState.kind === 'exited' ? true : undefined)
     } else {
       if (runtime.sessionName !== `crabot-w-${h.worker_id}-${h.seq}`) throw invalid()
-      const { captureTmuxProcessTree } = require(join(__dirname, '../../../../scripts/lib/tmux-process-tree.cjs'))
-      processes = await captureTmuxProcessTree(() => this.tmux.readProcessCarrier(runtime.sessionName))
+      if (legacyEnded && fixed && runtime.controlState.kind === 'exited') {
+        const sessionName = runtime.sessionName
+        processes = await captureMetadataNativeProcesses(this.deps.dataDir, h, fixed,
+          () => this.tmux.readOptionalProcessCarrier(sessionName), () => {
+            this.assertActive()
+            return this.runtimes.get(instanceKey(h)) === runtime && runtime.incarnation_id === h.incarnation_id
+              && runtime.worker_id === h.worker_id && runtime.seq === h.seq && runtime.sessionName === sessionName
+              && runtime.workspaceRoot === fixed!.workspace && runtime.controlState.kind === 'exited' && !runtime.headlessChild
+          }, true)
+      } else {
+        const { captureTmuxProcessTree } = require(join(__dirname, '../../../../scripts/lib/tmux-process-tree.cjs'))
+        processes = await captureTmuxProcessTree(() => this.tmux.readProcessCarrier(runtime.sessionName))
+      }
     }
     this.assertActive()
     if (this.runtimes.get(instanceKey(h)) !== runtime || runtime.incarnation_id !== h.incarnation_id) throw invalid()

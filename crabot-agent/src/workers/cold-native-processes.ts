@@ -36,8 +36,8 @@ async function readMetadata(dataDir: string, workerId: string, seq: number) {
   } finally { await handle.close() }
 }
 
-/** Read-only cold metadata; legacy absence still needs the caller's original upgrade boundary. */
-export async function captureColdNativeProcesses(dataDir: string, h: IncarnationHandle, fixed: WorkspaceRelocationIncarnation,
+/** Read-only metadata and exact carrier; the caller supplies its runtime consistency check. */
+export async function captureMetadataNativeProcesses(dataDir: string, h: IncarnationHandle, fixed: WorkspaceRelocationIncarnation,
   readCarrier: () => Promise<TmuxProcessCarrier | null>, isCurrent: () => boolean, legacyEnded?: true): Promise<ReadonlyArray<WorkerProcessIdentity>> {
   try {
     const fork = fixed.forked_from !== undefined || fixed.query_id !== undefined || h.query_id !== undefined

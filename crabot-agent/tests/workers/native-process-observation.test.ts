@@ -373,3 +373,49 @@ describe.each(['claude-code', 'codex'] as const)('%s fixed legacy cold fork', im
     } finally { await live?.close() }
   })
 })
+
+async function residentMetadata(impl: 'claude-code' | 'codex', fork = false) {
+  const f = make(impl), fixed = { ...fixedIncarnation(f.h), ...(fork ? { forked_from: 'original-parent', query_id: 'original-query' } : {}) }
+  if (fork) f.h.query_id = fixed.query_id
+  const file = await coldMetadata(f, fixed), value = JSON.parse(await fs.readFile(file, 'utf8'))
+  await fs.writeFile(file, JSON.stringify({ ...value, state: 'exited' }))
+  Object.assign(f.runtime, { workspaceRoot: fixed.workspace, controlState: { kind: 'exited' } })
+  f.runtimes.set('worker#1', f.runtime)
+  return { ...f, fixed, file }
+}
+describe.each(['claude-code', 'codex'] as const)('%s resident legacy headed metadata', impl => {
+  it.each([false, true])('retains original absence after history rebuilt the runtime; fork=%s', async fork => {
+    const f = await residentMetadata(impl, fork), before = await fs.readFile(f.file), rebuild = vi.spyOn(f.adapter as any, 'ensureRuntime')
+    f.tmux.readOptionalProcessCarrier.mockResolvedValue(null)
+    expect(await f.adapter.captureExecutionProcesses!(f.h, f.fixed, true)).toEqual([])
+    expect(f.tmux.readOptionalProcessCarrier).toHaveBeenCalledTimes(2)
+    expect(f.runtimes.get('worker#1')).toBe(f.runtime)
+    expect(await fs.readFile(f.file)).toEqual(before); expect(rebuild).not.toHaveBeenCalled(); expect(f.tmux.killSession).not.toHaveBeenCalled()
+  })
+  it('keeps the actual live mainline despite the old ended runtime', async () => {
+    const f = await residentMetadata(impl), live = await finiteCarrier(f)
+    f.tmux.readOptionalProcessCarrier.mockResolvedValue(live.carrier)
+    try {
+      expect(await f.adapter.captureExecutionProcesses!(f.h, f.fixed, true)).toMatchObject([{ pid: live.child.pid }])
+      expect(live.child.exitCode).toBeNull(); expect(f.tmux.killSession).not.toHaveBeenCalled()
+    } finally { await live.close() }
+  })
+  it.each(['ordinary strict path', 'running metadata', 'changed runtime', 'changed control state', 'changed metadata', 'changed Worker', 'changed seq', 'changed session', 'changed root', 'became headless', 'query error'])('rejects resident metadata uncertainty: %s', async change => {
+    const f = await residentMetadata(impl)
+    if (change === 'running metadata') await fs.writeFile(f.file, JSON.stringify({ seq: 1, session_id: f.h.session_ref, workspace_root: f.fixed.workspace, state: 'running' }))
+    f.tmux.readOptionalProcessCarrier.mockImplementation(async () => {
+      if (change === 'changed runtime') f.runtimes.set('worker#1', { ...f.runtime })
+      if (change === 'changed control state') (f.runtime as any).controlState = { kind: 'running' }
+      if (change === 'changed Worker') f.runtime.worker_id = 'different-worker'
+      if (change === 'changed seq') f.runtime.seq = 2
+      if (change === 'changed session') f.runtime.sessionName = 'different-session'
+      if (change === 'changed root') (f.runtime as any).workspaceRoot = join(directory, 'different-root')
+      if (change === 'became headless') (f.runtime as any)[impl === 'codex' ? 'headlessClient' : 'headlessChild'] = {}
+      if (change === 'changed metadata') await fs.writeFile(f.file, JSON.stringify({ seq: 1, session_id: f.h.session_ref, workspace_root: f.fixed.workspace, state: 'running' }))
+      if (change === 'query error') throw new Error('native unavailable')
+      return null
+    })
+    await expect(f.adapter.captureExecutionProcesses!(f.h, f.fixed, change === 'ordinary strict path' ? undefined : true)).rejects.toBeDefined()
+    expect(f.tmux.killSession).not.toHaveBeenCalled()
+  })
+})
