@@ -1,0 +1,33 @@
+diff --git a/crabot-agent/src/guidance/catalog.ts b/crabot-agent/src/guidance/catalog.ts
+index ac97130c..f97b283b 100644
+--- a/crabot-agent/src/guidance/catalog.ts
++++ b/crabot-agent/src/guidance/catalog.ts
+@@ -46 +46 @@ export function createGuidanceTool(role: GuidanceRole, options: GuidanceOptions
+-    description: '按名称读取内置工作流。首次进入目录描述的场景时，在相关动作前读取；上下文已有完整有效正文则直接沿用。仅支持当前角色目录，与用户 Skill 独立。',
++    description: '按名称读取内置工作流。仅在当前任务满足目录中的适用条件、且上下文缺少完整有效正文时，在相关动作前读取；已有正文直接沿用。仅支持当前角色目录，与用户 Skill 独立。',
+diff --git a/crabot-agent/src/guidance/content.ts b/crabot-agent/src/guidance/content.ts
+index 15a94923..d038577f 100644
+--- a/crabot-agent/src/guidance/content.ts
++++ b/crabot-agent/src/guidance/content.ts
+@@ -22,2 +22,2 @@ export const GUIDANCE = {
+-    title: '项目接手与交付检查',
+-    body: `适用：需要定位已有项目、准备持续开发委托、切换工作区，或检查项目交付特有的文档与版本要求。普通问答和简单验收不启动完整项目流程。
++    title: '项目定位与开发安排',
++    body: `适用：项目目录尚未确定，或需要安排代码、项目文档变更、Git 操作及版本发布。已知目录下的单次业务操作不启动本流程。
+@@ -73,2 +73,2 @@ export const GUIDANCE = {
+-    title: '项目接手、修改与交付',
+-    body: `适用：持续项目开发需要接手规则、确认版本基线、同步文档或准备交付。只读、问答和一次性文件处理不初始化项目，只读取当前动作所需规则，不默认检查完整开发与部署基线。
++    title: '代码与项目文档变更',
++    body: `适用：修改项目代码或文档、初始化仓库、操作 Git 或发布版本。只读查询和使用现有工具完成的单次业务操作不启动本流程。
+@@ -79,2 +79,2 @@ export const GUIDANCE = {
+-1. 读取现有规则入口，按任务查阅相关架构、协议、命令和已有决定；核对权威正文，不遍历无关文档。名称、“最新”字样或旧报告不能证明内容有效。
+-2. 修改前确认版本状态和已有暂存、未提交工作的归属。使用版本观察工具，在初始化、分支、提交等关键动作前后核对；观察不代表没有并发改动。必要基线不明时先排查，暂停依赖它的修改。
++1. 沿用上下文中完整有效的规则与方法，只补影响当前任务的缺口；规则缺失或有变化证据时查阅对应正文，不遍历无关文档。名称、“最新”字样或旧报告不能证明内容有效。
++2. 修改项目代码或文档前确认版本状态和已有暂存、未提交工作的归属。使用版本观察工具，在初始化、分支、提交等关键动作前后核对；观察不代表没有并发改动。必要基线不明时先排查，暂停依赖它的修改。
+diff --git a/crabot-agent/src/manager/prompt.ts b/crabot-agent/src/manager/prompt.ts
+index c59b480b..fcac00d8 100644
+--- a/crabot-agent/src/manager/prompt.ts
++++ b/crabot-agent/src/manager/prompt.ts
+@@ -35 +35 @@ export const MANAGER_EXECUTOR_COLLABORATION = `主控不是传话筒。人类和
+-委托围绕人类目标、必要约束和完成证据，不自行增加前置门槛或更强的验收条件；已有方法和证据足够时直接复用，只安排补齐实际缺口。
++委托围绕人类目标、必要约束和完成证据，不自行增加前置门槛或更强的验收条件；交接有效规则、方法和成果，区分仍需核实的现场事实，不把建议步骤或历史结果升级为约束。
