@@ -178,3 +178,19 @@ test('failed startup fixture reports the exit and identity evidence before clean
     return true
   })
 })
+
+test('Windows repeated Unicode-path registration retains exact parent identity through delayed startup', { skip: process.platform !== 'win32', timeout: 30000 }, async t => {
+  for (let iteration = 0; iteration < 8; iteration++) {
+    try {
+      const f = await fixture(t, 100, 250)
+      assert.equal(inspectInstance(f.data).state, 'running')
+      await stopInstance(f.data)
+      assert.equal(readFileSync(f.marker, 'utf8'), 'graceful')
+      assert.equal(readInstanceRuntime(f.data), null)
+      await f.exited
+    } catch (error) {
+      t.diagnostic('Windows registration iteration ' + (iteration + 1))
+      throw error
+    }
+  }
+})
