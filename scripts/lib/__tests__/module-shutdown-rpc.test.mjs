@@ -5,6 +5,7 @@ import { once } from 'node:events'
 import identity from '../process-identity.cjs'
 import moduleRpc from '../module-shutdown-rpc.cjs'
 import transport from '../pinned-process-rpc.cjs'
+import runtimeRpc from '../module-runtime-rpc.cjs'
 
 const expected = { instance_id: 'fixture-instance', module_id: 'fixture-memory', runtime_id: 'fixture-generation' }
 async function fixture(t, handler) {
@@ -97,4 +98,32 @@ test('overlapping calls fail closed without creating a second connection', async
   await assert.rejects(rpc.call('shutdown', {}), { code: 'CRABOT_PROCESS_RPC' })
   await first
   assert.equal(f.sockets.size, 1); assert.equal(f.calls.length, 1)
+})
+
+
+test('runtime-bound verification sends human bearer only on the requested call after the credential-free probe', async t => {
+  const headers = [], bearer = 'fixture-human-bearer'
+  const f = await fixture(t, (req, res, body, data) => {
+    headers.push(req.headers.authorization)
+    assert.equal(JSON.stringify(body).includes(bearer), false)
+    res.end(JSON.stringify({ id: body.id, success: true, data }))
+  })
+  const rpc = await runtimeRpc.openModuleRuntimeRpc(f.process, f.port, expected)
+  t.after(() => rpc.close())
+  await rpc.call('verify_workspace_relocation_request', { intent_id: 'fixed', intent_sha256: 'fixed' }, { authorizationBearer: bearer })
+  await rpc.call('get_runtime_identity', {})
+  assert.deepEqual(headers, [undefined, 'Bearer ' + bearer, undefined])
+  assert.equal(f.sockets.size, 1)
+})
+test('wrong module runtime never receives a human bearer', async t => {
+  const headers = []
+  const f = await fixture(t, (req, res, body, data) => { headers.push(req.headers.authorization); res.end(JSON.stringify({ id: body.id, success: true, data })) })
+  await assert.rejects(runtimeRpc.openModuleRuntimeRpc(f.process, f.port, { ...expected, runtime_id: 'other' }))
+  assert.deepEqual(headers, [undefined]); assert.equal(f.calls.length, 1)
+})
+for (const bearer of ['', 'bad\r\nheader']) test('invalid request bearer is refused before transmission: ' + JSON.stringify(bearer), async t => {
+  const f = await fixture(t), rpc = await runtimeRpc.openModuleRuntimeRpc(f.process, f.port, expected)
+  t.after(() => rpc.close())
+  await assert.rejects(rpc.call('verify_workspace_relocation_request', {}, { authorizationBearer: bearer }))
+  assert.equal(f.calls.length, 1)
 })

@@ -24,6 +24,8 @@ import {
   type RegisterParams,
   type SubscribeParams,
   type PublishEventParams,
+  type VerifyWorkspaceRelocationRequestParams,
+  type VerifyWorkspaceRelocationRequestResult,
   assertWorkspaceExecutionAllowed,
   workspaceMaintenancePending,
   sha256CanonicalJson,
@@ -1152,6 +1154,62 @@ export class ModuleManager {
   // ============================================================================
   // 进程管理
   // ============================================================================
+
+  private async verifyWorkspaceRelocationRequest(
+    params: VerifyWorkspaceRelocationRequestParams, bearer?: string,
+  ): Promise<VerifyWorkspaceRelocationRequestResult> {
+    const unavailable = () => Object.assign(new Error('迁移请求无法经当前Admin核验，已保留维护保护。'), { code: 'SERVICE_UNAVAILABLE' })
+    if (typeof bearer !== 'string' || !bearer) throw Object.assign(new Error('Human Admin credential required'), { code: 'UNAUTHORIZED' })
+    const runtime = this.modules.get('admin-web'), child = this.processes.get('admin-web')
+    const state = child ? this.childStates.get(child) : undefined
+    if (!runtime || !child?.pid || !state) throw unavailable()
+    const port = runtime.port, runtimeId = state.runtimeId, rootPid = child.pid
+    const verifyCurrent = (): void => {
+      if (this.isShuttingDown || this.modules.get('admin-web') !== runtime || runtime.module_type !== 'admin' || runtime.status !== 'running'
+        || runtime.port !== port || runtime.pid !== rootPid || this.processes.get('admin-web') !== child || this.childStates.get(child) !== state
+        || state.runtimeId !== runtimeId || state.rootPid !== rootPid || state.rootExited || !state.reachedRunning
+        || state.finalizeStarted || state.termination || child.exitCode !== null || child.signalCode !== null) throw unavailable()
+    }
+    let rpc: { call(method: string, params: unknown, options?: { authorizationBearer?: string }): Promise<unknown>; close(): void } | undefined
+    try {
+      verifyCurrent()
+      const records = (await this.runtimeRegistry.listRecords()).filter(record => record.module_id === 'admin-web')
+      const record = records[0], fingerprint = sha256CanonicalJson(records)
+      verifyCurrent()
+      if (records.length !== 1 || record.instance_id !== this.runtimeRegistry.getInstanceId() || record.runtime_id !== runtimeId
+        || record.root_pid !== rootPid || record.module_port !== port || await probeProcessStartIdentity(rootPid) !== record.process_start_identity) throw unavailable()
+      verifyCurrent()
+      const native = require('../../scripts/lib/process-identity.cjs'), { captureSpawnedProcessTree } = require('../../scripts/lib/spawned-process-tree.cjs')
+      const processes: WorkspaceModuleScope['processes'] = captureSpawnedProcessTree(child), root = processes.find(item => item.pid === rootPid)
+      if (!root || await probeProcessStartIdentity(rootPid) !== record.process_start_identity) throw unavailable()
+      verifyCurrent()
+      const listeners = processes.filter(item => native.sameProcess(item, native.inspectProcess(item.pid)) && native.listListeningTcpPorts(item.pid).includes(port))
+      if (listeners.length !== 1) throw unavailable()
+      const { openModuleRuntimeRpc } = require('../../scripts/lib/module-runtime-rpc.cjs')
+      rpc = await openModuleRuntimeRpc(listeners[0], port, { instance_id: record.instance_id, module_id: 'admin-web', runtime_id: runtimeId }, { timeoutMs: 1500 })
+      verifyCurrent()
+      const response = await rpc!.call('verify_workspace_relocation_request', params, { authorizationBearer: bearer })
+      verifyCurrent()
+      if (!response || typeof response !== 'object' || Array.isArray(response) || Object.keys(response).length !== 3
+        || !Object.keys(response).every(key => key === 'verified' || key === 'intent_id' || key === 'intent_sha256')) throw unavailable()
+      const verified = response as Partial<VerifyWorkspaceRelocationRequestResult>
+      if (verified.verified !== true || verified.intent_id !== params.intent_id || verified.intent_sha256 !== params.intent_sha256) throw unavailable()
+      if (sha256CanonicalJson((await this.runtimeRegistry.listRecords()).filter(record => record.module_id === 'admin-web')) !== fingerprint) throw unavailable()
+      verifyCurrent()
+      if (!native.sameProcess(root, native.inspectProcess(rootPid))) throw unavailable()
+      const { readWorkspaceRelocationIntent } = require('../../scripts/lib/workspace-relocation-intent.mjs')
+      const intent = readWorkspaceRelocationIntent(this.dataDir)
+      if (!intent) throw unavailable()
+      const intentHash = sha256CanonicalJson(intent)
+      if (intent.id !== params.intent_id || intentHash !== params.intent_sha256) {
+        throw Object.assign(new Error('Workspace request does not match this instance'), { code: 'FORBIDDEN' })
+      }
+      return { verified: true, intent_id: intent.id, intent_sha256: intentHash }
+    } catch (error) {
+      if ((error as { code?: string }).code === 'FORBIDDEN') throw error
+      throw unavailable()
+    } finally { rpc?.close() }
+  }
 
   async captureWorkspaceRelocationModules(): Promise<ReadonlyArray<WorkspaceModuleScope>> {
     const fail = (): never => { throw Object.assign(new Error('执行模块范围无法完整核验，保留维护保护。'), { code: 'CRABOT_WORKSPACE_MODULE_SCOPE' }) }

@@ -32,15 +32,18 @@ async function openPinnedProcessRpc(expected, port, { signal, timeoutMs = 5000 }
     }
   } catch { close(); throw unavailable() }
 
-  async function call(method, params, { verifyAfter = true } = {}) {
+  async function call(method, params, { verifyAfter = true, authorizationBearer } = {}) {
     try {
       verify()
       if (pending || socket.destroyed || typeof method !== 'string' || !/^[a-z][a-z0-9_]*$/.test(method)) throw unavailable()
+      if (authorizationBearer !== undefined && (typeof authorizationBearer !== 'string' || !authorizationBearer || /[\r\n]/.test(authorizationBearer))) throw unavailable()
       pending = true
       const id = randomUUID(), text = JSON.stringify({ id, source: 'module-manager', method, params, timestamp: new Date().toISOString() })
       const result = await new Promise((resolve, reject) => {
         const req = request({ host: '127.0.0.1', port, path: '/' + method, method: 'POST', agent,
-          headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(text) }, signal: deadline(),
+          headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(text),
+            ...(authorizationBearer === undefined ? {} : { Authorization: 'Bearer ' + authorizationBearer }),
+          }, signal: deadline(),
         }, async response => {
           try {
             const chunks = []; let size = 0
