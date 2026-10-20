@@ -1,9 +1,9 @@
 // Internal physical copier only. Directories are inherited kernel handles, never paths to re-resolve after launch.
 import fs from 'node:fs'
-import { spawn } from 'node:child_process'
 import { finished } from 'node:stream/promises'
 import native from './lib/process-identity.cjs'
 import { syncWorkspaceDirectoryFd } from './lib/workspace-sync.mjs'
+import { spawnWorkspaceTar } from './lib/workspace-tar.mjs'
 
 if (process.platform !== 'darwin' && process.platform !== 'linux'
   || process.argv.length !== 6 || !process.argv.slice(2).every(value => /^(?:0|[1-9][0-9]*)$/.test(value))) {
@@ -22,29 +22,26 @@ function stop() {
     for (const child of actors) if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
   }, 2000)
 }
-function actor(args) {
-  const child = spawn('/usr/bin/tar', args, { stdio: ['pipe', 'pipe', 'inherit'] })
+async function actor(mode) {
+  const gated = await spawnWorkspaceTar(mode), child = gated.child
   actors.push(child)
-  const closed = new Promise(resolve => {
-    child.once('error', () => { stop(); resolve(false) })
-    child.once('close', code => { if (code !== 0) stop(); resolve(code === 0) })
-  })
+  const closed = gated.closed.then(code => { if (code !== 0) stop(); return code === 0 })
   completions.push(closed)
-  return { child, closed }
+  return { ...gated, closed }
 }
 try {
-  const metadata = process.platform === 'darwin'
-    ? ['--acls', '--xattrs', '--fflags', '--mac-metadata'] : ['--acls', '--xattrs', '--xattrs-include=*']
   native.enterDirectoryFd(3, sourceDevice, sourceInode)
-  const pack = actor(['-c', '--format=pax', ...metadata, '-f', '-', '.'])
+  const pack = await actor('pack')
   pack.child.stdin.end()
   native.enterDirectoryFd(treeFd, tree.dev.toString(), tree.ino.toString())
-  const unpack = actor(['-x', ...metadata, '--same-owner', '--same-permissions', '-f', '-'])
+  const unpack = await actor('unpack')
   // No -v or -O: archive bytes only flow between these two owned processes, never into logs.
   unpack.child.stdout.resume()
   pack.child.stdout.on('error', stop)
   pack.child.stdout.pipe(unpack.child.stdin)
   const transport = finished(unpack.child.stdin).catch(() => { stop() })
+  if (failed) throw new Error('Workspace copy actor exited before permission')
+  await pack.permit(); await unpack.permit()
   const results = await Promise.all([pack.closed, unpack.closed, transport])
   if (failed || results[0] !== true || results[1] !== true) process.exitCode = 1
   else {
