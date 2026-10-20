@@ -2037,7 +2037,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       || fixed && runtime.workspaceRoot !== fixed.workspace) throw invalid()
     let processes: ReadonlyArray<WorkerProcessIdentity>
     if (runtime.headlessClient) {
-      processes = runtime.headlessClient.captureExecutionProcesses()
+      processes = runtime.headlessClient.captureExecutionProcesses(legacyEnded && runtime.controlState.kind === 'exited' ? true : undefined)
     } else {
       if (runtime.sessionName !== `crabot-w-${h.worker_id}-${h.seq}`) throw invalid()
       const { captureTmuxProcessTree } = require(join(__dirname, '../../../../scripts/lib/tmux-process-tree.cjs'))

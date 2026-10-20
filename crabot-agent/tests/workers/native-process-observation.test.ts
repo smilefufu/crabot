@@ -295,3 +295,52 @@ it.skipIf(!hasPrivateTmuxSupport())('observes real absent private servers throug
     } finally { await adapter.dispose() }
   }
 }, 30000)
+
+async function residentHeadless(impl: 'claude-code' | 'codex') {
+  const f = make(impl), fixed = fixedIncarnation(f.h)
+  Object.assign(f.runtime, { workspaceRoot: fixed.workspace, controlState: { kind: 'exited' } })
+  if (impl === 'claude-code') {
+    const live = await finiteCarrier(f)
+    ;(f.runtime as any).headlessChild = live.child
+    return { ...f, fixed, child: live.child, close: live.close }
+  }
+  const ready = join(directory, 'headless-ready')
+  const source = `require('node:fs').writeFileSync(${JSON.stringify(ready)},'ready');setTimeout(()=>process.exit(0),30000)`
+  const quote = (value: string) => "'" + value.replace(/'/g, "'\\''") + "'"
+  const client = new CodexAppServerClient({ command: quote(process.execPath) + ' -e ' + quote(source), cwd: directory, env: { PATH: process.env.PATH ?? '' } })
+  ;(f.runtime as any).headlessClient = client
+  try {
+    const deadline = Date.now() + 5000
+    while (!(await fs.stat(ready).catch(() => null))) { expect(Date.now()).toBeLessThan(deadline); await new Promise(resolve => setTimeout(resolve, 10)) }
+  } catch (error) { await client.terminate(); throw error }
+  // Protocol completion deliberately precedes the physical process exit.
+  ;(client as any).finish(new Error('controlled protocol disconnect'))
+  return { ...f, fixed, child: (client as any).child, close: async () => { expect(await client.terminate()).toBe(true) } }
+}
+describe.each(['claude-code', 'codex'] as const)('%s resident legacy headless', impl => {
+  const skip = process.platform === 'win32' && impl === 'codex'
+  it.skipIf(skip)('keeps the actual live child after an ended runtime or protocol-only disconnect', async () => {
+    const f = await residentHeadless(impl)
+    try {
+      expect(await f.adapter.captureExecutionProcesses!(f.h, f.fixed, true)).toMatchObject([{ pid: f.child.pid, parent: process.pid }])
+      expect(f.child.exitCode).toBeNull(); expect(f.child.signalCode).toBeNull(); expect(f.tmux.killSession).not.toHaveBeenCalled()
+    } finally { await f.close() }
+  })
+  it.skipIf(skip)('consumes actual child exit only with the original context and exited runtime', async () => {
+    const f = await residentHeadless(impl), rebuild = vi.spyOn(f.adapter as any, 'ensureRuntime')
+    try {
+      await f.close()
+      await expect(f.adapter.captureExecutionProcesses!(f.h, f.fixed)).rejects.toBeDefined()
+      const result = await f.adapter.captureExecutionProcesses!(f.h, f.fixed, true)
+      expect(result).toEqual([]); expect(Object.isFrozen(result)).toBe(true)
+      expect(rebuild).not.toHaveBeenCalled(); expect(f.tmux.readProcessCarrier).not.toHaveBeenCalled(); expect(f.tmux.killSession).not.toHaveBeenCalled()
+    } finally { await f.close() }
+  })
+  it.skipIf(skip)('rejects a conflicting running state even after actual child exit', async () => {
+    const f = await residentHeadless(impl)
+    try {
+      await f.close(); (f.runtime as any).controlState = { kind: 'running' }
+      await expect(f.adapter.captureExecutionProcesses!(f.h, f.fixed, true)).rejects.toBeDefined()
+    } finally { await f.close() }
+  })
+})

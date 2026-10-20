@@ -1,5 +1,6 @@
 import type { WorkspaceRelocationIncarnation } from 'crabot-shared'
 import { captureColdNativeProcesses } from '../cold-native-processes.js'
+import { captureHeadlessNativeProcesses } from '../headless-native-processes.js'
 import { nativeRuntimeRoot, nativeEventChannel, nativeEventSource, runtimeWorkspace, verifyNativeBinding, verifyPrivateNativeRuntime, verifyNativeRuntimeMetadata } from '../provision/native-runtime.js'
 /**
  * Claude Code WorkerAdapter.
@@ -1733,8 +1734,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       || fixed && runtime.workspaceRoot !== fixed.workspace) throw invalid()
     let processes: ReadonlyArray<WorkerProcessIdentity>
     if (runtime.headlessChild) {
-      const { captureSpawnedProcessTree } = require(join(__dirname, '../../../../scripts/lib/spawned-process-tree.cjs'))
-      processes = captureSpawnedProcessTree(runtime.headlessChild)
+      processes = captureHeadlessNativeProcesses(runtime.headlessChild, legacyEnded && runtime.controlState.kind === 'exited' ? true : undefined)
     } else {
       if (runtime.sessionName !== `crabot-w-${h.worker_id}-${h.seq}`) throw invalid()
       const { captureTmuxProcessTree } = require(join(__dirname, '../../../../scripts/lib/tmux-process-tree.cjs'))
