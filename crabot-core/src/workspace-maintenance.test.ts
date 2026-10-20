@@ -4,7 +4,7 @@ import path from 'node:path'
 import { tmpdir } from 'node:os'
 import ModuleManager from './index.js'
 
-describe.each(['relocation.json', 'relocation-workers.json'])('workspace maintenance module admission: %s', record => {
+describe.each(['relocation.json', 'relocation-workers.json', 'relocation-stop-attempt.json', 'relocation-stop-submission.json'])('workspace maintenance module admission: %s', record => {
   async function fixture() {
     const data = await fs.mkdtemp(path.join(tmpdir(), 'crabot-mm-workspace-gate-'))
     const manager = new ModuleManager({ port: 0, modules: [], hotplug_allowed_types: ['channel'],
@@ -18,7 +18,7 @@ describe.each(['relocation.json', 'relocation-workers.json'])('workspace mainten
       await fs.mkdir(path.join(data, 'workspace-control'), { recursive: true })
       await fs.writeFile(path.join(data, 'workspace-control', record), 'fixed-job')
     }
-    return { data, manager, freeze, cleanup: () => fs.rm(data, { recursive: true, force: true }) }
+    return { data, manager, freeze, cleanup: async () => { manager.processes.clear(); await manager.stop(); await fs.rm(data, { recursive: true, force: true }) } }
   }
 
   it('rejects ordinary business start/restart before queueing but permits Admin and stop requests', async () => {
@@ -48,4 +48,48 @@ describe.each(['relocation.json', 'relocation-workers.json'])('workspace mainten
       expect(await fs.readdir(f.data)).toEqual(before)
     } finally { await f.cleanup() }
   })
+
+  it('defers execution health recovery but keeps Admin management recovery available', async () => {
+    const f = await fixture(), enqueue = vi.spyOn(f.manager, 'enqueueLifecycle').mockResolvedValue(undefined)
+    try {
+      await f.freeze()
+      f.manager.scheduleHealthRecovery(f.manager.modules.get('memory'), undefined)
+      expect(enqueue).not.toHaveBeenCalled()
+      f.manager.scheduleHealthRecovery(f.manager.modules.get('admin-web'), undefined)
+      expect(enqueue).toHaveBeenCalledWith('admin-web', expect.any(Function))
+      await vi.waitFor(() => expect(f.manager.healthRecoveries.size).toBe(0))
+    } finally { await f.cleanup() }
+  })
+
+  it('defers automatic execution restart without spending its restart allowance, while Admin may recover', async () => {
+    const f = await fixture()
+    try {
+      await f.freeze()
+      const memory = f.manager.modules.get('memory'), admin = f.manager.modules.get('admin-web')
+      memory.auto_restart = admin.auto_restart = true
+      await f.manager.scheduleAutomaticRestart(memory)
+      expect(f.manager.restartTimers.size).toBe(0)
+      expect(memory.restart_history).toBeUndefined()
+      await f.manager.scheduleAutomaticRestart(admin)
+      expect(f.manager.restartTimers.has('admin-web')).toBe(true)
+    } finally { await f.cleanup() }
+  })
+
+  it('rechecks late queued health recovery after the persistent fence appears', async () => {
+    const f = await fixture(), stop = vi.spyOn(f.manager, 'stopModuleProcess').mockResolvedValue(undefined)
+    let release!: () => void
+    const held = new Promise<void>(resolve => { release = resolve })
+    try {
+      const child = {}, memory = f.manager.modules.get('memory')
+      memory.status = 'running'; f.manager.processes.set('memory', child)
+      void f.manager.enqueueLifecycle('memory', () => held)
+      f.manager.scheduleHealthRecovery(memory, child)
+      const queued = f.manager.lifecycleQueues.get('memory')
+      await f.freeze(); release(); await queued
+      await vi.waitFor(() => expect(f.manager.healthRecoveries.size).toBe(0))
+      expect(stop).not.toHaveBeenCalled()
+      expect(memory.status).toBe('running')
+    } finally { release(); await f.cleanup() }
+  })
+
 })

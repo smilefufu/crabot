@@ -25,6 +25,7 @@ import {
   type SubscribeParams,
   type PublishEventParams,
   assertWorkspaceExecutionAllowed,
+  workspaceMaintenancePending,
   generateId,
   generateTimestamp,
   createSuccessResponse,
@@ -1632,11 +1633,17 @@ export class ModuleManager {
     }
   }
 
+  private workspaceRecoveryPaused(moduleId: ModuleId): boolean {
+    return moduleId !== 'admin-web' && workspaceMaintenancePending(this.dataDir)
+  }
+
   private async scheduleAutomaticRestart(runtime: ModuleRuntime): Promise<void> {
     if (this.isShuttingDown || !runtime.auto_restart) {
       await this.transitionHealthStatus(runtime, 'unhealthy')
       return
     }
+
+    if (this.workspaceRecoveryPaused(runtime.module_id)) return
 
     const decision = scheduleRestart(runtime.restart_history ?? { attempts: [] }, Date.now())
     runtime.restart_history = decision.next_history
@@ -1754,7 +1761,7 @@ export class ModuleManager {
   }
 
   private scheduleHealthRecovery(runtime: ModuleRuntime, failedChild: ChildProcess | undefined): void {
-    if (this.isShuttingDown || this.healthRecoveries.has(runtime.module_id)) return
+    if (this.isShuttingDown || this.workspaceRecoveryPaused(runtime.module_id) || this.healthRecoveries.has(runtime.module_id)) return
     this.healthRecoveries.add(runtime.module_id)
 
     this.enqueueLifecycle(runtime.module_id, async () => {
@@ -1762,6 +1769,7 @@ export class ModuleManager {
         if (!this.processes.has(runtime.module_id) && runtime.status === 'running') runtime.status = 'error'
         return
       }
+      if (this.workspaceRecoveryPaused(runtime.module_id)) return
       await this.stopModuleProcess(runtime.module_id, 'health_check_failed')
     }).catch((error) => {
       runtime.status = 'error'
