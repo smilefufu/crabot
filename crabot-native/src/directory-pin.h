@@ -4,6 +4,7 @@
 struct DirectoryPin {
   std::vector<HANDLE> handles;
   std::string identity;
+  std::wstring path;
   void Close() { for (auto it = handles.rbegin(); it != handles.rend(); ++it) CloseHandle(*it); handles.clear(); }
   ~DirectoryPin() { Close(); }
 };
@@ -45,6 +46,7 @@ static napi_value PinDirectory(napi_env env, napi_callback_info info) {
     if (wide.size() <= 7 || wide.rfind(L"\\\\?\\", 0) != 0 || wide[5] != L':' || wide[6] != L'\\') {
       throw std::runtime_error("Directory pin requires a local DOS volume path");
     }
+    pin->path = wide;
     std::vector<std::wstring> paths{ wide.substr(0, 7) };
     size_t start = 7;
     for (;;) {
@@ -73,15 +75,56 @@ static napi_value PinDirectory(napi_env env, napi_callback_info info) {
     pin.release(); return result;
   } catch (const std::exception& error) { napi_throw_error(env, "CRABOT_DIRECTORY_PIN", error.what()); return nullptr; }
 }
+static DirectoryPin* OwnedDirectoryPin(napi_env env, napi_value value, bool allowClosed = false) {
+  bool tagged = false; void* data = nullptr; napi_valuetype type = napi_undefined;
+  napi_typeof(env, value, &type);
+  if (type != napi_object || napi_check_object_type_tag(env, value, &DirectoryPinTag, &tagged) != napi_ok || !tagged
+    || napi_unwrap(env, value, &data) != napi_ok || !data) throw std::runtime_error("Expected an owned directory pin");
+  auto pin = static_cast<DirectoryPin*>(data);
+  if (!allowClosed && pin->handles.empty()) throw std::runtime_error("Directory pin has been released");
+  return pin;
+}
 static napi_value ReleaseDirectoryPin(napi_env env, napi_callback_info info) {
   try {
     size_t argc = 2; napi_value args[2]; napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
-    bool tagged = false; void* data = nullptr; napi_valuetype type = napi_undefined;
-    if (argc == 1) napi_typeof(env, args[0], &type);
-    if (argc != 1 || type != napi_object || napi_check_object_type_tag(env, args[0], &DirectoryPinTag, &tagged) != napi_ok || !tagged
-      || napi_unwrap(env, args[0], &data) != napi_ok || !data) throw std::runtime_error("Expected an owned directory pin");
-    static_cast<DirectoryPin*>(data)->Close();
+    if (argc != 1) throw std::runtime_error("Expected an owned directory pin");
+    OwnedDirectoryPin(env, args[0], true)->Close();
     napi_value value; napi_get_undefined(env, &value); return value;
   } catch (const std::exception& error) { napi_throw_error(env, "CRABOT_DIRECTORY_PIN", error.what()); return nullptr; }
+}
+
+// Physical metadata only, on two distinct pinned directory objects. The job owns staging authorization and readback.
+static napi_value CopyPinnedDirectoryMetadata(napi_env env, napi_callback_info info) {
+  HANDLE write = INVALID_HANDLE_VALUE; PSECURITY_DESCRIPTOR sourceDescriptor = nullptr, targetDescriptor = nullptr;
+  try {
+    size_t argc = 3; napi_value args[3]; napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    if (argc != 2) throw std::runtime_error("Expected two owned directory pins");
+    auto source = OwnedDirectoryPin(env, args[0]), target = OwnedDirectoryPin(env, args[1]);
+    if (source->identity == target->identity) throw std::runtime_error("Source and target directory must be distinct");
+    write = CreateFileW(target->path.c_str(), READ_CONTROL | WRITE_DAC | WRITE_OWNER | FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES,
+      FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    if (write == INVALID_HANDLE_VALUE || DirectoryIdText(PinnedDirectoryId(write)) != target->identity
+      || DirectoryIdText(PinnedDirectoryId(source->handles.back())) != source->identity) throw std::runtime_error("Pinned directory identity changed");
+    PSID sourceOwner = nullptr, sourceGroup = nullptr, targetOwner = nullptr, targetGroup = nullptr; PACL sourceAcl = nullptr, sourceLabel = nullptr;
+    const DWORD fields = OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION;
+    if (GetSecurityInfo(source->handles.back(), SE_FILE_OBJECT, fields, &sourceOwner, &sourceGroup, &sourceAcl, &sourceLabel, &sourceDescriptor) != ERROR_SUCCESS
+      || GetSecurityInfo(write, SE_FILE_OBJECT, fields, &targetOwner, &targetGroup, nullptr, nullptr, &targetDescriptor) != ERROR_SUCCESS
+      || !sourceOwner || !sourceGroup || !targetOwner || !targetGroup
+      || !EqualSid(sourceOwner, targetOwner) || !EqualSid(sourceGroup, targetGroup)) throw std::runtime_error("Cannot preserve pinned directory ownership");
+    FILE_BASIC_INFO basic{}; SECURITY_DESCRIPTOR_CONTROL control = 0; DWORD revision = 0;
+    if (!GetFileInformationByHandleEx(source->handles.back(), FileBasicInfo, &basic, sizeof(basic))
+      || !GetSecurityDescriptorControl(sourceDescriptor, &control, &revision)) throw std::runtime_error("Cannot read pinned directory metadata");
+    const DWORD protection = (control & SE_DACL_PROTECTED) ? PROTECTED_DACL_SECURITY_INFORMATION : UNPROTECTED_DACL_SECURITY_INFORMATION;
+    if (SetSecurityInfo(write, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION | protection, nullptr, nullptr, sourceAcl, sourceLabel) != ERROR_SUCCESS
+      || !SetFileInformationByHandle(write, FileBasicInfo, &basic, sizeof(basic))) throw std::runtime_error("Cannot preserve pinned directory metadata");
+    LocalFree(sourceDescriptor); sourceDescriptor = nullptr; LocalFree(targetDescriptor); targetDescriptor = nullptr;
+    CloseHandle(write); write = INVALID_HANDLE_VALUE;
+    napi_value result; napi_get_undefined(env, &result); return result;
+  } catch (const std::exception& error) {
+    if (sourceDescriptor) LocalFree(sourceDescriptor);
+    if (targetDescriptor) LocalFree(targetDescriptor);
+    if (write != INVALID_HANDLE_VALUE) CloseHandle(write);
+    napi_throw_error(env, "CRABOT_DIRECTORY_METADATA", error.what()); return nullptr;
+  }
 }
 #endif

@@ -4,6 +4,7 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import { tmpdir } from 'node:os'
 import native from '../process-identity.cjs'
+import { execFileSync } from 'node:child_process'
 
 async function fixture(t) {
   const owned = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'crabot-directory-pin-中文 space-')))
@@ -46,4 +47,42 @@ test('Windows pin validation never adopts relative paths, files or another Nativ
     assert.throws(() => native.pinDirectory(...args), { code: 'CRABOT_DIRECTORY_PIN' })
   }
   for (const value of [null, {}, { identity: 'forged' }, 3, 'pin']) assert.throws(() => native.releaseDirectoryPin(value), { code: 'CRABOT_DIRECTORY_PIN' })
+})
+
+test('Windows copies pinned root ACL, attributes and timestamps without changing the source or needing a full tree mirror', { skip: process.platform !== 'win32' }, async t => {
+  const { root, source } = await fixture(t), parent = path.join(root, 'private-parent'), target = path.join(parent, 'target')
+  native.createPrivateDirectory(parent); await fs.mkdir(target)
+  await fs.utimes(source, 1700000000, 1700000000)
+  const { inspectWorkspaceFileMetadata } = await import('../workspace-file-metadata.mjs')
+  const before = await inspectWorkspaceFileMetadata(source), sourcePin = native.pinDirectory(source), targetPin = native.pinDirectory(target)
+  try {
+    native.copyPinnedDirectoryMetadata(sourcePin, targetPin)
+    assert.deepEqual(await inspectWorkspaceFileMetadata(target), before)
+    assert.deepEqual(await inspectWorkspaceFileMetadata(source), before)
+    assert.throws(() => native.copyPinnedDirectoryMetadata(sourcePin, sourcePin), { code: 'CRABOT_DIRECTORY_METADATA' })
+  } finally { native.releaseDirectoryPin(targetPin); native.releaseDirectoryPin(sourcePin) }
+})
+
+test('Windows root metadata rejects closed or forged pins before modifying a target', { skip: process.platform !== 'win32' }, async t => {
+  const { source } = await fixture(t), pin = native.pinDirectory(source)
+  native.releaseDirectoryPin(pin)
+  for (const values of [[pin, pin], [null, pin], [{ identity: 'forged' }, pin], [pin, {}, 'extra']]) {
+    assert.throws(() => native.copyPinnedDirectoryMetadata(...values), { code: 'CRABOT_DIRECTORY_METADATA' })
+  }
+})
+
+
+test('Windows preserves a protected root access ACL and explicit integrity label with unchanged source evidence', { skip: process.platform !== 'win32' }, async t => {
+  const { root, source } = await fixture(t), parent = path.join(root, 'private-parent'), target = path.join(parent, 'target')
+  native.createPrivateDirectory(parent); await fs.mkdir(target)
+  const icacls = path.join(process.env.SystemRoot, 'System32/icacls.exe')
+  execFileSync(icacls, [source, '/inheritance:d'])
+  execFileSync(icacls, [source, '/setintegritylevel', 'L'])
+  const { inspectWorkspaceFileMetadata } = await import('../workspace-file-metadata.mjs')
+  const before = await inspectWorkspaceFileMetadata(source), a = native.pinDirectory(source), b = native.pinDirectory(target)
+  try {
+    native.copyPinnedDirectoryMetadata(a, b)
+    assert.deepEqual(await inspectWorkspaceFileMetadata(target), before)
+    assert.deepEqual(await inspectWorkspaceFileMetadata(source), before)
+  } finally { native.releaseDirectoryPin(b); native.releaseDirectoryPin(a) }
 })

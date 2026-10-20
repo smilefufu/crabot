@@ -15,7 +15,7 @@ export async function inspectWorkspaceFileMetadata(file, { signal } = {}) {
   const before = await fs.lstat(file, { bigint: true }), first = native.inspectFileMetadata(file)
   const valid = value => value && Buffer.isBuffer(value.metadata) && Array.isArray(value.streams)
     && value.streams.every(name => typeof name === 'string' && /^:[^/\\:\0]+$/u.test(name))
-    && Array.isArray(value.copy_blockers) && value.copy_blockers.every(item => ['immutable_or_append', 'system_file_flags', 'linux_file_flags'].includes(item))
+    && Array.isArray(value.copy_blockers) && value.copy_blockers.every(item => ['immutable_or_append', 'system_file_flags', 'linux_file_flags', 'windows_access_policy'].includes(item))
     && new Set(value.streams).size === value.streams.length
     && (process.platform === 'win32' || value.streams.length === 0)
   if (!valid(first)) throw unverified()

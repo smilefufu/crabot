@@ -49,14 +49,24 @@ static std::string MetadataXattrs(const std::string& path) {
   return result;
 }
 #else
-static std::string MetadataSecurity(HANDLE file) {
+static std::string MetadataSecurity(HANDLE file, std::vector<std::string>& blockers) {
   PSECURITY_DESCRIPTOR descriptor = nullptr;
-  const DWORD fields = OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION;
+  const DWORD fields = OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION
+    | LABEL_SECURITY_INFORMATION | ATTRIBUTE_SECURITY_INFORMATION | SCOPE_SECURITY_INFORMATION;
   if (GetSecurityInfo(file, SE_FILE_OBJECT, fields, nullptr, nullptr, nullptr, nullptr, &descriptor) != ERROR_SUCCESS) {
     throw std::runtime_error("Cannot inspect file owner and access ACL");
   }
+  BOOL present = FALSE, defaulted = FALSE; PACL access = nullptr;
+  if (!GetSecurityDescriptorSacl(descriptor, &present, &access, &defaulted)) { LocalFree(descriptor); throw std::runtime_error("Cannot inspect access security labels"); }
+  if (present && access) for (DWORD i = 0; i < access->AceCount; i++) {
+    void* entry = nullptr;
+    if (!GetAce(access, i, &entry)) { LocalFree(descriptor); throw std::runtime_error("Cannot inspect access policy entry"); }
+    if (static_cast<ACE_HEADER*>(entry)->AceType != SYSTEM_MANDATORY_LABEL_ACE_TYPE) {
+      blockers.push_back("windows_access_policy"); break;
+    }
+  }
   LPSTR text = nullptr;
-  const bool ok = ConvertSecurityDescriptorToStringSecurityDescriptorA(descriptor, SDDL_REVISION_1, fields, &text, nullptr);
+  const bool ok = ConvertSecurityDescriptorToStringSecurityDescriptorA(descriptor, SDDL_REVISION_1, OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION | SACL_SECURITY_INFORMATION, &text, nullptr);
   LocalFree(descriptor);
   if (!ok) throw std::runtime_error("Cannot serialize file access ACL");
   std::string result(text); LocalFree(text); return result;
@@ -106,7 +116,7 @@ static napi_value InspectFileMetadata(napi_env env, napi_callback_info info) {
       FILE_ATTRIBUTE_TAG_INFO attributes{};
       if (!GetFileInformationByHandleEx(file, FileAttributeTagInfo, &attributes, sizeof(attributes))
           || (attributes.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) throw std::runtime_error("Reparse-point metadata is not supported");
-      MetadataPart(data, std::to_string(attributes.FileAttributes)); MetadataPart(data, MetadataSecurity(file));
+      MetadataPart(data, std::to_string(attributes.FileAttributes)); MetadataPart(data, MetadataSecurity(file, blockers));
       MetadataPart(data, MetadataWindowsEas(file));
       WIN32_FIND_STREAM_DATA stream{};
       HANDLE search = FindFirstStreamW(wide.c_str(), FindStreamInfoStandard, &stream, 0);

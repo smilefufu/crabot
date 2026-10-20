@@ -564,6 +564,7 @@ static napi_value Initialize(napi_env env, napi_value exports) {
   napi_property_descriptor methods[] = {
 #ifdef _WIN32
     {"inspectDirectoryFileId", nullptr, InspectDirectoryFileId, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"copyPinnedDirectoryMetadata", nullptr, CopyPinnedDirectoryMetadata, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"pinDirectory", nullptr, PinDirectory, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"releaseDirectoryPin", nullptr, ReleaseDirectoryPin, nullptr, nullptr, nullptr, napi_default, nullptr},
 #endif
