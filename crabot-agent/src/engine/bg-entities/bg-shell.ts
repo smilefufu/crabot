@@ -182,10 +182,16 @@ export async function spawnPersistentShell(opts: SpawnPersistentShellOpts): Prom
     resolveRegistered = resolve
   })
 
-  const child = spawnBash(wrapCommandWithExitSentinel(opts.command, exitcodeFile), {
-    stdio: ['ignore', logFd.fd, logFd.fd],
-    cwd: opts.cwd,
-  })
+  let child: ChildProcess
+  try {
+    child = spawnBash(wrapCommandWithExitSentinel(opts.command, exitcodeFile), {
+      stdio: ['ignore', logFd.fd, logFd.fd],
+      cwd: opts.cwd,
+    })
+  } catch (error) {
+    await logFd.close()
+    throw error
+  }
 
   // CRITICAL: 'error' listener MUST attach BEFORE any await. Node emits spawn
   // failures (ENOENT etc.) asynchronously on next tick. If any await runs

@@ -307,7 +307,7 @@ async function residentHeadless(impl: 'claude-code' | 'codex') {
   const ready = join(directory, 'headless-ready')
   const source = `require('node:fs').writeFileSync(${JSON.stringify(ready)},'ready');setTimeout(()=>process.exit(0),30000)`
   const quote = (value: string) => "'" + value.replace(/'/g, "'\\''") + "'"
-  const client = new CodexAppServerClient({ command: quote(process.execPath) + ' -e ' + quote(source), cwd: directory, env: { PATH: process.env.PATH ?? '' } })
+  const client = new CodexAppServerClient({ command: 'exec ' + quote(process.execPath) + ' -e ' + quote(source), cwd: directory, env: { PATH: process.env.PATH ?? '' } })
   ;(f.runtime as any).headlessClient = client
   try {
     const deadline = Date.now() + 5000
