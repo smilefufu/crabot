@@ -1,6 +1,7 @@
 import { parseFriendPermissionRecords, serializeFriendPermissionRecords } from './friend-permission-store.js'
 import { WorkspaceExecutionInventorySchema, WorkspaceIdSchema } from 'crabot-client'
 import { WorkspaceService } from './workspaces.js'
+import { WorkspaceWebAdmissions, requiresWorkspaceWebAdmission } from './workspace-web-admissions.js'
 import type { VerifyWorkspaceRelocationRequestParams, VerifyWorkspaceRelocationRequestResult } from 'crabot-shared'
 import { resolveManagedMcpConfig } from './managed-mcp-runtime.js'
 import type { ConversationRequestSource } from 'crabot-shared'
@@ -716,6 +717,7 @@ export class AdminModule extends ModuleBase {
   // Channel 管理器
   private channelManager: ChannelManager
   private workspaceService: WorkspaceService
+  private workspaceWebAdmissions?: WorkspaceWebAdmissions
   private voiceAdmin: VoiceAdmin
 
   // 模块安装器
@@ -1680,6 +1682,31 @@ export class AdminModule extends ModuleBase {
       }
     }
 
+    const route = () => this.routeWebRequest(req, res, url, agentCliAuth)
+    if (requiresWorkspaceWebAdmission(req.method, pathname)) return this.withWorkspaceWebAccess(res, route)
+    return route()
+  }
+
+  private workspaceWebAccess(): WorkspaceWebAdmissions {
+    return this.workspaceWebAdmissions ??= new WorkspaceWebAdmissions(path.resolve(this.adminConfig.data_dir, '..'))
+  }
+
+  private async withWorkspaceWebAccess(res: ServerResponse, action: () => Promise<void>): Promise<void> {
+    try { await this.workspaceWebAccess().run(action) }
+    catch (error) {
+      if ((error as { code?: string }).code !== 'WORKSPACE_MAINTENANCE') throw error
+      sendJson(res, 503, { code: 'WORKSPACE_MAINTENANCE', message: (error as Error).message })
+    }
+  }
+
+  /** Internal coordination only; callers still verify the fixed job and complete execution exit. */
+  private async quiesceWorkspaceWebAccess(): Promise<void> {
+    await Promise.all([this.workspaceWebAccess().closeAndDrain(), this.workspaceService.pauseScanning()])
+  }
+
+  private async routeWebRequest(req: IncomingMessage, res: ServerResponse, url: URL, agentCliAuth?: AgentCliWebAuth): Promise<void> {
+    const pathname = url.pathname
+    const workspaceRequest = pathname === '/api/workspaces' || pathname.startsWith('/api/workspaces/')
     // 路由处理
     try {
       if (workspaceRequest && await this.workspaceService.handleWeb(req, res, pathname, () => this.readJsonBody(req, 65536))) return
@@ -10443,6 +10470,10 @@ export class AdminModule extends ModuleBase {
       sendJson(res, 401, { error: 'Unauthorized' })
       return
     }
+    return this.withWorkspaceWebAccess(res, () => this.readMediaFile(res, url))
+  }
+
+  private async readMediaFile(res: ServerResponse, url: URL): Promise<void> {
     const id = decodeURIComponent(url.pathname.slice('/api/media/'.length))
     const resolved = this.mediaStore?.resolve(id)
     if (!resolved) {

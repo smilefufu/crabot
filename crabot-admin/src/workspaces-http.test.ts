@@ -18,7 +18,7 @@ async function fixture() {
   const service = new WorkspaceService({ dataRoot: root }); await service.initialize()
   cleanup.push(() => service.close())
   const admin = Object.create(AdminModule.prototype) as any
-  admin.adminConfig = { web_port: 0 }; admin.jwtSecret = 'fixture-secret'; admin.cutoverActivated = true
+  admin.adminConfig = { web_port: 0, data_dir: path.join(root, 'admin') }; admin.jwtSecret = 'fixture-secret'; admin.cutoverActivated = true
   admin.verifyAuthenticatedToken = vi.fn(async token => token === 'fixture-human' ? { sub: 'admin' } : token === 'fixture-internal' ? { sub: 'internal' } : null)
   admin.workspaceService = service
   admin.voiceAdmin = { handleWeb: vi.fn(async () => false) }
