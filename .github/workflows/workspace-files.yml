@@ -55,7 +55,7 @@ concurrency:
 jobs:
   files:
     name: Native workspace files ${{ matrix.os }}
-    timeout-minutes: 25
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && 75 || 25 }}
     strategy:
       fail-fast: false
       matrix:

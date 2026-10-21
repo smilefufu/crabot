@@ -615,7 +615,9 @@ for (const mode of ['confirmed', 'lost acknowledgement', 'changed source', 'copy
             try { await assert.rejects(files.prepareRoot(), { code: 'CRABOT_WORKSPACE_JOURNAL_UNAVAILABLE' }); assert.equal(dropped, true) } finally { mock.mock.restore() }
             files.close(); files = createWorkspaceFileJournal(child, context)
           }
+          const rootStarted = Date.now()
           const rootPrepared = await files.prepareRoot(), rootPlan = readWorkspaceRelocationRootPlan(f.data, f.id)
+          t.diagnostic('Fixed Root preparation confirmed in ' + (Date.now() - rootStarted) + 'ms')
           assert.equal(rootPrepared.dispatch, mode === 'lost acknowledgement' ? 'observe' : 'dispatch')
           assert.equal(rootPrepared.plan_sha256, sha256CanonicalJson(rootPlan))
           assert.equal(rootPlan.worker_commit_sha256, closedEvidence.worker_commit_sha256)
@@ -667,7 +669,9 @@ for (const mode of ['confirmed', 'lost acknowledgement', 'changed source', 'copy
               files.close(); files = createWorkspaceFileJournal(child, context)
               return files[operation]()
             }
+            const publicationStarted = Date.now()
             const published = await rootResult('publishRoot'), publishedFile = path.join(control, 'relocation-root-published.json')
+            t.diagnostic('Fixed Root publication confirmed in ' + (Date.now() - publicationStarted) + 'ms')
             const publishedBytes = fs.readFileSync(publishedFile), publishedRecord = rootRecords.readWorkspaceRelocationRootPublished(f.data, f.id)
             assert.equal(published.dispatch, mode === 'Root lost acknowledgement' ? 'observe' : 'dispatch')
             assert.equal(published.published_sha256, sha256CanonicalJson(publishedRecord))
@@ -686,7 +690,9 @@ for (const mode of ['confirmed', 'lost acknowledgement', 'changed source', 'copy
               assert.equal(fs.readFileSync(path.join(f.root, 'new/original.txt'), 'utf8'), 'original work changed work must remain')
               assert.deepEqual(fs.readFileSync(publishedFile), publishedBytes)
             } else {
+              const selectionStarted = Date.now()
               const selected = await rootResult('selectRoot'), selectedBytes = fs.readFileSync(selectedFile)
+              t.diagnostic('Fixed Root selection confirmed in ' + (Date.now() - selectionStarted) + 'ms')
               const after = await f.catalog.snapshot()
               assert.equal(selected.dispatch, mode === 'Root lost acknowledgement' ? 'observe' : 'dispatch')
               assert.equal(selected.selected_sha256, sha256CanonicalJson(rootRecords.readWorkspaceRelocationRootSelected(f.data, f.id)))
