@@ -6,6 +6,7 @@ import { randomUUID, createHash } from 'node:crypto'
 import native from './process-identity.cjs'
 import management from './desktop-management.cjs'
 import knownProcessExit from './known-process-exit.cjs'
+import ownedProcessTree from './owned-process-tree.cjs'
 import { cliLockToken } from './cli-lock.mjs'
 import { sha256CanonicalJson } from '../../crabot-shared/dist/canonical-json.js'
 import { publishWorkspaceRoot, inspectPublishedWorkspaceRoot, validateWorkspaceRootPublicationPlan, publishWorkspaceParents, validateWorkspaceParentsPublicationPlan } from './workspace-root-publish.mjs'
@@ -123,7 +124,7 @@ function read(ctx) {
   if (!privateControl(ctx.control)) return null
   const value = readPrivateJson(ctx.file, 65536)
   if (value === undefined) {
-    for (const file of ['relocation-workers.json', 'relocation-worker-processes.json', 'relocation-stop-attempt.json', 'relocation-stop-submission.json', 'relocation-modules.json', 'relocation-module-stop-attempt.json', 'relocation-module-processes', 'relocation-module-stop-submission.json', 'relocation-coordinator.json', 'relocation-coordinator-ready.json', 'relocation-process-stop.jsonl', 'relocation-execution-exit.json', 'relocation-files.json', 'relocation-file-actors.jsonl', 'relocation-worker-closure.json', 'relocation-worker-commits', 'relocation-manager-closure.json', 'relocation-manager-complete.json', 'relocation-root-plan.json', 'relocation-root-published.json', 'relocation-root-selected.json', 'relocation-root-parents.json', 'relocation-root-parents-complete.json']) {
+    for (const file of ['relocation-workers.json', 'relocation-worker-processes.json', 'relocation-stop-attempt.json', 'relocation-stop-submission.json', 'relocation-modules.json', 'relocation-module-stop-attempt.json', 'relocation-module-processes', 'relocation-module-stop-submission.json', 'relocation-coordinator.json', 'relocation-coordinator-ready.json', 'relocation-process-stop.jsonl', 'relocation-execution-exit.json', 'relocation-files.json', 'relocation-file-actors.jsonl', 'relocation-worker-closure.json', 'relocation-worker-commits', 'relocation-manager-closure.json', 'relocation-manager-complete.json', 'relocation-root-plan.json', 'relocation-root-published.json', 'relocation-root-selected.json', 'relocation-root-parents.json', 'relocation-root-parents-complete.json', 'relocation-health.json']) {
       try { fs.lstatSync(path.join(ctx.control, file)); fail() }
       catch (error) { if (error.code !== 'ENOENT') fail() }
     }
@@ -1860,4 +1861,124 @@ async function prepareWorkspaceRelocationRootParents({ dataDir, id, signal, ctx,
   await verifyPlan()
   if (sha256CanonicalJson(readWorkspaceRelocationRootParentsComplete(dataDir, id)) !== sha256CanonicalJson(record)) fail()
   return { parent: record.target_parent, commit_sha256: sha256CanonicalJson(record), plan }
+}
+
+
+// Runtime registry files inherit DATA_DIR privacy; POSIX per-file mode is not a coordinator-record contract.
+function readHealthRuntimeText(dataRoot, runtimeId) {
+  if (runtimeId !== undefined && !uuid(runtimeId)) fail()
+  const directories = [path.join(dataRoot, 'module-runtime-registry')]
+  if (runtimeId !== undefined) directories.push(path.join(directories[0], 'records'))
+  const before = directories.map(directory => identity(directory))
+  const owner = fs.lstatSync(dataRoot, { bigint: true }).uid
+  const checkDirectories = () => {
+    for (let index = 0; index < directories.length; index++) {
+      const directory = directories[index], stat = fs.lstatSync(directory, { bigint: true })
+      if (!same(before[index], identity(directory)) || (process.platform === 'win32' ? !native.isPrivateDirectory(directory) : stat.uid !== owner)) fail()
+    }
+  }
+  checkDirectories()
+  const file = path.join(directories.at(-1), runtimeId === undefined ? 'instance-id' : runtimeId + '.json')
+  const stat = fs.lstatSync(file, { bigint: true })
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1n || stat.size > 65536n
+    || (process.platform === 'win32' ? !native.isPrivateFile(file) : stat.uid !== owner)) fail()
+  const fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0))
+  try {
+    if (observedVersion(fs.fstatSync(fd, { bigint: true })) !== observedVersion(stat)) fail()
+    const text = fs.readFileSync(fd, 'utf8')
+    if (observedVersion(fs.fstatSync(fd, { bigint: true })) !== observedVersion(stat)
+      || observedVersion(fs.lstatSync(file, { bigint: true })) !== observedVersion(stat)) fail()
+    checkDirectories()
+    return text
+  } finally { fs.closeSync(fd) }
+}
+
+const healthFile = 'relocation-health.json'
+function workspaceHealthReport(dataDir, id, report) {
+  try {
+    const { ctx, intent } = coordinatorContext(dataDir, id)
+    const coordinator = readWorkspaceRelocationCoordinator(dataDir, id), selected = readWorkspaceRelocationRootSelected(dataDir, id)
+    const originalModules = readWorkspaceRelocationModules(dataDir, id).modules
+    const oldRuntimeIds = new Set(originalModules.map(item => item.runtime_id).filter(Boolean))
+    const scopes = originalModules.filter(item => item.runtime_id !== undefined && item.processes.length > 0 && ['crabot-agent', 'memory-default'].includes(item.module_id))
+      .sort((a, b) => a.module_id.localeCompare(b.module_id))
+    if (!coordinator.launch || !coordinator.ready || !selected || !fields(report, ['modules', 'root_proof'])
+      || !Array.isArray(report.modules) || report.modules.length !== scopes.length) fail()
+    const modules = [], pids = new Set(), runtimes = new Set(), { processBirthAtLeast } = ownedProcessTree
+    for (const scope of scopes) {
+      const input = report.modules.find(item => item?.module_id === scope.module_id), process = input?.process
+      if (!fields(input, ['module_id', 'runtime_id', 'process']) || !uuid(input.runtime_id) || oldRuntimeIds.has(input.runtime_id) || runtimes.has(input.runtime_id)
+        || !fields(process, ['pid', 'parent', 'started', 'owner', 'executable'])
+        || !Number.isInteger(process.pid) || process.pid < 1 || process.pid > 2147483647 || pids.has(process.pid)
+        || process.pid === coordinator.launch.parent.pid || process.pid === coordinator.launch.process.pid
+        || process.parent !== coordinator.launch.parent.pid || process.owner !== coordinator.launch.parent.owner
+        || !nonempty(process.started) || !nonempty(process.executable)
+        || !processBirthAtLeast(process.started, coordinator.launch.parent.started)) fail()
+      pids.add(process.pid); runtimes.add(input.runtime_id)
+      modules.push({ module_id: scope.module_id, runtime_id: input.runtime_id, process: { ...process } })
+    }
+    const agent = modules.find(item => item.module_id === 'crabot-agent'), original = scopes.find(item => item.module_id === 'crabot-agent')
+    if (!agent || !original) fail()
+    const root_proof = { verified: true, intent_id: id, intent_sha256: sha256CanonicalJson(intent), launch_id: coordinator.launch.launch_id,
+      launch_sha256: sha256CanonicalJson(coordinator.launch), root_selected_sha256: sha256CanonicalJson(selected),
+      instance_id: original.instance_id, module_id: 'crabot-agent', runtime_id: agent.runtime_id }
+    if (!fields(report.root_proof, Object.keys(root_proof)) || sha256CanonicalJson(report.root_proof) !== sha256CanonicalJson(root_proof)) fail()
+    return { ctx, intent, modules, root_proof, scopes }
+  } catch { fail() }
+}
+export const readWorkspaceRelocationHealth = recordGraphReader(function readWorkspaceRelocationHealth(dataDir, id) {
+  const { ctx } = coordinatorContext(dataDir, id), record = readPrivateJson(path.join(ctx.control, healthFile), 65536)
+  if (record === undefined) return null
+  if (!fields(record, ['schema_version', 'intent_id', 'modules', 'root_proof', 'checked_at'])
+    || record.schema_version !== 1 || record.intent_id !== id || !validDate(record.checked_at)) fail()
+  const frame = workspaceHealthReport(dataDir, id, { modules: record.modules, root_proof: record.root_proof })
+  if (sha256CanonicalJson(record.modules) !== sha256CanonicalJson(frame.modules)) fail()
+  return record
+})
+export async function recordWorkspaceRelocationHealth({ dataDir, id, report, signal }) {
+  let stage = 'report'
+  try {
+    const fixed = workspaceHealthReport(dataDir, id, report)
+    stage = 'role'
+    const base = workspaceFileCoordinatorContext(dataDir, id, signal)
+    const fingerprint = sha256CanonicalJson({ modules: fixed.modules, root_proof: fixed.root_proof })
+    const verify = () => {
+      base.verify()
+      const current = workspaceHealthReport(dataDir, id, { modules: fixed.modules, root_proof: fixed.root_proof })
+      const published = readWorkspaceRelocationRootPublished(dataDir, id)
+      if (sha256CanonicalJson({ modules: current.modules, root_proof: current.root_proof }) !== fingerprint
+        || !published || sha256CanonicalJson(rootFrame(fixed.intent.target)) !== sha256CanonicalJson(published.target)
+        || readHealthRuntimeText(fixed.ctx.dataRoot)?.trim() !== fixed.root_proof.instance_id) fail()
+      for (const module of fixed.modules) {
+        const runtime = JSON.parse(readHealthRuntimeText(fixed.ctx.dataRoot, module.runtime_id))
+        const scope = fixed.scopes.find(item => item.module_id === module.module_id)
+        if (!native.sameProcess(module.process, native.inspectProcess(module.process.pid))
+          || !fields(runtime, ['schema_version', 'instance_id', 'runtime_id', 'module_id', 'root_pid', 'process_start_identity', 'module_port', 'created_at'])
+          || runtime.schema_version !== 1 || runtime.instance_id !== fixed.root_proof.instance_id || runtime.runtime_id !== module.runtime_id
+          || runtime.module_id !== module.module_id || runtime.root_pid !== module.process.pid || runtime.module_port !== scope.module_port
+          || !nonempty(runtime.process_start_identity) || !validDate(runtime.created_at)) fail()
+      }
+    }
+    stage = 'current-runtime'
+    verify()
+    stage = 'selected-root'
+    await verifyWorkspaceRelocationSelectedRoot({ dataDir, id, signal })
+    verify()
+    stage = 'previous'
+    const previous = readWorkspaceRelocationHealth(dataDir, id)
+    if (previous) {
+      if (sha256CanonicalJson({ modules: previous.modules, root_proof: previous.root_proof }) !== fingerprint) fail('WORKSPACE_RELOCATION_CONFLICT')
+      syncIntent(fixed.ctx)
+      verify()
+      return { dispatch: 'observe', health_sha256: sha256CanonicalJson(previous) }
+    }
+    const record = { schema_version: 1, intent_id: id, modules: fixed.modules, root_proof: fixed.root_proof, checked_at: new Date().toISOString() }
+    stage = 'publish'
+    publishPrivateJson(fixed.ctx, path.join(fixed.ctx.control, healthFile), record, 65536, () => { verify(); if (readWorkspaceRelocationHealth(dataDir, id)) fail('WORKSPACE_RELOCATION_CONFLICT') })
+    verify()
+    stage = 'readback'
+    const accepted = readWorkspaceRelocationHealth(dataDir, id)
+    if (sha256CanonicalJson(accepted) !== sha256CanonicalJson(record)) fail()
+    return { dispatch: 'dispatch', health_sha256: sha256CanonicalJson(accepted) }
+  } catch (error) { if (error && typeof error === 'object' && typeof error.stage !== 'string') error.stage = stage; throw error }
 }

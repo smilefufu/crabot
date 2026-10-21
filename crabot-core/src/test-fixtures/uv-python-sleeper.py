@@ -12,6 +12,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from socketserver import TCPServer
 
 pid_file = Path(sys.argv[1])
 mode = sys.argv[2] if len(sys.argv) > 2 else "sleep"
@@ -87,9 +88,15 @@ if mode in {"http", "http-hang", "http-drip"}:
         def log_message(self, _format: str, *_args: object) -> None:
             return
 
+    class LoopbackFixtureServer(ThreadingHTTPServer):
+        def server_bind(self) -> None:
+            TCPServer.server_bind(self)
+            self.server_name = "localhost"
+            self.server_port = self.server_address[1]
+
     http_stage = "constructing-http"
     write_info()
-    server = ThreadingHTTPServer(("localhost", port), Handler)
+    server = LoopbackFixtureServer(("127.0.0.1", port), Handler)
     http_stage = "listening"
     write_info()
     server.serve_forever()

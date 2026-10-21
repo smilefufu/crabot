@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import fs from 'node:fs/promises'
 import path from 'node:path'
-import type { ChildProcess } from 'node:child_process'
+import { execFile, type ChildProcess } from 'node:child_process'
+import { promisify } from 'node:util'
 import ModuleManager from './index.js'
 import type { ModuleRuntime } from './types.js'
 import { isProcessTreeAlive } from './process-tree.js'
@@ -151,6 +152,25 @@ afterEach(async () => {
 })
 
 describe.skipIf(process.platform === 'win32')('Module Manager child-bound lifecycle', () => {
+  it('constructs the finite loopback HTTP server without reverse DNS', async () => {
+    const directory = path.resolve(`test-data/fixture-no-reverse-${process.pid}`)
+    cleanupDirs.push(directory)
+    const code = `import runpy,socket,socketserver,sys
+fixture,pid_file=sys.argv[1:3]
+def reject_reverse(*args):
+    raise RuntimeError('reverse DNS is not required for the finite loopback fixture')
+def confirm_listener(server):
+    assert server.socket.getsockname()[0]=='127.0.0.1'
+    assert server.socket.getsockname()[1]>0
+    print('finite-loopback-listening',flush=True)
+socket.getfqdn=reject_reverse
+socketserver.BaseServer.serve_forever=confirm_listener
+sys.argv=[fixture,pid_file,'http','0']
+runpy.run_path(fixture,run_name='__main__')`
+    const result = await promisify(execFile)('uv', ['run', '--no-project', 'python', '-c', code, fixture, path.join(directory, 'python.json')], { timeout: 4000 })
+    expect(result.stdout).toContain('finite-loopback-listening')
+  })
+
   it('completes startup orphan recovery before opening the MM listener', async () => {
     const { mm } = makeManager()
     mm.runtimeRegistry = {
@@ -301,6 +321,31 @@ describe.skipIf(process.platform === 'win32')('Module Manager child-bound lifecy
     expect(mm.startModuleProcess).toHaveBeenCalledTimes(1)
     expect(mm.processes.get(runtime.module_id)).toBe(replacement.child)
     await forceCleanup(mm, runtime)
+  })
+
+  it('retains registration accepted while the actual child runtime record is being persisted', async () => {
+    const { mm, runtime, pidFile, events } = makeManager({ mode: 'http', shutdownTimeout: 1 })
+    runtime.port = mm.portAllocator.allocate(runtime.module_id)
+    runtime.entry = `uv run --no-project python "${fixture}" "${pidFile}" "http" "${runtime.port}"`
+    runtime.skip_health_check = false
+    const persist = mm.runtimeRegistry.recordSpawn.bind(mm.runtimeRegistry)
+    let registeredEarly = false
+    vi.spyOn(mm.runtimeRegistry, 'recordSpawn').mockImplementation(async (input: any) => {
+      expect(input.rootPid).toBeGreaterThan(0)
+      expect(mm.processes.has(runtime.module_id)).toBe(false)
+      await mm.handleRegister({ module_id: runtime.module_id, module_type: 'memory', version: '0.1.0', protocol_version: '0.1.0', port: runtime.port, subscriptions: [] })
+      registeredEarly = true
+      return persist(input)
+    })
+    try {
+      const { child } = await start(mm, runtime)
+      expect(registeredEarly).toBe(true)
+      expect(runtime.status).toBe('running')
+      expect(mm.childStates.get(child).reachedRunning).toBe(true)
+      expect((await mm.runtimeRegistry.listRecords()).some((record: any) => record.root_pid === child.pid)).toBe(true)
+      expect(events.filter(event => event.type === 'module_manager.module_started')).toHaveLength(1)
+      await waitForModuleHealth(mm, runtime)
+    } finally { await forceCleanup(mm, runtime) }
   })
 
   it('ordinary module stop calls /shutdown before tree-level escalation', async () => {

@@ -189,6 +189,7 @@ interface WorkspaceValidationLaunchResult extends WorkspaceRootSelectionResult {
 interface WorkspaceValidationHealthResult extends WorkspaceValidationLaunchResult {
   readonly healthy_modules: ReadonlyArray<{ module_id: ModuleId; runtime_id: string }>
   readonly root_verified: VerifyWorkspaceRelocationRuntimeResult
+  readonly health_sha256: string
 }
 
 interface WorkspaceCoordinatorGrant {
@@ -1823,7 +1824,14 @@ export class ModuleManager {
         } finally { rpc.close() }
         stage = 'final-verify'
         await proof.verify(); assertBearer()
-        return Object.freeze({ ...launched, healthy_modules: Object.freeze(healthy.map(module => Object.freeze(module))), root_verified: Object.freeze(expected) })
+        stage = 'record-health'
+        const records = require('../../scripts/lib/workspace-relocation-intent.mjs')
+        const files = require('../../scripts/lib/workspace-file-journal.mjs').createWorkspaceFileJournal(child,
+          { dataDir: this.dataDir, id: request.intent_id, launch: records.readWorkspaceRelocationCoordinator(this.dataDir, request.intent_id).launch })
+        let health
+        try { health = await files.recordHealth({ modules: launched.validation_modules, root_proof: expected }) } finally { files.close() }
+        await proof.verify(); assertBearer()
+        return Object.freeze({ ...launched, healthy_modules: Object.freeze(healthy.map(module => Object.freeze(module))), root_verified: Object.freeze(expected), health_sha256: health.health_sha256 })
       } catch (cause) {
         await this.closeWorkspaceCoordinatorChannel(child)
         throw Object.assign(failure(), { stage, cause })
@@ -2590,7 +2598,8 @@ export class ModuleManager {
       child: proc,
       rootPid: proc.pid,
       rootExited: false,
-      reachedRunning: false,
+      // register may settle while recordSpawn is awaiting I/O.
+      reachedRunning: (runtime as ModuleRuntime).status === 'running',
       finalizeStarted: false,
       finalized,
       resolveFinalized,

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
 import fs from 'node:fs/promises'
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { tmpdir } from 'node:os'
 import http from 'node:http'
@@ -1666,7 +1666,7 @@ describe('MM restricts post-relocation validation launches to the original job',
 
 
 describe('MM checks the new runtime health and Root under the original job', () => {
-  for (const mode of ['healthy Agent', 'healthy Memory', 'healthy delayed registration', 'unhealthy Agent', 'degraded Memory', 'wrong runtime', 'definition changed during health', 'exit before registration']) {
+  for (const mode of ['healthy Agent', 'healthy Memory', 'healthy delayed registration', 'unhealthy Agent', 'degraded Memory', 'wrong runtime', 'definition changed during health', 'exit before registration', 'lost health acknowledgement', 'runtime record changed before health record']) {
     it('retains maintenance until all exact runtime checks confirm: ' + mode, async () => {
       const withMemory = mode.includes('Memory')
       const f = await fixture({ actualAgent: true, actualAdmin: true, withMemory,
@@ -1678,7 +1678,30 @@ describe('MM checks the new runtime health and Root under the original job', () 
       const lock = await locks.acquireWorkspaceRelocationLock(f.data, f.params.intent_id)
       const runtime = f.manager.modules.get('crabot-agent'), originalEntry = runtime.entry
       if (mode.includes('registration')) runtime.skip_health_check = false
-      let injected = false
+      let injected = false, changedRuntime: { file: string; contents: string } | undefined
+      const launchCoordinator = f.manager.launchWorkspaceRelocationCoordinator.bind(f.manager)
+      if (mode === 'lost health acknowledgement' || mode === 'runtime record changed before health record') {
+        vi.spyOn(f.manager, 'launchWorkspaceRelocationCoordinator').mockImplementation(async (...args: any[]) => {
+          const child = await launchCoordinator(...args)
+          const emit = child.emit.bind(child), send = child.send.bind(child)
+          if (mode === 'lost health acknowledgement') vi.spyOn(child, 'emit').mockImplementation((event: any, ...values: any[]) => {
+            if (event === 'message' && values[0]?.kind === 'workspace_file_journal_reply' && values[0].operation === 'record_health' && values[0].ok === true) {
+              injected = true; return emit(event, { ...values[0], ok: false })
+            }
+            return emit(event, ...values)
+          })
+          else vi.spyOn(child, 'send').mockImplementation((message: any, ...values: any[]) => {
+            if (!injected && message?.kind === 'workspace_file_journal_request' && message.operation === 'record_health') {
+              const module = message.payload.modules.find((item: any) => item.module_id === 'crabot-agent')
+              const file = path.join(f.data, 'module-runtime-registry/records', module.runtime_id + '.json'), contents = readFileSync(file, 'utf8')
+              changedRuntime = { file, contents }; injected = true
+              writeFileSync(file, JSON.stringify({ ...JSON.parse(contents), module_id: 'not-the-agent' }))
+            }
+            return send(message, ...values)
+          })
+          return child
+        })
+      }
       const open = rpc.openSpawnedModuleRuntimeRpc
       vi.spyOn(rpc, 'openSpawnedModuleRuntimeRpc').mockImplementation(async (...args: any[]) => {
         const connection = await open(...args)
@@ -1704,18 +1727,63 @@ describe('MM checks the new runtime health and Root under the original job', () 
         expect(f.manager.verifyWorkspaceRelocationValidationHealth({ ...f.params }, 'fixture-human')).toBe(first)
         await expect(f.manager.verifyWorkspaceRelocationValidationHealth({ ...f.params, intent_sha256: '0'.repeat(64) }, 'fixture-human')).rejects.toMatchObject({ code: 'FORBIDDEN' })
         if (mode.startsWith('healthy')) {
-          const result = await first
+          const result = await first.catch((error: unknown) => {
+            const coordinator = f.manager.workspaceValidationProof?.result.coordinator
+            if (coordinator) console.error('[Workspace health journal]', coordinatorJournalFailures(coordinator))
+            throw error
+          })
           expect(result.healthy_modules.map((item: any) => item.module_id)).toEqual(withMemory ? ['memory-default', 'crabot-agent'] : ['crabot-agent'])
           expect(result.root_verified).toMatchObject({ verified: true, intent_id: f.params.intent_id, root_selected_sha256: result.root_selected_sha256,
             instance_id: f.manager.runtimeRegistry.getInstanceId(), module_id: 'crabot-agent', runtime_id: result.validation_modules.find((item: any) => item.module_id === 'crabot-agent').runtime_id })
+          const health = JSON.parse(await fs.readFile(path.join(f.data, 'workspace-control/relocation-health.json'), 'utf8'))
+          expect(Object.keys(health).sort()).toEqual(['checked_at', 'intent_id', 'modules', 'root_proof', 'schema_version'])
+          expect(health).toMatchObject({ schema_version: 1, intent_id: f.params.intent_id, root_proof: result.root_verified })
+          expect(health.modules).toEqual([...result.validation_modules].sort((a: any, b: any) => a.module_id.localeCompare(b.module_id)))
+          expect(new Date(health.checked_at).toISOString()).toBe(health.checked_at)
+          expect(result.health_sha256).toBe(sha256CanonicalJson(health))
+          if (mode === 'healthy Agent') {
+            const records = require('../../scripts/lib/workspace-relocation-intent.mjs'), report = { modules: health.modules, root_proof: health.root_proof }
+            const original = await fs.readFile(path.join(f.data, 'workspace-control/relocation-health.json'), 'utf8')
+            expect(records.readWorkspaceRelocationHealth(f.data, f.params.intent_id)).toEqual(health)
+            const oldRuntime = records.readWorkspaceRelocationModules(f.data, f.params.intent_id).modules.find((item: any) => item.module_id === 'crabot-agent').runtime_id
+            const healthFile = path.join(f.data, 'workspace-control/relocation-health.json'), wrong = structuredClone(health)
+            wrong.modules[0].runtime_id = oldRuntime; wrong.root_proof.runtime_id = oldRuntime
+            try {
+              writeFileSync(healthFile, JSON.stringify(wrong))
+              expect(() => records.readWorkspaceRelocationHealth(f.data, f.params.intent_id)).toThrow()
+            } finally { writeFileSync(healthFile, original) }
+            await expect(records.recordWorkspaceRelocationHealth({ dataDir: f.data, id: f.params.intent_id, report })).rejects.toMatchObject({ code: 'WORKSPACE_RELOCATION_INVALID' })
+            const context = { dataDir: f.data, id: f.params.intent_id, launch: records.readWorkspaceRelocationCoordinator(f.data, f.params.intent_id).launch }
+            let journal = require('../../scripts/lib/workspace-file-journal.mjs').createWorkspaceFileJournal(result.coordinator, context)
+            try { await expect(journal.recordHealth({ ...report, root_proof: { ...report.root_proof, root_selected_sha256: '0'.repeat(64) } })).rejects.toMatchObject({ code: 'CRABOT_WORKSPACE_JOURNAL_UNAVAILABLE' }) }
+            finally { journal.close() }
+            journal = require('../../scripts/lib/workspace-file-journal.mjs').createWorkspaceFileJournal(result.coordinator, context)
+            try {
+              const mutable = structuredClone(report), observe = journal.recordHealth(mutable)
+              mutable.root_proof.runtime_id = 'not-the-original-report'
+              expect(await observe).toEqual({ dispatch: 'observe', health_sha256: result.health_sha256 })
+            } finally { journal.close() }
+            expect(await fs.readFile(path.join(f.data, 'workspace-control/relocation-health.json'), 'utf8')).toBe(original)
+          }
         } else {
           await expect(first).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
+          if (mode === 'unhealthy Agent' || mode === 'degraded Memory') await expect(first).rejects.toMatchObject({ stage: 'module-health' })
           await expect(f.manager.verifyWorkspaceRelocationValidationHealth(f.params, 'fixture-human')).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
           if (mode === 'definition changed during health' || mode === 'exit before registration') expect(injected).toBe(true)
+          if (mode === 'lost health acknowledgement' || mode === 'runtime record changed before health record') {
+            expect(injected).toBe(true)
+            await expect(first).rejects.toMatchObject({ stage: 'record-health' })
+            const file = path.join(f.data, 'workspace-control/relocation-health.json')
+            if (mode === 'lost health acknowledgement') {
+              const record = JSON.parse(await fs.readFile(file, 'utf8'))
+              expect(record.intent_id).toBe(f.params.intent_id)
+              expect(record.root_proof.runtime_id).toBe(f.manager.childStates.get(f.manager.processes.get('crabot-agent')).runtimeId)
+            } else await expect(fs.readFile(file)).rejects.toMatchObject({ code: 'ENOENT' })
+          }
         }
         expect(starts).toHaveBeenCalledTimes(withMemory ? 2 : 1)
         const calls = JSON.parse(await fs.readFile(path.join(f.data, 'agent-calls.json'), 'utf8'))
-        expect(calls.filter((item: any) => item.method === 'verify_workspace_relocation_root')).toHaveLength(mode.startsWith('healthy') ? 1 : 0)
+        expect(calls.filter((item: any) => item.method === 'verify_workspace_relocation_root')).toHaveLength(mode.startsWith('healthy') || mode.includes('health record') || mode === 'lost health acknowledgement' ? 1 : 0)
         expect(f.manager.verifyWorkspaceRelocationValidationHealth(f.params, 'fixture-human')).toBe(first)
         expect((await fetch(`http://127.0.0.1:${f.port}/api/friends`, { headers: { Authorization: 'Bearer fixture-human' } })).status).toBe(200)
         expect(require('../../scripts/lib/workspace-maintenance.cjs').workspaceMaintenancePending(f.data)).toBe(true)
@@ -1723,6 +1791,7 @@ describe('MM checks the new runtime health and Root under the original job', () 
         expect(ledger.workers[0].task.status).toBe('closed')
       } finally {
         runtime.entry = originalEntry
+        if (changedRuntime) writeFileSync(changedRuntime.file, changedRuntime.contents)
         const child = f.manager.workspaceValidationProof?.result.coordinator
         if (child?.connected) { const ended = once(child, 'exit'); child.disconnect(); await ended }
         try {

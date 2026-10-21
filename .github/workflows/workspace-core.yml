@@ -11,6 +11,7 @@ on:
       - 'crabot-agent/src/unified-agent.ts'
       - 'crabot-shared/src/workspace-types.ts'
       - 'crabot-shared/src/module-base.ts'
+      - 'crabot-shared/src/workspace-maintenance.ts'
       - 'crabot-core/src/workspace-*.test.ts'
       - 'crabot-agent/tests/core/fixtures/**'
       - 'scripts/lib/workspace-*'
@@ -31,6 +32,7 @@ on:
       - 'crabot-agent/src/unified-agent.ts'
       - 'crabot-shared/src/workspace-types.ts'
       - 'crabot-shared/src/module-base.ts'
+      - 'crabot-shared/src/workspace-maintenance.ts'
       - 'crabot-core/src/workspace-*.test.ts'
       - 'crabot-agent/tests/core/fixtures/**'
       - 'scripts/lib/workspace-*'
@@ -88,6 +90,9 @@ jobs:
           done
       - name: Actual fixed directory probe and bounded cleanup
         run: node --test scripts/lib/__tests__/workspace-root-probe.test.mjs scripts/lib/__tests__/module-carrier-rpc.test.mjs
+      - name: Persistent workspace maintenance guards
+        working-directory: crabot-shared
+        run: node --import tsx --test src/workspace-maintenance.test.ts
       - name: Original lifecycle and maintenance regressions
         working-directory: crabot-core
         run: node node_modules/vitest/vitest.mjs run src/module-manager-lifecycle.test.ts src/module-manager-health.test.ts src/module-manager-advanced.test.ts src/workspace-maintenance.test.ts src/workspace-module-scope.test.ts --maxWorkers=1 --minWorkers=1
