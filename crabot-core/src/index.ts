@@ -165,6 +165,13 @@ interface WorkspaceFilePreparationResult {
   readonly file_actors_sha256: string
 }
 
+interface WorkspaceWorkerClosureResult {
+  readonly coordinator: ChildProcess
+  readonly file_ready_sha256: string
+  readonly closure_plan_sha256: string
+  readonly closure_commit_sha256: string
+}
+
 interface WorkspaceCoordinatorGrant {
   capture?: Promise<ReadonlyArray<WorkspaceRelocationWorker>>
   workersHash?: string
@@ -202,6 +209,7 @@ export class ModuleManager {
   private workspaceCoordinatorGrant?: WorkspaceCoordinatorGrant
   private workspaceStopSequence?: { fingerprint: string; pending: Promise<WorkspaceStopSequenceResult> }
   private workspaceFilePreparation?: { fingerprint: string; pending: Promise<WorkspaceFilePreparationResult> }
+  private workspaceWorkerClosure?: { fingerprint: string; pending: Promise<WorkspaceWorkerClosureResult> }
   private workspaceModuleStop?: { fingerprint: string; pending: Promise<WorkspaceModuleStopResponse> }
   private readonly childStates: WeakMap<ChildProcess, ManagedChildState> = new WeakMap()
   private readonly lifecycleQueues: Map<ModuleId, Promise<void>> = new Map()
@@ -1427,6 +1435,33 @@ export class ModuleManager {
     return pending
   }
 
+  private workspaceRelocationStoppedVerifier(request: VerifyWorkspaceRelocationRequestParams, child: ChildProcess): () => Promise<void> {
+    const failure = () => Object.assign(new Error('迁移的原协调器或已停止模块范围无法核实，维护保护保留。'), { code: 'SERVICE_UNAVAILABLE' })
+    const records = require('../../scripts/lib/workspace-relocation-intent.mjs'), native = require('../../scripts/lib/process-identity.cjs')
+    const coordinator = records.readWorkspaceRelocationCoordinator(this.dataDir, request.intent_id)
+    const modules: ReadonlyArray<WorkspaceModuleScope> = records.readWorkspaceRelocationModules(this.dataDir, request.intent_id).modules
+    const verify = (): void => {
+      if (this.isShuttingDown || !child.connected || child.exitCode !== null || child.signalCode !== null
+        || sha256CanonicalJson(records.readWorkspaceRelocationIntent(this.dataDir)) !== request.intent_sha256
+        || sha256CanonicalJson(records.readWorkspaceRelocationCoordinator(this.dataDir, request.intent_id)) !== sha256CanonicalJson(coordinator)
+        || !records.readWorkspaceRelocationExecutionExit(this.dataDir, request.intent_id)
+        || !native.sameProcess(coordinator.launch.parent, native.inspectProcess(process.pid))
+        || !native.sameProcess(coordinator.launch.process, native.inspectProcess(child.pid))
+        || JSON.stringify([...this.modules.keys()].filter(id => id !== 'admin-web').sort()) !== JSON.stringify(modules.map(item => item.module_id))
+        || [...this.processes.keys()].some(id => id !== 'admin-web') || [...this.lifecycleQueues.keys()].some(id => id !== 'admin-web')) throw failure()
+      for (const item of modules) {
+        const runtime = this.modules.get(item.module_id)
+        if (!runtime || runtime.port !== item.module_port || runtime.pid !== undefined || runtime.status === 'running' || runtime.status === 'starting') throw failure()
+      }
+    }
+    const verifyStopped = async (): Promise<void> => {
+      verify()
+      if ((await this.runtimeRegistry.listRecords()).some(record => record.module_id !== 'admin-web')) throw failure()
+      verify()
+    }
+    return verifyStopped
+  }
+
   /** Bind the fixed file plan and idle host after the complete stop sequence; no file effects or root selection. */
   private prepareWorkspaceRelocationFiles(request: VerifyWorkspaceRelocationRequestParams, bearer?: string): Promise<WorkspaceFilePreparationResult> {
     request = Object.freeze({ ...request })
@@ -1441,28 +1476,9 @@ export class ModuleManager {
       let journal: { prepare(): Promise<{ plan: unknown }>; prepareHost(): Promise<{ actors: unknown }>; close(): void } | undefined
       try {
         child = (await this.submitWorkspaceRelocationStops(request, bearer)).coordinator
-        const records = require('../../scripts/lib/workspace-relocation-intent.mjs'), native = require('../../scripts/lib/process-identity.cjs')
+        const records = require('../../scripts/lib/workspace-relocation-intent.mjs')
         const coordinator = records.readWorkspaceRelocationCoordinator(this.dataDir, request.intent_id)
-        const modules: ReadonlyArray<WorkspaceModuleScope> = records.readWorkspaceRelocationModules(this.dataDir, request.intent_id).modules
-        const verify = (): void => {
-          if (this.isShuttingDown || !child!.connected || child!.exitCode !== null || child!.signalCode !== null
-            || sha256CanonicalJson(records.readWorkspaceRelocationIntent(this.dataDir)) !== request.intent_sha256
-            || sha256CanonicalJson(records.readWorkspaceRelocationCoordinator(this.dataDir, request.intent_id)) !== sha256CanonicalJson(coordinator)
-            || !records.readWorkspaceRelocationExecutionExit(this.dataDir, request.intent_id)
-            || !native.sameProcess(coordinator.launch.parent, native.inspectProcess(process.pid))
-            || !native.sameProcess(coordinator.launch.process, native.inspectProcess(child!.pid))
-            || JSON.stringify([...this.modules.keys()].filter(id => id !== 'admin-web').sort()) !== JSON.stringify(modules.map(item => item.module_id))
-            || [...this.processes.keys()].some(id => id !== 'admin-web') || [...this.lifecycleQueues.keys()].some(id => id !== 'admin-web')) throw failure()
-          for (const item of modules) {
-            const runtime = this.modules.get(item.module_id)
-            if (!runtime || runtime.port !== item.module_port || runtime.pid !== undefined || runtime.status === 'running' || runtime.status === 'starting') throw failure()
-          }
-        }
-        const verifyStopped = async (): Promise<void> => {
-          verify()
-          if ((await this.runtimeRegistry.listRecords()).some(record => record.module_id !== 'admin-web')) throw failure()
-          verify()
-        }
+        const verifyStopped = this.workspaceRelocationStoppedVerifier(request, child)
         await verifyStopped()
         const { createWorkspaceFileJournal } = require('../../scripts/lib/workspace-file-journal.mjs')
         journal = createWorkspaceFileJournal(child, { dataDir: this.dataDir, id: request.intent_id, launch: coordinator.launch })
@@ -1477,6 +1493,49 @@ export class ModuleManager {
       } finally { journal?.close() }
     })
     this.workspaceFilePreparation = { fingerprint, pending }
+    return pending
+  }
+
+  /** Finish the fixed file phase and Agent-owned Worker closure; keep maintenance and the original catalog. */
+  private commitWorkspaceRelocationWorkers(request: VerifyWorkspaceRelocationRequestParams, bearer?: string): Promise<WorkspaceWorkerClosureResult> {
+    request = Object.freeze({ ...request })
+    const fingerprint = sha256CanonicalJson(request)
+    const failure = () => Object.assign(new Error('执行器关闭结果尚未全部确认，已保留文件、提交事实和维护保护；未重放。'), { code: 'SERVICE_UNAVAILABLE' })
+    if (this.workspaceWorkerClosure) {
+      if (this.workspaceWorkerClosure.fingerprint !== fingerprint) return Promise.reject(Object.assign(new Error('Workspace closure intent cannot change'), { code: 'FORBIDDEN' }))
+      return this.workspaceWorkerClosure.pending
+    }
+    const pending = Promise.resolve().then(async (): Promise<WorkspaceWorkerClosureResult> => {
+      let child: ChildProcess | undefined
+      let files: { prepareStage(): Promise<unknown>; prepareFiles(): Promise<{ ready: unknown }>; close(): void } | undefined
+      let workers: { prepareClosure(): Promise<{ plan: unknown }>; commitClosure(): Promise<{ complete: unknown }>; close(): void } | undefined
+      try {
+        child = (await this.prepareWorkspaceRelocationFiles(request, bearer)).coordinator
+        const records = require('../../scripts/lib/workspace-relocation-intent.mjs')
+        const verifyStopped = this.workspaceRelocationStoppedVerifier(request, child)
+        await verifyStopped()
+        const context = { dataDir: this.dataDir, id: request.intent_id, launch: records.readWorkspaceRelocationCoordinator(this.dataDir, request.intent_id).launch }
+        files = require('../../scripts/lib/workspace-file-journal.mjs').createWorkspaceFileJournal(child, context)
+        workers = require('../../scripts/lib/workspace-worker-journal.mjs').createWorkspaceWorkerJournal(child, context)
+        await files!.prepareStage()
+        await verifyStopped()
+        const fileResult = await files!.prepareFiles()
+        await verifyStopped()
+        const prepared = await workers!.prepareClosure()
+        await verifyStopped()
+        const committed = await workers!.commitClosure()
+        await verifyStopped()
+        if (sha256CanonicalJson(records.readWorkspaceRelocationFileActors(this.dataDir, request.intent_id).file_ready) !== sha256CanonicalJson(fileResult.ready)
+          || sha256CanonicalJson(records.readWorkspaceRelocationClosurePlan(this.dataDir, request.intent_id)) !== sha256CanonicalJson(prepared.plan)
+          || sha256CanonicalJson(records.readWorkspaceRelocationClosureCommit(this.dataDir, request.intent_id)) !== sha256CanonicalJson(committed.complete)) throw failure()
+        return Object.freeze({ coordinator: child, file_ready_sha256: sha256CanonicalJson(fileResult.ready),
+          closure_plan_sha256: sha256CanonicalJson(prepared.plan), closure_commit_sha256: sha256CanonicalJson(committed.complete) })
+      } catch {
+        await this.closeWorkspaceCoordinatorChannel(child)
+        throw failure()
+      } finally { files?.close(); workers?.close() }
+    })
+    this.workspaceWorkerClosure = { fingerprint, pending }
     return pending
   }
 

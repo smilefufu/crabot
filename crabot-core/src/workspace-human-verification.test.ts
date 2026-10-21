@@ -1290,3 +1290,69 @@ describe('MM prepares the original fixed workspace file plan', () => {
     }
   }, timeout)
 })
+
+
+describe('MM commits the original workspace Worker closures', () => {
+  const timeout = process.platform === 'win32' ? 240000 : 40000
+  for (const mode of ['confirmed', 'lost closure preparation', 'lost closure commit', 'late runtime registration']) it('retains Admin and the first closure outcome: ' + mode, async () => {
+    const f = await fixture({ actualAgent: true, actualAdmin: true, processLifetimeMs: 300000 }), locks = require('../../scripts/lib/cli-lock.mjs')
+    const records = await import('../../scripts/lib/workspace-relocation-intent.mjs'), lock = await locks.acquireWorkspaceRelocationLock(f.data, f.params.intent_id)
+    const launch = f.manager.launchWorkspaceRelocationCoordinator.bind(f.manager)
+    let child: ReturnType<typeof spawn> | undefined, dropped = false
+    vi.spyOn(f.manager, 'launchWorkspaceRelocationCoordinator').mockImplementation(async (...args: any[]) => {
+      child = await launch(...args)
+      if (mode.startsWith('lost closure')) {
+        const emit = child!.emit.bind(child)
+        vi.spyOn(child!, 'emit').mockImplementation((event: any, ...args: any[]) => {
+          const operation = mode === 'lost closure preparation' ? 'prepare_closure' : 'commit_closure'
+          if (event === 'message' && args[0]?.kind === 'workspace_worker_journal_reply' && args[0]?.operation === operation && !dropped) {
+            dropped = true; return emit(event, { ...args[0], ok: false })
+          }
+          return emit(event, ...args)
+        })
+      }
+      return child
+    })
+    const stop = vi.spyOn(f.manager, 'submitWorkspaceRelocationStops')
+    if (mode === 'late runtime registration') {
+      const list = f.manager.runtimeRegistry.listRecords.bind(f.manager.runtimeRegistry)
+      vi.spyOn(f.manager.runtimeRegistry, 'listRecords').mockImplementation(async () => {
+        const rows = await list()
+        let ready = false
+        try { ready = Boolean(records.readWorkspaceRelocationFileActors(f.data, f.params.intent_id).file_ready) } catch { /* No file-ready observation yet. */ }
+        return ready ? [...rows, { module_id: 'unexpected-live-module' }] : rows
+      })
+    }
+    try {
+      const ledger = path.join(f.data, 'agent/worker-ledgers/channel%3A%3Asession.json'), original = JSON.parse(await fs.readFile(ledger, 'utf8'))
+      const admin = f.manager.processes.get('admin-web'), first = f.manager.commitWorkspaceRelocationWorkers(f.params, 'fixture-human')
+      expect(f.manager.commitWorkspaceRelocationWorkers({ ...f.params }, 'fixture-human')).toBe(first)
+      await expect(f.manager.commitWorkspaceRelocationWorkers({ ...f.params, intent_id: randomUUID() }, 'fixture-human')).rejects.toMatchObject({ code: 'FORBIDDEN' })
+      if (mode !== 'confirmed') await expect(first).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
+      else {
+        const result = await first
+        expect(result.coordinator).toBe(child)
+        expect(result.file_ready_sha256).toBe(sha256CanonicalJson(records.readWorkspaceRelocationFileActors(f.data, f.params.intent_id).file_ready))
+        expect(result.closure_plan_sha256).toBe(sha256CanonicalJson(records.readWorkspaceRelocationClosurePlan(f.data, f.params.intent_id)))
+        expect(result.closure_commit_sha256).toBe(sha256CanonicalJson(records.readWorkspaceRelocationClosureCommit(f.data, f.params.intent_id)))
+      }
+      const current = JSON.parse(await fs.readFile(ledger, 'utf8')).workers[0], old = original.workers[0]
+      expect(current.task.status).toBe(['lost closure preparation', 'late runtime registration'].includes(mode) ? 'running' : 'closed')
+      expect(current.origin).toEqual(old.origin); expect(current.report_to).toEqual(old.report_to)
+      expect(current.incarnations[0].incarnation_id).toBe(old.incarnations[0].incarnation_id)
+      expect(current.incarnations[0].workspace).toBe(old.incarnations[0].workspace)
+      if (current.task.status === 'closed') expect(current.task.closed).toMatchObject({ by: 'migration', note: 'workspace relocation ' + f.params.intent_id })
+      if (mode === 'late runtime registration') expect(records.readWorkspaceRelocationClosurePlan(f.data, f.params.intent_id)).toBeNull()
+      expect(stop).toHaveBeenCalledOnce(); expect(f.manager.commitWorkspaceRelocationWorkers(f.params, 'fixture-human')).toBe(first)
+      if (mode !== 'confirmed') { expect(dropped).toBe(mode.startsWith('lost closure')); await expect(first).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' }); expect(child!.connected).toBe(false) }
+      expect(f.manager.processes.get('admin-web')).toBe(admin); expect(admin.exitCode).toBeNull(); expect(f.manager.processes.has('crabot-agent')).toBe(false)
+      expect((await fetch(`http://127.0.0.1:${f.port}/api/friends`, { headers: { Authorization: 'Bearer fixture-human' } })).status).toBe(200)
+      expect(records.readWorkspaceRelocationFileActors(f.data, f.params.intent_id).file_ready).not.toBeNull()
+      await expect(fs.stat(path.join(f.root, 'relocated'))).rejects.toMatchObject({ code: 'ENOENT' })
+      expect(require('../../scripts/lib/workspace-maintenance.cjs').workspaceMaintenancePending(f.data)).toBe(true)
+    } finally {
+      if (child?.connected) { const ended = once(child, 'exit'); child.disconnect(); await ended }
+      locks.releaseCliLock(lock); await f.cleanup()
+    }
+  }, timeout)
+})
