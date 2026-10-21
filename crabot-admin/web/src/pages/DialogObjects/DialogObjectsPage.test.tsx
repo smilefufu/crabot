@@ -770,6 +770,7 @@ describe('DialogObjectsPage', () => {
     render(<DialogObjectsPage />)
 
     fireEvent.click(await screen.findByRole('button', { name: 'Master Boss' }))
+    expect(await screen.findByDisplayValue('Master Boss')).toBeInTheDocument()
 
     expect(screen.getByLabelText('权限')).toBeDisabled()
     expect(screen.queryByLabelText('权限模板')).not.toBeInTheDocument()
