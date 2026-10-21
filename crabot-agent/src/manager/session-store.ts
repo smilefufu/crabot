@@ -212,7 +212,9 @@ export class ManagerSessionStore {
   async loadCheckpoint(key: ManagerKey): Promise<ManagerResumeCheckpoint | undefined> {
     let raw: string
     try {
-      raw = await fs.readFile(join(this.dirFor(key), CHECKPOINT_FILE), 'utf-8')
+      const file = join(this.dirFor(key), CHECKPOINT_FILE)
+      // Keep Windows read handles inside the synchronous checkpoint replacement boundary.
+      raw = process.platform === 'win32' ? readFileSync(file, 'utf-8') : await fs.readFile(file, 'utf-8')
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
       throw error

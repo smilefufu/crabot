@@ -21,11 +21,13 @@ import { createWorkspaceProcessJournal } from '../workspace-process-journal.mjs'
 import { WorkspaceCatalog } from '../../../crabot-shared/dist/workspace-catalog.js'
 import { sha256CanonicalJson } from '../../../crabot-shared/dist/canonical-json.js'
 
-async function fixture(t, { crossVolume = false, closureLedger = false } = {}) {
+async function fixture(t, { crossVolume = false, closureLedger = false, separateTargetAncestor = false } = {}) {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(tmpdir(), 'coordinator-launch-')))
   const targetRoot = crossVolume ? fs.mkdtempSync('/dev/shm/crabot-real-file-host-') : root
+  const targetParent = separateTargetAncestor ? path.join(targetRoot, 'target-parent') : targetRoot
+  if (separateTargetAncestor) fs.mkdirSync(targetParent, { mode: 0o700 })
   const data = management.ensurePrivateDataRoot(path.join(root, 'data')), id = randomUUID()
-  let closureWorker, ledgerFile, ledgerBytes, checkpointFile, checkpointBytes
+  let closureWorker, ledgerFile, ledgerBytes, checkpointFile, checkpointBytes, externalWorkspace
   if (closureLedger) {
     closureWorker = { worker_id: 'closure-worker', manager_key: 'fixture::closure', task_id: 'closure-task', workspace_id: 'default', incarnations: [] }
     ledgerFile = path.join(data, 'agent/worker-ledgers/fixture%3A%3Aclosure.json')
@@ -48,12 +50,12 @@ async function fixture(t, { crossVolume = false, closureLedger = false } = {}) {
   if (closureLedger) {
     await catalog.createProject({ workspace_id: randomUUID(), name: 'managed', description: 'ROOT_PROJECT_PRIVATE_DESCRIPTION' })
     const external = path.join(root, 'outside-project'); fs.mkdirSync(external); fs.writeFileSync(path.join(external, 'kept'), 'external project work')
-    await catalog.createProject({ workspace_id: randomUUID(), name: 'external', root: external })
+    externalWorkspace = (await catalog.createProject({ workspace_id: randomUUID(), name: 'external', root: external })).workspace
   }
   const before = await catalog.snapshot(), marker = path.join(before.storage_root, 'original.txt')
   fs.writeFileSync(marker, 'original work')
   const lock = await acquireCliLock(data, 'workspace-relocation')
-  await beginWorkspaceRelocationIntent({ dataDir: data, id, target: path.join(targetRoot, 'new'), expectedRevision: before.revision, protectedRoots: [] })
+  const intent = await beginWorkspaceRelocationIntent({ dataDir: data, id, target: path.join(targetParent, 'new'), expectedRevision: before.revision, protectedRoots: [] })
   let coordinator
   const close = async () => {
     if (coordinator) {
@@ -66,7 +68,7 @@ async function fixture(t, { crossVolume = false, closureLedger = false } = {}) {
     }
   }
   t.after(async () => { if (coordinator && workspaceCoordinatorDiagnostics(coordinator.child)) t.diagnostic(workspaceCoordinatorDiagnostics(coordinator.child)); await close(); releaseCliLock(lock); fs.rmSync(root, { recursive: true, force: true }); if (crossVolume) fs.rmSync(targetRoot, { recursive: true, force: true }) })
-  return { root, data, id, lock, before, catalog, marker, close, closureWorker, ledgerFile, ledgerBytes, checkpointFile, checkpointBytes,
+  return { root, data, id, target: intent.target, lock, before, catalog, marker, close, closureWorker, ledgerFile, ledgerBytes, checkpointFile, checkpointBytes, externalWorkspace,
     launch: async options => { try { coordinator = await launchWorkspaceRelocationCoordinator(options ?? { dataDir: data, id }); return coordinator } catch (error) { t.diagnostic(JSON.stringify({ stage: error.stage, code: error.code, cause_code: error.cause?.code, cause_stage: error.cause?.stage, cause_message: error.cause?.message, child_observation: error.child_observation, stderr: error.diagnostics })); throw error } } }
 }
 
@@ -94,7 +96,7 @@ test('the actual fixed script owns the lock and serves the first journals before
     assert.equal(readWorkspaceRelocationExecutionExit(f.data, f.id).intent_id, f.id)
     assert.deepEqual(await f.catalog.snapshot(), f.before)
     assert.equal(fs.readFileSync(f.marker, 'utf8'), 'original work')
-    assert.equal(fs.existsSync(path.join(f.root, 'new')), false)
+    assert.equal(fs.existsSync(f.target), false)
     const beforeHash = sha256CanonicalJson({ launch, ready })
     await f.close()
     assert.equal(sha256CanonicalJson(readWorkspaceRelocationCoordinator(f.data, f.id)), beforeHash)
@@ -174,7 +176,7 @@ for (const mode of ['Worker receipt missing', 'module receipt missing', 'live mo
         if (mode === 'live module behind claimed receipt') assert.equal(native.isProcessExited(actor.pid), false)
       }
       assert.equal(fs.readFileSync(f.marker, 'utf8'), 'original work')
-      assert.equal(fs.existsSync(path.join(f.root, 'new')), false)
+      assert.equal(fs.existsSync(f.target), false)
     } finally { worker.close(); modules.close(); processes.close() }
   })
 }
@@ -205,7 +207,7 @@ for (const damage of ['hash', 'extra', 'hardlink', 'missing Native journal', 'mi
       await assert.rejects(processes.confirmExecutionExit(), { code: 'CRABOT_WORKSPACE_JOURNAL_UNAVAILABLE' })
       assert.deepEqual(fs.readFileSync(file), retained)
       assert.equal(fs.readFileSync(f.marker, 'utf8'), 'original work')
-      assert.equal(fs.existsSync(path.join(f.root, 'new')), false)
+      assert.equal(fs.existsSync(f.target), false)
     } finally { worker.close(); modules.close(); processes.close() }
   })
 }
@@ -240,7 +242,7 @@ for (const scenario of ['normal', 'unexpected-path', 'lost-reply']) test('actual
     const first = fs.readFileSync(path.join(f.data, 'workspace-control/relocation-files.json'))
     assert.equal((await files.prepare()).dispatch, 'observe')
     assert.deepEqual(fs.readFileSync(path.join(f.data, 'workspace-control/relocation-files.json')), first)
-    assert.equal(fs.existsSync(result.plan.staging_path), false); assert.equal(fs.existsSync(path.join(f.root, 'new')), false)
+    assert.equal(fs.existsSync(result.plan.staging_path), false); assert.equal(fs.existsSync(f.target), false)
     assert.equal(fs.readFileSync(f.marker, 'utf8'), 'original work'); assert.deepEqual(await f.catalog.snapshot(), f.before)
   } finally { worker.close(); modules.close(); processes.close(); files.close() }
 })
@@ -302,7 +304,7 @@ for (const mode of ['confirmed', 'lost reply', 'unexpected payload', 'exited Hos
     assert.deepEqual(native.listChildProcessIds(child.pid), [...initialPids, host.pid].sort((a, b) => a - b), JSON.stringify({ initial: initialChildren, current: describeChildren() }))
     for (const item of initialChildren) assert.ok(native.sameProcess(item.process, native.inspectProcess(item.process.pid)))
     const plan = readWorkspaceRelocationFilePlan(f.data, f.id)
-    assert.equal(fs.existsSync(plan.staging_path), false); assert.equal(fs.existsSync(path.join(f.root, 'new')), false)
+    assert.equal(fs.existsSync(plan.staging_path), false); assert.equal(fs.existsSync(f.target), false)
     assert.equal(fs.readFileSync(f.marker, 'utf8'), 'original work'); assert.deepEqual(await f.catalog.snapshot(), f.before)
     if (mode === 'exited Host') {
       native.terminateKnownProcess(host)
@@ -361,13 +363,13 @@ for (const mode of ['confirmed', 'lost acknowledgement', 'unexpected payload']) 
     assert.deepEqual(fs.readFileSync(path.join(f.data, 'workspace-control/relocation-file-actors.jsonl')), before)
     const observed = await files.prepareHost()
     assert.equal(observed.dispatch, 'observe'); assert.deepEqual(observed.actors.host, host.actors.host)
-    assert.equal(fs.existsSync(path.join(f.root, 'new')), false); assert.equal(fs.readFileSync(f.marker, 'utf8'), 'original work')
+    assert.equal(fs.existsSync(f.target), false); assert.equal(fs.readFileSync(f.marker, 'utf8'), 'original work')
     assert.deepEqual(await f.catalog.snapshot(), f.before)
   } finally { workers.close(); modules.close(); processes.close(); files.close() }
 })
 
 for (const mode of ['confirmed', 'lost acknowledgement', 'changed source', 'copy', 'Root publish', 'Root lost acknowledgement', 'Root target changed', 'Root changed ancestor']) test('the actual fixed Host prepares files once while the catalog stays unchanged: ' + mode, { timeout: process.platform === 'win32' ? 600000 : 120000, skip: mode === 'copy' && (process.platform !== 'linux' || !fs.existsSync('/dev/shm') || fs.statSync(tmpdir()).dev === fs.statSync('/dev/shm').dev) }, async t => {
-  const f = await fixture(t, { crossVolume: mode === 'copy', closureLedger: mode === 'confirmed' || mode === 'lost acknowledgement' || mode.startsWith('Root') }), { child, launch } = await f.launch(), context = { dataDir: f.data, id: f.id, launch }
+  const f = await fixture(t, { crossVolume: mode === 'copy', closureLedger: mode === 'confirmed' || mode === 'lost acknowledgement' || mode.startsWith('Root'), separateTargetAncestor: mode === 'Root changed ancestor' }), { child, launch } = await f.launch(), context = { dataDir: f.data, id: f.id, launch }
   const workers = createWorkspaceWorkerJournal(child, context), modules = createWorkspaceModuleJournal(child, context), processes = createWorkspaceProcessJournal(child, context)
   let files = createWorkspaceFileJournal(child, context)
   try {
@@ -616,19 +618,19 @@ for (const mode of ['confirmed', 'lost acknowledgement', 'changed source', 'copy
             files.close(); files = createWorkspaceFileJournal(child, context)
           }
           if (mode === 'Root changed ancestor') {
-            const saved = f.root + '-original-' + f.id
+            const anchor = path.dirname(f.target), saved = anchor + '-original-' + f.id
             assert.equal(fs.existsSync(saved), false)
-            fs.renameSync(f.root, saved); fs.mkdirSync(f.root, { mode: 0o700 })
-            for (const name of fs.readdirSync(saved)) fs.renameSync(path.join(saved, name), path.join(f.root, name))
+            fs.renameSync(anchor, saved); fs.mkdirSync(anchor, { mode: 0o700 })
+            for (const name of fs.readdirSync(saved)) fs.renameSync(path.join(saved, name), path.join(anchor, name))
             try {
               await assert.rejects(files.prepareRoot(), { code: 'CRABOT_WORKSPACE_JOURNAL_UNAVAILABLE' })
               assert.equal(readWorkspaceRelocationRootPlan(f.data, f.id), null)
-              assert.equal(fs.existsSync(path.join(f.root, 'new')), false)
+              assert.equal(fs.existsSync(path.join(anchor, 'new')), false)
               assert.deepEqual(await f.catalog.snapshot(), f.before)
               assert.deepEqual(fs.readFileSync(f.ledgerFile), closedBytes)
             } finally {
-              for (const name of fs.readdirSync(f.root)) fs.renameSync(path.join(f.root, name), path.join(saved, name))
-              fs.rmdirSync(f.root); fs.renameSync(saved, f.root)
+              for (const name of fs.readdirSync(anchor)) fs.renameSync(path.join(anchor, name), path.join(saved, name))
+              fs.rmdirSync(anchor); fs.renameSync(saved, anchor)
             }
             files.close(); files = createWorkspaceFileJournal(child, context)
             await assert.rejects(files.prepareRoot(), { code: 'CRABOT_WORKSPACE_JOURNAL_UNAVAILABLE' })
@@ -643,16 +645,16 @@ for (const mode of ['confirmed', 'lost acknowledgement', 'changed source', 'copy
           assert.equal(rootPrepared.plan_sha256, sha256CanonicalJson(rootPlan))
           assert.equal(rootPlan.worker_commit_sha256, closedEvidence.worker_commit_sha256)
           assert.equal(rootPlan.recovery_commit_sha256, closedEvidence.recovery_commit_sha256)
-          assert.equal(rootPlan.publication.target, path.join(f.root, 'new'))
+          assert.equal(rootPlan.publication.target, f.target)
           assert.equal(rootPlan.publication.tree.ino, result.ready.tree.ino)
           assert.equal(rootPlan.publication.empty_target, null)
-          const expectedMappings = f.before.workspaces.filter(item => item.root !== path.join(f.root, 'outside-project')).map(item => ({ workspace_id: item.workspace_id,
-            before_root: item.root, after_root: path.join(f.root, 'new', path.relative(f.before.storage_root, item.root)) })).sort((a, b) => a.workspace_id < b.workspace_id ? -1 : 1)
+          const expectedMappings = f.before.workspaces.filter(item => item.workspace_id !== f.externalWorkspace.workspace_id).map(item => ({ workspace_id: item.workspace_id,
+            before_root: item.root, after_root: path.join(f.target, path.relative(f.before.storage_root, item.root)) })).sort((a, b) => a.workspace_id < b.workspace_id ? -1 : 1)
           assert.deepEqual(rootPlan.catalog_mappings, expectedMappings)
           assert.equal(fs.readFileSync(path.join(f.root, 'outside-project/kept'), 'utf8'), 'external project work')
           const rootFile = path.join(control, 'relocation-root-plan.json'), rootBytes = fs.readFileSync(rootFile)
           assert.equal((await files.prepareRoot()).dispatch, 'observe'); assert.deepEqual(fs.readFileSync(rootFile), rootBytes)
-          assert.equal(fs.existsSync(path.join(f.root, 'new')), false); assert.deepEqual(await f.catalog.snapshot(), f.before)
+          assert.equal(fs.existsSync(f.target), false); assert.deepEqual(await f.catalog.snapshot(), f.before)
           assert.equal(rootBytes.includes(Buffer.from('ORIGINAL_RECOVERY_PRIVATE_INPUT')), false)
           assert.equal(rootBytes.includes(Buffer.from('keep original work')), false)
           assert.equal(rootBytes.includes(Buffer.from('ROOT_PROJECT_PRIVATE_DESCRIPTION')), false)
@@ -698,17 +700,17 @@ for (const mode of ['confirmed', 'lost acknowledgement', 'changed source', 'copy
             assert.equal(published.published_sha256, sha256CanonicalJson(publishedRecord))
             assert.equal(publishedRecord.plan_sha256, rootPrepared.plan_sha256)
             assert.equal(publishedRecord.content_sha256, result.ready.content_sha256)
-            assert.equal(fs.readFileSync(path.join(f.root, 'new/original.txt'), 'utf8'), 'original work')
+            assert.equal(fs.readFileSync(path.join(f.target, 'original.txt'), 'utf8'), 'original work')
             assert.equal(fs.existsSync(rootPlan.publication.tree.path), false)
             assert.deepEqual(await f.catalog.snapshot(), f.before)
             assert.equal((await files.publishRoot()).dispatch, 'observe'); assert.deepEqual(fs.readFileSync(publishedFile), publishedBytes)
             assert.equal(workspaceMaintenancePending(f.data), true)
             const selectedFile = path.join(control, 'relocation-root-selected.json')
             if (mode === 'Root target changed') {
-              fs.appendFileSync(path.join(f.root, 'new/original.txt'), ' changed work must remain')
+              fs.appendFileSync(path.join(f.target, 'original.txt'), ' changed work must remain')
               await assert.rejects(files.selectRoot(), { code: 'CRABOT_WORKSPACE_JOURNAL_UNAVAILABLE' })
               assert.equal(fs.existsSync(selectedFile), false); assert.deepEqual(await f.catalog.snapshot(), f.before)
-              assert.equal(fs.readFileSync(path.join(f.root, 'new/original.txt'), 'utf8'), 'original work changed work must remain')
+              assert.equal(fs.readFileSync(path.join(f.target, 'original.txt'), 'utf8'), 'original work changed work must remain')
               assert.deepEqual(fs.readFileSync(publishedFile), publishedBytes)
             } else {
               const selectionStarted = Date.now()
@@ -717,7 +719,7 @@ for (const mode of ['confirmed', 'lost acknowledgement', 'changed source', 'copy
               const after = await f.catalog.snapshot()
               assert.equal(selected.dispatch, mode === 'Root lost acknowledgement' ? 'observe' : 'dispatch')
               assert.equal(selected.selected_sha256, sha256CanonicalJson(rootRecords.readWorkspaceRelocationRootSelected(f.data, f.id)))
-              assert.equal(after.storage_root, path.join(f.root, 'new')); assert.equal(after.revision, f.before.revision + 1)
+              assert.equal(after.storage_root, f.target); assert.equal(after.revision, f.before.revision + 1)
               assert.equal(sha256CanonicalJson(after), rootPlan.catalog_after_sha256)
               for (const original of f.before.workspaces) {
                 const actual = after.workspaces.find(item => item.workspace_id === original.workspace_id)
@@ -753,6 +755,6 @@ for (const mode of ['confirmed', 'lost acknowledgement', 'changed source', 'copy
       assert.equal((await files.prepareFiles()).dispatch, 'observe')
       assert.deepEqual(fs.readFileSync(path.join(f.data, 'workspace-control/relocation-file-actors.jsonl')), before)
     }
-    assert.equal(fs.existsSync(path.join(f.root, 'new')), false); assert.deepEqual(await f.catalog.snapshot(), f.before)
+    assert.equal(fs.existsSync(f.target), false); assert.deepEqual(await f.catalog.snapshot(), f.before)
   } finally { workers.close(); modules.close(); processes.close(); files.close() }
 })

@@ -11,6 +11,8 @@ on:
       - 'crabot-agent/src/unified-agent.ts'
       - 'crabot-agent/src/manager/bootstrap.ts'
       - 'crabot-agent/src/manager/registry.ts'
+      - 'crabot-agent/src/manager/session-store.ts'
+      - 'crabot-agent/tests/manager/session-store.test.ts'
       - 'crabot-agent/tests/manager/restart-resume.test.ts'
       - 'crabot-agent/src/manager/voice-inbox.ts'
       - 'crabot-agent/src/manager/workboard-store.ts'
@@ -83,7 +85,7 @@ jobs:
           pnpm --dir crabot-agent install --frozen-lockfile
           pnpm --dir crabot-agent build
           cd crabot-agent
-          node node_modules/vitest/vitest.mjs run tests/manager/restart-resume.test.ts tests/core/workspace-relocation-ledgers.test.ts tests/core/workspace-relocation-commit.test.ts tests/core/workspace-relocation-checkpoints.test.ts tests/core/workspace-relocation-retirements.test.ts tests/core/workspace-relocation-recovery-capture.test.ts tests/core/workspace-relocation-recovery-progress.test.ts tests/core/workspace-recovery-routing.test.ts tests/workers/harness/workspace-relocation-close.test.ts tests/workers/harness/ledger-store.test.ts --maxWorkers=1 --minWorkers=1
+          node node_modules/vitest/vitest.mjs run tests/manager/restart-resume.test.ts tests/manager/session-store.test.ts tests/core/workspace-relocation-ledgers.test.ts tests/core/workspace-relocation-commit.test.ts tests/core/workspace-relocation-checkpoints.test.ts tests/core/workspace-relocation-retirements.test.ts tests/core/workspace-relocation-recovery-capture.test.ts tests/core/workspace-relocation-recovery-progress.test.ts tests/core/workspace-recovery-routing.test.ts tests/workers/harness/workspace-relocation-close.test.ts tests/workers/harness/ledger-store.test.ts --maxWorkers=1 --minWorkers=1
       - name: Preserve migrated request history without resuming its model or events
         working-directory: crabot-agent
         run: node node_modules/vitest/vitest.mjs run tests/manager/conversation-request-runner.test.ts --testNamePattern='retains a migrated old request' --maxWorkers=1 --minWorkers=1

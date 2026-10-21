@@ -59,6 +59,27 @@ describe('ManagerSessionStore', () => {
     expect(loaded.foldedCount).toBe(12)
   })
 
+  it('reads complete checkpoints while synchronous atomic replacements continue', async () => {
+    const key: ManagerKey = 'wechat::checkpoint-replacement'
+    await store.ensureSession(key)
+    const checkpoint: ManagerResumeCheckpoint = { episodeId: 'atomic-0', state: { key, foldedCount: 0,
+      recent: [createUserMessage('checkpoint body '.repeat(4096))] }, envelopes: [], wakeIndex: -1, pending: [], hasEngineMessages: true,
+      turns: [], responses: [], tools: [], pendingToolCallIds: [], adminChatClaims: [], transientMessageIds: [], spawnedWorkerIds: [],
+      execution: { needsSpawnRecheck: false, spawnRecheckInjected: false, spawnRecheckOutcomeRecorded: false,
+        postSendRecheckSequence: 0, successfulSendMessageTargets: [], continuedWorkers: [] } }
+    store.saveCheckpoint(checkpoint)
+    for (let index = 1; index <= 64; index++) {
+      const reading = store.loadCheckpoint(key)
+      await new Promise<void>(resolve => setImmediate(resolve))
+      let current: ManagerResumeCheckpoint | undefined
+      try { store.saveCheckpoint({ ...checkpoint, episodeId: 'atomic-' + index }) }
+      finally { current = await reading }
+      expect(['atomic-' + (index - 1), 'atomic-' + index]).toContain(current?.episodeId)
+      expect(current?.state.recent).toEqual(checkpoint.state.recent)
+      expect((await store.loadCheckpoint(key))?.episodeId).toBe('atomic-' + index)
+    }
+  }, 30_000)
+
   it('不存在的 key 返回空态,且不建目录', async () => {
     const key: ManagerKey = 'wechat::sess-never-seen'
     const loaded = await store.load(key)
