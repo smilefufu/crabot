@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { appendFileSync } from 'node:fs'
+import { appendFileSync, writeFileSync } from 'node:fs'
 import readline from 'node:readline'
 
 const argv = process.argv.slice(2)
@@ -14,7 +14,8 @@ const mode = process.env.FAKE_APP_SERVER_MODE ?? 'happy'
 const forkThreadId = process.env.FAKE_FORK_THREAD_ID ?? '019d0000-0000-7000-8000-000000000001'
 const turnId = process.env.FAKE_TURN_ID ?? '019d0000-0000-7000-8000-000000000002'
 const delayMs = Number(process.env.FAKE_COMPLETION_DELAY_MS ?? '20')
-if (process.env.FAKE_PID_FILE) appendFileSync(process.env.FAKE_PID_FILE, String(process.pid))
+if (process.env.FAKE_PID_FILE) appendFileSync(process.env.FAKE_PID_FILE, String(process.pid) + '\n')
+if (process.env.FAKE_QUERY_CONTEXT_FILE) writeFileSync(process.env.FAKE_QUERY_CONTEXT_FILE, JSON.stringify({ cwd: process.cwd(), codex_home: process.env.CODEX_HOME, args: process.argv.slice(2) }))
 const terminationFile = process.env.FAKE_TERMINATION_FILE
 const requestFile = process.env.FAKE_REQUEST_FILE
 
@@ -36,6 +37,7 @@ function error(id, message, code = -32600) {
 const rl = readline.createInterface({ input: process.stdin })
 rl.on('line', (line) => {
   const message = JSON.parse(line)
+  if (process.env.FAKE_QUERY_REQUEST_FILE) appendFileSync(process.env.FAKE_QUERY_REQUEST_FILE, `${message.method}\n`)
   if (requestFile && (message.method === 'thread/fork' || message.method === 'turn/start')) {
     appendFileSync(requestFile, `${JSON.stringify(message)}\n`)
   }

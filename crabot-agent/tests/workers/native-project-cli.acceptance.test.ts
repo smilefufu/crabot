@@ -1,4 +1,4 @@
-import { afterEach, expect, it } from 'vitest'
+import { afterEach, expect, it, vi } from 'vitest'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import os from 'node:os'
@@ -190,3 +190,50 @@ it.skipIf(!process.env.CRABOT_TEST_CLAUDE_BIN)('real Claude Code uses private MC
   expect(evidence.markers.some(output => output.includes('worker-b'))).toBe(true)
   expect(await fs.readdir(project)).toEqual(['AGENTS.md'])
 }, 100_000)
+
+
+it.skipIf(!process.env.CRABOT_TEST_CODEX_BIN)('real Codex historical child query does not resume a worker, invoke a model or start MCP', async () => {
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'native-codex-history-中文 ')))
+  cleanup.push(() => fs.rm(root, { recursive: true, force: true }))
+  const before = path.join(root, 'before'), after = path.join(root, 'after'), data = path.join(root, 'private'), home = path.join(root, 'home')
+  for (const directory of [before, data, home]) await fs.mkdir(directory)
+  vi.stubEnv('HOME', home); vi.stubEnv('USERPROFILE', home)
+  cleanup.push(async () => vi.unstubAllEnvs())
+  let modelRequests = 0
+  const server = createServer((_request, response) => { modelRequests++; response.writeHead(500); response.end('{}') })
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+  cleanup.push(async () => { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())) })
+  const marker = path.join(root, 'unexpected-mcp'), sentinel = path.join(root, 'mcp-sentinel.cjs')
+  await fs.writeFile(sentinel, `require('node:fs').writeFileSync(${JSON.stringify(marker)},'unexpected startup')`)
+  const session = '11111111-1111-4111-8111-111111111111', worker = 'historical-parent'
+  const config = [
+    'model="gpt-5.1-codex"', 'model_provider="fixture"', 'features.plugins=false', 'features.recommended_plugins=false',
+    '[model_providers.fixture]', 'name="No model calls expected"',
+    'base_url=' + JSON.stringify('http://127.0.0.1:' + (server.address() as { port: number }).port + '/v1'), 'wire_api="responses"',
+    '[mcp_servers.sentinel]', 'command=' + JSON.stringify(process.execPath), 'args=' + JSON.stringify([sentinel]),
+  ].join('\n') + '\n'
+  const source = JSON.stringify({ type: 'session_meta', timestamp: '2026-10-21T00:00:00.000Z', payload: {
+    id: session, timestamp: '2026-10-21T00:00:00.000Z', cwd: before, originator: 'crabot-history-acceptance', cli_version: '0.149.1', source: 'cli', model_provider: 'fixture',
+  } }) + '\n'
+  const profile = path.join(before, '.codex'), sessionFile = path.join('sessions', '2026', '10', '21', 'rollout-' + session + '.jsonl')
+  await fs.mkdir(path.dirname(path.join(profile, sessionFile)), { recursive: true })
+  await fs.writeFile(path.join(profile, 'config.toml'), config); await fs.writeFile(path.join(profile, sessionFile), source)
+  const metaFile = path.join(data, worker, 'meta-1.json'), meta = JSON.stringify({ workspace_root: before, codex_home: profile, session_id: session, session_discovery: 'discovered', state: 'exited' })
+  await fs.mkdir(path.dirname(metaFile)); await fs.writeFile(metaFile, meta); await fs.rename(before, after)
+  const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'"
+  const adapter = new CodexWorkerAdapter({ dataDir: data, codexHomeSource: path.join(home, 'unused'),
+    codexBin: quote(process.env.CRABOT_TEST_CODEX_BIN!.replaceAll('\\', '/')),
+    readWorkspaceHistory: async () => ({ before_root: before, after_root: after, verify: async () => undefined }),
+  })
+  cleanup.push(() => adapter.dispose())
+  ;(adapter as any).appServerSubagentSupported = true
+  const reconstruct = vi.spyOn(adapter as any, 'ensureRuntime').mockRejectedValue(new Error('closed parent must never be reconstructed'))
+  try {
+    expect(await adapter.listSubagents({ worker_id: worker, incarnation_id: 'original-incarnation', seq: 1, impl: 'codex', session_ref: session })).toEqual([])
+    expect(reconstruct).not.toHaveBeenCalled(); expect((adapter as any).runtimes.size).toBe(0)
+    expect(modelRequests).toBe(0); await expect(fs.stat(marker)).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(await fs.readFile(metaFile, 'utf8')).toBe(meta)
+    expect(await fs.readFile(path.join(after, '.codex/config.toml'), 'utf8')).toBe(config)
+    expect(await fs.readFile(path.join(after, '.codex', sessionFile), 'utf8')).toBe(source)
+  } finally { reconstruct.mockRestore() }
+}, 20_000)

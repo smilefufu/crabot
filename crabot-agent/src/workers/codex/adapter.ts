@@ -2141,29 +2141,57 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     return { fork: this.appServerForkSupported, revive: true, goalMode: false, subagent: this.appServerSubagentSupported, structuredTrace: true }
   }
 
-  private async readChildThreads(h: IncarnationHandle): Promise<ReadonlyArray<import('./app-server-client.js').CodexAppServerThread>> {
+  private async childReadContext(h: IncarnationHandle): Promise<{
+    sessionId: string; workspaceRoot: string; codexHome: string; verify?: () => Promise<void>
+  } | undefined> {
+    const historical = await nativeHistorySource(h, this.deps.readWorkspaceHistory,
+      () => this.readMetaFile(join(this.deps.dataDir, h.worker_id), h.seq))
+    if (historical) {
+      if (historical.metadata.session_discovery !== 'discovered') return undefined
+      const originalHome = historical.metadata.codex_home ?? join(historical.metadata.runtime_root ?? historical.history.before_root, '.codex')
+      const workspaceRoot = await nativeHistoryDirectory(historical, historical.history.before_root)
+      const codexHome = await nativeHistoryDirectory(historical, originalHome)
+      const verify = async () => {
+        await historical.verify()
+        if (await nativeHistoryDirectory(historical, historical.history.before_root) !== workspaceRoot
+          || await nativeHistoryDirectory(historical, originalHome) !== codexHome) throw new Error('Codex history query location changed')
+      }
+      await verify()
+      return { sessionId: h.session_ref, workspaceRoot, codexHome, verify }
+    }
     const runtime = await this.ensureRuntime(h)
-    if (!runtime?.sessionId || !runtime.workspaceRoot) return []
+    if (!runtime?.sessionId || !runtime.workspaceRoot) return undefined
+    return { sessionId: runtime.sessionId, workspaceRoot: runtime.workspaceRoot, codexHome: runtime.codexHome }
+  }
+
+  private async readChildThreads(h: IncarnationHandle): Promise<ReadonlyArray<import('./app-server-client.js').CodexAppServerThread>> {
+    const context = await this.childReadContext(h)
+    if (!context) return []
     const resolved = await this.resolveBinForCommand()
     if (!resolved) return []
-    const client = new CodexAppServerClient({
-      command: `${resolved.cmd} app-server --stdio`,
-      cwd: runtime.workspaceRoot,
-      env: await this.buildEnv({ CODEX_HOME: runtime.codexHome }),
-    })
+    const env = await this.buildEnv({ CODEX_HOME: context.codexHome })
+    await context.verify?.()
+    const command = `${resolved.cmd}${context.verify ? ' -c features.plugins=false -c features.recommended_plugins=false' : ''} app-server --stdio`
+    const client = new CodexAppServerClient({ command, cwd: context.workspaceRoot, env })
     const deadlineAt = new Date(Date.now() + 10_000).toISOString()
     try {
       await client.initialize(deadlineAt)
+      await context.verify?.()
       const children: import('./app-server-client.js').CodexAppServerThread[] = []
       let cursor: string | undefined
       do {
-        const page = await client.listThreads({ parentThreadId: runtime.sessionId, ...(cursor ? { cursor } : {}), limit: 100 }, deadlineAt)
-        children.push(...page.data.filter((thread) => thread.parentThreadId === runtime.sessionId))
+        const page = await client.listThreads({ parentThreadId: context.sessionId, ...(cursor ? { cursor } : {}), limit: 100 }, deadlineAt)
+        await context.verify?.()
+        children.push(...page.data.filter((thread) => thread.parentThreadId === context.sessionId))
         cursor = page.nextCursor ?? undefined
       } while (cursor)
       return children
     } finally {
-      await client.terminate()
+      const stopped = await client.terminate()
+      if (context.verify) {
+        if (!stopped) throw new Error('Codex history query process exit could not be confirmed')
+        await context.verify()
+      }
     }
   }
 
@@ -2171,22 +2199,23 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     items: ReadonlyArray<import('./app-server-client.js').CodexAppServerThreadItem>
     startedAtByTurnId: ReadonlyMap<string, string>
   }> {
-    const runtime = await this.ensureRuntime(h)
-    if (!runtime?.workspaceRoot) return { items: [], startedAtByTurnId: new Map() }
+    const context = await this.childReadContext(h)
+    if (!context) return { items: [], startedAtByTurnId: new Map() }
     const resolved = await this.resolveBinForCommand()
     if (!resolved) return { items: [], startedAtByTurnId: new Map() }
-    const client = new CodexAppServerClient({
-      command: `${resolved.cmd} app-server --stdio`,
-      cwd: runtime.workspaceRoot,
-      env: await this.buildEnv({ CODEX_HOME: runtime.codexHome }),
-    })
+    const env = await this.buildEnv({ CODEX_HOME: context.codexHome })
+    await context.verify?.()
+    const command = `${resolved.cmd}${context.verify ? ' -c features.plugins=false -c features.recommended_plugins=false' : ''} app-server --stdio`
+    const client = new CodexAppServerClient({ command, cwd: context.workspaceRoot, env })
     const deadlineAt = new Date(Date.now() + 10_000).toISOString()
     try {
       await client.initialize(deadlineAt)
+      await context.verify?.()
       const items: import('./app-server-client.js').CodexAppServerThreadItem[] = []
       let cursor: string | undefined
       do {
         const page = await client.listThreadItems({ threadId, ...(cursor ? { cursor } : {}), limit: 100 }, deadlineAt)
+        await context.verify?.()
         items.push(...page.data)
         cursor = page.nextCursor ?? undefined
       } while (cursor)
@@ -2202,9 +2231,14 @@ export class CodexWorkerAdapter implements WorkerAdapter {
         // Older app-server versions may not support includeTurns. The caller uses the
         // child thread creation time as a stable fallback without losing its trace.
       }
+      await context.verify?.()
       return { items, startedAtByTurnId }
     } finally {
-      await client.terminate()
+      const stopped = await client.terminate()
+      if (context.verify) {
+        if (!stopped) throw new Error('Codex history query process exit could not be confirmed')
+        await context.verify()
+      }
     }
   }
 

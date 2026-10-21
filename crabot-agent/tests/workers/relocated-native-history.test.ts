@@ -3,6 +3,7 @@ import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import { ClaudeCodeAdapter } from '../../src/workers/claude-code/adapter.js'
+import { CodexAppServerClient } from '../../src/workers/codex/app-server-client.js'
 import { CodexWorkerAdapter } from '../../src/workers/codex/adapter.js'
 import type { IncarnationHandle } from '../../src/workers/types.js'
 
@@ -105,6 +106,85 @@ for (const impl of ['claude-code', 'codex'] as const) describe('relocated native
     })
   }
   if (impl === 'codex') {
+    function childAdapter() {
+      const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'"
+      const requests = path.join(root, 'query-requests'), context = path.join(root, 'query-context'), pids = path.join(root, 'query-pids')
+      const fixture = path.resolve(__dirname, 'fixtures/fake-codex-app-server.mjs').replaceAll('\\', '/')
+      const queryAdapter = new CodexWorkerAdapter({ dataDir: data, tmux,
+        readWorkspaceHistory: async () => proof,
+        codexBin: `env FAKE_APP_SERVER_MODE=children FAKE_QUERY_REQUEST_FILE=${quote(requests)} FAKE_QUERY_CONTEXT_FILE=${quote(context)} FAKE_PID_FILE=${quote(pids)} ${quote(process.execPath.replaceAll('\\', '/'))} ${quote(fixture)}`,
+      })
+      ;(queryAdapter as any).appServerSubagentSupported = true
+      vi.spyOn(queryAdapter as any, 'ensureRuntime').mockRejectedValue(new Error('history must not reconstruct its parent'))
+      return { queryAdapter, requests, context, pids }
+    }
+    it('queries native children with the original cursor without rebuilding the closed parent', async () => {
+      const { queryAdapter, requests, context, pids } = childAdapter(), childId = '019d0000-0000-7000-8000-000000000003'
+      const children = await queryAdapter.listSubagents(handle)
+      expect(children).toMatchObject([{ subagent_id: childId, status: 'completed', task: '原生子 Agent 任务' }])
+      expect(await queryAdapter.getSubagent(handle, childId)).toMatchObject({ subagent_id: childId })
+      const trace = await queryAdapter.readSubagentTrace(handle, childId)
+      expect(trace.nextCursor).toEqual({ offset: 3 }); expect(trace.events).toHaveLength(3)
+      expect((await queryAdapter.readSubagentTrace(handle, childId, trace.nextCursor)).events).toEqual([])
+      const observed = JSON.parse(await fs.readFile(context, 'utf8'))
+      expect(observed.args).toEqual(['-c', 'features.plugins=false', '-c', 'features.recommended_plugins=false', 'app-server', '--stdio'])
+      for (const [actual, expected] of [[observed.cwd, after], [observed.codex_home, path.join(after, '.codex')]]) {
+        const a = await fs.stat(actual, { bigint: true }), b = await fs.stat(expected, { bigint: true })
+        expect([a.dev, a.ino]).toEqual([b.dev, b.ino])
+      }
+      expect([...new Set((await fs.readFile(requests, 'utf8')).trim().split('\n'))].sort()).toEqual([
+        'initialize', 'initialized', 'thread/items/list', 'thread/list', 'thread/read',
+      ])
+      const native = require('../../../scripts/lib/process-identity.cjs')
+      for (const pid of (await fs.readFile(pids, 'utf8')).trim().split('\n').map(Number)) expect(native.isProcessExited(pid)).toBe(true)
+      expect((queryAdapter as any).ensureRuntime).not.toHaveBeenCalled()
+      expect((queryAdapter as any).runtimes.size).toBe(0)
+      expect(tmux.isAlive).not.toHaveBeenCalled(); expect(tmux.killSession).not.toHaveBeenCalled()
+      expect(await fs.readFile(metaFile, 'utf8')).toBe(originalMeta); expect(await fs.readFile(source, 'utf8')).toBe(originalSource)
+    })
+    it('rejects a changed original binding after the child query reply', async () => {
+      const { queryAdapter, pids } = childAdapter(), list = CodexAppServerClient.prototype.listThreads
+      let changed = false
+      vi.spyOn(CodexAppServerClient.prototype, 'listThreads').mockImplementation(async function (...args) {
+        const result = await list.apply(this, args)
+        await fs.writeFile(metaFile, JSON.stringify({ ...JSON.parse(originalMeta), session_id: '22222222-2222-4222-8222-222222222222' }))
+        changed = true
+        return result
+      })
+      await expect(queryAdapter.listSubagents(handle)).rejects.toThrow()
+      expect(changed).toBe(true)
+      const native = require('../../../scripts/lib/process-identity.cjs')
+      for (const pid of (await fs.readFile(pids, 'utf8')).trim().split('\n').map(Number)) expect(native.isProcessExited(pid)).toBe(true)
+      expect((queryAdapter as any).ensureRuntime).not.toHaveBeenCalled()
+      expect((queryAdapter as any).runtimes.size).toBe(0); expect(tmux.isAlive).not.toHaveBeenCalled()
+      expect(await fs.readFile(source, 'utf8')).toBe(originalSource)
+    })
+    it('refuses a redirected mapped query home before starting an app-server', async () => {
+      const { queryAdapter, context } = childAdapter(), home = path.join(after, '.codex'), outside = path.join(root, 'outside-query-home')
+      await fs.rename(home, home + '-retained'); await fs.mkdir(outside)
+      await fs.symlink(outside, home, process.platform === 'win32' ? 'junction' : 'dir')
+      await expect(queryAdapter.listSubagents(handle)).rejects.toThrow()
+      await expect(fs.stat(context)).rejects.toMatchObject({ code: 'ENOENT' })
+      expect((queryAdapter as any).ensureRuntime).not.toHaveBeenCalled()
+      expect((queryAdapter as any).runtimes.size).toBe(0); expect(tmux.isAlive).not.toHaveBeenCalled()
+    })
+    it('keeps an original external private home for child queries', async () => {
+      const { queryAdapter, context } = childAdapter(), home = path.join(root, 'external-query-profile')
+      await fs.mkdir(home)
+      const metadata = JSON.stringify({ ...JSON.parse(originalMeta), codex_home: home }); await fs.writeFile(metaFile, metadata)
+      expect(await queryAdapter.listSubagents(handle)).toHaveLength(1)
+      expect(JSON.parse(await fs.readFile(context, 'utf8')).codex_home).toBe(home)
+      expect((queryAdapter as any).ensureRuntime).not.toHaveBeenCalled()
+      expect(await fs.readFile(metaFile, 'utf8')).toBe(metadata)
+    })
+    it('does not query an undiscovered original native session', async () => {
+      const { queryAdapter, context } = childAdapter()
+      const metadata = JSON.stringify({ ...JSON.parse(originalMeta), session_discovery: 'placeholder' }); await fs.writeFile(metaFile, metadata)
+      expect(await queryAdapter.listSubagents(handle)).toEqual([])
+      await expect(fs.stat(context)).rejects.toMatchObject({ code: 'ENOENT' })
+      expect((queryAdapter as any).ensureRuntime).not.toHaveBeenCalled()
+      expect(await fs.readFile(metaFile, 'utf8')).toBe(metadata)
+    })
     it('does not relocate a pre-existing private profile outside the original workspace', async () => {
       const home = path.join(root, 'private-profile'), file = path.join(home, 'sessions/2026/10/21', path.basename(source))
       await fs.mkdir(path.dirname(file), { recursive: true }); await fs.writeFile(file, originalSource)
