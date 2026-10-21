@@ -11,6 +11,8 @@ on:
       - 'scripts/lib/process-identity.cjs'
       - 'scripts/lib/owned-process-tree.cjs'
       - 'crabot-native/**'
+      - 'scripts/workspace-root-probe.mjs'
+      - 'scripts/lib/__tests__/workspace-root-probe.test.mjs'
       - '.github/workflows/workspace-core.yml'
   pull_request:
     paths:
@@ -21,6 +23,8 @@ on:
       - 'scripts/lib/process-identity.cjs'
       - 'scripts/lib/owned-process-tree.cjs'
       - 'crabot-native/**'
+      - 'scripts/workspace-root-probe.mjs'
+      - 'scripts/lib/__tests__/workspace-root-probe.test.mjs'
       - '.github/workflows/workspace-core.yml'
   workflow_dispatch:
 
@@ -49,6 +53,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22.22.3'
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.13.0'
       - name: Compile identity and frozen finite module dependencies
         run: |
           node scripts/build-native.mjs
@@ -62,6 +69,8 @@ jobs:
             pnpm --dir "$module" install --frozen-lockfile
             node "$module/node_modules/typescript/bin/tsc" -p "$module/tsconfig.json"
           done
+      - name: Actual fixed directory probe and bounded cleanup
+        run: node --test scripts/lib/__tests__/workspace-root-probe.test.mjs
       - name: Original lifecycle and maintenance regressions
         working-directory: crabot-core
         run: node node_modules/vitest/vitest.mjs run src/module-manager-lifecycle.test.ts src/module-manager-health.test.ts src/module-manager-advanced.test.ts src/workspace-maintenance.test.ts src/workspace-module-scope.test.ts --maxWorkers=1 --minWorkers=1
