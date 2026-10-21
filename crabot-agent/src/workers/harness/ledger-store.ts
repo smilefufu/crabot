@@ -320,17 +320,34 @@ export class LedgerStore {
     return (await this.parseLedgerFile(key, raw)).ledger
   }
 
+  private decodeLedgerFile(key: ManagerKey, raw: string, requireCurrent = false) {
+    const physical = JSON.parse(raw)
+    const wrapped = physical && typeof physical === 'object' && !Array.isArray(physical) && Object.prototype.hasOwnProperty.call(physical, 'schema_version')
+    if (wrapped && (physical.schema_version !== 1 || Object.keys(physical).length !== 2 || !Object.prototype.hasOwnProperty.call(physical, 'ledger'))) throw new Error('Unsupported request-aware ledger envelope')
+    const source = wrapped ? physical.ledger : physical
+    if (requireCurrent && Array.isArray(source?.workers) && source.workers.some((worker: LedgerWorker) => !['queued', 'running', 'halted', 'closed'].includes(worker?.task?.status))) {
+      throw new Error('[LedgerStore] workspace relocation ledger still requires format migration')
+    }
+    const normalized = this.assertLedger(key, source)
+    if (!wrapped && (this.requestAwareLedgers.has(key) || normalized.ledger.workers.some(worker => worker.origin.request !== undefined))) throw new Error('Request Worker ledger requires the versioned envelope')
+    return { ...normalized, physical: physical as WorkerLedger | RequestAwareWorkerLedgerFile, wrapped: !!wrapped }
+  }
+
+  /** Pure validation for the fixed offline job; never initializes a store or runs read-time writes. */
+  static parseWorkspaceRelocationLedger(key: ManagerKey, raw: string) {
+    if (!isManagerKey(key)) throw new Error('[LedgerStore] invalid workspace relocation Manager')
+    const decoded = new LedgerStore('').decodeLedgerFile(key, raw, true)
+    if (decoded.archivedAmbiguousLegacy) throw new Error('[LedgerStore] workspace relocation ledger still requires format migration')
+    return { ledger: decoded.ledger, physical: decoded.physical, wrapped: decoded.wrapped }
+  }
+
   private async parseLedgerFile(key: ManagerKey, raw: string): Promise<ReturnType<LedgerStore['assertLedger']>> {
     const filePath = this.pathFor(key)
     try {
-      const physical = JSON.parse(raw)
-      const wrapped = physical && typeof physical === 'object' && !Array.isArray(physical) && Object.prototype.hasOwnProperty.call(physical, 'schema_version')
-      if (wrapped && (physical.schema_version !== 1 || Object.keys(physical).length !== 2 || !Object.prototype.hasOwnProperty.call(physical, 'ledger'))) throw new Error('Unsupported request-aware ledger envelope')
-      const normalized = this.assertLedger(key, wrapped ? physical.ledger : physical)
-      if (!wrapped && (this.requestAwareLedgers.has(key) || normalized.ledger.workers.some(worker => worker.origin.request !== undefined))) throw new Error('Request Worker ledger requires the versioned envelope')
+      const { ledger, archivedAmbiguousLegacy, wrapped } = this.decodeLedgerFile(key, raw)
       if (wrapped) this.requestAwareLedgers.add(key)
-      if (normalized.archivedAmbiguousLegacy) await this.writeLedgerFile(key, normalized.ledger)
-      return normalized
+      if (archivedAmbiguousLegacy) await this.writeLedgerFile(key, ledger)
+      return { ledger, archivedAmbiguousLegacy }
     } catch (err) {
       throw new Error(`[LedgerStore] invalid ledger ${filePath}: ${(err as Error).message}`)
     }
