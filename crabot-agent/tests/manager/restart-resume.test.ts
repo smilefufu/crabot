@@ -183,7 +183,9 @@ describe('Manager restart continuation', () => {
     ['daily-human', false], ['daily-human', true],
     ['concurrent-schedule', true],
     ['queued-schedule', true],
+    ['queued-schedule-stale-read', true],
   ] as const)('persists a new %s wake across repeated recovery failure (restart=%s)', async (kind, restart) => {
+    const queuedSchedule = kind.startsWith('queued-schedule')
     const write = vi.fn(async () => ({ output: 'saved '.repeat(15000), isError: false }))
     const tool = defineTool({ name: 'write', description: 'write', inputSchema: {}, isReadOnly: false, call: write })
     let first = true
@@ -196,7 +198,7 @@ describe('Manager restart continuation', () => {
       if (params.tools.length === 0) {
         if (failing) {
           if (++failedSummaries === 2 && kind === 'concurrent-schedule') await resumeGate
-          if (failedSummaries === 1 && kind === 'queued-schedule') await resumeGate
+          if (failedSummaries === 1 && queuedSchedule) await resumeGate
           throw new Error('invalid api key')
         }
         yield* chunksFromContent([{ type: 'text', text: 'Write completed.' }], 'end_turn')
@@ -209,13 +211,32 @@ describe('Manager restart continuation', () => {
       }
     } }
     const deps = { toolFace: () => [tool], contextWindowTokens: () => 12000 }
+    let releaseStaleRead!: () => void
+    const staleReadGate = new Promise<void>(resolve => { releaseStaleRead = resolve })
+    let heldStaleRead = false
+    if (kind === 'queued-schedule-stale-read') {
+      let lastSaved: ManagerResumeCheckpoint | undefined
+      const save = store.saveCheckpoint.bind(store), load = store.loadCheckpoint.bind(store)
+      vi.spyOn(store, 'saveCheckpoint').mockImplementation(checkpoint => {
+        lastSaved = JSON.parse(JSON.stringify(checkpoint)); return save(checkpoint)
+      })
+      vi.spyOn(store, 'loadCheckpoint').mockImplementation(async key => {
+        if (!heldStaleRead && failedSummaries >= 1 && lastSaved && !JSON.stringify(lastSaved).includes('QUEUED_NEW_WAKE')) {
+          const captured = lastSaved; heldStaleRead = true
+          // A valid read of the old inode can settle after a later checkpoint was published.
+          await staleReadGate
+          return captured
+        }
+        return load(key)
+      })
+    }
     const original = registry(adapter, deps)
     const initial = kind === 'daily-human'
       ? original.routeSchedule({ scheduleId: 'daily', triggerId: 'daily-trigger', scheduleName: 'daily',
           title: 'daily', description: 'Execute once', isBuiltin: true, taskType: 'daily_reflection',
           targetSession: { channel_id: 'feishu', session_id: 'restart-test', type: 'private' } })
       : original.routeHumanMessages('feishu', 'restart-test', [message('original', 'Execute once')])
-    if (kind === 'queued-schedule') {
+    if (queuedSchedule) {
       await vi.waitFor(() => expect(failedSummaries).toBe(1))
       const queued = original.routeSchedule({ scheduleId: 'queued', triggerId: 'queued-trigger',
         scheduleName: 'queued', title: 'queued', description: 'QUEUED_NEW_WAKE',
@@ -223,9 +244,15 @@ describe('Manager restart continuation', () => {
       const queuedRejected = expect(queued).rejects.toThrow()
       releaseResume()
       await queuedRejected
+      if (kind === 'queued-schedule-stale-read') {
+        expect(heldStaleRead).toBe(true)
+        expect(JSON.stringify((original as any).pendingResumes.get(KEY)).includes('QUEUED_NEW_WAKE')).toBe(true)
+        releaseStaleRead()
+      }
     }
     const failed = await initial
-    if (kind === 'queued-schedule') expect(JSON.stringify(await store.loadCheckpoint(KEY))).toContain('QUEUED_NEW_WAKE')
+    if (kind === 'queued-schedule-stale-read') expect(JSON.stringify((original as any).pendingResumes.get(KEY)).includes('QUEUED_NEW_WAKE')).toBe(true)
+    if (queuedSchedule) expect(JSON.stringify(await store.loadCheckpoint(KEY))).toContain('QUEUED_NEW_WAKE')
     const incoming = kind !== 'schedule'
       ? original.routeHumanMessages('feishu', 'restart-test', [message('new-message', 'PRESERVE_NEW_WAKE')])
       : original.routeSchedule({ scheduleId: 'new-schedule', triggerId: 'new-trigger', scheduleName: 'new schedule',
@@ -244,7 +271,7 @@ describe('Manager restart continuation', () => {
     await rejected
     let checkpoint = await store.loadCheckpoint(KEY)
     expect(checkpoint?.episodeId).toBe(failed.episodeId)
-    if (kind !== 'queued-schedule') expect(checkpoint?.pending).toHaveLength(kind === 'concurrent-schedule' ? 2 : 1)
+    if (!queuedSchedule) expect(checkpoint?.pending).toHaveLength(kind === 'concurrent-schedule' ? 2 : 1)
     expect(JSON.stringify(checkpoint?.pending)).toContain('PRESERVE_NEW_WAKE')
     await expect(original.routeHumanMessages('feishu', 'restart-test', [message('another', 'SECOND_NEW_WAKE')]))
       .rejects.toThrow('上下文压缩失败')
@@ -261,10 +288,42 @@ describe('Manager restart continuation', () => {
     expect(requests.find(text => text.includes('PRESERVE_NEW_WAKE'))?.match(/PRESERVE_NEW_WAKE/g)).toHaveLength(1)
     expect(requests.join('\n')).toContain('SECOND_NEW_WAKE')
     if (kind === 'concurrent-schedule') expect(requests.join('\n')).toContain('CONCURRENT_NEW_WAKE')
-    if (kind === 'queued-schedule') expect(requests.join('\n')).toContain('QUEUED_NEW_WAKE')
+    if (queuedSchedule) expect(requests.join('\n')).toContain('QUEUED_NEW_WAKE')
     if (kind === 'daily-human') expect(requests[0]).not.toContain('PRESERVE_NEW_WAKE')
     expect(write).toHaveBeenCalledOnce()
     expect(await store.loadCheckpoint(KEY)).toBeUndefined()
+  })
+
+  it.each(['completed', 'newer read', 'read failure'] as const)('does not install an obsolete checkpoint after %s', async mode => {
+    const adapter: LLMAdapter = { updateConfig() {}, async *stream() {} }
+    const manager = registry(adapter) as any
+    const old: ManagerResumeCheckpoint = { episodeId: 'old-read', state: { key: KEY, recent: [], foldedCount: 0 },
+      envelopes: [], wakeIndex: -1, pending: [], hasEngineMessages: false, turns: [], responses: [], tools: [], pendingToolCallIds: [],
+      adminChatClaims: [], transientMessageIds: [], spawnedWorkerIds: [], execution: { needsSpawnRecheck: false,
+        spawnRecheckInjected: false, spawnRecheckOutcomeRecorded: false, postSendRecheckSequence: 0, successfulSendMessageTargets: [], continuedWorkers: [] } }
+    const later = { ...old, episodeId: 'later-recovery' }
+    let resolveRead!: (value: ManagerResumeCheckpoint) => void, rejectRead!: (error: Error) => void
+    const gate = new Promise<ManagerResumeCheckpoint>((resolve, reject) => { resolveRead = resolve; rejectRead = reject })
+    const load = vi.spyOn(store, 'loadCheckpoint').mockReturnValueOnce(gate)
+    manager.setPendingResume(KEY, old)
+    const reading = manager.refreshPendingResume(KEY)
+    if (mode === 'read failure') {
+      const error = new Error('checkpoint unavailable'), rejected = expect(reading).rejects.toBe(error)
+      rejectRead(error); await rejected
+      expect(manager.pendingResumes.get(KEY)).toBe(old)
+    } else {
+      if (mode === 'completed') {
+        manager.setPendingResume(KEY, later)
+        manager.setPendingResume(KEY, undefined)
+      } else {
+        load.mockResolvedValueOnce(later)
+        await manager.refreshPendingResume(KEY)
+      }
+      resolveRead(old); await reading
+      if (mode === 'completed') expect(manager.pendingResumes.has(KEY)).toBe(false)
+      else expect(manager.pendingResumes.get(KEY)).toBe(later)
+    }
+    expect(manager.pendingResumeReads.size).toBe(0)
   })
 
   it('restores a group with many image references as one image without rewriting durable history', async () => {
