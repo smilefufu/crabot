@@ -54,12 +54,12 @@ static std::string MetadataSid(PSID sid) {
   if (!sid || !ConvertSidToStringSidA(sid, &text)) throw std::runtime_error("Cannot identify metadata owner or group");
   std::string result(text); LocalFree(text); return result;
 }
+static constexpr DWORD WorkspaceMetadataSecurityFields = OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION
+  | LABEL_SECURITY_INFORMATION | ATTRIBUTE_SECURITY_INFORMATION | SCOPE_SECURITY_INFORMATION;
 static std::string MetadataSecurity(HANDLE file, std::vector<std::string>& blockers, std::string& owner, std::string& group) {
   PSECURITY_DESCRIPTOR descriptor = nullptr;
-  const DWORD fields = OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION
-    | LABEL_SECURITY_INFORMATION | ATTRIBUTE_SECURITY_INFORMATION | SCOPE_SECURITY_INFORMATION;
   PSID ownerSid = nullptr, groupSid = nullptr;
-  if (GetSecurityInfo(file, SE_FILE_OBJECT, fields, &ownerSid, &groupSid, nullptr, nullptr, &descriptor) != ERROR_SUCCESS) {
+  if (GetSecurityInfo(file, SE_FILE_OBJECT, WorkspaceMetadataSecurityFields, &ownerSid, &groupSid, nullptr, nullptr, &descriptor) != ERROR_SUCCESS) {
     throw std::runtime_error("Cannot inspect file owner and access ACL");
   }
   try { owner = MetadataSid(ownerSid); group = MetadataSid(groupSid); }

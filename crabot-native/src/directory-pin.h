@@ -98,7 +98,7 @@ static void CopyWorkspaceObjectMetadata(HANDLE source, HANDLE target, const std:
   PSECURITY_DESCRIPTOR sourceDescriptor = nullptr, targetDescriptor = nullptr;
   try {
     PSID sourceOwner = nullptr, sourceGroup = nullptr, targetOwner = nullptr, targetGroup = nullptr; PACL sourceLabel = nullptr, targetLabel = nullptr;
-    const DWORD fields = OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION;
+    const DWORD fields = WorkspaceMetadataSecurityFields;
     if (GetSecurityInfo(source, SE_FILE_OBJECT, fields, &sourceOwner, &sourceGroup, nullptr, &sourceLabel, &sourceDescriptor) != ERROR_SUCCESS
       || GetSecurityInfo(target, SE_FILE_OBJECT, fields, &targetOwner, &targetGroup, nullptr, &targetLabel, &targetDescriptor) != ERROR_SUCCESS
       || !sourceOwner || !sourceGroup || !targetOwner || !targetGroup
@@ -113,12 +113,6 @@ static void CopyWorkspaceObjectMetadata(HANDLE source, HANDLE target, const std:
     // The full target path remains fixed by its live root/ancestor handles throughout this path-only API.
     if ((sourceLabel && sourceLabel->AceCount && SetSecurityInfo(target, SE_FILE_OBJECT, LABEL_SECURITY_INFORMATION, nullptr, nullptr, nullptr, sourceLabel) != ERROR_SUCCESS)
       || !SetFileInformationByHandle(target, FileBasicInfo, &basic, sizeof(basic))) throw std::runtime_error("Cannot preserve pinned directory metadata");
-    // A legacy unprotected DACL must shed the copy's already inherited ACEs before restoring its original mode.
-    if (!(control & (SE_DACL_PROTECTED | SE_DACL_AUTO_INHERITED | SE_DACL_AUTO_INHERIT_REQ))) {
-      if (!SetSecurityDescriptorControl(sourceDescriptor, SE_DACL_PROTECTED, SE_DACL_PROTECTED)
-        || !SetFileSecurityW(targetPath.c_str(), DACL_SECURITY_INFORMATION, sourceDescriptor)
-        || !SetSecurityDescriptorControl(sourceDescriptor, SE_DACL_PROTECTED, 0)) throw std::runtime_error("Cannot prepare original legacy workspace DACL");
-    }
     if (!SetFileSecurityW(targetPath.c_str(), DACL_SECURITY_INFORMATION, sourceDescriptor)) throw std::runtime_error("Cannot preserve original workspace DACL");
     LocalFree(sourceDescriptor); LocalFree(targetDescriptor);
   } catch (...) {
