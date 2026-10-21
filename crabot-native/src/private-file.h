@@ -1,6 +1,26 @@
 #ifdef _WIN32
 #include <aclapi.h>
 
+// ACL ownership needs the current primary token, not a process-table snapshot.
+// Read it afresh: this is not a cached user or process-identity receipt.
+static std::string PrivateFileCurrentOwner() {
+  HANDLE token = nullptr; LPSTR sid = nullptr;
+  try {
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) throw std::runtime_error("Cannot inspect current file owner");
+    DWORD size = 0; GetTokenInformation(token, TokenUser, nullptr, 0, &size);
+    if (!size || size > 65536) throw std::runtime_error("Current file owner is unavailable");
+    std::vector<unsigned char> data(size);
+    if (!GetTokenInformation(token, TokenUser, data.data(), size, &size)
+      || !ConvertSidToStringSidA(reinterpret_cast<TOKEN_USER*>(data.data())->User.Sid, &sid)) throw std::runtime_error("Cannot inspect current file owner");
+    std::string result(sid);
+    LocalFree(sid); sid = nullptr; CloseHandle(token); token = nullptr;
+    return result;
+  } catch (...) {
+    if (sid) LocalFree(sid); if (token) CloseHandle(token);
+    throw;
+  }
+}
+
 static std::wstring PrivateFilePath(const std::string& path) {
   if (path.empty() || path.find('\0') != std::string::npos) throw std::runtime_error("Invalid private file path");
   int count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path.c_str(), -1, nullptr, 0);
@@ -16,7 +36,7 @@ static napi_value WritePrivateFile(napi_env env, napi_callback_info info) {
     if (argc != 2) throw std::runtime_error("Expected private file path and text");
     path = PrivateFilePath(Text(env, args[0])); auto text = Text(env, args[1]);
     if (text.size() > 65536) throw std::runtime_error("Private file is too large");
-    auto owner = Inspect(GetCurrentProcessId()).owner;
+    auto owner = PrivateFileCurrentOwner();
     auto acl = "O:" + owner + "D:P(A;;GA;;;" + owner + ")";
     if (!ConvertStringSecurityDescriptorToSecurityDescriptorA(acl.c_str(), SDDL_REVISION_1, &descriptor, nullptr)) throw std::runtime_error("Cannot create private file ACL");
     SECURITY_ATTRIBUTES attributes{ sizeof(attributes), descriptor, FALSE };
@@ -50,7 +70,7 @@ static napi_value IsPrivatePath(napi_env env, napi_callback_info info, bool dire
     if (!GetFileInformationByHandle(file, &fileInfo) || (fileInfo.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)
       || !!(fileInfo.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != directory
       || GetSecurityInfo(file, SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, &owner, nullptr, &acl, nullptr, &descriptor) != ERROR_SUCCESS) throw std::runtime_error("Cannot inspect private file ACL");
-    auto sid = Inspect(GetCurrentProcessId()).owner;
+    auto sid = PrivateFileCurrentOwner();
     if (!ConvertStringSidToSidA(sid.c_str(), &current)) throw std::runtime_error("Cannot inspect current user SID");
     SECURITY_DESCRIPTOR_CONTROL control; DWORD revision; void* raw = nullptr;
     bool valid = owner && EqualSid(owner, current);
@@ -79,7 +99,7 @@ static napi_value CreatePrivateDirectory(napi_env env, napi_callback_info info) 
     size_t argc = 1; napi_value args[1]; napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
     if (argc != 1) throw std::runtime_error("Expected private directory path");
     auto path = PrivateFilePath(Text(env, args[0]));
-    auto owner = Inspect(GetCurrentProcessId()).owner;
+    auto owner = PrivateFileCurrentOwner();
     auto acl = "O:" + owner + "D:P(A;OICI;GA;;;" + owner + ")";
     if (!ConvertStringSecurityDescriptorToSecurityDescriptorA(acl.c_str(), SDDL_REVISION_1, &descriptor, nullptr)) throw std::runtime_error("Cannot create private directory ACL");
     SECURITY_ATTRIBUTES attributes{ sizeof(attributes), descriptor, FALSE };

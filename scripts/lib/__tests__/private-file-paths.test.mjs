@@ -4,6 +4,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import vm from 'node:vm'
+import { execFileSync } from 'node:child_process'
 import identity from '../process-identity.cjs'
 
 test('Windows private file adapter preserves payload and converts actual filesystem paths only', () => {
@@ -43,4 +44,29 @@ test('Windows native private ACL operations support deep Unicode paths without o
   assert.equal(identity.isPrivateFile(path.relative(process.cwd(), file)), true)
   assert.throws(() => identity.writePrivateFile(file, 'replacement'), { code: 'CRABOT_PRIVATE_FILE' })
   assert.equal(fs.readFileSync(file, 'utf8'), 'original body\n')
+})
+
+test('Windows repeated private ACL reads observe access changes without changing the original owner or files', { skip: process.platform !== 'win32' }, t => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'crabot-private-acl-')))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  const directory = path.join(root, 'private'), file = path.join(directory, 'original.json')
+  identity.createPrivateDirectory(directory); identity.writePrivateFile(file, 'retained original body')
+  const fileBefore = fs.statSync(file, { bigint: true }), directoryBefore = fs.statSync(directory, { bigint: true })
+  const started = performance.now()
+  for (let index = 0; index < 256; index++) {
+    assert.equal(identity.isPrivateFile(file), true); assert.equal(identity.isPrivateDirectory(directory), true)
+    assert.equal(identity.isOwnedFile(file), true); assert.equal(identity.isOwnedDirectory(directory), true)
+  }
+  t.diagnostic('1024 fresh private/owner ACL reads: ' + Math.round(performance.now() - started) + 'ms')
+  const icacls = path.join(process.env.SystemRoot, 'System32/icacls.exe')
+  for (const target of [file, directory]) {
+    execFileSync(icacls, [target, '/grant', '*S-1-1-0:(R)'], { stdio: 'pipe' })
+    assert.equal(target === file ? identity.isPrivateFile(target) : identity.isPrivateDirectory(target), false)
+    assert.equal(target === file ? identity.isOwnedFile(target) : identity.isOwnedDirectory(target), true)
+    execFileSync(icacls, [target, '/remove:g', '*S-1-1-0'], { stdio: 'pipe' })
+    assert.equal(target === file ? identity.isPrivateFile(target) : identity.isPrivateDirectory(target), true)
+  }
+  assert.equal(fs.statSync(file, { bigint: true }).ino, fileBefore.ino)
+  assert.equal(fs.statSync(directory, { bigint: true }).ino, directoryBefore.ino)
+  assert.equal(fs.readFileSync(file, 'utf8'), 'retained original body')
 })
