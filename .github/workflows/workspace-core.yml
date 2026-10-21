@@ -6,6 +6,7 @@ on:
     paths:
       - 'crabot-core/src/index.ts'
       - 'crabot-core/src/module-manager-lifecycle.test.ts'
+      - 'crabot-core/src/test-fixtures/uv-python-sleeper.py'
       - 'crabot-agent/src/core/workspace-relocation-validation.ts'
       - 'crabot-agent/src/unified-agent.ts'
       - 'crabot-shared/src/workspace-types.ts'
@@ -15,6 +16,8 @@ on:
       - 'scripts/lib/workspace-*'
       - 'scripts/lib/process-identity.cjs'
       - 'scripts/lib/owned-process-tree.cjs'
+      - 'scripts/lib/module-carrier-rpc.cjs'
+      - 'scripts/lib/__tests__/module-carrier-rpc.test.mjs'
       - 'crabot-native/**'
       - 'scripts/workspace-root-probe.mjs'
       - 'scripts/lib/__tests__/workspace-root-probe.test.mjs'
@@ -23,6 +26,7 @@ on:
     paths:
       - 'crabot-core/src/index.ts'
       - 'crabot-core/src/module-manager-lifecycle.test.ts'
+      - 'crabot-core/src/test-fixtures/uv-python-sleeper.py'
       - 'crabot-agent/src/core/workspace-relocation-validation.ts'
       - 'crabot-agent/src/unified-agent.ts'
       - 'crabot-shared/src/workspace-types.ts'
@@ -32,6 +36,8 @@ on:
       - 'scripts/lib/workspace-*'
       - 'scripts/lib/process-identity.cjs'
       - 'scripts/lib/owned-process-tree.cjs'
+      - 'scripts/lib/module-carrier-rpc.cjs'
+      - 'scripts/lib/__tests__/module-carrier-rpc.test.mjs'
       - 'crabot-native/**'
       - 'scripts/workspace-root-probe.mjs'
       - 'scripts/lib/__tests__/workspace-root-probe.test.mjs'
@@ -81,7 +87,7 @@ jobs:
             node "$module/node_modules/typescript/bin/tsc" -p "$module/tsconfig.json"
           done
       - name: Actual fixed directory probe and bounded cleanup
-        run: node --test scripts/lib/__tests__/workspace-root-probe.test.mjs
+        run: node --test scripts/lib/__tests__/workspace-root-probe.test.mjs scripts/lib/__tests__/module-carrier-rpc.test.mjs
       - name: Original lifecycle and maintenance regressions
         working-directory: crabot-core
         run: node node_modules/vitest/vitest.mjs run src/module-manager-lifecycle.test.ts src/module-manager-health.test.ts src/module-manager-advanced.test.ts src/workspace-maintenance.test.ts src/workspace-module-scope.test.ts --maxWorkers=1 --minWorkers=1

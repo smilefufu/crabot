@@ -80,6 +80,8 @@ async function waitForModuleHealth(mm: any, runtime: ModuleRuntime): Promise<voi
           numeric = { status: response.status, health: result.data?.status }
         } catch (error) { numeric = { code: (error as { cause?: NodeJS.ErrnoException }).cause?.code, name: (error as Error).name } }
         console.error('[finite lifecycle numeric health] ' + JSON.stringify({ module_id: runtime.module_id, numeric }))
+        const info = await readPidFile(path.join(mm.dataDir, 'python.json')) as { http_stage?: string; python_version?: string } | undefined
+        console.error('[finite lifecycle Python] ' + JSON.stringify({ module_id: runtime.module_id, stage: info?.http_stage, version: info?.python_version }))
       }
       return undefined
     }

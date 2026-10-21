@@ -205,17 +205,29 @@ async function fixture(options: { withMemory?: boolean; inactiveMemory?: boolean
       await new Promise<void>(resolve => reserved.close(() => resolve()))
       let memoryEntry = `"${process.execPath}" -e "setInterval(()=>{},1000)"`
       if (options.memoryHealth) {
-        const file = path.join(data, 'finite-memory.cjs')
-        await fs.writeFile(file, `const http=require('node:http');const server=http.createServer(async(req,res)=>{
+        const file = path.join(data, 'finite-memory-server.cjs'), carrier = path.join(data, 'finite-memory-carrier.cjs')
+        const recordsFile = path.join(data, 'port-allocations.json'), allocations = JSON.parse(await fs.readFile(recordsFile, 'utf8').catch(() => '[]'))
+        await fs.writeFile(recordsFile, JSON.stringify([...allocations, { module_id: 'memory-default', port, allocated_at: new Date().toISOString() }]))
+        await manager.portAllocator.initialize()
+        await fs.writeFile(file, `const http=require('node:http'),fs=require('node:fs');const server=http.createServer(async(req,res)=>{
           let text='';for await(const part of req)text+=part;const body=JSON.parse(text);
-          const data=body.method==='get_runtime_identity'?{instance_id:process.env.CRABOT_INSTANCE_ID,module_id:'memory-default',runtime_id:process.env.CRABOT_MODULE_RUNTIME_ID}:body.method==='health'?{status:${JSON.stringify(options.memoryHealth)}}:{};
+          const data=body.method==='get_runtime_identity'?{instance_id:process.env.CRABOT_INSTANCE_ID,module_id:'memory-default',runtime_id:process.env.CRABOT_MODULE_RUNTIME_ID}:body.method==='health'?{status:fs.existsSync(${JSON.stringify(path.join(data, 'workspace-control/relocation-root-selected.json'))})?${JSON.stringify(options.memoryHealth)}:'healthy',details:{pid:process.pid}}:{};
           res.end(JSON.stringify({id:body.id,success:true,data}));if(body.method==='shutdown')setTimeout(()=>process.exit(0),25);
-        });server.listen(Number(process.env.Crabot_PORT),'127.0.0.1');setTimeout(()=>process.exit(0),${options.processLifetimeMs ?? 30000}).unref();`)
-        memoryEntry = `"${process.execPath}" "${file}"`
+        });server.listen(Number(process.env.Crabot_PORT),'127.0.0.1',async()=>{
+          try{const response=await fetch('http://127.0.0.1:'+process.env.CRABOT_MM_PORT+'/register',{method:'POST',headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({id:require('node:crypto').randomUUID(),source:'memory-default',method:'register',params:{module_id:'memory-default',module_type:'memory',version:'0.1.0',protocol_version:'0.1.0',port:Number(process.env.Crabot_PORT),subscriptions:[]}})});
+            if(!(await response.json()).success)throw new Error('Finite Memory registration failed');fs.writeFileSync(${JSON.stringify(path.join(data, 'memory-ready'))},'ready')
+          }catch(error){console.error(error);process.exit(1)}
+        });setTimeout(()=>process.exit(0),${options.processLifetimeMs ?? 30000}).unref();`)
+        await fs.writeFile(carrier, `const{spawn}=require('node:child_process');const child=spawn(process.execPath,[${JSON.stringify(file)}],{stdio:'inherit'});child.on('exit',(code)=>process.exit(code??1));setTimeout(()=>process.exit(0),${options.processLifetimeMs ?? 30000}).unref();`)
+        memoryEntry = `"${process.execPath}" "${carrier}"`
       }
       manager.modules.set('memory-default', { module_id: 'memory-default', module_type: 'memory', entry: memoryEntry,
-        port, auto_start: false, auto_restart: false, start_priority: 0, skip_health_check: true, status: 'stopped' })
-      if (options.withMemory) await manager.startModuleProcess('memory-default')
+        port, auto_start: false, auto_restart: false, start_priority: 0, skip_health_check: !options.memoryHealth, status: 'stopped' })
+      if (options.withMemory) {
+        await manager.startModuleProcess('memory-default')
+        if (options.memoryHealth) await vi.waitFor(async () => expect(await fs.readFile(path.join(data, 'memory-ready'), 'utf8')).toBe('ready'), { timeout: 10000 })
+      }
     }
     const catalog = new WorkspaceCatalog({ dataRoot: data, files: native }); await catalog.initialize()
     const locks = await import('../../scripts/lib/cli-lock.mjs'), relocation = await import('../../scripts/lib/workspace-relocation-intent.mjs')
@@ -1662,13 +1674,13 @@ describe('MM checks the new runtime health and Root under the original job', () 
         ...(mode.includes('registration') ? { validationRegistration: mode === 'exit before registration' ? 'exit' as const : 'delayed' as const } : {}),
         ...(withMemory ? { memoryHealth: mode === 'degraded Memory' ? 'degraded' as const : 'healthy' as const } : {}),
         processLifetimeMs: process.platform === 'win32' ? 900000 : 300000 })
-      const locks = require('../../scripts/lib/cli-lock.mjs'), rpc = require('../../scripts/lib/module-runtime-rpc.cjs')
+      const locks = require('../../scripts/lib/cli-lock.mjs'), rpc = require('../../scripts/lib/module-carrier-rpc.cjs')
       const lock = await locks.acquireWorkspaceRelocationLock(f.data, f.params.intent_id)
       const runtime = f.manager.modules.get('crabot-agent'), originalEntry = runtime.entry
       if (mode.includes('registration')) runtime.skip_health_check = false
       let injected = false
-      const open = rpc.openModuleRuntimeRpc
-      vi.spyOn(rpc, 'openModuleRuntimeRpc').mockImplementation(async (...args: any[]) => {
+      const open = rpc.openSpawnedModuleRuntimeRpc
+      vi.spyOn(rpc, 'openSpawnedModuleRuntimeRpc').mockImplementation(async (...args: any[]) => {
         const connection = await open(...args)
         return { ...connection, call: async (method: string, ...callArgs: any[]) => {
           const result = await connection.call(method, ...callArgs)

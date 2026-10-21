@@ -1775,7 +1775,7 @@ export class ModuleManager {
           if (this.workspaceValidationProof !== proof) throw failure()
           proof.assertCurrent()
         }
-        const { openModuleRuntimeRpc } = require('../../scripts/lib/module-runtime-rpc.cjs')
+        const { openSpawnedModuleRuntimeRpc } = require('../../scripts/lib/module-carrier-rpc.cjs')
         const instanceId = this.runtimeRegistry.getInstanceId(), healthy: Array<{ module_id: ModuleId; runtime_id: string }> = []
         stage = 'module-health'
         for (const module of launched.validation_modules) {
@@ -1789,7 +1789,7 @@ export class ModuleManager {
             await new Promise(resolve => setTimeout(resolve, 100))
           }
           stage = 'module-health'
-          const rpc = await openModuleRuntimeRpc(module.process, runtime.port, { instance_id: instanceId, module_id: module.module_id, runtime_id: module.runtime_id },
+          const rpc = await openSpawnedModuleRuntimeRpc(this.processes.get(module.module_id), module.process, runtime.port, { instance_id: instanceId, module_id: module.module_id, runtime_id: module.runtime_id },
             { timeoutMs: this.config.health_check_timeout * 1000 })
           try {
             assertCurrent()
@@ -1813,7 +1813,7 @@ export class ModuleManager {
         const expected: VerifyWorkspaceRelocationRuntimeResult = { verified: true, intent_id: request.intent_id, intent_sha256: request.intent_sha256,
           launch_id: proof.launchId, launch_sha256: proof.launchHash, root_selected_sha256: launched.root_selected_sha256,
           instance_id: instanceId, module_id: 'crabot-agent', runtime_id: agent.runtime_id }
-        const rpc = await openModuleRuntimeRpc(agent.process, this.modules.get('crabot-agent')!.port,
+        const rpc = await openSpawnedModuleRuntimeRpc(this.processes.get('crabot-agent'), agent.process, this.modules.get('crabot-agent')!.port,
           { instance_id: instanceId, module_id: 'crabot-agent', runtime_id: agent.runtime_id }, { timeoutMs: 30000 })
         try {
           assertBearer()

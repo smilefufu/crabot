@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import faulthandler
 import json
 import os
 import signal
@@ -16,6 +17,7 @@ pid_file = Path(sys.argv[1])
 mode = sys.argv[2] if len(sys.argv) > 2 else "sleep"
 port = int(sys.argv[3]) if len(sys.argv) > 3 else 0
 ignore_term = mode == "ignore-term"
+http_stage = "not-http"
 
 if ignore_term:
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
@@ -32,6 +34,8 @@ def write_info(shutdown_called: bool = False) -> None:
             "pgid": os.getpgid(0),
             "marker": os.getenv("TEST_MARKER"),
             "shutdown_called": shutdown_called,
+            "http_stage": http_stage,
+            "python_version": sys.version.split()[0],
         }),
         encoding="utf-8",
     )
@@ -44,6 +48,8 @@ if mode == "exit-zero":
     sys.exit(0)
 
 if mode in {"http", "http-hang", "http-drip"}:
+    faulthandler.dump_traceback_later(2, repeat=False)
+
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self) -> None:  # noqa: N802 - stdlib handler name
             length = int(self.headers.get("Content-Length", "0"))
@@ -81,9 +87,14 @@ if mode in {"http", "http-hang", "http-drip"}:
         def log_message(self, _format: str, *_args: object) -> None:
             return
 
+    http_stage = "constructing-http"
+    write_info()
     server = ThreadingHTTPServer(("localhost", port), Handler)
+    http_stage = "listening"
+    write_info()
     server.serve_forever()
     server.server_close()
+    faulthandler.cancel_dump_traceback_later()
     sys.exit(0)
 
 while True:
