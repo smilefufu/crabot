@@ -13,6 +13,7 @@ import { acquireCliLock, acquireWorkspaceRelocationLock, releaseCliLock } from '
 import { WorkspaceCatalog } from '../../../crabot-shared/dist/workspace-catalog.js'
 import { sha256CanonicalJson } from '../../../crabot-shared/dist/canonical-json.js'
 import * as records from '../workspace-relocation-intent.mjs'
+import { createWorkspaceFileToolJournal, serveWorkspaceFileToolJournal } from '../workspace-file-tool-journal.mjs'
 
 async function fixture(t, { exitEvidence = true, crossVolume = false } = {}) {
   const root = fs.realpathSync.native(fs.mkdtempSync(path.join(tmpdir(), 'workspace-file-plan-中文 space-')))
@@ -29,11 +30,13 @@ async function fixture(t, { exitEvidence = true, crossVolume = false } = {}) {
   records.commitWorkspaceRelocationModules({ dataDir: data, id, modules: [] })
   const entry = new URL('../workspace-coordinator-entry.mjs', import.meta.url).href
   const module = new URL('../workspace-relocation-intent.mjs', import.meta.url).href
-  const hostCode = `import {spawnWorkspaceTar} from ${JSON.stringify(new URL('../workspace-tar.mjs', import.meta.url).href)};
-    let actors=[];const stop=async()=>{for(const actor of actors){actor.cancel();actor.child.stdout.resume();if(actor.child.exitCode===null&&actor.child.signalCode===null)actor.child.kill('SIGTERM')}await Promise.all(actors.map(actor=>actor.closed))};
-    process.on('message',async message=>{try{let result;if(message==='tools-create'){actors=[await spawnWorkspaceTar('pack'),await spawnWorkspaceTar('unpack')];result=actors.map((actor,index)=>({role:index?'unpack':'pack',process:actor.identity}))}
+  const hostCode = `import {createWorkspaceFileToolJournal} from ${JSON.stringify(new URL('../workspace-file-tool-journal.mjs', import.meta.url).href)};import {spawnWorkspaceTar} from ${JSON.stringify(new URL('../workspace-tar.mjs', import.meta.url).href)};
+    let actors=[],client;const hostContext={dataDir:${JSON.stringify(data)},id:${JSON.stringify(id)}};const stop=async()=>{for(const actor of actors){actor.cancel();actor.child.stdout.resume();if(actor.child.exitCode===null&&actor.child.signalCode===null)actor.child.kill('SIGTERM')}await Promise.all(actors.map(actor=>actor.closed))};
+    process.on('message',async message=>{if(typeof message!=='string')return;try{let result;if(message==='tools-create'){actors=[await spawnWorkspaceTar('pack'),await spawnWorkspaceTar('unpack')];result=actors.map((actor,index)=>({role:index?'unpack':'pack',process:actor.identity}))}
       else if(message==='tools-pack'){actors[0].child.stdin.end();await actors[0].permit();result=true}
-      else if(message==='tools-stop'){await stop();result=true}else throw new Error('finite unknown operation');process.send({result})}catch(error){process.send({error:error.code??error.message})}});
+      else if(message==='tools-stop'){await stop();result=true}
+      else if(message==='tools-rpc-reset'){client?.close();client=createWorkspaceFileToolJournal(hostContext);result=true}
+      else if(message.startsWith('tools-rpc-')){client??=createWorkspaceFileToolJournal(hostContext);const operation=message.slice('tools-rpc-'.length);result=await client[operation](operation==='register'?actors.map((actor,index)=>({role:index?'unpack':'pack',process:actor.identity})):undefined)}else throw new Error('finite unknown operation');process.send({kind:'fixture-tools-reply',result})}catch(error){process.send({kind:'fixture-tools-reply',error:error.code??error.message})}});
     process.once('disconnect',async()=>{await stop();process.exit(0)});process.send('ready');setTimeout(()=>process.exit(3),30000);`
   const code = `import fs from 'node:fs';import{spawn}from'node:child_process';import{once}from'node:events';import native from ${JSON.stringify(new URL('../process-identity.cjs', import.meta.url).href)};import{enterWorkspaceRelocationCoordinator}from ${JSON.stringify(entry)};import * as records from ${JSON.stringify(module)};
     const context=await enterWorkspaceRelocationCoordinator(), args={dataDir:context.dataDir,id:context.id};
@@ -49,7 +52,8 @@ async function fixture(t, { exitEvidence = true, crossVolume = false } = {}) {
         let result;
         if(['host-launch','host-launch-preload','host-launch-extra','host-launch-after-unlock'].includes(message.operation)){if(message.operation==='host-launch-preload')process.env.NODE_OPTIONS='--require '+JSON.stringify(${JSON.stringify(path.join(root, 'host-preload.cjs'))});const {launchWorkspaceFileHost}=await import(${JSON.stringify(new URL('../workspace-file-host.mjs', import.meta.url).href)});if(message.operation==='host-launch-after-unlock')context.release();const launched=await launchWorkspaceFileHost(message.operation==='host-launch-extra'?{...args,entry:'not-accepted'}:args);if(launched.child){host=launched.child;hostIdentity=launched.host;hostEnded=once(host,'exit');process.send({kind:'fixture-actor',identity:hostIdentity})}result={dispatch:launched.dispatch,host:launched.host}}
         else if(message.operation==='actors-prepare')result=records.prepareWorkspaceRelocationFileActors(args);
-        else if(message.operation==='tools-create'||message.operation==='tools-pack'||message.operation==='tools-stop'){await ensureHost();const response=once(host,'message');host.send(message.operation);const [reply]=await response;if(reply.error)throw new Error(reply.error);if(message.operation==='tools-create')tools=reply.result;result=reply.result}
+        else if(['tools-create','tools-pack','tools-stop'].includes(message.operation)||message.operation.startsWith('tools-rpc-')){await ensureHost();const response=new Promise(resolve=>{const receive=message=>{if(message.kind==='fixture-tools-reply'){host.off('message',receive);resolve(message)}};host.on('message',receive)});host.send(message.operation);const reply=await response;if(reply.error)throw Object.assign(new Error(reply.error),{code:reply.error});if(message.operation==='tools-create')tools=reply.result;result=reply.result}
+        else if(message.operation==='tools-relay'||message.operation==='tools-relay-drop'){const {serveWorkspaceFileToolJournal}=await import(${JSON.stringify(new URL('../workspace-file-tool-journal.mjs', import.meta.url).href)});serveWorkspaceFileToolJournal(host,args);if(message.operation==='tools-relay-drop'){const send=host.send.bind(host);let dropped=false;host.send=(message,...rest)=>{if(message.kind==='workspace_file_tool_reply'&&message.operation==='register'&&!dropped){dropped=true;return send({...message,ok:false,result:null},...rest)}return send(message,...rest)}}result=true}
         else if(message.operation==='tools-permit')result=records.permitWorkspaceRelocationCopyTools(args);
         else if(message.operation==='tools-complete')result=records.completeWorkspaceRelocationCopyTools(args);
         else if(message.operation.startsWith('tools-register')){const selected=structuredClone(tools);if(message.operation==='tools-register-parent')selected[0].process.parent=process.pid;if(message.operation==='tools-register-generation')selected[0].process.started='replaced';if(message.operation==='tools-register-owner')selected[0].process.owner='other';if(message.operation==='tools-register-role')selected[0].role='copy';if(message.operation==='tools-register-duplicate')selected[1].process=selected[0].process;result=records.registerWorkspaceRelocationCopyTools({...args,tools:selected})}
@@ -356,4 +360,45 @@ for (const damage of ['hash', 'null', 'role', 'extra', 'reordered']) test('copy 
   assert.throws(() => records.readWorkspaceRelocationFileActors(f.data, f.id), { code: 'WORKSPACE_RELOCATION_INVALID' })
   assert.equal((await f.command('tools-complete')).error?.code, 'WORKSPACE_RELOCATION_INVALID')
   assert.deepEqual(fs.readFileSync(f.actorsFile), bytes)
+})
+
+
+for (const mode of ['confirmed', 'lost acknowledgement']) test('real Host IPC journals its fixed copy tools: ' + mode, crossVolumeTools, async t => {
+  const f = await toolsFixture(t)
+  assert.equal((await f.command(mode === 'confirmed' ? 'tools-relay' : 'tools-relay-drop')).error, undefined)
+  if (mode === 'lost acknowledgement') {
+    assert.equal((await f.command('tools-rpc-register')).error?.code, 'CRABOT_WORKSPACE_JOURNAL_UNAVAILABLE')
+    assert.ok(records.readWorkspaceRelocationFileActors(f.data, f.id).tools)
+    await f.command('tools-rpc-reset')
+  }
+  const registered = await f.command('tools-rpc-register')
+  assert.equal(registered.error, undefined); assert.equal(registered.result.dispatch, mode === 'confirmed' ? 'dispatch' : 'observe')
+  assert.deepEqual(registered.result.record.tools, f.tools)
+  assert.equal((await f.command('tools-rpc-permit')).result.dispatch, 'dispatch')
+  const first = fs.readFileSync(f.actorsFile)
+  assert.equal((await f.command('tools-rpc-register')).result.dispatch, 'observe')
+  assert.equal((await f.command('tools-rpc-permit')).result.dispatch, 'observe')
+  assert.deepEqual(fs.readFileSync(f.actorsFile), first)
+  assert.equal((await f.command('tools-rpc-complete')).error?.code, 'CRABOT_WORKSPACE_JOURNAL_UNAVAILABLE')
+  await f.command('tools-rpc-reset'); await f.command('tools-stop')
+  assert.equal((await f.command('tools-rpc-complete')).result.dispatch, 'dispatch')
+  assert.equal((await f.command('tools-rpc-complete')).result.dispatch, 'observe')
+  assert.ok(records.readWorkspaceRelocationFileActors(f.data, f.id).tool_exit)
+  assert.equal(fs.existsSync(f.target), false); assert.equal(fs.readFileSync(path.join(f.source, 'default/file'), 'utf8'), 'original bytes')
+})
+
+test('Host IPC cannot publish copy tools after the original coordinator loses its lock', crossVolumeTools, async t => {
+  const f = await toolsFixture(t); await f.command('tools-relay'); await f.command('unlock')
+  const before = fs.readFileSync(f.actorsFile)
+  assert.equal((await f.command('tools-rpc-register')).error?.code, 'CRABOT_WORKSPACE_JOURNAL_UNAVAILABLE')
+  assert.equal(records.readWorkspaceRelocationFileActors(f.data, f.id).tools, null)
+  assert.deepEqual(fs.readFileSync(f.actorsFile), before); await f.command('tools-stop')
+})
+
+test('file tool transport rejects the MM or another child being used as the Host or coordinator', async t => {
+  const f = await fixture(t); await f.command(); await f.command('actors-prepare'); await f.command('host-register'); await f.command('host-permit')
+  const before = fs.readFileSync(path.join(f.data, 'workspace-control/relocation-file-actors.jsonl')), context = { dataDir: f.data, id: f.id }
+  assert.throws(() => createWorkspaceFileToolJournal(context), { code: 'CRABOT_WORKSPACE_JOURNAL_UNAVAILABLE' })
+  assert.throws(() => serveWorkspaceFileToolJournal(f.child, context), { code: 'CRABOT_WORKSPACE_JOURNAL_UNAVAILABLE' })
+  assert.deepEqual(fs.readFileSync(path.join(f.data, 'workspace-control/relocation-file-actors.jsonl')), before)
 })

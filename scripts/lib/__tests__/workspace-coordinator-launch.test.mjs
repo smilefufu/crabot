@@ -238,6 +238,18 @@ for (const mode of ['confirmed', 'lost reply', 'unexpected payload', 'exited Hos
     await workers.prepare([]); await workers.complete([]); await modules.prepare([]); await modules.complete([])
     await processes.confirmExecutionExit()
     await files.prepare()
+    const describeChildren = () => native.listChildProcessIds(child.pid).map(pid => {
+      try { return { process: native.inspectProcess(pid), argv: native.inspectProcessArguments(pid) } } catch (error) { return { pid, unavailable: error.code } }
+    })
+    const initialChildren = describeChildren(), initialPids = initialChildren.map(item => item.process?.pid)
+    if (process.platform !== 'win32') assert.deepEqual(initialChildren, [])
+    else {
+      assert.ok(initialChildren.length <= 1, JSON.stringify(initialChildren))
+      for (const item of initialChildren) {
+        assert.equal(item.process?.parent, child.pid); assert.equal(item.process?.owner, launch.process.owner)
+        assert.equal(fs.realpathSync.native(item.process.executable).toLowerCase(), fs.realpathSync.native(path.join(process.env.SystemRoot, 'System32/conhost.exe')).toLowerCase())
+      }
+    }
     if (mode === 'unexpected payload') {
       const invalid = createWorkspaceJournalClient(child, context, 'file')
       try { await assert.rejects(invalid.call('prepare_host', { entry: 'not-accepted' }), { code: 'CRABOT_WORKSPACE_JOURNAL_UNAVAILABLE' }) } finally { invalid.close() }
@@ -253,10 +265,6 @@ for (const mode of ['confirmed', 'lost reply', 'unexpected payload', 'exited Hos
       assert.ok(readWorkspaceRelocationFileActors(f.data, f.id).permission)
       files.close(); files = createWorkspaceFileJournal(child, context)
     }
-    const describeChildren = () => native.listChildProcessIds(child.pid).map(pid => {
-      try { return { process: native.inspectProcess(pid), argv: native.inspectProcessArguments(pid) } } catch (error) { return { pid, unavailable: error.code } }
-    })
-    const initialChildren = describeChildren()
     const first = await files.prepareHost(); host = first.actors.host.process
     assert.equal(first.dispatch, mode === 'lost reply' ? 'observe' : 'dispatch')
     assert.equal(host.parent, child.pid); assert.ok(native.sameProcess(host, native.inspectProcess(host.pid)))
@@ -264,7 +272,8 @@ for (const mode of ['confirmed', 'lost reply', 'unexpected payload', 'exited Hos
     const second = await files.prepareHost()
     assert.equal(second.dispatch, 'observe'); assert.deepEqual(second.actors, first.actors)
     assert.deepEqual(fs.readFileSync(path.join(f.data, 'workspace-control/relocation-file-actors.jsonl')), bytes)
-    assert.deepEqual(native.listChildProcessIds(child.pid), [host.pid], JSON.stringify({ initial: initialChildren, current: describeChildren() }))
+    assert.deepEqual(native.listChildProcessIds(child.pid), [...initialPids, host.pid].sort((a, b) => a - b), JSON.stringify({ initial: initialChildren, current: describeChildren() }))
+    for (const item of initialChildren) assert.ok(native.sameProcess(item.process, native.inspectProcess(item.process.pid)))
     const plan = readWorkspaceRelocationFilePlan(f.data, f.id)
     assert.equal(fs.existsSync(plan.staging_path), false); assert.equal(fs.existsSync(path.join(f.root, 'new')), false)
     assert.equal(fs.readFileSync(f.marker, 'utf8'), 'original work'); assert.deepEqual(await f.catalog.snapshot(), f.before)
@@ -272,7 +281,7 @@ for (const mode of ['confirmed', 'lost reply', 'unexpected payload', 'exited Hos
       native.terminateKnownProcess(host)
       await confirmHostExit()
       await assert.rejects(files.prepareHost(), { code: 'CRABOT_WORKSPACE_JOURNAL_UNAVAILABLE' })
-      assert.deepEqual(native.listChildProcessIds(child.pid), [])
+      assert.deepEqual(native.listChildProcessIds(child.pid), initialPids)
       assert.deepEqual(fs.readFileSync(path.join(f.data, 'workspace-control/relocation-file-actors.jsonl')), bytes)
     }
     await f.close()

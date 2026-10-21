@@ -3,6 +3,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
+import { serveWorkspaceFileToolJournal } from './workspace-file-tool-journal.mjs'
 import native from './process-identity.cjs'
 import { journalFields as fields } from './workspace-coordinator-journal.mjs'
 import { readWorkspaceRelocationFilePlan, readWorkspaceRelocationFileActors, readWorkspaceRelocationCoordinator,
@@ -45,6 +46,7 @@ export async function launchWorkspaceFileHost(options) {
     const allowed = new Set(['PATH', 'HOME', 'USERPROFILE', 'SYSTEMROOT', 'WINDIR', 'LANG', 'LC_ALL', 'LC_CTYPE', 'TZ', 'TMPDIR', 'TMP', 'TEMP'])
     const env = Object.fromEntries(Object.entries(process.env).filter(([key, value]) => value !== undefined && allowed.has(key.toUpperCase())))
     child = spawn(process.execPath, [entry], { cwd: path.dirname(entry), env, stdio: ['ignore', 'ignore', 'ignore', 'ipc'], windowsHide: true })
+    child.on('error', () => {}) // The owned handoff/journal reports errors; late IPC errors must not crash the coordinator.
     await once(child, 'spawn')
     const host = registerWorkspaceRelocationFileHost({ ...options, process: native.inspectProcess(child.pid) })
     if (host.dispatch !== 'dispatch') throw failure()
@@ -68,6 +70,7 @@ export async function launchWorkspaceFileHost(options) {
     if (hash(verify().permission) !== permissionHash || !fields(entered, ['kind', ...Object.keys(bound), 'permission_sha256'])
       || entered.kind !== 'workspace_file_host_entered' || entered.permission_sha256 !== permissionHash
       || Object.entries(bound).some(([key, value]) => entered[key] !== value)) throw failure()
+    serveWorkspaceFileToolJournal(child, options)
     return { dispatch: 'dispatch', child, host: host.host.process }
   } catch { await close(child); throw failure() }
 }
