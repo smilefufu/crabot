@@ -2822,7 +2822,7 @@ export class ModuleManager {
       await state.forceTermination
       return
     }
-    state.termination ??= this.terminateChildTree(state, false)
+    state.termination ??= state.forceTermination ?? this.terminateChildTree(state, false)
     await state.termination
   }
 

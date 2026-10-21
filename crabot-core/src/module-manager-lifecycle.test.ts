@@ -423,6 +423,36 @@ runpy.run_path(fixture,run_name='__main__')`
     expect(stoppedEvents(events, runtime.module_id).map(event => event.payload.reason)).toEqual(['forced'])
   })
 
+  it('shares an in-flight forced termination with the exit finalizer without starting a second graceful termination', async () => {
+    const { mm, runtime, events } = makeManager({ mode: 'ignore-term' })
+    const { child, info } = await start(mm, runtime), state = mm.childStates.get(child)
+    const terminate = mm.terminateChildTree.bind(mm)
+    let release!: () => void
+    const completion = new Promise<void>(resolve => { release = resolve })
+    const modes: boolean[] = []
+    vi.spyOn(mm, 'terminateChildTree').mockImplementation(async (target: any, force: any) => {
+      modes.push(force)
+      if (!force) throw Object.assign(new Error('A second termination raced the in-flight force'), { code: 'EPERM' })
+      await terminate(target, force)
+      await completion
+    })
+    const stopping = mm.handleStopModule({ module_id: runtime.module_id, force: true })
+    void stopping.catch(() => {})
+    try {
+      await waitFor(() => state.finalizeStarted ? true : undefined)
+      release()
+      await stopping
+      await state.finalized
+      expect(state.finalizeError).toBeUndefined()
+      expect(modes).toEqual([true])
+      expect(isProcessTreeAlive(child.pid!)).toBe(false)
+      expect(pidAlive(info.pid)).toBe(false)
+      expect(stoppedEvents(events, runtime.module_id).map(event => event.payload.reason)).toEqual(['forced'])
+    } finally {
+      release(); await stopping.catch(() => {}); await mm.lifecycleQueues.get(runtime.module_id); await forceCleanup(mm, runtime)
+    }
+  })
+
   it('ignores child output that arrives after its log stream is finalized', async () => {
     const { mm, runtime } = makeManager()
     const { child } = await start(mm, runtime)
