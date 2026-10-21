@@ -1,10 +1,12 @@
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { filterToolsForSubAgent } from '../../src/agent/subagent-tool-filter.js'
 import { WorkspaceManager } from '../../src/workers/harness/workspace-manager.js'
 import { checkFileAccess } from '../../src/permissions/tool-authorization.js'
+import { buildChildEnv } from '../../src/core/runtime-env.js'
+import { LocalHostToolExecutor, localHostToolExecutor } from '../../src/engine/local-host-tool-executor.js'
 import { UnifiedAgent } from '../../src/unified-agent.js'
 import { BUILTIN_WORKER_PERMISSIONS } from '../../src/workers/builtin/runtime.js'
 
@@ -15,9 +17,14 @@ describe('host-verified managed task files', () => {
     workspaces = new WorkspaceManager(path.join(root, 'workspaces'))
     workspace = (await workspaces.resolve('owner')).root
   })
-  afterEach(async () => { await fs.rm(root, { recursive: true, force: true }) })
+  afterEach(async () => { vi.restoreAllMocks(); await fs.rm(root, { recursive: true, force: true }) })
   const principal = () => ({ ...BUILTIN_WORKER_PERMISSIONS, storage: null })
   it('executes actual Write/Read in its default root with no extra range', async () => {
+    // Exercise the shipped helper; the source-only ts-node fallback cannot resolve dynamic .js requires.
+    const helper = path.resolve(__dirname, '../../dist/engine/tools/local-host-helper.js')
+    await fs.access(helper)
+    const executor = new LocalHostToolExecutor(() => ({ argv: [process.execPath, helper], env: buildChildEnv({ DATA_DIR: root }) }))
+    vi.spyOn(localHostToolExecutor, 'execute').mockImplementation(executor.execute.bind(executor))
     const agent = Object.create(UnifiedAgent.prototype) as any
     Object.assign(agent, { config: { moduleId: 'fixture' }, agentConfig: { skills: [{ id: 'tmp-page', name: 'tmp-page', description: 'fixture', skill_dir: root }], subagents: [] },
       agentHandler: { createBuiltinBgToolOptions: () => undefined }, mcpConnector: { getAllTools: () => [] }, knownSecrets: [] })
@@ -36,7 +43,7 @@ describe('host-verified managed task files', () => {
     const secret = path.join(root, 'secret.txt'); await fs.writeFile(secret, 'OUTSIDE_SECRET')
     await fs.symlink(secret, path.join(workspace, 'escape.txt'))
     const grep = await tools.find((t: any) => t.name === 'Grep').call({ path: workspace, pattern: 'OUTSIDE_SECRET', output_mode: 'content' }, {})
-    expect(grep.isError).toBe(false); expect(grep.output).not.toContain('OUTSIDE_SECRET')
+    expect(grep.isError, grep.output).toBe(false); expect(grep.output).not.toContain('OUTSIDE_SECRET')
     expect((await tools.find((t: any) => t.name === 'Grep').call({ path: path.join(workspace, 'escape.txt'), pattern: 'OUTSIDE_SECRET' }, {})).isError).toBe(true)
     expect((await tools.find((t: any) => t.name === 'Glob').call({ path: workspace, pattern: '*.txt' }, {})).isError).toBe(false)
     expect(tools.some((t: any) => t.category === 'messaging' || t.category === 'memory')).toBe(false)

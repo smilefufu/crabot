@@ -22,12 +22,20 @@ const EXCLUDED_DIRECTORIES = new Set([
   '.git', 'node_modules', '.pnpm-store', 'dist', 'build', 'coverage', '.next',
 ])
 
+interface WorkspaceHistoryReadBinding {
+  readonly before_root: string
+  readonly after_root: string
+  readonly verify: () => Promise<void>
+  readonly managedScope: ManagedWorkspaceScope
+}
+
 export interface ProjectDocToolDeps {
   readonly ledger: Pick<LedgerStore, 'listWorkers' | 'findWorker'>
   /** Shared with execution-capabilities; project authorization never reads a Worker principal. */
   readonly readWorkerContext: (workerId: string) => Promise<WorkerContext | undefined>
   /** Host revalidates ledger/context task ownership before each operation. */
   readonly managedWorkspace?: (workerId: string, workspace: string) => ManagedWorkspaceScope
+  readonly historyWorkspace?: (workerId: string, incarnationId: string) => Promise<WorkspaceHistoryReadBinding | null>
   readonly managerKey: ManagerKey
   /** Current Manager authority; ordinary wake sources never supply their own permissions. */
   readonly managerPrincipalPermissions?: ResolvedPermissions
@@ -123,6 +131,26 @@ async function realDirectory(value: string, label: string): Promise<string> {
   return resolved
 }
 
+/** Temporary read coordinates only; neither the original principal nor persisted permissions are changed. */
+async function checkHistoryRead(permissions: ResolvedPermissions | undefined, file: string, history: WorkspaceHistoryReadBinding) {
+  if (!permissions?.tool_access.file_io) return denied('PERMISSION_DENIED', '未授权内置文件入口')
+  await history.verify()
+  const target = await fs.realpath(file), root = await fs.realpath(history.after_root)
+  if (root !== history.after_root || !isInsideOrEqual(root, target)) return denied('PERMISSION_DENIED', '历史文件越过原工作区范围')
+  let view = permissions
+  if (permissions.storage && 'workspace_path' in permissions.storage) {
+    const authorized = normalizeAbsoluteDirectoryPath(permissions.storage.workspace_path, 'storage.workspace_path')
+    let mapped: string | undefined
+    if (isInsideOrEqual(authorized, history.before_root)) mapped = root
+    else if (isInsideOrEqual(history.before_root, authorized)) mapped = path.join(root, path.relative(history.before_root, authorized))
+    if (mapped) view = { ...permissions, storage: { ...permissions.storage, workspace_path: mapped } }
+  }
+  const explicit = await checkFileAccess(view, target, '/', false)
+  const access = explicit.allowed ? explicit : await checkFileAccess(view, target, '/', false, history.managedScope)
+  await history.verify()
+  return access
+}
+
 /** Extra storage is explicit; automatic task files require the existing visible/controllable ledger. */
 export async function checkProjectFileAccess(deps: ProjectDocToolDeps, file: string, write = false) {
   const permissions = deps.managerPrincipalPermissions
@@ -131,13 +159,24 @@ export async function checkProjectFileAccess(deps: ProjectDocToolDeps, file: str
     if (permissions?.storage && 'workspace_path' in permissions.storage) normalizeAbsoluteDirectoryPath(permissions.storage.workspace_path, 'storage.workspace_path')
     explicit = await checkFileAccess(permissions, file, process.cwd(), write)
   } catch { explicit = denied('PERMISSION_DENIED', '额外文件范围不是规范化绝对目录') }
-  if (explicit.allowed || !permissions?.tool_access.file_io || !deps.managedWorkspace || write) return explicit
+  if (explicit.allowed || !permissions?.tool_access.file_io || (!deps.managedWorkspace && !deps.historyWorkspace) || write) return explicit
   for (const worker of await deps.ledger.listWorkers(deps.managerKey)) {
     if (worker.manager_key !== deps.managerKey) continue
     for (const incarnation of worker.incarnations) {
       if (!incarnation.workspace) continue
-      const access = await checkFileAccess(permissions, file, process.cwd(), false, deps.managedWorkspace(worker.worker_id, incarnation.workspace))
-      if (access.allowed) return access
+      if (deps.managedWorkspace) {
+        const access = await checkFileAccess(permissions, file, process.cwd(), false, deps.managedWorkspace(worker.worker_id, incarnation.workspace))
+        if (access.allowed) return access
+      }
+      if (deps.historyWorkspace && incarnation.incarnation_id) {
+        try {
+          const history = await deps.historyWorkspace(worker.worker_id, incarnation.incarnation_id)
+          if (history && history.before_root === incarnation.workspace) {
+            const access = await checkHistoryRead(permissions, file, history)
+            if (access.allowed) return access
+          }
+        } catch { /* An unavailable history binding grants no file scope. */ }
+      }
     }
   }
   return denied('PERMISSION_DENIED', '文件不在额外范围或有权观察的任务默认目录内')
@@ -151,7 +190,21 @@ export async function authorizeProjectRoot(
   const permissions = deps.managerPrincipalPermissions
   if (!permissions) throw new Error('当前处理回合没有可用的主体权限快照')
   if (!permissions.tool_access.file_io) throw new Error('当前处理回合主体没有 file_io 权限')
-  const requested = await realDirectory(normalizeProjectRoot(rawProjectRoot), 'project_root')
+  const logical = normalizeProjectRoot(rawProjectRoot)
+  if (!write && deps.historyWorkspace) for (const worker of await deps.ledger.listWorkers(deps.managerKey)) {
+    if (worker.manager_key !== deps.managerKey) continue
+    for (const incarnation of worker.incarnations) {
+      if (!incarnation.incarnation_id || !path.isAbsolute(incarnation.workspace) || !isInsideOrEqual(incarnation.workspace, logical)) continue
+      const history = await deps.historyWorkspace(worker.worker_id, incarnation.incarnation_id)
+      if (!history) continue
+      if (history.before_root !== incarnation.workspace) throw new Error('历史工作区归属无法核实')
+      const requested = await realDirectory(path.join(history.after_root, path.relative(history.before_root, logical)), '历史project_root')
+      const access = await checkHistoryRead(permissions, requested, history)
+      if (!access.allowed) throw new Error(access.reason)
+      return requested
+    }
+  }
+  const requested = await realDirectory(logical, 'project_root')
   const access = await checkProjectFileAccess(deps, requested, write)
   if (!access.allowed) throw new Error(access.reason)
   return requested

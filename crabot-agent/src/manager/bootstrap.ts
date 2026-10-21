@@ -1127,6 +1127,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
         projectDocs: {
           ledger: sharedProjectLedger,
           managedWorkspace: (id, workspace) => harness.managedWorkspaceScope(id, workspace),
+          historyWorkspace: (id, incarnation) => harness.workspaceHistoryRead(id, incarnation),
           readWorkerContext: (workerId) => workerContextStore.read(workerId),
           managerKey: key,
           managerPrincipalPermissions: managerPermissions ?? undefined,

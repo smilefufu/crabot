@@ -55,7 +55,7 @@ async function fixture(t, { crossVolume = false, closureLedger = false, separate
   const before = await catalog.snapshot(), marker = path.join(before.storage_root, 'original.txt')
   if (historyIncarnation) {
     const workspace = path.join(before.storage_root, 'default/tasks', closureWorker.worker_id)
-    fs.mkdirSync(workspace, { recursive: true }); fs.writeFileSync(path.join(workspace, 'history.txt'), 'original history artifact')
+    fs.mkdirSync(workspace, { recursive: true }); fs.writeFileSync(path.join(workspace, 'history.md'), 'original history artifact')
     const incarnation = { incarnation_id: 'history-mainline', impl: 'builtin', seq: 0, state: 'exited', workspace,
       session_ref: 'original-history-session', started_at: '2026-10-20T00:00:00.000Z', ended_at: '2026-10-20T00:01:00.000Z', ended_reason: 'completed' }
     closureWorker.incarnations = [{ incarnation_id: incarnation.incarnation_id, impl: incarnation.impl, seq: incarnation.seq, workspace, started_at: incarnation.started_at }]
@@ -788,7 +788,7 @@ for (const mode of ['confirmed', 'lost acknowledgement', 'changed source', 'copy
                 const beforeRoot = f.closureWorker.incarnations[0].workspace, afterRoot = path.join(f.target, path.relative(f.before.storage_root, beforeRoot))
                 const location = await locateWorkspaceRelocationHistory(query)
                 assert.deepEqual(location, { intent_id: f.id, manager_key: query.managerKey, worker_id: query.workerId, incarnation_id: query.incarnationId, before_root: beforeRoot, after_root: afterRoot })
-                assert.equal(fs.readFileSync(path.join(location.after_root, 'history.txt'), 'utf8'), 'original history artifact')
+                assert.equal(fs.readFileSync(path.join(location.after_root, 'history.md'), 'utf8'), 'original history artifact')
                 for (const change of [{ managerKey: 'other::manager' }, { workerId: 'new-worker' }, { incarnationId: 'new-incarnation' }]) assert.equal(await locateWorkspaceRelocationHistory({ ...query, ...change }), null)
                 await assert.rejects(locateWorkspaceRelocationHistory({ ...query, workspace: f.target }))
                 const originalStorage = process.env.WORKER_WORKSPACES_DIR
@@ -796,7 +796,7 @@ for (const mode of ['confirmed', 'lost acknowledgement', 'changed source', 'copy
                 finally { if (originalStorage === undefined) delete process.env.WORKER_WORKSPACES_DIR; else process.env.WORKER_WORKSPACES_DIR = originalStorage }
                 await f.catalog.update('default', { expected_revision: after.revision, name: 'updated after migration', description: '' })
                 assert.deepEqual(await locateWorkspaceRelocationHistory(query), location)
-                fs.mkdirSync(beforeRoot, { recursive: true }); fs.writeFileSync(path.join(beforeRoot, 'history.txt'), 'unrelated recreated source')
+                fs.mkdirSync(beforeRoot, { recursive: true }); fs.writeFileSync(path.join(beforeRoot, 'history.md'), 'unrelated recreated source')
                 assert.deepEqual(await locateWorkspaceRelocationHistory(query), location)
                 const retained = afterRoot + '-retained'
                 fs.renameSync(afterRoot, retained)
@@ -821,6 +821,53 @@ for (const mode of ['confirmed', 'lost acknowledgement', 'changed source', 'copy
                 })
                 try { await assert.rejects(locateWorkspaceRelocationHistory(query)); assert.equal(changedDuringRead, true) }
                 finally { mock.mock.restore(); fs.writeFileSync(selectedFile, selectedBeforeRead) }
+                const [{ WorkerHarness }, { LedgerStore }, { WorkerContextStore }, { WorkspaceManager }, { BUILTIN_WORKER_PERMISSIONS }, { buildProjectDocTools }] = await Promise.all([
+                  import('../../../crabot-agent/dist/workers/harness/harness.js'), import('../../../crabot-agent/dist/workers/harness/ledger-store.js'),
+                  import('../../../crabot-agent/dist/workers/harness/context-store.js'), import('../../../crabot-agent/dist/workers/harness/workspace-manager.js'),
+                  import('../../../crabot-agent/dist/workers/builtin/runtime.js'), import('../../../crabot-agent/dist/manager/tools/project-doc-tools.js'),
+                ])
+                const workersDir = path.join(f.data, 'agent/workers'), ledger = new LedgerStore(path.dirname(f.ledgerFile)), contexts = new WorkerContextStore(workersDir)
+                const originalPermissions = { ...BUILTIN_WORKER_PERMISSIONS, storage: null }
+                await contexts.write(query.workerId, { manager_key: query.managerKey, creator_friend_id: 'original-friend', principal_permissions: originalPermissions })
+                const contextFile = path.join(workersDir, query.workerId, 'context.json'), contextBytes = fs.readFileSync(contextFile)
+                const harness = new WorkerHarness({ ledger, workersDir, workspaces: new WorkspaceManager(path.join(f.data, 'workspaces'), f.data),
+                  adapters: new Map(), defaultImpl: 'builtin', now: () => new Date().toISOString() })
+                const docs = principal => buildProjectDocTools({ ledger, managerKey: query.managerKey, managerPrincipalPermissions: principal,
+                  readWorkerContext: id => contexts.read(id), managedWorkspace: (id, workspace) => harness.managedWorkspaceScope(id, workspace),
+                  historyWorkspace: (id, incarnation) => harness.workspaceHistoryRead(id, incarnation) })[0]
+                const request = { project_root: beforeRoot, operation: 'read', path: 'history.md' }
+                const historyReadStarted = Date.now()
+                for (const storage of [null, { workspace_path: beforeRoot, access: 'read' }, { scope: 'all', access: 'read' }]) {
+                  const principal = { ...originalPermissions, storage }, beforePermission = JSON.stringify(principal)
+                  const result = await docs(principal).call(request, {})
+                  assert.equal(result.isError, false, result.output)
+                  assert.equal(JSON.parse(result.output).content, 'original history artifact')
+                  assert.equal(JSON.stringify(principal), beforePermission); assert.deepEqual(fs.readFileSync(contextFile), contextBytes)
+                }
+                t.diagnostic('Original qualified history document reads confirmed in ' + (Date.now() - historyReadStarted) + 'ms')
+                const hiddenContext = contextFile + '-retained'
+                fs.renameSync(contextFile, hiddenContext)
+                try {
+                  const explicitHistory = await docs({ ...originalPermissions, storage: { workspace_path: beforeRoot, access: 'read' } }).call(request, {})
+                  assert.equal(explicitHistory.isError, false, explicitHistory.output)
+                  assert.equal(JSON.parse(explicitHistory.output).content, 'original history artifact')
+                  assert.equal((await docs(originalPermissions).call(request, {})).isError, true)
+                } finally { fs.renameSync(hiddenContext, contextFile) }
+                const binding = await harness.workspaceHistoryRead(query.workerId, query.incarnationId)
+                await contexts.write(query.workerId, { manager_key: query.managerKey, creator_friend_id: 'other-owner', principal_permissions: originalPermissions })
+                try {
+                  await assert.rejects(binding.managedScope())
+                  assert.equal((await docs(originalPermissions).call(request, {})).isError, true)
+                } finally { fs.writeFileSync(contextFile, contextBytes) }
+                fs.writeFileSync(contextFile, JSON.stringify({ ...JSON.parse(contextBytes), schema_version: 2,
+                  request: { schema_version: 1, request_id: 'a'.repeat(64), source_sha256: 'b'.repeat(64), execution_scope: 'group' },
+                  target_session: { channel_id: 'fixture', session_id: 'closure', type: 'group' } }))
+                try { const requestBinding = await harness.workspaceHistoryRead(query.workerId, query.incarnationId); await assert.rejects(requestBinding.managedScope(), /request ownership/) }
+                finally { fs.writeFileSync(contextFile, contextBytes) }
+                assert.equal(await harness.workspaceHistoryRead('new-worker', query.incarnationId), null)
+                const disabled = { ...originalPermissions, tool_access: { ...originalPermissions.tool_access, file_io: false } }
+                assert.equal((await docs(disabled).call(request, {})).isError, true)
+                assert.deepEqual(fs.readFileSync(contextFile), contextBytes)
                 await f.close()
                 assert.deepEqual(await locateWorkspaceRelocationHistory(query), location)
                 assert.deepEqual(fs.readFileSync(f.ledgerFile), closedBytes); assert.deepEqual(fs.readFileSync(retirementFile), retirementBytes)

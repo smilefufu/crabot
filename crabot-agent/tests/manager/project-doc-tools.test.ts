@@ -3,7 +3,7 @@ import { promises as fs } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
-import { buildProjectDocTools } from '../../src/manager/tools/project-doc-tools.js'
+import { buildProjectDocTools, authorizeProjectRoot, checkProjectFileAccess } from '../../src/manager/tools/project-doc-tools.js'
 import type { WakeEvent } from '../../src/manager/loop.js'
 import type { ManagerKey } from '../../src/manager/types.js'
 import type { ResolvedPermissions } from '../../src/types.js'
@@ -130,6 +130,57 @@ describe('project document tools', () => {
   function tool(wakeEvent: WakeEvent | undefined, name: string, managerPrincipalPermissions?: ResolvedPermissions) {
     return tools(wakeEvent, managerPrincipalPermissions).find((entry) => entry.name === name)!
   }
+
+  for (const mode of ['managed default', 'explicit read', 'all', 'narrow docs', 'no file entry', 'wrong Manager', 'outside scope']) it('preserves original history read qualification: ' + mode, async () => {
+    workers[0].task = { ...workers[0].task, status: 'closed', closed: { by: 'migration', at: '2026-10-21T00:00:00.000Z' } }
+    const moved = join(root, 'moved-project')
+    await fs.rename(project, moved)
+    const actual = await fs.realpath(moved)
+    const stored = mode === 'all' ? { scope: 'all' as const, access: 'read' as const }
+      : mode === 'managed default' ? null
+      : { workspace_path: mode === 'narrow docs' ? join(project, 'docs') : mode === 'outside scope' ? sibling : project, access: 'read' as const }
+    const principal = permissions({ storage: stored })
+    if (mode === 'no file entry') principal.tool_access = { ...principal.tool_access, file_io: false }
+    const beforePermissions = JSON.stringify(principal), beforeWorker = JSON.stringify(workers[0])
+    if (mode === 'wrong Manager') workers[0].manager_key = OTHER_KEY
+    const historyWorkspace = vi.fn(async (id: string, incarnation: string) => id === 'w-project' && incarnation === 'w-project-inc'
+      ? { before_root: project, after_root: actual, verify: async () => {}, managedScope: async () => mode === 'managed default' ? actual : undefined } : null)
+    const deps = { ledger, managerKey: KEY, managerPrincipalPermissions: principal,
+      readWorkerContext: async (id: string) => contexts.get(id), historyWorkspace }
+    const inspect = buildProjectDocTools(deps)[0]
+    const logical = mode === 'narrow docs' ? join(project, 'docs') : project
+    const result = await inspect.call({ project_root: logical, operation: 'read', path: mode === 'narrow docs' ? 'ARCHITECTURE.md' : 'README.md' }, {} as never)
+    const denied = ['no file entry', 'wrong Manager', 'outside scope'].includes(mode)
+    expect(result.isError).toBe(denied)
+    if (!denied) {
+      expect(JSON.parse(result.output).content).toContain(mode === 'narrow docs' ? '关键数据流' : '入口说明')
+      await expect(authorizeProjectRoot(deps, logical, true)).rejects.toThrow()
+      expect((await checkProjectFileAccess(deps, actual, true)).allowed).toBe(false)
+    }
+    if (mode === 'narrow docs') await expect(authorizeProjectRoot(deps, project, false)).rejects.toThrow('PERMISSION_DENIED')
+    if (mode === 'wrong Manager') expect(historyWorkspace).not.toHaveBeenCalled()
+    expect(JSON.stringify(principal)).toBe(beforePermissions)
+    if (mode !== 'wrong Manager') expect(JSON.stringify(workers[0])).toBe(beforeWorker)
+    expect(await fs.readFile(join(actual, 'README.md'), 'utf8')).toContain('入口说明')
+  })
+
+  it('uses verified history when the old root is recreated, and refuses a redirected mapped root', async () => {
+    workers[0].task = { ...workers[0].task, status: 'closed', closed: { by: 'migration', at: '2026-10-21T00:00:00.000Z' } }
+    const moved = join(root, 'moved-project'); await fs.rename(project, moved)
+    const actual = await fs.realpath(moved)
+    await fs.mkdir(project); await fs.writeFile(join(project, 'README.md'), 'unrelated replacement')
+    const deps = { ledger, managerKey: KEY, managerPrincipalPermissions: permissions(), readWorkerContext: async () => undefined,
+      historyWorkspace: async (id: string) => id === 'w-project' ? { before_root: project, after_root: actual, verify: async () => {}, managedScope: async () => actual } : null }
+    const inspect = buildProjectDocTools(deps)[0]
+    const result = await inspect.call({ project_root: project, operation: 'read', path: 'README.md' }, {} as never)
+    expect(result.isError).toBe(false); expect(JSON.parse(result.output).content).toContain('入口说明')
+    const kept = moved + '-kept'; await fs.rename(moved, kept)
+    try {
+      await fs.symlink(kept, moved, process.platform === 'win32' ? 'junction' : 'dir')
+      expect((await inspect.call({ project_root: project, operation: 'read', path: 'README.md' }, {} as never)).isError).toBe(true)
+    } finally { await fs.unlink(moved); await fs.rename(kept, moved) }
+    expect(await fs.readFile(join(project, 'README.md'), 'utf8')).toBe('unrelated replacement')
+  })
 
   it('只暴露项目文档读取，且没有 worker_id 参数或写入入口', () => {
     const built = tools(humanWake(permissions()))

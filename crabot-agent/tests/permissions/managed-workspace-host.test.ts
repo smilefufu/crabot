@@ -72,6 +72,18 @@ describe('host task ownership and compatibility', () => {
     expect((await checkProjectFileAccess(projectDeps(), claimed)).allowed).toBe(false)
     expect((await checkFileAccess(principal(), workspace, '/', false, harness.managedWorkspaceScope('unknown', workspace))).allowed).toBe(false)
   })
+  it('keeps ordinary explicitly authorized reads independent of unrelated closed-Worker context when no relocation exists', async () => {
+    const worker = await harness.spawnWorker(params()), incarnation = worker.incarnations[0]
+    const closed = structuredClone(worker)
+    closed.task = { ...closed.task, status: 'closed', closed: { by: 'migration', at: new Date().toISOString() } }
+    vi.spyOn(ledger, 'findWorker').mockResolvedValue({ managerKey: key, worker: closed })
+    const context = await contexts.read(worker.worker_id)
+    await contexts.write(worker.worker_id, { ...context, creator_friend_id: 'other-owner' })
+    expect(await harness.workspaceHistoryRead(worker.worker_id, incarnation.incarnation_id!)).toBeNull()
+    expect(await authorizeProjectRoot({ ...projectDeps(), managerPrincipalPermissions: { ...principal(), storage: { scope: 'all', access: 'read' } },
+      historyWorkspace: (id, incarnationId) => harness.workspaceHistoryRead(id, incarnationId) }, incarnation.workspace, false)).toBe(await fs.realpath(incarnation.workspace))
+  })
+
   it('keeps file_io=false tasks running without reading workspace rules or Git', async () => {
     const external = path.join(root, 'external'); await fs.mkdir(external)
     await fs.writeFile(path.join(external, 'AGENTS.md'), 'private rules')

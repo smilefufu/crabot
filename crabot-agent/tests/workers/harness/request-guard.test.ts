@@ -138,7 +138,7 @@ describe('Worker request guard never borrows a neighbouring speaker or legacy sn
     current.mockImplementation(async () => { throw new Error('unavailable') })
     await expect(harness.authorizeAgentCliExecution(execution, 'schedule', 'write')).rejects.toThrow('CAPABILITY_UNKNOWN')
   })
-  it('CLI authority rechecks exact execution after asynchronous authorization and never falls back on half bindings', async () => {
+  it('CLI authority rechecks exact execution after asynchronous authorization without reopening a closed Worker', async () => {
     const execution = await activeExecution(), harness = resourceHarness()
     const originalCurrent = current.getMockImplementation()!
     current.mockImplementation(async (kind, source) => {
@@ -147,9 +147,10 @@ describe('Worker request guard never borrows a neighbouring speaker or legacy sn
       return result
     })
     await expect(harness.authorizeAgentCliExecution(execution, 'schedule', 'read')).rejects.toThrow(/FORBIDDEN|closed/)
-    current.mockImplementation(originalCurrent)
-    await activeExecution()
-    await ledger.upsertWorker(key, 'w-owner', prev => ({ ...prev!, task: { ...prev!.task, status: 'running' } }))
+    expect((await ledger.findWorker('w-owner'))!.worker.task.status).toBe('closed')
+  })
+  it('CLI authority never falls back on half bindings', async () => {
+    const execution = await activeExecution(), harness = resourceHarness()
     await fs.rm(path.join(root, 'workers/w-owner/context.json'))
     await expect(harness.authorizeAgentCliExecution(execution, 'schedule', 'read')).rejects.toThrow('CAPABILITY_UNKNOWN')
   })

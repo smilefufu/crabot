@@ -3963,19 +3963,54 @@ export class WorkerHarness {
     return { valid: true, cli_access: permissions.cli_access[domain], shell: permissions.shell }
   }
 
+  private async requireWorkspaceOwnership(workerId: string, workspaceRoot: string): Promise<void> {
+    const found = await this.deps.ledger.findWorker(workerId), context = await this.contextStore.read(workerId)
+    if (!found || !context?.principal_permissions || context.manager_key !== found.managerKey
+      || found.worker.manager_key !== found.managerKey || context.creator_friend_id !== found.worker.origin.creator_friend_id
+      || !found.worker.incarnations.some(item => item.workspace === workspaceRoot)) throw new Error('CAPABILITY_UNKNOWN: Worker file ownership unavailable')
+    if (found.worker.origin.request || context.request) {
+      const guard = this.deps.requestGuard?.()
+      if (!guard || !await guard.load(workerId)) throw new Error('CAPABILITY_UNKNOWN: Worker request ownership unavailable')
+    }
+  }
+
   /** Ownership only; caller still applies its own resource/role and lifecycle checks. */
   managedWorkspaceScope(workerId: string, workspaceRoot: string): ManagedWorkspaceScope {
     return async () => {
-      const found = await this.deps.ledger.findWorker(workerId), context = await this.contextStore.read(workerId)
-      if (!found || !context?.principal_permissions || context.manager_key !== found.managerKey
-        || found.worker.manager_key !== found.managerKey || context.creator_friend_id !== found.worker.origin.creator_friend_id
-        || !found.worker.incarnations.some(item => item.workspace === workspaceRoot)) throw new Error('CAPABILITY_UNKNOWN: Worker file ownership unavailable')
-      if (found.worker.origin.request || context.request) {
-        const guard = this.deps.requestGuard?.()
-        if (!guard || !await guard.load(workerId)) throw new Error('CAPABILITY_UNKNOWN: Worker request ownership unavailable')
-      }
+      await this.requireWorkspaceOwnership(workerId, workspaceRoot)
       return this.deps.workspaces.fileScope(workerId, workspaceRoot)()
     }
+  }
+
+  /** Closed history only. The returned managed scope is never supplied to execution or write entrypoints. */
+  async workspaceHistoryRead(workerId: string, incarnationId: string) {
+    const readOwner = async () => {
+      const found = await this.deps.ledger.findWorker(workerId)
+      const incarnation = found?.worker.incarnations.find(item => item.incarnation_id === incarnationId)
+      if (!found || found.worker.task.status !== 'closed' || !incarnation) return null
+      return structuredClone({ managerKey: found.managerKey, incarnation })
+    }
+    const candidate = await this.deps.ledger.findWorker(workerId)
+    if (!candidate || candidate.worker.task.status !== 'closed' || !candidate.worker.incarnations.some(item => item.incarnation_id === incarnationId)) return null
+    const location = await this.deps.workspaces.locateHistory(candidate.managerKey, workerId, incarnationId)
+    if (!location) return null
+    const original = await readOwner()
+    if (!original) throw new Error('CAPABILITY_UNKNOWN: Worker history ownership unavailable')
+    if (location.manager_key !== original.managerKey || location.worker_id !== workerId || location.incarnation_id !== incarnationId
+      || location.before_root !== original.incarnation.workspace) throw new Error('CAPABILITY_UNKNOWN: Worker history ownership unavailable')
+    const originalHash = sha256CanonicalJson(original), locationHash = sha256CanonicalJson(location)
+    const verify = async () => {
+      if (sha256CanonicalJson(await readOwner()) !== originalHash
+        || sha256CanonicalJson(await this.deps.workspaces.locateHistory(original.managerKey, workerId, incarnationId)) !== locationHash
+        || sha256CanonicalJson(await readOwner()) !== originalHash) throw new Error('CAPABILITY_UNKNOWN: Worker history ownership changed')
+    }
+    await verify()
+    return { before_root: location.before_root, after_root: location.after_root, verify, managedScope: async () => {
+      await verify(); await this.requireWorkspaceOwnership(workerId, original.incarnation.workspace)
+      const scope = await this.deps.workspaces.fileScope(workerId, location.after_root)()
+      await verify(); await this.requireWorkspaceOwnership(workerId, original.incarnation.workspace)
+      return scope
+    } }
   }
 
   private async assertWorkerFileAccess(workerId: string, file: string, write: boolean): Promise<void> {
