@@ -1,6 +1,6 @@
 // Fixed file preparation policy; no caller-supplied paths or file effects are accepted here.
 import { createWorkspaceJournalClient, serveWorkspaceJournal, journalFields as fields, workspaceJournalFailure as failure } from './workspace-coordinator-journal.mjs'
-import { readWorkspaceRelocationFilePlan, readWorkspaceRelocationFileActors, prepareWorkspaceRelocationFilePlan, prepareWorkspaceRelocationStaging, readWorkspaceRelocationRootPlan, prepareWorkspaceRelocationRootPlan, verifyWorkspaceRelocationClosureReadiness, readWorkspaceRelocationRecoveryCommit } from './workspace-relocation-intent.mjs'
+import { readWorkspaceRelocationFilePlan, readWorkspaceRelocationFileActors, prepareWorkspaceRelocationFilePlan, prepareWorkspaceRelocationStaging, readWorkspaceRelocationRootPlan, prepareWorkspaceRelocationRootPlan, verifyWorkspaceRelocationClosureReadiness, readWorkspaceRelocationRecoveryCommit, readWorkspaceRelocationRootPublished, readWorkspaceRelocationRootSelected, publishWorkspaceRelocationRoot, selectWorkspaceRelocationRoot } from './workspace-relocation-intent.mjs'
 import { launchWorkspaceFileHost, prepareWorkspaceFilesWithHost } from './workspace-file-host.mjs'
 import native from './process-identity.cjs'
 import { sha256CanonicalJson } from '../../crabot-shared/dist/canonical-json.js'
@@ -61,14 +61,48 @@ export function createWorkspaceFileJournal(coordinator, context) {
         return { dispatch: result.dispatch, plan_sha256: result.plan_sha256 }
       } catch { transport.close(); throw failure() }
     },
+    async publishRoot() {
+      try {
+        const previous = readWorkspaceRelocationRootPublished(context.dataDir, context.id)
+        const result = await transport.call('publish_root', {}), record = readWorkspaceRelocationRootPublished(context.dataDir, context.id)
+        if (!record || !fields(result, ['dispatch', 'published_sha256']) || !['dispatch', 'observe'].includes(result.dispatch)
+          || previous && result.dispatch !== 'observe' || result.published_sha256 !== sha256CanonicalJson(record)) throw failure()
+        transport.verify()
+        return result
+      } catch { transport.close(); throw failure() }
+    },
+    async selectRoot() {
+      try {
+        const previous = readWorkspaceRelocationRootSelected(context.dataDir, context.id)
+        const result = await transport.call('select_root', {}), record = readWorkspaceRelocationRootSelected(context.dataDir, context.id)
+        if (!record || !fields(result, ['dispatch', 'selected_sha256']) || !['dispatch', 'observe'].includes(result.dispatch)
+          || previous && result.dispatch !== 'observe' || result.selected_sha256 !== sha256CanonicalJson(record)) throw failure()
+        transport.verify()
+        return result
+      } catch { transport.close(); throw failure() }
+    },
     close: transport.close,
   })
 }
 export function serveWorkspaceFileJournal(context) {
   const controller = new AbortController()
-  let hostPreparation, filePreparation, rootPreparation, host
+  let hostPreparation, filePreparation, rootPreparation, rootPublication, rootSelection, host
   const disconnectHost = child => { if (child?.connected) { try { child.disconnect() } catch {} } }
   const transport = serveWorkspaceJournal(context, 'file', {
+    async publish_root(payload) {
+      if (!fields(payload, []) || !readWorkspaceRelocationRootPlan(context.dataDir, context.id)) throw failure()
+      const previous = rootPublication
+      if (!rootPublication) rootPublication = publishWorkspaceRelocationRoot({ dataDir: context.dataDir, id: context.id, signal: controller.signal })
+      const result = await rootPublication
+      return { dispatch: previous ? 'observe' : result.dispatch, published_sha256: result.published_sha256 }
+    },
+    async select_root(payload) {
+      if (!fields(payload, []) || !readWorkspaceRelocationRootPublished(context.dataDir, context.id)) throw failure()
+      const previous = rootSelection
+      if (!rootSelection) rootSelection = selectWorkspaceRelocationRoot({ dataDir: context.dataDir, id: context.id, signal: controller.signal })
+      const result = await rootSelection
+      return { dispatch: previous ? 'observe' : result.dispatch, selected_sha256: result.selected_sha256 }
+    },
     async prepare_root(payload) {
       if (!fields(payload, [])) throw failure()
       const args = { dataDir: context.dataDir, id: context.id, signal: controller.signal }

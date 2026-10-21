@@ -174,6 +174,12 @@ interface WorkspaceWorkerClosureResult {
   readonly recovery_commit_sha256: string
 }
 
+interface WorkspaceRootSelectionResult extends WorkspaceWorkerClosureResult {
+  readonly root_plan_sha256: string
+  readonly root_published_sha256: string
+  readonly root_selected_sha256: string
+}
+
 interface WorkspaceCoordinatorGrant {
   capture?: Promise<ReadonlyArray<WorkspaceRelocationWorker>>
   workersHash?: string
@@ -212,6 +218,7 @@ export class ModuleManager {
   private workspaceStopSequence?: { fingerprint: string; pending: Promise<WorkspaceStopSequenceResult> }
   private workspaceFilePreparation?: { fingerprint: string; pending: Promise<WorkspaceFilePreparationResult> }
   private workspaceWorkerClosure?: { fingerprint: string; pending: Promise<WorkspaceWorkerClosureResult> }
+  private workspaceRootSelection?: { fingerprint: string; pending: Promise<WorkspaceRootSelectionResult> }
   private workspaceModuleStop?: { fingerprint: string; pending: Promise<WorkspaceModuleStopResponse> }
   private readonly childStates: WeakMap<ChildProcess, ManagedChildState> = new WeakMap()
   private readonly lifecycleQueues: Map<ModuleId, Promise<void>> = new Map()
@@ -1546,6 +1553,50 @@ export class ModuleManager {
       } finally { files?.close(); workers?.close() }
     })
     this.workspaceWorkerClosure = { fingerprint, pending }
+    return pending
+  }
+
+  /** Select only the original published Root after closures; ordinary startup remains fenced. */
+  private commitWorkspaceRelocationRoot(request: VerifyWorkspaceRelocationRequestParams, bearer?: string): Promise<WorkspaceRootSelectionResult> {
+    request = Object.freeze({ ...request })
+    const fingerprint = sha256CanonicalJson(request)
+    const failure = () => Object.assign(new Error('新工作区位置尚未全部确认，已保留文件、终态与维护保护；未重放。'), { code: 'SERVICE_UNAVAILABLE' })
+    if (this.workspaceRootSelection) {
+      if (this.workspaceRootSelection.fingerprint !== fingerprint) return Promise.reject(Object.assign(new Error('Workspace Root intent cannot change'), { code: 'FORBIDDEN' }))
+      return this.workspaceRootSelection.pending
+    }
+    const pending = Promise.resolve().then(async (): Promise<WorkspaceRootSelectionResult> => {
+      let child: ChildProcess | undefined
+      let files: { prepareRoot(): Promise<{ plan_sha256: string }>; publishRoot(): Promise<{ published_sha256: string }>;
+        selectRoot(): Promise<{ selected_sha256: string }>; close(): void } | undefined
+      try {
+        const closed = await this.commitWorkspaceRelocationWorkers(request, bearer)
+        child = closed.coordinator
+        const records = require('../../scripts/lib/workspace-relocation-intent.mjs')
+        const verifyStopped = this.workspaceRelocationStoppedVerifier(request, child)
+        await verifyStopped()
+        const context = { dataDir: this.dataDir, id: request.intent_id, launch: records.readWorkspaceRelocationCoordinator(this.dataDir, request.intent_id).launch }
+        files = require('../../scripts/lib/workspace-file-journal.mjs').createWorkspaceFileJournal(child, context)
+        const plan = await files!.prepareRoot()
+        await verifyStopped()
+        const published = await files!.publishRoot()
+        await verifyStopped()
+        const selected = await files!.selectRoot()
+        await verifyStopped()
+        if (sha256CanonicalJson(records.readWorkspaceRelocationRootPlan(this.dataDir, request.intent_id)) !== plan.plan_sha256
+          || sha256CanonicalJson(records.readWorkspaceRelocationRootPublished(this.dataDir, request.intent_id)) !== published.published_sha256
+          || sha256CanonicalJson(records.readWorkspaceRelocationRootSelected(this.dataDir, request.intent_id)) !== selected.selected_sha256) throw failure()
+        const { WorkspaceCatalog } = require('crabot-shared/dist/workspace-catalog.js')
+        const snapshot = await new WorkspaceCatalog({ dataRoot: this.dataDir, files: require('../../scripts/lib/process-identity.cjs') }).snapshot()
+        await verifyStopped()
+        if (sha256CanonicalJson(snapshot) !== records.readWorkspaceRelocationRootSelected(this.dataDir, request.intent_id).catalog_sha256) throw failure()
+        return Object.freeze({ ...closed, root_plan_sha256: plan.plan_sha256, root_published_sha256: published.published_sha256, root_selected_sha256: selected.selected_sha256 })
+      } catch {
+        await this.closeWorkspaceCoordinatorChannel(child)
+        throw failure()
+      } finally { files?.close() }
+    })
+    this.workspaceRootSelection = { fingerprint, pending }
     return pending
   }
 
