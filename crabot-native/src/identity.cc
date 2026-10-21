@@ -583,6 +583,7 @@ static napi_value ReleaseLock(napi_env env, napi_callback_info info) {
 #include "file-metadata.h"
 #include "directory-access.h"
 #include "directory-pin.h"
+#include "workspace-sync.h"
 #include "workspace-copy-job.h"
 #include "process-tree-observation.h"
 
@@ -596,6 +597,7 @@ static napi_value Initialize(napi_env env, napi_value exports) {
     {"closeWorkspaceCopyJob", nullptr, CloseWorkspaceCopyJob, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"inspectCurrentPrimaryGroup", nullptr, InspectCurrentPrimaryGroup, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"inspectDirectoryFileId", nullptr, InspectDirectoryFileId, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"syncPinnedWorkspaceTree", nullptr, SyncPinnedWorkspaceTree, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"copyPinnedDirectoryMetadata", nullptr, CopyPinnedDirectoryMetadata, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"pinDirectory", nullptr, PinDirectory, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"releaseDirectoryPin", nullptr, ReleaseDirectoryPin, nullptr, nullptr, nullptr, napi_default, nullptr},
