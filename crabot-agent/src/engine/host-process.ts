@@ -1,6 +1,6 @@
 import { execFile, spawn, type ChildProcess, type StdioOptions } from 'node:child_process'
 import { buildChildEnv } from '../core/runtime-env'
-import { getDataRootDir } from '../core/data-paths.js'
+import { getDataRootDir } from '../core/data-paths'
 import { assertWorkspaceExecutionAllowed } from 'crabot-shared'
 
 export interface HostProcessLimits {
