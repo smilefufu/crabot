@@ -52,7 +52,10 @@ function captureOwnedProcessTree(roots, api = native) {
           if (api.isProcessExited?.(pid) === true) continue
           fail('child-exit-unverified')
         }
-        if (!valid(child) || child.pid !== pid || child.owner !== self.owner || child.parent !== parent.pid) fail('child-binding')
+        if (!valid(child)) fail('child-identity')
+        if (child.pid !== pid) fail('child-pid-binding')
+        if (child.owner !== self.owner) fail('child-owner')
+        if (child.parent !== parent.pid) fail(child.parent === 0 ? 'child-parent-missing' : 'child-parent')
         if (!atLeast(child.started, parent.started)) fail('child-birth-order')
         let ancestor = parent.pid
         while (parents.has(ancestor)) { if (ancestor === pid) fail('ancestry-cycle'); ancestor = parents.get(ancestor) }

@@ -31,6 +31,23 @@ export function createWorkspaceMaintenanceFileAccess(failure: () => Error) {
     const fd = fs.openSync(directory, 'r')
     try { fs.fsyncSync(fd) } finally { fs.closeSync(fd) }
   }
+  function readBoundBytes(file: string, expected: string, privatePath = false) {
+    const before = owned(file, false, privatePath)
+    if (version(before) !== expected || before.size > 64n * 1024n * 1024n) throw failure()
+    const fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0) | (fs.constants.O_NONBLOCK ?? 0))
+    try {
+      if (version(fs.fstatSync(fd, { bigint: true })) !== expected) throw failure()
+      const body = Buffer.alloc(Number(before.size)); let offset = 0
+      while (offset < body.length) {
+        const count = fs.readSync(fd, body, offset, Math.min(128 * 1024, body.length - offset), offset)
+        if (!count) throw failure()
+        offset += count
+      }
+      if (fs.readSync(fd, Buffer.alloc(1), 0, 1, body.length) !== 0 || version(fs.fstatSync(fd, { bigint: true })) !== expected
+        || version(owned(file, false, privatePath)) !== expected) throw failure()
+      return body
+    } finally { fs.closeSync(fd) }
+  }
   function readJson(file: string, limit = 65536): any {
     let before: BigIntStats
     try { before = owned(file, false, true) }
@@ -57,5 +74,5 @@ export function createWorkspaceMaintenanceFileAccess(failure: () => Error) {
     } finally { fs.unlinkSync(temporary) }
     syncDirectory(directory)
   }
-  return { owned, syncDirectory, readJson, publish }
+  return { owned, syncDirectory, readBoundBytes, readJson, publish }
 }

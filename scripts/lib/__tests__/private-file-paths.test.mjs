@@ -26,7 +26,7 @@ test('Windows private file adapter preserves payload and converts actual filesys
 test('Windows native private ACL operations support deep Unicode paths without overwriting existing objects', { skip: process.platform !== 'win32' }, t => {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'crabot-private-path-')))
   t.after(() => fs.rmSync(root, { recursive: true, force: true }))
-  const parent = path.join(root, ...Array.from({ length: 14 }, (_, index) => 'directory-' + index + '-中文'))
+  const parent = path.join(root, ...Array.from({ length: 24 }, (_, index) => 'directory-' + index + '-中文'))
   fs.mkdirSync(parent, { recursive: true })
   const directory = path.join(parent, 'private'), file = path.join(directory, '原始文件.json')
   assert.ok(directory.length > 300)

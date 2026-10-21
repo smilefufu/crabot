@@ -646,6 +646,12 @@ function uniqueGeneratedId(used: ReadonlySet<string>): string {
 }
 
 export class ManagerWorkboardStore {
+  /** Pure original-format interpretation only; no lazy migration write or Admin acknowledgement. */
+  static parseWorkspaceRelocationBoard(key: ManagerKey, raw: string): InternalBoard {
+    const parsed: unknown = JSON.parse(raw)
+    return isRecord(parsed) && parsed.schema_version === 3 ? migrateV3Board(parsed, key) : validateBoard(parsed, key)
+  }
+
   private readonly mutexes = new Map<ManagerKey, AsyncMutex>()
 
   constructor(

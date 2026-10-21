@@ -10,30 +10,13 @@ import { createWorkspaceMaintenanceFileAccess, version, sameIdentity, digest } f
 const native = require('../../../scripts/lib/process-identity.cjs')
 const management = require('../../../scripts/lib/desktop-management.cjs')
 const failure = () => new Error('原检查点封存无法核实，已保留历史、提交材料和维护保护。')
-const { owned, syncDirectory, readJson, publish } = createWorkspaceMaintenanceFileAccess(failure)
+const { owned, syncDirectory, readBoundBytes, readJson, publish } = createWorkspaceMaintenanceFileAccess(failure)
 const validVersion = (value: unknown): value is string => typeof value === 'string' && /^-?[0-9]+(?::-?[0-9]+){8}$/.test(value)
 const fields = (value: any, keys: string[]) => value && typeof value === 'object' && !Array.isArray(value)
   && Object.keys(value).length === keys.length && keys.every(key => Object.prototype.hasOwnProperty.call(value, key))
 const optionalStat = (file: string, directory = false, privatePath = false) => {
   try { return owned(file, directory, privatePath) }
   catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error }
-}
-function readBoundBytes(file: string, expected: string, privatePath = false) {
-  const before = owned(file, false, privatePath)
-  if (version(before) !== expected || before.size > 64n * 1024n * 1024n) throw failure()
-  const fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0) | (fs.constants.O_NONBLOCK ?? 0))
-  try {
-    if (version(fs.fstatSync(fd, { bigint: true })) !== expected) throw failure()
-    const body = Buffer.alloc(Number(before.size)); let offset = 0
-    while (offset < body.length) {
-      const count = fs.readSync(fd, body, offset, Math.min(128 * 1024, body.length - offset), offset)
-      if (!count) throw failure()
-      offset += count
-    }
-    if (fs.readSync(fd, Buffer.alloc(1), 0, 1, body.length) !== 0 || version(fs.fstatSync(fd, { bigint: true })) !== expected
-      || version(owned(file, false, privatePath)) !== expected) throw failure()
-    return body
-  } finally { fs.closeSync(fd) }
 }
 interface CheckpointArchiveOptions {
   dataDir: string

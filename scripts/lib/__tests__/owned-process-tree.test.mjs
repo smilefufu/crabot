@@ -162,3 +162,15 @@ test('Linux keeps an unreaped exited child in the child list without making a li
   assert.deepEqual(captureOwnedProcessTree([expected]).map(item => item.pid), [root.pid])
   assert.equal(root.exitCode, null)
 })
+
+for (const [stage, change] of [
+  ['child-identity', child => ({ ...child, executable: '' })],
+  ['child-pid-binding', child => ({ ...child, pid: 14 })],
+  ['child-owner', child => ({ ...child, owner: 'other' })],
+  ['child-parent-missing', child => ({ ...child, parent: 0 })],
+  ['child-parent', child => ({ ...child, parent: 1 })],
+]) test('child rejection records the exact unchanged failing predicate: ' + stage, () => {
+  const f = fixture()
+  f.values.set(12, change(f.values.get(12)))
+  assert.throws(() => captureOwnedProcessTree([info(11)], f.api), { code: 'CRABOT_PROCESS_SCOPE', stage })
+})
