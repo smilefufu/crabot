@@ -4,7 +4,7 @@ import { existsSync } from 'node:fs'
 import path from 'node:path'
 import { tmpdir } from 'node:os'
 import http from 'node:http'
-import { randomUUID } from 'node:crypto'
+import { randomInt, randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { WorkspaceCatalog } from 'crabot-shared/dist/workspace-catalog.js'
@@ -17,11 +17,25 @@ function coordinatorJournalFailures(child: ReturnType<typeof spawn>): string[] {
     .split('\n').filter((line: string) => line.includes('workspace_journal_failed')).slice(-3)
 }
 
+// Keep fixture listeners out of the default OS ephemeral client-port range.
+async function reserveFixturePort(): Promise<ReturnType<typeof http.createServer>> {
+  for (let attempt = 0; attempt < 32; attempt++) {
+    const server = http.createServer()
+    try {
+      await new Promise<void>((resolve, reject) => {
+        server.once('error', reject); server.listen(randomInt(12000, 30000), '127.0.0.1', resolve)
+      })
+      return server
+    } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EADDRINUSE') throw error }
+  }
+  throw new Error('No finite fixture port was available')
+}
+
 async function fixture(options: { wrongRuntime?: boolean; result?: string; withAgent?: boolean; agentResult?: string; actualAgent?: boolean; processLifetimeMs?: number; backgroundShell?: boolean; actualAdmin?: boolean; adminReadyDelayMs?: number; quiesceResult?: string; orphanDuringStop?: boolean } = {}) {
   const root = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'crabot-current-admin-')))
   const native = require('../../scripts/lib/process-identity.cjs'), management = require('../../scripts/lib/desktop-management.cjs')
   const data = management.ensurePrivateDataRoot(path.join(root, 'data')), script = path.join(data, 'finite-admin.cjs'), callsFile = path.join(data, 'calls.json')
-  const reserve = http.createServer(); await new Promise<void>(resolve => reserve.listen(0, '127.0.0.1', resolve))
+  const reserve = await reserveFixturePort()
   const port = (reserve.address() as { port: number }).port; await new Promise<void>(resolve => reserve.close(() => resolve()))
   await fs.writeFile(script, `const fs=require('node:fs'),http=require('node:http'),calls=[];
     const server=http.createServer(async(req,res)=>{let text='';for await(const chunk of req)text+=chunk;const body=JSON.parse(text);
@@ -90,7 +104,7 @@ async function fixture(options: { wrongRuntime?: boolean; result?: string; withA
     manager.modules.set('admin-web', runtime); await manager.startModuleProcess('admin-web')
     await vi.waitFor(async () => expect(await fs.readFile(path.join(data, 'ready'), 'utf8')).toBe('ready'), { timeout: 10000 })
     if (options.withAgent || options.actualAgent) {
-      const agentPort = http.createServer(); await new Promise<void>(resolve => agentPort.listen(0, '127.0.0.1', resolve))
+      const agentPort = await reserveFixturePort()
       const agentScript = path.join(data, 'finite-agent.cjs'), agentReady = path.join(data, 'agent-ready')
       await fs.writeFile(agentScript, `const fs=require('node:fs'),http=require('node:http'),calls=[];
         http.createServer(async(req,res)=>{let text='';for await(const part of req)text+=part;const body=JSON.parse(text);
@@ -1401,7 +1415,7 @@ describe('MM commits the original workspace Worker closures', () => {
 
 describe('MM commits the original workspace Root', () => {
   const timeout = process.platform === 'win32' ? 600000 : 120000
-  for (const mode of ['confirmed', 'lost preparation', 'lost publication', 'lost selection', 'late runtime registration']) it('keeps Admin and the original Root outcome: ' + mode, async () => {
+  for (const mode of ['confirmed', 'lost preparation', 'lost publication', 'lost selection', 'lost current verification', 'late runtime registration']) it('keeps Admin and the original Root outcome: ' + mode, async () => {
     const f = await fixture({ actualAgent: true, actualAdmin: true, processLifetimeMs: process.platform === 'win32' ? 900000 : 300000 })
     const locks = require('../../scripts/lib/cli-lock.mjs'), records = await import('../../scripts/lib/workspace-relocation-intent.mjs')
     const lock = await locks.acquireWorkspaceRelocationLock(f.data, f.params.intent_id)
@@ -1409,7 +1423,7 @@ describe('MM commits the original workspace Root', () => {
     let child: ReturnType<typeof spawn> | undefined, dropped = false
     vi.spyOn(f.manager, 'launchWorkspaceRelocationCoordinator').mockImplementation(async (...args: any[]) => {
       child = await launch(...args)
-      const operation = { 'lost preparation': 'prepare_root', 'lost publication': 'publish_root', 'lost selection': 'select_root' }[mode]
+      const operation = { 'lost preparation': 'prepare_root', 'lost publication': 'publish_root', 'lost selection': 'select_root', 'lost current verification': 'verify_selected_root' }[mode]
       if (operation) {
         const emit = child!.emit.bind(child)
         vi.spyOn(child!, 'emit').mockImplementation((event: any, ...args: any[]) => {
@@ -1448,7 +1462,7 @@ describe('MM commits the original workspace Root', () => {
         await expect(f.manager.commitWorkspaceRelocationRoot(f.params, 'fixture-human')).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
       }
       expect(stop).toHaveBeenCalledOnce(); expect(f.manager.commitWorkspaceRelocationRoot(f.params, 'fixture-human')).toBe(first)
-      const selected = mode === 'confirmed' || mode === 'lost selection'
+      const selected = mode === 'confirmed' || mode === 'lost selection' || mode === 'lost current verification'
       expect((await catalog.snapshot()).storage_root).toBe(selected ? path.join(f.root, 'relocated') : before.storage_root)
       expect((await catalog.snapshot()).revision).toBe(before.revision + (selected ? 1 : 0))
       expect(records.readWorkspaceRelocationRootPlan(f.data, f.params.intent_id)).not.toBeNull()

@@ -1,6 +1,6 @@
 // Fixed file preparation policy; no caller-supplied paths or file effects are accepted here.
 import { createWorkspaceJournalClient, serveWorkspaceJournal, journalFields as fields, workspaceJournalFailure as failure } from './workspace-coordinator-journal.mjs'
-import { readWorkspaceRelocationFilePlan, readWorkspaceRelocationFileActors, prepareWorkspaceRelocationFilePlan, prepareWorkspaceRelocationStaging, readWorkspaceRelocationRootPlan, prepareWorkspaceRelocationRootPlan, verifyWorkspaceRelocationClosureReadiness, readWorkspaceRelocationRecoveryCommit, readWorkspaceRelocationRootPublished, readWorkspaceRelocationRootSelected, publishWorkspaceRelocationRoot, selectWorkspaceRelocationRoot } from './workspace-relocation-intent.mjs'
+import { readWorkspaceRelocationFilePlan, readWorkspaceRelocationFileActors, prepareWorkspaceRelocationFilePlan, prepareWorkspaceRelocationStaging, readWorkspaceRelocationRootPlan, prepareWorkspaceRelocationRootPlan, verifyWorkspaceRelocationClosureReadiness, readWorkspaceRelocationRecoveryCommit, readWorkspaceRelocationRootPublished, readWorkspaceRelocationRootSelected, publishWorkspaceRelocationRoot, selectWorkspaceRelocationRoot, verifyWorkspaceRelocationSelectedRoot, readWorkspaceRelocationClosureCommit } from './workspace-relocation-intent.mjs'
 import { launchWorkspaceFileHost, prepareWorkspaceFilesWithHost } from './workspace-file-host.mjs'
 import native from './process-identity.cjs'
 import { sha256CanonicalJson } from '../../crabot-shared/dist/canonical-json.js'
@@ -81,6 +81,18 @@ export function createWorkspaceFileJournal(coordinator, context) {
         return result
       } catch { transport.close(); throw failure() }
     },
+    async verifySelectedRoot() {
+      try {
+        const result = await transport.call('verify_selected_root', {})
+        const selected = readWorkspaceRelocationRootSelected(context.dataDir, context.id)
+        const worker = readWorkspaceRelocationClosureCommit(context.dataDir, context.id), recovery = readWorkspaceRelocationRecoveryCommit(context.dataDir, context.id)
+        if (!selected || !worker || !recovery || !fields(result, ['selected_sha256', 'worker_commit_sha256', 'recovery_commit_sha256'])
+          || result.selected_sha256 !== sha256CanonicalJson(selected) || result.worker_commit_sha256 !== sha256CanonicalJson(worker)
+          || result.recovery_commit_sha256 !== sha256CanonicalJson(recovery)) throw failure()
+        transport.verify()
+        return result
+      } catch { transport.close(); throw failure() }
+    },
     close: transport.close,
   })
 }
@@ -89,6 +101,10 @@ export function serveWorkspaceFileJournal(context) {
   let hostPreparation, filePreparation, rootPreparation, rootPublication, rootSelection, host
   const disconnectHost = child => { if (child?.connected) { try { child.disconnect() } catch {} } }
   const transport = serveWorkspaceJournal(context, 'file', {
+    async verify_selected_root(payload) {
+      if (!fields(payload, [])) throw failure()
+      return verifyWorkspaceRelocationSelectedRoot({ dataDir: context.dataDir, id: context.id, signal: controller.signal })
+    },
     async publish_root(payload) {
       if (!fields(payload, []) || !readWorkspaceRelocationRootPlan(context.dataDir, context.id)) throw failure()
       const previous = rootPublication

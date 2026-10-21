@@ -157,3 +157,28 @@ for (const mode of ['publish', 'lost acknowledgement', 'existing target', 'known
   assert.equal(fs.existsSync(tree), false)
   assert.equal((await publication.publishWorkspaceParents({ plan, verify: async () => {} })).dispatch, 'observe')
 })
+
+
+for (const empty of [false, true]) test('read-only published Root inspection never completes an unpublished move: empty=' + empty, async t => {
+  const f = fixture(t, empty)
+  assert.throws(() => publication.inspectPublishedWorkspaceRoot({ plan: f.plan }), { code: 'WORKSPACE_ROOT_PUBLISH_UNVERIFIED' })
+  assert.equal(fs.existsSync(f.tree), true); assert.equal(fs.existsSync(f.target), empty)
+  assert.equal(fs.existsSync(f.hold), false)
+  const published = await publishWorkspaceRoot({ plan: f.plan, verify: async () => {} })
+  const move = t.mock.method(native, 'renameDirectoryNoReplace', () => { throw new Error('read-only inspection attempted a move') })
+  try {
+    assert.deepEqual(publication.inspectPublishedWorkspaceRoot({ plan: f.plan }), published.target)
+    const probe = path.join(f.target, '.health-probe'); fs.writeFileSync(probe, 'owned probe'); fs.unlinkSync(probe)
+    assert.deepEqual(publication.inspectPublishedWorkspaceRoot({ plan: f.plan }), published.target)
+    assert.equal(move.mock.callCount(), 0)
+  } finally { move.mock.restore() }
+})
+for (const change of ['replacement', 'unexpected source', 'hold content', 'container content']) test('read-only Root inspection rejects changed publication positions: ' + change, async t => {
+  const f = fixture(t, true); await publishWorkspaceRoot({ plan: f.plan, verify: async () => {} })
+  if (change === 'replacement') { fs.renameSync(f.target, f.target + '-kept'); fs.mkdirSync(f.target) }
+  if (change === 'unexpected source') fs.mkdirSync(f.tree)
+  if (change === 'hold content') fs.writeFileSync(path.join(f.hold, 'keep'), 'user content retained')
+  if (change === 'container content') fs.writeFileSync(path.join(f.container, 'keep'), 'user content retained')
+  assert.throws(() => publication.inspectPublishedWorkspaceRoot({ plan: f.plan }), { code: 'WORKSPACE_ROOT_PUBLISH_UNVERIFIED' })
+  if (change.endsWith('content')) assert.equal(fs.readFileSync(path.join(change === 'hold content' ? f.hold : f.container, 'keep'), 'utf8'), 'user content retained')
+})

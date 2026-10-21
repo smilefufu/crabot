@@ -1568,7 +1568,8 @@ export class ModuleManager {
     const pending = Promise.resolve().then(async (): Promise<WorkspaceRootSelectionResult> => {
       let child: ChildProcess | undefined
       let files: { prepareRoot(): Promise<{ plan_sha256: string }>; publishRoot(): Promise<{ published_sha256: string }>;
-        selectRoot(): Promise<{ selected_sha256: string }>; close(): void } | undefined
+        selectRoot(): Promise<{ selected_sha256: string }>;
+        verifySelectedRoot(): Promise<{ selected_sha256: string; worker_commit_sha256: string; recovery_commit_sha256: string }>; close(): void } | undefined
       try {
         const closed = await this.commitWorkspaceRelocationWorkers(request, bearer)
         child = closed.coordinator
@@ -1590,6 +1591,10 @@ export class ModuleManager {
         const snapshot = await new WorkspaceCatalog({ dataRoot: this.dataDir, files: require('../../scripts/lib/process-identity.cjs') }).snapshot()
         await verifyStopped()
         if (sha256CanonicalJson(snapshot) !== records.readWorkspaceRelocationRootSelected(this.dataDir, request.intent_id).catalog_sha256) throw failure()
+        const current = await files!.verifySelectedRoot()
+        await verifyStopped()
+        if (current.selected_sha256 !== selected.selected_sha256 || current.worker_commit_sha256 !== closed.closure_commit_sha256
+          || current.recovery_commit_sha256 !== closed.recovery_commit_sha256) throw failure()
         return Object.freeze({ ...closed, root_plan_sha256: plan.plan_sha256, root_published_sha256: published.published_sha256, root_selected_sha256: selected.selected_sha256 })
       } catch {
         await this.closeWorkspaceCoordinatorChannel(child)

@@ -41,6 +41,21 @@ export function validateWorkspaceParentsPublicationPlan(plan) {
   if (plan.empty_target !== null) throw failure()
 }
 
+// Position facts only: this never publishes, syncs, repairs or grants authority.
+export function inspectPublishedWorkspaceRoot({ plan: input }) {
+  const plan = structuredClone(input)
+  validateWorkspaceRootPublicationPlan(plan)
+  if (!matches(plan.container, observe(plan.container.path)) || !matches(plan.target_parent, observe(plan.target_parent.path))
+    || fs.readdirSync(plan.container.path).length || observe(plan.tree.path)) throw failure()
+  const target = observe(plan.target), hold = path.join(plan.target_parent.path, '.crabot-workspace-empty-' + plan.intent_id)
+  if (!matches(plan.tree, target, plan.target)) throw failure()
+  const retained = observe(hold)
+  if (plan.empty_target === null) {
+    if (retained !== null) throw failure()
+  } else if (!matches(plan.empty_target, retained, hold) || fs.readdirSync(hold).length) throw failure()
+  return target
+}
+
 // Directory effects only; each owner retains its fixed plan, content checks and original job authority.
 async function publishDirectory(plan, verify, signal) {
   if (typeof verify !== 'function') throw failure()

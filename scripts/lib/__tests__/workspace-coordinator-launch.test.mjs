@@ -792,6 +792,46 @@ for (const mode of ['confirmed', 'lost acknowledgement', 'changed source', 'copy
               assert.equal(fs.existsSync(f.before.storage_root), false)
               assert.equal(workspaceMaintenancePending(f.data), true)
               if (mode === 'Root publish') {
+                const verifySelected = async () => {
+                  const journal = createWorkspaceFileJournal(child, context)
+                  try { return await journal.verifySelectedRoot() } finally { journal.close() }
+                }
+                const expectedProof = { selected_sha256: selected.selected_sha256, worker_commit_sha256: closedEvidence.worker_commit_sha256,
+                  recovery_commit_sha256: closedEvidence.recovery_commit_sha256 }
+                assert.deepEqual(await verifySelected(), expectedProof)
+                await assert.rejects(rootRecords.verifyWorkspaceRelocationSelectedRoot({ dataDir: f.data, id: f.id }))
+                const invalid = createWorkspaceJournalClient(child, context, 'file')
+                try { await assert.rejects(invalid.call('verify_selected_root', { directory: f.root })) } finally { invalid.close() }
+                const probe = path.join(f.target, '.owned-health-probe')
+                fs.writeFileSync(probe, 'finite probe'); fs.unlinkSync(probe)
+                assert.deepEqual(await verifySelected(), expectedProof)
+                const catalogPath = path.join(control, 'catalog.json'), catalogBytes = fs.readFileSync(catalogPath)
+                try {
+                  const changed = JSON.parse(catalogBytes); changed.revision++
+                  fs.writeFileSync(catalogPath, JSON.stringify(changed))
+                  await assert.rejects(verifySelected())
+                } finally { fs.writeFileSync(catalogPath, catalogBytes) }
+                assert.deepEqual(await verifySelected(), expectedProof)
+                const retainedSelectedRoot = f.target + '-health-kept'
+                fs.renameSync(f.target, retainedSelectedRoot)
+                try { fs.mkdirSync(f.target); await assert.rejects(verifySelected()) }
+                finally { fs.rmdirSync(f.target); fs.renameSync(retainedSelectedRoot, f.target) }
+                assert.deepEqual(await verifySelected(), expectedProof)
+                const emit = child.emit; let changedWhileAwaiting = false
+                const alterSelectedDuringReply = t.mock.method(child, 'emit', function(event, ...args) {
+                  if (!changedWhileAwaiting && event === 'message' && args[0]?.kind === 'workspace_file_journal_reply'
+                    && args[0].operation === 'verify_selected_root' && args[0].ok === true) {
+                    changedWhileAwaiting = true
+                    fs.writeFileSync(selectedFile, JSON.stringify({ ...JSON.parse(selectedBytes), catalog_revision: -1 }))
+                  }
+                  return emit.call(this, event, ...args)
+                })
+                try { await assert.rejects(verifySelected()); assert.equal(changedWhileAwaiting, true) }
+                finally { alterSelectedDuringReply.mock.restore(); fs.writeFileSync(selectedFile, selectedBytes) }
+                assert.deepEqual(await verifySelected(), expectedProof)
+                assert.deepEqual(fs.readFileSync(selectedFile), selectedBytes)
+                assert.deepEqual(fs.readFileSync(f.ledgerFile), closedBytes)
+                assert.deepEqual(fs.readFileSync(retirementFile), retirementBytes)
                 let privateReads = 0
                 const originalRead = fs.readFileSync
                 const countReads = t.mock.method(fs, 'readFileSync', function(file, ...args) {

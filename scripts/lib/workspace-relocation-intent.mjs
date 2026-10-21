@@ -8,7 +8,7 @@ import management from './desktop-management.cjs'
 import knownProcessExit from './known-process-exit.cjs'
 import { cliLockToken } from './cli-lock.mjs'
 import { sha256CanonicalJson } from '../../crabot-shared/dist/canonical-json.js'
-import { publishWorkspaceRoot, validateWorkspaceRootPublicationPlan, publishWorkspaceParents, validateWorkspaceParentsPublicationPlan } from './workspace-root-publish.mjs'
+import { publishWorkspaceRoot, inspectPublishedWorkspaceRoot, validateWorkspaceRootPublicationPlan, publishWorkspaceParents, validateWorkspaceParentsPublicationPlan } from './workspace-root-publish.mjs'
 import { WorkspaceCatalog, WorkspaceError, projectWorkspaceCatalogRelocation } from '../../crabot-shared/dist/workspace-catalog.js'
 import { inspectWorkspaceRelocationTarget } from '../../crabot-shared/dist/workspace-relocation-target.js'
 const uuid = value => typeof value === 'string' && /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(value)
@@ -1698,6 +1698,31 @@ export async function selectWorkspaceRelocationRoot({ dataDir, id, signal }) {
   if (sha256CanonicalJson(await catalog.snapshot()) !== plan.catalog_after_sha256
     || sha256CanonicalJson(readWorkspaceRelocationRootSelected(dataDir, id)) !== sha256CanonicalJson(record)) fail()
   return { dispatch: 'dispatch', selected_sha256: sha256CanonicalJson(record) }
+}
+
+
+/** Fresh facts under the original coordinator lock; no execution or maintenance-release authority. */
+export async function verifyWorkspaceRelocationSelectedRoot({ dataDir, id, signal }) {
+  const root = workspaceRootContext(dataDir, id, signal)
+  const selected = readWorkspaceRelocationRootSelected(dataDir, id), published = readWorkspaceRelocationRootPublished(dataDir, id)
+  if (!selected || !published) fail()
+  const selectedHash = sha256CanonicalJson(selected), publishedHash = sha256CanonicalJson(published)
+  const verify = () => {
+    root.verify()
+    if (sha256CanonicalJson(readWorkspaceRelocationRootSelected(dataDir, id)) !== selectedHash
+      || sha256CanonicalJson(readWorkspaceRelocationRootPublished(dataDir, id)) !== publishedHash
+      || sha256CanonicalJson(inspectPublishedWorkspaceRoot({ plan: root.plan.publication })) !== sha256CanonicalJson(published.target)) fail()
+  }
+  verify()
+  const agent = await import('../../crabot-agent/dist/core/workspace-relocation-closed-evidence.js')
+  verify()
+  const closures = await agent.inspectWorkspaceRelocationClosures({ dataDir, id, signal, verify: async () => verify() })
+  verify(); closures.verify()
+  const catalog = new WorkspaceCatalog({ dataRoot: root.ctx.dataRoot, storageRoot: process.env.WORKER_WORKSPACES_DIR, files: native })
+  const snapshot = await catalog.snapshot()
+  verify(); closures.verify()
+  if (sha256CanonicalJson(snapshot) !== selected.catalog_sha256) fail()
+  return { selected_sha256: selectedHash, worker_commit_sha256: closures.worker_commit_sha256, recovery_commit_sha256: closures.recovery_commit_sha256 }
 }
 
 
