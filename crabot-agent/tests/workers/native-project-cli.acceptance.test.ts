@@ -233,7 +233,9 @@ it.skipIf(!process.env.CRABOT_TEST_CODEX_BIN)('real Codex historical child query
   expect(adapter.capabilities().subagent).toBe(true)
   const reconstruct = vi.spyOn(adapter as any, 'ensureRuntime').mockRejectedValue(new Error('closed parent must never be reconstructed'))
   try {
-    expect(await adapter.listSubagents({ worker_id: worker, incarnation_id: 'original-incarnation', seq: 1, impl: 'codex', session_ref: session })).toEqual([])
+    for (let attempt = 0; attempt < (process.platform === 'win32' ? 8 : 1); attempt++) {
+      expect(await adapter.listSubagents({ worker_id: worker, incarnation_id: 'original-incarnation', seq: 1, impl: 'codex', session_ref: session })).toEqual([])
+    }
     expect(reconstruct).not.toHaveBeenCalled(); expect((adapter as any).runtimes.size).toBe(0)
     expect(modelRequests).toBe(0); await expect(fs.stat(marker)).rejects.toMatchObject({ code: 'ENOENT' })
     expect(await fs.readFile(metaFile, 'utf8')).toBe(meta)
