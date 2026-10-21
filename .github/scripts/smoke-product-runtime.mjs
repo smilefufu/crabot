@@ -68,6 +68,24 @@ try {
   assert.equal(background, '73')
   report.background_shell = true
 
+  // Exercise the app-server consumer through the actual packaged shell, not just Bash --version.
+  const queryFixture = join(data, 'codex-query-fixture.mjs'), queryCalls = join(data, 'codex-query-calls.jsonl')
+  await fs.writeFile(queryFixture, `import readline from 'node:readline';import{appendFileSync}from'node:fs';
+    readline.createInterface({input:process.stdin}).on('line',line=>{const request=JSON.parse(line);
+      appendFileSync(${JSON.stringify(queryCalls)},JSON.stringify(request.method)+'\\n');
+      if(request.method==='initialized')return;
+      const result=request.method==='initialize'?{userAgent:'offline-query-fixture',codexHome:process.cwd()}:request.method==='thread/list'?{data:[],nextCursor:null}:null;
+      process.stdout.write(JSON.stringify(result?{id:request.id,result}:{id:request.id,error:{code:-32601,message:'query-only fixture'}})+'\\n');
+    });`)
+  const shellQuote = value => "'" + (process.platform === 'win32' ? value.replaceAll('\\', '/') : value).replaceAll("'", "'\\''") + "'"
+  const queryScript = `import{CodexAppServerClient}from ${JSON.stringify(pathToFileURL(join(root, 'crabot-agent/dist/workers/codex/app-server-client.js')).href)};
+    const client=new CodexAppServerClient({command:${JSON.stringify(shellQuote(runtime.executables.node) + ' ' + shellQuote(queryFixture) + ' app-server --stdio')},cwd:${JSON.stringify(data)},env:{PATH:process.env.PATH,CODEX_HOME:${JSON.stringify(data)}}});
+    try{const deadline=new Date(Date.now()+10000).toISOString();await client.initialize(deadline);await client.listThreads({limit:1},deadline);}finally{if(!await client.terminate())throw new Error('query fixture process did not exit');}
+    console.log('packaged-query-shell-ok');`
+  assert.equal(await run(runtime.executables.node, ['--input-type=module', '-e', queryScript]), 'packaged-query-shell-ok')
+  assert.deepEqual((await fs.readFile(queryCalls, 'utf8')).trim().split('\n').map(line => JSON.parse(line)), ['initialize', 'initialized', 'thread/list'])
+  report.codex_query_shell = true
+
   // The core resolves its own interpreter even when a task environment has another PATH.
   Object.assign(process.env, env)
   const resolver = require(join(root, 'crabot-core/dist/executable-resolver.js'))

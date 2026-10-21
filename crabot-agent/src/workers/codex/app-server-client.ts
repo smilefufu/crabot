@@ -2,6 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { captureHeadlessNativeProcesses } from '../headless-native-processes.js'
 import type { WorkerProcessObservation } from '../types.js'
 import { buildScrubbedChildEnv } from '../connections/secret-env.js'
+import { resolveBashPath, BASH_NOT_FOUND_MESSAGE } from '../../utils/resolve-bash-path.js'
 
 type JsonObject = Record<string, unknown>
 
@@ -106,10 +107,12 @@ export class CodexAppServerClient {
     readonly cwd: string
     readonly env: Record<string, string>
   }) {
+    const shell = process.env.CRABOT_PRODUCT_ROOT || process.platform === 'win32' ? resolveBashPath() : '/bin/sh'
+    if (!shell) throw new Error(BASH_NOT_FOUND_MESSAGE)
     this.exitedPromise = new Promise((resolve) => {
       this.resolveExited = resolve
     })
-    this.child = spawn('/bin/sh', ['-c', opts.command], {
+    this.child = spawn(shell, ['-c', opts.command], {
       cwd: opts.cwd,
       env: { ...buildScrubbedChildEnv(), ...opts.env },
       detached: true,
@@ -388,8 +391,9 @@ export async function probeCodexAppServerFork(opts: {
   readonly timeoutMs?: number
 }): Promise<boolean> {
   const deadlineAt = new Date(Date.now() + (opts.timeoutMs ?? 3000)).toISOString()
-  const client = new CodexAppServerClient(opts)
+  let client: CodexAppServerClient | undefined
   try {
+    client = new CodexAppServerClient(opts)
     await client.initialize(deadlineAt)
     const [fork, turn] = await Promise.allSettled([
       client.request('thread/fork', {
@@ -407,7 +411,7 @@ export async function probeCodexAppServerFork(opts: {
   } catch {
     return false
   } finally {
-    await client.terminate()
+    await client?.terminate()
   }
 }
 
@@ -418,14 +422,15 @@ export async function probeCodexAppServerSubagents(opts: {
   readonly timeoutMs?: number
 }): Promise<boolean> {
   const deadlineAt = new Date(Date.now() + (opts.timeoutMs ?? 3000)).toISOString()
-  const client = new CodexAppServerClient(opts)
+  let client: CodexAppServerClient | undefined
   try {
+    client = new CodexAppServerClient(opts)
     await client.initialize(deadlineAt)
     await client.listThreads({ parentThreadId: '00000000-0000-0000-0000-000000000001', limit: 1 }, deadlineAt)
     return true
   } catch {
     return false
   } finally {
-    await client.terminate()
+    await client?.terminate()
   }
 }
