@@ -22,6 +22,10 @@ public static class CrabotWorkspaceSecurityProbe {
     [DllImport("advapi32.dll")] static extern uint GetSecurityDescriptorLength(IntPtr descriptor);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true, ExactSpelling = true)]
     static extern SafeFileHandle CreateFileW(string path, uint access, uint share, IntPtr security, uint disposition, uint flags, IntPtr template);
+    [StructLayout(LayoutKind.Sequential)]
+    struct SecurityAttributes { public int length; public IntPtr descriptor; public int inherit; }
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true, ExactSpelling = true, EntryPoint = "CreateFileW")]
+    static extern SafeFileHandle CreateNewFile(string path, uint access, uint share, ref SecurityAttributes security, uint disposition, uint flags, IntPtr template);
     [DllImport("kernel32.dll", SetLastError = true)]
     static extern bool BackupWrite(SafeFileHandle file, byte[] bytes, uint length, out uint written, bool abort, bool security, ref IntPtr context);
     static uint RestoreSecurityStream(string target, IntPtr descriptor) {
@@ -67,6 +71,12 @@ public static class CrabotWorkspaceSecurityProbe {
         try {
             ushort control; uint revision;
             Check(GetSecurityDescriptorControl(descriptor, out control, out revision));
+            if (mode == "explicit-create") {
+                var attributes = new SecurityAttributes { length = Marshal.SizeOf(typeof(SecurityAttributes)), descriptor = descriptor, inherit = 0 };
+                using (var file = CreateNewFile(target, 0x40000000, 3, ref attributes, 1, 0x2200080, IntPtr.Zero)) {
+                    return file.IsInvalid ? (uint)Marshal.GetLastWin32Error() : 0u;
+                }
+            }
             if (mode == "backup-security-stream") return RestoreSecurityStream(target, descriptor);
             if (mode == "modern-direct") return SetNamedSecurityInfoW(target, 1, 4, IntPtr.Zero, IntPtr.Zero, dacl, IntPtr.Zero);
             if (mode == "modern-protected-then-original") {
@@ -88,15 +98,22 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Cannot prepare owned security probe' }
     @{ evidence_only = $true; source_filesystem = ([IO.DriveInfo]::new([IO.Path]::GetPathRoot($source))).DriveFormat; target_filesystem = ([IO.DriveInfo]::new([IO.Path]::GetPathRoot($targets))).DriveFormat; elevated = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) } | ConvertTo-Json -Compress
     $original = [CrabotWorkspaceSecurityProbe]::Observe([IO.Path]::Combine($source, 'original.txt'))
-    foreach ($mode in @('query-dacl-only', 'query-full', 'request-matches-source', 'modern-direct', 'modern-protected-then-original', 'protected-flag-then-original', 'backup-security-stream')) {
+    foreach ($mode in @('query-dacl-only', 'query-full', 'request-matches-source', 'modern-direct', 'modern-protected-then-original', 'protected-flag-then-original', 'backup-security-stream', 'explicit-create')) {
         $target = [IO.Path]::Combine($targets, $mode)
         & node -e "require('./scripts/lib/process-identity.cjs').createPrivateDirectory(process.argv[1])" $target
         if ($LASTEXITCODE -ne 0) { throw 'Cannot create private security probe target' }
-        & "$env:SystemRoot\System32\robocopy.exe" $source $target /E /COPY:DATS /DCOPY:DATE /SL /SJ /R:0 /W:0 /NFL /NDL /NJH /NJS /NP | Out-Null
-        if ($LASTEXITCODE -gt 7) { throw 'Cannot copy finite security probe' }
         $file = [IO.Path]::Combine($target, 'original.txt')
-        $before = [CrabotWorkspaceSecurityProbe]::Observe($file)
+        $before = $null
+        if ($mode -ne 'explicit-create') {
+            & "$env:SystemRoot\System32\robocopy.exe" $source $target /E /COPY:DATS /DCOPY:DATE /SL /SJ /R:0 /W:0 /NFL /NDL /NJH /NJS /NP | Out-Null
+            if ($LASTEXITCODE -gt 7) { throw 'Cannot copy finite security probe' }
+            $before = [CrabotWorkspaceSecurityProbe]::Observe($file)
+        }
         $errorCode = [CrabotWorkspaceSecurityProbe]::Apply([IO.Path]::Combine($source, 'original.txt'), $file, $mode)
+        if ($mode -eq 'explicit-create') {
+            if ($errorCode -ne 0) { throw "Cannot create finite explicit descriptor file: $errorCode" }
+            [IO.File]::WriteAllText($file, 'finite original bytes')
+        }
         $after = [CrabotWorkspaceSecurityProbe]::Observe($file)
         if ([IO.File]::ReadAllText($file) -ne 'finite original bytes') { throw 'Probe target content changed' }
         @{ evidence_only = $true; mode = $mode; error_code = $errorCode; source = $original; before = $before; after = $after } | ConvertTo-Json -Depth 4 -Compress
