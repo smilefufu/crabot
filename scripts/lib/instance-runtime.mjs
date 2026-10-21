@@ -1,4 +1,4 @@
-import { writeFileSync, renameSync, unlinkSync, realpathSync, mkdirSync } from 'node:fs'
+import { writeFileSync, readFileSync, renameSync, unlinkSync, realpathSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import identity from './process-identity.cjs'
@@ -12,9 +12,23 @@ export const readInstanceRuntime = runtimeRecord.readInstanceRuntime
 
 function save(dataDir, record) {
   const file = join(dataDir, filename), pending = file + '.tmp-' + randomUUID()
+  const read = () => {
+    try { return readFileSync(file) } catch (error) { if (error.code === 'ENOENT') return null; throw error }
+  }
+  const original = read(), deadline = Date.now() + 500
   try {
     writeFileSync(pending, JSON.stringify(record) + '\n', { flag: 'wx', mode: 0o600 })
-    renameSync(pending, file)
+    for (;;) {
+      try { renameSync(pending, file); break }
+      catch (error) {
+        if (process.platform !== 'win32' || !['EPERM', 'EACCES', 'EBUSY'].includes(error.code) || Date.now() >= deadline) throw error
+        // Keep the old record continuously readable; never unlink it to bypass sharing locks.
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Math.min(20, deadline - Date.now()))
+        const current = read()
+        if (original === null ? current !== null : current === null || !original.equals(current)) fail('启动记录已改变；未覆盖现有代际。')
+        if (Date.now() >= deadline) throw error
+      }
+    }
   } finally { try { unlinkSync(pending) } catch {} }
 }
 

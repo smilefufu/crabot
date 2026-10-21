@@ -56,6 +56,7 @@ on:
       - 'scripts/lib/__tests__/workspace-*'
       - 'scripts/lib/__tests__/directory-*.test.mjs'
       - 'scripts/lib/__tests__/instance-runtime.test.mjs'
+      - 'scripts/lib/__tests__/instance-runtime-write.test.mjs'
       - 'scripts/lib/instance-*.mjs'
       - 'scripts/lib/managed-core.mjs'
       - 'scripts/workspace-copy-host.mjs'
@@ -106,6 +107,8 @@ jobs:
         run: node node_modules/vitest/vitest.mjs run tests/manager/conversation-request-runner.test.ts --testNamePattern='retains a migrated old request' --maxWorkers=1 --minWorkers=1
       - name: Native private ACL and path regressions
         run: node --test scripts/lib/__tests__/private-file-paths.test.mjs
+      - name: Atomic instance registration failure regressions
+        run: node --test scripts/lib/__tests__/instance-runtime-write.test.mjs
       - name: Windows delayed instance registration regression
         if: runner.os == 'Windows'
         run: |
