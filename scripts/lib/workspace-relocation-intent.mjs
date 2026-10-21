@@ -14,6 +14,54 @@ import { inspectWorkspaceRelocationTarget } from '../../crabot-shared/dist/works
 const uuid = value => typeof value === 'string' && /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(value)
 const absolute = value => typeof value === 'string' && path.isAbsolute(value) && !value.includes('\0')
 const fail = (code = 'WORKSPACE_RELOCATION_INVALID') => { throw Object.assign(new Error('工作目录迁移记录无法核验或操作冲突，原目录和维护保护已保留。'), { code }) }
+
+// One synchronous historical graph only. No live role/exit check or asynchronous
+// operation may reuse this frame; every returned graph rechecks its actual inputs.
+let recordObservation = null
+const observedVersion = stat => [stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs, stat.mode, stat.uid, stat.gid, stat.nlink].join(':')
+function observeRecordPath(file, kind, stat) {
+  if (!recordObservation) return
+  if (!stat) kind = 'missing'
+  const version = stat ? observedVersion(stat) : null, previous = recordObservation.paths.get(file)
+  if (previous && (previous.kind !== kind || previous.version !== version)) fail()
+  recordObservation.paths.set(file, { kind, version })
+}
+function verifyRecordObservation(frame) {
+  for (const [file, observed] of frame.paths) {
+    let stat
+    try { stat = fs.lstatSync(file, { bigint: true }) }
+    catch (error) { if (error.code !== 'ENOENT' || observed.version !== null) fail(); continue }
+    if (observed.version === null || observedVersion(stat) !== observed.version || stat.isSymbolicLink()) fail()
+    if (observed.kind === 'data') {
+      if (management.requirePrivateDataRoot(file) !== file) fail()
+    } else {
+      const directory = observed.kind === 'directory'
+      if (directory ? !stat.isDirectory() : !stat.isFile() || stat.nlink !== 1n) fail()
+      let privatePath
+      if (process.platform === 'win32') privatePath = directory ? native.isPrivateDirectory(file) : native.isPrivateFile(file)
+      else privatePath = stat.uid === BigInt(process.getuid()) && (stat.mode & 0o777n) === (directory ? 0o700n : 0o600n)
+      if (!privatePath) fail()
+    }
+    if (observedVersion(fs.lstatSync(file, { bigint: true })) !== observed.version) fail()
+  }
+}
+function recordGraphReader(reader) {
+  return function(dataDir, id) {
+    const outer = recordObservation === null
+    const frame = recordObservation ?? { values: new Map(), paths: new Map() }
+    if (outer) recordObservation = frame
+    try {
+      let values = frame.values.get(reader)
+      if (!values) { values = new Map(); frame.values.set(reader, values) }
+      const key = JSON.stringify([dataDir, id])
+      if (values.has(key)) return values.get(key)
+      const result = reader(dataDir, id)
+      values.set(key, result)
+      if (outer) verifyRecordObservation(frame)
+      return result
+    } finally { if (outer) recordObservation = null }
+  }
+}
 const identity = directory => {
   try {
     const stat = fs.lstatSync(directory, { bigint: true })
@@ -26,19 +74,32 @@ const validIdentity = value => value && Object.keys(value).length === 3 && absol
   && typeof value.dev === 'string' && /^(?:0|[1-9][0-9]*)$/.test(value.dev) && typeof value.ino === 'string' && /^[1-9][0-9]*$/.test(value.ino)
 function context(dataDir, locked = false) {
   const dataRoot = management.requirePrivateDataRoot(dataDir)
+  if (recordObservation) observeRecordPath(dataRoot, 'data', fs.lstatSync(dataRoot, { bigint: true }))
   if (locked && !cliLockToken(path.join(dataRoot, 'cli.lock'))) fail()
   return { dataRoot, control: path.join(dataRoot, 'workspace-control'), file: path.join(dataRoot, 'workspace-control/relocation.json') }
 }
 function privateControl(control) {
   let stat
-  try { stat = fs.lstatSync(control) } catch (error) { if (error.code === 'ENOENT') return false; fail() }
+  try { stat = fs.lstatSync(control) }
+  catch (error) {
+    if (error.code !== 'ENOENT') fail()
+    observeRecordPath(control, 'directory')
+    return false
+  }
   if (!stat.isDirectory() || stat.isSymbolicLink() || (process.platform === 'win32' ? !native.isPrivateDirectory(control)
     : stat.uid !== process.getuid() || (stat.mode & 0o777) !== 0o700)) fail()
+  if (recordObservation) observeRecordPath(control, 'directory', fs.lstatSync(control, { bigint: true }))
   return true
 }
 function readPrivateText(file, limit) {
   let before
-  try { before = fs.lstatSync(file, { bigint: true }) } catch (error) { if (error.code === 'ENOENT') return undefined; fail() }
+  try { before = fs.lstatSync(file, { bigint: true }) }
+  catch (error) {
+    if (error.code !== 'ENOENT') fail()
+    observeRecordPath(file, 'file')
+    return undefined
+  }
+  observeRecordPath(file, 'file', before)
   let fd
   try {
     if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1n || before.size > BigInt(limit)) fail()
@@ -85,7 +146,7 @@ function syncDirectory(directory) {
   try { fs.fsyncSync(fd) } finally { fs.closeSync(fd) }
 }
 function syncIntent(ctx) { syncDirectory(ctx.control); syncDirectory(ctx.dataRoot) }
-export function readWorkspaceRelocationIntent(dataDir) { return read(context(dataDir)) }
+export const readWorkspaceRelocationIntent = recordGraphReader(function readWorkspaceRelocationIntent(dataDir) { return read(context(dataDir)) })
 
 export async function beginWorkspaceRelocationIntent(options) {
   const ctx = context(options.dataDir, true), operationToken = cliLockToken(path.join(ctx.dataRoot, 'cli.lock'))
@@ -197,11 +258,11 @@ function readScope(ctx, intent) {
     return value
   } catch { fail() }
 }
-export function readWorkspaceRelocationWorkers(dataDir, id) {
+export const readWorkspaceRelocationWorkers = recordGraphReader(function readWorkspaceRelocationWorkers(dataDir, id) {
   const ctx = context(dataDir), intent = read(ctx)
   if (!intent || intent.id !== id) fail()
   return readScope(ctx, intent)
-}
+})
 export function commitWorkspaceRelocationWorkers({ dataDir, id, workers }) {
   const ctx = context(dataDir, true), intent = read(ctx)
   if (!intent || intent.id !== id || !validWorkers(workers)) fail()
@@ -266,12 +327,12 @@ function readStopSubmission(ctx, attempt, scope) {
     || sha256CanonicalJson(value.results) !== sha256CanonicalJson(stopResults(scope, value.results))) fail()
   return value
 }
-export function readWorkspaceRelocationStops(dataDir, id) {
+export const readWorkspaceRelocationStops = recordGraphReader(function readWorkspaceRelocationStops(dataDir, id) {
   const { ctx, intent, scope } = stoppingContext(dataDir, id), attempt = readStopAttempt(ctx, intent, scope)
   const submission = readStopSubmission(ctx, attempt, scope)
   if (sha256CanonicalJson(readScope(ctx, read(ctx))) !== sha256CanonicalJson(scope)) fail()
   return { attempt, submission }
-}
+})
 export function prepareWorkspaceRelocationStops({ dataDir, id, workers }) {
   const { ctx, intent, scope } = stoppingContext(dataDir, id, true)
   if (sha256CanonicalJson(workers) !== sha256CanonicalJson(scope.workers)) fail()
@@ -322,7 +383,7 @@ function validProcesses(processes) {
   return true
 }
 /** First pre-stop observation only; this never proves global ownership or execution exit. */
-export function readWorkspaceRelocationProcesses(dataDir, id) {
+export const readWorkspaceRelocationProcesses = recordGraphReader(function readWorkspaceRelocationProcesses(dataDir, id) {
   const { ctx, intent, scope } = stoppingContext(dataDir, id)
   const value = readPrivateJson(path.join(ctx.control, 'relocation-worker-processes.json'), scopeLimit)
   if (value === undefined) { absent(ctx, [processStopFile, executionExitFile, filePlanFile, fileActorsFile]); return null }
@@ -331,7 +392,7 @@ export function readWorkspaceRelocationProcesses(dataDir, id) {
     || value.workers_sha256 !== sha256CanonicalJson(scope) || !validProcesses(value.processes) || !validDate(value.created_at)
     || sha256CanonicalJson(readWorkspaceRelocationWorkers(dataDir, id)) !== value.workers_sha256) fail()
   return value
-}
+})
 export function commitWorkspaceRelocationProcesses({ dataDir, id, processes }) {
   const { ctx, intent, scope } = stoppingContext(dataDir, id, true)
   if (!validProcesses(processes)) fail()
@@ -374,7 +435,7 @@ function validModules(modules) {
 function absent(ctx, names) {
   for (const name of [...names, closurePlanFile, closureCommitsDirectory, recoveryPlanFile, recoveryCommitFile, rootPlanFile, rootPublishedFile, rootSelectedFile, rootParentsFile, rootParentsCompleteFile]) {
     try { fs.lstatSync(path.join(ctx.control, name)); fail() }
-    catch (error) { if (error.code !== 'ENOENT') fail() }
+    catch (error) { if (error.code !== 'ENOENT') fail(); observeRecordPath(path.join(ctx.control, name), 'missing') }
   }
 }
 function readModules(ctx, intent, workers) {
@@ -385,10 +446,10 @@ function readModules(ctx, intent, workers) {
     || !validModules(value.modules) || !validDate(value.created_at)) fail()
   return value
 }
-export function readWorkspaceRelocationModules(dataDir, id) {
+export const readWorkspaceRelocationModules = recordGraphReader(function readWorkspaceRelocationModules(dataDir, id) {
   const { ctx, intent, scope } = stoppingContext(dataDir, id)
   return readModules(ctx, intent, scope)
-}
+})
 export function commitWorkspaceRelocationModules({ dataDir, id, modules }) {
   const { ctx, intent, scope } = stoppingContext(dataDir, id, true)
   if (!validModules(modules)) fail()
@@ -475,12 +536,12 @@ function readModuleSubmission(ctx, attempt, modules, observations) {
     || sha256CanonicalJson(value.results) !== sha256CanonicalJson(moduleStopResults(modules, value.results, prefix))) fail()
   return value
 }
-export function readWorkspaceRelocationModuleStops(dataDir, id) {
+export const readWorkspaceRelocationModuleStops = recordGraphReader(function readWorkspaceRelocationModuleStops(dataDir, id) {
   const { ctx, modules } = moduleStoppingContext(dataDir, id), attempt = readModuleAttempt(ctx, modules)
   const observations = readModuleObservations(ctx, attempt, modules), submission = readModuleSubmission(ctx, attempt, modules, observations)
   if (sha256CanonicalJson(readWorkspaceRelocationModules(dataDir, id)) !== sha256CanonicalJson(modules)) fail()
   return { attempt, observations, submission }
-}
+})
 export function prepareWorkspaceRelocationModuleStops({ dataDir, id, modules: expected }) {
   const { ctx, intent, modules } = moduleStoppingContext(dataDir, id, true)
   if (sha256CanonicalJson(expected) !== sha256CanonicalJson(modules.modules)) fail()
@@ -563,7 +624,7 @@ function coordinatorContext(dataDir, id, locked = false) {
   if (!intent || intent.id !== id) fail()
   return { ctx, intent }
 }
-export function readWorkspaceRelocationCoordinator(dataDir, id) {
+export const readWorkspaceRelocationCoordinator = recordGraphReader(function readWorkspaceRelocationCoordinator(dataDir, id) {
   const { ctx, intent } = coordinatorContext(dataDir, id)
   const launch = readPrivateJson(path.join(ctx.control, coordinatorFile), 65536)
   const ready = readPrivateJson(path.join(ctx.control, coordinatorReadyFile), 65536)
@@ -583,7 +644,7 @@ export function readWorkspaceRelocationCoordinator(dataDir, id) {
     if (sha256CanonicalJson(read(ctx)) !== sha256CanonicalJson(intent)) fail()
     return { launch, ready: ready ?? null }
   } catch { fail() }
-}
+})
 export function commitWorkspaceRelocationCoordinator({ dataDir, id, launchId, coordinator }) {
   const { ctx, intent } = coordinatorContext(dataDir, id, true), operationToken = cliLockToken(path.join(ctx.dataRoot, 'cli.lock'))
   const parent = native.inspectProcess(process.pid), child = { ...coordinator }
@@ -652,7 +713,7 @@ function processStoppingContext(dataDir, id, locked = false) {
   if (!processes) fail()
   return { ...result, processes }
 }
-export function readWorkspaceRelocationProcessStops(dataDir, id) {
+export const readWorkspaceRelocationProcessStops = recordGraphReader(function readWorkspaceRelocationProcessStops(dataDir, id) {
   const { ctx, modules, processes } = processStoppingContext(dataDir, id)
   const text = readPrivateText(path.join(ctx.control, processStopFile), scopeLimit)
   if (text === undefined) { absent(ctx, [executionExitFile, filePlanFile, fileActorsFile]); return { attempt: null, observations: [], completion: null } }
@@ -681,7 +742,7 @@ export function readWorkspaceRelocationProcessStops(dataDir, id) {
     }
     return { attempt, observations, completion }
   } catch { fail() }
-}
+})
 export function prepareWorkspaceRelocationProcessStops({ dataDir, id }) {
   const { ctx, intent, processes, modules } = processStoppingContext(dataDir, id, true)
   const previous = readWorkspaceRelocationProcessStops(dataDir, id)
@@ -744,7 +805,7 @@ export function completeWorkspaceRelocationProcessStops({ dataDir, id }) {
 
 
 const executionExitFile = 'relocation-execution-exit.json', filePlanFile = 'relocation-files.json', fileActorsFile = 'relocation-file-actors.jsonl', closurePlanFile = 'relocation-worker-closure.json', closureCommitsDirectory = 'relocation-worker-commits'
-function workspaceExecutionExitMaterial(dataDir, id) {
+const workspaceExecutionExitMaterial = recordGraphReader(function workspaceExecutionExitMaterial(dataDir, id) {
   const coordinator = readWorkspaceRelocationCoordinator(dataDir, id), workers = readWorkspaceRelocationStops(dataDir, id)
   const modules = readWorkspaceRelocationModuleStops(dataDir, id), processes = readWorkspaceRelocationProcessStops(dataDir, id)
   if (!coordinator.launch || !coordinator.ready || !workers.attempt || !workers.submission || !modules.attempt || !modules.submission
@@ -755,9 +816,9 @@ function workspaceExecutionExitMaterial(dataDir, id) {
     ...modules.observations.flatMap(item => item.processes)]) known.set(processKey(item), item)
   return { coordinator, processes: [...known.values()], hashes: { coordinator_sha256: sha256CanonicalJson(coordinator),
     worker_stops_sha256: sha256CanonicalJson(workers), module_stops_sha256: sha256CanonicalJson(modules), process_stops_sha256: sha256CanonicalJson(processes) } }
-}
+})
 /** Historical fixed-scope fact only; neither fresh execution authority nor file permission. */
-export function readWorkspaceRelocationExecutionExit(dataDir, id) {
+export const readWorkspaceRelocationExecutionExit = recordGraphReader(function readWorkspaceRelocationExecutionExit(dataDir, id) {
   const { ctx, intent } = coordinatorContext(dataDir, id)
   const record = readPrivateJson(path.join(ctx.control, executionExitFile), 65536)
   if (record === undefined) { absent(ctx, [filePlanFile, fileActorsFile]); return null }
@@ -766,7 +827,7 @@ export function readWorkspaceRelocationExecutionExit(dataDir, id) {
     || record.schema_version !== 1 || record.intent_id !== id || record.intent_sha256 !== sha256CanonicalJson(intent)
     || !validDate(record.created_at) || Object.entries(hashes).some(([key, hash]) => record[key] !== hash)) fail()
   return record
-}
+})
 export function commitWorkspaceRelocationExecutionExit({ dataDir, id }) {
   const { ctx, intent } = coordinatorContext(dataDir, id, true), token = cliLockToken(path.join(ctx.dataRoot, 'cli.lock'))
   const material = workspaceExecutionExitMaterial(dataDir, id)
@@ -800,7 +861,7 @@ function validFileObservation(value, intent) {
     || !digest(value.tree_fingerprint) || !digest(value.metadata_fingerprint) || !integer(value.entries) || value.entries < 1) fail()
 }
 /** Historical preparation plan only; first dispatch still requires the original live coordinator. */
-export function readWorkspaceRelocationFilePlan(dataDir, id) {
+export const readWorkspaceRelocationFilePlan = recordGraphReader(function readWorkspaceRelocationFilePlan(dataDir, id) {
   const { ctx, intent } = coordinatorContext(dataDir, id), record = readPrivateJson(path.join(ctx.control, filePlanFile), 65536)
   if (record === undefined) { absent(ctx, [fileActorsFile]); return null }
   const exit = readWorkspaceRelocationExecutionExit(dataDir, id)
@@ -816,7 +877,7 @@ export function readWorkspaceRelocationFilePlan(dataDir, id) {
     || !validDate(record.created_at)) fail()
   validFileObservation(record.source_observation, intent)
   return record
-}
+})
 function workspaceFileCoordinatorContext(dataDir, id, signal) {
   const { ctx, intent } = coordinatorContext(dataDir, id, true), token = cliLockToken(path.join(ctx.dataRoot, 'cli.lock'))
   const material = workspaceExecutionExitMaterial(dataDir, id), exit = readWorkspaceRelocationExecutionExit(dataDir, id)
@@ -893,7 +954,7 @@ function validPreparedStaging(row, plan) {
 }
 
 /** File actor facts are separate from the earlier business execution-exit fact. */
-export function readWorkspaceRelocationFileActors(dataDir, id) {
+export const readWorkspaceRelocationFileActors = recordGraphReader(function readWorkspaceRelocationFileActors(dataDir, id) {
   const { ctx } = coordinatorContext(dataDir, id), plan = readWorkspaceRelocationFilePlan(dataDir, id)
   if (!plan) fail()
   const empty = { attempt: null, host: null, permission: null, staging_attempt: null, staging: null, file_attempt: null, tools: null, tool_permission: null, tool_exit: null, file_ready: null }
@@ -947,7 +1008,7 @@ export function readWorkspaceRelocationFileActors(dataDir, id) {
     }
     return { attempt, host: host ?? null, permission: permission ?? null, staging_attempt, staging, file_attempt, tools, tool_permission, tool_exit, file_ready }
   } catch { fail() }
-}
+})
 
 function syncFileActors(ctx) {
   const file = path.join(ctx.control, fileActorsFile), before = fs.lstatSync(file, { bigint: true })
@@ -1170,7 +1231,7 @@ export async function commitWorkspaceRelocationFileReady({ dataDir, id, signal }
 
 
 /** Historical bindings only; these digest values are not transferable write authorization. */
-export function readWorkspaceRelocationClosureBindings(dataDir, id) {
+export const readWorkspaceRelocationClosureBindings = recordGraphReader(function readWorkspaceRelocationClosureBindings(dataDir, id) {
   const intent = readWorkspaceRelocationIntent(dataDir), coordinator = readWorkspaceRelocationCoordinator(dataDir, id)
   const workers = readWorkspaceRelocationWorkers(dataDir, id), exit = readWorkspaceRelocationExecutionExit(dataDir, id)
   const plan = readWorkspaceRelocationFilePlan(dataDir, id), actors = readWorkspaceRelocationFileActors(dataDir, id)
@@ -1178,7 +1239,7 @@ export function readWorkspaceRelocationClosureBindings(dataDir, id) {
   return Object.freeze({ intent_id: id, intent_sha256: sha256CanonicalJson(intent), coordinator_sha256: sha256CanonicalJson(coordinator),
     worker_scope_sha256: sha256CanonicalJson(workers), execution_exit_sha256: sha256CanonicalJson(exit),
     file_plan_sha256: sha256CanonicalJson(plan), file_ready_sha256: sha256CanonicalJson(actors.file_ready), catalog_sha256: plan.catalog_sha256 })
-}
+})
 
 /** Only the original live, locked coordinator can establish current offline-close prerequisites. No writes. */
 export async function verifyWorkspaceRelocationClosureReadiness({ dataDir, id, signal }) {
@@ -1238,12 +1299,12 @@ function validClosurePlan(record, ctx, id) {
   if (scope.workers.some(worker => !managers.has(worker.manager_key)) || record.names.some(name => name.endsWith('.json')
     && !/^\.tmp-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.json$/i.test(name) && !accounted.has(name))) fail()
 }
-export function readWorkspaceRelocationClosurePlan(dataDir, id) {
+export const readWorkspaceRelocationClosurePlan = recordGraphReader(function readWorkspaceRelocationClosurePlan(dataDir, id) {
   const { ctx } = coordinatorContext(dataDir, id), record = readPrivateJson(path.join(ctx.control, closurePlanFile), scopeLimit)
   if (record === undefined) return null
   try { validClosurePlan(record, ctx, id) } catch { fail() }
   return record
-}
+})
 
 /** Technical closure plan only. Agent retains ledger contents; this never changes business state. */
 export async function prepareWorkspaceRelocationClosurePlan({ dataDir, id, manifest, signal }) {
@@ -1286,7 +1347,7 @@ export async function prepareWorkspaceRelocationClosurePlan({ dataDir, id, manif
 
 
 /** Historical completion digest only; Agent alone verifies and writes business ledgers. */
-export function readWorkspaceRelocationClosureCommit(dataDir, id) {
+export const readWorkspaceRelocationClosureCommit = recordGraphReader(function readWorkspaceRelocationClosureCommit(dataDir, id) {
   const { ctx } = coordinatorContext(dataDir, id), plan = readWorkspaceRelocationClosurePlan(dataDir, id)
   const directory = path.join(ctx.control, closureCommitsDirectory)
   if (!privateControl(directory)) return null
@@ -1308,7 +1369,7 @@ export function readWorkspaceRelocationClosureCommit(dataDir, id) {
     if (!fields(closed, ['version']) || !ledgerVersion(closed.version) || sha256CanonicalJson(closed) !== row.closed_sha256) fail()
   }
   return complete
-}
+})
 
 const recoveryPlanFile = 'relocation-manager-closure.json'
 function validRecoveryPlan(record, ctx, id) {
@@ -1319,12 +1380,12 @@ function validRecoveryPlan(record, ctx, id) {
     || record.worker_closure_sha256 !== sha256CanonicalJson(complete) || record.snapshot_sha256 !== sha256CanonicalJson(record.snapshot)) fail()
   validateWorkspaceRecoverySnapshot(record.snapshot, ctx.dataRoot)
 }
-export function readWorkspaceRelocationRecoveryPlan(dataDir, id) {
+export const readWorkspaceRelocationRecoveryPlan = recordGraphReader(function readWorkspaceRelocationRecoveryPlan(dataDir, id) {
   const { ctx } = coordinatorContext(dataDir, id), record = readPrivateJson(path.join(ctx.control, recoveryPlanFile), scopeLimit)
   if (record === undefined) return null
   try { validRecoveryPlan(record, ctx, id) } catch { fail() }
   return record
-}
+})
 /** Technical Agent plan only; this never archives a checkpoint or settles business responsibility. */
 export async function prepareWorkspaceRelocationRecoveryPlan({ dataDir, id, manifest, signal }) {
   const record = { schema_version: 1, intent_id: id, ...structuredClone(manifest) }
@@ -1360,14 +1421,14 @@ function validRecoveryCommit(record, plan, id) {
     || row.index !== index || !digest(row.manifest_sha256) || !digest(row.complete_sha256)) fail()
 }
 /** Historical completion digest only; the finite Agent role owns actual retirement/checkpoint validation. */
-export function readWorkspaceRelocationRecoveryCommit(dataDir, id) {
+export const readWorkspaceRelocationRecoveryCommit = recordGraphReader(function readWorkspaceRelocationRecoveryCommit(dataDir, id) {
   const { ctx } = coordinatorContext(dataDir, id), record = readPrivateJson(path.join(ctx.control, recoveryCommitFile), scopeLimit)
   if (record === undefined) return null
   const plan = readWorkspaceRelocationRecoveryPlan(dataDir, id)
   if (!plan) fail()
   validRecoveryCommit(record, plan, id)
   return record
-}
+})
 export async function completeWorkspaceRelocationRecovery({ dataDir, id, manifest, signal, verifyEffects }) {
   const record = { schema_version: 1, intent_id: id, ...structuredClone(manifest) }
   await verifyWorkspaceRelocationClosureReadiness({ dataDir, id, signal })
@@ -1431,12 +1492,12 @@ function validRootPlan(record, dataDir, id) {
   return parents
 }
 /** Immutable historical plan; observing it cannot grant an execution or recovery role. */
-function readRootPlanState(dataDir, id) {
+const readRootPlanState = recordGraphReader(function readRootPlanState(dataDir, id) {
   const { ctx } = coordinatorContext(dataDir, id), record = readPrivateJson(path.join(ctx.control, rootPlanFile), scopeLimit)
   if (record === undefined) return null
   return { record, parents: validRootPlan(record, dataDir, id) }
-}
-export function readWorkspaceRelocationRootPlan(dataDir, id) { return readRootPlanState(dataDir, id)?.record ?? null }
+})
+export const readWorkspaceRelocationRootPlan = recordGraphReader(function readWorkspaceRelocationRootPlan(dataDir, id) { return readRootPlanState(dataDir, id)?.record ?? null })
 export async function prepareWorkspaceRelocationRootPlan({ dataDir, id, signal }) {
   const { ctx, intent, verify } = workspaceFileCoordinatorContext(dataDir, id, signal)
   verify()
@@ -1483,7 +1544,7 @@ export async function prepareWorkspaceRelocationRootPlan({ dataDir, id, signal }
 
 const rootPublishedFile = 'relocation-root-published.json', rootSelectedFile = 'relocation-root-selected.json'
 /** Historical facts only. Current authority, files and catalog are independently verified before effects. */
-export function readWorkspaceRelocationRootPublished(dataDir, id) {
+export const readWorkspaceRelocationRootPublished = recordGraphReader(function readWorkspaceRelocationRootPublished(dataDir, id) {
   const { ctx } = coordinatorContext(dataDir, id), record = readPrivateJson(path.join(ctx.control, rootPublishedFile), 65536)
   if (record === undefined) return null
   const plan = readWorkspaceRelocationRootPlan(dataDir, id), ready = readWorkspaceRelocationFileActors(dataDir, id).file_ready
@@ -1492,8 +1553,8 @@ export function readWorkspaceRelocationRootPublished(dataDir, id) {
     || sha256CanonicalJson(record.target) !== sha256CanonicalJson({ ...plan.publication.tree, path: plan.publication.target })
     || record.content_sha256 !== ready.content_sha256 || record.metadata_sha256 !== ready.metadata_sha256) fail()
   return record
-}
-export function readWorkspaceRelocationRootSelected(dataDir, id) {
+})
+export const readWorkspaceRelocationRootSelected = recordGraphReader(function readWorkspaceRelocationRootSelected(dataDir, id) {
   const { ctx, intent } = coordinatorContext(dataDir, id), record = readPrivateJson(path.join(ctx.control, rootSelectedFile), 65536)
   if (record === undefined) return null
   const plan = readWorkspaceRelocationRootPlan(dataDir, id), published = readWorkspaceRelocationRootPublished(dataDir, id)
@@ -1502,7 +1563,7 @@ export function readWorkspaceRelocationRootSelected(dataDir, id) {
     || record.published_sha256 !== sha256CanonicalJson(published) || record.catalog_sha256 !== plan.catalog_after_sha256
     || record.catalog_revision !== intent.catalog_revision + 1) fail()
   return record
-}
+})
 function workspaceRootContext(dataDir, id, signal) {
   const base = workspaceFileCoordinatorContext(dataDir, id, signal), plan = readWorkspaceRelocationRootPlan(dataDir, id)
   if (!plan) fail()
@@ -1647,7 +1708,7 @@ function rootParentParts(record, intent) {
   if (record.publication.target !== path.join(record.publication.target_parent.path, parts[0])) fail()
   return parts
 }
-export function readWorkspaceRelocationRootParentsPlan(dataDir, id) {
+export const readWorkspaceRelocationRootParentsPlan = recordGraphReader(function readWorkspaceRelocationRootParentsPlan(dataDir, id) {
   const { ctx, intent } = coordinatorContext(dataDir, id), record = readPrivateJson(path.join(ctx.control, rootParentsFile), scopeLimit)
   if (record === undefined) return null
   const filePlan = readWorkspaceRelocationFilePlan(dataDir, id), worker = readWorkspaceRelocationClosureCommit(dataDir, id), recovery = readWorkspaceRelocationRecoveryCommit(dataDir, id)
@@ -1671,10 +1732,10 @@ export function readWorkspaceRelocationRootParentsPlan(dataDir, id) {
   const first = record.chain[0], tree = record.publication.tree
   if (first.dev !== tree.dev || first.ino !== tree.ino || first.native_id !== tree.native_id) fail()
   return record
-}
-export function readWorkspaceRelocationRootParentsComplete(dataDir, id) {
+})
+export const readWorkspaceRelocationRootParentsComplete = recordGraphReader(function readWorkspaceRelocationRootParentsComplete(dataDir, id) {
   return readRootParentsComplete(dataDir, id, readWorkspaceRelocationRootParentsPlan(dataDir, id))
-}
+})
 function readRootParentsComplete(dataDir, id, plan) {
   const { ctx, intent } = coordinatorContext(dataDir, id), record = readPrivateJson(path.join(ctx.control, rootParentsCompleteFile), 65536)
   if (record === undefined) return null

@@ -783,6 +783,41 @@ for (const mode of ['confirmed', 'lost acknowledgement', 'changed source', 'copy
               assert.equal(fs.existsSync(f.before.storage_root), false)
               assert.equal(workspaceMaintenancePending(f.data), true)
               if (mode === 'Root publish') {
+                let privateReads = 0
+                const originalRead = fs.readFileSync
+                const countReads = t.mock.method(fs, 'readFileSync', function(file, ...args) {
+                  if (typeof file === 'number') privateReads++
+                  return originalRead.call(this, file, ...args)
+                })
+                try { rootRecords.readWorkspaceRelocationRootSelected(f.data, f.id) } finally { countReads.mock.restore() }
+                t.diagnostic('Single selected-record graph private reads: ' + privateReads)
+                assert.ok(privateReads <= 256, 'one fixed technical record graph must not repeatedly reread thousands of prerequisites: ' + privateReads)
+                const upstreamFile = path.join(control, 'relocation-coordinator.json'), upstreamBytes = fs.readFileSync(upstreamFile)
+                const missingFile = path.join(control, 'relocation-root-parents-complete.json'), publishedStat = fs.statSync(publishedFile, { bigint: true })
+                for (const change of ['changed upstream', 'new missing record']) {
+                  let changed = false
+                  const mutateDuringRead = t.mock.method(fs, 'readFileSync', function(file, ...args) {
+                    const result = originalRead.call(this, file, ...args)
+                    if (typeof file === 'number' && !changed) {
+                      const stat = fs.fstatSync(file, { bigint: true })
+                      if (stat.dev === publishedStat.dev && stat.ino === publishedStat.ino) {
+                        changed = true
+                        if (change === 'changed upstream') fs.writeFileSync(upstreamFile, '{"invalid":"changed after its first read"}')
+                        else fs.writeFileSync(missingFile, '{"invalid":"new after absence was observed"}', { flag: 'wx', mode: 0o600 })
+                      }
+                    }
+                    return result
+                  })
+                  try {
+                    assert.throws(() => rootRecords.readWorkspaceRelocationRootSelected(f.data, f.id), { code: 'WORKSPACE_RELOCATION_INVALID' })
+                    assert.equal(changed, true)
+                  } finally {
+                    mutateDuringRead.mock.restore()
+                    if (change === 'changed upstream') fs.writeFileSync(upstreamFile, upstreamBytes)
+                    else if (changed) fs.unlinkSync(missingFile)
+                  }
+                  assert.equal(sha256CanonicalJson(rootRecords.readWorkspaceRelocationRootSelected(f.data, f.id)), selected.selected_sha256)
+                }
                 const { locateWorkspaceRelocationHistory } = await import('../workspace-relocation-history.mjs')
                 const query = { dataDir: f.data, managerKey: f.closureWorker.manager_key, workerId: f.closureWorker.worker_id, incarnationId: 'history-mainline' }
                 const beforeRoot = f.closureWorker.incarnations[0].workspace, afterRoot = path.join(f.target, path.relative(f.before.storage_root, beforeRoot))
