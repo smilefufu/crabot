@@ -60,7 +60,7 @@ function read(ctx) {
   if (!privateControl(ctx.control)) return null
   const value = readPrivateJson(ctx.file, 65536)
   if (value === undefined) {
-    for (const file of ['relocation-workers.json', 'relocation-worker-processes.json', 'relocation-stop-attempt.json', 'relocation-stop-submission.json', 'relocation-modules.json', 'relocation-module-stop-attempt.json', 'relocation-module-processes', 'relocation-module-stop-submission.json', 'relocation-coordinator.json', 'relocation-coordinator-ready.json', 'relocation-process-stop.jsonl', 'relocation-execution-exit.json', 'relocation-files.json', 'relocation-file-actors.jsonl', 'relocation-worker-closure.json']) {
+    for (const file of ['relocation-workers.json', 'relocation-worker-processes.json', 'relocation-stop-attempt.json', 'relocation-stop-submission.json', 'relocation-modules.json', 'relocation-module-stop-attempt.json', 'relocation-module-processes', 'relocation-module-stop-submission.json', 'relocation-coordinator.json', 'relocation-coordinator-ready.json', 'relocation-process-stop.jsonl', 'relocation-execution-exit.json', 'relocation-files.json', 'relocation-file-actors.jsonl', 'relocation-worker-closure.json', 'relocation-worker-commits']) {
       try { fs.lstatSync(path.join(ctx.control, file)); fail() }
       catch (error) { if (error.code !== 'ENOENT') fail() }
     }
@@ -365,7 +365,7 @@ function validModules(modules) {
   return true
 }
 function absent(ctx, names) {
-  for (const name of [...names, closurePlanFile]) {
+  for (const name of [...names, closurePlanFile, closureCommitsDirectory]) {
     try { fs.lstatSync(path.join(ctx.control, name)); fail() }
     catch (error) { if (error.code !== 'ENOENT') fail() }
   }
@@ -736,7 +736,7 @@ export function completeWorkspaceRelocationProcessStops({ dataDir, id }) {
 }
 
 
-const executionExitFile = 'relocation-execution-exit.json', filePlanFile = 'relocation-files.json', fileActorsFile = 'relocation-file-actors.jsonl', closurePlanFile = 'relocation-worker-closure.json'
+const executionExitFile = 'relocation-execution-exit.json', filePlanFile = 'relocation-files.json', fileActorsFile = 'relocation-file-actors.jsonl', closurePlanFile = 'relocation-worker-closure.json', closureCommitsDirectory = 'relocation-worker-commits'
 function workspaceExecutionExitMaterial(dataDir, id) {
   const coordinator = readWorkspaceRelocationCoordinator(dataDir, id), workers = readWorkspaceRelocationStops(dataDir, id)
   const modules = readWorkspaceRelocationModuleStops(dataDir, id), processes = readWorkspaceRelocationProcessStops(dataDir, id)
@@ -1275,4 +1275,30 @@ export async function prepareWorkspaceRelocationClosurePlan({ dataDir, id, manif
   const accepted = readWorkspaceRelocationClosurePlan(dataDir, id)
   if (sha256CanonicalJson(accepted) !== sha256CanonicalJson(record)) fail()
   return { dispatch: 'dispatch', plan: accepted }
+}
+
+
+/** Historical completion digest only; Agent alone verifies and writes business ledgers. */
+export function readWorkspaceRelocationClosureCommit(dataDir, id) {
+  const { ctx } = coordinatorContext(dataDir, id), plan = readWorkspaceRelocationClosurePlan(dataDir, id)
+  const directory = path.join(ctx.control, closureCommitsDirectory)
+  if (!privateControl(directory)) return null
+  if (!plan) fail()
+  const header = readPrivateJson(path.join(directory, 'header.json'), 65536), stat = fs.lstatSync(directory, { bigint: true })
+  const current = [stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs, stat.mode, stat.uid, stat.gid, stat.nlink].join(':').split(':')
+  if (!fields(header, ['schema_version', 'intent_id', 'plan_sha256', 'directory_version', 'native_id'])
+    || header.schema_version !== 1 || header.intent_id !== id || header.plan_sha256 !== sha256CanonicalJson(plan)
+    || !ledgerVersion(header.directory_version) || [0, 1, 5, 6, 7].some(index => header.directory_version.split(':')[index] !== current[index])
+    || (process.platform === 'win32' ? native.inspectDirectoryFileId(directory) !== header.native_id : header.native_id !== null)) fail()
+  const complete = readPrivateJson(path.join(directory, 'complete.json'), scopeLimit)
+  if (complete === undefined) return null
+  const changed = plan.ledgers.map((item, index) => item.before_sha256 !== item.after_sha256 ? index : null).filter(index => index !== null)
+  if (!fields(complete, ['schema_version', 'plan_sha256', 'receipts']) || complete.schema_version !== 1
+    || complete.plan_sha256 !== header.plan_sha256 || !Array.isArray(complete.receipts) || complete.receipts.length !== changed.length) fail()
+  for (const [position, row] of complete.receipts.entries()) {
+    if (!fields(row, ['index', 'closed_sha256']) || row.index !== changed[position] || !digest(row.closed_sha256)) fail()
+    const closed = readPrivateJson(path.join(directory, row.index + '.closed.json'), 65536)
+    if (!fields(closed, ['version']) || !ledgerVersion(closed.version) || sha256CanonicalJson(closed) !== row.closed_sha256) fail()
+  }
+  return complete
 }

@@ -1,3 +1,4 @@
+import { workspaceMaintenancePending } from '../../../crabot-shared/dist/workspace-maintenance.js'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
@@ -351,7 +352,7 @@ for (const mode of ['confirmed', 'lost acknowledgement', 'unexpected payload']) 
   } finally { workers.close(); modules.close(); processes.close(); files.close() }
 })
 
-for (const mode of ['confirmed', 'lost acknowledgement', 'changed source', 'copy']) test('the actual fixed Host prepares files once while the catalog stays unchanged: ' + mode, { timeout: process.platform === 'win32' ? 90000 : 30000, skip: mode === 'copy' && (process.platform !== 'linux' || !fs.existsSync('/dev/shm') || fs.statSync(tmpdir()).dev === fs.statSync('/dev/shm').dev) }, async t => {
+for (const mode of ['confirmed', 'lost acknowledgement', 'changed source', 'copy']) test('the actual fixed Host prepares files once while the catalog stays unchanged: ' + mode, { timeout: process.platform === 'win32' ? 180000 : 30000, skip: mode === 'copy' && (process.platform !== 'linux' || !fs.existsSync('/dev/shm') || fs.statSync(tmpdir()).dev === fs.statSync('/dev/shm').dev) }, async t => {
   const f = await fixture(t, { crossVolume: mode === 'copy', closureLedger: mode === 'confirmed' || mode === 'lost acknowledgement' }), { child, launch } = await f.launch(), context = { dataDir: f.data, id: f.id, launch }
   const workers = createWorkspaceWorkerJournal(child, context), modules = createWorkspaceModuleJournal(child, context), processes = createWorkspaceProcessJournal(child, context)
   let files = createWorkspaceFileJournal(child, context)
@@ -436,7 +437,8 @@ for (const mode of ['confirmed', 'lost acknowledgement', 'changed source', 'copy
             try { await assert.rejects(closer.prepareClosure(), { code: 'CRABOT_WORKSPACE_JOURNAL_UNAVAILABLE' }); assert.equal(dropped, true) } finally { mock.mock.restore() }
             closer.close(); closer = createWorkspaceWorkerJournal(child, context)
           }
-          const prepared = await closer.prepareClosure()
+          const preparationStarted = Date.now(), prepared = await closer.prepareClosure()
+          t.diagnostic('Agent fixed closure preparation confirmed in ' + (Date.now() - preparationStarted) + 'ms')
           assert.equal(prepared.dispatch, mode === 'lost acknowledgement' ? 'observe' : 'dispatch')
           assert.equal(prepared.plan.ledgers[0].closed_worker_ids[0], f.closureWorker.worker_id)
           assert.notEqual(prepared.plan.ledgers[0].before_sha256, prepared.plan.ledgers[0].after_sha256)
@@ -462,6 +464,35 @@ for (const mode of ['confirmed', 'lost acknowledgement', 'changed source', 'copy
           }
           assert.equal((await closer.prepareClosure()).dispatch, 'observe')
           assert.equal(fs.readFileSync(f.ledgerFile, 'utf8'), f.ledgerBytes)
+          const agent = await import('../../../crabot-agent/dist/core/workspace-relocation-closure.js')
+          await assert.rejects(agent.commitWorkspaceRelocationClosure({ dataDir: f.data, id: f.id }), { code: 'CRABOT_WORKSPACE_CLOSURE_COMMIT' })
+          assert.equal(fs.readFileSync(f.ledgerFile, 'utf8'), f.ledgerBytes)
+          const invalidCommit = createWorkspaceJournalClient(child, context, 'worker')
+          try { await assert.rejects(invalidCommit.call('commit_closure', { directory: f.root }), { code: 'CRABOT_WORKSPACE_JOURNAL_UNAVAILABLE' }) } finally { invalidCommit.close() }
+          if (mode === 'lost acknowledgement') {
+            const emit = child.emit; let dropped = false
+            const mock = t.mock.method(child, 'emit', function(event, ...args) {
+              if (event === 'message' && args[0]?.kind === 'workspace_worker_journal_reply' && args[0]?.operation === 'commit_closure' && !dropped) {
+                dropped = true; return emit.call(this, event, { ...args[0], ok: false }, ...args.slice(1))
+              }
+              return emit.call(this, event, ...args)
+            })
+            try { await assert.rejects(closer.commitClosure(), { code: 'CRABOT_WORKSPACE_JOURNAL_UNAVAILABLE' }); assert.equal(dropped, true) } finally { mock.mock.restore() }
+            closer.close(); closer = createWorkspaceWorkerJournal(child, context)
+          }
+          const commitStarted = Date.now(), committed = await closer.commitClosure()
+          t.diagnostic('Agent fixed closure commit confirmed in ' + (Date.now() - commitStarted) + 'ms')
+          assert.equal(committed.dispatch, mode === 'lost acknowledgement' ? 'observe' : 'dispatch')
+          const closedBytes = fs.readFileSync(f.ledgerFile), closedStat = fs.lstatSync(f.ledgerFile, { bigint: true })
+          const closed = JSON.parse(closedBytes).workers[0], old = JSON.parse(f.ledgerBytes).workers[0]
+          assert.equal(closed.task.status, 'closed'); assert.equal(closed.task.closed.by, 'migration')
+          assert.equal(closed.task.closed.note, 'workspace relocation ' + f.id)
+          assert.deepEqual(closed.origin, old.origin); assert.deepEqual(closed.report_to, old.report_to); assert.deepEqual(closed.incarnations, old.incarnations)
+          assert.equal((await closer.commitClosure()).dispatch, 'observe')
+          assert.deepEqual(fs.readFileSync(f.ledgerFile), closedBytes)
+          const observed = fs.lstatSync(f.ledgerFile, { bigint: true })
+          for (const field of ['dev', 'ino', 'size', 'mtimeNs', 'ctimeNs', 'mode', 'uid', 'gid', 'nlink']) assert.equal(observed[field], closedStat[field])
+          assert.equal(workspaceMaintenancePending(f.data), true)
         } finally { closer.close() }
       }
       const before = fs.readFileSync(path.join(f.data, 'workspace-control/relocation-file-actors.jsonl'))

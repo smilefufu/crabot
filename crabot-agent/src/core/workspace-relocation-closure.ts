@@ -1,5 +1,6 @@
 import path from 'node:path'
 import { sha256CanonicalJson } from 'crabot-shared'
+import { commitWorkspaceRelocationLedgers } from './workspace-relocation-commit.js'
 import { captureWorkspaceRelocationLedgers } from './workspace-relocation-ledgers.js'
 import { prepareWorkspaceRelocationWorkerClosure } from '../workers/harness/workspace-relocation-close.js'
 
@@ -30,5 +31,31 @@ export async function prepareWorkspaceRelocationClosure({ dataDir, id, signal }:
     return { dispatch: result.dispatch as 'dispatch' | 'observe', plan_sha256: sha256CanonicalJson(result.plan) }
   } catch (cause) {
     throw Object.assign(new Error('固定执行器关闭计划准备失败；原台账及维护保护保留。'), { code: 'CRABOT_WORKSPACE_CLOSURE_PLAN', stage, cause })
+  }
+}
+
+
+/** Fixed Agent-owned effects; the original coordinator remains authenticated throughout the finite commit. */
+export async function commitWorkspaceRelocationClosure({ dataDir, id, signal }: { dataDir: string; id: string; signal?: AbortSignal }) {
+  const records = require(path.join(__dirname, '../../../scripts/lib/workspace-relocation-intent.mjs'))
+  let stage = 'authority'
+  try {
+    await records.verifyWorkspaceRelocationClosureReadiness({ dataDir, id, signal })
+    const plan = records.readWorkspaceRelocationClosurePlan(dataDir, id)
+    if (!plan) throw new Error('Missing original closure plan')
+    const planHash = sha256CanonicalJson(plan)
+    const verify = async () => {
+      await records.verifyWorkspaceRelocationClosureReadiness({ dataDir, id, signal })
+      if (sha256CanonicalJson(records.readWorkspaceRelocationClosurePlan(dataDir, id)) !== planHash) throw new Error('Original closure plan changed')
+    }
+    stage = 'ledger-capture'
+    const snapshot = await captureWorkspaceRelocationLedgers(dataDir, { signal })
+    stage = 'ledger-transform'
+    const prepared = prepareWorkspaceRelocationWorkerClosure({ intentId: id, closedAt: plan.closed_at,
+      workers: records.readWorkspaceRelocationWorkers(dataDir, id).workers, ledgers: snapshot.files })
+    stage = 'ledger-commit'
+    return await commitWorkspaceRelocationLedgers({ snapshot, plan, prepared, verify })
+  } catch (cause) {
+    throw Object.assign(new Error('固定执行器关闭尚未全部核实，已保留提交事实和维护保护。'), { code: 'CRABOT_WORKSPACE_CLOSURE_COMMIT', stage, cause })
   }
 }
