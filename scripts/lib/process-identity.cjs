@@ -22,6 +22,10 @@ function terminateKnownProcess(expected) {
   return native.terminateProcessGeneration(expected.pid, expected.started, expected.owner)
 }
 
+// Native Win32 private ACL APIs need extended paths; retain the exact text/body arguments.
+const filesystemPath = method => process.platform === 'win32'
+  ? (file, ...args) => method(path.toNamespacedPath(file), ...args) : method
+
 module.exports = { ...native, sameProcess, terminateKnownProcess,
   renameDirectoryNoReplace: native.renameDirectoryNoReplace,
   inspectFileMetadata: native.inspectFileMetadata,
@@ -46,7 +50,7 @@ module.exports = { ...native, sameProcess, terminateKnownProcess,
   releaseFileLock: native.releaseFileLock,
   inspectProcessArguments: native.inspectProcessArguments,
   listListeningTcpPorts: native.listListeningTcpPorts,
-  isOwnedDirectory: native.isOwnedDirectory ?? (directory => {
+  isOwnedDirectory: native.isOwnedDirectory ? filesystemPath(native.isOwnedDirectory) : (directory => {
     const stat = fs.lstatSync(directory)
     return stat.isDirectory() && !stat.isSymbolicLink() && String(stat.uid) === native.inspectProcess(process.pid).owner
   }),
@@ -57,8 +61,8 @@ module.exports = { ...native, sameProcess, terminateKnownProcess,
     inspectServerPeer: native.inspectServerPeer,
     readPipe: native.readPipe, writePipe: native.writePipe, closePipe: native.closePipe,
   } : {}),
-  ...(native.writePrivateFile ? { writePrivateFile: native.writePrivateFile, isPrivateFile: native.isPrivateFile,
-    isOwnedFile: native.isOwnedFile, createPrivateDirectory: native.createPrivateDirectory, isPrivateDirectory: native.isPrivateDirectory } : {}),
+  ...(native.writePrivateFile ? { writePrivateFile: filesystemPath(native.writePrivateFile), isPrivateFile: filesystemPath(native.isPrivateFile),
+    isOwnedFile: filesystemPath(native.isOwnedFile), createPrivateDirectory: filesystemPath(native.createPrivateDirectory), isPrivateDirectory: filesystemPath(native.isPrivateDirectory) } : {}),
   ...(native.readUserPath ? { readUserPath: native.readUserPath, appendUserPathDirectory: native.appendUserPathDirectory,
     notifyUserPathChanged: native.notifyUserPathChanged } : {}),
 }
