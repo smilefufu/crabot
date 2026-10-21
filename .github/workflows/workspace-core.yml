@@ -7,6 +7,7 @@ on:
       - 'crabot-core/src/index.ts'
       - 'crabot-core/src/module-manager-lifecycle.test.ts'
       - 'crabot-core/src/test-fixtures/uv-python-sleeper.py'
+      - 'crabot-core/src/test-fixtures/workspace-config-admin.cjs'
       - 'crabot-agent/src/core/workspace-relocation-validation.ts'
       - 'crabot-agent/src/unified-agent.ts'
       - 'crabot-shared/src/workspace-types.ts'
@@ -28,6 +29,7 @@ on:
       - 'crabot-core/src/index.ts'
       - 'crabot-core/src/module-manager-lifecycle.test.ts'
       - 'crabot-core/src/test-fixtures/uv-python-sleeper.py'
+      - 'crabot-core/src/test-fixtures/workspace-config-admin.cjs'
       - 'crabot-agent/src/core/workspace-relocation-validation.ts'
       - 'crabot-agent/src/unified-agent.ts'
       - 'crabot-shared/src/workspace-types.ts'
@@ -100,3 +102,9 @@ jobs:
         if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
         working-directory: crabot-core
         run: node node_modules/vitest/vitest.mjs run src/workspace-human-verification.test.ts --testNamePattern='post-relocation validation launches|new runtime health and Root' --maxWorkers=1 --minWorkers=1
+      - name: Actual Agent main and business onStart at the selected workspace Root
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
+        working-directory: crabot-core
+        env:
+          CRABOT_WORKSPACE_BUSINESS_ONSTART_CI: '1'
+        run: node node_modules/vitest/vitest.mjs run src/workspace-human-verification.test.ts --testNamePattern='isolated business Agent after workspace relocation' --maxWorkers=1 --minWorkers=1

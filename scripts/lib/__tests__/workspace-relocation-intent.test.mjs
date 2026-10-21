@@ -793,6 +793,30 @@ for (const kind of ['admin', 'self process', 'duplicate runtime', 'extra content
   assert.throws(() => commitWorkspaceRelocationModules({ ...f.options, modules }), { code: 'WORKSPACE_RELOCATION_INVALID' })
   assert.equal(readWorkspaceRelocationModules(f.data, f.input.id), null)
 })
+for (const kind of ['module', 'CLI']) test('historical ' + kind + ' scope permits the reader to reuse an exited generation PID without adopting it', async t => {
+  const f = await moduleFixture(t), self = native.inspectProcess(process.pid)
+  const file = path.join(f.data, 'workspace-control', kind === 'module' ? 'relocation-modules.json' : 'relocation-worker-processes.json')
+  if (kind === 'module') commitWorkspaceRelocationModules({ ...f.options, modules: f.modules })
+  else commitWorkspaceRelocationProcesses({ ...f.options, processes: f.modules[0].processes })
+  const stored = JSON.parse(await fs.readFile(file, 'utf8'))
+  const processes = kind === 'module' ? stored.modules[0].processes : stored.processes
+  processes[0] = { ...self, started: self.started + '-departed-generation' }
+  await fs.writeFile(file, JSON.stringify(stored) + '\n')
+  const bytes = await fs.readFile(file)
+  const read = () => kind === 'module' ? readWorkspaceRelocationModules(f.data, f.input.id) : readWorkspaceRelocationProcesses(f.data, f.input.id)
+  assert.deepEqual(read(), stored)
+  const require = createRequire(import.meta.url)
+  assert.equal(require('../known-process-exit.cjs').probeKnownProcessExit(processes).state, 'stopped')
+  assert.deepEqual(await fs.readFile(file), bytes)
+  assertWorkspaceStillProtected(f.data)
+
+  for (const executable of [self.executable, self.executable + '.previous-image']) {
+    processes[0] = { ...self, executable }
+    await fs.writeFile(file, JSON.stringify(stored) + '\n')
+    assert.throws(read, { code: 'WORKSPACE_RELOCATION_INVALID' })
+  }
+})
+
 test('an observation directory replaced before its first entry cannot restart a fresh chain', async t => {
   const f = await moduleFixture(t)
   commitWorkspaceRelocationModules({ ...f.options, modules: f.modules }); prepareWorkspaceRelocationModuleStops({ ...f.options, modules: f.modules })

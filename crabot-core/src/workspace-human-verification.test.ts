@@ -31,7 +31,8 @@ async function reserveFixturePort(): Promise<ReturnType<typeof http.createServer
   throw new Error('No finite fixture port was available')
 }
 
-async function fixture(options: { withMemory?: boolean; inactiveMemory?: boolean; wrongRuntime?: boolean; result?: string; withAgent?: boolean; agentResult?: string; actualAgent?: boolean; processLifetimeMs?: number; backgroundShell?: boolean; validationHealth?: 'healthy' | 'unhealthy'; validationRuntimeMismatch?: boolean; validationRegistration?: 'delayed' | 'exit'; memoryHealth?: 'healthy' | 'degraded'; actualAdmin?: boolean; adminReadyDelayMs?: number; quiesceResult?: string; orphanDuringStop?: boolean } = {}) {
+async function fixture(options: { withMemory?: boolean; inactiveMemory?: boolean; wrongRuntime?: boolean; result?: string; withAgent?: boolean; agentResult?: string; actualAgent?: boolean; businessAgent?: boolean; processLifetimeMs?: number; backgroundShell?: boolean; validationHealth?: 'healthy' | 'unhealthy'; validationRuntimeMismatch?: boolean; validationRegistration?: 'delayed' | 'exit'; memoryHealth?: 'healthy' | 'degraded'; actualAdmin?: boolean; adminReadyDelayMs?: number; quiesceResult?: string; orphanDuringStop?: boolean } = {}) {
+  if (options.businessAgent && (process.env.GITHUB_ACTIONS !== 'true' || process.env.CRABOT_WORKSPACE_BUSINESS_ONSTART_CI !== '1')) throw new Error('Business onStart is isolated CI only')
   const root = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'crabot-current-admin-')))
   const native = require('../../scripts/lib/process-identity.cjs'), management = require('../../scripts/lib/desktop-management.cjs')
   const data = management.ensurePrivateDataRoot(path.join(root, 'data')), script = path.join(data, 'finite-admin.cjs'), callsFile = path.join(data, 'calls.json')
@@ -64,6 +65,10 @@ async function fixture(options: { withMemory?: boolean; inactiveMemory?: boolean
       const admin=new Admin({moduleId:'admin-web',moduleType:'admin',version:'0.1.0',protocolVersion:'0.1.0',port:Number(process.env.Crabot_PORT),subscriptions:[]},{data_dir:${JSON.stringify(path.join(data, 'admin'))},web_port:Number(process.env.Crabot_PORT)});
       admin.cutoverActivated=true;admin.verifyAuthenticatedToken=async token=>token==='fixture-human'?{sub:'admin'}:null;
       const server=http.createServer((req,res)=>{let text='';req.on('data',part=>text+=part);req.on('end',()=>{let body;try{if(text)body=JSON.parse(text)}catch{}calls.push({method:req.url,authorization:req.headers.authorization?'present':undefined,body});fs.writeFileSync(process.env.FIXTURE_CALLS,JSON.stringify(calls))});
+        if(${!!options.businessAgent}){
+          const config=${JSON.stringify(relocationAgentConfig)};config.agent_config.model_config.powerful.endpoint='http://127.0.0.1:'+process.env.Crabot_PORT+'/v1';
+          if(require(${JSON.stringify(path.resolve('src/test-fixtures/workspace-config-admin.cjs'))}).handleWorkspaceConfigRequest(req,res,{config,moduleManagerPort:Number(process.env.CRABOT_MM_PORT)}))return;
+        }
         const handling=req.url.startsWith('/api/')?admin.handleWebRequest(req,res):admin.handleRequest(req,res);void handling.catch(()=>{if(!res.headersSent)res.writeHead(500);res.end('{}')})
       });(async()=>{await admin.workspaceService.initialize();await new Promise(resolve=>setTimeout(resolve,${options.adminReadyDelayMs ?? 0}));server.listen(Number(process.env.Crabot_PORT),'127.0.0.1',()=>fs.writeFileSync(process.env.FIXTURE_READY,'ready'))})().catch(error=>{console.error(error);process.exit(1)});
       setTimeout(()=>process.exit(0),${options.processLifetimeMs ?? 30000}).unref();`)
@@ -137,7 +142,12 @@ async function fixture(options: { withMemory?: boolean; inactiveMemory?: boolean
                 if(observed)process.exit(0)},10)
             },10);` : ''}`)
         }
-        await fs.writeFile(agentScript, `const fs=require('node:fs'),http=require('node:http'),{UnifiedAgent}=require(${JSON.stringify(entry)}),calls=[];
+        await fs.writeFile(agentScript, `const fs=require('node:fs');
+          if(${!!options.businessAgent}&&fs.existsSync(${JSON.stringify(path.join(data, 'workspace-control/relocation-root-selected.json'))})){
+            if(process.env.GITHUB_ACTIONS!=='true'||process.env.CRABOT_WORKSPACE_BUSINESS_ONSTART_CI!=='1')throw new Error('Business onStart is isolated CI only');
+            setTimeout(()=>process.exit(1),${options.processLifetimeMs ?? 300000}).unref();
+            require(${JSON.stringify(path.resolve('../crabot-agent/dist/main.js'))});
+          }else{const http=require('node:http'),{UnifiedAgent}=require(${JSON.stringify(entry)}),calls=[];
           require(${JSON.stringify(path.resolve('../crabot-agent/dist/core/config-loader.js'))}).ConfigLoader.captureRuntimeBearer();
           const selected=${JSON.stringify(path.join(data, 'workspace-control/relocation-root-selected.json'))};
           if(${!!options.validationRuntimeMismatch}&&fs.existsSync(selected))process.env.CRABOT_MODULE_RUNTIME_ID='fixture-wrong-runtime';
@@ -185,7 +195,7 @@ async function fixture(options: { withMemory?: boolean; inactiveMemory?: boolean
                 }catch(error){console.error(error);process.exit(1)}
               },300)
             })})().catch(error=>{console.error(error);process.exit(1)});
-          setTimeout(()=>process.exit(0),${options.processLifetimeMs ?? 30000}).unref();`)
+          setTimeout(()=>process.exit(0),${options.processLifetimeMs ?? 30000}).unref();}`)
       }
       const agent = { module_id: 'crabot-agent', module_type: 'agent', entry: `"${process.execPath}" "${agentScript}"`,
         env: { FIXTURE_CALLS: path.join(data, 'agent-calls.json'), FIXTURE_READY: agentReady, FIXTURE_RESULT: options.agentResult ?? '',
@@ -193,7 +203,7 @@ async function fixture(options: { withMemory?: boolean; inactiveMemory?: boolean
           ...(options.backgroundShell ? { FIXTURE_BG_COMMAND: `"${process.execPath.replaceAll('\\', '/')}" "${path.join(data, 'finite-background.cjs').replaceAll('\\', '/')}"`, FIXTURE_BG_READY: path.join(data, 'background-ready.json'), ...(options.orphanDuringStop ? { FIXTURE_ORPHAN_READY: path.join(data, 'orphan-ready.json') } : {}) } : {}) },
         port: (agentPort.address() as { port: number }).port, auto_start: false, auto_restart: false, skip_health_check: true, start_priority: 1, status: 'stopped' }
       await new Promise<void>(resolve => agentPort.close(() => resolve()))
-      if (options.validationRegistration) {
+      if (options.validationRegistration || options.businessAgent) {
         await fs.writeFile(path.join(data, 'port-allocations.json'), JSON.stringify([{ module_id: 'crabot-agent', port: agent.port, allocated_at: new Date().toISOString() }]))
         await manager.portAllocator.initialize()
       }
@@ -1810,4 +1820,38 @@ describe('MM checks the new runtime health and Root under the original job', () 
       }
     }, process.platform === 'win32' ? 600000 : 120000)
   }
+})
+
+
+// This group cannot start a business Agent on a developer machine.
+describe.skipIf(process.env.GITHUB_ACTIONS !== 'true' || process.env.CRABOT_WORKSPACE_BUSINESS_ONSTART_CI !== '1')('isolated business Agent after workspace relocation', () => {
+  it('runs the actual main/config pull/onStart/register at the selected Root while old work stays retired', async () => {
+    const f = await fixture({ actualAgent: true, actualAdmin: true, businessAgent: true, processLifetimeMs: 300000 })
+    const locks = require('../../scripts/lib/cli-lock.mjs'), records = require('../../scripts/lib/workspace-relocation-intent.mjs')
+    const lock = await locks.acquireWorkspaceRelocationLock(f.data, f.params.intent_id)
+    const runtime = f.manager.modules.get('crabot-agent'); runtime.skip_health_check = false
+    const oldChild = f.manager.processes.get('crabot-agent')
+    try {
+      const result = await f.manager.verifyWorkspaceRelocationValidationHealth(f.params, 'fixture-human')
+      expect(f.manager.processes.get('crabot-agent')).not.toBe(oldChild)
+      expect(result.root_verified.runtime_id).toBe(f.manager.childStates.get(f.manager.processes.get('crabot-agent')).runtimeId)
+      await vi.waitFor(async () => expect(await fs.readFile(path.join(f.data, 'logs/crabot-agent.log'), 'utf8')).toContain('Unified Agent module started successfully'), { timeout: 10000 })
+      const calls = await f.calls()
+      expect(calls.filter(item => item.method === '/get_agent_config')).toHaveLength(1)
+      expect(calls.some(item => item.method.startsWith('/v1/'))).toBe(false)
+      const ledger = JSON.parse(await fs.readFile(path.join(f.data, 'agent/worker-ledgers/channel%3A%3Asession.json'), 'utf8'))
+      expect(ledger.workers[0].task.status).toBe('closed')
+      expect(ledger.workers[0].task.closed.by).toBe('migration')
+      expect(require('../../scripts/lib/workspace-maintenance.cjs').workspaceMaintenancePending(f.data)).toBe(true)
+      expect(records.readWorkspaceRelocationHealth(f.data, f.params.intent_id).root_proof).toEqual(result.root_verified)
+      expect((await fetch(`http://127.0.0.1:${f.port}/api/friends`, { headers: { Authorization: 'Bearer fixture-human' } })).status).toBe(200)
+    } catch (error) {
+      console.error('[Workspace business startup]', (await fs.readFile(path.join(f.data, 'logs/crabot-agent.log'), 'utf8').catch(() => '')).slice(-6000))
+      throw error
+    } finally {
+      const child = f.manager.workspaceValidationProof?.result.coordinator
+      if (child?.connected) { const ended = once(child, 'exit'); child.disconnect(); await ended }
+      locks.releaseCliLock(lock); await f.cleanup()
+    }
+  }, process.platform === 'win32' ? 600000 : 180000)
 })

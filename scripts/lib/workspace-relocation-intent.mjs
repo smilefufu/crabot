@@ -369,15 +369,17 @@ export function completeWorkspaceRelocationStops({ dataDir, id, results }) {
 
 const moduleFiles = ['relocation-modules.json', 'relocation-module-stop-attempt.json', 'relocation-module-processes', 'relocation-module-stop-submission.json']
 const processKey = item => JSON.stringify([item.pid, item.started, item.owner])
-function validProcesses(processes) {
+// A historical reader may have reused an exited generation's PID; new observations never include self.
+function validProcesses(processes, historical = false) {
   if (!Array.isArray(processes) || processes.length > 32768) return false
-  const owner = native.inspectProcess(process.pid).owner, seen = new Set()
+  const self = native.inspectProcess(process.pid), seen = new Set()
   let previous
   for (const item of processes) {
     if (!fields(item, ['pid', 'parent', 'started', 'owner', 'executable'])
-      || !Number.isInteger(item.pid) || item.pid < 1 || item.pid > 2147483647 || item.pid === process.pid
+      || !Number.isInteger(item.pid) || item.pid < 1 || item.pid > 2147483647
+      || item.pid === process.pid && (!historical || item.started === self.started)
       || !Number.isInteger(item.parent) || item.parent < 0 || item.parent > 2147483647
-      || !nonempty(item.started) || item.owner !== owner || !nonempty(item.executable) || seen.has(processKey(item))
+      || !nonempty(item.started) || item.owner !== self.owner || !nonempty(item.executable) || seen.has(processKey(item))
       || previous && (item.pid < previous.pid || item.pid === previous.pid && item.started <= previous.started)) return false
     seen.add(processKey(item)); previous = item
   }
@@ -390,7 +392,7 @@ export const readWorkspaceRelocationProcesses = recordGraphReader(function readW
   if (value === undefined) { absent(ctx, [processStopFile, executionExitFile, filePlanFile, fileActorsFile]); return null }
   if (!fields(value, ['schema_version', 'intent_id', 'intent_sha256', 'workers_sha256', 'processes', 'created_at'])
     || value.schema_version !== 1 || value.intent_id !== id || value.intent_sha256 !== sha256CanonicalJson(intent)
-    || value.workers_sha256 !== sha256CanonicalJson(scope) || !validProcesses(value.processes) || !validDate(value.created_at)
+    || value.workers_sha256 !== sha256CanonicalJson(scope) || !validProcesses(value.processes, true) || !validDate(value.created_at)
     || sha256CanonicalJson(readWorkspaceRelocationWorkers(dataDir, id)) !== value.workers_sha256) fail()
   return value
 })
@@ -416,7 +418,7 @@ export function commitWorkspaceRelocationProcesses({ dataDir, id, processes }) {
   return accepted
 }
 
-function validModules(modules) {
+function validModules(modules, historical = false) {
   if (!Array.isArray(modules)) return false
   let previous, instance
   const pids = new Set(), runtimes = new Set()
@@ -424,7 +426,7 @@ function validModules(modules) {
     if (!fields(item, ['instance_id', 'module_id', 'module_port', 'processes'], ['runtime_id'])
       || !nonempty(item.instance_id) || instance !== undefined && instance !== item.instance_id
       || !nonempty(item.module_id) || item.module_id === 'admin-web' || previous !== undefined && item.module_id <= previous
-      || !Number.isInteger(item.module_port) || item.module_port < 1 || item.module_port > 65535 || !validProcesses(item.processes)
+      || !Number.isInteger(item.module_port) || item.module_port < 1 || item.module_port > 65535 || !validProcesses(item.processes, historical)
       || Object.hasOwn(item, 'runtime_id') && (!nonempty(item.runtime_id) || runtimes.has(item.runtime_id))
       || Boolean(item.runtime_id) !== Boolean(item.processes.length)) return false
     for (const process of item.processes) { if (pids.has(process.pid)) return false; pids.add(process.pid) }
@@ -444,7 +446,7 @@ function readModules(ctx, intent, workers) {
   if (value === undefined) { absent(ctx, [...moduleFiles.slice(1), processStopFile, executionExitFile, filePlanFile, fileActorsFile]); return null }
   if (!fields(value, ['schema_version', 'intent_id', 'intent_sha256', 'workers_sha256', 'modules', 'created_at']) || value.schema_version !== 1
     || value.intent_id !== intent.id || value.intent_sha256 !== sha256CanonicalJson(intent) || value.workers_sha256 !== sha256CanonicalJson(workers)
-    || !validModules(value.modules) || !validDate(value.created_at)) fail()
+    || !validModules(value.modules, true) || !validDate(value.created_at)) fail()
   return value
 }
 export const readWorkspaceRelocationModules = recordGraphReader(function readWorkspaceRelocationModules(dataDir, id) {
@@ -501,7 +503,7 @@ function readModuleObservations(ctx, attempt, modules) {
     const value = readPrivateJson(file, scopeLimit)
     if (!value || !fields(value, ['schema_version', 'intent_id', 'attempt_sha256', 'sequence', 'module_id', 'previous_sha256', 'processes', 'created_at'])
       || value.schema_version !== 1 || value.intent_id !== attempt.intent_id || value.attempt_sha256 !== sha256CanonicalJson(attempt)
-      || value.sequence !== index || value.previous_sha256 !== previous || !validDate(value.created_at) || !validProcesses(value.processes)
+      || value.sequence !== index || value.previous_sha256 !== previous || !validDate(value.created_at) || !validProcesses(value.processes, true)
       || !modules.modules.some(item => item.module_id === value.module_id && item.runtime_id)
       || !extendsProcesses(latest.get(value.module_id), value.processes)) fail()
     for (const process of value.processes) {
@@ -732,7 +734,7 @@ export const readWorkspaceRelocationProcessStops = recordGraphReader(function re
     for (const row of rows) {
       if (completion || !validDate(row?.created_at) || row.previous_sha256 !== sha256CanonicalJson(previous)) fail()
       if (row.type === 'observation') {
-        if (!fields(row, ['type', 'previous_sha256', 'processes', 'created_at']) || !validProcesses(row.processes)
+        if (!fields(row, ['type', 'previous_sha256', 'processes', 'created_at']) || !validProcesses(row.processes, true)
           || !extendsProcesses(latest, row.processes)) fail()
         observations.push(row); latest = row.processes
       } else if (row.type === 'known_scope_exited') {
