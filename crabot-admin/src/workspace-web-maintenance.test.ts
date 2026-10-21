@@ -69,6 +69,44 @@ describe('Admin workspace maintenance HTTP admission', () => {
       expect((await fetch(f.endpoint + route, { headers: f.headers })).status).toBe(503)
     }
   })
+  it.each([
+    ['/api/agent/workers/worker/terminal', 'handleGetWorkerTerminalApi'],
+    ['/api/agent/workers/worker/trace', 'handleGetWorkerTraceApi'],
+    ['/api/agent/workers/worker/subagents', 'handleListWorkerSubagentsApi'],
+    ['/api/agent/workers/worker/subagents/child', 'handleGetWorkerSubagentDetailApi'],
+    ['/api/agent/workers/worker/subagents/child/trace', 'handleGetWorkerSubagentTraceApi'],
+  ])('fences native-backed GET %s before its file/runtime reader, after authentication', async (route, method) => {
+    const f = await fixture(), reader = vi.fn(async (_req, res) => { res.writeHead(200); res.end('{}') })
+    f.admin[method] = reader
+    expect((await fetch(f.endpoint + route, { headers: f.headers })).status).toBe(200)
+    await f.fence()
+    expect((await fetch(f.endpoint + route)).status).toBe(401)
+    const denied = await fetch(f.endpoint + route, { headers: f.headers })
+    expect(denied.status).toBe(503); expect(await denied.json()).toMatchObject({ code: 'WORKSPACE_MAINTENANCE' })
+    expect(reader).toHaveBeenCalledOnce()
+    expect((await fetch(f.endpoint + '/api/friends', { headers: f.headers })).status).toBe(200)
+    expect(f.errors).toEqual([])
+  })
+  it('drains an admitted native-backed GET until its actual workspace file handle closes', async () => {
+    const f = await fixture(), file = path.join((await f.service.get('default')).item.workspace.root, 'native-history.jsonl')
+    await fs.writeFile(file, 'retained history')
+    let release!: () => void, started = false, closed = false, drained = false
+    const wait = new Promise<void>(resolve => { release = resolve })
+    f.admin.handleGetWorkerTraceApi = vi.fn(async (_req, res) => {
+      const handle = await fs.open(file, 'r'); started = true
+      try { res.writeHead(200); res.end('{}'); await wait }
+      finally { await handle.close(); closed = true }
+    })
+    const request = fetch(f.endpoint + '/api/agent/workers/worker/trace', { headers: f.headers })
+    try {
+      await vi.waitFor(() => expect(started).toBe(true)); expect((await request).status).toBe(200)
+      await f.fence()
+      const drainage = f.admin.quiesceWorkspaceWebAccess().then(() => { drained = true })
+      await Promise.resolve(); expect(drained).toBe(false); expect(closed).toBe(false)
+      release(); await drainage; expect(closed).toBe(true); expect(drained).toBe(true)
+      expect(await fs.readFile(file, 'utf8')).toBe('retained history')
+    } finally { release(); await request; await vi.waitFor(() => expect(closed).toBe(true)) }
+  })
   it('waits for an admitted HTTP body and its real catalog write before draining; closed admission stays closed', async () => {
     const f = await fixture(), id = randomUUID(), read = vi.spyOn(f.admin, 'readJsonBody')
     expect(typeof f.admin.quiesceWorkspaceWebAccess).toBe('function')

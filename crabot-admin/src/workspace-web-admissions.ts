@@ -9,6 +9,7 @@ export function requiresWorkspaceWebAdmission(method: string | undefined, pathna
     || pathname === '/api/backup/export'
     || /^\/api\/legacy-agent-archive\/[^/]+\/export$/.test(pathname)
     || pathname.startsWith('/api/channels/onboard/')
+    || /^\/api\/agent\/workers\/[^/]+\/(?:terminal|trace|subagents(?:\/[^/]+(?:\/trace)?)?)$/.test(pathname)
 }
 
 const failure = () => Object.assign(new Error('工作目录正在迁移或维护状态无法核实，请在管理页面查看进度；暂不接受文件访问或配置、执行操作。'), { code: 'WORKSPACE_MAINTENANCE' })
