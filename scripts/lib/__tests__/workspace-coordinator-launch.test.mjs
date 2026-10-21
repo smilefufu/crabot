@@ -53,7 +53,7 @@ async function fixture(t, { crossVolume = false, closureLedger = false } = {}) {
   }
   t.after(async () => { if (coordinator && workspaceCoordinatorDiagnostics(coordinator.child)) t.diagnostic(workspaceCoordinatorDiagnostics(coordinator.child)); await close(); releaseCliLock(lock); fs.rmSync(root, { recursive: true, force: true }); if (crossVolume) fs.rmSync(targetRoot, { recursive: true, force: true }) })
   return { root, data, id, lock, before, catalog, marker, close, closureWorker, ledgerFile, ledgerBytes,
-    launch: async options => { try { coordinator = await launchWorkspaceRelocationCoordinator(options ?? { dataDir: data, id }); return coordinator } catch (error) { t.diagnostic(JSON.stringify({ stage: error.stage, code: error.code, cause_code: error.cause?.code, cause_message: error.cause?.message, child_observation: error.child_observation, stderr: error.diagnostics })); throw error } } }
+    launch: async options => { try { coordinator = await launchWorkspaceRelocationCoordinator(options ?? { dataDir: data, id }); return coordinator } catch (error) { t.diagnostic(JSON.stringify({ stage: error.stage, code: error.code, cause_code: error.cause?.code, cause_stage: error.cause?.stage, cause_message: error.cause?.message, child_observation: error.child_observation, stderr: error.diagnostics })); throw error } } }
 }
 
 test('the actual fixed script owns the lock and serves the first journals before launch returns', { timeout: 20000 }, async t => {
