@@ -27,7 +27,7 @@ async function fixture(t, { crossVolume = false, closureLedger = false, separate
   const targetParent = separateTargetAncestor ? path.join(targetRoot, 'target-parent') : targetRoot
   if (separateTargetAncestor) fs.mkdirSync(targetParent, { mode: 0o700 })
   const data = management.ensurePrivateDataRoot(path.join(root, 'data')), id = randomUUID()
-  let closureWorker, ledgerFile, ledgerBytes, checkpointFile, checkpointBytes, externalWorkspace
+  let closureWorker, ledgerFile, ledgerBytes, checkpointFile, checkpointBytes, externalWorkspace, nativeHistory
   if (closureLedger) {
     closureWorker = { worker_id: 'closure-worker', manager_key: 'fixture::closure', task_id: 'closure-task', workspace_id: 'default', incarnations: [] }
     ledgerFile = path.join(data, 'agent/worker-ledgers/fixture%3A%3Aclosure.json')
@@ -56,8 +56,16 @@ async function fixture(t, { crossVolume = false, closureLedger = false, separate
   if (historyIncarnation) {
     const workspace = path.join(before.storage_root, 'default/tasks', closureWorker.worker_id)
     fs.mkdirSync(workspace, { recursive: true }); fs.writeFileSync(path.join(workspace, 'history.md'), 'original history artifact')
-    const incarnation = { incarnation_id: 'history-mainline', impl: 'builtin', seq: 0, state: 'exited', workspace,
-      session_ref: 'original-history-session', started_at: '2026-10-20T00:00:00.000Z', ended_at: '2026-10-20T00:01:00.000Z', ended_reason: 'completed' }
+    const incarnation = { incarnation_id: 'history-mainline', impl: 'codex', seq: 1, state: 'exited', workspace,
+      session_ref: '11111111-1111-4111-8111-111111111111', started_at: '2026-10-20T00:00:00.000Z', ended_at: '2026-10-20T00:01:00.000Z', ended_reason: 'completed' }
+    const adapterData = path.join(data, 'agent/workers/codex'), privateDir = path.join(adapterData, closureWorker.worker_id)
+    const metaFile = path.join(privateDir, 'meta-1.json'), source = path.join(workspace, '.codex/sessions/2026/10/20', 'rollout-2026-10-20T00-00-00-' + incarnation.session_ref + '.jsonl')
+    const meta = JSON.stringify({ seq: 1, state: 'exited', ended_reason: 'completed', workspace_root: workspace, session_id: incarnation.session_ref, session_discovery: 'discovered' })
+    const body = JSON.stringify({ type: 'response_item', timestamp: incarnation.started_at, payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'original relocated native parent history' }] } }) + '\n'
+    fs.mkdirSync(privateDir, { recursive: true, mode: 0o700 }); fs.writeFileSync(metaFile, meta, { mode: 0o600 })
+    fs.writeFileSync(path.join(privateDir, 'terminal-final-1.json'), JSON.stringify({ text: 'original retained native terminal', captured_at: incarnation.ended_at }), { mode: 0o600 })
+    fs.mkdirSync(path.dirname(source), { recursive: true }); fs.writeFileSync(source, body, { mode: 0o600 })
+    nativeHistory = { adapterData, metaFile, meta, source, body, handle: { worker_id: closureWorker.worker_id, incarnation_id: incarnation.incarnation_id, seq: 1, impl: 'codex', session_ref: incarnation.session_ref } }
     closureWorker.incarnations = [{ incarnation_id: incarnation.incarnation_id, impl: incarnation.impl, seq: incarnation.seq, workspace, started_at: incarnation.started_at }]
     const ledger = JSON.parse(ledgerBytes); ledger.workers[0].incarnations = [incarnation]
     ledgerBytes = JSON.stringify(ledger, null, 2); fs.writeFileSync(ledgerFile, ledgerBytes, { mode: 0o600 })
@@ -78,6 +86,7 @@ async function fixture(t, { crossVolume = false, closureLedger = false, separate
   }
   t.after(async () => { if (coordinator && workspaceCoordinatorDiagnostics(coordinator.child)) t.diagnostic(workspaceCoordinatorDiagnostics(coordinator.child)); await close(); releaseCliLock(lock); fs.rmSync(root, { recursive: true, force: true }); if (crossVolume) fs.rmSync(targetRoot, { recursive: true, force: true }) })
   return { root, data, id, target: intent.target, lock, before, catalog, marker, close, closureWorker, ledgerFile, ledgerBytes, checkpointFile, checkpointBytes, externalWorkspace,
+    nativeHistory,
     launch: async options => { try { coordinator = await launchWorkspaceRelocationCoordinator(options ?? { dataDir: data, id }); return coordinator } catch (error) { t.diagnostic(JSON.stringify({ stage: error.stage, code: error.code, cause_code: error.cause?.code, cause_stage: error.cause?.stage, cause_message: error.cause?.message, child_observation: error.child_observation, stderr: error.diagnostics })); throw error } } }
 }
 
@@ -867,6 +876,19 @@ for (const mode of ['confirmed', 'lost acknowledgement', 'changed source', 'copy
                 const contextFile = path.join(workersDir, query.workerId, 'context.json'), contextBytes = fs.readFileSync(contextFile)
                 const harness = new WorkerHarness({ ledger, workersDir, workspaces: new WorkspaceManager(path.join(f.data, 'workspaces'), f.data),
                   adapters: new Map(), defaultImpl: 'builtin', now: () => new Date().toISOString() })
+                const { CodexWorkerAdapter } = await import('../../../crabot-agent/dist/workers/codex/adapter.js')
+                const forbiddenNative = async () => { throw new Error('actual relocated history must not rebuild or probe a native executor') }
+                const nativeReader = new CodexWorkerAdapter({ dataDir: f.nativeHistory.adapterData, codexHomeSource: path.join(f.root, 'unused-host-profile'),
+                  tmux: { isAlive: forbiddenNative, killSession: forbiddenNative, capturePane: forbiddenNative },
+                  readWorkspaceHistory: handle => harness.workspaceHistoryRead(handle.worker_id, handle.incarnation_id) })
+                const nativeTrace = await nativeReader.readTrace(f.nativeHistory.handle)
+                assert.equal(nativeTrace.events[0].summary, 'original relocated native parent history')
+                assert.deepEqual(nativeTrace.nextCursor, { offset: 1 })
+                assert.equal((await nativeReader.readTrace(f.nativeHistory.handle, nativeTrace.nextCursor)).events.length, 0)
+                assert.deepEqual(await nativeReader.readTerminal(f.nativeHistory.handle), { kind: 'final_terminal', text: 'original retained native terminal', captured_at: '2026-10-20T00:01:00.000Z' })
+                assert.equal(nativeReader.runtimes.size, 0)
+                assert.equal(fs.readFileSync(f.nativeHistory.metaFile, 'utf8'), f.nativeHistory.meta)
+                assert.equal(fs.readFileSync(path.join(f.target, path.relative(f.before.storage_root, f.nativeHistory.source)), 'utf8'), f.nativeHistory.body)
                 const docs = principal => buildProjectDocTools({ ledger, managerKey: query.managerKey, managerPrincipalPermissions: principal,
                   readWorkerContext: id => contexts.read(id), managedWorkspace: (id, workspace) => harness.managedWorkspaceScope(id, workspace),
                   historyWorkspace: (id, incarnation) => harness.workspaceHistoryRead(id, incarnation) })[0]
@@ -905,6 +927,9 @@ for (const mode of ['confirmed', 'lost acknowledgement', 'changed source', 'copy
                 assert.deepEqual(fs.readFileSync(contextFile), contextBytes)
                 await f.close()
                 assert.deepEqual(await locateWorkspaceRelocationHistory(query), location)
+                assert.deepEqual(await nativeReader.readTrace(f.nativeHistory.handle), nativeTrace)
+                assert.equal(nativeReader.runtimes.size, 0)
+                assert.equal(fs.readFileSync(f.nativeHistory.metaFile, 'utf8'), f.nativeHistory.meta)
                 assert.deepEqual(fs.readFileSync(f.ledgerFile), closedBytes); assert.deepEqual(fs.readFileSync(retirementFile), retirementBytes)
                 assert.equal(workspaceMaintenancePending(f.data), true)
               }
