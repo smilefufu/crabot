@@ -24,18 +24,25 @@ function sync(directory) {
   try { fs.fsyncSync(fd) } finally { fs.closeSync(fd) }
 }
 
-export function validateWorkspaceRootPublicationPlan(plan) {
+function validatePublicationPlan(plan, prefix) {
   if (!fields(plan, ['intent_id', 'container', 'tree', 'target', 'target_parent', 'empty_target']) || typeof plan.intent_id !== 'string' || !uuid.test(plan.intent_id)
     || !validIdentity(plan.container) || !validIdentity(plan.tree) || !validIdentity(plan.target_parent) || !absolute(plan.target)
     || plan.empty_target !== null && (!validIdentity(plan.empty_target) || plan.empty_target.path !== plan.target)
-    || path.basename(plan.container.path) !== '.crabot-workspace-' + plan.intent_id || plan.tree.path !== path.join(plan.container.path, 'tree')
+    || path.basename(plan.container.path) !== prefix + plan.intent_id || plan.tree.path !== path.join(plan.container.path, 'tree')
     || path.dirname(plan.target) !== plan.target_parent.path || within(plan.container.path, plan.target) || within(plan.target, plan.container.path)
     || plan.tree.dev !== plan.container.dev || plan.tree.dev !== plan.target_parent.dev) throw failure()
 }
 
-export async function publishWorkspaceRoot({ plan: input, verify, signal }) {
-  const plan = structuredClone(input)
-  validateWorkspaceRootPublicationPlan(plan)
+export function validateWorkspaceRootPublicationPlan(plan) {
+  validatePublicationPlan(plan, '.crabot-workspace-')
+}
+export function validateWorkspaceParentsPublicationPlan(plan) {
+  validatePublicationPlan(plan, '.crabot-workspace-parents-')
+  if (plan.empty_target !== null) throw failure()
+}
+
+// Directory effects only; each owner retains its fixed plan, content checks and original job authority.
+async function publishDirectory(plan, verify, signal) {
   if (typeof verify !== 'function') throw failure()
   const hold = path.join(plan.target_parent.path, '.crabot-workspace-empty-' + plan.intent_id), pins = []
   const check = () => {
@@ -76,4 +83,16 @@ export async function publishWorkspaceRoot({ plan: input, verify, signal }) {
     if (observe(plan.tree.path) || !matches(plan.tree, target, plan.target)) throw failure()
     return { dispatch: 'dispatch', target }
   } finally { for (const pin of pins.reverse()) native.releaseDirectoryPin(pin) }
+}
+
+
+export async function publishWorkspaceRoot({ plan: input, verify, signal }) {
+  const plan = structuredClone(input)
+  validateWorkspaceRootPublicationPlan(plan)
+  return publishDirectory(plan, verify, signal)
+}
+export async function publishWorkspaceParents({ plan: input, verify, signal }) {
+  const plan = structuredClone(input)
+  validateWorkspaceParentsPublicationPlan(plan)
+  return publishDirectory(plan, verify, signal)
 }

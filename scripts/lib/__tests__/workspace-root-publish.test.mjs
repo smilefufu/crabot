@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os'
 import { randomUUID } from 'node:crypto'
 import native from '../process-identity.cjs'
 import { publishWorkspaceRoot } from '../workspace-root-publish.mjs'
+import * as publication from '../workspace-root-publish.mjs'
 
 const identity = file => { const stat = fs.lstatSync(file, { bigint: true }); return { path: file, dev: stat.dev.toString(), ino: stat.ino.toString(), native_id: process.platform === 'win32' ? native.inspectDirectoryFileId(file) : null } }
 function fixture(t, empty = false) {
@@ -113,4 +114,46 @@ test('cancellation between the two moves preserves both original objects', async
   await assert.rejects(publishWorkspaceRoot({ plan: f.plan, signal: controller.signal, verify: async () => { if (fs.existsSync(f.hold)) controller.abort() } }))
   assert.equal(fs.existsSync(f.target), false); assert.equal(identity(f.hold).ino, f.plan.empty_target.ino)
   assert.equal(fs.readFileSync(path.join(f.tree, '.hidden'), 'utf8'), 'original work')
+})
+
+
+for (const mode of ['publish', 'lost acknowledgement', 'existing target', 'known empty target', 'wrong phase']) test('parent directory publication keeps its own fixed namespace: ' + mode, async t => {
+  const f = fixture(t), container = path.join(f.root, '.crabot-workspace-parents-' + f.plan.intent_id)
+  fs.renameSync(f.container, container)
+  const tree = path.join(container, 'tree')
+  fs.unlinkSync(path.join(tree, '.hidden'))
+  fs.mkdirSync(path.join(tree, 'nested', 'leaf'), { recursive: true })
+  const plan = { ...f.plan, container: identity(container), tree: identity(tree) }
+  await assert.rejects(publishWorkspaceRoot({ plan, verify: async () => {} }))
+  if (mode === 'existing target') {
+    fs.mkdirSync(f.target); fs.writeFileSync(path.join(f.target, 'keep'), 'user data')
+    await assert.rejects(publication.publishWorkspaceParents({ plan, verify: async () => {} }))
+    assert.equal(fs.readFileSync(path.join(f.target, 'keep'), 'utf8'), 'user data')
+    assert.ok(fs.statSync(path.join(tree, 'nested/leaf')).isDirectory())
+    return
+  }
+  if (mode === 'known empty target') {
+    fs.mkdirSync(f.target)
+    await assert.rejects(publication.publishWorkspaceParents({ plan: { ...plan, empty_target: identity(f.target) }, verify: async () => {} }))
+    assert.deepEqual(fs.readdirSync(f.target), [])
+    assert.equal(fs.existsSync(f.hold), false)
+    assert.ok(fs.statSync(path.join(tree, 'nested/leaf')).isDirectory())
+    return
+  }
+  if (mode === 'wrong phase') {
+    fs.renameSync(container, f.container)
+    await assert.rejects(publication.publishWorkspaceParents({ plan: { ...plan, container: identity(f.container), tree: identity(f.tree) }, verify: async () => {} }))
+    assert.equal(fs.existsSync(f.target), false)
+    return
+  }
+  if (mode === 'lost acknowledgement') {
+    await assert.rejects(publication.publishWorkspaceParents({ plan, verify: async () => { if (!fs.existsSync(tree)) throw new Error('parent publication acknowledgement lost') } }))
+    assert.equal(identity(f.target).ino, plan.tree.ino)
+  }
+  const result = await publication.publishWorkspaceParents({ plan, verify: async () => {} })
+  assert.equal(result.dispatch, mode === 'lost acknowledgement' ? 'observe' : 'dispatch')
+  assert.equal(result.target.ino, plan.tree.ino)
+  assert.deepEqual(fs.readdirSync(path.join(f.target, 'nested/leaf')), [])
+  assert.equal(fs.existsSync(tree), false)
+  assert.equal((await publication.publishWorkspaceParents({ plan, verify: async () => {} })).dispatch, 'observe')
 })
