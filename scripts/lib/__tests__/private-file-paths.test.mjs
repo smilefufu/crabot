@@ -93,7 +93,8 @@ test('Windows runtime registry inheritance remains owner-only without changing p
     execFileSync(icacls, [target, '/grant', '*S-1-1-0:(R)'], { stdio: 'pipe' })
     assert.equal(inspect(target), false)
     assert.equal(target === file ? identity.isOwnedFile(target) : identity.isOwnedDirectory(target), true)
-    execFileSync(icacls, [target, '/remove:g', '*S-1-1-0'], { stdio: 'pipe' })
+    // Restore this fixture's original default inheritance from its owner-only parent.
+    execFileSync(icacls, [target, '/reset'], { stdio: 'pipe' })
     assert.equal(inspect(target), true)
   }
   const junction = path.join(root, 'junction'); fs.symlinkSync(records, junction, 'junction')

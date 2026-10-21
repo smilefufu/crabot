@@ -31,7 +31,7 @@ async function reserveFixturePort(): Promise<ReturnType<typeof http.createServer
   throw new Error('No finite fixture port was available')
 }
 
-async function fixture(options: { withMemory?: boolean; inactiveMemory?: boolean; wrongRuntime?: boolean; result?: string; withAgent?: boolean; agentResult?: string; actualAgent?: boolean; businessAgent?: boolean; processLifetimeMs?: number; backgroundShell?: boolean; validationHealth?: 'healthy' | 'unhealthy'; validationRuntimeMismatch?: boolean; validationRegistration?: 'delayed' | 'exit'; memoryHealth?: 'healthy' | 'degraded'; actualAdmin?: boolean; adminReadyDelayMs?: number; quiesceResult?: string; orphanDuringStop?: boolean } = {}) {
+async function fixture(options: { withMemory?: boolean; inactiveMemory?: boolean; wrongRuntime?: boolean; result?: string; withAgent?: boolean; agentResult?: string; actualAgent?: boolean; businessAgent?: boolean; processLifetimeMs?: number; backgroundShell?: boolean; validationHealth?: 'healthy' | 'unhealthy'; validationRuntimeMismatch?: boolean; validationRootOverride?: boolean; validationRegistration?: 'delayed' | 'exit'; memoryHealth?: 'healthy' | 'degraded'; actualAdmin?: boolean; adminReadyDelayMs?: number; quiesceResult?: string; orphanDuringStop?: boolean } = {}) {
   if (options.businessAgent && (process.env.GITHUB_ACTIONS !== 'true' || process.env.CRABOT_WORKSPACE_BUSINESS_ONSTART_CI !== '1')) throw new Error('Business onStart is isolated CI only')
   const root = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'crabot-current-admin-')))
   const native = require('../../scripts/lib/process-identity.cjs'), management = require('../../scripts/lib/desktop-management.cjs')
@@ -98,6 +98,7 @@ async function fixture(options: { withMemory?: boolean; inactiveMemory?: boolean
   try {
     if (options.businessAgent) {
       // Real main requires the same completed offline preparation as ordinary startup.
+      await fs.mkdir(path.join(data, 'admin'), { recursive: true })
       const { prepareSharedRequests } = require('../../scripts/upgrade-lib/shared-requests.mjs')
       expect((await prepareSharedRequests(path.resolve('..'), data)).status).toBe('prepared')
       await require('../../crabot-agent/dist/manager/request-upgrade.js').assertRequestUpgradeReady(path.join(data, 'agent'))
@@ -109,7 +110,7 @@ async function fixture(options: { withMemory?: boolean; inactiveMemory?: boolean
     }
     manager.managementOnly = false
     const runtime = { module_id: 'admin-web', module_type: 'admin', entry: `"${process.execPath}" "${script}"`,
-      env: { FIXTURE_CALLS: callsFile, FIXTURE_READY: path.join(data, 'ready'), FIXTURE_QUIESCE_RESULT: options.quiesceResult ?? '', DATA_DIR: data, CRABOT_AGENT_DATA_DIR: path.join(data, 'agent'), WORKER_WORKSPACES_DIR: path.join(data, 'workspaces'), ...(options.wrongRuntime ? { FIXTURE_WRONG_RUNTIME: '1' } : {}),
+      env: { FIXTURE_CALLS: callsFile, FIXTURE_READY: path.join(data, 'ready'), FIXTURE_QUIESCE_RESULT: options.quiesceResult ?? '', DATA_DIR: data, CRABOT_AGENT_DATA_DIR: path.join(data, 'agent'), ...(options.wrongRuntime ? { FIXTURE_WRONG_RUNTIME: '1' } : {}),
    ...(options.result ? { FIXTURE_RESULT: options.result } : {}) },
       port, auto_start: false, auto_restart: false, skip_health_check: true, start_priority: 1, status: 'stopped' }
     manager.modules.set('admin-web', runtime); await manager.startModuleProcess('admin-web')
@@ -205,7 +206,7 @@ async function fixture(options: { withMemory?: boolean; inactiveMemory?: boolean
       }
       const agent = { module_id: 'crabot-agent', module_type: 'agent', entry: `"${process.execPath}" "${agentScript}"`,
         env: { FIXTURE_CALLS: path.join(data, 'agent-calls.json'), FIXTURE_READY: agentReady, FIXTURE_RESULT: options.agentResult ?? '',
-          DATA_DIR: data, CRABOT_AGENT_DATA_DIR: path.join(data, 'agent'), WORKER_WORKSPACES_DIR: path.join(data, 'workspaces'), FIXTURE_WORKSPACE: path.join(data, 'project'), FIXTURE_STOPS: path.join(data, 'stops.txt'),
+          DATA_DIR: data, CRABOT_AGENT_DATA_DIR: path.join(data, 'agent'), ...(options.validationRootOverride ? { WORKER_WORKSPACES_DIR: path.join(data, 'workspaces') } : {}), FIXTURE_WORKSPACE: path.join(data, 'project'), FIXTURE_STOPS: path.join(data, 'stops.txt'),
           ...(options.backgroundShell ? { FIXTURE_BG_COMMAND: `"${process.execPath.replaceAll('\\', '/')}" "${path.join(data, 'finite-background.cjs').replaceAll('\\', '/')}"`, FIXTURE_BG_READY: path.join(data, 'background-ready.json'), ...(options.orphanDuringStop ? { FIXTURE_ORPHAN_READY: path.join(data, 'orphan-ready.json') } : {}) } : {}) },
         port: (agentPort.address() as { port: number }).port, auto_start: false, auto_restart: false, skip_health_check: true, start_priority: 1, status: 'stopped' }
       await new Promise<void>(resolve => agentPort.close(() => resolve()))
@@ -1682,11 +1683,11 @@ describe('MM restricts post-relocation validation launches to the original job',
 
 
 describe('MM checks the new runtime health and Root under the original job', () => {
-  for (const mode of ['healthy Agent', 'healthy Memory', 'healthy delayed registration', 'unhealthy Agent', 'degraded Memory', 'wrong runtime', 'definition changed during health', 'exit before registration', 'lost health acknowledgement', 'runtime record changed before health record']) {
+  for (const mode of ['healthy Agent', 'healthy Memory', 'healthy delayed registration', 'unhealthy Agent', 'degraded Memory', 'wrong runtime', 'definition changed during health', 'exit before registration', 'lost health acknowledgement', 'runtime record changed before health record', 'Agent workspace override']) {
     it('retains maintenance until all exact runtime checks confirm: ' + mode, async () => {
       const withMemory = mode.includes('Memory')
       const f = await fixture({ actualAgent: true, actualAdmin: true, withMemory,
-        validationHealth: mode === 'unhealthy Agent' ? 'unhealthy' : 'healthy', validationRuntimeMismatch: mode === 'wrong runtime',
+        validationHealth: mode === 'unhealthy Agent' ? 'unhealthy' : 'healthy', validationRuntimeMismatch: mode === 'wrong runtime', validationRootOverride: mode === 'Agent workspace override',
         ...(mode.includes('registration') ? { validationRegistration: mode === 'exit before registration' ? 'exit' as const : 'delayed' as const } : {}),
         ...(withMemory ? { memoryHealth: mode === 'degraded Memory' ? 'degraded' as const : 'healthy' as const } : {}),
         processLifetimeMs: process.platform === 'win32' ? 900000 : 300000 })
@@ -1784,6 +1785,7 @@ describe('MM checks the new runtime health and Root under the original job', () 
         } else {
           await expect(first).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
           if (mode === 'unhealthy Agent' || mode === 'degraded Memory') await expect(first).rejects.toMatchObject({ stage: 'module-health' })
+          if (mode === 'Agent workspace override') await expect(fs.readFile(path.join(f.data, 'workspace-control/relocation-health.json'))).rejects.toMatchObject({ code: 'ENOENT' })
           await expect(f.manager.verifyWorkspaceRelocationValidationHealth(f.params, 'fixture-human')).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
           if (mode === 'definition changed during health' || mode === 'exit before registration') expect(injected).toBe(true)
           if (mode === 'lost health acknowledgement' || mode === 'runtime record changed before health record') {
@@ -1799,7 +1801,7 @@ describe('MM checks the new runtime health and Root under the original job', () 
         }
         expect(starts).toHaveBeenCalledTimes(withMemory ? 2 : 1)
         const calls = JSON.parse(await fs.readFile(path.join(f.data, 'agent-calls.json'), 'utf8'))
-        expect(calls.filter((item: any) => item.method === 'verify_workspace_relocation_root')).toHaveLength(mode.startsWith('healthy') || mode.includes('health record') || mode === 'lost health acknowledgement' ? 1 : 0)
+        expect(calls.filter((item: any) => item.method === 'verify_workspace_relocation_root')).toHaveLength(mode.startsWith('healthy') || mode.includes('health record') || mode === 'lost health acknowledgement' || mode === 'Agent workspace override' ? 1 : 0)
         expect(f.manager.verifyWorkspaceRelocationValidationHealth(f.params, 'fixture-human')).toBe(first)
         expect((await fetch(`http://127.0.0.1:${f.port}/api/friends`, { headers: { Authorization: 'Bearer fixture-human' } })).status).toBe(200)
         expect(require('../../scripts/lib/workspace-maintenance.cjs').workspaceMaintenancePending(f.data)).toBe(true)

@@ -1,6 +1,7 @@
 import path from 'node:path'
 import { timingSafeEqual } from 'node:crypto'
 import { RpcError, sha256CanonicalJson } from 'crabot-shared'
+import { WorkspaceCatalog } from 'crabot-shared/dist/workspace-catalog.js'
 import type { VerifyWorkspaceRelocationRootParams, VerifyWorkspaceRelocationRootResult } from 'crabot-shared'
 
 interface Options {
@@ -41,18 +42,24 @@ export function createWorkspaceRelocationRootVerifier(options: Options) {
       if (state.intent.id !== request.intent_id || state.launch.launch_id !== request.launch_id) {
         throw new RpcError('FORBIDDEN', '目录核验与当前迁移作业不匹配。')
       }
-      const snapshot = sha256CanonicalJson(state), key = sha256CanonicalJson({ snapshot, identity })
+      const snapshot = sha256CanonicalJson(state), workspaceRootOverride = process.env.WORKER_WORKSPACES_DIR
+      const key = sha256CanonicalJson({ snapshot, identity, workspace_root_override: workspaceRootOverride ?? null })
       if (original && original !== key) throw unavailable()
       const result: VerifyWorkspaceRelocationRootResult = Object.freeze({ verified: true, ...request,
         intent_sha256: sha256CanonicalJson(state.intent), launch_sha256: sha256CanonicalJson(state.launch),
         root_selected_sha256: sha256CanonicalJson(state.selected), instance_id: identity.instance_id,
         module_id: 'crabot-agent', runtime_id: identity.runtime_id })
       const assertCurrent = (): void => {
-        if (options.isClosing() || options.runtimeBearer() !== token || sha256CanonicalJson(options.runtimeIdentity()) !== sha256CanonicalJson(identity)
+        if (process.env.WORKER_WORKSPACES_DIR !== workspaceRootOverride || options.isClosing() || options.runtimeBearer() !== token || sha256CanonicalJson(options.runtimeIdentity()) !== sha256CanonicalJson(identity)
           || sha256CanonicalJson(read()) !== snapshot || !native.sameProcess(state.launch.parent, native.inspectProcess(state.launch.parent.pid))) throw unavailable()
       }
       const verify = async (): Promise<void> => {
         assertCurrent()
+        const catalog = await new WorkspaceCatalog({ dataRoot: options.dataDir,
+          storageRoot: workspaceRootOverride ? path.resolve(workspaceRootOverride) : undefined, files: native }).snapshot()
+        assertCurrent()
+        if (catalog.storage_root !== state.published.target.path || catalog.revision !== state.selected.catalog_revision
+          || sha256CanonicalJson(catalog) !== state.selected.catalog_sha256) throw unavailable()
         const { openPinnedProcessRpc } = require(path.join(__dirname, '../../../scripts/lib/pinned-process-rpc.cjs'))
         const rpc = await openPinnedProcessRpc(state.launch.parent, options.moduleManagerPort, { source: 'crabot-agent', timeoutMs: 5000 })
         try {
