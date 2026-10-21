@@ -1,3 +1,4 @@
+import { validateWorkspaceRecoverySnapshot, verifyWorkspaceRecoverySnapshot } from './workspace-recovery-plan.mjs'
 // Private fixed-job records only; submission receipts never prove exit or authorize moving/releasing maintenance.
 import fs from 'node:fs'
 import path from 'node:path'
@@ -60,7 +61,7 @@ function read(ctx) {
   if (!privateControl(ctx.control)) return null
   const value = readPrivateJson(ctx.file, 65536)
   if (value === undefined) {
-    for (const file of ['relocation-workers.json', 'relocation-worker-processes.json', 'relocation-stop-attempt.json', 'relocation-stop-submission.json', 'relocation-modules.json', 'relocation-module-stop-attempt.json', 'relocation-module-processes', 'relocation-module-stop-submission.json', 'relocation-coordinator.json', 'relocation-coordinator-ready.json', 'relocation-process-stop.jsonl', 'relocation-execution-exit.json', 'relocation-files.json', 'relocation-file-actors.jsonl', 'relocation-worker-closure.json', 'relocation-worker-commits']) {
+    for (const file of ['relocation-workers.json', 'relocation-worker-processes.json', 'relocation-stop-attempt.json', 'relocation-stop-submission.json', 'relocation-modules.json', 'relocation-module-stop-attempt.json', 'relocation-module-processes', 'relocation-module-stop-submission.json', 'relocation-coordinator.json', 'relocation-coordinator-ready.json', 'relocation-process-stop.jsonl', 'relocation-execution-exit.json', 'relocation-files.json', 'relocation-file-actors.jsonl', 'relocation-worker-closure.json', 'relocation-worker-commits', 'relocation-manager-closure.json']) {
       try { fs.lstatSync(path.join(ctx.control, file)); fail() }
       catch (error) { if (error.code !== 'ENOENT') fail() }
     }
@@ -1301,4 +1302,42 @@ export function readWorkspaceRelocationClosureCommit(dataDir, id) {
     if (!fields(closed, ['version']) || !ledgerVersion(closed.version) || sha256CanonicalJson(closed) !== row.closed_sha256) fail()
   }
   return complete
+}
+
+const recoveryPlanFile = 'relocation-manager-closure.json'
+function validRecoveryPlan(record, ctx, id) {
+  const complete = readWorkspaceRelocationClosureCommit(ctx.dataRoot, id)
+  if (!fields(record, ['schema_version', 'intent_id', 'bindings', 'worker_closure_sha256', 'snapshot_sha256', 'snapshot'])
+    || record.schema_version !== 1 || record.intent_id !== id || !complete
+    || sha256CanonicalJson(record.bindings) !== sha256CanonicalJson(readWorkspaceRelocationClosureBindings(ctx.dataRoot, id))
+    || record.worker_closure_sha256 !== sha256CanonicalJson(complete) || record.snapshot_sha256 !== sha256CanonicalJson(record.snapshot)) fail()
+  validateWorkspaceRecoverySnapshot(record.snapshot, ctx.dataRoot)
+}
+export function readWorkspaceRelocationRecoveryPlan(dataDir, id) {
+  const { ctx } = coordinatorContext(dataDir, id), record = readPrivateJson(path.join(ctx.control, recoveryPlanFile), scopeLimit)
+  if (record === undefined) return null
+  try { validRecoveryPlan(record, ctx, id) } catch { fail() }
+  return record
+}
+/** Technical Agent plan only; this never archives a checkpoint or settles business responsibility. */
+export async function prepareWorkspaceRelocationRecoveryPlan({ dataDir, id, manifest, signal }) {
+  const record = { schema_version: 1, intent_id: id, ...structuredClone(manifest) }
+  await verifyWorkspaceRelocationClosureReadiness({ dataDir, id, signal })
+  const { ctx, verify } = workspaceFileCoordinatorContext(dataDir, id, signal)
+  validRecoveryPlan(record, ctx, id)
+  const previous = readWorkspaceRelocationRecoveryPlan(dataDir, id)
+  if (previous) {
+    if (sha256CanonicalJson(previous) !== sha256CanonicalJson(record)) fail()
+    syncIntent(ctx); return { dispatch: 'observe', plan: previous }
+  }
+  const verifyInput = () => { verify(); validRecoveryPlan(record, ctx, id); verifyWorkspaceRecoverySnapshot(record.snapshot, ctx.dataRoot) }
+  verifyInput()
+  publishPrivateJson(ctx, path.join(ctx.control, recoveryPlanFile), record, scopeLimit, () => {
+    verifyInput(); if (readWorkspaceRelocationRecoveryPlan(dataDir, id)) fail()
+  })
+  await verifyWorkspaceRelocationClosureReadiness({ dataDir, id, signal })
+  verifyInput()
+  const accepted = readWorkspaceRelocationRecoveryPlan(dataDir, id)
+  if (sha256CanonicalJson(accepted) !== sha256CanonicalJson(record)) fail()
+  return { dispatch: 'dispatch', plan: accepted }
 }

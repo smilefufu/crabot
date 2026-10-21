@@ -16,7 +16,7 @@ import { createWorkspaceWorkerJournal } from '../workspace-worker-journal.mjs'
 import { createWorkspaceModuleJournal } from '../workspace-module-journal.mjs'
 import { createWorkspaceFileJournal } from '../workspace-file-journal.mjs'
 import { createWorkspaceJournalClient } from '../workspace-coordinator-journal.mjs'
-import { readWorkspaceRelocationFilePlan, readWorkspaceRelocationFileActors, verifyWorkspaceRelocationClosureReadiness, readWorkspaceRelocationClosurePlan } from '../workspace-relocation-intent.mjs'
+import { readWorkspaceRelocationFilePlan, readWorkspaceRelocationFileActors, verifyWorkspaceRelocationClosureReadiness, readWorkspaceRelocationClosurePlan, readWorkspaceRelocationRecoveryPlan } from '../workspace-relocation-intent.mjs'
 import { createWorkspaceProcessJournal } from '../workspace-process-journal.mjs'
 import { WorkspaceCatalog } from '../../../crabot-shared/dist/workspace-catalog.js'
 import { sha256CanonicalJson } from '../../../crabot-shared/dist/canonical-json.js'
@@ -25,7 +25,7 @@ async function fixture(t, { crossVolume = false, closureLedger = false } = {}) {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(tmpdir(), 'coordinator-launch-')))
   const targetRoot = crossVolume ? fs.mkdtempSync('/dev/shm/crabot-real-file-host-') : root
   const data = management.ensurePrivateDataRoot(path.join(root, 'data')), id = randomUUID()
-  let closureWorker, ledgerFile, ledgerBytes
+  let closureWorker, ledgerFile, ledgerBytes, checkpointFile, checkpointBytes
   if (closureLedger) {
     closureWorker = { worker_id: 'closure-worker', manager_key: 'fixture::closure', task_id: 'closure-task', workspace_id: 'default', incarnations: [] }
     ledgerFile = path.join(data, 'agent/worker-ledgers/fixture%3A%3Aclosure.json')
@@ -34,6 +34,15 @@ async function fixture(t, { crossVolume = false, closureLedger = false } = {}) {
       task: { id: closureWorker.task_id, title: 'keep original work', status: 'queued', created_at: '2026-10-20T00:00:00.000Z' },
       origin: { trigger_type: 'message', creator_friend_id: 'original-friend' }, report_to: { channel_id: 'fixture', session_id: 'closure' }, incarnations: [], updated_at: '2026-10-20T00:00:00.000Z' }] }, null, 2)
     fs.writeFileSync(ledgerFile, ledgerBytes, { mode: 0o600 })
+    checkpointFile = path.join(data, 'agent/managers/fixture%3A%3Aclosure/running.json')
+    checkpointBytes = JSON.stringify({ episodeId: 'original-recovery-episode', state: { key: closureWorker.manager_key, recent: [{ role: 'user', content: 'ORIGINAL_RECOVERY_PRIVATE_INPUT' }], foldedCount: 0 },
+      envelopes: [], wakeIndex: -1, pending: [], hasEngineMessages: true, turns: [], responses: [], tools: [], pendingToolCallIds: ['unknown-original-operation'],
+      adminChatClaims: [], transientMessageIds: [], spawnedWorkerIds: [closureWorker.worker_id], execution: { successfulSendMessageTargets: [], continuedWorkers: [],
+        needsSpawnRecheck: false, spawnRecheckInjected: false, spawnRecheckOutcomeRecorded: false, postSendRecheckSequence: 0 } }) + '\n'
+    fs.mkdirSync(path.dirname(checkpointFile), { recursive: true }); fs.writeFileSync(checkpointFile, checkpointBytes, { mode: 0o600 })
+    fs.writeFileSync(path.join(path.dirname(checkpointFile), 'pending-admin-chat-wakes.jsonl'), JSON.stringify({ kind: 'admin_chat_wake', status: 'pending',
+      request_id: 'original-admin-input', manager_key: closureWorker.manager_key, message_sha256: '1'.repeat(64), received_at: '2026-10-20T00:00:00.000Z',
+      message: { content: { text: 'ORIGINAL_RECOVERY_PRIVATE_INPUT' } } }) + '\n', { mode: 0o600 })
   }
   const catalog = new WorkspaceCatalog({ dataRoot: data, files: native }); await catalog.initialize()
   const before = await catalog.snapshot(), marker = path.join(before.storage_root, 'original.txt')
@@ -52,7 +61,7 @@ async function fixture(t, { crossVolume = false, closureLedger = false } = {}) {
     }
   }
   t.after(async () => { if (coordinator && workspaceCoordinatorDiagnostics(coordinator.child)) t.diagnostic(workspaceCoordinatorDiagnostics(coordinator.child)); await close(); releaseCliLock(lock); fs.rmSync(root, { recursive: true, force: true }); if (crossVolume) fs.rmSync(targetRoot, { recursive: true, force: true }) })
-  return { root, data, id, lock, before, catalog, marker, close, closureWorker, ledgerFile, ledgerBytes,
+  return { root, data, id, lock, before, catalog, marker, close, closureWorker, ledgerFile, ledgerBytes, checkpointFile, checkpointBytes,
     launch: async options => { try { coordinator = await launchWorkspaceRelocationCoordinator(options ?? { dataDir: data, id }); return coordinator } catch (error) { t.diagnostic(JSON.stringify({ stage: error.stage, code: error.code, cause_code: error.cause?.code, cause_stage: error.cause?.stage, cause_message: error.cause?.message, child_observation: error.child_observation, stderr: error.diagnostics })); throw error } } }
 }
 
@@ -492,6 +501,51 @@ for (const mode of ['confirmed', 'lost acknowledgement', 'changed source', 'copy
           assert.deepEqual(fs.readFileSync(f.ledgerFile), closedBytes)
           const observed = fs.lstatSync(f.ledgerFile, { bigint: true })
           for (const field of ['dev', 'ino', 'size', 'mtimeNs', 'ctimeNs', 'mode', 'uid', 'gid', 'nlink']) assert.equal(observed[field], closedStat[field])
+          const recoveryAgent = await import('../../../crabot-agent/dist/core/workspace-relocation-recovery.js')
+          await assert.rejects(recoveryAgent.prepareWorkspaceRelocationRecovery({ dataDir: f.data, id: f.id }), { code: 'CRABOT_WORKSPACE_RECOVERY_PLAN' })
+          const invalidRecovery = createWorkspaceJournalClient(child, context, 'worker')
+          try { await assert.rejects(invalidRecovery.call('prepare_recovery', { directory: f.root }), { code: 'CRABOT_WORKSPACE_JOURNAL_UNAVAILABLE' }) } finally { invalidRecovery.close() }
+          if (mode === 'lost acknowledgement') {
+            const emit = child.emit; let dropped = false
+            const mock = t.mock.method(child, 'emit', function(event, ...args) {
+              if (event === 'message' && args[0]?.kind === 'workspace_worker_journal_reply' && args[0]?.operation === 'prepare_recovery' && !dropped) {
+                dropped = true; return emit.call(this, event, { ...args[0], ok: false }, ...args.slice(1))
+              }
+              return emit.call(this, event, ...args)
+            })
+            try { await assert.rejects(closer.prepareRecovery(), { code: 'CRABOT_WORKSPACE_JOURNAL_UNAVAILABLE' }); assert.equal(dropped, true) } finally { mock.mock.restore() }
+            closer.close(); closer = createWorkspaceWorkerJournal(child, context)
+          }
+          const recoveryStarted = Date.now(), recovery = await closer.prepareRecovery()
+          t.diagnostic('Agent fixed recovery plan confirmed in ' + (Date.now() - recoveryStarted) + 'ms')
+          assert.equal(recovery.dispatch, mode === 'lost acknowledgement' ? 'observe' : 'dispatch')
+          const recoveryFile = path.join(control, 'relocation-manager-closure.json'), recoveryBytes = fs.readFileSync(recoveryFile)
+          const recoveryPlan = JSON.parse(recoveryBytes)
+          assert.equal(recovery.plan_sha256, sha256CanonicalJson(recoveryPlan))
+          assert.equal(recoveryPlan.intent_id, f.id)
+          assert.equal(recoveryPlan.worker_closure_sha256, sha256CanonicalJson(committed.complete))
+          assert.equal(recoveryPlan.snapshot.checkpoints[0].episode_id, 'original-recovery-episode')
+          assert.deepEqual(recoveryPlan.snapshot.records, [{ kind: 'admin_chat', manager_key: f.closureWorker.manager_key, request_id: 'original-admin-input', message_sha256: '1'.repeat(64) }])
+          assert.equal(recoveryBytes.includes(Buffer.from('ORIGINAL_RECOVERY_PRIVATE_INPUT')), false)
+          assert.equal(recoveryBytes.includes(Buffer.from('unknown-original-operation')), false)
+          assert.equal(fs.readFileSync(f.checkpointFile, 'utf8'), f.checkpointBytes)
+          assert.equal(fs.existsSync(path.join(f.data, 'agent/workspace-relocation-retirements')), false)
+          for (const change of ['binding', 'scope hash', 'path', 'body', 'checkpoint digest']) {
+            const invalid = structuredClone(recoveryPlan)
+            if (change === 'binding') invalid.worker_closure_sha256 = '0'.repeat(64)
+            if (change === 'scope hash') invalid.snapshot_sha256 = '0'.repeat(64)
+            if (change === 'path') invalid.snapshot.directories[0].relative = '..'
+            if (change === 'body') invalid.snapshot.records[0].permissions = { shell: true }
+            if (change === 'checkpoint digest') invalid.snapshot.checkpoints[0].before_sha256 = '0'.repeat(64)
+            if (!['scope hash', 'binding'].includes(change)) invalid.snapshot_sha256 = sha256CanonicalJson(invalid.snapshot)
+            try {
+              fs.writeFileSync(recoveryFile, JSON.stringify(invalid))
+              assert.throws(() => readWorkspaceRelocationRecoveryPlan(f.data, f.id), { code: 'WORKSPACE_RELOCATION_INVALID' })
+            } finally { fs.writeFileSync(recoveryFile, recoveryBytes) }
+          }
+          assert.equal((await closer.prepareRecovery()).dispatch, 'observe')
+          assert.deepEqual(fs.readFileSync(recoveryFile), recoveryBytes)
+          assert.deepEqual(fs.readFileSync(f.ledgerFile), closedBytes)
           assert.equal(workspaceMaintenancePending(f.data), true)
         } finally { closer.close() }
       }

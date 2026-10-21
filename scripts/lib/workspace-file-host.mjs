@@ -11,7 +11,7 @@ import { readWorkspaceRelocationFilePlan, readWorkspaceRelocationFileActors, rea
   prepareWorkspaceRelocationFileActors, registerWorkspaceRelocationFileHost, permitWorkspaceRelocationFileHost, beginWorkspaceRelocationFiles, commitWorkspaceRelocationFileReady } from './workspace-relocation-intent.mjs'
 import { sha256CanonicalJson as hash } from '../../crabot-shared/dist/canonical-json.js'
 
-const failure = () => Object.assign(new Error('固定文件准备子进程无法核验，原文件与维护记录已保留。'), { code: 'CRABOT_WORKSPACE_FILE_HOST' })
+const failure = stage => Object.assign(new Error('固定文件准备子进程无法核验，原文件与维护记录已保留。'), { code: 'CRABOT_WORKSPACE_FILE_HOST', ...(typeof stage === 'string' ? { stage } : {}) })
 const uuid = value => typeof value === 'string' && /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(value)
 function receive(channel, timeout) {
   return new Promise((resolve, reject) => {
@@ -110,33 +110,39 @@ export async function enterWorkspaceFileHost() {
 
 
 export async function prepareWorkspaceFilesWithHost(child, { dataDir, id, signal }) {
-  let clear = () => {}
+  let clear = () => {}, stage = 'file-actors'
   try {
     const original = readWorkspaceRelocationFileActors(dataDir, id), plan = readWorkspaceRelocationFilePlan(dataDir, id)
     if (original.file_ready) return { dispatch: 'observe', ready: original.file_ready }
     if (process.platform === 'win32' && plan.mode === 'copy') throw Object.assign(failure(), { code: 'WORKSPACE_COPY_SYNC_UNSUPPORTED' })
+    stage = 'file-attempt'
     const started = await beginWorkspaceRelocationFiles({ dataDir, id, signal })
+    stage = 'file-carrier'
     if (started.dispatch !== 'dispatch' || !child?.connected || !native.sameProcess(original.host.process, native.inspectProcess(child.pid))) throw failure()
     if (signal?.aborted) throw failure()
     const attemptHash = hash(started.attempt)
     const ended = new Promise((resolve, reject) => {
       let completed = false
-      const failed = cause => { const error = failure(); if (cause) error.cause = cause; reject(error) }
+      const failed = (cause, stage) => { const error = failure(stage); if (cause) error.cause = cause; reject(error) }
       const message = value => {
         if (value?.kind !== 'workspace_file_prepared' && value?.kind !== 'workspace_file_preparation_failed') return
+        let messageStage = 'completion-fields'
         try {
           if (!fields(value, ['kind', 'intent_id', 'attempt_sha256', ...(value.kind === 'workspace_file_preparation_failed' ? ['error_code'] : [])])
             || value.intent_id !== id || value.attempt_sha256 !== attemptHash || completed
             || child.pid !== original.host.process.pid) throw failure()
+          messageStage = 'completion-inspect'
           const current = native.inspectProcess(child.pid)
+          messageStage = 'completion-binding'
           if (!native.sameProcess(original.host.process, current) && knownExit.probeKnownProcessExit([original.host.process]).state !== 'stopped') throw failure()
-          if (value.kind === 'workspace_file_preparation_failed') return failed({ code: value.error_code })
+          if (value.kind === 'workspace_file_preparation_failed') return failed({ code: value.error_code }, 'host-reported-failure')
           completed = true
-        } catch (error) { failed(error) }
+        } catch (error) { failed(error, messageStage) }
       }
-      const exited = (code, exitSignal) => completed && code === 0 && exitSignal === null ? resolve() : failed()
-      const disconnected = () => { if (!completed) failed() }
-      const aborted = () => failed()
+      const exited = (code, exitSignal) => completed && code === 0 && exitSignal === null ? resolve()
+        : failed(undefined, !completed ? 'exit-before-completion' : code !== 0 ? 'host-exit-code' : 'host-exit-signal')
+      const disconnected = () => { if (!completed) failed(undefined, 'disconnect-before-completion') }
+      const aborted = () => failed(undefined, 'host-aborted')
       const timer = setTimeout(aborted, 20 * 60_000)
       clear = () => { clearTimeout(timer); child.off('message', message); child.off('exit', exited); child.off('disconnect', disconnected); child.off('error', aborted); signal?.removeEventListener('abort', aborted) }
       child.on('message', message); child.once('exit', exited); child.once('disconnect', disconnected); child.once('error', aborted); signal?.addEventListener('abort', aborted)
@@ -144,11 +150,14 @@ export async function prepareWorkspaceFilesWithHost(child, { dataDir, id, signal
     })
     void ended.catch(() => {})
     if (signal?.aborted) throw failure()
+    stage = 'host-completion'
     await Promise.all([send(child, { kind: 'workspace_file_prepare', intent_id: id, attempt_sha256: attemptHash }), ended])
     clear()
+    stage = 'host-kernel-exit'
     const { probeKnownProcessExit } = knownExit
     const deadline = Date.now() + 2000
     while (probeKnownProcessExit([original.host.process]).state !== 'stopped' && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10))
+    stage = 'file-ready'
     return await commitWorkspaceRelocationFileReady({ dataDir, id, signal })
-  } catch (cause) { clear(); await close(child); const error = failure(); error.cause = cause; throw error }
+  } catch (cause) { clear(); await close(child); const error = failure(stage); error.cause = cause; throw error }
 }
