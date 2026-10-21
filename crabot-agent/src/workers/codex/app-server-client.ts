@@ -3,7 +3,7 @@ import { join } from 'node:path'
 import { captureHeadlessNativeProcesses } from '../headless-native-processes.js'
 import type { WorkerProcessObservation } from '../types.js'
 import { buildScrubbedChildEnv } from '../connections/secret-env.js'
-import { resolveBashPath, BASH_NOT_FOUND_MESSAGE } from '../../utils/resolve-bash-path.js'
+import { resolveNativeShellPath } from '../../utils/resolve-bash-path.js'
 
 type JsonObject = Record<string, unknown>
 
@@ -109,8 +109,7 @@ export class CodexAppServerClient {
     readonly cwd: string
     readonly env: Record<string, string>
   }) {
-    const shell = process.env.CRABOT_PRODUCT_ROOT || process.platform === 'win32' ? resolveBashPath() : '/bin/sh'
-    if (!shell) throw new Error(BASH_NOT_FOUND_MESSAGE)
+    const shell = resolveNativeShellPath()
     this.exitedPromise = new Promise((resolve) => {
       this.resolveExited = resolve
     })

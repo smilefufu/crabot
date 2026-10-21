@@ -28,12 +28,12 @@ import { isStandardComputerUse } from '../../agent/computer-use-owner.js'
  */
 import { workerTaskInstructions } from '../../guidance/worker-bridge.js'
 import { promises as fs, type Dirent } from 'fs'
-import { join, dirname } from 'path'
+import { join, dirname, delimiter } from 'path'
 import { randomUUID } from 'crypto'
 import { homedir, tmpdir } from 'os'
 import { execFile } from 'child_process'
 import { buildChildEnv } from '../../core/runtime-env.js'
-import { resolveBashPath, BASH_NOT_FOUND_MESSAGE } from '../../utils/resolve-bash-path.js'
+import { resolveBashPath, resolveNativeShellPath, BASH_NOT_FOUND_MESSAGE } from '../../utils/resolve-bash-path.js'
 import { connectionCapabilitiesFor } from '../connections/registry.js'
 import { promisify } from 'util'
 import { TmuxDriver, type PaneSnapshot } from '../tmux/driver.js'
@@ -229,7 +229,7 @@ async function resolveBinDir(bin: string): Promise<string | undefined> {
     if (token.includes('/')) {
       resolved = await fs.realpath(token)
     } else {
-      const { stdout } = await execFileAsync('/bin/sh', ['-c', `command -v ${shQuote(token)}`], { env: buildChildEnv() })
+      const { stdout } = await execFileAsync(resolveNativeShellPath(), ['-c', `command -v ${shQuote(token)}`], { env: buildChildEnv() })
       resolved = await fs.realpath(stdout.trim())
     }
     return dirname(resolved)
@@ -619,7 +619,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     // 无用户级安装时不前置任何目录（否则把被忽略的全局目录塞进 PATH）；
     // resolver 未注入（测试）沿用 resolveBinDirCached 的 PATH 前置语义。
     const dir = binCmd?.raw ? dirname(binCmd.raw) : (this.resolveUserLevelBinary ? undefined : await this.resolveBinDirCached())
-    const path = dir ? `${dir}:${process.env.PATH ?? ''}` : (process.env.PATH ?? '')
+    const path = dir ? `${dir}${delimiter}${process.env.PATH ?? ''}` : (process.env.PATH ?? '')
     return { PATH: path, ...extra }
   }
 
@@ -632,13 +632,13 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     const binDir = resolved?.raw
       ? dirname(resolved.raw)
       : (this.resolveUserLevelBinary ? undefined : await this.resolveBinDirCached())
-    const versionEnv = buildChildEnv({ PATH: binDir ? `${binDir}:${process.env.PATH ?? ''}` : (process.env.PATH ?? '') })
+    const versionEnv = buildChildEnv({ PATH: binDir ? `${binDir}${delimiter}${process.env.PATH ?? ''}` : (process.env.PATH ?? '') })
     let versionOutput: string
     if (!effectiveBin) {
       return { installed: false, activated: false, global_detected: this.lastGlobalDetected, detail: 'codex binary not found at user level' }
     }
     try {
-      const { stdout } = await execFileAsync('/bin/sh', ['-c', `${effectiveBin} --version`], { env: versionEnv })
+      const { stdout } = await execFileAsync(resolveNativeShellPath(), ['-c', `${effectiveBin} --version`], { env: versionEnv })
       versionOutput = stdout.trim()
     } catch (err) {
       if (binDir) {
@@ -712,7 +712,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
             cwd: probeHome,
             env: {
               ...buildScrubbedChildEnv(),
-              PATH: binDir ? `${binDir}:${process.env.PATH ?? ''}` : (process.env.PATH ?? ''),
+              PATH: binDir ? `${binDir}${delimiter}${process.env.PATH ?? ''}` : (process.env.PATH ?? ''),
               CODEX_HOME: probeHome,
             },
           })
@@ -721,7 +721,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
             cwd: probeHome,
             env: {
               ...buildScrubbedChildEnv(),
-              PATH: binDir ? `${binDir}:${process.env.PATH ?? ''}` : (process.env.PATH ?? ''),
+              PATH: binDir ? `${binDir}${delimiter}${process.env.PATH ?? ''}` : (process.env.PATH ?? ''),
               CODEX_HOME: probeHome,
             },
           })

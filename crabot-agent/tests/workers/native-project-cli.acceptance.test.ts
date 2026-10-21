@@ -155,8 +155,11 @@ it.skipIf(!process.env.CRABOT_TEST_CLAUDE_BIN)('real Claude Code uses private MC
   cleanup.push(async () => { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())) })
   const endpoint = 'http://127.0.0.1:' + (server.address() as { port: number }).port
   const manager = new WorkspaceManager(path.join(data, 'workspaces'), data)
-  const adapter = new ClaudeCodeAdapter({ dataDir: path.join(data, 'adapters'), claudeConfigPath: path.join(home, '.claude.json'), claudeProjectsDir: path.join(home, '.claude/projects') })
+  vi.stubEnv('HOME', home); vi.stubEnv('USERPROFILE', home)
+  cleanup.push(async () => vi.unstubAllEnvs())
+  const adapter = new ClaudeCodeAdapter({ resolveUserLevelBinary: async () => ({ binary: process.env.CRABOT_TEST_CLAUDE_BIN!, global_detected: false }), dataDir: path.join(data, 'adapters'), claudeConfigPath: path.join(home, '.claude.json'), claudeProjectsDir: path.join(home, '.claude/projects') })
   cleanup.push(() => adapter.dispose())
+  expect((await adapter.detect()).installed).toBe(true)
   const profiles = await bothExecutors(async marker => {
     const workspace = await manager.resolve(marker, project), runtime = workspace.runtime_root!
     const markerFile = path.join(runtime, 'marker-evidence')
@@ -222,11 +225,12 @@ it.skipIf(!process.env.CRABOT_TEST_CODEX_BIN)('real Codex historical child query
   await fs.mkdir(path.dirname(metaFile)); await fs.writeFile(metaFile, meta); await fs.rename(before, after)
   const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'"
   const adapter = new CodexWorkerAdapter({ dataDir: data, codexHomeSource: path.join(home, 'unused'),
-    codexBin: quote(process.env.CRABOT_TEST_CODEX_BIN!.replaceAll('\\', '/')),
+    codexBin: quote(process.env.CRABOT_TEST_CODEX_BIN!.replaceAll('\\', '/')) + ' -c features.plugins=false -c features.recommended_plugins=false',
     readWorkspaceHistory: async () => ({ before_root: before, after_root: after, verify: async () => undefined }),
   })
   cleanup.push(() => adapter.dispose())
-  ;(adapter as any).appServerSubagentSupported = true
+  expect((await adapter.detect()).installed).toBe(true)
+  expect(adapter.capabilities().subagent).toBe(true)
   const reconstruct = vi.spyOn(adapter as any, 'ensureRuntime').mockRejectedValue(new Error('closed parent must never be reconstructed'))
   try {
     expect(await adapter.listSubagents({ worker_id: worker, incarnation_id: 'original-incarnation', seq: 1, impl: 'codex', session_ref: session })).toEqual([])

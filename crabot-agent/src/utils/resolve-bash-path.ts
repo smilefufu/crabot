@@ -28,6 +28,14 @@ export function resolveBashPath(): string | null {
   return cached
 }
 
+/** Preserve source POSIX sh semantics; sealed products and Windows use the selected Bash. */
+export function resolveNativeShellPath(): string {
+  if (!process.env.CRABOT_PRODUCT_ROOT && process.platform !== 'win32') return '/bin/sh'
+  const shell = resolveBashPath()
+  if (!shell) throw new Error(BASH_NOT_FOUND_MESSAGE)
+  return shell
+}
+
 /**
  * Pure implementation — all I/O injected. Use this in unit tests; the
  * `resolveBashPath()` wrapper just plumbs real process/fs state in.

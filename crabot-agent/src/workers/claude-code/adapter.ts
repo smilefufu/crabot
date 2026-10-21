@@ -49,6 +49,7 @@ import type { TerminalInteraction } from '../tmux/terminal-interaction.js'
 import { AsyncMutex } from '../async-mutex.js'
 import { writeMetaAtomic, maxSeqOnDisk, latestModifiedMs } from '../meta-store.js'
 import { buildChildEnv } from '../../core/runtime-env.js'
+import { resolveNativeShellPath } from '../../utils/resolve-bash-path.js'
 import { buildScrubbedChildEnv } from '../connections/secret-env.js'
 import { workspaceGitBridgeEnv } from '../workspace-git-capability.js'
 import { connectionCapabilitiesFor } from '../connections/registry.js'
@@ -423,7 +424,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     }
     let versionOutput: string
     try {
-      const { stdout } = await execFileAsync('/bin/sh', ['-c', `${binary} --version`], { env: buildChildEnv() })
+      const { stdout } = await execFileAsync(resolveNativeShellPath(), ['-c', `${binary} --version`], { env: buildChildEnv() })
       versionOutput = stdout.trim()
     } catch (err) {
       return { installed: false, activated: false, global_detected: this.lastGlobalDetected, detail: `claude binary not found or failed to run: ${(err as Error).message}` }
@@ -1241,7 +1242,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       const inheritedConnectionEnv = opts.connection_env ?? prevRuntime.connectionEnv ?? {}
       const execOpts = { cwd: prevRuntime.workspaceRoot, env: { ...buildScrubbedChildEnv(), [EVENTS_FILE_ENV]: forkEventsFile, ...inheritedConnectionEnv, ...await workspaceGitBridgeEnv(dir, runtime.seq, opts.workspace_git), ...opts.execution_env } }
 
-      child = spawn('/bin/sh', ['-c', shellCommand], {
+      child = spawn(resolveNativeShellPath(), ['-c', shellCommand], {
         ...execOpts,
         detached: true,
         stdio: ['ignore', 'pipe', 'pipe'],
