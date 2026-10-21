@@ -10,6 +10,8 @@ on:
       - 'crabot-agent/src/engine/bg-entities/**'
       - 'crabot-agent/tests/core/workspace-background-*.test.ts'
       - 'crabot-agent/tests/core/fixtures/owned-shell-cleanup.ts'
+      - 'scripts/lib/workspace-windows-*.mjs'
+      - 'scripts/lib/__tests__/workspace-windows-*.test.mjs'
       - 'scripts/lib/known-process-stop.cjs'
       - 'scripts/lib/owned-process-tree.cjs'
       - 'scripts/lib/process-identity.cjs'
@@ -26,6 +28,8 @@ on:
       - 'crabot-agent/src/engine/bg-entities/**'
       - 'crabot-agent/tests/core/workspace-background-*.test.ts'
       - 'crabot-agent/tests/core/fixtures/owned-shell-cleanup.ts'
+      - 'scripts/lib/workspace-windows-*.mjs'
+      - 'scripts/lib/__tests__/workspace-windows-*.test.mjs'
       - 'scripts/lib/known-process-stop.cjs'
       - 'scripts/lib/owned-process-tree.cjs'
       - 'scripts/lib/process-identity.cjs'
@@ -78,6 +82,8 @@ jobs:
           pnpm --dir crabot-agent install --frozen-lockfile
       - name: Native owned process scope regressions
         run: node --test scripts/lib/__tests__/owned-process-tree.test.mjs scripts/lib/__tests__/spawned-process-tree.test.mjs
+      - name: Fixed Windows copy and staging sync primitives
+        run: node --test scripts/lib/__tests__/workspace-windows-copy.test.mjs scripts/lib/__tests__/workspace-windows-sync.test.mjs
       - name: Project binding and private native runtime regressions
         working-directory: crabot-agent
         run: node node_modules/vitest/vitest.mjs run tests/core/workspace-background-processes.test.ts tests/core/workspace-background-admissions.test.ts tests/workers/native-cli-managed-shell.test.ts tests/workers/relocated-native-history.test.ts tests/workers/codex-app-server-shell.test.ts tests/workers/codex-app-server-client.test.ts tests/workers/harness/workspace-manager.test.ts tests/workers/harness/project-workspaces.test.ts tests/workers/private-project-provision.test.ts tests/workers/private-project-runtime.test.ts tests/workers/codex-managed-notify.test.ts tests/workers/codex-project-config.test.ts --maxWorkers=1 --minWorkers=1

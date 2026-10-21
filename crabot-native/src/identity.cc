@@ -78,9 +78,10 @@ static std::vector<int> Pids() {
   return result;
 }
 
-static Identity Inspect(int pid) {
+static Identity Inspect(int pid, const char** stage = nullptr) {
   Identity result; result.pid = pid;
 #ifdef _WIN32
+  if (stage) *stage = "identity-open-process";
   HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, pid);
   if (!process) {
     if (GetLastError() == ERROR_INVALID_PARAMETER) return {};
@@ -90,20 +91,29 @@ static Identity Inspect(int pid) {
   FILETIME created, exited, kernel, user;
   wchar_t path[32768]; DWORD length = 32768;
   HANDLE token = nullptr;
-  if (!GetProcessTimes(process, &created, &exited, &kernel, &user)
-      || !QueryFullProcessImageNameW(process, 0, path, &length)
-      || !OpenProcessToken(process, TOKEN_QUERY, &token)) {
+  const auto identify = [&]() {
+    if (stage) *stage = "identity-process-times";
+    if (!GetProcessTimes(process, &created, &exited, &kernel, &user)) return false;
+    if (stage) *stage = "identity-process-image";
+    if (!QueryFullProcessImageNameW(process, 0, path, &length)) return false;
+    if (stage) *stage = "identity-process-token";
+    return OpenProcessToken(process, TOKEN_QUERY, &token) != FALSE;
+  };
+  if (!identify()) {
     // An opened process can terminate between queries; only an OS-signalled
     // process is classified as exited. Access failures on live processes still fail closed.
     if (WaitForSingleObject(process, 0) == WAIT_OBJECT_0) { CloseHandle(process); return {}; }
     CloseHandle(process); throw std::runtime_error("Cannot inspect process identity");
   }
+  if (stage) *stage = "identity-token-size";
   DWORD size = 0; GetTokenInformation(token, TokenUser, nullptr, 0, &size);
   std::vector<unsigned char> info(size);
+  if (stage) *stage = "identity-token-user";
   if (!GetTokenInformation(token, TokenUser, info.data(), size, &size)) {
     CloseHandle(token); CloseHandle(process); throw std::runtime_error("Cannot inspect process owner");
   }
   LPSTR sid = nullptr;
+  if (stage) *stage = "identity-owner-sid";
   if (!ConvertSidToStringSidA(reinterpret_cast<TOKEN_USER*>(info.data())->User.Sid, &sid)) {
     CloseHandle(token); CloseHandle(process); throw std::runtime_error("Cannot read process owner");
   }
@@ -113,6 +123,7 @@ static Identity Inspect(int pid) {
   int count = WideCharToMultiByte(CP_UTF8, 0, path, length, nullptr, 0, nullptr, nullptr);
   result.executable.resize(count);
   WideCharToMultiByte(CP_UTF8, 0, path, length, result.executable.data(), count, nullptr, nullptr);
+  if (stage) *stage = "identity-parent-snapshot";
   HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
   if (snapshot == INVALID_HANDLE_VALUE) throw std::runtime_error("Cannot inspect process parent");
   PROCESSENTRY32 entry{}; entry.dwSize = sizeof(entry);

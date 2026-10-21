@@ -26,7 +26,7 @@ static std::unique_ptr<ObservedProcessGeneration> OpenObservedProcess(int pid, c
     throw std::runtime_error("Cannot hold process observation");
   }
   stage = "pinned-open-identity";
-  try { process->identity = Inspect(pid); }
+  try { process->identity = Inspect(pid, &stage); }
   catch (...) { if (ObservedProcessExited(*process)) return nullptr; throw; }
   stage = "pinned-open-identity-present";
   if (!process->identity.pid) {
@@ -117,7 +117,7 @@ static napi_value CaptureProcessTreeGeneration(napi_env env, napi_callback_info 
         }
         Identity current;
         stage = i == 0 ? "pinned-refresh-root-inspect" : "pinned-refresh-child-inspect";
-        try { current = Inspect(process.identity.pid); }
+        try { current = Inspect(process.identity.pid, &stage); }
         catch (...) {
           if (i != 0 && ObservedProcessExited(process)) { anotherPass = true; continue; }
           throw;
