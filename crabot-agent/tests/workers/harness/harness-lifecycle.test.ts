@@ -4925,7 +4925,7 @@ describe('WorkerHarness.getWorkerTerminal', () => {
 
     expect(result).toEqual({ kind: 'unavailable', unavailable_reason: 'headless_without_text' })
     expect(fake.readTerminalCalls).toHaveLength(1)
-    expect(fake.readTerminalCalls[0]).toEqual({ worker_id: worker.worker_id, seq: 1, impl: 'builtin', session_ref: `ref-${worker.worker_id}#1` })
+    expect(fake.readTerminalCalls[0]).toEqual({ worker_id: worker.worker_id, incarnation_id: worker.incarnations[0].incarnation_id, seq: 1, impl: 'builtin', session_ref: `ref-${worker.worker_id}#1` })
   })
 
   it('不存在的 worker_id → WorkerNotFoundError', async () => {
@@ -4946,7 +4946,7 @@ describe('WorkerHarness.getWorkerTerminal', () => {
   it('给 opts.seq → 读取该 seq 对应化身(如 fork 分支)的输出,不是主线', async () => {
     const { harness, fake } = await makeHarness({ caps: { fork: true } })
     const worker = await harness.spawnWorker(spawnParams())
-    const { fork_seq: forkSeq, query_id: queryId } = await harness.queryWorker(worker.worker_id, '侧问一下')
+    const { fork_seq: forkSeq, fork_incarnation_id: forkIncarnationId, query_id: queryId } = await harness.queryWorker(worker.worker_id, '侧问一下')
 
     const result = await harness.getWorkerTerminal(worker.worker_id, { seq: forkSeq })
 
@@ -4954,6 +4954,7 @@ describe('WorkerHarness.getWorkerTerminal', () => {
     expect(fake.readTerminalCalls).toHaveLength(1)
     expect(fake.readTerminalCalls[0]).toEqual({
       worker_id: worker.worker_id,
+      incarnation_id: forkIncarnationId,
       seq: forkSeq,
       impl: 'builtin',
       session_ref: `fork-ref-${worker.worker_id}#${forkSeq}`,

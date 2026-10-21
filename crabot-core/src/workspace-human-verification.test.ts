@@ -1100,12 +1100,17 @@ describe('MM submits one fixed workspace stop sequence', () => {
     const launch = f.manager.launchWorkspaceRelocationCoordinator.bind(f.manager), modules = vi.spyOn(f.manager, 'requestWorkspaceRelocationModuleStops')
     const stop = vi.spyOn(f.manager, 'stopWorkspaceRelocationWorkersForCoordinator'), signals = vi.spyOn(native, 'terminateKnownProcess')
     vi.spyOn(f.manager, 'launchWorkspaceRelocationCoordinator').mockImplementation(async (...args: unknown[]) => {
-      const child = await launch(...args), emit = child.emit.bind(child); let observations = 0
+      const child = await launch(...args), emit = child.emit.bind(child)
       vi.spyOn(child, 'emit').mockImplementation((event: string | symbol, ...args: any[]) => {
         const message = args[0]
         if (event === 'message' && message?.kind === 'workspace_process_journal_reply') {
-          if (message.operation === 'observe') observations++
-          if (phase === 'prepare' && message.operation === 'prepare' || orphan && message.operation === 'observe' && observations === 2
+          let descendantObserved = false
+          if (orphan && message.operation === 'observe' && existsSync(path.join(f.data, 'orphan-ready.json'))) {
+            const witness = JSON.parse(require('node:fs').readFileSync(path.join(f.data, 'orphan-ready.json'), 'utf8'))
+            descendantObserved = records.readWorkspaceRelocationProcessStops(f.data, f.params.intent_id).observations
+              .some((row: any) => row.processes.some((item: any) => item.pid === witness.process.pid && item.started === witness.process.started))
+          }
+          if (phase === 'prepare' && message.operation === 'prepare' || descendantObserved
             || phase === 'execution exit' && message.operation === 'execution_exit') {
             return emit(event, { ...message, ok: false })
           }
