@@ -1,3 +1,4 @@
+import { workspaceHistoryFor, nativeHistorySource, readNativeHistoryText, type WorkspaceHistoryReader } from '../relocated-native-history.js'
 import type { WorkspaceRelocationIncarnation } from 'crabot-shared'
 import { captureMetadataNativeProcesses } from '../cold-native-processes.js'
 import { captureHeadlessNativeProcesses } from '../headless-native-processes.js'
@@ -353,6 +354,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
   constructor(
     private readonly deps: {
       readonly dataDir: string
+      readonly readWorkspaceHistory?: WorkspaceHistoryReader
       readonly claudeBin?: string
       readonly tmux?: TmuxDriver
       /** cc trace 文件根目录,默认 ~/.claude/projects;detect() 的 activated 检查也复用它
@@ -1434,6 +1436,12 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       const { chunk } = await new OutputLog(join(dir, `output-${h.seq}.log`)).read({ offset: 0 })
       return chunk ? { kind: 'headless_text', text: chunk } : { kind: 'unavailable', unavailable_reason: 'headless_without_text' }
     }
+    const history = await workspaceHistoryFor(h, this.deps.readWorkspaceHistory)
+    if (history) {
+      const final = await readFinalTerminalSnapshot(dir, h.seq)
+      await history.verify()
+      return final ? { kind: 'final_terminal', ...final } : { kind: 'unavailable', unavailable_reason: 'no_final_terminal_snapshot' }
+    }
     const runtime = await this.ensureRuntime(h)
     if (!runtime) {
       const final = await readFinalTerminalSnapshot(dir, h.seq)
@@ -1609,24 +1617,30 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     // 里(meta.json 不落它)，进程重启后无法重建路径。现在从 meta 里的 workspace_root 字段
     // (本轮新增持久化)重建它,readTrace 因此也能在
     // 无常驻 runtime 时工作,不再是"只能对本进程内常驻的化身调用"。
-    const runtime = await this.ensureRuntime(h)
-    if (!runtime) {
-      throw new Error(`ClaudeCodeAdapter.readTrace: no such incarnation ${h.worker_id}#${h.seq} resident in this process`)
-    }
-    if (!runtime.workspaceRoot) {
-      // 重建自缺 workspace_root 的老 meta(升级前写入,已知限制,见 ensureRuntime 注释)。
-      throw new Error(
-        `ClaudeCodeAdapter.readTrace: cannot rebuild workspace for ${h.worker_id}#${h.seq} ` +
-          `(meta.json predates workspace_root persistence; trace unavailable after an adapter restart)`,
-      )
-    }
+    const historical = await nativeHistorySource(h, this.deps.readWorkspaceHistory, () => this.readMetaFile(join(this.deps.dataDir, h.worker_id), h.seq))
+    let filePath: string
+    if (historical) {
+      filePath = join(this.claudeProjectsDir, projectSlug(historical.history.before_root), `${h.session_ref}.jsonl`)
+    } else {
+      const runtime = await this.ensureRuntime(h)
+      if (!runtime) {
+        throw new Error(`ClaudeCodeAdapter.readTrace: no such incarnation ${h.worker_id}#${h.seq} resident in this process`)
+      }
+      if (!runtime.workspaceRoot) {
+        // 重建自缺 workspace_root 的老 meta(升级前写入,已知限制,见 ensureRuntime 注释)。
+        throw new Error(
+          `ClaudeCodeAdapter.readTrace: cannot rebuild workspace for ${h.worker_id}#${h.seq} ` +
+            `(meta.json predates workspace_root persistence; trace unavailable after an adapter restart)`,
+        )
+      }
 
-    const slug = projectSlug(runtime.workspaceRoot)
-    const filePath = join(this.claudeProjectsDir, slug, `${runtime.sessionId}.jsonl`)
+      const slug = projectSlug(runtime.workspaceRoot)
+      filePath = join(this.claudeProjectsDir, slug, `${runtime.sessionId}.jsonl`)
+    }
 
     let raw: string
     try {
-      raw = await fs.readFile(filePath, 'utf-8')
+      raw = historical ? await readNativeHistoryText(historical, filePath) : await fs.readFile(filePath, 'utf-8')
     } catch (err) {
       // 文件缺失(化身还没写过 trace,或 fork 化身的占位 session_id 本就对不上真实文件)
       // 退化为空数组,cursor 原样透传——没有新内容可消费,调用方下次仍从原位置续读。

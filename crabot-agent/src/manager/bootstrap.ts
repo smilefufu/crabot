@@ -597,6 +597,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     'claude-code',
     new ClaudeCodeAdapter({
       dataDir: adapterDataDir('claude-code'),
+      readWorkspaceHistory: handle => handle.incarnation_id ? harness.workspaceHistoryRead(handle.worker_id, handle.incarnation_id) : Promise.resolve(null),
       onStateChange: harness.handleStateChange,
       onNativeActivity: harness.handleNativeActivity,
       ...(deps.resolveUserLevelBinary ? { resolveUserLevelBinary: () => deps.resolveUserLevelBinary!('claude-code') } : {}),
@@ -606,6 +607,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     'codex',
     new CodexWorkerAdapter({
       dataDir: adapterDataDir('codex'),
+      readWorkspaceHistory: handle => handle.incarnation_id ? harness.workspaceHistoryRead(handle.worker_id, handle.incarnation_id) : Promise.resolve(null),
       onStateChange: harness.handleStateChange,
       onNativeActivity: harness.handleNativeActivity,
       ...(deps.resolveUserLevelBinary ? { resolveUserLevelBinary: () => deps.resolveUserLevelBinary!('codex') } : {}),

@@ -13,6 +13,12 @@ on:
       - 'crabot-agent/src/manager/request-loop.ts'
       - 'crabot-agent/src/manager/tools/project-doc-tools.ts'
       - 'crabot-agent/src/workers/harness/harness.ts'
+      - 'crabot-agent/src/workers/relocated-native-history.ts'
+      - 'crabot-agent/src/workers/claude-code/adapter.ts'
+      - 'crabot-agent/src/workers/codex/adapter.ts'
+      - 'crabot-agent/src/workers/trace/composite-reader.ts'
+      - 'crabot-agent/tests/workers/relocated-native-history.test.ts'
+      - 'crabot-agent/tests/workers/composite-trace.test.ts'
       - 'crabot-agent/src/workers/harness/workspace-manager.ts'
       - 'crabot-agent/tests/manager/project-doc-tools.test.ts'
       - 'crabot-agent/tests/manager/request-permission-gate.test.ts'
@@ -94,7 +100,7 @@ jobs:
           pnpm --dir crabot-agent install --frozen-lockfile
           pnpm --dir crabot-agent build
           cd crabot-agent
-          node node_modules/vitest/vitest.mjs run tests/manager/project-doc-tools.test.ts tests/permissions/managed-workspace.test.ts tests/permissions/managed-workspace-host.test.ts tests/workers/harness/workspace-manager.test.ts tests/workers/harness/request-guard.test.ts tests/manager/request-permission-gate.test.ts tests/manager/restart-resume.test.ts tests/manager/session-store.test.ts tests/core/workspace-relocation-ledgers.test.ts tests/core/workspace-relocation-commit.test.ts tests/core/workspace-relocation-checkpoints.test.ts tests/core/workspace-relocation-retirements.test.ts tests/core/workspace-relocation-recovery-capture.test.ts tests/core/workspace-relocation-recovery-progress.test.ts tests/core/workspace-recovery-routing.test.ts tests/workers/harness/workspace-relocation-close.test.ts tests/workers/harness/ledger-store.test.ts --maxWorkers=1 --minWorkers=1
+          node node_modules/vitest/vitest.mjs run tests/workers/relocated-native-history.test.ts tests/workers/composite-trace.test.ts tests/manager/project-doc-tools.test.ts tests/permissions/managed-workspace.test.ts tests/permissions/managed-workspace-host.test.ts tests/workers/harness/workspace-manager.test.ts tests/workers/harness/request-guard.test.ts tests/manager/request-permission-gate.test.ts tests/manager/restart-resume.test.ts tests/manager/session-store.test.ts tests/core/workspace-relocation-ledgers.test.ts tests/core/workspace-relocation-commit.test.ts tests/core/workspace-relocation-checkpoints.test.ts tests/core/workspace-relocation-retirements.test.ts tests/core/workspace-relocation-recovery-capture.test.ts tests/core/workspace-relocation-recovery-progress.test.ts tests/core/workspace-recovery-routing.test.ts tests/workers/harness/workspace-relocation-close.test.ts tests/workers/harness/ledger-store.test.ts --maxWorkers=1 --minWorkers=1
       - name: Preserve migrated request history without resuming its model or events
         working-directory: crabot-agent
         run: node node_modules/vitest/vitest.mjs run tests/manager/conversation-request-runner.test.ts --testNamePattern='retains a migrated old request' --maxWorkers=1 --minWorkers=1

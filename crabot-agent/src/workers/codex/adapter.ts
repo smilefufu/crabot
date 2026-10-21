@@ -1,3 +1,4 @@
+import { workspaceHistoryFor, nativeHistorySource, readNativeHistoryText, nativeHistoryDirectory, nativeHistorySourcePath, type WorkspaceHistoryReader } from '../relocated-native-history.js'
 import type { WorkspaceRelocationIncarnation } from 'crabot-shared'
 import { captureMetadataNativeProcesses } from '../cold-native-processes.js'
 import { assertCodexProjectConfiguration } from '../provision/codex-project-config.js'
@@ -566,6 +567,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
   constructor(
     private readonly deps: {
       readonly dataDir: string
+      readonly readWorkspaceHistory?: WorkspaceHistoryReader
       readonly codexBin?: string
       readonly tmux?: TmuxDriver
       /** 真实登录态所在的 CODEX_HOME,默认 ~/.codex;provision 从这里搬一份 auth.json 到
@@ -1815,6 +1817,12 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       const { chunk } = await new OutputLog(join(dir, `output-${h.seq}.log`)).read({ offset: 0 })
       return chunk ? { kind: 'headless_text', text: chunk } : { kind: 'unavailable', unavailable_reason: 'headless_without_text' }
     }
+    const history = await workspaceHistoryFor(h, this.deps.readWorkspaceHistory)
+    if (history) {
+      const final = await readFinalTerminalSnapshot(dir, h.seq)
+      await history.verify()
+      return final ? { kind: 'final_terminal', ...final } : { kind: 'unavailable', unavailable_reason: 'no_final_terminal_snapshot' }
+    }
     const runtime = await this.ensureRuntime(h)
     if (!runtime) {
       const final = await readFinalTerminalSnapshot(dir, h.seq)
@@ -1979,20 +1987,40 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     // runtime)。ensureRuntime 现在从 meta 的 session_discovery + workspace_root(本轮新增
     // 持久化)重新推导出 rolloutPath(见 findRolloutFileBySessionId),readTrace 因此也能在
     // 无常驻 runtime 时工作。
-    const runtime = await this.ensureRuntime(h)
-    if (!runtime) {
-      throw new Error(`CodexWorkerAdapter.readTrace: no such incarnation ${h.worker_id}#${h.seq} resident in this process`)
-    }
+    const historical = await nativeHistorySource(h, this.deps.readWorkspaceHistory, () => this.readMetaFile(join(this.deps.dataDir, h.worker_id), h.seq))
+    let filePath: string
+    if (historical) {
+      const meta = historical.metadata
+      const originalHome = meta.codex_home ?? join(meta.runtime_root ?? historical.history.before_root, '.codex')
+      let rollout: string | undefined
+      if (meta.session_discovery === 'discovered') {
+        try {
+          const sessions = await nativeHistoryDirectory(historical, join(originalHome, 'sessions'))
+          rollout = await findRolloutFileBySessionId(sessions, h.session_ref)
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+        }
+      }
+      await historical.verify()
+      if (!rollout) return { sourceAvailable: false, events: [], nextCursor: cursor ?? { offset: 0 } }
+      filePath = nativeHistorySourcePath(historical.history, originalHome, rollout)
+    } else {
+      const runtime = await this.ensureRuntime(h)
+      if (!runtime) {
+        throw new Error(`CodexWorkerAdapter.readTrace: no such incarnation ${h.worker_id}#${h.seq} resident in this process`)
+      }
 
-    if (!runtime.rolloutPath) {
-      // spawn 时没能发现 rollout 文件(占位 session_id,已知限制)——没有路径可读,退化为空
-      // 数组,cursor 原样透传。
-      return { sourceAvailable: false, events: [], nextCursor: cursor ?? { offset: 0 } }
+      if (!runtime.rolloutPath) {
+        // spawn 时没能发现 rollout 文件(占位 session_id,已知限制)——没有路径可读,退化为空
+        // 数组,cursor 原样透传。
+        return { sourceAvailable: false, events: [], nextCursor: cursor ?? { offset: 0 } }
+      }
+      filePath = runtime.rolloutPath
     }
 
     let raw: string
     try {
-      raw = await fs.readFile(runtime.rolloutPath, 'utf-8')
+      raw = historical ? await readNativeHistoryText(historical, filePath) : await fs.readFile(filePath, 'utf-8')
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { sourceAvailable: false, events: [], nextCursor: cursor ?? { offset: 0 } }
       throw err

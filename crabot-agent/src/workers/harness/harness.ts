@@ -3698,6 +3698,7 @@ export class WorkerHarness {
     }
     const handle: IncarnationHandle = {
       worker_id: workerId,
+      incarnation_id: incarnation.incarnation_id,
       seq: incarnation.seq,
       impl: incarnation.impl,
       session_ref: incarnation.session_ref,
