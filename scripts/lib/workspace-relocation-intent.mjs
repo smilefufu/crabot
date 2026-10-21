@@ -9,7 +9,7 @@ import knownProcessExit from './known-process-exit.cjs'
 import { cliLockToken } from './cli-lock.mjs'
 import { sha256CanonicalJson } from '../../crabot-shared/dist/canonical-json.js'
 import { publishWorkspaceRoot, validateWorkspaceRootPublicationPlan } from './workspace-root-publish.mjs'
-import { WorkspaceCatalog, projectWorkspaceCatalogRelocation } from '../../crabot-shared/dist/workspace-catalog.js'
+import { WorkspaceCatalog, WorkspaceError, projectWorkspaceCatalogRelocation } from '../../crabot-shared/dist/workspace-catalog.js'
 import { inspectWorkspaceRelocationTarget } from '../../crabot-shared/dist/workspace-relocation-target.js'
 const uuid = value => typeof value === 'string' && /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(value)
 const absolute = value => typeof value === 'string' && path.isAbsolute(value) && !value.includes('\0')
@@ -102,12 +102,16 @@ export async function beginWorkspaceRelocationIntent(options) {
     syncIntent(ctx)
     return current
   }
-  const catalog = new WorkspaceCatalog({ dataRoot: ctx.dataRoot, storageRoot: process.env.WORKER_WORKSPACES_DIR, files: native })
+  const storageRoot = process.env.WORKER_WORKSPACES_DIR
+  const catalog = new WorkspaceCatalog({ dataRoot: ctx.dataRoot, storageRoot, files: native })
   const snapshot = await catalog.snapshot()
   if (snapshot.revision !== options.expectedRevision) fail('WORKSPACE_REVISION_CONFLICT')
   const controlIdentity = identity(ctx.control)
   const preview = await inspectWorkspaceRelocationTarget(snapshot.storage_root, requestedTarget,
     { protectedRoots: [...options.protectedRoots, ctx.control] })
+  if (process.env.WORKER_WORKSPACES_DIR !== storageRoot || storageRoot !== undefined && preview.mode !== 'unchanged') {
+    throw new WorkspaceError('WORKSPACE_DIRECTORY_CONFLICT', '当前部署通过 WORKER_WORKSPACES_DIR 固定了工作区位置或预检期间环境发生变化；未停止任务或修改目录选择。')
+  }
   if (preview.mode === 'unchanged') return { unchanged: true, source: preview.source }
   if (preview.inspection.issues.length || preview.usage.status !== 'complete') fail('WORKSPACE_RELOCATION_BLOCKED')
   if (preview.mode === 'copy' && (preview.usage.logical_bytes === undefined || BigInt(preview.usage.logical_bytes) > preview.available_bytes)) fail('WORKSPACE_RELOCATION_BLOCKED')
@@ -126,7 +130,8 @@ export async function beginWorkspaceRelocationIntent(options) {
   if (!same(controlIdentity, identity(ctx.control)) || !privateControl(ctx.control)) fail()
   if (read(ctx)) fail('WORKSPACE_RELOCATION_CONFLICT')
   publishPrivateJson(ctx, ctx.file, record, 65536, () => {
-    if (cliLockToken(path.join(ctx.dataRoot, 'cli.lock')) !== operationToken
+    if (process.env.WORKER_WORKSPACES_DIR !== storageRoot
+      || cliLockToken(path.join(ctx.dataRoot, 'cli.lock')) !== operationToken
       || !same(dataIdentity, identity(ctx.dataRoot)) || !same(controlIdentity, identity(ctx.control)) || !privateControl(ctx.control)) fail()
     if (read(ctx)) fail('WORKSPACE_RELOCATION_CONFLICT')
   })

@@ -66,6 +66,31 @@ test('another id or conflicting retry input cannot replace an accepted intent', 
   } finally { releaseCliLock(lock) }
 })
 
+for (const choice of ['different root', 'current root', 'environment changed during preview']) test('an explicit deployment workspace is checked before freezing: ' + choice, async t => {
+  const f = await fixture(t), lock = await acquireCliLock(f.data, 'workspace-relocation')
+  const previous = process.env.WORKER_WORKSPACES_DIR, control = path.dirname(f.recordFile), names = await fs.readdir(control)
+  try {
+    process.env.WORKER_WORKSPACES_DIR = f.source
+    if (choice === 'environment changed during preview') {
+      delete process.env.WORKER_WORKSPACES_DIR
+      const statfs = fs.statfs
+      t.mock.method(fs, 'statfs', async (...args) => { const result = await statfs(...args); process.env.WORKER_WORKSPACES_DIR = f.source; return result })
+    }
+    if (choice !== 'current root') await assert.rejects(beginWorkspaceRelocationIntent(f.input), { code: 'WORKSPACE_DIRECTORY_CONFLICT' })
+    else assert.deepEqual(await beginWorkspaceRelocationIntent({ ...f.input, target: f.source }), { unchanged: true, source: f.source })
+    assert.equal(readWorkspaceRelocationIntent(f.data), null)
+    assertWorkspaceExecutionAllowed(f.data)
+    assert.deepEqual(await fs.readdir(control), names)
+    assert.deepEqual(await f.catalog.snapshot(), f.snapshot)
+    assert.equal(await fs.readFile(path.join(f.source, 'default/original.txt'), 'utf8'), 'user bytes')
+    await assert.rejects(fs.stat(f.input.target), { code: 'ENOENT' })
+  } finally {
+    if (previous === undefined) delete process.env.WORKER_WORKSPACES_DIR
+    else process.env.WORKER_WORKSPACES_DIR = previous
+    releaseCliLock(lock)
+  }
+})
+
 test('stale catalog or nonempty target rejects before a maintenance record exists', async t => {
   const f = await fixture(t), lock = await acquireCliLock(f.data, 'workspace-relocation')
   try {
