@@ -11,7 +11,7 @@ struct WorkspaceSyncObject {
   FILE_STANDARD_INFO standard{};
   bool directory = false;
 };
-static WorkspaceSyncHandle OpenWorkspaceSyncHandle(const std::wstring& path, DWORD access) {
+static WorkspaceSyncHandle OpenPinnedWorkspaceHandle(const std::wstring& path, DWORD access) {
   HANDLE raw = CreateFileW(path.c_str(), access, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
     FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
   if (raw == INVALID_HANDLE_VALUE) throw std::runtime_error("Cannot open pinned workspace sync object");
@@ -48,7 +48,7 @@ static std::unique_ptr<WorkspaceSyncObject> OpenWorkspaceSyncObject(const std::w
     ULONGLONG volume, const std::string* expected, const char*& stage) {
   auto object = std::make_unique<WorkspaceSyncObject>();
   stage = "metadata-open";
-  object->metadata = OpenWorkspaceSyncHandle(path, FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES);
+  object->metadata = OpenPinnedWorkspaceHandle(path, FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES);
   const auto file = object->metadata.get();
   stage = "metadata-read";
   FILE_ATTRIBUTE_TAG_INFO attributes{};
@@ -84,10 +84,10 @@ static std::unique_ptr<WorkspaceSyncObject> OpenWorkspaceSyncObject(const std::w
       readonlyChanged = true;
     }
     stage = "write-handle";
-    object->writable.push_back(OpenWorkspaceSyncHandle(path, GENERIC_WRITE | FILE_READ_ATTRIBUTES));
+    object->writable.push_back(OpenPinnedWorkspaceHandle(path, GENERIC_WRITE | FILE_READ_ATTRIBUTES));
     CheckWorkspaceSyncId(object->writable.back().get(), object->id);
     for (const auto& name : streams) {
-      object->writable.push_back(OpenWorkspaceSyncHandle(path + name, GENERIC_WRITE | FILE_READ_ATTRIBUTES));
+      object->writable.push_back(OpenPinnedWorkspaceHandle(path + name, GENERIC_WRITE | FILE_READ_ATTRIBUTES));
       CheckWorkspaceSyncId(object->writable.back().get(), object->id);
     }
     restore();
@@ -114,9 +114,9 @@ static void FlushWorkspaceSyncObject(const WorkspaceSyncObject& object, const ch
     || standard.EndOfFile.QuadPart != object.standard.EndOfFile.QuadPart || standard.DeletePending
     || (!object.directory && standard.NumberOfLinks != 1)) throw std::runtime_error("Workspace sync object changed while flushing");
 }
-struct WorkspaceSyncDirectory {
+// Neutral ordinary-directory name cursor; it performs no metadata writes or synchronization.
+struct WorkspaceDirectoryCursor {
   std::wstring path;
-  std::unique_ptr<WorkspaceSyncObject> object;
   WorkspaceSyncSearch search{nullptr, FindClose};
   bool started = false;
   bool Next(std::wstring& name) {
@@ -141,6 +141,9 @@ struct WorkspaceSyncDirectory {
       if (name != L"." && name != L"..") return true;
     }
   }
+};
+struct WorkspaceSyncDirectory : WorkspaceDirectoryCursor {
+  std::unique_ptr<WorkspaceSyncObject> object;
 };
 // Physical staging synchronization only. The fixed job owns authority, source validation and file-ready publication.
 static napi_value SyncPinnedWorkspaceTree(napi_env env, napi_callback_info info) {

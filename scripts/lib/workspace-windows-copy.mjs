@@ -39,7 +39,7 @@ export async function copyWorkspaceTreePinned(source, tree, container, { journal
     completionAttempted = true
     await journal.complete()
     check()
-    native.copyPinnedDirectoryMetadata(source, tree)
+    native.copyPinnedWorkspaceMetadata(source, tree)
     check()
     // Includes child streams/files, the tree and its private container, in child-to-parent order.
     native.syncPinnedWorkspaceTree(container)

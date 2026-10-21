@@ -93,9 +93,38 @@ static napi_value ReleaseDirectoryPin(napi_env env, napi_callback_info info) {
   } catch (const std::exception& error) { napi_throw_error(env, "CRABOT_DIRECTORY_PIN", error.what()); return nullptr; }
 }
 
+// Neutral metadata only; callers hold original object/ancestor handles and own staging authority.
+static void CopyWorkspaceObjectMetadata(HANDLE source, HANDLE target, const std::wstring& targetPath) {
+  PSECURITY_DESCRIPTOR sourceDescriptor = nullptr, targetDescriptor = nullptr;
+  try {
+    PSID sourceOwner = nullptr, sourceGroup = nullptr, targetOwner = nullptr, targetGroup = nullptr; PACL sourceLabel = nullptr, targetLabel = nullptr;
+    const DWORD fields = OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION;
+    if (GetSecurityInfo(source, SE_FILE_OBJECT, fields, &sourceOwner, &sourceGroup, nullptr, &sourceLabel, &sourceDescriptor) != ERROR_SUCCESS
+      || GetSecurityInfo(target, SE_FILE_OBJECT, fields, &targetOwner, &targetGroup, nullptr, &targetLabel, &targetDescriptor) != ERROR_SUCCESS
+      || !sourceOwner || !sourceGroup || !targetOwner || !targetGroup
+      || !EqualSid(sourceOwner, targetOwner) || !EqualSid(sourceGroup, targetGroup)) throw std::runtime_error("Cannot preserve pinned directory ownership");
+    FILE_BASIC_INFO basic{}; SECURITY_DESCRIPTOR_CONTROL control = 0; DWORD revision = 0;
+    if (!GetFileInformationByHandleEx(source, FileBasicInfo, &basic, sizeof(basic))
+      || !GetSecurityDescriptorControl(sourceDescriptor, &control, &revision)
+      || !SetSecurityDescriptorControl(sourceDescriptor, SE_DACL_AUTO_INHERIT_REQ,
+        (control & SE_DACL_AUTO_INHERITED) ? SE_DACL_AUTO_INHERIT_REQ : 0)) throw std::runtime_error("Cannot read pinned directory metadata");
+    if ((!sourceLabel || !sourceLabel->AceCount) && targetLabel && targetLabel->AceCount) throw std::runtime_error("Cannot remove an existing target access label");
+    // Preserve the source DACL inheritance model. Tree callers restore children after their parent.
+    // The full target path remains fixed by its live root/ancestor handles throughout this path-only API.
+    if (!SetFileSecurityW(targetPath.c_str(), DACL_SECURITY_INFORMATION, sourceDescriptor)
+      || (sourceLabel && sourceLabel->AceCount && SetSecurityInfo(target, SE_FILE_OBJECT, LABEL_SECURITY_INFORMATION, nullptr, nullptr, nullptr, sourceLabel) != ERROR_SUCCESS)
+      || !SetFileInformationByHandle(target, FileBasicInfo, &basic, sizeof(basic))) throw std::runtime_error("Cannot preserve pinned directory metadata");
+    LocalFree(sourceDescriptor); LocalFree(targetDescriptor);
+  } catch (...) {
+    if (sourceDescriptor) LocalFree(sourceDescriptor);
+    if (targetDescriptor) LocalFree(targetDescriptor);
+    throw;
+  }
+}
+
 // Physical metadata only, on two distinct pinned directory objects. The job owns staging authorization and readback.
 static napi_value CopyPinnedDirectoryMetadata(napi_env env, napi_callback_info info) {
-  HANDLE write = INVALID_HANDLE_VALUE; PSECURITY_DESCRIPTOR sourceDescriptor = nullptr, targetDescriptor = nullptr;
+  HANDLE write = INVALID_HANDLE_VALUE;
   try {
     size_t argc = 3; napi_value args[3]; napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
     if (argc != 2) throw std::runtime_error("Expected two owned directory pins");
@@ -105,29 +134,10 @@ static napi_value CopyPinnedDirectoryMetadata(napi_env env, napi_callback_info i
       FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
     if (write == INVALID_HANDLE_VALUE || DirectoryIdText(PinnedDirectoryId(write)) != target->identity
       || DirectoryIdText(PinnedDirectoryId(source->handles.back())) != source->identity) throw std::runtime_error("Pinned directory identity changed");
-    PSID sourceOwner = nullptr, sourceGroup = nullptr, targetOwner = nullptr, targetGroup = nullptr; PACL sourceLabel = nullptr, targetLabel = nullptr;
-    const DWORD fields = OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION;
-    if (GetSecurityInfo(source->handles.back(), SE_FILE_OBJECT, fields, &sourceOwner, &sourceGroup, nullptr, &sourceLabel, &sourceDescriptor) != ERROR_SUCCESS
-      || GetSecurityInfo(write, SE_FILE_OBJECT, fields, &targetOwner, &targetGroup, nullptr, &targetLabel, &targetDescriptor) != ERROR_SUCCESS
-      || !sourceOwner || !sourceGroup || !targetOwner || !targetGroup
-      || !EqualSid(sourceOwner, targetOwner) || !EqualSid(sourceGroup, targetGroup)) throw std::runtime_error("Cannot preserve pinned directory ownership");
-    FILE_BASIC_INFO basic{}; SECURITY_DESCRIPTOR_CONTROL control = 0; DWORD revision = 0;
-    if (!GetFileInformationByHandleEx(source->handles.back(), FileBasicInfo, &basic, sizeof(basic))
-      || !GetSecurityDescriptorControl(sourceDescriptor, &control, &revision)
-      || !SetSecurityDescriptorControl(sourceDescriptor, SE_DACL_AUTO_INHERIT_REQ,
-        (control & SE_DACL_AUTO_INHERITED) ? SE_DACL_AUTO_INHERIT_REQ : 0)) throw std::runtime_error("Cannot read pinned directory metadata");
-    if ((!sourceLabel || !sourceLabel->AceCount) && targetLabel && targetLabel->AceCount) throw std::runtime_error("Cannot remove an existing target access label");
-    // Preserve the source inheritance model instead of converting legacy ACLs or propagating changes to children.
-    // The full target path remains fixed by its live root/ancestor handles throughout this path-only API.
-    if (!SetFileSecurityW(target->path.c_str(), DACL_SECURITY_INFORMATION, sourceDescriptor)
-      || (sourceLabel && sourceLabel->AceCount && SetSecurityInfo(write, SE_FILE_OBJECT, LABEL_SECURITY_INFORMATION, nullptr, nullptr, nullptr, sourceLabel) != ERROR_SUCCESS)
-      || !SetFileInformationByHandle(write, FileBasicInfo, &basic, sizeof(basic))) throw std::runtime_error("Cannot preserve pinned directory metadata");
-    LocalFree(sourceDescriptor); sourceDescriptor = nullptr; LocalFree(targetDescriptor); targetDescriptor = nullptr;
+    CopyWorkspaceObjectMetadata(source->handles.back(), write, target->path);
     CloseHandle(write); write = INVALID_HANDLE_VALUE;
     napi_value result; napi_get_undefined(env, &result); return result;
   } catch (const std::exception& error) {
-    if (sourceDescriptor) LocalFree(sourceDescriptor);
-    if (targetDescriptor) LocalFree(targetDescriptor);
     if (write != INVALID_HANDLE_VALUE) CloseHandle(write);
     napi_throw_error(env, "CRABOT_DIRECTORY_METADATA", error.what()); return nullptr;
   }

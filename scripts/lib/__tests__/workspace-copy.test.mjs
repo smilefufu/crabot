@@ -189,8 +189,8 @@ test('actual Windows copy retains named-stream bytes and read-only file attribut
 
 test('Windows copy holds source, container and payload identities through metadata verification', { skip: process.platform !== 'win32' }, async t => {
   const { root, source, container } = await fixture(t), native = (await import('../process-identity.cjs')).default
-  const copy = native.copyPinnedDirectoryMetadata; let observed = false
-  t.mock.method(native, 'copyPinnedDirectoryMetadata', (...args) => {
+  const copy = native.copyPinnedWorkspaceMetadata; let observed = false
+  t.mock.method(native, 'copyPinnedWorkspaceMetadata', (...args) => {
     observed = true
     for (const directory of [source, container, path.join(container, 'tree')]) {
       assert.throws(() => native.renameDirectoryNoReplace(directory, path.join(root, 'unexpected-move')), { code: 'CRABOT_DIRECTORY_MOVE' })

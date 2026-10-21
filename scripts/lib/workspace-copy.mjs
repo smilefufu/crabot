@@ -106,7 +106,7 @@ export async function copyWorkspaceToStaging(source, container, { signal } = {})
       await runBounded(path.join(process.env.SystemRoot, 'System32/robocopy.exe'), [source, target, '/E', '/COPY:DATS', '/DCOPY:DATE',
         '/SL', '/SJ', '/R:0', '/W:0', '/NFL', '/NDL', '/NJH', '/NJS', '/NP'], { ...options, successCodes: [0, 1, 2, 3, 4, 5, 6, 7] })
       checkCancelled(signal)
-      native.copyPinnedDirectoryMetadata(sourcePin, treePin)
+      native.copyPinnedWorkspaceMetadata(sourcePin, treePin)
       if (native.inspectDirectoryFileId(source) !== sourcePin.identity || native.inspectDirectoryFileId(target) !== treePin.identity
         || native.inspectDirectoryFileId(container) !== containerPin.identity) throw fail()
     } else throw fail()
