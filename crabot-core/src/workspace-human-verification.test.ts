@@ -31,8 +31,8 @@ async function reserveFixturePort(): Promise<ReturnType<typeof http.createServer
   throw new Error('No finite fixture port was available')
 }
 
-async function fixture(options: { withMemory?: boolean; inactiveMemory?: boolean; wrongRuntime?: boolean; result?: string; withAgent?: boolean; agentResult?: string; actualAgent?: boolean; businessAgent?: boolean; processLifetimeMs?: number; backgroundShell?: boolean; validationHealth?: 'healthy' | 'unhealthy'; validationRuntimeMismatch?: boolean; validationRootOverride?: boolean; validationRegistration?: 'delayed' | 'exit'; memoryHealth?: 'healthy' | 'degraded'; actualAdmin?: boolean; adminReadyDelayMs?: number; quiesceResult?: string; orphanDuringStop?: boolean } = {}) {
-  if (options.businessAgent && (process.env.GITHUB_ACTIONS !== 'true' || process.env.CRABOT_WORKSPACE_BUSINESS_ONSTART_CI !== '1')) throw new Error('Business onStart is isolated CI only')
+async function fixture(options: { withMemory?: boolean; inactiveMemory?: boolean; wrongRuntime?: boolean; result?: string; withAgent?: boolean; agentResult?: string; actualAgent?: boolean; businessAgent?: boolean; businessMemory?: boolean; processLifetimeMs?: number; backgroundShell?: boolean; validationHealth?: 'healthy' | 'unhealthy'; validationRuntimeMismatch?: boolean; validationRootOverride?: boolean; validationRegistration?: 'delayed' | 'exit'; memoryHealth?: 'healthy' | 'degraded'; actualAdmin?: boolean; adminReadyDelayMs?: number; quiesceResult?: string; orphanDuringStop?: boolean } = {}) {
+  if ((options.businessAgent || options.businessMemory) && (process.env.GITHUB_ACTIONS !== 'true' || process.env.CRABOT_WORKSPACE_BUSINESS_ONSTART_CI !== '1')) throw new Error('Business onStart is isolated CI only')
   const root = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'crabot-current-admin-')))
   const native = require('../../scripts/lib/process-identity.cjs'), management = require('../../scripts/lib/desktop-management.cjs')
   const data = management.ensurePrivateDataRoot(path.join(root, 'data')), script = path.join(data, 'finite-admin.cjs'), callsFile = path.join(data, 'calls.json')
@@ -221,11 +221,13 @@ async function fixture(options: { withMemory?: boolean; inactiveMemory?: boolean
       const reserved = await reserveFixturePort(), port = (reserved.address() as { port: number }).port
       await new Promise<void>(resolve => reserved.close(() => resolve()))
       let memoryEntry = `"${process.execPath}" -e "setInterval(()=>{},1000)"`
-      if (options.memoryHealth) {
-        const file = path.join(data, 'finite-memory-server.cjs'), carrier = path.join(data, 'finite-memory-carrier.cjs')
+      if (options.memoryHealth || options.businessMemory) {
         const recordsFile = path.join(data, 'port-allocations.json'), allocations = JSON.parse(await fs.readFile(recordsFile, 'utf8').catch(() => '[]'))
         await fs.writeFile(recordsFile, JSON.stringify([...allocations, { module_id: 'memory-default', port, allocated_at: new Date().toISOString() }]))
         await manager.portAllocator.initialize()
+      }
+      if (options.memoryHealth && !options.businessMemory) {
+        const file = path.join(data, 'finite-memory-server.cjs'), carrier = path.join(data, 'finite-memory-carrier.cjs')
         await fs.writeFile(file, `const http=require('node:http'),fs=require('node:fs');const server=http.createServer(async(req,res)=>{
           let text='';for await(const part of req)text+=part;const body=JSON.parse(text);
           const data=body.method==='get_runtime_identity'?{instance_id:process.env.CRABOT_INSTANCE_ID,module_id:'memory-default',runtime_id:process.env.CRABOT_MODULE_RUNTIME_ID}:body.method==='health'?{status:fs.existsSync(${JSON.stringify(path.join(data, 'workspace-control/relocation-root-selected.json'))})?${JSON.stringify(options.memoryHealth)}:'healthy',details:{pid:process.pid}}:{};
@@ -239,11 +241,31 @@ async function fixture(options: { withMemory?: boolean; inactiveMemory?: boolean
         await fs.writeFile(carrier, `const{spawn}=require('node:child_process');const child=spawn(process.execPath,[${JSON.stringify(file)}],{stdio:'inherit'});child.on('exit',(code)=>process.exit(code??1));setTimeout(()=>process.exit(0),${options.processLifetimeMs ?? 30000}).unref();`)
         memoryEntry = `"${process.execPath}" "${carrier}"`
       }
+      const memoryProject = path.resolve('../crabot-memory'), memoryData = path.join(data, 'memory')
+      if (options.businessMemory) {
+        const python = path.join(memoryProject, '.venv', process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python')
+        await fs.access(python)
+        const wrapper = path.join(data, 'business-memory.py')
+        await fs.writeFile(wrapper, `import os,sys,runpy
+if os.environ.get('GITHUB_ACTIONS') != 'true' or os.environ.get('CRABOT_WORKSPACE_BUSINESS_ONSTART_CI') != '1':
+    raise RuntimeError('Business Memory startup is isolated CI only')
+sys.path.insert(0,${JSON.stringify(memoryProject)})
+runpy.run_module('src.main',run_name='__main__')
+`)
+        memoryEntry = `"${python}" "${wrapper}"`
+      }
       manager.modules.set('memory-default', { module_id: 'memory-default', module_type: 'memory', entry: memoryEntry,
+        ...(options.businessMemory ? { cwd: memoryProject, data_dir: memoryData, env: {
+          CRABOT_MEMORY_DATA_DIR: memoryData, CRABOT_MODULE_MANAGER_URL: `http://127.0.0.1:${manager.config.port}`,
+          CRABOT_LLM_API_KEY: 'finite-fixture-only', CRABOT_LLM_MODEL: 'finite-fixture-model', CRABOT_LLM_FORMAT: 'openai',
+          CRABOT_LLM_BASE_URL: `http://127.0.0.1:${manager.modules.get('admin-web').port}/v1`,
+        } } : {}),
         port, auto_start: false, auto_restart: false, start_priority: 0, skip_health_check: !options.memoryHealth, status: 'stopped' })
       if (options.withMemory) {
         await manager.startModuleProcess('memory-default')
-        if (options.memoryHealth) await vi.waitFor(async () => expect(await fs.readFile(path.join(data, 'memory-ready'), 'utf8')).toBe('ready'), { timeout: 10000 })
+        if (options.businessMemory) {
+          await vi.waitFor(async () => expect(await manager.sendToModule(port, 'health', {})).toMatchObject({ status: 'healthy' }), { timeout: 15000 })
+        } else if (options.memoryHealth) await vi.waitFor(async () => expect(await fs.readFile(path.join(data, 'memory-ready'), 'utf8')).toBe('ready'), { timeout: 10000 })
       }
     }
     const catalog = new WorkspaceCatalog({ dataRoot: data, files: native }); await catalog.initialize()
@@ -1833,15 +1855,22 @@ describe('MM checks the new runtime health and Root under the original job', () 
 
 // This group cannot start a business Agent on a developer machine.
 describe.skipIf(process.env.GITHUB_ACTIONS !== 'true' || process.env.CRABOT_WORKSPACE_BUSINESS_ONSTART_CI !== '1')('isolated business Agent after workspace relocation', () => {
-  it('runs the actual main/config pull/onStart/register at the selected Root while old work stays retired', async () => {
-    const f = await fixture({ actualAgent: true, actualAdmin: true, businessAgent: true, processLifetimeMs: 300000 })
+  it.each([false, true])('runs actual main/config/onStart/register at the selected Root while old work stays retired (real Memory=%s)', async businessMemory => {
+    const f = await fixture({ actualAgent: true, actualAdmin: true, businessAgent: true, businessMemory, withMemory: businessMemory, ...(businessMemory ? { memoryHealth: 'healthy' as const } : {}), processLifetimeMs: 300000 })
     const locks = require('../../scripts/lib/cli-lock.mjs'), records = require('../../scripts/lib/workspace-relocation-intent.mjs')
     const lock = await locks.acquireWorkspaceRelocationLock(f.data, f.params.intent_id)
     const runtime = f.manager.modules.get('crabot-agent'); runtime.skip_health_check = false
-    const oldChild = f.manager.processes.get('crabot-agent')
+    const oldChild = f.manager.processes.get('crabot-agent'), oldMemory = f.manager.processes.get('memory-default')
     try {
       const result = await f.manager.verifyWorkspaceRelocationValidationHealth(f.params, 'fixture-human')
       expect(f.manager.processes.get('crabot-agent')).not.toBe(oldChild)
+      if (businessMemory) {
+        expect(f.manager.processes.get('memory-default')).not.toBe(oldMemory)
+        expect(result.healthy_modules.map((item: any) => item.module_id)).toEqual(['memory-default', 'crabot-agent'])
+        expect((await fs.stat(path.join(f.data, 'memory/short_term.db'))).size).toBeGreaterThan(0)
+        expect((await fs.readFile(path.join(f.data, 'memory/SCHEMA_VERSION'), 'utf8')).trim()).toBe((await fs.readFile(path.resolve('../crabot-memory/schema_version'), 'utf8')).trim())
+        expect(await fs.readFile(path.join(f.data, 'logs/memory-default.log'), 'utf8')).toContain('Registered to Module Manager')
+      }
       expect(result.root_verified.runtime_id).toBe(f.manager.childStates.get(f.manager.processes.get('crabot-agent')).runtimeId)
       await vi.waitFor(async () => expect(await fs.readFile(path.join(f.data, 'logs/crabot-agent.log'), 'utf8')).toContain('Unified Agent module started successfully'), { timeout: 10000 })
       const calls = await f.calls()
@@ -1855,6 +1884,7 @@ describe.skipIf(process.env.GITHUB_ACTIONS !== 'true' || process.env.CRABOT_WORK
       expect(records.readWorkspaceRelocationHealth(f.data, f.params.intent_id).root_proof).toEqual(result.root_verified)
       expect((await fetch(`http://127.0.0.1:${f.port}/api/friends`, { headers: { Authorization: 'Bearer fixture-human' } })).status).toBe(200)
     } catch (error) {
+      if (businessMemory) console.error('[Workspace business Memory]', (await fs.readFile(path.join(f.data, 'logs/memory-default.log'), 'utf8').catch(() => '')).slice(-6000))
       console.error('[Workspace business startup]', (await fs.readFile(path.join(f.data, 'logs/crabot-agent.log'), 'utf8').catch(() => '')).slice(-6000))
       throw error
     } finally {

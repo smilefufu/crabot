@@ -441,7 +441,27 @@ for (const mode of ['confirmed', 'lost acknowledgement', 'changed source', 'copy
       assert.equal(fs.readFileSync(f.marker, 'utf8'), 'new work must be preserved')
       assert.equal(fs.existsSync(path.join(plan.staging_path, 'tree')), false)
     } else {
-      const result = await files.prepareFiles()
+      let result
+      try { result = await files.prepareFiles() }
+      catch (error) {
+        if (mode === 'copy' && process.platform === 'win32') {
+          const view = file => {
+            const bytes = native.inspectFileMetadata(file).metadata, parts = []; let at = 0
+            while (parts.length < 2) {
+              const colon = bytes.indexOf(58, at), size = Number(bytes.subarray(at, colon).toString())
+              parts.push(bytes.subarray(colon + 1, colon + 1 + size).toString('utf8')); at = colon + 1 + size
+            }
+            const stat = fs.statSync(file, { bigint: true })
+            return { attributes: parts[0], acl: parts[1], mtime_ns: String(stat.mtimeNs) }
+          }
+          for (const relative of ['', 'default', 'default/tasks', 'projects', 'original.txt']) {
+            try { t.diagnostic(JSON.stringify({ event: 'owned_cross_volume_metadata', relative,
+              source: view(path.join(f.before.storage_root, relative)), target: view(path.join(plan.staging_path, 'tree', relative)) })) }
+            catch { /* Keep the original failure if this finite diagnostic cannot be read. */ }
+          }
+        }
+        throw error
+      }
       assert.equal(result.dispatch, mode === 'lost acknowledgement' ? 'observe' : 'dispatch')
       assert.equal(result.ready.content_sha256, plan.source_content_sha256)
       assert.equal(fs.existsSync(f.before.storage_root), mode === 'copy')

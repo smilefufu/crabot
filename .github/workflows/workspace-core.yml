@@ -4,6 +4,10 @@ on:
   push:
     branches: ['feat/desktop-*']
     paths:
+      - 'crabot-memory/src/**'
+      - 'crabot-memory/schema_version'
+      - 'crabot-memory/pyproject.toml'
+      - 'crabot-memory/uv.lock'
       - 'crabot-core/src/index.ts'
       - 'crabot-core/src/module-manager-lifecycle.test.ts'
       - 'crabot-core/src/test-fixtures/uv-python-sleeper.py'
@@ -60,12 +64,13 @@ defaults:
 
 jobs:
   core:
-    name: Fixed workspace lifecycle ${{ matrix.os }}
+    name: ${{ matrix.suite == 'business' && 'Business workspace runtime' || 'Fixed workspace lifecycle' }} ${{ matrix.os }}
     timeout-minutes: ${{ matrix.os == 'windows-latest' && 45 || 25 }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-22.04, macos-14, macos-15-intel, windows-latest]
+        suite: [finite, business]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -91,19 +96,25 @@ jobs:
             node "$module/node_modules/typescript/bin/tsc" -p "$module/tsconfig.json"
           done
       - name: Actual fixed directory probe and bounded cleanup
+        if: matrix.suite == 'finite'
         run: node --test scripts/lib/__tests__/workspace-root-probe.test.mjs scripts/lib/__tests__/module-carrier-rpc.test.mjs
       - name: Persistent workspace maintenance guards
+        if: matrix.suite == 'finite'
         working-directory: crabot-shared
         run: node --import tsx --test src/workspace-maintenance.test.ts
       - name: Original lifecycle and maintenance regressions
+        if: matrix.suite == 'finite'
         working-directory: crabot-core
         run: node node_modules/vitest/vitest.mjs run src/module-manager-lifecycle.test.ts src/module-manager-health.test.ts src/module-manager-advanced.test.ts src/workspace-maintenance.test.ts src/workspace-module-scope.test.ts --maxWorkers=1 --minWorkers=1
       - name: Actual fixed job launch and technical health without business onStart
-        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
+        if: ${{ matrix.suite == 'finite' && !cancelled() && steps.compile.outcome == 'success' }}
         working-directory: crabot-core
         run: node node_modules/vitest/vitest.mjs run src/workspace-human-verification.test.ts --testNamePattern='post-relocation validation launches|new runtime health and Root' --maxWorkers=1 --minWorkers=1
+      - name: Prepare the actual Memory Python environment only in isolated CI
+        if: ${{ matrix.suite == 'business' && !cancelled() && steps.compile.outcome == 'success' }}
+        run: uv sync --project crabot-memory --frozen --python 3.13
       - name: Actual Agent main and business onStart at the selected workspace Root
-        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
+        if: ${{ matrix.suite == 'business' && !cancelled() && steps.compile.outcome == 'success' }}
         working-directory: crabot-core
         env:
           CRABOT_WORKSPACE_BUSINESS_ONSTART_CI: '1'
