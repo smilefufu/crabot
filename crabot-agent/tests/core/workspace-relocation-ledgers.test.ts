@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import fs from 'node:fs/promises'
-import { fstatSync } from 'node:fs'
+import { fstatSync, realpathSync } from 'node:fs'
 import path from 'node:path'
 import { tmpdir } from 'node:os'
 import { execFileSync } from 'node:child_process'
@@ -11,6 +11,7 @@ import type { LedgerWorker } from '../../src/workers/harness/ledger-types.js'
 import { managerKeyToFilename } from '../../src/workers/harness/ledger-store.js'
 const native = require('../../../scripts/lib/process-identity.cjs')
 const key = 'channel::session' as const
+const windowsAlias = process.platform === 'win32' && realpathSync(tmpdir()) !== realpathSync.native(tmpdir())
 
 describe('Agent-only read-only relocation ledger capture', () => {
   let root: string, data: string, directory: string, file: string
@@ -49,6 +50,14 @@ describe('Agent-only read-only relocation ledger capture', () => {
     expect(JSON.parse(prepared.contents).workers[0]).toMatchObject({ origin: worker.origin, report_to: worker.report_to,
       task: { id: worker.task.id, title: worker.task.title, status: 'closed', closed: { by: 'migration' } } })
     expect(await fs.readFile(file, 'utf8')).toBe(contents)
+  })
+  it.runIf(windowsAlias)('keeps an existing CLI binding for a real Windows short path to the same native directory', async () => {
+    const alias = path.join(tmpdir(), path.basename(root), 'data')
+    expect(realpathSync(alias)).not.toBe(await fs.realpath(alias))
+    expect(native.inspectDirectoryFileId(alias)).toBe(native.inspectDirectoryFileId(data))
+    const snapshot = await captureWorkspaceRelocationLedgers(alias)
+    expect(snapshot.data_root).toBe(realpathSync(alias))
+    expect(snapshot.files[0].contents).toBe(await fs.readFile(file, 'utf8'))
   })
   it.each(['data', 'agent', 'ledgers'])('does not create a missing %s namespace', async part => {
     const missing = part === 'data' ? data : part === 'agent' ? path.join(data, 'agent') : directory

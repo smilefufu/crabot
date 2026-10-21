@@ -1,4 +1,4 @@
-import { promises as fs, constants, type BigIntStats } from 'node:fs'
+import { promises as fs, constants, realpathSync, type BigIntStats } from 'node:fs'
 import path from 'node:path'
 import { TextDecoder } from 'node:util'
 import { ATOMIC_TEMP_FILE, filenameToManagerKey } from '../workers/harness/ledger-store.js'
@@ -7,7 +7,7 @@ import type { ManagerKey } from '../workers/harness/ledger-types.js'
 const native = require('../../../scripts/lib/process-identity.cjs')
 const management = require('../../../scripts/lib/desktop-management.cjs')
 const MAX_BYTES = 64 * 1024 * 1024
-const failure = () => new Error('无法核实原执行器台账，已保留数据和迁移维护保护。')
+const failure = (stage = 'capture') => Object.assign(new Error('无法核实原执行器台账，已保留数据和迁移维护保护。'), { code: 'CRABOT_WORKSPACE_LEDGER_CAPTURE', stage })
 const version = (stat: BigIntStats) => [stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs, stat.mode, stat.uid, stat.gid, stat.nlink].join(':')
 interface DirectoryObservation { readonly path: string; readonly version: string; readonly native_id: string | null }
 export interface WorkspaceRelocationLedgerFile {
@@ -31,23 +31,32 @@ export async function captureWorkspaceRelocationLedgers(dataDir: string, { signa
   const directory = path.join(root, 'agent', 'worker-ledgers')
   const directories: DirectoryObservation[] = [], pins: unknown[] = []
   const owned = (stat: BigIntStats, file: string, isDirectory: boolean) => {
-    if (stat.isSymbolicLink() || !(isDirectory ? stat.isDirectory() : stat.isFile()) || !stat.ino || !isDirectory && stat.nlink !== 1n) throw failure()
+    if (stat.isSymbolicLink() || !(isDirectory ? stat.isDirectory() : stat.isFile()) || !stat.ino || !isDirectory && stat.nlink !== 1n) throw failure(isDirectory ? 'directory-type' : 'file-type')
     const valid = process.platform === 'win32' ? (isDirectory ? native.isOwnedDirectory(file) : native.isOwnedFile(file))
       : stat.uid === BigInt(process.getuid!()) && (stat.mode & 0o022n) === 0n
-    if (!valid) throw failure()
+    if (!valid) throw failure(isDirectory ? 'directory-owner' : 'file-owner')
   }
   const verifyDirectories = async () => {
     check()
-    for (const item of directories) {
+    for (const [index, item] of directories.entries()) {
       const stat = await fs.lstat(item.path, { bigint: true }); owned(stat, item.path, true)
-      if (version(stat) !== item.version || await fs.realpath(item.path) !== item.path
-        || process.platform === 'win32' && native.inspectDirectoryFileId(item.path) !== item.native_id) throw failure()
+      if (version(stat) !== item.version) throw failure('directory-version-' + index)
+      const canonical = realpathSync(item.path)
+      if (canonical !== item.path) {
+        const sameNative = process.platform === 'win32' && native.inspectDirectoryFileId(canonical) === native.inspectDirectoryFileId(item.path)
+        throw failure('directory-canonical-' + (sameNative ? 'same-id-' : '') + index)
+      }
+      if (process.platform === 'win32' && native.inspectDirectoryFileId(item.path) !== item.native_id) throw failure('directory-native-id-' + index)
     }
   }
   try {
     for (const file of [root, path.join(root, 'agent'), directory]) {
       const before = await fs.lstat(file, { bigint: true }); owned(before, file, true)
-      if (await fs.realpath(file) !== file) throw failure()
+      const canonical = realpathSync(file)
+      if (canonical !== file) {
+        const sameNative = process.platform === 'win32' && native.inspectDirectoryFileId(canonical) === native.inspectDirectoryFileId(file)
+        throw failure('initial-directory-canonical' + (sameNative ? '-same-id' : ''))
+      }
       let nativeId: string | null = null
       if (process.platform === 'win32') { const pin = native.pinDirectory(file); pins.push(pin); nativeId = pin.identity }
       directories.push(Object.freeze({ path: file, version: version(before), native_id: nativeId }))
@@ -70,7 +79,7 @@ export async function captureWorkspaceRelocationLedgers(dataDir: string, { signa
       const file = path.join(directory, item.name), handle = await fs.open(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0))
       try {
         const opened = await handle.stat({ bigint: true }); owned(opened, file, false)
-        if (version(opened) !== version(item.stat)) throw failure()
+        if (version(opened) !== version(item.stat)) throw failure('file-opened-version')
         const size = Number(opened.size), body = Buffer.alloc(size)
         let offset = 0
         while (offset < size) {
@@ -83,15 +92,15 @@ export async function captureWorkspaceRelocationLedgers(dataDir: string, { signa
         if ((await handle.read(Buffer.alloc(1), 0, 1, null)).bytesRead !== 0) throw failure()
         const after = await handle.stat({ bigint: true }), current = await fs.lstat(file, { bigint: true })
         owned(after, file, false); owned(current, file, false)
-        if (version(after) !== version(item.stat) || version(current) !== version(item.stat)) throw failure()
+        if (version(after) !== version(item.stat) || version(current) !== version(item.stat)) throw failure('file-read-version')
         files.push(Object.freeze({ name: item.name, manager_key: item.manager_key, version: version(after), contents: new TextDecoder('utf-8', { fatal: true }).decode(body) }))
       } finally { await handle.close() }
     }
     await verifyDirectories()
-    if (JSON.stringify((await fs.readdir(directory)).sort()) !== JSON.stringify(names)) throw failure()
+    if (JSON.stringify((await fs.readdir(directory)).sort()) !== JSON.stringify(names)) throw failure('directory-names')
     for (const item of planned) {
       check()
-      if (version(await fs.lstat(path.join(directory, item.name), { bigint: true })) !== version(item.stat)) throw failure()
+      if (version(await fs.lstat(path.join(directory, item.name), { bigint: true })) !== version(item.stat)) throw failure('file-final-version')
     }
     check()
     return Object.freeze({ data_root: root, directories: Object.freeze(directories), names: Object.freeze(names), files: Object.freeze(files) })

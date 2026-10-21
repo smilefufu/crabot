@@ -139,10 +139,12 @@ export class LedgerStore {
       const index = ledger.workers.findIndex(w => w.worker_id === workerId)
       const prev = index >= 0 ? ledger.workers[index] : undefined
       const workspaceBefore = prev?.workspace_id
+      const statusBefore = prev?.task.status
       const previousRequest = canonicalizeJson(prev?.origin.request ?? null)
       const proposed = mutator(prev)
       const next = proposed?.origin.request ? structuredClone(proposed) : proposed
       if (!next) return undefined
+      if (statusBefore === 'closed' && next.task.status !== 'closed') throw new Error(`[LedgerStore] closed Worker cannot reopen: ${workerId}`)
       assertWorkerLegacyShape(next)
       if (prev && previousRequest !== canonicalizeJson(next.origin.request ?? null)) throw new Error(`[LedgerStore] request binding is immutable; historical Workers cannot acquire it: ${workerId}`)
       if (prev?.legacy_source) {

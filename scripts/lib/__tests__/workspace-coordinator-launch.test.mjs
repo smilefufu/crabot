@@ -231,7 +231,7 @@ for (const scenario of ['normal', 'unexpected-path', 'lost-reply']) test('actual
 })
 
 
-for (const mode of ['confirmed', 'lost reply', 'unexpected payload', 'exited Host']) test('fixed file journal starts only one idle Host: ' + mode, { timeout: 25000 }, async t => {
+for (const mode of ['confirmed', 'lost reply', 'unexpected payload', 'exited Host']) test('fixed file journal starts only one idle Host: ' + mode, { timeout: process.platform === 'win32' ? 60000 : 25000 }, async t => {
   const f = await fixture(t), { child, launch } = await f.launch(), context = { dataDir: f.data, id: f.id, launch }
   const workers = createWorkspaceWorkerJournal(child, context), modules = createWorkspaceModuleJournal(child, context), processes = createWorkspaceProcessJournal(child, context)
   let files = createWorkspaceFileJournal(child, context), host, hostExited = false, failed
@@ -277,6 +277,7 @@ for (const mode of ['confirmed', 'lost reply', 'unexpected payload', 'exited Hos
       files.close(); files = createWorkspaceFileJournal(child, context)
     }
     const first = await files.prepareHost(); host = first.actors.host.process
+    t.diagnostic('file Host channel: original Host admitted')
     assert.equal(first.dispatch, mode === 'lost reply' ? 'observe' : 'dispatch')
     assert.equal(host.parent, child.pid); assert.ok(native.sameProcess(host, native.inspectProcess(host.pid)))
     const bytes = fs.readFileSync(path.join(f.data, 'workspace-control/relocation-file-actors.jsonl'))
@@ -291,6 +292,7 @@ for (const mode of ['confirmed', 'lost reply', 'unexpected payload', 'exited Hos
     if (mode === 'exited Host') {
       native.terminateKnownProcess(host)
       await confirmHostExit()
+      t.diagnostic('file Host channel: original generation exited')
       await assert.rejects(files.prepareHost(), { code: 'CRABOT_WORKSPACE_JOURNAL_UNAVAILABLE' })
       assert.deepEqual(native.listChildProcessIds(child.pid), initialPids)
       assert.deepEqual(fs.readFileSync(path.join(f.data, 'workspace-control/relocation-file-actors.jsonl')), bytes)

@@ -11,6 +11,7 @@ on:
       - 'crabot-agent/src/workers/harness/ledger-store.ts'
       - 'crabot-agent/tests/core/workspace-relocation-ledgers.test.ts'
       - 'crabot-agent/tests/workers/harness/workspace-relocation-close.test.ts'
+      - 'crabot-agent/tests/workers/harness/ledger-store.test.ts'
       - 'scripts/lib/workspace-*'
       - 'scripts/lib/process-identity.cjs'
       - 'scripts/lib/run-bounded.mjs'
@@ -61,7 +62,7 @@ jobs:
           pnpm --dir crabot-agent install --frozen-lockfile
           pnpm --dir crabot-agent build
           cd crabot-agent
-          node node_modules/vitest/vitest.mjs run tests/core/workspace-relocation-ledgers.test.ts tests/workers/harness/workspace-relocation-close.test.ts --maxWorkers=1 --minWorkers=1
+          node node_modules/vitest/vitest.mjs run tests/core/workspace-relocation-ledgers.test.ts tests/workers/harness/workspace-relocation-close.test.ts tests/workers/harness/ledger-store.test.ts --maxWorkers=1 --minWorkers=1
       - name: Windows delayed instance registration regression
         if: runner.os == 'Windows'
         run: |
