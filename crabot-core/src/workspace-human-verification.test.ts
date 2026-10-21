@@ -31,7 +31,7 @@ async function reserveFixturePort(): Promise<ReturnType<typeof http.createServer
   throw new Error('No finite fixture port was available')
 }
 
-async function fixture(options: { withMemory?: boolean; inactiveMemory?: boolean; wrongRuntime?: boolean; result?: string; withAgent?: boolean; agentResult?: string; actualAgent?: boolean; businessAgent?: boolean; businessMemory?: boolean; processLifetimeMs?: number; backgroundShell?: boolean; validationHealth?: 'healthy' | 'unhealthy'; validationRuntimeMismatch?: boolean; validationRootOverride?: boolean; validationRegistration?: 'delayed' | 'exit'; memoryHealth?: 'healthy' | 'degraded'; actualAdmin?: boolean; adminReadyDelayMs?: number; quiesceResult?: string; orphanDuringStop?: boolean } = {}) {
+async function fixture(options: { withMemory?: boolean; inactiveMemory?: boolean; wrongRuntime?: boolean; result?: string; withAgent?: boolean; agentResult?: string; actualAgent?: boolean; businessAgent?: boolean; businessMemory?: boolean; processLifetimeMs?: number; backgroundShell?: boolean; validationHealth?: 'healthy' | 'unhealthy'; validationRuntimeMismatch?: boolean; validationRootOverride?: boolean; validationRegistration?: 'delayed' | 'exit'; memoryHealth?: 'healthy' | 'degraded'; memoryBootstrap?: boolean; actualAdmin?: boolean; adminReadyDelayMs?: number; quiesceResult?: string; orphanDuringStop?: boolean } = {}) {
   if ((options.businessAgent || options.businessMemory) && (process.env.GITHUB_ACTIONS !== 'true' || process.env.CRABOT_WORKSPACE_BUSINESS_ONSTART_CI !== '1')) throw new Error('Business onStart is isolated CI only')
   const root = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'crabot-current-admin-')))
   const native = require('../../scripts/lib/process-identity.cjs'), management = require('../../scripts/lib/desktop-management.cjs')
@@ -240,6 +240,17 @@ async function fixture(options: { withMemory?: boolean; inactiveMemory?: boolean
         });setTimeout(()=>process.exit(0),${options.processLifetimeMs ?? 30000}).unref();`)
         await fs.writeFile(carrier, `const{spawn}=require('node:child_process');const child=spawn(process.execPath,[${JSON.stringify(file)}],{stdio:'inherit'});child.on('exit',(code)=>process.exit(code??1));setTimeout(()=>process.exit(0),${options.processLifetimeMs ?? 30000}).unref();`)
         memoryEntry = `"${process.execPath}" "${carrier}"`
+        if (options.memoryBootstrap) {
+          const gate = path.join(data, 'memory-bootstrap-gate'), bootstrap = path.join(data, 'finite-memory-bootstrap.sh')
+          const quote = (value: string) => "'" + value.replaceAll("'", "'\"'\"'") + "'"
+          await fs.writeFile(gate, 'hold')
+          await fs.writeFile(bootstrap, `if [ -f ${quote(path.join(data, 'workspace-control/relocation-root-selected.json'))} ]; then
+  while [ "$(cat ${quote(gate)})" != release ]; do sleep 0.02; done
+fi
+exec ${quote(process.execPath)} ${quote(carrier)}
+`)
+          memoryEntry = `/bin/sh "${bootstrap}"`
+        }
       }
       const memoryProject = path.resolve('../crabot-memory'), memoryData = path.join(data, 'memory')
       if (options.businessMemory) {
@@ -1705,19 +1716,47 @@ describe('MM restricts post-relocation validation launches to the original job',
 
 
 describe('MM checks the new runtime health and Root under the original job', () => {
-  for (const mode of ['healthy Agent', 'healthy Memory', 'healthy delayed registration', 'unhealthy Agent', 'degraded Memory', 'wrong runtime', 'definition changed during health', 'exit before registration', 'lost health acknowledgement', 'runtime record changed before health record', 'Agent workspace override']) {
+  for (const mode of ['healthy Agent', 'healthy Memory', ...(process.platform === 'win32' ? [] : ['healthy Memory bootstrap', 'Memory bootstrap generation changed', 'Memory bootstrap owner changed', 'Memory bootstrap executable changed after binding']), 'healthy delayed registration', 'unhealthy Agent', 'degraded Memory', 'wrong runtime', 'definition changed during health', 'exit before registration', 'lost health acknowledgement', 'runtime record changed before health record', 'Agent workspace override']) {
     it('retains maintenance until all exact runtime checks confirm: ' + mode, async () => {
-      const withMemory = mode.includes('Memory')
+      const withMemory = mode.includes('Memory'), bootstrap = mode.includes('bootstrap')
       const f = await fixture({ actualAgent: true, actualAdmin: true, withMemory,
         validationHealth: mode === 'unhealthy Agent' ? 'unhealthy' : 'healthy', validationRuntimeMismatch: mode === 'wrong runtime', validationRootOverride: mode === 'Agent workspace override',
         ...(mode.includes('registration') ? { validationRegistration: mode === 'exit before registration' ? 'exit' as const : 'delayed' as const } : {}),
-        ...(withMemory ? { memoryHealth: mode === 'degraded Memory' ? 'degraded' as const : 'healthy' as const } : {}),
+        ...(withMemory ? { memoryHealth: mode === 'degraded Memory' ? 'degraded' as const : 'healthy' as const, memoryBootstrap: bootstrap } : {}),
         processLifetimeMs: process.platform === 'win32' ? 900000 : 300000 })
       const locks = require('../../scripts/lib/cli-lock.mjs'), rpc = require('../../scripts/lib/module-carrier-rpc.cjs')
       const lock = await locks.acquireWorkspaceRelocationLock(f.data, f.params.intent_id)
       const runtime = f.manager.modules.get('crabot-agent'), originalEntry = runtime.entry
       if (mode.includes('registration')) runtime.skip_health_check = false
       let injected = false, changedRuntime: { file: string; contents: string } | undefined
+      let bootstrapRelease: Promise<void> | undefined, bootstrapChanged = false, bootstrapRegistered = false
+      const bootstrapSpies: Array<{ mockRestore(): void }> = []
+      if (bootstrap) {
+        const native = require('../../scripts/lib/process-identity.cjs'), inspect = native.inspectProcess.bind(native)
+        const oldMemory = f.manager.processes.get('memory-default'), list = f.manager.runtimeRegistry.listRecords.bind(f.manager.runtimeRegistry)
+        bootstrapSpies.push(vi.spyOn(native, 'inspectProcess').mockImplementation((pid: number) => {
+          const actual = inspect(pid), current = f.manager.processes.get('memory-default')
+          if (!actual || current === oldMemory || current?.pid !== pid) return actual
+          if (!bootstrapRelease) bootstrapRelease = (async () => {
+            await fs.writeFile(path.join(f.data, 'memory-bootstrap-gate'), 'release')
+            await vi.waitFor(() => {
+              const service = inspect(pid)
+              expect(service?.executable).toBeTruthy()
+              expect(service.executable).not.toBe(actual.executable)
+              expect(service.started).toBe(actual.started)
+            }, { timeout: 10000 })
+            bootstrapChanged = true
+          })()
+          if (bootstrapRegistered && mode === 'Memory bootstrap executable changed after binding') return { ...actual, executable: actual.executable + '-other' }
+          if (bootstrapChanged && mode === 'Memory bootstrap generation changed') return { ...actual, started: actual.started + '-other' }
+          if (bootstrapChanged && mode === 'Memory bootstrap owner changed') return { ...actual, owner: actual.owner + '-other' }
+          return actual
+        }))
+        bootstrapSpies.push(vi.spyOn(f.manager.runtimeRegistry, 'listRecords').mockImplementation(async () => {
+          if (bootstrapRelease) { await bootstrapRelease; bootstrapRegistered = true }
+          return list()
+        }))
+      }
       const launchCoordinator = f.manager.launchWorkspaceRelocationCoordinator.bind(f.manager)
       if (mode === 'lost health acknowledgement' || mode === 'runtime record changed before health record') {
         vi.spyOn(f.manager, 'launchWorkspaceRelocationCoordinator').mockImplementation(async (...args: any[]) => {
@@ -1821,7 +1860,8 @@ describe('MM checks the new runtime health and Root under the original job', () 
             } else await expect(fs.readFile(file)).rejects.toMatchObject({ code: 'ENOENT' })
           }
         }
-        expect(starts).toHaveBeenCalledTimes(withMemory ? 2 : 1)
+        if (bootstrap) { await bootstrapRelease; expect(bootstrapChanged).toBe(true) }
+        expect(starts).toHaveBeenCalledTimes(bootstrap && !mode.startsWith('healthy') ? 1 : withMemory ? 2 : 1)
         const calls = JSON.parse(await fs.readFile(path.join(f.data, 'agent-calls.json'), 'utf8'))
         expect(calls.filter((item: any) => item.method === 'verify_workspace_relocation_root')).toHaveLength(mode.startsWith('healthy') || mode.includes('health record') || mode === 'lost health acknowledgement' || mode === 'Agent workspace override' ? 1 : 0)
         expect(f.manager.verifyWorkspaceRelocationValidationHealth(f.params, 'fixture-human')).toBe(first)
@@ -1830,6 +1870,8 @@ describe('MM checks the new runtime health and Root under the original job', () 
         const ledger = JSON.parse(await fs.readFile(path.join(f.data, 'agent/worker-ledgers/channel%3A%3Asession.json'), 'utf8'))
         expect(ledger.workers[0].task.status).toBe('closed')
       } finally {
+        for (const spy of bootstrapSpies) spy.mockRestore()
+        if (bootstrapRelease) await bootstrapRelease
         runtime.entry = originalEntry
         if (changedRuntime) writeFileSync(changedRuntime.file, changedRuntime.contents)
         const child = f.manager.workspaceValidationProof?.result.coordinator
@@ -1855,7 +1897,11 @@ describe('MM checks the new runtime health and Root under the original job', () 
 
 // This group cannot start a business Agent on a developer machine.
 describe.skipIf(process.env.GITHUB_ACTIONS !== 'true' || process.env.CRABOT_WORKSPACE_BUSINESS_ONSTART_CI !== '1')('isolated business Agent after workspace relocation', () => {
-  it.each([false, true])('runs actual main/config/onStart/register at the selected Root while old work stays retired (real Memory=%s)', async businessMemory => {
+  const cases = [
+    { memory: false, round: 1 },
+    ...Array.from({ length: process.platform === 'darwin' && process.arch === 'x64' ? 3 : 1 }, (_, index) => ({ memory: true, round: index + 1 })),
+  ]
+  it.each(cases)('runs actual main/config/onStart/register at the selected Root while old work stays retired (real Memory=$memory, round=$round)', async ({ memory: businessMemory }) => {
     const f = await fixture({ actualAgent: true, actualAdmin: true, businessAgent: true, businessMemory, withMemory: businessMemory, ...(businessMemory ? { memoryHealth: 'healthy' as const } : {}), processLifetimeMs: 300000 })
     const locks = require('../../scripts/lib/cli-lock.mjs'), records = require('../../scripts/lib/workspace-relocation-intent.mjs')
     const lock = await locks.acquireWorkspaceRelocationLock(f.data, f.params.intent_id)

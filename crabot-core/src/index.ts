@@ -1746,9 +1746,25 @@ export class ModuleManager {
           } finally { this.workspaceValidationPermits.delete(permit) }
           stage = 'observe-new-module'
           const newChild = this.processes.get(scope.module_id), state = newChild && this.childStates.get(newChild)
-          const identity = newChild?.pid && native.inspectProcess(newChild.pid)
+          let identity = newChild?.pid && native.inspectProcess(newChild.pid)
           if (!newChild || !state || state.finalizeStarted || !identity || identity.parent !== coordinator.launch.parent.pid
             || identity.owner !== coordinator.launch.parent.owner) throw failure()
+          if (scope.module_id === 'memory-default' && runtime.skip_health_check !== true
+            && !(state.reachedRunning && runtime.status === 'running')) {
+            stage = 'await-memory-bootstrap'
+            const original = identity, deadline = Date.now() + 120000
+            while (!(state.reachedRunning && (runtime as ModuleRuntime).status === 'running')) {
+              if (Date.now() > deadline || this.isShuttingDown || this.processes.get(scope.module_id) !== newChild
+                || this.childStates.get(newChild) !== state || state.finalizeStarted || state.rootExited
+                || newChild.exitCode !== null || newChild.signalCode !== null
+                || runtime.status === 'error' || runtime.status === 'stopped') throw failure()
+              await new Promise(resolve => setTimeout(resolve, 100))
+            }
+            const registered = native.inspectProcess(newChild.pid)
+            if (!registered || registered.pid !== original.pid || registered.started !== original.started
+              || registered.owner !== original.owner || registered.parent !== original.parent) throw failure()
+            identity = registered
+          }
           launched.set(scope.module_id, { child: newChild, state, process: identity })
           stage = 'verify-new-module'
           await verify(); pendingModule = undefined
