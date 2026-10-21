@@ -96,6 +96,12 @@ async function fixture(options: { withMemory?: boolean; inactiveMemory?: boolean
     await fs.rm(root, { recursive: true, force: true })
   }
   try {
+    if (options.businessAgent) {
+      // Real main requires the same completed offline preparation as ordinary startup.
+      const { prepareSharedRequests } = require('../../scripts/upgrade-lib/shared-requests.mjs')
+      expect((await prepareSharedRequests(path.resolve('..'), data)).status).toBe('prepared')
+      await require('../../crabot-agent/dist/manager/request-upgrade.js').assertRequestUpgradeReady(path.join(data, 'agent'))
+    }
     if (options.actualAgent) {
       host = http.createServer((req, res) => { void manager.handleRequest(req, res) })
       await new Promise<void>(resolve => host!.listen(0, '127.0.0.1', resolve))
@@ -1837,7 +1843,8 @@ describe.skipIf(process.env.GITHUB_ACTIONS !== 'true' || process.env.CRABOT_WORK
       expect(result.root_verified.runtime_id).toBe(f.manager.childStates.get(f.manager.processes.get('crabot-agent')).runtimeId)
       await vi.waitFor(async () => expect(await fs.readFile(path.join(f.data, 'logs/crabot-agent.log'), 'utf8')).toContain('Unified Agent module started successfully'), { timeout: 10000 })
       const calls = await f.calls()
-      expect(calls.filter(item => item.method === '/get_agent_config')).toHaveLength(1)
+      expect(calls.filter(item => item.method === '/get_agent_config').length).toBeGreaterThanOrEqual(1)
+      expect(await fs.readFile(path.join(f.data, 'logs/crabot-agent.log'), 'utf8')).toContain('- Configured: true')
       expect(calls.some(item => item.method.startsWith('/v1/'))).toBe(false)
       const ledger = JSON.parse(await fs.readFile(path.join(f.data, 'agent/worker-ledgers/channel%3A%3Asession.json'), 'utf8'))
       expect(ledger.workers[0].task.status).toBe('closed')

@@ -1866,7 +1866,7 @@ async function prepareWorkspaceRelocationRootParents({ dataDir, id, signal, ctx,
 }
 
 
-// Runtime registry files inherit DATA_DIR privacy; POSIX per-file mode is not a coordinator-record contract.
+// Runtime registry paths inherit owner-only access; protected per-entry ACLs/modes are not their contract.
 function readHealthRuntimeText(dataRoot, runtimeId) {
   if (runtimeId !== undefined && !uuid(runtimeId)) fail()
   const directories = [path.join(dataRoot, 'module-runtime-registry')]
@@ -1876,14 +1876,14 @@ function readHealthRuntimeText(dataRoot, runtimeId) {
   const checkDirectories = () => {
     for (let index = 0; index < directories.length; index++) {
       const directory = directories[index], stat = fs.lstatSync(directory, { bigint: true })
-      if (!same(before[index], identity(directory)) || (process.platform === 'win32' ? !native.isPrivateDirectory(directory) : stat.uid !== owner)) fail()
+      if (!same(before[index], identity(directory)) || (process.platform === 'win32' ? !native.isOwnerOnlyDirectory(directory) : stat.uid !== owner)) fail()
     }
   }
   checkDirectories()
   const file = path.join(directories.at(-1), runtimeId === undefined ? 'instance-id' : runtimeId + '.json')
   const stat = fs.lstatSync(file, { bigint: true })
   if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1n || stat.size > 65536n
-    || (process.platform === 'win32' ? !native.isPrivateFile(file) : stat.uid !== owner)) fail()
+    || (process.platform === 'win32' ? !native.isOwnerOnlyFile(file) : stat.uid !== owner)) fail()
   const fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0))
   try {
     if (observedVersion(fs.fstatSync(fd, { bigint: true })) !== observedVersion(stat)) fail()

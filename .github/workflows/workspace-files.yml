@@ -63,6 +63,7 @@ on:
       - 'scripts/workspace-file-host.mjs'
       - 'scripts/workspace-relocation-coordinator.mjs'
       - '.github/workflows/workspace-files.yml'
+      - '.github/scripts/probe-workspace-windows-sync.ps1'
   workflow_dispatch:
 
 permissions:
@@ -86,6 +87,10 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v4
+      - name: Observe Windows file and directory flush capability on owned finite files
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: .github/scripts/probe-workspace-windows-sync.ps1
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:

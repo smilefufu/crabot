@@ -64,6 +64,8 @@ module.exports = { ...native, sameProcess, terminateKnownProcess,
   } : {}),
   ...(native.writePrivateFile ? { writePrivateFile: filesystemPath(native.writePrivateFile), isPrivateFile: filesystemPath(native.isPrivateFile),
     isOwnedFile: filesystemPath(native.isOwnedFile), createPrivateDirectory: filesystemPath(native.createPrivateDirectory), isPrivateDirectory: filesystemPath(native.isPrivateDirectory) } : {}),
+  ...(native.isOwnerOnlyFile && native.isOwnerOnlyDirectory ? { isOwnerOnlyFile: filesystemPath(native.isOwnerOnlyFile),
+    isOwnerOnlyDirectory: filesystemPath(native.isOwnerOnlyDirectory) } : {}),
   ...(native.readUserPath ? { readUserPath: native.readUserPath, appendUserPathDirectory: native.appendUserPathDirectory,
     notifyUserPathChanged: native.notifyUserPathChanged } : {}),
 }

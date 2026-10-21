@@ -9,7 +9,7 @@ import identity from '../process-identity.cjs'
 
 test('Windows private file adapter preserves payload and converts actual filesystem paths only', () => {
   const calls = [], method = name => (...args) => { calls.push([name, ...args]); return true }
-  const native = Object.fromEntries(['writePrivateFile', 'isPrivateFile', 'isOwnedFile', 'createPrivateDirectory', 'isPrivateDirectory', 'isOwnedDirectory'].map(name => [name, method(name)]))
+  const native = Object.fromEntries(['writePrivateFile', 'isPrivateFile', 'isOwnedFile', 'createPrivateDirectory', 'isPrivateDirectory', 'isOwnedDirectory', 'isOwnerOnlyFile', 'isOwnerOnlyDirectory'].map(name => [name, method(name)]))
   const module = { exports: {} }
   vm.runInNewContext(fs.readFileSync(new URL('../process-identity.cjs', import.meta.url), 'utf8'), {
     module, process: { platform: 'win32' }, require: name => name === 'node:path' ? path.win32 : name === 'node:fs' ? fs : native,
@@ -69,4 +69,37 @@ test('Windows repeated private ACL reads observe access changes without changing
   assert.equal(fs.statSync(file, { bigint: true }).ino, fileBefore.ino)
   assert.equal(fs.statSync(directory, { bigint: true }).ino, directoryBefore.ino)
   assert.equal(fs.readFileSync(file, 'utf8'), 'retained original body')
+})
+
+
+test('Windows runtime registry inheritance remains owner-only without changing protected coordinator ACL rules', { skip: process.platform !== 'win32' }, t => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'crabot-inherited-acl-')))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  const data = path.join(root, 'data'); identity.createPrivateDirectory(data)
+  const registry = path.join(data, 'module-runtime-registry'), records = path.join(registry, 'records')
+  fs.mkdirSync(records, { recursive: true })
+  const file = path.join(records, 'finite-runtime.json'); fs.writeFileSync(file, 'retained runtime bytes')
+  assert.equal(identity.isPrivateDirectory(data), true)
+  assert.equal(identity.isPrivateDirectory(registry), false)
+  assert.equal(identity.isPrivateFile(file), false)
+  const before = fs.statSync(file, { bigint: true })
+  assert.equal(identity.isOwnerOnlyDirectory(data), true)
+  assert.equal(identity.isOwnerOnlyDirectory(registry), true)
+  assert.equal(identity.isOwnerOnlyDirectory(records), true)
+  assert.equal(identity.isOwnerOnlyFile(file), true)
+  const icacls = path.join(process.env.SystemRoot, 'System32/icacls.exe')
+  for (const target of [file, registry]) {
+    const inspect = target === file ? identity.isOwnerOnlyFile : identity.isOwnerOnlyDirectory
+    execFileSync(icacls, [target, '/grant', '*S-1-1-0:(R)'], { stdio: 'pipe' })
+    assert.equal(inspect(target), false)
+    assert.equal(target === file ? identity.isOwnedFile(target) : identity.isOwnedDirectory(target), true)
+    execFileSync(icacls, [target, '/remove:g', '*S-1-1-0'], { stdio: 'pipe' })
+    assert.equal(inspect(target), true)
+  }
+  const junction = path.join(root, 'junction'); fs.symlinkSync(records, junction, 'junction')
+  assert.throws(() => identity.isOwnerOnlyDirectory(junction), { code: 'CRABOT_PRIVATE_FILE' })
+  assert.equal(fs.statSync(file, { bigint: true }).ino, before.ino)
+  assert.equal(fs.readFileSync(file, 'utf8'), 'retained runtime bytes')
+  assert.equal(identity.isPrivateDirectory(registry), false)
+  assert.equal(identity.isPrivateFile(file), false)
 })
