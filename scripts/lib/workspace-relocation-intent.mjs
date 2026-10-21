@@ -8,7 +8,7 @@ import management from './desktop-management.cjs'
 import knownProcessExit from './known-process-exit.cjs'
 import { cliLockToken } from './cli-lock.mjs'
 import { sha256CanonicalJson } from '../../crabot-shared/dist/canonical-json.js'
-import { publishWorkspaceRoot, validateWorkspaceRootPublicationPlan } from './workspace-root-publish.mjs'
+import { publishWorkspaceRoot, validateWorkspaceRootPublicationPlan, publishWorkspaceParents, validateWorkspaceParentsPublicationPlan } from './workspace-root-publish.mjs'
 import { WorkspaceCatalog, WorkspaceError, projectWorkspaceCatalogRelocation } from '../../crabot-shared/dist/workspace-catalog.js'
 import { inspectWorkspaceRelocationTarget } from '../../crabot-shared/dist/workspace-relocation-target.js'
 const uuid = value => typeof value === 'string' && /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(value)
@@ -62,7 +62,7 @@ function read(ctx) {
   if (!privateControl(ctx.control)) return null
   const value = readPrivateJson(ctx.file, 65536)
   if (value === undefined) {
-    for (const file of ['relocation-workers.json', 'relocation-worker-processes.json', 'relocation-stop-attempt.json', 'relocation-stop-submission.json', 'relocation-modules.json', 'relocation-module-stop-attempt.json', 'relocation-module-processes', 'relocation-module-stop-submission.json', 'relocation-coordinator.json', 'relocation-coordinator-ready.json', 'relocation-process-stop.jsonl', 'relocation-execution-exit.json', 'relocation-files.json', 'relocation-file-actors.jsonl', 'relocation-worker-closure.json', 'relocation-worker-commits', 'relocation-manager-closure.json', 'relocation-manager-complete.json', 'relocation-root-plan.json', 'relocation-root-published.json', 'relocation-root-selected.json']) {
+    for (const file of ['relocation-workers.json', 'relocation-worker-processes.json', 'relocation-stop-attempt.json', 'relocation-stop-submission.json', 'relocation-modules.json', 'relocation-module-stop-attempt.json', 'relocation-module-processes', 'relocation-module-stop-submission.json', 'relocation-coordinator.json', 'relocation-coordinator-ready.json', 'relocation-process-stop.jsonl', 'relocation-execution-exit.json', 'relocation-files.json', 'relocation-file-actors.jsonl', 'relocation-worker-closure.json', 'relocation-worker-commits', 'relocation-manager-closure.json', 'relocation-manager-complete.json', 'relocation-root-plan.json', 'relocation-root-published.json', 'relocation-root-selected.json', 'relocation-root-parents.json', 'relocation-root-parents-complete.json']) {
       try { fs.lstatSync(path.join(ctx.control, file)); fail() }
       catch (error) { if (error.code !== 'ENOENT') fail() }
     }
@@ -372,7 +372,7 @@ function validModules(modules) {
   return true
 }
 function absent(ctx, names) {
-  for (const name of [...names, closurePlanFile, closureCommitsDirectory, recoveryPlanFile, recoveryCommitFile, rootPlanFile, rootPublishedFile, rootSelectedFile]) {
+  for (const name of [...names, closurePlanFile, closureCommitsDirectory, recoveryPlanFile, recoveryCommitFile, rootPlanFile, rootPublishedFile, rootSelectedFile, rootParentsFile, rootParentsCompleteFile]) {
     try { fs.lstatSync(path.join(ctx.control, name)); fail() }
     catch (error) { if (error.code !== 'ENOENT') fail() }
   }
@@ -1402,11 +1402,14 @@ const rootFrame = (directory, nativeId = process.platform === 'win32' ? native.i
 function validRootPlan(record, dataDir, id) {
   const intent = readWorkspaceRelocationIntent(dataDir), actors = readWorkspaceRelocationFileActors(dataDir, id)
   const worker = readWorkspaceRelocationClosureCommit(dataDir, id), recovery = readWorkspaceRelocationRecoveryCommit(dataDir, id)
-  if (!fields(record, ['schema_version', 'intent_id', 'bindings', 'worker_commit_sha256', 'recovery_commit_sha256', 'publication', 'catalog_after_sha256', 'catalog_mappings'])
+  if (!fields(record, ['schema_version', 'intent_id', 'bindings', 'worker_commit_sha256', 'recovery_commit_sha256', 'publication', 'catalog_after_sha256', 'catalog_mappings', 'parents_commit_sha256'])
     || record.schema_version !== 1 || record.intent_id !== id || !worker || !recovery || !actors.file_ready
     || sha256CanonicalJson(record.bindings) !== sha256CanonicalJson(readWorkspaceRelocationClosureBindings(dataDir, id))
     || record.worker_commit_sha256 !== sha256CanonicalJson(worker) || record.recovery_commit_sha256 !== sha256CanonicalJson(recovery)
     || !digest(record.catalog_after_sha256) || !Array.isArray(record.catalog_mappings)) fail()
+  const parents = readWorkspaceRelocationRootParentsPlan(dataDir, id), complete = readRootParentsComplete(dataDir, id, parents)
+  if (Boolean(parents) !== Boolean(complete) || record.parents_commit_sha256 !== (complete ? sha256CanonicalJson(complete) : null)
+    || complete && sha256CanonicalJson(complete.target_parent) !== sha256CanonicalJson(record.publication.target_parent)) fail()
   const publication = record.publication
   validateWorkspaceRootPublicationPlan(publication)
   if (publication.intent_id !== id || publication.target !== intent.target
@@ -1425,14 +1428,15 @@ function validRootPlan(record, dataDir, id) {
     previous = row.workspace_id
   }
   if (!hasDefault) fail()
+  return parents
 }
 /** Immutable historical plan; observing it cannot grant an execution or recovery role. */
-export function readWorkspaceRelocationRootPlan(dataDir, id) {
+function readRootPlanState(dataDir, id) {
   const { ctx } = coordinatorContext(dataDir, id), record = readPrivateJson(path.join(ctx.control, rootPlanFile), scopeLimit)
   if (record === undefined) return null
-  validRootPlan(record, dataDir, id)
-  return record
+  return { record, parents: validRootPlan(record, dataDir, id) }
 }
+export function readWorkspaceRelocationRootPlan(dataDir, id) { return readRootPlanState(dataDir, id)?.record ?? null }
 export async function prepareWorkspaceRelocationRootPlan({ dataDir, id, signal }) {
   const { ctx, intent, verify } = workspaceFileCoordinatorContext(dataDir, id, signal)
   verify()
@@ -1445,17 +1449,20 @@ export async function prepareWorkspaceRelocationRootPlan({ dataDir, id, signal }
   const filePlan = readWorkspaceRelocationFilePlan(dataDir, id)
   const before = await catalog.snapshot(), bindings = readWorkspaceRelocationClosureBindings(dataDir, id)
   if (sha256CanonicalJson(before) !== bindings.catalog_sha256 || before.revision !== intent.catalog_revision || before.storage_root !== intent.source.path) fail()
-  const after = projectWorkspaceCatalogRelocation(before, intent.target), parent = rootFrame(path.dirname(intent.target))
+  const after = projectWorkspaceCatalogRelocation(before, intent.target)
+  const preparedParents = await prepareWorkspaceRelocationRootParents({ dataDir, id, signal, ctx, intent, filePlan, evidence, verify })
+  const parent = preparedParents.parent
   const empty = intent.target_identity ? rootFrame(intent.target) : null
   const publication = { intent_id: id, container: { ...actors.staging.container, native_id: actors.staging.container_native_id },
     tree: { ...actors.file_ready.tree, native_id: actors.file_ready.tree_native_id }, target: intent.target, target_parent: parent, empty_target: empty }
   const record = { schema_version: 1, intent_id: id, bindings, worker_commit_sha256: evidence.worker_commit_sha256, recovery_commit_sha256: evidence.recovery_commit_sha256,
-    publication, catalog_after_sha256: sha256CanonicalJson(after), catalog_mappings: before.workspaces.flatMap((item, index) => item.root === after.workspaces[index].root ? []
+    publication, parents_commit_sha256: preparedParents.commit_sha256, catalog_after_sha256: sha256CanonicalJson(after), catalog_mappings: before.workspaces.flatMap((item, index) => item.root === after.workspaces[index].root ? []
       : [{ workspace_id: item.workspace_id, before_root: item.root, after_root: after.workspaces[index].root }]).sort((a, b) => a.workspace_id < b.workspace_id ? -1 : 1) }
   validRootPlan(record, dataDir, id)
   const verifyInput = () => {
     verify(); evidence.verify(); validRootPlan(record, dataDir, id)
     verifyRootStagingParent(filePlan)
+    if (preparedParents.plan) verifyRootParentsState(preparedParents.plan, intent)
     verifyStagingContainer(actors.staging, ['tree'])
     if (sha256CanonicalJson(rootFrame(parent.path)) !== sha256CanonicalJson(parent)
       || sha256CanonicalJson(rootFrame(publication.tree.path)) !== sha256CanonicalJson(publication.tree)) fail()
@@ -1504,7 +1511,9 @@ function workspaceRootContext(dataDir, id, signal) {
   const filePlan = readWorkspaceRelocationFilePlan(dataDir, id)
   const verify = () => {
     base.verify(); verifyRootStagingParent(filePlan)
-    if (sha256CanonicalJson(readWorkspaceRelocationRootPlan(dataDir, id)) !== planHash
+    const current = readRootPlanState(dataDir, id)
+    if (current?.parents) verifyRootParentsState(current.parents, base.intent, plan.publication.tree)
+    if (sha256CanonicalJson(current?.record) !== planHash
       || sha256CanonicalJson(readWorkspaceRelocationFileActors(dataDir, id)) !== actorsHash
       || knownProcessExit.probeKnownProcessExit(fileScope).state !== 'stopped'
       || sha256CanonicalJson(rootFrame(plan.publication.target_parent.path)) !== sha256CanonicalJson(plan.publication.target_parent)) fail()
@@ -1626,4 +1635,141 @@ export async function selectWorkspaceRelocationRoot({ dataDir, id, signal }) {
   if (sha256CanonicalJson(await catalog.snapshot()) !== plan.catalog_after_sha256
     || sha256CanonicalJson(readWorkspaceRelocationRootSelected(dataDir, id)) !== sha256CanonicalJson(record)) fail()
   return { dispatch: 'dispatch', selected_sha256: sha256CanonicalJson(record) }
+}
+
+
+const rootParentsFile = 'relocation-root-parents.json', rootParentsCompleteFile = 'relocation-root-parents-complete.json'
+const rootInside = (root, value) => { const relative = path.relative(root, value); return !relative || relative !== '..' && !relative.startsWith('..' + path.sep) && !path.isAbsolute(relative) }
+function rootParentParts(record, intent) {
+  const relative = path.relative(record.publication.target_parent.path, path.dirname(intent.target))
+  if (!relative || relative === '..' || relative.startsWith('..' + path.sep) || path.isAbsolute(relative)) fail()
+  const parts = relative.split(path.sep)
+  if (record.publication.target !== path.join(record.publication.target_parent.path, parts[0])) fail()
+  return parts
+}
+export function readWorkspaceRelocationRootParentsPlan(dataDir, id) {
+  const { ctx, intent } = coordinatorContext(dataDir, id), record = readPrivateJson(path.join(ctx.control, rootParentsFile), scopeLimit)
+  if (record === undefined) return null
+  const filePlan = readWorkspaceRelocationFilePlan(dataDir, id), worker = readWorkspaceRelocationClosureCommit(dataDir, id), recovery = readWorkspaceRelocationRecoveryCommit(dataDir, id)
+  if (!fields(record, ['schema_version', 'intent_id', 'bindings', 'worker_commit_sha256', 'recovery_commit_sha256', 'publication', 'container_metadata_sha256', 'chain'])
+    || record.schema_version !== 1 || record.intent_id !== id || !worker || !recovery
+    || sha256CanonicalJson(record.bindings) !== sha256CanonicalJson(readWorkspaceRelocationClosureBindings(dataDir, id))
+    || record.worker_commit_sha256 !== sha256CanonicalJson(worker) || record.recovery_commit_sha256 !== sha256CanonicalJson(recovery)
+    || !digest(record.container_metadata_sha256) || !Array.isArray(record.chain)) fail()
+  validateWorkspaceParentsPublicationPlan(record.publication)
+  if (record.publication.intent_id !== id || path.dirname(record.publication.container.path) !== filePlan.staging_parent.path
+    || !rootInside(filePlan.staging_parent.path, record.publication.target_parent.path)) fail()
+  const parts = rootParentParts(record, intent)
+  if (record.chain.length !== parts.length) fail()
+  for (const [index, item] of record.chain.entries()) {
+    const relative = index ? path.join(...parts.slice(1, index + 1)) : ''
+    if (!fields(item, ['relative', 'dev', 'ino', 'native_id']) || item.relative !== relative
+      || !validIdentity({ path: path.join(record.publication.tree.path, relative), dev: item.dev, ino: item.ino })
+      || item.dev !== record.publication.tree.dev
+      || (process.platform === 'win32' ? typeof item.native_id !== 'string' || !/^[0-9]+:[a-f0-9]{32}$/i.test(item.native_id) : item.native_id !== null)) fail()
+  }
+  const first = record.chain[0], tree = record.publication.tree
+  if (first.dev !== tree.dev || first.ino !== tree.ino || first.native_id !== tree.native_id) fail()
+  return record
+}
+export function readWorkspaceRelocationRootParentsComplete(dataDir, id) {
+  return readRootParentsComplete(dataDir, id, readWorkspaceRelocationRootParentsPlan(dataDir, id))
+}
+function readRootParentsComplete(dataDir, id, plan) {
+  const { ctx, intent } = coordinatorContext(dataDir, id), record = readPrivateJson(path.join(ctx.control, rootParentsCompleteFile), 65536)
+  if (record === undefined) return null
+  if (!plan || !fields(record, ['schema_version', 'intent_id', 'plan_sha256', 'target_parent']) || record.schema_version !== 1 || record.intent_id !== id
+    || record.plan_sha256 !== sha256CanonicalJson(plan)
+    || sha256CanonicalJson(record.target_parent) !== sha256CanonicalJson({ path: path.dirname(intent.target), dev: plan.chain.at(-1).dev,
+      ino: plan.chain.at(-1).ino, native_id: plan.chain.at(-1).native_id })) fail()
+  return record
+}
+function verifyRootParentsState(plan, intent, payload) {
+  if (!plan) fail()
+  const pub = plan.publication, names = fs.readdirSync(pub.container.path)
+  const staged = names.length === 1 && names[0] === 'tree'
+  if (!staged && names.length) fail()
+  verifyStagingContainer({ container: { path: pub.container.path, dev: pub.container.dev, ino: pub.container.ino },
+    container_native_id: pub.container.native_id, container_metadata_sha256: plan.container_metadata_sha256 }, staged ? ['tree'] : [])
+  if (sha256CanonicalJson(rootFrame(pub.target_parent.path)) !== sha256CanonicalJson(pub.target_parent)) fail()
+  if (staged) { try { fs.lstatSync(pub.target); fail() } catch (error) { if (error.code !== 'ENOENT') throw error } }
+  const root = staged ? pub.tree.path : pub.target
+  for (const [index, item] of plan.chain.entries()) {
+    const directory = path.join(root, item.relative), frame = rootFrame(directory), stat = fs.lstatSync(directory)
+    if (frame.dev !== item.dev || frame.ino !== item.ino || frame.native_id !== item.native_id
+      || (process.platform === 'win32' ? !native.isPrivateDirectory(directory) : stat.uid !== process.getuid() || (stat.mode & 0o777) !== 0o700)) fail()
+    const children = fs.readdirSync(directory)
+    if (index + 1 < plan.chain.length) {
+      if (JSON.stringify(children) !== JSON.stringify([path.basename(plan.chain[index + 1].relative)])) fail()
+    } else if (children.length) {
+      if (staged || !payload || JSON.stringify(children) !== JSON.stringify([path.basename(intent.target)])
+        || sha256CanonicalJson(rootFrame(intent.target)) !== sha256CanonicalJson({ ...payload, path: intent.target })) fail()
+    }
+  }
+  if (payload && staged) fail()
+}
+async function prepareWorkspaceRelocationRootParents({ dataDir, id, signal, ctx, intent, filePlan, evidence, verify }) {
+  const check = () => { verify(); verifyRootStagingParent(filePlan); evidence.verify() }
+  const checkReady = async () => { check(); await verifyWorkspaceRelocationClosureReadiness({ dataDir, id, signal }); check() }
+  await checkReady()
+  let plan = readWorkspaceRelocationRootParentsPlan(dataDir, id)
+  if (!plan) {
+    if (readWorkspaceRelocationRootParentsComplete(dataDir, id)) fail()
+    let parent = path.dirname(intent.target)
+    for (;;) {
+      try { fs.lstatSync(parent); break } catch (error) { if (error.code !== 'ENOENT') throw error }
+      parent = path.dirname(parent)
+    }
+    const base = rootFrame(parent)
+    if (!rootInside(filePlan.staging_parent.path, parent) || base.dev !== filePlan.staging_parent.dev) fail()
+    if (parent === path.dirname(intent.target)) return { parent: base, commit_sha256: null, plan: null }
+    const parts = path.relative(parent, path.dirname(intent.target)).split(path.sep)
+    const container = path.join(filePlan.staging_parent.path, '.crabot-workspace-parents-' + id), tree = path.join(container, 'tree')
+    const create = async directory => {
+      check()
+      if (sha256CanonicalJson(rootFrame(base.path)) !== sha256CanonicalJson(base)) fail()
+      if (process.platform === 'win32') native.createPrivateDirectory(directory)
+      else fs.mkdirSync(directory, { mode: 0o700 })
+      const frame = rootFrame(directory)
+      await new Promise(resolve => setImmediate(resolve)); check()
+      if (sha256CanonicalJson(rootFrame(directory)) !== sha256CanonicalJson(frame)) fail()
+      return frame
+    }
+    const containerFrame = await create(container), chain = []
+    for (const [index] of parts.entries()) {
+      const relative = index ? path.join(...parts.slice(1, index + 1)) : '', frame = await create(path.join(tree, relative))
+      chain.push({ relative, dev: frame.dev, ino: frame.ino, native_id: frame.native_id })
+    }
+    plan = { schema_version: 1, intent_id: id, bindings: readWorkspaceRelocationClosureBindings(dataDir, id),
+      worker_commit_sha256: evidence.worker_commit_sha256, recovery_commit_sha256: evidence.recovery_commit_sha256,
+      publication: { intent_id: id, container: containerFrame, tree: { path: tree, dev: chain[0].dev, ino: chain[0].ino, native_id: chain[0].native_id },
+        target: path.join(parent, parts[0]), target_parent: base, empty_target: null }, container_metadata_sha256: stagingMetadata(container), chain }
+    verifyRootParentsState(plan, intent)
+    for (const item of [...chain].reverse()) syncDirectory(path.join(tree, item.relative))
+    syncDirectory(container); syncDirectory(filePlan.staging_parent.path)
+    await checkReady(); verifyRootParentsState(plan, intent)
+    publishPrivateJson(ctx, path.join(ctx.control, rootParentsFile), plan, scopeLimit, () => {
+      check(); verifyRootParentsState(plan, intent)
+      if (readWorkspaceRelocationRootParentsPlan(dataDir, id)) fail()
+    })
+  }
+  const planHash = sha256CanonicalJson(plan)
+  const verifyPlan = async () => {
+    await checkReady()
+    if (sha256CanonicalJson(readWorkspaceRelocationRootParentsPlan(dataDir, id)) !== planHash) fail()
+    verifyRootParentsState(plan, intent)
+  }
+  await verifyPlan()
+  await publishWorkspaceParents({ plan: plan.publication, signal, verify: verifyPlan })
+  await verifyPlan()
+  const record = { schema_version: 1, intent_id: id, plan_sha256: planHash, target_parent: rootFrame(path.dirname(intent.target)) }
+  const previous = readWorkspaceRelocationRootParentsComplete(dataDir, id)
+  if (previous) { if (sha256CanonicalJson(previous) !== sha256CanonicalJson(record)) fail(); syncIntent(ctx) }
+  else publishPrivateJson(ctx, path.join(ctx.control, rootParentsCompleteFile), record, 65536, () => {
+    check(); verifyRootParentsState(plan, intent)
+    if (sha256CanonicalJson(readWorkspaceRelocationRootParentsPlan(dataDir, id)) !== planHash || readWorkspaceRelocationRootParentsComplete(dataDir, id)) fail()
+  })
+  await verifyPlan()
+  if (sha256CanonicalJson(readWorkspaceRelocationRootParentsComplete(dataDir, id)) !== sha256CanonicalJson(record)) fail()
+  return { parent: record.target_parent, commit_sha256: sha256CanonicalJson(record), plan }
 }
