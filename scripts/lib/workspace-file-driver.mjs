@@ -20,26 +20,37 @@ export async function runWorkspaceFilePreparation(context, signal) {
       || !native.sameProcess(coordinator.launch.parent, native.inspectProcess(coordinator.launch.parent.pid))) throw failure()
   }
   check()
-  if (process.platform === 'win32' && plan.mode === 'copy') throw Object.assign(failure(), { code: 'WORKSPACE_COPY_SYNC_UNSUPPORTED' })
   const { inspectWorkspaceFileSource } = await import('./workspace-copy.mjs')
   const observation = await inspectWorkspaceFileSource(intent.source.path, plan.mode, { signal })
   if (hash(observation) !== hash(plan.source_observation)) throw failure()
   check()
-  const target = path.join(plan.staging_path, 'tree'), descriptors = []
+  const target = path.join(plan.staging_path, 'tree'), descriptors = [], pins = []
   let journal, containerPin
   try {
     if (plan.mode === 'copy') {
       const { createWorkspaceFileToolJournal } = await import('./workspace-file-tool-journal.mjs')
-      const { copyWorkspaceTreeFd } = await import('./workspace-posix-copy.mjs')
       const expected = [intent.source, original.staging.tree, original.staging.container]
-      for (const item of expected) {
-        const fd = fs.openSync(item.path, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW)
-        descriptors.push(fd)
-        const stat = fs.fstatSync(fd, { bigint: true })
-        if (stat.dev.toString() !== item.dev || stat.ino.toString() !== item.ino) throw failure()
-      }
       journal = createWorkspaceFileToolJournal({ dataDir, id })
-      check(); await copyWorkspaceTreeFd(...descriptors, { journal, signal }); check()
+      if (process.platform === 'win32') {
+        const { copyWorkspaceTreePinned } = await import('./workspace-windows-copy.mjs')
+        const identities = [plan.source_observation.source_identity.native_id, original.staging.tree_native_id, original.staging.container_native_id]
+        for (const [index, item] of expected.entries()) {
+          const pin = native.pinDirectory(item.path)
+          pins.push(pin)
+          const stat = fs.lstatSync(item.path, { bigint: true })
+          if (pin.identity !== identities[index] || stat.dev.toString() !== item.dev || stat.ino.toString() !== item.ino) throw failure()
+        }
+        check(); await copyWorkspaceTreePinned(...pins, { journal, signal }); check()
+      } else {
+        const { copyWorkspaceTreeFd } = await import('./workspace-posix-copy.mjs')
+        for (const item of expected) {
+          const fd = fs.openSync(item.path, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW)
+          descriptors.push(fd)
+          const stat = fs.fstatSync(fd, { bigint: true })
+          if (stat.dev.toString() !== item.dev || stat.ino.toString() !== item.ino) throw failure()
+        }
+        check(); await copyWorkspaceTreeFd(...descriptors, { journal, signal }); check()
+      }
     } else {
       if (process.platform === 'win32') {
         containerPin = native.pinDirectory(plan.staging_path)
@@ -57,5 +68,10 @@ export async function runWorkspaceFilePreparation(context, signal) {
       for (const fd of descriptors) fs.fsyncSync(fd)
       check()
     }
-  } finally { journal?.close(); for (const fd of descriptors.reverse()) fs.closeSync(fd); if (containerPin) native.releaseDirectoryPin(containerPin) }
+  } finally {
+    journal?.close()
+    for (const fd of descriptors.reverse()) fs.closeSync(fd)
+    for (const pin of pins.reverse()) native.releaseDirectoryPin(pin)
+    if (containerPin) native.releaseDirectoryPin(containerPin)
+  }
 }

@@ -21,9 +21,29 @@ import { createWorkspaceProcessJournal } from '../workspace-process-journal.mjs'
 import { WorkspaceCatalog } from '../../../crabot-shared/dist/workspace-catalog.js'
 import { sha256CanonicalJson } from '../../../crabot-shared/dist/canonical-json.js'
 
+const crossVolumeParent = (() => {
+  const candidates = process.platform === 'linux' ? ['/dev/shm'] : process.platform === 'win32' ? [
+    process.env.RUNNER_TEMP,
+    process.env.USERPROFILE && path.join(process.env.USERPROFILE, 'AppData', 'Local', 'Temp'),
+    process.env.GITHUB_ACTIONS === 'true' && process.cwd(),
+  ] : []
+  for (const candidate of candidates) {
+    if (!candidate) continue
+    try {
+      const directory = fs.realpathSync(candidate), stat = fs.statSync(directory)
+      if (stat.isDirectory() && stat.dev !== fs.statSync(tmpdir()).dev) return directory
+    } catch { /* An unavailable optional volume supplies no test evidence. */ }
+  }
+  return null
+})()
+
 async function fixture(t, { crossVolume = false, closureLedger = false, separateTargetAncestor = false, nestedTarget = false, historyIncarnation = false } = {}) {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(tmpdir(), 'coordinator-launch-')))
-  const targetRoot = crossVolume ? fs.mkdtempSync('/dev/shm/crabot-real-file-host-') : root
+  if (crossVolume && !crossVolumeParent) {
+    fs.rmdirSync(root)
+    throw new Error('This cross-volume acceptance requires an actual writable directory on another device')
+  }
+  const targetRoot = crossVolume ? fs.mkdtempSync(path.join(crossVolumeParent, 'crabot-real-file-host-')) : root
   const targetParent = separateTargetAncestor ? path.join(targetRoot, 'target-parent') : targetRoot
   if (separateTargetAncestor) fs.mkdirSync(targetParent, { mode: 0o700 })
   const data = management.ensurePrivateDataRoot(path.join(root, 'data')), id = randomUUID()
@@ -386,7 +406,7 @@ for (const mode of ['confirmed', 'lost acknowledgement', 'unexpected payload']) 
   } finally { workers.close(); modules.close(); processes.close(); files.close() }
 })
 
-for (const mode of ['confirmed', 'lost acknowledgement', 'changed source', 'copy', 'Root publish', 'Root lost acknowledgement', 'Root target changed', 'Root changed ancestor', 'Root nested target', 'Root nested target lost acknowledgement', 'Root nested parent changed']) test('the actual fixed Host prepares files once while the catalog stays unchanged: ' + mode, { timeout: process.platform === 'win32' ? 600000 : 120000, skip: mode === 'copy' && (process.platform !== 'linux' || !fs.existsSync('/dev/shm') || fs.statSync(tmpdir()).dev === fs.statSync('/dev/shm').dev) }, async t => {
+for (const mode of ['confirmed', 'lost acknowledgement', 'changed source', 'copy', 'Root publish', 'Root lost acknowledgement', 'Root target changed', 'Root changed ancestor', 'Root nested target', 'Root nested target lost acknowledgement', 'Root nested parent changed']) test('the actual fixed Host prepares files once while the catalog stays unchanged: ' + mode, { timeout: process.platform === 'win32' ? 600000 : 120000, skip: mode === 'copy' && !crossVolumeParent && !(process.platform === 'win32' && process.env.GITHUB_ACTIONS === 'true') }, async t => {
   const f = await fixture(t, { crossVolume: mode === 'copy', closureLedger: mode === 'confirmed' || mode === 'lost acknowledgement' || mode.startsWith('Root'), separateTargetAncestor: mode === 'Root changed ancestor', nestedTarget: mode.startsWith('Root nested'), historyIncarnation: mode === 'Root publish' }), { child, launch } = await f.launch(), context = { dataDir: f.data, id: f.id, launch }
   const workers = createWorkspaceWorkerJournal(child, context), modules = createWorkspaceModuleJournal(child, context), processes = createWorkspaceProcessJournal(child, context)
   let files = createWorkspaceFileJournal(child, context)
@@ -425,7 +445,13 @@ for (const mode of ['confirmed', 'lost acknowledgement', 'changed source', 'copy
       assert.equal(result.dispatch, mode === 'lost acknowledgement' ? 'observe' : 'dispatch')
       assert.equal(result.ready.content_sha256, plan.source_content_sha256)
       assert.equal(fs.existsSync(f.before.storage_root), mode === 'copy')
-      if (mode === 'copy') assert.equal(fs.readFileSync(f.marker, 'utf8'), 'original work')
+      if (mode === 'copy') {
+        assert.notEqual(fs.statSync(f.before.storage_root).dev, fs.statSync(plan.staging_path).dev)
+        assert.equal(fs.readFileSync(f.marker, 'utf8'), 'original work')
+        const actors = readWorkspaceRelocationFileActors(f.data, f.id)
+        assert.deepEqual(actors.tools.tools.map(item => item.role), process.platform === 'win32' ? ['copy'] : ['pack', 'unpack'])
+        assert.ok(actors.tool_permission); assert.ok(actors.tool_exit)
+      }
       assert.equal(fs.readFileSync(path.join(plan.staging_path, 'tree/original.txt'), 'utf8'), 'original work')
       assert.equal(native.isProcessExited(host.actors.host.process.pid), true)
       const control = path.join(f.data, 'workspace-control')

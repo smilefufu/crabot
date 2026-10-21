@@ -35,6 +35,9 @@ export async function inspectWorkspaceFileSource(source, mode, { signal } = {}) 
       throw Object.assign(new Error('当前系统用户无法保留部分文件的所有者或用户组；未开始复制。'), { code: 'WORKSPACE_COPY_OWNER_UNSUPPORTED' })
     }
     const metadata = await inspectWorkspaceFileMetadata(file, { signal })
+    if (mode === 'copy' && process.platform === 'win32' && (entries >= 999999 || metadata.named_streams > 1024)) {
+      throw Object.assign(new Error('工作区超过当前 Windows 可靠同步的数量上限；未停止执行或开始复制。'), { code: 'WORKSPACE_COPY_SYNC_UNSUPPORTED', path: relative })
+    }
     if (mode === 'copy' && account && (metadata.owner !== account.owner || metadata.group !== account.group)) throw Object.assign(new Error('当前系统用户无法保留部分文件的所有者或用户组；未开始复制。'), { code: 'WORKSPACE_COPY_OWNER_UNSUPPORTED', path: relative })
     if (mode === 'copy' && metadata.copy_blockers.length) throw Object.assign(new Error('工作区含当前跨盘复制不支持的文件属性；原目录保留。'), { code: 'WORKSPACE_COPY_METADATA_UNSUPPORTED', path: relative, blockers: metadata.copy_blockers })
     hash.update(JSON.stringify([relative, metadata.fingerprint]) + '\n'); entries++

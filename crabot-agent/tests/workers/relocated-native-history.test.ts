@@ -141,7 +141,7 @@ for (const impl of ['claude-code', 'codex'] as const) describe('relocated native
       expect((queryAdapter as any).runtimes.size).toBe(0)
       expect(tmux.isAlive).not.toHaveBeenCalled(); expect(tmux.killSession).not.toHaveBeenCalled()
       expect(await fs.readFile(metaFile, 'utf8')).toBe(originalMeta); expect(await fs.readFile(source, 'utf8')).toBe(originalSource)
-    })
+    }, process.platform === 'win32' ? 30000 : 5000)
     it('rejects a changed original binding after the child query reply', async () => {
       const { queryAdapter, pids } = childAdapter(), list = CodexAppServerClient.prototype.listThreads
       let changed = false

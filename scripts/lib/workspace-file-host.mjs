@@ -121,9 +121,8 @@ export async function enterWorkspaceFileHost() {
 export async function prepareWorkspaceFilesWithHost(child, { dataDir, id, signal }) {
   let clear = () => {}, stage = 'file-actors'
   try {
-    const original = readWorkspaceRelocationFileActors(dataDir, id), plan = readWorkspaceRelocationFilePlan(dataDir, id)
+    const original = readWorkspaceRelocationFileActors(dataDir, id)
     if (original.file_ready) return { dispatch: 'observe', ready: original.file_ready }
-    if (process.platform === 'win32' && plan.mode === 'copy') throw Object.assign(failure(), { code: 'WORKSPACE_COPY_SYNC_UNSUPPORTED' })
     stage = 'file-attempt'
     const started = await beginWorkspaceRelocationFiles({ dataDir, id, signal })
     stage = 'file-carrier'
