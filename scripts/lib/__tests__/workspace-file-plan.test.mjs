@@ -16,6 +16,8 @@ import { sha256CanonicalJson } from '../../../crabot-shared/dist/canonical-json.
 import * as records from '../workspace-relocation-intent.mjs'
 import { createWorkspaceFileToolJournal, serveWorkspaceFileToolJournal } from '../workspace-file-tool-journal.mjs'
 
+const fixtureLifetimeMs = process.platform === 'win32' ? 120000 : 30000
+
 async function fixture(t, { exitEvidence = true, crossVolume = false } = {}) {
   const root = fs.realpathSync.native(fs.mkdtempSync(path.join(tmpdir(), 'workspace-file-plan-中文 space-')))
   const data = management.ensurePrivateDataRoot(path.join(root, 'data')), id = randomUUID()
@@ -39,7 +41,7 @@ async function fixture(t, { exitEvidence = true, crossVolume = false } = {}) {
       else if(message==='tools-copy'){client??=createWorkspaceFileToolJournal(hostContext);const plan=readWorkspaceRelocationFilePlan(hostContext.dataDir,hostContext.id);const container=plan.staging_path,tree=container+'/tree';const {readWorkspaceRelocationFileActors}=await import(${JSON.stringify(module)});const facts=readWorkspaceRelocationFileActors(hostContext.dataDir,hostContext.id);if(!facts.staging||facts.tools)throw Object.assign(new Error('finite staging already consumed'),{code:'CRABOT_PRIVATE_STAGING'});const fds=[];try{for(const directory of [${JSON.stringify(source)},tree,container])fds.push(fs.openSync(directory,fs.constants.O_RDONLY|fs.constants.O_DIRECTORY|fs.constants.O_NOFOLLOW));await copyWorkspaceTreeFd(...fds,{journal:client})}finally{for(const fd of fds)fs.closeSync(fd)}result=await verifyWorkspaceRelocationCopy(${JSON.stringify(source)},tree)}
       else if(message==='tools-rpc-reset'){client?.close();client=createWorkspaceFileToolJournal(hostContext);result=true}
       else if(message.startsWith('tools-rpc-')){client??=createWorkspaceFileToolJournal(hostContext);const operation=message.slice('tools-rpc-'.length);result=await client[operation](operation==='register'?actors.map((actor,index)=>({role:index?'unpack':'pack',process:actor.identity})):undefined)}else throw new Error('finite unknown operation');process.send({kind:'fixture-tools-reply',result})}catch(error){process.send({kind:'fixture-tools-reply',error:error.code??error.message})}});
-    process.once('disconnect',async()=>{await stop();process.exit(0)});process.send('ready');setTimeout(()=>process.exit(3),30000);`
+    process.once('disconnect',async()=>{await stop();process.exit(0)});process.send('ready');setTimeout(()=>process.exit(3),${fixtureLifetimeMs});`
   const code = `import fs from 'node:fs';import{spawn}from'node:child_process';import{once}from'node:events';import native from ${JSON.stringify(new URL('../process-identity.cjs', import.meta.url).href)};import{enterWorkspaceRelocationCoordinator}from ${JSON.stringify(entry)};import * as records from ${JSON.stringify(module)};
     const context=await enterWorkspaceRelocationCoordinator(), args={dataDir:context.dataDir,id:context.id};
     if(${exitEvidence}){records.prepareWorkspaceRelocationProcessStops(args);records.observeWorkspaceRelocationProcesses({...args,processes:[]});
@@ -78,7 +80,7 @@ async function fixture(t, { exitEvidence = true, crossVolume = false } = {}) {
         }else result=await records.prepareWorkspaceRelocationFilePlan(args);
         process.send({kind:'result',result})}
       catch(error){process.send({kind:'result',error:{code:error.code,message:error.message}})}finally{fs.fsyncSync=sync}});
-    process.once('disconnect',()=>{context.release();process.exit(0)});setTimeout(()=>process.exit(3),30000);`
+    process.once('disconnect',()=>{context.release();process.exit(0)});setTimeout(()=>process.exit(3),${fixtureLifetimeMs});`
   const child = spawn(process.execPath, ['--input-type=module', '-e', code], { stdio: ['ignore', 'ignore', 'pipe', 'ipc'] })
   const exited = once(child, 'exit'); let error = ''; child.stderr.on('data', bytes => { error += bytes })
   const messages = []; child.on('message', message => messages.push(message))
@@ -92,14 +94,19 @@ async function fixture(t, { exitEvidence = true, crossVolume = false } = {}) {
   const launch = records.commitWorkspaceRelocationCoordinator({ dataDir: data, id, launchId: randomUUID(), coordinator: native.inspectProcess(child.pid) })
   child.send({ kind: 'workspace_relocation_start', data_dir: data, intent_id: id, launch_id: launch.launch_id, launch_sha256: sha256CanonicalJson(launch) })
   releaseCliLock(lock)
-  const wait = async predicate => {
-    const deadline = Date.now() + 10000
-    while (!predicate()) { if (child.exitCode !== null || child.signalCode !== null || Date.now() > deadline) throw new Error('finite file-plan fixture: ' + error); await new Promise(resolve => setTimeout(resolve, 10)) }
+  const wait = async (predicate, operation = 'initial-ready') => {
+    const started = Date.now(), deadline = started + 10000
+    while (!predicate()) {
+      if (child.exitCode !== null || child.signalCode !== null || Date.now() > deadline) throw new Error('finite file-plan fixture: ' + JSON.stringify({
+        operation, elapsed_ms: Date.now() - started, exit_code: child.exitCode, signal: child.signalCode, stderr: error.slice(-4096),
+      }))
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
   }
   await wait(() => messages.some(message => message.kind === 'fixture-ready'))
   const command = async (operation = 'prepare') => {
     const offset = messages.length; child.send({ kind: 'command', operation })
-    await wait(() => messages.slice(offset).some(message => message.kind === 'result'))
+    await wait(() => messages.slice(offset).some(message => message.kind === 'result'), operation)
     return messages.slice(offset).find(message => message.kind === 'result')
   }
   return { root, data, id, source, target, catalog, before, child, exited, command, file: path.join(data, 'workspace-control/relocation-files.json') }
