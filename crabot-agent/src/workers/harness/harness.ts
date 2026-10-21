@@ -1202,9 +1202,9 @@ export class WorkerHarness {
       }
     }
     if ([...adapters].some(([impl, adapter]) => this.deps.adapters.get(impl) !== adapter)) throw failure()
-    // Reobserve the combined live roots after every adapter read; legacy absence is not a process exit proof.
-    const { captureOwnedProcessTree } = require(join(__dirname, '../../../../scripts/lib/owned-process-tree.cjs'))
-    return captureOwnedProcessTree(processes)
+    // Reobserve verified snapshots after adapter reads; only independent Native evidence can establish an original generation exit.
+    const { recaptureObservedProcessScope } = require(join(__dirname, '../../../../scripts/lib/owned-process-tree.cjs'))
+    return recaptureObservedProcessScope(processes)
   }
 
   /** Internal submission only; the fixed job still must verify the complete OS/module scope. */

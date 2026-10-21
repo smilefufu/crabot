@@ -4,6 +4,7 @@ import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import native from '../process-identity.cjs'
 import { captureOwnedProcessTree } from '../owned-process-tree.cjs'
+import * as tree from '../owned-process-tree.cjs'
 import { probeKnownProcessExit } from '../known-process-exit.cjs'
 
 const info = (pid, parent = 1, started = '100', owner = 'self') => ({ pid, parent, started, owner, executable: '/fixture/node' })
@@ -173,4 +174,75 @@ for (const [stage, change] of [
   const f = fixture()
   f.values.set(12, change(f.values.get(12)))
   assert.throws(() => captureOwnedProcessTree([info(11)], f.api), { code: 'CRABOT_PROCESS_SCOPE', stage })
+})
+
+
+test('an OS-pinned tree backend retains observed exited descendants without re-reading their recycled PIDs', () => {
+  const f = fixture(); let captured = 0
+  f.api.captureProcessTreeGeneration = (pid, started, owner) => {
+    captured++; assert.deepEqual([pid, started, owner], [11, '100', 'self'])
+    const result = [info(11), info(12, 11, '101'), info(13, 12, '102')]
+    f.values.delete(12); f.values.delete(13)
+    return result
+  }
+  assert.deepEqual(captureOwnedProcessTree([info(11)], f.api).map(item => item.pid), [11, 12, 13])
+  assert.equal(captured, 1); assert.equal(f.queried.includes(12), false); assert.equal(f.queried.includes(13), false)
+})
+for (const damage of ['wrong root', 'foreign owner', 'duplicate generation', 'missing parent', 'cycle', 'older child', 'self', 'changed root']) test('OS-pinned tree result cannot introduce unverified scope: ' + damage, () => {
+  const f = fixture()
+  f.api.captureProcessTreeGeneration = () => {
+    const result = [info(11), info(12, 11, '101'), info(13, 12, '102')]
+    if (damage === 'wrong root') result[0] = info(14)
+    if (damage === 'foreign owner') result[1].owner = 'other'
+    if (damage === 'duplicate generation') result.push(info(12, 11, '200'))
+    if (damage === 'missing parent') result[1].parent = 99
+    if (damage === 'cycle') { result[1].parent = 13; result[2].started = '101' }
+    if (damage === 'older child') result[1].started = '99'
+    if (damage === 'self') result.push(info(process.pid, 11, '102'))
+    if (damage === 'changed root') f.values.set(11, info(11, 1, '200'))
+    return result
+  }
+  assert.throws(() => captureOwnedProcessTree([info(11)], f.api), { code: 'CRABOT_PROCESS_SCOPE' })
+})
+
+
+test('reobserving verified snapshots retains independently exited generations and expands only live roots', () => {
+  const f = fixture(), original = [info(11), info(12, 11, '101')]
+  f.values.delete(12); f.children.set(11, [13]); f.values.set(13, info(13, 11, '102')); f.children.set(13, [])
+  f.api.isProcessExited = pid => pid === 12
+  const result = tree.recaptureObservedProcessScope(original, f.api)
+  assert.deepEqual(result.map(item => item.pid), [11, 12, 13]); assert.deepEqual(result[1], original[1])
+  assert.ok(Object.isFrozen(result) && result.every(Object.isFrozen))
+})
+for (const kind of ['unknown', 'foreign owner', 'self', 'generation conflict']) test('reobserving snapshots preserves unknown and ownership rejection: ' + kind, () => {
+  const f = fixture(), original = [info(11), info(12, 11, '101')]
+  if (kind === 'unknown') { f.values.delete(12); f.api.isProcessExited = () => false }
+  if (kind === 'foreign owner') original[1].owner = 'other'
+  if (kind === 'self') original.push(info(process.pid))
+  if (kind === 'generation conflict') original.push(info(12, 11, '200'))
+  assert.throws(() => tree.recaptureObservedProcessScope(original, f.api), { code: 'CRABOT_PROCESS_SCOPE' })
+})
+test('a reused PID proves only the old observation ended and never imports the unrelated new tree', () => {
+  const f = fixture(); f.values.set(11, info(11, 1, '200'))
+  f.api.listChildProcessIds = () => { throw new Error('unrelated replacement was queried') }
+  assert.deepEqual(tree.recaptureObservedProcessScope([info(11)], f.api), [info(11)])
+})
+
+test('Windows pinned process observation uses exact original generations and never accepts the observing process', { skip: process.platform !== 'win32', timeout: 30000 }, async t => {
+  assert.equal(typeof native.captureProcessTreeGeneration, 'function')
+  const child = spawn(process.execPath, ['-e', 'process.send("ready");process.on("message",()=>process.exit(0));setTimeout(()=>process.exit(3),20000)'], { stdio: ['ignore', 'ignore', 'ignore', 'ipc'] })
+  const ended = once(child, 'exit')
+  t.after(async () => { if (child.connected) child.send('finish', () => {}); await ended })
+  await once(child, 'message')
+  const root = native.inspectProcess(child.pid), self = native.inspectProcess(process.pid)
+  for (let i = 0; i < 8; i++) {
+    const observed = native.captureProcessTreeGeneration(root.pid, root.started, root.owner)
+    assert.ok(observed.some(item => item.pid === root.pid && item.started === root.started && item.owner === root.owner))
+    assert.ok(observed.every(item => Object.keys(item).sort().join(',') === 'executable,owner,parent,pid,started'))
+  }
+  assert.throws(() => native.captureProcessTreeGeneration(root.pid, 'different generation', root.owner), { code: 'CRABOT_PROCESS_SCOPE' })
+  assert.throws(() => native.captureProcessTreeGeneration(root.pid, root.started, 'different owner'), { code: 'CRABOT_PROCESS_SCOPE' })
+  assert.throws(() => native.captureProcessTreeGeneration(self.pid, self.started, self.owner), { code: 'CRABOT_PROCESS_SCOPE' })
+  child.send('finish'); await ended
+  assert.throws(() => native.captureProcessTreeGeneration(root.pid, root.started, root.owner), { code: 'CRABOT_PROCESS_SCOPE' })
 })

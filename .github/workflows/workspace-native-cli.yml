@@ -12,6 +12,8 @@ on:
       - 'crabot-agent/tests/core/fixtures/owned-shell-cleanup.ts'
       - 'scripts/lib/known-process-stop.cjs'
       - 'scripts/lib/owned-process-tree.cjs'
+      - 'scripts/lib/__tests__/owned-process-tree.test.mjs'
+      - 'crabot-native/**'
       - 'crabot-shared/src/workspace*'
       - '.github/scripts/native-project-cli-acceptance.mjs'
       - '.github/workflows/workspace-native-cli.yml'
@@ -25,6 +27,8 @@ on:
       - 'crabot-agent/tests/core/fixtures/owned-shell-cleanup.ts'
       - 'scripts/lib/known-process-stop.cjs'
       - 'scripts/lib/owned-process-tree.cjs'
+      - 'scripts/lib/__tests__/owned-process-tree.test.mjs'
+      - 'crabot-native/**'
       - 'crabot-shared/src/workspace*'
       - '.github/scripts/native-project-cli-acceptance.mjs'
       - '.github/workflows/workspace-native-cli.yml'
@@ -70,6 +74,8 @@ jobs:
           pnpm --dir crabot-shared install --frozen-lockfile
           node crabot-shared/node_modules/typescript/bin/tsc -p crabot-shared/tsconfig.json
           pnpm --dir crabot-agent install --frozen-lockfile
+      - name: Native owned process scope regressions
+        run: node --test scripts/lib/__tests__/owned-process-tree.test.mjs scripts/lib/__tests__/spawned-process-tree.test.mjs
       - name: Project binding and private native runtime regressions
         working-directory: crabot-agent
         run: node node_modules/vitest/vitest.mjs run tests/core/workspace-background-processes.test.ts tests/core/workspace-background-admissions.test.ts tests/workers/native-cli-managed-shell.test.ts tests/workers/relocated-native-history.test.ts tests/workers/codex-app-server-shell.test.ts tests/workers/codex-app-server-client.test.ts tests/workers/harness/workspace-manager.test.ts tests/workers/harness/project-workspaces.test.ts tests/workers/private-project-provision.test.ts tests/workers/private-project-runtime.test.ts tests/workers/codex-managed-notify.test.ts tests/workers/codex-project-config.test.ts --maxWorkers=1 --minWorkers=1

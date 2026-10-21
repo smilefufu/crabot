@@ -584,10 +584,12 @@ static napi_value ReleaseLock(napi_env env, napi_callback_info info) {
 #include "directory-access.h"
 #include "directory-pin.h"
 #include "workspace-copy-job.h"
+#include "process-tree-observation.h"
 
 static napi_value Initialize(napi_env env, napi_value exports) {
   napi_property_descriptor methods[] = {
 #ifdef _WIN32
+    {"captureProcessTreeGeneration", nullptr, CaptureProcessTreeGeneration, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"createWorkspaceCopyJob", nullptr, CreateWorkspaceCopyJob, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"inspectWorkspaceCopyJob", nullptr, InspectWorkspaceCopyJob, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"resumeWorkspaceCopyJob", nullptr, ResumeWorkspaceCopyJob, nullptr, nullptr, nullptr, napi_default, nullptr},
