@@ -79,8 +79,17 @@ describe('fixed read-only Agent recovery responsibility capture', () => {
     await expect(captureWorkspaceRelocationRecovery(data)).rejects.toThrow()
     expect(fs.readFileSync(active)).toEqual(fs.readFileSync(kept))
   })
-  it('detects a same-size source change during its actual read and never repairs or archives it', async () => {
+  it.each([false, true])('detects a same-size source change during its actual read (metadata collision=%s)', async collide => {
     write(active, checkpoint()); const read = fs.readSync, original = fs.statSync(active, { bigint: true }); let changed = false
+    if (collide) {
+      const fstat = fs.fstatSync, lstat = fs.lstatSync
+      vi.spyOn(fs, 'fstatSync').mockImplementation(((...args: any[]) => {
+        const stat = (fstat as any)(...args)
+        return stat.dev === original.dev && stat.ino === original.ino ? original : stat
+      }) as typeof fs.fstatSync)
+      vi.spyOn(fs, 'lstatSync').mockImplementation(((...args: any[]) => args[0] === active
+        ? original : (lstat as any)(...args)) as typeof fs.lstatSync)
+    }
     vi.spyOn(fs, 'readSync').mockImplementation(((...args: any[]) => {
       const count = (read as any)(...args)
       const opened = fs.fstatSync(args[0], { bigint: true })

@@ -184,7 +184,12 @@ export async function captureWorkspaceRelocationRecovery(dataDir: string, { sign
     for (const relative of frames.keys()) verifyDirectory(relative)
     for (const [relative, before] of views) if (JSON.stringify(fs.readdirSync(path.join(root, relative)).sort()) !== JSON.stringify(before)) throw failure('names-changed')
     for (const relative of missing) { try { fs.lstatSync(path.join(root, relative)); throw failure('namespace-appeared') } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error } }
-    for (const item of planned) if (version(owned(item.file)) !== item.version) throw failure('file-changed')
+    for (const item of files) {
+      check()
+      const file = path.join(root, item.relative)
+      verifyAncestors(file)
+      if (digest(readBoundBytes(file, item.version)) !== item.sha256) throw failure('file-changed')
+    }
     check()
     return Object.freeze({ data_root: root, directories: Object.freeze([...frames.values()].map(item => Object.freeze(item))),
       names: Object.freeze([...views].map(([relative, names]) => Object.freeze({ relative, names: Object.freeze([...names]) }))),

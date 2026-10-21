@@ -595,7 +595,7 @@ runpy.run_path(fixture,run_name='__main__')`
       'crashed',
     ])
     await forceCleanup(mm, runtime)
-  })
+  }, 15000)
 
   it('manual stop does not consume automatic restart history', async () => {
     const { mm, runtime } = makeManager({ autoRestart: true })

@@ -97,7 +97,7 @@ jobs:
           node-version: '22.22.3'
       - run: node scripts/build-native.mjs
       - name: Native pinned Windows staging synchronization
-        run: node --test scripts/lib/__tests__/workspace-windows-sync.test.mjs
+        run: node --test scripts/lib/__tests__/workspace-windows-sync.test.mjs scripts/lib/__tests__/workspace-windows-copy.test.mjs
       - run: pnpm --dir crabot-shared install --frozen-lockfile
       - run: pnpm --dir crabot-shared build
       - name: Validate stable workspace content snapshots
