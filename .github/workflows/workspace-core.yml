@@ -1,0 +1,70 @@
+name: Workspace Core lifecycle
+
+on:
+  push:
+    branches: ['feat/desktop-*']
+    paths:
+      - 'crabot-core/src/index.ts'
+      - 'crabot-core/src/workspace-*.test.ts'
+      - 'crabot-agent/tests/core/fixtures/**'
+      - 'scripts/lib/workspace-*'
+      - 'scripts/lib/process-identity.cjs'
+      - 'scripts/lib/owned-process-tree.cjs'
+      - 'crabot-native/**'
+      - '.github/workflows/workspace-core.yml'
+  pull_request:
+    paths:
+      - 'crabot-core/src/index.ts'
+      - 'crabot-core/src/workspace-*.test.ts'
+      - 'crabot-agent/tests/core/fixtures/**'
+      - 'scripts/lib/workspace-*'
+      - 'scripts/lib/process-identity.cjs'
+      - 'scripts/lib/owned-process-tree.cjs'
+      - 'crabot-native/**'
+      - '.github/workflows/workspace-core.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+concurrency:
+  group: workspace-core-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  core:
+    name: Fixed workspace lifecycle ${{ matrix.os }}
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && 45 || 25 }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-14, macos-15-intel, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.3'
+      - name: Compile identity and frozen finite module dependencies
+        run: |
+          node scripts/build-native.mjs
+          pnpm --dir crabot-client install --frozen-lockfile
+          node crabot-client/node_modules/typescript/bin/tsc -p crabot-client/tsconfig.json
+          pnpm install --frozen-lockfile
+          pnpm --dir scripts/lib install --frozen-lockfile
+          pnpm --dir crabot-shared install --frozen-lockfile
+          node crabot-shared/node_modules/typescript/bin/tsc -p crabot-shared/tsconfig.json
+          for module in crabot-core crabot-agent crabot-admin; do
+            pnpm --dir "$module" install --frozen-lockfile
+            node "$module/node_modules/typescript/bin/tsc" -p "$module/tsconfig.json"
+          done
+      - name: Original lifecycle and maintenance regressions
+        working-directory: crabot-core
+        run: node node_modules/vitest/vitest.mjs run src/module-manager-lifecycle.test.ts src/module-manager-health.test.ts src/module-manager-advanced.test.ts src/workspace-maintenance.test.ts src/workspace-module-scope.test.ts --maxWorkers=1 --minWorkers=1
+      - name: Actual fixed job validation launch without business onStart
+        working-directory: crabot-core
+        run: node node_modules/vitest/vitest.mjs run src/workspace-human-verification.test.ts --testNamePattern='post-relocation validation launches' --maxWorkers=1 --minWorkers=1

@@ -180,6 +180,10 @@ interface WorkspaceRootSelectionResult extends WorkspaceWorkerClosureResult {
   readonly root_selected_sha256: string
 }
 
+interface WorkspaceValidationLaunchResult extends WorkspaceRootSelectionResult {
+  readonly validation_modules: ReadonlyArray<{ module_id: ModuleId; runtime_id: string; process: WorkerProcessIdentity }>
+}
+
 interface WorkspaceCoordinatorGrant {
   capture?: Promise<ReadonlyArray<WorkspaceRelocationWorker>>
   workersHash?: string
@@ -219,6 +223,8 @@ export class ModuleManager {
   private workspaceFilePreparation?: { fingerprint: string; pending: Promise<WorkspaceFilePreparationResult> }
   private workspaceWorkerClosure?: { fingerprint: string; pending: Promise<WorkspaceWorkerClosureResult> }
   private workspaceRootSelection?: { fingerprint: string; pending: Promise<WorkspaceRootSelectionResult> }
+  private workspaceValidationLaunch?: { fingerprint: string; pending: Promise<WorkspaceValidationLaunchResult> }
+  private readonly workspaceValidationPermits = new WeakMap<object, { moduleId: ModuleId; runtime: ModuleRuntime; verify: () => Promise<void>; assertCurrent: () => void }>()
   private workspaceModuleStop?: { fingerprint: string; pending: Promise<WorkspaceModuleStopResponse> }
   private readonly childStates: WeakMap<ChildProcess, ManagedChildState> = new WeakMap()
   private readonly lifecycleQueues: Map<ModuleId, Promise<void>> = new Map()
@@ -702,6 +708,24 @@ export class ModuleManager {
 
   private assertWorkspaceStartAllowed(moduleId: ModuleId): void {
     if (moduleId !== 'admin-web') assertWorkspaceExecutionAllowed(this.dataDir)
+  }
+
+  private assertWorkspaceProcessStartCurrent(moduleId: ModuleId, permit?: object): void {
+    if (!permit) { this.assertWorkspaceStartAllowed(moduleId); return }
+    const binding = this.workspaceValidationPermits.get(permit)
+    if (!binding || binding.moduleId !== moduleId || this.modules.get(moduleId) !== binding.runtime) {
+      throw Object.assign(new Error('工作区验证启动凭据无效。'), { code: 'FORBIDDEN' })
+    }
+    binding.assertCurrent()
+  }
+
+  private async assertWorkspaceProcessStartAllowed(moduleId: ModuleId, permit?: object): Promise<void> {
+    const binding = permit && this.workspaceValidationPermits.get(permit)
+    this.assertWorkspaceProcessStartCurrent(moduleId, permit)
+    if (!binding) return
+    await binding.verify()
+    if (this.workspaceValidationPermits.get(permit!) !== binding) throw Object.assign(new Error('工作区验证启动凭据已撤销。'), { code: 'FORBIDDEN' })
+    this.assertWorkspaceProcessStartCurrent(moduleId, permit)
   }
 
   private assertManagementOnlyAllowed(moduleId: ModuleId): void {
@@ -1605,6 +1629,114 @@ export class ModuleManager {
     return pending
   }
 
+  /** Start only original active Core modules for later health checks; maintenance stays closed. */
+  private startWorkspaceRelocationValidationModules(request: VerifyWorkspaceRelocationRequestParams, bearer?: string): Promise<WorkspaceValidationLaunchResult> {
+    request = Object.freeze({ ...request })
+    const fingerprint = sha256CanonicalJson(request)
+    const failure = () => Object.assign(new Error('迁移后的验证模块尚未全部确认，已保留维护保护和原记录；未重试启动。'), { code: 'SERVICE_UNAVAILABLE' })
+    if (this.workspaceValidationLaunch) {
+      if (this.workspaceValidationLaunch.fingerprint !== fingerprint) return Promise.reject(Object.assign(new Error('Workspace validation intent cannot change'), { code: 'FORBIDDEN' }))
+      return this.workspaceValidationLaunch.pending
+    }
+    const pending = Promise.resolve().then(async (): Promise<WorkspaceValidationLaunchResult> => {
+      let child: ChildProcess | undefined, files: { verifySelectedRoot(): Promise<{ selected_sha256: string; worker_commit_sha256: string; recovery_commit_sha256: string }>; close(): void } | undefined
+      let stage = 'root'
+      try {
+        const selected = await this.commitWorkspaceRelocationRoot(request, bearer)
+        child = selected.coordinator
+        await this.workspaceRelocationStoppedVerifier(request, child)()
+        const records = require('../../scripts/lib/workspace-relocation-intent.mjs'), native = require('../../scripts/lib/process-identity.cjs')
+        const coordinator = records.readWorkspaceRelocationCoordinator(this.dataDir, request.intent_id)
+        const scopes: ReadonlyArray<WorkspaceModuleScope> = records.readWorkspaceRelocationModules(this.dataDir, request.intent_id).modules
+        const scopeHash = sha256CanonicalJson(scopes), admin = this.processes.get('admin-web')
+        const runtimeFields = new Set(['status', 'pid', 'version', 'protocol_version', 'registered_at', 'last_health_check', 'last_health_status', 'health_check_failures', 'restart_history', 'schema_mismatch', '_pendingBearer', '_pendingCutover'])
+        const definition = (runtime: ModuleRuntime) => Object.fromEntries(Object.entries(runtime).filter(([key]) => !runtimeFields.has(key)))
+        const definitions = new Map([...this.modules].map(([id, runtime]) => [id, { runtime, hash: sha256CanonicalJson(definition(runtime)), overrides: sha256CanonicalJson(this.envOverrides.get(id) ?? {}) }]))
+        const launched = new Map<ModuleId, { child: ChildProcess; state: ManagedChildState; process: WorkerProcessIdentity }>()
+        let pendingModule: ModuleId | undefined
+        files = require('../../scripts/lib/workspace-file-journal.mjs').createWorkspaceFileJournal(child, { dataDir: this.dataDir, id: request.intent_id, launch: coordinator.launch })
+        const assertCurrent = (): void => {
+          const target = records.readWorkspaceRelocationRootPublished(this.dataDir, request.intent_id)?.target
+          if (!target) throw failure()
+          const stat = fs.lstatSync(target.path, { bigint: true })
+          const frame = { path: target.path, dev: String(stat.dev), ino: String(stat.ino), native_id: process.platform === 'win32' ? native.inspectDirectoryFileId(target.path) : null }
+          if (!stat.isDirectory() || stat.isSymbolicLink() || fs.realpathSync(target.path) !== target.path
+            || sha256CanonicalJson(frame) !== sha256CanonicalJson(target)
+            || sha256CanonicalJson(records.readWorkspaceRelocationRootSelected(this.dataDir, request.intent_id)) !== selected.root_selected_sha256) throw failure()
+          if (this.isShuttingDown || !child!.connected || child!.exitCode !== null || child!.signalCode !== null
+            || !admin || this.processes.get('admin-web') !== admin || admin.exitCode !== null || admin.signalCode !== null
+            || sha256CanonicalJson(records.readWorkspaceRelocationIntent(this.dataDir)) !== request.intent_sha256
+            || sha256CanonicalJson(records.readWorkspaceRelocationCoordinator(this.dataDir, request.intent_id)) !== sha256CanonicalJson(coordinator)
+            || sha256CanonicalJson(records.readWorkspaceRelocationModules(this.dataDir, request.intent_id).modules) !== scopeHash
+            || !native.sameProcess(coordinator.launch.parent, native.inspectProcess(process.pid))
+            || !native.sameProcess(coordinator.launch.process, native.inspectProcess(child!.pid))
+            || this.modules.size !== definitions.size || [...this.lifecycleQueues.keys()].some(id => id !== pendingModule)
+            || [...this.processes.keys()].some(id => id !== 'admin-web' && !launched.has(id))) throw failure()
+          for (const [id, expected] of definitions) {
+            const runtime = this.modules.get(id)
+            if (runtime !== expected.runtime || sha256CanonicalJson(definition(runtime!)) !== expected.hash
+              || sha256CanonicalJson(this.envOverrides.get(id) ?? {}) !== expected.overrides) throw failure()
+          }
+          for (const scope of scopes) {
+            const runtime = this.modules.get(scope.module_id)!, current = launched.get(scope.module_id)
+            if (!current) {
+              if (runtime.pid !== undefined || runtime.status === 'running' || runtime.status === 'starting' && scope.module_id !== pendingModule) throw failure()
+              continue
+            }
+            if (this.processes.get(scope.module_id) !== current.child || this.childStates.get(current.child) !== current.state
+              || current.state.finalizeStarted || runtime.pid !== current.child.pid || !native.sameProcess(current.process, native.inspectProcess(current.child.pid))) throw failure()
+          }
+        }
+        const verifyRegistrations = async (): Promise<void> => {
+          assertCurrent()
+          const rows = (await this.runtimeRegistry.listRecords()).filter(row => row.module_id !== 'admin-web')
+          assertCurrent()
+          if (rows.length !== launched.size || rows.some(row => {
+            const current = launched.get(row.module_id)
+            return !current || row.runtime_id !== current.state.runtimeId || row.root_pid !== current.child.pid
+              || row.module_port !== this.modules.get(row.module_id)?.port || row.instance_id !== this.runtimeRegistry.getInstanceId()
+          })) throw failure()
+        }
+        const verify = async (): Promise<void> => {
+          await verifyRegistrations()
+          const proof = await files!.verifySelectedRoot()
+          assertCurrent()
+          if (proof.selected_sha256 !== selected.root_selected_sha256 || proof.worker_commit_sha256 !== selected.closure_commit_sha256
+            || proof.recovery_commit_sha256 !== selected.recovery_commit_sha256) throw failure()
+          await verifyRegistrations()
+        }
+        stage = 'verify-before-launch'
+        await verify()
+        const targets = scopes.filter(item => item.runtime_id !== undefined && item.processes.length > 0 && ['crabot-agent', 'memory-default'].includes(item.module_id))
+          .sort((a, b) => (this.modules.get(a.module_id)!.start_priority ?? 100) - (this.modules.get(b.module_id)!.start_priority ?? 100))
+        for (const scope of targets) {
+          const permit = Object.freeze({}), runtime = this.modules.get(scope.module_id)!
+          pendingModule = scope.module_id
+          this.workspaceValidationPermits.set(permit, { moduleId: scope.module_id, runtime, verify, assertCurrent })
+          stage = 'start-core-module'
+          try {
+            await this.enqueueLifecycle(scope.module_id, () => this.startModuleProcess(scope.module_id, undefined, this.envOverrides.get(scope.module_id), permit))
+          } finally { this.workspaceValidationPermits.delete(permit) }
+          stage = 'observe-new-module'
+          const newChild = this.processes.get(scope.module_id), state = newChild && this.childStates.get(newChild)
+          const identity = newChild?.pid && native.inspectProcess(newChild.pid)
+          if (!newChild || !state || state.finalizeStarted || !identity || identity.parent !== coordinator.launch.parent.pid
+            || identity.owner !== coordinator.launch.parent.owner) throw failure()
+          launched.set(scope.module_id, { child: newChild, state, process: identity })
+          stage = 'verify-new-module'
+          await verify(); pendingModule = undefined
+        }
+        stage = 'final-verify'
+        await verify()
+        return Object.freeze({ ...selected, validation_modules: Object.freeze([...launched].map(([module_id, item]) =>
+          Object.freeze({ module_id, runtime_id: item.state.runtimeId, process: Object.freeze({ ...item.process }) }))) })
+      } catch (cause) { await this.closeWorkspaceCoordinatorChannel(child); throw Object.assign(failure(), { stage, cause }) }
+      finally { files?.close() }
+    })
+    this.workspaceValidationLaunch = { fingerprint, pending }
+    return pending
+  }
+
   private assertWorkspaceCoordinatorGrantCurrent(grant: WorkspaceCoordinatorGrant): void {
     const unavailable = () => Object.assign(new Error('迁移协调授权无法核实，已保留维护保护。'), { code: 'SERVICE_UNAVAILABLE' })
     const forbidden = () => {
@@ -2098,12 +2230,13 @@ export class ModuleManager {
   private async startModuleProcess(
     moduleId: ModuleId,
     entryOverride?: string,
-    envOverride?: Record<string, string>
+    envOverride?: Record<string, string>,
+    validationPermit?: object
   ): Promise<void> {
     this.assertManagementOnlyAllowed(moduleId)
     this.assertAgentLifecycleAllowed(moduleId)
     this.assertCoreLifecycleInput(moduleId, entryOverride, envOverride)
-    this.assertWorkspaceStartAllowed(moduleId)
+    await this.assertWorkspaceProcessStartAllowed(moduleId, validationPermit)
     const runtime = this.modules.get(moduleId)
     if (!runtime) {
       throw new Error(`Module definition not found: ${moduleId}`)
@@ -2120,13 +2253,14 @@ export class ModuleManager {
       }
     }
 
-    this.assertWorkspaceStartAllowed(moduleId)
+    await this.assertWorkspaceProcessStartAllowed(moduleId, validationPermit)
     if (runtime.status === 'running' || runtime.status === 'starting') {
       throw new Error(`Module already running: ${moduleId}`)
     }
 
     await this.runtimeRegistry.initialize()
-    await this.runtimeRegistry.recoverOrphans({
+    if (validationPermit) await this.assertWorkspaceProcessStartAllowed(moduleId, validationPermit)
+    else await this.runtimeRegistry.recoverOrphans({
       moduleId,
       currentRuntimeIds: this.currentRuntimeIds(),
       gracefulTimeoutMs: this.config.shutdown_timeout * 1000,
@@ -2155,8 +2289,10 @@ export class ModuleManager {
         return
       }
       if (result.kind === 'allow_first_install') {
+        if (validationPermit) throw Object.assign(new Error('验证启动不创建模块数据版本。'), { code: 'WORKSPACE_MAINTENANCE' })
         const { mkdirSync, writeFileSync } = await import('node:fs')
-        this.assertWorkspaceStartAllowed(moduleId)
+        await this.assertWorkspaceProcessStartAllowed(moduleId, validationPermit)
+        this.assertWorkspaceProcessStartCurrent(moduleId, validationPermit)
         mkdirSync(runtime.data_dir, { recursive: true })
         writeFileSync(`${runtime.data_dir}/SCHEMA_VERSION`, `${result.writeVersion}\n`)
         console.log(`[ModuleManager] ${moduleId}: wrote initial SCHEMA_VERSION = ${result.writeVersion}`)
@@ -2167,7 +2303,7 @@ export class ModuleManager {
       throw new Error(`Module Manager is shutting down; refusing to spawn ${moduleId}`)
     }
 
-    this.assertWorkspaceStartAllowed(moduleId)
+    await this.assertWorkspaceProcessStartAllowed(moduleId, validationPermit)
     runtime.status = 'starting'
     runtime.health_check_failures = 0
 
@@ -2229,6 +2365,7 @@ export class ModuleManager {
 
     let proc: ChildProcess
     try {
+      this.assertWorkspaceProcessStartCurrent(moduleId, validationPermit)
       proc = spawn(command, args, {
         cwd: runtime.cwd,
         env: childEnv,
