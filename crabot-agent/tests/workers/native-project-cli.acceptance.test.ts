@@ -229,6 +229,8 @@ it.skipIf(!process.env.CRABOT_TEST_CODEX_BIN)('real Codex historical child query
     readWorkspaceHistory: async () => ({ before_root: before, after_root: after, verify: async () => undefined }),
   })
   cleanup.push(() => adapter.dispose())
+  const warnings = vi.spyOn(console, 'warn')
+  cleanup.push(async () => warnings.mockRestore())
   expect((await adapter.detect()).installed).toBe(true)
   expect(adapter.capabilities().subagent).toBe(true)
   const reconstruct = vi.spyOn(adapter as any, 'ensureRuntime').mockRejectedValue(new Error('closed parent must never be reconstructed'))
@@ -237,6 +239,7 @@ it.skipIf(!process.env.CRABOT_TEST_CODEX_BIN)('real Codex historical child query
       expect(await adapter.listSubagents({ worker_id: worker, incarnation_id: 'original-incarnation', seq: 1, impl: 'codex', session_ref: session })).toEqual([])
     }
     expect(reconstruct).not.toHaveBeenCalled(); expect((adapter as any).runtimes.size).toBe(0)
+    expect(warnings.mock.calls.filter(call => call[0] === 'Codex app-server termination unconfirmed')).toEqual([])
     expect(modelRequests).toBe(0); await expect(fs.stat(marker)).rejects.toMatchObject({ code: 'ENOENT' })
     expect(await fs.readFile(metaFile, 'utf8')).toBe(meta)
     expect(await fs.readFile(path.join(after, '.codex/config.toml'), 'utf8')).toBe(config)

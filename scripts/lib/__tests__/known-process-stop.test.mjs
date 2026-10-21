@@ -163,3 +163,32 @@ test('ordinary graceful RPC and fixed submission callbacks cannot be mixed', asy
     graceful: async () => { calls++ }, submit: async () => { calls++ } }), { code: 'CRABOT_PROCESS_SCOPE_STOP' })
   assert.equal(calls, 0)
 })
+
+test('a lost native signal result is not retried when the original generations actually exit', async t => {
+  const f = await fixture(t), requests = new Map()
+  const result = await stopKnownProcessScope(f.initial, { timeoutMs: 1, onObserved: f.remember }, {
+    ...native,
+    terminateKnownProcess(item) {
+      requests.set(item.pid, (requests.get(item.pid) ?? 0) + 1)
+      native.terminateKnownProcess(item)
+      throw Object.assign(new Error('fixture native result lost'), { code: 'CRABOT_PROCESS_SIGNAL' })
+    },
+  })
+  assert.equal(probeKnownProcessExit(result).state, 'stopped')
+  assert.equal(requests.size, 2)
+  assert.deepEqual([...requests.values()], [1, 1])
+})
+
+for (const mode of ['alive', 'unknown']) test('an uncertain native signal cannot stop another target while its generation remains ' + mode, async t => {
+  const f = await fixture(t), requests = []; let failed
+  const failure = Object.assign(new Error('fixture native result unavailable'), { code: 'CRABOT_PROCESS_SIGNAL' })
+  const api = {
+    ...native,
+    inspectProcess(pid) { return mode === 'unknown' && failed?.pid === pid ? null : native.inspectProcess(pid) },
+    isProcessExited(pid) { return mode === 'unknown' && failed?.pid === pid ? false : native.isProcessExited(pid) },
+    terminateKnownProcess(item) { failed = item; requests.push(item.pid); throw failure },
+  }
+  await assert.rejects(stopKnownProcessScope(f.initial, { timeoutMs: 1, onObserved: f.remember }, api))
+  assert.equal(requests.length, 1)
+  assert.equal(probeKnownProcessExit(f.initial).state, 'running')
+})

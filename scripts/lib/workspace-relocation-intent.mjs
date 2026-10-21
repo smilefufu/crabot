@@ -13,7 +13,7 @@ import { WorkspaceCatalog, WorkspaceError, projectWorkspaceCatalogRelocation } f
 import { inspectWorkspaceRelocationTarget } from '../../crabot-shared/dist/workspace-relocation-target.js'
 const uuid = value => typeof value === 'string' && /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(value)
 const absolute = value => typeof value === 'string' && path.isAbsolute(value) && !value.includes('\0')
-const fail = (code = 'WORKSPACE_RELOCATION_INVALID') => { throw Object.assign(new Error('工作目录迁移记录无法核验或操作冲突，原目录和维护保护已保留。'), { code }) }
+const fail = (code = 'WORKSPACE_RELOCATION_INVALID', stage) => { throw Object.assign(new Error('工作目录迁移记录无法核验或操作冲突，原目录和维护保护已保留。'), { code, ...(stage ? { stage } : {}) }) }
 
 // One synchronous historical graph only. No live role/exit check or asynchronous
 // operation may reuse this frame; every returned graph rechecks its actual inputs.
@@ -23,7 +23,7 @@ function observeRecordPath(file, kind, stat) {
   if (!recordObservation) return
   if (!stat) kind = 'missing'
   const version = stat ? observedVersion(stat) : null, previous = recordObservation.paths.get(file)
-  if (previous && (previous.kind !== kind || previous.version !== version)) fail()
+  if (previous && (previous.kind !== kind || previous.version !== version)) fail(undefined, 'record-input-' + kind + '-changed')
   recordObservation.paths.set(file, { kind, version })
 }
 function verifyRecordObservation(frame) {
@@ -31,7 +31,7 @@ function verifyRecordObservation(frame) {
     let stat
     try { stat = fs.lstatSync(file, { bigint: true }) }
     catch (error) { if (error.code !== 'ENOENT' || observed.version !== null) fail(); continue }
-    if (observed.version === null || observedVersion(stat) !== observed.version || stat.isSymbolicLink()) fail()
+    if (observed.version === null || observedVersion(stat) !== observed.version || stat.isSymbolicLink()) fail(undefined, 'record-recheck-' + observed.kind)
     if (observed.kind === 'data') {
       if (management.requirePrivateDataRoot(file) !== file) fail()
     } else {
@@ -761,7 +761,7 @@ function appendProcessStopRecord(dataDir, id, previous, record) {
   const { ctx, intent } = processStoppingContext(dataDir, id, true), token = cliLockToken(path.join(ctx.dataRoot, 'cli.lock'))
   const file = path.join(ctx.control, processStopFile), content = JSON.stringify(record) + '\n'
   const selected = fs.lstatSync(file, { bigint: true })
-  if (previous.observations.length >= 32767 || selected.size + BigInt(Buffer.byteLength(content)) > BigInt(scopeLimit)) fail()
+  if (previous.observations.length >= 32767 || selected.size + BigInt(Buffer.byteLength(content)) > BigInt(scopeLimit)) fail(undefined, 'process-stop-limit')
   const fd = fs.openSync(file, fs.constants.O_WRONLY | fs.constants.O_APPEND | (fs.constants.O_NOFOLLOW ?? 0))
   try {
     const current = fs.fstatSync(fd, { bigint: true })
@@ -769,7 +769,7 @@ function appendProcessStopRecord(dataDir, id, previous, record) {
       || current.mtimeNs !== selected.mtimeNs || current.ctimeNs !== selected.ctimeNs || current.nlink !== 1n
       || !token || cliLockToken(path.join(ctx.dataRoot, 'cli.lock')) !== token
       || !same(intent.source, identity(intent.source.path))
-      || sha256CanonicalJson(readWorkspaceRelocationProcessStops(dataDir, id)) !== sha256CanonicalJson(previous)) fail()
+      || sha256CanonicalJson(readWorkspaceRelocationProcessStops(dataDir, id)) !== sha256CanonicalJson(previous)) fail(undefined, 'process-stop-append-preflight')
     const bytes = Buffer.from(content)
     for (let offset = 0; offset < bytes.length;) {
       const written = fs.writeSync(fd, bytes, offset, bytes.length - offset)
@@ -780,15 +780,17 @@ function appendProcessStopRecord(dataDir, id, previous, record) {
   } finally { fs.closeSync(fd) }
   syncIntent(ctx)
   const accepted = readWorkspaceRelocationProcessStops(dataDir, id)
-  if (sha256CanonicalJson(record) !== sha256CanonicalJson(accepted.completion ?? accepted.observations.at(-1))) fail()
+  if (sha256CanonicalJson(record) !== sha256CanonicalJson(accepted.completion ?? accepted.observations.at(-1))) fail(undefined, 'process-stop-append-readback')
   return accepted
 }
 export function observeWorkspaceRelocationProcesses({ dataDir, id, processes }) {
   const context = processStoppingContext(dataDir, id, true), previous = readWorkspaceRelocationProcessStops(dataDir, id)
   const latest = previous.observations.at(-1)
-  if (!previous.attempt || !validProcesses(processes) || !extendsProcesses(latest?.processes ?? context.processes.processes, processes)) fail()
+  if (!previous.attempt) fail(undefined, 'process-stop-attempt')
+  if (!validProcesses(processes)) fail(undefined, 'process-stop-shape')
+  if (!extendsProcesses(latest?.processes ?? context.processes.processes, processes)) fail(undefined, 'process-stop-monotonic')
   if (latest && sha256CanonicalJson(latest.processes) === sha256CanonicalJson(processes)) { syncProcessStopFile(context.ctx); return latest }
-  if (previous.completion) fail()
+  if (previous.completion) fail(undefined, 'process-stop-completed')
   const record = { type: 'observation', previous_sha256: sha256CanonicalJson(latest ?? previous.attempt), processes, created_at: new Date().toISOString() }
   return appendProcessStopRecord(dataDir, id, previous, record).observations.at(-1)
 }

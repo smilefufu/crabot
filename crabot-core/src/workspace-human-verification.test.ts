@@ -12,6 +12,11 @@ import { sha256CanonicalJson } from 'crabot-shared'
 import ModuleManager from './index.js'
 import { relocationAgentConfig } from '../../crabot-agent/tests/core/fixtures/relocation-agent-config.js'
 
+function coordinatorJournalFailures(child: ReturnType<typeof spawn>): string[] {
+  return require('../../scripts/lib/workspace-coordinator-launch.mjs').workspaceCoordinatorDiagnostics(child)
+    .split('\n').filter((line: string) => line.includes('workspace_journal_failed')).slice(-3)
+}
+
 async function fixture(options: { wrongRuntime?: boolean; result?: string; withAgent?: boolean; agentResult?: string; actualAgent?: boolean; processLifetimeMs?: number; backgroundShell?: boolean; actualAdmin?: boolean; adminReadyDelayMs?: number; quiesceResult?: string; orphanDuringStop?: boolean } = {}) {
   const root = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'crabot-current-admin-')))
   const native = require('../../scripts/lib/process-identity.cjs'), management = require('../../scripts/lib/desktop-management.cjs')
@@ -104,16 +109,18 @@ async function fixture(options: { wrongRuntime?: boolean; result?: string; withA
         if (options.backgroundShell) {
           await fs.mkdir(path.join(data, 'project'))
           if (options.orphanDuringStop) {
+            await fs.writeFile(path.join(data, 'stops.txt'), '')
+            await fs.writeFile(path.join(data, 'orphan-ready.json'), '')
             await fs.writeFile(path.join(data, 'finite-orphan.cjs'), `const fs=require('node:fs'),native=require(${JSON.stringify(path.resolve('../scripts/lib/process-identity.cjs'))});
               fs.writeFileSync(${JSON.stringify(path.join(data, 'orphan-ready.json'))},JSON.stringify({process:native.inspectProcess(process.pid),parent:Number(process.argv[2])}));
               const file=${JSON.stringify(path.join(data, 'project/orphan.txt'))};fs.writeFileSync(file,'orphan active');setInterval(()=>fs.appendFileSync(file,'x'),50);setTimeout(()=>process.exit(0),20000);`)
           }
-          await fs.writeFile(path.join(data, 'finite-background.cjs'), `const fs=require('node:fs'),file=${JSON.stringify(path.join(data, 'project/background.txt'))};fs.writeFileSync(file,'active\\n');setInterval(()=>fs.appendFileSync(file,'x'),50);setTimeout(()=>process.exit(0),120000);
+          await fs.writeFile(path.join(data, 'finite-background.cjs'), `const fs=require('node:fs');fs.writeFileSync(${JSON.stringify(path.join(data, 'background-program.json'))},JSON.stringify({pid:process.pid}));const file=${JSON.stringify(path.join(data, 'project/background.txt'))};fs.writeFileSync(file,'active\\n');setInterval(()=>fs.appendFileSync(file,'x'),50);setTimeout(()=>process.exit(0),120000);
             ${options.orphanDuringStop ? `const timer=setInterval(()=>{
-              if(!fs.existsSync(${JSON.stringify(path.join(data, 'stops.txt'))}))return;clearInterval(timer);
+              if(!fs.existsSync(${JSON.stringify(path.join(data, 'stops.txt'))})||fs.statSync(${JSON.stringify(path.join(data, 'stops.txt'))}).size===0)return;clearInterval(timer);
               const child=require('node:child_process').spawn(process.execPath,[${JSON.stringify(path.join(data, 'finite-orphan.cjs'))},String(process.pid)],{detached:true,stdio:'ignore'});child.unref();
-              const end=Date.now()+4000;setInterval(()=>{let observed=false;try{observed=fs.readFileSync(${JSON.stringify(path.join(data, 'workspace-control/relocation-process-stop.jsonl'))},'utf8').trimEnd().split('\\n').map(line=>JSON.parse(line)).some(row=>row.processes?.some(item=>item.pid===child.pid))}catch{}
-                if(observed||Date.now()>=end)process.exit(0)},10)
+              setInterval(()=>{let observed=false;try{observed=fs.readFileSync(${JSON.stringify(path.join(data, 'workspace-control/relocation-process-stop.jsonl'))},'utf8').trimEnd().split('\\n').map(line=>JSON.parse(line)).some(row=>row.processes?.some(item=>item.pid===child.pid))}catch{}
+                if(observed)process.exit(0)},10)
             },10);` : ''}`)
         }
         await fs.writeFile(agentScript, `const fs=require('node:fs'),http=require('node:http'),{UnifiedAgent}=require(${JSON.stringify(entry)}),calls=[];
@@ -147,6 +154,7 @@ async function fixture(options: { wrongRuntime?: boolean; result?: string; withA
               const{spawnPersistentShell}=require(${JSON.stringify(path.resolve('../crabot-agent/dist/engine/bg-entities/bg-shell.js'))});
               const id=await spawnPersistentShell({command:process.env.FIXTURE_BG_COMMAND,cwd:process.env.FIXTURE_WORKSPACE,owner:{friend_id:'unchanged',worker_id:'worker',incarnation_id:'inc'},spawned_by_task_id:'task',registry:agent.builtinBgRegistry});
               const record=await agent.builtinBgRegistry.get(id);fs.writeFileSync(process.env.FIXTURE_BG_READY,JSON.stringify({entity_id:id,pid:record.pid}));
+              const ready=${JSON.stringify(path.join(data, 'background-program.json'))},end=Date.now()+8000;while(!fs.existsSync(ready)){if(Date.now()>=end)throw new Error('finite background program did not start');await new Promise(resolve=>setTimeout(resolve,20));}
             }
             const at='2026-10-20T00:00:00.000Z';await agent.managerStack.ledger.upsertWorker('channel::session','worker',()=>({worker_id:'worker',manager_key:'channel::session',task:{id:'task',title:'private task',status:'running',created_at:at},origin:{trigger_type:'message',creator_friend_id:'unchanged'},report_to:{channel_id:'channel',session_id:'session'},incarnations:[{incarnation_id:'inc',impl:'builtin',seq:1,state:${JSON.stringify(options.backgroundShell ? 'idle' : 'running')},workspace:process.env.FIXTURE_WORKSPACE,session_ref:'fixture',started_at:at}],updated_at:at}));
             server.listen(Number(process.env.Crabot_PORT),'127.0.0.1',()=>fs.writeFileSync(process.env.FIXTURE_READY,'ready'))})().catch(error=>{console.error(error);process.exit(1)});
@@ -1071,7 +1079,9 @@ describe('MM submits one fixed workspace stop sequence', () => {
     const locks = require('../../scripts/lib/cli-lock.mjs'), records = require('../../scripts/lib/workspace-relocation-intent.mjs')
     const native = require('../../scripts/lib/process-identity.cjs'), lock = await locks.acquireWorkspaceRelocationLock(f.data, f.params.intent_id)
     const ledger = path.join(f.data, 'agent/worker-ledgers/channel%3A%3Asession.json'), before = await fs.readFile(ledger)
+    const launch = f.manager.launchWorkspaceRelocationCoordinator.bind(f.manager)
     let child: ReturnType<typeof spawn> | undefined
+    vi.spyOn(f.manager, 'launchWorkspaceRelocationCoordinator').mockImplementation(async (...args: any[]) => { child = await launch(...args); return child })
     try {
       const result = await f.manager.submitWorkspaceRelocationStops(f.params, 'fixture-human'); child = result.coordinator
       const witness = JSON.parse(await fs.readFile(path.join(f.data, 'orphan-ready.json'), 'utf8'))
@@ -1086,6 +1096,9 @@ describe('MM submits one fixed workspace stop sequence', () => {
       expect(await fs.readFile(path.join(f.data, 'project/orphan.txt'), 'utf8')).toContain('orphan active')
       expect(await fs.readFile(ledger)).toEqual(before)
       await expect(fs.stat(path.join(f.root, 'relocated'))).rejects.toMatchObject({ code: 'ENOENT' })
+    } catch (error) {
+      console.error(child ? coordinatorJournalFailures(child) : 'coordinator not launched')
+      throw error
     } finally {
       const witness = await fs.readFile(path.join(f.data, 'orphan-ready.json'), 'utf8').then(JSON.parse).catch(() => undefined)
       if (witness) native.terminateKnownProcess(witness.process)
@@ -1094,6 +1107,9 @@ describe('MM submits one fixed workspace stop sequence', () => {
   }, timeout)
   it.each(['prepare', 'new descendant observation', 'execution exit'])('retains an actual process journal with an uncertain %s reply before further stops', async phase => {
     const orphan = phase === 'new descendant observation'
+    let injected = false
+    let diagnosticChild: ReturnType<typeof spawn> | undefined
+    const replies: Array<{ operation: string; ok: boolean }> = []
     const f = await fixture({ actualAgent: true, processLifetimeMs: 120000, backgroundShell: orphan, orphanDuringStop: orphan })
     const locks = require('../../scripts/lib/cli-lock.mjs'), records = require('../../scripts/lib/workspace-relocation-intent.mjs')
     const native = require('../../scripts/lib/process-identity.cjs'), lock = await locks.acquireWorkspaceRelocationLock(f.data, f.params.intent_id)
@@ -1101,17 +1117,21 @@ describe('MM submits one fixed workspace stop sequence', () => {
     const stop = vi.spyOn(f.manager, 'stopWorkspaceRelocationWorkersForCoordinator'), signals = vi.spyOn(native, 'terminateKnownProcess')
     vi.spyOn(f.manager, 'launchWorkspaceRelocationCoordinator').mockImplementation(async (...args: unknown[]) => {
       const child = await launch(...args), emit = child.emit.bind(child)
+      diagnosticChild = child
       vi.spyOn(child, 'emit').mockImplementation((event: string | symbol, ...args: any[]) => {
         const message = args[0]
         if (event === 'message' && message?.kind === 'workspace_process_journal_reply') {
+          replies.push({ operation: message.operation, ok: message.ok })
           let descendantObserved = false
-          if (orphan && message.operation === 'observe' && existsSync(path.join(f.data, 'orphan-ready.json'))) {
-            const witness = JSON.parse(require('node:fs').readFileSync(path.join(f.data, 'orphan-ready.json'), 'utf8'))
+          if (orphan && message.operation === 'observe' && message.ok === true && stop.mock.calls.length > 0) {
+            const key = (item: any) => JSON.stringify([item.pid, item.started, item.owner])
+            const initial = new Set(records.readWorkspaceRelocationProcesses(f.data, f.params.intent_id).processes.map(key))
             descendantObserved = records.readWorkspaceRelocationProcessStops(f.data, f.params.intent_id).observations
-              .some((row: any) => row.processes.some((item: any) => item.pid === witness.process.pid && item.started === witness.process.started))
+              .some((row: any) => row.processes.some((item: any) => !initial.has(key(item))))
           }
           if (phase === 'prepare' && message.operation === 'prepare' || descendantObserved
             || phase === 'execution exit' && message.operation === 'execution_exit') {
+            injected = true
             return emit(event, { ...message, ok: false })
           }
         }
@@ -1125,6 +1145,8 @@ describe('MM submits one fixed workspace stop sequence', () => {
       if (stop.mock.results[0]) await Promise.resolve(stop.mock.results[0].value).catch(() => undefined)
       expect(f.manager.submitWorkspaceRelocationStops(f.params, 'fixture-human')).toBe(first)
       await expect(first).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
+      const diagnostics = diagnosticChild ? coordinatorJournalFailures(diagnosticChild) : []
+      expect(injected, JSON.stringify({ phase, replies, worker_stop_calls: stop.mock.calls.length, diagnostics })).toBe(true)
       const stored = records.readWorkspaceRelocationProcessStops(f.data, f.params.intent_id)
       expect(stored.attempt).not.toBeNull()
       if (phase === 'execution exit') {

@@ -261,10 +261,18 @@ export class CodexAppServerClient {
       if (!await this.waitForExit(1000)) throw new Error('Carrier exit was not observed')
       return true
     } catch (error) {
-      const info = error as { code?: unknown; stage?: unknown }
+      const info = error as { code?: unknown; stage?: unknown; message?: unknown }
       const bounded = (value: unknown, pattern: RegExp) => typeof value === 'string' && pattern.test(value) ? value : undefined
+      const reasons = new Map([
+        ['Cannot inspect process exit', 'exit-observation'],
+        ['Cannot open the verified process for termination', 'open-target'],
+        ['Cannot inspect the verified process handle', 'target-handle'],
+        ['Cannot terminate the verified process', 'terminate-target'],
+        ['Cannot terminate self or another OS owner', 'target-owner'],
+      ])
       console.warn('Codex app-server termination unconfirmed', { stage,
-        code: bounded(info?.code, /^[A-Z0-9_]{1,80}$/), native_stage: bounded(info?.stage, /^[a-z-]{1,80}$/) })
+        code: bounded(info?.code, /^[A-Z0-9_]{1,80}$/), native_stage: bounded(info?.stage, /^[a-z-]{1,80}$/),
+        reason: typeof info?.message === 'string' ? reasons.get(info.message) : undefined })
       return false
     }
   }
