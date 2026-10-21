@@ -1266,6 +1266,20 @@ describe('MM prepares the original fixed workspace file plan', () => {
       await expect(fs.stat(plan.staging_path)).rejects.toMatchObject({ code: 'ENOENT' })
       await expect(fs.stat(path.join(f.root, 'relocated'))).rejects.toMatchObject({ code: 'ENOENT' })
       expect((await fetch(`http://127.0.0.1:${f.port}/api/friends`, { headers: { Authorization: 'Bearer fixture-human' } })).status).toBe(200)
+      if (mode === 'confirmed') {
+        const { createWorkspaceFileJournal } = require('../../scripts/lib/workspace-file-journal.mjs')
+        const files = createWorkspaceFileJournal(child, { dataDir: f.data, id: f.params.intent_id, launch: records.readWorkspaceRelocationCoordinator(f.data, f.params.intent_id).launch })
+        try {
+          const prepared = await files.prepareStage()
+          expect(prepared.dispatch).toBe('dispatch'); expect(prepared.staging.tree).toBeNull()
+          expect(await fs.readdir(plan.staging_path)).toEqual([])
+          expect((await files.prepareStage()).dispatch).toBe('observe')
+          expect((await files.prepareHost()).dispatch).toBe('observe')
+          expect(await fs.readFile(ledger)).toEqual(before)
+          expect((await fetch(`http://127.0.0.1:${f.port}/api/friends`, { headers: { Authorization: 'Bearer fixture-human' } })).status).toBe(200)
+          await expect(fs.stat(path.join(f.root, 'relocated'))).rejects.toMatchObject({ code: 'ENOENT' })
+        } finally { files.close() }
+      }
     } finally {
       if (child?.connected) { const ended = once(child, 'exit'); child.disconnect(); await ended }
       locks.releaseCliLock(lock); await f.cleanup()

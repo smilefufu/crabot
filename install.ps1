@@ -31,7 +31,7 @@ $InstallerHelperHashes = @{
     'scripts/installer-deps.mjs' = 'd4fd4bed9aa55ab09c65f7f63ffb8bfe275fbfac953caca131e5504df67d72b7'
     'scripts/lib/install-network.mjs' = '73f6ea5a506843a388459184fa9f5dba06ea6120d05a8fe0611af67969afb271'
     'scripts/lib/memory-deps.mjs' = '8111670a37b3c61e752fff79158b11a03a52dd3324b54b83f5240feed644c8f9'
-    'scripts/lib/run-bounded.mjs' = '81baca1edf1c06fe77c54ebe97ad3837632bc8db2823d6e5ad8a762c9d86a08c'
+    'scripts/lib/run-bounded.mjs' = 'e793f0e40c059e47efcb13bc0ee3297e913395d3119196039810e08aaa4721f2'
     'scripts/lib/toolchain.mjs' = '7ce0955b964790804305e7d227228bea222cdabfe1bce84213e86a80f99cc886'
 }
 $script:InstallerHelper = $null

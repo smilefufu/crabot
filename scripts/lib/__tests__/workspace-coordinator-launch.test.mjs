@@ -296,3 +296,43 @@ for (const mode of ['confirmed', 'lost reply', 'unexpected payload', 'exited Hos
     }
   }
 })
+
+for (const mode of ['confirmed', 'lost acknowledgement', 'unexpected payload']) test('the actual file channel prepares one exclusive staging: ' + mode, { timeout: 25000 }, async t => {
+  const f = await fixture(t), { child, launch } = await f.launch(), context = { dataDir: f.data, id: f.id, launch }
+  const workers = createWorkspaceWorkerJournal(child, context), modules = createWorkspaceModuleJournal(child, context), processes = createWorkspaceProcessJournal(child, context)
+  let files = createWorkspaceFileJournal(child, context)
+  try {
+    await workers.capture([]); await workers.captureProcesses([]); await modules.capture([])
+    await processes.prepare(); await processes.observe([]); await processes.complete()
+    await workers.prepare([]); await workers.complete([]); await modules.prepare([]); await modules.complete([]); await processes.confirmExecutionExit()
+    await files.prepare()
+    if (mode === 'unexpected payload') {
+      const invalid = createWorkspaceJournalClient(child, context, 'file')
+      try { await assert.rejects(invalid.call('prepare_stage', { target: 'not-accepted' }), { code: 'CRABOT_WORKSPACE_JOURNAL_UNAVAILABLE' }) } finally { invalid.close() }
+      assert.equal(readWorkspaceRelocationFileActors(f.data, f.id).staging_attempt, null)
+    }
+    const host = await files.prepareHost()
+    if (mode === 'lost acknowledgement') {
+      const emit = child.emit; let dropped = false
+      const mock = t.mock.method(child, 'emit', function(event, ...args) {
+        if (event === 'message' && args[0]?.kind === 'workspace_file_journal_reply' && args[0]?.operation === 'prepare_stage' && !dropped) {
+          dropped = true; return emit.call(this, event, { ...args[0], ok: false }, ...args.slice(1))
+        }
+        return emit.call(this, event, ...args)
+      })
+      try { await assert.rejects(files.prepareStage(), { code: 'CRABOT_WORKSPACE_JOURNAL_UNAVAILABLE' }); assert.equal(dropped, true) } finally { mock.mock.restore() }
+      assert.ok(readWorkspaceRelocationFileActors(f.data, f.id).staging)
+      files.close(); files = createWorkspaceFileJournal(child, context)
+    }
+    const result = await files.prepareStage()
+    assert.equal(result.dispatch, mode === 'lost acknowledgement' ? 'observe' : 'dispatch')
+    assert.equal(result.staging.tree, null); assert.deepEqual(fs.readdirSync(result.staging.container.path), [])
+    const before = fs.readFileSync(path.join(f.data, 'workspace-control/relocation-file-actors.jsonl'))
+    assert.equal((await files.prepareStage()).dispatch, 'observe')
+    assert.deepEqual(fs.readFileSync(path.join(f.data, 'workspace-control/relocation-file-actors.jsonl')), before)
+    const observed = await files.prepareHost()
+    assert.equal(observed.dispatch, 'observe'); assert.deepEqual(observed.actors.host, host.actors.host)
+    assert.equal(fs.existsSync(path.join(f.root, 'new')), false); assert.equal(fs.readFileSync(f.marker, 'utf8'), 'original work')
+    assert.deepEqual(await f.catalog.snapshot(), f.before)
+  } finally { workers.close(); modules.close(); processes.close(); files.close() }
+})

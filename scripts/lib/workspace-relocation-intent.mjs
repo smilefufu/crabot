@@ -1,7 +1,7 @@
 // Private fixed-job records only; submission receipts never prove exit or authorize moving/releasing maintenance.
 import fs from 'node:fs'
 import path from 'node:path'
-import { randomUUID } from 'node:crypto'
+import { randomUUID, createHash } from 'node:crypto'
 import native from './process-identity.cjs'
 import management from './desktop-management.cjs'
 import knownProcessExit from './known-process-exit.cjs'
@@ -875,18 +875,28 @@ function validCopyTools(tools, host) {
       && item.process.parent === host.pid && item.process.pid !== host.pid && item.process.owner === host.owner)
 }
 
+function validPreparedStaging(row, plan) {
+  const nativeId = value => process.platform === 'win32' ? typeof value === 'string' && /^[0-9]+:[a-f0-9]{32}$/i.test(value) : value === null
+  if (!fields(row, ['type', 'previous_sha256', 'container', 'container_native_id', 'container_metadata_sha256', 'tree', 'tree_native_id', 'created_at'])
+    || !digest(row.container_metadata_sha256) || !validIdentity(row.container) || row.container.path !== plan.staging_path
+    || row.container.dev !== plan.staging_parent.dev || !nativeId(row.container_native_id)) return false
+  if (plan.mode === 'rename') return row.tree === null && row.tree_native_id === null
+  return validIdentity(row.tree) && row.tree.path === path.join(plan.staging_path, 'tree') && row.tree.dev === row.container.dev
+    && row.tree.ino !== row.container.ino && nativeId(row.tree_native_id)
+}
+
 /** File actor facts are separate from the earlier business execution-exit fact. */
 export function readWorkspaceRelocationFileActors(dataDir, id) {
   const { ctx } = coordinatorContext(dataDir, id), plan = readWorkspaceRelocationFilePlan(dataDir, id)
   if (!plan) fail()
-  const empty = { attempt: null, host: null, permission: null, tools: null, tool_permission: null, tool_exit: null }
+  const empty = { attempt: null, host: null, permission: null, staging_attempt: null, staging: null, tools: null, tool_permission: null, tool_exit: null }
   const text = readPrivateText(path.join(ctx.control, fileActorsFile), 65536)
   if (text === undefined) return empty
   const coordinator = readWorkspaceRelocationCoordinator(dataDir, id)
   try {
     if (!text.endsWith('\n')) fail()
-    const rows = text.slice(0, -1).split('\n').map(JSON.parse), [attempt, host, permission, tools] = rows
-    if (rows.length < 1 || rows.length > 6 || rows.some(row => !row) || !coordinator.ready
+    const rows = text.slice(0, -1).split('\n').map(JSON.parse), [attempt, host, permission] = rows
+    if (rows.length < 1 || rows.length > 8 || rows.some(row => !row) || !coordinator.ready
       || !fields(attempt, ['type', 'schema_version', 'intent_id', 'plan_sha256', 'coordinator_sha256', 'created_at'])
       || attempt.type !== 'attempt' || attempt.schema_version !== 1 || attempt.intent_id !== id
       || attempt.plan_sha256 !== sha256CanonicalJson(plan) || attempt.coordinator_sha256 !== sha256CanonicalJson(coordinator)
@@ -897,18 +907,28 @@ export function readWorkspaceRelocationFileActors(dataDir, id) {
       || path.normalize(host.process.executable) !== path.normalize(coordinator.launch.process.executable) || !validDate(host.created_at))) fail()
     if (permission && (!fields(permission, ['type', 'previous_sha256', 'created_at']) || permission.type !== 'host_permitted'
       || permission.previous_sha256 !== sha256CanonicalJson(host) || !validDate(permission.created_at))) fail()
-    if (tools && (!fields(tools, ['type', 'previous_sha256', 'platform', 'tools', 'created_at']) || tools.type !== 'copy_tools'
-      || plan.mode !== 'copy' || tools.platform !== process.platform || tools.previous_sha256 !== sha256CanonicalJson(permission)
-      || !validCopyTools(tools.tools, host.process) || !validDate(tools.created_at))) fail()
-    let tool_permission = null, tool_exit = null, previous = tools
-    for (const row of rows.slice(4)) {
-      if (!fields(row, ['type', 'previous_sha256', 'created_at']) || row.previous_sha256 !== sha256CanonicalJson(previous) || !validDate(row.created_at)) fail()
-      if (row.type === 'copy_tools_permitted' && !tool_permission && !tool_exit) tool_permission = row
-      else if (row.type === 'copy_tools_exited' && !tool_exit) tool_exit = row
-      else fail()
+    let staging_attempt = null, staging = null, tools = null, tool_permission = null, tool_exit = null, previous = permission
+    for (const row of rows.slice(3)) {
+      if (row.previous_sha256 !== sha256CanonicalJson(previous) || !validDate(row.created_at)) fail()
+      if (row.type === 'staging_attempt' && !staging_attempt && !tools) {
+        if (!fields(row, ['type', 'previous_sha256', 'created_at'])) fail()
+        staging_attempt = row
+      } else if (row.type === 'staging_prepared' && staging_attempt && !staging && !tools) {
+        if (!validPreparedStaging(row, plan)) fail()
+        staging = row
+      } else if (row.type === 'copy_tools' && staging && !tools && plan.mode === 'copy') {
+        if (!fields(row, ['type', 'previous_sha256', 'platform', 'tools', 'created_at']) || row.platform !== process.platform || !validCopyTools(row.tools, host.process)) fail()
+        tools = row
+      } else if (row.type === 'copy_tools_permitted' && tools && !tool_permission && !tool_exit) {
+        if (!fields(row, ['type', 'previous_sha256', 'created_at'])) fail()
+        tool_permission = row
+      } else if (row.type === 'copy_tools_exited' && tools && !tool_exit) {
+        if (!fields(row, ['type', 'previous_sha256', 'created_at'])) fail()
+        tool_exit = row
+      } else fail()
       previous = row
     }
-    return { attempt, host: host ?? null, permission: permission ?? null, tools: tools ?? null, tool_permission, tool_exit }
+    return { attempt, host: host ?? null, permission: permission ?? null, staging_attempt, staging, tools, tool_permission, tool_exit }
   } catch { fail() }
 }
 
@@ -950,7 +970,7 @@ function appendFileActor(dataDir, id, previous, record) {
   } finally { fs.closeSync(fd) }
   syncIntent(ctx)
   const result = readWorkspaceRelocationFileActors(dataDir, id)
-  if (sha256CanonicalJson(result.tool_exit ?? result.tool_permission ?? result.tools ?? result.permission ?? result.host) !== sha256CanonicalJson(record)) fail()
+  if (sha256CanonicalJson(result.tool_exit ?? result.tool_permission ?? result.tools ?? result.staging ?? result.staging_attempt ?? result.permission ?? result.host) !== sha256CanonicalJson(record)) fail()
   return result
 }
 export function registerWorkspaceRelocationFileHost({ dataDir, id, process: host }) {
@@ -979,17 +999,33 @@ export function permitWorkspaceRelocationFileHost({ dataDir, id }) {
 }
 
 
+function stagingMetadata(directory) {
+  const metadata = native.inspectFileMetadata(directory).metadata
+  if (!Buffer.isBuffer(metadata)) fail()
+  return createHash('sha256').update(metadata).digest('hex')
+}
+function verifyCopyStaging(staging) {
+  const stat = fs.lstatSync(staging.container.path)
+  if (!same(staging.container, identity(staging.container.path)) || !staging.tree || !same(staging.tree, identity(staging.tree.path))
+    || stagingMetadata(staging.container.path) !== staging.container_metadata_sha256
+    || (process.platform === 'win32' ? !native.isPrivateDirectory(staging.container.path)
+      || native.inspectDirectoryFileId(staging.container.path) !== staging.container_native_id || native.inspectDirectoryFileId(staging.tree.path) !== staging.tree_native_id
+      : stat.uid !== process.getuid() || (stat.mode & 0o777) !== 0o700)
+    || JSON.stringify(fs.readdirSync(staging.container.path)) !== JSON.stringify(['tree']) || fs.readdirSync(staging.tree.path).length) fail()
+}
+
 export function registerWorkspaceRelocationCopyTools({ dataDir, id, tools }) {
   const { ctx, verify } = workspaceFileCoordinatorContext(dataDir, id); verify()
   const previous = readWorkspaceRelocationFileActors(dataDir, id)
-  if (!previous.permission || readWorkspaceRelocationFilePlan(dataDir, id).mode !== 'copy' || !validCopyTools(tools, previous.host.process)) fail()
+  if (!previous.staging || readWorkspaceRelocationFilePlan(dataDir, id).mode !== 'copy' || !validCopyTools(tools, previous.host.process)) fail()
   if (previous.tools) {
     if (sha256CanonicalJson(previous.tools.tools) !== sha256CanonicalJson(tools)) fail()
     syncFileActors(ctx); return { dispatch: 'observe', tools: previous.tools }
   }
+  verifyCopyStaging(previous.staging)
   if (!native.sameProcess(previous.host.process, native.inspectProcess(previous.host.process.pid))) fail()
   for (const item of tools) if (!native.sameProcess(item.process, native.inspectProcess(item.process.pid))) fail()
-  const record = { type: 'copy_tools', previous_sha256: sha256CanonicalJson(previous.permission), platform: process.platform, tools, created_at: new Date().toISOString() }
+  const record = { type: 'copy_tools', previous_sha256: sha256CanonicalJson(previous.staging), platform: process.platform, tools, created_at: new Date().toISOString() }
   return { dispatch: 'dispatch', tools: appendFileActor(dataDir, id, previous, record).tools }
 }
 export function permitWorkspaceRelocationCopyTools({ dataDir, id }) {
@@ -997,6 +1033,7 @@ export function permitWorkspaceRelocationCopyTools({ dataDir, id }) {
   const previous = readWorkspaceRelocationFileActors(dataDir, id)
   if (!previous.tools || previous.tool_exit) fail()
   if (previous.tool_permission) { syncFileActors(ctx); return { dispatch: 'observe', permission: previous.tool_permission } }
+  verifyCopyStaging(previous.staging)
   if (!native.sameProcess(previous.host.process, native.inspectProcess(previous.host.process.pid))) fail()
   for (const item of previous.tools.tools) if (!native.sameProcess(item.process, native.inspectProcess(item.process.pid))) fail()
   const record = { type: 'copy_tools_permitted', previous_sha256: sha256CanonicalJson(previous.tools), created_at: new Date().toISOString() }
@@ -1010,4 +1047,48 @@ export function completeWorkspaceRelocationCopyTools({ dataDir, id }) {
   if (knownProcessExit.probeKnownProcessExit(previous.tools.tools.map(item => item.process)).state !== 'stopped') fail()
   const record = { type: 'copy_tools_exited', previous_sha256: sha256CanonicalJson(previous.tool_permission ?? previous.tools), created_at: new Date().toISOString() }
   return { dispatch: 'dispatch', completion: appendFileActor(dataDir, id, previous, record).tool_exit }
+}
+
+
+export function prepareWorkspaceRelocationStaging({ dataDir, id }) {
+  const { ctx, intent, verify } = workspaceFileCoordinatorContext(dataDir, id); verify()
+  const plan = readWorkspaceRelocationFilePlan(dataDir, id)
+  let previous = readWorkspaceRelocationFileActors(dataDir, id)
+  if (!previous.permission) fail()
+  if (previous.staging) { syncFileActors(ctx); return { dispatch: 'observe', staging: previous.staging } }
+  if (previous.staging_attempt || previous.tools) fail()
+  const verifyPreparation = () => {
+    verify()
+    if (!native.sameProcess(previous.host.process, native.inspectProcess(previous.host.process.pid))
+      || !same(intent.source, identity(intent.source.path)) || !same(plan.staging_parent, identity(plan.staging_parent.path))
+      || process.platform === 'win32' && (native.inspectDirectoryFileId(plan.staging_parent.path) !== plan.staging_parent_native_id
+        || native.inspectDirectoryFileId(intent.source.path) !== plan.source_observation.source_identity.native_id)) fail()
+  }
+  verifyPreparation()
+  try { fs.lstatSync(plan.staging_path); fail() } catch (error) { if (error.code !== 'ENOENT') throw error }
+  const attempt = { type: 'staging_attempt', previous_sha256: sha256CanonicalJson(previous.permission), created_at: new Date().toISOString() }
+  previous = appendFileActor(dataDir, id, previous, attempt)
+  const pins = []
+  try {
+    verifyPreparation()
+    if (process.platform === 'win32') { native.createPrivateDirectory(plan.staging_path); pins.push(native.pinDirectory(plan.staging_path)) }
+    else native.createPrivateStagingDirectory(plan.staging_path)
+    const container = identity(plan.staging_path), containerNative = process.platform === 'win32' ? native.inspectDirectoryFileId(plan.staging_path) : null
+    let tree = null, treeNative = null
+    if (plan.mode === 'copy') {
+      const target = path.join(plan.staging_path, 'tree')
+      if (process.platform === 'win32') { native.createPrivateDirectory(target); pins.push(native.pinDirectory(target)) }
+      else native.createPrivateStagingDirectory(target)
+      tree = identity(target); treeNative = process.platform === 'win32' ? native.inspectDirectoryFileId(target) : null
+      syncDirectory(target)
+    }
+    syncDirectory(plan.staging_path); syncDirectory(plan.staging_parent.path)
+    verifyPreparation()
+    if (!same(container, identity(plan.staging_path)) || tree && !same(tree, identity(tree.path))
+      || JSON.stringify(fs.readdirSync(plan.staging_path)) !== JSON.stringify(tree ? ['tree'] : [])
+      || tree && fs.readdirSync(tree.path).length) fail()
+    const record = { type: 'staging_prepared', previous_sha256: sha256CanonicalJson(attempt), container, container_native_id: containerNative, container_metadata_sha256: stagingMetadata(plan.staging_path),
+      tree, tree_native_id: treeNative, created_at: new Date().toISOString() }
+    return { dispatch: 'dispatch', staging: appendFileActor(dataDir, id, previous, record).staging }
+  } finally { for (const pin of pins.reverse()) native.releaseDirectoryPin(pin) }
 }
