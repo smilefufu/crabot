@@ -37,7 +37,7 @@ async function capture(target = registry): Promise<ReadonlyArray<any>> {
   return (target as any).captureWorkspaceShellProcesses()
 }
 describe('registered background Shell native scope', () => {
-  it.each(['persistent', 'grace'])('observes the actual %s tree without signals or registry mutation', async kind => {
+  it.each(['persistent', ...Array<string>(process.platform === 'win32' ? 8 : 1).fill('grace')])('observes the actual %s tree without signals or registry mutation', async kind => {
     const record = await start(kind), before = await fs.readFile(file), signal = vi.spyOn(native, 'terminateKnownProcess')
     const scope = await capture()
     expect(scope).toEqual(expect.arrayContaining([expect.objectContaining({ pid: record.pid, owner: native.inspectProcess(process.pid).owner })]))
