@@ -104,7 +104,16 @@ export async function enterWorkspaceFileHost() {
   const current = verify()
   if (!current.permission || !fields(permit, ['kind', ...Object.keys(bound), 'permission_sha256']) || permit.kind !== 'workspace_file_host_permit'
     || permit.permission_sha256 !== hash(current.permission) || Object.entries(bound).some(([key, value]) => permit[key] !== value)) throw failure()
-  return Object.freeze({ dataDir: input.data_dir, id: input.intent_id, plan: readWorkspaceRelocationFilePlan(input.data_dir, input.intent_id),
+  const complete = async attemptHash => {
+    const before = verify()
+    if (!before.file_attempt || hash(before.file_attempt) !== attemptHash) throw failure()
+    const expected = { intent_id: input.intent_id, attempt_sha256: attemptHash }
+    const receiptPromise = receive(process, 20 * 60_000)
+    const [, receipt] = await Promise.all([send(process, { kind: 'workspace_file_prepared', ...expected }), receiptPromise])
+    if (hash(verify().file_attempt) !== attemptHash || !fields(receipt, ['kind', ...Object.keys(expected)])
+      || receipt.kind !== 'workspace_file_completion_verified' || Object.entries(expected).some(([key, value]) => receipt[key] !== value)) throw failure()
+  }
+  return Object.freeze({ dataDir: input.data_dir, id: input.intent_id, plan: readWorkspaceRelocationFilePlan(input.data_dir, input.intent_id), complete,
     entered: { kind: 'workspace_file_host_entered', ...bound, permission_sha256: hash(current.permission) } })
 }
 
@@ -122,7 +131,7 @@ export async function prepareWorkspaceFilesWithHost(child, { dataDir, id, signal
     if (signal?.aborted) throw failure()
     const attemptHash = hash(started.attempt)
     const ended = new Promise((resolve, reject) => {
-      let completed = false
+      let completed = false, acknowledgement
       const failed = (cause, stage) => { const error = failure(stage); if (cause) error.cause = cause; reject(error) }
       const message = value => {
         if (value?.kind !== 'workspace_file_prepared' && value?.kind !== 'workspace_file_preparation_failed') return
@@ -137,9 +146,11 @@ export async function prepareWorkspaceFilesWithHost(child, { dataDir, id, signal
           if (!native.sameProcess(original.host.process, current) && knownExit.probeKnownProcessExit([original.host.process]).state !== 'stopped') throw failure()
           if (value.kind === 'workspace_file_preparation_failed') return failed({ code: value.error_code }, 'host-reported-failure')
           completed = true
+          acknowledgement = send(child, { kind: 'workspace_file_completion_verified', intent_id: id, attempt_sha256: attemptHash })
+          void acknowledgement.catch(cause => failed(cause, 'completion-acknowledgement'))
         } catch (error) { failed(error, messageStage) }
       }
-      const exited = (code, exitSignal) => completed && code === 0 && exitSignal === null ? resolve()
+      const exited = (code, exitSignal) => completed && code === 0 && exitSignal === null ? acknowledgement.then(resolve, cause => failed(cause, 'completion-acknowledgement'))
         : failed(undefined, !completed ? 'exit-before-completion' : code !== 0 ? 'host-exit-code' : 'host-exit-signal')
       const disconnected = () => { if (!completed) failed(undefined, 'disconnect-before-completion') }
       const aborted = () => failed(undefined, 'host-aborted')

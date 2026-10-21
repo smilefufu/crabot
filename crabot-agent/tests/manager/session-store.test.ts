@@ -159,6 +159,7 @@ describe('ManagerSessionStore', () => {
     await fs.mkdir(join(dir, encodeSegment(key)), { recursive: true })
     const original = JSON.stringify(state) + '\n'
     await fs.writeFile(path, original, { mode: 0o640 })
+    const originalMode = (await fs.stat(path)).mode & 0o777
     const loaded = await store.load(key)
     expect(loaded.recent[1]).toEqual(state.recent[1])
     expect(loaded.recent[2]).toMatchObject({ id: state.recent[2].id, timestamp: state.recent[2].timestamp, toolResults: [
@@ -169,7 +170,9 @@ describe('ManagerSessionStore', () => {
     const backups = (await fs.readdir(join(dir, encodeSegment(key)))).filter(n => n.startsWith('state.json.bak-tool-history-'))
     expect(backups).toHaveLength(1)
     expect(await fs.readFile(join(dir, encodeSegment(key), backups[0]), 'utf-8')).toBe(original)
-    expect((await fs.stat(join(dir, encodeSegment(key), backups[0]))).mode & 0o137).toBe(0)
+    const backupMode = (await fs.stat(join(dir, encodeSegment(key), backups[0]))).mode & 0o777
+    expect(backupMode & ~originalMode).toBe(0)
+    if (process.platform !== 'win32') expect(backupMode & 0o137).toBe(0)
     expect(await store.load(key)).toEqual(loaded)
     expect((await fs.readdir(join(dir, encodeSegment(key)))).filter(n => n.startsWith('state.json.bak-tool-history-'))).toEqual(backups)
   })

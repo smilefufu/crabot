@@ -56,6 +56,16 @@ async function fixture(t, { exitEvidence = true, crossVolume = false } = {}) {
         let result;
         if(['host-launch','host-launch-preload','host-launch-extra','host-launch-after-unlock'].includes(message.operation)){if(message.operation==='host-launch-preload')process.env.NODE_OPTIONS='--require '+JSON.stringify(${JSON.stringify(path.join(root, 'host-preload.cjs'))});const {launchWorkspaceFileHost}=await import(${JSON.stringify(new URL('../workspace-file-host.mjs', import.meta.url).href)});if(message.operation==='host-launch-after-unlock')context.release();const launched=await launchWorkspaceFileHost(message.operation==='host-launch-extra'?{...args,entry:'not-accepted'}:args);if(launched.child){host=launched.child;hostIdentity=launched.host;hostEnded=once(host,'exit');process.send({kind:'fixture-actor',identity:hostIdentity})}result={dispatch:launched.dispatch,host:launched.host}}
         else if(message.operation==='stage-create-failure'){const key=process.platform==='win32'?'createPrivateDirectory':'createPrivateStagingDirectory',create=native[key];native[key]=directory=>{create(directory);throw Object.assign(new Error('finite creation acknowledgement failure'),{code:'EIO'})};try{result=records.prepareWorkspaceRelocationStaging(args)}finally{native[key]=create}}
+        else if(['file-prepare-wrong-receipt','file-prepare-extra-receipt','file-prepare-disconnected-receipt'].includes(message.operation)){
+          const {prepareWorkspaceFilesWithHost}=await import(${JSON.stringify(new URL('../workspace-file-host.mjs', import.meta.url).href)});const send=host.send.bind(host);
+          host.send=(value,...rest)=>{if(value?.kind==='workspace_file_completion_verified'){if(message.operation==='file-prepare-disconnected-receipt'){host.disconnect();const callback=rest.at(-1);if(typeof callback==='function')callback(Object.assign(new Error('finite disconnected receipt'),{code:'ERR_IPC_CHANNEL_CLOSED'}));return false}return send(message.operation==='file-prepare-extra-receipt'?{...value,command:'not-accepted'}:{...value,attempt_sha256:'0'.repeat(64)},...rest)}return send(value,...rest)};
+          try{result=await prepareWorkspaceFilesWithHost(host,args)}finally{host.send=send}
+        }
+        else if(message.operation==='file-prepare-delayed-completion'){
+          const {prepareWorkspaceFilesWithHost}=await import(${JSON.stringify(new URL('../workspace-file-host.mjs', import.meta.url).href)});const emit=host.emit.bind(host);let held=false,aliveAtDelivery=false;
+          host.emit=(event,...values)=>{if(event==='message'&&values[0]?.kind==='workspace_file_prepared'&&!held){held=true;setTimeout(()=>{aliveAtDelivery=native.sameProcess(hostIdentity,native.inspectProcess(host.pid));emit(event,...values)},150);return true}return emit(event,...values)};
+          try{const prepared=await prepareWorkspaceFilesWithHost(host,args);result={prepared,held,aliveAtDelivery}}finally{host.emit=emit}
+        }
         else if(message.operation==='file-begin')result=await records.beginWorkspaceRelocationFiles(args);
         else if(message.operation==='file-ready')result=await records.commitWorkspaceRelocationFileReady(args);
         else if(message.operation==='file-move-fixture'){const intent=records.readWorkspaceRelocationIntent(args.dataDir),plan=records.readWorkspaceRelocationFilePlan(args.dataDir,args.id);native.renameDirectoryNoReplace(intent.source.path,plan.staging_path+'/tree');result=true}
@@ -271,6 +281,34 @@ for (const scenario of ['normal', 'blocked preload']) test('actual fixed file ho
   assert.equal(fs.existsSync(f.target), false); assert.equal(fs.readFileSync(path.join(f.source, 'default/file'), 'utf8'), 'original bytes')
 })
 
+
+test('the actual file host remains identifiable until its delayed completion is verified', { timeout: fixtureLifetimeMs }, async t => {
+  const f = await fixture(t)
+  assert.equal((await f.command()).error, undefined)
+  assert.equal((await f.command('host-launch')).error, undefined)
+  assert.equal((await f.command('stage-prepare')).error, undefined)
+  const response = await f.command('file-prepare-delayed-completion')
+  assert.equal(response.error, undefined, JSON.stringify(response.error))
+  assert.equal(response.result.held, true); assert.equal(response.result.aliveAtDelivery, true)
+  assert.equal(response.result.prepared.dispatch, 'dispatch')
+  const actors = records.readWorkspaceRelocationFileActors(f.data, f.id)
+  assert.ok(actors.file_ready); assert.equal(exitProbe.probeKnownProcessExit([actors.host.process]).state, 'stopped')
+  assert.deepEqual(await f.catalog.snapshot(), f.before)
+  assert.equal(fs.readFileSync(path.join(actors.staging.container.path, 'tree/default/file'), 'utf8'), 'original bytes')
+})
+
+for (const mode of ['wrong', 'extra', 'disconnected']) test('a ' + mode + ' completion receipt never publishes file readiness', { timeout: fixtureLifetimeMs }, async t => {
+  const f = await fixture(t)
+  assert.equal((await f.command()).error, undefined)
+  assert.equal((await f.command('host-launch')).error, undefined)
+  assert.equal((await f.command('stage-prepare')).error, undefined)
+  const response = await f.command('file-prepare-' + mode + '-receipt')
+  assert.equal(response.error?.code, 'CRABOT_WORKSPACE_FILE_HOST')
+  const actors = records.readWorkspaceRelocationFileActors(f.data, f.id)
+  assert.equal(actors.file_ready, null); assert.equal(exitProbe.probeKnownProcessExit([actors.host.process]).state, 'stopped')
+  assert.deepEqual(await f.catalog.snapshot(), f.before); assert.equal(fs.existsSync(f.target), false)
+  assert.equal(fs.readFileSync(path.join(actors.staging.container.path, 'tree/default/file'), 'utf8'), 'original bytes')
+})
 
 for (const scenario of ['host-launch-extra', 'host-launch-after-unlock']) test('fixed file host rejects unsafe launch before a child exists: ' + scenario, async t => {
   const f = await fixture(t); await f.command()

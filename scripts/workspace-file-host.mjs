@@ -28,7 +28,7 @@ try {
   if (await work) {
     const { runWorkspaceFilePreparation } = await import('./lib/workspace-file-driver.mjs')
     await runWorkspaceFilePreparation(context, controller.signal)
-    await new Promise((resolve, reject) => process.send({ kind: 'workspace_file_prepared', intent_id: context.id, attempt_sha256: attemptHash }, error => error ? reject(error) : resolve()))
+    await context.complete(attemptHash)
   }
 } catch (error) {
   process.exitCode = 1

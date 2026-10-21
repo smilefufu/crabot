@@ -80,12 +80,19 @@ describe('fixed read-only Agent recovery responsibility capture', () => {
     expect(fs.readFileSync(active)).toEqual(fs.readFileSync(kept))
   })
   it('detects a same-size source change during its actual read and never repairs or archives it', async () => {
-    write(active, checkpoint()); const read = fs.readSync; let changed = false
+    write(active, checkpoint()); const read = fs.readSync, original = fs.statSync(active, { bigint: true }); let changed = false
     vi.spyOn(fs, 'readSync').mockImplementation(((...args: any[]) => {
       const count = (read as any)(...args)
-      if (count && !changed) { changed = true; fs.writeFileSync(active, checkpoint().replace('ORIGINAL_PRIVATE_INPUT', 'MODIFIED_PRIVATE_INPUT')) }
+      const opened = fs.fstatSync(args[0], { bigint: true })
+      if (count && !changed && opened.dev === original.dev && opened.ino === original.ino) {
+        changed = true; fs.writeFileSync(active, checkpoint().replace('ORIGINAL_PRIVATE_INPUT', 'MODIFIED_PRIVATE_INPUT'))
+      }
       return count
     }) as typeof fs.readSync)
+    const unrelated = path.join(root, 'unrelated-reader')
+    fs.writeFileSync(unrelated, 'unrelated read')
+    fs.readFileSync(unrelated)
+    expect(changed).toBe(false)
     await expect(captureWorkspaceRelocationRecovery(data)).rejects.toThrow()
     expect(changed).toBe(true); expect(fs.readFileSync(active, 'utf8')).toContain('MODIFIED_PRIVATE_INPUT')
     expect(fs.existsSync(path.join(manager, 'workspace-relocation-history'))).toBe(false)
