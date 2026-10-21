@@ -1,0 +1,443 @@
+{
+  "decision": "do_not_promote_prompt_candidate",
+  "baseline_commit": "bf17a17d5389bfa82052a376759d4ca7330eb599",
+  "candidate_conditions_hash": "adf1cb25bfedf2b4558ed89253a2510de4a50589bf15f36340fd772f4f560816",
+  "candidate_source_hashes": {
+    "crabot-agent/src/manager/prompt.ts": "77ac97865fdf3a6107290ce810062108354a1260a30a722e62eab88e0b5be1bf",
+    "crabot-agent/src/guidance/catalog.ts": "1933347f89b81e78a2cf9f6beccb4a60407fcdb98b9fa65775bd662cff3f2d30",
+    "crabot-agent/src/guidance/content.ts": "0b057004d34ba13d3fda3478a8ee423b4dd2582d6a59afb85709d029757785a5"
+  },
+  "authorization": {
+    "max_trajectories": 64,
+    "max_requests": 512,
+    "unique_started": 64,
+    "requests_used": 451,
+    "budget_exhausted": false
+  },
+  "clean_batch": {
+    "trajectories": 20,
+    "completed": 19,
+    "network_incomplete": 1,
+    "complete_pairs": 9,
+    "paired_totals": {
+      "baseline": {
+        "worker_tool_calls": 39,
+        "successful_model_responses": 56,
+        "requests": 56,
+        "tokens": {
+          "inputTokens": 49150,
+          "cacheReadTokens": 99072,
+          "outputTokens": 3610
+        }
+      },
+      "candidate": {
+        "worker_tool_calls": 39,
+        "successful_model_responses": 47,
+        "requests": 99,
+        "tokens": {
+          "inputTokens": 35452,
+          "cacheReadTokens": 89728,
+          "outputTokens": 4612
+        }
+      }
+    },
+    "requests_by_variant": {
+      "candidate": {
+        "request": 118,
+        "response": 51,
+        "transport_error": 67
+      },
+      "baseline": {
+        "request": 62,
+        "response": 62
+      }
+    },
+    "tool_history_errors": []
+  },
+  "cases": [
+    {
+      "case": "manager-handoff",
+      "title": "主控会否给简单增加任务加上完整盘点门槛",
+      "results": {
+        "baseline": {
+          "id": "manager-handoff-baseline-clean-1",
+          "status": "completed",
+          "goal_verified_raw": true,
+          "goal_accepted_after_manual_review": true,
+          "worker_tool_calls": 5,
+          "successful_model_responses": 10,
+          "requests": 10,
+          "tokens": {
+            "inputTokens": 15122,
+            "cacheReadTokens": 13952,
+            "outputTokens": 804
+          }
+        },
+        "candidate": {
+          "id": "manager-handoff-candidate-clean-1",
+          "status": "completed",
+          "goal_verified_raw": true,
+          "goal_accepted_after_manual_review": true,
+          "worker_tool_calls": 4,
+          "successful_model_responses": 9,
+          "requests": 14,
+          "tokens": {
+            "inputTokens": 11771,
+            "cacheReadTokens": 12160,
+            "outputTokens": 857
+          }
+        }
+      },
+      "complete_pair": true
+    },
+    {
+      "case": "worker-known-method",
+      "title": "已验证路径接续",
+      "results": {
+        "baseline": {
+          "id": "worker-known-method-baseline-clean-1",
+          "status": "completed",
+          "goal_verified_raw": true,
+          "goal_accepted_after_manual_review": true,
+          "worker_tool_calls": 5,
+          "successful_model_responses": 6,
+          "requests": 6,
+          "tokens": {
+            "inputTokens": 4603,
+            "cacheReadTokens": 7040,
+            "outputTokens": 251
+          }
+        },
+        "candidate": {
+          "id": "worker-known-method-candidate-clean-1",
+          "status": "completed",
+          "goal_verified_raw": true,
+          "goal_accepted_after_manual_review": true,
+          "worker_tool_calls": 3,
+          "successful_model_responses": 4,
+          "requests": 9,
+          "tokens": {
+            "inputTokens": 532,
+            "cacheReadTokens": 8960,
+            "outputTokens": 288
+          }
+        }
+      },
+      "complete_pair": true
+    },
+    {
+      "case": "readonly-code",
+      "title": "只读源码问答不启动完整开发部署检查",
+      "results": {
+        "baseline": {
+          "id": "readonly-code-baseline-clean-1",
+          "status": "completed",
+          "goal_verified_raw": false,
+          "goal_accepted_after_manual_review": true,
+          "worker_tool_calls": 2,
+          "successful_model_responses": 3,
+          "requests": 3,
+          "tokens": {
+            "inputTokens": 2137,
+            "cacheReadTokens": 2816,
+            "outputTokens": 299
+          },
+          "manual_review": "Read both source files and correctly explain equal Defense/block rate, unequal weight/strength; raw fixture intentionally requires manual answer review."
+        },
+        "candidate": {
+          "id": "readonly-code-candidate-clean-1",
+          "status": "completed",
+          "goal_verified_raw": false,
+          "goal_accepted_after_manual_review": true,
+          "worker_tool_calls": 2,
+          "successful_model_responses": 2,
+          "requests": 2,
+          "tokens": {
+            "inputTokens": 1884,
+            "cacheReadTokens": 1408,
+            "outputTokens": 375
+          },
+          "manual_review": "Read both source files and correctly explain equal Defense/block rate, unequal weight/strength; raw fixture intentionally requires manual answer review."
+        }
+      },
+      "complete_pair": true
+    },
+    {
+      "case": "fresh-statistics",
+      "title": "复用既有查询入口但重新查询动态数据",
+      "results": {
+        "baseline": {
+          "id": "fresh-statistics-baseline-clean-1",
+          "status": "completed",
+          "goal_verified_raw": true,
+          "goal_accepted_after_manual_review": true,
+          "worker_tool_calls": 1,
+          "successful_model_responses": 2,
+          "requests": 2,
+          "tokens": {
+            "inputTokens": 528,
+            "cacheReadTokens": 2816,
+            "outputTokens": 86
+          }
+        },
+        "candidate": {
+          "id": "fresh-statistics-candidate-clean-1",
+          "status": "completed",
+          "goal_verified_raw": true,
+          "goal_accepted_after_manual_review": true,
+          "worker_tool_calls": 1,
+          "successful_model_responses": 2,
+          "requests": 3,
+          "tokens": {
+            "inputTokens": 1790,
+            "cacheReadTokens": 1536,
+            "outputTokens": 85
+          }
+        }
+      },
+      "complete_pair": true
+    },
+    {
+      "case": "changed-owner",
+      "title": "动态容器变化仍需核实",
+      "results": {
+        "baseline": {
+          "id": "changed-owner-baseline-clean-1",
+          "status": "completed",
+          "goal_verified_raw": true,
+          "goal_accepted_after_manual_review": true,
+          "worker_tool_calls": 5,
+          "successful_model_responses": 6,
+          "requests": 6,
+          "tokens": {
+            "inputTokens": 3594,
+            "cacheReadTokens": 8064,
+            "outputTokens": 259
+          }
+        },
+        "candidate": {
+          "id": "changed-owner-candidate-clean-1",
+          "status": "completed",
+          "goal_verified_raw": true,
+          "goal_accepted_after_manual_review": true,
+          "worker_tool_calls": 3,
+          "successful_model_responses": 4,
+          "requests": 7,
+          "tokens": {
+            "inputTokens": 792,
+            "cacheReadTokens": 8704,
+            "outputTokens": 323
+          }
+        }
+      },
+      "complete_pair": true
+    },
+    {
+      "case": "unknown-previous-write",
+      "title": "上次变更结果未知时核实交易，不能重复增加",
+      "results": {
+        "baseline": {
+          "id": "unknown-previous-write-baseline-clean-1",
+          "status": "completed",
+          "goal_verified_raw": true,
+          "goal_accepted_after_manual_review": true,
+          "worker_tool_calls": 4,
+          "successful_model_responses": 5,
+          "requests": 5,
+          "tokens": {
+            "inputTokens": 4339,
+            "cacheReadTokens": 9600,
+            "outputTokens": 209
+          }
+        },
+        "candidate": {
+          "id": "unknown-previous-write-candidate-clean-1",
+          "status": "completed",
+          "goal_verified_raw": true,
+          "goal_accepted_after_manual_review": true,
+          "worker_tool_calls": 6,
+          "successful_model_responses": 6,
+          "requests": 11,
+          "tokens": {
+            "inputTokens": 3107,
+            "cacheReadTokens": 14720,
+            "outputTokens": 559
+          }
+        }
+      },
+      "complete_pair": true
+    },
+    {
+      "case": "handoff-original",
+      "title": "固定上一轮主控委托，隔离执行器指南影响",
+      "results": {
+        "baseline": {
+          "id": "handoff-original-baseline-clean-1",
+          "status": "completed",
+          "goal_verified_raw": true,
+          "goal_accepted_after_manual_review": true,
+          "worker_tool_calls": 7,
+          "successful_model_responses": 8,
+          "requests": 8,
+          "tokens": {
+            "inputTokens": 7386,
+            "cacheReadTokens": 18944,
+            "outputTokens": 522
+          }
+        },
+        "candidate": {
+          "id": "handoff-original-candidate-clean-1",
+          "status": "completed",
+          "goal_verified_raw": true,
+          "goal_accepted_after_manual_review": true,
+          "worker_tool_calls": 8,
+          "successful_model_responses": 5,
+          "requests": 14,
+          "tokens": {
+            "inputTokens": 6764,
+            "cacheReadTokens": 8576,
+            "outputTokens": 697
+          }
+        }
+      },
+      "complete_pair": true
+    },
+    {
+      "case": "handoff-focused",
+      "title": "只删除泛化重新读取要求，隔离交接措辞影响",
+      "results": {
+        "baseline": {
+          "id": "handoff-focused-baseline-clean-1",
+          "status": "completed",
+          "goal_verified_raw": true,
+          "goal_accepted_after_manual_review": true,
+          "worker_tool_calls": 5,
+          "successful_model_responses": 6,
+          "requests": 6,
+          "tokens": {
+            "inputTokens": 3916,
+            "cacheReadTokens": 11520,
+            "outputTokens": 364
+          }
+        },
+        "candidate": {
+          "id": "handoff-focused-candidate-clean-1",
+          "status": "incomplete",
+          "goal_verified_raw": false,
+          "goal_accepted_after_manual_review": null,
+          "worker_tool_calls": 4,
+          "successful_model_responses": 4,
+          "requests": 19,
+          "tokens": {
+            "inputTokens": 6019,
+            "cacheReadTokens": 1664,
+            "outputTokens": 300
+          },
+          "error": "openai-adapter stream HTTP 502: {\"error\":{\"message\":\"Our servers are currently overloaded. Please try again later.\",\"type\":\"upstream_error\"}}"
+        }
+      },
+      "complete_pair": false
+    },
+    {
+      "case": "development-boundary",
+      "title": "真正开发仍读取项目指南、保护已有工作并验证提交",
+      "results": {
+        "baseline": {
+          "id": "development-boundary-baseline-clean-1",
+          "status": "completed",
+          "goal_verified_raw": true,
+          "goal_accepted_after_manual_review": true,
+          "worker_tool_calls": 5,
+          "successful_model_responses": 6,
+          "requests": 6,
+          "tokens": {
+            "inputTokens": 5427,
+            "cacheReadTokens": 13056,
+            "outputTokens": 386
+          }
+        },
+        "candidate": {
+          "id": "development-boundary-candidate-clean-1",
+          "status": "completed",
+          "goal_verified_raw": true,
+          "goal_accepted_after_manual_review": true,
+          "worker_tool_calls": 5,
+          "successful_model_responses": 6,
+          "requests": 13,
+          "tokens": {
+            "inputTokens": 4861,
+            "cacheReadTokens": 9472,
+            "outputTokens": 465
+          }
+        }
+      },
+      "complete_pair": true
+    },
+    {
+      "case": "manager-current-owner",
+      "title": "主控不把旧容器值升级为当前约束",
+      "results": {
+        "baseline": {
+          "id": "manager-current-owner-baseline-clean-1",
+          "status": "completed",
+          "goal_verified_raw": true,
+          "goal_accepted_after_manual_review": true,
+          "worker_tool_calls": 5,
+          "successful_model_responses": 10,
+          "requests": 10,
+          "tokens": {
+            "inputTokens": 6014,
+            "cacheReadTokens": 22784,
+            "outputTokens": 794
+          }
+        },
+        "candidate": {
+          "id": "manager-current-owner-candidate-clean-1",
+          "status": "completed",
+          "goal_verified_raw": true,
+          "goal_accepted_after_manual_review": true,
+          "worker_tool_calls": 7,
+          "successful_model_responses": 9,
+          "requests": 26,
+          "tokens": {
+            "inputTokens": 3951,
+            "cacheReadTokens": 24192,
+            "outputTokens": 963
+          }
+        }
+      },
+      "complete_pair": true
+    }
+  ],
+  "representative_regressions": [
+    {
+      "case": "unknown-previous-write",
+      "baseline_worker_calls": 4,
+      "candidate_worker_calls": 6,
+      "evidence": "candidate action 3 performs git status and directory scan during business continuation; baseline lacks this extra check; both avoid a duplicate add"
+    },
+    {
+      "case": "manager-current-owner",
+      "baseline_worker_calls": 5,
+      "candidate_worker_calls": 7,
+      "evidence": "candidate actions 1/2 broadly Grep/Glob and action 5 reads deploy/HISTORY.md despite known API path; both use current bag-29 and preserve receipt/save"
+    }
+  ],
+  "original_conclusion_correction": "Old 1 to 3 comparison omitted baseline Glob/Grep and snapshot rereads. Consistent rescoring is 4 to 3 for the single complete original pair, insufficient for a stable gain/regression claim. Original raw report is retained.",
+  "verification": {
+    "docker_fixture_regressions_passed": 6,
+    "product_tests_passed": 130,
+    "agent_typecheck": "passed",
+    "real_git_and_business_state_checked": true
+  },
+  "limitations": [
+    "Only one observation per case and arm; no statistical stability or production acceptance claim.",
+    "Manager uses an adapter-driven subset and simulated delivery/Worker return, not full ManagerLoop.",
+    "Readonly answers accepted by manual source/final-answer review; raw false is not a model failure.",
+    "The incomplete focused-delegation candidate is a continuous HTTP502 interruption, not a task-success or model-failure sample; no replacement sampling.",
+    "67 HTTP502 errors all occurred on candidate inputs; cause is unknown, not treated as ignorable random noise or proof that the semantic prompt caused them.",
+    "Tokens cover successful responses; failed inference billing is unknown. Fewer logical responses and input tokens do not prove lower real cost/latency.",
+    "Explicit rule-reading requested in original delegation is distinguished from Worker-invented checks. The incomplete fourth cell prevents a full delegation-wording causal claim.",
+    "Development fixture business identity wording is not scoped precisely to code editing; identity queries there are not counted as definite waste."
+  ]
+}

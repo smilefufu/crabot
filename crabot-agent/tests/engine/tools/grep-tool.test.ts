@@ -125,6 +125,42 @@ describe('createGrepTool', () => {
     expect(result.output).not.toContain('readme.md')
   })
 
+  it.each(['files_with_matches', 'content', 'count'])('anchors a directory-qualified glob while preserving absolute %s paths', async (output_mode) => {
+    fs.mkdirSync(path.join(tmpDir, 'other', 'src'), { recursive: true })
+    fs.writeFileSync(path.join(tmpDir, 'other', 'src', 'unrelated.ts'), 'hello\n')
+    const otherCwdTool = createGrepTool(() => path.join(tmpDir, 'other'))
+
+    const result = await otherCwdTool.call({ pattern: '^const greeting', path: '..', glob: 'src/**/*.ts', output_mode }, {})
+
+    expect(result.isError).toBe(false)
+    expect(result.output).toContain(path.join(tmpDir, 'src', 'hello.ts'))
+    expect(result.output).not.toContain('unrelated.ts')
+    if (output_mode === 'content') expect(result.output).toContain(':1:const greeting')
+    if (output_mode === 'count') expect(result.output).toContain('hello.ts:1')
+  })
+
+  it('keeps single-file searches and context output valid with a path-qualified filter', async () => {
+    const filePath = path.join(tmpDir, 'src', 'hello.ts')
+
+    const result = await tool.call({ pattern: 'farewell', path: filePath, glob: '*.ts', output_mode: 'content', context: 1 }, {})
+
+    expect(result.isError).toBe(false)
+    expect(result.output).toContain(filePath + ':2:const farewell')
+    expect(result.output).toContain(filePath + '-1-const greeting')
+  })
+
+  it('preserves literal directory names when expanding result paths', async () => {
+    const directory = path.join(tmpDir, 'project $& space')
+    fs.mkdirSync(directory)
+    const filePath = path.join(directory, '-example.ts')
+    fs.writeFileSync(filePath, 'MATCH\n')
+
+    const result = await tool.call({ pattern: 'MATCH', path: filePath, output_mode: 'content' }, {})
+
+    expect(result.isError).toBe(false)
+    expect(result.output).toBe(filePath + ':1:MATCH')
+  })
+
   it('skips binary files', async () => {
     // Create a binary file with null bytes
     const binaryContent = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x00, 0x68, 0x65, 0x6c, 0x6c, 0x6f])
@@ -187,7 +223,7 @@ describe('createGrepTool', () => {
 
   itPosix('returns a partial result when ripgrep diagnostics reach the helper stderr limit', async () => {
     for (let index = 0; index < 1200; index++) {
-      const filePath = path.join(tmpDir, `denied-${index}.txt`)
+      const filePath = path.join(tmpDir, `denied-${index}-${'x'.repeat(80)}.txt`)
       fs.writeFileSync(filePath, 'no match\n')
       fs.chmodSync(filePath, 0)
     }
