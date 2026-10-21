@@ -179,6 +179,37 @@ test('failed startup fixture reports the exit and identity evidence before clean
   })
 })
 
+test('a stale creator PID cannot adopt a process born before the current controller generation', { timeout: 30000 }, async t => {
+  const unrelated = spawn(process.execPath, ['-e', 'process.send("ready");setInterval(()=>{},1000)'], { stdio: ['ignore', 'ignore', 'ignore', 'ipc'] })
+  const ended = once(unrelated, 'exit')
+  t.after(async () => { if (unrelated.exitCode === null && unrelated.signalCode === null) unrelated.kill('SIGKILL'); await ended })
+  await once(unrelated, 'message')
+  const inspect = identity.inspectProcess, list = identity.listProcessIds, original = inspect(unrelated.pid)
+  await pause(25)
+  const f = await fixture(t)
+  let stopping = false, adopted = false, invalidBirth = false
+  identity.listProcessIds = () => [unrelated.pid]
+  identity.inspectProcess = pid => {
+    if (pid !== unrelated.pid) return inspect(pid)
+    if (stopping) { adopted = true; throw new Error('unrelated older process was adopted into the stop set') }
+    const actual = inspect(pid)
+    return actual ? { ...actual, parent: f.record.controller.pid, ...(invalidBirth ? { started: 'unverifiable kernel birth' } : {}) } : actual
+  }
+  try {
+    invalidBirth = true
+    await assert.rejects(stopInstance(f.data), { code: 'CRABOT_STOP_UNKNOWN' })
+    assert.equal(existsSync(f.marker), false)
+    assert.equal(readInstanceRuntime(f.data).generation, f.record.generation)
+    assert.equal(identity.sameProcess(f.record.controller, inspect(f.child.pid)), true)
+    invalidBirth = false
+    await stopInstance(f.data, { log: message => { if (message.startsWith('Stopping generation')) stopping = true } })
+    assert.equal(adopted, false)
+    assert.equal(identity.sameProcess(original, inspect(unrelated.pid)), true)
+    assert.equal(readInstanceRuntime(f.data), null)
+    assert.equal(readFileSync(f.marker, 'utf8'), 'graceful')
+  } finally { identity.inspectProcess = inspect; identity.listProcessIds = list }
+})
+
 for (let iteration = 0; iteration < 8; iteration++) test('Windows repeated Unicode-path registration retains exact parent identity through delayed startup: ' + (iteration + 1), { skip: process.platform !== 'win32', timeout: 30000 }, async t => {
   const began = Date.now(); let phase = 'ready', f
   const diagnostic = () => t.diagnostic(JSON.stringify({ iteration: iteration + 1, phase, elapsed_ms: Date.now() - began, ...(f ? f.snapshot() : {}) }))

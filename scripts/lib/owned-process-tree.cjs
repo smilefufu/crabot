@@ -75,4 +75,5 @@ function captureOwnedProcessTree(roots, api = native) {
     return Object.freeze(result.sort((a, b) => a.pid - b.pid))
   } catch (error) { fail(typeof error?.stage === 'string' ? error.stage : stage) }
 }
-module.exports = { captureOwnedProcessTree }
+// Pure kernel timestamp comparison; this alone grants no ancestry or signal authority.
+module.exports = { captureOwnedProcessTree, processBirthAtLeast: atLeast }

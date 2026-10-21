@@ -4,6 +4,7 @@ import { join, isAbsolute, normalize } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { inspectInstance, clearInstanceRuntime, identity } from './instance-runtime.mjs'
 import { SUPERVISOR_FORCE_TIMEOUT_MS } from './supervisor-shutdown.mjs'
+import { processBirthAtLeast } from './owned-process-tree.cjs'
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
 
@@ -66,6 +67,11 @@ async function collectOwned(record, dataDir) {
     for (const process of processes) {
       const parent = owned.get(process.parent)
       if (!independent.has(process.pid) && !owned.has(process.pid) && parent && alive(parent) && alive(process)) {
+        let notOlderThanParent
+        try { notOlderThanParent = processBirthAtLeast(process.started, parent.started) }
+        catch { throw Object.assign(new Error('进程创建代际无法比较；未停止实例，保留运行记录。'), { code: 'CRABOT_STOP_UNKNOWN' }) }
+        // Windows retains the creator PID after exit. Its reuse is not a new parent relationship.
+        if (!notOlderThanParent) continue
         owned.set(process.pid, process); changed = true
       }
     }
