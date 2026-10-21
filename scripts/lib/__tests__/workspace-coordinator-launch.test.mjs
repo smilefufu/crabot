@@ -15,15 +15,25 @@ import { createWorkspaceWorkerJournal } from '../workspace-worker-journal.mjs'
 import { createWorkspaceModuleJournal } from '../workspace-module-journal.mjs'
 import { createWorkspaceFileJournal } from '../workspace-file-journal.mjs'
 import { createWorkspaceJournalClient } from '../workspace-coordinator-journal.mjs'
-import { readWorkspaceRelocationFilePlan, readWorkspaceRelocationFileActors, verifyWorkspaceRelocationClosureReadiness } from '../workspace-relocation-intent.mjs'
+import { readWorkspaceRelocationFilePlan, readWorkspaceRelocationFileActors, verifyWorkspaceRelocationClosureReadiness, readWorkspaceRelocationClosurePlan } from '../workspace-relocation-intent.mjs'
 import { createWorkspaceProcessJournal } from '../workspace-process-journal.mjs'
 import { WorkspaceCatalog } from '../../../crabot-shared/dist/workspace-catalog.js'
 import { sha256CanonicalJson } from '../../../crabot-shared/dist/canonical-json.js'
 
-async function fixture(t, { crossVolume = false } = {}) {
+async function fixture(t, { crossVolume = false, closureLedger = false } = {}) {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(tmpdir(), 'coordinator-launch-')))
   const targetRoot = crossVolume ? fs.mkdtempSync('/dev/shm/crabot-real-file-host-') : root
   const data = management.ensurePrivateDataRoot(path.join(root, 'data')), id = randomUUID()
+  let closureWorker, ledgerFile, ledgerBytes
+  if (closureLedger) {
+    closureWorker = { worker_id: 'closure-worker', manager_key: 'fixture::closure', task_id: 'closure-task', workspace_id: 'default', incarnations: [] }
+    ledgerFile = path.join(data, 'agent/worker-ledgers/fixture%3A%3Aclosure.json')
+    fs.mkdirSync(path.dirname(ledgerFile), { recursive: true })
+    ledgerBytes = JSON.stringify({ manager_key: closureWorker.manager_key, workers: [{ worker_id: closureWorker.worker_id, manager_key: closureWorker.manager_key, workspace_id: 'default',
+      task: { id: closureWorker.task_id, title: 'keep original work', status: 'queued', created_at: '2026-10-20T00:00:00.000Z' },
+      origin: { trigger_type: 'message', creator_friend_id: 'original-friend' }, report_to: { channel_id: 'fixture', session_id: 'closure' }, incarnations: [], updated_at: '2026-10-20T00:00:00.000Z' }] }, null, 2)
+    fs.writeFileSync(ledgerFile, ledgerBytes, { mode: 0o600 })
+  }
   const catalog = new WorkspaceCatalog({ dataRoot: data, files: native }); await catalog.initialize()
   const before = await catalog.snapshot(), marker = path.join(before.storage_root, 'original.txt')
   fs.writeFileSync(marker, 'original work')
@@ -41,7 +51,7 @@ async function fixture(t, { crossVolume = false } = {}) {
     }
   }
   t.after(async () => { if (coordinator && workspaceCoordinatorDiagnostics(coordinator.child)) t.diagnostic(workspaceCoordinatorDiagnostics(coordinator.child)); await close(); releaseCliLock(lock); fs.rmSync(root, { recursive: true, force: true }); if (crossVolume) fs.rmSync(targetRoot, { recursive: true, force: true }) })
-  return { root, data, id, lock, before, catalog, marker, close,
+  return { root, data, id, lock, before, catalog, marker, close, closureWorker, ledgerFile, ledgerBytes,
     launch: async options => { try { coordinator = await launchWorkspaceRelocationCoordinator(options ?? { dataDir: data, id }); return coordinator } catch (error) { t.diagnostic(JSON.stringify({ stage: error.stage, code: error.code, cause_code: error.cause?.code, cause_message: error.cause?.message, child_observation: error.child_observation, stderr: error.diagnostics })); throw error } } }
 }
 
@@ -340,16 +350,19 @@ for (const mode of ['confirmed', 'lost acknowledgement', 'unexpected payload']) 
 })
 
 for (const mode of ['confirmed', 'lost acknowledgement', 'changed source', 'copy']) test('the actual fixed Host prepares files once while the catalog stays unchanged: ' + mode, { timeout: process.platform === 'win32' ? 90000 : 30000, skip: mode === 'copy' && (process.platform !== 'linux' || !fs.existsSync('/dev/shm') || fs.statSync(tmpdir()).dev === fs.statSync('/dev/shm').dev) }, async t => {
-  const f = await fixture(t, { crossVolume: mode === 'copy' }), { child, launch } = await f.launch(), context = { dataDir: f.data, id: f.id, launch }
+  const f = await fixture(t, { crossVolume: mode === 'copy', closureLedger: mode === 'confirmed' || mode === 'lost acknowledgement' }), { child, launch } = await f.launch(), context = { dataDir: f.data, id: f.id, launch }
   const workers = createWorkspaceWorkerJournal(child, context), modules = createWorkspaceModuleJournal(child, context), processes = createWorkspaceProcessJournal(child, context)
   let files = createWorkspaceFileJournal(child, context)
   try {
-    await workers.capture([]); await workers.captureProcesses([]); await modules.capture([])
+    const fixedWorkers = f.closureWorker ? [f.closureWorker] : []
+    await workers.capture(fixedWorkers); await workers.captureProcesses([]); await modules.capture([])
     await processes.prepare(); await processes.observe([]); await processes.complete()
-    await workers.prepare([]); await workers.complete([]); await modules.prepare([]); await modules.complete([]); await processes.confirmExecutionExit()
+    await workers.prepare(fixedWorkers); await workers.complete([]); await modules.prepare([]); await modules.complete([]); await processes.confirmExecutionExit()
     if (mode === 'confirmed') {
       const early = createWorkspaceWorkerJournal(child, context)
       try { await assert.rejects(early.verifyClosureReadiness(), { code: 'CRABOT_WORKSPACE_JOURNAL_UNAVAILABLE' }) } finally { early.close() }
+      const earlyPrepare = createWorkspaceWorkerJournal(child, context)
+      try { await assert.rejects(earlyPrepare.prepareClosure(), { code: 'CRABOT_WORKSPACE_JOURNAL_UNAVAILABLE' }) } finally { earlyPrepare.close() }
     }
     const plan = (await files.prepare()).plan, host = await files.prepareHost(); await files.prepareStage()
     if (mode === 'changed source') fs.writeFileSync(f.marker, 'new work must be preserved')
@@ -406,6 +419,48 @@ for (const mode of ['confirmed', 'lost acknowledgement', 'changed source', 'copy
         try { await refused() } finally { fs.rmdirSync(f.before.storage_root) }
         assert.deepEqual(await workers.verifyClosureReadiness(), proof)
         assert.deepEqual(snapshotControl(), unchanged)
+      }
+      if (f.closureWorker) {
+        let closer = createWorkspaceWorkerJournal(child, context)
+        try {
+          if (mode === 'lost acknowledgement') {
+            const emit = child.emit; let dropped = false
+            const mock = t.mock.method(child, 'emit', function(event, ...args) {
+              if (event === 'message' && args[0]?.kind === 'workspace_worker_journal_reply' && args[0]?.operation === 'prepare_closure' && !dropped) {
+                dropped = true; return emit.call(this, event, { ...args[0], ok: false }, ...args.slice(1))
+              }
+              return emit.call(this, event, ...args)
+            })
+            try { await assert.rejects(closer.prepareClosure(), { code: 'CRABOT_WORKSPACE_JOURNAL_UNAVAILABLE' }); assert.equal(dropped, true) } finally { mock.mock.restore() }
+            closer.close(); closer = createWorkspaceWorkerJournal(child, context)
+          }
+          const prepared = await closer.prepareClosure()
+          assert.equal(prepared.dispatch, mode === 'lost acknowledgement' ? 'observe' : 'dispatch')
+          assert.equal(prepared.plan.ledgers[0].closed_worker_ids[0], f.closureWorker.worker_id)
+          assert.notEqual(prepared.plan.ledgers[0].before_sha256, prepared.plan.ledgers[0].after_sha256)
+          const planBytes = fs.readFileSync(path.join(control, 'relocation-worker-closure.json'))
+          assert.equal((await closer.prepareClosure()).dispatch, 'observe')
+          assert.deepEqual(fs.readFileSync(path.join(control, 'relocation-worker-closure.json')), planBytes)
+          assert.equal(fs.readFileSync(f.ledgerFile, 'utf8'), f.ledgerBytes)
+          const original = fs.lstatSync(f.ledgerFile, { bigint: true })
+          assert.equal([original.dev, original.ino, original.size, original.mtimeNs, original.ctimeNs, original.mode, original.uid, original.gid, original.nlink].join(':'), prepared.plan.ledgers[0].before_version)
+          assert.equal(planBytes.includes(Buffer.from('original-friend')), false)
+          const planFile = path.join(control, 'relocation-worker-closure.json')
+          for (const change of ['foreign Worker', 'missing ledger', 'path', 'unchanged hash', 'binding']) {
+            const invalid = JSON.parse(planBytes)
+            if (change === 'foreign Worker') invalid.ledgers[0].closed_worker_ids = ['foreign-worker']
+            if (change === 'missing ledger') invalid.ledgers = []
+            if (change === 'path') invalid.ledgers[0].name = '../outside.json'
+            if (change === 'unchanged hash') invalid.ledgers[0].after_sha256 = invalid.ledgers[0].before_sha256
+            if (change === 'binding') invalid.bindings.file_ready_sha256 = '0'.repeat(64)
+            try {
+              fs.writeFileSync(planFile, JSON.stringify(invalid))
+              assert.throws(() => readWorkspaceRelocationClosurePlan(f.data, f.id), { code: 'WORKSPACE_RELOCATION_INVALID' })
+            } finally { fs.writeFileSync(planFile, planBytes) }
+          }
+          assert.equal((await closer.prepareClosure()).dispatch, 'observe')
+          assert.equal(fs.readFileSync(f.ledgerFile, 'utf8'), f.ledgerBytes)
+        } finally { closer.close() }
       }
       const before = fs.readFileSync(path.join(f.data, 'workspace-control/relocation-file-actors.jsonl'))
       assert.equal((await files.prepareFiles()).dispatch, 'observe')

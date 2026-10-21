@@ -60,7 +60,7 @@ function read(ctx) {
   if (!privateControl(ctx.control)) return null
   const value = readPrivateJson(ctx.file, 65536)
   if (value === undefined) {
-    for (const file of ['relocation-workers.json', 'relocation-worker-processes.json', 'relocation-stop-attempt.json', 'relocation-stop-submission.json', 'relocation-modules.json', 'relocation-module-stop-attempt.json', 'relocation-module-processes', 'relocation-module-stop-submission.json', 'relocation-coordinator.json', 'relocation-coordinator-ready.json', 'relocation-process-stop.jsonl', 'relocation-execution-exit.json', 'relocation-files.json', 'relocation-file-actors.jsonl']) {
+    for (const file of ['relocation-workers.json', 'relocation-worker-processes.json', 'relocation-stop-attempt.json', 'relocation-stop-submission.json', 'relocation-modules.json', 'relocation-module-stop-attempt.json', 'relocation-module-processes', 'relocation-module-stop-submission.json', 'relocation-coordinator.json', 'relocation-coordinator-ready.json', 'relocation-process-stop.jsonl', 'relocation-execution-exit.json', 'relocation-files.json', 'relocation-file-actors.jsonl', 'relocation-worker-closure.json']) {
       try { fs.lstatSync(path.join(ctx.control, file)); fail() }
       catch (error) { if (error.code !== 'ENOENT') fail() }
     }
@@ -365,7 +365,7 @@ function validModules(modules) {
   return true
 }
 function absent(ctx, names) {
-  for (const name of names) {
+  for (const name of [...names, closurePlanFile]) {
     try { fs.lstatSync(path.join(ctx.control, name)); fail() }
     catch (error) { if (error.code !== 'ENOENT') fail() }
   }
@@ -736,7 +736,7 @@ export function completeWorkspaceRelocationProcessStops({ dataDir, id }) {
 }
 
 
-const executionExitFile = 'relocation-execution-exit.json', filePlanFile = 'relocation-files.json', fileActorsFile = 'relocation-file-actors.jsonl'
+const executionExitFile = 'relocation-execution-exit.json', filePlanFile = 'relocation-files.json', fileActorsFile = 'relocation-file-actors.jsonl', closurePlanFile = 'relocation-worker-closure.json'
 function workspaceExecutionExitMaterial(dataDir, id) {
   const coordinator = readWorkspaceRelocationCoordinator(dataDir, id), workers = readWorkspaceRelocationStops(dataDir, id)
   const modules = readWorkspaceRelocationModuleStops(dataDir, id), processes = readWorkspaceRelocationProcessStops(dataDir, id)
@@ -891,7 +891,7 @@ export function readWorkspaceRelocationFileActors(dataDir, id) {
   if (!plan) fail()
   const empty = { attempt: null, host: null, permission: null, staging_attempt: null, staging: null, file_attempt: null, tools: null, tool_permission: null, tool_exit: null, file_ready: null }
   const text = readPrivateText(path.join(ctx.control, fileActorsFile), 65536)
-  if (text === undefined) return empty
+  if (text === undefined) { absent(ctx, [closurePlanFile]); return empty }
   const coordinator = readWorkspaceRelocationCoordinator(dataDir, id)
   try {
     if (!text.endsWith('\n')) fail()
@@ -1195,4 +1195,84 @@ export async function verifyWorkspaceRelocationClosureReadiness({ dataDir, id, s
   if (sha256CanonicalJson(await catalog.snapshot()) !== bindings.catalog_sha256) fail()
   current()
   return Object.freeze({ verified: true, ...bindings })
+}
+
+
+const ledgerVersion = value => typeof value === 'string' && /^-?[0-9]+(?::-?[0-9]+){8}$/.test(value)
+const ledgerKeyName = key => encodeURIComponent(key).replace(/[.!~*'()]/g, ch => '%' + ch.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0')) + '.json'
+function validClosurePlan(record, ctx, id) {
+  if (!fields(record, ['schema_version', 'intent_id', 'bindings', 'closed_at', 'directories', 'names', 'ledgers'])
+    || record.schema_version !== 1 || record.intent_id !== id || !validDate(record.closed_at)
+    || sha256CanonicalJson(record.bindings) !== sha256CanonicalJson(readWorkspaceRelocationClosureBindings(ctx.dataRoot, id))
+    || !Array.isArray(record.directories) || record.directories.length !== 3 || !Array.isArray(record.names) || !Array.isArray(record.ledgers)) fail()
+  const paths = [ctx.dataRoot, path.join(ctx.dataRoot, 'agent'), path.join(ctx.dataRoot, 'agent/worker-ledgers')]
+  for (const [index, item] of record.directories.entries()) {
+    if (!fields(item, ['path', 'version', 'native_id']) || item.path !== paths[index] || !ledgerVersion(item.version)
+      || (process.platform === 'win32' ? typeof item.native_id !== 'string' || !/^[0-9]+:[a-f0-9]{32}$/i.test(item.native_id) : item.native_id !== null)) fail()
+  }
+  if (record.names.some((name, index) => !nonempty(name) || path.basename(name) !== name || name === '.' || name === '..'
+    || index > 0 && name <= record.names[index - 1])) fail()
+  const scope = readWorkspaceRelocationWorkers(ctx.dataRoot, id), managers = new Set(), closed = new Set(), names = new Set(record.names), accounted = new Set()
+  const owners = new Map(scope.workers.map(worker => [worker.worker_id, worker.manager_key]))
+  let previous
+  for (const item of record.ledgers) {
+    const separator = typeof item?.manager_key === 'string' ? item.manager_key.indexOf('::') : -1
+    if (!fields(item, ['name', 'manager_key', 'before_version', 'before_sha256', 'after_sha256', 'closed_worker_ids'])
+      || separator < 1 || separator + 2 >= item.manager_key.length || item.name !== ledgerKeyName(item.manager_key) || !names.has(item.name)
+      || previous !== undefined && item.name <= previous || managers.has(item.manager_key) || !ledgerVersion(item.before_version)
+      || !digest(item.before_sha256) || !digest(item.after_sha256) || !Array.isArray(item.closed_worker_ids)
+      || (item.closed_worker_ids.length === 0) !== (item.before_sha256 === item.after_sha256)) fail()
+    managers.add(item.manager_key); accounted.add(item.name); previous = item.name
+    for (const worker of item.closed_worker_ids) {
+      if (!nonempty(worker) || owners.get(worker) !== item.manager_key || closed.has(worker)) fail()
+      closed.add(worker)
+    }
+  }
+  if (scope.workers.some(worker => !managers.has(worker.manager_key)) || record.names.some(name => name.endsWith('.json')
+    && !/^\.tmp-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.json$/i.test(name) && !accounted.has(name))) fail()
+}
+export function readWorkspaceRelocationClosurePlan(dataDir, id) {
+  const { ctx } = coordinatorContext(dataDir, id), record = readPrivateJson(path.join(ctx.control, closurePlanFile), scopeLimit)
+  if (record === undefined) return null
+  try { validClosurePlan(record, ctx, id) } catch { fail() }
+  return record
+}
+
+/** Technical closure plan only. Agent retains ledger contents; this never changes business state. */
+export async function prepareWorkspaceRelocationClosurePlan({ dataDir, id, manifest, signal }) {
+  const copy = structuredClone(manifest)
+  await verifyWorkspaceRelocationClosureReadiness({ dataDir, id, signal })
+  const { ctx, verify } = workspaceFileCoordinatorContext(dataDir, id, signal)
+  const record = { schema_version: 1, intent_id: id, ...copy }
+  validClosurePlan(record, ctx, id)
+  const previous = readWorkspaceRelocationClosurePlan(dataDir, id)
+  if (previous) {
+    if (sha256CanonicalJson(previous) !== sha256CanonicalJson(record)) fail()
+    syncIntent(ctx); return { dispatch: 'observe', plan: previous }
+  }
+  const version = stat => [stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs, stat.mode, stat.uid, stat.gid, stat.nlink].join(':')
+  const verifyInput = () => {
+    verify()
+    if (sha256CanonicalJson(record.bindings) !== sha256CanonicalJson(readWorkspaceRelocationClosureBindings(dataDir, id))) fail()
+    for (const item of record.directories) {
+      const stat = fs.lstatSync(item.path, { bigint: true })
+      if (!stat.isDirectory() || stat.isSymbolicLink() || version(stat) !== item.version || fs.realpathSync(item.path) !== item.path
+        || process.platform === 'win32' && native.inspectDirectoryFileId(item.path) !== item.native_id) fail()
+    }
+    const directory = record.directories[2].path
+    if (JSON.stringify(fs.readdirSync(directory).sort()) !== JSON.stringify(record.names)) fail()
+    for (const item of record.ledgers) {
+      const stat = fs.lstatSync(path.join(directory, item.name), { bigint: true })
+      if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1n || version(stat) !== item.before_version) fail()
+    }
+  }
+  verifyInput()
+  publishPrivateJson(ctx, path.join(ctx.control, closurePlanFile), record, scopeLimit, () => {
+    verifyInput(); if (readWorkspaceRelocationClosurePlan(dataDir, id)) fail()
+  })
+  await verifyWorkspaceRelocationClosureReadiness({ dataDir, id, signal })
+  verifyInput()
+  const accepted = readWorkspaceRelocationClosurePlan(dataDir, id)
+  if (sha256CanonicalJson(accepted) !== sha256CanonicalJson(record)) fail()
+  return { dispatch: 'dispatch', plan: accepted }
 }

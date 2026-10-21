@@ -6,7 +6,7 @@ on:
     paths:
       - 'crabot-native/**'
       - 'crabot-shared/src/workspace-*'
-      - 'crabot-agent/src/core/workspace-relocation-ledgers.ts'
+      - 'crabot-agent/src/core/workspace-relocation-*.ts'
       - 'crabot-agent/src/workers/harness/workspace-relocation-close.ts'
       - 'crabot-agent/src/workers/harness/ledger-store.ts'
       - 'crabot-agent/tests/core/workspace-relocation-ledgers.test.ts'
@@ -59,6 +59,7 @@ jobs:
       - name: Agent offline ledger capture and closure regressions
         run: |
           pnpm --dir crabot-agent install --frozen-lockfile
+          pnpm --dir crabot-agent build
           cd crabot-agent
           node node_modules/vitest/vitest.mjs run tests/core/workspace-relocation-ledgers.test.ts tests/workers/harness/workspace-relocation-close.test.ts --maxWorkers=1 --minWorkers=1
       - name: Windows delayed instance registration regression

@@ -2,7 +2,7 @@
 import { createWorkspaceJournalClient, serveWorkspaceJournal, journalFields as fields, workspaceJournalFailure as failure } from './workspace-coordinator-journal.mjs'
 import { readWorkspaceRelocationWorkers, readWorkspaceRelocationStops, commitWorkspaceRelocationWorkers,
   readWorkspaceRelocationProcesses, commitWorkspaceRelocationProcesses,
-  prepareWorkspaceRelocationStops, completeWorkspaceRelocationStops, readWorkspaceRelocationClosureBindings, verifyWorkspaceRelocationClosureReadiness } from './workspace-relocation-intent.mjs'
+  prepareWorkspaceRelocationStops, completeWorkspaceRelocationStops, readWorkspaceRelocationClosureBindings, verifyWorkspaceRelocationClosureReadiness, readWorkspaceRelocationClosurePlan } from './workspace-relocation-intent.mjs'
 import { sha256CanonicalJson } from '../../crabot-shared/dist/canonical-json.js'
 
 const sortedResults = results => [...results].sort((a, b) => {
@@ -42,6 +42,16 @@ export function createWorkspaceWorkerJournal(coordinator, context) {
   return Object.freeze({ capture: async workers => { await acknowledged('capture', { workers }) },
     captureProcesses: async processes => { await acknowledged('capture_processes', { processes }) }, prepare: workers => acknowledged('prepare', { workers }),
     complete: async results => { await acknowledged('complete', { results }) },
+    async prepareClosure() {
+      try {
+        const previous = readWorkspaceRelocationClosurePlan(dataDir, id), result = await transport.call('prepare_closure', {})
+        const plan = readWorkspaceRelocationClosurePlan(dataDir, id)
+        if (!plan || !fields(result, ['dispatch', 'plan_sha256']) || !['dispatch', 'observe'].includes(result.dispatch)
+          || previous && result.dispatch !== 'observe' || result.plan_sha256 !== sha256CanonicalJson(plan)) throw failure()
+        transport.verify()
+        return { dispatch: result.dispatch, plan }
+      } catch { transport.close(); throw failure() }
+    },
     async verifyClosureReadiness() {
       try {
         const result = await transport.call('verify_closure_readiness', {}), bindings = readWorkspaceRelocationClosureBindings(dataDir, id)
@@ -54,7 +64,19 @@ export function createWorkspaceWorkerJournal(coordinator, context) {
 }
 export function serveWorkspaceWorkerJournal(context) {
   const args = { dataDir: context.dataDir, id: context.id }
+  let closurePreparation
   return serveWorkspaceJournal(context, 'worker', {
+    async prepare_closure(payload) {
+      if (!fields(payload, [])) throw failure()
+      await verifyWorkspaceRelocationClosureReadiness(args)
+      const previous = closurePreparation
+      if (!closurePreparation) closurePreparation = (async () => {
+        const agent = await import('../../crabot-agent/dist/core/workspace-relocation-closure.js')
+        return agent.prepareWorkspaceRelocationClosure(args)
+      })()
+      const result = await closurePreparation
+      return { dispatch: previous ? 'observe' : result.dispatch, plan_sha256: result.plan_sha256 }
+    },
     async verify_closure_readiness(payload) {
       if (!fields(payload, [])) throw failure()
       return verifyWorkspaceRelocationClosureReadiness(args)
