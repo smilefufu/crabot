@@ -169,3 +169,23 @@ test('direct children created by a runtime thread remain in the process scope', 
     assert.ok(!mainThreadChildren.includes(childPid), 'Fixture must exercise a non-leader thread child list')
   }
 })
+
+
+test('Windows excludes an older Toolhelp entry whose creator PID was reused by a newer process', { skip: process.platform !== 'win32', timeout: 30000 }, t => {
+  // A naturally reused parent ID is a read-only OS fixture; never create/kill unrelated processes to force it.
+  for (const pid of identity.listProcessIds().slice(0, 4096)) {
+    let child, parent
+    try {
+      child = identity.inspectProcess(pid)
+      if (!child?.parent || !/^[0-9]+$/.test(child.started)) continue
+      parent = identity.inspectProcess(child.parent)
+      if (!parent || !/^[0-9]+$/.test(parent.started) || BigInt(child.started) >= BigInt(parent.started)) continue
+    } catch { continue } // This fixture needs two readable live generations.
+    const children = identity.listChildProcessIds(parent.pid)
+    if (!identity.sameProcess(child, identity.inspectProcess(child.pid)) || !identity.sameProcess(parent, identity.inspectProcess(parent.pid))) continue
+    assert.equal(children.includes(child.pid), false, 'Old creator PID must not bind this unrelated process to the current parent generation')
+    t.diagnostic(JSON.stringify({ child_pid: child.pid, child_started: child.started, current_parent_pid: parent.pid, current_parent_started: parent.started }))
+    return
+  }
+  t.skip('No readable live parent-PID reuse fixture in this OS snapshot; actual fresh carrier stress remains required')
+})

@@ -168,21 +168,45 @@ static Identity Inspect(int pid) {
 static std::vector<int> Children(int pid) {
   std::set<int> children;
 #ifdef _WIN32
+  // Toolhelp retains the creator PID after that creator exits and its PID is reused.
+  // Hold this parent generation while excluding entries born before it.
+  HANDLE parent = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, pid);
+  if (!parent) throw std::runtime_error("Cannot inspect child-list parent");
+  FILETIME parentCreated, parentExited, parentKernel, parentUser;
+  if (WaitForSingleObject(parent, 0) != WAIT_TIMEOUT
+      || !GetProcessTimes(parent, &parentCreated, &parentExited, &parentKernel, &parentUser)) {
+    CloseHandle(parent); throw std::runtime_error("Cannot inspect child-list parent generation");
+  }
   HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-  if (snapshot == INVALID_HANDLE_VALUE) throw std::runtime_error("Cannot enumerate process children");
+  if (snapshot == INVALID_HANDLE_VALUE) { CloseHandle(parent); throw std::runtime_error("Cannot enumerate process children"); }
   try {
     PROCESSENTRY32 entry{}; entry.dwSize = sizeof(entry);
     BOOL found = Process32First(snapshot, &entry);
     while (found) {
       if (entry.th32ParentProcessID == static_cast<DWORD>(pid) && entry.th32ProcessID > 0) {
         if (entry.th32ProcessID > 2147483647) throw std::runtime_error("Unsupported child process identity");
-        children.insert(static_cast<int>(entry.th32ProcessID));
+        HANDLE child = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, entry.th32ProcessID);
+        bool predatesParent = false;
+        if (!child) {
+          if (GetLastError() != ERROR_INVALID_PARAMETER) throw std::runtime_error("Cannot inspect child generation");
+        } else {
+          FILETIME created, exited, kernel, user;
+          const bool timed = GetProcessTimes(child, &created, &exited, &kernel, &user);
+          const bool kernelExited = !timed && WaitForSingleObject(child, 0) == WAIT_OBJECT_0;
+          CloseHandle(child);
+          if (!timed && !kernelExited) throw std::runtime_error("Cannot inspect live child generation");
+          predatesParent = timed && CompareFileTime(&created, &parentCreated) < 0;
+        }
+        // Exited candidates remain in the list for the caller's independent kernel-exit verification.
+        if (!predatesParent) children.insert(static_cast<int>(entry.th32ProcessID));
       }
+      // The handle/timing calls above may change LastError; only inspect it immediately after Process32Next.
       found = Process32Next(snapshot, &entry);
     }
     if (GetLastError() != ERROR_NO_MORE_FILES) throw std::runtime_error("Incomplete process child snapshot");
-  } catch (...) { CloseHandle(snapshot); throw; }
-  CloseHandle(snapshot);
+    if (WaitForSingleObject(parent, 0) != WAIT_TIMEOUT) throw std::runtime_error("Child-list parent exited during observation");
+  } catch (...) { CloseHandle(snapshot); CloseHandle(parent); throw; }
+  CloseHandle(snapshot); CloseHandle(parent);
 #elif __APPLE__
   errno = 0;
   int count = proc_listchildpids(pid, nullptr, 0);
