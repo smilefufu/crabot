@@ -3,9 +3,10 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import { tmpdir } from 'node:os'
 import { UnifiedAgent } from '../../src/unified-agent.js'
-import { spawnPersistentShell, runShellWithGrace, killShellTree } from '../../src/engine/bg-entities/bg-shell.js'
+import { spawnPersistentShell, runShellWithGrace } from '../../src/engine/bg-entities/bg-shell.js'
 import { spawnPersistentAgent } from '../../src/engine/bg-entities/bg-agent.js'
 import { runEngine } from '../../src/engine/query-loop.js'
+import { stopTrackedTestShells } from './fixtures/owned-shell-cleanup.js'
 import { relocationAgentConfig } from './fixtures/relocation-agent-config.js'
 
 vi.mock('../../src/engine/query-loop.js', async importOriginal => ({ ...await importOriginal<typeof import('../../src/engine/query-loop.js')>(), runEngine: vi.fn() }))
@@ -36,7 +37,7 @@ beforeEach(async () => {
 afterEach(async () => {
   finish.resolve()
   const registry = agent.builtinBgRegistry
-  for (const record of await registry.list()) if (record.type === 'shell' && record.status === 'running') killShellTree(record.pgid)
+  await stopTrackedTestShells(registry)
   await vi.waitFor(async () => {
     expect((await registry.list()).every((record: any) => record.status !== 'running')).toBe(true)
     expect(controllers.size).toBe(0)

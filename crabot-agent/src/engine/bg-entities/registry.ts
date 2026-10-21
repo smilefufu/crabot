@@ -127,7 +127,7 @@ export class BgEntityRegistry {
     return sha256CanonicalJson(stable)
   }
 
-  /** Observed roots only; descendants, module exit and the whole closing window remain separate. */
+  /** Observed snapshots only; module exit and the whole closing window remain separate. */
   async captureWorkspaceShellProcesses(): Promise<ReadonlyArray<WorkerProcessIdentity>> {
     const failure = () => Object.assign(new Error('后台Shell原生范围无法核实，已保留维护保护。'), { code: 'WORKSPACE_MAINTENANCE' })
     try {
@@ -164,9 +164,13 @@ export class BgEntityRegistry {
       }
       if (fingerprint(await read()) !== original || this.shellProcesses.size !== bindings.size
         || [...bindings].some(([id, binding]) => this.shellProcesses.get(id) !== binding)) throw failure()
-      const { captureOwnedProcessTree } = require(path.join(__dirname, '../../../../scripts/lib/owned-process-tree.cjs'))
-      return captureOwnedProcessTree(processes)
-    } catch { throw failure() }
+      const observed = new Map<string, WorkerProcessIdentity>()
+      for (const item of processes) {
+        const key = JSON.stringify([item.pid, item.started, item.owner])
+        if (!observed.has(key)) observed.set(key, item)
+      }
+      return Object.freeze([...observed.values()].sort((a, b) => a.pid - b.pid || (a.started < b.started ? -1 : a.started > b.started ? 1 : 0)))
+    } catch (error) { throw Object.assign(failure(), { cause: error }) }
   }
 
   async register(record: BgEntityRecord): Promise<void> {

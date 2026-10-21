@@ -4,12 +4,12 @@ import path from 'node:path'
 import { tmpdir } from 'node:os'
 import { BgEntityRegistry } from '../../src/engine/bg-entities/registry.js'
 import { spawnPersistentShell, runShellWithGrace, killShellTree } from '../../src/engine/bg-entities/bg-shell.js'
+import { stopTrackedTestShells } from './fixtures/owned-shell-cleanup.js'
 import type { BgShellRegistryRecord } from '../../src/engine/bg-entities/types.js'
 
 const native = require('../../../scripts/lib/process-identity.cjs')
 const owner = { friend_id: 'original-friend', worker_id: 'original-worker', incarnation_id: 'original-incarnation' }
 let data: string, registry: BgEntityRegistry, file: string
-const roots: any[] = []
 const exits: Promise<void>[] = []
 const failed = { code: 'WORKSPACE_MAINTENANCE' }
 beforeEach(async () => {
@@ -19,9 +19,7 @@ beforeEach(async () => {
 })
 afterEach(async () => {
   vi.restoreAllMocks()
-  for (const root of roots.splice(0)) {
-    try { if (native.sameProcess(root, native.inspectProcess(root.pid))) killShellTree(root.pid) } catch { /* Test root already exited. */ }
-  }
+  await stopTrackedTestShells(registry)
   try { await Promise.all(exits.splice(0)) }
   finally { vi.unstubAllEnvs(); await fs.rm(data, { recursive: true, force: true }) }
 })
@@ -33,7 +31,6 @@ async function start(kind = 'persistent', command = `"${process.execPath}" -e 's
   const id = typeof result === 'string' ? result : result.kind === 'background' ? result.entity_id : ''
   const record = await registry.get(id) as BgShellRegistryRecord
   if (record) exits.push(exit)
-  if (record) { try { roots.push(native.inspectProcess(record.pid)) } catch { /* Actual short-lived test root. */ } }
   return record
 }
 async function capture(target = registry): Promise<ReadonlyArray<any>> {
@@ -47,6 +44,29 @@ describe('registered background Shell native scope', () => {
     expect(scope.every(item => Object.keys(item).sort().join(',') === 'executable,owner,parent,pid,started')).toBe(true)
     expect(await fs.readFile(file)).toEqual(before); expect(signal).not.toHaveBeenCalled()
     expect(await registry.get(record.entity_id)).toMatchObject({ owner, spawned_by_task_id: 'original-task', status: 'running' })
+  })
+  it('retains an observed child that exits during registry readback without treating it as a live root', async () => {
+    const marker = path.join(data, 'child.pid'), script = path.join(data, 'parent.cjs')
+    await fs.writeFile(script, `const {spawn}=require('node:child_process'),fs=require('node:fs');const child=spawn(process.execPath,['-e','setTimeout(()=>{},30000)'],{stdio:'ignore'});fs.writeFileSync(process.argv[2],String(child.pid));setTimeout(()=>{},30000);`)
+    const record = await start('persistent', `"${process.execPath.replaceAll('\\', '/')}" "${script.replaceAll('\\', '/')}" "${marker.replaceAll('\\', '/')}"`)
+    let child: any
+    await vi.waitFor(async () => { child = native.inspectProcess(Number(await fs.readFile(marker, 'utf8'))); expect(child).not.toBeNull() }, { timeout: 4000 })
+    const before = await fs.readFile(file), read = (registry as any).readFile.bind(registry)
+    let reads = 0, interrupted = false
+    vi.spyOn(registry as any, 'readFile').mockImplementation(async () => {
+      const value = await read()
+      if (++reads === 2) {
+        interrupted = true; native.terminateKnownProcess(child)
+        await vi.waitFor(() => expect(native.isProcessExited(child.pid)).toBe(true))
+      }
+      return value
+    })
+    const scope = await capture()
+    expect(interrupted).toBe(true)
+    expect(scope).toContainEqual(expect.objectContaining({ pid: child.pid, started: child.started, owner: child.owner }))
+    expect(scope).toContainEqual(expect.objectContaining({ pid: record.pid }))
+    expect(native.isProcessExited(child.pid)).toBe(true)
+    expect(await fs.readFile(file)).toEqual(before)
   })
   it('does not treat a completed registry status as actual process exit', async () => {
     const record = await start(); await registry.update(record.entity_id, { status: 'completed', ended_at: new Date().toISOString() })
