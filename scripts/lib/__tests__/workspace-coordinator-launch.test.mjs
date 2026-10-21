@@ -366,7 +366,7 @@ for (const mode of ['confirmed', 'lost acknowledgement', 'unexpected payload']) 
   } finally { workers.close(); modules.close(); processes.close(); files.close() }
 })
 
-for (const mode of ['confirmed', 'lost acknowledgement', 'changed source', 'copy', 'Root publish', 'Root lost acknowledgement', 'Root target changed']) test('the actual fixed Host prepares files once while the catalog stays unchanged: ' + mode, { timeout: process.platform === 'win32' ? 600000 : 120000, skip: mode === 'copy' && (process.platform !== 'linux' || !fs.existsSync('/dev/shm') || fs.statSync(tmpdir()).dev === fs.statSync('/dev/shm').dev) }, async t => {
+for (const mode of ['confirmed', 'lost acknowledgement', 'changed source', 'copy', 'Root publish', 'Root lost acknowledgement', 'Root target changed', 'Root changed ancestor']) test('the actual fixed Host prepares files once while the catalog stays unchanged: ' + mode, { timeout: process.platform === 'win32' ? 600000 : 120000, skip: mode === 'copy' && (process.platform !== 'linux' || !fs.existsSync('/dev/shm') || fs.statSync(tmpdir()).dev === fs.statSync('/dev/shm').dev) }, async t => {
   const f = await fixture(t, { crossVolume: mode === 'copy', closureLedger: mode === 'confirmed' || mode === 'lost acknowledgement' || mode.startsWith('Root') }), { child, launch } = await f.launch(), context = { dataDir: f.data, id: f.id, launch }
   const workers = createWorkspaceWorkerJournal(child, context), modules = createWorkspaceModuleJournal(child, context), processes = createWorkspaceProcessJournal(child, context)
   let files = createWorkspaceFileJournal(child, context)
@@ -614,6 +614,27 @@ for (const mode of ['confirmed', 'lost acknowledgement', 'changed source', 'copy
             })
             try { await assert.rejects(files.prepareRoot(), { code: 'CRABOT_WORKSPACE_JOURNAL_UNAVAILABLE' }); assert.equal(dropped, true) } finally { mock.mock.restore() }
             files.close(); files = createWorkspaceFileJournal(child, context)
+          }
+          if (mode === 'Root changed ancestor') {
+            const saved = f.root + '-original-' + f.id
+            assert.equal(fs.existsSync(saved), false)
+            fs.renameSync(f.root, saved); fs.mkdirSync(f.root, { mode: 0o700 })
+            for (const name of fs.readdirSync(saved)) fs.renameSync(path.join(saved, name), path.join(f.root, name))
+            try {
+              await assert.rejects(files.prepareRoot(), { code: 'CRABOT_WORKSPACE_JOURNAL_UNAVAILABLE' })
+              assert.equal(readWorkspaceRelocationRootPlan(f.data, f.id), null)
+              assert.equal(fs.existsSync(path.join(f.root, 'new')), false)
+              assert.deepEqual(await f.catalog.snapshot(), f.before)
+              assert.deepEqual(fs.readFileSync(f.ledgerFile), closedBytes)
+            } finally {
+              for (const name of fs.readdirSync(f.root)) fs.renameSync(path.join(f.root, name), path.join(saved, name))
+              fs.rmdirSync(f.root); fs.renameSync(saved, f.root)
+            }
+            files.close(); files = createWorkspaceFileJournal(child, context)
+            await assert.rejects(files.prepareRoot(), { code: 'CRABOT_WORKSPACE_JOURNAL_UNAVAILABLE' })
+            assert.equal(readWorkspaceRelocationRootPlan(f.data, f.id), null)
+            assert.equal(workspaceMaintenancePending(f.data), true)
+            return
           }
           const rootStarted = Date.now()
           const rootPrepared = await files.prepareRoot(), rootPlan = readWorkspaceRelocationRootPlan(f.data, f.id)

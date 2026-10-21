@@ -1393,6 +1393,10 @@ export async function completeWorkspaceRelocationRecovery({ dataDir, id, manifes
   return { dispatch: 'dispatch', commit_sha256: sha256CanonicalJson(record) }
 }
 
+function verifyRootStagingParent(plan) {
+  if (!same(plan.staging_parent, identity(plan.staging_parent.path))
+    || process.platform === 'win32' && native.inspectDirectoryFileId(plan.staging_parent.path) !== plan.staging_parent_native_id) fail()
+}
 const rootPlanFile = 'relocation-root-plan.json'
 const rootFrame = (directory, nativeId = process.platform === 'win32' ? native.inspectDirectoryFileId(directory) : null) => ({ ...identity(directory), native_id: nativeId })
 function validRootPlan(record, dataDir, id) {
@@ -1438,6 +1442,7 @@ export async function prepareWorkspaceRelocationRootPlan({ dataDir, id, signal }
   const agent = await import('../../crabot-agent/dist/core/workspace-relocation-closed-evidence.js')
   const evidence = await agent.inspectWorkspaceRelocationClosures({ dataDir, id, signal, verify: () => verifyWorkspaceRelocationClosureReadiness({ dataDir, id, signal }) })
   const actors = readWorkspaceRelocationFileActors(dataDir, id), catalog = new WorkspaceCatalog({ dataRoot: ctx.dataRoot, storageRoot: process.env.WORKER_WORKSPACES_DIR, files: native })
+  const filePlan = readWorkspaceRelocationFilePlan(dataDir, id)
   const before = await catalog.snapshot(), bindings = readWorkspaceRelocationClosureBindings(dataDir, id)
   if (sha256CanonicalJson(before) !== bindings.catalog_sha256 || before.revision !== intent.catalog_revision || before.storage_root !== intent.source.path) fail()
   const after = projectWorkspaceCatalogRelocation(before, intent.target), parent = rootFrame(path.dirname(intent.target))
@@ -1450,6 +1455,7 @@ export async function prepareWorkspaceRelocationRootPlan({ dataDir, id, signal }
   validRootPlan(record, dataDir, id)
   const verifyInput = () => {
     verify(); evidence.verify(); validRootPlan(record, dataDir, id)
+    verifyRootStagingParent(filePlan)
     verifyStagingContainer(actors.staging, ['tree'])
     if (sha256CanonicalJson(rootFrame(parent.path)) !== sha256CanonicalJson(parent)
       || sha256CanonicalJson(rootFrame(publication.tree.path)) !== sha256CanonicalJson(publication.tree)) fail()
@@ -1497,7 +1503,7 @@ function workspaceRootContext(dataDir, id, signal) {
   const fileScope = [actors.host.process, ...(actors.tools?.tools ?? []).map(item => item.process)]
   const filePlan = readWorkspaceRelocationFilePlan(dataDir, id)
   const verify = () => {
-    base.verify()
+    base.verify(); verifyRootStagingParent(filePlan)
     if (sha256CanonicalJson(readWorkspaceRelocationRootPlan(dataDir, id)) !== planHash
       || sha256CanonicalJson(readWorkspaceRelocationFileActors(dataDir, id)) !== actorsHash
       || knownProcessExit.probeKnownProcessExit(fileScope).state !== 'stopped'
