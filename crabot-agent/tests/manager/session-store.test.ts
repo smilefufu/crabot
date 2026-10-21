@@ -10,6 +10,22 @@ import { resumeManagerMessages } from '../../src/manager/resume-checkpoint.js'
 import { createUserMessage, createAssistantMessage, createBatchToolResultMessage } from '../../src/engine/types.js'
 
 describe('ManagerSessionStore', () => {
+  it('validates a relocation checkpoint without touching history or completing an unknown tool call', () => {
+    const key: ManagerKey = 'wechat::offline-checkpoint'
+    const state = { key, foldedCount: 0, recent: [createAssistantMessage([{ type: 'tool_use', id: 'unknown-call', name: 'Write', input: { path: '/original' } }], 'tool_use')] }
+    const checkpoint: ManagerResumeCheckpoint = { episodeId: 'original-episode', state, envelopes: [], wakeIndex: -1, pending: [], hasEngineMessages: true,
+      turns: [], responses: [], tools: [], pendingToolCallIds: ['unknown-call'], adminChatClaims: [['original-admin-request', 'unclaimed']], transientMessageIds: [], spawnedWorkerIds: ['original-worker'],
+      execution: { needsSpawnRecheck: false, spawnRecheckInjected: false, spawnRecheckOutcomeRecorded: false, postSendRecheckSequence: 0,
+        successfulSendMessageTargets: [], continuedWorkers: [] } }
+    const raw = JSON.stringify(checkpoint, null, 4) + '\n'
+    expect(ManagerSessionStore.parseWorkspaceRelocationCheckpoint(key, raw)).toEqual(checkpoint)
+    expect(ManagerSessionStore.parseWorkspaceRelocationCheckpoint(key, raw).state.recent).toHaveLength(1)
+    expect(() => ManagerSessionStore.parseWorkspaceRelocationCheckpoint('other::manager', raw)).toThrow('invalid resume checkpoint')
+    expect(() => ManagerSessionStore.parseWorkspaceRelocationCheckpoint(key, JSON.stringify({ ...checkpoint, pendingToolCallIds: null }))).toThrow('invalid resume checkpoint')
+    expect(() => ManagerSessionStore.parseWorkspaceRelocationCheckpoint(key, JSON.stringify({ ...checkpoint, execution: {} }))).toThrow('invalid resume checkpoint')
+    expect(JSON.stringify(checkpoint, null, 4) + '\n').toBe(raw)
+  })
+
   let dir: string
   let store: ManagerSessionStore
 

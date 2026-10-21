@@ -217,6 +217,15 @@ export class ManagerSessionStore {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
       throw error
     }
+    return ManagerSessionStore.decodeCheckpoint(key, raw)
+  }
+
+  /** Same checkpoint validation without store initialization, history repair or input acknowledgement. */
+  static parseWorkspaceRelocationCheckpoint(key: ManagerKey, raw: string): ManagerResumeCheckpoint {
+    return ManagerSessionStore.decodeCheckpoint(key, raw)
+  }
+
+  private static decodeCheckpoint(key: ManagerKey, raw: string): ManagerResumeCheckpoint {
     const checkpoint = JSON.parse(raw) as ManagerResumeCheckpoint
     if (checkpoint.state?.key !== key || typeof checkpoint.episodeId !== 'string'
       || !Array.isArray(checkpoint.state.recent) || !Array.isArray(checkpoint.envelopes)
