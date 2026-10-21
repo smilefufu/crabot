@@ -71,6 +71,8 @@ it.skipIf(!process.env.CRABOT_TEST_CODEX_BIN)('real Codex loads two private MCP 
   const endpoint = 'http://127.0.0.1:' + (server.address() as { port: number }).port + '/v1'
   await fs.writeFile(path.join(base, 'config.toml'), [
     'model="gpt-5.1-codex"', 'model_provider="fixture"', 'approval_policy="never"',
+    // This acceptance covers private MCP/skills/hooks; marketplace cloning is unrelated outbound work.
+    'features.plugins=false', 'features.recommended_plugins=false',
     '[model_providers.fixture]', 'name="Private local acceptance"', 'base_url=' + JSON.stringify(endpoint), 'wire_api="responses"',
   ].join('\n') + '\n')
   const manager = new WorkspaceManager(path.join(data, 'workspaces'), data)

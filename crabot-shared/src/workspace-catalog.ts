@@ -1,7 +1,8 @@
 import fs from 'node:fs/promises'
-import { realpathSync } from 'node:fs'
+import { lstatSync, realpathSync } from 'node:fs'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
+import { sha256CanonicalJson } from './canonical-json.js'
 import type { WorkspaceCreateRequest, WorkspaceRecord, WorkspaceRecordResult, WorkspaceUpdateRequest } from './workspace-types.js'
 
 // The OS lock has no CLI/startup/upgrade semantics; a crash releases its handle.
@@ -52,6 +53,27 @@ export interface WorkspaceCatalogSnapshot {
   workspaces: WorkspaceRecord[]
 }
 interface CatalogFile extends WorkspaceCatalogSnapshot { version: 1 }
+
+/** Fixed technical projection only; the original relocation coordinator owns physical verification and authority. */
+export function projectWorkspaceCatalogRelocation(before: WorkspaceCatalogSnapshot, target: string): WorkspaceCatalogSnapshot {
+  const source = before.storage_root
+  if (!Number.isSafeInteger(before.revision) || before.revision < 1 || before.revision >= Number.MAX_SAFE_INTEGER
+    || typeof source !== 'string' || !path.isAbsolute(source) || source.includes('\0') || path.normalize(source) !== source
+    || typeof target !== 'string' || !path.isAbsolute(target) || target.includes('\0') || path.normalize(target) !== target
+    || within(source, target) || within(target, source) || !Array.isArray(before.workspaces)) throw badRequest()
+  const after = structuredClone(before)
+  after.storage_root = target; after.revision++
+  const roots = new Set<string>()
+  after.workspaces = after.workspaces.map(record => {
+    if (!record || typeof record.root !== 'string' || !path.isAbsolute(record.root) || record.root.includes('\0')) throw badRequest()
+    const root = within(source, record.root) ? path.join(target, path.relative(source, record.root)) : record.root
+    const identity = process.platform === 'win32' ? root.toLowerCase() : root
+    if (roots.has(identity)) throw new WorkspaceError('WORKSPACE_DIRECTORY_CONFLICT', '迁移后的项目目录冲突，未更改原登记。')
+    roots.add(identity)
+    return { ...record, root }
+  })
+  return after
+}
 
 export class WorkspaceCatalog {
   private readonly dataRoot: string
@@ -137,6 +159,39 @@ export class WorkspaceCatalog {
       file.workspaces = file.workspaces.map(item => item.workspace_id === id ? workspace : item)
       file.revision++; await this.write(file)
       return { revision: file.revision, workspace }
+    })
+  }
+
+  /** Catalog CAS only. The fixed caller must verify its original job, published files and closures at every callback. */
+  async commitRelocation(expected: WorkspaceCatalogSnapshot, target: string, verify: () => Promise<unknown>): Promise<{ dispatch: 'dispatch' | 'observe'; snapshot: WorkspaceCatalogSnapshot }> {
+    // Storage version is internal; a typed catalog snapshot need not expose it.
+    const original = { version: 1, ...structuredClone(expected) }
+    if (typeof verify !== 'function') throw badRequest()
+    if (directoryPath(target) !== target) throw badRequest()
+    if (this.explicitRoot && this.explicitRoot !== target) throw new WorkspaceError('WORKSPACE_DIRECTORY_CONFLICT', '显式工作区环境与新位置冲突，未更改环境或目录选择。')
+    const projected = projectWorkspaceCatalogRelocation(original, target), beforeHash = sha256CanonicalJson(original), afterHash = sha256CanonicalJson(projected)
+    return this.lock(async () => {
+      await verify()
+      const current = await this.required(), currentHash = sha256CanonicalJson(current)
+      if (currentHash !== beforeHash && currentHash !== afterHash) throw new WorkspaceError('WORKSPACE_REVISION_CONFLICT', '原工作区登记发生变化，未覆盖更新。')
+      const directories = [...new Set([target, ...projected.workspaces.filter(record => within(target, record.root)).map(record => record.root)])]
+      const frames = directories.map(directory => ({ directory, stat: lstatSync(directory, { bigint: true }) }))
+      const verifyDirectories = () => {
+        for (const frame of frames) {
+          const stat = lstatSync(frame.directory, { bigint: true })
+          if (!stat.isDirectory() || stat.isSymbolicLink() || stat.dev !== frame.stat.dev || stat.ino !== frame.stat.ino
+            || realpathSync.native(frame.directory) !== frame.directory) throw invalid()
+        }
+      }
+      verifyDirectories()
+      await verify(); verifyDirectories()
+      const dispatch = currentHash === afterHash ? 'observe' as const : 'dispatch' as const
+      if (dispatch === 'dispatch') await this.write({ ...projected, version: 1 }, async () => { await verify(); verifyDirectories() })
+      await verify(); verifyDirectories()
+      const accepted = await this.required()
+      if (sha256CanonicalJson(accepted) !== afterHash) throw invalid()
+      await verify(); verifyDirectories()
+      return { dispatch, snapshot: accepted }
     })
   }
 
@@ -246,7 +301,7 @@ export class WorkspaceCatalog {
       await fs.writeFile(file, content, { flag: 'r+' })
     } else await fs.writeFile(file, content, { flag: 'wx', mode: 0o600 })
   }
-  private async write(file: CatalogFile): Promise<void> {
+  private async write(file: CatalogFile, beforeCommit?: () => Promise<unknown>): Promise<void> {
     const content = JSON.stringify(file) + '\n'
     if (Buffer.byteLength(content) > 16 * 1024 * 1024) throw new WorkspaceError('WORKSPACE_LIMIT', '工作区记录已达到安全大小上限，未覆盖原记录。')
     const temporary = path.join(this.control, '.catalog-' + randomUUID())
@@ -254,6 +309,7 @@ export class WorkspaceCatalog {
       await this.writePrivate(temporary, content)
       const handle = await fs.open(temporary, 'r+')
       try { await handle.sync() } finally { await handle.close() }
+      if (beforeCommit) await beforeCommit()
       await fs.rename(temporary, this.file)
       if (await this.readPrivate(path.join(this.control, 'catalog.ready')) === undefined) {
         const marker = path.join(this.control, 'catalog.ready')

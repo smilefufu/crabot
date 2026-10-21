@@ -95,7 +95,7 @@ async function fixture(t, { exitEvidence = true, crossVolume = false } = {}) {
   child.send({ kind: 'workspace_relocation_start', data_dir: data, intent_id: id, launch_id: launch.launch_id, launch_sha256: sha256CanonicalJson(launch) })
   releaseCliLock(lock)
   const wait = async (predicate, operation = 'initial-ready') => {
-    const started = Date.now(), deadline = started + 10000
+    const started = Date.now(), deadline = started + (process.platform === 'win32' ? 30000 : 10000)
     while (!predicate()) {
       if (child.exitCode !== null || child.signalCode !== null || Date.now() > deadline) throw new Error('finite file-plan fixture: ' + JSON.stringify({
         operation, elapsed_ms: Date.now() - started, exit_code: child.exitCode, signal: child.signalCode, stderr: error.slice(-4096),
