@@ -211,3 +211,19 @@ test('Windows failed tool launch releases every directory lock and retains origi
   assert.deepEqual(await fs.readdir(path.join(container, 'tree')), [])
   await fs.rename(source, path.join(root, 'released-source')); await fs.rename(container, path.join(root, 'released-stage'))
 })
+
+
+test('cancelling after real gated tool registration never requests permission or writes target bytes', { skip: process.platform === 'win32' }, async t => {
+  const { source, container } = await fixture(t)
+  const result = path.join(container, 'result.json'), copier = new URL('../workspace-posix-copy.mjs', import.meta.url).href
+  const nativeModule = new URL('../process-identity.cjs', import.meta.url).href, exits = new URL('../known-process-exit.cjs', import.meta.url).href
+  const code = `import fs from 'node:fs';import native from ${JSON.stringify(nativeModule)};import exit from ${JSON.stringify(exits)};import {copyWorkspaceTreeFd} from ${JSON.stringify(copier)};
+    const source=${JSON.stringify(source)},container=${JSON.stringify(container)},tree=container+'/tree';native.createPrivateStagingDirectory(container);fs.mkdirSync(tree,{mode:0o700});
+    const fds=[source,tree,container].map(directory=>fs.openSync(directory,fs.constants.O_RDONLY|fs.constants.O_DIRECTORY|fs.constants.O_NOFOLLOW));const controller=new AbortController();let tools,permitted=false,completed=false,code;
+    try{await copyWorkspaceTreeFd(...fds,{signal:controller.signal,journal:{register:async value=>{tools=value;controller.abort();return{dispatch:'dispatch'}},permit:async()=>{permitted=true;return{dispatch:'dispatch'}},complete:async()=>{completed=exit.probeKnownProcessExit(tools.map(item=>item.process)).state==='stopped';return{dispatch:'dispatch'}}}})}catch(error){code=error.code}finally{for(const fd of fds)fs.closeSync(fd)}
+    fs.writeFileSync(${JSON.stringify(result)},JSON.stringify({permitted,completed,code,entries:fs.readdirSync(tree)}));`
+  await runBounded(process.execPath, ['--input-type=module', '-e', code])
+  const observed = JSON.parse(await fs.readFile(result, 'utf8'))
+  assert.deepEqual(observed, { permitted: false, completed: true, code: 'WORKSPACE_COPY_UNVERIFIED', entries: [] })
+  assert.equal(await fs.readFile(path.join(source, '.git/config'), 'utf8'), '[core]\n')
+})

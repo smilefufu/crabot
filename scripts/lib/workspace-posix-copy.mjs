@@ -6,8 +6,9 @@ import { syncWorkspaceDirectoryFd } from './workspace-sync.mjs'
 import { spawnWorkspaceTar } from './workspace-tar.mjs'
 
 const failure = () => Object.assign(new Error('固定工作区复制未能完成，原目录与暂存保留。'), { code: 'WORKSPACE_COPY_UNVERIFIED' })
-export async function copyWorkspaceTreeFd(sourceFd, treeFd, containerFd, { journal } = {}) {
+export async function copyWorkspaceTreeFd(sourceFd, treeFd, containerFd, { journal, signal } = {}) {
   if (!['darwin', 'linux'].includes(process.platform)) throw failure()
+  if (signal?.aborted) throw failure()
   const source = fs.fstatSync(sourceFd, { bigint: true }), tree = fs.fstatSync(treeFd, { bigint: true }), container = fs.fstatSync(containerFd, { bigint: true })
   if (![source, tree, container].every(stat => stat.isDirectory()) || tree.dev !== container.dev
     || source.dev === tree.dev && source.ino === tree.ino || source.dev === container.dev && source.ino === container.ino || tree.ino === container.ino) throw failure()
@@ -22,13 +23,17 @@ export async function copyWorkspaceTreeFd(sourceFd, treeFd, containerFd, { journ
   async function actor(mode) {
     const gated = await spawnWorkspaceTar(mode), child = gated.child
     actors.push(child)
+    if (failed) stop()
     const closed = gated.closed.then(code => { if (code !== 0) stop(); return code === 0 })
     completions.push(closed)
     return { ...gated, closed }
   }
+  signal?.addEventListener('abort', stop)
   try {
+    if (signal?.aborted) throw failure()
     native.enterDirectoryFd(sourceFd, source.dev.toString(), source.ino.toString())
     const pack = await actor('pack'); pack.child.stdin.end()
+    if (failed) throw failure()
     native.enterDirectoryFd(treeFd, tree.dev.toString(), tree.ino.toString())
     const unpack = await actor('unpack')
     unpack.child.stdout.resume()
@@ -39,8 +44,10 @@ export async function copyWorkspaceTreeFd(sourceFd, treeFd, containerFd, { journ
       const tools = [{ role: 'pack', process: pack.identity }, { role: 'unpack', process: unpack.identity }]
       if ((await journal.register(tools)).dispatch !== 'dispatch') throw failure()
       registered = true
+      if (failed || signal?.aborted) throw failure()
       if ((await journal.permit()).dispatch !== 'dispatch') throw failure()
     }
+    if (failed || signal?.aborted) throw failure()
     await pack.permit(); await unpack.permit()
     const results = await Promise.all([pack.closed, unpack.closed, transport])
     if (failed || results[0] !== true || results[1] !== true) throw failure()
@@ -52,5 +59,5 @@ export async function copyWorkspaceTreeFd(sourceFd, treeFd, containerFd, { journ
     stop(); await Promise.all(completions)
     if (registered && !completionAttempted) try { await journal.complete() } catch { /* Unknown confirmation retains the original failure and maintenance. */ }
     throw error
-  } finally { clearTimeout(force) }
+  } finally { signal?.removeEventListener('abort', stop); clearTimeout(force) }
 }

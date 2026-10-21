@@ -9,6 +9,9 @@ import { cliLockToken, releaseCliLock } from './cli-lock.mjs'
 import { readWorkspaceRelocationIntent, readWorkspaceRelocationCoordinator, commitWorkspaceRelocationCoordinator } from './workspace-relocation-intent.mjs'
 import { sha256CanonicalJson } from '../../crabot-shared/dist/canonical-json.js'
 
+const diagnostics = new WeakMap()
+export const workspaceCoordinatorDiagnostics = child => diagnostics.get(child) ?? ''
+
 const entry = fileURLToPath(new URL('../workspace-relocation-coordinator.mjs', import.meta.url))
 const failure = () => Object.assign(new Error('迁移协调器启动尚未核实，原目录及维护记录已保留；未重新启动作业。'), { code: 'CRABOT_WORKSPACE_COORDINATOR' })
 const fields = (value, keys) => value && typeof value === 'object' && !Array.isArray(value)
@@ -32,8 +35,10 @@ export async function launchWorkspaceRelocationCoordinator(options) {
     }
     verifyParent()
     stage = 'spawn'
-    child = spawn(process.execPath, [entry], { env: environment(), stdio: ['ignore', 'ignore', 'ignore', 'ipc'], windowsHide: true, detached: process.platform !== 'win32' })
+    child = spawn(process.execPath, [entry], { env: environment(), stdio: ['ignore', 'ignore', 'pipe', 'ipc'], windowsHide: true, detached: process.platform !== 'win32' })
     child.on('error', () => {}) // The handoff/client owns diagnostics; a later IPC error must not crash MM.
+    diagnostics.set(child, '')
+    child.stderr?.on('data', bytes => diagnostics.set(child, (workspaceCoordinatorDiagnostics(child) + bytes.toString()).slice(-16384)))
     stage = 'capture-child'
     identity = captureSpawnedProcessTree(child).find(item => item.pid === child.pid)
     if (!identity) throw failure()
@@ -86,6 +91,8 @@ export async function launchWorkspaceRelocationCoordinator(options) {
       })
     }
     const error = failure(); error.cause = cause; error.stage = stage
+    error.diagnostics = workspaceCoordinatorDiagnostics(child)
+    try { error.child_observation = child?.pid ? native.inspectProcess(child.pid) : null } catch (observed) { error.child_observation = { unavailable: observed.code } }
     throw error
   }
 }

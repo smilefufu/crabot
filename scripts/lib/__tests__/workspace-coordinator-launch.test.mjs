@@ -10,7 +10,7 @@ import native from '../process-identity.cjs'
 import management from '../desktop-management.cjs'
 import { acquireCliLock, acquireWorkspaceRelocationLock, cliLockToken, releaseCliLock } from '../cli-lock.mjs'
 import { readWorkspaceRelocationExecutionExit, beginWorkspaceRelocationIntent, readWorkspaceRelocationCoordinator, readWorkspaceRelocationWorkers, readWorkspaceRelocationModules, readWorkspaceRelocationStops, readWorkspaceRelocationModuleStops } from '../workspace-relocation-intent.mjs'
-import { launchWorkspaceRelocationCoordinator } from '../workspace-coordinator-launch.mjs'
+import { launchWorkspaceRelocationCoordinator, workspaceCoordinatorDiagnostics } from '../workspace-coordinator-launch.mjs'
 import { createWorkspaceWorkerJournal } from '../workspace-worker-journal.mjs'
 import { createWorkspaceModuleJournal } from '../workspace-module-journal.mjs'
 import { createWorkspaceFileJournal } from '../workspace-file-journal.mjs'
@@ -20,14 +20,15 @@ import { createWorkspaceProcessJournal } from '../workspace-process-journal.mjs'
 import { WorkspaceCatalog } from '../../../crabot-shared/dist/workspace-catalog.js'
 import { sha256CanonicalJson } from '../../../crabot-shared/dist/canonical-json.js'
 
-async function fixture(t) {
+async function fixture(t, { crossVolume = false } = {}) {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(tmpdir(), 'coordinator-launch-')))
+  const targetRoot = crossVolume ? fs.mkdtempSync('/dev/shm/crabot-real-file-host-') : root
   const data = management.ensurePrivateDataRoot(path.join(root, 'data')), id = randomUUID()
   const catalog = new WorkspaceCatalog({ dataRoot: data, files: native }); await catalog.initialize()
   const before = await catalog.snapshot(), marker = path.join(before.storage_root, 'original.txt')
   fs.writeFileSync(marker, 'original work')
   const lock = await acquireCliLock(data, 'workspace-relocation')
-  await beginWorkspaceRelocationIntent({ dataDir: data, id, target: path.join(root, 'new'), expectedRevision: before.revision, protectedRoots: [] })
+  await beginWorkspaceRelocationIntent({ dataDir: data, id, target: path.join(targetRoot, 'new'), expectedRevision: before.revision, protectedRoots: [] })
   let coordinator
   const close = async () => {
     if (coordinator) {
@@ -39,9 +40,9 @@ async function fixture(t) {
       }
     }
   }
-  t.after(async () => { await close(); releaseCliLock(lock); fs.rmSync(root, { recursive: true, force: true }) })
+  t.after(async () => { if (coordinator && workspaceCoordinatorDiagnostics(coordinator.child)) t.diagnostic(workspaceCoordinatorDiagnostics(coordinator.child)); await close(); releaseCliLock(lock); fs.rmSync(root, { recursive: true, force: true }); if (crossVolume) fs.rmSync(targetRoot, { recursive: true, force: true }) })
   return { root, data, id, lock, before, catalog, marker, close,
-    launch: async options => { coordinator = await launchWorkspaceRelocationCoordinator(options ?? { dataDir: data, id }); return coordinator } }
+    launch: async options => { try { coordinator = await launchWorkspaceRelocationCoordinator(options ?? { dataDir: data, id }); return coordinator } catch (error) { t.diagnostic(JSON.stringify({ stage: error.stage, code: error.code, cause_code: error.cause?.code, cause_message: error.cause?.message, child_observation: error.child_observation, stderr: error.diagnostics })); throw error } } }
 }
 
 test('the actual fixed script owns the lock and serves the first journals before launch returns', { timeout: 20000 }, async t => {
@@ -335,5 +336,48 @@ for (const mode of ['confirmed', 'lost acknowledgement', 'unexpected payload']) 
     assert.equal(observed.dispatch, 'observe'); assert.deepEqual(observed.actors.host, host.actors.host)
     assert.equal(fs.existsSync(path.join(f.root, 'new')), false); assert.equal(fs.readFileSync(f.marker, 'utf8'), 'original work')
     assert.deepEqual(await f.catalog.snapshot(), f.before)
+  } finally { workers.close(); modules.close(); processes.close(); files.close() }
+})
+
+for (const mode of ['confirmed', 'lost acknowledgement', 'changed source', 'copy']) test('the actual fixed Host prepares files once while the catalog stays unchanged: ' + mode, { timeout: process.platform === 'win32' ? 90000 : 30000, skip: mode === 'copy' && (process.platform !== 'linux' || !fs.existsSync('/dev/shm') || fs.statSync(tmpdir()).dev === fs.statSync('/dev/shm').dev) }, async t => {
+  const f = await fixture(t, { crossVolume: mode === 'copy' }), { child, launch } = await f.launch(), context = { dataDir: f.data, id: f.id, launch }
+  const workers = createWorkspaceWorkerJournal(child, context), modules = createWorkspaceModuleJournal(child, context), processes = createWorkspaceProcessJournal(child, context)
+  let files = createWorkspaceFileJournal(child, context)
+  try {
+    await workers.capture([]); await workers.captureProcesses([]); await modules.capture([])
+    await processes.prepare(); await processes.observe([]); await processes.complete()
+    await workers.prepare([]); await workers.complete([]); await modules.prepare([]); await modules.complete([]); await processes.confirmExecutionExit()
+    const plan = (await files.prepare()).plan, host = await files.prepareHost(); await files.prepareStage()
+    if (mode === 'changed source') fs.writeFileSync(f.marker, 'new work must be preserved')
+    if (mode === 'lost acknowledgement') {
+      const emit = child.emit; let dropped = false
+      const mock = t.mock.method(child, 'emit', function(event, ...args) {
+        if (event === 'message' && args[0]?.kind === 'workspace_file_journal_reply' && args[0]?.operation === 'prepare_files' && !dropped) {
+          dropped = true; return emit.call(this, event, { ...args[0], ok: false }, ...args.slice(1))
+        }
+        return emit.call(this, event, ...args)
+      })
+      try { await assert.rejects(files.prepareFiles(), { code: 'CRABOT_WORKSPACE_JOURNAL_UNAVAILABLE' }); assert.equal(dropped, true) } finally { mock.mock.restore() }
+      assert.ok(readWorkspaceRelocationFileActors(f.data, f.id).file_ready)
+      files.close(); files = createWorkspaceFileJournal(child, context)
+    }
+    if (mode === 'changed source') {
+      await assert.rejects(files.prepareFiles(), { code: 'CRABOT_WORKSPACE_JOURNAL_UNAVAILABLE' })
+      assert.equal(readWorkspaceRelocationFileActors(f.data, f.id).file_ready, null)
+      assert.equal(fs.readFileSync(f.marker, 'utf8'), 'new work must be preserved')
+      assert.equal(fs.existsSync(path.join(plan.staging_path, 'tree')), false)
+    } else {
+      const result = await files.prepareFiles()
+      assert.equal(result.dispatch, mode === 'lost acknowledgement' ? 'observe' : 'dispatch')
+      assert.equal(result.ready.content_sha256, plan.source_content_sha256)
+      assert.equal(fs.existsSync(f.before.storage_root), mode === 'copy')
+      if (mode === 'copy') assert.equal(fs.readFileSync(f.marker, 'utf8'), 'original work')
+      assert.equal(fs.readFileSync(path.join(plan.staging_path, 'tree/original.txt'), 'utf8'), 'original work')
+      assert.equal(native.isProcessExited(host.actors.host.process.pid), true)
+      const before = fs.readFileSync(path.join(f.data, 'workspace-control/relocation-file-actors.jsonl'))
+      assert.equal((await files.prepareFiles()).dispatch, 'observe')
+      assert.deepEqual(fs.readFileSync(path.join(f.data, 'workspace-control/relocation-file-actors.jsonl')), before)
+    }
+    assert.equal(fs.existsSync(path.join(f.root, 'new')), false); assert.deepEqual(await f.catalog.snapshot(), f.before)
   } finally { workers.close(); modules.close(); processes.close(); files.close() }
 })

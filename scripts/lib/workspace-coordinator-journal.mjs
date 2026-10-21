@@ -86,7 +86,12 @@ export function serveWorkspaceJournal(context, namespace, handlers) {
       seen.add(message.request_id)
       reply.result = await handlers[message.operation](message.payload)
       verify(); reply.ok = true
-    } catch { reply.result = null }
+    } catch (error) {
+      reply.result = null
+      const causes = []
+      for (let current = error, depth = 0; current && depth < 4; current = current.cause, depth++) causes.push({ code: typeof current.code === 'string' ? current.code.slice(0, 128) : 'unverified', stage: typeof current.stage === 'string' ? current.stage.slice(0, 64) : null })
+      console.error(JSON.stringify({ event: 'workspace_journal_failed', namespace, operation: typeof message.operation === 'string' ? message.operation.slice(0, 64) : 'invalid', causes }))
+    }
     if (process.connected) process.send(reply, () => {})
   }
   verify()

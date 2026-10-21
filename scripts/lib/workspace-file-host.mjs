@@ -5,9 +5,10 @@ import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { serveWorkspaceFileToolJournal } from './workspace-file-tool-journal.mjs'
 import native from './process-identity.cjs'
+import knownExit from './known-process-exit.cjs'
 import { journalFields as fields } from './workspace-coordinator-journal.mjs'
 import { readWorkspaceRelocationFilePlan, readWorkspaceRelocationFileActors, readWorkspaceRelocationCoordinator,
-  prepareWorkspaceRelocationFileActors, registerWorkspaceRelocationFileHost, permitWorkspaceRelocationFileHost } from './workspace-relocation-intent.mjs'
+  prepareWorkspaceRelocationFileActors, registerWorkspaceRelocationFileHost, permitWorkspaceRelocationFileHost, beginWorkspaceRelocationFiles, commitWorkspaceRelocationFileReady } from './workspace-relocation-intent.mjs'
 import { sha256CanonicalJson as hash } from '../../crabot-shared/dist/canonical-json.js'
 
 const failure = () => Object.assign(new Error('固定文件准备子进程无法核验，原文件与维护记录已保留。'), { code: 'CRABOT_WORKSPACE_FILE_HOST' })
@@ -38,16 +39,18 @@ async function close(child) {
 export async function launchWorkspaceFileHost(options) {
   if (!fields(options, ['dataDir', 'id']) || typeof options.dataDir !== 'string' || !path.isAbsolute(options.dataDir)
     || options.dataDir.includes('\0') || !uuid(options.id)) throw failure()
-  let child
+  let child, stage = 'attempt'
   try {
     const attempt = prepareWorkspaceRelocationFileActors(options)
     if (attempt.dispatch !== 'dispatch') return { dispatch: 'observe', host: readWorkspaceRelocationFileActors(options.dataDir, options.id).host?.process ?? null }
     const entry = fileURLToPath(new URL('../workspace-file-host.mjs', import.meta.url))
     const allowed = new Set(['PATH', 'HOME', 'USERPROFILE', 'SYSTEMROOT', 'WINDIR', 'LANG', 'LC_ALL', 'LC_CTYPE', 'TZ', 'TMPDIR', 'TMP', 'TEMP'])
     const env = Object.fromEntries(Object.entries(process.env).filter(([key, value]) => value !== undefined && allowed.has(key.toUpperCase())))
+    stage = 'spawn'
     child = spawn(process.execPath, [entry], { cwd: path.dirname(entry), env, stdio: ['ignore', 'ignore', 'ignore', 'ipc'], windowsHide: true })
     child.on('error', () => {}) // The owned handoff/journal reports errors; late IPC errors must not crash the coordinator.
     await once(child, 'spawn')
+    stage = 'capture-host'
     const host = registerWorkspaceRelocationFileHost({ ...options, process: native.inspectProcess(child.pid) })
     if (host.dispatch !== 'dispatch') throw failure()
     const bound = { intent_id: options.id, attempt_sha256: hash(attempt.attempt), host_sha256: hash(host.host) }
@@ -58,11 +61,13 @@ export async function launchWorkspaceFileHost(options) {
         || !native.sameProcess(current.host.process, native.inspectProcess(child.pid))) throw failure()
       return current
     }
+    stage = 'host-ready'
     const readyPromise = receive(child, 10000)
     const [, ready] = await Promise.all([send(child, { kind: 'workspace_file_host_start', data_dir: options.dataDir, ...bound }), readyPromise])
     verify()
     if (!fields(ready, ['kind', ...Object.keys(bound)]) || ready.kind !== 'workspace_file_host_ready'
       || Object.entries(bound).some(([key, value]) => ready[key] !== value)) throw failure()
+    stage = 'host-permission'
     const permitted = permitWorkspaceRelocationFileHost(options)
     if (permitted.dispatch !== 'dispatch') throw failure()
     const permissionHash = hash(permitted.permission), enteredPromise = receive(child, 10000)
@@ -70,9 +75,10 @@ export async function launchWorkspaceFileHost(options) {
     if (hash(verify().permission) !== permissionHash || !fields(entered, ['kind', ...Object.keys(bound), 'permission_sha256'])
       || entered.kind !== 'workspace_file_host_entered' || entered.permission_sha256 !== permissionHash
       || Object.entries(bound).some(([key, value]) => entered[key] !== value)) throw failure()
+    stage = 'tool-journal'
     serveWorkspaceFileToolJournal(child, options)
     return { dispatch: 'dispatch', child, host: host.host.process }
-  } catch { await close(child); throw failure() }
+  } catch (cause) { await close(child); const error = failure(); error.cause = cause; error.stage = stage; throw error }
 }
 
 let entered = false
@@ -100,4 +106,49 @@ export async function enterWorkspaceFileHost() {
     || permit.permission_sha256 !== hash(current.permission) || Object.entries(bound).some(([key, value]) => permit[key] !== value)) throw failure()
   return Object.freeze({ dataDir: input.data_dir, id: input.intent_id, plan: readWorkspaceRelocationFilePlan(input.data_dir, input.intent_id),
     entered: { kind: 'workspace_file_host_entered', ...bound, permission_sha256: hash(current.permission) } })
+}
+
+
+export async function prepareWorkspaceFilesWithHost(child, { dataDir, id, signal }) {
+  let clear = () => {}
+  try {
+    const original = readWorkspaceRelocationFileActors(dataDir, id), plan = readWorkspaceRelocationFilePlan(dataDir, id)
+    if (original.file_ready) return { dispatch: 'observe', ready: original.file_ready }
+    if (process.platform === 'win32' && plan.mode === 'copy') throw Object.assign(failure(), { code: 'WORKSPACE_COPY_SYNC_UNSUPPORTED' })
+    const started = await beginWorkspaceRelocationFiles({ dataDir, id, signal })
+    if (started.dispatch !== 'dispatch' || !child?.connected || !native.sameProcess(original.host.process, native.inspectProcess(child.pid))) throw failure()
+    if (signal?.aborted) throw failure()
+    const attemptHash = hash(started.attempt)
+    const ended = new Promise((resolve, reject) => {
+      let completed = false
+      const failed = cause => { const error = failure(); if (cause) error.cause = cause; reject(error) }
+      const message = value => {
+        if (value?.kind !== 'workspace_file_prepared' && value?.kind !== 'workspace_file_preparation_failed') return
+        try {
+          if (!fields(value, ['kind', 'intent_id', 'attempt_sha256', ...(value.kind === 'workspace_file_preparation_failed' ? ['error_code'] : [])])
+            || value.intent_id !== id || value.attempt_sha256 !== attemptHash || completed
+            || child.pid !== original.host.process.pid) throw failure()
+          const current = native.inspectProcess(child.pid)
+          if (!native.sameProcess(original.host.process, current) && knownExit.probeKnownProcessExit([original.host.process]).state !== 'stopped') throw failure()
+          if (value.kind === 'workspace_file_preparation_failed') return failed({ code: value.error_code })
+          completed = true
+        } catch (error) { failed(error) }
+      }
+      const exited = (code, exitSignal) => completed && code === 0 && exitSignal === null ? resolve() : failed()
+      const disconnected = () => { if (!completed) failed() }
+      const aborted = () => failed()
+      const timer = setTimeout(aborted, 20 * 60_000)
+      clear = () => { clearTimeout(timer); child.off('message', message); child.off('exit', exited); child.off('disconnect', disconnected); child.off('error', aborted); signal?.removeEventListener('abort', aborted) }
+      child.on('message', message); child.once('exit', exited); child.once('disconnect', disconnected); child.once('error', aborted); signal?.addEventListener('abort', aborted)
+      if (signal?.aborted) aborted()
+    })
+    void ended.catch(() => {})
+    if (signal?.aborted) throw failure()
+    await Promise.all([send(child, { kind: 'workspace_file_prepare', intent_id: id, attempt_sha256: attemptHash }), ended])
+    clear()
+    const { probeKnownProcessExit } = knownExit
+    const deadline = Date.now() + 2000
+    while (probeKnownProcessExit([original.host.process]).state !== 'stopped' && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10))
+    return await commitWorkspaceRelocationFileReady({ dataDir, id, signal })
+  } catch (cause) { clear(); await close(child); const error = failure(); error.cause = cause; throw error }
 }
