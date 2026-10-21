@@ -584,7 +584,26 @@ for (const mode of ['confirmed', 'lost acknowledgement', 'changed source', 'copy
           assert.equal((await closer.commitRecovery()).dispatch, 'observe')
           assert.deepEqual(fs.readFileSync(recoveryCompleteFile), completeBytes)
           assert.deepEqual(fs.readFileSync(retirementFile), retirementBytes)
+          const closedEvidence = await closer.inspectClosures()
+          assert.deepEqual(await closer.inspectClosures(), closedEvidence)
+          assert.equal(closedEvidence.worker_commit_sha256, sha256CanonicalJson(committed.complete))
+          assert.equal(closedEvidence.recovery_commit_sha256, recoveryCommit.commit_sha256)
+          assert.deepEqual(fs.readFileSync(recoveryCompleteFile), completeBytes)
+          assert.deepEqual(fs.readFileSync(retirementFile), retirementBytes)
           assert.deepEqual(fs.readFileSync(f.ledgerFile), closedBytes)
+          const invalidInspection = createWorkspaceJournalClient(child, context, 'worker')
+          try { await assert.rejects(invalidInspection.call('inspect_closures', { directory: f.root }), { code: 'CRABOT_WORKSPACE_JOURNAL_UNAVAILABLE' }) } finally { invalidInspection.close() }
+          const evidenceAgent = await import('../../../crabot-agent/dist/core/workspace-relocation-closed-evidence.js')
+          const retainedEvidence = await evidenceAgent.inspectWorkspaceRelocationClosures({ dataDir: f.data, id: f.id, verify: async () => {} })
+          retainedEvidence.verify()
+          // The second read must be fresh, and must neither repair nor accept changed closure bytes.
+          try {
+            fs.appendFileSync(f.ledgerFile, '\n')
+            assert.throws(retainedEvidence.verify, { code: 'CRABOT_WORKSPACE_CLOSED_EVIDENCE' })
+            await assert.rejects(closer.inspectClosures(), { code: 'CRABOT_WORKSPACE_JOURNAL_UNAVAILABLE' })
+            assert.deepEqual(fs.readFileSync(f.ledgerFile), Buffer.concat([closedBytes, Buffer.from('\n')]))
+            assert.deepEqual(fs.readFileSync(recoveryCompleteFile), completeBytes)
+          } finally { fs.writeFileSync(f.ledgerFile, closedBytes) }
           assert.equal(workspaceMaintenancePending(f.data), true)
         } finally { closer.close() }
       }

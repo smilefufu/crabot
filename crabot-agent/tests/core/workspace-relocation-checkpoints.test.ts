@@ -52,6 +52,23 @@ for (const kind of ['manager', 'request'] as const) describe('fixed ' + kind + '
     if (change === 'active source') await fs.writeFile(source, original, { mode: 0o600 })
     expect(() => check!()).toThrow()
   })
+  it('read-only completion observation never creates an archive for an active original checkpoint', async () => {
+    await expect(archiveWorkspaceRelocationCheckpoint({ ...options, requireComplete: true })).rejects.toThrow()
+    expect(await fs.readFile(source)).toEqual(original)
+    await expect(fs.lstat(path.dirname(archive))).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+  it('read-only completion observation does not repair a missing completion receipt', async () => {
+    await archiveWorkspaceRelocationCheckpoint(options)
+    await fs.unlink(path.join(archive, 'complete.json'))
+    await expect(archiveWorkspaceRelocationCheckpoint({ ...options, requireComplete: true })).rejects.toThrow()
+    await expect(fs.lstat(path.join(archive, 'complete.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(await fs.readFile(path.join(archive, 'checkpoint.json'))).toEqual(original)
+  })
+  it('read-only completion observation preserves the same completed archive', async () => {
+    const result = await archiveWorkspaceRelocationCheckpoint(options), stat = await fs.stat(path.join(archive, 'checkpoint.json'), { bigint: true })
+    expect(await archiveWorkspaceRelocationCheckpoint({ ...options, requireComplete: true })).toEqual({ ...result, dispatch: 'observe' })
+    expect(version(await fs.stat(path.join(archive, 'checkpoint.json'), { bigint: true }))).toBe(version(stat))
+  })
   it('requires fresh caller verification before creating any archive namespace', async () => {
     await expect(archiveWorkspaceRelocationCheckpoint({ ...options, verify: async () => { throw new Error('unavailable original role') } })).rejects.toThrow()
     expect(await fs.readFile(source)).toEqual(original)

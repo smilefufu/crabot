@@ -83,6 +83,16 @@ export function createWorkspaceWorkerJournal(coordinator, context) {
         return { dispatch: result.dispatch, commit_sha256: result.commit_sha256 }
       } catch { transport.close(); throw failure() }
     },
+    async inspectClosures() {
+      try {
+        const result = await transport.call('inspect_closures', {})
+        if (!fields(result, ['verified', 'worker_commit_sha256', 'recovery_commit_sha256']) || result.verified !== true
+          || result.worker_commit_sha256 !== sha256CanonicalJson(readWorkspaceRelocationClosureCommit(dataDir, id))
+          || result.recovery_commit_sha256 !== sha256CanonicalJson(readWorkspaceRelocationRecoveryCommit(dataDir, id))) throw failure()
+        transport.verify()
+        return Object.freeze(result)
+      } catch { transport.close(); throw failure() }
+    },
     async verifyClosureReadiness() {
       try {
         const result = await transport.call('verify_closure_readiness', {}), bindings = readWorkspaceRelocationClosureBindings(dataDir, id)
@@ -146,6 +156,14 @@ export function serveWorkspaceWorkerJournal(context) {
       })()
       const result = await recoveryCommit
       return { ...result, dispatch: previous ? 'observe' : result.dispatch }
+    },
+    async inspect_closures(payload) {
+      if (!fields(payload, [])) throw failure()
+      await verifyWorkspaceRelocationClosureReadiness(args)
+      const agent = await import('../../crabot-agent/dist/core/workspace-relocation-closed-evidence.js')
+      const result = await agent.inspectWorkspaceRelocationClosures({ ...args, verify: () => verifyWorkspaceRelocationClosureReadiness(args) })
+      result.verify()
+      return { verified: true, worker_commit_sha256: result.worker_commit_sha256, recovery_commit_sha256: result.recovery_commit_sha256 }
     },
     async verify_closure_readiness(payload) {
       if (!fields(payload, [])) throw failure()

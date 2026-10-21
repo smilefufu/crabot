@@ -27,6 +27,7 @@ interface CheckpointArchiveOptions {
   beforeSha256: string
   verify: () => Promise<unknown>
   retainVerification?: (verify: () => void) => void
+  requireComplete?: boolean
 }
 
 /** Agent-owned file primitive, not authorization. The fixed offline caller verifies the original whole job before each effect. */
@@ -73,6 +74,7 @@ export async function archiveWorkspaceRelocationCheckpoint(options: CheckpointAr
     if (historyExists) remember(history, true)
     const archiveExists = historyExists && optionalStat(archive, true, true)
     if (archiveExists) remember(archive, true)
+    if (options.requireComplete && (!archiveExists || readJson(completeFile) === undefined)) throw failure()
     let changed = false
     if (!archiveExists) {
       if (!original || !parsed) throw failure()

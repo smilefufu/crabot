@@ -53,7 +53,7 @@ export function createWorkspaceJournalClient(coordinator, context, namespace) {
     try { if (closed || pending) throw workspaceJournalFailure(); verify() }
     catch { close(); return Promise.reject(workspaceJournalFailure()) }
     return new Promise((resolve, reject) => {
-      const deadline = namespace === 'worker' && ['prepare_closure', 'commit_closure', 'prepare_recovery', 'commit_recovery'].includes(operation) ? 20 * 60_000 : timeout
+      const deadline = namespace === 'worker' && ['prepare_closure', 'commit_closure', 'prepare_recovery', 'commit_recovery', 'inspect_closures'].includes(operation) ? 20 * 60_000 : timeout
       const id = randomUUID(), timer = setTimeout(() => {
         console.error(JSON.stringify({ event: 'workspace_journal_timeout', namespace, operation: typeof operation === 'string' ? operation.slice(0, 64) : 'invalid', timeout_ms: deadline }))
         close()
