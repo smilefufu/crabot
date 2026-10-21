@@ -16,7 +16,7 @@ import { createWorkspaceWorkerJournal } from '../workspace-worker-journal.mjs'
 import { createWorkspaceModuleJournal } from '../workspace-module-journal.mjs'
 import { createWorkspaceFileJournal } from '../workspace-file-journal.mjs'
 import { createWorkspaceJournalClient } from '../workspace-coordinator-journal.mjs'
-import { readWorkspaceRelocationFilePlan, readWorkspaceRelocationFileActors, verifyWorkspaceRelocationClosureReadiness, readWorkspaceRelocationClosurePlan, readWorkspaceRelocationRecoveryPlan, readWorkspaceRelocationRecoveryCommit } from '../workspace-relocation-intent.mjs'
+import { readWorkspaceRelocationFilePlan, readWorkspaceRelocationFileActors, verifyWorkspaceRelocationClosureReadiness, readWorkspaceRelocationClosurePlan, readWorkspaceRelocationRecoveryPlan, readWorkspaceRelocationRecoveryCommit, readWorkspaceRelocationRootPlan } from '../workspace-relocation-intent.mjs'
 import { createWorkspaceProcessJournal } from '../workspace-process-journal.mjs'
 import { WorkspaceCatalog } from '../../../crabot-shared/dist/workspace-catalog.js'
 import { sha256CanonicalJson } from '../../../crabot-shared/dist/canonical-json.js'
@@ -45,6 +45,11 @@ async function fixture(t, { crossVolume = false, closureLedger = false } = {}) {
       message: { content: { text: 'ORIGINAL_RECOVERY_PRIVATE_INPUT' } } }) + '\n', { mode: 0o600 })
   }
   const catalog = new WorkspaceCatalog({ dataRoot: data, files: native }); await catalog.initialize()
+  if (closureLedger) {
+    await catalog.createProject({ workspace_id: randomUUID(), name: 'managed', description: 'ROOT_PROJECT_PRIVATE_DESCRIPTION' })
+    const external = path.join(root, 'outside-project'); fs.mkdirSync(external); fs.writeFileSync(path.join(external, 'kept'), 'external project work')
+    await catalog.createProject({ workspace_id: randomUUID(), name: 'external', root: external })
+  }
   const before = await catalog.snapshot(), marker = path.join(before.storage_root, 'original.txt')
   fs.writeFileSync(marker, 'original work')
   const lock = await acquireCliLock(data, 'workspace-relocation')
@@ -361,7 +366,7 @@ for (const mode of ['confirmed', 'lost acknowledgement', 'unexpected payload']) 
   } finally { workers.close(); modules.close(); processes.close(); files.close() }
 })
 
-for (const mode of ['confirmed', 'lost acknowledgement', 'changed source', 'copy']) test('the actual fixed Host prepares files once while the catalog stays unchanged: ' + mode, { timeout: process.platform === 'win32' ? 600000 : 30000, skip: mode === 'copy' && (process.platform !== 'linux' || !fs.existsSync('/dev/shm') || fs.statSync(tmpdir()).dev === fs.statSync('/dev/shm').dev) }, async t => {
+for (const mode of ['confirmed', 'lost acknowledgement', 'changed source', 'copy']) test('the actual fixed Host prepares files once while the catalog stays unchanged: ' + mode, { timeout: process.platform === 'win32' ? 600000 : 120000, skip: mode === 'copy' && (process.platform !== 'linux' || !fs.existsSync('/dev/shm') || fs.statSync(tmpdir()).dev === fs.statSync('/dev/shm').dev) }, async t => {
   const f = await fixture(t, { crossVolume: mode === 'copy', closureLedger: mode === 'confirmed' || mode === 'lost acknowledgement' }), { child, launch } = await f.launch(), context = { dataDir: f.data, id: f.id, launch }
   const workers = createWorkspaceWorkerJournal(child, context), modules = createWorkspaceModuleJournal(child, context), processes = createWorkspaceProcessJournal(child, context)
   let files = createWorkspaceFileJournal(child, context)
@@ -433,6 +438,9 @@ for (const mode of ['confirmed', 'lost acknowledgement', 'changed source', 'copy
         assert.deepEqual(snapshotControl(), unchanged)
       }
       if (f.closureWorker) {
+        const earlyRoot = createWorkspaceFileJournal(child, context)
+        try { await assert.rejects(earlyRoot.prepareRoot(), { code: 'CRABOT_WORKSPACE_JOURNAL_UNAVAILABLE' }) } finally { earlyRoot.close() }
+        assert.equal(readWorkspaceRelocationRootPlan(f.data, f.id), null)
         let closer = createWorkspaceWorkerJournal(child, context)
         try {
           if (mode === 'lost acknowledgement') {
@@ -591,6 +599,51 @@ for (const mode of ['confirmed', 'lost acknowledgement', 'changed source', 'copy
           assert.deepEqual(fs.readFileSync(recoveryCompleteFile), completeBytes)
           assert.deepEqual(fs.readFileSync(retirementFile), retirementBytes)
           assert.deepEqual(fs.readFileSync(f.ledgerFile), closedBytes)
+          const rootRecords = await import('../workspace-relocation-intent.mjs')
+          await assert.rejects(rootRecords.prepareWorkspaceRelocationRootPlan({ dataDir: f.data, id: f.id }))
+          assert.equal(readWorkspaceRelocationRootPlan(f.data, f.id), null)
+          const invalidRoot = createWorkspaceJournalClient(child, context, 'file')
+          try { await assert.rejects(invalidRoot.call('prepare_root', { directory: f.root }), { code: 'CRABOT_WORKSPACE_JOURNAL_UNAVAILABLE' }) } finally { invalidRoot.close() }
+          if (mode === 'lost acknowledgement') {
+            const emit = child.emit; let dropped = false
+            const mock = t.mock.method(child, 'emit', function(event, ...args) {
+              if (event === 'message' && args[0]?.kind === 'workspace_file_journal_reply' && args[0]?.operation === 'prepare_root' && !dropped) {
+                dropped = true; return emit.call(this, event, { ...args[0], ok: false }, ...args.slice(1))
+              }
+              return emit.call(this, event, ...args)
+            })
+            try { await assert.rejects(files.prepareRoot(), { code: 'CRABOT_WORKSPACE_JOURNAL_UNAVAILABLE' }); assert.equal(dropped, true) } finally { mock.mock.restore() }
+            files.close(); files = createWorkspaceFileJournal(child, context)
+          }
+          const rootPrepared = await files.prepareRoot(), rootPlan = readWorkspaceRelocationRootPlan(f.data, f.id)
+          assert.equal(rootPrepared.dispatch, mode === 'lost acknowledgement' ? 'observe' : 'dispatch')
+          assert.equal(rootPrepared.plan_sha256, sha256CanonicalJson(rootPlan))
+          assert.equal(rootPlan.worker_commit_sha256, closedEvidence.worker_commit_sha256)
+          assert.equal(rootPlan.recovery_commit_sha256, closedEvidence.recovery_commit_sha256)
+          assert.equal(rootPlan.publication.target, path.join(f.root, 'new'))
+          assert.equal(rootPlan.publication.tree.ino, result.ready.tree.ino)
+          assert.equal(rootPlan.publication.empty_target, null)
+          const expectedMappings = f.before.workspaces.filter(item => item.root !== path.join(f.root, 'outside-project')).map(item => ({ workspace_id: item.workspace_id,
+            before_root: item.root, after_root: path.join(f.root, 'new', path.relative(f.before.storage_root, item.root)) })).sort((a, b) => a.workspace_id < b.workspace_id ? -1 : 1)
+          assert.deepEqual(rootPlan.catalog_mappings, expectedMappings)
+          assert.equal(fs.readFileSync(path.join(f.root, 'outside-project/kept'), 'utf8'), 'external project work')
+          const rootFile = path.join(control, 'relocation-root-plan.json'), rootBytes = fs.readFileSync(rootFile)
+          assert.equal((await files.prepareRoot()).dispatch, 'observe'); assert.deepEqual(fs.readFileSync(rootFile), rootBytes)
+          assert.equal(fs.existsSync(path.join(f.root, 'new')), false); assert.deepEqual(await f.catalog.snapshot(), f.before)
+          assert.equal(rootBytes.includes(Buffer.from('ORIGINAL_RECOVERY_PRIVATE_INPUT')), false)
+          assert.equal(rootBytes.includes(Buffer.from('keep original work')), false)
+          assert.equal(rootBytes.includes(Buffer.from('ROOT_PROJECT_PRIVATE_DESCRIPTION')), false)
+          for (const change of ['binding', 'tree identity', 'mapping target', 'missing default', 'extra field']) {
+            const invalid = structuredClone(rootPlan)
+            if (change === 'binding') invalid.worker_commit_sha256 = '0'.repeat(64)
+            if (change === 'tree identity') invalid.publication.tree.ino = '999999999999999'
+            if (change === 'mapping target') invalid.catalog_mappings[0].after_root = path.join(f.root, 'unselected')
+            if (change === 'missing default') invalid.catalog_mappings = invalid.catalog_mappings.filter(row => row.workspace_id !== 'default')
+            if (change === 'extra field') invalid.permissions = { all: true }
+            try { fs.writeFileSync(rootFile, JSON.stringify(invalid)); assert.throws(() => readWorkspaceRelocationRootPlan(f.data, f.id)) }
+            finally { fs.writeFileSync(rootFile, rootBytes) }
+          }
+          assert.equal((await files.prepareRoot()).dispatch, 'observe')
           const invalidInspection = createWorkspaceJournalClient(child, context, 'worker')
           try { await assert.rejects(invalidInspection.call('inspect_closures', { directory: f.root }), { code: 'CRABOT_WORKSPACE_JOURNAL_UNAVAILABLE' }) } finally { invalidInspection.close() }
           const evidenceAgent = await import('../../../crabot-agent/dist/core/workspace-relocation-closed-evidence.js')

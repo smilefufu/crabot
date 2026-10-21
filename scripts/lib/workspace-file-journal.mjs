@@ -1,6 +1,6 @@
 // Fixed file preparation policy; no caller-supplied paths or file effects are accepted here.
 import { createWorkspaceJournalClient, serveWorkspaceJournal, journalFields as fields, workspaceJournalFailure as failure } from './workspace-coordinator-journal.mjs'
-import { readWorkspaceRelocationFilePlan, readWorkspaceRelocationFileActors, prepareWorkspaceRelocationFilePlan, prepareWorkspaceRelocationStaging } from './workspace-relocation-intent.mjs'
+import { readWorkspaceRelocationFilePlan, readWorkspaceRelocationFileActors, prepareWorkspaceRelocationFilePlan, prepareWorkspaceRelocationStaging, readWorkspaceRelocationRootPlan, prepareWorkspaceRelocationRootPlan, verifyWorkspaceRelocationClosureReadiness, readWorkspaceRelocationRecoveryCommit } from './workspace-relocation-intent.mjs'
 import { launchWorkspaceFileHost, prepareWorkspaceFilesWithHost } from './workspace-file-host.mjs'
 import native from './process-identity.cjs'
 import { sha256CanonicalJson } from '../../crabot-shared/dist/canonical-json.js'
@@ -51,14 +51,34 @@ export function createWorkspaceFileJournal(coordinator, context) {
         return { dispatch: result.dispatch, ready }
       } catch { transport.close(); throw failure() }
     },
+    async prepareRoot() {
+      try {
+        const previous = readWorkspaceRelocationRootPlan(context.dataDir, context.id)
+        const result = await transport.call('prepare_root', {}), plan = readWorkspaceRelocationRootPlan(context.dataDir, context.id)
+        if (!plan || !fields(result, ['dispatch', 'plan_sha256']) || !['dispatch', 'observe'].includes(result.dispatch)
+          || previous && result.dispatch !== 'observe' || result.plan_sha256 !== sha256CanonicalJson(plan)) throw failure()
+        transport.verify()
+        return { dispatch: result.dispatch, plan_sha256: result.plan_sha256 }
+      } catch { transport.close(); throw failure() }
+    },
     close: transport.close,
   })
 }
 export function serveWorkspaceFileJournal(context) {
   const controller = new AbortController()
-  let hostPreparation, filePreparation, host
+  let hostPreparation, filePreparation, rootPreparation, host
   const disconnectHost = child => { if (child?.connected) { try { child.disconnect() } catch {} } }
   const transport = serveWorkspaceJournal(context, 'file', {
+    async prepare_root(payload) {
+      if (!fields(payload, [])) throw failure()
+      const args = { dataDir: context.dataDir, id: context.id, signal: controller.signal }
+      await verifyWorkspaceRelocationClosureReadiness(args)
+      if (!readWorkspaceRelocationRecoveryCommit(context.dataDir, context.id)) throw failure()
+      const previous = rootPreparation
+      if (!rootPreparation) rootPreparation = prepareWorkspaceRelocationRootPlan(args)
+      const result = await rootPreparation
+      return { dispatch: previous ? 'observe' : result.dispatch, plan_sha256: sha256CanonicalJson(result.plan) }
+    },
     async prepare_files(payload) {
       if (!fields(payload, []) || !hostPreparation) throw failure()
       const previous = filePreparation

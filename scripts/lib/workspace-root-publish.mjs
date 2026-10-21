@@ -24,14 +24,19 @@ function sync(directory) {
   try { fs.fsyncSync(fd) } finally { fs.closeSync(fd) }
 }
 
-export async function publishWorkspaceRoot({ plan: input, verify, signal }) {
-  const plan = structuredClone(input)
+export function validateWorkspaceRootPublicationPlan(plan) {
   if (!fields(plan, ['intent_id', 'container', 'tree', 'target', 'target_parent', 'empty_target']) || typeof plan.intent_id !== 'string' || !uuid.test(plan.intent_id)
     || !validIdentity(plan.container) || !validIdentity(plan.tree) || !validIdentity(plan.target_parent) || !absolute(plan.target)
     || plan.empty_target !== null && (!validIdentity(plan.empty_target) || plan.empty_target.path !== plan.target)
     || path.basename(plan.container.path) !== '.crabot-workspace-' + plan.intent_id || plan.tree.path !== path.join(plan.container.path, 'tree')
     || path.dirname(plan.target) !== plan.target_parent.path || within(plan.container.path, plan.target) || within(plan.target, plan.container.path)
-    || plan.tree.dev !== plan.container.dev || plan.tree.dev !== plan.target_parent.dev || typeof verify !== 'function') throw failure()
+    || plan.tree.dev !== plan.container.dev || plan.tree.dev !== plan.target_parent.dev) throw failure()
+}
+
+export async function publishWorkspaceRoot({ plan: input, verify, signal }) {
+  const plan = structuredClone(input)
+  validateWorkspaceRootPublicationPlan(plan)
+  if (typeof verify !== 'function') throw failure()
   const hold = path.join(plan.target_parent.path, '.crabot-workspace-empty-' + plan.intent_id), pins = []
   const check = () => {
     if (signal?.aborted || !matches(plan.container, observe(plan.container.path)) || !matches(plan.target_parent, observe(plan.target_parent.path))
