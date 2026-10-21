@@ -4,6 +4,7 @@ Add-Type -TypeDefinition @'
 using System;
 using System.ComponentModel;
 using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
 public static class CrabotWorkspaceSecurityProbe {
     [DllImport("advapi32.dll", CharSet = CharSet.Unicode, ExactSpelling = true)]
     static extern uint GetNamedSecurityInfoW(string path, uint type, uint fields, out IntPtr owner, out IntPtr group, out IntPtr dacl, out IntPtr sacl, out IntPtr descriptor);
@@ -18,6 +19,32 @@ public static class CrabotWorkspaceSecurityProbe {
     [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true, ExactSpelling = true)]
     static extern bool ConvertSecurityDescriptorToStringSecurityDescriptorW(IntPtr descriptor, uint revision, uint fields, out IntPtr text, out uint length);
     [DllImport("kernel32.dll")] static extern IntPtr LocalFree(IntPtr memory);
+    [DllImport("advapi32.dll")] static extern uint GetSecurityDescriptorLength(IntPtr descriptor);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true, ExactSpelling = true)]
+    static extern SafeFileHandle CreateFileW(string path, uint access, uint share, IntPtr security, uint disposition, uint flags, IntPtr template);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool BackupWrite(SafeFileHandle file, byte[] bytes, uint length, out uint written, bool abort, bool security, ref IntPtr context);
+    static uint RestoreSecurityStream(string target, IntPtr descriptor) {
+        uint length = GetSecurityDescriptorLength(descriptor);
+        if (length == 0 || length > 16 * 1024 * 1024) throw new InvalidOperationException("Unbounded probe descriptor");
+        byte[] bytes = new byte[20 + length];
+        Buffer.BlockCopy(BitConverter.GetBytes(3u), 0, bytes, 0, 4);
+        Buffer.BlockCopy(BitConverter.GetBytes(2u), 0, bytes, 4, 4);
+        Buffer.BlockCopy(BitConverter.GetBytes((long)length), 0, bytes, 8, 8);
+        Marshal.Copy(descriptor, bytes, 20, (int)length);
+        using (var file = CreateFileW(target, 0xC0000, 3, IntPtr.Zero, 3, 0x2200000, IntPtr.Zero)) {
+            if (file.IsInvalid) return (uint)Marshal.GetLastWin32Error();
+            IntPtr context = IntPtr.Zero;
+            uint written, error = 0;
+            try {
+                if (!BackupWrite(file, bytes, (uint)bytes.Length, out written, false, true, ref context)) error = (uint)Marshal.GetLastWin32Error();
+                else if (written != bytes.Length) error = 13;
+            } finally {
+                if (!BackupWrite(file, null, 0, out written, true, true, ref context) && error == 0) error = (uint)Marshal.GetLastWin32Error();
+            }
+            return error;
+        }
+    }
     static void Check(bool ok) { if (!ok) throw new Win32Exception(Marshal.GetLastWin32Error()); }
     static IntPtr Read(string path, uint fields, out IntPtr dacl) {
         IntPtr owner, group, sacl, descriptor;
@@ -40,6 +67,7 @@ public static class CrabotWorkspaceSecurityProbe {
         try {
             ushort control; uint revision;
             Check(GetSecurityDescriptorControl(descriptor, out control, out revision));
+            if (mode == "backup-security-stream") return RestoreSecurityStream(target, descriptor);
             if (mode == "modern-direct") return SetNamedSecurityInfoW(target, 1, 4, IntPtr.Zero, IntPtr.Zero, dacl, IntPtr.Zero);
             if (mode == "modern-protected-then-original") {
                 uint error = SetNamedSecurityInfoW(target, 1, 0x80000004, IntPtr.Zero, IntPtr.Zero, dacl, IntPtr.Zero);
@@ -58,8 +86,9 @@ $targets = [IO.Path]::Combine($env:GITHUB_WORKSPACE, '.desktop-build', $probeId)
 try {
     & node -e "const fs=require('node:fs'),p=require('node:path'),n=require('./scripts/lib/process-identity.cjs');n.createPrivateDirectory(process.argv[1]);fs.writeFileSync(p.join(process.argv[1],'original.txt'),'finite original bytes');n.createPrivateDirectory(process.argv[2]);console.log(JSON.stringify({evidence_only:true,different_devices:fs.statSync(process.argv[1]).dev!==fs.statSync(process.argv[2]).dev}));" $source $targets
     if ($LASTEXITCODE -ne 0) { throw 'Cannot prepare owned security probe' }
+    @{ evidence_only = $true; source_filesystem = ([IO.DriveInfo]::new([IO.Path]::GetPathRoot($source))).DriveFormat; target_filesystem = ([IO.DriveInfo]::new([IO.Path]::GetPathRoot($targets))).DriveFormat; elevated = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) } | ConvertTo-Json -Compress
     $original = [CrabotWorkspaceSecurityProbe]::Observe([IO.Path]::Combine($source, 'original.txt'))
-    foreach ($mode in @('query-dacl-only', 'query-full', 'request-matches-source', 'modern-direct', 'modern-protected-then-original', 'protected-flag-then-original')) {
+    foreach ($mode in @('query-dacl-only', 'query-full', 'request-matches-source', 'modern-direct', 'modern-protected-then-original', 'protected-flag-then-original', 'backup-security-stream')) {
         $target = [IO.Path]::Combine($targets, $mode)
         & node -e "require('./scripts/lib/process-identity.cjs').createPrivateDirectory(process.argv[1])" $target
         if ($LASTEXITCODE -ne 0) { throw 'Cannot create private security probe target' }
