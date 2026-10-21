@@ -21,7 +21,7 @@ import { createWorkspaceProcessJournal } from '../workspace-process-journal.mjs'
 import { WorkspaceCatalog } from '../../../crabot-shared/dist/workspace-catalog.js'
 import { sha256CanonicalJson } from '../../../crabot-shared/dist/canonical-json.js'
 
-async function fixture(t, { crossVolume = false, closureLedger = false, separateTargetAncestor = false, nestedTarget = false } = {}) {
+async function fixture(t, { crossVolume = false, closureLedger = false, separateTargetAncestor = false, nestedTarget = false, historyIncarnation = false } = {}) {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(tmpdir(), 'coordinator-launch-')))
   const targetRoot = crossVolume ? fs.mkdtempSync('/dev/shm/crabot-real-file-host-') : root
   const targetParent = separateTargetAncestor ? path.join(targetRoot, 'target-parent') : targetRoot
@@ -53,6 +53,15 @@ async function fixture(t, { crossVolume = false, closureLedger = false, separate
     externalWorkspace = (await catalog.createProject({ workspace_id: randomUUID(), name: 'external', root: external })).workspace
   }
   const before = await catalog.snapshot(), marker = path.join(before.storage_root, 'original.txt')
+  if (historyIncarnation) {
+    const workspace = path.join(before.storage_root, 'default/tasks', closureWorker.worker_id)
+    fs.mkdirSync(workspace, { recursive: true }); fs.writeFileSync(path.join(workspace, 'history.txt'), 'original history artifact')
+    const incarnation = { incarnation_id: 'history-mainline', impl: 'builtin', seq: 0, state: 'exited', workspace,
+      session_ref: 'original-history-session', started_at: '2026-10-20T00:00:00.000Z', ended_at: '2026-10-20T00:01:00.000Z', ended_reason: 'completed' }
+    closureWorker.incarnations = [{ incarnation_id: incarnation.incarnation_id, impl: incarnation.impl, seq: incarnation.seq, workspace, started_at: incarnation.started_at }]
+    const ledger = JSON.parse(ledgerBytes); ledger.workers[0].incarnations = [incarnation]
+    ledgerBytes = JSON.stringify(ledger, null, 2); fs.writeFileSync(ledgerFile, ledgerBytes, { mode: 0o600 })
+  }
   fs.writeFileSync(marker, 'original work')
   const lock = await acquireCliLock(data, 'workspace-relocation')
   const intent = await beginWorkspaceRelocationIntent({ dataDir: data, id, target: path.join(targetParent, ...(nestedTarget ? ['missing-parent', 'nested', 'new'] : ['new'])), expectedRevision: before.revision, protectedRoots: [] })
@@ -369,14 +378,14 @@ for (const mode of ['confirmed', 'lost acknowledgement', 'unexpected payload']) 
 })
 
 for (const mode of ['confirmed', 'lost acknowledgement', 'changed source', 'copy', 'Root publish', 'Root lost acknowledgement', 'Root target changed', 'Root changed ancestor', 'Root nested target', 'Root nested target lost acknowledgement', 'Root nested parent changed']) test('the actual fixed Host prepares files once while the catalog stays unchanged: ' + mode, { timeout: process.platform === 'win32' ? 600000 : 120000, skip: mode === 'copy' && (process.platform !== 'linux' || !fs.existsSync('/dev/shm') || fs.statSync(tmpdir()).dev === fs.statSync('/dev/shm').dev) }, async t => {
-  const f = await fixture(t, { crossVolume: mode === 'copy', closureLedger: mode === 'confirmed' || mode === 'lost acknowledgement' || mode.startsWith('Root'), separateTargetAncestor: mode === 'Root changed ancestor', nestedTarget: mode.startsWith('Root nested') }), { child, launch } = await f.launch(), context = { dataDir: f.data, id: f.id, launch }
+  const f = await fixture(t, { crossVolume: mode === 'copy', closureLedger: mode === 'confirmed' || mode === 'lost acknowledgement' || mode.startsWith('Root'), separateTargetAncestor: mode === 'Root changed ancestor', nestedTarget: mode.startsWith('Root nested'), historyIncarnation: mode === 'Root publish' }), { child, launch } = await f.launch(), context = { dataDir: f.data, id: f.id, launch }
   const workers = createWorkspaceWorkerJournal(child, context), modules = createWorkspaceModuleJournal(child, context), processes = createWorkspaceProcessJournal(child, context)
   let files = createWorkspaceFileJournal(child, context)
   try {
     const fixedWorkers = f.closureWorker ? [f.closureWorker] : []
     await workers.capture(fixedWorkers); await workers.captureProcesses([]); await modules.capture([])
     await processes.prepare(); await processes.observe([]); await processes.complete()
-    await workers.prepare(fixedWorkers); await workers.complete([]); await modules.prepare([]); await modules.complete([]); await processes.confirmExecutionExit()
+    await workers.prepare(fixedWorkers); await workers.complete(fixedWorkers.flatMap(worker => worker.incarnations.map(item => ({ worker_id: worker.worker_id, incarnation_id: item.incarnation_id, status: 'submitted' })))); await modules.prepare([]); await modules.complete([]); await processes.confirmExecutionExit()
     if (mode === 'confirmed') {
       const early = createWorkspaceWorkerJournal(child, context)
       try { await assert.rejects(early.verifyClosureReadiness(), { code: 'CRABOT_WORKSPACE_JOURNAL_UNAVAILABLE' }) } finally { early.close() }
@@ -773,6 +782,50 @@ for (const mode of ['confirmed', 'lost acknowledgement', 'changed source', 'copy
               assert.equal(fs.readFileSync(path.join(f.root, 'outside-project/kept'), 'utf8'), 'external project work')
               assert.equal(fs.existsSync(f.before.storage_root), false)
               assert.equal(workspaceMaintenancePending(f.data), true)
+              if (mode === 'Root publish') {
+                const { locateWorkspaceRelocationHistory } = await import('../workspace-relocation-history.mjs')
+                const query = { dataDir: f.data, managerKey: f.closureWorker.manager_key, workerId: f.closureWorker.worker_id, incarnationId: 'history-mainline' }
+                const beforeRoot = f.closureWorker.incarnations[0].workspace, afterRoot = path.join(f.target, path.relative(f.before.storage_root, beforeRoot))
+                const location = await locateWorkspaceRelocationHistory(query)
+                assert.deepEqual(location, { intent_id: f.id, manager_key: query.managerKey, worker_id: query.workerId, incarnation_id: query.incarnationId, before_root: beforeRoot, after_root: afterRoot })
+                assert.equal(fs.readFileSync(path.join(location.after_root, 'history.txt'), 'utf8'), 'original history artifact')
+                for (const change of [{ managerKey: 'other::manager' }, { workerId: 'new-worker' }, { incarnationId: 'new-incarnation' }]) assert.equal(await locateWorkspaceRelocationHistory({ ...query, ...change }), null)
+                await assert.rejects(locateWorkspaceRelocationHistory({ ...query, workspace: f.target }))
+                const originalStorage = process.env.WORKER_WORKSPACES_DIR
+                try { process.env.WORKER_WORKSPACES_DIR = f.root; await assert.rejects(locateWorkspaceRelocationHistory(query)) }
+                finally { if (originalStorage === undefined) delete process.env.WORKER_WORKSPACES_DIR; else process.env.WORKER_WORKSPACES_DIR = originalStorage }
+                await f.catalog.update('default', { expected_revision: after.revision, name: 'updated after migration', description: '' })
+                assert.deepEqual(await locateWorkspaceRelocationHistory(query), location)
+                fs.mkdirSync(beforeRoot, { recursive: true }); fs.writeFileSync(path.join(beforeRoot, 'history.txt'), 'unrelated recreated source')
+                assert.deepEqual(await locateWorkspaceRelocationHistory(query), location)
+                const retained = afterRoot + '-retained'
+                fs.renameSync(afterRoot, retained)
+                try {
+                  fs.symlinkSync(retained, afterRoot, process.platform === 'win32' ? 'junction' : 'dir')
+                  await assert.rejects(locateWorkspaceRelocationHistory(query))
+                } finally { fs.unlinkSync(afterRoot); fs.renameSync(retained, afterRoot) }
+                const retainedRoot = f.target + '-retained'
+                fs.renameSync(f.target, retainedRoot)
+                try { fs.mkdirSync(f.target); await assert.rejects(locateWorkspaceRelocationHistory(query)) }
+                finally { fs.rmdirSync(f.target); fs.renameSync(retainedRoot, f.target) }
+                assert.deepEqual(await locateWorkspaceRelocationHistory(query), location)
+                const read = fs.promises.readFile, selectedBeforeRead = fs.readFileSync(selectedFile)
+                let changedDuringRead = false
+                const mock = t.mock.method(fs.promises, 'readFile', async function(file, ...args) {
+                  const body = await read.call(this, file, ...args)
+                  if (file === path.join(control, 'catalog.json') && !changedDuringRead) {
+                    changedDuringRead = true
+                    fs.writeFileSync(selectedFile, JSON.stringify({ ...JSON.parse(selectedBeforeRead), catalog_revision: -1 }))
+                  }
+                  return body
+                })
+                try { await assert.rejects(locateWorkspaceRelocationHistory(query)); assert.equal(changedDuringRead, true) }
+                finally { mock.mock.restore(); fs.writeFileSync(selectedFile, selectedBeforeRead) }
+                await f.close()
+                assert.deepEqual(await locateWorkspaceRelocationHistory(query), location)
+                assert.deepEqual(fs.readFileSync(f.ledgerFile), closedBytes); assert.deepEqual(fs.readFileSync(retirementFile), retirementBytes)
+                assert.equal(workspaceMaintenancePending(f.data), true)
+              }
             }
             return
           }
