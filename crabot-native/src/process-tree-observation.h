@@ -109,22 +109,30 @@ static napi_value CaptureProcessTreeGeneration(napi_env env, napi_callback_info 
       stage = "pinned-refresh";
       for (size_t i = 0; i < processes.size(); i++) {
         auto& process = *processes[i];
+        stage = i == 0 ? "pinned-refresh-root-exit" : "pinned-refresh-child-exit";
         if (ObservedProcessExited(process)) {
           if (i == 0) throw std::runtime_error("Original process root exited");
           if (!process.enumeratedAfterExit) { enumerate(process); anotherPass = true; }
           continue;
         }
         Identity current;
+        stage = i == 0 ? "pinned-refresh-root-inspect" : "pinned-refresh-child-inspect";
         try { current = Inspect(process.identity.pid); }
         catch (...) {
           if (i != 0 && ObservedProcessExited(process)) { anotherPass = true; continue; }
           throw;
         }
+        stage = "pinned-refresh-identity-present";
         if (!current.pid) {
           if (ObservedProcessExited(process)) { anotherPass = true; continue; }
           throw std::runtime_error("Live held process identity unavailable");
         }
-        if (current.owner != owner || current.started != process.identity.started || current.parent != process.identity.parent) throw std::runtime_error("Live held process generation changed");
+        stage = "pinned-refresh-owner";
+        if (current.owner != owner) throw std::runtime_error("Live held process owner changed");
+        stage = "pinned-refresh-birth";
+        if (current.started != process.identity.started) throw std::runtime_error("Live held process birth changed");
+        stage = "pinned-refresh-parent";
+        if (current.parent != process.identity.parent) throw std::runtime_error("Live held process parent changed");
         process.identity.executable = current.executable;
       }
       if (!anotherPass && offset == processes.size()) break;

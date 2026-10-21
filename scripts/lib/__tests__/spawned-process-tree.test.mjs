@@ -61,7 +61,7 @@ test('Windows repeatedly captures the actual just-spawned carrier before applica
   }
 })
 
-for (const stage of ['pinned-open-identity', 'pinned-children-complete', 'pinned-child-ownership']) test('a rejected pinned observation preserves the exact native stage without a fallback: ' + stage, () => {
+for (const stage of ['pinned-open-identity', 'pinned-children-complete', 'pinned-child-ownership', 'pinned-refresh-child-inspect', 'pinned-refresh-parent', 'pinned-refresh-birth']) test('a rejected pinned observation preserves the exact native stage without a fallback: ' + stage, () => {
   const f = fixture(); let calls = 0
   f.api.captureProcessTreeGeneration = () => { calls++; throw Object.assign(new Error('Native observation denied'), { code: 'CRABOT_PROCESS_SCOPE', stage }) }
   f.api.listChildProcessIds = () => { assert.fail('A rejected pinned scope must not fall back to a weaker snapshot') }

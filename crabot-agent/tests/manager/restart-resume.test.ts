@@ -291,7 +291,7 @@ describe('Manager restart continuation', () => {
     if (queuedSchedule) expect(requests.join('\n')).toContain('QUEUED_NEW_WAKE')
     if (kind === 'daily-human') expect(requests[0]).not.toContain('PRESERVE_NEW_WAKE')
     expect(write).toHaveBeenCalledOnce()
-    expect(await store.loadCheckpoint(KEY)).toBeUndefined()
+    await vi.waitFor(async () => expect(await store.loadCheckpoint(KEY)).toBeUndefined())
   })
 
   it.each(['completed', 'newer read', 'read failure'] as const)('does not install an obsolete checkpoint after %s', async mode => {

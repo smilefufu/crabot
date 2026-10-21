@@ -71,7 +71,19 @@ test('Windows does not resume when new content appears in the initially empty pr
 })
 
 test('Windows rejects forged, released, overlapping and nonempty targets before creating a copy process', { skip: process.platform !== 'win32' }, t => {
-  const f = fixture(t), before = native.listChildProcessIds(process.pid)
+  const f = fixture(t)
+  const observeChildren = () => {
+    const result = new Map()
+    for (const pid of native.listChildProcessIds(process.pid)) {
+      let current
+      try { current = native.inspectProcess(pid) }
+      catch (error) { if (native.isProcessExited(pid) === true) continue; throw error }
+      if (current) result.set(pid, current)
+      else assert.equal(native.isProcessExited(pid), true)
+    }
+    return result
+  }
+  const before = observeChildren()
   for (const args of [[null, f.b], [f.a, {}], [f.a, f.a], [f.a, f.b, 'extra']]) assert.throws(() => native.createWorkspaceCopyJob(...args), { code: 'CRABOT_WINDOWS_COPY_ACTOR' })
   const nested = path.join(f.source, 'nested-target'); native.createPrivateDirectory(nested)
   const nestedPin = native.pinDirectory(nested)
@@ -80,7 +92,8 @@ test('Windows rejects forged, released, overlapping and nonempty targets before 
   assert.throws(() => native.createWorkspaceCopyJob(f.a, f.b), { code: 'CRABOT_WINDOWS_COPY_ACTOR' })
   native.releaseDirectoryPin(f.b)
   assert.throws(() => native.createWorkspaceCopyJob(f.a, f.b), { code: 'CRABOT_WINDOWS_COPY_ACTOR' })
-  assert.deepEqual(native.listChildProcessIds(process.pid), before); assert.equal(fs.readFileSync(path.join(f.target, 'keep'), 'utf8'), 'user bytes')
+  for (const [pid, current] of observeChildren()) assert.ok(native.sameProcess(before.get(pid), current), 'No new child generation may appear after rejected copy requests')
+  assert.equal(fs.readFileSync(path.join(f.target, 'keep'), 'utf8'), 'user bytes')
 })
 
 test('Windows kills its suspended copy on unexpected host exit without needing a later PID-based cleanup', { skip: process.platform !== 'win32', timeout: 20000 }, async t => {
