@@ -69,6 +69,41 @@ for (const impl of ['claude-code', 'codex'] as const) describe('relocated native
     await adapter.readTrace(handle)
     expect(tmux.isAlive).toHaveBeenCalledOnce(); expect((adapter as any).runtimes.size).toBe(1)
   })
+  if (impl === 'claude-code') {
+    it('relocates an internal Claude child directory while rejecting a redirected mapped source', async () => {
+      const originalProjects = path.join(before, '.claude-projects'), slug = before.replace(/[^a-zA-Z0-9]/g, '-')
+      const directory = path.join(after, '.claude-projects', slug, session, 'subagents'), childId = 'agent-childabc'
+      const body = JSON.stringify({ agentId: childId, timestamp: time, type: 'assistant', message: { content: 'mapped child history', stop_reason: 'end_turn' } }) + '\n'
+      await fs.mkdir(directory, { recursive: true }); await fs.writeFile(path.join(directory, childId + '.jsonl'), body)
+      const reader = new ClaudeCodeAdapter({ dataDir: data, tmux, claudeProjectsDir: originalProjects, readWorkspaceHistory: async () => proof })
+      expect((await reader.readSubagentTrace(handle, childId)).events[0].summary).toBe('mapped child history')
+      const retained = directory + '-retained', outside = path.join(root, 'outside-children')
+      await fs.rename(directory, retained); await fs.mkdir(outside)
+      await fs.writeFile(path.join(outside, childId + '.jsonl'), body)
+      await fs.symlink(outside, directory, process.platform === 'win32' ? 'junction' : 'dir')
+      await expect(reader.listSubagents(handle)).rejects.toThrow()
+      expect(tmux.isAlive).not.toHaveBeenCalled(); expect((reader as any).runtimes.size).toBe(0)
+      expect(await fs.readFile(path.join(outside, childId + '.jsonl'), 'utf8')).toBe(body)
+      expect(await fs.readFile(metaFile, 'utf8')).toBe(originalMeta)
+    })
+    it('reads retained native child JSONL under the original project slug without rebuilding its parent', async () => {
+      const childId = 'agent-childabc', childFile = path.join(projects, before.replace(/[^a-zA-Z0-9]/g, '-'), session, 'subagents', childId + '.jsonl')
+      const body = [
+        JSON.stringify({ agentId: childId, agentType: 'Explore', timestamp: time, type: 'user', message: { content: 'original child request' } }),
+        JSON.stringify({ agentId: childId, timestamp: time, type: 'assistant', message: { content: 'original child answer', stop_reason: 'end_turn' } }),
+        '{"agentId":"unfinished child tail"',
+      ].join('\n')
+      await fs.mkdir(path.dirname(childFile), { recursive: true }); await fs.writeFile(childFile, body)
+      expect(await adapter.listSubagents(handle)).toMatchObject([{ subagent_id: childId, status: 'completed', task: 'original child request' }])
+      expect(await adapter.getSubagent(handle, childId)).toMatchObject({ subagent_id: childId })
+      const trace = await adapter.readSubagentTrace(handle, childId)
+      expect(trace.events.map(event => event.summary)).toEqual(['original child request', 'original child answer'])
+      expect(trace.nextCursor).toEqual({ offset: 2 })
+      expect((await adapter.readSubagentTrace(handle, childId, trace.nextCursor)).events).toEqual([])
+      expect(tmux.isAlive).not.toHaveBeenCalled(); expect((adapter as any).runtimes.size).toBe(0)
+      expect(await fs.readFile(childFile, 'utf8')).toBe(body); expect(await fs.readFile(metaFile, 'utf8')).toBe(originalMeta)
+    })
+  }
   if (impl === 'codex') {
     it('does not relocate a pre-existing private profile outside the original workspace', async () => {
       const home = path.join(root, 'private-profile'), file = path.join(home, 'sessions/2026/10/21', path.basename(source))

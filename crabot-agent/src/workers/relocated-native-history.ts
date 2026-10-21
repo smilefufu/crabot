@@ -61,7 +61,9 @@ export function relocatedNativePath(history: WorkspaceHistoryCoordinates, origin
   return within(history.before_root, original) ? path.join(history.after_root, path.relative(history.before_root, original)) : original
 }
 
-export async function nativeHistoryDirectory(source: NonNullable<Awaited<ReturnType<typeof nativeHistorySource>>>, original: string): Promise<string> {
+export type NativeHistorySource = NonNullable<Awaited<ReturnType<typeof nativeHistorySource>>>
+
+export async function nativeHistoryDirectory(source: NativeHistorySource, original: string): Promise<string> {
   await source.verify()
   const directory = relocatedNativePath(source.history, original), canonical = await fs.realpath(directory)
   if (directory !== original && (!within(source.history.after_root, canonical) || await fs.realpath(source.history.after_root) !== source.history.after_root)) throw failure()
@@ -77,7 +79,7 @@ export function nativeHistorySourcePath(history: WorkspaceHistoryCoordinates, or
 }
 
 /** Read one original native source. This cannot launch, provision, restore, watch or mutate a CLI. */
-export async function readNativeHistoryText(source: NonNullable<Awaited<ReturnType<typeof nativeHistorySource>>>, original: string): Promise<string> {
+export async function readNativeHistoryText(source: NativeHistorySource, original: string): Promise<string> {
   await source.verify()
   const file = relocatedNativePath(source.history, original), canonical = await fs.realpath(file)
   if (file !== original && (!within(source.history.after_root, canonical) || await fs.realpath(source.history.after_root) !== source.history.after_root)) throw failure()

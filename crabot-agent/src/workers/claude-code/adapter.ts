@@ -1,4 +1,4 @@
-import { workspaceHistoryFor, nativeHistorySource, readNativeHistoryText, type WorkspaceHistoryReader } from '../relocated-native-history.js'
+import { workspaceHistoryFor, nativeHistorySource, readNativeHistoryText, nativeHistoryDirectory, type NativeHistorySource, type WorkspaceHistoryReader } from '../relocated-native-history.js'
 import type { WorkspaceRelocationIncarnation } from 'crabot-shared'
 import { captureMetadataNativeProcesses } from '../cold-native-processes.js'
 import { captureHeadlessNativeProcesses } from '../headless-native-processes.js'
@@ -275,6 +275,7 @@ interface ClaudeTraceRecord {
 }
 
 interface ClaudeSubagentRecord {
+  readonly history?: NativeHistorySource
   readonly filePath: string
   readonly summary: WorkerSubagentSummary
 }
@@ -1586,7 +1587,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     if (!child) throw new Error(`ClaudeCodeAdapter: subagent not found: ${subagentId}`)
     let raw: string
     try {
-      raw = await fs.readFile(child.filePath, 'utf-8')
+      raw = child.history ? await readNativeHistoryText(child.history, child.filePath) : await fs.readFile(child.filePath, 'utf-8')
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
         return {
@@ -1670,26 +1671,34 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
   }
 
   private async readSubagentRecords(h: IncarnationHandle): Promise<ReadonlyArray<ClaudeSubagentRecord>> {
-    const runtime = await this.ensureRuntime(h)
-    if (!runtime?.workspaceRoot || !runtime.sessionId) return []
-    const childrenDir = join(this.claudeProjectsDir, projectSlug(runtime.workspaceRoot), runtime.sessionId, 'subagents')
+    const historical = await nativeHistorySource(h, this.deps.readWorkspaceHistory, () => this.readMetaFile(join(this.deps.dataDir, h.worker_id), h.seq))
+    let childrenDir: string
+    if (historical) {
+      childrenDir = join(this.claudeProjectsDir, projectSlug(historical.history.before_root), h.session_ref, 'subagents')
+    } else {
+      const runtime = await this.ensureRuntime(h)
+      if (!runtime?.workspaceRoot || !runtime.sessionId) return []
+      childrenDir = join(this.claudeProjectsDir, projectSlug(runtime.workspaceRoot), runtime.sessionId, 'subagents')
+    }
     let entries: import('node:fs').Dirent[]
     try {
-      entries = await fs.readdir(childrenDir, { withFileTypes: true })
+      const directory = historical ? await nativeHistoryDirectory(historical, childrenDir) : childrenDir
+      entries = await fs.readdir(directory, { withFileTypes: true })
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') { await historical?.verify(); return [] }
       throw error
     }
     const children = await Promise.all(entries
       .filter((entry) => entry.isFile() && /^agent-[a-zA-Z0-9]+\.jsonl$/.test(entry.name))
-      .map(async (entry) => this.readSubagentRecord(h.worker_id, join(childrenDir, entry.name))))
+      .map(async (entry) => this.readSubagentRecord(h.worker_id, join(childrenDir, entry.name), historical ?? undefined)))
+    await historical?.verify()
     return children.filter((child): child is ClaudeSubagentRecord => child !== undefined)
   }
 
-  private async readSubagentRecord(workerId: string, filePath: string): Promise<ClaudeSubagentRecord | undefined> {
+  private async readSubagentRecord(workerId: string, filePath: string, history?: NativeHistorySource): Promise<ClaudeSubagentRecord | undefined> {
     let raw: string
     try {
-      raw = await fs.readFile(filePath, 'utf-8')
+      raw = history ? await readNativeHistoryText(history, filePath) : await fs.readFile(filePath, 'utf-8')
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
       throw error
@@ -1715,6 +1724,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       ? last.timestamp
       : undefined
     return {
+      ...(history ? { history } : {}),
       filePath,
       summary: {
         subagent_id: first.agentId,
