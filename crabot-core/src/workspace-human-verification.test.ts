@@ -1861,6 +1861,14 @@ describe.skipIf(process.env.GITHUB_ACTIONS !== 'true' || process.env.CRABOT_WORK
     const lock = await locks.acquireWorkspaceRelocationLock(f.data, f.params.intent_id)
     const runtime = f.manager.modules.get('crabot-agent'); runtime.skip_health_check = false
     const oldChild = f.manager.processes.get('crabot-agent'), oldMemory = f.manager.processes.get('memory-default')
+    const native = require('../../scripts/lib/process-identity.cjs'), inspect = native.inspectProcess, memoryImages = new Map<string, unknown>()
+    const observer = businessMemory ? vi.spyOn(native, 'inspectProcess').mockImplementation((pid: number) => {
+      const identity = inspect(pid)
+      if (pid === f.manager.processes.get('memory-default')?.pid && identity && memoryImages.size < 8) {
+        memoryImages.set(JSON.stringify([pid, identity.started, identity.executable]), { pid, started: identity.started, executable: identity.executable })
+      }
+      return identity
+    }) : undefined
     try {
       const result = await f.manager.verifyWorkspaceRelocationValidationHealth(f.params, 'fixture-human')
       expect(f.manager.processes.get('crabot-agent')).not.toBe(oldChild)
@@ -1884,10 +1892,12 @@ describe.skipIf(process.env.GITHUB_ACTIONS !== 'true' || process.env.CRABOT_WORK
       expect(records.readWorkspaceRelocationHealth(f.data, f.params.intent_id).root_proof).toEqual(result.root_verified)
       expect((await fetch(`http://127.0.0.1:${f.port}/api/friends`, { headers: { Authorization: 'Bearer fixture-human' } })).status).toBe(200)
     } catch (error) {
+      if (businessMemory) console.error('[Workspace Memory kernel images]', [...memoryImages.values()])
       if (businessMemory) console.error('[Workspace business Memory]', (await fs.readFile(path.join(f.data, 'logs/memory-default.log'), 'utf8').catch(() => '')).slice(-6000))
       console.error('[Workspace business startup]', (await fs.readFile(path.join(f.data, 'logs/crabot-agent.log'), 'utf8').catch(() => '')).slice(-6000))
       throw error
     } finally {
+      observer?.mockRestore()
       const child = f.manager.workspaceValidationProof?.result.coordinator
       if (child?.connected) { const ended = once(child, 'exit'); child.disconnect(); await ended }
       locks.releaseCliLock(lock); await f.cleanup()

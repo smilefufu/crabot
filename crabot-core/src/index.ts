@@ -1701,8 +1701,15 @@ export class ModuleManager {
               if (runtime.pid !== undefined || runtime.status === 'running' || runtime.status === 'starting' && scope.module_id !== pendingModule) throw failure()
               continue
             }
-            if (this.processes.get(scope.module_id) !== current.child || this.childStates.get(current.child) !== current.state
-              || current.state.finalizeStarted || runtime.pid !== current.child.pid || !native.sameProcess(current.process, native.inspectProcess(current.child.pid))) throw failure()
+            if (this.processes.get(scope.module_id) !== current.child) throw Object.assign(failure(), { stage: 'new-module-child' })
+            if (this.childStates.get(current.child) !== current.state) throw Object.assign(failure(), { stage: 'new-module-state' })
+            if (current.state.finalizeStarted) throw Object.assign(failure(), { stage: 'new-module-finalizing' })
+            if (runtime.pid !== current.child.pid) throw Object.assign(failure(), { stage: 'new-module-runtime-pid' })
+            const actual = native.inspectProcess(current.child.pid)
+            if (!native.sameProcess(current.process, actual)) {
+              const sameGeneration = actual && actual.pid === current.process.pid && actual.owner === current.process.owner && actual.started === current.process.started
+              throw Object.assign(failure(), { stage: sameGeneration ? 'new-module-executable' : 'new-module-generation' })
+            }
           }
         }
         const verifyRegistrations = async (): Promise<void> => {

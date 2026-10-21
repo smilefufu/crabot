@@ -1,4 +1,5 @@
 #ifdef _WIN32
+struct WorkspaceMetadataReadbackError : std::runtime_error { using std::runtime_error::runtime_error; };
 struct WorkspaceMetadataObject {
   WorkspaceSyncHandle file{nullptr, CloseHandle};
   FILE_ID_INFO id{};
@@ -50,6 +51,12 @@ static napi_value CopyPinnedWorkspaceMetadata(napi_env env, napi_callback_info i
       if (pair->source.directory != pair->target.directory
         || (!pair->source.directory && pair->source.standard.EndOfFile.QuadPart != pair->target.standard.EndOfFile.QuadPart)) throw std::runtime_error("Copied workspace metadata type or size differs");
       CopyWorkspaceObjectMetadata(pair->source.file.get(), pair->target.file.get(), to);
+      std::vector<std::string> sourceBlockers, targetBlockers;
+      std::string sourceOwner, sourceGroup, targetOwner, targetGroup;
+      if (MetadataSecurity(pair->source.file.get(), sourceBlockers, sourceOwner, sourceGroup)
+        != MetadataSecurity(pair->target.file.get(), targetBlockers, targetOwner, targetGroup)) {
+        throw WorkspaceMetadataReadbackError("Copied workspace security did not retain the original descriptor");
+      }
       return pair;
     };
     auto root = openPair(source->path, target->path);
@@ -72,6 +79,8 @@ static napi_value CopyPinnedWorkspaceMetadata(napi_env env, napi_callback_info i
     if (DirectoryIdText(MoveDirectoryId(source->path)) != source->identity
       || DirectoryIdText(MoveDirectoryId(target->path)) != target->identity) throw std::runtime_error("Workspace metadata roots changed");
     napi_value result; napi_get_undefined(env, &result); return result;
+  } catch (const WorkspaceMetadataReadbackError& error) {
+    napi_throw_error(env, "CRABOT_WORKSPACE_METADATA_READBACK", error.what()); return nullptr;
   } catch (const std::exception& error) { napi_throw_error(env, "CRABOT_WORKSPACE_METADATA", error.what()); return nullptr; }
 }
 #endif

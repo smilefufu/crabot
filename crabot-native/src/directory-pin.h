@@ -111,9 +111,9 @@ static void CopyWorkspaceObjectMetadata(HANDLE source, HANDLE target, const std:
     if ((!sourceLabel || !sourceLabel->AceCount) && targetLabel && targetLabel->AceCount) throw std::runtime_error("Cannot remove an existing target access label");
     // Preserve the source DACL inheritance model. Tree callers restore children after their parent.
     // The full target path remains fixed by its live root/ancestor handles throughout this path-only API.
-    if (!SetFileSecurityW(targetPath.c_str(), DACL_SECURITY_INFORMATION, sourceDescriptor)
-      || (sourceLabel && sourceLabel->AceCount && SetSecurityInfo(target, SE_FILE_OBJECT, LABEL_SECURITY_INFORMATION, nullptr, nullptr, nullptr, sourceLabel) != ERROR_SUCCESS)
-      || !SetFileInformationByHandle(target, FileBasicInfo, &basic, sizeof(basic))) throw std::runtime_error("Cannot preserve pinned directory metadata");
+    if ((sourceLabel && sourceLabel->AceCount && SetSecurityInfo(target, SE_FILE_OBJECT, LABEL_SECURITY_INFORMATION, nullptr, nullptr, nullptr, sourceLabel) != ERROR_SUCCESS)
+      || !SetFileInformationByHandle(target, FileBasicInfo, &basic, sizeof(basic))
+      || !SetFileSecurityW(targetPath.c_str(), DACL_SECURITY_INFORMATION, sourceDescriptor)) throw std::runtime_error("Cannot preserve pinned directory metadata");
     LocalFree(sourceDescriptor); LocalFree(targetDescriptor);
   } catch (...) {
     if (sourceDescriptor) LocalFree(sourceDescriptor);
