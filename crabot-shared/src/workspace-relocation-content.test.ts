@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import os from 'node:os'
-import { verifyWorkspaceRelocationContent } from './workspace-relocation-content.js'
+import { verifyWorkspaceRelocationContent, inspectWorkspaceRelocationContent } from './workspace-relocation-content.js'
 
 async function fixture(t: test.TestContext) {
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'workspace-copy-content-中文 space-')))
@@ -99,4 +99,50 @@ test('cancelling after a real content chunk closes its file handle before return
   await assert.rejects(verifyWorkspaceRelocationContent(source, target, { signal: controller.signal }), { code: 'WORKSPACE_SCAN_CANCELLED' })
   assert.equal(read, true); assert.equal(closed, true)
   assert.equal((await fs.stat(file)).size, 4 * 1024 * 1024)
+})
+
+
+test('relative content identity survives a real root rename while preserving hidden bytes and empty directories', async t => {
+  const { source, target } = await fixture(t)
+  await fs.mkdir(path.join(source, '.git')); await fs.mkdir(path.join(source, 'empty'))
+  await fs.writeFile(path.join(source, '.git/config'), Buffer.from([0, 255, 1]))
+  const before = await inspectWorkspaceRelocationContent(source, 'rename'), original = await fs.stat(source, { bigint: true })
+  await fs.rename(source, target)
+  const after = await inspectWorkspaceRelocationContent(target, 'rename')
+  assert.equal(after.fingerprint, before.fingerprint); assert.equal(after.files, 1); assert.equal(after.verified_bytes, 3)
+  assert.equal((await fs.stat(target, { bigint: true })).ino, original.ino)
+  await assert.rejects(fs.stat(source), { code: 'ENOENT' })
+})
+
+for (const mode of ['same-size bytes', 'empty directory', 'hard-link topology', 'link spelling']) test('stable content identity detects ' + mode, async t => {
+  const { source } = await fixture(t), file = path.join(source, 'first')
+  await fs.writeFile(file, 'original')
+  if (mode === 'hard-link topology') await fs.link(file, path.join(source, 'second'))
+  if (mode === 'link spelling') await fs.symlink('first', path.join(source, 'relative'))
+  const before = await inspectWorkspaceRelocationContent(source, 'rename')
+  if (mode === 'same-size bytes') await fs.writeFile(file, 'modified')
+  if (mode === 'empty directory') await fs.mkdir(path.join(source, 'new-empty'))
+  if (mode === 'hard-link topology') { await fs.unlink(path.join(source, 'second')); await fs.copyFile(file, path.join(source, 'second')) }
+  if (mode === 'link spelling') { await fs.unlink(path.join(source, 'relative')); await fs.symlink('./first', path.join(source, 'relative')) }
+  const after = await inspectWorkspaceRelocationContent(source, 'rename')
+  assert.notEqual(after.fingerprint, before.fingerprint)
+})
+
+test('source snapshot cancellation after actual streamed bytes closes the opened descriptor', async t => {
+  const { source } = await fixture(t), file = path.join(source, 'large')
+  await fs.writeFile(file, Buffer.alloc(1024 * 1024, 7))
+  const controller = new AbortController(), open = fs.open.bind(fs)
+  let read = false, closed = false
+  t.mock.method(fs, 'open', async (...args: Parameters<typeof fs.open>) => {
+    const handle = await open(...args)
+    if (args[0] === file) {
+      const stream = handle.createReadStream.bind(handle), close = handle.close.bind(handle)
+      handle.createReadStream = options => { const result = stream(options); result.once('data', () => { read = true; controller.abort() }); return result }
+      handle.close = async () => { await close(); closed = true }
+    }
+    return handle
+  })
+  await assert.rejects(inspectWorkspaceRelocationContent(source, 'rename', { signal: controller.signal }), { code: 'WORKSPACE_SCAN_CANCELLED' })
+  assert.equal(read, true); assert.equal(closed, true)
+  assert.equal((await fs.stat(file)).size, 1024 * 1024)
 })

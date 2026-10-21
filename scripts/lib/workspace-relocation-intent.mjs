@@ -798,9 +798,9 @@ export function readWorkspaceRelocationFilePlan(dataDir, id) {
   if (record === undefined) { absent(ctx, [fileActorsFile]); return null }
   const exit = readWorkspaceRelocationExecutionExit(dataDir, id)
   if (!exit || !fields(record, ['schema_version', 'intent_id', 'intent_sha256', 'execution_exit_sha256', 'catalog_sha256',
-    'mode', 'source_observation', 'staging_parent', 'staging_parent_native_id', 'staging_path', 'created_at'])
+    'mode', 'source_observation', 'source_content_sha256', 'staging_parent', 'staging_parent_native_id', 'staging_path', 'created_at'])
     || record.schema_version !== 1 || record.intent_id !== id || record.intent_sha256 !== sha256CanonicalJson(intent)
-    || record.execution_exit_sha256 !== sha256CanonicalJson(exit) || !digest(record.catalog_sha256)
+    || record.execution_exit_sha256 !== sha256CanonicalJson(exit) || !digest(record.catalog_sha256) || !digest(record.source_content_sha256)
     || record.mode !== (intent.source.dev === intent.target_ancestor.dev ? 'rename' : 'copy') || !validIdentity(record.staging_parent)
     || record.staging_parent.path !== (intent.target_identity ? path.dirname(intent.target) : intent.target_ancestor.path)
     || record.staging_parent.dev !== intent.target_ancestor.dev
@@ -846,10 +846,12 @@ export async function prepareWorkspaceRelocationFilePlan({ dataDir, id, signal }
   try { fs.lstatSync(stagingPath); fail() } catch (error) { if (error.code !== 'ENOENT') throw error }
   const { inspectWorkspaceFileSource } = await import('./workspace-copy.mjs')
   const observation = await inspectWorkspaceFileSource(intent.source.path, preview.mode, { signal })
-  if (observation.tree_fingerprint !== preview.inspection.fingerprint
+  const { inspectWorkspaceRelocationContent } = await import('../../crabot-shared/dist/workspace-relocation-content.js')
+  const content = await inspectWorkspaceRelocationContent(intent.source.path, preview.mode, { signal })
+  if (observation.tree_fingerprint !== preview.inspection.fingerprint || content.tree_fingerprint !== observation.tree_fingerprint
     || sha256CanonicalJson(await catalog.snapshot()) !== sha256CanonicalJson(snapshot)) fail()
   const record = { schema_version: 1, intent_id: id, intent_sha256: sha256CanonicalJson(intent), execution_exit_sha256: sha256CanonicalJson(exit),
-    catalog_sha256: sha256CanonicalJson(snapshot), mode: preview.mode, source_observation: observation, staging_parent: stagingParent,
+    catalog_sha256: sha256CanonicalJson(snapshot), mode: preview.mode, source_observation: observation, source_content_sha256: content.fingerprint, staging_parent: stagingParent,
     staging_parent_native_id: nativeId, staging_path: stagingPath, created_at: new Date().toISOString() }
   publishPrivateJson(ctx, path.join(ctx.control, filePlanFile), record, 65536, () => {
     verify()

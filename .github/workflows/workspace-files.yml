@@ -48,6 +48,9 @@ jobs:
       - run: node scripts/build-native.mjs
       - run: pnpm --dir crabot-shared install --frozen-lockfile
       - run: pnpm --dir crabot-shared build
+      - name: Validate stable workspace content snapshots
+        working-directory: crabot-shared
+        run: node --import tsx --test src/workspace-relocation-content.test.ts
       - name: Windows delayed instance registration regression
         if: runner.os == 'Windows'
         run: |

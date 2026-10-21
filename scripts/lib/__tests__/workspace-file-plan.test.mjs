@@ -106,6 +106,8 @@ test('original coordinator publishes one fixed file plan without moving source o
   const plan = records.readWorkspaceRelocationFilePlan(f.data, f.id)
   assert.deepEqual(response.result.plan, plan); assert.equal(plan.mode, 'rename')
   assert.equal(plan.catalog_sha256, sha256CanonicalJson(f.before))
+  const { inspectWorkspaceRelocationContent } = await import('../../../crabot-shared/dist/workspace-relocation-content.js')
+  assert.equal(plan.source_content_sha256, (await inspectWorkspaceRelocationContent(f.source, 'rename')).fingerprint)
   assert.equal(plan.execution_exit_sha256, sha256CanonicalJson(records.readWorkspaceRelocationExecutionExit(f.data, f.id)))
   assert.equal(plan.staging_path, path.join(f.root, '.crabot-workspace-' + f.id))
   assert.equal(fs.existsSync(plan.staging_path), false); assert.equal(fs.existsSync(f.target), false)
@@ -134,11 +136,11 @@ for (const scenario of ['missing-exit', 'lost-lock', 'stale-catalog', 'target-oc
   if (scenario === 'target-occupied') assert.equal(fs.readFileSync(path.join(f.target, 'keep'), 'utf8'), 'user content')
 })
 
-for (const damage of ['hash', 'extra', 'mode', 'parent', 'hardlink', 'link']) test('damaged fixed file plan cannot be replaced or dispatched again: ' + damage, async t => {
+for (const damage of ['hash', 'extra', 'mode', 'parent', 'content', 'hardlink', 'link']) test('damaged fixed file plan cannot be replaced or dispatched again: ' + damage, async t => {
   const f = await fixture(t); assert.equal((await f.command()).result.dispatch, 'dispatch')
   if (damage === 'hardlink') fs.linkSync(f.file, path.join(f.root, 'second-link'))
   else if (damage === 'link') { fs.renameSync(f.file, path.join(f.root, 'retained-plan')); fs.symlinkSync(path.join(f.root, 'retained-plan'), f.file) }
-  else { const plan = JSON.parse(fs.readFileSync(f.file)); if (damage === 'hash') plan.execution_exit_sha256 = '0'.repeat(64); else if (damage === 'mode') plan.mode = 'copy'; else if (damage === 'parent') { plan.staging_parent.path = f.source; plan.staging_path = path.join(f.source, '.crabot-workspace-' + f.id) } else plan.command = 'not permitted'; fs.writeFileSync(f.file, JSON.stringify(plan)) }
+  else { const plan = JSON.parse(fs.readFileSync(f.file)); if (damage === 'hash') plan.execution_exit_sha256 = '0'.repeat(64); else if (damage === 'mode') plan.mode = 'copy'; else if (damage === 'content') plan.source_content_sha256 = 'not-a-digest'; else if (damage === 'parent') { plan.staging_parent.path = f.source; plan.staging_path = path.join(f.source, '.crabot-workspace-' + f.id) } else plan.command = 'not permitted'; fs.writeFileSync(f.file, JSON.stringify(plan)) }
   const first = fs.readFileSync(f.file)
   assert.throws(() => records.readWorkspaceRelocationFilePlan(f.data, f.id), { code: 'WORKSPACE_RELOCATION_INVALID' })
   assert.ok((await f.command()).error); assert.deepEqual(fs.readFileSync(f.file), first)
