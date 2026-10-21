@@ -186,6 +186,11 @@ interface WorkspaceValidationLaunchResult extends WorkspaceRootSelectionResult {
   readonly validation_modules: ReadonlyArray<{ module_id: ModuleId; runtime_id: string; process: WorkerProcessIdentity }>
 }
 
+interface WorkspaceValidationHealthResult extends WorkspaceValidationLaunchResult {
+  readonly healthy_modules: ReadonlyArray<{ module_id: ModuleId; runtime_id: string }>
+  readonly root_verified: VerifyWorkspaceRelocationRuntimeResult
+}
+
 interface WorkspaceCoordinatorGrant {
   capture?: Promise<ReadonlyArray<WorkspaceRelocationWorker>>
   workersHash?: string
@@ -226,6 +231,7 @@ export class ModuleManager {
   private workspaceWorkerClosure?: { fingerprint: string; pending: Promise<WorkspaceWorkerClosureResult> }
   private workspaceRootSelection?: { fingerprint: string; pending: Promise<WorkspaceRootSelectionResult> }
   private workspaceValidationLaunch?: { fingerprint: string; pending: Promise<WorkspaceValidationLaunchResult> }
+  private workspaceValidationHealth?: { fingerprint: string; pending: Promise<WorkspaceValidationHealthResult> }
   private workspaceValidationProof?: {
     request: VerifyWorkspaceRelocationRequestParams
     result: WorkspaceValidationLaunchResult
@@ -1748,6 +1754,82 @@ export class ModuleManager {
       } catch (cause) { await this.closeWorkspaceCoordinatorChannel(child); throw Object.assign(failure(), { stage, cause }) }
     })
     this.workspaceValidationLaunch = { fingerprint, pending }
+    return pending
+  }
+
+  private verifyWorkspaceRelocationValidationHealth(request: VerifyWorkspaceRelocationRequestParams, bearer?: string): Promise<WorkspaceValidationHealthResult> {
+    request = Object.freeze({ ...request })
+    const fingerprint = sha256CanonicalJson(request)
+    const failure = () => Object.assign(new Error('迁移后的模块与目录尚未全部通过健康核验，已保留维护保护；未重试启动或探测。'), { code: 'SERVICE_UNAVAILABLE' })
+    if (this.workspaceValidationHealth) {
+      if (this.workspaceValidationHealth.fingerprint !== fingerprint) return Promise.reject(Object.assign(new Error('Workspace health intent cannot change'), { code: 'FORBIDDEN' }))
+      return this.workspaceValidationHealth.pending
+    }
+    const pending = Promise.resolve().then(async (): Promise<WorkspaceValidationHealthResult> => {
+      let child: ChildProcess | undefined, stage = 'launch'
+      try {
+        const launched = await this.startWorkspaceRelocationValidationModules(request, bearer), proof = this.workspaceValidationProof
+        child = launched.coordinator
+        if (!proof || proof.result !== launched) throw failure()
+        const assertCurrent = () => {
+          if (this.workspaceValidationProof !== proof) throw failure()
+          proof.assertCurrent()
+        }
+        const { openModuleRuntimeRpc } = require('../../scripts/lib/module-runtime-rpc.cjs')
+        const instanceId = this.runtimeRegistry.getInstanceId(), healthy: Array<{ module_id: ModuleId; runtime_id: string }> = []
+        stage = 'module-health'
+        for (const module of launched.validation_modules) {
+          const runtime = this.modules.get(module.module_id)!, deadline = Date.now() + 120000
+          stage = 'await-runtime-registration'
+          for (;;) {
+            await proof.verify(); assertCurrent()
+            const currentChild = this.processes.get(module.module_id), state = currentChild && this.childStates.get(currentChild)
+            if (!state || Date.now() > deadline || runtime.status === 'error' || runtime.status === 'stopped') throw failure()
+            if (state.reachedRunning && runtime.status === 'running') break
+            await new Promise(resolve => setTimeout(resolve, 100))
+          }
+          stage = 'module-health'
+          const rpc = await openModuleRuntimeRpc(module.process, runtime.port, { instance_id: instanceId, module_id: module.module_id, runtime_id: module.runtime_id },
+            { timeoutMs: this.config.health_check_timeout * 1000 })
+          try {
+            assertCurrent()
+            const result: HealthResult = await rpc.call('health', {})
+            assertCurrent()
+            if (result.status !== 'healthy') throw failure()
+            await proof.verify(); assertCurrent()
+            healthy.push({ module_id: module.module_id, runtime_id: module.runtime_id })
+          } finally { rpc.close() }
+        }
+        stage = 'root-probe'
+        const agent = launched.validation_modules.find(module => module.module_id === 'crabot-agent')
+        const credential = this.runtimeBearers.get('crabot-agent')
+        if (!agent || !credential) throw failure()
+        const assertBearer = () => {
+          assertCurrent()
+          if (this.runtimeBearers.get('crabot-agent') !== credential || credential.revoked
+            || this.processes.get('crabot-agent') !== credential.child) throw failure()
+        }
+        await proof.verify(); assertBearer()
+        const expected: VerifyWorkspaceRelocationRuntimeResult = { verified: true, intent_id: request.intent_id, intent_sha256: request.intent_sha256,
+          launch_id: proof.launchId, launch_sha256: proof.launchHash, root_selected_sha256: launched.root_selected_sha256,
+          instance_id: instanceId, module_id: 'crabot-agent', runtime_id: agent.runtime_id }
+        const rpc = await openModuleRuntimeRpc(agent.process, this.modules.get('crabot-agent')!.port,
+          { instance_id: instanceId, module_id: 'crabot-agent', runtime_id: agent.runtime_id }, { timeoutMs: 30000 })
+        try {
+          assertBearer()
+          const result = await rpc.call('verify_workspace_relocation_root', { intent_id: request.intent_id, launch_id: proof.launchId }, { authorizationBearer: credential.token })
+          assertBearer()
+          if (sha256CanonicalJson(result) !== sha256CanonicalJson(expected)) throw failure()
+        } finally { rpc.close() }
+        stage = 'final-verify'
+        await proof.verify(); assertBearer()
+        return Object.freeze({ ...launched, healthy_modules: Object.freeze(healthy.map(module => Object.freeze(module))), root_verified: Object.freeze(expected) })
+      } catch (cause) {
+        await this.closeWorkspaceCoordinatorChannel(child)
+        throw Object.assign(failure(), { stage, cause })
+      }
+    })
+    this.workspaceValidationHealth = { fingerprint, pending }
     return pending
   }
 

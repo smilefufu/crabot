@@ -71,6 +71,16 @@ async function waitForModuleHealth(mm: any, runtime: ModuleRuntime): Promise<voi
       // Preserve a bounded failure reason before the outer test deadline can fire.
       if (++failures <= 2) console.error('[finite lifecycle health]', { module_id: runtime.module_id,
         code: (error as NodeJS.ErrnoException).code, message: (error as Error).message })
+      if (failures === 2) {
+        let numeric: unknown
+        try {
+          const response = await fetch(`http://127.0.0.1:${runtime.port}/health`, { method: 'POST',
+            headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: 'finite-diagnostic', method: 'health', params: {} }), signal: AbortSignal.timeout(1000) })
+          const result = await response.json() as { data?: { status?: string } }
+          numeric = { status: response.status, health: result.data?.status }
+        } catch (error) { numeric = { code: (error as { cause?: NodeJS.ErrnoException }).cause?.code, name: (error as Error).name } }
+        console.error('[finite lifecycle numeric health] ' + JSON.stringify({ module_id: runtime.module_id, numeric }))
+      }
       return undefined
     }
   })

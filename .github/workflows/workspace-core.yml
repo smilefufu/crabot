@@ -67,6 +67,7 @@ jobs:
         with:
           version: '0.13.0'
       - name: Compile identity and frozen finite module dependencies
+        id: compile
         run: |
           node scripts/build-native.mjs
           pnpm --dir crabot-client install --frozen-lockfile
@@ -84,6 +85,7 @@ jobs:
       - name: Original lifecycle and maintenance regressions
         working-directory: crabot-core
         run: node node_modules/vitest/vitest.mjs run src/module-manager-lifecycle.test.ts src/module-manager-health.test.ts src/module-manager-advanced.test.ts src/workspace-maintenance.test.ts src/workspace-module-scope.test.ts --maxWorkers=1 --minWorkers=1
-      - name: Actual fixed job validation launch without business onStart
+      - name: Actual fixed job launch and technical health without business onStart
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
         working-directory: crabot-core
-        run: node node_modules/vitest/vitest.mjs run src/workspace-human-verification.test.ts --testNamePattern='post-relocation validation launches' --maxWorkers=1 --minWorkers=1
+        run: node node_modules/vitest/vitest.mjs run src/workspace-human-verification.test.ts --testNamePattern='post-relocation validation launches|new runtime health and Root' --maxWorkers=1 --minWorkers=1

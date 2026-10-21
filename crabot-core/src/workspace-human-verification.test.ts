@@ -31,7 +31,7 @@ async function reserveFixturePort(): Promise<ReturnType<typeof http.createServer
   throw new Error('No finite fixture port was available')
 }
 
-async function fixture(options: { withMemory?: boolean; inactiveMemory?: boolean; wrongRuntime?: boolean; result?: string; withAgent?: boolean; agentResult?: string; actualAgent?: boolean; processLifetimeMs?: number; backgroundShell?: boolean; actualAdmin?: boolean; adminReadyDelayMs?: number; quiesceResult?: string; orphanDuringStop?: boolean } = {}) {
+async function fixture(options: { withMemory?: boolean; inactiveMemory?: boolean; wrongRuntime?: boolean; result?: string; withAgent?: boolean; agentResult?: string; actualAgent?: boolean; processLifetimeMs?: number; backgroundShell?: boolean; validationHealth?: 'healthy' | 'unhealthy'; validationRuntimeMismatch?: boolean; validationRegistration?: 'delayed' | 'exit'; memoryHealth?: 'healthy' | 'degraded'; actualAdmin?: boolean; adminReadyDelayMs?: number; quiesceResult?: string; orphanDuringStop?: boolean } = {}) {
   const root = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'crabot-current-admin-')))
   const native = require('../../scripts/lib/process-identity.cjs'), management = require('../../scripts/lib/desktop-management.cjs')
   const data = management.ensurePrivateDataRoot(path.join(root, 'data')), script = path.join(data, 'finite-admin.cjs'), callsFile = path.join(data, 'calls.json')
@@ -139,7 +139,10 @@ async function fixture(options: { withMemory?: boolean; inactiveMemory?: boolean
         }
         await fs.writeFile(agentScript, `const fs=require('node:fs'),http=require('node:http'),{UnifiedAgent}=require(${JSON.stringify(entry)}),calls=[];
           require(${JSON.stringify(path.resolve('../crabot-agent/dist/core/config-loader.js'))}).ConfigLoader.captureRuntimeBearer();
+          const selected=${JSON.stringify(path.join(data, 'workspace-control/relocation-root-selected.json'))};
+          if(${!!options.validationRuntimeMismatch}&&fs.existsSync(selected))process.env.CRABOT_MODULE_RUNTIME_ID='fixture-wrong-runtime';
           const config=${JSON.stringify(relocationAgentConfig)};config.port=Number(process.env.Crabot_PORT);const agent=new UnifiedAgent(config);
+          if(${JSON.stringify(options.validationHealth ?? null)}&&fs.existsSync(selected))agent.getHealthStatus=async()=>${JSON.stringify(options.validationHealth ?? 'healthy')};
           agent.managerStack.harness.deps.isWorkspaceRelocationReady=()=>true;
           agent.managerStack.adapters.get('builtin').stop=async()=>{fs.appendFileSync(process.env.FIXTURE_STOPS,'stop\\n');
             if(process.env.FIXTURE_ORPHAN_READY){const native=require(${JSON.stringify(path.resolve('../scripts/lib/process-identity.cjs'))}),end=Date.now()+8000;for(;;){
@@ -172,7 +175,16 @@ async function fixture(options: { withMemory?: boolean; inactiveMemory?: boolean
               const ready=${JSON.stringify(path.join(data, 'background-program.json'))},end=Date.now()+8000;while(!fs.existsSync(ready)){if(Date.now()>=end)throw new Error('finite background program did not start');await new Promise(resolve=>setTimeout(resolve,20));}
             }
             const at='2026-10-20T00:00:00.000Z';if(!(await agent.managerStack.ledger.listAllWorkers()).some(item=>item.worker.worker_id==='worker'))await agent.managerStack.ledger.upsertWorker('channel::session','worker',()=>({worker_id:'worker',manager_key:'channel::session',task:{id:'task',title:'private task',status:'running',created_at:at},origin:{trigger_type:'message',creator_friend_id:'unchanged'},report_to:{channel_id:'channel',session_id:'session'},incarnations:[{incarnation_id:'inc',impl:'builtin',seq:1,state:${JSON.stringify(options.backgroundShell ? 'idle' : 'running')},workspace:process.env.FIXTURE_WORKSPACE,session_ref:'fixture',started_at:at}],updated_at:at}));
-            server.listen(Number(process.env.Crabot_PORT),'127.0.0.1',()=>fs.writeFileSync(process.env.FIXTURE_READY,'ready'))})().catch(error=>{console.error(error);process.exit(1)});
+            server.listen(Number(process.env.Crabot_PORT),'127.0.0.1',()=>{fs.writeFileSync(process.env.FIXTURE_READY,'ready');
+              if(${JSON.stringify(options.validationRegistration ?? null)}&&fs.existsSync(selected))setTimeout(async()=>{
+                if(${JSON.stringify(options.validationRegistration ?? null)}==='exit')return
+                try{const response=await fetch('http://127.0.0.1:'+process.env.CRABOT_MM_PORT+'/register_core_agent',{method:'POST',
+                  headers:{'Content-Type':'application/json',Authorization:'Bearer '+require(${JSON.stringify(path.resolve('../crabot-agent/dist/core/config-loader.js'))}).ConfigLoader.getRuntimeBearer()},
+                  body:JSON.stringify({id:require('node:crypto').randomUUID(),source:'crabot-agent',method:'register_core_agent',params:{module_id:'crabot-agent',module_type:'agent',version:'0.1.0',protocol_version:'3.4.0',port:Number(process.env.Crabot_PORT),subscriptions:[]}})});
+                  if(!(await response.json()).success)throw new Error('Finite Agent registration failed')
+                }catch(error){console.error(error);process.exit(1)}
+              },300)
+            })})().catch(error=>{console.error(error);process.exit(1)});
           setTimeout(()=>process.exit(0),${options.processLifetimeMs ?? 30000}).unref();`)
       }
       const agent = { module_id: 'crabot-agent', module_type: 'agent', entry: `"${process.execPath}" "${agentScript}"`,
@@ -181,13 +193,27 @@ async function fixture(options: { withMemory?: boolean; inactiveMemory?: boolean
           ...(options.backgroundShell ? { FIXTURE_BG_COMMAND: `"${process.execPath.replaceAll('\\', '/')}" "${path.join(data, 'finite-background.cjs').replaceAll('\\', '/')}"`, FIXTURE_BG_READY: path.join(data, 'background-ready.json'), ...(options.orphanDuringStop ? { FIXTURE_ORPHAN_READY: path.join(data, 'orphan-ready.json') } : {}) } : {}) },
         port: (agentPort.address() as { port: number }).port, auto_start: false, auto_restart: false, skip_health_check: true, start_priority: 1, status: 'stopped' }
       await new Promise<void>(resolve => agentPort.close(() => resolve()))
+      if (options.validationRegistration) {
+        await fs.writeFile(path.join(data, 'port-allocations.json'), JSON.stringify([{ module_id: 'crabot-agent', port: agent.port, allocated_at: new Date().toISOString() }]))
+        await manager.portAllocator.initialize()
+      }
       manager.modules.set('crabot-agent', agent); await manager.startModuleProcess('crabot-agent')
       await vi.waitFor(async () => expect(await fs.readFile(agentReady, 'utf8')).toBe('ready'), { timeout: 10000 })
     }
     if (options.withMemory || options.inactiveMemory) {
       const reserved = await reserveFixturePort(), port = (reserved.address() as { port: number }).port
       await new Promise<void>(resolve => reserved.close(() => resolve()))
-      manager.modules.set('memory-default', { module_id: 'memory-default', module_type: 'memory', entry: `"${process.execPath}" -e "setInterval(()=>{},1000)"`,
+      let memoryEntry = `"${process.execPath}" -e "setInterval(()=>{},1000)"`
+      if (options.memoryHealth) {
+        const file = path.join(data, 'finite-memory.cjs')
+        await fs.writeFile(file, `const http=require('node:http');const server=http.createServer(async(req,res)=>{
+          let text='';for await(const part of req)text+=part;const body=JSON.parse(text);
+          const data=body.method==='get_runtime_identity'?{instance_id:process.env.CRABOT_INSTANCE_ID,module_id:'memory-default',runtime_id:process.env.CRABOT_MODULE_RUNTIME_ID}:body.method==='health'?{status:${JSON.stringify(options.memoryHealth)}}:{};
+          res.end(JSON.stringify({id:body.id,success:true,data}));if(body.method==='shutdown')setTimeout(()=>process.exit(0),25);
+        });server.listen(Number(process.env.Crabot_PORT),'127.0.0.1');setTimeout(()=>process.exit(0),${options.processLifetimeMs ?? 30000}).unref();`)
+        memoryEntry = `"${process.execPath}" "${file}"`
+      }
+      manager.modules.set('memory-default', { module_id: 'memory-default', module_type: 'memory', entry: memoryEntry,
         port, auto_start: false, auto_restart: false, start_priority: 0, skip_health_check: true, status: 'stopped' })
       if (options.withMemory) await manager.startModuleProcess('memory-default')
     }
@@ -1624,4 +1650,83 @@ describe('MM restricts post-relocation validation launches to the original job',
       locks.releaseCliLock(lock); await f.cleanup()
     }
   }, process.platform === 'win32' ? 600000 : 120000)
+})
+
+
+describe('MM checks the new runtime health and Root under the original job', () => {
+  for (const mode of ['healthy Agent', 'healthy Memory', 'healthy delayed registration', 'unhealthy Agent', 'degraded Memory', 'wrong runtime', 'definition changed during health', 'exit before registration']) {
+    it('retains maintenance until all exact runtime checks confirm: ' + mode, async () => {
+      const withMemory = mode.includes('Memory')
+      const f = await fixture({ actualAgent: true, actualAdmin: true, withMemory,
+        validationHealth: mode === 'unhealthy Agent' ? 'unhealthy' : 'healthy', validationRuntimeMismatch: mode === 'wrong runtime',
+        ...(mode.includes('registration') ? { validationRegistration: mode === 'exit before registration' ? 'exit' as const : 'delayed' as const } : {}),
+        ...(withMemory ? { memoryHealth: mode === 'degraded Memory' ? 'degraded' as const : 'healthy' as const } : {}),
+        processLifetimeMs: process.platform === 'win32' ? 900000 : 300000 })
+      const locks = require('../../scripts/lib/cli-lock.mjs'), rpc = require('../../scripts/lib/module-runtime-rpc.cjs')
+      const lock = await locks.acquireWorkspaceRelocationLock(f.data, f.params.intent_id)
+      const runtime = f.manager.modules.get('crabot-agent'), originalEntry = runtime.entry
+      if (mode.includes('registration')) runtime.skip_health_check = false
+      let injected = false
+      const open = rpc.openModuleRuntimeRpc
+      vi.spyOn(rpc, 'openModuleRuntimeRpc').mockImplementation(async (...args: any[]) => {
+        const connection = await open(...args)
+        return { ...connection, call: async (method: string, ...callArgs: any[]) => {
+          const result = await connection.call(method, ...callArgs)
+          if (mode === 'definition changed during health' && method === 'health' && !injected) { injected = true; runtime.entry += ' fixture-change' }
+          return result
+        } }
+      })
+      const starts = vi.spyOn(f.manager, 'startModuleProcess')
+      if (mode === 'exit before registration') {
+        const launch = f.manager.startWorkspaceRelocationValidationModules.bind(f.manager)
+        vi.spyOn(f.manager, 'startWorkspaceRelocationValidationModules').mockImplementation(async (...args: any[]) => {
+          const result = await launch(...args), child = f.manager.processes.get('crabot-agent')
+          const scope = require('../../scripts/lib/spawned-process-tree.cjs').captureSpawnedProcessTree(child)
+          await require('../../scripts/lib/known-process-stop.cjs').stopKnownProcessScope(scope, { timeoutMs: 1000, onObserved: async () => {} })
+          injected = true
+          return result
+        })
+      }
+      try {
+        const first = f.manager.verifyWorkspaceRelocationValidationHealth(f.params, 'fixture-human')
+        expect(f.manager.verifyWorkspaceRelocationValidationHealth({ ...f.params }, 'fixture-human')).toBe(first)
+        await expect(f.manager.verifyWorkspaceRelocationValidationHealth({ ...f.params, intent_sha256: '0'.repeat(64) }, 'fixture-human')).rejects.toMatchObject({ code: 'FORBIDDEN' })
+        if (mode.startsWith('healthy')) {
+          const result = await first
+          expect(result.healthy_modules.map((item: any) => item.module_id)).toEqual(withMemory ? ['memory-default', 'crabot-agent'] : ['crabot-agent'])
+          expect(result.root_verified).toMatchObject({ verified: true, intent_id: f.params.intent_id, root_selected_sha256: result.root_selected_sha256,
+            instance_id: f.manager.runtimeRegistry.getInstanceId(), module_id: 'crabot-agent', runtime_id: result.validation_modules.find((item: any) => item.module_id === 'crabot-agent').runtime_id })
+        } else {
+          await expect(first).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
+          await expect(f.manager.verifyWorkspaceRelocationValidationHealth(f.params, 'fixture-human')).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
+          if (mode === 'definition changed during health' || mode === 'exit before registration') expect(injected).toBe(true)
+        }
+        expect(starts).toHaveBeenCalledTimes(withMemory ? 2 : 1)
+        const calls = JSON.parse(await fs.readFile(path.join(f.data, 'agent-calls.json'), 'utf8'))
+        expect(calls.filter((item: any) => item.method === 'verify_workspace_relocation_root')).toHaveLength(mode.startsWith('healthy') ? 1 : 0)
+        expect(f.manager.verifyWorkspaceRelocationValidationHealth(f.params, 'fixture-human')).toBe(first)
+        expect((await fetch(`http://127.0.0.1:${f.port}/api/friends`, { headers: { Authorization: 'Bearer fixture-human' } })).status).toBe(200)
+        expect(require('../../scripts/lib/workspace-maintenance.cjs').workspaceMaintenancePending(f.data)).toBe(true)
+        const ledger = JSON.parse(await fs.readFile(path.join(f.data, 'agent/worker-ledgers/channel%3A%3Asession.json'), 'utf8'))
+        expect(ledger.workers[0].task.status).toBe('closed')
+      } finally {
+        runtime.entry = originalEntry
+        const child = f.manager.workspaceValidationProof?.result.coordinator
+        if (child?.connected) { const ended = once(child, 'exit'); child.disconnect(); await ended }
+        try {
+          if (mode === 'exit before registration') {
+            const process = f.manager.processes.get('crabot-agent'), state = process && f.manager.childStates.get(process)
+            const identity = f.manager.workspaceValidationProof?.result.validation_modules.find((module: any) => module.module_id === 'crabot-agent')?.process
+            expect(identity).toBeDefined()
+            expect(require('../../scripts/lib/known-process-exit.cjs').probeKnownProcessExit([identity]).state).toBe('stopped')
+            await state.finalized
+            expect(state.finalizeError).toMatchObject({ code: 'CRABOT_WORKSPACE_MODULE_SCOPE' })
+            // This finite fixture never spawns a child. Drop only its independently exited test process for teardown.
+            f.manager.processes.delete('crabot-agent')
+            await f.manager.runtimeRegistry.removeRuntime(state.runtimeId)
+          }
+        } finally { locks.releaseCliLock(lock); await f.cleanup() }
+      }
+    }, process.platform === 'win32' ? 600000 : 120000)
+  }
 })
