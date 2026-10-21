@@ -25,8 +25,8 @@ function captureOwnedProcessTree(roots, api = native) {
     for (const root of roots) if (!valid(root) || root.owner !== self.owner || root.pid === process.pid) fail('root-binding')
     const rootIds = new Set(roots.map(root => root.pid))
     const observed = new Map(), parents = new Map(), pending = []
-    const read = expected => {
-      stage = rootIds.has(expected.pid) ? 'root-refresh' : 'descendant-refresh'
+    const read = (expected, phase = 'refresh') => {
+      stage = (rootIds.has(expected.pid) ? 'root-' : 'descendant-') + phase
       const current = api.inspectProcess(expected.pid)
       if (!valid(current) || current.pid !== expected.pid || current.owner !== self.owner || current.started !== expected.started) fail(stage)
       return current
@@ -39,7 +39,7 @@ function captureOwnedProcessTree(roots, api = native) {
     }
     for (const root of roots) remember(read(root))
     for (let offset = 0; offset < pending.length; offset++) {
-      const parent = read(pending[offset])
+      const parent = read(pending[offset], 'before-list')
       stage = 'child-list'
       const children = api.listChildProcessIds(parent.pid)
       if (!Array.isArray(children) || children.length > 32768 || new Set(children).size !== children.length) fail(stage)
@@ -63,11 +63,11 @@ function captureOwnedProcessTree(roots, api = native) {
         parents.set(pid, parent.pid)
         remember(child)
       }
-      read(parent) // A reused/disappeared parent cannot vouch for its former child list.
+      read(parent, 'after-list') // A reused/disappeared parent cannot vouch for its former child list.
     }
     const result = []
     for (const expected of observed.values()) {
-      const current = read(expected)
+      const current = read(expected, 'final')
       if (parents.has(current.pid) && current.parent !== parents.get(current.pid)) fail('final-parent')
       const { pid, parent, started, owner, executable } = current
       result.push(Object.freeze({ pid, parent, started, owner, executable }))
