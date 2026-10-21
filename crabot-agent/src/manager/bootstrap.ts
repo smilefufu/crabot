@@ -171,6 +171,7 @@ export interface ManagerStack {
 }
 
 export interface BootstrapDeps {
+  readonly isRequestRetired?: (request: import('./conversation-request.js').ConversationRequestRecord) => boolean
   readonly coreRuntimeBearer?: () => string | undefined
   readonly reflectionEvidence?: Pick<ReflectionEvidenceDeps, 'traces' | 'captureWorkerTrace' | 'readWorkerTrace' | 'redact'>
   readonly confirmDailyReflection?: import('./daily-reflection.js').DailyReflectionDeps['confirm']
@@ -735,6 +736,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
   const requestRuntimeRoot = join(agentDir, 'conversation-requests')
   let voiceManagementHost: VoiceManagementHost
   requestRunner = new ConversationRequestRunner(requestRuntimeRoot, conversationRequests, {
+    isRetired: deps.isRequestRetired,
     validateVoiceManagement: (key, requestId, result) => voiceManagementHost.validate(key, requestId, result),
     canRun: () => candidatesReady && !candidatesClosing && !deps.isClosing?.() && !maintenancePending(),
     timezone: deps.timezone ?? (() => 'Asia/Shanghai'),

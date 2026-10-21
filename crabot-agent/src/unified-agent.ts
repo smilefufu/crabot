@@ -71,6 +71,7 @@ import { toImageConnInfo, imageToolsFor, type ImageConnInfo } from './mcp/crab-i
 import { getAgentTraceDir, getAgentLogsDir, getAgentDataDir, getWorkspaceDir, getDataRootDir, getAdminDataDir } from './core/data-paths.js'
 import { retireWorkerSupervision } from './workers/harness/supervision-retirement-migration.js'
 import { ConfigLoader } from './core/config-loader.js'
+import { WorkspaceRelocationRetirements } from './core/workspace-relocation-retirements.js'
 import { TraceStore } from './core/trace-store.js'
 import { readReviewBackgrounds } from './engine/bg-entities/review-facts.js'
 import { BuiltinSubagentRunner } from './workers/builtin/subagent-runner.js'
@@ -814,6 +815,7 @@ export class UnifiedAgent extends ModuleBase {
    * 未装配时读端点 fail-fast 报错，不返回空结果——空结果会被 admin 误读成"没有 worker"。
    */
   private managerStack?: ManagerStack
+  private workspaceRetirementStore?: WorkspaceRelocationRetirements
   private readonly voiceInbox = new VoiceInbox(path.join(getAgentDataDir(), 'voice-inbox'))
   private readonly voiceDrains = new Map<string, Promise<void>>()
   private voiceRetryTimer?: ReturnType<typeof setInterval>
@@ -1359,6 +1361,7 @@ export class UnifiedAgent extends ModuleBase {
         this.assertRuntimeExecutionAdmission()
         return this.buildBuiltinWorkerRuntime(ctx)
       },
+      isRequestRetired: request => this.workspaceRetirements().request(request.manager_key, request.request_id, request.source_sha256),
       assertExecutionAdmission: () => this.assertRuntimeExecutionAdmission(),
       isClosing: () => this.runtimeClosing,
       describeExecutionTools: (impl, principal) => {
@@ -2296,7 +2299,7 @@ export class UnifiedAgent extends ModuleBase {
 
   private async reconcileVoiceHandoffs(): Promise<void> {
     for (const record of this.voiceInbox.pending()) {
-      if (record.phase !== 'accepted' || !record.payload) continue
+      if (record.phase !== 'accepted' || !record.payload || this.workspaceRetirements().voice(record.channel_id, record.turn_id, record.payload_sha256)) continue
       const payload = record.payload
       const checkpoint = await this.requireManagerStack().store.loadCheckpoint(`${payload.channel_id}::${payload.session_id}` as import('./manager/types.js').ManagerKey)
       const ids = new Set(checkpoint ? [...checkpoint.envelopes, ...checkpoint.pending].flatMap(e => e.wake.kind === 'human_messages' || e.wake.kind === 'attention_flush' ? e.wake.messages.map(m => m.platform_message_id) : []) : [])
@@ -2313,7 +2316,7 @@ export class UnifiedAgent extends ModuleBase {
         await this.reconcileVoiceHandoffs()
         for (const record of this.voiceInbox.pending().filter(r => r.channel_id === channelId)) {
           await this.confirmVoiceInbox(record)
-          if (record.phase === 'managed' || !record.payload) continue
+          if (record.phase === 'managed' || !record.payload || this.workspaceRetirements().voice(record.channel_id, record.turn_id, record.payload_sha256)) continue
           const payload = record.payload
           const context = this.voiceInbox.context(record)
           let queued!: () => void
@@ -4147,6 +4150,7 @@ export class UnifiedAgent extends ModuleBase {
       const notice = await stack.workboard.pendingAdminNotice(key)
       if (!notice) return
       dispatchedRevision = notice.revision
+      if (this.workspaceRetirements().workboard(key, notice.revision)) return
       await stack.workboard.recordAdminNoticeAttempt(key, notice.revision)
       const result = await stack.registry.routeWorkboardAdminUpdate({
         key,
@@ -4174,7 +4178,7 @@ export class UnifiedAgent extends ModuleBase {
   private async dispatchNewerPendingWorkboardNotice(key: ManagerKey, dispatchedRevision: number | undefined): Promise<void> {
     if (this.runtimeClosing) return
     const pending = await this.requireManagerStack().workboard.pendingAdminNotice(key)
-    if (pending && pending.revision !== dispatchedRevision) this.dispatchWorkboardAdminNotice(key)
+    if (pending && !this.workspaceRetirements().workboard(key, pending.revision) && pending.revision !== dispatchedRevision) this.dispatchWorkboardAdminNotice(key)
   }
 
   /** 只清除实际被成功 episode 消费的 revision；更晚的 Admin 保存保持待投递。 */
@@ -4195,7 +4199,7 @@ export class UnifiedAgent extends ModuleBase {
     if (this.runtimeClosing || this.workboardNoticeRetryTimers.has(key)) return
     const stack = this.requireManagerStack()
     const notice = await stack.workboard.pendingAdminNotice(key)
-    if (!notice || (revision !== undefined && notice.revision !== revision)) return
+    if (!notice || this.workspaceRetirements().workboard(key, notice.revision) || (revision !== undefined && notice.revision !== revision)) return
     const delay = WORKBOARD_RETRY_DELAYS_MS[Math.min(notice.attempts, WORKBOARD_RETRY_DELAYS_MS.length - 1)]
     const retryAfter = new Date(Date.now() + delay).toISOString()
     await stack.workboard.recordAdminNoticeAttempt(key, notice.revision, retryAfter)
@@ -4209,6 +4213,7 @@ export class UnifiedAgent extends ModuleBase {
     const stack = this.requireManagerStack()
     const notices = await stack.workboard.listPendingAdminNotices()
     for (const { manager_key, notice } of notices) {
+      if (this.workspaceRetirements().workboard(manager_key, notice.revision)) continue
       if (notice.retry_after_at && Date.parse(notice.retry_after_at) > Date.now()) {
         const delay = Date.parse(notice.retry_after_at) - Date.now()
         if (!this.workboardNoticeRetryTimers.has(manager_key)) {
@@ -5450,6 +5455,7 @@ export class UnifiedAgent extends ModuleBase {
       for (const key of keys) {
         const pending = await this.adminChatCorrelationStore().pendingWakes(key)
         for (const wake of pending) {
+          if (this.workspaceRetirements().adminChat(key, wake.request_id, wake.message_sha256)) continue
           try {
             await stack.registry.routeHumanMessages(
               'admin-web',
@@ -5467,6 +5473,10 @@ export class UnifiedAgent extends ModuleBase {
     } catch (error) {
       console.error(`[${this.config.moduleId}] admin chat wake replay scan failed:`, error instanceof Error ? error.message : String(error))
     }
+  }
+
+  private workspaceRetirements(): WorkspaceRelocationRetirements {
+    return this.workspaceRetirementStore ??= new WorkspaceRelocationRetirements(getDataRootDir())
   }
 
   /** P6-A §3.2/§3.5：Admin Chat correlation 持久化（inbound wake journal + outbound delivery）。 */
@@ -5769,6 +5779,7 @@ export class UnifiedAgent extends ModuleBase {
   }
 
   protected override async onStart(): Promise<void> {
+    this.workspaceRetirements().load()
     this.voiceInbox.load()
     await this.reconcileVoiceHandoffs()
     await retireWorkerSupervision(getAgentDataDir())
@@ -5891,7 +5902,7 @@ export class UnifiedAgent extends ModuleBase {
         if (this.runtimeClosing) return
         void this.drainVoiceInbox().catch(() => console.warn('[Agent] Durable voice inbox awaits runtime admission'))
         if (!this.voiceRetryTimer) this.voiceRetryTimer = setInterval(() => {
-          if (this.voiceInbox.pending().length) void this.drainVoiceInbox().catch(() => {})
+          if (this.voiceInbox.pending().some(record => !record.confirmed || !this.workspaceRetirements().voice(record.channel_id, record.turn_id, record.payload_sha256))) void this.drainVoiceInbox().catch(() => {})
         }, 5000)
         // 空台账（现网常态）不打日志，避免每次启动都刷一行没有信息量的 0/0/0。
         if (report.revived.length === 0 && report.failed.length === 0) return

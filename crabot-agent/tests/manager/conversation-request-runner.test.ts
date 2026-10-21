@@ -7,6 +7,7 @@ import { ManagerSessionStore } from '../../src/manager/session-store.js'
 import { TrustedHumanInputStore } from '../../src/manager/trusted-human-input-store.js'
 import { ConversationRequestStore } from '../../src/manager/conversation-request-store.js'
 import { ConversationRequestRunner, type RequestRunContext } from '../../src/manager/conversation-request-runner.js'
+import { publishWorkspaceRelocationRetirements, WorkspaceRelocationRetirements } from '../../src/core/workspace-relocation-retirements.js'
 import { allowed, denied } from '../../src/permissions/tool-authorization.js'
 import { createUserMessage, defineTool, type LLMAdapter, type LLMStreamParams, type ToolDefinition } from '../../src/engine/index.js'
 import type { ResolvedPermissions, ChannelMessage } from '../../src/types.js'
@@ -26,6 +27,7 @@ describe('isolated request admission with real ManagerLoop', () => {
   let directory: string, root: string, sources: TrustedHumanInputStore, requests: ConversationRequestStore
   let frames: RequestRunContext[], calls: LLMStreamParams[], sideEffects: number, revoked: boolean
   let onAction: () => Promise<void>, checkpointAtAction: ManagerResumeCheckpoint | undefined
+  let retirements: WorkspaceRelocationRetirements | undefined
   let ready: boolean
   let tools: (frame: RequestRunContext) => ToolDefinition[]
   const resolved = (source: ConversationRequestSource): ResolveRequestPermissionSourcesResult => ({
@@ -34,6 +36,7 @@ describe('isolated request admission with real ManagerLoop', () => {
   })
   beforeEach(async () => {
     directory = await fs.mkdtemp(path.join(os.tmpdir(), 'isolated-request-')); root = path.join(directory, 'requests-runtime')
+    retirements = undefined
     ready = true; frames = []; calls = []; sideEffects = 0; revoked = false; checkpointAtAction = undefined; onAction = async () => {}
     sources = new TrustedHumanInputStore(path.join(directory, 'sources'), { now: () => new Date().toISOString(), resolveSender: async (_channel, user) => user === 'a' ? { id: 'actual-a', display_name: 'A', permission: 'master', channel_identities: [{ channel_id: 'voice', platform_user_id: 'a' }], created_at: 't', updated_at: 't' } : null })
     requests = new ConversationRequestStore(path.join(directory, 'records'), sources, { now: () => new Date().toISOString(), resolveSources: async source => resolved(source) })
@@ -46,7 +49,7 @@ describe('isolated request admission with real ManagerLoop', () => {
   })
   afterEach(async () => { vi.restoreAllMocks(); await fs.rm(directory, { recursive: true, force: true }) })
   function runner(createLoop?: (frame: RequestRunContext) => ManagerLoop) {
-    return new ConversationRequestRunner(root, requests, { canRun: () => ready, timezone: () => 'Asia/Shanghai', resolveCurrent: async (kind, source) => resolved(source)[kind], createLoop: createLoop ?? (frame => {
+    return new ConversationRequestRunner(root, requests, { isRetired: record => retirements?.request(record.manager_key, record.request_id, record.source_sha256) ?? false, canRun: () => ready, timezone: () => 'Asia/Shanghai', resolveCurrent: async (kind, source) => resolved(source)[kind], createLoop: createLoop ?? (frame => {
       frames.push(frame)
       const adapter: LLMAdapter = { updateConfig() {}, async *stream(params) {
         calls.push({ ...params, messages: [...params.messages] })
@@ -77,6 +80,36 @@ describe('isolated request admission with real ManagerLoop', () => {
     expect((await executor.execute(key, inputs, args)).status).toBe('waiting')
     expect((await runner(() => { throw new Error('must not restart') }).recover(key, result.request_id)).status).toBe('waiting')
     expect(sideEffects).toBe(1); expect(frames).toHaveLength(1)
+  })
+
+  it('retains a migrated old request and queued event without another model call or false receipt; new original input still works', async () => {
+    const inputs = await input(), executor = runner(), args = { source_id: inputs[0].source_id, delivery: 'origin' }
+    const result = await executor.execute(key, inputs, args)
+    await requests.attachWorker(key, result.request_id, 'owned')
+    const event = { ts: new Date().toISOString(), kind: 'turn_completed' as const, worker_id: 'owned', seq: 1 }
+    ready = false
+    expect(await executor.routeWorkerEvent(key, result.request_id, event)).toEqual({ consumed: false })
+    const eventRoot = path.join(root, result.request_id, 'events'), events = await fs.readdir(eventRoot)
+    const eventFile = path.join(eventRoot, events[0], 'event.json'), beforeEvent = await fs.readFile(eventFile)
+    const original = await requests.get(key, result.request_id)
+    const management = require('../../../scripts/lib/desktop-management.cjs')
+    const data = management.ensurePrivateDataRoot(path.join(await fs.realpath(directory), 'retirement-data')) as string
+    await fs.mkdir(path.join(data, 'agent'))
+    await publishWorkspaceRelocationRetirements({ dataDir: data, document: { schema_version: 1,
+      intent_id: '12345678-1234-4123-8123-123456789abc', file_ready_sha256: '1'.repeat(64), worker_closure_sha256: '2'.repeat(64),
+      records: [{ kind: 'request', manager_key: key, request_id: result.request_id, source_sha256: original!.record.source_sha256 }] }, verify: async () => {} })
+    retirements = new WorkspaceRelocationRetirements(data); ready = true
+    const recovered = runner()
+    expect((await recovered.recover(key, result.request_id)).status).toBe('recovery_required')
+    await recovered.recoverPending()
+    expect(await recovered.routeWorkerEvent(key, result.request_id, event)).toEqual({ consumed: false })
+    expect((await recovered.execute(key, inputs, args)).status).toBe('recovery_required')
+    expect(frames).toHaveLength(1); expect(sideEffects).toBe(1)
+    expect(await requests.get(key, result.request_id)).toEqual(original)
+    expect(await fs.readFile(eventFile)).toEqual(beforeEvent)
+    const next = await input(raw('new-input'))
+    expect((await recovered.execute(key, next, { source_id: next[0].source_id, delivery: 'origin' })).status).toBe('waiting')
+    expect(frames).toHaveLength(2); expect(sideEffects).toBe(2)
   })
 
   it('does not create another loop while the same request is executing', async () => {

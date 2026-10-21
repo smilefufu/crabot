@@ -8,11 +8,17 @@ on:
       - 'crabot-shared/src/workspace-*'
       - 'crabot-agent/src/core/workspace-relocation-*.ts'
       - 'crabot-agent/src/core/workspace-maintenance-files.ts'
+      - 'crabot-agent/src/unified-agent.ts'
+      - 'crabot-agent/src/manager/bootstrap.ts'
+      - 'crabot-agent/src/manager/conversation-request-runner.ts'
       - 'crabot-agent/src/workers/harness/workspace-relocation-close.ts'
       - 'crabot-agent/src/workers/harness/ledger-store.ts'
       - 'crabot-agent/tests/core/workspace-relocation-ledgers.test.ts'
       - 'crabot-agent/tests/core/workspace-relocation-commit.test.ts'
       - 'crabot-agent/tests/core/workspace-relocation-checkpoints.test.ts'
+      - 'crabot-agent/tests/core/workspace-relocation-retirements.test.ts'
+      - 'crabot-agent/tests/core/workspace-recovery-routing.test.ts'
+      - 'crabot-agent/tests/manager/conversation-request-runner.test.ts'
       - 'crabot-agent/tests/workers/harness/workspace-relocation-close.test.ts'
       - 'crabot-agent/tests/workers/harness/ledger-store.test.ts'
       - 'scripts/lib/workspace-*'
@@ -20,6 +26,7 @@ on:
       - 'scripts/lib/owned-process-tree.cjs'
       - 'scripts/lib/spawned-process-tree.cjs'
       - 'scripts/lib/__tests__/spawned-process-tree.test.mjs'
+      - 'scripts/lib/__tests__/private-file-paths.test.mjs'
       - 'scripts/lib/run-bounded.mjs'
       - 'scripts/lib/__tests__/workspace-*'
       - 'scripts/lib/__tests__/directory-*.test.mjs'
@@ -68,12 +75,15 @@ jobs:
           pnpm --dir crabot-agent install --frozen-lockfile
           pnpm --dir crabot-agent build
           cd crabot-agent
-          node node_modules/vitest/vitest.mjs run tests/core/workspace-relocation-ledgers.test.ts tests/core/workspace-relocation-commit.test.ts tests/core/workspace-relocation-checkpoints.test.ts tests/workers/harness/workspace-relocation-close.test.ts tests/workers/harness/ledger-store.test.ts --maxWorkers=1 --minWorkers=1
+          node node_modules/vitest/vitest.mjs run tests/core/workspace-relocation-ledgers.test.ts tests/core/workspace-relocation-commit.test.ts tests/core/workspace-relocation-checkpoints.test.ts tests/core/workspace-relocation-retirements.test.ts tests/core/workspace-recovery-routing.test.ts tests/workers/harness/workspace-relocation-close.test.ts tests/workers/harness/ledger-store.test.ts --maxWorkers=1 --minWorkers=1
+      - name: Preserve migrated request history without resuming its model or events
+        working-directory: crabot-agent
+        run: node node_modules/vitest/vitest.mjs run tests/manager/conversation-request-runner.test.ts --testNamePattern='retains a migrated old request' --maxWorkers=1 --minWorkers=1
       - name: Windows delayed instance registration regression
         if: runner.os == 'Windows'
         run: |
           pnpm --dir crabot-core install --frozen-lockfile
           pnpm --dir crabot-core build
           node --test --test-name-pattern='Windows repeated Unicode-path registration' scripts/lib/__tests__/instance-runtime.test.mjs
-      - run: node --test scripts/lib/__tests__/owned-process-tree.test.mjs scripts/lib/__tests__/spawned-process-tree.test.mjs scripts/lib/__tests__/workspace-file-metadata.test.mjs scripts/lib/__tests__/workspace-copy.test.mjs scripts/lib/__tests__/workspace-copy-job.test.mjs scripts/lib/__tests__/workspace-sync.test.mjs scripts/lib/__tests__/workspace-tar.test.mjs scripts/lib/__tests__/workspace-file-plan.test.mjs scripts/lib/__tests__/workspace-coordinator-launch.test.mjs scripts/lib/__tests__/directory-move.test.mjs scripts/lib/__tests__/directory-pin.test.mjs
+      - run: node --test scripts/lib/__tests__/owned-process-tree.test.mjs scripts/lib/__tests__/spawned-process-tree.test.mjs scripts/lib/__tests__/workspace-file-metadata.test.mjs scripts/lib/__tests__/workspace-copy.test.mjs scripts/lib/__tests__/workspace-copy-job.test.mjs scripts/lib/__tests__/workspace-sync.test.mjs scripts/lib/__tests__/workspace-tar.test.mjs scripts/lib/__tests__/workspace-file-plan.test.mjs scripts/lib/__tests__/workspace-coordinator-launch.test.mjs scripts/lib/__tests__/private-file-paths.test.mjs scripts/lib/__tests__/directory-move.test.mjs scripts/lib/__tests__/directory-pin.test.mjs
       - run: node --test --test-name-pattern='cross-volume unsupported source metadata' scripts/lib/__tests__/workspace-relocation-intent.test.mjs
