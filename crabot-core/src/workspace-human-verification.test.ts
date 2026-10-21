@@ -1293,18 +1293,18 @@ describe('MM prepares the original fixed workspace file plan', () => {
 
 
 describe('MM commits the original workspace Worker closures', () => {
-  const timeout = process.platform === 'win32' ? 240000 : 40000
-  for (const mode of ['confirmed', 'lost closure preparation', 'lost closure commit', 'late runtime registration']) it('retains Admin and the first closure outcome: ' + mode, async () => {
-    const f = await fixture({ actualAgent: true, actualAdmin: true, processLifetimeMs: 300000 }), locks = require('../../scripts/lib/cli-lock.mjs')
+  const timeout = process.platform === 'win32' ? 600000 : 40000
+  for (const mode of ['confirmed', 'lost closure preparation', 'lost closure commit', 'lost recovery preparation', 'lost recovery commit', 'late runtime registration']) it('retains Admin and the first closure outcome: ' + mode, async () => {
+    const f = await fixture({ actualAgent: true, actualAdmin: true, processLifetimeMs: process.platform === 'win32' ? 900000 : 300000 }), locks = require('../../scripts/lib/cli-lock.mjs')
     const records = await import('../../scripts/lib/workspace-relocation-intent.mjs'), lock = await locks.acquireWorkspaceRelocationLock(f.data, f.params.intent_id)
     const launch = f.manager.launchWorkspaceRelocationCoordinator.bind(f.manager)
     let child: ReturnType<typeof spawn> | undefined, dropped = false
     vi.spyOn(f.manager, 'launchWorkspaceRelocationCoordinator').mockImplementation(async (...args: any[]) => {
       child = await launch(...args)
-      if (mode.startsWith('lost closure')) {
+      if (mode.startsWith('lost ')) {
         const emit = child!.emit.bind(child)
         vi.spyOn(child!, 'emit').mockImplementation((event: any, ...args: any[]) => {
-          const operation = mode === 'lost closure preparation' ? 'prepare_closure' : 'commit_closure'
+          const operation = { 'lost closure preparation': 'prepare_closure', 'lost closure commit': 'commit_closure', 'lost recovery preparation': 'prepare_recovery', 'lost recovery commit': 'commit_recovery' }[mode]
           if (event === 'message' && args[0]?.kind === 'workspace_worker_journal_reply' && args[0]?.operation === operation && !dropped) {
             dropped = true; return emit(event, { ...args[0], ok: false })
           }
@@ -1325,6 +1325,13 @@ describe('MM commits the original workspace Worker closures', () => {
     }
     try {
       const ledger = path.join(f.data, 'agent/worker-ledgers/channel%3A%3Asession.json'), original = JSON.parse(await fs.readFile(ledger, 'utf8'))
+      const checkpoint = path.join(f.data, 'agent/managers/channel%3A%3Asession/running.json')
+      await fs.mkdir(path.dirname(checkpoint), { recursive: true })
+      const checkpointBytes = JSON.stringify({ episodeId: 'original-mm-episode', state: { key: 'channel::session', recent: [], foldedCount: 0 },
+        envelopes: [], wakeIndex: -1, pending: [], hasEngineMessages: false, turns: [], responses: [], tools: [], pendingToolCallIds: [],
+        adminChatClaims: [], transientMessageIds: [], spawnedWorkerIds: ['worker'], execution: { successfulSendMessageTargets: [], continuedWorkers: [],
+          needsSpawnRecheck: false, spawnRecheckInjected: false, spawnRecheckOutcomeRecorded: false, postSendRecheckSequence: 0 } })
+      await fs.writeFile(checkpoint, checkpointBytes, { mode: 0o600 })
       const admin = f.manager.processes.get('admin-web'), first = f.manager.commitWorkspaceRelocationWorkers(f.params, 'fixture-human')
       expect(f.manager.commitWorkspaceRelocationWorkers({ ...f.params }, 'fixture-human')).toBe(first)
       await expect(f.manager.commitWorkspaceRelocationWorkers({ ...f.params, intent_id: randomUUID() }, 'fixture-human')).rejects.toMatchObject({ code: 'FORBIDDEN' })
@@ -1335,6 +1342,8 @@ describe('MM commits the original workspace Worker closures', () => {
         expect(result.file_ready_sha256).toBe(sha256CanonicalJson(records.readWorkspaceRelocationFileActors(f.data, f.params.intent_id).file_ready))
         expect(result.closure_plan_sha256).toBe(sha256CanonicalJson(records.readWorkspaceRelocationClosurePlan(f.data, f.params.intent_id)))
         expect(result.closure_commit_sha256).toBe(sha256CanonicalJson(records.readWorkspaceRelocationClosureCommit(f.data, f.params.intent_id)))
+        expect(result.recovery_plan_sha256).toBe(sha256CanonicalJson(records.readWorkspaceRelocationRecoveryPlan(f.data, f.params.intent_id)))
+        expect(result.recovery_commit_sha256).toBe(sha256CanonicalJson(records.readWorkspaceRelocationRecoveryCommit(f.data, f.params.intent_id)))
       }
       const current = JSON.parse(await fs.readFile(ledger, 'utf8')).workers[0], old = original.workers[0]
       expect(current.task.status).toBe(['lost closure preparation', 'late runtime registration'].includes(mode) ? 'running' : 'closed')
@@ -1344,12 +1353,17 @@ describe('MM commits the original workspace Worker closures', () => {
       if (current.task.status === 'closed') expect(current.task.closed).toMatchObject({ by: 'migration', note: 'workspace relocation ' + f.params.intent_id })
       if (mode === 'late runtime registration') expect(records.readWorkspaceRelocationClosurePlan(f.data, f.params.intent_id)).toBeNull()
       expect(stop).toHaveBeenCalledOnce(); expect(f.manager.commitWorkspaceRelocationWorkers(f.params, 'fixture-human')).toBe(first)
-      if (mode !== 'confirmed') { expect(dropped).toBe(mode.startsWith('lost closure')); await expect(first).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' }); expect(child!.connected).toBe(false) }
+      if (mode !== 'confirmed') { expect(dropped).toBe(mode.startsWith('lost ')); await expect(first).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' }); expect(child!.connected).toBe(false) }
       expect(f.manager.processes.get('admin-web')).toBe(admin); expect(admin.exitCode).toBeNull(); expect(f.manager.processes.has('crabot-agent')).toBe(false)
       expect((await fetch(`http://127.0.0.1:${f.port}/api/friends`, { headers: { Authorization: 'Bearer fixture-human' } })).status).toBe(200)
       expect(records.readWorkspaceRelocationFileActors(f.data, f.params.intent_id).file_ready).not.toBeNull()
       await expect(fs.stat(path.join(f.root, 'relocated'))).rejects.toMatchObject({ code: 'ENOENT' })
       expect(require('../../scripts/lib/workspace-maintenance.cjs').workspaceMaintenancePending(f.data)).toBe(true)
+      if (['confirmed', 'lost recovery commit'].includes(mode)) {
+        await expect(fs.stat(checkpoint)).rejects.toMatchObject({ code: 'ENOENT' })
+        expect(await fs.readFile(path.join(path.dirname(checkpoint), 'workspace-relocation-history', f.params.intent_id, 'checkpoint.json'), 'utf8')).toBe(checkpointBytes)
+        expect(records.readWorkspaceRelocationRecoveryCommit(f.data, f.params.intent_id)).not.toBeNull()
+      } else expect(await fs.readFile(checkpoint, 'utf8')).toBe(checkpointBytes)
     } finally {
       if (child?.connected) { const ended = once(child, 'exit'); child.disconnect(); await ended }
       locks.releaseCliLock(lock); await f.cleanup()

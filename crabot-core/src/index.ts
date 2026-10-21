@@ -170,6 +170,8 @@ interface WorkspaceWorkerClosureResult {
   readonly file_ready_sha256: string
   readonly closure_plan_sha256: string
   readonly closure_commit_sha256: string
+  readonly recovery_plan_sha256: string
+  readonly recovery_commit_sha256: string
 }
 
 interface WorkspaceCoordinatorGrant {
@@ -1496,7 +1498,7 @@ export class ModuleManager {
     return pending
   }
 
-  /** Finish the fixed file phase and Agent-owned Worker closure; keep maintenance and the original catalog. */
+  /** Finish fixed files and Agent-owned closures/recovery retirement; keep maintenance and the original catalog. */
   private commitWorkspaceRelocationWorkers(request: VerifyWorkspaceRelocationRequestParams, bearer?: string): Promise<WorkspaceWorkerClosureResult> {
     request = Object.freeze({ ...request })
     const fingerprint = sha256CanonicalJson(request)
@@ -1508,7 +1510,8 @@ export class ModuleManager {
     const pending = Promise.resolve().then(async (): Promise<WorkspaceWorkerClosureResult> => {
       let child: ChildProcess | undefined
       let files: { prepareStage(): Promise<unknown>; prepareFiles(): Promise<{ ready: unknown }>; close(): void } | undefined
-      let workers: { prepareClosure(): Promise<{ plan: unknown }>; commitClosure(): Promise<{ complete: unknown }>; close(): void } | undefined
+      let workers: { prepareClosure(): Promise<{ plan: unknown }>; commitClosure(): Promise<{ complete: unknown }>;
+        prepareRecovery(): Promise<{ plan_sha256: string }>; commitRecovery(): Promise<{ commit_sha256: string }>; close(): void } | undefined
       try {
         child = (await this.prepareWorkspaceRelocationFiles(request, bearer)).coordinator
         const records = require('../../scripts/lib/workspace-relocation-intent.mjs')
@@ -1525,11 +1528,18 @@ export class ModuleManager {
         await verifyStopped()
         const committed = await workers!.commitClosure()
         await verifyStopped()
+        const recoveryPlan = await workers!.prepareRecovery()
+        await verifyStopped()
+        const recoveryCommit = await workers!.commitRecovery()
+        await verifyStopped()
         if (sha256CanonicalJson(records.readWorkspaceRelocationFileActors(this.dataDir, request.intent_id).file_ready) !== sha256CanonicalJson(fileResult.ready)
           || sha256CanonicalJson(records.readWorkspaceRelocationClosurePlan(this.dataDir, request.intent_id)) !== sha256CanonicalJson(prepared.plan)
-          || sha256CanonicalJson(records.readWorkspaceRelocationClosureCommit(this.dataDir, request.intent_id)) !== sha256CanonicalJson(committed.complete)) throw failure()
+          || sha256CanonicalJson(records.readWorkspaceRelocationClosureCommit(this.dataDir, request.intent_id)) !== sha256CanonicalJson(committed.complete)
+          || sha256CanonicalJson(records.readWorkspaceRelocationRecoveryPlan(this.dataDir, request.intent_id)) !== recoveryPlan.plan_sha256
+          || sha256CanonicalJson(records.readWorkspaceRelocationRecoveryCommit(this.dataDir, request.intent_id)) !== recoveryCommit.commit_sha256) throw failure()
         return Object.freeze({ coordinator: child, file_ready_sha256: sha256CanonicalJson(fileResult.ready),
-          closure_plan_sha256: sha256CanonicalJson(prepared.plan), closure_commit_sha256: sha256CanonicalJson(committed.complete) })
+          closure_plan_sha256: sha256CanonicalJson(prepared.plan), closure_commit_sha256: sha256CanonicalJson(committed.complete),
+          recovery_plan_sha256: recoveryPlan.plan_sha256, recovery_commit_sha256: recoveryCommit.commit_sha256 })
       } catch {
         await this.closeWorkspaceCoordinatorChannel(child)
         throw failure()

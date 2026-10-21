@@ -26,6 +26,7 @@ interface CheckpointArchiveOptions {
   beforeVersion: string
   beforeSha256: string
   verify: () => Promise<unknown>
+  retainVerification?: (verify: () => void) => void
 }
 
 /** Agent-owned file primitive, not authorization. The fixed offline caller verifies the original whole job before each effect. */
@@ -140,9 +141,13 @@ export async function archiveWorkspaceRelocationCheckpoint(options: CheckpointAr
     const complete = { schema_version: 1, manifest_sha256: manifestHash, archive_version: archiveVersion }
     if (previous === undefined) { publish(archive, 'complete.json', complete, checkArchive); changed = true }
     else if (sha256CanonicalJson(previous) !== sha256CanonicalJson(complete)) throw failure()
-    await verify(); checkArchive()
-    if (optionalStat(source) || version(owned(checkpointFile, false, true)) !== archiveVersion
-      || sha256CanonicalJson(readJson(completeFile)) !== sha256CanonicalJson(complete)) throw failure()
+    const verifyComplete = () => {
+      checkArchive()
+      if (optionalStat(source) || version(owned(checkpointFile, false, true)) !== archiveVersion
+        || sha256CanonicalJson(readJson(completeFile)) !== sha256CanonicalJson(complete)) throw failure()
+    }
+    await verify(); verifyComplete()
+    options.retainVerification?.(verifyComplete)
     return { dispatch: changed ? 'dispatch' as const : 'observe' as const, manifest_sha256: manifestHash, complete_sha256: sha256CanonicalJson(complete) }
   } finally { for (const pin of pins.reverse()) native.releaseDirectoryPin(pin) }
 }

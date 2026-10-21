@@ -16,7 +16,7 @@ import { createWorkspaceWorkerJournal } from '../workspace-worker-journal.mjs'
 import { createWorkspaceModuleJournal } from '../workspace-module-journal.mjs'
 import { createWorkspaceFileJournal } from '../workspace-file-journal.mjs'
 import { createWorkspaceJournalClient } from '../workspace-coordinator-journal.mjs'
-import { readWorkspaceRelocationFilePlan, readWorkspaceRelocationFileActors, verifyWorkspaceRelocationClosureReadiness, readWorkspaceRelocationClosurePlan, readWorkspaceRelocationRecoveryPlan } from '../workspace-relocation-intent.mjs'
+import { readWorkspaceRelocationFilePlan, readWorkspaceRelocationFileActors, verifyWorkspaceRelocationClosureReadiness, readWorkspaceRelocationClosurePlan, readWorkspaceRelocationRecoveryPlan, readWorkspaceRelocationRecoveryCommit } from '../workspace-relocation-intent.mjs'
 import { createWorkspaceProcessJournal } from '../workspace-process-journal.mjs'
 import { WorkspaceCatalog } from '../../../crabot-shared/dist/workspace-catalog.js'
 import { sha256CanonicalJson } from '../../../crabot-shared/dist/canonical-json.js'
@@ -361,7 +361,7 @@ for (const mode of ['confirmed', 'lost acknowledgement', 'unexpected payload']) 
   } finally { workers.close(); modules.close(); processes.close(); files.close() }
 })
 
-for (const mode of ['confirmed', 'lost acknowledgement', 'changed source', 'copy']) test('the actual fixed Host prepares files once while the catalog stays unchanged: ' + mode, { timeout: process.platform === 'win32' ? 180000 : 30000, skip: mode === 'copy' && (process.platform !== 'linux' || !fs.existsSync('/dev/shm') || fs.statSync(tmpdir()).dev === fs.statSync('/dev/shm').dev) }, async t => {
+for (const mode of ['confirmed', 'lost acknowledgement', 'changed source', 'copy']) test('the actual fixed Host prepares files once while the catalog stays unchanged: ' + mode, { timeout: process.platform === 'win32' ? 600000 : 30000, skip: mode === 'copy' && (process.platform !== 'linux' || !fs.existsSync('/dev/shm') || fs.statSync(tmpdir()).dev === fs.statSync('/dev/shm').dev) }, async t => {
   const f = await fixture(t, { crossVolume: mode === 'copy', closureLedger: mode === 'confirmed' || mode === 'lost acknowledgement' }), { child, launch } = await f.launch(), context = { dataDir: f.data, id: f.id, launch }
   const workers = createWorkspaceWorkerJournal(child, context), modules = createWorkspaceModuleJournal(child, context), processes = createWorkspaceProcessJournal(child, context)
   let files = createWorkspaceFileJournal(child, context)
@@ -545,6 +545,45 @@ for (const mode of ['confirmed', 'lost acknowledgement', 'changed source', 'copy
           }
           assert.equal((await closer.prepareRecovery()).dispatch, 'observe')
           assert.deepEqual(fs.readFileSync(recoveryFile), recoveryBytes)
+          const recoveryCompleteFile = path.join(control, 'relocation-manager-complete.json')
+          for (const invalid of [null, false, {}, { schema_version: 1, intent_id: f.id }]) {
+            try {
+              fs.writeFileSync(recoveryCompleteFile, JSON.stringify(invalid), { mode: 0o600 })
+              assert.throws(() => readWorkspaceRelocationRecoveryCommit(f.data, f.id), { code: 'WORKSPACE_RELOCATION_INVALID' })
+              await assert.rejects(recoveryAgent.commitWorkspaceRelocationRecovery({ dataDir: f.data, id: f.id }), { code: 'CRABOT_WORKSPACE_RECOVERY_COMMIT' })
+            } finally { fs.unlinkSync(recoveryCompleteFile) }
+          }
+          assert.equal(fs.readFileSync(f.checkpointFile, 'utf8'), f.checkpointBytes)
+          assert.equal(fs.existsSync(path.join(f.data, 'agent/workspace-relocation-retirements')), false)
+          const invalidRecoveryCommit = createWorkspaceJournalClient(child, context, 'worker')
+          try { await assert.rejects(invalidRecoveryCommit.call('commit_recovery', { directory: f.root }), { code: 'CRABOT_WORKSPACE_JOURNAL_UNAVAILABLE' }) } finally { invalidRecoveryCommit.close() }
+          if (mode === 'lost acknowledgement') {
+            const emit = child.emit; let dropped = false
+            const mock = t.mock.method(child, 'emit', function(event, ...args) {
+              if (event === 'message' && args[0]?.kind === 'workspace_worker_journal_reply' && args[0]?.operation === 'commit_recovery' && !dropped) {
+                dropped = true; return emit.call(this, event, { ...args[0], ok: false }, ...args.slice(1))
+              }
+              return emit.call(this, event, ...args)
+            })
+            try { await assert.rejects(closer.commitRecovery(), { code: 'CRABOT_WORKSPACE_JOURNAL_UNAVAILABLE' }); assert.equal(dropped, true) } finally { mock.mock.restore() }
+            closer.close(); closer = createWorkspaceWorkerJournal(child, context)
+          }
+          const recoveryCommit = await closer.commitRecovery(), completeBytes = fs.readFileSync(recoveryCompleteFile)
+          assert.equal(recoveryCommit.dispatch, mode === 'lost acknowledgement' ? 'observe' : 'dispatch')
+          const complete = readWorkspaceRelocationRecoveryCommit(f.data, f.id)
+          assert.equal(recoveryCommit.commit_sha256, sha256CanonicalJson(complete))
+          assert.equal(complete.plan_sha256, recovery.plan_sha256)
+          assert.equal(complete.checkpoints.length, 1)
+          const archive = path.join(path.dirname(f.checkpointFile), 'workspace-relocation-history', f.id)
+          assert.equal(fs.readFileSync(path.join(archive, 'checkpoint.json'), 'utf8'), f.checkpointBytes)
+          assert.equal(fs.existsSync(f.checkpointFile), false)
+          const retirementFile = path.join(f.data, 'agent/workspace-relocation-retirements', f.id + '.json'), retirementBytes = fs.readFileSync(retirementFile)
+          const retirement = JSON.parse(retirementBytes)
+          assert.deepEqual(retirement.records, recoveryPlan.snapshot.records)
+          assert.equal(complete.retirement_sha256, sha256CanonicalJson(retirement))
+          assert.equal((await closer.commitRecovery()).dispatch, 'observe')
+          assert.deepEqual(fs.readFileSync(recoveryCompleteFile), completeBytes)
+          assert.deepEqual(fs.readFileSync(retirementFile), retirementBytes)
           assert.deepEqual(fs.readFileSync(f.ledgerFile), closedBytes)
           assert.equal(workspaceMaintenancePending(f.data), true)
         } finally { closer.close() }

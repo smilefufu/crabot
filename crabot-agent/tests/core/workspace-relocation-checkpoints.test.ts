@@ -42,6 +42,16 @@ for (const kind of ['manager', 'request'] as const) describe('fixed ' + kind + '
     expect(await fs.readdir(archive)).toEqual(expect.arrayContaining(['manifest.json', 'checkpoint.json', 'complete.json']))
     await expect(fs.lstat(path.join(data, 'workspace-control'))).rejects.toMatchObject({ code: 'ENOENT' })
   })
+  for (const change of ['body', 'completion', 'directory', 'active source']) it('rechecks retained archival evidence before common completion: ' + change, async () => {
+    let check: (() => void) | undefined
+    await archiveWorkspaceRelocationCheckpoint({ ...options, retainVerification: (verify: () => void) => { check = verify } })
+    expect(check).toBeTypeOf('function'); expect(() => check!()).not.toThrow()
+    if (change === 'body') await fs.writeFile(path.join(archive, 'checkpoint.json'), 'changed')
+    if (change === 'completion') await fs.writeFile(path.join(archive, 'complete.json'), 'null')
+    if (change === 'directory') { await fs.rename(archive, archive + '-kept'); await fs.mkdir(archive) }
+    if (change === 'active source') await fs.writeFile(source, original, { mode: 0o600 })
+    expect(() => check!()).toThrow()
+  })
   it('requires fresh caller verification before creating any archive namespace', async () => {
     await expect(archiveWorkspaceRelocationCheckpoint({ ...options, verify: async () => { throw new Error('unavailable original role') } })).rejects.toThrow()
     expect(await fs.readFile(source)).toEqual(original)

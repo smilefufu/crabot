@@ -2,7 +2,7 @@
 import { createWorkspaceJournalClient, serveWorkspaceJournal, journalFields as fields, workspaceJournalFailure as failure } from './workspace-coordinator-journal.mjs'
 import { readWorkspaceRelocationWorkers, readWorkspaceRelocationStops, commitWorkspaceRelocationWorkers,
   readWorkspaceRelocationProcesses, commitWorkspaceRelocationProcesses,
-  prepareWorkspaceRelocationStops, completeWorkspaceRelocationStops, readWorkspaceRelocationClosureBindings, verifyWorkspaceRelocationClosureReadiness, readWorkspaceRelocationClosurePlan, readWorkspaceRelocationClosureCommit, readWorkspaceRelocationRecoveryPlan } from './workspace-relocation-intent.mjs'
+  prepareWorkspaceRelocationStops, completeWorkspaceRelocationStops, readWorkspaceRelocationClosureBindings, verifyWorkspaceRelocationClosureReadiness, readWorkspaceRelocationClosurePlan, readWorkspaceRelocationClosureCommit, readWorkspaceRelocationRecoveryPlan, readWorkspaceRelocationRecoveryCommit } from './workspace-relocation-intent.mjs'
 import { sha256CanonicalJson } from '../../crabot-shared/dist/canonical-json.js'
 
 const sortedResults = results => [...results].sort((a, b) => {
@@ -73,6 +73,16 @@ export function createWorkspaceWorkerJournal(coordinator, context) {
         return { dispatch: result.dispatch, plan_sha256: result.plan_sha256 }
       } catch { transport.close(); throw failure() }
     },
+    async commitRecovery() {
+      try {
+        const previous = readWorkspaceRelocationRecoveryCommit(dataDir, id), result = await transport.call('commit_recovery', {})
+        const complete = readWorkspaceRelocationRecoveryCommit(dataDir, id)
+        if (!complete || !fields(result, ['dispatch', 'commit_sha256']) || !['dispatch', 'observe'].includes(result.dispatch)
+          || previous && result.dispatch !== 'observe' || result.commit_sha256 !== sha256CanonicalJson(complete)) throw failure()
+        transport.verify()
+        return { dispatch: result.dispatch, commit_sha256: result.commit_sha256 }
+      } catch { transport.close(); throw failure() }
+    },
     async verifyClosureReadiness() {
       try {
         const result = await transport.call('verify_closure_readiness', {}), bindings = readWorkspaceRelocationClosureBindings(dataDir, id)
@@ -85,7 +95,7 @@ export function createWorkspaceWorkerJournal(coordinator, context) {
 }
 export function serveWorkspaceWorkerJournal(context) {
   const args = { dataDir: context.dataDir, id: context.id }
-  let closurePreparation, closureCommit, recoveryPreparation
+  let closurePreparation, closureCommit, recoveryPreparation, recoveryCommit
   return serveWorkspaceJournal(context, 'worker', {
     async prepare_closure(payload) {
       if (!fields(payload, [])) throw failure()
@@ -123,6 +133,19 @@ export function serveWorkspaceWorkerJournal(context) {
       })()
       const result = await recoveryPreparation
       return { dispatch: previous ? 'observe' : result.dispatch, plan_sha256: result.plan_sha256 }
+    },
+    async commit_recovery(payload) {
+      if (!fields(payload, [])) throw failure()
+      await verifyWorkspaceRelocationClosureReadiness(args)
+      if (recoveryPreparation) await recoveryPreparation
+      if (!readWorkspaceRelocationRecoveryPlan(args.dataDir, args.id)) throw failure()
+      const previous = recoveryCommit
+      if (!recoveryCommit) recoveryCommit = (async () => {
+        const agent = await import('../../crabot-agent/dist/core/workspace-relocation-recovery.js')
+        return agent.commitWorkspaceRelocationRecovery(args)
+      })()
+      const result = await recoveryCommit
+      return { ...result, dispatch: previous ? 'observe' : result.dispatch }
     },
     async verify_closure_readiness(payload) {
       if (!fields(payload, [])) throw failure()
