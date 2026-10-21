@@ -854,17 +854,26 @@ for (const mode of ['confirmed', 'lost acknowledgement', 'changed source', 'copy
                 finally { fs.rmdirSync(f.target); fs.renameSync(retainedRoot, f.target) }
                 assert.deepEqual(await locateWorkspaceRelocationHistory(query), location)
                 const read = fs.promises.readFile, selectedBeforeRead = fs.readFileSync(selectedFile)
-                let changedDuringRead = false
+                // Catalog can expand a Windows short-path alias; bind the actual file, not its spelling.
+                const catalogIdentity = fs.statSync(path.join(control, 'catalog.json'), { bigint: true })
+                let changedDuringRead = false, pathAlias = false
                 const mock = t.mock.method(fs.promises, 'readFile', async function(file, ...args) {
                   const body = await read.call(this, file, ...args)
-                  if (file === path.join(control, 'catalog.json') && !changedDuringRead) {
-                    changedDuringRead = true
-                    fs.writeFileSync(selectedFile, JSON.stringify({ ...JSON.parse(selectedBeforeRead), catalog_revision: -1 }))
+                  if (!changedDuringRead && (typeof file === 'string' || file instanceof URL)) {
+                    const actual = await fs.promises.stat(file, { bigint: true })
+                    if (actual.dev === catalogIdentity.dev && actual.ino === catalogIdentity.ino) {
+                      changedDuringRead = true; pathAlias = file !== path.join(control, 'catalog.json')
+                      fs.writeFileSync(selectedFile, JSON.stringify({ ...JSON.parse(selectedBeforeRead), catalog_revision: -1 }))
+                    }
                   }
                   return body
                 })
-                try { await assert.rejects(locateWorkspaceRelocationHistory(query)); assert.equal(changedDuringRead, true) }
-                finally { mock.mock.restore(); fs.writeFileSync(selectedFile, selectedBeforeRead) }
+                try {
+                  assert.equal(await fs.promises.readFile(path.join(f.root, 'outside-project/kept'), 'utf8'), 'external project work')
+                  assert.equal(changedDuringRead, false)
+                  await assert.rejects(locateWorkspaceRelocationHistory(query)); assert.equal(changedDuringRead, true)
+                }
+                finally { t.diagnostic(JSON.stringify({ catalog_read_race_injected: changedDuringRead, path_alias: pathAlias })); mock.mock.restore(); fs.writeFileSync(selectedFile, selectedBeforeRead) }
                 const [{ WorkerHarness }, { LedgerStore }, { WorkerContextStore }, { WorkspaceManager }, { BUILTIN_WORKER_PERMISSIONS }, { buildProjectDocTools }] = await Promise.all([
                   import('../../../crabot-agent/dist/workers/harness/harness.js'), import('../../../crabot-agent/dist/workers/harness/ledger-store.js'),
                   import('../../../crabot-agent/dist/workers/harness/context-store.js'), import('../../../crabot-agent/dist/workers/harness/workspace-manager.js'),
