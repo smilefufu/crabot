@@ -1,4 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import { join } from 'node:path'
 import { captureHeadlessNativeProcesses } from '../headless-native-processes.js'
 import type { WorkerProcessObservation } from '../types.js'
 import { buildScrubbedChildEnv } from '../connections/secret-env.js'
@@ -101,6 +102,7 @@ export class CodexAppServerClient {
   private stderrBuffer = ''
   private exited = false
   private processExited = false
+  private windowsTermination?: Promise<boolean>
 
   constructor(opts: {
     readonly command: string
@@ -239,11 +241,28 @@ export class CodexAppServerClient {
   }
 
   async terminate(): Promise<boolean> {
+    if (process.platform === 'win32') {
+      this.windowsTermination ??= this.terminateWindowsProcesses()
+      return this.windowsTermination
+    }
     if (this.processExited) return true
     killProcessTree(this.child, 'SIGTERM')
     if (await this.waitForExit(1000)) return true
     killProcessTree(this.child, 'SIGKILL')
     return this.waitForExit(1000)
+  }
+
+  private async terminateWindowsProcesses(): Promise<boolean> {
+    if (this.processExited) return true
+    try {
+      const processes = captureHeadlessNativeProcesses(this.child)
+      if (!Array.isArray(processes)) return false
+      const { stopKnownProcessScope } = require(join(__dirname, '../../../../scripts/lib/known-process-stop.cjs'))
+      await stopKnownProcessScope(processes, { timeoutMs: 1, onObserved: async () => {} })
+      return await this.waitForExit(1000)
+    } catch {
+      return false
+    }
   }
 
   private write(message: JsonObject): void {
