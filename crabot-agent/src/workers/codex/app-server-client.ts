@@ -102,7 +102,7 @@ export class CodexAppServerClient {
   private stderrBuffer = ''
   private exited = false
   private processExited = false
-  private windowsTermination?: Promise<boolean>
+  private termination?: Promise<boolean>
 
   constructor(opts: {
     readonly command: string
@@ -240,26 +240,31 @@ export class CodexAppServerClient {
   }
 
   async terminate(): Promise<boolean> {
-    if (process.platform === 'win32') {
-      this.windowsTermination ??= this.terminateWindowsProcesses()
-      return this.windowsTermination
-    }
-    if (this.processExited) return true
-    killProcessTree(this.child, 'SIGTERM')
-    if (await this.waitForExit(1000)) return true
-    killProcessTree(this.child, 'SIGKILL')
-    return this.waitForExit(1000)
+    this.termination ??= this.terminateObservedProcesses()
+    return this.termination
   }
 
-  private async terminateWindowsProcesses(): Promise<boolean> {
+  private async terminateObservedProcesses(): Promise<boolean> {
     if (this.processExited) return true
+    let stage = 'capture'
     try {
       const processes = captureHeadlessNativeProcesses(this.child)
       if (!Array.isArray(processes)) return false
       const { stopKnownProcessScope } = require(join(__dirname, '../../../../scripts/lib/known-process-stop.cjs'))
-      await stopKnownProcessScope(processes, { timeoutMs: 1, onObserved: async () => {} })
-      return await this.waitForExit(1000)
-    } catch {
+      stage = 'stop'
+      await stopKnownProcessScope(processes, {
+        timeoutMs: process.platform === 'win32' ? 1 : 1000,
+        onObserved: async () => {},
+        ...(process.platform === 'win32' ? {} : { graceful: () => { killProcessTree(this.child, 'SIGTERM') } }),
+      })
+      stage = 'exit'
+      if (!await this.waitForExit(1000)) throw new Error('Carrier exit was not observed')
+      return true
+    } catch (error) {
+      const info = error as { code?: unknown; stage?: unknown }
+      const bounded = (value: unknown, pattern: RegExp) => typeof value === 'string' && pattern.test(value) ? value : undefined
+      console.warn('Codex app-server termination unconfirmed', { stage,
+        code: bounded(info?.code, /^[A-Z0-9_]{1,80}$/), native_stage: bounded(info?.stage, /^[a-z-]{1,80}$/) })
       return false
     }
   }

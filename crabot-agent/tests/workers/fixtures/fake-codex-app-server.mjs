@@ -21,7 +21,9 @@ const requestFile = process.env.FAKE_REQUEST_FILE
 
 function recordTermination(signal) {
   if (terminationFile) appendFileSync(terminationFile, `${process.pid}:${signal}\n`)
-  process.exit(0)
+  const wait = Number(process.env.FAKE_TERMINATION_DELAY_MS ?? '0')
+  if (wait > 0) setTimeout(() => process.exit(0), wait)
+  else process.exit(0)
 }
 process.on('SIGTERM', () => recordTermination('SIGTERM'))
 process.on('SIGINT', () => recordTermination('SIGINT'))
