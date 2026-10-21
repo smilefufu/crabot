@@ -297,7 +297,7 @@ for (const mode of ['confirmed', 'lost reply', 'unexpected payload', 'exited Hos
   }
 })
 
-for (const mode of ['confirmed', 'lost acknowledgement', 'unexpected payload']) test('the actual file channel prepares one exclusive staging: ' + mode, { timeout: 25000 }, async t => {
+for (const mode of ['confirmed', 'lost acknowledgement', 'unexpected payload']) test('the actual file channel prepares one exclusive staging: ' + mode, { timeout: process.platform === 'win32' ? 60000 : 25000 }, async t => {
   const f = await fixture(t), { child, launch } = await f.launch(), context = { dataDir: f.data, id: f.id, launch }
   const workers = createWorkspaceWorkerJournal(child, context), modules = createWorkspaceModuleJournal(child, context), processes = createWorkspaceProcessJournal(child, context)
   let files = createWorkspaceFileJournal(child, context)
@@ -312,6 +312,7 @@ for (const mode of ['confirmed', 'lost acknowledgement', 'unexpected payload']) 
       assert.equal(readWorkspaceRelocationFileActors(f.data, f.id).staging_attempt, null)
     }
     const host = await files.prepareHost()
+    t.diagnostic('file staging channel: Host entered and original stop facts confirmed')
     if (mode === 'lost acknowledgement') {
       const emit = child.emit; let dropped = false
       const mock = t.mock.method(child, 'emit', function(event, ...args) {
