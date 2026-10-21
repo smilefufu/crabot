@@ -6,6 +6,11 @@ on:
     paths:
       - 'crabot-native/**'
       - 'crabot-shared/src/workspace-*'
+      - 'crabot-agent/src/core/workspace-relocation-ledgers.ts'
+      - 'crabot-agent/src/workers/harness/workspace-relocation-close.ts'
+      - 'crabot-agent/src/workers/harness/ledger-store.ts'
+      - 'crabot-agent/tests/core/workspace-relocation-ledgers.test.ts'
+      - 'crabot-agent/tests/workers/harness/workspace-relocation-close.test.ts'
       - 'scripts/lib/workspace-*'
       - 'scripts/lib/process-identity.cjs'
       - 'scripts/lib/run-bounded.mjs'
@@ -51,6 +56,11 @@ jobs:
       - name: Validate stable workspace content snapshots
         working-directory: crabot-shared
         run: node --import tsx --test src/workspace-relocation-content.test.ts
+      - name: Agent offline ledger capture and closure regressions
+        run: |
+          pnpm --dir crabot-agent install --frozen-lockfile
+          cd crabot-agent
+          node node_modules/vitest/vitest.mjs run tests/core/workspace-relocation-ledgers.test.ts tests/workers/harness/workspace-relocation-close.test.ts --maxWorkers=1 --minWorkers=1
       - name: Windows delayed instance registration regression
         if: runner.os == 'Windows'
         run: |
