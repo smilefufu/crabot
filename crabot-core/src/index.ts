@@ -39,6 +39,8 @@ import {
   type VerifyWorkspaceRelocationRequestResult,
   type QuiesceWorkspaceRelocationWebParams,
   type QuiesceWorkspaceRelocationWebResult,
+  type VerifyWorkspaceRelocationRuntimeParams,
+  type VerifyWorkspaceRelocationRuntimeResult,
   type VerifyWorkspaceRelocationCoordinatorParams,
   type VerifyWorkspaceRelocationCoordinatorResult,
   assertWorkspaceExecutionAllowed,
@@ -224,6 +226,14 @@ export class ModuleManager {
   private workspaceWorkerClosure?: { fingerprint: string; pending: Promise<WorkspaceWorkerClosureResult> }
   private workspaceRootSelection?: { fingerprint: string; pending: Promise<WorkspaceRootSelectionResult> }
   private workspaceValidationLaunch?: { fingerprint: string; pending: Promise<WorkspaceValidationLaunchResult> }
+  private workspaceValidationProof?: {
+    request: VerifyWorkspaceRelocationRequestParams
+    result: WorkspaceValidationLaunchResult
+    launchId: string
+    launchHash: string
+    verify: () => Promise<void>
+    assertCurrent: () => void
+  }
   private readonly workspaceValidationPermits = new WeakMap<object, { moduleId: ModuleId; runtime: ModuleRuntime; verify: () => Promise<void>; assertCurrent: () => void }>()
   private workspaceModuleStop?: { fingerprint: string; pending: Promise<WorkspaceModuleStopResponse> }
   private readonly childStates: WeakMap<ChildProcess, ManagedChildState> = new WeakMap()
@@ -268,6 +278,7 @@ export class ModuleManager {
     // 注册所有方法处理器
     this.registerMethod('register', this.handleRegisterUnauthenticated.bind(this))
     this.registerMethod('register_core_agent', this.handleRegisterCoreAgent.bind(this))
+    this.registerMethod('verify_workspace_relocation_runtime', this.handleVerifyWorkspaceRelocationRuntime.bind(this))
     this.registerMethod('verify_workspace_relocation_coordinator', this.handleVerifyWorkspaceRelocationCoordinator.bind(this))
     this.registerMethod('prepare_workspace_relocation_worker_stops', this.handlePrepareWorkspaceRelocationWorkerStops.bind(this))
     this.registerMethod('complete_workspace_relocation_worker_stops', this.handleCompleteWorkspaceRelocationWorkerStops.bind(this))
@@ -1639,7 +1650,7 @@ export class ModuleManager {
       return this.workspaceValidationLaunch.pending
     }
     const pending = Promise.resolve().then(async (): Promise<WorkspaceValidationLaunchResult> => {
-      let child: ChildProcess | undefined, files: { verifySelectedRoot(): Promise<{ selected_sha256: string; worker_commit_sha256: string; recovery_commit_sha256: string }>; close(): void } | undefined
+      let child: ChildProcess | undefined
       let stage = 'root'
       try {
         const selected = await this.commitWorkspaceRelocationRoot(request, bearer)
@@ -1654,7 +1665,7 @@ export class ModuleManager {
         const definitions = new Map([...this.modules].map(([id, runtime]) => [id, { runtime, hash: sha256CanonicalJson(definition(runtime)), overrides: sha256CanonicalJson(this.envOverrides.get(id) ?? {}) }]))
         const launched = new Map<ModuleId, { child: ChildProcess; state: ManagedChildState; process: WorkerProcessIdentity }>()
         let pendingModule: ModuleId | undefined
-        files = require('../../scripts/lib/workspace-file-journal.mjs').createWorkspaceFileJournal(child, { dataDir: this.dataDir, id: request.intent_id, launch: coordinator.launch })
+        const journalContext = { dataDir: this.dataDir, id: request.intent_id, launch: coordinator.launch }
         const assertCurrent = (): void => {
           const target = records.readWorkspaceRelocationRootPublished(this.dataDir, request.intent_id)?.target
           if (!target) throw failure()
@@ -1699,7 +1710,9 @@ export class ModuleManager {
         }
         const verify = async (): Promise<void> => {
           await verifyRegistrations()
-          const proof = await files!.verifySelectedRoot()
+          const files = require('../../scripts/lib/workspace-file-journal.mjs').createWorkspaceFileJournal(child, journalContext)
+          let proof
+          try { proof = await files.verifySelectedRoot() } finally { files.close() }
           assertCurrent()
           if (proof.selected_sha256 !== selected.root_selected_sha256 || proof.worker_commit_sha256 !== selected.closure_commit_sha256
             || proof.recovery_commit_sha256 !== selected.recovery_commit_sha256) throw failure()
@@ -1728,13 +1741,52 @@ export class ModuleManager {
         }
         stage = 'final-verify'
         await verify()
-        return Object.freeze({ ...selected, validation_modules: Object.freeze([...launched].map(([module_id, item]) =>
+        const result = Object.freeze({ ...selected, validation_modules: Object.freeze([...launched].map(([module_id, item]) =>
           Object.freeze({ module_id, runtime_id: item.state.runtimeId, process: Object.freeze({ ...item.process }) }))) })
+        this.workspaceValidationProof = { request, result, launchId: coordinator.launch.launch_id, launchHash: sha256CanonicalJson(coordinator.launch), verify, assertCurrent }
+        return result
       } catch (cause) { await this.closeWorkspaceCoordinatorChannel(child); throw Object.assign(failure(), { stage, cause }) }
-      finally { files?.close() }
     })
     this.workspaceValidationLaunch = { fingerprint, pending }
     return pending
+  }
+
+  private async handleVerifyWorkspaceRelocationRuntime(
+    params: VerifyWorkspaceRelocationRuntimeParams, context?: RpcHandlerContext,
+  ): Promise<VerifyWorkspaceRelocationRuntimeResult> {
+    context = Object.freeze({ authorizationBearer: context?.authorizationBearer })
+    this.handleVerifyCoreAgentRuntime({ expected_module_id: 'crabot-agent' }, context)
+    const uuid = (value: unknown) => typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value)
+    if (!params || typeof params !== 'object' || Array.isArray(params) || Object.keys(params).length !== 2
+      || !Object.keys(params).every(key => key === 'intent_id' || key === 'launch_id') || !uuid(params.intent_id) || !uuid(params.launch_id)) {
+      throw Object.assign(new Error('Invalid workspace validation request'), { code: 'INVALID_PARAMS' })
+    }
+    const request = Object.freeze({ ...params }), proof = this.workspaceValidationProof
+    if (!proof) throw Object.assign(new Error('Workspace validation launch is not confirmed'), { code: 'SERVICE_UNAVAILABLE' })
+    if (request.intent_id !== proof.request.intent_id || request.launch_id !== proof.launchId) {
+      throw Object.assign(new Error('Workspace validation job does not match'), { code: 'FORBIDDEN' })
+    }
+    const validateAgent = () => {
+      this.handleVerifyCoreAgentRuntime({ expected_module_id: 'crabot-agent' }, context)
+      proof.assertCurrent()
+      const agent = proof.result.validation_modules.find(item => item.module_id === 'crabot-agent')
+      const child = this.processes.get('crabot-agent'), state = child && this.childStates.get(child)
+      if (this.workspaceValidationProof !== proof || !agent || !child || !state || state.runtimeId !== agent.runtime_id
+        || this.runtimeBearers.get('crabot-agent')?.child !== child || state.rootExited || state.finalizeStarted || state.intentionalReason
+        || state.termination || state.forceTermination || !state.reachedRunning) {
+        throw Object.assign(new Error('Workspace validation Agent is not current'), { code: 'FORBIDDEN' })
+      }
+      return agent
+    }
+    try {
+      validateAgent()
+      await proof.verify()
+      const agent = validateAgent()
+      return { verified: true, ...request, intent_sha256: proof.request.intent_sha256, launch_sha256: proof.launchHash,
+        root_selected_sha256: proof.result.root_selected_sha256, instance_id: this.runtimeRegistry.getInstanceId(), module_id: 'crabot-agent', runtime_id: agent.runtime_id }
+    } catch (cause) {
+      throw Object.assign(new Error('无法核实迁移后的Agent运行代际，已保留维护保护。'), { code: 'SERVICE_UNAVAILABLE', cause })
+    }
   }
 
   private assertWorkspaceCoordinatorGrantCurrent(grant: WorkspaceCoordinatorGrant): void {

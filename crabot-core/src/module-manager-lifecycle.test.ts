@@ -63,6 +63,19 @@ async function waitFor<T>(read: () => T | undefined | Promise<T | undefined>, ti
   throw new Error('timed out waiting for lifecycle state')
 }
 
+async function waitForModuleHealth(mm: any, runtime: ModuleRuntime): Promise<void> {
+  let failures = 0
+  await waitFor(async () => {
+    try { await mm.sendToModule(runtime.port, 'health', {}); return true }
+    catch (error) {
+      // Preserve a bounded failure reason before the outer test deadline can fire.
+      if (++failures <= 2) console.error('[finite lifecycle health]', { module_id: runtime.module_id,
+        code: (error as NodeJS.ErrnoException).code, message: (error as Error).message })
+      return undefined
+    }
+  })
+}
+
 async function readPidFile(pidFile: string): Promise<{
   pid: number
   ppid: number
@@ -282,14 +295,7 @@ describe.skipIf(process.platform === 'win32')('Module Manager child-bound lifecy
     const { mm, runtime, pidFile, events } = makeManager({ mode: 'http', shutdownTimeout: 1 })
     runtime.skip_health_check = false
     const { child } = await start(mm, runtime)
-    await waitFor(async () => {
-      try {
-        await mm.sendToModule(runtime.port, 'health', {})
-        return true
-      } catch {
-        return undefined
-      }
-    })
+    await waitForModuleHealth(mm, runtime)
     const sendToModule = mm.sendToModule.bind(mm)
     mm.sendToModule = vi.fn(sendToModule)
 
@@ -310,14 +316,7 @@ describe.skipIf(process.platform === 'win32')('Module Manager child-bound lifecy
     })
     runtime.skip_health_check = false
     await start(mm, runtime)
-    await waitFor(async () => {
-      try {
-        await mm.sendToModule(runtime.port, 'health', {})
-        return true
-      } catch {
-        return undefined
-      }
-    })
+    await waitForModuleHealth(mm, runtime)
 
     const startedAt = Date.now()
     await mm.handleStopModule({ module_id: runtime.module_id })
@@ -331,14 +330,7 @@ describe.skipIf(process.platform === 'win32')('Module Manager child-bound lifecy
     const { mm, runtime, pidFile } = makeManager({ mode: 'http', shutdownTimeout: 1 })
     runtime.skip_health_check = false
     await start(mm, runtime)
-    await waitFor(async () => {
-      try {
-        await mm.sendToModule(runtime.port, 'health', {})
-        return true
-      } catch {
-        return undefined
-      }
-    })
+    await waitForModuleHealth(mm, runtime)
     const sendToModule = mm.sendToModule.bind(mm)
     mm.sendToModule = vi.fn(sendToModule)
 
@@ -478,6 +470,7 @@ describe.skipIf(process.platform === 'win32')('Module Manager child-bound lifecy
 
   it('health failure and crash share one restart budget and reuse the current env snapshot', async () => {
     const { mm, runtime, pidFile, events } = makeManager({ autoRestart: true, threshold: 1 })
+    const startedAt = Date.now()
     const initial = await start(mm, runtime, { TEST_MARKER: 'stable-env' })
     runtime.skip_health_check = false
     mm.sendToModule = vi.fn().mockRejectedValue(new Error('unhealthy'))
@@ -492,6 +485,7 @@ describe.skipIf(process.platform === 'win32')('Module Manager child-bound lifecy
         : undefined
     }, 4000)
 
+    console.log('[finite lifecycle recovery]', { stage: 'health', elapsed_ms: Date.now() - startedAt })
     expect(runtime.restart_history?.attempts).toHaveLength(1)
     expect(stoppedEvents(events, runtime.module_id).map(event => event.payload.reason)).toEqual([
       'health_check_failed',
@@ -506,6 +500,7 @@ describe.skipIf(process.platform === 'win32')('Module Manager child-bound lifecy
         : undefined
     }, 6000)
 
+    console.log('[finite lifecycle recovery]', { stage: 'crash', elapsed_ms: Date.now() - startedAt })
     expect(afterCrash.info.marker).toBe('stable-env')
     expect(runtime.restart_history?.attempts).toHaveLength(2)
     expect(stoppedEvents(events, runtime.module_id).map(event => event.payload.reason)).toEqual([

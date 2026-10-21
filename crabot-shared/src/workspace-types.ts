@@ -98,6 +98,24 @@ export interface VerifyWorkspaceRelocationCoordinatorResult {
   action: WorkspaceRelocationCoordinatorAction
 }
 
+export interface VerifyWorkspaceRelocationRuntimeParams {
+  intent_id: string
+  launch_id: string
+}
+export interface VerifyWorkspaceRelocationRuntimeResult {
+  verified: true
+  intent_id: string
+  intent_sha256: string
+  launch_id: string
+  launch_sha256: string
+  root_selected_sha256: string
+  instance_id: string
+  module_id: 'crabot-agent'
+  runtime_id: string
+}
+export type VerifyWorkspaceRelocationRootParams = VerifyWorkspaceRelocationRuntimeParams
+export type VerifyWorkspaceRelocationRootResult = VerifyWorkspaceRelocationRuntimeResult
+
 export type WorkspaceRelocationImplementation = 'builtin' | 'claude-code' | 'codex' | 'legacy'
 export interface WorkspaceRelocationIncarnation {
   readonly incarnation_id: string

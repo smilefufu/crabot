@@ -5,6 +5,11 @@ on:
     branches: ['feat/desktop-*']
     paths:
       - 'crabot-core/src/index.ts'
+      - 'crabot-core/src/module-manager-lifecycle.test.ts'
+      - 'crabot-agent/src/core/workspace-relocation-validation.ts'
+      - 'crabot-agent/src/unified-agent.ts'
+      - 'crabot-shared/src/workspace-types.ts'
+      - 'crabot-shared/src/module-base.ts'
       - 'crabot-core/src/workspace-*.test.ts'
       - 'crabot-agent/tests/core/fixtures/**'
       - 'scripts/lib/workspace-*'
@@ -17,6 +22,11 @@ on:
   pull_request:
     paths:
       - 'crabot-core/src/index.ts'
+      - 'crabot-core/src/module-manager-lifecycle.test.ts'
+      - 'crabot-agent/src/core/workspace-relocation-validation.ts'
+      - 'crabot-agent/src/unified-agent.ts'
+      - 'crabot-shared/src/workspace-types.ts'
+      - 'crabot-shared/src/module-base.ts'
       - 'crabot-core/src/workspace-*.test.ts'
       - 'crabot-agent/tests/core/fixtures/**'
       - 'scripts/lib/workspace-*'

@@ -138,6 +138,7 @@ async function fixture(options: { withMemory?: boolean; inactiveMemory?: boolean
             },10);` : ''}`)
         }
         await fs.writeFile(agentScript, `const fs=require('node:fs'),http=require('node:http'),{UnifiedAgent}=require(${JSON.stringify(entry)}),calls=[];
+          require(${JSON.stringify(path.resolve('../crabot-agent/dist/core/config-loader.js'))}).ConfigLoader.captureRuntimeBearer();
           const config=${JSON.stringify(relocationAgentConfig)};config.port=Number(process.env.Crabot_PORT);const agent=new UnifiedAgent(config);
           agent.managerStack.harness.deps.isWorkspaceRelocationReady=()=>true;
           agent.managerStack.adapters.get('builtin').stop=async()=>{fs.appendFileSync(process.env.FIXTURE_STOPS,'stop\\n');
@@ -1490,7 +1491,7 @@ describe('MM commits the original workspace Root', () => {
 
 
 describe('MM restricts post-relocation validation launches to the original job', () => {
-  for (const mode of ['confirmed', 'confirmed memory', 'inactive memory', 'unready memory', 'lost proof', 'definition changed', 'foreign registration', 'definition changed before spawn']) it('keeps normal startup fenced while validation starts: ' + mode, async () => {
+  for (const mode of ['confirmed', 'confirmed probe rejected', 'confirmed memory', 'inactive memory', 'unready memory', 'lost proof', 'definition changed', 'foreign registration', 'definition changed before spawn']) it('keeps normal startup fenced while validation starts: ' + mode, async () => {
     const f = await fixture({ actualAgent: true, actualAdmin: true, withMemory: mode === 'confirmed memory' || mode === 'unready memory', inactiveMemory: mode === 'inactive memory', processLifetimeMs: process.platform === 'win32' ? 900000 : 300000 })
     const locks = require('../../scripts/lib/cli-lock.mjs'), native = require('../../scripts/lib/process-identity.cjs')
     const lock = await locks.acquireWorkspaceRelocationLock(f.data, f.params.intent_id)
@@ -1537,8 +1538,58 @@ describe('MM restricts post-relocation validation launches to the original job',
     try {
       const first = f.manager.startWorkspaceRelocationValidationModules(f.params, 'fixture-human')
       expect(f.manager.startWorkspaceRelocationValidationModules({ ...f.params }, 'fixture-human')).toBe(first)
-      if (['confirmed', 'confirmed memory', 'inactive memory'].includes(mode)) {
+      if (['confirmed', 'confirmed probe rejected', 'confirmed memory', 'inactive memory'].includes(mode)) {
         const result = await first
+        if (mode === 'confirmed' || mode === 'confirmed probe rejected') {
+          const records = require('../../scripts/lib/workspace-relocation-intent.mjs')
+          const ids = { intent_id: f.params.intent_id, launch_id: records.readWorkspaceRelocationCoordinator(f.data, f.params.intent_id).launch.launch_id }
+          const currentBearer = f.manager.runtimeBearers.get('crabot-agent').token
+          await expect(f.manager.handleVerifyWorkspaceRelocationRuntime(ids, {})).rejects.toMatchObject({ code: 'UNAUTHORIZED' })
+          for (const token of [originalBearer.token, 'fixture-human', 'not-current']) {
+            await expect(f.manager.handleVerifyWorkspaceRelocationRuntime(ids, { authorizationBearer: token })).rejects.toMatchObject({ code: 'FORBIDDEN' })
+          }
+          await expect(f.manager.handleVerifyWorkspaceRelocationRuntime({ ...ids, path: f.root }, { authorizationBearer: currentBearer })).rejects.toMatchObject({ code: 'INVALID_PARAMS' })
+          const proof = await f.manager.handleVerifyWorkspaceRelocationRuntime(ids, { authorizationBearer: currentBearer })
+          expect(proof).toEqual({ verified: true, ...ids, intent_sha256: f.params.intent_sha256,
+            launch_sha256: sha256CanonicalJson(records.readWorkspaceRelocationCoordinator(f.data, f.params.intent_id).launch),
+            root_selected_sha256: result.root_selected_sha256, instance_id: f.manager.runtimeRegistry.getInstanceId(), module_id: 'crabot-agent',
+            runtime_id: result.validation_modules.find((item: any) => item.module_id === 'crabot-agent').runtime_id })
+          const originalEntry = runtime.entry; runtime.entry += ' changed-after-start'
+          await expect(f.manager.handleVerifyWorkspaceRelocationRuntime(ids, { authorizationBearer: currentBearer })).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
+          runtime.entry = originalEntry
+          const callRoot = async (params: unknown, bearer?: string) => {
+            const response = await fetch(`http://127.0.0.1:${runtime.port}/verify_workspace_relocation_root`, {
+              method: 'POST', headers: { 'Content-Type': 'application/json', ...(bearer ? { Authorization: 'Bearer ' + bearer } : {}) },
+              body: JSON.stringify({ id: randomUUID(), method: 'verify_workspace_relocation_root', params, source: 'module-manager' }),
+            })
+            return response.json() as Promise<any>
+          }
+          expect((await callRoot(ids)).error?.code).toBe('UNAUTHORIZED')
+          for (const bearer of [originalBearer.token, 'fixture-human']) expect((await callRoot(ids, bearer)).error?.code).toBe('FORBIDDEN')
+          expect((await callRoot({ ...ids, path: f.root }, currentBearer)).error?.code).toBe('INVALID_PARAMS')
+          expect((await callRoot({ ...ids, launch_id: randomUUID() }, currentBearer)).error?.code).toBe('FORBIDDEN')
+          const root = records.readWorkspaceRelocationRootPublished(f.data, f.params.intent_id).target.path
+          const beforeFiles = await fs.readdir(root), beforeProbe = (await fs.stat(root, { bigint: true })).mtimeNs
+          const foreign = { module_id: 'foreign', runtime_id: randomUUID() }
+          if (mode === 'confirmed probe rejected') {
+            vi.spyOn(f.manager.runtimeRegistry, 'listRecords').mockImplementation(async () => [...await list(), foreign])
+            expect((await callRoot(ids, currentBearer)).success).toBe(false)
+            vi.mocked(f.manager.runtimeRegistry.listRecords).mockRestore()
+            expect(await f.manager.handleVerifyWorkspaceRelocationRuntime(ids, { authorizationBearer: currentBearer })).toEqual(proof)
+            expect((await callRoot(ids, currentBearer)).success).toBe(false)
+            expect((await fs.stat(root, { bigint: true })).mtimeNs).toBe(beforeProbe)
+          } else {
+            const probe = await callRoot(ids, currentBearer)
+            expect(probe).toMatchObject({ success: true, data: proof })
+            const probedAt = (await fs.stat(root, { bigint: true })).mtimeNs
+            expect(await callRoot(ids, currentBearer)).toMatchObject({ success: true, data: proof })
+            expect((await fs.stat(root, { bigint: true })).mtimeNs).toBe(probedAt)
+            vi.spyOn(f.manager.runtimeRegistry, 'listRecords').mockImplementation(async () => [...await list(), foreign])
+            expect((await callRoot(ids, currentBearer)).success).toBe(false)
+            vi.mocked(f.manager.runtimeRegistry.listRecords).mockRestore()
+          }
+          expect(await fs.readdir(root)).toEqual(beforeFiles)
+        }
         expect(starts).toHaveBeenCalledTimes(mode === 'confirmed memory' ? 2 : 1)
         expect(result.validation_modules.map((item: any) => item.module_id)).toEqual(mode === 'confirmed memory' ? ['memory-default', 'crabot-agent'] : ['crabot-agent'])
         if (mode === 'inactive memory') expect(f.manager.processes.has('memory-default')).toBe(false)
