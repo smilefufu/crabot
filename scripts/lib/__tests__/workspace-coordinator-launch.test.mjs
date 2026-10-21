@@ -15,7 +15,7 @@ import { createWorkspaceWorkerJournal } from '../workspace-worker-journal.mjs'
 import { createWorkspaceModuleJournal } from '../workspace-module-journal.mjs'
 import { createWorkspaceFileJournal } from '../workspace-file-journal.mjs'
 import { createWorkspaceJournalClient } from '../workspace-coordinator-journal.mjs'
-import { readWorkspaceRelocationFilePlan, readWorkspaceRelocationFileActors } from '../workspace-relocation-intent.mjs'
+import { readWorkspaceRelocationFilePlan, readWorkspaceRelocationFileActors, verifyWorkspaceRelocationClosureReadiness } from '../workspace-relocation-intent.mjs'
 import { createWorkspaceProcessJournal } from '../workspace-process-journal.mjs'
 import { WorkspaceCatalog } from '../../../crabot-shared/dist/workspace-catalog.js'
 import { sha256CanonicalJson } from '../../../crabot-shared/dist/canonical-json.js'
@@ -347,6 +347,10 @@ for (const mode of ['confirmed', 'lost acknowledgement', 'changed source', 'copy
     await workers.capture([]); await workers.captureProcesses([]); await modules.capture([])
     await processes.prepare(); await processes.observe([]); await processes.complete()
     await workers.prepare([]); await workers.complete([]); await modules.prepare([]); await modules.complete([]); await processes.confirmExecutionExit()
+    if (mode === 'confirmed') {
+      const early = createWorkspaceWorkerJournal(child, context)
+      try { await assert.rejects(early.verifyClosureReadiness(), { code: 'CRABOT_WORKSPACE_JOURNAL_UNAVAILABLE' }) } finally { early.close() }
+    }
     const plan = (await files.prepare()).plan, host = await files.prepareHost(); await files.prepareStage()
     if (mode === 'changed source') fs.writeFileSync(f.marker, 'new work must be preserved')
     if (mode === 'lost acknowledgement') {
@@ -374,6 +378,35 @@ for (const mode of ['confirmed', 'lost acknowledgement', 'changed source', 'copy
       if (mode === 'copy') assert.equal(fs.readFileSync(f.marker, 'utf8'), 'original work')
       assert.equal(fs.readFileSync(path.join(plan.staging_path, 'tree/original.txt'), 'utf8'), 'original work')
       assert.equal(native.isProcessExited(host.actors.host.process.pid), true)
+      const control = path.join(f.data, 'workspace-control')
+      const snapshotControl = () => fs.readdirSync(control).sort().map(name => {
+        const file = path.join(control, name), stat = fs.lstatSync(file, { bigint: true })
+        return [name, stat.isFile() ? fs.readFileSync(file) : [stat.dev, stat.ino, stat.mtimeNs, stat.ctimeNs].join(':')]
+      })
+      const unchanged = snapshotControl()
+      const proof = await workers.verifyClosureReadiness()
+      assert.equal(proof.verified, true); assert.equal(proof.intent_id, f.id)
+      assert.deepEqual(await workers.verifyClosureReadiness(), proof)
+      assert.deepEqual(snapshotControl(), unchanged)
+      if (mode === 'confirmed') {
+        await assert.rejects(verifyWorkspaceRelocationClosureReadiness({ dataDir: f.data, id: f.id }), { code: 'WORKSPACE_RELOCATION_INVALID' })
+        const injected = createWorkspaceJournalClient(child, context, 'worker')
+        try { await assert.rejects(injected.call('verify_closure_readiness', { directory: f.root }), { code: 'CRABOT_WORKSPACE_JOURNAL_UNAVAILABLE' }) } finally { injected.close() }
+        const refused = async () => {
+          const observer = createWorkspaceWorkerJournal(child, context)
+          try { await assert.rejects(observer.verifyClosureReadiness(), { code: 'CRABOT_WORKSPACE_JOURNAL_UNAVAILABLE' }) } finally { observer.close() }
+        }
+        const catalogFile = path.join(control, 'catalog.json'), originalCatalog = fs.readFileSync(catalogFile)
+        const changed = JSON.parse(originalCatalog); changed.revision++
+        try { fs.writeFileSync(catalogFile, JSON.stringify(changed)); await refused() } finally { fs.writeFileSync(catalogFile, originalCatalog) }
+        const tree = path.join(plan.staging_path, 'tree'), saved = path.join(path.dirname(plan.staging_path), 'saved-tree-' + f.id)
+        fs.renameSync(tree, saved)
+        try { fs.mkdirSync(tree, { mode: 0o700 }); await refused() } finally { fs.rmdirSync(tree); fs.renameSync(saved, tree) }
+        fs.mkdirSync(f.before.storage_root)
+        try { await refused() } finally { fs.rmdirSync(f.before.storage_root) }
+        assert.deepEqual(await workers.verifyClosureReadiness(), proof)
+        assert.deepEqual(snapshotControl(), unchanged)
+      }
       const before = fs.readFileSync(path.join(f.data, 'workspace-control/relocation-file-actors.jsonl'))
       assert.equal((await files.prepareFiles()).dispatch, 'observe')
       assert.deepEqual(fs.readFileSync(path.join(f.data, 'workspace-control/relocation-file-actors.jsonl')), before)

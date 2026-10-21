@@ -2,7 +2,7 @@
 import { createWorkspaceJournalClient, serveWorkspaceJournal, journalFields as fields, workspaceJournalFailure as failure } from './workspace-coordinator-journal.mjs'
 import { readWorkspaceRelocationWorkers, readWorkspaceRelocationStops, commitWorkspaceRelocationWorkers,
   readWorkspaceRelocationProcesses, commitWorkspaceRelocationProcesses,
-  prepareWorkspaceRelocationStops, completeWorkspaceRelocationStops } from './workspace-relocation-intent.mjs'
+  prepareWorkspaceRelocationStops, completeWorkspaceRelocationStops, readWorkspaceRelocationClosureBindings, verifyWorkspaceRelocationClosureReadiness } from './workspace-relocation-intent.mjs'
 import { sha256CanonicalJson } from '../../crabot-shared/dist/canonical-json.js'
 
 const sortedResults = results => [...results].sort((a, b) => {
@@ -41,11 +41,24 @@ export function createWorkspaceWorkerJournal(coordinator, context) {
   }
   return Object.freeze({ capture: async workers => { await acknowledged('capture', { workers }) },
     captureProcesses: async processes => { await acknowledged('capture_processes', { processes }) }, prepare: workers => acknowledged('prepare', { workers }),
-    complete: async results => { await acknowledged('complete', { results }) }, close: transport.close })
+    complete: async results => { await acknowledged('complete', { results }) },
+    async verifyClosureReadiness() {
+      try {
+        const result = await transport.call('verify_closure_readiness', {}), bindings = readWorkspaceRelocationClosureBindings(dataDir, id)
+        if (!fields(result, ['verified', ...Object.keys(bindings)]) || result.verified !== true
+          || sha256CanonicalJson(result) !== sha256CanonicalJson({ verified: true, ...bindings })) throw failure()
+        transport.verify()
+        return Object.freeze(result)
+      } catch { transport.close(); throw failure() }
+    }, close: transport.close })
 }
 export function serveWorkspaceWorkerJournal(context) {
   const args = { dataDir: context.dataDir, id: context.id }
   return serveWorkspaceJournal(context, 'worker', {
+    async verify_closure_readiness(payload) {
+      if (!fields(payload, [])) throw failure()
+      return verifyWorkspaceRelocationClosureReadiness(args)
+    },
     capture(payload) {
       if (!fields(payload, ['workers'])) throw failure()
       commitWorkspaceRelocationWorkers({ ...args, workers: payload.workers })

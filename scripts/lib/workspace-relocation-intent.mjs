@@ -1160,3 +1160,39 @@ export async function commitWorkspaceRelocationFileReady({ dataDir, id, signal }
     tree_native_id: nativeId, content_sha256: content.fingerprint, metadata_sha256: metadata, created_at: new Date().toISOString() }
   return { dispatch: 'dispatch', ready: appendFileActor(dataDir, id, previous, record).file_ready }
 }
+
+
+/** Historical bindings only; these digest values are not transferable write authorization. */
+export function readWorkspaceRelocationClosureBindings(dataDir, id) {
+  const intent = readWorkspaceRelocationIntent(dataDir), coordinator = readWorkspaceRelocationCoordinator(dataDir, id)
+  const workers = readWorkspaceRelocationWorkers(dataDir, id), exit = readWorkspaceRelocationExecutionExit(dataDir, id)
+  const plan = readWorkspaceRelocationFilePlan(dataDir, id), actors = readWorkspaceRelocationFileActors(dataDir, id)
+  if (!intent || !coordinator.launch || !coordinator.ready || !workers || !exit || !plan || !actors.file_ready) fail()
+  return Object.freeze({ intent_id: id, intent_sha256: sha256CanonicalJson(intent), coordinator_sha256: sha256CanonicalJson(coordinator),
+    worker_scope_sha256: sha256CanonicalJson(workers), execution_exit_sha256: sha256CanonicalJson(exit),
+    file_plan_sha256: sha256CanonicalJson(plan), file_ready_sha256: sha256CanonicalJson(actors.file_ready), catalog_sha256: plan.catalog_sha256 })
+}
+
+/** Only the original live, locked coordinator can establish current offline-close prerequisites. No writes. */
+export async function verifyWorkspaceRelocationClosureReadiness({ dataDir, id, signal }) {
+  const { ctx, intent, verify } = workspaceFileCoordinatorContext(dataDir, id, signal)
+  verify()
+  const bindings = readWorkspaceRelocationClosureBindings(dataDir, id), plan = readWorkspaceRelocationFilePlan(dataDir, id)
+  const actors = readWorkspaceRelocationFileActors(dataDir, id), ready = actors.file_ready
+  const scope = [actors.host.process, ...(actors.tools?.tools ?? []).map(item => item.process)]
+  const current = () => {
+    verify()
+    if (sha256CanonicalJson(readWorkspaceRelocationClosureBindings(dataDir, id)) !== sha256CanonicalJson(bindings)
+      || knownProcessExit.probeKnownProcessExit(scope).state !== 'stopped') fail()
+    verifyStagingContainer(actors.staging, ['tree'])
+    if (!same(ready.tree, identity(ready.tree.path))
+      || process.platform === 'win32' && native.inspectDirectoryFileId(ready.tree.path) !== ready.tree_native_id) fail()
+    if (plan.mode === 'copy') { if (!same(intent.source, identity(intent.source.path))) fail() }
+    else { try { fs.lstatSync(intent.source.path); fail() } catch (error) { if (error.code !== 'ENOENT') throw error } }
+  }
+  current()
+  const catalog = new WorkspaceCatalog({ dataRoot: ctx.dataRoot, storageRoot: process.env.WORKER_WORKSPACES_DIR, files: native })
+  if (sha256CanonicalJson(await catalog.snapshot()) !== bindings.catalog_sha256) fail()
+  current()
+  return Object.freeze({ verified: true, ...bindings })
+}
