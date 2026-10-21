@@ -34,7 +34,7 @@ test('a rejected carrier retains the failing read-only stage without accepting a
 })
 
 test('Windows repeatedly captures the actual just-spawned carrier before application readiness', { skip: process.platform !== 'win32', timeout: 60000 }, async t => {
-  for (let attempt = 0; attempt < 8; attempt++) {
+  for (let attempt = 0; attempt < 64; attempt++) {
     const env = { ...process.env }; delete env.NODE_OPTIONS; delete env.NODE_PATH
     const child = spawn(process.execPath, ['-e', 'process.on("message",()=>process.exit(0));process.send("ready");setTimeout(()=>process.exit(4),5000)'],
       { env, windowsHide: true, stdio: ['ignore', 'ignore', 'pipe', 'ipc'] })
