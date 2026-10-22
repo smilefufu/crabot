@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync, chmodSync } from 'fs'
-import { join } from 'path'
+import { dirname, join } from 'path'
 import { tmpdir } from 'os'
 import { createGlobTool } from '../../../src/engine/tools/glob-tool'
 
@@ -18,7 +18,7 @@ describe('createGlobTool', () => {
   function createFiles(paths: ReadonlyArray<string>): void {
     for (const p of paths) {
       const fullPath = join(tempDir, p)
-      const dir = fullPath.substring(0, fullPath.lastIndexOf('/'))
+      const dir = dirname(fullPath)
       mkdirSync(dir, { recursive: true })
       writeFileSync(fullPath, '')
     }
@@ -50,8 +50,8 @@ describe('createGlobTool', () => {
     expect(result.isError).toBe(false)
     const lines = result.output.split('\n')
     expect(lines).toHaveLength(2)
-    expect(lines).toContain('src/a.ts')
-    expect(lines).toContain('src/b.ts')
+    expect(lines).toContain(join('src', 'a.ts'))
+    expect(lines).toContain(join('src', 'b.ts'))
   })
 
   it('respects base path', async () => {
@@ -81,7 +81,7 @@ describe('createGlobTool', () => {
     const result = await tool.call({ pattern }, {})
 
     expect(result.isError).toBe(false)
-    expect(result.output.split('\n')).toEqual(['src/a.ts', 'src/b.ts'])
+    expect(result.output.split('\n')).toEqual([join('src', 'a.ts'), join('src', 'b.ts')])
   })
 
   it('anchors a pattern to an explicit base outside the worker cwd', async () => {
@@ -91,7 +91,7 @@ describe('createGlobTool', () => {
     const result = await tool.call({ pattern: 'authorized/*', path: '../project/logs' }, {})
 
     expect(result.isError).toBe(false)
-    expect(result.output).toBe('authorized/result.json')
+    expect(result.output).toBe(join('authorized', 'result.json'))
   })
 
   it('ignores node_modules and .git', async () => {
@@ -105,7 +105,7 @@ describe('createGlobTool', () => {
     const result = await tool.call({ pattern: '**/*' }, {})
 
     expect(result.isError).toBe(false)
-    expect(result.output).toBe('src/a.ts')
+    expect(result.output).toBe(join('src', 'a.ts'))
   })
 
   it('returns "No files found" for no matches', async () => {
@@ -144,7 +144,7 @@ describe('createGlobTool', () => {
     expect(lines[200]).toBe('[...10 more results truncated]')
   })
 
-  it('某子目录权限被拒（rg 退出码 2）但有结果时，返回 partial 而非整体报错', async () => {
+  it.skipIf(process.platform === 'win32')('某子目录权限被拒（rg 退出码 2）但有结果时，返回 partial 而非整体报错', async () => {
     // root 绕过权限位，无法构造 EACCES，跳过。
     if (typeof process.getuid === 'function' && process.getuid() === 0) return
 
@@ -162,8 +162,8 @@ describe('createGlobTool', () => {
       // 关键：不因 locked 目录的 EACCES 整体判错，已搜到的文件照常返回。
       expect(result.isError).toBe(false)
       const lines = result.output.split('\n')
-      expect(lines).toContain('src/a.ts')
-      expect(lines).toContain('src/b.ts')
+      expect(lines).toContain(join('src', 'a.ts'))
+      expect(lines).toContain(join('src', 'b.ts'))
     } finally {
       // 还原权限，否则 afterEach 的 rmSync 删不掉。
       chmodSync(locked, 0o755)

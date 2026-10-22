@@ -59,7 +59,7 @@ describe('createGrepTool', () => {
 
     expect(result.isError).toBe(false)
     const lines = result.output.trim().split('\n')
-    const normalized = lines.map((l) => l.replace(tmpDir + '/', ''))
+    const normalized = lines.map((line) => path.relative(tmpDir, line).split(path.sep).join('/'))
     expect(normalized).toContain('src/hello.ts')
     expect(normalized).toContain('src/utils.ts')
     expect(normalized).toContain('src/readme.md')
@@ -118,7 +118,7 @@ describe('createGrepTool', () => {
 
     expect(result.isError).toBe(false)
     const lines = result.output.trim().split('\n')
-    const normalized = lines.map((l) => l.replace(tmpDir + '/', ''))
+    const normalized = lines.map((line) => path.relative(tmpDir, line).split(path.sep).join('/'))
     expect(normalized).toContain('src/hello.ts')
     expect(normalized).toContain('src/utils.ts')
     // Should NOT include .md file
