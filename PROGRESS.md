@@ -22,8 +22,11 @@
 - 联合部署代码132d696a、Android210a251（0.8.0/code17/wire9），原Node22下122项定向回归、前端8项/类型检查/生产打包通过。完整在线准备核验约2.07GB产品，数据迁移备份0字节，未扫描任务工作区；8模块均已恢复，Telegram一次局部重试后正常。APK签名相同，加密配对/声音文件覆盖安装前后摘要一致，首页已连接且麦克风关闭。真人停止及50轮首声仍待验收；见[脱敏证据](crabot-agent/eval/shared-requests/evidence-2026-10-19-continuous-playback.json)与[实施计划](crabot-docs/superpowers/plans/2026-10-19-continuous-long-voice-playback-implementation.md)。
 - 真人故事回答完整播出112.75秒/2706000样本，端侧gap_count/gap_ms均0，后台实际completed且样本一致；用户听感首声4–5秒，同机单调计时实为7104毫秒。10月20日两轮首声4.274/4.596秒，仍需优化及50轮验收。
 - 声纹历史漏认：按用户2026-10-22要求记为**待复现**。现有登记/模型/保存/算分核查及后续对照均未复现，根因未定、没有算法修复；临时观察已停止，原0.8.0产品APK恢复，配对/声音/阈值不变，不再重复请用户朗读。完整历史见[调查记录](https://github.com/smilefufu/crabot-voice-android/blob/main/docs/research/2026-10-20-speaker-identification-investigation.md)。
-- 2026-10-22独立检查：最近三轮正确tag但播放unknown；固定短句复现本机TTS缺少原音色文件、HTTP200后断流。仅恢复原固定版本522320字节音色并核验SHA-256，4次公开短句验证成功，其中产品适配器270ms/104400有效样本；未重启Crabot/ADB或修改配置。外部服务冷启动依赖仍需稳定部署；两轮各5次LLM502重试另记，不能把TTS恢复当作首声达标。
+- 2026-10-22独立检查：最近三轮正确tag但播放unknown；固定短句复现本机TTS缺少原音色文件、HTTP200后断流。仅恢复原固定版本522320字节音色并核验SHA-256，4次公开短句验证成功，其中产品适配器270ms/104400有效样本；未重启Crabot/ADB或修改配置。外部服务冷启动依赖仍需稳定部署；两轮各5次流内overload重试（映射502）另记，不能把TTS恢复当作首声达标。
 - 本轮Agent71、Channel40、Admin75、Shared28、Android JVM30项共244项通过；新增真机静音PCM停止/旧帧拒绝/下一播放检查1项通过，真实terminal.enc摘要不变，只装测试APK。用户按钮整链体验仍待验收。当前清单：[功能与剩余验收](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/plans/2026-10-22-voice-remaining-acceptance.md)，P0交付与服务稳定→P1首声/异步生命周期/全语音管理→P2环境与多人覆盖；先独立检查，再集中安排有明确判据的真人环节。
+- 后续独立推进：已按原清单恢复62个依赖和所选ASR/TTS全部模型至持久副本（约1.11GiB），SHA及包兼容均通过；两组件各两次新进程/各两条公开请求通过，TTS首请求3402/846ms、热请求150/127ms，ASR61–71ms。仅随机端口副本，旧17781/17782仍在、配置和Crabot/ADB不动；不把副本就绪称作现场已切换。
+- 新P0已隔离复现：手机3秒播放预留与后端首音频5秒错位；空标签取消会连带清除原输入。两项原0.8.0诊断断言失败且真人密文不变，不计通过；[最小播放启动修订](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/specs/2026-10-22-voice-playback-start-lifecycle-design.md)待用户确认，未改产品/正式协议/提示词。拟推迟到正文再预留，ready后立即开输出会话；原0.8.0立即start后延迟3.4秒送PCM的独立兼容项通过，真实started/completed及关麦正确，支持只改后端。
+- 计时口径核对：first_chunk含元消息，流处理总长含消费者/播放等待；流内错误映射502不证明外层HTTP502。trace_id去重后5个语音回合/19次尝试、14次overload重试，相同时段无其他Manager同配置样本，不能借其他时段成功推定因果。无本轮付费模型调用，50轮首声未验收。
 - 升级恢复耗时超过预估：Admin退出至新进程约38秒、Voice约63秒；旧Agent退出等待约30秒，另有模块恢复时间。后续独立核对退出等待和启动阶段，不放宽当前恢复/交付语义、不与播放方案混改。额外Engine全集未完成，退避夹具expected 3 to be 5已在未改main复现，不计通过。
 
 ### 统一升级与迁移减重：副本验证完成，PR 审查中
