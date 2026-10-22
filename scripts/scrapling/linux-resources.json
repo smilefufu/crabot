@@ -339,7 +339,7 @@
     {
       "package": "libudev1",
       "version": "249.11-0ubuntu3.22",
-      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/s/systemd/libudev1_249.11-0ubuntu3.22_arm64.deb",
+      "url": "https://snapshot.ubuntu.com/ubuntu/20261017T000000Z/pool/main/s/systemd/libudev1_249.11-0ubuntu3.22_arm64.deb",
       "sha256": "ec814eee0c7a398e031ece85d07c0108c16f609fb033d7b77700e9106ce86130"
     },
     {
@@ -803,7 +803,7 @@
     {
       "package": "libudev1",
       "version": "249.11-0ubuntu3.22",
-      "url": "http://archive.ubuntu.com/ubuntu/pool/main/s/systemd/libudev1_249.11-0ubuntu3.22_amd64.deb",
+      "url": "https://snapshot.ubuntu.com/ubuntu/20261017T000000Z/pool/main/s/systemd/libudev1_249.11-0ubuntu3.22_amd64.deb",
       "sha256": "48e47354d8d421b59bc2aac1437bc6b22ba04526963e4a73f9313b0dd518556b"
     },
     {

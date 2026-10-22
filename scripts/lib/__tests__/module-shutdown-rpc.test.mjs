@@ -40,6 +40,20 @@ for (const key of ['instance_id', 'module_id', 'runtime_id']) test(`mismatched $
   await assert.rejects(moduleRpc.openModuleShutdownRpc(f.process, f.port, { ...expected, [key]: 'different' }), { code: 'CRABOT_MODULE_SHUTDOWN_UNVERIFIED' })
   assert.deepEqual(f.calls.map(call => call.url), ['/get_runtime_identity'])
 })
+test('shutdown refusal retains safe transport diagnosis without response bodies', async t => {
+  const secret = 'PRIVATE_RESPONSE_BODY_AND_CREDENTIAL'
+  const f = await fixture(t, (_req, res) => res.end(secret))
+  await assert.rejects(moduleRpc.openModuleShutdownRpc(f.process, f.port, expected), error => {
+    assert.equal(error.code, 'CRABOT_MODULE_SHUTDOWN_UNVERIFIED')
+    assert.equal(error.cause?.code, 'CRABOT_MODULE_RPC_UNVERIFIED')
+    assert.equal(error.cause?.cause?.stage, 'response-json')
+    assert.equal(JSON.stringify(error).includes(secret), false)
+    assert.equal(error.stack.includes(secret), false)
+    return true
+  })
+  assert.deepEqual(f.calls.map(call => call.url), ['/get_runtime_identity'])
+})
+
 test('wrong process generation rejects before even reading runtime', async t => {
   const f = await fixture(t)
   await assert.rejects(moduleRpc.openModuleShutdownRpc({ ...f.process, started: 'other' }, f.port, expected))

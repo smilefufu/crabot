@@ -112,7 +112,7 @@ it.skipIf(!process.env.CRABOT_TEST_CODEX_BIN)('real Codex loads two private MCP 
 
 it.skipIf(!process.env.CRABOT_TEST_CLAUDE_BIN)('real Claude Code uses private MCP settings and Stop hooks for two executors in one project', async () => {
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "native-claude-project-中文 ' $space-")))
-  cleanup.push(() => fs.rm(root, { recursive: true, force: true }))
+  cleanup.push(() => fs.rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }))
   const data = path.join(root, 'data'), project = path.join(root, 'project'), home = path.join(root, 'home')
   for (const directory of [data, project, home]) await fs.mkdir(directory)
   await fs.writeFile(path.join(project, 'AGENTS.md'), 'Shared project instructions.\n')
@@ -168,6 +168,7 @@ it.skipIf(!process.env.CRABOT_TEST_CLAUDE_BIN)('real Claude Code uses private MC
     await adapter.provision(workspace, { skills: [{ id: 'marker-skill', name: 'marker-skill', skill_dir: skill }], mcp_servers: [{ name: 'owned', command: process.execPath, args: [mcp],
       env: { PRIVATE_MARKER: marker, MARKER_EVIDENCE: markerFile } }] })
     const eventFile = path.join(runtime, '.claude/events-cli.jsonl')
+    const native = require('../../../scripts/lib/process-identity.cjs')
     const execution = run(process.env.CRABOT_TEST_CLAUDE_BIN!, ['-p', 'Read the private marker.', '--output-format', 'stream-json', '--verbose',
       '--model', 'claude-sonnet-4-6', '--max-turns', '3', '--permission-mode', 'default', '--allowedTools', 'mcp__owned__get_marker',
       '--mcp-config', path.join(runtime, '.mcp.json'), '--strict-mcp-config', '--settings', path.join(runtime, '.claude/settings.json'),
@@ -177,11 +178,16 @@ it.skipIf(!process.env.CRABOT_TEST_CLAUDE_BIN)('real Claude Code uses private MC
         CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1', DISABLE_AUTOUPDATER: '1', [EVENTS_FILE_ENV]: eventFile },
       timeout: 45_000, maxBuffer: 2 * 1024 * 1024,
     })
+    let originalProcess: any, observationError: unknown
+    try { originalProcess = native.inspectProcess(execution.child.pid) } catch (error) { observationError = error }
     execution.child.stdin?.end()
     let result
     try { result = await execution } catch (error) {
       throw new Error('Native Claude failed: ' + JSON.stringify({ evidence, stdout: (error as any).stdout, stderr: (error as any).stderr }))
     }
+    if (observationError) throw new Error('Original finite Claude process could not be verified', { cause: observationError })
+    expect(originalProcess?.parent).toBe(process.pid)
+    await vi.waitFor(() => expect(require('../../../scripts/lib/known-process-exit.cjs').probeKnownProcessExit([originalProcess]).state).toBe('stopped'), { timeout: 5000 })
     expect(result.stdout, JSON.stringify({ stderr: result.stderr, evidence })).toContain('Private Claude profile verified.')
     expect(await fs.readFile(markerFile, 'utf8')).toBe(marker + '\n')
     expect((await nativeEventChannel(workspace, '.claude').readAll()).some(event => event.kind === 'stop')).toBe(true)

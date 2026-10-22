@@ -2958,7 +2958,17 @@ export class ModuleManager {
       await state.termination
       await this.beginChildFinalize(state, null, null)
       result.status = 'known_scope_exited'
-    } catch { runtime.status = 'error' }
+    } catch (error) {
+      runtime.status = 'error'
+      const causes: Array<Record<string, string | null>> = []
+      for (let current: unknown = error; current && typeof current === 'object' && causes.length < 4; current = (current as { cause?: unknown }).cause) {
+        const value = current as { code?: unknown; stage?: unknown; transport_code?: unknown; remote_code?: unknown }
+        const safe = (item: unknown, pattern: RegExp) => typeof item === 'string' && item.length <= 128 && pattern.test(item) ? item : null
+        causes.push({ code: safe(value.code, /^(?:CRABOT_|WORKSPACE_)[A-Z_]+$|^E[A-Z]+$/), stage: safe(value.stage, /^[a-z][a-z0-9-]*$/),
+          transport_code: safe(value.transport_code, /^(?:ERR_[A-Z_]+|E[A-Z]+|ABORT_ERR)$/), remote_code: safe(value.remote_code, /^(?:UNAUTHORIZED|FORBIDDEN|SERVICE_UNAVAILABLE|INTERNAL_ERROR|TIMEOUT)$/) })
+      }
+      console.error(JSON.stringify({ event: 'workspace_module_stop_unverified', module_id: scope.module_id, causes }))
+    }
     return result
   }
 

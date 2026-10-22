@@ -8,7 +8,7 @@ async function openModuleRuntimeRpc(process, port, expected, options) {
     if (!['instance_id', 'module_id', 'runtime_id'].every(key => typeof expected[key] === 'string' && expected[key])) throw unavailable()
     rpc = await openPinnedProcessRpc(process, port, options)
     const actual = await rpc.call('get_runtime_identity', {})
-    if (!['instance_id', 'module_id', 'runtime_id'].every(key => expected[key] === actual[key])) throw unavailable()
+    if (!['instance_id', 'module_id', 'runtime_id'].every(key => expected[key] === actual[key])) throw Object.assign(unavailable(), { stage: 'runtime-identity' })
     return rpc
   } catch (error) { rpc?.close(); throw unavailable(error) }
 }
