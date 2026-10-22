@@ -115,6 +115,13 @@ jobs:
       - name: Project binding and private native runtime regressions
         working-directory: crabot-agent
         run: node node_modules/vitest/vitest.mjs run tests/core/workspace-background-processes.test.ts tests/core/workspace-background-admissions.test.ts tests/workers/native-cli-managed-shell.test.ts tests/workers/relocated-native-history.test.ts tests/workers/codex-app-server-shell.test.ts tests/workers/codex-app-server-client.test.ts tests/workers/harness/workspace-manager.test.ts tests/workers/harness/project-workspaces.test.ts tests/workers/private-project-provision.test.ts tests/workers/private-project-runtime.test.ts tests/workers/codex-managed-notify.test.ts tests/workers/codex-project-config.test.ts --maxWorkers=1 --minWorkers=1
+      - name: Bounded Windows grace-shell observation evidence
+        if: runner.os == 'Windows'
+        working-directory: crabot-agent
+        run: |
+          for scope_round in 1 2 3 4 5; do
+            node node_modules/vitest/vitest.mjs run tests/core/workspace-background-processes.test.ts --testNamePattern='observes the actual grace tree' --maxWorkers=1 --minWorkers=1
+          done
       - name: Install pinned acceptance-only native CLIs
         run: npm install --prefix .desktop-build/native-cli-tools --no-package-lock --no-audit --no-fund @openai/codex@0.149.1 @anthropic-ai/claude-code@2.1.246
       - name: Execute real native CLI against loopback-only model and MCP sentinels
