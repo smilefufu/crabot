@@ -54,6 +54,7 @@
 - System按[确认Spec](crabot-docs/superpowers/specs/2026-10-18-system-mode-experience-design.md)/[协议](crabot-docs/protocols/protocol-system.md)/[计划](crabot-docs/superpowers/plans/2026-10-18-system-mode-experience-implementation.md)：S1–S4注册/UID/systemd/本人CLI/批量/升级/受保护恢复已接，多轮真实三UID已验；新增范围材料接线仍需当前head整机重验。S5已有旧表/降UID发现、真实目录/精确停机、入口隔离/交接、专用数据与Python组件；完整旧共享转换协调、全部启动源、恢复和真实旧发行多UID尚未完成。自定义DATA_DIR/旧停止目录映射提案已撤回；旧Node指纹恢复补充未获确认且未实现，不作全局门禁。代码/环境在线准备，最终仅因一致性备份实际迁移配置/数据库及切换而停止。 同步主线后本机System/旧版400项有限回归通过，不代替真实旧发行多UID全链。
 - 原生发行历史矩阵及旧候选证据见安装根/验收计划；旧包不能代替当前head。Windows错误5退出边缘按同一内核句柄信号有限确认，13bba四平台与五轮grace通过，但10bcc额外轮次仍有pinned-refresh-parent失败；整包与普通用户真实OS验收待完成；不能以重跑通过、延长测试预算或阶段诊断代替根因修复。8bb桌面Linux的libudev旧URL404已改同SHA官方快照；d3 Native Win本轮范围观察通过但Claude临时目录EBUSY，补实际根退出/本测试清理待验。156 Linux业务与8bb Win停机拒绝仍保留，安全阶段诊断回归49+39通过，不改unknown。
 - 回归边界：此前Agent4320通过/34失败在未改main逐条复现，另有main同样停滞的重试用例；Admin两项静态失败亦同源。分支WS关闭丢消息回归已修并验证。签名/公证、macOS14/Windows11/Ubuntu GNOME24.04与26.04、真实OS权限/IME、资源指标、最终模型业务和完整迁移/更新均分别验收；[签名指南](crabot-docs/guides/desktop-release-signing.md)。当前Core21及4fa/517等旧包均不含全部最新代码。
+- 6e92原生CLI四平台通过。7d71 Intel两处夹具问题：24轮模拟工具用实际暂停信号同步，延迟红例后39条离线恢复通过；双迁移首轮约70秒，非Win组合测试预算120→240秒，产品期限及断言保持，真实双轮仍待当前CI。
 - 逐项证据、旧候选及基线记录见[验收记录](crabot-docs/superpowers/plans/2026-10-17-desktop-application-validation.md)、安装根和System计划。损坏安装的只读原根/数据引用已接（58通过/1条件跳过），完整修复和保留数据重装仍待；保留数据/依赖/解释器基底的卸载未完成；源码、构建、签名、部署、运行与产品验收分别报告。整项需求未完成。
 ### 任务默认目录文件授权：独立修复待审查
 

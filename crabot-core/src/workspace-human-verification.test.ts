@@ -2453,7 +2453,7 @@ describe.skipIf(process.env.GITHUB_ACTIONS !== 'true')('fixed terminal release a
         if (child?.connected) { const ended = once(child, 'exit'); child.disconnect(); await ended }
         locks.releaseCliLock(lock); await f.cleanup()
       }
-    }, process.platform === 'win32' ? 600000 : 120000)
+    }, process.platform === 'win32' ? 600000 : 240000)
 })
 
 

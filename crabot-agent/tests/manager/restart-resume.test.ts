@@ -751,7 +751,8 @@ describe('Manager restart continuation', () => {
 
   it.each(['human', 'schedule'] as const)('continues a compacted long %s episode from its saved progress across restart', async (source) => {
     let inference = 0
-    let paused = false
+    let markPaused!: () => void
+    const paused = new Promise<void>(resolve => { markPaused = resolve })
     const read = vi.fn(async () => ({ output: 'DIRECTORY_PAGE:' + 'x'.repeat(4000), isError: false }))
     const page = defineTool({ name: 'page', description: 'read page', inputSchema: {}, call: read })
     const old = registry({ async *stream(params) {
@@ -762,14 +763,15 @@ describe('Manager restart continuation', () => {
           inputTokens: inference === 24 ? 90000 : 100, outputTokens: 5,
         })
       } else {
-        paused = true
+        markPaused()
         await new Promise(() => {})
       }
     }, updateConfig() {} }, { contextWindowTokens: () => 100000, toolFace: () => [page] })
     if (source === 'human') void old.routeHumanMessages('feishu', 'restart-test', [message('original', 'Original long request')])
     else void old.getOrCreate(KEY).wakeUp({ received_at: '2026-09-06T14:05:00Z', timezone: 'Asia/Shanghai',
       wake: { kind: 'schedule', scheduleId: 'long-review', title: 'Original long request', description: 'read all pages' } })
-    const checkpoint = await checkpointWhere(value => paused && value.state.foldedCount > 0)
+    await paused
+    const checkpoint = await checkpointWhere(value => value.state.foldedCount > 0)
     expect(checkpoint.state.rollingSummary).toBeUndefined()
     expect(checkpoint.state.recent.some(item => item.id.startsWith('compaction:'))).toBe(true)
     const original = checkpoint.state.recent.find(item => item.id === checkpoint.protectedTailMessageId)!
