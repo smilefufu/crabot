@@ -51,6 +51,29 @@ public static class CrabotWorkspaceSecurityProbe {
             } finally { Check(SetFileSecurityW(parent, 4, original)); }
         } finally { if (temporary != IntPtr.Zero) LocalFree(temporary); LocalFree(original); }
     }
+    public static Snapshot DuringMove;
+    static uint WithNonInheritingSibling(string target, IntPtr descriptor, IntPtr dacl) {
+        string scratch = System.IO.Path.Combine(System.IO.Path.GetDirectoryName(target), "owned-security-" + Guid.NewGuid().ToString());
+        string held = System.IO.Path.Combine(scratch, "original.txt");
+        IntPtr temporary = IntPtr.Zero;
+        System.IO.Directory.CreateDirectory(scratch);
+        try {
+            uint size;
+            Check(ConvertStringSecurityDescriptorToSecurityDescriptorW("D:P(A;;FA;;;" + System.Security.Principal.WindowsIdentity.GetCurrent().User.Value + ")", 1, out temporary, out size));
+            Check(SetFileSecurityW(scratch, 4, temporary));
+            System.IO.File.Move(target, held);
+            uint error = SetNamedSecurityInfoW(held, 1, 0x80000004, IntPtr.Zero, IntPtr.Zero, dacl, IntPtr.Zero);
+            if (error != 0) return error;
+            Check(SetFileSecurityW(held, 4, descriptor));
+            DuringMove = Observe(held);
+            System.IO.File.Move(held, target);
+            return 0;
+        } finally {
+            if (System.IO.File.Exists(held) && !System.IO.File.Exists(target)) System.IO.File.Move(held, target);
+            if (temporary != IntPtr.Zero) LocalFree(temporary);
+            System.IO.Directory.Delete(scratch, false);
+        }
+    }
     static uint RestoreSecurityStream(string target, IntPtr descriptor) {
         uint length = GetSecurityDescriptorLength(descriptor);
         if (length == 0 || length > 16 * 1024 * 1024) throw new InvalidOperationException("Unbounded probe descriptor");
@@ -90,10 +113,12 @@ public static class CrabotWorkspaceSecurityProbe {
         } finally { if (text != IntPtr.Zero) LocalFree(text); LocalFree(descriptor); }
     }
     public static uint Apply(string source, string target, string mode) {
+        DuringMove = null;
         IntPtr dacl, descriptor = Read(source, mode == "query-dacl-only" ? 7u : 0x77u, out dacl);
         try {
             ushort control; uint revision;
             Check(GetSecurityDescriptorControl(descriptor, out control, out revision));
+            if (mode == "isolated-sibling-move") return WithNonInheritingSibling(target, descriptor, dacl);
             if (mode == "explicit-create") return CreateWithSecurity(target, descriptor);
             if (mode == "isolated-parent-create" || mode == "isolated-parent-assign") return WithNonInheritingParent(target, descriptor, dacl, mode == "isolated-parent-create");
             if (mode == "backup-security-stream") return RestoreSecurityStream(target, descriptor);
@@ -117,7 +142,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Cannot prepare owned security probe' }
     @{ evidence_only = $true; source_filesystem = ([IO.DriveInfo]::new([IO.Path]::GetPathRoot($source))).DriveFormat; target_filesystem = ([IO.DriveInfo]::new([IO.Path]::GetPathRoot($targets))).DriveFormat; elevated = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) } | ConvertTo-Json -Compress
     $original = [CrabotWorkspaceSecurityProbe]::Observe([IO.Path]::Combine($source, 'original.txt'))
-    foreach ($mode in @('query-dacl-only', 'query-full', 'request-matches-source', 'modern-direct', 'modern-protected-then-original', 'protected-flag-then-original', 'backup-security-stream', 'explicit-create', 'isolated-parent-create', 'isolated-parent-assign')) {
+    foreach ($mode in @('query-dacl-only', 'query-full', 'request-matches-source', 'modern-direct', 'modern-protected-then-original', 'protected-flag-then-original', 'backup-security-stream', 'explicit-create', 'isolated-parent-create', 'isolated-parent-assign', 'isolated-sibling-move')) {
         $target = [IO.Path]::Combine($targets, $mode)
         & node -e "require('./scripts/lib/process-identity.cjs').createPrivateDirectory(process.argv[1])" $target
         if ($LASTEXITCODE -ne 0) { throw 'Cannot create private security probe target' }
@@ -137,7 +162,7 @@ try {
         }
         $after = [CrabotWorkspaceSecurityProbe]::Observe($file)
         if ([IO.File]::ReadAllText($file) -ne 'finite original bytes') { throw 'Probe target content changed' }
-        @{ evidence_only = $true; mode = $mode; error_code = $errorCode; source = $original; before = $before; after = $after; parent_before = $parentBefore; parent_after = [CrabotWorkspaceSecurityProbe]::Observe($target) } | ConvertTo-Json -Depth 4 -Compress
+        @{ evidence_only = $true; mode = $mode; error_code = $errorCode; during_move = [CrabotWorkspaceSecurityProbe]::DuringMove; source = $original; before = $before; after = $after; parent_before = $parentBefore; parent_after = [CrabotWorkspaceSecurityProbe]::Observe($target) } | ConvertTo-Json -Depth 4 -Compress
     }
     $sourceAfter = [CrabotWorkspaceSecurityProbe]::Observe([IO.Path]::Combine($source, 'original.txt'))
     if ($original.sddl -ne $sourceAfter.sddl -or $original.control -ne $sourceAfter.control -or [IO.File]::ReadAllText([IO.Path]::Combine($source, 'original.txt')) -ne 'finite original bytes') { throw 'Probe source changed' }
