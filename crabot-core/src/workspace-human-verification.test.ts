@@ -1895,6 +1895,67 @@ describe('MM checks the new runtime health and Root under the original job', () 
 })
 
 
+describe('normal fixed-job Admin completion preparation', () => {
+  it('prepares the current Admin after archive without reopening business or requiring the old human request', async () => {
+    const f = await fixture({ actualAgent: true, actualAdmin: true, validationHealth: 'healthy', processLifetimeMs: process.platform === 'win32' ? 900000 : 300000 })
+    const locks = require('../../scripts/lib/cli-lock.mjs'), records = require('../../scripts/lib/workspace-relocation-intent.mjs')
+    const lock = await locks.acquireWorkspaceRelocationLock(f.data, f.params.intent_id)
+    try {
+      await f.manager.verifyWorkspaceRelocationValidationHealth(f.params, 'fixture-human')
+      const result = await f.manager.prepareWorkspaceRelocationCompletion(f.params)
+      expect(result).toMatchObject({ prepared: true, intent_id: f.params.intent_id, intent_sha256: f.params.intent_sha256 })
+      const archived = records.readWorkspaceRelocationArchivedCompletion(f.data, f.params.intent_id)
+      expect(result.completion_sha256).toBe(sha256CanonicalJson(archived))
+      expect(records.readWorkspaceRelocationFinalizing(f.data, f.params.intent_id).completion_sha256).toBe(result.completion_sha256)
+      const grant = f.manager.workspaceFinalizationGrant
+      expect(typeof grant.token).toBe('string')
+      expect(JSON.stringify(result)).not.toContain(grant.token)
+      const prepare = (input: unknown, token?: string) => f.manager.withCurrentAdminRpc(30000, (rpc: any) =>
+        rpc.call('prepare_workspace_relocation_completion', input, { authorizationBearer: token }))
+      const request = { intent_id: result.intent_id, launch_id: result.launch_id, completion_sha256: result.completion_sha256 }
+      await expect(prepare(request)).rejects.toMatchObject({ remote_code: 'UNAUTHORIZED' })
+      for (const token of ['fixture-human', f.manager.runtimeBearers.get('crabot-agent').token, 'not-the-grant']) {
+        await expect(prepare(request, token)).rejects.toMatchObject({ remote_code: 'FORBIDDEN' })
+      }
+      await expect(prepare({ ...request, path: f.root }, grant.token)).rejects.toMatchObject({ remote_code: 'INVALID_PARAMS' })
+      await expect(prepare({ ...request, completion_sha256: '0'.repeat(64) }, grant.token)).rejects.toMatchObject({ remote_code: 'FORBIDDEN' })
+      await expect(prepare(request, grant.token)).resolves.toEqual(result)
+      expect(JSON.stringify(await f.calls())).not.toContain(grant.token)
+      const params = { intent_id: result.intent_id, launch_id: result.launch_id, completion_sha256: result.completion_sha256, action: 'prepare_web' }
+      await expect(f.manager.handleVerifyWorkspaceRelocationFinalization(params, {})).rejects.toMatchObject({ code: 'UNAUTHORIZED' })
+      for (const token of ['fixture-human', f.manager.runtimeBearers.get('crabot-agent').token, 'not-the-grant']) {
+        await expect(f.manager.handleVerifyWorkspaceRelocationFinalization(params, { authorizationBearer: token })).rejects.toMatchObject({ code: 'FORBIDDEN' })
+      }
+      await expect(f.manager.handleVerifyWorkspaceRelocationFinalization({ ...params, action: 'resume_web' }, { authorizationBearer: grant.token })).rejects.toMatchObject({ code: 'FORBIDDEN' })
+      await expect(f.manager.handleVerifyWorkspaceRelocationFinalization({ ...params, path: f.root }, { authorizationBearer: grant.token })).rejects.toMatchObject({ code: 'INVALID_PARAMS' })
+      await expect(f.manager.handleVerifyWorkspaceRelocationFinalization(params, { authorizationBearer: grant.token })).resolves.toMatchObject({ verified: true, ...params, intent_sha256: f.params.intent_sha256 })
+      expect((await fetch(`http://127.0.0.1:${f.port}/api/friends`, { headers: { Authorization: 'Bearer fixture-human' } })).status).toBe(200)
+      expect(require('../../scripts/lib/workspace-maintenance.cjs').workspaceMaintenancePending(f.data)).toBe(true)
+      expect(JSON.parse(await fs.readFile(path.join(f.data, 'agent/worker-ledgers/channel%3A%3Asession.json'), 'utf8')).workers[0].task.status).toBe('closed')
+      const fenceFile = path.join(f.data, 'workspace-control/relocation-finalizing.json'), fenceBytes = await fs.readFile(fenceFile)
+      const fence = JSON.parse(fenceBytes.toString())
+      await fs.writeFile(fenceFile, JSON.stringify({ ...fence, created_at: new Date(Date.parse(fence.created_at) + 1000).toISOString() }))
+      await expect(f.manager.handleVerifyWorkspaceRelocationFinalization(params, { authorizationBearer: grant.token })).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
+      await expect(prepare(request, grant.token)).rejects.toMatchObject({ remote_code: 'SERVICE_UNAVAILABLE' })
+      await fs.writeFile(fenceFile, fenceBytes)
+      await expect(prepare(request, grant.token)).resolves.toEqual(result)
+      const adminState = f.manager.childStates.get(f.manager.processes.get('admin-web')), runtimeId = adminState.runtimeId
+      adminState.runtimeId = randomUUID()
+      await expect(f.manager.handleVerifyWorkspaceRelocationFinalization(params, { authorizationBearer: grant.token })).rejects.toMatchObject({ code: 'FORBIDDEN' })
+      adminState.runtimeId = runtimeId
+      expect(grant.revoked).toBe(true)
+      await expect(f.manager.prepareWorkspaceRelocationCompletion(f.params)).rejects.toMatchObject({ code: 'FORBIDDEN' })
+      await expect(prepare(request, grant.token)).rejects.toMatchObject({ remote_code: 'FORBIDDEN' })
+      await expect(f.manager.handleVerifyWorkspaceRelocationFinalization(params, { authorizationBearer: grant.token })).rejects.toMatchObject({ code: 'FORBIDDEN' })
+    } finally {
+      const coordinator = f.manager.workspaceValidationProof?.result.coordinator
+      if (coordinator?.connected) { const ended = once(coordinator, 'exit'); coordinator.disconnect(); await ended }
+      locks.releaseCliLock(lock); await f.cleanup()
+    }
+  }, process.platform === 'win32' ? 600000 : 120000)
+})
+
+
 describe('fixed job archive storage handoff', () => {
   const modes = ['healthy Agent', 'healthy Memory', ...['target conflict', 'fence conflict', 'runtime changed', 'unhealthy runtime', 'wrong launch', 'lost acknowledgement', 'archive changed', 'fence changed', 'active conflict after move', ...(process.platform !== 'win32' && process.getuid?.() !== 0 ? ['readonly root'] : [])].map(value => 'healthy archive ' + value)]
   it.each(modes)('keeps maintenance and preserves one job: %s', async mode => {
@@ -2031,6 +2092,20 @@ describe('fixed job archive storage handoff', () => {
           expect(closed.worker_commit_sha256).toBe(completion.worker_commit_sha256)
           expect(closed.recovery_commit_sha256).toBe(completion.recovery_commit_sha256)
           closed.verify()
+          expect(records.readCurrentWorkspaceRelocationFinalizing(f.data)).toEqual(records.readWorkspaceRelocationFinalizing(f.data, f.params.intent_id))
+          const state = records.readWorkspaceRelocationArchivedState(f.data, f.params.intent_id)
+          expect(state.intent.id).toBe(f.params.intent_id)
+          expect(state.health).toEqual(health)
+          const capabilities = await records.verifyWorkspaceRelocationArchivedCapabilities({ dataDir: f.data, id: f.params.intent_id, verify })
+          expect(capabilities).toEqual({ completion_sha256: prepared.completion_sha256, selected_sha256: result.root_selected_sha256, modules_sha256: sha256CanonicalJson(health.modules) })
+          const unhealthy = path.join(f.data, 'validation-health-unhealthy')
+          try {
+            writeFileSync(unhealthy, 'same generation is no longer healthy')
+            await expect(records.verifyWorkspaceRelocationArchivedCapabilities({ dataDir: f.data, id: f.params.intent_id, verify })).rejects.toBeDefined()
+          } finally { await fs.unlink(unhealthy) }
+          await expect(records.verifyWorkspaceRelocationArchivedCapabilities({ dataDir: f.data, id: f.params.intent_id,
+            verify: async () => { throw Object.assign(new Error('original role revoked'), { code: 'FORBIDDEN' }) } })).rejects.toMatchObject({ code: 'FORBIDDEN' })
+          expect(await records.verifyWorkspaceRelocationArchivedCapabilities({ dataDir: f.data, id: f.params.intent_id, verify })).toEqual(capabilities)
           const cancellation = new AbortController()
           const cancelled = await inspection.inspectArchivedWorkspaceRelocationClosures({ dataDir: f.data, id: f.params.intent_id, verify, signal: cancellation.signal })
           cancelled.verify(); cancellation.abort()

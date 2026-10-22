@@ -43,6 +43,9 @@ import {
   type VerifyWorkspaceRelocationRuntimeResult,
   type VerifyWorkspaceRelocationCoordinatorParams,
   type VerifyWorkspaceRelocationCoordinatorResult,
+  type VerifyWorkspaceRelocationFinalizationParams,
+  type VerifyWorkspaceRelocationFinalizationResult,
+  type PrepareWorkspaceRelocationCompletionResult,
   assertWorkspaceExecutionAllowed,
   workspaceMaintenancePending,
   sha256CanonicalJson,
@@ -149,6 +152,21 @@ interface WorkspaceAgentRpc {
   close(): void
 }
 
+interface CurrentAdminRpc {
+  call(method: string, params: unknown, options?: { authorizationBearer?: string }): Promise<unknown>
+  close(): void
+}
+interface WorkspaceFinalizationGrant {
+  token: string
+  revoked: boolean
+  phase: 'archiving' | 'archived' | 'prepared' | 'released'
+  request: VerifyWorkspaceRelocationRequestParams
+  completionHash: string
+  launch: { launch_id: string; parent: WorkerProcessIdentity; process: WorkerProcessIdentity }
+  child: ChildProcess
+  verify: () => void
+}
+
 interface WorkspaceWorkerStopJournal {
   prepare(workers: ReadonlyArray<WorkspaceRelocationWorker>): Promise<WorkspaceRelocationStopDispatch>
   complete(results: ReadonlyArray<WorkspaceRelocationStopResult>): Promise<void>
@@ -232,6 +250,8 @@ export class ModuleManager {
   private workspaceWorkerClosure?: { fingerprint: string; pending: Promise<WorkspaceWorkerClosureResult> }
   private workspaceRootSelection?: { fingerprint: string; pending: Promise<WorkspaceRootSelectionResult> }
   private workspaceValidationLaunch?: { fingerprint: string; pending: Promise<WorkspaceValidationLaunchResult> }
+  private workspaceFinalizationGrant?: WorkspaceFinalizationGrant
+  private workspaceFinalizationPreparation?: { fingerprint: string; pending: Promise<PrepareWorkspaceRelocationCompletionResult> }
   private workspaceValidationHealth?: { fingerprint: string; pending: Promise<WorkspaceValidationHealthResult> }
   private workspaceValidationProof?: {
     request: VerifyWorkspaceRelocationRequestParams
@@ -285,6 +305,7 @@ export class ModuleManager {
     // 注册所有方法处理器
     this.registerMethod('register', this.handleRegisterUnauthenticated.bind(this))
     this.registerMethod('register_core_agent', this.handleRegisterCoreAgent.bind(this))
+    this.registerMethod('verify_workspace_relocation_finalization', this.handleVerifyWorkspaceRelocationFinalization.bind(this))
     this.registerMethod('verify_workspace_relocation_runtime', this.handleVerifyWorkspaceRelocationRuntime.bind(this))
     this.registerMethod('verify_workspace_relocation_coordinator', this.handleVerifyWorkspaceRelocationCoordinator.bind(this))
     this.registerMethod('prepare_workspace_relocation_worker_stops', this.handlePrepareWorkspaceRelocationWorkerStops.bind(this))
@@ -1297,16 +1318,9 @@ export class ModuleManager {
     return { quiesced: true, ...await this.callWorkspaceRelocationAdmin('quiesce_workspace_relocation_web', params, bearer) }
   }
 
-  /** Shared current-Admin connection/intent proof; each caller retains its own action and result tag. */
-  private async callWorkspaceRelocationAdmin(
-    method: 'verify_workspace_relocation_request' | 'quiesce_workspace_relocation_web',
-    params: VerifyWorkspaceRelocationRequestParams, bearer?: string,
-  ): Promise<VerifyWorkspaceRelocationRequestParams> {
-    params = Object.freeze({ ...params })
-    const field = method === 'verify_workspace_relocation_request' ? 'verified' : 'quiesced'
-    const timeoutMs = method === 'verify_workspace_relocation_request' ? 1500 : 30000
-    const unavailable = () => Object.assign(new Error('当前Admin固定请求无法确认，已保留维护保护。'), { code: 'SERVICE_UNAVAILABLE' })
-    if (typeof bearer !== 'string' || !bearer) throw Object.assign(new Error('Human Admin credential required'), { code: 'UNAUTHORIZED' })
+  /** One current Admin carrier/runtime connection only; callers retain authorization and job semantics. */
+  private async withCurrentAdminRpc<T>(timeoutMs: number, action: (rpc: CurrentAdminRpc, verify: () => Promise<void>) => Promise<T>): Promise<T> {
+    const unavailable = () => Object.assign(new Error('当前Admin固定连接无法确认。'), { code: 'SERVICE_UNAVAILABLE' })
     const runtime = this.modules.get('admin-web'), child = this.processes.get('admin-web')
     const state = child ? this.childStates.get(child) : undefined
     if (!runtime || !child?.pid || !state) throw unavailable()
@@ -1317,7 +1331,7 @@ export class ModuleManager {
         || state.runtimeId !== runtimeId || state.rootPid !== rootPid || state.rootExited || !state.reachedRunning
         || state.finalizeStarted || state.termination || child.exitCode !== null || child.signalCode !== null) throw unavailable()
     }
-    let rpc: { call(method: string, params: unknown, options?: { authorizationBearer?: string }): Promise<unknown>; close(): void } | undefined
+    let rpc: CurrentAdminRpc | undefined
     try {
       verifyCurrent()
       const records = (await this.runtimeRegistry.listRecords()).filter(record => record.module_id === 'admin-web')
@@ -1335,27 +1349,46 @@ export class ModuleManager {
       const { openModuleRuntimeRpc } = require('../../scripts/lib/module-runtime-rpc.cjs')
       rpc = await openModuleRuntimeRpc(listeners[0], port, { instance_id: record.instance_id, module_id: 'admin-web', runtime_id: runtimeId }, { timeoutMs })
       verifyCurrent()
-      const response = await rpc!.call(method, params, { authorizationBearer: bearer })
-      verifyCurrent()
-      if (!response || typeof response !== 'object' || Array.isArray(response) || Object.keys(response).length !== 3
-        || !Object.keys(response).every(key => key === field || key === 'intent_id' || key === 'intent_sha256')) throw unavailable()
-      const result = response as Record<string, unknown>
-      if (result[field] !== true || result.intent_id !== params.intent_id || result.intent_sha256 !== params.intent_sha256) throw unavailable()
-      if (sha256CanonicalJson((await this.runtimeRegistry.listRecords()).filter(record => record.module_id === 'admin-web')) !== fingerprint) throw unavailable()
-      verifyCurrent()
-      if (!native.sameProcess(root, native.inspectProcess(rootPid))) throw unavailable()
-      const { readWorkspaceRelocationIntent } = require('../../scripts/lib/workspace-relocation-intent.mjs')
-      const intent = readWorkspaceRelocationIntent(this.dataDir)
-      if (!intent) throw unavailable()
-      const intentHash = sha256CanonicalJson(intent)
-      if (intent.id !== params.intent_id || intentHash !== params.intent_sha256) {
-        throw Object.assign(new Error('Workspace request does not match this instance'), { code: 'FORBIDDEN' })
+      const verify = async (): Promise<void> => {
+        verifyCurrent()
+        if (sha256CanonicalJson((await this.runtimeRegistry.listRecords()).filter(record => record.module_id === 'admin-web')) !== fingerprint) throw unavailable()
+        verifyCurrent()
+        if (!native.sameProcess(root, native.inspectProcess(rootPid))) throw unavailable()
       }
-      return { intent_id: intent.id, intent_sha256: intentHash }
+      const result = await action(rpc!, verify)
+      await verify()
+      return result
+    } finally { rpc?.close() }
+  }
+
+  private async callWorkspaceRelocationAdmin(
+    method: 'verify_workspace_relocation_request' | 'quiesce_workspace_relocation_web',
+    params: VerifyWorkspaceRelocationRequestParams, bearer?: string,
+  ): Promise<VerifyWorkspaceRelocationRequestParams> {
+    params = Object.freeze({ ...params })
+    const field = method === 'verify_workspace_relocation_request' ? 'verified' : 'quiesced'
+    const timeoutMs = method === 'verify_workspace_relocation_request' ? 1500 : 30000
+    const unavailable = () => Object.assign(new Error('当前Admin固定请求无法确认，已保留维护保护。'), { code: 'SERVICE_UNAVAILABLE' })
+    if (typeof bearer !== 'string' || !bearer) throw Object.assign(new Error('Human Admin credential required'), { code: 'UNAUTHORIZED' })
+    try {
+      return await this.withCurrentAdminRpc(timeoutMs, async (rpc, verify) => {
+        const response = await rpc.call(method, params, { authorizationBearer: bearer })
+        await verify()
+        if (!response || typeof response !== 'object' || Array.isArray(response) || Object.keys(response).length !== 3
+          || !Object.keys(response).every(key => key === field || key === 'intent_id' || key === 'intent_sha256')) throw unavailable()
+        const result = response as Record<string, unknown>
+        if (result[field] !== true || result.intent_id !== params.intent_id || result.intent_sha256 !== params.intent_sha256) throw unavailable()
+        const { readWorkspaceRelocationIntent } = require('../../scripts/lib/workspace-relocation-intent.mjs')
+        const intent = readWorkspaceRelocationIntent(this.dataDir)
+        if (!intent) throw unavailable()
+        const intentHash = sha256CanonicalJson(intent)
+        if (intent.id !== params.intent_id || intentHash !== params.intent_sha256) throw Object.assign(new Error('Workspace request does not match this instance'), { code: 'FORBIDDEN' })
+        return { intent_id: intent.id, intent_sha256: intentHash }
+      })
     } catch (error) {
       if ((error as { code?: string }).code === 'FORBIDDEN') throw error
       throw unavailable()
-    } finally { rpc?.close() }
+    }
   }
 
   /** Fixed host startup only; subsequent scope capture still owns Agent grant authorization. */
@@ -1861,6 +1894,106 @@ export class ModuleManager {
       }
     })
     this.workspaceValidationHealth = { fingerprint, pending }
+    return pending
+  }
+
+  private async handleVerifyWorkspaceRelocationFinalization(
+    params: VerifyWorkspaceRelocationFinalizationParams, context?: RpcHandlerContext,
+  ): Promise<VerifyWorkspaceRelocationFinalizationResult> {
+    const supplied = context?.authorizationBearer, grant = this.workspaceFinalizationGrant
+    if (!supplied) throw Object.assign(new Error('Finalization credential required'), { code: 'UNAUTHORIZED' })
+    if (!grant || grant.revoked || Buffer.byteLength(supplied) !== Buffer.byteLength(grant.token)
+      || !crypto.timingSafeEqual(Buffer.from(supplied), Buffer.from(grant.token))) throw Object.assign(new Error('Finalization credential is not current'), { code: 'FORBIDDEN' })
+    const uuid = (value: unknown) => typeof value === 'string' && /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(value)
+    if (!params || typeof params !== 'object' || Array.isArray(params) || Object.keys(params).sort().join() !== 'action,completion_sha256,intent_id,launch_id'
+      || !uuid(params.intent_id) || !uuid(params.launch_id) || typeof params.completion_sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(params.completion_sha256)
+      || !['prepare_web', 'resume_web'].includes(params.action)) throw Object.assign(new Error('Invalid finalization request'), { code: 'INVALID_PARAMS' })
+    if (params.intent_id !== grant.request.intent_id || params.launch_id !== grant.launch.launch_id || params.completion_sha256 !== grant.completionHash
+      || params.action === 'prepare_web' && !['archived', 'prepared'].includes(grant.phase)
+      || params.action === 'resume_web' && grant.phase !== 'released') throw Object.assign(new Error('Finalization purpose or job does not match'), { code: 'FORBIDDEN' })
+    try { grant.verify() }
+    catch (cause) {
+      if ((cause as { code?: string }).code === 'FORBIDDEN') throw cause
+      throw Object.assign(new Error('Finalization facts cannot be verified'), { code: 'SERVICE_UNAVAILABLE', cause })
+    }
+    return { verified: true, ...params, intent_sha256: grant.request.intent_sha256, launch_sha256: sha256CanonicalJson(grant.launch) }
+  }
+
+  private prepareWorkspaceRelocationCompletion(request: VerifyWorkspaceRelocationRequestParams, bearer?: string): Promise<PrepareWorkspaceRelocationCompletionResult> {
+    request = Object.freeze({ ...request })
+    const fingerprint = sha256CanonicalJson(request), previous = this.workspaceFinalizationPreparation
+    if (previous) {
+      if (previous.fingerprint !== fingerprint) return Promise.reject(Object.assign(new Error('Finalization job cannot change'), { code: 'FORBIDDEN' }))
+      return previous.pending.then(result => {
+        const grant = this.workspaceFinalizationGrant
+        if (!grant || grant.phase !== 'prepared') throw Object.assign(new Error('Finalization preparation is not current'), { code: 'FORBIDDEN' })
+        grant.verify()
+        return result
+      })
+    }
+    const pending = Promise.resolve().then(async (): Promise<PrepareWorkspaceRelocationCompletionResult> => {
+      const failure = () => Object.assign(new Error('迁移完成准备尚未确认，已保留维护保护。'), { code: 'SERVICE_UNAVAILABLE' })
+      let child: ChildProcess | undefined, terminal: { archive(): Promise<unknown>; close(): void } | undefined
+      try {
+        const health = await this.verifyWorkspaceRelocationValidationHealth(request, bearer), proof = this.workspaceValidationProof
+        child = health.coordinator
+        if (!proof || proof.result.coordinator !== child || sha256CanonicalJson(proof.request) !== fingerprint) throw failure()
+        proof.assertCurrent()
+        const records = require('../../scripts/lib/workspace-relocation-intent.mjs'), native = require('../../scripts/lib/process-identity.cjs')
+        const coordinator = records.readWorkspaceRelocationCoordinator(this.dataDir, request.intent_id), context = { dataDir: this.dataDir, id: request.intent_id, launch: coordinator.launch }
+        const files = require('../../scripts/lib/workspace-coordinator-journal.mjs').createWorkspaceJournalClient(child, context, 'file')
+        let completionHash: string
+        try { completionHash = (await files.call('prepare_completion', {})).completion_sha256 } finally { files.close() }
+        proof.assertCurrent()
+        if (typeof completionHash !== 'string' || sha256CanonicalJson(records.readWorkspaceRelocationCompletion(this.dataDir, request.intent_id)) !== completionHash) throw failure()
+        const admin = this.processes.get('admin-web'), adminState = admin && this.childStates.get(admin), adminRuntime = this.modules.get('admin-web')
+        const self = native.inspectProcess(process.pid), adminIdentity = admin?.pid && native.inspectProcess(admin.pid), launch = coordinator.launch
+        if (!admin || !adminState || !adminRuntime || !adminIdentity || !native.sameProcess(launch.parent, self)) throw failure()
+        const adminRuntimeId = adminState.runtimeId, adminPort = adminRuntime.port, adminPid = admin.pid
+        let finalizingHash: string | undefined
+        const grant: WorkspaceFinalizationGrant = { token: crypto.randomBytes(32).toString('base64url'), revoked: false, phase: 'archiving', request,
+          completionHash, launch, child, verify: () => {
+            const forbidden = () => { grant.revoked = true; return Object.assign(new Error('Finalization role changed'), { code: 'FORBIDDEN' }) }
+            if (this.workspaceFinalizationGrant !== grant || grant.revoked || this.isShuttingDown || !child!.connected || child!.exitCode !== null || child!.signalCode !== null
+              || this.processes.get('admin-web') !== admin || this.childStates.get(admin) !== adminState || this.modules.get('admin-web') !== adminRuntime
+              || adminState.runtimeId !== adminRuntimeId || adminState.rootPid !== adminPid || adminRuntime.pid !== adminPid
+              || adminRuntime.port !== adminPort || adminRuntime.module_type !== 'admin' || adminRuntime.status !== 'running'
+              || adminState.finalizeStarted || adminState.rootExited || !adminState.reachedRunning || adminState.termination || admin.exitCode !== null || admin.signalCode !== null
+              || !native.sameProcess(self, native.inspectProcess(process.pid)) || !native.sameProcess(launch.process, native.inspectProcess(child!.pid))
+              || !native.sameProcess(adminIdentity, native.inspectProcess(admin.pid))) throw forbidden()
+            const completion = grant.phase === 'archiving' ? records.readWorkspaceRelocationCompletion(this.dataDir, request.intent_id)
+              : records.readWorkspaceRelocationArchivedCompletion(this.dataDir, request.intent_id)
+            if (sha256CanonicalJson(completion) !== completionHash) throw failure()
+            if (grant.phase !== 'archiving' && grant.phase !== 'released') {
+              const fence = records.readWorkspaceRelocationFinalizing(this.dataDir, request.intent_id)
+              if (!fence || fence.completion_sha256 !== completionHash || sha256CanonicalJson(fence) !== finalizingHash) throw failure()
+            }
+          } }
+        if (this.workspaceFinalizationGrant) this.workspaceFinalizationGrant.revoked = true
+        this.workspaceFinalizationGrant = grant; grant.verify()
+        terminal = require('../../scripts/lib/workspace-finalization-journal.mjs').createWorkspaceFinalizationJournal(child, context)
+        const archived = await terminal!.archive() as { completion_sha256: string; finalizing_sha256: string }
+        if (archived.completion_sha256 !== completionHash) throw failure()
+        finalizingHash = archived.finalizing_sha256
+        grant.phase = 'archived'; grant.verify()
+        const params = { intent_id: request.intent_id, launch_id: launch.launch_id, completion_sha256: completionHash }
+        const response = await this.withCurrentAdminRpc(30000, async (rpc, verify) => {
+          grant.verify()
+          const result = await rpc.call('prepare_workspace_relocation_completion', params, { authorizationBearer: grant.token })
+          await verify(); grant.verify()
+          return result
+        })
+        const expected = { prepared: true as const, ...params, intent_sha256: request.intent_sha256, launch_sha256: sha256CanonicalJson(launch) }
+        if (sha256CanonicalJson(response) !== sha256CanonicalJson(expected)) throw failure()
+        grant.phase = 'prepared'; grant.verify()
+        return Object.freeze(expected)
+      } catch (cause) {
+        if (this.workspaceFinalizationGrant?.request.intent_id === request.intent_id) this.workspaceFinalizationGrant.revoked = true
+        await this.closeWorkspaceCoordinatorChannel(child)
+        throw Object.assign(failure(), { cause })
+      } finally { terminal?.close() }
+    })
+    this.workspaceFinalizationPreparation = { fingerprint, pending }
     return pending
   }
 

@@ -1955,8 +1955,12 @@ const healthFile = 'relocation-health.json'
 function workspaceHealthReport(dataDir, id, report) {
   try {
     const { ctx, intent } = coordinatorContext(dataDir, id)
-    const coordinator = readWorkspaceRelocationCoordinator(dataDir, id), selected = readWorkspaceRelocationRootSelected(dataDir, id)
-    const originalModules = readWorkspaceRelocationModules(dataDir, id).modules
+    return workspaceHealthFrame({ ctx, intent, coordinator: readWorkspaceRelocationCoordinator(dataDir, id),
+      selected: readWorkspaceRelocationRootSelected(dataDir, id), originalModules: readWorkspaceRelocationModules(dataDir, id).modules }, id, report)
+  } catch { fail() }
+}
+function workspaceHealthFrame({ ctx, intent, coordinator, selected, originalModules }, id, report) {
+  try {
     const oldRuntimeIds = new Set(originalModules.map(item => item.runtime_id).filter(Boolean))
     const scopes = originalModules.filter(item => item.runtime_id !== undefined && item.processes.length > 0 && ['crabot-agent', 'memory-default'].includes(item.module_id))
       .sort((a, b) => a.module_id.localeCompare(b.module_id))
@@ -1996,8 +2000,11 @@ export const readWorkspaceRelocationHealth = recordGraphReader(function readWork
 function verifyWorkspaceHealthRuntime(dataDir, id, fixed) {
   const current = workspaceHealthReport(dataDir, id, { modules: fixed.modules, root_proof: fixed.root_proof })
   const published = readWorkspaceRelocationRootPublished(dataDir, id)
-  if (sha256CanonicalJson({ modules: current.modules, root_proof: current.root_proof }) !== sha256CanonicalJson({ modules: fixed.modules, root_proof: fixed.root_proof })
-    || !published || sha256CanonicalJson(rootFrame(fixed.intent.target)) !== sha256CanonicalJson(published.target)
+  if (!published || sha256CanonicalJson({ modules: current.modules, root_proof: current.root_proof }) !== sha256CanonicalJson({ modules: fixed.modules, root_proof: fixed.root_proof })) fail()
+  verifyFixedWorkspaceRuntime(current, published.target)
+}
+function verifyFixedWorkspaceRuntime(fixed, directory) {
+  if (sha256CanonicalJson(rootFrame(fixed.intent.target)) !== sha256CanonicalJson(directory)
     || readHealthRuntimeText(fixed.ctx.dataRoot)?.trim() !== fixed.root_proof.instance_id) fail()
   for (const module of fixed.modules) {
     const runtime = JSON.parse(readHealthRuntimeText(fixed.ctx.dataRoot, module.runtime_id))
@@ -2100,9 +2107,12 @@ export const readWorkspaceRelocationCompletion = recordGraphReader(function read
     || sha256CanonicalJson(record.materials) !== sha256CanonicalJson(workspaceJobMaterials(ctx))) fail()
   return record
 })
-async function verifyWorkspaceCompletionCapabilities(dataDir, id, fixed, verify, signal) {
+// Neutral capability checks; callers retain their own current role and fixed material guards.
+async function verifyWorkspaceCapabilities(fixed, directory, verify, authorize, signal) {
+  const revalidate = async () => { await authorize(); verify() }
+  await revalidate()
   const { openModuleRuntimeRpc } = await import('./module-runtime-rpc.cjs')
-  verify()
+  await revalidate()
   for (const module of fixed.modules) {
     const scope = fixed.scopes.find(item => item.module_id === module.module_id)
     const locate = () => {
@@ -2116,16 +2126,17 @@ async function verifyWorkspaceCompletionCapabilities(dataDir, id, fixed, verify,
     const listener = locate(), rpc = await openModuleRuntimeRpc(listener, scope.module_port,
       { instance_id: fixed.root_proof.instance_id, module_id: module.module_id, runtime_id: module.runtime_id }, { signal })
     try {
+      await revalidate()
       if (!native.sameProcess(listener, locate())) fail()
       const health = await rpc.call('health', {})
+      await revalidate()
       if (health.status !== 'healthy' || !native.sameProcess(listener, locate())) fail(undefined, 'completion-runtime-health')
     } finally { rpc.close() }
   }
   const { probeWorkspaceDirectory } = await import('./workspace-root-probe.mjs')
-  verify()
-  const published = readWorkspaceRelocationRootPublished(dataDir, id)
-  await probeWorkspaceDirectory({ directory: published.target, authorize: async () => { verify(); return verify } })
-  verify()
+  await revalidate()
+  await probeWorkspaceDirectory({ directory, authorize: async () => { await revalidate(); return verify } })
+  await revalidate()
 }
 export async function prepareWorkspaceRelocationCompletion({ dataDir, id, signal }) {
   const base = workspaceFileCoordinatorContext(dataDir, id, signal)
@@ -2141,7 +2152,7 @@ export async function prepareWorkspaceRelocationCompletion({ dataDir, id, signal
   verify()
   const selected = await verifyWorkspaceRelocationSelectedRoot({ dataDir, id, signal })
   verify()
-  await verifyWorkspaceCompletionCapabilities(dataDir, id, fixed, verify, signal)
+  await verifyWorkspaceCapabilities(fixed, readWorkspaceRelocationRootPublished(dataDir, id).target, verify, async () => verify(), signal)
   verify()
   const previous = readWorkspaceRelocationCompletion(dataDir, id)
   if (previous) { syncIntent(base.ctx); verify(); return { dispatch: 'observe', completion_sha256: sha256CanonicalJson(previous) } }
@@ -2183,6 +2194,25 @@ export const readWorkspaceRelocationArchivedCompletion = recordGraphReader(funct
   }
   return record
 })
+/** Sealed facts only. This does not revive the original active role or any command. */
+export const readWorkspaceRelocationArchivedState = recordGraphReader(function readWorkspaceRelocationArchivedState(dataDir, id) {
+  const completion = readWorkspaceRelocationArchivedCompletion(dataDir, id)
+  if (!completion) fail()
+  const ctx = context(dataDir), archive = { ...ctx, control: path.join(ctx.baseControl, 'relocation-history', id) }
+  const intent = readPrivateJson(path.join(archive.control, 'relocation.json'), 65536)
+  const launch = readPrivateJson(path.join(archive.control, coordinatorFile), 65536), ready = readPrivateJson(path.join(archive.control, coordinatorReadyFile), 65536)
+  const selected = readPrivateJson(path.join(archive.control, rootSelectedFile), 65536), published = readPrivateJson(path.join(archive.control, rootPublishedFile), 65536)
+  const workers = readPrivateJson(path.join(archive.control, 'relocation-workers.json'), scopeLimit)
+  if (!fields(workers, ['schema_version', 'intent_id', 'intent_sha256', 'workers', 'created_at']) || workers.schema_version !== 1
+    || workers.intent_id !== id || workers.intent_sha256 !== sha256CanonicalJson(intent) || !validWorkers(workers.workers) || !validDate(workers.created_at)) fail()
+  const health = readPrivateJson(path.join(archive.control, healthFile), 65536), modules = readModules(archive, intent, workers)
+  if (!launch || !ready || !selected || !published || !modules || !fields(health, ['schema_version', 'intent_id', 'modules', 'root_proof', 'checked_at'])
+    || health.schema_version !== 1 || health.intent_id !== id || !validDate(health.checked_at)) fail()
+  const frame = workspaceHealthFrame({ ctx, intent, coordinator: { launch, ready }, selected, originalModules: modules.modules }, id,
+    { modules: health.modules, root_proof: health.root_proof })
+  if (sha256CanonicalJson(frame.modules) !== sha256CanonicalJson(health.modules)) fail()
+  return { completion, intent, launch, ready, selected, published, health, modules }
+})
 /** Sealed closure facts for read-only inspection; no active role or command is restored. */
 export const readWorkspaceRelocationArchivedClosureFacts = recordGraphReader(function readWorkspaceRelocationArchivedClosureFacts(dataDir, id) {
   const completion = readWorkspaceRelocationArchivedCompletion(dataDir, id)
@@ -2215,6 +2245,45 @@ export const readWorkspaceRelocationFinalizing = recordGraphReader(function read
   if (locations.length !== 1 || sha256CanonicalJson({ ...rootFrame(locations[0]), path: ctx.control }) !== sha256CanonicalJson(record.control_root)) fail()
   return record
 })
+export const readCurrentWorkspaceRelocationFinalizing = recordGraphReader(function readCurrentWorkspaceRelocationFinalizing(dataDir) {
+  const ctx = context(dataDir)
+  if (!privateControl(ctx.baseControl)) return null
+  const record = readPrivateJson(path.join(ctx.baseControl, finalizingFile), 65536)
+  if (record === undefined) return null
+  if (!uuid(record?.intent_id)) fail()
+  return readWorkspaceRelocationFinalizing(dataDir, record.intent_id)
+})
+/** Before release only: facts and live capabilities, never authorization to reopen business. */
+export async function verifyWorkspaceRelocationArchivedCapabilities({ dataDir, id, signal, verify: authorize }) {
+  if (typeof authorize !== 'function') fail()
+  await authorize()
+  const state = readWorkspaceRelocationArchivedState(dataDir, id), stateHash = sha256CanonicalJson(state)
+  const fixed = workspaceHealthFrame({ ctx: context(dataDir), intent: state.intent, coordinator: { launch: state.launch, ready: state.ready },
+    selected: state.selected, originalModules: state.modules.modules }, id, { modules: state.health.modules, root_proof: state.health.root_proof })
+  const verify = () => {
+    if (signal?.aborted || sha256CanonicalJson(readWorkspaceRelocationArchivedState(dataDir, id)) !== stateHash) fail()
+    const fence = readWorkspaceRelocationFinalizing(dataDir, id)
+    if (!fence || fence.completion_sha256 !== sha256CanonicalJson(state.completion) || fence.intent_sha256 !== state.completion.intent_sha256
+      || fence.launch_sha256 !== state.completion.launch_sha256
+      || !native.sameProcess(state.launch.parent, native.inspectProcess(state.launch.parent.pid))
+      || !native.sameProcess(state.launch.process, native.inspectProcess(state.launch.process.pid))) fail()
+    verifyFixedWorkspaceRuntime(fixed, state.published.target)
+  }
+  const current = async () => { await authorize(); verify() }
+  await current()
+  const catalog = new WorkspaceCatalog({ dataRoot: fixed.ctx.dataRoot, storageRoot: process.env.WORKER_WORKSPACES_DIR, files: native })
+  const snapshot = await catalog.snapshot()
+  await current()
+  if (sha256CanonicalJson(snapshot) !== state.selected.catalog_sha256) fail()
+  const agent = await import('../../crabot-agent/dist/core/workspace-relocation-closed-evidence.js')
+  await current()
+  const closures = await agent.inspectArchivedWorkspaceRelocationClosures({ dataDir, id, signal, verify: current })
+  await current(); closures.verify()
+  if (closures.worker_commit_sha256 !== state.completion.worker_commit_sha256 || closures.recovery_commit_sha256 !== state.completion.recovery_commit_sha256) fail()
+  await verifyWorkspaceCapabilities(fixed, state.published.target, verify, authorize, signal)
+  await current(); closures.verify()
+  return Object.freeze({ completion_sha256: sha256CanonicalJson(state.completion), selected_sha256: sha256CanonicalJson(state.selected), modules_sha256: sha256CanonicalJson(state.health.modules) })
+}
 /** One original coordinator's storage effect only. The fixed fence remains until current MM/Admin confirmation. */
 export async function archiveWorkspaceRelocationJob({ dataDir, id, signal }) {
   await prepareWorkspaceRelocationCompletion({ dataDir, id, signal })

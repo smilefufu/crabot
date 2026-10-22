@@ -65,7 +65,8 @@ async function openPinnedProcessRpc(expected, port, { signal, timeoutMs = 5000, 
             }
             responseStage = 'response-json'
             const value = JSON.parse(Buffer.concat(chunks).toString('utf8'))
-            if (response.statusCode !== 200) throw unavailable('response-status')
+            if (response.statusCode !== 200) throw unavailable('response-status',
+              value?.id === id && value?.success === false && remoteCodes.has(value.error?.code) ? { remote_code: value.error.code } : {})
             if (!value || value.id !== id) throw unavailable('response-identity')
             if (value.success !== true) throw unavailable('response-rejected', remoteCodes.has(value.error?.code) ? { remote_code: value.error.code } : {})
             if (!value.data || typeof value.data !== 'object' || Array.isArray(value.data)) throw unavailable('response-shape')

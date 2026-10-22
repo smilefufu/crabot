@@ -1,3 +1,4 @@
+import { createWorkspaceFinalizationWeb } from './workspace-finalization-web.js'
 import { parseFriendPermissionRecords, serializeFriendPermissionRecords } from './friend-permission-store.js'
 import { WorkspaceExecutionInventorySchema, WorkspaceIdSchema } from 'crabot-client'
 import { WorkspaceService } from './workspaces.js'
@@ -717,6 +718,7 @@ export class AdminModule extends ModuleBase {
   // Channel 管理器
   private channelManager: ChannelManager
   private workspaceService: WorkspaceService
+  private workspaceFinalizationWeb?: ReturnType<typeof createWorkspaceFinalizationWeb>
   private workspaceWebAdmissions?: WorkspaceWebAdmissions
   private voiceAdmin: VoiceAdmin
 
@@ -1019,6 +1021,7 @@ export class AdminModule extends ModuleBase {
 
     this.registerMethod('verify_workspace_relocation_request', this.handleVerifyWorkspaceRelocationRequest.bind(this))
     this.registerMethod('quiesce_workspace_relocation_web', this.handleQuiesceWorkspaceRelocationWeb.bind(this))
+    this.registerMethod('prepare_workspace_relocation_completion', (params, context) => this.workspaceFinalizationAccess().prepare(params, context?.authorizationBearer))
 
     // Schedule 管理
     this.registerMethod('create_schedule', this.handleCreateSchedule.bind(this))
@@ -1686,6 +1689,13 @@ export class AdminModule extends ModuleBase {
     const route = () => this.routeWebRequest(req, res, url, agentCliAuth)
     if (requiresWorkspaceWebAdmission(req.method, pathname)) return this.withWorkspaceWebAccess(res, route)
     return route()
+  }
+
+  private workspaceFinalizationAccess(): ReturnType<typeof createWorkspaceFinalizationWeb> {
+    return this.workspaceFinalizationWeb ??= createWorkspaceFinalizationWeb({ dataDir: path.resolve(this.adminConfig.data_dir, '..'),
+      moduleManagerPort: this.rpcClient.moduleManagerTargetPort,
+      runtimeIdentity: () => ({ instance_id: process.env.CRABOT_INSTANCE_ID, module_id: this.config.moduleId, runtime_id: process.env.CRABOT_MODULE_RUNTIME_ID }),
+      quiesce: () => this.quiesceWorkspaceWebAccess() })
   }
 
   private workspaceWebAccess(): WorkspaceWebAdmissions {

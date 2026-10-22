@@ -187,3 +187,20 @@ test('runtime proof preserves fixed transport diagnostics without forwarding a r
   })
   assert.equal(f.calls.length, 1); assert.equal(f.sockets.size, 1)
 })
+
+for (const correlated of [true, false]) test('a non-200 reply retains only a correlated known denial code: ' + correlated, async t => {
+  const f = await fixture(t, (req, res, body) => {
+    res.writeHead(403)
+    res.end(JSON.stringify({ id: correlated ? body.id : 'unrelated', success: false,
+      error: { code: 'FORBIDDEN', message: 'PRIVATE_DENIAL_BODY' } }))
+  })
+  const rpc = await transport.openPinnedProcessRpc(f.process, f.port)
+  t.after(() => rpc.close())
+  await assert.rejects(rpc.call('verify_workspace_relocation_finalization', {}), error => {
+    assert.equal(error.code, 'CRABOT_PROCESS_RPC'); assert.equal(error.stage, 'response-status')
+    assert.equal(error.remote_code, correlated ? 'FORBIDDEN' : undefined)
+    assert.equal(JSON.stringify(error).includes('PRIVATE_DENIAL_BODY'), false)
+    return true
+  })
+  assert.equal(f.sockets.size, 1); assert.equal(f.calls.length, 1)
+})
