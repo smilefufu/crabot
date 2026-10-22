@@ -31,7 +31,7 @@ async function reserveFixturePort(): Promise<ReturnType<typeof http.createServer
   throw new Error('No finite fixture port was available')
 }
 
-async function fixture(options: { withMemory?: boolean; inactiveMemory?: boolean; wrongRuntime?: boolean; result?: string; withAgent?: boolean; agentResult?: string; actualAgent?: boolean; businessAgent?: boolean; businessMemory?: boolean; processLifetimeMs?: number; backgroundShell?: boolean; validationHealth?: 'healthy' | 'unhealthy'; validationRuntimeMismatch?: boolean; validationRootOverride?: boolean; validationRegistration?: 'delayed' | 'exit'; memoryHealth?: 'healthy' | 'degraded'; memoryBootstrap?: boolean; actualAdmin?: boolean; adminReadyDelayMs?: number; quiesceResult?: string; orphanDuringStop?: boolean } = {}) {
+async function fixture(options: { withMemory?: boolean; inactiveMemory?: boolean; wrongRuntime?: boolean; result?: string; withAgent?: boolean; agentResult?: string; actualAgent?: boolean; businessAgent?: boolean; businessMemory?: boolean; processLifetimeMs?: number; backgroundShell?: boolean; validationHealth?: 'healthy' | 'unhealthy'; validationRuntimeMismatch?: boolean; validationRootOverride?: boolean; validationRegistration?: 'delayed' | 'exit'; memoryHealth?: 'healthy' | 'degraded'; memoryBootstrap?: boolean; actualAdmin?: boolean; adminReadyDelayMs?: number; quiesceResult?: string; orphanDuringStop?: boolean; extraModule?: 'running' | 'inactive' | 'tool' } = {}) {
   if ((options.businessAgent || options.businessMemory) && (process.env.GITHUB_ACTIONS !== 'true' || process.env.CRABOT_WORKSPACE_BUSINESS_ONSTART_CI !== '1')) throw new Error('Business onStart is isolated CI only')
   const root = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'crabot-current-admin-')))
   const native = require('../../scripts/lib/process-identity.cjs'), management = require('../../scripts/lib/desktop-management.cjs')
@@ -104,7 +104,7 @@ async function fixture(options: { withMemory?: boolean; inactiveMemory?: boolean
       expect((await prepareSharedRequests(path.resolve('..'), data)).status).toBe('prepared')
       await require('../../crabot-agent/dist/manager/request-upgrade.js').assertRequestUpgradeReady(path.join(data, 'agent'))
     }
-    if (options.actualAgent) {
+    if (options.actualAgent || options.extraModule) {
       host = http.createServer((req, res) => { void manager.handleRequest(req, res) })
       await new Promise<void>(resolve => host!.listen(0, '127.0.0.1', resolve))
       manager.config.port = (host.address() as { port: number }).port
@@ -278,6 +278,32 @@ runpy.run_module('src.main',run_name='__main__')
         if (options.businessMemory) {
           await vi.waitFor(async () => expect(await manager.sendToModule(port, 'health', {})).toMatchObject({ status: 'healthy' }), { timeout: 15000 })
         } else if (options.memoryHealth) await vi.waitFor(async () => expect(await fs.readFile(path.join(data, 'memory-ready'), 'utf8')).toBe('ready'), { timeout: 10000 })
+      }
+    }
+    if (options.extraModule) {
+      const reserved = await reserveFixturePort(), port = (reserved.address() as { port: number }).port
+      await new Promise<void>(resolve => reserved.close(() => resolve()))
+      const id = options.extraModule === 'tool' ? 'fixture-tool' : 'fixture-channel'
+      const allocationsFile = path.join(data, 'port-allocations.json'), allocations = JSON.parse(await fs.readFile(allocationsFile, 'utf8').catch(() => '[]'))
+      await fs.writeFile(allocationsFile, JSON.stringify([...allocations, { module_id: id, port, allocated_at: new Date().toISOString() }]))
+      await manager.portAllocator.initialize()
+      const entry = path.join(data, id + '.cjs'), ready = path.join(data, id + '-ready')
+      await fs.writeFile(entry, options.extraModule === 'tool' ? `setInterval(()=>{},1000)` : `
+        const http=require('node:http'),fs=require('node:fs'),crypto=require('node:crypto');
+        const server=http.createServer(async(req,res)=>{let text='';for await(const part of req)text+=part;const body=JSON.parse(text);
+          const data=body.method==='get_runtime_identity'?{instance_id:process.env.CRABOT_INSTANCE_ID,module_id:${JSON.stringify(id)},runtime_id:process.env.CRABOT_MODULE_RUNTIME_ID}:
+            body.method==='health'?{status:fs.existsSync(${JSON.stringify(path.join(data, 'extra-health-unhealthy'))})?'degraded':'healthy'}:{};
+          res.end(JSON.stringify({id:body.id,success:true,data}));if(body.method==='shutdown')setTimeout(()=>process.exit(0),25);
+        });server.listen(Number(process.env.Crabot_PORT),'127.0.0.1',async()=>{try{
+          const response=await fetch('http://127.0.0.1:'+process.env.CRABOT_MM_PORT+'/register',{method:'POST',headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({id:crypto.randomUUID(),source:${JSON.stringify(id)},method:'register',params:{module_id:${JSON.stringify(id)},module_type:'channel',version:'0.1.0',protocol_version:'0.1.0',port:Number(process.env.Crabot_PORT),subscriptions:[]}})});
+          if(!(await response.json()).success)throw new Error('Finite extra module registration failed');fs.writeFileSync(${JSON.stringify(ready)},'ready')
+        }catch(error){console.error(error);process.exit(1)}});setTimeout(()=>process.exit(0),${options.processLifetimeMs ?? 300000}).unref();`)
+      manager.modules.set(id, { module_id: id, module_type: 'channel', entry: `"${process.execPath}" "${entry}"`, port,
+        auto_start: false, auto_restart: false, start_priority: 2, skip_health_check: options.extraModule === 'tool', status: 'stopped' })
+      if (options.extraModule !== 'inactive') {
+        await manager.startModuleProcess(id)
+        if (options.extraModule !== 'tool') await vi.waitFor(async () => expect(await fs.readFile(ready, 'utf8')).toBe('ready'), { timeout: 10000 })
       }
     }
     const catalog = new WorkspaceCatalog({ dataRoot: data, files: native }); await catalog.initialize()
@@ -1908,12 +1934,29 @@ describe('MM checks the new runtime health and Root under the original job', () 
 
 
 describe('normal fixed-job Admin completion preparation', () => {
+  it.each(['running', 'inactive', 'tool'] as const)('observes the actual original finite %s module scope without starting business', async extraModule => {
+    const f = await fixture({ extraModule })
+    try {
+      const id = extraModule === 'tool' ? 'fixture-tool' : 'fixture-channel'
+      const native = require('../../scripts/lib/process-identity.cjs'), signal = vi.spyOn(native, 'terminateKnownProcess')
+      const scope = (await f.manager.captureWorkspaceRelocationModules()).find((item: any) => item.module_id === id)
+      expect(scope).toBeDefined(); expect(scope.module_port).toBe(f.manager.modules.get(id).port)
+      if (extraModule === 'inactive') { expect(scope.processes).toEqual([]); expect(scope.runtime_id).toBeUndefined() }
+      else {
+        expect(scope.processes).toEqual(expect.arrayContaining([expect.objectContaining({ pid: f.manager.processes.get(id).pid })]))
+        expect(scope.runtime_id).toBe(f.manager.childStates.get(f.manager.processes.get(id)).runtimeId)
+      }
+      expect(signal).not.toHaveBeenCalled()
+    } finally { await f.cleanup() }
+  })
+
   it('does not turn an unaccepted private completion call into original human admission', async () => {
     const f = await fixture(), records = require('../../scripts/lib/workspace-relocation-intent.mjs')
     const locks = require('../../scripts/lib/cli-lock.mjs'), lock = await locks.acquireWorkspaceRelocationLock(f.data, f.params.intent_id)
     try {
       const original = records.readWorkspaceRelocationIntent(f.data)
       await expect(f.manager.resumeWorkspaceRelocationWeb(f.params)).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
+      await expect(f.manager.completeWorkspaceRelocation(f.params)).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
       expect(records.readWorkspaceRelocationIntent(f.data)).toEqual(original)
       expect(records.readWorkspaceRelocationCoordinator(f.data, f.params.intent_id).launch).toBeNull()
       expect(await f.calls()).toEqual([])
@@ -1988,17 +2031,22 @@ describe('normal fixed-job Admin completion preparation', () => {
 
 // This stage requires the new Native file move, rebuilt only in isolated CI.
 describe.skipIf(process.env.GITHUB_ACTIONS !== 'true')('fixed terminal release and current Admin resume', () => {
-  it.each(['healthy', 'controller lost acknowledgement', 'bad prepared result', 'unhealthy runtime', 'existing release fact', 'lost acknowledgement', 'new maintenance after effect'])(
+  it.each(['healthy', 'controller lost acknowledgement', 'inactive module', 'skip-health tool', 'unhealthy restored module', 'changed restored definition', 'bad prepared result', 'unhealthy runtime', 'existing release fact', 'lost acknowledgement', 'new maintenance after effect'])(
     'does not replay or reopen an unconfirmed result: %s', async mode => {
-      const f = await fixture({ actualAgent: true, actualAdmin: true, validationHealth: 'healthy', processLifetimeMs: process.platform === 'win32' ? 900000 : 300000 })
+      const extraModule = mode === 'skip-health tool' ? 'tool' : mode === 'inactive module' ? 'inactive' : ['healthy', 'controller lost acknowledgement', 'unhealthy restored module', 'changed restored definition'].includes(mode) ? 'running' : undefined
+      const f = await fixture({ actualAgent: true, actualAdmin: true, validationHealth: 'healthy', extraModule, processLifetimeMs: process.platform === 'win32' ? 900000 : 300000 })
       const locks = require('../../scripts/lib/cli-lock.mjs'), records = require('../../scripts/lib/workspace-relocation-intent.mjs')
       const native = require('../../scripts/lib/process-identity.cjs'), maintenance = require('../../scripts/lib/workspace-maintenance.cjs')
       const lock = await locks.acquireWorkspaceRelocationLock(f.data, f.params.intent_id)
       let replySpy: ReturnType<typeof vi.spyOn> | undefined, sendSpy: ReturnType<typeof vi.spyOn> | undefined
-      const sent: string[] = [], healthyFlow = mode === 'healthy' || mode === 'controller lost acknowledgement'
+      const sent: string[] = [], healthyFlow = ['healthy', 'controller lost acknowledgement', 'inactive module', 'skip-health tool'].includes(mode)
       try {
         expect(typeof native.renameFileNoReplace).toBe('function')
+        const extraId = mode === 'skip-health tool' ? 'fixture-tool' : 'fixture-channel'
+        const originalExtra = (await f.manager.runtimeRegistry.listRecords()).find((row: any) => row.module_id === extraId)
         const prepared = await f.manager.prepareWorkspaceRelocationCompletion(f.params, 'fixture-human'), grant = f.manager.workspaceFinalizationGrant
+        if (mode === 'unhealthy restored module') await fs.writeFile(path.join(f.data, 'extra-health-unhealthy'), 'degraded after restoration')
+        if (mode === 'changed restored definition') f.manager.modules.get(extraId).env = { CHANGED_DURING_FINALIZATION: '1' }
         const send = grant.child.send.bind(grant.child)
         sendSpy = vi.spyOn(grant.child, 'send').mockImplementation((message: any, ...values: any[]) => { sent.push(message.kind); return send(message, ...values) })
         await expect(grant.observeRelease()).rejects.toBeDefined()
@@ -2029,6 +2077,12 @@ describe.skipIf(process.env.GITHUB_ACTIONS !== 'true')('fixed terminal release a
             const result = await f.manager.resumeWorkspaceRelocationWeb(f.params)
             expect(grant.phase).toBe('released'); expect(maintenance.workspaceMaintenancePending(f.data)).toBe(false)
             await expect(f.manager.resumeWorkspaceRelocationWeb(f.params)).resolves.toEqual(result)
+            if (extraModule === 'inactive') expect(f.manager.processes.has(extraId)).toBe(false)
+            else if (extraModule) {
+              const restored = (await f.manager.runtimeRegistry.listRecords()).find((row: any) => row.module_id === extraId)
+              expect(restored).toBeDefined(); expect(restored.runtime_id).not.toBe(originalExtra.runtime_id)
+              expect(f.manager.modules.get(extraId).status).toBe('running')
+            }
             expect(result).toEqual({ resumed: true, ...request, intent_sha256: prepared.intent_sha256, launch_sha256: prepared.launch_sha256 })
             const create = await fetch(`http://127.0.0.1:${f.port}/api/workspaces`, { method: 'POST', headers: { Authorization: 'Bearer fixture-human', 'Content-Type': 'application/json' },
               body: JSON.stringify({ workspace_id: randomUUID(), name: 'after relocation' }) })
@@ -2044,6 +2098,16 @@ describe.skipIf(process.env.GITHUB_ACTIONS !== 'true')('fixed terminal release a
             expect(records.readWorkspaceRelocationReleased(f.data, f.params.intent_id).completion_sha256).toBe(prepared.completion_sha256)
             await expect(resume()).rejects.toMatchObject({ remote_code: 'SERVICE_UNAVAILABLE' })
             await expect(f.manager.resumeWorkspaceRelocationWeb(f.params)).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
+            await fs.rmdir(path.join(f.data, 'workspace-control/relocation-active'))
+            await expect(f.manager.completeWorkspaceRelocation(f.params)).resolves.toEqual(result)
+            expect(grant.revoked).toBe(true); expect(grant.child.connected).toBe(false)
+            expect(require('../../scripts/lib/known-process-exit.cjs').probeKnownProcessExit([grant.launch.process]).state).toBe('stopped')
+            expect(f.manager.workspaceFinalizationGrant).toBeUndefined(); expect(f.manager.workspaceStopSequence).toBeUndefined()
+            const nextLock = await locks.acquireCliLock(f.data, 'next-operation', 1000); locks.releaseCliLock(nextLock)
+            await expect(f.manager.handleVerifyWorkspaceRelocationFinalization({ ...request, action: 'resume_web' }, { authorizationBearer: grant.token })).rejects.toMatchObject({ code: 'FORBIDDEN' })
+          } else if (mode === 'unhealthy restored module' || mode === 'changed restored definition') {
+            await expect(f.manager.resumeWorkspaceRelocationWeb(f.params)).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
+            if (mode === 'changed restored definition') expect(f.manager.processes.has(extraId)).toBe(false)
           } else await expect(grant.release(prepared)).rejects.toBeDefined()
         }
         if (['bad prepared result', 'unhealthy runtime', 'existing release fact'].includes(mode)) {
@@ -2068,7 +2132,7 @@ describe.skipIf(process.env.GITHUB_ACTIONS !== 'true')('fixed terminal release a
           expect(create.status).toBe(503)
         }
         expect(sent.filter(kind => kind === 'workspace_relocation_release_request')).toHaveLength(mode === 'bad prepared result' ? 0 : 1)
-        expect(sent.filter(kind => kind === 'workspace_relocation_release_observe')).toHaveLength(['healthy', 'bad prepared result'].includes(mode) ? 0 : 1)
+        expect(sent.filter(kind => kind === 'workspace_relocation_release_observe')).toHaveLength(['healthy', 'inactive module', 'skip-health tool', 'unhealthy restored module', 'changed restored definition', 'bad prepared result'].includes(mode) ? 0 : 1)
         expect((await fetch(`http://127.0.0.1:${f.port}/api/friends`, { headers: { Authorization: 'Bearer fixture-human' } })).status).toBe(200)
         expect(JSON.parse(await fs.readFile(path.join(f.data, 'agent/worker-ledgers/channel%3A%3Asession.json'), 'utf8')).workers[0].task.status).toBe('closed')
         expect(JSON.stringify(await f.calls())).not.toContain(grant.token)

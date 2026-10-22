@@ -131,3 +131,42 @@ it('retains ordinary all-module orphan recovery when no workspace maintenance is
     expect(manager.server.listening).toBe(true)
   } finally { await manager.stop(); await fs.rm(data, { recursive: true, force: true }) }
 })
+
+
+describe('ordinary restoration guards', () => {
+  async function fixture() {
+    const data = await fs.mkdtemp(path.join(tmpdir(), 'crabot-restoration-start-'))
+    const manager = new ModuleManager({ port: 0, modules: [] }, data) as any
+    const runtime = { module_id: 'fixture-channel', module_type: 'channel', entry: 'never-spawn', port: 19801, status: 'stopped' }
+    manager.modules.set(runtime.module_id, runtime)
+    return { data, manager, runtime, cleanup: async () => { await manager.stop(); await fs.rm(data, { recursive: true, force: true }) } }
+  }
+  it('refuses a changed current restoration role before any startup preparation', async () => {
+    const f = await fixture(), denied = Object.assign(new Error('original role changed'), { code: 'FORBIDDEN' }), verify = vi.fn(async () => {})
+    try {
+      const before = await fs.readdir(f.data)
+      expect(() => f.manager.assertWorkspaceProcessStartCurrent('fixture-channel', undefined, { assertCurrent: () => { throw denied }, verify })).toThrow(denied)
+      expect(verify).not.toHaveBeenCalled(); expect(f.manager.processes.size).toBe(0)
+      expect(await fs.readdir(f.data)).toEqual(before)
+    } finally { await f.cleanup() }
+  })
+  it('rechecks the same role after asynchronous restoration validation', async () => {
+    const f = await fixture(); let revoked = false
+    const denied = Object.assign(new Error('original role changed during await'), { code: 'FORBIDDEN' })
+    const guard = { assertCurrent: () => { if (revoked) throw denied }, verify: vi.fn(async () => { await Promise.resolve(); revoked = true }) }
+    try {
+      await expect(f.manager.assertWorkspaceProcessStartAllowed('fixture-channel', undefined, guard)).rejects.toBe(denied)
+      expect(guard.verify).toHaveBeenCalledTimes(1); expect(f.manager.processes.size).toBe(0)
+    } finally { await f.cleanup() }
+  })
+  it('never lets a restoration guard bypass a later persistent maintenance fence', async () => {
+    const f = await fixture()
+    const guard = { assertCurrent: () => {}, verify: async () => {
+      await fs.mkdir(path.join(f.data, 'workspace-control')); await fs.writeFile(path.join(f.data, 'workspace-control/relocation-finalizing.json'), 'new maintenance')
+    } }
+    try {
+      await expect(f.manager.assertWorkspaceProcessStartAllowed('fixture-channel', undefined, guard)).rejects.toMatchObject({ code: 'WORKSPACE_MAINTENANCE' })
+      expect(f.manager.processes.size).toBe(0); expect(f.runtime.status).toBe('stopped')
+    } finally { await f.cleanup() }
+  })
+})
