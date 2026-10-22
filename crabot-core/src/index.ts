@@ -2071,6 +2071,18 @@ export class ModuleManager {
     return pending
   }
 
+  /** Cold inspection grants no stop/start/release authority and does not adopt the old runtime. */
+  private async inspectWorkspaceRelocationRecovery(request: VerifyWorkspaceRelocationRecoveryRequestParams, bearer?: string) {
+    request = Object.freeze({ ...request })
+    const coordinator = await this.initializeWorkspaceRelocationRecovery(request, bearer)
+    try {
+      const facts = await require('../../scripts/lib/workspace-recovery-admission.mjs').inspectWorkspaceRecoveryFacts({ dataDir: this.dataDir, request, verify: coordinator.verify })
+      return Object.freeze({ ...facts, verify: async () => {
+        try { await facts.verify() } catch (cause) { coordinator.close(); throw cause }
+      } })
+    } catch (cause) { coordinator.close(); throw cause }
+  }
+
   private async handleVerifyWorkspaceRelocationRecoveryAdmission(
     params: VerifyWorkspaceRelocationRecoveryAdmissionParams, context?: RpcHandlerContext,
   ): Promise<VerifyWorkspaceRelocationRecoveryAdmissionResult> {

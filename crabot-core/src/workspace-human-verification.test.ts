@@ -2058,6 +2058,10 @@ describe('normal fixed-job Admin completion preparation', () => {
       await expect(freshRole.consume()).rejects.toBeDefined()
       expect(recoveryRecords.readWorkspaceRecoveryCoordinator(f.data, freshRole.request.recovery_id)).toEqual({ launch: initialized.launch, ready: initialized.ready })
       expect(await cold.initializeWorkspaceRelocationRecovery(freshRole.request, 'fixture-human')).toBe(initialized)
+      const recoveryFacts = await cold.inspectWorkspaceRelocationRecovery(freshRole.request, 'fixture-human')
+      expect(recoveryFacts).toMatchObject({ completion_sha256: freshRole.request.completion_sha256, root_selected_sha256: sha256CanonicalJson(records.readWorkspaceRelocationArchivedState(f.data, request.intent_id).selected) })
+      expect(recoveryFacts.validation_roots).toEqual(expect.arrayContaining([expect.objectContaining({ module_id: 'crabot-agent', root_state: 'stopped' })]))
+      await recoveryFacts.verify()
       expect(initialized.launch.process.parent).toBe(process.pid)
       expect(initialized.launch.process.executable).toBe(require('../../scripts/lib/process-identity.cjs').inspectProcess(process.pid).executable)
       expect((await fetch(`http://127.0.0.1:${f.port}/api/workspaces`, { method: 'POST', headers: { Authorization: 'Bearer fixture-human', 'Content-Type': 'application/json' }, body: '{}' })).status).toBe(503)
@@ -2079,6 +2083,24 @@ describe('normal fixed-job Admin completion preparation', () => {
       await expect(next.verify()).rejects.toBeDefined()
       await expect(cold.initializeWorkspaceRelocationRecovery(nextRequest, 'fixture-human')).rejects.toBeDefined()
       expect(recoveryRecords.readWorkspaceRecoveryCoordinator(f.data, nextRequest.recovery_id)).toEqual(nextFacts)
+      for (const changed of ['selected root', 'closed ledger']) {
+        const inspectRequest = { ...request, recovery_id: randomUUID() }
+        const inspected = await cold.initializeWorkspaceRelocationRecovery(inspectRequest, 'fixture-human')
+        const facts = await cold.inspectWorkspaceRelocationRecovery(inspectRequest, 'fixture-human')
+        const selectedRoot = records.readWorkspaceRelocationArchivedState(f.data, request.intent_id).published.target.path
+        try {
+          if (changed === 'selected root') { await fs.rename(selectedRoot, selectedRoot + '-retained'); await fs.mkdir(selectedRoot) }
+          else await fs.appendFile(ledgerFile, ' ')
+          await expect(facts.verify()).rejects.toBeDefined()
+        } finally {
+          if (changed === 'selected root') { await fs.rmdir(selectedRoot); await fs.rename(selectedRoot + '-retained', selectedRoot) }
+          else await fs.writeFile(ledgerFile, ledger)
+        }
+        await expect(facts.verify()).rejects.toBeDefined()
+        await expect(inspected.verify()).rejects.toBeDefined()
+        await vi.waitFor(() => expect(require('../../scripts/lib/known-process-exit.cjs').probeKnownProcessExit([inspected.launch.process]).state).toBe('stopped'), { timeout: 15000 })
+        expect(await fs.readFile(fenceFile)).toEqual(before)
+      }
       expect(await fs.readFile(fenceFile)).toEqual(before)
     } finally {
       if (cold) await cold.stop()
