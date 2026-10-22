@@ -38,6 +38,72 @@ test('an initial intent requires the actual instance operation lock before publi
   assert.equal(await fs.readFile(path.join(f.source, 'default/original.txt'), 'utf8'), 'user bytes')
 })
 
+test('an unrelated data-root entry does not invalidate the fixed synchronous intent graph', async t => {
+  const f = await fixture(t), lock = await acquireCliLock(f.data, 'workspace-relocation')
+  try {
+    const accepted = await beginWorkspaceRelocationIntent(f.input), lstat = syncFs.lstatSync
+    let injected = false
+    t.mock.method(syncFs, 'lstatSync', function(file, ...args) {
+      const stat = lstat.call(this, file, ...args)
+      if (!injected && String(file) === f.recordFile) {
+        injected = true; syncFs.writeFileSync(path.join(f.data, 'unrelated-runtime-marker'), 'keep')
+      }
+      return stat
+    })
+    assert.deepEqual(readWorkspaceRelocationIntent(f.data), accepted)
+    assert.equal(injected, true)
+    assert.equal(await fs.readFile(path.join(f.data, 'unrelated-runtime-marker'), 'utf8'), 'keep')
+    assert.throws(() => assertWorkspaceExecutionAllowed(f.data), { code: 'WORKSPACE_MAINTENANCE' })
+  } finally { releaseCliLock(lock) }
+})
+
+test('synchronous graph observation releases its data-root handle', async t => {
+  const f = await fixture(t), lock = await acquireCliLock(f.data, 'workspace-relocation')
+  try {
+    const accepted = await beginWorkspaceRelocationIntent(f.input)
+    releaseCliLock(lock)
+    assert.deepEqual(readWorkspaceRelocationIntent(f.data), accepted)
+    const moved = f.data + '-roundtrip'
+    await fs.rename(f.data, moved)
+    await fs.rename(moved, f.data)
+    assert.deepEqual(readWorkspaceRelocationIntent(f.data), accepted)
+  } finally { releaseCliLock(lock) }
+})
+
+for (const change of ['root replaced', ...(process.platform === 'win32' ? [] : ['root permissions']), 'control directory entry', 'record changed']) {
+  test('synchronous intent observation still refuses ' + change, async t => {
+    const f = await fixture(t), lock = await acquireCliLock(f.data, 'workspace-relocation')
+    let moved = false
+    try {
+      await beginWorkspaceRelocationIntent(f.input)
+      releaseCliLock(lock)
+      const lstat = syncFs.lstatSync
+      let injected = false
+      t.mock.method(syncFs, 'lstatSync', function(file, ...args) {
+        const stat = lstat.call(this, file, ...args)
+        if (!injected && String(file) === f.recordFile) {
+          injected = true
+          if (change === 'root replaced') {
+            syncFs.renameSync(f.data, f.data + '-original'); moved = true
+            syncFs.cpSync(f.data + '-original', f.data, { recursive: true, preserveTimestamps: true })
+          } else if (change === 'root permissions') syncFs.chmodSync(f.data, 0o755)
+          else if (change === 'control directory entry') syncFs.writeFileSync(path.join(path.dirname(f.recordFile), 'unexpected-record'), 'keep')
+          else syncFs.appendFileSync(f.recordFile, ' ')
+        }
+        return stat
+      })
+      assert.throws(() => readWorkspaceRelocationIntent(f.data))
+      assert.equal(injected, true)
+      t.mock.restoreAll()
+    } finally {
+      t.mock.restoreAll()
+      if (moved) { await fs.rm(f.data, { recursive: true, force: true }); await fs.rename(f.data + '-original', f.data) }
+      else if (process.platform !== 'win32') await fs.chmod(f.data, 0o700)
+      releaseCliLock(lock)
+    }
+  })
+}
+
 test('completion preparation requires the original coordinator and current technical health', async t => {
   const f = await fixture(t), lock = await acquireCliLock(f.data, 'workspace-relocation')
   try {

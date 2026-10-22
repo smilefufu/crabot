@@ -5,7 +5,7 @@ import path from 'node:path'
 import { tmpdir } from 'node:os'
 import http from 'node:http'
 import { randomInt, randomUUID } from 'node:crypto'
-import { spawn } from 'node:child_process'
+import { spawn, execFileSync } from 'node:child_process'
 import { once } from 'node:events'
 import { WorkspaceCatalog } from 'crabot-shared/dist/workspace-catalog.js'
 import { sha256CanonicalJson } from 'crabot-shared'
@@ -82,16 +82,25 @@ async function fixture(options: { withMemory?: boolean; inactiveMemory?: boolean
     try { await manager.stop() }
     catch (error) {
       const actors = [...manager.processes].map(([id, child]: [string, any]) => {
-        let actual = null, kernelExited = null, group = null
-        try { actual = native.inspectProcess(child.pid) } catch { /* Diagnostic only. */ }
-        try { kernelExited = native.isProcessExited(child.pid) } catch { /* Preserve unknown. */ }
+        let actual = null, kernelExited = null, group = null, identityErrno, exitErrno
+        try { actual = native.inspectProcess(child.pid) } catch (probe) { identityErrno = /macOS errno (\d+)/.exec((probe as Error).message)?.[1] }
+        try { kernelExited = native.isProcessExited(child.pid) } catch (probe) { exitErrno = /macOS errno (\d+)/.exec((probe as Error).message)?.[1] }
         if (process.platform !== 'win32') {
           try { process.kill(-child.pid, 0); group = 'alive' } catch (probe) { group = (probe as NodeJS.ErrnoException).code }
         }
         return { module_id: id, pid: child.pid, exit_code: child.exitCode, signal: child.signalCode,
-          actual_started: actual?.started, actual_owner: actual?.owner, kernel_exited: kernelExited, group_probe: group }
+          actual_started: actual?.started, actual_owner: actual?.owner, kernel_exited: kernelExited, group_probe: group, identity_errno: identityErrno, exit_errno: exitErrno }
       })
-      console.error('[Workspace fixture cleanup] ' + JSON.stringify({ code: (error as NodeJS.ErrnoException).code, actors }))
+      let numericGroups: unknown
+      if (process.platform !== 'win32') {
+        try {
+          const groups = new Set(actors.map((actor: { pid?: number }) => actor.pid))
+          numericGroups = execFileSync('ps', ['-axo', 'pid=,ppid=,pgid=,uid=,stat='], { encoding: 'utf8', timeout: 1000, maxBuffer: 1024 * 1024 })
+            .trim().split('\n').map(line => line.trim().split(/\s+/)).filter(parts => parts.length === 5 && (groups.has(Number(parts[2])) || Number(parts[0]) === process.pid)).slice(0, 32)
+            .map(parts => ({ pid: Number(parts[0]), parent: Number(parts[1]), group: Number(parts[2]), uid: Number(parts[3]), status: parts[4] }))
+        } catch (probe) { numericGroups = { code: (probe as NodeJS.ErrnoException).code } }
+      }
+      console.error('[Workspace fixture cleanup] ' + JSON.stringify({ code: (error as NodeJS.ErrnoException).code, actors, numeric_groups: numericGroups }))
       throw error
     } finally { if (host) { host.closeAllConnections(); await new Promise<void>(resolve => host!.close(() => resolve())) } }
     await fs.rm(root, { recursive: true, force: true })

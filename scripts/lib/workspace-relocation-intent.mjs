@@ -20,10 +20,27 @@ const fail = (code = 'WORKSPACE_RELOCATION_INVALID', stage) => { throw Object.as
 // operation may reuse this frame; every returned graph rechecks its actual inputs.
 let recordObservation = null
 const observedVersion = stat => [stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs, stat.mode, stat.uid, stat.gid, stat.nlink].join(':')
+const observedRootIdentity = stat => [stat.dev, stat.ino, stat.mode, stat.uid, stat.gid].join(':')
+function observationVersion(file, kind, stat) {
+  return kind === 'data' && recordObservation.roots.has(file) ? observedRootIdentity(stat) : observedVersion(stat)
+}
 function observeRecordPath(file, kind, stat) {
   if (!recordObservation) return
   if (!stat) kind = 'missing'
-  const version = stat ? observedVersion(stat) : null, previous = recordObservation.paths.get(file)
+  if (stat && kind === 'data' && !recordObservation.roots.has(file)) {
+    // Pin the actual directory generation. Its unrelated entries may change;
+    // all private control directories and record files still use full versions.
+    if (process.platform !== 'win32') {
+      const fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW)
+      recordObservation.roots.set(file, () => fs.closeSync(fd))
+      if (observedRootIdentity(fs.fstatSync(fd, { bigint: true })) !== observedRootIdentity(stat)) fail()
+    } else if (/^[a-z]:[\\/]/i.test(file) || /^\\\\\?\\[a-z]:\\/i.test(file)) {
+      const pin = native.pinDirectory(file)
+      recordObservation.roots.set(file, () => native.releaseDirectoryPin(pin))
+      if (pin.identity !== native.inspectDirectoryFileId(file) || observedRootIdentity(fs.lstatSync(file, { bigint: true })) !== observedRootIdentity(stat)) fail()
+    }
+  }
+  const version = stat ? observationVersion(file, kind, stat) : null, previous = recordObservation.paths.get(file)
   if (previous && (previous.kind !== kind || previous.version !== version)) fail(undefined, 'record-input-' + kind + '-changed')
   recordObservation.paths.set(file, { kind, version })
 }
@@ -32,7 +49,7 @@ function verifyRecordObservation(frame) {
     let stat
     try { stat = fs.lstatSync(file, { bigint: true }) }
     catch (error) { if (error.code !== 'ENOENT' || observed.version !== null) fail(); continue }
-    if (observed.version === null || observedVersion(stat) !== observed.version || stat.isSymbolicLink()) fail(undefined, 'record-recheck-' + observed.kind)
+    if (observed.version === null || observationVersion(file, observed.kind, stat) !== observed.version || stat.isSymbolicLink()) fail(undefined, 'record-recheck-' + observed.kind)
     if (observed.kind === 'data') {
       if (management.requirePrivateDataRoot(file) !== file) fail()
     } else {
@@ -43,13 +60,13 @@ function verifyRecordObservation(frame) {
       else privatePath = stat.uid === BigInt(process.getuid()) && (stat.mode & 0o777n) === (directory ? 0o700n : 0o600n)
       if (!privatePath) fail()
     }
-    if (observedVersion(fs.lstatSync(file, { bigint: true })) !== observed.version) fail()
+    if (observationVersion(file, observed.kind, fs.lstatSync(file, { bigint: true })) !== observed.version) fail()
   }
 }
 function recordGraphReader(reader) {
   return function(dataDir, id) {
     const outer = recordObservation === null
-    const frame = recordObservation ?? { values: new Map(), paths: new Map() }
+    const frame = recordObservation ?? { values: new Map(), paths: new Map(), roots: new Map() }
     if (outer) recordObservation = frame
     try {
       let values = frame.values.get(reader)
@@ -60,7 +77,12 @@ function recordGraphReader(reader) {
       values.set(key, result)
       if (outer) verifyRecordObservation(frame)
       return result
-    } finally { if (outer) recordObservation = null }
+    } finally {
+      if (outer) {
+        recordObservation = null
+        for (const release of frame.roots.values()) release()
+      }
+    }
   }
 }
 const identity = directory => {

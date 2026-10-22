@@ -111,7 +111,7 @@ static Identity Inspect(int pid, const char** stage = nullptr) {
     // A published exit status may precede the signalled process object. Keep the
     // same generation handle and require kernel confirmation, never the exit code alone.
     if (error == ERROR_ACCESS_DENIED && waitState == WAIT_TIMEOUT && exitKnown && exitCode != STILL_ACTIVE) {
-      waitState = WaitForSingleObject(process, 1);
+      waitState = WaitForSingleObject(process, 25);
       if (waitState == WAIT_OBJECT_0) { CloseHandle(process); return {}; }
     }
     CloseHandle(process);
@@ -150,12 +150,12 @@ static Identity Inspect(int pid, const char** stage = nullptr) {
   proc_bsdinfo info{};
   if (proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, sizeof(info)) != sizeof(info)) {
     if (errno == ESRCH || errno == ENOENT) return {};
-    throw std::runtime_error("Cannot inspect process identity");
+    throw std::runtime_error("Cannot inspect process identity (macOS errno " + std::to_string(errno) + ", pid " + std::to_string(pid) + ")");
   }
   char path[PROC_PIDPATHINFO_MAXSIZE];
   if (proc_pidpath(pid, path, sizeof(path)) <= 0) {
     if (errno == ESRCH || errno == ENOENT) return {};
-    throw std::runtime_error("Cannot inspect process executable");
+    throw std::runtime_error("Cannot inspect process executable (macOS errno " + std::to_string(errno) + ", pid " + std::to_string(pid) + ")");
   }
   result.owner = std::to_string(info.pbi_uid); result.parent = info.pbi_ppid;
   result.started = std::to_string(info.pbi_start_tvsec) + ":" + std::to_string(info.pbi_start_tvusec);
@@ -303,7 +303,7 @@ static bool Exited(int pid) {
   proc_bsdinfo info{};
   if (proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, sizeof(info)) != sizeof(info)) {
     if (PidAbsent(pid)) return true;
-    throw std::runtime_error("Cannot inspect process exit");
+    throw std::runtime_error("Cannot inspect process exit (macOS errno " + std::to_string(errno) + ", pid " + std::to_string(pid) + ")");
   }
   return info.pbi_status == SZOMB;
 #else
