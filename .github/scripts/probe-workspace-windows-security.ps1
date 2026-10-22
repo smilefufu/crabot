@@ -10,6 +10,10 @@ public static class CrabotWorkspaceSecurityProbe {
     static extern uint GetNamedSecurityInfoW(string path, uint type, uint fields, out IntPtr owner, out IntPtr group, out IntPtr dacl, out IntPtr sacl, out IntPtr descriptor);
     [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true, ExactSpelling = true)]
     static extern bool SetFileSecurityW(string path, uint fields, IntPtr descriptor);
+    [DllImport("advapi32.dll", ExactSpelling = true)]
+    static extern uint GetSecurityInfo(SafeFileHandle file, uint type, uint fields, out IntPtr owner, out IntPtr group, out IntPtr dacl, out IntPtr sacl, out IntPtr descriptor);
+    [DllImport("advapi32.dll", ExactSpelling = true)]
+    static extern uint SetSecurityInfo(SafeFileHandle file, uint type, uint fields, IntPtr owner, IntPtr group, IntPtr dacl, IntPtr sacl);
     [DllImport("advapi32.dll", CharSet = CharSet.Unicode, ExactSpelling = true)]
     static extern uint SetNamedSecurityInfoW(string path, uint type, uint fields, IntPtr owner, IntPtr group, IntPtr dacl, IntPtr sacl);
     [DllImport("advapi32.dll", SetLastError = true)]
@@ -79,21 +83,32 @@ public static class CrabotWorkspaceSecurityProbe {
         IntPtr temporary = IntPtr.Zero;
         System.IO.Directory.CreateDirectory(scratch);
         SafeFileHandle file = byHandle ? CreateFileW(target, 0xF0080, 3, IntPtr.Zero, 3, 0x2200000, IntPtr.Zero) : null;
+        bool moved = false;
         try {
             if (byHandle) Check(!file.IsInvalid);
             uint size;
             Check(ConvertStringSecurityDescriptorToSecurityDescriptorW("D:P(A;;FA;;;" + System.Security.Principal.WindowsIdentity.GetCurrent().User.Value + ")", 1, out temporary, out size));
             Check(SetFileSecurityW(scratch, 4, temporary));
-            MoveProbeFile(file, target, held);
-            uint error = SetNamedSecurityInfoW(held, 1, 0x80000004, IntPtr.Zero, IntPtr.Zero, dacl, IntPtr.Zero);
+            MoveProbeFile(file, target, held); moved = true;
+            uint error = byHandle ? SetSecurityInfo(file, 1, 0x80000004, IntPtr.Zero, IntPtr.Zero, dacl, IntPtr.Zero)
+                : SetNamedSecurityInfoW(held, 1, 0x80000004, IntPtr.Zero, IntPtr.Zero, dacl, IntPtr.Zero);
             if (error != 0) return error;
-            Check(SetFileSecurityW(held, 4, descriptor));
-            DuringMove = Observe(held);
-            MoveProbeFile(file, held, target);
+            if (byHandle) {
+                error = RestoreSecurityOnHandle(file, descriptor);
+                if (error != 0) return error;
+                IntPtr owner, group, heldDacl, sacl, observed;
+                error = GetSecurityInfo(file, 1, 0x77, out owner, out group, out heldDacl, out sacl, out observed);
+                if (error != 0) return error;
+                try { DuringMove = Describe(observed); } finally { LocalFree(observed); }
+            } else {
+                Check(SetFileSecurityW(held, 4, descriptor));
+                DuringMove = Observe(held);
+            }
+            MoveProbeFile(file, held, target); moved = false;
             return 0;
         } finally {
             try {
-                if (System.IO.File.Exists(held) && !System.IO.File.Exists(target)) MoveProbeFile(file, held, target);
+                if (moved) MoveProbeFile(file, held, target);
             } finally {
                 if (temporary != IntPtr.Zero) LocalFree(temporary);
                 if (file != null) file.Dispose();
@@ -102,6 +117,12 @@ public static class CrabotWorkspaceSecurityProbe {
         }
     }
     static uint RestoreSecurityStream(string target, IntPtr descriptor) {
+        using (var file = CreateFileW(target, 0xC0000, 3, IntPtr.Zero, 3, 0x2200000, IntPtr.Zero)) {
+            if (file.IsInvalid) return (uint)Marshal.GetLastWin32Error();
+            return RestoreSecurityOnHandle(file, descriptor);
+        }
+    }
+    static uint RestoreSecurityOnHandle(SafeFileHandle file, IntPtr descriptor) {
         uint length = GetSecurityDescriptorLength(descriptor);
         if (length == 0 || length > 16 * 1024 * 1024) throw new InvalidOperationException("Unbounded probe descriptor");
         byte[] bytes = new byte[20 + length];
@@ -109,18 +130,15 @@ public static class CrabotWorkspaceSecurityProbe {
         Buffer.BlockCopy(BitConverter.GetBytes(2u), 0, bytes, 4, 4);
         Buffer.BlockCopy(BitConverter.GetBytes((long)length), 0, bytes, 8, 8);
         Marshal.Copy(descriptor, bytes, 20, (int)length);
-        using (var file = CreateFileW(target, 0xC0000, 3, IntPtr.Zero, 3, 0x2200000, IntPtr.Zero)) {
-            if (file.IsInvalid) return (uint)Marshal.GetLastWin32Error();
-            IntPtr context = IntPtr.Zero;
-            uint written, error = 0;
-            try {
-                if (!BackupWrite(file, bytes, (uint)bytes.Length, out written, false, true, ref context)) error = (uint)Marshal.GetLastWin32Error();
-                else if (written != bytes.Length) error = 13;
-            } finally {
-                if (!BackupWrite(file, null, 0, out written, true, true, ref context) && error == 0) error = (uint)Marshal.GetLastWin32Error();
-            }
-            return error;
+        IntPtr context = IntPtr.Zero;
+        uint written, error = 0;
+        try {
+            if (!BackupWrite(file, bytes, (uint)bytes.Length, out written, false, true, ref context)) error = (uint)Marshal.GetLastWin32Error();
+            else if (written != bytes.Length) error = 13;
+        } finally {
+            if (!BackupWrite(file, null, 0, out written, true, true, ref context) && error == 0) error = (uint)Marshal.GetLastWin32Error();
         }
+        return error;
     }
     static void Check(bool ok) { if (!ok) throw new Win32Exception(Marshal.GetLastWin32Error()); }
     static IntPtr Read(string path, uint fields, out IntPtr dacl) {
@@ -131,13 +149,17 @@ public static class CrabotWorkspaceSecurityProbe {
     }
     public sealed class Snapshot { public string sddl; public ushort control; }
     public static Snapshot Observe(string path) {
-        IntPtr dacl, descriptor = Read(path, 0x77, out dacl), text = IntPtr.Zero;
+        IntPtr dacl, descriptor = Read(path, 0x77, out dacl);
+        try { return Describe(descriptor); } finally { LocalFree(descriptor); }
+    }
+    static Snapshot Describe(IntPtr descriptor) {
+        IntPtr text = IntPtr.Zero;
         try {
             uint revision, length; ushort control;
             Check(GetSecurityDescriptorControl(descriptor, out control, out revision));
             Check(ConvertSecurityDescriptorToStringSecurityDescriptorW(descriptor, 1, 7, out text, out length));
             return new Snapshot { sddl = Marshal.PtrToStringUni(text), control = control };
-        } finally { if (text != IntPtr.Zero) LocalFree(text); LocalFree(descriptor); }
+        } finally { if (text != IntPtr.Zero) LocalFree(text); }
     }
     public static uint Apply(string source, string target, string mode) {
         DuringMove = null;

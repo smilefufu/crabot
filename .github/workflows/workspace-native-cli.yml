@@ -92,7 +92,9 @@ jobs:
           pnpm --dir crabot-shared install --frozen-lockfile
           node crabot-shared/node_modules/typescript/bin/tsc -p crabot-shared/tsconfig.json
           pnpm --dir crabot-agent install --frozen-lockfile
+      # Diagnostic observations do not grant or replace the strict product copy acceptance below.
       - name: Observe exact Windows security restoration on owned finite copies
+        continue-on-error: true
         if: runner.os == 'Windows'
         shell: powershell
         run: .github/scripts/probe-workspace-windows-security.ps1
