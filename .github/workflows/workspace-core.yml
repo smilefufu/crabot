@@ -10,6 +10,8 @@ on:
       - 'crabot-admin/src/workspace-finalization-web.ts'
       - 'crabot-core/src/index.ts'
       - 'crabot-core/src/module-manager-lifecycle.test.ts'
+      - 'crabot-core/src/module-runtime-registry.ts'
+      - 'crabot-core/src/module-runtime-registry.test.ts'
       - 'crabot-core/src/test-fixtures/uv-python-sleeper.py'
       - 'crabot-core/src/test-fixtures/workspace-config-admin.cjs'
       - 'crabot-agent/src/core/workspace-relocation-*.ts'
@@ -88,7 +90,7 @@ jobs:
       - name: Original lifecycle and maintenance regressions
         if: matrix.suite == 'finite'
         working-directory: crabot-core
-        run: node node_modules/vitest/vitest.mjs run src/module-manager-lifecycle.test.ts src/module-manager-health.test.ts src/module-manager-advanced.test.ts src/workspace-maintenance.test.ts src/workspace-module-scope.test.ts --maxWorkers=1 --minWorkers=1
+        run: node node_modules/vitest/vitest.mjs run src/module-manager-lifecycle.test.ts src/module-runtime-registry.test.ts src/module-manager-health.test.ts src/module-manager-advanced.test.ts src/workspace-maintenance.test.ts src/workspace-module-scope.test.ts --maxWorkers=1 --minWorkers=1
       - name: Actual fixed job launch and technical health without business onStart
         if: ${{ matrix.suite == 'finite' && !cancelled() && steps.compile.outcome == 'success' }}
         working-directory: crabot-core

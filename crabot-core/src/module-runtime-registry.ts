@@ -50,6 +50,7 @@ interface RecordSpawnInput {
 
 interface RecoverOrphansInput {
   moduleId?: string
+  runtimeIds?: ReadonlySet<string>
   currentRuntimeIds: ReadonlySet<string>
   gracefulTimeoutMs: number
 }
@@ -322,10 +323,12 @@ export class ModuleRuntimeRegistry {
   }
 
   async recoverOrphans(input: RecoverOrphansInput): Promise<void> {
+    const runtimeIds = input.runtimeIds === undefined ? undefined : new Set(input.runtimeIds)
     const records = await this.listRecords()
     for (const record of records) {
       if (record.instance_id !== this.getInstanceId()) continue
       if (input.moduleId !== undefined && record.module_id !== input.moduleId) continue
+      if (runtimeIds !== undefined && !runtimeIds.has(record.runtime_id)) continue
       if (input.currentRuntimeIds.has(record.runtime_id)) continue
 
       const currentIdentity = await this.probeStartIdentity(record.root_pid)

@@ -143,6 +143,35 @@ describe('ModuleRuntimeRegistry', () => {
     expect(await registry.listRecords()).toEqual([])
   })
 
+  it('limits an explicit recovery scope to its original runtime ids without touching same-name outsiders', async () => {
+    const identities = new Map<number, string | null>([[101, 'start-101'], [102, 'start-102'], [103, 'start-103']])
+    const { registry, terminateTree } = makeRegistry(identities)
+    await record(registry, 'runtime-a', 'crabot-agent', 101, 19003)
+    await record(registry, 'runtime-b', 'crabot-agent', 102, 19003)
+    await record(registry, 'runtime-current', 'crabot-agent', 103, 19003)
+    const probe = vi.spyOn(registry as any, 'probeStartIdentity')
+    const scope = new Set(['runtime-a', 'runtime-current'])
+    const list = registry.listRecords.bind(registry)
+    vi.spyOn(registry, 'listRecords').mockImplementationOnce(async () => {
+      const records = await list()
+      scope.add('runtime-b')
+      return records
+    })
+    await registry.recoverOrphans({ moduleId: 'crabot-agent', runtimeIds: scope, currentRuntimeIds: new Set(['runtime-current']), gracefulTimeoutMs: 30000 })
+    expect(terminateTree).toHaveBeenCalledTimes(1)
+    expect(probe.mock.calls.map(([pid]) => pid)).toEqual([101])
+    expect(terminateTree).toHaveBeenCalledWith(101, expect.objectContaining({ requireOwnedProcess: true }))
+    expect((await registry.listRecords()).map(item => item.runtime_id)).toEqual(['runtime-b', 'runtime-current'])
+  })
+
+  it('an empty explicit recovery scope preserves every runtime', async () => {
+    const { registry, terminateTree } = makeRegistry(new Map([[101, 'start-101']]))
+    await record(registry, 'runtime-a', 'crabot-agent', 101, 19003)
+    await registry.recoverOrphans({ runtimeIds: new Set(), currentRuntimeIds: new Set(), gracefulTimeoutMs: 30000 })
+    expect(terminateTree).not.toHaveBeenCalled()
+    expect((await registry.listRecords()).map(item => item.runtime_id)).toEqual(['runtime-a'])
+  })
+
   it('preserves a runtime owned by the current MM', async () => {
     const identities = new Map<number, string | null>([[201, 'start-201']])
     const { registry, terminateTree } = makeRegistry(identities)
