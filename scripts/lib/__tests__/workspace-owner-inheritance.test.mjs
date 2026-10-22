@@ -68,6 +68,29 @@ for (const mutation of ['named stream', 'integrity label']) test('private Window
     await assert.rejects(verifyWorkspaceRelocationCopy(f.source, f.target, { metadataCompatibility: policy }), { code: 'CRABOT_FILE_METADATA' })
   } finally { for (const pin of pins.reverse()) native.releaseDirectoryPin(pin) }
 })
+test('Windows compatibility refuses an actual audit ACE rather than treating a filtered descriptor as absent SACL', windows, async t => {
+  const f = fixture(t), pins = [f.source, f.target, path.dirname(f.target)].map(directory => native.pinDirectory(directory))
+  try {
+    await copyWorkspaceTreePinned(...pins, { metadataCompatibility: policy, journal: {
+      async register() { return { dispatch: 'dispatch' } }, async permit() { return { dispatch: 'dispatch' } }, async complete() {},
+    } })
+    const copy = path.join(f.target, 'original.txt')
+    // Only this separate CI fixture process may use its audit privilege, never the product caller.
+    execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `
+$ErrorActionPreference='Stop'
+$sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User
+$acl=Get-Acl -LiteralPath $env:CRABOT_TEST_FILE -Audit
+$rule=New-Object System.Security.AccessControl.FileSystemAuditRule($sid,[System.Security.AccessControl.FileSystemRights]::ReadData,[System.Security.AccessControl.AuditFlags]::Success)
+$acl.AddAuditRule($rule)
+Set-Acl -LiteralPath $env:CRABOT_TEST_FILE -AclObject $acl
+$actual=Get-Acl -LiteralPath $env:CRABOT_TEST_FILE -Audit
+if(@($actual.GetAuditRules($true,$true,[System.Security.Principal.SecurityIdentifier])|Where-Object {$_.IdentityReference -eq $sid -and ($_.AuditFlags -band [System.Security.AccessControl.AuditFlags]::Success)}).Count -lt 1){throw 'Actual fixture audit ACE is missing'}
+`], { env: { ...process.env, CRABOT_TEST_FILE: f.file }, stdio: 'pipe' })
+    assert.equal(native.compareWorkspaceOwnerInheritance(f.file, copy), false)
+    await assert.rejects(inspectWorkspaceCopySource(f.source, { metadataCompatibility: policy }), { code: 'WORKSPACE_COPY_ACL_UNSUPPORTED' })
+    assert.equal(fs.readFileSync(f.file, 'utf8'), 'original retained bytes')
+  } finally { for (const pin of pins.reverse()) native.releaseDirectoryPin(pin) }
+})
 for (const kind of ['extra user', 'deny', 'restricted', 'file inheritance flags', 'different user']) {
   test('Windows compatibility preflight blocks ' + kind + ' before any copy or source mutation', windows, async t => {
     const f = fixture(t), owner = native.inspectProcess(process.pid).owner
