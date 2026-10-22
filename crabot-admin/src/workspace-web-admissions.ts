@@ -36,6 +36,13 @@ export class WorkspaceWebAdmissions {
     return this.drain()
   }
 
+  /** Internal prepared-job completion only; the caller owns current fixed-job authorization. */
+  reopen(): void {
+    assertWorkspaceExecutionAllowed(this.dataRoot)
+    if (this.pending.size) throw failure()
+    this.closed = false
+  }
+
   private async drain(): Promise<void> {
     while (this.pending.size) await Promise.all([...this.pending])
     if (!workspaceMaintenancePending(this.dataRoot)) throw failure()

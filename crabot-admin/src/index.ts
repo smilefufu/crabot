@@ -1,3 +1,4 @@
+import { assertWorkspaceExecutionAllowed } from 'crabot-shared'
 import { createWorkspaceFinalizationWeb } from './workspace-finalization-web.js'
 import { parseFriendPermissionRecords, serializeFriendPermissionRecords } from './friend-permission-store.js'
 import { WorkspaceExecutionInventorySchema, WorkspaceIdSchema } from 'crabot-client'
@@ -1022,6 +1023,7 @@ export class AdminModule extends ModuleBase {
     this.registerMethod('verify_workspace_relocation_request', this.handleVerifyWorkspaceRelocationRequest.bind(this))
     this.registerMethod('quiesce_workspace_relocation_web', this.handleQuiesceWorkspaceRelocationWeb.bind(this))
     this.registerMethod('prepare_workspace_relocation_completion', (params, context) => this.workspaceFinalizationAccess().prepare(params, context?.authorizationBearer))
+    this.registerMethod('resume_workspace_relocation_web', (params, context) => this.workspaceFinalizationAccess().resume(params, context?.authorizationBearer))
 
     // Schedule 管理
     this.registerMethod('create_schedule', this.handleCreateSchedule.bind(this))
@@ -1695,7 +1697,10 @@ export class AdminModule extends ModuleBase {
     return this.workspaceFinalizationWeb ??= createWorkspaceFinalizationWeb({ dataDir: path.resolve(this.adminConfig.data_dir, '..'),
       moduleManagerPort: this.rpcClient.moduleManagerTargetPort,
       runtimeIdentity: () => ({ instance_id: process.env.CRABOT_INSTANCE_ID, module_id: this.config.moduleId, runtime_id: process.env.CRABOT_MODULE_RUNTIME_ID }),
-      quiesce: () => this.quiesceWorkspaceWebAccess() })
+      quiesce: () => this.quiesceWorkspaceWebAccess(), resume: () => {
+        assertWorkspaceExecutionAllowed(path.resolve(this.adminConfig.data_dir, '..'))
+        this.workspaceService.resumeScanning(); this.workspaceWebAccess().reopen()
+      } })
   }
 
   private workspaceWebAccess(): WorkspaceWebAdmissions {

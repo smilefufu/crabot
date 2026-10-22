@@ -1908,6 +1908,8 @@ describe('normal fixed-job Admin completion preparation', () => {
       expect(result.completion_sha256).toBe(sha256CanonicalJson(archived))
       expect(records.readWorkspaceRelocationFinalizing(f.data, f.params.intent_id).completion_sha256).toBe(result.completion_sha256)
       const grant = f.manager.workspaceFinalizationGrant
+      await expect(records.releaseWorkspaceRelocationJob({ dataDir: f.data, id: f.params.intent_id, verify: async () => {} })).rejects.toMatchObject({ code: 'WORKSPACE_RELOCATION_INVALID' })
+      expect(records.readWorkspaceRelocationReleased(f.data, f.params.intent_id)).toBeNull()
       expect(typeof grant.token).toBe('string')
       expect(JSON.stringify(result)).not.toContain(grant.token)
       const prepare = (input: unknown, token?: string) => f.manager.withCurrentAdminRpc(30000, (rpc: any) =>
@@ -1947,12 +1949,95 @@ describe('normal fixed-job Admin completion preparation', () => {
       await expect(f.manager.prepareWorkspaceRelocationCompletion(f.params)).rejects.toMatchObject({ code: 'FORBIDDEN' })
       await expect(prepare(request, grant.token)).rejects.toMatchObject({ remote_code: 'FORBIDDEN' })
       await expect(f.manager.handleVerifyWorkspaceRelocationFinalization(params, { authorizationBearer: grant.token })).rejects.toMatchObject({ code: 'FORBIDDEN' })
+      await f.manager.stop()
+      expect(grant.child.connected).toBe(false)
+      expect(records.readWorkspaceRelocationFinalizing(f.data, f.params.intent_id).completion_sha256).toBe(result.completion_sha256)
     } finally {
       const coordinator = f.manager.workspaceValidationProof?.result.coordinator
       if (coordinator?.connected) { const ended = once(coordinator, 'exit'); coordinator.disconnect(); await ended }
       locks.releaseCliLock(lock); await f.cleanup()
     }
   }, process.platform === 'win32' ? 600000 : 120000)
+})
+
+
+// This stage requires the new Native file move, rebuilt only in isolated CI.
+describe.skipIf(process.env.GITHUB_ACTIONS !== 'true')('fixed terminal release and current Admin resume', () => {
+  it.each(['healthy', 'bad prepared result', 'unhealthy runtime', 'existing release fact', 'lost acknowledgement', 'new maintenance after effect'])(
+    'does not replay or reopen an unconfirmed result: %s', async mode => {
+      const f = await fixture({ actualAgent: true, actualAdmin: true, validationHealth: 'healthy', processLifetimeMs: process.platform === 'win32' ? 900000 : 300000 })
+      const locks = require('../../scripts/lib/cli-lock.mjs'), records = require('../../scripts/lib/workspace-relocation-intent.mjs')
+      const native = require('../../scripts/lib/process-identity.cjs'), maintenance = require('../../scripts/lib/workspace-maintenance.cjs')
+      const lock = await locks.acquireWorkspaceRelocationLock(f.data, f.params.intent_id)
+      let replySpy: ReturnType<typeof vi.spyOn> | undefined
+      try {
+        expect(typeof native.renameFileNoReplace).toBe('function')
+        const prepared = await f.manager.prepareWorkspaceRelocationCompletion(f.params, 'fixture-human'), grant = f.manager.workspaceFinalizationGrant
+        const receipt = path.join(f.data, 'workspace-control/relocation-history', f.params.intent_id + '.released.json')
+        const fence = path.join(f.data, 'workspace-control/relocation-finalizing.json'), original = await fs.readFile(fence)
+        const request = { intent_id: prepared.intent_id, launch_id: prepared.launch_id, completion_sha256: prepared.completion_sha256 }
+        const resume = (token = grant.token, input: unknown = request) => f.manager.withCurrentAdminRpc(30000, (rpc: any) =>
+          rpc.call('resume_workspace_relocation_web', input, { authorizationBearer: token }))
+        await expect(resume()).rejects.toMatchObject({ remote_code: 'SERVICE_UNAVAILABLE' })
+        if (mode === 'bad prepared result') {
+          await expect(grant.release({ ...prepared, completion_sha256: '0'.repeat(64) })).rejects.toBeDefined()
+        } else {
+          if (mode === 'unhealthy runtime') await fs.writeFile(path.join(f.data, 'validation-health-unhealthy'), 'current runtime degraded')
+          if (mode === 'existing release fact') await fs.writeFile(receipt, 'unrelated retained content')
+          if (mode === 'lost acknowledgement' || mode === 'new maintenance after effect') {
+            const child = grant.child, emit = child.emit.bind(child)
+            replySpy = vi.spyOn(child, 'emit').mockImplementation((event: string, ...args: unknown[]) => {
+              const message = args[0] as any
+              if (event === 'message' && message?.kind === 'workspace_relocation_release_reply' && message.ok) {
+                if (mode === 'lost acknowledgement') return emit(event, { ...message, ok: false, result: null })
+                require('node:fs').mkdirSync(path.join(f.data, 'workspace-control/relocation-active'), { mode: 0o700 })
+              }
+              return emit(event, ...args)
+            })
+          }
+          if (mode === 'healthy') {
+            await grant.release(prepared)
+            expect(grant.phase).toBe('released'); expect(maintenance.workspaceMaintenancePending(f.data)).toBe(false)
+            const result = await resume()
+            expect(result).toEqual({ resumed: true, ...request, intent_sha256: prepared.intent_sha256, launch_sha256: prepared.launch_sha256 })
+            const create = await fetch(`http://127.0.0.1:${f.port}/api/workspaces`, { method: 'POST', headers: { Authorization: 'Bearer fixture-human', 'Content-Type': 'application/json' },
+              body: JSON.stringify({ workspace_id: randomUUID(), name: 'after relocation' }) })
+            expect(create.status).toBe(200)
+            const created = await create.json() as any
+            expect(created.workspace.root.startsWith(path.join(records.readWorkspaceRelocationArchivedState(f.data, f.params.intent_id).intent.target, 'projects') + path.sep)).toBe(true)
+            expect((await fetch(`http://127.0.0.1:${f.port}/api/workspaces/default/usage/refresh`, { method: 'POST', headers: { Authorization: 'Bearer fixture-human', 'Content-Type': 'application/json' }, body: '{}' })).status).toBe(202)
+            await expect(resume()).resolves.toEqual(result)
+            await expect(resume('fixture-human')).rejects.toMatchObject({ remote_code: 'FORBIDDEN' })
+            await expect(resume(grant.token, { ...request, path: f.root })).rejects.toMatchObject({ remote_code: 'INVALID_PARAMS' })
+            await expect(records.verifyWorkspaceRelocationReleasedCapabilities({ dataDir: f.data, id: f.params.intent_id, verify: async () => grant.verify() })).resolves.toMatchObject({ completion_sha256: prepared.completion_sha256 })
+            await fs.mkdir(path.join(f.data, 'workspace-control/relocation-active'), { mode: 0o700 })
+            expect(records.readWorkspaceRelocationReleased(f.data, f.params.intent_id).completion_sha256).toBe(prepared.completion_sha256)
+            await expect(resume()).rejects.toMatchObject({ remote_code: 'SERVICE_UNAVAILABLE' })
+          } else await expect(grant.release(prepared)).rejects.toBeDefined()
+        }
+        if (['bad prepared result', 'unhealthy runtime', 'existing release fact'].includes(mode)) {
+          expect(await fs.readFile(fence)).toEqual(original); expect(maintenance.workspaceMaintenancePending(f.data)).toBe(true)
+          if (mode === 'existing release fact') expect(await fs.readFile(receipt, 'utf8')).toBe('unrelated retained content')
+        }
+        if (mode === 'lost acknowledgement' || mode === 'new maintenance after effect') {
+          expect(records.readWorkspaceRelocationReleased(f.data, f.params.intent_id).completion_sha256).toBe(prepared.completion_sha256)
+          expect(grant.phase).toBe('prepared')
+          await expect(resume()).rejects.toMatchObject({ remote_code: 'SERVICE_UNAVAILABLE' })
+        }
+        if (mode !== 'healthy') {
+          const create = await fetch(`http://127.0.0.1:${f.port}/api/workspaces`, { method: 'POST', headers: { Authorization: 'Bearer fixture-human', 'Content-Type': 'application/json' }, body: '{}' })
+          expect(create.status).toBe(503)
+        }
+        expect((await fetch(`http://127.0.0.1:${f.port}/api/friends`, { headers: { Authorization: 'Bearer fixture-human' } })).status).toBe(200)
+        expect(JSON.parse(await fs.readFile(path.join(f.data, 'agent/worker-ledgers/channel%3A%3Asession.json'), 'utf8')).workers[0].task.status).toBe('closed')
+        expect(JSON.stringify(await f.calls())).not.toContain(grant.token)
+      } finally {
+        replySpy?.mockRestore(); f.manager.workspaceFinalizationGrant?.close()
+        const child = f.manager.workspaceValidationProof?.result.coordinator
+        if (child?.connected) { const ended = once(child, 'exit'); child.disconnect(); await ended }
+        locks.releaseCliLock(lock); await f.cleanup()
+      }
+    }, process.platform === 'win32' ? 600000 : 120000)
 })
 
 

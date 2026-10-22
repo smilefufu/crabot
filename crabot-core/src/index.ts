@@ -165,6 +165,8 @@ interface WorkspaceFinalizationGrant {
   launch: { launch_id: string; parent: WorkerProcessIdentity; process: WorkerProcessIdentity }
   child: ChildProcess
   verify: () => void
+  release: (prepared: PrepareWorkspaceRelocationCompletionResult) => Promise<unknown>
+  close: () => void
 }
 
 interface WorkspaceWorkerStopJournal {
@@ -459,6 +461,11 @@ export class ModuleManager {
 
     for (const timer of this.restartTimers.values()) clearTimeout(timer)
     this.restartTimers.clear()
+    if (this.workspaceFinalizationGrant) {
+      this.workspaceFinalizationGrant.revoked = true
+      this.workspaceFinalizationGrant.close()
+      await this.closeWorkspaceCoordinatorChannel(this.workspaceFinalizationGrant.child)
+    }
 
     // Drain operations accepted before shutdown. startModuleProcess rechecks
     // the terminal flag immediately before spawn, so a paused start cannot
@@ -1933,7 +1940,7 @@ export class ModuleManager {
     }
     const pending = Promise.resolve().then(async (): Promise<PrepareWorkspaceRelocationCompletionResult> => {
       const failure = () => Object.assign(new Error('迁移完成准备尚未确认，已保留维护保护。'), { code: 'SERVICE_UNAVAILABLE' })
-      let child: ChildProcess | undefined, terminal: { archive(): Promise<unknown>; close(): void } | undefined
+      let child: ChildProcess | undefined, terminal: { archive(): Promise<unknown>; release(prepared: PrepareWorkspaceRelocationCompletionResult): Promise<unknown>; close(): void } | undefined
       try {
         const health = await this.verifyWorkspaceRelocationValidationHealth(request, bearer), proof = this.workspaceValidationProof
         child = health.coordinator
@@ -1952,7 +1959,16 @@ export class ModuleManager {
         const adminRuntimeId = adminState.runtimeId, adminPort = adminRuntime.port, adminPid = admin.pid
         let finalizingHash: string | undefined
         const grant: WorkspaceFinalizationGrant = { token: crypto.randomBytes(32).toString('base64url'), revoked: false, phase: 'archiving', request,
-          completionHash, launch, child, verify: () => {
+          completionHash, launch, child,
+          release: async prepared => {
+            grant.verify()
+            if (grant.phase !== 'prepared' || !terminal) throw failure()
+            const result = await terminal.release(prepared)
+            const expected = { intent_id: request.intent_id, completion_sha256: completionHash, finalizing_sha256: finalizingHash }
+            if (sha256CanonicalJson(result) !== sha256CanonicalJson(expected)) throw failure()
+            grant.phase = 'released'; grant.verify()
+            return Object.freeze(expected)
+          }, close: () => terminal?.close(), verify: () => {
             const forbidden = () => { grant.revoked = true; return Object.assign(new Error('Finalization role changed'), { code: 'FORBIDDEN' }) }
             if (this.workspaceFinalizationGrant !== grant || grant.revoked || this.isShuttingDown || !child!.connected || child!.exitCode !== null || child!.signalCode !== null
               || this.processes.get('admin-web') !== admin || this.childStates.get(admin) !== adminState || this.modules.get('admin-web') !== adminRuntime
@@ -1967,6 +1983,8 @@ export class ModuleManager {
             if (grant.phase !== 'archiving' && grant.phase !== 'released') {
               const fence = records.readWorkspaceRelocationFinalizing(this.dataDir, request.intent_id)
               if (!fence || fence.completion_sha256 !== completionHash || sha256CanonicalJson(fence) !== finalizingHash) throw failure()
+            } else if (grant.phase === 'released') {
+              if (workspaceMaintenancePending(this.dataDir) || sha256CanonicalJson(records.readWorkspaceRelocationReleased(this.dataDir, request.intent_id)) !== finalizingHash) throw failure()
             }
           } }
         if (this.workspaceFinalizationGrant) this.workspaceFinalizationGrant.revoked = true
@@ -1991,7 +2009,7 @@ export class ModuleManager {
         if (this.workspaceFinalizationGrant?.request.intent_id === request.intent_id) this.workspaceFinalizationGrant.revoked = true
         await this.closeWorkspaceCoordinatorChannel(child)
         throw Object.assign(failure(), { cause })
-      } finally { terminal?.close() }
+      } finally { if (this.workspaceFinalizationGrant?.phase !== 'prepared') terminal?.close() }
     })
     this.workspaceFinalizationPreparation = { fingerprint, pending }
     return pending

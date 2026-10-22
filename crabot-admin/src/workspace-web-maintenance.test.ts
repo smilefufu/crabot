@@ -38,6 +38,26 @@ async function fixture(scan?: ConstructorParameters<typeof WorkspaceService>[0][
 }
 
 describe('Admin workspace maintenance HTTP admission', () => {
+  it('reopens only drained file admission and supports new scans without restarting Admin', async () => {
+    const f = await fixture(), admission = f.admin.workspaceWebAccess()
+    await f.fence('relocation-finalizing.json'); await f.admin.quiesceWorkspaceWebAccess()
+    const create = () => fetch(f.endpoint + '/api/workspaces', { method: 'POST', headers: f.headers,
+      body: JSON.stringify({ workspace_id: randomUUID(), name: 'new project after completed relocation' }) })
+    expect(() => admission.reopen()).toThrow()
+    expect((await create()).status).toBe(503)
+    expect((await fetch(f.endpoint + '/api/friends', { headers: f.headers })).status).toBe(200)
+    await fs.unlink(path.join(f.root, 'workspace-control/relocation-finalizing.json'))
+    expect((await create()).status).toBe(503)
+    f.service.resumeScanning(); admission.reopen()
+    expect((await create()).status).toBe(200)
+    expect((await f.service.refresh('default')).workspace_id).toBe('default')
+    await f.fence('relocation-finalizing.json')
+    expect(() => admission.reopen()).toThrow()
+    expect((await create()).status).toBe(503)
+    expect(f.admin.workspaceWebAccess()).toBe(admission)
+    expect(f.errors).toEqual([])
+  })
+
   it.each(['relocation.json', 'relocation-coordinator-ready.json', 'relocation-module-stop-submission.json'])('blocks new writes under %s while authentication and management reads remain online', async name => {
     const f = await fixture(), id = randomUUID(), before = await f.service.list()
     await f.fence(name)

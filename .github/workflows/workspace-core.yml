@@ -121,7 +121,7 @@ jobs:
       - name: Actual archived workspace records and bounded terminal failures
         if: ${{ matrix.suite == 'archive' && !cancelled() && steps.compile.outcome == 'success' }}
         working-directory: crabot-core
-        run: node node_modules/vitest/vitest.mjs run src/workspace-human-verification.test.ts --testNamePattern='fixed job archive storage handoff|normal fixed-job Admin completion preparation' --maxWorkers=1 --minWorkers=1
+        run: node node_modules/vitest/vitest.mjs run src/workspace-human-verification.test.ts --testNamePattern='fixed job archive storage handoff|normal fixed-job Admin completion preparation|fixed terminal release and current Admin resume' --maxWorkers=1 --minWorkers=1
       - name: Prepare the actual Memory Python environment only in isolated CI
         if: ${{ matrix.suite == 'business' && !cancelled() && steps.compile.outcome == 'success' }}
         run: uv sync --project crabot-memory --frozen --python 3.13
