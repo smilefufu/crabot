@@ -68,8 +68,9 @@ for (const stage of [
   'identity-process-token', 'identity-token-user', 'identity-owner-sid', 'identity-parent-snapshot',
 ]) test('a rejected pinned observation preserves the exact native stage without a fallback: ' + stage, () => {
   const f = fixture(); let calls = 0
-  f.api.captureProcessTreeGeneration = () => { calls++; throw Object.assign(new Error('Native observation denied'), { code: 'CRABOT_PROCESS_SCOPE', stage }) }
+  const denied = Object.assign(new Error('Native observation denied (Windows error 299)'), { code: 'CRABOT_PROCESS_SCOPE', stage })
+  f.api.captureProcessTreeGeneration = () => { calls++; throw denied }
   f.api.listChildProcessIds = () => { assert.fail('A rejected pinned scope must not fall back to a weaker snapshot') }
-  assert.throws(() => captureSpawnedProcessTree(f.child, f.api), { code: 'CRABOT_PROCESS_SCOPE', stage })
+  assert.throws(() => captureSpawnedProcessTree(f.child, f.api), error => error.code === denied.code && error.stage === stage && error.cause?.cause === denied)
   assert.equal(calls, 1)
 })

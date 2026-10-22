@@ -100,10 +100,11 @@ static Identity Inspect(int pid, const char** stage = nullptr) {
     return OpenProcessToken(process, TOKEN_QUERY, &token) != FALSE;
   };
   if (!identify()) {
+    const DWORD error = GetLastError();
     // An opened process can terminate between queries; only an OS-signalled
     // process is classified as exited. Access failures on live processes still fail closed.
     if (WaitForSingleObject(process, 0) == WAIT_OBJECT_0) { CloseHandle(process); return {}; }
-    CloseHandle(process); throw std::runtime_error("Cannot inspect process identity");
+    CloseHandle(process); throw std::runtime_error("Cannot inspect process identity (Windows error " + std::to_string(error) + ")");
   }
   if (stage) *stage = "identity-token-size";
   DWORD size = 0; GetTokenInformation(token, TokenUser, nullptr, 0, &size);

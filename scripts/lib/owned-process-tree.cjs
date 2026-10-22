@@ -1,7 +1,7 @@
 // A read-only ancestry observation rooted in already verified launch identities.
 // It does not send signals or prove that a whole shutdown window is complete.
 const native = require('./process-identity.cjs')
-const fail = stage => { throw Object.assign(new Error('执行进程范围无法完整核验，已保留文件与维护保护。'), { code: 'CRABOT_PROCESS_SCOPE', stage }) }
+const fail = (stage, cause) => { throw Object.assign(new Error('执行进程范围无法完整核验，已保留文件与维护保护。'), { code: 'CRABOT_PROCESS_SCOPE', stage, ...(cause ? { cause } : {}) }) }
 const validPid = pid => Number.isInteger(pid) && pid > 0 && pid <= 2147483647
 const linuxBirth = /^([0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12})\n?:([0-9]+)$/
 const valid = item => item && validPid(item.pid) && (item.parent === 0 || validPid(item.parent))
@@ -101,7 +101,7 @@ function captureOwnedProcessTree(roots, api = native) {
       result.push(Object.freeze({ pid, parent, started, owner, executable }))
     }
     return Object.freeze(result.sort((a, b) => a.pid - b.pid))
-  } catch (error) { fail(typeof error?.stage === 'string' ? error.stage : stage) }
+  } catch (error) { fail(typeof error?.stage === 'string' ? error.stage : stage, error) }
 }
 // Re-observe already verified snapshots. A departed member remains a fact, not a new live root.
 function recaptureObservedProcessScope(items, api = native) {
