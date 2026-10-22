@@ -8,6 +8,8 @@ on:
       - 'crabot-memory/schema_version'
       - 'crabot-memory/pyproject.toml'
       - 'crabot-memory/uv.lock'
+      - 'crabot-admin/src/workspace-recovery-auth.ts'
+      - 'crabot-admin/src/workspace-finalization-web.ts'
       - 'crabot-core/src/index.ts'
       - 'crabot-core/src/module-manager-lifecycle.test.ts'
       - 'crabot-core/src/test-fixtures/uv-python-sleeper.py'
@@ -34,6 +36,8 @@ on:
       - '.github/workflows/workspace-core.yml'
   pull_request:
     paths:
+      - 'crabot-admin/src/workspace-recovery-auth.ts'
+      - 'crabot-admin/src/workspace-finalization-web.ts'
       - 'crabot-core/src/index.ts'
       - 'crabot-core/src/module-manager-lifecycle.test.ts'
       - 'crabot-core/src/test-fixtures/uv-python-sleeper.py'
@@ -69,13 +73,13 @@ defaults:
 
 jobs:
   core:
-    name: ${{ matrix.suite == 'business' && 'Business workspace runtime' || matrix.suite == 'archive' && 'Archived workspace records' || 'Fixed workspace lifecycle' }} ${{ matrix.os }}
+    name: ${{ matrix.suite == 'business' && 'Business workspace runtime' || matrix.suite == 'archive' && 'Archived workspace records' || matrix.suite == 'completion' && 'Workspace job completion' || 'Fixed workspace lifecycle' }} ${{ matrix.os }}
     timeout-minutes: ${{ matrix.os == 'windows-latest' && 45 || 25 }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-22.04, macos-14, macos-15-intel, windows-latest]
-        suite: [finite, business, archive]
+        suite: [finite, business, archive, completion]
     runs-on: ${{ matrix.os }}
     concurrency:
       group: workspace-core-${{ github.ref }}-${{ matrix.os }}-${{ matrix.suite }}
@@ -121,7 +125,11 @@ jobs:
       - name: Actual archived workspace records and bounded terminal failures
         if: ${{ matrix.suite == 'archive' && !cancelled() && steps.compile.outcome == 'success' }}
         working-directory: crabot-core
-        run: node node_modules/vitest/vitest.mjs run src/workspace-human-verification.test.ts --testNamePattern='fixed job archive storage handoff|normal fixed-job Admin completion preparation|fixed terminal release and current Admin resume' --maxWorkers=1 --minWorkers=1
+        run: node node_modules/vitest/vitest.mjs run src/workspace-human-verification.test.ts --testNamePattern='fixed job archive storage handoff|normal fixed-job Admin completion preparation' --maxWorkers=1 --minWorkers=1
+      - name: Actual terminal release, business reopening and repeated jobs
+        if: ${{ matrix.suite == 'completion' && !cancelled() && steps.compile.outcome == 'success' }}
+        working-directory: crabot-core
+        run: node node_modules/vitest/vitest.mjs run src/workspace-human-verification.test.ts --testNamePattern='fixed terminal release and current Admin resume' --maxWorkers=1 --minWorkers=1
       - name: Prepare the actual Memory Python environment only in isolated CI
         if: ${{ matrix.suite == 'business' && !cancelled() && steps.compile.outcome == 'success' }}
         run: uv sync --project crabot-memory --frozen --python 3.13

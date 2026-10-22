@@ -35,6 +35,10 @@ import {
   type PrepareWorkspaceRelocationWorkerStopsResult,
   type CompleteWorkspaceRelocationWorkerStopsParams,
   type CompleteWorkspaceRelocationWorkerStopsResult,
+  type VerifyWorkspaceRelocationRecoveryAdmissionParams,
+  type VerifyWorkspaceRelocationRecoveryAdmissionResult,
+  type VerifyWorkspaceRelocationRecoveryRequestParams,
+  type VerifyWorkspaceRelocationRecoveryRequestResult,
   type VerifyWorkspaceRelocationRequestParams,
   type VerifyWorkspaceRelocationRequestResult,
   type QuiesceWorkspaceRelocationWebParams,
@@ -89,6 +93,14 @@ interface WorkspaceModuleRestorationGuard { assertCurrent: () => void; verify: (
 type WorkspaceModuleDefinitions = ReadonlyMap<ModuleId, { runtime: ModuleRuntime; hash: string; overrides: string }>
 const workspaceModuleProgressFields = new Set(['status', 'pid', 'version', 'protocol_version', 'registered_at', 'last_health_check', 'last_health_status', 'health_check_failures', 'restart_history', 'schema_mismatch', '_pendingBearer', '_pendingCutover'])
 const workspaceModuleDefinition = (runtime: ModuleRuntime) => Object.fromEntries(Object.entries(runtime).filter(([key]) => !workspaceModuleProgressFields.has(key)))
+
+interface WorkspaceRecoveryAdmission {
+  request: VerifyWorkspaceRelocationRecoveryRequestParams
+  result: VerifyWorkspaceRelocationRecoveryRequestResult
+  accepted: boolean
+  verify: () => Promise<void>
+  close: () => void
+}
 
 interface MethodHandler<P = unknown, R = unknown> {
   (params: P, context?: RpcHandlerContext): Promise<R> | R
@@ -260,6 +272,8 @@ export class ModuleManager {
   private workspaceWorkerClosure?: { fingerprint: string; pending: Promise<WorkspaceWorkerClosureResult> }
   private workspaceRootSelection?: { fingerprint: string; pending: Promise<WorkspaceRootSelectionResult> }
   private workspaceValidationLaunch?: { fingerprint: string; pending: Promise<WorkspaceValidationLaunchResult> }
+  private workspaceRecoveryAdmission?: WorkspaceRecoveryAdmission
+  private workspaceRecoveryAdmissionPreparation?: { fingerprint: string; bearerHash: string; pending: Promise<WorkspaceRecoveryAdmission> }
   private workspaceFinalizationGrant?: WorkspaceFinalizationGrant
   private workspaceFinalizationPreparation?: { fingerprint: string; pending: Promise<PrepareWorkspaceRelocationCompletionResult> }
   private workspaceFinalizationResume?: { fingerprint: string; pending: Promise<ResumeWorkspaceRelocationWebResult> }
@@ -317,6 +331,7 @@ export class ModuleManager {
     // 注册所有方法处理器
     this.registerMethod('register', this.handleRegisterUnauthenticated.bind(this))
     this.registerMethod('register_core_agent', this.handleRegisterCoreAgent.bind(this))
+    this.registerMethod('verify_workspace_relocation_recovery_admission', this.handleVerifyWorkspaceRelocationRecoveryAdmission.bind(this))
     this.registerMethod('verify_workspace_relocation_finalization', this.handleVerifyWorkspaceRelocationFinalization.bind(this))
     this.registerMethod('verify_workspace_relocation_runtime', this.handleVerifyWorkspaceRelocationRuntime.bind(this))
     this.registerMethod('verify_workspace_relocation_coordinator', this.handleVerifyWorkspaceRelocationCoordinator.bind(this))
@@ -471,6 +486,7 @@ export class ModuleManager {
 
     for (const timer of this.restartTimers.values()) clearTimeout(timer)
     this.restartTimers.clear()
+    this.workspaceRecoveryAdmission?.close()
     if (this.workspaceFinalizationGrant) {
       this.workspaceFinalizationGrant.revoked = true
       this.workspaceFinalizationGrant.close()
@@ -1915,6 +1931,83 @@ export class ModuleManager {
     })
     this.workspaceValidationHealth = { fingerprint, pending }
     return pending
+  }
+
+  /** New human admission only; neither the old normal role nor this mutex grants recovery effects. */
+  private prepareWorkspaceRelocationRecoveryAdmission(request: VerifyWorkspaceRelocationRecoveryRequestParams, bearer?: string): Promise<WorkspaceRecoveryAdmission> {
+    if (!bearer) return Promise.reject(Object.assign(new Error('Current human credential required'), { code: 'UNAUTHORIZED' }))
+    request = Object.freeze({ ...request })
+    const fingerprint = sha256CanonicalJson(request), bearerHash = sha256CanonicalJson(bearer), previous = this.workspaceRecoveryAdmissionPreparation
+    const failure = () => Object.assign(new Error('当前人类冷恢复接纳尚未确认，原维护保护已保留。'), { code: 'SERVICE_UNAVAILABLE' })
+    if (previous) {
+      if (previous.fingerprint !== fingerprint || previous.bearerHash !== bearerHash) return Promise.reject(Object.assign(failure(), { code: 'FORBIDDEN' }))
+      return previous.pending.then(async admission => { await admission.verify(); return admission })
+    }
+    const pending = Promise.resolve().then(async (): Promise<WorkspaceRecoveryAdmission> => {
+      let lock: string | undefined, token: string | undefined, admission: WorkspaceRecoveryAdmission | undefined
+      const locks = require('../../scripts/lib/cli-lock.mjs'), { readWorkspaceRecoveryAdmissionScope } = require('../../scripts/lib/workspace-recovery-admission.mjs')
+      const native = require('../../scripts/lib/process-identity.cjs')
+      try {
+        const scope = readWorkspaceRecoveryAdmissionScope(this.dataDir, request), self = native.inspectProcess(process.pid)
+        if (!self || this.isShuttingDown || this.workspaceRecoveryAdmission) throw failure()
+        lock = await locks.acquireWorkspaceRelocationRecoveryLock(this.dataDir, request.intent_id)
+        token = locks.cliLockToken(lock)
+        if (!token) throw failure()
+        return await this.withCurrentAdminRpc(30000, async (rpc, verifyAdmin) => {
+          const child = this.processes.get('admin-web')!, state = this.childStates.get(child)!, runtimeId = state.runtimeId
+          const result: VerifyWorkspaceRelocationRecoveryRequestResult = { verified: true, ...request,
+            instance_id: this.runtimeRegistry.getInstanceId(), admin_runtime_id: runtimeId, mm_sha256: sha256CanonicalJson(self) }
+          const verify = async () => {
+            const check = () => {
+              if (this.isShuttingDown || this.workspaceRecoveryAdmission !== admission || closed || !lock || !token || locks.cliLockToken(lock) !== token
+                || !native.sameProcess(self, native.inspectProcess(process.pid)) || this.processes.get('admin-web') !== child
+                || this.childStates.get(child) !== state || state.runtimeId !== runtimeId
+                || readWorkspaceRecoveryAdmissionScope(this.dataDir, request).fingerprint !== scope.fingerprint) throw failure()
+            }
+            try { check(); await verifyAdmin(); check() }
+            catch (cause) { admission?.close(); throw cause }
+          }
+          let closed = false
+          admission = { request, result: Object.freeze(result), accepted: false, verify, close: () => {
+            if (closed) return
+            closed = true
+            if (admission) admission.accepted = false
+            if (lock && token && locks.cliLockToken(lock) === token) locks.releaseCliLock(lock)
+            if (this.workspaceRecoveryAdmission === admission) this.workspaceRecoveryAdmission = undefined
+            if (this.workspaceRecoveryAdmissionPreparation?.pending === pending) this.workspaceRecoveryAdmissionPreparation = undefined
+          } }
+          this.workspaceRecoveryAdmission = admission
+          await verify()
+          const response = await rpc.call('verify_workspace_relocation_recovery_request', request, { authorizationBearer: bearer })
+          await verify()
+          if (sha256CanonicalJson(response) !== sha256CanonicalJson(result)) throw failure()
+          admission.accepted = true
+          return admission
+        })
+      } catch (cause) {
+        admission?.close()
+        if (lock && token && locks.cliLockToken(lock) === token) locks.releaseCliLock(lock)
+        if (this.workspaceRecoveryAdmissionPreparation?.pending === pending) this.workspaceRecoveryAdmissionPreparation = undefined
+        const code = (cause as { remote_code?: string; code?: string }).remote_code ?? (cause as { code?: string }).code
+        throw Object.assign(failure(), { ...(code && ['UNAUTHORIZED', 'FORBIDDEN', 'INVALID_PARAMS'].includes(code) ? { code } : {}), cause })
+      }
+    })
+    this.workspaceRecoveryAdmissionPreparation = { fingerprint, bearerHash, pending }
+    return pending
+  }
+
+  private async handleVerifyWorkspaceRelocationRecoveryAdmission(
+    params: VerifyWorkspaceRelocationRecoveryAdmissionParams, context?: RpcHandlerContext,
+  ): Promise<VerifyWorkspaceRelocationRecoveryAdmissionResult> {
+    const bearer = context?.authorizationBearer
+    if (!bearer) throw Object.assign(new Error('Current admission credential required'), { code: 'UNAUTHORIZED' })
+    const admission = this.workspaceRecoveryAdmission, preparation = this.workspaceRecoveryAdmissionPreparation
+    if (!admission || !preparation || sha256CanonicalJson(bearer) !== preparation.bearerHash) throw Object.assign(new Error('No current recovery admission'), { code: 'FORBIDDEN' })
+    await admission.verify()
+    const request = require('../../scripts/lib/workspace-recovery-admission.mjs').parseWorkspaceRecoveryAdmissionRequest(params)
+    if (sha256CanonicalJson(request) !== sha256CanonicalJson(admission.request)) throw Object.assign(new Error('Recovery admission mismatch'), { code: 'FORBIDDEN' })
+    await admission.verify()
+    return admission.result
   }
 
   private async handleVerifyWorkspaceRelocationFinalization(

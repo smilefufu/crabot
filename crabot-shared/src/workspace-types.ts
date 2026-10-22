@@ -228,3 +228,22 @@ export interface CaptureWorkspaceRelocationProcessesParams {
 export interface CaptureWorkspaceRelocationProcessesResult {
   processes: ReadonlyArray<WorkerProcessIdentity>
 }
+
+export interface VerifyWorkspaceRelocationRecoveryRequestParams {
+  intent_id: string
+  recovery_id: string
+  completion_sha256: string
+  finalizing_sha256: string
+}
+export interface VerifyWorkspaceRelocationRecoveryRequestResult {
+  verified: true
+  intent_id: string
+  recovery_id: string
+  completion_sha256: string
+  finalizing_sha256: string
+  instance_id: string
+  admin_runtime_id: string
+  mm_sha256: string
+}
+export type VerifyWorkspaceRelocationRecoveryAdmissionParams = VerifyWorkspaceRelocationRecoveryRequestParams
+export type VerifyWorkspaceRelocationRecoveryAdmissionResult = VerifyWorkspaceRelocationRecoveryRequestResult

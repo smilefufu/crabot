@@ -192,3 +192,18 @@ describe('human-authorized Admin Web quiescence for the fixed workspace intent',
     await expect(fs.stat(path.join(f.root, 'relocated'))).rejects.toMatchObject({ code: 'ENOENT' })
   })
 })
+
+
+describe('current human archived recovery admission', () => {
+  it('authenticates human identity before inspecting recovery parameters or fixed records', async () => {
+    const f = await fixture(), before = await fs.readFile(f.file)
+    f.admin.rpcClient = { moduleManagerTargetPort: 1 }; f.admin.config = { moduleId: 'admin-web', port: 1 }
+    for (const token of [undefined, f.jwt({ sub: 'voice-device', purpose: 'voice' }), f.jwt({ sub: 'admin', exp: 1 })]) {
+      await expect(f.admin.handleVerifyWorkspaceRelocationRecoveryRequest(null, { authorizationBearer: token })).rejects.toMatchObject({ code: expect.stringMatching(/UNAUTHORIZED|FORBIDDEN/) })
+    }
+    for (const params of [null, {}, { intent_id: randomUUID(), recovery_id: randomUUID(), completion_sha256: '0'.repeat(64), finalizing_sha256: '1'.repeat(64), pid: process.pid }]) {
+      await expect(f.admin.handleVerifyWorkspaceRelocationRecoveryRequest(params, { authorizationBearer: f.token })).rejects.toMatchObject({ code: 'INVALID_PARAMS' })
+    }
+    expect(await fs.readFile(f.file)).toEqual(before)
+  })
+})

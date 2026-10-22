@@ -1938,6 +1938,60 @@ describe('MM checks the new runtime health and Root under the original job', () 
 
 
 describe('normal fixed-job Admin completion preparation', () => {
+  it('requires current human approval and the current Admin for a new protected recovery admission', async () => {
+    const f = await fixture({ actualAgent: true, actualAdmin: true, validationHealth: 'healthy', processLifetimeMs: 300000 })
+    const locks = require('../../scripts/lib/cli-lock.mjs'), records = require('../../scripts/lib/workspace-relocation-intent.mjs')
+    const lock = await locks.acquireWorkspaceRelocationLock(f.data, f.params.intent_id)
+    let cold: any
+    try {
+      const prepared = await f.manager.prepareWorkspaceRelocationCompletion(f.params, 'fixture-human'), old = f.manager.workspaceFinalizationGrant
+      const definition = f.manager.modules.get('admin-web')
+      await f.manager.stop()
+      const fence = records.readWorkspaceRelocationFinalizing(f.data, f.params.intent_id), fenceFile = path.join(f.data, 'workspace-control/relocation-finalizing.json')
+      const before = await fs.readFile(fenceFile), ledgerFile = path.join(f.data, 'agent/worker-ledgers/channel%3A%3Asession.json'), ledger = await fs.readFile(ledgerFile)
+      const request = { intent_id: f.params.intent_id, recovery_id: randomUUID(), completion_sha256: prepared.completion_sha256, finalizing_sha256: sha256CanonicalJson(fence) }
+      cold = new ModuleManager({ port: 0, modules: [], shutdown_timeout: 0.1 }, f.data) as any
+      cold.modules.set('admin-web', { ...definition, status: 'stopped', pid: undefined, auto_start: false })
+      cold.modules.set('crabot-agent', { module_id: 'crabot-agent', module_type: 'agent', entry: 'never-spawn', port: 19801, auto_start: false, status: 'stopped' })
+      await cold.start(); const currentPort = cold.server.address().port
+      cold.config.port = f.manager.config.port
+      await fs.unlink(path.join(f.data, 'ready')); await cold.startModuleProcess('admin-web')
+      await vi.waitFor(async () => expect(await fs.readFile(path.join(f.data, 'ready'), 'utf8')).toBe('ready'))
+      for (const token of ['wrong-human', old.token]) {
+        await expect(cold.prepareWorkspaceRelocationRecoveryAdmission(request, token)).rejects.toMatchObject({ code: expect.stringMatching(/UNAUTHORIZED|FORBIDDEN/) })
+        expect(cold.workspaceRecoveryAdmission).toBeUndefined()
+      }
+      await expect(cold.prepareWorkspaceRelocationRecoveryAdmission(request, 'fixture-human')).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
+      expect(cold.workspaceRecoveryAdmission).toBeUndefined()
+      await cold.stopModuleProcess('admin-web', 'shutdown'); cold.config.port = currentPort
+      await fs.unlink(path.join(f.data, 'ready')); await cold.startModuleProcess('admin-web')
+      await vi.waitFor(async () => expect(await fs.readFile(path.join(f.data, 'ready'), 'utf8')).toBe('ready'))
+      await expect(cold.prepareWorkspaceRelocationRecoveryAdmission({ ...request, completion_sha256: '0'.repeat(64) }, 'fixture-human')).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
+      const role = await cold.prepareWorkspaceRelocationRecoveryAdmission(request, 'fixture-human')
+      expect(role.accepted).toBe(true); expect(role.request).toEqual(request)
+      expect(JSON.stringify(role.result)).not.toContain('fixture-human'); expect(JSON.stringify(await f.calls())).not.toContain('fixture-human')
+      await expect(cold.prepareWorkspaceRelocationRecoveryAdmission(request, 'fixture-human')).resolves.toBe(role)
+      await expect(cold.handleVerifyWorkspaceRelocationRecoveryAdmission({ ...request, path: f.root }, { authorizationBearer: 'fixture-human' })).rejects.toMatchObject({ code: 'INVALID_PARAMS' })
+      await expect(cold.handleVerifyWorkspaceRelocationRecoveryAdmission({ ...request, recovery_id: randomUUID() }, { authorizationBearer: 'fixture-human' })).rejects.toMatchObject({ code: 'FORBIDDEN' })
+      expect([...cold.processes.keys()]).toEqual(['admin-web']); expect(await fs.readFile(fenceFile)).toEqual(before); expect(await fs.readFile(ledgerFile)).toEqual(ledger)
+      const state = cold.childStates.get(cold.processes.get('admin-web')), runtimeId = state.runtimeId
+      state.runtimeId = randomUUID()
+      await expect(role.verify()).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
+      state.runtimeId = runtimeId
+      expect(cold.workspaceRecoveryAdmission).toBeUndefined(); expect(role.accepted).toBe(false)
+      await expect(role.verify()).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
+      const freshRole = await cold.prepareWorkspaceRelocationRecoveryAdmission({ ...request, recovery_id: randomUUID() }, 'fixture-human')
+      expect(freshRole.accepted).toBe(true); expect(freshRole).not.toBe(role)
+      role.close(); expect(cold.workspaceRecoveryAdmission).toBe(freshRole)
+      freshRole.close(); expect(cold.workspaceRecoveryAdmission).toBeUndefined()
+      expect(await fs.readFile(fenceFile)).toEqual(before)
+    } finally {
+      if (cold) await cold.stop()
+      const child = f.manager.workspaceValidationProof?.result.coordinator
+      if (child?.connected) { const ended = once(child, 'exit'); child.disconnect(); await ended }
+      locks.releaseCliLock(lock); await f.cleanup()
+    }
+  }, process.platform === 'win32' ? 600000 : 120000)
   it('locates sealed workspace history while the original archive still retains maintenance', async () => {
     const f = await fixture({ actualAgent: true, actualAdmin: true, validationHealth: 'healthy', historyWorkspace: true, processLifetimeMs: 300000 })
     const locks = require('../../scripts/lib/cli-lock.mjs'), lock = await locks.acquireWorkspaceRelocationLock(f.data, f.params.intent_id)
@@ -1985,6 +2039,7 @@ describe('normal fixed-job Admin completion preparation', () => {
       const original = records.readWorkspaceRelocationIntent(f.data)
       await expect(f.manager.resumeWorkspaceRelocationWeb(f.params)).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
       await expect(f.manager.completeWorkspaceRelocation(f.params)).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
+      await expect(f.manager.prepareWorkspaceRelocationRecoveryAdmission({ intent_id: f.params.intent_id, recovery_id: randomUUID(), completion_sha256: '0'.repeat(64), finalizing_sha256: '1'.repeat(64) })).rejects.toMatchObject({ code: 'UNAUTHORIZED' })
       expect(records.readWorkspaceRelocationIntent(f.data)).toEqual(original)
       expect(records.readWorkspaceRelocationCoordinator(f.data, f.params.intent_id).launch).toBeNull()
       expect(await f.calls()).toEqual([])
@@ -2108,6 +2163,15 @@ describe.skipIf(process.env.GITHUB_ACTIONS !== 'true')('fixed terminal release a
       let replySpy: ReturnType<typeof vi.spyOn> | undefined, sendSpy: ReturnType<typeof vi.spyOn> | undefined
       const sent: string[] = [], healthyFlow = ['healthy', 'controller lost acknowledgement', 'inactive module', 'skip-health tool'].includes(mode)
       try {
+        if (mode === 'healthy') for (const operation of ['submitWorkspaceRelocationStops', 'prepareWorkspaceRelocationFiles', 'commitWorkspaceRelocationWorkers', 'commitWorkspaceRelocationRoot',
+          'startWorkspaceRelocationValidationModules', 'verifyWorkspaceRelocationValidationHealth', 'prepareWorkspaceRelocationCompletion', 'resumeWorkspaceRelocationWeb', 'completeWorkspaceRelocation']) {
+          const original = f.manager[operation].bind(f.manager)
+          vi.spyOn(f.manager, operation).mockImplementation(async (...args: any[]) => {
+            const started = Date.now()
+            try { return await original(...args) }
+            finally { console.log('[finite workspace stage]', { operation, elapsed_ms: Date.now() - started }) }
+          })
+        }
         expect(typeof native.renameFileNoReplace).toBe('function')
         const extraId = mode === 'skip-health tool' ? 'fixture-tool' : 'fixture-channel'
         const originalExtra = (await f.manager.runtimeRegistry.listRecords()).find((row: any) => row.module_id === extraId)

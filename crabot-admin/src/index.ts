@@ -1,10 +1,11 @@
+import { verifyWorkspaceRecoveryAdmin } from './workspace-recovery-auth.js'
 import { assertWorkspaceExecutionAllowed } from 'crabot-shared'
 import { createWorkspaceFinalizationWeb } from './workspace-finalization-web.js'
 import { parseFriendPermissionRecords, serializeFriendPermissionRecords } from './friend-permission-store.js'
 import { WorkspaceExecutionInventorySchema, WorkspaceIdSchema } from 'crabot-client'
 import { WorkspaceService } from './workspaces.js'
 import { WorkspaceWebAdmissions, requiresWorkspaceWebAdmission } from './workspace-web-admissions.js'
-import type { VerifyWorkspaceRelocationRequestParams, VerifyWorkspaceRelocationRequestResult, QuiesceWorkspaceRelocationWebParams, QuiesceWorkspaceRelocationWebResult } from 'crabot-shared'
+import type { VerifyWorkspaceRelocationRecoveryRequestParams, VerifyWorkspaceRelocationRecoveryRequestResult, VerifyWorkspaceRelocationRequestParams, VerifyWorkspaceRelocationRequestResult, QuiesceWorkspaceRelocationWebParams, QuiesceWorkspaceRelocationWebResult } from 'crabot-shared'
 import { resolveManagedMcpConfig } from './managed-mcp-runtime.js'
 import type { ConversationRequestSource } from 'crabot-shared'
 import type { VerifyMemoryAccessResult, VerifyMemoryRequestAccessResult } from 'crabot-shared'
@@ -1020,6 +1021,7 @@ export class AdminModule extends ModuleBase {
     this.registerMethod('get_task_stats', this.handleGetTaskStats.bind(this))
     this.registerMethod('delete_task', this.handleDeleteTask.bind(this))
 
+    this.registerMethod('verify_workspace_relocation_recovery_request', this.handleVerifyWorkspaceRelocationRecoveryRequest.bind(this))
     this.registerMethod('verify_workspace_relocation_request', this.handleVerifyWorkspaceRelocationRequest.bind(this))
     this.registerMethod('quiesce_workspace_relocation_web', this.handleQuiesceWorkspaceRelocationWeb.bind(this))
     this.registerMethod('prepare_workspace_relocation_completion', (params, context) => this.workspaceFinalizationAccess().prepare(params, context?.authorizationBearer))
@@ -3238,6 +3240,18 @@ export class AdminModule extends ModuleBase {
   private async verifyHumanToken(token: string): Promise<JwtPayload | null> {
     const payload = await this.verifyAuthenticatedToken(token)
     return payload?.sub === 'admin' && !payload.agent_cli ? payload : null
+  }
+
+  private async handleVerifyWorkspaceRelocationRecoveryRequest(
+    params: VerifyWorkspaceRelocationRecoveryRequestParams, context?: RpcHandlerContext,
+  ): Promise<VerifyWorkspaceRelocationRecoveryRequestResult> {
+    const bearer = context?.authorizationBearer
+    if (!bearer || !await this.verifyHumanToken(bearer)) {
+      throw new RpcError(this.isNonHumanToken(bearer) ? 'FORBIDDEN' : 'UNAUTHORIZED', 'Human Admin credential required')
+    }
+    return verifyWorkspaceRecoveryAdmin({ dataDir: path.resolve(this.adminConfig.data_dir, '..'),
+      moduleManagerPort: this.rpcClient.moduleManagerTargetPort, modulePort: this.config.port,
+      runtimeIdentity: () => ({ instance_id: process.env.CRABOT_INSTANCE_ID, module_id: this.config.moduleId, runtime_id: process.env.CRABOT_MODULE_RUNTIME_ID }) }, params, bearer)
   }
 
   private async handleVerifyWorkspaceRelocationRequest(
