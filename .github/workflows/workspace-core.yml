@@ -3,39 +3,9 @@ name: Workspace Core lifecycle
 on:
   push:
     branches: ['feat/desktop-*']
-    paths:
-      - 'crabot-memory/src/**'
-      - 'crabot-memory/schema_version'
-      - 'crabot-memory/pyproject.toml'
-      - 'crabot-memory/uv.lock'
-      - 'crabot-admin/src/workspace-recovery-auth.ts'
-      - 'crabot-admin/src/workspace-finalization-web.ts'
-      - 'crabot-core/src/index.ts'
-      - 'crabot-core/src/module-manager-lifecycle.test.ts'
-      - 'crabot-core/src/test-fixtures/uv-python-sleeper.py'
-      - 'crabot-core/src/test-fixtures/workspace-config-admin.cjs'
-      - 'crabot-agent/src/core/workspace-relocation-*.ts'
-      - 'crabot-agent/tests/core/workspace-relocation-*.test.ts'
-      - 'crabot-agent/src/unified-agent.ts'
-      - 'crabot-shared/src/workspace-types.ts'
-      - 'crabot-shared/src/module-base.ts'
-      - 'crabot-shared/src/workspace-maintenance.ts'
-      - 'crabot-core/src/workspace-*.test.ts'
-      - 'crabot-agent/tests/core/fixtures/**'
-      - 'scripts/lib/workspace-*'
-      - 'scripts/lib/process-identity.cjs'
-      - 'scripts/lib/owned-process-tree.cjs'
-      - 'scripts/lib/module-carrier-rpc.cjs'
-      - 'scripts/lib/module-runtime-rpc.cjs'
-      - 'scripts/lib/pinned-process-rpc.cjs'
-      - 'scripts/lib/__tests__/module-shutdown-rpc.test.mjs'
-      - 'scripts/lib/__tests__/module-carrier-rpc.test.mjs'
-      - 'crabot-native/**'
-      - 'scripts/workspace-root-probe.mjs'
-      - 'scripts/lib/__tests__/workspace-root-probe.test.mjs'
-      - '.github/workflows/workspace-core.yml'
   pull_request:
     paths:
+      - '.github/workflows/desktop.yml'
       - 'crabot-admin/src/workspace-recovery-auth.ts'
       - 'crabot-admin/src/workspace-finalization-web.ts'
       - 'crabot-core/src/index.ts'
@@ -60,6 +30,7 @@ on:
       - 'scripts/lib/__tests__/module-carrier-rpc.test.mjs'
       - 'crabot-native/**'
       - 'scripts/workspace-root-probe.mjs'
+      - 'scripts/workspace-recovery-coordinator.mjs'
       - 'scripts/lib/__tests__/workspace-root-probe.test.mjs'
       - '.github/workflows/workspace-core.yml'
   workflow_dispatch:

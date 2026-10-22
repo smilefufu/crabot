@@ -160,9 +160,9 @@ for (const [kind, stage] of [['bad-json', 'response-json'], ['wrong-id', 'respon
       if (kind === 'timeout') return
       const result = { id: kind === 'wrong-id' ? 'other' : body.id, success: !['failed', 'unknown-code'].includes(kind), data,
         error: { code: kind === 'unknown-code' ? secret : 'SERVICE_UNAVAILABLE', message: secret } }
-      res.end(kind === 'bad-json' ? secret : kind === 'oversize' ? secret.repeat(20000) : JSON.stringify(result))
+      setTimeout(() => res.end(kind === 'bad-json' ? secret : kind === 'oversize' ? secret.repeat(20000) : JSON.stringify(result)), 150)
     })
-    const startedAt = Date.now(), rpc = await transport.openPinnedProcessRpc(f.process, f.port, { timeoutMs: 100 })
+    const startedAt = Date.now(), rpc = await transport.openPinnedProcessRpc(f.process, f.port, { timeoutMs: kind === 'timeout' ? 100 : 3000 })
     t.after(() => rpc.close())
     await assert.rejects(rpc.call('get_runtime_identity', {}, { authorizationBearer: secret }), error => {
       assert.equal(error.code, 'CRABOT_PROCESS_RPC')

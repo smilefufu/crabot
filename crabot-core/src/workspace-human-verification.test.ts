@@ -1971,6 +1971,52 @@ describe('normal fixed-job Admin completion preparation', () => {
       expect(role.accepted).toBe(true); expect(role.request).toEqual(request)
       expect(JSON.stringify(role.result)).not.toContain('fixture-human'); expect(JSON.stringify(await f.calls())).not.toContain('fixture-human')
       await expect(cold.prepareWorkspaceRelocationRecoveryAdmission(request, 'fixture-human')).resolves.toBe(role)
+      const recoveryRecords = require('../../scripts/lib/workspace-recovery-records.mjs')
+      const idle = spawn(process.execPath, ['-e', 'process.on("disconnect",()=>process.exit(0));process.send("idle-ready");setTimeout(()=>process.exit(0),10000)'], { stdio: ['ignore', 'ignore', 'pipe', 'ipc'] })
+      const idleExited = once(idle, 'exit'); let idleErrors = ''
+      let childIdentity: any
+      idle.stderr.on('data', chunk => { idleErrors = (idleErrors + chunk.toString()).slice(-4096) })
+      try {
+        const ready = await Promise.race([once(idle, 'message'), idleExited.then(([code]) => { throw new Error('Finite idle exited before ready: ' + code + ' ' + idleErrors) })])
+        expect(ready[0]).toBe('idle-ready')
+        console.log('[finite recovery record]', { stage: 'idle-ready' })
+        childIdentity = require('../../scripts/lib/spawned-process-tree.cjs').captureSpawnedProcessTree(idle).find((item: any) => item.pid === idle.pid)
+        const launch = await recoveryRecords.commitWorkspaceRecoveryCoordinatorLaunch({ dataDir: f.data, request, admission: role.result, coordinator: childIdentity, verify: role.verify })
+        console.log('[finite recovery record]', { stage: 'launch-written' })
+        const recovered = recoveryRecords.readWorkspaceRecoveryCoordinator(f.data, request.recovery_id)
+        expect(recovered).toEqual({ launch, ready: null })
+        expect(launch.process).toEqual(childIdentity); expect(launch.admission_sha256).toBe(sha256CanonicalJson(role.result))
+        console.log('[finite recovery record]', { stage: 'duplicate-launch-denial' })
+        await expect(recoveryRecords.commitWorkspaceRecoveryCoordinatorLaunch({ dataDir: f.data, request, admission: role.result, coordinator: childIdentity, verify: role.verify })).rejects.toBeDefined()
+        console.log('[finite recovery record]', { stage: 'parent-ready-denial' })
+        await expect(recoveryRecords.commitWorkspaceRecoveryCoordinatorReady({ dataDir: f.data, recoveryId: request.recovery_id, launchHash: sha256CanonicalJson(launch) })).rejects.toBeDefined()
+        expect(recoveryRecords.readWorkspaceRecoveryCoordinator(f.data, request.recovery_id)).toEqual(recovered)
+        const launchFile = path.join(launch.control_root.path, 'launch.json'), launchBytes = await fs.readFile(launchFile)
+        for (const changed of [{ ...launch, unexpected: true }, { ...launch, control_root: { ...launch.control_root, ino: '0' } }]) {
+          await fs.writeFile(launchFile, JSON.stringify(changed))
+          expect(() => recoveryRecords.readWorkspaceRecoveryCoordinator(f.data, request.recovery_id)).toThrow()
+          await fs.writeFile(launchFile, launchBytes)
+        }
+        const linked = path.join(launch.control_root.path, 'retained-link')
+        await fs.link(launchFile, linked)
+        try { expect(() => recoveryRecords.readWorkspaceRecoveryCoordinator(f.data, request.recovery_id)).toThrow() }
+        finally { await fs.unlink(linked) }
+        const readyFile = path.join(launch.control_root.path, 'ready.json')
+        await fs.writeFile(readyFile, '[]', { mode: 0o600 })
+        try { expect(() => recoveryRecords.readWorkspaceRecoveryCoordinator(f.data, request.recovery_id)).toThrow() }
+        finally { await fs.unlink(readyFile) }
+        expect(recoveryRecords.readWorkspaceRecoveryCoordinator(f.data, request.recovery_id)).toEqual(recovered)
+        expect(await fs.readFile(fenceFile)).toEqual(before); expect(await fs.readFile(ledgerFile)).toEqual(ledger)
+      } finally {
+        console.log('[finite recovery record]', { stage: 'idle-disconnect', exit_code: idle.exitCode, connected: idle.connected })
+        if (idle.connected) idle.disconnect()
+        await vi.waitFor(() => {
+          if (childIdentity) expect(require('../../scripts/lib/known-process-exit.cjs').probeKnownProcessExit([childIdentity]).state).toBe('stopped')
+          else expect(!idle.pid || require('../../scripts/lib/process-identity.cjs').isProcessExited(idle.pid) === true).toBe(true)
+        }, { timeout: 15000 })
+        idle.stderr.destroy()
+        console.log('[finite recovery record]', { stage: 'idle-kernel-exited' })
+      }
       await expect(cold.handleVerifyWorkspaceRelocationRecoveryAdmission({ ...request, path: f.root }, { authorizationBearer: 'fixture-human' })).rejects.toMatchObject({ code: 'INVALID_PARAMS' })
       await expect(cold.handleVerifyWorkspaceRelocationRecoveryAdmission({ ...request, recovery_id: randomUUID() }, { authorizationBearer: 'fixture-human' })).rejects.toMatchObject({ code: 'FORBIDDEN' })
       expect([...cold.processes.keys()]).toEqual(['admin-web']); expect(await fs.readFile(fenceFile)).toEqual(before); expect(await fs.readFile(ledgerFile)).toEqual(ledger)
@@ -1983,7 +2029,47 @@ describe('normal fixed-job Admin completion preparation', () => {
       const freshRole = await cold.prepareWorkspaceRelocationRecoveryAdmission({ ...request, recovery_id: randomUUID() }, 'fixture-human')
       expect(freshRole.accepted).toBe(true); expect(freshRole).not.toBe(role)
       role.close(); expect(cold.workspaceRecoveryAdmission).toBe(freshRole)
-      freshRole.close(); expect(cold.workspaceRecoveryAdmission).toBeUndefined()
+      const injectedLoader = path.join(f.root, 'untrusted-loader.cjs'), injectedMarker = path.join(f.root, 'loader-ran')
+      await fs.writeFile(injectedLoader, `require('node:fs').writeFileSync(${JSON.stringify(injectedMarker)}, 'unexpected')`)
+      const oldNodeOptions = process.env.NODE_OPTIONS
+      let initialized: any
+      try {
+        process.env.NODE_OPTIONS = '--require ' + JSON.stringify(injectedLoader)
+        initialized = await cold.initializeWorkspaceRelocationRecovery(freshRole.request, 'fixture-human')
+      } finally {
+        if (oldNodeOptions === undefined) delete process.env.NODE_OPTIONS
+        else process.env.NODE_OPTIONS = oldNodeOptions
+      }
+      await expect(fs.lstat(injectedMarker)).rejects.toMatchObject({ code: 'ENOENT' })
+      expect(freshRole.accepted).toBe(false)
+      await expect(freshRole.verify()).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
+      freshRole.close()
+      await Promise.all([initialized.verify(), initialized.verify()])
+      await expect(cold.initializeWorkspaceRelocationRecovery(freshRole.request, 'wrong-human')).rejects.toMatchObject({ code: 'FORBIDDEN' })
+      await expect(freshRole.consume()).rejects.toBeDefined()
+      expect(recoveryRecords.readWorkspaceRecoveryCoordinator(f.data, freshRole.request.recovery_id)).toEqual({ launch: initialized.launch, ready: initialized.ready })
+      expect(await cold.initializeWorkspaceRelocationRecovery(freshRole.request, 'fixture-human')).toBe(initialized)
+      expect(initialized.launch.process.parent).toBe(process.pid)
+      expect(initialized.launch.process.executable).toBe(require('../../scripts/lib/process-identity.cjs').inspectProcess(process.pid).executable)
+      expect((await fetch(`http://127.0.0.1:${f.port}/api/workspaces`, { method: 'POST', headers: { Authorization: 'Bearer fixture-human', 'Content-Type': 'application/json' }, body: '{}' })).status).toBe(503)
+      expect(await fs.readFile(ledgerFile)).toEqual(ledger)
+      const stateAfterHandoff = cold.childStates.get(cold.processes.get('admin-web')), runtimeAfterHandoff = stateAfterHandoff.runtimeId
+      stateAfterHandoff.runtimeId = randomUUID()
+      await expect(initialized.verify()).rejects.toBeDefined()
+      stateAfterHandoff.runtimeId = runtimeAfterHandoff
+      await expect(initialized.verify()).rejects.toBeDefined()
+      await vi.waitFor(() => expect(require('../../scripts/lib/known-process-exit.cjs').probeKnownProcessExit([initialized.launch.process]).state).toBe('stopped'), { timeout: 15000 })
+      await expect(cold.initializeWorkspaceRelocationRecovery(freshRole.request, 'fixture-human')).rejects.toBeDefined()
+      const nextRequest = { ...request, recovery_id: randomUUID() }
+      const next = await cold.initializeWorkspaceRelocationRecovery(nextRequest, 'fixture-human')
+      freshRole.close(); initialized.close()
+      await next.verify()
+      const nextFacts = recoveryRecords.readWorkspaceRecoveryCoordinator(f.data, nextRequest.recovery_id)
+      next.child.send({ kind: 'workspace_recovery_verify', recovery_id: nextRequest.recovery_id, launch_sha256: sha256CanonicalJson(next.launch), ready_sha256: sha256CanonicalJson(next.ready), nonce: 'invalid' })
+      await vi.waitFor(() => expect(require('../../scripts/lib/known-process-exit.cjs').probeKnownProcessExit([next.launch.process]).state).toBe('stopped'), { timeout: 15000 })
+      await expect(next.verify()).rejects.toBeDefined()
+      await expect(cold.initializeWorkspaceRelocationRecovery(nextRequest, 'fixture-human')).rejects.toBeDefined()
+      expect(recoveryRecords.readWorkspaceRecoveryCoordinator(f.data, nextRequest.recovery_id)).toEqual(nextFacts)
       expect(await fs.readFile(fenceFile)).toEqual(before)
     } finally {
       if (cold) await cold.stop()
@@ -2030,7 +2116,7 @@ describe('normal fixed-job Admin completion preparation', () => {
       }
       expect(signal).not.toHaveBeenCalled()
     } finally { await f.cleanup() }
-  })
+  }, process.platform === 'win32' ? 600000 : 120000)
 
   it('does not turn an unaccepted private completion call into original human admission', async () => {
     const f = await fixture(), records = require('../../scripts/lib/workspace-relocation-intent.mjs')
@@ -2044,7 +2130,7 @@ describe('normal fixed-job Admin completion preparation', () => {
       expect(records.readWorkspaceRelocationCoordinator(f.data, f.params.intent_id).launch).toBeNull()
       expect(await f.calls()).toEqual([])
     } finally { locks.releaseCliLock(lock); await f.cleanup() }
-  })
+  }, process.platform === 'win32' ? 600000 : 120000)
 
   it('prepares the current Admin after archive without reopening business or requiring the old human request', async () => {
     const f = await fixture({ actualAgent: true, actualAdmin: true, validationHealth: 'healthy', processLifetimeMs: process.platform === 'win32' ? 900000 : 300000 })

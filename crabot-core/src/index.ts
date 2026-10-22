@@ -99,6 +99,16 @@ interface WorkspaceRecoveryAdmission {
   result: VerifyWorkspaceRelocationRecoveryRequestResult
   accepted: boolean
   verify: () => Promise<void>
+  consume: () => Promise<WorkspaceRecoveryInitialization>
+  close: () => void
+}
+interface WorkspaceRecoveryCoordinator { verify: () => Promise<void>; close: () => void }
+interface WorkspaceRecoveryInitialization {
+  request: VerifyWorkspaceRelocationRecoveryRequestParams
+  result: VerifyWorkspaceRelocationRecoveryRequestResult
+  verify: () => Promise<void>
+  releaseParentLock: () => void
+  coordinator?: WorkspaceRecoveryCoordinator
   close: () => void
 }
 
@@ -272,6 +282,8 @@ export class ModuleManager {
   private workspaceWorkerClosure?: { fingerprint: string; pending: Promise<WorkspaceWorkerClosureResult> }
   private workspaceRootSelection?: { fingerprint: string; pending: Promise<WorkspaceRootSelectionResult> }
   private workspaceValidationLaunch?: { fingerprint: string; pending: Promise<WorkspaceValidationLaunchResult> }
+  private workspaceRecoveryInitialization?: WorkspaceRecoveryInitialization
+  private workspaceRecoveryInitializations = new Map<string, { fingerprint: string; bearerHash: string; pending: Promise<WorkspaceRecoveryCoordinator> }>()
   private workspaceRecoveryAdmission?: WorkspaceRecoveryAdmission
   private workspaceRecoveryAdmissionPreparation?: { fingerprint: string; bearerHash: string; pending: Promise<WorkspaceRecoveryAdmission> }
   private workspaceFinalizationGrant?: WorkspaceFinalizationGrant
@@ -487,6 +499,7 @@ export class ModuleManager {
     for (const timer of this.restartTimers.values()) clearTimeout(timer)
     this.restartTimers.clear()
     this.workspaceRecoveryAdmission?.close()
+    this.workspaceRecoveryInitialization?.close()
     if (this.workspaceFinalizationGrant) {
       this.workspaceFinalizationGrant.revoked = true
       this.workspaceFinalizationGrant.close()
@@ -1949,7 +1962,7 @@ export class ModuleManager {
       const native = require('../../scripts/lib/process-identity.cjs')
       try {
         const scope = readWorkspaceRecoveryAdmissionScope(this.dataDir, request), self = native.inspectProcess(process.pid)
-        if (!self || this.isShuttingDown || this.workspaceRecoveryAdmission) throw failure()
+        if (!self || this.isShuttingDown || this.workspaceRecoveryAdmission || this.workspaceRecoveryInitialization) throw failure()
         lock = await locks.acquireWorkspaceRelocationRecoveryLock(this.dataDir, request.intent_id)
         token = locks.cliLockToken(lock)
         if (!token) throw failure()
@@ -1957,24 +1970,59 @@ export class ModuleManager {
           const child = this.processes.get('admin-web')!, state = this.childStates.get(child)!, runtimeId = state.runtimeId
           const result: VerifyWorkspaceRelocationRecoveryRequestResult = { verified: true, ...request,
             instance_id: this.runtimeRegistry.getInstanceId(), admin_runtime_id: runtimeId, mm_sha256: sha256CanonicalJson(self) }
+          const checkFacts = () => {
+            if (this.isShuttingDown || !native.sameProcess(self, native.inspectProcess(process.pid)) || this.processes.get('admin-web') !== child
+              || this.childStates.get(child) !== state || state.runtimeId !== runtimeId
+              || readWorkspaceRecoveryAdmissionScope(this.dataDir, request).fingerprint !== scope.fingerprint) throw failure()
+          }
+          const checkAdmission = () => {
+            checkFacts()
+            if (this.workspaceRecoveryAdmission !== admission || closed || !lock || !token || locks.cliLockToken(lock) !== token) throw failure()
+          }
           const verify = async () => {
-            const check = () => {
-              if (this.isShuttingDown || this.workspaceRecoveryAdmission !== admission || closed || !lock || !token || locks.cliLockToken(lock) !== token
-                || !native.sameProcess(self, native.inspectProcess(process.pid)) || this.processes.get('admin-web') !== child
-                || this.childStates.get(child) !== state || state.runtimeId !== runtimeId
-                || readWorkspaceRecoveryAdmissionScope(this.dataDir, request).fingerprint !== scope.fingerprint) throw failure()
-            }
-            try { check(); await verifyAdmin(); check() }
+            try { checkAdmission(); await verifyAdmin(); checkAdmission() }
             catch (cause) { admission?.close(); throw cause }
           }
           let closed = false
-          admission = { request, result: Object.freeze(result), accepted: false, verify, close: () => {
-            if (closed) return
+          const detach = () => {
             closed = true
             if (admission) admission.accepted = false
-            if (lock && token && locks.cliLockToken(lock) === token) locks.releaseCliLock(lock)
             if (this.workspaceRecoveryAdmission === admission) this.workspaceRecoveryAdmission = undefined
             if (this.workspaceRecoveryAdmissionPreparation?.pending === pending) this.workspaceRecoveryAdmissionPreparation = undefined
+          }
+          admission = { request, result: Object.freeze(result), accepted: false, verify, consume: async () => {
+            await verify(); checkAdmission()
+            if (!admission?.accepted || this.workspaceRecoveryInitialization) throw failure()
+            let ended = false, parentReleased = false
+            const check = () => {
+              checkFacts()
+              if (ended || this.workspaceRecoveryInitialization !== context || !lock || !token
+                || !parentReleased && locks.cliLockToken(lock) !== token) throw failure()
+            }
+            const context: WorkspaceRecoveryInitialization = { request, result: admission.result,
+              verify: async () => {
+                try { check(); await verifyAdmin(); check() }
+                catch (cause) { context.close(); throw cause }
+              },
+              releaseParentLock: () => {
+                check()
+                if (parentReleased) throw failure()
+                locks.releaseCliLock(lock!); parentReleased = true
+              },
+              close: () => {
+                if (ended) return
+                ended = true; context.coordinator?.close()
+                if (!parentReleased && lock && token && locks.cliLockToken(lock) === token) locks.releaseCliLock(lock)
+                if (this.workspaceRecoveryInitialization === context) this.workspaceRecoveryInitialization = undefined
+              },
+            }
+            // No await between consuming the admission and installing its sole successor.
+            detach(); this.workspaceRecoveryInitialization = context
+            return context
+          }, close: () => {
+            if (closed) return
+            detach()
+            if (lock && token && locks.cliLockToken(lock) === token) locks.releaseCliLock(lock)
           } }
           this.workspaceRecoveryAdmission = admission
           await verify()
@@ -1993,6 +2041,33 @@ export class ModuleManager {
       }
     })
     this.workspaceRecoveryAdmissionPreparation = { fingerprint, bearerHash, pending }
+    return pending
+  }
+
+  /** One fixed idle generation per accepted recovery id; never re-spawn an uncertain handoff. */
+  private initializeWorkspaceRelocationRecovery(request: VerifyWorkspaceRelocationRecoveryRequestParams, bearer?: string): Promise<WorkspaceRecoveryCoordinator> {
+    if (!bearer) return Promise.reject(Object.assign(new Error('Current human credential required'), { code: 'UNAUTHORIZED' }))
+    request = Object.freeze({ ...request })
+    const fingerprint = sha256CanonicalJson(request), bearerHash = sha256CanonicalJson(bearer), previous = this.workspaceRecoveryInitializations.get(request.recovery_id)
+    if (previous) {
+      if (previous.fingerprint !== fingerprint || previous.bearerHash !== bearerHash) return Promise.reject(Object.assign(new Error('Recovery initialization mismatch'), { code: 'FORBIDDEN' }))
+      return previous.pending.then(async result => { await result.verify(); return result })
+    }
+    const pending = Promise.resolve().then(async () => {
+      const admission = await this.prepareWorkspaceRelocationRecoveryAdmission(request, bearer), context = await admission.consume()
+      try {
+        const { launchWorkspaceRecoveryCoordinator } = require('../../scripts/lib/workspace-recovery-launch.mjs')
+        const result = await launchWorkspaceRecoveryCoordinator({ dataDir: this.dataDir, request: context.request, admission: context.result,
+          verify: context.verify, releaseParentLock: context.releaseParentLock })
+        const coordinator = Object.freeze({ ...result, verify: async () => {
+          try { await result.verify() } catch (cause) { context.close(); throw cause }
+        }, close: () => { result.close(); context.close() } })
+        context.coordinator = coordinator
+        await coordinator.verify()
+        return coordinator
+      } catch (cause) { context.close(); throw cause }
+    })
+    this.workspaceRecoveryInitializations.set(request.recovery_id, { fingerprint, bearerHash, pending })
     return pending
   }
 

@@ -146,11 +146,12 @@ jobs:
         run: |
           cd crabot-core
           node node_modules/vitest/vitest.mjs run src/workspace-human-verification.test.ts --testNamePattern "MM consumes a human intent|MM dedicated fixed coordinator|MM delegates capture only|MM sensitive Worker stop" --maxWorkers=1 --minWorkers=1
+      # Long recovery suites run at the same commit in workspace-core.yml, with four OS matrices.
       - name: Workspace coordinator native dispatch and module regressions
         timeout-minutes: ${{ matrix.target == 'win32-x64' && 30 || 15 }}
         run: |
           cd crabot-core
-          node node_modules/vitest/vitest.mjs run src/workspace-human-verification.test.ts --testNamePattern "^(?!.*(?:MM consumes a human intent|MM dedicated fixed coordinator|MM delegates capture only|MM sensitive Worker stop|MM launches the actual fixed coordinator|MM submits one fixed workspace stop sequence|MM requires original Admin quiescence))" --maxWorkers=1 --minWorkers=1
+          node node_modules/vitest/vitest.mjs run src/workspace-human-verification.test.ts --testNamePattern "^(?!.*(?:MM consumes a human intent|MM dedicated fixed coordinator|MM delegates capture only|MM sensitive Worker stop|MM launches the actual fixed coordinator|MM submits one fixed workspace stop sequence|MM requires original Admin quiescence|post-relocation validation launches|new runtime health and Root|fixed job archive storage handoff|normal fixed-job Admin completion preparation|fixed terminal release and current Admin resume|isolated business Agent after workspace relocation))" --maxWorkers=1 --minWorkers=1
       - name: Workspace fixed host and actual Admin quiescence regressions
         timeout-minutes: 15
         run: |
