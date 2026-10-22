@@ -181,7 +181,10 @@ public static class CrabotWorkspaceSecurityProbe {
             ushort control; uint revision;
             Check(GetSecurityDescriptorControl(descriptor, out control, out revision));
             if (mode == "isolated-sibling-move" || mode == "isolated-handle-move") return WithNonInheritingSibling(target, descriptor, dacl, mode == "isolated-handle-move");
-            if (mode == "explicit-create") return CreateWithSecurity(target, descriptor);
+            if (mode == "explicit-create" || mode == "explicit-create-sacl-auto-request") {
+                if (mode == "explicit-create-sacl-auto-request") Check(SetSecurityDescriptorControl(descriptor, 0x200, 0x200));
+                return CreateWithSecurity(target, descriptor);
+            }
             if (mode == "isolated-parent-create" || mode == "isolated-parent-assign") return WithNonInheritingParent(target, descriptor, dacl, mode == "isolated-parent-create");
             if (mode == "label-descriptor-before-dacl" || mode == "label-descriptor-after-dacl") {
                 if (mode == "label-descriptor-after-dacl" && !SetFileSecurityW(target, 4, descriptor)) return (uint)Marshal.GetLastWin32Error();
@@ -210,13 +213,13 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Cannot prepare owned security probe' }
     @{ evidence_only = $true; source_filesystem = ([IO.DriveInfo]::new([IO.Path]::GetPathRoot($source))).DriveFormat; target_filesystem = ([IO.DriveInfo]::new([IO.Path]::GetPathRoot($targets))).DriveFormat; elevated = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) } | ConvertTo-Json -Compress
     $original = [CrabotWorkspaceSecurityProbe]::Observe([IO.Path]::Combine($source, 'original.txt'))
-    foreach ($mode in @('label-descriptor-before-dacl', 'label-descriptor-after-dacl', 'query-dacl-only', 'query-full', 'request-matches-source', 'modern-direct', 'modern-protected-then-original', 'protected-flag-then-original', 'backup-security-stream', 'explicit-create', 'isolated-parent-create', 'isolated-parent-assign', 'isolated-sibling-move', 'isolated-handle-move')) {
+    foreach ($mode in @('label-descriptor-before-dacl', 'label-descriptor-after-dacl', 'query-dacl-only', 'query-full', 'request-matches-source', 'modern-direct', 'modern-protected-then-original', 'protected-flag-then-original', 'backup-security-stream', 'explicit-create', 'explicit-create-sacl-auto-request', 'isolated-parent-create', 'isolated-parent-assign', 'isolated-sibling-move', 'isolated-handle-move')) {
         $target = [IO.Path]::Combine($targets, $mode)
         & node -e "require('./scripts/lib/process-identity.cjs').createPrivateDirectory(process.argv[1])" $target
         if ($LASTEXITCODE -ne 0) { throw 'Cannot create private security probe target' }
         $file = [IO.Path]::Combine($target, 'original.txt')
         $before = $null
-        $create = $mode -in @('explicit-create', 'isolated-parent-create')
+        $create = $mode -in @('explicit-create', 'explicit-create-sacl-auto-request', 'isolated-parent-create')
         if (-not $create) {
             & "$env:SystemRoot\System32\robocopy.exe" $source $target /E /COPY:DATS /DCOPY:DATE /SL /SJ /R:0 /W:0 /NFL /NDL /NJH /NJS /NP | Out-Null
             if ($LASTEXITCODE -gt 7) { throw 'Cannot copy finite security probe' }

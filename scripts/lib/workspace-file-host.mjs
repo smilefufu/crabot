@@ -36,6 +36,11 @@ async function close(child) {
   })
 }
 
+// Fixed technical labels only; never forward paths, descriptor text or arbitrary child errors.
+export function workspaceFileMetadataStage(value) {
+  return typeof value === 'string' && value === value.trim() && /^metadata-(?:object|owner-ace|ace-flags|control-unavailable|control-[0-9]{1,5}-[0-9]{1,5}|security-text|exact)$/.test(value) ? value : null
+}
+
 export async function launchWorkspaceFileHost(options) {
   if (!fields(options, ['dataDir', 'id']) || typeof options.dataDir !== 'string' || !path.isAbsolute(options.dataDir)
     || options.dataDir.includes('\0') || !uuid(options.id)) throw failure()
@@ -136,14 +141,17 @@ export async function prepareWorkspaceFilesWithHost(child, { dataDir, id, signal
         if (value?.kind !== 'workspace_file_prepared' && value?.kind !== 'workspace_file_preparation_failed') return
         let messageStage = 'completion-fields'
         try {
-          if (!fields(value, ['kind', 'intent_id', 'attempt_sha256', ...(value.kind === 'workspace_file_preparation_failed' ? ['error_code'] : [])])
+          if (!fields(value, ['kind', 'intent_id', 'attempt_sha256', ...(value.kind === 'workspace_file_preparation_failed' ? ['error_code', ...(Object.hasOwn(value, 'error_stage') ? ['error_stage'] : [])] : [])])
             || value.intent_id !== id || value.attempt_sha256 !== attemptHash || completed
             || child.pid !== original.host.process.pid) throw failure()
           messageStage = 'completion-inspect'
           const current = native.inspectProcess(child.pid)
           messageStage = 'completion-binding'
           if (!native.sameProcess(original.host.process, current) && knownExit.probeKnownProcessExit([original.host.process]).state !== 'stopped') throw failure()
-          if (value.kind === 'workspace_file_preparation_failed') return failed({ code: value.error_code }, 'host-reported-failure')
+          if (value.kind === 'workspace_file_preparation_failed') {
+            if (value.error_stage != null && workspaceFileMetadataStage(value.error_stage) !== value.error_stage) throw failure()
+            return failed({ code: value.error_code, stage: workspaceFileMetadataStage(value.error_stage) }, 'host-reported-failure')
+          }
           completed = true
           acknowledgement = send(child, { kind: 'workspace_file_completion_verified', intent_id: id, attempt_sha256: attemptHash })
           void acknowledgement.catch(cause => failed(cause, 'completion-acknowledgement'))
