@@ -132,7 +132,12 @@ static napi_value CaptureProcessTreeGeneration(napi_env env, napi_callback_info 
         stage = "pinned-refresh-birth";
         if (current.started != process.identity.started) throw std::runtime_error("Live held process birth changed");
         stage = "pinned-refresh-parent";
-        if (current.parent != process.identity.parent) throw std::runtime_error("Live held process parent changed");
+        if (current.parent != process.identity.parent) {
+          const DWORD waitState = WaitForSingleObject(process.handle.get(), 0);
+          throw std::runtime_error("Live held process parent changed (pid " + std::to_string(process.identity.pid)
+            + ", index " + std::to_string(i) + ", expected-parent " + std::to_string(process.identity.parent)
+            + ", actual-parent " + std::to_string(current.parent) + ", wait " + std::to_string(waitState) + ")");
+        }
         process.identity.executable = current.executable;
       }
       if (!anotherPass && offset == processes.size()) break;
