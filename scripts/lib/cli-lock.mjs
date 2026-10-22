@@ -53,6 +53,24 @@ export async function acquireWorkspaceRelocationLock(dataDir, id, waitMs = 5000)
   })
 }
 
+// A new recovery owner's mutex only. No old launch, bearer, or business action is revived.
+export async function acquireWorkspaceRelocationRecoveryLock(dataDir, id, waitMs = 5000) {
+  const records = await import('./workspace-relocation-intent.mjs')
+  const { sha256CanonicalJson } = await import('../../crabot-shared/dist/canonical-json.js')
+  const binding = () => {
+    try {
+      const fence = records.readCurrentWorkspaceRelocationFinalizing(dataDir)
+      if (!fence || fence.intent_id !== id || records.readWorkspaceRelocationReleased(dataDir, id)) throw workspace.failure()
+      const state = records.readWorkspaceRelocationArchivedState(dataDir, id)
+      return sha256CanonicalJson({ fence, completion: state.completion })
+    } catch { throw workspace.failure() }
+  }
+  const original = binding()
+  return acquire(dataDir, 'workspace-relocation-recovery', waitMs, undefined, () => {
+    if (binding() !== original) throw workspace.failure()
+  })
+}
+
 export function releaseCliLock(path) {
   const lock = handles.get(path)
   if (!lock) return

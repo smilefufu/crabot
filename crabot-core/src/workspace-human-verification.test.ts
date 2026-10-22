@@ -2048,6 +2048,45 @@ describe('normal fixed-job Admin completion preparation', () => {
       await f.manager.stop()
       expect(grant.child.connected).toBe(false)
       expect(records.readWorkspaceRelocationFinalizing(f.data, f.params.intent_id).completion_sha256).toBe(result.completion_sha256)
+      const cold = new ModuleManager({ port: 0, modules: [] }, f.data) as any
+      try {
+        await expect(cold.handleVerifyWorkspaceRelocationFinalization(params, { authorizationBearer: grant.token })).rejects.toMatchObject({ code: 'FORBIDDEN' })
+        expect(cold.workspaceFinalizationGrant).toBeUndefined(); expect(cold.processes.size).toBe(0)
+        await expect(locks.acquireWorkspaceRelocationRecoveryLock(f.data, randomUUID(), 10)).rejects.toBeDefined()
+        const recoveredLock = await locks.acquireWorkspaceRelocationRecoveryLock(f.data, f.params.intent_id, 1000)
+        const firstRecoveryToken = locks.cliLockToken(recoveredLock)
+        expect(firstRecoveryToken).toBeTruthy()
+        expect(firstRecoveryToken).not.toBe(grant.token)
+        locks.releaseCliLock(recoveredLock)
+        const program = `const locks=require(${JSON.stringify(path.resolve('../scripts/lib/cli-lock.mjs'))}),native=require(${JSON.stringify(path.resolve('../scripts/lib/process-identity.cjs'))});
+          setTimeout(()=>process.exit(2),10000).unref();(async()=>{const lock=await locks.acquireWorkspaceRelocationRecoveryLock(${JSON.stringify(f.data)},${JSON.stringify(f.params.intent_id)});
+          try{process.stdout.write(JSON.stringify({owner:native.inspectProcess(process.pid),token:locks.cliLockToken(lock)}))}finally{locks.releaseCliLock(lock)}})().catch(error=>{console.error(error);process.exitCode=1})`
+        const child = spawn(process.execPath, ['-e', program], { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, NODE_OPTIONS: '' } })
+        let output = '', errors = ''; child.stdout.on('data', chunk => { output += chunk }); child.stderr.on('data', chunk => { errors += chunk })
+        expect((await once(child, 'close'))[0], errors).toBe(0)
+        const fresh = JSON.parse(output)
+        expect(fresh.owner.pid).toBe(child.pid); expect(fresh.owner.pid).not.toBe(grant.launch.process.pid)
+        expect(fresh.owner.parent).toBe(process.pid); expect(fresh.owner.owner).toBe(grant.launch.parent.owner)
+        expect(fresh.token).toBeTruthy(); expect(fresh.token).not.toBe(grant.token); expect(fresh.token).not.toBe(firstRecoveryToken)
+        await expect(locks.acquireWorkspaceRelocationLock(f.data, f.params.intent_id, 10)).rejects.toBeDefined()
+        expect(await fs.readFile(fenceFile)).toEqual(fenceBytes)
+        const native = require('../../scripts/lib/process-identity.cjs'), lockFile = path.join(f.data, 'cli.lock')
+        const held = native.tryFileLock(lockFile, await fs.readFile(lockFile, 'utf8'))
+        expect(held).toBeTruthy()
+        const tryLock = vi.spyOn(native, 'tryFileLock'), waiting = locks.acquireWorkspaceRelocationRecoveryLock(f.data, f.params.intent_id, 2000)
+        const observed = waiting.then((lock: string) => { locks.releaseCliLock(lock); return null }, (error: unknown) => error)
+        let heldReleased = false
+        try {
+          await vi.waitFor(() => expect(tryLock.mock.calls.some((call: any[]) => JSON.parse(call[1]).command === 'workspace-relocation-recovery')).toBe(true))
+          await fs.writeFile(fenceFile, JSON.stringify({ ...fence, created_at: new Date(Date.parse(fence.created_at) + 2000).toISOString() }))
+          native.releaseFileLock(held); heldReleased = true
+          expect(await observed).toMatchObject({ code: 'WORKSPACE_MAINTENANCE' })
+        } finally {
+          tryLock.mockRestore(); if (!heldReleased) native.releaseFileLock(held)
+          await observed; await fs.writeFile(fenceFile, fenceBytes)
+        }
+        expect(cold.processes.size).toBe(0); expect(await fs.readFile(fenceFile)).toEqual(fenceBytes)
+      } finally { await cold.stop() }
     } finally {
       const coordinator = f.manager.workspaceValidationProof?.result.coordinator
       if (coordinator?.connected) { const ended = once(coordinator, 'exit'); coordinator.disconnect(); await ended }
@@ -2129,6 +2168,7 @@ describe.skipIf(process.env.GITHUB_ACTIONS !== 'true')('fixed terminal release a
             await fs.rmdir(path.join(f.data, 'workspace-control/relocation-active'))
             await expect(f.manager.completeWorkspaceRelocation(f.params)).resolves.toEqual(result)
             expect(grant.revoked).toBe(true); expect(grant.child.connected).toBe(false)
+            await expect(locks.acquireWorkspaceRelocationRecoveryLock(f.data, f.params.intent_id, 10)).rejects.toMatchObject({ code: 'WORKSPACE_MAINTENANCE' })
             expect(require('../../scripts/lib/known-process-exit.cjs').probeKnownProcessExit([grant.launch.process]).state).toBe('stopped')
             expect(f.manager.workspaceFinalizationGrant).toBeUndefined(); expect(f.manager.workspaceStopSequence).toBeUndefined()
             const nextLock = await locks.acquireCliLock(f.data, 'next-operation', 1000); locks.releaseCliLock(nextLock)
