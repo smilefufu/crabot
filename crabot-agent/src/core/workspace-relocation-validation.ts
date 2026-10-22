@@ -81,6 +81,16 @@ export function createWorkspaceRelocationRootVerifier(options: Options) {
       await verify()
       return confirmed
     } catch (error) {
+      const causes: Array<Record<string, string | null>> = []
+      for (let current: unknown = error, depth = 0; current && typeof current === 'object' && depth < 4; depth++) {
+        const value = current as { code?: unknown; stage?: unknown; transport_code?: unknown; remote_code?: unknown; cause?: unknown }
+        const fixed = (field: unknown, pattern: RegExp): string | null => typeof field === 'string' && field.length <= 128 && pattern.test(field) ? field : null
+        causes.push({ code: fixed(value.code, /^(?:CRABOT_|WORKSPACE_)[A-Z_]+$|^(?:UNAUTHORIZED|FORBIDDEN|INVALID_PARAMS|SERVICE_UNAVAILABLE)$/),
+          stage: fixed(value.stage, /^[a-z][a-z0-9-]*$/), transport_code: fixed(value.transport_code, /^(?:ERR_[A-Z_]+|E[A-Z]+|ABORT_ERR)$/),
+          remote_code: fixed(value.remote_code, /^(?:INVALID_REQUEST|INVALID_PARAMS|METHOD_NOT_FOUND|UNAUTHORIZED|FORBIDDEN|PERMISSION_DENIED|NOT_FOUND|CONFLICT|INTERNAL_ERROR|SERVICE_UNAVAILABLE|TIMEOUT)$/) })
+        current = value.cause
+      }
+      console.error(JSON.stringify({ event: 'workspace_root_validation_failed', causes }))
       if (error instanceof RpcError) throw error
       throw Object.assign(unavailable(), { cause: error })
     }

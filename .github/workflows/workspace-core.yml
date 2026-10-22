@@ -24,6 +24,9 @@ on:
       - 'scripts/lib/process-identity.cjs'
       - 'scripts/lib/owned-process-tree.cjs'
       - 'scripts/lib/module-carrier-rpc.cjs'
+      - 'scripts/lib/module-runtime-rpc.cjs'
+      - 'scripts/lib/pinned-process-rpc.cjs'
+      - 'scripts/lib/__tests__/module-shutdown-rpc.test.mjs'
       - 'scripts/lib/__tests__/module-carrier-rpc.test.mjs'
       - 'crabot-native/**'
       - 'scripts/workspace-root-probe.mjs'
@@ -47,6 +50,9 @@ on:
       - 'scripts/lib/process-identity.cjs'
       - 'scripts/lib/owned-process-tree.cjs'
       - 'scripts/lib/module-carrier-rpc.cjs'
+      - 'scripts/lib/module-runtime-rpc.cjs'
+      - 'scripts/lib/pinned-process-rpc.cjs'
+      - 'scripts/lib/__tests__/module-shutdown-rpc.test.mjs'
       - 'scripts/lib/__tests__/module-carrier-rpc.test.mjs'
       - 'crabot-native/**'
       - 'scripts/workspace-root-probe.mjs'
@@ -99,7 +105,7 @@ jobs:
           done
       - name: Actual fixed directory probe and bounded cleanup
         if: matrix.suite == 'finite'
-        run: node --test scripts/lib/__tests__/workspace-root-probe.test.mjs scripts/lib/__tests__/module-carrier-rpc.test.mjs
+        run: node --test scripts/lib/__tests__/workspace-root-probe.test.mjs scripts/lib/__tests__/module-carrier-rpc.test.mjs scripts/lib/__tests__/module-shutdown-rpc.test.mjs
       - name: Persistent workspace maintenance guards
         if: matrix.suite == 'finite'
         working-directory: crabot-shared

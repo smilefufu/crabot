@@ -152,3 +152,38 @@ for (const limit of [0, -1, 1.5, 32 * 1024 * 1024 + 1]) test('invalid full scope
   await assert.rejects(transport.openPinnedProcessRpc(f.process, f.port, { maxResponseBytes: limit }))
   assert.equal(f.calls.length, 0)
 })
+
+for (const [kind, stage] of [['bad-json', 'response-json'], ['wrong-id', 'response-identity'], ['failed', 'response-rejected'], ['unknown-code', 'response-rejected'], ['oversize', 'response-budget'], ['timeout', 'request-error']]) {
+  test('fixed transport retains only a safe diagnostic stage: ' + kind, async t => {
+    const secret = 'PRIVATE_RESPONSE_BODY_AND_CREDENTIAL'
+    const f = await fixture(t, (req, res, body, data) => {
+      if (kind === 'timeout') return
+      const result = { id: kind === 'wrong-id' ? 'other' : body.id, success: !['failed', 'unknown-code'].includes(kind), data,
+        error: { code: kind === 'unknown-code' ? secret : 'SERVICE_UNAVAILABLE', message: secret } }
+      res.end(kind === 'bad-json' ? secret : kind === 'oversize' ? secret.repeat(20000) : JSON.stringify(result))
+    })
+    const rpc = await transport.openPinnedProcessRpc(f.process, f.port, { timeoutMs: 100 })
+    t.after(() => rpc.close())
+    await assert.rejects(rpc.call('get_runtime_identity', {}, { authorizationBearer: secret }), error => {
+      assert.equal(error.code, 'CRABOT_PROCESS_RPC'); assert.equal(error.stage, stage)
+      if (kind === 'failed') assert.equal(error.remote_code, 'SERVICE_UNAVAILABLE')
+      assert.equal(JSON.stringify(error).includes(secret), false)
+      assert.equal(error.stack.includes(secret), false)
+      return true
+    })
+    const count = f.calls.length
+    await assert.rejects(rpc.call('shutdown', {}), { code: 'CRABOT_PROCESS_RPC' })
+    assert.equal(f.calls.length, count); assert.equal(f.sockets.size, 1)
+  })
+}
+
+test('runtime proof preserves fixed transport diagnostics without forwarding a response body', async t => {
+  const f = await fixture(t, (req, res) => res.end('PRIVATE_INVALID_RESPONSE'))
+  await assert.rejects(runtimeRpc.openModuleRuntimeRpc(f.process, f.port, expected), error => {
+    assert.equal(error.code, 'CRABOT_MODULE_RPC_UNVERIFIED')
+    assert.equal(error.cause?.code, 'CRABOT_PROCESS_RPC'); assert.equal(error.cause?.stage, 'response-json')
+    assert.equal(JSON.stringify(error).includes('PRIVATE_INVALID_RESPONSE'), false)
+    return true
+  })
+  assert.equal(f.calls.length, 1); assert.equal(f.sockets.size, 1)
+})
