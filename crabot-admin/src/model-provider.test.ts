@@ -237,6 +237,72 @@ describe('ModelProviderManager', () => {
     })
   })
 
+  describe('Gemini connectivity', () => {
+    const draft: CreateModelProviderParams = {
+      name: 'Gemini',
+      type: 'manual',
+      format: 'gemini',
+      endpoint: 'https://gateway.example/antigravity',
+      api_key: 'test-key-with+reserved&characters',
+      models: [{ model_id: 'gemini-test', display_name: 'Gemini Test', type: 'llm' }],
+    }
+
+    it('should validate the draft with header auth for both model listing and chat', async () => {
+      const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, init) => {
+        if (new URL(String(url)).searchParams.has('key')) {
+          return new Response(JSON.stringify({ code: 'api_key_in_query_deprecated' }), { status: 400 })
+        }
+        if (init?.headers && new Headers(init.headers).get('Authorization') === `Bearer ${draft.api_key}`) {
+          return init.method === 'POST'
+            ? new Response('data: {"choices":[{"delta":{"content":"ok"}}]}\n\n')
+            : new Response('{"data":[]}')
+        }
+        return new Response('Unauthorized', { status: 401 })
+      })
+
+      expect(await manager.validateDraftProvider(draft)).toMatchObject({ success: true })
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+      expect(fetchMock).toHaveBeenNthCalledWith(1, `${draft.endpoint}/models`, {
+        method: 'GET',
+        headers: { Authorization: `Bearer ${draft.api_key}` },
+      })
+      expect(fetchMock).toHaveBeenNthCalledWith(2, `${draft.endpoint}/chat/completions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${draft.api_key}` },
+        body: expect.any(String),
+      })
+      expect(JSON.parse(String(fetchMock.mock.calls[1][1]?.body))).toMatchObject({
+        model: 'gemini-test', stream: true,
+        messages: [{ role: 'system', content: expect.any(String) }, { role: 'user', content: 'ping' }],
+        tools: [expect.objectContaining({ type: 'function' })],
+      })
+      expect(manager.listProviders()).toEqual([])
+    })
+
+    it('should test a saved provider using header auth without putting its key in the URL', async () => {
+      const provider = await manager.createProvider(draft)
+      const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{"data":[]}'))
+
+      expect(await manager.testProviderModel(provider.id)).toMatchObject({ success: true })
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+      expect(fetchMock).toHaveBeenCalledWith(`${draft.endpoint}/models`, {
+        method: 'GET',
+        headers: { Authorization: `Bearer ${draft.api_key}` },
+      })
+      expect(manager.getProvider(provider.id)?.status).toBe('active')
+    })
+
+    it('should report an authentication error without attempting chat or saving the draft', async () => {
+      const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('Unauthorized', { status: 401 }))
+
+      expect(await manager.validateDraftProvider(draft)).toMatchObject({
+        success: false, failed_stage: 'endpoint', error: 'HTTP 401: Unauthorized',
+      })
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+      expect(manager.listProviders()).toEqual([])
+    })
+  })
+
   describe('Global Config', () => {
     it('should get default global config', () => {
       const config = manager.getGlobalConfig()
