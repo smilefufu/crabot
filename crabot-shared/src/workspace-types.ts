@@ -83,6 +83,46 @@ export interface QuiesceWorkspaceRelocationWebResult {
   intent_sha256: string
 }
 
+export type WorkspaceRelocationFinalizationAction = 'prepare_web' | 'resume_web'
+export interface WorkspaceRelocationFinalizationRequest {
+  intent_id: string
+  launch_id: string
+  completion_sha256: string
+}
+export interface VerifyWorkspaceRelocationFinalizationParams {
+  intent_id: string
+  launch_id: string
+  completion_sha256: string
+  action: WorkspaceRelocationFinalizationAction
+}
+export interface VerifyWorkspaceRelocationFinalizationResult {
+  verified: true
+  intent_id: string
+  intent_sha256: string
+  launch_id: string
+  launch_sha256: string
+  completion_sha256: string
+  action: WorkspaceRelocationFinalizationAction
+}
+export type PrepareWorkspaceRelocationCompletionParams = WorkspaceRelocationFinalizationRequest
+export interface PrepareWorkspaceRelocationCompletionResult {
+  prepared: true
+  intent_id: string
+  intent_sha256: string
+  launch_id: string
+  launch_sha256: string
+  completion_sha256: string
+}
+export type ResumeWorkspaceRelocationWebParams = WorkspaceRelocationFinalizationRequest
+export interface ResumeWorkspaceRelocationWebResult {
+  resumed: true
+  intent_id: string
+  intent_sha256: string
+  launch_id: string
+  launch_sha256: string
+  completion_sha256: string
+}
+
 export type WorkspaceRelocationCoordinatorAction = 'capture_workers' | 'stop_workers'
 export interface VerifyWorkspaceRelocationCoordinatorParams {
   intent_id: string
