@@ -93,7 +93,13 @@ static napi_value CaptureProcessTreeGeneration(napi_env env, napi_callback_info 
         stage = "pinned-child-birth-order";
         if (child->created < parent.created) continue; // A stale creator PID from an older generation.
         stage = "pinned-child-ownership";
-        if (child->identity.pid == self.pid || child->identity.owner != owner || child->identity.parent != parent.identity.pid) throw std::runtime_error("Held process child ownership changed");
+        if (child->identity.pid == self.pid || child->identity.owner != owner || child->identity.parent != parent.identity.pid) {
+          const DWORD waitState = WaitForSingleObject(child->handle.get(), 0);
+          throw std::runtime_error("Held process child ownership changed (pid " + std::to_string(child->identity.pid)
+            + ", expected-parent " + std::to_string(parent.identity.pid) + ", actual-parent " + std::to_string(child->identity.parent)
+            + ", self-child " + std::to_string(child->identity.pid == self.pid) + ", owner-matches " + std::to_string(child->identity.owner == owner)
+            + ", wait " + std::to_string(waitState) + ")");
+        }
         stage = "pinned-child-scope-size";
         if (processes.size() >= 32768) throw std::runtime_error("Held process scope exceeds limit");
         byPid.emplace(pid, child.get()); processes.push_back(std::move(child));
