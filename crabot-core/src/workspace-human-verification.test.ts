@@ -2458,7 +2458,7 @@ describe.skipIf(process.env.GITHUB_ACTIONS !== 'true')('fixed terminal release a
 
 
 describe('fixed job archive storage handoff', () => {
-  const modes = ['healthy Agent', 'healthy Memory', ...['target conflict', 'fence conflict', 'runtime changed', 'unhealthy runtime', 'wrong launch', 'lost acknowledgement', 'archive changed', 'fence changed', 'active conflict after move', ...(process.platform !== 'win32' && process.getuid?.() !== 0 ? ['readonly root'] : [])].map(value => 'healthy archive ' + value)]
+  const modes = ['healthy Agent', 'healthy Memory', ...['target conflict', 'fence conflict', 'runtime changed', 'unhealthy runtime', 'wrong launch', 'lost acknowledgement', 'coordinator exited after archive', 'archive changed', 'fence changed', 'active conflict after move', ...(process.platform !== 'win32' && process.getuid?.() !== 0 ? ['readonly root'] : [])].map(value => 'healthy archive ' + value)]
   it.each(modes)('keeps maintenance and preserves one job: %s', async mode => {
     const f = await fixture({ actualAgent: true, actualAdmin: true, validationHealth: 'healthy', withMemory: mode === 'healthy Memory', memoryHealth: 'healthy', processLifetimeMs: process.platform === 'win32' ? 900000 : 300000 })
     const locks = require('../../scripts/lib/cli-lock.mjs'), records = require('../../scripts/lib/workspace-relocation-intent.mjs')
@@ -2540,8 +2540,13 @@ describe('fixed job archive storage handoff', () => {
       const replySpy = vi.spyOn(result.coordinator, 'emit').mockImplementation((event: any, ...values: any[]) => {
         const message = values[0]
         if (!archiveReplyChanged && event === 'message' && message?.kind === 'workspace_relocation_archive_reply' && message.ok === true
-          && ['lost acknowledgement', 'archive changed', 'fence changed', 'active conflict after move'].includes(archiveMode)) {
+          && ['lost acknowledgement', 'coordinator exited after archive', 'archive changed', 'fence changed', 'active conflict after move'].includes(archiveMode)) {
           archiveReplyChanged = true
+          if (archiveMode === 'coordinator exited after archive') {
+            expect(native.sameProcess(context.launch.process, native.inspectProcess(result.coordinator.pid))).toBe(true)
+            result.coordinator.kill('SIGKILL')
+            return true
+          }
           if (archiveMode === 'lost acknowledgement') return emit(event, { ...message, ok: false })
           if (archiveMode === 'archive changed') writeFileSync(path.join(archiveDirectory, 'relocation.json'), readFileSync(path.join(archiveDirectory, 'relocation.json'), 'utf8') + ' ')
           if (archiveMode === 'fence changed') writeFileSync(fenceFile, JSON.stringify({ ...JSON.parse(readFileSync(fenceFile, 'utf8')), unexpected: true }))
@@ -2555,7 +2560,7 @@ describe('fixed job archive storage handoff', () => {
           expect(finalization.archive()).toBe(firstArchive)
           await expect(firstArchive).rejects.toMatchObject({ code: 'CRABOT_WORKSPACE_JOURNAL_UNAVAILABLE' })
           expect(sendSpy.mock.calls.filter(([message]: any[]) => message?.kind === 'workspace_relocation_archive_request')).toHaveLength(1)
-          const moved = ['lost acknowledgement', 'archive changed', 'fence changed', 'active conflict after move'].includes(archiveMode)
+          const moved = ['lost acknowledgement', 'coordinator exited after archive', 'archive changed', 'fence changed', 'active conflict after move'].includes(archiveMode)
           expect(archiveReplyChanged).toBe(moved)
           if (moved) {
             if (archiveMode === 'active conflict after move') expect(await fs.readFile(path.join(path.dirname(completionFile), 'foreign-content'), 'utf8')).toBe('preserve foreign active job')
@@ -2573,6 +2578,14 @@ describe('fixed job archive storage handoff', () => {
             else await expect(fs.lstat(fenceFile)).rejects.toMatchObject({ code: 'ENOENT' })
           }
           expect(require('../../scripts/lib/workspace-maintenance.cjs').workspaceMaintenancePending(f.data)).toBe(true)
+          if (archiveMode === 'coordinator exited after archive') {
+            await vi.waitFor(() => expect(require('../../scripts/lib/known-process-exit.cjs').probeKnownProcessExit([context.launch.process]).state).toBe('stopped'), { timeout: 10000 })
+            expect(records.readCurrentWorkspaceRelocationFinalizing(f.data).intent_id).toBe(f.params.intent_id)
+            expect(records.readWorkspaceRelocationArchivedState(f.data, f.params.intent_id).intent.id).toBe(f.params.intent_id)
+            await expect(locks.acquireCliLock(f.data, 'start', 10)).rejects.toMatchObject({ code: 'WORKSPACE_MAINTENANCE' })
+            await expect(finalization.archive()).rejects.toMatchObject({ code: 'CRABOT_WORKSPACE_JOURNAL_UNAVAILABLE' })
+            expect(sendSpy.mock.calls.filter(([message]: any[]) => message?.kind === 'workspace_relocation_archive_request')).toHaveLength(1)
+          }
           expect(await fs.readFile(path.join(f.data, 'workspace-control/catalog.json'))).toEqual(catalogBeforeArchive)
         } else {
           const archived = await finalization.archive()
