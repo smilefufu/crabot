@@ -606,6 +606,7 @@ static napi_value ReleaseLock(napi_env env, napi_callback_info info) {
 #include "user-path.h"
 #include "install-filesystem.h"
 #include "directory-move.h"
+#include "file-move.h"
 #include "file-metadata.h"
 #include "workspace-owner-inheritance.h"
 #include "directory-access.h"
@@ -640,6 +641,7 @@ static napi_value Initialize(napi_env env, napi_value exports) {
 #endif
     {"inspectFileMetadata", nullptr, InspectFileMetadata, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"renameDirectoryNoReplace", nullptr, RenameDirectoryNoReplace, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"renameFileNoReplace", nullptr, RenameFileNoReplace, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"inspectInstallFilesystem", nullptr, InstallFilesystemCall, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"inspectProcess", nullptr, InspectCall, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"listProcessIds", nullptr, PidsCall, nullptr, nullptr, nullptr, napi_default, nullptr},

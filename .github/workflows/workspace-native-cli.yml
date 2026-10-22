@@ -100,6 +100,8 @@ jobs:
         if: runner.os == 'Windows'
         shell: powershell
         run: .github/scripts/probe-workspace-windows-security.ps1
+      - name: Atomic single-link file finalization primitive
+        run: node --test scripts/lib/__tests__/file-move.test.mjs
       - name: Native owned process scope regressions
         run: node --test scripts/lib/__tests__/owned-process-tree.test.mjs scripts/lib/__tests__/spawned-process-tree.test.mjs
       - name: Actual finite source host tool regressions
