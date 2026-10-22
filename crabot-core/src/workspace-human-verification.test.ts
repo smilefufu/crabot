@@ -31,7 +31,7 @@ async function reserveFixturePort(): Promise<ReturnType<typeof http.createServer
   throw new Error('No finite fixture port was available')
 }
 
-async function fixture(options: { withMemory?: boolean; inactiveMemory?: boolean; wrongRuntime?: boolean; result?: string; withAgent?: boolean; agentResult?: string; actualAgent?: boolean; businessAgent?: boolean; businessMemory?: boolean; processLifetimeMs?: number; backgroundShell?: boolean; validationHealth?: 'healthy' | 'unhealthy'; validationRuntimeMismatch?: boolean; validationRootOverride?: boolean; validationRegistration?: 'delayed' | 'exit'; memoryHealth?: 'healthy' | 'degraded'; memoryBootstrap?: boolean; actualAdmin?: boolean; adminReadyDelayMs?: number; quiesceResult?: string; orphanDuringStop?: boolean; extraModule?: 'running' | 'inactive' | 'tool' } = {}) {
+async function fixture(options: { withMemory?: boolean; inactiveMemory?: boolean; wrongRuntime?: boolean; result?: string; withAgent?: boolean; agentResult?: string; actualAgent?: boolean; businessAgent?: boolean; businessMemory?: boolean; processLifetimeMs?: number; backgroundShell?: boolean; validationHealth?: 'healthy' | 'unhealthy'; validationRuntimeMismatch?: boolean; validationRootOverride?: boolean; validationRegistration?: 'delayed' | 'exit'; memoryHealth?: 'healthy' | 'degraded'; memoryBootstrap?: boolean; actualAdmin?: boolean; adminReadyDelayMs?: number; quiesceResult?: string; orphanDuringStop?: boolean; extraModule?: 'running' | 'inactive' | 'tool'; historyWorkspace?: boolean } = {}) {
   if ((options.businessAgent || options.businessMemory) && (process.env.GITHUB_ACTIONS !== 'true' || process.env.CRABOT_WORKSPACE_BUSINESS_ONSTART_CI !== '1')) throw new Error('Business onStart is isolated CI only')
   const root = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'crabot-current-admin-')))
   const native = require('../../scripts/lib/process-identity.cjs'), management = require('../../scripts/lib/desktop-management.cjs')
@@ -205,9 +205,13 @@ async function fixture(options: { withMemory?: boolean; inactiveMemory?: boolean
             })})().catch(error=>{console.error(error);process.exit(1)});
           setTimeout(()=>process.exit(0),${options.processLifetimeMs ?? 30000}).unref();}`)
       }
+      if (options.historyWorkspace) {
+        await fs.mkdir(path.join(data, 'workspaces/default/tasks/worker'), { recursive: true })
+        await fs.writeFile(path.join(data, 'workspaces/default/tasks/worker/history.md'), 'original history artifact')
+      }
       const agent = { module_id: 'crabot-agent', module_type: 'agent', entry: `"${process.execPath}" "${agentScript}"`,
         env: { FIXTURE_CALLS: path.join(data, 'agent-calls.json'), FIXTURE_READY: agentReady, FIXTURE_RESULT: options.agentResult ?? '',
-          DATA_DIR: data, CRABOT_AGENT_DATA_DIR: path.join(data, 'agent'), ...(options.validationRootOverride ? { WORKER_WORKSPACES_DIR: path.join(data, 'workspaces') } : {}), FIXTURE_WORKSPACE: path.join(data, 'project'), FIXTURE_STOPS: path.join(data, 'stops.txt'),
+          DATA_DIR: data, CRABOT_AGENT_DATA_DIR: path.join(data, 'agent'), ...(options.validationRootOverride ? { WORKER_WORKSPACES_DIR: path.join(data, 'workspaces') } : {}), FIXTURE_WORKSPACE: options.historyWorkspace ? path.join(data, 'workspaces/default/tasks/worker') : path.join(data, 'project'), FIXTURE_STOPS: path.join(data, 'stops.txt'),
           ...(options.backgroundShell ? { FIXTURE_BG_COMMAND: `"${process.execPath.replaceAll('\\', '/')}" "${path.join(data, 'finite-background.cjs').replaceAll('\\', '/')}"`, FIXTURE_BG_READY: path.join(data, 'background-ready.json'), ...(options.orphanDuringStop ? { FIXTURE_ORPHAN_READY: path.join(data, 'orphan-ready.json') } : {}) } : {}) },
         port: (agentPort.address() as { port: number }).port, auto_start: false, auto_restart: false, skip_health_check: true, start_priority: 1, status: 'stopped' }
       await new Promise<void>(resolve => agentPort.close(() => resolve()))
@@ -1934,6 +1938,30 @@ describe('MM checks the new runtime health and Root under the original job', () 
 
 
 describe('normal fixed-job Admin completion preparation', () => {
+  it('locates sealed workspace history while the original archive still retains maintenance', async () => {
+    const f = await fixture({ actualAgent: true, actualAdmin: true, validationHealth: 'healthy', historyWorkspace: true, processLifetimeMs: 300000 })
+    const locks = require('../../scripts/lib/cli-lock.mjs'), lock = await locks.acquireWorkspaceRelocationLock(f.data, f.params.intent_id)
+    try {
+      await f.manager.prepareWorkspaceRelocationCompletion(f.params, 'fixture-human')
+      const { locateWorkspaceRelocationHistory } = require('../../scripts/lib/workspace-relocation-history.mjs')
+      const query = { dataDir: f.data, managerKey: 'channel::session', workerId: 'worker', incarnationId: 'inc' }
+      const location = await locateWorkspaceRelocationHistory(query)
+      expect(location).toEqual({ intent_id: f.params.intent_id, manager_key: query.managerKey, worker_id: 'worker', incarnation_id: 'inc',
+        before_root: path.join(f.data, 'workspaces/default/tasks/worker'), after_root: path.join(f.root, 'relocated/default/tasks/worker') })
+      expect(await fs.readFile(path.join(location.after_root, 'history.md'), 'utf8')).toBe('original history artifact')
+      expect(await locateWorkspaceRelocationHistory({ ...query, incarnationId: 'another-incarnation' })).toBeNull()
+      const bytes = await fs.readFile(path.join(f.data, 'workspace-control/relocation-history', f.params.intent_id, 'relocation.json'))
+      const archived = path.join(f.data, 'workspace-control/relocation-history', f.params.intent_id, 'relocation.json')
+      await fs.appendFile(archived, '\n')
+      await expect(locateWorkspaceRelocationHistory(query)).rejects.toMatchObject({ code: 'CRABOT_WORKSPACE_HISTORY_LOCATION' })
+      await fs.writeFile(archived, bytes)
+    } finally {
+      f.manager.workspaceFinalizationGrant?.close()
+      const child = f.manager.workspaceValidationProof?.result.coordinator
+      if (child?.connected) { const ended = once(child, 'exit'); child.disconnect(); await ended }
+      locks.releaseCliLock(lock); await f.cleanup()
+    }
+  }, process.platform === 'win32' ? 600000 : 120000)
   it.each(['running', 'inactive', 'tool'] as const)('observes the actual original finite %s module scope without starting business', async extraModule => {
     const f = await fixture({ extraModule })
     try {
@@ -2034,7 +2062,7 @@ describe.skipIf(process.env.GITHUB_ACTIONS !== 'true')('fixed terminal release a
   it.each(['healthy', 'controller lost acknowledgement', 'inactive module', 'skip-health tool', 'unhealthy restored module', 'changed restored definition', 'bad prepared result', 'unhealthy runtime', 'existing release fact', 'lost acknowledgement', 'new maintenance after effect'])(
     'does not replay or reopen an unconfirmed result: %s', async mode => {
       const extraModule = mode === 'skip-health tool' ? 'tool' : mode === 'inactive module' ? 'inactive' : ['healthy', 'controller lost acknowledgement', 'unhealthy restored module', 'changed restored definition'].includes(mode) ? 'running' : undefined
-      const f = await fixture({ actualAgent: true, actualAdmin: true, validationHealth: 'healthy', extraModule, processLifetimeMs: process.platform === 'win32' ? 900000 : 300000 })
+      const f = await fixture({ actualAgent: true, actualAdmin: true, validationHealth: 'healthy', extraModule, historyWorkspace: mode === 'healthy', processLifetimeMs: process.platform === 'win32' ? 900000 : 300000 })
       const locks = require('../../scripts/lib/cli-lock.mjs'), records = require('../../scripts/lib/workspace-relocation-intent.mjs')
       const native = require('../../scripts/lib/process-identity.cjs'), maintenance = require('../../scripts/lib/workspace-maintenance.cjs')
       const lock = await locks.acquireWorkspaceRelocationLock(f.data, f.params.intent_id)
@@ -2105,6 +2133,30 @@ describe.skipIf(process.env.GITHUB_ACTIONS !== 'true')('fixed terminal release a
             expect(f.manager.workspaceFinalizationGrant).toBeUndefined(); expect(f.manager.workspaceStopSequence).toBeUndefined()
             const nextLock = await locks.acquireCliLock(f.data, 'next-operation', 1000); locks.releaseCliLock(nextLock)
             await expect(f.manager.handleVerifyWorkspaceRelocationFinalization({ ...request, action: 'resume_web' }, { authorizationBearer: grant.token })).rejects.toMatchObject({ code: 'FORBIDDEN' })
+            if (mode === 'healthy') {
+              const { locateWorkspaceRelocationHistory } = require('../../scripts/lib/workspace-relocation-history.mjs')
+              const query = { dataDir: f.data, managerKey: 'channel::session', workerId: 'worker', incarnationId: 'inc' }
+              const first = await locateWorkspaceRelocationHistory(query)
+              const { WorkspaceManager } = require('../../crabot-agent/dist/workers/harness/workspace-manager.js')
+              const history = new WorkspaceManager(undefined, f.data)
+              await expect(history.locateHistory(query.managerKey, query.workerId, query.incarnationId)).resolves.toEqual(first)
+              expect(first.after_root).toBe(path.join(f.root, 'relocated/default/tasks/worker'))
+              const catalog = new WorkspaceCatalog({ dataRoot: f.data, files: native }), beginLock = await locks.acquireCliLock(f.data, 'workspace-relocation')
+              let next
+              try { next = await records.beginWorkspaceRelocationIntent({ dataDir: f.data, id: randomUUID(), target: path.join(f.data, 'workspaces'),
+                expectedRevision: (await catalog.snapshot()).revision, protectedRoots: [path.join(f.data, 'workspace-control')] }) }
+              finally { locks.releaseCliLock(beginLock) }
+              const nextLock = await locks.acquireWorkspaceRelocationLock(f.data, next.id)
+              try {
+                await f.manager.completeWorkspaceRelocation({ intent_id: next.id, intent_sha256: sha256CanonicalJson(next) }, 'fixture-human')
+                const second = await locateWorkspaceRelocationHistory(query)
+                expect(second).toEqual({ ...first, intent_id: next.id, after_root: first.before_root })
+                await expect(history.locateHistory(query.managerKey, query.workerId, query.incarnationId)).resolves.toEqual(second)
+                expect(await fs.readFile(path.join(second.after_root, 'history.md'), 'utf8')).toBe('original history artifact')
+                expect(records.readWorkspaceRelocationReleased(f.data, f.params.intent_id).completion_sha256).toBe(prepared.completion_sha256)
+                expect(f.manager.workspaceFinalizationGrant).toBeUndefined()
+              } finally { locks.releaseCliLock(nextLock) }
+            }
           } else if (mode === 'unhealthy restored module' || mode === 'changed restored definition') {
             await expect(f.manager.resumeWorkspaceRelocationWeb(f.params)).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
             if (mode === 'changed restored definition') expect(f.manager.processes.has(extraId)).toBe(false)

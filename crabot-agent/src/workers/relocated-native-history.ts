@@ -66,7 +66,7 @@ export type NativeHistorySource = NonNullable<Awaited<ReturnType<typeof nativeHi
 export async function nativeHistoryDirectory(source: NativeHistorySource, original: string): Promise<string> {
   await source.verify()
   const directory = relocatedNativePath(source.history, original), canonical = await fs.realpath(directory)
-  if (directory !== original && (!within(source.history.after_root, canonical) || await fs.realpath(source.history.after_root) !== source.history.after_root)) throw failure()
+  if (within(source.history.before_root, original) && (!within(source.history.after_root, canonical) || await fs.realpath(source.history.after_root) !== source.history.after_root)) throw failure()
   if (!(await fs.stat(canonical)).isDirectory()) throw failure()
   await source.verify()
   return directory
@@ -82,7 +82,7 @@ export function nativeHistorySourcePath(history: WorkspaceHistoryCoordinates, or
 export async function readNativeHistoryText(source: NativeHistorySource, original: string): Promise<string> {
   await source.verify()
   const file = relocatedNativePath(source.history, original), canonical = await fs.realpath(file)
-  if (file !== original && (!within(source.history.after_root, canonical) || await fs.realpath(source.history.after_root) !== source.history.after_root)) throw failure()
+  if (within(source.history.before_root, original) && (!within(source.history.after_root, canonical) || await fs.realpath(source.history.after_root) !== source.history.after_root)) throw failure()
   const before = await fs.lstat(canonical, { bigint: true })
   if (!before.isFile() || before.isSymbolicLink()) throw failure()
   const handle = await fs.open(canonical, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0))

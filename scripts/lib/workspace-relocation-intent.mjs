@@ -2213,7 +2213,10 @@ export const readWorkspaceRelocationArchivedState = recordGraphReader(function r
   const frame = workspaceHealthFrame({ ctx, intent, coordinator: { launch, ready }, selected, originalModules: modules.modules }, id,
     { modules: health.modules, root_proof: health.root_proof })
   if (sha256CanonicalJson(frame.modules) !== sha256CanonicalJson(health.modules)) fail()
-  return { completion, intent, launch, ready, selected, published, health, modules }
+  const files = readPrivateJson(path.join(archive.control, filePlanFile), 65536)
+  if (!files || files.intent_id !== id || files.intent_sha256 !== sha256CanonicalJson(intent)) fail()
+  validFileObservation(files.source_observation, intent)
+  return { completion, intent, launch, ready, selected, published, health, modules, workers, files }
 })
 /** Sealed closure facts for read-only inspection; no active role or command is restored. */
 export const readWorkspaceRelocationArchivedClosureFacts = recordGraphReader(function readWorkspaceRelocationArchivedClosureFacts(dataDir, id) {

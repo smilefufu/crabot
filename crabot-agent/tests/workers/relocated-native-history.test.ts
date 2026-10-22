@@ -210,3 +210,20 @@ for (const impl of ['claude-code', 'codex'] as const) describe('relocated native
     expect(tmux.isAlive).not.toHaveBeenCalled(); expect(await fs.readFile(source, 'utf8')).toBe(originalSource)
   })
 })
+
+
+describe('returned workspace path history boundaries', () => {
+  it('rejects symlink escapes even when a migration returns to the original path', async () => {
+    const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'returned-workspace-history-')))
+    try {
+      const workspace = path.join(root, 'workspace'), outside = path.join(root, 'outside')
+      await fs.mkdir(workspace); await fs.mkdir(outside); await fs.writeFile(path.join(outside, 'history.jsonl'), 'outside history')
+      await fs.symlink(outside, path.join(workspace, 'escaped'), process.platform === 'win32' ? 'junction' : 'dir')
+      const source = { history: { before_root: workspace, after_root: workspace, verify: async () => {} }, verify: async () => {} }
+      const { readNativeHistoryText, nativeHistoryDirectory } = await import('../../src/workers/relocated-native-history.js')
+      await expect(readNativeHistoryText(source as any, path.join(workspace, 'escaped/history.jsonl'))).rejects.toThrow()
+      await expect(nativeHistoryDirectory(source as any, path.join(workspace, 'escaped'))).rejects.toThrow()
+      expect(await fs.readFile(path.join(outside, 'history.jsonl'), 'utf8')).toBe('outside history')
+    } finally { await fs.rm(root, { recursive: true, force: true }) }
+  })
+})

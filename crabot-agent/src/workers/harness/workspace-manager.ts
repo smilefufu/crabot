@@ -2,7 +2,6 @@ import path from 'node:path'
 import { promises as fs } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { WorkspaceCatalog } from 'crabot-shared/dist/workspace-catalog.js'
-import { workspaceMaintenancePending } from 'crabot-shared'
 import { getDataRootDir, getWorkspacesRootDir } from '../../core/data-paths.js'
 import type { Workspace } from '../types.js'
 import { isWithin, type ManagedWorkspaceScope } from '../../permissions/tool-authorization.js'
@@ -60,11 +59,6 @@ export class WorkspaceManager {
 
   /** Coordinates only; the caller retains original query ownership and read authorization. */
   async locateHistory(managerKey: string, workerId: string, incarnationId: string): Promise<WorkspaceHistoryLocation | null> {
-    try { await fs.lstat(path.join(this.dataRoot, 'workspace-control', 'relocation-active', 'relocation.json')) }
-    catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
-      if (!workspaceMaintenancePending(this.dataRoot)) return null
-    }
     const { locateWorkspaceRelocationHistory } = require('../../../../scripts/lib/workspace-relocation-history.mjs')
     return locateWorkspaceRelocationHistory({ dataDir: this.dataRoot, managerKey, workerId, incarnationId })
   }
