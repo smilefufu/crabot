@@ -37,7 +37,7 @@ export async function inspectWorkspaceRelocationClosures({ dataDir, id, verify, 
       const planned = workerPlan.ledgers[index]
       if (!planned || file.name !== planned.name || file.manager_key !== planned.manager_key || digest(file.contents) !== planned.after_sha256) throw failure()
       const expectedVersion = planned.before_sha256 === planned.after_sha256 ? planned.before_version
-        : readJson(path.join(dataDir, 'workspace-control/relocation-worker-commits', index + '.closed.json'))?.version
+        : readJson(path.join(dataDir, 'workspace-control/relocation-active/relocation-worker-commits', index + '.closed.json'))?.version
       if (file.version !== expectedVersion) throw failure()
       return { path: path.join(snapshot.directories[2].path, file.name), version: file.version }
     })

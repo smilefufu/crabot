@@ -73,11 +73,13 @@ const identity = directory => {
 const same = (a, b) => a.path === b.path && a.dev === b.dev && a.ino === b.ino
 const validIdentity = value => value && Object.keys(value).length === 3 && absolute(value.path)
   && typeof value.dev === 'string' && /^(?:0|[1-9][0-9]*)$/.test(value.dev) && typeof value.ino === 'string' && /^[1-9][0-9]*$/.test(value.ino)
+const legacyRelocationFiles = ['relocation.json', 'relocation-workers.json', 'relocation-worker-processes.json', 'relocation-stop-attempt.json', 'relocation-stop-submission.json', 'relocation-modules.json', 'relocation-module-stop-attempt.json', 'relocation-module-processes', 'relocation-module-stop-submission.json', 'relocation-coordinator.json', 'relocation-coordinator-ready.json', 'relocation-process-stop.jsonl', 'relocation-execution-exit.json', 'relocation-files.json', 'relocation-file-actors.jsonl', 'relocation-worker-closure.json', 'relocation-worker-commits', 'relocation-manager-closure.json', 'relocation-manager-complete.json', 'relocation-root-plan.json', 'relocation-root-published.json', 'relocation-root-selected.json', 'relocation-root-parents.json', 'relocation-root-parents-complete.json', 'relocation-health.json']
 function context(dataDir, locked = false) {
   const dataRoot = management.requirePrivateDataRoot(dataDir)
   if (recordObservation) observeRecordPath(dataRoot, 'data', fs.lstatSync(dataRoot, { bigint: true }))
   if (locked && !cliLockToken(path.join(dataRoot, 'cli.lock'))) fail()
-  return { dataRoot, control: path.join(dataRoot, 'workspace-control'), file: path.join(dataRoot, 'workspace-control/relocation.json') }
+  const baseControl = path.join(dataRoot, 'workspace-control'), control = path.join(baseControl, 'relocation-active')
+  return { dataRoot, baseControl, control, file: path.join(control, 'relocation.json') }
 }
 function privateControl(control) {
   let stat
@@ -120,16 +122,25 @@ function readPrivateJson(file, limit) {
   const text = readPrivateText(file, limit)
   try { return text === undefined ? undefined : JSON.parse(text) } catch { fail() }
 }
+const assertNoLegacyRelocation = recordGraphReader(function assertNoLegacyRelocation(dataDir) {
+  const control = path.join(dataDir, 'workspace-control')
+  if (!privateControl(control)) return
+  for (const name of legacyRelocationFiles) {
+    const file = path.join(control, name)
+    try { fs.lstatSync(file); fail() }
+    catch (error) { if (error.code !== 'ENOENT') fail() }
+    observeRecordPath(file, 'file')
+  }
+})
 function read(ctx) {
-  if (!privateControl(ctx.control)) return null
-  const value = readPrivateJson(ctx.file, 65536)
-  if (value === undefined) {
-    for (const file of ['relocation-workers.json', 'relocation-worker-processes.json', 'relocation-stop-attempt.json', 'relocation-stop-submission.json', 'relocation-modules.json', 'relocation-module-stop-attempt.json', 'relocation-module-processes', 'relocation-module-stop-submission.json', 'relocation-coordinator.json', 'relocation-coordinator-ready.json', 'relocation-process-stop.jsonl', 'relocation-execution-exit.json', 'relocation-files.json', 'relocation-file-actors.jsonl', 'relocation-worker-closure.json', 'relocation-worker-commits', 'relocation-manager-closure.json', 'relocation-manager-complete.json', 'relocation-root-plan.json', 'relocation-root-published.json', 'relocation-root-selected.json', 'relocation-root-parents.json', 'relocation-root-parents-complete.json', 'relocation-health.json']) {
-      try { fs.lstatSync(path.join(ctx.control, file)); fail() }
-      catch (error) { if (error.code !== 'ENOENT') fail() }
-    }
+  if (!privateControl(ctx.baseControl)) return null
+  assertNoLegacyRelocation(ctx.dataRoot)
+  if (!privateControl(ctx.control)) {
+    if (readPrivateText(path.join(ctx.baseControl, 'relocation-finalizing.json'), 65536) !== undefined) fail()
     return null
   }
+  const value = readPrivateJson(ctx.file, 65536)
+  if (value === undefined) fail()
   try {
     if (![1, 2].includes(value?.schema_version) || Object.keys(value).length !== (value.schema_version === 1 ? 12 : 13)
       || value.schema_version === 2 && (!['exact', 'windows-owner-inheritance-v1'].includes(value.metadata_compatibility)
@@ -149,7 +160,7 @@ function syncDirectory(directory) {
   const fd = fs.openSync(directory, 'r')
   try { fs.fsyncSync(fd) } finally { fs.closeSync(fd) }
 }
-function syncIntent(ctx) { syncDirectory(ctx.control); syncDirectory(ctx.dataRoot) }
+function syncIntent(ctx) { syncDirectory(ctx.control); syncDirectory(ctx.baseControl); syncDirectory(ctx.dataRoot) }
 export const readWorkspaceRelocationIntent = recordGraphReader(function readWorkspaceRelocationIntent(dataDir) { return read(context(dataDir)) })
 
 export async function beginWorkspaceRelocationIntent(options) {
@@ -171,9 +182,9 @@ export async function beginWorkspaceRelocationIntent(options) {
   const catalog = new WorkspaceCatalog({ dataRoot: ctx.dataRoot, storageRoot, files: native })
   const snapshot = await catalog.snapshot()
   if (snapshot.revision !== options.expectedRevision) fail('WORKSPACE_REVISION_CONFLICT')
-  const controlIdentity = identity(ctx.control)
+  const baseControlIdentity = identity(ctx.baseControl)
   const preview = await inspectWorkspaceRelocationTarget(snapshot.storage_root, requestedTarget,
-    { protectedRoots: [...options.protectedRoots, ctx.control] })
+    { protectedRoots: [...options.protectedRoots, ctx.baseControl] })
   if (process.env.WORKER_WORKSPACES_DIR !== storageRoot || storageRoot !== undefined && preview.mode !== 'unchanged') {
     throw new WorkspaceError('WORKSPACE_DIRECTORY_CONFLICT', '当前部署通过 WORKER_WORKSPACES_DIR 固定了工作区位置或预检期间环境发生变化；未停止任务或修改目录选择。')
   }
@@ -190,20 +201,41 @@ export async function beginWorkspaceRelocationIntent(options) {
     || !same(preview.target_ancestor, identity(preview.target_ancestor.path))) fail()
   if (preview.target_identity) { if (!same(preview.target_identity, identity(preview.target))) fail() }
   else { try { fs.lstatSync(preview.target); fail() } catch (error) { if (error.code !== 'ENOENT') throw error } }
-  const record = { schema_version: 2, metadata_compatibility: metadataCompatibility, id: options.id, phase: 'freezing', catalog_revision: snapshot.revision,
-    data_root: dataIdentity, control_root: controlIdentity, source: preview.source_identity, target: preview.target, requested_target: requestedTarget,
-    target_identity: preview.target_identity, target_ancestor: preview.target_ancestor, created_at: new Date().toISOString() }
-  if (!same(controlIdentity, identity(ctx.control)) || !privateControl(ctx.control)) fail()
+  const verifyAdmission = () => {
+    if (process.env.WORKER_WORKSPACES_DIR !== storageRoot || cliLockToken(path.join(ctx.dataRoot, 'cli.lock')) !== operationToken
+      || !same(dataIdentity, identity(ctx.dataRoot)) || !same(baseControlIdentity, identity(ctx.baseControl)) || !privateControl(ctx.baseControl)) fail()
+  }
+  verifyAdmission()
   if (read(ctx)) fail('WORKSPACE_RELOCATION_CONFLICT')
-  publishPrivateJson(ctx, ctx.file, record, 65536, () => {
-    if (process.env.WORKER_WORKSPACES_DIR !== storageRoot
-      || cliLockToken(path.join(ctx.dataRoot, 'cli.lock')) !== operationToken
-      || !same(dataIdentity, identity(ctx.dataRoot)) || !same(controlIdentity, identity(ctx.control)) || !privateControl(ctx.control)) fail()
-    if (read(ctx)) fail('WORKSPACE_RELOCATION_CONFLICT')
-  })
-  const accepted = read(ctx)
-  if (!accepted || sha256CanonicalJson(accepted) !== sha256CanonicalJson(record)) fail()
-  return accepted
+  const staging = path.join(ctx.baseControl, '.relocation-pending-' + randomUUID())
+  if (process.platform === 'win32') native.createPrivateDirectory(staging)
+  else fs.mkdirSync(staging, { mode: 0o700 })
+  let stagedIdentity
+  try {
+    stagedIdentity = identity(staging)
+    const controlIdentity = { ...stagedIdentity, path: ctx.control }
+    const record = { schema_version: 2, metadata_compatibility: metadataCompatibility, id: options.id, phase: 'freezing', catalog_revision: snapshot.revision,
+      data_root: dataIdentity, control_root: controlIdentity, source: preview.source_identity, target: preview.target, requested_target: requestedTarget,
+      target_identity: preview.target_identity, target_ancestor: preview.target_ancestor, created_at: new Date().toISOString() }
+    const prepared = { ...ctx, control: staging, file: path.join(staging, 'relocation.json') }
+    const verifyPrepared = () => {
+      verifyAdmission()
+      if (!same(stagedIdentity, identity(staging)) || !privateControl(staging)) fail()
+      if (read(ctx)) fail('WORKSPACE_RELOCATION_CONFLICT')
+    }
+    verifyPrepared()
+    publishPrivateJson(prepared, prepared.file, record, 65536, verifyPrepared)
+    verifyPrepared()
+    native.renameDirectoryNoReplace(staging, ctx.control)
+    syncIntent(ctx)
+    verifyAdmission()
+    const accepted = read(ctx)
+    if (!accepted || sha256CanonicalJson(accepted) !== sha256CanonicalJson(record)) fail()
+    return accepted
+  } finally {
+    // Only reclaim our still-empty unpublished directory; retain unknown contents or effects.
+    try { if (stagedIdentity && same(stagedIdentity, identity(staging))) fs.rmdirSync(staging) } catch {}
+  }
 }
 
 function publishPrivateJson(ctx, file, value, limit, verify) {

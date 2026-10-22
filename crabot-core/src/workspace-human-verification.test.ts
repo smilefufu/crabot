@@ -49,7 +49,7 @@ async function fixture(options: { withMemory?: boolean; inactiveMemory?: boolean
         if(process.env.FIXTURE_QUIESCE_RESULT==='hash')data.intent_sha256='0'.repeat(64);
         if(process.env.FIXTURE_QUIESCE_RESULT==='extra')data.unexpected=true;
         if(process.env.FIXTURE_QUIESCE_RESULT==='mutate'){
-          const file=${JSON.stringify(path.join(data, 'workspace-control/relocation.json'))},stored=JSON.parse(fs.readFileSync(file,'utf8'));
+          const file=${JSON.stringify(path.join(data, 'workspace-control/relocation-active/relocation.json'))},stored=JSON.parse(fs.readFileSync(file,'utf8'));
           fs.writeFileSync(file,JSON.stringify({...stored,created_at:new Date(Date.parse(stored.created_at)+1000).toISOString()}));
         }
       }
@@ -145,18 +145,18 @@ async function fixture(options: { withMemory?: boolean; inactiveMemory?: boolean
             ${options.orphanDuringStop ? `const timer=setInterval(()=>{
               if(!fs.existsSync(${JSON.stringify(path.join(data, 'stops.txt'))})||fs.statSync(${JSON.stringify(path.join(data, 'stops.txt'))}).size===0)return;clearInterval(timer);
               const child=require('node:child_process').spawn(process.execPath,[${JSON.stringify(path.join(data, 'finite-orphan.cjs'))},String(process.pid)],{detached:true,stdio:'ignore'});child.unref();
-              setInterval(()=>{let observed=false;try{observed=fs.readFileSync(${JSON.stringify(path.join(data, 'workspace-control/relocation-process-stop.jsonl'))},'utf8').trimEnd().split('\\n').map(line=>JSON.parse(line)).some(row=>row.processes?.some(item=>item.pid===child.pid))}catch{}
+              setInterval(()=>{let observed=false;try{observed=fs.readFileSync(${JSON.stringify(path.join(data, 'workspace-control/relocation-active/relocation-process-stop.jsonl'))},'utf8').trimEnd().split('\\n').map(line=>JSON.parse(line)).some(row=>row.processes?.some(item=>item.pid===child.pid))}catch{}
                 if(observed)process.exit(0)},10)
             },10);` : ''}`)
         }
         await fs.writeFile(agentScript, `const fs=require('node:fs');
-          if(${!!options.businessAgent}&&fs.existsSync(${JSON.stringify(path.join(data, 'workspace-control/relocation-root-selected.json'))})){
+          if(${!!options.businessAgent}&&fs.existsSync(${JSON.stringify(path.join(data, 'workspace-control/relocation-active/relocation-root-selected.json'))})){
             if(process.env.GITHUB_ACTIONS!=='true'||process.env.CRABOT_WORKSPACE_BUSINESS_ONSTART_CI!=='1')throw new Error('Business onStart is isolated CI only');
             setTimeout(()=>process.exit(1),${options.processLifetimeMs ?? 300000}).unref();
             require(${JSON.stringify(path.resolve('../crabot-agent/dist/main.js'))});
           }else{const http=require('node:http'),{UnifiedAgent}=require(${JSON.stringify(entry)}),calls=[];
           require(${JSON.stringify(path.resolve('../crabot-agent/dist/core/config-loader.js'))}).ConfigLoader.captureRuntimeBearer();
-          const selected=${JSON.stringify(path.join(data, 'workspace-control/relocation-root-selected.json'))};
+          const selected=${JSON.stringify(path.join(data, 'workspace-control/relocation-active/relocation-root-selected.json'))};
           if(${!!options.validationRuntimeMismatch}&&fs.existsSync(selected))process.env.CRABOT_MODULE_RUNTIME_ID='fixture-wrong-runtime';
           const config=${JSON.stringify(relocationAgentConfig)};config.port=Number(process.env.Crabot_PORT);const agent=new UnifiedAgent(config);
           if(${JSON.stringify(options.validationHealth ?? null)}&&fs.existsSync(selected))agent.getHealthStatus=async()=>${JSON.stringify(options.validationHealth ?? 'healthy')};
@@ -230,7 +230,7 @@ async function fixture(options: { withMemory?: boolean; inactiveMemory?: boolean
         const file = path.join(data, 'finite-memory-server.cjs'), carrier = path.join(data, 'finite-memory-carrier.cjs')
         await fs.writeFile(file, `const http=require('node:http'),fs=require('node:fs');const server=http.createServer(async(req,res)=>{
           let text='';for await(const part of req)text+=part;const body=JSON.parse(text);
-          const data=body.method==='get_runtime_identity'?{instance_id:process.env.CRABOT_INSTANCE_ID,module_id:'memory-default',runtime_id:process.env.CRABOT_MODULE_RUNTIME_ID}:body.method==='health'?{status:fs.existsSync(${JSON.stringify(path.join(data, 'workspace-control/relocation-root-selected.json'))})?${JSON.stringify(options.memoryHealth)}:'healthy',details:{pid:process.pid}}:{};
+          const data=body.method==='get_runtime_identity'?{instance_id:process.env.CRABOT_INSTANCE_ID,module_id:'memory-default',runtime_id:process.env.CRABOT_MODULE_RUNTIME_ID}:body.method==='health'?{status:fs.existsSync(${JSON.stringify(path.join(data, 'workspace-control/relocation-active/relocation-root-selected.json'))})?${JSON.stringify(options.memoryHealth)}:'healthy',details:{pid:process.pid}}:{};
           res.end(JSON.stringify({id:body.id,success:true,data}));if(body.method==='shutdown')setTimeout(()=>process.exit(0),25);
         });server.listen(Number(process.env.Crabot_PORT),'127.0.0.1',async()=>{
           try{const response=await fetch('http://127.0.0.1:'+process.env.CRABOT_MM_PORT+'/register',{method:'POST',headers:{'Content-Type':'application/json'},
@@ -244,7 +244,7 @@ async function fixture(options: { withMemory?: boolean; inactiveMemory?: boolean
           const gate = path.join(data, 'memory-bootstrap-gate'), bootstrap = path.join(data, 'finite-memory-bootstrap.sh')
           const quote = (value: string) => "'" + value.replaceAll("'", "'\"'\"'") + "'"
           await fs.writeFile(gate, 'hold')
-          await fs.writeFile(bootstrap, `if [ -f ${quote(path.join(data, 'workspace-control/relocation-root-selected.json'))} ]; then
+          await fs.writeFile(bootstrap, `if [ -f ${quote(path.join(data, 'workspace-control/relocation-active/relocation-root-selected.json'))} ]; then
   while [ "$(cat ${quote(gate)})" != release ]; do sleep 0.02; done
 fi
 exec ${quote(process.execPath)} ${quote(carrier)}
@@ -491,7 +491,7 @@ describe('MM dedicated fixed coordinator authorization', () => {
       if (kind === 'coordinator exit') await c.cleanup()
       if (kind === 'Agent planned exit') await f.manager.stopModuleProcess('crabot-agent', 'shutdown')
       if (kind === 'Agent generation changed') state.runtimeId = 'replacement-runtime'
-      if (kind === 'private receipt damaged') await fs.writeFile(path.join(f.data, 'workspace-control/relocation-coordinator-ready.json'), '{}')
+      if (kind === 'private receipt damaged') await fs.writeFile(path.join(f.data, 'workspace-control/relocation-active/relocation-coordinator-ready.json'), '{}')
       await expect(Promise.resolve().then(() => f.manager.handleVerifyWorkspaceRelocationCoordinator({ intent_id: f.params.intent_id, launch_id: c.launch.launch_id, action: 'capture_workers' }, auth))).rejects.toMatchObject({ code: kind === 'private receipt damaged' ? 'SERVICE_UNAVAILABLE' : 'FORBIDDEN' })
     } finally { state.runtimeId = original; await c.cleanup(); await f.cleanup() }
   }, 30000)
@@ -524,7 +524,7 @@ describe('MM delegates capture only to the fixed Agent and persists through its 
       await expect(f.manager.captureWorkspaceRelocationWorkersForCoordinator(c.child, f.params, 'fixture-human')).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
       expect(await agentCalls(f.data)).toHaveLength(count)
       if (result === 'wrong-runtime') expect((await agentCalls(f.data)).map(item => item.header_present)).toEqual([false])
-      await expect(fs.stat(path.join(f.data, 'workspace-control/relocation-workers.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+      await expect(fs.stat(path.join(f.data, 'workspace-control/relocation-active/relocation-workers.json'))).rejects.toMatchObject({ code: 'ENOENT' })
     } finally { await c.cleanup(); await f.cleanup() }
   }, 30000)
   it('rechecks the current Agent after the real runtime handshake before sending its bearer', async () => {
@@ -540,7 +540,7 @@ describe('MM delegates capture only to the fixed Agent and persists through its 
       await expect(f.manager.captureWorkspaceRelocationWorkersForCoordinator(c.child, f.params, 'fixture-human')).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
       expect((await agentCalls(f.data)).map(item => [item.method, item.header_present])).toEqual([['get_runtime_identity', false]])
       expect(f.manager.workspaceCoordinatorGrant).toBeUndefined()
-      await expect(fs.stat(path.join(f.data, 'workspace-control/relocation-workers.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+      await expect(fs.stat(path.join(f.data, 'workspace-control/relocation-active/relocation-workers.json'))).rejects.toMatchObject({ code: 'ENOENT' })
     } finally { state.intentionalReason = undefined; await c.cleanup(); await f.cleanup() }
   }, 30000)
   for (const journal of ['false-ack', 'lost-lock', 'drop-reply']) it(`requires actual durable coordinator confirmation, never repeats capture: ${journal}`, async () => {
@@ -552,7 +552,7 @@ describe('MM delegates capture only to the fixed Agent and persists through its 
       const records = await import('../../scripts/lib/workspace-relocation-intent.mjs')
       if (journal === 'drop-reply') expect(records.readWorkspaceRelocationWorkers(f.data, f.params.intent_id).workers).toEqual([])
       else expect(records.readWorkspaceRelocationWorkers(f.data, f.params.intent_id)).toBeNull()
-      await expect(fs.stat(path.join(f.data, 'workspace-control/relocation-stop-attempt.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+      await expect(fs.stat(path.join(f.data, 'workspace-control/relocation-active/relocation-stop-attempt.json'))).rejects.toMatchObject({ code: 'ENOENT' })
     } finally { await c.cleanup(); await f.cleanup() }
   }, 30000)
 })
@@ -680,7 +680,7 @@ describe('MM delegates actual fixed Agent stop code through finite native proces
       await f.manager.authorizeWorkspaceRelocationCoordinator(c.child, f.params, 'fixture-human')
       await expect(f.manager.stopWorkspaceRelocationWorkersForCoordinator(c.child)).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
       await expect(fs.stat(path.join(f.data, 'stops.txt'))).rejects.toMatchObject({ code: 'ENOENT' })
-      await expect(fs.stat(path.join(f.data, 'workspace-control/relocation-workers.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+      await expect(fs.stat(path.join(f.data, 'workspace-control/relocation-active/relocation-workers.json'))).rejects.toMatchObject({ code: 'ENOENT' })
     } finally { await c.cleanup(); await f.cleanup() }
   }, 30000)
   it('only observes a prior attempt through actual Agent code', async () => {
@@ -855,11 +855,11 @@ describe('MM delegates fixed Native observation through actual Agent and coordin
     const f = await fixture({ actualAgent: true }), c = await coordinator(f)
     try {
       await f.manager.captureWorkspaceRelocationWorkersForCoordinator(c.child, f.params, 'fixture-human')
-      const file = path.join(f.data, 'workspace-control/relocation-workers.json'), original = JSON.parse(await fs.readFile(file, 'utf8'))
+      const file = path.join(f.data, 'workspace-control/relocation-active/relocation-workers.json'), original = JSON.parse(await fs.readFile(file, 'utf8'))
       await fs.writeFile(file, JSON.stringify({ ...original, created_at: new Date(Date.parse(original.created_at) + 1000).toISOString() }))
       await expect(f.manager.captureWorkspaceRelocationProcessesForCoordinator(c.child)).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
       expect((await agentCalls(f.data)).some(call => call.method === 'capture_workspace_relocation_processes')).toBe(false)
-      await expect(fs.stat(path.join(f.data, 'workspace-control/relocation-worker-processes.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+      await expect(fs.stat(path.join(f.data, 'workspace-control/relocation-active/relocation-worker-processes.json'))).rejects.toMatchObject({ code: 'ENOENT' })
     } finally { await c.cleanup(); await f.cleanup() }
   }, 30000)
   for (const result of ['lost-process-reply', 'extra-process-reply', 'bad-process-reply']) it('keeps the first failure without recapturing after an unverifiable actual Agent reply: ' + result, async () => {
@@ -869,7 +869,7 @@ describe('MM delegates fixed Native observation through actual Agent and coordin
       await expect(f.manager.captureWorkspaceRelocationProcessesForCoordinator(c.child)).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
       await expect(f.manager.captureWorkspaceRelocationProcessesForCoordinator(c.child)).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
       expect((await agentCalls(f.data)).filter(call => call.method === 'capture_workspace_relocation_processes')).toHaveLength(1)
-      await expect(fs.stat(path.join(f.data, 'workspace-control/relocation-worker-processes.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+      await expect(fs.stat(path.join(f.data, 'workspace-control/relocation-active/relocation-worker-processes.json'))).rejects.toMatchObject({ code: 'ENOENT' })
       await expect(fs.stat(path.join(f.data, 'stops.txt'))).rejects.toMatchObject({ code: 'ENOENT' })
     } finally { await c.cleanup(); await f.cleanup() }
   }, 30000)
@@ -908,7 +908,7 @@ describe('MM delegates fixed Native observation through actual Agent and coordin
     try {
       await f.manager.captureWorkspaceRelocationWorkersForCoordinator(c.child, f.params, 'fixture-human')
       await f.manager.captureWorkspaceRelocationProcessesForCoordinator(c.child)
-      const file = path.join(f.data, 'workspace-control/relocation-workers.json'), original = JSON.parse(await fs.readFile(file, 'utf8'))
+      const file = path.join(f.data, 'workspace-control/relocation-active/relocation-workers.json'), original = JSON.parse(await fs.readFile(file, 'utf8'))
       await fs.writeFile(file, JSON.stringify({ ...original, created_at: new Date(Date.parse(original.created_at) + 1000).toISOString() }))
       await expect(f.manager.captureWorkspaceRelocationProcessesForCoordinator(c.child)).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
       expect((await agentCalls(f.data)).filter(call => call.method === 'capture_workspace_relocation_processes')).toHaveLength(1)
@@ -927,7 +927,7 @@ describe('MM delegates fixed Native observation through actual Agent and coordin
       })
       await expect(f.manager.captureWorkspaceRelocationProcessesForCoordinator(c.child)).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
       expect((await agentCalls(f.data)).filter(call => call.method === 'capture_workspace_relocation_processes')).toHaveLength(0)
-      await expect(fs.stat(path.join(f.data, 'workspace-control/relocation-worker-processes.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+      await expect(fs.stat(path.join(f.data, 'workspace-control/relocation-active/relocation-worker-processes.json'))).rejects.toMatchObject({ code: 'ENOENT' })
       expect(f.manager.workspaceCoordinatorGrant).toBeUndefined()
     } finally { state.intentionalReason = previous; await c.cleanup(); await f.cleanup() }
   }, 30000)
@@ -970,11 +970,11 @@ describe('MM fixes execution modules in the same original coordinator job', () =
     try {
       await f.manager.captureWorkspaceRelocationWorkersForCoordinator(c.child, f.params, 'fixture-human')
       await f.manager.captureWorkspaceRelocationProcessesForCoordinator(c.child)
-      const file = path.join(f.data, 'workspace-control/relocation-worker-processes.json'), original = JSON.parse(await fs.readFile(file, 'utf8'))
+      const file = path.join(f.data, 'workspace-control/relocation-active/relocation-worker-processes.json'), original = JSON.parse(await fs.readFile(file, 'utf8'))
       await fs.writeFile(file, JSON.stringify({ ...original, created_at: new Date(Date.parse(original.created_at) + 1000).toISOString() }))
       await expect(f.manager.captureWorkspaceRelocationModulesForCoordinator(c.child)).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
       expect(capture).not.toHaveBeenCalled()
-      await expect(fs.stat(path.join(f.data, 'workspace-control/relocation-modules.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+      await expect(fs.stat(path.join(f.data, 'workspace-control/relocation-active/relocation-modules.json'))).rejects.toMatchObject({ code: 'ENOENT' })
     } finally { await c.cleanup(); await f.cleanup() }
   }, 30000)
   for (const policy of ['lost-lock', 'false-module-ack']) it('rejects a module capture without actual locked persistence: ' + policy, async () => {
@@ -1019,11 +1019,11 @@ describe('MM fixes execution modules in the same original coordinator job', () =
       response = f.manager.captureWorkspaceRelocationModulesForCoordinator(c.child)
       const rejected = expect(response).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
       await vi.waitFor(() => expect(capture).toHaveBeenCalledOnce())
-      await expect(fs.stat(path.join(f.data, 'workspace-control/relocation-modules.json'))).rejects.toMatchObject({ code: 'ENOENT' })
-      const file = path.join(f.data, 'workspace-control/relocation-worker-processes.json'), original = JSON.parse(await fs.readFile(file, 'utf8'))
+      await expect(fs.stat(path.join(f.data, 'workspace-control/relocation-active/relocation-modules.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+      const file = path.join(f.data, 'workspace-control/relocation-active/relocation-worker-processes.json'), original = JSON.parse(await fs.readFile(file, 'utf8'))
       await fs.writeFile(file, JSON.stringify({ ...original, created_at: new Date(Date.parse(original.created_at) + 1000).toISOString() }))
       release(); await held; await rejected
-      await expect(fs.stat(path.join(f.data, 'workspace-control/relocation-modules.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+      await expect(fs.stat(path.join(f.data, 'workspace-control/relocation-active/relocation-modules.json'))).rejects.toMatchObject({ code: 'ENOENT' })
     } finally { release(); await held; await response?.catch(() => {}); await c.cleanup(); await f.cleanup() }
   }, 30000)
   it('checks the original module record even when returning its previously captured scope', async () => {
@@ -1033,7 +1033,7 @@ describe('MM fixes execution modules in the same original coordinator job', () =
       await f.manager.captureWorkspaceRelocationWorkersForCoordinator(c.child, f.params, 'fixture-human')
       await f.manager.captureWorkspaceRelocationProcessesForCoordinator(c.child)
       await f.manager.captureWorkspaceRelocationModulesForCoordinator(c.child)
-      const file = path.join(f.data, 'workspace-control/relocation-modules.json'), original = JSON.parse(await fs.readFile(file, 'utf8'))
+      const file = path.join(f.data, 'workspace-control/relocation-active/relocation-modules.json'), original = JSON.parse(await fs.readFile(file, 'utf8'))
       await fs.writeFile(file, JSON.stringify({ ...original, created_at: new Date(Date.parse(original.created_at) + 1000).toISOString() }))
       await expect(f.manager.captureWorkspaceRelocationModulesForCoordinator(c.child)).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
       expect(capture).toHaveBeenCalledOnce()
@@ -1134,7 +1134,7 @@ describe('MM launches the actual fixed coordinator under the original human inte
     const inspect = native.inspectProcess
     vi.spyOn(native, 'inspectProcess').mockImplementation((pid: number) => {
       const result = inspect(pid)
-      if (pid === process.pid && existsSync(path.join(f.data, 'workspace-control/relocation-coordinator-ready.json'))) f.manager.isShuttingDown = true
+      if (pid === process.pid && existsSync(path.join(f.data, 'workspace-control/relocation-active/relocation-coordinator-ready.json'))) f.manager.isShuttingDown = true
       return result
     })
     try {
@@ -1331,7 +1331,7 @@ describe('MM requires original Admin quiescence before execution capture', () =>
       expect(capture).not.toHaveBeenCalled()
       expect((await f.calls()).filter(item => item.method === '/quiesce_workspace_relocation_web')).toHaveLength(1)
       expect(f.manager.processes.get('admin-web').exitCode).toBeNull(); expect(f.manager.processes.get('crabot-agent').exitCode).toBeNull()
-      for (const name of ['workspace-control/relocation-workers.json', 'workspace-control/relocation-stop-attempt.json', 'stops.txt']) {
+      for (const name of ['workspace-control/relocation-active/relocation-workers.json', 'workspace-control/relocation-active/relocation-stop-attempt.json', 'stops.txt']) {
         await expect(fs.stat(path.join(f.data, name))).rejects.toMatchObject({ code: 'ENOENT' })
       }
     } finally { locks.releaseCliLock(lock); await f.cleanup() }
@@ -1813,7 +1813,7 @@ describe('MM checks the new runtime health and Root under the original job', () 
           expect(result.healthy_modules.map((item: any) => item.module_id)).toEqual(withMemory ? ['memory-default', 'crabot-agent'] : ['crabot-agent'])
           expect(result.root_verified).toMatchObject({ verified: true, intent_id: f.params.intent_id, root_selected_sha256: result.root_selected_sha256,
             instance_id: f.manager.runtimeRegistry.getInstanceId(), module_id: 'crabot-agent', runtime_id: result.validation_modules.find((item: any) => item.module_id === 'crabot-agent').runtime_id })
-          const health = JSON.parse(await fs.readFile(path.join(f.data, 'workspace-control/relocation-health.json'), 'utf8'))
+          const health = JSON.parse(await fs.readFile(path.join(f.data, 'workspace-control/relocation-active/relocation-health.json'), 'utf8'))
           expect(Object.keys(health).sort()).toEqual(['checked_at', 'intent_id', 'modules', 'root_proof', 'schema_version'])
           expect(health).toMatchObject({ schema_version: 1, intent_id: f.params.intent_id, root_proof: result.root_verified })
           expect(health.modules).toEqual([...result.validation_modules].sort((a: any, b: any) => a.module_id.localeCompare(b.module_id)))
@@ -1821,10 +1821,10 @@ describe('MM checks the new runtime health and Root under the original job', () 
           expect(result.health_sha256).toBe(sha256CanonicalJson(health))
           if (mode === 'healthy Agent') {
             const records = require('../../scripts/lib/workspace-relocation-intent.mjs'), report = { modules: health.modules, root_proof: health.root_proof }
-            const original = await fs.readFile(path.join(f.data, 'workspace-control/relocation-health.json'), 'utf8')
+            const original = await fs.readFile(path.join(f.data, 'workspace-control/relocation-active/relocation-health.json'), 'utf8')
             expect(records.readWorkspaceRelocationHealth(f.data, f.params.intent_id)).toEqual(health)
             const oldRuntime = records.readWorkspaceRelocationModules(f.data, f.params.intent_id).modules.find((item: any) => item.module_id === 'crabot-agent').runtime_id
-            const healthFile = path.join(f.data, 'workspace-control/relocation-health.json'), wrong = structuredClone(health)
+            const healthFile = path.join(f.data, 'workspace-control/relocation-active/relocation-health.json'), wrong = structuredClone(health)
             wrong.modules[0].runtime_id = oldRuntime; wrong.root_proof.runtime_id = oldRuntime
             try {
               writeFileSync(healthFile, JSON.stringify(wrong))
@@ -1841,18 +1841,18 @@ describe('MM checks the new runtime health and Root under the original job', () 
               mutable.root_proof.runtime_id = 'not-the-original-report'
               expect(await observe).toEqual({ dispatch: 'observe', health_sha256: result.health_sha256 })
             } finally { journal.close() }
-            expect(await fs.readFile(path.join(f.data, 'workspace-control/relocation-health.json'), 'utf8')).toBe(original)
+            expect(await fs.readFile(path.join(f.data, 'workspace-control/relocation-active/relocation-health.json'), 'utf8')).toBe(original)
           }
         } else {
           await expect(first).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
           if (mode === 'unhealthy Agent' || mode === 'degraded Memory') await expect(first).rejects.toMatchObject({ stage: 'module-health' })
-          if (mode === 'Agent workspace override') await expect(fs.readFile(path.join(f.data, 'workspace-control/relocation-health.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+          if (mode === 'Agent workspace override') await expect(fs.readFile(path.join(f.data, 'workspace-control/relocation-active/relocation-health.json'))).rejects.toMatchObject({ code: 'ENOENT' })
           await expect(f.manager.verifyWorkspaceRelocationValidationHealth(f.params, 'fixture-human')).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
           if (mode === 'definition changed during health' || mode === 'exit before registration') expect(injected).toBe(true)
           if (mode === 'lost health acknowledgement' || mode === 'runtime record changed before health record') {
             expect(injected).toBe(true)
             await expect(first).rejects.toMatchObject({ stage: 'record-health' })
-            const file = path.join(f.data, 'workspace-control/relocation-health.json')
+            const file = path.join(f.data, 'workspace-control/relocation-active/relocation-health.json')
             if (mode === 'lost health acknowledgement') {
               const record = JSON.parse(await fs.readFile(file, 'utf8'))
               expect(record.intent_id).toBe(f.params.intent_id)

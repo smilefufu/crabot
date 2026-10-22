@@ -202,7 +202,7 @@ for (const mode of ['Worker receipt missing', 'module receipt missing', 'live mo
         await modules.complete(actor ? [{ module_id: 'finite-memory', runtime_id: 'finite-runtime', shutdown: 'submitted',
           status: mode === 'unknown module after actual exit' ? 'unknown' : 'known_scope_exited' }] : [])
       }
-      const file = path.join(f.data, 'workspace-control/relocation-execution-exit.json')
+      const file = path.join(f.data, 'workspace-control/relocation-active/relocation-execution-exit.json')
       if (mode === 'known module exited') {
         await processes.confirmExecutionExit()
         const before = fs.readFileSync(file); await processes.confirmExecutionExit()
@@ -228,12 +228,12 @@ for (const damage of ['hash', 'extra', 'hardlink', 'missing Native journal', 'mi
       await processes.prepare(); await processes.observe([]); await processes.complete()
       await worker.prepare([]); await worker.complete([]); await modules.prepare([]); await modules.complete([])
       await processes.confirmExecutionExit()
-      const file = path.join(f.data, 'workspace-control/relocation-execution-exit.json')
+      const file = path.join(f.data, 'workspace-control/relocation-active/relocation-execution-exit.json')
       if (damage === 'hardlink') fs.linkSync(file, path.join(f.root, 'linked-exit'))
-      else if (damage === 'missing Native journal') fs.unlinkSync(path.join(f.data, 'workspace-control/relocation-process-stop.jsonl'))
+      else if (damage === 'missing Native journal') fs.unlinkSync(path.join(f.data, 'workspace-control/relocation-active/relocation-process-stop.jsonl'))
       else if (damage === 'missing coordinator') {
-        fs.unlinkSync(path.join(f.data, 'workspace-control/relocation-coordinator.json'))
-        fs.unlinkSync(path.join(f.data, 'workspace-control/relocation-coordinator-ready.json'))
+        fs.unlinkSync(path.join(f.data, 'workspace-control/relocation-active/relocation-coordinator.json'))
+        fs.unlinkSync(path.join(f.data, 'workspace-control/relocation-active/relocation-coordinator-ready.json'))
       } else {
         const value = JSON.parse(fs.readFileSync(file, 'utf8'))
         if (damage === 'hash') value.process_stops_sha256 = '0'.repeat(64)
@@ -277,9 +277,9 @@ for (const scenario of ['normal', 'unexpected-path', 'lost-reply']) test('actual
     const result = await files.prepare()
     assert.equal(result.dispatch, scenario === 'lost-reply' ? 'observe' : 'dispatch')
     assert.deepEqual(result.plan, readWorkspaceRelocationFilePlan(f.data, f.id))
-    const first = fs.readFileSync(path.join(f.data, 'workspace-control/relocation-files.json'))
+    const first = fs.readFileSync(path.join(f.data, 'workspace-control/relocation-active/relocation-files.json'))
     assert.equal((await files.prepare()).dispatch, 'observe')
-    assert.deepEqual(fs.readFileSync(path.join(f.data, 'workspace-control/relocation-files.json')), first)
+    assert.deepEqual(fs.readFileSync(path.join(f.data, 'workspace-control/relocation-active/relocation-files.json')), first)
     assert.equal(fs.existsSync(result.plan.staging_path), false); assert.equal(fs.existsSync(f.target), false)
     assert.equal(fs.readFileSync(f.marker, 'utf8'), 'original work'); assert.deepEqual(await f.catalog.snapshot(), f.before)
   } finally { worker.close(); modules.close(); processes.close(); files.close() }
@@ -335,10 +335,10 @@ for (const mode of ['confirmed', 'lost reply', 'unexpected payload', 'exited Hos
     t.diagnostic('file Host channel: original Host admitted')
     assert.equal(first.dispatch, mode === 'lost reply' ? 'observe' : 'dispatch')
     assert.equal(host.parent, child.pid); assert.ok(native.sameProcess(host, native.inspectProcess(host.pid)))
-    const bytes = fs.readFileSync(path.join(f.data, 'workspace-control/relocation-file-actors.jsonl'))
+    const bytes = fs.readFileSync(path.join(f.data, 'workspace-control/relocation-active/relocation-file-actors.jsonl'))
     const second = await files.prepareHost()
     assert.equal(second.dispatch, 'observe'); assert.deepEqual(second.actors, first.actors)
-    assert.deepEqual(fs.readFileSync(path.join(f.data, 'workspace-control/relocation-file-actors.jsonl')), bytes)
+    assert.deepEqual(fs.readFileSync(path.join(f.data, 'workspace-control/relocation-active/relocation-file-actors.jsonl')), bytes)
     assert.deepEqual(native.listChildProcessIds(child.pid), [...initialPids, host.pid].sort((a, b) => a - b), JSON.stringify({ initial: initialChildren, current: describeChildren() }))
     for (const item of initialChildren) assert.ok(native.sameProcess(item.process, native.inspectProcess(item.process.pid)))
     const plan = readWorkspaceRelocationFilePlan(f.data, f.id)
@@ -350,7 +350,7 @@ for (const mode of ['confirmed', 'lost reply', 'unexpected payload', 'exited Hos
       t.diagnostic('file Host channel: original generation exited')
       await assert.rejects(files.prepareHost(), { code: 'CRABOT_WORKSPACE_JOURNAL_UNAVAILABLE' })
       assert.deepEqual(native.listChildProcessIds(child.pid), initialPids)
-      assert.deepEqual(fs.readFileSync(path.join(f.data, 'workspace-control/relocation-file-actors.jsonl')), bytes)
+      assert.deepEqual(fs.readFileSync(path.join(f.data, 'workspace-control/relocation-active/relocation-file-actors.jsonl')), bytes)
     }
     await f.close()
     if (!hostExited) await confirmHostExit()
@@ -396,9 +396,9 @@ for (const mode of ['confirmed', 'lost acknowledgement', 'unexpected payload']) 
     const result = await files.prepareStage()
     assert.equal(result.dispatch, mode === 'lost acknowledgement' ? 'observe' : 'dispatch')
     assert.equal(result.staging.tree, null); assert.deepEqual(fs.readdirSync(result.staging.container.path), [])
-    const before = fs.readFileSync(path.join(f.data, 'workspace-control/relocation-file-actors.jsonl'))
+    const before = fs.readFileSync(path.join(f.data, 'workspace-control/relocation-active/relocation-file-actors.jsonl'))
     assert.equal((await files.prepareStage()).dispatch, 'observe')
-    assert.deepEqual(fs.readFileSync(path.join(f.data, 'workspace-control/relocation-file-actors.jsonl')), before)
+    assert.deepEqual(fs.readFileSync(path.join(f.data, 'workspace-control/relocation-active/relocation-file-actors.jsonl')), before)
     const observed = await files.prepareHost()
     assert.equal(observed.dispatch, 'observe'); assert.deepEqual(observed.actors.host, host.actors.host)
     assert.equal(fs.existsSync(f.target), false); assert.equal(fs.readFileSync(f.marker, 'utf8'), 'original work')
@@ -466,7 +466,7 @@ for (const mode of ['confirmed', 'lost acknowledgement', 'changed source', 'copy
       assert.equal(result.dispatch, mode === 'lost acknowledgement' ? 'observe' : 'dispatch')
       assert.equal(result.ready.content_sha256, plan.source_content_sha256)
       if (mode === 'confirmed' || copyMode) {
-        const journal = path.join(f.data, 'workspace-control/relocation-file-actors.jsonl'), bytes = fs.readFileSync(journal)
+        const journal = path.join(f.data, 'workspace-control/relocation-active/relocation-file-actors.jsonl'), bytes = fs.readFileSync(journal)
         const rows = bytes.toString().trimEnd().split('\n'), ready = JSON.parse(rows.at(-1))
         assert.equal(ready.type, 'file_ready'); assert.equal(ready.schema_version, 2)
         const patches = [{ schema_version: 1 }, { metadata_fingerprint: '0'.repeat(64) }, { metadata_compatibility: 'arbitrary' },
@@ -499,7 +499,7 @@ for (const mode of ['confirmed', 'lost acknowledgement', 'changed source', 'copy
       }
       assert.equal(fs.readFileSync(path.join(plan.staging_path, 'tree/original.txt'), 'utf8'), 'original work')
       assert.equal(native.isProcessExited(host.actors.host.process.pid), true)
-      const control = path.join(f.data, 'workspace-control')
+      const control = path.join(f.data, 'workspace-control/relocation-active')
       const snapshotControl = () => fs.readdirSync(control).sort().map(name => {
         const file = path.join(control, name), stat = fs.lstatSync(file, { bigint: true })
         return [name, stat.isFile() ? fs.readFileSync(file) : [stat.dev, stat.ino, stat.mtimeNs, stat.ctimeNs].join(':')]
@@ -517,7 +517,7 @@ for (const mode of ['confirmed', 'lost acknowledgement', 'changed source', 'copy
           const observer = createWorkspaceWorkerJournal(child, context)
           try { await assert.rejects(observer.verifyClosureReadiness(), { code: 'CRABOT_WORKSPACE_JOURNAL_UNAVAILABLE' }) } finally { observer.close() }
         }
-        const catalogFile = path.join(control, 'catalog.json'), originalCatalog = fs.readFileSync(catalogFile)
+        const catalogFile = path.join(f.data, 'workspace-control/catalog.json'), originalCatalog = fs.readFileSync(catalogFile)
         const changed = JSON.parse(originalCatalog); changed.revision++
         try { fs.writeFileSync(catalogFile, JSON.stringify(changed)); await refused() } finally { fs.writeFileSync(catalogFile, originalCatalog) }
         const tree = path.join(plan.staging_path, 'tree'), saved = path.join(path.dirname(plan.staging_path), 'saved-tree-' + f.id)
@@ -878,7 +878,7 @@ for (const mode of ['confirmed', 'lost acknowledgement', 'changed source', 'copy
                 const probe = path.join(f.target, '.owned-health-probe')
                 fs.writeFileSync(probe, 'finite probe'); fs.unlinkSync(probe)
                 assert.deepEqual(await verifySelected(), expectedProof)
-                const catalogPath = path.join(control, 'catalog.json'), catalogBytes = fs.readFileSync(catalogPath)
+                const catalogPath = path.join(f.data, 'workspace-control/catalog.json'), catalogBytes = fs.readFileSync(catalogPath)
                 try {
                   const changed = JSON.parse(catalogBytes); changed.revision++
                   fs.writeFileSync(catalogPath, JSON.stringify(changed))
@@ -968,14 +968,14 @@ for (const mode of ['confirmed', 'lost acknowledgement', 'changed source', 'copy
                 assert.deepEqual(await locateWorkspaceRelocationHistory(query), location)
                 const read = fs.promises.readFile, selectedBeforeRead = fs.readFileSync(selectedFile)
                 // Catalog can expand a Windows short-path alias; bind the actual file, not its spelling.
-                const catalogIdentity = fs.statSync(path.join(control, 'catalog.json'), { bigint: true })
+                const catalogIdentity = fs.statSync(path.join(f.data, 'workspace-control/catalog.json'), { bigint: true })
                 let changedDuringRead = false, pathAlias = false
                 const mock = t.mock.method(fs.promises, 'readFile', async function(file, ...args) {
                   const body = await read.call(this, file, ...args)
                   if (!changedDuringRead && (typeof file === 'string' || file instanceof URL)) {
                     const actual = await fs.promises.stat(file, { bigint: true })
                     if (actual.dev === catalogIdentity.dev && actual.ino === catalogIdentity.ino) {
-                      changedDuringRead = true; pathAlias = file !== path.join(control, 'catalog.json')
+                      changedDuringRead = true; pathAlias = file !== path.join(f.data, 'workspace-control/catalog.json')
                       fs.writeFileSync(selectedFile, JSON.stringify({ ...JSON.parse(selectedBeforeRead), catalog_revision: -1 }))
                     }
                   }
@@ -1074,9 +1074,9 @@ for (const mode of ['confirmed', 'lost acknowledgement', 'changed source', 'copy
           assert.equal(workspaceMaintenancePending(f.data), true)
         } finally { closer.close() }
       }
-      const before = fs.readFileSync(path.join(f.data, 'workspace-control/relocation-file-actors.jsonl'))
+      const before = fs.readFileSync(path.join(f.data, 'workspace-control/relocation-active/relocation-file-actors.jsonl'))
       assert.equal((await files.prepareFiles()).dispatch, 'observe')
-      assert.deepEqual(fs.readFileSync(path.join(f.data, 'workspace-control/relocation-file-actors.jsonl')), before)
+      assert.deepEqual(fs.readFileSync(path.join(f.data, 'workspace-control/relocation-active/relocation-file-actors.jsonl')), before)
     }
     assert.equal(fs.existsSync(f.target), false); assert.deepEqual(await f.catalog.snapshot(), f.before)
   } finally { workers.close(); modules.close(); processes.close(); files.close() }

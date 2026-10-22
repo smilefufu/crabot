@@ -21,7 +21,7 @@ export async function relocationMmFixture(mode = 'normal', withJournal = false, 
     const body = JSON.parse(text); calls.push({ body, header_present: Boolean(req.headers.authorization) })
     if (mode === 'disconnect') { req.socket.destroy(); return }
     if (mode === 'mutate') {
-      const file = path.join(data, 'workspace-control/relocation-coordinator-ready.json')
+      const file = path.join(data, 'workspace-control/relocation-active/relocation-coordinator-ready.json')
       const ready = JSON.parse(await fs.readFile(file, 'utf8'))
       await fs.writeFile(file, JSON.stringify({ ...ready, acquired_at: new Date(Date.parse(ready.acquired_at) + 1000).toISOString() }))
     }
@@ -30,7 +30,7 @@ export async function relocationMmFixture(mode = 'normal', withJournal = false, 
       let result: any
       if (body.method === 'verify_workspace_relocation_coordinator') {
         if (mode === 'scope-change-on-second-proof' && calls.filter(call => call.body.method === 'verify_workspace_relocation_coordinator').length === 2) {
-          const file = path.join(data, 'workspace-control/relocation-workers.json'), stored = JSON.parse(await fs.readFile(file, 'utf8'))
+          const file = path.join(data, 'workspace-control/relocation-active/relocation-workers.json'), stored = JSON.parse(await fs.readFile(file, 'utf8'))
           await fs.writeFile(file, JSON.stringify({ ...stored, created_at: new Date(Date.parse(stored.created_at) + 1000).toISOString() }))
         }
         result = { verified: mode !== 'false', intent_id: id, intent_sha256: mode === 'hash' ? '0'.repeat(64) : sha256CanonicalJson(intent),
@@ -40,7 +40,7 @@ export async function relocationMmFixture(mode = 'normal', withJournal = false, 
         if (mode === 'extra-prepare') result.extra = true
         if (mode === 'revoke-prepare') authorized = false
         if (mode === 'scope-change-prepare') {
-          const file = path.join(data, 'workspace-control/relocation-workers.json'), value = JSON.parse(await fs.readFile(file, 'utf8'))
+          const file = path.join(data, 'workspace-control/relocation-active/relocation-workers.json'), value = JSON.parse(await fs.readFile(file, 'utf8'))
           value.workers[0].incarnations[0].workspace += '-changed'
           await fs.writeFile(file, JSON.stringify(value))
         }

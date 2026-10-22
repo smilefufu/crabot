@@ -28,7 +28,7 @@ export async function commitWorkspaceRelocationLedgers({ snapshot, plan, prepare
   await verify()
   if (prepared.reduce((sum, row) => sum + Buffer.byteLength(row.contents), 0) > 64 * 1024 * 1024) throw failure()
   const root = management.requirePrivateDataRoot(snapshot.data_root) as string
-  const directory = path.join(root, 'agent/worker-ledgers'), journal = path.join(root, 'workspace-control/relocation-worker-commits')
+  const directory = path.join(root, 'agent/worker-ledgers'), journal = path.join(root, 'workspace-control/relocation-active/relocation-worker-commits')
   const planHash = sha256CanonicalJson(plan), byManager = new Map<string, WorkspaceRelocationLedgerClosure>(prepared.map(row => [row.manager_key, row]))
   if (!/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(plan.intent_id)
     || plan.directories.length !== 3 || plan.directories[0].path !== root || plan.directories[1].path !== path.join(root, 'agent')
@@ -40,6 +40,7 @@ export async function commitWorkspaceRelocationLedgers({ snapshot, plan, prepare
         || process.platform === 'win32' && native.inspectDirectoryFileId(item.path) !== item.native_id) throw failure()
     }
     owned(path.join(root, 'workspace-control'), true, true)
+    owned(path.join(root, 'workspace-control/relocation-active'), true, true)
   }
   const pins: unknown[] = []
   try {

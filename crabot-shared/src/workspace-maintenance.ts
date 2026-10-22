@@ -12,6 +12,7 @@ export function workspaceMaintenancePending(dataRoot: string): boolean {
   }
   // Any known activity entry blocks, including an orphaned fixed set or dangling link.
   for (const file of [
+    'relocation-active', 'relocation-finalizing.json',
     'relocation.json', 'relocation-workers.json', 'relocation-worker-processes.json',
     'relocation-stop-attempt.json', 'relocation-stop-submission.json',
     'relocation-modules.json', 'relocation-module-stop-attempt.json',

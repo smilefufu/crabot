@@ -10,14 +10,14 @@ describe('Agent consumes only its private job proof from the actual MM connectio
   it('uses one native-bound connection, the correct source and header-only bearer without writing job data', async () => {
     const f = await fixture()
     try {
-      const before = await fs.readFile(path.join(f.data, 'workspace-control/relocation.json'))
+      const before = await fs.readFile(path.join(f.data, 'workspace-control/relocation-active/relocation.json'))
       expect(await verifyWorkspaceRelocationAuthority(f.options)).toEqual({ verified: true, ...f.options.params,
         intent_sha256: sha256CanonicalJson(f.intent), launch_sha256: sha256CanonicalJson(f.launch) })
       expect(f.calls).toHaveLength(1); expect(f.calls[0].header_present).toBe(true)
       expect(f.calls[0].body.source).toBe('crabot-agent')
       expect(JSON.stringify(f.calls)).not.toContain(f.options.bearer)
       expect(f.sockets.size).toBe(1)
-      expect(await fs.readFile(path.join(f.data, 'workspace-control/relocation.json'))).toEqual(before)
+      expect(await fs.readFile(path.join(f.data, 'workspace-control/relocation-active/relocation.json'))).toEqual(before)
       await expect(fs.stat(path.join(f.root, 'relocated'))).rejects.toMatchObject({ code: 'ENOENT' })
     } finally { await f.cleanup() }
   }, 30000)
@@ -39,7 +39,7 @@ describe('Agent consumes only its private job proof from the actual MM connectio
   it('refuses a coherent private record with the wrong MM creation identity before sending any bearer', async () => {
     const f = await fixture()
     try {
-      const control = path.join(f.data, 'workspace-control'), launch = { ...f.launch, parent: { ...f.launch.parent, started: 'wrong-generation' } }
+      const control = path.join(f.data, 'workspace-control/relocation-active'), launch = { ...f.launch, parent: { ...f.launch.parent, started: 'wrong-generation' } }
       const readyFile = path.join(control, 'relocation-coordinator-ready.json'), ready = JSON.parse(await fs.readFile(readyFile, 'utf8'))
       await fs.writeFile(path.join(control, 'relocation-coordinator.json'), JSON.stringify(launch))
       await fs.writeFile(readyFile, JSON.stringify({ ...ready, launch_sha256: sha256CanonicalJson(launch) }))

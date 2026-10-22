@@ -26,7 +26,7 @@ async function fixture(t, beforeCleanup = () => {}) {
   await fs.writeFile(path.join(source, 'default/original.txt'), 'user bytes')
   const input = { dataDir: data, id: randomUUID(), target: path.join(root, 'new workspace'), expectedRevision: snapshot.revision,
     protectedRoots: [path.join(data, 'workspace-control')] }
-  const recordFile = path.join(data, 'workspace-control/relocation.json')
+  const recordFile = path.join(data, 'workspace-control/relocation-active/relocation.json')
   return { root, data, catalog, snapshot, source, input, recordFile }
 }
 
@@ -54,6 +54,63 @@ test('publication is durable and retryable without moving files, changing catalo
   } finally { releaseCliLock(lock) }
 })
 
+test('new intent owns an independent active directory while the catalog stays in place', async t => {
+  const f = await fixture(t), lock = await acquireCliLock(f.data, 'workspace-relocation')
+  const control = path.join(f.data, 'workspace-control'), catalog = path.join(control, 'catalog.json')
+  const before = await fs.readFile(catalog), catalogStat = await fs.stat(catalog, { bigint: true })
+  try {
+    const accepted = await beginWorkspaceRelocationIntent(f.input)
+    const active = path.join(control, 'relocation-active'), stat = await fs.lstat(active, { bigint: true })
+    assert.deepEqual(accepted.control_root, { path: active, dev: String(stat.dev), ino: String(stat.ino) })
+    assert.deepEqual(JSON.parse(await fs.readFile(path.join(active, 'relocation.json'), 'utf8')), accepted)
+    await assert.rejects(fs.lstat(path.join(control, 'relocation.json')), { code: 'ENOENT' })
+    assert.deepEqual(await fs.readFile(catalog), before)
+    assert.equal((await fs.stat(catalog, { bigint: true })).ino, catalogStat.ino)
+  } finally { releaseCliLock(lock) }
+})
+
+test('the whole catalog control root stays protected when the caller supplies no extra protected paths', async t => {
+  const f = await fixture(t), lock = await acquireCliLock(f.data, 'workspace-relocation')
+  const control = path.join(f.data, 'workspace-control'), before = await fs.readdir(control)
+  try {
+    await assert.rejects(beginWorkspaceRelocationIntent({ ...f.input, target: path.join(control, 'workspace-target'), protectedRoots: [] }))
+    assert.equal(readWorkspaceRelocationIntent(f.data), null)
+    assertWorkspaceExecutionAllowed(f.data)
+    assert.deepEqual(await fs.readdir(control), before)
+    assert.deepEqual(await f.catalog.snapshot(), f.snapshot)
+  } finally { releaseCliLock(lock) }
+})
+
+for (const residue of ['empty active directory', 'finalizing marker', 'legacy flat intent']) test('does not adopt or overwrite ' + residue, async t => {
+  const f = await fixture(t), lock = await acquireCliLock(f.data, 'workspace-relocation')
+  const control = path.join(f.data, 'workspace-control'), active = path.join(control, 'relocation-active')
+  const record = path.join(control, residue === 'finalizing marker' ? 'relocation-finalizing.json' : 'relocation.json')
+  try {
+    if (residue === 'empty active directory') await fs.mkdir(active, { mode: 0o700 })
+    else await fs.writeFile(record, 'preserve unknown activity', { mode: 0o600 })
+    const names = await fs.readdir(control)
+    await assert.rejects(beginWorkspaceRelocationIntent(f.input))
+    assert.deepEqual(await fs.readdir(control), names)
+    assert.deepEqual(await f.catalog.snapshot(), f.snapshot)
+    await assert.rejects(fs.lstat(f.input.target), { code: 'ENOENT' })
+    if (residue !== 'empty active directory') assert.equal(await fs.readFile(record, 'utf8'), 'preserve unknown activity')
+  } finally { releaseCliLock(lock) }
+})
+
+test('failed first intent publication does not freeze business or create an empty active job', async t => {
+  const f = await fixture(t), lock = await acquireCliLock(f.data, 'workspace-relocation')
+  try {
+    const link = t.mock.method(syncFs, 'linkSync', () => { throw Object.assign(new Error('finite publication write failure'), { code: 'EIO' }) })
+    await assert.rejects(beginWorkspaceRelocationIntent(f.input), { code: 'EIO' })
+    link.mock.restore()
+    assert.equal(readWorkspaceRelocationIntent(f.data), null)
+    assertWorkspaceExecutionAllowed(f.data)
+    await assert.rejects(fs.lstat(path.join(f.data, 'workspace-control/relocation-active')), { code: 'ENOENT' })
+    assert.deepEqual(await f.catalog.snapshot(), f.snapshot)
+    assert.equal(await fs.readFile(path.join(f.source, 'default/original.txt'), 'utf8'), 'user bytes')
+  } finally { releaseCliLock(lock) }
+})
+
 test('another id or conflicting retry input cannot replace an accepted intent', async t => {
   const f = await fixture(t), lock = await acquireCliLock(f.data, 'workspace-relocation')
   try {
@@ -68,7 +125,7 @@ test('another id or conflicting retry input cannot replace an accepted intent', 
 
 for (const choice of ['different root', 'current root', 'environment changed during preview']) test('an explicit deployment workspace is checked before freezing: ' + choice, async t => {
   const f = await fixture(t), lock = await acquireCliLock(f.data, 'workspace-relocation')
-  const previous = process.env.WORKER_WORKSPACES_DIR, control = path.dirname(f.recordFile), names = await fs.readdir(control)
+  const previous = process.env.WORKER_WORKSPACES_DIR, control = path.join(f.data, 'workspace-control'), names = await fs.readdir(control)
   try {
     process.env.WORKER_WORKSPACES_DIR = f.source
     if (choice === 'environment changed during preview') {
@@ -153,7 +210,7 @@ test('a directory flush failure retains the published id and retry finishes dura
   const original = syncFs.fsyncSync
   try {
     const mocked = t.mock.method(syncFs, 'fsyncSync', function(fd) {
-      if (syncFs.fstatSync(fd).isDirectory()) throw Object.assign(new Error('flush fault'), { code: 'EIO' })
+      if (syncFs.fstatSync(fd).isDirectory() && syncFs.existsSync(f.recordFile)) throw Object.assign(new Error('flush fault'), { code: 'EIO' })
       return original(fd)
     })
     if (process.platform === 'win32') { mocked.mock.restore(); return t.skip('Node does not expose Windows directory flushing') }
@@ -169,17 +226,23 @@ test('a directory flush failure retains the published id and retry finishes dura
 
 test('a lost publication reply never creates another intent or removes the active protection', async t => {
   const f = await fixture(t), lock = await acquireCliLock(f.data, 'workspace-relocation')
-  const original = syncFs.linkSync
+  const original = native.renameDirectoryNoReplace
+  let injected = false
   try {
-    const mocked = t.mock.method(syncFs, 'linkSync', function(source, target) {
-      original(source, target)
+    const mocked = t.mock.method(native, 'renameDirectoryNoReplace', function(source, target) {
+      const result = original(source, target)
+      if (target !== path.dirname(f.recordFile)) return result
+      injected = true
       throw Object.assign(new Error('publication reply lost'), { code: 'EIO' })
     })
     await assert.rejects(beginWorkspaceRelocationIntent(f.input), { code: 'EIO' })
-    mocked.mock.restore()
-    const record = readWorkspaceRelocationIntent(f.data)
+    mocked.mock.restore(); assert.equal(injected, true)
+    const record = readWorkspaceRelocationIntent(f.data), before = await fs.readFile(f.recordFile)
     assert.equal(record.id, f.input.id)
     assert.deepEqual(await beginWorkspaceRelocationIntent(f.input), record)
+    assert.deepEqual(await fs.readFile(f.recordFile), before)
+    assert.deepEqual(await f.catalog.snapshot(), f.snapshot)
+    assert.equal(await fs.readFile(path.join(f.source, 'default/original.txt'), 'utf8'), 'user bytes')
     assertWorkspaceStillProtected(f.data)
   } finally { releaseCliLock(lock) }
 })
@@ -223,7 +286,7 @@ test('a pending version replacement cannot acquire a second workspace maintenanc
 
 test('a control directory disappearing after preview is never recreated to publish an intent', async t => {
   const f = await fixture(t), lock = await acquireCliLock(f.data, 'workspace-relocation')
-  const original = syncFs.lstatSync, control = path.dirname(f.recordFile), retained = path.join(f.root, 'retained-control')
+  const original = syncFs.lstatSync, control = path.join(f.data, 'workspace-control'), retained = path.join(f.root, 'retained-control')
   let moved = false
   try {
     const mocked = t.mock.method(syncFs, 'lstatSync', function(file, ...args) {
@@ -243,15 +306,42 @@ test('a control directory disappearing after preview is never recreated to publi
 
 test('an unexpected publication entry is preserved atomically without replacement', async t => {
   const f = await fixture(t), lock = await acquireCliLock(f.data, 'workspace-relocation'), original = syncFs.linkSync
+  let unexpected
   try {
     const mocked = t.mock.method(syncFs, 'linkSync', function(source, target) {
+      unexpected = target
       syncFs.writeFileSync(target, 'unexpected existing control', { flag: 'wx', mode: 0o600 })
       return original(source, target)
     })
     await assert.rejects(beginWorkspaceRelocationIntent(f.input), { code: 'WORKSPACE_RELOCATION_CONFLICT' })
     mocked.mock.restore()
-    assert.equal(await fs.readFile(f.recordFile, 'utf8'), 'unexpected existing control')
+    assert.equal(await fs.readFile(unexpected, 'utf8'), 'unexpected existing control')
+    assert.equal(readWorkspaceRelocationIntent(f.data), null)
+    assertWorkspaceExecutionAllowed(f.data)
+    await assert.rejects(fs.lstat(f.recordFile), { code: 'ENOENT' })
+  } finally { releaseCliLock(lock) }
+})
+
+test('atomic job admission never replaces an unexpected active directory', async t => {
+  const f = await fixture(t), lock = await acquireCliLock(f.data, 'workspace-relocation')
+  const active = path.dirname(f.recordFile), move = native.renameDirectoryNoReplace
+  let injected = false
+  try {
+    const mocked = t.mock.method(native, 'renameDirectoryNoReplace', function(source, target) {
+      if (target !== active) return move(source, target)
+      injected = true
+      if (process.platform === 'win32') native.createPrivateDirectory(active)
+      else syncFs.mkdirSync(active, { mode: 0o700 })
+      syncFs.writeFileSync(path.join(active, 'unexpected'), 'preserve foreign content')
+      return move(source, target)
+    })
+    await assert.rejects(beginWorkspaceRelocationIntent(f.input))
+    mocked.mock.restore(); assert.equal(injected, true)
     assertWorkspaceStillProtected(f.data)
+    assert.equal(await fs.readFile(path.join(active, 'unexpected'), 'utf8'), 'preserve foreign content')
+    assert.throws(() => readWorkspaceRelocationIntent(f.data))
+    assert.deepEqual(await f.catalog.snapshot(), f.snapshot)
+    assert.equal(await fs.readFile(path.join(f.source, 'default/original.txt'), 'utf8'), 'user bytes')
   } finally { releaseCliLock(lock) }
 })
 
@@ -314,7 +404,7 @@ function workerSet() {
 
 test('fixed Worker set requires the native lock and binds the first complete set to its intent', async t => {
   const f = await fixture(t), lock = await acquireCliLock(f.data, 'workspace-relocation'), workers = workerSet()
-  const scopeFile = path.join(f.data, 'workspace-control/relocation-workers.json')
+  const scopeFile = path.join(f.data, 'workspace-control/relocation-active/relocation-workers.json')
   try { await beginWorkspaceRelocationIntent(f.input) } finally { releaseCliLock(lock) }
   assert.throws(() => commitWorkspaceRelocationWorkers({ dataDir: f.data, id: f.input.id, workers }), { code: 'WORKSPACE_RELOCATION_INVALID' })
   await assert.rejects(fs.stat(scopeFile), { code: 'ENOENT' })
@@ -337,7 +427,7 @@ test('fixed Worker set requires the native lock and binds the first complete set
 
 for (const damage of ['json', 'null', 'intent', 'workers', 'link', 'hardlink', 'large']) test('fixed Worker set damage retains protection: ' + damage, async t => {
   const f = await fixture(t), lock = await acquireCliLock(f.data, 'workspace-relocation'), workers = workerSet()
-  const file = path.join(f.data, 'workspace-control/relocation-workers.json')
+  const file = path.join(f.data, 'workspace-control/relocation-active/relocation-workers.json')
   try {
     await beginWorkspaceRelocationIntent(f.input)
     const record = commitWorkspaceRelocationWorkers({ dataDir: f.data, id: f.input.id, workers })
@@ -367,12 +457,12 @@ for (const invalid of ['extra content', 'duplicate Worker', 'duplicate incarnati
     if (invalid === 'missing task') delete workers[0].task_id
     if (invalid === 'missing incarnation') delete workers[0].incarnations[0].incarnation_id
     assert.throws(() => commitWorkspaceRelocationWorkers({ dataDir: f.data, id: f.input.id, workers }), { code: 'WORKSPACE_RELOCATION_INVALID' })
-    await assert.rejects(fs.stat(path.join(f.data, 'workspace-control/relocation-workers.json')), { code: 'ENOENT' })
+    await assert.rejects(fs.stat(path.join(f.data, 'workspace-control/relocation-active/relocation-workers.json')), { code: 'ENOENT' })
   } finally { releaseCliLock(lock) }
 })
 
 test('fixed set survives a lost publication reply and later id-bound native lock recovery', async t => {
-  const f = await fixture(t), workers = workerSet(), file = path.join(f.data, 'workspace-control/relocation-workers.json')
+  const f = await fixture(t), workers = workerSet(), file = path.join(f.data, 'workspace-control/relocation-active/relocation-workers.json')
   const lock = await acquireCliLock(f.data, 'workspace-relocation')
   try { await beginWorkspaceRelocationIntent(f.input); commitWorkspaceRelocationWorkers({ dataDir: f.data, id: f.input.id, workers }) }
   finally { releaseCliLock(lock) }
@@ -406,13 +496,13 @@ test('source replacement during fixed-set publication does not commit or overwri
     }
     assert.throws(() => commitWorkspaceRelocationWorkers({ dataDir: f.data, id: f.input.id, workers }), { code: 'WORKSPACE_RELOCATION_INVALID' })
     assert.equal(await fs.readFile(path.join(retained, 'default/original.txt'), 'utf8'), 'user bytes')
-    await assert.rejects(fs.stat(path.join(f.data, 'workspace-control/relocation-workers.json')), { code: 'ENOENT' })
+    await assert.rejects(fs.stat(path.join(f.data, 'workspace-control/relocation-active/relocation-workers.json')), { code: 'ENOENT' })
   } finally { syncFs.writeFileSync = write; releaseCliLock(lock) }
 })
 
 test('an unknown fixed-set entry appearing at publication is preserved', async t => {
   const f = await fixture(t), lock = await acquireCliLock(f.data, 'workspace-relocation'), workers = workerSet()
-  const link = syncFs.linkSync, file = path.join(f.data, 'workspace-control/relocation-workers.json')
+  const link = syncFs.linkSync, file = path.join(f.data, 'workspace-control/relocation-active/relocation-workers.json')
   try {
     await beginWorkspaceRelocationIntent(f.input)
     syncFs.linkSync = function(source, target, ...args) {
@@ -488,7 +578,7 @@ test('a persisted fixed set cannot lose its fence when the initial intent is mis
 
 for (const change of ['missing', 'different']) test('fixed-set publication cannot report success after readback changes: ' + change, async t => {
   const f = await fixture(t), lock = await acquireCliLock(f.data, 'workspace-relocation'), workers = workerSet()
-  const link = syncFs.linkSync, file = path.join(f.data, 'workspace-control/relocation-workers.json')
+  const link = syncFs.linkSync, file = path.join(f.data, 'workspace-control/relocation-active/relocation-workers.json')
   try {
     await beginWorkspaceRelocationIntent(f.input)
     syncFs.linkSync = function(source, target, ...args) {
@@ -507,8 +597,10 @@ for (const change of ['missing', 'different']) test('fixed-set publication canno
 
 
 for (const file of ['relocation-stop-attempt.json', 'relocation-stop-submission.json', 'relocation-modules.json', 'relocation-module-stop-attempt.json', 'relocation-module-processes', 'relocation-module-stop-submission.json', 'relocation-coordinator.json', 'relocation-coordinator-ready.json']) test('orphaned stop evidence keeps all execution entry points fenced: ' + file, async t => {
-  const f = await fixture(t)
-  await fs.writeFile(path.join(f.data, 'workspace-control', file), '{}', { mode: 0o600 })
+  const f = await fixture(t), active = path.join(f.data, 'workspace-control/relocation-active')
+  if (process.platform === 'win32') native.createPrivateDirectory(active)
+  else await fs.mkdir(active, { mode: 0o700 })
+  await fs.writeFile(path.join(active, file), '{}', { mode: 0o600 })
   assertWorkspaceStillProtected(f.data)
   assert.throws(() => readWorkspaceRelocationIntent(f.data), { code: 'WORKSPACE_RELOCATION_INVALID' })
 })
@@ -563,7 +655,7 @@ for (const invalid of ['missing', 'duplicate', 'replacement', 'extra content', '
 
 for (const damage of ['attempt json', 'attempt scope', 'attempt link', 'attempt hardlink', 'submission attempt', 'missing upstream', 'missing attempt']) test('damaged stop records preserve maintenance and never authorize redispatch: ' + damage, async t => {
   const f = await fixture(t), workers = workerSet(), lock = await acquireCliLock(f.data, 'workspace-relocation')
-  const file = path.join(f.data, 'workspace-control/relocation-stop-attempt.json'), submitted = path.join(f.data, 'workspace-control/relocation-stop-submission.json')
+  const file = path.join(f.data, 'workspace-control/relocation-active/relocation-stop-attempt.json'), submitted = path.join(f.data, 'workspace-control/relocation-active/relocation-stop-submission.json')
   try {
     await beginWorkspaceRelocationIntent(f.input); commitWorkspaceRelocationWorkers({ dataDir: f.data, id: f.input.id, workers })
     const { attempt } = prepareWorkspaceRelocationStops({ dataDir: f.data, id: f.input.id, workers })
@@ -573,7 +665,7 @@ for (const damage of ['attempt json', 'attempt scope', 'attempt link', 'attempt 
     if (damage === 'attempt link') { const original = path.join(f.root, 'retained-attempt'); await fs.rename(file, original); await fs.symlink(original, file, 'file') }
     if (damage === 'attempt hardlink') await fs.link(file, path.join(f.root, 'hardlink'))
     if (damage === 'submission attempt') await fs.writeFile(submitted, JSON.stringify({ ...result, attempt_sha256: '0'.repeat(64) }))
-    if (damage === 'missing upstream') await fs.rm(path.join(f.data, 'workspace-control/relocation-workers.json'))
+    if (damage === 'missing upstream') await fs.rm(path.join(f.data, 'workspace-control/relocation-active/relocation-workers.json'))
     if (damage === 'missing attempt') await fs.rm(file)
     assert.throws(() => readWorkspaceRelocationStops(f.data, f.input.id), { code: 'WORKSPACE_RELOCATION_INVALID' })
     assert.throws(() => prepareWorkspaceRelocationStops({ dataDir: f.data, id: f.input.id, workers }), { code: 'WORKSPACE_RELOCATION_INVALID' })
@@ -696,7 +788,7 @@ for (const kind of ['missing worker scope', 'missing module scope', 'missing att
   commitWorkspaceRelocationModules({ ...f.options, modules: f.modules }); prepareWorkspaceRelocationModuleStops({ ...f.options, modules: f.modules })
   observeWorkspaceRelocationModuleProcesses({ ...f.options, moduleId: 'fixture-memory', processes: f.modules[0].processes })
   completeWorkspaceRelocationModuleStops({ ...f.options, results: moduleResults(f.modules) })
-  const control = path.join(f.data, 'workspace-control'), observations = path.join(control, 'relocation-module-processes'), first = path.join(observations, '00000000.json')
+  const control = path.join(f.data, 'workspace-control/relocation-active'), observations = path.join(control, 'relocation-module-processes'), first = path.join(observations, '00000000.json')
   if (kind === 'missing worker scope') await fs.rm(path.join(control, 'relocation-workers.json'))
   if (kind === 'missing module scope') await fs.rm(path.join(control, 'relocation-modules.json'))
   if (kind === 'missing attempt') await fs.rm(path.join(control, 'relocation-module-stop-attempt.json'))
@@ -768,7 +860,7 @@ test('read-only observations can extend an unknown receipt without replacing its
 test('an observation published before acknowledgement loss keeps its first sequence and content', async t => {
   const f = await moduleFixture(t)
   commitWorkspaceRelocationModules({ ...f.options, modules: f.modules }); prepareWorkspaceRelocationModuleStops({ ...f.options, modules: f.modules })
-  const directory = path.join(f.data, 'workspace-control/relocation-module-processes'), inode = syncFs.statSync(directory).ino
+  const directory = path.join(f.data, 'workspace-control/relocation-active/relocation-module-processes'), inode = syncFs.statSync(directory).ino
   if (process.platform === 'win32') {
     const original = syncFs.linkSync
     t.mock.method(syncFs, 'linkSync', (...args) => { original(...args); if (String(args[1]).endsWith('00000000.json')) throw new Error('observation acknowledgement lost') })
@@ -795,7 +887,7 @@ for (const kind of ['admin', 'self process', 'duplicate runtime', 'extra content
 })
 for (const kind of ['module', 'CLI']) test('historical ' + kind + ' scope permits the reader to reuse an exited generation PID without adopting it', async t => {
   const f = await moduleFixture(t), self = native.inspectProcess(process.pid)
-  const file = path.join(f.data, 'workspace-control', kind === 'module' ? 'relocation-modules.json' : 'relocation-worker-processes.json')
+  const file = path.join(f.data, 'workspace-control/relocation-active', kind === 'module' ? 'relocation-modules.json' : 'relocation-worker-processes.json')
   if (kind === 'module') commitWorkspaceRelocationModules({ ...f.options, modules: f.modules })
   else commitWorkspaceRelocationProcesses({ ...f.options, processes: f.modules[0].processes })
   const stored = JSON.parse(await fs.readFile(file, 'utf8'))
@@ -820,7 +912,7 @@ for (const kind of ['module', 'CLI']) test('historical ' + kind + ' scope permit
 test('an observation directory replaced before its first entry cannot restart a fresh chain', async t => {
   const f = await moduleFixture(t)
   commitWorkspaceRelocationModules({ ...f.options, modules: f.modules }); prepareWorkspaceRelocationModuleStops({ ...f.options, modules: f.modules })
-  const directory = path.join(f.data, 'workspace-control/relocation-module-processes')
+  const directory = path.join(f.data, 'workspace-control/relocation-active/relocation-module-processes')
   await fs.rename(directory, path.join(f.root, 'first-observation-directory'))
   management.ensurePrivateDataRoot(directory)
   assert.throws(() => observeWorkspaceRelocationModuleProcesses({ ...f.options, moduleId: 'fixture-memory', processes: f.modules[0].processes }), { code: 'WORKSPACE_RELOCATION_INVALID' })
@@ -901,19 +993,19 @@ for (const damage of ['hash', 'extra', 'hardlink', 'missing-launch', 'null-launc
   const c = await coordinatorChild(t), f = await fixture(t, () => releaseCliLock(lock))
   lock = await acquireCliLock(f.data, 'workspace-relocation'); await beginWorkspaceRelocationIntent(f.input)
   const record = commitWorkspaceRelocationCoordinator({ dataDir: f.data, id: f.input.id, launchId: randomUUID(), coordinator: c.process })
-  const file = path.join(f.data, 'workspace-control/relocation-coordinator.json')
+  const file = path.join(f.data, 'workspace-control/relocation-active/relocation-coordinator.json')
   if (damage === 'hash') await fs.writeFile(file, JSON.stringify({ ...record, intent_sha256: '0'.repeat(64) }))
   if (damage === 'extra') await fs.writeFile(file, JSON.stringify({ ...record, token: 'not-allowed' }))
   if (damage === 'null-launch') await fs.writeFile(file, 'null')
   if (damage === 'null-ready') {
-    const invalid = path.join(f.data, 'workspace-control/relocation-coordinator-ready.json')
+    const invalid = path.join(f.data, 'workspace-control/relocation-active/relocation-coordinator-ready.json')
     if (process.platform === 'win32') native.writePrivateFile(invalid, 'null')
     else await fs.writeFile(invalid, 'null', { mode: 0o600 })
   }
   if (damage === 'hardlink') await fs.link(file, path.join(f.root, 'outside-launch'))
   if (damage === 'missing-launch') {
     await fs.rm(file);
-    const orphan = path.join(f.data, 'workspace-control/relocation-coordinator-ready.json')
+    const orphan = path.join(f.data, 'workspace-control/relocation-active/relocation-coordinator-ready.json')
     if (process.platform === 'win32') native.writePrivateFile(orphan, '{}')
     else await fs.writeFile(orphan, '{}', { mode: 0o600 })
   }
@@ -955,7 +1047,7 @@ for (const dependent of ['relocation-worker-processes.json', 'relocation-stop-at
   let lock
   const f = await fixture(t, () => releaseCliLock(lock))
   lock = await acquireCliLock(f.data, 'workspace-relocation'); await beginWorkspaceRelocationIntent(f.input)
-  const orphan = path.join(f.data, 'workspace-control', dependent), workersFile = path.join(f.data, 'workspace-control/relocation-workers.json')
+  const orphan = path.join(f.data, 'workspace-control/relocation-active', dependent), workersFile = path.join(f.data, 'workspace-control/relocation-active/relocation-workers.json')
   if (process.platform === 'win32') native.writePrivateFile(orphan, '{}')
   else await fs.writeFile(orphan, '{}', { mode: 0o600 })
   assert.throws(() => commitWorkspaceRelocationWorkers({ dataDir: f.data, id: f.input.id, workers: workerSet() }), { code: 'WORKSPACE_RELOCATION_INVALID' })
@@ -968,7 +1060,7 @@ for (const dependent of ['relocation-worker-processes.json', 'relocation-stop-at
 
 async function processFixture(t) {
   const f = await moduleFixture(t)
-  return { ...f, processes: f.modules[0].processes, file: path.join(f.data, 'workspace-control/relocation-worker-processes.json') }
+  return { ...f, processes: f.modules[0].processes, file: path.join(f.data, 'workspace-control/relocation-active/relocation-worker-processes.json') }
 }
 test('the first CLI process observation is lock-bound, immutable and independent from exit or Worker closure', async t => {
   const f = await processFixture(t), before = await f.catalog.snapshot()

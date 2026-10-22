@@ -251,7 +251,7 @@ describe('workspace planned execution module stops', () => {
         } else expect(fixed).toBeNull()
         expect(f.manager.processes.get('fixture-memory').exitCode).toBeNull()
         expect(f.manager.processes.get('admin-web').exitCode).toBeNull()
-        await expect(fs.stat(path.join(f.data, 'workspace-control/relocation-module-stop-attempt.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+        await expect(fs.stat(path.join(f.data, 'workspace-control/relocation-active/relocation-module-stop-attempt.json'))).rejects.toMatchObject({ code: 'ENOENT' })
         expect(await fs.readFile(f.marker, 'utf8').catch(() => '[]')).not.toContain('/shutdown')
         return
       }
@@ -269,7 +269,7 @@ describe('workspace planned execution module stops', () => {
       if (mode === 'lock lost' || mode === 'false persistence ack') {
         await expect(pending).rejects.toMatchObject({ code: 'CRABOT_WORKSPACE_JOURNAL_UNAVAILABLE' })
         expect(f.relocation.readWorkspaceRelocationModules(f.data, f.jobId)).toBeNull()
-        await expect(fs.stat(path.join(f.data, 'workspace-control/relocation-module-stop-attempt.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+        await expect(fs.stat(path.join(f.data, 'workspace-control/relocation-active/relocation-module-stop-attempt.json'))).rejects.toMatchObject({ code: 'ENOENT' })
         expect(f.manager.processes.get('fixture-memory').exitCode).toBeNull()
         expect(await fs.readFile(f.marker, 'utf8').catch(() => '[]')).not.toContain('/shutdown')
       } else {

@@ -88,7 +88,7 @@ test('the independent bootstrap guard matches Shared on absent, malformed, and r
 })
 
 
-for (const record of ['relocation-workers.json', 'relocation-worker-processes.json', 'relocation-stop-attempt.json', 'relocation-stop-submission.json', 'relocation-modules.json', 'relocation-module-stop-attempt.json', 'relocation-module-processes', 'relocation-module-stop-submission.json', 'relocation-coordinator.json', 'relocation-coordinator-ready.json', 'relocation-process-stop.jsonl', 'relocation-execution-exit.json', 'relocation-files.json', 'relocation-file-actors.jsonl', 'relocation-worker-closure.json', 'relocation-worker-commits', 'relocation-manager-closure.json', 'relocation-manager-complete.json', 'relocation-root-plan.json', 'relocation-root-published.json', 'relocation-root-selected.json', 'relocation-root-parents.json', 'relocation-root-parents-complete.json', 'relocation-health.json'])
+for (const record of ['relocation-active', 'relocation-finalizing.json', 'relocation-workers.json', 'relocation-worker-processes.json', 'relocation-stop-attempt.json', 'relocation-stop-submission.json', 'relocation-modules.json', 'relocation-module-stop-attempt.json', 'relocation-module-processes', 'relocation-module-stop-submission.json', 'relocation-coordinator.json', 'relocation-coordinator-ready.json', 'relocation-process-stop.jsonl', 'relocation-execution-exit.json', 'relocation-files.json', 'relocation-file-actors.jsonl', 'relocation-worker-closure.json', 'relocation-worker-commits', 'relocation-manager-closure.json', 'relocation-manager-complete.json', 'relocation-root-plan.json', 'relocation-root-published.json', 'relocation-root-selected.json', 'relocation-root-parents.json', 'relocation-root-parents-complete.json', 'relocation-health.json'])
 for (const kind of ['file', 'directory', 'link']) test('orphaned evidence keeps both guards closed: ' + record + '/' + kind, async t => {
   const f = await fixture(t), scope = path.join(f.control, record)
   const bootstrap = createRequire(import.meta.url)('../../scripts/lib/workspace-maintenance.cjs')
@@ -100,4 +100,21 @@ for (const kind of ['file', 'directory', 'link']) test('orphaned evidence keeps 
   assert.throws(() => bootstrap.assertWorkspaceExecutionAllowed(f.root), { code: 'WORKSPACE_MAINTENANCE' })
   await fs.rm(scope, { recursive: kind === 'directory' })
   assertWorkspaceExecutionAllowed(f.root); bootstrap.assertWorkspaceExecutionAllowed(f.root)
+})
+
+
+test('historical archives do not replace an active or finalizing fence', async t => {
+  const f = await fixture(t), bootstrap = createRequire(import.meta.url)('../../scripts/lib/workspace-maintenance.cjs')
+  const archive = path.join(f.control, 'relocation-history', '12345678-1234-4123-8123-123456789abc')
+  await fs.mkdir(archive, { recursive: true }); await fs.writeFile(path.join(archive, 'relocation.json'), '{"phase":"completed"}')
+  const compare = (pending: boolean) => {
+    assert.equal(workspaceMaintenancePending(f.root), pending)
+    assert.equal(bootstrap.workspaceMaintenancePending(f.root), pending)
+  }
+  compare(false)
+  const active = path.join(f.control, 'relocation-active'), finishing = path.join(f.control, 'relocation-finalizing.json')
+  await fs.mkdir(active); compare(true)
+  await fs.rmdir(active); await fs.writeFile(finishing, '{"phase":"completed"}'); compare(true)
+  await fs.unlink(finishing); compare(false)
+  assert.equal(await fs.readFile(path.join(archive, 'relocation.json'), 'utf8'), '{"phase":"completed"}')
 })

@@ -37,7 +37,7 @@ async function fixture() {
     return `${header}.${body}.${createHmac('sha256', key).update(`${header}.${body}`).digest('base64url')}`
   }
   const params = { intent_id: id, intent_sha256: sha256CanonicalJson(intent) }, token = jwt({ sub: 'admin', e: 0, desktop })
-  return { root, data, adminData, admin, service, desktop, jwt, params, token, file: path.join(data, 'workspace-control/relocation.json') }
+  return { root, data, adminData, admin, service, desktop, jwt, params, token, file: path.join(data, 'workspace-control/relocation-active/relocation.json') }
 }
 describe('human authorization for one fixed workspace relocation intent', () => {
   it('accepts a registered desktop session without configuring another password or changing files', async () => {

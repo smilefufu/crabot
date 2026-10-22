@@ -35,7 +35,7 @@ async function fixture(t, populated = true) {
   records.commitWorkspaceRelocationWorkers({ dataDir: data, id, workers: [] })
   records.commitWorkspaceRelocationProcesses({ dataDir: data, id, processes })
   records.commitWorkspaceRelocationModules({ dataDir: data, id, modules: [] })
-  const file = path.join(data, 'workspace-control/relocation-process-stop.jsonl')
+  const file = path.join(data, 'workspace-control/relocation-active/relocation-process-stop.jsonl')
   return { root, data, id, lock, child, ended, processes, file, catalog, before,
     addDescendant: async () => { const ready = once(child, 'message'); child.send('spawn'); const [pid] = await ready; const item = native.inspectProcess(pid); descendants.push(item); return item },
     prepare: () => records.prepareWorkspaceRelocationProcessStops({ dataDir: data, id }),
@@ -170,7 +170,7 @@ test('an acknowledgement retry syncs the original append after an earlier file-s
 
 for (const file of ['relocation-workers.json', 'relocation-worker-processes.json', 'relocation-modules.json']) test('missing original material cannot recapture around a process-stop journal: ' + file, async t => {
   const f = await fixture(t); f.prepare(); f.observe(f.processes)
-  fs.unlinkSync(path.join(f.data, 'workspace-control', file))
+  fs.unlinkSync(path.join(f.data, 'workspace-control/relocation-active', file))
   const before = fs.readFileSync(f.file)
   assert.throws(f.prepare, { code: 'WORKSPACE_RELOCATION_INVALID' })
   if (file === 'relocation-workers.json') assert.throws(() => records.commitWorkspaceRelocationWorkers({ dataDir: f.data, id: f.id, workers: [] }), { code: 'WORKSPACE_RELOCATION_INVALID' })

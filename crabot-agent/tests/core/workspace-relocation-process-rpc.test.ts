@@ -234,7 +234,7 @@ describe('Agent fixed native process capture RPC', () => {
       if (mode === 'extra pid') { params = { ...params, pids: [process.pid] }; expected = 'INVALID_PARAMS' }
       if (mode === 'wrong job') { params = { ...params, intent_id: randomUUID() }; expected = 'FORBIDDEN' }
       if (mode === 'revoked') f.revoke()
-      if (mode === 'missing scope') await fs.rm(path.join(f.data, 'workspace-control/relocation-workers.json'))
+      if (mode === 'missing scope') await fs.rm(path.join(f.data, 'workspace-control/relocation-active/relocation-workers.json'))
       if (mode === 'stop started') await f.journal.prepare(f.scope)
       if (mode === 'module stop started') await f.moduleJournal.prepare([])
       if (mode === 'not ready') { f.harness.deps.isWorkspaceRelocationReady = () => false; expected = 'WORKSPACE_MAINTENANCE' }

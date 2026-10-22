@@ -60,7 +60,7 @@ export class WorkspaceManager {
 
   /** Coordinates only; the caller retains original query ownership and read authorization. */
   async locateHistory(managerKey: string, workerId: string, incarnationId: string): Promise<WorkspaceHistoryLocation | null> {
-    try { await fs.lstat(path.join(this.dataRoot, 'workspace-control', 'relocation.json')) }
+    try { await fs.lstat(path.join(this.dataRoot, 'workspace-control', 'relocation-active', 'relocation.json')) }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
       if (!workspaceMaintenancePending(this.dataRoot)) return null
