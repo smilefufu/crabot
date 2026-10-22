@@ -34,8 +34,10 @@ export async function inspectWorkspaceRecoveryFacts({ dataDir, request, verify: 
   await authorize()
   const original = readWorkspaceRecoveryAdmissionScope(dataDir, request), state = original.state
   request = original.request
-  const catalog = new WorkspaceCatalog({ dataRoot: dataDir, storageRoot: process.env.WORKER_WORKSPACES_DIR, files: native })
+  const workspaceRootOverride = process.env.WORKER_WORKSPACES_DIR
+  const catalog = new WorkspaceCatalog({ dataRoot: dataDir, storageRoot: workspaceRootOverride, files: native })
   const check = () => {
+    if (process.env.WORKER_WORKSPACES_DIR !== workspaceRootOverride) throw unavailable()
     if (readWorkspaceRecoveryAdmissionScope(dataDir, request).fingerprint !== original.fingerprint) throw unavailable()
     const target = state.published.target, stat = fs.lstatSync(target.path, { bigint: true })
     const actual = { path: target.path, dev: String(stat.dev), ino: String(stat.ino), native_id: process.platform === 'win32' ? native.inspectDirectoryFileId(target.path) : null }

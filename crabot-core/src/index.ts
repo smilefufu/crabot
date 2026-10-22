@@ -35,6 +35,7 @@ import {
   type PrepareWorkspaceRelocationWorkerStopsResult,
   type CompleteWorkspaceRelocationWorkerStopsParams,
   type CompleteWorkspaceRelocationWorkerStopsResult,
+  type WorkspaceRecoveryRuntimePlan,
   type VerifyWorkspaceRelocationRecoveryAdmissionParams,
   type VerifyWorkspaceRelocationRecoveryAdmissionResult,
   type VerifyWorkspaceRelocationRecoveryRequestParams,
@@ -103,6 +104,7 @@ interface WorkspaceRecoveryAdmission {
   close: () => void
 }
 interface WorkspaceRecoveryCoordinator { verify: () => Promise<void>; close: () => void }
+interface WorkspaceRecoveryRuntimePreparation { plan: WorkspaceRecoveryRuntimePlan; verify: () => Promise<void> }
 interface WorkspaceRecoveryInitialization {
   request: VerifyWorkspaceRelocationRecoveryRequestParams
   result: VerifyWorkspaceRelocationRecoveryRequestResult
@@ -282,6 +284,7 @@ export class ModuleManager {
   private workspaceWorkerClosure?: { fingerprint: string; pending: Promise<WorkspaceWorkerClosureResult> }
   private workspaceRootSelection?: { fingerprint: string; pending: Promise<WorkspaceRootSelectionResult> }
   private workspaceValidationLaunch?: { fingerprint: string; pending: Promise<WorkspaceValidationLaunchResult> }
+  private readonly workspaceRecoveryRuntimePreparations = new WeakMap<WorkspaceRecoveryCoordinator, Promise<WorkspaceRecoveryRuntimePreparation>>()
   private workspaceRecoveryInitialization?: WorkspaceRecoveryInitialization
   private workspaceRecoveryInitializations = new Map<string, { fingerprint: string; bearerHash: string; pending: Promise<WorkspaceRecoveryCoordinator> }>()
   private workspaceRecoveryAdmission?: WorkspaceRecoveryAdmission
@@ -2082,6 +2085,40 @@ export class ModuleManager {
         try { await facts.verify() } catch (cause) { coordinator.close(); throw cause }
       } })
     } catch (cause) { coordinator.close(); throw cause }
+  }
+
+  private async prepareWorkspaceRecoveryRuntimes(request: VerifyWorkspaceRelocationRecoveryRequestParams, bearer?: string): Promise<WorkspaceRecoveryRuntimePreparation> {
+    request = Object.freeze({ ...request })
+    const coordinator = await this.initializeWorkspaceRelocationRecovery(request, bearer), previous = this.workspaceRecoveryRuntimePreparations.get(coordinator)
+    if (previous) { const result = await previous; await result.verify(); return result }
+    const pending = Promise.resolve().then(async () => {
+      try {
+        const facts = await this.inspectWorkspaceRelocationRecovery(request, bearer)
+        await facts.verify()
+        const records = require('../../scripts/lib/workspace-recovery-records.mjs')
+        const scope = require('../../scripts/lib/workspace-recovery-admission.mjs').readWorkspaceRecoveryAdmissionScope(this.dataDir, request)
+        const modules = scope.state.health.modules.map((module: { module_id: string }) => ({ module_id: module.module_id, runtime_id: this.runtimeRegistry.createRuntimeId() }))
+          .sort((a: { module_id: string }, b: { module_id: string }) => a.module_id.localeCompare(b.module_id))
+        const plan: WorkspaceRecoveryRuntimePlan = await records.commitWorkspaceRecoveryRuntimePlan({ dataDir: this.dataDir, recoveryId: request.recovery_id, modules, verify: facts.verify })
+        const planHash = sha256CanonicalJson(plan)
+        for (const module of plan.modules) Object.freeze(module)
+        Object.freeze(plan.modules); Object.freeze(plan)
+        const assertPlan = () => {
+          if (sha256CanonicalJson(records.readWorkspaceRecoveryRuntimePlan(this.dataDir, request.recovery_id)) !== planHash) throw new Error('Recovery runtime plan changed')
+        }
+        const verify = async () => {
+          try { await facts.verify(); assertPlan(); await facts.verify(); assertPlan() }
+          catch (cause) { coordinator.close(); throw cause }
+        }
+        await verify()
+        return Object.freeze({ plan, verify })
+      } catch (cause) {
+        coordinator.close()
+        throw Object.assign(new Error('新恢复运行预登记未全部确认，维护保护已保留；未启动业务模块。'), { code: 'SERVICE_UNAVAILABLE', cause })
+      }
+    })
+    this.workspaceRecoveryRuntimePreparations.set(coordinator, pending)
+    return pending
   }
 
   private async handleVerifyWorkspaceRelocationRecoveryAdmission(

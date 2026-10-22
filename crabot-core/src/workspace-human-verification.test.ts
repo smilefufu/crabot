@@ -2068,8 +2068,12 @@ describe('normal fixed-job Admin completion preparation', () => {
         await expect(recoveryRecords.commitWorkspaceRecoveryRuntimePlan({ dataDir: f.data, recoveryId: freshRole.request.recovery_id, modules, verify: initialized.verify })).rejects.toBeDefined()
         expect(recoveryRecords.readWorkspaceRecoveryRuntimePlan(f.data, freshRole.request.recovery_id)).toBeNull()
       }
-      const runtimePlan = await recoveryRecords.commitWorkspaceRecoveryRuntimePlan({ dataDir: f.data, recoveryId: freshRole.request.recovery_id, modules: plannedModules, verify: initialized.verify })
-      expect(runtimePlan.modules).toEqual(plannedModules)
+      const runtimePreparation = await cold.prepareWorkspaceRecoveryRuntimes(freshRole.request, 'fixture-human'), runtimePlan = runtimePreparation.plan
+      expect(await cold.prepareWorkspaceRecoveryRuntimes(freshRole.request, 'fixture-human')).toBe(runtimePreparation)
+      await runtimePreparation.verify()
+      expect(runtimePlan.modules.map((item: any) => item.module_id)).toEqual(plannedModules.map((item: any) => item.module_id))
+      expect(runtimePlan.modules.some((item: any) => archivedState.health.modules.some((old: any) => old.runtime_id === item.runtime_id))).toBe(false)
+      expect(Object.isFrozen(runtimePlan)).toBe(true); expect(Object.isFrozen(runtimePlan.modules)).toBe(true)
       expect(runtimePlan.root_selected_sha256).toBe(recoveryFacts.root_selected_sha256)
       expect(runtimePlan.launch_sha256).toBe(sha256CanonicalJson(initialized.launch))
       expect(recoveryRecords.readWorkspaceRecoveryRuntimePlan(f.data, freshRole.request.recovery_id)).toEqual(runtimePlan)
@@ -2107,19 +2111,29 @@ describe('normal fixed-job Admin completion preparation', () => {
       await expect(next.verify()).rejects.toBeDefined()
       await expect(cold.initializeWorkspaceRelocationRecovery(nextRequest, 'fixture-human')).rejects.toBeDefined()
       expect(recoveryRecords.readWorkspaceRecoveryCoordinator(f.data, nextRequest.recovery_id)).toEqual(nextFacts)
-      for (const changed of ['selected root', 'closed ledger']) {
+      for (const changed of ['runtime plan', 'environment', 'selected root', 'closed ledger']) {
         const inspectRequest = { ...request, recovery_id: randomUUID() }
         const inspected = await cold.initializeWorkspaceRelocationRecovery(inspectRequest, 'fixture-human')
         const facts = await cold.inspectWorkspaceRelocationRecovery(inspectRequest, 'fixture-human')
+        const preparation = await cold.prepareWorkspaceRecoveryRuntimes(inspectRequest, 'fixture-human')
+        const planFile = path.join(inspected.launch.control_root.path, 'runtime-plan.json'), planBytes = await fs.readFile(planFile)
+        const allocate = vi.spyOn(cold.runtimeRegistry, 'createRuntimeId'), oldRootOverride = process.env.WORKER_WORKSPACES_DIR
         const selectedRoot = records.readWorkspaceRelocationArchivedState(f.data, request.intent_id).published.target.path
         try {
           if (changed === 'selected root') { await fs.rename(selectedRoot, selectedRoot + '-retained'); await fs.mkdir(selectedRoot) }
+          else if (changed === 'runtime plan') await fs.writeFile(planFile, JSON.stringify({ ...preparation.plan, unexpected: true }))
+          else if (changed === 'environment') process.env.WORKER_WORKSPACES_DIR = path.join(f.root, 'foreign-override')
           else await fs.appendFile(ledgerFile, ' ')
-          await expect(facts.verify()).rejects.toBeDefined()
+          await expect(cold.prepareWorkspaceRecoveryRuntimes(inspectRequest, 'fixture-human')).rejects.toBeDefined()
+          expect(allocate).not.toHaveBeenCalled()
         } finally {
+          allocate.mockRestore()
           if (changed === 'selected root') { await fs.rmdir(selectedRoot); await fs.rename(selectedRoot + '-retained', selectedRoot) }
+          else if (changed === 'runtime plan') await fs.writeFile(planFile, planBytes)
+          else if (changed === 'environment') { if (oldRootOverride === undefined) delete process.env.WORKER_WORKSPACES_DIR; else process.env.WORKER_WORKSPACES_DIR = oldRootOverride }
           else await fs.writeFile(ledgerFile, ledger)
         }
+        await expect(preparation.verify()).rejects.toBeDefined()
         await expect(facts.verify()).rejects.toBeDefined()
         await expect(inspected.verify()).rejects.toBeDefined()
         await vi.waitFor(() => expect(require('../../scripts/lib/known-process-exit.cjs').probeKnownProcessExit([inspected.launch.process]).state).toBe('stopped'), { timeout: 15000 })

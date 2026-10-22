@@ -229,6 +229,15 @@ export interface CaptureWorkspaceRelocationProcessesResult {
   processes: ReadonlyArray<WorkerProcessIdentity>
 }
 
+export interface WorkspaceRecoveryRuntimePlan {
+  schema_version: 1
+  recovery_id: string
+  launch_sha256: string
+  root_selected_sha256: string
+  modules: Array<{ module_id: 'crabot-agent' | 'memory-default'; runtime_id: string }>
+  created_at: string
+}
+
 export interface VerifyWorkspaceRelocationRecoveryRequestParams {
   intent_id: string
   recovery_id: string
