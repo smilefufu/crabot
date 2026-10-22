@@ -90,7 +90,7 @@ $before=$acl.GetSecurityDescriptorSddlForm($sections)
 $right=if($file -eq $env:CRABOT_TEST_FILE){[System.Security.AccessControl.FileSystemRights]::ReadData}else{[System.Security.AccessControl.FileSystemRights]::WriteData}
 $rule=New-Object System.Security.AccessControl.FileSystemAuditRule($sid,$right,[System.Security.AccessControl.AuditFlags]::Success)
 $acl.AddAuditRule($rule)
-Set-Acl -LiteralPath $file -AclObject $acl
+[System.IO.File]::SetAccessControl($file,$acl)
 $actual=Get-Acl -LiteralPath $file -Audit
 if($actual.GetSecurityDescriptorSddlForm($sections) -ne $before){throw 'Audit fixture unexpectedly changed access permissions or ownership'}
 if(@($actual.GetAuditRules($true,$true,[System.Security.Principal.SecurityIdentifier])|Where-Object {$_.IdentityReference -eq $sid -and ($_.AuditFlags -band [System.Security.AccessControl.AuditFlags]::Success) -and ($_.FileSystemRights -band $right)}).Count -lt 1){throw 'Actual fixture audit ACE is missing'}
