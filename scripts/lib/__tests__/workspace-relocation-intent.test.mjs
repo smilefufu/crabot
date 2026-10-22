@@ -83,6 +83,20 @@ test('a historical job id cannot be reused to freeze a new migration', async t =
   } finally { releaseCliLock(lock) }
 })
 
+test('a retained release fact reserves its job id even when the archive is unavailable', async t => {
+  const f = await fixture(t), lock = await acquireCliLock(f.data, 'workspace-relocation')
+  const history = management.ensurePrivateDataRoot(path.join(f.data, 'workspace-control/relocation-history'))
+  const released = path.join(history, f.input.id + '.released.json')
+  await fs.writeFile(released, 'retained release fact')
+  try {
+    await assert.rejects(beginWorkspaceRelocationIntent(f.input), { code: 'WORKSPACE_RELOCATION_CONFLICT' })
+    assert.equal(readWorkspaceRelocationIntent(f.data), null)
+    assertWorkspaceExecutionAllowed(f.data)
+    assert.deepEqual(await f.catalog.snapshot(), f.snapshot)
+    assert.equal(await fs.readFile(released, 'utf8'), 'retained release fact')
+  } finally { releaseCliLock(lock) }
+})
+
 test('new intent owns an independent active directory while the catalog stays in place', async t => {
   const f = await fixture(t), lock = await acquireCliLock(f.data, 'workspace-relocation')
   const control = path.join(f.data, 'workspace-control'), catalog = path.join(control, 'catalog.json')

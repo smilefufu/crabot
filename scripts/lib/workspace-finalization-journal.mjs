@@ -11,6 +11,7 @@ import { journalFields as fields, workspaceJournalFailure as failure } from './w
 
 const requestKind = 'workspace_relocation_archive_request', replyKind = 'workspace_relocation_archive_reply'
 const releaseRequest = 'workspace_relocation_release_request', releaseReply = 'workspace_relocation_release_reply'
+const observeRequest = 'workspace_relocation_release_observe', observeReply = 'workspace_relocation_release_observed'
 function binding(context) {
   const coordinator = readWorkspaceRelocationCoordinator(context.dataDir, context.id)
   if (!coordinator.launch || !coordinator.ready || hash(context.launch) !== hash(coordinator.launch)) throw failure()
@@ -33,11 +34,41 @@ function preparedResult(bound, completionHash, prepared) {
   if (hash(prepared) !== hash(expected)) throw failure()
   return expected
 }
+// A new read-only query may observe an existing effect after its old reply channel failed.
+function observeStoredRelease(child, bound, completionHash) {
+  return new Promise((resolve, reject) => {
+    const id = randomUUID()
+    const verify = () => {
+      const self = native.inspectProcess(process.pid), actual = native.inspectProcess(child.pid)
+      if (!child.connected || child.exitCode !== null || child.signalCode !== null
+        || !native.sameProcess(bound.launch.parent, self) || !native.sameProcess(bound.launch.process, actual) || actual.parent !== self.pid) throw failure()
+    }
+    const cleanup = () => {
+      clearTimeout(timer); child.off('message', receive); child.off('exit', failed); child.off('error', failed); child.off('disconnect', failed)
+    }
+    const failed = () => { cleanup(); reject(failure()) }
+    const receive = message => {
+      if (message?.kind !== observeReply || message.request_id !== id) return
+      try {
+        verify()
+        if (!fields(message, ['kind', 'request_id', 'launch_id', 'ok', 'result']) || message.launch_id !== bound.launch.launch_id || message.ok !== true) throw failure()
+        const result = stored(bound, completionHash, message.result, true)
+        cleanup(); resolve(result)
+      } catch { failed() }
+    }
+    const timer = setTimeout(failed, 20 * 60_000)
+    child.on('message', receive); child.once('exit', failed); child.once('error', failed); child.once('disconnect', failed)
+    try {
+      verify()
+      child.send({ kind: observeRequest, request_id: id, launch_id: bound.launch.launch_id, completion_sha256: completionHash }, error => { if (error) failed() })
+    } catch { failed() }
+  })
+}
 export function createWorkspaceFinalizationJournal(child, context) {
   const bound = binding(context), completion = readWorkspaceRelocationCompletion(bound.dataDir, bound.id)
   if (!completion) throw failure()
   const completionHash = hash(completion)
-  let closed = false, pending, promise, releasePromise, releaseFingerprint, archiveResult
+  let closed = false, pending, promise, releasePromise, releaseFingerprint, archiveResult, observation
   const verify = () => {
     const self = native.inspectProcess(process.pid), childIdentity = native.inspectProcess(child.pid)
     if (closed || !child.connected || child.exitCode !== null || child.signalCode !== null
@@ -90,6 +121,10 @@ export function createWorkspaceFinalizationJournal(child, context) {
         })
         return releasePromise
       } catch { return Promise.reject(failure()) }
+    },
+    observeRelease() {
+      if (!releasePromise) return Promise.reject(failure())
+      return observation ??= observeStoredRelease(child, bound, completionHash)
     }, close,
   })
 }
@@ -102,16 +137,16 @@ export function serveWorkspaceFinalizationJournal(context) {
       || self.parent !== bound.launch.parent.pid || !native.sameProcess(bound.launch.parent, native.inspectProcess(bound.launch.parent.pid))) throw failure()
   }
   const receive = async message => {
-    if (message?.kind !== requestKind && message?.kind !== releaseRequest) return
-    const releasing = message.kind === releaseRequest
-    const reply = { kind: releasing ? releaseReply : replyKind, request_id: message.request_id, launch_id: bound.launch.launch_id, ok: false, result: null }
+    if (![requestKind, releaseRequest, observeRequest].includes(message?.kind)) return
+    const releasing = message.kind === releaseRequest, observing = message.kind === observeRequest
+    const reply = { kind: observing ? observeReply : releasing ? releaseReply : replyKind, request_id: message.request_id, launch_id: bound.launch.launch_id, ok: false, result: null }
     try {
       verify()
       if (!fields(message, ['kind', 'request_id', 'launch_id', 'completion_sha256', ...(releasing ? ['prepared'] : [])]) || message.launch_id !== bound.launch.launch_id
         || typeof message.request_id !== 'string' || !/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(message.request_id)
         || typeof message.completion_sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(message.completion_sha256)) throw failure()
       if (!effect) {
-        if (releasing) throw failure()
+        if (releasing || observing) throw failure()
         const completion = readWorkspaceRelocationCompletion(bound.dataDir, bound.id)
         if (!completion || hash(completion) !== message.completion_sha256) throw failure()
         completionHash = message.completion_sha256
@@ -120,7 +155,11 @@ export function serveWorkspaceFinalizationJournal(context) {
       if (message.completion_sha256 !== completionHash) throw failure()
       const archiveResult = await effect
       verify()
-      if (releasing) {
+      if (observing) {
+        if (!releaseEffect) throw failure()
+        const result = await releaseEffect
+        verify(); reply.result = stored(bound, completionHash, result, true)
+      } else if (releasing) {
         const prepared = preparedResult(bound, completionHash, message.prepared), fingerprint = hash(prepared)
         if (!releaseEffect) {
           stored(bound, completionHash, archiveResult)
@@ -134,7 +173,7 @@ export function serveWorkspaceFinalizationJournal(context) {
       reply.ok = true
     } catch (error) {
       reply.result = null
-      console.error(JSON.stringify({ event: releasing ? 'workspace_release_failed' : 'workspace_archive_failed', code: typeof error?.code === 'string' ? error.code.slice(0, 128) : 'unverified',
+      console.error(JSON.stringify({ event: observing ? 'workspace_release_observation_failed' : releasing ? 'workspace_release_failed' : 'workspace_archive_failed', code: typeof error?.code === 'string' ? error.code.slice(0, 128) : 'unverified',
         stage: typeof error?.stage === 'string' ? error.stage.slice(0, 64) : null }))
     }
     if (process.connected) process.send(reply, () => {})

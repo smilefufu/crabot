@@ -64,7 +64,8 @@ async function fixture(options: { withMemory?: boolean; inactiveMemory?: boolean
     await fs.writeFile(script, `const fs=require('node:fs'),http=require('node:http'),{default:Admin}=require(${JSON.stringify(entry)}),calls=[];
       const admin=new Admin({moduleId:'admin-web',moduleType:'admin',version:'0.1.0',protocolVersion:'0.1.0',port:Number(process.env.Crabot_PORT),subscriptions:[]},{data_dir:${JSON.stringify(path.join(data, 'admin'))},web_port:Number(process.env.Crabot_PORT)});
       admin.cutoverActivated=true;admin.verifyAuthenticatedToken=async token=>token==='fixture-human'?{sub:'admin'}:null;
-      const server=http.createServer((req,res)=>{let text='';req.on('data',part=>text+=part);req.on('end',()=>{let body;try{if(text)body=JSON.parse(text)}catch{}calls.push({method:req.url,authorization:req.headers.authorization?'present':undefined,body});fs.writeFileSync(process.env.FIXTURE_CALLS,JSON.stringify(calls))});
+      const server=http.createServer((req,res)=>{const record=body=>{calls.push({method:req.url,authorization:req.headers.authorization?'present':undefined,body});fs.writeFileSync(process.env.FIXTURE_CALLS,JSON.stringify(calls))};
+        if(req.url.startsWith('/api/'))record();else{let text='';req.on('data',part=>text+=part);req.on('end',()=>{let body;try{if(text)body=JSON.parse(text)}catch{}record(body)})}
         if(${!!options.businessAgent}){
           const config=${JSON.stringify(relocationAgentConfig)};config.agent_config.model_config.powerful.endpoint='http://127.0.0.1:'+process.env.Crabot_PORT+'/v1';
           if(require(${JSON.stringify(path.resolve('src/test-fixtures/workspace-config-admin.cjs'))}).handleWorkspaceConfigRequest(req,res,{config,moduleManagerPort:Number(process.env.CRABOT_MM_PORT)}))return;
@@ -291,6 +292,17 @@ runpy.run_module('src.main',run_name='__main__')
   } catch (error) { await cleanup(); throw error }
 }
 describe('MM consumes a human intent proof only from its current Admin runtime', () => {
+  it('retains the actual Web request body across authentication without diagnostic listeners consuming it', async () => {
+    const f = await fixture({ actualAdmin: true })
+    try {
+      const response = await fetch(`http://127.0.0.1:${f.port}/api/auth/change-password`, { method: 'POST',
+        headers: { Authorization: 'Bearer fixture-human', 'Content-Type': 'application/json' }, body: JSON.stringify({ new_password: 'finite-fixture-only' }) })
+      // Valid body reaches the real handler; this isolated constructor has no credentials to change.
+      expect(response.status).toBe(503)
+      expect(await response.json()).toMatchObject({ error: 'ADMIN_SERVER_NOT_INITIALIZED' })
+    } finally { await f.cleanup() }
+  })
+
   it('verifies the actual spawned Admin/runtime and own intent without stopping or creating a coordinator', async () => {
     const f = await fixture()
     try {
@@ -1908,6 +1920,7 @@ describe('normal fixed-job Admin completion preparation', () => {
       expect(result.completion_sha256).toBe(sha256CanonicalJson(archived))
       expect(records.readWorkspaceRelocationFinalizing(f.data, f.params.intent_id).completion_sha256).toBe(result.completion_sha256)
       const grant = f.manager.workspaceFinalizationGrant
+      await expect(grant.observeRelease()).rejects.toMatchObject({ code: 'CRABOT_WORKSPACE_JOURNAL_UNAVAILABLE' })
       await expect(records.releaseWorkspaceRelocationJob({ dataDir: f.data, id: f.params.intent_id, verify: async () => {} })).rejects.toMatchObject({ code: 'WORKSPACE_RELOCATION_INVALID' })
       expect(records.readWorkspaceRelocationReleased(f.data, f.params.intent_id)).toBeNull()
       expect(typeof grant.token).toBe('string')
@@ -1969,10 +1982,15 @@ describe.skipIf(process.env.GITHUB_ACTIONS !== 'true')('fixed terminal release a
       const locks = require('../../scripts/lib/cli-lock.mjs'), records = require('../../scripts/lib/workspace-relocation-intent.mjs')
       const native = require('../../scripts/lib/process-identity.cjs'), maintenance = require('../../scripts/lib/workspace-maintenance.cjs')
       const lock = await locks.acquireWorkspaceRelocationLock(f.data, f.params.intent_id)
-      let replySpy: ReturnType<typeof vi.spyOn> | undefined
+      let replySpy: ReturnType<typeof vi.spyOn> | undefined, sendSpy: ReturnType<typeof vi.spyOn> | undefined
+      const sent: string[] = []
       try {
         expect(typeof native.renameFileNoReplace).toBe('function')
         const prepared = await f.manager.prepareWorkspaceRelocationCompletion(f.params, 'fixture-human'), grant = f.manager.workspaceFinalizationGrant
+        const send = grant.child.send.bind(grant.child)
+        sendSpy = vi.spyOn(grant.child, 'send').mockImplementation((message: any, ...values: any[]) => { sent.push(message.kind); return send(message, ...values) })
+        await expect(grant.observeRelease()).rejects.toBeDefined()
+        expect(sent).toEqual([])
         const receipt = path.join(f.data, 'workspace-control/relocation-history', f.params.intent_id + '.released.json')
         const fence = path.join(f.data, 'workspace-control/relocation-finalizing.json'), original = await fs.readFile(fence)
         const request = { intent_id: prepared.intent_id, launch_id: prepared.launch_id, completion_sha256: prepared.completion_sha256 }
@@ -2002,8 +2020,8 @@ describe.skipIf(process.env.GITHUB_ACTIONS !== 'true')('fixed terminal release a
             expect(result).toEqual({ resumed: true, ...request, intent_sha256: prepared.intent_sha256, launch_sha256: prepared.launch_sha256 })
             const create = await fetch(`http://127.0.0.1:${f.port}/api/workspaces`, { method: 'POST', headers: { Authorization: 'Bearer fixture-human', 'Content-Type': 'application/json' },
               body: JSON.stringify({ workspace_id: randomUUID(), name: 'after relocation' }) })
-            expect(create.status).toBe(200)
             const created = await create.json() as any
+            expect(create.status, JSON.stringify(created)).toBe(200)
             expect(created.workspace.root.startsWith(path.join(records.readWorkspaceRelocationArchivedState(f.data, f.params.intent_id).intent.target, 'projects') + path.sep)).toBe(true)
             expect((await fetch(`http://127.0.0.1:${f.port}/api/workspaces/default/usage/refresh`, { method: 'POST', headers: { Authorization: 'Bearer fixture-human', 'Content-Type': 'application/json' }, body: '{}' })).status).toBe(202)
             await expect(resume()).resolves.toEqual(result)
@@ -2022,17 +2040,27 @@ describe.skipIf(process.env.GITHUB_ACTIONS !== 'true')('fixed terminal release a
         if (mode === 'lost acknowledgement' || mode === 'new maintenance after effect') {
           expect(records.readWorkspaceRelocationReleased(f.data, f.params.intent_id).completion_sha256).toBe(prepared.completion_sha256)
           expect(grant.phase).toBe('prepared')
-          await expect(resume()).rejects.toMatchObject({ remote_code: 'SERVICE_UNAVAILABLE' })
+          await expect(resume()).rejects.toMatchObject({ remote_code: mode === 'lost acknowledgement' ? 'FORBIDDEN' : 'SERVICE_UNAVAILABLE' })
         }
-        if (mode !== 'healthy') {
+        if (mode === 'lost acknowledgement') {
+          await grant.observeRelease()
+          expect(grant.phase).toBe('released')
+          await expect(resume()).resolves.toMatchObject({ resumed: true, ...request })
+          const create = await fetch(`http://127.0.0.1:${f.port}/api/workspaces`, { method: 'POST', headers: { Authorization: 'Bearer fixture-human', 'Content-Type': 'application/json' },
+            body: JSON.stringify({ workspace_id: randomUUID(), name: 'confirmed original effect' }) })
+          expect(create.status).toBe(200)
+        } else if (mode !== 'healthy') {
+          await expect(grant.observeRelease()).rejects.toBeDefined()
           const create = await fetch(`http://127.0.0.1:${f.port}/api/workspaces`, { method: 'POST', headers: { Authorization: 'Bearer fixture-human', 'Content-Type': 'application/json' }, body: '{}' })
           expect(create.status).toBe(503)
         }
+        expect(sent.filter(kind => kind === 'workspace_relocation_release_request')).toHaveLength(mode === 'bad prepared result' ? 0 : 1)
+        expect(sent.filter(kind => kind === 'workspace_relocation_release_observe')).toHaveLength(['healthy', 'bad prepared result'].includes(mode) ? 0 : 1)
         expect((await fetch(`http://127.0.0.1:${f.port}/api/friends`, { headers: { Authorization: 'Bearer fixture-human' } })).status).toBe(200)
         expect(JSON.parse(await fs.readFile(path.join(f.data, 'agent/worker-ledgers/channel%3A%3Asession.json'), 'utf8')).workers[0].task.status).toBe('closed')
         expect(JSON.stringify(await f.calls())).not.toContain(grant.token)
       } finally {
-        replySpy?.mockRestore(); f.manager.workspaceFinalizationGrant?.close()
+        replySpy?.mockRestore(); sendSpy?.mockRestore(); f.manager.workspaceFinalizationGrant?.close()
         const child = f.manager.workspaceValidationProof?.result.coordinator
         if (child?.connected) { const ended = once(child, 'exit'); child.disconnect(); await ended }
         locks.releaseCliLock(lock); await f.cleanup()

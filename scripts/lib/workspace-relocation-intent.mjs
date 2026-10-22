@@ -168,8 +168,10 @@ function assertArchiveUnused(ctx, id) {
   if (!privateControl(ctx.baseControl)) return
   const history = path.join(ctx.baseControl, 'relocation-history')
   if (!privateControl(history)) return
-  try { fs.lstatSync(path.join(history, id)); fail('WORKSPACE_RELOCATION_CONFLICT') }
-  catch (error) { if (error.code !== 'ENOENT') throw error }
+  for (const name of [id, id + '.released.json']) {
+    try { fs.lstatSync(path.join(history, name)); fail('WORKSPACE_RELOCATION_CONFLICT') }
+    catch (error) { if (error.code !== 'ENOENT') throw error }
+  }
 }
 export async function beginWorkspaceRelocationIntent(options) {
   const ctx = context(options.dataDir, true), operationToken = cliLockToken(path.join(ctx.dataRoot, 'cli.lock'))
