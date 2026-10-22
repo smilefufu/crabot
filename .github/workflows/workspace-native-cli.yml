@@ -111,7 +111,7 @@ jobs:
         if: runner.os == 'Windows'
         run: |
           pnpm --dir crabot-agent build
-          node --test --test-name-pattern='actual fixed Host prepares files once while the catalog stays unchanged: copy$' scripts/lib/__tests__/workspace-coordinator-launch.test.mjs
+          node --test --test-name-pattern='actual fixed Host prepares files once while the catalog stays unchanged: (copy|Root copy publish)$' scripts/lib/__tests__/workspace-coordinator-launch.test.mjs
       - name: Project binding and private native runtime regressions
         working-directory: crabot-agent
         run: node node_modules/vitest/vitest.mjs run tests/core/workspace-background-processes.test.ts tests/core/workspace-background-admissions.test.ts tests/workers/native-cli-managed-shell.test.ts tests/workers/relocated-native-history.test.ts tests/workers/codex-app-server-shell.test.ts tests/workers/codex-app-server-client.test.ts tests/workers/harness/workspace-manager.test.ts tests/workers/harness/project-workspaces.test.ts tests/workers/private-project-provision.test.ts tests/workers/private-project-runtime.test.ts tests/workers/codex-managed-notify.test.ts tests/workers/codex-project-config.test.ts --maxWorkers=1 --minWorkers=1

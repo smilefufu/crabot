@@ -20,7 +20,7 @@ function fixture(t) {
 }
 function setAcl(file, sddl) {
   execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
-    '$a=New-Object System.Security.AccessControl.FileSecurity;$a.SetSecurityDescriptorSddlForm($env.CRABOT_TEST_SDDL);Set-Acl -LiteralPath $env.CRABOT_TEST_FILE -AclObject $a'],
+    "$ErrorActionPreference='Stop';$a=New-Object System.Security.AccessControl.FileSecurity;$a.SetSecurityDescriptorSddlForm($env:CRABOT_TEST_SDDL);Set-Acl -LiteralPath $env:CRABOT_TEST_FILE -AclObject $a"],
   { env: { ...process.env, CRABOT_TEST_FILE: file, CRABOT_TEST_SDDL: sddl }, stdio: 'pipe' })
 }
 test('private Windows copy preserves two raw proofs and never changes the source ACL', windows, async t => {
@@ -74,7 +74,7 @@ test('compatibility refuses non-private parents even if the files have current-u
   const f = fixture(t), owner = native.inspectProcess(process.pid).owner
   const acl = 'O:' + owner + 'D:P(A;OICI;FA;;;' + owner + ')(A;OICI;FR;;;WD)'
   execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
-    '$a=New-Object System.Security.AccessControl.DirectorySecurity;$a.SetSecurityDescriptorSddlForm($env.CRABOT_TEST_SDDL);Set-Acl -LiteralPath $env.CRABOT_TEST_FILE -AclObject $a'],
+    "$ErrorActionPreference='Stop';$a=New-Object System.Security.AccessControl.DirectorySecurity;$a.SetSecurityDescriptorSddlForm($env:CRABOT_TEST_SDDL);Set-Acl -LiteralPath $env:CRABOT_TEST_FILE -AclObject $a"],
     { env: { ...process.env, CRABOT_TEST_FILE: f.source, CRABOT_TEST_SDDL: acl }, stdio: 'pipe' })
   await assert.rejects(inspectWorkspaceCopySource(f.source, { metadataCompatibility: policy }), { code: 'WORKSPACE_COPY_ACL_UNSUPPORTED' })
 })

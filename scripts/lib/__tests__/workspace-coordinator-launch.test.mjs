@@ -406,8 +406,9 @@ for (const mode of ['confirmed', 'lost acknowledgement', 'unexpected payload']) 
   } finally { workers.close(); modules.close(); processes.close(); files.close() }
 })
 
-for (const mode of ['confirmed', 'lost acknowledgement', 'changed source', 'copy', 'Root publish', 'Root lost acknowledgement', 'Root target changed', 'Root changed ancestor', 'Root nested target', 'Root nested target lost acknowledgement', 'Root nested parent changed']) test('the actual fixed Host prepares files once while the catalog stays unchanged: ' + mode, { timeout: process.platform === 'win32' ? 600000 : 120000, skip: mode === 'copy' && !crossVolumeParent && !(process.platform === 'win32' && process.env.GITHUB_ACTIONS === 'true') }, async t => {
-  const f = await fixture(t, { crossVolume: mode === 'copy', closureLedger: mode === 'confirmed' || mode === 'lost acknowledgement' || mode.startsWith('Root'), separateTargetAncestor: mode === 'Root changed ancestor', nestedTarget: mode.startsWith('Root nested'), historyIncarnation: mode === 'Root publish' }), { child, launch } = await f.launch(), context = { dataDir: f.data, id: f.id, launch }
+for (const mode of ['confirmed', 'lost acknowledgement', 'changed source', 'copy', 'Root copy publish', 'Root publish', 'Root lost acknowledgement', 'Root target changed', 'Root changed ancestor', 'Root nested target', 'Root nested target lost acknowledgement', 'Root nested parent changed']) test('the actual fixed Host prepares files once while the catalog stays unchanged: ' + mode, { timeout: process.platform === 'win32' ? 600000 : 120000, skip: ['copy', 'Root copy publish'].includes(mode) && !crossVolumeParent && !(process.platform === 'win32' && process.env.GITHUB_ACTIONS === 'true') }, async t => {
+  const copyMode = mode === 'copy' || mode === 'Root copy publish'
+  const f = await fixture(t, { crossVolume: copyMode, closureLedger: mode === 'confirmed' || mode === 'lost acknowledgement' || mode.startsWith('Root'), separateTargetAncestor: mode === 'Root changed ancestor', nestedTarget: mode.startsWith('Root nested'), historyIncarnation: mode === 'Root publish' }), { child, launch } = await f.launch(), context = { dataDir: f.data, id: f.id, launch }
   const workers = createWorkspaceWorkerJournal(child, context), modules = createWorkspaceModuleJournal(child, context), processes = createWorkspaceProcessJournal(child, context)
   let files = createWorkspaceFileJournal(child, context)
   try {
@@ -444,7 +445,7 @@ for (const mode of ['confirmed', 'lost acknowledgement', 'changed source', 'copy
       let result
       try { result = await files.prepareFiles() }
       catch (error) {
-        if (mode === 'copy' && process.platform === 'win32') {
+        if (copyMode && process.platform === 'win32') {
           const view = file => {
             const bytes = native.inspectFileMetadata(file).metadata, parts = []; let at = 0
             while (parts.length < 2) {
@@ -464,8 +465,8 @@ for (const mode of ['confirmed', 'lost acknowledgement', 'changed source', 'copy
       }
       assert.equal(result.dispatch, mode === 'lost acknowledgement' ? 'observe' : 'dispatch')
       assert.equal(result.ready.content_sha256, plan.source_content_sha256)
-      assert.equal(fs.existsSync(f.before.storage_root), mode === 'copy')
-      if (mode === 'copy') {
+      assert.equal(fs.existsSync(f.before.storage_root), copyMode)
+      if (copyMode) {
         assert.notEqual(fs.statSync(f.before.storage_root).dev, fs.statSync(plan.staging_path).dev)
         assert.equal(fs.readFileSync(f.marker, 'utf8'), 'original work')
         const actors = readWorkspaceRelocationFileActors(f.data, f.id)
@@ -812,6 +813,7 @@ for (const mode of ['confirmed', 'lost acknowledgement', 'changed source', 'copy
             assert.equal(published.published_sha256, sha256CanonicalJson(publishedRecord))
             assert.equal(publishedRecord.plan_sha256, rootPrepared.plan_sha256)
             assert.equal(publishedRecord.content_sha256, result.ready.content_sha256)
+            assert.equal(publishedRecord.metadata_sha256, result.ready.target_metadata_fingerprint)
             assert.equal(fs.readFileSync(path.join(f.target, 'original.txt'), 'utf8'), 'original work')
             assert.equal(fs.existsSync(rootPlan.publication.tree.path), false)
             assert.deepEqual(await f.catalog.snapshot(), f.before)
