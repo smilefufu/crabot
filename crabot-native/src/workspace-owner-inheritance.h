@@ -12,6 +12,8 @@ struct WorkspaceSecurityDescriptor {
   WorkspaceSecurityDescriptor& operator=(const WorkspaceSecurityDescriptor&) = delete;
 };
 static ACCESS_ALLOWED_ACE* WorkspaceOwnerAce(PSECURITY_DESCRIPTOR descriptor, bool directory) {
+  SECURITY_DESCRIPTOR_CONTROL control = 0; DWORD revision = 0;
+  if (!GetSecurityDescriptorControl(descriptor, &control, &revision) || (control & SE_SACL_PRESENT)) return nullptr;
   PSID owner = nullptr; BOOL defaulted = FALSE, present = FALSE; PACL acl = nullptr; void* raw = nullptr;
   if (!GetSecurityDescriptorOwner(descriptor, &owner, &defaulted) || !owner || MetadataSid(owner) != PrivateFileCurrentOwner()
     || !GetSecurityDescriptorDacl(descriptor, &present, &acl, &defaulted) || !present || !acl || acl->AceCount != 1

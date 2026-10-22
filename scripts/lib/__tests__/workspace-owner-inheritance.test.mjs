@@ -47,6 +47,26 @@ public static class CrabotAclFixture {
 [CrabotAclFixture]::Set($env:CRABOT_TEST_FILE,$env:CRABOT_TEST_SDDL)`],
   { env: { ...process.env, CRABOT_TEST_FILE: file, CRABOT_TEST_SDDL: sddl }, stdio: 'pipe' })
 }
+function addAuditOnly(file, copy) {
+  // Only this separate CI fixture process may use its audit privilege, never the product caller.
+  execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `
+$ErrorActionPreference='Stop'
+$sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User
+$sections=[System.Security.AccessControl.AccessControlSections]::Access -bor [System.Security.AccessControl.AccessControlSections]::Owner -bor [System.Security.AccessControl.AccessControlSections]::Group
+foreach($file in @($env:CRABOT_TEST_FILE,$env:CRABOT_TEST_COPY)) {
+if(!$file){continue}
+$acl=Get-Acl -LiteralPath $file -Audit
+$before=$acl.GetSecurityDescriptorSddlForm($sections)
+$right=if($file -eq $env:CRABOT_TEST_FILE){[System.Security.AccessControl.FileSystemRights]::ReadData}else{[System.Security.AccessControl.FileSystemRights]::WriteData}
+$rule=New-Object System.Security.AccessControl.FileSystemAuditRule($sid,$right,[System.Security.AccessControl.AuditFlags]::Success)
+$acl.AddAuditRule($rule)
+[System.IO.File]::SetAccessControl($file,$acl)
+$actual=Get-Acl -LiteralPath $file -Audit
+if($actual.GetSecurityDescriptorSddlForm($sections) -ne $before){throw 'Audit fixture unexpectedly changed access permissions or ownership'}
+if(@($actual.GetAuditRules($true,$true,[System.Security.Principal.SecurityIdentifier])|Where-Object {$_.IdentityReference -eq $sid -and ($_.AuditFlags -band [System.Security.AccessControl.AuditFlags]::Success) -and ($_.FileSystemRights -band $right)}).Count -lt 1){throw 'Actual fixture audit ACE is missing'}
+}
+`], { env: { ...process.env, CRABOT_TEST_FILE: file, CRABOT_TEST_COPY: copy ?? '' }, stdio: 'pipe' })
+}
 for (const mutation of ['named stream', 'integrity label']) test('private Windows copy preserves raw proofs and rejects a changed ' + mutation, windows, async t => {
   const f = fixture(t), original = await inspectWorkspaceFileMetadata(f.file)
   const pins = [f.source, f.target, path.dirname(f.target)].map(directory => native.pinDirectory(directory))
@@ -78,24 +98,7 @@ for (const auditScope of ['source only', 'different rules on both files']) test(
       async register() { return { dispatch: 'dispatch' } }, async permit() { return { dispatch: 'dispatch' } }, async complete() {},
     } })
     const copy = path.join(f.target, 'original.txt')
-    // Only this separate CI fixture process may use its audit privilege, never the product caller.
-    execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `
-$ErrorActionPreference='Stop'
-$sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User
-$sections=[System.Security.AccessControl.AccessControlSections]::Access -bor [System.Security.AccessControl.AccessControlSections]::Owner -bor [System.Security.AccessControl.AccessControlSections]::Group
-foreach($file in @($env:CRABOT_TEST_FILE,$env:CRABOT_TEST_COPY)) {
-if(!$file){continue}
-$acl=Get-Acl -LiteralPath $file -Audit
-$before=$acl.GetSecurityDescriptorSddlForm($sections)
-$right=if($file -eq $env:CRABOT_TEST_FILE){[System.Security.AccessControl.FileSystemRights]::ReadData}else{[System.Security.AccessControl.FileSystemRights]::WriteData}
-$rule=New-Object System.Security.AccessControl.FileSystemAuditRule($sid,$right,[System.Security.AccessControl.AuditFlags]::Success)
-$acl.AddAuditRule($rule)
-[System.IO.File]::SetAccessControl($file,$acl)
-$actual=Get-Acl -LiteralPath $file -Audit
-if($actual.GetSecurityDescriptorSddlForm($sections) -ne $before){throw 'Audit fixture unexpectedly changed access permissions or ownership'}
-if(@($actual.GetAuditRules($true,$true,[System.Security.Principal.SecurityIdentifier])|Where-Object {$_.IdentityReference -eq $sid -and ($_.AuditFlags -band [System.Security.AccessControl.AuditFlags]::Success) -and ($_.FileSystemRights -band $right)}).Count -lt 1){throw 'Actual fixture audit ACE is missing'}
-}
-`], { env: { ...process.env, CRABOT_TEST_FILE: f.file, CRABOT_TEST_COPY: auditScope === 'source only' ? '' : copy }, stdio: 'pipe' })
+    addAuditOnly(f.file, auditScope === 'source only' ? undefined : copy)
     assert.equal(native.compareWorkspaceOwnerInheritance(f.file, copy), false)
     await assert.rejects(inspectWorkspaceCopySource(f.source, { metadataCompatibility: policy }), { code: 'WORKSPACE_COPY_ACL_UNSUPPORTED' })
     assert.equal(fs.readFileSync(f.file, 'utf8'), 'original retained bytes')
@@ -142,7 +145,7 @@ test('compatibility refuses non-private parents even if the files have current-u
 })
 
 
-test('unsupported Windows ACL rejects the actual cross-volume intent before fencing or stopping existing execution', windows, async t => {
+for (const acl of ['restricted', 'audit']) test('unsupported Windows ' + acl + ' ACL rejects the actual cross-volume intent before fencing or stopping existing execution', windows, async t => {
   const root = fs.realpathSync.native(fs.mkdtempSync(path.join(tmpdir(), 'workspace-acl-admission-')))
   const other = path.resolve('.desktop-build')
   t.after(() => fs.rmSync(root, { recursive: true, force: true }))
@@ -153,7 +156,8 @@ test('unsupported Windows ACL rejects the actual cross-volume intent before fenc
   const snapshot = await catalog.snapshot(), file = path.join(snapshot.storage_root, 'limited.txt')
   fs.writeFileSync(file, 'keep original project work')
   const owner = native.inspectProcess(process.pid).owner
-  setAcl(file, 'O:' + owner + 'D:P(A;;FR;;;' + owner + ')')
+  if (acl === 'audit') addAuditOnly(file)
+  else setAcl(file, 'O:' + owner + 'D:P(A;;FR;;;' + owner + ')')
   const original = native.inspectFileMetadata(file).metadata
   const child = spawn(process.execPath, ['-e', 'setTimeout(()=>process.exit(0),30000)'], { stdio: 'ignore' })
   await once(child, 'spawn'); const processIdentity = native.inspectProcess(child.pid), ended = once(child, 'exit')
