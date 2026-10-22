@@ -33,12 +33,12 @@ public static class CrabotWorkspaceSecurityProbe {
     static void RenameHandle(SafeFileHandle file, string target) {
         using (var parent = CreateFileW(System.IO.Path.GetDirectoryName(target), 0x83, 3, IntPtr.Zero, 3, 0x2200000, IntPtr.Zero)) {
             Check(!parent.IsInvalid);
-            byte[] name = System.Text.Encoding.Unicode.GetBytes(System.IO.Path.GetFileName(target));
+            byte[] name = System.Text.Encoding.Unicode.GetBytes(target);
             int rootOffset = IntPtr.Size == 8 ? 8 : 4, lengthOffset = rootOffset + IntPtr.Size, nameOffset = lengthOffset + 4;
             IntPtr information = Marshal.AllocHGlobal(nameOffset + name.Length);
             try {
                 Marshal.WriteInt32(information, 0, 0); // Never replace another file.
-                Marshal.WriteIntPtr(information, rootOffset, parent.DangerousGetHandle());
+                Marshal.WriteIntPtr(information, rootOffset, IntPtr.Zero);
                 Marshal.WriteInt32(information, lengthOffset, name.Length);
                 Marshal.Copy(name, 0, IntPtr.Add(information, nameOffset), name.Length);
                 Check(SetFileInformationByHandle(file, 3, information, (uint)(nameOffset + name.Length)));
@@ -157,7 +157,8 @@ public static class CrabotWorkspaceSecurityProbe {
             if (mode == "protected-flag-then-original" && !SetFileSecurityW(target, 0x80000004, descriptor)) return (uint)Marshal.GetLastWin32Error();
             if (mode == "request-matches-source") Check(SetSecurityDescriptorControl(descriptor, 0x100, (ushort)((control & 0x400) != 0 ? 0x100 : 0)));
             return SetFileSecurityW(target, 4, descriptor) ? 0u : (uint)Marshal.GetLastWin32Error();
-        } finally { LocalFree(descriptor); }
+        } catch (Win32Exception error) { return (uint)error.NativeErrorCode; }
+        finally { LocalFree(descriptor); }
     }
 }
 '@
