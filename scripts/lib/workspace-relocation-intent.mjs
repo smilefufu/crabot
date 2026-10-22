@@ -2183,6 +2183,21 @@ export const readWorkspaceRelocationArchivedCompletion = recordGraphReader(funct
   }
   return record
 })
+/** Sealed closure facts for read-only inspection; no active role or command is restored. */
+export const readWorkspaceRelocationArchivedClosureFacts = recordGraphReader(function readWorkspaceRelocationArchivedClosureFacts(dataDir, id) {
+  const completion = readWorkspaceRelocationArchivedCompletion(dataDir, id)
+  if (!completion) fail()
+  const archive = path.join(context(dataDir).baseControl, 'relocation-history', id)
+  const workerPlan = readPrivateJson(path.join(archive, closurePlanFile), scopeLimit)
+  const workerComplete = readPrivateJson(path.join(archive, closureCommitsDirectory, 'complete.json'), scopeLimit)
+  const recoveryPlan = readPrivateJson(path.join(archive, recoveryPlanFile), scopeLimit)
+  const recoveryComplete = readPrivateJson(path.join(archive, recoveryCommitFile), scopeLimit)
+  if (!workerPlan || !workerComplete || !recoveryPlan || !recoveryComplete
+    || sha256CanonicalJson(workerComplete) !== completion.worker_commit_sha256 || sha256CanonicalJson(recoveryComplete) !== completion.recovery_commit_sha256
+    || workerComplete.plan_sha256 !== sha256CanonicalJson(workerPlan) || recoveryComplete.plan_sha256 !== sha256CanonicalJson(recoveryPlan)
+    || recoveryPlan.worker_closure_sha256 !== completion.worker_commit_sha256) fail()
+  return { workerPlan, workerComplete, recoveryPlan, recoveryComplete }
+})
 export const readWorkspaceRelocationFinalizing = recordGraphReader(function readWorkspaceRelocationFinalizing(dataDir, id) {
   if (!uuid(id)) fail()
   const ctx = context(dataDir)
@@ -2243,14 +2258,23 @@ export async function archiveWorkspaceRelocationJob({ dataDir, id, signal }) {
   if (sha256CanonicalJson(readWorkspaceRelocationFinalizing(dataDir, id)) !== sha256CanonicalJson(fence)) fail()
   native.renameDirectoryNoReplace(base.ctx.control, archive)
   syncDirectory(archive); syncDirectory(historyPath); syncDirectory(base.ctx.baseControl); syncDirectory(base.ctx.dataRoot)
-  // No ordinary reader/role fallback after moving the job. Check this fixed effect and original live generations only.
-  try { fs.lstatSync(base.ctx.control); fail() } catch (error) { if (error.code !== 'ENOENT') throw error }
-  const self = native.inspectProcess(process.pid), launch = coordinator.launch
-  if (signal?.aborted || !process.connected || !token || cliLockToken(path.join(base.ctx.dataRoot, 'cli.lock')) !== token
-    || !native.sameProcess(launch.process, self) || self.parent !== launch.parent.pid || !native.sameProcess(launch.parent, native.inspectProcess(launch.parent.pid))
-    || !same(dataRoot, identity(base.ctx.dataRoot)) || !same(baseControl, identity(base.ctx.baseControl))
-    || sha256CanonicalJson({ ...rootFrame(archive), path: active.path }) !== sha256CanonicalJson(active)
-    || sha256CanonicalJson(readWorkspaceRelocationFinalizing(dataDir, id)) !== sha256CanonicalJson(fence)
-    || sha256CanonicalJson(readWorkspaceRelocationArchivedCompletion(dataDir, id)) !== completionHash) fail()
+  // Only the fixed terminal handoff may inspect these facts after the active job moved.
+  const launch = coordinator.launch
+  const verifyArchived = () => {
+    try { fs.lstatSync(base.ctx.control); fail() } catch (error) { if (error.code !== 'ENOENT') throw error }
+    const self = native.inspectProcess(process.pid)
+    if (signal?.aborted || !process.connected || !token || cliLockToken(path.join(base.ctx.dataRoot, 'cli.lock')) !== token
+      || !native.sameProcess(launch.process, self) || self.parent !== launch.parent.pid || !native.sameProcess(launch.parent, native.inspectProcess(launch.parent.pid))
+      || !same(dataRoot, identity(base.ctx.dataRoot)) || !same(baseControl, identity(base.ctx.baseControl))
+      || sha256CanonicalJson({ ...rootFrame(archive), path: active.path }) !== sha256CanonicalJson(active)
+      || sha256CanonicalJson(readWorkspaceRelocationFinalizing(dataDir, id)) !== sha256CanonicalJson(fence)
+      || sha256CanonicalJson(readWorkspaceRelocationArchivedCompletion(dataDir, id)) !== completionHash) fail()
+  }
+  verifyArchived()
+  const agent = await import('../../crabot-agent/dist/core/workspace-relocation-closed-evidence.js')
+  verifyArchived()
+  const closures = await agent.inspectArchivedWorkspaceRelocationClosures({ dataDir, id, signal, verify: async () => verifyArchived() })
+  verifyArchived(); closures.verify()
+  if (closures.worker_commit_sha256 !== completion.worker_commit_sha256 || closures.recovery_commit_sha256 !== completion.recovery_commit_sha256) fail()
   return { intent_id: id, completion_sha256: completionHash, finalizing_sha256: sha256CanonicalJson(fence) }
 }

@@ -11,16 +11,25 @@ import { createWorkspaceMaintenanceFileAccess, digest, version, sameIdentity } f
 const native = require('../../../scripts/lib/process-identity.cjs')
 const failure = () => Object.assign(new Error('旧执行器或恢复终态无法重新核实，已保留原记录及维护保护。'), { code: 'CRABOT_WORKSPACE_CLOSED_EVIDENCE' })
 
-/** Read-only Agent facts, not execution authority. The fixed Root caller owns fresh role/lock/global-exit checks. */
-export async function inspectWorkspaceRelocationClosures({ dataDir, id, verify, signal }: {
-  dataDir: string; id: string; verify: () => Promise<unknown>; signal?: AbortSignal
-}) {
+interface ClosureInspectionOptions {
+  dataDir: string
+  id: string
+  verify: () => Promise<unknown>
+  signal?: AbortSignal
+}
+
+/** Read-only Agent facts; callers retain current role, lock and whole-execution exit checks. */
+async function inspectClosureFacts({ dataDir, id, verify, signal }: ClosureInspectionOptions, archived: boolean) {
   if (typeof verify !== 'function') throw failure()
   const records = require(path.join(__dirname, '../../../scripts/lib/workspace-relocation-intent.mjs'))
   const { owned, readJson } = createWorkspaceMaintenanceFileAccess(failure)
   await verify()
-  const workerPlan = records.readWorkspaceRelocationClosurePlan(dataDir, id), workerComplete = records.readWorkspaceRelocationClosureCommit(dataDir, id)
-  const recoveryPlan = records.readWorkspaceRelocationRecoveryPlan(dataDir, id), recoveryComplete = records.readWorkspaceRelocationRecoveryCommit(dataDir, id)
+  const readFacts = () => archived ? records.readWorkspaceRelocationArchivedClosureFacts(dataDir, id) : {
+    workerPlan: records.readWorkspaceRelocationClosurePlan(dataDir, id), workerComplete: records.readWorkspaceRelocationClosureCommit(dataDir, id),
+    recoveryPlan: records.readWorkspaceRelocationRecoveryPlan(dataDir, id), recoveryComplete: records.readWorkspaceRelocationRecoveryCommit(dataDir, id),
+  }
+  const { workerPlan, workerComplete, recoveryPlan, recoveryComplete } = readFacts()
+  const controlRoot = archived ? path.join(dataDir, 'workspace-control/relocation-history', id) : path.join(dataDir, 'workspace-control/relocation-active')
   if (!workerPlan || !workerComplete || !recoveryPlan || !recoveryComplete) throw failure()
   const workerHash = sha256CanonicalJson(workerComplete), recoveryHash = sha256CanonicalJson(recoveryComplete)
   const workerPlanHash = sha256CanonicalJson(workerPlan), recoveryPlanHash = sha256CanonicalJson(recoveryPlan)
@@ -37,7 +46,7 @@ export async function inspectWorkspaceRelocationClosures({ dataDir, id, verify, 
       const planned = workerPlan.ledgers[index]
       if (!planned || file.name !== planned.name || file.manager_key !== planned.manager_key || digest(file.contents) !== planned.after_sha256) throw failure()
       const expectedVersion = planned.before_sha256 === planned.after_sha256 ? planned.before_version
-        : readJson(path.join(dataDir, 'workspace-control/relocation-active/relocation-worker-commits', index + '.closed.json'))?.version
+        : readJson(path.join(controlRoot, 'relocation-worker-commits', index + '.closed.json'))?.version
       if (file.version !== expectedVersion) throw failure()
       return { path: path.join(snapshot.directories[2].path, file.name), version: file.version }
     })
@@ -59,10 +68,10 @@ export async function inspectWorkspaceRelocationClosures({ dataDir, id, verify, 
     if (!expected || result.dispatch !== 'observe' || result.manifest_sha256 !== expected.manifest_sha256 || result.complete_sha256 !== expected.complete_sha256) throw failure()
   }
   const check = () => {
-    if (signal?.aborted || sha256CanonicalJson(records.readWorkspaceRelocationClosurePlan(dataDir, id)) !== workerPlanHash
-      || sha256CanonicalJson(records.readWorkspaceRelocationClosureCommit(dataDir, id)) !== workerHash
-      || sha256CanonicalJson(records.readWorkspaceRelocationRecoveryPlan(dataDir, id)) !== recoveryPlanHash
-      || sha256CanonicalJson(records.readWorkspaceRelocationRecoveryCommit(dataDir, id)) !== recoveryHash) throw failure()
+    if (signal?.aborted) throw failure()
+    const current = readFacts()
+    if (sha256CanonicalJson(current.workerPlan) !== workerPlanHash || sha256CanonicalJson(current.workerComplete) !== workerHash
+      || sha256CanonicalJson(current.recoveryPlan) !== recoveryPlanHash || sha256CanonicalJson(current.recoveryComplete) !== recoveryHash) throw failure()
     for (const directory of directories) if (!sameIdentity(version(owned(directory.path, true)), directory.version, true)
       || fs.realpathSync(directory.path) !== directory.path || process.platform === 'win32' && native.inspectDirectoryFileId(directory.path) !== directory.native_id) throw failure()
     if (sha256CanonicalJson(fs.readdirSync(directories[2].path).sort()) !== sha256CanonicalJson(names)) throw failure()
@@ -74,4 +83,13 @@ export async function inspectWorkspaceRelocationClosures({ dataDir, id, verify, 
   }
   await verify(); check()
   return Object.freeze({ worker_commit_sha256: workerHash, recovery_commit_sha256: recoveryHash, verify: check })
+}
+
+
+export function inspectWorkspaceRelocationClosures(options: ClosureInspectionOptions) {
+  return inspectClosureFacts(options, false)
+}
+
+export function inspectArchivedWorkspaceRelocationClosures(options: ClosureInspectionOptions) {
+  return inspectClosureFacts(options, true)
 }

@@ -2024,6 +2024,24 @@ describe('fixed job archive storage handoff', () => {
           expect(await finalization.archive()).toEqual(archived)
           expect(() => records.readWorkspaceRelocationHealth(f.data, f.params.intent_id)).toThrow()
           expect(await fs.readFile(path.join(f.data, 'workspace-control/catalog.json'))).toEqual(catalogBeforeArchive)
+          const inspection = require('../../crabot-agent/dist/core/workspace-relocation-closed-evidence.js')
+          const ledgerFile = path.join(f.data, 'agent/worker-ledgers/channel%3A%3Asession.json'), ledgerBytes = await fs.readFile(ledgerFile)
+          const verify = async () => { expect(records.readWorkspaceRelocationArchivedCompletion(f.data, f.params.intent_id)).toEqual(completion) }
+          const closed = await inspection.inspectArchivedWorkspaceRelocationClosures({ dataDir: f.data, id: f.params.intent_id, verify })
+          expect(closed.worker_commit_sha256).toBe(completion.worker_commit_sha256)
+          expect(closed.recovery_commit_sha256).toBe(completion.recovery_commit_sha256)
+          closed.verify()
+          const cancellation = new AbortController()
+          const cancelled = await inspection.inspectArchivedWorkspaceRelocationClosures({ dataDir: f.data, id: f.params.intent_id, verify, signal: cancellation.signal })
+          cancelled.verify(); cancellation.abort()
+          expect(() => cancelled.verify()).toThrowError(expect.objectContaining({ code: 'CRABOT_WORKSPACE_CLOSED_EVIDENCE' }))
+          expect(await fs.readFile(ledgerFile)).toEqual(ledgerBytes)
+          await expect(inspection.inspectWorkspaceRelocationClosures({ dataDir: f.data, id: f.params.intent_id, verify })).rejects.toBeDefined()
+          try {
+            writeFileSync(ledgerFile, ledgerBytes.toString('utf8') + ' ')
+            expect(() => closed.verify()).toThrow()
+            await expect(inspection.inspectArchivedWorkspaceRelocationClosures({ dataDir: f.data, id: f.params.intent_id, verify })).rejects.toBeDefined()
+          } finally { writeFileSync(ledgerFile, ledgerBytes) }
         }
       } finally { sendSpy.mockRestore(); replySpy.mockRestore(); finalization.close() }
       expect((await fetch(`http://127.0.0.1:${f.port}/api/friends`, { headers: { Authorization: 'Bearer fixture-human' } })).status).toBe(200)
@@ -2081,6 +2099,21 @@ describe.skipIf(process.env.GITHUB_ACTIONS !== 'true' || process.env.CRABOT_WORK
       expect(require('../../scripts/lib/workspace-maintenance.cjs').workspaceMaintenancePending(f.data)).toBe(true)
       expect(records.readWorkspaceRelocationHealth(f.data, f.params.intent_id).root_proof).toEqual(result.root_verified)
       expect((await fetch(`http://127.0.0.1:${f.port}/api/friends`, { headers: { Authorization: 'Bearer fixture-human' } })).status).toBe(200)
+      const context = { dataDir: f.data, id: f.params.intent_id, launch: records.readWorkspaceRelocationCoordinator(f.data, f.params.intent_id).launch }
+      const preparation = require('../../scripts/lib/workspace-coordinator-journal.mjs').createWorkspaceJournalClient(result.coordinator, context, 'file')
+      let prepared
+      try { prepared = await preparation.call('prepare_completion', {}) } finally { preparation.close() }
+      const terminal = require('../../scripts/lib/workspace-finalization-journal.mjs').createWorkspaceFinalizationJournal(result.coordinator, context)
+      try {
+        const archived = await terminal.archive()
+        expect(archived.completion_sha256).toBe(prepared.completion_sha256)
+        expect(sha256CanonicalJson(records.readWorkspaceRelocationArchivedCompletion(f.data, f.params.intent_id))).toBe(archived.completion_sha256)
+        expect(records.readWorkspaceRelocationFinalizing(f.data, f.params.intent_id).completion_sha256).toBe(archived.completion_sha256)
+        expect(() => records.readWorkspaceRelocationHealth(f.data, f.params.intent_id)).toThrow()
+        expect(JSON.parse(await fs.readFile(path.join(f.data, 'agent/worker-ledgers/channel%3A%3Asession.json'), 'utf8')).workers[0].task.status).toBe('closed')
+        expect(require('../../scripts/lib/workspace-maintenance.cjs').workspaceMaintenancePending(f.data)).toBe(true)
+        expect((await fetch(`http://127.0.0.1:${f.port}/api/friends`, { headers: { Authorization: 'Bearer fixture-human' } })).status).toBe(200)
+      } finally { terminal.close() }
     } catch (error) {
       if (businessMemory) console.error('[Workspace Memory kernel images]', [...memoryImages.values()])
       if (businessMemory) console.error('[Workspace business Memory]', (await fs.readFile(path.join(f.data, 'logs/memory-default.log'), 'utf8').catch(() => '')).slice(-6000))
