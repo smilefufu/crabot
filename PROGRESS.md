@@ -8,7 +8,7 @@
 - 公平重测20条，19完成、1条连续502中断；九组完整配对Worker工具39→39、成功模型响应56→47，仍有业务续办新增Git/目录检查、主控交接后广搜/读取部署历史的反例。67次502全部发生新版，原因未定；不把传输错误当模型失败，也不忽略该条件差异推断成本下降。[复核结果](crabot-agent/eval/prework/results-handoff-2026-10-20.json)。
 - 上一轮追加提示词候选未合入产品或部署，仅保留隔离分支/证据；上一轮仅交付评测器修复及结论更正。原交接明确要求读规则，相关重读不全算执行器加码；归因四格不完整、每场景各一次，不能宣称稳定因果或线上收益。
 
-### 长回答连续播放：真人长答完整播出，首声与身份继续复核
+### 语音：wire9已部署，按优先级收口验收
 
 - 用户已确认后端/安卓配套设计及一处提示词文字；正式 Voice v0.9.0/wire9 先行发布。不增加通用 SSML 或新模型配置，普通 voice_reply 按需完整回答，宿主自动断句、单个 TTS 请求加一个预取，按实际播放游标保持最多一秒在途音频。
 - 原回答总字数、20/25/30秒累计播放限制已从普通输出移除；原60秒仅限制首次接纳，已接纳回应保持原请求/epoch，按首音频、合成、消费和收尾阶段检测卡住。reply_end 短返回与实际完成分离；只有真实全播才记 completed，取消和未知不自动重播。登记引导继续使用原有限预算。
@@ -16,7 +16,9 @@
 - 当前Kokoro真实API分40段生成175.75秒音频，实时速率替身完整消费，首PCM约265毫秒、峰值24000在途样本、额外缓冲空档0。OnePlus7Pro实际单播放器181.094秒测试通过，完整消费4344000样本，gap_count/gap_ms均0；不采音、不接触配对或声音数据，仍不是整链真人听感/首声验收。
 - 联合部署代码132d696a、Android210a251（0.8.0/code17/wire9），原Node22下122项定向回归、前端8项/类型检查/生产打包通过。完整在线准备核验约2.07GB产品，数据迁移备份0字节，未扫描任务工作区；8模块均已恢复，Telegram一次局部重试后正常。APK签名相同，加密配对/声音文件覆盖安装前后摘要一致，首页已连接且麦克风关闭。真人停止及50轮首声仍待验收；见[脱敏证据](crabot-agent/eval/shared-requests/evidence-2026-10-19-continuous-playback.json)与[实施计划](crabot-docs/superpowers/plans/2026-10-19-continuous-long-voice-playback-implementation.md)。
 - 真人故事回答完整播出112.75秒/2706000样本，端侧gap_count/gap_ms均0，后台实际completed且样本一致；用户听感首声4–5秒，同机单调计时实为7104毫秒。10月20日两轮首声4.274/4.596秒，仍需优化及50轮验收。
-- FuFu专项复测已结束：当前登记、模型/保存/算分核查正常，两句手动及四次正常单人（含自然使用）均matched；最近原比对0.7416且未额外加载模型。干扰轮FuFu问题段0.5681、另一匿名段-0.0451 unknown，后台分别归属。裁剪会影响分数已确认，但公开对照未支持通用整段/扩边修复，历史三次低分根因仍未定，未实施算法修复。根据用户反馈停止重复真人测试与临时观察，已保留数据恢复原0.8.0 APK及普通首页，关麦，后端/ADB未动。后续有新失败证据或明确可证伪假设时，先说明最少次数、判据和结束条件，再安排必要验证，不无限观察。见[调查记录](https://github.com/smilefufu/crabot-voice-android/blob/main/docs/research/2026-10-20-speaker-identification-investigation.md)。
+- 声纹历史漏认：按用户2026-10-22要求记为**待复现**。现有登记/模型/保存/算分核查及后续对照均未复现，根因未定、没有算法修复；临时观察已停止，原0.8.0产品APK恢复，配对/声音/阈值不变，不再重复请用户朗读。完整历史见[调查记录](https://github.com/smilefufu/crabot-voice-android/blob/main/docs/research/2026-10-20-speaker-identification-investigation.md)。
+- 2026-10-22独立检查：最近三轮正确tag但播放unknown；固定短句复现本机TTS缺少原音色文件、HTTP200后断流。仅恢复原固定版本522320字节音色并核验SHA-256，4次公开短句验证成功，其中产品适配器270ms/104400有效样本；未重启Crabot/ADB或修改配置。外部服务冷启动依赖仍需稳定部署；两轮各5次LLM502重试另记，不能把TTS恢复当作首声达标。
+- 本轮Agent71、Channel40、Admin75、Shared28、Android JVM30项共244项通过；新增真机静音PCM停止/旧帧拒绝/下一播放检查1项通过，真实terminal.enc摘要不变，只装测试APK。用户按钮整链体验仍待验收。当前清单：[功能与剩余验收](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/plans/2026-10-22-voice-remaining-acceptance.md)，P0交付与服务稳定→P1首声/异步生命周期/全语音管理→P2环境与多人覆盖；先独立检查，再集中安排有明确判据的真人环节。
 - 升级恢复耗时超过预估：Admin退出至新进程约38秒、Voice约63秒；旧Agent退出等待约30秒，另有模块恢复时间。后续独立核对退出等待和启动阶段，不放宽当前恢复/交付语义、不与播放方案混改。额外Engine全集未完成，退避夹具expected 3 to be 5已在未改main复现，不计通过。
 
 ### 统一升级与迁移减重：副本验证完成，PR 审查中
@@ -52,16 +54,11 @@
 - PR #206 review 第3项已复核为真实回归：Channel 短暂重启时，get_capabilities 原位于发送重试外，导致普通渠道直接失败。只为该只读预检复用现有瞬态重试，不缓存能力、不改变 Voice 标签拒绝或发送后状态。
 - 三项回归先失败后通过，相关发送/私发/ask_human/目标观察28项与Agent构建通过；预检最多3次，永久错误立即返回，未确认能力前不发送。源码修复不代表已替换现场部署。
 
-### 语音整组：受控模型与播报验收通过，准备联合升级
+### 语音所有者、请求授权与全语音管理：已实现并随wire9部署
 
-- 已确认整组设计与最终四处精简提示词；正式协议先行发布 v0.8.0 / wire8。所有者激活、请求级授权/插话隔离、异步任务回报与三项按需 voice 工具均已有候选；15/11/3 常驻目录不扩张，非语音、共享主控、Worker/daily/graph 不暴露管理工具。
-- 原 Master 请求固定权限上限及当前授权；设备三段自动引导、真实提示播放完成后采样、单人一致性与既有身份冲突检查、候选密文保存、普通好友提交、目录确认和原请求完成事件接通。重录成功前保旧，改名/撤销保联系人与好友；撤销设备清除待确认如实返回。样本不经 ASR/Agent，不借所有者认主或 human 凭据。
-- Voice 状态升 v4，v2/v3 迁移先核对备份；未接纳采样在断连/后台/撤权/重启后停止，已接纳结果沿原操作收口。结果私发保持原目标；公共完成后的待机恢复须关联原请求实际播放，其他通知不能代替。
-- 本轮 Shared149、Admin语音79、Agent相关314、Voice33、Core切换13、升级16、离线装配16及Web语音配置8通过；四个后端模块编译通过。Android0.7.0/code16/wire8：JVM26及只读模拟器10项通过，生产/测试APK构建完成，生产包不含公开测试录音；未覆盖安装用户手机。
-- 已精确应用用户确认的共享交办/设备采样提示职责文字，新增16次真实模型调用：首次添加与重录各只执行一次操作、提交后回报，均只有接单与完成两段播报，人工逐段核对和重复检查均通过。首段可播文字约3.43/2.25秒，尚未包含真实ASR/TTS/手机音频；首次添加一次无播报模型轮耗时63.7秒已如实保留。159项定向、17项离线、8种投影和实际输入审计通过；此前未执行与重复指引失败记录保留。证据：[全语音管理验证](crabot-agent/eval/shared-requests/evidence-2026-10-17-guided-management.json)。
-- 前置整仓检查、真正main失败对照、默认目录修复及1435文件隔离演练保留在[联合升级准备](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/plans/2026-10-17-voice-joint-upgrade-readiness.md)；演练不是全量备份。现场仍为wire5；原停机全量备份安排已中止，先完成通用升级修订及副本验证，现场切换另获授权。保留配对、FuFu、好友、历史和任务产物，不卸载/清数据、不部署半套协议。
-- 2026-10-18联合升级已停止：按授权清理未占用缓存/孤立临时文件，实际释放约14.9GiB，保留业务数据及进行中任务。旧APK与配对/声纹密文已备份且新旧签名一致；停机全量备份未完成校验即中止，不能称为已验证完整备份。已恢复停机前源码及25处已校验旧构建/依赖，8模块恢复运行；未执行数据迁移、覆盖业务数据或安装新APK。原ADB守护进程未重启但后续仍有USB掉线，不再将短时成功称为稳定恢复。后续先修通用升级流程，不再沿用停机全量备份安排。
-- 真人验收尚未进行：先单人唤醒/接单/任务回报与生命周期，再由两位真人分别完成登记/识别；单人自演不能证明多人效果。两端准备完成后再请用户录音。
+- 整组设计及精确提示词均已确认；所有者激活、请求级授权/插话隔离、异步任务反馈、按需voice工具已接通并随wire9联合部署。原Master请求固定授权上限及当前授权；不扩大常驻工具列表，非语音/共享主控/Worker不暴露管理工具。
+- 三段引导以真实读句completed后才采样，样本不经ASR/Agent；候选加密保存、Admin持久提交联系人/好友、目录确认后才完成。重录失败保旧，改名/撤销保稳定身份、好友和历史，私发内容不进共享音箱。真实模型首次添加/重录各只操作一次，仅接单和完成两段，无重复播报，见[证据](crabot-agent/eval/shared-requests/evidence-2026-10-17-guided-management.json)。
+- 当时整组准备、失败对照及10月18日中止升级保留在[历史准备记录](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/plans/2026-10-17-voice-joint-upgrade-readiness.md)；当前部署和待验收以本页顶部及[当前清单](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/plans/2026-10-22-voice-remaining-acceptance.md)为准。真实首次添加/重录、静音/离线恢复和多人场景尚未整体验收，不以模型或模拟器通过代替。
 
 ### crabot check 运行状态误报：已修复
 
@@ -133,19 +130,10 @@
 - 2026-10-10 17:18:31（Asia/Shanghai）以已合并代码 `7ebf64ed` 完成全模块、Web、CLI、MCP 构建及本机 user mode 正常重启，七模块及端点健康。新 Agent 使用本仓 dist；实际 Admin JS 与构建逐字节一致，生产 `get_worker_detail` 已返回新版执行事实结构，旧化身为 `legacy_unknown`。编译查询 fixture 确认旧值 `task=false` 不阻止主控派发、仅显示六个有效入口；未为验收触发新任务或模型请求，真实行为继续按后续 trace 观察。
 - 启动对账 revived=21、failed=0、unchanged=3944；9 条 `builtin trace writer unavailable` 的 Worker/trace 标识均在部署前出现，无新标识或新增 fatal 日志。保留为独立历史恢复告警，不据此改写任务或权限数据；Memory 后端修复仍独立处理。
 
-### 安卓语音终端与 Voice Channel：v5 已安装，FuFu 短句真人复核通过
+### 安卓语音终端早期里程碑（已被wire9后续修订覆盖）
 
-- 2026-10-14 日常交互/声纹管理两端 spec 已确认，正式协议 v0.5.0/wire5 已发布。手机一次开启本地唤醒，回答后8秒接话；独立页面新增、改名、重录、撤销声纹。首次成功确认才生成联系人，重录失败保旧、撤销保联系人/好友绑定；迁移保身份、配对和向量，目录立即推送、2秒心跳核对，重连保持关麦。
-- 本机部署分支10222def已完整构建并crabot restart，实际Voice capability5、八模块running。OnePlus 7 Pro保留数据升级至Android0.5.2/code13；用户已确认现场登记、本地唤醒及最新实际播报。新FuFu联系人经正常AdminUI绑定原好友，唯一群已有1位Master名册成员；未按名字合并旧身份或修改群权限。后端仍在[PR #206](https://github.com/smilefufu/crabot/pull/206)，不自行合并；[Android仓库](https://github.com/smilefufu/crabot-voice-android)已按授权直接发布main（0efe2f2），本地与远端提交一致。
-- 用户确认[短句最小修订](https://github.com/smilefufu/crabot-voice-android/blob/main/docs/specs/2026-10-14-short-utterance-speaker-identification-design.md)：删除日常识别的固定1.5秒提取门槛，现成IsReady决定能否计算；校验特征维度/有限值/范数与匹配结果，分数0.50、差值0.08及三段严格登记保持。原77d77e97人声1.18125秒被旧门槛跳过，不是模型已尝试匹配失败。0.3秒也不是模型下限；公开短片段能提取特征不代表可靠身份。
-- Android0.5.2隔离原生回归先复现旧门槛3项失败，修复后指定24项通过；简化本次分支后14项JVM与24项指定真机回归再次通过，APK构建成功。覆盖实际JNI独立公开登记/查询、单档案两位未知者拒配、无效特征/匹配、A/B/A片段汇总、下一轮不继承、SDK异常及重叠整轮失败。真实terminal.enc前/中/后逐字节一致，无卸载或清数据；公开音频只打进测试APK，不进入产品。
-- 2026-10-14 21:10（Asia/Shanghai）真人自然短句轮3d4f4ae7实际比对：19980有效人声samples（1.24875秒）、1候选、score=0.5552635，matched为FuFu。后台accepted、ASR问题内容保持、发送人解析到原好友；播放5453b8b5 completed/319800samples，用户确认“有回答了”。这轮完成本次短句修复的相关真人复核；[验证记录](https://github.com/smilefufu/crabot-voice-android/blob/main/docs/verification/2026-10-14-short-utterance-speaker-identification.md)区分文件回归与现场证据。
-- 语音当前以`<voice_reply>`增量投递，系统提示词、最终工具面、一次纠偏及交付判定已按确认稿条件化，其它渠道继续send_message。逐句TTS、连续PCM、started/completed、response_end接话及外发后禁止整请求重试已实现，重启不补播。旧轮8aecebaf三次SSE错误后总69.869秒超过60秒机会；0.5.1已修复超时关麦与首页原因，不能将该修复或最新成功播报当作延迟验收。原SSE错误映射502的四次授权重放均HTTP200，根因未复现，未据此更换模型。
-- 唯一普通语音群允许陌生人发言，逐片段保留好友/陌生人和全部内容；好友按当前ChannelIdentity解析，声纹不授予权限。重叠、无效分段/ASR失败仍整轮失败；授权快照整批入inbox，重启不复活回答机会。私聊及自然抢话/AEC属于后续范围。
-- Admin创建向导与WS/WSS共端口已部署；完整BASE_URL保留端口/路径前缀，HTTP/HTTPS推荐WS/WSS且可显式选择，同网允许局域网。内部Voice入口只监听loopback，二维码pin或系统CA/hostname失败不降级；历史v2需明确撤销重配，有效v3/v4配对可直接升级。扫码竖屏、现场核对与局域网WSS已通过；公网默认BASE_URL的Upgrade曾502，隧道未修改。
-- 创建阶段本人手动登记/绑定已由10月15日整组确认稿替代：新增所有者自动关联后仍保留草稿及普通群准入；不纳入旧稿未确认的 group_ready 等独立设想。整组 wire6 尚未统一部署，现场仍按原版本运行。
-- 后端定向及集成构建/回归已完成，既有Admin/Web/Agent全量失败在未修改main复现；不声称整仓全量绿色，具体数字与历史联调见PR及[Android验证目录](https://github.com/smilefufu/crabot-voice-android/tree/main/docs/verification)。本次只改Android与进度记录，无后台产品代码或重启。
-- 后续验收：多位真人A/B/A、未知者短句误识率、三轮接话、唤醒误触发、50轮整体延迟、回声/AEC、功耗及Linux两UID隔离。公开文件和一次FuFu成功不能证明这些指标；整体流畅性仍待改善。
+- 0.5.2阶段已完成一次现场登记/唤醒/短句播报；日常固定1.5秒提取门槛已按确认稿移除，模型就绪检查及原score0.50/margin0.08保持。真实JNI公开回归与FuFu短句现场证据见[验证记录](https://github.com/smilefufu/crabot-voice-android/blob/main/docs/verification/2026-10-14-short-utterance-speaker-identification.md)；不代表后来的历史漏认已解决。
+- 创建向导、二维码与局域网WS/WSS共Admin端口已有验证；公网BASE_URL的Upgrade曾502，仍单列部署验收。当前为0.8.0/wire9，旧“wire5/6未部署”和PR206待合并不再作为现状。全语音添加、所有者及异步回报按后续已确认spec实施，私聊/自然抢话/AEC等仍是后续功能。
 
 ### 未实装远程执行类别隐藏：已本地部署
 
