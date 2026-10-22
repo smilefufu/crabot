@@ -39,13 +39,14 @@ public static class CrabotWorkspaceSecurityProbe {
             Check(!parent.IsInvalid);
             byte[] name = System.Text.Encoding.Unicode.GetBytes(target);
             int rootOffset = IntPtr.Size == 8 ? 8 : 4, lengthOffset = rootOffset + IntPtr.Size, nameOffset = lengthOffset + 4;
-            IntPtr information = Marshal.AllocHGlobal(nameOffset + name.Length);
+            IntPtr information = Marshal.AllocHGlobal(nameOffset + name.Length + 2);
             try {
                 Marshal.WriteInt32(information, 0, 0); // Never replace another file.
                 Marshal.WriteIntPtr(information, rootOffset, IntPtr.Zero);
                 Marshal.WriteInt32(information, lengthOffset, name.Length);
                 Marshal.Copy(name, 0, IntPtr.Add(information, nameOffset), name.Length);
-                Check(SetFileInformationByHandle(file, 3, information, (uint)(nameOffset + name.Length)));
+                Marshal.WriteInt16(information, nameOffset + name.Length, 0);
+                Check(SetFileInformationByHandle(file, 3, information, (uint)(nameOffset + name.Length + 2)));
             } finally { Marshal.FreeHGlobal(information); }
         }
     }
@@ -77,6 +78,8 @@ public static class CrabotWorkspaceSecurityProbe {
         } finally { if (temporary != IntPtr.Zero) LocalFree(temporary); LocalFree(original); }
     }
     public static Snapshot DuringMove;
+    public static Snapshot AfterHandleMove;
+    public static string HandleStage;
     static uint WithNonInheritingSibling(string target, IntPtr descriptor, IntPtr dacl, bool byHandle) {
         string scratch = System.IO.Path.Combine(System.IO.Path.GetDirectoryName(target), "owned-security-" + Guid.NewGuid().ToString());
         string held = System.IO.Path.Combine(scratch, "original.txt");
@@ -89,7 +92,9 @@ public static class CrabotWorkspaceSecurityProbe {
             uint size;
             Check(ConvertStringSecurityDescriptorToSecurityDescriptorW("D:P(A;;FA;;;" + System.Security.Principal.WindowsIdentity.GetCurrent().User.Value + ")", 1, out temporary, out size));
             Check(SetFileSecurityW(scratch, 4, temporary));
+            HandleStage = "rename-to-isolation";
             MoveProbeFile(file, target, held); moved = true;
+            HandleStage = "restore-in-isolation";
             uint error = byHandle ? SetSecurityInfo(file, 1, 0x80000004, IntPtr.Zero, IntPtr.Zero, dacl, IntPtr.Zero)
                 : SetNamedSecurityInfoW(held, 1, 0x80000004, IntPtr.Zero, IntPtr.Zero, dacl, IntPtr.Zero);
             if (error != 0) return error;
@@ -104,11 +109,19 @@ public static class CrabotWorkspaceSecurityProbe {
                 Check(SetFileSecurityW(held, 4, descriptor));
                 DuringMove = Observe(held);
             }
+            HandleStage = "rename-to-original";
             MoveProbeFile(file, held, target); moved = false;
+            if (byHandle) {
+                IntPtr owner, group, heldDacl, sacl, observed;
+                uint inspectError = GetSecurityInfo(file, 1, 0x77, out owner, out group, out heldDacl, out sacl, out observed);
+                if (inspectError != 0) return inspectError;
+                try { AfterHandleMove = Describe(observed); } finally { LocalFree(observed); }
+            }
+            HandleStage = "restored";
             return 0;
         } finally {
             try {
-                if (moved) MoveProbeFile(file, held, target);
+                if (moved) { HandleStage = "restore-original-on-failure"; MoveProbeFile(file, held, target); }
             } finally {
                 if (temporary != IntPtr.Zero) LocalFree(temporary);
                 if (file != null) file.Dispose();
@@ -162,7 +175,7 @@ public static class CrabotWorkspaceSecurityProbe {
         } finally { if (text != IntPtr.Zero) LocalFree(text); }
     }
     public static uint Apply(string source, string target, string mode) {
-        DuringMove = null;
+        DuringMove = null; AfterHandleMove = null; HandleStage = null;
         IntPtr dacl, descriptor = Read(source, mode == "query-dacl-only" ? 7u : 0x77u, out dacl);
         try {
             ushort control; uint revision;
@@ -205,14 +218,18 @@ try {
             $before = [CrabotWorkspaceSecurityProbe]::Observe($file)
         }
         $parentBefore = [CrabotWorkspaceSecurityProbe]::Observe($target)
-        $errorCode = [CrabotWorkspaceSecurityProbe]::Apply([IO.Path]::Combine($source, 'original.txt'), $file, $mode)
+        try { $errorCode = [CrabotWorkspaceSecurityProbe]::Apply([IO.Path]::Combine($source, 'original.txt'), $file, $mode) }
+        catch {
+            @{ evidence_only = $true; mode = $mode; handle_stage = [CrabotWorkspaceSecurityProbe]::HandleStage; during_move = [CrabotWorkspaceSecurityProbe]::DuringMove; after_handle_move = [CrabotWorkspaceSecurityProbe]::AfterHandleMove } | ConvertTo-Json -Depth 4 -Compress
+            throw
+        }
         if ($create) {
             if ($errorCode -ne 0) { throw "Cannot create finite explicit descriptor file: $errorCode" }
             [IO.File]::WriteAllText($file, 'finite original bytes')
         }
         $after = [CrabotWorkspaceSecurityProbe]::Observe($file)
         if ([IO.File]::ReadAllText($file) -ne 'finite original bytes') { throw 'Probe target content changed' }
-        @{ evidence_only = $true; mode = $mode; error_code = $errorCode; during_move = [CrabotWorkspaceSecurityProbe]::DuringMove; source = $original; before = $before; after = $after; parent_before = $parentBefore; parent_after = [CrabotWorkspaceSecurityProbe]::Observe($target) } | ConvertTo-Json -Depth 4 -Compress
+        @{ evidence_only = $true; mode = $mode; error_code = $errorCode; during_move = [CrabotWorkspaceSecurityProbe]::DuringMove; after_handle_move = [CrabotWorkspaceSecurityProbe]::AfterHandleMove; handle_stage = [CrabotWorkspaceSecurityProbe]::HandleStage; source = $original; before = $before; after = $after; parent_before = $parentBefore; parent_after = [CrabotWorkspaceSecurityProbe]::Observe($target) } | ConvertTo-Json -Depth 4 -Compress
     }
     $sourceAfter = [CrabotWorkspaceSecurityProbe]::Observe([IO.Path]::Combine($source, 'original.txt'))
     if ($original.sddl -ne $sourceAfter.sddl -or $original.control -ne $sourceAfter.control -or [IO.File]::ReadAllText([IO.Path]::Combine($source, 'original.txt')) -ne 'finite original bytes') { throw 'Probe source changed' }
