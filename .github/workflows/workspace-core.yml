@@ -111,7 +111,7 @@ jobs:
       - name: Actual fixed job launch and technical health without business onStart
         if: ${{ matrix.suite == 'finite' && !cancelled() && steps.compile.outcome == 'success' }}
         working-directory: crabot-core
-        run: node node_modules/vitest/vitest.mjs run src/workspace-human-verification.test.ts --testNamePattern='post-relocation validation launches|new runtime health and Root' --maxWorkers=1 --minWorkers=1
+        run: node node_modules/vitest/vitest.mjs run src/workspace-human-verification.test.ts --testNamePattern='post-relocation validation launches|new runtime health and Root|fixed job archive storage handoff' --maxWorkers=1 --minWorkers=1
       - name: Prepare the actual Memory Python environment only in isolated CI
         if: ${{ matrix.suite == 'business' && !cancelled() && steps.compile.outcome == 'success' }}
         run: uv sync --project crabot-memory --frozen --python 3.13

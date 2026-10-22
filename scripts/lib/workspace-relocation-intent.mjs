@@ -94,7 +94,7 @@ function privateControl(control) {
   if (recordObservation) observeRecordPath(control, 'directory', fs.lstatSync(control, { bigint: true }))
   return true
 }
-function readPrivateText(file, limit) {
+function readPrivateBytes(file, limit) {
   let before
   try { before = fs.lstatSync(file, { bigint: true }) }
   catch (error) {
@@ -112,12 +112,13 @@ function readPrivateText(file, limit) {
     fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0))
     const stat = fs.fstatSync(fd, { bigint: true })
     if (stat.dev !== before.dev || stat.ino !== before.ino || stat.size !== before.size) fail()
-    const value = fs.readFileSync(fd, 'utf8')
+    const value = fs.readFileSync(fd)
     const after = fs.lstatSync(file, { bigint: true })
     if (after.dev !== before.dev || after.ino !== before.ino || after.mtimeNs !== before.mtimeNs || after.ctimeNs !== before.ctimeNs) fail()
     return value
   } catch { fail() } finally { if (fd !== undefined) fs.closeSync(fd) }
 }
+function readPrivateText(file, limit) { return readPrivateBytes(file, limit)?.toString('utf8') }
 function readPrivateJson(file, limit) {
   const text = readPrivateText(file, limit)
   try { return text === undefined ? undefined : JSON.parse(text) } catch { fail() }
@@ -163,6 +164,13 @@ function syncDirectory(directory) {
 function syncIntent(ctx) { syncDirectory(ctx.control); syncDirectory(ctx.baseControl); syncDirectory(ctx.dataRoot) }
 export const readWorkspaceRelocationIntent = recordGraphReader(function readWorkspaceRelocationIntent(dataDir) { return read(context(dataDir)) })
 
+function assertArchiveUnused(ctx, id) {
+  if (!privateControl(ctx.baseControl)) return
+  const history = path.join(ctx.baseControl, 'relocation-history')
+  if (!privateControl(history)) return
+  try { fs.lstatSync(path.join(history, id)); fail('WORKSPACE_RELOCATION_CONFLICT') }
+  catch (error) { if (error.code !== 'ENOENT') throw error }
+}
 export async function beginWorkspaceRelocationIntent(options) {
   const ctx = context(options.dataDir, true), operationToken = cliLockToken(path.join(ctx.dataRoot, 'cli.lock'))
   const dataIdentity = identity(ctx.dataRoot)
@@ -178,6 +186,7 @@ export async function beginWorkspaceRelocationIntent(options) {
     syncIntent(ctx)
     return current
   }
+  assertArchiveUnused(ctx, options.id)
   const storageRoot = process.env.WORKER_WORKSPACES_DIR
   const catalog = new WorkspaceCatalog({ dataRoot: ctx.dataRoot, storageRoot, files: native })
   const snapshot = await catalog.snapshot()
@@ -204,6 +213,7 @@ export async function beginWorkspaceRelocationIntent(options) {
   const verifyAdmission = () => {
     if (process.env.WORKER_WORKSPACES_DIR !== storageRoot || cliLockToken(path.join(ctx.dataRoot, 'cli.lock')) !== operationToken
       || !same(dataIdentity, identity(ctx.dataRoot)) || !same(baseControlIdentity, identity(ctx.baseControl)) || !privateControl(ctx.baseControl)) fail()
+    assertArchiveUnused(ctx, options.id)
   }
   verifyAdmission()
   if (read(ctx)) fail('WORKSPACE_RELOCATION_CONFLICT')
@@ -245,7 +255,7 @@ function publishPrivateJson(ctx, file, value, limit, verify) {
     if (Buffer.byteLength(content) > limit) fail()
     if (process.platform === 'win32') { native.writePrivateFile(temporary, ''); fs.writeFileSync(temporary, content, { flag: 'r+', flush: true }) }
     else fs.writeFileSync(temporary, content, { flag: 'wx', mode: 0o600, flush: true })
-    verify()
+    verify(temporary)
     // No replacement: preserve even an unexpected entry appearing under the held lock.
     try { fs.linkSync(temporary, file) } catch (error) { if (error.code === 'EEXIST') fail('WORKSPACE_RELOCATION_CONFLICT'); throw error }
   } finally { fs.rmSync(temporary, { force: true }) }
@@ -1983,6 +1993,22 @@ export const readWorkspaceRelocationHealth = recordGraphReader(function readWork
   if (sha256CanonicalJson(record.modules) !== sha256CanonicalJson(frame.modules)) fail()
   return record
 })
+function verifyWorkspaceHealthRuntime(dataDir, id, fixed) {
+  const current = workspaceHealthReport(dataDir, id, { modules: fixed.modules, root_proof: fixed.root_proof })
+  const published = readWorkspaceRelocationRootPublished(dataDir, id)
+  if (sha256CanonicalJson({ modules: current.modules, root_proof: current.root_proof }) !== sha256CanonicalJson({ modules: fixed.modules, root_proof: fixed.root_proof })
+    || !published || sha256CanonicalJson(rootFrame(fixed.intent.target)) !== sha256CanonicalJson(published.target)
+    || readHealthRuntimeText(fixed.ctx.dataRoot)?.trim() !== fixed.root_proof.instance_id) fail()
+  for (const module of fixed.modules) {
+    const runtime = JSON.parse(readHealthRuntimeText(fixed.ctx.dataRoot, module.runtime_id))
+    const scope = fixed.scopes.find(item => item.module_id === module.module_id)
+    if (!native.sameProcess(module.process, native.inspectProcess(module.process.pid))
+      || !fields(runtime, ['schema_version', 'instance_id', 'runtime_id', 'module_id', 'root_pid', 'process_start_identity', 'module_port', 'created_at'])
+      || runtime.schema_version !== 1 || runtime.instance_id !== fixed.root_proof.instance_id || runtime.runtime_id !== module.runtime_id
+      || runtime.module_id !== module.module_id || runtime.root_pid !== module.process.pid || runtime.module_port !== scope.module_port
+      || !nonempty(runtime.process_start_identity) || !validDate(runtime.created_at)) fail()
+  }
+}
 export async function recordWorkspaceRelocationHealth({ dataDir, id, report, signal }) {
   let stage = 'report'
   try {
@@ -1992,20 +2018,7 @@ export async function recordWorkspaceRelocationHealth({ dataDir, id, report, sig
     const fingerprint = sha256CanonicalJson({ modules: fixed.modules, root_proof: fixed.root_proof })
     const verify = () => {
       base.verify()
-      const current = workspaceHealthReport(dataDir, id, { modules: fixed.modules, root_proof: fixed.root_proof })
-      const published = readWorkspaceRelocationRootPublished(dataDir, id)
-      if (sha256CanonicalJson({ modules: current.modules, root_proof: current.root_proof }) !== fingerprint
-        || !published || sha256CanonicalJson(rootFrame(fixed.intent.target)) !== sha256CanonicalJson(published.target)
-        || readHealthRuntimeText(fixed.ctx.dataRoot)?.trim() !== fixed.root_proof.instance_id) fail()
-      for (const module of fixed.modules) {
-        const runtime = JSON.parse(readHealthRuntimeText(fixed.ctx.dataRoot, module.runtime_id))
-        const scope = fixed.scopes.find(item => item.module_id === module.module_id)
-        if (!native.sameProcess(module.process, native.inspectProcess(module.process.pid))
-          || !fields(runtime, ['schema_version', 'instance_id', 'runtime_id', 'module_id', 'root_pid', 'process_start_identity', 'module_port', 'created_at'])
-          || runtime.schema_version !== 1 || runtime.instance_id !== fixed.root_proof.instance_id || runtime.runtime_id !== module.runtime_id
-          || runtime.module_id !== module.module_id || runtime.root_pid !== module.process.pid || runtime.module_port !== scope.module_port
-          || !nonempty(runtime.process_start_identity) || !validDate(runtime.created_at)) fail()
-      }
+      verifyWorkspaceHealthRuntime(dataDir, id, fixed)
     }
     stage = 'current-runtime'
     verify()
@@ -2029,4 +2042,215 @@ export async function recordWorkspaceRelocationHealth({ dataDir, id, report, sig
     if (sha256CanonicalJson(accepted) !== sha256CanonicalJson(record)) fail()
     return { dispatch: 'dispatch', health_sha256: sha256CanonicalJson(accepted) }
   } catch (error) { if (error && typeof error === 'object' && typeof error.stage !== 'string') error.stage = stage; throw error }
+}
+
+
+const completionFile = 'relocation-complete.json'
+const completionFields = ['schema_version', 'intent_id', 'intent_sha256', 'launch_sha256', 'ready_sha256', 'health_sha256', 'selected_sha256',
+  'worker_commit_sha256', 'recovery_commit_sha256', 'materials', 'created_at']
+// Technical records only. This inventory does not authorize execution or maintenance release.
+function workspaceJobMaterials(ctx, temporary) {
+  const materials = [], directories = [], root = identity(ctx.control)
+  const names = fs.readdirSync(ctx.control).sort()
+  const addFile = (name, file) => {
+    const bytes = readPrivateBytes(file, scopeLimit)
+    if (bytes === undefined) fail()
+    const stat = fs.lstatSync(file, { bigint: true })
+    materials.push({ name, type: 'file', dev: String(stat.dev), ino: String(stat.ino), size: bytes.length,
+      sha256: createHash('sha256').update(bytes).digest('hex') })
+  }
+  for (const name of names) {
+    const file = path.join(ctx.control, name)
+    if (file === temporary || name === completionFile) continue
+    if (!legacyRelocationFiles.includes(name)) fail(undefined, 'completion-unknown-material')
+    if (['relocation-module-processes', 'relocation-worker-commits'].includes(name)) {
+      if (!privateControl(file)) fail()
+      const directory = identity(file), children = fs.readdirSync(file).sort()
+      if (children.length > 32768) fail()
+      directories.push({ file, directory, children })
+      materials.push({ name, type: 'directory', dev: directory.dev, ino: directory.ino })
+      for (const child of children) {
+        if (name === 'relocation-module-processes' ? !/^[0-9]{8}\.json$/.test(child) : !['header.json', 'complete.json'].includes(child) && !/^(?:0|[1-9][0-9]*)\.(?:prepared|closed)\.json$/.test(child)) fail()
+        addFile(name + '/' + child, path.join(file, child))
+      }
+    } else addFile(name, file)
+  }
+  for (const row of directories) {
+    if (!same(row.directory, identity(row.file)) || !privateControl(row.file)
+      || JSON.stringify(fs.readdirSync(row.file).sort()) !== JSON.stringify(row.children)) fail()
+  }
+  if (!same(root, identity(ctx.control)) || !privateControl(ctx.control)
+    || JSON.stringify(fs.readdirSync(ctx.control).sort()) !== JSON.stringify(names)) fail()
+  return materials
+}
+export const readWorkspaceRelocationCompletion = recordGraphReader(function readWorkspaceRelocationCompletion(dataDir, id) {
+  const ctx = context(dataDir), intent = read(ctx)
+  if (!intent || intent.id !== id) fail()
+  const record = readPrivateJson(path.join(ctx.control, completionFile), scopeLimit)
+  if (record === undefined) return null
+  const coordinator = readWorkspaceRelocationCoordinator(dataDir, id), health = readWorkspaceRelocationHealth(dataDir, id)
+  const selected = readWorkspaceRelocationRootSelected(dataDir, id), worker = readWorkspaceRelocationClosureCommit(dataDir, id)
+  const recovery = readWorkspaceRelocationRecoveryCommit(dataDir, id)
+  if (!fields(record, completionFields) || record.schema_version !== 1 || record.intent_id !== id
+    || !coordinator.launch || !coordinator.ready || !health || !selected || !worker || !recovery || !validDate(record.created_at)
+    || record.intent_sha256 !== sha256CanonicalJson(intent) || record.launch_sha256 !== sha256CanonicalJson(coordinator.launch)
+    || record.ready_sha256 !== sha256CanonicalJson(coordinator.ready) || record.health_sha256 !== sha256CanonicalJson(health)
+    || record.selected_sha256 !== sha256CanonicalJson(selected) || record.worker_commit_sha256 !== sha256CanonicalJson(worker)
+    || record.recovery_commit_sha256 !== sha256CanonicalJson(recovery)
+    || sha256CanonicalJson(record.materials) !== sha256CanonicalJson(workspaceJobMaterials(ctx))) fail()
+  return record
+})
+async function verifyWorkspaceCompletionCapabilities(dataDir, id, fixed, verify, signal) {
+  const { openModuleRuntimeRpc } = await import('./module-runtime-rpc.cjs')
+  verify()
+  for (const module of fixed.modules) {
+    const scope = fixed.scopes.find(item => item.module_id === module.module_id)
+    const locate = () => {
+      verify()
+      const processes = ownedProcessTree.captureOwnedProcessTree([module.process])
+      const listeners = processes.filter(item => native.sameProcess(item, native.inspectProcess(item.pid)) && native.listListeningTcpPorts(item.pid).includes(scope.module_port))
+      verify()
+      if (listeners.length !== 1) fail(undefined, 'completion-runtime-listener')
+      return listeners[0]
+    }
+    const listener = locate(), rpc = await openModuleRuntimeRpc(listener, scope.module_port,
+      { instance_id: fixed.root_proof.instance_id, module_id: module.module_id, runtime_id: module.runtime_id }, { signal })
+    try {
+      if (!native.sameProcess(listener, locate())) fail()
+      const health = await rpc.call('health', {})
+      if (health.status !== 'healthy' || !native.sameProcess(listener, locate())) fail(undefined, 'completion-runtime-health')
+    } finally { rpc.close() }
+  }
+  const { probeWorkspaceDirectory } = await import('./workspace-root-probe.mjs')
+  verify()
+  const published = readWorkspaceRelocationRootPublished(dataDir, id)
+  await probeWorkspaceDirectory({ directory: published.target, authorize: async () => { verify(); return verify } })
+  verify()
+}
+export async function prepareWorkspaceRelocationCompletion({ dataDir, id, signal }) {
+  const base = workspaceFileCoordinatorContext(dataDir, id, signal)
+  base.verify()
+  const health = readWorkspaceRelocationHealth(dataDir, id)
+  if (!health) fail()
+  const fixed = workspaceHealthReport(dataDir, id, { modules: health.modules, root_proof: health.root_proof })
+  const coordinator = readWorkspaceRelocationCoordinator(dataDir, id)
+  const verify = () => {
+    base.verify(); verifyWorkspaceHealthRuntime(dataDir, id, fixed)
+    if (sha256CanonicalJson(readWorkspaceRelocationHealth(dataDir, id)) !== sha256CanonicalJson(health)) fail()
+  }
+  verify()
+  const selected = await verifyWorkspaceRelocationSelectedRoot({ dataDir, id, signal })
+  verify()
+  await verifyWorkspaceCompletionCapabilities(dataDir, id, fixed, verify, signal)
+  verify()
+  const previous = readWorkspaceRelocationCompletion(dataDir, id)
+  if (previous) { syncIntent(base.ctx); verify(); return { dispatch: 'observe', completion_sha256: sha256CanonicalJson(previous) } }
+  const record = { schema_version: 1, intent_id: id, intent_sha256: sha256CanonicalJson(base.intent),
+    launch_sha256: sha256CanonicalJson(coordinator.launch), ready_sha256: sha256CanonicalJson(coordinator.ready),
+    health_sha256: sha256CanonicalJson(health), selected_sha256: selected.selected_sha256,
+    worker_commit_sha256: selected.worker_commit_sha256, recovery_commit_sha256: selected.recovery_commit_sha256,
+    materials: workspaceJobMaterials(base.ctx), created_at: new Date().toISOString() }
+  publishPrivateJson(base.ctx, path.join(base.ctx.control, completionFile), record, scopeLimit, temporary => {
+    verify()
+    if (readPrivateJson(path.join(base.ctx.control, completionFile), scopeLimit) !== undefined
+      || sha256CanonicalJson(workspaceJobMaterials(base.ctx, temporary)) !== sha256CanonicalJson(record.materials)) fail()
+  })
+  verify()
+  const accepted = readWorkspaceRelocationCompletion(dataDir, id)
+  if (sha256CanonicalJson(accepted) !== sha256CanonicalJson(record)) fail()
+  return { dispatch: 'dispatch', completion_sha256: sha256CanonicalJson(accepted) }
+}
+
+const finalizingFile = 'relocation-finalizing.json'
+/** Historical facts only; this reader never falls back from an ordinary active journal. */
+export const readWorkspaceRelocationArchivedCompletion = recordGraphReader(function readWorkspaceRelocationArchivedCompletion(dataDir, id) {
+  if (!uuid(id)) fail()
+  const ctx = context(dataDir), history = path.join(ctx.baseControl, 'relocation-history'), archive = path.join(history, id)
+  if (!privateControl(ctx.baseControl) || !privateControl(history) || !privateControl(archive)) return null
+  const archived = { ...ctx, control: archive }, intent = readPrivateJson(path.join(archive, 'relocation.json'), 65536)
+  const record = readPrivateJson(path.join(archive, completionFile), scopeLimit)
+  if (!intent || intent.id !== id || !validIdentity(intent.data_root) || !same(intent.data_root, identity(ctx.dataRoot))
+    || !validIdentity(intent.control_root) || intent.control_root.path !== ctx.control
+    || !same({ ...intent.control_root, path: archive }, identity(archive))
+    || !fields(record, completionFields)
+    || record.schema_version !== 1 || record.intent_id !== id || !validDate(record.created_at)
+    || record.intent_sha256 !== sha256CanonicalJson(intent)
+    || sha256CanonicalJson(record.materials) !== sha256CanonicalJson(workspaceJobMaterials(archived))) fail()
+  for (const [key, name] of [['launch_sha256', coordinatorFile], ['ready_sha256', coordinatorReadyFile], ['health_sha256', healthFile],
+    ['selected_sha256', rootSelectedFile], ['worker_commit_sha256', closureCommitsDirectory + '/complete.json'], ['recovery_commit_sha256', recoveryCommitFile]]) {
+    const value = readPrivateJson(path.join(archive, name), scopeLimit)
+    if (value === undefined || record[key] !== sha256CanonicalJson(value)) fail()
+  }
+  return record
+})
+export const readWorkspaceRelocationFinalizing = recordGraphReader(function readWorkspaceRelocationFinalizing(dataDir, id) {
+  if (!uuid(id)) fail()
+  const ctx = context(dataDir)
+  if (!privateControl(ctx.baseControl)) return null
+  const record = readPrivateJson(path.join(ctx.baseControl, finalizingFile), 65536)
+  if (record === undefined) return null
+  const history = path.join(ctx.baseControl, 'relocation-history')
+  if (!fields(record, ['schema_version', 'intent_id', 'intent_sha256', 'completion_sha256', 'launch_sha256', 'control_root', 'history_root', 'archive_path', 'created_at'])
+    || record.schema_version !== 1 || record.intent_id !== id || !digest(record.intent_sha256) || !digest(record.completion_sha256) || !digest(record.launch_sha256)
+    || !fields(record.control_root, ['path', 'dev', 'ino', 'native_id']) || !validIdentity({ path: record.control_root.path, dev: record.control_root.dev, ino: record.control_root.ino })
+    || record.control_root.path !== ctx.control || !privateControl(history) || sha256CanonicalJson(record.history_root) !== sha256CanonicalJson(rootFrame(history))
+    || record.archive_path !== path.join(history, id) || !validDate(record.created_at)
+    || (process.platform === 'win32' ? typeof record.control_root.native_id !== 'string' || !/^[0-9]+:[a-f0-9]{32}$/i.test(record.control_root.native_id) : record.control_root.native_id !== null)) fail()
+  const locations = [ctx.control, record.archive_path].filter(directory => privateControl(directory))
+  if (locations.length !== 1 || sha256CanonicalJson({ ...rootFrame(locations[0]), path: ctx.control }) !== sha256CanonicalJson(record.control_root)) fail()
+  return record
+})
+/** One original coordinator's storage effect only. The fixed fence remains until current MM/Admin confirmation. */
+export async function archiveWorkspaceRelocationJob({ dataDir, id, signal }) {
+  await prepareWorkspaceRelocationCompletion({ dataDir, id, signal })
+  const base = workspaceFileCoordinatorContext(dataDir, id, signal), completion = readWorkspaceRelocationCompletion(dataDir, id)
+  const coordinator = readWorkspaceRelocationCoordinator(dataDir, id), health = readWorkspaceRelocationHealth(dataDir, id)
+  const fixed = workspaceHealthReport(dataDir, id, { modules: health.modules, root_proof: health.root_proof })
+  const completionHash = sha256CanonicalJson(completion), token = cliLockToken(path.join(base.ctx.dataRoot, 'cli.lock'))
+  const dataRoot = identity(base.ctx.dataRoot), baseControl = identity(base.ctx.baseControl), active = rootFrame(base.ctx.control)
+  const verify = () => {
+    base.verify(); verifyWorkspaceHealthRuntime(dataDir, id, fixed)
+    if (sha256CanonicalJson(readWorkspaceRelocationCompletion(dataDir, id)) !== completionHash) fail()
+  }
+  verify()
+  const historyPath = path.join(base.ctx.baseControl, 'relocation-history')
+  management.ensurePrivateDataRoot(historyPath)
+  const history = rootFrame(historyPath), archive = path.join(historyPath, id)
+  const absentArchive = () => { try { fs.lstatSync(archive); fail('WORKSPACE_RELOCATION_CONFLICT') } catch (error) { if (error.code !== 'ENOENT') throw error } }
+  const verifyBeforeMove = () => {
+    verify(); absentArchive()
+    if (!same(dataRoot, identity(base.ctx.dataRoot)) || !same(baseControl, identity(base.ctx.baseControl))
+      || sha256CanonicalJson(rootFrame(base.ctx.control)) !== sha256CanonicalJson(active)
+      || sha256CanonicalJson(rootFrame(historyPath)) !== sha256CanonicalJson(history) || !privateControl(historyPath)) fail()
+  }
+  verifyBeforeMove()
+  const previous = readWorkspaceRelocationFinalizing(dataDir, id)
+  const fence = { schema_version: 1, intent_id: id, intent_sha256: sha256CanonicalJson(base.intent), completion_sha256: completionHash,
+    launch_sha256: sha256CanonicalJson(coordinator.launch), control_root: active, history_root: history, archive_path: archive,
+    created_at: previous?.created_at ?? new Date().toISOString() }
+  syncDirectory(historyPath); syncDirectory(base.ctx.baseControl); syncDirectory(base.ctx.dataRoot)
+  if (previous) {
+    if (sha256CanonicalJson(previous) !== sha256CanonicalJson(fence)) fail()
+  } else {
+    const parent = { ...base.ctx, control: base.ctx.baseControl }
+    publishPrivateJson(parent, path.join(parent.control, finalizingFile), fence, 65536, () => {
+      verifyBeforeMove()
+      if (readWorkspaceRelocationFinalizing(dataDir, id)) fail()
+    })
+  }
+  await verifyWorkspaceRelocationSelectedRoot({ dataDir, id, signal })
+  verifyBeforeMove()
+  if (sha256CanonicalJson(readWorkspaceRelocationFinalizing(dataDir, id)) !== sha256CanonicalJson(fence)) fail()
+  native.renameDirectoryNoReplace(base.ctx.control, archive)
+  syncDirectory(archive); syncDirectory(historyPath); syncDirectory(base.ctx.baseControl); syncDirectory(base.ctx.dataRoot)
+  // No ordinary reader/role fallback after moving the job. Check this fixed effect and original live generations only.
+  try { fs.lstatSync(base.ctx.control); fail() } catch (error) { if (error.code !== 'ENOENT') throw error }
+  const self = native.inspectProcess(process.pid), launch = coordinator.launch
+  if (signal?.aborted || !process.connected || !token || cliLockToken(path.join(base.ctx.dataRoot, 'cli.lock')) !== token
+    || !native.sameProcess(launch.process, self) || self.parent !== launch.parent.pid || !native.sameProcess(launch.parent, native.inspectProcess(launch.parent.pid))
+    || !same(dataRoot, identity(base.ctx.dataRoot)) || !same(baseControl, identity(base.ctx.baseControl))
+    || sha256CanonicalJson({ ...rootFrame(archive), path: active.path }) !== sha256CanonicalJson(active)
+    || sha256CanonicalJson(readWorkspaceRelocationFinalizing(dataDir, id)) !== sha256CanonicalJson(fence)
+    || sha256CanonicalJson(readWorkspaceRelocationArchivedCompletion(dataDir, id)) !== completionHash) fail()
+  return { intent_id: id, completion_sha256: completionHash, finalizing_sha256: sha256CanonicalJson(fence) }
 }

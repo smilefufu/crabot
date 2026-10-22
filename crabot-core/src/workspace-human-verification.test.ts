@@ -159,7 +159,7 @@ async function fixture(options: { withMemory?: boolean; inactiveMemory?: boolean
           const selected=${JSON.stringify(path.join(data, 'workspace-control/relocation-active/relocation-root-selected.json'))};
           if(${!!options.validationRuntimeMismatch}&&fs.existsSync(selected))process.env.CRABOT_MODULE_RUNTIME_ID='fixture-wrong-runtime';
           const config=${JSON.stringify(relocationAgentConfig)};config.port=Number(process.env.Crabot_PORT);const agent=new UnifiedAgent(config);
-          if(${JSON.stringify(options.validationHealth ?? null)}&&fs.existsSync(selected))agent.getHealthStatus=async()=>${JSON.stringify(options.validationHealth ?? 'healthy')};
+          if(${JSON.stringify(options.validationHealth ?? null)}&&fs.existsSync(selected))agent.getHealthStatus=async()=>fs.existsSync(${JSON.stringify(path.join(data, 'validation-health-unhealthy'))})?'unhealthy':${JSON.stringify(options.validationHealth ?? 'healthy')};
           agent.managerStack.harness.deps.isWorkspaceRelocationReady=()=>true;
           agent.managerStack.adapters.get('builtin').stop=async()=>{fs.appendFileSync(process.env.FIXTURE_STOPS,'stop\\n');
             if(process.env.FIXTURE_ORPHAN_READY){const native=require(${JSON.stringify(path.resolve('../scripts/lib/process-identity.cjs'))}),end=Date.now()+8000;for(;;){
@@ -1892,6 +1892,150 @@ describe('MM checks the new runtime health and Root under the original job', () 
       }
     }, process.platform === 'win32' ? 600000 : 120000)
   }
+})
+
+
+describe('fixed job archive storage handoff', () => {
+  const modes = ['healthy Agent', 'healthy Memory', ...['target conflict', 'fence conflict', 'runtime changed', 'unhealthy runtime', 'wrong launch', 'lost acknowledgement', 'archive changed', 'fence changed', 'active conflict after move', ...(process.platform !== 'win32' && process.getuid?.() !== 0 ? ['readonly root'] : [])].map(value => 'healthy archive ' + value)]
+  it.each(modes)('keeps maintenance and preserves one job: %s', async mode => {
+    const f = await fixture({ actualAgent: true, actualAdmin: true, validationHealth: 'healthy', withMemory: mode === 'healthy Memory', memoryHealth: 'healthy', processLifetimeMs: process.platform === 'win32' ? 900000 : 300000 })
+    const locks = require('../../scripts/lib/cli-lock.mjs'), records = require('../../scripts/lib/workspace-relocation-intent.mjs')
+    const lock = await locks.acquireWorkspaceRelocationLock(f.data, f.params.intent_id)
+    let coordinator: ReturnType<typeof spawn> | undefined, changedRuntime: { file: string; contents: string } | undefined
+    let readonlyRoot: { path: string; mode: number } | undefined
+    try {
+      const result = await f.manager.verifyWorkspaceRelocationValidationHealth(f.params, 'fixture-human')
+      coordinator = result.coordinator
+      const context = { dataDir: f.data, id: f.params.intent_id, launch: records.readWorkspaceRelocationCoordinator(f.data, f.params.intent_id).launch }
+      const original = await fs.readFile(path.join(f.data, 'workspace-control/relocation-active/relocation-health.json'), 'utf8'), health = JSON.parse(original)
+      const completionFile = path.join(f.data, 'workspace-control/relocation-active/relocation-complete.json')
+      expect(records.readWorkspaceRelocationCompletion(f.data, f.params.intent_id)).toBeNull()
+      await expect(records.prepareWorkspaceRelocationCompletion({ dataDir: f.data, id: f.params.intent_id })).rejects.toMatchObject({ code: 'WORKSPACE_RELOCATION_INVALID' })
+      const complete = async () => {
+        const transport = require('../../scripts/lib/workspace-coordinator-journal.mjs').createWorkspaceJournalClient(result.coordinator, context, 'file')
+        try { return await transport.call('prepare_completion', {}) } catch (error) { console.error('[Workspace completion journal]', coordinatorJournalFailures(result.coordinator)); throw error } finally { transport.close() }
+      }
+      const prepared = await complete(), completion = records.readWorkspaceRelocationCompletion(f.data, f.params.intent_id)
+      expect(prepared).toEqual({ dispatch: 'dispatch', completion_sha256: sha256CanonicalJson(completion) })
+      expect(completion).toMatchObject({ schema_version: 1, intent_id: f.params.intent_id, health_sha256: result.health_sha256,
+        selected_sha256: result.root_selected_sha256 })
+      expect(completion.materials.some((row: any) => row.name === 'relocation-complete.json')).toBe(false)
+      expect(completion.materials.some((row: any) => row.name === 'relocation-health.json')).toBe(true)
+      const completionBytes = await fs.readFile(completionFile)
+      expect(await complete()).toEqual({ dispatch: 'observe', completion_sha256: prepared.completion_sha256 })
+      expect(await fs.readFile(completionFile)).toEqual(completionBytes)
+      const healthPath = path.join(f.data, 'workspace-control/relocation-active/relocation-health.json')
+      try {
+        writeFileSync(healthPath, original + ' ')
+        expect(() => records.readWorkspaceRelocationCompletion(f.data, f.params.intent_id)).toThrow()
+        await expect(complete()).rejects.toMatchObject({ code: 'CRABOT_WORKSPACE_JOURNAL_UNAVAILABLE' })
+      } finally { writeFileSync(healthPath, original) }
+      expect(records.readWorkspaceRelocationCompletion(f.data, f.params.intent_id)).toEqual(completion)
+      const unknown = path.join(f.data, 'workspace-control/relocation-active/unexpected-preserve')
+      try {
+        writeFileSync(unknown, 'preserve unknown contents')
+        expect(() => records.readWorkspaceRelocationCompletion(f.data, f.params.intent_id)).toThrow()
+        await expect(complete()).rejects.toMatchObject({ code: 'CRABOT_WORKSPACE_JOURNAL_UNAVAILABLE' })
+        expect(readFileSync(unknown, 'utf8')).toBe('preserve unknown contents')
+        expect(await fs.readFile(completionFile)).toEqual(completionBytes)
+      } finally { await fs.unlink(unknown) }
+      expect(records.readWorkspaceRelocationCompletion(f.data, f.params.intent_id)).toEqual(completion)
+      expect(await fs.readFile(healthPath, 'utf8')).toBe(original)
+      const generic = require('../../scripts/lib/workspace-coordinator-journal.mjs').createWorkspaceJournalClient(result.coordinator, context, 'file')
+      try { await expect(generic.call('archive_job', {})).rejects.toMatchObject({ code: 'CRABOT_WORKSPACE_JOURNAL_UNAVAILABLE' }) }
+      finally { generic.close() }
+      const catalogBeforeArchive = await fs.readFile(path.join(f.data, 'workspace-control/catalog.json'))
+      const finalization = require('../../scripts/lib/workspace-finalization-journal.mjs').createWorkspaceFinalizationJournal(result.coordinator, context)
+      const archiveMode = mode.startsWith('healthy archive ') ? mode.slice('healthy archive '.length) : ''
+      const archiveDirectory = path.join(f.data, 'workspace-control/relocation-history', f.params.intent_id)
+      const fenceFile = path.join(f.data, 'workspace-control/relocation-finalizing.json')
+      const management = require('../../scripts/lib/desktop-management.cjs'), native = require('../../scripts/lib/process-identity.cjs')
+      if (archiveMode === 'target conflict') {
+        management.ensurePrivateDataRoot(path.dirname(archiveDirectory)); management.ensurePrivateDataRoot(archiveDirectory)
+        writeFileSync(path.join(archiveDirectory, 'foreign-content'), 'preserve existing archive target')
+      }
+      if (archiveMode === 'fence conflict') {
+        if (process.platform === 'win32') native.writePrivateFile(fenceFile, '{}')
+        else await fs.writeFile(fenceFile, '{}', { mode: 0o600 })
+      }
+      if (archiveMode === 'readonly root') {
+        const root = records.readWorkspaceRelocationRootPublished(f.data, f.params.intent_id).target.path
+        readonlyRoot = { path: root, mode: (await fs.stat(root)).mode & 0o777 }
+        await fs.chmod(root, 0o500)
+      }
+      if (archiveMode === 'unhealthy runtime') await fs.writeFile(path.join(f.data, 'validation-health-unhealthy'), 'finite health failure')
+      if (archiveMode === 'runtime changed') {
+        const file = path.join(f.data, 'module-runtime-registry/records', health.modules[0].runtime_id + '.json')
+        const contents = readFileSync(file, 'utf8'); changedRuntime = { file, contents }
+        writeFileSync(file, JSON.stringify({ ...JSON.parse(contents), module_id: 'foreign-runtime' }))
+      }
+      let archiveReplyChanged = false
+      const emit = result.coordinator.emit.bind(result.coordinator), send = result.coordinator.send.bind(result.coordinator)
+      const sendSpy = vi.spyOn(result.coordinator, 'send').mockImplementation((message: any, ...values: any[]) => {
+        if (archiveMode === 'wrong launch' && message?.kind === 'workspace_relocation_archive_request') return send({ ...message, launch_id: randomUUID() }, ...values)
+        return send(message, ...values)
+      })
+      const replySpy = vi.spyOn(result.coordinator, 'emit').mockImplementation((event: any, ...values: any[]) => {
+        const message = values[0]
+        if (!archiveReplyChanged && event === 'message' && message?.kind === 'workspace_relocation_archive_reply' && message.ok === true
+          && ['lost acknowledgement', 'archive changed', 'fence changed', 'active conflict after move'].includes(archiveMode)) {
+          archiveReplyChanged = true
+          if (archiveMode === 'lost acknowledgement') return emit(event, { ...message, ok: false })
+          if (archiveMode === 'archive changed') writeFileSync(path.join(archiveDirectory, 'relocation.json'), readFileSync(path.join(archiveDirectory, 'relocation.json'), 'utf8') + ' ')
+          if (archiveMode === 'fence changed') writeFileSync(fenceFile, JSON.stringify({ ...JSON.parse(readFileSync(fenceFile, 'utf8')), unexpected: true }))
+          if (archiveMode === 'active conflict after move') { management.ensurePrivateDataRoot(path.dirname(completionFile)); writeFileSync(path.join(path.dirname(completionFile), 'foreign-content'), 'preserve foreign active job') }
+        }
+        return emit(event, ...values)
+      })
+      try {
+        if (archiveMode) {
+          const firstArchive = finalization.archive()
+          expect(finalization.archive()).toBe(firstArchive)
+          await expect(firstArchive).rejects.toMatchObject({ code: 'CRABOT_WORKSPACE_JOURNAL_UNAVAILABLE' })
+          expect(sendSpy.mock.calls.filter(([message]: any[]) => message?.kind === 'workspace_relocation_archive_request')).toHaveLength(1)
+          const moved = ['lost acknowledgement', 'archive changed', 'fence changed', 'active conflict after move'].includes(archiveMode)
+          expect(archiveReplyChanged).toBe(moved)
+          if (moved) {
+            if (archiveMode === 'active conflict after move') expect(await fs.readFile(path.join(path.dirname(completionFile), 'foreign-content'), 'utf8')).toBe('preserve foreign active job')
+            else await expect(fs.lstat(path.dirname(completionFile))).rejects.toMatchObject({ code: 'ENOENT' })
+            expect(await fs.readFile(path.join(archiveDirectory, 'relocation-complete.json'))).toEqual(completionBytes)
+            if (archiveMode === 'archive changed') expect(() => records.readWorkspaceRelocationArchivedCompletion(f.data, f.params.intent_id)).toThrow()
+            else expect(records.readWorkspaceRelocationArchivedCompletion(f.data, f.params.intent_id)).toEqual(completion)
+            if (['fence changed', 'active conflict after move'].includes(archiveMode)) expect(() => records.readWorkspaceRelocationFinalizing(f.data, f.params.intent_id)).toThrow()
+            else expect(records.readWorkspaceRelocationFinalizing(f.data, f.params.intent_id).completion_sha256).toBe(prepared.completion_sha256)
+          } else {
+            expect(await fs.readFile(completionFile)).toEqual(completionBytes)
+            if (archiveMode === 'target conflict') expect(await fs.readFile(path.join(archiveDirectory, 'foreign-content'), 'utf8')).toBe('preserve existing archive target')
+            else await expect(fs.lstat(archiveDirectory)).rejects.toMatchObject({ code: 'ENOENT' })
+            if (archiveMode === 'fence conflict') expect(await fs.readFile(fenceFile, 'utf8')).toBe('{}')
+            else await expect(fs.lstat(fenceFile)).rejects.toMatchObject({ code: 'ENOENT' })
+          }
+          expect(require('../../scripts/lib/workspace-maintenance.cjs').workspaceMaintenancePending(f.data)).toBe(true)
+          expect(await fs.readFile(path.join(f.data, 'workspace-control/catalog.json'))).toEqual(catalogBeforeArchive)
+        } else {
+          const archived = await finalization.archive()
+          expect(archived.completion_sha256).toBe(prepared.completion_sha256)
+          expect(records.readWorkspaceRelocationArchivedCompletion(f.data, f.params.intent_id)).toEqual(completion)
+          await expect(fs.lstat(path.dirname(completionFile))).rejects.toMatchObject({ code: 'ENOENT' })
+          expect(await fs.readFile(path.join(f.data, 'workspace-control/relocation-history', f.params.intent_id, 'relocation-complete.json'))).toEqual(completionBytes)
+          expect(records.readWorkspaceRelocationFinalizing(f.data, f.params.intent_id).completion_sha256).toBe(prepared.completion_sha256)
+          expect(require('../../scripts/lib/workspace-maintenance.cjs').workspaceMaintenancePending(f.data)).toBe(true)
+          expect(finalization.archive()).toBe(finalization.archive())
+          expect(await finalization.archive()).toEqual(archived)
+          expect(() => records.readWorkspaceRelocationHealth(f.data, f.params.intent_id)).toThrow()
+          expect(await fs.readFile(path.join(f.data, 'workspace-control/catalog.json'))).toEqual(catalogBeforeArchive)
+        }
+      } finally { sendSpy.mockRestore(); replySpy.mockRestore(); finalization.close() }
+      expect((await fetch(`http://127.0.0.1:${f.port}/api/friends`, { headers: { Authorization: 'Bearer fixture-human' } })).status).toBe(200)
+      const ledger = JSON.parse(await fs.readFile(path.join(f.data, 'agent/worker-ledgers/channel%3A%3Asession.json'), 'utf8'))
+      expect(ledger.workers[0].task.status).toBe('closed')
+    } finally {
+      if (readonlyRoot) await fs.chmod(readonlyRoot.path, readonlyRoot.mode)
+      if (changedRuntime) writeFileSync(changedRuntime.file, changedRuntime.contents)
+      if (coordinator?.connected) { const ended = once(coordinator, 'exit'); coordinator.disconnect(); await ended }
+      locks.releaseCliLock(lock); await f.cleanup()
+    }
+  }, process.platform === 'win32' ? 600000 : 120000)
 })
 
 

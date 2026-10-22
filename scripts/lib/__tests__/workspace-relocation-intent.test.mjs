@@ -38,6 +38,21 @@ test('an initial intent requires the actual instance operation lock before publi
   assert.equal(await fs.readFile(path.join(f.source, 'default/original.txt'), 'utf8'), 'user bytes')
 })
 
+test('completion preparation requires the original coordinator and current technical health', async t => {
+  const f = await fixture(t), lock = await acquireCliLock(f.data, 'workspace-relocation')
+  try {
+    await beginWorkspaceRelocationIntent(f.input)
+    const records = await import('../workspace-relocation-intent.mjs')
+    assert.equal(records.readWorkspaceRelocationCompletion(f.data, f.input.id), null)
+    await assert.rejects(records.prepareWorkspaceRelocationCompletion({ dataDir: f.data, id: f.input.id }), { code: 'WORKSPACE_RELOCATION_INVALID' })
+    await assert.rejects(records.archiveWorkspaceRelocationJob({ dataDir: f.data, id: f.input.id }), { code: 'WORKSPACE_RELOCATION_INVALID' })
+    assert.equal(records.readWorkspaceRelocationCompletion(f.data, f.input.id), null)
+    assert.throws(() => assertWorkspaceExecutionAllowed(f.data), { code: 'WORKSPACE_MAINTENANCE' })
+    assert.deepEqual(await f.catalog.snapshot(), f.snapshot)
+    await assert.rejects(fs.stat(path.join(path.dirname(f.recordFile), 'relocation-complete.json')), { code: 'ENOENT' })
+  } finally { releaseCliLock(lock) }
+})
+
 test('publication is durable and retryable without moving files, changing catalog, or relaxing execution', async t => {
   const f = await fixture(t), lock = await acquireCliLock(f.data, 'workspace-relocation')
   try {
@@ -51,6 +66,20 @@ test('publication is durable and retryable without moving files, changing catalo
     assert.equal(await fs.readFile(path.join(f.source, 'default/original.txt'), 'utf8'), 'user bytes')
     await assert.rejects(fs.stat(f.input.target), { code: 'ENOENT' })
     assert.deepEqual((await fs.readdir(path.dirname(f.recordFile))).filter(name => name.startsWith('.relocation-')), [])
+  } finally { releaseCliLock(lock) }
+})
+
+test('a historical job id cannot be reused to freeze a new migration', async t => {
+  const f = await fixture(t), lock = await acquireCliLock(f.data, 'workspace-relocation')
+  const history = management.ensurePrivateDataRoot(path.join(f.data, 'workspace-control/relocation-history'))
+  const existing = management.ensurePrivateDataRoot(path.join(history, f.input.id))
+  await fs.writeFile(path.join(existing, 'preserve'), 'old job material')
+  try {
+    await assert.rejects(beginWorkspaceRelocationIntent(f.input), { code: 'WORKSPACE_RELOCATION_CONFLICT' })
+    assert.equal(readWorkspaceRelocationIntent(f.data), null)
+    assertWorkspaceExecutionAllowed(f.data)
+    assert.deepEqual(await f.catalog.snapshot(), f.snapshot)
+    assert.equal(await fs.readFile(path.join(existing, 'preserve'), 'utf8'), 'old job material')
   } finally { releaseCliLock(lock) }
 })
 

@@ -1,6 +1,6 @@
 // Fixed file preparation policy; no caller-supplied paths or file effects are accepted here.
 import { createWorkspaceJournalClient, serveWorkspaceJournal, journalFields as fields, workspaceJournalFailure as failure } from './workspace-coordinator-journal.mjs'
-import { readWorkspaceRelocationFilePlan, readWorkspaceRelocationFileActors, prepareWorkspaceRelocationFilePlan, prepareWorkspaceRelocationStaging, readWorkspaceRelocationRootPlan, prepareWorkspaceRelocationRootPlan, verifyWorkspaceRelocationClosureReadiness, readWorkspaceRelocationRecoveryCommit, readWorkspaceRelocationRootPublished, readWorkspaceRelocationRootSelected, publishWorkspaceRelocationRoot, selectWorkspaceRelocationRoot, verifyWorkspaceRelocationSelectedRoot, readWorkspaceRelocationClosureCommit, readWorkspaceRelocationHealth, recordWorkspaceRelocationHealth } from './workspace-relocation-intent.mjs'
+import { readWorkspaceRelocationFilePlan, readWorkspaceRelocationFileActors, prepareWorkspaceRelocationFilePlan, prepareWorkspaceRelocationStaging, readWorkspaceRelocationRootPlan, prepareWorkspaceRelocationRootPlan, verifyWorkspaceRelocationClosureReadiness, readWorkspaceRelocationRecoveryCommit, readWorkspaceRelocationRootPublished, readWorkspaceRelocationRootSelected, publishWorkspaceRelocationRoot, selectWorkspaceRelocationRoot, verifyWorkspaceRelocationSelectedRoot, readWorkspaceRelocationClosureCommit, readWorkspaceRelocationHealth, recordWorkspaceRelocationHealth, prepareWorkspaceRelocationCompletion } from './workspace-relocation-intent.mjs'
 import { launchWorkspaceFileHost, prepareWorkspaceFilesWithHost } from './workspace-file-host.mjs'
 import native from './process-identity.cjs'
 import { sha256CanonicalJson } from '../../crabot-shared/dist/canonical-json.js'
@@ -116,6 +116,10 @@ export function serveWorkspaceFileJournal(context) {
   let hostPreparation, filePreparation, rootPreparation, rootPublication, rootSelection, host, healthRecording, healthFingerprint
   const disconnectHost = child => { if (child?.connected) { try { child.disconnect() } catch {} } }
   const transport = serveWorkspaceJournal(context, 'file', {
+    async prepare_completion(payload) {
+      if (!fields(payload, [])) throw failure()
+      return prepareWorkspaceRelocationCompletion({ dataDir: context.dataDir, id: context.id, signal: controller.signal })
+    },
     async record_health(payload) {
       if (!fields(payload, ['modules', 'root_proof'])) throw failure()
       const fingerprint = sha256CanonicalJson(payload)
