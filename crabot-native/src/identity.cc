@@ -592,6 +592,7 @@ static napi_value ReleaseLock(napi_env env, napi_callback_info info) {
 #include "install-filesystem.h"
 #include "directory-move.h"
 #include "file-metadata.h"
+#include "workspace-owner-inheritance.h"
 #include "directory-access.h"
 #include "directory-pin.h"
 #include "workspace-sync.h"
@@ -607,6 +608,8 @@ static napi_value Initialize(napi_env env, napi_value exports) {
     {"inspectWorkspaceCopyJob", nullptr, InspectWorkspaceCopyJob, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"resumeWorkspaceCopyJob", nullptr, ResumeWorkspaceCopyJob, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"closeWorkspaceCopyJob", nullptr, CloseWorkspaceCopyJob, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"inspectWorkspaceOwnerAccess", nullptr, InspectWorkspaceOwnerAccess, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"compareWorkspaceOwnerInheritance", nullptr, CompareWorkspaceOwnerInheritance, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"inspectCurrentPrimaryGroup", nullptr, InspectCurrentPrimaryGroup, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"inspectDirectoryFileId", nullptr, InspectDirectoryFileId, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"copyPinnedWorkspaceMetadata", nullptr, CopyPinnedWorkspaceMetadata, nullptr, nullptr, nullptr, napi_default, nullptr},

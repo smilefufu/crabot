@@ -1068,3 +1068,24 @@ test('cross-volume unsupported source metadata is rejected before publishing mai
     assert.equal(await fs.readFile(file, 'utf8'), 'user bytes')
   } finally { execFileSync('chattr', ['-d', file]); releaseCliLock(lock) }
 })
+
+
+test('new intents fix the exact policy and legacy schema1 is read unchanged without promotion', async t => {
+  const f = await fixture(t), lock = await acquireCliLock(f.data, 'workspace-relocation')
+  try {
+    const current = await beginWorkspaceRelocationIntent(f.input)
+    assert.equal(current.schema_version, 2); assert.equal(current.metadata_compatibility, 'exact')
+    const legacy = { ...current, schema_version: 1 }; delete legacy.metadata_compatibility
+    await fs.writeFile(f.recordFile, JSON.stringify(legacy))
+    const bytes = await fs.readFile(f.recordFile)
+    assert.deepEqual(readWorkspaceRelocationIntent(f.data), legacy)
+    assert.deepEqual(await beginWorkspaceRelocationIntent(f.input), legacy)
+    assert.deepEqual(await fs.readFile(f.recordFile), bytes)
+    for (const metadata_compatibility of ['arbitrary', null, 'windows-owner-inheritance-v1']) {
+      await fs.writeFile(f.recordFile, JSON.stringify({ ...current, metadata_compatibility }))
+      assert.throws(() => readWorkspaceRelocationIntent(f.data), { code: 'WORKSPACE_RELOCATION_INVALID' })
+    }
+    await fs.writeFile(f.recordFile, JSON.stringify({ ...legacy, metadata_compatibility: 'exact' }))
+    assert.throws(() => readWorkspaceRelocationIntent(f.data), { code: 'WORKSPACE_RELOCATION_INVALID' })
+  } finally { releaseCliLock(lock) }
+})

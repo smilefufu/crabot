@@ -29,12 +29,16 @@ struct WorkspaceMetadataDirectory {
   WorkspaceDirectoryCursor cursor;
   std::wstring targetPath;
   WorkspaceMetadataObject source, target;
+  std::string security;
 };
-// Exact source metadata on the copied tree only. Source objects are always opened read-only.
+// Original source metadata on the copied tree only. Source objects are always opened read-only.
 static napi_value CopyPinnedWorkspaceMetadata(napi_env env, napi_callback_info info) {
   try {
-    size_t argc = 3; napi_value args[3]; napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
-    if (argc != 2) throw std::runtime_error("Expected two actual workspace directory pins");
+    size_t argc = 4; napi_value args[4]; napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    if (argc != 2 && argc != 3) throw std::runtime_error("Expected two actual workspace directory pins and optional fixed metadata policy");
+    const auto policy = argc == 3 ? Text(env, args[2]) : "exact";
+    if (policy != "exact" && policy != "windows-owner-inheritance-v1") throw std::runtime_error("Unsupported workspace metadata policy");
+    const bool compatible = policy == "windows-owner-inheritance-v1";
     auto source = OwnedDirectoryPin(env, args[0]), target = OwnedDirectoryPin(env, args[1]);
     const auto inside = [](const std::wstring& parent, const std::wstring& child) {
       return parent.size() <= child.size() && CompareStringOrdinal(parent.data(), static_cast<int>(parent.size()), child.data(), static_cast<int>(parent.size()), TRUE) == CSTR_EQUAL
@@ -50,11 +54,14 @@ static napi_value CopyPinnedWorkspaceMetadata(napi_env env, napi_callback_info i
       pair->target = OpenWorkspaceMetadataObject(to, targetId.VolumeSerialNumber, true);
       if (pair->source.directory != pair->target.directory
         || (!pair->source.directory && pair->source.standard.EndOfFile.QuadPart != pair->target.standard.EndOfFile.QuadPart)) throw std::runtime_error("Copied workspace metadata type or size differs");
+      if (compatible && pair->source.directory && (!WorkspaceOwnerAccess(pair->source.file.get(), true)
+        || !WorkspaceOwnerAccess(pair->target.file.get(), true))) throw std::runtime_error("Workspace metadata parents are not private");
       CopyWorkspaceObjectMetadata(pair->source.file.get(), pair->target.file.get(), to);
       std::vector<std::string> sourceBlockers, targetBlockers;
       std::string sourceOwner, sourceGroup, targetOwner, targetGroup;
-      if (MetadataSecurity(pair->source.file.get(), sourceBlockers, sourceOwner, sourceGroup)
-        != MetadataSecurity(pair->target.file.get(), targetBlockers, targetOwner, targetGroup)) {
+      pair->security = MetadataSecurity(pair->source.file.get(), sourceBlockers, sourceOwner, sourceGroup);
+      if (pair->security != MetadataSecurity(pair->target.file.get(), targetBlockers, targetOwner, targetGroup)
+        && !(compatible && !pair->source.directory && WorkspaceOwnerInheritanceDifference(pair->source.file.get(), pair->target.file.get()))) {
         throw WorkspaceMetadataReadbackError("Copied workspace security did not retain the original descriptor");
       }
       return pair;
@@ -67,6 +74,9 @@ static napi_value CopyPinnedWorkspaceMetadata(napi_env env, napi_callback_info i
     uint32_t objects = 1;
     while (!stack.empty()) {
       auto& parent = *stack.back();
+      std::vector<std::string> blockers; std::string owner, group;
+      if (MetadataSecurity(parent.source.file.get(), blockers, owner, group) != parent.security
+        || MetadataSecurity(parent.target.file.get(), blockers, owner, group) != parent.security) throw WorkspaceMetadataReadbackError("Workspace parent security changed");
       std::wstring name;
       if (!parent.cursor.Next(name)) {
         stack.pop_back();

@@ -2,8 +2,8 @@
 import native from './process-identity.cjs'
 
 const failure = () => Object.assign(new Error('Windows 固定工作区复制未能核实，原目录与暂存保留。'), { code: 'WORKSPACE_COPY_UNVERIFIED' })
-export async function copyWorkspaceTreePinned(source, tree, container, { journal, signal } = {}) {
-  if (process.platform !== 'win32' || !journal || signal?.aborted) throw failure()
+export async function copyWorkspaceTreePinned(source, tree, container, { journal, signal, metadataCompatibility = 'exact' } = {}) {
+  if (process.platform !== 'win32' || !journal || signal?.aborted || !['exact', 'windows-owner-inheritance-v1'].includes(metadataCompatibility)) throw failure()
   let job, registered = false, completionAttempted = false
   const check = () => { if (signal?.aborted) throw failure() }
   const close = () => {
@@ -39,7 +39,7 @@ export async function copyWorkspaceTreePinned(source, tree, container, { journal
     completionAttempted = true
     await journal.complete()
     check()
-    native.copyPinnedWorkspaceMetadata(source, tree)
+    native.copyPinnedWorkspaceMetadata(source, tree, metadataCompatibility)
     check()
     // Includes child streams/files, the tree and its private container, in child-to-parent order.
     native.syncPinnedWorkspaceTree(container)

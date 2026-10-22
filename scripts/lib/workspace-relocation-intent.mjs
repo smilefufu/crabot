@@ -131,7 +131,10 @@ function read(ctx) {
     return null
   }
   try {
-    if (value?.schema_version !== 1 || Object.keys(value).length !== 12 || !uuid(value.id) || value.phase !== 'freezing'
+    if (![1, 2].includes(value?.schema_version) || Object.keys(value).length !== (value.schema_version === 1 ? 12 : 13)
+      || value.schema_version === 2 && (!['exact', 'windows-owner-inheritance-v1'].includes(value.metadata_compatibility)
+        || value.metadata_compatibility !== 'exact' && (process.platform !== 'win32' || value.source?.dev === value.target_ancestor?.dev))
+      || value.schema_version === 1 && Object.hasOwn(value, 'metadata_compatibility') || !uuid(value.id) || value.phase !== 'freezing'
       || !Number.isSafeInteger(value.catalog_revision) || value.catalog_revision < 1
       || !validIdentity(value.data_root) || !same(value.data_root, identity(ctx.dataRoot))
       || !validIdentity(value.control_root) || !same(value.control_root, identity(ctx.control)) || !validIdentity(value.source)
@@ -177,16 +180,17 @@ export async function beginWorkspaceRelocationIntent(options) {
   if (preview.mode === 'unchanged') return { unchanged: true, source: preview.source }
   if (preview.inspection.issues.length || preview.usage.status !== 'complete') fail('WORKSPACE_RELOCATION_BLOCKED')
   if (preview.mode === 'copy' && (preview.usage.logical_bytes === undefined || BigInt(preview.usage.logical_bytes) > preview.available_bytes)) fail('WORKSPACE_RELOCATION_BLOCKED')
+  const metadataCompatibility = process.platform === 'win32' && preview.mode === 'copy' ? 'windows-owner-inheritance-v1' : 'exact'
   if (preview.mode === 'copy') {
     const { inspectWorkspaceCopySource } = await import('./workspace-copy.mjs')
-    if ((await inspectWorkspaceCopySource(preview.source)).tree_fingerprint !== preview.inspection.fingerprint) fail()
+    if ((await inspectWorkspaceCopySource(preview.source, { metadataCompatibility })).tree_fingerprint !== preview.inspection.fingerprint) fail()
   }
   if ((await catalog.snapshot()).revision !== snapshot.revision) fail('WORKSPACE_REVISION_CONFLICT')
   if (!same(dataIdentity, identity(ctx.dataRoot)) || !same(preview.source_identity, identity(preview.source))
     || !same(preview.target_ancestor, identity(preview.target_ancestor.path))) fail()
   if (preview.target_identity) { if (!same(preview.target_identity, identity(preview.target))) fail() }
   else { try { fs.lstatSync(preview.target); fail() } catch (error) { if (error.code !== 'ENOENT') throw error } }
-  const record = { schema_version: 1, id: options.id, phase: 'freezing', catalog_revision: snapshot.revision,
+  const record = { schema_version: 2, metadata_compatibility: metadataCompatibility, id: options.id, phase: 'freezing', catalog_revision: snapshot.revision,
     data_root: dataIdentity, control_root: controlIdentity, source: preview.source_identity, target: preview.target, requested_target: requestedTarget,
     target_identity: preview.target_identity, target_ancestor: preview.target_ancestor, created_at: new Date().toISOString() }
   if (!same(controlIdentity, identity(ctx.control)) || !privateControl(ctx.control)) fail()
@@ -918,7 +922,7 @@ export async function prepareWorkspaceRelocationFilePlan({ dataDir, id, signal }
   const nativeId = process.platform === 'win32' ? native.inspectDirectoryFileId(stagingParent.path) : null
   try { fs.lstatSync(stagingPath); fail() } catch (error) { if (error.code !== 'ENOENT') throw error }
   const { inspectWorkspaceFileSource } = await import('./workspace-copy.mjs')
-  const observation = await inspectWorkspaceFileSource(intent.source.path, preview.mode, { signal })
+  const observation = await inspectWorkspaceFileSource(intent.source.path, preview.mode, { signal, metadataCompatibility: intent.metadata_compatibility ?? 'exact' })
   const { inspectWorkspaceRelocationContent } = await import('../../crabot-shared/dist/workspace-relocation-content.js')
   const content = await inspectWorkspaceRelocationContent(intent.source.path, preview.mode, { signal })
   if (observation.tree_fingerprint !== preview.inspection.fingerprint || content.tree_fingerprint !== observation.tree_fingerprint
@@ -1004,7 +1008,15 @@ export const readWorkspaceRelocationFileActors = recordGraphReader(function read
       } else if (row.type === 'file_ready' && file_attempt && !file_ready && (plan.mode === 'rename' ? !tools : tool_exit)) {
         const expected = plan.mode === 'copy' ? staging.tree : { ...readWorkspaceRelocationIntent(dataDir).source, path: path.join(plan.staging_path, 'tree') }
         const nativeId = process.platform === 'win32' ? plan.mode === 'copy' ? staging.tree_native_id : plan.source_observation.source_identity.native_id : null
-        if (!fields(row, ['type', 'previous_sha256', 'tree', 'tree_native_id', 'content_sha256', 'metadata_sha256', 'created_at'])
+        const intent = readWorkspaceRelocationIntent(dataDir)
+        const extra = intent.schema_version === 2 ? ['schema_version', 'metadata_fingerprint', 'target_metadata_fingerprint', 'metadata_compatibility', 'legacy_owner_inheritance_files'] : []
+        if (!fields(row, ['type', 'previous_sha256', 'tree', 'tree_native_id', 'content_sha256', 'metadata_sha256', 'created_at', ...extra])
+          || intent.schema_version === 2 && (row.schema_version !== 2 || row.metadata_fingerprint !== row.metadata_sha256
+            || row.metadata_compatibility !== intent.metadata_compatibility || !digest(row.target_metadata_fingerprint)
+            || !integer(row.legacy_owner_inheritance_files) || row.legacy_owner_inheritance_files < 0
+            || row.legacy_owner_inheritance_files >= plan.source_observation.entries
+            || row.metadata_compatibility === 'exact' && row.legacy_owner_inheritance_files !== 0
+            || (row.legacy_owner_inheritance_files === 0) !== (row.metadata_sha256 === row.target_metadata_fingerprint))
           || !validIdentity(row.tree) || !same(row.tree, expected) || row.tree_native_id !== nativeId
           || row.content_sha256 !== plan.source_content_sha256 || row.metadata_sha256 !== plan.source_observation.metadata_fingerprint) fail()
         file_ready = row
@@ -1213,12 +1225,12 @@ export async function commitWorkspaceRelocationFileReady({ dataDir, id, signal }
   const { inspectWorkspaceRelocationContent } = await import('../../crabot-shared/dist/workspace-relocation-content.js')
   const { inspectWorkspaceFileSource } = await import('./workspace-copy.mjs')
   const { verifyWorkspaceRelocationCopy } = await import('./workspace-file-metadata.mjs')
-  let metadata
+  let metadata, targetMetadata, inherited = 0
   if (plan.mode === 'copy') {
     if (!same(intent.source, identity(intent.source.path))) fail()
-    const proof = await verifyWorkspaceRelocationCopy(intent.source.path, target, { signal })
+    const proof = await verifyWorkspaceRelocationCopy(intent.source.path, target, { signal, metadataCompatibility: intent.metadata_compatibility ?? 'exact' })
     if (proof.source_fingerprint !== plan.source_observation.tree_fingerprint) fail()
-    metadata = proof.metadata_fingerprint
+    metadata = proof.metadata_fingerprint; targetMetadata = proof.target_metadata_fingerprint; inherited = proof.legacy_owner_inheritance_files
   } else {
     try { fs.lstatSync(intent.source.path); fail() } catch (error) { if (error.code !== 'ENOENT') throw error }
     metadata = (await inspectWorkspaceFileSource(target, 'rename', { signal })).metadata_fingerprint
@@ -1230,7 +1242,9 @@ export async function commitWorkspaceRelocationFileReady({ dataDir, id, signal }
   verify(); verifyStagingContainer(previous.staging, ['tree'])
   if (!same(tree, identity(target)) || knownProcessExit.probeKnownProcessExit(scope).state !== 'stopped') fail()
   const record = { type: 'file_ready', previous_sha256: sha256CanonicalJson(previous.tool_exit ?? previous.file_attempt), tree,
-    tree_native_id: nativeId, content_sha256: content.fingerprint, metadata_sha256: metadata, created_at: new Date().toISOString() }
+    tree_native_id: nativeId, content_sha256: content.fingerprint, metadata_sha256: metadata,
+    ...(intent.schema_version === 2 ? { schema_version: 2, metadata_fingerprint: metadata, target_metadata_fingerprint: targetMetadata ?? metadata,
+      metadata_compatibility: intent.metadata_compatibility, legacy_owner_inheritance_files: inherited } : {}), created_at: new Date().toISOString() }
   return { dispatch: 'dispatch', ready: appendFileActor(dataDir, id, previous, record).file_ready }
 }
 
@@ -1556,7 +1570,7 @@ export const readWorkspaceRelocationRootPublished = recordGraphReader(function r
   if (!plan || !fields(record, ['schema_version', 'intent_id', 'plan_sha256', 'target', 'content_sha256', 'metadata_sha256'])
     || record.schema_version !== 1 || record.intent_id !== id || record.plan_sha256 !== sha256CanonicalJson(plan)
     || sha256CanonicalJson(record.target) !== sha256CanonicalJson({ ...plan.publication.tree, path: plan.publication.target })
-    || record.content_sha256 !== ready.content_sha256 || record.metadata_sha256 !== ready.metadata_sha256) fail()
+    || record.content_sha256 !== ready.content_sha256 || record.metadata_sha256 !== (ready.target_metadata_fingerprint ?? ready.metadata_sha256)) fail()
   return record
 })
 export const readWorkspaceRelocationRootSelected = recordGraphReader(function readWorkspaceRelocationRootSelected(dataDir, id) {
@@ -1627,7 +1641,7 @@ async function inspectRootTarget(root, evidence, signal) {
   check()
   const original = await inspectWorkspaceFileSource(target, filePlan.mode, { signal }); check()
   const content = await inspectWorkspaceRelocationContent(target, filePlan.mode, { signal }); check()
-  if (content.fingerprint !== ready.content_sha256 || original.metadata_fingerprint !== ready.metadata_sha256
+  if (content.fingerprint !== ready.content_sha256 || original.metadata_fingerprint !== (ready.target_metadata_fingerprint ?? ready.metadata_sha256)
     || content.tree_fingerprint !== original.tree_fingerprint) fail()
   const verifyTarget = async () => {
     check()

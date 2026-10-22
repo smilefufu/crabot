@@ -21,7 +21,7 @@ export async function runWorkspaceFilePreparation(context, signal) {
   }
   check()
   const { inspectWorkspaceFileSource } = await import('./workspace-copy.mjs')
-  const observation = await inspectWorkspaceFileSource(intent.source.path, plan.mode, { signal })
+  const observation = await inspectWorkspaceFileSource(intent.source.path, plan.mode, { signal, metadataCompatibility: intent.metadata_compatibility ?? 'exact' })
   if (hash(observation) !== hash(plan.source_observation)) throw failure()
   check()
   const target = path.join(plan.staging_path, 'tree'), descriptors = [], pins = []
@@ -40,7 +40,7 @@ export async function runWorkspaceFilePreparation(context, signal) {
           const stat = fs.lstatSync(item.path, { bigint: true })
           if (pin.identity !== identities[index] || stat.dev.toString() !== item.dev || stat.ino.toString() !== item.ino) throw failure()
         }
-        check(); await copyWorkspaceTreePinned(...pins, { journal, signal }); check()
+        check(); await copyWorkspaceTreePinned(...pins, { journal, signal, metadataCompatibility: intent.metadata_compatibility ?? 'exact' }); check()
       } else {
         const { copyWorkspaceTreeFd } = await import('./workspace-posix-copy.mjs')
         for (const item of expected) {

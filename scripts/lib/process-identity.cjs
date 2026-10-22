@@ -29,6 +29,8 @@ const filesystemPath = method => process.platform === 'win32'
 module.exports = { ...native, sameProcess, terminateKnownProcess,
   renameDirectoryNoReplace: native.renameDirectoryNoReplace,
   inspectFileMetadata: native.inspectFileMetadata,
+  inspectWorkspaceOwnerAccess: native.inspectWorkspaceOwnerAccess,
+  compareWorkspaceOwnerInheritance: native.compareWorkspaceOwnerInheritance,
   createPrivateStagingDirectory: native.createPrivateStagingDirectory,
   enterDirectoryFd: native.enterDirectoryFd,
   copyDirectoryTimesFd: native.copyDirectoryTimesFd,

@@ -471,6 +471,13 @@ for (const mode of ['confirmed', 'lost acknowledgement', 'changed source', 'copy
         const actors = readWorkspaceRelocationFileActors(f.data, f.id)
         assert.deepEqual(actors.tools.tools.map(item => item.role), process.platform === 'win32' ? ['copy'] : ['pack', 'unpack'])
         assert.ok(actors.tool_permission); assert.ok(actors.tool_exit)
+        assert.equal(result.ready.schema_version, 2)
+        assert.equal(result.ready.metadata_fingerprint, plan.source_observation.metadata_fingerprint)
+        assert.equal(result.ready.metadata_compatibility, process.platform === 'win32' ? 'windows-owner-inheritance-v1' : 'exact')
+        if (process.platform === 'win32') {
+          assert.ok(result.ready.legacy_owner_inheritance_files > 0)
+          assert.notEqual(result.ready.target_metadata_fingerprint, result.ready.metadata_fingerprint)
+        } else assert.equal(result.ready.target_metadata_fingerprint, result.ready.metadata_fingerprint)
       }
       assert.equal(fs.readFileSync(path.join(plan.staging_path, 'tree/original.txt'), 'utf8'), 'original work')
       assert.equal(native.isProcessExited(host.actors.host.process.pid), true)

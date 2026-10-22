@@ -17,6 +17,7 @@ on:
       - 'scripts/lib/workspace-*.mjs'
       - 'scripts/lib/__tests__/workspace-coordinator-launch.test.mjs'
       - 'scripts/lib/__tests__/workspace-windows-*.test.mjs'
+      - 'scripts/lib/__tests__/workspace-owner-inheritance.test.mjs'
       - 'scripts/lib/known-process-stop.cjs'
       - 'scripts/lib/owned-process-tree.cjs'
       - 'scripts/lib/process-identity.cjs'
@@ -41,6 +42,7 @@ on:
       - 'scripts/lib/workspace-*.mjs'
       - 'scripts/lib/__tests__/workspace-coordinator-launch.test.mjs'
       - 'scripts/lib/__tests__/workspace-windows-*.test.mjs'
+      - 'scripts/lib/__tests__/workspace-owner-inheritance.test.mjs'
       - 'scripts/lib/known-process-stop.cjs'
       - 'scripts/lib/owned-process-tree.cjs'
       - 'scripts/lib/process-identity.cjs'
@@ -104,7 +106,7 @@ jobs:
         working-directory: crabot-agent
         run: node node_modules/vitest/vitest.mjs run tests/engine/tools/glob-tool.test.ts tests/engine/tools/grep-tool.test.ts tests/engine/local-host-tool-executor.test.ts --maxWorkers=1 --minWorkers=1
       - name: Fixed Windows copy and staging sync primitives
-        run: node --test scripts/lib/__tests__/workspace-windows-copy.test.mjs scripts/lib/__tests__/workspace-windows-sync.test.mjs
+        run: node --test scripts/lib/__tests__/workspace-windows-metadata.test.mjs scripts/lib/__tests__/workspace-owner-inheritance.test.mjs scripts/lib/__tests__/workspace-windows-copy.test.mjs scripts/lib/__tests__/workspace-windows-sync.test.mjs
       - name: Actual fixed Windows cross-volume file preparation
         if: runner.os == 'Windows'
         run: |

@@ -15,7 +15,9 @@ const sameRoot = (a, b) => a.isDirectory() && !a.isSymbolicLink() && a.dev === b
 const checkCancelled = signal => { if (signal?.aborted) throw Object.assign(new Error('工作区复制已取消，原目录保留。'), { code: 'CRABOT_PREPARATION_CANCELLED' }) }
 
 /** Read-only source capability checks, callable before execution is stopped. No target is created. */
-export async function inspectWorkspaceFileSource(source, mode, { signal } = {}) {
+export async function inspectWorkspaceFileSource(source, mode, { signal, metadataCompatibility = 'exact' } = {}) {
+  if (!['exact', 'windows-owner-inheritance-v1'].includes(metadataCompatibility)
+    || metadataCompatibility !== 'exact' && (process.platform !== 'win32' || mode !== 'copy')) throw fail()
   if (mode !== 'copy' && mode !== 'rename') throw fail()
   checkCancelled(signal)
   const original = await fs.lstat(source, { bigint: true })
@@ -35,6 +37,9 @@ export async function inspectWorkspaceFileSource(source, mode, { signal } = {}) 
       throw Object.assign(new Error('当前系统用户无法保留部分文件的所有者或用户组；未开始复制。'), { code: 'WORKSPACE_COPY_OWNER_UNSUPPORTED' })
     }
     const metadata = await inspectWorkspaceFileMetadata(file, { signal })
+    if (metadataCompatibility === 'windows-owner-inheritance-v1' && !native.inspectWorkspaceOwnerAccess(file)) {
+      throw Object.assign(new Error('部分工作区文件或目录使用自定义、共享或受限权限，当前无法安全跨盘迁移；尚未停止任务。'), { code: 'WORKSPACE_COPY_ACL_UNSUPPORTED', path: relative })
+    }
     if (mode === 'copy' && process.platform === 'win32' && (entries >= 999999 || metadata.named_streams > 1024)) {
       throw Object.assign(new Error('工作区超过当前 Windows 可靠同步的数量上限；未停止执行或开始复制。'), { code: 'WORKSPACE_COPY_SYNC_UNSUPPORTED', path: relative })
     }
