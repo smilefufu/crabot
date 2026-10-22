@@ -465,6 +465,23 @@ for (const mode of ['confirmed', 'lost acknowledgement', 'changed source', 'copy
       }
       assert.equal(result.dispatch, mode === 'lost acknowledgement' ? 'observe' : 'dispatch')
       assert.equal(result.ready.content_sha256, plan.source_content_sha256)
+      if (mode === 'confirmed' || copyMode) {
+        const journal = path.join(f.data, 'workspace-control/relocation-file-actors.jsonl'), bytes = fs.readFileSync(journal)
+        const rows = bytes.toString().trimEnd().split('\n'), ready = JSON.parse(rows.at(-1))
+        assert.equal(ready.type, 'file_ready'); assert.equal(ready.schema_version, 2)
+        const patches = [{ schema_version: 1 }, { metadata_fingerprint: '0'.repeat(64) }, { metadata_compatibility: 'arbitrary' },
+          { legacy_owner_inheritance_files: -1 }, { legacy_owner_inheritance_files: 0.5 },
+          { legacy_owner_inheritance_files: plan.source_observation.entries }, { target_metadata_fingerprint: null }]
+        if (ready.legacy_owner_inheritance_files === 0) patches.push({ target_metadata_fingerprint: '0'.repeat(64) })
+        else patches.push({ legacy_owner_inheritance_files: 0 })
+        for (const patch of patches) {
+          try {
+            fs.writeFileSync(journal, [...rows.slice(0, -1), JSON.stringify({ ...ready, ...patch })].join('\n') + '\n')
+            assert.throws(() => readWorkspaceRelocationFileActors(f.data, f.id), { code: 'WORKSPACE_RELOCATION_INVALID' })
+          } finally { fs.writeFileSync(journal, bytes) }
+        }
+        assert.deepEqual(readWorkspaceRelocationFileActors(f.data, f.id).file_ready, result.ready)
+      }
       assert.equal(fs.existsSync(f.before.storage_root), copyMode)
       if (copyMode) {
         assert.notEqual(fs.statSync(f.before.storage_root).dev, fs.statSync(plan.staging_path).dev)

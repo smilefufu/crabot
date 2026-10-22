@@ -1,5 +1,8 @@
 #ifdef _WIN32
-struct WorkspaceMetadataReadbackError : std::runtime_error { using std::runtime_error::runtime_error; };
+struct WorkspaceMetadataReadbackError : std::runtime_error {
+  std::string stage;
+  explicit WorkspaceMetadataReadbackError(const std::string& message, const std::string& step = "metadata-exact") : std::runtime_error(message), stage(step) {}
+};
 struct WorkspaceMetadataObject {
   WorkspaceSyncHandle file{nullptr, CloseHandle};
   FILE_ID_INFO id{};
@@ -60,9 +63,10 @@ static napi_value CopyPinnedWorkspaceMetadata(napi_env env, napi_callback_info i
       std::vector<std::string> sourceBlockers, targetBlockers;
       std::string sourceOwner, sourceGroup, targetOwner, targetGroup;
       pair->security = MetadataSecurity(pair->source.file.get(), sourceBlockers, sourceOwner, sourceGroup);
+      std::string diagnostic = "metadata-exact";
       if (pair->security != MetadataSecurity(pair->target.file.get(), targetBlockers, targetOwner, targetGroup)
-        && !(compatible && !pair->source.directory && WorkspaceOwnerInheritanceDifference(pair->source.file.get(), pair->target.file.get()))) {
-        throw WorkspaceMetadataReadbackError("Copied workspace security did not retain the original descriptor");
+        && !(compatible && !pair->source.directory && WorkspaceOwnerInheritanceDifference(pair->source.file.get(), pair->target.file.get(), &diagnostic))) {
+        throw WorkspaceMetadataReadbackError("Copied workspace security did not retain the original descriptor", diagnostic);
       }
       return pair;
     };
@@ -90,7 +94,11 @@ static napi_value CopyPinnedWorkspaceMetadata(napi_env env, napi_callback_info i
       || DirectoryIdText(MoveDirectoryId(target->path)) != target->identity) throw std::runtime_error("Workspace metadata roots changed");
     napi_value result; napi_get_undefined(env, &result); return result;
   } catch (const WorkspaceMetadataReadbackError& error) {
-    napi_throw_error(env, "CRABOT_WORKSPACE_METADATA_READBACK", error.what()); return nullptr;
+    napi_value code, message, result, stage;
+    napi_create_string_utf8(env, "CRABOT_WORKSPACE_METADATA_READBACK", NAPI_AUTO_LENGTH, &code);
+    napi_create_string_utf8(env, error.what(), NAPI_AUTO_LENGTH, &message); napi_create_error(env, code, message, &result);
+    napi_create_string_utf8(env, error.stage.data(), error.stage.size(), &stage); napi_set_named_property(env, result, "stage", stage);
+    napi_throw(env, result); return nullptr;
   } catch (const std::exception& error) { napi_throw_error(env, "CRABOT_WORKSPACE_METADATA", error.what()); return nullptr; }
 }
 #endif

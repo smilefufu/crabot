@@ -34,23 +34,25 @@ static std::string WorkspaceSecurityText(PSECURITY_DESCRIPTOR descriptor) {
     throw std::runtime_error("Cannot serialize workspace security comparison");
   std::string result(text); LocalFree(text); return result;
 }
-static bool WorkspaceOwnerInheritanceDifference(HANDLE source, HANDLE target) {
+static bool WorkspaceOwnerInheritanceDifference(HANDLE source, HANDLE target, std::string* diagnostic = nullptr) {
+  const auto reject = [&](const std::string& reason) { if (diagnostic) *diagnostic = reason; return false; };
   for (HANDLE file : { source, target }) {
     FILE_ATTRIBUTE_TAG_INFO attributes{}; FILE_STANDARD_INFO standard{};
     if (!GetFileInformationByHandleEx(file, FileAttributeTagInfo, &attributes, sizeof(attributes))
       || (attributes.FileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY))
       || !GetFileInformationByHandleEx(file, FileStandardInfo, &standard, sizeof(standard))
-      || standard.Directory || standard.DeletePending || standard.NumberOfLinks != 1) return false;
+      || standard.Directory || standard.DeletePending || standard.NumberOfLinks != 1) return reject("metadata-object");
   }
   WorkspaceSecurityDescriptor a(source), b(target);
   auto left = WorkspaceOwnerAce(a.value, false), right = WorkspaceOwnerAce(b.value, false);
   SECURITY_DESCRIPTOR_CONTROL ac = 0, bc = 0; DWORD ar = 0, br = 0;
-  if (!left || !right || left->Header.AceFlags != 0 || right->Header.AceFlags != INHERITED_ACE
-    || !GetSecurityDescriptorControl(a.value, &ac, &ar) || !GetSecurityDescriptorControl(b.value, &bc, &br)
-    || ac != bc || ar != br) return false;
+  if (!left || !right) return reject("metadata-owner-ace");
+  if (left->Header.AceFlags != 0 || right->Header.AceFlags != INHERITED_ACE) return reject("metadata-ace-flags");
+  if (!GetSecurityDescriptorControl(a.value, &ac, &ar) || !GetSecurityDescriptorControl(b.value, &bc, &br)) return reject("metadata-control-unavailable");
+  if (ac != bc || ar != br) return reject("metadata-control-" + std::to_string(ac) + "-" + std::to_string(bc));
   // Only alter this private in-memory observation. Never write the descriptor back to either file.
   right->Header.AceFlags = 0;
-  return WorkspaceSecurityText(a.value) == WorkspaceSecurityText(b.value);
+  return WorkspaceSecurityText(a.value) == WorkspaceSecurityText(b.value) || reject("metadata-security-text");
 }
 static HANDLE OpenWorkspaceSecurityObservation(napi_env env, napi_value value) {
   const auto path = Text(env, value);
