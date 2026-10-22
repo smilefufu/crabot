@@ -46,6 +46,7 @@ import {
   type VerifyWorkspaceRelocationFinalizationParams,
   type VerifyWorkspaceRelocationFinalizationResult,
   type PrepareWorkspaceRelocationCompletionResult,
+  type ResumeWorkspaceRelocationWebResult,
   assertWorkspaceExecutionAllowed,
   workspaceMaintenancePending,
   sha256CanonicalJson,
@@ -255,6 +256,7 @@ export class ModuleManager {
   private workspaceValidationLaunch?: { fingerprint: string; pending: Promise<WorkspaceValidationLaunchResult> }
   private workspaceFinalizationGrant?: WorkspaceFinalizationGrant
   private workspaceFinalizationPreparation?: { fingerprint: string; pending: Promise<PrepareWorkspaceRelocationCompletionResult> }
+  private workspaceFinalizationResume?: { fingerprint: string; pending: Promise<ResumeWorkspaceRelocationWebResult> }
   private workspaceValidationHealth?: { fingerprint: string; pending: Promise<WorkspaceValidationHealthResult> }
   private workspaceValidationProof?: {
     request: VerifyWorkspaceRelocationRequestParams
@@ -2026,6 +2028,62 @@ export class ModuleManager {
       } finally { if (this.workspaceFinalizationGrant?.phase !== 'prepared') terminal?.close() }
     })
     this.workspaceFinalizationPreparation = { fingerprint, pending }
+    return pending
+  }
+
+  /** The same accepted normal job only; this stage does not clear all job state or report full migration completion. */
+  private resumeWorkspaceRelocationWeb(request: VerifyWorkspaceRelocationRequestParams, bearer?: string): Promise<ResumeWorkspaceRelocationWebResult> {
+    request = Object.freeze({ ...request })
+    const fingerprint = sha256CanonicalJson(request), previous = this.workspaceFinalizationResume
+    const failure = () => Object.assign(new Error('工作区业务恢复尚未确认，请查看原作业诊断。'), { code: 'SERVICE_UNAVAILABLE' })
+    if (previous) {
+      if (previous.fingerprint !== fingerprint) return Promise.reject(Object.assign(failure(), { code: 'FORBIDDEN' }))
+      return previous.pending.then(result => {
+        const grant = this.workspaceFinalizationGrant
+        if (!grant || grant.phase !== 'released') throw failure()
+        grant.verify()
+        return result
+      })
+    }
+    const pending = Promise.resolve().then(async (): Promise<ResumeWorkspaceRelocationWebResult> => {
+      let grant: WorkspaceFinalizationGrant | undefined
+      let stage = 'prepare'
+      try {
+        const prepared = await this.prepareWorkspaceRelocationCompletion(request, bearer)
+        grant = this.workspaceFinalizationGrant
+        if (!grant || grant.phase !== 'prepared' || sha256CanonicalJson(grant.request) !== fingerprint) throw failure()
+        grant.verify()
+        stage = 'release'
+        try { await grant.release(prepared) }
+        catch {
+          // Query the original existing effect only; never resend the release or recreate a role.
+          stage = 'observe-release'
+          await grant.observeRelease()
+        }
+        grant.verify()
+        stage = 'current-root'
+        const records = require('../../scripts/lib/workspace-relocation-intent.mjs')
+        await records.verifyWorkspaceRelocationReleasedCapabilities({ dataDir: this.dataDir, id: request.intent_id, verify: async () => grant!.verify() })
+        grant.verify()
+        stage = 'resume-web'
+        const params = { intent_id: prepared.intent_id, launch_id: prepared.launch_id, completion_sha256: prepared.completion_sha256 }
+        const current = grant
+        const result = await this.withCurrentAdminRpc(30000, async (rpc, verify) => {
+          current.verify()
+          const response = await rpc.call('resume_workspace_relocation_web', params, { authorizationBearer: current.token })
+          await verify(); current.verify()
+          return response
+        })
+        const expected = { resumed: true as const, ...params, intent_sha256: prepared.intent_sha256, launch_sha256: prepared.launch_sha256 }
+        if (sha256CanonicalJson(result) !== sha256CanonicalJson(expected)) throw failure()
+        grant.verify()
+        return Object.freeze(expected)
+      } catch (cause) {
+        if (grant) { grant.revoked = true; grant.close(); await this.closeWorkspaceCoordinatorChannel(grant.child) }
+        throw Object.assign(failure(), { stage, cause })
+      }
+    })
+    this.workspaceFinalizationResume = { fingerprint, pending }
     return pending
   }
 

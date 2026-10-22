@@ -1908,6 +1908,18 @@ describe('MM checks the new runtime health and Root under the original job', () 
 
 
 describe('normal fixed-job Admin completion preparation', () => {
+  it('does not turn an unaccepted private completion call into original human admission', async () => {
+    const f = await fixture(), records = require('../../scripts/lib/workspace-relocation-intent.mjs')
+    const locks = require('../../scripts/lib/cli-lock.mjs'), lock = await locks.acquireWorkspaceRelocationLock(f.data, f.params.intent_id)
+    try {
+      const original = records.readWorkspaceRelocationIntent(f.data)
+      await expect(f.manager.resumeWorkspaceRelocationWeb(f.params)).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
+      expect(records.readWorkspaceRelocationIntent(f.data)).toEqual(original)
+      expect(records.readWorkspaceRelocationCoordinator(f.data, f.params.intent_id).launch).toBeNull()
+      expect(await f.calls()).toEqual([])
+    } finally { locks.releaseCliLock(lock); await f.cleanup() }
+  })
+
   it('prepares the current Admin after archive without reopening business or requiring the old human request', async () => {
     const f = await fixture({ actualAgent: true, actualAdmin: true, validationHealth: 'healthy', processLifetimeMs: process.platform === 'win32' ? 900000 : 300000 })
     const locks = require('../../scripts/lib/cli-lock.mjs'), records = require('../../scripts/lib/workspace-relocation-intent.mjs')
@@ -1976,14 +1988,14 @@ describe('normal fixed-job Admin completion preparation', () => {
 
 // This stage requires the new Native file move, rebuilt only in isolated CI.
 describe.skipIf(process.env.GITHUB_ACTIONS !== 'true')('fixed terminal release and current Admin resume', () => {
-  it.each(['healthy', 'bad prepared result', 'unhealthy runtime', 'existing release fact', 'lost acknowledgement', 'new maintenance after effect'])(
+  it.each(['healthy', 'controller lost acknowledgement', 'bad prepared result', 'unhealthy runtime', 'existing release fact', 'lost acknowledgement', 'new maintenance after effect'])(
     'does not replay or reopen an unconfirmed result: %s', async mode => {
       const f = await fixture({ actualAgent: true, actualAdmin: true, validationHealth: 'healthy', processLifetimeMs: process.platform === 'win32' ? 900000 : 300000 })
       const locks = require('../../scripts/lib/cli-lock.mjs'), records = require('../../scripts/lib/workspace-relocation-intent.mjs')
       const native = require('../../scripts/lib/process-identity.cjs'), maintenance = require('../../scripts/lib/workspace-maintenance.cjs')
       const lock = await locks.acquireWorkspaceRelocationLock(f.data, f.params.intent_id)
       let replySpy: ReturnType<typeof vi.spyOn> | undefined, sendSpy: ReturnType<typeof vi.spyOn> | undefined
-      const sent: string[] = []
+      const sent: string[] = [], healthyFlow = mode === 'healthy' || mode === 'controller lost acknowledgement'
       try {
         expect(typeof native.renameFileNoReplace).toBe('function')
         const prepared = await f.manager.prepareWorkspaceRelocationCompletion(f.params, 'fixture-human'), grant = f.manager.workspaceFinalizationGrant
@@ -2002,21 +2014,21 @@ describe.skipIf(process.env.GITHUB_ACTIONS !== 'true')('fixed terminal release a
         } else {
           if (mode === 'unhealthy runtime') await fs.writeFile(path.join(f.data, 'validation-health-unhealthy'), 'current runtime degraded')
           if (mode === 'existing release fact') await fs.writeFile(receipt, 'unrelated retained content')
-          if (mode === 'lost acknowledgement' || mode === 'new maintenance after effect') {
+          if (mode === 'lost acknowledgement' || mode === 'controller lost acknowledgement' || mode === 'new maintenance after effect') {
             const child = grant.child, emit = child.emit.bind(child)
             replySpy = vi.spyOn(child, 'emit').mockImplementation((event: string, ...args: unknown[]) => {
               const message = args[0] as any
               if (event === 'message' && message?.kind === 'workspace_relocation_release_reply' && message.ok) {
-                if (mode === 'lost acknowledgement') return emit(event, { ...message, ok: false, result: null })
+                if (mode === 'lost acknowledgement' || mode === 'controller lost acknowledgement') return emit(event, { ...message, ok: false, result: null })
                 require('node:fs').mkdirSync(path.join(f.data, 'workspace-control/relocation-active'), { mode: 0o700 })
               }
               return emit(event, ...args)
             })
           }
-          if (mode === 'healthy') {
-            await grant.release(prepared)
+          if (healthyFlow) {
+            const result = await f.manager.resumeWorkspaceRelocationWeb(f.params)
             expect(grant.phase).toBe('released'); expect(maintenance.workspaceMaintenancePending(f.data)).toBe(false)
-            const result = await resume()
+            await expect(f.manager.resumeWorkspaceRelocationWeb(f.params)).resolves.toEqual(result)
             expect(result).toEqual({ resumed: true, ...request, intent_sha256: prepared.intent_sha256, launch_sha256: prepared.launch_sha256 })
             const create = await fetch(`http://127.0.0.1:${f.port}/api/workspaces`, { method: 'POST', headers: { Authorization: 'Bearer fixture-human', 'Content-Type': 'application/json' },
               body: JSON.stringify({ workspace_id: randomUUID(), name: 'after relocation' }) })
@@ -2031,6 +2043,7 @@ describe.skipIf(process.env.GITHUB_ACTIONS !== 'true')('fixed terminal release a
             await fs.mkdir(path.join(f.data, 'workspace-control/relocation-active'), { mode: 0o700 })
             expect(records.readWorkspaceRelocationReleased(f.data, f.params.intent_id).completion_sha256).toBe(prepared.completion_sha256)
             await expect(resume()).rejects.toMatchObject({ remote_code: 'SERVICE_UNAVAILABLE' })
+            await expect(f.manager.resumeWorkspaceRelocationWeb(f.params)).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
           } else await expect(grant.release(prepared)).rejects.toBeDefined()
         }
         if (['bad prepared result', 'unhealthy runtime', 'existing release fact'].includes(mode)) {
@@ -2049,7 +2062,7 @@ describe.skipIf(process.env.GITHUB_ACTIONS !== 'true')('fixed terminal release a
           const create = await fetch(`http://127.0.0.1:${f.port}/api/workspaces`, { method: 'POST', headers: { Authorization: 'Bearer fixture-human', 'Content-Type': 'application/json' },
             body: JSON.stringify({ workspace_id: randomUUID(), name: 'confirmed original effect' }) })
           expect(create.status).toBe(200)
-        } else if (mode !== 'healthy') {
+        } else if (!healthyFlow) {
           await expect(grant.observeRelease()).rejects.toBeDefined()
           const create = await fetch(`http://127.0.0.1:${f.port}/api/workspaces`, { method: 'POST', headers: { Authorization: 'Bearer fixture-human', 'Content-Type': 'application/json' }, body: '{}' })
           expect(create.status).toBe(503)
