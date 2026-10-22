@@ -29,6 +29,27 @@ public static class CrabotWorkspaceSecurityProbe {
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true, ExactSpelling = true, EntryPoint = "CreateFileW")]
     static extern SafeFileHandle CreateNewFile(string path, uint access, uint share, ref SecurityAttributes security, uint disposition, uint flags, IntPtr template);
     [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool SetFileInformationByHandle(SafeFileHandle file, int kind, IntPtr information, uint length);
+    static void RenameHandle(SafeFileHandle file, string target) {
+        using (var parent = CreateFileW(System.IO.Path.GetDirectoryName(target), 0x83, 3, IntPtr.Zero, 3, 0x2200000, IntPtr.Zero)) {
+            Check(!parent.IsInvalid);
+            byte[] name = System.Text.Encoding.Unicode.GetBytes(System.IO.Path.GetFileName(target));
+            int rootOffset = IntPtr.Size == 8 ? 8 : 4, lengthOffset = rootOffset + IntPtr.Size, nameOffset = lengthOffset + 4;
+            IntPtr information = Marshal.AllocHGlobal(nameOffset + name.Length);
+            try {
+                Marshal.WriteInt32(information, 0, 0); // Never replace another file.
+                Marshal.WriteIntPtr(information, rootOffset, parent.DangerousGetHandle());
+                Marshal.WriteInt32(information, lengthOffset, name.Length);
+                Marshal.Copy(name, 0, IntPtr.Add(information, nameOffset), name.Length);
+                Check(SetFileInformationByHandle(file, 3, information, (uint)(nameOffset + name.Length)));
+            } finally { Marshal.FreeHGlobal(information); }
+        }
+    }
+    static void MoveProbeFile(SafeFileHandle file, string from, string to) {
+        if (file == null) System.IO.File.Move(from, to);
+        else RenameHandle(file, to);
+    }
+    [DllImport("kernel32.dll", SetLastError = true)]
     static extern bool BackupWrite(SafeFileHandle file, byte[] bytes, uint length, out uint written, bool abort, bool security, ref IntPtr context);
     static uint CreateWithSecurity(string target, IntPtr descriptor) {
         var attributes = new SecurityAttributes { length = Marshal.SizeOf(typeof(SecurityAttributes)), descriptor = descriptor, inherit = 0 };
@@ -52,26 +73,32 @@ public static class CrabotWorkspaceSecurityProbe {
         } finally { if (temporary != IntPtr.Zero) LocalFree(temporary); LocalFree(original); }
     }
     public static Snapshot DuringMove;
-    static uint WithNonInheritingSibling(string target, IntPtr descriptor, IntPtr dacl) {
+    static uint WithNonInheritingSibling(string target, IntPtr descriptor, IntPtr dacl, bool byHandle) {
         string scratch = System.IO.Path.Combine(System.IO.Path.GetDirectoryName(target), "owned-security-" + Guid.NewGuid().ToString());
         string held = System.IO.Path.Combine(scratch, "original.txt");
         IntPtr temporary = IntPtr.Zero;
         System.IO.Directory.CreateDirectory(scratch);
+        SafeFileHandle file = byHandle ? CreateFileW(target, 0xF0080, 3, IntPtr.Zero, 3, 0x2200000, IntPtr.Zero) : null;
         try {
+            if (byHandle) Check(!file.IsInvalid);
             uint size;
             Check(ConvertStringSecurityDescriptorToSecurityDescriptorW("D:P(A;;FA;;;" + System.Security.Principal.WindowsIdentity.GetCurrent().User.Value + ")", 1, out temporary, out size));
             Check(SetFileSecurityW(scratch, 4, temporary));
-            System.IO.File.Move(target, held);
+            MoveProbeFile(file, target, held);
             uint error = SetNamedSecurityInfoW(held, 1, 0x80000004, IntPtr.Zero, IntPtr.Zero, dacl, IntPtr.Zero);
             if (error != 0) return error;
             Check(SetFileSecurityW(held, 4, descriptor));
             DuringMove = Observe(held);
-            System.IO.File.Move(held, target);
+            MoveProbeFile(file, held, target);
             return 0;
         } finally {
-            if (System.IO.File.Exists(held) && !System.IO.File.Exists(target)) System.IO.File.Move(held, target);
-            if (temporary != IntPtr.Zero) LocalFree(temporary);
-            System.IO.Directory.Delete(scratch, false);
+            try {
+                if (System.IO.File.Exists(held) && !System.IO.File.Exists(target)) MoveProbeFile(file, held, target);
+            } finally {
+                if (temporary != IntPtr.Zero) LocalFree(temporary);
+                if (file != null) file.Dispose();
+                System.IO.Directory.Delete(scratch, false);
+            }
         }
     }
     static uint RestoreSecurityStream(string target, IntPtr descriptor) {
@@ -118,7 +145,7 @@ public static class CrabotWorkspaceSecurityProbe {
         try {
             ushort control; uint revision;
             Check(GetSecurityDescriptorControl(descriptor, out control, out revision));
-            if (mode == "isolated-sibling-move") return WithNonInheritingSibling(target, descriptor, dacl);
+            if (mode == "isolated-sibling-move" || mode == "isolated-handle-move") return WithNonInheritingSibling(target, descriptor, dacl, mode == "isolated-handle-move");
             if (mode == "explicit-create") return CreateWithSecurity(target, descriptor);
             if (mode == "isolated-parent-create" || mode == "isolated-parent-assign") return WithNonInheritingParent(target, descriptor, dacl, mode == "isolated-parent-create");
             if (mode == "backup-security-stream") return RestoreSecurityStream(target, descriptor);
@@ -142,7 +169,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Cannot prepare owned security probe' }
     @{ evidence_only = $true; source_filesystem = ([IO.DriveInfo]::new([IO.Path]::GetPathRoot($source))).DriveFormat; target_filesystem = ([IO.DriveInfo]::new([IO.Path]::GetPathRoot($targets))).DriveFormat; elevated = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) } | ConvertTo-Json -Compress
     $original = [CrabotWorkspaceSecurityProbe]::Observe([IO.Path]::Combine($source, 'original.txt'))
-    foreach ($mode in @('query-dacl-only', 'query-full', 'request-matches-source', 'modern-direct', 'modern-protected-then-original', 'protected-flag-then-original', 'backup-security-stream', 'explicit-create', 'isolated-parent-create', 'isolated-parent-assign', 'isolated-sibling-move')) {
+    foreach ($mode in @('query-dacl-only', 'query-full', 'request-matches-source', 'modern-direct', 'modern-protected-then-original', 'protected-flag-then-original', 'backup-security-stream', 'explicit-create', 'isolated-parent-create', 'isolated-parent-assign', 'isolated-sibling-move', 'isolated-handle-move')) {
         $target = [IO.Path]::Combine($targets, $mode)
         & node -e "require('./scripts/lib/process-identity.cjs').createPrivateDirectory(process.argv[1])" $target
         if ($LASTEXITCODE -ne 0) { throw 'Cannot create private security probe target' }
