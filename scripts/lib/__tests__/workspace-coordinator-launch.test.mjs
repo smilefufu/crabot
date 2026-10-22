@@ -861,7 +861,8 @@ for (const mode of ['confirmed', 'lost acknowledgement', 'changed source', 'copy
               assert.deepEqual(await new WorkspaceCatalog({ dataRoot: f.data, files: native }).snapshot(), after)
               assert.deepEqual(fs.readFileSync(f.ledgerFile), closedBytes); assert.deepEqual(fs.readFileSync(retirementFile), retirementBytes)
               assert.equal(fs.readFileSync(path.join(f.root, 'outside-project/kept'), 'utf8'), 'external project work')
-              assert.equal(fs.existsSync(f.before.storage_root), false)
+              assert.equal(fs.existsSync(f.before.storage_root), copyMode)
+              if (copyMode) assert.equal(fs.readFileSync(path.join(f.before.storage_root, 'original.txt'), 'utf8'), 'original work')
               assert.equal(workspaceMaintenancePending(f.data), true)
               if (mode === 'Root publish') {
                 const verifySelected = async () => {

@@ -25,7 +25,7 @@ export interface WorkspaceRelocationLedgerSnapshot {
 
 /** Read-only input capture. The fixed offline caller must independently verify authority and global exit. */
 export async function captureWorkspaceRelocationLedgers(dataDir: string, { signal }: { signal?: AbortSignal } = {}): Promise<WorkspaceRelocationLedgerSnapshot> {
-  const check = () => { if (signal?.aborted) throw failure() }
+  const check = () => { if (signal?.aborted) throw failure('capture-aborted') }
   check()
   const root = management.requirePrivateDataRoot(dataDir) as string
   const directory = path.join(root, 'agent', 'worker-ledgers')
@@ -68,7 +68,7 @@ export async function captureWorkspaceRelocationLedgers(dataDir: string, { signa
       check()
       if (ATOMIC_TEMP_FILE.test(name) || !name.endsWith('.json')) continue
       const key = filenameToManagerKey(name)
-      if (!key) throw failure()
+      if (!key) throw failure('file-name')
       const file = path.join(directory, name), stat = await fs.lstat(file, { bigint: true }); owned(stat, file, false)
       if (stat.size > BigInt(MAX_BYTES - bytes)) throw new Error('执行器台账超过离线捕获的 64 MiB 内存预算；未读取正文或修改数据。')
       bytes += Number(stat.size); planned.push({ name, manager_key: key, stat })
@@ -85,11 +85,11 @@ export async function captureWorkspaceRelocationLedgers(dataDir: string, { signa
         while (offset < size) {
           check()
           const { bytesRead } = await handle.read(body, offset, Math.min(128 * 1024, size - offset), null)
-          if (!bytesRead) throw failure()
+          if (!bytesRead) throw failure('file-short-read')
           offset += bytesRead
         }
         check()
-        if ((await handle.read(Buffer.alloc(1), 0, 1, null)).bytesRead !== 0) throw failure()
+        if ((await handle.read(Buffer.alloc(1), 0, 1, null)).bytesRead !== 0) throw failure('file-extra-byte')
         const after = await handle.stat({ bigint: true }), current = await fs.lstat(file, { bigint: true })
         owned(after, file, false); owned(current, file, false)
         if (version(after) !== version(item.stat) || version(current) !== version(item.stat)) throw failure('file-read-version')

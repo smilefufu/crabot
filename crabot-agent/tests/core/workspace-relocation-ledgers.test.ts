@@ -67,7 +67,7 @@ describe('Agent-only read-only relocation ledger capture', () => {
   })
   it('rejects a noncanonical JSON ledger rather than hiding it from the complete scope', async () => {
     await fs.writeFile(path.join(directory, 'unindexed.json'), '{}')
-    await expect(captureWorkspaceRelocationLedgers(data)).rejects.toThrow()
+    await expect(captureWorkspaceRelocationLedgers(data)).rejects.toMatchObject({ code: 'CRABOT_WORKSPACE_LEDGER_CAPTURE', stage: 'file-name' })
   })
   it('rejects hard-linked ledger data without changing the external link', async () => {
     const outside = path.join(root, 'outside'); await fs.link(file, outside)
@@ -114,9 +114,35 @@ describe('Agent-only read-only relocation ledger capture', () => {
       })
       return handle
     })
-    await expect(captureWorkspaceRelocationLedgers(data, { signal: controller.signal })).rejects.toThrow()
+    const capture = captureWorkspaceRelocationLedgers(data, { signal: controller.signal })
+    if (mode === 'cancel') await expect(capture).rejects.toMatchObject({ code: 'CRABOT_WORKSPACE_LEDGER_CAPTURE', stage: 'capture-aborted' })
+    else await expect(capture).rejects.toThrow()
     expect(changed).toBe(true); expect(descriptor).toBeDefined()
     expect(() => fstatSync(descriptor!)).toThrow()
+  })
+  it.each(['shorten', 'append'])('identifies %s during physical capture and closes its descriptor', async mode => {
+    const original = Buffer.alloc(256 * 1024, 32)
+    await fs.writeFile(file, original)
+    const open = fs.open.bind(fs); let descriptor: number | undefined, changed = false
+    vi.spyOn(fs, 'open').mockImplementation(async (...args) => {
+      const handle = await open(...args); descriptor = handle.fd
+      const read = handle.read.bind(handle)
+      vi.spyOn(handle, 'read').mockImplementation(async (...readArgs: any[]) => {
+        const result = await (read as any)(...readArgs)
+        if (!changed) {
+          changed = true
+          if (mode === 'shorten') await fs.truncate(file, 0)
+          else await fs.appendFile(file, 'additional bytes')
+        }
+        return result
+      })
+      return handle
+    })
+    await expect(captureWorkspaceRelocationLedgers(data)).rejects.toMatchObject({ code: 'CRABOT_WORKSPACE_LEDGER_CAPTURE',
+      stage: mode === 'shorten' ? 'file-short-read' : 'file-extra-byte' })
+    expect(changed).toBe(true); expect(descriptor).toBeDefined()
+    expect(() => fstatSync(descriptor!)).toThrow()
+    expect(await fs.readFile(file)).toEqual(mode === 'shorten' ? Buffer.alloc(0) : Buffer.concat([original, Buffer.from('additional bytes')]))
   })
   it.runIf(process.platform === 'win32')('pins the actual namespace and its ancestors while reading, then releases every pin', async () => {
     const open = fs.open.bind(fs); let checked = false
