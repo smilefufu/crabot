@@ -47,7 +47,7 @@ public static class CrabotAclFixture {
 [CrabotAclFixture]::Set($env:CRABOT_TEST_FILE,$env:CRABOT_TEST_SDDL)`],
   { env: { ...process.env, CRABOT_TEST_FILE: file, CRABOT_TEST_SDDL: sddl }, stdio: 'pipe' })
 }
-test('private Windows copy preserves two raw proofs and never changes the source ACL', windows, async t => {
+for (const mutation of ['named stream', 'integrity label']) test('private Windows copy preserves raw proofs and rejects a changed ' + mutation, windows, async t => {
   const f = fixture(t), original = await inspectWorkspaceFileMetadata(f.file)
   const pins = [f.source, f.target, path.dirname(f.target)].map(directory => native.pinDirectory(directory))
   try {
@@ -60,7 +60,11 @@ test('private Windows copy preserves two raw proofs and never changes the source
     assert.equal(proof.legacy_owner_inheritance_files === 0, proof.metadata_fingerprint === proof.target_metadata_fingerprint)
     assert.deepEqual(await inspectWorkspaceFileMetadata(f.file), original)
     const copy = path.join(f.target, 'original.txt')
-    fs.writeFileSync(copy + ':extra', 'unapproved stream')
+    if (mutation === 'named stream') fs.writeFileSync(copy + ':extra', 'unapproved stream')
+    else {
+      execFileSync(path.join(process.env.SystemRoot, 'System32/icacls.exe'), [copy, '/setintegritylevel', 'L'], { stdio: 'pipe' })
+      assert.equal(native.compareWorkspaceOwnerInheritance(f.file, copy), false)
+    }
     await assert.rejects(verifyWorkspaceRelocationCopy(f.source, f.target, { metadataCompatibility: policy }), { code: 'CRABOT_FILE_METADATA' })
   } finally { for (const pin of pins.reverse()) native.releaseDirectoryPin(pin) }
 })

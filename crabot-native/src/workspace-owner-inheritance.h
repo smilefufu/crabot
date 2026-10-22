@@ -34,6 +34,17 @@ static std::string WorkspaceSecurityText(PSECURITY_DESCRIPTOR descriptor) {
     throw std::runtime_error("Cannot serialize workspace security comparison");
   std::string result(text); LocalFree(text); return result;
 }
+// The approved exception is one historical bit, only when both SACLs are absent.
+// This never creates or writes a SACL and never accepts any other control difference.
+static bool WorkspaceAbsentSaclHistoryOnly(PSECURITY_DESCRIPTOR source, PSECURITY_DESCRIPTOR target,
+  SECURITY_DESCRIPTOR_CONTROL from, SECURITY_DESCRIPTOR_CONTROL to) {
+  if ((from ^ to) != SE_SACL_AUTO_INHERITED || !(from & SE_SACL_AUTO_INHERITED) || ((from | to) & SE_SACL_PRESENT)) return false;
+  for (auto descriptor : { source, target }) {
+    BOOL present = FALSE, defaulted = FALSE; PACL acl = nullptr;
+    if (!GetSecurityDescriptorSacl(descriptor, &present, &acl, &defaulted) || present || acl) return false;
+  }
+  return true;
+}
 static bool WorkspaceOwnerInheritanceDifference(HANDLE source, HANDLE target, std::string* diagnostic = nullptr) {
   const auto reject = [&](const std::string& reason) { if (diagnostic) *diagnostic = reason; return false; };
   for (HANDLE file : { source, target }) {
@@ -49,7 +60,7 @@ static bool WorkspaceOwnerInheritanceDifference(HANDLE source, HANDLE target, st
   if (!left || !right) return reject("metadata-owner-ace");
   if (left->Header.AceFlags != 0 || right->Header.AceFlags != INHERITED_ACE) return reject("metadata-ace-flags");
   if (!GetSecurityDescriptorControl(a.value, &ac, &ar) || !GetSecurityDescriptorControl(b.value, &bc, &br)) return reject("metadata-control-unavailable");
-  if (ac != bc || ar != br) return reject("metadata-control-" + std::to_string(ac) + "-" + std::to_string(bc));
+  if (ar != br || (ac != bc && !WorkspaceAbsentSaclHistoryOnly(a.value, b.value, ac, bc))) return reject("metadata-control-" + std::to_string(ac) + "-" + std::to_string(bc));
   // Only alter this private in-memory observation. Never write the descriptor back to either file.
   right->Header.AceFlags = 0;
   return WorkspaceSecurityText(a.value) == WorkspaceSecurityText(b.value) || reject("metadata-security-text");
