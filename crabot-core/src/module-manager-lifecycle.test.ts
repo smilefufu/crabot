@@ -578,6 +578,8 @@ runpy.run_path(fixture,run_name='__main__')`
       'health_check_failed',
     ])
 
+    const native = require('../../scripts/lib/process-identity.cjs')
+    const observed = [afterHealth.child.pid!, afterHealth.info.pid].map(pid => ({ pid, process: native.inspectProcess(pid) }))
     process.kill(-afterHealth.child.pid!, 'SIGKILL')
     const afterCrash = await waitFor(async () => {
       const info = await readPidFile(pidFile)
@@ -585,7 +587,19 @@ runpy.run_path(fixture,run_name='__main__')`
       return info?.pid !== afterHealth.info.pid && info?.marker === 'stable-env' && child
         ? { child, info }
         : undefined
-    }, 6000)
+    }, 6000).catch(async error => {
+      const state = mm.childStates.get(afterHealth.child)
+      let group: string[] | null = null
+      try {
+        const { stdout } = await promisify(execFile)('ps', ['-ax', '-o', 'pid=,ppid=,pgid=,state=,uid='], { timeout: 1000 })
+        group = stdout.split('\n').filter(line => Number(line.trim().split(/\s+/)[2]) === afterHealth.child.pid)
+      } catch { /* Preserve the original failure and unknown group state. */ }
+      console.error('[finite lifecycle crash wait]', { root_pid: afterHealth.child.pid, root_exited: state?.rootExited,
+        exit_code: afterHealth.child.exitCode, signal: afterHealth.child.signalCode, final_reason: state?.finalReason,
+        finalize_started: state?.finalizeStarted, finalize_error_code: state?.finalizeError?.code, group,
+        processes: observed.map(item => ({ ...item, current: native.inspectProcess(item.pid) })) })
+      throw error
+    })
 
     console.log('[finite lifecycle recovery]', { stage: 'crash', elapsed_ms: Date.now() - startedAt })
     expect(afterCrash.info.marker).toBe('stable-env')

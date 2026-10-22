@@ -162,10 +162,11 @@ for (const [kind, stage] of [['bad-json', 'response-json'], ['wrong-id', 'respon
         error: { code: kind === 'unknown-code' ? secret : 'SERVICE_UNAVAILABLE', message: secret } }
       res.end(kind === 'bad-json' ? secret : kind === 'oversize' ? secret.repeat(20000) : JSON.stringify(result))
     })
-    const rpc = await transport.openPinnedProcessRpc(f.process, f.port, { timeoutMs: 100 })
+    const startedAt = Date.now(), rpc = await transport.openPinnedProcessRpc(f.process, f.port, { timeoutMs: 100 })
     t.after(() => rpc.close())
     await assert.rejects(rpc.call('get_runtime_identity', {}, { authorizationBearer: secret }), error => {
-      assert.equal(error.code, 'CRABOT_PROCESS_RPC'); assert.equal(error.stage, stage)
+      assert.equal(error.code, 'CRABOT_PROCESS_RPC')
+      assert.equal(error.stage, stage, JSON.stringify({ stage: error.stage, transport_code: error.transport_code, elapsed_ms: Date.now() - startedAt, handled_requests: f.calls.length }))
       if (kind === 'failed') assert.equal(error.remote_code, 'SERVICE_UNAVAILABLE')
       assert.equal(JSON.stringify(error).includes(secret), false)
       assert.equal(error.stack.includes(secret), false)
