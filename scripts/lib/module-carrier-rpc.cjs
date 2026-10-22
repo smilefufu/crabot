@@ -4,7 +4,7 @@ const native = require('./process-identity.cjs')
 const { captureSpawnedProcessTree } = require('./spawned-process-tree.cjs')
 const { probeKnownProcessExit } = require('./known-process-exit.cjs')
 const { openModuleRuntimeRpc } = require('./module-runtime-rpc.cjs')
-const fail = () => { throw Object.assign(new Error('模块实际载体或唯一监听进程无法核验，未重连请求。'), { code: 'CRABOT_MODULE_CARRIER_UNVERIFIED' }) }
+const fail = cause => { throw Object.assign(new Error('模块实际载体或唯一监听进程无法核验，未重连请求。'), { code: 'CRABOT_MODULE_CARRIER_UNVERIFIED', ...(cause ? { cause } : {}) }) }
 
 async function openSpawnedModuleRuntimeRpc(child, root, port, expected, options) {
   root = Object.freeze({ ...root })
@@ -37,10 +37,10 @@ async function openSpawnedModuleRuntimeRpc(child, root, port, expected, options)
           const result = await rpc.call(...args)
           verify()
           return result
-        } catch { rpc.close(); fail() }
+        } catch (error) { rpc.close(); fail(error) }
       },
       close: rpc.close,
     }
-  } catch { rpc?.close(); fail() }
+  } catch (error) { rpc?.close(); fail(error) }
 }
 module.exports = { openSpawnedModuleRuntimeRpc }

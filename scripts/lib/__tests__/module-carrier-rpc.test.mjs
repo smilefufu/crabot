@@ -72,3 +72,18 @@ test('does not follow another connection after the actual carrier exits', { time
     await rejects(rpc.call('health', {}))
   } finally { rpc?.close(); await f.cleanup() }
 })
+
+for (const phase of ['open', 'call']) test('retains the native observation failure and closes the fixed RPC: ' + phase, { timeout: 30000 }, async t => {
+  const f = await carrier(true); let rpc, inspect
+  const denied = Object.assign(new Error('Cannot inspect process identity (Windows error 299)'), { code: 'CRABOT_PROCESS_SCOPE', stage: 'identity-process-image' })
+  try {
+    if (phase === 'call') rpc = await openSpawnedModuleRuntimeRpc(f.child, f.root, f.port, f.identity, { timeoutMs: 5000 })
+    const original = native.inspectProcess
+    inspect = t.mock.method(native, 'inspectProcess', function(pid) { if (pid === f.child.pid) throw denied; return original.call(this, pid) })
+    await assert.rejects(phase === 'open' ? openSpawnedModuleRuntimeRpc(f.child, f.root, f.port, f.identity, { timeoutMs: 5000 }) : rpc.call('health', {}),
+      error => error.code === 'CRABOT_MODULE_CARRIER_UNVERIFIED' && error.cause === denied)
+    inspect.mock.restore(); inspect = undefined
+    if (rpc) await rejects(rpc.call('health', {}))
+    assert.equal(native.sameProcess(f.root, native.inspectProcess(f.child.pid)), true)
+  } finally { inspect?.mock.restore(); rpc?.close(); await f.cleanup() }
+})
