@@ -1,4 +1,4 @@
-// Immutable initialization facts only; no recovery command or normal-job authority.
+// Immutable recovery metadata only; no command or normal-job authority.
 import fs from 'node:fs'
 import path from 'node:path'
 import native from './process-identity.cjs'
@@ -6,6 +6,7 @@ import management from './desktop-management.cjs'
 import { cliLockToken } from './cli-lock.mjs'
 import owned from './owned-process-tree.cjs'
 import { parseWorkspaceRecoveryAdmissionRequest, readWorkspaceRecoveryAdmissionScope } from './workspace-recovery-admission.mjs'
+import { readWorkspaceRelocationArchivedState } from './workspace-relocation-intent.mjs'
 import { sha256CanonicalJson as hash } from '../../crabot-shared/dist/canonical-json.js'
 const fail = () => { throw Object.assign(new Error('新恢复协调器的初始化材料无法核实，原维护保护已保留。'), { code: 'CRABOT_WORKSPACE_RECOVERY_COORDINATOR' }) }
 const uuid = value => typeof value === 'string' && /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(value)
@@ -74,6 +75,7 @@ export function readWorkspaceRecoveryCoordinator(dataDir, id) {
     const parent = frame(ctx.parent)
     if (!exists(ctx.directory)) return { launch: null, ready: null }
     const directory = frame(ctx.directory), launch = read(ctx.directory, 'launch.json'), ready = read(ctx.directory, 'ready.json')
+    if (exists(path.join(ctx.directory, 'ready.json')) && !ready) fail()
     if (!launch || !exact(launch, ['schema_version', 'request', 'admission_sha256', 'parent', 'process', 'data_root', 'control_root', 'created_at'])
       || launch.schema_version !== 1 || launch.request?.recovery_id !== id || !digest(launch.admission_sha256) || !date(launch.created_at)
       || hash(launch.data_root) !== hash(ctx.dataFrame) || hash(launch.control_root) !== hash(directory)
@@ -146,5 +148,59 @@ export async function commitWorkspaceRecoveryCoordinatorReady(options) {
     const stored = readWorkspaceRecoveryCoordinator(ctx.data, options.recoveryId)
     if (hash(stored.ready) !== hash(record)) fail()
     return stored.ready
+  } catch { fail() }
+}
+
+function runtimePlan(launch, state, record) {
+  const targets = state.health.modules.map(module => module.module_id).sort()
+  const old = new Set([...state.health.modules, ...state.modules.modules].map(module => module.runtime_id).filter(Boolean))
+  if (!exact(record, ['schema_version', 'recovery_id', 'launch_sha256', 'root_selected_sha256', 'modules', 'created_at']) || record.schema_version !== 1
+    || record.recovery_id !== launch.request.recovery_id || record.launch_sha256 !== hash(launch) || record.root_selected_sha256 !== hash(state.selected)
+    || !date(record.created_at) || !Array.isArray(record.modules) || record.modules.length !== targets.length) fail()
+  const ids = new Set()
+  for (const [index, module] of record.modules.entries()) {
+    if (!exact(module, ['module_id', 'runtime_id']) || !['crabot-agent', 'memory-default'].includes(module.module_id)
+      || module.module_id !== targets[index] || !uuid(module.runtime_id) || old.has(module.runtime_id) || ids.has(module.runtime_id)) fail()
+    ids.add(module.runtime_id)
+  }
+  return record
+}
+/** Historical ownership hint only, never a startup permit or proof that a runtime exists. */
+export function readWorkspaceRecoveryRuntimePlan(dataDir, recoveryId) {
+  try {
+    const ctx = context(dataDir, recoveryId), coordinator = readWorkspaceRecoveryCoordinator(dataDir, recoveryId)
+    if (!coordinator.launch || !coordinator.ready) return null
+    const directory = frame(ctx.directory), parent = frame(ctx.parent)
+    if (!exists(path.join(ctx.directory, 'runtime-plan.json'))) return null
+    const record = read(ctx.directory, 'runtime-plan.json')
+    const state = readWorkspaceRelocationArchivedState(dataDir, coordinator.launch.request.intent_id)
+    runtimePlan(coordinator.launch, state, record)
+    ctx.verify()
+    if (hash(frame(ctx.directory)) !== hash(directory) || hash(frame(ctx.parent)) !== hash(parent)) fail()
+    return record
+  } catch { fail() }
+}
+export async function commitWorkspaceRecoveryRuntimePlan(options) {
+  try {
+    if (!exact(options, ['dataDir', 'recoveryId', 'modules', 'verify']) || typeof options.verify !== 'function' || process.versions.electron) fail()
+    const ctx = context(options.dataDir, options.recoveryId), coordinator = readWorkspaceRecoveryCoordinator(ctx.data, options.recoveryId)
+    const launch = coordinator.launch, self = native.inspectProcess(process.pid)
+    if (!launch || !coordinator.ready || !native.sameProcess(launch.parent, self)) fail()
+    const scope = readWorkspaceRecoveryAdmissionScope(ctx.data, launch.request), directory = frame(ctx.directory), parent = frame(ctx.parent)
+    const record = runtimePlan(launch, scope.state, { schema_version: 1, recovery_id: options.recoveryId, launch_sha256: hash(launch),
+      root_selected_sha256: hash(scope.state.selected), modules: structuredClone(options.modules), created_at: new Date().toISOString() })
+    const check = () => {
+      ctx.verify()
+      if (!native.sameProcess(self, native.inspectProcess(process.pid)) || !native.sameProcess(launch.process, native.inspectProcess(launch.process.pid))
+        || hash(frame(ctx.directory)) !== hash(directory) || hash(frame(ctx.parent)) !== hash(parent)
+        || hash(readWorkspaceRecoveryCoordinator(ctx.data, options.recoveryId)) !== hash(coordinator)
+        || readWorkspaceRecoveryAdmissionScope(ctx.data, launch.request).fingerprint !== scope.fingerprint) fail()
+    }
+    await options.verify(); check()
+    publish(ctx, 'runtime-plan.json', record, check)
+    await options.verify(); check()
+    const stored = readWorkspaceRecoveryRuntimePlan(ctx.data, options.recoveryId)
+    if (hash(stored) !== hash(record)) fail()
+    return stored
   } catch { fail() }
 }

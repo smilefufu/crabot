@@ -299,7 +299,7 @@ export class ModuleManager {
     verify: () => Promise<void>
     assertCurrent: () => void
   }
-  private readonly workspaceValidationPermits = new WeakMap<object, { moduleId: ModuleId; runtime: ModuleRuntime; verify: () => Promise<void>; assertCurrent: () => void }>()
+  private readonly workspaceValidationPermits = new WeakMap<object, { moduleId: ModuleId; runtime: ModuleRuntime; runtimeId?: string; verify: () => Promise<void>; assertCurrent: () => void }>()
   private workspaceModuleStop?: { fingerprint: string; pending: Promise<WorkspaceModuleStopResponse> }
   private readonly childStates: WeakMap<ChildProcess, ManagedChildState> = new WeakMap()
   private readonly lifecycleQueues: Map<ModuleId, Promise<void>> = new Map()
@@ -799,7 +799,8 @@ export class ModuleManager {
     if (permit && restoration) throw Object.assign(new Error('Distinct workspace startup roles cannot be combined'), { code: 'FORBIDDEN' })
     if (!permit) { this.assertWorkspaceStartAllowed(moduleId); restoration?.assertCurrent(); return }
     const binding = this.workspaceValidationPermits.get(permit)
-    if (!binding || binding.moduleId !== moduleId || this.modules.get(moduleId) !== binding.runtime) {
+    if (!binding || binding.moduleId !== moduleId || this.modules.get(moduleId) !== binding.runtime
+      || binding.runtimeId !== undefined && !/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(binding.runtimeId)) {
       throw Object.assign(new Error('工作区验证启动凭据无效。'), { code: 'FORBIDDEN' })
     }
     binding.assertCurrent()
@@ -3066,7 +3067,7 @@ export class ModuleManager {
     // （无人监听）永远失败，只能靠 module_started 推送兜底；一旦错过推送竞态就永久 unconfigured。
     // 这里用 admin 模块真实分配的端口覆盖静态值，让启动 pull 这条主路径可靠工作。
     const adminRpcPort = this.modules.get('admin-web')?.port
-    const runtimeId = this.runtimeRegistry.createRuntimeId()
+    const runtimeId = (validationPermit && this.workspaceValidationPermits.get(validationPermit)?.runtimeId) ?? this.runtimeRegistry.createRuntimeId()
 
     const childEnv: Record<string, string> = {
       ...process.env,

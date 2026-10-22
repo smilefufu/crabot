@@ -2062,6 +2062,30 @@ describe('normal fixed-job Admin completion preparation', () => {
       expect(recoveryFacts).toMatchObject({ completion_sha256: freshRole.request.completion_sha256, root_selected_sha256: sha256CanonicalJson(records.readWorkspaceRelocationArchivedState(f.data, request.intent_id).selected) })
       expect(recoveryFacts.validation_roots).toEqual(expect.arrayContaining([expect.objectContaining({ module_id: 'crabot-agent', root_state: 'stopped' })]))
       await recoveryFacts.verify()
+      const archivedState = records.readWorkspaceRelocationArchivedState(f.data, request.intent_id)
+      const plannedModules = archivedState.health.modules.map((item: any) => ({ module_id: item.module_id, runtime_id: randomUUID() })).sort((a: any, b: any) => a.module_id.localeCompare(b.module_id))
+      for (const modules of [[], [{ ...plannedModules[0], runtime_id: archivedState.health.modules[0].runtime_id }], [{ ...plannedModules[0], module_id: 'foreign-module' }]]) {
+        await expect(recoveryRecords.commitWorkspaceRecoveryRuntimePlan({ dataDir: f.data, recoveryId: freshRole.request.recovery_id, modules, verify: initialized.verify })).rejects.toBeDefined()
+        expect(recoveryRecords.readWorkspaceRecoveryRuntimePlan(f.data, freshRole.request.recovery_id)).toBeNull()
+      }
+      const runtimePlan = await recoveryRecords.commitWorkspaceRecoveryRuntimePlan({ dataDir: f.data, recoveryId: freshRole.request.recovery_id, modules: plannedModules, verify: initialized.verify })
+      expect(runtimePlan.modules).toEqual(plannedModules)
+      expect(runtimePlan.root_selected_sha256).toBe(recoveryFacts.root_selected_sha256)
+      expect(runtimePlan.launch_sha256).toBe(sha256CanonicalJson(initialized.launch))
+      expect(recoveryRecords.readWorkspaceRecoveryRuntimePlan(f.data, freshRole.request.recovery_id)).toEqual(runtimePlan)
+      const actualReadyFile = path.join(initialized.launch.control_root.path, 'ready.json'), actualReadyBytes = await fs.readFile(actualReadyFile)
+      await fs.writeFile(actualReadyFile, 'null')
+      try { expect(() => recoveryRecords.readWorkspaceRecoveryCoordinator(f.data, freshRole.request.recovery_id)).toThrow() }
+      finally { await fs.writeFile(actualReadyFile, actualReadyBytes) }
+      const planFile = path.join(initialized.launch.control_root.path, 'runtime-plan.json'), planBytes = await fs.readFile(planFile)
+      for (const invalid of [null, [], { ...runtimePlan, unexpected: true }, { ...runtimePlan, launch_sha256: '0'.repeat(64) }]) {
+        await fs.writeFile(planFile, JSON.stringify(invalid))
+        expect(() => recoveryRecords.readWorkspaceRecoveryRuntimePlan(f.data, freshRole.request.recovery_id)).toThrow()
+        await fs.writeFile(planFile, planBytes)
+      }
+      expect(recoveryRecords.readWorkspaceRecoveryRuntimePlan(f.data, freshRole.request.recovery_id)).toEqual(runtimePlan)
+      await expect(recoveryRecords.commitWorkspaceRecoveryRuntimePlan({ dataDir: f.data, recoveryId: freshRole.request.recovery_id, modules: plannedModules, verify: initialized.verify })).rejects.toBeDefined()
+      expect(await fs.readFile(ledgerFile)).toEqual(ledger)
       expect(initialized.launch.process.parent).toBe(process.pid)
       expect(initialized.launch.process.executable).toBe(require('../../scripts/lib/process-identity.cjs').inspectProcess(process.pid).executable)
       expect((await fetch(`http://127.0.0.1:${f.port}/api/workspaces`, { method: 'POST', headers: { Authorization: 'Bearer fixture-human', 'Content-Type': 'application/json' }, body: '{}' })).status).toBe(503)
