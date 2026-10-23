@@ -1,11 +1,11 @@
 # Crabot 项目进度
 
-### Gemini 原生兼容：实现与真实网关验证通过，待 PR 审查
+### Gemini 原生兼容：实现与真实网关验证通过，本机代码已升级
 
 - 按已确认 [spec](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/specs/2026-10-23-gemini-native-compatibility-design.md) 实现原生 GeminiAdapter：流式文本、图片输入、函数调用/结果、thoughtSignature 原位历史与 Manager/builtin 存储恢复、思考映射及用量。Admin 改为原生目录/预检，手动 Gemini 可同步模型；30 秒有界操作，分页失败或空目录保留旧值。
 - Shared 152、Admin 63、Web 4 项及 Agent 相关回归通过，相关构建与完整 diff review 已完成；原生选择/流解析先在旧实现复现两项失败。保留既有三种适配器和默认引用，按 code-simplifier 简化本次分支后重验。旧 OpenAI 随机约 5 秒退避偶尔撞到默认 5 秒测试上限，扩大验证使用 10 秒测试预算，不改生产恢复或超时。
 - Node 22.22.3 加载 worktree 实际产物，对 gemini-4-argon-low 共四次生成全部 HTTP 200：完整短答、一次纯测试工具的两轮签名往返、合成图片识别 Green；工具只执行一次，真实响应保存再加载后投影相等。用量共 2603 输入/68 输出；证据 `/private/tmp/crabot-gemini-native-acceptance-20261023/summary.json`。原生目录解析得 33 个聊天型号，包含 gemini-4-argon，未逐型号生成验证。
-- 本地正式实例尚未升级，xinshu Gemini 仍为 inactive、27 项旧目录；默认及其它供应商未变。P6 主仓非草稿 PR，P7 合并后的本机升级/启用与现场回合验证分别跟踪，不把 worktree 验收写成本机部署完成。
+- 2026-10-24按用户要求，本机正式实例已升级到main代码08352c3e；实际新进程、关键产物和Web页面已核验。本轮未启用供应商或修改默认引用；供应商启用、目录同步与现场真实回合仍需单独核对，不以代码部署代替模型验收。
 
 ### 执行器前置检查：最小提示词已完成真实输入重放
 
@@ -21,7 +21,8 @@
 - 原回答总字数、20/25/30秒累计播放限制已从普通输出移除；原60秒仅限制首次接纳，已接纳回应保持原请求/epoch，按首音频、合成、消费和收尾阶段检测卡住。reply_end 短返回与实际完成分离；只有真实全播才记 completed，取消和未知不自动重播。登记引导继续使用原有限预算。
 - Agent/Channel 新写交付 v3/回执 v2，旧记录保留验证；Android0.8.0/code17 使用 Long 计数、同一 AudioTrack、进度反馈和有限 journal 校验备份迁移。Shared/Channel/Agent/Admin/Core 编译、定向回归及两种 APK 构建通过；三分钟虚拟播放保持在途≤24000样本。真实模型短答、649字长故事和工具前单次接单通过；首可播文字约3.37/2.43/2.58秒，不含ASR/TTS/手机播放。
 - 当前Kokoro真实API分40段生成175.75秒音频，实时速率替身完整消费，首PCM约265毫秒、峰值24000在途样本、额外缓冲空档0。OnePlus7Pro实际单播放器181.094秒测试通过，完整消费4344000样本，gap_count/gap_ms均0；不采音、不接触配对或声音数据，仍不是整链真人听感/首声验收。
-- 联合部署代码132d696a、Android210a251（0.8.0/code17/wire9），原Node22下122项定向回归、前端8项/类型检查/生产打包通过。完整在线准备核验约2.07GB产品，数据迁移备份0字节，未扫描任务工作区；8模块均已恢复，Telegram一次局部重试后正常。APK签名相同，加密配对/声音文件覆盖安装前后摘要一致，首页已连接且麦克风关闭。真人停止及50轮首声仍待验收；见[脱敏证据](crabot-agent/eval/shared-requests/evidence-2026-10-19-continuous-playback.json)与[实施计划](crabot-docs/superpowers/plans/2026-10-19-continuous-long-voice-playback-implementation.md)。
+- 10月19日联合部署代码132d696a、Android210a251（0.8.0/code17/wire9），原Node22下122项定向回归、前端8项/类型检查/生产打包通过。完整在线准备核验约2.07GB产品，数据迁移备份0字节，未扫描任务工作区；8模块均已恢复，Telegram一次局部重试后正常。APK签名相同，加密配对/声音文件覆盖安装前后摘要一致，首页已连接且麦克风关闭。真人停止及50轮首声仍待验收；见[脱敏证据](crabot-agent/eval/shared-requests/evidence-2026-10-19-continuous-playback.json)与[实施计划](crabot-docs/superpowers/plans/2026-10-19-continuous-long-voice-playback-implementation.md)。
+- 2026-10-24同步main08352c3e到本语音分支及本机源码安装；原Node22在线完整准备约79.17秒、产品2.05GB，迁移预检0模块/0备份字节。251项定向检查通过（适配器重试用例5秒期限不足，按15秒测试期限复测通过，产品超时未改）；统一升级入口约61.67秒完成，8模块和3端点健康、8项关键产物哈希及实际进程目录/Web页面一致，语音共端口WS握手通过。未操作ADB/APK、声纹或外部音频服务；播放启动修订仍待确认，未计真人体验验收。
 - 真人故事回答完整播出112.75秒/2706000样本，端侧gap_count/gap_ms均0，后台实际completed且样本一致；用户听感首声4–5秒，同机单调计时实为7104毫秒。10月20日两轮首声4.274/4.596秒，仍需优化及50轮验收。
 - 声纹历史漏认：按用户2026-10-22要求记为**待复现**。现有登记/模型/保存/算分核查及后续对照均未复现，根因未定、没有算法修复；临时观察已停止，原0.8.0产品APK恢复，配对/声音/阈值不变，不再重复请用户朗读。完整历史见[调查记录](https://github.com/smilefufu/crabot-voice-android/blob/main/docs/research/2026-10-20-speaker-identification-investigation.md)。
 - 2026-10-22独立检查：最近三轮正确tag但播放unknown；固定短句复现本机TTS缺少原音色文件、HTTP200后断流。仅恢复原固定版本522320字节音色并核验SHA-256，4次公开短句验证成功，其中产品适配器270ms/104400有效样本；未重启Crabot/ADB或修改配置。外部服务冷启动依赖仍需稳定部署；两轮各5次流内overload重试（映射502）另记，不能把TTS恢复当作首声达标。
