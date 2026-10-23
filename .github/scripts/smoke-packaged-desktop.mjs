@@ -26,6 +26,15 @@ if (location.schema_version === 2) {
   const { prepareDesktopInstallation, commitDesktopInstallation } = await import('../../scripts/lib/desktop-payload.mjs')
   const prepared = await prepareDesktopInstallation({ payload: inside(location.payload), installRoot: path.join(temporary, '整体 安装'),
     progress: phase => console.log('CRABOT_INSTALL_PREPARATION ' + JSON.stringify({ phase })) })
+  if (process.platform === 'linux') {
+    const helper = path.resolve('.desktop-build/ubuntu-helper-source-probe')
+    const { stdout } = await promisify(execFile)(helper, ['--inspect', prepared.installRoot], { timeout: 60_000, maxBuffer: 65536 })
+    const runtime = JSON.parse(await fs.readFile(path.join(prepared.coreRoot, 'product-runtime.json'), 'utf8'))
+    const headless = Object.keys(runtime.files).some(name => /\/browsers\/chromium_headless_shell-[0-9]+\/chrome-headless-shell-linux(?:64)?\/headless_shell$/.test(name))
+    assert.equal(stdout.split('  userns,').length - 1, headless ? 3 : 2)
+    assert.ok(stdout.endsWith('CRABOT_SANDBOX_VERIFIED\n'))
+    console.log('CRABOT_PREPARED_NATIVE_ROLES_VERIFIED')
+  }
   const selected = await commitDesktopInstallation(prepared)
   executable = selected.executable; core = selected.coreRoot; data = selected.dataDir
 } else {

@@ -43,6 +43,7 @@ jobs:
         run: |
           chmod a+rx /__w /__w/crabot /__w/crabot/crabot
           runuser -u crabot-test -- python3 .github/scripts/test-ubuntu-sandbox-helper.py .desktop-build/ubuntu-native/crabot-sandbox-helper
+          runuser -u crabot-test -- python3 .github/scripts/test-ubuntu-sandbox-helper.py .desktop-build/ubuntu-native/crabot-sandbox-helper --without-headless
       - name: Open real GTK first window without Chromium or business startup
         run: |
           runuser -u crabot-test -- dbus-run-session -- xvfb-run -a env GDK_BACKEND=x11 .desktop-build/ubuntu-native/crabot-installer --smoke-test

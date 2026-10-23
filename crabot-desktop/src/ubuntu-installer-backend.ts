@@ -20,15 +20,15 @@ input.on('line', line => {
   if (line === '{"action":"cancel"}') { abort.abort(); authorization?.reject(new Error('Cancelled')); return }
   if (line === '{"action":"authorized"}' && authorization) { authorization.resolve(); authorization = undefined; return }
   if (line === '{"action":"denied"}' && authorization) { authorization.reject(new Error('OS authorization rejected')); authorization = undefined; return }
-  abort.abort()
+  abort.abort(); authorization?.reject(new Error('Invalid installer action')); authorization = undefined
 })
 input.on('close', () => { abort.abort(); authorization?.reject(new Error('Installer closed')) })
 process.on('SIGTERM', () => abort.abort())
 
-async function run(command: string, args: string[], env: NodeJS.ProcessEnv, timeout: number) {
+async function run(command: string, args: string[], env: NodeJS.ProcessEnv, timeout: number, cwd?: string) {
   abort.signal.throwIfAborted()
   // A private process group contains only this finite probe and its children.
-  const child = spawn(command, args, { env, stdio: 'ignore', detached: true })
+  const child = spawn(command, args, { cwd, env, stdio: 'ignore', detached: true })
   let alive = true
   child.once('exit', () => { alive = false })
   const stop = () => { if (alive && child.pid) { try { process.kill(-child.pid, 'SIGKILL') } catch {} } }
@@ -43,10 +43,14 @@ async function run(command: string, args: string[], env: NodeJS.ProcessEnv, time
 }
 async function probe(prepared: PreparedInstallation) {
   emit('progress', { phase: 'sandbox' })
+  const product = createRequire(import.meta.url)('./bootstrap/scripts/lib/product-runtime.cjs')
+  const runtime = product.loadProductRuntime(prepared.coreRoot, { required: true, full: true })
+  const roles = ['gui', 'chromium', 'scrapling']
+  if (Object.keys(runtime.manifest.files).some(name => /\/browsers\/chromium_headless_shell-[0-9]+\/chrome-headless-shell-linux(?:64)?\/headless_shell$/.test(name))) roles.push('headless')
   const profile = await mkdtemp(path.join(tmpdir(), 'crabot-install-sandbox-')), token = randomBytes(32).toString('hex'), received = new Set<string>()
   const server = createServer((request, response) => {
     const role = request.url?.slice(token.length + 2)
-    if (!role || !['gui', 'chromium', 'headless'].includes(role) || request.url !== `/${token}/${role}`) { response.writeHead(404).end(); return }
+    if (!role || !['gui', 'chromium', 'headless', 'scrapling'].includes(role) || request.url !== `/${token}/${role}`) { response.writeHead(404).end(); return }
     response.setHeader('Cache-Control', 'no-store')
     if (request.method === 'GET') {
       response.setHeader('Content-Type', 'text/html; charset=utf-8')
@@ -64,12 +68,13 @@ async function probe(prepared: PreparedInstallation) {
     const endpoint = `http://127.0.0.1:${address.port}/${token}`
     const env = { ...process.env }
     for (const name of ['NODE_OPTIONS', 'NODE_PATH', 'ELECTRON_RUN_AS_NODE', 'CHROME_DEVEL_SANDBOX', 'LD_PRELOAD', 'LD_LIBRARY_PATH', 'DATA_DIR', 'PYTHONPATH', 'PYTHONHOME']) delete env[name]
+    for (const name of ['TMPDIR', 'TEMP', 'TMP']) env[name] = profile
+    env.HOME = profile; env.CRABOT_SCRAPLING_DATA_DIR = profile
+    env.XDG_CACHE_HOME = path.join(profile, 'cache'); env.XDG_CONFIG_HOME = env.CHROME_CONFIG_HOME = path.join(profile, 'config')
     await mkdir(path.join(profile, 'gui'), { mode: 0o700 })
-    await run(path.join(prepared.guiRoot, 'crabot-desktop'), [`--user-data-dir=${path.join(profile, 'gui')}`, `--installation-sandbox-probe=${endpoint}/gui`], env, 60_000)
-    const product = createRequire(import.meta.url)('./bootstrap/scripts/lib/product-runtime.cjs')
-    const runtime = product.loadProductRuntime(prepared.coreRoot, { required: true, full: true })
-    await run(runtime.executables.python, ['-I', '-B', path.join(bundle, 'browser-probe.py'), prepared.coreRoot, endpoint], env, 150_000)
-    if (!['gui', 'chromium', 'headless'].every(role => received.has(role))) throw new Error('Probe network incomplete')
+    await run(path.join(prepared.guiRoot, 'crabot-desktop'), [`--user-data-dir=${path.join(profile, 'gui')}`, `--installation-sandbox-probe=${endpoint}/gui`], env, 60_000, profile)
+    await run(runtime.executables.python, ['-I', '-B', path.join(bundle, 'browser-probe.py'), prepared.coreRoot, endpoint], env, 150_000, profile)
+    if (!roles.every(role => received.has(role))) throw new Error('Probe network incomplete')
   } finally {
     server.closeAllConnections()
     await new Promise<void>(resolve => server.close(() => resolve()))

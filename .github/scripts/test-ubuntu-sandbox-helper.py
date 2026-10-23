@@ -1,4 +1,5 @@
 """Finite fixture test. --inspect never modifies AppArmor; no GUI/Polkit claim."""
+import argparse
 import copy
 import hashlib
 import json
@@ -6,11 +7,16 @@ import os
 import re
 from pathlib import Path
 import subprocess
-import sys
 import tempfile
 import uuid
 
-helper = str(Path(sys.argv[1]).resolve())
+parser = argparse.ArgumentParser()
+parser.add_argument('helper')
+parser.add_argument('namespace_probe', nargs='?')
+parser.add_argument('--without-headless', action='store_true')
+args = parser.parse_args()
+helper = str(Path(args.helper).resolve())
+role_count = 2 if args.without_headless else 3
 assert os.getuid() != 0
 sha = lambda b: hashlib.sha256(b).hexdigest()
 encode = lambda obj: (json.dumps(obj, separators=(',', ':'), ensure_ascii=False) + '\n').encode()
@@ -19,16 +25,22 @@ with tempfile.TemporaryDirectory(prefix='Crabot namespace 用户 *?[]{}@{HOME} \
     ident, gui = str(uuid.uuid4()), str(uuid.uuid4())
     version = '0.1.0-test'
     # ELF header sufficient for fixture identity; never executed by the helper.
-    binary = bytearray(Path(sys.argv[2]).read_bytes()) if len(sys.argv) == 3 else bytearray(64)
+    binary = bytearray(Path(args.namespace_probe).read_bytes()) if args.namespace_probe else bytearray(64)
     binary[:6] = b'\x7fELF\x02\x01'
     binary[18] = 62
     entry = {'size': len(binary), 'sha256': sha(binary)}
-    chromium = '.scrapling-runtime-0123456789abcdef/browsers/chromium-1234/chrome-linux64/chrome'
-    headless = '.scrapling-runtime-0123456789abcdef/browsers/chromium_headless_shell-1234/chrome-headless-shell-linux64/headless_shell'
+    chromium = '.scrapling-runtime-desktop-dev-0123456789abcdef-12345678/browsers/chromium-1234/chrome-linux64/chrome'
+    headless = '.scrapling-runtime-desktop-dev-0123456789abcdef-12345678/browsers/chromium_headless_shell-1234/chrome-headless-shell-linux64/headless_shell'
     runtime = {'schema_version': 1, 'version': version, 'platform': 'linux', 'arch': 'x64',
-               'browser': '.scrapling-runtime-0123456789abcdef/chromium-launcher', 'files': {chromium: entry, headless: entry}}
-    files = {'product-runtime.json': {'type': 'file', 'size': len(encode(runtime)), 'sha256': sha(encode(runtime))},
+               'browser': '.scrapling-runtime-desktop-dev-0123456789abcdef-12345678/chromium-launcher', 'files': {chromium: entry, headless: entry}}
+    pointer = {'directory': '.scrapling-runtime-desktop-dev-0123456789abcdef-12345678'}
+    if args.without_headless:
+        del runtime['files'][headless]
+    files = {'scrapling-runtime.json': {'type': 'file', 'size': len(encode(pointer)), 'sha256': sha(encode(pointer))},
+             'product-runtime.json': {'type': 'file', 'size': len(encode(runtime)), 'sha256': sha(encode(runtime))},
              chromium: {'type': 'file', **entry}, headless: {'type': 'file', **entry}}
+    if args.without_headless:
+        del files[headless]
     index = {'schema_version': 1, 'files': files}
     core = sha(encode(index))
     selection = {'schema_version': 1, 'version': version, 'gui_id': gui, 'core_id': core}
@@ -51,7 +63,7 @@ with tempfile.TemporaryDirectory(prefix='Crabot namespace 用户 *?[]{}@{HOME} \
         result = subprocess.run([helper, option, target], capture_output=True, text=True, timeout=10)
         assert (result.returncode == 0) == ok, (result.returncode, result.stderr)
         if ok:
-            assert result.stdout.count('  userns,') == 3
+            assert result.stdout.count('  userns,') == role_count
             assert 'CRABOT_SANDBOX_VERIFIED' in result.stdout
         else:
             assert 'CRABOT_SANDBOX_NOT_READY:' in result.stderr
@@ -65,8 +77,10 @@ with tempfile.TemporaryDirectory(prefix='Crabot namespace 用户 *?[]{}@{HOME} \
     put(f'releases/{core}/core-release.json', {'schema_version': 1, 'version': version, 'inventory_sha256': core, 'platform': 'linux', 'arch': 'x64'})
     put(f'releases/{core}/core-files.json', index)
     runtime_file = put(f'releases/{core}/product-runtime.json', runtime)
+    put(f'releases/{core}/scrapling-runtime.json', pointer)
     chrome_file = put(f'releases/{core}/{chromium}', binary, 0o755)
-    put(f'releases/{core}/{headless}', binary, 0o755)
+    if not args.without_headless:
+        put(f'releases/{core}/{headless}', binary, 0o755)
     # Business directories deliberately absent. Helper must not need/read them.
     output = run().stdout
     assert '\\x2a\\x3f\\x5b\\x5d\\x7b\\x7d\\x40\\x7bHOME\\x7d' in output
@@ -110,7 +124,7 @@ with tempfile.TemporaryDirectory(prefix='Crabot namespace 用户 *?[]{}@{HOME} \
     run(False)
     put(f'releases/{core}/product-runtime.json', runtime)
     run()
-    if len(sys.argv) == 3:
+    if args.namespace_probe:
         restriction = Path('/proc/sys/kernel/apparmor_restrict_unprivileged_userns')
         assert restriction.read_text().strip() == '1', 'Kernel restriction is required for this acceptance'
         original_setting = restriction.read_bytes()
@@ -122,12 +136,12 @@ with tempfile.TemporaryDirectory(prefix='Crabot namespace 用户 *?[]{}@{HOME} \
                 'caller_status': [line for line in Path('/proc/self/status').read_text().splitlines() if line.startswith(('Uid:', 'CapEff:', 'NoNewPrivs:', 'Seccomp:'))]}), flush=True)
         assert before_code == 13, 'Fixture must actually be denied before registration'
         names = [line for line in output.splitlines() if re.fullmatch(r'crabot-[a-z0-9-]+', line)]
-        assert len(names) == 3
+        assert len(names) == role_count
         policies = [Path('/etc/apparmor.d') / name for name in names]
         assert not any(file.exists() for file in policies)
         try:
             subprocess.run(['/usr/bin/sudo', '/usr/bin/env', 'PKEXEC_UID=' + str(os.getuid()), helper, '--register', tmp], check=True, timeout=120)
-            for executable in [gui_file, chrome_file, root / f'releases/{core}/{headless}']:
+            for executable in [gui_file, chrome_file] + ([] if args.without_headless else [root / f'releases/{core}/{headless}']):
                 assert subprocess.run([str(executable)], timeout=5).returncode == 0, 'Exact role must receive namespace permission'
             neighbor = gui_file.with_name('unregistered-neighbor')
             neighbor.write_bytes(binary)

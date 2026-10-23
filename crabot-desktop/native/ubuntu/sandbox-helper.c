@@ -143,7 +143,7 @@ static void make_target(Target *target, int root, const char *install_root, cons
   target->name = g_strdup_printf("crabot-%lu-%s-%s-%s", (unsigned long)caller, id, role, version_id);
   target->text = g_strdup_printf("# Crabot exact-path user namespace registration\nabi <abi/4.0>,\nprofile %s %s flags=(unconfined) {\n  userns,\n}\n", target->name, escaped);
 }
-static void verify_targets(const char *install_root, int root, Target targets[3]) {
+static int verify_targets(const char *install_root, int root, Target targets[3]) {
   stage = "installation";
   g_autoptr(JsonNode) metadata = json(root, "desktop-installation.json", 65536, true, NULL);
   JsonObject *own = json_node_get_object(metadata); keys(own, "schema_version,installation_id,owner,install_root,root_identity,paths");
@@ -186,9 +186,13 @@ static void verify_targets(const char *install_root, int root, Target targets[3]
   eq(object(files, "product-runtime.json"), "sha256", runtime_sha);
   JsonObject *product = json_node_get_object(runtime); need(integer(product, "schema_version") == 1); eq(product, "version", version);
   eq(product, "platform", "linux"); eq(product, "arch", "x64");
-  const char *browser = string(product, "browser");
-  need(matches(browser, "^\\.scrapling-runtime-[a-f0-9]{16}/chromium-launcher$"));
-  g_autofree char *runtime_dir = g_path_get_dirname(browser);
+  g_autofree char *pointer_path = g_strdup_printf("releases/%s/scrapling-runtime.json", core), *pointer_sha = NULL;
+  g_autoptr(JsonNode) pointer = json(root, pointer_path, 4096, false, &pointer_sha);
+  eq(object(files, "scrapling-runtime.json"), "sha256", pointer_sha);
+  JsonObject *location = json_node_get_object(pointer); keys(location, "directory");
+  const char *runtime_dir = string(location, "directory");
+  need(strlen(runtime_dir) <= 240 && matches(runtime_dir, "^\\.scrapling-runtime-[A-Za-z0-9.-]+-[a-f0-9]{16}-[a-f0-9]{8}$"));
+  g_autofree char *launcher = g_strconcat(runtime_dir, "/chromium-launcher", NULL); eq(product, "browser", launcher);
   JsonObject *runtime_files = object(product, "files");
   g_autofree char *gui_path = g_strdup_printf("app/releases/%s/crabot-desktop", gui);
   stage = "gui-entry";
@@ -208,12 +212,13 @@ static void verify_targets(const char *install_root, int root, Target targets[3]
     g_autofree char *relative = g_strdup_printf("releases/%s/%s", core, name);
     make_target(&targets[role + 1], root, install_root, id, role ? "headless" : "chromium", core, relative, entry);
   }
-  need(found[0] && found[1]);
+  need(found[0]);
+  return found[1] ? 3 : 2;
 }
-static void unchanged_targets(const char *root_path, int root, Target targets[3]) {
+static void unchanged_targets(const char *root_path, int root, Target targets[3], int count) {
   int current = root_directory(root_path, caller); struct stat before, after;
   need(fstat(root, &before) == 0 && fstat(current, &after) == 0 && before.st_ino == after.st_ino && before.st_dev == after.st_dev); close(current);
-  for (int i = 0; i < 3; i++) {
+  for (int i = 0; i < count; i++) {
     int fd = open_chain(root, targets[i].relative, caller, false, false);
     need(fstat(fd, &after) == 0 && same_stat(&targets[i].identity, &after)); close(fd);
   }
@@ -277,17 +282,17 @@ int main(int argc, char **argv) {
     unsigned long parsed = strtoul(value, NULL, 10); need(parsed > 0 && parsed < UINT32_MAX); caller = (uid_t)parsed;
   } else { need(getuid() != 0 && getuid() == geteuid()); caller = getuid(); }
   stage = "root"; int root = root_directory(argv[2], caller); Target targets[3] = {0};
-  verify_targets(argv[2], root, targets); stage = "entries-changed"; unchanged_targets(argv[2], root, targets);
+  int count = verify_targets(argv[2], root, targets); stage = "entries-changed"; unchanged_targets(argv[2], root, targets, count);
   if (registration) {
     stage = "system-policy-conflict"; int system = system_directory();
-    for (int i = 0; i < 3; i++) existing_policy(system, &targets[i]);
-    for (int i = 0; i < 3; i++) { stage = "entries-changed"; unchanged_targets(argv[2], root, targets);
+    for (int i = 0; i < count; i++) existing_policy(system, &targets[i]);
+    for (int i = 0; i < count; i++) { stage = "entries-changed"; unchanged_targets(argv[2], root, targets, count);
       stage = "system-policy-publish"; publish_policy(system, &targets[i]); stage = "system-policy-load"; load_policy(&targets[i]); }
     close(system);
   } else {
-    for (int i = 0; i < 3; i++) { printf("%s\n%s", targets[i].name, targets[i].text); }
+    for (int i = 0; i < count; i++) { printf("%s\n%s", targets[i].name, targets[i].text); }
   }
   close(root);
-  for (int i = 0; i < 3; i++) { g_free(targets[i].relative); g_free(targets[i].name); g_free(targets[i].text); g_free(targets[i].sha); }
+  for (int i = 0; i < count; i++) { g_free(targets[i].relative); g_free(targets[i].name); g_free(targets[i].text); g_free(targets[i].sha); }
   puts("CRABOT_SANDBOX_VERIFIED"); return 0;
 }

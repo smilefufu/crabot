@@ -100,9 +100,12 @@ jobs:
           node .github/scripts/desktop-runtime-scope.mjs
       - name: Linux build prerequisites
         if: runner.os == 'Linux' && steps.scope.outputs.full_runtime == 'true'
-        run: sudo apt-get update && sudo apt-get install -y build-essential libcurl4-openssl-dev libexpat1-dev zlib1g-dev
+        run: sudo apt-get update && sudo apt-get install -y build-essential libcurl4-openssl-dev libexpat1-dev zlib1g-dev libjson-glib-dev
       - name: Prepare isolated build directory
         run: mkdir -p .desktop-build
+      - name: Compile same-source helper for actual paired-layout verification
+        if: runner.os == 'Linux' && steps.scope.outputs.full_runtime == 'true'
+        run: cc -std=c11 -Wall -Wextra -Werror -O2 crabot-desktop/native/ubuntu/sandbox-helper.c -o .desktop-build/ubuntu-helper-source-probe $(pkg-config --cflags --libs json-glib-1.0)
       - name: Build OS process identity helper with installed compiler
         run: node scripts/build-native.mjs
       - name: Shared system installation ownership and restrictive umask
