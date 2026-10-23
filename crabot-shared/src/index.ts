@@ -132,7 +132,9 @@ export { testAudioService } from './audio-client.js'
 export { parseVoiceConnection, voiceTerminalEntry, voiceSetupStatus } from './voice-connection.js'
 export * from './computer-use.js'
 
+export { parseWorkspaceRelocationJobQuery } from './workspace-job-query.js'
 export type { WorkspaceRecord, WorkspaceUsage, WorkspaceExecution, WorkspaceExecutionInventory, WorkspaceSummary, WorkspaceMaintenanceStatus, WorkspaceListResult,
+  WorkspaceRelocationJobQuery, VerifyWorkspaceRelocationJobQueryResult, WorkspaceRelocationJobStage, WorkspaceRelocationJobStatus, WorkspaceRelocationStatusResult,
   WorkspaceRelocationAccepted, WorkspaceRelocationUnchanged, WorkspaceRelocationStartResult,
   VerifyWorkspaceRelocationStartParams, VerifyWorkspaceRelocationStartResult,
   WorkspaceRelocationPreviewRequest, WorkspaceRelocationPreviewResult, WorkspaceRelocationIssue,

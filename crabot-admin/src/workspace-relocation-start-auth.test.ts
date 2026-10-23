@@ -82,3 +82,30 @@ it('the actual sensitive RPC uses only the header human identity and never body/
     expect(await fs.readdir(f.root)).toEqual([])
   } finally { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())) }
 })
+
+it('verifies a read-only current or fixed job query under a real desktop identity without creating data', async () => {
+  const f = await fixture(), before = await fs.readdir(f.root)
+  expect(await f.admin.handleVerifyWorkspaceRelocationJobQuery({}, { authorizationBearer: f.human })).toEqual({ verified: true })
+  expect(await f.admin.handleVerifyWorkspaceRelocationJobQuery({ intent_id: f.params.intent_id }, { authorizationBearer: f.human })).toEqual({ verified: true, intent_id: f.params.intent_id })
+  expect(await fs.readdir(f.root)).toEqual(before)
+})
+it('read-only job query authenticates first and never consumes a confirmation, path, source or body token', async () => {
+  const f = await fixture()
+  await expect(f.admin.handleVerifyWorkspaceRelocationJobQuery(null)).rejects.toMatchObject({ code: 'UNAUTHORIZED' })
+  for (const bearer of [f.token({ sub: 'internal' }), f.token({ sub: 'agent-cli' })]) {
+    await expect(f.admin.handleVerifyWorkspaceRelocationJobQuery(null, { authorizationBearer: bearer })).rejects.toMatchObject({ code: 'FORBIDDEN' })
+  }
+  for (const invalid of [f.params, { source: 'admin-web' }, { token: f.human }, { intent_id: '../private' }]) {
+    await expect(f.admin.handleVerifyWorkspaceRelocationJobQuery(invalid, { authorizationBearer: f.human })).rejects.toMatchObject({ code: 'INVALID_PARAMS' })
+  }
+  expect(await fs.readdir(f.root)).toEqual([])
+})
+it('read-only query fixes its fields across asynchronous authentication and still respects the original password epoch', async () => {
+  const f = await fixture(), original = { intent_id: f.params.intent_id }
+  const verify = f.admin.verifyHumanToken.bind(f.admin)
+  vi.spyOn(f.admin, 'verifyHumanToken').mockImplementation(async (...args: any[]) => { original.intent_id = randomUUID(); return verify(...args) })
+  expect(await f.admin.handleVerifyWorkspaceRelocationJobQuery(original, { authorizationBearer: f.human })).toEqual({ verified: true, intent_id: f.params.intent_id })
+  const credentials = await newCredentialsFromPassword('finite-query-password', { is_temp: false, changed_via: 'ui' }); credentials.token_epoch = 1
+  await writeCredentials(f.root, credentials)
+  await expect(f.admin.handleVerifyWorkspaceRelocationJobQuery({}, { authorizationBearer: f.token({ sub: 'admin' }) })).rejects.toMatchObject({ code: 'UNAUTHORIZED' })
+})

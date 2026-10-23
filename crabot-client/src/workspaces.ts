@@ -2,7 +2,7 @@ import { z } from 'zod'
 import type { HttpClient, RequestOptions } from './http.js'
 import { WorkspaceCreateRequestSchema, WorkspaceGetResultSchema, WorkspaceIdSchema, WorkspaceListResultSchema,
   WorkspaceRecordResultSchema, WorkspaceScanResultSchema, WorkspaceMaintenanceStatusSchema, WorkspaceUpdateRequestSchema, WorkspaceUsageSchema,
-  WorkspaceRelocationPreviewRequestSchema, WorkspaceRelocationPreviewResultSchema, VerifyWorkspaceRelocationStartParamsSchema, WorkspaceRelocationStartResultSchema,
+  WorkspaceRelocationPreviewRequestSchema, WorkspaceRelocationPreviewResultSchema, VerifyWorkspaceRelocationStartParamsSchema, WorkspaceRelocationStartResultSchema, WorkspaceRelocationJobQuerySchema, WorkspaceRelocationStatusResultSchema,
   type VerifyWorkspaceRelocationStartParams, type WorkspaceRelocationPreviewRequest, type WorkspaceCreateRequest, type WorkspaceUpdateRequest } from './contracts/workspaces.js'
 
 export class WorkspaceClient {
@@ -10,6 +10,12 @@ export class WorkspaceClient {
   maintenance(options?: RequestOptions) { return this.http.request('/workspaces/maintenance', WorkspaceMaintenanceStatusSchema, { ...options, method: 'GET' }) }
   previewRelocation(input: WorkspaceRelocationPreviewRequest, options?: RequestOptions) {
     return this.write('/workspaces/relocation/preview', 'POST', WorkspaceRelocationPreviewRequestSchema.parse(input), WorkspaceRelocationPreviewResultSchema, { timeoutMs: 120_000, ...options })
+  }
+  currentRelocation(options?: RequestOptions) { return this.http.request('/workspaces/relocation/current', WorkspaceRelocationStatusResultSchema, { ...options, method: 'GET' }) }
+  relocationStatus(id: string, options?: RequestOptions) {
+    const query = WorkspaceRelocationJobQuerySchema.required().parse({ intent_id: id })
+    const response = WorkspaceRelocationStatusResultSchema.refine(value => !value.job || value.job.intent_id === query.intent_id)
+    return this.http.request('/workspaces/relocation/jobs/' + encodeURIComponent(query.intent_id), response, { ...options, method: 'GET' })
   }
   startRelocation(input: VerifyWorkspaceRelocationStartParams, options?: RequestOptions) {
     const request = VerifyWorkspaceRelocationStartParamsSchema.parse(input)

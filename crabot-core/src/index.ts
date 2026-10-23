@@ -46,6 +46,10 @@ import {
   type VerifyWorkspaceRelocationRecoveryReleaseResult,
   type ReleaseWorkspaceRelocationRecoveryCompletionResult,
   type ResumeWorkspaceRelocationRecoveryWebResult,
+  type WorkspaceRelocationJobQuery,
+  type WorkspaceRelocationStatusResult,
+  type WorkspaceRelocationJobStage,
+  parseWorkspaceRelocationJobQuery,
   type WorkspaceRelocationStartResult,
   type VerifyWorkspaceRelocationStartParams,
   type VerifyWorkspaceRelocationStartResult,
@@ -265,6 +269,8 @@ interface WorkspaceInitialJob {
   readonly resolve: (result: WorkspaceRelocationStartResult) => void
   readonly reject: (error: Error) => void
   phase: 'preparing' | 'accepted' | 'completed' | 'needs_attention'
+  stage: WorkspaceRelocationJobStage
+  coordinator?: { child: ChildProcess; identity: WorkerProcessIdentity }
   proof?: VerifyWorkspaceRelocationRequestParams
   completion?: Promise<void>
 }
@@ -417,6 +423,7 @@ export class ModuleManager {
 
     // 注册所有方法处理器
     this.registerMethod<VerifyWorkspaceRelocationStartParams, WorkspaceRelocationStartResult>('start_workspace_relocation', (params, context) => this.startWorkspaceRelocation(params, context?.authorizationBearer))
+    this.registerMethod<WorkspaceRelocationJobQuery, WorkspaceRelocationStatusResult>('get_workspace_relocation_status', (params, context) => this.getWorkspaceRelocationStatus(params, context?.authorizationBearer))
     this.registerMethod('register', this.handleRegisterUnauthenticated.bind(this))
     this.registerMethod('register_core_agent', this.handleRegisterCoreAgent.bind(this))
     this.registerMethod('verify_workspace_relocation_recovery_admission', this.handleVerifyWorkspaceRelocationRecoveryAdmission.bind(this))
@@ -1437,6 +1444,56 @@ export class ModuleManager {
   // 进程管理
   // ============================================================================
 
+  private async getWorkspaceRelocationStatus(params: WorkspaceRelocationJobQuery, bearer?: string): Promise<WorkspaceRelocationStatusResult> {
+    const snapshot = params && typeof params === 'object' && !Array.isArray(params) ? Object.freeze({ ...params }) : params
+    if (typeof bearer !== 'string' || !bearer) throw Object.assign(new Error('Human Admin credential required'), { code: 'UNAUTHORIZED' })
+    const unavailable = () => Object.assign(new Error('当前作业查询身份无法核实。'), { code: 'SERVICE_UNAVAILABLE' })
+    let query: Readonly<WorkspaceRelocationJobQuery>
+    try {
+      query = await this.withCurrentAdminRpc(5000, async (rpc, verify) => {
+        let response: unknown
+        try { response = await rpc.call('verify_workspace_relocation_job_query', snapshot, { authorizationBearer: bearer }) }
+        catch (error) { await verify(); throw error }
+        await verify()
+        const request = parseWorkspaceRelocationJobQuery(snapshot)
+        if (sha256CanonicalJson(response) !== sha256CanonicalJson({ verified: true, ...request })) throw unavailable()
+        return request
+      })
+    } catch (error) {
+      const code = (error as { remote_code?: string; code?: string }).remote_code ?? (error as { code?: string }).code
+      if (code && ['UNAUTHORIZED', 'FORBIDDEN', 'INVALID_PARAMS'].includes(code)) throw Object.assign(new Error('Human workspace query rejected'), { code })
+      throw unavailable()
+    }
+    const job = this.workspaceInitialJob
+    const ownId = job && (job.proof || job.phase === 'preparing') ? job.request.intent_id : undefined
+    const records = require('../../scripts/lib/workspace-relocation-intent.mjs')
+    let stored: WorkspaceRelocationStatusResult
+    if (query.intent_id) stored = records.readWorkspaceRelocationJobStatus(this.dataDir, query.intent_id)
+    else if (job?.phase === 'preparing' || job?.phase === 'accepted') stored = records.readWorkspaceRelocationJobStatus(this.dataDir, ownId)
+    else {
+      stored = records.readWorkspaceRelocationJobStatus(this.dataDir)
+      if (stored.available && !stored.job && ownId) stored = records.readWorkspaceRelocationJobStatus(this.dataDir, ownId)
+    }
+    const id = query.intent_id ?? stored.job?.intent_id ?? ownId
+    if (!stored.available || !job || ownId !== id || !ownId) return stored
+    if ((job.proof && !stored.job) || (job.phase === 'completed' && stored.job?.state !== 'committed')) return { available: false, job: null }
+    if (job.phase === 'accepted') {
+      const owner = job.coordinator, native = require('../../scripts/lib/process-identity.cjs')
+      try {
+        if (!owner?.child.connected || owner.child.exitCode !== null || owner.child.signalCode !== null
+          || !native.sameProcess(owner.identity, native.inspectProcess(owner.child.pid))) return { available: false, job: null }
+      } catch { return { available: false, job: null } }
+    }
+    return { available: true, job: { ...(stored.job ?? { intent_id: ownId, target: job.request.target }),
+      state: job.phase === 'accepted' ? 'running' : job.phase, stage: job.stage } }
+  }
+
+  /** Progress observation only; the original effect retains all admission and role checks. */
+  private noteWorkspaceRelocationJobStage(request: VerifyWorkspaceRelocationRequestParams, stage: WorkspaceRelocationJobStage): void {
+    const job = this.workspaceInitialJob
+    if (job?.phase === 'accepted' && job.proof && sha256CanonicalJson(job.proof) === sha256CanonicalJson(request)) job.stage = stage
+  }
+
   private async startWorkspaceRelocation(params: VerifyWorkspaceRelocationStartParams, bearer?: string): Promise<WorkspaceRelocationStartResult> {
     const verified = await this.verifyWorkspaceRelocationStartRequest(params, bearer)
     const { verified: _, ...request } = verified
@@ -1448,7 +1505,7 @@ export class ModuleManager {
     if (previous && previous.phase !== 'completed') throw Object.assign(new Error('已有工作区作业尚未完成，请查看当前作业。'), { code: 'SERVICE_UNAVAILABLE' })
     let resolve!: WorkspaceInitialJob['resolve'], reject!: WorkspaceInitialJob['reject']
     const reply = new Promise<WorkspaceRelocationStartResult>((yes, no) => { resolve = yes; reject = no })
-    const job: WorkspaceInitialJob = { request: Object.freeze(request), fingerprint, reply, resolve, reject, phase: 'preparing' }
+    const job: WorkspaceInitialJob = { request: Object.freeze(request), fingerprint, reply, resolve, reject, phase: 'preparing', stage: 'preparing' }
     this.workspaceInitialJob = job
     job.completion = this.driveInitialWorkspaceRelocation(job, bearer!)
     return reply
@@ -1471,11 +1528,11 @@ export class ModuleManager {
       const records = require('../../scripts/lib/workspace-relocation-intent.mjs')
       const intent = await records.beginWorkspaceRelocationIntent({ dataDir: this.dataDir, id: job.request.intent_id,
         target: job.request.target, expectedRevision: job.request.expected_revision, ...policy })
-      if (intent.unchanged) { job.phase = 'completed'; job.resolve({ unchanged: true, source: intent.source }); return }
+      if (intent.unchanged) { job.phase = 'completed'; job.stage = 'finished'; job.resolve({ unchanged: true, source: intent.source }); return }
       job.proof = Object.freeze({ intent_id: intent.id, intent_sha256: sha256CanonicalJson(intent) })
       await this.completeWorkspaceRelocation(job.proof, bearer)
       if (this.workspaceInitialJob !== job || job.phase !== 'accepted') throw unavailable()
-      job.phase = 'completed'
+      job.phase = 'completed'; job.stage = 'finished'
     } catch (cause) {
       job.phase = 'needs_attention'
       const code = (cause as { code?: string })?.code
@@ -1491,11 +1548,14 @@ export class ModuleManager {
   /** Observation of this original fixed scope only; it does not grant any stop/file authority. */
   private markWorkspaceRelocationAccepted(request: VerifyWorkspaceRelocationRequestParams): void {
     const job = this.workspaceInitialJob
-    if (!job) return
+    if (!job || job.phase === 'completed') return
     if (!job.proof || sha256CanonicalJson(job.proof) !== sha256CanonicalJson(request) || job.phase !== 'preparing') {
       throw Object.assign(new Error('Initial workspace job is not current'), { code: 'FORBIDDEN' })
     }
-    job.phase = 'accepted'; job.resolve({ intent_id: request.intent_id, accepted: true })
+    const grant = this.workspaceCoordinatorGrant
+    if (!grant || grant.proof.intent_id !== request.intent_id) throw Object.assign(new Error('Current coordinator is unavailable'), { code: 'FORBIDDEN' })
+    job.coordinator = { child: grant.child, identity: grant.identity }
+    job.phase = 'accepted'; job.stage = 'stopping'; job.resolve({ intent_id: request.intent_id, accepted: true })
   }
 
   /** Initial human confirmation only; no intent, lock or coordinator is created here. */
@@ -1798,6 +1858,7 @@ export class ModuleManager {
         const coordinator = records.readWorkspaceRelocationCoordinator(this.dataDir, request.intent_id)
         const verifyStopped = this.workspaceRelocationStoppedVerifier(request, child)
         await verifyStopped()
+        this.noteWorkspaceRelocationJobStage(request, 'moving')
         const { createWorkspaceFileJournal } = require('../../scripts/lib/workspace-file-journal.mjs')
         journal = createWorkspaceFileJournal(child, { dataDir: this.dataDir, id: request.intent_id, launch: coordinator.launch })
         const result = await journal!.prepare()
@@ -1830,6 +1891,7 @@ export class ModuleManager {
         prepareRecovery(): Promise<{ plan_sha256: string }>; commitRecovery(): Promise<{ commit_sha256: string }>; close(): void } | undefined
       try {
         child = (await this.prepareWorkspaceRelocationFiles(request, bearer)).coordinator
+        this.noteWorkspaceRelocationJobStage(request, 'closing_executors')
         const records = require('../../scripts/lib/workspace-relocation-intent.mjs')
         const verifyStopped = this.workspaceRelocationStoppedVerifier(request, child)
         await verifyStopped()
@@ -1881,6 +1943,7 @@ export class ModuleManager {
         verifySelectedRoot(): Promise<{ selected_sha256: string; worker_commit_sha256: string; recovery_commit_sha256: string }>; close(): void } | undefined
       try {
         const closed = await this.commitWorkspaceRelocationWorkers(request, bearer)
+        this.noteWorkspaceRelocationJobStage(request, 'switching')
         child = closed.coordinator
         const records = require('../../scripts/lib/workspace-relocation-intent.mjs')
         const verifyStopped = this.workspaceRelocationStoppedVerifier(request, child)
@@ -1928,6 +1991,7 @@ export class ModuleManager {
       let stage = 'root'
       try {
         const selected = await this.commitWorkspaceRelocationRoot(request, bearer)
+        this.noteWorkspaceRelocationJobStage(request, 'validating')
         child = selected.coordinator
         await this.workspaceRelocationStoppedVerifier(request, child)()
         const records = require('../../scripts/lib/workspace-relocation-intent.mjs'), native = require('../../scripts/lib/process-identity.cjs')
@@ -3115,6 +3179,7 @@ export class ModuleManager {
       let child: ChildProcess | undefined, terminal: { archive(): Promise<unknown>; release(prepared: PrepareWorkspaceRelocationCompletionResult): Promise<unknown>; observeRelease(): Promise<unknown>; close(): void } | undefined
       try {
         const health = await this.verifyWorkspaceRelocationValidationHealth(request, bearer), proof = this.workspaceValidationProof
+        this.noteWorkspaceRelocationJobStage(request, 'finalizing')
         child = health.coordinator
         if (!proof || proof.result.coordinator !== child || sha256CanonicalJson(proof.request) !== fingerprint) throw failure()
         proof.assertCurrent()
@@ -3344,6 +3409,7 @@ export class ModuleManager {
         await records.verifyWorkspaceRelocationReleasedCapabilities({ dataDir: this.dataDir, id: request.intent_id, verify: async () => grant!.verify() })
         grant.verify()
         stage = 'restore-modules'
+        this.noteWorkspaceRelocationJobStage(request, 'restoring')
         await grant.restoreModules()
         grant.verify()
         stage = 'resume-web'

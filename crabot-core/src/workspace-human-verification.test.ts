@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
 import fs from 'node:fs/promises'
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import syncFs, { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { tmpdir } from 'node:os'
 import http from 'node:http'
@@ -16,6 +16,44 @@ import { relocationAgentConfig } from '../../crabot-agent/tests/core/fixtures/re
 function coordinatorJournalFailures(child: ReturnType<typeof spawn>): string[] {
   return require('../../scripts/lib/workspace-coordinator-launch.mjs').workspaceCoordinatorDiagnostics(child)
     .split('\n').filter((line: string) => line.includes('workspace_journal_failed')).slice(-3)
+}
+
+// Finite CI diagnostics only: no arguments, paths, identities or credentials are recorded.
+function observeColdTerminalProgress(cold: any, coordinator: any, grant: any) {
+  const native = require('../../scripts/lib/process-identity.cjs'), counters: Record<string, { calls: number; pending: number; elapsed_ms: number }> = {}
+  const restores: Array<() => void> = [], started = performance.now()
+  const replace = (object: any, key: string, value: (...args: any[]) => any) => {
+    const previous = Object.getOwnPropertyDescriptor(object, key)
+    Object.defineProperty(object, key, { configurable: true, writable: true, enumerable: previous?.enumerable ?? false, value })
+    restores.push(() => { if (previous) Object.defineProperty(object, key, previous); else delete object[key] })
+  }
+  const watch = (object: any, key: string, name = key) => {
+    if (typeof object[key] !== 'function' || Object.getOwnPropertyDescriptor(object, key)?.configurable === false) return // Private ACL primitives are Windows-only.
+    const original = object[key].bind(object), counter = counters[name] = { calls: 0, pending: 0, elapsed_ms: 0 }
+    replace(object, key, (...args: any[]) => {
+      const began = performance.now(); counter.calls++; counter.pending++
+      const done = () => { counter.pending--; counter.elapsed_ms += Math.round(performance.now() - began) }
+      try {
+        const result = original(...args)
+        if (result && typeof result.then === 'function') void result.then(done, done)
+        else done()
+        return result // Preserve the actual cached Promise and all original effects.
+      } catch (error) { done(); throw error }
+    })
+  }
+  for (const key of ['releaseWorkspaceRecoveryCompletion', 'prepareWorkspaceRecoveryCompletion', 'beginWorkspaceRecoveryCompletionObservation', 'restoreWorkspaceModules']) watch(cold, key)
+  watch(grant, 'verifyHealth', 'current-health'); watch(grant, 'verify', 'current-facts')
+  watch(syncFs, 'readFileSync', 'sync-file-read')
+  for (const key of ['inspectProcess', 'isPrivateDirectory', 'isPrivateFile', 'listListeningTcpPorts']) watch(native, key, 'native-' + key)
+  const ipc: Record<string, number> = {}, sent = coordinator.child.send.bind(coordinator.child)
+  const kinds = new Set(['workspace_recovery_release', 'workspace_recovery_released', 'workspace_recovery_release_observe', 'workspace_recovery_release_observed', 'workspace_recovery_verify', 'workspace_recovery_verified'])
+  const observe = (message: any) => { if (kinds.has(message?.kind)) ipc[message.kind] = (ipc[message.kind] ?? 0) + 1 }
+  replace(coordinator.child, 'send', (message: any, ...args: any[]) => { observe(message); return sent(message, ...args) })
+  coordinator.child.on('message', observe)
+  const report = () => console.log('[Cold terminal progress]', { elapsed_ms: Math.round(performance.now() - started), phase: grant.phase, counters, ipc })
+  report()
+  const timer = setInterval(report, 15000); timer.unref()
+  return () => { clearInterval(timer); report(); coordinator.child.off('message', observe); for (const restore of restores.reverse()) restore() }
 }
 
 // Keep fixture listeners out of the default OS ephemeral client-port range.
@@ -468,6 +506,29 @@ describe('MM owns the initial workspace migration job', () => {
       expect(launch).toHaveBeenCalledTimes(1)
     } finally { vi.restoreAllMocks(); await f.cleanup() }
   }, timeout)
+  it('observes the actual current coordinator without turning unknown ownership or a failed stop into running success', async () => {
+    const f = await initial(), native = require('../../scripts/lib/process-identity.cjs')
+    const { HttpClient, WorkspaceClient } = require('../../crabot-client/dist/index.js')
+    const sdk = new WorkspaceClient(new HttpClient({ endpoint: `http://127.0.0.1:${f.port}/api`, token: () => 'fixture-human' }))
+    let entered!: () => void, release!: () => void
+    const stopping = new Promise<void>(resolve => { entered = resolve }), held = new Promise<void>(resolve => { release = resolve })
+    const moduleStop = vi.spyOn(f.manager, 'requestWorkspaceRelocationModuleStops').mockImplementation(async () => { entered(); await held; throw new Error('finite stop boundary') })
+    try {
+      expect(await f.manager.startWorkspaceRelocation(f.start, 'fixture-human')).toEqual({ intent_id: f.start.intent_id, accepted: true })
+      await stopping
+      const expected = { available: true, job: { intent_id: f.start.intent_id, state: 'running', stage: 'stopping', source: path.join(f.data, 'workspaces'), target: f.start.target } }
+      expect(await sdk.currentRelocation()).toEqual(expected)
+      expect(await sdk.relocationStatus(f.start.intent_id)).toEqual(expected)
+      const actual = native.inspectProcess, owner = f.manager.workspaceInitialJob.coordinator.child.pid
+      const unknown = vi.spyOn(native, 'inspectProcess').mockImplementation((pid: number) => { if (pid === owner) throw new Error('finite unknown coordinator identity'); return actual(pid) })
+      try { expect(await sdk.currentRelocation()).toEqual({ available: false, job: null }) }
+      finally { unknown.mockRestore() }
+      release(); await f.manager.workspaceInitialJob.completion
+      expect(await sdk.currentRelocation()).toEqual({ ...expected, job: { ...expected.job, state: 'needs_attention' } })
+      expect(moduleStop).toHaveBeenCalledTimes(1)
+      await expect(fs.stat(f.start.target)).rejects.toMatchObject({ code: 'ENOENT' })
+    } finally { release(); await f.manager.workspaceInitialJob?.completion; vi.restoreAllMocks(); await f.cleanup() }
+  }, timeout)
   it.each(['revoked human', 'Agent stopped'])('rechecks readiness after waiting for the original lock: %s', async mode => {
     const f = await initial(), locks = require('../../scripts/lib/cli-lock.mjs')
     const held = await locks.acquireCliLock(f.data, 'finite competing operation')
@@ -513,6 +574,8 @@ describe('MM owns the initial workspace migration job', () => {
         const job = f.manager.workspaceInitialJob
         await job.completion
         expect(job.phase).toBe('completed')
+        expect(records.readWorkspaceRelocationJobStatus(f.data, request.intent_id).job.state).toBe('committed')
+        expect((await sdk.relocationStatus(request.intent_id)).job).toMatchObject({ state: 'completed', stage: 'finished' })
         expect((await catalog.snapshot()).storage_root).toBe(request.target)
         expect(records.readWorkspaceRelocationReleased(f.data, request.intent_id)).not.toBeNull()
         expect(require('../../scripts/lib/workspace-maintenance.cjs').workspaceMaintenancePending(f.data)).toBe(false)
@@ -542,6 +605,27 @@ describe('MM owns the initial workspace migration job', () => {
   }, timeout)
 })
 
+describe('finite cold terminal diagnostics', () => {
+  it('preserves cached Promises and records no arguments, paths or credentials', async () => {
+    const events = new (require('node:events').EventEmitter)(), pending = Promise.resolve('unchanged')
+    events.send = vi.fn((_message: any, callback?: () => void) => { callback?.(); return true })
+    const cold = Object.fromEntries(['releaseWorkspaceRecoveryCompletion', 'prepareWorkspaceRecoveryCompletion', 'beginWorkspaceRecoveryCompletionObservation', 'restoreWorkspaceModules'].map(key => [key, () => pending]))
+    const grant = { phase: 'prepared', verifyHealth: () => pending, verify: () => {} }, logs = vi.spyOn(console, 'log').mockImplementation(() => {})
+    const stop = observeColdTerminalProgress(cold, { child: events }, grant)
+    try {
+      expect(cold.releaseWorkspaceRecoveryCompletion('private-monitor-secret', '/private-monitor-path')).toBe(pending)
+      expect(grant.verifyHealth()).toBe(pending)
+      events.send({ kind: 'workspace_recovery_release', credential: 'private-monitor-secret', path: '/private-monitor-path' })
+      events.emit('message', { kind: 'workspace_recovery_released', credential: 'private-monitor-secret' })
+      await pending
+    } finally { stop() }
+    const output = JSON.stringify(logs.mock.calls)
+    expect(output).toContain('workspace_recovery_release'); expect(output).not.toContain('private-monitor-secret'); expect(output).not.toContain('/private-monitor-path')
+    expect(events.listenerCount('message')).toBe(0)
+    logs.mockRestore()
+  })
+})
+
 describe('actual Admin recovery RPC observer', () => {
   it('keeps the actual body reader working and records only selected wire bodies with header presence', async () => {
     const root = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'crabot-admin-observer-')))
@@ -566,6 +650,31 @@ describe('actual Admin recovery RPC observer', () => {
       expect(observed.every((item: any) => item.authorization === 'present' && item.body.params.marker === item.method.slice(1))).toBe(true)
       expect(JSON.stringify(observed)).not.toContain(secret)
     } finally { if (child.connected) child.send('finish'); await ended; await fs.rm(root, { recursive: true, force: true }) }
+  }, process.platform === 'win32' ? 120000 : 30000)
+})
+
+describe('MM reads workspace job status under the current human identity', () => {
+  it.each(['actual Admin', 'no human', 'wrong runtime', 'false', 'extra', 'hash', 'bad query'])('observes only original stored facts without effects: %s', async mode => {
+    const f = await fixture({ actualAdmin: ['actual Admin', 'bad query'].includes(mode), wrongRuntime: mode === 'wrong runtime', result: mode })
+    const file = path.join(f.data, 'workspace-control/relocation-active/relocation.json'), bytes = await fs.readFile(file)
+    try {
+      const params = mode === 'bad query' ? { source: 'admin-web' } : {}
+      const observed = f.manager.getWorkspaceRelocationStatus(params, mode === 'no human' ? undefined : 'fixture-human')
+      if (mode === 'actual Admin') {
+        expect(await observed).toEqual({ available: true, job: { intent_id: f.params.intent_id, state: 'needs_attention', stage: 'unknown', source: path.join(f.data, 'workspaces'), target: path.join(f.root, 'relocated') } })
+        expect(await f.manager.getWorkspaceRelocationStatus({ intent_id: randomUUID() }, 'fixture-human')).toEqual({ available: true, job: null })
+        const other = randomUUID()
+        f.manager.workspaceInitialJob = { request: { intent_id: other }, proof: { intent_id: other }, phase: 'completed', stage: 'finished' }
+        try { expect((await f.manager.getWorkspaceRelocationStatus({}, 'fixture-human')).job?.intent_id).toBe(f.params.intent_id) }
+        finally { f.manager.workspaceInitialJob = undefined }
+        expect((await f.calls()).every((item: any) => ['/get_runtime_identity', '/verify_workspace_relocation_job_query'].includes(item.method))).toBe(true)
+      } else await expect(observed).rejects.toMatchObject({ code: mode === 'no human' ? 'UNAUTHORIZED' : mode === 'bad query' ? 'INVALID_PARAMS' : 'SERVICE_UNAVAILABLE' })
+      if (mode === 'wrong runtime') expect((await f.calls()).every((item: any) => !item.authorization)).toBe(true)
+      expect(JSON.stringify((await f.calls()).map((item: any) => item.body))).not.toContain('fixture-human')
+      expect(await fs.readFile(file)).toEqual(bytes)
+      expect(f.manager.workspaceInitialJob).toBeUndefined(); expect(f.manager.workspaceStopSequence).toBeUndefined()
+      expect(require('../../scripts/lib/cli-lock.mjs').cliLockToken(path.join(f.data, 'cli.lock'))).toBeUndefined()
+    } finally { await f.cleanup() }
   }, process.platform === 'win32' ? 120000 : 30000)
 })
 
@@ -2231,6 +2340,7 @@ describe('normal fixed-job Admin completion preparation', () => {
     try {
       const prepared = await f.manager.prepareWorkspaceRelocationCompletion(f.params, 'fixture-human')
       expect(prepared.prepared).toBe(true)
+      expect(require('../../scripts/lib/workspace-relocation-intent.mjs').readWorkspaceRelocationJobStatus(f.data)).toMatchObject({ available: true, job: { intent_id: f.params.intent_id, state: 'needs_attention', stage: 'finalizing' } })
       expect(require('../../scripts/lib/workspace-maintenance.cjs').workspaceMaintenancePending(f.data)).toBe(true)
     } finally { locks.releaseCliLock(lock); await f.cleanup() }
   }, process.platform === 'win32' ? 600000 : 120000)
@@ -2946,10 +3056,12 @@ describe('normal fixed-job Admin completion preparation', () => {
             }
             return emit(event, ...args)
           })
+          let stopObserving: (() => void) | undefined
           try {
             if (mode === 'release readonly root') { rootMode = (await fs.stat(root)).mode & 0o777; await fs.chmod(root, 0o500) }
             const restoring = resumeModes.includes(mode), operate = () => restoring ? cold.resumeWorkspaceRecoveryWeb(request, human) : cold.releaseWorkspaceRecoveryCompletion(request, human)
             const start = vi.spyOn(cold, 'startModuleProcess')
+            stopObserving = mode === 'resume running module' && process.env.GITHUB_ACTIONS === 'true' ? observeColdTerminalProgress(cold, coordinator, grant) : undefined
             phase('current-terminal-request')
             const first = operate(), second = operate()
             if (hasNativeRelease && mode !== 'release readonly root') {
@@ -3010,7 +3122,7 @@ describe('normal fixed-job Admin completion preparation', () => {
             expect(await fs.readFile(ledgerFile)).toEqual(ledger)
             start.mockRestore()
             return
-          } finally { if (rootMode !== undefined) await fs.chmod(root, rootMode); sending.mockRestore(); receiving.mockRestore() }
+          } finally { stopObserving?.(); if (rootMode !== undefined) await fs.chmod(root, rootMode); sending.mockRestore(); receiving.mockRestore() }
         }
       }
       if (mode === 'completion observation' || mode === 'released without observation') {

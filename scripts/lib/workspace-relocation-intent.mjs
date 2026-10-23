@@ -5,6 +5,7 @@ import path from 'node:path'
 import { randomUUID, createHash } from 'node:crypto'
 import native from './process-identity.cjs'
 import management from './desktop-management.cjs'
+import workspaceMaintenance from './workspace-maintenance.cjs'
 import knownProcessExit from './known-process-exit.cjs'
 import ownedProcessTree from './owned-process-tree.cjs'
 import { cliLockToken } from './cli-lock.mjs'
@@ -2301,6 +2302,36 @@ export const readCurrentWorkspaceRelocationFinalizing = recordGraphReader(functi
   if (!uuid(record?.intent_id)) fail()
   return readWorkspaceRelocationFinalizing(dataDir, record.intent_id)
 })
+// One synchronous material observation only. It never owns, resumes or completes a job.
+const readWorkspaceJobStatusFrame = recordGraphReader(function readWorkspaceJobStatusFrame(dataDir, requestedId) {
+  if (requestedId !== undefined && !uuid(requestedId)) fail()
+  const ctx = context(dataDir)
+  assertNoLegacyRelocation(dataDir)
+  const finalizing = readCurrentWorkspaceRelocationFinalizing(dataDir)
+  const active = privateControl(ctx.control) ? readWorkspaceRelocationIntent(dataDir) : null
+  if (active && finalizing && (finalizing.intent_id !== active.id || finalizing.intent_sha256 !== sha256CanonicalJson(active)
+    || finalizing.completion_sha256 !== sha256CanonicalJson(readWorkspaceRelocationCompletion(dataDir, active.id)))) fail()
+  const id = requestedId ?? active?.id ?? finalizing?.intent_id
+  if (!id) return { available: !workspaceMaintenance.workspaceMaintenancePending(dataDir), job: null }
+  if (active?.id === id) return { available: true, job: { intent_id: id, state: 'needs_attention',
+    stage: finalizing ? 'finalizing' : 'unknown', source: active.source.path, target: active.target } }
+  const released = readWorkspaceRelocationReleased(dataDir, id)
+  const archived = readWorkspaceRelocationArchivedCompletion(dataDir, id)
+  if (!archived) {
+    if (finalizing?.intent_id === id) fail()
+    return { available: true, job: null }
+  }
+  const state = readWorkspaceRelocationArchivedState(dataDir, id)
+  if (released && finalizing?.intent_id === id) fail()
+  if (finalizing?.intent_id === id && finalizing.completion_sha256 !== sha256CanonicalJson(state.completion)) fail()
+  return { available: true, job: { intent_id: id, state: released ? 'committed' : 'needs_attention',
+    stage: released ? 'finished' : 'finalizing', source: state.intent.source.path, target: state.intent.target } }
+})
+export function readWorkspaceRelocationJobStatus(dataDir, requestedId) {
+  try { return readWorkspaceJobStatusFrame(dataDir, requestedId) }
+  catch { return { available: false, job: null } }
+}
+
 /** Before release only: facts and live capabilities, never authorization to reopen business. */
 export async function verifyWorkspaceRelocationArchivedCapabilities({ dataDir, id, signal, verify: authorize }) {
   if (typeof authorize !== 'function') fail()

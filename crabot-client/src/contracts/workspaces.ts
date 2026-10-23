@@ -63,13 +63,27 @@ export type WorkspaceRelocationPreviewRequest = z.infer<typeof WorkspaceRelocati
 export type WorkspaceRelocationPreviewResult = z.infer<typeof WorkspaceRelocationPreviewResultSchema>
 export type WorkspaceRelocationIssue = z.infer<typeof WorkspaceRelocationIssueSchema>
 
+const RelocationJobId = z.uuid().refine(value => value === value.toLowerCase())
 export const VerifyWorkspaceRelocationStartParamsSchema = z.strictObject({
-  intent_id: z.uuid().refine(value => value === value.toLowerCase()), target: Directory,
+  intent_id: RelocationJobId, target: Directory,
   expected_revision: Count.min(1), confirmed: z.literal(true),
 })
 export const WorkspaceRelocationStartResultSchema = z.union([
-  z.strictObject({ intent_id: z.uuid().refine(value => value === value.toLowerCase()), accepted: z.literal(true) }),
+  z.strictObject({ intent_id: RelocationJobId, accepted: z.literal(true) }),
   z.strictObject({ source: Directory, unchanged: z.literal(true) }),
 ])
 export type VerifyWorkspaceRelocationStartParams = z.infer<typeof VerifyWorkspaceRelocationStartParamsSchema>
 export type WorkspaceRelocationStartResult = z.infer<typeof WorkspaceRelocationStartResultSchema>
+
+export const WorkspaceRelocationJobQuerySchema = z.strictObject({ intent_id: RelocationJobId.optional() })
+export const WorkspaceRelocationJobStageSchema = z.enum(['preparing', 'stopping', 'moving', 'closing_executors', 'switching', 'validating', 'finalizing', 'restoring', 'finished', 'unknown'])
+export const WorkspaceRelocationJobStatusSchema = z.strictObject({
+  intent_id: RelocationJobId, state: z.enum(['preparing', 'running', 'completed', 'needs_attention', 'committed']),
+  stage: WorkspaceRelocationJobStageSchema, source: Directory.optional(), target: Directory.optional(),
+}).refine(value => !['completed', 'committed'].includes(value.state) || value.stage === 'finished')
+export const WorkspaceRelocationStatusResultSchema = z.strictObject({ available: z.boolean(), job: WorkspaceRelocationJobStatusSchema.nullable() })
+  .refine(value => value.available || value.job === null)
+export type WorkspaceRelocationJobQuery = z.infer<typeof WorkspaceRelocationJobQuerySchema>
+export type WorkspaceRelocationJobStage = z.infer<typeof WorkspaceRelocationJobStageSchema>
+export type WorkspaceRelocationJobStatus = z.infer<typeof WorkspaceRelocationJobStatusSchema>
+export type WorkspaceRelocationStatusResult = z.infer<typeof WorkspaceRelocationStatusResultSchema>

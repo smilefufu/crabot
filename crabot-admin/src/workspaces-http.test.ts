@@ -264,3 +264,34 @@ it('closing the browser only cancels its wait after handoff, never the owned Cor
   complete(); await done
   expect(call).toHaveBeenCalledTimes(1); expect(f.admin.workspaceWebAccess().isClosed()).toBe(true)
 })
+
+it('job status remains a human-only management read during maintenance, with one query and header-only identity', async () => {
+  const f = await fixture(), id = randomUUID(), snapshot = { available: true, job: { intent_id: id, state: 'needs_attention', stage: 'finalizing', source: path.join(f.root, 'workspaces'), target: path.join(f.root, 'next') } }
+  const call = startRpc(f.admin, async () => snapshot)
+  const pathname = f.endpoint + '/workspaces/relocation/current', headers = { Authorization: 'Bearer fixture-human' }
+  expect((await fetch(pathname)).status).toBe(401)
+  expect((await fetch(pathname, { headers: { Authorization: 'Bearer fixture-internal' } })).status).toBe(403)
+  expect(call).not.toHaveBeenCalled()
+  await fs.writeFile(path.join(f.root, 'workspace-control/relocation-finalizing.json'), 'finite stored fence')
+  await f.admin.quiesceWorkspaceWebAccess()
+  const response = await fetch(pathname, { headers })
+  expect(response.status).toBe(200); expect(response.headers.get('cache-control')).toBe('no-store'); expect(await response.json()).toEqual(snapshot)
+  expect(call).toHaveBeenCalledTimes(1)
+  expect(call).toHaveBeenCalledWith('get_workspace_relocation_status', {}, 'admin-web', { authorizationBearer: 'fixture-human', timeoutMs: 30_000 })
+  expect((await fetch(f.endpoint + '/workspaces/default/usage/refresh', { method: 'POST', headers, body: '{}' })).status).toBe(503)
+  expect(await fs.readFile(path.join(f.root, 'workspace-control/relocation-finalizing.json'), 'utf8')).toBe('finite stored fence')
+})
+it('fixed job status validates the identity and receipt without falling back from unknown to no job', async () => {
+  const f = await fixture(), id = randomUUID(), headers = { Authorization: 'Bearer fixture-human' }
+  const call = startRpc(f.admin, async () => ({ available: false, job: null }))
+  const pathname = f.endpoint + '/workspaces/relocation/jobs/' + id
+  const unknown = await fetch(pathname, { headers }); expect(unknown.status).toBe(200); expect(await unknown.json()).toEqual({ available: false, job: null })
+  expect(call).toHaveBeenCalledWith('get_workspace_relocation_status', { intent_id: id }, 'admin-web', { authorizationBearer: 'fixture-human', timeoutMs: 30_000 })
+  call.mockResolvedValueOnce({ available: true, job: { intent_id: randomUUID(), state: 'committed', stage: 'finished' } })
+  expect((await fetch(pathname, { headers })).status).toBe(503)
+  call.mockResolvedValueOnce({ available: false, job: { intent_id: id, state: 'completed', stage: 'finished' } })
+  expect((await fetch(pathname, { headers })).status).toBe(503)
+  expect((await fetch(f.endpoint + '/workspaces/relocation/jobs/not-a-job', { headers })).status).toBe(400)
+  expect((await fetch(f.endpoint + '/workspaces/relocation/current?target=forged', { headers })).status).toBe(400)
+  expect(call).toHaveBeenCalledTimes(3)
+})

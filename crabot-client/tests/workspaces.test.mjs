@@ -103,3 +103,19 @@ test('initial confirmation keeps one stable job id, strict receipt and header-on
   await assert.rejects(client.startRelocation(request), { kind: 'unreachable' }); assert.equal(attempts, 1)
   assert.equal(request.intent_id, id)
 })
+
+test('status keeps historical commit distinct from full completion, validates a fixed job and never starts an action', async () => {
+  const job = { intent_id: id, state: 'committed', stage: 'finished', source: '/projects/old', target: '/projects/new' }, f = fixture({ available: true, job })
+  assert.deepEqual(await f.client.currentRelocation(), { available: true, job })
+  assert.deepEqual(await f.client.relocationStatus(id), { available: true, job })
+  assert.deepEqual(f.calls.map(call => [call.url, call.options.method]), [
+    ['http://localhost:3000/api/workspaces/relocation/current', 'GET'], ['http://localhost:3000/api/workspaces/relocation/jobs/' + id, 'GET'],
+  ])
+  assert.throws(() => f.client.relocationStatus('../private'))
+  assert.throws(() => f.client.relocationStatus(undefined))
+  assert.deepEqual(await fixture({ available: false, job: null }).client.currentRelocation(), { available: false, job: null })
+  for (const body of [{ available: false, job }, { available: true, job: { ...job, state: 'completed', stage: 'unknown' } },
+    { available: true, job: { ...job, intent_id: '22345678-1234-4123-8123-123456789abc' } }]) {
+    await assert.rejects(fixture(body).client.relocationStatus(id), { kind: 'validation' })
+  }
+})

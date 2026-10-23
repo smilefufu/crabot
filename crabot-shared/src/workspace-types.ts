@@ -106,6 +106,25 @@ export interface WorkspaceRelocationUnchanged {
 }
 export type WorkspaceRelocationStartResult = WorkspaceRelocationAccepted | WorkspaceRelocationUnchanged
 
+export interface WorkspaceRelocationJobQuery {
+  intent_id?: string
+}
+export interface VerifyWorkspaceRelocationJobQueryResult extends WorkspaceRelocationJobQuery {
+  verified: true
+}
+export type WorkspaceRelocationJobStage = 'preparing' | 'stopping' | 'moving' | 'closing_executors' | 'switching' | 'validating' | 'finalizing' | 'restoring' | 'finished' | 'unknown'
+export interface WorkspaceRelocationJobStatus {
+  intent_id: string
+  state: 'preparing' | 'running' | 'completed' | 'needs_attention' | 'committed'
+  stage: WorkspaceRelocationJobStage
+  source?: string
+  target?: string
+}
+export interface WorkspaceRelocationStatusResult {
+  available: boolean
+  job: WorkspaceRelocationJobStatus | null
+}
+
 export interface VerifyWorkspaceRelocationRequestParams {
   intent_id: string
   intent_sha256: string

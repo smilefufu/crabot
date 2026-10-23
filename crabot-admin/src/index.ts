@@ -3,11 +3,11 @@ import { assertWorkspaceExecutionAllowed, workspaceMaintenancePending } from 'cr
 import { createWorkspaceFinalizationWeb } from './workspace-finalization-web.js'
 import { createWorkspaceRecoveryFinalizationWeb } from './workspace-recovery-finalization-web.js'
 import { parseFriendPermissionRecords, serializeFriendPermissionRecords } from './friend-permission-store.js'
-import { WorkspaceExecutionInventorySchema, WorkspaceIdSchema, WorkspaceRelocationStartResultSchema } from 'crabot-client'
+import { WorkspaceExecutionInventorySchema, WorkspaceIdSchema, WorkspaceRelocationStatusResultSchema, WorkspaceRelocationStartResultSchema } from 'crabot-client'
 import { WorkspaceService } from './workspaces.js'
 import { WorkspaceWebAdmissions, requiresWorkspaceWebAdmission } from './workspace-web-admissions.js'
-import { parseWorkspaceRelocationStartRequest } from 'crabot-shared'
-import type { VerifyWorkspaceRelocationStartParams, VerifyWorkspaceRelocationStartResult, VerifyWorkspaceRelocationRecoveryRequestParams, VerifyWorkspaceRelocationRecoveryRequestResult, VerifyWorkspaceRelocationRequestParams, VerifyWorkspaceRelocationRequestResult, QuiesceWorkspaceRelocationWebParams, QuiesceWorkspaceRelocationWebResult } from 'crabot-shared'
+import { parseWorkspaceRelocationStartRequest, parseWorkspaceRelocationJobQuery } from 'crabot-shared'
+import type { WorkspaceRelocationJobQuery, VerifyWorkspaceRelocationJobQueryResult, VerifyWorkspaceRelocationStartParams, VerifyWorkspaceRelocationStartResult, VerifyWorkspaceRelocationRecoveryRequestParams, VerifyWorkspaceRelocationRecoveryRequestResult, VerifyWorkspaceRelocationRequestParams, VerifyWorkspaceRelocationRequestResult, QuiesceWorkspaceRelocationWebParams, QuiesceWorkspaceRelocationWebResult } from 'crabot-shared'
 import { resolveManagedMcpConfig } from './managed-mcp-runtime.js'
 import type { ConversationRequestSource } from 'crabot-shared'
 import type { VerifyMemoryAccessResult, VerifyMemoryRequestAccessResult } from 'crabot-shared'
@@ -1030,6 +1030,7 @@ export class AdminModule extends ModuleBase {
 
     this.registerMethod('verify_workspace_relocation_recovery_request', this.handleVerifyWorkspaceRelocationRecoveryRequest.bind(this))
     this.registerMethod('verify_workspace_relocation_start', this.handleVerifyWorkspaceRelocationStart.bind(this))
+    this.registerMethod('verify_workspace_relocation_job_query', this.handleVerifyWorkspaceRelocationJobQuery.bind(this))
     this.registerMethod('verify_workspace_relocation_request', this.handleVerifyWorkspaceRelocationRequest.bind(this))
     this.registerMethod('quiesce_workspace_relocation_web', this.handleQuiesceWorkspaceRelocationWeb.bind(this))
     this.registerMethod('prepare_workspace_relocation_completion', (params, context) => this.workspaceFinalizationAccess().prepare(params, context?.authorizationBearer))
@@ -1764,6 +1765,10 @@ export class AdminModule extends ModuleBase {
         if (req.method === 'GET') sendJson(res, 200, { maintenance: workspaceMaintenancePending(path.resolve(this.adminConfig.data_dir, '..')) || this.workspaceWebAccess().isClosed() })
         else sendJson(res, 405, { code: 'WORKSPACE_METHOD_NOT_ALLOWED', message: '工作区维护状态仅支持读取。' })
         return
+      }
+      const workspaceJob = pathname.match(/^\/api\/workspaces\/relocation\/jobs\/([^/]+)$/)
+      if (pathname === '/api/workspaces/relocation/current' || workspaceJob) {
+        await this.handleWorkspaceRelocationStatusHttp(req, res, url, workspaceJob?.[1]); return
       }
       if (pathname === '/api/workspaces/relocation/start') { await this.handleWorkspaceRelocationStartHttp(req, res); return }
       if (workspaceRequest && await this.workspaceService.handleWeb(req, res, pathname, () => this.readJsonBody(req, 65536))) return
@@ -3159,6 +3164,31 @@ export class AdminModule extends ModuleBase {
     }
   }
 
+  private async handleWorkspaceRelocationStatusHttp(req: IncomingMessage, res: ServerResponse, url: URL, intentId?: string): Promise<void> {
+    res.setHeader('Cache-Control', 'no-store')
+    if (req.method !== 'GET') { sendJson(res, 405, { code: 'WORKSPACE_METHOD_NOT_ALLOWED', message: '作业状态仅支持读取。' }); return }
+    try {
+      let query: WorkspaceRelocationJobQuery
+      try {
+        if (url.search) throw new Error('Unexpected query fields')
+        query = parseWorkspaceRelocationJobQuery(intentId === undefined ? {} : { intent_id: decodeURIComponent(intentId) })
+      } catch { sendJson(res, 400, { code: 'INVALID_PARAMS', message: '作业编号无效。' }); return }
+      const result = WorkspaceRelocationStatusResultSchema.safeParse(await this.rpcClient.callModuleManagerSensitive(
+        'get_workspace_relocation_status', query, this.config.moduleId, { authorizationBearer: req.headers.authorization!.slice(7), timeoutMs: 30_000 }))
+      if (!result.success || query.intent_id && result.data.job && result.data.job.intent_id !== query.intent_id) {
+        throw new RpcError('SERVICE_UNAVAILABLE', 'Workspace job observation unavailable')
+      }
+      sendJson(res, 200, result.data)
+    } catch (error) {
+      const code = (error as { code?: string }).code
+      let status = 503
+      if (code === 'UNAUTHORIZED') status = 401
+      else if (code === 'FORBIDDEN') status = 403
+      else if (code === 'INVALID_PARAMS') status = 400
+      sendJson(res, status, { code: status === 503 ? 'SERVICE_UNAVAILABLE' : code, message: '当前作业状态暂时无法核实，请稍后查看；未重发任何作业。' })
+    }
+  }
+
   /** Management handoff: this handler must not await its own file-admission drain. */
   private async handleWorkspaceRelocationStartHttp(req: IncomingMessage, res: ServerResponse): Promise<void> {
     res.setHeader('Cache-Control', 'no-store')
@@ -3310,6 +3340,17 @@ export class AdminModule extends ModuleBase {
   private async verifyHumanToken(token: string): Promise<JwtPayload | null> {
     const payload = await this.verifyAuthenticatedToken(token)
     return payload?.sub === 'admin' && !payload.agent_cli ? payload : null
+  }
+
+  private async handleVerifyWorkspaceRelocationJobQuery(
+    params: WorkspaceRelocationJobQuery, context?: RpcHandlerContext,
+  ): Promise<VerifyWorkspaceRelocationJobQueryResult> {
+    const snapshot = params && typeof params === 'object' && !Array.isArray(params) ? Object.freeze({ ...params }) : params
+    const bearer = context?.authorizationBearer
+    if (!bearer || !await this.verifyHumanToken(bearer)) {
+      throw new RpcError(this.isNonHumanToken(bearer) ? 'FORBIDDEN' : 'UNAUTHORIZED', 'Human Admin credential required')
+    }
+    return { verified: true, ...parseWorkspaceRelocationJobQuery(snapshot) }
   }
 
   private async handleVerifyWorkspaceRelocationStart(
