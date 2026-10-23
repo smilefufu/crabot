@@ -904,25 +904,36 @@ describe('MM reads workspace recovery handoff under current human authority', ()
   it('shares one initialized receipt, rechecks each current human and leaves its driver independent', async () => {
     const f = await fixture({ actualAdmin: true })
     const request = { intent_id: f.params.intent_id, recovery_id: randomUUID(), completion_sha256: 'a'.repeat(64), finalizing_sha256: 'b'.repeat(64), confirmed: true }
-    let initialize!: () => void, complete!: () => void
+    let initialize!: () => void, complete!: () => void, entered!: () => void
     const initialized = new Promise<void>(resolve => { initialize = resolve }), finished = new Promise<void>(resolve => { complete = resolve })
+    const entering = new Promise<void>(resolve => { entered = resolve })
+    const verifyHuman = f.manager.verifyWorkspaceRelocationJobQuery.bind(f.manager)
+    let admissions = 0
+    const verify = vi.spyOn(f.manager, 'verifyWorkspaceRelocationJobQuery').mockImplementation(async (...args: any[]) => {
+      const result = await verifyHuman(...args)
+      // Both real human admissions exceed the former one-second observation window.
+      if (++admissions <= 2) await new Promise(resolve => setTimeout(resolve, 1100))
+      return result
+    })
     const coordinator = { verify: vi.fn(async () => {}) }
-    const init = vi.spyOn(f.manager, 'initializeWorkspaceRelocationRecovery').mockImplementation(async () => { await initialized; return coordinator })
+    const init = vi.spyOn(f.manager, 'initializeWorkspaceRelocationRecovery').mockImplementation(async () => { entered(); await initialized; return coordinator })
     const driver = vi.spyOn(f.manager, 'completeWorkspaceRecovery').mockImplementation(() => finished)
     let first: Promise<any> | undefined, second: Promise<any> | undefined
     try {
       first = f.manager.startWorkspaceRelocationRecovery(request, 'fixture-human')
       second = f.manager.startWorkspaceRelocationRecovery({ ...request }, 'fixture-human')
-      await vi.waitFor(() => expect(init).toHaveBeenCalledOnce())
+      await Promise.race([entering, first])
+      expect(init).toHaveBeenCalledOnce()
       expect(driver).not.toHaveBeenCalled(); initialize()
       const expected = { intent_id: request.intent_id, recovery_id: request.recovery_id, accepted: true }
       expect(await first).toEqual(expected); expect(await second).toBe(await first)
+      expect(admissions).toBe(2)
       expect(driver).toHaveBeenCalledOnce(); expect(driver).toHaveBeenCalledWith(expect.not.objectContaining({ confirmed: true }), 'fixture-human')
       expect(coordinator.verify).toHaveBeenCalledOnce()
       await expect(f.manager.startWorkspaceRelocationRecovery({ ...request, completion_sha256: 'c'.repeat(64) }, 'fixture-human')).rejects.toMatchObject({ code: 'FORBIDDEN' })
       await fs.writeFile(path.join(f.data, 'human-revoked'), 'revoked')
       await expect(f.manager.startWorkspaceRelocationRecovery(request, 'fixture-human')).rejects.toMatchObject({ code: 'UNAUTHORIZED' })
-      expect(init).toHaveBeenCalledOnce(); expect(driver).toHaveBeenCalledOnce()
+      expect(init).toHaveBeenCalledOnce(); expect(driver).toHaveBeenCalledOnce(); expect(verify).toHaveBeenCalledTimes(4)
     } finally { initialize(); complete(); await Promise.allSettled([first, second].filter(Boolean)); await f.cleanup() }
   }, timeout)
   it('rejects missing identity before parsing and unknown initialization without replay', async () => {
