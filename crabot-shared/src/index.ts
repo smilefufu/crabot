@@ -133,6 +133,7 @@ export { parseVoiceConnection, voiceTerminalEntry, voiceSetupStatus } from './vo
 export * from './computer-use.js'
 
 export type { WorkspaceRecord, WorkspaceUsage, WorkspaceExecution, WorkspaceExecutionInventory, WorkspaceSummary, WorkspaceMaintenanceStatus, WorkspaceListResult,
+  VerifyWorkspaceRelocationStartParams, VerifyWorkspaceRelocationStartResult,
   WorkspaceRelocationPreviewRequest, WorkspaceRelocationPreviewResult, WorkspaceRelocationIssue,
   WorkspaceCreateRequest, WorkspaceUpdateRequest, WorkspaceRecordResult, WorkspaceGetResult, WorkspaceScanResult,
   WorkspaceRecoveryRuntimeStart, WorkspaceRecoveryRuntimeRegistration, WorkspaceRecoveryRuntimeInvocation,
@@ -162,3 +163,5 @@ export type { WorkspaceRecord, WorkspaceUsage, WorkspaceExecution, WorkspaceExec
 export { isStoragePermission, type StoragePermission, type DirectoryStoragePermission, type AllDirectoriesStoragePermission } from './storage-permission.js'
 
 export { workspaceMaintenancePending, assertWorkspaceExecutionAllowed } from './workspace-maintenance.js'
+
+export { parseWorkspaceRelocationStartRequest } from './workspace-start-request.js'

@@ -18,7 +18,7 @@ const SENSITIVE_METHODS: SensitiveRpcMethod[] = [
   'get_voice_config', 'submit_voice_turn', 'get_voice_turn_status', 'get_authorized_voice_turn', 'confirm_voice_turn',
   'verify_voice_runtime', 'register_voice_runtime', 'voice_admin_action', 'verify_voice_admin', 'sync_voice_terminal',
   'verify_memory_access',
-  'verify_workspace_relocation_request', 'quiesce_workspace_relocation_web',
+  'verify_workspace_relocation_start', 'verify_workspace_relocation_request', 'quiesce_workspace_relocation_web',
   'verify_workspace_relocation_recovery_request', 'verify_workspace_relocation_recovery_admission', 'verify_workspace_relocation_finalization', 'prepare_workspace_relocation_completion', 'resume_workspace_relocation_web',
   'verify_workspace_relocation_recovery_runtime', 'verify_workspace_relocation_recovery_root',
   'resume_workspace_relocation_recovery_web', 'verify_workspace_relocation_recovery_release', 'verify_workspace_relocation_recovery_finalization', 'prepare_workspace_relocation_recovery_completion',

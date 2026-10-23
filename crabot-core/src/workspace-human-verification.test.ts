@@ -32,6 +32,21 @@ async function reserveFixturePort(): Promise<ReturnType<typeof http.createServer
   throw new Error('No finite fixture port was available')
 }
 
+// Diagnostic-only observer: install after the real reader has attached; never copy header values.
+function observeActualAdminRecoveryRpc(callsFile: string): string {
+  return `(function(){
+    const fs=require('node:fs'),{default:Admin}=require(${JSON.stringify(path.resolve('../crabot-admin/dist/index.js'))});
+    const original=Admin.prototype.handleRequest,calls=JSON.parse(fs.readFileSync(${JSON.stringify(callsFile)},'utf8'));
+    Admin.prototype.handleRequest=function(req,res){
+      const pending=original.call(this,req,res);
+      if(['/prepare_workspace_relocation_recovery_completion','/resume_workspace_relocation_recovery_web'].includes(req.url)){
+        let body='';req.on('data',part=>body+=part);req.once('end',()=>{calls.push({method:req.url,authorization:req.headers.authorization?'present':undefined,body:JSON.parse(body)});fs.writeFileSync(${JSON.stringify(callsFile)},JSON.stringify(calls))});
+      }
+      return pending;
+    };
+  })();`
+}
+
 async function fixture(options: { withMemory?: boolean; inactiveMemory?: boolean; wrongRuntime?: boolean; result?: string; withAgent?: boolean; agentResult?: string; actualAgent?: boolean; businessAgent?: boolean; businessMemory?: boolean; processLifetimeMs?: number; backgroundShell?: boolean; validationHealth?: 'healthy' | 'unhealthy'; validationRuntimeMismatch?: boolean; validationRootOverride?: boolean; validationRegistration?: 'delayed' | 'exit'; memoryHealth?: 'healthy' | 'degraded'; memoryBootstrap?: boolean; actualAdmin?: boolean; adminReadyDelayMs?: number; quiesceResult?: string; orphanDuringStop?: boolean; extraModule?: 'running' | 'inactive' | 'tool'; historyWorkspace?: boolean } = {}) {
   if ((options.businessAgent || options.businessMemory) && (process.env.GITHUB_ACTIONS !== 'true' || process.env.CRABOT_WORKSPACE_BUSINESS_ONSTART_CI !== '1')) throw new Error('Business onStart is isolated CI only')
   const root = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'crabot-current-admin-')))
@@ -410,6 +425,62 @@ async function verifyRegisteredRuntimeGate({ manager, dataDir, coordinator, prep
     await manager.runtimeRegistry.removeRuntime(runtimePlan.modules[0].runtime_id)
   }
 }
+
+describe('actual Admin recovery RPC observer', () => {
+  it('keeps the actual body reader working and records only selected wire bodies with header presence', async () => {
+    const root = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'crabot-admin-observer-')))
+    const callsFile = path.join(root, 'calls.json'), script = path.join(root, 'observer.cjs'), secret = 'finite-observer-header-only'
+    await fs.writeFile(callsFile, '[]')
+    await fs.writeFile(script, `${observeActualAdminRecoveryRpc(callsFile)}
+      const http=require('node:http'),{default:Admin}=require(${JSON.stringify(path.resolve('../crabot-admin/dist/index.js'))});
+      const admin=Object.create(Admin.prototype);admin.methodHandlers=new Map(
+        ['/prepare_workspace_relocation_recovery_completion','/resume_workspace_relocation_recovery_web','/unobserved_read'].map(method=>[method.slice(1),(params,context)=>({received:params.marker,header:context.authorizationBearer===${JSON.stringify(secret)}})]));
+      const server=http.createServer((req,res)=>admin.handleRequest(req,res));server.listen(0,'127.0.0.1',()=>process.send({port:server.address().port}));
+      process.on('message',()=>server.close(()=>process.exit(0)));setTimeout(()=>process.exit(1),30000).unref();`)
+    const child = spawn(process.execPath, [script], { stdio: ['ignore', 'ignore', 'inherit', 'ipc'] }), ended = once(child, 'exit')
+    try {
+      const [ready] = await Promise.race([once(child, 'message'), ended.then(() => { throw new Error('Finite observer exited before readiness') })])
+      for (const method of ['prepare_workspace_relocation_recovery_completion', 'resume_workspace_relocation_recovery_web', 'unobserved_read']) {
+        const response = await fetch(`http://127.0.0.1:${ready.port}/${method}`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + secret },
+          body: JSON.stringify({ id: randomUUID(), source: 'finite-observer', method, params: { marker: method } }) })
+        expect(await response.json()).toMatchObject({ success: true, data: { received: method, header: true } })
+      }
+      const observed = JSON.parse(await fs.readFile(callsFile, 'utf8'))
+      expect(observed.map((item: any) => item.method)).toEqual(['/prepare_workspace_relocation_recovery_completion', '/resume_workspace_relocation_recovery_web'])
+      expect(observed.every((item: any) => item.authorization === 'present' && item.body.params.marker === item.method.slice(1))).toBe(true)
+      expect(JSON.stringify(observed)).not.toContain(secret)
+    } finally { if (child.connected) child.send('finish'); await ended; await fs.rm(root, { recursive: true, force: true }) }
+  }, process.platform === 'win32' ? 120000 : 30000)
+})
+
+describe('MM verifies an initial workspace request without creating an intent', () => {
+  const timeout = process.platform === 'win32' ? 120000 : 30000
+  it.each(['actual Admin', 'no human', 'wrong runtime', 'false', 'extra', 'hash'])('uses only the current fixed Admin and retains all files: %s', async mode => {
+    const f = await fixture({ actualAdmin: mode === 'actual Admin', wrongRuntime: mode === 'wrong runtime', result: mode })
+    const active = path.join(f.data, 'workspace-control/relocation-active'), retained = path.join(f.data, 'retained-initial-fixture')
+    const before = await fs.readFile(path.join(active, 'relocation.json'))
+    const params = { intent_id: randomUUID(), target: path.join(f.root, 'initial-target'), expected_revision: 1, confirmed: true as const }
+    const bearer = mode === 'no human' ? undefined : 'fixture-human'
+    try {
+      await fs.rename(active, retained)
+      const runtimes = await f.manager.runtimeRegistry.listRecords(), child = f.manager.processes.get('admin-web')
+      const request = f.manager.verifyWorkspaceRelocationStartRequest(params, bearer)
+      if (mode === 'actual Admin') await expect(request).resolves.toEqual({ verified: true, ...params })
+      else await expect(request).rejects.toMatchObject({ code: mode === 'no human' ? 'UNAUTHORIZED' : 'SERVICE_UNAVAILABLE' })
+      const calls = await f.calls()
+      if (mode === 'actual Admin') expect(calls.map(item => item.method)).toEqual(['/get_runtime_identity', '/verify_workspace_relocation_start'])
+      if (mode === 'no human') expect(calls).toEqual([])
+      if (mode === 'wrong runtime') expect(calls.every(item => !item.authorization)).toBe(true)
+      expect(JSON.stringify(calls.map(item => item.body))).not.toContain('fixture-human')
+      expect(await f.manager.runtimeRegistry.listRecords()).toEqual(runtimes)
+      expect(f.manager.processes.get('admin-web')).toBe(child); expect(child.exitCode).toBeNull()
+      expect(await fs.readFile(path.join(retained, 'relocation.json'))).toEqual(before)
+      await expect(fs.stat(active)).rejects.toMatchObject({ code: 'ENOENT' })
+      await expect(fs.stat(params.target)).rejects.toMatchObject({ code: 'ENOENT' })
+      expect(f.manager.workspaceCoordinatorGrant).toBeUndefined()
+    } finally { await f.cleanup() }
+  }, timeout)
+})
 
 describe('MM consumes a human intent proof only from its current Admin runtime', () => {
   it('retains the actual Web request body across authentication without diagnostic listeners consuming it', async () => {
@@ -2499,7 +2570,9 @@ describe('normal fixed-job Admin completion preparation', () => {
         await new Promise<void>(resolve => web.close(() => resolve()))
         const admin = cold.modules.get('admin-web')
         const adminMain = path.join(f.data, 'cold-admin-main.cjs')
-        await fs.writeFile(adminMain, `setTimeout(()=>process.exit(1),${processLifetimeMs}).unref();require(${JSON.stringify(path.resolve('../crabot-admin/dist/main.js'))});`)
+        await fs.writeFile(adminMain, `
+          ${observeActualAdminRecoveryRpc(path.join(f.data, 'calls.json'))}
+          setTimeout(()=>process.exit(1),${processLifetimeMs}).unref();require(${JSON.stringify(path.resolve('../crabot-admin/dist/main.js'))});`)
         admin.entry = `"${process.execPath}" "${adminMain}"`
         admin.skip_health_check = false
         admin.env = { ...admin.env, CRABOT_ADMIN_DATA_DIR: path.join(f.data, 'admin'), CRABOT_ADMIN_WEB_PORT: String(webPort) }

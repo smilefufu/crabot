@@ -46,6 +46,9 @@ import {
   type VerifyWorkspaceRelocationRecoveryReleaseResult,
   type ReleaseWorkspaceRelocationRecoveryCompletionResult,
   type ResumeWorkspaceRelocationRecoveryWebResult,
+  type VerifyWorkspaceRelocationStartParams,
+  type VerifyWorkspaceRelocationStartResult,
+  parseWorkspaceRelocationStartRequest,
   type VerifyWorkspaceRelocationRecoveryAdmissionParams,
   type VerifyWorkspaceRelocationRecoveryAdmissionResult,
   type VerifyWorkspaceRelocationRecoveryRequestParams,
@@ -1419,6 +1422,29 @@ export class ModuleManager {
   // ============================================================================
   // 进程管理
   // ============================================================================
+
+  /** Initial human confirmation only; no intent, lock or coordinator is created here. */
+  private async verifyWorkspaceRelocationStartRequest(
+    params: VerifyWorkspaceRelocationStartParams, bearer?: string,
+  ): Promise<VerifyWorkspaceRelocationStartResult> {
+    const snapshot = params && typeof params === 'object' && !Array.isArray(params) ? Object.freeze({ ...params }) : params
+    if (typeof bearer !== 'string' || !bearer) throw Object.assign(new Error('Human Admin credential required'), { code: 'UNAUTHORIZED' })
+    const unavailable = () => Object.assign(new Error('当前人类迁移确认无法核实，未创建迁移作业。'), { code: 'SERVICE_UNAVAILABLE' })
+    try {
+      return await this.withCurrentAdminRpc(5000, async (rpc, verify) => {
+        let response: unknown
+        try { response = await rpc.call('verify_workspace_relocation_start', snapshot, { authorizationBearer: bearer }) }
+        catch (error) { await verify(); throw error }
+        await verify()
+        const expected = { verified: true as const, ...parseWorkspaceRelocationStartRequest(snapshot) }
+        if (sha256CanonicalJson(response) !== sha256CanonicalJson(expected)) throw unavailable()
+        return Object.freeze(expected)
+      })
+    } catch (error) {
+      if (['UNAUTHORIZED', 'FORBIDDEN', 'INVALID_PARAMS'].includes((error as { code?: string }).code ?? '')) throw error
+      throw unavailable()
+    }
+  }
 
   private async verifyWorkspaceRelocationRequest(
     params: VerifyWorkspaceRelocationRequestParams, bearer?: string,

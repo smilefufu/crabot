@@ -30,6 +30,17 @@ test('Windows preview observes actual directory ACL without creating a file or t
     assert.equal(native.inspectDirectoryWriteAccess(targetParent), true)
     const before = await fs.readdir(targetParent)
     permissions(targetParent, 'ReadAndExecute')
+    const ordinaryWrite = path.join(targetParent, 'denied-ordinary-write')
+    let denied = false
+    try { await fs.writeFile(ordinaryWrite, 'finite ACL test only', { flag: 'wx' }) }
+    catch (error) { if (!['EACCES', 'EPERM'].includes(error.code)) throw error; denied = true }
+    if (!denied || native.inspectDirectoryWriteAccess(targetParent) !== false) {
+      const acl = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+        `ConvertTo-Json -InputObject @((Get-Acl -LiteralPath $env:CRABOT_ACCESS_TEST_PATH).Access | Select-Object IsInherited,AccessControlType,FileSystemRights) -Compress`],
+        { env: { ...process.env, CRABOT_ACCESS_TEST_PATH: targetParent }, encoding: 'utf8' })
+      console.log('Windows target access diagnostic', { ordinary_write_denied: denied, native_writable: native.inspectDirectoryWriteAccess(targetParent), acl: JSON.parse(acl) })
+    }
+    assert.equal(denied, true, 'The fixture must deny actual ordinary file creation before checking the native observer')
     assert.equal(native.inspectDirectoryWriteAccess(targetParent), false)
     await assert.rejects(inspectWorkspaceRelocationTarget(source, path.join(targetParent, 'missing'),
       { protectedRoots: [], inspectTargetAccess: native.inspectDirectoryWriteAccess }), { code: 'WORKSPACE_UNAVAILABLE' })

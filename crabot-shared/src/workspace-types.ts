@@ -86,6 +86,16 @@ export interface WorkspaceScanResult {
   usage: WorkspaceUsage
 }
 
+export interface VerifyWorkspaceRelocationStartParams {
+  intent_id: string
+  target: string
+  expected_revision: number
+  confirmed: true
+}
+export interface VerifyWorkspaceRelocationStartResult extends VerifyWorkspaceRelocationStartParams {
+  verified: true
+}
+
 export interface VerifyWorkspaceRelocationRequestParams {
   intent_id: string
   intent_sha256: string
