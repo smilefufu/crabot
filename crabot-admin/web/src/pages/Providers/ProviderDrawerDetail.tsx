@@ -303,7 +303,7 @@ export const ProviderDrawerDetail: React.FC<ProviderDrawerDetailProps> = ({
             ) : (
               <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>未验证</span>
             )}
-            {provider.type === 'preset' && provider.preset_vendor && (
+            {(provider.format === 'gemini' || (provider.type === 'preset' && provider.preset_vendor)) && (
               <button
                 type="button"
                 className="provider-head__meta-action"

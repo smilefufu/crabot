@@ -1,9 +1,11 @@
 # Crabot 项目进度
 
-### Gemini 供应商测速：鉴权兼容修复待审查
+### Gemini 原生兼容：实现与真实网关验证通过，待 PR 审查
 
-- 2026-10-22：修复 Gemini 模型列表探测将 API Key 放在 query 导致 `api_key_in_query_deprecated` 的问题，改用 `Authorization: Bearer`，与既有聊天调用一致；保留当前 OpenAI 兼容端点和配置结构。
-- 新增草稿列表＋聊天验证、已保存供应商测速、401 短路三项回归，旧代码先复现两项失败；Admin 51 项及 Agent 适配器/缓存/思考映射 107 项通过，完成本次 diff review。独立 worktree 交付 PR；未调用真实网关模型或部署，不代表 Gemini 原生 API 支持。
+- 按已确认 [spec](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/specs/2026-10-23-gemini-native-compatibility-design.md) 实现原生 GeminiAdapter：流式文本、图片输入、函数调用/结果、thoughtSignature 原位历史与 Manager/builtin 存储恢复、思考映射及用量。Admin 改为原生目录/预检，手动 Gemini 可同步模型；30 秒有界操作，分页失败或空目录保留旧值。
+- Shared 152、Admin 63、Web 4 项及 Agent 相关回归通过，相关构建与完整 diff review 已完成；原生选择/流解析先在旧实现复现两项失败。保留既有三种适配器和默认引用，按 code-simplifier 简化本次分支后重验。旧 OpenAI 随机约 5 秒退避偶尔撞到默认 5 秒测试上限，扩大验证使用 10 秒测试预算，不改生产恢复或超时。
+- Node 22.22.3 加载 worktree 实际产物，对 gemini-4-argon-low 共四次生成全部 HTTP 200：完整短答、一次纯测试工具的两轮签名往返、合成图片识别 Green；工具只执行一次，真实响应保存再加载后投影相等。用量共 2603 输入/68 输出；证据 `/private/tmp/crabot-gemini-native-acceptance-20261023/summary.json`。原生目录解析得 33 个聊天型号，包含 gemini-4-argon，未逐型号生成验证。
+- 本地正式实例尚未升级，xinshu Gemini 仍为 inactive、27 项旧目录；默认及其它供应商未变。P6 主仓非草稿 PR，P7 合并后的本机升级/启用与现场回合验证分别跟踪，不把 worktree 验收写成本机部署完成。
 
 ### 执行器前置检查：最小提示词已完成真实输入重放
 

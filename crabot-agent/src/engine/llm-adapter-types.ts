@@ -27,6 +27,7 @@ import type {
   LLMTokenUsage,
   LLMCallDiagnostics,
   LLMRequestEvent,
+  GeminiProviderState,
 } from './types.js'
 
 // --- Interfaces ---
@@ -159,6 +160,7 @@ export interface LLMAdapterConfig {
 }
 
 export interface LLMCallResponse {
+  readonly providerState?: GeminiProviderState
   readonly content: ContentBlock[]
   readonly stopReason: string | null
   readonly usage?: LLMTokenUsage
@@ -302,6 +304,7 @@ async function withStreamConsumptionRetry(
           ...(result.text ? [{ type: 'text' as const, text: result.text }] : []),
           ...result.toolUseBlocks,
         ],
+        ...(result.providerState ? { providerState: result.providerState } : {}),
         stopReason: result.stopReason,
         usage: result.usage,
         diagnostics: {

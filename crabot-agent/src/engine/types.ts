@@ -65,10 +65,18 @@ export interface EngineUserMessage {
   readonly timestamp: number
 }
 
+/** Opaque native parts retained with their Engine tool-call identities. */
+export interface GeminiProviderState {
+  readonly format: 'gemini'
+  readonly content: { readonly role: 'model'; readonly parts: ReadonlyArray<Record<string, unknown>> }
+  readonly toolCalls: ReadonlyArray<{ readonly partIndex: number; readonly toolUseId: string }>
+}
+
 export interface EngineAssistantMessage {
   readonly id: string
   readonly role: 'assistant'
   readonly content: ContentBlock[]
+  readonly providerState?: GeminiProviderState
   readonly stopReason: 'end_turn' | 'tool_use' | 'max_tokens' | 'stop_sequence' | null
   readonly timestamp: number
   readonly usage?: LLMTokenUsage
@@ -222,6 +230,8 @@ export interface ToolDefinition {
 // --- Stream Chunks ---
 
 export type StreamChunk =
+  | { readonly type: 'heartbeat' }
+  | { readonly type: 'provider_state'; readonly state: GeminiProviderState }
   | { readonly type: 'text_delta'; readonly text: string }
   | { readonly type: 'tool_use_start'; readonly id: string; readonly name: string }
   | { readonly type: 'tool_use_delta'; readonly id: string; readonly inputJson: string }

@@ -1,17 +1,17 @@
 import { jsonrepair } from 'jsonrepair'
-import type { StreamChunk, ToolUseBlock, RawReasoningBlock, LLMTokenUsage } from './types'
+import type { StreamChunk, ToolUseBlock, RawReasoningBlock, LLMTokenUsage, GeminiProviderState } from './types'
 
 /**
  * 判断 chunk 是否对消费者可见。message_start 仅携带 messageId，
- * `StreamProcessor.process` 对其 noop —— 仅它属于「重试可安全丢弃」的元事件
- * （重试层为 callNonStreaming 的缓冲整流；streamWithRetry 供非 adapter 场景复用）。
+ * 与 heartbeat 都不生成可见内容，重试可安全丢弃这两类传输元事件。
  * 此谓词与 process() 中 noop 分支的判定保持单点同步。
  */
 export function isMaterialChunk(chunk: StreamChunk): boolean {
-  return chunk.type !== 'message_start'
+  return chunk.type !== 'message_start' && chunk.type !== 'heartbeat'
 }
 
 export interface ProcessedResponse {
+  readonly providerState?: GeminiProviderState
   readonly text: string
   readonly toolUseBlocks: ReadonlyArray<ToolUseBlock>
   readonly reasoningBlocks: ReadonlyArray<RawReasoningBlock>
@@ -26,6 +26,7 @@ interface ToolUseBuffer {
 }
 
 export class StreamProcessor {
+  private providerState?: GeminiProviderState
   private textParts: string[] = []
   private toolUseBlocks: ToolUseBlock[] = []
   private reasoningBlocks: RawReasoningBlock[] = []
@@ -81,6 +82,11 @@ export class StreamProcessor {
         }
         break
 
+      case 'provider_state':
+        this.providerState = chunk.state
+        break
+
+      case 'heartbeat':
       case 'message_start':
       case 'error':
         // Not tracked by StreamProcessor
@@ -90,6 +96,7 @@ export class StreamProcessor {
 
   finalize(): ProcessedResponse {
     return {
+      ...(this.providerState ? { providerState: this.providerState } : {}),
       text: this.textParts.join(''),
       toolUseBlocks: [...this.toolUseBlocks],
       reasoningBlocks: [...this.reasoningBlocks],
@@ -99,6 +106,7 @@ export class StreamProcessor {
   }
 
   reset(): void {
+    this.providerState = undefined
     this.textParts = []
     this.toolUseBlocks = []
     this.reasoningBlocks = []

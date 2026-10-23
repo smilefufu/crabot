@@ -9,6 +9,7 @@
  * 共享类型和工具函数在 llm-adapter-types.ts
  */
 
+import { GeminiAdapter } from './gemini-adapter.js'
 import { AnthropicAdapter } from './anthropic-adapter.js'
 import { OpenAIAdapter } from './openai-adapter.js'
 import { OpenAIResponsesAdapter } from './openai-responses-adapter.js'
@@ -32,6 +33,7 @@ export {
 } from './llm-adapter-types.js'
 
 // Re-export adapter classes and their normalization functions
+export { GeminiAdapter, normalizeMessagesForGemini } from './gemini-adapter.js'
 export { AnthropicAdapter, normalizeMessagesForAnthropic } from './anthropic-adapter.js'
 export { OpenAIAdapter, normalizeMessagesForOpenAI, toOpenAITool } from './openai-adapter.js'
 export { OpenAIResponsesAdapter, normalizeMessagesForResponses } from './openai-responses-adapter.js'
@@ -54,7 +56,7 @@ export function createAdapter(config: CreateAdapterConfig): LLMAdapter {
     case 'openai':
       return new OpenAIAdapter({ endpoint: config.endpoint, apikey: config.apikey })
     case 'gemini':
-      return new OpenAIAdapter({ endpoint: config.endpoint, apikey: config.apikey }, 'gemini')
+      return new GeminiAdapter({ endpoint: config.endpoint, apikey: config.apikey })
     case 'openai-responses':
       return new OpenAIResponsesAdapter({
         endpoint: config.endpoint,
