@@ -112,6 +112,8 @@ interface WorkspaceModuleRestorationGuard { assertCurrent: () => void; verify: (
 type WorkspaceModuleDefinitions = ReadonlyMap<ModuleId, { runtime: ModuleRuntime; hash: string; overrides: string }>
 const workspaceModuleProgressFields = new Set(['status', 'pid', 'version', 'protocol_version', 'registered_at', 'last_health_check', 'last_health_status', 'health_check_failures', 'restart_history', 'schema_mismatch', '_pendingBearer', '_pendingCutover'])
 const workspaceModuleDefinition = (runtime: ModuleRuntime) => Object.fromEntries(Object.entries(runtime).filter(([key]) => !workspaceModuleProgressFields.has(key)))
+const workspaceNormalJobCacheKeys = ['workspaceStopSequence', 'workspaceFilePreparation', 'workspaceWorkerClosure', 'workspaceRootSelection',
+  'workspaceValidationLaunch', 'workspaceValidationHealth', 'workspaceFinalizationPreparation', 'workspaceFinalizationResume', 'workspaceFinalizationCompletion'] as const
 
 interface WorkspaceRecoveryAdmission {
   request: VerifyWorkspaceRelocationRecoveryRequestParams
@@ -1524,6 +1526,9 @@ export class ModuleManager {
       return previous.reply
     }
     if (previous && previous.phase !== 'completed') throw Object.assign(new Error('已有工作区作业尚未完成，请查看当前作业。'), { code: 'SERVICE_UNAVAILABLE' })
+    if (this.workspaceRecoveryAdmission || this.workspaceRecoveryInitialization || this.workspaceRecoveryFinalizationGrant || this.workspaceFinalizationGrant) {
+      throw Object.assign(new Error('当前工作区作业仍在收尾，请查看当前作业。'), { code: 'SERVICE_UNAVAILABLE' })
+    }
     let resolve!: WorkspaceInitialJob['resolve'], reject!: WorkspaceInitialJob['reject']
     const reply = new Promise<WorkspaceRelocationStartResult>((yes, no) => { resolve = yes; reject = no })
     const job: WorkspaceInitialJob = { request: Object.freeze(request), fingerprint, reply, resolve, reject, phase: 'preparing', stage: 'preparing' }
@@ -2975,9 +2980,17 @@ export class ModuleManager {
         if (!grant || grant.phase !== 'resumed' || !grant.verifyRestored || grant.job.recovery_id !== request.recovery_id) throw failure()
         grant.verifyRestored(); await grant.verifyHealth(); grant.verifyRestored()
         const record = require('../../scripts/lib/workspace-recovery-records.mjs').readWorkspaceRecoveryCoordinator(this.dataDir, request.recovery_id)
+        const scope = require('../../scripts/lib/workspace-recovery-admission.mjs').readWorkspaceRecoveryCompletionScope(this.dataDir, request)
+        const original = { intent_id: request.intent_id, intent_sha256: sha256CanonicalJson(scope.state.intent) }, initial = this.workspaceInitialJob
+        if (initial?.proof && sha256CanonicalJson(initial.proof) === sha256CanonicalJson(original) && initial.completion) {
+          await initial.completion
+          grant.verifyRestored(); await grant.verifyHealth(); grant.verifyRestored()
+        }
+        const retireOriginal = this.prepareRecoveredWorkspaceJobRetirement(original, scope.state.modules.modules, scope.state.launch.process)
         stage = 'coordinator-exit'; grant.revoked = true; coordinator.close()
         await this.closeWorkspaceCoordinatorChannel(coordinator.child)
         if (coordinator.child.connected || require('../../scripts/lib/known-process-exit.cjs').probeKnownProcessExit([record.launch.process]).state !== 'stopped') throw failure()
+        retireOriginal()
         if (this.workspaceRecoveryFinalizationGrant === grant) this.workspaceRecoveryFinalizationGrant = undefined
         if (this.workspaceRecoveryInitializations.get(request.recovery_id) === initialized) this.workspaceRecoveryInitializations.delete(request.recovery_id)
         for (const cache of [this.workspaceRecoveryRuntimePreparations, this.workspaceRecoveryRuntimeCleanups, this.workspaceRecoveryValidationLaunches,
@@ -2994,6 +3007,35 @@ export class ModuleManager {
     })
     this.workspaceRecoveryCompletions.set(request.recovery_id, { fingerprint, bearerHash, pending })
     return pending
+  }
+
+  /** Capture this original job while the recovery still owns its lock; clear only identical references after exit. */
+  private prepareRecoveredWorkspaceJobRetirement(request: VerifyWorkspaceRelocationRequestParams, modules: ReadonlyArray<WorkspaceModuleScope>, originalCoordinator: WorkerProcessIdentity): () => void {
+    const fingerprint = sha256CanonicalJson(request), caches = workspaceNormalJobCacheKeys.map(key => [key, this[key]] as const)
+    const moduleStop = this.workspaceModuleStop, proof = this.workspaceValidationProof
+    const coordinator = this.workspaceCoordinatorGrant, finalization = this.workspaceFinalizationGrant
+    const coordinatorHash = sha256CanonicalJson(originalCoordinator)
+    const initial = this.workspaceInitialJob, ownInitial = initial?.proof && sha256CanonicalJson(initial.proof) === fingerprint ? initial : undefined
+    const failure = () => Object.assign(new Error('当前恢复的原作业内存归属无法核实，未清理其它作业。'), { code: 'SERVICE_UNAVAILABLE' })
+    if (caches.some(([, value]) => value && value.fingerprint !== fingerprint)) throw failure()
+    if (moduleStop && moduleStop.fingerprint !== sha256CanonicalJson(modules)) throw failure()
+    if (proof && sha256CanonicalJson(proof.request) !== fingerprint) throw failure()
+    if (coordinator && (sha256CanonicalJson({ intent_id: coordinator.proof.intent_id, intent_sha256: coordinator.proof.intent_sha256 }) !== fingerprint
+      || sha256CanonicalJson(coordinator.identity) !== coordinatorHash)) throw failure()
+    if (finalization && (sha256CanonicalJson(finalization.request) !== fingerprint || sha256CanonicalJson(finalization.launch.process) !== coordinatorHash)) throw failure()
+    if (ownInitial && !['needs_attention', 'completed'].includes(ownInitial.phase)) throw failure()
+    if (initial && !ownInitial && ['accepted', 'needs_attention'].includes(initial.phase)) throw failure()
+    return () => {
+      if (coordinator && this.workspaceCoordinatorGrant === coordinator) {
+        coordinator.revoked = true; coordinator.revoke?.()
+        if (this.workspaceCoordinatorGrant === coordinator) this.workspaceCoordinatorGrant = undefined
+      }
+      if (finalization && this.workspaceFinalizationGrant === finalization) { finalization.revoked = true; this.workspaceFinalizationGrant = undefined }
+      for (const [key, value] of caches) if (this[key] === value) this[key] = undefined
+      if (this.workspaceModuleStop === moduleStop) this.workspaceModuleStop = undefined
+      if (this.workspaceValidationProof === proof) this.workspaceValidationProof = undefined
+      if (ownInitial && this.workspaceInitialJob === ownInitial) { ownInitial.phase = 'completed'; ownInitial.stage = 'finished' }
+    }
   }
 
   /** Observe this one completion effect under the current role; this performs no file release. */
@@ -3474,8 +3516,7 @@ export class ModuleManager {
         if (!grant || grant.phase !== 'released' || sha256CanonicalJson(grant.request) !== fingerprint) throw failure()
         const current = grant, records = require('../../scripts/lib/workspace-relocation-intent.mjs')
         const moduleStop = this.workspaceModuleStop, moduleScopeHash = sha256CanonicalJson(records.readWorkspaceRelocationArchivedState(this.dataDir, request.intent_id).modules.modules)
-        const cacheKeys = ['workspaceStopSequence', 'workspaceFilePreparation', 'workspaceWorkerClosure', 'workspaceRootSelection',
-          'workspaceValidationLaunch', 'workspaceValidationHealth', 'workspaceFinalizationPreparation', 'workspaceFinalizationResume'] as const
+        const cacheKeys = workspaceNormalJobCacheKeys
         const ownsCaches = () => {
           if (this.workspaceFinalizationGrant !== current || this.workspaceFinalizationCompletion?.pending !== pending) throw failure()
           for (const key of cacheKeys) if (this[key] && this[key]!.fingerprint !== fingerprint) throw failure()
@@ -3501,7 +3542,6 @@ export class ModuleManager {
         this.workspaceValidationProof = undefined
         this.workspaceCoordinatorGrant = undefined
         this.workspaceFinalizationGrant = undefined
-        this.workspaceFinalizationCompletion = undefined
         this.workspaceRecoveryJob = undefined
         return result
       } catch (cause) {

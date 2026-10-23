@@ -49,13 +49,13 @@ defaults:
 
 jobs:
   core:
-    name: ${{ matrix.suite == 'business' && 'Business workspace runtime' || matrix.suite == 'archive' && 'Archived workspace records' || matrix.suite == 'recovery-terminal' && 'Cold workspace release' || matrix.suite == 'recovery-services' && 'Cold workspace service restoration' || matrix.suite == 'recovery-admin' && 'Cold workspace Admin restoration' || matrix.suite == 'recovery' && 'Cold workspace recovery' || matrix.suite == 'completion' && 'Workspace job completion' || 'Fixed workspace lifecycle' }} ${{ matrix.os }}
+    name: ${{ matrix.suite == 'business' && 'Business workspace runtime' || matrix.suite == 'archive' && 'Archived workspace records' || matrix.suite == 'recovery-terminal' && 'Cold workspace release' || matrix.suite == 'recovery-services' && 'Cold workspace service restoration' || matrix.suite == 'recovery-admin' && 'Cold workspace Admin restoration' || matrix.suite == 'recovery' && 'Cold workspace recovery' || matrix.suite == 'owned' && 'Owned workspace migrations' || matrix.suite == 'owned-recovery' && 'Same MM workspace recovery' || matrix.suite == 'completion' && 'Workspace job completion' || 'Fixed workspace lifecycle' }} ${{ matrix.os }}
     timeout-minutes: ${{ matrix.os == 'windows-latest' && 45 || 25 }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-22.04, macos-14, macos-15-intel, windows-latest]
-        suite: [finite, business, archive, recovery, recovery-terminal, recovery-services, recovery-admin, completion]
+        suite: [finite, business, archive, recovery, recovery-terminal, recovery-services, recovery-admin, owned, owned-recovery, completion]
     runs-on: ${{ matrix.os }}
     concurrency:
       group: workspace-core-${{ github.ref }}-${{ matrix.os }}-${{ matrix.suite }}
@@ -93,11 +93,19 @@ jobs:
       - name: Original lifecycle and maintenance regressions
         if: matrix.suite == 'finite'
         working-directory: crabot-core
-        run: node node_modules/vitest/vitest.mjs run src/process-tree.test.ts src/process-tree-exit-race.test.ts src/module-manager-lifecycle.test.ts src/module-runtime-registry.test.ts src/module-manager-health.test.ts src/module-manager-advanced.test.ts src/workspace-maintenance.test.ts src/workspace-recovery-runtime.test.ts src/workspace-module-restoration.test.ts src/workspace-runtime-gate.test.ts src/workspace-module-scope.test.ts --maxWorkers=1 --minWorkers=1
+        run: node node_modules/vitest/vitest.mjs run src/process-tree.test.ts src/process-tree-exit-race.test.ts src/module-manager-lifecycle.test.ts src/module-runtime-registry.test.ts src/module-manager-health.test.ts src/module-manager-advanced.test.ts src/workspace-maintenance.test.ts src/workspace-recovered-job-retirement.test.ts src/workspace-recovery-runtime.test.ts src/workspace-module-restoration.test.ts src/workspace-runtime-gate.test.ts src/workspace-module-scope.test.ts --maxWorkers=1 --minWorkers=1
       - name: Actual fixed job launch and technical health without business onStart
         if: ${{ matrix.suite == 'finite' && !cancelled() && steps.compile.outcome == 'success' }}
         working-directory: crabot-core
-        run: node node_modules/vitest/vitest.mjs run src/workspace-human-verification.test.ts --testNamePattern='finite cold terminal diagnostics|MM reads workspace job status|MM owns the initial|MM verifies an initial|actual Admin recovery RPC observer|post-relocation validation launches|new runtime health and Root' --maxWorkers=1 --minWorkers=1
+        run: node node_modules/vitest/vitest.mjs run src/workspace-human-verification.test.ts --testNamePattern='^(?!.*completes two actually owned).*(?:finite cold terminal diagnostics|MM reads workspace job status|MM owns the initial|MM verifies an initial|actual Admin recovery RPC observer|post-relocation validation launches|new runtime health and Root)' --maxWorkers=1 --minWorkers=1
+      - name: Actual two owned SDK migrations and return to the default root
+        if: ${{ matrix.suite == 'owned' && !cancelled() && steps.compile.outcome == 'success' }}
+        working-directory: crabot-core
+        run: node node_modules/vitest/vitest.mjs run src/workspace-human-verification.test.ts --testNamePattern='completes two actually owned initial jobs' --maxWorkers=1 --minWorkers=1
+      - name: Same MM failed normal job, current recovery and another SDK migration
+        if: ${{ matrix.suite == 'owned-recovery' && !cancelled() && steps.compile.outcome == 'success' }}
+        working-directory: crabot-core
+        run: node node_modules/vitest/vitest.mjs run src/workspace-human-verification.test.ts --testNamePattern='same MM workspace recovery and later migration' --maxWorkers=1 --minWorkers=1
       - name: Actual archived workspace records and bounded terminal failures
         if: ${{ matrix.suite == 'archive' && !cancelled() && steps.compile.outcome == 'success' }}
         working-directory: crabot-core

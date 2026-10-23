@@ -590,6 +590,16 @@ describe('MM owns the initial workspace migration job', () => {
       expect(require('../../scripts/lib/cli-lock.mjs').cliLockToken(path.join(f.data, 'cli.lock'))).toBeUndefined()
     } finally { await f.cleanup() }
   }, timeout)
+  it.each(['workspaceRecoveryAdmission', 'workspaceRecoveryInitialization', 'workspaceRecoveryFinalizationGrant', 'workspaceFinalizationGrant'])('refuses another initial job while its original %s is still settling', async key => {
+    const f = await initial()
+    try {
+      f.manager[key] = { revoked: true }
+      await expect(f.manager.startWorkspaceRelocation(f.start, 'fixture-human')).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
+      expect(f.manager.workspaceInitialJob).toBeUndefined()
+      await expect(fs.stat(path.join(f.data, 'workspace-control/relocation-active'))).rejects.toMatchObject({ code: 'ENOENT' })
+      await expect(fs.stat(f.start.target)).rejects.toMatchObject({ code: 'ENOENT' })
+    } finally { f.manager[key] = undefined; await f.cleanup() }
+  }, timeout)
   it.runIf(process.env.GITHUB_ACTIONS === 'true')('completes two actually owned initial jobs and reopens original Web without reviving old work', async () => {
     const jobBudget = process.platform === 'win32' ? 600000 : 240000
     const f = await fixture({ actualAdmin: true, actualAgent: true, validationHealth: 'healthy', extraModule: 'running', processLifetimeMs: jobBudget * 2 + 60000 })
@@ -636,6 +646,57 @@ describe('MM owns the initial workspace migration job', () => {
       expect(require('../../scripts/lib/cli-lock.mjs').cliLockToken(path.join(f.data, 'cli.lock'))).toBeUndefined()
     } finally { await f.cleanup() }
   }, timeout)
+})
+
+describe('same MM workspace recovery and later migration', () => {
+  const budget = process.platform === 'win32' ? 600000 : 240000
+  it.runIf(process.env.GITHUB_ACTIONS === 'true')('recovers a failed owned job then performs a new migration in that same MM', async () => {
+    const f = await fixture({ actualAdmin: true, actualAgent: true, validationHealth: 'healthy', extraModule: 'running', processLifetimeMs: budget * 3 + 60000 })
+    const records = require('../../scripts/lib/workspace-relocation-intent.mjs'), native = require('../../scripts/lib/process-identity.cjs')
+    try {
+      expect(typeof native.renameFileNoReplace).toBe('function')
+      await fs.rename(path.join(f.data, 'workspace-control/relocation-active'), path.join(f.data, 'retained-initial-fixture'))
+      const catalog = new WorkspaceCatalog({ dataRoot: f.data, files: native }), first = { intent_id: randomUUID(), target: path.join(f.root, 'recover-in-place'), expected_revision: (await catalog.snapshot()).revision, confirmed: true as const }
+      const { HttpClient, WorkspaceClient } = require('../../crabot-client/dist/index.js')
+      const sdk = new WorkspaceClient(new HttpClient({ endpoint: `http://127.0.0.1:${f.port}/api`, token: () => 'fixture-human' }))
+      const originalRpc = f.manager.withCurrentAdminRpc.bind(f.manager)
+      let injected = false
+      const corrupt = vi.spyOn(f.manager, 'withCurrentAdminRpc').mockImplementation((timeout: number, action: any) => originalRpc(timeout, (rpc: any, verify: any) => action({ ...rpc,
+        call: async (method: string, ...args: any[]) => {
+          const response = await rpc.call(method, ...args)
+          if (method === 'prepare_workspace_relocation_completion' && !injected) { injected = true; return { ...response, unexpected: true } }
+          return response
+        },
+      }, verify)))
+      try {
+        expect(await sdk.startRelocation(first)).toEqual({ intent_id: first.intent_id, accepted: true })
+        await f.manager.workspaceInitialJob.completion
+      } finally { corrupt.mockRestore() }
+      expect(injected).toBe(true); expect(f.manager.workspaceInitialJob.phase).toBe('needs_attention')
+      expect(f.manager.workspaceFinalizationCompletion).toBeDefined()
+      const fence = records.readWorkspaceRelocationFinalizing(f.data, first.intent_id), archived = records.readWorkspaceRelocationArchivedState(f.data, first.intent_id)
+      expect(require('../../scripts/lib/known-process-exit.cjs').probeKnownProcessExit([archived.launch.process]).state).toBe('stopped')
+      const request = { intent_id: first.intent_id, recovery_id: randomUUID(), completion_sha256: sha256CanonicalJson(archived.completion), finalizing_sha256: sha256CanonicalJson(fence) }
+      expect(await f.manager.completeWorkspaceRecovery(request, 'fixture-human')).toMatchObject({ resumed: true, ...request })
+      expect(f.manager.workspaceInitialJob.phase).toBe('completed')
+      expect((await sdk.relocationStatus(first.intent_id)).job).toMatchObject({ state: 'completed', stage: 'finished' })
+      expect((await catalog.snapshot()).storage_root).toBe(first.target)
+      const next = { intent_id: randomUUID(), target: path.join(f.data, 'workspaces'), expected_revision: (await catalog.snapshot()).revision, confirmed: true as const }
+      expect(await sdk.startRelocation(next)).toEqual({ intent_id: next.intent_id, accepted: true })
+      await f.manager.workspaceInitialJob.completion
+      expect(f.manager.workspaceInitialJob.phase).toBe('completed')
+      expect((await sdk.currentRelocation()).job).toMatchObject({ intent_id: next.intent_id, state: 'completed', stage: 'finished' })
+      expect((await catalog.snapshot()).storage_root).toBe(next.target)
+      expect(f.manager.modules.get('fixture-channel').status).toBe('running')
+      const ledger = JSON.parse(await fs.readFile(path.join(f.data, 'agent/worker-ledgers/channel%3A%3Asession.json'), 'utf8'))
+      expect(ledger.workers.length).toBeGreaterThan(0); expect(ledger.workers.every((worker: any) => worker.task.status === 'closed')).toBe(true)
+      for (const id of [first.intent_id, next.intent_id]) {
+        expect(records.readWorkspaceRelocationReleased(f.data, id)).not.toBeNull()
+        expect(require('../../scripts/lib/known-process-exit.cjs').probeKnownProcessExit([records.readWorkspaceRelocationArchivedState(f.data, id).launch.process]).state).toBe('stopped')
+      }
+      expect(require('../../scripts/lib/workspace-maintenance.cjs').workspaceMaintenancePending(f.data)).toBe(false)
+    } finally { await f.cleanup() }
+  }, budget * 3)
 })
 
 describe('finite cold terminal diagnostics', () => {
