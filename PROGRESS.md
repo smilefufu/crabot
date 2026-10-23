@@ -1,9 +1,10 @@
 # Crabot 项目进度
 
-### Gemini 供应商测速：鉴权兼容修复待审查
+### Gemini 原生兼容：Spec 待确认，未实现
 
-- 2026-10-22：修复 Gemini 模型列表探测将 API Key 放在 query 导致 `api_key_in_query_deprecated` 的问题，改用 `Authorization: Bearer`，与既有聊天调用一致；保留当前 OpenAI 兼容端点和配置结构。
-- 新增草稿列表＋聊天验证、已保存供应商测速、401 短路三项回归，旧代码先复现两项失败；Admin 51 项及 Agent 适配器/缓存/思考映射 107 项通过，完成本次 diff review。独立 worktree 交付 PR；未调用真实网关模型或部署，不代表 Gemini 原生 API 支持。
+- 原始需求是原生 Gemini 格式可用；#217 仅修复列表 query Key，不能代表兼容完成。当前 gemini 仍走 OpenAIAdapter，目标网关 `/chat/completions` 返回 404；原生 `/v1beta/models` 返回 39 项，短答与带签名测试工具往返均成功，但尚未经过产品 adapter。
+- 已发布[最小 Spec](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/specs/2026-10-23-gemini-native-compatibility-design.md)：让 gemini 走原生流式 API，覆盖工具/签名持久化、图片输入、思考/用量、原生目录刷新及 Admin 预检。独立 worktree 分支 feat/gemini-native；用户确认后更新协议、写实施计划并实现，主仓走 PR。
+- 本地 xinshu Gemini 已保存但为 inactive，27 项模型来自首次兼容目录查询；真实原生刷新和产品完整回合通过后再启用。默认模型及其它供应商未变；未部署本次兼容代码。
 
 ### 执行器前置检查：最小提示词已完成真实输入重放
 
