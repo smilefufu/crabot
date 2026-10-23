@@ -22,7 +22,9 @@ const formats = ['openai', 'openai-responses'] as const
 
 function mockFetch() {
   const fetchMock = vi.fn(async (url: string, _init?: RequestInit) => {
-    const data = url.endsWith('/responses')
+    const data = url.includes(':streamGenerateContent')
+      ? `data: ${JSON.stringify({ candidates: [{ content: { parts: [{ text: 'OK' }] }, finishReason: 'STOP' }] })}\n\n`
+      : url.endsWith('/responses')
       ? `event: response.completed\ndata: ${JSON.stringify({ response: { id: 'resp_1', output: [] } })}\n\n`
       : `data: ${JSON.stringify({ id: 'chat_1', choices: [{ delta: { content: 'OK' }, finish_reason: 'stop' }] })}\n\ndata: [DONE]\n\n`
     return new Response(data, { headers: { 'Content-Type': 'text/event-stream' } })
@@ -228,7 +230,8 @@ describe('OpenAI prompt cache key', () => {
     expect(bodies).toHaveLength(2)
     expect(bodies[0].prompt_cache_key).toBe(expectedKey)
     expect(bodies[1]).not.toHaveProperty('prompt_cache_key')
-    expect(bodies[1].model).toBe('gemini-test-model')
+    expect(fetchMock.mock.calls[1][0]).toContain('/models/gemini-test-model:streamGenerateContent')
+    expect(bodies[1]).not.toHaveProperty('model')
   })
 
   it.each(formats)('surfaces a %s parameter rejection without retrying or dropping the key', async (format) => {

@@ -289,7 +289,9 @@ export class ContextManager {
     let charCount = 0
 
     if (msg.role === 'assistant') {
-      charCount += this.estimateContentBlocks(msg.content)
+      charCount += msg.providerState?.format === 'gemini'
+        ? JSON.stringify(msg.providerState.content).length
+        : this.estimateContentBlocks(msg.content)
     } else if ('toolResults' in msg) {
       const toolMsg = msg as EngineToolResultMessage
       for (const result of toolMsg.toolResults) {

@@ -355,7 +355,9 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
       const contentBlocks = buildAssistantContent(processed.reasoningBlocks, processed.text, processed.toolUseBlocks)
       const stopReason = normalizeStopReason(response.stopReason)
 
-      const assistantMessage = createAssistantMessage(contentBlocks, stopReason, response.usage)
+      const assistantMessage = { ...createAssistantMessage(contentBlocks, stopReason, response.usage),
+        ...(response.providerState ? { providerState: response.providerState } : {}),
+      }
       messages.push(assistantMessage)
 
       // skipReflection 信号累加（spec 2026-06-03 §7.2.1）

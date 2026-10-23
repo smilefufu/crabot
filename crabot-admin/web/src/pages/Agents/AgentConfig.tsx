@@ -256,7 +256,7 @@ export const AgentConfig: React.FC = () => {
       case 'anthropic': return '如 xhigh / max；数字 budget 暂不建议（工具循环可能 400），优先用枚举档位'
       case 'openai': return '如 minimal / xhigh / max'
       case 'openai-responses': return '如 minimal / xhigh / max'
-      case 'gemini': return '如 low / high（兼容层映射 thinking level）'
+      case 'gemini': return '如 low / medium / high（Gemini 原生思考档位）'
       default: return '原生枚举值或 budget 数字'
     }
   }

@@ -131,3 +131,5 @@ export { testAudioService } from './audio-client.js'
 
 export { parseVoiceConnection, voiceTerminalEntry, voiceSetupStatus } from './voice-connection.js'
 export * from './computer-use.js'
+
+export { geminiApiUrl, geminiApiHeaders, geminiModelId } from './gemini-api.js'
