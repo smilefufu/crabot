@@ -217,7 +217,7 @@ export async function beginWorkspaceRelocationIntent(options) {
   if (snapshot.revision !== options.expectedRevision) fail('WORKSPACE_REVISION_CONFLICT')
   const baseControlIdentity = identity(ctx.baseControl)
   const preview = await inspectWorkspaceRelocationTarget(snapshot.storage_root, requestedTarget,
-    { protectedRoots: [...options.protectedRoots, ctx.baseControl] })
+    { protectedRoots: [...options.protectedRoots, ctx.baseControl], inspectTargetAccess: native.inspectDirectoryWriteAccess })
   if (process.env.WORKER_WORKSPACES_DIR !== storageRoot || storageRoot !== undefined && preview.mode !== 'unchanged') {
     throw new WorkspaceError('WORKSPACE_DIRECTORY_CONFLICT', '当前部署通过 WORKER_WORKSPACES_DIR 固定了工作区位置或预检期间环境发生变化；未停止任务或修改目录选择。')
   }
@@ -977,7 +977,7 @@ export async function prepareWorkspaceRelocationFilePlan({ dataDir, id, signal }
   const snapshot = await catalog.snapshot()
   if (snapshot.revision !== intent.catalog_revision || snapshot.storage_root !== intent.source.path
     || !same(intent.source, identity(intent.source.path))) fail()
-  const preview = await inspectWorkspaceRelocationTarget(intent.source.path, intent.target, { protectedRoots: [ctx.control], signal })
+  const preview = await inspectWorkspaceRelocationTarget(intent.source.path, intent.target, { protectedRoots: [ctx.control], signal, inspectTargetAccess: native.inspectDirectoryWriteAccess })
   if (preview.mode === 'unchanged' || preview.inspection.issues.length || preview.usage.status !== 'complete'
     || !same(preview.source_identity, intent.source) || !same(preview.target_ancestor, intent.target_ancestor)
     || sha256CanonicalJson(preview.target_identity) !== sha256CanonicalJson(intent.target_identity)

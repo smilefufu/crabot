@@ -2501,6 +2501,7 @@ describe('normal fixed-job Admin completion preparation', () => {
         const adminMain = path.join(f.data, 'cold-admin-main.cjs')
         await fs.writeFile(adminMain, `setTimeout(()=>process.exit(1),${processLifetimeMs}).unref();require(${JSON.stringify(path.resolve('../crabot-admin/dist/main.js'))});`)
         admin.entry = `"${process.execPath}" "${adminMain}"`
+        admin.skip_health_check = false
         admin.env = { ...admin.env, CRABOT_ADMIN_DATA_DIR: path.join(f.data, 'admin'), CRABOT_ADMIN_WEB_PORT: String(webPort) }
         const packageDir = path.join(f.data, 'finite-channel-package')
         await fs.mkdir(path.join(packageDir, 'dist'), { recursive: true })

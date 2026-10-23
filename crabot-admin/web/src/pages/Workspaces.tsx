@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
-import { ClientError, WorkspaceClient, type WorkspaceRecord, type WorkspaceSummary, type WorkspaceUsage } from 'crabot-client'
+import { ClientError, WorkspaceClient, type WorkspaceRecord, type WorkspaceSummary, type WorkspaceUsage, type WorkspaceRelocationPreviewResult, type WorkspaceRelocationIssue } from 'crabot-client'
 import { MainLayout } from '../components/Layout/MainLayout'
 import { Button } from '../components/Common/Button'
 import { Card } from '../components/Common/Card'
@@ -22,6 +22,61 @@ function projectId() {
   return [hex.slice(0, 8), hex.slice(8, 12), hex.slice(12, 16), hex.slice(16, 20), hex.slice(20)].join('-')
 }
 const message = (error: unknown) => error instanceof ClientError ? error.message : '操作未完成，请重新核对工作区状态。'
+
+const relocationIssues: Record<WorkspaceRelocationIssue['reason'], string> = {
+  absolute_link: '链接绑定绝对位置', external_link: '链接指向迁移范围之外', git_worktree: 'Git 工作树绑定外部位置',
+  python_environment: 'Python 环境绑定原位置', external_hardlink: '与范围外文件共享硬链接', mount_point: '包含独立挂载目录', special_file: '包含不支持迁移的特殊文件', unreadable: '无法读取或核验',
+}
+function RelocationPreviewPanel({ client, source, revision, locked }: { client: WorkspaceClient; source: string; revision: number; locked: boolean }) {
+  const [target, setTarget] = useState(''), [result, setResult] = useState<WorkspaceRelocationPreviewResult>(), [error, setError] = useState(''), [busy, setBusy] = useState(false)
+  const request = useRef<AbortController | undefined>(undefined)
+  useEffect(() => {
+    request.current?.abort(); setResult(undefined); setBusy(false)
+    return () => request.current?.abort()
+  }, [client, revision, locked])
+  function edit(value: string) { request.current?.abort(); setBusy(false); setResult(undefined); setError(''); setTarget(value) }
+  async function preview(event: React.FormEvent) {
+    event.preventDefault(); if (locked || busy || !target.trim()) return
+    const controller = new AbortController(); request.current?.abort(); request.current = controller
+    setBusy(true); setResult(undefined); setError('')
+    try {
+      const next = await client.previewRelocation({ target: target.trim() }, { signal: controller.signal })
+      if (!controller.signal.aborted) setResult(next)
+    } catch (failure) { if (!controller.signal.aborted) setError(message(failure)) }
+    finally { if (request.current === controller) setBusy(false) }
+  }
+  const available = result?.available_bytes
+  const insufficient = result?.mode === 'copy' && result.usage?.logical_bytes !== undefined && available !== undefined && BigInt(result.usage.logical_bytes) > BigInt(available)
+  const incomplete = result && result.mode !== 'unchanged' && (result.usage?.status !== 'complete' || result.issues.length > 0 || insufficient)
+  let summary = '预检通过，尚未开始迁移。'
+  if (result?.mode === 'unchanged') summary = '当前位置相同，无需迁移。'
+  else if (incomplete) summary = '预检发现阻塞项，请处理后重新检查。'
+  const counts = result?.execution.ready ? Object.values(result.execution.items) : undefined
+  const workerCount = counts?.every(item => item.worker_count !== undefined) ? counts.reduce((sum, item) => sum + item.worker_count!, 0) : undefined
+  return <Card title="迁移工作目录">
+    <p className="workspace-path">当前位置：{source}</p>
+    <form aria-label="工作目录迁移预检" onSubmit={preview} className="workspace-form">
+      <label>目标工作目录<input value={target} onChange={event => edit(event.target.value)} placeholder="运行 Crabot 的电脑或服务器上的绝对路径" /></label>
+      <p className="workspace-note">先检查迁移范围、空间和兼容问题。检查不会停止任务或搬动文件。</p>
+      <div className="workspace-actions"><Button type="submit" disabled={locked || busy || !target.trim()}>{busy ? '正在检查…' : '检查迁移位置'}</Button>
+        {busy && <Button type="button" variant="secondary" onClick={() => { request.current?.abort(); setBusy(false) }}>取消检查</Button>}</div>
+    </form>
+    {error && <p role="alert">{error}</p>}
+    {result && <section aria-label="迁移预检结果">
+      <p>{summary}</p>
+      <p className="workspace-path">预检源位置：{result.source}</p>
+      <p className="workspace-path">目标位置：{result.target}</p>
+      <p>{result.workspaces.length} 个工作区随迁，{result.retained_workspaces.length} 个根外项目保留原位。</p>
+      {result.workspaces.length > 0 && <ul>{result.workspaces.map(item => <li key={item.workspace_id}>{item.name}：<span className="workspace-path">{item.root}</span>（随迁）</li>)}</ul>}
+      {result.retained_workspaces.map(item => <p key={item.workspace_id}>{item.name}：<span className="workspace-path">{item.root}</span>（保留原位）</p>)}
+      <p>{workerCount === undefined ? '执行器数量待核实，不能据此判断任务已停止。' : `当前关联 ${workerCount} 个执行器；这不是停止完成证明。`}</p>
+      {result.usage && <p>源文件总大小：{bytes(result.usage.logical_bytes)} · {statuses[result.usage.status]}；目标可用空间约 {bytes(available === undefined ? undefined : Number(available))}。</p>}
+      {insufficient && <p role="alert">目标空间不足，不能开始迁移。</p>}
+      {result.issues.length > 0 && <ul>{result.issues.map((issue, index) => <li key={index}>{issue.path || '工作目录'}：{relocationIssues[issue.reason]}</li>)}</ul>}
+      <p className="workspace-note">实际迁移需要再次明确确认。迁移期间暂停任务，管理页面保持在线；现有执行器将永久关闭，历史和文件保留。</p>
+    </section>}
+  </Card>
+}
 
 function WorkspaceEditor({ client, record, initialRevision, onSaved, locked }: {
   client: WorkspaceClient; record: WorkspaceRecord; initialRevision: number; onSaved(): void; locked: boolean
@@ -158,6 +213,7 @@ function WorkspacePage({ scope }: { scope: string }) {
         <Button disabled={locked} onClick={() => { createId.current = projectId(); setName(''); setPurpose(''); setRoot(''); setCreating(true) }}>添加项目工作区</Button></div></div>
     {maintenance.isError ? <p role="alert">暂时无法核实工作区维护状态，仍可查看和搜索；请重新核验后再操作。 <Button variant="secondary" onClick={() => void maintenance.refetch()}>重新核验维护状态</Button></p>
       : locked && <p role="status">{observedMaintenance ? '工作目录正在维护或等待恢复，新任务与相关文件操作暂不可用。仍可查看和搜索工作区。' : '正在核验工作区维护状态…'}</p>}
+    {query.data && <RelocationPreviewPanel client={client} source={query.data.storage_root} revision={query.data.revision} locked={locked} />}
     {query.data && <p>{query.data.items.filter(item => item.workspace.kind === 'project').length} 个项目工作区 · 1 个默认工作区 · {query.data.items.filter(item => item.directory_status !== 'ready').length} 个目录待核实</p>}
     <section aria-label="全部工作区空间">
       <h2>全部工作区空间</h2>

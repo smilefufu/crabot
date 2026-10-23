@@ -3,6 +3,8 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import os from 'node:os'
+import { createRequire } from 'node:module'
+const native = createRequire(import.meta.url)('../../scripts/lib/process-identity.cjs')
 import { inspectWorkspaceRelocationTarget } from './workspace-relocation-target.js'
 
 async function fixture(t: test.TestContext) {
@@ -10,7 +12,7 @@ async function fixture(t: test.TestContext) {
   t.after(() => fs.rm(root, { recursive: true, force: true }))
   const source = path.join(root, 'source'); await fs.mkdir(source)
   await fs.writeFile(path.join(source, 'kept'), 'original')
-  return { root, source, protectedRoots: [path.join(root, 'private-state')] }
+  return { root, source, protectedRoots: [path.join(root, 'private-state')], inspectTargetAccess: native.inspectDirectoryWriteAccess }
 }
 
 test('same-volume preflight resolves a missing nested destination without creating it or modifying source', async t => {
@@ -96,4 +98,25 @@ test('a source replaced between the initial identity check and the tree inspecti
   assert.equal(replaced, true)
   assert.equal(await fs.readFile(path.join(f.root, 'original-source/kept'), 'utf8'), 'original')
   await assert.rejects(fs.stat(target), { code: 'ENOENT' })
+})
+
+
+test('target-only private exclusions keep the existing default source valid but reject other private destinations', async t => {
+  const f = await fixture(t), options = { ...f, protectedTargets: [f.root] }
+  assert.equal((await inspectWorkspaceRelocationTarget(f.source, f.source, options)).mode, 'unchanged')
+  await assert.rejects(inspectWorkspaceRelocationTarget(f.source, path.join(f.root, 'other-state'), options), { code: 'WORKSPACE_INVALID_REQUEST' })
+  const outside = path.join(path.dirname(f.root), 'outside-workspace-' + path.basename(f.root))
+  assert.equal((await inspectWorkspaceRelocationTarget(f.source, outside, options)).mode, 'rename')
+  await assert.rejects(fs.stat(outside), { code: 'ENOENT' })
+})
+
+
+test('an unwritable target ancestor is rejected before tasks stop or a destination is created', { skip: process.platform === 'win32' || process.getuid?.() === 0 }, async t => {
+  const f = await fixture(t), parent = path.join(f.root, 'readonly-target'), target = path.join(parent, 'missing')
+  await fs.mkdir(parent); await fs.chmod(parent, 0o500)
+  try {
+    await assert.rejects(inspectWorkspaceRelocationTarget(f.source, target, f), { code: 'WORKSPACE_UNAVAILABLE' })
+    await assert.rejects(fs.stat(target), { code: 'ENOENT' })
+    assert.equal(await fs.readFile(path.join(f.source, 'kept'), 'utf8'), 'original')
+  } finally { await fs.chmod(parent, 0o700) }
 })

@@ -630,6 +630,7 @@ static napi_value Initialize(napi_env env, napi_value exports) {
     {"inspectWorkspaceCopyJob", nullptr, InspectWorkspaceCopyJob, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"resumeWorkspaceCopyJob", nullptr, ResumeWorkspaceCopyJob, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"closeWorkspaceCopyJob", nullptr, CloseWorkspaceCopyJob, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"inspectDirectoryWriteAccess", nullptr, InspectDirectoryWriteAccess, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"inspectWorkspaceOwnerAccess", nullptr, InspectWorkspaceOwnerAccess, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"compareWorkspaceOwnerInheritance", nullptr, CompareWorkspaceOwnerInheritance, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"inspectCurrentPrimaryGroup", nullptr, InspectCurrentPrimaryGroup, nullptr, nullptr, nullptr, napi_default, nullptr},

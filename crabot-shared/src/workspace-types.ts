@@ -37,6 +37,26 @@ export interface WorkspaceMaintenanceStatus {
   maintenance: boolean
 }
 
+export interface WorkspaceRelocationPreviewRequest {
+  target: string
+}
+export interface WorkspaceRelocationIssue {
+  path: string
+  reason: 'absolute_link' | 'external_link' | 'git_worktree' | 'python_environment' | 'external_hardlink' | 'mount_point' | 'special_file' | 'unreadable'
+}
+export interface WorkspaceRelocationPreviewResult {
+  revision: number
+  source: string
+  target: string
+  mode: 'unchanged' | 'rename' | 'copy'
+  workspaces: WorkspaceRecord[]
+  retained_workspaces: WorkspaceRecord[]
+  usage?: WorkspaceUsage
+  available_bytes?: string
+  issues: WorkspaceRelocationIssue[]
+  execution: WorkspaceExecutionInventory
+}
+
 export interface WorkspaceListResult {
   revision: number
   storage_root: string

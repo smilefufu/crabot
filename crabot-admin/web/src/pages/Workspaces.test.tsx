@@ -5,9 +5,9 @@ import { ClientError } from 'crabot-client'
 import { serverQueries, setServerScope } from '../services/server-state'
 import { Workspaces } from './Workspaces'
 
-const mocks = vi.hoisted(() => ({ list: vi.fn(), get: vi.fn(), refresh: vi.fn(), update: vi.fn(), create: vi.fn(), totalUsage: vi.fn(), refreshTotalUsage: vi.fn(), maintenance: vi.fn(), bridge: { revealWorkspaceFolder: undefined as undefined | ReturnType<typeof vi.fn> } }))
+const mocks = vi.hoisted(() => ({ list: vi.fn(), get: vi.fn(), refresh: vi.fn(), update: vi.fn(), create: vi.fn(), totalUsage: vi.fn(), refreshTotalUsage: vi.fn(), maintenance: vi.fn(), previewRelocation: vi.fn(), bridge: { revealWorkspaceFolder: undefined as undefined | ReturnType<typeof vi.fn> } }))
 vi.mock('crabot-client', async () => ({ ...await vi.importActual('crabot-client'), WorkspaceClient: class {
-  list = mocks.list; get = mocks.get; refresh = mocks.refresh; update = mocks.update; create = mocks.create; totalUsage = mocks.totalUsage; refreshTotalUsage = mocks.refreshTotalUsage; maintenance = mocks.maintenance
+  list = mocks.list; get = mocks.get; refresh = mocks.refresh; update = mocks.update; create = mocks.create; totalUsage = mocks.totalUsage; refreshTotalUsage = mocks.refreshTotalUsage; maintenance = mocks.maintenance; previewRelocation = mocks.previewRelocation
 } }))
 vi.mock('../services/api', () => ({ getWebClient: () => ({}) }))
 vi.mock('../services/desktop-host', () => ({ desktopBridge: mocks.bridge }))
@@ -133,4 +133,69 @@ it('a failed maintenance refresh locks a previously available page and preserves
   fireEvent.click(screen.getByRole('button', { name: '重新核验维护状态' }))
   await waitFor(() => expect(save).toBeEnabled())
   expect(screen.getByLabelText('工作区名称')).toHaveValue('等待核验的草稿')
+})
+
+
+it('previews the actual storage scope and external projects without starting migration', async () => {
+  mocks.previewRelocation.mockResolvedValue({ revision: 2, source: '/workspaces', target: '/moved', mode: 'rename', workspaces: [snapshot.items[1].workspace], retained_workspaces: [workspace],
+    usage: { status: 'complete', logical_bytes: 1000, file_count: 1, skipped_entries: 0 }, available_bytes: '9007199254740993', issues: [], execution: { ready: false, items: {} } })
+  render(<MemoryRouter><Workspaces /></MemoryRouter>)
+  const check = await screen.findByRole('button', { name: '检查迁移位置' })
+  await waitFor(() => expect(screen.getByRole('button', { name: '添加项目工作区' })).toBeEnabled())
+  fireEvent.change(screen.getByLabelText('目标工作目录'), { target: { value: '/moved' } })
+  fireEvent.click(check)
+  expect(await screen.findByText('预检通过，尚未开始迁移。')).toBeInTheDocument()
+  expect(screen.getByText(/1 个工作区随迁，1 个根外项目保留原位/)).toBeInTheDocument()
+  expect(screen.getByText(/执行器数量待核实/)).toBeInTheDocument()
+  expect(mocks.previewRelocation).toHaveBeenCalledWith({ target: '/moved' }, expect.objectContaining({ signal: expect.any(AbortSignal) }))
+  expect(mocks.create).not.toHaveBeenCalled(); expect(mocks.update).not.toHaveBeenCalled()
+  fireEvent.change(screen.getByLabelText('目标工作目录'), { target: { value: '/another' } })
+  expect(screen.queryByText('预检通过，尚未开始迁移。')).toBeNull()
+})
+
+it('a late preview cannot replace the edited target or imply that a migration has started', async () => {
+  let finish!: (value: unknown) => void
+  mocks.previewRelocation.mockReturnValue(new Promise(resolve => { finish = resolve }))
+  render(<MemoryRouter><Workspaces /></MemoryRouter>)
+  await screen.findByLabelText('目标工作目录')
+  await waitFor(() => expect(screen.getByRole('button', { name: '添加项目工作区' })).toBeEnabled())
+  fireEvent.change(screen.getByLabelText('目标工作目录'), { target: { value: '/first' } })
+  fireEvent.click(screen.getByRole('button', { name: '检查迁移位置' }))
+  await waitFor(() => expect(mocks.previewRelocation).toHaveBeenCalledTimes(1))
+  fireEvent.change(screen.getByLabelText('目标工作目录'), { target: { value: '/second' } })
+  expect(mocks.previewRelocation.mock.calls[0][1].signal.aborted).toBe(true)
+  finish({ revision: 2, source: '/workspaces', target: '/first', mode: 'unchanged', workspaces: [], retained_workspaces: [], issues: [], execution: { ready: false, items: {} } })
+  await waitFor(() => expect(screen.getByRole('button', { name: '检查迁移位置' })).toBeEnabled())
+  expect(screen.getByLabelText('目标工作目录')).toHaveValue('/second')
+  expect(screen.queryByText('当前位置相同，无需迁移。')).toBeNull()
+})
+
+
+it('incompatible bindings and incomplete size remain visible as blockers rather than a passed preview', async () => {
+  mocks.previewRelocation.mockResolvedValue({ revision: 2, source: '/workspaces', target: '/moved', mode: 'copy', workspaces: [], retained_workspaces: [],
+    usage: { status: 'partial', logical_bytes: 1000, file_count: 1, skipped_entries: 1 }, available_bytes: '100', issues: [{ path: 'env/pyvenv.cfg', reason: 'python_environment' }], execution: { ready: false, items: {} } })
+  render(<MemoryRouter><Workspaces /></MemoryRouter>)
+  await screen.findByLabelText('目标工作目录')
+  await waitFor(() => expect(screen.getByRole('button', { name: '添加项目工作区' })).toBeEnabled())
+  fireEvent.change(screen.getByLabelText('目标工作目录'), { target: { value: '/moved' } })
+  fireEvent.click(screen.getByRole('button', { name: '检查迁移位置' }))
+  expect(await screen.findByText('预检发现阻塞项，请处理后重新检查。')).toBeInTheDocument()
+  expect(screen.getByText(/Python 环境绑定原位置/)).toBeInTheDocument()
+  expect(screen.getByRole('alert')).toHaveTextContent('目标空间不足')
+  expect(screen.queryByText('预检通过，尚未开始迁移。')).toBeNull()
+})
+
+
+it('cancels a pending read-only preview while preserving the target for an explicit new check', async () => {
+  mocks.previewRelocation.mockReturnValue(new Promise(() => {}))
+  render(<MemoryRouter><Workspaces /></MemoryRouter>)
+  await screen.findByLabelText('目标工作目录')
+  await waitFor(() => expect(screen.getByRole('button', { name: '添加项目工作区' })).toBeEnabled())
+  fireEvent.change(screen.getByLabelText('目标工作目录'), { target: { value: '/moved' } })
+  fireEvent.click(screen.getByRole('button', { name: '检查迁移位置' }))
+  fireEvent.click(await screen.findByRole('button', { name: '取消检查' }))
+  expect(mocks.previewRelocation.mock.calls[0][1].signal.aborted).toBe(true)
+  expect(screen.getByLabelText('目标工作目录')).toHaveValue('/moved')
+  expect(screen.getByRole('button', { name: '检查迁移位置' })).toBeEnabled()
+  expect(mocks.previewRelocation).toHaveBeenCalledTimes(1)
 })

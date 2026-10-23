@@ -170,3 +170,19 @@ it('maintenance pauses only scan access, drains owned handles, keeps management 
   await service.close()
   expect(() => service.resumeScanning()).toThrow()
 })
+
+
+it('preview cancellation and concurrent catalog changes never authorize or start migration', async () => {
+  const f = await fixture(), target = path.join(path.dirname(f.root), 'preview-cancel-' + randomUUID())
+  const controller = new AbortController(); controller.abort()
+  await expect(f.service.previewRelocation({ target }, controller.signal)).rejects.toMatchObject({ code: 'WORKSPACE_SCAN_CANCELLED' })
+  let changed = false
+  ;(f.service as any).execution = async () => {
+    if (!changed) { changed = true; await f.service.create({ workspace_id: randomUUID(), name: 'concurrent' }) }
+    return { ready: false, items: {} }
+  }
+  await expect(f.service.previewRelocation({ target })).rejects.toMatchObject({ code: 'WORKSPACE_REVISION_CONFLICT' })
+  expect(changed).toBe(true)
+  await expect(fs.stat(target)).rejects.toMatchObject({ code: 'ENOENT' })
+  await expect(fs.stat(path.join(f.root, 'workspace-control/relocation-active'))).rejects.toMatchObject({ code: 'ENOENT' })
+})

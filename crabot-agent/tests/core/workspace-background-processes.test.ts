@@ -38,8 +38,14 @@ async function capture(target = registry): Promise<ReadonlyArray<any>> {
 }
 describe('registered background Shell native scope', () => {
   it.each(['persistent', ...Array<string>(process.platform === 'win32' ? 8 : 1).fill('grace')])('observes the actual %s tree without signals or registry mutation', async kind => {
-    const record = await start(kind), before = await fs.readFile(file), signal = vi.spyOn(native, 'terminateKnownProcess')
+    const marker = path.join(data, 'payload-ready'), script = path.join(data, 'ready-payload.cjs')
+    await fs.writeFile(script, "require('node:fs').writeFileSync(process.argv[2],String(process.pid));setTimeout(()=>{},30000)")
+    const record = await start(kind, `"${process.execPath.replaceAll('\\', '/')}" "${script.replaceAll('\\', '/')}" "${marker.replaceAll('\\', '/')}"`)
+    let payload: any
+    await vi.waitFor(async () => { payload = native.inspectProcess(Number(await fs.readFile(marker, 'utf8'))); expect(payload).not.toBeNull() }, { timeout: 4000 })
+    const before = await fs.readFile(file), signal = vi.spyOn(native, 'terminateKnownProcess')
     const scope = await capture()
+    expect(scope).toContainEqual(expect.objectContaining({ pid: payload.pid, started: payload.started, owner: payload.owner }))
     expect(scope).toEqual(expect.arrayContaining([expect.objectContaining({ pid: record.pid, owner: native.inspectProcess(process.pid).owner })]))
     expect(scope.every(item => Object.keys(item).sort().join(',') === 'executable,owner,parent,pid,started')).toBe(true)
     expect(await fs.readFile(file)).toEqual(before); expect(signal).not.toHaveBeenCalled()

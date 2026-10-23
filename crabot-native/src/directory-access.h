@@ -72,3 +72,41 @@ static napi_value CopyDirectoryTimesFd(napi_env env, napi_callback_info info) {
   } catch (const std::exception& error) { napi_throw_error(env, "CRABOT_DIRECTORY_TIMES", error.what()); return nullptr; }
 }
 #endif
+
+#ifdef _WIN32
+// Observe existing directory rights; OPEN_EXISTING never creates a probe file.
+static napi_value InspectDirectoryWriteAccess(napi_env env, napi_callback_info info) {
+  HANDLE directory = INVALID_HANDLE_VALUE;
+  try {
+    size_t argc = 2; napi_value args[2]; napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    if (argc != 1) throw std::runtime_error("Expected one existing directory path");
+    const auto path = Text(env, args[0]);
+    if (!MoveAbsolutePath(path)) throw std::runtime_error("Expected an absolute directory path");
+    const auto wide = MoveWidePath(path);
+    directory = CreateFileW(wide.c_str(), FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY | FILE_TRAVERSE | FILE_READ_ATTRIBUTES,
+      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+      FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    bool allowed = false;
+    if (directory == INVALID_HANDLE_VALUE) {
+      if (GetLastError() != ERROR_ACCESS_DENIED) throw std::runtime_error("Cannot observe directory write access");
+    } else {
+      FILE_ATTRIBUTE_TAG_INFO attributes{};
+      if (!GetFileInformationByHandleEx(directory, FileAttributeTagInfo, &attributes, sizeof(attributes))) {
+        throw std::runtime_error("Cannot identify target access directory");
+      }
+      std::vector<wchar_t> volume(32768); DWORD flags = 0;
+      if (!GetVolumePathNameW(wide.c_str(), volume.data(), static_cast<DWORD>(volume.size()))
+        || !GetVolumeInformationW(volume.data(), nullptr, 0, nullptr, nullptr, &flags, nullptr, 0)) {
+        throw std::runtime_error("Cannot observe target volume write access");
+      }
+      allowed = (attributes.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) && !(attributes.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)
+        && !(flags & FILE_READ_ONLY_VOLUME);
+      CloseHandle(directory); directory = INVALID_HANDLE_VALUE;
+    }
+    napi_value result; napi_get_boolean(env, allowed, &result); return result;
+  } catch (const std::exception& error) {
+    if (directory != INVALID_HANDLE_VALUE) CloseHandle(directory);
+    napi_throw_error(env, "CRABOT_DIRECTORY_ACCESS", error.what()); return nullptr;
+  }
+}
+#endif

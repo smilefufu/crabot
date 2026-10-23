@@ -27,7 +27,7 @@ async function assertEmpty(directory: string): Promise<void> {
 }
 
 /** Host-supplied private roots are exclusions, never caller-granted permissions. A preview does not authorize stopping or moving. */
-export async function inspectWorkspaceRelocationTarget(source: string, target: string, options: { protectedRoots: readonly string[]; signal?: AbortSignal }) {
+export async function inspectWorkspaceRelocationTarget(source: string, target: string, options: { protectedRoots: readonly string[]; protectedTargets?: readonly string[]; inspectTargetAccess?: (directory: string) => boolean; signal?: AbortSignal }) {
   const check = () => { if (options.signal?.aborted) throw new WorkspaceError('WORKSPACE_SCAN_CANCELLED', '工作区预检已取消，原目录保留。') }
   const validPath = (value: string) => { if (typeof value !== 'string' || !path.isAbsolute(value) || value.includes('\0')) throw invalid(); return path.resolve(value) }
   check()
@@ -43,6 +43,10 @@ export async function inspectWorkspaceRelocationTarget(source: string, target: s
     const protectedRoot = await canonicalLocation(validPath(root))
     if (within(protectedRoot, source) || within(source, protectedRoot) || within(protectedRoot, target) || within(target, protectedRoot)) throw invalid()
   }
+  for (const root of options.protectedTargets ?? []) {
+    const protectedTarget = await canonicalLocation(validPath(root))
+    if (within(protectedTarget, target) || within(target, protectedTarget)) throw invalid()
+  }
   if (selected) await assertEmpty(target)
   let parent = selected ? target : path.dirname(target), parentStat = await optionalStat(parent)
   while (!parentStat) {
@@ -51,6 +55,12 @@ export async function inspectWorkspaceRelocationTarget(source: string, target: s
     parent = next; parentStat = await optionalStat(parent)
   }
   if (!parentStat.isDirectory() || parentStat.isSymbolicLink() || !parentStat.ino || await fs.realpath(parent) !== parent) throw invalid()
+  try {
+    if (process.platform === 'win32') {
+      if (options.inspectTargetAccess?.(parent) !== true) throw new Error('Target ACL is unavailable or denied')
+    } else await fs.access(parent, fs.constants.W_OK | fs.constants.X_OK)
+  }
+  catch { throw new WorkspaceError('WORKSPACE_UNAVAILABLE', '目标目录权限不足或暂时无法核实是否可写；未停止任务或创建迁移目录。') }
   const mode = original.dev === parentStat.dev ? 'rename' as const : 'copy' as const
   const inspection = await inspectWorkspaceRelocationTree(source, mode, options)
   const usage = await scanWorkspaceUsage(source, options)

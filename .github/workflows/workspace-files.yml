@@ -100,7 +100,7 @@ jobs:
       - run: pnpm --dir crabot-shared install --frozen-lockfile
       - run: pnpm --dir crabot-shared build
       - name: Native pinned Windows staging synchronization
-        run: node --test scripts/lib/__tests__/workspace-windows-metadata.test.mjs scripts/lib/__tests__/workspace-owner-inheritance.test.mjs scripts/lib/__tests__/workspace-windows-sync.test.mjs scripts/lib/__tests__/workspace-windows-copy.test.mjs
+        run: node --test scripts/lib/__tests__/workspace-target-access.test.mjs scripts/lib/__tests__/workspace-windows-metadata.test.mjs scripts/lib/__tests__/workspace-owner-inheritance.test.mjs scripts/lib/__tests__/workspace-windows-sync.test.mjs scripts/lib/__tests__/workspace-windows-copy.test.mjs
       - name: Validate stable workspace content snapshots
         working-directory: crabot-shared
         run: node --import tsx --test src/workspace-relocation-content.test.ts src/workspace-catalog.test.ts src/workspace-catalog-relocation.test.ts

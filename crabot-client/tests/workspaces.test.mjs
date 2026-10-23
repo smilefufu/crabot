@@ -63,3 +63,19 @@ test('maintenance is a checked read-only status and never coerces malformed evid
     await assert.rejects(fixture(body).client.maintenance(), { kind: 'validation' })
   }
 })
+
+
+test('relocation preview accepts only a target and checks the non-authoritative response without retry', async () => {
+  const preview = { revision: 2, source: '/workspaces', target: '/moved', mode: 'rename', workspaces: [record], retained_workspaces: [],
+    usage: { status: 'complete', logical_bytes: 1, file_count: 1, skipped_entries: 0 }, available_bytes: '9007199254740993', issues: [], execution: { ready: false, items: {} } }
+  const f = fixture(preview)
+  assert.deepEqual(await f.client.previewRelocation({ target: '/moved' }), preview)
+  assert.equal(f.calls[0].url, 'http://localhost:3000/api/workspaces/relocation/preview')
+  assert.equal(f.calls[0].options.method, 'POST'); assert.equal(f.calls[0].options.body, '{"target":"/moved"}')
+  for (const input of [{ target: 'relative' }, { target: '/moved', source: '/' }, { target: '/moved', protectedRoots: [] }]) {
+    assert.throws(() => f.client.previewRelocation(input)); assert.equal(f.calls.length, 1)
+  }
+  for (const invalid of [{ ...preview, mode: 'unchanged' }, { ...preview, usage: undefined }, { ...preview, available_bytes: 1 }, { ...preview, available_bytes: '-1' }, { ...preview, issues: [{ path: 'x', reason: 'ignore' }] }]) {
+    await assert.rejects(fixture(invalid).client.previewRelocation({ target: '/moved' }), { kind: 'validation' })
+  }
+})

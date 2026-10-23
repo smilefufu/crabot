@@ -48,3 +48,17 @@ export type WorkspaceScanResult = z.infer<typeof WorkspaceScanResultSchema>
 export type WorkspaceExecutionInventory = z.infer<typeof WorkspaceExecutionInventorySchema>
 
 export type WorkspaceMaintenanceStatus = z.infer<typeof WorkspaceMaintenanceStatusSchema>
+
+
+export const WorkspaceRelocationPreviewRequestSchema = z.strictObject({ target: Directory })
+export const WorkspaceRelocationIssueSchema = z.object({ path: z.string(), reason: z.enum(['absolute_link', 'external_link', 'git_worktree', 'python_environment', 'external_hardlink', 'mount_point', 'special_file', 'unreadable']) })
+export const WorkspaceRelocationPreviewResultSchema = z.object({
+  revision: Count.min(1), source: Directory, target: Directory, mode: z.enum(['unchanged', 'rename', 'copy']),
+  workspaces: z.array(WorkspaceRecordSchema), retained_workspaces: z.array(WorkspaceRecordSchema),
+  usage: WorkspaceUsageSchema.optional(), available_bytes: z.string().regex(/^(?:0|[1-9][0-9]*)$/).optional(),
+  issues: z.array(WorkspaceRelocationIssueSchema), execution: WorkspaceExecutionInventorySchema,
+}).refine(value => value.mode === 'unchanged' ? value.source === value.target
+  : value.source !== value.target && value.usage !== undefined && value.available_bytes !== undefined)
+export type WorkspaceRelocationPreviewRequest = z.infer<typeof WorkspaceRelocationPreviewRequestSchema>
+export type WorkspaceRelocationPreviewResult = z.infer<typeof WorkspaceRelocationPreviewResultSchema>
+export type WorkspaceRelocationIssue = z.infer<typeof WorkspaceRelocationIssueSchema>
