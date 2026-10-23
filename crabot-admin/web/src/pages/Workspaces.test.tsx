@@ -1,13 +1,13 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, afterEach, expect, it, vi } from 'vitest'
-import { MemoryRouter } from 'react-router-dom'
+import { MemoryRouter, useLocation } from 'react-router-dom'
 import { ClientError } from 'crabot-client'
 import { serverQueries, setServerScope } from '../services/server-state'
 import { Workspaces } from './Workspaces'
 
-const mocks = vi.hoisted(() => ({ list: vi.fn(), get: vi.fn(), refresh: vi.fn(), update: vi.fn(), create: vi.fn(), totalUsage: vi.fn(), refreshTotalUsage: vi.fn(), maintenance: vi.fn(), previewRelocation: vi.fn(), currentRelocation: vi.fn(), relocationStatus: vi.fn(), bridge: { revealWorkspaceFolder: undefined as undefined | ReturnType<typeof vi.fn> } }))
+const mocks = vi.hoisted(() => ({ list: vi.fn(), get: vi.fn(), refresh: vi.fn(), update: vi.fn(), create: vi.fn(), totalUsage: vi.fn(), refreshTotalUsage: vi.fn(), maintenance: vi.fn(), previewRelocation: vi.fn(), startRelocation: vi.fn(), currentRelocation: vi.fn(), relocationStatus: vi.fn(), bridge: { revealWorkspaceFolder: undefined as undefined | ReturnType<typeof vi.fn> } }))
 vi.mock('crabot-client', async () => ({ ...await vi.importActual('crabot-client'), WorkspaceClient: class {
-  list = mocks.list; get = mocks.get; refresh = mocks.refresh; update = mocks.update; create = mocks.create; totalUsage = mocks.totalUsage; refreshTotalUsage = mocks.refreshTotalUsage; maintenance = mocks.maintenance; previewRelocation = mocks.previewRelocation; currentRelocation = mocks.currentRelocation; relocationStatus = mocks.relocationStatus
+  list = mocks.list; get = mocks.get; refresh = mocks.refresh; update = mocks.update; create = mocks.create; totalUsage = mocks.totalUsage; refreshTotalUsage = mocks.refreshTotalUsage; maintenance = mocks.maintenance; previewRelocation = mocks.previewRelocation; startRelocation = mocks.startRelocation; currentRelocation = mocks.currentRelocation; relocationStatus = mocks.relocationStatus
 } }))
 vi.mock('../services/api', () => ({ getWebClient: () => ({}) }))
 vi.mock('../services/desktop-host', () => ({ desktopBridge: mocks.bridge }))
@@ -251,4 +251,111 @@ it('a fresh unavailable observation keeps the known paths without claiming that 
   expect(screen.getByText('/new workspaces')).toBeInTheDocument()
   expect(screen.queryByText('迁移已完成')).toBeNull()
   expect(mocks.relocationStatus).not.toHaveBeenCalled()
+})
+
+async function readyToRelocate() {
+  mocks.previewRelocation.mockResolvedValue({ revision: 2, source: '/workspaces', target: '/canonical-moved', mode: 'rename', workspaces: [snapshot.items[1].workspace], retained_workspaces: [workspace],
+    usage: { status: 'complete', logical_bytes: 1000, file_count: 1, skipped_entries: 0 }, available_bytes: '10000', issues: [], execution: { ready: true, items: { default: { worker_count: 1, status: 'idle' } } } })
+  await screen.findByLabelText('目标工作目录')
+  fireEvent.change(screen.getByLabelText('目标工作目录'), { target: { value: '/user-alias' } })
+  await waitFor(() => expect(screen.getByRole('button', { name: '检查迁移位置' })).toBeEnabled())
+  fireEvent.click(screen.getByRole('button', { name: '检查迁移位置' }))
+  return screen.findByRole('button', { name: '停止执行并迁移' })
+}
+it('requires an explicit complete preview and dispatches a double click once with its canonical target and revision', async () => {
+  mocks.startRelocation.mockReturnValue(new Promise(() => {}))
+  render(<MemoryRouter><Workspaces /></MemoryRouter>)
+  const start = await readyToRelocate()
+  expect(screen.getByText(/现有执行器将永久关闭/)).toBeInTheDocument()
+  expect(mocks.startRelocation).not.toHaveBeenCalled()
+  fireEvent.click(start); fireEvent.click(start)
+  expect(mocks.startRelocation).toHaveBeenCalledTimes(1)
+  expect(mocks.startRelocation.mock.calls[0][0]).toEqual({ intent_id: expect.stringMatching(/^[a-f0-9-]{36}$/), target: '/canonical-moved', expected_revision: 2, confirmed: true })
+  expect(mocks.startRelocation.mock.calls[0]).toHaveLength(1)
+})
+function CurrentPage() { const location = useLocation(); return <output aria-label="当前页面">{location.pathname + location.search}</output> }
+it('keeps an uncertain submission identity in navigation and reopening only observes that same job', async () => {
+  mocks.startRelocation.mockRejectedValue(new ClientError('unreachable', '连接中断'))
+  const view = render(<MemoryRouter><Workspaces /><CurrentPage /></MemoryRouter>)
+  fireEvent.click(await readyToRelocate())
+  expect(await screen.findByText(/提交结果待核实/)).toBeInTheDocument()
+  const jobId = mocks.startRelocation.mock.calls[0][0].intent_id
+  expect(screen.queryByRole('button', { name: '停止执行并迁移' })).toBeNull()
+  const navigation = screen.getByLabelText('当前页面').textContent!
+  expect(new URL(navigation, 'http://fixture').searchParams.get('relocation_id')).toBe(jobId)
+  view.unmount(); serverQueries.clear()
+  render(<MemoryRouter initialEntries={[navigation]}><Workspaces /></MemoryRouter>)
+  await waitFor(() => expect(mocks.relocationStatus).toHaveBeenCalledWith(jobId, expect.objectContaining({ signal: expect.any(AbortSignal) })))
+  expect(screen.getByText(/提交结果待核实/)).toBeInTheDocument()
+  expect(mocks.startRelocation).toHaveBeenCalledTimes(1)
+})
+it('a committed job never exposes another migration confirmation', async () => {
+  mocks.currentRelocation.mockResolvedValue({ available: true, job: { intent_id: id, state: 'committed', stage: 'finished' } })
+  render(<MemoryRouter><Workspaces /></MemoryRouter>)
+  await screen.findByText('目录切换已提交')
+  fireEvent.change(screen.getByLabelText('目标工作目录'), { target: { value: '/moved' } })
+  await waitFor(() => expect(screen.getByRole('button', { name: '检查迁移位置' })).toBeEnabled())
+  mocks.previewRelocation.mockResolvedValue({ revision: 2, source: '/workspaces', target: '/moved', mode: 'rename', workspaces: [], retained_workspaces: [], issues: [], usage: { status: 'complete', logical_bytes: 0, file_count: 0, skipped_entries: 0 }, execution: { ready: true, items: {} } })
+  fireEvent.click(screen.getByRole('button', { name: '检查迁移位置' }))
+  await screen.findByText('预检通过，尚未开始迁移。')
+  expect(screen.queryByRole('button', { name: '停止执行并迁移' })).toBeNull()
+  expect(mocks.startRelocation).not.toHaveBeenCalled()
+})
+
+it('never submits from a malformed navigation identity and keeps progress unknown', async () => {
+  render(<MemoryRouter initialEntries={['/workspaces?relocation_id=not-a-job']}><Workspaces /></MemoryRouter>)
+  await screen.findByText(/暂时无法核实迁移进度/)
+  expect(mocks.startRelocation).not.toHaveBeenCalled(); expect(mocks.relocationStatus).not.toHaveBeenCalled()
+  expect(screen.queryByRole('button', { name: '停止执行并迁移' })).toBeNull()
+})
+it('catalog revision changes invalidate a confirmed preview before any start dispatch', async () => {
+  render(<MemoryRouter><Workspaces /></MemoryRouter>)
+  await readyToRelocate()
+  mocks.list.mockResolvedValue({ ...snapshot, revision: 3 })
+  fireEvent.click(screen.getByRole('button', { name: '刷新列表与执行状态' }))
+  await waitFor(() => expect(screen.queryByRole('button', { name: '停止执行并迁移' })).toBeNull())
+  expect(screen.getByLabelText('目标工作目录')).toHaveValue('/user-alias')
+  expect(mocks.startRelocation).not.toHaveBeenCalled()
+})
+it('an unknown execution scope or a partial preview cannot offer migration confirmation', async () => {
+  render(<MemoryRouter><Workspaces /></MemoryRouter>)
+  await readyToRelocate()
+  fireEvent.change(screen.getByLabelText('目标工作目录'), { target: { value: '/unknown-execution' } })
+  const complete = mocks.previewRelocation.mock.results[0].value
+  mocks.previewRelocation.mockResolvedValue({ ...await complete, execution: { ready: false, items: {} } })
+  fireEvent.click(screen.getByRole('button', { name: '检查迁移位置' }))
+  await screen.findByText(/执行器数量待核实/)
+  expect(screen.queryByRole('button', { name: '停止执行并迁移' })).toBeNull()
+  fireEvent.change(screen.getByLabelText('目标工作目录'), { target: { value: '/partial' } })
+  mocks.previewRelocation.mockResolvedValue({ ...await complete, usage: { status: 'partial' } })
+  fireEvent.click(screen.getByRole('button', { name: '检查迁移位置' }))
+  await screen.findByText('预检发现阻塞项，请处理后重新检查。')
+  expect(screen.queryByRole('button', { name: '停止执行并迁移' })).toBeNull()
+})
+it('an unchanged receipt clears only this navigation hint and allows a fresh explicit preview', async () => {
+  mocks.startRelocation.mockResolvedValue({ source: '/canonical-moved', unchanged: true })
+  render(<MemoryRouter><Workspaces /></MemoryRouter>)
+  fireEvent.click(await readyToRelocate())
+  await screen.findByText('当前位置相同，无需迁移。')
+  expect(screen.queryByRole('button', { name: '停止执行并迁移' })).toBeNull()
+  fireEvent.click(screen.getByRole('button', { name: '检查迁移位置' }))
+  expect(await screen.findByRole('button', { name: '停止执行并迁移' })).toBeEnabled()
+  expect(mocks.startRelocation).toHaveBeenCalledTimes(1)
+})
+
+it('a new accepted identity is not replaced by the previous completed job during handoff', async () => {
+  mocks.currentRelocation.mockResolvedValue({ available: true, job: { intent_id: id, state: 'completed', stage: 'finished' } })
+  let accept!: (value: unknown) => void
+  mocks.startRelocation.mockReturnValue(new Promise(resolve => { accept = resolve }))
+  render(<MemoryRouter><Workspaces /><CurrentPage /></MemoryRouter>)
+  fireEvent.click(await readyToRelocate())
+  const request = mocks.startRelocation.mock.calls[0][0]
+  expect(request.intent_id).not.toBe(id)
+  await waitFor(() => expect(mocks.relocationStatus).toHaveBeenCalledWith(request.intent_id, expect.anything()))
+  mocks.relocationStatus.mockResolvedValue({ available: true, job: { intent_id: request.intent_id, state: 'running', stage: 'stopping', target: request.target } })
+  accept({ intent_id: request.intent_id, accepted: true })
+  await screen.findByText('正在停止并核验执行')
+  expect(new URL(screen.getByLabelText('当前页面').textContent!, 'http://fixture').searchParams.get('relocation_id')).toBe(request.intent_id)
+  expect(screen.queryByText('迁移已完成')).toBeNull()
+  expect(mocks.startRelocation).toHaveBeenCalledTimes(1)
 })

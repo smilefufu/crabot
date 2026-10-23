@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { ClientError, WorkspaceClient, type WorkspaceRecord, type WorkspaceSummary, type WorkspaceUsage, type WorkspaceRelocationPreviewResult, type WorkspaceRelocationIssue, type WorkspaceRelocationJobStage, type WorkspaceRelocationJobStatus } from 'crabot-client'
@@ -27,27 +27,44 @@ const relocationIssues: Record<WorkspaceRelocationIssue['reason'], string> = {
   absolute_link: '链接绑定绝对位置', external_link: '链接指向迁移范围之外', git_worktree: 'Git 工作树绑定外部位置',
   python_environment: 'Python 环境绑定原位置', external_hardlink: '与范围外文件共享硬链接', mount_point: '包含独立挂载目录', special_file: '包含不支持迁移的特殊文件', unreadable: '无法读取或核验',
 }
-function RelocationPreviewPanel({ client, source, revision, locked }: { client: WorkspaceClient; source: string; revision: number; locked: boolean }) {
+function RelocationPreviewPanel({ client, source, revision, locked, canStart, rememberJob, refreshStatus }: { client: WorkspaceClient; source: string; revision: number; locked: boolean; canStart: boolean; rememberJob(id: string | null): void; refreshStatus(): void }) {
   const [target, setTarget] = useState(''), [result, setResult] = useState<WorkspaceRelocationPreviewResult>(), [error, setError] = useState(''), [busy, setBusy] = useState(false)
-  const request = useRef<AbortController | undefined>(undefined)
+  const request = useRef<AbortController | undefined>(undefined), submitted = useRef(false), mounted = useRef(true)
+  const [submitting, setSubmitting] = useState(false)
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false } }, [])
   useEffect(() => {
     request.current?.abort(); setResult(undefined); setBusy(false)
     return () => request.current?.abort()
   }, [client, revision, locked])
   function edit(value: string) { request.current?.abort(); setBusy(false); setResult(undefined); setError(''); setTarget(value) }
   async function preview(event: React.FormEvent) {
-    event.preventDefault(); if (locked || busy || !target.trim()) return
+    event.preventDefault(); if (locked || busy || submitting || !target.trim()) return
     const controller = new AbortController(); request.current?.abort(); request.current = controller
     setBusy(true); setResult(undefined); setError('')
     try {
       const next = await client.previewRelocation({ target: target.trim() }, { signal: controller.signal })
-      if (!controller.signal.aborted) setResult(next)
+      if (!controller.signal.aborted) { submitted.current = false; setResult(next) }
     } catch (failure) { if (!controller.signal.aborted) setError(message(failure)) }
     finally { if (request.current === controller) setBusy(false) }
   }
+  async function start() {
+    if (!result || locked || !canStart || incomplete || !result.execution.ready || workerCount === undefined || result.mode === 'unchanged' || submitted.current) return
+    submitted.current = true; setSubmitting(true); setError('')
+    const intent_id = projectId()
+    rememberJob(intent_id)
+    try {
+      const receipt = await client.startRelocation({ intent_id, target: result.target, expected_revision: result.revision, confirmed: true })
+      if (!mounted.current) return
+      if ('unchanged' in receipt) { rememberJob(null); setResult(undefined); setError('当前位置相同，无需迁移。') }
+    } catch {
+      if (mounted.current) setError('接纳回执未收到，请以上方实际进度为准。')
+    } finally {
+      if (mounted.current) { setSubmitting(false); refreshStatus() }
+    }
+  }
   const available = result?.available_bytes
   const insufficient = result?.mode === 'copy' && result.usage?.logical_bytes !== undefined && available !== undefined && BigInt(result.usage.logical_bytes) > BigInt(available)
-  const incomplete = result && result.mode !== 'unchanged' && (result.usage?.status !== 'complete' || result.issues.length > 0 || insufficient)
+  const incomplete = result && result.mode !== 'unchanged' && (result.usage?.status !== 'complete' || result.usage.logical_bytes === undefined || result.issues.length > 0 || insufficient || result.mode === 'copy' && available === undefined)
   let summary = '预检通过，尚未开始迁移。'
   if (result?.mode === 'unchanged') summary = '当前位置相同，无需迁移。'
   else if (incomplete) summary = '预检发现阻塞项，请处理后重新检查。'
@@ -56,9 +73,9 @@ function RelocationPreviewPanel({ client, source, revision, locked }: { client: 
   return <Card title="迁移工作目录">
     <p className="workspace-path">当前位置：{source}</p>
     <form aria-label="工作目录迁移预检" onSubmit={preview} className="workspace-form">
-      <label>目标工作目录<input value={target} onChange={event => edit(event.target.value)} placeholder="运行 Crabot 的电脑或服务器上的绝对路径" /></label>
+      <label>目标工作目录<input disabled={submitting} value={target} onChange={event => edit(event.target.value)} placeholder="运行 Crabot 的电脑或服务器上的绝对路径" /></label>
       <p className="workspace-note">先检查迁移范围、空间和兼容问题。检查不会停止任务或搬动文件。</p>
-      <div className="workspace-actions"><Button type="submit" disabled={locked || busy || !target.trim()}>{busy ? '正在检查…' : '检查迁移位置'}</Button>
+      <div className="workspace-actions"><Button type="submit" disabled={locked || busy || submitting || !target.trim()}>{busy ? '正在检查…' : '检查迁移位置'}</Button>
         {busy && <Button type="button" variant="secondary" onClick={() => { request.current?.abort(); setBusy(false) }}>取消检查</Button>}</div>
     </form>
     {error && <p role="alert">{error}</p>}
@@ -73,7 +90,8 @@ function RelocationPreviewPanel({ client, source, revision, locked }: { client: 
       {result.usage && <p>源文件总大小：{bytes(result.usage.logical_bytes)} · {statuses[result.usage.status]}；目标可用空间约 {bytes(available === undefined ? undefined : Number(available))}。</p>}
       {insufficient && <p role="alert">目标空间不足，不能开始迁移。</p>}
       {result.issues.length > 0 && <ul>{result.issues.map((issue, index) => <li key={index}>{issue.path || '工作目录'}：{relocationIssues[issue.reason]}</li>)}</ul>}
-      <p className="workspace-note">实际迁移需要再次明确确认。迁移期间暂停任务，管理页面保持在线；现有执行器将永久关闭，历史和文件保留。</p>
+      <p className="workspace-note">迁移期间暂停任务，管理页面保持在线；现有执行器将永久关闭，历史和文件保留。迁移后请发起新任务继续工作。</p>
+      {!incomplete && result.mode !== 'unchanged' && result.execution.ready && workerCount !== undefined && canStart && <Button disabled={locked || submitting} onClick={() => void start()}>停止执行并迁移</Button>}
     </section>}
   </Card>
 }
@@ -83,11 +101,14 @@ const relocationStages: Record<WorkspaceRelocationJobStage, string> = {
   switching: '正在切换目录', validating: '正在检查新目录与执行模块', finalizing: '正在保存迁移结果', restoring: '正在恢复业务',
   finished: '迁移步骤已结束', unknown: '阶段待核实',
 }
-function RelocationStatusPanel({ client, maintenance }: { client: WorkspaceClient; maintenance: boolean }) {
+function useRelocationStatus(client: WorkspaceClient, maintenance: boolean, knownId: string | null) {
   const scope = useServerScope(), previous = useRef<WorkspaceRelocationJobStatus | undefined>(undefined)
-  const status = useQuery({ queryKey: ['server', scope, 'workspaces', 'relocation', 'current'], queryFn: async ({ signal }) => {
-    let observed = await client.currentRelocation({ signal }); signal.throwIfAborted()
-    if (observed.available && !observed.job && previous.current) observed = await client.relocationStatus(previous.current.intent_id, { signal })
+  if (knownId && previous.current?.intent_id !== knownId) previous.current = undefined
+  const status = useQuery({ queryKey: ['server', scope, 'workspaces', 'relocation', 'current', knownId], queryFn: async ({ signal }) => {
+    if (knownId && !/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(knownId)) throw new Error('Invalid relocation identity')
+    let observed = knownId ? await client.relocationStatus(knownId, { signal }) : await client.currentRelocation({ signal }); signal.throwIfAborted()
+    const id = knownId ?? previous.current?.intent_id
+    if (!knownId && observed.available && !observed.job && id) observed = await client.relocationStatus(id, { signal })
     signal.throwIfAborted()
     if (observed.available && observed.job) previous.current = observed.job
     return observed
@@ -97,10 +118,16 @@ function RelocationStatusPanel({ client, maintenance }: { client: WorkspaceClien
     if (maintenance && !wasMaintaining.current && !status.isFetching) void status.refetch()
     wasMaintaining.current = maintenance
   }, [maintenance, status.refetch])
-  const uncertain = status.isError || status.data?.available === false
+  const missing = !!knownId && status.data?.available === true && !status.data.job
+  const uncertain = status.isError || status.data?.available === false || missing
   const job = uncertain ? previous.current : status.data?.job
-  if (!job && !uncertain) return null
+  return { status, job, uncertain, missing }
+}
+function RelocationStatusPanel({ observation, knownId }: { observation: ReturnType<typeof useRelocationStatus>; knownId: string | null }) {
+  const { status, job, uncertain, missing } = observation
+  if (!job && !uncertain && !knownId) return null
   let title = '暂时无法核实迁移进度，保留上次信息；未重新提交迁移。'
+  if (missing || knownId && !job && !status.isError) title = '提交结果待核实，请刷新迁移进度；不要重复提交。'
   let detail = '请稍后刷新，当前工作区列表与搜索仍可使用。'
   if (!uncertain && job) {
     if (job.state === 'completed') { title = '迁移已完成'; detail = '目录、执行模块和管理页面已恢复，旧执行器保持关闭。' }
@@ -110,7 +137,8 @@ function RelocationStatusPanel({ client, maintenance }: { client: WorkspaceClien
   }
   return <Card><section aria-label="工作目录迁移进度"><h2>迁移进度</h2>
     <p role={uncertain || job?.state === 'needs_attention' ? 'alert' : 'status'}>{title}</p><p className="workspace-note">{detail}</p>
-    {job && <><p className="workspace-path">作业编号：{job.intent_id}</p><dl className="workspace-facts">
+    {(job || knownId) && <p className="workspace-path">作业编号：{job?.intent_id ?? knownId}</p>}
+    {job && <><dl className="workspace-facts">
       <dt>原位置</dt><dd className="workspace-path">{job.source ?? '尚未核实'}</dd>
       <dt>目标位置</dt><dd className="workspace-path">{job.target ?? '尚未核实'}</dd>
       {uncertain && <><dt>上次确认阶段</dt><dd>{relocationStages[job.stage]}</dd></>}
@@ -201,7 +229,18 @@ function WorkspacePage({ scope }: { scope: string }) {
   const total = useQuery({ queryKey: ['server', scope, 'workspaces', 'usage'], queryFn: ({ signal }) => client.totalUsage({ signal }),
     refetchOnWindowFocus: true, refetchInterval: value => value.state.data?.status === 'measuring' ? 1000 : false }, serverQueries)
   const [totalRefreshing, setTotalRefreshing] = useState(false)
-  const [searchParams] = useSearchParams()
+  const [searchParams, setSearchParams] = useSearchParams()
+  const knownId = searchParams.get('relocation_id'), relocation = useRelocationStatus(client, observedMaintenance === true, knownId)
+  const canStart = !relocation.status.isPending && !relocation.uncertain && relocation.status.data?.available === true && (!relocation.job || relocation.job.state === 'completed')
+  const rememberJob = useCallback((id: string | null) => {
+    setSearchParams(previous => { const next = new URLSearchParams(previous); if (id) next.set('relocation_id', id); else next.delete('relocation_id'); return next }, { replace: true })
+  }, [setSearchParams])
+  const refreshedJob = useRef<string | undefined>(undefined)
+  useEffect(() => {
+    if (relocation.job?.state === 'completed' && !relocation.uncertain && refreshedJob.current !== relocation.job.intent_id) {
+      refreshedJob.current = relocation.job.intent_id; void query.refetch(); void total.refetch()
+    }
+  }, [relocation.job, relocation.uncertain, query.refetch, total.refetch])
   const [selected, setSelected] = useState(searchParams.get('workspace_id') ?? ''), [search, setSearch] = useState(''), [sort, setSort] = useState('name')
   const [error, setError] = useState(''), [creating, setCreating] = useState(false), [saving, setSaving] = useState(false)
   const [name, setName] = useState(''), [purpose, setPurpose] = useState(''), [root, setRoot] = useState('')
@@ -255,8 +294,8 @@ function WorkspacePage({ scope }: { scope: string }) {
         <Button disabled={locked} onClick={() => { createId.current = projectId(); setName(''); setPurpose(''); setRoot(''); setCreating(true) }}>添加项目工作区</Button></div></div>
     {maintenance.isError ? <p role="alert">暂时无法核实工作区维护状态，仍可查看和搜索；请重新核验后再操作。 <Button variant="secondary" onClick={() => void maintenance.refetch()}>重新核验维护状态</Button></p>
       : locked && <p role="status">{observedMaintenance ? '工作目录正在维护或等待恢复，新任务与相关文件操作暂不可用。仍可查看和搜索工作区。' : '正在核验工作区维护状态…'}</p>}
-    <RelocationStatusPanel key={scope} client={client} maintenance={observedMaintenance === true} />
-    {query.data && <RelocationPreviewPanel client={client} source={query.data.storage_root} revision={query.data.revision} locked={locked} />}
+    <RelocationStatusPanel observation={relocation} knownId={knownId} />
+    {query.data && <RelocationPreviewPanel client={client} source={query.data.storage_root} revision={query.data.revision} locked={locked} canStart={canStart} rememberJob={rememberJob} refreshStatus={() => void serverQueries.invalidateQueries({ queryKey: ['server', scope, 'workspaces', 'relocation'] })} />}
     {query.data && <p>{query.data.items.filter(item => item.workspace.kind === 'project').length} 个项目工作区 · 1 个默认工作区 · {query.data.items.filter(item => item.directory_status !== 'ready').length} 个目录待核实</p>}
     <section aria-label="全部工作区空间">
       <h2>全部工作区空间</h2>
