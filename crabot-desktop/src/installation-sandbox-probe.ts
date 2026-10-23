@@ -1,5 +1,6 @@
 import { app, BrowserWindow } from 'electron'
-import { readFile } from 'node:fs/promises'
+import { readFile, lstat, mkdir } from 'node:fs/promises'
+import path from 'node:path'
 
 // Isolated installation probe. It never resolves a Core, starts MM, connects
 // Admin, grants application IPC or uses a persistent user/business profile.
@@ -9,6 +10,14 @@ export async function runInstallationSandboxProbe(argument: string) {
   try {
     if (process.platform !== 'linux' || !/^http:\/\/127\.0\.0\.1:[1-9][0-9]{0,4}\/[a-f0-9]{64}\/gui$/.test(argument)
       || Number(new URL(argument).port) > 65535 || process.argv.some(value => /^--(?:no-sandbox|disable-.*sandbox|single-process)(?:=|$)/.test(value))) throw new Error('Invalid installation probe')
+    const profiles = process.argv.filter(value => value.startsWith('--user-data-dir='))
+    const profile = profiles[0]?.slice('--user-data-dir='.length)
+    if (profiles.length !== 1 || !profile || !path.isAbsolute(profile)) throw new Error('Missing isolated profile')
+    const stat = await lstat(profile)
+    if (!stat.isDirectory() || stat.isSymbolicLink() || stat.uid !== process.getuid!() || (stat.mode & 0o777) !== 0o700) throw new Error('Invalid isolated profile')
+    app.setPath('userData', profile); app.setPath('sessionData', profile)
+    await mkdir(path.join(profile, 'tmp'), { mode: 0o700 })
+    app.setPath('temp', path.join(profile, 'tmp'))
     app.enableSandbox()
     await app.whenReady()
     window = new BrowserWindow({ show: false, webPreferences: { sandbox: true, nodeIntegration: false, contextIsolation: true,
@@ -26,8 +35,9 @@ export async function runInstallationSandboxProbe(argument: string) {
     const pid = window.webContents.getOSProcessId()
     if (!ready || !Number.isSafeInteger(pid) || pid <= 0) throw new Error('Renderer not ready')
     const status = await readFile(`/proc/${pid}/status`, 'utf8')
-    if (!/^NoNewPrivs:\s+1$/m.test(status) || !/^Seccomp:\s+2$/m.test(status)
-      || (await readFile(`/proc/${pid}/uid_map`, 'utf8')).trim() === (await readFile('/proc/self/uid_map', 'utf8')).trim()) throw new Error('Renderer sandbox not verified')
+    const mapping = (await readFile(`/proc/${pid}/uid_map`, 'utf8')).trim()
+    if (!mapping || !/^NoNewPrivs:\s+1$/m.test(status) || !/^Seccomp:\s+2$/m.test(status)
+      || mapping === (await readFile('/proc/self/uid_map', 'utf8')).trim()) throw new Error('Renderer sandbox not verified')
     window.destroy(); app.exit(0)
   } catch { window?.destroy(); app.exit(1) }
   finally { clearTimeout(timer) }

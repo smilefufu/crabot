@@ -3,7 +3,7 @@ import { createRequire } from 'node:module'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import path from 'node:path'
 import { homedir, tmpdir } from 'node:os'
-import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, readdir, rm } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { randomBytes } from 'node:crypto'
 import { createInterface } from 'node:readline'
@@ -64,6 +64,7 @@ async function probe(prepared: PreparedInstallation) {
     const endpoint = `http://127.0.0.1:${address.port}/${token}`
     const env = { ...process.env }
     for (const name of ['NODE_OPTIONS', 'NODE_PATH', 'ELECTRON_RUN_AS_NODE', 'CHROME_DEVEL_SANDBOX', 'LD_PRELOAD', 'LD_LIBRARY_PATH', 'DATA_DIR', 'PYTHONPATH', 'PYTHONHOME']) delete env[name]
+    await mkdir(path.join(profile, 'gui'), { mode: 0o700 })
     await run(path.join(prepared.guiRoot, 'crabot-desktop'), [`--user-data-dir=${path.join(profile, 'gui')}`, `--installation-sandbox-probe=${endpoint}/gui`], env, 60_000)
     const product = createRequire(import.meta.url)('./bootstrap/scripts/lib/product-runtime.cjs')
     const runtime = product.loadProductRuntime(prepared.coreRoot, { required: true, full: true })
@@ -76,9 +77,15 @@ async function probe(prepared: PreparedInstallation) {
   }
 }
 async function main() {
+  const verifyOnly = process.argv.length === 3 && process.argv[2] === '--verify-payload-only'
   if (process.platform !== 'linux' || process.arch !== 'x64' || process.getuid!() === 0 || process.getuid!() !== process.geteuid!()
-    || process.argv.length !== 3 || !path.isAbsolute(process.argv[2]) || /[\r\n\0]/.test(process.argv[2])) throw new Error('Invalid native installer')
+    || process.argv.length !== 3 || !verifyOnly && (!path.isAbsolute(process.argv[2]) || /[\r\n\0]/.test(process.argv[2]))) throw new Error('Invalid native installer')
   const backend = await import(pathToFileURL(path.join(directory, 'bootstrap/scripts/lib/desktop-payload.mjs')).href)
+  if (verifyOnly) {
+    const verified = await backend.verifyDesktopPayload(path.join(bundle, 'offline'))
+    if (verified.bytes <= 0n) throw new Error('Invalid payload')
+    emit('payload_verified', { business_mm_started: false }); return
+  }
   const { detectMode } = await import(pathToFileURL(path.join(directory, 'bootstrap/scripts/lib/mode.mjs')).href)
   if (detectMode() === 'system') throw Object.assign(new Error('System deployment'), { code: 'CRABOT_INSTALL_SYSTEM_MODE' })
   const locator = await readInstallationLocator(homedir(), 'linux', process.env)

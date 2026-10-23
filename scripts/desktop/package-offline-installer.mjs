@@ -35,6 +35,13 @@ for (const file of helpers) {
   const target = path.join(appDir, 'dist/bootstrap', file)
   await fs.mkdir(path.dirname(target), { recursive: true }); await fs.copyFile(path.join(root, file), target)
 }
+if (process.platform === 'linux') {
+  const { packageUbuntuInstaller } = await import('./package-ubuntu-installer.mjs')
+  await packageUbuntuInstaller({ appDir, output, payload, release, nativeDirectory: args.get('--native-bootstrap'), distribute: args.get('--distribute') === 'true' })
+  sameSource()
+  console.log('Native GTK offline candidate assembled; default GNOME/Polkit and real GUI/browser acceptance remain required.')
+  process.exit(0)
+}
 const require = createRequire(path.join(root, 'crabot-desktop/package.json')), { build, Platform, Arch } = require('electron-builder')
 let resources
 await build({ projectDir: output, publish: 'never', targets: Platform.current().createTarget('dir', Arch[process.arch]), config: {
@@ -64,7 +71,6 @@ await fs.writeFile(path.join(output, 'installer-location.json'), JSON.stringify(
 console.log('Offline installer host built; OS distribution wrappers and final installation acceptance remain required.')
 
 if (args.get('--distribute') === 'true') {
-  if (process.platform === 'linux') throw new Error('Ubuntu distribution requires the native sandbox authorization bootstrap; not ready')
   const artifacts = [], packaged = process.platform === 'darwin' ? path.resolve(resources, '../../..') : path.dirname(executable)
   await build({ projectDir: output, prepackaged: process.platform === 'darwin' ? path.join(packaged, 'Crabot Installer.app') : packaged,
     publish: 'never', targets: Platform.current().createTarget(process.platform === 'darwin' ? ['dmg'] : ['nsis'], Arch[process.arch]), config: {

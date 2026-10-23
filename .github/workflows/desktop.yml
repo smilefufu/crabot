@@ -43,8 +43,29 @@ defaults:
     shell: bash
 
 jobs:
+  ubuntu-bootstrap:
+    name: Build Ubuntu24 native bootstrap
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.3'
+      - name: Prepare native compiler and Ubuntu24 desktop headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libgtk-4-dev libjson-glib-dev
+      - name: Compile fixed helper and GTK frontend from this clean commit
+        run: node scripts/desktop/build-ubuntu-installer.mjs .desktop-build/ubuntu-bootstrap
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ubuntu-native-bootstrap
+          path: .desktop-build/ubuntu-bootstrap
+          retention-days: 3
   runtime:
     name: Desktop foundation ${{ matrix.target }}
+    needs: ubuntu-bootstrap
     timeout-minutes: ${{ (matrix.target == 'darwin-x64' || matrix.target == 'win32-x64') && 135 || 90 }}
     strategy:
       fail-fast: false
@@ -181,7 +202,7 @@ jobs:
         run: |
           node node_modules/typescript/bin/tsc -p tsconfig.json
           node build-preload.mjs
-          node --test tests/installation-entries.test.mjs tests/desktop-ipc.test.mjs tests/workspace-folder.test.mjs tests/desktop-disk.test.mjs tests/desktop-resources.test.mjs tests/first-model-fixture.test.mjs tests/full-host-control.test.mjs tests/desktop-network.test.mjs tests/artifact-network.test.mjs tests/session-host.test.mjs tests/diagnostics.test.mjs tests/login-startup.test.mjs tests/controller.test.mjs tests/update-dialog.test.mjs tests/update-package.test.mjs
+          node --test ../scripts/desktop/ubuntu-bootstrap.test.mjs tests/ubuntu-installation.test.mjs tests/installation-entries.test.mjs tests/desktop-ipc.test.mjs tests/workspace-folder.test.mjs tests/desktop-disk.test.mjs tests/desktop-resources.test.mjs tests/first-model-fixture.test.mjs tests/full-host-control.test.mjs tests/desktop-network.test.mjs tests/artifact-network.test.mjs tests/session-host.test.mjs tests/diagnostics.test.mjs tests/login-startup.test.mjs tests/controller.test.mjs tests/update-dialog.test.mjs tests/update-package.test.mjs
       - name: Actual paired controller scoped migration without MM
         env:
           CRABOT_PAIRED_CONTROLLER_TEST: '1'
@@ -262,11 +283,17 @@ jobs:
         if: steps.scope.outputs.full_runtime == 'true'
         timeout-minutes: 10
         run: node scripts/desktop/package-application.mjs --candidate=true --layout=paired "--core=.desktop-build/安装 候选/core" "--out=.desktop-build/安装 候选/paired" 2>&1 | tee .desktop-build/paired-package.log
+      - name: Load same-commit Ubuntu24 native bootstrap
+        if: runner.os == 'Linux' && steps.scope.outputs.full_runtime == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: ubuntu-native-bootstrap
+          path: .desktop-build/ubuntu-bootstrap
       - name: Build independent offline installer host
         if: steps.scope.outputs.full_runtime == 'true'
         timeout-minutes: 15
-        run: node scripts/desktop/package-offline-installer.mjs --candidate=true --distribute=${{ runner.os != 'Linux' }} "--paired=.desktop-build/安装 候选/paired" "--out=.desktop-build/安装 候选/installer" 2>&1 | tee .desktop-build/offline-installer.log
-      - name: Verify actual installer ASAR without business startup on Linux
+        run: node scripts/desktop/package-offline-installer.mjs --candidate=true --distribute=${{ runner.os != 'Linux' }} --native-bootstrap=.desktop-build/ubuntu-bootstrap "--paired=.desktop-build/安装 候选/paired" "--out=.desktop-build/安装 候选/installer" 2>&1 | tee .desktop-build/offline-installer.log
+      - name: Verify native installer backend and payload without business startup on Linux
         if: runner.os == 'Linux' && steps.scope.outputs.full_runtime == 'true'
         timeout-minutes: 6
         run: xvfb-run -a node .github/scripts/verify-offline-installer-host.mjs ".desktop-build/安装 候选/installer" 2>&1 | tee .desktop-build/installer-host-probe.log

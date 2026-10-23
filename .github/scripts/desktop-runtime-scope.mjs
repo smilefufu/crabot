@@ -3,7 +3,7 @@ import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs'
 
 // Native identity, control, SDK and UI checks always run. Rebuild the full interpreter/
 // browser payload when its inputs or actual capability consumers change, or on manual final validation.
-const prefixes = ['crabot-agent/src/core/workspace-', 'crabot-agent/src/engine/bg-entities/', 'scripts/lib/workspace-', 'crabot-desktop/src/installer', 'crabot-desktop/src/installation-', 'crabot-admin/upgrade/', 'crabot-agent/src/workers/', 'crabot-core/', 'crabot-memory/', 'crabot-shared/', 'crabot-mcp-tools/', 'crabot-native/', 'scripts/desktop/', 'scripts/scrapling/',
+const prefixes = ['crabot-desktop/native/ubuntu/', 'crabot-desktop/src/ubuntu-', 'crabot-agent/src/core/workspace-', 'crabot-agent/src/engine/bg-entities/', 'scripts/lib/workspace-', 'crabot-desktop/src/installer', 'crabot-desktop/src/installation-', 'crabot-admin/upgrade/', 'crabot-agent/src/workers/', 'crabot-core/', 'crabot-memory/', 'crabot-shared/', 'crabot-mcp-tools/', 'crabot-native/', 'scripts/desktop/', 'scripts/scrapling/',
   'scripts/computer-use/', 'crabot-desktop/tests/fixtures/first-model-', 'crabot-desktop/tests/fixtures/workspace-', 'scripts/lib/product-', 'scripts/lib/legacy-', 'scripts/lib/managed-mcp-', 'scripts/lib/scrapling-', 'scripts/lib/computer-use-',
   'scripts/lib/__tests__/legacy-python', 'scripts/lib/__tests__/system-', 'scripts/lib/system-', 'scripts/system', '.github/scripts/smoke-system',
   '.github/scripts/fixtures/product-']

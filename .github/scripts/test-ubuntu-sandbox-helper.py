@@ -114,7 +114,13 @@ with tempfile.TemporaryDirectory(prefix='Crabot namespace 用户 *?[]{}@{HOME} \
         restriction = Path('/proc/sys/kernel/apparmor_restrict_unprivileged_userns')
         assert restriction.read_text().strip() == '1', 'Kernel restriction is required for this acceptance'
         original_setting = restriction.read_bytes()
-        assert subprocess.run([str(gui_file)], timeout=5).returncode == 13, 'Fixture must actually be denied before registration'
+        before_code = subprocess.run([str(gui_file)], timeout=5).returncode
+        if before_code != 13:
+            print('KERNEL_PRECONDITION', json.dumps({'code': before_code, 'restriction': original_setting.decode().strip(),
+                'kernel': os.uname().release, 'apparmor_enabled': Path('/sys/module/apparmor/parameters/enabled').read_text().strip(),
+                'caller_context': Path('/proc/self/attr/current').read_text().strip(),
+                'caller_status': [line for line in Path('/proc/self/status').read_text().splitlines() if line.startswith(('Uid:', 'CapEff:', 'NoNewPrivs:', 'Seccomp:'))]}), flush=True)
+        assert before_code == 13, 'Fixture must actually be denied before registration'
         names = [line for line in output.splitlines() if re.fullmatch(r'crabot-[a-z0-9-]+', line)]
         assert len(names) == 3
         policies = [Path('/etc/apparmor.d') / name for name in names]

@@ -37,7 +37,8 @@ with sync_playwright() as playwright:
             for pid in renderers:
                 status = Path(f'/proc/{pid}/status').read_text()
                 assert re.search(r'^NoNewPrivs:\s+1$', status, re.M) and re.search(r'^Seccomp:\s+2$', status, re.M)
-                assert Path(f'/proc/{pid}/uid_map').read_text().strip() != Path('/proc/self/uid_map').read_text().strip()
+                mapping = Path(f'/proc/{pid}/uid_map').read_text().strip()
+                assert mapping and mapping != Path('/proc/self/uid_map').read_text().strip()
         finally:
             browser.close()
 print('CRABOT_BROWSER_SANDBOX_VERIFIED')
