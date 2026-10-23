@@ -59,6 +59,7 @@
 - [管理页面恢复入口Spec](crabot-docs/superpowers/specs/2026-10-23-workspace-recovery-http-handoff-design.md)已于10-24获确认，§3.5生效。已接共享SDK/当前人类RPC/维护在线HTTP及“核验→明确继续”页面；新协调初始化才202，后台独立、同id回执与撤权/未知不重发。SDK9、Shared17、Core11（真实归档/旧协调退出）、Admin53、页面33及类型/有限构建通过；同MM三段已改由真实SDK恢复，Linux已实际通过，四平台及整包继续。未归档/其它故障恢复及最终整包GUI仍未完成，不缩减原验收范围。
 - 权限兼容按[确认Spec](crabot-docs/superpowers/specs/2026-10-19-legacy-project-file-access-design.md)：旧对象有效null一次转显式全目录，新对象仅默认受管范围；仅storage覆盖，其余继承、明确限制及原请求/Worker上限保留。实际旧元数据→Admin重载→生产Harness读写及受限拒绝通过，未改现场权限。
 - System按[确认Spec](crabot-docs/superpowers/specs/2026-10-18-system-mode-experience-design.md)/[协议](crabot-docs/protocols/protocol-system.md)/[计划](crabot-docs/superpowers/plans/2026-10-18-system-mode-experience-implementation.md)：S1–S4注册/降UID/systemd/本人CLI/批量启停重启/范围升级与受保护恢复已接，旧候选多轮三UID通过，新head仍需整机验证。S5有旧表/运行目录发现、精确停机、旧入口隔离/交接及专用数据/Python组件；完整旧共享转换协调、全部启动源/恢复、真实旧发行多UID仍未完成。自定义DATA_DIR/停止目录映射提案已撤回；旧Node指纹补充未确认且未实现。在线准备代码/环境，仅一致性备份/实际转换与切换停机。
+- 验收夹具时序：迟到cleanup清空后续spy、stop前实际尚未入队两项均有确定性红例；改为测试边界恢复/迟到清理只认原测试，以及真实队列hold后确认两条入队再stop。有限Core2、完整Harness261通过，未改产品停机或原超时；Intel真实Admin耗时仍须原生验证。
 - 最终缺口：完整安装/更新/修复/卸载、旧部署迁移及故障恢复、签名/公证、macOS14/Windows11/Ubuntu GNOME24.04与26.04的权限/IME/沙箱/资源、真实模型任务分别验收；[签名指南](crabot-docs/guides/desktop-release-signing.md)。Agent34项和Admin两项既有失败已在未改main复现，分支WS关闭丢消息已修；不把基线、构建、部署或旧候选混成验收。逐项证据/旧结果保留在[总验收记录](crabot-docs/superpowers/plans/2026-10-17-desktop-application-validation.md)与对应计划；完成全部验证后才走PR。
 
 ### 任务默认目录文件授权：独立修复待审查

@@ -5082,25 +5082,26 @@ describe('HarnessEvent.task_status —— 事件自带落账后的 task 状态',
 
   it('非迁移点:stop 后 drain 出的 dead_letter 不带 task_status(迁移由 operation_settled 承载)', async () => {
     const opEvents: HarnessEvent[] = []
-    const { harness } = await makeHarness({
-      // 让第一条卡在投递里,第二条就会留在队列上等 killWorker 去 drain
-      sendInputBehavior: () => new Promise((resolve) => setTimeout(resolve, 30)),
-    }, {
+    const { harness, fake } = await makeHarness({}, {
       onOperationNotification: async (_managerKey, e) => { opEvents.push(e); return { consumed: true } },
     })
     const worker = await harness.spawnWorker(spawnParams())
     events.length = 0
-
-    const inFlight = harness.sendToWorker(worker.worker_id, '第一条')
-    const queued = harness.sendToWorker(worker.worker_id, '第二条').catch(() => undefined)
+    // Hold delivery until the actual public calls have admitted both inputs.
+    const inbox = (harness as any).getInbox(worker.worker_id)
+    inbox.hold('fixture-stop-drain')
+    await Promise.all([
+      harness.sendToWorker(worker.worker_id, '第一条'),
+      harness.sendToWorker(worker.worker_id, '第二条'),
+    ])
+    expect(inbox.pending).toBe(2)
+    expect(fake.sendInputCalls).toHaveLength(0)
     await harness.killWorker(worker.worker_id)
-    await inFlight.catch(() => undefined)
-    await queued
 
     // 死信已降审计：读 events.jsonl 而非唤醒面
     const deadLetters = (await harness.readWorkerEvents(worker.worker_id))
       .filter((e) => e.kind === 'state_changed' && e.detail?.kind === 'dead_letter')
-    expect(deadLetters.length).toBeGreaterThan(0)
+    expect(deadLetters).toHaveLength(2)
     for (const e of deadLetters) expect(e.task_status).toBeUndefined()
     // 同一次 verified stop 的迁移载体是 operation_settled（唯一唤醒，自带 closed）
     await waitUntil(() => opEvents.some((e) => e.kind === 'operation_settled'))

@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest'
+import { afterEach, describe, it, expect, vi } from 'vitest'
 import fs from 'node:fs/promises'
 import syncFs, { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
@@ -12,6 +12,8 @@ import { sha256CanonicalJson } from 'crabot-shared'
 import ModuleManager from './index.js'
 import { terminateProcessTree } from './process-tree.js'
 import { relocationAgentConfig } from '../../crabot-agent/tests/core/fixtures/relocation-agent-config.js'
+
+afterEach(() => vi.restoreAllMocks())
 
 function coordinatorJournalFailures(child: ReturnType<typeof spawn>): string[] {
   return require('../../scripts/lib/workspace-coordinator-launch.mjs').workspaceCoordinatorDiagnostics(child)
@@ -87,6 +89,7 @@ function observeActualAdminRecoveryRpc(callsFile: string): string {
 
 async function fixture(options: { withMemory?: boolean; inactiveMemory?: boolean; wrongRuntime?: boolean; result?: string; withAgent?: boolean; agentResult?: string; actualAgent?: boolean; businessAgent?: boolean; businessMemory?: boolean; processLifetimeMs?: number; backgroundShell?: boolean; validationHealth?: 'healthy' | 'unhealthy'; validationServerReadyDelayMs?: number; runtimeRegistrationDelayMs?: number; validationRuntimeMismatch?: boolean; validationRootOverride?: boolean; validationRegistration?: 'delayed' | 'exit'; memoryHealth?: 'healthy' | 'degraded'; memoryBootstrap?: boolean; actualAdmin?: boolean; adminReadyDelayMs?: number; quiesceResult?: string; orphanDuringStop?: boolean; extraModule?: 'running' | 'inactive' | 'tool'; historyWorkspace?: boolean } = {}) {
   if ((options.businessAgent || options.businessMemory) && (process.env.GITHUB_ACTIONS !== 'true' || process.env.CRABOT_WORKSPACE_BUSINESS_ONSTART_CI !== '1')) throw new Error('Business onStart is isolated CI only')
+  const fixtureTestName = expect.getState().currentTestName
   const root = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'crabot-current-admin-')))
   const native = require('../../scripts/lib/process-identity.cjs'), management = require('../../scripts/lib/desktop-management.cjs')
   const data = management.ensurePrivateDataRoot(path.join(root, 'data')), script = path.join(data, 'finite-admin.cjs'), callsFile = path.join(data, 'calls.json')
@@ -152,7 +155,7 @@ async function fixture(options: { withMemory?: boolean; inactiveMemory?: boolean
     })
   }
   const cleanup = async () => {
-    vi.restoreAllMocks()
+    if (expect.getState().currentTestName === fixtureTestName) vi.restoreAllMocks()
     const admin = manager.modules.get('admin-web'); if (admin) admin.port = port
     try { await manager.stop() }
     catch (error) {
@@ -523,6 +526,20 @@ time.sleep(300)`
     await manager.runtimeRegistry.removeRuntime(runtimePlan.modules[0].runtime_id)
   }
 }
+
+describe('workspace fixture mock ownership', () => {
+  it('late cleanup cannot restore a later test mock', async () => {
+    const f = await fixture(), currentTestName = expect.getState().currentTestName
+    const target = { value: () => 1 }, spy = vi.spyOn(target, 'value')
+    target.value()
+    try {
+      expect.setState({ currentTestName: 'a later test with its own mocks' })
+      await f.cleanup()
+      target.value()
+      expect(spy).toHaveBeenCalledTimes(2)
+    } finally { expect.setState({ currentTestName }); vi.restoreAllMocks() }
+  }, 30000)
+})
 
 describe('registered workspace gate bundled Python', () => {
   it.runIf(!!process.env.CRABOT_WORKSPACE_GATE_PYTHON)('runs the actual bundled interpreter only after its own durable gate registration', async () => {
