@@ -82,6 +82,20 @@ for (const kind of ['oversize', 'bad-json', 'wrong-id', 'failed', 'timeout']) te
   assert.equal(f.calls.some(call => call.url === '/shutdown'), false)
 })
 
+test('a valid delayed identity can exceed a tiny fixture budget without authorizing shutdown', async t => {
+  const f = await fixture(t, (req, res, body, data) => {
+    const reply = () => res.end(JSON.stringify({ id: body.id, success: true, data }))
+    if (req.url === '/get_runtime_identity') setTimeout(reply, 150)
+    else reply()
+  })
+  await assert.rejects(moduleRpc.openModuleShutdownRpc(f.process, f.port, expected, { timeoutMs: 50 }), { code: 'CRABOT_MODULE_SHUTDOWN_UNVERIFIED' })
+  assert.deepEqual(f.calls.map(call => call.url), ['/get_runtime_identity'])
+  const rpc = await moduleRpc.openModuleShutdownRpc(f.process, f.port, expected, { timeoutMs: 1000 })
+  t.after(() => rpc.close())
+  await rpc.shutdown()
+  assert.deepEqual(f.calls.map(call => call.url), ['/get_runtime_identity', '/get_runtime_identity', '/shutdown'])
+})
+
 test('runtime expectation is fixed before the asynchronous identity response', async t => {
   let respond, connected
   const ready = new Promise(resolve => { connected = resolve })

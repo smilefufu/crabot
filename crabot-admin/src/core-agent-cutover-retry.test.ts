@@ -38,7 +38,7 @@ function createSubject(options: { completionError?: unknown; existingMarker?: bo
   }
   subject.waitForCoreAgentReady = vi.fn().mockResolvedValue(undefined)
   subject.configMutationCoordinator = { drainPendingInvalidation: vi.fn() }
-  subject.channelManager = { reRegisterInstances: vi.fn() }
+  subject.channelManager = { reRegisterInstances: vi.fn(), registerBuiltinInstanceDefinitions: vi.fn(async () => []) }
   subject.ensureBuiltinSchedules = vi.fn()
   subject.scheduleEngine = { startAll: vi.fn(), stop: vi.fn() }
   subject.startAgentDependentMaintenance = vi.fn()
@@ -101,6 +101,61 @@ describe('legacy Agent package inventory scope', () => {
 })
 
 describe('core Agent cutover activation retry', () => {
+  it('retains workspace startup suspension after topology handshake and does not activate business when the fence later disappears', async () => {
+    const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-cold-admin-startup-')))
+    const subject = createSubject()
+    subject.adminConfig = { data_dir: path.join(root, 'admin') }
+    await fs.mkdir(path.join(root, 'workspace-control'))
+    const fence = path.join(root, 'workspace-control/relocation-finalizing.json')
+    await fs.writeFile(fence, 'maintenance exists; not execution authority')
+    try {
+      await expect(subject.completeCoreAgentCutover()).rejects.toMatchObject({ code: 'WORKSPACE_MAINTENANCE' })
+      expect(subject.rpcClient.callModuleManagerSensitive).toHaveBeenCalledTimes(1)
+      expect(subject.channelManager.registerBuiltinInstanceDefinitions).toHaveBeenCalledOnce()
+      expect(subject.waitForCoreAgentReady).not.toHaveBeenCalled()
+      expect(subject.channelManager.reRegisterInstances).not.toHaveBeenCalled()
+      expect(subject.scheduleEngine.startAll).not.toHaveBeenCalled()
+      expect(subject.configMutationCoordinator.drainPendingInvalidation).not.toHaveBeenCalled()
+      expect(subject.cutoverActivated).toBe(false)
+      await expect(subject.getHealthStatus()).resolves.toBe('degraded')
+      await expect(subject.getHealthDetails()).resolves.toMatchObject({ recovery_reason: 'workspace maintenance is waiting for authenticated recovery' })
+      await fs.unlink(fence)
+      await expect(subject.completeCoreAgentCutover()).rejects.toMatchObject({ code: 'WORKSPACE_MAINTENANCE' })
+      expect(subject.cutoverActivated).toBe(false)
+      expect(subject.scheduleEngine.startAll).not.toHaveBeenCalled()
+    } finally { await fs.rm(root, { recursive: true, force: true }) }
+  })
+
+  it('activates the suspended current startup once without replaying topology or channel auto_start', async () => {
+    const subject = createSubject(), verify = vi.fn(async () => {})
+    subject.workspaceStartupSuspended = true
+    const first = subject.resumeWorkspaceStartup(verify), second = subject.resumeWorkspaceStartup(verify)
+    expect(second).toBe(first)
+    await first
+    expect(subject.cutoverActivated).toBe(true)
+    expect(subject.workspaceStartupSuspended).toBe(false)
+    expect(subject.rpcClient.callModuleManagerSensitive).not.toHaveBeenCalled()
+    expect(subject.channelManager.reRegisterInstances).not.toHaveBeenCalled()
+    expect(subject.waitForCoreAgentReady).toHaveBeenCalledOnce()
+    expect(subject.scheduleEngine.startAll).toHaveBeenCalledOnce()
+    expect(subject.startAgentDependentMaintenance).toHaveBeenCalledOnce()
+    expect(verify.mock.calls.length).toBeGreaterThan(2)
+  })
+
+  it('keeps failed startup activation suspended and never retries an unknown stage', async () => {
+    const subject = createSubject()
+    subject.workspaceStartupSuspended = true
+    const verify = vi.fn(async () => { if (subject.waitForCoreAgentReady.mock.calls.length) throw new Error('Current recovery role revoked') })
+    await expect(subject.resumeWorkspaceStartup(verify)).rejects.toThrow('Current recovery role revoked')
+    await expect(subject.resumeWorkspaceStartup(verify)).rejects.toThrow('Current recovery role revoked')
+    expect(subject.waitForCoreAgentReady).toHaveBeenCalledOnce()
+    expect(subject.workspaceStartupSuspended).toBe(true)
+    expect(subject.cutoverActivated).toBe(false)
+    expect(subject.configInvalidationPublicationEnabled).toBe(false)
+    expect(subject.channelManager.reRegisterInstances).not.toHaveBeenCalled()
+    expect(subject.scheduleEngine.startAll).not.toHaveBeenCalled()
+  })
+
   it('repeats the MM handshake and retries readiness in the same process after a durable marker', async () => {
     const subject = createSubject()
     subject.waitForCoreAgentReady

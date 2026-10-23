@@ -1,5 +1,5 @@
 import { verifyWorkspaceRecoveryAdmin } from './workspace-recovery-auth.js'
-import { assertWorkspaceExecutionAllowed } from 'crabot-shared'
+import { assertWorkspaceExecutionAllowed, workspaceMaintenancePending } from 'crabot-shared'
 import { createWorkspaceFinalizationWeb } from './workspace-finalization-web.js'
 import { createWorkspaceRecoveryFinalizationWeb } from './workspace-recovery-finalization-web.js'
 import { parseFriendPermissionRecords, serializeFriendPermissionRecords } from './friend-permission-store.js'
@@ -685,6 +685,10 @@ export class AdminModule extends ModuleBase {
   private readonly managementOnly: boolean
   private readonly cutoverBearer?: string
   private cutoverActivated = false
+  private workspaceStartupSuspended = false
+  private workspaceStartupDefinitions?: Promise<void>
+  private workspaceStartupActivation?: Promise<void>
+  private workspaceStartupSkillsPending = false
   private configInvalidationPublicationEnabled = false
   private configDrainRetryTimer?: ReturnType<typeof setTimeout>
   private configDrainRetryDelayMs = 1_000
@@ -1162,8 +1166,12 @@ export class AdminModule extends ModuleBase {
 
     // 确保数据目录存在
     await fs.mkdir(this.adminConfig.data_dir, { recursive: true })
-    try { await this.workspaceService.initialize() }
-    catch { console.warn('[Admin] Workspace catalog unavailable; management remains online and original records are retained') }
+    this.workspaceStartupSuspended = workspaceMaintenancePending(path.resolve(this.adminConfig.data_dir, '..'))
+    if (this.workspaceStartupSuspended) await this.workspaceService.pauseScanning()
+    else {
+      try { await this.workspaceService.initialize() }
+      catch { console.warn('[Admin] Workspace catalog unavailable; management remains online and original records are retained') }
+    }
     await this.voiceAdmin.load()
     this.voiceAdmin.start()
     // Source managers must load before coordinator recovery so its semantic HMAC observes
@@ -1265,7 +1273,8 @@ export class AdminModule extends ModuleBase {
     console.log(`[Admin] Seeded ${getBuiltinSkills().length} builtin skills`)
 
     // 扫描工作区 skill（来自 WORKSPACE_DIR/.agents/skills/）
-    const scannedCount = await this.skillManager.scanWorkspaceSkills(this.workspaceDir)
+    this.workspaceStartupSkillsPending = this.workspaceStartupSuspended
+    const scannedCount = this.workspaceStartupSkillsPending ? 0 : await this.skillManager.scanWorkspaceSkills(this.workspaceDir)
     if (scannedCount > 0) {
       console.log(`[SkillManager] 扫描发现 ${scannedCount} 个新 skill（来自 ${this.workspaceDir}/.agents/skills/）`)
     }
@@ -1713,8 +1722,10 @@ export class AdminModule extends ModuleBase {
     return this.workspaceRecoveryFinalizationWeb ??= createWorkspaceRecoveryFinalizationWeb({ dataDir: path.resolve(this.adminConfig.data_dir, '..'),
       moduleManagerPort: this.rpcClient.moduleManagerTargetPort, modulePort: this.config.port,
       runtimeIdentity: () => ({ instance_id: process.env.CRABOT_INSTANCE_ID, module_id: this.config.moduleId, runtime_id: process.env.CRABOT_MODULE_RUNTIME_ID }),
-      quiesce: () => this.quiesceWorkspaceWebAccess(), reclose: () => this.recloseWorkspaceWebAccessAfterResumeFailure(), resume: () => {
+      quiesce: () => this.quiesceWorkspaceWebAccess(), reclose: () => this.recloseWorkspaceWebAccessAfterResumeFailure(), resume: async verify => {
         assertWorkspaceExecutionAllowed(path.resolve(this.adminConfig.data_dir, '..'))
+        await this.resumeWorkspaceStartup(verify)
+        await verify()
         this.workspaceService.resumeScanning(); this.workspaceWebAccess().reopen()
       } })
   }
@@ -7944,6 +7955,7 @@ export class AdminModule extends ModuleBase {
 
   private classifyCutoverRecoveryReason(error: unknown): string {
     const code = (error as { code?: unknown })?.code
+    if (code === 'WORKSPACE_MAINTENANCE') return 'workspace maintenance is waiting for authenticated recovery'
     if (code === 'MODULE_MANAGER_CUTOVER_STOP_FAILED') return 'legacy Agent process tree could not be stopped; retry after recovery'
     if (code === 'MODULE_MANAGER_CUTOVER_CONFLICT') return 'core Agent cutover inventory conflicts with durable marker'
     const message = error instanceof Error ? error.message : String(error)
@@ -8013,14 +8025,32 @@ export class AdminModule extends ModuleBase {
     }
     // The durable marker commits topology cutover. Readiness activation is a separate,
     // retryable phase: the MM bearer has already been consumed and must never be replayed.
-    await this.waitForCoreAgentReady()
+    if (workspaceMaintenancePending(path.resolve(this.adminConfig.data_dir, '..'))) this.workspaceStartupSuspended = true
+    if (this.workspaceStartupSuspended) {
+      this.workspaceStartupDefinitions ??= this.channelManager.registerBuiltinInstanceDefinitions().then(() => {})
+      await this.workspaceStartupDefinitions
+      throw new RpcError('WORKSPACE_MAINTENANCE', '工作目录恢复期间管理面保持在线；业务启动等待当前恢复完成。')
+    }
+    await this.activateCoreAgentBusiness(true)
+  }
+
+  /** Ordinary readiness only; topology handshake remains exclusively in its original runner. */
+  private async activateCoreAgentBusiness(registerChannels: boolean, verify?: () => Promise<void>): Promise<void> {
+    const step = async (action: () => Promise<unknown>) => {
+      await verify?.(); await action(); await verify?.()
+    }
+    await step(() => this.waitForCoreAgentReady())
     this.configInvalidationPublicationEnabled = true
-    await this.configMutationCoordinator.drainPendingInvalidation()
-    await this.channelManager.reRegisterInstances()
-    await this.ensureBuiltinSchedules()
-    await this.publishCurrentAgentConfigInvalidation()
+    await step(() => this.configMutationCoordinator.drainPendingInvalidation())
+    if (this.workspaceStartupSkillsPending) {
+      await step(() => this.skillManager.scanWorkspaceSkills(this.workspaceDir))
+      this.workspaceStartupSkillsPending = false
+    }
+    if (registerChannels) await step(() => this.channelManager.reRegisterInstances())
+    await step(() => this.ensureBuiltinSchedules())
+    await step(() => this.publishCurrentAgentConfigInvalidation())
     try {
-      await this.startAgentDependentMaintenance()
+      await step(() => this.startAgentDependentMaintenance())
     } catch (error) {
       this.configInvalidationPublicationEnabled = false
       throw error
@@ -8028,6 +8058,7 @@ export class AdminModule extends ModuleBase {
     // §3.19.12 step 4：开放 ingress 前完成 worker implementation 初始迁移
     // （grandfather bootstrap；fresh deploy 只落 completed marker，不 inspect 不付费 verify）。
     // 失败不阻断 Admin 启动：marker 保持 pending，下次启动重试（inspect/commit 幂等）。
+    await verify?.()
     try {
       await this.runWorkerImplementationBootstrap()
     } catch (error) {
@@ -8035,11 +8066,35 @@ export class AdminModule extends ModuleBase {
         error instanceof Error ? error.message : String(error))
     }
 
+    await verify?.()
     // Open ingress before arming timers: an already-due one-shot must never fire into
     // the management-only gate and be lost.
     this.cutoverActivated = true
     this.scheduleEngine.startAll(Array.from(this.schedules.values()))
     this.cutoverRecoveryReason = null
+  }
+
+  /** The owning prepared recovery supplies the live guard; no old cutover bearer is consumed. */
+  private resumeWorkspaceStartup(verify: () => Promise<void>): Promise<void> {
+    if (!this.workspaceStartupSuspended) {
+      if (this.cutoverActivated) return Promise.resolve()
+      return Promise.reject(new RpcError('SERVICE_UNAVAILABLE', '当前Admin业务启动尚未就绪。'))
+    }
+    if (!this.workspaceStartupActivation) {
+      this.workspaceStartupActivation = Promise.resolve().then(async () => {
+        try {
+          assertWorkspaceExecutionAllowed(path.resolve(this.adminConfig.data_dir, '..'))
+          await this.activateCoreAgentBusiness(false, verify)
+          this.workspaceStartupSuspended = false
+        } catch (error) {
+          this.cutoverActivated = false
+          this.configInvalidationPublicationEnabled = false
+          this.scheduleEngine.stop()
+          throw error
+        }
+      })
+    }
+    return this.workspaceStartupActivation
   }
 
   // ============================================================================

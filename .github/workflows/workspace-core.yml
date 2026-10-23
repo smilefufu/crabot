@@ -106,12 +106,14 @@ jobs:
         if: ${{ matrix.suite == 'recovery' && !cancelled() && steps.compile.outcome == 'success' }}
         working-directory: crabot-core
         run: |
-          node node_modules/vitest/vitest.mjs run src/workspace-human-verification.test.ts --testNamePattern='^(?!.*starts only the planned cold validation generations: (?:completion release|lost release acknowledgement|release unavailable|release readonly root|released current observation|resume running module|resume inactive module|resume tool)$).*normal fixed-job Admin completion preparation' --maxWorkers=1 --minWorkers=1
+          node node_modules/vitest/vitest.mjs run src/workspace-human-verification.test.ts --testNamePattern='^(?!.*starts only the planned cold validation generations: (?:completion release|lost release acknowledgement|release unavailable|release readonly root|released current observation|resume running module|resume inactive module|resume tool|resume actual Admin startup)$).*normal fixed-job Admin completion preparation' --maxWorkers=1 --minWorkers=1 --bail=1
       - name: Current cold completion, original services and Admin reopening
         if: ${{ matrix.suite == 'recovery-terminal' && !cancelled() && steps.compile.outcome == 'success' }}
         working-directory: crabot-core
+        env:
+          CRABOT_WORKSPACE_BUSINESS_ONSTART_CI: '1'
         run: |
-          node node_modules/vitest/vitest.mjs run src/workspace-human-verification.test.ts --testNamePattern='starts only the planned cold validation generations: (?:completion release|lost release acknowledgement|release unavailable|release readonly root|released current observation|resume running module|resume inactive module|resume tool)$' --maxWorkers=1 --minWorkers=1
+          node node_modules/vitest/vitest.mjs run src/workspace-human-verification.test.ts --testNamePattern='starts only the planned cold validation generations: (?:completion release|lost release acknowledgement|release unavailable|release readonly root|released current observation|resume running module|resume inactive module|resume tool|resume actual Admin startup)$' --maxWorkers=1 --minWorkers=1 --bail=1
       - name: Actual terminal release, business reopening and repeated jobs
         if: ${{ matrix.suite == 'completion' && !cancelled() && steps.compile.outcome == 'success' }}
         working-directory: crabot-core

@@ -11,7 +11,7 @@ interface Options {
   modulePort: number
   runtimeIdentity: () => { instance_id?: string; module_id: string; runtime_id?: string }
   quiesce: () => Promise<void>
-  resume: () => void
+  resume: (verify: () => Promise<void>) => void | Promise<void>
   reclose: () => Promise<void>
 }
 const native = require('../../scripts/lib/process-identity.cjs')
@@ -124,7 +124,7 @@ export function createWorkspaceRecoveryFinalizationWeb(options: Options) {
           try {
             await prepared.pending; await current.verify()
             if (preparation !== prepared || prepared.failed) throw unavailable()
-            options.resume()
+            await options.resume(current.verify)
             await current.verify()
             if (preparation !== prepared || prepared.failed) throw unavailable()
             return Object.freeze({ resumed: true as const, ...current.job })

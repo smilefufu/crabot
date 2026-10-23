@@ -61,7 +61,7 @@ export function createWorkspaceRelocationRootVerifier(options: Options) {
         if (catalog.storage_root !== state.published.target.path || catalog.revision !== state.selected.catalog_revision
           || sha256CanonicalJson(catalog) !== state.selected.catalog_sha256) throw unavailable()
         const { openPinnedProcessRpc } = require(path.join(__dirname, '../../../scripts/lib/pinned-process-rpc.cjs'))
-        const rpc = await openPinnedProcessRpc(state.launch.parent, options.moduleManagerPort, { source: 'crabot-agent', timeoutMs: 5000 })
+        const rpc = await openPinnedProcessRpc(state.launch.parent, options.moduleManagerPort, { source: 'crabot-agent', timeoutMs: 30000 })
         try {
           const proof = await rpc.call('verify_workspace_relocation_runtime', request, { authorizationBearer: token })
           assertCurrent()
@@ -167,7 +167,7 @@ export function createWorkspaceRecoveryRootVerifier(options: Options) {
           || !released && (catalog.revision !== selected.catalog_revision || sha256CanonicalJson(catalog) !== selected.catalog_sha256)) throw unavailable()
         stage = 'current-mm-runtime'
         const rpc = await require(path.join(__dirname, '../../../scripts/lib/pinned-process-rpc.cjs')).openPinnedProcessRpc(
-          state.coordinator.launch.parent, options.moduleManagerPort, { source: 'crabot-agent', timeoutMs: 5000 })
+          state.coordinator.launch.parent, options.moduleManagerPort, { source: 'crabot-agent', timeoutMs: 30000 })
         try {
           const proof = await rpc.call('verify_workspace_relocation_recovery_runtime', request, { authorizationBearer: token })
           assertCurrent()
