@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { once } from 'node:events'
 import { spawn } from 'node:child_process'
+import { Worker } from 'node:worker_threads'
 import identity from '../process-identity.cjs'
 
 test('native identity includes OS owner, precise creation identity and executable; invalid PIDs fail closed', () => {
@@ -188,4 +189,31 @@ test('Windows excludes an older Toolhelp entry whose creator PID was reused by a
     return
   }
   t.skip('No readable live parent-PID reuse fixture in this OS snapshot; actual fresh carrier stress remains required')
+})
+
+
+test('Windows creator reuse across threads retains fresh process identity and kernel exit checks', { skip: process.platform !== 'win32', timeout: 30000 }, async t => {
+  const expected = identity.inspectProcess(process.pid), module = new URL('../process-identity.cjs', import.meta.url).href
+  const started = performance.now()
+  await Promise.all(Array.from({ length: 4 }, async () => {
+    const worker = new Worker(`const { parentPort, workerData } = require('node:worker_threads');
+      const identity = require(require('node:url').fileURLToPath(workerData.module));
+      for (let i=0;i<200;i++) {
+        const actual=identity.inspectProcess(workerData.expected.pid);
+        if(JSON.stringify(actual)!==JSON.stringify(workerData.expected))throw new Error('Current generation creator observation changed');
+      }
+      parentPort.postMessage('verified');`, { eval: true, workerData: { expected, module } })
+    try { const [message, exit] = await Promise.all([once(worker, 'message'), once(worker, 'exit')]); assert.equal(message[0], 'verified'); assert.equal(exit[0], 0) }
+    finally { await worker.terminate() }
+  }))
+  t.diagnostic('Concurrent current-generation observations milliseconds: ' + Math.round(performance.now() - started))
+  const child = spawn(process.execPath, ['-e', "process.send('ready');setInterval(()=>{},1000);setTimeout(()=>process.exit(0),10000).unref()"], { stdio: ['ignore', 'ignore', 'ignore', 'ipc'] })
+  t.after(async () => { if (child.pid && child.exitCode === null && child.signalCode === null) { const ended = once(child, 'exit'); child.kill(); await ended } })
+  await once(child, 'spawn'); await once(child, 'message')
+  const observed = identity.inspectProcess(child.pid)
+  assert.equal(observed.parent, process.pid)
+  assert.deepEqual(identity.inspectProcess(child.pid), observed)
+  const exited = once(child, 'exit'); child.kill(); await exited
+  assert.equal(identity.isProcessExited(child.pid), true)
+  assert.equal(identity.inspectProcess(child.pid), null)
 })

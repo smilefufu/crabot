@@ -21,6 +21,8 @@
 #include <shellapi.h>
 #include <io.h>
 #include <fcntl.h>
+#include <map>
+#include <mutex>
 #else
 #include <unistd.h>
 #include <signal.h>
@@ -45,6 +47,13 @@ struct Identity {
   int parent = 0;
   std::string owner, started, executable;
 };
+
+#ifdef _WIN32
+// Only immutable creator metadata is retained. Every Inspect still opens and
+// verifies the actual current process handle, birth, token, image and exit state.
+static std::mutex creatorMutex;
+static std::map<int, std::pair<ULONGLONG, int>> creatorByPid;
+#endif
 
 static std::string Read(const std::string& path) {
   std::ifstream file(path);
@@ -138,20 +147,35 @@ static Identity Inspect(int pid, const char** stage = nullptr) {
   int count = WideCharToMultiByte(CP_UTF8, 0, path, length, nullptr, 0, nullptr, nullptr);
   result.executable.resize(count);
   WideCharToMultiByte(CP_UTF8, 0, path, length, result.executable.data(), count, nullptr, nullptr);
-  if (stage) *stage = "identity-parent-snapshot";
-  HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-  if (snapshot == INVALID_HANDLE_VALUE) { CloseHandle(process); throw std::runtime_error("Cannot inspect process parent"); }
-  PROCESSENTRY32 entry{}; entry.dwSize = sizeof(entry);
-  if (Process32First(snapshot, &entry)) do {
-    if (entry.th32ProcessID == static_cast<DWORD>(pid)) { result.parent = entry.th32ParentProcessID; break; }
-  } while (Process32Next(snapshot, &entry));
-  CloseHandle(snapshot);
-  // Keep this generation pinned through the parent snapshot. A process can finish
-  // after its image/token were read and disappear from Toolhelp before we return.
+  bool knownCreator = false;
+  {
+    std::lock_guard<std::mutex> lock(creatorMutex);
+    const auto previous = creatorByPid.find(pid);
+    if (previous != creatorByPid.end() && previous->second.first == ticks.QuadPart) {
+      result.parent = previous->second.second; knownCreator = true;
+    }
+  }
+  if (!knownCreator) {
+    if (stage) *stage = "identity-parent-snapshot";
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot == INVALID_HANDLE_VALUE) { CloseHandle(process); throw std::runtime_error("Cannot inspect process parent"); }
+    PROCESSENTRY32 entry{}; entry.dwSize = sizeof(entry);
+    if (Process32First(snapshot, &entry)) do {
+      if (entry.th32ProcessID == static_cast<DWORD>(pid)) { result.parent = entry.th32ParentProcessID; break; }
+    } while (Process32Next(snapshot, &entry));
+    CloseHandle(snapshot);
+  }
+  // Keep this generation pinned through the creator observation. Retained birth
+  // metadata never proves the process is still alive after its image/token queries.
   const DWORD finalWait = WaitForSingleObject(process, 0);
   CloseHandle(process);
   if (finalWait == WAIT_OBJECT_0) return {};
   if (finalWait != WAIT_TIMEOUT) throw std::runtime_error("Cannot confirm process identity is still current");
+  if (!knownCreator && ticks.QuadPart != 0 && result.parent > 0) {
+    std::lock_guard<std::mutex> lock(creatorMutex);
+    if (creatorByPid.size() >= 1024 && creatorByPid.find(pid) == creatorByPid.end()) creatorByPid.clear();
+    creatorByPid[pid] = { ticks.QuadPart, result.parent };
+  }
 #elif __APPLE__
   proc_bsdinfo info{};
   if (proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, sizeof(info)) != sizeof(info)) {
