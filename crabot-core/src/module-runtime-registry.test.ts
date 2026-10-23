@@ -168,7 +168,7 @@ describe('ModuleRuntimeRegistry', () => {
   it.each(['before observation', 'after root observation', 'after tree observation', 'after termination'] as const)(
     'retains the fixed runtime when its recovery role is revoked: %s', async phase => {
       const identities = new Map<number, string | null>([[101, 'start-101']])
-      const { registry, terminateTree } = makeRegistry(identities)
+      const { registry, terminateTree } = makeRegistry(identities, new Set(), { platform: 'linux' })
       await record(registry, 'runtime-a', 'crabot-agent', 101, 19003)
       let revoked = phase === 'before observation'
       if (phase === 'after root observation') vi.spyOn(registry as any, 'probeStartIdentity').mockImplementation(async () => { revoked = true; return 'start-101' })

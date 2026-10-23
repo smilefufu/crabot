@@ -2046,7 +2046,7 @@ describe('normal fixed-job Admin completion preparation', () => {
       await cold.start(); const currentPort = cold.server.address().port
       cold.config.port = f.manager.config.port
       await fs.unlink(path.join(f.data, 'ready')); await cold.startModuleProcess('admin-web')
-      await vi.waitFor(async () => expect(await fs.readFile(path.join(f.data, 'ready'), 'utf8')).toBe('ready'))
+      await vi.waitFor(async () => expect(await fs.readFile(path.join(f.data, 'ready'), 'utf8')).toBe('ready'), { timeout: 10000 })
       for (const token of ['wrong-human', old.token]) {
         await expect(cold.prepareWorkspaceRelocationRecoveryAdmission(request, token)).rejects.toMatchObject({ code: expect.stringMatching(/UNAUTHORIZED|FORBIDDEN/) })
         expect(cold.workspaceRecoveryAdmission).toBeUndefined()
@@ -2055,7 +2055,7 @@ describe('normal fixed-job Admin completion preparation', () => {
       expect(cold.workspaceRecoveryAdmission).toBeUndefined()
       await cold.stopModuleProcess('admin-web', 'shutdown'); cold.config.port = currentPort
       await fs.unlink(path.join(f.data, 'ready')); await cold.startModuleProcess('admin-web')
-      await vi.waitFor(async () => expect(await fs.readFile(path.join(f.data, 'ready'), 'utf8')).toBe('ready'))
+      await vi.waitFor(async () => expect(await fs.readFile(path.join(f.data, 'ready'), 'utf8')).toBe('ready'), { timeout: 10000 })
       await expect(cold.prepareWorkspaceRelocationRecoveryAdmission({ ...request, completion_sha256: '0'.repeat(64) }, 'fixture-human')).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
       const role = await cold.prepareWorkspaceRelocationRecoveryAdmission(request, 'fixture-human')
       expect(role.accepted).toBe(true); expect(role.request).toEqual(request)
@@ -2429,9 +2429,12 @@ describe('normal fixed-job Admin completion preparation', () => {
       locks.releaseCliLock(lock); await f.cleanup()
     }
   }, process.platform === 'win32' || process.platform === 'darwin' && process.arch === 'x64' ? 600000 : 120000)
-  it.each(['Agent', 'Agent and Memory', 'catalog changed after probe', 'completion observation', 'released without observation', 'definition changed before release', 'plan changed before release'])('starts only the planned cold validation generations: %s', async mode => {
+  const hasNativeRelease = typeof require('../../scripts/lib/process-identity.cjs').renameFileNoReplace === 'function'
+  const releaseModes = [...(hasNativeRelease ? ['completion release', 'lost release acknowledgement'] : ['release unavailable']),
+    ...(process.platform !== 'win32' && process.getuid?.() !== 0 ? ['release readonly root'] : [])]
+  it.each(['Agent', 'Agent and Memory', 'catalog changed after probe', 'completion observation', 'released without observation', 'definition changed before release', 'plan changed before release', ...releaseModes])('starts only the planned cold validation generations: %s', async mode => {
     const withMemory = mode === 'Agent and Memory'
-    const f = await fixture({ actualAgent: true, actualAdmin: true, validationHealth: 'healthy', withMemory, inactiveMemory: !withMemory, memoryHealth: withMemory ? 'healthy' : undefined, processLifetimeMs: 300000 })
+    const f = await fixture({ actualAgent: true, actualAdmin: true, ...(mode === 'catalog changed after probe' ? { adminReadyDelayMs: 1100 } : {}), validationHealth: 'healthy', withMemory, inactiveMemory: !withMemory, memoryHealth: withMemory ? 'healthy' : undefined, processLifetimeMs: 300000 })
     const locks = require('../../scripts/lib/cli-lock.mjs'), records = require('../../scripts/lib/workspace-relocation-intent.mjs')
     const lock = await locks.acquireWorkspaceRelocationLock(f.data, f.params.intent_id)
     let cold: any, coordinator: any
@@ -2466,7 +2469,7 @@ describe('normal fixed-job Admin completion preparation', () => {
       }
       await cold.start(); cold.config.port = cold.server.address().port
       await fs.unlink(path.join(f.data, 'ready')); await cold.startModuleProcess('admin-web')
-      await vi.waitFor(async () => expect(await fs.readFile(path.join(f.data, 'ready'), 'utf8')).toBe('ready'))
+      await vi.waitFor(async () => expect(await fs.readFile(path.join(f.data, 'ready'), 'utf8')).toBe('ready'), { timeout: 10000 })
       // Constructors/finite processes only; the Admin business cutover handshake is tested separately.
       cold.managementOnly = false
       expect(typeof cold.startWorkspaceRecoveryValidationModules).toBe('function')
@@ -2566,7 +2569,7 @@ describe('normal fixed-job Admin completion preparation', () => {
       expect(health.root_verified).toEqual(proof)
       await health.verify()
       expect((await fs.stat(root, { bigint: true })).mtimeNs).toBe(probedAt)
-      if (mode === 'Agent') {
+      if (mode === 'Agent' || releaseModes.includes(mode)) {
         expect(typeof cold.prepareWorkspaceRecoveryCompletion).toBe('function')
         const [prepared, concurrent] = await Promise.all([
           cold.prepareWorkspaceRecoveryCompletion(request, 'fixture-human'),
@@ -2577,6 +2580,7 @@ describe('normal fixed-job Admin completion preparation', () => {
         const expected = { ...request, launch_sha256: proof.launch_sha256, plan_sha256: proof.plan_sha256,
           instance_id: proof.instance_id, admin_runtime_id: adminState.runtimeId }
         expect(prepared).toEqual({ prepared: true, ...expected })
+        expect(typeof cold.releaseWorkspaceRecoveryCompletion).toBe('function')
         const grant = cold.workspaceRecoveryFinalizationGrant
         const finalization = async (params: any, bearer?: string) => {
           const response = await fetch(`http://127.0.0.1:${cold.config.port}/verify_workspace_relocation_recovery_finalization`, { method: 'POST',
@@ -2589,6 +2593,17 @@ describe('normal fixed-job Admin completion preparation', () => {
         expect(await finalization({ action: 'prepare_web', unexpected: true }, grant.token)).toMatchObject({ success: false, error: { code: 'INVALID_PARAMS' } })
         expect(await finalization({ action: 'resume_web' }, grant.token)).toMatchObject({ success: false, error: { code: 'FORBIDDEN' } })
         expect(await finalization({ action: 'prepare_web' }, grant.token)).toMatchObject({ success: true, data: { verified: true, ...expected, action: 'prepare_web' } })
+        const releaseProof = async (params: any, bearer?: string) => {
+          const response = await fetch(`http://127.0.0.1:${cold.config.port}/verify_workspace_relocation_recovery_release`, { method: 'POST',
+            headers: { 'Content-Type': 'application/json', ...(bearer ? { Authorization: 'Bearer ' + bearer } : {}) },
+            body: JSON.stringify({ id: randomUUID(), source: 'forged-source', method: 'verify_workspace_relocation_recovery_release', params }) })
+          return response.json()
+        }
+        expect(await releaseProof({ unexpected: true })).toMatchObject({ success: false, error: { code: 'UNAUTHORIZED' } })
+        expect(await releaseProof({ unexpected: true }, 'fixture-human')).toMatchObject({ success: false, error: { code: 'FORBIDDEN' } })
+        expect(await releaseProof({ ...request, unexpected: true }, grant.token)).toMatchObject({ success: false, error: { code: 'INVALID_PARAMS' } })
+        expect(await releaseProof(request, grant.token)).toMatchObject({ success: false, error: { code: 'FORBIDDEN' } })
+
         const calls = await f.calls()
         expect(calls.filter((item: any) => item.method === '/prepare_workspace_relocation_recovery_completion')).toHaveLength(1)
         expect(JSON.stringify(calls)).not.toContain(grant.token)
@@ -2606,6 +2621,48 @@ describe('normal fixed-job Admin completion preparation', () => {
         expect(JSON.stringify(await f.calls())).not.toContain(grant.token)
         expect((await fetch(`http://127.0.0.1:${f.port}/api/friends`, { headers: { Authorization: 'Bearer fixture-human' } })).status).toBe(200)
         expect((await fetch(`http://127.0.0.1:${f.port}/api/chat`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer fixture-human' }, body: '{}' })).status).toBe(503)
+        if (releaseModes.includes(mode)) {
+          const child = coordinator.child, send = child.send.bind(child), emit = child.emit.bind(child)
+          let lost = false, rootMode: number | undefined
+          const sent: string[] = []
+          const sending = vi.spyOn(child, 'send').mockImplementation((message: any, ...args: any[]) => { sent.push(message.kind); return send(message, ...args) })
+          const receiving = vi.spyOn(child, 'emit').mockImplementation((event: any, ...args: any[]) => {
+            if (!lost && mode === 'lost release acknowledgement' && event === 'message' && args[0]?.kind === 'workspace_recovery_released' && args[0].ok === true) {
+              lost = true; return emit(event, { ...args[0], ok: false, result: null })
+            }
+            return emit(event, ...args)
+          })
+          try {
+            if (mode === 'release readonly root') { rootMode = (await fs.stat(root)).mode & 0o777; await fs.chmod(root, 0o500) }
+            const first = cold.releaseWorkspaceRecoveryCompletion(request, 'fixture-human'), second = cold.releaseWorkspaceRecoveryCompletion(request, 'fixture-human')
+            if (hasNativeRelease && mode !== 'release readonly root') {
+              const [released, concurrent] = await Promise.all([first, second])
+              expect(released).toEqual({ released: true, ...expected }); expect(concurrent).toBe(released)
+              expect(await cold.releaseWorkspaceRecoveryCompletion(request, 'fixture-human')).toBe(released)
+              expect(await fs.readFile(path.join(f.data, 'workspace-control/relocation-history', request.intent_id + '.released.json'))).toEqual(before)
+              await expect(fs.lstat(fenceFile)).rejects.toMatchObject({ code: 'ENOENT' })
+              await health.verify()
+              expect(await callRoot(request, token)).toMatchObject({ success: true, data: proof })
+              expect(await finalization({ action: 'resume_web' }, grant.token)).toMatchObject({ success: false, error: { code: 'FORBIDDEN' } })
+              expect((await fetch(`http://127.0.0.1:${f.port}/api/chat`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer fixture-human' }, body: '{}' })).status).toBe(503)
+              expect(lost).toBe(mode === 'lost release acknowledgement')
+            } else {
+              let failure: any
+              await expect(first.catch((error: unknown) => { failure = error; throw error })).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
+              await expect(second).rejects.toBeDefined()
+              expect(JSON.stringify(failure)).not.toContain(grant.token)
+              expect(failure.cause.diagnostics.length).toBeGreaterThan(0)
+              expect(failure.cause.diagnostics.length).toBeLessThanOrEqual(4)
+              for (const item of failure.cause.diagnostics) expect(Object.keys(item).sort()).toEqual(['code', 'event', 'stage'])
+              await expect(cold.releaseWorkspaceRecoveryCompletion(request, 'fixture-human')).rejects.toBeDefined()
+              expect(await fs.readFile(fenceFile)).toEqual(before)
+            }
+            expect(sent.filter(kind => kind === 'workspace_recovery_release')).toHaveLength(1)
+            expect(sent.filter(kind => kind === 'workspace_recovery_release_observe')).toHaveLength(mode === 'completion release' ? 0 : 1)
+            expect(await fs.readFile(ledgerFile)).toEqual(ledger)
+            return
+          } finally { if (rootMode !== undefined) await fs.chmod(root, rootMode); sending.mockRestore(); receiving.mockRestore() }
+        }
       }
       if (mode === 'completion observation' || mode === 'released without observation') {
         expect(typeof cold.beginWorkspaceRecoveryCompletionObservation).toBe('function')
@@ -2619,9 +2676,28 @@ describe('normal fixed-job Admin completion preparation', () => {
           ])
           expect(first).toBe(health); expect(second).toBe(health)
         }
-        // A finite read-only effect fixture; this is not the product's release operation.
+        // The primitive's storage checks run locally; only its final native effect is a finite fixture.
         await expect(fs.lstat(releasedFile)).rejects.toMatchObject({ code: 'ENOENT' })
-        await fs.rename(fenceFile, releasedFile)
+        if (mode === 'completion observation') {
+          const originalRename = native.renameFileNoReplace, effects: string[][] = []
+          native.renameFileNoReplace = (source: string, destination: string) => { effects.push([source, destination]); require('node:fs').renameSync(source, destination) }
+          try {
+            await expect(records.releaseWorkspaceRelocationJob({ dataDir: f.data, id: request.intent_id, verify: health.verify })).rejects.toBeDefined()
+            expect(effects).toEqual([])
+            await expect(records.commitWorkspaceRelocationFinalizing({ dataDir: f.data, id: request.intent_id,
+              verify: async () => { throw new Error('fixture role revoked') }, assertCurrent: () => {}, checkCapabilities: async () => {} })).rejects.toThrow('fixture role revoked')
+            expect(effects).toEqual([])
+            let currentRole = true
+            const assertCurrent = () => { if (!currentRole) throw new Error('fixture synchronous role revoked') }
+            await expect(records.commitWorkspaceRelocationFinalizing({ dataDir: f.data, id: request.intent_id, verify: async () => {}, assertCurrent,
+              checkCapabilities: async () => { currentRole = false } })).rejects.toThrow('fixture synchronous role revoked')
+            expect(effects).toEqual([]); currentRole = true
+            const moved = await records.commitWorkspaceRelocationFinalizing({ dataDir: f.data, id: request.intent_id, verify: health.verify, assertCurrent,
+              checkCapabilities: async (verify: () => Promise<void>) => { await verify() } })
+            expect(moved).toEqual({ intent_id: request.intent_id, completion_sha256: request.completion_sha256, finalizing_sha256: request.finalizing_sha256 })
+            expect(effects).toEqual([[fenceFile, releasedFile]])
+          } finally { native.renameFileNoReplace = originalRename }
+        } else await fs.rename(fenceFile, releasedFile)
         try {
           expect(() => admission.readWorkspaceRecoveryAdmissionScope(f.data, request)).toThrow()
           expect(admission.readWorkspaceRecoveryCompletionScope(f.data, request)).toMatchObject({ released: true, fingerprint: protectedFacts.fingerprint })

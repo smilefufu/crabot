@@ -2395,46 +2395,62 @@ export async function archiveWorkspaceRelocationJob({ dataDir, id, signal }) {
   return { intent_id: id, completion_sha256: completionHash, finalizing_sha256: sha256CanonicalJson(fence) }
 }
 
-/** One original coordinator's commit effect. Read-only facts and a missing fence do not authorize this. */
-export async function releaseWorkspaceRelocationJob({ dataDir, id, signal, verify: authorize }) {
-  if (typeof authorize !== 'function') fail()
+/** Fixed storage only; callers separately own their role and current capability checks. */
+export async function commitWorkspaceRelocationFinalizing({ dataDir, id, signal, verify: authorize, assertCurrent, checkCapabilities }) {
+  if (typeof authorize !== 'function' || typeof assertCurrent !== 'function' || typeof checkCapabilities !== 'function') fail()
+  await authorize()
   const state = readWorkspaceRelocationArchivedState(dataDir, id), stateHash = sha256CanonicalJson(state)
   const ctx = context(dataDir), fence = readWorkspaceRelocationFinalizing(dataDir, id), fenceHash = sha256CanonicalJson(fence)
   if (!fence || fence.completion_sha256 !== sha256CanonicalJson(state.completion)) fail()
-  const token = cliLockToken(path.join(ctx.dataRoot, 'cli.lock')), dataRoot = identity(ctx.dataRoot), base = identity(ctx.baseControl)
+  const dataRoot = identity(ctx.dataRoot), base = identity(ctx.baseControl)
   const source = path.join(ctx.baseControl, finalizingFile), destination = path.join(ctx.baseControl, 'relocation-history', id + '.released.json')
   const bytes = readPrivateBytes(source, 65536), original = fs.lstatSync(source, { bigint: true })
   const absent = file => { try { fs.lstatSync(file); fail('WORKSPACE_RELOCATION_CONFLICT') } catch (error) { if (error.code !== 'ENOENT') throw error } }
-  const role = () => {
-    const self = native.inspectProcess(process.pid)
-    if (signal?.aborted || !token || cliLockToken(path.join(ctx.dataRoot, 'cli.lock')) !== token || !process.connected
-      || !native.sameProcess(state.launch.process, self) || self.parent !== state.launch.parent.pid
-      || !native.sameProcess(state.launch.parent, native.inspectProcess(state.launch.parent.pid))
-      || !same(dataRoot, identity(ctx.dataRoot)) || !same(base, identity(ctx.baseControl))
+  const checkStorage = () => {
+    assertCurrent()
+    if (signal?.aborted || !same(dataRoot, identity(ctx.dataRoot)) || !same(base, identity(ctx.baseControl))
       || sha256CanonicalJson(readWorkspaceRelocationArchivedState(dataDir, id)) !== stateHash) fail()
     for (const name of ['relocation-active', ...legacyRelocationFiles]) absent(path.join(ctx.baseControl, name))
   }
   const before = () => {
-    role(); absent(destination)
+    checkStorage(); absent(destination)
     if (sha256CanonicalJson(readWorkspaceRelocationFinalizing(dataDir, id)) !== fenceHash
       || observedVersion(fs.lstatSync(source, { bigint: true })) !== observedVersion(original)) fail()
   }
   const verify = async () => { await authorize(); before() }
   await verify()
-  await verifyWorkspaceRelocationArchivedCapabilities({ dataDir, id, signal, verify })
+  await checkCapabilities(verify)
   await verify()
   syncDirectory(fence.archive_path); syncDirectory(path.dirname(destination)); syncDirectory(ctx.baseControl); syncDirectory(ctx.dataRoot)
   before()
   native.renameFileNoReplace(source, destination)
   // A thrown sync/readback leaves an unknown result, never a successful release receipt.
   syncDirectory(path.dirname(destination)); syncDirectory(ctx.baseControl); syncDirectory(ctx.dataRoot)
-  role(); absent(source)
+  checkStorage(); absent(source)
   const moved = fs.lstatSync(destination, { bigint: true })
   if (moved.dev !== original.dev || moved.ino !== original.ino || !readPrivateBytes(destination, 65536).equals(bytes)
     || sha256CanonicalJson(readWorkspaceRelocationReleased(dataDir, id)) !== fenceHash) fail()
   await authorize()
-  role(); absent(source)
+  checkStorage(); absent(source)
   return Object.freeze({ intent_id: id, completion_sha256: fence.completion_sha256, finalizing_sha256: fenceHash })
+}
+
+/** One original coordinator's commit effect. A new recovery cannot borrow this role. */
+export async function releaseWorkspaceRelocationJob({ dataDir, id, signal, verify: authorize }) {
+  if (typeof authorize !== 'function') fail()
+  const state = readWorkspaceRelocationArchivedState(dataDir, id), stateHash = sha256CanonicalJson(state)
+  const ctx = context(dataDir), token = cliLockToken(path.join(ctx.dataRoot, 'cli.lock')), dataRoot = identity(ctx.dataRoot), base = identity(ctx.baseControl)
+  const assertCurrent = () => {
+    const self = native.inspectProcess(process.pid)
+    if (signal?.aborted || !token || cliLockToken(path.join(ctx.dataRoot, 'cli.lock')) !== token || !process.connected
+      || !same(dataRoot, identity(ctx.dataRoot)) || !same(base, identity(ctx.baseControl))
+      || !native.sameProcess(state.launch.process, self) || self.parent !== state.launch.parent.pid
+      || !native.sameProcess(state.launch.parent, native.inspectProcess(state.launch.parent.pid))
+      || sha256CanonicalJson(readWorkspaceRelocationArchivedState(dataDir, id)) !== stateHash) fail()
+  }
+  const verify = async () => { await authorize(); assertCurrent() }
+  return commitWorkspaceRelocationFinalizing({ dataDir, id, signal, verify, assertCurrent,
+    checkCapabilities: current => verifyWorkspaceRelocationArchivedCapabilities({ dataDir, id, signal, verify: current }) })
 }
 
 /** After the committed effect only; new business records may legitimately advance. */

@@ -302,6 +302,10 @@ export interface PrepareWorkspaceRelocationRecoveryCompletionResult {
   admin_runtime_id: string
 }
 
+export type VerifyWorkspaceRelocationRecoveryReleaseParams = VerifyWorkspaceRelocationRecoveryRequestParams
+export type VerifyWorkspaceRelocationRecoveryReleaseResult = Omit<VerifyWorkspaceRelocationRecoveryFinalizationResult, 'action'>
+export type ReleaseWorkspaceRelocationRecoveryCompletionResult = Omit<PrepareWorkspaceRelocationRecoveryCompletionResult, 'prepared'> & { released: true }
+
 export interface WorkspaceRecoveryRuntimeRegistration {
   schema_version: 1
   instance_id: string

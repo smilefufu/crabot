@@ -1,4 +1,4 @@
-// Fixed, idle recovery generation. This entry imports no business journal or runner.
+// Fixed recovery generation. Business runners and normal-job credentials are never loaded.
 import path from 'node:path'
 import { sha256CanonicalJson as hash } from '../crabot-shared/dist/canonical-json.js'
 import native from './lib/process-identity.cjs'
@@ -10,7 +10,7 @@ const exact = (value, keys) => value && typeof value === 'object' && !Array.isAr
 const digest = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value)
 const uuid = value => typeof value === 'string' && /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(value)
 let closed = false, initializing = false, lock, token, input, launch, ready, fingerprint
-let completionObservation = false, releasedObserved = false
+let completionObservation = false, releasedObserved = false, releaseEffect, releaseObservation = false
 const close = () => {
   if (closed) return
   closed = true; clearTimeout(timer)
@@ -50,6 +50,39 @@ process.on('message', async message => {
       ready = await commitWorkspaceRecoveryCoordinatorReady({ dataDir: input.data_dir, recoveryId: input.recovery_id, launchHash: input.launch_sha256 })
       verify(); clearTimeout(timer)
       await send({ kind: 'workspace_recovery_ready', recovery_id: input.recovery_id, launch_sha256: input.launch_sha256, ready_sha256: hash(ready) })
+      return
+    }
+    if (['workspace_recovery_release', 'workspace_recovery_release_observe'].includes(message?.kind)) {
+      const releasing = message.kind === 'workspace_recovery_release'
+      if (!ready || !completionObservation || !exact(message, ['kind', 'recovery_id', 'launch_sha256', 'ready_sha256', 'nonce', ...(releasing ? ['module_manager_port', 'prepared', 'credential'] : [])])
+        || message.recovery_id !== input.recovery_id || message.launch_sha256 !== input.launch_sha256 || message.ready_sha256 !== hash(ready) || !uuid(message.nonce)) throw new Error('Invalid release request')
+      verify()
+      const reply = { kind: releasing ? 'workspace_recovery_released' : 'workspace_recovery_release_observed', recovery_id: input.recovery_id,
+        launch_sha256: input.launch_sha256, ready_sha256: hash(ready), nonce: message.nonce, ok: false, result: null }
+      try {
+        if (releasing) {
+          if (releaseEffect) throw new Error('Release is already accepted')
+          releaseEffect = Promise.resolve().then(async () => {
+            const { releaseWorkspaceRecoveryFinalizing } = await import('./lib/workspace-recovery-finalization.mjs')
+            verify()
+            return releaseWorkspaceRecoveryFinalizing({ dataDir: input.data_dir, launch, ready, prepared: message.prepared,
+              credential: message.credential, moduleManagerPort: message.module_manager_port, verify })
+          })
+        }
+        if (!releaseEffect) throw new Error('No accepted release effect')
+        if (!releasing) {
+          if (releaseObservation) throw new Error('Release observation is already accepted')
+          releaseObservation = true
+        }
+        const result = await releaseEffect
+        verify()
+        if (!readWorkspaceRecoveryCompletionScope(input.data_dir, launch.request).released) throw new Error('No verified released fact')
+        reply.result = result; reply.ok = true
+      } catch (error) {
+        const fixed = value => typeof value === 'string' && /^[A-Za-z][A-Za-z0-9_-]{0,127}$/.test(value) ? value : null
+        console.error(JSON.stringify({ event: 'workspace_recovery_release_unconfirmed', code: fixed(error?.code), stage: fixed(error?.stage) }))
+      }
+      await send(reply)
       return
     }
     if (!ready || !exact(message, ['kind', 'recovery_id', 'launch_sha256', 'ready_sha256', 'nonce']) || !['workspace_recovery_verify', 'workspace_recovery_completion_observe'].includes(message.kind)
