@@ -12,7 +12,7 @@ describe('current recovery completion preparation authentication', () => {
     const identity = vi.fn(() => ({ instance_id: 'fixture-instance', module_id: 'admin-web', runtime_id: randomUUID() })), quiesce = vi.fn(async () => {}), resume = vi.fn()
     try {
       const web = createWorkspaceRecoveryFinalizationWeb({ dataDir: path.join(tmpdir(), 'absent-completion-' + randomUUID()), moduleManagerPort: 1,
-        modulePort: 2, runtimeIdentity: identity, quiesce, resume })
+        modulePort: 2, runtimeIdentity: identity, quiesce, resume, reclose: vi.fn(async () => {}) })
       expect(typeof web.resume).toBe('function')
       await expect(web.resume({ unexpected: true })).rejects.toMatchObject({ code: 'UNAUTHORIZED' })
       await expect(web.prepare({ unexpected: true })).rejects.toMatchObject({ code: 'UNAUTHORIZED' })

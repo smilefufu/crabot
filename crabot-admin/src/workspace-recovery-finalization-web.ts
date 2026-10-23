@@ -12,6 +12,7 @@ interface Options {
   runtimeIdentity: () => { instance_id?: string; module_id: string; runtime_id?: string }
   quiesce: () => Promise<void>
   resume: () => void
+  reclose: () => Promise<void>
 }
 const native = require('../../scripts/lib/process-identity.cjs')
 const admission = require('../../scripts/lib/workspace-recovery-admission.mjs')
@@ -130,7 +131,7 @@ export function createWorkspaceRecoveryFinalizationWeb(options: Options) {
           } catch (cause) {
             if (preparation === prepared) {
               prepared.failed = true
-              try { await options.quiesce() } catch { /* Admission closes before its existing drain can reject. */ }
+              try { await options.reclose() } catch { /* This owning preparation remains failed and admission stays closed. */ }
             }
             throw Object.assign(unavailable(), { cause })
           }

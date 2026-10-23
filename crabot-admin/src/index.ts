@@ -1713,7 +1713,7 @@ export class AdminModule extends ModuleBase {
     return this.workspaceRecoveryFinalizationWeb ??= createWorkspaceRecoveryFinalizationWeb({ dataDir: path.resolve(this.adminConfig.data_dir, '..'),
       moduleManagerPort: this.rpcClient.moduleManagerTargetPort, modulePort: this.config.port,
       runtimeIdentity: () => ({ instance_id: process.env.CRABOT_INSTANCE_ID, module_id: this.config.moduleId, runtime_id: process.env.CRABOT_MODULE_RUNTIME_ID }),
-      quiesce: () => this.quiesceWorkspaceWebAccess(), resume: () => {
+      quiesce: () => this.quiesceWorkspaceWebAccess(), reclose: () => this.recloseWorkspaceWebAccessAfterResumeFailure(), resume: () => {
         assertWorkspaceExecutionAllowed(path.resolve(this.adminConfig.data_dir, '..'))
         this.workspaceService.resumeScanning(); this.workspaceWebAccess().reopen()
       } })
@@ -1734,6 +1734,11 @@ export class AdminModule extends ModuleBase {
   /** Internal coordination only; callers still verify the fixed job and complete execution exit. */
   private async quiesceWorkspaceWebAccess(): Promise<void> {
     await Promise.all([this.workspaceWebAccess().closeAndDrain(), this.workspaceService.pauseScanning()])
+  }
+
+  /** Same prepared recovery only: its committed release must not prevent closing admission. */
+  private async recloseWorkspaceWebAccessAfterResumeFailure(): Promise<void> {
+    await Promise.all([this.workspaceWebAccess().closeAfterFailedResume(), this.workspaceService.pauseScanning()])
   }
 
   private async routeWebRequest(req: IncomingMessage, res: ServerResponse, url: URL, agentCliAuth?: AgentCliWebAuth): Promise<void> {

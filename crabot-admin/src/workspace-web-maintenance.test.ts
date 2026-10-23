@@ -58,6 +58,29 @@ describe('Admin workspace maintenance HTTP admission', () => {
     expect(f.errors).toEqual([])
   })
 
+  it('recloses failed resume without recreating a fence and drains the admitted handler while management stays online', async () => {
+    const f = await fixture(), admission = f.admin.workspaceWebAccess()
+    await f.fence('relocation-finalizing.json'); await f.admin.quiesceWorkspaceWebAccess()
+    await fs.unlink(path.join(f.root, 'workspace-control/relocation-finalizing.json'))
+    f.service.resumeScanning(); admission.reopen()
+    let release!: () => void, entered = false, drained = false
+    const wait = new Promise<void>(resolve => { release = resolve })
+    f.admin.handleCreateFriendApi = vi.fn(async (_req, res) => { entered = true; await wait; res.writeHead(200); res.end('{}') })
+    const request = fetch(f.endpoint + '/api/friends', { method: 'POST', headers: f.headers, body: '{}' })
+    try {
+      await vi.waitFor(() => expect(entered).toBe(true))
+      const closing = f.admin.recloseWorkspaceWebAccessAfterResumeFailure().then(() => { drained = true })
+      await Promise.resolve(); expect(drained).toBe(false)
+      expect((await fetch(f.endpoint + '/api/workspaces', { method: 'POST', headers: f.headers, body: '{}' })).status).toBe(503)
+      await expect(f.service.refresh('default')).rejects.toMatchObject({ code: 'WORKSPACE_UNAVAILABLE' })
+      expect((await fetch(f.endpoint + '/api/friends', { headers: f.headers })).status).toBe(200)
+      release(); expect((await request).status).toBe(200); await closing
+      expect(drained).toBe(true)
+      await expect(fs.stat(path.join(f.root, 'workspace-control/relocation-finalizing.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+      expect(f.errors).toEqual([])
+    } finally { release(); await request }
+  })
+
   it.each(['relocation.json', 'relocation-coordinator-ready.json', 'relocation-module-stop-submission.json'])('blocks new writes under %s while authentication and management reads remain online', async name => {
     const f = await fixture(), id = randomUUID(), before = await f.service.list()
     await f.fence(name)

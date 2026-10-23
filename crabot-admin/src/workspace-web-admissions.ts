@@ -36,6 +36,12 @@ export class WorkspaceWebAdmissions {
     return this.drain()
   }
 
+  /** Only the owning prepared completion may reclose after its durable fence was released. */
+  async closeAfterFailedResume(): Promise<void> {
+    this.closed = true
+    while (this.pending.size) await Promise.all([...this.pending])
+  }
+
   /** Internal prepared-job completion only; the caller owns current fixed-job authorization. */
   reopen(): void {
     assertWorkspaceExecutionAllowed(this.dataRoot)
