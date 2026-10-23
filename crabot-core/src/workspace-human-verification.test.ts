@@ -612,7 +612,7 @@ describe('MM owns the initial workspace migration job', () => {
       if (mode === 'login revoked after acceptance') await expect(f.manager.startWorkspaceRelocation(f.start, 'fixture-human')).rejects.toMatchObject({ code: 'UNAUTHORIZED' })
       else await expect(f.manager.startWorkspaceRelocation({ ...f.start, target: path.join(f.root, 'changed') }, 'fixture-human')).rejects.toMatchObject({ code: 'FORBIDDEN' })
       expect(launch).toHaveBeenCalledTimes(1)
-    } finally { vi.restoreAllMocks(); await f.cleanup() }
+    } finally { await f.cleanup() }
   }, timeout)
   it('observes the actual current coordinator without turning unknown ownership or a failed stop into running success', async () => {
     const f = await initial(), native = require('../../scripts/lib/process-identity.cjs')
@@ -635,7 +635,7 @@ describe('MM owns the initial workspace migration job', () => {
       expect(await sdk.currentRelocation()).toEqual({ ...expected, job: { ...expected.job, state: 'needs_attention' } })
       expect(moduleStop).toHaveBeenCalledTimes(1)
       await expect(fs.stat(f.start.target)).rejects.toMatchObject({ code: 'ENOENT' })
-    } finally { release(); await f.manager.workspaceInitialJob?.completion; vi.restoreAllMocks(); await f.cleanup() }
+    } finally { release(); await f.manager.workspaceInitialJob?.completion; await f.cleanup() }
   }, timeout)
   it.each(['revoked human', 'Agent stopped'])('rechecks readiness after waiting for the original lock: %s', async mode => {
     const f = await initial(), locks = require('../../scripts/lib/cli-lock.mjs')
@@ -666,7 +666,7 @@ describe('MM owns the initial workspace migration job', () => {
       expect(verify).toHaveBeenCalledTimes(2)
       await expect(fs.stat(path.join(f.data, 'workspace-control/relocation-active'))).rejects.toMatchObject({ code: 'ENOENT' })
       expect(locks.cliLockToken(held)).toBeUndefined()
-    } finally { locks.releaseCliLock(held); await pending?.catch(() => {}); vi.restoreAllMocks(); await f.cleanup() }
+    } finally { locks.releaseCliLock(held); await pending?.catch(() => {}); await f.cleanup() }
   }, timeout)
   it('treats the current directory as unchanged without an intent or coordinator', async () => {
     const f = await initial()
