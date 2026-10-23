@@ -81,7 +81,7 @@ async function main() {
   }
   const trusted = makeWindow(), foreign = makeWindow()
   attachDesktopNetwork(privateSession, host, () => trusted.webContents)
-  let starts = 0, updateDialogs = 0
+  let starts = 0, updateDialogs = 0, directorySelections = 0
   const revealed = []
   let preview, exported, helpOpened
   const helpRequest = new Promise(resolve => { helpOpened = resolve })
@@ -89,6 +89,7 @@ async function main() {
     controller: { host, start: async () => { starts++; return state }, stop: async () => state, reconnect: async () => state },
     quit: async () => true, openUpdateDialog: async () => { updateDialogs++; return true }, revealData: async () => true, openExternal: async url => { helpOpened(url) },
     revealWorkspace: async id => { revealed.push(id); return true },
+    selectWorkspace: async () => { directorySelections++; return root },
     diagnostics: async () => preview = await collectDiagnostics(path.join(__dirname, '../..'), state, []),
     exportDiagnostics: async id => { assert.equal(id, preview.report_id); exported = id; return false },
   })
@@ -109,6 +110,9 @@ async function main() {
   assert.equal(await foreign.webContents.executeJavaScript('window.crabotDesktop.revealWorkspaceFolder("default").then(()=>false,()=>true)'), true)
   assert.equal(await trusted.webContents.executeJavaScript('Promise.resolve().then(()=>window.crabotDesktop.revealWorkspaceFolder("/arbitrary/path")).then(()=>false,()=>true)'), true)
   assert.deepEqual(revealed, ['default'])
+  assert.equal(await trusted.webContents.executeJavaScript('window.crabotDesktop.selectWorkspaceDirectory()'), root)
+  assert.equal(await foreign.webContents.executeJavaScript('window.crabotDesktop.selectWorkspaceDirectory().then(()=>false,()=>true)'), true)
+  assert.equal(directorySelections, 1)
   const { createUpdateDriver } = await module('update-driver.js')
   const candidateResources = path.join(root, 'candidate-resources')
   await fs.mkdir(candidateResources)

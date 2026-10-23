@@ -20,6 +20,7 @@ export const DesktopDiagnosticsSchema = z.strictObject({
   recent: z.array(z.strictObject({ at: z.iso.datetime(), phase: DesktopPhaseSchema, code: z.string().max(128).optional() })).max(40),
 })
 export type DesktopDiagnostics = z.infer<typeof DesktopDiagnosticsSchema>
+export const DesktopDirectorySelectionSchema = z.string().min(1).max(32768).refine(value => !value.includes('\0') && /^(?:\/|[A-Za-z]:[\\/]|\\\\)/.test(value)).nullable()
 
 // Narrow host capabilities only. No token getter, business API, raw IPC or command/file proxy.
 export interface DesktopBridge {
@@ -33,6 +34,7 @@ export interface DesktopBridge {
   openExternal(url: string): Promise<boolean>
   revealDataFolder(): Promise<boolean>
   revealWorkspaceFolder(workspace_id: string): Promise<boolean>
+  selectWorkspaceDirectory(): Promise<string | null>
   getDiagnostics(): Promise<DesktopDiagnostics>
   exportDiagnostics(report_id: string): Promise<boolean>
 }

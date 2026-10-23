@@ -1,4 +1,4 @@
-import { revealWorkspaceFolder } from './workspace-folder.js'
+import { revealWorkspaceFolder, selectWorkspaceDirectory } from './workspace-folder.js'
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, protocol, session, shell, Tray } from 'electron'
 import path from 'node:path'
 import { createRequire } from 'node:module'
@@ -124,6 +124,13 @@ async function boot() {
     openUpdateDialog: () => updates!.open(),
     openExternal: url => shell.openExternal(url), revealData: async () => !(await shell.openPath(dataRoot)),
     revealWorkspace: id => revealWorkspaceFolder(controller!.host, id, value => shell.openPath(value)),
+    selectWorkspace: () => selectWorkspaceDirectory(controller!.host, async () => {
+      const owner = window
+      if (!owner || owner.isDestroyed()) return null
+      const selected = await dialog.showOpenDialog(owner, { title: '选择工作目录迁移位置', buttonLabel: '选择这个文件夹', properties: ['openDirectory'] })
+      if (selected.canceled || selected.filePaths.length !== 1) return null
+      return selected.filePaths[0]
+    }),
     exportDiagnostics: async id => {
       const report = reports.get(id)
       if (!report) return false

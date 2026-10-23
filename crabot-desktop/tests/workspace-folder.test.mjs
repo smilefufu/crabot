@@ -70,3 +70,27 @@ test('a context change between asynchronous token resolution and fetch sends no 
   assert.equal(f.reads, 0)
   assert.deepEqual(f.opened, [])
 })
+
+
+test('native workspace directory selection returns only a current single absolute path and cancels without effects', async () => {
+  const { selectWorkspaceDirectory } = await import('../dist/workspace-folder.js')
+  assert.equal(typeof selectWorkspaceDirectory, 'function')
+  const scope = { instance_id: 'a'.repeat(64), generation: randomUUID(), admin_url: 'http://127.0.0.1:3000', connection_epoch: 1 }
+  const host = { context: () => ({ ...scope }) }, directory = path.join(tmpdir(), '中文 selected folder')
+  assert.equal(await selectWorkspaceDirectory(host, async () => directory), directory)
+  assert.equal(await selectWorkspaceDirectory(host, async () => null), null)
+  for (const invalid of ['', 'relative/path', 'bad\0path', 'x'.repeat(32769), { path: directory }, [directory]]) {
+    assert.equal(await selectWorkspaceDirectory(host, async () => invalid), null)
+  }
+})
+test('a disconnected or changed desktop connection never delivers a stale selected directory', async () => {
+  const { selectWorkspaceDirectory } = await import('../dist/workspace-folder.js')
+  assert.equal(typeof selectWorkspaceDirectory, 'function')
+  let scope = { instance_id: 'a'.repeat(64), generation: randomUUID(), admin_url: 'http://127.0.0.1:3000', connection_epoch: 1 }, calls = 0
+  const host = { context: () => scope && ({ ...scope }) }, choose = async () => { calls++; return tmpdir() }
+  scope = null
+  assert.equal(await selectWorkspaceDirectory(host, choose), null); assert.equal(calls, 0)
+  scope = { instance_id: 'a'.repeat(64), generation: randomUUID(), admin_url: 'http://127.0.0.1:3000', connection_epoch: 1 }
+  assert.equal(await selectWorkspaceDirectory(host, async () => { scope = { ...scope, connection_epoch: 2 }; return tmpdir() }), null)
+  assert.equal(await selectWorkspaceDirectory(host, async () => { throw new Error('native dialog unavailable') }), null)
+})

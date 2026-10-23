@@ -29,16 +29,16 @@ const relocationIssues: Record<WorkspaceRelocationIssue['reason'], string> = {
 }
 function RelocationPreviewPanel({ client, source, revision, locked, canStart, rememberJob, refreshStatus }: { client: WorkspaceClient; source: string; revision: number; locked: boolean; canStart: boolean; rememberJob(id: string | null): void; refreshStatus(): void }) {
   const [target, setTarget] = useState(''), [result, setResult] = useState<WorkspaceRelocationPreviewResult>(), [error, setError] = useState(''), [busy, setBusy] = useState(false)
-  const request = useRef<AbortController | undefined>(undefined), submitted = useRef(false), mounted = useRef(true)
-  const [submitting, setSubmitting] = useState(false)
+  const request = useRef<AbortController | undefined>(undefined), submitted = useRef(false), selecting = useRef(false), mounted = useRef(true)
+  const [submitting, setSubmitting] = useState(false), [choosing, setChoosing] = useState(false)
   useEffect(() => { mounted.current = true; return () => { mounted.current = false } }, [])
   useEffect(() => {
-    request.current?.abort(); setResult(undefined); setBusy(false)
+    request.current?.abort(); setResult(undefined); setBusy(false); setChoosing(false)
     return () => request.current?.abort()
   }, [client, revision, locked])
-  function edit(value: string) { request.current?.abort(); setBusy(false); setResult(undefined); setError(''); setTarget(value) }
+  function edit(value: string) { request.current?.abort(); setBusy(false); setChoosing(false); setResult(undefined); setError(''); setTarget(value) }
   async function preview(event: React.FormEvent) {
-    event.preventDefault(); if (locked || busy || submitting || !target.trim()) return
+    event.preventDefault(); if (locked || busy || submitting || choosing || !target.trim()) return
     const controller = new AbortController(); request.current?.abort(); request.current = controller
     setBusy(true); setResult(undefined); setError('')
     try {
@@ -47,8 +47,18 @@ function RelocationPreviewPanel({ client, source, revision, locked, canStart, re
     } catch (failure) { if (!controller.signal.aborted) setError(message(failure)) }
     finally { if (request.current === controller) setBusy(false) }
   }
+  async function chooseDirectory() {
+    if (!desktopBridge?.selectWorkspaceDirectory || locked || busy || submitting || selecting.current) return
+    const controller = new AbortController(); request.current?.abort(); request.current = controller
+    selecting.current = true; setChoosing(true); setError('')
+    try {
+      const selected = await desktopBridge.selectWorkspaceDirectory()
+      if (!controller.signal.aborted && selected !== null) edit(selected)
+    } catch { if (!controller.signal.aborted) setError('目录选择未完成，请重试或填写目标路径。') }
+    finally { selecting.current = false; if (request.current === controller) setChoosing(false) }
+  }
   async function start() {
-    if (!result || locked || !canStart || incomplete || !result.execution.ready || workerCount === undefined || result.mode === 'unchanged' || submitted.current) return
+    if (!result || locked || choosing || !canStart || incomplete || !result.execution.ready || workerCount === undefined || result.mode === 'unchanged' || submitted.current) return
     submitted.current = true; setSubmitting(true); setError('')
     const intent_id = projectId()
     rememberJob(intent_id)
@@ -74,8 +84,9 @@ function RelocationPreviewPanel({ client, source, revision, locked, canStart, re
     <p className="workspace-path">当前位置：{source}</p>
     <form aria-label="工作目录迁移预检" onSubmit={preview} className="workspace-form">
       <label>目标工作目录<input disabled={submitting} value={target} onChange={event => edit(event.target.value)} placeholder="运行 Crabot 的电脑或服务器上的绝对路径" /></label>
+      {desktopBridge?.selectWorkspaceDirectory && <Button type="button" variant="secondary" disabled={locked || busy || submitting || choosing} onClick={() => void chooseDirectory()}>{choosing ? '正在选择文件夹…' : '选择本机文件夹'}</Button>}
       <p className="workspace-note">先检查迁移范围、空间和兼容问题。检查不会停止任务或搬动文件。</p>
-      <div className="workspace-actions"><Button type="submit" disabled={locked || busy || submitting || !target.trim()}>{busy ? '正在检查…' : '检查迁移位置'}</Button>
+      <div className="workspace-actions"><Button type="submit" disabled={locked || busy || submitting || choosing || !target.trim()}>{busy ? '正在检查…' : '检查迁移位置'}</Button>
         {busy && <Button type="button" variant="secondary" onClick={() => { request.current?.abort(); setBusy(false) }}>取消检查</Button>}</div>
     </form>
     {error && <p role="alert">{error}</p>}
@@ -91,7 +102,7 @@ function RelocationPreviewPanel({ client, source, revision, locked, canStart, re
       {insufficient && <p role="alert">目标空间不足，不能开始迁移。</p>}
       {result.issues.length > 0 && <ul>{result.issues.map((issue, index) => <li key={index}>{issue.path || '工作目录'}：{relocationIssues[issue.reason]}</li>)}</ul>}
       <p className="workspace-note">迁移期间暂停任务，管理页面保持在线；现有执行器将永久关闭，历史和文件保留。迁移后请发起新任务继续工作。</p>
-      {!incomplete && result.mode !== 'unchanged' && result.execution.ready && workerCount !== undefined && canStart && <Button disabled={locked || submitting} onClick={() => void start()}>停止执行并迁移</Button>}
+      {!incomplete && result.mode !== 'unchanged' && result.execution.ready && workerCount !== undefined && canStart && <Button disabled={locked || submitting || choosing} onClick={() => void start()}>停止执行并迁移</Button>}
     </section>}
   </Card>
 }

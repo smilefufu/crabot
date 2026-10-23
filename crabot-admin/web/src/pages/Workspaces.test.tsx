@@ -5,7 +5,7 @@ import { ClientError } from 'crabot-client'
 import { serverQueries, setServerScope } from '../services/server-state'
 import { Workspaces } from './Workspaces'
 
-const mocks = vi.hoisted(() => ({ list: vi.fn(), get: vi.fn(), refresh: vi.fn(), update: vi.fn(), create: vi.fn(), totalUsage: vi.fn(), refreshTotalUsage: vi.fn(), maintenance: vi.fn(), previewRelocation: vi.fn(), startRelocation: vi.fn(), currentRelocation: vi.fn(), relocationStatus: vi.fn(), bridge: { revealWorkspaceFolder: undefined as undefined | ReturnType<typeof vi.fn> } }))
+const mocks = vi.hoisted(() => ({ list: vi.fn(), get: vi.fn(), refresh: vi.fn(), update: vi.fn(), create: vi.fn(), totalUsage: vi.fn(), refreshTotalUsage: vi.fn(), maintenance: vi.fn(), previewRelocation: vi.fn(), startRelocation: vi.fn(), currentRelocation: vi.fn(), relocationStatus: vi.fn(), bridge: { revealWorkspaceFolder: undefined as undefined | ReturnType<typeof vi.fn>, selectWorkspaceDirectory: undefined as undefined | ReturnType<typeof vi.fn> } }))
 vi.mock('crabot-client', async () => ({ ...await vi.importActual('crabot-client'), WorkspaceClient: class {
   list = mocks.list; get = mocks.get; refresh = mocks.refresh; update = mocks.update; create = mocks.create; totalUsage = mocks.totalUsage; refreshTotalUsage = mocks.refreshTotalUsage; maintenance = mocks.maintenance; previewRelocation = mocks.previewRelocation; startRelocation = mocks.startRelocation; currentRelocation = mocks.currentRelocation; relocationStatus = mocks.relocationStatus
 } }))
@@ -16,7 +16,7 @@ const id = '12345678-1234-4123-8123-123456789abc'
 const workspace = { workspace_id: id, kind: 'project', name: 'Crabot', description: '桌面应用', root: '/projects/crabot', source: 'existing', created_at: '2026-10-19T00:00:00.000Z' }
 const item = { workspace, directory_status: 'ready', usage: { status: 'complete', logical_bytes: 1234, file_count: 1, skipped_entries: 0 }, execution: { status: 'unknown' } }
 const snapshot = { revision: 2, storage_root: '/workspaces', items: [item, { ...item, workspace: { ...workspace, workspace_id: 'default', kind: 'default', name: '默认工作区', root: '/workspaces/default', description: '' }, directory_status: 'missing', usage: { status: 'pending', file_count: 0, skipped_entries: 0 } }] }
-beforeEach(() => { serverQueries.clear(); setServerScope('workspace-test'); vi.resetAllMocks(); mocks.bridge.revealWorkspaceFolder = undefined; mocks.maintenance.mockResolvedValue({ maintenance: false }); mocks.currentRelocation.mockResolvedValue({ available: true, job: null }); mocks.relocationStatus.mockResolvedValue({ available: true, job: null }); mocks.list.mockResolvedValue(structuredClone(snapshot)); mocks.totalUsage.mockResolvedValue({ status: 'pending', file_count: 0, skipped_entries: 0 }) })
+beforeEach(() => { serverQueries.clear(); setServerScope('workspace-test'); vi.resetAllMocks(); mocks.bridge.revealWorkspaceFolder = undefined; mocks.bridge.selectWorkspaceDirectory = undefined; mocks.maintenance.mockResolvedValue({ maintenance: false }); mocks.currentRelocation.mockResolvedValue({ available: true, job: null }); mocks.relocationStatus.mockResolvedValue({ available: true, job: null }); mocks.list.mockResolvedValue(structuredClone(snapshot)); mocks.totalUsage.mockResolvedValue({ status: 'pending', file_count: 0, skipped_entries: 0 }) })
 afterEach(() => { serverQueries.clear() })
 it('shows one row per project/default and does not invent zero space or idle execution for missing evidence', async () => {
   render(<MemoryRouter><Workspaces /></MemoryRouter>)
@@ -26,6 +26,7 @@ it('shows one row per project/default and does not invent zero space or idle exe
   expect(screen.getAllByText('未知').length).toBeGreaterThan(0)
   expect(screen.queryByText('当前空闲')).toBeNull()
   expect(screen.queryByRole('button', { name: '在文件管理器打开' })).toBeNull()
+  expect(screen.queryByRole('button', { name: '选择本机文件夹' })).toBeNull()
   expect(screen.getByRole('link', { name: '查看关联执行器（含历史）' })).toHaveAttribute('href', `/traces?tab=workers&workspace_id=${id}`)
   fireEvent.change(screen.getByLabelText('搜索工作区'), { target: { value: '无此项目' } })
   expect(screen.getByText('没有匹配的工作区。')).toBeInTheDocument()
@@ -358,4 +359,37 @@ it('a new accepted identity is not replaced by the previous completed job during
   expect(new URL(screen.getByLabelText('当前页面').textContent!, 'http://fixture').searchParams.get('relocation_id')).toBe(request.intent_id)
   expect(screen.queryByText('迁移已完成')).toBeNull()
   expect(mocks.startRelocation).toHaveBeenCalledTimes(1)
+})
+
+it('the native directory chooser only fills the preview draft and cancel preserves it', async () => {
+  mocks.bridge.selectWorkspaceDirectory = vi.fn().mockResolvedValue('/native chosen')
+  render(<MemoryRouter><Workspaces /></MemoryRouter>)
+  const choose = await screen.findByRole('button', { name: '选择本机文件夹' })
+  await waitFor(() => expect(choose).toBeEnabled()); fireEvent.click(choose)
+  await waitFor(() => expect(screen.getByLabelText('目标工作目录')).toHaveValue('/native chosen'))
+  expect(mocks.previewRelocation).not.toHaveBeenCalled(); expect(mocks.startRelocation).not.toHaveBeenCalled()
+  mocks.bridge.selectWorkspaceDirectory.mockResolvedValue(null)
+  fireEvent.click(choose)
+  await waitFor(() => expect(choose).toBeEnabled())
+  expect(screen.getByLabelText('目标工作目录')).toHaveValue('/native chosen')
+  expect(mocks.startRelocation).not.toHaveBeenCalled()
+})
+it('a late native selection cannot overwrite an edited draft or a different catalog generation', async () => {
+  let finish!: (value: string) => void
+  mocks.bridge.selectWorkspaceDirectory = vi.fn().mockImplementation(() => new Promise(resolve => { finish = resolve }))
+  render(<MemoryRouter><Workspaces /></MemoryRouter>)
+  const choose = await screen.findByRole('button', { name: '选择本机文件夹' })
+  await waitFor(() => expect(choose).toBeEnabled()); fireEvent.click(choose)
+  fireEvent.change(screen.getByLabelText('目标工作目录'), { target: { value: '/typed-later' } })
+  finish('/old-native-choice')
+  await waitFor(() => expect(choose).toBeEnabled())
+  expect(screen.getByLabelText('目标工作目录')).toHaveValue('/typed-later')
+  fireEvent.click(choose)
+  mocks.list.mockResolvedValue({ ...snapshot, revision: 3 })
+  fireEvent.click(screen.getByRole('button', { name: '刷新列表与执行状态' }))
+  await waitFor(() => expect(mocks.list).toHaveBeenCalledTimes(2))
+  await waitFor(() => expect(choose).toBeEnabled())
+  finish('/old-catalog-choice')
+  await waitFor(() => expect(screen.getByLabelText('目标工作目录')).toHaveValue('/typed-later'))
+  expect(mocks.previewRelocation).not.toHaveBeenCalled(); expect(mocks.startRelocation).not.toHaveBeenCalled()
 })
