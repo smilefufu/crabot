@@ -85,7 +85,7 @@ function observeActualAdminRecoveryRpc(callsFile: string): string {
   })();`
 }
 
-async function fixture(options: { withMemory?: boolean; inactiveMemory?: boolean; wrongRuntime?: boolean; result?: string; withAgent?: boolean; agentResult?: string; actualAgent?: boolean; businessAgent?: boolean; businessMemory?: boolean; processLifetimeMs?: number; backgroundShell?: boolean; validationHealth?: 'healthy' | 'unhealthy'; validationServerReadyDelayMs?: number; validationRuntimeMismatch?: boolean; validationRootOverride?: boolean; validationRegistration?: 'delayed' | 'exit'; memoryHealth?: 'healthy' | 'degraded'; memoryBootstrap?: boolean; actualAdmin?: boolean; adminReadyDelayMs?: number; quiesceResult?: string; orphanDuringStop?: boolean; extraModule?: 'running' | 'inactive' | 'tool'; historyWorkspace?: boolean } = {}) {
+async function fixture(options: { withMemory?: boolean; inactiveMemory?: boolean; wrongRuntime?: boolean; result?: string; withAgent?: boolean; agentResult?: string; actualAgent?: boolean; businessAgent?: boolean; businessMemory?: boolean; processLifetimeMs?: number; backgroundShell?: boolean; validationHealth?: 'healthy' | 'unhealthy'; validationServerReadyDelayMs?: number; runtimeRegistrationDelayMs?: number; validationRuntimeMismatch?: boolean; validationRootOverride?: boolean; validationRegistration?: 'delayed' | 'exit'; memoryHealth?: 'healthy' | 'degraded'; memoryBootstrap?: boolean; actualAdmin?: boolean; adminReadyDelayMs?: number; quiesceResult?: string; orphanDuringStop?: boolean; extraModule?: 'running' | 'inactive' | 'tool'; historyWorkspace?: boolean } = {}) {
   if ((options.businessAgent || options.businessMemory) && (process.env.GITHUB_ACTIONS !== 'true' || process.env.CRABOT_WORKSPACE_BUSINESS_ONSTART_CI !== '1')) throw new Error('Business onStart is isolated CI only')
   const root = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'crabot-current-admin-')))
   const native = require('../../scripts/lib/process-identity.cjs'), management = require('../../scripts/lib/desktop-management.cjs')
@@ -129,8 +129,31 @@ async function fixture(options: { withMemory?: boolean; inactiveMemory?: boolean
       setTimeout(()=>process.exit(0),${options.processLifetimeMs ?? 30000}).unref();`)
   }
   const manager = new ModuleManager({ port: 0, modules: [], shutdown_timeout: 0.1 }, data) as any
+  if (options.runtimeRegistrationDelayMs) {
+    const original = manager.runtimeRegistry.recordSpawn.bind(manager.runtimeRegistry)
+    let first = true
+    vi.spyOn(manager.runtimeRegistry, 'recordSpawn').mockImplementation(async (input: any) => {
+      if (first && input.moduleId === 'crabot-agent') { first = false; await new Promise(resolve => setTimeout(resolve, options.runtimeRegistrationDelayMs)) }
+      return original(input)
+    })
+  }
   let host: ReturnType<typeof http.createServer> | undefined
+  let registrationPublication: ReturnType<typeof setInterval> | undefined
+  if (options.actualAgent && !options.businessAgent && options.validationHealth) {
+    const published = new Set<string>()
+    registrationPublication = setInterval(() => {
+      const child = manager.processes.get('crabot-agent'), state = child && manager.childStates.get(child), bearer = manager.runtimeBearers.get('crabot-agent')
+      if (!child || !state || !bearer || bearer.revoked || bearer.child !== child || state.finalizeStarted || state.rootExited || published.has(state.runtimeId)) return
+      try {
+        // Test-only rendezvous, never an admission/health/exit proof. The real register RPC still authenticates this exact child.
+        syncFs.writeFileSync(path.join(data, 'finite-agent-registration-' + state.runtimeId), String(child.pid))
+        published.add(state.runtimeId)
+      } catch { clearInterval(registrationPublication) }
+    }, 10)
+    registrationPublication.unref()
+  }
   const cleanup = async () => {
+    clearInterval(registrationPublication)
     vi.restoreAllMocks()
     const admin = manager.modules.get('admin-web'); if (admin) admin.port = port
     try { await manager.stop() }
@@ -221,6 +244,7 @@ async function fixture(options: { withMemory?: boolean; inactiveMemory?: boolean
           }else{const http=require('node:http'),{UnifiedAgent}=require(${JSON.stringify(entry)}),calls=[];
           require(${JSON.stringify(path.resolve('../crabot-agent/dist/core/config-loader.js'))}).ConfigLoader.captureRuntimeBearer();
           const selected=${JSON.stringify(path.join(data, 'workspace-control/relocation-active/relocation-root-selected.json'))};
+          const registrationRuntimeId=process.env.CRABOT_MODULE_RUNTIME_ID;
           if(${!!options.validationRuntimeMismatch}&&fs.existsSync(selected))process.env.CRABOT_MODULE_RUNTIME_ID='fixture-wrong-runtime';
           const config=${JSON.stringify(relocationAgentConfig)};config.port=Number(process.env.Crabot_PORT);const agent=new UnifiedAgent(config);
           if(${JSON.stringify(options.validationHealth ?? null)}&&fs.existsSync(selected))agent.getHealthStatus=async()=>fs.existsSync(${JSON.stringify(path.join(data, 'validation-health-unhealthy'))})?'unhealthy':${JSON.stringify(options.validationHealth ?? 'healthy')};
@@ -261,10 +285,15 @@ async function fixture(options: { withMemory?: boolean; inactiveMemory?: boolean
               if(${!!options.validationHealth}) {
                 if(fs.existsSync(selected)&&${JSON.stringify(options.validationRegistration ?? null)}==='exit'){fs.writeFileSync(process.env.FIXTURE_READY,'ready');return}
                 if(fs.existsSync(selected)&&${JSON.stringify(options.validationRegistration ?? null)}==='delayed')await new Promise(resolve=>setTimeout(resolve,300));
-                try{const response=await fetch('http://127.0.0.1:'+process.env.CRABOT_MM_PORT+'/register_core_agent',{method:'POST',
+                try{
+                  const publication=require('node:path').join(process.env.DATA_DIR,'finite-agent-registration-'+registrationRuntimeId),end=Date.now()+(process.platform==='win32'?30000:10000);
+                  while(!fs.existsSync(publication)||fs.readFileSync(publication,'utf8')!==String(process.pid)){
+                    if(Date.now()>=end)throw new Error('Finite parent runtime was not published');await new Promise(resolve=>setTimeout(resolve,10));
+                  }
+                  const response=await fetch('http://127.0.0.1:'+process.env.CRABOT_MM_PORT+'/register_core_agent',{method:'POST',
                   headers:{'Content-Type':'application/json',Authorization:'Bearer '+require(${JSON.stringify(path.resolve('../crabot-agent/dist/core/config-loader.js'))}).ConfigLoader.getRuntimeBearer()},
                   body:JSON.stringify({id:require('node:crypto').randomUUID(),source:'crabot-agent',method:'register_core_agent',params:{module_id:'crabot-agent',module_type:'agent',version:'0.1.0',protocol_version:'3.4.0',port:Number(process.env.Crabot_PORT),subscriptions:[]}})});
-                  if(!(await response.json()).success)throw new Error('Finite Agent registration failed')
+                  const reply=await response.json();if(!reply.success){fs.writeFileSync(process.env.FIXTURE_READY+'.registration-failed',['UNAUTHORIZED','FORBIDDEN','INVALID_PARAMS'].includes(reply.error?.code)?reply.error.code:'UNKNOWN');throw new Error('Finite Agent registration failed')}
                 }catch(error){console.error(error);process.exit(1);return}
               }
               fs.writeFileSync(process.env.FIXTURE_READY,'ready');
@@ -385,7 +414,11 @@ runpy.run_module('src.main',run_name='__main__')
     const params = { intent_id: intent.id, intent_sha256: sha256CanonicalJson(intent) }
     const calls = async (): Promise<any[]> => JSON.parse(await fs.readFile(callsFile, 'utf8').catch(() => '[]'))
     return { root, data, manager, runtime, port, params, calls, cleanup }
-  } catch (error) { await cleanup(); throw error }
+  } catch (error) {
+    const registration = await fs.readFile(path.join(data, 'agent-ready.registration-failed'), 'utf8').catch(() => undefined)
+    if (registration && ['UNAUTHORIZED', 'FORBIDDEN', 'INVALID_PARAMS', 'UNKNOWN'].includes(registration)) console.error('[Finite initial registration rejected]', { code: registration })
+    await cleanup(); throw error
+  }
 }
 
 async function verifyRegisteredRuntimeGate({ manager, dataDir, coordinator, preparation, modules, afterClose }: any) {
@@ -2144,6 +2177,16 @@ describe('MM restricts post-relocation validation launches to the original job',
 
 
 describe('MM checks the new runtime health and Root under the original job', () => {
+  it('registers the finite listener only after the original parent runtime publication under delayed persistence', async () => {
+    const f = await fixture({ actualAgent: true, actualAdmin: true, validationHealth: 'healthy', runtimeRegistrationDelayMs: 4000 })
+    try {
+      expect(f.manager.modules.get('crabot-agent').status).toBe('running')
+      const record = (await f.manager.runtimeRegistry.listRecords()).find((item: any) => item.module_id === 'crabot-agent')
+      expect(record.root_pid).toBe(f.manager.processes.get('crabot-agent').pid)
+      expect(await f.manager.sendToModule(f.manager.modules.get('crabot-agent').port, 'health', {})).toMatchObject({ status: 'healthy' })
+    } finally { await f.cleanup() }
+  }, process.platform === 'win32' ? 120000 : 30000)
+
   for (const mode of ['healthy Agent', 'healthy slow runtime reply', 'healthy Memory', ...(process.platform === 'win32' ? [] : ['healthy Memory bootstrap', 'Memory bootstrap generation changed', 'Memory bootstrap owner changed', 'Memory bootstrap executable changed after binding']), 'healthy delayed registration', 'unhealthy Agent', 'degraded Memory', 'wrong runtime', 'definition changed during health', 'exit before registration', 'lost health acknowledgement', 'runtime record changed before health record', 'Agent workspace override']) {
     it('retains maintenance until all exact runtime checks confirm: ' + mode, async () => {
       const withMemory = mode.includes('Memory'), bootstrap = mode.includes('bootstrap')
