@@ -4,6 +4,7 @@ import { readCurrentWorkspaceRelocationFinalizing, readWorkspaceRelocationArchiv
 import exits from './known-process-exit.cjs'
 import fs from 'node:fs'
 import native from './process-identity.cjs'
+import maintenance from './workspace-maintenance.cjs'
 import { WorkspaceCatalog } from '../../crabot-shared/dist/workspace-catalog.js'
 const uuid = value => typeof value === 'string' && /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(value)
 const digest = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value)
@@ -16,28 +17,38 @@ export function parseWorkspaceRecoveryAdmissionRequest(input) {
   }
   return Object.freeze({ ...input })
 }
-export function readWorkspaceRecoveryAdmissionScope(dataDir, input) {
+function readRecoveryScope(dataDir, input, completion) {
   const request = parseWorkspaceRecoveryAdmissionRequest(input)
   try {
-    const fence = readCurrentWorkspaceRelocationFinalizing(dataDir)
-    if (!fence || fence.intent_id !== request.intent_id || hash(fence) !== request.finalizing_sha256
-      || readWorkspaceRelocationReleased(dataDir, request.intent_id)) throw unavailable()
+    const protectedFence = readCurrentWorkspaceRelocationFinalizing(dataDir), releasedFence = readWorkspaceRelocationReleased(dataDir, request.intent_id)
+    if (!!protectedFence === !!releasedFence) throw unavailable()
+    if (releasedFence && (!completion || maintenance.workspaceMaintenancePending(dataDir))) throw unavailable()
+    const fence = protectedFence ?? releasedFence
+    if (fence.intent_id !== request.intent_id || hash(fence) !== request.finalizing_sha256) throw unavailable()
     const state = readWorkspaceRelocationArchivedState(dataDir, request.intent_id)
     if (hash(state.completion) !== request.completion_sha256 || exits.probeKnownProcessExit([state.launch.process]).state !== 'stopped') throw unavailable()
-    return { request, state, fence, fingerprint: hash({ state, fence }) }
+    return { request, state, fence, fingerprint: hash({ state, fence }), released: !!releasedFence }
   } catch { throw unavailable() }
 }
+export function readWorkspaceRecoveryAdmissionScope(dataDir, input) {
+  const { released, ...scope } = readRecoveryScope(dataDir, input, false)
+  return scope
+}
+/** Exact stored facts only; this never admits a new recovery or authorizes an effect. */
+export function readWorkspaceRecoveryCompletionScope(dataDir, input) {
+  return readRecoveryScope(dataDir, input, true)
+}
 
-async function prepareWorkspaceRecoveryControlFacts({ dataDir, request, verify: authorize }) {
-  if (typeof authorize !== 'function') throw unavailable()
+async function prepareWorkspaceRecoveryControlFacts({ dataDir, request, verify: authorize, readScope = readWorkspaceRecoveryAdmissionScope }) {
+  if (typeof authorize !== 'function' || typeof readScope !== 'function') throw unavailable()
   await authorize()
-  const original = readWorkspaceRecoveryAdmissionScope(dataDir, request), state = original.state
+  const original = readScope(dataDir, request), state = original.state
   request = original.request
   const workspaceRootOverride = process.env.WORKER_WORKSPACES_DIR
   const catalog = new WorkspaceCatalog({ dataRoot: dataDir, storageRoot: workspaceRootOverride, files: native })
   const check = () => {
     if (process.env.WORKER_WORKSPACES_DIR !== workspaceRootOverride) throw unavailable()
-    if (readWorkspaceRecoveryAdmissionScope(dataDir, request).fingerprint !== original.fingerprint) throw unavailable()
+    if (readScope(dataDir, request).fingerprint !== original.fingerprint) throw unavailable()
     const target = state.published.target, stat = fs.lstatSync(target.path, { bigint: true })
     const actual = { path: target.path, dev: String(stat.dev), ino: String(stat.ino), native_id: process.platform === 'win32' ? native.inspectDirectoryFileId(target.path) : null }
     if (!stat.isDirectory() || stat.isSymbolicLink() || fs.realpathSync(target.path) !== target.path || hash(actual) !== hash(target)) throw unavailable()

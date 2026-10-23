@@ -62,7 +62,20 @@ export async function launchWorkspaceRecoveryCoordinator(options) {
       } catch (cause) { close(); throw Object.assign(failure(), { cause }) }
     }
     const verify = () => { verification = verification.then(verifyOnce); return verification }
+    let completionObservation
+    const beginCompletionObservation = () => {
+      if (completionObservation) return completionObservation
+      completionObservation = verification = verification.then(async () => {
+        try {
+          await verifyOnce()
+          const message = { kind: 'workspace_recovery_completion_observe', recovery_id: options.request.recovery_id, launch_sha256: launchHash, ready_sha256: hash(ready), nonce: randomUUID() }
+          await exchange(message, reply => hash(reply) === hash({ ...message, kind: 'workspace_recovery_completion_observing' }))
+          await options.verify()
+        } catch (cause) { close(); throw Object.assign(failure(), { cause }) }
+      })
+      return completionObservation
+    }
     await verify()
-    return Object.freeze({ child, launch, ready, verify, close })
+    return Object.freeze({ child, launch, ready, verify, close, beginCompletionObservation })
   } catch (cause) { close(); throw Object.assign(failure(), { cause }) }
 }

@@ -106,7 +106,7 @@ interface WorkspaceRecoveryAdmission {
   consume: () => Promise<WorkspaceRecoveryInitialization>
   close: () => void
 }
-interface WorkspaceRecoveryCoordinator { verify: () => Promise<void>; close: () => void }
+interface WorkspaceRecoveryCoordinator { verify: () => Promise<void>; close: () => void; beginCompletionObservation: () => Promise<void> }
 interface WorkspaceRecoveryRuntimePreparation { plan: WorkspaceRecoveryRuntimePlan; verify: () => Promise<void> }
 interface WorkspaceRecoveryRuntimeCleanup { runtime_ids: ReadonlyArray<string>; verify: () => Promise<void> }
 interface WorkspaceRecoveryValidationLaunch {
@@ -125,6 +125,8 @@ interface WorkspaceRecoveryInitialization {
   verify: () => Promise<void>
   releaseParentLock: () => void
   coordinator?: WorkspaceRecoveryCoordinator
+  readScope: () => { fingerprint: string }
+  allowCompletionObservation: () => void
   close: () => void
 }
 
@@ -302,6 +304,7 @@ export class ModuleManager {
   private readonly workspaceRecoveryRuntimeCleanups = new WeakMap<WorkspaceRecoveryCoordinator, Promise<WorkspaceRecoveryRuntimeCleanup>>()
   private readonly workspaceRecoveryValidationLaunches = new WeakMap<WorkspaceRecoveryCoordinator, Promise<WorkspaceRecoveryValidationLaunch>>()
   private readonly workspaceRecoveryValidationHealth = new WeakMap<WorkspaceRecoveryCoordinator, Promise<WorkspaceRecoveryValidationHealth>>()
+  private readonly workspaceRecoveryCompletionObservations = new WeakMap<WorkspaceRecoveryCoordinator, Promise<WorkspaceRecoveryValidationHealth>>()
   private workspaceRecoveryInitialization?: WorkspaceRecoveryInitialization
   private workspaceRecoveryInitializations = new Map<string, { fingerprint: string; bearerHash: string; pending: Promise<WorkspaceRecoveryCoordinator> }>()
   private workspaceRecoveryAdmission?: WorkspaceRecoveryAdmission
@@ -2009,9 +2012,11 @@ export class ModuleManager {
           const result: VerifyWorkspaceRelocationRecoveryRequestResult = { verified: true, ...request,
             instance_id: this.runtimeRegistry.getInstanceId(), admin_runtime_id: runtimeId, mm_sha256: sha256CanonicalJson(self) }
           const checkFacts = () => {
+            const current = this.workspaceRecoveryInitialization
+            const currentScope = current?.request === request && current.result === admission?.result ? current.readScope() : readWorkspaceRecoveryAdmissionScope(this.dataDir, request)
             if (this.isShuttingDown || !native.sameProcess(self, native.inspectProcess(process.pid)) || this.processes.get('admin-web') !== child
               || this.childStates.get(child) !== state || state.runtimeId !== runtimeId
-              || readWorkspaceRecoveryAdmissionScope(this.dataDir, request).fingerprint !== scope.fingerprint) throw failure()
+              || currentScope.fingerprint !== scope.fingerprint) throw failure()
           }
           const checkAdmission = () => {
             checkFacts()
@@ -2032,12 +2037,26 @@ export class ModuleManager {
             await verify(); checkAdmission()
             if (!admission?.accepted || this.workspaceRecoveryInitialization) throw failure()
             let ended = false, parentReleased = false
+            let completionObservation = false, releasedObserved = false
             const check = () => {
               checkFacts()
               if (ended || this.workspaceRecoveryInitialization !== context || !lock || !token
                 || !parentReleased && locks.cliLockToken(lock) !== token) throw failure()
             }
             const context: WorkspaceRecoveryInitialization = { request, result: admission.result,
+              readScope: () => {
+                if (!completionObservation) return readWorkspaceRecoveryAdmissionScope(this.dataDir, request)
+                const observed = require('../../scripts/lib/workspace-recovery-admission.mjs').readWorkspaceRecoveryCompletionScope(this.dataDir, request)
+                if (releasedObserved && !observed.released) throw failure()
+                releasedObserved ||= observed.released
+                return observed
+              },
+              allowCompletionObservation: () => {
+                check()
+                if (completionObservation) throw failure()
+                completionObservation = true
+                check()
+              },
               verify: async () => {
                 try { check(); await verifyAdmin(); check() }
                 catch (cause) { context.close(); throw cause }
@@ -2114,7 +2133,13 @@ export class ModuleManager {
     request = Object.freeze({ ...request })
     const coordinator = await this.initializeWorkspaceRelocationRecovery(request, bearer)
     try {
-      const facts = await require('../../scripts/lib/workspace-recovery-admission.mjs').inspectWorkspaceRecoveryFacts({ dataDir: this.dataDir, request, verify: coordinator.verify })
+      const context = this.workspaceRecoveryInitialization
+      if (!context || context.coordinator !== coordinator) throw new Error('No current recovery observation role')
+      const readScope = () => {
+        if (this.workspaceRecoveryInitialization !== context) throw new Error('Recovery observation role changed')
+        return context.readScope()
+      }
+      const facts = await require('../../scripts/lib/workspace-recovery-admission.mjs').inspectWorkspaceRecoveryFacts({ dataDir: this.dataDir, request, verify: coordinator.verify, readScope })
       return Object.freeze({ ...facts, verify: async () => {
         try { await facts.verify() } catch (cause) { coordinator.close(); throw cause }
       } })
@@ -2405,6 +2430,30 @@ export class ModuleManager {
       } catch (cause) { active = false; coordinator.close(); throw Object.assign(failure(), { cause }) }
     })
     this.workspaceRecoveryValidationLaunches.set(coordinator, pending)
+    return pending
+  }
+
+  /** Observe this one completion effect under the current role; this performs no file release. */
+  private async beginWorkspaceRecoveryCompletionObservation(request: VerifyWorkspaceRelocationRecoveryRequestParams, bearer?: string): Promise<WorkspaceRecoveryValidationHealth> {
+    request = Object.freeze({ ...request })
+    const coordinator = await this.initializeWorkspaceRelocationRecovery(request, bearer), previous = this.workspaceRecoveryCompletionObservations.get(coordinator)
+    if (previous) { const result = await previous; await result.verify(); return result }
+    const pending = Promise.resolve().then(async () => {
+      try {
+        const health = await this.verifyWorkspaceRecoveryValidationHealth(request, bearer), context = this.workspaceRecoveryInitialization
+        if (!context || context.coordinator !== coordinator) throw new Error('Recovery observation context changed')
+        await health.verify(); health.assertCurrent()
+        await coordinator.beginCompletionObservation()
+        if (this.workspaceRecoveryInitialization !== context || context.coordinator !== coordinator) throw new Error('Recovery observation context changed')
+        context.allowCompletionObservation()
+        await health.verify(); health.assertCurrent()
+        return health
+      } catch (cause) {
+        coordinator.close()
+        throw Object.assign(new Error('当前恢复收口观察尚未确认，原保护和材料已保留；未执行文件移动。'), { code: 'SERVICE_UNAVAILABLE', cause })
+      }
+    })
+    this.workspaceRecoveryCompletionObservations.set(coordinator, pending)
     return pending
   }
 

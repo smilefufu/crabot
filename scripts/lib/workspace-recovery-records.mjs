@@ -5,7 +5,7 @@ import native from './process-identity.cjs'
 import management from './desktop-management.cjs'
 import { cliLockToken } from './cli-lock.mjs'
 import owned from './owned-process-tree.cjs'
-import { parseWorkspaceRecoveryAdmissionRequest, readWorkspaceRecoveryAdmissionScope } from './workspace-recovery-admission.mjs'
+import { parseWorkspaceRecoveryAdmissionRequest, readWorkspaceRecoveryAdmissionScope, readWorkspaceRecoveryCompletionScope } from './workspace-recovery-admission.mjs'
 import { readWorkspaceRelocationArchivedState } from './workspace-relocation-intent.mjs'
 import { sha256CanonicalJson as hash } from '../../crabot-shared/dist/canonical-json.js'
 const fail = () => { throw Object.assign(new Error('新恢复协调器的初始化材料无法核实，原维护保护已保留。'), { code: 'CRABOT_WORKSPACE_RECOVERY_COORDINATOR' }) }
@@ -258,7 +258,7 @@ export function verifyWorkspaceRecoveryRuntimeStart({ dataDir, recoveryId, modul
       || !native.sameProcess(record.parent, native.inspectProcess(record.parent.pid)) || !native.sameProcess(record.process, native.inspectProcess(record.process.pid))
       || !native.sameProcess(coordinator.launch.process, native.inspectProcess(coordinator.launch.process.pid))
       || hash(registration(ctx, record.runtime.runtime_id)) !== hash(record.runtime)) fail()
-    readWorkspaceRecoveryAdmissionScope(dataDir, coordinator.launch.request)
+    readWorkspaceRecoveryCompletionScope(dataDir, coordinator.launch.request)
     return record
   } catch { fail() }
 }

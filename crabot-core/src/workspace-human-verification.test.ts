@@ -2429,7 +2429,7 @@ describe('normal fixed-job Admin completion preparation', () => {
       locks.releaseCliLock(lock); await f.cleanup()
     }
   }, process.platform === 'win32' || process.platform === 'darwin' && process.arch === 'x64' ? 600000 : 120000)
-  it.each(['Agent', 'Agent and Memory', 'catalog changed after probe', 'definition changed before release', 'plan changed before release'])('starts only the planned cold validation generations: %s', async mode => {
+  it.each(['Agent', 'Agent and Memory', 'catalog changed after probe', 'completion observation', 'released without observation', 'definition changed before release', 'plan changed before release'])('starts only the planned cold validation generations: %s', async mode => {
     const withMemory = mode === 'Agent and Memory'
     const f = await fixture({ actualAgent: true, actualAdmin: true, validationHealth: 'healthy', withMemory, inactiveMemory: !withMemory, memoryHealth: withMemory ? 'healthy' : undefined, processLifetimeMs: 300000 })
     const locks = require('../../scripts/lib/cli-lock.mjs'), records = require('../../scripts/lib/workspace-relocation-intent.mjs')
@@ -2566,7 +2566,46 @@ describe('normal fixed-job Admin completion preparation', () => {
       expect(health.root_verified).toEqual(proof)
       await health.verify()
       expect((await fs.stat(root, { bigint: true })).mtimeNs).toBe(probedAt)
-      if (withMemory) {
+      if (mode === 'completion observation' || mode === 'released without observation') {
+        expect(typeof cold.beginWorkspaceRecoveryCompletionObservation).toBe('function')
+        const admission = require('../../scripts/lib/workspace-recovery-admission.mjs'), native = require('../../scripts/lib/process-identity.cjs')
+        const protectedFacts = admission.readWorkspaceRecoveryAdmissionScope(f.data, request)
+        const releasedFile = path.join(f.data, 'workspace-control/relocation-history', request.intent_id + '.released.json')
+        if (mode === 'completion observation') {
+          const [first, second] = await Promise.all([
+            cold.beginWorkspaceRecoveryCompletionObservation(request, 'fixture-human'),
+            cold.beginWorkspaceRecoveryCompletionObservation(request, 'fixture-human'),
+          ])
+          expect(first).toBe(health); expect(second).toBe(health)
+        }
+        // A finite read-only effect fixture; this is not the product's release operation.
+        await expect(fs.lstat(releasedFile)).rejects.toMatchObject({ code: 'ENOENT' })
+        await fs.rename(fenceFile, releasedFile)
+        try {
+          expect(() => admission.readWorkspaceRecoveryAdmissionScope(f.data, request)).toThrow()
+          expect(admission.readWorkspaceRecoveryCompletionScope(f.data, request)).toMatchObject({ released: true, fingerprint: protectedFacts.fingerprint })
+          if (mode === 'completion observation') {
+            await health.verify()
+            expect(await callRoot(request, token)).toMatchObject({ success: true, data: proof })
+            expect((await fs.stat(root, { bigint: true })).mtimeNs).toBe(probedAt)
+          } else {
+            await expect(health.verify()).rejects.toBeDefined()
+            expect(await callRoot(request, token)).toMatchObject({ success: false })
+          }
+          if (process.platform === 'win32') native.writePrivateFile(fenceFile, before.toString())
+          else await fs.writeFile(fenceFile, before, { mode: 0o600 })
+          try { expect(() => admission.readWorkspaceRecoveryCompletionScope(f.data, request)).toThrow() }
+          finally { await fs.unlink(fenceFile) }
+          expect(() => admission.readWorkspaceRecoveryCompletionScope(f.data, { ...request, completion_sha256: '0'.repeat(64) })).toThrow()
+          const active = path.join(f.data, 'workspace-control/relocation-active')
+          if (process.platform === 'win32') native.createPrivateDirectory(active)
+          else await fs.mkdir(active, { mode: 0o700 })
+          try { expect(() => admission.readWorkspaceRecoveryCompletionScope(f.data, request)).toThrow() }
+          finally { await fs.rmdir(active) }
+        } finally { await fs.rename(releasedFile, fenceFile) }
+        // The same role cannot follow an observed released effect backwards.
+        await expect(health.verify()).rejects.toBeDefined()
+      } else if (withMemory) {
         const unhealthy = path.join(f.data, 'cold-health-unhealthy')
         await fs.writeFile(unhealthy, 'memory-default')
         try { await expect(health.verify()).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' }) }

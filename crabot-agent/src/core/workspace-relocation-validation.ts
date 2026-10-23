@@ -116,10 +116,13 @@ export function createWorkspaceRecoveryRootVerifier(options: Options) {
       if (failed) throw unavailable()
       const records = require(path.join(__dirname, '../../../scripts/lib/workspace-recovery-records.mjs'))
       const native = require(path.join(__dirname, '../../../scripts/lib/process-identity.cjs'))
-      const read = () => ({ scope: admission.readWorkspaceRecoveryAdmissionScope(options.dataDir, request),
-        coordinator: records.readWorkspaceRecoveryCoordinator(options.dataDir, request.recovery_id),
-        plan: records.readWorkspaceRecoveryRuntimePlan(options.dataDir, request.recovery_id),
-        start: records.readWorkspaceRecoveryRuntimeStart(options.dataDir, request.recovery_id, 'crabot-agent') })
+      const read = () => {
+        const { released, ...scope } = admission.readWorkspaceRecoveryCompletionScope(options.dataDir, request)
+        return { scope,
+          coordinator: records.readWorkspaceRecoveryCoordinator(options.dataDir, request.recovery_id),
+          plan: records.readWorkspaceRecoveryRuntimePlan(options.dataDir, request.recovery_id),
+          start: records.readWorkspaceRecoveryRuntimeStart(options.dataDir, request.recovery_id, 'crabot-agent') }
+      }
       const state = read(), identity = Object.freeze({ ...options.runtimeIdentity() }), self = native.inspectProcess(process.pid)
       if (!state.coordinator.launch || !state.coordinator.ready || !state.plan || !state.start || !self
         || identity.module_id !== 'crabot-agent' || !identity.instance_id || !identity.runtime_id
