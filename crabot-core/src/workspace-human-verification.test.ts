@@ -444,6 +444,7 @@ async function verifyRegisteredRuntimeGate({ manager, dataDir, coordinator, prep
     const runtimeRecord = await manager.runtimeRegistry.recordSpawn({ runtimeId: planned.runtime_id, moduleId: planned.module_id, rootPid: idleModule.pid, modulePort: modules.find((module: any) => module.module_id === planned.module_id).module_port })
     const marker = 'gate-module-' + runtimePlan.recovery_id
     const moduleMarker = path.join(dataDir, marker + '.json'), preloadMarker = path.join(dataDir, marker + '-preload'), preload = path.join(dataDir, marker + '-preload.cjs')
+    const finishMarker = path.join(dataDir, marker + '-finish')
     await fs.writeFile(preload, `require('node:fs').writeFileSync(${JSON.stringify(preloadMarker)},'only actual module')`)
     const pythonProgram = `import json,os,pathlib,time,sys
 receipt=json.loads(pathlib.Path(${JSON.stringify(path.join(coordinator.launch.control_root.path, 'runtime-starts', planned.module_id + '.json'))}).read_text(encoding='utf-8'))
@@ -452,7 +453,7 @@ print('workspace-gate-python-stdout',flush=True)
 print('workspace-gate-python-stderr',file=sys.stderr,flush=True)
 pathlib.Path(${JSON.stringify(moduleMarker)}).write_text(json.dumps(dict(parent=os.getppid(),pid=os.getpid(),runtime=os.environ['CRABOT_MODULE_RUNTIME_ID'],token=os.environ['TEST_GATE_TOKEN'],executable=sys.executable,cwd=os.getcwd())),encoding='utf-8')
 time.sleep(300)`
-    const invocation = { command: python ?? process.execPath, args: python ? ['-I', '-B', '-c', pythonProgram] : ['-e', `require('node:fs').writeFileSync(${JSON.stringify(moduleMarker)},JSON.stringify({parent:process.ppid,pid:process.pid,runtime:process.env.CRABOT_MODULE_RUNTIME_ID,token:process.env.TEST_GATE_TOKEN}));setTimeout(()=>process.exit(0),300000)`],
+    const invocation = { command: python ?? process.execPath, args: python ? ['-I', '-B', '-c', pythonProgram] : ['-e', `require('node:fs').writeFileSync(${JSON.stringify(moduleMarker)},JSON.stringify({parent:process.ppid,pid:process.pid,runtime:process.env.CRABOT_MODULE_RUNTIME_ID,token:process.env.TEST_GATE_TOKEN}));if(${!afterClose})setInterval(()=>{if(require('node:fs').existsSync(${JSON.stringify(finishMarker)}))process.exit(17)},20);setTimeout(()=>process.exit(0),300000)`],
       cwd: dataDir, env: { ...Object.fromEntries(Object.entries(process.env).filter(([, value]) => value !== undefined)), CRABOT_MODULE_RUNTIME_ID: planned.runtime_id, TEST_GATE_TOKEN: 'private-gate-fixture-token', NODE_OPTIONS: '--require ' + preload } }
     if (python) for (const key of Object.keys(invocation.env)) if (key.toLowerCase() === 'path') invocation.env[key] = ''
     const input = { dataDir, recoveryId: preparation.plan.recovery_id, moduleId: planned.module_id, process: identity, runtime: runtimeRecord, definitionHash: sha256CanonicalJson(invocation), verify: preparation.verify }
@@ -511,7 +512,14 @@ time.sleep(300)`
     gate.close()
     expect(require('../../scripts/lib/process-identity.cjs').sameProcess(identity, require('../../scripts/lib/process-identity.cjs').inspectProcess(idleModule.pid))).toBe(true)
     sent.mockRestore()
-    await afterClose?.({ identity, start })
+    if (afterClose) await afterClose({ identity, start })
+    else if (!python) {
+      await fs.writeFile(finishMarker, 'finish this finite module')
+      expect(await idleModuleExit).toEqual([17, null])
+      await vi.waitFor(() => expect(require('../../scripts/lib/known-process-exit.cjs').probeKnownProcessExit([identity, execution]).state).toBe('stopped'), { timeout: 15000 })
+      expect(recoveryRecords.readWorkspaceRecoveryRuntimeStart(dataDir, input.recoveryId, input.moduleId)).toEqual(start)
+      expect((await manager.runtimeRegistry.listRecords()).find((record: any) => record.runtime_id === planned.runtime_id)).toEqual(runtimeRecord)
+    }
   } finally {
     for (const spy of spies) spy.mockRestore()
     gate.close()
