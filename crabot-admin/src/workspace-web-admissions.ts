@@ -4,6 +4,7 @@ import { assertWorkspaceExecutionAllowed, workspaceMaintenancePending } from 'cr
 export function requiresWorkspaceWebAdmission(method: string | undefined, pathname: string): boolean {
   if (pathname.startsWith('/tmp-pages/')) return true
   if (!pathname.startsWith('/api/') || pathname.startsWith('/api/media/')) return false
+  if (pathname === '/api/workspaces/relocation/start') return false // The control request awaits the file drain.
   if (['/api/auth/login', '/api/auth/me', '/api/auth/change-password'].includes(pathname)) return false
   return method !== 'GET' && method !== 'HEAD'
     || pathname === '/api/backup/export'

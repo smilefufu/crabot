@@ -3,7 +3,7 @@ import { assertWorkspaceExecutionAllowed, workspaceMaintenancePending } from 'cr
 import { createWorkspaceFinalizationWeb } from './workspace-finalization-web.js'
 import { createWorkspaceRecoveryFinalizationWeb } from './workspace-recovery-finalization-web.js'
 import { parseFriendPermissionRecords, serializeFriendPermissionRecords } from './friend-permission-store.js'
-import { WorkspaceExecutionInventorySchema, WorkspaceIdSchema } from 'crabot-client'
+import { WorkspaceExecutionInventorySchema, WorkspaceIdSchema, WorkspaceRelocationStartResultSchema } from 'crabot-client'
 import { WorkspaceService } from './workspaces.js'
 import { WorkspaceWebAdmissions, requiresWorkspaceWebAdmission } from './workspace-web-admissions.js'
 import { parseWorkspaceRelocationStartRequest } from 'crabot-shared'
@@ -1765,6 +1765,7 @@ export class AdminModule extends ModuleBase {
         else sendJson(res, 405, { code: 'WORKSPACE_METHOD_NOT_ALLOWED', message: '工作区维护状态仅支持读取。' })
         return
       }
+      if (pathname === '/api/workspaces/relocation/start') { await this.handleWorkspaceRelocationStartHttp(req, res); return }
       if (workspaceRequest && await this.workspaceService.handleWeb(req, res, pathname, () => this.readJsonBody(req, 65536))) return
       if (await this.voiceAdmin.handleWeb(req, res, pathname, () => this.readJsonBody(req))) return
       if (pathname === '/api/auth/login' && req.method === 'POST') {
@@ -3155,6 +3156,37 @@ export class AdminModule extends ModuleBase {
       console.error('[Admin] API error:', error)
       res.writeHead(500)
       res.end(JSON.stringify({ error: 'Internal server error' }))
+    }
+  }
+
+  /** Management handoff: this handler must not await its own file-admission drain. */
+  private async handleWorkspaceRelocationStartHttp(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    res.setHeader('Cache-Control', 'no-store')
+    if (req.method !== 'POST') { sendJson(res, 405, { code: 'WORKSPACE_METHOD_NOT_ALLOWED', message: '迁移确认仅支持 POST。' }); return }
+    const admit = () => {
+      if (this.workspaceWebAccess().isClosed()) throw new RpcError('WORKSPACE_MAINTENANCE', '工作区维护尚未结束。')
+      assertWorkspaceExecutionAllowed(path.resolve(this.adminConfig.data_dir, '..'))
+    }
+    try {
+      admit()
+      let input: VerifyWorkspaceRelocationStartParams
+      try { input = parseWorkspaceRelocationStartRequest(await this.readJsonBody(req, 65536)) }
+      catch { sendJson(res, 400, { code: 'INVALID_PARAMS', message: '请重新预检并明确确认本次迁移。' }); return }
+      admit()
+      const result = WorkspaceRelocationStartResultSchema.safeParse(await this.rpcClient.callModuleManagerSensitive(
+        'start_workspace_relocation', input, this.config.moduleId, { authorizationBearer: req.headers.authorization!.slice(7), timeoutMs: 120_000 }))
+      if (!result.success || 'accepted' in result.data && result.data.intent_id !== input.intent_id) {
+        throw new RpcError('SERVICE_UNAVAILABLE', '迁移接纳回执无法核实。')
+      }
+      sendJson(res, 'accepted' in result.data ? 202 : 200, result.data)
+    } catch (error) {
+      const code = (error as { code?: string }).code
+      const statuses: Record<string, number> = { UNAUTHORIZED: 401, FORBIDDEN: 403, INVALID_PARAMS: 400,
+        WORKSPACE_INVALID_REQUEST: 400, WORKSPACE_DIRECTORY_CONFLICT: 409, WORKSPACE_REVISION_CONFLICT: 409,
+        WORKSPACE_RELOCATION_BLOCKED: 409, WORKSPACE_MAINTENANCE: 503 }
+      const status = code && Object.prototype.hasOwnProperty.call(statuses, code) ? statuses[code] : undefined
+      sendJson(res, status ?? 503, { code: status === undefined ? 'SERVICE_UNAVAILABLE' : code,
+        message: code === 'UNAUTHORIZED' ? '请重新登录后查询原作业。' : code === 'WORKSPACE_MAINTENANCE' ? '工作区正在维护，请查看原作业。' : '本次迁移尚未确认，请保留作业编号并查看当前状态；未自动重发。' })
     }
   }
 

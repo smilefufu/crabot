@@ -2,14 +2,19 @@ import { z } from 'zod'
 import type { HttpClient, RequestOptions } from './http.js'
 import { WorkspaceCreateRequestSchema, WorkspaceGetResultSchema, WorkspaceIdSchema, WorkspaceListResultSchema,
   WorkspaceRecordResultSchema, WorkspaceScanResultSchema, WorkspaceMaintenanceStatusSchema, WorkspaceUpdateRequestSchema, WorkspaceUsageSchema,
-  WorkspaceRelocationPreviewRequestSchema, WorkspaceRelocationPreviewResultSchema,
-  type WorkspaceRelocationPreviewRequest, type WorkspaceCreateRequest, type WorkspaceUpdateRequest } from './contracts/workspaces.js'
+  WorkspaceRelocationPreviewRequestSchema, WorkspaceRelocationPreviewResultSchema, VerifyWorkspaceRelocationStartParamsSchema, WorkspaceRelocationStartResultSchema,
+  type VerifyWorkspaceRelocationStartParams, type WorkspaceRelocationPreviewRequest, type WorkspaceCreateRequest, type WorkspaceUpdateRequest } from './contracts/workspaces.js'
 
 export class WorkspaceClient {
   constructor(private readonly http: HttpClient) {}
   maintenance(options?: RequestOptions) { return this.http.request('/workspaces/maintenance', WorkspaceMaintenanceStatusSchema, { ...options, method: 'GET' }) }
   previewRelocation(input: WorkspaceRelocationPreviewRequest, options?: RequestOptions) {
     return this.write('/workspaces/relocation/preview', 'POST', WorkspaceRelocationPreviewRequestSchema.parse(input), WorkspaceRelocationPreviewResultSchema, { timeoutMs: 120_000, ...options })
+  }
+  startRelocation(input: VerifyWorkspaceRelocationStartParams, options?: RequestOptions) {
+    const request = VerifyWorkspaceRelocationStartParamsSchema.parse(input)
+    const receipt = WorkspaceRelocationStartResultSchema.refine(value => !('accepted' in value) || value.intent_id === request.intent_id)
+    return this.write('/workspaces/relocation/start', 'POST', request, receipt, { timeoutMs: 120_000, ...options })
   }
   list(options?: RequestOptions) { return this.http.request('/workspaces', WorkspaceListResultSchema, { ...options, method: 'GET' }) }
   get(id: string, options?: RequestOptions) { return this.http.request(this.path(id), WorkspaceGetResultSchema, { ...options, method: 'GET' }) }

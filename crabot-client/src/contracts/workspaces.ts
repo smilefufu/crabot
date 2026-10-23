@@ -62,3 +62,14 @@ export const WorkspaceRelocationPreviewResultSchema = z.object({
 export type WorkspaceRelocationPreviewRequest = z.infer<typeof WorkspaceRelocationPreviewRequestSchema>
 export type WorkspaceRelocationPreviewResult = z.infer<typeof WorkspaceRelocationPreviewResultSchema>
 export type WorkspaceRelocationIssue = z.infer<typeof WorkspaceRelocationIssueSchema>
+
+export const VerifyWorkspaceRelocationStartParamsSchema = z.strictObject({
+  intent_id: z.uuid().refine(value => value === value.toLowerCase()), target: Directory,
+  expected_revision: Count.min(1), confirmed: z.literal(true),
+})
+export const WorkspaceRelocationStartResultSchema = z.union([
+  z.strictObject({ intent_id: z.uuid().refine(value => value === value.toLowerCase()), accepted: z.literal(true) }),
+  z.strictObject({ source: Directory, unchanged: z.literal(true) }),
+])
+export type VerifyWorkspaceRelocationStartParams = z.infer<typeof VerifyWorkspaceRelocationStartParamsSchema>
+export type WorkspaceRelocationStartResult = z.infer<typeof WorkspaceRelocationStartResultSchema>

@@ -179,3 +179,88 @@ it('a disconnected preview is cancelled while maintenance still waits for its co
   expect(drained).toBe(true)
   expect((await f.client.maintenance()).maintenance).toBe(true)
 })
+
+function initialRequest(root: string) {
+  return { intent_id: randomUUID(), target: path.join(root, 'next workspaces'), expected_revision: 1, confirmed: true }
+}
+function startRpc(admin: any, implementation: (...args: any[]) => Promise<unknown>) {
+  admin.config = { moduleId: 'admin-web' }
+  const call = vi.fn(implementation); admin.rpcClient = { callModuleManagerSensitive: call }
+  return call
+}
+it('initial relocation HTTP authenticates before parsing, enforces one closed confirmation and never trusts body credentials', async () => {
+  const f = await fixture(), call = startRpc(f.admin, async () => { throw new Error('must not dispatch') })
+  const submit = (body: unknown, token?: string) => fetch(f.endpoint + '/workspaces/relocation/start', { method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: 'Bearer ' + token } : {}) }, body: JSON.stringify(body) })
+  expect((await submit({ token: 'fixture-human' })).status).toBe(401)
+  for (const token of ['fixture-internal', jwt.sign({ sub: 'agent-cli', exp: Math.floor(Date.now() / 1000) + 60 }, 'fixture-secret')]) expect((await submit({}, token)).status).toBe(403)
+  const request = initialRequest(f.root)
+  for (const body of [{ ...request, confirmed: false }, { ...request, expected_revision: 0 }, { ...request, authorization: 'body-only' }, { ...request, source: 'admin-web' }]) {
+    expect((await submit(body, 'fixture-human')).status).toBe(400)
+  }
+  expect((await fetch(f.endpoint + '/workspaces/relocation/start', { headers: { Authorization: 'Bearer fixture-human' } })).status).toBe(405)
+  expect(call).not.toHaveBeenCalled()
+})
+it('initial control HTTP waits for real file-handler drainage without counting itself, and dispatches exactly once with a header bearer', async () => {
+  const f = await fixture(), request = initialRequest(f.root), before = await f.service.list()
+  const call = startRpc(f.admin, async () => {
+    await fs.writeFile(path.join(f.root, 'workspace-control/relocation-finalizing.json'), 'finite test fence')
+    await f.admin.quiesceWorkspaceWebAccess()
+    return { intent_id: request.intent_id, accepted: true }
+  })
+  const response = await fetch(f.endpoint + '/workspaces/relocation/start', { method: 'POST', headers: { Authorization: 'Bearer fixture-human', 'Content-Type': 'application/json' }, body: JSON.stringify(request) })
+  expect(response.status).toBe(202); expect(response.headers.get('cache-control')).toBe('no-store')
+  expect(await response.json()).toEqual({ intent_id: request.intent_id, accepted: true })
+  expect(call).toHaveBeenCalledTimes(1)
+  expect(call).toHaveBeenCalledWith('start_workspace_relocation', request, 'admin-web', { authorizationBearer: 'fixture-human', timeoutMs: 120_000 })
+  expect(JSON.stringify(call.mock.calls[0][1])).not.toContain('fixture-human')
+  expect(await f.service.list()).toEqual(before)
+  const again = await fetch(f.endpoint + '/workspaces/relocation/start', { method: 'POST', headers: { Authorization: 'Bearer fixture-human', 'Content-Type': 'application/json' }, body: JSON.stringify(request) })
+  expect(again.status).toBe(503); expect(call).toHaveBeenCalledTimes(1)
+})
+it('initial HTTP distinguishes unchanged, unknown handoff and malformed Core receipts without exposing remote content', async () => {
+  const f = await fixture(), request = initialRequest(f.root)
+  const call = startRpc(f.admin, async () => ({ unchanged: true, source: path.join(f.root, 'workspaces') }))
+  const submit = () => fetch(f.endpoint + '/workspaces/relocation/start', { method: 'POST', headers: { Authorization: 'Bearer fixture-human', 'Content-Type': 'application/json' }, body: JSON.stringify(request) })
+  const unchanged = await submit(); expect(unchanged.status).toBe(200); expect(await unchanged.json()).toEqual({ unchanged: true, source: path.join(f.root, 'workspaces') })
+  call.mockRejectedValueOnce(Object.assign(new Error('private-remote-content'), { code: 'SERVICE_UNAVAILABLE' }))
+  const unknown = await submit(); expect(unknown.status).toBe(503); expect(JSON.stringify(await unknown.json())).not.toContain('private-remote-content')
+  call.mockResolvedValueOnce({ intent_id: randomUUID(), accepted: true })
+  expect((await submit()).status).toBe(503)
+  for (const code of ['__proto__', 'toString']) {
+    call.mockRejectedValueOnce(Object.assign(new Error('private-remote-content'), { code }))
+    const response = await submit(); expect(response.status).toBe(503); expect(await response.json()).toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
+  }
+  expect(call).toHaveBeenCalledTimes(5)
+})
+it('maintenance appearing while a confirmation body is being read refuses before any handoff', async () => {
+  const f = await fixture(), call = startRpc(f.admin, async () => { throw new Error('must not dispatch') })
+  let continueBody!: () => void, entered!: () => void
+  const bodyEntered = new Promise<void>(resolve => { entered = resolve }), bodyReady = new Promise<void>(resolve => { continueBody = resolve })
+  const read = f.admin.readJsonBody.bind(f.admin)
+  vi.spyOn(f.admin, 'readJsonBody').mockImplementation(async (...args: any[]) => { entered(); await bodyReady; return read(...args) })
+  const response = fetch(f.endpoint + '/workspaces/relocation/start', { method: 'POST', headers: { Authorization: 'Bearer fixture-human', 'Content-Type': 'application/json' }, body: JSON.stringify(initialRequest(f.root)) })
+  await bodyEntered
+  await fs.writeFile(path.join(f.root, 'workspace-control/relocation-finalizing.json'), 'finite concurrent fence'); continueBody()
+  expect((await response).status).toBe(503); expect(call).not.toHaveBeenCalled()
+})
+
+it('closing the browser only cancels its wait after handoff, never the owned Core operation', async () => {
+  const f = await fixture(), request = initialRequest(f.root), controller = new AbortController()
+  let entered!: () => void, complete!: () => void, finished!: () => void
+  const handed = new Promise<void>(resolve => { entered = resolve }), finish = new Promise<void>(resolve => { complete = resolve })
+  const done = new Promise<void>(resolve => { finished = resolve })
+  const call = startRpc(f.admin, async (...args) => {
+    expect(args[3]).toEqual({ authorizationBearer: 'fixture-human', timeoutMs: 120_000 })
+    entered(); await finish
+    await fs.writeFile(path.join(f.root, 'workspace-control/relocation-finalizing.json'), 'finite test owned job')
+    await f.admin.quiesceWorkspaceWebAccess(); finished()
+    return { intent_id: request.intent_id, accepted: true }
+  })
+  const pending = fetch(f.endpoint + '/workspaces/relocation/start', { method: 'POST', signal: controller.signal,
+    headers: { Authorization: 'Bearer fixture-human', 'Content-Type': 'application/json' }, body: JSON.stringify(request) })
+  const closed = expect(pending).rejects.toMatchObject({ name: 'AbortError' })
+  await handed; controller.abort(); await closed
+  complete(); await done
+  expect(call).toHaveBeenCalledTimes(1); expect(f.admin.workspaceWebAccess().isClosed()).toBe(true)
+})

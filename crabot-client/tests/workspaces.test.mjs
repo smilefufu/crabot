@@ -79,3 +79,27 @@ test('relocation preview accepts only a target and checks the non-authoritative 
     await assert.rejects(fixture(invalid).client.previewRelocation({ target: '/moved' }), { kind: 'validation' })
   }
 })
+
+test('initial confirmation keeps one stable job id, strict receipt and header-only identity without retrying unknown network outcomes', async () => {
+  const request = { intent_id: id, target: '/projects/new', expected_revision: 4, confirmed: true }
+  const f = fixture({ intent_id: id, accepted: true }, 202)
+  assert.deepEqual(await f.client.startRelocation(request), { intent_id: id, accepted: true })
+  assert.equal(f.calls.length, 1); assert.equal(f.calls[0].url, 'http://localhost:3000/api/workspaces/relocation/start')
+  assert.deepEqual(JSON.parse(f.calls[0].options.body), request)
+  for (const bad of [{ ...request, confirmed: false }, { ...request, expected_revision: 0 }, { ...request, authorization: 'body-only' }, { ...request, source: '/forged' }]) {
+    assert.throws(() => f.client.startRelocation(bad))
+  }
+  assert.equal(f.calls.length, 1)
+  for (const bad of [{ intent_id: '22345678-1234-4123-8123-123456789abc', accepted: true }, { intent_id: id, accepted: true, unchanged: true, source: '/projects/new' }, { source: 'relative', unchanged: true }]) {
+    await assert.rejects(fixture(bad).client.startRelocation(request), { kind: 'validation' })
+  }
+  assert.deepEqual(await fixture({ source: '/projects/new', unchanged: true }).client.startRelocation(request), { source: '/projects/new', unchanged: true })
+  let attempts = 0
+  const client = new WorkspaceClient(new HttpClient({ endpoint: 'http://localhost:3000/api', token: () => 'private-human-token', fetch: async (_url, options) => {
+    attempts++; assert.equal(new Headers(options.headers).get('Authorization'), 'Bearer private-human-token')
+    assert.equal(JSON.stringify(options.body).includes('private-human-token'), false)
+    throw new TypeError('connection closed after handoff')
+  } }))
+  await assert.rejects(client.startRelocation(request), { kind: 'unreachable' }); assert.equal(attempts, 1)
+  assert.equal(request.intent_id, id)
+})

@@ -493,6 +493,39 @@ describe('MM owns the initial workspace migration job', () => {
       expect(require('../../scripts/lib/cli-lock.mjs').cliLockToken(path.join(f.data, 'cli.lock'))).toBeUndefined()
     } finally { await f.cleanup() }
   }, timeout)
+  it.runIf(process.env.GITHUB_ACTIONS === 'true')('completes two actually owned initial jobs and reopens original Web without reviving old work', async () => {
+    const jobBudget = process.platform === 'win32' ? 600000 : 240000
+    const f = await fixture({ actualAdmin: true, actualAgent: true, validationHealth: 'healthy', extraModule: 'running', processLifetimeMs: jobBudget * 2 + 60000 })
+    const records = require('../../scripts/lib/workspace-relocation-intent.mjs'), native = require('../../scripts/lib/process-identity.cjs')
+    try {
+      expect(typeof native.renameFileNoReplace).toBe('function')
+      await fs.rename(path.join(f.data, 'workspace-control/relocation-active'), path.join(f.data, 'retained-initial-fixture'))
+      const catalog = new WorkspaceCatalog({ dataRoot: f.data, files: native })
+      const { HttpClient, WorkspaceClient } = require('../../crabot-client/dist/index.js')
+      const sdk = new WorkspaceClient(new HttpClient({ endpoint: `http://127.0.0.1:${f.port}/api`, token: () => 'fixture-human' }))
+      for (const round of [1, 2]) {
+        const before = await catalog.snapshot(), request = { intent_id: randomUUID(), target: path.join(f.root, 'owned-success-' + round), expected_revision: before.revision, confirmed: true as const }
+        const accepted = await sdk.startRelocation(request)
+        expect(accepted).toEqual({ intent_id: request.intent_id, accepted: true })
+        const job = f.manager.workspaceInitialJob
+        await job.completion
+        expect(job.phase).toBe('completed')
+        expect((await catalog.snapshot()).storage_root).toBe(request.target)
+        expect(records.readWorkspaceRelocationReleased(f.data, request.intent_id)).not.toBeNull()
+        expect(require('../../scripts/lib/workspace-maintenance.cjs').workspaceMaintenancePending(f.data)).toBe(false)
+        const archived = records.readWorkspaceRelocationArchivedState(f.data, request.intent_id)
+        expect(require('../../scripts/lib/known-process-exit.cjs').probeKnownProcessExit([archived.launch.process]).state).toBe('stopped')
+        expect(f.manager.modules.get('fixture-channel').status).toBe('running')
+        const create = await fetch(`http://127.0.0.1:${f.port}/api/workspaces`, { method: 'POST', headers: { Authorization: 'Bearer fixture-human', 'Content-Type': 'application/json' }, body: JSON.stringify({ workspace_id: randomUUID(), name: 'After owned migration ' + round }) })
+        const project = await create.json() as any
+        expect(create.status, JSON.stringify(project)).toBe(200)
+        expect(project.workspace.root.startsWith(path.join(request.target, 'projects') + path.sep)).toBe(true)
+        const ledger = JSON.parse(await fs.readFile(path.join(f.data, 'agent/worker-ledgers/channel%3A%3Asession.json'), 'utf8'))
+        expect(ledger.workers.length).toBeGreaterThan(0)
+        expect(ledger.workers.every((worker: any) => worker.task.status === 'closed')).toBe(true)
+      }
+    } finally { await f.cleanup() }
+  }, 2 * (process.platform === 'win32' ? 600000 : 240000))
   it.each(['no human', 'no Agent', 'private destination', 'old catalog'])('refuses before creating an intent: %s', async mode => {
     const f = await initial(mode !== 'no Agent')
     try {
@@ -2603,6 +2636,7 @@ describe('normal fixed-job Admin completion preparation', () => {
     const caseStarted = performance.now()
     const phase = (stage: string) => console.log('[Cold workspace stage]', { mode, stage, elapsed_ms: Math.round(performance.now() - caseStarted) })
     const withMemory = mode === 'Agent and Memory'
+    const checkRpcContract = !resumeModes.includes(mode) || mode === 'resume actual Admin startup'
     const extraModule = mode === 'resume tool' ? 'tool' : ['resume inactive module', 'resume actual Admin startup'].includes(mode) ? 'inactive' : mode === 'resume running module' ? 'running' : undefined
     const processLifetimeMs = process.platform === 'win32' ? 900000 : 300000
     const f = await fixture({ actualAgent: true, actualAdmin: true, extraModule, ...(mode === 'catalog changed after probe' ? { adminReadyDelayMs: 1100 } : {}), validationHealth: 'healthy', withMemory, inactiveMemory: !withMemory, memoryHealth: withMemory ? 'healthy' : undefined, processLifetimeMs })
@@ -2758,10 +2792,12 @@ describe('normal fixed-job Admin completion preparation', () => {
           body: JSON.stringify({ id: randomUUID(), source: 'forged-source', method: 'verify_workspace_relocation_recovery_runtime', params }) })
         return response.json()
       }
-      expect(await call({ unexpected: true })).toMatchObject({ success: false, error: { code: 'UNAUTHORIZED' } })
-      expect(await call({ unexpected: true }, human)).toMatchObject({ success: false, error: { code: 'FORBIDDEN' } })
-      expect(await call({ ...request, unexpected: true }, token)).toMatchObject({ success: false, error: { code: 'INVALID_PARAMS' } })
-      expect(await call({ ...request, recovery_id: randomUUID() }, token)).toMatchObject({ success: false, error: { code: 'FORBIDDEN' } })
+      if (checkRpcContract) {
+        expect(await call({ unexpected: true })).toMatchObject({ success: false, error: { code: 'UNAUTHORIZED' } })
+        expect(await call({ unexpected: true }, human)).toMatchObject({ success: false, error: { code: 'FORBIDDEN' } })
+        expect(await call({ ...request, unexpected: true }, token)).toMatchObject({ success: false, error: { code: 'INVALID_PARAMS' } })
+        expect(await call({ ...request, recovery_id: randomUUID() }, token)).toMatchObject({ success: false, error: { code: 'FORBIDDEN' } })
+      }
       const proof = { verified: true, ...request, launch_sha256: sha256CanonicalJson(coordinator.launch), plan_sha256: sha256CanonicalJson(started.plan),
         root_selected_sha256: started.plan.root_selected_sha256, instance_id: cold.runtimeRegistry.getInstanceId(), module_id: 'crabot-agent',
         runtime_id: started.modules.find((module: any) => module.module_id === 'crabot-agent').runtime_id }
@@ -2772,13 +2808,15 @@ describe('normal fixed-job Admin completion preparation', () => {
           body: JSON.stringify({ id: randomUUID(), source: 'forged-source', method: 'verify_workspace_relocation_recovery_root', params }) })
         return response.json()
       }
-      expect(await callRoot(request)).toMatchObject({ success: false, error: { code: 'UNAUTHORIZED' } })
-      expect(await callRoot({ unexpected: true }, human)).toMatchObject({ success: false, error: { code: 'FORBIDDEN' } })
-      expect(await callRoot({ ...request, unexpected: true }, token)).toMatchObject({ success: false, error: { code: 'INVALID_PARAMS' } })
+      if (checkRpcContract) {
+        expect(await callRoot(request)).toMatchObject({ success: false, error: { code: 'UNAUTHORIZED' } })
+        expect(await callRoot({ unexpected: true }, human)).toMatchObject({ success: false, error: { code: 'FORBIDDEN' } })
+        expect(await callRoot({ ...request, unexpected: true }, token)).toMatchObject({ success: false, error: { code: 'INVALID_PARAMS' } })
+      }
       const root = records.readWorkspaceRelocationArchivedState(f.data, request.intent_id).published.target.path, files = await fs.readdir(root)
       expect(await callRoot(request, token)).toMatchObject({ success: true, data: proof })
       const probedAt = (await fs.stat(root, { bigint: true })).mtimeNs
-      expect(await callRoot(request, token)).toMatchObject({ success: true, data: proof })
+      if (checkRpcContract) expect(await callRoot(request, token)).toMatchObject({ success: true, data: proof })
       expect((await fs.stat(root, { bigint: true })).mtimeNs).toBe(probedAt)
       expect(await fs.readdir(root)).toEqual(files)
       expect(typeof cold.verifyWorkspaceRecoveryValidationHealth).toBe('function')
@@ -2809,11 +2847,13 @@ describe('normal fixed-job Admin completion preparation', () => {
             body: JSON.stringify({ id: randomUUID(), source: 'forged-source', method: 'verify_workspace_relocation_recovery_finalization', params }) })
           return response.json()
         }
-        expect(await finalization({ unexpected: true })).toMatchObject({ success: false, error: { code: 'UNAUTHORIZED' } })
-        expect(await finalization({ unexpected: true }, human)).toMatchObject({ success: false, error: { code: 'FORBIDDEN' } })
-        expect(await finalization({ action: 'prepare_web', unexpected: true }, grant.token)).toMatchObject({ success: false, error: { code: 'INVALID_PARAMS' } })
-        expect(await finalization({ action: 'resume_web' }, grant.token)).toMatchObject({ success: false, error: { code: 'FORBIDDEN' } })
-        expect(await finalization({ action: 'prepare_web' }, grant.token)).toMatchObject({ success: true, data: { verified: true, ...expected, action: 'prepare_web' } })
+        if (checkRpcContract) {
+          expect(await finalization({ unexpected: true })).toMatchObject({ success: false, error: { code: 'UNAUTHORIZED' } })
+          expect(await finalization({ unexpected: true }, human)).toMatchObject({ success: false, error: { code: 'FORBIDDEN' } })
+          expect(await finalization({ action: 'prepare_web', unexpected: true }, grant.token)).toMatchObject({ success: false, error: { code: 'INVALID_PARAMS' } })
+          expect(await finalization({ action: 'resume_web' }, grant.token)).toMatchObject({ success: false, error: { code: 'FORBIDDEN' } })
+          expect(await finalization({ action: 'prepare_web' }, grant.token)).toMatchObject({ success: true, data: { verified: true, ...expected, action: 'prepare_web' } })
+        }
         phase('current-finalization-proof-checked')
         const releaseProof = async (params: any, bearer?: string) => {
           const response = await fetch(`http://127.0.0.1:${cold.config.port}/verify_workspace_relocation_recovery_release`, { method: 'POST',
@@ -2821,10 +2861,12 @@ describe('normal fixed-job Admin completion preparation', () => {
             body: JSON.stringify({ id: randomUUID(), source: 'forged-source', method: 'verify_workspace_relocation_recovery_release', params }) })
           return response.json()
         }
-        expect(await releaseProof({ unexpected: true })).toMatchObject({ success: false, error: { code: 'UNAUTHORIZED' } })
-        expect(await releaseProof({ unexpected: true }, human)).toMatchObject({ success: false, error: { code: 'FORBIDDEN' } })
-        expect(await releaseProof({ ...request, unexpected: true }, grant.token)).toMatchObject({ success: false, error: { code: 'INVALID_PARAMS' } })
-        expect(await releaseProof(request, grant.token)).toMatchObject({ success: false, error: { code: 'FORBIDDEN' } })
+        if (checkRpcContract) {
+          expect(await releaseProof({ unexpected: true })).toMatchObject({ success: false, error: { code: 'UNAUTHORIZED' } })
+          expect(await releaseProof({ unexpected: true }, human)).toMatchObject({ success: false, error: { code: 'FORBIDDEN' } })
+          expect(await releaseProof({ ...request, unexpected: true }, grant.token)).toMatchObject({ success: false, error: { code: 'INVALID_PARAMS' } })
+          expect(await releaseProof(request, grant.token)).toMatchObject({ success: false, error: { code: 'FORBIDDEN' } })
+        }
 
         const calls = await f.calls()
         expect(calls.filter((item: any) => item.method === '/prepare_workspace_relocation_recovery_completion')).toHaveLength(1)
@@ -2835,11 +2877,13 @@ describe('normal fixed-job Admin completion preparation', () => {
             body: JSON.stringify({ id: randomUUID(), source: 'forged-source', method: 'prepare_workspace_relocation_recovery_completion', params }) })
           return response.json()
         }
-        expect(await callPrepare({ unexpected: true })).toMatchObject({ success: false, error: { code: 'UNAUTHORIZED' } })
-        expect(await callPrepare({ unexpected: true }, human)).toMatchObject({ success: false, error: { code: 'FORBIDDEN' } })
-        expect(await callPrepare({ ...request, unexpected: true }, grant.token)).toMatchObject({ success: false, error: { code: 'INVALID_PARAMS' } })
-        expect(await callPrepare({ ...request, recovery_id: randomUUID() }, grant.token)).toMatchObject({ success: false, error: { code: 'FORBIDDEN' } })
-        expect(await callPrepare(request, grant.token)).toMatchObject({ success: true, data: prepared })
+        if (checkRpcContract) {
+          expect(await callPrepare({ unexpected: true })).toMatchObject({ success: false, error: { code: 'UNAUTHORIZED' } })
+          expect(await callPrepare({ unexpected: true }, human)).toMatchObject({ success: false, error: { code: 'FORBIDDEN' } })
+          expect(await callPrepare({ ...request, unexpected: true }, grant.token)).toMatchObject({ success: false, error: { code: 'INVALID_PARAMS' } })
+          expect(await callPrepare({ ...request, recovery_id: randomUUID() }, grant.token)).toMatchObject({ success: false, error: { code: 'FORBIDDEN' } })
+          expect(await callPrepare(request, grant.token)).toMatchObject({ success: true, data: prepared })
+        }
         expect(JSON.stringify(await f.calls())).not.toContain(grant.token)
         expect((await fetch(`http://127.0.0.1:${webPort}/api/friends`, { headers: { Authorization: 'Bearer ' + human } })).status).toBe(200)
         expect((await fetch(`http://127.0.0.1:${webPort}/api/chat`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + human }, body: '{}' })).status).toBe(503)
