@@ -79,7 +79,7 @@ async function fixture(options: { withMemory?: boolean; inactiveMemory?: boolean
     const entry = path.resolve('../crabot-admin/dist/index.js'); await fs.access(entry)
     await fs.writeFile(script, `const fs=require('node:fs'),http=require('node:http'),{default:Admin}=require(${JSON.stringify(entry)}),calls=[];
       const admin=new Admin({moduleId:'admin-web',moduleType:'admin',version:'0.1.0',protocolVersion:'0.1.0',port:Number(process.env.Crabot_PORT),subscriptions:[]},{data_dir:${JSON.stringify(path.join(data, 'admin'))},web_port:Number(process.env.Crabot_PORT)});
-      admin.cutoverActivated=true;admin.verifyAuthenticatedToken=async token=>token==='fixture-human'?{sub:'admin'}:null;
+      admin.cutoverActivated=true;admin.verifyAuthenticatedToken=async token=>!fs.existsSync(${JSON.stringify(path.join(data, 'human-revoked'))})&&token==='fixture-human'?{sub:'admin'}:null;
       const server=http.createServer((req,res)=>{const record=body=>{calls.push({method:req.url,authorization:req.headers.authorization?'present':undefined,body});fs.writeFileSync(process.env.FIXTURE_CALLS,JSON.stringify(calls))};
         if(req.url.startsWith('/api/'))record();else{let text='';req.on('data',part=>text+=part);req.on('end',()=>{let body;try{if(text)body=JSON.parse(text)}catch{}record(body)})}
         if(${!!options.businessAgent}){
@@ -425,6 +425,86 @@ async function verifyRegisteredRuntimeGate({ manager, dataDir, coordinator, prep
     await manager.runtimeRegistry.removeRuntime(runtimePlan.modules[0].runtime_id)
   }
 }
+
+describe('MM owns the initial workspace migration job', () => {
+  const timeout = process.platform === 'win32' ? 180000 : 60000
+  async function initial(withAgent = true) {
+    const f = await fixture({ actualAdmin: true, actualAgent: withAgent, processLifetimeMs: 180000 })
+    await fs.rename(path.join(f.data, 'workspace-control/relocation-active'), path.join(f.data, 'retained-initial-fixture'))
+    const params = { intent_id: randomUUID(), target: path.join(f.root, 'owned-job-target'), expected_revision: 1, confirmed: true as const }
+    return { ...f, start: params }
+  }
+  it.each(['concurrent confirmation', 'login revoked after acceptance'])('keeps one owned driver and original stop authority: %s', async mode => {
+    const f = await initial(), records = require('../../scripts/lib/workspace-relocation-intent.mjs')
+    try {
+      expect(typeof f.manager.startWorkspaceRelocation).toBe('function')
+      const launch = vi.spyOn(f.manager, 'launchWorkspaceRelocationCoordinator')
+      const workerStop = vi.spyOn(f.manager, 'stopWorkspaceRelocationWorkersForCoordinator')
+      const moduleStop = vi.spyOn(f.manager, 'requestWorkspaceRelocationModuleStops').mockRejectedValue(new Error('finite module stop boundary'))
+      if (mode === 'login revoked after acceptance') {
+        const mark = f.manager.markWorkspaceRelocationAccepted.bind(f.manager)
+        vi.spyOn(f.manager, 'markWorkspaceRelocationAccepted').mockImplementation((request: any) => {
+          mark(request); require('node:fs').writeFileSync(path.join(f.data, 'human-revoked'), 'revoked')
+        })
+      }
+      const first = f.manager.startWorkspaceRelocation(f.start, 'fixture-human')
+      const replies = mode === 'concurrent confirmation' ? await Promise.all([first, f.manager.startWorkspaceRelocation({ ...f.start }, 'fixture-human')]) : [await first]
+      expect(replies.every(reply => JSON.stringify(reply) === JSON.stringify({ intent_id: f.start.intent_id, accepted: true }))).toBe(true)
+      const job = f.manager.workspaceInitialJob
+      expect(job).toBeDefined()
+      await job.completion
+      expect(job.phase).toBe('needs_attention')
+      expect(launch).toHaveBeenCalledTimes(1); expect(workerStop).toHaveBeenCalledTimes(1); expect(moduleStop).toHaveBeenCalledTimes(1)
+      const coordinator = records.readWorkspaceRelocationCoordinator(f.data, f.start.intent_id)
+      expect(coordinator.ready).not.toBeNull()
+      expect(records.readWorkspaceRelocationStops(f.data, f.start.intent_id).submission?.results).toHaveLength(1)
+      expect(records.readWorkspaceRelocationExecutionExit(f.data, f.start.intent_id)).toBeNull()
+      await expect(fs.stat(f.start.target)).rejects.toMatchObject({ code: 'ENOENT' })
+      if (mode === 'login revoked after acceptance') await expect(f.manager.startWorkspaceRelocation(f.start, 'fixture-human')).rejects.toMatchObject({ code: 'UNAUTHORIZED' })
+      else await expect(f.manager.startWorkspaceRelocation({ ...f.start, target: path.join(f.root, 'changed') }, 'fixture-human')).rejects.toMatchObject({ code: 'FORBIDDEN' })
+      expect(launch).toHaveBeenCalledTimes(1)
+    } finally { vi.restoreAllMocks(); await f.cleanup() }
+  }, timeout)
+  it.each(['revoked human', 'Agent stopped'])('rechecks readiness after waiting for the original lock: %s', async mode => {
+    const f = await initial(), locks = require('../../scripts/lib/cli-lock.mjs')
+    const held = await locks.acquireCliLock(f.data, 'finite competing operation')
+    try {
+      const verify = vi.spyOn(f.manager, 'verifyWorkspaceRelocationStartRequest')
+      const pending = f.manager.startWorkspaceRelocation(f.start, 'fixture-human')
+      const rejected = expect(pending).rejects.toMatchObject({ code: mode === 'revoked human' ? 'UNAUTHORIZED' : 'SERVICE_UNAVAILABLE' })
+      await vi.waitFor(() => expect(f.manager.workspaceInitialJob?.phase).toBe('preparing'))
+      expect(verify).toHaveBeenCalledTimes(1)
+      expect(locks.cliLockToken(held)).toBeDefined()
+      if (mode === 'revoked human') await fs.writeFile(path.join(f.data, 'human-revoked'), 'revoked')
+      else f.manager.modules.get('crabot-agent').status = 'stopped'
+      locks.releaseCliLock(held)
+      await rejected
+      expect(verify).toHaveBeenCalledTimes(2)
+      await expect(fs.stat(path.join(f.data, 'workspace-control/relocation-active'))).rejects.toMatchObject({ code: 'ENOENT' })
+      expect(locks.cliLockToken(held)).toBeUndefined()
+    } finally { locks.releaseCliLock(held); vi.restoreAllMocks(); await f.cleanup() }
+  }, timeout)
+  it('treats the current directory as unchanged without an intent or coordinator', async () => {
+    const f = await initial()
+    try {
+      expect(typeof f.manager.startWorkspaceRelocation).toBe('function')
+      expect(await f.manager.startWorkspaceRelocation({ ...f.start, target: path.join(f.data, 'workspaces') }, 'fixture-human')).toEqual({ unchanged: true, source: path.join(f.data, 'workspaces') })
+      await expect(fs.stat(path.join(f.data, 'workspace-control/relocation-active'))).rejects.toMatchObject({ code: 'ENOENT' })
+      expect(require('../../scripts/lib/cli-lock.mjs').cliLockToken(path.join(f.data, 'cli.lock'))).toBeUndefined()
+    } finally { await f.cleanup() }
+  }, timeout)
+  it.each(['no human', 'no Agent', 'private destination', 'old catalog'])('refuses before creating an intent: %s', async mode => {
+    const f = await initial(mode !== 'no Agent')
+    try {
+      expect(typeof f.manager.startWorkspaceRelocation).toBe('function')
+      const params = { ...f.start, ...(mode === 'private destination' ? { target: path.join(f.data, 'private-target') } : {}), ...(mode === 'old catalog' ? { expected_revision: 100 } : {}) }
+      await expect(f.manager.startWorkspaceRelocation(params, mode === 'no human' ? undefined : 'fixture-human')).rejects.toBeDefined()
+      await expect(fs.stat(path.join(f.data, 'workspace-control/relocation-active'))).rejects.toMatchObject({ code: 'ENOENT' })
+      await expect(fs.stat(params.target)).rejects.toMatchObject({ code: 'ENOENT' })
+      expect(require('../../scripts/lib/cli-lock.mjs').cliLockToken(path.join(f.data, 'cli.lock'))).toBeUndefined()
+    } finally { await f.cleanup() }
+  }, timeout)
+})
 
 describe('actual Admin recovery RPC observer', () => {
   it('keeps the actual body reader working and records only selected wire bodies with header presence', async () => {
@@ -2715,6 +2795,7 @@ describe('normal fixed-job Admin completion preparation', () => {
           cold.prepareWorkspaceRecoveryCompletion(request, human),
         ])
         expect(concurrent).toBe(prepared)
+        phase('current-web-prepared')
         const adminState = cold.childStates.get(cold.processes.get('admin-web'))
         const expected = { ...request, launch_sha256: proof.launch_sha256, plan_sha256: proof.plan_sha256,
           instance_id: proof.instance_id, admin_runtime_id: adminState.runtimeId }
@@ -2733,6 +2814,7 @@ describe('normal fixed-job Admin completion preparation', () => {
         expect(await finalization({ action: 'prepare_web', unexpected: true }, grant.token)).toMatchObject({ success: false, error: { code: 'INVALID_PARAMS' } })
         expect(await finalization({ action: 'resume_web' }, grant.token)).toMatchObject({ success: false, error: { code: 'FORBIDDEN' } })
         expect(await finalization({ action: 'prepare_web' }, grant.token)).toMatchObject({ success: true, data: { verified: true, ...expected, action: 'prepare_web' } })
+        phase('current-finalization-proof-checked')
         const releaseProof = async (params: any, bearer?: string) => {
           const response = await fetch(`http://127.0.0.1:${cold.config.port}/verify_workspace_relocation_recovery_release`, { method: 'POST',
             headers: { 'Content-Type': 'application/json', ...(bearer ? { Authorization: 'Bearer ' + bearer } : {}) },
@@ -2761,6 +2843,7 @@ describe('normal fixed-job Admin completion preparation', () => {
         expect(JSON.stringify(await f.calls())).not.toContain(grant.token)
         expect((await fetch(`http://127.0.0.1:${webPort}/api/friends`, { headers: { Authorization: 'Bearer ' + human } })).status).toBe(200)
         expect((await fetch(`http://127.0.0.1:${webPort}/api/chat`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + human }, body: '{}' })).status).toBe(503)
+        phase('current-web-prepare-http-checked')
         if (mode === 'released current observation') {
           await cold.beginWorkspaceRecoveryCompletionObservation(request, human)
           grant.releasedHealth = cold.observeWorkspaceRecoveryReleasedHealth(request, coordinator, health, grant)
@@ -2810,6 +2893,7 @@ describe('normal fixed-job Admin completion preparation', () => {
             if (mode === 'release readonly root') { rootMode = (await fs.stat(root)).mode & 0o777; await fs.chmod(root, 0o500) }
             const restoring = resumeModes.includes(mode), operate = () => restoring ? cold.resumeWorkspaceRecoveryWeb(request, human) : cold.releaseWorkspaceRecoveryCompletion(request, human)
             const start = vi.spyOn(cold, 'startModuleProcess')
+            phase('current-terminal-request')
             const first = operate(), second = operate()
             if (hasNativeRelease && mode !== 'release readonly root') {
               const [released, concurrent] = await Promise.all([first, second])

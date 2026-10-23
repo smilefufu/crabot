@@ -133,6 +133,7 @@ export { parseVoiceConnection, voiceTerminalEntry, voiceSetupStatus } from './vo
 export * from './computer-use.js'
 
 export type { WorkspaceRecord, WorkspaceUsage, WorkspaceExecution, WorkspaceExecutionInventory, WorkspaceSummary, WorkspaceMaintenanceStatus, WorkspaceListResult,
+  WorkspaceRelocationAccepted, WorkspaceRelocationUnchanged, WorkspaceRelocationStartResult,
   VerifyWorkspaceRelocationStartParams, VerifyWorkspaceRelocationStartResult,
   WorkspaceRelocationPreviewRequest, WorkspaceRelocationPreviewResult, WorkspaceRelocationIssue,
   WorkspaceCreateRequest, WorkspaceUpdateRequest, WorkspaceRecordResult, WorkspaceGetResult, WorkspaceScanResult,

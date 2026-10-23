@@ -96,6 +96,16 @@ export interface VerifyWorkspaceRelocationStartResult extends VerifyWorkspaceRel
   verified: true
 }
 
+export interface WorkspaceRelocationAccepted {
+  intent_id: string
+  accepted: true
+}
+export interface WorkspaceRelocationUnchanged {
+  source: string
+  unchanged: true
+}
+export type WorkspaceRelocationStartResult = WorkspaceRelocationAccepted | WorkspaceRelocationUnchanged
+
 export interface VerifyWorkspaceRelocationRequestParams {
   intent_id: string
   intent_sha256: string

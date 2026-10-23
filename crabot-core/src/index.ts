@@ -46,6 +46,7 @@ import {
   type VerifyWorkspaceRelocationRecoveryReleaseResult,
   type ReleaseWorkspaceRelocationRecoveryCompletionResult,
   type ResumeWorkspaceRelocationRecoveryWebResult,
+  type WorkspaceRelocationStartResult,
   type VerifyWorkspaceRelocationStartParams,
   type VerifyWorkspaceRelocationStartResult,
   parseWorkspaceRelocationStartRequest,
@@ -257,6 +258,17 @@ interface WorkspaceWorkerStopJournal {
   close(): void
 }
 
+interface WorkspaceInitialJob {
+  readonly request: VerifyWorkspaceRelocationStartParams
+  readonly fingerprint: string
+  readonly reply: Promise<WorkspaceRelocationStartResult>
+  readonly resolve: (result: WorkspaceRelocationStartResult) => void
+  readonly reject: (error: Error) => void
+  phase: 'preparing' | 'accepted' | 'completed' | 'needs_attention'
+  proof?: VerifyWorkspaceRelocationRequestParams
+  completion?: Promise<void>
+}
+
 interface WorkspaceStopSequenceResult {
   readonly coordinator: ChildProcess
   readonly workerSubmission: StopWorkspaceRelocationWorkersResult
@@ -328,6 +340,7 @@ export class ModuleManager {
   private readonly portAllocator: PortAllocator
   private readonly modules: Map<ModuleId, ModuleRuntime> = new Map()
   private readonly processes: Map<ModuleId, ChildProcess> = new Map()
+  private workspaceInitialJob?: WorkspaceInitialJob
   private workspaceCoordinatorGrant?: WorkspaceCoordinatorGrant
   private workspaceStopSequence?: { fingerprint: string; pending: Promise<WorkspaceStopSequenceResult> }
   private workspaceFilePreparation?: { fingerprint: string; pending: Promise<WorkspaceFilePreparationResult> }
@@ -403,6 +416,7 @@ export class ModuleManager {
     this.dataDir = dataDir
 
     // 注册所有方法处理器
+    this.registerMethod<VerifyWorkspaceRelocationStartParams, WorkspaceRelocationStartResult>('start_workspace_relocation', (params, context) => this.startWorkspaceRelocation(params, context?.authorizationBearer))
     this.registerMethod('register', this.handleRegisterUnauthenticated.bind(this))
     this.registerMethod('register_core_agent', this.handleRegisterCoreAgent.bind(this))
     this.registerMethod('verify_workspace_relocation_recovery_admission', this.handleVerifyWorkspaceRelocationRecoveryAdmission.bind(this))
@@ -1423,6 +1437,67 @@ export class ModuleManager {
   // 进程管理
   // ============================================================================
 
+  private async startWorkspaceRelocation(params: VerifyWorkspaceRelocationStartParams, bearer?: string): Promise<WorkspaceRelocationStartResult> {
+    const verified = await this.verifyWorkspaceRelocationStartRequest(params, bearer)
+    const { verified: _, ...request } = verified
+    const fingerprint = sha256CanonicalJson(request), previous = this.workspaceInitialJob
+    if (previous?.request.intent_id === request.intent_id) {
+      if (previous.fingerprint !== fingerprint) throw Object.assign(new Error('Original workspace confirmation cannot change'), { code: 'FORBIDDEN' })
+      return previous.reply
+    }
+    if (previous && previous.phase !== 'completed') throw Object.assign(new Error('已有工作区作业尚未完成，请查看当前作业。'), { code: 'SERVICE_UNAVAILABLE' })
+    let resolve!: WorkspaceInitialJob['resolve'], reject!: WorkspaceInitialJob['reject']
+    const reply = new Promise<WorkspaceRelocationStartResult>((yes, no) => { resolve = yes; reject = no })
+    const job: WorkspaceInitialJob = { request: Object.freeze(request), fingerprint, reply, resolve, reject, phase: 'preparing' }
+    this.workspaceInitialJob = job
+    job.completion = this.driveInitialWorkspaceRelocation(job, bearer!)
+    return reply
+  }
+
+  /** Owned by the job, not an HTTP request or its cancellation signal. */
+  private async driveInitialWorkspaceRelocation(job: WorkspaceInitialJob, bearer: string): Promise<void> {
+    const unavailable = () => Object.assign(new Error('迁移作业尚未确认，请查看当前作业和诊断；未自动重发。'), { code: 'SERVICE_UNAVAILABLE' })
+    const locks = require('../../scripts/lib/cli-lock.mjs')
+    let lock: string | undefined, token: string | undefined
+    try {
+      if (this.isShuttingDown || this.managementOnly || this.modules.get('crabot-agent')?.status !== 'running' || !this.processes.has('crabot-agent')) throw unavailable()
+      const policy = require('../../scripts/lib/workspace-target-policy.cjs').workspaceRelocationTargetPolicy(this.dataDir)
+      lock = await locks.acquireCliLock(this.dataDir, 'workspace-relocation')
+      token = locks.cliLockToken(lock)
+      if (!token || this.workspaceInitialJob !== job || this.isShuttingDown) throw unavailable()
+      await this.verifyWorkspaceRelocationStartRequest(job.request, bearer)
+      if (locks.cliLockToken(lock) !== token || this.workspaceInitialJob !== job || this.isShuttingDown || this.managementOnly
+        || this.modules.get('crabot-agent')?.status !== 'running' || !this.processes.has('crabot-agent')) throw unavailable()
+      const records = require('../../scripts/lib/workspace-relocation-intent.mjs')
+      const intent = await records.beginWorkspaceRelocationIntent({ dataDir: this.dataDir, id: job.request.intent_id,
+        target: job.request.target, expectedRevision: job.request.expected_revision, ...policy })
+      if (intent.unchanged) { job.phase = 'completed'; job.resolve({ unchanged: true, source: intent.source }); return }
+      job.proof = Object.freeze({ intent_id: intent.id, intent_sha256: sha256CanonicalJson(intent) })
+      await this.completeWorkspaceRelocation(job.proof, bearer)
+      if (this.workspaceInitialJob !== job || job.phase !== 'accepted') throw unavailable()
+      job.phase = 'completed'
+    } catch (cause) {
+      job.phase = 'needs_attention'
+      const code = (cause as { code?: string })?.code
+      const allowed = ['UNAUTHORIZED', 'FORBIDDEN', 'INVALID_PARAMS', 'WORKSPACE_INVALID_REQUEST', 'WORKSPACE_DIRECTORY_CONFLICT', 'WORKSPACE_REVISION_CONFLICT', 'WORKSPACE_RELOCATION_BLOCKED', 'WORKSPACE_MAINTENANCE']
+      job.reject(cause instanceof Error && code && allowed.includes(code) ? cause : unavailable())
+      if (!job.proof && this.workspaceInitialJob === job) this.workspaceInitialJob = undefined
+    } finally {
+      try { if (lock && token && locks.cliLockToken(lock) === token) locks.releaseCliLock(lock) }
+      catch { job.phase = 'needs_attention'; job.reject(unavailable()) }
+    }
+  }
+
+  /** Observation of this original fixed scope only; it does not grant any stop/file authority. */
+  private markWorkspaceRelocationAccepted(request: VerifyWorkspaceRelocationRequestParams): void {
+    const job = this.workspaceInitialJob
+    if (!job) return
+    if (!job.proof || sha256CanonicalJson(job.proof) !== sha256CanonicalJson(request) || job.phase !== 'preparing') {
+      throw Object.assign(new Error('Initial workspace job is not current'), { code: 'FORBIDDEN' })
+    }
+    job.phase = 'accepted'; job.resolve({ intent_id: request.intent_id, accepted: true })
+  }
+
   /** Initial human confirmation only; no intent, lock or coordinator is created here. */
   private async verifyWorkspaceRelocationStartRequest(
     params: VerifyWorkspaceRelocationStartParams, bearer?: string,
@@ -1441,7 +1516,10 @@ export class ModuleManager {
         return Object.freeze(expected)
       })
     } catch (error) {
-      if (['UNAUTHORIZED', 'FORBIDDEN', 'INVALID_PARAMS'].includes((error as { code?: string }).code ?? '')) throw error
+      const code = (error as { remote_code?: string; code?: string }).remote_code ?? (error as { code?: string }).code
+      if (code && ['UNAUTHORIZED', 'FORBIDDEN', 'INVALID_PARAMS'].includes(code)) {
+        throw Object.assign(new Error('Human workspace confirmation rejected'), { code })
+      }
       throw unavailable()
     }
   }
@@ -1618,6 +1696,7 @@ export class ModuleManager {
         journal = createWorkspaceModuleJournal(child, context)
         processJournal = createWorkspaceProcessJournal(child, context)
         verify()
+        this.markWorkspaceRelocationAccepted(request)
         stage = 'process-attempt'
         if (await processJournal!.prepare() !== 'dispatch') throw failure()
         let submissions: Pick<WorkspaceStopSequenceResult, 'workerSubmission' | 'moduleSubmission'> | undefined

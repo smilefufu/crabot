@@ -48,13 +48,10 @@ export class WorkspaceService {
   }
   async previewRelocation(input: WorkspaceRelocationPreviewRequest, signal?: AbortSignal): Promise<WorkspaceRelocationPreviewResult> {
     this.checkScanning()
-    const snapshot = await this.snapshot(), dataRoot = await fs.realpath(this.dataRoot)
-    const coreRoot = await fs.realpath(path.resolve(__dirname, '../..'))
-    const desktop = require('../../scripts/lib/desktop-installation.cjs').locateDesktopCore(coreRoot)
-    const protectedTargets = [dataRoot, coreRoot, ...(desktop ? ['app', 'releases', 'bin'].map(name => path.join(desktop.root, name)) : [])]
+    const snapshot = await this.snapshot()
+    const policy = require('../../scripts/lib/workspace-target-policy.cjs').workspaceRelocationTargetPolicy(this.dataRoot)
     const preview = await inspectWorkspaceRelocationTarget(snapshot.storage_root, input.target,
-      { protectedRoots: [path.join(dataRoot, 'workspace-control')], protectedTargets, signal,
-        inspectTargetAccess: require('../../scripts/lib/process-identity.cjs').inspectDirectoryWriteAccess })
+      { ...policy, signal, inspectTargetAccess: require('../../scripts/lib/process-identity.cjs').inspectDirectoryWriteAccess })
     if (preview.mode !== 'unchanged' && this.fixedStorageRoot) {
       throw new WorkspaceError('WORKSPACE_DIRECTORY_CONFLICT', '当前部署通过 WORKER_WORKSPACES_DIR 固定了工作区位置；未停止任务或修改设置。')
     }
