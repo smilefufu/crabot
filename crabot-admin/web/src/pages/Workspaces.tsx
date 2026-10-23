@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
-import { ClientError, WorkspaceClient, type WorkspaceRecord, type WorkspaceSummary, type WorkspaceUsage, type WorkspaceRelocationPreviewResult, type WorkspaceRelocationIssue } from 'crabot-client'
+import { ClientError, WorkspaceClient, type WorkspaceRecord, type WorkspaceSummary, type WorkspaceUsage, type WorkspaceRelocationPreviewResult, type WorkspaceRelocationIssue, type WorkspaceRelocationJobStage, type WorkspaceRelocationJobStatus } from 'crabot-client'
 import { MainLayout } from '../components/Layout/MainLayout'
 import { Button } from '../components/Common/Button'
 import { Card } from '../components/Common/Card'
@@ -76,6 +76,48 @@ function RelocationPreviewPanel({ client, source, revision, locked }: { client: 
       <p className="workspace-note">实际迁移需要再次明确确认。迁移期间暂停任务，管理页面保持在线；现有执行器将永久关闭，历史和文件保留。</p>
     </section>}
   </Card>
+}
+
+const relocationStages: Record<WorkspaceRelocationJobStage, string> = {
+  preparing: '正在准备迁移', stopping: '正在停止并核验执行', moving: '正在迁移文件', closing_executors: '正在关闭旧执行器',
+  switching: '正在切换目录', validating: '正在检查新目录与执行模块', finalizing: '正在保存迁移结果', restoring: '正在恢复业务',
+  finished: '迁移步骤已结束', unknown: '阶段待核实',
+}
+function RelocationStatusPanel({ client, maintenance }: { client: WorkspaceClient; maintenance: boolean }) {
+  const scope = useServerScope(), previous = useRef<WorkspaceRelocationJobStatus | undefined>(undefined)
+  const status = useQuery({ queryKey: ['server', scope, 'workspaces', 'relocation', 'current'], queryFn: async ({ signal }) => {
+    let observed = await client.currentRelocation({ signal }); signal.throwIfAborted()
+    if (observed.available && !observed.job && previous.current) observed = await client.relocationStatus(previous.current.intent_id, { signal })
+    signal.throwIfAborted()
+    if (observed.available && observed.job) previous.current = observed.job
+    return observed
+  }, refetchOnWindowFocus: true, refetchInterval: value => maintenance || ['preparing', 'running'].includes(value.state.data?.job?.state ?? previous.current?.state ?? '') ? 3000 : false }, serverQueries)
+  const wasMaintaining = useRef(false)
+  useEffect(() => {
+    if (maintenance && !wasMaintaining.current && !status.isFetching) void status.refetch()
+    wasMaintaining.current = maintenance
+  }, [maintenance, status.refetch])
+  const uncertain = status.isError || status.data?.available === false
+  const job = uncertain ? previous.current : status.data?.job
+  if (!job && !uncertain) return null
+  let title = '暂时无法核实迁移进度，保留上次信息；未重新提交迁移。'
+  let detail = '请稍后刷新，当前工作区列表与搜索仍可使用。'
+  if (!uncertain && job) {
+    if (job.state === 'completed') { title = '迁移已完成'; detail = '目录、执行模块和管理页面已恢复，旧执行器保持关闭。' }
+    else if (job.state === 'committed') { title = '目录切换已提交'; detail = '这条历史记录确认了目录切换，完整业务恢复结果仍待核实。' }
+    else if (job.state === 'needs_attention') { title = '迁移尚未确认完成'; detail = '请先核对当前状态；刷新页面不会重新执行迁移。' }
+    else { title = relocationStages[job.stage]; detail = job.state === 'preparing' ? '正在准备并核对本次迁移，尚未确认接管。' : '迁移由后台继续执行，关闭页面不会取消已接纳的作业。' }
+  }
+  return <Card><section aria-label="工作目录迁移进度"><h2>迁移进度</h2>
+    <p role={uncertain || job?.state === 'needs_attention' ? 'alert' : 'status'}>{title}</p><p className="workspace-note">{detail}</p>
+    {job && <><p className="workspace-path">作业编号：{job.intent_id}</p><dl className="workspace-facts">
+      <dt>原位置</dt><dd className="workspace-path">{job.source ?? '尚未核实'}</dd>
+      <dt>目标位置</dt><dd className="workspace-path">{job.target ?? '尚未核实'}</dd>
+      {uncertain && <><dt>上次确认阶段</dt><dd>{relocationStages[job.stage]}</dd></>}
+    </dl></>}
+    <div className="workspace-actions"><Button variant="secondary" disabled={status.isFetching} onClick={() => void status.refetch()}>刷新迁移进度</Button>
+      {job && ['committed', 'needs_attention'].includes(job.state) && <Link to="/modules">查看当前模块状态</Link>}</div>
+  </section></Card>
 }
 
 function WorkspaceEditor({ client, record, initialRevision, onSaved, locked }: {
@@ -213,6 +255,7 @@ function WorkspacePage({ scope }: { scope: string }) {
         <Button disabled={locked} onClick={() => { createId.current = projectId(); setName(''); setPurpose(''); setRoot(''); setCreating(true) }}>添加项目工作区</Button></div></div>
     {maintenance.isError ? <p role="alert">暂时无法核实工作区维护状态，仍可查看和搜索；请重新核验后再操作。 <Button variant="secondary" onClick={() => void maintenance.refetch()}>重新核验维护状态</Button></p>
       : locked && <p role="status">{observedMaintenance ? '工作目录正在维护或等待恢复，新任务与相关文件操作暂不可用。仍可查看和搜索工作区。' : '正在核验工作区维护状态…'}</p>}
+    <RelocationStatusPanel key={scope} client={client} maintenance={observedMaintenance === true} />
     {query.data && <RelocationPreviewPanel client={client} source={query.data.storage_root} revision={query.data.revision} locked={locked} />}
     {query.data && <p>{query.data.items.filter(item => item.workspace.kind === 'project').length} 个项目工作区 · 1 个默认工作区 · {query.data.items.filter(item => item.directory_status !== 'ready').length} 个目录待核实</p>}
     <section aria-label="全部工作区空间">
