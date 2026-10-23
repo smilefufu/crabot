@@ -47,3 +47,21 @@ jobs:
         run: |
           runuser -u crabot-test -- dbus-run-session -- xvfb-run -a env GDK_BACKEND=x11 .desktop-build/ubuntu-native/crabot-installer --smoke-test
       # Container libraries are not proof of default GNOME, Polkit or kernel enforcement.
+
+  kernel:
+    name: Real restricted kernel Ubuntu 24.04
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile the native helper and finite owned namespace probe
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libjson-glib-dev
+          mkdir -p .desktop-build/ubuntu-kernel
+          cc -std=c11 -Wall -Wextra -Werror -O2 crabot-desktop/native/ubuntu/sandbox-helper.c -o .desktop-build/ubuntu-kernel/crabot-sandbox-helper $(pkg-config --cflags --libs json-glib-1.0)
+          cc -std=c11 -Wall -Wextra -Werror crabot-desktop/native/ubuntu/namespace-probe.test.c -o .desktop-build/ubuntu-kernel/namespace-probe
+      - name: Prove actual default restriction and exact-path registration
+        shell: bash
+        run: python3 .github/scripts/test-ubuntu-sandbox-helper.py .desktop-build/ubuntu-kernel/crabot-sandbox-helper .desktop-build/ubuntu-kernel/namespace-probe

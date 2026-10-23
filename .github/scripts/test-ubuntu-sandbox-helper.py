@@ -3,8 +3,8 @@ import copy
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -19,7 +19,7 @@ with tempfile.TemporaryDirectory(prefix='Crabot namespace 用户 *?[]{}@{HOME} \
     ident, gui = str(uuid.uuid4()), str(uuid.uuid4())
     version = '0.1.0-test'
     # ELF header sufficient for fixture identity; never executed by the helper.
-    binary = bytearray(64)
+    binary = bytearray(Path(sys.argv[2]).read_bytes()) if len(sys.argv) == 3 else bytearray(64)
     binary[:6] = b'\x7fELF\x02\x01'
     binary[18] = 62
     entry = {'size': len(binary), 'sha256': sha(binary)}
@@ -110,4 +110,35 @@ with tempfile.TemporaryDirectory(prefix='Crabot namespace 用户 *?[]{}@{HOME} \
     run(False)
     put(f'releases/{core}/product-runtime.json', runtime)
     run()
+    if len(sys.argv) == 3:
+        restriction = Path('/proc/sys/kernel/apparmor_restrict_unprivileged_userns')
+        assert restriction.read_text().strip() == '1', 'Kernel restriction is required for this acceptance'
+        original_setting = restriction.read_bytes()
+        assert subprocess.run([str(gui_file)], timeout=5).returncode == 13, 'Fixture must actually be denied before registration'
+        names = [line for line in output.splitlines() if re.fullmatch(r'crabot-[a-z0-9-]+', line)]
+        assert len(names) == 3
+        policies = [Path('/etc/apparmor.d') / name for name in names]
+        assert not any(file.exists() for file in policies)
+        try:
+            subprocess.run(['/usr/bin/sudo', '/usr/bin/env', 'PKEXEC_UID=' + str(os.getuid()), helper, '--register', tmp], check=True, timeout=120)
+            for executable in [gui_file, chrome_file, root / f'releases/{core}/{headless}']:
+                assert subprocess.run([str(executable)], timeout=5).returncode == 0, 'Exact role must receive namespace permission'
+            neighbor = gui_file.with_name('unregistered-neighbor')
+            neighbor.write_bytes(binary)
+            neighbor.chmod(0o755)
+            assert subprocess.run([str(neighbor)], timeout=5).returncode == 13, 'Other executable must remain denied'
+            # Equal existing rules are idempotent, not replaced.
+            identities = [(file.stat().st_dev, file.stat().st_ino, file.read_bytes()) for file in policies]
+            subprocess.run(['/usr/bin/sudo', '/usr/bin/env', 'PKEXEC_UID=' + str(os.getuid()), helper, '--register', tmp], check=True, timeout=120)
+            assert identities == [(file.stat().st_dev, file.stat().st_ino, file.read_bytes()) for file in policies]
+            assert restriction.read_bytes() == original_setting
+            print('CRABOT_KERNEL_NAMESPACE_ACCEPTANCE: actual denial -> exact roles allowed; neighbor denied; global setting unchanged; no GUI/Polkit claim')
+        finally:
+            # All test executables above exited; preserve unknown or changed rules.
+            for file in policies:
+                if file.exists():
+                    expected = next(text for name, text in re.findall(r'(crabot-[a-z0-9-]+)\n(.*?\n}\n)', output, re.S) if name == file.name)
+                    assert file.stat().st_uid == 0 and file.stat().st_nlink == 1 and file.read_text() == expected
+                    subprocess.run(['/usr/bin/sudo', '/usr/sbin/apparmor_parser', '-R', '-T', '-K', '--', str(file)], check=True, timeout=90)
+                    subprocess.run(['/usr/bin/sudo', '/usr/bin/rm', '--', str(file)], check=True, timeout=5)
 print('Native helper identity, closed roles, path literals and rejection fixtures passed; no system authorization performed.')
