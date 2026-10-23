@@ -627,10 +627,22 @@ describe('MM owns the initial workspace migration job', () => {
   it.each(['revoked human', 'Agent stopped'])('rechecks readiness after waiting for the original lock: %s', async mode => {
     const f = await initial(), locks = require('../../scripts/lib/cli-lock.mjs')
     const held = await locks.acquireCliLock(f.data, 'finite competing operation')
+    let pending: Promise<unknown> | undefined
     try {
-      const verify = vi.spyOn(f.manager, 'verifyWorkspaceRelocationStartRequest')
-      const pending = f.manager.startWorkspaceRelocation(f.start, 'fixture-human')
+      const originalVerify = f.manager.verifyWorkspaceRelocationStartRequest.bind(f.manager)
+      let firstVerification: Promise<unknown> | undefined
+      const verify = vi.spyOn(f.manager, 'verifyWorkspaceRelocationStartRequest').mockImplementationOnce((...args: any[]) => {
+        firstVerification = originalVerify(...args).then(async (result: unknown) => {
+          await new Promise(resolve => setTimeout(resolve, 1100)) // Admission can exceed the former one-second observation window.
+          return result
+        })
+        return firstVerification
+      })
+      pending = f.manager.startWorkspaceRelocation(f.start, 'fixture-human')
       const rejected = expect(pending).rejects.toMatchObject({ code: mode === 'revoked human' ? 'UNAUTHORIZED' : 'SERVICE_UNAVAILABLE' })
+      void rejected.catch(() => {})
+      expect(firstVerification).toBeDefined()
+      await firstVerification
       await vi.waitFor(() => expect(f.manager.workspaceInitialJob?.phase).toBe('preparing'))
       expect(verify).toHaveBeenCalledTimes(1)
       expect(locks.cliLockToken(held)).toBeDefined()
@@ -641,7 +653,7 @@ describe('MM owns the initial workspace migration job', () => {
       expect(verify).toHaveBeenCalledTimes(2)
       await expect(fs.stat(path.join(f.data, 'workspace-control/relocation-active'))).rejects.toMatchObject({ code: 'ENOENT' })
       expect(locks.cliLockToken(held)).toBeUndefined()
-    } finally { locks.releaseCliLock(held); vi.restoreAllMocks(); await f.cleanup() }
+    } finally { locks.releaseCliLock(held); await pending?.catch(() => {}); vi.restoreAllMocks(); await f.cleanup() }
   }, timeout)
   it('treats the current directory as unchanged without an intent or coordinator', async () => {
     const f = await initial()
