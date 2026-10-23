@@ -240,8 +240,6 @@ async function fixture(options: { withMemory?: boolean; inactiveMemory?: boolean
             setTimeout(()=>process.exit(1),${options.processLifetimeMs ?? 300000}).unref();
             require(${JSON.stringify(path.resolve('../crabot-agent/dist/main.js'))});
           }else{const http=require('node:http'),{UnifiedAgent}=require(${JSON.stringify(entry)}),calls=[];
-          let diagnosticReads=0;const diagnostic=process.env.CRABOT_FINITE_ROOT_DIAGNOSTICS==='1',read=fs.readFileSync;
-          if(diagnostic)fs.readFileSync=function(file,...args){if(typeof file==='number')diagnosticReads++;return read.call(this,file,...args)};
           require(${JSON.stringify(path.resolve('../crabot-agent/dist/core/config-loader.js'))}).ConfigLoader.captureRuntimeBearer();
           const selected=${JSON.stringify(path.join(data, 'workspace-control/relocation-active/relocation-root-selected.json'))};
           const registrationRuntimeId=process.env.CRABOT_MODULE_RUNTIME_ID;
@@ -256,10 +254,6 @@ async function fixture(options: { withMemory?: boolean; inactiveMemory?: boolean
             }}
           };
           const server=http.createServer((req,res)=>{
-            if(diagnostic&&['/verify_workspace_relocation_root','/verify_workspace_relocation_recovery_root'].includes(req.url)){
-              const before=diagnosticReads,began=performance.now(),kind=req.url==='/verify_workspace_relocation_root'?'normal':'recovery';
-              res.once('finish',()=>console.log(JSON.stringify({event:'finite_root_read_window',kind,reads:diagnosticReads-before,elapsed_ms:Math.round(performance.now()-began)})));
-            }
             let text='';req.on('data',part=>text+=part);req.on('end',()=>{const body=JSON.parse(text);calls.push({method:body.method,header_present:Boolean(req.headers.authorization),body});fs.writeFileSync(process.env.FIXTURE_CALLS,JSON.stringify(calls))});
             if(req.url==='/shutdown'){req.on('end',async()=>{await agent.managerStack.dispose();res.end(JSON.stringify({id:JSON.parse(text).id,success:true,data:{}}));setTimeout(()=>process.exit(0),25)});return}
             if(req.url==='/stop_workspace_relocation_workers'&&['lost-stop-reply','extra-stop-reply'].includes(process.env.FIXTURE_RESULT)){
