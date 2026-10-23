@@ -311,18 +311,12 @@ export const DialogObjectsPage: React.FC = () => {
 
   useEffect(() => {
     const currentItems = itemsByDomain[domain]
-    const selectedId = selectedIds[domain]
-
-    if (currentItems.length === 0) {
-      if (selectedId !== null) {
-        setSelectedIds((prev) => ({ ...prev, [domain]: null }))
-      }
-      return
-    }
-
-    if (!selectedId || !currentItems.some((item) => dialogObjectSelectionId(item) === selectedId)) {
-      setSelectedIds((prev) => ({ ...prev, [domain]: dialogObjectSelectionId(currentItems[0]) }))
-    }
+    setSelectedIds((prev) => {
+      const selectedId = prev[domain]
+      if (currentItems.some((item) => dialogObjectSelectionId(item) === selectedId)) return prev
+      const nextId = currentItems.length > 0 ? dialogObjectSelectionId(currentItems[0]) : null
+      return selectedId === nextId ? prev : { ...prev, [domain]: nextId }
+    })
   }, [domain, itemsByDomain, selectedIds])
 
   useEffect(() => {

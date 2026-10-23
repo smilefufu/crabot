@@ -766,6 +766,26 @@ describe('DialogObjectsPage', () => {
     })
   })
 
+  it('preserves a friend selected immediately when the list appears', async () => {
+    let selected = false
+    const observer = new MutationObserver(() => {
+      if (selected) return
+      const button = screen.queryByRole('button', { name: 'Master Boss' })
+      if (!button) return
+      selected = true
+      button.click()
+    })
+    observer.observe(document.body, { childList: true, subtree: true })
+    try {
+      render(<DialogObjectsPage />)
+      await waitFor(() => expect(selected).toBe(true))
+      expect(await screen.findByDisplayValue('Master Boss')).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: 'Master Boss' })).toHaveClass('is-active')
+    } finally {
+      observer.disconnect()
+    }
+  })
+
   it('keeps master friends permission locked in the dialog objects workbench', async () => {
     render(<DialogObjectsPage />)
 

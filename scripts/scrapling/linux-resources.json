@@ -129,7 +129,7 @@
     {
       "package": "libfreetype6",
       "version": "2.11.1+dfsg-1ubuntu0.3",
-      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/f/freetype/libfreetype6_2.11.1%2bdfsg-1ubuntu0.3_arm64.deb",
+      "url": "https://launchpad.net/ubuntu/+archive/primary/+files/libfreetype6_2.11.1+dfsg-1ubuntu0.3_arm64.deb",
       "sha256": "2dfec0077df5cef76c6247610ed4d164ec6ce27fb2982313275ead0832ac745d"
     },
     {
@@ -267,7 +267,7 @@
     {
       "package": "libnss3",
       "version": "2:3.98-0ubuntu0.22.04.4",
-      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/n/nss/libnss3_3.98-0ubuntu0.22.04.4_arm64.deb",
+      "url": "https://snapshot.ubuntu.com/ubuntu/20261017T000000Z/pool/main/n/nss/libnss3_3.98-0ubuntu0.22.04.4_arm64.deb",
       "sha256": "570de4d8e9b98c3dbd6c113fcc752d5420a64851b2d1f40c5796124f051cda0f"
     },
     {
@@ -303,7 +303,7 @@
     {
       "package": "libpng16-16",
       "version": "1.6.37-3ubuntu0.6",
-      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/libp/libpng1.6/libpng16-16_1.6.37-3ubuntu0.6_arm64.deb",
+      "url": "https://launchpad.net/ubuntu/+archive/primary/+files/libpng16-16_1.6.37-3ubuntu0.6_arm64.deb",
       "sha256": "d3e87c9de2166c39e42830881c155f749d1bc26dbdba9bbb2e20286af51fa3c7"
     },
     {
@@ -321,7 +321,7 @@
     {
       "package": "libsystemd0",
       "version": "249.11-0ubuntu3.22",
-      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/s/systemd/libsystemd0_249.11-0ubuntu3.22_arm64.deb",
+      "url": "https://snapshot.ubuntu.com/ubuntu/20261017T000000Z/pool/main/s/systemd/libsystemd0_249.11-0ubuntu3.22_arm64.deb",
       "sha256": "9805c8c136fd41d9bff355297fdf6f811529960908711f647e38e1fd39a198ec"
     },
     {
@@ -363,7 +363,7 @@
     {
       "package": "libx11-6",
       "version": "2:1.7.5-1ubuntu0.3",
-      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/libx/libx11/libx11-6_1.7.5-1ubuntu0.3_arm64.deb",
+      "url": "https://snapshot.ubuntu.com/ubuntu/20261017T000000Z/pool/main/libx/libx11/libx11-6_1.7.5-1ubuntu0.3_arm64.deb",
       "sha256": "3cabb679c6f3a72c8ad7e26a4382e012df35abe1f5b521a7e4d91090bc35a2bd"
     },
     {
@@ -731,7 +731,7 @@
     {
       "package": "libnss3",
       "version": "2:3.98-0ubuntu0.22.04.4",
-      "url": "http://archive.ubuntu.com/ubuntu/pool/main/n/nss/libnss3_3.98-0ubuntu0.22.04.4_amd64.deb",
+      "url": "https://snapshot.ubuntu.com/ubuntu/20261017T000000Z/pool/main/n/nss/libnss3_3.98-0ubuntu0.22.04.4_amd64.deb",
       "sha256": "caf60f375adbbdafef74930c5dd91411de0ac5c9499bf699185110dc77d82611"
     },
     {
@@ -785,7 +785,7 @@
     {
       "package": "libsystemd0",
       "version": "249.11-0ubuntu3.22",
-      "url": "http://archive.ubuntu.com/ubuntu/pool/main/s/systemd/libsystemd0_249.11-0ubuntu3.22_amd64.deb",
+      "url": "https://snapshot.ubuntu.com/ubuntu/20261017T000000Z/pool/main/s/systemd/libsystemd0_249.11-0ubuntu3.22_amd64.deb",
       "sha256": "4fae4644bcfd86f891faae12cedbf30aca280cf76a034768aec3a03fe42ddc25"
     },
     {
@@ -827,7 +827,7 @@
     {
       "package": "libx11-6",
       "version": "2:1.7.5-1ubuntu0.3",
-      "url": "http://archive.ubuntu.com/ubuntu/pool/main/libx/libx11/libx11-6_1.7.5-1ubuntu0.3_amd64.deb",
+      "url": "https://snapshot.ubuntu.com/ubuntu/20261017T000000Z/pool/main/libx/libx11/libx11-6_1.7.5-1ubuntu0.3_amd64.deb",
       "sha256": "d382a3064ecd7576f24661a6d234adc737b854a9a0ec1d9f42cb4d007e77d547"
     },
     {
