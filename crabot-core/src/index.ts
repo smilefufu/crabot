@@ -122,6 +122,7 @@ interface WorkspaceRecoveryAdmission {
   close: () => void
 }
 interface WorkspaceRecoveryCoordinator {
+  readonly identity: WorkerProcessIdentity
   child: ChildProcess
   verify: () => Promise<void>
   close: () => void
@@ -275,6 +276,12 @@ interface WorkspaceInitialJob {
   completion?: Promise<void>
 }
 
+interface WorkspaceRecoveryJob {
+  readonly request: VerifyWorkspaceRelocationRecoveryRequestParams
+  readonly coordinator: WorkspaceRecoveryCoordinator
+  phase: 'running' | 'completed' | 'needs_attention'
+}
+
 interface WorkspaceStopSequenceResult {
   readonly coordinator: ChildProcess
   readonly workerSubmission: StopWorkspaceRelocationWorkersResult
@@ -347,6 +354,7 @@ export class ModuleManager {
   private readonly modules: Map<ModuleId, ModuleRuntime> = new Map()
   private readonly processes: Map<ModuleId, ChildProcess> = new Map()
   private workspaceInitialJob?: WorkspaceInitialJob
+  private workspaceRecoveryJob?: WorkspaceRecoveryJob
   private workspaceCoordinatorGrant?: WorkspaceCoordinatorGrant
   private workspaceStopSequence?: { fingerprint: string; pending: Promise<WorkspaceStopSequenceResult> }
   private workspaceFilePreparation?: { fingerprint: string; pending: Promise<WorkspaceFilePreparationResult> }
@@ -1464,17 +1472,30 @@ export class ModuleManager {
       if (code && ['UNAUTHORIZED', 'FORBIDDEN', 'INVALID_PARAMS'].includes(code)) throw Object.assign(new Error('Human workspace query rejected'), { code })
       throw unavailable()
     }
-    const job = this.workspaceInitialJob
+    const job = this.workspaceInitialJob, recovery = this.workspaceRecoveryJob
+    const recoveryId = recovery?.request.intent_id
     const ownId = job && (job.proof || job.phase === 'preparing') ? job.request.intent_id : undefined
     const records = require('../../scripts/lib/workspace-relocation-intent.mjs')
     let stored: WorkspaceRelocationStatusResult
     if (query.intent_id) stored = records.readWorkspaceRelocationJobStatus(this.dataDir, query.intent_id)
     else if (job?.phase === 'preparing' || job?.phase === 'accepted') stored = records.readWorkspaceRelocationJobStatus(this.dataDir, ownId)
+    else if (recovery?.phase === 'running') stored = records.readWorkspaceRelocationJobStatus(this.dataDir, recoveryId)
     else {
       stored = records.readWorkspaceRelocationJobStatus(this.dataDir)
-      if (stored.available && !stored.job && ownId) stored = records.readWorkspaceRelocationJobStatus(this.dataDir, ownId)
+      if (stored.available && !stored.job && (recoveryId || ownId)) stored = records.readWorkspaceRelocationJobStatus(this.dataDir, recoveryId ?? ownId)
     }
-    const id = query.intent_id ?? stored.job?.intent_id ?? ownId
+    const id = query.intent_id ?? stored.job?.intent_id ?? recoveryId ?? ownId
+    if (stored.available && recovery && recoveryId === id) {
+      if (!stored.job || recovery.phase === 'completed' && stored.job.state !== 'committed') return { available: false, job: null }
+      if (recovery.phase === 'running') {
+        const owner = recovery.coordinator, native = require('../../scripts/lib/process-identity.cjs')
+        try {
+          if (this.workspaceRecoveryInitialization?.coordinator !== owner || !owner.child.connected || owner.child.exitCode !== null || owner.child.signalCode !== null
+            || !native.sameProcess(owner.identity, native.inspectProcess(owner.child.pid))) return { available: false, job: null }
+        } catch { return { available: false, job: null } }
+      }
+      return { available: true, job: { ...stored.job, state: recovery.phase, stage: recovery.phase === 'completed' ? 'finished' : 'restoring' } }
+    }
     if (!stored.available || !job || ownId !== id || !ownId) return stored
     if ((job.proof && !stored.job) || (job.phase === 'completed' && stored.job?.state !== 'committed')) return { available: false, job: null }
     if (job.phase === 'accepted') {
@@ -2323,7 +2344,7 @@ export class ModuleManager {
         const { launchWorkspaceRecoveryCoordinator } = require('../../scripts/lib/workspace-recovery-launch.mjs')
         const result = await launchWorkspaceRecoveryCoordinator({ dataDir: this.dataDir, request: context.request, admission: context.result,
           verify: context.verify, releaseParentLock: context.releaseParentLock })
-        const coordinator = Object.freeze({ ...result, verify: async () => {
+        const coordinator = Object.freeze({ ...result, identity: Object.freeze({ ...result.launch.process }), verify: async () => {
           try { await result.verify() } catch (cause) { context.close(); throw cause }
         }, close: () => { result.close(); context.close() } })
         context.coordinator = coordinator
@@ -2943,9 +2964,11 @@ export class ModuleManager {
     if (previous) return previous.fingerprint === fingerprint && previous.bearerHash === bearerHash ? previous.pending : Promise.reject(Object.assign(failure(), { code: 'FORBIDDEN' }))
     const pending = Promise.resolve().then(async () => {
       let grant: WorkspaceRecoveryFinalizationGrant | undefined, coordinator: WorkspaceRecoveryCoordinator | undefined
+      let job: WorkspaceRecoveryJob | undefined
       let stage = 'restore-services'
       try {
         coordinator = await this.initializeWorkspaceRelocationRecovery(request, bearer)
+        job = { request, coordinator, phase: 'running' }; this.workspaceRecoveryJob = job
         const initialized = this.workspaceRecoveryInitializations.get(request.recovery_id)
         const result = await this.resumeWorkspaceRecoveryWeb(request, bearer)
         grant = this.workspaceRecoveryFinalizationGrant
@@ -2960,8 +2983,10 @@ export class ModuleManager {
         for (const cache of [this.workspaceRecoveryRuntimePreparations, this.workspaceRecoveryRuntimeCleanups, this.workspaceRecoveryValidationLaunches,
           this.workspaceRecoveryValidationHealth, this.workspaceRecoveryCompletionObservations, this.workspaceRecoveryCompletionPreparations,
           this.workspaceRecoveryCompletionReleases, this.workspaceRecoveryWebResumes]) cache.delete(coordinator)
+        job.phase = 'completed'
         return result
       } catch (cause) {
+        if (job) job.phase = 'needs_attention'
         if (grant) grant.revoked = true
         coordinator?.close()
         throw Object.assign(failure(), { stage, cause })
@@ -3477,6 +3502,7 @@ export class ModuleManager {
         this.workspaceCoordinatorGrant = undefined
         this.workspaceFinalizationGrant = undefined
         this.workspaceFinalizationCompletion = undefined
+        this.workspaceRecoveryJob = undefined
         return result
       } catch (cause) {
         if (grant) { grant.revoked = true; grant.close(); await this.closeWorkspaceCoordinatorChannel(grant.child) }

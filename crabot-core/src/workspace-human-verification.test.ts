@@ -2755,7 +2755,7 @@ describe('normal fixed-job Admin completion preparation', () => {
     ...(process.env.GITHUB_ACTIONS === 'true' && process.env.CRABOT_WORKSPACE_BUSINESS_ONSTART_CI === '1' ? ['resume actual Admin startup'] : [])] : []
   const releaseModes = [...resumeModes, ...(hasNativeRelease ? ['completion release', 'lost release acknowledgement'] : ['release unavailable']),
     ...(process.platform !== 'win32' && process.getuid?.() !== 0 ? ['release readonly root'] : [])]
-  it.each(['Agent', 'Agent and Memory', 'catalog changed after probe', 'completion observation', 'released without observation', 'definition changed before release', 'plan changed before release', 'record changed during assertion', 'released current observation', ...releaseModes])('starts only the planned cold validation generations: %s', async mode => {
+  it.each(['Agent', 'Agent and Memory', 'catalog changed after probe', 'completion observation', 'released without observation', 'definition changed before release', 'plan changed before release', 'record changed during assertion', 'owned recovery status', 'released current observation', ...releaseModes])('starts only the planned cold validation generations: %s', async mode => {
     const caseStarted = performance.now()
     const phase = (stage: string) => console.log('[Cold workspace stage]', { mode, stage, elapsed_ms: Math.round(performance.now() - caseStarted) })
     const withMemory = mode === 'Agent and Memory'
@@ -2996,6 +2996,36 @@ describe('normal fixed-job Admin completion preparation', () => {
         return
       }
       expect((await fs.stat(root, { bigint: true })).mtimeNs).toBe(probedAt)
+      if (mode === 'owned recovery status') {
+        let entered!: () => void, reject!: (cause: Error) => void
+        const waiting = new Promise<void>(resolve => { entered = resolve })
+        const holding = new Promise((_, no) => { reject = no })
+        const resume = vi.spyOn(cold, 'resumeWorkspaceRecoveryWeb').mockImplementation(() => { entered(); return holding })
+        const completion = cold.completeWorkspaceRecovery(request, human).then(() => undefined, (error: unknown) => error)
+        try {
+          await waiting
+          const expected = { available: true, job: { intent_id: request.intent_id, state: 'running', stage: 'restoring', source: path.join(f.data, 'workspaces'), target: root } }
+          expect(await cold.getWorkspaceRelocationStatus({}, human)).toEqual(expected)
+          expect(await cold.getWorkspaceRelocationStatus({ intent_id: request.intent_id }, human)).toEqual(expected)
+          const native = require('../../scripts/lib/process-identity.cjs'), original = native.inspectProcess
+          const unknown = vi.spyOn(native, 'inspectProcess').mockImplementation((pid: number) => pid === coordinator.child.pid ? null : original(pid))
+          try { expect(await cold.getWorkspaceRelocationStatus({}, human)).toEqual({ available: false, job: null }) }
+          finally { unknown.mockRestore() }
+          const currentContext = cold.workspaceRecoveryInitialization
+          cold.workspaceRecoveryInitialization = undefined
+          try { expect(await cold.getWorkspaceRelocationStatus({}, human)).toEqual({ available: false, job: null }) }
+          finally { cold.workspaceRecoveryInitialization = currentContext }
+          await coordinator.verify()
+          expect(await cold.getWorkspaceRelocationStatus({}, human)).toEqual(expected)
+          expect(await cold.getWorkspaceRelocationStatus({ intent_id: randomUUID() }, human)).toEqual({ available: true, job: null })
+          expect(await fs.readFile(fenceFile)).toEqual(before); expect(await fs.readFile(ledgerFile)).toEqual(ledger)
+          reject(new Error('finite recovery intentionally held before restoration'))
+          expect(await completion).toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
+          expect(await cold.getWorkspaceRelocationStatus({ intent_id: request.intent_id }, human)).toEqual({ ...expected, job: { ...expected.job, state: 'needs_attention' } })
+          expect(resume).toHaveBeenCalledTimes(1)
+        } finally { reject(new Error('finite status cleanup')); await completion; resume.mockRestore() }
+        return
+      }
       if (mode === 'Agent' || mode === 'released current observation' || releaseModes.includes(mode)) {
         expect(typeof cold.prepareWorkspaceRecoveryCompletion).toBe('function')
         const [prepared, concurrent] = await Promise.all([
@@ -3142,6 +3172,7 @@ describe('normal fixed-job Admin completion preparation', () => {
                 await grant.verifyHealth(); grant.verifyRestored()
                 const firstCompletion = cold.completeWorkspaceRecovery(request, human), nextCompletion = cold.completeWorkspaceRecovery(request, human)
                 expect(nextCompletion).toBe(firstCompletion); expect(await firstCompletion).toBe(released)
+                expect(await cold.getWorkspaceRelocationStatus({ intent_id: request.intent_id }, human)).toMatchObject({ available: true, job: { intent_id: request.intent_id, state: 'completed', stage: 'finished' } })
                 phase('current-coordinator-exited')
                 expect(await cold.completeWorkspaceRecovery(request, human)).toBe(released)
                 expect(grant.revoked).toBe(true); expect(child.connected).toBe(false)
