@@ -8,9 +8,9 @@ export type UpdateFailure = 'space' | 'integrity' | 'signature' | 'metadata' | '
 export function updateFailure(error: unknown): UpdateFailure {
   const code = error && typeof error === 'object' && 'code' in error && typeof error.code === 'string' ? error.code : ''
   if (['CRABOT_UPDATE_SPACE', 'CRABOT_BACKUP_SPACE', 'ENOSPC'].includes(code)) return 'space'
-  if (['CRABOT_UPDATE_INTEGRITY', 'ERR_UPDATER_CHECKSUM_MISMATCH'].includes(code)) return 'integrity'
-  if (code === 'ERR_UPDATER_INVALID_SIGNATURE') return 'signature'
-  if (error instanceof z.ZodError || ['ERR_UPDATER_INVALID_UPDATE_INFO', 'ERR_UPDATER_INVALID_VERSION'].includes(code)) return 'metadata'
+  if (['CRABOT_UPDATE_INTEGRITY', 'ERR_UPDATER_CHECKSUM_MISMATCH', 'CRABOT_DESKTOP_RELEASE_INTEGRITY'].includes(code)) return 'integrity'
+  if (['ERR_UPDATER_INVALID_SIGNATURE', 'CRABOT_DESKTOP_RELEASE_SIGNATURE'].includes(code)) return 'signature'
+  if (error instanceof z.ZodError || ['ERR_UPDATER_INVALID_UPDATE_INFO', 'ERR_UPDATER_INVALID_VERSION', 'CRABOT_DESKTOP_RELEASE_METADATA', 'CRABOT_DESKTOP_RELEASE_VERSION'].includes(code)) return 'metadata'
   return 'unavailable'
 }
 

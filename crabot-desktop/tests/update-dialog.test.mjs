@@ -41,7 +41,7 @@ test('an interrupted maintenance action reports recovery and never claims succes
   assert.deepEqual(f.calls, ['check', 'activity']); assert.match(f.dialogs.at(-1).message, /未能确认/)
 })
 test('space and signature failures give specific safe recovery instructions instead of a network diagnosis', async () => {
-  for (const [code, word] of [['CRABOT_UPDATE_SPACE', '空间不足'], ['ERR_UPDATER_INVALID_SIGNATURE', '签名']]) {
+  for (const [code, word] of [['CRABOT_UPDATE_SPACE', '空间不足'], ['ERR_UPDATER_INVALID_SIGNATURE', '签名'], ['CRABOT_DESKTOP_RELEASE_SIGNATURE', '签名']]) {
     const f = fixture({ check: async () => { throw Object.assign(new Error('https://secret/token'), { code }) }, response: 0 })
     f.controller.start(); await flush(); await f.controller.open(); f.controller.close()
     assert.ok(f.dialogs[0].detail.includes(word)); assert.equal(JSON.stringify(f.dialogs).includes('secret'), false)

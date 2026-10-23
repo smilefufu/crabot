@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict'
 import { promises as fs, constants } from 'node:fs'
 import path from 'node:path'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { spawn, execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { pathToFileURL } from 'node:url'
@@ -19,7 +19,8 @@ function inside(relative) {
 }
 assert.ok([1, 2].includes(location.schema_version))
 const originalExecutable = inside(location.executable), originalCore = inside(location.core)
-const temporary = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'Crabot 打包 ')))
+// The native Ubuntu helper requires every installation ancestor to resist other-user writes.
+const temporary = await fs.realpath(await fs.mkdtemp(path.join(process.platform === 'linux' ? homedir() : tmpdir(), 'Crabot 打包 ')))
 let executable, core, data
 if (location.schema_version === 2) {
   // Programmatic backend acceptance; OS installer menus/registration are separate.

@@ -20,7 +20,7 @@ role_count = 2 if args.without_headless else 3
 assert os.getuid() != 0
 sha = lambda b: hashlib.sha256(b).hexdigest()
 encode = lambda obj: (json.dumps(obj, separators=(',', ':'), ensure_ascii=False) + '\n').encode()
-with tempfile.TemporaryDirectory(prefix='Crabot namespace 用户 *?[]{}@{HOME} \\" ', dir=Path.home()) as tmp:
+with tempfile.TemporaryDirectory(prefix='Crabot namespace 用户 *?[]{}@{HOME} \\" ', dir=Path.home()) as parent, tempfile.TemporaryDirectory(prefix='安装 ', dir=parent) as tmp:
     root = Path(tmp)
     ident, gui = str(uuid.uuid4()), str(uuid.uuid4())
     version = '0.1.0-test'
@@ -98,6 +98,13 @@ with tempfile.TemporaryDirectory(prefix='Crabot namespace 用户 *?[]{}@{HOME} \
         put('.desktop-installing.json', changed)
         run(False)
     put('.desktop-installing.json', saved)
+    parent_mode = Path(parent).stat().st_mode & 0o777
+    try:
+        Path(parent).chmod(0o777)
+        run(False)  # Private root alone cannot protect a writable ancestor.
+    finally:
+        Path(parent).chmod(parent_mode)
+    run()
     state_file.chmod(0o644)
     run(False)
     state_file.chmod(0o600)
