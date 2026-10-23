@@ -27,6 +27,7 @@ on:
       - '.github/scripts/fixtures/product-*'
       - '.github/scripts/desktop-runtime-scope.mjs'
       - '.github/scripts/smoke-migration-interruption.mjs'
+      - '.github/scripts/smoke-workspace-python-gate.mjs'
       - '.github/workflows/desktop.yml'
   workflow_dispatch:
 
@@ -239,6 +240,10 @@ jobs:
         if: steps.scope.outputs.full_runtime == 'true'
         timeout-minutes: 8
         run: node .github/scripts/smoke-legacy-python-maintenance.mjs ".desktop-build/安装 候选/core" 2>&1 | tee .desktop-build/python-maintenance.log
+      - name: Real bundled Python behind a registered workspace gate
+        if: steps.scope.outputs.full_runtime == 'true'
+        timeout-minutes: 12
+        run: node .github/scripts/smoke-workspace-python-gate.mjs ".desktop-build/安装 候选/core" 2>&1 | tee .desktop-build/python-workspace-gate.log
       - name: Build and extract native installer candidates
         if: steps.scope.outputs.full_runtime == 'true'
         timeout-minutes: 15

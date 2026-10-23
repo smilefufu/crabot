@@ -419,13 +419,18 @@ runpy.run_module('src.main',run_name='__main__')
   }
 }
 
-async function verifyRegisteredRuntimeGate({ manager, dataDir, coordinator, preparation, modules, afterClose }: any) {
+async function verifyRegisteredRuntimeGate({ manager, dataDir, coordinator, preparation, modules, afterClose, python }: any) {
   const recoveryRecords = require('../../scripts/lib/workspace-recovery-records.mjs'), runtimePlan = preparation.plan
   expect(typeof recoveryRecords.commitWorkspaceRecoveryRuntimeStart).toBe('function')
   const gate = require('../../scripts/lib/workspace-runtime-gate.mjs').createWorkspaceRuntimeGate(), idleModule = gate.child
   const idleModuleExit = once(idleModule, 'exit')
   let identity: any, execution: any
   const spies: Array<{ mockRestore(): void }> = []
+  let output = '', errors = ''
+  if (python) {
+    idleModule.stdout.on('data', (chunk: Buffer) => { output = (output + chunk.toString()).slice(-4096) })
+    idleModule.stderr.on('data', (chunk: Buffer) => { errors = (errors + chunk.toString()).slice(-4096) })
+  }
   try {
     await gate.ready()
     identity = require('../../scripts/lib/spawned-process-tree.cjs').captureSpawnedProcessTree(idleModule).find((item: any) => item.pid === idleModule.pid)
@@ -434,8 +439,16 @@ async function verifyRegisteredRuntimeGate({ manager, dataDir, coordinator, prep
     const marker = 'gate-module-' + runtimePlan.recovery_id
     const moduleMarker = path.join(dataDir, marker + '.json'), preloadMarker = path.join(dataDir, marker + '-preload'), preload = path.join(dataDir, marker + '-preload.cjs')
     await fs.writeFile(preload, `require('node:fs').writeFileSync(${JSON.stringify(preloadMarker)},'only actual module')`)
-    const invocation = { command: process.execPath, args: ['-e', `require('node:fs').writeFileSync(${JSON.stringify(moduleMarker)},JSON.stringify({parent:process.ppid,pid:process.pid,runtime:process.env.CRABOT_MODULE_RUNTIME_ID,token:process.env.TEST_GATE_TOKEN}));setTimeout(()=>process.exit(0),300000)`],
+    const pythonProgram = `import json,os,pathlib,time,sys
+receipt=json.loads(pathlib.Path(${JSON.stringify(path.join(coordinator.launch.control_root.path, 'runtime-starts', planned.module_id + '.json'))}).read_text(encoding='utf-8'))
+assert receipt['process']['pid']==os.getppid() and receipt['runtime']['runtime_id']==os.environ['CRABOT_MODULE_RUNTIME_ID']
+print('workspace-gate-python-stdout',flush=True)
+print('workspace-gate-python-stderr',file=sys.stderr,flush=True)
+pathlib.Path(${JSON.stringify(moduleMarker)}).write_text(json.dumps(dict(parent=os.getppid(),pid=os.getpid(),runtime=os.environ['CRABOT_MODULE_RUNTIME_ID'],token=os.environ['TEST_GATE_TOKEN'],executable=sys.executable,cwd=os.getcwd())),encoding='utf-8')
+time.sleep(300)`
+    const invocation = { command: python ?? process.execPath, args: python ? ['-I', '-B', '-c', pythonProgram] : ['-e', `require('node:fs').writeFileSync(${JSON.stringify(moduleMarker)},JSON.stringify({parent:process.ppid,pid:process.pid,runtime:process.env.CRABOT_MODULE_RUNTIME_ID,token:process.env.TEST_GATE_TOKEN}));setTimeout(()=>process.exit(0),300000)`],
       cwd: dataDir, env: { ...Object.fromEntries(Object.entries(process.env).filter(([, value]) => value !== undefined)), CRABOT_MODULE_RUNTIME_ID: planned.runtime_id, TEST_GATE_TOKEN: 'private-gate-fixture-token', NODE_OPTIONS: '--require ' + preload } }
+    if (python) for (const key of Object.keys(invocation.env)) if (key.toLowerCase() === 'path') invocation.env[key] = ''
     const input = { dataDir, recoveryId: preparation.plan.recovery_id, moduleId: planned.module_id, process: identity, runtime: runtimeRecord, definitionHash: sha256CanonicalJson(invocation), verify: preparation.verify }
     expect(recoveryRecords.readWorkspaceRecoveryRuntimeStart(dataDir, input.recoveryId, input.moduleId)).toBeNull()
     for (const damaged of [{ ...runtimeRecord, runtime_id: randomUUID() }, { ...runtimeRecord, root_pid: process.pid }, { ...runtimeRecord, module_port: 1 }, { ...runtimeRecord, unexpected: true }]) {
@@ -482,7 +495,12 @@ async function verifyRegisteredRuntimeGate({ manager, dataDir, coordinator, prep
     expect(gate.start(gateInput)).toBe(firstStart)
     expect(sent.mock.calls.filter(([message]: any[]) => message?.kind === 'workspace_runtime_gate_start')).toHaveLength(1)
     expect(actual).toMatchObject({ parent: idleModule.pid, runtime: planned.runtime_id, token: 'private-gate-fixture-token' })
-    expect(await fs.readFile(preloadMarker, 'utf8')).toBe('only actual module')
+    if (python) {
+      expect(await fs.realpath(actual.executable)).toBe(await fs.realpath(python))
+      expect(await fs.realpath(actual.cwd)).toBe(dataDir)
+      await vi.waitFor(() => { expect(output).toContain('workspace-gate-python-stdout'); expect(errors).toContain('workspace-gate-python-stderr') })
+      await expect(fs.lstat(preloadMarker)).rejects.toMatchObject({ code: 'ENOENT' })
+    } else expect(await fs.readFile(preloadMarker, 'utf8')).toBe('only actual module')
     expect(require('../../scripts/lib/process-identity.cjs').inspectProcess(actual.pid).parent).toBe(idleModule.pid)
     gate.close()
     expect(require('../../scripts/lib/process-identity.cjs').sameProcess(identity, require('../../scripts/lib/process-identity.cjs').inspectProcess(idleModule.pid))).toBe(true)
@@ -497,6 +515,38 @@ async function verifyRegisteredRuntimeGate({ manager, dataDir, coordinator, prep
     await manager.runtimeRegistry.removeRuntime(runtimePlan.modules[0].runtime_id)
   }
 }
+
+describe('registered workspace gate bundled Python', () => {
+  it.runIf(!!process.env.CRABOT_WORKSPACE_GATE_PYTHON)('runs the actual bundled interpreter only after its own durable gate registration', async () => {
+    const python = await fs.realpath(process.env.CRABOT_WORKSPACE_GATE_PYTHON!)
+    expect(JSON.parse(execFileSync(python, ['-I', '-B', '-c', 'import json,sys;print(json.dumps(sys.version_info[:2]))'], { encoding: 'utf8', timeout: 15000 }))).toEqual([3, 12])
+    const f = await fixture({ actualAgent: true, actualAdmin: true, validationHealth: 'healthy', processLifetimeMs: 300000 })
+    const locks = require('../../scripts/lib/cli-lock.mjs'), records = require('../../scripts/lib/workspace-relocation-intent.mjs')
+    const lock = await locks.acquireWorkspaceRelocationLock(f.data, f.params.intent_id)
+    let cold: any, coordinator: any
+    try {
+      const prepared = await f.manager.prepareWorkspaceRelocationCompletion(f.params, 'fixture-human')
+      const definitions = new Map([...f.manager.modules].map(([id, runtime]: any) => [id, { ...runtime }]))
+      await f.manager.stop()
+      const fence = records.readWorkspaceRelocationFinalizing(f.data, f.params.intent_id)
+      const request = { intent_id: f.params.intent_id, recovery_id: randomUUID(), completion_sha256: prepared.completion_sha256, finalizing_sha256: sha256CanonicalJson(fence) }
+      cold = new ModuleManager({ port: 0, modules: [], shutdown_timeout: 0.1 }, f.data) as any
+      for (const [id, definition] of definitions as Map<string, any>) cold.modules.set(id, { ...definition, status: 'stopped', pid: undefined, auto_start: false })
+      await cold.start(); cold.config.port = cold.server.address().port
+      await fs.unlink(path.join(f.data, 'ready')); await cold.startModuleProcess('admin-web')
+      await vi.waitFor(async () => expect(await fs.readFile(path.join(f.data, 'ready'), 'utf8')).toBe('ready'), { timeout: 10000 })
+      coordinator = await cold.initializeWorkspaceRelocationRecovery(request, 'fixture-human')
+      const preparation = await cold.prepareWorkspaceRecoveryRuntimes(request, 'fixture-human')
+      await verifyRegisteredRuntimeGate({ manager: cold, dataDir: f.data, coordinator, preparation, modules: records.readWorkspaceRelocationArchivedState(f.data, f.params.intent_id).modules.modules, python })
+      expect(records.readWorkspaceRelocationFinalizing(f.data, f.params.intent_id)).toEqual(fence)
+    } finally {
+      coordinator?.close()
+      await cold?.stop()
+      locks.releaseCliLock(lock)
+      await f.cleanup()
+    }
+  }, process.platform === 'win32' ? 600000 : 240000)
+})
 
 describe('MM owns the initial workspace migration job', () => {
   const timeout = process.platform === 'win32' ? 180000 : 60000

@@ -30,6 +30,7 @@ for (const [file, expected] of [
   ['scripts/workspace-file-host.mjs', true],
   ['scripts/workspace-root-probe.mjs', true],
   ['scripts/workspace-runtime-gate.mjs', true],
+  ['.github/scripts/smoke-workspace-python-gate.mjs', true],
   ['scripts/lib/workspace-coordinator-launch.mjs', true],
   ['scripts/lib/known-process-stop.cjs', true],
   ['scripts/lib/process-identity.cjs', true],
