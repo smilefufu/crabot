@@ -78,14 +78,14 @@ export function createWorkspaceFinalizationWeb(options: Options) {
     if (!exact(params, ['intent_id', 'launch_id', 'completion_sha256']) || !uuid(params.intent_id) || !uuid(params.launch_id)
       || typeof params.completion_sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(params.completion_sha256)) throw new RpcError('INVALID_PARAMS', 'Invalid finalization parameters')
     if (sha256CanonicalJson(params) !== sha256CanonicalJson(request)) throw new RpcError('FORBIDDEN', 'Finalization parameters do not match the current job')
-    return { request, expected, stateHash, fenceHash, verify }
+    return { request, expected, stateHash, fenceHash, assertCurrent: local, verify }
   }
   return Object.freeze({
     async prepare(input: unknown, bearer?: string): Promise<PrepareWorkspaceRelocationCompletionResult> {
       const params = input && typeof input === 'object' && !Array.isArray(input) ? Object.freeze({ ...input }) : input
       const current = await scope(params, bearer, 'prepare_web'), fingerprint = sha256CanonicalJson(current.expected)
-      if (preparation && !preparation.resumed && preparation.fingerprint !== fingerprint) throw new RpcError('FORBIDDEN', 'A different finalization job is pending')
-      if (!preparation || preparation.resumed) {
+      current.assertCurrent()
+      if (!preparation || preparation.resumed || preparation.fingerprint !== fingerprint) {
         const pending = (async () => {
           await current.verify()
           await options.quiesce()
@@ -97,8 +97,10 @@ export function createWorkspaceFinalizationWeb(options: Options) {
         const binding = { request: current.request, expected: current.expected, stateHash: current.stateHash, fenceHash: current.fenceHash }
         preparation = { fingerprint, pending, binding, resumed: false }
       }
-      const result = await preparation.pending
+      const prepared = preparation
+      const result = await prepared.pending
       await current.verify()
+      if (preparation !== prepared) throw unavailable()
       return result
     },
     async resume(input: unknown, bearer?: string): Promise<ResumeWorkspaceRelocationWebResult> {

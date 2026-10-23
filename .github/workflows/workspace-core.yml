@@ -8,6 +8,7 @@ on:
       - '.github/workflows/desktop.yml'
       - 'crabot-admin/src/workspace-recovery-auth.ts'
       - 'crabot-admin/src/workspace-finalization-web.ts'
+      - 'crabot-admin/src/workspace-finalization-web.test.ts'
       - 'crabot-core/src/index.ts'
       - 'crabot-core/src/process-tree.ts'
       - 'crabot-core/src/process-tree*.test.ts'
@@ -90,6 +91,10 @@ jobs:
         if: matrix.suite == 'finite'
         working-directory: crabot-shared
         run: node --import tsx --test src/workspace-maintenance.test.ts src/workspace-job-query.test.ts src/module-base.test.ts
+      - name: Admin prepared job ownership
+        if: matrix.suite == 'finite'
+        working-directory: crabot-admin
+        run: node node_modules/vitest/vitest.mjs run src/workspace-finalization-web.test.ts src/workspace-recovery-finalization-web.test.ts --maxWorkers=1 --minWorkers=1
       - name: Original lifecycle and maintenance regressions
         if: matrix.suite == 'finite'
         working-directory: crabot-core

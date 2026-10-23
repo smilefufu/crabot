@@ -138,22 +138,20 @@ async function fixture(options: { withMemory?: boolean; inactiveMemory?: boolean
     })
   }
   let host: ReturnType<typeof http.createServer> | undefined
-  let registrationPublication: ReturnType<typeof setInterval> | undefined
   if (options.actualAgent && !options.businessAgent && options.validationHealth) {
-    const published = new Set<string>()
-    registrationPublication = setInterval(() => {
-      const child = manager.processes.get('crabot-agent'), state = child && manager.childStates.get(child), bearer = manager.runtimeBearers.get('crabot-agent')
-      if (!child || !state || !bearer || bearer.revoked || bearer.child !== child || state.finalizeStarted || state.rootExited || published.has(state.runtimeId)) return
-      try {
-        // Test-only rendezvous, never an admission/health/exit proof. The real register RPC still authenticates this exact child.
-        syncFs.writeFileSync(path.join(data, 'finite-agent-registration-' + state.runtimeId), String(child.pid))
-        published.add(state.runtimeId)
-      } catch { clearInterval(registrationPublication) }
-    }, 10)
-    registrationPublication.unref()
+    const prototype = ModuleManager.prototype as any, start = prototype.startModuleProcess
+    vi.spyOn(prototype, 'startModuleProcess').mockImplementation(async function (this: any, ...args: any[]) {
+      const result = await start.apply(this, args)
+      if (this.dataDir !== data || args[0] !== 'crabot-agent') return result
+      const child = this.processes.get('crabot-agent'), state = child && this.childStates.get(child), bearer = this.runtimeBearers.get('crabot-agent')
+      if (!child || !state || !bearer || bearer.revoked || bearer.child !== child || state.finalizeStarted || state.rootExited) throw new Error('Finite parent runtime was not published')
+      // Test rendezvous only: gated descendants retain the root runtime id.
+      // The real register RPC still authenticates their actual process tree.
+      syncFs.writeFileSync(path.join(data, 'finite-agent-registration-' + state.runtimeId), state.runtimeId)
+      return result
+    })
   }
   const cleanup = async () => {
-    clearInterval(registrationPublication)
     vi.restoreAllMocks()
     const admin = manager.modules.get('admin-web'); if (admin) admin.port = port
     try { await manager.stop() }
@@ -287,7 +285,7 @@ async function fixture(options: { withMemory?: boolean; inactiveMemory?: boolean
                 if(fs.existsSync(selected)&&${JSON.stringify(options.validationRegistration ?? null)}==='delayed')await new Promise(resolve=>setTimeout(resolve,300));
                 try{
                   const publication=require('node:path').join(process.env.DATA_DIR,'finite-agent-registration-'+registrationRuntimeId),end=Date.now()+(process.platform==='win32'?30000:10000);
-                  while(!fs.existsSync(publication)||fs.readFileSync(publication,'utf8')!==String(process.pid)){
+                  while(!fs.existsSync(publication)||fs.readFileSync(publication,'utf8')!==registrationRuntimeId){
                     if(Date.now()>=end)throw new Error('Finite parent runtime was not published');await new Promise(resolve=>setTimeout(resolve,10));
                   }
                   const response=await fetch('http://127.0.0.1:'+process.env.CRABOT_MM_PORT+'/register_core_agent',{method:'POST',
