@@ -39,6 +39,13 @@ jobs:
           cc -std=c11 -Wall -Wextra -Werror -O2 -D_FORTIFY_SOURCE=3 -fstack-protector-strong -Wl,-z,relro,-z,now crabot-desktop/native/ubuntu/sandbox-helper.c -o .desktop-build/ubuntu-native/crabot-sandbox-helper $(pkg-config --cflags --libs json-glib-1.0)
           if ldd .desktop-build/ubuntu-native/crabot-sandbox-helper | grep -E 'libgtk|libwebkit|libchromium'; then exit 1; fi
           cc -std=c11 -Wall -Wextra -Werror -O2 -D_FORTIFY_SOURCE=3 -fstack-protector-strong -Wl,-z,relro,-z,now crabot-desktop/native/ubuntu/installer.c -o .desktop-build/ubuntu-native/crabot-installer $(pkg-config --cflags --libs gtk4 json-glib-1.0)
+      - name: Compile actual GTK cancellation callback regression
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror -O2 crabot-desktop/native/ubuntu/installer-lifecycle.test.c -o .desktop-build/ubuntu-native/installer-lifecycle-test $(pkg-config --cflags --libs gtk4 json-glib-1.0)
+      - name: Reap pending authorization before allowing retry
+        run: |
+          chmod a+rx /__w /__w/crabot /__w/crabot/crabot
+          runuser -u crabot-test -- timeout 30s dbus-run-session -- xvfb-run -a env GDK_BACKEND=x11 GTK_A11Y=none .desktop-build/ubuntu-native/installer-lifecycle-test
       - name: Exercise ordinary UID native verification and refusal
         run: |
           chmod a+rx /__w /__w/crabot /__w/crabot/crabot

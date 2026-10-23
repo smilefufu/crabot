@@ -18,7 +18,7 @@ typedef struct {
   GSubprocess *backend, *authorization;
   GDataInputStream *output;
   char *bundle, *selected, *executable;
-  gboolean busy, failed, complete, cancelling, finalizing, smoke;
+  gboolean busy, failed, complete, cancelling, finalizing, smoke, authorization_pending;
 } Installer;
 static void status(Installer *s, const char *text) { gtk_label_set_text(s->status, text); }
 static void busy(Installer *s, gboolean value) {
@@ -29,6 +29,12 @@ static void busy(Installer *s, gboolean value) {
   gtk_widget_set_sensitive(s->cancel, TRUE);
   gtk_button_set_label(GTK_BUTTON(s->cancel), value ? "取消安装" : "关闭");
   if (value) gtk_spinner_start(s->spinner); else gtk_spinner_stop(s->spinner);
+}
+static void finish_if_idle(Installer *s) {
+  // A late permission result must never reach a later installation attempt.
+  if (s->backend || s->authorization_pending || s->authorization) return;
+  s->cancelling = FALSE; busy(s, FALSE); gtk_widget_set_visible(s->open, s->complete);
+  if (!s->complete) gtk_button_set_label(GTK_BUTTON(s->install), "重试安装");
 }
 static void action(Installer *s, const char *value) {
   if (!s->backend) return;
@@ -50,23 +56,25 @@ static GSubprocessLauncher *launcher(GSubprocessFlags flags) {
 static void authorization_finished(GObject *source, GAsyncResult *result, gpointer data) {
   Installer *s = data;
   gboolean accepted = g_subprocess_wait_check_finish(G_SUBPROCESS(source), result, NULL);
-  g_clear_object(&s->authorization);
+  g_clear_object(&s->authorization); s->authorization_pending = FALSE;
   if (s->backend) {
     if (accepted && !s->cancelling) { status(s, "系统授权已完成，正在重新核验实际沙箱与网络…"); action(s, "authorized"); }
     else { status(s, "系统授权未完成，安装尚未就绪。准备记录和原数据已保留，可再次尝试。"); action(s, "denied"); }
   }
+  finish_if_idle(s);
 }
 static void permission_chosen(GObject *source, GAsyncResult *result, gpointer data) {
   Installer *s = data;
   int choice = gtk_alert_dialog_choose_finish(GTK_ALERT_DIALOG(source), result, NULL);
-  if (choice != 1 || s->cancelling || !s->backend) { action(s, "denied"); return; }
+  s->authorization_pending = FALSE;
+  if (choice != 1 || s->cancelling || !s->backend) { action(s, "denied"); finish_if_idle(s); return; }
   char *root = realpath(s->selected, NULL);
-  if (!root) { action(s, "denied"); return; }
+  if (!root) { action(s, "denied"); finish_if_idle(s); return; }
   g_autofree char *helper = g_build_filename(s->bundle, "crabot-sandbox-helper", NULL);
   g_autoptr(GSubprocessLauncher) launch = launcher(G_SUBPROCESS_FLAGS_STDOUT_SILENCE | G_SUBPROCESS_FLAGS_STDERR_SILENCE);
   s->authorization = g_subprocess_launcher_spawn(launch, NULL, "/usr/bin/pkexec", helper, "--register", root, NULL);
   free(root);
-  if (!s->authorization) { action(s, "denied"); return; }
+  if (!s->authorization) { action(s, "denied"); finish_if_idle(s); return; }
   status(s, "请在 Ubuntu 系统窗口中完成管理员授权。拒绝授权可保留进度后重试。");
   g_subprocess_wait_check_async(s->authorization, NULL, authorization_finished, s);
 }
@@ -107,7 +115,8 @@ static gboolean frame(Installer *s, const char *line, gsize size) {
     if (!s->cancelling) status(s, text);
     if (!g_strcmp0(field(object, "phase"), "registering")) { s->finalizing = TRUE; gtk_widget_set_sensitive(s->cancel, FALSE); }
   } else if (!g_strcmp0(type, "authorization_required")) {
-    if (s->authorization || s->complete || s->cancelling) { action(s, "denied"); return TRUE; }
+    if (s->authorization_pending || s->authorization || s->complete || s->cancelling) { action(s, "denied"); return TRUE; }
+    s->authorization_pending = TRUE;
     GtkAlertDialog *dialog = gtk_alert_dialog_new("Ubuntu 需要为 Crabot 登记专属沙箱权限");
     gtk_alert_dialog_set_detail(dialog, "仅为本安装的应用和内置浏览器开启必要权限，保留系统保护。不安装常驻管理员服务。接下来由 Ubuntu 验证管理员身份。");
     const char *buttons[] = { "暂不授权", "授权并继续", NULL };
@@ -129,9 +138,8 @@ static void backend_finished(GObject *source, GAsyncResult *result, gpointer dat
   Installer *s = data;
   gboolean ok = g_subprocess_wait_check_finish(G_SUBPROCESS(source), result, NULL);
   if (!ok || !s->complete) { if (!s->failed) status(s, failure_text(NULL)); s->complete = FALSE; }
-  g_clear_object(&s->output); g_clear_object(&s->backend); s->cancelling = FALSE;
-  busy(s, FALSE); gtk_widget_set_visible(s->open, s->complete);
-  if (!s->complete) gtk_button_set_label(GTK_BUTTON(s->install), "重试安装");
+  g_clear_object(&s->output); g_clear_object(&s->backend);
+  finish_if_idle(s);
 }
 static void read_frame(GObject *source, GAsyncResult *result, gpointer data) {
   Installer *s = data; gsize size = 0;
@@ -175,7 +183,7 @@ static gboolean close_requested(GtkWindow *window, gpointer data) {
   if (!s->busy) return FALSE;
   if (s->finalizing) { status(s, "正在完成安装，完成后即可关闭。请稍候…"); return TRUE; }
   if (!s->cancelling) { s->cancelling = TRUE; action(s, "cancel"); }
-  status(s, s->authorization ? "正在取消。请在系统授权窗口中选择取消；原数据与准备记录保留。" : "正在取消安装并保留准备记录，请稍候…");
+  status(s, s->authorization_pending || s->authorization ? "正在取消。请在系统授权窗口中选择取消；原数据与准备记录保留。" : "正在取消安装并保留准备记录，请稍候…");
   return TRUE;
 }
 static void cancel_clicked(GtkButton *button, gpointer data) { (void)button; Installer *s = data; if (!close_requested(s->window, s)) gtk_window_destroy(s->window); }
