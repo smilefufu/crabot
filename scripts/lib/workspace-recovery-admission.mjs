@@ -28,8 +28,7 @@ export function readWorkspaceRecoveryAdmissionScope(dataDir, input) {
   } catch { throw unavailable() }
 }
 
-/** Current read-only facts under a new role. Historical health is never current health. */
-export async function inspectWorkspaceRecoveryFacts({ dataDir, request, verify: authorize }) {
+async function prepareWorkspaceRecoveryControlFacts({ dataDir, request, verify: authorize }) {
   if (typeof authorize !== 'function') throw unavailable()
   await authorize()
   const original = readWorkspaceRecoveryAdmissionScope(dataDir, request), state = original.state
@@ -49,6 +48,31 @@ export async function inspectWorkspaceRecoveryFacts({ dataDir, request, verify: 
   await current()
   const closures = await agent.inspectArchivedWorkspaceRelocationClosures({ dataDir, id: request.intent_id, verify: current })
   if (closures.worker_commit_sha256 !== state.completion.worker_commit_sha256 || closures.recovery_commit_sha256 !== state.completion.recovery_commit_sha256) throw unavailable()
+  let failed = false
+  const verify = async () => {
+    try {
+      if (failed) throw unavailable()
+      await current(); closures.verify()
+      const snapshot = await catalog.snapshot()
+      await current(); closures.verify()
+      if (hash(snapshot) !== state.selected.catalog_sha256 || snapshot.storage_root !== state.published.target.path) throw unavailable()
+    } catch (cause) { failed = true; throw Object.assign(unavailable(), { cause }) }
+  }
+  await verify()
+  const proof = Object.freeze({ completion_sha256: request.completion_sha256, root_selected_sha256: hash(state.selected), catalog_revision: state.selected.catalog_revision,
+    worker_commit_sha256: closures.worker_commit_sha256, recovery_commit_sha256: closures.recovery_commit_sha256,
+    verify })
+  return { state, proof }
+}
+
+/** Current Root/catalog and retired work only; no process-exit or action authority. */
+export async function inspectWorkspaceRecoveryControlFacts(options) {
+  return (await prepareWorkspaceRecoveryControlFacts(options)).proof
+}
+
+/** Current read-only facts under a new role. Historical health is never current health. */
+export async function inspectWorkspaceRecoveryFacts(options) {
+  const { state, proof } = await prepareWorkspaceRecoveryControlFacts(options)
   const observeRoots = () => state.health.modules.map(module => {
     const observed = exits.probeKnownProcessExit([module.process])
     if (observed.state === 'unknown') throw unavailable()
@@ -59,14 +83,10 @@ export async function inspectWorkspaceRecoveryFacts({ dataDir, request, verify: 
   const verify = async () => {
     try {
       if (failed) throw unavailable()
-      await current(); closures.verify()
-      const snapshot = await catalog.snapshot()
-      await current(); closures.verify()
-      if (hash(snapshot) !== state.selected.catalog_sha256 || snapshot.storage_root !== state.published.target.path || hash(observeRoots()) !== rootHash) throw unavailable()
+      await proof.verify()
+      if (hash(observeRoots()) !== rootHash) throw unavailable()
     } catch (cause) { failed = true; throw Object.assign(unavailable(), { cause }) }
   }
   await verify()
-  return Object.freeze({ completion_sha256: request.completion_sha256, root_selected_sha256: hash(state.selected), catalog_revision: state.selected.catalog_revision,
-    worker_commit_sha256: closures.worker_commit_sha256, recovery_commit_sha256: closures.recovery_commit_sha256,
-    validation_roots: Object.freeze(roots.map(module => Object.freeze(module))), verify })
+  return Object.freeze({ ...proof, validation_roots: Object.freeze(roots.map(module => Object.freeze(module))), verify })
 }

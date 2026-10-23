@@ -172,6 +172,85 @@ describe('ModuleRuntimeRegistry', () => {
     expect((await registry.listRecords()).map(item => item.runtime_id)).toEqual(['runtime-a'])
   })
 
+  it.each(['before observation', 'after root observation', 'after tree observation', 'after termination'] as const)(
+    'retains the fixed runtime when its recovery role is revoked: %s', async phase => {
+      const identities = new Map<number, string | null>([[101, 'start-101']])
+      const { registry, terminateTree } = makeRegistry(identities)
+      await record(registry, 'runtime-a', 'crabot-agent', 101, 19003)
+      let revoked = phase === 'before observation'
+      if (phase === 'after root observation') vi.spyOn(registry as any, 'probeStartIdentity').mockImplementation(async () => { revoked = true; return 'start-101' })
+      if (phase === 'after tree observation') {
+        identities.set(101, null)
+        vi.spyOn(registry as any, 'isTreeAlive').mockImplementation(async () => { revoked = true; return false })
+      }
+      if (phase === 'after termination') terminateTree.mockImplementation(async () => { revoked = true })
+      const verify = vi.fn(async () => { if (revoked) throw new Error('Recovery role revoked') })
+
+      await expect(registry.recoverOrphans({ runtimeIds: new Set(['runtime-a']), currentRuntimeIds: new Set(), gracefulTimeoutMs: 30000, verify })).rejects.toThrow('Recovery role revoked')
+
+      expect(terminateTree).toHaveBeenCalledTimes(phase === 'after termination' ? 1 : 0)
+      expect((await registry.listRecords()).map(item => item.runtime_id)).toEqual(['runtime-a'])
+    },
+  )
+
+  it('does not signal a confirmed Windows listener after its recovery role is revoked during human confirmation', async () => {
+    const identities = new Map<number, string | null>([[401, 'original-start'], [451, 'listener-start']])
+    const expectedInstanceId = `instance-${nextId + 1}`
+    let revoked = false
+    const confirmOrphanTermination = vi.fn(async () => { revoked = true; return true })
+    const { registry, terminateTree } = makeRegistry(identities, new Set(), {
+      platform: 'win32',
+      inspectWindowsPortOwners: async () => [{ pid: 451, process_name: 'node.exe', process_start_identity: 'listener-start' }],
+      probeRuntimeIdentity: async () => ({ instance_id: expectedInstanceId, module_id: 'crabot-agent', runtime_id: 'runtime-a' }),
+      confirmOrphanTermination,
+    })
+    await record(registry, 'runtime-a', 'crabot-agent', 401, 19003)
+    identities.set(401, 'replacement-start')
+
+    await expect(registry.recoverOrphans({ runtimeIds: new Set(['runtime-a']), currentRuntimeIds: new Set(), gracefulTimeoutMs: 30000,
+      verify: async () => { if (revoked) throw new Error('Recovery role revoked') } })).rejects.toThrow('Recovery role revoked')
+
+    expect(confirmOrphanTermination).toHaveBeenCalledOnce()
+    expect(terminateTree).not.toHaveBeenCalled()
+    expect((await registry.listRecords()).map(item => item.runtime_id)).toEqual(['runtime-a'])
+  })
+
+  it('requires an explicit runtime scope for guarded recovery', async () => {
+    const { registry, terminateTree } = makeRegistry(new Map([[101, 'start-101']]))
+    await record(registry, 'runtime-a', 'crabot-agent', 101, 19003)
+
+    await expect(registry.recoverOrphans({ currentRuntimeIds: new Set(), gracefulTimeoutMs: 30000, verify: async () => {} })).rejects.toThrow('explicit runtime scope')
+
+    expect(terminateTree).not.toHaveBeenCalled()
+    expect((await registry.listRecords()).map(item => item.runtime_id)).toEqual(['runtime-a'])
+  })
+
+  it('retains the original current-runtime exclusion while a guarded observation waits', async () => {
+    const { registry, terminateTree } = makeRegistry(new Map([[101, 'start-101']]))
+    await record(registry, 'runtime-current', 'crabot-agent', 101, 19003)
+    const currentRuntimeIds = new Set(['runtime-current'])
+
+    await registry.recoverOrphans({ runtimeIds: new Set(['runtime-current']), currentRuntimeIds, gracefulTimeoutMs: 30000,
+      verify: async () => { currentRuntimeIds.clear() } })
+
+    expect(terminateTree).not.toHaveBeenCalled()
+    expect((await registry.listRecords()).map(item => item.runtime_id)).toEqual(['runtime-current'])
+  })
+
+  it('retains the original module filter while a guarded observation waits', async () => {
+    const { registry, terminateTree } = makeRegistry(new Map([[101, 'start-101'], [102, 'start-102']]))
+    await record(registry, 'runtime-agent', 'crabot-agent', 101, 19003)
+    await record(registry, 'runtime-memory', 'memory-default', 102, 19004)
+    const input = { moduleId: 'crabot-agent', runtimeIds: new Set(['runtime-agent', 'runtime-memory']), currentRuntimeIds: new Set<string>(), gracefulTimeoutMs: 30000,
+      verify: async () => { input.moduleId = 'memory-default' } }
+
+    await registry.recoverOrphans(input)
+
+    expect(terminateTree).toHaveBeenCalledOnce()
+    expect(terminateTree).toHaveBeenCalledWith(101, expect.objectContaining({ requireOwnedProcess: true }))
+    expect((await registry.listRecords()).map(item => item.runtime_id)).toEqual(['runtime-memory'])
+  })
+
   it('preserves a runtime owned by the current MM', async () => {
     const identities = new Map<number, string | null>([[201, 'start-201']])
     const { registry, terminateTree } = makeRegistry(identities)

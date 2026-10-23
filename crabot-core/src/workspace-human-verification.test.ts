@@ -332,18 +332,22 @@ runpy.run_module('src.main',run_name='__main__')
   } catch (error) { await cleanup(); throw error }
 }
 
-async function verifyRegisteredRuntimeGate({ manager, dataDir, coordinator, preparation, modules }: any) {
+async function verifyRegisteredRuntimeGate({ manager, dataDir, coordinator, preparation, modules, afterClose }: any) {
   const recoveryRecords = require('../../scripts/lib/workspace-recovery-records.mjs'), runtimePlan = preparation.plan
   expect(typeof recoveryRecords.commitWorkspaceRecoveryRuntimeStart).toBe('function')
   const gate = require('../../scripts/lib/workspace-runtime-gate.mjs').createWorkspaceRuntimeGate(), idleModule = gate.child
   const idleModuleExit = once(idleModule, 'exit')
+  let identity: any, execution: any
+  const spies: Array<{ mockRestore(): void }> = []
   try {
     await gate.ready()
-    const identity = require('../../scripts/lib/spawned-process-tree.cjs').captureSpawnedProcessTree(idleModule).find((item: any) => item.pid === idleModule.pid), planned = runtimePlan.modules[0]
+    identity = require('../../scripts/lib/spawned-process-tree.cjs').captureSpawnedProcessTree(idleModule).find((item: any) => item.pid === idleModule.pid)
+    const planned = runtimePlan.modules[0]
     const runtimeRecord = await manager.runtimeRegistry.recordSpawn({ runtimeId: planned.runtime_id, moduleId: planned.module_id, rootPid: idleModule.pid, modulePort: modules.find((module: any) => module.module_id === planned.module_id).module_port })
-    const moduleMarker = path.join(dataDir, 'gate-module.json'), preloadMarker = path.join(dataDir, 'gate-module-preload'), preload = path.join(dataDir, 'gate-module-preload.cjs')
+    const marker = 'gate-module-' + runtimePlan.recovery_id
+    const moduleMarker = path.join(dataDir, marker + '.json'), preloadMarker = path.join(dataDir, marker + '-preload'), preload = path.join(dataDir, marker + '-preload.cjs')
     await fs.writeFile(preload, `require('node:fs').writeFileSync(${JSON.stringify(preloadMarker)},'only actual module')`)
-    const invocation = { command: process.execPath, args: ['-e', `require('node:fs').writeFileSync(${JSON.stringify(moduleMarker)},JSON.stringify({parent:process.ppid,pid:process.pid,runtime:process.env.CRABOT_MODULE_RUNTIME_ID,token:process.env.TEST_GATE_TOKEN}));setTimeout(()=>process.exit(0),30000)`],
+    const invocation = { command: process.execPath, args: ['-e', `require('node:fs').writeFileSync(${JSON.stringify(moduleMarker)},JSON.stringify({parent:process.ppid,pid:process.pid,runtime:process.env.CRABOT_MODULE_RUNTIME_ID,token:process.env.TEST_GATE_TOKEN}));setTimeout(()=>process.exit(0),300000)`],
       cwd: dataDir, env: { ...Object.fromEntries(Object.entries(process.env).filter(([, value]) => value !== undefined)), CRABOT_MODULE_RUNTIME_ID: planned.runtime_id, TEST_GATE_TOKEN: 'private-gate-fixture-token', NODE_OPTIONS: '--require ' + preload } }
     const input = { dataDir, recoveryId: preparation.plan.recovery_id, moduleId: planned.module_id, process: identity, runtime: runtimeRecord, definitionHash: sha256CanonicalJson(invocation), verify: preparation.verify }
     expect(recoveryRecords.readWorkspaceRecoveryRuntimeStart(dataDir, input.recoveryId, input.moduleId)).toBeNull()
@@ -378,25 +382,30 @@ async function verifyRegisteredRuntimeGate({ manager, dataDir, coordinator, prep
     const sent = vi.spyOn(idleModule, 'send')
     const dropped = vi.spyOn(idleModule, 'emit').mockImplementation((event: string, ...args: any[]) => event === 'message' && args[0]?.kind === 'workspace_runtime_gate_started' ? true : originalEmit(event, ...args))
     const timeout = vi.spyOn(global, 'setTimeout').mockImplementation(((callback: any, delay: number, ...args: any[]) => originalTimeout(callback, delay === 60000 ? 1500 : delay, ...args)) as any)
+    spies.push(sent, dropped, timeout)
     const firstStart = gate.start(gateInput)
     expect(gate.start(gateInput)).toBe(firstStart)
     try { await expect(firstStart).rejects.toMatchObject({ code: 'CRABOT_WORKSPACE_RUNTIME_GATE' }) }
     finally { timeout.mockRestore() }
     await vi.waitFor(async () => expect(JSON.parse(await fs.readFile(moduleMarker, 'utf8')).runtime).toBe(planned.runtime_id), { timeout: 15000 })
+    const actual = JSON.parse(await fs.readFile(moduleMarker, 'utf8'))
+    execution = require('../../scripts/lib/process-identity.cjs').inspectProcess(actual.pid)
     try { await expect(gate.observe()).resolves.toMatchObject({ kind: 'workspace_runtime_gate_observed', runtime_id: planned.runtime_id }) }
     finally { dropped.mockRestore() }
     expect(gate.start(gateInput)).toBe(firstStart)
     expect(sent.mock.calls.filter(([message]: any[]) => message?.kind === 'workspace_runtime_gate_start')).toHaveLength(1)
-    const actual = JSON.parse(await fs.readFile(moduleMarker, 'utf8'))
     expect(actual).toMatchObject({ parent: idleModule.pid, runtime: planned.runtime_id, token: 'private-gate-fixture-token' })
     expect(await fs.readFile(preloadMarker, 'utf8')).toBe('only actual module')
     expect(require('../../scripts/lib/process-identity.cjs').inspectProcess(actual.pid).parent).toBe(idleModule.pid)
     gate.close()
     expect(require('../../scripts/lib/process-identity.cjs').sameProcess(identity, require('../../scripts/lib/process-identity.cjs').inspectProcess(idleModule.pid))).toBe(true)
     sent.mockRestore()
+    await afterClose?.({ identity, start })
   } finally {
+    for (const spy of spies) spy.mockRestore()
     gate.close()
-    await terminateProcessTree(idleModule.pid, { gracefulTimeoutMs: 0, forceImmediately: true })
+    if (identity) await require('../../scripts/lib/known-process-stop.cjs').stopKnownProcessScope([identity, execution].filter(Boolean), { timeoutMs: 100, onObserved: async () => {} })
+    else await terminateProcessTree(idleModule.pid, { gracefulTimeoutMs: 0, forceImmediately: true })
     await idleModuleExit
     await manager.runtimeRegistry.removeRuntime(runtimePlan.modules[0].runtime_id)
   }
@@ -2135,6 +2144,28 @@ describe('normal fixed-job Admin completion preparation', () => {
       expect(recoveryFacts.validation_roots).toEqual(expect.arrayContaining([expect.objectContaining({ module_id: 'crabot-agent', root_state: 'stopped' })]))
       await recoveryFacts.verify()
       const archivedState = records.readWorkspaceRelocationArchivedState(f.data, request.intent_id)
+      const recoveryInspection = require('../../scripts/lib/workspace-recovery-admission.mjs'), exits = require('../../scripts/lib/known-process-exit.cjs')
+      const originalProbe = exits.probeKnownProcessExit, root = archivedState.health.modules[0].process
+      let rootStopped = false
+      const observedRoot = vi.spyOn(exits, 'probeKnownProcessExit').mockImplementation((scope: any, ...args: any[]) => {
+        if (scope.length === 1 && scope[0].pid === root.pid && scope[0].started === root.started) return {
+          state: rootStopped ? 'stopped' : 'running', running_pids: rootStopped ? [] : [root.pid], unknown_pids: [],
+        }
+        return originalProbe(scope, ...args)
+      })
+      try {
+        const options = { dataDir: f.data, request: freshRole.request, verify: initialized.verify }
+        const controlFacts = await recoveryInspection.inspectWorkspaceRecoveryControlFacts(options)
+        const rootSnapshot = await recoveryInspection.inspectWorkspaceRecoveryFacts(options)
+        expect(controlFacts).not.toHaveProperty('validation_roots')
+        expect(rootSnapshot.validation_roots[0].root_state).toBe('running')
+        rootStopped = true
+        await expect(controlFacts.verify()).resolves.toBeUndefined()
+        await expect(rootSnapshot.verify()).rejects.toBeDefined()
+        rootStopped = false
+        await expect(rootSnapshot.verify()).rejects.toBeDefined()
+        await expect(controlFacts.verify()).resolves.toBeUndefined()
+      } finally { observedRoot.mockRestore() }
       const plannedModules = archivedState.health.modules.map((item: any) => ({ module_id: item.module_id, runtime_id: randomUUID() })).sort((a: any, b: any) => a.module_id.localeCompare(b.module_id))
       for (const modules of [[], [{ ...plannedModules[0], runtime_id: archivedState.health.modules[0].runtime_id }], [{ ...plannedModules[0], module_id: 'foreign-module' }]]) {
         await expect(recoveryRecords.commitWorkspaceRecoveryRuntimePlan({ dataDir: f.data, recoveryId: freshRole.request.recovery_id, modules, verify: initialized.verify })).rejects.toBeDefined()
@@ -2188,7 +2219,16 @@ describe('normal fixed-job Admin completion preparation', () => {
       const startPreparation = await cold.prepareWorkspaceRecoveryRuntimes(startRequest, 'fixture-human'), modulePlan = startPreparation.plan.modules[0]
       const originalDefinition = cold.modules.get(modulePlan.module_id), observed = path.join(f.data, 'mm-gate-observed.json')
       const receipt = path.join(startCoordinator.launch.control_root.path, 'runtime-starts', modulePlan.module_id + '.json')
-      const moduleDefinition = { ...originalDefinition, port: archivedState.modules.modules.find((module: any) => module.module_id === modulePlan.module_id).module_port, cwd: f.data, skip_health_check: true, env: { ...originalDefinition.env, TEST_GATE_OBSERVED: observed, TEST_GATE_RECEIPT: receipt }, entry: `"${process.execPath}" -e "require('node:fs').writeFileSync(process.env.TEST_GATE_OBSERVED,JSON.stringify({pid:process.pid,parent:process.ppid,runtime:process.env.CRABOT_MODULE_RUNTIME_ID,registered:require('node:fs').existsSync(process.env.TEST_GATE_RECEIPT)}));setTimeout(()=>process.exit(0),30000)"` }
+      const finiteModule = path.join(f.data, 'mm-gate-runtime.cjs'), finiteCalls = path.join(f.data, 'mm-gate-rpc.json'), finiteReady = path.join(f.data, 'mm-gate-ready')
+      await fs.writeFile(finiteModule, `const fs=require('node:fs'),http=require('node:http');const calls=[];
+        fs.writeFileSync(process.env.TEST_GATE_OBSERVED,JSON.stringify({pid:process.pid,parent:process.ppid,runtime:process.env.CRABOT_MODULE_RUNTIME_ID,registered:fs.existsSync(process.env.TEST_GATE_RECEIPT)}));
+        const server=http.createServer(async(req,res)=>{let text='';for await(const part of req)text+=part;const body=JSON.parse(text);calls.push(body.method);fs.writeFileSync(process.env.TEST_GATE_CALLS,JSON.stringify(calls));
+          const data=body.method==='get_runtime_identity'?{instance_id:process.env.CRABOT_INSTANCE_ID,module_id:'crabot-agent',runtime_id:process.env.CRABOT_MODULE_RUNTIME_ID}:{};
+          res.end(JSON.stringify({id:body.id,success:true,data}));if(body.method==='shutdown')setTimeout(()=>process.exit(0),25);
+        });server.listen(Number(process.env.Crabot_PORT),'127.0.0.1',()=>fs.writeFileSync(process.env.TEST_GATE_READY,'ready'));
+        setTimeout(()=>process.exit(1),300000).unref();`)
+      const moduleDefinition = { ...originalDefinition, port: archivedState.modules.modules.find((module: any) => module.module_id === modulePlan.module_id).module_port,
+        cwd: f.data, skip_health_check: false, env: { ...originalDefinition.env, TEST_GATE_OBSERVED: observed, TEST_GATE_RECEIPT: receipt, TEST_GATE_CALLS: finiteCalls, TEST_GATE_READY: finiteReady }, entry: `"${process.execPath}" "${finiteModule}"` }
       const startPermit = Object.freeze({})
       cold.modules.set(modulePlan.module_id, moduleDefinition)
       // This constructor fixture has no Admin.onStart; keep the real cutover gate separately verified.
@@ -2220,7 +2260,59 @@ describe('normal fixed-job Admin completion preparation', () => {
         expect(data.pid).not.toBe(child.pid)
         expect(recoveryRecords.readWorkspaceRecoveryRuntimeStart(f.data, startRequest.recovery_id, modulePlan.module_id).runtime.root_pid).toBe(child.pid)
         expect(cold.childStates.get(child).runtimeId).toBe(modulePlan.runtime_id)
+        await vi.waitFor(async () => expect(await fs.readFile(finiteReady, 'utf8')).toBe('ready'), { timeout: 15000 })
         await startPreparation.verify()
+        startCoordinator.close()
+        await vi.waitFor(() => expect(require('../../scripts/lib/known-process-exit.cjs').probeKnownProcessExit([startCoordinator.launch.process]).state).toBe('stopped'), { timeout: 15000 })
+        const cleanupRequest = { ...request, recovery_id: randomUUID() }, admin = cold.processes.get('admin-web')
+        const processApi = require('../../scripts/lib/process-identity.cjs'), signals = vi.spyOn(processApi, 'terminateKnownProcess')
+        let cleanupCoordinator: any
+        try {
+          const unrelated = spawn(process.execPath, ['-e', 'setTimeout(()=>process.exit(0),300000)'], { detached: process.platform !== 'win32', stdio: 'ignore' })
+          const unrelatedExited = once(unrelated, 'exit'), unknownRuntimeId = randomUUID(), deniedRequest = { ...request, recovery_id: randomUUID() }
+          await once(unrelated, 'spawn')
+          const unrelatedIdentity = processApi.inspectProcess(unrelated.pid)
+          try {
+            await cold.runtimeRegistry.recordSpawn({ runtimeId: unknownRuntimeId, moduleId: 'unrelated-fixture', rootPid: unrelated.pid, modulePort: 19099 })
+            await expect(cold.cleanupWorkspaceRecoveryRuntimes(deniedRequest, 'fixture-human')).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
+            await expect(cold.cleanupWorkspaceRecoveryRuntimes(deniedRequest, 'fixture-human')).rejects.toMatchObject({ code: 'CRABOT_WORKSPACE_RECOVERY_COORDINATOR' })
+            expect(signals).not.toHaveBeenCalled()
+            expect(processApi.sameProcess(unrelatedIdentity, processApi.inspectProcess(unrelated.pid))).toBe(true)
+            expect(processApi.sameProcess(recoveryRecords.readWorkspaceRecoveryRuntimeStart(f.data, startRequest.recovery_id, modulePlan.module_id).process, processApi.inspectProcess(child.pid))).toBe(true)
+            expect((await cold.runtimeRegistry.listRecords()).some((row: any) => row.runtime_id === unknownRuntimeId)).toBe(true)
+            await expect(fs.lstat(finiteCalls)).rejects.toMatchObject({ code: 'ENOENT' })
+            const denied = recoveryRecords.readWorkspaceRecoveryCoordinator(f.data, deniedRequest.recovery_id)
+            await vi.waitFor(() => expect(require('../../scripts/lib/known-process-exit.cjs').probeKnownProcessExit([denied.launch.process]).state).toBe('stopped'), { timeout: 15000 })
+          } finally {
+            if (require('../../scripts/lib/known-process-exit.cjs').probeKnownProcessExit([unrelatedIdentity]).state === 'running') processApi.terminateKnownProcess(unrelatedIdentity)
+            await unrelatedExited
+            await vi.waitFor(() => expect(require('../../scripts/lib/known-process-exit.cjs').probeKnownProcessExit([unrelatedIdentity]).state).toBe('stopped'), { timeout: 15000 })
+            await cold.runtimeRegistry.removeRuntime(unknownRuntimeId)
+            signals.mockClear()
+          }
+          const [first, second] = await Promise.all([
+            cold.cleanupWorkspaceRecoveryRuntimes(cleanupRequest, 'fixture-human'),
+            cold.cleanupWorkspaceRecoveryRuntimes(cleanupRequest, 'fixture-human'),
+          ])
+          expect(first).toBe(second)
+          const sentTo = signals.mock.calls.map(([target]: any[]) => [target.pid, target.started, target.owner].join(':'))
+          expect(new Set(sentTo).size).toBe(sentTo.length)
+          expect(JSON.parse(await fs.readFile(finiteCalls, 'utf8'))).toEqual(['get_runtime_identity', 'shutdown'])
+          expect(first.runtime_ids).toContain(modulePlan.runtime_id)
+          await first.verify()
+          expect(require('../../scripts/lib/known-process-exit.cjs').probeKnownProcessExit([recoveryRecords.readWorkspaceRecoveryRuntimeStart(f.data, startRequest.recovery_id, modulePlan.module_id).process]).state).toBe('stopped')
+          expect([...cold.processes.keys()]).toEqual(['admin-web'])
+          expect(cold.processes.get('admin-web')).toBe(admin)
+          expect((await cold.runtimeRegistry.listRecords()).filter((row: any) => row.module_id !== 'admin-web')).toEqual([])
+          expect(await fs.readFile(ledgerFile)).toEqual(ledger)
+          expect(await fs.readFile(fenceFile)).toEqual(before)
+          expect((await fetch(`http://127.0.0.1:${f.port}/api/friends`, { headers: { Authorization: 'Bearer fixture-human' } })).status).toBe(200)
+          cleanupCoordinator = await cold.initializeWorkspaceRelocationRecovery(cleanupRequest, 'fixture-human')
+        } finally {
+          signals.mockRestore()
+          cleanupCoordinator?.close()
+          if (cleanupCoordinator) await vi.waitFor(() => expect(require('../../scripts/lib/known-process-exit.cjs').probeKnownProcessExit([cleanupCoordinator.launch.process]).state).toBe('stopped'), { timeout: 15000 })
+        }
       } finally {
         dropped.mockRestore(); sent?.mockRestore(); timeout?.mockRestore()
         cold.workspaceValidationPermits.delete(startPermit)
@@ -2230,6 +2322,47 @@ describe('normal fixed-job Admin completion preparation', () => {
         cold.modules.set(modulePlan.module_id, originalDefinition)
         cold.managementOnly = managementOnly
       }
+      const orphanRequest = { ...request, recovery_id: randomUUID() }, orphanCoordinator = await cold.initializeWorkspaceRelocationRecovery(orphanRequest, 'fixture-human')
+      const orphanPreparation = await cold.prepareWorkspaceRecoveryRuntimes(orphanRequest, 'fixture-human')
+      await verifyRegisteredRuntimeGate({ manager: cold, dataDir: f.data, coordinator: orphanCoordinator, preparation: orphanPreparation, modules: archivedState.modules.modules,
+        afterClose: async ({ identity, start }: any) => {
+          orphanCoordinator.close()
+          await vi.waitFor(() => expect(require('../../scripts/lib/known-process-exit.cjs').probeKnownProcessExit([orphanCoordinator.launch.process]).state).toBe('stopped'), { timeout: 15000 })
+          const currentRequest = { ...request, recovery_id: randomUUID() }
+          let currentCoordinator: any
+          try {
+            const cleaned = await cold.cleanupWorkspaceRecoveryRuntimes(currentRequest, 'fixture-human')
+            await cleaned.verify()
+            expect(require('../../scripts/lib/known-process-exit.cjs').probeKnownProcessExit([identity]).state).toBe('stopped')
+            expect((await cold.runtimeRegistry.listRecords()).filter((row: any) => row.module_id !== 'admin-web')).toEqual([])
+            currentCoordinator = await cold.initializeWorkspaceRelocationRecovery(currentRequest, 'fixture-human')
+          } finally {
+            currentCoordinator?.close()
+            if (currentCoordinator) await vi.waitFor(() => expect(require('../../scripts/lib/known-process-exit.cjs').probeKnownProcessExit([currentCoordinator.launch.process]).state).toBe('stopped'), { timeout: 15000 })
+          }
+          // Simulate interruption after a confirmed tree exit but before its exact record was removed.
+          const recordFile = path.join(f.data, 'module-runtime-registry/records', start.runtime.runtime_id + '.json')
+          await fs.writeFile(recordFile, JSON.stringify(start.runtime) + '\n', { mode: 0o600 })
+          const stoppedRequest = { ...request, recovery_id: randomUUID() }
+          let stoppedCoordinator: any
+          try {
+            if (process.platform === 'win32') {
+              await expect(cold.cleanupWorkspaceRecoveryRuntimes(stoppedRequest, 'fixture-human')).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
+              expect((await cold.runtimeRegistry.listRecords()).some((row: any) => row.runtime_id === start.runtime.runtime_id)).toBe(true)
+              const stopped = recoveryRecords.readWorkspaceRecoveryCoordinator(f.data, stoppedRequest.recovery_id)
+              await vi.waitFor(() => expect(require('../../scripts/lib/known-process-exit.cjs').probeKnownProcessExit([stopped.launch.process]).state).toBe('stopped'), { timeout: 15000 })
+            } else {
+              const cleaned = await cold.cleanupWorkspaceRecoveryRuntimes(stoppedRequest, 'fixture-human')
+              await cleaned.verify()
+              expect((await cold.runtimeRegistry.listRecords()).some((row: any) => row.runtime_id === start.runtime.runtime_id)).toBe(false)
+              stoppedCoordinator = await cold.initializeWorkspaceRelocationRecovery(stoppedRequest, 'fixture-human')
+            }
+          } finally {
+            stoppedCoordinator?.close()
+            if (stoppedCoordinator) await vi.waitFor(() => expect(require('../../scripts/lib/known-process-exit.cjs').probeKnownProcessExit([stoppedCoordinator.launch.process]).state).toBe('stopped'), { timeout: 15000 })
+            await cold.runtimeRegistry.removeRuntime(start.runtime.runtime_id)
+          }
+        } })
       for (const changed of ['runtime plan', 'environment', 'selected root', 'closed ledger']) {
         const inspectRequest = { ...request, recovery_id: randomUUID() }
         const inspected = await cold.initializeWorkspaceRelocationRecovery(inspectRequest, 'fixture-human')
@@ -2259,6 +2392,36 @@ describe('normal fixed-job Admin completion preparation', () => {
         expect(await fs.readFile(fenceFile)).toEqual(before)
       }
       expect(await fs.readFile(fenceFile)).toEqual(before)
+      const historyRequest = { ...request, recovery_id: randomUUID() }
+      const history = recoveryRecords.readWorkspaceRecoveryRuntimeHistory(f.data, historyRequest)
+      expect(history).toHaveLength(7)
+      expect(history.map((item: any) => item.recovery_id)).toContain(startRequest.recovery_id)
+      const startHistory = history.find((item: any) => item.recovery_id === startRequest.recovery_id)
+      expect(startHistory.plan).toEqual(startPreparation.plan)
+      expect(startHistory.starts[0].runtime.runtime_id).toBe(modulePlan.runtime_id)
+      expect(history.filter((item: any) => item.starts.length === 0)).toHaveLength(4)
+      expect(recoveryRecords.readWorkspaceRecoveryRuntimeHistory(f.data, startRequest)).toHaveLength(6)
+      const oldPlanFile = path.join(startCoordinator.launch.control_root.path, 'runtime-plan.json'), oldPlanBytes = await fs.readFile(oldPlanFile)
+      await fs.writeFile(oldPlanFile, 'null')
+      try { expect(() => recoveryRecords.readWorkspaceRecoveryRuntimeHistory(f.data, historyRequest)).toThrow() }
+      finally { await fs.writeFile(oldPlanFile, oldPlanBytes) }
+      const extraReceipt = path.join(startCoordinator.launch.control_root.path, 'runtime-starts/unexpected.json')
+      await fs.writeFile(extraReceipt, '{}', { mode: 0o600 })
+      try { expect(() => recoveryRecords.readWorkspaceRecoveryRuntimeHistory(f.data, historyRequest)).toThrow() }
+      finally { await fs.unlink(extraReceipt) }
+      const emptyAttempt = path.join(f.data, 'workspace-control/relocation-recovery', randomUUID())
+      const native = require('../../scripts/lib/process-identity.cjs')
+      if (process.platform === 'win32') native.createPrivateDirectory(emptyAttempt)
+      else await fs.mkdir(emptyAttempt, { mode: 0o700 })
+      try {
+        expect(recoveryRecords.readWorkspaceRecoveryRuntimeHistory(f.data, historyRequest)).toEqual(history)
+        const starts = path.join(emptyAttempt, 'runtime-starts')
+        if (process.platform === 'win32') native.createPrivateDirectory(starts)
+        else await fs.mkdir(starts, { mode: 0o700 })
+        try { expect(() => recoveryRecords.readWorkspaceRecoveryRuntimeHistory(f.data, historyRequest)).toThrow() }
+        finally { await fs.rmdir(starts) }
+      } finally { await fs.rmdir(emptyAttempt) }
+      expect(recoveryRecords.readWorkspaceRecoveryRuntimeHistory(f.data, historyRequest)).toEqual(history)
     } finally {
       if (cold) await cold.stop()
       const child = f.manager.workspaceValidationProof?.result.coordinator

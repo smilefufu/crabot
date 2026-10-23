@@ -81,7 +81,7 @@ import { scheduleRestart } from './restart-policy.js'
 import { checkDiskLow } from './disk-watcher.js'
 import { resolveExecutable } from './executable-resolver.js'
 import { terminateProcessTree, waitForProcessTreeExit } from './process-tree.js'
-import { ModuleRuntimeRegistry, probeProcessStartIdentity } from './module-runtime-registry.js'
+import { ModuleRuntimeRegistry, probeProcessStartIdentity, inspectWindowsPortOwners } from './module-runtime-registry.js'
 import type { ModuleRuntimeRecord, OrphanTerminationCandidate } from './module-runtime-registry.js'
 
 // ============================================================================
@@ -105,6 +105,7 @@ interface WorkspaceRecoveryAdmission {
 }
 interface WorkspaceRecoveryCoordinator { verify: () => Promise<void>; close: () => void }
 interface WorkspaceRecoveryRuntimePreparation { plan: WorkspaceRecoveryRuntimePlan; verify: () => Promise<void> }
+interface WorkspaceRecoveryRuntimeCleanup { runtime_ids: ReadonlyArray<string>; verify: () => Promise<void> }
 interface WorkspaceRecoveryInitialization {
   request: VerifyWorkspaceRelocationRecoveryRequestParams
   result: VerifyWorkspaceRelocationRecoveryRequestResult
@@ -285,6 +286,7 @@ export class ModuleManager {
   private workspaceRootSelection?: { fingerprint: string; pending: Promise<WorkspaceRootSelectionResult> }
   private workspaceValidationLaunch?: { fingerprint: string; pending: Promise<WorkspaceValidationLaunchResult> }
   private readonly workspaceRecoveryRuntimePreparations = new WeakMap<WorkspaceRecoveryCoordinator, Promise<WorkspaceRecoveryRuntimePreparation>>()
+  private readonly workspaceRecoveryRuntimeCleanups = new WeakMap<WorkspaceRecoveryCoordinator, Promise<WorkspaceRecoveryRuntimeCleanup>>()
   private workspaceRecoveryInitialization?: WorkspaceRecoveryInitialization
   private workspaceRecoveryInitializations = new Map<string, { fingerprint: string; bearerHash: string; pending: Promise<WorkspaceRecoveryCoordinator> }>()
   private workspaceRecoveryAdmission?: WorkspaceRecoveryAdmission
@@ -2101,6 +2103,176 @@ export class ModuleManager {
         try { await facts.verify() } catch (cause) { coordinator.close(); throw cause }
       } })
     } catch (cause) { coordinator.close(); throw cause }
+  }
+
+  /** Retire only this archive's known validation runs; never replay Worker or file actions. */
+  private async cleanupWorkspaceRecoveryRuntimes(request: VerifyWorkspaceRelocationRecoveryRequestParams, bearer?: string): Promise<WorkspaceRecoveryRuntimeCleanup> {
+    request = Object.freeze({ ...request })
+    const coordinator = await this.initializeWorkspaceRelocationRecovery(request, bearer), previous = this.workspaceRecoveryRuntimeCleanups.get(coordinator)
+    if (previous) { const result = await previous; await result.verify(); return result }
+    const failure = () => Object.assign(new Error('原验证运行的完整退出尚未确认，维护保护与记录已保留；未重试。'), { code: 'SERVICE_UNAVAILABLE' })
+    const pending = Promise.resolve().then(async () => {
+      let active = true
+      try {
+        const records = require('../../scripts/lib/workspace-recovery-records.mjs'), admission = require('../../scripts/lib/workspace-recovery-admission.mjs')
+        const native = require('../../scripts/lib/process-identity.cjs'), exits = require('../../scripts/lib/known-process-exit.cjs')
+        const control = await admission.inspectWorkspaceRecoveryControlFacts({ dataDir: this.dataDir, request, verify: coordinator.verify })
+        const state = admission.readWorkspaceRecoveryAdmissionScope(this.dataDir, request).state
+        const history = records.readWorkspaceRecoveryRuntimeHistory(this.dataDir, request), historyHash = sha256CanonicalJson(history)
+        if (history.some((item: any) => exits.probeKnownProcessExit([item.coordinator.launch.process]).state !== 'stopped')) throw failure()
+        const scopes = new Map<string, WorkspaceModuleScope>(state.modules.modules.map((module: WorkspaceModuleScope) => [module.module_id, module]))
+        const known = new Map<string, { moduleId: string; port: number; process?: WorkerProcessIdentity; registration?: ModuleRuntimeRecord }>()
+        const add = (moduleId: string, runtimeId: string, process?: WorkerProcessIdentity, registration?: ModuleRuntimeRecord) => {
+          const scope = scopes.get(moduleId)
+          if (!scope || !['crabot-agent', 'memory-default'].includes(moduleId) || known.has(runtimeId)) throw failure()
+          known.set(runtimeId, { moduleId, port: scope.module_port, process, registration })
+        }
+        for (const module of state.health.modules) add(module.module_id, module.runtime_id, module.process)
+        for (const item of history) for (const module of item.plan.modules) {
+          const start = item.starts.find((entry: any) => entry.runtime.runtime_id === module.runtime_id)
+          add(module.module_id, module.runtime_id, start?.process, start?.runtime)
+        }
+        const definitions = new Map([...this.modules].map(([id, runtime]) => [id, {
+          runtime, definition: sha256CanonicalJson(workspaceModuleDefinition(runtime)), overrides: sha256CanonicalJson(this.envOverrides.get(id) ?? {}),
+        }]))
+        const currentCoordinator = records.readWorkspaceRecoveryCoordinator(this.dataDir, request.recovery_id)
+        const admin = this.processes.get('admin-web'), adminState = admin && this.childStates.get(admin), adminRuntimeId = adminState?.runtimeId
+        const adminIdentity = admin?.pid && native.inspectProcess(admin.pid)
+        if (!admin || !adminState || !adminIdentity || !currentCoordinator.launch) throw failure()
+        const children = new Map([...this.processes].filter(([id]) => id !== 'admin-web').map(([id, child]) => [id, { child, state: this.childStates.get(child) }]))
+        const initialRows: ModuleRuntimeRecord[] = (await this.runtimeRegistry.listRecords()).filter(row => row.module_id !== 'admin-web')
+        await control.verify()
+        const initial = new Map(initialRows.map(row => [row.runtime_id, row])), removals = new Set<string>()
+        if (initial.size !== initialRows.length) throw failure()
+        for (const row of initialRows) {
+          const expected = known.get(row.runtime_id)
+          if (!expected || row.instance_id !== this.runtimeRegistry.getInstanceId() || row.module_id !== expected.moduleId || row.module_port !== expected.port
+            || expected.process && row.root_pid !== expected.process.pid || expected.registration && sha256CanonicalJson(row) !== sha256CanonicalJson(expected.registration)) throw failure()
+        }
+        for (const [id, item] of children) {
+          const row = item.state && initial.get(item.state.runtimeId), runtime = this.modules.get(id)
+          if (!item.state || !row || !runtime || item.state.moduleId !== id || row.root_pid !== item.child.pid || runtime.pid !== item.child.pid || runtime.port !== row.module_port) throw failure()
+        }
+        const roots = [...known].filter((entry): entry is [string, { moduleId: string; port: number; process: WorkerProcessIdentity; registration?: ModuleRuntimeRecord }] => !!entry[1].process)
+        let pendingModule: string | undefined
+        const assertCurrent = () => {
+          if (!active || this.isShuttingDown || this.modules.size !== definitions.size
+            || this.workspaceRecoveryInitialization?.coordinator !== coordinator || this.processes.get('admin-web') !== admin
+            || this.childStates.get(admin) !== adminState || adminState.runtimeId !== adminRuntimeId
+            || !native.sameProcess(adminIdentity, native.inspectProcess(admin.pid))
+            || !native.sameProcess(currentCoordinator.launch.parent, native.inspectProcess(process.pid))
+            || !native.sameProcess(currentCoordinator.launch.process, native.inspectProcess(currentCoordinator.launch.process.pid))
+            || [...this.lifecycleQueues.keys()].some(id => id !== 'admin-web' && id !== pendingModule)
+            || sha256CanonicalJson(records.readWorkspaceRecoveryRuntimeHistory(this.dataDir, request)) !== historyHash) throw failure()
+          for (const [id, expected] of definitions) {
+            if (this.modules.get(id) !== expected.runtime || sha256CanonicalJson(workspaceModuleDefinition(expected.runtime)) !== expected.definition
+              || sha256CanonicalJson(this.envOverrides.get(id) ?? {}) !== expected.overrides) throw failure()
+          }
+          for (const [id, child] of this.processes) {
+            if (id === 'admin-web') continue
+            const expected = children.get(id), childState = this.childStates.get(child)
+            if (!expected || expected.child !== child || childState !== expected.state || !childState
+              || !removals.has(childState.runtimeId) && (childState.finalizeStarted || childState.rootExited)) throw failure()
+          }
+          for (const [id, item] of children) if (this.processes.get(id) !== item.child && !removals.has(item.state!.runtimeId)) throw failure()
+        }
+        const verify = async () => {
+          try {
+            await control.verify(); assertCurrent()
+            const rows = (await this.runtimeRegistry.listRecords()).filter(row => row.module_id !== 'admin-web')
+            assertCurrent()
+            if (rows.some(row => !initial.has(row.runtime_id) || sha256CanonicalJson(row) !== sha256CanonicalJson(initial.get(row.runtime_id)))
+              || initialRows.some(row => !removals.has(row.runtime_id) && !rows.some(current => current.runtime_id === row.runtime_id))) throw failure()
+            const observed = exits.probeKnownProcessExit(roots.map(([, item]) => item.process))
+            if (observed.state === 'unknown') throw failure()
+            for (const [id, item] of roots) if (observed.running_pids.includes(item.process.pid)
+              && (!rows.some(row => row.runtime_id === id) || !native.sameProcess(item.process, native.inspectProcess(item.process.pid)))) throw failure()
+            await control.verify(); assertCurrent()
+          } catch (cause) { active = false; coordinator.close(); throw Object.assign(failure(), { cause }) }
+        }
+        await verify()
+        for (const [id, item] of children) {
+          await verify(); pendingModule = id; removals.add(item.state!.runtimeId)
+          await this.enqueueLifecycle(id, () => this.stopWorkspaceRecoveryChild(id, item.child, item.state!, verify, assertCurrent))
+          await verify(); pendingModule = undefined
+        }
+        for (const row of initialRows) {
+          if (children.has(row.module_id)) continue
+          await verify()
+          if (process.platform === 'win32' && await probeProcessStartIdentity(row.root_pid) !== row.process_start_identity) {
+            await verify()
+            const owners = await inspectWindowsPortOwners(row.module_port)
+            await verify()
+            // An empty port cannot establish complete exit of a departed recovery root.
+            if (!owners.length) throw failure()
+          }
+          removals.add(row.runtime_id)
+          await this.runtimeRegistry.recoverOrphans({ moduleId: row.module_id, runtimeIds: new Set([row.runtime_id]), currentRuntimeIds: this.currentRuntimeIds(),
+            gracefulTimeoutMs: this.config.shutdown_timeout * 1000, verify })
+          await verify()
+        }
+        const verifyStopped = async () => {
+          try {
+            await verify()
+            if ([...this.processes.keys()].some(id => id !== 'admin-web') || (await this.runtimeRegistry.listRecords()).some(row => row.module_id !== 'admin-web')
+              || exits.probeKnownProcessExit(roots.map(([, item]) => item.process)).state !== 'stopped') throw failure()
+            for (const [, item] of roots) {
+              await verify()
+              if (process.platform !== 'win32') {
+                const actual = native.inspectProcess(item.process.pid)
+                if (actual && actual.started !== item.process.started) continue
+              }
+              if (!await waitForProcessTreeExit(item.process.pid, 0, 25, item.port, () => true)) throw failure()
+              await verify()
+            }
+          } catch (cause) { active = false; coordinator.close(); throw Object.assign(failure(), { cause }) }
+        }
+        await verifyStopped()
+        return Object.freeze({ runtime_ids: Object.freeze([...known.keys()].sort()), verify: verifyStopped })
+      } catch (cause) {
+        active = false; coordinator.close()
+        throw Object.assign(failure(), { cause })
+      }
+    })
+    this.workspaceRecoveryRuntimeCleanups.set(coordinator, pending)
+    return pending
+  }
+
+  private async stopWorkspaceRecoveryChild(moduleId: string, child: ChildProcess, state: ManagedChildState, verify: () => Promise<void>, assertCurrent: () => void): Promise<void> {
+    await verify()
+    const runtime = this.modules.get(moduleId)!
+    if (state.finalizeStarted || state.termination || state.forceTermination || state.rootExited) throw new Error('Recovery child already has an unconfirmed stop')
+    const native = require('../../scripts/lib/process-identity.cjs')
+    const scope: ReadonlyArray<WorkerProcessIdentity> = require('../../scripts/lib/spawned-process-tree.cjs').captureSpawnedProcessTree(child)
+    await verify()
+    this.cancelAutoRestart(moduleId); this.revokeRuntimeBearer(moduleId)
+    state.intentionalReason = 'shutdown'
+    state.termination = Promise.resolve().then(async () => {
+      let rpc: { shutdown(): Promise<void>; close(): void } | undefined
+      try {
+        await verify()
+        const timeoutMs = Math.max(1, Math.round(this.config.shutdown_timeout * 1000))
+        if (!runtime.skip_health_check) {
+          const listeners = scope.filter(item => native.sameProcess(item, native.inspectProcess(item.pid)) && native.listListeningTcpPorts(item.pid).includes(runtime.port))
+          if (listeners.length !== 1) throw new Error('Cannot verify the recovery module listener')
+          rpc = await require('../../scripts/lib/module-shutdown-rpc.cjs').openModuleShutdownRpc(listeners[0], runtime.port,
+            { instance_id: this.runtimeRegistry.getInstanceId(), module_id: moduleId, runtime_id: state.runtimeId }, { timeoutMs })
+          await verify()
+        }
+        await require('../../scripts/lib/known-process-stop.cjs').stopKnownProcessScope(scope, { timeoutMs,
+          onObserved: verify,
+          graceful: rpc ? async () => { await verify(); await rpc!.shutdown() } : undefined,
+        }, { ...native, terminateKnownProcess: (target: WorkerProcessIdentity) => { assertCurrent(); return native.terminateKnownProcess(target) } })
+        assertCurrent()
+      } finally { rpc?.close() }
+    })
+    try {
+      await state.termination
+      await this.beginChildFinalize(state, null, null)
+    } catch (error) {
+      runtime.status = 'error'
+      throw error
+    }
   }
 
   private async prepareWorkspaceRecoveryRuntimes(request: VerifyWorkspaceRelocationRecoveryRequestParams, bearer?: string): Promise<WorkspaceRecoveryRuntimePreparation> {

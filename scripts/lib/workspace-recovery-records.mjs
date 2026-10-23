@@ -295,3 +295,51 @@ export async function commitWorkspaceRecoveryRuntimeStart(options) {
     return record
   } catch { fail() }
 }
+
+/** Existing ownership facts only; neither a live role nor a complete-exit proof. */
+export function readWorkspaceRecoveryRuntimeHistory(dataDir, input) {
+  try {
+    const scope = readWorkspaceRecoveryAdmissionScope(dataDir, input), request = scope.request, ctx = context(dataDir, request.recovery_id)
+    if (!exists(ctx.parent)) return Object.freeze([])
+    const parent = frame(ctx.parent), entries = fs.readdirSync(ctx.parent).sort(), history = []
+    for (const id of entries) {
+      if (!uuid(id)) fail()
+      if (id === request.recovery_id) continue
+      const directory = path.join(ctx.parent, id), before = frame(directory), startsDirectory = path.join(directory, 'runtime-starts')
+      if (!exists(path.join(directory, 'runtime-plan.json'))) {
+        // Initialization without a plan cannot contribute any module runtime scope.
+        if (exists(startsDirectory) || hash(frame(directory)) !== hash(before)) fail()
+        continue
+      }
+      const coordinator = readWorkspaceRecoveryCoordinator(ctx.data, id), previous = coordinator.launch?.request
+      if (!previous || !coordinator.ready) fail()
+      if (previous.intent_id !== request.intent_id) {
+        if (hash(frame(directory)) !== hash(before)) fail()
+        continue
+      }
+      if (previous.completion_sha256 !== request.completion_sha256 || previous.finalizing_sha256 !== request.finalizing_sha256) fail()
+      const plan = readWorkspaceRecoveryRuntimePlan(ctx.data, id), starts = []
+      if (!plan || plan.launch_sha256 !== hash(coordinator.launch)) fail()
+      if (exists(startsDirectory)) {
+        const startsFrame = frame(startsDirectory), names = fs.readdirSync(startsDirectory).sort()
+        if (names.some(name => !plan.modules.some(module => name === module.module_id + '.json'))) fail()
+        for (const module of plan.modules) {
+          const record = readWorkspaceRecoveryRuntimeStart(ctx.data, id, module.module_id)
+          if (record) {
+            if (record.plan_sha256 !== hash(plan)) fail()
+            starts.push(record)
+          }
+        }
+        if (hash(frame(startsDirectory)) !== hash(startsFrame) || hash(fs.readdirSync(startsDirectory).sort()) !== hash(names)) fail()
+      }
+      if (hash(frame(directory)) !== hash(before) || hash(readWorkspaceRecoveryCoordinator(ctx.data, id)) !== hash(coordinator)
+        || hash(readWorkspaceRecoveryRuntimePlan(ctx.data, id)) !== hash(plan)
+        || starts.some(record => hash(readWorkspaceRecoveryRuntimeStart(ctx.data, id, record.runtime.module_id)) !== hash(record))) fail()
+      history.push({ recovery_id: id, coordinator, plan, starts })
+    }
+    ctx.verify()
+    if (hash(frame(ctx.parent)) !== hash(parent) || hash(fs.readdirSync(ctx.parent).sort()) !== hash(entries)
+      || readWorkspaceRecoveryAdmissionScope(ctx.data, request).fingerprint !== scope.fingerprint) fail()
+    return Object.freeze(history)
+  } catch { fail() }
+}
