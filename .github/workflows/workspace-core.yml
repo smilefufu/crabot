@@ -56,7 +56,7 @@ jobs:
       fail-fast: false
       matrix:
         # Temporary isolated diagnosis; normal feature/PR runs keep the full matrix.
-        os: ${{ fromJSON(github.ref == 'refs/heads/ci/desktop-workspace-probe-20261023' && '["windows-latest"]' || '["ubuntu-22.04","macos-14","macos-15-intel","windows-latest"]') }}
+        os: ${{ fromJSON(github.ref == 'refs/heads/ci/desktop-workspace-probe-20261023' && '["windows-latest"]' || '["ubuntu-22.04","macos-15","macos-15-intel","windows-latest"]') }}
         suite: ${{ fromJSON(github.ref == 'refs/heads/ci/desktop-workspace-probe-20261023' && '["owned-recovery"]' || '["finite","business","archive","recovery","recovery-terminal","recovery-services","recovery-admin","owned","owned-recovery","completion"]') }}
     runs-on: ${{ matrix.os }}
     concurrency:
