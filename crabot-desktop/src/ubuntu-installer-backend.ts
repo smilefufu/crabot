@@ -10,7 +10,7 @@ import { createInterface } from 'node:readline'
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { registerInstallationEntries, readInstallationLocator, type PreparedInstallation } from './installation-entries.js'
-import { finishUbuntuInstallation } from './ubuntu-installation.js'
+import { finishUbuntuInstallation, probeFailurePhase, ubuntuInstallationFailure } from './ubuntu-installation.js'
 const directory = path.dirname(fileURLToPath(import.meta.url)), bundle = path.resolve(directory, '../..')
 const abort = new AbortController()
 const emit = (type: string, fields: Record<string, unknown> = {}) => process.stdout.write(JSON.stringify({ type, ...fields }) + '\n')
@@ -19,16 +19,18 @@ const input = createInterface({ input: process.stdin, crlfDelay: Infinity })
 input.on('line', line => {
   if (line === '{"action":"cancel"}') { abort.abort(); authorization?.reject(new Error('Cancelled')); return }
   if (line === '{"action":"authorized"}' && authorization) { authorization.resolve(); authorization = undefined; return }
-  if (line === '{"action":"denied"}' && authorization) { authorization.reject(new Error('OS authorization rejected')); authorization = undefined; return }
+  if (line === '{"action":"denied"}' && authorization) { authorization.reject(Object.assign(new Error('OS authorization rejected'), { code: 'CRABOT_INSTALL_SYSTEM_AUTHORIZATION' })); authorization = undefined; return }
   abort.abort(); authorization?.reject(new Error('Invalid installer action')); authorization = undefined
 })
 input.on('close', () => { abort.abort(); authorization?.reject(new Error('Installer closed')) })
 process.on('SIGTERM', () => abort.abort())
 
-async function run(command: string, args: string[], env: NodeJS.ProcessEnv, timeout: number, cwd?: string) {
+async function run(command: string, args: string[], env: NodeJS.ProcessEnv, timeout: number, cwd?: string, failureCode = 'CRABOT_INSTALL_PROGRAM_IDENTITY') {
   abort.signal.throwIfAborted()
   // A private process group contains only this finite probe and its children.
-  const child = spawn(command, args, { cwd, env, stdio: 'ignore', detached: true })
+  const child = spawn(command, args, { cwd, env, stdio: ['ignore', 'ignore', 'pipe'], detached: true })
+  let diagnostic = ''
+  child.stderr.on('data', bytes => { diagnostic = (diagnostic + bytes.toString('utf8')).slice(-8192) })
   let alive = true
   child.once('exit', () => { alive = false })
   const stop = () => { if (alive && child.pid) { try { process.kill(-child.pid, 'SIGKILL') } catch {} } }
@@ -38,7 +40,10 @@ async function run(command: string, args: string[], env: NodeJS.ProcessEnv, time
     await once(child, 'spawn')
     const [code] = await once(child, 'exit')
     abort.signal.throwIfAborted()
-    if (code !== 0) throw new Error('Sandbox probe failed')
+    if (code !== 0) {
+      const phase = probeFailurePhase(diagnostic)
+      throw Object.assign(new Error('Sandbox probe failed'), { code: failureCode, ...(phase ? { phase } : {}) })
+    }
   } finally { clearTimeout(timer); abort.signal.removeEventListener('abort', cancelled); stop() }
 }
 async function probe(prepared: PreparedInstallation) {
@@ -72,8 +77,8 @@ async function probe(prepared: PreparedInstallation) {
     env.HOME = profile; env.CRABOT_SCRAPLING_DATA_DIR = profile
     env.XDG_CACHE_HOME = path.join(profile, 'cache'); env.XDG_CONFIG_HOME = env.CHROME_CONFIG_HOME = path.join(profile, 'config')
     await mkdir(path.join(profile, 'gui'), { mode: 0o700 })
-    await run(path.join(prepared.guiRoot, 'crabot-desktop'), [`--user-data-dir=${path.join(profile, 'gui')}`, `--installation-sandbox-probe=${endpoint}/gui`], env, 60_000, profile)
-    await run(runtime.executables.python, ['-I', '-B', path.join(bundle, 'browser-probe.py'), prepared.coreRoot, endpoint], env, 150_000, profile)
+    await run(path.join(prepared.guiRoot, 'crabot-desktop'), [`--user-data-dir=${path.join(profile, 'gui')}`, `--installation-sandbox-probe=${endpoint}/gui`], env, 60_000, profile, 'CRABOT_INSTALL_GUI_SANDBOX')
+    await run(runtime.executables.python, ['-I', '-B', path.join(bundle, 'browser-probe.py'), prepared.coreRoot, endpoint], env, 150_000, profile, 'CRABOT_INSTALL_BROWSER_SANDBOX')
     if (!roles.every(role => received.has(role))) throw new Error('Probe network incomplete')
   } finally {
     server.closeAllConnections()
@@ -112,6 +117,6 @@ async function main() {
   emit('complete', { executable: installed.executable })
 }
 void main().catch(error => {
-  const allowed = ['ENOSPC', 'CRABOT_UPDATE_SPACE', 'CRABOT_CORE_INTEGRITY', 'CRABOT_INSTALL_FILESYSTEM', 'CRABOT_INSTALL_SYSTEM_MODE', 'CRABOT_DESKTOP_TAKEOVER_REQUIRED', 'CRABOT_INSTALL_REGISTRATION']
-  emit('failed', { code: abort.signal.aborted ? 'CANCELLED' : allowed.includes(error?.code) ? error.code : 'NOT_READY' }); process.exitCode = abort.signal.aborted ? 2 : 1
+  emit('failed', ubuntuInstallationFailure(error, abort.signal.aborted))
+  process.exitCode = abort.signal.aborted ? 2 : 1
 }).finally(() => { input.close(); process.stdin.destroy() })

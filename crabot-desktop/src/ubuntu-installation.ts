@@ -24,3 +24,24 @@ export async function finishUbuntuInstallation(options: {
   // checks; cancellation is no longer offered between these two final steps.
   return options.commit()
 }
+
+
+const probePhasePattern = 'arguments|profile|window|network|renderer|kernel|runtime|(?:chromium|headless)-(?:launch|network|kernel)|scrapling-(?:policy|fetch)'
+const probeFailureLine = new RegExp('CRABOT_(?:GUI|BROWSER)_SANDBOX_PROBE_FAILED:(' + probePhasePattern + ')\\r?\\n')
+const validProbePhase = new RegExp('^(?:' + probePhasePattern + ')$')
+const failureCodes = new Set(['ENOSPC', 'CRABOT_UPDATE_SPACE', 'CRABOT_CORE_INTEGRITY', 'CRABOT_INSTALL_FILESYSTEM', 'CRABOT_INSTALL_SYSTEM_MODE',
+  'CRABOT_DESKTOP_TAKEOVER_REQUIRED', 'CRABOT_INSTALL_REGISTRATION', 'CRABOT_INSTALL_PROGRAM_IDENTITY', 'CRABOT_INSTALL_GUI_SANDBOX',
+  'CRABOT_INSTALL_BROWSER_SANDBOX', 'CRABOT_INSTALL_SYSTEM_AUTHORIZATION'])
+
+export function probeFailurePhase(stderr: string): string | undefined {
+  return probeFailureLine.exec(stderr)?.[1]
+}
+export function ubuntuInstallationFailure(error: unknown, cancelled: boolean): { code: string; phase?: string } {
+  const value = error as { code?: unknown; phase?: unknown } | null | undefined
+  let code = 'NOT_READY'
+  if (cancelled) code = 'CANCELLED'
+  else if (typeof value?.code === 'string' && failureCodes.has(value.code)) code = value.code
+  const result: { code: string; phase?: string } = { code }
+  if (typeof value?.phase === 'string' && validProbePhase.test(value.phase)) result.phase = value.phase
+  return result
+}

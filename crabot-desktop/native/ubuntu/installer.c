@@ -78,6 +78,10 @@ static const char *failure_text(const char *code) {
   if (!g_strcmp0(code, "CRABOT_INSTALL_SYSTEM_MODE")) return "此机器由管理员统一部署，请通过浏览器或渠道使用 Crabot。现有实例未改变。";
   if (!g_strcmp0(code, "CRABOT_DESKTOP_TAKEOVER_REQUIRED")) return "检测到已有 Crabot 部署，需要沿用原位置接管。原数据保留，未创建新实例。";
   if (!g_strcmp0(code, "CRABOT_INSTALL_REGISTRATION")) return "系统应用入口与已有文件冲突。原文件已保留，请核对原安装后重试。";
+  if (!g_strcmp0(code, "CRABOT_INSTALL_PROGRAM_IDENTITY")) return "安装程序或内置浏览器未通过身份校验。原文件已保留，请重新获取完整安装包。";
+  if (!g_strcmp0(code, "CRABOT_INSTALL_GUI_SANDBOX")) return "应用沙箱验证未通过。请检查 Ubuntu 系统授权和桌面组件，再使用此安装包重试。";
+  if (!g_strcmp0(code, "CRABOT_INSTALL_BROWSER_SANDBOX")) return "内置浏览器的沙箱或网络检查未通过。准备记录已保留，请检查系统限制后重试。";
+  if (!g_strcmp0(code, "CRABOT_INSTALL_SYSTEM_AUTHORIZATION")) return "系统授权或 Crabot 专属沙箱规则登记尚未完成。原规则和准备记录已保留，可以重试。";
   return "安装尚未就绪。请核对安装包、位置、系统授权和沙箱条件后重试；原数据及准备记录已保留。";
 }
 static const char *progress_text(const char *phase) {

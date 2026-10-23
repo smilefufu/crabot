@@ -161,4 +161,5 @@ with tempfile.TemporaryDirectory(prefix='Crabot namespace 用户 *?[]{}@{HOME} \
                     assert file.stat().st_uid == 0 and file.stat().st_nlink == 1 and file.read_text() == expected
                     subprocess.run(['/usr/bin/sudo', '/usr/sbin/apparmor_parser', '-R', '-T', '-K', '--', str(file)], check=True, timeout=90)
                     subprocess.run(['/usr/bin/sudo', '/usr/bin/rm', '--', str(file)], check=True, timeout=5)
-print('Native helper identity, closed roles, path literals and rejection fixtures passed; no system authorization performed.')
+print('Native helper identity, closed roles, path literals and rejection fixtures passed; ' +
+      ('isolated CI root registration exercised; graphical Polkit not tested.' if args.namespace_probe else 'no system registration performed.'))

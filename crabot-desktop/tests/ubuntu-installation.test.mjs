@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { finishUbuntuInstallation } from '../dist/ubuntu-installation.js'
+import { finishUbuntuInstallation, probeFailurePhase, ubuntuInstallationFailure } from '../dist/ubuntu-installation.js'
 function fixture() {
   const calls = [], abort = new AbortController()
   const options = { signal: abort.signal, probe: async () => { calls.push('probe') }, authorizationNeeded: async () => { calls.push('needed'); return true },
@@ -37,4 +37,17 @@ test('once OS entry publication begins, completion retains its final commit boun
   const f = fixture(); f.options.register = async () => { f.calls.push('register'); f.abort.abort() }
   assert.equal(await finishUbuntuInstallation(f.options), 'installed')
   assert.deepEqual(f.calls, ['probe', 'register', 'commit'])
+})
+
+test('failure feedback contains only closed codes and phases, never raw third-party errors', () => {
+  const error = { code: 'CRABOT_INSTALL_GUI_SANDBOX', phase: 'kernel', message: 'Bearer private-secret', stack: 'untrusted/path' }
+  assert.deepEqual(ubuntuInstallationFailure(error, false), { code: 'CRABOT_INSTALL_GUI_SANDBOX', phase: 'kernel' })
+  assert.deepEqual(ubuntuInstallationFailure({ ...error, code: 'foreign-secret', phase: 'private-secret' }, false), { code: 'NOT_READY' })
+  assert.deepEqual(ubuntuInstallationFailure(error, true), { code: 'CANCELLED', phase: 'kernel' })
+  assert.deepEqual(ubuntuInstallationFailure(null, false), { code: 'NOT_READY' })
+})
+test('probe stderr accepts only a complete fixed diagnostic line', () => {
+  assert.equal(probeFailurePhase('third party log\nCRABOT_GUI_SANDBOX_PROBE_FAILED:kernel\n'), 'kernel')
+  assert.equal(probeFailurePhase('CRABOT_BROWSER_SANDBOX_PROBE_FAILED:scrapling-fetch\r\n'), 'scrapling-fetch')
+  for (const text of ['secret', 'CRABOT_GUI_SANDBOX_PROBE_FAILED:kernel', 'CRABOT_GUI_SANDBOX_PROBE_FAILED:kernel-secret\n']) assert.equal(probeFailurePhase(text), undefined)
 })

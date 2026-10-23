@@ -300,6 +300,26 @@ jobs:
         if: runner.os == 'Linux' && steps.scope.outputs.full_runtime == 'true'
         timeout-minutes: 6
         run: xvfb-run -a node .github/scripts/verify-offline-installer-host.mjs ".desktop-build/安装 候选/installer" 2>&1 | tee .desktop-build/installer-host-probe.log
+      - name: Stage temporary Linux program payload for Ubuntu24 installation acceptance
+        if: runner.os == 'Linux' && steps.scope.outputs.full_runtime == 'true'
+        timeout-minutes: 8
+        run: |
+          node --input-type=module <<'NODE'
+          import { statfsSync } from 'node:fs'
+          import { execFileSync } from 'node:child_process'
+          const size = Number(execFileSync('du', ['--apparent-size', '-sk', '.desktop-build/安装 候选/installer/ubuntu-native'], { encoding: 'utf8' }).split(/\s+/)[0]) * 1024
+          const disk = statfsSync('.desktop-build')
+          if (!Number.isSafeInteger(size) || size <= 0 || disk.bavail * disk.bsize < size + 1024 ** 3) throw new Error('Insufficient CI space to transfer candidate safely')
+          NODE
+          tar -czf .desktop-build/ubuntu-native-candidate.tar.gz -C ".desktop-build/安装 候选/installer" ubuntu-native installer-location.json
+      - name: Transfer only the immutable candidate to the disposable Ubuntu24 test VM
+        if: runner.os == 'Linux' && steps.scope.outputs.full_runtime == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ubuntu-native-installation-candidate
+          path: .desktop-build/ubuntu-native-candidate.tar.gz
+          compression-level: 0
+          retention-days: 1
       - name: Verify actual installer ASAR without business startup on macOS and Windows
         if: runner.os != 'Linux' && steps.scope.outputs.full_runtime == 'true'
         timeout-minutes: 6
@@ -353,3 +373,48 @@ jobs:
             product-runtime.json
           if-no-files-found: warn
           include-hidden-files: true
+
+  ubuntu-installation:
+    name: Actual Ubuntu24 native installation
+    needs: runtime
+    if: always() && !cancelled()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.3'
+      - name: Select full installation scope
+        id: scope
+        env:
+          CRABOT_CI_BASE: ${{ github.event.before || github.event.pull_request.base.sha }}
+        run: node .github/scripts/desktop-runtime-scope.mjs
+      - name: Load same-run Linux candidate
+        if: steps.scope.outputs.full_runtime == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: ubuntu-native-installation-candidate
+          path: .desktop-build
+      - name: Prepare isolated desktop test libraries
+        if: steps.scope.outputs.full_runtime == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libgtk-4-1 libjson-glib-1.0-0 libgtk-3-0t64 libnss3 libxss1 libasound2t64 libgbm1 xvfb xauth dbus-x11
+          mkdir -p .desktop-build/ubuntu-installation
+          tar -xzf .desktop-build/ubuntu-native-candidate.tar.gz -C .desktop-build/ubuntu-installation
+      - name: Exercise actual user backend, test authorization, GUI and MCP sandbox
+        if: steps.scope.outputs.full_runtime == 'true'
+        timeout-minutes: 14
+        run: |
+          ulimit -c 0
+          dbus-run-session -- xvfb-run -a node .github/scripts/accept-ubuntu-offline-installer.mjs .desktop-build/ubuntu-installation
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.scope.outputs.full_runtime == 'true'
+        with:
+          name: ubuntu-installation-report
+          path: .desktop-build/ubuntu-installation-report.json
+          if-no-files-found: ignore
+          retention-days: 3

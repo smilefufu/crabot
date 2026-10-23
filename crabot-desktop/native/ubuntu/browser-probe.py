@@ -7,6 +7,11 @@ from pathlib import Path
 import re
 import sys
 
+stage = 'runtime'
+def failed(kind, error, traceback):
+    print('CRABOT_BROWSER_SANDBOX_PROBE_FAILED:' + stage, file=sys.stderr)
+sys.excepthook = failed
+
 assert os.getuid() != 0 and len(sys.argv) == 3
 core, endpoint = Path(sys.argv[1]), sys.argv[2]
 assert core.is_absolute() and re.fullmatch(r'http://127\.0\.0\.1:[1-9][0-9]{0,4}/[a-f0-9]{64}', endpoint)
@@ -31,12 +36,15 @@ with sync_playwright() as playwright:
         if role == 'headless' and not choices:
             continue  # Current products use --no-shell; full Chrome handles headless.
         assert len(choices) == 1
+        stage = role + '-launch'
         browser = playwright.chromium.launch(executable_path=str(choices[0]), headless=True, chromium_sandbox=True,
                                              args=['--disable-setuid-sandbox'], timeout=45000)
         try:
+            stage = role + '-network'
             page = browser.new_page()
             page.goto(endpoint + '/' + role, wait_until='load', timeout=30000)
             page.wait_for_function("document.body.dataset.ready === 'yes'", timeout=15000)
+            stage = role + '-kernel'
             processes = browser.new_browser_cdp_session().send('SystemInfo.getProcessInfo')['processInfo']
             renderers = [int(item['id']) for item in processes if item['type'] == 'renderer']
             assert renderers
@@ -48,6 +56,7 @@ with sync_playwright() as playwright:
         finally:
             browser.close()
 # Exercise the actual bundled MCP fetch path, not only raw Playwright options.
+stage = 'scrapling-policy'
 spec = importlib.util.spec_from_file_location('crabot_install_scrapling', runtime / 'server.py')
 server = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(server)
@@ -60,5 +69,6 @@ async def fetch():
     result = await upstream.fetch(endpoint + '/scrapling', extraction_type='text', main_content_only=False,
                                   headless=True, google_search=False, wait_selector="body[data-ready='yes']", timeout=30000)
     assert result.status == 200 and result.url == endpoint + '/scrapling' and 'Crabot' in ''.join(result.content)
+stage = 'scrapling-fetch'
 asyncio.run(fetch())
 print('CRABOT_BROWSER_SANDBOX_VERIFIED')
