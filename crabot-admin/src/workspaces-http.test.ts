@@ -93,3 +93,28 @@ it('aggregate HTTP routes precede workspace-id parsing and preserve human authen
     Authorization: 'Bearer fixture-human', 'Content-Type': 'application/json' }, body: '{"root":"/"}' })
   expect(invalid.status).toBe(400)
 })
+
+it('maintenance status is human-only, no-store and retains the Admin closure after durable release', async () => {
+  const f = await fixture(), pathname = f.endpoint + '/workspaces/maintenance'
+  const read = () => fetch(pathname, { headers: { Authorization: 'Bearer fixture-human' } })
+  expect((await fetch(pathname)).status).toBe(401)
+  for (const token of ['fixture-internal', jwt.sign({ sub: 'agent-cli', exp: Math.floor(Date.now() / 1000) + 60 }, 'fixture-secret')]) {
+    expect((await fetch(pathname, { headers: { Authorization: 'Bearer ' + token } })).status).toBe(403)
+  }
+  const original = await f.service.list(), file = path.join(f.root, 'workspace-control/catalog.json'), bytes = await fs.readFile(file)
+  const idle = await read()
+  expect(idle.status).toBe(200); expect(idle.headers.get('cache-control')).toBe('no-store')
+  expect(await idle.json()).toEqual({ maintenance: false })
+  expect((await fetch(pathname, { method: 'POST', headers: { Authorization: 'Bearer fixture-human' } })).status).toBe(405)
+  const fence = path.join(f.root, 'workspace-control/relocation-finalizing.json')
+  await fs.writeFile(fence, 'unverified maintenance is still closed')
+  expect(await (await read()).json()).toEqual({ maintenance: true })
+  await f.admin.quiesceWorkspaceWebAccess(); await fs.unlink(fence)
+  expect(await (await read()).json()).toEqual({ maintenance: true })
+  f.service.resumeScanning(); f.admin.workspaceWebAccess().reopen()
+  expect(await (await read()).json()).toEqual({ maintenance: false })
+  await f.admin.recloseWorkspaceWebAccessAfterResumeFailure()
+  expect(await (await read()).json()).toEqual({ maintenance: true })
+  expect(await f.service.list()).toEqual(original)
+  expect(await fs.readFile(file)).toEqual(bytes)
+})

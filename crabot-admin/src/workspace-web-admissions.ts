@@ -20,6 +20,8 @@ export class WorkspaceWebAdmissions {
   private readonly pending = new Set<Promise<void>>()
   constructor(private readonly dataRoot: string) {}
 
+  isClosed(): boolean { return this.closed }
+
   async run<T>(action: () => Promise<T>): Promise<T> {
     if (this.closed) throw failure()
     assertWorkspaceExecutionAllowed(this.dataRoot)

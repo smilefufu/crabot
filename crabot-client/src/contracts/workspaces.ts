@@ -23,6 +23,7 @@ export const WorkspaceSummarySchema = z.object({
   workspace: WorkspaceRecordSchema, directory_status: z.enum(['ready', 'missing', 'unavailable']),
   usage: WorkspaceUsageSchema, execution: WorkspaceExecutionSchema,
 })
+export const WorkspaceMaintenanceStatusSchema = z.object({ maintenance: z.boolean() })
 export const WorkspaceListResultSchema = z.object({ revision: Count, storage_root: Directory, items: z.array(WorkspaceSummarySchema) })
 export const WorkspaceCreateRequestSchema = z.strictObject({
   workspace_id: z.uuid(), name: z.string().trim().pipe(Name), description: z.string().trim().pipe(Description).optional(), root: Directory.optional(),
@@ -45,3 +46,5 @@ export type WorkspaceGetResult = z.infer<typeof WorkspaceGetResultSchema>
 export type WorkspaceScanResult = z.infer<typeof WorkspaceScanResultSchema>
 
 export type WorkspaceExecutionInventory = z.infer<typeof WorkspaceExecutionInventorySchema>
+
+export type WorkspaceMaintenanceStatus = z.infer<typeof WorkspaceMaintenanceStatusSchema>

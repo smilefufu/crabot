@@ -23,14 +23,14 @@ function projectId() {
 }
 const message = (error: unknown) => error instanceof ClientError ? error.message : '操作未完成，请重新核对工作区状态。'
 
-function WorkspaceEditor({ client, record, initialRevision, onSaved }: {
-  client: WorkspaceClient; record: WorkspaceRecord; initialRevision: number; onSaved(): void
+function WorkspaceEditor({ client, record, initialRevision, onSaved, locked }: {
+  client: WorkspaceClient; record: WorkspaceRecord; initialRevision: number; onSaved(): void; locked: boolean
 }) {
   const [name, setName] = useState(record.name), [description, setDescription] = useState(record.description)
   const [revision, setRevision] = useState(initialRevision), [error, setError] = useState(''), [busy, setBusy] = useState(false)
   const [conflict, setConflict] = useState(false), [latest, setLatest] = useState<WorkspaceRecord>()
   async function save(event: React.FormEvent) {
-    event.preventDefault(); setBusy(true); setError('')
+    event.preventDefault(); if (locked) return; setBusy(true); setError('')
     try {
       const result = await client.update(record.workspace_id, { expected_revision: revision, name, description })
       setRevision(result.revision); setName(result.workspace.name); setDescription(result.workspace.description); setLatest(undefined); onSaved()
@@ -47,16 +47,17 @@ function WorkspaceEditor({ client, record, initialRevision, onSaved }: {
     <label>项目用途<textarea value={description} onChange={event => setDescription(event.target.value)} maxLength={2000} rows={3} /></label>
     {latest && <p>最新名称：{latest.name}；最新用途：{latest.description || '未补充'}</p>}
     {error && <p role="alert">{error}</p>}
-    <div className="workspace-actions"><Button type="submit" disabled={busy || conflict}>保存名称与用途</Button>
+    <div className="workspace-actions"><Button type="submit" disabled={busy || conflict || locked}>保存名称与用途</Button>
       {conflict && <Button type="button" variant="secondary" disabled={busy} onClick={() => void recheck()}>读取最新信息，保留草稿</Button>}</div>
   </form>
 }
-function WorkspaceDetails({ item, revision, client, refresh, onSaved }: {
-  item: WorkspaceSummary; revision: number; client: WorkspaceClient; refresh(id: string): void; onSaved(): void
+function WorkspaceDetails({ item, revision, client, refresh, onSaved, locked }: {
+  item: WorkspaceSummary; revision: number; client: WorkspaceClient; refresh(id: string): void; onSaved(): void; locked: boolean
 }) {
   const { workspace, usage, execution } = item
   const [opening, setOpening] = useState(false), [openError, setOpenError] = useState('')
   async function openFolder() {
+    if (locked) return
     setOpening(true); setOpenError('')
     try { if (!await desktopBridge?.revealWorkspaceFolder(workspace.workspace_id)) setOpenError('目录暂时无法打开，请刷新状态并检查目录是否可用。') }
     catch { setOpenError('目录暂时无法打开，请刷新状态后重试。') }
@@ -79,11 +80,11 @@ function WorkspaceDetails({ item, revision, client, refresh, onSaved }: {
       <dt>最近使用</dt><dd>{workspace.last_used_at ? new Date(workspace.last_used_at).toLocaleString() : '未知'}</dd>
     </dl>
     <p className="workspace-note">路径位于运行 Crabot 的电脑或服务器。空间是带时间的估算，可能包含共享数据块；不等于删除后可释放的空间。</p>
-    {desktopBridge?.revealWorkspaceFolder && <Button variant="secondary" disabled={opening || item.directory_status !== 'ready'} onClick={() => void openFolder()}>在文件管理器打开</Button>}
+    {desktopBridge?.revealWorkspaceFolder && <Button variant="secondary" disabled={locked || opening || item.directory_status !== 'ready'} onClick={() => void openFolder()}>在文件管理器打开</Button>}
     {openError && <p role="alert">{openError}</p>}
     <p><Link to={`/traces?tab=workers&workspace_id=${encodeURIComponent(workspace.workspace_id)}`}>查看关联执行器（含历史）</Link></p>
-    <Button variant="secondary" disabled={usage.status === 'measuring' || item.directory_status !== 'ready'} onClick={() => refresh(workspace.workspace_id)}>刷新空间统计</Button>
-    {workspace.kind === 'project' && <WorkspaceEditor key={workspace.workspace_id} client={client} record={workspace} initialRevision={revision} onSaved={onSaved} />}
+    <Button variant="secondary" disabled={locked || usage.status === 'measuring' || item.directory_status !== 'ready'} onClick={() => refresh(workspace.workspace_id)}>刷新空间统计</Button>
+    {workspace.kind === 'project' && <WorkspaceEditor key={workspace.workspace_id} client={client} record={workspace} initialRevision={revision} onSaved={onSaved} locked={locked} />}
   </Card>
 }
 
@@ -93,6 +94,11 @@ export function Workspaces() {
 }
 function WorkspacePage({ scope }: { scope: string }) {
   const client = useMemo(() => new WorkspaceClient(getWebClient()), [scope])
+  const maintenance = useQuery({ queryKey: ['server', scope, 'workspaces', 'maintenance'], queryFn: ({ signal }) => client.maintenance({ signal }),
+    refetchOnWindowFocus: true, refetchInterval: 3000 }, serverQueries)
+  const observedMaintenance = maintenance.isError ? true : maintenance.data?.maintenance
+  const locked = observedMaintenance !== false
+
   const query = useQuery({ queryKey: ['server', scope, 'workspaces'], queryFn: ({ signal }) => client.list({ signal }),
     refetchOnWindowFocus: true, refetchInterval: value => value.state.data?.items.some(item => item.usage.status === 'measuring') ? 1000 : false }, serverQueries)
   const total = useQuery({ queryKey: ['server', scope, 'workspaces', 'usage'], queryFn: ({ signal }) => client.totalUsage({ signal }),
@@ -103,15 +109,23 @@ function WorkspacePage({ scope }: { scope: string }) {
   const [error, setError] = useState(''), [creating, setCreating] = useState(false), [saving, setSaving] = useState(false)
   const [name, setName] = useState(''), [purpose, setPurpose] = useState(''), [root, setRoot] = useState('')
   const createId = useRef(''), requested = useRef(new Set<string>())
+  const previousMaintenance = useRef<boolean | undefined>(undefined)
   useEffect(() => {
+    if (observedMaintenance === undefined) return
+    if (previousMaintenance.current === true && !observedMaintenance) { void query.refetch(); void total.refetch() }
+    previousMaintenance.current = observedMaintenance
+  }, [observedMaintenance, query.refetch, total.refetch])
+
+  useEffect(() => {
+    if (locked) return
     const controller = new AbortController()
-    const candidates = query.data?.items.filter(item => item.directory_status === 'ready' && item.usage.status === 'pending' && !requested.current.has(item.workspace.workspace_id)) ?? []
-    for (const item of candidates) requested.current.add(item.workspace.workspace_id)
+    const candidates = query.data?.items.filter(item => item.directory_status === 'ready' && item.usage.status === 'pending' && !requested.current.has(JSON.stringify([item.workspace.workspace_id, item.workspace.root]))) ?? []
+    for (const item of candidates) requested.current.add(JSON.stringify([item.workspace.workspace_id, item.workspace.root]))
     if (candidates.length) void Promise.allSettled(candidates.map(item => client.refresh(item.workspace.workspace_id, { signal: controller.signal }))).then(() => {
       if (!controller.signal.aborted) void query.refetch()
     })
     return () => controller.abort()
-  }, [client, query.data])
+  }, [client, query.data, locked])
   const items = useMemo(() => {
     const needle = search.trim().toLocaleLowerCase()
     return [...(query.data?.items ?? [])].filter(item => [item.workspace.name, item.workspace.description, item.workspace.root].some(text => text.toLocaleLowerCase().includes(needle)))
@@ -122,15 +136,17 @@ function WorkspacePage({ scope }: { scope: string }) {
   }, [query.data, search, sort])
   const current = query.data?.items.find(item => item.workspace.workspace_id === selected)
   async function refresh(id: string) {
+    if (locked) return
     try { await client.refresh(id); await query.refetch() } catch (failure) { setError(message(failure)) }
   }
   async function refreshTotal() {
+    if (locked) return
     setTotalRefreshing(true)
     try { await client.refreshTotalUsage(); await total.refetch() } catch (failure) { setError(message(failure)) }
     finally { setTotalRefreshing(false) }
   }
   async function create(event: React.FormEvent) {
-    event.preventDefault(); setSaving(true); setError('')
+    event.preventDefault(); if (locked) return; setSaving(true); setError('')
     try {
       const result = await client.create({ workspace_id: createId.current, name, description: purpose, ...(root.trim() ? { root: root.trim() } : {}) })
       setCreating(false); setSelected(result.workspace.workspace_id); await query.refetch(); await total.refetch()
@@ -138,8 +154,10 @@ function WorkspacePage({ scope }: { scope: string }) {
   }
   return <MainLayout><div className="workspaces-page">
     <div className="workspace-heading"><div><h1>工作区</h1><p>每个项目长期使用一个工作区；未识别项目的任务放入默认工作区。</p></div>
-      <div className="workspace-actions"><Button variant="secondary" disabled={query.isFetching} onClick={() => { void query.refetch(); void total.refetch() }}>刷新列表与执行状态</Button>
-        <Button onClick={() => { createId.current = projectId(); setName(''); setPurpose(''); setRoot(''); setCreating(true) }}>添加项目工作区</Button></div></div>
+      <div className="workspace-actions"><Button variant="secondary" disabled={query.isFetching} onClick={() => { void query.refetch(); void total.refetch(); void maintenance.refetch() }}>刷新列表与执行状态</Button>
+        <Button disabled={locked} onClick={() => { createId.current = projectId(); setName(''); setPurpose(''); setRoot(''); setCreating(true) }}>添加项目工作区</Button></div></div>
+    {maintenance.isError ? <p role="alert">暂时无法核实工作区维护状态，仍可查看和搜索；请重新核验后再操作。 <Button variant="secondary" onClick={() => void maintenance.refetch()}>重新核验维护状态</Button></p>
+      : locked && <p role="status">{observedMaintenance ? '工作目录正在维护或等待恢复，新任务与相关文件操作暂不可用。仍可查看和搜索工作区。' : '正在核验工作区维护状态…'}</p>}
     {query.data && <p>{query.data.items.filter(item => item.workspace.kind === 'project').length} 个项目工作区 · 1 个默认工作区 · {query.data.items.filter(item => item.directory_status !== 'ready').length} 个目录待核实</p>}
     <section aria-label="全部工作区空间">
       <h2>全部工作区空间</h2>
@@ -148,7 +166,7 @@ function WorkspacePage({ scope }: { scope: string }) {
       {total.data?.measured_at && <p>统计时间：{new Date(total.data.measured_at).toLocaleString()}</p>}
       <p className="workspace-note">按实际目录去重，包含隐藏文件和依赖；不等于删除后可释放的空间。</p>
       {total.error && <p role="alert">{message(total.error)}</p>}
-      <Button variant="secondary" disabled={totalRefreshing || total.data?.status === 'measuring'} onClick={() => void refreshTotal()}>刷新汇总空间</Button>
+      <Button variant="secondary" disabled={locked || totalRefreshing || total.data?.status === 'measuring'} onClick={() => void refreshTotal()}>刷新汇总空间</Button>
     </section>
     {(error || query.error) && <p role="alert">{error || message(query.error)} <Button variant="secondary" onClick={() => void query.refetch()}>重新读取</Button></p>}
     {creating && <Card title="添加项目工作区"><form onSubmit={create} className="workspace-form">
@@ -156,7 +174,7 @@ function WorkspacePage({ scope }: { scope: string }) {
       <label>用途说明<textarea value={purpose} onChange={event => setPurpose(event.target.value)} maxLength={2000} /></label>
       <label>已有项目目录（可选）<input value={root} onChange={event => setRoot(event.target.value)} placeholder="留空由 Crabot 创建项目目录" /></label>
       <p className="workspace-note">填写运行 Crabot 的电脑或服务器上的绝对路径。绑定原有目录会保留其中的文件。</p>
-      <div className="workspace-actions"><Button type="submit" disabled={saving}>保存工作区</Button><Button type="button" variant="secondary" disabled={saving} onClick={() => setCreating(false)}>取消</Button></div>
+      <div className="workspace-actions"><Button type="submit" disabled={saving || locked}>保存工作区</Button><Button type="button" variant="secondary" disabled={saving} onClick={() => setCreating(false)}>取消</Button></div>
     </form></Card>}
     <div className="workspace-actions"><label>搜索工作区<input value={search} onChange={event => setSearch(event.target.value)} placeholder="名称、用途或路径" /></label>
       <label>排序<select value={sort} onChange={event => setSort(event.target.value)}><option value="name">名称</option><option value="space">文件总大小从大到小</option></select></label></div>
@@ -165,6 +183,6 @@ function WorkspacePage({ scope }: { scope: string }) {
       <span>{item.workspace.description || '用途未补充'}</span><span>{item.usage.allocated_bytes === undefined ? '文件总大小 ' + bytes(item.usage.logical_bytes) : '磁盘占用约 ' + bytes(item.usage.allocated_bytes)} · {statuses[item.usage.status]}</span>
       <span className="workspace-path">{item.workspace.root}</span></button>)}</div>}
     {!query.isPending && !query.error && !items.length && <p>没有匹配的工作区。</p>}
-    {current && <WorkspaceDetails key={scope + ':' + current.workspace.workspace_id} item={current} revision={query.data!.revision} client={client} refresh={id => void refresh(id)} onSaved={() => void query.refetch()} />}
+    {current && <WorkspaceDetails key={scope + ':' + current.workspace.workspace_id} item={current} revision={query.data!.revision} client={client} locked={locked} refresh={id => void refresh(id)} onSaved={() => void query.refetch()} />}
   </div></MainLayout>
 }

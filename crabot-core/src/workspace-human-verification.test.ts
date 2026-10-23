@@ -2506,6 +2506,7 @@ describe('normal fixed-job Admin completion preparation', () => {
         await fs.mkdir(path.join(packageDir, 'dist'), { recursive: true })
         await fs.writeFile(path.join(packageDir, 'dist/main.js'), 'throw new Error("Previously inactive channel must not auto-start")')
         const { ChannelManager } = require('../../crabot-admin/dist/channel-manager.js')
+        await fs.mkdir(path.join(f.data, 'admin'), { recursive: true })
         const channels = new ChannelManager(path.join(f.data, 'admin'), { registerModuleDefinition: async () => ({}), startModule: async () => ({}) })
         await channels.addImplementation({ id: 'channel-fixture-cold', name: 'finite cold channel', platform: 'fixture', type: 'builtin',
           module_path: path.relative(path.resolve('../crabot-admin'), packageDir), version: '0.1.0', created_at: '', updated_at: '' })

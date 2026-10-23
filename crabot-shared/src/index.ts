@@ -132,7 +132,7 @@ export { testAudioService } from './audio-client.js'
 export { parseVoiceConnection, voiceTerminalEntry, voiceSetupStatus } from './voice-connection.js'
 export * from './computer-use.js'
 
-export type { WorkspaceRecord, WorkspaceUsage, WorkspaceExecution, WorkspaceExecutionInventory, WorkspaceSummary, WorkspaceListResult,
+export type { WorkspaceRecord, WorkspaceUsage, WorkspaceExecution, WorkspaceExecutionInventory, WorkspaceSummary, WorkspaceMaintenanceStatus, WorkspaceListResult,
   WorkspaceCreateRequest, WorkspaceUpdateRequest, WorkspaceRecordResult, WorkspaceGetResult, WorkspaceScanResult,
   WorkspaceRecoveryRuntimeStart, WorkspaceRecoveryRuntimeRegistration, WorkspaceRecoveryRuntimeInvocation,
   WorkspaceRecoveryRuntimePlan, VerifyWorkspaceRelocationRecoveryRequestParams, VerifyWorkspaceRelocationRecoveryRequestResult,

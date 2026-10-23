@@ -5,9 +5,9 @@ import { ClientError } from 'crabot-client'
 import { serverQueries, setServerScope } from '../services/server-state'
 import { Workspaces } from './Workspaces'
 
-const mocks = vi.hoisted(() => ({ list: vi.fn(), get: vi.fn(), refresh: vi.fn(), update: vi.fn(), create: vi.fn(), totalUsage: vi.fn(), refreshTotalUsage: vi.fn(), bridge: { revealWorkspaceFolder: undefined as undefined | ReturnType<typeof vi.fn> } }))
+const mocks = vi.hoisted(() => ({ list: vi.fn(), get: vi.fn(), refresh: vi.fn(), update: vi.fn(), create: vi.fn(), totalUsage: vi.fn(), refreshTotalUsage: vi.fn(), maintenance: vi.fn(), bridge: { revealWorkspaceFolder: undefined as undefined | ReturnType<typeof vi.fn> } }))
 vi.mock('crabot-client', async () => ({ ...await vi.importActual('crabot-client'), WorkspaceClient: class {
-  list = mocks.list; get = mocks.get; refresh = mocks.refresh; update = mocks.update; create = mocks.create; totalUsage = mocks.totalUsage; refreshTotalUsage = mocks.refreshTotalUsage
+  list = mocks.list; get = mocks.get; refresh = mocks.refresh; update = mocks.update; create = mocks.create; totalUsage = mocks.totalUsage; refreshTotalUsage = mocks.refreshTotalUsage; maintenance = mocks.maintenance
 } }))
 vi.mock('../services/api', () => ({ getWebClient: () => ({}) }))
 vi.mock('../services/desktop-host', () => ({ desktopBridge: mocks.bridge }))
@@ -16,7 +16,7 @@ const id = '12345678-1234-4123-8123-123456789abc'
 const workspace = { workspace_id: id, kind: 'project', name: 'Crabot', description: '桌面应用', root: '/projects/crabot', source: 'existing', created_at: '2026-10-19T00:00:00.000Z' }
 const item = { workspace, directory_status: 'ready', usage: { status: 'complete', logical_bytes: 1234, file_count: 1, skipped_entries: 0 }, execution: { status: 'unknown' } }
 const snapshot = { revision: 2, storage_root: '/workspaces', items: [item, { ...item, workspace: { ...workspace, workspace_id: 'default', kind: 'default', name: '默认工作区', root: '/workspaces/default', description: '' }, directory_status: 'missing', usage: { status: 'pending', file_count: 0, skipped_entries: 0 } }] }
-beforeEach(() => { serverQueries.clear(); setServerScope('workspace-test'); vi.resetAllMocks(); mocks.bridge.revealWorkspaceFolder = undefined; mocks.list.mockResolvedValue(structuredClone(snapshot)); mocks.totalUsage.mockResolvedValue({ status: 'pending', file_count: 0, skipped_entries: 0 }) })
+beforeEach(() => { serverQueries.clear(); setServerScope('workspace-test'); vi.resetAllMocks(); mocks.bridge.revealWorkspaceFolder = undefined; mocks.maintenance.mockResolvedValue({ maintenance: false }); mocks.list.mockResolvedValue(structuredClone(snapshot)); mocks.totalUsage.mockResolvedValue({ status: 'pending', file_count: 0, skipped_entries: 0 }) })
 afterEach(() => { serverQueries.clear() })
 it('shows one row per project/default and does not invent zero space or idle execution for missing evidence', async () => {
   render(<MemoryRouter><Workspaces /></MemoryRouter>)
@@ -48,7 +48,10 @@ it('CAS conflict retains the draft, shows the latest metadata and requires a new
 })
 it('a lost create response keeps a stable project identity for an explicit retry', async () => {
   mocks.create.mockRejectedValueOnce(new ClientError('unreachable', '连接中断')).mockResolvedValueOnce({ revision: 3, workspace })
-  render(<MemoryRouter><Workspaces /></MemoryRouter>); fireEvent.click(await screen.findByRole('button', { name: '添加项目工作区' }))
+  render(<MemoryRouter><Workspaces /></MemoryRouter>)
+  const add = screen.getByRole('button', { name: '添加项目工作区' })
+  expect(add).toBeDisabled()
+  await waitFor(() => expect(add).toBeEnabled()); fireEvent.click(add)
   fireEvent.change(screen.getByLabelText('项目名称'), { target: { value: '新项目' } })
   fireEvent.click(screen.getByRole('button', { name: '保存工作区' }))
   expect(await screen.findByRole('alert')).toHaveTextContent('连接中断')
@@ -77,4 +80,57 @@ it('aggregate usage comes from the union endpoint; partial totals and missing al
   await waitFor(() => expect(total).toHaveTextContent('已统计下界'))
   expect(total).toHaveTextContent('2 KiB'); expect(total).toHaveTextContent('1 项未计入')
   expect(mocks.refreshTotalUsage).toHaveBeenCalledTimes(1)
+})
+
+it('maintenance keeps metadata drafts and read-only browsing while refusing scans, saves and folder opening', async () => {
+  mocks.maintenance.mockResolvedValue({ maintenance: true })
+  mocks.bridge.revealWorkspaceFolder = vi.fn()
+  mocks.list.mockResolvedValue({ ...snapshot, items: [{ ...item, usage: { status: 'pending', file_count: 0, skipped_entries: 0 } }] })
+  render(<MemoryRouter><Workspaces /></MemoryRouter>)
+  expect(await screen.findByText(/工作目录正在维护或等待恢复/)).toBeInTheDocument()
+  fireEvent.click(await screen.findByRole('button', { name: /Crabot 桌面应用/ }))
+  fireEvent.change(screen.getByLabelText('工作区名称'), { target: { value: '保留我的草稿' } })
+  expect(screen.getByRole('button', { name: '保存名称与用途' })).toBeDisabled()
+  expect(screen.getByRole('button', { name: '刷新空间统计' })).toBeDisabled()
+  expect(screen.getByRole('button', { name: '在文件管理器打开' })).toBeDisabled()
+  fireEvent.submit(screen.getByRole('button', { name: '保存名称与用途' }).closest('form')!)
+  expect(mocks.update).not.toHaveBeenCalled(); expect(mocks.refresh).not.toHaveBeenCalled()
+  mocks.maintenance.mockResolvedValue({ maintenance: false })
+  fireEvent.click(screen.getByRole('button', { name: '刷新列表与执行状态' }))
+  await waitFor(() => expect(screen.getByRole('button', { name: '保存名称与用途' })).toBeEnabled())
+  expect(screen.getByLabelText('工作区名称')).toHaveValue('保留我的草稿')
+  expect(mocks.bridge.revealWorkspaceFolder).not.toHaveBeenCalled()
+})
+
+it('a relocated project can request statistics again at its new root without repeating the old root', async () => {
+  const pending = { ...item, usage: { status: 'pending', file_count: 0, skipped_entries: 0 } }
+  mocks.list.mockResolvedValue({ ...snapshot, items: [pending] })
+  render(<MemoryRouter><Workspaces /></MemoryRouter>)
+  await waitFor(() => expect(mocks.refresh).toHaveBeenCalledTimes(1))
+  mocks.list.mockResolvedValue({ ...snapshot, revision: 3, items: [{ ...pending, workspace: { ...workspace, root: '/moved/crabot' } }] })
+  fireEvent.click(screen.getByRole('button', { name: '刷新列表与执行状态' }))
+  await waitFor(() => expect(mocks.refresh).toHaveBeenCalledTimes(2))
+  expect(mocks.refresh.mock.calls.map(args => args[0])).toEqual([id, id])
+})
+
+it('a failed maintenance refresh locks a previously available page and preserves its draft until verified again', async () => {
+  render(<MemoryRouter><Workspaces /></MemoryRouter>)
+  fireEvent.click(await screen.findByRole('button', { name: /Crabot 桌面应用/ }))
+  const save = screen.getByRole('button', { name: '保存名称与用途' })
+  await waitFor(() => expect(save).toBeEnabled())
+  fireEvent.change(screen.getByLabelText('工作区名称'), { target: { value: '等待核验的草稿' } })
+  mocks.maintenance.mockRejectedValue(new ClientError('unreachable', '连接中断'))
+  fireEvent.click(screen.getByRole('button', { name: '刷新列表与执行状态' }))
+  expect(await screen.findByRole('alert')).toHaveTextContent('暂时无法核实工作区维护状态')
+  expect(save).toBeDisabled()
+  expect(screen.getByRole('button', { name: '刷新空间统计' })).toBeDisabled()
+  fireEvent.submit(save.closest('form')!)
+  expect(mocks.update).not.toHaveBeenCalled()
+  expect(screen.getByLabelText('工作区名称')).toHaveValue('等待核验的草稿')
+  fireEvent.change(screen.getByLabelText('搜索工作区'), { target: { value: '无此项目' } })
+  expect(screen.getByText('没有匹配的工作区。')).toBeInTheDocument()
+  mocks.maintenance.mockResolvedValue({ maintenance: false })
+  fireEvent.click(screen.getByRole('button', { name: '重新核验维护状态' }))
+  await waitFor(() => expect(save).toBeEnabled())
+  expect(screen.getByLabelText('工作区名称')).toHaveValue('等待核验的草稿')
 })

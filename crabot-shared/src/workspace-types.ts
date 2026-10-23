@@ -33,6 +33,10 @@ export interface WorkspaceSummary {
   usage: WorkspaceUsage
   execution: WorkspaceExecution
 }
+export interface WorkspaceMaintenanceStatus {
+  maintenance: boolean
+}
+
 export interface WorkspaceListResult {
   revision: number
   storage_root: string

@@ -1757,6 +1757,12 @@ export class AdminModule extends ModuleBase {
     const workspaceRequest = pathname === '/api/workspaces' || pathname.startsWith('/api/workspaces/')
     // 路由处理
     try {
+      if (pathname === '/api/workspaces/maintenance') {
+        res.setHeader('Cache-Control', 'no-store')
+        if (req.method === 'GET') sendJson(res, 200, { maintenance: workspaceMaintenancePending(path.resolve(this.adminConfig.data_dir, '..')) || this.workspaceWebAccess().isClosed() })
+        else sendJson(res, 405, { code: 'WORKSPACE_METHOD_NOT_ALLOWED', message: '工作区维护状态仅支持读取。' })
+        return
+      }
       if (workspaceRequest && await this.workspaceService.handleWeb(req, res, pathname, () => this.readJsonBody(req, 65536))) return
       if (await this.voiceAdmin.handleWeb(req, res, pathname, () => this.readJsonBody(req))) return
       if (pathname === '/api/auth/login' && req.method === 'POST') {

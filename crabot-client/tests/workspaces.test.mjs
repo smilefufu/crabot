@@ -52,3 +52,14 @@ test('aggregate usage has a checked HTTP contract and never retries a failed ref
   await assert.rejects(denied.client.refreshTotalUsage(), { message: '维护中' })
   assert.equal(denied.calls.length, 1)
 })
+
+test('maintenance is a checked read-only status and never coerces malformed evidence to false', async () => {
+  const f = fixture({ maintenance: true })
+  assert.deepEqual(await f.client.maintenance(), { maintenance: true })
+  assert.equal(f.calls[0].url, 'http://localhost:3000/api/workspaces/maintenance')
+  assert.equal(f.calls[0].options.method, 'GET')
+  assert.equal(f.calls[0].options.body, undefined)
+  for (const body of [{}, { maintenance: null }, { maintenance: 'false' }]) {
+    await assert.rejects(fixture(body).client.maintenance(), { kind: 'validation' })
+  }
+})
