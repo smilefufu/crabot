@@ -79,6 +79,8 @@ test('an existing marker is not overwritten or removed when exclusive creation f
   assert.equal(fs.readFileSync(path.join(f.root, name), 'utf8'), 'unrelated existing file')
 })
 test('timeout stops only the actual probe generation and releases its directory handles', { timeout: 20000 }, async t => {
+  const diagnostics = []
+  t.mock.method(console, 'error', text => diagnostics.push(JSON.parse(text)))
   const f = fixture(t), sibling = cp.spawn(process.execPath, ['-e', 'process.send("ready");setTimeout(()=>{},30000)'], { stdio: ['ignore', 'ignore', 'ignore', 'ipc'] })
   const siblingExit = once(sibling, 'exit'); await once(sibling, 'message')
   t.after(async () => { if (sibling.exitCode === null && sibling.signalCode === null) sibling.kill('SIGKILL'); await siblingExit })
@@ -90,6 +92,9 @@ test('timeout stops only the actual probe generation and releases its directory 
   })
   syncBuiltinESMExports(); t.after(() => { replacement.mock.restore(); syncBuiltinESMExports() })
   await assert.rejects(probeWorkspaceDirectory({ directory: f.directory, authorize: allowed }), { code: 'WORKSPACE_ROOT_PROBE_UNVERIFIED' })
+  assert.equal(diagnostics[0].probe_event, 'deadline')
+  assert.equal(Number.isSafeInteger(diagnostics[0].elapsed_ms), true)
+  assert.equal(Number.isSafeInteger(diagnostics[0].submission_delay_ms), true)
   assert.equal(probe.exitCode !== null || probe.signalCode !== null, true)
   assert.equal(native.sameProcess(siblingIdentity, native.inspectProcess(sibling.pid)), true)
   assert.deepEqual(fs.readdirSync(f.root), ['.original'])
@@ -121,13 +126,57 @@ test('an actual executable spawn failure releases the acquired directory without
 })
 
 for (const mode of ['missing completion', 'failed exit']) test('neither an exit nor a completion frame alone proves filesystem capability: ' + mode, async t => {
-  const f = fixture(t), spawn = cp.spawn
+  const f = fixture(t), spawn = cp.spawn, diagnostics = []
+  t.mock.method(console, 'error', text => diagnostics.push(JSON.parse(text)))
   const code = mode === 'missing completion'
     ? 'process.once("message",()=>{process.exitCode=0;process.disconnect()})'
     : 'process.once("message",frame=>process.send({kind:"workspace_root_probe_complete",nonce:frame.nonce,root:frame.root},()=>{process.exitCode=1;process.disconnect()}))'
   const replacement = t.mock.method(cp, 'spawn', (command, _args, options) => spawn(command, ['-e', code], options))
   syncBuiltinESMExports(); t.after(() => { replacement.mock.restore(); syncBuiltinESMExports() })
   await assert.rejects(probeWorkspaceDirectory({ directory: f.directory, authorize: allowed }), { code: 'WORKSPACE_ROOT_PROBE_UNVERIFIED' })
+  assert.equal(diagnostics.length, 1)
+  assert.equal(diagnostics[0].event, 'workspace_root_probe_failed')
+  assert.equal(diagnostics[0].probe_event, mode === 'missing completion' ? 'disconnect' : 'child-exit')
+  assert.equal(JSON.stringify(diagnostics).includes(f.root), false)
   assert.deepEqual(fs.readdirSync(f.root), ['.original'])
   const moved = path.join(f.parent, 'released'); fs.renameSync(f.root, moved); fs.renameSync(moved, f.root)
+})
+
+
+test('probe diagnostics retain only fixed technical failure facts and no private error text', async t => {
+  const f = fixture(t), diagnostics = []
+  t.mock.method(console, 'error', text => diagnostics.push(JSON.parse(text)))
+  await assert.rejects(probeWorkspaceDirectory({ directory: f.directory, authorize: async () => { throw new Error('private-probe-secret ' + f.root) } }), { code: 'WORKSPACE_ROOT_PROBE_UNVERIFIED' })
+  assert.equal(diagnostics.length, 1)
+  const { elapsed_ms, submission_delay_ms, ...facts } = diagnostics[0]
+  assert.equal(Number.isSafeInteger(elapsed_ms), true); assert.equal(submission_delay_ms, null)
+  assert.deepEqual(facts, { event: 'workspace_root_probe_failed', stage: 'authorize', probe_event: null, accepted: false, exited: false, exit_code: null, exit_signal: null, native_exit_state: null })
+  assert.equal(JSON.stringify(diagnostics).includes('private-probe-secret'), false)
+  assert.equal(JSON.stringify(diagnostics).includes(f.root), false)
+})
+
+
+test('a diagnostic sink failure cannot skip the original failed-probe cleanup', async t => {
+  const f = fixture(t), spawn = cp.spawn
+  t.mock.method(console, 'error', () => { throw new Error('finite diagnostic sink failure') })
+  const missing = t.mock.method(cp, 'spawn', (_command, args, options) => spawn(path.join(f.parent, 'absent-node'), args, options))
+  syncBuiltinESMExports(); t.after(() => { missing.mock.restore(); syncBuiltinESMExports() })
+  await assert.rejects(probeWorkspaceDirectory({ directory: f.directory, authorize: allowed }), { code: 'WORKSPACE_ROOT_PROBE_UNVERIFIED' })
+  assert.deepEqual(fs.readdirSync(f.root), ['.original'])
+  const moved = path.join(f.parent, 'released'); fs.renameSync(f.root, moved); fs.renameSync(moved, f.root)
+})
+
+test('a completion and actual child exit still fail when the independent Native exit proof is unknown', async t => {
+  const f = fixture(t), spawn = cp.spawn, exited = native.isProcessExited, diagnostics = []
+  let child
+  t.mock.method(console, 'error', text => diagnostics.push(JSON.parse(text)))
+  const observed = t.mock.method(cp, 'spawn', (...args) => { child = spawn(...args); return child })
+  t.mock.method(native, 'isProcessExited', pid => pid === child?.pid ? false : exited(pid))
+  syncBuiltinESMExports(); t.after(() => { observed.mock.restore(); syncBuiltinESMExports() })
+  await assert.rejects(probeWorkspaceDirectory({ directory: f.directory, authorize: allowed }), { code: 'WORKSPACE_ROOT_PROBE_UNVERIFIED' })
+  assert.equal(child.exitCode, 0)
+  assert.equal(diagnostics[0].probe_event, 'native-exit')
+  assert.equal(diagnostics[0].accepted, true); assert.equal(diagnostics[0].exited, true)
+  assert.equal(diagnostics[0].native_exit_state, 'unknown')
+  assert.deepEqual(fs.readdirSync(f.root), ['.original'])
 })

@@ -31,6 +31,9 @@ function environment() {
 }
 export async function probeWorkspaceDirectory(options) {
   let stage = 'input', directoryFd, pin, child, processes, timer, spawnFailed = false
+  const began = performance.now()
+  let spawnedAt, submittedAt
+  let probeEvent = null, accepted = false, exited = false, exitCode, exitSignal, nativeExitState = null
   const release = () => {
     if (pin) { const held = pin; pin = undefined; native.releaseDirectoryPin(held) }
     if (directoryFd !== undefined) { const held = directoryFd; directoryFd = undefined; fs.closeSync(held) }
@@ -62,28 +65,34 @@ export async function probeWorkspaceDirectory(options) {
     child = spawn(process.execPath, [entry], { cwd: process.platform === 'win32' ? root.path : undefined,
       env: environment(), stdio: ['ignore', 'ignore', 'pipe', ...(directoryFd !== undefined ? [directoryFd] : []), 'ipc'],
       windowsHide: true, detached: process.platform !== 'win32' })
-    let rejectRun, resolveRun, accepted = false, exited = false, exitCode, exitSignal
+    spawnedAt = performance.now()
+    let rejectRun, resolveRun
     const run = new Promise((resolve, reject) => { resolveRun = resolve; rejectRun = reject })
     void run.catch(() => {})
-    const fail = () => rejectRun(failure(stage))
+    const fail = event => { probeEvent ??= event; rejectRun(failure(stage)) }
     const complete = () => { if (accepted && exited) resolveRun() }
-    child.on('error', () => { spawnFailed = true; fail() })
+    child.on('error', () => { spawnFailed = true; fail('child-error') })
     child.stderr?.resume()
-    child.once('exit', (code, signal) => { exited = true; exitCode = code; exitSignal = signal; if (code !== 0 || signal) fail(); else complete() })
-    child.once('disconnect', () => { if (!accepted) fail() })
+    child.once('exit', (code, signal) => { exited = true; exitCode = code; exitSignal = signal; if (code !== 0 || signal) fail('child-exit'); else complete() })
+    child.once('disconnect', () => { if (!accepted) fail('disconnect') })
     child.on('message', message => {
       if (accepted || !fields(message, ['kind', 'nonce', 'root']) || message.kind !== 'workspace_root_probe_complete'
-        || message.nonce !== nonce || JSON.stringify(message.root) !== JSON.stringify(root)) { fail(); return }
+        || message.nonce !== nonce || JSON.stringify(message.root) !== JSON.stringify(root)) { fail('completion-frame'); return }
       accepted = true; complete()
     })
-    timer = setTimeout(fail, 5000)
+    timer = setTimeout(() => fail('deadline'), 5000)
     processes = captureSpawnedProcessTree(child)
     assertAuthorized(current); checkDirectory(root)
     stage = 'submit'
-    child.send({ kind: 'workspace_root_probe', nonce, root, parent }, error => { if (error) fail() })
+    submittedAt = performance.now()
+    child.send({ kind: 'workspace_root_probe', nonce, root, parent }, error => { if (error) fail('submission') })
     stage = 'exit'
     await run
-    if (exitCode !== 0 || exitSignal || probeKnownProcessExit(processes).state !== 'stopped') throw failure(stage)
+    if (exitCode !== 0 || exitSignal) { probeEvent = 'child-exit'; throw failure(stage) }
+    probeEvent = 'native-exit'
+    nativeExitState = probeKnownProcessExit(processes).state
+    if (nativeExitState !== 'stopped') throw failure(stage)
+    probeEvent = null
     clearTimeout(timer); timer = undefined
     release()
     stage = 'final-authorize'
@@ -91,6 +100,11 @@ export async function probeWorkspaceDirectory(options) {
     assertAuthorized(final); checkDirectory(root)
     return Object.freeze(root)
   } catch (cause) {
+    try {
+      console.error(JSON.stringify({ event: 'workspace_root_probe_failed', stage, probe_event: probeEvent, accepted, exited,
+        exit_code: child?.exitCode ?? null, exit_signal: child?.signalCode ?? null, native_exit_state: nativeExitState,
+        elapsed_ms: Math.round(performance.now() - began), submission_delay_ms: submittedAt === undefined ? null : Math.round(submittedAt - spawnedAt) }))
+    } catch { /* Diagnostics must not interrupt owned-child cleanup. */ }
     clearTimeout(timer)
     if (processes) {
       try { await stopKnownProcessScope(processes, { timeoutMs: 1, onObserved: async () => {} }) } catch { /* Unknown exit remains failure; retain handles until the actual child exits. */ }

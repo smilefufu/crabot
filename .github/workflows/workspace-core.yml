@@ -2,7 +2,7 @@ name: Workspace Core lifecycle
 
 on:
   push:
-    branches: ['feat/desktop-*']
+    branches: ['feat/desktop-*', 'ci/desktop-workspace-probe-20261023']
   pull_request:
     paths:
       - '.github/workflows/desktop.yml'
@@ -55,8 +55,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, macos-14, macos-15-intel, windows-latest]
-        suite: [finite, business, archive, recovery, recovery-terminal, recovery-services, recovery-admin, owned, owned-recovery, completion]
+        # Temporary isolated diagnosis; normal feature/PR runs keep the full matrix.
+        os: ${{ fromJSON(github.ref == 'refs/heads/ci/desktop-workspace-probe-20261023' && '["windows-latest"]' || '["ubuntu-22.04","macos-14","macos-15-intel","windows-latest"]') }}
+        suite: ${{ fromJSON(github.ref == 'refs/heads/ci/desktop-workspace-probe-20261023' && '["owned-recovery"]' || '["finite","business","archive","recovery","recovery-terminal","recovery-services","recovery-admin","owned","owned-recovery","completion"]') }}
     runs-on: ${{ matrix.os }}
     concurrency:
       group: workspace-core-${{ github.ref }}-${{ matrix.os }}-${{ matrix.suite }}
@@ -110,7 +111,15 @@ jobs:
       - name: Same MM failed normal job, current recovery and another SDK migration
         if: ${{ matrix.suite == 'owned-recovery' && !cancelled() && steps.compile.outcome == 'success' }}
         working-directory: crabot-core
-        run: node node_modules/vitest/vitest.mjs run src/workspace-human-verification.test.ts --testNamePattern='same MM workspace recovery and later migration' --maxWorkers=1 --minWorkers=1
+        env:
+          CRABOT_FINITE_ROOT_DIAGNOSTICS: ${{ github.ref == 'refs/heads/ci/desktop-workspace-probe-20261023' && '1' || '0' }}
+        run: |
+          probe_attempt_count=1
+          if [[ "$GITHUB_REF" == refs/heads/ci/desktop-workspace-probe-20261023 ]]; then probe_attempt_count=3; fi
+          for ((probe_attempt=1; probe_attempt<=probe_attempt_count; probe_attempt++)); do
+            printf 'Same-MM check %d/%d\n' "$probe_attempt" "$probe_attempt_count"
+            node node_modules/vitest/vitest.mjs run src/workspace-human-verification.test.ts --testNamePattern='same MM workspace recovery and later migration' --maxWorkers=1 --minWorkers=1
+          done
       - name: Actual archived workspace records and bounded terminal failures
         if: ${{ matrix.suite == 'archive' && !cancelled() && steps.compile.outcome == 'success' }}
         working-directory: crabot-core
