@@ -3288,6 +3288,16 @@ describe('normal fixed-job Admin completion preparation', () => {
               moved = true
             } finally { native.renameFileNoReplace = originalRename }
             await grant.verifyHealth()
+            let reads = 0
+            const originalRead = syncFs.readFileSync, counting = vi.spyOn(syncFs, 'readFileSync').mockImplementation(((file: any, ...args: any[]) => {
+              if (typeof file === 'number') reads++
+              return (originalRead as any)(file, ...args)
+            }) as any)
+            try { grant.releasedHealth.assertCurrent() }
+            finally { counting.mockRestore() }
+            console.log('[Released current observation cost]', { reads })
+            expect(reads).toBeGreaterThan(0)
+            expect(reads).toBeLessThanOrEqual(100)
             const catalog = new WorkspaceCatalog({ dataRoot: f.data, files: native }), previous = await catalog.snapshot()
             await catalog.createProject({ workspace_id: randomUUID(), name: 'Lawful post-release project' })
             expect((await catalog.snapshot()).revision).toBeGreaterThan(previous.revision)

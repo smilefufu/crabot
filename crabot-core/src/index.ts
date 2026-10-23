@@ -2777,7 +2777,7 @@ export class ModuleManager {
     let active = true
     const failure = () => Object.assign(new Error('当前已收口恢复的运行或新根无法确认，未重发启动。'), { code: 'SERVICE_UNAVAILABLE' })
     const assertCurrent = () => {
-      try {
+      try { return require('../../scripts/lib/workspace-relocation-intent.mjs').observeWorkspaceRelocationRecords(() => {
         grant.verifyActors()
         if (!active || !admin || !adminIdentity || this.processes.get('admin-web') !== admin || this.modules.size !== definitions.size
           || !native.sameProcess(adminIdentity, native.inspectProcess(admin.pid)) || !native.sameProcess(stored.launch.parent, native.inspectProcess(process.pid))
@@ -2800,7 +2800,7 @@ export class ModuleManager {
         }
         for (const id of this.processes.keys()) if (id !== 'admin-web' && !cores.some(item => item.module_id === id) && !activeNonCore.has(id)) throw failure()
         if (['restored', 'resuming', 'resumed'].includes(grant.phase) && [...activeNonCore.keys()].some(id => !this.processes.has(id))) throw failure()
-      } catch (cause) { active = false; coordinator.close(); throw Object.assign(failure(), { cause }) }
+      }) } catch (cause) { active = false; coordinator.close(); throw Object.assign(failure(), { cause }) }
     }
     const verifyRuntime = async () => {
       try {
