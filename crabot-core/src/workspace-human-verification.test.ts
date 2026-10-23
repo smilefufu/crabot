@@ -2430,11 +2430,13 @@ describe('normal fixed-job Admin completion preparation', () => {
     }
   }, process.platform === 'win32' || process.platform === 'darwin' && process.arch === 'x64' ? 600000 : 120000)
   const hasNativeRelease = typeof require('../../scripts/lib/process-identity.cjs').renameFileNoReplace === 'function'
-  const releaseModes = [...(hasNativeRelease ? ['completion release', 'lost release acknowledgement'] : ['release unavailable']),
+  const resumeModes = hasNativeRelease ? ['resume running module', 'resume inactive module', 'resume tool'] : []
+  const releaseModes = [...resumeModes, ...(hasNativeRelease ? ['completion release', 'lost release acknowledgement'] : ['release unavailable']),
     ...(process.platform !== 'win32' && process.getuid?.() !== 0 ? ['release readonly root'] : [])]
-  it.each(['Agent', 'Agent and Memory', 'catalog changed after probe', 'completion observation', 'released without observation', 'definition changed before release', 'plan changed before release', ...releaseModes])('starts only the planned cold validation generations: %s', async mode => {
+  it.each(['Agent', 'Agent and Memory', 'catalog changed after probe', 'completion observation', 'released without observation', 'definition changed before release', 'plan changed before release', 'released current observation', ...releaseModes])('starts only the planned cold validation generations: %s', async mode => {
     const withMemory = mode === 'Agent and Memory'
-    const f = await fixture({ actualAgent: true, actualAdmin: true, ...(mode === 'catalog changed after probe' ? { adminReadyDelayMs: 1100 } : {}), validationHealth: 'healthy', withMemory, inactiveMemory: !withMemory, memoryHealth: withMemory ? 'healthy' : undefined, processLifetimeMs: 300000 })
+    const extraModule = mode === 'resume tool' ? 'tool' : mode === 'resume inactive module' ? 'inactive' : mode === 'resume running module' ? 'running' : undefined
+    const f = await fixture({ actualAgent: true, actualAdmin: true, extraModule, ...(mode === 'catalog changed after probe' ? { adminReadyDelayMs: 1100 } : {}), validationHealth: 'healthy', withMemory, inactiveMemory: !withMemory, memoryHealth: withMemory ? 'healthy' : undefined, processLifetimeMs: 300000 })
     const locks = require('../../scripts/lib/cli-lock.mjs'), records = require('../../scripts/lib/workspace-relocation-intent.mjs')
     const lock = await locks.acquireWorkspaceRelocationLock(f.data, f.params.intent_id)
     let cold: any, coordinator: any
@@ -2465,7 +2467,8 @@ describe('normal fixed-job Admin completion preparation', () => {
       cold = new ModuleManager({ port: 0, modules: [], shutdown_timeout: 0.1 }, f.data) as any
       for (const [id, definition] of definitions as Map<string, any>) {
         const env = { ...definition.env, TEST_MODULE_ID: id, TEST_UNHEALTHY: path.join(f.data, 'cold-health-unhealthy'), TEST_RECEIPT: path.join(f.data, 'workspace-control/relocation-recovery', request.recovery_id, 'runtime-starts', id + '.json'), TEST_MARKER: path.join(f.data, 'cold-start-' + id + '.json') }
-        cold.modules.set(id, { ...definition, status: 'stopped', pid: undefined, auto_start: false, ...(id === 'admin-web' ? {} : { entry: `"${process.execPath}" "${entry}"`, skip_health_check: true, env }) })
+        const core = id === 'crabot-agent' || id === 'memory-default'
+        cold.modules.set(id, { ...definition, status: 'stopped', pid: undefined, auto_start: false, ...(core ? { entry: `"${process.execPath}" "${entry}"`, skip_health_check: true, env } : {}) })
       }
       await cold.start(); cold.config.port = cold.server.address().port
       await fs.unlink(path.join(f.data, 'ready')); await cold.startModuleProcess('admin-web')
@@ -2569,7 +2572,7 @@ describe('normal fixed-job Admin completion preparation', () => {
       expect(health.root_verified).toEqual(proof)
       await health.verify()
       expect((await fs.stat(root, { bigint: true })).mtimeNs).toBe(probedAt)
-      if (mode === 'Agent' || releaseModes.includes(mode)) {
+      if (mode === 'Agent' || mode === 'released current observation' || releaseModes.includes(mode)) {
         expect(typeof cold.prepareWorkspaceRecoveryCompletion).toBe('function')
         const [prepared, concurrent] = await Promise.all([
           cold.prepareWorkspaceRecoveryCompletion(request, 'fixture-human'),
@@ -2581,6 +2584,7 @@ describe('normal fixed-job Admin completion preparation', () => {
           instance_id: proof.instance_id, admin_runtime_id: adminState.runtimeId }
         expect(prepared).toEqual({ prepared: true, ...expected })
         expect(typeof cold.releaseWorkspaceRecoveryCompletion).toBe('function')
+        expect(typeof cold.resumeWorkspaceRecoveryWeb).toBe('function')
         const grant = cold.workspaceRecoveryFinalizationGrant
         const finalization = async (params: any, bearer?: string) => {
           const response = await fetch(`http://127.0.0.1:${cold.config.port}/verify_workspace_relocation_recovery_finalization`, { method: 'POST',
@@ -2621,6 +2625,40 @@ describe('normal fixed-job Admin completion preparation', () => {
         expect(JSON.stringify(await f.calls())).not.toContain(grant.token)
         expect((await fetch(`http://127.0.0.1:${f.port}/api/friends`, { headers: { Authorization: 'Bearer fixture-human' } })).status).toBe(200)
         expect((await fetch(`http://127.0.0.1:${f.port}/api/chat`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer fixture-human' }, body: '{}' })).status).toBe(503)
+        if (mode === 'released current observation') {
+          await cold.beginWorkspaceRecoveryCompletionObservation(request, 'fixture-human')
+          grant.releasedHealth = cold.observeWorkspaceRecoveryReleasedHealth(request, coordinator, health, grant)
+          grant.phase = 'releasing'; grant.verify()
+          const native = require('../../scripts/lib/process-identity.cjs'), admission = require('../../scripts/lib/workspace-recovery-admission.mjs')
+          const originalRename = native.renameFileNoReplace, releasedFile = path.join(f.data, 'workspace-control/relocation-history', request.intent_id + '.released.json')
+          let moved = false
+          try {
+            // Read-observer fixture only: no coordinator effect acknowledgement or service-restore permission is fabricated.
+            native.renameFileNoReplace = (source: string, destination: string) => require('node:fs').renameSync(source, destination)
+            try {
+              await records.commitWorkspaceRelocationFinalizing({ dataDir: f.data, id: request.intent_id, verify: grant.verifyHealth, assertCurrent: grant.verify,
+                checkCapabilities: async (verify: () => Promise<void>) => { await verify() } })
+              moved = true
+            } finally { native.renameFileNoReplace = originalRename }
+            await grant.verifyHealth()
+            const catalog = new WorkspaceCatalog({ dataRoot: f.data, files: native }), previous = await catalog.snapshot()
+            await catalog.createProject({ workspace_id: randomUUID(), name: 'Lawful post-release project' })
+            expect((await catalog.snapshot()).revision).toBeGreaterThan(previous.revision)
+            const afterWrite = (await fs.stat(root, { bigint: true })).mtimeNs
+            await grant.verifyHealth()
+            expect(await callRoot(request, token)).toMatchObject({ success: true, data: proof })
+            expect((await fs.stat(root, { bigint: true })).mtimeNs).toBe(afterWrite)
+            await expect(admission.inspectWorkspaceRecoveryControlFacts({ dataDir: f.data, request, verify: async () => {}, readScope: admission.readWorkspaceRecoveryCompletionScope })).rejects.toBeDefined()
+            await grant.verifyHealth()
+            expect(await finalization({ action: 'resume_web' }, grant.token)).toMatchObject({ success: false, error: { code: 'FORBIDDEN' } })
+            expect((await fetch(`http://127.0.0.1:${f.port}/api/chat`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer fixture-human' }, body: '{}' })).status).toBe(503)
+            const state = cold.childStates.get(cold.processes.get('admin-web')), originalId = state.runtimeId
+            state.runtimeId = randomUUID(); expect(() => grant.verify()).toThrow(); state.runtimeId = originalId
+            expect(grant.revoked).toBe(true); expect(() => grant.verify()).toThrow()
+            expect(await fs.readFile(ledgerFile)).toEqual(ledger)
+            return
+          } finally { native.renameFileNoReplace = originalRename; if (moved) await fs.rename(releasedFile, fenceFile) }
+        }
         if (releaseModes.includes(mode)) {
           const child = coordinator.child, send = child.send.bind(child), emit = child.emit.bind(child)
           let lost = false, rootMode: number | undefined
@@ -2634,17 +2672,45 @@ describe('normal fixed-job Admin completion preparation', () => {
           })
           try {
             if (mode === 'release readonly root') { rootMode = (await fs.stat(root)).mode & 0o777; await fs.chmod(root, 0o500) }
-            const first = cold.releaseWorkspaceRecoveryCompletion(request, 'fixture-human'), second = cold.releaseWorkspaceRecoveryCompletion(request, 'fixture-human')
+            const restoring = resumeModes.includes(mode), operate = () => restoring ? cold.resumeWorkspaceRecoveryWeb(request, 'fixture-human') : cold.releaseWorkspaceRecoveryCompletion(request, 'fixture-human')
+            const start = vi.spyOn(cold, 'startModuleProcess')
+            const first = operate(), second = operate()
             if (hasNativeRelease && mode !== 'release readonly root') {
               const [released, concurrent] = await Promise.all([first, second])
-              expect(released).toEqual({ released: true, ...expected }); expect(concurrent).toBe(released)
-              expect(await cold.releaseWorkspaceRecoveryCompletion(request, 'fixture-human')).toBe(released)
+              expect(released).toEqual({ ...(restoring ? { resumed: true } : { released: true }), ...expected }); expect(concurrent).toBe(released)
+              expect(await operate()).toBe(released)
               expect(await fs.readFile(path.join(f.data, 'workspace-control/relocation-history', request.intent_id + '.released.json'))).toEqual(before)
               await expect(fs.lstat(fenceFile)).rejects.toMatchObject({ code: 'ENOENT' })
-              await health.verify()
+              await grant.verifyHealth()
               expect(await callRoot(request, token)).toMatchObject({ success: true, data: proof })
-              expect(await finalization({ action: 'resume_web' }, grant.token)).toMatchObject({ success: false, error: { code: 'FORBIDDEN' } })
-              expect((await fetch(`http://127.0.0.1:${f.port}/api/chat`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer fixture-human' }, body: '{}' })).status).toBe(503)
+              if (restoring) {
+                const id = extraModule === 'tool' ? 'fixture-tool' : 'fixture-channel'
+                const oldScope = records.readWorkspaceRelocationArchivedState(f.data, request.intent_id).modules.modules.find((scope: any) => scope.module_id === id)
+                expect(start.mock.calls.filter((args: any[]) => args[0] === id)).toHaveLength(extraModule === 'inactive' ? 0 : 1)
+                if (extraModule === 'inactive') expect(cold.processes.has(id)).toBe(false)
+                else {
+                  const row = (await cold.runtimeRegistry.listRecords()).find((row: any) => row.module_id === id)
+                  expect(row.runtime_id).not.toBe(oldScope.runtime_id); expect(cold.modules.get(id).status).toBe('running')
+                }
+                expect(await finalization({ action: 'resume_web' }, grant.token)).toMatchObject({ success: true })
+                const create = await fetch(`http://127.0.0.1:${f.port}/api/workspaces`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer fixture-human' },
+                  body: JSON.stringify({ workspace_id: randomUUID(), name: 'After cold recovery' }) })
+                const project = await create.json() as any
+                expect(create.status, JSON.stringify(project)).toBe(200)
+                expect(project.workspace.root.startsWith(path.join(root, 'projects') + path.sep)).toBe(true)
+                expect((await fetch(`http://127.0.0.1:${f.port}/api/workspaces/default/usage/refresh`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer fixture-human' }, body: '{}' })).status).toBe(202)
+                await grant.verifyHealth(); grant.verifyRestored()
+                const firstCompletion = cold.completeWorkspaceRecovery(request, 'fixture-human'), nextCompletion = cold.completeWorkspaceRecovery(request, 'fixture-human')
+                expect(nextCompletion).toBe(firstCompletion); expect(await firstCompletion).toBe(released)
+                expect(await cold.completeWorkspaceRecovery(request, 'fixture-human')).toBe(released)
+                expect(grant.revoked).toBe(true); expect(child.connected).toBe(false)
+                expect(require('../../scripts/lib/known-process-exit.cjs').probeKnownProcessExit([coordinator.launch.process]).state).toBe('stopped')
+                expect(cold.workspaceRecoveryInitialization).toBeUndefined(); expect(cold.workspaceRecoveryFinalizationGrant).toBeUndefined()
+                expect(await finalization({ action: 'resume_web' }, grant.token)).toMatchObject({ success: false, error: { code: 'FORBIDDEN' } })
+              } else {
+                expect(await finalization({ action: 'resume_web' }, grant.token)).toMatchObject({ success: false, error: { code: 'FORBIDDEN' } })
+                expect((await fetch(`http://127.0.0.1:${f.port}/api/chat`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer fixture-human' }, body: '{}' })).status).toBe(503)
+              }
               expect(lost).toBe(mode === 'lost release acknowledgement')
             } else {
               let failure: any
@@ -2658,8 +2724,9 @@ describe('normal fixed-job Admin completion preparation', () => {
               expect(await fs.readFile(fenceFile)).toEqual(before)
             }
             expect(sent.filter(kind => kind === 'workspace_recovery_release')).toHaveLength(1)
-            expect(sent.filter(kind => kind === 'workspace_recovery_release_observe')).toHaveLength(mode === 'completion release' ? 0 : 1)
+            expect(sent.filter(kind => kind === 'workspace_recovery_release_observe')).toHaveLength(['lost release acknowledgement', 'release unavailable', 'release readonly root'].includes(mode) ? 1 : 0)
             expect(await fs.readFile(ledgerFile)).toEqual(ledger)
+            start.mockRestore()
             return
           } finally { if (rootMode !== undefined) await fs.chmod(root, rootMode); sending.mockRestore(); receiving.mockRestore() }
         }

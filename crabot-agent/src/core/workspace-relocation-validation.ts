@@ -100,7 +100,7 @@ export function createWorkspaceRelocationRootVerifier(options: Options) {
 
 /** The current recovery role has its own probe; an archived normal launch never authorizes it. */
 export function createWorkspaceRecoveryRootVerifier(options: Options) {
-  let original: string | undefined, pending: Promise<VerifyWorkspaceRelocationRecoveryRootResult> | undefined, failed = false
+  let original: string | undefined, pending: Promise<VerifyWorkspaceRelocationRecoveryRootResult> | undefined, failed = false, releasedObserved = false
   return async (params: VerifyWorkspaceRelocationRecoveryRootParams, bearer?: string): Promise<VerifyWorkspaceRelocationRecoveryRootResult> => {
     if (!bearer) throw new RpcError('UNAUTHORIZED', '缺少当前Agent运行凭据。')
     const token = options.runtimeBearer(), supplied = Buffer.from(bearer)
@@ -118,6 +118,8 @@ export function createWorkspaceRecoveryRootVerifier(options: Options) {
       const native = require(path.join(__dirname, '../../../scripts/lib/process-identity.cjs'))
       const read = () => {
         const { released, ...scope } = admission.readWorkspaceRecoveryCompletionScope(options.dataDir, request)
+        if (releasedObserved && !released) throw unavailable()
+        releasedObserved ||= released
         return { scope,
           coordinator: records.readWorkspaceRecoveryCoordinator(options.dataDir, request.recovery_id),
           plan: records.readWorkspaceRecoveryRuntimePlan(options.dataDir, request.recovery_id),
@@ -160,7 +162,9 @@ export function createWorkspaceRecoveryRootVerifier(options: Options) {
           storageRoot: workspaceRootOverride ? path.resolve(workspaceRootOverride) : undefined, files: native }).snapshot()
         assertCurrent()
         const selected = state.scope.state.selected, target = state.scope.state.published.target
-        if (catalog.storage_root !== target.path || catalog.revision !== selected.catalog_revision || sha256CanonicalJson(catalog) !== selected.catalog_sha256) throw unavailable()
+        const released = admission.readWorkspaceRecoveryCompletionScope(options.dataDir, request).released
+        if (catalog.storage_root !== target.path || catalog.revision < selected.catalog_revision
+          || !released && (catalog.revision !== selected.catalog_revision || sha256CanonicalJson(catalog) !== selected.catalog_sha256)) throw unavailable()
         stage = 'current-mm-runtime'
         const rpc = await require(path.join(__dirname, '../../../scripts/lib/pinned-process-rpc.cjs')).openPinnedProcessRpc(
           state.coordinator.launch.parent, options.moduleManagerPort, { source: 'crabot-agent', timeoutMs: 5000 })

@@ -45,6 +45,7 @@ import {
   type VerifyWorkspaceRelocationRecoveryReleaseParams,
   type VerifyWorkspaceRelocationRecoveryReleaseResult,
   type ReleaseWorkspaceRelocationRecoveryCompletionResult,
+  type ResumeWorkspaceRelocationRecoveryWebResult,
   type VerifyWorkspaceRelocationRecoveryAdmissionParams,
   type VerifyWorkspaceRelocationRecoveryAdmissionResult,
   type VerifyWorkspaceRelocationRecoveryRequestParams,
@@ -113,6 +114,7 @@ interface WorkspaceRecoveryAdmission {
   close: () => void
 }
 interface WorkspaceRecoveryCoordinator {
+  child: ChildProcess
   verify: () => Promise<void>
   close: () => void
   beginCompletionObservation: () => Promise<void>
@@ -131,10 +133,19 @@ interface WorkspaceRecoveryValidationHealth extends WorkspaceRecoveryValidationL
   healthy_modules: ReadonlyArray<{ module_id: ModuleId; runtime_id: string }>
   root_verified: VerifyWorkspaceRelocationRecoveryRootResult
 }
+interface WorkspaceRecoveryReleasedHealth {
+  root_verified: VerifyWorkspaceRelocationRecoveryRootResult
+  assertCurrent: () => void
+  verifyRuntime: () => Promise<void>
+  verify: () => Promise<void>
+}
 interface WorkspaceRecoveryFinalizationGrant {
   token: string
   revoked: boolean
-  phase: 'preparing' | 'prepared' | 'releasing' | 'released'
+  phase: 'preparing' | 'prepared' | 'releasing' | 'released' | 'restoring' | 'restored' | 'resuming' | 'resumed'
+  releasedHealth?: WorkspaceRecoveryReleasedHealth
+  verifyRestored?: () => void
+  verifyActors: () => void
   verifyHealth: () => Promise<void>
   job: Readonly<Omit<PrepareWorkspaceRelocationRecoveryCompletionResult, 'prepared'>>
   verify: () => void
@@ -145,7 +156,7 @@ interface WorkspaceRecoveryInitialization {
   verify: () => Promise<void>
   releaseParentLock: () => void
   coordinator?: WorkspaceRecoveryCoordinator
-  readScope: () => { fingerprint: string }
+  readScope: () => { fingerprint: string; released?: boolean }
   allowCompletionObservation: () => void
   close: () => void
 }
@@ -327,6 +338,8 @@ export class ModuleManager {
   private readonly workspaceRecoveryCompletionObservations = new WeakMap<WorkspaceRecoveryCoordinator, Promise<WorkspaceRecoveryValidationHealth>>()
   private readonly workspaceRecoveryCompletionPreparations = new WeakMap<WorkspaceRecoveryCoordinator, Promise<PrepareWorkspaceRelocationRecoveryCompletionResult>>()
   private readonly workspaceRecoveryCompletionReleases = new WeakMap<WorkspaceRecoveryCoordinator, Promise<ReleaseWorkspaceRelocationRecoveryCompletionResult>>()
+  private readonly workspaceRecoveryWebResumes = new WeakMap<WorkspaceRecoveryCoordinator, Promise<ResumeWorkspaceRelocationRecoveryWebResult>>()
+  private readonly workspaceRecoveryCompletions = new Map<string, { fingerprint: string; bearerHash: string; pending: Promise<ResumeWorkspaceRelocationRecoveryWebResult> }>()
   private workspaceRecoveryFinalizationGrant?: WorkspaceRecoveryFinalizationGrant
   private workspaceRecoveryInitialization?: WorkspaceRecoveryInitialization
   private workspaceRecoveryInitializations = new Map<string, { fingerprint: string; bearerHash: string; pending: Promise<WorkspaceRecoveryCoordinator> }>()
@@ -2477,19 +2490,34 @@ export class ModuleManager {
         const job = Object.freeze({ ...request, launch_sha256: health.root_verified.launch_sha256, plan_sha256: health.root_verified.plan_sha256,
           instance_id: health.root_verified.instance_id, admin_runtime_id: context.result.admin_runtime_id })
         if (job.instance_id !== context.result.instance_id) throw failure()
-        grant = { token: crypto.randomBytes(32).toString('base64url'), revoked: false, phase: 'preparing', job, verifyHealth: health.verify, verify: () => {
-          try {
-            if (this.workspaceRecoveryFinalizationGrant !== grant || grant!.revoked || this.workspaceRecoveryInitialization !== context
-              || context.coordinator !== coordinator) throw failure()
-            const currentScope = grant!.phase === 'releasing' || grant!.phase === 'released' ? context.readScope()
-              : require('../../scripts/lib/workspace-recovery-admission.mjs').readWorkspaceRecoveryAdmissionScope(this.dataDir, request)
-            if (currentScope.fingerprint !== scope.fingerprint) throw failure()
-            health.assertCurrent()
-            const admin = this.processes.get('admin-web'), state = admin && this.childStates.get(admin)
-            if (!admin || !state || state.runtimeId !== job.admin_runtime_id || state.finalizeStarted || state.rootExited || state.termination || state.forceTermination
-              || !state.reachedRunning || this.modules.get('admin-web')?.status !== 'running' || admin.exitCode !== null || admin.signalCode !== null) throw failure()
-          } catch (cause) { grant!.revoked = true; coordinator.close(); throw Object.assign(failure(), { cause }) }
-        } }
+        const verifyActors = () => {
+          if (this.workspaceRecoveryFinalizationGrant !== grant || grant!.revoked || this.workspaceRecoveryInitialization !== context
+            || context.coordinator !== coordinator) throw failure()
+          const completing = ['releasing', 'released', 'restoring', 'restored', 'resuming', 'resumed'].includes(grant!.phase)
+          const currentScope = completing ? context.readScope()
+            : require('../../scripts/lib/workspace-recovery-admission.mjs').readWorkspaceRecoveryAdmissionScope(this.dataDir, request)
+          if (currentScope.fingerprint !== scope.fingerprint) throw failure()
+          const admin = this.processes.get('admin-web'), state = admin && this.childStates.get(admin)
+          if (!admin || !state || state.runtimeId !== job.admin_runtime_id || state.finalizeStarted || state.rootExited || state.termination || state.forceTermination
+            || !state.reachedRunning || this.modules.get('admin-web')?.status !== 'running' || admin.exitCode !== null || admin.signalCode !== null) throw failure()
+        }
+        grant = { token: crypto.randomBytes(32).toString('base64url'), revoked: false, phase: 'preparing', job, verifyActors,
+          verifyHealth: async () => {
+            grant!.verify()
+            if (context.readScope().released) {
+              if (!grant!.releasedHealth) throw failure()
+              await grant!.releasedHealth.verify()
+            } else await health.verify()
+            grant!.verify()
+          }, verify: () => {
+            try {
+              verifyActors()
+              if (context.readScope().released) {
+                if (!grant!.releasedHealth) throw failure()
+                grant!.releasedHealth.assertCurrent()
+              } else health.assertCurrent()
+            } catch (cause) { grant!.revoked = true; coordinator.close(); throw Object.assign(failure(), { cause }) }
+          } }
         if (this.workspaceRecoveryFinalizationGrant) this.workspaceRecoveryFinalizationGrant.revoked = true
         this.workspaceRecoveryFinalizationGrant = grant; grant.verify()
         const expected = Object.freeze({ prepared: true as const, ...job })
@@ -2522,9 +2550,109 @@ export class ModuleManager {
     grant.verify()
     if (!params || typeof params !== 'object' || Array.isArray(params) || Object.keys(params).join() !== 'action'
       || !['prepare_web', 'resume_web'].includes(params.action)) throw Object.assign(new Error('Invalid recovery completion action'), { code: 'INVALID_PARAMS' })
-    if (params.action !== 'prepare_web' || !['preparing', 'prepared'].includes(grant.phase)) throw Object.assign(new Error('Recovery completion action is not admitted'), { code: 'FORBIDDEN' })
+    const allowed = params.action === 'prepare_web' ? ['preparing', 'prepared'] : ['restored', 'resuming', 'resumed']
+    if (!allowed.includes(grant.phase)) throw Object.assign(new Error('Recovery completion action is not admitted'), { code: 'FORBIDDEN' })
     grant.verify()
+    if (params.action === 'resume_web') {
+      if (!grant.verifyRestored) throw Object.assign(new Error('Original recovery modules are not confirmed'), { code: 'FORBIDDEN' })
+      grant.verifyRestored()
+    }
     return { verified: true, ...grant.job, action: params.action }
+  }
+
+  /** Current generations only; lawful post-release catalog/ledger writes do not revive old authority. */
+  private observeWorkspaceRecoveryReleasedHealth(request: VerifyWorkspaceRelocationRecoveryRequestParams, coordinator: WorkspaceRecoveryCoordinator,
+    health: WorkspaceRecoveryValidationHealth, grant: WorkspaceRecoveryFinalizationGrant): WorkspaceRecoveryReleasedHealth {
+    const native = require('../../scripts/lib/process-identity.cjs'), records = require('../../scripts/lib/workspace-recovery-records.mjs')
+    const admission = require('../../scripts/lib/workspace-recovery-admission.mjs'), original = admission.readWorkspaceRecoveryAdmissionScope(this.dataDir, request)
+    const stored = records.readWorkspaceRecoveryCoordinator(this.dataDir, request.recovery_id), planHash = sha256CanonicalJson(health.plan)
+    const definitions: WorkspaceModuleDefinitions = new Map([...this.modules].map(([id, runtime]) => [id, {
+      runtime, hash: sha256CanonicalJson(workspaceModuleDefinition(runtime)), overrides: sha256CanonicalJson(this.envOverrides.get(id) ?? {}),
+    }]))
+    const activeNonCore = new Map<string, WorkspaceModuleScope>(original.state.modules.modules.filter((scope: WorkspaceModuleScope) =>
+      !['crabot-agent', 'memory-default'].includes(scope.module_id) && scope.runtime_id !== undefined && scope.processes.length > 0).map((scope: WorkspaceModuleScope) => [scope.module_id, scope]))
+    const cores = health.modules.map(module => {
+      const child = this.processes.get(module.module_id), state = child && this.childStates.get(child), runtime = this.modules.get(module.module_id)
+      const start = records.readWorkspaceRecoveryRuntimeStart(this.dataDir, request.recovery_id, module.module_id)
+      if (!child || !state || !runtime || !start || state.runtimeId !== module.runtime_id || start.runtime.runtime_id !== module.runtime_id) throw new Error('Current recovery Core is missing')
+      return { ...module, child, state, runtime, start, startHash: sha256CanonicalJson(start) }
+    })
+    const admin = this.processes.get('admin-web'), adminIdentity = admin?.pid && native.inspectProcess(admin.pid)
+    const workspaceRootOverride = process.env.WORKER_WORKSPACES_DIR
+    let active = true
+    const failure = () => Object.assign(new Error('当前已收口恢复的运行或新根无法确认，未重发启动。'), { code: 'SERVICE_UNAVAILABLE' })
+    const assertCurrent = () => {
+      try {
+        grant.verifyActors()
+        if (!active || !admin || !adminIdentity || this.processes.get('admin-web') !== admin || this.modules.size !== definitions.size
+          || !native.sameProcess(adminIdentity, native.inspectProcess(admin.pid)) || !native.sameProcess(stored.launch.parent, native.inspectProcess(process.pid))
+          || !native.sameProcess(stored.launch.process, native.inspectProcess(stored.launch.process.pid))
+          || process.env.WORKER_WORKSPACES_DIR !== workspaceRootOverride || sha256CanonicalJson(records.readWorkspaceRecoveryRuntimePlan(this.dataDir, request.recovery_id)) !== planHash) throw failure()
+        const scope = admission.readWorkspaceRecoveryCompletionScope(this.dataDir, request)
+        if (!scope.released || scope.fingerprint !== original.fingerprint) throw failure()
+        const target = scope.state.published.target, stat = fs.lstatSync(target.path, { bigint: true })
+        const actual = { path: target.path, dev: String(stat.dev), ino: String(stat.ino), native_id: process.platform === 'win32' ? native.inspectDirectoryFileId(target.path) : null }
+        if (!stat.isDirectory() || stat.isSymbolicLink() || fs.realpathSync(target.path) !== target.path || sha256CanonicalJson(actual) !== sha256CanonicalJson(target)) throw failure()
+        for (const [id, expected] of definitions) if (this.modules.get(id) !== expected.runtime || sha256CanonicalJson(workspaceModuleDefinition(expected.runtime)) !== expected.hash
+          || sha256CanonicalJson(this.envOverrides.get(id) ?? {}) !== expected.overrides) throw failure()
+        for (const item of cores) {
+          if (this.processes.get(item.module_id) !== item.child || this.childStates.get(item.child) !== item.state || item.state.runtimeId !== item.runtime_id
+            || item.runtime.pid !== item.child.pid || item.runtime.status !== 'running' || !item.state.reachedRunning || item.state.finalizeStarted || item.state.rootExited
+            || item.state.termination || item.state.forceTermination || item.child.exitCode !== null || item.child.signalCode !== null
+            || !native.sameProcess(item.process, native.inspectProcess(item.child.pid))) throw failure()
+          records.verifyWorkspaceRecoveryRuntimeStart({ dataDir: this.dataDir, recoveryId: request.recovery_id, moduleId: item.module_id,
+            recordHash: item.startHash, definitionHash: item.start.definition_sha256 })
+        }
+        for (const id of this.processes.keys()) if (id !== 'admin-web' && !cores.some(item => item.module_id === id) && !activeNonCore.has(id)) throw failure()
+        if (['restored', 'resuming', 'resumed'].includes(grant.phase) && [...activeNonCore.keys()].some(id => !this.processes.has(id))) throw failure()
+      } catch (cause) { active = false; coordinator.close(); throw Object.assign(failure(), { cause }) }
+    }
+    const verifyRuntime = async () => {
+      try {
+        assertCurrent(); await coordinator.verify(); assertCurrent()
+        const rows = await this.runtimeRegistry.listRecords()
+        assertCurrent()
+        if (cores.some(item => rows.filter(row => row.module_id === item.module_id).length !== 1)) throw failure()
+        for (const row of rows) {
+          const core = cores.find(item => item.module_id === row.module_id)
+          if (core) { if (sha256CanonicalJson(row) !== sha256CanonicalJson(core.start.runtime)) throw failure(); continue }
+          const child = this.processes.get(row.module_id), state = child && this.childStates.get(child), runtime = this.modules.get(row.module_id)
+          if (!child || !state || !runtime || row.instance_id !== grant.job.instance_id || row.runtime_id !== state.runtimeId || row.root_pid !== child.pid || row.module_port !== runtime.port) throw failure()
+          if (row.module_id === 'admin-web') { if (row.runtime_id !== grant.job.admin_runtime_id) throw failure(); continue }
+          const old = activeNonCore.get(row.module_id), identity = native.inspectProcess(child.pid)
+          if (!old || row.runtime_id === old.runtime_id || !identity || identity.parent !== stored.launch.parent.pid || identity.owner !== stored.launch.parent.owner) throw failure()
+        }
+        const { WorkspaceCatalog } = require('crabot-shared/dist/workspace-catalog.js')
+        const catalog = await new WorkspaceCatalog({ dataRoot: this.dataDir, storageRoot: workspaceRootOverride, files: native }).snapshot()
+        assertCurrent()
+        if (catalog.storage_root !== original.state.published.target.path || catalog.revision < original.state.selected.catalog_revision) throw failure()
+        await coordinator.verify(); assertCurrent()
+      } catch (cause) { active = false; coordinator.close(); throw Object.assign(failure(), { cause }) }
+    }
+    const verify = async () => {
+      try {
+        await verifyRuntime()
+        const { openSpawnedModuleRuntimeRpc } = require('../../scripts/lib/module-carrier-rpc.cjs')
+        for (const item of cores) {
+          const rpc = await openSpawnedModuleRuntimeRpc(item.child, item.process, item.runtime.port,
+            { instance_id: grant.job.instance_id, module_id: item.module_id, runtime_id: item.runtime_id }, { timeoutMs: this.config.health_check_timeout * 1000 })
+          try { assertCurrent(); if ((await rpc.call('health', {})).status !== 'healthy') throw failure(); assertCurrent() } finally { rpc.close() }
+          await verifyRuntime()
+        }
+        const agent = cores.find(item => item.module_id === 'crabot-agent'), credential = this.runtimeBearers.get('crabot-agent')
+        if (!agent || !credential || credential.revoked || credential.child !== agent.child) throw failure()
+        const rpc = await openSpawnedModuleRuntimeRpc(agent.child, agent.process, agent.runtime.port,
+          { instance_id: grant.job.instance_id, module_id: agent.module_id, runtime_id: agent.runtime_id }, { timeoutMs: 30000 })
+        try {
+          assertCurrent()
+          if (sha256CanonicalJson(await rpc.call('verify_workspace_relocation_recovery_root', request, { authorizationBearer: credential.token })) !== sha256CanonicalJson(health.root_verified)) throw failure()
+          assertCurrent()
+          if (this.runtimeBearers.get('crabot-agent') !== credential || credential.revoked) throw failure()
+        } finally { rpc.close() }
+        await verifyRuntime()
+      } catch (cause) { active = false; coordinator.close(); throw Object.assign(failure(), { cause }) }
+    }
+    return Object.freeze({ root_verified: health.root_verified, assertCurrent, verifyRuntime, verify })
   }
 
   private async handleVerifyWorkspaceRelocationRecoveryRelease(
@@ -2561,7 +2689,11 @@ export class ModuleManager {
         if (!grant || grant.phase !== 'prepared' || grant.job.recovery_id !== request.recovery_id) throw failure()
         grant.verify()
         await this.beginWorkspaceRecoveryCompletionObservation(request, bearer)
-        grant.verify(); grant.phase = 'releasing'; grant.verify()
+        grant.verify()
+        const health = this.workspaceRecoveryValidationHealth.get(coordinator)
+        if (!health) throw failure()
+        grant.releasedHealth = this.observeWorkspaceRecoveryReleasedHealth(request, coordinator, await health, grant)
+        grant.phase = 'releasing'; grant.verify()
         await grant.verifyHealth(); grant.verify()
         let result
         try { result = await coordinator.releaseCompletion(prepared, grant.token, this.config.port) }
@@ -2579,6 +2711,94 @@ export class ModuleManager {
       }
     })
     this.workspaceRecoveryCompletionReleases.set(coordinator, pending)
+    return pending
+  }
+
+  private async resumeWorkspaceRecoveryWeb(request: VerifyWorkspaceRelocationRecoveryRequestParams, bearer?: string): Promise<ResumeWorkspaceRelocationRecoveryWebResult> {
+    request = Object.freeze({ ...request })
+    const coordinator = await this.initializeWorkspaceRelocationRecovery(request, bearer), previous = this.workspaceRecoveryWebResumes.get(coordinator)
+    const failure = () => Object.assign(new Error('新根已选择，当前恢复的服务或Web重开尚未完整确认；未重发启动。'), { code: 'SERVICE_UNAVAILABLE' })
+    if (previous) {
+      const result = await previous, grant = this.workspaceRecoveryFinalizationGrant
+      if (!grant || grant.phase !== 'resumed' || !grant.verifyRestored || grant.job.recovery_id !== request.recovery_id) throw failure()
+      grant.verifyRestored(); await grant.verifyHealth(); grant.verifyRestored(); return result
+    }
+    const pending = Promise.resolve().then(async () => {
+      let grant: WorkspaceRecoveryFinalizationGrant | undefined, stage = 'release'
+      try {
+        await this.releaseWorkspaceRecoveryCompletion(request, bearer)
+        grant = this.workspaceRecoveryFinalizationGrant
+        if (!grant || grant.phase !== 'released' || !grant.releasedHealth || grant.job.recovery_id !== request.recovery_id) throw failure()
+        grant.verify(); await grant.verifyHealth(); grant.verify()
+        const scope = require('../../scripts/lib/workspace-recovery-admission.mjs').readWorkspaceRecoveryCompletionScope(this.dataDir, request)
+        const launch = require('../../scripts/lib/workspace-recovery-records.mjs').readWorkspaceRecoveryCoordinator(this.dataDir, request.recovery_id).launch
+        const definitions: WorkspaceModuleDefinitions = new Map([...this.modules].map(([id, runtime]) => [id, {
+          runtime, hash: sha256CanonicalJson(workspaceModuleDefinition(runtime)), overrides: sha256CanonicalJson(this.envOverrides.get(id) ?? {}),
+        }]))
+        const current = grant
+        stage = 'restore-modules'; current.phase = 'restoring'; current.verify()
+        const restored = await this.restoreWorkspaceModules(scope.state.modules.modules, definitions, { parent: launch.parent, assertCurrent: () => {
+          current.verify()
+          if (this.workspaceRecoveryFinalizationGrant !== current || !['restoring', 'restored', 'resuming', 'resumed'].includes(current.phase)) throw failure()
+        } })
+        current.verifyRestored = restored.verify; current.phase = 'restored'; restored.verify()
+        await current.verifyHealth(); restored.verify()
+        stage = 'resume-web'; current.phase = 'resuming'; current.verify()
+        const result = await this.withCurrentAdminRpc(30000, async (rpc, verifyAdmin) => {
+          restored.verify()
+          const value = await rpc.call('resume_workspace_relocation_recovery_web', request, { authorizationBearer: current.token })
+          await verifyAdmin(); restored.verify()
+          return value
+        })
+        const expected: ResumeWorkspaceRelocationRecoveryWebResult = Object.freeze({ resumed: true, ...current.job })
+        if (sha256CanonicalJson(result) !== sha256CanonicalJson(expected)) throw failure()
+        await current.verifyHealth(); restored.verify()
+        current.phase = 'resumed'; restored.verify()
+        return expected
+      } catch (cause) {
+        if (grant) grant.revoked = true
+        coordinator.close()
+        throw Object.assign(failure(), { stage, cause })
+      }
+    })
+    this.workspaceRecoveryWebResumes.set(coordinator, pending)
+    return pending
+  }
+
+  /** Retire only this current recovery after actual restoration and its coordinator exit. */
+  private completeWorkspaceRecovery(request: VerifyWorkspaceRelocationRecoveryRequestParams, bearer?: string): Promise<ResumeWorkspaceRelocationRecoveryWebResult> {
+    if (!bearer) return Promise.reject(Object.assign(new Error('Current human credential required'), { code: 'UNAUTHORIZED' }))
+    request = require('../../scripts/lib/workspace-recovery-admission.mjs').parseWorkspaceRecoveryAdmissionRequest(request)
+    const fingerprint = sha256CanonicalJson(request), bearerHash = sha256CanonicalJson(bearer), previous = this.workspaceRecoveryCompletions.get(request.recovery_id)
+    const failure = () => Object.assign(new Error('当前恢复尚未完整收尾，请查看原作业状态；未重发效果。'), { code: 'SERVICE_UNAVAILABLE' })
+    if (previous) return previous.fingerprint === fingerprint && previous.bearerHash === bearerHash ? previous.pending : Promise.reject(Object.assign(failure(), { code: 'FORBIDDEN' }))
+    const pending = Promise.resolve().then(async () => {
+      let grant: WorkspaceRecoveryFinalizationGrant | undefined, coordinator: WorkspaceRecoveryCoordinator | undefined
+      let stage = 'restore-services'
+      try {
+        coordinator = await this.initializeWorkspaceRelocationRecovery(request, bearer)
+        const initialized = this.workspaceRecoveryInitializations.get(request.recovery_id)
+        const result = await this.resumeWorkspaceRecoveryWeb(request, bearer)
+        grant = this.workspaceRecoveryFinalizationGrant
+        if (!grant || grant.phase !== 'resumed' || !grant.verifyRestored || grant.job.recovery_id !== request.recovery_id) throw failure()
+        grant.verifyRestored(); await grant.verifyHealth(); grant.verifyRestored()
+        const record = require('../../scripts/lib/workspace-recovery-records.mjs').readWorkspaceRecoveryCoordinator(this.dataDir, request.recovery_id)
+        stage = 'coordinator-exit'; grant.revoked = true; coordinator.close()
+        await this.closeWorkspaceCoordinatorChannel(coordinator.child)
+        if (coordinator.child.connected || require('../../scripts/lib/known-process-exit.cjs').probeKnownProcessExit([record.launch.process]).state !== 'stopped') throw failure()
+        if (this.workspaceRecoveryFinalizationGrant === grant) this.workspaceRecoveryFinalizationGrant = undefined
+        if (this.workspaceRecoveryInitializations.get(request.recovery_id) === initialized) this.workspaceRecoveryInitializations.delete(request.recovery_id)
+        for (const cache of [this.workspaceRecoveryRuntimePreparations, this.workspaceRecoveryRuntimeCleanups, this.workspaceRecoveryValidationLaunches,
+          this.workspaceRecoveryValidationHealth, this.workspaceRecoveryCompletionObservations, this.workspaceRecoveryCompletionPreparations,
+          this.workspaceRecoveryCompletionReleases, this.workspaceRecoveryWebResumes]) cache.delete(coordinator)
+        return result
+      } catch (cause) {
+        if (grant) grant.revoked = true
+        coordinator?.close()
+        throw Object.assign(failure(), { stage, cause })
+      }
+    })
+    this.workspaceRecoveryCompletions.set(request.recovery_id, { fingerprint, bearerHash, pending })
     return pending
   }
 
@@ -2716,6 +2936,12 @@ export class ModuleManager {
     const pending = coordinator && this.workspaceRecoveryValidationLaunches.get(coordinator)
     if (!current || !coordinator || !pending || sha256CanonicalJson(current.request) !== sha256CanonicalJson(request)) {
       throw Object.assign(new Error('No matching current recovery validation role'), { code: 'FORBIDDEN' })
+    }
+    const grant = this.workspaceRecoveryFinalizationGrant
+    if (grant?.releasedHealth && grant.job.recovery_id === request.recovery_id && current.readScope().released) {
+      grant.verify(); await grant.releasedHealth.verifyRuntime(); grant.verify()
+      this.handleVerifyCoreAgentRuntime({ expected_module_id: 'crabot-agent' }, context)
+      return grant.releasedHealth.root_verified
     }
     const launched = await pending
     await launched.verify()
@@ -2882,16 +3108,25 @@ export class ModuleManager {
     return pending
   }
 
-  /** Restore the original active non-Core set using ordinary startup, never a validation exemption. */
-  private async restoreWorkspaceRelocationModules(grant: WorkspaceFinalizationGrant, scopes: ReadonlyArray<WorkspaceModuleScope>, definitions: WorkspaceModuleDefinitions) {
+  /** Normal finalization keeps its original role; cold recovery never constructs this grant. */
+  private restoreWorkspaceRelocationModules(grant: WorkspaceFinalizationGrant, scopes: ReadonlyArray<WorkspaceModuleScope>, definitions: WorkspaceModuleDefinitions) {
+    return this.restoreWorkspaceModules(scopes, definitions, { parent: grant.launch.parent, assertCurrent: () => {
+      grant.verify()
+      if (this.workspaceFinalizationGrant !== grant || grant.phase !== 'released') throw Object.assign(new Error('Normal restoration role changed'), { code: 'SERVICE_UNAVAILABLE' })
+    } })
+  }
+
+  /** Neutral original-active non-Core startup/health only; the caller owns its role and scope. */
+  private async restoreWorkspaceModules(scopes: ReadonlyArray<WorkspaceModuleScope>, definitions: WorkspaceModuleDefinitions,
+    role: { parent: WorkerProcessIdentity; assertCurrent: () => void }) {
     const failure = () => Object.assign(new Error('新工作区已选择，但原模块恢复尚未完整确认；未重发启动。'), { code: 'SERVICE_UNAVAILABLE' })
     const native = require('../../scripts/lib/process-identity.cjs'), { captureSpawnedProcessTree } = require('../../scripts/lib/spawned-process-tree.cjs')
     const restored = new Map<ModuleId, { child: ChildProcess; state: ManagedChildState; runtimeId: string; process: WorkerProcessIdentity }>()
     const nonCore = scopes.filter(scope => !['crabot-agent', 'memory-default'].includes(scope.module_id))
     let pendingModule: ModuleId | undefined
     const verify = () => {
-      grant.verify()
-      if (this.workspaceFinalizationGrant !== grant || grant.phase !== 'released' || this.modules.size !== definitions.size) throw failure()
+      role.assertCurrent()
+      if (this.modules.size !== definitions.size) throw failure()
       for (const [id, expected] of definitions) {
         if (this.modules.get(id) !== expected.runtime || sha256CanonicalJson(workspaceModuleDefinition(expected.runtime)) !== expected.hash
           || sha256CanonicalJson(this.envOverrides.get(id) ?? {}) !== expected.overrides) throw failure()
@@ -2925,7 +3160,7 @@ export class ModuleManager {
       verify()
       const child = this.processes.get(scope.module_id), state = child && this.childStates.get(child), runtime = this.modules.get(scope.module_id)!
       const original = child?.pid && native.inspectProcess(child.pid)
-      if (!child || !state || !original || original.parent !== grant.launch.parent.pid || original.owner !== grant.launch.parent.owner) throw failure()
+      if (!child || !state || !original || original.parent !== role.parent.pid || original.owner !== role.parent.owner) throw failure()
       const deadline = Date.now() + 120000
       while (!(state.reachedRunning && runtime.status === 'running')) {
         verify()

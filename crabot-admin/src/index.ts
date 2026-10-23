@@ -1028,6 +1028,7 @@ export class AdminModule extends ModuleBase {
     this.registerMethod('quiesce_workspace_relocation_web', this.handleQuiesceWorkspaceRelocationWeb.bind(this))
     this.registerMethod('prepare_workspace_relocation_completion', (params, context) => this.workspaceFinalizationAccess().prepare(params, context?.authorizationBearer))
     this.registerMethod('prepare_workspace_relocation_recovery_completion', (params, context) => this.workspaceRecoveryFinalizationAccess().prepare(params, context?.authorizationBearer))
+    this.registerMethod('resume_workspace_relocation_recovery_web', (params, context) => this.workspaceRecoveryFinalizationAccess().resume(params, context?.authorizationBearer))
     this.registerMethod('resume_workspace_relocation_web', (params, context) => this.workspaceFinalizationAccess().resume(params, context?.authorizationBearer))
 
     // Schedule 管理
@@ -1712,7 +1713,10 @@ export class AdminModule extends ModuleBase {
     return this.workspaceRecoveryFinalizationWeb ??= createWorkspaceRecoveryFinalizationWeb({ dataDir: path.resolve(this.adminConfig.data_dir, '..'),
       moduleManagerPort: this.rpcClient.moduleManagerTargetPort, modulePort: this.config.port,
       runtimeIdentity: () => ({ instance_id: process.env.CRABOT_INSTANCE_ID, module_id: this.config.moduleId, runtime_id: process.env.CRABOT_MODULE_RUNTIME_ID }),
-      quiesce: () => this.quiesceWorkspaceWebAccess() })
+      quiesce: () => this.quiesceWorkspaceWebAccess(), resume: () => {
+        assertWorkspaceExecutionAllowed(path.resolve(this.adminConfig.data_dir, '..'))
+        this.workspaceService.resumeScanning(); this.workspaceWebAccess().reopen()
+      } })
   }
 
   private workspaceWebAccess(): WorkspaceWebAdmissions {

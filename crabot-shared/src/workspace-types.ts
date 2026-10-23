@@ -306,6 +306,9 @@ export type VerifyWorkspaceRelocationRecoveryReleaseParams = VerifyWorkspaceRelo
 export type VerifyWorkspaceRelocationRecoveryReleaseResult = Omit<VerifyWorkspaceRelocationRecoveryFinalizationResult, 'action'>
 export type ReleaseWorkspaceRelocationRecoveryCompletionResult = Omit<PrepareWorkspaceRelocationRecoveryCompletionResult, 'prepared'> & { released: true }
 
+export type ResumeWorkspaceRelocationRecoveryWebParams = VerifyWorkspaceRelocationRecoveryRequestParams
+export type ResumeWorkspaceRelocationRecoveryWebResult = Omit<PrepareWorkspaceRelocationRecoveryCompletionResult, 'prepared'> & { resumed: true }
+
 export interface WorkspaceRecoveryRuntimeRegistration {
   schema_version: 1
   instance_id: string
