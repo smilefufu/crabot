@@ -2429,6 +2429,124 @@ describe('normal fixed-job Admin completion preparation', () => {
       locks.releaseCliLock(lock); await f.cleanup()
     }
   }, process.platform === 'win32' ? 600000 : 120000)
+  it.each(['Agent', 'Agent and Memory', 'definition changed before release', 'plan changed before release'])('starts only the planned cold validation generations: %s', async mode => {
+    const withMemory = mode === 'Agent and Memory'
+    const f = await fixture({ actualAgent: true, actualAdmin: true, validationHealth: 'healthy', withMemory, inactiveMemory: !withMemory, memoryHealth: withMemory ? 'healthy' : undefined, processLifetimeMs: 300000 })
+    const locks = require('../../scripts/lib/cli-lock.mjs'), records = require('../../scripts/lib/workspace-relocation-intent.mjs')
+    const lock = await locks.acquireWorkspaceRelocationLock(f.data, f.params.intent_id)
+    let cold: any, coordinator: any
+    try {
+      const prepared = await f.manager.prepareWorkspaceRelocationCompletion(f.params, 'fixture-human')
+      const definitions = new Map([...f.manager.modules].map(([id, runtime]: any) => [id, { ...runtime }]))
+      await f.manager.stop()
+      const fence = records.readWorkspaceRelocationFinalizing(f.data, f.params.intent_id), fenceFile = path.join(f.data, 'workspace-control/relocation-finalizing.json')
+      const before = await fs.readFile(fenceFile), ledgerFile = path.join(f.data, 'agent/worker-ledgers/channel%3A%3Asession.json'), ledger = await fs.readFile(ledgerFile)
+      const request = { intent_id: f.params.intent_id, recovery_id: randomUUID(), completion_sha256: prepared.completion_sha256, finalizing_sha256: sha256CanonicalJson(fence) }
+      const entry = path.join(f.data, 'cold-finite-runtime.cjs')
+      await fs.writeFile(entry, `const fs=require('node:fs');const receipt=JSON.parse(fs.readFileSync(process.env.TEST_RECEIPT,'utf8'));
+        fs.writeFileSync(process.env.TEST_MARKER,JSON.stringify({pid:process.pid,parent:process.ppid,runtime:process.env.CRABOT_MODULE_RUNTIME_ID,receipt}));
+        setTimeout(()=>process.exit(0),300000);`)
+      cold = new ModuleManager({ port: 0, modules: [], shutdown_timeout: 0.1 }, f.data) as any
+      for (const [id, definition] of definitions as Map<string, any>) {
+        const env = { ...definition.env, TEST_RECEIPT: path.join(f.data, 'workspace-control/relocation-recovery', request.recovery_id, 'runtime-starts', id + '.json'), TEST_MARKER: path.join(f.data, 'cold-start-' + id + '.json') }
+        cold.modules.set(id, { ...definition, status: 'stopped', pid: undefined, auto_start: false, ...(id === 'admin-web' ? {} : { entry: `"${process.execPath}" "${entry}"`, skip_health_check: true, env }) })
+      }
+      await cold.start(); cold.config.port = cold.server.address().port
+      await fs.unlink(path.join(f.data, 'ready')); await cold.startModuleProcess('admin-web')
+      await vi.waitFor(async () => expect(await fs.readFile(path.join(f.data, 'ready'), 'utf8')).toBe('ready'))
+      // Constructors/finite processes only; the Admin business cutover handshake is tested separately.
+      cold.managementOnly = false
+      expect(typeof cold.startWorkspaceRecoveryValidationModules).toBe('function')
+      coordinator = await cold.initializeWorkspaceRelocationRecovery(request, 'fixture-human')
+      if (mode.endsWith('before release')) {
+        const recoveryRecords = require('../../scripts/lib/workspace-recovery-records.mjs')
+        const authorize = cold.assertWorkspaceProcessStartAllowed.bind(cold)
+        const starts = vi.spyOn(cold, 'startModuleProcess')
+        let restore: () => Promise<void> = async () => {}
+        let injected = false
+        const tamper = vi.spyOn(cold, 'assertWorkspaceProcessStartAllowed').mockImplementation(async (...args: any[]) => {
+          await authorize(...args)
+          if (injected || !recoveryRecords.readWorkspaceRecoveryRuntimeStart(f.data, request.recovery_id, args[0])) return
+          injected = true
+          if (mode.startsWith('definition')) {
+            const runtime = cold.modules.get(args[0]), port = runtime.port
+            runtime.port++
+            restore = async () => { runtime.port = port }
+          } else {
+            const file = path.join(coordinator.launch.control_root.path, 'runtime-plan.json'), bytes = await fs.readFile(file)
+            const plan = JSON.parse(bytes.toString()); plan.created_at = new Date(Date.parse(plan.created_at) + 1000).toISOString()
+            await fs.writeFile(file, JSON.stringify(plan))
+            restore = async () => { await fs.writeFile(file, bytes) }
+          }
+        })
+        try {
+          await expect(Promise.all([
+            cold.startWorkspaceRecoveryValidationModules(request, 'fixture-human'),
+            cold.startWorkspaceRecoveryValidationModules(request, 'fixture-human'),
+          ])).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
+          await restore()
+          await expect(cold.startWorkspaceRecoveryValidationModules(request, 'fixture-human')).rejects.toBeDefined()
+          expect(injected).toBe(true); expect(starts).toHaveBeenCalledOnce()
+          await expect(fs.lstat(path.join(f.data, 'cold-start-crabot-agent.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+          expect(await fs.readFile(fenceFile)).toEqual(before); expect(await fs.readFile(ledgerFile)).toEqual(ledger)
+          expect(recoveryRecords.readWorkspaceRecoveryRuntimeStart(f.data, request.recovery_id, 'crabot-agent')).not.toBeNull()
+        } finally { await restore(); tamper.mockRestore(); starts.mockRestore() }
+        return
+      }
+      const [started, concurrent] = await Promise.all([
+        cold.startWorkspaceRecoveryValidationModules(request, 'fixture-human'),
+        cold.startWorkspaceRecoveryValidationModules(request, 'fixture-human'),
+      ])
+      expect(concurrent).toBe(started)
+      coordinator = await cold.initializeWorkspaceRelocationRecovery(request, 'fixture-human')
+      await started.verify()
+      const ids = withMemory ? ['crabot-agent', 'memory-default'] : ['crabot-agent']
+      expect(started.modules.map((item: any) => item.module_id).sort()).toEqual(ids)
+      const rows = (await cold.runtimeRegistry.listRecords()).filter((row: any) => row.module_id !== 'admin-web')
+      expect(rows).toHaveLength(ids.length)
+      for (const module of started.modules) {
+        const file = path.join(f.data, 'cold-start-' + module.module_id + '.json')
+        await vi.waitFor(async () => expect(await fs.readFile(file, 'utf8')).toBeTruthy())
+        const marker = JSON.parse(await fs.readFile(file, 'utf8'))
+        expect(marker).toMatchObject({ parent: module.process.pid, runtime: module.runtime_id,
+          receipt: { process: module.process, runtime: { root_pid: module.process.pid, runtime_id: module.runtime_id } } })
+        expect(marker.pid).not.toBe(module.process.pid)
+        expect(started.plan.modules).toContainEqual({ module_id: module.module_id, runtime_id: module.runtime_id })
+      }
+      expect(await cold.startWorkspaceRecoveryValidationModules(request, 'fixture-human')).toBe(started)
+      expect((await cold.runtimeRegistry.listRecords()).filter((row: any) => row.module_id !== 'admin-web')).toEqual(rows)
+      expect(await fs.readFile(fenceFile)).toEqual(before); expect(await fs.readFile(ledgerFile)).toEqual(ledger)
+      const token = cold.runtimeBearers.get('crabot-agent').token
+      const call = async (params: any, bearer?: string) => {
+        const response = await fetch(`http://127.0.0.1:${cold.config.port}/verify_workspace_relocation_recovery_runtime`, { method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...(bearer ? { Authorization: 'Bearer ' + bearer } : {}) },
+          body: JSON.stringify({ id: randomUUID(), source: 'forged-source', method: 'verify_workspace_relocation_recovery_runtime', params }) })
+        return response.json()
+      }
+      expect(await call({ unexpected: true })).toMatchObject({ success: false, error: { code: 'UNAUTHORIZED' } })
+      expect(await call({ unexpected: true }, 'fixture-human')).toMatchObject({ success: false, error: { code: 'FORBIDDEN' } })
+      expect(await call({ ...request, unexpected: true }, token)).toMatchObject({ success: false, error: { code: 'INVALID_PARAMS' } })
+      expect(await call({ ...request, recovery_id: randomUUID() }, token)).toMatchObject({ success: false, error: { code: 'FORBIDDEN' } })
+      const proof = { verified: true, ...request, launch_sha256: sha256CanonicalJson(coordinator.launch), plan_sha256: sha256CanonicalJson(started.plan),
+        root_selected_sha256: started.plan.root_selected_sha256, instance_id: cold.runtimeRegistry.getInstanceId(), module_id: 'crabot-agent',
+        runtime_id: started.modules.find((module: any) => module.module_id === 'crabot-agent').runtime_id }
+      expect(await call(request, token)).toMatchObject({ success: true, data: proof })
+      const admin = cold.childStates.get(cold.processes.get('admin-web')), oldRuntimeId = admin.runtimeId
+      admin.runtimeId = randomUUID()
+      await expect(started.verify()).rejects.toBeDefined()
+      admin.runtimeId = oldRuntimeId
+      expect(await call(request, token)).toMatchObject({ success: false })
+      await expect(started.verify()).rejects.toBeDefined()
+      await expect(cold.startWorkspaceRecoveryValidationModules(request, 'fixture-human')).rejects.toBeDefined()
+      expect((await cold.runtimeRegistry.listRecords()).filter((row: any) => row.module_id !== 'admin-web')).toEqual(rows)
+      expect(await fs.readFile(fenceFile)).toEqual(before); expect(await fs.readFile(ledgerFile)).toEqual(ledger)
+    } finally {
+      coordinator?.close()
+      if (cold) await cold.stop()
+      locks.releaseCliLock(lock); await f.cleanup()
+    }
+  }, process.platform === 'win32' ? 600000 : 120000)
+
   it('locates sealed workspace history while the original archive still retains maintenance', async () => {
     const f = await fixture({ actualAgent: true, actualAdmin: true, validationHealth: 'healthy', historyWorkspace: true, processLifetimeMs: 300000 })
     const locks = require('../../scripts/lib/cli-lock.mjs'), lock = await locks.acquireWorkspaceRelocationLock(f.data, f.params.intent_id)

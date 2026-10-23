@@ -36,6 +36,8 @@ import {
   type CompleteWorkspaceRelocationWorkerStopsParams,
   type CompleteWorkspaceRelocationWorkerStopsResult,
   type WorkspaceRecoveryRuntimePlan,
+  type VerifyWorkspaceRelocationRecoveryRuntimeParams,
+  type VerifyWorkspaceRelocationRecoveryRuntimeResult,
   type VerifyWorkspaceRelocationRecoveryAdmissionParams,
   type VerifyWorkspaceRelocationRecoveryAdmissionResult,
   type VerifyWorkspaceRelocationRecoveryRequestParams,
@@ -106,6 +108,12 @@ interface WorkspaceRecoveryAdmission {
 interface WorkspaceRecoveryCoordinator { verify: () => Promise<void>; close: () => void }
 interface WorkspaceRecoveryRuntimePreparation { plan: WorkspaceRecoveryRuntimePlan; verify: () => Promise<void> }
 interface WorkspaceRecoveryRuntimeCleanup { runtime_ids: ReadonlyArray<string>; verify: () => Promise<void> }
+interface WorkspaceRecoveryValidationLaunch {
+  plan: WorkspaceRecoveryRuntimePlan
+  modules: ReadonlyArray<{ module_id: ModuleId; runtime_id: string; process: WorkerProcessIdentity }>
+  verify: () => Promise<void>
+  assertCurrent: () => void
+}
 interface WorkspaceRecoveryInitialization {
   request: VerifyWorkspaceRelocationRecoveryRequestParams
   result: VerifyWorkspaceRelocationRecoveryRequestResult
@@ -287,6 +295,7 @@ export class ModuleManager {
   private workspaceValidationLaunch?: { fingerprint: string; pending: Promise<WorkspaceValidationLaunchResult> }
   private readonly workspaceRecoveryRuntimePreparations = new WeakMap<WorkspaceRecoveryCoordinator, Promise<WorkspaceRecoveryRuntimePreparation>>()
   private readonly workspaceRecoveryRuntimeCleanups = new WeakMap<WorkspaceRecoveryCoordinator, Promise<WorkspaceRecoveryRuntimeCleanup>>()
+  private readonly workspaceRecoveryValidationLaunches = new WeakMap<WorkspaceRecoveryCoordinator, Promise<WorkspaceRecoveryValidationLaunch>>()
   private workspaceRecoveryInitialization?: WorkspaceRecoveryInitialization
   private workspaceRecoveryInitializations = new Map<string, { fingerprint: string; bearerHash: string; pending: Promise<WorkspaceRecoveryCoordinator> }>()
   private workspaceRecoveryAdmission?: WorkspaceRecoveryAdmission
@@ -351,6 +360,7 @@ export class ModuleManager {
     this.registerMethod('verify_workspace_relocation_recovery_admission', this.handleVerifyWorkspaceRelocationRecoveryAdmission.bind(this))
     this.registerMethod('verify_workspace_relocation_finalization', this.handleVerifyWorkspaceRelocationFinalization.bind(this))
     this.registerMethod('verify_workspace_relocation_runtime', this.handleVerifyWorkspaceRelocationRuntime.bind(this))
+    this.registerMethod('verify_workspace_relocation_recovery_runtime', this.handleVerifyWorkspaceRelocationRecoveryRuntime.bind(this))
     this.registerMethod('verify_workspace_relocation_coordinator', this.handleVerifyWorkspaceRelocationCoordinator.bind(this))
     this.registerMethod('prepare_workspace_relocation_worker_stops', this.handlePrepareWorkspaceRelocationWorkerStops.bind(this))
     this.registerMethod('complete_workspace_relocation_worker_stops', this.handleCompleteWorkspaceRelocationWorkerStops.bind(this))
@@ -2275,6 +2285,106 @@ export class ModuleManager {
     }
   }
 
+  /** Start only new planned validation generations after this role proves old execution stopped. */
+  private async startWorkspaceRecoveryValidationModules(request: VerifyWorkspaceRelocationRecoveryRequestParams, bearer?: string): Promise<WorkspaceRecoveryValidationLaunch> {
+    request = Object.freeze({ ...request })
+    const coordinator = await this.initializeWorkspaceRelocationRecovery(request, bearer), previous = this.workspaceRecoveryValidationLaunches.get(coordinator)
+    if (previous) { const result = await previous; await result.verify(); return result }
+    const failure = () => Object.assign(new Error('新恢复验证运行尚未全部确认，维护保护与登记已保留；未重复启动。'), { code: 'SERVICE_UNAVAILABLE' })
+    const pending = Promise.resolve().then(async () => {
+      let active = true, pendingModule: ModuleId | undefined, completed = false
+      try {
+        const cleanup = await this.cleanupWorkspaceRecoveryRuntimes(request, bearer)
+        await cleanup.verify()
+        const preparation = await this.prepareWorkspaceRecoveryRuntimes(request, bearer), plan = preparation.plan
+        const planHash = sha256CanonicalJson(plan)
+        if (plan.modules.some(module => cleanup.runtime_ids.includes(module.runtime_id))) throw failure()
+        const records = require('../../scripts/lib/workspace-recovery-records.mjs'), native = require('../../scripts/lib/process-identity.cjs')
+        const launch = records.readWorkspaceRecoveryCoordinator(this.dataDir, request.recovery_id).launch
+        const definitions: WorkspaceModuleDefinitions = new Map([...this.modules].map(([id, runtime]) => [id, {
+          runtime, hash: sha256CanonicalJson(workspaceModuleDefinition(runtime)), overrides: sha256CanonicalJson(this.envOverrides.get(id) ?? {}),
+        }]))
+        const admin = this.processes.get('admin-web'), adminState = admin && this.childStates.get(admin), adminRuntimeId = adminState?.runtimeId
+        const adminIdentity = admin?.pid && native.inspectProcess(admin.pid)
+        if (!admin || !adminState || !adminIdentity || !launch) throw failure()
+        const launched = new Map<ModuleId, { child: ChildProcess; state: ManagedChildState; process: WorkerProcessIdentity }>()
+        const registrations = new Map<string, string>(), receipts = new Map<ModuleId, string>()
+        const assertCurrent = () => {
+          try {
+            if (!active || this.isShuttingDown || this.workspaceRecoveryInitialization?.coordinator !== coordinator
+              || sha256CanonicalJson(records.readWorkspaceRecoveryRuntimePlan(this.dataDir, request.recovery_id)) !== planHash
+              || this.modules.size !== definitions.size || this.processes.get('admin-web') !== admin
+              || this.childStates.get(admin) !== adminState || adminState.runtimeId !== adminRuntimeId
+              || !native.sameProcess(adminIdentity, native.inspectProcess(admin.pid))
+              || !native.sameProcess(launch.parent, native.inspectProcess(process.pid))
+              || !native.sameProcess(launch.process, native.inspectProcess(launch.process.pid))
+              || [...this.lifecycleQueues.keys()].some(id => id !== 'admin-web' && id !== pendingModule)) throw failure()
+            for (const [id, expected] of definitions) {
+              if (this.modules.get(id) !== expected.runtime || sha256CanonicalJson(workspaceModuleDefinition(expected.runtime)) !== expected.hash
+                || sha256CanonicalJson(this.envOverrides.get(id) ?? {}) !== expected.overrides) throw failure()
+            }
+            for (const [id, child] of this.processes) {
+              if (id === 'admin-web') continue
+              const target = plan.modules.find(module => module.module_id === id), state = this.childStates.get(child), runtime = this.modules.get(id)!
+              const identity = child.pid && native.inspectProcess(child.pid)
+              if (!target || !state || state.runtimeId !== target.runtime_id || runtime.pid !== child.pid || state.moduleId !== id
+                || state.finalizeStarted || state.rootExited || state.termination || state.forceTermination || child.exitCode !== null || child.signalCode !== null
+                || !identity || identity.parent !== launch.parent.pid || identity.owner !== launch.parent.owner) throw failure()
+              if (!launched.has(id)) {
+                if (pendingModule !== id) throw failure()
+                launched.set(id, { child, state, process: Object.freeze({ ...identity }) })
+              }
+              const bound = launched.get(id)!
+              if (bound.child !== child || bound.state !== state || !native.sameProcess(bound.process, identity)) throw failure()
+            }
+            for (const [id, item] of launched) if (this.processes.get(id) !== item.child) throw failure()
+            for (const [id, hash] of receipts) if (sha256CanonicalJson(records.readWorkspaceRecoveryRuntimeStart(this.dataDir, request.recovery_id, id)) !== hash) throw failure()
+            if (completed && (launched.size !== plan.modules.length || receipts.size !== plan.modules.length)) throw failure()
+          } catch (cause) { active = false; coordinator.close(); throw Object.assign(failure(), { cause }) }
+        }
+        const verify = async () => {
+          try {
+            await preparation.verify(); assertCurrent()
+            const rows = (await this.runtimeRegistry.listRecords()).filter(row => row.module_id !== 'admin-web')
+            assertCurrent()
+            if (rows.length !== launched.size) throw failure()
+            for (const row of rows) {
+              const item = launched.get(row.module_id)
+              if (!item || row.runtime_id !== item.state.runtimeId || row.root_pid !== item.process.pid
+                || row.instance_id !== this.runtimeRegistry.getInstanceId() || row.module_port !== this.modules.get(row.module_id)?.port) throw failure()
+              const hash = sha256CanonicalJson(row), previous = registrations.get(row.runtime_id)
+              if (previous && previous !== hash) throw failure()
+              registrations.set(row.runtime_id, hash)
+            }
+            await preparation.verify(); assertCurrent()
+          } catch (cause) { active = false; coordinator.close(); throw Object.assign(failure(), { cause }) }
+        }
+        await cleanup.verify()
+        await verify()
+        const targets = [...plan.modules].sort((a, b) => (this.modules.get(a.module_id)?.start_priority ?? 100) - (this.modules.get(b.module_id)?.start_priority ?? 100))
+        for (const module of targets) {
+          const runtime = this.modules.get(module.module_id), permit = Object.freeze({})
+          if (!runtime || !['crabot-agent', 'memory-default'].includes(module.module_id)) throw failure()
+          pendingModule = module.module_id
+          this.workspaceValidationPermits.set(permit, { moduleId: module.module_id, runtime, runtimeId: module.runtime_id, recoveryId: request.recovery_id, verify, assertCurrent })
+          try {
+            await this.enqueueLifecycle(module.module_id, () => this.startModuleProcess(module.module_id, undefined, this.envOverrides.get(module.module_id), permit))
+          } finally { this.workspaceValidationPermits.delete(permit) }
+          assertCurrent()
+          const receipt = records.readWorkspaceRecoveryRuntimeStart(this.dataDir, request.recovery_id, module.module_id), owned = launched.get(module.module_id)
+          if (!owned || !receipt || receipt.runtime.runtime_id !== module.runtime_id || !native.sameProcess(receipt.process, owned.process)) throw failure()
+          receipts.set(module.module_id, sha256CanonicalJson(receipt))
+          await verify(); pendingModule = undefined
+        }
+        completed = true
+        await verify()
+        return Object.freeze({ plan, modules: Object.freeze([...launched].map(([module_id, item]) => Object.freeze({ module_id, runtime_id: item.state.runtimeId, process: item.process }))), verify, assertCurrent })
+      } catch (cause) { active = false; coordinator.close(); throw Object.assign(failure(), { cause }) }
+    })
+    this.workspaceRecoveryValidationLaunches.set(coordinator, pending)
+    return pending
+  }
+
   private async prepareWorkspaceRecoveryRuntimes(request: VerifyWorkspaceRelocationRecoveryRequestParams, bearer?: string): Promise<WorkspaceRecoveryRuntimePreparation> {
     request = Object.freeze({ ...request })
     const coordinator = await this.initializeWorkspaceRelocationRecovery(request, bearer), previous = this.workspaceRecoveryRuntimePreparations.get(coordinator)
@@ -2307,6 +2417,31 @@ export class ModuleManager {
     })
     this.workspaceRecoveryRuntimePreparations.set(coordinator, pending)
     return pending
+  }
+
+  private async handleVerifyWorkspaceRelocationRecoveryRuntime(
+    params: VerifyWorkspaceRelocationRecoveryRuntimeParams, context?: RpcHandlerContext,
+  ): Promise<VerifyWorkspaceRelocationRecoveryRuntimeResult> {
+    context = Object.freeze({ authorizationBearer: context?.authorizationBearer })
+    this.handleVerifyCoreAgentRuntime({ expected_module_id: 'crabot-agent' }, context)
+    const request = require('../../scripts/lib/workspace-recovery-admission.mjs').parseWorkspaceRecoveryAdmissionRequest(params)
+    const current = this.workspaceRecoveryInitialization, coordinator = current?.coordinator
+    const pending = coordinator && this.workspaceRecoveryValidationLaunches.get(coordinator)
+    if (!current || !coordinator || !pending || sha256CanonicalJson(current.request) !== sha256CanonicalJson(request)) {
+      throw Object.assign(new Error('No matching current recovery validation role'), { code: 'FORBIDDEN' })
+    }
+    const launched = await pending
+    await launched.verify()
+    this.handleVerifyCoreAgentRuntime({ expected_module_id: 'crabot-agent' }, context)
+    const agent = launched.modules.find(module => module.module_id === 'crabot-agent'), credential = this.runtimeBearers.get('crabot-agent')
+    if (this.workspaceRecoveryInitialization !== current || current.coordinator !== coordinator || !agent || !credential
+      || this.processes.get('crabot-agent') !== credential.child || credential.child.pid !== agent.process.pid) {
+      throw Object.assign(new Error('Recovery Agent generation changed'), { code: 'FORBIDDEN' })
+    }
+    const record = require('../../scripts/lib/workspace-recovery-records.mjs').readWorkspaceRecoveryCoordinator(this.dataDir, request.recovery_id)
+    launched.assertCurrent()
+    return { verified: true, ...request, launch_sha256: sha256CanonicalJson(record.launch), plan_sha256: sha256CanonicalJson(launched.plan),
+      root_selected_sha256: launched.plan.root_selected_sha256, instance_id: this.runtimeRegistry.getInstanceId(), module_id: 'crabot-agent', runtime_id: agent.runtime_id }
   }
 
   private async handleVerifyWorkspaceRelocationRecoveryAdmission(

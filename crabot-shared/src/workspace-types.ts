@@ -257,6 +257,23 @@ export interface VerifyWorkspaceRelocationRecoveryRequestResult {
 export type VerifyWorkspaceRelocationRecoveryAdmissionParams = VerifyWorkspaceRelocationRecoveryRequestParams
 export type VerifyWorkspaceRelocationRecoveryAdmissionResult = VerifyWorkspaceRelocationRecoveryRequestResult
 
+export type VerifyWorkspaceRelocationRecoveryRuntimeParams = VerifyWorkspaceRelocationRecoveryRequestParams
+export interface VerifyWorkspaceRelocationRecoveryRuntimeResult {
+  verified: true
+  intent_id: string
+  recovery_id: string
+  completion_sha256: string
+  finalizing_sha256: string
+  launch_sha256: string
+  plan_sha256: string
+  root_selected_sha256: string
+  instance_id: string
+  module_id: 'crabot-agent'
+  runtime_id: string
+}
+export type VerifyWorkspaceRelocationRecoveryRootParams = VerifyWorkspaceRelocationRecoveryRuntimeParams
+export type VerifyWorkspaceRelocationRecoveryRootResult = VerifyWorkspaceRelocationRecoveryRuntimeResult
+
 export interface WorkspaceRecoveryRuntimeRegistration {
   schema_version: 1
   instance_id: string
