@@ -1,6 +1,6 @@
 // Read-only fixed archive scope. This supplies no recovery or normal-job command authority.
 import { sha256CanonicalJson as hash } from '../../crabot-shared/dist/canonical-json.js'
-import { readCurrentWorkspaceRelocationFinalizing, readWorkspaceRelocationArchivedState, readWorkspaceRelocationReleased } from './workspace-relocation-intent.mjs'
+import { observeWorkspaceRelocationRecords, readCurrentWorkspaceRelocationFinalizing, readWorkspaceRelocationArchivedState, readWorkspaceRelocationReleased } from './workspace-relocation-intent.mjs'
 import exits from './known-process-exit.cjs'
 import fs from 'node:fs'
 import native from './process-identity.cjs'
@@ -19,7 +19,7 @@ export function parseWorkspaceRecoveryAdmissionRequest(input) {
 }
 function readRecoveryScope(dataDir, input, completion) {
   const request = parseWorkspaceRecoveryAdmissionRequest(input)
-  try {
+  try { return observeWorkspaceRelocationRecords(() => {
     const protectedFence = readCurrentWorkspaceRelocationFinalizing(dataDir), releasedFence = readWorkspaceRelocationReleased(dataDir, request.intent_id)
     if (!!protectedFence === !!releasedFence) throw unavailable()
     if (releasedFence && (!completion || maintenance.workspaceMaintenancePending(dataDir))) throw unavailable()
@@ -28,7 +28,7 @@ function readRecoveryScope(dataDir, input, completion) {
     const state = readWorkspaceRelocationArchivedState(dataDir, request.intent_id)
     if (hash(state.completion) !== request.completion_sha256 || exits.probeKnownProcessExit([state.launch.process]).state !== 'stopped') throw unavailable()
     return { request, state, fence, fingerprint: hash({ state, fence }), released: !!releasedFence }
-  } catch { throw unavailable() }
+  }) } catch { throw unavailable() }
 }
 export function readWorkspaceRecoveryAdmissionScope(dataDir, input) {
   const { released, ...scope } = readRecoveryScope(dataDir, input, false)

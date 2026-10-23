@@ -14,7 +14,7 @@ import { beginVersionMaintenance } from '../version-maintenance.mjs'
 import { writeCoreRelease } from '../core-release.mjs'
 import { WorkspaceCatalog } from '../../../crabot-shared/dist/workspace-catalog.js'
 import { assertWorkspaceExecutionAllowed } from '../../../crabot-shared/dist/workspace-maintenance.js'
-import { commitWorkspaceRelocationProcesses, readWorkspaceRelocationProcesses, commitWorkspaceRelocationCoordinator, commitWorkspaceRelocationCoordinatorReady, readWorkspaceRelocationCoordinator, commitWorkspaceRelocationModules, readWorkspaceRelocationModules, prepareWorkspaceRelocationModuleStops, observeWorkspaceRelocationModuleProcesses, completeWorkspaceRelocationModuleStops, readWorkspaceRelocationModuleStops, beginWorkspaceRelocationIntent, readWorkspaceRelocationIntent, commitWorkspaceRelocationWorkers, readWorkspaceRelocationWorkers, prepareWorkspaceRelocationStops, completeWorkspaceRelocationStops, readWorkspaceRelocationStops } from '../workspace-relocation-intent.mjs'
+import { observeWorkspaceRelocationRecords, commitWorkspaceRelocationProcesses, readWorkspaceRelocationProcesses, commitWorkspaceRelocationCoordinator, commitWorkspaceRelocationCoordinatorReady, readWorkspaceRelocationCoordinator, commitWorkspaceRelocationModules, readWorkspaceRelocationModules, prepareWorkspaceRelocationModuleStops, observeWorkspaceRelocationModuleProcesses, completeWorkspaceRelocationModuleStops, readWorkspaceRelocationModuleStops, beginWorkspaceRelocationIntent, readWorkspaceRelocationIntent, commitWorkspaceRelocationWorkers, readWorkspaceRelocationWorkers, prepareWorkspaceRelocationStops, completeWorkspaceRelocationStops, readWorkspaceRelocationStops } from '../workspace-relocation-intent.mjs'
 
 async function fixture(t, beforeCleanup = () => {}) {
   const root = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'crabot-relocation-intent-中文 space-')))
@@ -1288,5 +1288,40 @@ test('new intents fix the exact policy and legacy schema1 is read unchanged with
     }
     await fs.writeFile(f.recordFile, JSON.stringify({ ...legacy, metadata_compatibility: 'exact' }))
     assert.throws(() => readWorkspaceRelocationIntent(f.data), { code: 'WORKSPACE_RELOCATION_INVALID' })
+  } finally { releaseCliLock(lock) }
+})
+
+
+test('a finite synchronous record observation shares reads but still detects a cached record changed before return', async t => {
+  const f = await fixture(t), lock = await acquireCliLock(f.data, 'workspace-relocation')
+  try {
+    const accepted = await beginWorkspaceRelocationIntent(f.input), bytes = await fs.readFile(f.recordFile)
+    const original = syncFs.readFileSync; let reads = 0
+    const counting = t.mock.method(syncFs, 'readFileSync', function(file, ...args) {
+      if (typeof file === 'number') reads++
+      return original.call(this, file, ...args)
+    })
+    try {
+      readWorkspaceRelocationIntent(f.data); const single = reads; reads = 0
+      observeWorkspaceRelocationRecords(() => {
+        const first = readWorkspaceRelocationIntent(f.data)
+        assert.equal(readWorkspaceRelocationIntent(f.data), first)
+        assert.deepEqual(first, accepted)
+        assert.equal(readWorkspaceRelocationWorkers(f.data, f.input.id), null)
+      })
+      assert.ok(single > 0); assert.equal(reads, single)
+      assert.throws(() => observeWorkspaceRelocationRecords(() => {
+        readWorkspaceRelocationIntent(f.data)
+        syncFs.appendFileSync(f.recordFile, ' ')
+        return readWorkspaceRelocationIntent(f.data)
+      }))
+    } finally { counting.mock.restore(); await fs.writeFile(f.recordFile, bytes) }
+    assert.deepEqual(readWorkspaceRelocationIntent(f.data), accepted)
+    assert.throws(() => observeWorkspaceRelocationRecords(() => Promise.resolve('never a record frame')), { code: 'WORKSPACE_RELOCATION_INVALID' })
+    let executed = false
+    assert.throws(() => observeWorkspaceRelocationRecords(async () => { executed = true }), { code: 'WORKSPACE_RELOCATION_INVALID' })
+    assert.equal(executed, false)
+    const moved = f.data + '-roundtrip'; await fs.rename(f.data, moved); await fs.rename(moved, f.data)
+    assert.deepEqual(readWorkspaceRelocationIntent(f.data), accepted)
   } finally { releaseCliLock(lock) }
 })

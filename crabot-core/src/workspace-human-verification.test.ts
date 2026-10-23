@@ -2755,7 +2755,7 @@ describe('normal fixed-job Admin completion preparation', () => {
     ...(process.env.GITHUB_ACTIONS === 'true' && process.env.CRABOT_WORKSPACE_BUSINESS_ONSTART_CI === '1' ? ['resume actual Admin startup'] : [])] : []
   const releaseModes = [...resumeModes, ...(hasNativeRelease ? ['completion release', 'lost release acknowledgement'] : ['release unavailable']),
     ...(process.platform !== 'win32' && process.getuid?.() !== 0 ? ['release readonly root'] : [])]
-  it.each(['Agent', 'Agent and Memory', 'catalog changed after probe', 'completion observation', 'released without observation', 'definition changed before release', 'plan changed before release', 'released current observation', ...releaseModes])('starts only the planned cold validation generations: %s', async mode => {
+  it.each(['Agent', 'Agent and Memory', 'catalog changed after probe', 'completion observation', 'released without observation', 'definition changed before release', 'plan changed before release', 'record changed during assertion', 'released current observation', ...releaseModes])('starts only the planned cold validation generations: %s', async mode => {
     const caseStarted = performance.now()
     const phase = (stage: string) => console.log('[Cold workspace stage]', { mode, stage, elapsed_ms: Math.round(performance.now() - caseStarted) })
     const withMemory = mode === 'Agent and Memory'
@@ -2776,6 +2776,18 @@ describe('normal fixed-job Admin completion preparation', () => {
       const fence = records.readWorkspaceRelocationFinalizing(f.data, f.params.intent_id), fenceFile = path.join(f.data, 'workspace-control/relocation-finalizing.json')
       const before = await fs.readFile(fenceFile), ledgerFile = path.join(f.data, 'agent/worker-ledgers/channel%3A%3Asession.json'), ledger = await fs.readFile(ledgerFile)
       const request = { intent_id: f.params.intent_id, recovery_id: randomUUID(), completion_sha256: prepared.completion_sha256, finalizing_sha256: sha256CanonicalJson(fence) }
+      if (mode === 'Agent') {
+        let reads = 0
+        const originalRead = syncFs.readFileSync
+        const counting = vi.spyOn(syncFs, 'readFileSync').mockImplementation(((file: any, ...args: any[]) => {
+          if (typeof file === 'number') reads++
+          return (originalRead as any)(file, ...args)
+        }) as any)
+        try { require('../../scripts/lib/workspace-recovery-admission.mjs').readWorkspaceRecoveryCompletionScope(f.data, request) }
+        finally { counting.mockRestore() }
+        console.log('[Recovery fixed scope reads]', { reads })
+        expect(reads).toBeLessThanOrEqual(256)
+      }
       const entry = path.join(f.data, 'cold-finite-runtime.cjs')
       await fs.writeFile(entry, `const fs=require('node:fs'),http=require('node:http');const receipt=JSON.parse(fs.readFileSync(process.env.TEST_RECEIPT,'utf8'));
         fs.writeFileSync(process.env.TEST_MARKER,JSON.stringify({pid:process.pid,parent:process.ppid,runtime:process.env.CRABOT_MODULE_RUNTIME_ID,receipt}));
@@ -2946,8 +2958,43 @@ describe('normal fixed-job Admin completion preparation', () => {
       const health = await cold.verifyWorkspaceRecoveryValidationHealth(request, human)
       expect(health.healthy_modules.map((module: any) => module.module_id).sort()).toEqual(ids)
       expect(health.root_verified).toEqual(proof)
-      await health.verify()
+      if (mode === 'Agent') {
+        let reads = 0, verifies = 0
+        const originalRead = syncFs.readFileSync, originalSend = coordinator.child.send.bind(coordinator.child)
+        const counting = vi.spyOn(syncFs, 'readFileSync').mockImplementation(((file: any, ...args: any[]) => {
+          if (typeof file === 'number') reads++
+          return (originalRead as any)(file, ...args)
+        }) as any)
+        const sending = vi.spyOn(coordinator.child, 'send').mockImplementation((message: any, ...args: any[]) => {
+          if (message?.kind === 'workspace_recovery_verify') verifies++
+          return originalSend(message, ...args)
+        })
+        const started = performance.now()
+        try { await health.verify() }
+        finally { counting.mockRestore(); sending.mockRestore() }
+        console.log('[Recovery finite health cost]', { reads, verifies, elapsed_ms: Math.round(performance.now() - started) })
+        expect(verifies).toBe(40)
+        expect(reads).toBeLessThanOrEqual(12000)
+      } else await health.verify()
       phase('current-root-health')
+      if (mode === 'record changed during assertion') {
+        const launched = await cold.startWorkspaceRecoveryValidationModules(request, human)
+        const file = path.join(fence.archive_path, 'relocation.json'), bytes = await fs.readFile(file), lstat = syncFs.lstatSync
+        let changed = false, failure: unknown
+        const inject = vi.spyOn(syncFs, 'lstatSync').mockImplementation(((name: any, ...args: any[]) => {
+          const stat = (lstat as any)(name, ...args)
+          if (!changed && name === file && new Error().stack?.includes('verifyRecordObservation')) {
+            changed = true; syncFs.appendFileSync(file, ' ')
+          }
+          return stat
+        }) as any)
+        try { try { launched.assertCurrent() } catch (error) { failure = error } }
+        finally { inject.mockRestore(); await fs.writeFile(file, bytes) }
+        expect(changed).toBe(true); expect(failure).toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
+        expect(() => launched.assertCurrent()).toThrow()
+        await vi.waitFor(() => expect(require('../../scripts/lib/known-process-exit.cjs').probeKnownProcessExit([coordinator.launch.process]).state).toBe('stopped'), { timeout: 15000 })
+        return
+      }
       expect((await fs.stat(root, { bigint: true })).mtimeNs).toBe(probedAt)
       if (mode === 'Agent' || mode === 'released current observation' || releaseModes.includes(mode)) {
         expect(typeof cold.prepareWorkspaceRecoveryCompletion).toBe('function')

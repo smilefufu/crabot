@@ -49,13 +49,13 @@ defaults:
 
 jobs:
   core:
-    name: ${{ matrix.suite == 'business' && 'Business workspace runtime' || matrix.suite == 'archive' && 'Archived workspace records' || matrix.suite == 'recovery-terminal' && 'Cold workspace completion' || matrix.suite == 'recovery' && 'Cold workspace recovery' || matrix.suite == 'completion' && 'Workspace job completion' || 'Fixed workspace lifecycle' }} ${{ matrix.os }}
+    name: ${{ matrix.suite == 'business' && 'Business workspace runtime' || matrix.suite == 'archive' && 'Archived workspace records' || matrix.suite == 'recovery-terminal' && 'Cold workspace release' || matrix.suite == 'recovery-services' && 'Cold workspace service restoration' || matrix.suite == 'recovery-admin' && 'Cold workspace Admin restoration' || matrix.suite == 'recovery' && 'Cold workspace recovery' || matrix.suite == 'completion' && 'Workspace job completion' || 'Fixed workspace lifecycle' }} ${{ matrix.os }}
     timeout-minutes: ${{ matrix.os == 'windows-latest' && 45 || 25 }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-22.04, macos-14, macos-15-intel, windows-latest]
-        suite: [finite, business, archive, recovery, recovery-terminal, completion]
+        suite: [finite, business, archive, recovery, recovery-terminal, recovery-services, recovery-admin, completion]
     runs-on: ${{ matrix.os }}
     concurrency:
       group: workspace-core-${{ github.ref }}-${{ matrix.os }}-${{ matrix.suite }}
@@ -113,7 +113,19 @@ jobs:
         env:
           CRABOT_WORKSPACE_BUSINESS_ONSTART_CI: '1'
         run: |
-          node node_modules/vitest/vitest.mjs run src/workspace-human-verification.test.ts --testNamePattern='starts only the planned cold validation generations: (?:completion release|lost release acknowledgement|release unavailable|release readonly root|released current observation|resume running module|resume inactive module|resume tool|resume actual Admin startup)$' --maxWorkers=1 --minWorkers=1 --bail=1
+          node node_modules/vitest/vitest.mjs run src/workspace-human-verification.test.ts --testNamePattern='starts only the planned cold validation generations: (?:completion release|lost release acknowledgement|release unavailable|release readonly root|released current observation)$' --maxWorkers=1 --minWorkers=1 --bail=1
+      - name: Current cold service restoration and coordinator exit
+        if: ${{ matrix.suite == 'recovery-services' && !cancelled() && steps.compile.outcome == 'success' }}
+        working-directory: crabot-core
+        run: |
+          node node_modules/vitest/vitest.mjs run src/workspace-human-verification.test.ts --testNamePattern='starts only the planned cold validation generations: (?:resume running module|resume inactive module|resume tool)$' --maxWorkers=1 --minWorkers=1 --bail=1
+      - name: Current cold actual Admin main and authenticated Web restoration
+        if: ${{ matrix.suite == 'recovery-admin' && !cancelled() && steps.compile.outcome == 'success' }}
+        working-directory: crabot-core
+        env:
+          CRABOT_WORKSPACE_BUSINESS_ONSTART_CI: '1'
+        run: |
+          node node_modules/vitest/vitest.mjs run src/workspace-human-verification.test.ts --testNamePattern='starts only the planned cold validation generations: resume actual Admin startup$' --maxWorkers=1 --minWorkers=1 --bail=1
       - name: Actual terminal release, business reopening and repeated jobs
         if: ${{ matrix.suite == 'completion' && !cancelled() && steps.compile.outcome == 'success' }}
         working-directory: crabot-core

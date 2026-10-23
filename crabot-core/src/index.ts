@@ -2565,7 +2565,7 @@ export class ModuleManager {
         const launched = new Map<ModuleId, { child: ChildProcess; state: ManagedChildState; process: WorkerProcessIdentity }>()
         const registrations = new Map<string, string>(), receipts = new Map<ModuleId, string>()
         const assertCurrent = () => {
-          try {
+          try { return require('../../scripts/lib/workspace-relocation-intent.mjs').observeWorkspaceRelocationRecords(() => {
             if (!active || this.isShuttingDown || this.workspaceRecoveryInitialization?.coordinator !== coordinator
               || sha256CanonicalJson(records.readWorkspaceRecoveryRuntimePlan(this.dataDir, request.recovery_id)) !== planHash
               || this.modules.size !== definitions.size || this.processes.get('admin-web') !== admin
@@ -2595,7 +2595,7 @@ export class ModuleManager {
             for (const [id, item] of launched) if (this.processes.get(id) !== item.child) throw failure()
             for (const [id, hash] of receipts) if (sha256CanonicalJson(records.readWorkspaceRecoveryRuntimeStart(this.dataDir, request.recovery_id, id)) !== hash) throw failure()
             if (completed && (launched.size !== plan.modules.length || receipts.size !== plan.modules.length)) throw failure()
-          } catch (cause) { active = false; coordinator.close(); throw Object.assign(failure(), { cause }) }
+          }) } catch (cause) { active = false; coordinator.close(); throw Object.assign(failure(), { cause }) }
         }
         const verify = async () => {
           try {

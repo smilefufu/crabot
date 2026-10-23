@@ -6,7 +6,7 @@ import management from './desktop-management.cjs'
 import { cliLockToken } from './cli-lock.mjs'
 import owned from './owned-process-tree.cjs'
 import { parseWorkspaceRecoveryAdmissionRequest, readWorkspaceRecoveryAdmissionScope, readWorkspaceRecoveryCompletionScope } from './workspace-recovery-admission.mjs'
-import { readWorkspaceRelocationArchivedState } from './workspace-relocation-intent.mjs'
+import { observeWorkspaceRelocationRecords, readWorkspaceRelocationArchivedState } from './workspace-relocation-intent.mjs'
 import { sha256CanonicalJson as hash } from '../../crabot-shared/dist/canonical-json.js'
 const fail = () => { throw Object.assign(new Error('新恢复协调器的初始化材料无法核实，原维护保护已保留。'), { code: 'CRABOT_WORKSPACE_RECOVERY_COORDINATOR' }) }
 const uuid = value => typeof value === 'string' && /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(value)
@@ -168,7 +168,7 @@ function runtimePlan(launch, state, record) {
 }
 /** Historical ownership hint only, never a startup permit or proof that a runtime exists. */
 export function readWorkspaceRecoveryRuntimePlan(dataDir, recoveryId) {
-  try {
+  try { return observeWorkspaceRelocationRecords(() => {
     const ctx = context(dataDir, recoveryId), coordinator = readWorkspaceRecoveryCoordinator(dataDir, recoveryId)
     if (!coordinator.launch || !coordinator.ready) return null
     const directory = frame(ctx.directory), parent = frame(ctx.parent)
@@ -179,7 +179,7 @@ export function readWorkspaceRecoveryRuntimePlan(dataDir, recoveryId) {
     ctx.verify()
     if (hash(frame(ctx.directory)) !== hash(directory) || hash(frame(ctx.parent)) !== hash(parent)) fail()
     return record
-  } catch { fail() }
+  }) } catch { fail() }
 }
 export async function commitWorkspaceRecoveryRuntimePlan(options) {
   try {
@@ -233,7 +233,7 @@ function registration(ctx, runtimeId, flush = false) {
 }
 /** Immutable technical facts, not a live process or startup authorization. */
 export function readWorkspaceRecoveryRuntimeStart(dataDir, recoveryId, moduleId) {
-  try {
+  try { return observeWorkspaceRelocationRecords(() => {
     if (!coreModule(moduleId)) fail()
     const ctx = context(dataDir, recoveryId), coordinator = readWorkspaceRecoveryCoordinator(dataDir, recoveryId), plan = readWorkspaceRecoveryRuntimePlan(dataDir, recoveryId)
     if (!coordinator.launch || !coordinator.ready || !plan) fail()
@@ -246,11 +246,11 @@ export function readWorkspaceRecoveryRuntimeStart(dataDir, recoveryId, moduleId)
     ctx.verify()
     if (hash(before) !== hash(frame(starts))) fail()
     return record
-  } catch { fail() }
+  }) } catch { fail() }
 }
 /** Current facts only; callers retain their own private live permit. */
 export function verifyWorkspaceRecoveryRuntimeStart({ dataDir, recoveryId, moduleId, recordHash, definitionHash }) {
-  try {
+  try { return observeWorkspaceRelocationRecords(() => {
     if (!digest(recordHash) || !digest(definitionHash)) fail()
     const ctx = context(dataDir, recoveryId), coordinator = readWorkspaceRecoveryCoordinator(dataDir, recoveryId)
     const record = readWorkspaceRecoveryRuntimeStart(dataDir, recoveryId, moduleId)
@@ -260,7 +260,7 @@ export function verifyWorkspaceRecoveryRuntimeStart({ dataDir, recoveryId, modul
       || hash(registration(ctx, record.runtime.runtime_id)) !== hash(record.runtime)) fail()
     readWorkspaceRecoveryCompletionScope(dataDir, coordinator.launch.request)
     return record
-  } catch { fail() }
+  }) } catch { fail() }
 }
 export async function commitWorkspaceRecoveryRuntimeStart(options) {
   try {

@@ -67,7 +67,7 @@ function verifyRecordObservation(frame) {
 function recordGraphReader(reader) {
   return function(dataDir, id) {
     const outer = recordObservation === null
-    const frame = recordObservation ?? { values: new Map(), paths: new Map(), roots: new Map() }
+    const frame = recordObservation ?? { values: new Map(), bytes: new Map(), paths: new Map(), roots: new Map() }
     if (outer) recordObservation = frame
     try {
       let values = frame.values.get(reader)
@@ -85,6 +85,15 @@ function recordGraphReader(reader) {
       }
     }
   }
+}
+/** One trusted synchronous read only; no frame, handle or role survives an await. */
+export function observeWorkspaceRelocationRecords(reader) {
+  if (typeof reader !== 'function' || reader.constructor?.name === 'AsyncFunction') fail()
+  return recordGraphReader(function observeSynchronousRecords() {
+    const result = reader()
+    if (result && typeof result.then === 'function') fail()
+    return result
+  })()
 }
 const identity = directory => {
   try {
@@ -132,12 +141,15 @@ function readPrivateBytes(file, limit) {
     const owner = process.platform === 'win32' ? native.isPrivateFile(file)
       : before.uid === BigInt(process.getuid()) && (before.mode & 0o777n) === 0o600n
     if (!owner) fail()
+    const cached = recordObservation?.bytes.get(file)
+    if (cached) return Buffer.from(cached)
     fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0))
     const stat = fs.fstatSync(fd, { bigint: true })
     if (stat.dev !== before.dev || stat.ino !== before.ino || stat.size !== before.size) fail()
     const value = fs.readFileSync(fd)
     const after = fs.lstatSync(file, { bigint: true })
     if (after.dev !== before.dev || after.ino !== before.ino || after.mtimeNs !== before.mtimeNs || after.ctimeNs !== before.ctimeNs) fail()
+    recordObservation?.bytes.set(file, Buffer.from(value))
     return value
   } catch { fail() } finally { if (fd !== undefined) fs.closeSync(fd) }
 }
