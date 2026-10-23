@@ -806,8 +806,8 @@ export class ModelProviderManager {
     }
     if (provider.format === 'gemini') {
       return {
-        url: `${provider.endpoint}/models?key=${authToken}`,
-        headers: {},
+        url: `${provider.endpoint}/models`,
+        headers: { Authorization: `Bearer ${authToken}` },
       }
     }
     throw new Error(`Unsupported format: ${provider.format}`)
