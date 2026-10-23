@@ -3,6 +3,7 @@ import type { HttpClient, RequestOptions } from './http.js'
 import { WorkspaceCreateRequestSchema, WorkspaceGetResultSchema, WorkspaceIdSchema, WorkspaceListResultSchema,
   WorkspaceRecordResultSchema, WorkspaceScanResultSchema, WorkspaceMaintenanceStatusSchema, WorkspaceUpdateRequestSchema, WorkspaceUsageSchema,
   WorkspaceRelocationPreviewRequestSchema, WorkspaceRelocationPreviewResultSchema, VerifyWorkspaceRelocationStartParamsSchema, WorkspaceRelocationStartResultSchema, WorkspaceRelocationJobQuerySchema, WorkspaceRelocationStatusResultSchema,
+  StartWorkspaceRelocationRecoveryParamsSchema, WorkspaceRelocationRecoveryPreviewResultSchema, WorkspaceRelocationRecoveryAcceptedSchema, type StartWorkspaceRelocationRecoveryParams,
   type VerifyWorkspaceRelocationStartParams, type WorkspaceRelocationPreviewRequest, type WorkspaceCreateRequest, type WorkspaceUpdateRequest } from './contracts/workspaces.js'
 
 export class WorkspaceClient {
@@ -16,6 +17,16 @@ export class WorkspaceClient {
     const query = WorkspaceRelocationJobQuerySchema.required().parse({ intent_id: id })
     const response = WorkspaceRelocationStatusResultSchema.refine(value => !value.job || value.job.intent_id === query.intent_id)
     return this.http.request('/workspaces/relocation/jobs/' + encodeURIComponent(query.intent_id), response, { ...options, method: 'GET' })
+  }
+  previewRelocationRecovery(id: string, options?: RequestOptions) {
+    const query = WorkspaceRelocationJobQuerySchema.required().parse({ intent_id: id })
+    const response = WorkspaceRelocationRecoveryPreviewResultSchema.refine(value => !value.recovery || value.recovery.intent_id === query.intent_id)
+    return this.http.request('/workspaces/relocation/jobs/' + encodeURIComponent(query.intent_id) + '/recovery', response, { ...options, method: 'GET' })
+  }
+  startRelocationRecovery(input: StartWorkspaceRelocationRecoveryParams, options?: RequestOptions) {
+    const request = StartWorkspaceRelocationRecoveryParamsSchema.parse(input)
+    const response = WorkspaceRelocationRecoveryAcceptedSchema.refine(value => value.intent_id === request.intent_id && value.recovery_id === request.recovery_id)
+    return this.write('/workspaces/relocation/recover', 'POST', request, response, { timeoutMs: 120_000, ...options })
   }
   startRelocation(input: VerifyWorkspaceRelocationStartParams, options?: RequestOptions) {
     const request = VerifyWorkspaceRelocationStartParamsSchema.parse(input)

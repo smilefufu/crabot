@@ -747,7 +747,13 @@ describe('same MM workspace recovery and later migration', () => {
       const fence = records.readWorkspaceRelocationFinalizing(f.data, first.intent_id), archived = records.readWorkspaceRelocationArchivedState(f.data, first.intent_id)
       expect(require('../../scripts/lib/known-process-exit.cjs').probeKnownProcessExit([archived.launch.process]).state).toBe('stopped')
       const request = { intent_id: first.intent_id, recovery_id: randomUUID(), completion_sha256: sha256CanonicalJson(archived.completion), finalizing_sha256: sha256CanonicalJson(fence) }
-      expect(await f.manager.completeWorkspaceRecovery(request, 'fixture-human')).toMatchObject({ resumed: true, ...request })
+      expect(await sdk.previewRelocationRecovery(first.intent_id)).toEqual({ available: true, recovery: {
+        intent_id: request.intent_id, completion_sha256: request.completion_sha256, finalizing_sha256: request.finalizing_sha256,
+      } })
+      const confirmation = { ...request, confirmed: true }
+      const receipts = await Promise.all([sdk.startRelocationRecovery(confirmation), sdk.startRelocationRecovery({ ...confirmation })])
+      expect(receipts).toEqual([{ intent_id: first.intent_id, recovery_id: request.recovery_id, accepted: true }, { intent_id: first.intent_id, recovery_id: request.recovery_id, accepted: true }])
+      expect(await f.manager.workspaceRecoveryCompletions.get(request.recovery_id).pending).toMatchObject({ resumed: true, ...request })
       expect(f.manager.workspaceInitialJob.phase).toBe('completed')
       expect((await sdk.relocationStatus(first.intent_id)).job).toMatchObject({ state: 'completed', stage: 'finished' })
       expect((await catalog.snapshot()).storage_root).toBe(first.target)
@@ -840,6 +846,83 @@ describe('MM reads workspace job status under the current human identity', () =>
       expect(require('../../scripts/lib/cli-lock.mjs').cliLockToken(path.join(f.data, 'cli.lock'))).toBeUndefined()
     } finally { await f.cleanup() }
   }, process.platform === 'win32' ? 120000 : 30000)
+})
+
+describe('MM reads workspace recovery handoff under current human authority', () => {
+  const timeout = process.platform === 'win32' ? 120000 : 30000
+  it('previews without creating roles or files, and preserves unknown facts', async () => {
+    const f = await fixture({ actualAdmin: true })
+    const file = path.join(f.data, 'workspace-control/relocation-active/relocation.json'), before = await fs.readFile(file)
+    try {
+      expect(await f.manager.previewWorkspaceRelocationRecovery({ intent_id: f.params.intent_id }, 'fixture-human')).toEqual({ available: true, recovery: null })
+      expect(f.manager.workspaceRecoveryAdmissionPreparation).toBeUndefined(); expect(f.manager.workspaceRecoveryInitializations.size).toBe(0)
+      expect(f.manager.workspaceRecoveryReceipts.size).toBe(0)
+      expect(require('../../scripts/lib/cli-lock.mjs').cliLockToken(path.join(f.data, 'cli.lock'))).toBeUndefined()
+      expect(await fs.readFile(file)).toEqual(before)
+      await fs.writeFile(file, 'unverifiable original fact')
+      expect(await f.manager.previewWorkspaceRelocationRecovery({ intent_id: f.params.intent_id }, 'fixture-human')).toEqual({ available: false, recovery: null })
+      await expect(f.manager.previewWorkspaceRelocationRecovery({}, 'fixture-human')).rejects.toMatchObject({ code: 'INVALID_PARAMS' })
+    } finally { await fs.writeFile(file, before); await f.cleanup() }
+  }, timeout)
+  it('offers only the complete original archive after its actual coordinator has exited', async () => {
+    const f = await fixture({ actualAdmin: true, actualAgent: true, validationHealth: 'healthy', processLifetimeMs: 180000 })
+    const records = require('../../scripts/lib/workspace-relocation-intent.mjs'), locks = require('../../scripts/lib/cli-lock.mjs')
+    const lock = await locks.acquireWorkspaceRelocationLock(f.data, f.params.intent_id)
+    try {
+      await f.manager.prepareWorkspaceRelocationCompletion(f.params, 'fixture-human')
+      const grant = f.manager.workspaceFinalizationGrant
+      const fence = records.readWorkspaceRelocationFinalizing(f.data, f.params.intent_id), archive = records.readWorkspaceRelocationArchivedState(f.data, f.params.intent_id)
+      expect(await f.manager.previewWorkspaceRelocationRecovery({ intent_id: f.params.intent_id }, 'fixture-human')).toEqual({ available: true, recovery: null })
+      // Retire the failed normal role while retaining its real process until it is closed.
+      grant.revoked = true
+      expect(await f.manager.previewWorkspaceRelocationRecovery({ intent_id: f.params.intent_id }, 'fixture-human')).toEqual({ available: false, recovery: null })
+      grant.close(); await f.manager.closeWorkspaceCoordinatorChannel(grant.child)
+      expect(await f.manager.previewWorkspaceRelocationRecovery({ intent_id: f.params.intent_id }, 'fixture-human')).toEqual({ available: true, recovery: {
+        intent_id: f.params.intent_id, completion_sha256: sha256CanonicalJson(archive.completion), finalizing_sha256: sha256CanonicalJson(fence),
+      } })
+      expect(records.readWorkspaceRelocationFinalizing(f.data, f.params.intent_id)).toEqual(fence)
+      expect(f.manager.workspaceRecoveryAdmissionPreparation).toBeUndefined(); expect(f.manager.workspaceRecoveryInitializations.size).toBe(0)
+    } finally { locks.releaseCliLock(lock); await f.cleanup() }
+  }, process.platform === 'win32' ? 180000 : 60000)
+  it('shares one initialized receipt, rechecks each current human and leaves its driver independent', async () => {
+    const f = await fixture({ actualAdmin: true })
+    const request = { intent_id: f.params.intent_id, recovery_id: randomUUID(), completion_sha256: 'a'.repeat(64), finalizing_sha256: 'b'.repeat(64), confirmed: true }
+    let initialize!: () => void, complete!: () => void
+    const initialized = new Promise<void>(resolve => { initialize = resolve }), finished = new Promise<void>(resolve => { complete = resolve })
+    const coordinator = { verify: vi.fn(async () => {}) }
+    const init = vi.spyOn(f.manager, 'initializeWorkspaceRelocationRecovery').mockImplementation(async () => { await initialized; return coordinator })
+    const driver = vi.spyOn(f.manager, 'completeWorkspaceRecovery').mockImplementation(() => finished)
+    let first: Promise<any> | undefined, second: Promise<any> | undefined
+    try {
+      first = f.manager.startWorkspaceRelocationRecovery(request, 'fixture-human')
+      second = f.manager.startWorkspaceRelocationRecovery({ ...request }, 'fixture-human')
+      await vi.waitFor(() => expect(init).toHaveBeenCalledOnce())
+      expect(driver).not.toHaveBeenCalled(); initialize()
+      const expected = { intent_id: request.intent_id, recovery_id: request.recovery_id, accepted: true }
+      expect(await first).toEqual(expected); expect(await second).toBe(await first)
+      expect(driver).toHaveBeenCalledOnce(); expect(driver).toHaveBeenCalledWith(expect.not.objectContaining({ confirmed: true }), 'fixture-human')
+      expect(coordinator.verify).toHaveBeenCalledOnce()
+      await expect(f.manager.startWorkspaceRelocationRecovery({ ...request, completion_sha256: 'c'.repeat(64) }, 'fixture-human')).rejects.toMatchObject({ code: 'FORBIDDEN' })
+      await fs.writeFile(path.join(f.data, 'human-revoked'), 'revoked')
+      await expect(f.manager.startWorkspaceRelocationRecovery(request, 'fixture-human')).rejects.toMatchObject({ code: 'UNAUTHORIZED' })
+      expect(init).toHaveBeenCalledOnce(); expect(driver).toHaveBeenCalledOnce()
+    } finally { initialize(); complete(); await Promise.allSettled([first, second].filter(Boolean)); await f.cleanup() }
+  }, timeout)
+  it('rejects missing identity before parsing and unknown initialization without replay', async () => {
+    const f = await fixture({ actualAdmin: true })
+    const request = { intent_id: f.params.intent_id, recovery_id: randomUUID(), completion_sha256: 'a'.repeat(64), finalizing_sha256: 'b'.repeat(64), confirmed: true }
+    const init = vi.spyOn(f.manager, 'initializeWorkspaceRelocationRecovery').mockRejectedValue(new Error('finite unknown initialization'))
+    const driver = vi.spyOn(f.manager, 'completeWorkspaceRecovery')
+    try {
+      await expect(f.manager.startWorkspaceRelocationRecovery(null)).rejects.toMatchObject({ code: 'UNAUTHORIZED' })
+      await expect(f.manager.startWorkspaceRelocationRecovery({ ...request, confirmed: false }, 'fixture-human')).rejects.toMatchObject({ code: 'INVALID_PARAMS' })
+      expect(init).not.toHaveBeenCalled()
+      const first = f.manager.startWorkspaceRelocationRecovery(request, 'fixture-human')
+      await expect(first).rejects.toThrow('finite unknown initialization')
+      await expect(f.manager.startWorkspaceRelocationRecovery(request, 'fixture-human')).rejects.toThrow('finite unknown initialization')
+      expect(init).toHaveBeenCalledOnce(); expect(driver).not.toHaveBeenCalled()
+    } finally { await f.cleanup() }
+  }, timeout)
 })
 
 describe('MM verifies an initial workspace request without creating an intent', () => {

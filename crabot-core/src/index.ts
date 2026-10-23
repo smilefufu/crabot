@@ -46,6 +46,10 @@ import {
   type VerifyWorkspaceRelocationRecoveryReleaseResult,
   type ReleaseWorkspaceRelocationRecoveryCompletionResult,
   type ResumeWorkspaceRelocationRecoveryWebResult,
+  type WorkspaceRelocationRecoveryPreviewResult,
+  type StartWorkspaceRelocationRecoveryParams,
+  type WorkspaceRelocationRecoveryAccepted,
+  parseWorkspaceRelocationRecoveryStartRequest,
   type WorkspaceRelocationJobQuery,
   type WorkspaceRelocationStatusResult,
   type WorkspaceRelocationJobStage,
@@ -357,6 +361,7 @@ export class ModuleManager {
   private readonly processes: Map<ModuleId, ChildProcess> = new Map()
   private workspaceInitialJob?: WorkspaceInitialJob
   private workspaceRecoveryJob?: WorkspaceRecoveryJob
+  private readonly workspaceRecoveryReceipts = new Map<string, { fingerprint: string; reply: Promise<WorkspaceRelocationRecoveryAccepted> }>()
   private workspaceCoordinatorGrant?: WorkspaceCoordinatorGrant
   private workspaceStopSequence?: { fingerprint: string; pending: Promise<WorkspaceStopSequenceResult> }
   private workspaceFilePreparation?: { fingerprint: string; pending: Promise<WorkspaceFilePreparationResult> }
@@ -434,6 +439,8 @@ export class ModuleManager {
     // 注册所有方法处理器
     this.registerMethod<VerifyWorkspaceRelocationStartParams, WorkspaceRelocationStartResult>('start_workspace_relocation', (params, context) => this.startWorkspaceRelocation(params, context?.authorizationBearer))
     this.registerMethod<WorkspaceRelocationJobQuery, WorkspaceRelocationStatusResult>('get_workspace_relocation_status', (params, context) => this.getWorkspaceRelocationStatus(params, context?.authorizationBearer))
+    this.registerMethod<WorkspaceRelocationJobQuery, WorkspaceRelocationRecoveryPreviewResult>('preview_workspace_relocation_recovery', (params, context) => this.previewWorkspaceRelocationRecovery(params, context?.authorizationBearer))
+    this.registerMethod<StartWorkspaceRelocationRecoveryParams, WorkspaceRelocationRecoveryAccepted>('start_workspace_relocation_recovery', (params, context) => this.startWorkspaceRelocationRecovery(params, context?.authorizationBearer))
     this.registerMethod('register', this.handleRegisterUnauthenticated.bind(this))
     this.registerMethod('register_core_agent', this.handleRegisterCoreAgent.bind(this))
     this.registerMethod('verify_workspace_relocation_recovery_admission', this.handleVerifyWorkspaceRelocationRecoveryAdmission.bind(this))
@@ -1454,7 +1461,7 @@ export class ModuleManager {
   // 进程管理
   // ============================================================================
 
-  private async getWorkspaceRelocationStatus(params: WorkspaceRelocationJobQuery, bearer?: string): Promise<WorkspaceRelocationStatusResult> {
+  private async verifyWorkspaceRelocationJobQuery(params: WorkspaceRelocationJobQuery, bearer?: string): Promise<Readonly<WorkspaceRelocationJobQuery>> {
     const snapshot = params && typeof params === 'object' && !Array.isArray(params) ? Object.freeze({ ...params }) : params
     if (typeof bearer !== 'string' || !bearer) throw Object.assign(new Error('Human Admin credential required'), { code: 'UNAUTHORIZED' })
     const unavailable = () => Object.assign(new Error('当前作业查询身份无法核实。'), { code: 'SERVICE_UNAVAILABLE' })
@@ -1474,6 +1481,11 @@ export class ModuleManager {
       if (code && ['UNAUTHORIZED', 'FORBIDDEN', 'INVALID_PARAMS'].includes(code)) throw Object.assign(new Error('Human workspace query rejected'), { code })
       throw unavailable()
     }
+    return query
+  }
+
+  private async getWorkspaceRelocationStatus(params: WorkspaceRelocationJobQuery, bearer?: string): Promise<WorkspaceRelocationStatusResult> {
+    const query = await this.verifyWorkspaceRelocationJobQuery(params, bearer)
     const job = this.workspaceInitialJob, recovery = this.workspaceRecoveryJob
     const recoveryId = recovery?.request.intent_id
     const ownId = job && (job.proof || job.phase === 'preparing') ? job.request.intent_id : undefined
@@ -1509,6 +1521,54 @@ export class ModuleManager {
     }
     return { available: true, job: { ...(stored.job ?? { intent_id: ownId, target: job.request.target }),
       state: job.phase === 'accepted' ? 'running' : job.phase, stage: job.stage } }
+  }
+
+  private workspaceRecoveryHandoffBusy(): boolean {
+    return !!(this.workspaceRecoveryAdmissionPreparation || this.workspaceRecoveryAdmission || this.workspaceRecoveryInitialization
+      || this.workspaceRecoveryFinalizationGrant || this.workspaceFinalizationGrant && !this.workspaceFinalizationGrant.revoked
+      || this.workspaceInitialJob && ['preparing', 'accepted'].includes(this.workspaceInitialJob.phase))
+  }
+
+  /** Read original private facts only; an offer is neither a reservation nor an effect role. */
+  private async previewWorkspaceRelocationRecovery(params: WorkspaceRelocationJobQuery, bearer?: string): Promise<WorkspaceRelocationRecoveryPreviewResult> {
+    const query = await this.verifyWorkspaceRelocationJobQuery(params, bearer)
+    if (!query.intent_id) throw Object.assign(new Error('Original workspace job required'), { code: 'INVALID_PARAMS' })
+    if (this.workspaceRecoveryHandoffBusy()) return { available: true, recovery: null }
+    const records = require('../../scripts/lib/workspace-relocation-intent.mjs')
+    try {
+      return records.observeWorkspaceRelocationRecords(() => {
+        const status = records.readWorkspaceRelocationJobStatus(this.dataDir, query.intent_id)
+        if (!status.available) return { available: false, recovery: null }
+        if (!status.job) return { available: true, recovery: null }
+        const fence = records.readCurrentWorkspaceRelocationFinalizing(this.dataDir)
+        if (!fence || fence.intent_id !== query.intent_id || records.readWorkspaceRelocationReleased(this.dataDir, query.intent_id)) return { available: true, recovery: null }
+        const state = records.readWorkspaceRelocationArchivedState(this.dataDir, query.intent_id)
+        if (require('../../scripts/lib/known-process-exit.cjs').probeKnownProcessExit([state.launch.process]).state !== 'stopped') return { available: false, recovery: null }
+        return { available: true, recovery: { intent_id: query.intent_id, completion_sha256: sha256CanonicalJson(state.completion), finalizing_sha256: sha256CanonicalJson(fence) } }
+      })
+    } catch { return { available: false, recovery: null } }
+  }
+
+  /** Current human first, then one initialization receipt independent of the HTTP lifetime. */
+  private async startWorkspaceRelocationRecovery(params: StartWorkspaceRelocationRecoveryParams, bearer?: string): Promise<WorkspaceRelocationRecoveryAccepted> {
+    const snapshot = params && typeof params === 'object' && !Array.isArray(params) ? Object.freeze({ ...params }) : params
+    await this.verifyWorkspaceRelocationJobQuery({}, bearer)
+    const { confirmed: _, ...request } = parseWorkspaceRelocationRecoveryStartRequest(snapshot)
+    const fingerprint = sha256CanonicalJson(request), previous = this.workspaceRecoveryReceipts.get(request.recovery_id)
+    if (previous) {
+      if (previous.fingerprint !== fingerprint) throw Object.assign(new Error('Original recovery confirmation cannot change'), { code: 'FORBIDDEN' })
+      return previous.reply
+    }
+    if (this.isShuttingDown || this.workspaceRecoveryHandoffBusy()) throw Object.assign(new Error('当前作业仍在收尾，请查看原作业。'), { code: 'SERVICE_UNAVAILABLE' })
+    const reply = Promise.resolve().then(async (): Promise<WorkspaceRelocationRecoveryAccepted> => {
+      const coordinator = await this.initializeWorkspaceRelocationRecovery(request, bearer)
+      await coordinator.verify()
+      // The original driver owns its failure/status and all once-only effects, never the browser.
+      void this.completeWorkspaceRecovery(request, bearer).catch(() => {})
+      return Object.freeze({ intent_id: request.intent_id, recovery_id: request.recovery_id, accepted: true })
+    })
+    this.workspaceRecoveryReceipts.set(request.recovery_id, { fingerprint, reply })
+    return reply
   }
 
   /** Progress observation only; the original effect retains all admission and role checks. */

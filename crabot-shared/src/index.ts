@@ -140,7 +140,7 @@ export type { WorkspaceRecord, WorkspaceUsage, WorkspaceExecution, WorkspaceExec
   WorkspaceRelocationPreviewRequest, WorkspaceRelocationPreviewResult, WorkspaceRelocationIssue,
   WorkspaceCreateRequest, WorkspaceUpdateRequest, WorkspaceRecordResult, WorkspaceGetResult, WorkspaceScanResult,
   WorkspaceRecoveryRuntimeStart, WorkspaceRecoveryRuntimeRegistration, WorkspaceRecoveryRuntimeInvocation,
-  WorkspaceRecoveryRuntimePlan, VerifyWorkspaceRelocationRecoveryRequestParams, VerifyWorkspaceRelocationRecoveryRequestResult,
+  WorkspaceRecoveryRuntimePlan, WorkspaceRelocationRecoveryOffer, WorkspaceRelocationRecoveryPreviewResult, StartWorkspaceRelocationRecoveryParams, WorkspaceRelocationRecoveryAccepted, VerifyWorkspaceRelocationRecoveryRequestParams, VerifyWorkspaceRelocationRecoveryRequestResult,
   VerifyWorkspaceRelocationRecoveryAdmissionParams, VerifyWorkspaceRelocationRecoveryAdmissionResult,
   VerifyWorkspaceRelocationRecoveryRuntimeParams, VerifyWorkspaceRelocationRecoveryRuntimeResult,
   VerifyWorkspaceRelocationRecoveryRootParams, VerifyWorkspaceRelocationRecoveryRootResult,
@@ -168,3 +168,5 @@ export { isStoragePermission, type StoragePermission, type DirectoryStoragePermi
 export { workspaceMaintenancePending, assertWorkspaceExecutionAllowed } from './workspace-maintenance.js'
 
 export { parseWorkspaceRelocationStartRequest } from './workspace-start-request.js'
+
+export { parseWorkspaceRelocationRecoveryStartRequest } from './workspace-recovery-start-request.js'

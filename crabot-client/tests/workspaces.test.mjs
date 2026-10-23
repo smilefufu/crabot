@@ -119,3 +119,33 @@ test('status keeps historical commit distinct from full completion, validates a 
     await assert.rejects(fixture(body).client.relocationStatus(id), { kind: 'validation' })
   }
 })
+
+
+test('recovery is explicit, strictly correlated and never retried after losing admission', async () => {
+  const recovery_id = '87654321-4321-4321-8321-cba987654321'
+  const offer = { intent_id: id, completion_sha256: 'a'.repeat(64), finalizing_sha256: 'b'.repeat(64) }
+  const request = { ...offer, recovery_id, confirmed: true }
+  const preview = fixture({ available: true, recovery: offer })
+  assert.deepEqual(await preview.client.previewRelocationRecovery(id), { available: true, recovery: offer })
+  assert.equal(preview.calls[0].options.method, 'GET'); assert.equal(preview.calls[0].options.body, undefined)
+  assert.equal(preview.calls[0].url, 'http://localhost:3000/api/workspaces/relocation/jobs/' + id + '/recovery')
+  const f = fixture({ intent_id: id, recovery_id, accepted: true }, 202)
+  assert.deepEqual(await f.client.startRelocationRecovery(request), { intent_id: id, recovery_id, accepted: true })
+  for (const bad of [{ ...request, confirmed: false }, { ...request, path: '/forged' }, { ...request, completion_sha256: 'A'.repeat(64) }, { ...request, recovery_id: recovery_id.toUpperCase() }]) {
+    assert.throws(() => f.client.startRelocationRecovery(bad))
+  }
+  assert.equal(f.calls.length, 1)
+  for (const bad of [{ intent_id: recovery_id, recovery_id, accepted: true }, { intent_id: id, recovery_id: id, accepted: true }, { intent_id: id, recovery_id, accepted: true, extra: true }]) {
+    await assert.rejects(fixture(bad, 202).client.startRelocationRecovery(request), { kind: 'validation' })
+  }
+  await assert.rejects(fixture({ available: false, recovery: offer }).client.previewRelocationRecovery(id), { kind: 'validation' })
+  await assert.rejects(fixture({ available: true, recovery: { ...offer, intent_id: recovery_id } }).client.previewRelocationRecovery(id), { kind: 'validation' })
+  let attempts = 0
+  const diagnostics = []
+  const client = new WorkspaceClient(new HttpClient({ endpoint: 'http://localhost:3000/api', token: () => 'private-human', diagnose: event => diagnostics.push(event), fetch: async (_url, options) => {
+    attempts++; assert.equal(new Headers(options.headers).get('Authorization'), 'Bearer private-human')
+    assert.deepEqual(JSON.parse(options.body), request); throw new Error('lost reply')
+  } }))
+  await assert.rejects(client.startRelocationRecovery(request), { kind: 'unreachable' })
+  assert.equal(attempts, 1); assert.ok(!JSON.stringify(diagnostics).includes('private-human')); assert.ok(!JSON.stringify(diagnostics).includes(recovery_id))
+})

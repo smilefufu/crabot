@@ -90,11 +90,11 @@ jobs:
       - name: Persistent workspace maintenance guards
         if: matrix.suite == 'finite'
         working-directory: crabot-shared
-        run: node --import tsx --test src/workspace-maintenance.test.ts src/workspace-job-query.test.ts src/module-base.test.ts
+        run: node --import tsx --test src/workspace-maintenance.test.ts src/workspace-job-query.test.ts src/workspace-recovery-start-request.test.ts src/module-base.test.ts
       - name: Admin prepared job ownership
         if: matrix.suite == 'finite'
         working-directory: crabot-admin
-        run: node node_modules/vitest/vitest.mjs run src/workspace-finalization-web.test.ts src/workspace-recovery-finalization-web.test.ts --maxWorkers=1 --minWorkers=1
+        run: node node_modules/vitest/vitest.mjs run src/workspace-finalization-web.test.ts src/workspace-recovery-finalization-web.test.ts src/workspaces-http.test.ts --maxWorkers=1 --minWorkers=1
       - name: Original lifecycle and maintenance regressions
         if: matrix.suite == 'finite'
         working-directory: crabot-core
@@ -102,7 +102,7 @@ jobs:
       - name: Actual fixed job launch and technical health without business onStart
         if: ${{ matrix.suite == 'finite' && !cancelled() && steps.compile.outcome == 'success' }}
         working-directory: crabot-core
-        run: node node_modules/vitest/vitest.mjs run src/workspace-human-verification.test.ts --testNamePattern='^(?!.*completes two actually owned).*(?:finite cold terminal diagnostics|MM reads workspace job status|MM owns the initial|MM verifies an initial|actual Admin recovery RPC observer|post-relocation validation launches|new runtime health and Root)' --maxWorkers=1 --minWorkers=1
+        run: node node_modules/vitest/vitest.mjs run src/workspace-human-verification.test.ts --testNamePattern='^(?!.*completes two actually owned).*(?:finite cold terminal diagnostics|MM reads workspace job status|MM reads workspace recovery handoff|MM owns the initial|MM verifies an initial|actual Admin recovery RPC observer|post-relocation validation launches|new runtime health and Root)' --maxWorkers=1 --minWorkers=1
       - name: Actual two owned SDK migrations and return to the default root
         if: ${{ matrix.suite == 'owned' && !cancelled() && steps.compile.outcome == 'success' }}
         working-directory: crabot-core

@@ -3,10 +3,10 @@ import { assertWorkspaceExecutionAllowed, workspaceMaintenancePending } from 'cr
 import { createWorkspaceFinalizationWeb } from './workspace-finalization-web.js'
 import { createWorkspaceRecoveryFinalizationWeb } from './workspace-recovery-finalization-web.js'
 import { parseFriendPermissionRecords, serializeFriendPermissionRecords } from './friend-permission-store.js'
-import { WorkspaceExecutionInventorySchema, WorkspaceIdSchema, WorkspaceRelocationStatusResultSchema, WorkspaceRelocationStartResultSchema } from 'crabot-client'
+import { WorkspaceRelocationRecoveryAcceptedSchema, WorkspaceRelocationRecoveryPreviewResultSchema, WorkspaceExecutionInventorySchema, WorkspaceIdSchema, WorkspaceRelocationStatusResultSchema, WorkspaceRelocationStartResultSchema } from 'crabot-client'
 import { WorkspaceService } from './workspaces.js'
 import { WorkspaceWebAdmissions, requiresWorkspaceWebAdmission } from './workspace-web-admissions.js'
-import { parseWorkspaceRelocationStartRequest, parseWorkspaceRelocationJobQuery } from 'crabot-shared'
+import { parseWorkspaceRelocationRecoveryStartRequest, parseWorkspaceRelocationStartRequest, parseWorkspaceRelocationJobQuery } from 'crabot-shared'
 import type { WorkspaceRelocationJobQuery, VerifyWorkspaceRelocationJobQueryResult, VerifyWorkspaceRelocationStartParams, VerifyWorkspaceRelocationStartResult, VerifyWorkspaceRelocationRecoveryRequestParams, VerifyWorkspaceRelocationRecoveryRequestResult, VerifyWorkspaceRelocationRequestParams, VerifyWorkspaceRelocationRequestResult, QuiesceWorkspaceRelocationWebParams, QuiesceWorkspaceRelocationWebResult } from 'crabot-shared'
 import { resolveManagedMcpConfig } from './managed-mcp-runtime.js'
 import type { ConversationRequestSource } from 'crabot-shared'
@@ -1644,6 +1644,7 @@ export class AdminModule extends ModuleBase {
     const pathname = url.pathname
     const workspaceRequest = pathname === '/api/workspaces' || pathname.startsWith('/api/workspaces/')
     if (pathname.startsWith('/api/')) correlateHttpRequest(req, res)
+    if (pathname === '/api/workspaces/relocation/recover' || /^\/api\/workspaces\/relocation\/jobs\/[^/]+\/recovery$/.test(pathname)) res.setHeader('Cache-Control', 'no-store')
     let agentCliAuth: AgentCliWebAuth | undefined
 
     if (!this.cutoverActivated && (pathname === '/api/chat/messages' || pathname === '/api/chat/tasks' || pathname.startsWith('/api/chat/messages/') || pathname.startsWith('/api/chat/tasks/'))) {
@@ -1765,6 +1766,10 @@ export class AdminModule extends ModuleBase {
         if (req.method === 'GET') sendJson(res, 200, { maintenance: workspaceMaintenancePending(path.resolve(this.adminConfig.data_dir, '..')) || this.workspaceWebAccess().isClosed() })
         else sendJson(res, 405, { code: 'WORKSPACE_METHOD_NOT_ALLOWED', message: '工作区维护状态仅支持读取。' })
         return
+      }
+      const workspaceRecovery = pathname.match(/^\/api\/workspaces\/relocation\/jobs\/([^/]+)\/recovery$/)
+      if (pathname === '/api/workspaces/relocation/recover' || workspaceRecovery) {
+        await this.handleWorkspaceRelocationRecoveryHttp(req, res, url, workspaceRecovery?.[1]); return
       }
       const workspaceJob = pathname.match(/^\/api\/workspaces\/relocation\/jobs\/([^/]+)$/)
       if (pathname === '/api/workspaces/relocation/current' || workspaceJob) {
@@ -3186,6 +3191,34 @@ export class AdminModule extends ModuleBase {
       else if (code === 'FORBIDDEN') status = 403
       else if (code === 'INVALID_PARAMS') status = 400
       sendJson(res, status, { code: status === 503 ? 'SERVICE_UNAVAILABLE' : code, message: '当前作业状态暂时无法核实，请稍后查看；未重发任何作业。' })
+    }
+  }
+
+  /** Recovery control remains available while the original file-admission fence is closed. */
+  private async handleWorkspaceRelocationRecoveryHttp(req: IncomingMessage, res: ServerResponse, url: URL, intentId?: string): Promise<void> {
+    res.setHeader('Cache-Control', 'no-store')
+    const preview = intentId !== undefined
+    if (req.method !== (preview ? 'GET' : 'POST')) { sendJson(res, 405, { code: 'WORKSPACE_METHOD_NOT_ALLOWED', message: '恢复入口方法无效。' }); return }
+    try {
+      if (url.search) throw new RpcError('INVALID_PARAMS', 'Unexpected query fields')
+      const input = preview ? parseWorkspaceRelocationJobQuery({ intent_id: intentId })
+        : parseWorkspaceRelocationRecoveryStartRequest(await this.readJsonBody(req, 65536).catch(() => { throw new RpcError('INVALID_PARAMS', 'Invalid JSON') }))
+      const raw = await this.rpcClient.callModuleManagerSensitive(preview ? 'preview_workspace_relocation_recovery' : 'start_workspace_relocation_recovery', input,
+        this.config.moduleId, { authorizationBearer: req.headers.authorization!.slice(7), timeoutMs: preview ? 30_000 : 120_000 })
+      if (preview) {
+        const result = WorkspaceRelocationRecoveryPreviewResultSchema.safeParse(raw)
+        if (!result.success || result.data.recovery && result.data.recovery.intent_id !== input.intent_id) throw new RpcError('SERVICE_UNAVAILABLE', 'Recovery offer unavailable')
+        sendJson(res, 200, result.data)
+      } else {
+        const result = WorkspaceRelocationRecoveryAcceptedSchema.safeParse(raw)
+        if (!result.success || result.data.intent_id !== input.intent_id || result.data.recovery_id !== ('recovery_id' in input ? input.recovery_id : undefined)) throw new RpcError('SERVICE_UNAVAILABLE', 'Recovery receipt unavailable')
+        sendJson(res, 202, result.data)
+      }
+    } catch (error) {
+      const code = (error as { code?: string }).code
+      const status = code === 'UNAUTHORIZED' ? 401 : code === 'FORBIDDEN' ? 403 : code === 'INVALID_PARAMS' ? 400 : 503
+      sendJson(res, status, { code: status === 503 ? 'SERVICE_UNAVAILABLE' : code,
+        message: '恢复结果尚未核实，请保留原作业编号并查询进度；未自动重发。' })
     }
   }
 

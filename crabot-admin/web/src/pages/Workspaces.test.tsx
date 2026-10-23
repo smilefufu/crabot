@@ -1,13 +1,13 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, afterEach, expect, it, vi } from 'vitest'
 import { MemoryRouter, useLocation } from 'react-router-dom'
 import { ClientError } from 'crabot-client'
 import { serverQueries, setServerScope } from '../services/server-state'
 import { Workspaces } from './Workspaces'
 
-const mocks = vi.hoisted(() => ({ list: vi.fn(), get: vi.fn(), refresh: vi.fn(), update: vi.fn(), create: vi.fn(), totalUsage: vi.fn(), refreshTotalUsage: vi.fn(), maintenance: vi.fn(), previewRelocation: vi.fn(), startRelocation: vi.fn(), currentRelocation: vi.fn(), relocationStatus: vi.fn(), bridge: { revealWorkspaceFolder: undefined as undefined | ReturnType<typeof vi.fn>, selectWorkspaceDirectory: undefined as undefined | ReturnType<typeof vi.fn> } }))
+const mocks = vi.hoisted(() => ({ list: vi.fn(), get: vi.fn(), refresh: vi.fn(), update: vi.fn(), create: vi.fn(), totalUsage: vi.fn(), refreshTotalUsage: vi.fn(), maintenance: vi.fn(), previewRelocation: vi.fn(), startRelocation: vi.fn(), currentRelocation: vi.fn(), relocationStatus: vi.fn(), previewRelocationRecovery: vi.fn(), startRelocationRecovery: vi.fn(), bridge: { revealWorkspaceFolder: undefined as undefined | ReturnType<typeof vi.fn>, selectWorkspaceDirectory: undefined as undefined | ReturnType<typeof vi.fn> } }))
 vi.mock('crabot-client', async () => ({ ...await vi.importActual('crabot-client'), WorkspaceClient: class {
-  list = mocks.list; get = mocks.get; refresh = mocks.refresh; update = mocks.update; create = mocks.create; totalUsage = mocks.totalUsage; refreshTotalUsage = mocks.refreshTotalUsage; maintenance = mocks.maintenance; previewRelocation = mocks.previewRelocation; startRelocation = mocks.startRelocation; currentRelocation = mocks.currentRelocation; relocationStatus = mocks.relocationStatus
+  list = mocks.list; get = mocks.get; refresh = mocks.refresh; update = mocks.update; create = mocks.create; totalUsage = mocks.totalUsage; refreshTotalUsage = mocks.refreshTotalUsage; maintenance = mocks.maintenance; previewRelocation = mocks.previewRelocation; startRelocation = mocks.startRelocation; currentRelocation = mocks.currentRelocation; relocationStatus = mocks.relocationStatus; previewRelocationRecovery = mocks.previewRelocationRecovery; startRelocationRecovery = mocks.startRelocationRecovery
 } }))
 vi.mock('../services/api', () => ({ getWebClient: () => ({}) }))
 vi.mock('../services/desktop-host', () => ({ desktopBridge: mocks.bridge }))
@@ -392,4 +392,83 @@ it('a late native selection cannot overwrite an edited draft or a different cata
   finish('/old-catalog-choice')
   await waitFor(() => expect(screen.getByLabelText('目标工作目录')).toHaveValue('/typed-later'))
   expect(mocks.previewRelocation).not.toHaveBeenCalled(); expect(mocks.startRelocation).not.toHaveBeenCalled()
+})
+
+
+const recoveryOffer = { intent_id: id, completion_sha256: 'a'.repeat(64), finalizing_sha256: 'b'.repeat(64) }
+function pendingRecovery() {
+  const result = { available: true, job: { intent_id: id, state: 'needs_attention', stage: 'finalizing' } }
+  mocks.currentRelocation.mockResolvedValue(result); mocks.relocationStatus.mockResolvedValue(result)
+  mocks.previewRelocationRecovery.mockResolvedValue({ available: true, recovery: recoveryOffer })
+  render(<MemoryRouter><Workspaces /></MemoryRouter>)
+  return screen.findByRole('button', { name: '核验恢复条件' })
+}
+it('recovery requires separate verification and explicit confirmation, submits once and retains original intent', async () => {
+  let resolve!: (value: unknown) => void
+  mocks.startRelocationRecovery.mockImplementation(() => new Promise(done => { resolve = done }))
+  const verify = await pendingRecovery()
+  expect(mocks.previewRelocationRecovery).not.toHaveBeenCalled(); expect(mocks.startRelocationRecovery).not.toHaveBeenCalled()
+  fireEvent.click(verify)
+  const start = await screen.findByRole('button', { name: '继续恢复服务' })
+  expect(mocks.previewRelocationRecovery).toHaveBeenCalledWith(id, expect.objectContaining({ signal: expect.any(AbortSignal) }))
+  fireEvent.click(start); fireEvent.click(start)
+  await waitFor(() => expect(mocks.startRelocationRecovery).toHaveBeenCalledTimes(1))
+  const request = mocks.startRelocationRecovery.mock.calls[0][0]
+  expect(request).toEqual({ ...recoveryOffer, recovery_id: expect.stringMatching(/^[a-f0-9-]{36}$/), confirmed: true })
+  expect(screen.getByText(/旧执行器永久保持关闭/)).toBeInTheDocument()
+  resolve({ intent_id: id, recovery_id: request.recovery_id, accepted: true })
+  expect(await screen.findByText(/恢复已接纳，正在后台继续/)).toBeInTheDocument()
+  expect(screen.queryByText('迁移已完成')).toBeNull()
+  expect(mocks.startRelocationRecovery).toHaveBeenCalledTimes(1)
+  expect(mocks.relocationStatus).toHaveBeenCalledWith(id, expect.anything())
+})
+it('unknown recovery admission retains both identities without automatically retrying', async () => {
+  mocks.startRelocationRecovery.mockRejectedValue(new ClientError('timeout', 'timeout'))
+  fireEvent.click(await pendingRecovery()); fireEvent.click(await screen.findByRole('button', { name: '继续恢复服务' }))
+  expect(await screen.findByText(/恢复接纳结果待核实/)).toBeInTheDocument()
+  const request = mocks.startRelocationRecovery.mock.calls[0][0]
+  expect(screen.getByText('恢复编号：' + request.recovery_id)).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: '核验恢复条件' })).toBeDisabled()
+  fireEvent.click(screen.getByRole('button', { name: '刷新迁移进度' }))
+  await waitFor(() => expect(mocks.relocationStatus).toHaveBeenCalled())
+  expect(mocks.startRelocationRecovery).toHaveBeenCalledTimes(1)
+})
+it('a late recovery preview cannot enable recovery after current status has changed', async () => {
+  let resolve!: (value: unknown) => void
+  const verify = await pendingRecovery()
+  mocks.previewRelocationRecovery.mockImplementation(() => new Promise(done => { resolve = done }))
+  fireEvent.click(verify)
+  const previous = mocks.currentRelocation.mock.calls.length
+  mocks.currentRelocation.mockResolvedValue({ available: true, job: { intent_id: id, state: 'running', stage: 'restoring' } })
+  fireEvent.click(screen.getByRole('button', { name: '刷新迁移进度' }))
+  await waitFor(() => expect(mocks.currentRelocation.mock.calls.length).toBeGreaterThan(previous))
+  await screen.findByText('正在恢复业务')
+  resolve({ available: true, recovery: recoveryOffer })
+  await waitFor(() => expect(screen.queryByRole('button', { name: '继续恢复服务' })).toBeNull())
+  expect(mocks.startRelocationRecovery).not.toHaveBeenCalled()
+})
+it('unverifiable recovery conditions leave the original diagnostic and never show an action', async () => {
+  const verify = await pendingRecovery()
+  mocks.previewRelocationRecovery.mockResolvedValue({ available: false, recovery: null })
+  fireEvent.click(verify)
+  expect(await screen.findByText(/恢复条件暂时无法核实/)).toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: '继续恢复服务' })).toBeNull()
+  expect(mocks.startRelocationRecovery).not.toHaveBeenCalled()
+})
+
+it.each(['job', 'server'])('a late recovery offer cannot cross a changed %s', async mode => {
+  const verify = await pendingRecovery()
+  let resolve!: (value: unknown) => void
+  mocks.previewRelocationRecovery.mockImplementation(() => new Promise(done => { resolve = done }))
+  fireEvent.click(verify)
+  const signal = mocks.previewRelocationRecovery.mock.calls[0][1].signal
+  const next = '87654321-4321-4321-8321-cba987654321'
+  mocks.currentRelocation.mockResolvedValue({ available: true, job: { intent_id: next, state: 'needs_attention', stage: 'finalizing' } })
+  if (mode === 'job') fireEvent.click(screen.getByRole('button', { name: '刷新迁移进度' }))
+  else act(() => setServerScope('different-recovery-server'))
+  await screen.findByText('作业编号：' + next)
+  expect(signal.aborted).toBe(true)
+  await act(async () => resolve({ available: true, recovery: recoveryOffer }))
+  expect(screen.queryByRole('button', { name: '继续恢复服务' })).toBeNull()
+  expect(mocks.startRelocationRecovery).not.toHaveBeenCalled()
 })

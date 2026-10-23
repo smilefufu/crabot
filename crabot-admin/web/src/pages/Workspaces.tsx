@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
-import { ClientError, WorkspaceClient, type WorkspaceRecord, type WorkspaceSummary, type WorkspaceUsage, type WorkspaceRelocationPreviewResult, type WorkspaceRelocationIssue, type WorkspaceRelocationJobStage, type WorkspaceRelocationJobStatus } from 'crabot-client'
+import { ClientError, WorkspaceClient, type WorkspaceRecord, type WorkspaceSummary, type WorkspaceUsage, type WorkspaceRelocationPreviewResult, type WorkspaceRelocationIssue, type WorkspaceRelocationJobStage, type WorkspaceRelocationJobStatus, type WorkspaceRelocationRecoveryOffer } from 'crabot-client'
 import { MainLayout } from '../components/Layout/MainLayout'
 import { Button } from '../components/Common/Button'
 import { Card } from '../components/Common/Card'
@@ -159,6 +159,49 @@ function RelocationStatusPanel({ observation, knownId }: { observation: ReturnTy
   </section></Card>
 }
 
+function RelocationRecoveryPanel({ client, observation, knownId, rememberJob }: {
+  client: WorkspaceClient; observation: ReturnType<typeof useRelocationStatus>; knownId: string | null; rememberJob(id: string | null): void
+}) {
+  const { job, uncertain, status } = observation, intentId = knownId ?? job?.intent_id
+  const [offer, setOffer] = useState<WorkspaceRelocationRecoveryOffer>(), [busy, setBusy] = useState(false), [notice, setNotice] = useState(''), [recoveryId, setRecoveryId] = useState('')
+  const request = useRef<AbortController | undefined>(undefined), submitted = useRef(false), mounted = useRef(true)
+  const state = `${job?.state}:${job?.stage}:${uncertain}`, current = useRef(state); current.current = state
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; request.current?.abort() } }, [])
+  useEffect(() => { request.current?.abort(); setOffer(undefined); setBusy(false) }, [client, state])
+  const eligible = !!intentId && !['preparing', 'running', 'completed'].includes(job?.state ?? '')
+  async function preview() {
+    if (!eligible || submitted.current || busy) return
+    const controller = new AbortController(), version = current.current
+    request.current?.abort(); request.current = controller; setBusy(true); setOffer(undefined); setNotice('')
+    try {
+      const result = await client.previewRelocationRecovery(intentId!, { signal: controller.signal })
+      if (controller.signal.aborted || current.current !== version) return
+      setOffer(result.recovery ?? undefined)
+      if (!result.recovery) setNotice(result.available ? '当前没有可继续的收尾恢复建议，请保留原编号并核对进度和模块状态。' : '恢复条件暂时无法核实，原维护保护保持；未提交恢复。')
+    } catch (error) { if (!controller.signal.aborted && current.current === version) setNotice(message(error)) }
+    finally { if (request.current === controller && !controller.signal.aborted) setBusy(false) }
+  }
+  async function recover() {
+    if (!offer || !eligible || submitted.current || busy) return
+    submitted.current = true
+    const recovery_id = projectId(), input = { ...offer, recovery_id, confirmed: true as const }
+    setRecoveryId(recovery_id); setBusy(true); setOffer(undefined); rememberJob(offer.intent_id)
+    try {
+      await client.startRelocationRecovery(input)
+      if (mounted.current) setNotice('恢复已接纳，正在后台继续；关闭页面不会取消。')
+    } catch { if (mounted.current) setNotice('恢复接纳结果待核实，请保留编号并刷新原作业进度；未自动重发。') }
+    finally { if (mounted.current) { setBusy(false); void status.refetch() } }
+  }
+  if (!eligible && !recoveryId || job?.state === 'completed') return null
+  return <Card><section aria-label="恢复工作目录服务"><h2>恢复服务</h2>
+    <p>恢复本次原活动服务，使用已提交的新目录；旧执行器永久保持关闭，历史文件保留。</p>
+    {notice && <p role="status">{notice}</p>}
+    {recoveryId && <p className="workspace-path">恢复编号：{recoveryId}</p>}
+    <div className="workspace-actions"><Button variant="secondary" disabled={!eligible || busy || submitted.current} onClick={() => void preview()}>核验恢复条件</Button>
+      {offer && <Button disabled={busy || submitted.current} onClick={() => void recover()}>继续恢复服务</Button>}</div>
+  </section></Card>
+}
+
 function WorkspaceEditor({ client, record, initialRevision, onSaved, locked }: {
   client: WorkspaceClient; record: WorkspaceRecord; initialRevision: number; onSaved(): void; locked: boolean
 }) {
@@ -306,6 +349,7 @@ function WorkspacePage({ scope }: { scope: string }) {
     {maintenance.isError ? <p role="alert">暂时无法核实工作区维护状态，仍可查看和搜索；请重新核验后再操作。 <Button variant="secondary" onClick={() => void maintenance.refetch()}>重新核验维护状态</Button></p>
       : locked && <p role="status">{observedMaintenance ? '工作目录正在维护或等待恢复，新任务与相关文件操作暂不可用。仍可查看和搜索工作区。' : '正在核验工作区维护状态…'}</p>}
     <RelocationStatusPanel observation={relocation} knownId={knownId} />
+    <RelocationRecoveryPanel key={knownId ?? relocation.job?.intent_id ?? 'none'} client={client} observation={relocation} knownId={knownId} rememberJob={rememberJob} />
     {query.data && <RelocationPreviewPanel client={client} source={query.data.storage_root} revision={query.data.revision} locked={locked} canStart={canStart} rememberJob={rememberJob} refreshStatus={() => void serverQueries.invalidateQueries({ queryKey: ['server', scope, 'workspaces', 'relocation'] })} />}
     {query.data && <p>{query.data.items.filter(item => item.workspace.kind === 'project').length} 个项目工作区 · 1 个默认工作区 · {query.data.items.filter(item => item.directory_status !== 'ready').length} 个目录待核实</p>}
     <section aria-label="全部工作区空间">

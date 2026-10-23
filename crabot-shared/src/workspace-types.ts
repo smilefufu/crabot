@@ -307,6 +307,23 @@ export interface VerifyWorkspaceRelocationRecoveryRequestParams {
   completion_sha256: string
   finalizing_sha256: string
 }
+export interface WorkspaceRelocationRecoveryOffer {
+  intent_id: string
+  completion_sha256: string
+  finalizing_sha256: string
+}
+export interface WorkspaceRelocationRecoveryPreviewResult {
+  available: boolean
+  recovery: WorkspaceRelocationRecoveryOffer | null
+}
+export interface StartWorkspaceRelocationRecoveryParams extends VerifyWorkspaceRelocationRecoveryRequestParams {
+  confirmed: true
+}
+export interface WorkspaceRelocationRecoveryAccepted {
+  intent_id: string
+  recovery_id: string
+  accepted: true
+}
 export interface VerifyWorkspaceRelocationRecoveryRequestResult {
   verified: true
   intent_id: string
