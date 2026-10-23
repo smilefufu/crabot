@@ -419,7 +419,7 @@ runpy.run_module('src.main',run_name='__main__')
   }
 }
 
-async function verifyRegisteredRuntimeGate({ manager, dataDir, coordinator, preparation, modules, afterClose, python }: any) {
+async function verifyRegisteredRuntimeGate({ manager, dataDir, coordinator, preparation, modules, afterClose, python, pythonBinary }: any) {
   const recoveryRecords = require('../../scripts/lib/workspace-recovery-records.mjs'), runtimePlan = preparation.plan
   expect(typeof recoveryRecords.commitWorkspaceRecoveryRuntimeStart).toBe('function')
   const gate = require('../../scripts/lib/workspace-runtime-gate.mjs').createWorkspaceRuntimeGate(), idleModule = gate.child
@@ -497,7 +497,7 @@ time.sleep(300)`
     expect(sent.mock.calls.filter(([message]: any[]) => message?.kind === 'workspace_runtime_gate_start')).toHaveLength(1)
     expect(actual).toMatchObject({ parent: idleModule.pid, runtime: planned.runtime_id, token: 'private-gate-fixture-token' })
     if (python) {
-      expect(await fs.realpath(actual.executable)).toBe(await fs.realpath(python))
+      expect(await fs.realpath(actual.executable)).toBe(pythonBinary)
       expect(await fs.realpath(actual.cwd)).toBe(dataDir)
       await vi.waitFor(() => { expect(output).toContain('workspace-gate-python-stdout'); expect(errors).toContain('workspace-gate-python-stderr') })
       await expect(fs.lstat(preloadMarker)).rejects.toMatchObject({ code: 'ENOENT' })
@@ -527,6 +527,8 @@ time.sleep(300)`
 describe('registered workspace gate bundled Python', () => {
   it.runIf(!!process.env.CRABOT_WORKSPACE_GATE_PYTHON)('runs the actual bundled interpreter only after its own durable gate registration', async () => {
     const python = await fs.realpath(process.env.CRABOT_WORKSPACE_GATE_PYTHON!)
+    expect(process.env.CRABOT_WORKSPACE_GATE_PYTHON_BINARY).toBeTruthy()
+    const pythonBinary = await fs.realpath(process.env.CRABOT_WORKSPACE_GATE_PYTHON_BINARY!)
     expect(JSON.parse(execFileSync(python, ['-I', '-B', '-c', 'import json,sys;print(json.dumps(sys.version_info[:2]))'], { encoding: 'utf8', timeout: 15000 }))).toEqual([3, 12])
     const f = await fixture({ actualAgent: true, actualAdmin: true, validationHealth: 'healthy', processLifetimeMs: 300000 })
     const locks = require('../../scripts/lib/cli-lock.mjs'), records = require('../../scripts/lib/workspace-relocation-intent.mjs')
@@ -545,7 +547,7 @@ describe('registered workspace gate bundled Python', () => {
       await vi.waitFor(async () => expect(await fs.readFile(path.join(f.data, 'ready'), 'utf8')).toBe('ready'), { timeout: 10000 })
       coordinator = await cold.initializeWorkspaceRelocationRecovery(request, 'fixture-human')
       const preparation = await cold.prepareWorkspaceRecoveryRuntimes(request, 'fixture-human')
-      await verifyRegisteredRuntimeGate({ manager: cold, dataDir: f.data, coordinator, preparation, modules: records.readWorkspaceRelocationArchivedState(f.data, f.params.intent_id).modules.modules, python })
+      await verifyRegisteredRuntimeGate({ manager: cold, dataDir: f.data, coordinator, preparation, modules: records.readWorkspaceRelocationArchivedState(f.data, f.params.intent_id).modules.modules, python, pythonBinary })
       expect(records.readWorkspaceRelocationFinalizing(f.data, f.params.intent_id)).toEqual(fence)
     } finally {
       coordinator?.close()

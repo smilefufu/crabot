@@ -15,7 +15,8 @@ try {
   const result = spawnSync(runtime.executables.node, [path.join(source, 'crabot-core/node_modules/vitest/vitest.mjs'),
     'run', 'src/workspace-human-verification.test.ts', '--testNamePattern=registered workspace gate bundled Python', '--maxWorkers=1', '--minWorkers=1',
     '--reporter=default', '--reporter=json', '--outputFile=' + report], {
-    cwd: path.join(source, 'crabot-core'), env: { ...process.env, CRABOT_WORKSPACE_GATE_PYTHON: runtime.executables.python },
+    cwd: path.join(source, 'crabot-core'), env: { ...process.env, CRABOT_WORKSPACE_GATE_PYTHON: runtime.executables.python,
+      CRABOT_WORKSPACE_GATE_PYTHON_BINARY: path.join(runtime.pythonHome, process.platform === 'win32' ? 'python.exe' : 'bin/python3.12') },
     stdio: 'inherit', timeout: process.platform === 'win32' ? 660000 : 300000,
   })
   if (result.error) throw result.error
