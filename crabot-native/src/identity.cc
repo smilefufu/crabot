@@ -132,7 +132,7 @@ static Identity Inspect(int pid, const char** stage = nullptr) {
   if (!ConvertSidToStringSidA(reinterpret_cast<TOKEN_USER*>(info.data())->User.Sid, &sid)) {
     CloseHandle(token); CloseHandle(process); throw std::runtime_error("Cannot read process owner");
   }
-  result.owner = sid; LocalFree(sid); CloseHandle(token); CloseHandle(process);
+  result.owner = sid; LocalFree(sid); CloseHandle(token);
   ULARGE_INTEGER ticks; ticks.LowPart = created.dwLowDateTime; ticks.HighPart = created.dwHighDateTime;
   result.started = std::to_string(ticks.QuadPart);
   int count = WideCharToMultiByte(CP_UTF8, 0, path, length, nullptr, 0, nullptr, nullptr);
@@ -140,12 +140,18 @@ static Identity Inspect(int pid, const char** stage = nullptr) {
   WideCharToMultiByte(CP_UTF8, 0, path, length, result.executable.data(), count, nullptr, nullptr);
   if (stage) *stage = "identity-parent-snapshot";
   HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-  if (snapshot == INVALID_HANDLE_VALUE) throw std::runtime_error("Cannot inspect process parent");
+  if (snapshot == INVALID_HANDLE_VALUE) { CloseHandle(process); throw std::runtime_error("Cannot inspect process parent"); }
   PROCESSENTRY32 entry{}; entry.dwSize = sizeof(entry);
   if (Process32First(snapshot, &entry)) do {
     if (entry.th32ProcessID == static_cast<DWORD>(pid)) { result.parent = entry.th32ParentProcessID; break; }
   } while (Process32Next(snapshot, &entry));
   CloseHandle(snapshot);
+  // Keep this generation pinned through the parent snapshot. A process can finish
+  // after its image/token were read and disappear from Toolhelp before we return.
+  const DWORD finalWait = WaitForSingleObject(process, 0);
+  CloseHandle(process);
+  if (finalWait == WAIT_OBJECT_0) return {};
+  if (finalWait != WAIT_TIMEOUT) throw std::runtime_error("Cannot confirm process identity is still current");
 #elif __APPLE__
   proc_bsdinfo info{};
   if (proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, sizeof(info)) != sizeof(info)) {
