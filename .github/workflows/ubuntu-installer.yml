@@ -38,8 +38,12 @@ jobs:
           .desktop-build/ubuntu-native/path-test
           cc -std=c11 -Wall -Wextra -Werror -O2 -D_FORTIFY_SOURCE=3 -fstack-protector-strong -Wl,-z,relro,-z,now crabot-desktop/native/ubuntu/sandbox-helper.c -o .desktop-build/ubuntu-native/crabot-sandbox-helper $(pkg-config --cflags --libs json-glib-1.0)
           if ldd .desktop-build/ubuntu-native/crabot-sandbox-helper | grep -E 'libgtk|libwebkit|libchromium'; then exit 1; fi
+          cc -std=c11 -Wall -Wextra -Werror -O2 -D_FORTIFY_SOURCE=3 -fstack-protector-strong -Wl,-z,relro,-z,now crabot-desktop/native/ubuntu/installer.c -o .desktop-build/ubuntu-native/crabot-installer $(pkg-config --cflags --libs gtk4 json-glib-1.0)
       - name: Exercise ordinary UID native verification and refusal
         run: |
           chmod a+rx /__w /__w/crabot /__w/crabot/crabot
           runuser -u crabot-test -- python3 .github/scripts/test-ubuntu-sandbox-helper.py .desktop-build/ubuntu-native/crabot-sandbox-helper
+      - name: Open real GTK first window without Chromium or business startup
+        run: |
+          runuser -u crabot-test -- dbus-run-session -- xvfb-run -a env GDK_BACKEND=x11 .desktop-build/ubuntu-native/crabot-installer --smoke-test
       # Container libraries are not proof of default GNOME, Polkit or kernel enforcement.

@@ -54,6 +54,13 @@ async function quit(): Promise<boolean> {
 function show() { window?.show(); window?.focus() }
 
 async function boot() {
+  const installationProbe = process.argv.filter(value => value.startsWith('--installation-sandbox-probe='))
+  if (installationProbe.length) {
+    if (installationProbe.length !== 1) { app.exit(1); return }
+    const { runInstallationSandboxProbe } = await import('./installation-sandbox-probe.js')
+    await runInstallationSandboxProbe(installationProbe[0].slice('--installation-sandbox-probe='.length))
+    return
+  }
   // Resolve the protected GUI identity before external code or privileged UI.
   // A failed pair binding must not fall back to Resources/core.
   const verifier = app.isPackaged ? createRequire(import.meta.url)('./bootstrap/scripts/lib/desktop-installation.cjs') : null
