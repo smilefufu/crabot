@@ -5,11 +5,12 @@ import path from 'node:path'
 import { tmpdir } from 'node:os'
 import http from 'node:http'
 import { randomInt, randomUUID } from 'node:crypto'
-import { spawn, execFileSync } from 'node:child_process'
+import { ChildProcess, spawn, execFileSync } from 'node:child_process'
 import { once } from 'node:events'
 import { WorkspaceCatalog } from 'crabot-shared/dist/workspace-catalog.js'
 import { sha256CanonicalJson } from 'crabot-shared'
 import ModuleManager from './index.js'
+import { terminateProcessTree } from './process-tree.js'
 import { relocationAgentConfig } from '../../crabot-agent/tests/core/fixtures/relocation-agent-config.js'
 
 function coordinatorJournalFailures(child: ReturnType<typeof spawn>): string[] {
@@ -330,6 +331,77 @@ runpy.run_module('src.main',run_name='__main__')
     return { root, data, manager, runtime, port, params, calls, cleanup }
   } catch (error) { await cleanup(); throw error }
 }
+
+async function verifyRegisteredRuntimeGate({ manager, dataDir, coordinator, preparation, modules }: any) {
+  const recoveryRecords = require('../../scripts/lib/workspace-recovery-records.mjs'), runtimePlan = preparation.plan
+  expect(typeof recoveryRecords.commitWorkspaceRecoveryRuntimeStart).toBe('function')
+  const gate = require('../../scripts/lib/workspace-runtime-gate.mjs').createWorkspaceRuntimeGate(), idleModule = gate.child
+  const idleModuleExit = once(idleModule, 'exit')
+  try {
+    await gate.ready()
+    const identity = require('../../scripts/lib/spawned-process-tree.cjs').captureSpawnedProcessTree(idleModule).find((item: any) => item.pid === idleModule.pid), planned = runtimePlan.modules[0]
+    const runtimeRecord = await manager.runtimeRegistry.recordSpawn({ runtimeId: planned.runtime_id, moduleId: planned.module_id, rootPid: idleModule.pid, modulePort: modules.find((module: any) => module.module_id === planned.module_id).module_port })
+    const moduleMarker = path.join(dataDir, 'gate-module.json'), preloadMarker = path.join(dataDir, 'gate-module-preload'), preload = path.join(dataDir, 'gate-module-preload.cjs')
+    await fs.writeFile(preload, `require('node:fs').writeFileSync(${JSON.stringify(preloadMarker)},'only actual module')`)
+    const invocation = { command: process.execPath, args: ['-e', `require('node:fs').writeFileSync(${JSON.stringify(moduleMarker)},JSON.stringify({parent:process.ppid,pid:process.pid,runtime:process.env.CRABOT_MODULE_RUNTIME_ID,token:process.env.TEST_GATE_TOKEN}));setTimeout(()=>process.exit(0),30000)`],
+      cwd: dataDir, env: { ...Object.fromEntries(Object.entries(process.env).filter(([, value]) => value !== undefined)), CRABOT_MODULE_RUNTIME_ID: planned.runtime_id, TEST_GATE_TOKEN: 'private-gate-fixture-token', NODE_OPTIONS: '--require ' + preload } }
+    const input = { dataDir, recoveryId: preparation.plan.recovery_id, moduleId: planned.module_id, process: identity, runtime: runtimeRecord, definitionHash: sha256CanonicalJson(invocation), verify: preparation.verify }
+    expect(recoveryRecords.readWorkspaceRecoveryRuntimeStart(dataDir, input.recoveryId, input.moduleId)).toBeNull()
+    for (const damaged of [{ ...runtimeRecord, runtime_id: randomUUID() }, { ...runtimeRecord, root_pid: process.pid }, { ...runtimeRecord, module_port: 1 }, { ...runtimeRecord, unexpected: true }]) {
+      await expect(recoveryRecords.commitWorkspaceRecoveryRuntimeStart({ ...input, runtime: damaged })).rejects.toBeDefined()
+      expect(recoveryRecords.readWorkspaceRecoveryRuntimeStart(dataDir, input.recoveryId, input.moduleId)).toBeNull()
+    }
+    await expect(recoveryRecords.commitWorkspaceRecoveryRuntimeStart({ ...input, verify: async () => { throw new Error('test role revoked') } })).rejects.toBeDefined()
+    const start = await recoveryRecords.commitWorkspaceRecoveryRuntimeStart(input)
+    expect(start).toEqual({ schema_version: 1, recovery_id: input.recoveryId, plan_sha256: sha256CanonicalJson(runtimePlan), definition_sha256: input.definitionHash,
+      parent: coordinator.launch.parent, process: identity, runtime: runtimeRecord, created_at: expect.any(String) })
+    expect(recoveryRecords.readWorkspaceRecoveryRuntimeStart(dataDir, input.recoveryId, input.moduleId)).toEqual(start)
+    await expect(recoveryRecords.commitWorkspaceRecoveryRuntimeStart(input)).rejects.toBeDefined()
+    const startFile = path.join(coordinator.launch.control_root.path, 'runtime-starts', input.moduleId + '.json'), startBytes = await fs.readFile(startFile)
+    for (const change of [null, { ...start, plan_sha256: '0'.repeat(64) }, { ...start, unexpected: true }]) {
+      await fs.writeFile(startFile, JSON.stringify(change))
+      expect(() => recoveryRecords.readWorkspaceRecoveryRuntimeStart(dataDir, input.recoveryId, input.moduleId)).toThrow()
+      await fs.writeFile(startFile, startBytes)
+    }
+    expect(await fs.readFile(startFile)).toEqual(startBytes)
+    expect(JSON.stringify(start)).not.toContain('fixture-human')
+    expect(JSON.stringify(start)).not.toContain('private-gate-fixture-token')
+    await expect(fs.lstat(moduleMarker)).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(fs.lstat(preloadMarker)).rejects.toMatchObject({ code: 'ENOENT' })
+    const instanceFile = path.join(dataDir, 'module-runtime-registry/instance-id'), instanceBytes = await fs.readFile(instanceFile)
+    await fs.writeFile(instanceFile, 'changed-instance-id')
+    try { expect(() => recoveryRecords.verifyWorkspaceRecoveryRuntimeStart({ dataDir, recoveryId: input.recoveryId, moduleId: input.moduleId, recordHash: sha256CanonicalJson(start), definitionHash: input.definitionHash })).toThrow() }
+    finally { await fs.writeFile(instanceFile, instanceBytes) }
+    const gateInput = { dataDir, recoveryId: input.recoveryId, moduleId: input.moduleId, recordHash: sha256CanonicalJson(start), invocation,
+      verify: preparation.verify, assertCurrent: () => { expect(recoveryRecords.readWorkspaceRecoveryRuntimePlan(dataDir, input.recoveryId)).toEqual(runtimePlan) } }
+    const originalEmit = idleModule.emit.bind(idleModule), originalTimeout = global.setTimeout
+    const sent = vi.spyOn(idleModule, 'send')
+    const dropped = vi.spyOn(idleModule, 'emit').mockImplementation((event: string, ...args: any[]) => event === 'message' && args[0]?.kind === 'workspace_runtime_gate_started' ? true : originalEmit(event, ...args))
+    const timeout = vi.spyOn(global, 'setTimeout').mockImplementation(((callback: any, delay: number, ...args: any[]) => originalTimeout(callback, delay === 60000 ? 1500 : delay, ...args)) as any)
+    const firstStart = gate.start(gateInput)
+    expect(gate.start(gateInput)).toBe(firstStart)
+    try { await expect(firstStart).rejects.toMatchObject({ code: 'CRABOT_WORKSPACE_RUNTIME_GATE' }) }
+    finally { timeout.mockRestore() }
+    await vi.waitFor(async () => expect(JSON.parse(await fs.readFile(moduleMarker, 'utf8')).runtime).toBe(planned.runtime_id), { timeout: 15000 })
+    try { await expect(gate.observe()).resolves.toMatchObject({ kind: 'workspace_runtime_gate_observed', runtime_id: planned.runtime_id }) }
+    finally { dropped.mockRestore() }
+    expect(gate.start(gateInput)).toBe(firstStart)
+    expect(sent.mock.calls.filter(([message]: any[]) => message?.kind === 'workspace_runtime_gate_start')).toHaveLength(1)
+    const actual = JSON.parse(await fs.readFile(moduleMarker, 'utf8'))
+    expect(actual).toMatchObject({ parent: idleModule.pid, runtime: planned.runtime_id, token: 'private-gate-fixture-token' })
+    expect(await fs.readFile(preloadMarker, 'utf8')).toBe('only actual module')
+    expect(require('../../scripts/lib/process-identity.cjs').inspectProcess(actual.pid).parent).toBe(idleModule.pid)
+    gate.close()
+    expect(require('../../scripts/lib/process-identity.cjs').sameProcess(identity, require('../../scripts/lib/process-identity.cjs').inspectProcess(idleModule.pid))).toBe(true)
+    sent.mockRestore()
+  } finally {
+    gate.close()
+    await terminateProcessTree(idleModule.pid, { gracefulTimeoutMs: 0, forceImmediately: true })
+    await idleModuleExit
+    await manager.runtimeRegistry.removeRuntime(runtimePlan.modules[0].runtime_id)
+  }
+}
+
 describe('MM consumes a human intent proof only from its current Admin runtime', () => {
   it('retains the actual Web request body across authentication without diagnostic listeners consuming it', async () => {
     const f = await fixture({ actualAdmin: true })
@@ -340,7 +412,7 @@ describe('MM consumes a human intent proof only from its current Admin runtime',
       expect(response.status).toBe(503)
       expect(await response.json()).toMatchObject({ error: 'ADMIN_SERVER_NOT_INITIALIZED' })
     } finally { await f.cleanup() }
-  })
+  }, process.platform === 'win32' ? 120000 : 30000)
 
   it('verifies the actual spawned Admin/runtime and own intent without stopping or creating a coordinator', async () => {
     const f = await fixture()
@@ -2077,6 +2149,7 @@ describe('normal fixed-job Admin completion preparation', () => {
       expect(runtimePlan.root_selected_sha256).toBe(recoveryFacts.root_selected_sha256)
       expect(runtimePlan.launch_sha256).toBe(sha256CanonicalJson(initialized.launch))
       expect(recoveryRecords.readWorkspaceRecoveryRuntimePlan(f.data, freshRole.request.recovery_id)).toEqual(runtimePlan)
+      await verifyRegisteredRuntimeGate({ manager: cold, dataDir: f.data, coordinator: initialized, preparation: runtimePreparation, modules: archivedState.modules.modules })
       const actualReadyFile = path.join(initialized.launch.control_root.path, 'ready.json'), actualReadyBytes = await fs.readFile(actualReadyFile)
       await fs.writeFile(actualReadyFile, 'null')
       try { expect(() => recoveryRecords.readWorkspaceRecoveryCoordinator(f.data, freshRole.request.recovery_id)).toThrow() }
@@ -2111,6 +2184,52 @@ describe('normal fixed-job Admin completion preparation', () => {
       await expect(next.verify()).rejects.toBeDefined()
       await expect(cold.initializeWorkspaceRelocationRecovery(nextRequest, 'fixture-human')).rejects.toBeDefined()
       expect(recoveryRecords.readWorkspaceRecoveryCoordinator(f.data, nextRequest.recovery_id)).toEqual(nextFacts)
+      const startRequest = { ...request, recovery_id: randomUUID() }, startCoordinator = await cold.initializeWorkspaceRelocationRecovery(startRequest, 'fixture-human')
+      const startPreparation = await cold.prepareWorkspaceRecoveryRuntimes(startRequest, 'fixture-human'), modulePlan = startPreparation.plan.modules[0]
+      const originalDefinition = cold.modules.get(modulePlan.module_id), observed = path.join(f.data, 'mm-gate-observed.json')
+      const receipt = path.join(startCoordinator.launch.control_root.path, 'runtime-starts', modulePlan.module_id + '.json')
+      const moduleDefinition = { ...originalDefinition, port: archivedState.modules.modules.find((module: any) => module.module_id === modulePlan.module_id).module_port, cwd: f.data, skip_health_check: true, env: { ...originalDefinition.env, TEST_GATE_OBSERVED: observed, TEST_GATE_RECEIPT: receipt }, entry: `"${process.execPath}" -e "require('node:fs').writeFileSync(process.env.TEST_GATE_OBSERVED,JSON.stringify({pid:process.pid,parent:process.ppid,runtime:process.env.CRABOT_MODULE_RUNTIME_ID,registered:require('node:fs').existsSync(process.env.TEST_GATE_RECEIPT)}));setTimeout(()=>process.exit(0),30000)"` }
+      const startPermit = Object.freeze({})
+      cold.modules.set(modulePlan.module_id, moduleDefinition)
+      // This constructor fixture has no Admin.onStart; keep the real cutover gate separately verified.
+      const managementOnly = cold.managementOnly
+      await expect(cold.startModuleProcess(modulePlan.module_id)).rejects.toMatchObject({ code: 'MODULE_MANAGER_CUTOVER_INCOMPLETE' })
+      cold.managementOnly = false
+      cold.workspaceValidationPermits.set(startPermit, { moduleId: modulePlan.module_id, runtime: moduleDefinition, runtimeId: modulePlan.runtime_id, recoveryId: startRequest.recovery_id,
+        verify: startPreparation.verify, assertCurrent: () => { expect(cold.modules.get(modulePlan.module_id)).toBe(moduleDefinition) } })
+      let submissions = 0, observations = 0, sent: { mockRestore(): void } | undefined, timeout: { mockRestore(): void } | undefined
+      const originalEmit = ChildProcess.prototype.emit, originalTimeout = global.setTimeout
+      const dropped = vi.spyOn(ChildProcess.prototype, 'emit').mockImplementation(function (this: ChildProcess, event: string, ...args: any[]) {
+        if (event === 'message' && args[0]?.kind === 'workspace_runtime_gate_ready' && !sent) {
+          const originalSend = this.send
+          sent = vi.spyOn(this, 'send').mockImplementation((message: any, ...values: any[]) => {
+            if (message?.kind === 'workspace_runtime_gate_start') submissions++
+            if (message?.kind === 'workspace_runtime_gate_observe') observations++
+            return Reflect.apply(originalSend, this, [message, ...values])
+          })
+          timeout = vi.spyOn(global, 'setTimeout').mockImplementation(((callback: any, delay: number, ...values: any[]) => originalTimeout(callback, delay === 60000 ? 1500 : delay, ...values)) as any)
+        }
+        return event === 'message' && args[0]?.kind === 'workspace_runtime_gate_started' ? true : Reflect.apply(originalEmit, this, [event, ...args])
+      })
+      try {
+        await cold.startModuleProcess(modulePlan.module_id, undefined, undefined, startPermit)
+        expect(submissions).toBe(1); expect(observations).toBe(1)
+        await vi.waitFor(async () => expect(JSON.parse(await fs.readFile(observed, 'utf8')).registered).toBe(true), { timeout: 15000 })
+        const child = cold.processes.get(modulePlan.module_id), data = JSON.parse(await fs.readFile(observed, 'utf8'))
+        expect(data).toMatchObject({ parent: child.pid, runtime: modulePlan.runtime_id, registered: true })
+        expect(data.pid).not.toBe(child.pid)
+        expect(recoveryRecords.readWorkspaceRecoveryRuntimeStart(f.data, startRequest.recovery_id, modulePlan.module_id).runtime.root_pid).toBe(child.pid)
+        expect(cold.childStates.get(child).runtimeId).toBe(modulePlan.runtime_id)
+        await startPreparation.verify()
+      } finally {
+        dropped.mockRestore(); sent?.mockRestore(); timeout?.mockRestore()
+        cold.workspaceValidationPermits.delete(startPermit)
+        await cold.stopModuleProcess(modulePlan.module_id, 'forced')
+        startCoordinator.close()
+        await vi.waitFor(() => expect(require('../../scripts/lib/known-process-exit.cjs').probeKnownProcessExit([startCoordinator.launch.process]).state).toBe('stopped'), { timeout: 15000 })
+        cold.modules.set(modulePlan.module_id, originalDefinition)
+        cold.managementOnly = managementOnly
+      }
       for (const changed of ['runtime plan', 'environment', 'selected root', 'closed ledger']) {
         const inspectRequest = { ...request, recovery_id: randomUUID() }
         const inspected = await cold.initializeWorkspaceRelocationRecovery(inspectRequest, 'fixture-human')

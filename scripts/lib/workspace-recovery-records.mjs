@@ -17,10 +17,10 @@ const version = stat => [stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctime
 const processIdentity = value => exact(value, ['pid', 'parent', 'started', 'owner', 'executable']) && Number.isInteger(value.pid) && value.pid > 0 && value.pid <= 2147483647
   && Number.isInteger(value.parent) && value.parent >= 0 && value.parent <= 2147483647 && ['started', 'owner', 'executable'].every(key => typeof value[key] === 'string' && value[key] && !value[key].includes('\0'))
 function exists(file) { try { fs.lstatSync(file); return true } catch (error) { if (error.code !== 'ENOENT') fail(); return false } }
-function frame(directory) {
+function frame(directory, privateEntry = true) {
   const stat = fs.lstatSync(directory, { bigint: true })
   if (!stat.isDirectory() || stat.isSymbolicLink() || !stat.ino || fs.realpathSync(directory) !== directory
-    || (process.platform === 'win32' ? !native.isPrivateDirectory(directory) : stat.uid !== BigInt(process.getuid()) || (stat.mode & 0o777n) !== 0o700n)) fail()
+    || (process.platform === 'win32' ? !(privateEntry ? native.isPrivateDirectory(directory) : native.isOwnerOnlyDirectory(directory)) : stat.uid !== BigInt(process.getuid()) || privateEntry && (stat.mode & 0o777n) !== 0o700n)) fail()
   return { path: directory, dev: String(stat.dev), ino: String(stat.ino), native_id: process.platform === 'win32' ? native.inspectDirectoryFileId(directory) : null }
 }
 function context(dataDir, id) {
@@ -30,19 +30,20 @@ function context(dataDir, id) {
   const verify = () => { if (hash(frame(data)) !== hash(dataFrame) || hash(frame(control)) !== hash(controlFrame)) fail() }
   return { data, control, parent, directory, dataFrame, verify }
 }
-function read(directory, name) {
-  const beforeDirectory = frame(directory), file = path.join(directory, name)
+function read(directory, name, privateEntry = true, flush = false, parse = JSON.parse) {
+  const beforeDirectory = frame(directory, privateEntry), file = path.join(directory, name)
   if (!exists(file)) return null
   const stat = fs.lstatSync(file, { bigint: true })
   if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1n || stat.size > 65536n
-    || (process.platform === 'win32' ? !native.isPrivateFile(file) : stat.uid !== BigInt(process.getuid()) || (stat.mode & 0o777n) !== 0o600n)) fail()
-  const fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0))
+    || (process.platform === 'win32' ? !(privateEntry ? native.isPrivateFile(file) : native.isOwnerOnlyFile(file)) : stat.uid !== BigInt(process.getuid()) || privateEntry && (stat.mode & 0o777n) !== 0o600n)) fail()
+  const fd = fs.openSync(file, (flush && process.platform === 'win32' ? fs.constants.O_RDWR : fs.constants.O_RDONLY) | (fs.constants.O_NOFOLLOW ?? 0))
   try {
     if (version(fs.fstatSync(fd, { bigint: true })) !== version(stat)) fail()
     const value = fs.readFileSync(fd, 'utf8')
+    if (flush) fs.fsyncSync(fd)
     if (version(fs.fstatSync(fd, { bigint: true })) !== version(stat) || version(fs.lstatSync(file, { bigint: true })) !== version(stat)
-      || hash(frame(directory)) !== hash(beforeDirectory)) fail()
-    return JSON.parse(value)
+      || hash(frame(directory, privateEntry)) !== hash(beforeDirectory)) fail()
+    return parse(value)
   } finally { fs.closeSync(fd) }
 }
 function sync(directory) {
@@ -202,5 +203,95 @@ export async function commitWorkspaceRecoveryRuntimePlan(options) {
     const stored = readWorkspaceRecoveryRuntimePlan(ctx.data, options.recoveryId)
     if (hash(stored) !== hash(record)) fail()
     return stored
+  } catch { fail() }
+}
+
+
+const coreModule = value => ['crabot-agent', 'memory-default'].includes(value)
+function runtimeStart(coordinator, plan, state, moduleId, record) {
+  const target = plan?.modules.find(module => module.module_id === moduleId), runtime = record?.runtime
+  const scope = state.modules.modules.find(module => module.module_id === moduleId)
+  if (!target || !scope || !exact(record, ['schema_version', 'recovery_id', 'plan_sha256', 'definition_sha256', 'parent', 'process', 'runtime', 'created_at'])
+    || record.schema_version !== 1 || record.recovery_id !== coordinator.launch.request.recovery_id || record.plan_sha256 !== hash(plan)
+    || !digest(record.definition_sha256) || !date(record.created_at) || !processIdentity(record.parent) || !processIdentity(record.process)
+    || hash(record.parent) !== hash(coordinator.launch.parent) || record.process.parent !== record.parent.pid || record.process.owner !== record.parent.owner
+    || record.process.executable !== record.parent.executable || record.process.pid === record.parent.pid || !owned.processBirthAtLeast(record.process.started, record.parent.started)
+    || !exact(runtime, ['schema_version', 'instance_id', 'runtime_id', 'module_id', 'root_pid', 'process_start_identity', 'module_port', 'created_at'])
+    || runtime.schema_version !== 1 || runtime.instance_id !== state.health.root_proof.instance_id || runtime.runtime_id !== target.runtime_id || runtime.module_id !== moduleId
+    || runtime.root_pid !== record.process.pid || runtime.module_port !== scope.module_port || typeof runtime.process_start_identity !== 'string'
+    || !runtime.process_start_identity || runtime.process_start_identity.includes('\0') || !date(runtime.created_at)) fail()
+  return record
+}
+function registration(ctx, runtimeId, flush = false) {
+  const directory = path.join(ctx.data, 'module-runtime-registry'), entries = path.join(directory, 'records')
+  const before = [frame(directory, false), frame(entries, false)], record = read(entries, runtimeId + '.json', false, flush)
+  const instanceId = read(directory, 'instance-id', false, flush, value => value.trim())
+  if (flush) { sync(entries); sync(directory); sync(ctx.data) }
+  ctx.verify()
+  if (!record || instanceId !== record.instance_id || hash(before) !== hash([frame(directory, false), frame(entries, false)])) fail()
+  return record
+}
+/** Immutable technical facts, not a live process or startup authorization. */
+export function readWorkspaceRecoveryRuntimeStart(dataDir, recoveryId, moduleId) {
+  try {
+    if (!coreModule(moduleId)) fail()
+    const ctx = context(dataDir, recoveryId), coordinator = readWorkspaceRecoveryCoordinator(dataDir, recoveryId), plan = readWorkspaceRecoveryRuntimePlan(dataDir, recoveryId)
+    if (!coordinator.launch || !coordinator.ready || !plan) fail()
+    const starts = path.join(ctx.directory, 'runtime-starts')
+    if (!exists(starts)) return null
+    const before = frame(starts), record = read(starts, moduleId + '.json')
+    if (!exists(path.join(starts, moduleId + '.json'))) return null
+    const state = readWorkspaceRelocationArchivedState(dataDir, coordinator.launch.request.intent_id)
+    runtimeStart(coordinator, plan, state, moduleId, record)
+    ctx.verify()
+    if (hash(before) !== hash(frame(starts))) fail()
+    return record
+  } catch { fail() }
+}
+/** Current facts only; callers retain their own private live permit. */
+export function verifyWorkspaceRecoveryRuntimeStart({ dataDir, recoveryId, moduleId, recordHash, definitionHash }) {
+  try {
+    if (!digest(recordHash) || !digest(definitionHash)) fail()
+    const ctx = context(dataDir, recoveryId), coordinator = readWorkspaceRecoveryCoordinator(dataDir, recoveryId)
+    const record = readWorkspaceRecoveryRuntimeStart(dataDir, recoveryId, moduleId)
+    if (!record || hash(record) !== recordHash || record.definition_sha256 !== definitionHash
+      || !native.sameProcess(record.parent, native.inspectProcess(record.parent.pid)) || !native.sameProcess(record.process, native.inspectProcess(record.process.pid))
+      || !native.sameProcess(coordinator.launch.process, native.inspectProcess(coordinator.launch.process.pid))
+      || hash(registration(ctx, record.runtime.runtime_id)) !== hash(record.runtime)) fail()
+    readWorkspaceRecoveryAdmissionScope(dataDir, coordinator.launch.request)
+    return record
+  } catch { fail() }
+}
+export async function commitWorkspaceRecoveryRuntimeStart(options) {
+  try {
+    if (!exact(options, ['dataDir', 'recoveryId', 'moduleId', 'process', 'runtime', 'definitionHash', 'verify']) || !coreModule(options.moduleId)
+      || typeof options.verify !== 'function' || !digest(options.definitionHash) || process.versions.electron) fail()
+    const ctx = context(options.dataDir, options.recoveryId), coordinator = readWorkspaceRecoveryCoordinator(ctx.data, options.recoveryId)
+    const plan = readWorkspaceRecoveryRuntimePlan(ctx.data, options.recoveryId), self = native.inspectProcess(process.pid)
+    if (!coordinator.launch || !coordinator.ready || !plan || !native.sameProcess(coordinator.launch.parent, self)) fail()
+    const scope = readWorkspaceRecoveryAdmissionScope(ctx.data, coordinator.launch.request)
+    const record = runtimeStart(coordinator, plan, scope.state, options.moduleId, { schema_version: 1, recovery_id: options.recoveryId,
+      plan_sha256: hash(plan), definition_sha256: options.definitionHash, parent: self, process: structuredClone(options.process), runtime: structuredClone(options.runtime), created_at: new Date().toISOString() })
+    const originalDirectory = frame(ctx.directory), starts = path.join(ctx.directory, 'runtime-starts')
+    const check = () => {
+      ctx.verify()
+      if (hash(frame(ctx.directory)) !== hash(originalDirectory) || !native.sameProcess(self, native.inspectProcess(process.pid))
+        || !native.sameProcess(record.process, native.inspectProcess(record.process.pid)) || !native.sameProcess(coordinator.launch.process, native.inspectProcess(coordinator.launch.process.pid))
+        || hash(readWorkspaceRecoveryCoordinator(ctx.data, options.recoveryId)) !== hash(coordinator) || hash(readWorkspaceRecoveryRuntimePlan(ctx.data, options.recoveryId)) !== hash(plan)
+        || hash(registration(ctx, record.runtime.runtime_id)) !== hash(record.runtime) || readWorkspaceRecoveryAdmissionScope(ctx.data, coordinator.launch.request).fingerprint !== scope.fingerprint) fail()
+    }
+    await options.verify(); check()
+    if (hash(registration(ctx, record.runtime.runtime_id, true)) !== hash(record.runtime)) fail()
+    if (!exists(starts)) {
+      if (process.platform === 'win32') native.createPrivateDirectory(starts)
+      else fs.mkdirSync(starts, { mode: 0o700 })
+    }
+    const startsFrame = frame(starts)
+    const verify = () => { check(); if (hash(frame(starts)) !== hash(startsFrame)) fail() }
+    await options.verify(); verify()
+    publish({ ...ctx, directory: starts, parent: ctx.directory }, options.moduleId + '.json', record, verify)
+    await options.verify(); verify()
+    if (hash(readWorkspaceRecoveryRuntimeStart(ctx.data, options.recoveryId, options.moduleId)) !== hash(record)) fail()
+    return record
   } catch { fail() }
 }

@@ -237,7 +237,7 @@
     {
       "package": "liblzma5",
       "version": "5.2.5-2ubuntu1.1",
-      "url": "http://ports.ubuntu.com/ubuntu-ports/pool/main/x/xz-utils/liblzma5_5.2.5-2ubuntu1.1_arm64.deb",
+      "url": "https://snapshot.ubuntu.com/ubuntu/20261017T000000Z/pool/main/x/xz-utils/liblzma5_5.2.5-2ubuntu1.1_arm64.deb",
       "sha256": "97f4c7e360aa229d3bf0a5b56b204652ce4f1704536dc0256c0e2537b356f397"
     },
     {
@@ -701,7 +701,7 @@
     {
       "package": "liblzma5",
       "version": "5.2.5-2ubuntu1.1",
-      "url": "http://archive.ubuntu.com/ubuntu/pool/main/x/xz-utils/liblzma5_5.2.5-2ubuntu1.1_amd64.deb",
+      "url": "https://snapshot.ubuntu.com/ubuntu/20261017T000000Z/pool/main/x/xz-utils/liblzma5_5.2.5-2ubuntu1.1_amd64.deb",
       "sha256": "af77f099e7fa95a31267023535832804382fa66572a6b38002187be6e15116cb"
     },
     {

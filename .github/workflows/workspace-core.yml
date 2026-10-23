@@ -35,6 +35,7 @@ on:
       - 'crabot-native/**'
       - 'scripts/workspace-root-probe.mjs'
       - 'scripts/workspace-recovery-coordinator.mjs'
+      - 'scripts/workspace-runtime-gate.mjs'
       - 'scripts/lib/__tests__/workspace-root-probe.test.mjs'
       - '.github/workflows/workspace-core.yml'
   workflow_dispatch:
@@ -92,7 +93,7 @@ jobs:
       - name: Original lifecycle and maintenance regressions
         if: matrix.suite == 'finite'
         working-directory: crabot-core
-        run: node node_modules/vitest/vitest.mjs run src/process-tree.test.ts src/process-tree-exit-race.test.ts src/module-manager-lifecycle.test.ts src/module-runtime-registry.test.ts src/module-manager-health.test.ts src/module-manager-advanced.test.ts src/workspace-maintenance.test.ts src/workspace-recovery-runtime.test.ts src/workspace-module-scope.test.ts --maxWorkers=1 --minWorkers=1
+        run: node node_modules/vitest/vitest.mjs run src/process-tree.test.ts src/process-tree-exit-race.test.ts src/module-manager-lifecycle.test.ts src/module-runtime-registry.test.ts src/module-manager-health.test.ts src/module-manager-advanced.test.ts src/workspace-maintenance.test.ts src/workspace-recovery-runtime.test.ts src/workspace-runtime-gate.test.ts src/workspace-module-scope.test.ts --maxWorkers=1 --minWorkers=1
       - name: Actual fixed job launch and technical health without business onStart
         if: ${{ matrix.suite == 'finite' && !cancelled() && steps.compile.outcome == 'success' }}
         working-directory: crabot-core

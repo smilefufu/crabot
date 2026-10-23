@@ -256,3 +256,30 @@ export interface VerifyWorkspaceRelocationRecoveryRequestResult {
 }
 export type VerifyWorkspaceRelocationRecoveryAdmissionParams = VerifyWorkspaceRelocationRecoveryRequestParams
 export type VerifyWorkspaceRelocationRecoveryAdmissionResult = VerifyWorkspaceRelocationRecoveryRequestResult
+
+export interface WorkspaceRecoveryRuntimeRegistration {
+  schema_version: 1
+  instance_id: string
+  runtime_id: string
+  module_id: string
+  root_pid: number
+  process_start_identity: string
+  module_port: number
+  created_at: string
+}
+export interface WorkspaceRecoveryRuntimeStart {
+  schema_version: 1
+  recovery_id: string
+  plan_sha256: string
+  definition_sha256: string
+  parent: WorkerProcessIdentity
+  process: WorkerProcessIdentity
+  runtime: WorkspaceRecoveryRuntimeRegistration
+  created_at: string
+}
+export interface WorkspaceRecoveryRuntimeInvocation {
+  command: string
+  args: string[]
+  cwd: string
+  env: Record<string, string>
+}

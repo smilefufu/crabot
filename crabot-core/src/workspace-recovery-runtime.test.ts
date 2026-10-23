@@ -6,7 +6,7 @@ import { randomUUID } from 'node:crypto'
 import ModuleManager from './index.js'
 
 describe('private planned workspace validation runtime', () => {
-  it.each(['planned', 'ordinary', 'invalid'] as const)('keeps the actual finite runtime identity bound to its owner: %s', async mode => {
+  it.each(['planned', 'ordinary', 'invalid', 'invalid recovery', 'unregistered recovery'] as const)('keeps the actual finite runtime identity bound to its owner: %s', async mode => {
     const data = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'workspace-runtime-plan-')))
     const script = path.join(data, 'finite.cjs'), observed = path.join(data, 'observed.json')
     await fs.writeFile(script, `require('node:fs').writeFileSync(${JSON.stringify(observed)}, JSON.stringify({runtime_id:process.env.CRABOT_MODULE_RUNTIME_ID}));setTimeout(()=>process.exit(0),30000)`)
@@ -20,11 +20,14 @@ describe('private planned workspace validation runtime', () => {
     try {
       if (mode !== 'ordinary') {
         await fs.mkdir(path.dirname(fence)); await fs.writeFile(fence, 'test-owned-fence')
-        mm.workspaceValidationPermits.set(permit, { moduleId: runtime.module_id, runtime, runtimeId: plannedId, assertCurrent: () => {}, verify: async () => {} })
+        mm.workspaceValidationPermits.set(permit, { moduleId: runtime.module_id, runtime, runtimeId: plannedId, ...(mode.includes('recovery') ? { recoveryId: mode === 'invalid recovery' ? 'bad-recovery-id' : randomUUID() } : {}), assertCurrent: () => {}, verify: async () => {} })
       }
-      if (mode === 'invalid') {
+      if (mode === 'invalid' || mode === 'invalid recovery') {
         await expect(mm.startModuleProcess(runtime.module_id, undefined, undefined, permit)).rejects.toMatchObject({ code: 'FORBIDDEN' })
         expect(mm.processes.size).toBe(0)
+        await expect(fs.lstat(observed)).rejects.toMatchObject({ code: 'ENOENT' })
+      } else if (mode === 'unregistered recovery') {
+        await expect(mm.startModuleProcess(runtime.module_id, undefined, undefined, permit)).rejects.toMatchObject({ code: 'CRABOT_WORKSPACE_RUNTIME_GATE' })
         await expect(fs.lstat(observed)).rejects.toMatchObject({ code: 'ENOENT' })
       } else {
         await mm.startModuleProcess(runtime.module_id, undefined, { CRABOT_MODULE_RUNTIME_ID: 'caller-cannot-pick-runtime' }, mode === 'planned' ? permit : undefined)

@@ -82,7 +82,7 @@ import { checkDiskLow } from './disk-watcher.js'
 import { resolveExecutable } from './executable-resolver.js'
 import { terminateProcessTree, waitForProcessTreeExit } from './process-tree.js'
 import { ModuleRuntimeRegistry, probeProcessStartIdentity } from './module-runtime-registry.js'
-import type { OrphanTerminationCandidate } from './module-runtime-registry.js'
+import type { ModuleRuntimeRecord, OrphanTerminationCandidate } from './module-runtime-registry.js'
 
 // ============================================================================
 // 类型定义
@@ -302,7 +302,7 @@ export class ModuleManager {
     verify: () => Promise<void>
     assertCurrent: () => void
   }
-  private readonly workspaceValidationPermits = new WeakMap<object, { moduleId: ModuleId; runtime: ModuleRuntime; runtimeId?: string; verify: () => Promise<void>; assertCurrent: () => void }>()
+  private readonly workspaceValidationPermits = new WeakMap<object, { moduleId: ModuleId; runtime: ModuleRuntime; runtimeId?: string; recoveryId?: string; verify: () => Promise<void>; assertCurrent: () => void }>()
   private workspaceModuleStop?: { fingerprint: string; pending: Promise<WorkspaceModuleStopResponse> }
   private readonly childStates: WeakMap<ChildProcess, ManagedChildState> = new WeakMap()
   private readonly lifecycleQueues: Map<ModuleId, Promise<void>> = new Map()
@@ -803,7 +803,8 @@ export class ModuleManager {
     if (!permit) { this.assertWorkspaceStartAllowed(moduleId); restoration?.assertCurrent(); return }
     const binding = this.workspaceValidationPermits.get(permit)
     if (!binding || binding.moduleId !== moduleId || this.modules.get(moduleId) !== binding.runtime
-      || binding.runtimeId !== undefined && !/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(binding.runtimeId)) {
+      || binding.runtimeId !== undefined && !/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(binding.runtimeId)
+      || binding.recoveryId !== undefined && (!binding.runtimeId || !/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(binding.recoveryId))) {
       throw Object.assign(new Error('工作区验证启动凭据无效。'), { code: 'FORBIDDEN' })
     }
     binding.assertCurrent()
@@ -1498,12 +1499,16 @@ export class ModuleManager {
       let child: ChildProcess | undefined
       let journal: (WorkspaceModuleStopJournal & { close(): void }) | undefined
       let processJournal: { prepare(): Promise<'dispatch' | 'observe'>; observe(processes: ReadonlyArray<WorkerProcessIdentity>): Promise<void>; complete(): Promise<void>; confirmExecutionExit(): Promise<void>; close(): void } | undefined
-      let active = true
+      let active = true, stage = 'launch'
       try {
         child = await this.launchWorkspaceRelocationCoordinator(request, bearer)
+        stage = 'quiesce-web'
         await this.quiesceWorkspaceRelocationWeb(request, bearer)
+        stage = 'capture-workers'
         await this.captureWorkspaceRelocationWorkersForCoordinator(child, request, bearer)
+        stage = 'capture-processes'
         const processes = await this.captureWorkspaceRelocationProcessesForCoordinator(child)
+        stage = 'capture-modules'
         const modules = await this.captureWorkspaceRelocationModulesForCoordinator(child)
         const grant = this.workspaceCoordinatorGrant
         if (!grant || grant.child !== child) throw failure()
@@ -1528,20 +1533,26 @@ export class ModuleManager {
         journal = createWorkspaceModuleJournal(child, context)
         processJournal = createWorkspaceProcessJournal(child, context)
         verify()
+        stage = 'process-attempt'
         if (await processJournal!.prepare() !== 'dispatch') throw failure()
         let submissions: Pick<WorkspaceStopSequenceResult, 'workerSubmission' | 'moduleSubmission'> | undefined
         const { stopKnownProcessScope } = require('../../scripts/lib/known-process-stop.cjs')
+        stage = 'stop-known-scope'
         await stopKnownProcessScope(processes, { timeoutMs: Math.max(1, Math.round(this.config.shutdown_timeout * 1000)),
           onObserved: async (observed: ReadonlyArray<WorkerProcessIdentity>) => { verify(); await processJournal!.observe(observed); verify() },
           submit: async () => {
             verify()
+            stage = 'stop-workers'
             const workerSubmission = await this.stopWorkspaceRelocationWorkersForCoordinator(child!)
             verify(); this.assertWorkspaceCoordinatorGrantCurrent(grant)
+            stage = 'stop-modules'
             const moduleSubmission = await this.requestWorkspaceRelocationModuleStops(modules, journal!)
             verify(); submissions = { workerSubmission, moduleSubmission }
+            stage = 'stop-known-scope'
           },
         }, { ...native, terminateKnownProcess: (target: WorkerProcessIdentity) => { verify(); return native.terminateKnownProcess(target) } })
         if (!submissions) throw failure()
+        stage = 'complete-processes'
         await processJournal!.complete(); verify()
         const assertModulesStopped = (): void => {
           verify()
@@ -1557,16 +1568,21 @@ export class ModuleManager {
           if ((await this.runtimeRegistry.listRecords()).some(record => record.module_id !== 'admin-web')) throw failure()
           assertModulesStopped()
         }
+        stage = 'verify-stopped-modules'
         await verifyStoppedModules()
+        stage = 'execution-exit'
         await processJournal!.confirmExecutionExit()
         await verifyStoppedModules()
         if (sha256CanonicalJson(records.readWorkspaceRelocationModuleStops(this.dataDir, request.intent_id).submission?.results) !== sha256CanonicalJson(submissions.moduleSubmission.results)
           || !records.readWorkspaceRelocationProcessStops(this.dataDir, request.intent_id).completion) throw failure()
         return Object.freeze({ coordinator: child, ...submissions })
-      } catch {
+      } catch (cause) {
         active = false
         await this.closeWorkspaceCoordinatorChannel(child)
-        throw failure()
+        const diagnostic = cause as { code?: unknown; stage?: unknown } | null
+        const safe = (value: unknown, pattern: RegExp) => typeof value === 'string' && value.length <= 128 && pattern.test(value) ? value : null
+        throw Object.assign(failure(), { stage, cause_code: safe(diagnostic?.code, /^(?:CRABOT_|WORKSPACE_)[A-Z_]+$|^E[A-Z]+$/),
+          cause_stage: safe(diagnostic?.stage, /^[a-z][a-z0-9-]*$/) })
       } finally { active = false; journal?.close(); processJournal?.close() }
     })
     this.workspaceStopSequence = { fingerprint, pending }
@@ -3151,10 +3167,15 @@ export class ModuleManager {
       delete (runtime as ModuleRuntime & { _pendingCutover?: unknown })._pendingCutover
     }
 
+    const recoveryId = validationPermit && this.workspaceValidationPermits.get(validationPermit)?.recoveryId
+    let runtimeGate: { child: ChildProcess; ready(): Promise<unknown>; start(input: unknown): Promise<unknown>; observe(): Promise<unknown>; close(): void } | undefined
     let proc: ChildProcess
     try {
       this.assertWorkspaceProcessStartCurrent(moduleId, validationPermit, restorationGuard)
-      proc = spawn(command, args, {
+      if (recoveryId) {
+        runtimeGate = require('../../scripts/lib/workspace-runtime-gate.mjs').createWorkspaceRuntimeGate()
+        proc = runtimeGate!.child
+      } else proc = spawn(command, args, {
         cwd: runtime.cwd,
         env: childEnv,
         stdio: ['ignore', 'pipe', 'pipe'],
@@ -3188,14 +3209,16 @@ export class ModuleManager {
       throw spawnError ?? new Error(`Spawn did not return a PID for module ${moduleId}`)
     }
 
+    let runtimeRecord: ModuleRuntimeRecord
     try {
-      await this.runtimeRegistry.recordSpawn({
+      runtimeRecord = await this.runtimeRegistry.recordSpawn({
         runtimeId,
         moduleId,
         rootPid: proc.pid,
         modulePort: runtime.port,
       })
     } catch (error) {
+      runtimeGate?.close()
       let cleanupError: unknown
       try {
         await terminateProcessTree(proc.pid, {
@@ -3206,7 +3229,7 @@ export class ModuleManager {
       } catch (terminationError) {
         cleanupError = terminationError
       }
-      await this.runtimeRegistry.removeRuntime(runtimeId).catch((removeError) => {
+      if (!runtimeGate || !cleanupError) await this.runtimeRegistry.removeRuntime(runtimeId).catch((removeError) => {
         cleanupError ??= removeError
       })
       proc.removeListener('error', captureSpawnError)
@@ -3287,6 +3310,33 @@ export class ModuleManager {
       childState.rootExited = true
       await this.beginChildFinalize(childState, proc.exitCode, proc.signalCode, spawnError)
       throw spawnError ?? new Error(`Module ${moduleId} exited during startup`)
+    }
+
+    if (runtimeGate) {
+      try {
+        await runtimeGate.ready()
+        await this.assertWorkspaceProcessStartAllowed(moduleId, validationPermit)
+        const invocation = { command, args, cwd: path.resolve(runtime.cwd ?? '.'), env: childEnv }
+        const records = require('../../scripts/lib/workspace-recovery-records.mjs')
+        const verify = () => this.assertWorkspaceProcessStartAllowed(moduleId, validationPermit)
+        const assertCurrent = () => this.assertWorkspaceProcessStartCurrent(moduleId, validationPermit)
+        const receipt = await records.commitWorkspaceRecoveryRuntimeStart({ dataDir: this.dataDir, recoveryId, moduleId,
+          process: require('../../scripts/lib/process-identity.cjs').inspectProcess(proc.pid), runtime: runtimeRecord,
+          definitionHash: sha256CanonicalJson(invocation), verify })
+        try {
+          await runtimeGate.start({ dataDir: this.dataDir, recoveryId, moduleId, recordHash: sha256CanonicalJson(receipt), invocation, verify, assertCurrent })
+        } catch {
+          // The release may have reached the carrier even when its acknowledgement did not.
+          // Observe that same one-time effect; never issue another start.
+          await runtimeGate.observe()
+        }
+      } catch {
+        childState.intentionalReason = 'shutdown'
+        this.revokeRuntimeBearer(moduleId)
+        runtimeGate.close()
+        runtime.status = 'error'
+        throw Object.assign(new Error('恢复验证模块未能确认先登记后启动，已保留维护和技术材料；未重试。'), { code: 'CRABOT_WORKSPACE_RUNTIME_GATE' })
+      }
     }
 
     console.log(`[ModuleManager] Started module: ${moduleId} (PID: ${proc.pid})`)

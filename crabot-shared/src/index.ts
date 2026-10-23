@@ -134,6 +134,7 @@ export * from './computer-use.js'
 
 export type { WorkspaceRecord, WorkspaceUsage, WorkspaceExecution, WorkspaceExecutionInventory, WorkspaceSummary, WorkspaceListResult,
   WorkspaceCreateRequest, WorkspaceUpdateRequest, WorkspaceRecordResult, WorkspaceGetResult, WorkspaceScanResult,
+  WorkspaceRecoveryRuntimeStart, WorkspaceRecoveryRuntimeRegistration, WorkspaceRecoveryRuntimeInvocation,
   WorkspaceRecoveryRuntimePlan, VerifyWorkspaceRelocationRecoveryRequestParams, VerifyWorkspaceRelocationRecoveryRequestResult,
   VerifyWorkspaceRelocationRecoveryAdmissionParams, VerifyWorkspaceRelocationRecoveryAdmissionResult,
   VerifyWorkspaceRelocationRequestParams, VerifyWorkspaceRelocationRequestResult,
