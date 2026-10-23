@@ -170,3 +170,4 @@ export { workspaceMaintenancePending, assertWorkspaceExecutionAllowed } from './
 export { parseWorkspaceRelocationStartRequest } from './workspace-start-request.js'
 
 export { parseWorkspaceRelocationRecoveryStartRequest } from './workspace-recovery-start-request.js'
+export { geminiApiUrl, geminiApiHeaders, geminiModelId } from './gemini-api.js'

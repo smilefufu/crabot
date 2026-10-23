@@ -1,9 +1,11 @@
 # Crabot 项目进度
 
-### Gemini 供应商测速：鉴权兼容修复待审查
+### Gemini 原生兼容：实现与真实网关验证通过，待 PR 审查
 
-- 2026-10-22：修复 Gemini 模型列表探测将 API Key 放在 query 导致 `api_key_in_query_deprecated` 的问题，改用 `Authorization: Bearer`，与既有聊天调用一致；保留当前 OpenAI 兼容端点和配置结构。
-- 新增草稿列表＋聊天验证、已保存供应商测速、401 短路三项回归，旧代码先复现两项失败；Admin 51 项及 Agent 适配器/缓存/思考映射 107 项通过，完成本次 diff review。独立 worktree 交付 PR；未调用真实网关模型或部署，不代表 Gemini 原生 API 支持。
+- 按已确认 [spec](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/specs/2026-10-23-gemini-native-compatibility-design.md) 实现原生 GeminiAdapter：流式文本、图片输入、函数调用/结果、thoughtSignature 原位历史与 Manager/builtin 存储恢复、思考映射及用量。Admin 改为原生目录/预检，手动 Gemini 可同步模型；30 秒有界操作，分页失败或空目录保留旧值。
+- Shared 152、Admin 63、Web 4 项及 Agent 相关回归通过，相关构建与完整 diff review 已完成；原生选择/流解析先在旧实现复现两项失败。保留既有三种适配器和默认引用，按 code-simplifier 简化本次分支后重验。旧 OpenAI 随机约 5 秒退避偶尔撞到默认 5 秒测试上限，扩大验证使用 10 秒测试预算，不改生产恢复或超时。
+- Node 22.22.3 加载 worktree 实际产物，对 gemini-4-argon-low 共四次生成全部 HTTP 200：完整短答、一次纯测试工具的两轮签名往返、合成图片识别 Green；工具只执行一次，真实响应保存再加载后投影相等。用量共 2603 输入/68 输出；证据 `/private/tmp/crabot-gemini-native-acceptance-20261023/summary.json`。原生目录解析得 33 个聊天型号，包含 gemini-4-argon，未逐型号生成验证。
+- 本地正式实例尚未升级，xinshu Gemini 仍为 inactive、27 项旧目录；默认及其它供应商未变。P6 主仓非草稿 PR，P7 合并后的本机升级/启用与现场回合验证分别跟踪，不把 worktree 验收写成本机部署完成。
 
 ### 执行器前置检查：最小提示词已完成真实输入重放
 
@@ -47,7 +49,7 @@
 ### 桌面化方案：独立 worktree 开发中，尚未进入 PR
 
 - 按[桌面Spec](crabot-docs/superpowers/specs/2026-10-17-desktop-application-design.md)在`feat/desktop-application`推进；整项未完成，产品main未推、未提前PR或部署现场。Electron+React、业务HTTP/WS与共享SDK、最小原生IPC、GUI免额外密码；关闭窗口后台运行，退出停止共享实例。安装时选整体根，之后迁workspace，不新增DATA_DIR选择步骤。
-- 资源保护：启动需≥40GiB空闲，低于30GiB只停止本任务，构建材料≤20GiB；本轮最低401.41GiB、材料3.77GiB，无新增本机整包/Native重建或业务onStart。完整实例仅隔离CI，磁盘/Docker事故由独立会话跟踪，不清理现场数据。
+- 资源保护：启动需≥40GiB空闲，低于30GiB只停止本任务，构建材料≤20GiB；本轮最低401.14GiB、材料3.77GiB，无新增本机整包/Native重建或业务onStart。完整实例仅隔离CI，磁盘/Docker事故由独立会话跟踪，不清理现场数据。
 - P0–P5组件已接统一内置Node/Python/浏览器、隔离可写依赖、GUI/CLI同实例、OS peer、首次配置/权限/诊断、内置Bash与稳定MCP id环境；五类真实隔离stdio连接及部分四平台有证据。已有GUI配置→聊天→持久ack/交付使用loopback模型；真实Provider完整GUI未验收，不能以两次短直连代替。
 - I1/I2及I3底层已接严格安装身份、唯一GUI/Core版本对、离线向导、OS入口和整体准备；共同schema3范围迁移只访问实际写入范围，不复制无关200GiB历史，旧schema1/2恢复保留。GUI停止段已有目标证明→锁内空闲→精确停机→一次转换→成对提交；真实目标Node/唯一备份/完成凭据与有限Electron重启锁交接通过。ASAR内声明及校验器在首次外置Core导入前拒绝错配/字节损坏/移根，不创建空数据或回退另一Core。正式可信下载/签名、不同GUI二进制交接与健康、登录项、中断修复、旧CLI完整接管、保留式卸载及Ubuntu默认沙箱授权仍未收口，详见[安装根计划](crabot-docs/superpowers/plans/2026-10-19-desktop-install-root-implementation.md)。
 - Ubuntu原生引导已确认且protocol-desktop§2.2先行；ca2的24/26 GTK首窗/helper及24真实内核三job全部通过（精确入口授权、邻近拒绝、全局不变）。同提交24.04原生封装已接，按实际清单只授权所含浏览器；配对Core明确启用沙箱，旧CLI/CDP保持，冻结SDK/元数据5项红绿通过。安装/载荷/入口/脱敏35通过、4平台跳过，范围19通过；343a旧基线四平台整包通过，不能替代最新原生安装；525候选已进入CI，完整包将临时传Ubuntu24验真实新安装/GUI/浏览器/MCP。取消竞态已修复：后端结束后仍等待旧授权回调收尾才允许重试；2988的40034997809两版实际GTK回归、首窗及24受限内核三job均success。图形Polkit、默认GNOME/Wayland、26内核、发行/卸载仍待验；本机约401GiB空闲，无大包重构。
@@ -59,6 +61,7 @@
 - [管理页面恢复入口Spec](crabot-docs/superpowers/specs/2026-10-23-workspace-recovery-http-handoff-design.md)已于10-24获确认，§3.5生效。已接共享SDK/当前人类RPC/维护在线HTTP及“核验→明确继续”页面；新协调初始化才202，后台独立、同id回执与撤权/未知不重发。SDK9、Shared17、Core11（真实归档/旧协调退出）、Admin53、页面33及类型/有限构建通过；同MM三段已改由真实SDK恢复，Linux已实际通过，四平台及整包继续。未归档/其它故障恢复及最终整包GUI仍未完成，不缩减原验收范围。
 - 权限兼容按[确认Spec](crabot-docs/superpowers/specs/2026-10-19-legacy-project-file-access-design.md)：旧对象有效null一次转显式全目录，新对象仅默认受管范围；仅storage覆盖，其余继承、明确限制及原请求/Worker上限保留。实际旧元数据→Admin重载→生产Harness读写及受限拒绝通过，未改现场权限。
 - System按[确认Spec](crabot-docs/superpowers/specs/2026-10-18-system-mode-experience-design.md)/[协议](crabot-docs/protocols/protocol-system.md)/[计划](crabot-docs/superpowers/plans/2026-10-18-system-mode-experience-implementation.md)：S1–S4注册/降UID/systemd/本人CLI/批量启停重启/范围升级与受保护恢复已接，旧候选多轮三UID通过，新head仍需整机验证。S5有旧表/运行目录发现、精确停机、旧入口隔离/交接及专用数据/Python组件；完整旧共享转换协调、全部启动源/恢复、真实旧发行多UID仍未完成。自定义DATA_DIR/停止目录映射提案已撤回；旧Node指纹补充未确认且未实现。在线准备代码/环境，仅一致性备份/实际转换与切换停机。
+- 已集成main的Gemini原生08352c3e，仅共享导出冲突且两边保留；刷新本地file依赖产物后Agent57/Admin48/Shared3/Web2及五模块类型通过。原适配器69按主线既有10秒验证预算通过，默认5秒与随机约5秒重试冲突的失败日志保留；不改生产期限，不称默认全集绿。最新合并源完整CI继续。
 - 验收夹具时序：迟到cleanup清空后续spy、stop前实际尚未入队两项均有确定性红例；改为测试边界恢复/迟到清理只认原测试，以及真实队列hold后确认两条入队再stop。统一清理后的定向Core15、完整Harness261通过；已将新回归加入四平台筛选，未改产品停机或原超时；Intel真实Admin耗时仍须原生验证。
 - 最终缺口：完整安装/更新/修复/卸载、旧部署迁移及故障恢复、签名/公证、macOS14/Windows11/Ubuntu GNOME24.04与26.04的权限/IME/沙箱/资源、真实模型任务分别验收；[签名指南](crabot-docs/guides/desktop-release-signing.md)。Agent34项和Admin两项既有失败已在未改main复现，分支WS关闭丢消息已修；不把基线、构建、部署或旧候选混成验收。逐项证据/旧结果保留在[总验收记录](crabot-docs/superpowers/plans/2026-10-17-desktop-application-validation.md)与对应计划；完成全部验证后才走PR。
 

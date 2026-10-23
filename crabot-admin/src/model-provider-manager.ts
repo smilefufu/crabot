@@ -8,6 +8,7 @@
 import fs from 'fs/promises'
 import path from 'path'
 import { generateId, generateTimestamp } from 'crabot-shared'
+import { fetchGeminiModels, probeGeminiChat, probeGeminiEndpoint, GEMINI_OPERATION_TIMEOUT_MS } from './gemini-provider.js'
 import { durableAtomicWriteFile } from './durable-file.js'
 import type {
   ModelProvider,
@@ -116,8 +117,7 @@ function buildChatProbeRequest(
     }
   }
 
-  if (provider.format === 'openai' || provider.format === 'gemini') {
-    // gemini 实际走 OpenAI 兼容端点（见 llm-adapter.ts 的 createAdapter）
+  if (provider.format === 'openai') {
     return {
       ok: true,
       url: `${provider.endpoint}/chat/completions`,
@@ -573,7 +573,8 @@ export class ModelProviderManager {
 
     // 1) base_url 探测：endpoint 写错 / 鉴权挂掉早死，省得跑第二步浪费时间。
     // 用本地版避免污染：draft 没入 Map，不应写 provider.status / saveProviders。
-    const endpointResult = await this.probeEndpointConnectivity(tempProvider)
+    const signal = draft.format === 'gemini' ? AbortSignal.timeout(GEMINI_OPERATION_TIMEOUT_MS) : undefined
+    const endpointResult = await this.probeEndpointConnectivity(tempProvider, signal)
     if (!endpointResult.success) {
       return { ...endpointResult, failed_stage: 'endpoint' }
     }
@@ -584,7 +585,7 @@ export class ModelProviderManager {
       // 没填模型不强制（用户可能想先建框架后续 refreshModels），endpoint 通了就放行
       return { success: true, latency_ms: endpointResult.latency_ms }
     }
-    const modelResult = await this.probeChatRoundtrip(tempProvider, llmModel)
+    const modelResult = await this.probeChatRoundtrip(tempProvider, llmModel, signal)
     if (!modelResult.success) {
       return { ...modelResult, failed_stage: 'model' }
     }
@@ -621,12 +622,15 @@ export class ModelProviderManager {
    * 纯 base_url 探测（不写 provider.status）。给草稿验证和持久化测速共用。
    */
   private async probeEndpointConnectivity(
-    provider: ModelProvider
+    provider: ModelProvider,
+    signal?: AbortSignal
   ): Promise<{ success: boolean; latency_ms: number; error?: string }> {
     const authToken = await this.resolveAuthToken(provider)
     if (typeof authToken !== 'string') {
       return authToken
     }
+
+    if (provider.format === 'gemini') return probeGeminiEndpoint(provider, authToken, signal)
 
     let url: string
     let headers: Record<string, string>
@@ -671,12 +675,15 @@ export class ModelProviderManager {
    */
   private async probeChatRoundtrip(
     provider: ModelProvider,
-    model: ModelInfo
+    model: ModelInfo,
+    signal?: AbortSignal
   ): Promise<{ success: boolean; latency_ms: number; error?: string }> {
     const authToken = await this.resolveAuthToken(provider)
     if (typeof authToken !== 'string') {
       return authToken
     }
+
+    if (provider.format === 'gemini') return probeGeminiChat(provider, model, authToken, signal)
 
     const probe = buildChatProbeRequest(provider, model, authToken)
     if (!probe.ok) {
@@ -804,12 +811,6 @@ export class ModelProviderManager {
         headers: { 'x-api-key': authToken, 'anthropic-version': '2023-06-01' },
       }
     }
-    if (provider.format === 'gemini') {
-      return {
-        url: `${provider.endpoint}/models`,
-        headers: { Authorization: `Bearer ${authToken}` },
-      }
-    }
     throw new Error(`Unsupported format: ${provider.format}`)
   }
 
@@ -818,21 +819,23 @@ export class ModelProviderManager {
     if (!provider) {
       throw new Error('Provider not found')
     }
-    if (provider.type !== 'preset' || !provider.preset_vendor) {
-      throw new Error('Only preset providers support model refresh')
-    }
-
-    const vendor = findPresetVendor(provider.preset_vendor)
-    if (!vendor) {
-      throw new Error(`Unknown vendor: ${provider.preset_vendor}`)
-    }
-
     const authToken = await this.ensureFreshAuthToken(provider)
-
-    const freshModels = await this.fetchVendorModels(
-      { ...vendor, endpoint: provider.endpoint },
-      authToken
-    )
+    let freshModels: ModelInfo[]
+    if (provider.format === 'gemini') {
+      freshModels = (await fetchGeminiModels(provider, authToken)).map(model => {
+        const previous = provider.models.find(item => item.model_id === model.model_id)
+        return { ...model,
+          ...(previous?.context_window !== undefined ? { context_window: previous.context_window } : {}),
+          ...(previous?.max_tokens !== undefined ? { max_tokens: previous.max_tokens } : {}),
+          ...(previous?.supports_vision !== undefined ? { supports_vision: previous.supports_vision } : {}),
+        }
+      })
+    } else {
+      if (provider.type !== 'preset' || !provider.preset_vendor) throw new Error('Only preset providers support model refresh')
+      const vendor = findPresetVendor(provider.preset_vendor)
+      if (!vendor) throw new Error(`Unknown vendor: ${provider.preset_vendor}`)
+      freshModels = await this.fetchVendorModels({ ...vendor, endpoint: provider.endpoint }, authToken)
+    }
 
     const oldIds = new Set(provider.models.map(m => m.model_id))
     const newIds = new Set(freshModels.map(m => m.model_id))
@@ -853,7 +856,7 @@ export class ModelProviderManager {
       await this.saveProviders()
     }, true)
 
-    await this.autoConfigureImageSlot(id)
+    if (provider.format !== 'gemini') await this.autoConfigureImageSlot(id)
 
     return { models: mergedModels, added, removed }
   }
@@ -912,6 +915,7 @@ export class ModelProviderManager {
   }
 
   private async fetchVendorModels(vendor: PresetVendor, apiKey: string): Promise<ModelInfo[]> {
+    if (vendor.format === 'gemini') return fetchGeminiModels(vendor, apiKey)
     if (!vendor.models_api) {
       return vendor.default_models ? [...vendor.default_models] : []
     }

@@ -6,6 +6,7 @@ import {
   readSSELines,
   AnthropicAdapter,
   OpenAIAdapter,
+  GeminiAdapter,
   OpenAIResponsesAdapter,
   createAdapter,
   callNonStreaming,
@@ -1368,9 +1369,9 @@ describe('createAdapter', () => {
     expect(adapter).toBeInstanceOf(OpenAIAdapter)
   })
 
-  it('should return OpenAIAdapter for format=gemini (OpenAI-compatible)', () => {
+  it('should return GeminiAdapter for format=gemini', () => {
     const adapter = createAdapter({ ...baseConfig, format: 'gemini' })
-    expect(adapter).toBeInstanceOf(OpenAIAdapter)
+    expect(adapter).toBeInstanceOf(GeminiAdapter)
   })
 
   it('should throw for unsupported format', () => {
