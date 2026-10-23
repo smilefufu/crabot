@@ -195,7 +195,7 @@ it('initial relocation HTTP authenticates before parsing, enforces one closed co
   expect((await submit({ token: 'fixture-human' })).status).toBe(401)
   for (const token of ['fixture-internal', jwt.sign({ sub: 'agent-cli', exp: Math.floor(Date.now() / 1000) + 60 }, 'fixture-secret')]) expect((await submit({}, token)).status).toBe(403)
   const request = initialRequest(f.root)
-  for (const body of [{ ...request, confirmed: false }, { ...request, expected_revision: 0 }, { ...request, authorization: 'body-only' }, { ...request, source: 'admin-web' }]) {
+  for (const body of [{ ...request, confirmed: false }, { ...request, expected_revision: 0 }, { ...request, authorization: 'body-only' }, { ...request, source: 'admin-web' }, { ...request, managedDefaultTarget: request.target }]) {
     expect((await submit(body, 'fixture-human')).status).toBe(400)
   }
   expect((await fetch(f.endpoint + '/workspaces/relocation/start', { headers: { Authorization: 'Bearer fixture-human' } })).status).toBe(405)

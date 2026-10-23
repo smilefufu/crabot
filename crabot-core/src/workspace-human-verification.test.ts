@@ -568,7 +568,7 @@ describe('MM owns the initial workspace migration job', () => {
       const { HttpClient, WorkspaceClient } = require('../../crabot-client/dist/index.js')
       const sdk = new WorkspaceClient(new HttpClient({ endpoint: `http://127.0.0.1:${f.port}/api`, token: () => 'fixture-human' }))
       for (const round of [1, 2]) {
-        const before = await catalog.snapshot(), request = { intent_id: randomUUID(), target: path.join(f.root, 'owned-success-' + round), expected_revision: before.revision, confirmed: true as const }
+        const before = await catalog.snapshot(), request = { intent_id: randomUUID(), target: round === 2 ? path.join(f.data, 'workspaces') : path.join(f.root, 'owned-success-' + round), expected_revision: before.revision, confirmed: true as const }
         const accepted = await sdk.startRelocation(request)
         expect(accepted).toEqual({ intent_id: request.intent_id, accepted: true })
         const job = f.manager.workspaceInitialJob

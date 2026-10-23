@@ -201,6 +201,7 @@ export async function beginWorkspaceRelocationIntent(options) {
   const dataIdentity = identity(ctx.dataRoot)
   if (!uuid(options.id) || !absolute(options.target) || !Number.isSafeInteger(options.expectedRevision) || options.expectedRevision < 1
     || !Array.isArray(options.protectedRoots) || options.protectedRoots.some(root => !absolute(root))
+    || options.managedDefaultTarget !== undefined && !absolute(options.managedDefaultTarget)
     || options.protectedTargets !== undefined && (!Array.isArray(options.protectedTargets) || options.protectedTargets.some(root => !absolute(root)))) fail()
   const { readVersionMaintenance } = await import('./version-maintenance.mjs')
   if (!operationToken || cliLockToken(path.join(ctx.dataRoot, 'cli.lock')) !== operationToken || !same(dataIdentity, identity(ctx.dataRoot))) fail()
@@ -219,7 +220,7 @@ export async function beginWorkspaceRelocationIntent(options) {
   if (snapshot.revision !== options.expectedRevision) fail('WORKSPACE_REVISION_CONFLICT')
   const baseControlIdentity = identity(ctx.baseControl)
   const preview = await inspectWorkspaceRelocationTarget(snapshot.storage_root, requestedTarget,
-    { protectedRoots: [...options.protectedRoots, ctx.baseControl], protectedTargets: options.protectedTargets, inspectTargetAccess: native.inspectDirectoryWriteAccess })
+    { protectedRoots: [...options.protectedRoots, ctx.baseControl], protectedTargets: options.protectedTargets, managedDefaultTarget: options.managedDefaultTarget, inspectTargetAccess: native.inspectDirectoryWriteAccess })
   if (process.env.WORKER_WORKSPACES_DIR !== storageRoot || storageRoot !== undefined && preview.mode !== 'unchanged') {
     throw new WorkspaceError('WORKSPACE_DIRECTORY_CONFLICT', '当前部署通过 WORKER_WORKSPACES_DIR 固定了工作区位置或预检期间环境发生变化；未停止任务或修改目录选择。')
   }

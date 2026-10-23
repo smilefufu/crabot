@@ -120,3 +120,48 @@ test('an unwritable target ancestor is rejected before tasks stop or a destinati
     assert.equal(await fs.readFile(path.join(f.source, 'kept'), 'utf8'), 'original')
   } finally { await fs.chmod(parent, 0o700) }
 })
+
+test('only the host fixed default target can return below protected data/program ancestors', async t => {
+  const f = await fixture(t), data = path.join(f.root, 'private-data'), target = path.join(data, 'workspaces')
+  await fs.mkdir(data)
+  const options = { ...f, protectedRoots: [path.join(data, 'workspace-control')], protectedTargets: [data, f.root], managedDefaultTarget: target }
+  const preview = await inspectWorkspaceRelocationTarget(f.source, target, options)
+  assert.equal(preview.mode, 'rename'); assert.equal(preview.target, target)
+  for (const denied of [data, path.join(data, 'agent'), path.join(target, 'child'), f.root]) {
+    await assert.rejects(inspectWorkspaceRelocationTarget(f.source, denied, options), { code: 'WORKSPACE_INVALID_REQUEST' })
+  }
+  await assert.rejects(inspectWorkspaceRelocationTarget(f.source, target, { ...options, protectedRoots: [path.join(target, 'actual-state')] }), { code: 'WORKSPACE_INVALID_REQUEST' })
+  await assert.rejects(inspectWorkspaceRelocationTarget(f.source, target, { ...options, protectedTargets: [target] }), { code: 'WORKSPACE_INVALID_REQUEST' })
+  await assert.rejects(inspectWorkspaceRelocationTarget(f.source, target, { ...options, protectedTargets: [path.join(target, 'program')] }), { code: 'WORKSPACE_INVALID_REQUEST' })
+  await assert.rejects(fs.stat(target), { code: 'ENOENT' })
+  assert.equal(await fs.readFile(path.join(f.source, 'kept'), 'utf8'), 'original')
+})
+test('the host default exception uses the exact canonical result and rejects a redirected default directory', async t => {
+  const f = await fixture(t), data = path.join(f.root, 'private-data'), target = path.join(data, 'workspaces'), alias = path.join(f.root, 'data-alias')
+  await fs.mkdir(data)
+  const options = { ...f, protectedTargets: [data], managedDefaultTarget: target }
+  await fs.symlink(data, alias, process.platform === 'win32' ? 'junction' : 'dir')
+  assert.equal((await inspectWorkspaceRelocationTarget(f.source, path.join(alias, 'workspaces'), options)).target, target)
+  const privateState = path.join(data, 'actual-state'); await fs.mkdir(privateState)
+  await fs.symlink(privateState, target, process.platform === 'win32' ? 'junction' : 'dir')
+  await assert.rejects(inspectWorkspaceRelocationTarget(f.source, target, options), { code: 'WORKSPACE_INVALID_REQUEST' })
+  assert.deepEqual(await fs.readdir(privateState), [])
+})
+
+test('a default path replaced by a link between initial stat and canonicalization never exempts private state', async t => {
+  const f = await fixture(t), data = path.join(f.root, 'private-data'), target = path.join(data, 'workspaces'), privateState = path.join(data, 'actual-state')
+  await fs.mkdir(data); await fs.mkdir(privateState)
+  const original = fs.lstat.bind(fs); let changed = false
+  t.mock.method(fs, 'lstat', async (...args: any[]) => {
+    try { return await original(...args as Parameters<typeof fs.lstat>) }
+    catch (error) {
+      if (!changed && args[0] === target && (error as NodeJS.ErrnoException).code === 'ENOENT') {
+        changed = true; await fs.symlink(privateState, target, process.platform === 'win32' ? 'junction' : 'dir')
+      }
+      throw error
+    }
+  })
+  await assert.rejects(inspectWorkspaceRelocationTarget(f.source, target, { ...f, protectedTargets: [data], managedDefaultTarget: target }), { code: 'WORKSPACE_INVALID_REQUEST' })
+  assert.equal(changed, true); assert.deepEqual(await fs.readdir(privateState), [])
+  assert.equal(await fs.readFile(path.join(f.source, 'kept'), 'utf8'), 'original')
+})

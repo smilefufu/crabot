@@ -6,7 +6,7 @@ const installation = require('./desktop-installation.cjs')
 function workspaceRelocationTargetPolicy(dataDir) {
   const dataRoot = fs.realpathSync.native(dataDir), coreRoot = fs.realpathSync.native(path.resolve(__dirname, '../..'))
   const desktop = installation.locateDesktopCore(coreRoot)
-  return { protectedRoots: [path.join(dataRoot, 'workspace-control')],
+  return { managedDefaultTarget: path.join(dataRoot, 'workspaces'), protectedRoots: [path.join(dataRoot, 'workspace-control')],
     protectedTargets: [dataRoot, coreRoot, ...(desktop ? ['app', 'releases', 'bin'].map(name => path.join(desktop.root, name)) : [])] }
 }
 module.exports = { workspaceRelocationTargetPolicy }

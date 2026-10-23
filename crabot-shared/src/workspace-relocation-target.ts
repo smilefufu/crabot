@@ -27,11 +27,12 @@ async function assertEmpty(directory: string): Promise<void> {
 }
 
 /** Host-supplied private roots are exclusions, never caller-granted permissions. A preview does not authorize stopping or moving. */
-export async function inspectWorkspaceRelocationTarget(source: string, target: string, options: { protectedRoots: readonly string[]; protectedTargets?: readonly string[]; inspectTargetAccess?: (directory: string) => boolean; signal?: AbortSignal }) {
+export async function inspectWorkspaceRelocationTarget(source: string, target: string, options: { protectedRoots: readonly string[]; protectedTargets?: readonly string[]; managedDefaultTarget?: string; inspectTargetAccess?: (directory: string) => boolean; signal?: AbortSignal }) {
   const check = () => { if (options.signal?.aborted) throw new WorkspaceError('WORKSPACE_SCAN_CANCELLED', '工作区预检已取消，原目录保留。') }
   const validPath = (value: string) => { if (typeof value !== 'string' || !path.isAbsolute(value) || value.includes('\0')) throw invalid(); return path.resolve(value) }
   check()
   source = validPath(source); target = validPath(target)
+  const managedDefault = options.managedDefaultTarget === undefined ? undefined : validPath(options.managedDefaultTarget)
   const original = await fs.lstat(source, { bigint: true })
   if (!original.isDirectory() || original.isSymbolicLink() || !original.ino || await fs.realpath(source) !== source) throw invalid()
   const selected = await optionalStat(target)
@@ -45,7 +46,7 @@ export async function inspectWorkspaceRelocationTarget(source: string, target: s
   }
   for (const root of options.protectedTargets ?? []) {
     const protectedTarget = await canonicalLocation(validPath(root))
-    if (within(protectedTarget, target) || within(target, protectedTarget)) throw invalid()
+    if (within(target, protectedTarget) || (within(protectedTarget, target) && target !== managedDefault)) throw invalid()
   }
   if (selected) await assertEmpty(target)
   let parent = selected ? target : path.dirname(target), parentStat = await optionalStat(parent)
