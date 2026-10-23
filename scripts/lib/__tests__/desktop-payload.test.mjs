@@ -465,3 +465,44 @@ test('actual GUI controller runs one scoped Node conversion and commits the stop
   await assert.rejects(fs.stat(current.dataDir + '.desktop-backups'), { code: 'ENOENT' })
   await assert.rejects(fs.stat(path.join(current.dataDir, 'mm.pid')), { code: 'ENOENT' })
 })
+
+test('signed complete release intake reaches actual online preparation without stopping or migrating the old instance', { skip: !process.env.CRABOT_TEST_PYTHON }, async t => {
+  const f = await fixture(t, { schema: 'v1' }), next = await fixture(t, { version: '1.2.4', schema: 'v2' })
+  const installed = await prepareDesktopInstallation({ payload: f.payload, installRoot: f.target }), selected = await commitDesktopInstallation(installed)
+  await fs.mkdir(path.join(selected.dataDir, 'fixture'))
+  await fs.writeFile(path.join(selected.dataDir, 'fixture/SCHEMA_VERSION'), 'v1')
+  await fs.writeFile(path.join(selected.dataDir, 'fixture/content'), 'USER DATA')
+  await fs.writeFile(path.join(selected.dataDir, 'mm.pid'), String(process.pid))
+  const { generateKeyPairSync } = await import('node:crypto'), keys = generateKeyPairSync('ed25519')
+  const require = createRequire(new URL('../../../crabot-admin/package.json', import.meta.url)), AdmZip = require('adm-zip'), zip = new AdmZip()
+  async function add(directory) {
+    for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
+      const file = path.join(directory, entry.name)
+      if (entry.isDirectory()) await add(file)
+      else zip.addFile(path.relative(next.payload, file).split(path.sep).join('/'), await fs.readFile(file), '', (await fs.stat(file)).mode)
+    }
+  }
+  await add(next.payload)
+  const bytes = zip.toBuffer(), artifact = path.join(next.parent, 'Crabot.zip'); await fs.writeFile(artifact, bytes, { mode: 0o600 })
+  const { signDesktopReleaseManifest } = await import('../../desktop/sign-release.mjs')
+  const signed = signDesktopReleaseManifest({ schema_version: 1, app_id: 'com.crabot.desktop', platform: process.platform, arch: process.arch,
+    selection: next.selection, artifact: { file: 'Crabot.zip', size: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') } },
+  [keys.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString()])
+  const { createDesktopReleaseIntake } = await import('../../../crabot-desktop/dist/release-intake.js')
+  const { prepareDesktopPair } = await import('../desktop-pair-preparation.mjs')
+  const intake = createDesktopReleaseIntake({ pinnedPublicKeys: [keys.publicKey.export({ type: 'spki', format: 'pem' }).toString()],
+    python: process.env.CRABOT_TEST_PYTHON, cacheRoot: path.join(f.target, 'data/signed-cache'), verifyPayload: verifyDesktopPayload, preparePair: prepareDesktopPair })
+  const staged = await intake.stage({ manifestBytes: signed.manifest, signatureBytes: signed.signatures, artifact,
+    context: { platform: process.platform, arch: process.arch, purpose: 'update', currentVersion: f.selection.version } })
+  const prepared = await intake.prepare(staged, { installRoot: f.target })
+  assert.deepEqual(prepared.source, f.selection); assert.deepEqual(prepared.selection, next.selection)
+  assert.equal(prepared.coreRoot, path.join(f.target, 'releases', next.selection.core_id))
+  assert.equal(prepared.guiRoot, path.join(f.target, 'app/releases', next.selection.gui_id))
+  assert.equal(prepared.preview.modules[0].moduleId, 'crabot-fixture')
+  assert.deepEqual(installation.readDesktopSelection(f.target).selection, f.selection)
+  assert.equal(await fs.readFile(path.join(selected.dataDir, 'mm.pid'), 'utf8'), String(process.pid))
+  assert.equal(await fs.readFile(path.join(selected.dataDir, 'fixture/content'), 'utf8'), 'USER DATA')
+  assert.equal(await fs.readFile(path.join(selected.dataDir, 'fixture/SCHEMA_VERSION'), 'utf8'), 'v1')
+  for (const name of ['desktop-maintenance.json', '.upgrade-migrations']) await assert.rejects(fs.lstat(path.join(selected.dataDir, name)), { code: 'ENOENT' })
+  await intake.discard(staged)
+})

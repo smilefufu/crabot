@@ -41,7 +41,7 @@ test('download bytes are rechecked before installation; changed files, lengths a
 
 test('complete-pair release failures retain specific safe update feedback', () => {
   for (const [code, expected] of [['CRABOT_DESKTOP_RELEASE_SIGNATURE', 'signature'], ['CRABOT_DESKTOP_RELEASE_INTEGRITY', 'integrity'],
-    ['CRABOT_DESKTOP_RELEASE_METADATA', 'metadata'], ['CRABOT_DESKTOP_RELEASE_VERSION', 'metadata']]) {
+    ['CRABOT_CORE_INTEGRITY', 'integrity'], ['CRABOT_DESKTOP_RELEASE_METADATA', 'metadata'], ['CRABOT_DESKTOP_RELEASE_VERSION', 'metadata']]) {
     assert.equal(updateFailure(Object.assign(new Error('private-url-secret'), { code })), expected)
   }
 })
