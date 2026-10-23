@@ -22,6 +22,7 @@ on:
       - 'scripts/lib/owned-process-tree.cjs'
       - 'scripts/lib/process-identity.cjs'
       - 'scripts/lib/__tests__/owned-process-tree.test.mjs'
+      - 'scripts/lib/__tests__/process-identity.test.mjs'
       - 'crabot-native/**'
       - 'crabot-shared/src/workspace*'
       - '.github/scripts/native-project-cli-acceptance.mjs'
@@ -47,6 +48,7 @@ on:
       - 'scripts/lib/owned-process-tree.cjs'
       - 'scripts/lib/process-identity.cjs'
       - 'scripts/lib/__tests__/owned-process-tree.test.mjs'
+      - 'scripts/lib/__tests__/process-identity.test.mjs'
       - 'crabot-native/**'
       - 'crabot-shared/src/workspace*'
       - '.github/scripts/native-project-cli-acceptance.mjs'
@@ -103,7 +105,7 @@ jobs:
       - name: Atomic single-link file finalization primitive
         run: node --test scripts/lib/__tests__/file-move.test.mjs
       - name: Native owned process scope regressions
-        run: node --test scripts/lib/__tests__/owned-process-tree.test.mjs scripts/lib/__tests__/spawned-process-tree.test.mjs
+        run: node --test scripts/lib/__tests__/process-identity.test.mjs scripts/lib/__tests__/owned-process-tree.test.mjs scripts/lib/__tests__/spawned-process-tree.test.mjs
       - name: Actual finite source host tool regressions
         working-directory: crabot-agent
         run: node node_modules/vitest/vitest.mjs run tests/engine/tools/glob-tool.test.ts tests/engine/tools/grep-tool.test.ts tests/engine/local-host-tool-executor.test.ts --maxWorkers=1 --minWorkers=1
