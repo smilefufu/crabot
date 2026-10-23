@@ -47,7 +47,7 @@ function observeActualAdminRecoveryRpc(callsFile: string): string {
   })();`
 }
 
-async function fixture(options: { withMemory?: boolean; inactiveMemory?: boolean; wrongRuntime?: boolean; result?: string; withAgent?: boolean; agentResult?: string; actualAgent?: boolean; businessAgent?: boolean; businessMemory?: boolean; processLifetimeMs?: number; backgroundShell?: boolean; validationHealth?: 'healthy' | 'unhealthy'; validationRuntimeMismatch?: boolean; validationRootOverride?: boolean; validationRegistration?: 'delayed' | 'exit'; memoryHealth?: 'healthy' | 'degraded'; memoryBootstrap?: boolean; actualAdmin?: boolean; adminReadyDelayMs?: number; quiesceResult?: string; orphanDuringStop?: boolean; extraModule?: 'running' | 'inactive' | 'tool'; historyWorkspace?: boolean } = {}) {
+async function fixture(options: { withMemory?: boolean; inactiveMemory?: boolean; wrongRuntime?: boolean; result?: string; withAgent?: boolean; agentResult?: string; actualAgent?: boolean; businessAgent?: boolean; businessMemory?: boolean; processLifetimeMs?: number; backgroundShell?: boolean; validationHealth?: 'healthy' | 'unhealthy'; validationServerReadyDelayMs?: number; validationRuntimeMismatch?: boolean; validationRootOverride?: boolean; validationRegistration?: 'delayed' | 'exit'; memoryHealth?: 'healthy' | 'degraded'; memoryBootstrap?: boolean; actualAdmin?: boolean; adminReadyDelayMs?: number; quiesceResult?: string; orphanDuringStop?: boolean; extraModule?: 'running' | 'inactive' | 'tool'; historyWorkspace?: boolean } = {}) {
   if ((options.businessAgent || options.businessMemory) && (process.env.GITHUB_ACTIONS !== 'true' || process.env.CRABOT_WORKSPACE_BUSINESS_ONSTART_CI !== '1')) throw new Error('Business onStart is isolated CI only')
   const root = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'crabot-current-admin-')))
   const native = require('../../scripts/lib/process-identity.cjs'), management = require('../../scripts/lib/desktop-management.cjs')
@@ -218,15 +218,18 @@ async function fixture(options: { withMemory?: boolean; inactiveMemory?: boolean
               const ready=${JSON.stringify(path.join(data, 'background-program.json'))},end=Date.now()+8000;while(!fs.existsSync(ready)){if(Date.now()>=end)throw new Error('finite background program did not start');await new Promise(resolve=>setTimeout(resolve,20));}
             }
             const at='2026-10-20T00:00:00.000Z';if(!(await agent.managerStack.ledger.listAllWorkers()).some(item=>item.worker.worker_id==='worker'))await agent.managerStack.ledger.upsertWorker('channel::session','worker',()=>({worker_id:'worker',manager_key:'channel::session',task:{id:'task',title:'private task',status:'running',created_at:at},origin:{trigger_type:'message',creator_friend_id:'unchanged'},report_to:{channel_id:'channel',session_id:'session'},incarnations:[{incarnation_id:'inc',impl:'builtin',seq:1,state:${JSON.stringify(options.backgroundShell ? 'idle' : 'running')},workspace:process.env.FIXTURE_WORKSPACE,session_ref:'fixture',started_at:at}],updated_at:at}));
-            server.listen(Number(process.env.Crabot_PORT),'127.0.0.1',()=>{fs.writeFileSync(process.env.FIXTURE_READY,'ready');
-              if(${JSON.stringify(options.validationRegistration ?? null)}&&fs.existsSync(selected))setTimeout(async()=>{
-                if(${JSON.stringify(options.validationRegistration ?? null)}==='exit')return
+            if(fs.existsSync(selected))await new Promise(resolve=>setTimeout(resolve,${options.validationServerReadyDelayMs ?? 0}));
+            server.listen(Number(process.env.Crabot_PORT),'127.0.0.1',async()=>{
+              if(${!!options.validationHealth}) {
+                if(fs.existsSync(selected)&&${JSON.stringify(options.validationRegistration ?? null)}==='exit'){fs.writeFileSync(process.env.FIXTURE_READY,'ready');return}
+                if(fs.existsSync(selected)&&${JSON.stringify(options.validationRegistration ?? null)}==='delayed')await new Promise(resolve=>setTimeout(resolve,300));
                 try{const response=await fetch('http://127.0.0.1:'+process.env.CRABOT_MM_PORT+'/register_core_agent',{method:'POST',
                   headers:{'Content-Type':'application/json',Authorization:'Bearer '+require(${JSON.stringify(path.resolve('../crabot-agent/dist/core/config-loader.js'))}).ConfigLoader.getRuntimeBearer()},
                   body:JSON.stringify({id:require('node:crypto').randomUUID(),source:'crabot-agent',method:'register_core_agent',params:{module_id:'crabot-agent',module_type:'agent',version:'0.1.0',protocol_version:'3.4.0',port:Number(process.env.Crabot_PORT),subscriptions:[]}})});
                   if(!(await response.json()).success)throw new Error('Finite Agent registration failed')
-                }catch(error){console.error(error);process.exit(1)}
-              },300)
+                }catch(error){console.error(error);process.exit(1);return}
+              }
+              fs.writeFileSync(process.env.FIXTURE_READY,'ready');
             })})().catch(error=>{console.error(error);process.exit(1)});
           setTimeout(()=>process.exit(0),${options.processLifetimeMs ?? 30000}).unref();}`)
       }
@@ -238,9 +241,9 @@ async function fixture(options: { withMemory?: boolean; inactiveMemory?: boolean
         env: { FIXTURE_CALLS: path.join(data, 'agent-calls.json'), FIXTURE_READY: agentReady, FIXTURE_RESULT: options.agentResult ?? '',
           DATA_DIR: data, CRABOT_AGENT_DATA_DIR: path.join(data, 'agent'), ...(options.validationRootOverride ? { WORKER_WORKSPACES_DIR: path.join(data, 'workspaces') } : {}), FIXTURE_WORKSPACE: options.historyWorkspace ? path.join(data, 'workspaces/default/tasks/worker') : path.join(data, 'project'), FIXTURE_STOPS: path.join(data, 'stops.txt'),
           ...(options.backgroundShell ? { FIXTURE_BG_COMMAND: `"${process.execPath.replaceAll('\\', '/')}" "${path.join(data, 'finite-background.cjs').replaceAll('\\', '/')}"`, FIXTURE_BG_READY: path.join(data, 'background-ready.json'), ...(options.orphanDuringStop ? { FIXTURE_ORPHAN_READY: path.join(data, 'orphan-ready.json') } : {}) } : {}) },
-        port: (agentPort.address() as { port: number }).port, auto_start: false, auto_restart: false, skip_health_check: true, start_priority: 1, status: 'stopped' }
+        port: (agentPort.address() as { port: number }).port, auto_start: false, auto_restart: false, skip_health_check: !options.validationHealth, start_priority: 1, status: 'stopped' }
       await new Promise<void>(resolve => agentPort.close(() => resolve()))
-      if (options.validationRegistration || options.businessAgent) {
+      if (options.validationHealth || options.validationRegistration || options.businessAgent) {
         await fs.writeFile(path.join(data, 'port-allocations.json'), JSON.stringify([{ module_id: 'crabot-agent', port: agent.port, allocated_at: new Date().toISOString() }]))
         await manager.portAllocator.initialize()
       }
@@ -2222,6 +2225,16 @@ describe('MM checks the new runtime health and Root under the original job', () 
 
 
 describe('normal fixed-job Admin completion preparation', () => {
+  it('uses the actual finite validation listener after a delayed child boot', async () => {
+    const f = await fixture({ actualAgent: true, actualAdmin: true, validationHealth: 'healthy', validationServerReadyDelayMs: 4000, processLifetimeMs: 180000 })
+    const locks = require('../../scripts/lib/cli-lock.mjs'), lock = await locks.acquireWorkspaceRelocationLock(f.data, f.params.intent_id)
+    try {
+      const prepared = await f.manager.prepareWorkspaceRelocationCompletion(f.params, 'fixture-human')
+      expect(prepared.prepared).toBe(true)
+      expect(require('../../scripts/lib/workspace-maintenance.cjs').workspaceMaintenancePending(f.data)).toBe(true)
+    } finally { locks.releaseCliLock(lock); await f.cleanup() }
+  }, process.platform === 'win32' ? 600000 : 120000)
+
   it('requires current human approval and the current Admin for a new protected recovery admission', async () => {
     const f = await fixture({ actualAgent: true, actualAdmin: true, validationHealth: 'healthy', processLifetimeMs: 300000 })
     const locks = require('../../scripts/lib/cli-lock.mjs'), records = require('../../scripts/lib/workspace-relocation-intent.mjs')
