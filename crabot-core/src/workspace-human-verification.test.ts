@@ -3228,6 +3228,9 @@ describe('normal fixed-job Admin completion preparation', () => {
           expect(windows.some(item => item.reads > 0)).toBe(true)
         })
         expect(Math.max(...windows.map(item => item.reads))).toBeLessThanOrEqual(1400)
+        const successfulReads = windows.filter(item => item.reads > 0)
+        expect(successfulReads.length).toBeGreaterThan(1)
+        expect(Math.max(...successfulReads.slice(1).map(item => item.reads))).toBeLessThanOrEqual(320)
         let reads = 0, verifies = 0
         const originalRead = syncFs.readFileSync, originalSend = coordinator.child.send.bind(coordinator.child)
         const counting = vi.spyOn(syncFs, 'readFileSync').mockImplementation(((file: any, ...args: any[]) => {

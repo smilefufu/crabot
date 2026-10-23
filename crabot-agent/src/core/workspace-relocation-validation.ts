@@ -136,7 +136,7 @@ export function createWorkspaceRecoveryRootVerifier(options: Options) {
       const result: VerifyWorkspaceRelocationRecoveryRootResult = Object.freeze({ verified: true, ...request,
         launch_sha256: sha256CanonicalJson(state.coordinator.launch), plan_sha256: sha256CanonicalJson(state.plan),
         root_selected_sha256: state.plan.root_selected_sha256, instance_id: identity.instance_id, module_id: 'crabot-agent', runtime_id: identity.runtime_id })
-      const assertCurrent = () => {
+      const assertCurrent = () => graph.observeWorkspaceRelocationRecords(() => {
         if (process.env.WORKER_WORKSPACES_DIR !== workspaceRootOverride || options.isClosing() || options.runtimeBearer() !== token
           || sha256CanonicalJson(options.runtimeIdentity()) !== sha256CanonicalJson(identity) || sha256CanonicalJson(read()) !== snapshot
           || !native.sameProcess(self, native.inspectProcess(process.pid))) throw unavailable()
@@ -155,7 +155,7 @@ export function createWorkspaceRecoveryRootVerifier(options: Options) {
           const actual = native.inspectProcess(item.pid)
           return !native.sameProcess(item, actual) || actual.parent !== item.parent
         })) throw unavailable()
-      }
+      })
       const verify = async () => {
         assertCurrent()
         stage = 'catalog'
