@@ -17,7 +17,7 @@ interface Options {
 }
 
 /** Read the current Admin's own durable root; a caller cannot choose the parent PID. */
-function currentParent(options: Options) {
+export function observeCurrentWorkspaceAdmin(options: Options) {
   const data = management.requirePrivateDataRoot(options.dataDir), runtime = { ...options.runtimeIdentity() }, self = native.inspectProcess(process.pid)
   if (!self || runtime.module_id !== 'admin-web' || !runtime.instance_id || !runtime.runtime_id
     || !/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(runtime.runtime_id)) throw unavailable()
@@ -72,7 +72,7 @@ export async function verifyWorkspaceRecoveryAdmin(options: Options, params: Ver
   try { scope = readWorkspaceRecoveryAdmissionScope(options.dataDir, params) }
   catch (error) { if ((error as { code?: string }).code === 'INVALID_PARAMS') throw new RpcError('INVALID_PARAMS', 'Invalid recovery admission parameters'); throw unavailable() }
   try {
-    const actor = currentParent(options)
+    const actor = observeCurrentWorkspaceAdmin(options)
     const expected = { verified: true as const, ...scope.request, instance_id: actor.runtime.instance_id!, admin_runtime_id: actor.runtime.runtime_id!, mm_sha256: sha256CanonicalJson(actor.parent) }
     if (expected.instance_id !== scope.state.health.root_proof.instance_id) throw unavailable()
     const verify = () => {

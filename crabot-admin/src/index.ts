@@ -1,6 +1,7 @@
 import { verifyWorkspaceRecoveryAdmin } from './workspace-recovery-auth.js'
 import { assertWorkspaceExecutionAllowed } from 'crabot-shared'
 import { createWorkspaceFinalizationWeb } from './workspace-finalization-web.js'
+import { createWorkspaceRecoveryFinalizationWeb } from './workspace-recovery-finalization-web.js'
 import { parseFriendPermissionRecords, serializeFriendPermissionRecords } from './friend-permission-store.js'
 import { WorkspaceExecutionInventorySchema, WorkspaceIdSchema } from 'crabot-client'
 import { WorkspaceService } from './workspaces.js'
@@ -721,6 +722,7 @@ export class AdminModule extends ModuleBase {
   private channelManager: ChannelManager
   private workspaceService: WorkspaceService
   private workspaceFinalizationWeb?: ReturnType<typeof createWorkspaceFinalizationWeb>
+  private workspaceRecoveryFinalizationWeb?: ReturnType<typeof createWorkspaceRecoveryFinalizationWeb>
   private workspaceWebAdmissions?: WorkspaceWebAdmissions
   private voiceAdmin: VoiceAdmin
 
@@ -1025,6 +1027,7 @@ export class AdminModule extends ModuleBase {
     this.registerMethod('verify_workspace_relocation_request', this.handleVerifyWorkspaceRelocationRequest.bind(this))
     this.registerMethod('quiesce_workspace_relocation_web', this.handleQuiesceWorkspaceRelocationWeb.bind(this))
     this.registerMethod('prepare_workspace_relocation_completion', (params, context) => this.workspaceFinalizationAccess().prepare(params, context?.authorizationBearer))
+    this.registerMethod('prepare_workspace_relocation_recovery_completion', (params, context) => this.workspaceRecoveryFinalizationAccess().prepare(params, context?.authorizationBearer))
     this.registerMethod('resume_workspace_relocation_web', (params, context) => this.workspaceFinalizationAccess().resume(params, context?.authorizationBearer))
 
     // Schedule 管理
@@ -1703,6 +1706,13 @@ export class AdminModule extends ModuleBase {
         assertWorkspaceExecutionAllowed(path.resolve(this.adminConfig.data_dir, '..'))
         this.workspaceService.resumeScanning(); this.workspaceWebAccess().reopen()
       } })
+  }
+
+  private workspaceRecoveryFinalizationAccess(): ReturnType<typeof createWorkspaceRecoveryFinalizationWeb> {
+    return this.workspaceRecoveryFinalizationWeb ??= createWorkspaceRecoveryFinalizationWeb({ dataDir: path.resolve(this.adminConfig.data_dir, '..'),
+      moduleManagerPort: this.rpcClient.moduleManagerTargetPort, modulePort: this.config.port,
+      runtimeIdentity: () => ({ instance_id: process.env.CRABOT_INSTANCE_ID, module_id: this.config.moduleId, runtime_id: process.env.CRABOT_MODULE_RUNTIME_ID }),
+      quiesce: () => this.quiesceWorkspaceWebAccess() })
   }
 
   private workspaceWebAccess(): WorkspaceWebAdmissions {

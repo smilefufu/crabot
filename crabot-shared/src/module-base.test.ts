@@ -21,6 +21,7 @@ const SENSITIVE_METHODS: SensitiveRpcMethod[] = [
   'verify_workspace_relocation_request', 'quiesce_workspace_relocation_web',
   'verify_workspace_relocation_recovery_request', 'verify_workspace_relocation_recovery_admission', 'verify_workspace_relocation_finalization', 'prepare_workspace_relocation_completion', 'resume_workspace_relocation_web',
   'verify_workspace_relocation_recovery_runtime', 'verify_workspace_relocation_recovery_root',
+  'verify_workspace_relocation_recovery_finalization', 'prepare_workspace_relocation_recovery_completion',
   'verify_workspace_relocation_runtime', 'verify_workspace_relocation_root', 'verify_workspace_relocation_coordinator',
   'capture_workspace_relocation_processes', 'capture_workspace_relocation_workers', 'stop_workspace_relocation_workers',
   'prepare_workspace_relocation_worker_stops', 'complete_workspace_relocation_worker_stops',
@@ -125,7 +126,7 @@ test('ordinary call rejects a sensitive method before network I/O or trace creat
 
 test('workspace relocation RPCs cannot use ordinary traced transport', async () => {
   const client = new RpcClient(), trace = { startSpan: () => { throw new Error('trace must not start') }, endSpan: () => {} }
-  for (const method of ['verify_workspace_relocation_recovery_runtime', 'verify_workspace_relocation_recovery_root', 'verify_workspace_relocation_recovery_request', 'verify_workspace_relocation_recovery_admission', 'verify_workspace_relocation_finalization', 'prepare_workspace_relocation_completion', 'resume_workspace_relocation_web', 'verify_workspace_relocation_request', 'quiesce_workspace_relocation_web', 'verify_workspace_relocation_coordinator', 'capture_workspace_relocation_processes', 'capture_workspace_relocation_workers', 'stop_workspace_relocation_workers', 'prepare_workspace_relocation_worker_stops', 'complete_workspace_relocation_worker_stops']) await assert.rejects(client.call(1, method, { intent_id: 'fixed' }, 'forged-source', {
+  for (const method of ['verify_workspace_relocation_recovery_finalization', 'prepare_workspace_relocation_recovery_completion', 'verify_workspace_relocation_recovery_runtime', 'verify_workspace_relocation_recovery_root', 'verify_workspace_relocation_recovery_request', 'verify_workspace_relocation_recovery_admission', 'verify_workspace_relocation_finalization', 'prepare_workspace_relocation_completion', 'resume_workspace_relocation_web', 'verify_workspace_relocation_request', 'quiesce_workspace_relocation_web', 'verify_workspace_relocation_coordinator', 'capture_workspace_relocation_processes', 'capture_workspace_relocation_workers', 'stop_workspace_relocation_workers', 'prepare_workspace_relocation_worker_stops', 'complete_workspace_relocation_worker_stops']) await assert.rejects(client.call(1, method, { intent_id: 'fixed' }, 'forged-source', {
     traceStore: trace, traceId: 'fixture',
   }), (error: unknown) => (error as { code?: string }).code === 'SENSITIVE_RPC_REQUIRES_NO_TRACE_TRANSPORT')
 })

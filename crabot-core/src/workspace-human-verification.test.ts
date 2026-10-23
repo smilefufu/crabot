@@ -2566,6 +2566,47 @@ describe('normal fixed-job Admin completion preparation', () => {
       expect(health.root_verified).toEqual(proof)
       await health.verify()
       expect((await fs.stat(root, { bigint: true })).mtimeNs).toBe(probedAt)
+      if (mode === 'Agent') {
+        expect(typeof cold.prepareWorkspaceRecoveryCompletion).toBe('function')
+        const [prepared, concurrent] = await Promise.all([
+          cold.prepareWorkspaceRecoveryCompletion(request, 'fixture-human'),
+          cold.prepareWorkspaceRecoveryCompletion(request, 'fixture-human'),
+        ])
+        expect(concurrent).toBe(prepared)
+        const adminState = cold.childStates.get(cold.processes.get('admin-web'))
+        const expected = { ...request, launch_sha256: proof.launch_sha256, plan_sha256: proof.plan_sha256,
+          instance_id: proof.instance_id, admin_runtime_id: adminState.runtimeId }
+        expect(prepared).toEqual({ prepared: true, ...expected })
+        const grant = cold.workspaceRecoveryFinalizationGrant
+        const finalization = async (params: any, bearer?: string) => {
+          const response = await fetch(`http://127.0.0.1:${cold.config.port}/verify_workspace_relocation_recovery_finalization`, { method: 'POST',
+            headers: { 'Content-Type': 'application/json', ...(bearer ? { Authorization: 'Bearer ' + bearer } : {}) },
+            body: JSON.stringify({ id: randomUUID(), source: 'forged-source', method: 'verify_workspace_relocation_recovery_finalization', params }) })
+          return response.json()
+        }
+        expect(await finalization({ unexpected: true })).toMatchObject({ success: false, error: { code: 'UNAUTHORIZED' } })
+        expect(await finalization({ unexpected: true }, 'fixture-human')).toMatchObject({ success: false, error: { code: 'FORBIDDEN' } })
+        expect(await finalization({ action: 'prepare_web', unexpected: true }, grant.token)).toMatchObject({ success: false, error: { code: 'INVALID_PARAMS' } })
+        expect(await finalization({ action: 'resume_web' }, grant.token)).toMatchObject({ success: false, error: { code: 'FORBIDDEN' } })
+        expect(await finalization({ action: 'prepare_web' }, grant.token)).toMatchObject({ success: true, data: { verified: true, ...expected, action: 'prepare_web' } })
+        const calls = await f.calls()
+        expect(calls.filter((item: any) => item.method === '/prepare_workspace_relocation_recovery_completion')).toHaveLength(1)
+        expect(JSON.stringify(calls)).not.toContain(grant.token)
+        const callPrepare = async (params: any, bearer?: string) => {
+          const response = await fetch(`http://127.0.0.1:${f.port}/prepare_workspace_relocation_recovery_completion`, { method: 'POST',
+            headers: { 'Content-Type': 'application/json', ...(bearer ? { Authorization: 'Bearer ' + bearer } : {}) },
+            body: JSON.stringify({ id: randomUUID(), source: 'forged-source', method: 'prepare_workspace_relocation_recovery_completion', params }) })
+          return response.json()
+        }
+        expect(await callPrepare({ unexpected: true })).toMatchObject({ success: false, error: { code: 'UNAUTHORIZED' } })
+        expect(await callPrepare({ unexpected: true }, 'fixture-human')).toMatchObject({ success: false, error: { code: 'FORBIDDEN' } })
+        expect(await callPrepare({ ...request, unexpected: true }, grant.token)).toMatchObject({ success: false, error: { code: 'INVALID_PARAMS' } })
+        expect(await callPrepare({ ...request, recovery_id: randomUUID() }, grant.token)).toMatchObject({ success: false, error: { code: 'FORBIDDEN' } })
+        expect(await callPrepare(request, grant.token)).toMatchObject({ success: true, data: prepared })
+        expect(JSON.stringify(await f.calls())).not.toContain(grant.token)
+        expect((await fetch(`http://127.0.0.1:${f.port}/api/friends`, { headers: { Authorization: 'Bearer fixture-human' } })).status).toBe(200)
+        expect((await fetch(`http://127.0.0.1:${f.port}/api/chat`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer fixture-human' }, body: '{}' })).status).toBe(503)
+      }
       if (mode === 'completion observation' || mode === 'released without observation') {
         expect(typeof cold.beginWorkspaceRecoveryCompletionObservation).toBe('function')
         const admission = require('../../scripts/lib/workspace-recovery-admission.mjs'), native = require('../../scripts/lib/process-identity.cjs')
@@ -2627,6 +2668,12 @@ describe('normal fixed-job Admin completion preparation', () => {
       await expect(health.verify()).rejects.toBeDefined()
       admin.runtimeId = oldRuntimeId
       expect(await call(request, token)).toMatchObject({ success: false })
+      if (mode === 'Agent') {
+        const grant = cold.workspaceRecoveryFinalizationGrant
+        expect(() => cold.handleVerifyWorkspaceRelocationRecoveryFinalization({ action: 'prepare_web' }, { authorizationBearer: grant.token })).toThrow()
+        expect(grant.revoked).toBe(true)
+        await expect(cold.prepareWorkspaceRecoveryCompletion(request, 'fixture-human')).rejects.toBeDefined()
+      }
       await expect(started.verify()).rejects.toBeDefined()
       await expect(cold.startWorkspaceRecoveryValidationModules(request, 'fixture-human')).rejects.toBeDefined()
       expect((await cold.runtimeRegistry.listRecords()).filter((row: any) => row.module_id !== 'admin-web')).toEqual(rows)
@@ -3157,6 +3204,13 @@ describe.skipIf(process.env.GITHUB_ACTIONS !== 'true' || process.env.CRABOT_WORK
       }
       return identity
     }) : undefined
+    const handler = f.manager.methodHandlers.get('verify_workspace_relocation_runtime')
+    f.manager.methodHandlers.set('verify_workspace_relocation_runtime', async (...args: any[]) => {
+      const started = performance.now()
+      let verified = false
+      try { const result = await handler(...args); verified = true; return result }
+      finally { console.log('[Workspace business runtime verification]', { elapsed_ms: Math.round(performance.now() - started), verified }) }
+    })
     try {
       const result = await f.manager.verifyWorkspaceRelocationValidationHealth(f.params, 'fixture-human')
       expect(f.manager.processes.get('crabot-agent')).not.toBe(oldChild)

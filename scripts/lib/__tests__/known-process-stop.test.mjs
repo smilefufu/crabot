@@ -192,3 +192,28 @@ for (const mode of ['alive', 'unknown']) test('an uncertain native signal cannot
   assert.equal(requests.length, 1)
   assert.equal(probeKnownProcessExit(f.initial).state, 'running')
 })
+
+
+test('exhausted observation reports the bounded failing phase without copying native error text', async () => {
+  const self = { pid: process.pid, parent: 0, started: '1', owner: 'fixture-owner', executable: 'node' }
+  const root = { ...self, pid: process.pid + 1, parent: process.pid, started: '2' }
+  const calls = [], now = Date.now
+  let tick = 0
+  try {
+    Date.now = () => (tick++ === 0 ? 0 : 6000)
+    await assert.rejects(stopKnownProcessScope([root], { timeoutMs: 1, onObserved: async () => {},
+      graceful: async () => calls.push('graceful') }, {
+      inspectProcess: pid => pid === process.pid ? self : root,
+      captureProcessTreeGeneration: () => { throw Object.assign(new Error('private native detail'), { code: 'CRABOT_PROCESS_SCOPE', stage: 'pinned-refresh-parent' }) },
+      terminateKnownProcess: () => calls.push('signal'),
+    }), error => {
+      assert.equal(error.code, 'CRABOT_PROCESS_SCOPE_STOP')
+      assert.equal(error.stage, 'owned-tree')
+      assert.equal(error.observation_code, 'CRABOT_PROCESS_SCOPE')
+      assert.equal(error.observation_stage, 'pinned-refresh-parent')
+      assert.equal(JSON.stringify(error).includes('private native detail'), false)
+      return true
+    })
+    assert.deepEqual(calls, [])
+  } finally { Date.now = now }
+})

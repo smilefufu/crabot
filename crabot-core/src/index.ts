@@ -39,6 +39,9 @@ import {
   type VerifyWorkspaceRelocationRecoveryRuntimeParams,
   type VerifyWorkspaceRelocationRecoveryRuntimeResult,
   type VerifyWorkspaceRelocationRecoveryRootResult,
+  type VerifyWorkspaceRelocationRecoveryFinalizationParams,
+  type VerifyWorkspaceRelocationRecoveryFinalizationResult,
+  type PrepareWorkspaceRelocationRecoveryCompletionResult,
   type VerifyWorkspaceRelocationRecoveryAdmissionParams,
   type VerifyWorkspaceRelocationRecoveryAdmissionResult,
   type VerifyWorkspaceRelocationRecoveryRequestParams,
@@ -118,6 +121,13 @@ interface WorkspaceRecoveryValidationLaunch {
 interface WorkspaceRecoveryValidationHealth extends WorkspaceRecoveryValidationLaunch {
   healthy_modules: ReadonlyArray<{ module_id: ModuleId; runtime_id: string }>
   root_verified: VerifyWorkspaceRelocationRecoveryRootResult
+}
+interface WorkspaceRecoveryFinalizationGrant {
+  token: string
+  revoked: boolean
+  phase: 'preparing' | 'prepared'
+  job: Readonly<Omit<PrepareWorkspaceRelocationRecoveryCompletionResult, 'prepared'>>
+  verify: () => void
 }
 interface WorkspaceRecoveryInitialization {
   request: VerifyWorkspaceRelocationRecoveryRequestParams
@@ -305,6 +315,8 @@ export class ModuleManager {
   private readonly workspaceRecoveryValidationLaunches = new WeakMap<WorkspaceRecoveryCoordinator, Promise<WorkspaceRecoveryValidationLaunch>>()
   private readonly workspaceRecoveryValidationHealth = new WeakMap<WorkspaceRecoveryCoordinator, Promise<WorkspaceRecoveryValidationHealth>>()
   private readonly workspaceRecoveryCompletionObservations = new WeakMap<WorkspaceRecoveryCoordinator, Promise<WorkspaceRecoveryValidationHealth>>()
+  private readonly workspaceRecoveryCompletionPreparations = new WeakMap<WorkspaceRecoveryCoordinator, Promise<PrepareWorkspaceRelocationRecoveryCompletionResult>>()
+  private workspaceRecoveryFinalizationGrant?: WorkspaceRecoveryFinalizationGrant
   private workspaceRecoveryInitialization?: WorkspaceRecoveryInitialization
   private workspaceRecoveryInitializations = new Map<string, { fingerprint: string; bearerHash: string; pending: Promise<WorkspaceRecoveryCoordinator> }>()
   private workspaceRecoveryAdmission?: WorkspaceRecoveryAdmission
@@ -370,6 +382,7 @@ export class ModuleManager {
     this.registerMethod('verify_workspace_relocation_finalization', this.handleVerifyWorkspaceRelocationFinalization.bind(this))
     this.registerMethod('verify_workspace_relocation_runtime', this.handleVerifyWorkspaceRelocationRuntime.bind(this))
     this.registerMethod('verify_workspace_relocation_recovery_runtime', this.handleVerifyWorkspaceRelocationRecoveryRuntime.bind(this))
+    this.registerMethod('verify_workspace_relocation_recovery_finalization', this.handleVerifyWorkspaceRelocationRecoveryFinalization.bind(this))
     this.registerMethod('verify_workspace_relocation_coordinator', this.handleVerifyWorkspaceRelocationCoordinator.bind(this))
     this.registerMethod('prepare_workspace_relocation_worker_stops', this.handlePrepareWorkspaceRelocationWorkerStops.bind(this))
     this.registerMethod('complete_workspace_relocation_worker_stops', this.handleCompleteWorkspaceRelocationWorkerStops.bind(this))
@@ -2431,6 +2444,72 @@ export class ModuleManager {
     })
     this.workspaceRecoveryValidationLaunches.set(coordinator, pending)
     return pending
+  }
+
+  private async prepareWorkspaceRecoveryCompletion(request: VerifyWorkspaceRelocationRecoveryRequestParams, bearer?: string): Promise<PrepareWorkspaceRelocationRecoveryCompletionResult> {
+    request = Object.freeze({ ...request })
+    const coordinator = await this.initializeWorkspaceRelocationRecovery(request, bearer), previous = this.workspaceRecoveryCompletionPreparations.get(coordinator)
+    if (previous) {
+      const result = await previous, grant = this.workspaceRecoveryFinalizationGrant
+      if (!grant || grant.phase !== 'prepared' || grant.job.recovery_id !== request.recovery_id) throw Object.assign(new Error('Recovery preparation is not current'), { code: 'FORBIDDEN' })
+      grant.verify(); return result
+    }
+    const pending = Promise.resolve().then(async () => {
+      const failure = () => Object.assign(new Error('当前恢复完成准备尚未确认，原保护和业务维护已保留。'), { code: 'SERVICE_UNAVAILABLE' })
+      let grant: WorkspaceRecoveryFinalizationGrant | undefined
+      try {
+        const health = await this.verifyWorkspaceRecoveryValidationHealth(request, bearer), context = this.workspaceRecoveryInitialization
+        if (!context || context.coordinator !== coordinator) throw failure()
+        await health.verify(); health.assertCurrent()
+        const scope = require('../../scripts/lib/workspace-recovery-admission.mjs').readWorkspaceRecoveryAdmissionScope(this.dataDir, request)
+        const job = Object.freeze({ ...request, launch_sha256: health.root_verified.launch_sha256, plan_sha256: health.root_verified.plan_sha256,
+          instance_id: health.root_verified.instance_id, admin_runtime_id: context.result.admin_runtime_id })
+        if (job.instance_id !== context.result.instance_id) throw failure()
+        grant = { token: crypto.randomBytes(32).toString('base64url'), revoked: false, phase: 'preparing', job, verify: () => {
+          try {
+            if (this.workspaceRecoveryFinalizationGrant !== grant || grant!.revoked || this.workspaceRecoveryInitialization !== context
+              || context.coordinator !== coordinator || require('../../scripts/lib/workspace-recovery-admission.mjs').readWorkspaceRecoveryAdmissionScope(this.dataDir, request).fingerprint !== scope.fingerprint) throw failure()
+            health.assertCurrent()
+            const admin = this.processes.get('admin-web'), state = admin && this.childStates.get(admin)
+            if (!admin || !state || state.runtimeId !== job.admin_runtime_id || state.finalizeStarted || state.rootExited || state.termination || state.forceTermination
+              || !state.reachedRunning || this.modules.get('admin-web')?.status !== 'running' || admin.exitCode !== null || admin.signalCode !== null) throw failure()
+          } catch (cause) { grant!.revoked = true; coordinator.close(); throw Object.assign(failure(), { cause }) }
+        } }
+        if (this.workspaceRecoveryFinalizationGrant) this.workspaceRecoveryFinalizationGrant.revoked = true
+        this.workspaceRecoveryFinalizationGrant = grant; grant.verify()
+        const expected = Object.freeze({ prepared: true as const, ...job })
+        const response = await this.withCurrentAdminRpc(30000, async (rpc, verifyAdmin) => {
+          grant!.verify()
+          const result = await rpc.call('prepare_workspace_relocation_recovery_completion', request, { authorizationBearer: grant!.token })
+          await verifyAdmin(); await health.verify(); grant!.verify()
+          return result
+        })
+        if (sha256CanonicalJson(response) !== sha256CanonicalJson(expected)) throw failure()
+        grant.phase = 'prepared'; grant.verify()
+        return expected
+      } catch (cause) {
+        if (grant) grant.revoked = true
+        coordinator.close()
+        throw Object.assign(failure(), { cause })
+      }
+    })
+    this.workspaceRecoveryCompletionPreparations.set(coordinator, pending)
+    return pending
+  }
+
+  private handleVerifyWorkspaceRelocationRecoveryFinalization(
+    params: VerifyWorkspaceRelocationRecoveryFinalizationParams, context?: RpcHandlerContext,
+  ): VerifyWorkspaceRelocationRecoveryFinalizationResult {
+    const bearer = context?.authorizationBearer, grant = this.workspaceRecoveryFinalizationGrant
+    if (!bearer) throw Object.assign(new Error('Recovery completion credential required'), { code: 'UNAUTHORIZED' })
+    if (!grant || grant.revoked || Buffer.byteLength(bearer) !== Buffer.byteLength(grant.token)
+      || !crypto.timingSafeEqual(Buffer.from(bearer), Buffer.from(grant.token))) throw Object.assign(new Error('Recovery completion credential is not current'), { code: 'FORBIDDEN' })
+    grant.verify()
+    if (!params || typeof params !== 'object' || Array.isArray(params) || Object.keys(params).join() !== 'action'
+      || !['prepare_web', 'resume_web'].includes(params.action)) throw Object.assign(new Error('Invalid recovery completion action'), { code: 'INVALID_PARAMS' })
+    if (params.action !== 'prepare_web' || !['preparing', 'prepared'].includes(grant.phase)) throw Object.assign(new Error('Recovery completion action is not admitted'), { code: 'FORBIDDEN' })
+    grant.verify()
+    return { verified: true, ...grant.job, action: params.action }
   }
 
   /** Observe this one completion effect under the current role; this performs no file release. */

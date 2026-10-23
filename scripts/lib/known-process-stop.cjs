@@ -3,7 +3,12 @@ const native = require('./process-identity.cjs')
 const { captureOwnedProcessTree } = require('./owned-process-tree.cjs')
 const { probeKnownProcessExit } = require('./known-process-exit.cjs')
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms))
-const fail = () => { throw Object.assign(new Error('已知进程停止尚不能核实，保留维护保护。'), { code: 'CRABOT_PROCESS_SCOPE_STOP' }) }
+const fail = (stage, cause) => {
+  const fixed = (value, pattern) => typeof value === 'string' && value.length <= 128 && pattern.test(value) ? value : null
+  throw Object.assign(new Error('已知进程停止尚不能核实，保留维护保护。'), { code: 'CRABOT_PROCESS_SCOPE_STOP', ...(stage ? {
+    stage, observation_code: fixed(cause?.code, /^CRABOT_[A-Z_]+$/), observation_stage: fixed(cause?.stage, /^[a-z][a-z0-9-]*$/),
+  } : {}) })
+}
 const key = item => JSON.stringify([item.pid, item.started, item.owner])
 async function stopKnownProcessScope(initial, { timeoutMs, onObserved, graceful, submit }, api = native) {
   if (!Array.isArray(initial) || !initial.length && !submit || submit !== undefined && (typeof submit !== 'function' || graceful !== undefined) || !Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 2147483647
@@ -19,11 +24,14 @@ async function stopKnownProcessScope(initial, { timeoutMs, onObserved, graceful,
   }
   for (const item of initial) remember(item)
   const snapshot = () => Object.freeze([...known.values()].sort((a, b) => a.pid - b.pid || (a.started < b.started ? -1 : a.started > b.started ? 1 : 0)))
+  let observationStage = 'known-exit'
   function running() {
+    observationStage = 'known-exit'
     const report = probeKnownProcessExit(snapshot(), api)
     if (report.state === 'unknown') fail()
     return snapshot().filter(item => {
       if (!report.running_pids.includes(item.pid)) return false
+      observationStage = 'active-identity'
       const current = api.inspectProcess(item.pid)
       if (!current || current.pid !== item.pid || typeof current.started !== 'string' || !current.started
         || typeof current.owner !== 'string' || !current.owner || typeof current.executable !== 'string' || !current.executable) fail()
@@ -37,9 +45,10 @@ async function stopKnownProcessScope(initial, { timeoutMs, onObserved, graceful,
       let active
       try {
         active = running()
+        observationStage = 'owned-tree'
         if (active.length) for (const item of captureOwnedProcessTree(active, api)) remember(item)
-      } catch {
-        if (Date.now() >= observationEnd) fail()
+      } catch (error) {
+        if (Date.now() >= observationEnd) fail(observationStage, error)
         await delay(25)
         continue // Read-only uncertainty is bounded; no stop is submitted until it resolves.
       }

@@ -274,6 +274,34 @@ export interface VerifyWorkspaceRelocationRecoveryRuntimeResult {
 export type VerifyWorkspaceRelocationRecoveryRootParams = VerifyWorkspaceRelocationRecoveryRuntimeParams
 export type VerifyWorkspaceRelocationRecoveryRootResult = VerifyWorkspaceRelocationRecoveryRuntimeResult
 
+export interface VerifyWorkspaceRelocationRecoveryFinalizationParams {
+  action: WorkspaceRelocationFinalizationAction
+}
+export interface VerifyWorkspaceRelocationRecoveryFinalizationResult {
+  verified: true
+  intent_id: string
+  recovery_id: string
+  completion_sha256: string
+  finalizing_sha256: string
+  launch_sha256: string
+  plan_sha256: string
+  instance_id: string
+  admin_runtime_id: string
+  action: WorkspaceRelocationFinalizationAction
+}
+export type PrepareWorkspaceRelocationRecoveryCompletionParams = VerifyWorkspaceRelocationRecoveryRequestParams
+export interface PrepareWorkspaceRelocationRecoveryCompletionResult {
+  prepared: true
+  intent_id: string
+  recovery_id: string
+  completion_sha256: string
+  finalizing_sha256: string
+  launch_sha256: string
+  plan_sha256: string
+  instance_id: string
+  admin_runtime_id: string
+}
+
 export interface WorkspaceRecoveryRuntimeRegistration {
   schema_version: 1
   instance_id: string
