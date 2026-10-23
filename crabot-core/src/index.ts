@@ -38,6 +38,7 @@ import {
   type WorkspaceRecoveryRuntimePlan,
   type VerifyWorkspaceRelocationRecoveryRuntimeParams,
   type VerifyWorkspaceRelocationRecoveryRuntimeResult,
+  type VerifyWorkspaceRelocationRecoveryRootResult,
   type VerifyWorkspaceRelocationRecoveryAdmissionParams,
   type VerifyWorkspaceRelocationRecoveryAdmissionResult,
   type VerifyWorkspaceRelocationRecoveryRequestParams,
@@ -113,6 +114,10 @@ interface WorkspaceRecoveryValidationLaunch {
   modules: ReadonlyArray<{ module_id: ModuleId; runtime_id: string; process: WorkerProcessIdentity }>
   verify: () => Promise<void>
   assertCurrent: () => void
+}
+interface WorkspaceRecoveryValidationHealth extends WorkspaceRecoveryValidationLaunch {
+  healthy_modules: ReadonlyArray<{ module_id: ModuleId; runtime_id: string }>
+  root_verified: VerifyWorkspaceRelocationRecoveryRootResult
 }
 interface WorkspaceRecoveryInitialization {
   request: VerifyWorkspaceRelocationRecoveryRequestParams
@@ -296,6 +301,7 @@ export class ModuleManager {
   private readonly workspaceRecoveryRuntimePreparations = new WeakMap<WorkspaceRecoveryCoordinator, Promise<WorkspaceRecoveryRuntimePreparation>>()
   private readonly workspaceRecoveryRuntimeCleanups = new WeakMap<WorkspaceRecoveryCoordinator, Promise<WorkspaceRecoveryRuntimeCleanup>>()
   private readonly workspaceRecoveryValidationLaunches = new WeakMap<WorkspaceRecoveryCoordinator, Promise<WorkspaceRecoveryValidationLaunch>>()
+  private readonly workspaceRecoveryValidationHealth = new WeakMap<WorkspaceRecoveryCoordinator, Promise<WorkspaceRecoveryValidationHealth>>()
   private workspaceRecoveryInitialization?: WorkspaceRecoveryInitialization
   private workspaceRecoveryInitializations = new Map<string, { fingerprint: string; bearerHash: string; pending: Promise<WorkspaceRecoveryCoordinator> }>()
   private workspaceRecoveryAdmission?: WorkspaceRecoveryAdmission
@@ -2262,16 +2268,33 @@ export class ModuleManager {
       try {
         await verify()
         const timeoutMs = Math.max(1, Math.round(this.config.shutdown_timeout * 1000))
-        if (!runtime.skip_health_check) {
-          const listeners = scope.filter(item => native.sameProcess(item, native.inspectProcess(item.pid)) && native.listListeningTcpPorts(item.pid).includes(runtime.port))
-          if (listeners.length !== 1) throw new Error('Cannot verify the recovery module listener')
-          rpc = await require('../../scripts/lib/module-shutdown-rpc.cjs').openModuleShutdownRpc(listeners[0], runtime.port,
-            { instance_id: this.runtimeRegistry.getInstanceId(), module_id: moduleId, runtime_id: state.runtimeId }, { timeoutMs })
-          await verify()
+        const graceful = runtime.skip_health_check ? undefined : async () => {
+          let stage = 'current-role'
+          try {
+            await verify()
+            stage = 'owned-listener'
+            const listeners = scope.filter(item => native.sameProcess(item, native.inspectProcess(item.pid)) && native.listListeningTcpPorts(item.pid).includes(runtime.port))
+            if (listeners.length !== 1) throw new Error('Cannot verify the recovery module listener')
+            stage = 'runtime-identity'
+            rpc = await require('../../scripts/lib/module-shutdown-rpc.cjs').openModuleShutdownRpc(listeners[0], runtime.port,
+              { instance_id: this.runtimeRegistry.getInstanceId(), module_id: moduleId, runtime_id: state.runtimeId }, { timeoutMs })
+            stage = 'current-role-after-identity'
+            await verify()
+            stage = 'shutdown'
+            await rpc!.shutdown()
+          } catch (cause) {
+            const errors = []
+            for (let error: any = cause, depth = 0; error && depth < 4; error = error.cause, depth++) {
+              const fixed = (value: unknown) => typeof value === 'string' && /^[A-Za-z][A-Za-z0-9_-]{0,127}$/.test(value) ? value : null
+              errors.push({ code: fixed(error.code), stage: fixed(error.stage), transport_code: fixed(error.transport_code) })
+            }
+            console.error(JSON.stringify({ event: 'workspace_recovery_shutdown_unconfirmed', stage, causes: errors }))
+            throw cause
+          }
         }
         await require('../../scripts/lib/known-process-stop.cjs').stopKnownProcessScope(scope, { timeoutMs,
           onObserved: verify,
-          graceful: rpc ? async () => { await verify(); await rpc!.shutdown() } : undefined,
+          graceful,
         }, { ...native, terminateKnownProcess: (target: WorkerProcessIdentity) => { assertCurrent(); return native.terminateKnownProcess(target) } })
         assertCurrent()
       } finally { rpc?.close() }
@@ -2382,6 +2405,72 @@ export class ModuleManager {
       } catch (cause) { active = false; coordinator.close(); throw Object.assign(failure(), { cause }) }
     })
     this.workspaceRecoveryValidationLaunches.set(coordinator, pending)
+    return pending
+  }
+
+  private async verifyWorkspaceRecoveryValidationHealth(request: VerifyWorkspaceRelocationRecoveryRequestParams, bearer?: string): Promise<WorkspaceRecoveryValidationHealth> {
+    request = Object.freeze({ ...request })
+    const coordinator = await this.initializeWorkspaceRelocationRecovery(request, bearer), previous = this.workspaceRecoveryValidationHealth.get(coordinator)
+    if (previous) { const result = await previous; await result.verify(); return result }
+    const failure = () => Object.assign(new Error('新恢复模块健康与目录能力尚未全部确认，维护保护已保留；未重复启动或探测。'), { code: 'SERVICE_UNAVAILABLE' })
+    const pending = Promise.resolve().then(async () => {
+      let active = true
+      try {
+        const launched = await this.startWorkspaceRecoveryValidationModules(request, bearer)
+        const records = require('../../scripts/lib/workspace-recovery-records.mjs'), launch = records.readWorkspaceRecoveryCoordinator(this.dataDir, request.recovery_id).launch
+        const instanceId = this.runtimeRegistry.getInstanceId(), agent = launched.modules.find(module => module.module_id === 'crabot-agent')
+        const credential = this.runtimeBearers.get('crabot-agent')
+        if (!agent || !credential || credential.child !== this.processes.get('crabot-agent')) throw failure()
+        const expected: VerifyWorkspaceRelocationRecoveryRootResult = Object.freeze({ verified: true, ...request,
+          launch_sha256: sha256CanonicalJson(launch), plan_sha256: sha256CanonicalJson(launched.plan), root_selected_sha256: launched.plan.root_selected_sha256,
+          instance_id: instanceId, module_id: 'crabot-agent', runtime_id: agent.runtime_id })
+        const assertCurrent = () => {
+          try {
+            if (!active || this.workspaceRecoveryInitialization?.coordinator !== coordinator || this.runtimeBearers.get('crabot-agent') !== credential
+              || credential.revoked || credential.child !== this.processes.get('crabot-agent')) throw failure()
+            launched.assertCurrent()
+          } catch (cause) { active = false; coordinator.close(); throw Object.assign(failure(), { cause }) }
+        }
+        const { openSpawnedModuleRuntimeRpc } = require('../../scripts/lib/module-carrier-rpc.cjs')
+        const verify = async () => {
+          try {
+            await launched.verify(); assertCurrent()
+            for (const module of launched.modules) {
+              const runtime = this.modules.get(module.module_id)!, deadline = Date.now() + 120000
+              for (;;) {
+                await launched.verify(); assertCurrent()
+                const child = this.processes.get(module.module_id), state = child && this.childStates.get(child)
+                if (!state || Date.now() > deadline || runtime.status === 'error' || runtime.status === 'stopped') throw failure()
+                if (state.reachedRunning && runtime.status === 'running') break
+                await new Promise(resolve => setTimeout(resolve, 100))
+              }
+              const rpc = await openSpawnedModuleRuntimeRpc(this.processes.get(module.module_id), module.process, runtime.port,
+                { instance_id: instanceId, module_id: module.module_id, runtime_id: module.runtime_id }, { timeoutMs: this.config.health_check_timeout * 1000 })
+              try {
+                assertCurrent()
+                const health: HealthResult = await rpc.call('health', {})
+                assertCurrent()
+                if (health.status !== 'healthy') throw failure()
+                await launched.verify(); assertCurrent()
+              } finally { rpc.close() }
+            }
+            const rpc = await openSpawnedModuleRuntimeRpc(credential.child, agent.process, this.modules.get('crabot-agent')!.port,
+              { instance_id: instanceId, module_id: 'crabot-agent', runtime_id: agent.runtime_id }, { timeoutMs: 30000 })
+            try {
+              assertCurrent()
+              const result = await rpc.call('verify_workspace_relocation_recovery_root', request, { authorizationBearer: credential.token })
+              assertCurrent()
+              if (sha256CanonicalJson(result) !== sha256CanonicalJson(expected)) throw failure()
+            } finally { rpc.close() }
+            await launched.verify(); assertCurrent()
+          } catch (cause) { active = false; coordinator.close(); throw Object.assign(failure(), { cause }) }
+        }
+        await verify()
+        return Object.freeze({ ...launched, healthy_modules: Object.freeze(launched.modules.map(module => Object.freeze({ module_id: module.module_id, runtime_id: module.runtime_id }))),
+          root_verified: expected, verify, assertCurrent })
+      } catch (cause) { active = false; coordinator.close(); throw Object.assign(failure(), { cause }) }
+    })
+    this.workspaceRecoveryValidationHealth.set(coordinator, pending)
     return pending
   }
 

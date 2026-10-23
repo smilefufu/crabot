@@ -1,7 +1,7 @@
 import { createWorkspaceRelocationStopJournal } from './core/workspace-relocation-stop-journal.js'
-import { createWorkspaceRelocationRootVerifier } from './core/workspace-relocation-validation.js'
+import { createWorkspaceRelocationRootVerifier, createWorkspaceRecoveryRootVerifier } from './core/workspace-relocation-validation.js'
 import { verifyWorkspaceRelocationAuthority } from './core/workspace-relocation-authority.js'
-import type { VerifyWorkspaceRelocationRootParams, VerifyWorkspaceRelocationRootResult, CaptureWorkspaceRelocationProcessesParams, CaptureWorkspaceRelocationProcessesResult, CaptureWorkspaceRelocationWorkersParams, CaptureWorkspaceRelocationWorkersResult, StopWorkspaceRelocationWorkersParams, StopWorkspaceRelocationWorkersResult, RpcHandlerContext } from 'crabot-shared'
+import type { VerifyWorkspaceRelocationRecoveryRootParams, VerifyWorkspaceRelocationRecoveryRootResult, VerifyWorkspaceRelocationRootParams, VerifyWorkspaceRelocationRootResult, CaptureWorkspaceRelocationProcessesParams, CaptureWorkspaceRelocationProcessesResult, CaptureWorkspaceRelocationWorkersParams, CaptureWorkspaceRelocationWorkersResult, StopWorkspaceRelocationWorkersParams, StopWorkspaceRelocationWorkersResult, RpcHandlerContext } from 'crabot-shared'
 import { ExecutionAdmissions } from './core/execution-admissions.js'
 import { WorkerRequestToolScope } from './workers/harness/request-tools.js'
 import { selectSubAgentSkills } from './agent/subagent-tool-filter.js'
@@ -831,6 +831,7 @@ export class UnifiedAgent extends ModuleBase {
   private managerReconciliationSettled = false
   private runtimeClosing = false
   private workspaceRootVerifier?: ReturnType<typeof createWorkspaceRelocationRootVerifier>
+  private workspaceRecoveryRootVerifier?: ReturnType<typeof createWorkspaceRecoveryRootVerifier>
   private readonly executionAdmissions = new ExecutionAdmissions()
   /** 每个 ManagerKey 至多一个任务板 notice 路由尝试；最新 revision 仍以 Store 为准。 */
   private readonly workboardNoticeDispatching = new Set<ManagerKey>()
@@ -1006,6 +1007,14 @@ export class UnifiedAgent extends ModuleBase {
       runtimeIdentity: () => ({ instance_id: process.env.CRABOT_INSTANCE_ID, module_id: this.config.moduleId, runtime_id: process.env.CRABOT_MODULE_RUNTIME_ID }),
       isClosing: () => this.runtimeClosing })
     return this.workspaceRootVerifier(params, context?.authorizationBearer)
+  }
+
+  private handleVerifyWorkspaceRelocationRecoveryRoot(params: VerifyWorkspaceRelocationRecoveryRootParams, context?: RpcHandlerContext): Promise<VerifyWorkspaceRelocationRecoveryRootResult> {
+    this.workspaceRecoveryRootVerifier ??= createWorkspaceRecoveryRootVerifier({ dataDir: getDataRootDir(),
+      moduleManagerPort: this.rpcClient.moduleManagerTargetPort, runtimeBearer: () => ConfigLoader.getRuntimeBearer(),
+      runtimeIdentity: () => ({ instance_id: process.env.CRABOT_INSTANCE_ID, module_id: this.config.moduleId, runtime_id: process.env.CRABOT_MODULE_RUNTIME_ID }),
+      isClosing: () => this.runtimeClosing })
+    return this.workspaceRecoveryRootVerifier(params, context?.authorizationBearer)
   }
 
   private async handleCaptureWorkspaceRelocationWorkers(params: CaptureWorkspaceRelocationWorkersParams, context?: RpcHandlerContext): Promise<CaptureWorkspaceRelocationWorkersResult> {
@@ -1937,6 +1946,7 @@ export class UnifiedAgent extends ModuleBase {
     this.registerMethod('stop_workspace_relocation_workers', this.handleStopWorkspaceRelocationWorkers.bind(this))
     this.registerMethod('capture_workspace_relocation_processes', this.handleCaptureWorkspaceRelocationProcesses.bind(this))
     this.registerMethod('verify_workspace_relocation_root', this.handleVerifyWorkspaceRelocationRoot.bind(this))
+    this.registerMethod('verify_workspace_relocation_recovery_root', this.handleVerifyWorkspaceRelocationRecoveryRoot.bind(this))
     this.registerMethod('capture_workspace_relocation_workers', this.handleCaptureWorkspaceRelocationWorkers.bind(this))
     this.registerMethod('get_workspace_execution_admin', async () => this.requireManagerStack().harness.getWorkspaceExecutionInventory())
     this.registerMethod('list_workers_admin', this.handleListWorkersAdmin.bind(this))

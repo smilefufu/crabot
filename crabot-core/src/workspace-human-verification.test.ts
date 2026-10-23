@@ -2428,8 +2428,8 @@ describe('normal fixed-job Admin completion preparation', () => {
       if (child?.connected) { const ended = once(child, 'exit'); child.disconnect(); await ended }
       locks.releaseCliLock(lock); await f.cleanup()
     }
-  }, process.platform === 'win32' ? 600000 : 120000)
-  it.each(['Agent', 'Agent and Memory', 'definition changed before release', 'plan changed before release'])('starts only the planned cold validation generations: %s', async mode => {
+  }, process.platform === 'win32' || process.platform === 'darwin' && process.arch === 'x64' ? 600000 : 120000)
+  it.each(['Agent', 'Agent and Memory', 'catalog changed after probe', 'definition changed before release', 'plan changed before release'])('starts only the planned cold validation generations: %s', async mode => {
     const withMemory = mode === 'Agent and Memory'
     const f = await fixture({ actualAgent: true, actualAdmin: true, validationHealth: 'healthy', withMemory, inactiveMemory: !withMemory, memoryHealth: withMemory ? 'healthy' : undefined, processLifetimeMs: 300000 })
     const locks = require('../../scripts/lib/cli-lock.mjs'), records = require('../../scripts/lib/workspace-relocation-intent.mjs')
@@ -2443,12 +2443,25 @@ describe('normal fixed-job Admin completion preparation', () => {
       const before = await fs.readFile(fenceFile), ledgerFile = path.join(f.data, 'agent/worker-ledgers/channel%3A%3Asession.json'), ledger = await fs.readFile(ledgerFile)
       const request = { intent_id: f.params.intent_id, recovery_id: randomUUID(), completion_sha256: prepared.completion_sha256, finalizing_sha256: sha256CanonicalJson(fence) }
       const entry = path.join(f.data, 'cold-finite-runtime.cjs')
-      await fs.writeFile(entry, `const fs=require('node:fs');const receipt=JSON.parse(fs.readFileSync(process.env.TEST_RECEIPT,'utf8'));
+      await fs.writeFile(entry, `const fs=require('node:fs'),http=require('node:http');const receipt=JSON.parse(fs.readFileSync(process.env.TEST_RECEIPT,'utf8'));
         fs.writeFileSync(process.env.TEST_MARKER,JSON.stringify({pid:process.pid,parent:process.ppid,runtime:process.env.CRABOT_MODULE_RUNTIME_ID,receipt}));
+        let agent;
+        if(process.env.TEST_MODULE_ID==='crabot-agent'){
+          require(${JSON.stringify(path.resolve('../crabot-agent/dist/core/config-loader.js'))}).ConfigLoader.captureRuntimeBearer();
+          const{UnifiedAgent}=require(${JSON.stringify(path.resolve('../crabot-agent/dist/unified-agent.js'))}),config=${JSON.stringify(relocationAgentConfig)};
+          config.port=Number(process.env.Crabot_PORT);agent=new UnifiedAgent(config);agent.getHealthStatus=async()=> fs.existsSync(process.env.TEST_UNHEALTHY)&&fs.readFileSync(process.env.TEST_UNHEALTHY,'utf8')===process.env.TEST_MODULE_ID?'unhealthy':'healthy';
+        }
+        const server=http.createServer(async(req,res)=>{
+          if(agent&&req.url!=='/shutdown'){await agent.handleRequest(req,res);return}
+          let text='';for await(const part of req)text+=part;const body=JSON.parse(text);
+          const data=body.method==='get_runtime_identity'?{instance_id:process.env.CRABOT_INSTANCE_ID,module_id:process.env.TEST_MODULE_ID,runtime_id:process.env.CRABOT_MODULE_RUNTIME_ID}:body.method==='health'?{status:fs.existsSync(process.env.TEST_UNHEALTHY)&&fs.readFileSync(process.env.TEST_UNHEALTHY,'utf8')===process.env.TEST_MODULE_ID?'unhealthy':'healthy'}:{};
+          if(body.method==='shutdown'&&agent)await agent.managerStack.dispose();
+          res.end(JSON.stringify({id:body.id,success:true,data}));if(body.method==='shutdown')setTimeout(()=>process.exit(0),25);
+        });server.listen(Number(process.env.Crabot_PORT),'127.0.0.1',()=>fs.writeFileSync(process.env.TEST_MARKER+'.ready','ready'));
         setTimeout(()=>process.exit(0),300000);`)
       cold = new ModuleManager({ port: 0, modules: [], shutdown_timeout: 0.1 }, f.data) as any
       for (const [id, definition] of definitions as Map<string, any>) {
-        const env = { ...definition.env, TEST_RECEIPT: path.join(f.data, 'workspace-control/relocation-recovery', request.recovery_id, 'runtime-starts', id + '.json'), TEST_MARKER: path.join(f.data, 'cold-start-' + id + '.json') }
+        const env = { ...definition.env, TEST_MODULE_ID: id, TEST_UNHEALTHY: path.join(f.data, 'cold-health-unhealthy'), TEST_RECEIPT: path.join(f.data, 'workspace-control/relocation-recovery', request.recovery_id, 'runtime-starts', id + '.json'), TEST_MARKER: path.join(f.data, 'cold-start-' + id + '.json') }
         cold.modules.set(id, { ...definition, status: 'stopped', pid: undefined, auto_start: false, ...(id === 'admin-web' ? {} : { entry: `"${process.execPath}" "${entry}"`, skip_health_check: true, env }) })
       }
       await cold.start(); cold.config.port = cold.server.address().port
@@ -2507,6 +2520,7 @@ describe('normal fixed-job Admin completion preparation', () => {
       for (const module of started.modules) {
         const file = path.join(f.data, 'cold-start-' + module.module_id + '.json')
         await vi.waitFor(async () => expect(await fs.readFile(file, 'utf8')).toBeTruthy())
+        await vi.waitFor(async () => expect(await fs.readFile(file + '.ready', 'utf8')).toBe('ready'), { timeout: 15000 })
         const marker = JSON.parse(await fs.readFile(file, 'utf8'))
         expect(marker).toMatchObject({ parent: module.process.pid, runtime: module.runtime_id,
           receipt: { process: module.process, runtime: { root_pid: module.process.pid, runtime_id: module.runtime_id } } })
@@ -2531,9 +2545,47 @@ describe('normal fixed-job Admin completion preparation', () => {
         root_selected_sha256: started.plan.root_selected_sha256, instance_id: cold.runtimeRegistry.getInstanceId(), module_id: 'crabot-agent',
         runtime_id: started.modules.find((module: any) => module.module_id === 'crabot-agent').runtime_id }
       expect(await call(request, token)).toMatchObject({ success: true, data: proof })
+      const callRoot = async (params: any, bearer?: string) => {
+        const response = await fetch(`http://127.0.0.1:${cold.modules.get('crabot-agent').port}/verify_workspace_relocation_recovery_root`, { method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...(bearer ? { Authorization: 'Bearer ' + bearer } : {}) },
+          body: JSON.stringify({ id: randomUUID(), source: 'forged-source', method: 'verify_workspace_relocation_recovery_root', params }) })
+        return response.json()
+      }
+      expect(await callRoot(request)).toMatchObject({ success: false, error: { code: 'UNAUTHORIZED' } })
+      expect(await callRoot({ unexpected: true }, 'fixture-human')).toMatchObject({ success: false, error: { code: 'FORBIDDEN' } })
+      expect(await callRoot({ ...request, unexpected: true }, token)).toMatchObject({ success: false, error: { code: 'INVALID_PARAMS' } })
+      const root = records.readWorkspaceRelocationArchivedState(f.data, request.intent_id).published.target.path, files = await fs.readdir(root)
+      expect(await callRoot(request, token)).toMatchObject({ success: true, data: proof })
+      const probedAt = (await fs.stat(root, { bigint: true })).mtimeNs
+      expect(await callRoot(request, token)).toMatchObject({ success: true, data: proof })
+      expect((await fs.stat(root, { bigint: true })).mtimeNs).toBe(probedAt)
+      expect(await fs.readdir(root)).toEqual(files)
+      expect(typeof cold.verifyWorkspaceRecoveryValidationHealth).toBe('function')
+      const health = await cold.verifyWorkspaceRecoveryValidationHealth(request, 'fixture-human')
+      expect(health.healthy_modules.map((module: any) => module.module_id).sort()).toEqual(ids)
+      expect(health.root_verified).toEqual(proof)
+      await health.verify()
+      expect((await fs.stat(root, { bigint: true })).mtimeNs).toBe(probedAt)
+      if (withMemory) {
+        const unhealthy = path.join(f.data, 'cold-health-unhealthy')
+        await fs.writeFile(unhealthy, 'memory-default')
+        try { await expect(health.verify()).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' }) }
+        finally { await fs.unlink(unhealthy) }
+        await expect(health.verify()).rejects.toBeDefined()
+      } else if (mode === 'catalog changed after probe') {
+        const catalogFile = path.join(f.data, 'workspace-control/catalog.json'), bytes = await fs.readFile(catalogFile)
+        await fs.writeFile(catalogFile, '{"unexpected":true}')
+        try {
+          expect(await callRoot(request, token)).toMatchObject({ success: false, error: { code: 'SERVICE_UNAVAILABLE' } })
+          await expect(health.verify()).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
+        } finally { await fs.writeFile(catalogFile, bytes) }
+        expect(await callRoot(request, token)).toMatchObject({ success: false })
+        await expect(health.verify()).rejects.toBeDefined()
+      }
       const admin = cold.childStates.get(cold.processes.get('admin-web')), oldRuntimeId = admin.runtimeId
       admin.runtimeId = randomUUID()
       await expect(started.verify()).rejects.toBeDefined()
+      await expect(health.verify()).rejects.toBeDefined()
       admin.runtimeId = oldRuntimeId
       expect(await call(request, token)).toMatchObject({ success: false })
       await expect(started.verify()).rejects.toBeDefined()
