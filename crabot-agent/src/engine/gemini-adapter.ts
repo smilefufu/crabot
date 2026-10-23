@@ -19,6 +19,7 @@ function object(value: unknown): value is Record<string, unknown> {
 function functionCall(part: Part): FunctionCall {
   const call = part.functionCall
   if (!object(call) || typeof call.name !== 'string' || !call.name
+    || 'partialArgs' in call || call.willContinue === true
     || (call.args !== undefined && !object(call.args))
     || (call.id !== undefined && (typeof call.id !== 'string' || !call.id))) {
     throw new Error('Gemini returned an invalid functionCall')

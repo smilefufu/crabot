@@ -115,6 +115,7 @@ describe('Gemini wire semantics', () => {
     [{ promptFeedback: { blockReason: 'SAFETY' } }, /blocked/],
     [response([], 'SAFETY'), /stopped/],
     [response([{ functionCall: { name: 'probe', args: 'broken' } }], 'STOP'), /invalid functionCall/],
+    [response([{ functionCall: { name: 'probe', partialArgs: [{ jsonPath: '$.label', stringValue: 'heal' }] } }], 'STOP'), /invalid functionCall/],
     [response([{ text: 'x' }], 'STOP', { promptTokenCount: 1, cachedContentTokenCount: 2 }), /cached tokens/],
     [{ candidates: [{ index: 1, content: { parts: [{ text: 'x' }] } }] }, /unexpected candidate/],
     [{ candidates: [{ content: { role: 'user', parts: [{ text: 'x' }] }, finishReason: 'STOP' }] }, /invalid content/],
