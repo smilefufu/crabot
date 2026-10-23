@@ -142,6 +142,54 @@ describe('core Agent cutover activation retry', () => {
     expect(verify.mock.calls.length).toBeGreaterThan(2)
   })
 
+  for (const result of ['success', 'failure']) it('a late ordinary topology retry cannot undo an owned workspace activation: ' + result, async () => {
+    const subject = createSubject()
+    subject.workspaceStartupSuspended = true
+    let release!: () => void, entered!: () => void
+    const waiting = new Promise<void>(resolve => { entered = resolve })
+    subject.rpcClient.callModuleManagerSensitive.mockImplementation(() => new Promise((resolve, reject) => {
+      release = () => result === 'success' ? resolve({ record: {} }) : reject(new Error('late ordinary topology failure'))
+      entered()
+    }))
+    subject.rpcClient.callModuleManager.mockRejectedValue(new Error('late observation unavailable'))
+    const ordinary = subject.completeCoreAgentCutover().then(() => undefined, () => undefined)
+    await waiting
+    await subject.resumeWorkspaceStartup(async () => {})
+    expect(subject.cutoverActivated).toBe(true)
+    release(); await ordinary
+    expect(subject.channelManager.reRegisterInstances).not.toHaveBeenCalled()
+    expect(subject.waitForCoreAgentReady).toHaveBeenCalledTimes(1)
+    expect(subject.scheduleEngine.startAll).toHaveBeenCalledTimes(1)
+    expect(subject.configInvalidationPublicationEnabled).toBe(true)
+    expect(subject.cutoverRecoveryReason).toBe(null)
+  })
+
+  it('a late ordinary success observes the pending owned activation without starting a second readiness sequence', async () => {
+    const subject = createSubject()
+    subject.workspaceStartupSuspended = true
+    let topology!: () => void, ready!: () => void, enteredTopology!: () => void, enteredReady!: () => void
+    const topologyWaiting = new Promise<void>(resolve => { enteredTopology = resolve })
+    const readinessWaiting = new Promise<void>(resolve => { enteredReady = resolve })
+    subject.rpcClient.callModuleManagerSensitive.mockImplementation(() => new Promise(resolve => {
+      topology = () => resolve({ record: {} }); enteredTopology()
+    }))
+    subject.waitForCoreAgentReady.mockImplementation(() => new Promise<void>(resolve => { ready = resolve; enteredReady() }))
+    let ordinaryDone = false
+    const ordinary = subject.completeCoreAgentCutover().then(() => { ordinaryDone = true })
+    await topologyWaiting
+    const recovery = subject.resumeWorkspaceStartup(async () => {})
+    await readinessWaiting; topology()
+    await new Promise<void>(resolve => setImmediate(resolve))
+    expect(ordinaryDone).toBe(false)
+    expect(subject.waitForCoreAgentReady).toHaveBeenCalledTimes(1)
+    expect(subject.channelManager.reRegisterInstances).not.toHaveBeenCalled()
+    expect(subject.scheduleEngine.startAll).not.toHaveBeenCalled()
+    ready(); await Promise.all([ordinary, recovery])
+    expect(subject.cutoverActivated).toBe(true)
+    expect(subject.scheduleEngine.startAll).toHaveBeenCalledTimes(1)
+    expect(subject.channelManager.reRegisterInstances).not.toHaveBeenCalled()
+  })
+
   it('keeps failed startup activation suspended and never retries an unknown stage', async () => {
     const subject = createSubject()
     subject.workspaceStartupSuspended = true

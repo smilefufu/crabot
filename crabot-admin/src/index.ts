@@ -8037,8 +8037,10 @@ export class AdminModule extends ModuleBase {
     this.cutoverRecoveryReason = null
     this.cutoverAttempt = this.completeCoreAgentCutoverAttempt()
       .catch((error) => {
-        this.configInvalidationPublicationEnabled = false
-        this.cutoverRecoveryReason = this.classifyCutoverRecoveryReason(error)
+        if (!this.workspaceStartupActivation) {
+          this.configInvalidationPublicationEnabled = false
+          this.cutoverRecoveryReason = this.classifyCutoverRecoveryReason(error)
+        }
         throw error
       })
       .finally(() => { this.cutoverAttempt = null })
@@ -8115,6 +8117,8 @@ export class AdminModule extends ModuleBase {
     if (!existing) {
       await this.cutoverStore.saveMarker({ schema_version: 1, completed: true, completed_at: new Date().toISOString(), archive_fingerprint: archive.fingerprint, archive_record_count: archive.record_count, mm_result: result })
     }
+    // A delayed ordinary retry only observes the current recovery's activation.
+    if (this.workspaceStartupActivation) return this.workspaceStartupActivation
     // The durable marker commits topology cutover. Readiness activation is a separate,
     // retryable phase: the MM bearer has already been consumed and must never be replayed.
     if (workspaceMaintenancePending(path.resolve(this.adminConfig.data_dir, '..'))) this.workspaceStartupSuspended = true
