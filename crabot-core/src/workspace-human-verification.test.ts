@@ -32,7 +32,7 @@ function observeColdTerminalProgress(cold: any, coordinator: any, grant: any) {
     const original = object[key].bind(object), counter = counters[name] = { calls: 0, pending: 0, elapsed_ms: 0 }
     replace(object, key, (...args: any[]) => {
       const began = performance.now(); counter.calls++; counter.pending++
-      const done = () => { counter.pending--; counter.elapsed_ms += Math.round(performance.now() - began) }
+      const done = () => { counter.pending--; counter.elapsed_ms += performance.now() - began }
       try {
         const result = original(...args)
         if (result && typeof result.then === 'function') void result.then(done, done)
@@ -3290,7 +3290,7 @@ describe('normal fixed-job Admin completion preparation', () => {
             if (mode === 'release readonly root') { rootMode = (await fs.stat(root)).mode & 0o777; await fs.chmod(root, 0o500) }
             const restoring = resumeModes.includes(mode), operate = () => restoring ? cold.resumeWorkspaceRecoveryWeb(request, human) : cold.releaseWorkspaceRecoveryCompletion(request, human)
             const start = vi.spyOn(cold, 'startModuleProcess')
-            stopObserving = mode === 'resume running module' && process.env.GITHUB_ACTIONS === 'true' ? observeColdTerminalProgress(cold, coordinator, grant) : undefined
+            stopObserving = ['resume running module', 'resume actual Admin startup'].includes(mode) && process.env.GITHUB_ACTIONS === 'true' ? observeColdTerminalProgress(cold, coordinator, grant) : undefined
             phase('current-terminal-request')
             const first = operate(), second = operate()
             if (hasNativeRelease && mode !== 'release readonly root') {
@@ -3765,13 +3765,18 @@ describe.skipIf(process.env.GITHUB_ACTIONS !== 'true')('fixed terminal release a
 describe('fixed job archive storage handoff', () => {
   const modes = ['healthy Agent', 'healthy Memory', ...['target conflict', 'fence conflict', 'runtime changed', 'unhealthy runtime', 'wrong launch', 'lost acknowledgement', 'coordinator exited after archive', 'archive changed', 'fence changed', 'active conflict after move', ...(process.platform !== 'win32' && process.getuid?.() !== 0 ? ['readonly root'] : [])].map(value => 'healthy archive ' + value)]
   it.each(modes)('keeps maintenance and preserves one job: %s', async mode => {
+    const began = performance.now()
+    const phase = (stage: string) => { if (mode === 'healthy Memory' && process.env.GITHUB_ACTIONS === 'true') console.log('[Archive Memory stage]', { stage, elapsed_ms: Math.round(performance.now() - began) }) }
+    phase('fixture-start')
     const f = await fixture({ actualAgent: true, actualAdmin: true, validationHealth: 'healthy', withMemory: mode === 'healthy Memory', memoryHealth: 'healthy', processLifetimeMs: process.platform === 'win32' ? 900000 : 300000 })
+    phase('fixture-ready')
     const locks = require('../../scripts/lib/cli-lock.mjs'), records = require('../../scripts/lib/workspace-relocation-intent.mjs')
     const lock = await locks.acquireWorkspaceRelocationLock(f.data, f.params.intent_id)
     let coordinator: ReturnType<typeof spawn> | undefined, changedRuntime: { file: string; contents: string } | undefined
     let readonlyRoot: { path: string; mode: number } | undefined
     try {
       const result = await f.manager.verifyWorkspaceRelocationValidationHealth(f.params, 'fixture-human')
+      phase('health-ready')
       coordinator = result.coordinator
       const context = { dataDir: f.data, id: f.params.intent_id, launch: records.readWorkspaceRelocationCoordinator(f.data, f.params.intent_id).launch }
       const original = await fs.readFile(path.join(f.data, 'workspace-control/relocation-active/relocation-health.json'), 'utf8'), health = JSON.parse(original)
@@ -3782,7 +3787,9 @@ describe('fixed job archive storage handoff', () => {
         const transport = require('../../scripts/lib/workspace-coordinator-journal.mjs').createWorkspaceJournalClient(result.coordinator, context, 'file')
         try { return await transport.call('prepare_completion', {}) } catch (error) { console.error('[Workspace completion journal]', coordinatorJournalFailures(result.coordinator)); throw error } finally { transport.close() }
       }
-      const prepared = await complete(), completion = records.readWorkspaceRelocationCompletion(f.data, f.params.intent_id)
+      const prepared = await complete()
+      phase('completion-published')
+      const completion = records.readWorkspaceRelocationCompletion(f.data, f.params.intent_id)
       expect(prepared).toEqual({ dispatch: 'dispatch', completion_sha256: sha256CanonicalJson(completion) })
       expect(completion).toMatchObject({ schema_version: 1, intent_id: f.params.intent_id, health_sha256: result.health_sha256,
         selected_sha256: result.root_selected_sha256 })

@@ -1321,6 +1321,9 @@ test('a finite synchronous record observation shares reads but still detects a c
     let executed = false
     assert.throws(() => observeWorkspaceRelocationRecords(async () => { executed = true }), { code: 'WORKSPACE_RELOCATION_INVALID' })
     assert.equal(executed, false)
+    // Only record-observation pins are under test; the intentional CLI lock
+    // otherwise also holds a non-delete-shared file inside this Windows root.
+    releaseCliLock(lock)
     const moved = f.data + '-roundtrip'; await fs.rename(f.data, moved); await fs.rename(moved, f.data)
     assert.deepEqual(readWorkspaceRelocationIntent(f.data), accepted)
   } finally { releaseCliLock(lock) }
