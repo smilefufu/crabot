@@ -2957,7 +2957,12 @@ describe('normal fixed-job Admin completion preparation', () => {
           // Finite Core configuration health only; this case exercises real Admin main, not Provider resolution.
           if(${actualAdminStartup})agent.getHealthDetails=async()=>({llm_status:'ready'});
         }
+        let rootReads=0;const read=fs.readFileSync;
+        if(${mode === 'Agent'})fs.readFileSync=function(file,...args){if(typeof file==='number')rootReads++;return read.call(this,file,...args)};
         const server=http.createServer(async(req,res)=>{
+          if(${mode === 'Agent'}&&req.url==='/verify_workspace_relocation_recovery_root'){
+            const before=rootReads,began=performance.now();res.once('finish',()=>console.log(JSON.stringify({event:'finite_cold_root_reads',reads:rootReads-before,elapsed_ms:Math.round(performance.now()-began)})));
+          }
           if(agent&&req.url!=='/shutdown'){await agent.handleRequest(req,res);return}
           let text='';for await(const part of req)text+=part;const body=JSON.parse(text);
           const data=body.method==='get_runtime_identity'?{instance_id:process.env.CRABOT_INSTANCE_ID,module_id:process.env.TEST_MODULE_ID,runtime_id:process.env.CRABOT_MODULE_RUNTIME_ID}:body.method==='health'?{status:fs.existsSync(process.env.TEST_UNHEALTHY)&&fs.readFileSync(process.env.TEST_UNHEALTHY,'utf8')===process.env.TEST_MODULE_ID?'unhealthy':'healthy'}:{};
@@ -3117,6 +3122,13 @@ describe('normal fixed-job Admin completion preparation', () => {
       expect(health.healthy_modules.map((module: any) => module.module_id).sort()).toEqual(ids)
       expect(health.root_verified).toEqual(proof)
       if (mode === 'Agent') {
+        let windows: Array<{ reads: number }> = []
+        await vi.waitFor(async () => {
+          const log = await fs.readFile(path.join(f.data, 'logs/crabot-agent.log'), 'utf8')
+          windows = log.split('\n').filter(line => line.startsWith('{"event":"finite_cold_root_reads"')).map(line => JSON.parse(line))
+          expect(windows.some(item => item.reads > 0)).toBe(true)
+        })
+        expect(Math.max(...windows.map(item => item.reads))).toBeLessThanOrEqual(1400)
         let reads = 0, verifies = 0
         const originalRead = syncFs.readFileSync, originalSend = coordinator.child.send.bind(coordinator.child)
         const counting = vi.spyOn(syncFs, 'readFileSync').mockImplementation(((file: any, ...args: any[]) => {

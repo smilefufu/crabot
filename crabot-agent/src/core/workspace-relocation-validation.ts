@@ -32,10 +32,10 @@ export function createWorkspaceRelocationRootVerifier(options: Options) {
     try {
       const records = require(path.join(__dirname, '../../../scripts/lib/workspace-relocation-intent.mjs'))
       const native = require(path.join(__dirname, '../../../scripts/lib/process-identity.cjs'))
-      const read = () => ({ intent: records.readWorkspaceRelocationIntent(options.dataDir),
+      const read = () => records.observeWorkspaceRelocationRecords(() => ({ intent: records.readWorkspaceRelocationIntent(options.dataDir),
         ...records.readWorkspaceRelocationCoordinator(options.dataDir, request.intent_id),
         published: records.readWorkspaceRelocationRootPublished(options.dataDir, request.intent_id),
-        selected: records.readWorkspaceRelocationRootSelected(options.dataDir, request.intent_id) })
+        selected: records.readWorkspaceRelocationRootSelected(options.dataDir, request.intent_id) }))
       const state = read(), identity = Object.freeze({ ...options.runtimeIdentity() })
       if (!state.intent || !state.launch || !state.ready || !state.published || !state.selected
         || identity.module_id !== 'crabot-agent' || !identity.instance_id || !identity.runtime_id) throw unavailable()
@@ -116,7 +116,8 @@ export function createWorkspaceRecoveryRootVerifier(options: Options) {
       if (failed) throw unavailable()
       const records = require(path.join(__dirname, '../../../scripts/lib/workspace-recovery-records.mjs'))
       const native = require(path.join(__dirname, '../../../scripts/lib/process-identity.cjs'))
-      const read = () => {
+      const graph = require(path.join(__dirname, '../../../scripts/lib/workspace-relocation-intent.mjs'))
+      const read = () => graph.observeWorkspaceRelocationRecords(() => {
         const { released, ...scope } = admission.readWorkspaceRecoveryCompletionScope(options.dataDir, request)
         if (releasedObserved && !released) throw unavailable()
         releasedObserved ||= released
@@ -124,7 +125,7 @@ export function createWorkspaceRecoveryRootVerifier(options: Options) {
           coordinator: records.readWorkspaceRecoveryCoordinator(options.dataDir, request.recovery_id),
           plan: records.readWorkspaceRecoveryRuntimePlan(options.dataDir, request.recovery_id),
           start: records.readWorkspaceRecoveryRuntimeStart(options.dataDir, request.recovery_id, 'crabot-agent') }
-      }
+      })
       const state = read(), identity = Object.freeze({ ...options.runtimeIdentity() }), self = native.inspectProcess(process.pid)
       if (!state.coordinator.launch || !state.coordinator.ready || !state.plan || !state.start || !self
         || identity.module_id !== 'crabot-agent' || !identity.instance_id || !identity.runtime_id
