@@ -37,18 +37,18 @@ try {
       import assert from 'node:assert/strict'; import {pathToFileURL} from 'node:url';
       const load = index => import(pathToFileURL(process.argv[index]).href);
       const repair = await load(1), reader = await load(2), proof = await load(3);
-      const controller = await load(4), host = await load(5), job = await load(6), cli = await load(7);
+      const controller = await load(4), host = await load(5), job = await load(6), cli = await load(7), programs = await load(8);
       assert.equal(typeof repair.prepareDesktopRepair, 'function'); assert.equal(typeof repair.commitDesktopRepair, 'function');
       assert.equal(typeof reader.default.readDesktopRemoval, 'function');
       assert.equal(typeof proof.captureDesktopRemovalProof, 'function'); assert.equal(typeof proof.readDesktopRemovalProof, 'function');
-      assert.equal(typeof job.beginInitialDesktopRemoval, 'function'); assert.equal(typeof cli.removeDesktopCliEntries, 'function');
+      assert.equal(typeof job.beginInitialDesktopRemoval, 'function'); assert.equal(typeof cli.removeDesktopCliEntries, 'function'); assert.equal(typeof programs.inspectDesktopRemovalPrograms, 'function');
       assert.equal(typeof controller.stopInstance, 'function'); assert.equal(typeof host.prepareDesktopRemovalGui, 'function');
     `
     await promisify(execFile)(path.join(payload, 'core/.product-runtime/node/bin/node'), ['--input-type=module', '-e', code, repair, path.join(root, 'backend/dist/bootstrap/scripts/lib/desktop-removal-record.cjs'), path.join(root, 'backend/dist/bootstrap/scripts/lib/desktop-removal-proof.mjs'),
-      path.join(root, 'backend/dist/bootstrap/scripts/lib/instance-controller.mjs'), path.join(root, 'backend/dist/bootstrap/scripts/lib/desktop-removal-host.mjs'), path.join(root, 'backend/dist/bootstrap/scripts/lib/desktop-removal-job.mjs'), path.join(root, 'backend/dist/installation-removal.js')],
+      path.join(root, 'backend/dist/bootstrap/scripts/lib/instance-controller.mjs'), path.join(root, 'backend/dist/bootstrap/scripts/lib/desktop-removal-host.mjs'), path.join(root, 'backend/dist/bootstrap/scripts/lib/desktop-removal-job.mjs'), path.join(root, 'backend/dist/installation-removal.js'), path.join(root, 'backend/dist/bootstrap/scripts/lib/desktop-removal-programs.mjs')],
       { env, timeout: 30_000, maxBuffer: 65536 })
     console.log('CRABOT_INSTALLER_HOST ' + JSON.stringify({ native_source_and_bytes: true, opaque_payload_verified: true,
-      ordinary_uid_backend_outside_checkout: true, trusted_repair_backend_outside_checkout: true, trusted_removal_reader_outside_checkout: true, trusted_removal_proof_outside_checkout: true, trusted_common_stop_outside_checkout: true, trusted_removal_host_backend_outside_checkout: true, trusted_initial_removal_job_outside_checkout: true, trusted_cli_removal_outside_checkout: true, actual_installer_flow: false, graphical_polkit: false, real_browser_sandbox: false, business_mm_started: false }))
+      ordinary_uid_backend_outside_checkout: true, trusted_repair_backend_outside_checkout: true, trusted_removal_reader_outside_checkout: true, trusted_removal_proof_outside_checkout: true, trusted_common_stop_outside_checkout: true, trusted_removal_host_backend_outside_checkout: true, trusted_initial_removal_job_outside_checkout: true, trusted_cli_removal_outside_checkout: true, trusted_program_inventory_outside_checkout: true, actual_installer_flow: false, graphical_polkit: false, real_browser_sandbox: false, business_mm_started: false }))
   } else {
   await fs.mkdir(path.join(root, 'resources'))
   for (const name of ['app.asar', 'app.asar.unpacked']) await fs.cp(path.join(resources, name), path.join(root, 'resources', name), { recursive: true, verbatimSymlinks: true, mode: constants.COPYFILE_FICLONE })
@@ -60,7 +60,7 @@ try {
   for (const key of ['ELECTRON_RUN_AS_NODE', 'NODE_PATH', 'NODE_OPTIONS', 'DATA_DIR', 'CRABOT_HOME', 'CRABOT_DEV', 'CRABOT_PORT_OFFSET']) delete env[key]
   await runBounded(require('electron'), [fileURLToPath(new URL('../../crabot-desktop/tests/installer-host-probe.cjs', import.meta.url))], { env, timeout: 180_000 })
   const report = JSON.parse(await fs.readFile(path.join(root, 'probe-report.json'), 'utf8'))
-  for (const key of ['trusted_backend_in_asar', 'trusted_repair_backend_in_asar', 'trusted_removal_reader_in_asar', 'trusted_removal_proof_in_asar', 'trusted_removal_host_backend_in_asar', 'trusted_common_stop_in_asar', 'trusted_initial_removal_frame_in_asar', 'trusted_initial_removal_job_in_asar', 'trusted_cli_removal_in_asar', 'opaque_payload_verified', 'sandboxed_progress_preload', 'sandboxed_removal_progress_preload', 'outside_checkout']) assert.equal(report[key], true)
+  for (const key of ['trusted_backend_in_asar', 'trusted_repair_backend_in_asar', 'trusted_removal_reader_in_asar', 'trusted_removal_proof_in_asar', 'trusted_removal_host_backend_in_asar', 'trusted_common_stop_in_asar', 'trusted_initial_removal_frame_in_asar', 'trusted_initial_removal_job_in_asar', 'trusted_cli_removal_in_asar', 'trusted_program_inventory_in_asar', 'opaque_payload_verified', 'sandboxed_progress_preload', 'sandboxed_removal_progress_preload', 'outside_checkout']) assert.equal(report[key], true)
   assert.equal(report.actual_installer_flow, false); assert.equal(report.business_mm_started, false)
   }
 } finally { await fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }

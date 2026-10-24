@@ -40,6 +40,8 @@ for (const [file, expected] of [
   ['scripts/lib/desktop-repair.mjs', true],
   ['scripts/lib/desktop-program-proof.mjs', true],
   ['scripts/lib/desktop-removal-proof.mjs', true],
+  ['scripts/lib/desktop-removal-programs.mjs', true],
+  ['scripts/lib/__tests__/desktop-removal-programs.test.mjs', true],
   ['.github/scripts/paired-update-source-data.test.mjs', true],
   ['.github/scripts/paired-update-source-activity.test.mjs', true],
   ['crabot-desktop/tests/fixtures/paired-update-source-activity.cjs', true],
