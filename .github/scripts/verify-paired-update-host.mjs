@@ -19,6 +19,7 @@ import { stopInstance } from '../../scripts/lib/instance-controller.mjs'
 import product from '../../scripts/lib/product-runtime.cjs'
 import { buildPairedUpdateSource } from './build-paired-update-source.mjs'
 import { preparePairedUpdateCore } from './prepare-paired-update-core.mjs'
+import { startPairedUpdateModelProvider } from '../../crabot-desktop/tests/fixtures/paired-update-model-provider.mjs'
 
 if (process.env.GITHUB_ACTIONS !== 'true' || !['darwin', 'win32'].includes(process.platform)) throw new Error('Requires an isolated macOS/Windows CI user; never run against a developer MM')
 const acceptanceId = process.env.CRABOT_PAIRED_ACCEPTANCE_ID
@@ -42,7 +43,7 @@ if (space.bavail * space.bsize < needed || temporarySpace.bavail * temporarySpac
 const job = path.join(repository, '.desktop-build', 'paired-update-' + randomBytes(12).toString('hex')), temporary = await fs.mkdtemp(path.join(tmpdir(), 'Crabot 更新 '))
 await fs.mkdir(job, { mode: 0o700 }); const control = path.join(temporary, 'control'), home = path.join(temporary, 'home')
 await fs.mkdir(control, { mode: 0o700 }); await fs.mkdir(home, { mode: 0o700 })
-let selected, child, targetIdentity, sourceIdentity, expectedTargetGuiRoot, phase = 'prepare-target', success = false, sourceOutput = ''
+let modelProvider, selected, child, targetIdentity, sourceIdentity, expectedTargetGuiRoot, phase = 'prepare-target', success = false, sourceOutput = ''
 const report = { acceptance_id: acceptanceId, platform: process.platform, arch: process.arch, candidate_channel_enabled: false, remote_model_called: false,
   source_gui: 'fixture-packaged-component-actor', target_gui: 'ordinary-packaged-main', fixture_debugger: false, real_login_session_verified: false }
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
@@ -83,7 +84,8 @@ try {
   await fs.rm(path.join(job, 'source-project'), { recursive: true })
   expectedTargetGuiRoot = path.join(selected.root, 'app/releases', target.record.selection.gui_id)
   const sentinel = path.join(selected.dataDir, 'update-fixture-preserved.txt')
-  const metadata = { source: selected, home, control, publicKey: keys.publicKey.export({ type: 'spki', format: 'pem' }).toString(), publication,
+  modelProvider = await startPairedUpdateModelProvider()
+  const metadata = { modelEndpoint: modelProvider.endpoint, source: selected, home, control, publicKey: keys.publicKey.export({ type: 'spki', format: 'pem' }).toString(), publication,
     manifestName: path.basename(signed.manifestFile), signaturesName: path.basename(signed.signaturesFile), artifactName: path.basename(signed.artifact), targetVersion }
   const config = path.join(control, 'config.json'); await fs.writeFile(config, JSON.stringify(metadata) + '\n', { mode: 0o600 })
   const env = { ...process.env, HOME: home, USERPROFILE: home, APPDATA: path.join(home, 'Roaming'), LOCALAPPDATA: path.join(home, 'Local'), DATA_DIR: selected.dataDir, GIT_ALLOW_PROTOCOL: 'file', CRABOT_PAIRED_UPDATE_FIXTURE_CONFIG: config }
@@ -94,6 +96,7 @@ try {
   child.on('error', error => { sourceOutput += String(error) })
   sourceIdentity = await poll('source actor identity', async () => identity.inspectProcess(child.pid), 10000)
   const before = await poll('source ready', () => readControl('source-ready'))
+  assert.equal(before.model_configured_via_http, true)
   const handoff = await poll('committed target handoff', () => readControl('handoff'), 420000)
   assert.deepEqual(handoff.target, target.record.selection); assert.equal(handoff.ordinary_exits, 0); assert.equal(handoff.requests, 3)
   assert.match(handoff.maintenance_id, /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/); assert.equal(handoff.production_peer_policy_verified, true)
@@ -121,7 +124,7 @@ try {
   assert.equal(after.state, 'running'); assert.equal(after.record.install_root, current.coreRoot); assert.equal(after.record.instance_id, before.instance_id); assert.notEqual(after.record.generation, before.generation)
   for (const process of [before.controller, before.mm]) assert.equal(identity.sameProcess(process, identity.inspectProcess(process.pid)), false)
   assert.equal(await fs.readFile(sentinel, 'utf8'), 'preserved across the actual pair handoff\n')
-  Object.assign(report, { source_version: original.version, target_version: targetVersion, selected_pair: current.selection,
+  Object.assign(report, { source_model_configured_via_http: before.model_configured_via_http, model_substitute: true, source_version: original.version, target_version: targetVersion, selected_pair: current.selection,
     source_exited: true, old_mm_stopped: true, target_executable_verified: true, target_main_ready: true,
     same_instance_new_generation: true, maintenance_cleared_after_real_health: true, data_preserved: true, normal_peer_policy_verified: true,
     target_health_proof: 'ordinary-main-maintenance-completion', renderer_inspected: false,
@@ -170,6 +173,11 @@ try {
       if (!await fs.lstat(application).then(() => true, error => { if (error.code === 'ENOENT') return false; throw error })) continue
       await promisify(execFile)('/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister', ['-u', application], { timeout: 30000 }).catch(() => { process.exitCode = 1 })
     }
+  }
+  if (modelProvider) {
+    report.model_fixture_requests = { ...modelProvider.evidence }
+    try { await modelProvider.close() }
+    catch { process.exitCode = 1; if (!report.failure_code) Object.assign(report, { failure_phase: 'fixture-provider-cleanup', failure_code: 'FIXTURE_PROVIDER_CLEANUP_UNVERIFIED' }) }
   }
   const diagnostics = path.join(repository, '.desktop-build/fixture-diagnostics'); await fs.mkdir(diagnostics, { recursive: true })
   await fs.writeFile(path.join(diagnostics, 'paired-update-source.log'), sourceOutput)

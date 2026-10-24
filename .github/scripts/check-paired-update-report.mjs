@@ -4,7 +4,7 @@ import assert from 'node:assert/strict'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
-const completed = ['source_exited', 'old_mm_stopped', 'target_executable_verified', 'target_main_ready', 'same_instance_new_generation',
+const completed = ['source_model_configured_via_http', 'model_substitute', 'source_exited', 'old_mm_stopped', 'target_executable_verified', 'target_main_ready', 'same_instance_new_generation',
   'maintenance_cleared_after_real_health', 'data_preserved', 'normal_peer_policy_verified', 'fixture_core_stopped', 'fixture_gui_stopped', 'temporary_program_copies_removed']
 const excluded = ['candidate_channel_enabled', 'remote_model_called', 'fixture_debugger', 'real_login_session_verified', 'renderer_inspected', 'historical_migration_tested', 'os_login_tested']
 export function verifyPairedUpdateReport(report, expectedId) {

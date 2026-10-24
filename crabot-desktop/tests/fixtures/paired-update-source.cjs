@@ -40,10 +40,12 @@ void app.whenReady().then(async () => {
     loginStartup: { captureForUpdate: async () => 'off', restoreForUpdate: async () => assert.fail('Source may not restore target login') } })
   const { startPairedUpdateSource } = require('./paired-update-source-data.cjs')
   const state = await startPairedUpdateSource(controller, config.source.dataDir)
+  const { configurePairedSourceModel } = require('./paired-update-source-model.cjs')
+  const model = await configurePairedSourceModel(controller.host, config.modelEndpoint)
   const runtime = await import(pathToFileURL(path.join(config.source.coreRoot, 'scripts/lib/instance-runtime.mjs')).href)
   const source = runtime.inspectInstance(config.source.dataDir)
   assert.equal(source.state, 'running'); assert.ok(source.record.mm)
-  write('source-ready', { generation: state.generation, instance_id: state.instance_id, mm: source.record.mm, controller: source.record.controller })
+  write('source-ready', { model_configured_via_http: model.configured_via_http, generation: state.generation, instance_id: state.instance_id, mm: source.record.mm, controller: source.record.controller })
   const deadline = Date.now() + 120_000
   while (await controller.updateActivity() !== 'idle') {
     if (Date.now() >= deadline) {

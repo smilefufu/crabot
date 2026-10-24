@@ -8,13 +8,13 @@ import { promisify } from 'node:util'
 import { fileURLToPath } from 'node:url'
 const expectedId = '12345-1-darwin-arm64', checker = fileURLToPath(new URL('check-paired-update-report.mjs', import.meta.url))
 const complete = () => ({ acceptance_id: expectedId, platform: 'darwin', arch: 'arm64', candidate_channel_enabled: false, remote_model_called: false,
-  source_gui: 'fixture-packaged-component-actor', target_gui: 'ordinary-packaged-main', fixture_debugger: false, real_login_session_verified: false,
+  source_model_configured_via_http: true, model_substitute: true, source_gui: 'fixture-packaged-component-actor', target_gui: 'ordinary-packaged-main', fixture_debugger: false, real_login_session_verified: false,
   source_version: '1.2.3', target_version: '1.2.4-desktop-fixture.1', selected_pair: { schema_version: 1, version: '1.2.4-desktop-fixture.1',
     gui_id: '01234567-1234-1234-1234-123456789abc', core_id: 'a'.repeat(64) }, source_exited: true, old_mm_stopped: true,
   target_executable_verified: true, target_main_ready: true, same_instance_new_generation: true, maintenance_cleared_after_real_health: true,
   data_preserved: true, normal_peer_policy_verified: true, target_health_proof: 'ordinary-main-maintenance-completion', renderer_inspected: false,
   historical_migration_tested: false, os_login_tested: false, fixture_core_stopped: true, fixture_gui_stopped: true, temporary_program_copies_removed: true })
-for (const mode of ['complete', 'observed-zero-exit-failure', 'stale', 'missing-health', 'cleanup', 'wrong-pair', 'peer-bypass', 'contradictory', 'absent']) {
+for (const mode of ['complete', 'observed-zero-exit-failure', 'stale', 'missing-health', 'source-unconfigured', 'cleanup', 'wrong-pair', 'peer-bypass', 'contradictory', 'absent']) {
   test('independent paired update result gate: ' + mode, async t => {
     const root = await fs.mkdtemp(path.join(tmpdir(), 'crabot-update-result-')); t.after(() => fs.rm(root, { recursive: true, force: true }))
     const file = path.join(root, 'report.json'), report = complete()
@@ -25,6 +25,7 @@ for (const mode of ['complete', 'observed-zero-exit-failure', 'stale', 'missing-
     } else if (mode !== 'absent') {
       if (mode === 'stale') report.acceptance_id = '12344-1-darwin-arm64'
       else if (mode === 'missing-health') delete report.maintenance_cleared_after_real_health
+      else if (mode === 'source-unconfigured') delete report.source_model_configured_via_http
       else if (mode === 'cleanup') report.temporary_program_copies_removed = false
       else if (mode === 'wrong-pair') report.selected_pair.version = '1.2.3'
       else if (mode === 'peer-bypass') report.normal_peer_policy_verified = false
