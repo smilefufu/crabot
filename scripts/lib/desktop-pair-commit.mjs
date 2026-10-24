@@ -19,9 +19,9 @@ function pair(value) {
     || typeof value.gui_id !== 'string' || !/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(value.gui_id)
     || typeof value.core_id !== 'string' || !/^[a-f0-9]{64}$/.test(value.core_id)) fail()
 }
-async function privateText(file) {
+async function privateText(file, limit = 64 * 1024 * 1024) {
   const stat = await fs.lstat(file)
-  if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || stat.size > 64 * 1024 * 1024
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || stat.size > limit
     || (process.platform === 'win32' ? !identity.isPrivateFile(file) : stat.uid !== process.getuid() || (stat.mode & 0o777) !== 0o600)) fail()
   return fs.readFile(file, 'utf8')
 }
@@ -95,4 +95,37 @@ export async function commitPreparedDesktopPair(prepared, { maintenanceId, verif
     if (!same(selected.selection, prepared.selection)) fail()
     return selected
   } finally { if (lock) releaseCliLock(lock); releaseCliLock(rootLock) }
+}
+
+// Read-only recovery context for the already selected target. It grants no
+// stop, commit, migration or startup authority and requires the current lock.
+export async function readCommittedDesktopPair(installRoot, maintenanceId) {
+  if (!/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(maintenanceId ?? '')) fail()
+  const own = installation.readDesktopSelection(installRoot), record = readVersionMaintenance(own.dataDir)
+  const directory = management.requirePrivateDataRoot(path.join(own.root, 'app/updates', maintenanceId))
+  management.requirePrivateDataRoot(path.dirname(directory))
+  const file = path.join(directory, 'selection.json'), text = await privateText(file, 4096)
+  let value
+  try { value = JSON.parse(text); pair(value.source); pair(value.target) } catch { fail() }
+  const expected = { schema_version: 1, installation_id: own.record.installation_id, maintenance_id: maintenanceId,
+    source: value.source, target: value.target, payload_sha256: value.payload_sha256 }
+  if (JSON.stringify(expected) + '\n' !== text || !/^[a-f0-9]{64}$/.test(value.payload_sha256 ?? '')
+    || same(value.source, value.target) || !same(own.selection, value.target)) fail()
+  const verify = () => {
+    const current = installation.readDesktopSelection(own.root), currentRecord = readVersionMaintenance(own.dataDir)
+    if (!cliLockToken(path.join(own.dataDir, 'cli.lock')) || !same(current.record, own.record) || !same(current.selection, value.target)
+      || !same(currentRecord, record) || record?.schema_version !== 3 || record.id !== maintenanceId || record.phase !== 'verifying'
+      || record.system_operation_id !== undefined || record.install_root !== path.join(own.root, 'releases', value.source.core_id)
+      || record.source_version !== value.source.version || record.source_inventory_sha256 !== value.source.core_id
+      || record.target_version !== value.target.version || record.target_core?.root !== own.coreRoot
+      || record.target_core.inventory_sha256 !== value.target.core_id) fail()
+  }
+  verify()
+  const prepared = { installRoot: own.root, installation_id: own.record.installation_id, source: value.source,
+    selection: value.target, coreRoot: own.coreRoot, guiRoot: own.guiRoot,
+    proof: { file: path.join(own.root, 'app/payloads', value.target.gui_id + '.json'), sha256: value.payload_sha256 } }
+  await verifyPreparedDesktopPair(prepared)
+  verify()
+  if (await privateText(file, 4096) !== text) fail()
+  return prepared
 }

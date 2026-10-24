@@ -114,9 +114,10 @@ export class LoginStartupUpdateStore {
     const proof = this.proofs.get(record)
     if (!proof) fail()
     if (record.phase === 'consumed') return
-    await this.publish(JSON.stringify({ ...record, phase: 'consumed' }) + '\n', proof)
+    const text = JSON.stringify({ ...record, phase: 'consumed' }) + '\n'
+    await this.publish(text, proof)
     this.proofs.delete(record)
     this.guard('target')
-    if ((await this.snapshot())?.text !== JSON.stringify({ ...record, phase: 'consumed' }) + '\n') fail()
+    if ((await this.snapshot())?.text !== text) fail()
   }
 }

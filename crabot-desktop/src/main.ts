@@ -100,7 +100,12 @@ async function boot() {
   let startupState: StartupState = await startup.get().catch(() => ({ supported: app.isPackaged, enabled: false, approvalRequired: false }))
   const background = process.argv.includes('--background') || startup.launchedAtLogin()
   await access(path.join(coreRoot, 'crabot-admin/dist/web/desktop.html'))
-  controller = new DesktopController({ coreRoot, dataRoot, appVersion: app.getVersion(), platform: process.platform as 'darwin' | 'win32' | 'linux', packaged: app.isPackaged, verifyBinding })
+  controller = new DesktopController({ coreRoot, dataRoot, appVersion: app.getVersion(), platform: process.platform as 'darwin' | 'win32' | 'linux', packaged: app.isPackaged, verifyBinding, loginStartup: startup,
+    loginStartupRecovered: state => {
+      if (state) { startupState = state; updateMenus() }
+      else void dialog.showMessageBox({ type: 'warning', message: '登录启动设置尚未恢复。',
+        detail: '服务仍按正常流程恢复。请在系统登录项中核对 Crabot，也可从应用菜单重新设置。更新记录和业务数据已保留。', buttons: ['知道了'] }).catch(() => {})
+    } })
   let driver = null, configurationError = false
   try { driver = await createUpdateDriver({ resources: process.resourcesPath, cacheRoot: path.join(dataRoot, 'runtime-cache'), packaged: app.isPackaged,
     beginExit: () => { quitting = true; return () => { quitting = false } } }) }

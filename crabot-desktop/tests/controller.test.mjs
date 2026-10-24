@@ -323,3 +323,97 @@ test('paired commit serializes later GUI stop and keeps its watcher suspended un
   assert.equal(f.calls.filter(item => item === 'stop').length, 2)
   assert.ok(f.calls.lastIndexOf('stop') > f.calls.indexOf('entries'))
 })
+
+for (const fail of [false, true]) test('bound login intent is captured before the shared service stops: ' + fail, async t => {
+  const f = await pairedController(t)
+  f.controller.options.loginStartup = { captureForUpdate: async () => 'off' }
+  f.controller.captureLoginStartup = async (prepared, id) => {
+    assert.equal(prepared, f.prepared); assert.equal(id, f.record().id)
+    assert.equal(f.record().phase, 'preparing')
+    assert.equal(f.calls.includes('stop'), false)
+    assert.equal(f.calls.includes('unlock'), false)
+    f.calls.push('login-capture')
+    if (fail) throw new Error('Unknown OS entry')
+  }
+  if (fail) {
+    await assert.rejects(f.run(), /Unknown OS entry/)
+    assert.equal(f.calls.includes('stop'), false); assert.equal(f.calls.includes('migrate'), false)
+    assert.equal(f.record().phase, 'preparing'); assert.equal(f.calls.at(-1), 'unlock')
+  } else {
+    await f.run()
+    assert.ok(f.calls.indexOf('login-capture') > f.calls.indexOf('bind'))
+    assert.ok(f.calls.indexOf('login-capture') < f.calls.indexOf('stop'))
+  }
+})
+
+test('target login recovery stays inside compatible-data recovery before the health gate', async t => {
+  const controller = new DesktopController({ coreRoot: '/unused', dataRoot: '/unused', appVersion: 'fixture', platform: process.platform,
+    loginStartup: { captureForUpdate: async () => 'off', restoreForUpdate: async () => assert.fail('No OS mutation in this orchestration fixture') } })
+  t.after(() => controller.close())
+  const calls = []
+  controller.load = async file => {
+    if (file.endsWith('version-maintenance.mjs')) return {
+      readVersionMaintenance: () => ({ id: 'current' }), recoverVersionMaintenance: async options => {
+        calls.push('lock'); await options.verifyCompatible(); assert.equal(await options.run(), false); calls.push('health-failed')
+      },
+    }
+    if (file.endsWith('core-preparation.mjs')) return { verifyDataCompatibility: () => { calls.push('compatibility'); return [] } }
+    if (file.endsWith('maintenance-backup.mjs')) return { assertLocalMigrationData: async () => { calls.push('coverage') } }
+    throw new Error('Unexpected adapter')
+  }
+  controller.recoverLoginStartup = async () => { calls.push('login') }
+  controller.startCore = async () => { calls.push('start'); controller.host.status('error') }
+  await controller.recoverVersion()
+  assert.deepEqual(calls, ['lock', 'compatibility', 'coverage', 'login', 'start', 'health-failed'])
+})
+
+for (const source of [true, false]) test('source recovery and old target jobs do not create or replay login intent: ' + source, async t => {
+  const root = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'login-no-replay-')))
+  t.after(() => fs.rm(root, { recursive: true, force: true }))
+  let os = 0, notices = 0
+  const controller = new DesktopController({ coreRoot: '/target', dataRoot: '/data', appVersion: '1.2.4', platform: process.platform,
+    loginStartup: { captureForUpdate: async () => { os++; return 'on' }, restoreForUpdate: async () => { os++; throw new Error('No intent') } },
+    loginStartupRecovered: () => { notices++ } })
+  t.after(() => controller.close())
+  controller.load = async file => {
+    if (file.endsWith('version-maintenance.mjs')) return { readVersionMaintenance: () => ({ schema_version: 3, phase: 'verifying',
+      id: '11111111-1111-4111-8111-111111111111', install_root: source ? '/target' : '/source', target_core: { root: '/target' } }) }
+    if (file.endsWith('desktop-installation.cjs')) return { default: { locateDesktopCore: () => ({ root, dataDir: '/data' }) } }
+    assert.fail('No old job scan, proof replay or start/stop import: ' + file)
+  }
+  await controller.recoverLoginStartup()
+  assert.equal(os, 0); assert.equal(notices, 0); assert.deepEqual(await fs.readdir(root), [])
+})
+
+for (const health of [false, true]) test('an unconfirmed login recovery cannot clear or fake business health: ' + health, async t => {
+  const calls = [], notices = []
+  const controller = new DesktopController({ coreRoot: '/target', dataRoot: '/data', appVersion: '1.2.4', platform: process.platform,
+    loginStartup: { captureForUpdate: async () => assert.fail('No capture'), restoreForUpdate: async () => assert.fail('Unverified OS operation') },
+    loginStartupRecovered: state => notices.push(state) })
+  t.after(() => controller.close())
+  controller.load = async file => {
+    if (file.endsWith('version-maintenance.mjs')) return {
+      readVersionMaintenance: () => ({ schema_version: 3, phase: 'verifying', install_root: '/source', target_core: { root: '/target' } }),
+      recoverVersionMaintenance: async options => {
+        calls.push('lock'); await options.verifyCompatible()
+        if (!await options.run()) throw Object.assign(new Error('Health unconfirmed'), { code: 'CRABOT_MAINTENANCE_PENDING' })
+        await options.verifyCompatible(); calls.push('clear')
+      },
+    }
+    if (file.endsWith('core-preparation.mjs')) return { verifyDataCompatibility: () => { calls.push('compatibility'); return [] } }
+    if (file.endsWith('maintenance-backup.mjs')) return { assertLocalMigrationData: async () => { calls.push('coverage') } }
+    if (file.endsWith('desktop-installation.cjs')) throw new Error('Login installation unconfirmed')
+    assert.fail('Unexpected adapter: ' + file)
+  }
+  controller.startCore = async () => {
+    calls.push('start')
+    if (health) controller.host.publish({ phase: 'ready', app_version: '1.2.4', platform: process.platform,
+      instance_id: '1'.repeat(64), generation: '11111111-1111-4111-8111-111111111111', admin_url: 'http://127.0.0.1:3000' })
+    else controller.host.status('error')
+  }
+  if (health) await controller.recoverVersion()
+  else await assert.rejects(controller.recoverVersion(), { code: 'CRABOT_MAINTENANCE_PENDING' })
+  assert.deepEqual(notices, [null]); assert.equal(calls.includes('start'), true)
+  assert.equal(calls.includes('clear'), health)
+  assert.equal(calls.filter(item => item === 'compatibility').length, health ? 2 : 1)
+})

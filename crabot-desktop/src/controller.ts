@@ -1,11 +1,13 @@
 import { existsSync, realpathSync } from 'node:fs'
-import { readdir } from 'node:fs/promises'
+import { lstat, readdir } from 'node:fs/promises'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { ActivityClient, HttpClient, type DesktopHostState } from 'crabot-client'
 import { SessionHost, sameHostContext } from './session-host.js'
 import type { UpdateDownload } from './update-dialog.js'
 import type { PreparedInstallation } from './installation-entries.js'
+import type { LoginStartup, StartupState } from './login-startup.js'
+import { LoginStartupUpdateStore } from './login-startup-update.js'
 
 export type PreparedDesktopPair = PreparedInstallation & { source: PreparedInstallation['selection']; proof: { file: string; sha256: string } }
 
@@ -16,7 +18,8 @@ export class DesktopController {
   private polling?: ReturnType<typeof setInterval>
   private checking = false
   private retries = 0
-  constructor(private readonly options: { coreRoot: string; dataRoot: string; appVersion: string; platform: 'darwin' | 'win32' | 'linux'; packaged?: boolean; verifyBinding?: () => void }) {
+  constructor(private readonly options: { coreRoot: string; dataRoot: string; appVersion: string; platform: 'darwin' | 'win32' | 'linux'; packaged?: boolean; verifyBinding?: () => void;
+    loginStartup?: Pick<LoginStartup, 'captureForUpdate' | 'restoreForUpdate'>; loginStartupRecovered?: (state: StartupState | null) => void }) {
     this.host = new SessionHost(options)
   }
   private load(file: string, root = this.options.coreRoot): Promise<any> { return import(pathToFileURL(path.join(root, file)).href) }
@@ -46,6 +49,7 @@ export class DesktopController {
     else if (code === 'CRABOT_MIGRATION_INTERRUPTED') message = '上次数据迁移尚未完成，已停止自动重试。原数据、备份和维护记录已保留，请查看基础诊断并按恢复流程处理。'
     else if (['CRABOT_PREFLIGHT_BUSY', 'CRABOT_PREFLIGHT_INTERRUPTED', 'CRABOT_PREFLIGHT_TIMEOUT'].includes(code)) message = '上次启动检查尚未确认结束，检查记录已保留。稍后点击启动可重新核对；只有旧检查进程已结束才会继续，不会清空数据。'
     else if (code === 'CRABOT_INSTANCE_STARTING') message = '服务仍在启动。请稍候重新检查状态，再停止服务。'
+    else if (code === 'CRABOT_LOGIN_STARTUP_UPDATE') message = '登录启动设置无法核验，尚未停止服务或开始版本切换。请核对系统登录项；原设置和更新记录已保留。'
     else if (code === 'CRABOT_MAINTENANCE_PENDING') message = '版本更新尚未核验完成。请退出并重新打开 Crabot 检查恢复；仍未恢复时重新安装目标版本，保留现有数据。'
     this.host.status(migration ? 'migration_required' : 'error', message, code)
   }
@@ -135,6 +139,10 @@ export class DesktopController {
         checkSource(); await this.current()
         record = await maintenance.beginVersionMaintenance(this.options.dataRoot, this.options.coreRoot, prepared.selection.version, this.options.appVersion, { dataProtection: 'scoped' })
         await maintenance.bindVersionMaintenanceTarget(this.options.dataRoot, record.id, root)
+        if (this.options.loginStartup) {
+          await this.captureLoginStartup(prepared, record.id)
+          checkSource(); await this.current(); checkSource()
+        }
         this.host.status('stopping', '正在停止共享实例并准备更新所需的数据转换。')
         await stopInstance(this.options.dataRoot)
         checkSource()
@@ -153,6 +161,64 @@ export class DesktopController {
     this.operation = pending.then(() => {}, () => {}).finally(() => { this.busy-- })
     return pending
   }
+  private async loginStartupStore(prepared: PreparedDesktopPair, id: string, phase: 'preparing' | 'verifying') {
+    const { cliLockToken } = await this.load('scripts/lib/cli-lock.mjs', prepared.coreRoot)
+    const maintenance = await this.load('scripts/lib/version-maintenance.mjs', prepared.coreRoot)
+    const guard = () => {
+      this.options.verifyBinding?.()
+      const record = maintenance.readVersionMaintenance(this.options.dataRoot)
+      if (!cliLockToken(path.join(this.options.dataRoot, 'cli.lock')) || record?.schema_version !== 3 || record.id !== id
+        || record.phase !== phase || record.data_protection !== 'scoped' || record.system_operation_id !== undefined
+        || record.data_dir !== this.options.dataRoot || record.install_root !== path.join(prepared.installRoot, 'releases', prepared.source.core_id)
+        || record.source_version !== prepared.source.version || record.source_inventory_sha256 !== prepared.source.core_id
+        || record.target_version !== prepared.selection.version || record.target_core?.root !== prepared.coreRoot
+        || record.target_core.inventory_sha256 !== prepared.selection.core_id) {
+        throw Object.assign(new Error('Login startup maintenance binding changed'), { code: 'CRABOT_LOGIN_STARTUP_UPDATE' })
+      }
+    }
+    guard()
+    return new LoginStartupUpdateStore({ installRoot: prepared.installRoot, installation_id: prepared.installation_id,
+      maintenance_id: id, source: prepared.source, target: prepared.selection }, guard)
+  }
+  private async captureLoginStartup(prepared: PreparedDesktopPair, id: string) {
+    try {
+      const store = await this.loginStartupStore(prepared, id, 'preparing')
+      await store.capture(await this.options.loginStartup!.captureForUpdate())
+    } catch {
+      throw Object.assign(new Error('Login startup intent could not be confirmed before stop'), { code: 'CRABOT_LOGIN_STARTUP_UPDATE' })
+    }
+  }
+  private async recoverLoginStartup() {
+    if (!this.options.loginStartup) return
+    try {
+      const maintenance = await this.load('scripts/lib/version-maintenance.mjs')
+      const record = maintenance.readVersionMaintenance(this.options.dataRoot)
+      // Source recovery and old jobs without this sidecar retain their original path.
+      if (record?.schema_version !== 3 || record.phase !== 'verifying' || record.install_root === this.options.coreRoot
+        || record.target_core?.root !== this.options.coreRoot) return
+      this.options.verifyBinding?.()
+      const { default: installation } = await this.load('scripts/lib/desktop-installation.cjs')
+      const own = installation.locateDesktopCore(this.options.coreRoot)
+      if (!own || own.dataDir !== this.options.dataRoot) throw new Error('Login startup installation changed')
+      const sidecar = path.join(own.root, 'app/updates', record.id, 'login-startup.json')
+      const present = await lstat(sidecar).catch(error => { if (error.code === 'ENOENT') return null; throw error })
+      if (!present) return
+      const { readCommittedDesktopPair } = await this.load('scripts/lib/desktop-pair-commit.mjs')
+      const prepared = await readCommittedDesktopPair(own.root, record.id)
+      const store = await this.loginStartupStore(prepared, record.id, 'verifying')
+      const intent = await store.read()
+      if (!intent || intent.phase === 'consumed') return
+      const sourceGui = path.join(prepared.installRoot, 'app/releases', prepared.source.gui_id)
+      const sourceExecutable = path.join(sourceGui, this.options.platform === 'darwin' ? 'Crabot.app/Contents/MacOS/Crabot'
+        : this.options.platform === 'win32' ? 'Crabot.exe' : 'crabot-desktop')
+      const state = await this.options.loginStartup.restoreForUpdate(intent.intent, sourceExecutable)
+      await store.consume(intent)
+      this.options.loginStartupRecovered?.(state)
+    } catch {
+      // This capability cannot clear maintenance, bypass health or mask a data error.
+      this.options.loginStartupRecovered?.(null)
+    }
+  }
   recoverVersion(): Promise<boolean> {
     this.busy++
     const pending = this.operation.then(async () => {
@@ -168,7 +234,7 @@ export class DesktopController {
           }
           await assertLocalMigrationData(this.options.dataRoot, pending, this.options.coreRoot)
         },
-        run: async () => { await this.startCore(); return this.host.snapshot().phase === 'ready' } })
+        run: async () => { await this.recoverLoginStartup(); await this.startCore(); return this.host.snapshot().phase === 'ready' } })
       return true
     })
     this.operation = pending.then(() => {}, () => {}).finally(() => { this.busy-- })

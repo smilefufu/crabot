@@ -11,7 +11,8 @@ export type StartupState = { supported: boolean; enabled: boolean; approvalRequi
 // OS settings are the source of truth. Construction/reading never enrolls the app.
 export class LoginStartup {
   constructor(private readonly options: { platform: string; packaged: boolean; executable: string; configHome: string;
-    app: Pick<App, 'getLoginItemSettings' | 'setLoginItemSettings'>; retargetWindows?: (source: string, target: string) => void | Promise<void> }) {}
+    app: Pick<App, 'getLoginItemSettings' | 'setLoginItemSettings'>; retargetWindows?: (source: string, target: string) => void | Promise<void>;
+    inspectWindows?: (executable: string) => 'absent' | 'different' | 'background' | 'custom' }) {}
   private file() { return path.join(this.options.configHome, 'autostart', 'crabot.desktop') }
   private linuxCommand(executable = this.options.executable): string {
     if (/[\r\n\0=]/.test(executable)) throw new Error('应用路径不能用于登录启动。')
@@ -49,11 +50,16 @@ export class LoginStartup {
       const lines = text?.split(/\r?\n/) ?? []
       return { supported: true, enabled: !!text && !lines.includes('Hidden=true') && !lines.includes('X-GNOME-Autostart-enabled=false'), approvalRequired: false }
     }
-    const state = platform === 'win32' ? this.windowsSettings(executable) : app.getLoginItemSettings()
-    const approvalRequired = platform === 'darwin' && state.status === 'requires-approval'
-    const ownWindowsEntry = platform !== 'win32' || state.launchItems.some(item => item.name === 'Crabot' && item.scope === 'user'
-      && item.path.toLowerCase() === executable.toLowerCase() && JSON.stringify(item.args) === '["--background"]' && item.enabled)
-    return { supported: true, enabled: platform === 'win32' ? ownWindowsEntry : state.openAtLogin && !approvalRequired, approvalRequired }
+    if (platform === 'win32') {
+      const command = this.windowsCommand(executable), state = this.windowsSettings(executable)
+      const enabled = command === 'background' && state.launchItems.some(item => item.name === 'Crabot' && item.scope === 'user'
+        && item.path.toLowerCase() === executable.toLowerCase() && item.enabled)
+      if (this.windowsCommand(executable) !== command) throw new Error('登录启动命令发生变化，请重新核对。')
+      return { supported: true, enabled, approvalRequired: false }
+    }
+    const state = app.getLoginItemSettings()
+    const approvalRequired = state.status === 'requires-approval'
+    return { supported: true, enabled: !!state.openAtLogin && !approvalRequired, approvalRequired }
   }
   async set(enabled: boolean): Promise<StartupState> {
     const { platform, packaged, app, executable } = this.options
@@ -73,17 +79,28 @@ export class LoginStartup {
     if (state.enabled !== enabled && !state.approvalRequired) throw new Error('系统未确认登录启动设置，请检查系统设置。')
     return state
   }
+  private windowsCommand(executable: string) {
+    const inspect = this.options.inspectWindows ?? createRequire(import.meta.url)('./bootstrap/scripts/lib/process-identity.cjs').inspectDesktopLoginStartup
+    if (typeof inspect !== 'function') throw new Error('内置登录启动能力缺失，请修复安装。')
+    const command = inspect(executable)
+    if (!['absent', 'different', 'background', 'custom'].includes(command)) throw new Error('登录启动命令无法核验。')
+    return command
+  }
   private windowsEntry(executable: string) {
-    const state = this.windowsSettings(executable)
-    if (state.launchItems.length > 1 || state.launchItems.some(item => item.name !== 'Crabot' || item.scope !== 'user'
-      || item.path.toLowerCase() !== executable.toLowerCase() || JSON.stringify(item.args) !== '["--background"]')) {
+    const command = this.windowsCommand(executable), state = this.windowsSettings(executable)
+    if (command === 'custom' || state.launchItems.length > 1 || state.launchItems.some(item => item.name !== 'Crabot' || item.scope !== 'user'
+      || item.path.toLowerCase() !== executable.toLowerCase()) || (command === 'background') !== (state.launchItems.length === 1)
+      || this.windowsCommand(executable) !== command) {
       throw new Error('已有登录启动项与当前应用不一致，已保留。请检查系统设置。')
     }
-    return state.launchItems[0]
+    return state.launchItems[0] ?? null
   }
   async captureForUpdate(): Promise<LoginStartupIntent> {
     if (!this.options.packaged) throw new Error('开发模式不建立登录启动更新记录。')
-    if (this.options.platform === 'win32') return this.windowsEntry(this.options.executable)?.enabled ? 'on' : 'off'
+    if (this.options.platform === 'win32') {
+      if (this.windowsCommand(this.options.executable) === 'different') throw new Error('已有登录启动项属于另一应用，未开始更新。')
+      return this.windowsEntry(this.options.executable)?.enabled ? 'on' : 'off'
+    }
     if (this.options.platform === 'darwin' && this.options.app.getLoginItemSettings().status === 'not-found') {
       throw new Error('系统无法识别当前应用的登录启动状态，未开始更新。')
     }

@@ -16,7 +16,10 @@ test('disposable Windows user retains actual StartupApproved bytes across a nati
   const require = createRequire(import.meta.url), env = { ...process.env }
   for (const name of ['ELECTRON_RUN_AS_NODE', 'NODE_OPTIONS', 'NODE_PATH', 'DATA_DIR', 'CRABOT_HOME', 'CRABOT_DEV']) delete env[name]
   const result = await promisify(execFile)(require('electron'), [fileURLToPath(new URL('./login-startup-native.cjs', import.meta.url)), root],
-    { env, timeout: 80000, maxBuffer: 32768, windowsHide: true })
+    { env, timeout: 80000, maxBuffer: 32768, windowsHide: true }).catch(error => {
+      for (const line of String(error.stdout ?? '').split('\n')) if (line.startsWith('CRABOT_LOGIN_LOOKUP ')) console.log(line)
+      throw error
+    })
   assert.match(result.stdout, /"approval_bytes_preserved":true/)
   console.log(result.stdout.trim())
 })

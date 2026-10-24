@@ -24,6 +24,9 @@ void app.whenReady().then(async () => {
   const initial = snapshot()
   assert.equal(initial.length === 2 && initial.every(value => value === null), true, 'Existing login values must be preserved; this CI user is not disposable')
   for (const file of [source, target]) { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, 'finite file, never execute') }
+  assert.equal(native.inspectDesktopLoginStartup(source), 'absent')
+  assert.throws(() => native.inspectDesktopLoginStartup('not-an-absolute-path'))
+  assert.equal(snapshot().every(value => value === null), true)
   const make = (executable, extra = {}) => new LoginStartup({ platform: 'win32', packaged: true, executable, configHome: root, app, ...extra })
   for (const enabled of [true, false]) {
     claimed = true
@@ -35,10 +38,13 @@ void app.whenReady().then(async () => {
       quoted_matches: lookup.launchItems.length, unquoted_matches: app.getLoginItemSettings({ path: source }).launchItems.length,
       entries: lookup.launchItems.map(item => ({ named: item.name === 'Crabot', user: item.scope === 'user',
         exact_program: item.path.toLowerCase() === source.toLowerCase(), background: JSON.stringify(item.args) === '["--background"]', enabled: item.enabled })) }))
+    assert.equal(native.inspectDesktopLoginStartup(source), 'background')
+    assert.equal(native.inspectDesktopLoginStartup(target), 'different')
     assert.equal((await original.get()).enabled, enabled)
     assert.equal(await original.captureForUpdate(), enabled ? 'on' : 'off')
     assert.equal((await updated.restoreForUpdate(enabled ? 'on' : 'off', source)).enabled, enabled)
     const after = snapshot()
+    assert.equal(native.inspectDesktopLoginStartup(target), 'background')
     assert.equal(JSON.stringify(after[1]) === JSON.stringify(before[1]), true, 'StartupApproved bytes and type must remain unchanged')
     native.retargetDesktopLoginStartup(source, target)
     await updated.restoreForUpdate(enabled ? 'on' : 'off', source)
@@ -46,6 +52,7 @@ void app.whenReady().then(async () => {
   }
   app.setLoginItemSettings({ name: 'Crabot', path: source, args: ['--custom'], openAtLogin: true, enabled: false })
   const custom = snapshot()
+  assert.equal(native.inspectDesktopLoginStartup(source), 'custom')
   assert.throws(() => native.retargetDesktopLoginStartup(source, target))
   await assert.rejects(make(source).captureForUpdate())
   assert.equal(JSON.stringify(snapshot()) === JSON.stringify(custom), true)
@@ -56,7 +63,7 @@ void app.whenReady().then(async () => {
   assert.equal(JSON.stringify(snapshot()[1]) === JSON.stringify(veto), true)
   console.log('CRABOT_LOGIN_STARTUP_NATIVE ' + JSON.stringify({ actual_registry: true, named_item_state: true,
     enabled_and_disabled_retarget: true, approval_bytes_preserved: true, custom_preserved: true,
-    lost_reply_readback: true, real_login_session_verified: false, business_mm_started: false }))
+    switches_checked_natively: true, lost_reply_readback: true, real_login_session_verified: false, business_mm_started: false }))
 }).then(() => finish(0), error => { console.error(error.stack); finish(1) })
 function finish(code) {
   try {
@@ -65,7 +72,10 @@ function finish(code) {
         .filter(item => item.name === 'Crabot' && item.scope === 'user')
       assert.equal(items.length, 1, 'Unknown login change: retain values instead of guessing cleanup')
       assert.ok([source, target].includes(items[0].path))
-      assert.ok(['["--background"]', '["--custom"]'].includes(JSON.stringify(items[0].args)))
+      const current = snapshot(), allowed = [source, target].flatMap(program => ['--background', '--custom']
+        .flatMap(argument => [`"${program}" ${argument}`, `"${program}" "${argument}"`]))
+      assert.equal(current[0]?.kind, 'String')
+      assert.ok(allowed.includes(current[0].value), 'Unknown command: retain instead of cleaning up')
       app.setLoginItemSettings({ name: 'Crabot', openAtLogin: false })
       assert.equal(snapshot().every(value => value === null), true)
     }

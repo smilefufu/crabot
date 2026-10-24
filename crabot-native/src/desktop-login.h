@@ -28,6 +28,34 @@ static std::wstring ReadDesktopLoginCommand(HKEY key) {
   if (result.find(L'\0') != std::wstring::npos) throw std::runtime_error("Invalid desktop login command");
   return result;
 }
+// Read-only command inspection; unlike Electron's LaunchItem.args, Win32
+// parsing retains switches. Only the fixed current-user Crabot value is read.
+static napi_value InspectDesktopLogin(napi_env env, napi_callback_info info) {
+  try {
+    size_t argc = 2; napi_value args[2]; napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    if (argc != 1) throw std::runtime_error("Expected one desktop program");
+    auto expected = DesktopLoginPath(env, args[0]);
+    DesktopLoginKey key;
+    LONG opened = RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run", 0, KEY_QUERY_VALUE, &key.value);
+    const char* status = "absent";
+    if (opened != ERROR_FILE_NOT_FOUND && opened != ERROR_SUCCESS) throw std::runtime_error("Cannot inspect desktop login command");
+    if (opened == ERROR_SUCCESS) {
+      DWORD type = 0, bytes = 0;
+      LONG queried = RegQueryValueExW(key.value, L"Crabot", nullptr, &type, nullptr, &bytes);
+      if (queried != ERROR_FILE_NOT_FOUND) {
+        if (queried != ERROR_SUCCESS) throw std::runtime_error("Cannot inspect desktop login command");
+        auto command = ReadDesktopLoginCommand(key.value);
+        int count = 0; LPWSTR* parts = CommandLineToArgvW(command.c_str(), &count);
+        if (!parts || count < 1) { if (parts) LocalFree(parts); throw std::runtime_error("Invalid desktop login command"); }
+        status = _wcsicmp(parts[0], expected.c_str()) != 0 ? "different"
+          : count == 2 && std::wstring(parts[1]) == L"--background" ? "background" : "custom";
+        LocalFree(parts);
+        if (ReadDesktopLoginCommand(key.value) != command) throw std::runtime_error("Desktop login command changed");
+      }
+    }
+    napi_value result; napi_create_string_utf8(env, status, NAPI_AUTO_LENGTH, &result); return result;
+  } catch (const std::exception& error) { napi_throw_error(env, "CRABOT_LOGIN_STARTUP_UPDATE", error.what()); return nullptr; }
+}
 static napi_value RetargetDesktopLogin(napi_env env, napi_callback_info info) {
   try {
     size_t argc = 2; napi_value args[2]; napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);

@@ -449,11 +449,45 @@ test('actual GUI controller runs one scoped Node conversion and commits the stop
   // Target native DLLs are loaded in this child, which exits before Windows
   // cleanup. No MM, GUI, model or system registration is started here.
   const module = pathToFileURL(fileURLToPath(new URL('../../../crabot-desktop/dist/controller.js', import.meta.url))).href
-  const code = `import {DesktopController} from ${JSON.stringify(module)};const [prepared,current]=JSON.parse(process.argv[1]);const c=new DesktopController({coreRoot:current.coreRoot,dataRoot:current.dataDir,appVersion:current.selection.version,platform:process.platform});c.host.status('stopped');let entries=0;try{const selected=await c.applyPreparedPair(prepared,async()=>{entries++});console.log('PAIRED_CONTROLLER '+JSON.stringify({entries,phase:c.host.snapshot().phase,dataDir:selected.dataDir}));}finally{c.close()}`
+  const code = `
+    import {DesktopController} from ${JSON.stringify(module)};
+    import {readFile} from 'node:fs/promises';
+    import path from 'node:path';
+    import {pathToFileURL} from 'node:url';
+    const [prepared,current]=JSON.parse(process.argv[1]);
+    let captures=0, restores=0, entries=0;
+    const notices=[];
+    const c=new DesktopController({coreRoot:current.coreRoot,dataRoot:current.dataDir,appVersion:current.selection.version,platform:process.platform,
+      loginStartup:{captureForUpdate:async()=>{captures++;return 'off'},restoreForUpdate:async()=>{throw new Error('Source may not restore target login')}}});
+    c.host.status('stopped');
+    let target, lock;
+    const locks=await import(pathToFileURL(path.join(prepared.coreRoot,'scripts/lib/cli-lock.mjs')).href);
+    const maintenance=await import(pathToFileURL(path.join(prepared.coreRoot,'scripts/lib/version-maintenance.mjs')).href);
+    try {
+      const selected=await c.applyPreparedPair(prepared,async()=>{entries++});
+      const record=maintenance.readVersionMaintenance(current.dataDir);
+      const sidecar=path.join(prepared.installRoot,'app/updates',record.id,'login-startup.json');
+      target=new DesktopController({coreRoot:prepared.coreRoot,dataRoot:current.dataDir,appVersion:prepared.selection.version,platform:process.platform,
+        loginStartup:{captureForUpdate:async()=>{throw new Error('Target may not capture source intent')},restoreForUpdate:async(intent,source)=>{
+          if(intent!=='off'||!source.includes(current.selection.gui_id))throw new Error('Wrong intent/source');
+          restores++; if(restores===1)throw new Error('Unknown OS result');
+          return {supported:true,enabled:false,approvalRequired:false};
+        }},loginStartupRecovered:state=>{notices.push(state===null?'unconfirmed':'off')}});
+      lock=await locks.acquireStartupLock(current.dataDir,'finite-login-recovery');
+      await target.recoverLoginStartup();
+      const pending=JSON.parse(await readFile(sidecar,'utf8')).phase;
+      await target.recoverLoginStartup();
+      await target.recoverLoginStartup();
+      const phase=JSON.parse(await readFile(sidecar,'utf8')).phase;
+      console.log('PAIRED_CONTROLLER '+JSON.stringify({entries,phase:c.host.snapshot().phase,dataDir:selected.dataDir,
+        login:{captures,restores,notices,pending,phase,maintenance:maintenance.readVersionMaintenance(current.dataDir).phase}}));
+    }finally{if(lock)locks.releaseCliLock(lock);target?.close();c.close()}
+  `
   const result = await promisify(execFile)(process.execPath, ['--input-type=module', '-e', code, JSON.stringify([prepared, current])],
     { env: { ...process.env, PATH: '' }, timeout: 45_000, maxBuffer: 64 * 1024 })
   const evidence = JSON.parse(result.stdout.split('\n').find(line => line.startsWith('PAIRED_CONTROLLER ')).slice('PAIRED_CONTROLLER '.length))
-  assert.deepEqual(evidence, { entries: 1, phase: 'stopped', dataDir: current.dataDir })
+  assert.deepEqual(evidence, { entries: 1, phase: 'stopped', dataDir: current.dataDir,
+    login: { captures: 1, restores: 2, notices: ['unconfirmed', 'off'], pending: 'pending', phase: 'consumed', maintenance: 'verifying' } })
   assert.deepEqual(installation.readDesktopSelection(f.target).selection, prepared.selection)
   assert.equal(await fs.readFile(path.join(current.dataDir, 'fixture/content'), 'utf8'), 'converted by bundled Node')
   assert.equal(await fs.readFile(path.join(current.dataDir, 'fixture/SCHEMA_VERSION'), 'utf8'), 'v2\n')
@@ -520,4 +554,33 @@ test('signed complete release intake reaches actual online preparation without s
   for (const name of ['desktop-maintenance.json', '.upgrade-migrations']) await assert.rejects(fs.lstat(path.join(selected.dataDir, name)), { code: 'ENOENT' })
   assert.deepEqual(await fs.readdir(path.join(f.target, 'data/signed-cache')), [])
   assert.equal((await fs.readdir(path.join(f.target, 'data/download-cache'))).length, 1, 'retry keeps the authenticated archive')
+})
+
+
+for (const changed of [null, 'no-lock', 'journal', 'maintenance', 'program', 'source-selected']) test('read-only committed pair recovery binding: ' + changed, async t => {
+  const f = await stoppedPairFixture(t), { readCommittedDesktopPair } = await import('../desktop-pair-commit.mjs')
+  const { acquireStartupLock, releaseCliLock } = await import('../cli-lock.mjs')
+  await f.commit()
+  const before = await fs.readFile(path.join(f.current.dataDir, 'admin/kept'))
+  let lock
+  try {
+    if (changed !== 'no-lock') lock = await acquireStartupLock(f.current.dataDir, 'finite-login-recovery')
+    if (changed === 'journal') await fs.appendFile(path.join(f.target, 'app/updates', f.record.id, 'selection.json'), ' ')
+    if (changed === 'maintenance') {
+      const file = path.join(f.current.dataDir, 'desktop-maintenance.json'), record = f.maintenance.readVersionMaintenance(f.current.dataDir)
+      await fs.writeFile(file, JSON.stringify({ ...record, source_inventory_sha256: 'd'.repeat(64) }))
+    }
+    if (changed === 'program') await fs.appendFile(path.join(f.prepared.coreRoot, 'package.json'), ' ')
+    if (changed === 'source-selected') await fs.writeFile(path.join(f.target, 'current-release.json'), JSON.stringify(f.current.selection) + '\n')
+    if (changed) await assert.rejects(readCommittedDesktopPair(f.target, f.record.id))
+    else {
+      const restored = await readCommittedDesktopPair(f.target, f.record.id)
+      const { preview, ...expected } = f.prepared
+      assert.deepEqual(restored, expected)
+      assert.equal(Object.hasOwn(restored, 'preview'), false)
+      assert.equal(f.maintenance.readVersionMaintenance(f.current.dataDir).phase, 'verifying')
+    }
+    assert.deepEqual(await fs.readFile(path.join(f.current.dataDir, 'admin/kept')), before)
+    await assert.rejects(fs.stat(path.join(f.current.dataDir, 'mm.pid')), { code: 'ENOENT' })
+  } finally { if (lock) releaseCliLock(lock) }
 })

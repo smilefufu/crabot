@@ -11,10 +11,15 @@ async function fixture(t, extra = {}) {
   t.after(() => rm(configHome, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }))
   const calls = []
   let value = { openAtLogin: false, wasOpenedAtLogin: false, status: 'not-registered', executableWillLaunchAtLogin: false, launchItems: [] }
-  const app = { getLoginItemSettings: options => { calls.push(['get', options]); return value },
+  const app = { getLoginItemSettings: options => { calls.push(['get', options]); return { ...value,
+      launchItems: value.launchItems.map(item => ({ ...item, args: item.args.filter(arg => !arg.startsWith('--')) })) } },
     setLoginItemSettings: options => { calls.push(['set', options]); value = { ...value, openAtLogin: options.openAtLogin, executableWillLaunchAtLogin: options.enabled,
       launchItems: options.path ? [{ name: options.name, path: options.path, args: options.args, scope: 'user', enabled: options.enabled }] : [] } } }
-  return { startup: new LoginStartup({ platform: 'linux', executable: '/opt/中文 Crabot/crabot', packaged: true, configHome, app, ...extra }),
+  return { startup: new LoginStartup({ platform: 'linux', executable: '/opt/中文 Crabot/crabot', packaged: true, configHome, app, inspectWindows: executable => {
+      const item = value.launchItems.find(item => item.name === 'Crabot' && item.scope === 'user')
+      return !item ? 'absent' : item.path.toLowerCase() !== executable.toLowerCase() ? 'different'
+        : JSON.stringify(item.args) === '["--background"]' ? 'background' : 'custom'
+    }, ...extra }),
     configHome, file: path.join(configHome, 'autostart/crabot.desktop'), calls, state: next => { value = { ...value, ...next } } }
 }
 
@@ -116,7 +121,7 @@ function windowsUpdate({ enabled = true, present = true, lostReply = false, path
   const app = {
     getLoginItemSettings: options => ({ openAtLogin: false, wasOpenedAtLogin: false, status: 'not-registered',
       executableWillLaunchAtLogin: !!entry?.enabled,
-      launchItems: entry && entry.path.toLowerCase() === (options.path.startsWith('"') ? options.path.slice(1, -1) : options.path.split(' ')[0]).toLowerCase() ? [{ ...entry }] : [] }),
+      launchItems: entry && entry.path.toLowerCase() === (options.path.startsWith('"') ? options.path.slice(1, -1) : options.path.split(' ')[0]).toLowerCase() ? [{ ...entry, args: entry.args.filter(arg => !arg.startsWith('--')) }] : [] }),
     setLoginItemSettings: () => { throw new Error('Updating must never rewrite StartupApproved through Electron') },
   }
   const retargetWindows = (prior, next) => {
@@ -124,7 +129,9 @@ function windowsUpdate({ enabled = true, present = true, lostReply = false, path
     writes.push({ source: prior, target: next }); entry = { ...entry, path: next }
     if (lostReply) throw new Error('OS write reply lost')
   }
-  const startup = executable => new LoginStartup({ platform: 'win32', executable, packaged: true, configHome: 'unused', app, retargetWindows })
+  const startup = executable => new LoginStartup({ platform: 'win32', executable, packaged: true, configHome: 'unused', app, retargetWindows,
+    inspectWindows: program => !entry ? 'absent' : entry.path.toLowerCase() !== program.toLowerCase() ? 'different'
+      : JSON.stringify(entry.args) === '["--background"]' ? 'background' : 'custom' })
   return { source, target, original: startup(source), updated: startup(target), writes, entry: () => entry }
 }
 for (const enabled of [true, false]) test('Windows retargets only its known source and retains current OS approval: ' + enabled, async () => {
@@ -147,6 +154,7 @@ test('Windows reads back a completed OS write after a lost reply, and does not o
 test('absent or unrelated Windows startup cannot be created or overwritten by a saved on intent', async () => {
   for (const options of [{ present: false }, { path: 'C:\\Other\\program.exe' }]) {
     const f = windowsUpdate(options)
+    if (options.path) await assert.rejects(f.original.captureForUpdate())
     await assert.rejects(f.updated.restoreForUpdate('on', f.source))
     assert.equal(f.writes.length, 0)
     assert.equal((await f.updated.restoreForUpdate('off', f.source)).enabled, false)
