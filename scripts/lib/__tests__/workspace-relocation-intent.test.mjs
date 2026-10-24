@@ -1363,3 +1363,29 @@ test('one synchronous graph checks a shared private directory once and still val
     assert.deepEqual(readWorkspaceRelocationIntent(f.data), accepted)
   } finally { releaseCliLock(lock) }
 })
+
+
+test('one synchronous record graph validates and pins its data root once before final revalidation', async t => {
+  const f = await fixture(t), lock = await acquireCliLock(f.data, 'workspace-relocation')
+  try {
+    const accepted = await beginWorkspaceRelocationIntent(f.input), requireRoot = management.requirePrivateDataRoot
+    let roots = 0
+    const counting = t.mock.method(management, 'requirePrivateDataRoot', (...args) => { roots++; return requireRoot(...args) })
+    try {
+      observeWorkspaceRelocationRecords(() => {
+        assert.deepEqual(readWorkspaceRelocationIntent(f.data), accepted)
+        assert.deepEqual(readWorkspaceRelocationCoordinator(f.data, f.input.id), { launch: null, ready: null })
+      })
+    } finally { counting.mock.restore() }
+    assert.equal(roots, 2, 'initial validation and final actual identity/permission revalidation')
+    const lstat = syncFs.lstatSync
+    let finalRootRechecks = 0
+    const check = t.mock.method(syncFs, 'lstatSync', function(file, ...args) {
+      if (String(file) === f.data && new Error().stack.includes('verifyRecordObservation')) finalRootRechecks++
+      return lstat.call(this, file, ...args)
+    })
+    try { assert.deepEqual(readWorkspaceRelocationIntent(f.data), accepted) }
+    finally { check.mock.restore() }
+    assert.ok(finalRootRechecks >= 2, 'new graph rechecks the actual root, with no cross-frame cache')
+  } finally { releaseCliLock(lock) }
+})

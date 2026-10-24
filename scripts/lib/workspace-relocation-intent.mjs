@@ -67,7 +67,7 @@ function verifyRecordObservation(frame) {
 function recordGraphReader(reader) {
   return function(dataDir, id) {
     const outer = recordObservation === null
-    const frame = recordObservation ?? { values: new Map(), bytes: new Map(), paths: new Map(), roots: new Map() }
+    const frame = recordObservation ?? { values: new Map(), bytes: new Map(), paths: new Map(), roots: new Map(), dataRoots: new Map() }
     if (outer) recordObservation = frame
     try {
       let values = frame.values.get(reader)
@@ -107,8 +107,14 @@ const validIdentity = value => value && Object.keys(value).length === 3 && absol
   && typeof value.dev === 'string' && /^(?:0|[1-9][0-9]*)$/.test(value.dev) && typeof value.ino === 'string' && /^[1-9][0-9]*$/.test(value.ino)
 const legacyRelocationFiles = ['relocation.json', 'relocation-workers.json', 'relocation-worker-processes.json', 'relocation-stop-attempt.json', 'relocation-stop-submission.json', 'relocation-modules.json', 'relocation-module-stop-attempt.json', 'relocation-module-processes', 'relocation-module-stop-submission.json', 'relocation-coordinator.json', 'relocation-coordinator-ready.json', 'relocation-process-stop.jsonl', 'relocation-execution-exit.json', 'relocation-files.json', 'relocation-file-actors.jsonl', 'relocation-worker-closure.json', 'relocation-worker-commits', 'relocation-manager-closure.json', 'relocation-manager-complete.json', 'relocation-root-plan.json', 'relocation-root-published.json', 'relocation-root-selected.json', 'relocation-root-parents.json', 'relocation-root-parents-complete.json', 'relocation-health.json']
 function context(dataDir, locked = false) {
-  const dataRoot = management.requirePrivateDataRoot(dataDir)
-  if (recordObservation) observeRecordPath(dataRoot, 'data', fs.lstatSync(dataRoot, { bigint: true }))
+  // Only the pure synchronous graph shares this pinned root. Mutating callers
+  // still validate immediately; the outer reader rechecks actual root permissions.
+  const cached = !locked && recordObservation?.dataRoots.get(dataDir)
+  const dataRoot = cached || management.requirePrivateDataRoot(dataDir)
+  if (recordObservation && !cached) {
+    observeRecordPath(dataRoot, 'data', fs.lstatSync(dataRoot, { bigint: true }))
+    if (!locked) recordObservation.dataRoots.set(dataDir, dataRoot)
+  }
   if (locked && !cliLockToken(path.join(dataRoot, 'cli.lock'))) fail()
   const baseControl = path.join(dataRoot, 'workspace-control'), control = path.join(baseControl, 'relocation-active')
   return { dataRoot, baseControl, control, file: path.join(control, 'relocation.json') }
