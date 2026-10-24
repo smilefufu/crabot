@@ -155,7 +155,7 @@ jobs:
       - name: Installation and migration regressions
         timeout-minutes: 15
         run: |
-          node --test .github/scripts/paired-update-source-data.test.mjs scripts/lib/__tests__/desktop-asar.test.mjs scripts/lib/__tests__/archive-core.test.mjs scripts/lib/__tests__/core-release.test.mjs scripts/lib/__tests__/stage-core-imports.test.mjs scripts/lib/__tests__/desktop-installation.test.mjs scripts/lib/__tests__/desktop-payload.test.mjs scripts/lib/__tests__/cli-launcher.test.mjs scripts/lib/__tests__/cli-installation.test.mjs
+          node --test .github/scripts/paired-update-source-data.test.mjs .github/scripts/paired-update-source-activity.test.mjs scripts/lib/__tests__/desktop-asar.test.mjs scripts/lib/__tests__/archive-core.test.mjs scripts/lib/__tests__/core-release.test.mjs scripts/lib/__tests__/stage-core-imports.test.mjs scripts/lib/__tests__/desktop-installation.test.mjs scripts/lib/__tests__/desktop-payload.test.mjs scripts/lib/__tests__/cli-launcher.test.mjs scripts/lib/__tests__/cli-installation.test.mjs
           node --test scripts/lib/__tests__/legacy-desktop.test.mjs scripts/lib/__tests__/legacy-entry-fence.test.mjs scripts/lib/__tests__/legacy-system-*.test.mjs
           node --test scripts/lib/__tests__/legacy-mm-rpc.test.mjs scripts/lib/__tests__/module-shutdown-rpc.test.mjs
           node --test scripts/lib/__tests__/legacy-runtime.test.mjs scripts/lib/__tests__/legacy-stop.test.mjs

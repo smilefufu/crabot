@@ -46,7 +46,18 @@ void app.whenReady().then(async () => {
   write('source-ready', { generation: state.generation, instance_id: state.instance_id, mm: source.record.mm, controller: source.record.controller })
   const deadline = Date.now() + 120_000
   while (await controller.updateActivity() !== 'idle') {
-    if (Date.now() >= deadline) throw new Error('Source activity did not become authoritatively idle')
+    if (Date.now() >= deadline) {
+      const { captureSourceActivityEvidence } = require('./paired-update-source-activity.cjs')
+      const evidence = await captureSourceActivityEvidence(controller.host)
+      try {
+        const actual = runtime.inspectInstance(config.source.dataDir)
+        Object.assign(evidence, { runtime_state: actual.state, source_generation_matches: actual.record?.generation === state.generation,
+          selected_core_matches: Boolean(actual.record && fs.realpathSync(actual.record.install_root) === fs.realpathSync(config.source.coreRoot)),
+          mm_alive: Boolean(actual.record?.mm && identity.sameProcess(actual.record.mm, identity.inspectProcess(actual.record.mm.pid))) })
+      } catch { evidence.runtime_state = 'unknown' }
+      write('source-activity', evidence)
+      throw new Error('Source activity did not become authoritatively idle')
+    }
     await new Promise(resolve => setTimeout(resolve, 500))
   }
   const maintenance = await import(pathToFileURL(path.join(config.source.coreRoot, 'scripts/lib/version-maintenance.mjs')).href)

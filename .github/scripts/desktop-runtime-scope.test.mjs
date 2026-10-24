@@ -39,6 +39,8 @@ for (const [file, expected] of [
   ['scripts/lib/desktop-program-proof.mjs', true],
   ['scripts/lib/desktop-removal-proof.mjs', true],
   ['.github/scripts/paired-update-source-data.test.mjs', true],
+  ['.github/scripts/paired-update-source-activity.test.mjs', true],
+  ['crabot-desktop/tests/fixtures/paired-update-source-activity.cjs', true],
   ['crabot-desktop/tests/fixtures/paired-update-source-data.cjs', true],
   ['.github/scripts/check-paired-update-report.mjs', true],
   ['.github/scripts/check-paired-update-report.test.mjs', true],
