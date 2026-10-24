@@ -14,6 +14,7 @@ import { readInstanceRuntime, inspectInstance } from '../../scripts/lib/instance
 import { writeCoreRelease, verifyCoreRelease } from '../../scripts/lib/core-release.mjs'
 import { sealDesktopPayload, prepareDesktopInstallation, commitDesktopInstallation } from '../../scripts/lib/desktop-payload.mjs'
 import identity from '../../scripts/lib/process-identity.cjs'
+import { probeKnownProcessExit } from '../../scripts/lib/known-process-exit.cjs'
 import { prepareDesktopRemovalGui } from '../../scripts/lib/desktop-removal-host.mjs'
 const supported = ['darwin', 'win32'].includes(process.platform), repository = fileURLToPath(new URL('../../', import.meta.url))
 const require = createRequire(new URL('../package.json', import.meta.url))
@@ -65,9 +66,10 @@ before(async () => {
   await sealDesktopPayload(payload)
 }, 120000)
 after(async () => { if (root) await fs.rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }) })
-for (const mode of ['valid', 'node-parent', 'unexpected-source-args', 'changed-copy', 'other-installation', 'publish-close', 'publish-cancel', 'publish-module', 'publish-damaged', 'publish-lost-reply', 'publish-replaced-record', 'publish-live', 'publish-cancel-lost', 'publish-stop', 'publish-stop-wrong-root', 'publish-stop-lost', 'publish-source-verifier', 'publish-source-exit', 'publish-source-ignore', 'publish-source-disconnect', 'resume-valid', 'resume-core-missing', 'resume-wrong-operation', 'resume-changed-copy', 'resume-source-changed']) test('actual protected initial removal frame: ' + mode, { skip: !supported, timeout: 60000 }, async t => {
+for (const mode of ['valid', 'node-parent', 'unexpected-source-args', 'changed-copy', 'other-installation', 'publish-close', 'publish-cancel', 'publish-module', 'publish-damaged', 'publish-lost-reply', 'publish-replaced-record', 'publish-live', 'publish-cancel-lost', 'publish-stop', 'publish-stop-wrong-root', 'publish-stop-lost', 'publish-source-verifier', 'publish-source-exit', 'publish-source-ignore', 'publish-source-disconnect', 'resume-valid', 'resume-core-missing', 'resume-wrong-operation', 'resume-changed-copy', 'resume-source-changed', 'resume-lease-cancel', 'resume-lease-stopping', 'resume-lease-removing', 'resume-lease-completed', 'resume-lease-core-missing', 'resume-lease-wrong-operation', 'resume-lease-busy']) test('actual protected initial removal frame: ' + mode, { skip: !supported, timeout: 60000 }, async t => {
   const area = await fs.mkdtemp(path.join(root, 'case-'))
-  const cancelled = ['publish-cancel', 'publish-cancel-lost', 'publish-stop', 'publish-source-exit', 'publish-source-verifier'].includes(mode)
+  const cancelled = ['publish-cancel', 'publish-cancel-lost', 'publish-stop', 'publish-source-exit', 'publish-source-verifier', 'resume-lease-cancel'].includes(mode)
+  const existingPhase = ({ 'resume-lease-stopping': 'stopping', 'resume-lease-removing': 'removing', 'resume-lease-completed': 'completed' })[mode] || 'preparing'
   const own = await commitDesktopInstallation(await prepareDesktopInstallation({ payload, installRoot: path.join(area, 'installation') }))
   let finite, finiteExited, finiteOutput = ''
   if (mode.startsWith('publish-stop')) {
@@ -112,27 +114,36 @@ for (const mode of ['valid', 'node-parent', 'unexpected-source-args', 'changed-c
   if (mode === 'publish-source-exit') {
     assert.equal(result.handoff, true, JSON.stringify(result))
     const host = result.host, directory = result.directory
+    const exitState = () => probeKnownProcessExit([host]).state
     t.after(async () => {
       if (identity.sameProcess(host, identity.inspectProcess(host.pid))) globalThis.process.kill(host.pid, 'SIGKILL')
-      if (identity.isProcessExited(host.pid)) await fs.rm(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 })
+      if (exitState() === 'stopped') await fs.rm(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 })
     })
     const deadline = Date.now() + 20000
-    while (!(await fs.lstat(cfg.resultFile).catch(() => null)) || !identity.isProcessExited(host.pid)) {
+    while (!(await fs.lstat(cfg.resultFile).catch(() => null)) || exitState() !== 'stopped') {
       if (Date.now() > deadline) throw new Error('Independent host did not finish after actual source exit: ' + JSON.stringify({
-        host_exited: identity.isProcessExited(host.pid), result: await fs.readFile(cfg.resultFile, 'utf8').then(JSON.parse).catch(() => null),
+        host_exit_state: exitState(), result: await fs.readFile(cfg.resultFile, 'utf8').then(JSON.parse).catch(() => null),
       }))
       await new Promise(resolve => setTimeout(resolve, 100))
     }
     result = JSON.parse(await fs.readFile(cfg.resultFile, 'utf8'))
   }
   if (mode.startsWith('resume-')) {
-    assert.equal(result.accepted, ['resume-valid', 'resume-core-missing'].includes(mode), JSON.stringify(result))
+    assert.equal(result.accepted, ['resume-valid', 'resume-core-missing', 'resume-lease-cancel', 'resume-lease-stopping', 'resume-lease-removing', 'resume-lease-completed', 'resume-lease-core-missing'].includes(mode), JSON.stringify(result))
     if (result.accepted) {
-      assert.equal(result.resumed, true); assert.equal(result.record.operation_id, operationId); assert.equal(result.record.phase, 'preparing')
+      assert.equal(result.resumed, true); assert.equal(result.record.operation_id, operationId); assert.equal(result.record.phase, existingPhase)
       assert.equal(result.frame.source_gui.pid, child.pid); assert.deepEqual(result.record.source_selection, own.selection)
-    } else assert.equal(result.code, 'CRABOT_DESKTOP_REMOVAL', JSON.stringify(result))
+    } else if (mode === 'resume-lease-busy') assert.match(result.message, /another crabot CLI operation is in progress/)
+    else assert.equal(result.code, 'CRABOT_DESKTOP_REMOVAL', JSON.stringify(result))
     const removal = (await import('../../scripts/lib/desktop-removal-record.cjs')).default.readDesktopRemoval(own.root)
-    assert.equal(removal.operation_id, operationId); assert.equal(removal.phase, 'preparing')
+    if (mode === 'resume-lease-cancel') { assert.equal(removal, null); assert.equal(result.lease_cancelled, true) }
+    else {
+      assert.equal(removal.operation_id, operationId)
+      const phase = mode === 'resume-lease-core-missing' ? 'stopping' : existingPhase
+      assert.equal(removal.phase, phase)
+      if (['resume-lease-removing', 'resume-lease-completed', 'resume-lease-core-missing'].includes(mode)) assert.equal(result.lease_cancel_rejected, true)
+    }
+    if (mode.startsWith('resume-lease-') && result.accepted) assert.equal(result.phase_after_stop, existingPhase === 'preparing' ? 'stopping' : existingPhase)
   } else if (mode.startsWith('publish-')) {
     assert.equal(result.accepted, true, JSON.stringify(result)); assert.equal(result.published, true)
     assert.equal(result.cancelled, cancelled, JSON.stringify(result)); assert.equal(result.retained, !cancelled)

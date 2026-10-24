@@ -1,11 +1,11 @@
-// Initial private-GUI transaction and normal stop only. No program deletion,
-// executable loading or recovery from an existing removal job occurs here.
+// Separate initial/existing private-GUI transactions share only mutex, normal
+// stop and source-exit observation. Neither deletes programs or executes Core.
 import path from 'node:path'
 import physicalFs from './physical-fs.cjs'
 import identity from './process-identity.cjs'
 import installation from './desktop-installation.cjs'
 import management from './desktop-management.cjs'
-import { captureInitialRemovalGuiHost } from './desktop-removal-frame.mjs'
+import { captureInitialRemovalGuiHost, captureExistingRemovalGuiHost } from './desktop-removal-frame.mjs'
 import { acquireExistingCliLock, releaseCliLock, cliLockToken } from './cli-lock.mjs'
 import { readDesktopRemoval } from './desktop-removal-record.cjs'
 import { readDesktopRemovalProof } from './desktop-removal-proof.mjs'
@@ -23,8 +23,10 @@ const fail = () => { throw Object.assign(new Error('卸载作业或停止结果�
 function absent(file) {
   try { physicalFs.lstatSync(file); return false } catch (error) { if (error.code === 'ENOENT') return true; throw error }
 }
-export async function beginInitialDesktopRemoval({ installRoot, operationId, signal }) {
-  const own = installation.readDesktopSelection(installRoot)
+async function openDesktopRemoval({ installRoot, operationId, signal }, existing) {
+  const base = existing ? installation.readDesktopInstallation(installRoot) : installation.readDesktopSelection(installRoot)
+  const selection = existing ? installation.readDesktopPairReference(base.root).selection : base.selection
+  const own = { ...base, coreRoot: path.join(base.root, 'releases', selection.core_id), guiRoot: path.join(base.root, 'app/releases', selection.gui_id) }
   const rootLock = await acquireExistingCliLock(own.root, 'desktop-removal'), rootToken = cliLockToken(rootLock)
   let dataLock, dataToken, job, pendingStop, pendingSourceExit, closed = false, busy = false, cancelIssued = false
   const close = () => {
@@ -36,9 +38,10 @@ export async function beginInitialDesktopRemoval({ installRoot, operationId, sig
   try {
     dataLock = await acquireExistingCliLock(own.dataDir, 'desktop-removal'); dataToken = cliLockToken(dataLock)
     const dataIdentity = directoryIdentity(await fs.lstat(own.dataDir, { bigint: true }))
-    const captured = await captureInitialRemovalGuiHost({ installRoot: own.root, operationId, signal })
+    const capture = existing ? captureExistingRemovalGuiHost : captureInitialRemovalGuiHost
+    const captured = await capture({ installRoot: own.root, operationId, signal })
     const { proof, facts } = captured
-    let record = { schema_version: 1, installation_id: own.record.installation_id, operation_id: operationId,
+    let record = existing ? captured.record : { schema_version: 1, installation_id: own.record.installation_id, operation_id: operationId,
       source_selection: proof.source_selection, phase: 'preparing', proof_sha256: facts.proof_sha256 }
     const fence = path.join(own.root, '.desktop-removal.json')
     const current = async (published = true) => {
@@ -56,21 +59,28 @@ export async function beginInitialDesktopRemoval({ installRoot, operationId, sig
         || (published ? !same(readDesktopRemoval(own.root), record) : !absent(fence))) fail()
       return structuredClone(record)
     }
-    await current(false); signal?.throwIfAborted()
-    // Establish a fresh fixed job directory exclusively; never adopt old material.
-    const parent = management.ensurePrivateDataRoot(path.join(own.root, 'app/removals'))
-    const directory = path.join(parent, operationId)
-    if (process.platform === 'win32') identity.createPrivateDirectory(directory)
-    else await fs.mkdir(directory, { mode: 0o700 })
-    if (management.requirePrivateDataRoot(directory) !== directory) fail()
-    job = [parent, directory].map(directory => [directory, directoryIdentity(physicalFs.lstatSync(directory, { bigint: true }))])
-    await current(false); signal?.throwIfAborted()
-    await privateJson(path.join(directory, 'proof.json'), proof)
-    await current(false); signal?.throwIfAborted()
-    // A lost publication reply preserves both proof and fence. Releasing locks
-    // is never interpreted as cancellation, even before any service was stopped.
-    await privateJson(fence, record)
-    await current()
+    if (existing) {
+      const parent = management.requirePrivateDataRoot(path.join(own.root, 'app/removals'))
+      const directory = management.requirePrivateDataRoot(path.join(parent, operationId))
+      job = [parent, directory].map(directory => [directory, directoryIdentity(physicalFs.lstatSync(directory, { bigint: true }))])
+      await current(); signal?.throwIfAborted()
+    } else {
+      await current(false); signal?.throwIfAborted()
+      // Establish a fresh fixed job directory exclusively; never adopt old material.
+      const parent = management.ensurePrivateDataRoot(path.join(own.root, 'app/removals'))
+      const directory = path.join(parent, operationId)
+      if (process.platform === 'win32') identity.createPrivateDirectory(directory)
+      else await fs.mkdir(directory, { mode: 0o700 })
+      if (management.requirePrivateDataRoot(directory) !== directory) fail()
+      job = [parent, directory].map(directory => [directory, directoryIdentity(physicalFs.lstatSync(directory, { bigint: true }))])
+      await current(false); signal?.throwIfAborted()
+      await privateJson(path.join(directory, 'proof.json'), proof)
+      await current(false); signal?.throwIfAborted()
+      // A lost publication reply preserves both proof and fence. Releasing locks
+      // is never interpreted as cancellation, even before any service was stopped.
+      await privateJson(fence, record)
+      await current()
+    }
     const assertStopped = () => {
       if (inspectInstance(own.dataDir).state !== 'stopped') fail()
       const records = path.join(own.dataDir, 'module-runtime-registry/records')
@@ -90,8 +100,10 @@ export async function beginInitialDesktopRemoval({ installRoot, operationId, sig
             await current()
             const original = inspectInstance(own.dataDir)
             if (!['running', 'stopped'].includes(original.state) || original.record && original.record.install_root !== own.coreRoot) fail()
-            const stopping = { ...record, phase: 'stopping' }
-            await privateJson(fence, stopping, true); record = stopping
+            if (record.phase === 'preparing') {
+              const stopping = { ...record, phase: 'stopping' }
+              await privateJson(fence, stopping, true); record = stopping
+            }
             await current()
             const actual = inspectInstance(own.dataDir)
             if (actual.record && !same(actual.record, original.record)) fail()
@@ -138,7 +150,7 @@ export async function beginInitialDesktopRemoval({ installRoot, operationId, sig
         return pendingSourceExit
       },
       async cancel() {
-        if (busy) fail()
+        if (busy || ['removing', 'completed'].includes(record.phase)) fail()
         busy = true
         try {
           const checkCancellation = () => current(!cancelIssued || !absent(fence))
@@ -161,3 +173,7 @@ export async function beginInitialDesktopRemoval({ installRoot, operationId, sig
     }
   } catch (error) { close(); throw error }
 }
+
+// Fixed role entrypoints. Existing records can never enter initial publication.
+export function beginInitialDesktopRemoval(options) { return openDesktopRemoval(options, false) }
+export function resumeDesktopRemoval(options) { return openDesktopRemoval(options, true) }

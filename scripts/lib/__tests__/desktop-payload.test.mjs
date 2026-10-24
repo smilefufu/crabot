@@ -14,7 +14,7 @@ import installation from '../desktop-installation.cjs'
 import { writeCoreRelease, verifyCoreRelease } from '../core-release.mjs'
 import { sealDesktopPayload, verifyDesktopPayload, prepareDesktopInstallation, commitDesktopInstallation } from '../desktop-payload.mjs'
 const windows = process.platform === 'win32', launcher = windows ? 'crabot.exe' : 'crabot'
-async function fixture(t, { version = '1.2.3', schema, functional = false } = {}) {
+async function fixture(t, { version = '1.2.3', schema, functional = false, executableNode = true } = {}) {
   const parent = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'Crabot 离线安装 ')))
   t.after(() => fs.rm(parent, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }))
   const payload = path.join(parent, '离线包'), core = path.join(payload, 'core'), gui = path.join(payload, 'gui'), target = path.join(parent, '选择的 目录')
@@ -22,7 +22,11 @@ async function fixture(t, { version = '1.2.3', schema, functional = false } = {}
   const exe = path.join(gui, process.platform === 'darwin' ? 'Crabot.app/Contents/MacOS/Crabot' : windows ? 'Crabot.exe' : 'crabot-desktop')
   await fs.mkdir(path.join(core, 'bin'), { recursive: true })
   const node = path.join(core, windows ? '.product-runtime/node/node.exe' : '.product-runtime/node/bin/node')
-  await fs.mkdir(path.dirname(node), { recursive: true }); await fs.copyFile(process.execPath, node, constants.COPYFILE_FICLONE)
+  await fs.mkdir(path.dirname(node), { recursive: true })
+  // Byte-only proof/repair cases never execute Core. Keep actual official Node
+  // for native CLI launches, migrations and all functional runtime fixtures.
+  if (executableNode || functional) await fs.copyFile(process.execPath, node, constants.COPYFILE_FICLONE)
+  else await fs.writeFile(node, 'inert Node bytes; never executed\n')
   await fs.copyFile(new URL('../../../crabot-native/build/Release/' + launcher, import.meta.url), path.join(core, 'bin', launcher))
   if (!windows) { await fs.chmod(node, 0o755); await fs.chmod(path.join(core, 'bin', launcher), 0o755) }
   for (const file of ['package.json', 'product-runtime.json']) await fs.writeFile(path.join(core, file), JSON.stringify({ version }))
@@ -645,8 +649,8 @@ test('fresh commit cannot consume preparation protection after business data app
   await assert.rejects(fs.stat(path.join(f.target, 'current-release.json')), { code: 'ENOENT' })
 })
 
-async function repairFixture(t) {
-  const f = await fixture(t), prepared = await prepareDesktopInstallation({ payload: f.payload, installRoot: f.target })
+async function repairFixture(t, { executableNode = false } = {}) {
+  const f = await fixture(t, { executableNode }), prepared = await prepareDesktopInstallation({ payload: f.payload, installRoot: f.target })
   const selected = await commitDesktopInstallation(prepared), data = selected.dataDir
   await fs.mkdir(path.join(data, 'workspaces/default'), { recursive: true })
   await fs.writeFile(path.join(data, 'workspaces/default', 'user.txt'), 'user project remains')
@@ -655,7 +659,7 @@ async function repairFixture(t) {
 }
 const repairApi = () => import('../desktop-repair.mjs')
 test('exact-pair repair restores only GUI/Core, preserves data and original protection, and keeps CLI binding', async t => {
-  const f = await repairFixture(t), { prepareDesktopRepair, commitDesktopRepair } = await repairApi()
+  const f = await repairFixture(t, { executableNode: true }), { prepareDesktopRepair, commitDesktopRepair } = await repairApi()
   const gui = path.join(f.prepared.guiRoot, path.relative(f.gui, f.resources), 'app.asar')
   await fs.writeFile(path.join(f.prepared.coreRoot, 'cli.mjs'), 'damaged Core bytes'); await fs.writeFile(gui, 'damaged GUI bytes')
   const before = await fs.readFile(path.join(f.target, 'current-release.json')), launcherBefore = await fs.readFile(f.selected.command)
@@ -852,7 +856,7 @@ test('private preparation JSON supports large inventories and still refuses exis
 })
 
 async function removalProofFixture(t) {
-  const f = await fixture(t), prepared = await prepareDesktopInstallation({ payload: f.payload, installRoot: f.target })
+  const f = await fixture(t, { executableNode: false }), prepared = await prepareDesktopInstallation({ payload: f.payload, installRoot: f.target })
   await commitDesktopInstallation(prepared)
   await fs.writeFile(path.join(f.target, 'data', 'retained-user-file'), 'user content')
   const backend = await import('../desktop-removal-proof.mjs'), operation = randomUUID()
@@ -918,7 +922,7 @@ for (const changed of ['digest', 'bom', 'noncanonical', 'reordered', 'installati
   })
 }
 for (const changed of ['gui', 'core', 'original-proof', 'operation', 'cancelled']) test('removal proof capture refuses unverified sources and leaves no transaction: ' + changed, async t => {
-  const f = await fixture(t), prepared = await prepareDesktopInstallation({ payload: f.payload, installRoot: f.target })
+  const f = await fixture(t, { executableNode: false }), prepared = await prepareDesktopInstallation({ payload: f.payload, installRoot: f.target })
   await commitDesktopInstallation(prepared)
   const backend = await import('../desktop-removal-proof.mjs'), abort = new AbortController()
   if (changed === 'gui') await fs.appendFile(path.join(prepared.guiRoot, process.platform === 'darwin' ? 'Crabot.app/Contents/MacOS/Crabot' : windows ? 'Crabot.exe' : 'crabot-desktop'), 'changed')
@@ -969,7 +973,7 @@ test('GUI byte verification works independently after the paired Core has been r
 })
 for (const mode of ['success', 'cancelled', 'space', 'copy-changed', 'selection-changed', 'lock-lost', 'final-cancel', 'active-version', 'bad-version', 'active-workspace']) {
   test('private macOS/Windows removal GUI preparation never publishes a removal or starts business: ' + mode, { skip: process.platform === 'linux' }, async t => {
-    const f = await fixture(t), prepared = await prepareDesktopInstallation({ payload: f.payload, installRoot: f.target })
+    const f = await fixture(t, { executableNode: false }), prepared = await prepareDesktopInstallation({ payload: f.payload, installRoot: f.target })
     await commitDesktopInstallation(prepared)
     await fs.writeFile(path.join(f.target, 'data/retained-user-file'), 'unchanged')
     const { prepareDesktopRemovalGui } = await import('../desktop-removal-host.mjs')
@@ -1018,7 +1022,7 @@ for (const mode of ['success', 'cancelled', 'space', 'copy-changed', 'selection-
 }
 
 test('initial removal host inspection rejects an ordinary Node caller without publishing any operation', async t => {
-  const f = await fixture(t), prepared = await prepareDesktopInstallation({ payload: f.payload, installRoot: f.target })
+  const f = await fixture(t, { executableNode: false }), prepared = await prepareDesktopInstallation({ payload: f.payload, installRoot: f.target })
   await commitDesktopInstallation(prepared)
   const { inspectInitialRemovalGuiHost } = await import('../desktop-removal-frame.mjs')
   const before = await fs.readdir(f.target), data = await fs.readdir(path.join(f.target, 'data'))
@@ -1028,7 +1032,7 @@ test('initial removal host inspection rejects an ordinary Node caller without pu
 
 
 test('initial removal publication refuses ordinary Node and releases both locks without a fence or blank data', async t => {
-  const f = await fixture(t), prepared = await prepareDesktopInstallation({ payload: f.payload, installRoot: f.target })
+  const f = await fixture(t, { executableNode: false }), prepared = await prepareDesktopInstallation({ payload: f.payload, installRoot: f.target })
   await commitDesktopInstallation(prepared)
   const { beginInitialDesktopRemoval } = await import('../desktop-removal-job.mjs')
   const { acquireExistingCliLock, releaseCliLock } = await import('../cli-lock.mjs')

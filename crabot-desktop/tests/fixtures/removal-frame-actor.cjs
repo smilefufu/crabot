@@ -10,7 +10,7 @@ const host = process.argv.includes('--fixture-removal-host')
 const profile = host ? path.resolve(process.resourcesPath, process.platform === 'darwin' ? '../../../..' : '../..', 'frame-profile') : path.join(cfg.root, 'data/desktop-profile')
 fs.mkdirSync(profile, { recursive: true, mode: 0o700 }); app.setPath('userData', profile)
 const load = name => import(pathToFileURL(path.join(__dirname, 'bootstrap/scripts/lib', name)).href)
-let prepared, child
+let prepared, child, releaseDataLock
 const timer = setTimeout(() => app.exit(2), 60000)
 async function send(result) {
   await new Promise((resolve, reject) => process.send(result, error => error ? reject(error) : resolve()))
@@ -101,6 +101,19 @@ async function main() {
       const captured = await captureExistingRemovalGuiHost({ installRoot: cfg.root,
         operationId: cfg.mode === 'resume-wrong-operation' ? '11111111-1111-4111-8111-111111111111' : cfg.operationId })
       result = { accepted: true, resumed: true, record: captured.record, frame: captured.facts }
+      if (cfg.mode.startsWith('resume-lease-')) {
+        const { resumeDesktopRemoval } = await load('desktop-removal-job.mjs'), assert = require('node:assert/strict')
+        const lease = await resumeDesktopRemoval({ installRoot: cfg.root,
+          operationId: cfg.mode === 'resume-lease-wrong-operation' ? '11111111-1111-4111-8111-111111111111' : cfg.operationId })
+        try {
+          const first = lease.stop(); assert.equal(first, lease.stop()); await first
+          result.phase_after_stop = (await lease.current()).phase
+          if (cfg.mode === 'resume-lease-cancel') { await lease.cancel(); result.lease_cancelled = true }
+          else if (['resume-lease-removing', 'resume-lease-completed', 'resume-lease-core-missing'].includes(cfg.mode)) {
+            await assert.rejects(lease.cancel(), { code: 'CRABOT_DESKTOP_REMOVAL' }); result.lease_cancel_rejected = true
+          }
+        } finally { lease.close() }
+      }
     } else if (cfg.mode.startsWith('publish-')) { result = await publication(); } else { const { inspectInitialRemovalGuiHost } = await load('desktop-removal-frame.mjs'); const frame = await inspectInitialRemovalGuiHost({ installRoot: cfg.inspectRoot || cfg.root, operationId: cfg.operationId }); result = { accepted: true, frame } } }
     catch (error) { result = { accepted: false, code: error.code, stage: error.stage, message: String(error.message).slice(0, 256) } }
     if (['publish-source-exit', 'publish-source-disconnect'].includes(cfg.mode)) {
@@ -118,11 +131,19 @@ async function main() {
     assert.equal(first.accepted, true); assert.equal(first.published, true); assert.equal((await firstExit)[0], 0)
     fs.rmSync(prepared.directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); prepared = undefined
     fs.writeFileSync(process.env.CRABOT_REMOVAL_FRAME_CONFIG, JSON.stringify(cfg))
-    if (cfg.mode === 'resume-core-missing') {
+    if (['resume-core-missing', 'resume-lease-core-missing'].includes(cfg.mode)) {
       const reference = require('./bootstrap/scripts/lib/desktop-installation.cjs').readDesktopPairReference(cfg.root)
       fs.rmSync(path.join(cfg.root, 'releases', reference.selection.core_id), { recursive: true })
     }
+    if (['resume-lease-stopping', 'resume-lease-removing', 'resume-lease-completed'].includes(cfg.mode)) {
+      const fence = path.join(cfg.root, '.desktop-removal.json'), current = JSON.parse(fs.readFileSync(fence, 'utf8'))
+      await (await load('desktop-preparation-files.mjs')).privateJson(fence, { ...current, phase: cfg.mode.slice('resume-lease-'.length) }, true)
+    }
     prepared = await backend.prepareExistingDesktopRemovalGui({ installRoot: cfg.root, operationId: cfg.operationId })
+    if (cfg.mode === 'resume-lease-busy') {
+      const locks = await load('cli-lock.mjs'), file = await locks.acquireExistingCliLock(path.join(cfg.root, 'data'), 'fixture-active-other-owner', 0)
+      releaseDataLock = () => locks.releaseCliLock(file)
+    }
   } else prepared = await (await load('desktop-removal-host.mjs')).prepareDesktopRemovalGui({ installRoot: cfg.root, operationId: cfg.operationId })
   if (cfg.mode === 'resume-source-changed') fs.appendFileSync(path.join(process.resourcesPath, 'desktop-release.json'), ' ')
   if (['changed-copy', 'resume-changed-copy'].includes(cfg.mode)) fs.appendFileSync(path.join(prepared.guiRoot, process.platform === 'darwin' ? 'Crabot.app/Contents/Resources/desktop-release.json' : 'resources/desktop-release.json'), ' ')
@@ -179,12 +200,17 @@ async function main() {
   const exited = once(child, 'exit')
   const result = cfg.mode === 'publish-source-disconnect' ? await exited.then(() => JSON.parse(fs.readFileSync(cfg.resultFile, 'utf8'))) : await Promise.race([new Promise(resolve => child.on('message', result => { if (typeof result?.accepted === 'boolean') resolve(result) })), exited.then(([code, signal]) => { throw new Error('Host exited before a result: ' + code + ':' + signal) })])
   await exited
+  if (releaseDataLock) {
+    const locks = await load('cli-lock.mjs'), file = await locks.acquireExistingCliLock(cfg.root, 'fixture-confirm-root-release', 0)
+    locks.releaseCliLock(file); releaseDataLock(); releaseDataLock = undefined
+  }
   fs.rmSync(prepared.directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); prepared = undefined
   await send(result)
 }
 main().then(() => { clearTimeout(timer); app.exit(0) }).catch(async error => {
   try {
     if (child && child.exitCode === null && child.signalCode === null) { child.kill(); await once(child, 'exit') }
+    releaseDataLock?.()
     if (prepared) fs.rmSync(prepared.directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 })
     await send({ accepted: false, code: 'FIXTURE_FAILED', message: String(error.message).slice(0, 512) })
   } catch {}

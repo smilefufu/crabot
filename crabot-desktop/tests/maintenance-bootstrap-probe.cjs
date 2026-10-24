@@ -16,7 +16,7 @@ async function main() {
   const frame = await load('desktop-removal-frame.mjs'); assert.equal(typeof frame.inspectInitialRemovalGuiHost, 'function'); assert.equal(typeof frame.captureExistingRemovalGuiHost, 'function')
   const sourceExit = await load('desktop-removal-source.mjs'); assert.equal(typeof sourceExit.createDesktopRemovalSourceExitVerifier, 'function')
   const programs = await load('desktop-removal-programs.mjs'); assert.equal(typeof programs.inspectDesktopRemovalPrograms, 'function')
-  const job = await load('desktop-removal-job.mjs'); assert.equal(typeof job.beginInitialDesktopRemoval, 'function')
+  const job = await load('desktop-removal-job.mjs'); assert.equal(typeof job.beginInitialDesktopRemoval, 'function'); assert.equal(typeof job.resumeDesktopRemoval, 'function')
   const cli = await import(pathToFileURL(path.join(root, 'app.asar/dist/installation-removal.js')).href); assert.equal(typeof cli.removeDesktopCliEntries, 'function')
   const native = (await load('process-identity.cjs')).default
   assert.equal(native.inspectProcess(process.pid).pid, process.pid)
