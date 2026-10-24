@@ -11,7 +11,7 @@ import { readDesktopRemoval } from './desktop-removal-record.cjs'
 import { readDesktopRemovalProof } from './desktop-removal-proof.mjs'
 import { readOriginalDesktopPayload } from './desktop-program-proof.mjs'
 import { privateJson } from './desktop-preparation-files.mjs'
-import { verifyDesktopPrograms } from './desktop-payload.mjs'
+import { verifyDesktopGui, verifyDesktopPrograms } from './desktop-payload.mjs'
 import { inspectInstance } from './instance-runtime.mjs'
 import { stopInstance } from './instance-controller.mjs'
 import { probeKnownProcessExit } from './known-process-exit.cjs'
@@ -28,7 +28,7 @@ async function openDesktopRemoval({ installRoot, operationId, signal }, existing
   const selection = existing ? installation.readDesktopPairReference(base.root).selection : base.selection
   const own = { ...base, coreRoot: path.join(base.root, 'releases', selection.core_id), guiRoot: path.join(base.root, 'app/releases', selection.gui_id) }
   const rootLock = await acquireExistingCliLock(own.root, 'desktop-removal'), rootToken = cliLockToken(rootLock)
-  let dataLock, dataToken, job, pendingStop, pendingSourceExit, closed = false, busy = false, cancelIssued = false
+  let dataLock, dataToken, job, pendingStop, pendingPhase, stopFailed = false, pendingSourceExit, sourceExitFailed = false, closed = false, busy = false, cancelIssued = false
   const close = () => {
     if (busy) fail()
     if (dataToken && cliLockToken(dataLock) === dataToken) releaseCliLock(dataLock)
@@ -41,12 +41,20 @@ async function openDesktopRemoval({ installRoot, operationId, signal }, existing
     const capture = existing ? captureExistingRemovalGuiHost : captureInitialRemovalGuiHost
     const captured = await capture({ installRoot: own.root, operationId, signal })
     const { proof, facts } = captured
+    const executable = await fs.realpath(process.execPath)
+    const hostGuiRoot = process.platform === 'darwin' ? path.resolve(path.dirname(executable), '../../..') : path.dirname(executable)
+    const hostDirectory = path.dirname(hostGuiRoot)
+    const hostDirectories = [hostDirectory, hostGuiRoot].map(directory => [directory, directoryIdentity(physicalFs.lstatSync(directory, { bigint: true }))])
     let record = existing ? captured.record : { schema_version: 1, installation_id: own.record.installation_id, operation_id: operationId,
       source_selection: proof.source_selection, phase: 'preparing', proof_sha256: facts.proof_sha256 }
     const fence = path.join(own.root, '.desktop-removal.json')
     const current = async (published = true) => {
       if (published && !same((await readDesktopRemovalProof(own.root)).record, record)) fail()
       const actualDataIdentity = directoryIdentity(await fs.lstat(own.dataDir, { bigint: true }))
+      for (const [directory, original] of hostDirectories) {
+        if (directoryIdentity(physicalFs.lstatSync(directory, { bigint: true })) !== original) fail()
+      }
+      if (management.requirePrivateDataRoot(hostDirectory) !== hostDirectory || physicalFs.realpathSync(process.cwd()) !== hostDirectory) fail()
       if (job) for (const [directory, original] of job) {
         if (management.requirePrivateDataRoot(directory) !== directory || directoryIdentity(physicalFs.lstatSync(directory, { bigint: true })) !== original) fail()
       }
@@ -87,68 +95,89 @@ async function openDesktopRemoval({ installRoot, operationId, signal }, existing
       try { if (physicalFs.readdirSync(records).some(name => name.endsWith('.json'))) fail() }
       catch (error) { if (error.code !== 'ENOENT') throw error }
     }
+    const requestSourceExit = (retry = false) => {
+      if (closed || cancelIssued) fail()
+      if (pendingSourceExit && (!retry || !sourceExitFailed)) return pendingSourceExit
+      if (retry && !sourceExitFailed) fail()
+      if (busy || !pendingStop) fail()
+      busy = true; sourceExitFailed = false
+      pendingSourceExit = (async () => {
+        try {
+          await pendingStop; await current(); assertStopped()
+          if (retry) {
+            await verifyDesktopGui(hostGuiRoot, proof.payload)
+            await current(); assertStopped()
+          }
+          const deadline = performance.now() + 15000
+          if (probeKnownProcessExit([facts.source_gui]).state === 'running') {
+            const self = identity.inspectProcess(process.pid)
+            if (!process.connected || typeof process.send !== 'function' || !self || self.parent !== facts.source_gui.pid
+              || !identity.sameProcess(facts.source_gui, identity.inspectProcess(facts.source_gui.pid))) fail()
+            await new Promise(resolve => {
+              const timer = setTimeout(resolve, 5000)
+              const sent = () => { clearTimeout(timer); resolve() }
+              try { process.send({ kind: 'desktop_removal_source_exit', installation_id: record.installation_id,
+                operation_id: record.operation_id, source_selection: record.source_selection }, sent) } catch { sent() }
+            })
+          }
+          // IPC completion/disconnection is not an OS exit receipt. Never signal
+          // this GUI, and do not treat its root exit as whole-program settlement.
+          for (;;) {
+            if (closed || cliLockToken(rootLock) !== rootToken || cliLockToken(dataLock) !== dataToken
+              || !same(readDesktopRemoval(own.root), record)) fail()
+            if (probeKnownProcessExit([facts.source_gui]).state === 'stopped') break
+            if (performance.now() >= deadline) fail()
+            await new Promise(resolve => setTimeout(resolve, 100))
+          }
+          await current(); assertStopped()
+          return { source_exited: true }
+        } catch (error) { sourceExitFailed = true; throw error } finally { busy = false }
+      })()
+      return pendingSourceExit
+    }
+    const requestStop = (retry = false) => {
+      if (closed || cancelIssued) fail()
+      if (pendingStop && (!retry || !stopFailed)) return pendingStop
+      if (retry && !stopFailed) fail()
+      if (busy) fail()
+      busy = true; stopFailed = false
+      pendingStop = (async () => {
+        try {
+          if (retry) {
+            // Only this session's attempted write may explain a lost reply.
+            if (pendingPhase) {
+              const actual = readDesktopRemoval(own.root)
+              if (same(actual, pendingPhase)) record = pendingPhase
+              else if (!same(actual, record)) fail()
+              pendingPhase = undefined
+            }
+            await current()
+            await verifyDesktopGui(hostGuiRoot, proof.payload)
+          }
+          await current()
+          const original = inspectInstance(own.dataDir)
+          if (!['running', 'stopped'].includes(original.state) || original.record && original.record.install_root !== own.coreRoot) fail()
+          if (record.phase === 'preparing') {
+            pendingPhase = { ...record, phase: 'stopping' }
+            await privateJson(fence, pendingPhase, true); record = pendingPhase; pendingPhase = undefined
+          }
+          await current()
+          const actual = inspectInstance(own.dataDir)
+          if (actual.record && !same(actual.record, original.record)) fail()
+          await stopInstance(own.dataDir)
+          await current(); assertStopped()
+          return { stopped: true }
+        } catch (error) { stopFailed = true; throw error } finally { busy = false }
+      })()
+      return pendingStop
+    }
     return {
       record: structuredClone(record),
       current: () => current(),
-      stop() {
-        if (closed || cancelIssued) fail()
-        if (pendingStop) return pendingStop
-        if (busy) fail()
-        busy = true
-        pendingStop = (async () => {
-          try {
-            await current()
-            const original = inspectInstance(own.dataDir)
-            if (!['running', 'stopped'].includes(original.state) || original.record && original.record.install_root !== own.coreRoot) fail()
-            if (record.phase === 'preparing') {
-              const stopping = { ...record, phase: 'stopping' }
-              await privateJson(fence, stopping, true); record = stopping
-            }
-            await current()
-            const actual = inspectInstance(own.dataDir)
-            if (actual.record && !same(actual.record, original.record)) fail()
-            await stopInstance(own.dataDir)
-            await current(); assertStopped()
-            return { stopped: true }
-          } finally { busy = false }
-        })()
-        return pendingStop
-      },
-      exitSource() {
-        if (closed || cancelIssued) fail()
-        if (pendingSourceExit) return pendingSourceExit
-        if (busy || !pendingStop) fail()
-        busy = true
-        pendingSourceExit = (async () => {
-          try {
-            await pendingStop; await current(); assertStopped()
-            const deadline = performance.now() + 15000
-            if (probeKnownProcessExit([facts.source_gui]).state === 'running') {
-              const self = identity.inspectProcess(process.pid)
-              if (!process.connected || typeof process.send !== 'function' || !self || self.parent !== facts.source_gui.pid
-                || !identity.sameProcess(facts.source_gui, identity.inspectProcess(facts.source_gui.pid))) fail()
-              await new Promise(resolve => {
-                const timer = setTimeout(resolve, 5000)
-                const sent = () => { clearTimeout(timer); resolve() }
-                try { process.send({ kind: 'desktop_removal_source_exit', installation_id: record.installation_id,
-                  operation_id: record.operation_id, source_selection: record.source_selection }, sent) } catch { sent() }
-              })
-            }
-            // IPC completion/disconnection is not an OS exit receipt. Never signal
-            // this GUI, and do not treat its root exit as whole-program settlement.
-            for (;;) {
-              if (closed || cliLockToken(rootLock) !== rootToken || cliLockToken(dataLock) !== dataToken
-                || !same(readDesktopRemoval(own.root), record)) fail()
-              if (probeKnownProcessExit([facts.source_gui]).state === 'stopped') break
-              if (performance.now() >= deadline) fail()
-              await new Promise(resolve => setTimeout(resolve, 100))
-            }
-            await current(); assertStopped()
-            return { source_exited: true }
-          } finally { busy = false }
-        })()
-        return pendingSourceExit
-      },
+      stop: () => requestStop(),
+      retryStop: () => requestStop(true),
+      exitSource: () => requestSourceExit(),
+      retrySourceExit: () => requestSourceExit(true),
       async cancel() {
         if (busy || ['removing', 'completed'].includes(record.phase)) fail()
         busy = true

@@ -66,10 +66,10 @@ before(async () => {
   await sealDesktopPayload(payload)
 }, 120000)
 after(async () => { if (root) await fs.rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }) })
-for (const mode of ['valid', 'node-parent', 'unexpected-source-args', 'changed-copy', 'other-installation', 'publish-close', 'publish-cancel', 'publish-module', 'publish-damaged', 'publish-lost-reply', 'publish-replaced-record', 'publish-live', 'publish-cancel-lost', 'publish-stop', 'publish-stop-wrong-root', 'publish-stop-lost', 'publish-source-verifier', 'publish-source-exit', 'publish-source-ignore', 'publish-source-disconnect', 'resume-valid', 'resume-core-missing', 'resume-wrong-operation', 'resume-changed-copy', 'resume-source-changed', 'resume-lease-cancel', 'resume-lease-stopping', 'resume-lease-removing', 'resume-lease-completed', 'resume-lease-core-missing', 'resume-lease-wrong-operation', 'resume-lease-busy', 'resume-lease-source-exit']) test('actual protected initial removal frame: ' + mode, { skip: !supported, timeout: 60000 }, async t => {
+for (const mode of ['valid', 'node-parent', 'unexpected-source-args', 'changed-copy', 'other-installation', 'publish-close', 'publish-cancel', 'publish-module', 'publish-damaged', 'publish-lost-reply', 'publish-replaced-record', 'publish-live', 'publish-cancel-lost', 'publish-stop', 'publish-stop-wrong-root', 'publish-stop-lost', 'publish-stop-retry', 'publish-stop-lost-retry', 'publish-inherited-cwd', 'publish-source-verifier', 'publish-source-exit', 'publish-source-retry', 'publish-source-late-exit', 'publish-source-ignore', 'publish-source-disconnect', 'resume-valid', 'resume-core-missing', 'resume-wrong-operation', 'resume-changed-copy', 'resume-source-changed', 'resume-lease-cancel', 'resume-lease-stopping', 'resume-lease-removing', 'resume-lease-completed', 'resume-lease-core-missing', 'resume-lease-wrong-operation', 'resume-lease-busy', 'resume-lease-source-exit']) test('actual protected initial removal frame: ' + mode, { skip: !supported, timeout: 60000 }, async t => {
   const area = await fs.mkdtemp(path.join(root, 'case-'))
-  const cancelled = ['publish-cancel', 'publish-cancel-lost', 'publish-stop', 'publish-source-exit', 'publish-source-verifier', 'resume-lease-cancel'].includes(mode)
-  const sourceExitMode = ['publish-source-exit', 'resume-lease-source-exit'].includes(mode)
+  const cancelled = ['publish-cancel', 'publish-cancel-lost', 'publish-stop', 'publish-stop-retry', 'publish-stop-lost-retry', 'publish-source-exit', 'publish-source-retry', 'publish-source-late-exit', 'publish-source-verifier', 'resume-lease-cancel'].includes(mode)
+  const sourceExitMode = ['publish-source-exit', 'publish-source-retry', 'publish-source-late-exit', 'resume-lease-source-exit'].includes(mode)
   const existingPhase = ({ 'resume-lease-stopping': 'stopping', 'resume-lease-removing': 'removing', 'resume-lease-completed': 'completed', 'resume-lease-source-exit': 'removing' })[mode] || 'preparing'
   const own = await commitDesktopInstallation(await prepareDesktopInstallation({ payload, installRoot: path.join(area, 'installation') }))
   let finite, finiteExited, finiteOutput = ''
@@ -106,7 +106,7 @@ for (const mode of ['valid', 'node-parent', 'unexpected-source-args', 'changed-c
   const args = ['--background', ...(mode === 'unexpected-source-args' ? ['--unexpected-maintenance-source'] : [])]
   const direct = mode === 'node-parent' ? await prepareDesktopRemovalGui({ installRoot: own.root, operationId }) : undefined
   t.after(async () => { if (direct) await fs.rm(direct.directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }) })
-  const child = spawn(direct?.executable || own.executable, direct ? ['--fixture-removal-host'] : args, { env, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] }), exited = once(child, 'exit')
+  const child = spawn(direct?.executable || own.executable, direct ? ['--fixture-removal-host'] : args, { env, cwd: direct?.directory ?? (sourceExitMode ? own.guiRoot : undefined), stdio: ['ignore', 'pipe', 'pipe', 'ipc'] }), exited = once(child, 'exit')
   let output = ''; for (const stream of [child.stdout, child.stderr]) stream.on('data', bytes => { output = (output + bytes.toString()).slice(-8000) })
   const processIdentity = identity.inspectProcess(child.pid)
   t.after(() => { if (child.exitCode === null && child.signalCode === null && identity.sameProcess(processIdentity, identity.inspectProcess(child.pid))) child.kill('SIGKILL') })
@@ -146,12 +146,14 @@ for (const mode of ['valid', 'node-parent', 'unexpected-source-args', 'changed-c
       if (['resume-lease-removing', 'resume-lease-completed', 'resume-lease-core-missing'].includes(mode)) assert.equal(result.lease_cancel_rejected, true)
     }
     if (mode.startsWith('resume-lease-') && result.accepted) assert.equal(result.phase_after_stop, existingPhase === 'preparing' ? 'stopping' : existingPhase)
+  } else if (mode === 'publish-inherited-cwd') {
+    assert.equal(result.accepted, false); assert.equal(result.code, 'CRABOT_DESKTOP_REMOVAL')
   } else if (mode.startsWith('publish-')) {
     assert.equal(result.accepted, true, JSON.stringify(result)); assert.equal(result.published, true)
     assert.equal(result.cancelled, cancelled, JSON.stringify(result)); assert.equal(result.retained, !cancelled)
     assert.equal(result.cancelRejected, ['publish-module', 'publish-damaged', 'publish-replaced-record', 'publish-live', 'publish-stop-wrong-root', 'publish-stop-lost'].includes(mode), JSON.stringify(result))
-    assert.equal(result.sourceExited, mode === 'publish-source-exit'); assert.equal(result.sourceExitRejected, ['publish-source-ignore', 'publish-source-disconnect'].includes(mode))
-    assert.equal(result.stopRejected, ['publish-stop-wrong-root', 'publish-stop-lost'].includes(mode))
+    assert.equal(result.sourceExited, ['publish-source-exit', 'publish-source-retry', 'publish-source-late-exit'].includes(mode)); assert.equal(result.sourceExitRejected, ['publish-source-ignore', 'publish-source-disconnect', 'publish-source-retry', 'publish-source-late-exit'].includes(mode))
+    assert.equal(result.stopRejected, ['publish-stop-wrong-root', 'publish-stop-lost', 'publish-stop-retry', 'publish-stop-lost-retry'].includes(mode))
     if (mode === 'publish-stop-lost') assert.equal(result.phase, 'stopping')
     assert.equal(result.cancellationReplyLost, mode === 'publish-cancel-lost'); assert.equal(result.lost, mode === 'publish-lost-reply'); assert.equal(result.proofRetained, true)
   } else if (mode === 'valid') {
@@ -162,10 +164,10 @@ for (const mode of ['valid', 'node-parent', 'unexpected-source-args', 'changed-c
     assert.equal(result.accepted, false, JSON.stringify(result)); assert.equal(result.code, 'CRABOT_DESKTOP_REMOVAL', JSON.stringify(result))
     assert.equal(result.stage, mode === 'changed-copy' ? 'private-programs' : 'source-peer', JSON.stringify(result))
   }
-  if ((!mode.startsWith('resume-') && !mode.startsWith('publish-')) || cancelled) await assert.rejects(fs.lstat(path.join(own.root, '.desktop-removal.json')), { code: 'ENOENT' })
+  if ((!mode.startsWith('resume-') && !mode.startsWith('publish-')) || cancelled || mode === 'publish-inherited-cwd') await assert.rejects(fs.lstat(path.join(own.root, '.desktop-removal.json')), { code: 'ENOENT' })
   else assert.equal((await fs.lstat(path.join(own.root, '.desktop-removal.json'))).isFile(), true)
   assert.equal(await fs.readFile(path.join(own.dataDir, 'preserved-user-file'), 'utf8'), 'user bytes')
-  if (finite && mode !== 'publish-stop') {
+  if (finite && !['publish-stop', 'publish-stop-retry', 'publish-stop-lost-retry'].includes(mode)) {
     assert.equal(finite.exitCode, null); assert.equal(finite.signalCode, null); assert.equal(inspectInstance(own.dataDir).state, 'running')
     await assert.rejects(fs.lstat(path.join(area, 'stopped')), { code: 'ENOENT' }); return
   }
