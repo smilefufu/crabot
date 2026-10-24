@@ -492,7 +492,13 @@ test('signed complete release intake reaches actual online preparation without s
   const { prepareDesktopPair } = await import('../desktop-pair-preparation.mjs')
   const intake = createDesktopReleaseIntake({ pinnedPublicKeys: [keys.publicKey.export({ type: 'spki', format: 'pem' }).toString()],
     python: process.env.CRABOT_TEST_PYTHON, cacheRoot: path.join(f.target, 'data/signed-cache'), verifyPayload: verifyDesktopPayload, preparePair: prepareDesktopPair })
-  const staged = await intake.stage({ manifestBytes: signed.manifest, signatureBytes: signed.signatures, artifact,
+  const { createDesktopReleaseDownloader } = await import('../../../crabot-desktop/dist/release-download.js')
+  const downloader = createDesktopReleaseDownloader({ pinnedPublicKeys: [keys.publicKey.export({ type: 'spki', format: 'pem' }).toString()],
+    platform: process.platform, arch: process.arch, cacheRoot: path.join(f.target, 'data/download-cache'),
+    fetch: async url => new Response(url.endsWith('.manifest.json') ? signed.manifest : url.endsWith('.signatures.json') ? signed.signatures : bytes) })
+  const downloaded = await downloader.check(f.selection)
+  assert.ok(downloaded)
+  const staged = await intake.stage({ manifestBytes: downloaded.manifestBytes, signatureBytes: downloaded.signatureBytes, artifact: downloaded.artifact,
     context: { platform: process.platform, arch: process.arch, purpose: 'update', currentVersion: f.selection.version } })
   const prepared = await intake.prepare(staged, { installRoot: f.target })
   assert.deepEqual(prepared.source, f.selection); assert.deepEqual(prepared.selection, next.selection)
@@ -504,5 +510,5 @@ test('signed complete release intake reaches actual online preparation without s
   assert.equal(await fs.readFile(path.join(selected.dataDir, 'fixture/content'), 'utf8'), 'USER DATA')
   assert.equal(await fs.readFile(path.join(selected.dataDir, 'fixture/SCHEMA_VERSION'), 'utf8'), 'v1')
   for (const name of ['desktop-maintenance.json', '.upgrade-migrations']) await assert.rejects(fs.lstat(path.join(selected.dataDir, name)), { code: 'ENOENT' })
-  await intake.discard(staged)
+  await intake.discard(staged); await downloaded.discard()
 })

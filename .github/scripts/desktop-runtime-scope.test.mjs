@@ -45,6 +45,7 @@ for (const [file, expected] of [
   ['.github/scripts/accept-ubuntu-offline-installer.mjs', true],
   ['crabot-client/src/contracts/desktop-release.ts', true],
   ['crabot-desktop/src/release-signatures.ts', true],
+  ['.github/scripts/test-paired-release-intake.mjs', true],
   ['crabot-docs/fixture.md', false],
 ]) test('actual Git delta classifies runtime scope: ' + file, { timeout: 15000 }, () => {
   const base = git(['rev-parse', 'HEAD'])

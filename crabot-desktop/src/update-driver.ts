@@ -14,6 +14,9 @@ import { UpdateConfigSchema, UpdateInfoSchema, verifyUpdateDownload } from './up
 export async function createUpdateDriver(options: { resources: string; cacheRoot: string; packaged: boolean;
   beginExit: () => () => void }): Promise<UpdateDriver | null> {
   if (!options.packaged || existsSync(path.join(options.resources, 'candidate-only.json'))) return null
+  // Complete-root updates use the paired signed-archive channel. Until that
+  // channel has pinned release keys, never invoke legacy NSIS/deb over this root.
+  if (existsSync(path.join(options.resources, 'desktop-release.json'))) return null
   const configFile = path.join(options.resources, 'app-update.yml')
   if (!existsSync(configFile)) throw new Error('Release update configuration is missing')
   const config = UpdateConfigSchema.parse(JSON.parse(await readFile(configFile, 'utf8')))

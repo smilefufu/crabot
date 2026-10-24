@@ -35,10 +35,11 @@ async function main() {
   const websocket = new WebSocketServer({ noServer: true })
   async function listen(sink) {
     const server = createServer((req, res) => {
-      sink.push({ url: req.url, authorization: req.headers.authorization })
+      sink.push({ url: req.url, authorization: req.headers.authorization, cookie: req.headers.cookie, method: req.method })
       res.setHeader('Access-Control-Allow-Origin', '*')
       res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type, X-Crabot-Request-Id')
       if (req.method === 'OPTIONS') { res.writeHead(204).end(); return }
+      if (req.url === '/release-stall') { res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'X-Content-Type-Options': 'nosniff' }); res.write('first'); return }
       if (req.url === '/redirect') { res.writeHead(302, { Location: externalOrigin + '/landing' }).end(); return }
       if (req.url === '/api/media/a232f3cb-a297-440f-8aba-03af28359e36') {
         res.setHeader('Content-Type', 'text/html; charset=utf-8')
@@ -120,6 +121,33 @@ async function main() {
   await fs.writeFile(path.join(candidateResources, 'app-update.yml'), 'must not parse or initialize a network updater')
   assert.equal(await createUpdateDriver({ resources: candidateResources, cacheRoot: path.join(root, 'updater-cache'), packaged: true,
     beginExit: () => { throw new Error('Candidate must never prepare an installer') } }), null)
+  // A paired-root installation cannot fall back to the legacy NSIS/deb path.
+  await fs.unlink(path.join(candidateResources, 'candidate-only.json'))
+  await fs.writeFile(path.join(candidateResources, 'desktop-release.json'), '{}')
+  assert.equal(await createUpdateDriver({ resources: candidateResources, cacheRoot: path.join(root, 'updater-cache'), packaged: true,
+    beginExit: () => { throw new Error('Paired roots must never use a legacy package installer') } }), null)
+  const { createDesktopReleaseTransport } = await module('release-transport.js')
+  await privateSession.cookies.set({ url: origin, name: 'admin-fixture', value: 'must-not-send' })
+  const releaseTransport = createDesktopReleaseTransport()
+  const publicResponse = await releaseTransport.fetch(externalOrigin + '/release-transport', {
+    method: 'POST', credentials: 'include', headers: { Authorization: 'Bearer must-not-send', Cookie: 'private=must-not-send' },
+  })
+  assert.equal(publicResponse.status, 200)
+  await publicResponse.text()
+  const releaseRequest = external.find(req => req.url === '/release-transport')
+  assert.equal(releaseRequest.authorization, undefined)
+  assert.equal(releaseRequest.cookie, undefined); assert.equal(releaseRequest.method, 'GET')
+  const landings = external.filter(request => request.url === '/landing').length
+  const redirectResponse = await releaseTransport.fetch(origin + '/redirect', {})
+  assert.equal(redirectResponse.status, 302)
+  await redirectResponse.body?.cancel()
+  assert.equal(external.filter(request => request.url === '/landing').length, landings)
+  const streamingResponse = await releaseTransport.fetch(origin + '/release-stall', {})
+  const reader = streamingResponse.body.getReader(); await reader.read()
+  const interrupted = reader.read().then(value => value.done, () => true)
+  await releaseTransport.close()
+  assert.equal(await interrupted, true); reader.releaseLock()
+  await assert.rejects(releaseTransport.fetch(externalOrigin + '/closed', {}))
   const result = await trusted.webContents.executeJavaScript(`fetch(${JSON.stringify(origin + '/api/probe')}).then(r=>r.json())`)
   assert.equal(result.ok, true)
   assert.equal(received.find(req => req.url === '/api/probe').authorization, 'Bearer fixture-main-only')
@@ -218,7 +246,7 @@ async function main() {
   await captureFixturePage('diagnostics')
   console.log('CRABOT_ELECTRON_BOUNDARY ' + JSON.stringify({ electron: process.versions.electron, node: process.versions.node,
     sandbox: true, isolated_preload: true, current_frame_ipc: true, direct_http_header: true, direct_ws_header: true,
-    foreign_frame_denied: true, redirect_token_absent: true, isolated_artifact_preview: true, built_react_app: true, reconnect_keeps_draft: true, independent_diagnostics: true, repair_help_ipc: true }))
+    foreign_frame_denied: true, redirect_token_absent: true, isolated_artifact_preview: true, built_react_app: true, reconnect_keeps_draft: true, independent_diagnostics: true, repair_help_ipc: true, paired_legacy_installer_blocked: true, anonymous_release_transport: true, manual_release_redirect: true, release_stream_cancelled: true }))
 }
 main().then(() => cleanup(0), error => { console.error('Electron boundary fixture failed:', error); void cleanup(1) })
 async function cleanup(code) {

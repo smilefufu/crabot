@@ -28,6 +28,7 @@ on:
       - '.github/scripts/desktop-runtime-scope.mjs'
       - '.github/scripts/smoke-migration-interruption.mjs'
       - '.github/scripts/smoke-workspace-python-gate.mjs'
+      - '.github/scripts/test-paired-release-intake.mjs'
       - '.github/workflows/desktop.yml'
   workflow_dispatch:
 
@@ -205,7 +206,7 @@ jobs:
         run: |
           node node_modules/typescript/bin/tsc -p tsconfig.json
           node build-preload.mjs
-          node --test ../scripts/desktop/ubuntu-bootstrap.test.mjs ../scripts/desktop/release-signing.test.mjs tests/release-signatures.test.mjs tests/ubuntu-installation.test.mjs tests/installation-entries.test.mjs tests/desktop-ipc.test.mjs tests/workspace-folder.test.mjs tests/desktop-disk.test.mjs tests/desktop-resources.test.mjs tests/first-model-fixture.test.mjs tests/full-host-control.test.mjs tests/desktop-network.test.mjs tests/artifact-network.test.mjs tests/session-host.test.mjs tests/diagnostics.test.mjs tests/login-startup.test.mjs tests/controller.test.mjs tests/update-dialog.test.mjs tests/update-package.test.mjs
+          node --test ../scripts/desktop/ubuntu-bootstrap.test.mjs ../scripts/desktop/release-signing.test.mjs tests/release-signatures.test.mjs tests/release-download.test.mjs tests/ubuntu-installation.test.mjs tests/installation-entries.test.mjs tests/desktop-ipc.test.mjs tests/workspace-folder.test.mjs tests/desktop-disk.test.mjs tests/desktop-resources.test.mjs tests/first-model-fixture.test.mjs tests/full-host-control.test.mjs tests/desktop-network.test.mjs tests/artifact-network.test.mjs tests/session-host.test.mjs tests/diagnostics.test.mjs tests/login-startup.test.mjs tests/controller.test.mjs tests/update-dialog.test.mjs tests/update-package.test.mjs
       - name: Actual paired controller scoped migration without MM
         env:
           CRABOT_PAIRED_CONTROLLER_TEST: '1'
