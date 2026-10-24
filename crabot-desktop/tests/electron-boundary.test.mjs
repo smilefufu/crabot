@@ -20,10 +20,12 @@ for (const stalled of [false, true]) test('actual sandboxed Electron window enfo
     assert.equal(result.termination_requested, false, JSON.stringify({ code: result.code, signal: result.signal, termination_requested: result.termination_requested }) + '\n' + result.output)
     if (stalled) {
       assert.equal(result.code, 1, result.output)
+      assert.match(result.output, /CRABOT_BOUNDARY_PHASE .*cleanup-complete-1/)
       assert.match(result.output, /React condition 1 renderer execution exceeded its original 5000ms budget/)
       assert.doesNotMatch(result.output, /CRABOT_ELECTRON_BOUNDARY /)
       return
     }
+    assert.match(result.output, /CRABOT_BOUNDARY_PHASE .*cleanup-complete-0/)
     assert.equal(result.code, 0, JSON.stringify({ code: result.code, signal: result.signal, termination_requested: result.termination_requested }) + '\n' + result.output)
     const line = result.output.split('\n').find(line => line.startsWith('CRABOT_ELECTRON_BOUNDARY '))
     assert.ok(line, result.output)

@@ -11,6 +11,8 @@ const { WebSocketServer } = require('../../crabot-admin/node_modules/ws')
 const started = Date.now()
 const phase = value => console.log('CRABOT_BOUNDARY_PHASE ' + JSON.stringify({ phase: value, elapsed_ms: Date.now() - started }))
 app.setName('Crabot boundary fixture')
+// Async server cleanup owns the exit result, including an expected failed check.
+app.on('window-all-closed', () => {})
 app.on('child-process-gone', (_event, details) => {
   if (details.type === 'GPU') console.log('CRABOT_BOUNDARY_GPU_EXIT ' + JSON.stringify({ reason: details.reason, exit_code: details.exitCode, elapsed_ms: Date.now() - started }))
 })
@@ -293,5 +295,6 @@ async function cleanup(code) {
   clients.forEach(client => client.terminate())
   windows.forEach(window => { if (!window.isDestroyed()) window.destroy() })
   await Promise.all(servers.map(server => new Promise(resolve => server.close(resolve))))
+  phase('cleanup-complete-' + code)
   app.exit(code)
 }

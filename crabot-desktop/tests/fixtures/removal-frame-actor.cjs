@@ -99,7 +99,7 @@ async function main() {
   }
   prepared = await (await load('desktop-removal-host.mjs')).prepareDesktopRemovalGui({ installRoot: cfg.root, operationId: cfg.operationId })
   if (cfg.mode === 'changed-copy') fs.appendFileSync(path.join(prepared.guiRoot, process.platform === 'darwin' ? 'Crabot.app/Contents/Resources/desktop-release.json' : 'resources/desktop-release.json'), ' ')
-  child = spawn(prepared.executable, ['--fixture-removal-host'], { env: process.env, stdio: ['ignore', 'inherit', 'inherit', 'ipc'] })
+  child = spawn(prepared.executable, ['--fixture-removal-host'], { env: process.env, detached: true, stdio: ['ignore', 'ignore', 'ignore', 'ipc'] })
   const native = require('./bootstrap/scripts/lib/process-identity.cjs'), childIdentity = native.inspectProcess(child.pid)
   if (cfg.mode === 'publish-source-exit') await send({ handoff: true, host: childIdentity, directory: prepared.directory })
   child.on('message', message => {

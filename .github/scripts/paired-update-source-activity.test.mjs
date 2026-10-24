@@ -7,6 +7,8 @@ async function fixture(t, mode) {
   let calls = 0, context
   const server = createServer((req, res) => {
     calls++; assert.equal(req.method, 'GET'); assert.equal(req.headers.authorization, 'Bearer ' + secret)
+    if (req.url === '/api/modules') { res.end(JSON.stringify({ modules: [{ module_id: 'crabot-agent', status: 'error', host: secret, error: secret }] })); return }
+    if (['agent_unavailable', 'cutover_incomplete'].includes(mode)) { res.writeHead(503).end(JSON.stringify({ error: mode === 'agent_unavailable' ? 'Agent not available' : 'Core Agent cutover is incomplete', detail: secret })); return }
     if (mode === 'unauthorized' || mode === 'unavailable') { res.writeHead(mode === 'unauthorized' ? 401 : 503).end(JSON.stringify({ error: secret })); return }
     if (mode === 'invalid') { res.end(JSON.stringify({ error: secret })); return }
     if (mode === 'changed') context = { ...context, generation: 'other' }
@@ -20,7 +22,7 @@ async function fixture(t, mode) {
   const credential = { ...context, token: secret }
   return { calls: () => calls, host: { snapshot: () => ({ phase: 'ready' }), context: () => context, credential: async () => credential } }
 }
-for (const mode of ['idle', 'active', 'unauthorized', 'unavailable', 'invalid', 'changed', 'unknown_manager']) test('source idle failure diagnostics read the real SDK without leaking credentials: ' + mode, async t => {
+for (const mode of ['idle', 'active', 'unauthorized', 'unavailable', 'invalid', 'changed', 'unknown_manager', 'agent_unavailable', 'cutover_incomplete']) test('source idle failure diagnostics read the real SDK without leaking credentials: ' + mode, async t => {
   const f = await fixture(t, mode), { captureSourceActivityEvidence } = await import('../../crabot-desktop/tests/fixtures/paired-update-source-activity.cjs')
   const result = await captureSourceActivityEvidence(f.host)
   assert.equal(result.phase, 'ready'); assert.equal(result.credential_present, true)
@@ -28,6 +30,10 @@ for (const mode of ['idle', 'active', 'unauthorized', 'unavailable', 'invalid', 
   assert.equal(JSON.stringify(result).includes(secret), false)
   assert.ok(result.requests.length <= 8); assert.equal(result.requests[0].route, 'workers')
   if (mode === 'unauthorized') assert.deepEqual(result.requests[0], { route: 'workers', status: 401, error: 'unauthorized' })
+  if (['agent_unavailable', 'cutover_incomplete'].includes(mode)) assert.equal(result.agent_failure, mode)
+  else assert.equal(result.agent_failure, undefined)
+  if (result.activity === 'unknown' && mode !== 'changed') assert.equal(result.agent_status, 'error')
+  else assert.equal(result.agent_status, undefined)
   if (mode === 'unavailable') assert.deepEqual(result.requests[0], { route: 'workers', status: 503, error: 'http' })
   if (mode === 'invalid') assert.deepEqual(result.requests[0], { route: 'workers', status: 200, error: 'validation' })
   if (mode === 'unknown_manager') {

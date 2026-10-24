@@ -117,7 +117,9 @@ for (const mode of ['valid', 'node-parent', 'unexpected-source-args', 'changed-c
     })
     const deadline = Date.now() + 20000
     while (!(await fs.lstat(cfg.resultFile).catch(() => null)) || !identity.isProcessExited(host.pid)) {
-      if (Date.now() > deadline) throw new Error('Independent host did not finish after actual source exit')
+      if (Date.now() > deadline) throw new Error('Independent host did not finish after actual source exit: ' + JSON.stringify({
+        host_exited: identity.isProcessExited(host.pid), result: await fs.readFile(cfg.resultFile, 'utf8').then(JSON.parse).catch(() => null),
+      }))
       await new Promise(resolve => setTimeout(resolve, 100))
     }
     result = JSON.parse(await fs.readFile(cfg.resultFile, 'utf8'))
