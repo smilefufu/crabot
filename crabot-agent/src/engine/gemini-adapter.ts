@@ -247,7 +247,8 @@ export class GeminiAdapter implements LLMAdapter {
             parts.push(part)
             if (part.functionCall !== undefined) {
               const call = functionCall(part)
-              if (!params.tools.some(tool => tool.name === call.name)) throw new Error('Gemini returned an undeclared function')
+              // Engine returns unavailable-tool errors; it alone decides what may execute.
+              if (params.tools.length === 0) throw new Error('Gemini returned an undeclared function')
               const id = call.id ?? randomUUID()
               if (ids.has(id)) throw new Error('Gemini returned duplicate function call IDs')
               ids.add(id)
