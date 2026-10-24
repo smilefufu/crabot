@@ -218,3 +218,121 @@ test('menu identity comparison distinguishes adjacent file IDs above the JS safe
   finally { changed.mock.restore() }
   assert.equal(await fs.readFile(file, 'utf8'), original)
 })
+
+async function removableFixture(t, platform = 'linux') {
+  const f = await updateFixture(t, platform)
+  await fs.writeFile(path.join(f.root, 'data', 'retained-business'), 'data and dependencies stay')
+  const entry = platform === 'darwin' ? path.join(f.home, 'Applications/Crabot.app') : platform === 'linux'
+    ? path.join(f.env.XDG_DATA_HOME, 'applications/crabot.desktop') : path.join(f.env.APPDATA, 'Microsoft/Windows/Start Menu/Programs/Crabot.lnk')
+  const locator = path.join(integrationRoot(f.home, platform, f.env), 'installation.json')
+  let stops = 0
+  const options = { ...f.options, verifyStopped: async () => { stops++ }, unregisterMac: async app => {
+    assert.equal(app, path.join(f.prepared.guiRoot, 'Crabot.app'))
+  } }
+  return { ...f, entry, locator, options, stops: () => stops }
+}
+const removal = async () => (await import('../dist/installation-removal.js')).removeInstallationEntries
+for (const platform of ['linux', 'darwin', 'win32']) {
+  test('retained-data removal only unlinks owned user entries and can safely repeat: ' + platform,
+    { skip: platform === 'darwin' && windows || platform === 'win32' && !windows }, async t => {
+      const f = await removableFixture(t, platform), remove = await removal()
+      await remove(f.prepared, f.options); await remove(f.prepared, f.options)
+      await assert.rejects(fs.lstat(f.entry), { code: 'ENOENT' }); await assert.rejects(fs.lstat(f.locator), { code: 'ENOENT' })
+      assert.ok(f.stops() >= 4)
+      assert.equal(await fs.readFile(path.join(f.root, 'data', 'retained-business'), 'utf8'), 'data and dependencies stay')
+      assert.equal((await fs.stat(f.prepared.coreRoot)).isDirectory(), true)
+      assert.equal(JSON.parse(await fs.readFile(f.selector, 'utf8')).gui_id, f.prepared.selection.gui_id)
+    })
+}
+for (const changed of ['menu', 'locator', 'shortcut']) {
+  test('uninstall preflight preserves every entry when one has an unknown owner or custom content: ' + changed,
+    { skip: changed === 'shortcut' && !windows }, async t => {
+      const f = await removableFixture(t, changed === 'shortcut' ? 'win32' : 'linux'), remove = await removal()
+      if (changed === 'menu') await fs.writeFile(f.entry, 'user customized desktop entry')
+      else if (changed === 'shortcut') {
+        const value = f.shell.readShortcutLink(f.entry); await fs.writeFile(f.entry, JSON.stringify({ ...value, args: '--custom' }))
+      } else {
+        const value = JSON.parse(await fs.readFile(f.locator, 'utf8')); await fs.writeFile(f.locator, JSON.stringify({ ...value, installation_id: randomUUID() }))
+      }
+      const before = await Promise.all([fs.readFile(f.entry), fs.readFile(f.locator)])
+      await assert.rejects(remove(f.prepared, f.options), { code: 'CRABOT_INSTALL_REGISTRATION' })
+      assert.deepEqual(await Promise.all([fs.readFile(f.entry), fs.readFile(f.locator)]), before)
+    })
+}
+test('uninstall cannot proceed without the caller proving stopped state or the currently selected pair', async t => {
+  const f = await removableFixture(t), remove = await removal(), before = await fs.readFile(f.entry)
+  await assert.rejects(remove(f.prepared, { ...f.options, verifyStopped: async () => { throw new Error('still running') } }), /still running/)
+  await assert.rejects(remove(f.target, f.options), { code: 'CRABOT_INSTALL_REGISTRATION' })
+  assert.deepEqual(await fs.readFile(f.entry), before); assert.ok(await fs.stat(f.locator))
+})
+test('an entry replaced after preflight is retained and its locator is not removed', async t => {
+  const f = await removableFixture(t), remove = await removal()
+  let checks = 0
+  await assert.rejects(remove(f.prepared, { ...f.options, verifyStopped: async () => {
+    if (++checks === 2) { await fs.unlink(f.entry); await fs.writeFile(f.entry, 'replacement must stay') }
+  } }), { code: 'CRABOT_INSTALL_REGISTRATION' })
+  assert.equal(await fs.readFile(f.entry, 'utf8'), 'replacement must stay'); assert.ok(await fs.stat(f.locator))
+})
+test('an entry parent redirected outside the user root is refused without deleting its target', async t => {
+  const f = await removableFixture(t), remove = await removal(), parent = path.dirname(f.entry), retained = parent + '-retained'
+  await fs.rename(parent, retained); await fs.symlink(retained, parent, windows ? 'junction' : 'dir')
+  await assert.rejects(remove(f.prepared, f.options), { code: 'CRABOT_INSTALL_REGISTRATION' })
+  assert.ok(await fs.stat(path.join(retained, 'crabot.desktop'))); assert.ok(await fs.stat(f.locator))
+})
+test('a completed unlink whose response was lost leaves the locator and retries only the remaining entries', async t => {
+  const f = await removableFixture(t), remove = await removal(), unlink = fs.unlink
+  let deletes = 0
+  const fault = t.mock.method(fs, 'unlink', async file => {
+    await unlink(file)
+    if (file === f.entry) { deletes++; throw new Error('unlink reply lost') }
+  })
+  try { await assert.rejects(remove(f.prepared, f.options), /unlink reply lost/) }
+  finally { fault.mock.restore() }
+  assert.ok(await fs.stat(f.locator)); await remove(f.prepared, f.options)
+  assert.equal(deletes, 1); await assert.rejects(fs.stat(f.locator), { code: 'ENOENT' })
+})
+test('a failed macOS unregister preserves the menu alias, locator and data for retry', { skip: windows }, async t => {
+  const f = await removableFixture(t, 'darwin'), remove = await removal()
+  await assert.rejects(remove(f.prepared, { ...f.options, unregisterMac: async () => { throw new Error('unregister reply lost') } }), /unregister reply lost/)
+  assert.ok((await fs.lstat(f.entry)).isSymbolicLink()); assert.ok(await fs.stat(f.locator))
+  await remove(f.prepared, f.options)
+  assert.equal(await fs.readFile(path.join(f.root, 'data', 'retained-business'), 'utf8'), 'data and dependencies stay')
+})
+
+test('a foreign locator swapped during its initial read is retained with the menu', async t => {
+  const f = await removableFixture(t), remove = await removal(), readFile = fs.readFile
+  let swapped = false
+  const fault = t.mock.method(fs, 'readFile', async (file, ...args) => {
+    const value = await readFile(file, ...args)
+    if (file === f.locator && !swapped) {
+      swapped = true; const record = JSON.parse(value.toString())
+      await fs.writeFile(file, JSON.stringify({ ...record, installation_id: randomUUID() }) + '\n')
+    }
+    return value
+  })
+  try { await assert.rejects(remove(f.prepared, f.options), { code: 'CRABOT_INSTALL_REGISTRATION' }) }
+  finally { fault.mock.restore() }
+  assert.ok(swapped); assert.ok(await fs.stat(f.entry))
+  assert.notEqual(JSON.parse(await fs.readFile(f.locator, 'utf8')).installation_id, f.prepared.installation_id)
+})
+test('a different selection or lost stopped proof after preflight cannot remove an entry', async t => {
+  const f = await removableFixture(t), remove = await removal(), original = await fs.readFile(f.entry)
+  let checks = 0
+  await assert.rejects(remove(f.prepared, { ...f.options, verifyStopped: async () => {
+    if (++checks === 2) throw new Error('stop proof changed')
+  } }), /stop proof changed/)
+  assert.deepEqual(await fs.readFile(f.entry), original); checks = 0
+  await assert.rejects(remove(f.prepared, { ...f.options, verifyStopped: async () => {
+    if (++checks === 2) writeFileSync(f.selector, JSON.stringify(f.target.selection) + '\n')
+  } }), { code: 'CRABOT_INSTALL_REGISTRATION' })
+  assert.deepEqual(await fs.readFile(f.entry), original); assert.ok(await fs.stat(f.locator))
+})
+test('hard-linked menu content is preserved and removal never creates missing directories', async t => {
+  const f = await removableFixture(t), remove = await removal(), link = path.join(f.home, 'retained-link')
+  await fs.link(f.entry, link)
+  await assert.rejects(remove(f.prepared, f.options), { code: 'CRABOT_INSTALL_REGISTRATION' })
+  assert.equal((await fs.stat(f.entry)).nlink, 2); assert.ok(await fs.stat(f.locator))
+  await fs.unlink(link); await fs.unlink(f.entry); await fs.rmdir(path.dirname(f.entry))
+  await remove(f.prepared, f.options)
+  await assert.rejects(fs.stat(path.dirname(f.entry)), { code: 'ENOENT' })
+})
