@@ -14,6 +14,7 @@ async function main() {
   assert.equal(typeof proof.captureDesktopRemovalProof, 'function'); assert.equal(typeof proof.readDesktopRemovalProof, 'function')
   assert.equal(typeof host.prepareDesktopRemovalGui, 'function'); assert.equal(typeof controller.stopInstance, 'function')
   const frame = await load('desktop-removal-frame.mjs'); assert.equal(typeof frame.inspectInitialRemovalGuiHost, 'function')
+  const sourceExit = await load('desktop-removal-source.mjs'); assert.equal(typeof sourceExit.createDesktopRemovalSourceExitVerifier, 'function')
   const programs = await load('desktop-removal-programs.mjs'); assert.equal(typeof programs.inspectDesktopRemovalPrograms, 'function')
   const job = await load('desktop-removal-job.mjs'); assert.equal(typeof job.beginInitialDesktopRemoval, 'function')
   const cli = await import(pathToFileURL(path.join(root, 'app.asar/dist/installation-removal.js')).href); assert.equal(typeof cli.removeDesktopCliEntries, 'function')
@@ -23,7 +24,7 @@ async function main() {
   const emptyReferences = await native.inspectProgramReferences({ roots: [], files: [] })
   assert.equal(emptyReferences.complete, true); assert.equal(emptyReferences.incomplete, false); assert.deepEqual(emptyReferences.processes, []); assert.deepEqual(emptyReferences.unknown_pids, [])
   await assert.rejects(fs.lstat(path.join(root, 'crabot-core')), { code: 'ENOENT' })
-  const report = { fixed_gui_bootstrap_loaded: true, initial_frame_loaded: true, initial_job_loaded: true, program_inventory_loaded: true, cli_entry_removal_loaded: true, native_helper_loaded: true, native_reference_query_loaded: true, core_present: false, business_mm_started: false,
+  const report = { fixed_gui_bootstrap_loaded: true, initial_frame_loaded: true, initial_job_loaded: true, source_exit_verifier_loaded: true, program_inventory_loaded: true, cli_entry_removal_loaded: true, native_helper_loaded: true, native_reference_query_loaded: true, core_present: false, business_mm_started: false,
     stop_called: false, host_executed: false, removal_published: false }
   await fs.writeFile(path.join(root, 'report.json'), JSON.stringify(report), { flag: 'wx' })
 }

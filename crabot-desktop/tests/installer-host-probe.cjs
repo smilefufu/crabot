@@ -26,6 +26,7 @@ async function main() {
   assert.equal(typeof controller.stopInstance, 'function')
   const frame = await module('bootstrap/scripts/lib/desktop-removal-frame.mjs'); assert.equal(typeof frame.inspectInitialRemovalGuiHost, 'function')
   const job = await module('bootstrap/scripts/lib/desktop-removal-job.mjs'); assert.equal(typeof job.beginInitialDesktopRemoval, 'function')
+  const sourceExit = await module('bootstrap/scripts/lib/desktop-removal-source.mjs'); assert.equal(typeof sourceExit.createDesktopRemovalSourceExitVerifier, 'function')
   const programs = await module('bootstrap/scripts/lib/desktop-removal-programs.mjs'); assert.equal(typeof programs.inspectDesktopRemovalPrograms, 'function')
   const native = (await module('bootstrap/scripts/lib/process-identity.cjs')).default; assert.equal(typeof native.inspectProgramReferences, 'function')
   const emptyReferences = await native.inspectProgramReferences({ roots: [], files: [] })
@@ -51,7 +52,7 @@ async function main() {
   assert.equal(await removalWindow.webContents.executeJavaScript('typeof require'), 'undefined')
   await removalWindow.webContents.executeJavaScript('window.crabotRemove.cancel()'); assert.equal(removalAbort.signal.aborted, true)
   progress.close()
-  const report = { trusted_backend_in_asar: true, trusted_repair_backend_in_asar: true, trusted_removal_reader_in_asar: true, trusted_removal_proof_in_asar: true, trusted_removal_host_backend_in_asar: true, trusted_common_stop_in_asar: true, trusted_initial_removal_frame_in_asar: true, trusted_initial_removal_job_in_asar: true, trusted_cli_removal_in_asar: true, trusted_program_inventory_in_asar: true, native_reference_query_loaded: true, opaque_payload_verified: true, sandboxed_progress_preload: true, sandboxed_removal_progress_preload: true,
+  const report = { trusted_backend_in_asar: true, trusted_repair_backend_in_asar: true, trusted_removal_reader_in_asar: true, trusted_removal_proof_in_asar: true, trusted_removal_host_backend_in_asar: true, trusted_common_stop_in_asar: true, trusted_initial_removal_frame_in_asar: true, trusted_initial_removal_job_in_asar: true, trusted_source_exit_verifier_in_asar: true, trusted_cli_removal_in_asar: true, trusted_program_inventory_in_asar: true, native_reference_query_loaded: true, opaque_payload_verified: true, sandboxed_progress_preload: true, sandboxed_removal_progress_preload: true,
     outside_checkout: true, actual_installer_flow: false, business_mm_started: false }
   await fs.writeFile(path.join(root, 'probe-report.json'), JSON.stringify(report), { flag: 'wx' })
   console.log('CRABOT_INSTALLER_HOST ' + JSON.stringify(report))
