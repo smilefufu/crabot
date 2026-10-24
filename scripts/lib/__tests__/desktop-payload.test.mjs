@@ -584,3 +584,53 @@ for (const changed of [null, 'no-lock', 'journal', 'maintenance', 'program', 'so
     await assert.rejects(fs.stat(path.join(f.current.dataDir, 'mm.pid')), { code: 'ENOENT' })
   } finally { if (lock) releaseCliLock(lock) }
 })
+
+for (const scenario of ['current', 'bad-core', 'changed-selection', 'bad-signature', 'close-before-network', 'close-at-session', 'changed-during-check']) test('actual paired update host checks preserve the running source: ' + scenario,
+  { skip: process.env.CRABOT_PAIRED_CONTROLLER_TEST !== '1', timeout: 60_000 }, async t => {
+    const f = await fixture(t, { functional: true, schema: 'v1' })
+    const prepared = await prepareDesktopInstallation({ payload: f.payload, installRoot: f.target }), current = await commitDesktopInstallation(prepared)
+    await fs.mkdir(path.join(current.dataDir, 'admin')); await fs.writeFile(path.join(current.dataDir, 'admin/kept'), 'source business data')
+    await fs.writeFile(path.join(current.dataDir, 'mm.pid'), String(process.pid))
+    const { generateKeyPairSync } = await import('node:crypto'), keys = generateKeyPairSync('ed25519')
+    const { signDesktopReleaseManifest } = await import('../../desktop/sign-release.mjs')
+    const signed = signDesktopReleaseManifest({ schema_version: 1, app_id: 'com.crabot.desktop', platform: process.platform, arch: process.arch,
+      selection: current.selection, artifact: { file: 'Crabot.zip', size: 1, sha256: 'a'.repeat(64) } }, [keys.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString()])
+    if (scenario === 'bad-core') await fs.appendFile(path.join(current.coreRoot, 'package.json'), ' ')
+    if (scenario === 'changed-selection') await fs.writeFile(path.join(f.target, 'current-release.json'), JSON.stringify({ ...current.selection, gui_id: randomUUID() }) + '\n')
+    const module = pathToFileURL(fileURLToPath(new URL('../../../crabot-desktop/dist/paired-update-host.js', import.meta.url))).href
+    const code = `
+      import {createPairedUpdateHost} from ${JSON.stringify(module)};
+      import assert from 'node:assert/strict'; import {writeFile} from 'node:fs/promises'; import path from 'node:path';
+      const [current,key,raw,envelope,scenario]=JSON.parse(process.argv[1]);
+      let sessions=0,requests=0,closed=0,driver;
+      const forbidden=()=>assert.fail('No install, OS mutation or GUI execution during a check');
+      const transport=()=>{sessions++;if(scenario==='close-at-session')driver.close();return{close:async()=>{closed++},fetch:async(url,options)=>{
+        requests++; assert.equal(options.credentials,'omit'); assert.equal(options.redirect,'manual'); assert.equal(options.method,'GET');
+        if(scenario==='changed-during-check'&&requests===1)await writeFile(path.join(current.root,'current-release.json'),JSON.stringify({...current.selection,gui_id:'11111111-1111-4111-8111-111111111111'})+'\\n');
+        const manifest=url.endsWith('.manifest.json');
+        const body=Buffer.from(manifest?raw:envelope,'base64');
+        return new Response(manifest&&scenario==='bad-signature'?Buffer.concat([body,Buffer.from(' ')]):body);
+      }}};
+      driver=await createPairedUpdateHost({pinnedPublicKeys:[key],coreRoot:current.coreRoot,dataRoot:current.dataDir,appVersion:current.selection.version,
+        verifyBinding:()=>{if(scenario==='close-before-network')driver.close()},transport,controller:{applyPreparedPair:forbidden},
+        entries:{home:current.root,platform:process.platform,env:{},shell:{readShortcutLink:forbidden,writeShortcutLink:forbidden}},
+        app:{relaunch:forbidden,quit:forbidden,once:forbidden,off:forbidden},beginExit:forbidden});
+      if(scenario==='current')assert.equal(await driver.check(()=>{}),null);
+      else await assert.rejects(driver.check(()=>{}),error=>scenario.startsWith('close-')?error.name==='AbortError'
+        : error.code===(scenario==='bad-core'?'CRABOT_CORE_INTEGRITY':scenario==='bad-signature'?'CRABOT_DESKTOP_RELEASE_SIGNATURE':'CRABOT_DESKTOP_INSTALLATION'));
+      if(scenario==='close-at-session')assert.equal(closed,1,'A session created across close must be released without a second close');
+      driver.close();driver.close();await new Promise(resolve=>setImmediate(resolve));
+      console.log('PAIRED_HOST '+JSON.stringify({sessions,requests,closed}));
+    `
+    const result = await promisify(execFile)(process.execPath, ['--input-type=module', '-e', code,
+      JSON.stringify([current, signed.publicKeys[0], signed.manifest.toString('base64'), signed.signatures.toString('base64'), scenario])],
+    { env: { ...process.env, PATH: '' }, timeout: 45_000, maxBuffer: 64 * 1024 })
+    const evidence = JSON.parse(result.stdout.split('\n').find(line => line.startsWith('PAIRED_HOST ')).slice('PAIRED_HOST '.length))
+    const initialized = ['current', 'bad-signature', 'changed-during-check'].includes(scenario)
+    assert.deepEqual(evidence, { sessions: initialized || scenario === 'close-at-session' ? 1 : 0, requests: initialized ? 2 : 0,
+      closed: initialized || scenario === 'close-at-session' ? 1 : 0 })
+    assert.equal(await fs.readFile(path.join(current.dataDir, 'mm.pid'), 'utf8'), String(process.pid))
+    assert.equal(await fs.readFile(path.join(current.dataDir, 'admin/kept'), 'utf8'), 'source business data')
+    await assert.rejects(fs.stat(path.join(current.dataDir, 'desktop-maintenance.json')), { code: 'ENOENT' })
+    await assert.rejects(fs.stat(path.join(current.dataDir, 'runtime-cache')), { code: 'ENOENT' })
+  })

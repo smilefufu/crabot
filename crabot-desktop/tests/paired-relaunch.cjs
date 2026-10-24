@@ -2,6 +2,7 @@
 const { app } = require('electron')
 const fs = require('node:fs')
 const path = require('node:path')
+const { pathToFileURL } = require('node:url')
 const identity = require('../../scripts/lib/process-identity.cjs')
 const management = require('../../scripts/lib/desktop-management.cjs')
 const [root, role, originalText, targetExecutable] = process.argv.slice(2)
@@ -15,13 +16,21 @@ if (role === 'source') app.on('before-quit', event => {
   if (!handingOff) { stopCalls++; event.preventDefault(); app.exit(3) }
   fs.writeFileSync(path.join(root, 'source-exit.json'), JSON.stringify({ stopCalls }) + '\n', { mode: 0o600, flush: true })
 })
-void app.whenReady().then(() => {
+void app.whenReady().then(async () => {
   if (!ownLock) throw new Error('Single-instance lock unavailable')
   if (role === 'source') {
     const original = identity.inspectProcess(process.pid)
-    handingOff = true
-    app.relaunch({ execPath: targetExecutable || process.execPath, args: [__filename, root, 'target', JSON.stringify(original)] })
-    app.quit()
+    const { handoffDesktopPair } = await import(pathToFileURL(path.resolve(__dirname, '../dist/paired-handoff.js')).href)
+    const executable = targetExecutable || process.execPath
+    await handoffDesktopPair({ target: { executable, dataDir: profile },
+      verify: async target => {
+        if (target.executable !== executable || target.dataDir !== profile || !fs.lstatSync(executable).isFile()) throw new Error('Fixture target changed')
+      }, beginExit: () => { handingOff = true; return () => { handingOff = false } },
+      app: { once: (...args) => app.once(...args), off: (...args) => app.off(...args), quit: () => app.quit(),
+        relaunch: options => {
+          if (options.args.length !== 0 || options.execPath !== executable) throw new Error('Unexpected production handoff arguments')
+          app.relaunch({ ...options, args: [__filename, root, 'target', JSON.stringify(original)] })
+        } } })
   } else if (role === 'target') {
     const original = JSON.parse(originalText)
     const previousExited = !identity.sameProcess(original, identity.inspectProcess(original.pid))

@@ -17,6 +17,9 @@ import { LoginStartup, type StartupState } from './login-startup.js'
 import { externalUrl, isAppUrl, isTrustedFrame } from './window-security.js'
 import { UpdateDialog } from './update-dialog.js'
 import { createUpdateDriver } from './update-driver.js'
+import { createPairedUpdateHost } from './paired-update-host.js'
+import { createDesktopReleaseTransport } from './release-transport.js'
+import { desktopReleasePublicKeys } from './release-trust.js'
 import { verifyUpdateDownload } from './update-package.js'
 
 app.setName('Crabot')
@@ -107,8 +110,11 @@ async function boot() {
         detail: '服务仍按正常流程恢复。请在系统登录项中核对 Crabot，也可从应用菜单重新设置。更新记录和业务数据已保留。', buttons: ['知道了'] }).catch(() => {})
     } })
   let driver = null, configurationError = false
+  const beginUpdateExit = () => { quitting = true; return () => { quitting = false } }
   try { driver = await createUpdateDriver({ resources: process.resourcesPath, cacheRoot: path.join(dataRoot, 'runtime-cache'), packaged: app.isPackaged,
-    beginExit: () => { quitting = true; return () => { quitting = false } } }) }
+    beginExit: beginUpdateExit, paired: () => createPairedUpdateHost({ coreRoot, dataRoot, appVersion: app.getVersion(), verifyBinding,
+      pinnedPublicKeys: desktopReleasePublicKeys, controller: controller!, transport: createDesktopReleaseTransport, app, beginExit: beginUpdateExit,
+      entries: { home: homedir(), platform: process.platform, env: process.env, shell } }) }) }
   catch { configurationError = true }
   updates = new UpdateDialog({ version: app.getVersion(), driver, configurationError, show: options => dialog.showMessageBox(options),
     activity: () => controller!.updateActivity(), prepareInstall: async (update, install) => {
