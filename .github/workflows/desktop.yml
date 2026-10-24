@@ -285,7 +285,7 @@ jobs:
         run: node .github/scripts/smoke-packaged-desktop.mjs ".desktop-build/安装 候选/gui" 2>&1 | tee .desktop-build/packaged-boot.log
       - name: Signed complete-archive intake with the actual bundled Python
         if: steps.scope.outputs.full_runtime == 'true'
-        timeout-minutes: 3
+        timeout-minutes: 6
         run: node .github/scripts/test-paired-release-intake.mjs ".desktop-build/安装 候选/core" 2>&1 | tee .desktop-build/signed-release-intake.log
       - name: Build paired offline GUI and Core candidate
         if: steps.scope.outputs.full_runtime == 'true'

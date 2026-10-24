@@ -1,9 +1,13 @@
 // Development publisher only. Formal signing credentials/channel remain disabled.
 import { createPrivateKey, createPublicKey, createHash, sign } from 'node:crypto'
-import { constants, promises as fs } from 'node:fs'
+import { constants, promises as fs, createReadStream } from 'node:fs'
 import path from 'node:path'
-import { pathToFileURL } from 'node:url'
+import { pathToFileURL, fileURLToPath } from 'node:url'
 import identity from '../lib/process-identity.cjs'
+import { verifyDesktopPayload } from '../lib/desktop-payload.mjs'
+import { verifyCoreRelease } from '../lib/core-release.mjs'
+import product from '../lib/product-runtime.cjs'
+import { runBounded } from '../lib/run-bounded.mjs'
 import { DesktopReleaseManifestSchema, serializeDesktopReleaseManifest, serializeDesktopReleaseSignatures,
   desktopReleaseMetadataNames } from '../../crabot-client/dist/contracts/index.js'
 import { createDesktopReleaseVerifier } from '../../crabot-desktop/dist/release-signatures.js'
@@ -47,6 +51,40 @@ export async function writeSignedDesktopRelease({ manifest, artifact, privateKey
     key_ids: JSON.parse(signed.signatures.toString('utf8')).signatures.map(item => item.key_id) }
 }
 
+// Development publisher only. Derive the descriptor from final verified bytes;
+// callers cannot supply an independent version, tuple, length or archive digest.
+export async function writeSignedDesktopPayload({ payload, python, privateKeys, output, format = process.platform === 'linux' ? 'tar.gz' : 'zip' }) {
+  if (!path.isAbsolute(python) || !['zip', 'tar.gz'].includes(format)) fail('METADATA')
+  output = path.resolve(output)
+  const parent = await fs.realpath(path.dirname(output))
+  output = path.join(parent, path.basename(output))
+  if (await fs.lstat(output).then(() => true, error => { if (error.code === 'ENOENT') return false; throw error })) fail('METADATA')
+  const source = await verifyDesktopPayload(payload), before = JSON.stringify(source.record)
+  const relative = path.relative(source.directory, output)
+  if (!relative || relative !== '..' && !relative.startsWith('..' + path.sep) && !path.isAbsolute(relative)) fail('METADATA')
+  const available = await fs.statfs(parent, { bigint: true })
+  if (available.bavail * available.bsize < source.bytes + 512n * 1024n * 1024n) throw Object.assign(new Error('Insufficient publication space'), { code: 'CRABOT_UPDATE_SPACE' })
+  const staging = await fs.mkdtemp(path.join(parent, '.paired-publication-'))
+  try {
+    const name = `Crabot-${source.record.selection.version}-${source.record.platform}-${source.record.arch}.${format}`
+    const artifact = path.join(staging, name)
+    const env = Object.fromEntries(['SystemRoot', 'WINDIR', 'TEMP', 'TMP', 'LANG'].flatMap(name => process.env[name] ? [[name, process.env[name]]] : []))
+    await runBounded(python, ['-I', '-B', fileURLToPath(new URL('./archive-paired-release.py', import.meta.url)), source.directory, artifact], { env })
+    if (JSON.stringify((await verifyDesktopPayload(source.directory)).record) !== before) fail('INTEGRITY')
+    const sha = createHash('sha256')
+    for await (const bytes of createReadStream(artifact)) sha.update(bytes)
+    const manifest = { schema_version: 1, app_id: 'com.crabot.desktop', platform: source.record.platform, arch: source.record.arch,
+      selection: source.record.selection, artifact: { file: name, size: (await fs.stat(artifact)).size, sha256: sha.digest('hex') } }
+    const publication = path.join(staging, 'publication')
+    const signed = await writeSignedDesktopRelease({ manifest, artifact, privateKeys, output: publication })
+    await fs.rename(artifact, path.join(publication, name))
+    // Generic same-volume no-replace filesystem primitive, no install/data semantics.
+    identity.renameDirectoryNoReplace(publication, output)
+    return { candidate_only: true, artifact: path.join(output, name),
+      manifestFile: path.join(output, path.basename(signed.manifestFile)), signaturesFile: path.join(output, path.basename(signed.signaturesFile)), key_ids: signed.key_ids }
+  } finally { await fs.rm(staging, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
+}
+
 async function readInput(file, limit, secret = false) {
   const before = await fs.lstat(file, { bigint: true })
   if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1n || before.size <= 0n || before.size > BigInt(limit)) fail('SIGNATURE')
@@ -70,15 +108,23 @@ async function main() {
   for (const value of process.argv.slice(2)) {
     const split = value.indexOf('='); if (split < 0) fail('METADATA')
     const name = value.slice(0, split), text = value.slice(split + 1)
-    if (!text || !['--candidate', '--manifest', '--artifact', '--key', '--out'].includes(name)) fail('METADATA')
+    if (!text || !['--candidate', '--manifest', '--artifact', '--payload', '--runtime-core', '--key', '--out'].includes(name)) fail('METADATA')
     if (name === '--key') keyFiles.push(text)
     else { if (args.has(name)) fail('METADATA'); args.set(name, text) }
   }
   if (args.get('--candidate') !== 'true' || args.size !== 4 || !keyFiles.length || keyFiles.length > 4) fail('METADATA')
-  const manifest = JSON.parse(await readInput(args.get('--manifest'), 65536))
   const privateKeys = []
   for (const file of keyFiles) privateKeys.push(await readInput(file, 4096, true))
-  const result = await writeSignedDesktopRelease({ manifest, artifact: path.resolve(args.get('--artifact')), privateKeys, output: path.resolve(args.get('--out')) })
+  let result
+  if (args.has('--payload') && args.has('--runtime-core') && !args.has('--manifest') && !args.has('--artifact')) {
+    const core = await fs.realpath(args.get('--runtime-core'))
+    await verifyCoreRelease(core)
+    const runtime = product.loadProductRuntime(core, { required: true, full: true })
+    result = await writeSignedDesktopPayload({ payload: args.get('--payload'), python: runtime.executables.python, privateKeys, output: args.get('--out') })
+  } else if (args.has('--manifest') && args.has('--artifact') && !args.has('--payload') && !args.has('--runtime-core')) {
+    const manifest = JSON.parse(await readInput(args.get('--manifest'), 65536))
+    result = await writeSignedDesktopRelease({ manifest, artifact: path.resolve(args.get('--artifact')), privateKeys, output: path.resolve(args.get('--out')) })
+  } else fail('METADATA')
   console.log(JSON.stringify(result))
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {

@@ -15,6 +15,9 @@ import zipfile
 spec = importlib.util.spec_from_file_location('paired_extract', Path(__file__).parent.parent / 'extract-paired-release.py')
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
+producer_spec = importlib.util.spec_from_file_location('paired_archive', Path(__file__).parent.parent / 'archive-paired-release.py')
+producer = importlib.util.module_from_spec(producer_spec)
+producer_spec.loader.exec_module(producer)
 
 
 class ExtractionTests(unittest.TestCase):
@@ -139,6 +142,30 @@ class ExtractionTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertEqual(result.stdout, '')
         self.assertEqual(result.stderr, 'CRABOT_DESKTOP_RELEASE_INTEGRITY\n')
+
+    def test_producer_preserves_modes_links_and_materializes_hardlink_aliases(self):
+        source = self.root / 'source'
+        (source / 'core').mkdir(parents=True)
+        (source / 'gui').mkdir()
+        (source / 'desktop-payload.json').write_bytes(b'{}')
+        original = source / 'core/program'
+        original.write_bytes(b'never execute')
+        if os.name != 'nt':
+            original.chmod(0o755)
+            (source / 'core/current').symlink_to('program')
+        os.link(original, source / 'core/alias')
+        for format in ['zip', 'tar.gz']:
+            file = self.root / ('produced.' + format)
+            producer.archive_payload(source, file)
+            module.extract(file, self.output, file.stat().st_size, hashlib.sha256(file.read_bytes()).hexdigest())
+            self.assertEqual((self.output / 'core/alias').read_bytes(), b'never execute')
+            self.assertFalse(os.path.samefile(self.output / 'core/program', self.output / 'core/alias'))
+            if os.name != 'nt':
+                self.assertEqual(stat.S_IMODE((self.output / 'core/program').stat().st_mode), 0o755)
+                self.assertTrue((self.output / 'core/current').is_symlink())
+            import shutil
+            shutil.rmtree(self.output)
+            self.output.mkdir(mode=0o700)
 
     def test_hardlinks_are_rejected(self):
         file = self.root / 'hard.tar.gz'
