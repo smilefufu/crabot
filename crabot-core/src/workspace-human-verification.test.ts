@@ -17,7 +17,7 @@ afterEach(() => vi.restoreAllMocks())
 
 function coordinatorJournalFailures(child: ReturnType<typeof spawn>): string[] {
   return require('../../scripts/lib/workspace-coordinator-launch.mjs').workspaceCoordinatorDiagnostics(child)
-    .split('\n').filter((line: string) => line.includes('workspace_journal_failed')).slice(-3)
+    .split('\n').filter((line: string) => line.includes('workspace_journal_failed') || line.includes('workspace_root_probe_failed')).slice(-3)
 }
 
 // Finite CI diagnostics only: no arguments, paths, identities or credentials are recorded.
