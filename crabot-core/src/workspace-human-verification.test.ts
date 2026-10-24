@@ -759,7 +759,10 @@ describe('same MM workspace recovery and later migration', () => {
         expect(await sdk.startRelocation(first)).toEqual({ intent_id: first.intent_id, accepted: true })
         await f.manager.workspaceInitialJob.completion
       } finally { corrupt.mockRestore() }
-      expect(injected).toBe(true); expect(f.manager.workspaceInitialJob.phase).toBe('needs_attention')
+      const job = f.manager.workspaceInitialJob, child = job?.coordinator?.child
+      expect(injected, JSON.stringify({ phase: job?.phase, stage: job?.stage, coordinator_exit: child?.exitCode,
+        coordinator_signal: child?.signalCode, diagnostics: child ? coordinatorJournalFailures(child) : [] })).toBe(true)
+      expect(job.phase).toBe('needs_attention')
       expect(f.manager.workspaceFinalizationCompletion).toBeDefined()
       const fence = records.readWorkspaceRelocationFinalizing(f.data, first.intent_id), archived = records.readWorkspaceRelocationArchivedState(f.data, first.intent_id)
       expect(require('../../scripts/lib/known-process-exit.cjs').probeKnownProcessExit([archived.launch.process]).state).toBe('stopped')
