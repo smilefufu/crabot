@@ -1,0 +1,57 @@
+{
+  "date": "2026-10-24",
+  "scope": "isolated fixtures only; source at reviewed task diff; no production mutation, phone microphone or paid model calls",
+  "baseline": "f17b2ad615de52d85f43cc6cb493972714fd2e22",
+  "protocol_commit": "b2ff5a0",
+  "before": {
+    "agent": {
+      "passed": 10,
+      "expected_regression_failures": 7
+    },
+    "channel": {
+      "passed": 15,
+      "expected_regression_failures": 3
+    }
+  },
+  "after": {
+    "agent": {
+      "files": 8,
+      "passed": 99
+    },
+    "channel": {
+      "files": 9,
+      "passed": 45
+    },
+    "total": 144
+  },
+  "builds": [
+    "crabot-shared",
+    "crabot-agent",
+    "crabot-channel-voice"
+  ],
+  "verified": [
+    "head, whitespace, empty, malformed tag and empty-attempt retry cause no terminal preparation/cancel",
+    "leading whitespace and original binding retained; text commitment still prevents replay",
+    "Agent tag to real loopback core-auth RPC/WS and original task notification completes only on playback receipt",
+    "start control precedes TTS and preserves the old three-second reservation for delayed synthesis",
+    "duplicate start is idempotent",
+    "start-control send or receipt-prepare persistence failure cleans reservation/player/maps and allows the next playback",
+    "incomplete WAV cancels the started session without PCM or completed delivery",
+    "notification/private isolation, independent request event continuation, long-answer bounded queue and actual progress remain covered"
+  ],
+  "delayed_tts": {
+    "delay_ms": 3400,
+    "observed_first_pcm_ms": 3403,
+    "start_before_tts": true,
+    "actual_completion_report_required": true
+  },
+  "excluded_validation": [
+    "initial post-main shared file-dependency refresh left Admin missing a new main export; loading failed before tests; offline relink then full rerun passed"
+  ],
+  "android_compatibility": "existing 0.8.0 isolated immediate-start/delayed-PCM compatibility passed on 2026-10-22; no Android product change or new physical run claimed",
+  "not_accepted": [
+    "50-round end-to-end latency",
+    "human phone listening experience"
+  ],
+  "deployed": false
+}

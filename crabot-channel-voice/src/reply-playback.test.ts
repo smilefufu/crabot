@@ -10,13 +10,13 @@ describe('continuous sentence playback', () => {
     expect(buffer.finish()).toEqual(['下一句'])
   })
   it('sends first audio before text ends and stitches sentence tails into one verified playback', async () => {
-    const frames: number[] = [], starts: string[] = [], endings: number[] = []
+    const frames: number[] = [], texts: string[] = [], endings: number[] = []
     const play = new ReplyPlayback('playback', { provider_id: 'fixture', format: 'mlx-audio-http', endpoint: 'http://fixture', model_id: 'fixture', voice: 'fixture' }, {
-      valid: () => {}, start: text => { starts.push(text) }, text() {}, audio: (seq, pcm) => { expect(seq).toBe(frames.length); frames.push(pcm.length / 2) },
+      valid: () => {}, text: (_sequence, text) => { texts.push(text) }, audio: (seq, pcm) => { expect(seq).toBe(frames.length); frames.push(pcm.length / 2) },
       end: (_, count) => { endings.push(count) }, cancel: () => {},
     })
     play.append(0, '第一句。'); await vi.waitFor(() => expect(frames).toEqual([480]))
-    expect(endings).toEqual([]); expect(starts).toEqual(['第一句。'])
+    expect(endings).toEqual([]); expect(texts).toEqual(['第一句。'])
     play.receipt('started', 480); play.append(1, '第二句。'); play.end()
     await vi.waitFor(() => expect(endings).toEqual([1200]))
     expect(frames).toEqual([480, 480, 240])

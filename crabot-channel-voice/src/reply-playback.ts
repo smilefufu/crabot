@@ -28,7 +28,6 @@ export class SentenceBuffer {
 
 export interface PlaybackTransport {
   valid(): void
-  start(text: string): void
   text(sequence: number, text: string): void
   audio(sequence: number, pcm: Buffer): void
   end(text: string, sampleCount: number, textSegments: number): void
@@ -163,7 +162,6 @@ export class ReplyPlayback {
         if (!this.started) {
           this.transport.valid(); this.started = true
           console.info('[VoicePlayback]', { playback_id: this.id, first_pcm_ms: Date.now() - this.firstSubmittedAt! })
-          this.transport.start(item.text)
         }
         this.transport.text(this.textSegments++, item.text)
         next = this.synthesize(); void next.catch(() => {})

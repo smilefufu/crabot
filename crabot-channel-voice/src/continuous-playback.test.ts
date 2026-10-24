@@ -29,7 +29,7 @@ describe('bounded long voice playback', () => {
     let sent = 0, played = 0, peak = 0, final = 0
     const began = Date.now()
     const player = new ReplyPlayback('fixture', {} as never, {
-      valid() {}, start() {}, text() {}, cancel() {},
+      valid() {}, text() {}, cancel() {},
       audio(_sequence: number, pcm: Buffer) { sent += pcm.length / 2; peak = Math.max(peak, sent - played) },
       end(_text: string, count: number) { final = count },
     })
@@ -49,7 +49,7 @@ describe('bounded long voice playback', () => {
   it('rejects invalid or stationary progress instead of treating it as playback', async () => {
     vi.useFakeTimers()
     const player = new ReplyPlayback('fixture', {} as never, {
-      valid() {}, start() {}, text() {}, audio() {}, end() {}, cancel() {},
+      valid() {}, text() {}, audio() {}, end() {}, cancel() {},
     })
     const rejected = expect(player.done).rejects.toThrow()
     player.append(0, '请完整播放。'); player.end()
@@ -63,7 +63,7 @@ describe('bounded long voice playback', () => {
     vi.mocked(synthesizeAudio).mockImplementation(async () => Buffer.alloc(48_000 * 10))
     let sent = 0
     const cancel = vi.fn(), player = new ReplyPlayback('fixture', {} as never, {
-      valid() {}, start() {}, text() {}, end() {}, cancel,
+      valid() {}, text() {}, end() {}, cancel,
       audio(_sequence, pcm) { sent += pcm.length / 2 },
     })
     player.append(0, '第一句。')
@@ -85,7 +85,7 @@ describe('bounded long voice playback', () => {
   it('stationary progress cannot renew the five-second consumption watchdog', async () => {
     vi.useFakeTimers()
     vi.mocked(synthesizeAudio).mockImplementation(async () => Buffer.alloc(48_000 * 10))
-    const player = new ReplyPlayback('fixture', {} as never, { valid() {}, start() {}, text() {}, audio() {}, end() {}, cancel() {} })
+    const player = new ReplyPlayback('fixture', {} as never, { valid() {}, text() {}, audio() {}, end() {}, cancel() {} })
     const rejected = expect(player.done).rejects.toThrow('5 秒没有前进')
     player.append(0, '开始。'); player.end()
     await vi.advanceTimersByTimeAsync(10); player.progress(480)
