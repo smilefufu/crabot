@@ -1,4 +1,4 @@
-// Initial private-GUI transaction only. No program deletion, service stop,
+// Initial private-GUI transaction and normal stop only. No program deletion,
 // executable loading or recovery from an existing removal job occurs here.
 import path from 'node:path'
 import physicalFs from './physical-fs.cjs'
@@ -13,6 +13,7 @@ import { readOriginalDesktopPayload } from './desktop-program-proof.mjs'
 import { privateJson } from './desktop-preparation-files.mjs'
 import { verifyDesktopPrograms } from './desktop-payload.mjs'
 import { inspectInstance } from './instance-runtime.mjs'
+import { stopInstance } from './instance-controller.mjs'
 import { workspaceMaintenancePending } from './workspace-maintenance.cjs'
 const { promises: fs } = physicalFs
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b)
@@ -24,7 +25,7 @@ function absent(file) {
 export async function beginInitialDesktopRemoval({ installRoot, operationId, signal }) {
   const own = installation.readDesktopSelection(installRoot)
   const rootLock = await acquireExistingCliLock(own.root, 'desktop-removal'), rootToken = cliLockToken(rootLock)
-  let dataLock, dataToken, job, closed = false, busy = false, cancelIssued = false
+  let dataLock, dataToken, job, pendingStop, closed = false, busy = false, cancelIssued = false
   const close = () => {
     if (busy) fail()
     if (dataToken && cliLockToken(dataLock) === dataToken) releaseCliLock(dataLock)
@@ -36,7 +37,7 @@ export async function beginInitialDesktopRemoval({ installRoot, operationId, sig
     const dataIdentity = directoryIdentity(await fs.lstat(own.dataDir, { bigint: true }))
     const captured = await captureInitialRemovalGuiHost({ installRoot: own.root, operationId, signal })
     const { proof, facts } = captured
-    const record = { schema_version: 1, installation_id: own.record.installation_id, operation_id: operationId,
+    let record = { schema_version: 1, installation_id: own.record.installation_id, operation_id: operationId,
       source_selection: proof.source_selection, phase: 'preparing', proof_sha256: facts.proof_sha256 }
     const fence = path.join(own.root, '.desktop-removal.json')
     const current = async (published = true) => {
@@ -69,9 +70,37 @@ export async function beginInitialDesktopRemoval({ installRoot, operationId, sig
     // is never interpreted as cancellation, even before any service was stopped.
     await privateJson(fence, record)
     await current()
+    const assertStopped = () => {
+      if (inspectInstance(own.dataDir).state !== 'stopped') fail()
+      const records = path.join(own.dataDir, 'module-runtime-registry/records')
+      try { if (physicalFs.readdirSync(records).some(name => name.endsWith('.json'))) fail() }
+      catch (error) { if (error.code !== 'ENOENT') throw error }
+    }
     return {
       record: structuredClone(record),
       current: () => current(),
+      stop() {
+        if (closed || cancelIssued) fail()
+        if (pendingStop) return pendingStop
+        if (busy) fail()
+        busy = true
+        pendingStop = (async () => {
+          try {
+            await current()
+            const original = inspectInstance(own.dataDir)
+            if (!['running', 'stopped'].includes(original.state) || original.record && original.record.install_root !== own.coreRoot) fail()
+            const stopping = { ...record, phase: 'stopping' }
+            await privateJson(fence, stopping, true); record = stopping
+            await current()
+            const actual = inspectInstance(own.dataDir)
+            if (actual.record && !same(actual.record, original.record)) fail()
+            await stopInstance(own.dataDir)
+            await current(); assertStopped()
+            return { stopped: true }
+          } finally { busy = false }
+        })()
+        return pendingStop
+      },
       async cancel() {
         if (busy) fail()
         busy = true
@@ -81,14 +110,10 @@ export async function beginInitialDesktopRemoval({ installRoot, operationId, sig
           await verifyDesktopPrograms(own.coreRoot, own.guiRoot, proof.payload)
           const source = await readOriginalDesktopPayload(own.root, record.source_selection)
           if (!same(source.record, proof.payload)) fail()
-          const records = path.join(own.dataDir, 'module-runtime-registry/records')
-          let names
-          try { names = await fs.readdir(records) } catch (error) { if (error.code !== 'ENOENT') throw error; names = [] }
-          if (names.some(name => name.endsWith('.json')) || inspectInstance(own.dataDir).state !== 'stopped') fail()
+          assertStopped()
           await checkCancellation()
           // Final synchronous stop/record checks directly precede the unlink.
-          if (inspectInstance(own.dataDir).state !== 'stopped'
-            || !absent(records) && physicalFs.readdirSync(records).some(name => name.endsWith('.json'))) fail()
+          assertStopped()
           if (!absent(fence)) { cancelIssued = true; await fs.unlink(fence) }
           if (process.platform !== 'win32') {
             const root = await fs.open(own.root, 'r'); try { await root.sync() } finally { await root.close() }

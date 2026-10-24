@@ -9,6 +9,8 @@ import { randomUUID } from 'node:crypto'
 import { execFile, spawn } from 'node:child_process'
 import { promisify } from 'node:util'
 import { once } from 'node:events'
+import { createServer } from 'node:net'
+import { readInstanceRuntime, inspectInstance } from '../../scripts/lib/instance-runtime.mjs'
 import { writeCoreRelease, verifyCoreRelease } from '../../scripts/lib/core-release.mjs'
 import { sealDesktopPayload, prepareDesktopInstallation, commitDesktopInstallation } from '../../scripts/lib/desktop-payload.mjs'
 import identity from '../../scripts/lib/process-identity.cjs'
@@ -22,7 +24,9 @@ before(async () => {
   payload = path.join(root, 'payload'); const core = path.join(payload, 'core'), appDir = path.join(root, 'app')
   await fs.mkdir(path.join(core, 'bin'), { recursive: true })
   await fs.copyFile(path.join(repository, 'crabot-native/build/Release', process.platform === 'win32' ? 'crabot.exe' : 'crabot'), path.join(core, 'bin', process.platform === 'win32' ? 'crabot.exe' : 'crabot'))
-  for (const name of ['package.json', 'product-runtime.json']) await fs.writeFile(path.join(core, name), JSON.stringify({ version: '1.2.3' }))
+  for (const name of ['package.json', 'product-runtime.json']) await fs.writeFile(path.join(core, name), JSON.stringify({ version: '1.2.3', ...(name === 'package.json' ? { type: 'module' } : {}) }))
+  await fs.mkdir(path.join(core, 'crabot-core/dist'), { recursive: true })
+  await fs.copyFile(new URL('../../scripts/lib/__tests__/fixtures/core.mjs', import.meta.url), path.join(core, 'crabot-core/dist/main.js'))
   await fs.writeFile(path.join(core, 'program.mjs'), 'throw new Error("Never execute this minimal fixture Core")')
   await writeCoreRelease(core, { schema_version: 1, version: '1.2.3', platform: process.platform, arch: process.arch, commit: '1'.repeat(40), source_dirty: false })
   await fs.writeFile(path.join(core, 'desktop-host.json'), JSON.stringify({ schema_version: 2, platform: process.platform, arch: process.arch }))
@@ -61,9 +65,34 @@ before(async () => {
   await sealDesktopPayload(payload)
 }, 120000)
 after(async () => { if (root) await fs.rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }) })
-for (const mode of ['valid', 'node-parent', 'unexpected-source-args', 'changed-copy', 'other-installation', 'publish-close', 'publish-cancel', 'publish-module', 'publish-damaged', 'publish-lost-reply', 'publish-replaced-record', 'publish-live', 'publish-cancel-lost']) test('actual protected initial removal frame: ' + mode, { skip: !supported, timeout: 60000 }, async t => {
+for (const mode of ['valid', 'node-parent', 'unexpected-source-args', 'changed-copy', 'other-installation', 'publish-close', 'publish-cancel', 'publish-module', 'publish-damaged', 'publish-lost-reply', 'publish-replaced-record', 'publish-live', 'publish-cancel-lost', 'publish-stop', 'publish-stop-wrong-root', 'publish-stop-lost']) test('actual protected initial removal frame: ' + mode, { skip: !supported, timeout: 60000 }, async t => {
   const area = await fs.mkdtemp(path.join(root, 'case-'))
   const own = await commitDesktopInstallation(await prepareDesktopInstallation({ payload, installRoot: path.join(area, 'installation') }))
+  let finite, finiteExited, finiteOutput = ''
+  if (mode.startsWith('publish-stop')) {
+    const reserve = createServer().listen(0, '127.0.0.1'); await once(reserve, 'listening')
+    const port = reserve.address().port; await new Promise(resolve => reserve.close(resolve))
+    finite = spawn(process.execPath, [fileURLToPath(new URL('../../scripts/lib/__tests__/fixtures/managed-core.mjs', import.meta.url))], {
+      env: { ...process.env, TEST_CORE_ROOT: own.coreRoot, TEST_DATA_DIR: own.dataDir, TEST_PORT: String(port), TEST_MARKER: path.join(area, 'stopped'), TEST_READY: path.join(area, 'ready') },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    finiteExited = once(finite, 'exit'); const owner = identity.inspectProcess(finite.pid)
+    for (const stream of [finite.stdout, finite.stderr]) stream.on('data', bytes => { finiteOutput = (finiteOutput + bytes.toString()).slice(-4000) })
+    t.after(async () => {
+      const record = readInstanceRuntime(own.dataDir)
+      for (const process of [record?.mm, owner]) if (process && identity.sameProcess(process, identity.inspectProcess(process.pid))) globalThis.process.kill(process.pid, 'SIGKILL')
+      await finiteExited
+    })
+    const deadline = Date.now() + 10000
+    while (!(await fs.lstat(path.join(area, 'ready')).catch(() => null)) || !readInstanceRuntime(own.dataDir)?.mm) {
+      if (finite.exitCode !== null || finite.signalCode !== null || Date.now() > deadline) throw new Error('Finite fixture failed: ' + finiteOutput)
+      await new Promise(resolve => setTimeout(resolve, 25))
+    }
+  }
+  if (mode === 'publish-stop-wrong-root') {
+    const record = readInstanceRuntime(own.dataDir)
+    await fs.writeFile(path.join(own.dataDir, 'instance-runtime.json'), JSON.stringify({ ...record, install_root: area }) + '\n')
+  }
   const operationId = randomUUID(), cfg = { root: own.root, operationId, mode }
   if (mode === 'other-installation') cfg.inspectRoot = (await commitDesktopInstallation(await prepareDesktopInstallation({ payload, installRoot: path.join(area, 'other') }))).root
   await fs.writeFile(path.join(own.dataDir, 'preserved-user-file'), 'user bytes')
@@ -81,8 +110,10 @@ for (const mode of ['valid', 'node-parent', 'unexpected-source-args', 'changed-c
   const [code] = await exited; assert.equal(code, 0, output)
   if (mode.startsWith('publish-')) {
     assert.equal(result.accepted, true, JSON.stringify(result)); assert.equal(result.published, true)
-    assert.equal(result.cancelled, ['publish-cancel', 'publish-cancel-lost'].includes(mode), JSON.stringify(result)); assert.equal(result.retained, !['publish-cancel', 'publish-cancel-lost'].includes(mode))
-    assert.equal(result.cancelRejected, ['publish-module', 'publish-damaged', 'publish-replaced-record', 'publish-live'].includes(mode), JSON.stringify(result))
+    assert.equal(result.cancelled, ['publish-cancel', 'publish-cancel-lost', 'publish-stop'].includes(mode), JSON.stringify(result)); assert.equal(result.retained, !['publish-cancel', 'publish-cancel-lost', 'publish-stop'].includes(mode))
+    assert.equal(result.cancelRejected, ['publish-module', 'publish-damaged', 'publish-replaced-record', 'publish-live', 'publish-stop-wrong-root', 'publish-stop-lost'].includes(mode), JSON.stringify(result))
+    assert.equal(result.stopRejected, ['publish-stop-wrong-root', 'publish-stop-lost'].includes(mode))
+    if (mode === 'publish-stop-lost') assert.equal(result.phase, 'stopping')
     assert.equal(result.cancellationReplyLost, mode === 'publish-cancel-lost'); assert.equal(result.lost, mode === 'publish-lost-reply'); assert.equal(result.proofRetained, true)
   } else if (mode === 'valid') {
     assert.equal(result.accepted, true, JSON.stringify(result)); assert.equal(result.frame.operation_id, operationId)
@@ -92,8 +123,17 @@ for (const mode of ['valid', 'node-parent', 'unexpected-source-args', 'changed-c
     assert.equal(result.accepted, false, JSON.stringify(result)); assert.equal(result.code, 'CRABOT_DESKTOP_REMOVAL', JSON.stringify(result))
     assert.equal(result.stage, mode === 'changed-copy' ? 'private-programs' : 'source-peer', JSON.stringify(result))
   }
-  if (!mode.startsWith('publish-') || ['publish-cancel', 'publish-cancel-lost'].includes(mode)) await assert.rejects(fs.lstat(path.join(own.root, '.desktop-removal.json')), { code: 'ENOENT' })
+  if (!mode.startsWith('publish-') || ['publish-cancel', 'publish-cancel-lost', 'publish-stop'].includes(mode)) await assert.rejects(fs.lstat(path.join(own.root, '.desktop-removal.json')), { code: 'ENOENT' })
   else assert.equal((await fs.lstat(path.join(own.root, '.desktop-removal.json'))).isFile(), true)
   assert.equal(await fs.readFile(path.join(own.dataDir, 'preserved-user-file'), 'utf8'), 'user bytes')
+  if (finite && mode !== 'publish-stop') {
+    assert.equal(finite.exitCode, null); assert.equal(finite.signalCode, null); assert.equal(inspectInstance(own.dataDir).state, 'running')
+    await assert.rejects(fs.lstat(path.join(area, 'stopped')), { code: 'ENOENT' }); return
+  }
+  if (finite) {
+    assert.equal((await finiteExited)[0], 0, finiteOutput); assert.equal(await fs.readFile(path.join(area, 'stopped'), 'utf8'), 'graceful')
+    assert.equal(finiteOutput.split('FIXTURE_SHUTDOWN ').length - 1, 1); assert.equal(readInstanceRuntime(own.dataDir), null)
+    assert.equal(inspectInstance(own.dataDir).state, 'stopped'); assert.equal(result.stopApplied, true)
+  }
   await fs.rm(area, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 })
 })

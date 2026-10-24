@@ -20,11 +20,17 @@ async function publication() {
   const physical = require('./bootstrap/scripts/lib/physical-fs.cjs')
   const removal = require('./bootstrap/scripts/lib/desktop-removal-record.cjs')
   const { readDesktopRemovalProof } = await load('desktop-removal-proof.mjs')
+  const assert = require('node:assert/strict')
   const { acquireExistingCliLock, releaseCliLock } = await load('cli-lock.mjs')
-  const originalLink = physical.promises.link, originalUnlink = physical.promises.unlink
+  const originalLink = physical.promises.link, originalUnlink = physical.promises.unlink, originalRename = physical.promises.rename
   if (cfg.mode === 'publish-lost-reply') physical.promises.link = async (...args) => {
     const result = await originalLink(...args)
     if (args[1] === path.join(cfg.root, '.desktop-removal.json')) throw Object.assign(new Error('fixture lost publication reply'), { code: 'EIO' })
+    return result
+  }
+  if (cfg.mode === 'publish-stop-lost') physical.promises.rename = async (...args) => {
+    const result = await originalRename(...args)
+    if (args[1] === path.join(cfg.root, '.desktop-removal.json')) throw Object.assign(new Error('fixture lost stopping reply'), { code: 'EIO' })
     return result
   }
   let cancellationReplyLost = false
@@ -35,11 +41,19 @@ async function publication() {
     }
     return result
   }
-  let lease, lost = false, cancelRejected = false, cancelled = false
+  let lease, lost = false, cancelRejected = false, cancelled = false, stopApplied = false, stopRejected = false
   try {
     try { lease = await beginInitialDesktopRemoval({ installRoot: cfg.root, operationId: cfg.operationId }) }
     catch (error) { if (cfg.mode !== 'publish-lost-reply' || error.code !== 'EIO') throw error; lost = true }
     const initial = await readDesktopRemovalProof(cfg.root)
+    if (cfg.mode === 'publish-stop') {
+      const first = lease.stop(), second = lease.stop(); if (first !== second) throw new Error('Repeated stop did not share its result')
+      assert.throws(() => lease.close(), { code: 'CRABOT_DESKTOP_REMOVAL' }); await assert.rejects(lease.cancel(), { code: 'CRABOT_DESKTOP_REMOVAL' })
+      await first; await lease.stop(); stopApplied = (await lease.current()).phase === 'stopping'
+    }
+    if (['publish-stop-wrong-root', 'publish-stop-lost'].includes(cfg.mode)) {
+      await assert.rejects(lease.stop()); stopRejected = true
+    }
     if (cfg.mode === 'publish-module') {
       fs.mkdirSync(path.join(cfg.root, 'data/module-runtime-registry/records'), { recursive: true })
       fs.writeFileSync(path.join(cfg.root, 'data/module-runtime-registry/records/unsettled.json'), '{}')
@@ -52,14 +66,15 @@ async function publication() {
     }
     if (cfg.mode !== 'publish-close' && cfg.mode !== 'publish-lost-reply') {
       try { await lease.cancel(); cancelled = true; await lease.cancel() }
-      catch (error) { if (cfg.mode === 'publish-cancel') throw error; if (cfg.mode === 'publish-cancel-lost' && cancellationReplyLost) { await lease.cancel(); cancelled = true } else cancelRejected = error.code === 'CRABOT_DESKTOP_REMOVAL' }
+      catch (error) { if (['publish-cancel', 'publish-stop'].includes(cfg.mode)) throw error; if (cfg.mode === 'publish-cancel-lost' && cancellationReplyLost) { await lease.cancel(); cancelled = true } else cancelRejected = error.code === 'CRABOT_DESKTOP_REMOVAL' }
     }
     const record = removal.readDesktopRemoval(cfg.root)
     return { accepted: true, published: true, cancelled, cancelRejected, lost, retained: Boolean(record), operation_id: record?.operation_id,
-      cancellationReplyLost, proofRetained: fs.existsSync(path.join(cfg.root, 'app/removals', cfg.operationId, 'proof.json')) }
+      cancellationReplyLost, stopApplied, stopRejected, phase: record?.phase, proofRetained: fs.existsSync(path.join(cfg.root, 'app/removals', cfg.operationId, 'proof.json')) }
   } finally {
-    physical.promises.link = originalLink; physical.promises.unlink = originalUnlink
+    physical.promises.link = originalLink; physical.promises.unlink = originalUnlink; physical.promises.rename = originalRename
     await lease?.close()
+    if (cfg.mode === 'publish-stop') assert.throws(() => lease.stop(), { code: 'CRABOT_DESKTOP_REMOVAL' })
     for (const directory of [cfg.root, path.join(cfg.root, 'data')]) {
       const lock = await acquireExistingCliLock(directory, 'fixture-confirm-release', 0); releaseCliLock(lock)
     }
