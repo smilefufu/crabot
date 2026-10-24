@@ -66,6 +66,7 @@
 - 验收夹具时序：迟到cleanup清空后续spy、stop前实际尚未入队两项均有确定性红例；改为测试边界恢复/迟到清理只认原测试，以及真实队列hold后确认两条入队再stop。统一清理后的定向Core15、完整Harness261通过；已将新回归加入四平台筛选；525的Windows另现恢复接纳断言仅等1秒，实际鉴权尚未结束。1.1秒真实鉴权延迟先红，再改等初始化到达信号，13定向通过/206未选；未改产品或整体期限，Windows/Intel仍须原生验证。
 - CI成品525的Windows已走过界面模型配置/两次loopback回复/工作区清单，随后RSS观测PowerShell退出1；采样器改为先快照再筛已核验PID，避免短命子进程消失导致查询失败。根身份与partial语义保持，本机3项通过，实际Windows重跑仍待。
 - 签名缓存跨启动先核当前远端原始签名与实际包，坏缓存/未知文件保留；返回Buffer不授清理权限。下载13项、相关54项通过。明确安装协调器新增10项身份/取消/并发/故障回归，实际签名→内置Python→完整GUI/Core→最终目录预览已由协调器驱动，旧PID/数据/选择不变；平台授权、不同GUI交接及健康尚待，未开放正式通道。
+- Ubuntu更新helper新增只读既有安装/确切GUI准备事实的固定模式；同提交Ubuntu24 helper与浏览器探针纳入GUI完整清单。ASAR/原生输入/CI范围49项通过，原生24/26编译、真实内核规则并存与桌面授权接线仍待；不复用新装提交或让Root运行JS。
 - Ubuntu24首次真实整包安装在profile阶段失败；固定Electron实证ready后enableSandbox会抛错，原探测在异步IO后调用存在竞态。安装后端改为进程启动参数enable-sandbox，仍拒绝禁用沙箱参数/保留内核核验；新增延迟profile真实Linux入口回归接CI，本机12过/1仅Linux跳过，不称Ubuntu已修验。
 - CI新增待定位：0470的Windows归档11通过/1失败，首次completion的根目录探针stage=exit拒绝；未改权限/恢复/超时，仅让CI失败报告保留已有脱敏探针事件。本机对应场景1通过/218未选，不能代验Windows。
 - 最终缺口：完整安装/更新/修复/卸载、旧部署迁移及故障恢复、签名/公证、macOS14/Windows11/Ubuntu GNOME24.04与26.04的权限/IME/沙箱/资源、真实模型任务分别验收；[签名指南](crabot-docs/guides/desktop-release-signing.md)。Agent34项和Admin两项既有失败已在未改main复现，分支WS关闭丢消息已修；不把基线、构建、部署或旧候选混成验收。逐项证据/旧结果保留在[总验收记录](crabot-docs/superpowers/plans/2026-10-17-desktop-application-validation.md)与对应计划；完成全部验证后才走PR。

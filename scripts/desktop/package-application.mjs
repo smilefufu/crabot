@@ -30,6 +30,12 @@ function checkSource() {
   }
 }
 checkSource()
+let ubuntuNative
+if (paired && process.platform === 'linux') {
+  if (process.arch !== 'x64' || !args.get('--native-bootstrap')) throw new Error('Paired Ubuntu GUI requires the same-source Ubuntu24 native bootstrap')
+  const { readUbuntuBootstrap } = await import('./package-ubuntu-installer.mjs')
+  ubuntuNative = await readUbuntuBootstrap(await fs.realpath(path.resolve(args.get('--native-bootstrap'))), release.commit)
+}
 const runtime = product.loadProductRuntime(core, { required: true, full: true })
 scrapling.loadRuntime(core, { full: true })
 computerUse.loadRuntime(core, { full: true })
@@ -93,6 +99,12 @@ const configuration = {
     if (paired) {
       await fs.writeFile(path.join(resources, 'desktop-release.json'), JSON.stringify(selection) + '\n')
       await fs.copyFile(appIcon, path.join(resources, 'crabot.png'))
+      if (ubuntuNative) {
+        // These target resources are included in the complete GUI inventory and
+        // signed archive before the updater may execute either fixed helper.
+        await fs.writeFile(path.join(resources, 'crabot-sandbox-helper'), ubuntuNative.binaries['crabot-sandbox-helper'], { flag: 'wx', mode: 0o755 })
+        await fs.copyFile(path.join(root, 'crabot-desktop/native/ubuntu/browser-probe.py'), path.join(resources, 'browser-probe.py'))
+      }
     }
     else {
       await fs.cp(core, packagedCore, { recursive: true, verbatimSymlinks: true, mode: constants.COPYFILE_FICLONE })

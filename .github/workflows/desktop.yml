@@ -287,16 +287,16 @@ jobs:
         if: steps.scope.outputs.full_runtime == 'true'
         timeout-minutes: 6
         run: node .github/scripts/test-paired-release-intake.mjs ".desktop-build/安装 候选/core" 2>&1 | tee .desktop-build/signed-release-intake.log
-      - name: Build paired offline GUI and Core candidate
-        if: steps.scope.outputs.full_runtime == 'true'
-        timeout-minutes: 10
-        run: node scripts/desktop/package-application.mjs --candidate=true --layout=paired "--core=.desktop-build/安装 候选/core" "--out=.desktop-build/安装 候选/paired" 2>&1 | tee .desktop-build/paired-package.log
       - name: Load same-commit Ubuntu24 native bootstrap
         if: runner.os == 'Linux' && steps.scope.outputs.full_runtime == 'true'
         uses: actions/download-artifact@v4
         with:
           name: ubuntu-native-bootstrap
           path: .desktop-build/ubuntu-bootstrap
+      - name: Build paired offline GUI and Core candidate
+        if: steps.scope.outputs.full_runtime == 'true'
+        timeout-minutes: 10
+        run: node scripts/desktop/package-application.mjs --candidate=true --layout=paired --native-bootstrap=.desktop-build/ubuntu-bootstrap "--core=.desktop-build/安装 候选/core" "--out=.desktop-build/安装 候选/paired" 2>&1 | tee .desktop-build/paired-package.log
       - name: Build independent offline installer host
         if: steps.scope.outputs.full_runtime == 'true'
         timeout-minutes: 15

@@ -59,8 +59,9 @@ with tempfile.TemporaryDirectory(prefix='Crabot namespace 用户 *?[]{}@{HOME} \
         p.chmod(mode)
         return p
 
-    def run(ok=True, option='--inspect', target=tmp):
-        result = subprocess.run([helper, option, target], capture_output=True, text=True, timeout=10)
+    def run(ok=True, option='--inspect', target=tmp, update_gui=None):
+        command = [helper, option, target] + ([] if update_gui is None else [update_gui])
+        result = subprocess.run(command, capture_output=True, text=True, timeout=10)
         assert (result.returncode == 0) == ok, (result.returncode, result.stderr)
         if ok:
             assert result.stdout.count('  userns,') == role_count
@@ -131,6 +132,35 @@ with tempfile.TemporaryDirectory(prefix='Crabot namespace 用户 *?[]{}@{HOME} \
     run(False)
     put(f'releases/{core}/product-runtime.json', runtime)
     run()
+    # An update reads only the existing installation, current pair and exact
+    # prepared GUI-id proof. It cannot reuse a fresh-install pending marker.
+    next_gui = str(uuid.uuid4())
+    next_selection = {**selection, 'gui_id': next_gui}
+    next_payload = {**payload, 'selection': next_selection}
+    update_proof = put(f'app/payloads/{next_gui}.json', next_payload)
+    next_gui_file = put(f'app/releases/{next_gui}/crabot-desktop', binary, 0o755)
+    next_pin = put(f'app/releases/{next_gui}/resources/desktop-release.json', next_selection)
+    current_file = put('current-release.json', selection)
+    run(False, '--inspect-update', update_gui=next_gui)  # Fresh marker is still present.
+    state_file.unlink()
+    update_output = run(option='--inspect-update', update_gui=next_gui).stdout
+    run(False)  # Missing fresh marker is never treated as a new installation.
+    run(False, '--register-update', update_gui=next_gui)
+    for bad in ['../escape', 'not-a-uuid', gui]:
+        run(False, '--inspect-update', update_gui=bad)
+    update_proof.chmod(0o644)
+    run(False, '--inspect-update', update_gui=next_gui)
+    update_proof.chmod(0o600)
+    current_file.unlink()
+    run(False, '--inspect-update', update_gui=next_gui)
+    put('current-release.json', {**selection, 'gui_id': str(uuid.uuid4())})
+    run(False, '--inspect-update', update_gui=next_gui)
+    put('current-release.json', selection)
+    put(f'app/releases/{next_gui}/resources/desktop-release.json', selection)
+    run(False, '--inspect-update', update_gui=next_gui)
+    put(f'app/releases/{next_gui}/resources/desktop-release.json', next_selection)
+    run(option='--inspect-update', update_gui=next_gui)
+    put('.desktop-installing.json', saved)
     if args.namespace_probe:
         restriction = Path('/proc/sys/kernel/apparmor_restrict_unprivileged_userns')
         assert restriction.read_text().strip() == '1', 'Kernel restriction is required for this acceptance'
@@ -158,13 +188,26 @@ with tempfile.TemporaryDirectory(prefix='Crabot namespace 用户 *?[]{}@{HOME} \
             identities = [(file.stat().st_dev, file.stat().st_ino, file.read_bytes()) for file in policies]
             subprocess.run(['/usr/bin/sudo', '/usr/bin/env', 'PKEXEC_UID=' + str(os.getuid()), helper, '--register', tmp], check=True, timeout=120)
             assert identities == [(file.stat().st_dev, file.stat().st_ino, file.read_bytes()) for file in policies]
+            # Updating adds the exact new GUI rule before any stop. Shared
+            # browser rules and all old GUI rules retain their original identity.
+            state_file.unlink()
+            old_policies = list(policies)
+            for name in re.findall(r'^(crabot-[a-z0-9-]+)$', update_output, re.M):
+                policy = Path('/etc/apparmor.d') / name
+                if policy not in policies:
+                    policies.append(policy)
+            subprocess.run(['/usr/bin/sudo', '/usr/bin/env', 'PKEXEC_UID=' + str(os.getuid()), helper, '--register-update', tmp, next_gui], check=True, timeout=120)
+            assert identities == [(file.stat().st_dev, file.stat().st_ino, file.read_bytes()) for file in old_policies]
+            assert subprocess.run([str(gui_file)], timeout=5).returncode == 0
+            assert subprocess.run([str(next_gui_file)], timeout=5).returncode == 0
+            assert subprocess.run([str(neighbor)], timeout=5).returncode == 13
             assert restriction.read_bytes() == original_setting
             print('CRABOT_KERNEL_NAMESPACE_ACCEPTANCE: actual denial -> exact roles allowed; neighbor denied; global setting unchanged; no GUI/Polkit claim')
         finally:
             # All test executables above exited; preserve unknown or changed rules.
             for file in policies:
                 if file.exists():
-                    expected = next(text for name, text in re.findall(r'(crabot-[a-z0-9-]+)\n(.*?\n}\n)', output, re.S) if name == file.name)
+                    expected = next(text for name, text in re.findall(r'(crabot-[a-z0-9-]+)\n(.*?\n}\n)', output + update_output, re.S) if name == file.name)
                     assert file.stat().st_uid == 0 and file.stat().st_nlink == 1 and file.read_text() == expected
                     subprocess.run(['/usr/bin/sudo', '/usr/sbin/apparmor_parser', '-R', '-T', '-K', '--', str(file)], check=True, timeout=90)
                     subprocess.run(['/usr/bin/sudo', '/usr/bin/rm', '--', str(file)], check=True, timeout=5)

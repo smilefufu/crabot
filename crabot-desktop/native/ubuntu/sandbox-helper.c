@@ -16,7 +16,7 @@
 #include "apparmor-path.h"
 
 /* One-shot, no GTK, no application execution and no business data access.
- * Only --inspect ROOT (caller UID, read-only) or --register ROOT (Polkit). */
+ * Fixed install/update inspection and registration only; no executable list. */
 static uid_t caller;
 static const char *stage = "arguments";
 static void refuse(void) {
@@ -118,6 +118,12 @@ static void pair(JsonObject *obj, const char *version, const char *gui, const ch
   keys(obj, "schema_version,version,gui_id,core_id"); need(integer(obj, "schema_version") == 1);
   eq(obj, "version", version); eq(obj, "gui_id", gui); eq(obj, "core_id", core);
 }
+static void valid_pair(JsonObject *selection) {
+  const char *gui = string(selection, "gui_id"), *core = string(selection, "core_id"), *version = string(selection, "version");
+  need(matches(gui, "^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$") && matches(core, "^[a-f0-9]{64}$")
+    && matches(version, "^[0-9]+\\.[0-9]+\\.[0-9]+(?:-[A-Za-z0-9_.-]+)?$"));
+  pair(selection, version, gui, core);
+}
 typedef struct { char *relative, *name, *text, *sha; struct stat identity; } Target;
 static void executable(int base, const char *relative, JsonObject *record, struct stat *identity, char **sha) {
   int fd = open_chain(base, relative, caller, false, false); struct stat after;
@@ -143,7 +149,7 @@ static void make_target(Target *target, int root, const char *install_root, cons
   target->name = g_strdup_printf("crabot-%lu-%s-%s-%s", (unsigned long)caller, id, role, version_id);
   target->text = g_strdup_printf("# Crabot exact-path user namespace registration\nabi <abi/4.0>,\nprofile %s %s flags=(unconfined) {\n  userns,\n}\n", target->name, escaped);
 }
-static int verify_targets(const char *install_root, int root, Target targets[3]) {
+static int verify_targets(const char *install_root, int root, Target targets[3], const char *update_gui) {
   stage = "installation";
   g_autoptr(JsonNode) metadata = json(root, "desktop-installation.json", 65536, true, NULL);
   JsonObject *own = json_node_get_object(metadata); keys(own, "schema_version,installation_id,owner,install_root,root_identity,paths");
@@ -157,17 +163,38 @@ static int verify_targets(const char *install_root, int root, Target targets[3])
   keys(identity, "dev,ino"); eq(identity, "dev", dev); eq(identity, "ino", ino);
   keys(paths, "app,core,data,bin"); eq(paths, "app", "app/releases"); eq(paths, "core", "releases"); eq(paths, "data", "data"); eq(paths, "bin", "bin");
   stage = "prepared-pair";
-  g_autoptr(JsonNode) pending = json(root, ".desktop-installing.json", 4096, true, NULL);
-  JsonObject *state = json_node_get_object(pending); keys(state, "schema_version,id,installation_id,selection,phase,payload_sha256");
-  need(integer(state, "schema_version") == 1); eq(state, "installation_id", id); eq(state, "phase", "prepared");
-  JsonObject *selection = object(state, "selection");
+  g_autoptr(JsonNode) pending = NULL, payload = NULL;
+  JsonObject *selection;
+  if (update_gui) {
+    /* Existing online preparation uses the already defined per-GUI payload
+     * proof. Never invent a fresh-install marker or read business state. */
+    stage = "update-source";
+    need(fstatat(root, ".desktop-installing.json", &st, AT_SYMLINK_NOFOLLOW) != 0 && errno == ENOENT);
+    g_autoptr(JsonNode) current = json(root, "current-release.json", 4096, true, NULL);
+    JsonObject *source = json_node_get_object(current); valid_pair(source);
+    g_autofree char *source_pin = g_strdup_printf("app/releases/%s/resources/desktop-release.json", string(source, "gui_id"));
+    g_autoptr(JsonNode) original_pin = json(root, source_pin, 4096, false, NULL);
+    pair(json_node_get_object(original_pin), string(source, "version"), string(source, "gui_id"), string(source, "core_id"));
+    g_autofree char *source_release = g_strdup_printf("releases/%s/core-release.json", string(source, "core_id"));
+    g_autoptr(JsonNode) original_release = json(root, source_release, 65536, false, NULL);
+    JsonObject *original = json_node_get_object(original_release);
+    need(integer(original, "schema_version") == 1); eq(original, "inventory_sha256", string(source, "core_id"));
+    eq(original, "version", string(source, "version")); eq(original, "platform", "linux"); eq(original, "arch", "x64");
+    stage = "update-prepared-pair";
+    g_autofree char *proof_path = g_strdup_printf("app/payloads/%s.json", update_gui);
+    payload = json(root, proof_path, 64 * 1024 * 1024, true, NULL);
+    selection = object(json_node_get_object(payload), "selection"); eq(selection, "gui_id", update_gui);
+  } else {
+    pending = json(root, ".desktop-installing.json", 4096, true, NULL);
+    JsonObject *state = json_node_get_object(pending); keys(state, "schema_version,id,installation_id,selection,phase,payload_sha256");
+    need(integer(state, "schema_version") == 1); eq(state, "installation_id", id); eq(state, "phase", "prepared");
+    selection = object(state, "selection");
+    g_autofree char *payload_sha = NULL;
+    payload = json(root, ".desktop-install-payload.json", 64 * 1024 * 1024, true, &payload_sha);
+    eq(state, "payload_sha256", payload_sha);
+  }
+  valid_pair(selection);
   const char *gui = string(selection, "gui_id"), *core = string(selection, "core_id"), *version = string(selection, "version");
-  need(matches(gui, "^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$") && matches(core, "^[a-f0-9]{64}$")
-    && matches(version, "^[0-9]+\\.[0-9]+\\.[0-9]+(?:-[A-Za-z0-9_.-]+)?$"));
-  pair(selection, version, gui, core);
-  g_autofree char *payload_sha = NULL;
-  g_autoptr(JsonNode) payload = json(root, ".desktop-install-payload.json", 64 * 1024 * 1024, true, &payload_sha);
-  eq(state, "payload_sha256", payload_sha);
   JsonObject *proof = json_node_get_object(payload); need(integer(proof, "schema_version") == 1); eq(proof, "platform", "linux"); eq(proof, "arch", "x64");
   pair(object(proof, "selection"), version, gui, core);
   g_autofree char *pin_path = g_strdup_printf("app/releases/%s/resources/desktop-release.json", gui);
@@ -274,15 +301,18 @@ static void load_policy(const Target *target) {
 }
 int main(int argc, char **argv) {
   umask(077);
-  bool inspect = argc == 3 && !strcmp(argv[1], "--inspect"), registration = argc == 3 && !strcmp(argv[1], "--register");
+  bool update = argc == 4 && (!strcmp(argv[1], "--inspect-update") || !strcmp(argv[1], "--register-update"));
+  bool inspect = (argc == 3 && !strcmp(argv[1], "--inspect")) || (update && !strcmp(argv[1], "--inspect-update"));
+  bool registration = (argc == 3 && !strcmp(argv[1], "--register")) || (update && !strcmp(argv[1], "--register-update"));
   need(inspect || registration);
+  if (update) need(matches(argv[3], "^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$"));
   if (registration) {
     const char *value = getenv("PKEXEC_UID");
     need(geteuid() == 0 && matches(value, "^[1-9][0-9]{0,9}$"));
     unsigned long parsed = strtoul(value, NULL, 10); need(parsed > 0 && parsed < UINT32_MAX); caller = (uid_t)parsed;
   } else { need(getuid() != 0 && getuid() == geteuid()); caller = getuid(); }
   stage = "root"; int root = root_directory(argv[2], caller); Target targets[3] = {0};
-  int count = verify_targets(argv[2], root, targets); stage = "entries-changed"; unchanged_targets(argv[2], root, targets, count);
+  int count = verify_targets(argv[2], root, targets, update ? argv[3] : NULL); stage = "entries-changed"; unchanged_targets(argv[2], root, targets, count);
   if (registration) {
     stage = "system-policy-conflict"; int system = system_directory();
     for (int i = 0; i < count; i++) existing_policy(system, &targets[i]);
