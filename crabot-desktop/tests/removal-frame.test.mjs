@@ -65,7 +65,7 @@ before(async () => {
   await sealDesktopPayload(payload)
 }, 120000)
 after(async () => { if (root) await fs.rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }) })
-for (const mode of ['valid', 'node-parent', 'unexpected-source-args', 'changed-copy', 'other-installation', 'publish-close', 'publish-cancel', 'publish-module', 'publish-damaged', 'publish-lost-reply', 'publish-replaced-record', 'publish-live', 'publish-cancel-lost', 'publish-stop', 'publish-stop-wrong-root', 'publish-stop-lost']) test('actual protected initial removal frame: ' + mode, { skip: !supported, timeout: 60000 }, async t => {
+for (const mode of ['valid', 'node-parent', 'unexpected-source-args', 'changed-copy', 'other-installation', 'publish-close', 'publish-cancel', 'publish-module', 'publish-damaged', 'publish-lost-reply', 'publish-replaced-record', 'publish-live', 'publish-cancel-lost', 'publish-stop', 'publish-stop-wrong-root', 'publish-stop-lost', 'publish-source-exit', 'publish-source-ignore', 'publish-source-disconnect']) test('actual protected initial removal frame: ' + mode, { skip: !supported, timeout: 60000 }, async t => {
   const area = await fs.mkdtemp(path.join(root, 'case-'))
   const own = await commitDesktopInstallation(await prepareDesktopInstallation({ payload, installRoot: path.join(area, 'installation') }))
   let finite, finiteExited, finiteOutput = ''
@@ -93,7 +93,7 @@ for (const mode of ['valid', 'node-parent', 'unexpected-source-args', 'changed-c
     const record = readInstanceRuntime(own.dataDir)
     await fs.writeFile(path.join(own.dataDir, 'instance-runtime.json'), JSON.stringify({ ...record, install_root: area }) + '\n')
   }
-  const operationId = randomUUID(), cfg = { root: own.root, operationId, mode }
+  const operationId = randomUUID(), cfg = { root: own.root, operationId, mode, resultFile: path.join(area, 'host-result.json') }
   if (mode === 'other-installation') cfg.inspectRoot = (await commitDesktopInstallation(await prepareDesktopInstallation({ payload, installRoot: path.join(area, 'other') }))).root
   await fs.writeFile(path.join(own.dataDir, 'preserved-user-file'), 'user bytes')
   const config = path.join(area, 'control.json'); await fs.writeFile(config, JSON.stringify(cfg))
@@ -106,12 +106,27 @@ for (const mode of ['valid', 'node-parent', 'unexpected-source-args', 'changed-c
   let output = ''; for (const stream of [child.stdout, child.stderr]) stream.on('data', bytes => { output = (output + bytes.toString()).slice(-8000) })
   const processIdentity = identity.inspectProcess(child.pid)
   t.after(() => { if (child.exitCode === null && child.signalCode === null && identity.sameProcess(processIdentity, identity.inspectProcess(child.pid))) child.kill('SIGKILL') })
-  const result = await Promise.race([once(child, 'message').then(([result]) => result), exited.then(([code, signal]) => { throw new Error('Source exited: ' + code + ':' + signal + '\n' + output) })])
+  let result = await Promise.race([once(child, 'message').then(([result]) => result), exited.then(([code, signal]) => { throw new Error('Source exited: ' + code + ':' + signal + '\n' + output) })])
   const [code] = await exited; assert.equal(code, 0, output)
+  if (mode === 'publish-source-exit') {
+    assert.equal(result.handoff, true, JSON.stringify(result))
+    const host = result.host, directory = result.directory
+    t.after(async () => {
+      if (identity.sameProcess(host, identity.inspectProcess(host.pid))) globalThis.process.kill(host.pid, 'SIGKILL')
+      if (identity.isProcessExited(host.pid)) await fs.rm(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 })
+    })
+    const deadline = Date.now() + 20000
+    while (!(await fs.lstat(cfg.resultFile).catch(() => null)) || !identity.isProcessExited(host.pid)) {
+      if (Date.now() > deadline) throw new Error('Independent host did not finish after actual source exit')
+      await new Promise(resolve => setTimeout(resolve, 100))
+    }
+    result = JSON.parse(await fs.readFile(cfg.resultFile, 'utf8'))
+  }
   if (mode.startsWith('publish-')) {
     assert.equal(result.accepted, true, JSON.stringify(result)); assert.equal(result.published, true)
-    assert.equal(result.cancelled, ['publish-cancel', 'publish-cancel-lost', 'publish-stop'].includes(mode), JSON.stringify(result)); assert.equal(result.retained, !['publish-cancel', 'publish-cancel-lost', 'publish-stop'].includes(mode))
+    assert.equal(result.cancelled, ['publish-cancel', 'publish-cancel-lost', 'publish-stop', 'publish-source-exit'].includes(mode), JSON.stringify(result)); assert.equal(result.retained, !['publish-cancel', 'publish-cancel-lost', 'publish-stop', 'publish-source-exit'].includes(mode))
     assert.equal(result.cancelRejected, ['publish-module', 'publish-damaged', 'publish-replaced-record', 'publish-live', 'publish-stop-wrong-root', 'publish-stop-lost'].includes(mode), JSON.stringify(result))
+    assert.equal(result.sourceExited, mode === 'publish-source-exit'); assert.equal(result.sourceExitRejected, ['publish-source-ignore', 'publish-source-disconnect'].includes(mode))
     assert.equal(result.stopRejected, ['publish-stop-wrong-root', 'publish-stop-lost'].includes(mode))
     if (mode === 'publish-stop-lost') assert.equal(result.phase, 'stopping')
     assert.equal(result.cancellationReplyLost, mode === 'publish-cancel-lost'); assert.equal(result.lost, mode === 'publish-lost-reply'); assert.equal(result.proofRetained, true)
@@ -123,7 +138,7 @@ for (const mode of ['valid', 'node-parent', 'unexpected-source-args', 'changed-c
     assert.equal(result.accepted, false, JSON.stringify(result)); assert.equal(result.code, 'CRABOT_DESKTOP_REMOVAL', JSON.stringify(result))
     assert.equal(result.stage, mode === 'changed-copy' ? 'private-programs' : 'source-peer', JSON.stringify(result))
   }
-  if (!mode.startsWith('publish-') || ['publish-cancel', 'publish-cancel-lost', 'publish-stop'].includes(mode)) await assert.rejects(fs.lstat(path.join(own.root, '.desktop-removal.json')), { code: 'ENOENT' })
+  if (!mode.startsWith('publish-') || ['publish-cancel', 'publish-cancel-lost', 'publish-stop', 'publish-source-exit'].includes(mode)) await assert.rejects(fs.lstat(path.join(own.root, '.desktop-removal.json')), { code: 'ENOENT' })
   else assert.equal((await fs.lstat(path.join(own.root, '.desktop-removal.json'))).isFile(), true)
   assert.equal(await fs.readFile(path.join(own.dataDir, 'preserved-user-file'), 'utf8'), 'user bytes')
   if (finite && mode !== 'publish-stop') {

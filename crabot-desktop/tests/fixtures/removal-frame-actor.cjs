@@ -41,7 +41,7 @@ async function publication() {
     }
     return result
   }
-  let lease, lost = false, cancelRejected = false, cancelled = false, stopApplied = false, stopRejected = false
+  let lease, lost = false, cancelRejected = false, cancelled = false, stopApplied = false, stopRejected = false, sourceExited = false, sourceExitRejected = false
   try {
     try { lease = await beginInitialDesktopRemoval({ installRoot: cfg.root, operationId: cfg.operationId }) }
     catch (error) { if (cfg.mode !== 'publish-lost-reply' || error.code !== 'EIO') throw error; lost = true }
@@ -54,6 +54,11 @@ async function publication() {
     if (['publish-stop-wrong-root', 'publish-stop-lost'].includes(cfg.mode)) {
       await assert.rejects(lease.stop()); stopRejected = true
     }
+    if (cfg.mode.startsWith('publish-source-')) {
+      await lease.stop()
+      if (cfg.mode === 'publish-source-exit') { await lease.exitSource(); sourceExited = true }
+      else { await assert.rejects(lease.exitSource()); sourceExitRejected = true }
+    }
     if (cfg.mode === 'publish-module') {
       fs.mkdirSync(path.join(cfg.root, 'data/module-runtime-registry/records'), { recursive: true })
       fs.writeFileSync(path.join(cfg.root, 'data/module-runtime-registry/records/unsettled.json'), '{}')
@@ -64,13 +69,13 @@ async function publication() {
       const changed = { ...initial.record, operation_id: '11111111-1111-4111-8111-111111111111' }
       await (await load('desktop-preparation-files.mjs')).privateJson(path.join(cfg.root, '.desktop-removal.json'), changed, true)
     }
-    if (cfg.mode !== 'publish-close' && cfg.mode !== 'publish-lost-reply') {
+    if (!['publish-close', 'publish-lost-reply', 'publish-source-ignore', 'publish-source-disconnect'].includes(cfg.mode)) {
       try { await lease.cancel(); cancelled = true; await lease.cancel() }
-      catch (error) { if (['publish-cancel', 'publish-stop'].includes(cfg.mode)) throw error; if (cfg.mode === 'publish-cancel-lost' && cancellationReplyLost) { await lease.cancel(); cancelled = true } else cancelRejected = error.code === 'CRABOT_DESKTOP_REMOVAL' }
+      catch (error) { if (['publish-cancel', 'publish-stop', 'publish-source-exit'].includes(cfg.mode)) throw error; if (cfg.mode === 'publish-cancel-lost' && cancellationReplyLost) { await lease.cancel(); cancelled = true } else cancelRejected = error.code === 'CRABOT_DESKTOP_REMOVAL' }
     }
     const record = removal.readDesktopRemoval(cfg.root)
     return { accepted: true, published: true, cancelled, cancelRejected, lost, retained: Boolean(record), operation_id: record?.operation_id,
-      cancellationReplyLost, stopApplied, stopRejected, phase: record?.phase, proofRetained: fs.existsSync(path.join(cfg.root, 'app/removals', cfg.operationId, 'proof.json')) }
+      cancellationReplyLost, stopApplied, stopRejected, sourceExited, sourceExitRejected, phase: record?.phase, proofRetained: fs.existsSync(path.join(cfg.root, 'app/removals', cfg.operationId, 'proof.json')) }
   } finally {
     physical.promises.link = originalLink; physical.promises.unlink = originalUnlink; physical.promises.rename = originalRename
     await lease?.close()
@@ -86,13 +91,31 @@ async function main() {
     let result
     try { if (cfg.mode.startsWith('publish-')) { result = await publication(); } else { const { inspectInitialRemovalGuiHost } = await load('desktop-removal-frame.mjs'); const frame = await inspectInitialRemovalGuiHost({ installRoot: cfg.inspectRoot || cfg.root, operationId: cfg.operationId }); result = { accepted: true, frame } } }
     catch (error) { result = { accepted: false, code: error.code, stage: error.stage, message: String(error.message).slice(0, 256) } }
-    await send(result); return
+    if (['publish-source-exit', 'publish-source-disconnect'].includes(cfg.mode)) {
+      fs.writeFileSync(cfg.resultFile, JSON.stringify(result)); if (!result.accepted && process.connected) await send(result)
+    }
+    else await send(result)
+    return
   }
   prepared = await (await load('desktop-removal-host.mjs')).prepareDesktopRemovalGui({ installRoot: cfg.root, operationId: cfg.operationId })
   if (cfg.mode === 'changed-copy') fs.appendFileSync(path.join(prepared.guiRoot, process.platform === 'darwin' ? 'Crabot.app/Contents/Resources/desktop-release.json' : 'resources/desktop-release.json'), ' ')
   child = spawn(prepared.executable, ['--fixture-removal-host'], { env: process.env, stdio: ['ignore', 'inherit', 'inherit', 'ipc'] })
+  const native = require('./bootstrap/scripts/lib/process-identity.cjs'), childIdentity = native.inspectProcess(child.pid)
+  if (cfg.mode === 'publish-source-exit') await send({ handoff: true, host: childIdentity, directory: prepared.directory })
+  child.on('message', message => {
+    if (!['publish-source-exit', 'publish-source-disconnect'].includes(cfg.mode) || message?.kind !== 'desktop_removal_source_exit' || message.operation_id !== cfg.operationId
+      || message.installation_id !== prepared.proof.installation_id || JSON.stringify(message.source_selection) !== JSON.stringify(prepared.proof.source_selection)
+      || !native.sameProcess(childIdentity, native.inspectProcess(child.pid))) return
+    const record = require('./bootstrap/scripts/lib/desktop-removal-record.cjs').readDesktopRemoval(cfg.root)
+    if (record?.phase !== 'stopping' || record.operation_id !== cfg.operationId) return
+    void load('instance-runtime.mjs').then(runtime => {
+      if (runtime.inspectInstance(path.join(cfg.root, 'data')).state !== 'stopped') return
+      if (cfg.mode === 'publish-source-disconnect') child.disconnect()
+      else { clearTimeout(timer); app.exit(0) }
+    })
+  })
   const exited = once(child, 'exit')
-  const result = await Promise.race([once(child, 'message').then(([result]) => result), exited.then(([code, signal]) => { throw new Error('Host exited before a result: ' + code + ':' + signal) })])
+  const result = cfg.mode === 'publish-source-disconnect' ? await exited.then(() => JSON.parse(fs.readFileSync(cfg.resultFile, 'utf8'))) : await Promise.race([new Promise(resolve => child.on('message', result => { if (typeof result?.accepted === 'boolean') resolve(result) })), exited.then(([code, signal]) => { throw new Error('Host exited before a result: ' + code + ':' + signal) })])
   await exited
   fs.rmSync(prepared.directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); prepared = undefined
   await send(result)

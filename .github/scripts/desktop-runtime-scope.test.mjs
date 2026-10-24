@@ -33,6 +33,7 @@ for (const [file, expected] of [
   ['.github/scripts/smoke-workspace-python-gate.mjs', true],
   ['scripts/lib/workspace-coordinator-launch.mjs', true],
   ['scripts/lib/known-process-stop.cjs', true],
+  ['scripts/lib/known-process-exit.cjs', true],
   ['scripts/lib/desktop-preparation-files.mjs', true],
   ['scripts/lib/desktop-repair.mjs', true],
   ['scripts/lib/desktop-program-proof.mjs', true],

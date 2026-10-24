@@ -76,8 +76,8 @@
 - Ubuntu24首次真实整包安装在profile阶段失败；固定Electron实证ready后enableSandbox会抛错，原探测在异步IO后调用存在竞态。安装后端改为进程启动参数enable-sandbox，仍拒绝禁用沙箱参数/保留内核核验；新增延迟profile真实Linux入口回归接CI，本机12过/1仅Linux跳过，不称Ubuntu已修验。
 - 151矩阵Intel原生窗口新增EGL/GPU初始化失败及app://加载中断，根因未定；仅加阶段计时/终止请求证据，未放宽期限或改生产GPU，本机实际Electron1项通过，50e的Intel同一窗口组重跑success；偶发原因仍未知，不据一次重跑称已修。
 - CI归档：0470的Windows首次completion根目录探针stage=exit拒绝后，e580同组重跑通过；偶发根因仍未知，不能据重跑绿称已修复。保留脱敏探针事件，不放宽权限/恢复/超时。
-- Windows 原程序清单创建缺私有 ACL 已修，67项过/9条件跳过，NTFS待重验。卸载已确认并同步Desktop1.10.0/MM0.2.4；启动保护、原程序证明、macOS/Windows私有GUI准备、独立stop、固定GUI bootstrap、受限进度UI、初始交接、双锁作业发布/删除前取消及正常停机已接，真实约310MB GUI复制及无Core归档加载通过。Ubuntu宿主/完整停机交接/实际删除/保留数据重装仍待，未开放完整卸载，详见[计划](crabot-docs/superpowers/plans/2026-10-24-desktop-retained-data-uninstall-implementation.md)。
-- 验收更正：878 ARM虽CI绿，实际完整更新报告源状态migration_required，已撤回目标健康通过结论。夹具哨兵改在正常ready后写，新增独立新进程核对本run完整健康/收尾，失败/旧结果均拒绝；62项通过，依赖Native的测试已移到编译后，无Native隔离前置59项通过；实际新head全流程仍待，原退出机制尚未定。
+- Windows 原程序清单创建缺私有 ACL 已修，67项过/9条件跳过，NTFS待重验。卸载已确认并同步Desktop1.10.0/MM0.2.4；启动保护、原程序证明、macOS/Windows私有GUI准备、独立stop、固定GUI bootstrap、受限进度UI、初始交接、双锁作业发布/删除前取消、正常停机与原GUI根进程退出观察已接，真实约310MB GUI复制及无Core归档加载通过。Ubuntu宿主/完整停机交接/实际删除/保留数据重装仍待，未开放完整卸载，详见[计划](crabot-docs/superpowers/plans/2026-10-24-desktop-retained-data-uninstall-implementation.md)。
+- 验收更正：878 ARM虽CI绿，实际完整更新报告源状态migration_required，已撤回目标健康通过结论。夹具哨兵改在正常ready后写，新增独立新进程核对本run完整健康/收尾，失败/旧结果均拒绝；62项通过，依赖Native的测试已移到编译后，无Native隔离前置59项通过；d529 Core40/40通过，Desktop Linux作业完成，ARM/Windows均被新门禁因源activity未确认idle拒绝，目标尚未启动，正在诊断；原旧退出机制尚未定。
 - 最终缺口：完整安装/更新/修复/卸载、旧部署迁移及故障恢复、签名/公证、macOS14/Windows11/Ubuntu GNOME24.04与26.04的权限/IME/沙箱/资源、真实模型任务分别验收；[签名指南](crabot-docs/guides/desktop-release-signing.md)。Agent34项和Admin两项既有失败已在未改main复现，分支WS关闭丢消息已修；不把基线、构建、部署或旧候选混成验收。逐项证据/旧结果保留在[总验收记录](crabot-docs/superpowers/plans/2026-10-17-desktop-application-validation.md)与对应计划；完成全部验证后才走PR。
 
 ### 任务默认目录文件授权：独立修复待审查
