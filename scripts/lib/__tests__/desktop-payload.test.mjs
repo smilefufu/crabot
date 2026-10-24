@@ -850,3 +850,110 @@ test('private preparation JSON supports large inventories and still refuses exis
   assert.deepEqual(await fs.readdir(parent), ['proof.json'])
   assert.equal(await fs.readFile(file, 'utf8'), JSON.stringify(value) + '\n')
 })
+
+async function removalProofFixture(t) {
+  const f = await fixture(t), prepared = await prepareDesktopInstallation({ payload: f.payload, installRoot: f.target })
+  await commitDesktopInstallation(prepared)
+  await fs.writeFile(path.join(f.target, 'data', 'retained-user-file'), 'user content')
+  const backend = await import('../desktop-removal-proof.mjs'), operation = randomUUID()
+  const entries = await fs.readdir(f.target), dataEntries = await fs.readdir(path.join(f.target, 'data'))
+  const proof = await backend.captureDesktopRemovalProof(f.target, operation)
+  assert.deepEqual(await fs.readdir(f.target), entries)
+  assert.deepEqual(await fs.readdir(path.join(f.target, 'data')), dataEntries)
+  const { privateJson } = await import('../desktop-preparation-files.mjs')
+  const management = (await import('../desktop-management.cjs')).default
+  management.ensurePrivateDataRoot(path.join(f.target, 'app/removals'))
+  const directory = management.ensurePrivateDataRoot(path.join(f.target, 'app/removals', operation))
+  const file = path.join(directory, 'proof.json'), record = { schema_version: 1, installation_id: prepared.installation_id,
+    operation_id: operation, source_selection: f.selection, phase: 'preparing', proof_sha256: '' }
+  const publish = async (value = proof, text = JSON.stringify(value) + '\n') => {
+    await fs.rm(file, { force: true }); await privateJson(file, value)
+    if (text !== JSON.stringify(value) + '\n') await fs.writeFile(file, text, { flag: 'r+' })
+    record.proof_sha256 = createHash('sha256').update(text).digest('hex')
+    await privateJson(path.join(f.target, '.desktop-removal.json'), record, Boolean(await fs.lstat(path.join(f.target, '.desktop-removal.json')).catch(() => null)))
+  }
+  await publish()
+  return { ...f, prepared, proof, file, record, publish, backend }
+}
+test('removal proof captures verified original bytes without data or transaction writes and reads after Core removal', async t => {
+  const f = await removalProofFixture(t)
+  assert.equal(f.proof.installation_id, f.prepared.installation_id)
+  assert.deepEqual(f.proof.source_selection, f.selection)
+  assert.equal(f.proof.core.inventory, await fs.readFile(path.join(f.prepared.coreRoot, 'core-files.json'), 'utf8'))
+  assert.deepEqual(await f.backend.readDesktopRemovalProof(f.target), { record: f.record, proof: f.proof })
+  await fs.rm(f.prepared.coreRoot, { recursive: true })
+  assert.deepEqual(await f.backend.readDesktopRemovalProof(f.target), { record: f.record, proof: f.proof })
+  assert.equal(await fs.readFile(path.join(f.target, 'data/retained-user-file'), 'utf8'), 'user content')
+  assert.throws(() => installation.readDesktopSelection(f.target), { code: 'CRABOT_DESKTOP_REMOVAL_PENDING' })
+})
+for (const changed of ['digest', 'bom', 'noncanonical', 'reordered', 'installation', 'operation', 'selection', 'platform', 'inventory-bytes', 'inventory-path', 'gui-path', 'gui-link', 'metadata', 'unknown-field', 'hardlink', 'parent-link']) {
+  test('removal proof rejects changed or unsafe historical bytes without loading Core: ' + changed, async t => {
+    const f = await removalProofFixture(t), value = structuredClone(f.proof)
+    if (changed === 'digest') await fs.appendFile(f.file, ' ')
+    else if (changed === 'bom') await fs.writeFile(f.file, '\uFEFF' + JSON.stringify(value) + '\n', { flag: 'r+' })
+    else if (changed === 'noncanonical') await f.publish(value, JSON.stringify(value, null, 2) + '\n')
+    else if (changed === 'reordered') { const { schema_version, ...rest } = value; await f.publish({ ...rest, schema_version }) }
+    else if (changed === 'installation') { value.installation_id = randomUUID(); await f.publish(value) }
+    else if (changed === 'operation') { value.operation_id = randomUUID(); await f.publish(value) }
+    else if (changed === 'selection') { value.source_selection.gui_id = randomUUID(); await f.publish(value) }
+    else if (changed === 'platform') { value.payload.platform = 'foreign'; await f.publish(value) }
+    else if (changed === 'inventory-bytes') { value.core.inventory += ' '; await f.publish(value) }
+    else if (changed === 'inventory-path') {
+      const inventory = JSON.parse(value.core.inventory)
+      inventory.files['../data/retained-user-file'] = Object.values(inventory.files).find(entry => entry.type === 'file')
+      value.core.inventory = JSON.stringify(inventory) + '\n'
+      const core = JSON.parse(value.core.release); core.inventory_sha256 = createHash('sha256').update(value.core.inventory).digest('hex')
+      value.core.release = JSON.stringify(core); value.source_selection.core_id = core.inventory_sha256
+      value.payload.selection.core_id = core.inventory_sha256; f.record.source_selection.core_id = core.inventory_sha256
+      await f.publish(value)
+    } else if (changed === 'gui-path') { value.payload.gui['/outside'] = { type: 'file', size: 0, sha256: '0'.repeat(64), ...(!windows && { mode: 0o600 }) }; await f.publish(value) }
+    else if (changed === 'gui-link') { value.payload.gui['escape'] = { type: 'link', target: '../data' }; await f.publish(value) }
+    else if (changed === 'metadata') { const core = JSON.parse(value.core.release); core.version = '99.0.0'; value.core.release = JSON.stringify(core); await f.publish(value) }
+    else if (changed === 'unknown-field') { value.command = 'unexpected'; await f.publish(value) }
+    else if (changed === 'hardlink') await fs.link(f.file, f.file + '.retained')
+    else { const directory = path.dirname(f.file); await fs.rename(directory, directory + '.retained'); await fs.symlink(directory + '.retained', directory, windows ? 'junction' : 'dir') }
+    await assert.rejects(f.backend.readDesktopRemovalProof(f.target), { code: 'CRABOT_DESKTOP_REMOVAL' })
+    assert.equal(await fs.readFile(path.join(f.target, 'data/retained-user-file'), 'utf8'), 'user content')
+    assert.throws(() => installation.readDesktopSelection(f.target), { code: 'CRABOT_DESKTOP_REMOVAL_PENDING' })
+  })
+}
+for (const changed of ['gui', 'core', 'original-proof', 'operation', 'cancelled']) test('removal proof capture refuses unverified sources and leaves no transaction: ' + changed, async t => {
+  const f = await fixture(t), prepared = await prepareDesktopInstallation({ payload: f.payload, installRoot: f.target })
+  await commitDesktopInstallation(prepared)
+  const backend = await import('../desktop-removal-proof.mjs'), abort = new AbortController()
+  if (changed === 'gui') await fs.appendFile(path.join(prepared.guiRoot, process.platform === 'darwin' ? 'Crabot.app/Contents/MacOS/Crabot' : windows ? 'Crabot.exe' : 'crabot-desktop'), 'changed')
+  else if (changed === 'core') await fs.appendFile(path.join(prepared.coreRoot, 'cli.mjs'), 'changed')
+  else if (changed === 'original-proof') await fs.rm(path.join(f.target, '.desktop-install-payload.json'))
+  else if (changed === 'cancelled') abort.abort(new Error('cancelled capture'))
+  const entries = await fs.readdir(f.target), dataEntries = await fs.readdir(path.join(f.target, 'data'))
+  await assert.rejects(backend.captureDesktopRemovalProof(f.target, changed === 'operation' ? '../outside' : randomUUID(), { signal: abort.signal }), changed === 'cancelled' ? /cancelled capture/ : { code: 'CRABOT_DESKTOP_REMOVAL' })
+  assert.deepEqual(await fs.readdir(f.target), entries)
+  assert.deepEqual(await fs.readdir(path.join(f.target, 'data')), dataEntries)
+})
+for (const changed of ['oversized', 'changed-open-file', 'changed-parent']) test('removal proof bounds allocation and pins open bytes and private job parents: ' + changed, async t => {
+  const f = await removalProofFixture(t), physical = (await import('../physical-fs.cjs')).default.promises
+  if (changed === 'oversized') { const handle = await fs.open(f.file, 'r+'); try { await handle.truncate(128 * 1024 * 1024 + 1) } finally { await handle.close() } }
+  const open = physical.open.bind(physical)
+  let proofReads = 0, injected = false
+  const spy = t.mock.method(physical, 'open', async function(file, ...args) {
+    const handle = await open(file, ...args)
+    if (file === f.file) {
+      proofReads++
+      const read = handle.read.bind(handle)
+      t.mock.method(handle, 'read', async function(...values) {
+        const response = await read(...values)
+        if (!injected) {
+          injected = true
+          if (changed === 'changed-open-file') await fs.appendFile(f.file, ' ')
+          else if (changed === 'changed-parent') { const directory = path.dirname(f.file); await fs.rename(directory, directory + '.retained'); (await import('../desktop-management.cjs')).default.ensurePrivateDataRoot(directory) }
+        }
+        return response
+      })
+    }
+    return handle
+  })
+  try { await assert.rejects(f.backend.readDesktopRemovalProof(f.target), { code: 'CRABOT_DESKTOP_REMOVAL' }) }
+  finally { spy.mock.restore() }
+  assert.equal(proofReads, changed === 'oversized' ? 0 : 1)
+  assert.equal(await fs.readFile(path.join(f.target, 'data/retained-user-file'), 'utf8'), 'user content')
+})

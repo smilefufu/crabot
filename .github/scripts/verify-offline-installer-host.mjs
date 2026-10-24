@@ -33,11 +33,11 @@ try {
       [path.join(root, 'backend/dist/ubuntu-installer-backend.js'), '--verify-payload-only'], { env, timeout: 180_000, maxBuffer: 65536 })
     assert.deepEqual(JSON.parse(stdout.trim()), { type: 'payload_verified', business_mm_started: false })
     const repair = path.join(root, 'backend/dist/bootstrap/scripts/lib/desktop-repair.mjs')
-    const code = `import assert from 'node:assert/strict';import{pathToFileURL}from'node:url';const m=await import(pathToFileURL(process.argv[1]).href);assert.equal(typeof m.prepareDesktopRepair,'function');assert.equal(typeof m.commitDesktopRepair,'function');const r=await import(pathToFileURL(process.argv[2]).href);assert.equal(typeof r.default.readDesktopRemoval,'function')`
-    await promisify(execFile)(path.join(payload, 'core/.product-runtime/node/bin/node'), ['--input-type=module', '-e', code, repair, path.join(root, 'backend/dist/bootstrap/scripts/lib/desktop-removal-record.cjs')],
+    const code = `import assert from 'node:assert/strict';import{pathToFileURL}from'node:url';const m=await import(pathToFileURL(process.argv[1]).href);assert.equal(typeof m.prepareDesktopRepair,'function');assert.equal(typeof m.commitDesktopRepair,'function');const r=await import(pathToFileURL(process.argv[2]).href);assert.equal(typeof r.default.readDesktopRemoval,'function');const p=await import(pathToFileURL(process.argv[3]).href);assert.equal(typeof p.captureDesktopRemovalProof,'function');assert.equal(typeof p.readDesktopRemovalProof,'function')`
+    await promisify(execFile)(path.join(payload, 'core/.product-runtime/node/bin/node'), ['--input-type=module', '-e', code, repair, path.join(root, 'backend/dist/bootstrap/scripts/lib/desktop-removal-record.cjs'), path.join(root, 'backend/dist/bootstrap/scripts/lib/desktop-removal-proof.mjs')],
       { env, timeout: 30_000, maxBuffer: 65536 })
     console.log('CRABOT_INSTALLER_HOST ' + JSON.stringify({ native_source_and_bytes: true, opaque_payload_verified: true,
-      ordinary_uid_backend_outside_checkout: true, trusted_repair_backend_outside_checkout: true, trusted_removal_reader_outside_checkout: true, actual_installer_flow: false, graphical_polkit: false, real_browser_sandbox: false, business_mm_started: false }))
+      ordinary_uid_backend_outside_checkout: true, trusted_repair_backend_outside_checkout: true, trusted_removal_reader_outside_checkout: true, trusted_removal_proof_outside_checkout: true, actual_installer_flow: false, graphical_polkit: false, real_browser_sandbox: false, business_mm_started: false }))
   } else {
   await fs.mkdir(path.join(root, 'resources'))
   for (const name of ['app.asar', 'app.asar.unpacked']) await fs.cp(path.join(resources, name), path.join(root, 'resources', name), { recursive: true, verbatimSymlinks: true, mode: constants.COPYFILE_FICLONE })
@@ -49,7 +49,7 @@ try {
   for (const key of ['ELECTRON_RUN_AS_NODE', 'NODE_PATH', 'NODE_OPTIONS', 'DATA_DIR', 'CRABOT_HOME', 'CRABOT_DEV', 'CRABOT_PORT_OFFSET']) delete env[key]
   await runBounded(require('electron'), [fileURLToPath(new URL('../../crabot-desktop/tests/installer-host-probe.cjs', import.meta.url))], { env, timeout: 180_000 })
   const report = JSON.parse(await fs.readFile(path.join(root, 'probe-report.json'), 'utf8'))
-  for (const key of ['trusted_backend_in_asar', 'trusted_repair_backend_in_asar', 'trusted_removal_reader_in_asar', 'opaque_payload_verified', 'sandboxed_progress_preload', 'outside_checkout']) assert.equal(report[key], true)
+  for (const key of ['trusted_backend_in_asar', 'trusted_repair_backend_in_asar', 'trusted_removal_reader_in_asar', 'trusted_removal_proof_in_asar', 'opaque_payload_verified', 'sandboxed_progress_preload', 'outside_checkout']) assert.equal(report[key], true)
   assert.equal(report.actual_installer_flow, false); assert.equal(report.business_mm_started, false)
   }
 } finally { await fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
