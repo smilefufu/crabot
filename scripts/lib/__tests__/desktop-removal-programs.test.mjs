@@ -58,18 +58,26 @@ for (const mode of ['matching', 'partial', 'missing-core', 'changed-file', 'new-
   if (mode === 'changed-proof') await fs.appendFile(path.join(f.root, 'app/removals', f.operationId, 'proof.json'), ' ')
   if (mode === 'changed-selection') await privateJson(path.join(f.root, 'current-release.json'), { schema_version: 1, version: '1.2.4', gui_id: randomUUID(), core_id: '2'.repeat(64) }, true)
   if (mode === 'cancelled') input.signal = AbortSignal.abort()
-  let raced = false
+  let raced = false, replaced = false
   if (['read-race', 'job-race', 'directory-race'].includes(mode)) {
     const open = fs.open
     t.mock.method(fs, 'open', async (...args) => {
-      const handle = await open(...args)
-      if (args[0] === source) {
-        raced = true
-        if (mode === 'read-race') await fs.appendFile(source, ' changed while opening')
-        if (mode === 'job-race') { const file = path.join(f.root, '.desktop-removal.json'), record = JSON.parse(await fs.readFile(file)); await privateJson(file, { ...record, operation_id: randomUUID() }, true) }
-        if (mode === 'directory-race') { const directory = path.dirname(source); await fs.rename(directory, directory + '-old'); await fs.mkdir(directory); await fs.writeFile(source, 'Core bytes') }
+      if (args[0] === source && mode === 'directory-race') {
+        // Replace between the scanner's stat and open. An already open file
+        // can prevent renaming its parent on Windows; that is no replacement.
+        const directory = path.dirname(source)
+        await fs.rename(directory, directory + '-old'); await fs.mkdir(directory); await fs.writeFile(source, 'Core bytes')
+        replaced = true
       }
-      return handle
+      const handle = await open(...args)
+      try {
+        if (args[0] === source) {
+          raced = true
+          if (mode === 'read-race') await fs.appendFile(source, ' changed while opening')
+          if (mode === 'job-race') { const file = path.join(f.root, '.desktop-removal.json'), record = JSON.parse(await fs.readFile(file)); await privateJson(file, { ...record, operation_id: randomUUID() }, true) }
+        }
+        return handle
+      } catch (error) { await handle.close(); throw error }
     })
   }
   const beforeData = await fs.readFile(path.join(f.data, 'user.txt')), beforeRecord = await fs.readFile(path.join(f.root, '.desktop-removal.json'))
@@ -86,5 +94,6 @@ for (const mode of ['matching', 'partial', 'missing-core', 'changed-file', 'new-
     if (mode === 'bad-metadata') assert.ok(result.retained.some(item => item.path.endsWith('/core-release.json')))
     if (mode === 'changed-launcher') assert.ok(result.retained.some(item => item.path === 'bin/' + f.launcher))
   }
+  if (mode === 'directory-race') { assert.equal(raced, true); assert.equal(replaced, true) }
   assert.deepEqual(await fs.readFile(path.join(f.data, 'user.txt')), beforeData); if (mode !== 'job-race') assert.deepEqual(await fs.readFile(path.join(f.root, '.desktop-removal.json')), beforeRecord)
 })

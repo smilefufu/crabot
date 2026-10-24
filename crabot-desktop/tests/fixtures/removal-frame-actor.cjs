@@ -96,7 +96,12 @@ async function main() {
   await app.whenReady()
   if (host) {
     let result
-    try { if (cfg.mode.startsWith('publish-')) { result = await publication(); } else { const { inspectInitialRemovalGuiHost } = await load('desktop-removal-frame.mjs'); const frame = await inspectInitialRemovalGuiHost({ installRoot: cfg.inspectRoot || cfg.root, operationId: cfg.operationId }); result = { accepted: true, frame } } }
+    try { if (cfg.mode.startsWith('resume-')) {
+      const { captureExistingRemovalGuiHost } = await load('desktop-removal-frame.mjs')
+      const captured = await captureExistingRemovalGuiHost({ installRoot: cfg.root,
+        operationId: cfg.mode === 'resume-wrong-operation' ? '11111111-1111-4111-8111-111111111111' : cfg.operationId })
+      result = { accepted: true, resumed: true, record: captured.record, frame: captured.facts }
+    } else if (cfg.mode.startsWith('publish-')) { result = await publication(); } else { const { inspectInitialRemovalGuiHost } = await load('desktop-removal-frame.mjs'); const frame = await inspectInitialRemovalGuiHost({ installRoot: cfg.inspectRoot || cfg.root, operationId: cfg.operationId }); result = { accepted: true, frame } } }
     catch (error) { result = { accepted: false, code: error.code, stage: error.stage, message: String(error.message).slice(0, 256) } }
     if (['publish-source-exit', 'publish-source-disconnect'].includes(cfg.mode)) {
       fs.writeFileSync(cfg.resultFile, JSON.stringify(result)); if (!result.accepted && process.connected) await send(result)
@@ -104,8 +109,23 @@ async function main() {
     else await send(result)
     return
   }
-  prepared = await (await load('desktop-removal-host.mjs')).prepareDesktopRemovalGui({ installRoot: cfg.root, operationId: cfg.operationId })
-  if (cfg.mode === 'changed-copy') fs.appendFileSync(path.join(prepared.guiRoot, process.platform === 'darwin' ? 'Crabot.app/Contents/Resources/desktop-release.json' : 'resources/desktop-release.json'), ' ')
+  if (cfg.mode.startsWith('resume-')) {
+    const backend = await load('desktop-removal-host.mjs'), assert = require('node:assert/strict')
+    prepared = await backend.prepareDesktopRemovalGui({ installRoot: cfg.root, operationId: cfg.operationId })
+    fs.writeFileSync(process.env.CRABOT_REMOVAL_FRAME_CONFIG, JSON.stringify({ ...cfg, mode: 'publish-close' }))
+    child = spawn(prepared.executable, ['--fixture-removal-host'], { env: process.env, detached: true, stdio: ['ignore', 'ignore', 'ignore', 'ipc'] })
+    const firstExit = once(child, 'exit'), [first] = await once(child, 'message')
+    assert.equal(first.accepted, true); assert.equal(first.published, true); assert.equal((await firstExit)[0], 0)
+    fs.rmSync(prepared.directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); prepared = undefined
+    fs.writeFileSync(process.env.CRABOT_REMOVAL_FRAME_CONFIG, JSON.stringify(cfg))
+    if (cfg.mode === 'resume-core-missing') {
+      const reference = require('./bootstrap/scripts/lib/desktop-installation.cjs').readDesktopPairReference(cfg.root)
+      fs.rmSync(path.join(cfg.root, 'releases', reference.selection.core_id), { recursive: true })
+    }
+    prepared = await backend.prepareExistingDesktopRemovalGui({ installRoot: cfg.root, operationId: cfg.operationId })
+  } else prepared = await (await load('desktop-removal-host.mjs')).prepareDesktopRemovalGui({ installRoot: cfg.root, operationId: cfg.operationId })
+  if (cfg.mode === 'resume-source-changed') fs.appendFileSync(path.join(process.resourcesPath, 'desktop-release.json'), ' ')
+  if (['changed-copy', 'resume-changed-copy'].includes(cfg.mode)) fs.appendFileSync(path.join(prepared.guiRoot, process.platform === 'darwin' ? 'Crabot.app/Contents/Resources/desktop-release.json' : 'resources/desktop-release.json'), ' ')
   child = spawn(prepared.executable, ['--fixture-removal-host'], { env: process.env, detached: true, stdio: ['ignore', 'ignore', 'ignore', 'ipc'] })
   const native = require('./bootstrap/scripts/lib/process-identity.cjs'), childIdentity = native.inspectProcess(child.pid)
   if (cfg.mode === 'publish-source-exit') await send({ handoff: true, host: childIdentity, directory: prepared.directory })

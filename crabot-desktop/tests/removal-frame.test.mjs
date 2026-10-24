@@ -65,8 +65,9 @@ before(async () => {
   await sealDesktopPayload(payload)
 }, 120000)
 after(async () => { if (root) await fs.rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }) })
-for (const mode of ['valid', 'node-parent', 'unexpected-source-args', 'changed-copy', 'other-installation', 'publish-close', 'publish-cancel', 'publish-module', 'publish-damaged', 'publish-lost-reply', 'publish-replaced-record', 'publish-live', 'publish-cancel-lost', 'publish-stop', 'publish-stop-wrong-root', 'publish-stop-lost', 'publish-source-verifier', 'publish-source-exit', 'publish-source-ignore', 'publish-source-disconnect']) test('actual protected initial removal frame: ' + mode, { skip: !supported, timeout: 60000 }, async t => {
+for (const mode of ['valid', 'node-parent', 'unexpected-source-args', 'changed-copy', 'other-installation', 'publish-close', 'publish-cancel', 'publish-module', 'publish-damaged', 'publish-lost-reply', 'publish-replaced-record', 'publish-live', 'publish-cancel-lost', 'publish-stop', 'publish-stop-wrong-root', 'publish-stop-lost', 'publish-source-verifier', 'publish-source-exit', 'publish-source-ignore', 'publish-source-disconnect', 'resume-valid', 'resume-core-missing', 'resume-wrong-operation', 'resume-changed-copy', 'resume-source-changed']) test('actual protected initial removal frame: ' + mode, { skip: !supported, timeout: 60000 }, async t => {
   const area = await fs.mkdtemp(path.join(root, 'case-'))
+  const cancelled = ['publish-cancel', 'publish-cancel-lost', 'publish-stop', 'publish-source-exit', 'publish-source-verifier'].includes(mode)
   const own = await commitDesktopInstallation(await prepareDesktopInstallation({ payload, installRoot: path.join(area, 'installation') }))
   let finite, finiteExited, finiteOutput = ''
   if (mode.startsWith('publish-stop')) {
@@ -124,9 +125,17 @@ for (const mode of ['valid', 'node-parent', 'unexpected-source-args', 'changed-c
     }
     result = JSON.parse(await fs.readFile(cfg.resultFile, 'utf8'))
   }
-  if (mode.startsWith('publish-')) {
+  if (mode.startsWith('resume-')) {
+    assert.equal(result.accepted, ['resume-valid', 'resume-core-missing'].includes(mode), JSON.stringify(result))
+    if (result.accepted) {
+      assert.equal(result.resumed, true); assert.equal(result.record.operation_id, operationId); assert.equal(result.record.phase, 'preparing')
+      assert.equal(result.frame.source_gui.pid, child.pid); assert.deepEqual(result.record.source_selection, own.selection)
+    } else assert.equal(result.code, 'CRABOT_DESKTOP_REMOVAL', JSON.stringify(result))
+    const removal = (await import('../../scripts/lib/desktop-removal-record.cjs')).default.readDesktopRemoval(own.root)
+    assert.equal(removal.operation_id, operationId); assert.equal(removal.phase, 'preparing')
+  } else if (mode.startsWith('publish-')) {
     assert.equal(result.accepted, true, JSON.stringify(result)); assert.equal(result.published, true)
-    assert.equal(result.cancelled, ['publish-cancel', 'publish-cancel-lost', 'publish-stop', 'publish-source-exit', 'publish-source-verifier'].includes(mode), JSON.stringify(result)); assert.equal(result.retained, !['publish-cancel', 'publish-cancel-lost', 'publish-stop', 'publish-source-exit', 'publish-source-verifier'].includes(mode))
+    assert.equal(result.cancelled, cancelled, JSON.stringify(result)); assert.equal(result.retained, !cancelled)
     assert.equal(result.cancelRejected, ['publish-module', 'publish-damaged', 'publish-replaced-record', 'publish-live', 'publish-stop-wrong-root', 'publish-stop-lost'].includes(mode), JSON.stringify(result))
     assert.equal(result.sourceExited, mode === 'publish-source-exit'); assert.equal(result.sourceExitRejected, ['publish-source-ignore', 'publish-source-disconnect'].includes(mode))
     assert.equal(result.stopRejected, ['publish-stop-wrong-root', 'publish-stop-lost'].includes(mode))
@@ -140,7 +149,7 @@ for (const mode of ['valid', 'node-parent', 'unexpected-source-args', 'changed-c
     assert.equal(result.accepted, false, JSON.stringify(result)); assert.equal(result.code, 'CRABOT_DESKTOP_REMOVAL', JSON.stringify(result))
     assert.equal(result.stage, mode === 'changed-copy' ? 'private-programs' : 'source-peer', JSON.stringify(result))
   }
-  if (!mode.startsWith('publish-') || ['publish-cancel', 'publish-cancel-lost', 'publish-stop', 'publish-source-exit', 'publish-source-verifier'].includes(mode)) await assert.rejects(fs.lstat(path.join(own.root, '.desktop-removal.json')), { code: 'ENOENT' })
+  if ((!mode.startsWith('resume-') && !mode.startsWith('publish-')) || cancelled) await assert.rejects(fs.lstat(path.join(own.root, '.desktop-removal.json')), { code: 'ENOENT' })
   else assert.equal((await fs.lstat(path.join(own.root, '.desktop-removal.json'))).isFile(), true)
   assert.equal(await fs.readFile(path.join(own.dataDir, 'preserved-user-file'), 'utf8'), 'user bytes')
   if (finite && mode !== 'publish-stop') {

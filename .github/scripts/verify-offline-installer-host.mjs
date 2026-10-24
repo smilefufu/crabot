@@ -45,7 +45,7 @@ try {
       const sourceExit = await load(10); assert.equal(typeof sourceExit.createDesktopRemovalSourceExitVerifier, 'function');
       const native = await load(9); assert.equal(typeof native.default.inspectProgramReferences, 'function');
       const observed = await native.default.inspectProgramReferences({ roots: [], files: [] }); assert.equal(observed.complete, true); assert.deepEqual(observed.processes, []);
-      assert.equal(typeof controller.stopInstance, 'function'); assert.equal(typeof host.prepareDesktopRemovalGui, 'function');
+      assert.equal(typeof controller.stopInstance, 'function'); assert.equal(typeof host.prepareDesktopRemovalGui, 'function'); assert.equal(typeof host.prepareExistingDesktopRemovalGui, 'function');
     `
     await promisify(execFile)(path.join(payload, 'core/.product-runtime/node/bin/node'), ['--input-type=module', '-e', code, repair, path.join(root, 'backend/dist/bootstrap/scripts/lib/desktop-removal-record.cjs'), path.join(root, 'backend/dist/bootstrap/scripts/lib/desktop-removal-proof.mjs'),
       path.join(root, 'backend/dist/bootstrap/scripts/lib/instance-controller.mjs'), path.join(root, 'backend/dist/bootstrap/scripts/lib/desktop-removal-host.mjs'), path.join(root, 'backend/dist/bootstrap/scripts/lib/desktop-removal-job.mjs'), path.join(root, 'backend/dist/installation-removal.js'), path.join(root, 'backend/dist/bootstrap/scripts/lib/desktop-removal-programs.mjs'), path.join(root, 'backend/dist/bootstrap/scripts/lib/process-identity.cjs'), path.join(root, 'backend/dist/bootstrap/scripts/lib/desktop-removal-source.mjs')],

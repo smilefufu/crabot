@@ -6,7 +6,7 @@ import { randomUUID } from 'node:crypto'
 import physicalFs from './physical-fs.cjs'
 import management from './desktop-management.cjs'
 import installation from './desktop-installation.cjs'
-import { captureDesktopRemovalProof } from './desktop-removal-proof.mjs'
+import { captureDesktopRemovalProof, readDesktopRemovalProof } from './desktop-removal-proof.mjs'
 import { readOriginalDesktopPayload } from './desktop-program-proof.mjs'
 import { verifyDesktopGui } from './desktop-payload.mjs'
 import { acquireExistingCliLock, releaseCliLock, cliLockToken } from './cli-lock.mjs'
@@ -22,7 +22,6 @@ async function versionMaintenancePending(dataDir) {
 export async function prepareDesktopRemovalGui({ installRoot, operationId, signal, progress = () => {} }) {
   if (process.platform !== 'darwin' && process.platform !== 'win32') fail()
   const own = installation.readDesktopSelection(installRoot), lock = await acquireExistingCliLock(own.root, 'prepare-removal-host'), token = cliLockToken(lock)
-  let directory, createdIdentity
   try {
     const proof = await captureDesktopRemovalProof(own.root, operationId, { signal })
     const original = await readOriginalDesktopPayload(own.root, own.selection)
@@ -36,6 +35,14 @@ export async function prepareDesktopRemovalGui({ installRoot, operationId, signa
         || await versionMaintenancePending(own.dataDir) || workspaceMaintenancePending(own.dataDir) || cliLockToken(lock) !== token) fail()
     }
     await current(); signal?.throwIfAborted()
+    return await copyRemovalGui(own, proof, current, signal, progress)
+  } finally { if (token && cliLockToken(lock) === token) releaseCliLock(lock) }
+}
+
+// Same neutral byte-copy operation for independently verified role contexts.
+async function copyRemovalGui(own, proof, current, signal, progress) {
+  let directory, createdIdentity
+  try {
     const bytes = Object.values(proof.payload.gui).reduce((sum, file) => sum + BigInt(file.size ?? 0), 0n)
     const parent = await fs.realpath(tmpdir()), space = await fs.statfs(parent, { bigint: true })
     if (space.bavail * space.bsize < bytes + 512n * 1024n * 1024n) throw Object.assign(new Error('临时维护程序空间不足，原应用和数据已保留。'), { code: 'CRABOT_UPDATE_SPACE' })
@@ -58,5 +65,32 @@ export async function prepareDesktopRemovalGui({ installRoot, operationId, signa
       } catch (cleanup) { throw new AggregateError([error, cleanup], '维护副本准备与清理未完成，保留原应用、数据和诊断。') }
     }
     throw error
+  }
+}
+
+// Continue only an already published job. Its proof describes old bytes; this
+// prepares a GUI copy and never loads the missing/partially removed Core.
+export async function prepareExistingDesktopRemovalGui({ installRoot, operationId, signal, progress = () => {} }) {
+  if (!['darwin', 'win32'].includes(process.platform)) fail()
+  const installationRoot = installation.readDesktopInstallation(installRoot)
+  const own = { ...installationRoot, guiRoot: path.join(installationRoot.root, 'app/releases', installation.readDesktopPairReference(installRoot).selection.gui_id) }
+  const lock = await acquireExistingCliLock(own.root, 'prepare-existing-removal-host'), token = cliLockToken(lock)
+  try {
+    const original = await readDesktopRemovalProof(own.root), { record, proof } = original
+    if (record.operation_id !== operationId || !same(installation.readDesktopPairReference(own.root).selection, record.source_selection)) fail()
+    const dataIdentity = directoryIdentity(await fs.lstat(own.dataDir, { bigint: true }))
+    const current = async () => {
+      if (!token || cliLockToken(lock) !== token) fail()
+      const actual = await readDesktopRemovalProof(own.root)
+      if (!same(actual.record, record) || !same(actual.proof, proof)
+        || !same(installation.readDesktopInstallation(own.root).record, own.record)
+        || !same(installation.readDesktopPairReference(own.root).selection, record.source_selection)
+        || directoryIdentity(await fs.lstat(own.dataDir, { bigint: true })) !== dataIdentity
+        || await versionMaintenancePending(own.dataDir) || workspaceMaintenancePending(own.dataDir)
+        || cliLockToken(lock) !== token) fail()
+    }
+    await current(); signal?.throwIfAborted()
+    await verifyDesktopGui(own.guiRoot, proof.payload, { signal }); await current()
+    return { ...await copyRemovalGui(own, proof, current, signal, progress), record }
   } finally { if (token && cliLockToken(lock) === token) releaseCliLock(lock) }
 }
