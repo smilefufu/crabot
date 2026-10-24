@@ -21,6 +21,7 @@ async function fixture(t, missingTray = false, installer = false, pair) {
   if (installer) for (const file of ['dist/installer-main.js', 'dist/installer-preload.cjs', 'dist/installation-progress-window.js', 'dist/installation-entries.js',
     'dist/bootstrap/scripts/lib/desktop-payload.mjs', 'dist/bootstrap/scripts/lib/desktop-preparation-files.mjs', 'dist/bootstrap/scripts/lib/desktop-repair.mjs', 'dist/bootstrap/scripts/lib/desktop-program-proof.mjs', 'dist/bootstrap/scripts/lib/desktop-removal-proof.mjs', 'dist/bootstrap/scripts/lib/desktop-removal-host.mjs', 'dist/bootstrap/scripts/lib/module-process-start.cjs', 'dist/bootstrap/scripts/lib/instance-controller.mjs', 'dist/bootstrap/scripts/lib/core-release.mjs', 'dist/bootstrap/scripts/lib/physical-fs.cjs']) files[file] = 'installer fixture'
   for (const file of desktopMaintenanceBootstrap) files['dist/bootstrap/' + file] = 'fixed maintenance fixture'
+  for (const file of ['dist/operation-progress-window.js', 'dist/operation-progress.js', 'dist/removal-progress-window.js', 'dist/removal-preload.cjs']) files[file] = 'fixed progress fixture'
   if (pair) files['dist/desktop-release.json'] = pair.text
   if (missingTray) delete files['dist/assets/tray.png']
   for (const [file, bytes] of Object.entries(files)) {
@@ -117,4 +118,14 @@ for (const member of desktopMaintenanceBootstrap) test('GUI and installer ASAR r
   } }
   assert.throws(() => verifyDesktopAsar(missing, archive), /missing fixed maintenance dependency/)
   assert.throws(() => verifyInstallerAsar(missing, archive), /missing fixed maintenance dependency/)
+})
+
+for (const member of ['dist/operation-progress-window.js', 'dist/operation-progress.js', 'dist/removal-progress-window.js', 'dist/removal-preload.cjs']) test('GUI and installer require fixed progress code: ' + member, async t => {
+  const archive = await fixture(t, false, true)
+  const missing = { statFile: (file, name) => {
+    if (name === path.normalize(member)) throw new Error('missing fixed progress component')
+    return asar.statFile(file, name)
+  } }
+  assert.throws(() => verifyDesktopAsar(missing, archive), /missing fixed progress component/)
+  assert.throws(() => verifyInstallerAsar(missing, archive), /missing fixed progress component/)
 })

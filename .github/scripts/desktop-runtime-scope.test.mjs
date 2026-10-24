@@ -40,6 +40,8 @@ for (const [file, expected] of [
   ['scripts/lib/desktop-removal-host.mjs', true],
   ['scripts/lib/desktop-maintenance-bootstrap.mjs', true],
   ['crabot-desktop/build-preload.mjs', true],
+  ['crabot-desktop/src/removal-preload.ts', true],
+  ['crabot-desktop/src/operation-progress-window.ts', true],
   ['crabot-desktop/tests/maintenance-bootstrap.test.mjs', true],
   ['crabot-desktop/tests/maintenance-bootstrap-probe.cjs', true],
   ['scripts/lib/module-process-start.cjs', true],

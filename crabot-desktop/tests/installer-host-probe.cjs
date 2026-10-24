@@ -36,7 +36,15 @@ async function main() {
   await window.webContents.executeJavaScript('window.crabotInstall.cancel()')
   assert.equal(abort.signal.aborted, true)
   progress.close()
-  const report = { trusted_backend_in_asar: true, trusted_repair_backend_in_asar: true, trusted_removal_reader_in_asar: true, trusted_removal_proof_in_asar: true, trusted_removal_host_backend_in_asar: true, trusted_common_stop_in_asar: true, opaque_payload_verified: true, sandboxed_progress_preload: true,
+  const { createRemovalProgressWindow } = await module('removal-progress-window.js')
+  const removalAbort = new AbortController(); progress = createRemovalProgressWindow(removalAbort); await progress.ready
+  const removalWindow = BrowserWindow.getAllWindows()[0]
+  assert.deepEqual(await removalWindow.webContents.executeJavaScript('Object.keys(window.crabotRemove).sort()'), ['cancel', 'subscribe'])
+  assert.equal(await removalWindow.webContents.executeJavaScript('typeof window.crabotInstall'), 'undefined')
+  assert.equal(await removalWindow.webContents.executeJavaScript('typeof require'), 'undefined')
+  await removalWindow.webContents.executeJavaScript('window.crabotRemove.cancel()'); assert.equal(removalAbort.signal.aborted, true)
+  progress.close()
+  const report = { trusted_backend_in_asar: true, trusted_repair_backend_in_asar: true, trusted_removal_reader_in_asar: true, trusted_removal_proof_in_asar: true, trusted_removal_host_backend_in_asar: true, trusted_common_stop_in_asar: true, opaque_payload_verified: true, sandboxed_progress_preload: true, sandboxed_removal_progress_preload: true,
     outside_checkout: true, actual_installer_flow: false, business_mm_started: false }
   await fs.writeFile(path.join(root, 'probe-report.json'), JSON.stringify(report), { flag: 'wx' })
   console.log('CRABOT_INSTALLER_HOST ' + JSON.stringify(report))

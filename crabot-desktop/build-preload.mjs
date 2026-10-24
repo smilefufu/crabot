@@ -14,4 +14,5 @@ for (const file of [...desktopMaintenanceBootstrap, 'scripts/desktop/extract-pai
   await copyFile('../' + file, destination)
 }
 
-await build({ entryPoints: ['src/installer-preload.ts'], outfile: 'dist/installer-preload.cjs', bundle: true, platform: 'node', format: 'cjs', target: 'es2022', external: ['electron'], sourcemap: false })
+for (const kind of ['installer', 'removal']) await build({ entryPoints: ['src/' + kind + '-preload.ts'], outfile: 'dist/' + kind + '-preload.cjs',
+  bundle: true, platform: 'node', format: 'cjs', target: 'es2022', external: ['electron'], sourcemap: false })

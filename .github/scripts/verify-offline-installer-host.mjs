@@ -59,7 +59,7 @@ try {
   for (const key of ['ELECTRON_RUN_AS_NODE', 'NODE_PATH', 'NODE_OPTIONS', 'DATA_DIR', 'CRABOT_HOME', 'CRABOT_DEV', 'CRABOT_PORT_OFFSET']) delete env[key]
   await runBounded(require('electron'), [fileURLToPath(new URL('../../crabot-desktop/tests/installer-host-probe.cjs', import.meta.url))], { env, timeout: 180_000 })
   const report = JSON.parse(await fs.readFile(path.join(root, 'probe-report.json'), 'utf8'))
-  for (const key of ['trusted_backend_in_asar', 'trusted_repair_backend_in_asar', 'trusted_removal_reader_in_asar', 'trusted_removal_proof_in_asar', 'trusted_removal_host_backend_in_asar', 'trusted_common_stop_in_asar', 'opaque_payload_verified', 'sandboxed_progress_preload', 'outside_checkout']) assert.equal(report[key], true)
+  for (const key of ['trusted_backend_in_asar', 'trusted_repair_backend_in_asar', 'trusted_removal_reader_in_asar', 'trusted_removal_proof_in_asar', 'trusted_removal_host_backend_in_asar', 'trusted_common_stop_in_asar', 'opaque_payload_verified', 'sandboxed_progress_preload', 'sandboxed_removal_progress_preload', 'outside_checkout']) assert.equal(report[key], true)
   assert.equal(report.actual_installer_flow, false); assert.equal(report.business_mm_started, false)
   }
 } finally { await fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
