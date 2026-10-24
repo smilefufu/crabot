@@ -1016,3 +1016,12 @@ for (const mode of ['success', 'cancelled', 'space', 'copy-changed', 'selection-
     assert.equal(await fs.readFile(path.join(prepared.coreRoot, 'cli.mjs'), 'utf8'), `console.log(JSON.stringify({version:${JSON.stringify('1.2.3')},required:process.env.CRABOT_PRODUCT_REQUIRED}))`)
   })
 }
+
+test('initial removal host inspection rejects an ordinary Node caller without publishing any operation', async t => {
+  const f = await fixture(t), prepared = await prepareDesktopInstallation({ payload: f.payload, installRoot: f.target })
+  await commitDesktopInstallation(prepared)
+  const { inspectInitialRemovalGuiHost } = await import('../desktop-removal-frame.mjs')
+  const before = await fs.readdir(f.target), data = await fs.readdir(path.join(f.target, 'data'))
+  await assert.rejects(inspectInitialRemovalGuiHost({ installRoot: f.target, operationId: randomUUID() }), { code: 'CRABOT_DESKTOP_REMOVAL', stage: 'transport' })
+  assert.deepEqual(await fs.readdir(f.target), before); assert.deepEqual(await fs.readdir(path.join(f.target, 'data')), data)
+})

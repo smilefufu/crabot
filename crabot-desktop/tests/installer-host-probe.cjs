@@ -24,6 +24,7 @@ async function main() {
   assert.equal(typeof removalHost.prepareDesktopRemovalGui, 'function')
   const controller = await module('bootstrap/scripts/lib/instance-controller.mjs')
   assert.equal(typeof controller.stopInstance, 'function')
+  const frame = await module('bootstrap/scripts/lib/desktop-removal-frame.mjs'); assert.equal(typeof frame.inspectInitialRemovalGuiHost, 'function')
   const checked = await backend.verifyDesktopPayload(payload)
   assert.ok(checked.bytes > 0n)
   const entries = await module('installation-entries.js')
@@ -44,7 +45,7 @@ async function main() {
   assert.equal(await removalWindow.webContents.executeJavaScript('typeof require'), 'undefined')
   await removalWindow.webContents.executeJavaScript('window.crabotRemove.cancel()'); assert.equal(removalAbort.signal.aborted, true)
   progress.close()
-  const report = { trusted_backend_in_asar: true, trusted_repair_backend_in_asar: true, trusted_removal_reader_in_asar: true, trusted_removal_proof_in_asar: true, trusted_removal_host_backend_in_asar: true, trusted_common_stop_in_asar: true, opaque_payload_verified: true, sandboxed_progress_preload: true, sandboxed_removal_progress_preload: true,
+  const report = { trusted_backend_in_asar: true, trusted_repair_backend_in_asar: true, trusted_removal_reader_in_asar: true, trusted_removal_proof_in_asar: true, trusted_removal_host_backend_in_asar: true, trusted_common_stop_in_asar: true, trusted_initial_removal_frame_in_asar: true, opaque_payload_verified: true, sandboxed_progress_preload: true, sandboxed_removal_progress_preload: true,
     outside_checkout: true, actual_installer_flow: false, business_mm_started: false }
   await fs.writeFile(path.join(root, 'probe-report.json'), JSON.stringify(report), { flag: 'wx' })
   console.log('CRABOT_INSTALLER_HOST ' + JSON.stringify(report))
