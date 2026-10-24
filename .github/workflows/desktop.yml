@@ -297,6 +297,10 @@ jobs:
         if: steps.scope.outputs.full_runtime == 'true'
         timeout-minutes: 10
         run: node scripts/desktop/package-application.mjs --candidate=true --layout=paired --native-bootstrap=.desktop-build/ubuntu-bootstrap "--core=.desktop-build/安装 候选/core" "--out=.desktop-build/安装 候选/paired" 2>&1 | tee .desktop-build/paired-package.log
+      - name: Verify actual complete GUI and Core signed archive
+        if: steps.scope.outputs.full_runtime == 'true'
+        timeout-minutes: 10
+        run: node .github/scripts/verify-complete-paired-release.mjs ".desktop-build/安装 候选/core" ".desktop-build/安装 候选/paired/offline" 2>&1 | tee .desktop-build/complete-paired-release.log
       - name: Build independent offline installer host
         if: steps.scope.outputs.full_runtime == 'true'
         timeout-minutes: 15
@@ -368,6 +372,7 @@ jobs:
           path: |
             .desktop-build/*.log
             .desktop-build/*.png
+            .desktop-build/complete-paired-release.json
             .desktop-build/runtime-scope.json
             .desktop-build/desktop-resources.json
             .desktop-build/desktop-initialization-disk.json
