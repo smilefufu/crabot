@@ -11,6 +11,9 @@ const { WebSocketServer } = require('../../crabot-admin/node_modules/ws')
 const started = Date.now()
 const phase = value => console.log('CRABOT_BOUNDARY_PHASE ' + JSON.stringify({ phase: value, elapsed_ms: Date.now() - started }))
 app.setName('Crabot boundary fixture')
+app.on('child-process-gone', (_event, details) => {
+  if (details.type === 'GPU') console.log('CRABOT_BOUNDARY_GPU_EXIT ' + JSON.stringify({ reason: details.reason, exit_code: details.exitCode, elapsed_ms: Date.now() - started }))
+})
 protocol.registerSchemesAsPrivileged([{ scheme: 'app', privileges: { standard: true, secure: true, supportFetchAPI: true } }])
 const windows = [], servers = [], clients = new Set()
 let root
@@ -82,6 +85,10 @@ async function main() {
   attachLocalPages(privateSession, web)
   const makeWindow = () => {
     const window = new BrowserWindow({ width: 1180, height: 800, show: false, webPreferences: { session: privateSession, preload: path.join(__dirname, '../dist/preload.cjs'), sandbox: true, contextIsolation: true, nodeIntegration: false, backgroundThrottling: false } })
+    const slot = windows.length
+    window.webContents.on('render-process-gone', (_event, details) => console.log('CRABOT_BOUNDARY_RENDERER_EXIT ' + JSON.stringify({ slot, reason: details.reason, exit_code: details.exitCode, elapsed_ms: Date.now() - started })))
+    window.webContents.on('did-fail-load', (_event, code, _description, _url, mainFrame) => console.log('CRABOT_BOUNDARY_LOAD_FAILURE ' + JSON.stringify({ slot, code, main_frame: mainFrame, elapsed_ms: Date.now() - started })))
+    window.on('unresponsive', () => phase('window-unresponsive-' + slot))
     windows.push(window); return window
   }
   const trusted = makeWindow(), foreign = makeWindow()
@@ -211,13 +218,22 @@ async function main() {
   attachLocalPages(privateSession, path.join(__dirname, '../../crabot-admin/dist/web'))
   await trusted.loadURL('app://crabot/')
   phase('react-page-ready')
+  let condition = 0
   async function waitFor(script) {
-    const deadline = Date.now() + 5000
+    const id = ++condition, deadline = Date.now() + 5000
+    phase('react-condition-' + id + '-start')
     while (Date.now() < deadline) {
-      if (await trusted.webContents.executeJavaScript(script)) return
+      let timer
+      try {
+        const evaluation = process.env.CRABOT_BOUNDARY_STALLED_EVALUATION === '1' && id === 1 ? new Promise(() => {}) : trusted.webContents.executeJavaScript(script)
+        const ready = await Promise.race([evaluation, new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error('React condition ' + id + ' renderer execution exceeded its original 5000ms budget')), Math.max(1, deadline - Date.now()))
+        })])
+        if (ready) { phase('react-condition-' + id + '-ready'); return }
+      } finally { clearTimeout(timer) }
       await new Promise(resolve => setTimeout(resolve, 25))
     }
-    throw new Error('React fixture condition timed out: ' + script)
+    throw new Error('React fixture condition ' + id + ' timed out')
   }
   await waitFor('document.body.textContent.includes("让 Crabot 准备好为你工作") && document.body.textContent.includes("添加模型服务")')
   const evidence = path.join(__dirname, '../../.desktop-build'); await fs.mkdir(evidence, { recursive: true })
