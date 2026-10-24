@@ -216,7 +216,7 @@ jobs:
       - name: Real sandboxed Electron window boundaries on Linux
         if: runner.os == 'Linux'
         working-directory: crabot-desktop
-        run: xvfb-run -a node --test --test-concurrency=1 tests/electron-boundary.test.mjs tests/installer-progress.test.mjs tests/paired-relaunch.test.mjs tests/paired-binding.test.mjs 2>&1 | tee ../.desktop-build/electron-boundary.log
+        run: xvfb-run -a node --test --test-concurrency=1 tests/electron-boundary.test.mjs tests/installation-probe.test.mjs tests/installer-progress.test.mjs tests/paired-relaunch.test.mjs tests/paired-binding.test.mjs 2>&1 | tee ../.desktop-build/electron-boundary.log
       - name: Real sandboxed Electron window boundaries on macOS and Windows
         if: runner.os != 'Linux'
         working-directory: crabot-desktop

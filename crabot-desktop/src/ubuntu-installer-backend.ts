@@ -77,7 +77,7 @@ async function probe(prepared: PreparedInstallation) {
     env.HOME = profile; env.CRABOT_SCRAPLING_DATA_DIR = profile
     env.XDG_CACHE_HOME = path.join(profile, 'cache'); env.XDG_CONFIG_HOME = env.CHROME_CONFIG_HOME = path.join(profile, 'config')
     await mkdir(path.join(profile, 'gui'), { mode: 0o700 })
-    await run(path.join(prepared.guiRoot, 'crabot-desktop'), [`--user-data-dir=${path.join(profile, 'gui')}`, `--installation-sandbox-probe=${endpoint}/gui`], env, 60_000, profile, 'CRABOT_INSTALL_GUI_SANDBOX')
+    await run(path.join(prepared.guiRoot, 'crabot-desktop'), ['--enable-sandbox', `--user-data-dir=${path.join(profile, 'gui')}`, `--installation-sandbox-probe=${endpoint}/gui`], env, 60_000, profile, 'CRABOT_INSTALL_GUI_SANDBOX')
     await run(runtime.executables.python, ['-I', '-B', path.join(bundle, 'browser-probe.py'), prepared.coreRoot, endpoint], env, 150_000, profile, 'CRABOT_INSTALL_BROWSER_SANDBOX')
     if (!roles.every(role => received.has(role))) throw new Error('Probe network incomplete')
   } finally {

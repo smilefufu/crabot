@@ -18,6 +18,7 @@ async function main() {
   await fs.mkdir(path.join(root, 'profile'), { recursive: true })
   app.setPath('userData', path.join(root, 'profile'))
   await app.whenReady()
+  assert.throws(() => app.enableSandbox(), /before.*ready/i)
   console.log('CRABOT_ELECTRON_NATIVE_HOST loading Node-API helper in Electron ' + process.versions.electron)
   const identity = require('../../scripts/lib/process-identity.cjs')
   assert.equal(identity.inspectProcess(process.pid).pid, process.pid)

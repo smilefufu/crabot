@@ -8,7 +8,7 @@ export async function runInstallationSandboxProbe(argument: string) {
   let window: BrowserWindow | undefined, stage = 'arguments'
   const timer = setTimeout(() => app.exit(1), 45_000)
   try {
-    if (process.platform !== 'linux' || !/^http:\/\/127\.0\.0\.1:[1-9][0-9]{0,4}\/[a-f0-9]{64}\/gui$/.test(argument)
+    if (process.platform !== 'linux' || !app.commandLine.hasSwitch('enable-sandbox') || !/^http:\/\/127\.0\.0\.1:[1-9][0-9]{0,4}\/[a-f0-9]{64}\/gui$/.test(argument)
       || Number(new URL(argument).port) > 65535 || process.argv.some(value => /^--(?:no-sandbox|disable-.*sandbox|single-process)(?:=|$)/.test(value))) throw new Error('Invalid installation probe')
     stage = 'profile'
     const profiles = process.argv.filter(value => value.startsWith('--user-data-dir='))
@@ -19,7 +19,6 @@ export async function runInstallationSandboxProbe(argument: string) {
     app.setPath('userData', profile); app.setPath('sessionData', profile)
     await mkdir(path.join(profile, 'tmp'), { mode: 0o700 })
     app.setPath('temp', path.join(profile, 'tmp'))
-    app.enableSandbox()
     stage = 'window'
     await app.whenReady()
     window = new BrowserWindow({ show: false, webPreferences: { sandbox: true, nodeIntegration: false, contextIsolation: true,
