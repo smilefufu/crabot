@@ -634,3 +634,183 @@ for (const scenario of ['current', 'bad-core', 'changed-selection', 'bad-signatu
     await assert.rejects(fs.stat(path.join(current.dataDir, 'desktop-maintenance.json')), { code: 'ENOENT' })
     await assert.rejects(fs.stat(path.join(current.dataDir, 'runtime-cache')), { code: 'ENOENT' })
   })
+
+test('fresh commit cannot consume preparation protection after business data appears', async t => {
+  const f = await fixture(t), prepared = await prepareDesktopInstallation({ payload: f.payload, installRoot: f.target })
+  const data = path.join(f.target, 'data'), file = path.join(data, 'existing-business.json')
+  await fs.writeFile(file, '{"keep":"original data"}\n')
+  await assert.rejects(commitDesktopInstallation(prepared), { code: 'CRABOT_DESKTOP_INSTALLATION' })
+  assert.equal(await fs.readFile(file, 'utf8'), '{"keep":"original data"}\n')
+  assert.equal(JSON.parse(await fs.readFile(path.join(f.target, '.desktop-installing.json'), 'utf8')).phase, 'prepared')
+  await assert.rejects(fs.stat(path.join(f.target, 'current-release.json')), { code: 'ENOENT' })
+})
+
+async function repairFixture(t) {
+  const f = await fixture(t), prepared = await prepareDesktopInstallation({ payload: f.payload, installRoot: f.target })
+  const selected = await commitDesktopInstallation(prepared), data = selected.dataDir
+  await fs.mkdir(path.join(data, 'workspaces/default'), { recursive: true })
+  await fs.writeFile(path.join(data, 'workspaces/default', 'user.txt'), 'user project remains')
+  await fs.writeFile(path.join(data, 'desktop-maintenance.json'), 'original version protection, never clear')
+  return { ...f, prepared, selected, data, options: { payload: f.payload, installRoot: f.target, verifyStopped: async () => {} } }
+}
+const repairApi = () => import('../desktop-repair.mjs')
+test('exact-pair repair restores only GUI/Core, preserves data and original protection, and keeps CLI binding', async t => {
+  const f = await repairFixture(t), { prepareDesktopRepair, commitDesktopRepair } = await repairApi()
+  const gui = path.join(f.prepared.guiRoot, path.relative(f.gui, f.resources), 'app.asar')
+  await fs.writeFile(path.join(f.prepared.coreRoot, 'cli.mjs'), 'damaged Core bytes'); await fs.writeFile(gui, 'damaged GUI bytes')
+  const before = await fs.readFile(path.join(f.target, 'current-release.json')), launcherBefore = await fs.readFile(f.selected.command)
+  const repaired = await prepareDesktopRepair(f.options)
+  assert.throws(() => installation.readDesktopSelection(f.target), { code: 'CRABOT_DESKTOP_INSTALLATION' })
+  await assert.rejects(commitDesktopInstallation(repaired), { code: 'CRABOT_DESKTOP_INSTALLATION' })
+  const selected = await commitDesktopRepair(repaired, { verifyStopped: f.options.verifyStopped })
+  assert.deepEqual(selected.selection, f.selection); assert.deepEqual(await fs.readFile(path.join(f.target, 'current-release.json')), before)
+  assert.deepEqual(await fs.readFile(f.selected.command), launcherBefore)
+  assert.equal(await fs.readFile(path.join(f.data, 'workspaces/default', 'user.txt'), 'utf8'), 'user project remains')
+  assert.equal(await fs.readFile(path.join(f.data, 'desktop-maintenance.json'), 'utf8'), 'original version protection, never clear')
+  assert.equal((await fs.readdir(path.join(f.target, 'releases'))).filter(name => name.startsWith('.damaged-')).length, 1)
+  assert.equal((await fs.readdir(path.join(f.target, 'app/releases'))).filter(name => name.startsWith('.damaged-')).length, 1)
+  const result = await promisify(execFile)(selected.command, ['help'], { env: { ...process.env, PATH: '' } })
+  assert.deepEqual(JSON.parse(result.stdout), { version: '1.2.3', required: '1' })
+})
+test('exact-pair repair can restore missing program directories without recreating data', async t => {
+  const f = await repairFixture(t), { prepareDesktopRepair, commitDesktopRepair } = await repairApi()
+  await fs.rename(f.prepared.coreRoot, path.join(f.parent, 'retained-core')); await fs.rename(f.prepared.guiRoot, path.join(f.parent, 'retained-gui'))
+  const reference = installation.readDesktopPairReference(f.target)
+  const repaired = await prepareDesktopRepair(f.options); await commitDesktopRepair(repaired, { verifyStopped: f.options.verifyStopped })
+  assert.deepEqual(installation.readDesktopPairReference(f.target), reference)
+  assert.equal(await fs.readFile(path.join(f.data, 'workspaces/default', 'user.txt'), 'utf8'), 'user project remains')
+})
+
+async function assertRepairData(f) {
+  assert.equal(await fs.readFile(path.join(f.data, 'workspaces/default/user.txt'), 'utf8'), 'user project remains')
+  assert.equal(await fs.readFile(path.join(f.data, 'desktop-maintenance.json'), 'utf8'), 'original version protection, never clear')
+}
+for (const changed of ['other-pair', 'missing-proof', 'invalid-proof', 'linked-proof', 'no-stop-proof', 'running', 'lost-lock', 'changed-root']) test('exact-pair repair refuses ambiguous authority before publication: ' + changed, async t => {
+  const f = await repairFixture(t), { prepareDesktopRepair } = await repairApi()
+  const original = await fs.readFile(path.join(f.prepared.coreRoot, 'cli.mjs')), proof = path.join(f.target, '.desktop-install-payload.json')
+  if (changed === 'other-pair') f.options.payload = (await fixture(t)).payload
+  else if (changed === 'missing-proof') await fs.unlink(proof)
+  else if (changed === 'invalid-proof') await fs.writeFile(proof, 'broken original manifest')
+  else if (changed === 'linked-proof') { await fs.rename(proof, proof + '.retained'); await fs.link(proof + '.retained', proof) }
+  else if (changed === 'no-stop-proof') delete f.options.verifyStopped
+  else if (changed === 'running') await fs.writeFile(path.join(f.data, 'mm.pid'), String(process.pid))
+  else if (changed === 'lost-lock') {
+    const { releaseCliLock } = await import('../cli-lock.mjs')
+    f.options.verifyStopped = async () => releaseCliLock(path.join(f.data, 'cli.lock'))
+  } else {
+    f.options.verifyStopped = async () => {
+      const file = path.join(f.target, 'desktop-installation.json'), record = JSON.parse(await fs.readFile(file, 'utf8'))
+      await fs.writeFile(file, JSON.stringify({ ...record, installation_id: randomUUID() }) + '\n')
+    }
+  }
+  await assert.rejects(prepareDesktopRepair(f.options), { code: 'CRABOT_DESKTOP_INSTALLATION' })
+  await assert.rejects(fs.lstat(path.join(f.target, '.desktop-installing.json')), { code: 'ENOENT' })
+  assert.deepEqual(await fs.readFile(path.join(f.prepared.coreRoot, 'cli.mjs')), original)
+  await assertRepairData(f)
+})
+test('exact-pair repair cancellation finishes copy cleanup without publishing or fencing the installed pair', async t => {
+  const f = await repairFixture(t), { prepareDesktopRepair } = await repairApi(), abort = new AbortController()
+  await fs.writeFile(path.join(f.prepared.coreRoot, 'cli.mjs'), 'old damaged program')
+  await assert.rejects(prepareDesktopRepair({ ...f.options, signal: abort.signal, progress: phase => { if (phase === 'copying') abort.abort() } }), { name: 'AbortError' })
+  await assert.rejects(fs.lstat(path.join(f.target, '.desktop-installing.json')), { code: 'ENOENT' })
+  assert.equal((await fs.readdir(f.target)).some(name => name.startsWith('.preparing-repair-')), false)
+  assert.equal(await fs.readFile(path.join(f.prepared.coreRoot, 'cli.mjs'), 'utf8'), 'old damaged program')
+  await assertRepairData(f)
+})
+test('exact-pair repair reuses the same protected job after a program publication reply is lost', async t => {
+  const f = await repairFixture(t), { prepareDesktopRepair, commitDesktopRepair } = await repairApi()
+  const gui = path.join(f.prepared.guiRoot, path.relative(f.gui, f.resources), 'app.asar')
+  await fs.writeFile(path.join(f.prepared.coreRoot, 'cli.mjs'), 'old damaged Core'); await fs.writeFile(gui, 'old damaged GUI')
+  const rename = fs.rename, fault = t.mock.method(fs, 'rename', async (from, to) => {
+    await rename(from, to)
+    if (to === f.prepared.coreRoot && from.includes('.preparing-repair-')) throw new Error('publication reply lost')
+  })
+  await assert.rejects(prepareDesktopRepair(f.options), AggregateError); fault.mock.restore()
+  const file = path.join(f.target, '.desktop-installing.json'), pending = JSON.parse(await fs.readFile(file, 'utf8'))
+  assert.equal(pending.phase, 'preparing')
+  assert.throws(() => installation.readDesktopSelection(f.target), { code: 'CRABOT_DESKTOP_INSTALLATION' })
+  assert.equal(await fs.readFile(gui, 'utf8'), 'old damaged GUI'); await assertRepairData(f)
+  const repaired = await prepareDesktopRepair(f.options)
+  assert.equal(JSON.parse(await fs.readFile(file, 'utf8')).id, pending.id)
+  assert.equal((await fs.readdir(path.join(f.target, 'releases'))).filter(name => name.startsWith('.damaged-')).length, 1)
+  // Transport/schema parsers may reorder fields; descriptor order is not authority.
+  await commitDesktopRepair(Object.fromEntries(Object.entries(repaired).reverse()), { verifyStopped: f.options.verifyStopped })
+  assert.deepEqual(installation.readDesktopSelection(f.target).selection, f.selection)
+  await assertRepairData(f)
+})
+test('exact-pair repair rejects a changed preparation job between program publications', async t => {
+  const f = await repairFixture(t), { prepareDesktopRepair } = await repairApi()
+  const gui = path.join(f.prepared.guiRoot, path.relative(f.gui, f.resources), 'app.asar')
+  await fs.writeFile(path.join(f.prepared.coreRoot, 'cli.mjs'), 'damaged Core'); await fs.writeFile(gui, 'damaged GUI')
+  const file = path.join(f.target, '.desktop-installing.json'), rename = fs.rename
+  let replacement
+  const fault = t.mock.method(fs, 'rename', async (from, to) => {
+    await rename(from, to)
+    if (to === f.prepared.coreRoot && from.includes('.preparing-repair-')) {
+      replacement = { ...JSON.parse(await fs.readFile(file, 'utf8')), id: randomUUID() }
+      await fs.writeFile(file, JSON.stringify(replacement) + '\n')
+    }
+  })
+  await assert.rejects(prepareDesktopRepair(f.options), { code: 'CRABOT_DESKTOP_INSTALLATION' }); fault.mock.restore()
+  assert.deepEqual(JSON.parse(await fs.readFile(file, 'utf8')), replacement)
+  assert.equal(await fs.readFile(gui, 'utf8'), 'damaged GUI'); await assertRepairData(f)
+})
+test('exact-pair repair commit keeps protection after program mutation and retries only the same tuple', async t => {
+  const f = await repairFixture(t), { prepareDesktopRepair, commitDesktopRepair } = await repairApi()
+  const prepared = await prepareDesktopRepair(f.options), commitOptions = { verifyStopped: f.options.verifyStopped }
+  await assert.rejects(commitDesktopRepair({ ...prepared, coreRoot: f.core }, commitOptions), { code: 'CRABOT_DESKTOP_INSTALLATION' })
+  await assert.rejects(commitDesktopRepair({ ...prepared, extra: true }, commitOptions), { code: 'CRABOT_DESKTOP_INSTALLATION' })
+  const gui = path.join(prepared.guiRoot, path.relative(f.gui, f.resources), 'app.asar')
+  await fs.writeFile(gui, 'changed after repair preparation')
+  await assert.rejects(commitDesktopRepair(prepared, commitOptions), { code: 'CRABOT_CORE_INTEGRITY' })
+  assert.equal(JSON.parse(await fs.readFile(path.join(f.target, '.desktop-installing.json'), 'utf8')).phase, 'prepared')
+  await assertRepairData(f)
+  await commitDesktopRepair(await prepareDesktopRepair(f.options), commitOptions)
+  await assertRepairData(f)
+})
+
+for (const scenario of ['current-proof', 'current-proof-conflict', 'current-proof-link', 'missing-data', 'stop-refused']) test('exact-pair repair respects original proof priority and existing data identity: ' + scenario, async t => {
+  const f = await repairFixture(t), { prepareDesktopRepair, commitDesktopRepair } = await repairApi()
+  if (scenario.startsWith('current-proof')) {
+    const directory = path.join(f.target, 'app/payloads'), { privateJson } = await import('../desktop-preparation-files.mjs')
+    if (windows) identity.createPrivateDirectory(directory)
+    else await fs.mkdir(directory, { mode: 0o700 })
+    const proof = path.join(directory, f.selection.gui_id + '.json')
+    await privateJson(proof, JSON.parse(await fs.readFile(path.join(f.payload, 'desktop-payload.json'), 'utf8')))
+    if (scenario === 'current-proof') await fs.writeFile(path.join(f.target, '.desktop-install-payload.json'), 'old initial installation proof, no longer current')
+    else if (scenario === 'current-proof-conflict') await fs.appendFile(proof, ' ')
+    else { await fs.rename(proof, proof + '.retained'); await fs.symlink(proof + '.retained', proof, 'file') }
+  } else if (scenario === 'missing-data') await fs.rename(f.data, path.join(f.parent, 'data-retained'))
+  else f.options.verifyStopped = async () => { throw new Error('actual GUI still uses selected program') }
+  if (scenario === 'current-proof') {
+    await commitDesktopRepair(await prepareDesktopRepair(f.options), { verifyStopped: f.options.verifyStopped })
+    await assertRepairData(f)
+  } else {
+    await assert.rejects(prepareDesktopRepair(f.options), error => scenario === 'stop-refused'
+      ? error.message === 'actual GUI still uses selected program' : error.code === 'CRABOT_DESKTOP_INSTALLATION')
+    await assert.rejects(fs.lstat(path.join(f.target, '.desktop-installing.json')), { code: 'ENOENT' })
+    if (scenario === 'missing-data') {
+      await assert.rejects(fs.lstat(f.data), { code: 'ENOENT' })
+      assert.equal(await fs.readFile(path.join(f.parent, 'data-retained/workspaces/default/user.txt'), 'utf8'), 'user project remains')
+    } else await assertRepairData(f)
+  }
+})
+test('exact-pair repair publication ignores late cancellation and commit can recover a lost unlink response', async t => {
+  const f = await repairFixture(t), { prepareDesktopRepair, commitDesktopRepair } = await repairApi(), abort = new AbortController()
+  await fs.writeFile(path.join(f.prepared.coreRoot, 'cli.mjs'), 'damaged Core')
+  const rename = fs.rename, fault = t.mock.method(fs, 'rename', async (from, to) => {
+    await rename(from, to)
+    if (to === f.prepared.coreRoot && from.includes('.preparing-repair-')) abort.abort()
+  })
+  const prepared = await prepareDesktopRepair({ ...f.options, signal: abort.signal }); fault.mock.restore()
+  assert.equal(abort.signal.aborted, true)
+  const fence = path.join(f.target, '.desktop-installing.json'), unlink = fs.unlink
+  const lost = t.mock.method(fs, 'unlink', async file => { await unlink(file); if (file === fence) throw new Error('fence removal reply lost') })
+  await assert.rejects(commitDesktopRepair(prepared, { verifyStopped: f.options.verifyStopped }), /fence removal reply lost/); lost.mock.restore()
+  assert.deepEqual(installation.readDesktopSelection(f.target).selection, f.selection)
+  await assertRepairData(f)
+  // Reverify the package and actual bytes before explicitly completing repair.
+  await commitDesktopRepair(await prepareDesktopRepair(f.options), { verifyStopped: f.options.verifyStopped })
+  assert.equal((await fs.readdir(path.join(f.target, 'releases'))).filter(name => name.startsWith('.damaged-')).length, 1)
+  await assertRepairData(f)
+})

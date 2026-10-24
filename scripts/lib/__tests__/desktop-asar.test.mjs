@@ -18,7 +18,7 @@ async function fixture(t, missingTray = false, installer = false, pair) {
     'node_modules/crabot-client/dist/index.js': 'export{}', 'node_modules/zod/package.json': '{}', 'node_modules/electron-updater/package.json': '{}', 'node_modules/@electron/asar/package.json': '{}' }
   for (const file of ['dist/ubuntu-process.js', 'dist/ubuntu-program-probe.js', 'dist/ubuntu-update.js', 'dist/paired-update.js', 'dist/release-intake.js', 'dist/release-signatures.js', 'dist/release-download.js', 'dist/release-transport.js', 'dist/bootstrap/scripts/lib/desktop-management.cjs', 'dist/bootstrap/scripts/desktop/extract-paired-release.py']) files[file] = 'trusted release fixture'
   if (installer) for (const file of ['dist/installer-main.js', 'dist/installer-preload.cjs', 'dist/installation-progress-window.js', 'dist/installation-entries.js',
-    'dist/bootstrap/scripts/lib/desktop-payload.mjs', 'dist/bootstrap/scripts/lib/core-release.mjs', 'dist/bootstrap/scripts/lib/physical-fs.cjs']) files[file] = 'installer fixture'
+    'dist/bootstrap/scripts/lib/desktop-payload.mjs', 'dist/bootstrap/scripts/lib/desktop-preparation-files.mjs', 'dist/bootstrap/scripts/lib/desktop-repair.mjs', 'dist/bootstrap/scripts/lib/core-release.mjs', 'dist/bootstrap/scripts/lib/physical-fs.cjs']) files[file] = 'installer fixture'
   if (pair) files['dist/desktop-release.json'] = pair.text
   if (missingTray) delete files['dist/assets/tray.png']
   for (const [file, bytes] of Object.entries(files)) {
@@ -97,3 +97,12 @@ for (const member of ['dist/ubuntu-process.js', 'dist/ubuntu-program-probe.js', 
     assert.throws(() => verifyDesktopAsar(missing, archive), /missing trusted release resource/)
   })
 }
+
+for (const member of ['desktop-preparation-files.mjs', 'desktop-repair.mjs']) test('installer ASAR requires its own preparation/repair module: ' + member, async t => {
+  const archive = await fixture(t, false, true)
+  const missing = { statFile: (file, name) => {
+    if (name === path.normalize('dist/bootstrap/scripts/lib/' + member)) throw new Error('missing independent installation component')
+    return asar.statFile(file, name)
+  } }
+  assert.throws(() => verifyInstallerAsar(missing, archive), /missing independent installation component/)
+})

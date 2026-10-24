@@ -33,6 +33,8 @@ for (const [file, expected] of [
   ['.github/scripts/smoke-workspace-python-gate.mjs', true],
   ['scripts/lib/workspace-coordinator-launch.mjs', true],
   ['scripts/lib/known-process-stop.cjs', true],
+  ['scripts/lib/desktop-preparation-files.mjs', true],
+  ['scripts/lib/desktop-repair.mjs', true],
   ['scripts/lib/process-identity.cjs', true],
   ['crabot-agent/src/core/workspace-relocation-ledgers.ts', true],
   ['crabot-agent/src/engine/host-process.ts', true],

@@ -11,9 +11,9 @@ import installation from './desktop-installation.cjs'
 import { verifyCoreRelease } from './core-release.mjs'
 import { acquireCliLock, releaseCliLock } from './cli-lock.mjs'
 import { inspectInstance } from './instance-runtime.mjs'
+import { pendingName, payloadName, privateJson, readPending, publishPreparedProgram } from './desktop-preparation-files.mjs'
 const { promises: fs, createReadStream, constants } = physicalFs
 const fail = (message, code = 'CRABOT_DESKTOP_INSTALLATION') => { throw Object.assign(new Error(message), { code }) }
-const pendingName = '.desktop-installing.json', payloadName = '.desktop-install-payload.json'
 const inside = (parent, child) => { const relative = path.relative(parent, child); return !relative || relative !== '..' && !relative.startsWith('..' + path.sep) && !path.isAbsolute(relative) }
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b)
 async function present(file) { try { return await fs.lstat(file) } catch (error) { if (error.code === 'ENOENT') return null; throw error } }
@@ -51,27 +51,6 @@ async function guiInventory(root, signal) {
   }))
   const failed = results.find(result => result.status === 'rejected'); if (failed) throw failed.reason
   return Object.fromEntries(Object.keys(files).sort().map(key => [key, files[key]]))
-}
-async function privateJson(file, value, replace = false) {
-  const temporary = file + '.tmp-' + randomUUID(), text = JSON.stringify(value) + '\n'
-  try {
-    if (process.platform === 'win32') identity.writePrivateFile(temporary, text)
-    else await fs.writeFile(temporary, text, { flag: 'wx', mode: 0o600, flush: true })
-    if (replace) await fs.rename(temporary, file); else await fs.link(temporary, file)
-    if (process.platform !== 'win32') { const directory = await fs.open(path.dirname(file), 'r'); try { await directory.sync() } finally { await directory.close() } }
-  } finally { await fs.rm(temporary, { force: true }) }
-}
-async function readPending(root) {
-  const file = path.join(root, pendingName), stat = await present(file)
-  if (!stat) return null
-  if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || stat.size > 4096
-    || (process.platform === 'win32' ? !identity.isPrivateFile(file) : stat.uid !== process.getuid() || (stat.mode & 0o777) !== 0o600)) fail('安装准备记录无法核验，原目录已保留。')
-  const state = JSON.parse(await fs.readFile(file, 'utf8'))
-  if (state.schema_version !== 1 || !['preparing', 'prepared'].includes(state.phase)
-    || typeof state.id !== 'string' || !/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(state.id) || typeof state.installation_id !== 'string'
-    || !/^[a-f0-9]{64}$/.test(state.payload_sha256)
-    || Object.keys(state).some(key => !['schema_version', 'id', 'installation_id', 'selection', 'phase', 'payload_sha256'].includes(key))) fail('安装准备记录损坏，原目录已保留。')
-  return state
 }
 async function verifyPairedCore(root) {
   const stat = await fs.lstat(root)
@@ -139,25 +118,6 @@ async function targetRoot(target, bytes) {
     management.ensurePrivateDataRoot(target)
   }
   return fs.realpath(target)
-}
-// Only an unselected, fenced fresh installation reaches this publication.
-// Keep damaged immutable program bytes; never repair data or dependency trees.
-async function publishPreparedProgram(source, target, signal, verify) {
-  if (!await present(target)) { await fs.rename(source, target); return }
-  const stat = await fs.lstat(target)
-  if (!stat.isDirectory() || stat.isSymbolicLink()) fail('准备版本目录已被重定向。')
-  try { await verify(); return }
-  catch { signal?.throwIfAborted() }
-  const retained = path.join(path.dirname(target), '.damaged-' + path.basename(target) + '-' + randomUUID())
-  await fs.rename(target, retained)
-  try { await fs.rename(source, target) }
-  catch (publishError) {
-    try {
-      if (await present(target)) throw publishError
-      await fs.rename(retained, target)
-    } catch (restoreError) { throw new AggregateError([publishError, restoreError], '安装准备与原位恢复未完成；原程序已保留。') }
-    throw publishError
-  }
 }
 export async function prepareDesktopInstallation({ payload, installRoot, signal, progress = () => {} }) {
   progress('verifying')
@@ -236,6 +196,7 @@ export async function commitDesktopInstallation(prepared) {
     if (!same(current.record, own.record)) fail('安装绑定在操作期间发生变化。')
     lock = await acquireCliLock(own.dataDir, 'commit-desktop-installation')
     const state = await readPending(installRoot)
+    if ((await fs.readdir(own.dataDir)).some(name => name !== 'cli.lock')) fail('发现既有业务数据，需要显式接管或修复，未按新安装提交。')
     if (!state || state.phase !== 'prepared' || state.installation_id !== own.record.installation_id || prepared.installation_id !== state.installation_id
       || !same(state.selection, selection) || inspectInstance(own.dataDir).state !== 'stopped') fail('安装准备状态已改变，未提交版本。')
     if (prepared.coreRoot !== path.join(installRoot, 'releases', selection.core_id) || prepared.guiRoot !== path.join(installRoot, 'app/releases', selection.gui_id)
