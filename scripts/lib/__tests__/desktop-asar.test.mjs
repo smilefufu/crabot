@@ -18,7 +18,7 @@ async function fixture(t, missingTray = false, installer = false, pair) {
     'node_modules/crabot-client/dist/index.js': 'export{}', 'node_modules/zod/package.json': '{}', 'node_modules/electron-updater/package.json': '{}', 'node_modules/@electron/asar/package.json': '{}' }
   for (const file of ['dist/ubuntu-process.js', 'dist/ubuntu-program-probe.js', 'dist/ubuntu-update.js', 'dist/paired-update.js', 'dist/release-intake.js', 'dist/release-signatures.js', 'dist/release-download.js', 'dist/release-transport.js', 'dist/bootstrap/scripts/lib/desktop-management.cjs', 'dist/bootstrap/scripts/desktop/extract-paired-release.py']) files[file] = 'trusted release fixture'
   if (installer) for (const file of ['dist/installer-main.js', 'dist/installer-preload.cjs', 'dist/installation-progress-window.js', 'dist/installation-entries.js',
-    'dist/bootstrap/scripts/lib/desktop-payload.mjs', 'dist/bootstrap/scripts/lib/desktop-preparation-files.mjs', 'dist/bootstrap/scripts/lib/desktop-repair.mjs', 'dist/bootstrap/scripts/lib/desktop-program-proof.mjs', 'dist/bootstrap/scripts/lib/desktop-removal-proof.mjs', 'dist/bootstrap/scripts/lib/desktop-removal-host.mjs', 'dist/bootstrap/scripts/lib/core-release.mjs', 'dist/bootstrap/scripts/lib/physical-fs.cjs']) files[file] = 'installer fixture'
+    'dist/bootstrap/scripts/lib/desktop-payload.mjs', 'dist/bootstrap/scripts/lib/desktop-preparation-files.mjs', 'dist/bootstrap/scripts/lib/desktop-repair.mjs', 'dist/bootstrap/scripts/lib/desktop-program-proof.mjs', 'dist/bootstrap/scripts/lib/desktop-removal-proof.mjs', 'dist/bootstrap/scripts/lib/desktop-removal-host.mjs', 'dist/bootstrap/scripts/lib/module-process-start.cjs', 'dist/bootstrap/scripts/lib/instance-controller.mjs', 'dist/bootstrap/scripts/lib/core-release.mjs', 'dist/bootstrap/scripts/lib/physical-fs.cjs']) files[file] = 'installer fixture'
   if (pair) files['dist/desktop-release.json'] = pair.text
   if (missingTray) delete files['dist/assets/tray.png']
   for (const [file, bytes] of Object.entries(files)) {
@@ -98,7 +98,7 @@ for (const member of ['dist/ubuntu-process.js', 'dist/ubuntu-program-probe.js', 
   })
 }
 
-for (const member of ['desktop-preparation-files.mjs', 'desktop-repair.mjs', 'desktop-program-proof.mjs', 'desktop-removal-proof.mjs', 'desktop-removal-host.mjs', 'desktop-removal-record.cjs']) test('installer ASAR requires its own preparation/repair module: ' + member, async t => {
+for (const member of ['desktop-preparation-files.mjs', 'desktop-repair.mjs', 'desktop-program-proof.mjs', 'desktop-removal-proof.mjs', 'desktop-removal-host.mjs', 'module-process-start.cjs', 'instance-controller.mjs', 'desktop-removal-record.cjs']) test('installer ASAR requires its own preparation/repair module: ' + member, async t => {
   const archive = await fixture(t, false, true)
   const missing = { statFile: (file, name) => {
     if (name === path.normalize('dist/bootstrap/scripts/lib/' + member)) throw new Error('missing independent installation component')

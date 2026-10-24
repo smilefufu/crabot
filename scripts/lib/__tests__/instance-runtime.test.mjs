@@ -1,12 +1,12 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, copyFileSync, existsSync, realpathSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, copyFileSync, existsSync, realpathSync, cpSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { createServer } from 'node:net'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { readInstanceRuntime, inspectInstance, clearInstanceRuntime, identity } from '../instance-runtime.mjs'
 import { stopInstance } from '../instance-controller.mjs'
 
@@ -227,4 +227,35 @@ for (let iteration = 0; iteration < 8; iteration++) test('Windows repeated Unico
     await f.exited
   } catch (error) { diagnostic(); throw error }
   finally { t.signal.removeEventListener('abort', diagnostic) }
+})
+
+
+test('independent common stop settles its exact fixture generation without any Core package', { timeout: 80000 }, async t => {
+  const f = await fixture(t), host = join(f.root, 'independent-maintenance')
+  cpSync(new URL('../', import.meta.url), join(host, 'scripts/lib'), { recursive: true,
+    filter: file => !file.split(/[\\/]/).some(part => ['__tests__', 'node_modules'].includes(part)) })
+  mkdirSync(join(host, 'crabot-native/build/Release'), { recursive: true })
+  copyFileSync(new URL('../../../crabot-native/build/Release/crabot-native.node', import.meta.url), join(host, 'crabot-native/build/Release/crabot-native.node'))
+  const entry = join(host, 'scripts/lib/instance-controller.mjs')
+  const source = `const {stopInstance}=await import(process.env.CRABOT_FIXTURE_STOP_ENTRY);await stopInstance(process.env.CRABOT_FIXTURE_STOP_DATA)`
+  const stopper = spawn(process.execPath, ['--input-type=module', '-e', source], { env: { ...process.env,
+    CRABOT_FIXTURE_STOP_ENTRY: pathToFileURL(entry).href, CRABOT_FIXTURE_STOP_DATA: f.data }, stdio: ['ignore', 'pipe', 'pipe'] })
+  let output = ''; stopper.stdout.on('data', bytes => { output += bytes }); stopper.stderr.on('data', bytes => { output += bytes })
+  const done = once(stopper, 'exit')
+  t.after(() => { if (stopper.exitCode === null && stopper.signalCode === null) stopper.kill('SIGKILL') })
+  const [code] = await done
+  assert.equal(code, 0, output)
+  await f.exited
+  assert.equal(readFileSync(f.marker, 'utf8'), 'graceful')
+  assert.equal(readInstanceRuntime(f.data), null)
+  assert.equal(inspectInstance(f.data).state, 'stopped')
+  assert.equal(existsSync(join(host, 'crabot-core')), false)
+})
+test('shared module-start probe preserves the existing Core producer identity for the current process', async () => {
+  const { probeProcessStartIdentity } = await import('../module-process-start.cjs')
+  const core = await import('../../../crabot-core/dist/module-runtime-registry.js')
+  const expected = await core.probeProcessStartIdentity(process.pid)
+  assert.equal(typeof expected, 'string')
+  assert.equal(await probeProcessStartIdentity(process.pid), expected)
+  assert.equal(await probeProcessStartIdentity(2_147_483_647), null)
 })

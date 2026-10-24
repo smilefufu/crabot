@@ -38,6 +38,8 @@ for (const [file, expected] of [
   ['scripts/lib/desktop-program-proof.mjs', true],
   ['scripts/lib/desktop-removal-proof.mjs', true],
   ['scripts/lib/desktop-removal-host.mjs', true],
+  ['scripts/lib/module-process-start.cjs', true],
+  ['scripts/lib/instance-controller.mjs', true],
   ['scripts/lib/desktop-removal-record.cjs', true],
   ['scripts/lib/process-identity.cjs', true],
   ['crabot-agent/src/core/workspace-relocation-ledgers.ts', true],

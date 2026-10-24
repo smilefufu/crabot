@@ -5,6 +5,7 @@ import { randomUUID } from 'node:crypto'
 import { inspectInstance, clearInstanceRuntime, identity } from './instance-runtime.mjs'
 import { SUPERVISOR_FORCE_TIMEOUT_MS } from './supervisor-shutdown.mjs'
 import { processBirthAtLeast } from './owned-process-tree.cjs'
+import { probeProcessStartIdentity } from './module-process-start.cjs'
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
 
@@ -28,7 +29,6 @@ async function moduleProcesses(dataDir, owner) {
 }
 
 async function collectOwned(record, dataDir) {
-  const { probeProcessStartIdentity } = await import(new URL('../../crabot-core/dist/module-runtime-registry.js', import.meta.url))
   const modules = [], admins = []
   for (const item of await moduleProcesses(dataDir, record.controller.owner)) {
     if (await probeProcessStartIdentity(item.process.pid) === item.record.process_start_identity
