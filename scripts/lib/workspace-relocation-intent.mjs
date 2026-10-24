@@ -114,6 +114,11 @@ function context(dataDir, locked = false) {
   return { dataRoot, baseControl, control, file: path.join(control, 'relocation.json') }
 }
 function privateControl(control) {
+  // Trusted synchronous reads share directory facts; the outer frame still
+  // rechecks actual identity, permissions and versions before returning.
+  const observed = recordObservation?.paths.get(control)
+  if (observed?.kind === 'directory') return true
+  if (observed?.kind === 'missing') return false
   let stat
   try { stat = fs.lstatSync(control) }
   catch (error) {

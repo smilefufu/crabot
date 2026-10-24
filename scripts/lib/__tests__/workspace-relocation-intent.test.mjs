@@ -1328,3 +1328,38 @@ test('a finite synchronous record observation shares reads but still detects a c
     assert.deepEqual(readWorkspaceRelocationIntent(f.data), accepted)
   } finally { releaseCliLock(lock) }
 })
+
+test('one synchronous graph checks a shared private directory once and still validates it before return', async t => {
+  const f = await fixture(t), lock = await acquireCliLock(f.data, 'workspace-relocation')
+  try {
+    const accepted = await beginWorkspaceRelocationIntent(f.input), control = path.dirname(f.recordFile), lstat = syncFs.lstatSync
+    let directoryReads = 0
+    const counting = t.mock.method(syncFs, 'lstatSync', function(file, ...args) {
+      if (String(file) === control && new Error().stack.includes('privateControl')) directoryReads++
+      return lstat.call(this, file, ...args)
+    })
+    try {
+      observeWorkspaceRelocationRecords(() => {
+        assert.deepEqual(readWorkspaceRelocationIntent(f.data), accepted)
+        assert.deepEqual(readWorkspaceRelocationCoordinator(f.data, f.input.id), { launch: null, ready: null })
+      })
+    } finally { counting.mock.restore() }
+    assert.equal(directoryReads, 2, 'one permission/type stat and one exact observation stat')
+    assert.throws(() => observeWorkspaceRelocationRecords(() => {
+      readWorkspaceRelocationIntent(f.data)
+      syncFs.writeFileSync(path.join(control, 'changed-during-frame'), 'must reject before return')
+      readWorkspaceRelocationCoordinator(f.data, f.input.id)
+    }), { code: 'WORKSPACE_RELOCATION_INVALID' })
+    syncFs.unlinkSync(path.join(control, 'changed-during-frame'))
+    if (process.platform !== 'win32') {
+      try {
+        assert.throws(() => observeWorkspaceRelocationRecords(() => {
+          readWorkspaceRelocationIntent(f.data)
+          syncFs.chmodSync(control, 0o755)
+          readWorkspaceRelocationCoordinator(f.data, f.input.id)
+        }), { code: 'WORKSPACE_RELOCATION_INVALID' })
+      } finally { syncFs.chmodSync(control, 0o700) }
+    }
+    assert.deepEqual(readWorkspaceRelocationIntent(f.data), accepted)
+  } finally { releaseCliLock(lock) }
+})
