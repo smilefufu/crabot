@@ -957,3 +957,62 @@ for (const changed of ['oversized', 'changed-open-file', 'changed-parent']) test
   assert.equal(proofReads, changed === 'oversized' ? 0 : 1)
   assert.equal(await fs.readFile(path.join(f.target, 'data/retained-user-file'), 'utf8'), 'user content')
 })
+
+test('GUI byte verification works independently after the paired Core has been removed', async t => {
+  const f = await fixture(t), record = (await verifyDesktopPayload(f.payload)).record
+  await fs.rm(f.core, { recursive: true })
+  const { verifyDesktopGui } = await import('../desktop-payload.mjs')
+  const checked = await verifyDesktopGui(f.gui, record)
+  assert.equal(checked.bytes, Object.values(record.gui).reduce((sum, entry) => sum + BigInt(entry.size ?? 0), 0n))
+  await fs.writeFile(path.join(f.gui, 'unexpected-user-file'), 'retain unknown files')
+  await assert.rejects(verifyDesktopGui(f.gui, record), { code: 'CRABOT_CORE_INTEGRITY' })
+})
+for (const mode of ['success', 'cancelled', 'space', 'copy-changed', 'selection-changed', 'lock-lost', 'final-cancel', 'active-version', 'bad-version', 'active-workspace']) {
+  test('private macOS/Windows removal GUI preparation never publishes a removal or starts business: ' + mode, { skip: process.platform === 'linux' }, async t => {
+    const f = await fixture(t), prepared = await prepareDesktopInstallation({ payload: f.payload, installRoot: f.target })
+    await commitDesktopInstallation(prepared)
+    await fs.writeFile(path.join(f.target, 'data/retained-user-file'), 'unchanged')
+    const { prepareDesktopRemovalGui } = await import('../desktop-removal-host.mjs')
+    const physical = (await import('../physical-fs.cjs')).default.promises, management = (await import('../desktop-management.cjs')).default
+    const create = management.ensurePrivateDataRoot.bind(management), roots = [], copy = physical.cp.bind(physical), abort = new AbortController()
+    const rootSpy = t.mock.method(management, 'ensurePrivateDataRoot', file => {
+      const result = create(file)
+      if (path.basename(file).startsWith('crabot-removal-host-')) roots.push(result)
+      return result
+    })
+    t.after(async () => { rootSpy.mock.restore(); for (const root of roots) await fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) })
+    if (mode === 'space') t.mock.method(physical, 'statfs', async () => ({ bavail: 0n, bsize: 4096n }))
+    if (mode === 'copy-changed') t.mock.method(physical, 'cp', async (...args) => { await copy(...args); if (roots.some(root => args[1] === path.join(root, 'gui'))) await fs.writeFile(path.join(args[1], 'unknown'), 'changed copy') })
+    if (mode === 'active-version') await fs.writeFile(path.join(f.target, 'data/desktop-maintenance.json'), JSON.stringify({ schema_version: 3 }))
+    else if (mode === 'bad-version') await fs.mkdir(path.join(f.target, 'data/desktop-maintenance.json'))
+    else if (mode === 'active-workspace') { await fs.mkdir(path.join(f.target, 'data/workspace-control')); await fs.mkdir(path.join(f.target, 'data/workspace-control/relocation-active')) }
+    const progress = phase => {
+      if (mode === 'cancelled' && phase === 'copying' || mode === 'final-cancel' && phase === 'prepared') abort.abort(new Error('cancelled host'))
+      if (mode === 'selection-changed' && phase === 'copying') writeFileSync(path.join(f.target, 'current-release.json'), JSON.stringify({ ...f.selection, gui_id: randomUUID() }) + '\n')
+      if (mode === 'lock-lost' && phase === 'copying') {
+        const require = createRequire(import.meta.url)
+        require('../cli-lock.mjs').releaseCliLock(path.join(f.target, 'cli.lock'))
+      }
+    }
+    const pending = prepareDesktopRemovalGui({ installRoot: f.target, operationId: randomUUID(), signal: abort.signal, progress })
+    if (mode === 'success') {
+      const host = await pending
+      assert.deepEqual(await fs.readdir(host.directory), ['gui'])
+      assert.deepEqual(host.proof.source_selection, f.selection)
+      assert.equal(host.guiRoot, path.join(host.directory, 'gui'))
+      if (windows) assert.equal(identity.isPrivateDirectory(host.directory), true)
+      else { const stat = await fs.lstat(host.directory); assert.equal(stat.mode & 0o777, 0o700); assert.equal(stat.uid, process.getuid()) }
+      assert.notEqual(host.guiRoot, prepared.guiRoot)
+      assert.deepEqual(await fs.readFile(host.executable), await fs.readFile(path.join(prepared.guiRoot, path.relative(host.guiRoot, host.executable))))
+      assert.equal((await import('../desktop-payload.mjs')).verifyDesktopGui instanceof Function, true)
+      await (await import('../desktop-payload.mjs')).verifyDesktopGui(host.guiRoot, host.proof.payload)
+    } else {
+      await assert.rejects(pending, mode.includes('cancel') ? /cancelled host/ : mode === 'space' ? { code: 'CRABOT_UPDATE_SPACE' } : undefined)
+      for (const root of roots) await assert.rejects(fs.lstat(root), { code: 'ENOENT' })
+    }
+    await assert.rejects(fs.lstat(path.join(f.target, '.desktop-removal.json')), { code: 'ENOENT' })
+    await assert.rejects(fs.lstat(path.join(f.target, 'app/removals')), { code: 'ENOENT' })
+    assert.equal(await fs.readFile(path.join(f.target, 'data/retained-user-file'), 'utf8'), 'unchanged')
+    assert.equal(await fs.readFile(path.join(prepared.coreRoot, 'cli.mjs'), 'utf8'), `console.log(JSON.stringify({version:${JSON.stringify('1.2.3')},required:process.env.CRABOT_PRODUCT_REQUIRED}))`)
+  })
+}

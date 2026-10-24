@@ -75,19 +75,29 @@ export async function sealDesktopPayload(directory) {
   return record
 }
 // Byte integrity only. Callers own installation selection, trust and lifecycle.
+export async function verifyDesktopGui(guiRoot, record, { signal } = {}) {
+  if (record.schema_version !== 1 || record.platform !== process.platform || record.arch !== process.arch
+    || Object.keys(record).join(',') !== 'schema_version,platform,arch,selection,gui') fail('此离线安装包不适用于当前系统。')
+  const stat = await fs.lstat(guiRoot)
+  if (!stat.isDirectory() || stat.isSymbolicLink()) fail('离线载荷根被重定向。')
+  const pinned = JSON.parse(await fs.readFile(path.join(resources(guiRoot), 'desktop-release.json'), 'utf8'))
+  if (!same(record.selection, pinned) || pinned.schema_version !== 1 || !/^\d+\.\d+\.\d+(?:-[\w.-]+)?$/.test(pinned.version)
+    || !/^[a-f0-9]{64}$/.test(pinned.core_id) || !/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(pinned.gui_id)
+    || Object.keys(pinned).join(',') !== 'schema_version,version,gui_id,core_id'
+    || !same(await guiInventory(guiRoot, signal), record.gui)) fail('离线安装载荷不完整或已改变。', 'CRABOT_CORE_INTEGRITY')
+  verifyDesktopPairAsar(asar, path.join(resources(guiRoot), 'app.asar'), pinned)
+  signal?.throwIfAborted()
+  return { bytes: Object.values(record.gui).reduce((sum, file) => sum + BigInt(file.size ?? 0), 0n) }
+}
 export async function verifyDesktopPrograms(coreRoot, guiRoot, record, { signal } = {}) {
   if (record.schema_version !== 1 || record.platform !== process.platform || record.arch !== process.arch
     || Object.keys(record).join(',') !== 'schema_version,platform,arch,selection,gui') fail('此离线安装包不适用于当前系统。')
   for (const root of [coreRoot, guiRoot]) { const stat = await fs.lstat(root); if (!stat.isDirectory() || stat.isSymbolicLink()) fail('离线载荷根被重定向。') }
   const core = await verifyPairedCore(coreRoot)
-  const pinned = JSON.parse(await fs.readFile(path.join(resources(guiRoot), 'desktop-release.json'), 'utf8'))
-  if (!same(record.selection, pinned) || pinned.schema_version !== 1 || pinned.version !== core.version || pinned.core_id !== core.inventory_sha256
-    || !/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(pinned.gui_id)
-    || Object.keys(pinned).join(',') !== 'schema_version,version,gui_id,core_id'
-    || !same(await guiInventory(guiRoot, signal), record.gui)) fail('离线安装载荷不完整或已改变。', 'CRABOT_CORE_INTEGRITY')
-  verifyDesktopPairAsar(asar, path.join(resources(guiRoot), 'app.asar'), pinned)
+  if (record.selection?.version !== core.version || record.selection?.core_id !== core.inventory_sha256) fail('离线安装载荷不完整或已改变。', 'CRABOT_CORE_INTEGRITY')
+  const gui = await verifyDesktopGui(guiRoot, record, { signal })
   const coreFiles = JSON.parse(await fs.readFile(path.join(coreRoot, 'core-files.json'), 'utf8')).files
-  const bytes = [...Object.values(coreFiles), ...Object.values(record.gui)].reduce((sum, file) => sum + BigInt(file.size ?? 0), 0n)
+  const bytes = Object.values(coreFiles).reduce((sum, file) => sum + BigInt(file.size ?? 0), gui.bytes)
   signal?.throwIfAborted()
   return { bytes }
 }

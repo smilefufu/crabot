@@ -20,6 +20,8 @@ async function main() {
   assert.equal(typeof repair.prepareDesktopRepair, 'function'); assert.equal(typeof repair.commitDesktopRepair, 'function')
   const proof = await module('bootstrap/scripts/lib/desktop-removal-proof.mjs')
   assert.equal(typeof proof.captureDesktopRemovalProof, 'function'); assert.equal(typeof proof.readDesktopRemovalProof, 'function')
+  const removalHost = await module('bootstrap/scripts/lib/desktop-removal-host.mjs')
+  assert.equal(typeof removalHost.prepareDesktopRemovalGui, 'function')
   const checked = await backend.verifyDesktopPayload(payload)
   assert.ok(checked.bytes > 0n)
   const entries = await module('installation-entries.js')
@@ -32,7 +34,7 @@ async function main() {
   await window.webContents.executeJavaScript('window.crabotInstall.cancel()')
   assert.equal(abort.signal.aborted, true)
   progress.close()
-  const report = { trusted_backend_in_asar: true, trusted_repair_backend_in_asar: true, trusted_removal_reader_in_asar: true, trusted_removal_proof_in_asar: true, opaque_payload_verified: true, sandboxed_progress_preload: true,
+  const report = { trusted_backend_in_asar: true, trusted_repair_backend_in_asar: true, trusted_removal_reader_in_asar: true, trusted_removal_proof_in_asar: true, trusted_removal_host_backend_in_asar: true, opaque_payload_verified: true, sandboxed_progress_preload: true,
     outside_checkout: true, actual_installer_flow: false, business_mm_started: false }
   await fs.writeFile(path.join(root, 'probe-report.json'), JSON.stringify(report), { flag: 'wx' })
   console.log('CRABOT_INSTALLER_HOST ' + JSON.stringify(report))
