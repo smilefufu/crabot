@@ -44,6 +44,21 @@ defaults:
     shell: bash
 
 jobs:
+  paired-extraction:
+    name: Paired archive Python ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-15, macos-15-intel, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.13.0'
+      - name: Check pinned Python archive identity before the full product build
+        run: uv run --no-project --no-config --managed-python --python 3.12.12 python -I -B scripts/desktop/__tests__/extract-paired-release.test.py
   ubuntu-bootstrap:
     name: Build Ubuntu24 native bootstrap
     runs-on: ubuntu-24.04

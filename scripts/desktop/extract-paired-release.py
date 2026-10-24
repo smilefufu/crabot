@@ -26,6 +26,13 @@ def identity(value):
                  ('st_dev', 'st_ino', 'st_mode', 'st_uid', 'st_nlink', 'st_size', 'st_mtime_ns', 'st_ctime_ns'))
 
 
+def path_identity(value):
+    # CPython 3.12 Windows lstat uses creation time for ctime, while fstat
+    # uses change time. Bridge them with birthtime; retain full fstat checks.
+    result = identity(value)
+    return result[:-1] + (value.st_birthtime_ns,) if sys.platform == 'win32' else result
+
+
 def entry_name(value, directory=False):
     require(isinstance(value, str) and 0 < len(value) <= 4096)
     require('\\' not in value and not any(ord(char) < 32 or ord(char) == 127 for char in value))
@@ -99,11 +106,12 @@ def extract(file, destination, size, sha256):
     require(stat.S_ISREG(before.st_mode) and before.st_nlink == 1 and before.st_size == size)
     flags = os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0) | getattr(os, 'O_BINARY', 0)
     with os.fdopen(os.open(file, flags), 'rb') as source:
-        require(identity(os.fstat(source.fileno())) == identity(before))
+        opened = os.fstat(source.fileno())
+        require(path_identity(opened) == path_identity(before))
         digest = hashlib.sha256()
         while data := source.read(CHUNK):
             digest.update(data)
-        require(digest.hexdigest() == sha256 and identity(os.fstat(source.fileno())) == identity(before))
+        require(digest.hexdigest() == sha256 and identity(os.fstat(source.fileno())) == identity(opened))
         source.seek(0)
         zipped = file.name.endswith('.zip')
         require(zipped or file.name.endswith('.tar.gz'))
@@ -141,7 +149,7 @@ def extract(file, destination, size, sha256):
             if os.name != 'nt':
                 for directory in sorted(directories, key=lambda value: len(value.parts), reverse=True):
                     directory.chmod(directories[directory])
-        require(identity(os.fstat(source.fileno())) == identity(before) and identity(file.lstat()) == identity(before))
+        require(identity(os.fstat(source.fileno())) == identity(opened) and identity(file.lstat()) == identity(before))
     require(identity(destination.lstat())[:4] == identity(root)[:4])
 
 

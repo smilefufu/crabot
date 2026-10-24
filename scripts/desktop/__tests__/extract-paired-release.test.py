@@ -9,6 +9,7 @@ import sys
 import tarfile
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 import zipfile
 
@@ -166,6 +167,40 @@ class ExtractionTests(unittest.TestCase):
             import shutil
             shutil.rmtree(self.output)
             self.output.mkdir(mode=0o700)
+
+    def test_windows_path_and_handle_creation_time_comparison(self):
+        fields = dict(st_dev=42, st_ino=123, st_mode=stat.S_IFREG | 0o600, st_uid=0,
+                      st_nlink=1, st_size=200, st_mtime_ns=300, st_birthtime_ns=100)
+        path_stat = SimpleNamespace(**fields, st_ctime_ns=100)
+        handle_stat = SimpleNamespace(**fields, st_ctime_ns=400)
+        with patch.object(module, 'sys', SimpleNamespace(platform='win32')):
+            self.assertEqual(module.path_identity(path_stat), module.path_identity(handle_stat))
+            self.assertNotEqual(module.identity(path_stat), module.identity(handle_stat))
+            for key in fields:
+                changed = SimpleNamespace(**{**fields, key: fields[key] + 1}, st_ctime_ns=400)
+                self.assertNotEqual(module.path_identity(path_stat), module.path_identity(changed), key)
+
+    def test_open_handle_change_time_is_still_checked_after_hashing(self):
+        file = self.archive(self.base())
+        original = module.os.fstat
+        calls = 0
+
+        def changed_stat(fd):
+            nonlocal calls
+            calls += 1
+            value = original(fd)
+            fields = {key: getattr(value, key) for key in
+                      ('st_dev', 'st_ino', 'st_mode', 'st_uid', 'st_nlink', 'st_size', 'st_mtime_ns', 'st_ctime_ns')}
+            fields['st_birthtime_ns'] = getattr(value, 'st_birthtime_ns', 0)
+            if calls > 1:
+                fields['st_ctime_ns'] += 1
+            return SimpleNamespace(**fields)
+
+        with patch.object(module.os, 'fstat', side_effect=changed_stat):
+            with self.assertRaises(ValueError):
+                module.extract(file, self.output, file.stat().st_size, hashlib.sha256(file.read_bytes()).hexdigest())
+        self.assertGreaterEqual(calls, 2)
+        self.assertEqual(list(self.output.iterdir()), [])
 
     def test_hardlinks_are_rejected(self):
         file = self.root / 'hard.tar.gz'
