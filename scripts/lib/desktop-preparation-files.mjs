@@ -11,7 +11,10 @@ export const pendingName = '.desktop-installing.json', payloadName = '.desktop-i
 export async function privateJson(file, value, replace = false) {
   const temporary = file + '.tmp-' + randomUUID(), text = JSON.stringify(value) + '\n'
   try {
-    if (process.platform === 'win32') identity.writePrivateFile(temporary, text)
+    if (process.platform === 'win32') {
+      identity.writePrivateFile(temporary, '')
+      await fs.writeFile(temporary, text, { flag: 'r+', flush: true })
+    }
     else await fs.writeFile(temporary, text, { flag: 'wx', mode: 0o600, flush: true })
     if (replace) await fs.rename(temporary, file); else await fs.link(temporary, file)
     if (process.platform !== 'win32') { const directory = await fs.open(path.dirname(file), 'r'); try { await directory.sync() } finally { await directory.close() } }

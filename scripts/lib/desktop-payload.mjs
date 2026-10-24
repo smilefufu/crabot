@@ -148,13 +148,7 @@ export async function prepareDesktopInstallation({ payload, installRoot, signal,
     const retainedStat = await present(retained)
     if (retainedStat) {
       if (!retainedStat.isFile() || retainedStat.isSymbolicLink() || retainedStat.nlink !== 1 || await hash(retained) !== payloadSha) fail('准备载荷与原安装记录不一致。')
-    } else {
-      const temporary = retained + '.tmp-' + randomUUID()
-      try {
-        await fs.writeFile(temporary, payloadText, { flag: 'wx', mode: 0o600, flush: true })
-        await fs.link(temporary, retained)
-      } finally { await fs.rm(temporary, { force: true }) }
-    }
+    } else await privateJson(retained, source.record)
     const pending = previous ?? { schema_version: 1, id: randomUUID(), installation_id: own.record.installation_id, selection: source.record.selection, phase: 'preparing', payload_sha256: payloadSha }
     if (pending.payload_sha256 !== payloadSha) fail('准备载荷摘要已改变。')
     if (!previous) await privateJson(path.join(installRoot, pendingName), pending)

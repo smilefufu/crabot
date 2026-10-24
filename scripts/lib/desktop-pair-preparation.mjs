@@ -1,12 +1,13 @@
 // Online program preparation only. This never switches a pair, touches business
 // data, executes migration scripts, changes OS entries, stops or starts Core.
 import path from 'node:path'
-import { createHash, randomUUID } from 'node:crypto'
+import { createHash } from 'node:crypto'
 import physicalFs from './physical-fs.cjs'
 import identity from './process-identity.cjs'
 import management from './desktop-management.cjs'
 import installation from './desktop-installation.cjs'
 import { verifyDesktopPayload, verifyDesktopPrograms } from './desktop-payload.mjs'
+import { privateJson } from './desktop-preparation-files.mjs'
 import { acquireCliLock, releaseCliLock } from './cli-lock.mjs'
 import { readVersionMaintenance } from './version-maintenance.mjs'
 import { previewMigrations } from '../upgrade-lib/migrate.mjs'
@@ -26,14 +27,7 @@ async function storeProof(root, record) {
     if (!existing.isFile() || existing.isSymbolicLink() || existing.nlink !== 1 || existing.size > 64 * 1024 * 1024
       || (process.platform === 'win32' ? !identity.isPrivateFile(file) : existing.uid !== process.getuid() || (existing.mode & 0o777) !== 0o600)
       || await fs.readFile(file, 'utf8') !== text) fail('已准备版本的完整清单无法核验，原材料保留。')
-  } else {
-    const temporary = file + '.tmp-' + randomUUID()
-    try {
-      if (process.platform === 'win32') identity.writePrivateFile(temporary, text)
-      else await fs.writeFile(temporary, text, { flag: 'wx', mode: 0o600, flush: true })
-      await fs.link(temporary, file)
-    } finally { await fs.rm(temporary, { force: true }) }
-  }
+  } else await privateJson(file, record)
   if (process.platform !== 'win32') {
     for (const parent of [directory, path.dirname(directory)]) {
       const handle = await fs.open(parent, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW)

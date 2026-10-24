@@ -826,3 +826,27 @@ for (const stage of ['prepare', 'commit']) test('ordinary exact-pair repair cann
   else assert.equal(JSON.parse(await fs.readFile(path.join(f.target, '.desktop-installing.json'), 'utf8')).phase, 'prepared')
   await assertRepairData(f)
 })
+
+test('fresh install retains a standalone private original GUI payload proof for later repair', async t => {
+  const f = await fixture(t), prepared = await prepareDesktopInstallation({ payload: f.payload, installRoot: f.target })
+  const file = path.join(f.target, '.desktop-install-payload.json'), stat = await fs.lstat(file)
+  assert.equal(stat.nlink, 1)
+  if (windows) assert.equal(identity.isPrivateFile(file), true)
+  else { assert.equal(stat.uid, process.getuid()); assert.equal(stat.mode & 0o777, 0o600) }
+  assert.equal(await fs.readFile(file, 'utf8'), JSON.stringify((await verifyDesktopPayload(f.payload)).record) + '\n')
+  await commitDesktopInstallation(prepared)
+})
+test('private preparation JSON supports large inventories and still refuses existing targets without leftovers', async t => {
+  const parent = await fs.mkdtemp(path.join(tmpdir(), 'crabot-large-private-proof-'))
+  t.after(() => fs.rm(parent, { recursive: true, force: true }))
+  const file = path.join(parent, 'proof.json'), value = { inventory: 'x'.repeat(128 * 1024) }
+  const { privateJson } = await import('../desktop-preparation-files.mjs')
+  await privateJson(file, value)
+  assert.equal(await fs.readFile(file, 'utf8'), JSON.stringify(value) + '\n')
+  if (windows) assert.equal(identity.isPrivateFile(file), true)
+  else assert.equal((await fs.stat(file)).mode & 0o777, 0o600)
+  assert.equal((await fs.stat(file)).nlink, 1)
+  await assert.rejects(privateJson(file, { changed: true }), { code: 'EEXIST' })
+  assert.deepEqual(await fs.readdir(parent), ['proof.json'])
+  assert.equal(await fs.readFile(file, 'utf8'), JSON.stringify(value) + '\n')
+})
