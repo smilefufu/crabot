@@ -48,6 +48,7 @@ for (const [file, expected] of [
   ['crabot-desktop/src/ubuntu-program-probe.ts', true],
   ['crabot-desktop/src/paired-update.ts', true],
   ['.github/scripts/accept-ubuntu-offline-installer.mjs', true],
+  ['.github/scripts/prepare-paired-update-core.mjs', true],
   ['crabot-client/src/contracts/desktop-release.ts', true],
   ['crabot-desktop/src/release-signatures.ts', true],
   ['.github/scripts/test-paired-release-intake.mjs', true],

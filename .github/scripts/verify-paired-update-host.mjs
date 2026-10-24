@@ -1,7 +1,7 @@
 // Isolated CI component-to-product acceptance. The source packages unchanged
 // production modules with a finite actor; the target runs ordinary main.
 import assert from 'node:assert/strict'
-import { promises as fs, constants } from 'node:fs'
+import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { tmpdir } from 'node:os'
 import { spawn, execFile } from 'node:child_process'
@@ -11,13 +11,14 @@ import { fileURLToPath } from 'node:url'
 import { once } from 'node:events'
 import { randomBytes, generateKeyPairSync } from 'node:crypto'
 import { runBounded } from '../../scripts/lib/run-bounded.mjs'
-import { verifyCoreRelease, writeCoreRelease } from '../../scripts/lib/core-release.mjs'
+import { verifyCoreRelease } from '../../scripts/lib/core-release.mjs'
 import { verifyDesktopPayload, prepareDesktopInstallation, commitDesktopInstallation } from '../../scripts/lib/desktop-payload.mjs'
 import { writeSignedDesktopPayload } from '../../scripts/desktop/sign-release.mjs'
 import { inspectInstance, identity } from '../../scripts/lib/instance-runtime.mjs'
 import { stopInstance } from '../../scripts/lib/instance-controller.mjs'
 import product from '../../scripts/lib/product-runtime.cjs'
 import { buildPairedUpdateSource } from './build-paired-update-source.mjs'
+import { preparePairedUpdateCore } from './prepare-paired-update-core.mjs'
 
 if (process.env.GITHUB_ACTIONS !== 'true' || !['darwin', 'win32'].includes(process.platform)) throw new Error('Requires an isolated macOS/Windows CI user; never run against a developer MM')
 const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
@@ -64,12 +65,7 @@ try {
   // runtime packages. This does not claim a historical-release migration.
   const match = /^(\d+)\.(\d+)\.(\d+)(?:-.*)?$/.exec(original.version); assert.ok(match)
   const targetVersion = `${match[1]}.${match[2]}.${Number(match[3]) + 1}-desktop-fixture.1`, targetCore = path.join(job, 'core')
-  await fs.cp(originalCore, targetCore, { recursive: true, verbatimSymlinks: true, mode: constants.COPYFILE_FICLONE })
-  for (const file of ['package.json', 'product-runtime.json']) {
-    const value = JSON.parse(await fs.readFile(path.join(targetCore, file), 'utf8')); value.version = targetVersion
-    await fs.writeFile(path.join(targetCore, file), JSON.stringify(value) + '\n')
-  }
-  await writeCoreRelease(targetCore, { schema_version: 1, version: targetVersion, platform: original.platform, arch: original.arch, commit: original.commit, source_dirty: false })
+  await preparePairedUpdateCore(originalCore, targetCore, targetVersion)
   const targetProject = path.join(job, 'paired')
   await runBounded(runtime.executables.node, [path.join(repository, 'scripts/desktop/package-application.mjs'), '--candidate=true', '--layout=paired', '--core=' + targetCore, '--out=' + targetProject], { cwd: repository, timeout: 240000 })
   const targetPayload = path.join(targetProject, 'offline'), target = await verifyDesktopPayload(targetPayload)

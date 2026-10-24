@@ -31,6 +31,7 @@ on:
       - '.github/scripts/test-paired-release-intake.mjs'
       - '.github/scripts/verify-paired-update-host.mjs'
       - '.github/scripts/build-paired-update-source.mjs'
+      - '.github/scripts/prepare-paired-update-core*'
       - '.github/workflows/desktop.yml'
   workflow_dispatch:
 
@@ -99,7 +100,7 @@ jobs:
         env:
           CRABOT_CI_BASE: ${{ github.event.before || github.event.pull_request.base.sha }}
         run: |
-          node --test .github/scripts/desktop-runtime-scope.test.mjs
+          node --test .github/scripts/desktop-runtime-scope.test.mjs .github/scripts/prepare-paired-update-core.test.mjs
           node .github/scripts/desktop-runtime-scope.mjs
       - name: Linux build prerequisites
         if: runner.os == 'Linux' && steps.scope.outputs.full_runtime == 'true'
