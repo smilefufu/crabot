@@ -45,7 +45,7 @@ describe('voice streaming and irreversible delivery', () => {
     await expect(callNonStreaming(adapter, { model: 'fixture', systemPrompt: 'fixture', messages: [], tools: [], createTextConsumer: () => output.consumer() })).rejects.toThrow('fetch failed')
     expect(stream).toHaveBeenCalledTimes(1); expect(events).toEqual(['reply_start', 'reply_text', 'reply_cancel'])
   })
-  it('retries before nonempty external text and cancels the abandoned empty tag', async () => {
+  it('retries an empty tag without opening or canceling the terminal', async () => {
     vi.useFakeTimers()
     try {
       const events: string[] = []
@@ -63,7 +63,7 @@ describe('voice streaming and irreversible delivery', () => {
       const result = callNonStreaming(adapter, { model: 'fixture', systemPrompt: 'fixture', messages: [], tools: [], createTextConsumer: () => output.consumer() })
       await vi.runAllTimersAsync()
       expect((await result).stopReason).toBe('end_turn'); expect(attempts).toBe(2)
-      expect(events).toEqual(['reply_start', 'reply_cancel', 'reply_start', 'reply_text', 'reply_end'])
+      expect(events).toEqual(['reply_start', 'reply_text', 'reply_end'])
     } finally { vi.useRealTimers() }
   })
 

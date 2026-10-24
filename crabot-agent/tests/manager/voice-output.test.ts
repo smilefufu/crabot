@@ -7,6 +7,40 @@ import { describe, expect, it } from 'vitest'
 import { VoiceTagParser, TaggedVoiceOutput, type VoiceDeliveryRecord } from '../../src/manager/voice-output.js'
 
 describe('voice tag streaming', () => {
+  it.each(['<voice_reply>', '<voice_reply></voice_reply>', '<voice_reply> \n\t</voice_reply>', '<voice_reply> \n', '<voice_reply><nested>'])('does not reserve or cancel a terminal for an empty attempt: %j', async source => {
+    const events: import('crabot-shared').VoiceOutputParams[] = []
+    let preparations = 0
+    const context = { channel_id: 'voice', session_id: 'group', turn_id: 'turn', connection_epoch: 'epoch', expires_at: new Date(Date.now() + 60000).toISOString() }
+    const binding = { channel_id: 'voice', session_id: 'group', response_id: 'response' }
+    const output = new TaggedVoiceOutput({ isVoice: () => true, records: () => [], save() {},
+      prepare: async () => { preparations++; return { binding, kind: 'reply', turn_id: 'turn', connection_epoch: 'epoch' } },
+      send: async params => { events.push(params); return { accepted: true } },
+    }, () => context, () => {}, () => binding)
+    const consumer = output.consumer()
+    await consumer.write(source); await consumer.finish(); await consumer.abort()
+    expect(preparations).toBe(0); expect(events).toEqual([])
+    expect(consumer.externallyCommitted).toBe(false)
+  })
+  it('opens only at the first nonblank body and preserves its leading text and original binding', async () => {
+    const events: import('crabot-shared').VoiceOutputParams[] = [], records: VoiceDeliveryRecord[] = []
+    const context = { channel_id: 'voice', session_id: 'group', turn_id: 'turn', connection_epoch: 'epoch', expires_at: new Date(Date.now() + 60000).toISOString() }
+    const binding = { channel_id: 'voice', session_id: 'group', response_id: 'response', request_id: 'request' }
+    let preparations = 0
+    const output = new TaggedVoiceOutput({ isVoice: () => true, records: () => records, save: record => { records.push(structuredClone(record)) },
+      prepare: async () => { preparations++; expect(records.at(-1)?.text).toBe(' \n你好'); return { binding, kind: 'reply', turn_id: 'turn', connection_epoch: 'epoch' } },
+      send: async params => { events.push(params); return params.event.type === 'reply_end' ? { platform_message_id: params.event.playback_id, played_samples: 480, sent_at: new Date().toISOString() } : { accepted: true } },
+    }, () => context, () => {}, () => binding)
+    const consumer = output.consumer()
+    await consumer.write('<voice_reply> \n')
+    expect(preparations).toBe(0); expect(events).toEqual([]); expect(consumer.externallyCommitted).toBe(false)
+    await consumer.write('你好'); await consumer.write('。</voice_reply>'); await consumer.finish()
+    expect(preparations).toBe(1)
+    expect(events.map(item => item.event.type)).toEqual(['reply_start', 'reply_text', 'reply_text', 'reply_end'])
+    expect(events.filter(item => item.event.type === 'reply_text').map(item => (item.event as { text: string }).text).join('')).toBe(' \n你好。')
+    expect(events.every(item => JSON.stringify(item.delivery_context?.binding) === JSON.stringify(binding))).toBe(true)
+    expect(records.at(-1)).toMatchObject({ text: ' \n你好。', binding, status: 'completed' })
+  })
+
   it('keeps subsequent blocks and response_end on the accepted response after the initial expiry', async () => {
     let context = { channel_id: 'voice', session_id: 'group', turn_id: 'turn', connection_epoch: 'epoch', expires_at: new Date(Date.now() + 60000).toISOString() }
     const binding = { channel_id: 'voice', session_id: 'group', response_id: 'different-from-turn' }
