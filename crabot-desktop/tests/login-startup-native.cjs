@@ -12,6 +12,7 @@ app.setName('Crabot Login Startup Fixture')
 app.setPath('userData', path.join(root, 'profile')); app.setPath('sessionData', path.join(root, 'profile'))
 app.setAppUserModelId('com.crabot.login-startup.fixture')
 const query = String.raw`$ErrorActionPreference='Stop'
+[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false)
 $paths=@('Software\Microsoft\Windows\CurrentVersion\Run','Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run')
 $values=@()
 foreach($p in $paths){$key=[Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($p);try{if($null -eq $key -or -not ($key.GetValueNames() -contains 'Crabot')){$values+= $null}else{$v=$key.GetValue('Crabot',$null,[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames);if($v -is [byte[]]){$v=[Convert]::ToBase64String($v)};$values+= @{kind=$key.GetValueKind('Crabot').ToString();value=$v}}}finally{if($null -ne $key){$key.Dispose()}}}
@@ -32,6 +33,7 @@ void app.whenReady().then(async () => {
     claimed = true
     app.setLoginItemSettings({ name: 'Crabot', path: source, args: ['--background'], openAtLogin: true, enabled })
     const before = snapshot(), original = make(source), updated = make(target)
+    assert.equal(before[0].value.includes('旧 source'), true, 'Registry snapshot must preserve the Unicode source path')
     assert.equal(app.getLoginItemSettings({ path: `"${source}"`, args: ['--background'] }).openAtLogin, false)
     const lookup = app.getLoginItemSettings({ path: `"${source}"`, args: ['--background'] })
     console.log('CRABOT_LOGIN_LOOKUP ' + JSON.stringify({ run_present: before[0] !== null, expected_enabled: enabled,
