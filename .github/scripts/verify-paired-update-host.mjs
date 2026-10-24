@@ -1,5 +1,5 @@
-// Isolated CI component-to-product acceptance. The source actor loads the real
-// ASAR without enabling its candidate channel; the target runs ordinary main.
+// Isolated CI component-to-product acceptance. The source packages unchanged
+// production modules with a finite actor; the target runs ordinary main.
 import assert from 'node:assert/strict'
 import { promises as fs, constants } from 'node:fs'
 import path from 'node:path'
@@ -9,8 +9,7 @@ import { promisify } from 'node:util'
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 import { once } from 'node:events'
-import { createServer } from 'node:net'
-import { randomUUID, generateKeyPairSync } from 'node:crypto'
+import { randomBytes, generateKeyPairSync } from 'node:crypto'
 import { runBounded } from '../../scripts/lib/run-bounded.mjs'
 import { verifyCoreRelease, writeCoreRelease } from '../../scripts/lib/core-release.mjs'
 import { verifyDesktopPayload, prepareDesktopInstallation, commitDesktopInstallation } from '../../scripts/lib/desktop-payload.mjs'
@@ -18,6 +17,7 @@ import { writeSignedDesktopPayload } from '../../scripts/desktop/sign-release.mj
 import { inspectInstance, identity } from '../../scripts/lib/instance-runtime.mjs'
 import { stopInstance } from '../../scripts/lib/instance-controller.mjs'
 import product from '../../scripts/lib/product-runtime.cjs'
+import { buildPairedUpdateSource } from './build-paired-update-source.mjs'
 
 if (process.env.GITHUB_ACTIONS !== 'true' || !['darwin', 'win32'].includes(process.platform)) throw new Error('Requires an isolated macOS/Windows CI user; never run against a developer MM')
 const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
@@ -32,15 +32,16 @@ const payload = inside(location.payload), originalCore = inside(location.core)
 const original = await verifyCoreRelease(originalCore), verified = await verifyDesktopPayload(payload)
 assert.equal(original.source_dirty, false); assert.equal(verified.record.selection.core_id, original.inventory_sha256)
 const runtime = product.loadProductRuntime(originalCore, { required: true, full: true })
-const needed = verified.bytes * 5n + 1024n ** 3n, space = await fs.statfs(repository, { bigint: true })
+const needed = verified.bytes * 9n + 2n * 1024n ** 3n, space = await fs.statfs(repository, { bigint: true })
 const temporarySpace = await fs.statfs(tmpdir(), { bigint: true })
-if (space.bavail * space.bsize < needed || temporarySpace.bavail * temporarySpace.bsize < verified.bytes * 4n + 1024n ** 3n) throw Object.assign(new Error('Whole update fixture needs bounded program-copy space'), { code: 'CRABOT_UPDATE_SPACE' })
-const job = path.join(repository, '.desktop-build', 'paired-update-' + randomUUID()), temporary = await fs.mkdtemp(path.join(tmpdir(), 'Crabot 更新 '))
+if (space.bavail * space.bsize < needed || temporarySpace.bavail * temporarySpace.bsize < needed) throw Object.assign(new Error('Whole update fixture needs bounded program-copy space'), { code: 'CRABOT_UPDATE_SPACE' })
+// npm redacts UUID-shaped dependency paths; build directories use random hex.
+const job = path.join(repository, '.desktop-build', 'paired-update-' + randomBytes(12).toString('hex')), temporary = await fs.mkdtemp(path.join(tmpdir(), 'Crabot 更新 '))
 await fs.mkdir(job, { mode: 0o700 }); const control = path.join(temporary, 'control'), home = path.join(temporary, 'home')
 await fs.mkdir(control, { mode: 0o700 }); await fs.mkdir(home, { mode: 0o700 })
-let selected, child, browser, page, targetIdentity, sourceIdentity, expectedTargetGuiRoot, phase = 'prepare-target', success = false, sourceOutput = ''
+let selected, child, targetIdentity, sourceIdentity, expectedTargetGuiRoot, phase = 'prepare-target', success = false, sourceOutput = ''
 const report = { platform: process.platform, arch: process.arch, candidate_channel_enabled: false, remote_model_called: false,
-  source_gui: 'real-asar-component-actor', target_gui: 'ordinary-packaged-main', fixture_debugger: true, real_login_session_verified: false }
+  source_gui: 'fixture-packaged-component-actor', target_gui: 'ordinary-packaged-main', fixture_debugger: false, real_login_session_verified: false }
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
 async function readControl(name) {
   try { return JSON.parse(await fs.readFile(path.join(control, name + '.json'), 'utf8')) }
@@ -57,20 +58,7 @@ async function poll(label, check, timeout = 180000) {
   }
   throw new Error('Timed out: ' + label)
 }
-async function cdp(url) {
-  const endpoint = new URL(url); assert.equal(endpoint.protocol, 'ws:'); assert.equal(endpoint.hostname, '127.0.0.1')
-  const socket = new WebSocket(url), pending = new Map(); let id = 0
-  await new Promise((resolve, reject) => {
-    const timer = setTimeout(() => { socket.close(); reject(new Error('Debugger connection timed out')) }, 5000)
-    socket.addEventListener('open', () => { clearTimeout(timer); resolve() }, { once: true })
-    socket.addEventListener('error', () => { clearTimeout(timer); reject(new Error('Debugger connection failed')) }, { once: true })
-  })
-  socket.addEventListener('message', event => { const value = JSON.parse(String(event.data)), call = pending.get(value.id); if (!call) return
-    pending.delete(value.id); clearTimeout(call.timer); value.error ? call.reject(new Error('Debugger command failed')) : call.resolve(value.result) })
-  socket.addEventListener('close', () => { for (const call of pending.values()) { clearTimeout(call.timer); call.reject(new Error('Debugger closed')) }; pending.clear() })
-  return { send: (method, params = {}) => new Promise((resolve, reject) => { const next = ++id, timer = setTimeout(() => { pending.delete(next); reject(new Error('Debugger command timed out')) }, 5000); pending.set(next, { resolve, reject, timer }); socket.send(JSON.stringify({ id: next, method, params })) }),
-    close: () => socket.close() }
-}
+
 try {
   // A synthetic higher version with unchanged feature code; both are full real
   // runtime packages. This does not claim a historical-release migration.
@@ -88,75 +76,77 @@ try {
   const keys = generateKeyPairSync('ed25519'), publication = path.join(job, 'publication')
   const signed = await writeSignedDesktopPayload({ payload: targetPayload, python: runtime.executables.python,
     privateKeys: [keys.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString()], output: publication })
+  // The signed archive is self-contained. These exact producer trees were
+  // never executed and are no longer needed; avoid retaining redundant cores.
+  await fs.rm(targetProject, { recursive: true }); await fs.rm(targetCore, { recursive: true })
   phase = 'prepare-source'
-  selected = await commitDesktopInstallation(await prepareDesktopInstallation({ payload, installRoot: path.join(temporary, '整体 安装') }))
+  const sourcePayload = await buildPairedUpdateSource({ repository, project, destination: path.join(job, 'source-project') })
+  selected = await commitDesktopInstallation(await prepareDesktopInstallation({ payload: sourcePayload, installRoot: path.join(temporary, '整体 安装') }))
+  await fs.rm(path.join(job, 'source-project'), { recursive: true })
   expectedTargetGuiRoot = path.join(selected.root, 'app/releases', target.record.selection.gui_id)
   const sentinel = path.join(selected.dataDir, 'update-fixture-preserved.txt'); await fs.writeFile(sentinel, 'preserved across the actual pair handoff\n')
-  const server = createServer(); server.listen(0, '127.0.0.1'); await once(server, 'listening'); const debugPort = server.address().port; await new Promise(resolve => server.close(resolve))
   const metadata = { source: selected, home, control, publicKey: keys.publicKey.export({ type: 'spki', format: 'pem' }).toString(), publication,
-    manifestName: path.basename(signed.manifestFile), signaturesName: path.basename(signed.signaturesFile), artifactName: path.basename(signed.artifact), targetVersion, debugPort }
+    manifestName: path.basename(signed.manifestFile), signaturesName: path.basename(signed.signaturesFile), artifactName: path.basename(signed.artifact), targetVersion }
   const config = path.join(control, 'config.json'); await fs.writeFile(config, JSON.stringify(metadata) + '\n', { mode: 0o600 })
-  const env = { ...process.env, HOME: home, USERPROFILE: home, APPDATA: path.join(home, 'Roaming'), LOCALAPPDATA: path.join(home, 'Local'), DATA_DIR: selected.dataDir, GIT_ALLOW_PROTOCOL: 'file' }
+  const env = { ...process.env, HOME: home, USERPROFILE: home, APPDATA: path.join(home, 'Roaming'), LOCALAPPDATA: path.join(home, 'Local'), DATA_DIR: selected.dataDir, GIT_ALLOW_PROTOCOL: 'file', CRABOT_PAIRED_UPDATE_FIXTURE_CONFIG: config }
   for (const name of ['ELECTRON_RUN_AS_NODE', 'NODE_OPTIONS', 'NODE_PATH', 'CRABOT_DEV', 'CRABOT_PORT_OFFSET']) delete env[name]
   phase = 'source-start-and-update'
-  const require = createRequire(path.join(repository, 'crabot-desktop/package.json'))
-  child = spawn(require('electron'), [path.join(repository, 'crabot-desktop/tests/fixtures/paired-update-source.cjs'), config], { env, stdio: ['ignore', 'pipe', 'pipe'] })
+  child = spawn(selected.executable, ['--background'], { env, stdio: ['ignore', 'pipe', 'pipe'] })
   for (const stream of [child.stdout, child.stderr]) stream.on('data', bytes => { sourceOutput = (sourceOutput + bytes.toString()).slice(-128000) })
   child.on('error', error => { sourceOutput += String(error) })
   sourceIdentity = await poll('source actor identity', async () => identity.inspectProcess(child.pid), 10000)
   const before = await poll('source ready', () => readControl('source-ready'))
   const handoff = await poll('committed target handoff', () => readControl('handoff'), 420000)
   assert.deepEqual(handoff.target, target.record.selection); assert.equal(handoff.ordinary_exits, 0); assert.equal(handoff.requests, 3)
+  assert.match(handoff.maintenance_id, /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/); assert.equal(handoff.production_peer_policy_verified, true)
   phase = 'target-start-and-health'
-  const version = await poll('target debugger', async () => { try { return await (await fetch('http://127.0.0.1:' + debugPort + '/json/version', { signal: AbortSignal.timeout(2000) })).json() } catch { return null } })
-  browser = await cdp(version.webSocketDebuggerUrl)
-  const processes = await browser.send('SystemInfo.getProcessInfo'), gui = processes.processInfo.find(value => value.type === 'browser')
-  assert.ok(gui); targetIdentity = identity.inspectProcess(gui.id); assert.ok(targetIdentity)
   const installation = createRequire(import.meta.url)('../../scripts/lib/desktop-installation.cjs'), current = installation.readDesktopSelection(selected.root)
-  assert.equal(await fs.realpath(targetIdentity.executable), await fs.realpath(current.executable))
-  assert.equal(identity.sameProcess(sourceIdentity, identity.inspectProcess(sourceIdentity.pid)), false)
-  const pages = await (await fetch('http://127.0.0.1:' + debugPort + '/json/list', { signal: AbortSignal.timeout(5000) })).json(), targetPage = pages.find(value => value.type === 'page' && value.url.startsWith('app://crabot/'))
-  assert.ok(targetPage); page = await cdp(targetPage.webSocketDebuggerUrl)
-  const ready = await poll('ordinary target main ready', async () => {
-    const value = await page.send('Runtime.evaluate', { expression: '(async()=>({state:await window.crabotDesktop.getState(),node:typeof require,token:window.crabotDesktop.token??null}))()', awaitPromise: true, returnByValue: true })
-    if (value.exceptionDetails) return null
-    const result = value.result.value
-    if (['error', 'migration_required'].includes(result.state.phase)) throw new Error('Target main refused startup: ' + result.state.code)
-    return result.state.phase === 'ready' ? result : null
+  targetIdentity = await poll('ordinary target executable', async () => {
+    for (const pid of identity.listProcessIds()) {
+      try {
+        const value = identity.inspectProcess(pid)
+        if (value?.owner === sourceIdentity.owner && await fs.realpath(value.executable) === await fs.realpath(current.executable)) return value
+      } catch { /* unrelated inaccessible or exited process */ }
+    }
+    return null
   })
-  assert.equal(ready.node, 'undefined'); assert.equal(ready.token, null); assert.equal(ready.state.app_version, targetVersion)
-  assert.equal(ready.state.instance_id, before.instance_id); assert.notEqual(ready.state.generation, before.generation)
-  const after = inspectInstance(selected.dataDir)
-  assert.equal(after.state, 'running'); assert.equal(after.record.install_root, current.coreRoot); assert.equal(after.record.generation, ready.state.generation)
-  for (const process of [before.controller, before.mm]) assert.equal(identity.sameProcess(process, identity.inspectProcess(process.pid)), false)
-  await poll('post-health maintenance completion', async () => {
+  assert.equal(identity.sameProcess(sourceIdentity, identity.inspectProcess(sourceIdentity.pid)), false)
+  // Only ordinary target main clears this job after data compatibility, an
+  // authenticated desktop session and Core verification. Keep normal peer args.
+  await poll('ordinary target main health completion', async () => {
     try { await fs.stat(path.join(selected.dataDir, 'desktop-maintenance.json')); return false }
     catch (error) { if (error.code === 'ENOENT') return true; throw error }
   })
+  const entry = await import(new URL('../../scripts/lib/desktop-entry.cjs', import.meta.url))
+  assert.equal(entry.default.verifyDesktopEntry(targetIdentity, entry.default.loadDesktopEntry(current.coreRoot)), true)
+  const after = inspectInstance(selected.dataDir)
+  assert.equal(after.state, 'running'); assert.equal(after.record.install_root, current.coreRoot); assert.equal(after.record.instance_id, before.instance_id); assert.notEqual(after.record.generation, before.generation)
+  for (const process of [before.controller, before.mm]) assert.equal(identity.sameProcess(process, identity.inspectProcess(process.pid)), false)
   assert.equal(await fs.readFile(sentinel, 'utf8'), 'preserved across the actual pair handoff\n')
   Object.assign(report, { source_version: original.version, target_version: targetVersion, selected_pair: current.selection,
     source_exited: true, old_mm_stopped: true, target_executable_verified: true, target_main_ready: true,
-    same_instance_new_generation: true, maintenance_cleared_after_real_health: true, data_preserved: true, renderer_token_absent: true,
+    same_instance_new_generation: true, maintenance_cleared_after_real_health: true, data_preserved: true, normal_peer_policy_verified: true,
+    target_health_proof: 'ordinary-main-maintenance-completion', renderer_inspected: false,
     historical_migration_tested: false, os_login_tested: false })
   success = true
 } catch (error) {
   Object.assign(report, { failure_phase: phase, failure_code: error.code || 'PAIRED_HOST_ACCEPTANCE_FAILED', failure_message: String(error.message).slice(0, 512) })
   process.exitCode = 1
 } finally {
-  page?.close(); browser?.close()
   if (sourceIdentity && identity.sameProcess(sourceIdentity, identity.inspectProcess(sourceIdentity.pid))) {
     try { identity.terminateKnownProcess(sourceIdentity) } catch { process.exitCode = 1 }
   }
   if (child) { try { if (child.exitCode === null && child.signalCode === null) await once(child, 'exit', { signal: AbortSignal.timeout(10000) }) } catch { process.exitCode = 1 } }
-  // Exact fresh private GUI tree only; never use names, ports or a broad kill.
+  // Exact fresh private source/target GUI trees only; never kill by name or port.
   const guiProcesses = () => {
     const found = [], owner = identity.inspectProcess(process.pid).owner
-    if (!expectedTargetGuiRoot) return found
+    const roots = [selected?.guiRoot, expectedTargetGuiRoot].filter(Boolean)
+    if (!roots.length) return found
     const normalize = file => process.platform === 'win32' ? path.normalize(file).toLowerCase() : path.normalize(file)
     for (const pid of identity.listProcessIds()) {
       try {
         const value = identity.inspectProcess(pid)
-        if (value?.owner === owner && normalize(value.executable).startsWith(normalize(expectedTargetGuiRoot) + path.sep)) found.push(value)
+        if (value?.owner === owner && roots.some(root => normalize(value.executable).startsWith(normalize(root) + path.sep))) found.push(value)
       } catch { /* unrelated inaccessible or already-exited process */ }
     }
     return found

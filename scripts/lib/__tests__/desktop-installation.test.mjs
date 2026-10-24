@@ -238,3 +238,16 @@ test('a repair reference cannot accidentally become startup environment or selec
   assert.deepEqual(env, { PATH: 'unchanged' })
   assert.deepEqual(await fs.readdir(path.join(f.root, 'data')), [])
 })
+
+test('production peer policy requires the selected executable and rejects fixture or debugger arguments', async t => {
+  const f = await fixture(t), peer = identity.inspectProcess(process.pid), policy = { executable: peer.executable, development: false }
+  let arguments_ = [peer.executable]
+  t.mock.method(identity, 'inspectProcessArguments', () => arguments_)
+  assert.equal(entry.verifyDesktopEntry(peer, policy), true)
+  arguments_ = [peer.executable, '--background']; assert.equal(entry.verifyDesktopEntry(peer, policy), true)
+  for (const extra of ['--remote-debugging-port=23456', '--fixture-config=example', 'paired-update-source.cjs']) {
+    arguments_ = [peer.executable, extra]; assert.equal(entry.verifyDesktopEntry(peer, policy), false)
+  }
+  arguments_ = [peer.executable]
+  assert.equal(entry.verifyDesktopEntry(peer, { ...policy, executable: f.executable }), false)
+})

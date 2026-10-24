@@ -1,5 +1,5 @@
-// CI-only privileged GUI component actor. It loads the real source ASAR but
-// never enables its candidate channel; the private component receives test keys.
+// CI-only packaged GUI component actor with unchanged production modules. It
+// uses the real selected executable and normal peer policy, never a debug flag.
 const { app, shell } = require('electron')
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
@@ -7,7 +7,7 @@ const path = require('node:path')
 const { pathToFileURL } = require('node:url')
 const { Readable } = require('node:stream')
 if (process.env.GITHUB_ACTIONS !== 'true') throw new Error('An isolated CI user is required')
-const config = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'))
+const config = JSON.parse(fs.readFileSync(process.env.CRABOT_PAIRED_UPDATE_FIXTURE_CONFIG, 'utf8'))
 const profile = path.join(config.source.dataDir, 'desktop-profile')
 fs.mkdirSync(profile, { recursive: true, mode: 0o700 })
 app.setName('Crabot paired update source fixture')
@@ -29,6 +29,9 @@ void app.whenReady().then(async () => {
   const installation = require(path.join(archive, 'dist/bootstrap/scripts/lib/desktop-installation.cjs'))
   const pin = fs.readFileSync(path.join(archive, 'dist/desktop-release.json'), 'utf8')
   const verifyBinding = () => { installation.locatePinnedDesktopGui(config.source.resources, pin) }
+  const identity = require(path.join(archive, 'dist/bootstrap/scripts/lib/process-identity.cjs'))
+  const entry = require(path.join(config.source.coreRoot, 'scripts/lib/desktop-entry.cjs'))
+  assert.equal(entry.verifyDesktopEntry(identity.inspectProcess(process.pid), entry.loadDesktopEntry(config.source.coreRoot)), true)
   const entries = { home: config.home, platform: process.platform, env: process.env, shell }
   await registerInstallationEntries({ installRoot: config.source.root, installation_id: config.source.record.installation_id,
     selection: config.source.selection, coreRoot: config.source.coreRoot, guiRoot: config.source.guiRoot }, entries)
@@ -46,6 +49,7 @@ void app.whenReady().then(async () => {
     if (Date.now() >= deadline) throw new Error('Source activity did not become authoritatively idle')
     await new Promise(resolve => setTimeout(resolve, 500))
   }
+  const maintenance = await import(pathToFileURL(path.join(config.source.coreRoot, 'scripts/lib/version-maintenance.mjs')).href)
   driver = await createPairedUpdateHost({ coreRoot: config.source.coreRoot, dataRoot: config.source.dataDir, appVersion: config.source.selection.version,
     pinnedPublicKeys: [config.publicKey], verifyBinding, controller, entries,
     transport: () => ({ close: async () => {}, fetch: async (url, options) => {
@@ -60,11 +64,11 @@ void app.whenReady().then(async () => {
       assert.deepEqual(options.args, [])
       const selected = installation.readDesktopSelection(config.source.root)
       assert.equal(selected.executable, options.execPath); assert.equal(selected.selection.version, config.targetVersion)
-      write('handoff', { source_generation: state.generation, target: selected.selection, requests, ordinary_exits: ordinaryExits,
-        candidate_channel_enabled: false, target_fixture_debugger: true })
-      // Only this adapter adds a loopback debugger for read-only renderer/PID
-      // observation. Production handoff above supplied an empty argument list.
-      app.relaunch({ ...options, args: ['--remote-debugging-port=' + config.debugPort] })
+      const fence = maintenance.readVersionMaintenance(config.source.dataDir)
+      assert.equal(fence.phase, 'verifying'); assert.equal(fence.target_core.root, selected.coreRoot)
+      write('handoff', { source_generation: state.generation, target: selected.selection, requests, ordinary_exits: ordinaryExits, maintenance_id: fence.id,
+        candidate_channel_enabled: false, production_peer_policy_verified: true })
+      app.relaunch(options)
     } } })
   const candidate = await driver.check(() => {})
   assert.equal(candidate.kind, 'paired'); assert.equal(candidate.version, config.targetVersion)

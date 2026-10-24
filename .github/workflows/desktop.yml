@@ -30,6 +30,7 @@ on:
       - '.github/scripts/smoke-workspace-python-gate.mjs'
       - '.github/scripts/test-paired-release-intake.mjs'
       - '.github/scripts/verify-paired-update-host.mjs'
+      - '.github/scripts/build-paired-update-source.mjs'
       - '.github/workflows/desktop.yml'
   workflow_dispatch:
 
@@ -344,7 +345,7 @@ jobs:
         run: node .github/scripts/smoke-packaged-desktop.mjs ".desktop-build/安装 候选/paired" 2>&1 | tee .desktop-build/paired-boot.log
       - name: Signed paired update reaches ordinary target GUI and Core health
         if: runner.os != 'Linux' && steps.scope.outputs.full_runtime == 'true'
-        timeout-minutes: 15
+        timeout-minutes: 20
         run: node .github/scripts/verify-paired-update-host.mjs ".desktop-build/安装 候选/paired" 2>&1 | tee .desktop-build/paired-update-host.log
       - name: Ordinary CLI archive and actual upgrade command
         if: steps.scope.outputs.full_runtime == 'true'
