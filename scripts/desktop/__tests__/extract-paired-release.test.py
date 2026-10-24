@@ -35,6 +35,8 @@ class ExtractionTests(unittest.TestCase):
             with zipfile.ZipFile(file, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
                 for name, data, mode in entries:
                     info = zipfile.ZipInfo(name.replace('\x00', '!'))
+                    # ZipInfo normalizes os.sep on Windows; retain the hostile raw member.
+                    info.filename = name.replace('\x00', '!')
                     info.create_system = 3
                     info.external_attr = mode << 16
                     archive.writestr(info, data)
@@ -55,6 +57,9 @@ class ExtractionTests(unittest.TestCase):
                         archive.addfile(info, io.BytesIO(data))
         if kind == 'zip' and any('\x00' in name for name, _, _ in entries):
             file.write_bytes(file.read_bytes().replace(b'core/value!hidden', b'core/value\x00hidden'))
+        if kind == 'zip':
+            with zipfile.ZipFile(file) as archive:
+                self.assertEqual([item.orig_filename for item in archive.infolist()], [entry[0] for entry in entries])
         return file
 
     def extract(self, entries, kind='zip'):
@@ -93,6 +98,12 @@ class ExtractionTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.extract(self.base() + [('core/link', b'sub', stat.S_IFLNK | 0o777),
                                        ('core/link/file', b'bad', stat.S_IFREG | 0o600)])
+        self.assertEqual(list(self.output.iterdir()), [])
+
+    def test_windows_zip_normalization_does_not_hide_a_hostile_member(self):
+        with patch.object(zipfile.os, 'sep', '\\'):
+            with self.assertRaises(ValueError):
+                self.extract(self.base() + [('core\\escape', b'bad', stat.S_IFREG | 0o600)])
         self.assertEqual(list(self.output.iterdir()), [])
 
     @unittest.skipIf(os.name == 'nt', 'Windows paired payloads materialize links')
