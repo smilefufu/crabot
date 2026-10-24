@@ -31,7 +31,11 @@ async function fixture(t) {
     await fs.writeFile(path.join(core, 'core-release.json'), JSON.stringify({ schema_version: 1, version: pair.version,
       inventory_sha256: pair.core_id, platform: process.platform, arch: process.arch }))
   }
-  const select = pair => privateText(path.join(root, 'current-release.json'), JSON.stringify(pair) + '\n')
+  const select = async pair => {
+    const file = path.join(root, 'current-release.json'), temporary = file + '.tmp-' + randomUUID()
+    await privateText(temporary, JSON.stringify(pair) + '\n')
+    await fs.rename(temporary, file)
+  }
   await select(source)
   let authorized = true
   const context = { installRoot: root, installation_id, maintenance_id, source, target }

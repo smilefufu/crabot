@@ -69,7 +69,7 @@ test('Windows reads and writes the exact same background entry; OS-disabled star
   assert.equal((await f.startup.set(true)).enabled, true)
   const [, written] = f.calls.find(call => call[0] === 'set')
   assert.deepEqual(written, { openAtLogin: true, path: 'C:\\Users\\中文\\Crabot\\Crabot.exe', args: ['--background'], enabled: true, name: 'Crabot' })
-  assert.deepEqual(f.calls.find(call => call[0] === 'get')[1], { path: written.path, args: written.args })
+  assert.deepEqual(f.calls.find(call => call[0] === 'get')[1], { path: `"${written.path}"`, args: written.args })
   f.state({ executableWillLaunchAtLogin: true, launchItems: [{ name: 'Other entry', scope: 'user', path: written.path, args: [], enabled: true },
     { name: 'Crabot', scope: 'user', path: written.path, args: written.args, enabled: false }] })
   assert.equal((await f.startup.get()).enabled, false)
@@ -110,13 +110,13 @@ test('Windows named startup approval is authoritative when legacy openAtLogin is
   assert.equal((await f.startup.get()).enabled, true)
 })
 
-function windowsUpdate({ enabled = true, present = true, lostReply = false, path: initialPath = 'C:\\Crabot\\source.exe', args = ['--background'] } = {}) {
-  const source = 'C:\\Crabot\\source.exe', target = 'C:\\Crabot\\target.exe', writes = []
+function windowsUpdate({ enabled = true, present = true, lostReply = false, path: initialPath = 'C:\\Crabot source\\source.exe', args = ['--background'] } = {}) {
+  const source = 'C:\\Crabot source\\source.exe', target = 'C:\\Crabot target\\target.exe', writes = []
   let entry = present ? { name: 'Crabot', scope: 'user', path: initialPath, args, enabled } : null
   const app = {
     getLoginItemSettings: options => ({ openAtLogin: false, wasOpenedAtLogin: false, status: 'not-registered',
       executableWillLaunchAtLogin: !!entry?.enabled,
-      launchItems: entry && entry.path.toLowerCase() === options.path.toLowerCase() ? [{ ...entry }] : [] }),
+      launchItems: entry && entry.path.toLowerCase() === (options.path.startsWith('"') ? options.path.slice(1, -1) : options.path.split(' ')[0]).toLowerCase() ? [{ ...entry }] : [] }),
     setLoginItemSettings: () => { throw new Error('Updating must never rewrite StartupApproved through Electron') },
   }
   const retargetWindows = (prior, next) => {

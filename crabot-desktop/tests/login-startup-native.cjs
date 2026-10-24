@@ -29,7 +29,12 @@ void app.whenReady().then(async () => {
     claimed = true
     app.setLoginItemSettings({ name: 'Crabot', path: source, args: ['--background'], openAtLogin: true, enabled })
     const before = snapshot(), original = make(source), updated = make(target)
-    assert.equal(app.getLoginItemSettings({ path: source, args: ['--background'] }).openAtLogin, false)
+    assert.equal(app.getLoginItemSettings({ path: `"${source}"`, args: ['--background'] }).openAtLogin, false)
+    const lookup = app.getLoginItemSettings({ path: `"${source}"`, args: ['--background'] })
+    console.log('CRABOT_LOGIN_LOOKUP ' + JSON.stringify({ run_present: before[0] !== null, expected_enabled: enabled,
+      quoted_matches: lookup.launchItems.length, unquoted_matches: app.getLoginItemSettings({ path: source }).launchItems.length,
+      entries: lookup.launchItems.map(item => ({ named: item.name === 'Crabot', user: item.scope === 'user',
+        exact_program: item.path.toLowerCase() === source.toLowerCase(), background: JSON.stringify(item.args) === '["--background"]', enabled: item.enabled })) }))
     assert.equal((await original.get()).enabled, enabled)
     assert.equal(await original.captureForUpdate(), enabled ? 'on' : 'off')
     assert.equal((await updated.restoreForUpdate(enabled ? 'on' : 'off', source)).enabled, enabled)
@@ -56,7 +61,7 @@ void app.whenReady().then(async () => {
 function finish(code) {
   try {
     if (claimed) {
-      const items = [source, target].flatMap(executable => app.getLoginItemSettings({ path: executable }).launchItems)
+      const items = [source, target].flatMap(executable => app.getLoginItemSettings({ path: `"${executable}"` }).launchItems)
         .filter(item => item.name === 'Crabot' && item.scope === 'user')
       assert.equal(items.length, 1, 'Unknown login change: retain values instead of guessing cleanup')
       assert.ok([source, target].includes(items[0].path))

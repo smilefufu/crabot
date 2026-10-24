@@ -36,6 +36,11 @@ export class LoginStartup {
       return text
     } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error }
   }
+  private windowsSettings(executable: string) {
+    if (/["\r\n\0]/.test(executable)) throw new Error('应用路径不能用于登录启动。')
+    // Electron 44 parses lookup path as a command line; quote spaced paths.
+    return this.options.app.getLoginItemSettings({ path: `"${executable}"`, args: ['--background'] })
+  }
   async get(): Promise<StartupState> {
     const { platform, packaged, app, executable } = this.options
     if (!packaged) return { supported: false, enabled: false, approvalRequired: false }
@@ -44,7 +49,7 @@ export class LoginStartup {
       const lines = text?.split(/\r?\n/) ?? []
       return { supported: true, enabled: !!text && !lines.includes('Hidden=true') && !lines.includes('X-GNOME-Autostart-enabled=false'), approvalRequired: false }
     }
-    const state = app.getLoginItemSettings(platform === 'win32' ? { path: executable, args: ['--background'] } : {})
+    const state = platform === 'win32' ? this.windowsSettings(executable) : app.getLoginItemSettings()
     const approvalRequired = platform === 'darwin' && state.status === 'requires-approval'
     const ownWindowsEntry = platform !== 'win32' || state.launchItems.some(item => item.name === 'Crabot' && item.scope === 'user'
       && item.path.toLowerCase() === executable.toLowerCase() && JSON.stringify(item.args) === '["--background"]' && item.enabled)
@@ -69,7 +74,7 @@ export class LoginStartup {
     return state
   }
   private windowsEntry(executable: string) {
-    const state = this.options.app.getLoginItemSettings({ path: executable, args: ['--background'] })
+    const state = this.windowsSettings(executable)
     if (state.launchItems.length > 1 || state.launchItems.some(item => item.name !== 'Crabot' || item.scope !== 'user'
       || item.path.toLowerCase() !== executable.toLowerCase() || JSON.stringify(item.args) !== '["--background"]')) {
       throw new Error('已有登录启动项与当前应用不一致，已保留。请检查系统设置。')
