@@ -22,3 +22,15 @@ test('closing before the first check cancels initialization without starting any
   await assert.rejects(driver.check(() => {}), { name: 'AbortError' })
   await assert.rejects(driver.install({ kind: 'paired', version: '1.2.4' }), { name: 'AbortError' })
 })
+
+
+test('whole-update CI actors refuse a developer environment before reading an installation', async () => {
+  const { execFile } = await import('node:child_process'), { promisify } = await import('node:util')
+  const { fileURLToPath } = await import('node:url')
+  for (const file of ['../../.github/scripts/verify-paired-update-host.mjs', './fixtures/paired-update-source.cjs']) {
+    await assert.rejects(promisify(execFile)(process.execPath, [fileURLToPath(new URL(file, import.meta.url)), '/must-not-read-an-installation'],
+      { env: { ...process.env, GITHUB_ACTIONS: 'false' }, timeout: 10000, maxBuffer: 16384 }), error => {
+        assert.match(error.stderr, /isolated.*CI user/); assert.doesNotMatch(error.stderr, /ENOENT|EADDRINUSE/); return true
+      })
+  }
+})
