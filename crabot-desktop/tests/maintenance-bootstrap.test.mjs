@@ -38,6 +38,6 @@ test('the GUI ships its exact fixed maintenance bootstrap and loads it independe
   for (const key of ['ELECTRON_RUN_AS_NODE', 'NODE_PATH', 'NODE_OPTIONS', 'DATA_DIR', 'CRABOT_HOME', 'CRABOT_DEV', 'CRABOT_PORT_OFFSET']) delete env[key]
   await promisify(execFile)(require('electron'), [fileURLToPath(new URL('maintenance-bootstrap-probe.cjs', import.meta.url))], { cwd: root, env, timeout: 60000, maxBuffer: 65536 })
   const report = JSON.parse(await fs.readFile(path.join(root, 'report.json'), 'utf8'))
-  assert.deepEqual(report, { fixed_gui_bootstrap_loaded: true, initial_frame_loaded: true, initial_job_loaded: true, program_inventory_loaded: true, cli_entry_removal_loaded: true, native_helper_loaded: true, core_present: false, business_mm_started: false,
+  assert.deepEqual(report, { fixed_gui_bootstrap_loaded: true, initial_frame_loaded: true, initial_job_loaded: true, program_inventory_loaded: true, cli_entry_removal_loaded: true, native_helper_loaded: true, native_reference_query_loaded: true, core_present: false, business_mm_started: false,
     stop_called: false, host_executed: false, removal_published: false })
 })

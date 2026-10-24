@@ -19,8 +19,11 @@ async function main() {
   const cli = await import(pathToFileURL(path.join(root, 'app.asar/dist/installation-removal.js')).href); assert.equal(typeof cli.removeDesktopCliEntries, 'function')
   const native = (await load('process-identity.cjs')).default
   assert.equal(native.inspectProcess(process.pid).pid, process.pid)
+  assert.equal(typeof native.inspectProgramReferences, 'function')
+  const emptyReferences = await native.inspectProgramReferences({ roots: [], files: [] })
+  assert.equal(emptyReferences.complete, true); assert.equal(emptyReferences.incomplete, false); assert.deepEqual(emptyReferences.processes, []); assert.deepEqual(emptyReferences.unknown_pids, [])
   await assert.rejects(fs.lstat(path.join(root, 'crabot-core')), { code: 'ENOENT' })
-  const report = { fixed_gui_bootstrap_loaded: true, initial_frame_loaded: true, initial_job_loaded: true, program_inventory_loaded: true, cli_entry_removal_loaded: true, native_helper_loaded: true, core_present: false, business_mm_started: false,
+  const report = { fixed_gui_bootstrap_loaded: true, initial_frame_loaded: true, initial_job_loaded: true, program_inventory_loaded: true, cli_entry_removal_loaded: true, native_helper_loaded: true, native_reference_query_loaded: true, core_present: false, business_mm_started: false,
     stop_called: false, host_executed: false, removal_published: false }
   await fs.writeFile(path.join(root, 'report.json'), JSON.stringify(report), { flag: 'wx' })
 }
