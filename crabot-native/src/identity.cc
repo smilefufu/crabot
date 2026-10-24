@@ -634,6 +634,7 @@ static napi_value ReleaseLock(napi_env env, napi_callback_info info) {
 #include "local-pipe.h"
 #include "private-file.h"
 #include "user-path.h"
+#include "desktop-login.h"
 #include "install-filesystem.h"
 #include "directory-move.h"
 #include "file-move.h"
@@ -649,6 +650,7 @@ static napi_value ReleaseLock(napi_env env, napi_callback_info info) {
 static napi_value Initialize(napi_env env, napi_value exports) {
   napi_property_descriptor methods[] = {
 #ifdef _WIN32
+    {"retargetDesktopLoginStartup", nullptr, RetargetDesktopLogin, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"captureProcessTreeGeneration", nullptr, CaptureProcessTreeGeneration, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"createWorkspaceCopyJob", nullptr, CreateWorkspaceCopyJob, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"inspectWorkspaceCopyJob", nullptr, InspectWorkspaceCopyJob, nullptr, nullptr, nullptr, napi_default, nullptr},

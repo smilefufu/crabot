@@ -102,3 +102,91 @@ test('the actual Ubuntu desktop-entry launcher preserves a quoted executable pat
   }
   assert.equal(value, '--background')
 })
+
+
+test('Windows named startup approval is authoritative when legacy openAtLogin is false', async t => {
+  const executable = 'C:\\Crabot\\source.exe', f = await fixture(t, { platform: 'win32', executable })
+  f.state({ openAtLogin: false, launchItems: [{ name: 'Crabot', scope: 'user', path: executable, args: ['--background'], enabled: true }] })
+  assert.equal((await f.startup.get()).enabled, true)
+})
+
+function windowsUpdate({ enabled = true, present = true, lostReply = false, path: initialPath = 'C:\\Crabot\\source.exe', args = ['--background'] } = {}) {
+  const source = 'C:\\Crabot\\source.exe', target = 'C:\\Crabot\\target.exe', writes = []
+  let entry = present ? { name: 'Crabot', scope: 'user', path: initialPath, args, enabled } : null
+  const app = {
+    getLoginItemSettings: options => ({ openAtLogin: false, wasOpenedAtLogin: false, status: 'not-registered',
+      executableWillLaunchAtLogin: !!entry?.enabled,
+      launchItems: entry && entry.path.toLowerCase() === options.path.toLowerCase() ? [{ ...entry }] : [] }),
+    setLoginItemSettings: () => { throw new Error('Updating must never rewrite StartupApproved through Electron') },
+  }
+  const retargetWindows = (prior, next) => {
+    assert.equal(entry.path, prior); assert.deepEqual(entry.args, ['--background'])
+    writes.push({ source: prior, target: next }); entry = { ...entry, path: next }
+    if (lostReply) throw new Error('OS write reply lost')
+  }
+  const startup = executable => new LoginStartup({ platform: 'win32', executable, packaged: true, configHome: 'unused', app, retargetWindows })
+  return { source, target, original: startup(source), updated: startup(target), writes, entry: () => entry }
+}
+for (const enabled of [true, false]) test('Windows retargets only its known source and retains current OS approval: ' + enabled, async () => {
+  const f = windowsUpdate({ enabled }), intent = await f.original.captureForUpdate()
+  assert.equal(intent, enabled ? 'on' : 'off')
+  assert.equal((await f.updated.restoreForUpdate(intent, f.source)).enabled, enabled)
+  assert.equal(f.entry().path, f.target); assert.equal(f.writes.length, 1)
+  assert.deepEqual(f.writes[0], { source: f.source, target: f.target })
+  await f.updated.restoreForUpdate(intent, f.source)
+  assert.equal(f.writes.length, 1)
+})
+test('Windows reads back a completed OS write after a lost reply, and does not override later disablement', async () => {
+  const lost = windowsUpdate({ lostReply: true })
+  assert.equal((await lost.updated.restoreForUpdate('on', lost.source)).enabled, true)
+  assert.equal(lost.writes.length, 1)
+  const disabled = windowsUpdate({ enabled: false })
+  assert.equal((await disabled.updated.restoreForUpdate('on', disabled.source)).enabled, false)
+  assert.equal(disabled.entry().enabled, false)
+})
+test('absent or unrelated Windows startup cannot be created or overwritten by a saved on intent', async () => {
+  for (const options of [{ present: false }, { path: 'C:\\Other\\program.exe' }]) {
+    const f = windowsUpdate(options)
+    await assert.rejects(f.updated.restoreForUpdate('on', f.source))
+    assert.equal(f.writes.length, 0)
+    assert.equal((await f.updated.restoreForUpdate('off', f.source)).enabled, false)
+    assert.equal(f.writes.length, 0)
+  }
+  const custom = windowsUpdate({ args: ['--custom-command'] })
+  await assert.rejects(custom.original.captureForUpdate())
+  assert.equal(custom.writes.length, 0)
+})
+for (const disabled of [false, true]) test('Linux retargets the known entry without changing OS Hidden flags: ' + disabled, async t => {
+  const f = await fixture(t)
+  await f.startup.set(true)
+  if (disabled) await writeFile(f.file, (await readFile(f.file, 'utf8')) + 'Hidden=true\n')
+  const intent = await f.startup.captureForUpdate()
+  const target = new LoginStartup({ platform: 'linux', packaged: true, executable: '/opt/target Crabot/crabot', configHome: f.configHome, app: {} })
+  assert.equal((await target.restoreForUpdate(intent, '/opt/中文 Crabot/crabot')).enabled, !disabled)
+  assert.match(await readFile(f.file, 'utf8'), /^Exec=.*target Crabot/m)
+  assert.equal((await readFile(f.file, 'utf8')).includes('Hidden=true'), disabled)
+  const bytes = await readFile(f.file, 'utf8')
+  await target.restoreForUpdate(intent, '/opt/中文 Crabot/crabot')
+  assert.equal(await readFile(f.file, 'utf8'), bytes)
+})
+test('Linux off with no entry performs no registration; an on intent cannot resurrect a deleted entry', async t => {
+  const f = await fixture(t)
+  assert.equal((await f.startup.restoreForUpdate('off', '/opt/old Crabot/crabot')).enabled, false)
+  await assert.rejects(f.startup.restoreForUpdate('on', '/opt/old Crabot/crabot'))
+  await assert.rejects(readFile(f.file), { code: 'ENOENT' })
+})
+test('macOS target registers itself once, while pending system approval and off never register', async t => {
+  const f = await fixture(t, { platform: 'darwin' })
+  assert.equal(await f.startup.captureForUpdate(), 'off')
+  await f.startup.restoreForUpdate('on', '/opt/old-app')
+  assert.equal(f.calls.filter(call => call[0] === 'set').length, 1)
+  await f.startup.restoreForUpdate('on', '/opt/old-app')
+  assert.equal(f.calls.filter(call => call[0] === 'set').length, 1)
+  f.state({ openAtLogin: false, status: 'requires-approval' })
+  assert.equal((await f.startup.restoreForUpdate('on', '/opt/old-app')).approvalRequired, true)
+  assert.equal(f.calls.filter(call => call[0] === 'set').length, 1)
+  f.state({ openAtLogin: false, status: 'not-registered' })
+  await f.startup.restoreForUpdate('off', '/opt/old-app')
+  await f.startup.restoreForUpdate('approval_required', '/opt/old-app')
+  assert.equal(f.calls.filter(call => call[0] === 'set').length, 1)
+})

@@ -26,7 +26,10 @@ test('actual Electron host shares its real core with CLI and distinguishes hide,
   const temporary = await mkdtemp(path.join(tmpdir(), 'Crabot 用户 '))
   const data = path.join(temporary, '实例 数据') // Main creates its private OS ACL/mode.
   const node = path.join(root, process.platform === 'win32' ? '.product-runtime/node/node.exe' : '.product-runtime/node/bin/node')
-  const env = { ...process.env, DATA_DIR: data, CRABOT_FULL_HOST_FIXTURE: '1' }
+  // This source-host fixture validates offline lifecycle and a loopback model.
+  // Deny remote Git transport rather than letting source version checks block
+  // startup on GitHub; real Git still reports unavailable, with no fake success.
+  const env = { ...process.env, DATA_DIR: data, CRABOT_FULL_HOST_FIXTURE: '1', GIT_ALLOW_PROTOCOL: 'file' }
   delete env.ELECTRON_RUN_AS_NODE; delete env.CRABOT_DEV; delete env.CRABOT_PORT_OFFSET
   const children = [], controls = []
   t.after(async () => { for (const { server, sockets } of controls) { for (const socket of sockets) socket.destroy(); await new Promise(resolve => server.close(resolve)) } })
@@ -200,7 +203,7 @@ test('actual Electron host shares its real core with CLI and distinguishes hide,
     gui.send('quit_confirm'); assert.equal((await gui.exited(true)).code, 0)
     assert.equal(inspectInstance(data).state, 'stopped')
     console.log('CRABOT_FULL_HOST_RESULT ' + JSON.stringify({ platform: process.platform, arch: process.arch, native_bootstrap: true,
-      cli_gui_same_instance: true, close_keeps_core: true, gui_crash_keeps_core: true, cli_stop_stays_stopped: true, cli_start_reconnects_gui: true, relaunch_autostarts: true, quit_cancel_preserves_core: true, quit_stops_core: true }))
+      source_git_network_denied: true, cli_gui_same_instance: true, close_keeps_core: true, gui_crash_keeps_core: true, cli_stop_stays_stopped: true, cli_start_reconnects_gui: true, relaunch_autostarts: true, quit_cancel_preserves_core: true, quit_stops_core: true }))
   } catch (error) {
     console.log('CRABOT_FULL_HOST_MODEL_COUNTERS ' + JSON.stringify(provider.evidence))
     // Disposable CI data only; preserve the bootstrap cause before cleanup.
