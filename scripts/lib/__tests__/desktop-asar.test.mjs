@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os'
 import { createRequire } from 'node:module'
 import vm from 'node:vm'
 import { verifyDesktopAsar, verifyInstallerAsar } from '../desktop-asar.mjs'
+import { desktopMaintenanceBootstrap } from '../desktop-maintenance-bootstrap.mjs'
 const desktopRequire = createRequire(new URL('../../../crabot-desktop/package.json', import.meta.url))
 const builderRequire = createRequire(createRequire(desktopRequire.resolve('electron-builder')).resolve('app-builder-lib/package.json'))
 const asar = builderRequire('@electron/asar')
@@ -19,6 +20,7 @@ async function fixture(t, missingTray = false, installer = false, pair) {
   for (const file of ['dist/ubuntu-process.js', 'dist/ubuntu-program-probe.js', 'dist/ubuntu-update.js', 'dist/paired-update.js', 'dist/release-intake.js', 'dist/release-signatures.js', 'dist/release-download.js', 'dist/release-transport.js', 'dist/bootstrap/scripts/lib/desktop-management.cjs', 'dist/bootstrap/scripts/desktop/extract-paired-release.py']) files[file] = 'trusted release fixture'
   if (installer) for (const file of ['dist/installer-main.js', 'dist/installer-preload.cjs', 'dist/installation-progress-window.js', 'dist/installation-entries.js',
     'dist/bootstrap/scripts/lib/desktop-payload.mjs', 'dist/bootstrap/scripts/lib/desktop-preparation-files.mjs', 'dist/bootstrap/scripts/lib/desktop-repair.mjs', 'dist/bootstrap/scripts/lib/desktop-program-proof.mjs', 'dist/bootstrap/scripts/lib/desktop-removal-proof.mjs', 'dist/bootstrap/scripts/lib/desktop-removal-host.mjs', 'dist/bootstrap/scripts/lib/module-process-start.cjs', 'dist/bootstrap/scripts/lib/instance-controller.mjs', 'dist/bootstrap/scripts/lib/core-release.mjs', 'dist/bootstrap/scripts/lib/physical-fs.cjs']) files[file] = 'installer fixture'
+  for (const file of desktopMaintenanceBootstrap) files['dist/bootstrap/' + file] = 'fixed maintenance fixture'
   if (pair) files['dist/desktop-release.json'] = pair.text
   if (missingTray) delete files['dist/assets/tray.png']
   for (const [file, bytes] of Object.entries(files)) {
@@ -105,4 +107,14 @@ for (const member of ['desktop-preparation-files.mjs', 'desktop-repair.mjs', 'de
     return asar.statFile(file, name)
   } }
   assert.throws(() => verifyInstallerAsar(missing, archive), /missing independent installation component/)
+})
+
+for (const member of desktopMaintenanceBootstrap) test('GUI and installer ASAR require the fixed independent bootstrap: ' + member, async t => {
+  const archive = await fixture(t, false, true)
+  const missing = { statFile: (file, name) => {
+    if (name === path.normalize('dist/bootstrap/' + member)) throw new Error('missing fixed maintenance dependency')
+    return asar.statFile(file, name)
+  } }
+  assert.throws(() => verifyDesktopAsar(missing, archive), /missing fixed maintenance dependency/)
+  assert.throws(() => verifyInstallerAsar(missing, archive), /missing fixed maintenance dependency/)
 })

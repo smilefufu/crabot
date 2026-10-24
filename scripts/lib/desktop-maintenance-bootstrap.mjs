@@ -1,0 +1,28 @@
+// Fixed protected GUI code, shared by staging and ASAR checks. Dependencies used
+// by these maintenance entries must load without the selected Core package.
+export const desktopMaintenanceBootstrap = Object.freeze([
+  'scripts/lib/cli-lock.mjs',
+  'scripts/lib/core-release.mjs',
+  'scripts/lib/desktop-asar.mjs',
+  'scripts/lib/desktop-installation.cjs',
+  'scripts/lib/desktop-maintenance-bootstrap.mjs',
+  'scripts/lib/desktop-management.cjs',
+  'scripts/lib/desktop-payload.mjs',
+  'scripts/lib/desktop-preparation-files.mjs',
+  'scripts/lib/desktop-program-proof.mjs',
+  'scripts/lib/desktop-removal-host.mjs',
+  'scripts/lib/desktop-removal-proof.mjs',
+  'scripts/lib/desktop-removal-record.cjs',
+  'scripts/lib/instance-controller.mjs',
+  'scripts/lib/instance-runtime-record.cjs',
+  'scripts/lib/instance-runtime.mjs',
+  'scripts/lib/module-process-start.cjs',
+  'scripts/lib/owned-process-tree.cjs',
+  'scripts/lib/physical-fs.cjs',
+  'scripts/lib/pid.mjs',
+  'scripts/lib/preflight-state.cjs',
+  'scripts/lib/process-identity.cjs',
+  'scripts/lib/product-runtime.cjs',
+  'scripts/lib/supervisor-shutdown.mjs',
+  'scripts/lib/workspace-maintenance.cjs',
+])
