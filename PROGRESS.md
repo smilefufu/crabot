@@ -1,5 +1,10 @@
 # Crabot 项目进度
 
+### Gemini 未加载工具恢复：回归通过，待 PR 审查
+
+- 按已确认 [spec](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/specs/2026-10-24-gemini-unloaded-tool-recovery-design.md)，将有工具声明时完整的未知调用交给 Engine，返回 TOOL_NOT_LOADED/TOOL_UNAVAILABLE；不自动加载或执行，同批加载下一轮才可用。无工具、格式错误、不完整参数及重复 id 仍拒绝，签名与错误结果原位配对。
+- 同网关/模型的近似重放已首次复现 fetch_image 未加载错误（124062 输入/65 输出 tokens）；本次回归只用脱敏合成 SSE，无额外生成或现场部署。新增回归先在旧实现复现 5 项失败，最小修复后 Gemini、历史、Engine 编排和 Manager 目录 5 文件回归及 Agent 构建通过。
+
 ### Gemini 原生兼容：实现与真实网关验证通过，本机代码已升级
 
 - 按已确认 [spec](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/specs/2026-10-23-gemini-native-compatibility-design.md) 实现原生 GeminiAdapter：流式文本、图片输入、函数调用/结果、thoughtSignature 原位历史与 Manager/builtin 存储恢复、思考映射及用量。Admin 改为原生目录/预检，手动 Gemini 可同步模型；30 秒有界操作，分页失败或空目录保留旧值。
