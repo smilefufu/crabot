@@ -13,7 +13,8 @@ import { UpdateConfigSchema, UpdateInfoSchema, verifyUpdateDownload } from './up
 // A candidate marker always disables the channel, even if config is copied in.
 export async function createUpdateDriver(options: { resources: string; cacheRoot: string; packaged: boolean;
   beginExit: () => () => void }): Promise<UpdateDriver | null> {
-  if (!options.packaged || existsSync(path.join(options.resources, 'candidate-only.json'))) return null
+  if (!options.packaged || existsSync(new URL('./candidate-only.json', import.meta.url))
+    || existsSync(path.join(options.resources, 'candidate-only.json'))) return null
   // Complete-root updates use the paired signed-archive channel. Until that
   // channel has pinned release keys, never invoke legacy NSIS/deb over this root.
   if (existsSync(path.join(options.resources, 'desktop-release.json'))) return null

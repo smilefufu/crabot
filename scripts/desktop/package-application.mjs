@@ -52,6 +52,8 @@ if (paired) {
   await fs.writeFile(path.join(pairedCore, 'desktop-host.json'), JSON.stringify({ schema_version: 2, platform: process.platform, arch: process.arch }) + '\n')
 }
 await fs.cp(path.join(root, 'crabot-desktop/dist'), path.join(appDir, 'dist'), { recursive: true })
+const candidateMarker = JSON.stringify({ ...release, candidate_only: true }) + '\n'
+await fs.writeFile(path.join(appDir, 'dist/candidate-only.json'), candidateMarker, { flag: 'wx' })
 if (paired) await fs.writeFile(path.join(appDir, 'dist/desktop-release.json'), JSON.stringify(selection) + '\n')
 await fs.mkdir(path.join(projectDir, 'crabot-client'))
 for (const file of ['package.json', 'pnpm-lock.yaml']) await fs.copyFile(path.join(root, 'crabot-client', file), path.join(projectDir, 'crabot-client', file))
@@ -110,7 +112,7 @@ const configuration = {
       await fs.cp(core, packagedCore, { recursive: true, verbatimSymlinks: true, mode: constants.COPYFILE_FICLONE })
       await fs.writeFile(path.join(packagedCore, 'desktop-host.json'), JSON.stringify({ schema_version: 1, platform: process.platform, arch: process.arch }) + '\n')
     }
-    await fs.writeFile(path.join(resources, 'candidate-only.json'), JSON.stringify({ ...release, candidate_only: true }) + '\n')
+    await fs.writeFile(path.join(resources, 'candidate-only.json'), candidateMarker)
     product.loadProductRuntime(packagedCore, { required: true, full: true })
     scrapling.loadRuntime(packagedCore, { full: true })
     computerUse.loadRuntime(packagedCore, { full: true })
@@ -129,6 +131,9 @@ await verifyCoreRelease(paired ? pairedCore : path.join(packagedResources, 'core
 const builderRequire = createRequire(createRequire(require.resolve('electron-builder')).resolve('app-builder-lib/package.json'))
 const asar = builderRequire('@electron/asar')
 verifyDesktopAsar(asar, path.join(packagedResources, 'app.asar'), process.platform, paired ? selection : undefined)
+const markerPath = path.normalize('dist/candidate-only.json'), marker = asar.statFile(path.join(packagedResources, 'app.asar'), markerPath, false)
+if (marker.unpacked || 'link' in marker || marker.size !== Buffer.byteLength(candidateMarker)
+  || asar.extractFile(path.join(packagedResources, 'app.asar'), markerPath, false).toString('utf8') !== candidateMarker) throw new Error('Candidate channel marker must remain inside protected ASAR bytes')
 
 const executable = process.platform === 'darwin' ? path.join(packagedResources, '../MacOS/Crabot')
   : path.join(packagedResources, '..', process.platform === 'win32' ? 'Crabot.exe' : 'crabot-desktop')

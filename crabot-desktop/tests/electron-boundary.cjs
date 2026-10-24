@@ -133,6 +133,20 @@ async function main() {
   await fs.writeFile(path.join(candidateResources, 'desktop-release.json'), '{}')
   assert.equal(await createUpdateDriver({ resources: candidateResources, cacheRoot: path.join(root, 'updater-cache'), packaged: true,
     beginExit: () => { throw new Error('Paired roots must never use a legacy package installer') } }), null)
+  // Candidate status must also be inside protected program bytes. A copied
+  // update config or a missing outer Resources marker cannot enable a candidate.
+  phase('protected-candidate')
+  const asar = require('@electron/asar'), candidate = path.join(root, 'protected-candidate'), input = path.join(candidate, 'input')
+  await fs.mkdir(input, { recursive: true })
+  await fs.writeFile(path.join(input, 'package.json'), '{"type":"module"}')
+  await fs.writeFile(path.join(input, 'candidate-only.json'), '{"candidate_only":true}')
+  for (const file of ['update-driver.js', 'update-package.js']) await fs.copyFile(path.join(__dirname, '../dist', file), path.join(input, file))
+  await fs.symlink(path.resolve(__dirname, '../node_modules'), path.join(candidate, 'node_modules'), 'junction')
+  const archive = path.join(candidate, 'app.asar'); await asar.createPackage(input, archive)
+  const protectedDriver = await import(pathToFileURL(path.join(archive, 'update-driver.js')).href)
+  const emptyResources = path.join(candidate, 'resources'); await fs.mkdir(emptyResources)
+  assert.equal(await protectedDriver.createUpdateDriver({ resources: emptyResources, cacheRoot: path.join(candidate, 'cache'), packaged: true,
+    beginExit: () => { throw new Error('Protected candidate must never install') } }), null)
   phase('release-transport')
   const { createDesktopReleaseTransport } = await module('release-transport.js')
   await privateSession.cookies.set({ url: origin, name: 'admin-fixture', value: 'must-not-send' })
