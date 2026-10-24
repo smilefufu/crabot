@@ -16,10 +16,13 @@ import { workspaceMaintenancePending } from './workspace-maintenance.cjs'
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b)
 const inside = (parent, child) => { const relative = path.relative(parent, child); return !relative || relative !== '..' && !relative.startsWith('..' + path.sep) && !path.isAbsolute(relative) }
 const generation = stat => [stat.dev, stat.ino, stat.mode, stat.uid, stat.gid].join(':')
-export function createDesktopRemovalSourceExitVerifier({ installRoot, prepared, child }) {
+function createSourceExitVerifier({ installRoot, prepared, child }, existing) {
   const own = installation.readDesktopInstallation(installRoot), source = identity.inspectProcess(process.pid)
   const proofText = JSON.stringify(prepared.proof) + '\n', proof = JSON.parse(proofText)
   const digest = createHash('sha256').update(proofText).digest('hex')
+  const phases = { preparing: 'stopping', stopping: 'stopping', removing: 'removing', completed: 'completed' }
+  const expectedPhase = existing ? phases[prepared.record?.phase] : 'stopping'
+  const expectedRecord = existing && prepared.record ? { ...structuredClone(prepared.record), phase: expectedPhase } : null
   const directory = prepared.directory, guiRoot = prepared.guiRoot, executable = prepared.executable
   const expectedExecutable = path.join(guiRoot, process.platform === 'darwin' ? 'Crabot.app/Contents/MacOS/Crabot' : 'Crabot.exe')
   const originalData = generation(physical.lstatSync(own.dataDir, { bigint: true }))
@@ -30,6 +33,7 @@ export function createDesktopRemovalSourceExitVerifier({ installRoot, prepared, 
   const current = () => {
     const actual = identity.inspectProcess(child.pid), self = identity.inspectProcess(process.pid)
     const record = readDesktopRemoval(own.root)
+    if (!expectedPhase || (existing ? !expectedRecord || !same(record, expectedRecord) : Object.hasOwn(prepared, 'record'))) return false
     if (!host || !source || !child.connected || child.exitCode !== null || child.signalCode !== null
       || !identity.sameProcess(source, self) || !identity.sameProcess(host, actual)
       || actual.parent !== source.pid || actual.owner !== own.record.owner || !processBirthAtLeast(actual.started, source.started)
@@ -43,7 +47,7 @@ export function createDesktopRemovalSourceExitVerifier({ installRoot, prepared, 
       || generation(physical.lstatSync(own.dataDir, { bigint: true })) !== originalData
       || !same(installation.readDesktopInstallation(own.root).record, own.record)
       || !same(installation.readDesktopPairReference(own.root).selection, proof.source_selection)
-      || !record || record.phase !== 'stopping' || record.installation_id !== proof.installation_id
+      || !record || record.phase !== expectedPhase || record.installation_id !== proof.installation_id
       || record.operation_id !== proof.operation_id || record.proof_sha256 !== digest || !same(record.source_selection, proof.source_selection)
       || inspectInstance(own.dataDir).state !== 'stopped' || workspaceMaintenancePending(own.dataDir)) return false
     for (const file of [path.join(own.root, '.desktop-installing.json'), path.join(own.dataDir, 'desktop-maintenance.json')]) {
@@ -70,3 +74,7 @@ export function createDesktopRemovalSourceExitVerifier({ installRoot, prepared, 
     } catch { return false }
   }
 }
+
+// Role choice is fixed by the trusted source, never accepted from an IPC field.
+export function createDesktopRemovalSourceExitVerifier(options) { return createSourceExitVerifier(options, false) }
+export function createExistingRemovalSourceExitVerifier(options) { return createSourceExitVerifier(options, true) }

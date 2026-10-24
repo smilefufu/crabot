@@ -42,7 +42,7 @@ try {
       assert.equal(typeof reader.default.readDesktopRemoval, 'function');
       assert.equal(typeof proof.captureDesktopRemovalProof, 'function'); assert.equal(typeof proof.readDesktopRemovalProof, 'function');
       assert.equal(typeof job.beginInitialDesktopRemoval, 'function'); assert.equal(typeof job.resumeDesktopRemoval, 'function'); assert.equal(typeof cli.removeDesktopCliEntries, 'function'); assert.equal(typeof programs.inspectDesktopRemovalPrograms, 'function');
-      const sourceExit = await load(10); assert.equal(typeof sourceExit.createDesktopRemovalSourceExitVerifier, 'function');
+      const sourceExit = await load(10); assert.equal(typeof sourceExit.createDesktopRemovalSourceExitVerifier, 'function'); assert.equal(typeof sourceExit.createExistingRemovalSourceExitVerifier, 'function');
       const native = await load(9); assert.equal(typeof native.default.inspectProgramReferences, 'function');
       const observed = await native.default.inspectProgramReferences({ roots: [], files: [] }); assert.equal(observed.complete, true); assert.deepEqual(observed.processes, []);
       assert.equal(typeof controller.stopInstance, 'function'); assert.equal(typeof host.prepareDesktopRemovalGui, 'function'); assert.equal(typeof host.prepareExistingDesktopRemovalGui, 'function');

@@ -7,6 +7,7 @@ const { spawn } = require('node:child_process')
 const { once } = require('node:events')
 const cfg = JSON.parse(fs.readFileSync(process.env.CRABOT_REMOVAL_FRAME_CONFIG, 'utf8'))
 const host = process.argv.includes('--fixture-removal-host')
+const sourceExitMode = ['publish-source-exit', 'resume-lease-source-exit'].includes(cfg.mode)
 const profile = host ? path.resolve(process.resourcesPath, process.platform === 'darwin' ? '../../../..' : '../..', 'frame-profile') : path.join(cfg.root, 'data/desktop-profile')
 fs.mkdirSync(profile, { recursive: true, mode: 0o700 }); app.setPath('userData', profile)
 const load = name => import(pathToFileURL(path.join(__dirname, 'bootstrap/scripts/lib', name)).href)
@@ -108,6 +109,7 @@ async function main() {
         try {
           const first = lease.stop(); assert.equal(first, lease.stop()); await first
           result.phase_after_stop = (await lease.current()).phase
+          if (sourceExitMode) { await lease.exitSource(); result.sourceExited = true }
           if (cfg.mode === 'resume-lease-cancel') { await lease.cancel(); result.lease_cancelled = true }
           else if (['resume-lease-removing', 'resume-lease-completed', 'resume-lease-core-missing'].includes(cfg.mode)) {
             await assert.rejects(lease.cancel(), { code: 'CRABOT_DESKTOP_REMOVAL' }); result.lease_cancel_rejected = true
@@ -116,7 +118,7 @@ async function main() {
       }
     } else if (cfg.mode.startsWith('publish-')) { result = await publication(); } else { const { inspectInitialRemovalGuiHost } = await load('desktop-removal-frame.mjs'); const frame = await inspectInitialRemovalGuiHost({ installRoot: cfg.inspectRoot || cfg.root, operationId: cfg.operationId }); result = { accepted: true, frame } } }
     catch (error) { result = { accepted: false, code: error.code, stage: error.stage, message: String(error.message).slice(0, 256) } }
-    if (['publish-source-exit', 'publish-source-disconnect'].includes(cfg.mode)) {
+    if (sourceExitMode || cfg.mode === 'publish-source-disconnect') {
       fs.writeFileSync(cfg.resultFile, JSON.stringify(result)); if (!result.accepted && process.connected) await send(result)
     }
     else await send(result)
@@ -135,9 +137,9 @@ async function main() {
       const reference = require('./bootstrap/scripts/lib/desktop-installation.cjs').readDesktopPairReference(cfg.root)
       fs.rmSync(path.join(cfg.root, 'releases', reference.selection.core_id), { recursive: true })
     }
-    if (['resume-lease-stopping', 'resume-lease-removing', 'resume-lease-completed'].includes(cfg.mode)) {
+    if (['resume-lease-stopping', 'resume-lease-removing', 'resume-lease-completed', 'resume-lease-source-exit'].includes(cfg.mode)) {
       const fence = path.join(cfg.root, '.desktop-removal.json'), current = JSON.parse(fs.readFileSync(fence, 'utf8'))
-      await (await load('desktop-preparation-files.mjs')).privateJson(fence, { ...current, phase: cfg.mode.slice('resume-lease-'.length) }, true)
+      await (await load('desktop-preparation-files.mjs')).privateJson(fence, { ...current, phase: cfg.mode === 'resume-lease-source-exit' ? 'removing' : cfg.mode.slice('resume-lease-'.length) }, true)
     }
     prepared = await backend.prepareExistingDesktopRemovalGui({ installRoot: cfg.root, operationId: cfg.operationId })
     if (cfg.mode === 'resume-lease-busy') {
@@ -149,9 +151,10 @@ async function main() {
   if (['changed-copy', 'resume-changed-copy'].includes(cfg.mode)) fs.appendFileSync(path.join(prepared.guiRoot, process.platform === 'darwin' ? 'Crabot.app/Contents/Resources/desktop-release.json' : 'resources/desktop-release.json'), ' ')
   child = spawn(prepared.executable, ['--fixture-removal-host'], { env: process.env, detached: true, stdio: ['ignore', 'ignore', 'ignore', 'ipc'] })
   const native = require('./bootstrap/scripts/lib/process-identity.cjs'), childIdentity = native.inspectProcess(child.pid)
-  if (cfg.mode === 'publish-source-exit') await send({ handoff: true, host: childIdentity, directory: prepared.directory })
-  const { createDesktopRemovalSourceExitVerifier } = await load('desktop-removal-source.mjs')
-  const verifySourceExit = createDesktopRemovalSourceExitVerifier({ installRoot: cfg.root, prepared, child })
+  if (sourceExitMode) await send({ handoff: true, host: childIdentity, directory: prepared.directory })
+  const { createDesktopRemovalSourceExitVerifier, createExistingRemovalSourceExitVerifier } = await load('desktop-removal-source.mjs')
+  const createVerifier = cfg.mode.startsWith('resume-') ? createExistingRemovalSourceExitVerifier : createDesktopRemovalSourceExitVerifier
+  const verifySourceExit = createVerifier({ installRoot: cfg.root, prepared, child })
   child.on('message', message => {
     if (cfg.mode === 'publish-source-verifier' && message?.kind === 'desktop_removal_source_exit') {
       void (async () => {
@@ -188,11 +191,19 @@ async function main() {
       })().catch(error => { console.error(error); child.send({ kind: 'source-verifier-checked', accepted: false }) })
       return
     }
-    if (!['publish-source-exit', 'publish-source-disconnect'].includes(cfg.mode) || message?.kind !== 'desktop_removal_source_exit' || message.operation_id !== cfg.operationId
+    if (!(sourceExitMode || cfg.mode === 'publish-source-disconnect') || message?.kind !== 'desktop_removal_source_exit' || message.operation_id !== cfg.operationId
       || message.installation_id !== prepared.proof.installation_id || JSON.stringify(message.source_selection) !== JSON.stringify(prepared.proof.source_selection)
       || !native.sameProcess(childIdentity, native.inspectProcess(child.pid))) return
-    void verifySourceExit(message).then(accepted => {
+    void verifySourceExit(message).then(async accepted => {
       if (!accepted) return
+      if (cfg.mode === 'resume-lease-source-exit') {
+        const assert = require('node:assert/strict'), options = { installRoot: cfg.root, prepared, child }
+        assert.equal(await createDesktopRemovalSourceExitVerifier(options)(message), false)
+        for (const phase of ['preparing', 'completed']) {
+          const wrong = createExistingRemovalSourceExitVerifier({ ...options, prepared: { ...prepared, record: { ...prepared.record, phase } } })
+          assert.equal(await wrong(message), false)
+        }
+      }
       if (cfg.mode === 'publish-source-disconnect') child.disconnect()
       else { clearTimeout(timer); app.exit(0) }
     })
