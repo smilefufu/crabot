@@ -6,6 +6,7 @@ export const desktopMaintenanceBootstrap = Object.freeze([
   'scripts/lib/desktop-asar.mjs',
   'scripts/lib/desktop-entry.cjs',
   'scripts/lib/desktop-removal-frame.mjs',
+  'scripts/lib/desktop-removal-job.mjs',
   'scripts/lib/desktop-installation.cjs',
   'scripts/lib/desktop-maintenance-bootstrap.mjs',
   'scripts/lib/desktop-management.cjs',

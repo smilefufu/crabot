@@ -43,6 +43,7 @@ for (const [file, expected] of [
   ['.github/scripts/check-paired-update-report.test.mjs', true],
   ['scripts/lib/desktop-removal-host.mjs', true],
   ['scripts/lib/desktop-removal-frame.mjs', true],
+  ['scripts/lib/desktop-removal-job.mjs', true],
   ['crabot-desktop/tests/removal-frame.test.mjs', true],
   ['crabot-desktop/tests/fixtures/removal-frame-actor.cjs', true],
   ['scripts/lib/desktop-maintenance-bootstrap.mjs', true],

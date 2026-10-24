@@ -1,5 +1,5 @@
 // OS-owned lock: crash closes the handle; the persistent metadata file is never renamed/unlinked.
-import { mkdirSync, readFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, lstatSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import native from './process-identity.cjs'
@@ -9,20 +9,29 @@ import workspace from './workspace-maintenance.cjs'
 const handles = new Map()
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
 
-async function acquire(dataDir, command, waitMs, recoveryId, workspaceAdmission = workspace.assertWorkspaceExecutionAllowed) {
+async function acquire(dataDir, command, waitMs, recoveryId, workspaceAdmission = workspace.assertWorkspaceExecutionAllowed, existingOnly = false) {
   workspaceAdmission(dataDir)
-  mkdirSync(dataDir, { recursive: true })
+  const directoryIdentity = () => {
+    const stat = lstatSync(dataDir, { bigint: true })
+    if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error('maintenance directory is not an existing ordinary directory')
+    return [stat.dev, stat.ino, stat.mode, stat.uid, stat.gid].join(':')
+  }
+  if (!existingOnly) mkdirSync(dataDir, { recursive: true })
+  const original = existingOnly ? directoryIdentity() : undefined
+  const assertDirectory = () => {
+    if (existingOnly && directoryIdentity() !== original) throw new Error('maintenance directory changed while acquiring its lock')
+  }
   const path = resolve(dataDir, 'cli.lock')
   const deadline = Date.now() + waitMs
   const token = randomUUID()
   const owner = native.inspectProcess(process.pid)
   for (;;) {
-    workspaceAdmission(dataDir)
+    assertDirectory(); workspaceAdmission(dataDir)
     let preparationBusy
     if (!handles.has(path)) {
       const handle = native.tryFileLock(path, JSON.stringify({ pid: process.pid, command, started_at: new Date().toISOString(), owner, token }))
       if (handle) {
-        try { workspaceAdmission(dataDir); preflight.assertSettled(dataDir, recoveryId) }
+        try { assertDirectory(); workspaceAdmission(dataDir); preflight.assertSettled(dataDir, recoveryId) }
         catch (error) {
           native.releaseFileLock(handle)
           if (error.code !== 'CRABOT_PREFLIGHT_BUSY') throw error
@@ -37,6 +46,11 @@ async function acquire(dataDir, command, waitMs, recoveryId, workspaceAdmission 
 }
 
 export function acquireCliLock(dataDir, command, waitMs = 5000) { return acquire(dataDir, command, waitMs) }
+
+// Maintenance on an already verified installation must not initialize missing data.
+export function acquireExistingCliLock(dataDir, command, waitMs = 5000) {
+  return acquire(dataDir, command, waitMs, undefined, workspace.assertWorkspaceExecutionAllowed, true)
+}
 
 // Only explicit startup/recovery can replace a stopped orphan-check receipt.
 // This does not authorize retrying schema migrations or other business work.

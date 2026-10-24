@@ -9,7 +9,7 @@ import installation from './desktop-installation.cjs'
 import { captureDesktopRemovalProof } from './desktop-removal-proof.mjs'
 import { readOriginalDesktopPayload } from './desktop-program-proof.mjs'
 import { verifyDesktopGui } from './desktop-payload.mjs'
-import { acquireCliLock, releaseCliLock, cliLockToken } from './cli-lock.mjs'
+import { acquireExistingCliLock, releaseCliLock, cliLockToken } from './cli-lock.mjs'
 import { workspaceMaintenancePending } from './workspace-maintenance.cjs'
 const { promises: fs, constants } = physicalFs
 const fail = () => { throw Object.assign(new Error('卸载维护程序尚未准备完成，原应用与用户数据已保留。'), { code: 'CRABOT_DESKTOP_REMOVAL' }) }
@@ -21,7 +21,7 @@ async function versionMaintenancePending(dataDir) {
 }
 export async function prepareDesktopRemovalGui({ installRoot, operationId, signal, progress = () => {} }) {
   if (process.platform !== 'darwin' && process.platform !== 'win32') fail()
-  const own = installation.readDesktopSelection(installRoot), lock = await acquireCliLock(own.root, 'prepare-removal-host'), token = cliLockToken(lock)
+  const own = installation.readDesktopSelection(installRoot), lock = await acquireExistingCliLock(own.root, 'prepare-removal-host'), token = cliLockToken(lock)
   let directory, createdIdentity
   try {
     const proof = await captureDesktopRemovalProof(own.root, operationId, { signal })

@@ -15,7 +15,7 @@ const { promises: fs } = physicalFs
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b)
 const directoryIdentity = stat => [stat.dev, stat.ino, stat.mode, stat.uid, stat.gid].join(':')
 const inside = (parent, child) => { const relative = path.relative(parent, child); return !relative || relative !== '..' && !relative.startsWith('..' + path.sep) && !path.isAbsolute(relative) }
-export async function inspectInitialRemovalGuiHost({ installRoot, operationId, signal }) {
+export async function captureInitialRemovalGuiHost({ installRoot, operationId, signal }) {
   let stage = 'transport'
   const fail = () => { throw Object.assign(new Error('卸载维护宿主的安装或进程交接无法核验，原程序与数据已保留。'), { code: 'CRABOT_DESKTOP_REMOVAL', stage }) }
   try {
@@ -49,7 +49,12 @@ export async function inspectInitialRemovalGuiHost({ installRoot, operationId, s
       || !entry.verifyDesktopEntry(parent, policy) || currentDataIdentity !== dataIdentity
       || management.requirePrivateDataRoot(directory) !== directory || currentHostIdentity !== hostIdentity) fail()
     signal?.throwIfAborted()
-    return { installation_id: own.record.installation_id, operation_id: operationId, source_selection: proof.source_selection,
-      source_gui: parent, host_gui: self, proof_sha256: createHash('sha256').update(JSON.stringify(proof) + '\n').digest('hex') }
+    return { proof, facts: { installation_id: own.record.installation_id, operation_id: operationId, source_selection: proof.source_selection,
+      source_gui: parent, host_gui: self, proof_sha256: createHash('sha256').update(JSON.stringify(proof) + '\n').digest('hex') } }
   } catch { if (signal?.aborted) signal.throwIfAborted(); fail() }
+}
+
+// Public facts-only inspection; the transaction captures the same proof under both locks.
+export async function inspectInitialRemovalGuiHost(options) {
+  return (await captureInitialRemovalGuiHost(options)).facts
 }

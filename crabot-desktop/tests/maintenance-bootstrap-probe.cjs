@@ -14,10 +14,11 @@ async function main() {
   assert.equal(typeof proof.captureDesktopRemovalProof, 'function'); assert.equal(typeof proof.readDesktopRemovalProof, 'function')
   assert.equal(typeof host.prepareDesktopRemovalGui, 'function'); assert.equal(typeof controller.stopInstance, 'function')
   const frame = await load('desktop-removal-frame.mjs'); assert.equal(typeof frame.inspectInitialRemovalGuiHost, 'function')
+  const job = await load('desktop-removal-job.mjs'); assert.equal(typeof job.beginInitialDesktopRemoval, 'function')
   const native = (await load('process-identity.cjs')).default
   assert.equal(native.inspectProcess(process.pid).pid, process.pid)
   await assert.rejects(fs.lstat(path.join(root, 'crabot-core')), { code: 'ENOENT' })
-  const report = { fixed_gui_bootstrap_loaded: true, initial_frame_loaded: true, native_helper_loaded: true, core_present: false, business_mm_started: false,
+  const report = { fixed_gui_bootstrap_loaded: true, initial_frame_loaded: true, initial_job_loaded: true, native_helper_loaded: true, core_present: false, business_mm_started: false,
     stop_called: false, host_executed: false, removal_published: false }
   await fs.writeFile(path.join(root, 'report.json'), JSON.stringify(report), { flag: 'wx' })
 }

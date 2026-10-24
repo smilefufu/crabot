@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync, existsSync, symlinkSync, renameSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawn } from 'node:child_process'
@@ -65,4 +65,46 @@ test('a fence appearing at native lock acquisition rejects the operation and rel
   mocked.mock.restore()
   const management = await acquireStartupLock(dir, 'management-start', 0)
   releaseCliLock(management)
+})
+
+
+test('maintenance locking never creates a missing existing directory', async t => {
+  const dir = directory(t), missing = join(dir, 'missing')
+  const { acquireExistingCliLock } = await import('../cli-lock.mjs')
+  await assert.rejects(acquireExistingCliLock(missing, 'removal', 0))
+  assert.equal(existsSync(missing), false)
+})
+
+test('maintenance locking refuses a redirected directory without touching its destination', { skip: process.platform === 'win32' }, async t => {
+  const dir = directory(t), target = join(dir, 'target'), alias = join(dir, 'alias')
+  mkdirSync(target); symlinkSync(target, alias)
+  const { acquireExistingCliLock } = await import('../cli-lock.mjs')
+  await assert.rejects(acquireExistingCliLock(alias, 'removal', 0))
+  assert.equal(existsSync(join(target, 'cli.lock')), false)
+})
+
+test('existing-directory maintenance uses the same OS mutex and releases only its token', async t => {
+  const dir = directory(t), { acquireExistingCliLock } = await import('../cli-lock.mjs')
+  const lock = await acquireExistingCliLock(dir, 'removal', 0), token = cliLockToken(lock)
+  assert.equal(hasInheritedCliLock(dir, token), true)
+  await assert.rejects(acquireCliLock(dir, 'ordinary', 0), /operation is in progress/)
+  releaseCliLock(lock)
+  assert.equal(hasInheritedCliLock(dir, token), false)
+})
+
+test('a directory replaced during native acquisition releases the handle and refuses adoption', { skip: process.platform === 'win32' }, async t => {
+  const dir = directory(t), current = join(dir, 'current'), old = join(dir, 'old')
+  mkdirSync(current)
+  const original = native.tryFileLock
+  const mocked = t.mock.method(native, 'tryFileLock', function(...args) {
+    const handle = original(...args)
+    if (handle) { renameSync(current, old); mkdirSync(current) }
+    return handle
+  })
+  const { acquireExistingCliLock } = await import('../cli-lock.mjs')
+  await assert.rejects(acquireExistingCliLock(current, 'removal', 0))
+  mocked.mock.restore()
+  assert.equal(existsSync(join(current, 'cli.lock')), false)
+  const lock = await acquireExistingCliLock(old, 'inspect-original', 0)
+  releaseCliLock(lock)
 })

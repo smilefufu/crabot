@@ -50,7 +50,7 @@ function readPairSelection(installation) {
   if (Buffer.byteLength(serialized) > 1024 || fs.readFileSync(path.join(installation.root, 'current-release.json'), 'utf8') !== serialized) fail()
   return selection
 }
-// Repair diagnostics only. This reference has no executable or code-loading context.
+// Read-only maintenance reference. This has no executable or code-loading context.
 function readDesktopPairReference(root) {
   try {
     const installation = readDesktopInstallation(root), selection = readPairSelection(installation)

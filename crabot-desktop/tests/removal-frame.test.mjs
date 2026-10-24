@@ -61,7 +61,7 @@ before(async () => {
   await sealDesktopPayload(payload)
 }, 120000)
 after(async () => { if (root) await fs.rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }) })
-for (const mode of ['valid', 'node-parent', 'unexpected-source-args', 'changed-copy', 'other-installation']) test('actual protected initial removal frame: ' + mode, { skip: !supported, timeout: 60000 }, async t => {
+for (const mode of ['valid', 'node-parent', 'unexpected-source-args', 'changed-copy', 'other-installation', 'publish-close', 'publish-cancel', 'publish-module', 'publish-damaged', 'publish-lost-reply', 'publish-replaced-record', 'publish-live', 'publish-cancel-lost']) test('actual protected initial removal frame: ' + mode, { skip: !supported, timeout: 60000 }, async t => {
   const area = await fs.mkdtemp(path.join(root, 'case-'))
   const own = await commitDesktopInstallation(await prepareDesktopInstallation({ payload, installRoot: path.join(area, 'installation') }))
   const operationId = randomUUID(), cfg = { root: own.root, operationId, mode }
@@ -79,7 +79,12 @@ for (const mode of ['valid', 'node-parent', 'unexpected-source-args', 'changed-c
   t.after(() => { if (child.exitCode === null && child.signalCode === null && identity.sameProcess(processIdentity, identity.inspectProcess(child.pid))) child.kill('SIGKILL') })
   const result = await Promise.race([once(child, 'message').then(([result]) => result), exited.then(([code, signal]) => { throw new Error('Source exited: ' + code + ':' + signal + '\n' + output) })])
   const [code] = await exited; assert.equal(code, 0, output)
-  if (mode === 'valid') {
+  if (mode.startsWith('publish-')) {
+    assert.equal(result.accepted, true, JSON.stringify(result)); assert.equal(result.published, true)
+    assert.equal(result.cancelled, ['publish-cancel', 'publish-cancel-lost'].includes(mode), JSON.stringify(result)); assert.equal(result.retained, !['publish-cancel', 'publish-cancel-lost'].includes(mode))
+    assert.equal(result.cancelRejected, ['publish-module', 'publish-damaged', 'publish-replaced-record', 'publish-live'].includes(mode), JSON.stringify(result))
+    assert.equal(result.cancellationReplyLost, mode === 'publish-cancel-lost'); assert.equal(result.lost, mode === 'publish-lost-reply'); assert.equal(result.proofRetained, true)
+  } else if (mode === 'valid') {
     assert.equal(result.accepted, true, JSON.stringify(result)); assert.equal(result.frame.operation_id, operationId)
     assert.equal(result.frame.installation_id, own.record.installation_id); assert.equal(result.frame.source_gui.pid, child.pid)
     assert.notEqual(result.frame.host_gui.pid, child.pid); assert.deepEqual(result.frame.source_selection, own.selection)
@@ -87,7 +92,8 @@ for (const mode of ['valid', 'node-parent', 'unexpected-source-args', 'changed-c
     assert.equal(result.accepted, false, JSON.stringify(result)); assert.equal(result.code, 'CRABOT_DESKTOP_REMOVAL', JSON.stringify(result))
     assert.equal(result.stage, mode === 'changed-copy' ? 'private-programs' : 'source-peer', JSON.stringify(result))
   }
-  await assert.rejects(fs.lstat(path.join(own.root, '.desktop-removal.json')), { code: 'ENOENT' })
+  if (!mode.startsWith('publish-') || ['publish-cancel', 'publish-cancel-lost'].includes(mode)) await assert.rejects(fs.lstat(path.join(own.root, '.desktop-removal.json')), { code: 'ENOENT' })
+  else assert.equal((await fs.lstat(path.join(own.root, '.desktop-removal.json'))).isFile(), true)
   assert.equal(await fs.readFile(path.join(own.dataDir, 'preserved-user-file'), 'utf8'), 'user bytes')
   await fs.rm(area, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 })
 })

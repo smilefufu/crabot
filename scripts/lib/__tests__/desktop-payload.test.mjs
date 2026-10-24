@@ -1025,3 +1025,20 @@ test('initial removal host inspection rejects an ordinary Node caller without pu
   await assert.rejects(inspectInitialRemovalGuiHost({ installRoot: f.target, operationId: randomUUID() }), { code: 'CRABOT_DESKTOP_REMOVAL', stage: 'transport' })
   assert.deepEqual(await fs.readdir(f.target), before); assert.deepEqual(await fs.readdir(path.join(f.target, 'data')), data)
 })
+
+
+test('initial removal publication refuses ordinary Node and releases both locks without a fence or blank data', async t => {
+  const f = await fixture(t), prepared = await prepareDesktopInstallation({ payload: f.payload, installRoot: f.target })
+  await commitDesktopInstallation(prepared)
+  const { beginInitialDesktopRemoval } = await import('../desktop-removal-job.mjs')
+  const { acquireExistingCliLock, releaseCliLock } = await import('../cli-lock.mjs')
+  await assert.rejects(beginInitialDesktopRemoval({ installRoot: f.target, operationId: randomUUID() }), { code: 'CRABOT_DESKTOP_REMOVAL', stage: 'transport' })
+  await assert.rejects(fs.lstat(path.join(f.target, '.desktop-removal.json')), { code: 'ENOENT' })
+  await assert.rejects(fs.lstat(path.join(f.target, 'app/removals')), { code: 'ENOENT' })
+  for (const directory of [f.target, path.join(f.target, 'data')]) {
+    const lock = await acquireExistingCliLock(directory, 'verify-release', 0); releaseCliLock(lock)
+  }
+  await fs.rm(path.join(f.target, 'data'), { recursive: true })
+  await assert.rejects(beginInitialDesktopRemoval({ installRoot: f.target, operationId: randomUUID() }))
+  await assert.rejects(fs.lstat(path.join(f.target, 'data')), { code: 'ENOENT' })
+})
