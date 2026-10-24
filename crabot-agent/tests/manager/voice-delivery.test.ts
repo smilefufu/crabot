@@ -60,6 +60,41 @@ describe('durable voice delivery responsibility', () => {
 
 import { TaggedVoiceOutput } from '../../src/manager/voice-output.js'
 
+describe.each(['resume', 'same-block'])('queued result before terminal opening: %s', mode => {
+  it.each(['<voice_reply>', '<voice_reply></voice_reply>', '<voice_reply> \n', '<voice_reply><nested>'])('preserves the original durable result for %j', async source => {
+    const directory = mkdtempSync(join(tmpdir(), 'voice-delivery-'))
+    try {
+      const send = vi.fn(), prepare = vi.fn(), port = voiceOutputPort(directory, () => true, send)
+      const original = { ...record(), block_index: 0 }; port.save(original)
+      const before = readFileSync(join(directory, original.playback_id + '.json'), 'utf8')
+      const output = new TaggedVoiceOutput({ ...port, prepare }, () => undefined, vi.fn(), () => original.binding, mode === 'resume' ? () => original : undefined)
+      const consumer = output.consumer()
+      await consumer.write(source); await consumer.finish(); await consumer.abort()
+      expect(readFileSync(join(directory, original.playback_id + '.json'), 'utf8')).toBe(before)
+      expect(voiceOutputPort(directory, () => true, send).records()).toEqual([original])
+      expect(send).not.toHaveBeenCalled(); expect(prepare).not.toHaveBeenCalled()
+      expect(consumer.externallyCommitted).toBe(false)
+    } finally { rmSync(directory, { recursive: true, force: true }) }
+  })
+})
+
+it.each([false, true])('preserves queued fallback after start failure but never restores it after text was external: %s', async textAccepted => {
+  const directory = mkdtempSync(join(tmpdir(), 'voice-delivery-'))
+  try {
+    const original = { ...record(), block_index: 0 }
+    const send = vi.fn(async (params: import('crabot-shared').VoiceOutputParams) => {
+      if (!textAccepted && params.event.type === 'reply_start') throw new Error('fixture start failed')
+      return { accepted: true as const }
+    })
+    const port = voiceOutputPort(directory, () => true, send); port.save(original)
+    const output = new TaggedVoiceOutput({ ...port, prepare: async () => ({ binding: original.binding!, connection_epoch: 'epoch', kind: 'notification' }) }, () => undefined, vi.fn(), () => original.binding, () => original)
+    const consumer = output.consumer(); await consumer.write('<voice_reply>重新表达的结果'); await consumer.abort()
+    const saved = port.records()[0]
+    if (textAccepted) expect(saved).toMatchObject({ playback_id: original.playback_id, text: '重新表达的结果', status: 'unknown' })
+    else expect(saved).toEqual(original)
+  } finally { rmSync(directory, { recursive: true, force: true }) }
+})
+
 it('keeps a validated final tag for later delivery even with no live input turn', async () => {
   const records: VoiceDeliveryRecord[] = [], send = vi.fn()
   const binding = record().binding!

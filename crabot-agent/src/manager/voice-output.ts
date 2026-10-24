@@ -113,7 +113,7 @@ export class TaggedVoiceOutput {
     const save = (): void => { if (record) this.port.save(record) }
     const cancel = async (): Promise<void> => {
       if (!record || record.status === 'completed') return
-      if (queued && original) { this.port.save(original); record = undefined; return }
+      if (original && (queued || !opened)) { this.port.save(original); record = undefined; return }
       record.status = !queued && record.status === 'streaming' ? 'unknown' : 'failed'
       try { save() } finally {
         if (opened && !queued) try { await send({ type: 'reply_cancel', playback_id: record.playback_id }) } catch { /* no replay */ }
