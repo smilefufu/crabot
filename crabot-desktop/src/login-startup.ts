@@ -11,12 +11,27 @@ export class LoginStartup {
   constructor(private readonly options: { platform: string; packaged: boolean; executable: string; configHome: string;
     app: Pick<App, 'getLoginItemSettings' | 'setLoginItemSettings'> }) {}
   private file() { return path.join(this.options.configHome, 'autostart', 'crabot.desktop') }
+  private linuxCommand(): string {
+    const { executable } = this.options
+    if (/[\r\n\0=]/.test(executable)) throw new Error('应用路径不能用于登录启动。')
+    // Exec quoting is desktop-entry syntax, not shell syntax. Literal percent
+    // must be doubled; backslashes pass through both string and Exec parsing.
+    const quoted = executable.replace(/\\/g, '\\\\\\\\').replace(/"/g, '\\\\"').replace(/`/g, '\\\\`').replace(/\$/g, '\\\\$').replace(/%/g, '%%')
+    // GIO validates argv[0] before expanding %% to a literal percent. Keep
+    // its executable fixed; env forwards the expanded path without a shell.
+    return `Exec=/usr/bin/env -- "${quoted}" --background`
+  }
   private async linuxEntry(): Promise<string | null> {
     try {
       const stat = await lstat(this.file())
       if (!stat.isFile() || stat.size > 16_384) throw new Error('已有登录启动项无法识别，未作修改。')
       const text = await readFile(this.file(), 'utf8')
-      if (!text.split(/\r?\n/).includes(marker)) throw new Error('已有登录启动项不属于桌面版，请先完成旧安装接管。')
+      const lines = text.split(/\r?\n/)
+      if (!lines.includes(marker)) throw new Error('已有登录启动项不属于桌面版，请先完成旧安装接管。')
+      if (lines.filter(line => line.startsWith('Exec=')).join('\n') !== this.linuxCommand()
+        || lines.filter(line => line.startsWith('[')).join('\n') !== '[Desktop Entry]') {
+        throw new Error('已有登录启动项与当前应用不一致，已保留。请先完成旧安装接管或检查系统设置。')
+      }
       return text
     } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error }
   }
@@ -41,13 +56,7 @@ export class LoginStartup {
       await this.linuxEntry() // Refuse unrelated files before making any change.
       if (!enabled) await rm(this.file(), { force: true })
       else {
-        if (/[\r\n\0=]/.test(executable)) throw new Error('应用路径不能用于登录启动。')
-        // Exec quoting is desktop-entry syntax, not shell syntax. Literal percent
-        // must be doubled; backslashes pass through both string and Exec parsing.
-        const quoted = executable.replace(/\\/g, '\\\\\\\\').replace(/"/g, '\\\\"').replace(/`/g, '\\\\`').replace(/\$/g, '\\\\$').replace(/%/g, '%%')
-        // GIO validates argv[0] before expanding %% to a literal percent. Keep
-        // its executable fixed; env forwards the expanded path without a shell.
-        const text = `[Desktop Entry]\nType=Application\nName=Crabot\nExec=/usr/bin/env -- "${quoted}" --background\nTerminal=false\nX-GNOME-Autostart-enabled=true\n${marker}\n`
+        const text = `[Desktop Entry]\nType=Application\nName=Crabot\n${this.linuxCommand()}\nTerminal=false\nX-GNOME-Autostart-enabled=true\n${marker}\n`
         await mkdir(path.dirname(this.file()), { recursive: true })
         const temporary = this.file() + '.tmp-' + randomUUID()
         try { await writeFile(temporary, text, { flag: 'wx', mode: 0o600 }); await rename(temporary, this.file()) }

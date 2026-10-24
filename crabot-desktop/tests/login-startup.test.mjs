@@ -50,6 +50,20 @@ test('unknown files and symlinks are preserved, and source mode never writes OS 
   assert.deepEqual(source.calls, [])
 })
 
+test('a desktop marker cannot authorize replacing another executable or a custom entry', async t => {
+  const f = await fixture(t)
+  await f.startup.set(true)
+  const original = await readFile(f.file, 'utf8')
+  for (const text of [original.replace('/opt/中文 Crabot/crabot', '/opt/other-crabot/crabot'),
+    original + 'Exec=unrelated-program\n', original + '[Desktop Action Other]\nName=Other\n']) {
+    await writeFile(f.file, text)
+    await assert.rejects(f.startup.get())
+    await assert.rejects(f.startup.set(true))
+    await assert.rejects(f.startup.set(false))
+    assert.equal(await readFile(f.file, 'utf8'), text)
+  }
+})
+
 test('Windows reads and writes the exact same background entry; OS-disabled startup is not reported enabled', async t => {
   const f = await fixture(t, { platform: 'win32', executable: 'C:\\Users\\中文\\Crabot\\Crabot.exe' })
   assert.equal((await f.startup.set(true)).enabled, true)
