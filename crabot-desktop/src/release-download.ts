@@ -1,10 +1,10 @@
 // Anonymous program downloads only. No Admin session, updater installer or target code.
-import { promises as fs } from 'node:fs'
+import { promises as fs, constants } from 'node:fs'
 import { createRequire } from 'node:module'
 import { createHash, randomUUID } from 'node:crypto'
 import path from 'node:path'
 import { desktopReleaseMetadataNames, DesktopReleaseSelectionSchema, type DesktopReleaseManifest } from 'crabot-client/contracts'
-import { createDesktopReleaseVerifier } from './release-signatures.js'
+import { createDesktopReleaseVerifier, type DesktopReleaseProof } from './release-signatures.js'
 
 const management = createRequire(import.meta.url)('./bootstrap/scripts/lib/desktop-management.cjs')
 const channel = 'https://github.com/smilefufu/crabot/releases/latest/download/'
@@ -34,12 +34,71 @@ async function waitFor<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> 
   finally { signal.removeEventListener('abort', onAbort) }
 }
 
+async function matchesBytes(file: string, expected: Buffer): Promise<boolean> {
+  let handle
+  try {
+    const before = await fs.lstat(file)
+    if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1 || before.size !== expected.length) return false
+    handle = await fs.open(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0))
+    const opened = await handle.stat()
+    if (before.dev !== opened.dev || before.ino !== opened.ino) return false
+    const bytes = Buffer.alloc(expected.length + 1); let used = 0
+    while (used < bytes.length) {
+      const { bytesRead } = await handle.read(bytes, used, bytes.length - used, null)
+      if (!bytesRead) break
+      used += bytesRead
+    }
+    return used === expected.length && bytes.subarray(0, used).equals(expected)
+  } catch { return false }
+  finally { await handle?.close() }
+}
+
 export function createDesktopReleaseDownloader(options: {
   pinnedPublicKeys: readonly string[]; platform: DesktopReleaseManifest['platform']; arch: DesktopReleaseManifest['arch']; cacheRoot: string
   fetch: (url: string, init: RequestInit) => Promise<Response>
 }) {
   const verifier = createDesktopReleaseVerifier(options.pinnedPublicKeys), names = desktopReleaseMetadataNames(options.platform, options.arch)
   if (!path.isAbsolute(options.cacheRoot)) fail('METADATA')
+  function jobFiles(proof: DesktopReleaseProof) { return [names.manifest, names.signatures, proof.manifest.artifact.file] }
+  async function matchesJob(job: string, proof: DesktopReleaseProof, raw: Buffer, signatures: Buffer) {
+    try {
+      management.requirePrivateDataRoot(job)
+      const actual = (await fs.readdir(job)).sort(), expected = jobFiles(proof).sort()
+      return JSON.stringify(actual) === JSON.stringify(expected)
+        && await matchesBytes(path.join(job, names.manifest), raw) && await matchesBytes(path.join(job, names.signatures), signatures)
+    } catch { return false }
+  }
+  function result(job: string, proof: DesktopReleaseProof, manifestBytes: Buffer, signatureBytes: Buffer) {
+    const artifact = path.join(job, proof.manifest.artifact.file)
+    const raw = Buffer.from(manifestBytes), signatures = Buffer.from(signatureBytes)
+    return Object.freeze({ manifest: proof.manifest, manifestBytes: Buffer.from(raw), signatureBytes: Buffer.from(signatures), artifact,
+      async discard() {
+        // Optional program-cache cleanup. Never recurse into unknown contents,
+        // and never let cache deletion authorize or undo an installation.
+        if (!await matchesJob(job, proof, raw, signatures)) return
+        try {
+          await verifier.verifyArtifact(artifact, proof)
+          for (const name of jobFiles(proof)) await fs.unlink(path.join(job, name))
+          await fs.rmdir(job)
+        } catch { /* Preserve changed/in-use entries and any newly added files. */ }
+      } })
+  }
+  async function cached(proof: DesktopReleaseProof, raw: Buffer, signatures: Buffer, signal: AbortSignal) {
+    const exists = await fs.lstat(options.cacheRoot).then(() => true, error => { if (error.code === 'ENOENT') return false; throw error })
+    if (!exists) return null
+    const cache = management.requirePrivateDataRoot(options.cacheRoot)
+    for (const entry of await fs.readdir(cache, { withFileTypes: true })) {
+      signal.throwIfAborted()
+      if (!entry.isDirectory() || !/^download-[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(entry.name)) continue
+      const job = path.join(cache, entry.name)
+      if (!await matchesJob(job, proof, raw, signatures)) continue
+      try {
+        await verifier.verifyArtifact(path.join(job, proof.manifest.artifact.file), proof, { signal })
+        return result(job, proof, raw, signatures)
+      } catch { signal.throwIfAborted() } // Bad cache is retained, never trusted or executed.
+    }
+    return null
+  }
   return {
     async check(current: DesktopReleaseManifest['selection'], { signal, progress = () => {} }: { signal?: AbortSignal; progress?: (percent: number) => void } = {}) {
       const cancelled = () => { if (signal?.aborted) throw new DOMException('Cancelled', 'AbortError') }
@@ -100,6 +159,8 @@ export function createDesktopReleaseDownloader(options: {
         const authenticated = verifier.verifyMetadata(manifestBytes, signatureBytes, context)
         if (JSON.stringify(authenticated.manifest.selection) === JSON.stringify(current)) return null
         const proof = verifier.verifyMetadata(manifestBytes, signatureBytes, { ...context, purpose: 'update', currentVersion: current.version })
+        const reused = await cached(proof, manifestBytes, signatureBytes, combined)
+        if (reused) { progress(100); return reused }
         const cache = management.ensurePrivateDataRoot(options.cacheRoot)
         job = path.join(cache, 'download-' + randomUUID()); management.ensurePrivateDataRoot(job)
         const space = await fs.statfs(job, { bigint: true }), artifactSize = proof.manifest.artifact.size
@@ -124,9 +185,10 @@ export function createDesktopReleaseDownloader(options: {
         } finally { await handle.close() }
         await fs.rename(temporary, artifact)
         await verifier.verifyArtifact(artifact, proof, { signal: combined })
-        const owned = job; job = undefined
-        return Object.freeze({ manifest: proof.manifest, manifestBytes, signatureBytes, artifact,
-          discard: () => fs.rm(owned, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) })
+        await fs.writeFile(path.join(job, names.manifest), manifestBytes, { flag: 'wx', mode: 0o600, flush: true })
+        await fs.writeFile(path.join(job, names.signatures), signatureBytes, { flag: 'wx', mode: 0o600, flush: true })
+        const complete = result(job, proof, manifestBytes, signatureBytes); job = undefined
+        return complete
       } catch (error) {
         cancelled()
         const code = (error as { code?: unknown })?.code

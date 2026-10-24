@@ -490,17 +490,25 @@ test('signed complete release intake reaches actual online preparation without s
   [keys.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString()])
   const { createDesktopReleaseIntake } = await import('../../../crabot-desktop/dist/release-intake.js')
   const { prepareDesktopPair } = await import('../desktop-pair-preparation.mjs')
+  let prepared
   const intake = createDesktopReleaseIntake({ pinnedPublicKeys: [keys.publicKey.export({ type: 'spki', format: 'pem' }).toString()],
-    python: process.env.CRABOT_TEST_PYTHON, cacheRoot: path.join(f.target, 'data/signed-cache'), verifyPayload: verifyDesktopPayload, preparePair: prepareDesktopPair })
+    python: process.env.CRABOT_TEST_PYTHON, cacheRoot: path.join(f.target, 'data/signed-cache'), verifyPayload: verifyDesktopPayload,
+    preparePair: async options => { prepared = await prepareDesktopPair(options); return prepared } })
   const { createDesktopReleaseDownloader } = await import('../../../crabot-desktop/dist/release-download.js')
   const downloader = createDesktopReleaseDownloader({ pinnedPublicKeys: [keys.publicKey.export({ type: 'spki', format: 'pem' }).toString()],
     platform: process.platform, arch: process.arch, cacheRoot: path.join(f.target, 'data/download-cache'),
     fetch: async url => new Response(url.endsWith('.manifest.json') ? signed.manifest : url.endsWith('.signatures.json') ? signed.signatures : bytes) })
-  const downloaded = await downloader.check(f.selection)
-  assert.ok(downloaded)
-  const staged = await intake.stage({ manifestBytes: downloaded.manifestBytes, signatureBytes: downloaded.signatureBytes, artifact: downloaded.artifact,
-    context: { platform: process.platform, arch: process.arch, purpose: 'update', currentVersion: f.selection.version } })
-  const prepared = await intake.prepare(staged, { installRoot: f.target })
+  const { createPairedUpdateDriver } = await import('../../../crabot-desktop/dist/paired-update.js')
+  const driver = createPairedUpdateDriver({ platform: process.platform, arch: process.arch, downloader, intake,
+    current: () => { const value = installation.readDesktopSelection(f.target); return { installRoot: value.root,
+      installation_id: value.record.installation_id, selection: value.selection, coreRoot: value.coreRoot, guiRoot: value.guiRoot } },
+    preparePlatform: async () => { throw Object.assign(new Error('Controlled stop before OS authorization or maintenance'), { code: 'PRE_STOP_FIXTURE' }) },
+    apply: async () => { throw new Error('Live fixture instance must never be stopped') }, handoff: async () => { throw new Error('No GUI handoff in preparation fixture') } })
+  t.after(() => driver.close())
+  const candidate = await driver.check(() => {})
+  assert.deepEqual(candidate, { kind: 'paired', version: next.selection.version })
+  await assert.rejects(fs.lstat(path.join(f.target, 'releases', next.selection.core_id)), { code: 'ENOENT' })
+  await assert.rejects(driver.install(candidate), { code: 'PRE_STOP_FIXTURE' })
   assert.deepEqual(prepared.source, f.selection); assert.deepEqual(prepared.selection, next.selection)
   assert.equal(prepared.coreRoot, path.join(f.target, 'releases', next.selection.core_id))
   assert.equal(prepared.guiRoot, path.join(f.target, 'app/releases', next.selection.gui_id))
@@ -510,5 +518,6 @@ test('signed complete release intake reaches actual online preparation without s
   assert.equal(await fs.readFile(path.join(selected.dataDir, 'fixture/content'), 'utf8'), 'USER DATA')
   assert.equal(await fs.readFile(path.join(selected.dataDir, 'fixture/SCHEMA_VERSION'), 'utf8'), 'v1')
   for (const name of ['desktop-maintenance.json', '.upgrade-migrations']) await assert.rejects(fs.lstat(path.join(selected.dataDir, name)), { code: 'ENOENT' })
-  await intake.discard(staged); await downloaded.discard()
+  assert.deepEqual(await fs.readdir(path.join(f.target, 'data/signed-cache')), [])
+  assert.equal((await fs.readdir(path.join(f.target, 'data/download-cache'))).length, 1, 'retry keeps the authenticated archive')
 })

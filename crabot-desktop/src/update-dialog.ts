@@ -2,12 +2,15 @@ import type { MessageBoxOptions, MessageBoxReturnValue } from 'electron'
 import { updateFailure, type UpdateFailure } from './update-package.js'
 
 export interface UpdateDownload { version: string; file: string; sha512: string; size: number }
+export interface PairedUpdateDownload { readonly kind: 'paired'; readonly version: string }
+export type UpdateCandidate = UpdateDownload | PairedUpdateDownload
 export interface UpdateDriver {
-  check(progress: (percent: number) => void): Promise<UpdateDownload | null>
-  install(update: UpdateDownload): Promise<void>
+  check(progress: (percent: number) => void): Promise<UpdateCandidate | null>
+  install(update: UpdateCandidate): Promise<void>
+  close?(): void
 }
 type UpdateState = { phase: 'idle' | 'checking' | 'current' } | { phase: 'error'; failure: UpdateFailure } | { phase: 'downloading'; percent: number }
-  | { phase: 'downloaded' | 'installing'; update: UpdateDownload }
+  | { phase: 'downloaded' | 'installing'; update: UpdateCandidate }
 
 // Native presentation only. Driver owns trusted downloads; the maintenance
 // adapter owns the common lifecycle lock, shutdown, backup and recovery record.
@@ -23,7 +26,7 @@ export class UpdateDialog {
     configurationError?: boolean
     show: (options: MessageBoxOptions) => Promise<MessageBoxReturnValue>
     activity: () => Promise<'idle' | 'active' | 'unknown'>
-    prepareInstall: (update: UpdateDownload, install: () => Promise<void>) => Promise<void>
+    prepareInstall: (update: UpdateCandidate, install: () => Promise<void>) => Promise<void>
   }) {}
   start() {
     if (!this.options.driver || this.closed) return
@@ -94,5 +97,5 @@ export class UpdateDialog {
     }
     return true
   }
-  close() { this.closed = true; clearInterval(this.timer) }
+  close() { this.closed = true; clearInterval(this.timer); this.options.driver?.close?.() }
 }

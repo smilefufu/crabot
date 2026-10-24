@@ -4,10 +4,10 @@ import { UpdateDialog } from '../dist/update-dialog.js'
 
 const update = { version: '1.2.4', file: '/fixture', sha512: 'fixture', size: 100 }
 const flush = () => new Promise(resolve => setImmediate(resolve))
-function fixture({ activity = 'idle', check = async () => update, prepare, response = 1, driver = true } = {}) {
+function fixture({ activity = 'idle', check = async () => update, prepare, response = 1, driver = true, close } = {}) {
   const calls = [], dialogs = []
   const controller = new UpdateDialog({ version: '1.2.3', driver: driver ? {
-    check: async progress => { calls.push('check'); return check(progress) }, install: async () => { calls.push('install') },
+    check: async progress => { calls.push('check'); return check(progress) }, install: async () => { calls.push('install') }, close,
   } : null, show: async options => { dialogs.push(options); return { response, checkboxChecked: false } },
     activity: async () => { calls.push('activity'); return activity },
     prepareInstall: prepare ?? (async (_update, install) => { calls.push('prepare'); await install() }) })
@@ -52,4 +52,11 @@ test('a changed cached file can be downloaded again and cannot trap the user in 
   f.controller.start(); await flush(); await f.controller.open()
   await f.controller.open(); await flush(); f.controller.close()
   assert.deepEqual(f.calls, ['check', 'activity', 'check'])
+})
+
+test('closing the update presentation cancels its owned driver without installing', async () => {
+  let closes = 0
+  const f = fixture({ response: 0, close: () => { closes++ } })
+  f.controller.start(); await flush(); f.controller.close()
+  assert.equal(closes, 1); assert.deepEqual(f.calls, ['check'])
 })

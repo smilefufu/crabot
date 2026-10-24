@@ -107,8 +107,11 @@ async function boot() {
   catch { configurationError = true }
   updates = new UpdateDialog({ version: app.getVersion(), driver, configurationError, show: options => dialog.showMessageBox(options),
     activity: () => controller!.updateActivity(), prepareInstall: async (update, install) => {
-      await verifyUpdateDownload(update)
-      await controller!.prepareUpdate(update, install)
+      if ('kind' in update) await install()
+      else {
+        await verifyUpdateDownload(update)
+        await controller!.prepareUpdate(update, install)
+      }
     } })
   artifacts = new ArtifactWindows(controller.host, () => { if (!quitting) updateMenus() })
   const privateSession = session.fromPartition('persist:crabot-desktop')

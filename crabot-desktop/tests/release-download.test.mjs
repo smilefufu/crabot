@@ -136,3 +136,38 @@ test('transport errors cannot inject arbitrary release codes or raw URLs into fe
     })
   }
 })
+
+test('a new verifier reuses only exact signed metadata and freshly checked archive bytes', async t => {
+  const f = await fixture(t), first = await f.downloader.check(f.current)
+  const construct = () => createDesktopReleaseDownloader({ pinnedPublicKeys: [pub], platform: process.platform, arch: process.arch, cacheRoot: f.cacheRoot,
+    fetch: async (url, options) => { f.calls.push({ url, options }); return new Response(f.bodies.get(new URL(url).pathname.split('/').at(-1))) } })
+  f.calls.length = 0
+  const second = await construct().check(f.current)
+  assert.equal(second.artifact, first.artifact)
+  assert.equal(f.calls.some(call => call.url.endsWith('/Crabot.zip')), false)
+  assert.deepEqual((await fs.readdir(path.dirname(second.artifact))).sort(), ['Crabot.zip', f.names.manifest, f.names.signatures].sort())
+  await fs.writeFile(first.artifact, Buffer.alloc(f.bytes.length))
+  const third = await construct().check(f.current)
+  assert.notEqual(third.artifact, first.artifact)
+  assert.deepEqual(await fs.readFile(third.artifact), f.bytes)
+  assert.deepEqual(await fs.readFile(first.artifact), Buffer.alloc(f.bytes.length), 'unverified cache is retained')
+})
+test('cache reuse never bypasses current source verification or deletes unrecognized job contents', async t => {
+  const f = await fixture(t), first = await f.downloader.check(f.current)
+  const note = path.join(path.dirname(first.artifact), 'unknown-note'); await fs.writeFile(note, 'preserve this')
+  await first.discard()
+  assert.equal(await fs.readFile(note, 'utf8'), 'preserve this')
+  await fs.access(first.artifact)
+  const changed = Buffer.from(f.bodies.get(f.names.manifest)); changed[0] ^= 1; f.bodies.set(f.names.manifest, changed)
+  f.calls.length = 0
+  await assert.rejects(f.downloader.check(f.current), { code: 'CRABOT_DESKTOP_RELEASE_SIGNATURE' })
+  assert.equal(f.calls.some(call => call.url.endsWith('/Crabot.zip')), false)
+  assert.equal(await fs.readFile(note, 'utf8'), 'preserve this')
+})
+
+test('caller byte buffers cannot change the private cache cleanup proof', async t => {
+  const f = await fixture(t), result = await f.downloader.check(f.current)
+  result.manifestBytes.fill(0); result.signatureBytes.fill(0)
+  await result.discard()
+  await assert.rejects(fs.lstat(result.artifact), { code: 'ENOENT' })
+})

@@ -63,7 +63,7 @@ export async function createUpdateDriver(options: { resources: string; cacheRoot
       } finally { updater.off('update-downloaded', receive); updater.off('download-progress', report) }
     },
     async install(update) {
-      if (!downloaded || JSON.stringify(update) !== JSON.stringify(downloaded)) throw new Error('Unexpected update installation')
+      if ('kind' in update || !downloaded || JSON.stringify(update) !== JSON.stringify(downloaded)) throw new Error('Unexpected update installation')
       await verifyUpdateDownload(update)
       if (process.platform === 'linux') {
         // Use the OS authorization prompt for this one verified package only.
