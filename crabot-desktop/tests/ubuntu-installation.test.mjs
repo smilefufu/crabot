@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { finishUbuntuInstallation, probeFailurePhase, ubuntuInstallationFailure } from '../dist/ubuntu-installation.js'
+import { finishUbuntuInstallation, ensureUbuntuProgramsReady, probeFailurePhase, ubuntuInstallationFailure } from '../dist/ubuntu-installation.js'
 function fixture() {
   const calls = [], abort = new AbortController()
   const options = { signal: abort.signal, probe: async () => { calls.push('probe') }, authorizationNeeded: async () => { calls.push('needed'); return true },
@@ -50,4 +50,11 @@ test('probe stderr accepts only a complete fixed diagnostic line', () => {
   assert.equal(probeFailurePhase('third party log\nCRABOT_GUI_SANDBOX_PROBE_FAILED:kernel\n'), 'kernel')
   assert.equal(probeFailurePhase('CRABOT_BROWSER_SANDBOX_PROBE_FAILED:scrapling-fetch\r\n'), 'scrapling-fetch')
   for (const text of ['secret', 'CRABOT_GUI_SANDBOX_PROBE_FAILED:kernel', 'CRABOT_GUI_SANDBOX_PROBE_FAILED:kernel-secret\n']) assert.equal(probeFailurePhase(text), undefined)
+})
+
+test('shared readiness preserves update semantics without first-install entries or selection', async () => {
+  const f = fixture(); let count = 0
+  f.options.probe = async () => { f.calls.push('probe'); if (++count === 1) throw new Error('restricted') }
+  await ensureUbuntuProgramsReady(f.options)
+  assert.deepEqual(f.calls, ['probe', 'needed', 'authorize', 'probe'])
 })

@@ -8,6 +8,19 @@ export async function finishUbuntuInstallation(options: {
   register: () => Promise<void>
   commit: () => Promise<unknown>
 }): Promise<unknown> {
+  await ensureUbuntuProgramsReady(options)
+  options.signal.throwIfAborted()
+  await options.register()
+  // Registration may already be durable. Commit has its own lock/integrity
+  // checks; cancellation is no longer offered between these two final steps.
+  return options.commit()
+}
+
+// Readiness only: neither first-install registration nor update selection.
+export async function ensureUbuntuProgramsReady(options: {
+  signal: AbortSignal; probe: () => Promise<void>
+  authorizationNeeded: () => Promise<boolean>; authorize: () => Promise<void>
+}): Promise<void> {
   const { signal } = options
   signal.throwIfAborted()
   try { await options.probe() }
@@ -19,10 +32,6 @@ export async function finishUbuntuInstallation(options: {
     await options.probe()
   }
   signal.throwIfAborted()
-  await options.register()
-  // Registration may already be durable. Commit has its own lock/integrity
-  // checks; cancellation is no longer offered between these two final steps.
-  return options.commit()
 }
 
 

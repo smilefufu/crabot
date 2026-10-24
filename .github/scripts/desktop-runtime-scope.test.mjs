@@ -42,6 +42,8 @@ for (const [file, expected] of [
   ['crabot-admin/src/workspace-web-admissions.ts', true],
   ['crabot-desktop/native/ubuntu/sandbox-helper.c', true],
   ['crabot-desktop/src/ubuntu-installer-backend.ts', true],
+  ['crabot-desktop/src/ubuntu-program-probe.ts', true],
+  ['crabot-desktop/src/paired-update.ts', true],
   ['.github/scripts/accept-ubuntu-offline-installer.mjs', true],
   ['crabot-client/src/contracts/desktop-release.ts', true],
   ['crabot-desktop/src/release-signatures.ts', true],
