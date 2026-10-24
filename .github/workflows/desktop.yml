@@ -30,6 +30,8 @@ on:
       - '.github/scripts/smoke-workspace-python-gate.mjs'
       - '.github/scripts/test-paired-release-intake.mjs'
       - '.github/scripts/verify-paired-update-host.mjs'
+      - '.github/scripts/check-paired-update-report*'
+      - '.github/scripts/paired-update-source-data.test.mjs'
       - '.github/scripts/build-paired-update-source.mjs'
       - '.github/scripts/prepare-paired-update-core*'
       - '.github/workflows/desktop.yml'
@@ -100,7 +102,7 @@ jobs:
         env:
           CRABOT_CI_BASE: ${{ github.event.before || github.event.pull_request.base.sha }}
         run: |
-          node --test .github/scripts/desktop-runtime-scope.test.mjs .github/scripts/prepare-paired-update-core.test.mjs
+          node --test .github/scripts/desktop-runtime-scope.test.mjs .github/scripts/prepare-paired-update-core.test.mjs .github/scripts/check-paired-update-report.test.mjs .github/scripts/paired-update-source-data.test.mjs
           node .github/scripts/desktop-runtime-scope.mjs
       - name: Linux build prerequisites
         if: runner.os == 'Linux' && steps.scope.outputs.full_runtime == 'true'
@@ -347,7 +349,11 @@ jobs:
       - name: Signed paired update reaches ordinary target GUI and Core health
         if: runner.os != 'Linux' && steps.scope.outputs.full_runtime == 'true'
         timeout-minutes: 20
-        run: node .github/scripts/verify-paired-update-host.mjs ".desktop-build/安装 候选/paired" 2>&1 | tee .desktop-build/paired-update-host.log
+        env:
+          CRABOT_PAIRED_ACCEPTANCE_ID: ${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.target }}
+        run: |
+          node .github/scripts/verify-paired-update-host.mjs ".desktop-build/安装 候选/paired" 2>&1 | tee .desktop-build/paired-update-host.log
+          node .github/scripts/check-paired-update-report.mjs .desktop-build/paired-update-host.json "$CRABOT_PAIRED_ACCEPTANCE_ID"
       - name: Ordinary CLI archive and actual upgrade command
         if: steps.scope.outputs.full_runtime == 'true'
         run: |

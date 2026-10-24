@@ -21,6 +21,8 @@ import { buildPairedUpdateSource } from './build-paired-update-source.mjs'
 import { preparePairedUpdateCore } from './prepare-paired-update-core.mjs'
 
 if (process.env.GITHUB_ACTIONS !== 'true' || !['darwin', 'win32'].includes(process.platform)) throw new Error('Requires an isolated macOS/Windows CI user; never run against a developer MM')
+const acceptanceId = process.env.CRABOT_PAIRED_ACCEPTANCE_ID
+assert.match(acceptanceId ?? '', /^\d+-[1-9]\d*-(?:darwin-(?:arm64|x64)|win32-x64)$/)
 const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 const project = await fs.realpath(path.resolve(process.argv[2])), location = JSON.parse(await fs.readFile(path.join(project, 'packaged-location.json'), 'utf8'))
 assert.equal(location.schema_version, 2)
@@ -41,7 +43,7 @@ const job = path.join(repository, '.desktop-build', 'paired-update-' + randomByt
 await fs.mkdir(job, { mode: 0o700 }); const control = path.join(temporary, 'control'), home = path.join(temporary, 'home')
 await fs.mkdir(control, { mode: 0o700 }); await fs.mkdir(home, { mode: 0o700 })
 let selected, child, targetIdentity, sourceIdentity, expectedTargetGuiRoot, phase = 'prepare-target', success = false, sourceOutput = ''
-const report = { platform: process.platform, arch: process.arch, candidate_channel_enabled: false, remote_model_called: false,
+const report = { acceptance_id: acceptanceId, platform: process.platform, arch: process.arch, candidate_channel_enabled: false, remote_model_called: false,
   source_gui: 'fixture-packaged-component-actor', target_gui: 'ordinary-packaged-main', fixture_debugger: false, real_login_session_verified: false }
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
 async function readControl(name) {
@@ -80,7 +82,7 @@ try {
   selected = await commitDesktopInstallation(await prepareDesktopInstallation({ payload: sourcePayload, installRoot: path.join(temporary, '整体 安装') }))
   await fs.rm(path.join(job, 'source-project'), { recursive: true })
   expectedTargetGuiRoot = path.join(selected.root, 'app/releases', target.record.selection.gui_id)
-  const sentinel = path.join(selected.dataDir, 'update-fixture-preserved.txt'); await fs.writeFile(sentinel, 'preserved across the actual pair handoff\n')
+  const sentinel = path.join(selected.dataDir, 'update-fixture-preserved.txt')
   const metadata = { source: selected, home, control, publicKey: keys.publicKey.export({ type: 'spki', format: 'pem' }).toString(), publication,
     manifestName: path.basename(signed.manifestFile), signaturesName: path.basename(signed.signaturesFile), artifactName: path.basename(signed.artifact), targetVersion }
   const config = path.join(control, 'config.json'); await fs.writeFile(config, JSON.stringify(metadata) + '\n', { mode: 0o600 })

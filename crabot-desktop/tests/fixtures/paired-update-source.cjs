@@ -38,8 +38,8 @@ void app.whenReady().then(async () => {
   controller = new DesktopController({ coreRoot: config.source.coreRoot, dataRoot: config.source.dataDir, appVersion: config.source.selection.version,
     platform: process.platform, packaged: true, verifyBinding,
     loginStartup: { captureForUpdate: async () => 'off', restoreForUpdate: async () => assert.fail('Source may not restore target login') } })
-  const state = await controller.start()
-  assert.equal(state.phase, 'ready')
+  const { startPairedUpdateSource } = require('./paired-update-source-data.cjs')
+  const state = await startPairedUpdateSource(controller, config.source.dataDir)
   const runtime = await import(pathToFileURL(path.join(config.source.coreRoot, 'scripts/lib/instance-runtime.mjs')).href)
   const source = runtime.inspectInstance(config.source.dataDir)
   assert.equal(source.state, 'running'); assert.ok(source.record.mm)

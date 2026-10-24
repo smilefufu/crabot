@@ -19,7 +19,8 @@ export async function buildPairedUpdateSource({ repository, project, destination
   assert.equal(metadata.version, selection.version); assert.equal(metadata.main, 'dist/main.js')
   metadata.main = 'dist/paired-update-source.cjs'
   await fs.writeFile(path.join(app, 'package.json'), JSON.stringify(metadata) + '\n')
-  await fs.copyFile(path.join(repository, 'crabot-desktop/tests/fixtures/paired-update-source.cjs'), path.join(app, metadata.main))
+  for (const file of ['paired-update-source.cjs', 'paired-update-source-data.cjs']) await fs.copyFile(
+    path.join(repository, 'crabot-desktop/tests/fixtures', file), path.join(app, 'dist', file))
   await fs.writeFile(path.join(app, 'dist/desktop-release.json'), JSON.stringify(selection) + '\n')
   const require = createRequire(path.join(repository, 'crabot-desktop/package.json')), { build, Platform, Arch } = require('electron-builder')
   const builder = createRequire(createRequire(require.resolve('electron-builder')).resolve('app-builder-lib/package.json'))
