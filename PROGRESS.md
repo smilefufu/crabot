@@ -49,7 +49,7 @@
 ### 桌面化方案：独立 worktree 开发中，尚未进入 PR
 
 - 按[桌面Spec](crabot-docs/superpowers/specs/2026-10-17-desktop-application-design.md)在`feat/desktop-application`推进；整项未完成，产品main未推、未提前PR或部署现场。Electron+React、业务HTTP/WS与共享SDK、最小原生IPC、GUI免额外密码；关闭窗口后台运行，退出停止共享实例。安装时选整体根，之后迁workspace，不新增DATA_DIR选择步骤。
-- 资源保护：启动需≥40GiB空闲，低于30GiB只停止本任务，构建材料≤20GiB；本轮最低398.87GiB、材料3.77GiB，无新增本机整包/Native重建或业务onStart。完整实例仅隔离CI，磁盘/Docker事故由独立会话跟踪，不清理现场数据。
+- 资源保护：启动需≥40GiB空闲，低于30GiB只停止本任务，构建材料≤20GiB；本轮最低398.65GiB；保护现计入根下解释器/浏览器缓存，峰值6.79GiB，旧材料保留。新源整包重建中，未启动业务实例。完整实例仅隔离CI，磁盘/Docker事故由独立会话跟踪，不清理现场数据。
 - P0–P5组件已接统一内置Node/Python/浏览器、隔离可写依赖、GUI/CLI同实例、OS peer、首次配置/权限/诊断、内置Bash与稳定MCP id环境；五类真实隔离stdio连接及部分四平台有证据。已有GUI配置→聊天→持久ack/交付使用loopback模型；真实Provider完整GUI未验收，不能以两次短直连代替。
 - I1/I2及I3底层已接严格安装身份、唯一GUI/Core版本对、离线向导、OS入口和整体准备；共同schema3范围迁移只访问实际写入范围，不复制无关200GiB历史，旧schema1/2恢复保留。GUI停止段已有目标证明→锁内空闲→精确停机→一次转换→成对提交；真实目标Node/唯一备份/完成凭据与有限Electron重启锁交接通过。ASAR内声明及校验器在首次外置Core导入前拒绝错配/字节损坏/移根，不创建空数据或回退另一Core。正式可信下载/签名、不同GUI二进制交接与健康、登录项、中断修复、旧CLI完整接管、保留式卸载及Ubuntu默认沙箱授权仍未收口，详见[安装根计划](crabot-docs/superpowers/plans/2026-10-19-desktop-install-root-implementation.md)。
 - Ubuntu原生引导已确认且protocol-desktop§2.2先行；ca2的24/26 GTK首窗/helper及24真实内核三job全部通过（精确入口授权、邻近拒绝、全局不变）。同提交24.04原生封装已接，按实际清单只授权所含浏览器；配对Core明确启用沙箱，旧CLI/CDP保持，冻结SDK/元数据5项红绿通过。安装/载荷/入口/脱敏35通过、4平台跳过，范围19通过；343a旧基线四平台整包通过，不能替代最新原生安装；525候选已进入CI，完整包将临时传Ubuntu24验真实新安装/GUI/浏览器/MCP。取消竞态已修复：后端结束后仍等待旧授权回调收尾才允许重试；2988的40034997809两版实际GTK回归、首窗及24受限内核三job均success。525Linux已完成原生封装与包外后端核验，打包App烟测在/tmp祖先可写处被helper拒绝；夹具改专用HOME并补可写祖先拒绝，原生重验待跑。图形Polkit、默认GNOME/Wayland、26内核、发行/卸载仍待验；本机约400GiB空闲，无大包重构。
@@ -64,6 +64,7 @@
 - System按[确认Spec](crabot-docs/superpowers/specs/2026-10-18-system-mode-experience-design.md)/[协议](crabot-docs/protocols/protocol-system.md)/[计划](crabot-docs/superpowers/plans/2026-10-18-system-mode-experience-implementation.md)：S1–S4注册/降UID/systemd/本人CLI/批量启停重启/范围升级与受保护恢复已接，旧候选多轮三UID通过，新head仍需整机验证。S5有旧表/运行目录发现、精确停机、旧入口隔离/交接及专用数据/Python组件；完整旧共享转换协调、全部启动源/恢复、真实旧发行多UID仍未完成。自定义DATA_DIR/停止目录映射提案已撤回；旧Node指纹补充未确认且未实现。在线准备代码/环境，仅一致性备份/实际转换与切换停机。
 - 已集成main的Gemini原生08352c3e，仅共享导出冲突且两边保留；刷新本地file依赖产物后Agent57/Admin48/Shared3/Web2及五模块类型通过。原适配器69按主线既有10秒验证预算通过，默认5秒与随机约5秒重试冲突的失败日志保留；不改生产期限，不称默认全集绿。最新合并源完整CI继续。
 - 验收夹具时序：迟到cleanup清空后续spy、stop前实际尚未入队两项均有确定性红例；改为测试边界恢复/迟到清理只认原测试，以及真实队列hold后确认两条入队再stop。统一清理后的定向Core15、完整Harness261通过；已将新回归加入四平台筛选；525的Windows另现恢复接纳断言仅等1秒，实际鉴权尚未结束。1.1秒真实鉴权延迟先红，再改等初始化到达信号，13定向通过/206未选；未改产品或整体期限，Windows/Intel仍须原生验证。
+- CI成品525的Windows已走过界面模型配置/两次loopback回复/工作区清单，随后RSS观测PowerShell退出1；采样器改为先快照再筛已核验PID，避免短命子进程消失导致查询失败。根身份与partial语义保持，本机3项通过，实际Windows重跑仍待。
 - CI新增待定位：0470的Windows归档11通过/1失败，首次completion的根目录探针stage=exit拒绝；未改权限/恢复/超时，仅让CI失败报告保留已有脱敏探针事件。本机对应场景1通过/218未选，不能代验Windows。
 - 最终缺口：完整安装/更新/修复/卸载、旧部署迁移及故障恢复、签名/公证、macOS14/Windows11/Ubuntu GNOME24.04与26.04的权限/IME/沙箱/资源、真实模型任务分别验收；[签名指南](crabot-docs/guides/desktop-release-signing.md)。Agent34项和Admin两项既有失败已在未改main复现，分支WS关闭丢消息已修；不把基线、构建、部署或旧候选混成验收。逐项证据/旧结果保留在[总验收记录](crabot-docs/superpowers/plans/2026-10-17-desktop-application-validation.md)与对应计划；完成全部验证后才走PR。
 

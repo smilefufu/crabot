@@ -21,7 +21,9 @@ export async function observeDesktopResources(roots) {
   let rows
   if (process.platform === 'win32') {
     const shell = path.join(process.env.SystemRoot, 'System32/WindowsPowerShell/v1.0/powershell.exe')
-    const script = 'Get-Process -Id @(' + pids.join(',') + ') -ErrorAction SilentlyContinue | Select-Object Id,WorkingSet64 | ConvertTo-Json -Compress'
+    // A short-lived descendant may disappear after discovery. Snapshot first,
+    // then filter; requesting a missing -Id makes Windows PowerShell exit 1.
+    const script = 'Get-Process -ErrorAction Stop | Where-Object { @(' + pids.join(',') + ') -contains $_.Id } | Select-Object Id,WorkingSet64 | ConvertTo-Json -Compress'
     const { stdout } = await execute(shell, ['-NoProfile', '-NonInteractive', '-Command', script], { timeout: 15_000, maxBuffer: 65536 })
     const value = JSON.parse(stdout); rows = (Array.isArray(value) ? value : [value]).map(row => [row.Id, row.WorkingSet64])
   } else {
