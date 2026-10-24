@@ -10,7 +10,7 @@ import { desktopMaintenanceBootstrap } from '../desktop-maintenance-bootstrap.mj
 const desktopRequire = createRequire(new URL('../../../crabot-desktop/package.json', import.meta.url))
 const builderRequire = createRequire(createRequire(desktopRequire.resolve('electron-builder')).resolve('app-builder-lib/package.json'))
 const asar = builderRequire('@electron/asar')
-async function fixture(t, missingTray = false, installer = false, pair) {
+async function fixture(t, missingTray = false, installer = false, pair, omitted = []) {
   const parent = await fs.mkdtemp(path.join(tmpdir(), 'Crabot ASAR 中文 ')), source = path.join(parent, 'source'), archive = path.join(parent, 'app.asar')
   t.after(() => fs.rm(parent, { recursive: true, force: true }))
   const files = { 'dist/bootstrap/scripts/lib/desktop-removal-record.cjs': 'module.exports={}', 'dist/main.js': 'export{}', 'dist/bootstrap/scripts/lib/desktop-installation.cjs': 'module.exports={}',
@@ -21,8 +21,9 @@ async function fixture(t, missingTray = false, installer = false, pair) {
   if (installer) for (const file of ['dist/installer-main.js', 'dist/installer-preload.cjs', 'dist/installation-progress-window.js', 'dist/installation-entries.js',
     'dist/bootstrap/scripts/lib/desktop-payload.mjs', 'dist/bootstrap/scripts/lib/desktop-preparation-files.mjs', 'dist/bootstrap/scripts/lib/desktop-repair.mjs', 'dist/bootstrap/scripts/lib/desktop-program-proof.mjs', 'dist/bootstrap/scripts/lib/desktop-removal-proof.mjs', 'dist/bootstrap/scripts/lib/desktop-removal-host.mjs', 'dist/bootstrap/scripts/lib/module-process-start.cjs', 'dist/bootstrap/scripts/lib/instance-controller.mjs', 'dist/bootstrap/scripts/lib/core-release.mjs', 'dist/bootstrap/scripts/lib/physical-fs.cjs']) files[file] = 'installer fixture'
   for (const file of desktopMaintenanceBootstrap) files['dist/bootstrap/' + file] = 'fixed maintenance fixture'
-  for (const file of ['dist/operation-progress-window.js', 'dist/operation-progress.js', 'dist/removal-progress-window.js', 'dist/removal-preload.cjs']) files[file] = 'fixed progress fixture'
+  for (const file of ['dist/operation-progress-window.js', 'dist/operation-progress.js', 'dist/removal-progress-window.js', 'dist/removal-preload.cjs', 'dist/installation-entries.js', 'dist/installation-removal.js']) files[file] = 'fixed progress fixture'
   if (pair) files['dist/desktop-release.json'] = pair.text
+  for (const file of omitted) delete files[file]
   if (missingTray) delete files['dist/assets/tray.png']
   for (const [file, bytes] of Object.entries(files)) {
     await fs.mkdir(path.dirname(path.join(source, file)), { recursive: true }); await fs.writeFile(path.join(source, file), bytes)
@@ -120,7 +121,7 @@ for (const member of desktopMaintenanceBootstrap) test('GUI and installer ASAR r
   assert.throws(() => verifyInstallerAsar(missing, archive), /missing fixed maintenance dependency/)
 })
 
-for (const member of ['dist/operation-progress-window.js', 'dist/operation-progress.js', 'dist/removal-progress-window.js', 'dist/removal-preload.cjs']) test('GUI and installer require fixed progress code: ' + member, async t => {
+for (const member of ['dist/operation-progress-window.js', 'dist/operation-progress.js', 'dist/removal-progress-window.js', 'dist/removal-preload.cjs', 'dist/installation-entries.js', 'dist/installation-removal.js']) test('GUI and installer require fixed progress code: ' + member, async t => {
   const archive = await fixture(t, false, true)
   const missing = { statFile: (file, name) => {
     if (name === path.normalize(member)) throw new Error('missing fixed progress component')
@@ -128,4 +129,12 @@ for (const member of ['dist/operation-progress-window.js', 'dist/operation-progr
   } }
   assert.throws(() => verifyDesktopAsar(missing, archive), /missing fixed progress component/)
   assert.throws(() => verifyInstallerAsar(missing, archive), /missing fixed progress component/)
+})
+
+
+for (const installer of [false, true]) test('GUI and installer archives refuse missing CLI-removal code: ' + installer, async t => {
+  const archive = await fixture(t, false, installer, undefined, ['dist/installation-removal.js'])
+  for (const [reader, platform] of [[asar, process.platform], [windowsFilesystem(archive), 'win32']]) {
+    assert.throws(() => (installer ? verifyInstallerAsar : verifyDesktopAsar)(reader, archive, platform), /installation-removal.*not found/)
+  }
 })

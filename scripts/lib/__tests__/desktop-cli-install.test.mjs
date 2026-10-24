@@ -106,3 +106,11 @@ test('a command directory writable by other accounts is preserved without regist
   assert.equal((await fs.stat(f.prefix)).mode & 0o777, 0o777)
   await assert.rejects(fs.lstat(path.join(f.prefix, 'crabot')), { code: 'ENOENT' })
 })
+
+
+test('command registration never creates missing desktop data', isolatedOnly, async t => {
+  const f = await fixture(t)
+  await fs.rm(f.dataDir, { recursive: true })
+  await assert.rejects(installDesktopCli(f))
+  await assert.rejects(fs.lstat(f.dataDir), { code: 'ENOENT' })
+})

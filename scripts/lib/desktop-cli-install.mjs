@@ -9,15 +9,14 @@ import installation from './desktop-installation.cjs'
 import identity from './process-identity.cjs'
 import management from './desktop-management.cjs'
 import { verifyCoreRelease } from './core-release.mjs'
-import { acquireCliLock, releaseCliLock } from './cli-lock.mjs'
+import { acquireExistingCliLock, releaseCliLock } from './cli-lock.mjs'
 import { assertVersionMaintenanceAllowsStart } from './version-maintenance.mjs'
 import { detectMode } from './mode.mjs'
 import { notifyCliPathChange } from './cli-path-notification.mjs'
+import { windowsCommand, windowsPairedCommand } from './desktop-cli-text.mjs'
 
 const start = '# >>> Crabot desktop CLI >>>', end = '# <<< Crabot desktop CLI <<<'
 const pathBlock = `${start}\ncase ":$PATH:" in\n  *":$HOME/.local/bin:"*) ;;\n  *) export PATH="$HOME/.local/bin:$PATH" ;;\nesac\n${end}`
-const windowsCommand = '@echo off\r\nsetlocal DisableDelayedExpansion\r\nset "CRABOT_CLI_ROOT=%~dp0.crabot-desktop-core"\r\n"%CRABOT_CLI_ROOT%\\.product-runtime\\node\\node.exe" "%CRABOT_CLI_ROOT%\\cli.mjs" %*\r\nexit /b %errorlevel%\r\n'
-const windowsPairedCommand = '@echo off\r\nsetlocal DisableDelayedExpansion\r\n"%~dp0.crabot-desktop-core\\bin\\crabot.exe" %*\r\nexit /b %errorlevel%\r\n'
 const fail = message => { throw Object.assign(new Error(message), { code: 'CRABOT_CLI_INSTALL_REQUIRED' }) }
 async function stat(file) { try { return await fs.lstat(file) } catch (error) { if (error.code === 'ENOENT') return null; throw error } }
 async function regular(file) {
@@ -99,7 +98,7 @@ export async function installDesktopCli({ coreRoot, dataDir, home = homedir(), e
   const windows = process.platform === 'win32'
   const prefix = windows ? path.join(env.LOCALAPPDATA || path.join(home, 'AppData/Local'), 'Crabot/cli') : path.join(home, '.local/bin')
   const metadata = path.join(prefix, '.crabot-desktop-cli.json'), entry = path.join(prefix, windows ? 'crabot.cmd' : 'crabot')
-  const lock = await acquireCliLock(dataDir, 'desktop-install-cli')
+  const lock = await acquireExistingCliLock(dataDir, 'desktop-install-cli')
   let shellFiles
   try {
     assertVersionMaintenanceAllowsStart(dataDir)

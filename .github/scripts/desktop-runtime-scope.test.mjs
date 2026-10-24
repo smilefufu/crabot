@@ -35,6 +35,8 @@ for (const [file, expected] of [
   ['scripts/lib/known-process-stop.cjs', true],
   ['scripts/lib/known-process-exit.cjs', true],
   ['scripts/lib/desktop-preparation-files.mjs', true],
+  ['scripts/lib/desktop-cli-text.mjs', true],
+  ['crabot-desktop/tests/cli-removal.test.mjs', true],
   ['scripts/lib/desktop-repair.mjs', true],
   ['scripts/lib/desktop-program-proof.mjs', true],
   ['scripts/lib/desktop-removal-proof.mjs', true],
