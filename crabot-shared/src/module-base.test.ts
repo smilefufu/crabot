@@ -43,20 +43,31 @@ const SENSITIVE_METHODS: SensitiveRpcMethod[] = [
   'cancel_worker_implementation_operation',
 ]
 
-test('RPC wall deadline destroys a stalled partial response instead of leaving playback pending', async () => {
-  let closed = false
+test('RPC wall deadline destroys a stalled partial response instead of leaving playback pending', { timeout: 5000 }, async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  let sent!: (error?: Error | null) => void, disconnected!: () => void
+  const partial = new Promise<void>((resolve, reject) => { sent = error => error ? reject(error) : resolve() })
+  const closed = new Promise<void>(resolve => { disconnected = resolve })
   const server = http.createServer((req, res) => {
     req.resume()
-    res.on('close', () => { closed = true })
-    res.writeHead(200, { 'Content-Type': 'application/json' }); res.write('{"success":')
+    res.on('close', disconnected)
+    res.writeHead(200, { 'Content-Type': 'application/json' }); res.write('{"success":', sent)
   })
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
-  try {
-    const port = (server.address() as { port: number }).port
-    await assert.rejects(new RpcClient().call(port, 'send_message', {}, 'voice-probe', undefined, { timeoutMs: 80 }), /timed out/)
-    await new Promise(resolve => setTimeout(resolve, 20))
-    assert.equal(closed, true)
-  } finally { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())) }
+  t.after(async () => { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())) })
+  const port = (server.address() as { port: number }).port
+  let settled = false
+  const response = new RpcClient().call(port, 'send_message', {}, 'voice-probe', undefined, { timeoutMs: 80 })
+    .finally(() => { settled = true })
+  const timedOut = assert.rejects(response, /timed out/)
+  // Establish the actual partial response before advancing the registered timer;
+  // slow localhost lookup or delivery of a close event is not an RPC leak.
+  await partial
+  t.mock.timers.tick(79); await new Promise<void>(resolve => setImmediate(resolve))
+  assert.equal(settled, false)
+  t.mock.timers.tick(1)
+  await timedOut
+  await closed
 })
 
 test('interrupted RPC bodies fail promptly even without an explicit call deadline', async () => {
