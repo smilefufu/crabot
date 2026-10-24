@@ -15,9 +15,9 @@ test('actual sandboxed Electron window enforces local-frame IPC and direct reque
       const child = spawn(createRequire(import.meta.url)('electron'), [fileURLToPath(new URL('./electron-boundary.cjs', import.meta.url))], { env, stdio: ['ignore', 'pipe', 'pipe'], timeout: 30_000 })
       let output = ''
       child.stdout.on('data', data => { output += data }); child.stderr.on('data', data => { output += data })
-      child.on('error', reject); child.on('close', (code, signal) => resolve({ code, signal, output }))
+      child.on('error', reject); child.on('close', (code, signal) => resolve({ code, signal, termination_requested: child.killed, output }))
     })
-    assert.equal(result.code, 0, result.output)
+    assert.equal(result.code, 0, JSON.stringify({ code: result.code, signal: result.signal, termination_requested: result.termination_requested }) + '\n' + result.output)
     const line = result.output.split('\n').find(line => line.startsWith('CRABOT_ELECTRON_BOUNDARY '))
     assert.ok(line, result.output)
     assert.equal(JSON.parse(line.slice('CRABOT_ELECTRON_BOUNDARY '.length)).direct_http_header, true)

@@ -68,6 +68,7 @@
 - 签名缓存跨启动先核当前远端原始签名与实际包，坏缓存/未知文件保留；返回Buffer不授清理权限。下载13项、相关54项通过。明确安装协调器新增10项身份/取消/并发/故障回归，实际签名→内置Python→完整GUI/Core→最终目录预览已由协调器驱动，旧PID/数据/选择不变；平台授权、不同GUI交接及健康尚待，未开放正式通道。
 - Ubuntu更新helper e580的24/26原生编译与24真实受限内核CI均通过：新旧入口规则并存、相邻程序拒绝、全局设置不变。共用纯就绪/有限探针及停止前授权组件已实现，72相关通过/2Linux条件跳过；不复用新装提交、Root不跑JS。独立实际Electron GUI入口交接两项本机通过，普通stop为0；完整主宿主更新、登录项、图形Polkit和目标健康仍待。
 - Ubuntu24首次真实整包安装在profile阶段失败；固定Electron实证ready后enableSandbox会抛错，原探测在异步IO后调用存在竞态。安装后端改为进程启动参数enable-sandbox，仍拒绝禁用沙箱参数/保留内核核验；新增延迟profile真实Linux入口回归接CI，本机12过/1仅Linux跳过，不称Ubuntu已修验。
+- 151矩阵Intel原生窗口新增EGL/GPU初始化失败及app://加载中断，根因未定；仅加阶段计时/终止请求证据，未放宽期限或改生产GPU，本机实际Electron1项通过，待Intel新源诊断。
 - CI新增待定位：0470的Windows归档11通过/1失败，首次completion的根目录探针stage=exit拒绝；未改权限/恢复/超时，仅让CI失败报告保留已有脱敏探针事件。本机对应场景1通过/218未选，不能代验Windows。
 - 最终缺口：完整安装/更新/修复/卸载、旧部署迁移及故障恢复、签名/公证、macOS14/Windows11/Ubuntu GNOME24.04与26.04的权限/IME/沙箱/资源、真实模型任务分别验收；[签名指南](crabot-docs/guides/desktop-release-signing.md)。Agent34项和Admin两项既有失败已在未改main复现，分支WS关闭丢消息已修；不把基线、构建、部署或旧候选混成验收。逐项证据/旧结果保留在[总验收记录](crabot-docs/superpowers/plans/2026-10-17-desktop-application-validation.md)与对应计划；完成全部验证后才走PR。
 

@@ -8,6 +8,8 @@ const { once } = require('node:events')
 const assert = require('node:assert/strict')
 const { WebSocketServer } = require('../../crabot-admin/node_modules/ws')
 
+const started = Date.now()
+const phase = value => console.log('CRABOT_BOUNDARY_PHASE ' + JSON.stringify({ phase: value, elapsed_ms: Date.now() - started }))
 app.setName('Crabot boundary fixture')
 protocol.registerSchemesAsPrivileged([{ scheme: 'app', privileges: { standard: true, secure: true, supportFetchAPI: true } }])
 const windows = [], servers = [], clients = new Set()
@@ -18,6 +20,7 @@ async function main() {
   await fs.mkdir(path.join(root, 'profile'), { recursive: true })
   app.setPath('userData', path.join(root, 'profile'))
   await app.whenReady()
+  phase('app-ready')
   assert.throws(() => app.enableSandbox(), /before.*ready/i)
   console.log('CRABOT_ELECTRON_NATIVE_HOST loading Node-API helper in Electron ' + process.versions.electron)
   const identity = require('../../scripts/lib/process-identity.cjs')
@@ -95,7 +98,9 @@ async function main() {
     diagnostics: async () => preview = await collectDiagnostics(path.join(__dirname, '../..'), state, []),
     exportDiagnostics: async id => { assert.equal(id, preview.report_id); exported = id; return false },
   })
+  phase('local-frames-loading')
   await trusted.loadURL('app://crabot/'); await foreign.loadURL('app://crabot/')
+  phase('local-frames-ready')
   assert.equal(isTrustedFrame(trusted.webContents.mainFrame, trusted.webContents), true)
   assert.equal(await trusted.webContents.executeJavaScript('typeof window.require'), 'undefined')
   const surface = await trusted.webContents.executeJavaScript('(async()=>({state:await window.crabotDesktop.getState(), keys:Object.keys(window.crabotDesktop), localToken:localStorage.getItem("crabot_admin_token")}))()')
@@ -115,6 +120,7 @@ async function main() {
   assert.equal(await trusted.webContents.executeJavaScript('window.crabotDesktop.selectWorkspaceDirectory()'), root)
   assert.equal(await foreign.webContents.executeJavaScript('window.crabotDesktop.selectWorkspaceDirectory().then(()=>false,()=>true)'), true)
   assert.equal(directorySelections, 1)
+  phase('release-boundaries')
   const { createUpdateDriver } = await module('update-driver.js')
   const candidateResources = path.join(root, 'candidate-resources')
   await fs.mkdir(candidateResources)
@@ -127,6 +133,7 @@ async function main() {
   await fs.writeFile(path.join(candidateResources, 'desktop-release.json'), '{}')
   assert.equal(await createUpdateDriver({ resources: candidateResources, cacheRoot: path.join(root, 'updater-cache'), packaged: true,
     beginExit: () => { throw new Error('Paired roots must never use a legacy package installer') } }), null)
+  phase('release-transport')
   const { createDesktopReleaseTransport } = await module('release-transport.js')
   await privateSession.cookies.set({ url: origin, name: 'admin-fixture', value: 'must-not-send' })
   const releaseTransport = createDesktopReleaseTransport()
@@ -184,10 +191,12 @@ async function main() {
   artifacts.close()
   // Load the real built React application with only local, explicitly simulated
   // Admin read responses. No model endpoint or business MM is started.
+  phase('react-page-loading')
   wholeUi = true
   privateSession.protocol.unhandle('app')
   attachLocalPages(privateSession, path.join(__dirname, '../../crabot-admin/dist/web'))
   await trusted.loadURL('app://crabot/')
+  phase('react-page-ready')
   async function waitFor(script) {
     const deadline = Date.now() + 5000
     while (Date.now() < deadline) {
