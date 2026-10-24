@@ -45,9 +45,12 @@ async function originalProof(root, selection) {
 }
 async function context(root, verifyStopped) {
   if (typeof verifyStopped !== 'function') fail('修复前必须核实共享实例和应用程序已停止。')
-  const own = installation.readDesktopInstallation(root), reference = installation.readDesktopPairReference(root)
+  const own = installation.readDesktopInstallation(root)
+  installation.assertDesktopRemovalAllowsStart(own.root)
+  const reference = installation.readDesktopPairReference(root)
   const dataIdentity = directoryIdentity(await fs.lstat(own.dataDir, { bigint: true })), proof = await originalProof(own.root, reference.selection)
   const current = async () => {
+    installation.assertDesktopRemovalAllowsStart(own.root)
     if (!same(installation.readDesktopInstallation(own.root).record, own.record)
       || !same(installation.readDesktopPairReference(own.root), reference)
       || directoryIdentity(await fs.lstat(own.dataDir, { bigint: true })) !== dataIdentity) fail('安装或数据目录身份已变化，原文件已保留。')

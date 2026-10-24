@@ -251,3 +251,90 @@ test('production peer policy requires the selected executable and rejects fixtur
   arguments_ = [peer.executable]
   assert.equal(entry.verifyDesktopEntry(peer, { ...policy, executable: f.executable }), false)
 })
+
+
+const removalRecord = f => ({ schema_version: 1, installation_id: f.record.installation_id, operation_id: randomUUID(), source_selection: f.selection, phase: 'preparing', proof_sha256: 'a'.repeat(64) })
+for (const phase of ['preparing', 'stopping', 'removing', 'completed']) test('desktop removal protection blocks GUI/CLI selection and native launch without changing data: ' + phase, async t => {
+  const f = await fixture(t), record = { ...removalRecord(f), phase }
+  await privateJson(path.join(f.root, '.desktop-removal.json'), record)
+  const before = await fs.readFile(path.join(f.root, 'current-release.json'))
+  assert.throws(() => desktop.readDesktopSelection(f.root), { code: 'CRABOT_DESKTOP_REMOVAL_PENDING' })
+  assert.throws(() => desktop.locateDesktopCore(f.coreRoot), { code: 'CRABOT_DESKTOP_REMOVAL_PENDING' })
+  assert.throws(() => desktop.locateDesktopGui(f.resources), { code: 'CRABOT_DESKTOP_REMOVAL_PENDING' })
+  assert.deepEqual(desktop.readDesktopPairReference(f.root).selection, f.selection, 'diagnosis does not authorize startup')
+  await assert.rejects(promisify(execFile)(path.join(f.root, 'bin', nativeName), ['help'], { env: { ...process.env, PATH: '' } }), error => error.code === 127 && /remov|uninstall/i.test(error.stderr))
+  assert.deepEqual(await fs.readFile(path.join(f.root, 'current-release.json')), before)
+  assert.deepEqual(await fs.readdir(path.join(f.root, 'data')), [])
+})
+for (const changed of ['malformed', 'directory', 'link']) test('unreadable removal protection never permits ordinary native startup: ' + changed, async t => {
+  const f = await fixture(t), file = path.join(f.root, '.desktop-removal.json')
+  if (changed === 'malformed') await fs.writeFile(file, 'invalid interrupted removal')
+  else if (changed === 'directory') await fs.mkdir(file)
+  else await fs.symlink(path.join(f.parent, 'missing-removal-state'), file, 'file')
+  await assert.rejects(promisify(execFile)(path.join(f.root, 'bin', nativeName), ['help'], { env: { ...process.env, PATH: '' } }), error => error.code === 127 && /remov|uninstall/i.test(error.stderr))
+  assert.throws(() => desktop.readDesktopSelection(f.root), { code: 'CRABOT_DESKTOP_REMOVAL_PENDING' })
+  assert.deepEqual(await fs.readdir(path.join(f.root, 'data')), [])
+})
+test('strict private removal reader returns facts only and preserves historical source selection', async t => {
+  const f = await fixture(t), removal = await import('../desktop-removal-record.cjs')
+  assert.equal(removal.default.readDesktopRemoval(f.root), null)
+  const record = removalRecord(f), file = path.join(f.root, '.desktop-removal.json')
+  await privateJson(file, record)
+  assert.deepEqual(removal.default.readDesktopRemoval(f.root), record)
+  // Reinstall may have selected a verified new target while the original
+  // removal fence still blocks business. Parsing never authorizes that target.
+  await fs.writeFile(path.join(f.root, 'current-release.json'), JSON.stringify({ ...f.selection, gui_id: randomUUID() }) + '\n')
+  assert.deepEqual(removal.default.readDesktopRemoval(f.root), record)
+  assert.equal(await fs.readFile(file, 'utf8'), JSON.stringify(record) + '\n')
+  assert.deepEqual(await fs.readdir(path.join(f.root, 'data')), [])
+})
+for (const changed of ['wrong-installation', 'bad-phase', 'bad-uuid', 'bad-hash', 'extra', 'unknown-selection', 'noncanonical', 'duplicate', 'hardlink', ...(windows ? [] : ['wide-permissions'])]) test('strict removal reader rejects changed or ambiguous state: ' + changed, async t => {
+  const f = await fixture(t), removal = (await import('../desktop-removal-record.cjs')).default, record = removalRecord(f), file = path.join(f.root, '.desktop-removal.json')
+  if (changed === 'wrong-installation') record.installation_id = randomUUID()
+  else if (changed === 'bad-phase') record.phase = 'cancelled'
+  else if (changed === 'bad-uuid') record.operation_id = '../another-installation'
+  else if (changed === 'bad-hash') record.proof_sha256 = 'a'.repeat(63)
+  else if (changed === 'extra') record.executable = '/untrusted/temporary-program'
+  else if (changed === 'unknown-selection') record.source_selection.extra = true
+  await privateJson(file, record)
+  if (changed === 'noncanonical') await fs.appendFile(file, ' ')
+  else if (changed === 'duplicate') await fs.writeFile(file, '{"schema_version":0,' + JSON.stringify(record).slice(1) + '\n')
+  else if (changed === 'hardlink') await fs.link(file, file + '.other')
+  else if (changed === 'wide-permissions') await fs.chmod(file, 0o644)
+  assert.throws(() => removal.readDesktopRemoval(f.root), { code: 'CRABOT_DESKTOP_REMOVAL' })
+  assert.deepEqual(await fs.readdir(path.join(f.root, 'data')), [])
+})
+
+for (const managed of [false, true]) test('normal MM entry refuses removal before data, PID, venv or business initialization: ' + managed, async t => {
+  const f = await fixture(t), cwd = path.join(f.coreRoot, 'crabot-core'), forbidden = path.join(f.parent, 'never-create-data')
+  const entryFile = path.resolve(library, '../../crabot-core/dist/main.js'), preload = path.join(f.parent, 'finite-mm-preload.cjs'), marker = path.join(f.parent, 'business-started')
+  await fs.mkdir(cwd)
+  await privateJson(path.join(f.root, '.desktop-removal.json'), removalRecord(f))
+  await fs.writeFile(preload, `const Module=require('node:module'),fs=require('node:fs');const load=Module._load;Module._load=function(request,parent,...rest){if(parent?.filename===${JSON.stringify(entryFile)}){if(request==='./index.js')return class{constructor(){fs.writeFileSync(${JSON.stringify(marker)},'must never construct business MM');throw new Error('business forbidden')}};if(request==='./agent-venv.js')return{ensureAgentVenv(){fs.writeFileSync(${JSON.stringify(marker)},'must never create venv');throw new Error('venv forbidden')}}}return load.call(this,request,parent,...rest)}`)
+  const env = { ...process.env, DATA_DIR: forbidden, CRABOT_PRODUCT_REQUIRED: '0', CRABOT_DEV: 'false', CRABOT_PORT_OFFSET: '0' }
+  if (managed) env.CRABOT_INSTANCE_GENERATION = randomUUID()
+  else delete env.CRABOT_INSTANCE_GENERATION
+  await assert.rejects(promisify(execFile)(process.execPath, ['--require', preload, entryFile], { cwd, env, timeout: 12000, maxBuffer: 65536 }), error => error.code === 1 && /卸载|CRABOT_DESKTOP_REMOVAL_PENDING/.test(error.stderr))
+  await assert.rejects(fs.lstat(forbidden), { code: 'ENOENT' })
+  await assert.rejects(fs.lstat(marker), { code: 'ENOENT' })
+  assert.deepEqual(await fs.readdir(path.join(f.root, 'data')), [])
+})
+
+for (const changed of ['oversized', 'replaced-during-read']) test('strict removal reader bounds bytes and rejects a changed open record: ' + changed, async t => {
+  const f = await fixture(t), removal = (await import('../desktop-removal-record.cjs')).default, file = path.join(f.root, '.desktop-removal.json')
+  await privateJson(file, removalRecord(f))
+  if (changed === 'oversized') await fs.writeFile(file, 'x'.repeat(4097))
+  const read = fsSync.readFileSync
+  let descriptorReads = 0
+  const injected = t.mock.method(fsSync, 'readFileSync', function(source, ...args) {
+    const result = read.call(this, source, ...args)
+    if (typeof source === 'number') { descriptorReads++; if (changed === 'replaced-during-read') fsSync.appendFileSync(file, ' ') }
+    return result
+  })
+  try { assert.throws(() => removal.readDesktopRemoval(f.root), { code: 'CRABOT_DESKTOP_REMOVAL' }) }
+  finally { injected.mock.restore() }
+  assert.equal(descriptorReads, changed === 'oversized' ? 0 : 1)
+  assert.throws(() => desktop.readDesktopSelection(f.root), { code: 'CRABOT_DESKTOP_REMOVAL_PENDING' })
+  await fs.rename(file, file + '.retained')
+  assert.deepEqual(await fs.readdir(path.join(f.root, 'data')), [])
+})

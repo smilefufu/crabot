@@ -252,7 +252,9 @@ app.on('window-all-closed', () => { /* Tray owns the application lifetime. */ })
 app.on('will-quit', () => { updates?.close(); artifacts?.close(); controller?.close(); tray?.destroy() })
 void boot().catch(async error => {
   await app.whenReady()
-  await dialog.showMessageBox({ type: 'error', message: ['CRABOT_DESKTOP_INSTALLATION', 'CRABOT_CORE_INTEGRITY'].includes(error?.code)
-    ? 'Crabot 安装位置、内置文件或版本对未通过校验，请使用同版或更高版安装包修复。已有数据保留。' : 'Crabot 界面启动失败，请修复安装。' })
+  let message = 'Crabot 界面启动失败，请修复安装。'
+  if (error?.code === 'CRABOT_DESKTOP_REMOVAL_PENDING') message = 'Crabot 卸载尚未完成。请继续卸载，或使用同版/更高版离线安装器修复。用户数据已保留。'
+  else if (['CRABOT_DESKTOP_INSTALLATION', 'CRABOT_CORE_INTEGRITY'].includes(error?.code)) message = 'Crabot 安装位置、内置文件或版本对未通过校验，请使用同版或更高版安装包修复。已有数据保留。'
+  await dialog.showMessageBox({ type: 'error', message })
   quitting = true; app.quit()
 })

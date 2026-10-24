@@ -12,7 +12,7 @@ const asar = builderRequire('@electron/asar')
 async function fixture(t, missingTray = false, installer = false, pair) {
   const parent = await fs.mkdtemp(path.join(tmpdir(), 'Crabot ASAR 中文 ')), source = path.join(parent, 'source'), archive = path.join(parent, 'app.asar')
   t.after(() => fs.rm(parent, { recursive: true, force: true }))
-  const files = { 'dist/main.js': 'export{}', 'dist/bootstrap/scripts/lib/desktop-installation.cjs': 'module.exports={}',
+  const files = { 'dist/bootstrap/scripts/lib/desktop-removal-record.cjs': 'module.exports={}', 'dist/main.js': 'export{}', 'dist/bootstrap/scripts/lib/desktop-installation.cjs': 'module.exports={}',
     'dist/bootstrap/scripts/lib/core-release.mjs': 'export{}', 'dist/bootstrap/scripts/lib/physical-fs.cjs': 'module.exports={}',
     'dist/bootstrap/scripts/lib/process-identity.cjs': 'module.exports={}', 'dist/bootstrap/crabot-native/build/Release/crabot-native.node': 'native fixture', 'dist/preload.cjs': 'module.exports={}', 'dist/assets/tray.png': 'fixture tray bytes',
     'node_modules/crabot-client/dist/index.js': 'export{}', 'node_modules/zod/package.json': '{}', 'node_modules/electron-updater/package.json': '{}', 'node_modules/@electron/asar/package.json': '{}' }
@@ -90,7 +90,7 @@ test('an unbounded ASAR header is rejected before invoking the parser', async t 
 })
 
 
-for (const member of ['dist/ubuntu-process.js', 'dist/ubuntu-program-probe.js', 'dist/ubuntu-update.js', 'dist/paired-update.js', 'dist/release-intake.js', 'dist/release-signatures.js', 'dist/release-download.js', 'dist/release-transport.js', 'dist/bootstrap/scripts/lib/desktop-management.cjs', 'dist/bootstrap/scripts/desktop/extract-paired-release.py']) {
+for (const member of ['dist/ubuntu-process.js', 'dist/ubuntu-program-probe.js', 'dist/ubuntu-update.js', 'dist/paired-update.js', 'dist/release-intake.js', 'dist/release-signatures.js', 'dist/release-download.js', 'dist/release-transport.js', 'dist/bootstrap/scripts/lib/desktop-management.cjs', 'dist/bootstrap/scripts/lib/desktop-removal-record.cjs', 'dist/bootstrap/scripts/desktop/extract-paired-release.py']) {
   test('packaged GUI requires its own trusted release component: ' + member, async t => {
     const archive = await fixture(t)
     const missing = { statFile: (file, name) => { if (name === path.normalize(member)) throw new Error('missing trusted release resource'); return asar.statFile(file, name) } }
@@ -98,7 +98,7 @@ for (const member of ['dist/ubuntu-process.js', 'dist/ubuntu-program-probe.js', 
   })
 }
 
-for (const member of ['desktop-preparation-files.mjs', 'desktop-repair.mjs']) test('installer ASAR requires its own preparation/repair module: ' + member, async t => {
+for (const member of ['desktop-preparation-files.mjs', 'desktop-repair.mjs', 'desktop-removal-record.cjs']) test('installer ASAR requires its own preparation/repair module: ' + member, async t => {
   const archive = await fixture(t, false, true)
   const missing = { statFile: (file, name) => {
     if (name === path.normalize('dist/bootstrap/scripts/lib/' + member)) throw new Error('missing independent installation component')

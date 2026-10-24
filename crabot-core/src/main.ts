@@ -14,6 +14,8 @@ import { createOrphanTerminationConfirmer } from './orphan-recovery-prompt.js'
 async function main(): Promise<void> {
   // 获取模块路径
   const CRABOT_ROOT = path.resolve(process.cwd(), '..')
+  // A desktop removal fence blocks direct MM startup before any data/PID work.
+  require('../../scripts/lib/desktop-installation.cjs').locateDesktopCore(CRABOT_ROOT)
   const ADMIN_DIR = path.join(CRABOT_ROOT, 'crabot-admin')
   const AGENT_DIR = path.join(CRABOT_ROOT, 'crabot-agent')
   const PORT_OFF = parseInt(process.env.CRABOT_PORT_OFFSET || '0', 10)

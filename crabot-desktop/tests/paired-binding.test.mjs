@@ -11,7 +11,7 @@ import identity from '../../scripts/lib/process-identity.cjs'
 import management from '../../scripts/lib/desktop-management.cjs'
 import { writeCoreRelease } from '../../scripts/lib/core-release.mjs'
 
-for (const scenario of ['pin-mismatch', 'core-corrupt', 'detached-pair']) test('actual GUI entry refuses external Core execution before initialization: ' + scenario, { timeout: 35_000 }, async t => {
+for (const scenario of ['pin-mismatch', 'core-corrupt', 'detached-pair', 'removal']) test('actual GUI entry refuses external Core execution before initialization: ' + scenario, { timeout: 35_000 }, async t => {
   const parent = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'crabot-gui-binding-')))
   t.after(() => fs.rm(parent, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }))
   const root = management.ensurePrivateDataRoot(path.join(parent, 'install')), profile = management.ensurePrivateDataRoot(path.join(parent, 'profile'))
@@ -38,6 +38,7 @@ for (const scenario of ['pin-mismatch', 'core-corrupt', 'detached-pair']) test('
     if (process.platform === 'win32') identity.writePrivateFile(path.join(root, file), JSON.stringify(value) + '\n')
     else await fs.writeFile(path.join(root, file), JSON.stringify(value) + '\n', { mode: 0o600 })
   }
+  if (scenario === 'removal') await fs.writeFile(path.join(root, '.desktop-removal.json'), 'interrupted removal must block without executing Core')
   if (scenario === 'core-corrupt') await fs.appendFile(path.join(core, 'scripts/lib/instance.mjs'), '\n// changed after sealing')
   if (scenario === 'detached-pair') {
     const moved = path.join(parent, 'detached/app/releases', selection.gui_id)
@@ -58,6 +59,6 @@ for (const scenario of ['pin-mismatch', 'core-corrupt', 'detached-pair']) test('
   })
   assert.equal(result.code, 0, result.output)
   const evidence = JSON.parse(await fs.readFile(report, 'utf8'))
-  assert.deepEqual(evidence, { external_core_executed: false, repair_shown: true, data_entries: [], business_mm_started: false, actual_packaged_binary: false })
+  assert.deepEqual(evidence, { external_core_executed: false, repair_shown: true, removal_shown: scenario === 'removal', data_entries: [], business_mm_started: false, actual_packaged_binary: false })
   console.log('CRABOT_GUI_BINDING_REJECTION ' + JSON.stringify({ scenario, ...evidence }))
 })

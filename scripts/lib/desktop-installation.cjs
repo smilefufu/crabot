@@ -57,9 +57,13 @@ function readDesktopPairReference(root) {
     return { installation_id: installation.record.installation_id, install_root: installation.root, data_dir: installation.dataDir, selection }
   } catch { fail() }
 }
+function assertDesktopRemovalAllowsStart(root) {
+  if (present(path.join(root, '.desktop-removal.json'))) throw Object.assign(new Error('Crabot 正在卸载或等待恢复；请继续卸载或使用离线安装器修复。用户数据已保留，未启动实例。'), { code: 'CRABOT_DESKTOP_REMOVAL_PENDING' })
+}
 function readDesktopSelection(root) {
   try {
     const installation = readDesktopInstallation(root)
+    assertDesktopRemovalAllowsStart(installation.root)
     if (present(path.join(installation.root, '.desktop-installing.json'))) fail()
     const selection = readPairSelection(installation)
     const guiRoot = path.join(installation.root, 'app/releases', selection.gui_id)
@@ -79,7 +83,7 @@ function readDesktopSelection(root) {
     if (!entry.isFile() || entry.isSymbolicLink() || entry.nlink !== 1
       || (process.platform === 'win32' ? !identity.isOwnedFile(executable) : String(entry.uid) !== identity.inspectProcess(process.pid).owner)) fail()
     return { ...installation, selection, coreRoot, guiRoot, resources, executable: fs.realpathSync.native(executable) }
-  } catch { fail() }
+  } catch (error) { if (error.code === 'CRABOT_DESKTOP_REMOVAL_PENDING') throw error; fail() }
 }
 function locateDesktopCore(coreRoot) {
   coreRoot = fs.realpathSync.native(coreRoot)
@@ -125,4 +129,4 @@ function applyDesktopEnvironment(installation, env = process.env) {
   env.CRABOT_DEV = 'false'
   env.CRABOT_PRODUCT_REQUIRED = '1'
 }
-module.exports = { readDesktopInstallation, readDesktopPairReference, readDesktopSelection, locateDesktopCore, locateDesktopGui, locatePinnedDesktopGui, applyDesktopEnvironment }
+module.exports = { assertDesktopRemovalAllowsStart, readDesktopInstallation, readDesktopPairReference, readDesktopSelection, locateDesktopCore, locateDesktopGui, locatePinnedDesktopGui, applyDesktopEnvironment }

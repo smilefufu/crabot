@@ -40,6 +40,7 @@ static fs::path Payload() {
   auto selector = root / "current-core";
   auto desktop = root / "desktop-installation.json", pair = root / "current-release.json";
   if (fs::exists(fs::symlink_status(desktop)) || fs::exists(fs::symlink_status(pair))) {
+    if (fs::exists(fs::symlink_status(root / ".desktop-removal.json"))) throw std::runtime_error("Crabot removal is pending; continue uninstall or repair with the offline installer. User data was preserved.");
     if (!fs::is_regular_file(fs::symlink_status(desktop)) || fs::exists(fs::symlink_status(selector))
         || !fs::is_regular_file(fs::symlink_status(pair)) || fs::file_size(pair) > 1024) throw std::runtime_error("Invalid Crabot desktop selection");
     std::ifstream input(pair, std::ios::binary);

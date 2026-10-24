@@ -23,7 +23,7 @@ export function verifyDesktopAsar(asar, archive, platform = process.platform, se
   if (selection) verifyDesktopPairAsar(asar, archive, selection, platform)
   const paths = platform === 'win32' ? path.win32 : path.posix
   for (const file of ['dist/main.js', 'dist/preload.cjs', 'dist/ubuntu-process.js', 'dist/ubuntu-program-probe.js', 'dist/ubuntu-update.js', 'dist/paired-update.js', 'dist/release-intake.js', 'dist/release-signatures.js', 'dist/release-download.js', 'dist/release-transport.js',
-    'dist/bootstrap/scripts/lib/desktop-management.cjs', 'dist/bootstrap/scripts/desktop/extract-paired-release.py', 'dist/bootstrap/scripts/lib/desktop-installation.cjs',
+    'dist/bootstrap/scripts/lib/desktop-management.cjs', 'dist/bootstrap/scripts/desktop/extract-paired-release.py', 'dist/bootstrap/scripts/lib/desktop-installation.cjs', 'dist/bootstrap/scripts/lib/desktop-removal-record.cjs',
     'dist/bootstrap/scripts/lib/core-release.mjs', 'dist/bootstrap/scripts/lib/physical-fs.cjs',
     'dist/bootstrap/scripts/lib/process-identity.cjs', 'dist/bootstrap/crabot-native/build/Release/crabot-native.node', 'dist/assets/tray.png', 'node_modules/crabot-client/dist/index.js',
     'node_modules/zod/package.json', 'node_modules/electron-updater/package.json', 'node_modules/@electron/asar/package.json']) asar.statFile(archive, paths.normalize(file))
@@ -32,6 +32,6 @@ export function verifyDesktopAsar(asar, archive, platform = process.platform, se
 export function verifyInstallerAsar(asar, archive, platform = process.platform) {
   const paths = platform === 'win32' ? path.win32 : path.posix
   for (const file of ['dist/installer-main.js', 'dist/installer-preload.cjs', 'dist/installation-progress-window.js', 'dist/installation-entries.js',
-    'dist/bootstrap/scripts/lib/desktop-payload.mjs', 'dist/bootstrap/scripts/lib/desktop-preparation-files.mjs', 'dist/bootstrap/scripts/lib/desktop-repair.mjs', 'dist/bootstrap/scripts/lib/core-release.mjs', 'dist/bootstrap/scripts/lib/physical-fs.cjs', 'dist/bootstrap/scripts/lib/process-identity.cjs',
+    'dist/bootstrap/scripts/lib/desktop-payload.mjs', 'dist/bootstrap/scripts/lib/desktop-preparation-files.mjs', 'dist/bootstrap/scripts/lib/desktop-repair.mjs', 'dist/bootstrap/scripts/lib/desktop-removal-record.cjs', 'dist/bootstrap/scripts/lib/core-release.mjs', 'dist/bootstrap/scripts/lib/physical-fs.cjs', 'dist/bootstrap/scripts/lib/process-identity.cjs',
     'dist/bootstrap/crabot-native/build/Release/crabot-native.node', 'node_modules/crabot-client/dist/index.js', 'node_modules/zod/package.json', 'node_modules/@electron/asar/package.json']) asar.statFile(archive, paths.normalize(file))
 }

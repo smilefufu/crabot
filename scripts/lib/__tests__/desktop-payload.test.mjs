@@ -814,3 +814,15 @@ test('exact-pair repair publication ignores late cancellation and commit can rec
   assert.equal((await fs.readdir(path.join(f.target, 'releases'))).filter(name => name.startsWith('.damaged-')).length, 1)
   await assertRepairData(f)
 })
+
+for (const stage of ['prepare', 'commit']) test('ordinary exact-pair repair cannot bypass an independent removal fence: ' + stage, async t => {
+  const f = await repairFixture(t), { prepareDesktopRepair, commitDesktopRepair } = await repairApi()
+  const prepared = stage === 'commit' ? await prepareDesktopRepair(f.options) : undefined
+  const marker = path.join(f.target, '.desktop-removal.json')
+  await fs.writeFile(marker, 'independent removal protection, cannot clear through repair')
+  await assert.rejects(stage === 'prepare' ? prepareDesktopRepair(f.options) : commitDesktopRepair(prepared, { verifyStopped: f.options.verifyStopped }), { code: 'CRABOT_DESKTOP_REMOVAL_PENDING' })
+  assert.equal(await fs.readFile(marker, 'utf8'), 'independent removal protection, cannot clear through repair')
+  if (stage === 'prepare') await assert.rejects(fs.lstat(path.join(f.target, '.desktop-installing.json')), { code: 'ENOENT' })
+  else assert.equal(JSON.parse(await fs.readFile(path.join(f.target, '.desktop-installing.json'), 'utf8')).phase, 'prepared')
+  await assertRepairData(f)
+})
