@@ -1,0 +1,79 @@
+name: Desktop native review boundary
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ['feat/desktop-*']
+    paths:
+      - 'crabot-native/**'
+      - 'scripts/build-native.mjs'
+      - 'scripts/lib/product-prepare.mjs'
+      - 'scripts/lib/product-runtime.cjs'
+      - 'scripts/lib/process-identity.cjs'
+      - 'scripts/lib/known-process-exit.cjs'
+      - 'scripts/lib/__tests__/*-move.test.mjs'
+      - 'scripts/lib/__tests__/process-identity.test.mjs'
+      - 'scripts/lib/__tests__/known-process-*.test.mjs'
+      - 'scripts/lib/__tests__/cli-launcher.test.mjs'
+      - 'scripts/lib/__tests__/product-runtime.test.mjs'
+      - 'scripts/lib/__tests__/private-file-paths.test.mjs'
+      - 'scripts/lib/__tests__/program-reference*'
+      - 'scripts/lib/__tests__/directory-pin.test.mjs'
+      - 'scripts/lib/__tests__/fixtures/program-reference*'
+      - '.github/scripts/verify-native-review-boundary.mjs'
+      - '.github/workflows/desktop-native-review.yml'
+  pull_request:
+    paths:
+      - 'crabot-native/**'
+      - 'scripts/build-native.mjs'
+      - 'scripts/lib/product-prepare.mjs'
+      - 'scripts/lib/product-runtime.cjs'
+      - 'scripts/lib/process-identity.cjs'
+      - 'scripts/lib/known-process-exit.cjs'
+      - 'scripts/lib/__tests__/*-move.test.mjs'
+      - 'scripts/lib/__tests__/process-identity.test.mjs'
+      - 'scripts/lib/__tests__/known-process-*.test.mjs'
+      - 'scripts/lib/__tests__/cli-launcher.test.mjs'
+      - 'scripts/lib/__tests__/product-runtime.test.mjs'
+      - 'scripts/lib/__tests__/private-file-paths.test.mjs'
+      - 'scripts/lib/__tests__/program-reference*'
+      - 'scripts/lib/__tests__/directory-pin.test.mjs'
+      - 'scripts/lib/__tests__/fixtures/program-reference*'
+      - '.github/scripts/verify-native-review-boundary.mjs'
+      - '.github/workflows/desktop-native-review.yml'
+
+permissions:
+  contents: read
+concurrency:
+  group: desktop-native-review-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  native-boundary:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, macos-15-intel, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.3'
+      - name: Freeze the actual review baseline
+        id: baseline
+        shell: bash
+        env:
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [[ -n "$PR_BASE" ]]; then
+            git fetch --no-tags --depth=1 origin "$PR_BASE"
+          else
+            git fetch --no-tags --depth=1 origin main
+          fi
+          echo "sha=$(git rev-parse FETCH_HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Build and test main plus only the native candidate
+        shell: bash
+        run: node .github/scripts/verify-native-review-boundary.mjs '${{ steps.baseline.outputs.sha }}'
