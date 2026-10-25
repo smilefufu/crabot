@@ -15,10 +15,10 @@ import { discoverLegacySystemRelease } from '../legacy-system-release.mjs'
 import { materializeLegacyRelease } from './fixtures/legacy-release.mjs'
 import { writeCoreRelease, verifyCoreRelease } from '../core-release.mjs'
 const options = { skip: process.platform === 'win32' }
-async function fixture(t, { failure } = {}) {
+async function fixture(t, { failure, nested = false } = {}) {
   const parent = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'crabot-conversion-wiring-')))
   t.after(() => fs.rm(parent, { recursive: true, force: true }))
-  const source = path.join(parent, 'old'), install = path.join(parent, 'managed'), staging = path.join(install, 'staging')
+  const source = path.join(parent, 'old'), install = nested ? path.join(source, '.managed') : path.join(parent, 'managed'), staging = path.join(install, 'staging')
   const metadata = path.join(parent, 'system'), commandFile = path.join(parent, 'bin/crabot')
   for (const name of [source, staging, path.join(install, 'releases'), path.join(install, 'bin'), path.dirname(commandFile)]) await fs.mkdir(name, { recursive: true })
   await materializeLegacyRelease(source)
@@ -53,7 +53,7 @@ async function fixture(t, { failure } = {}) {
   let running = true
   const dependencies = { root: core, registry, fence, command,
     prepare: async () => { calls.push('prepare-services') },
-    processes: () => running ? [instances[0].observation.controller, instances[0].observation.mm].map(process => ({ process, uses_source: true })) : [],
+    processes: (directory, options) => { assert.equal(directory, source); assert.deepEqual(options, { trustedTargetRoot: install }); return running ? [instances[0].observation.controller, instances[0].observation.mm].map(process => ({ process, uses_source: true })) : [] },
     legacy: async (entry, request) => {
       const action = request.action, phase = (await fence.inspect(source)).phase
       const bootId = randomUUID(), record = structuredClone(store.read(store.file(plan.id), true)), maintenance = structuredClone(store.maintenance())
@@ -82,7 +82,7 @@ async function fixture(t, { failure } = {}) {
   return { parent, source, core, registry, store, plan, fence, command, dependencies, calls, run }
 }
 test('filesystem metadata coordinator connects fenced source, all backups, atomic command switch and per-UID registration without opening employee data', options, async t => {
-  const f = await fixture(t)
+  const f = await fixture(t, { nested: true })
   f.dependencies.root += path.sep // system-job's file URL directory retains this separator.
   const result = await f.run()
   assert.equal(result.exit_code, 0); assert.equal(await f.command.selected(f.plan), 'target')
@@ -109,9 +109,9 @@ test('unknown old shutdown keeps source fenced and never switches, backs up or a
 })
 test('uncovered source consumer blocks fencing before any UID action', options, async t => {
   const f = await fixture(t), collect = f.dependencies.processes
-  f.dependencies.processes = () => [...collect(), { process: { pid: 53000, parent: 1, owner: '1003', started: 'unaccounted', executable: '/usr/bin/node' }, uses_source: true }]
+  f.dependencies.processes = (...args) => [...collect(...args), { process: { pid: 53000, parent: 1, owner: '1003', started: 'unaccounted', executable: '/usr/bin/node' }, uses_source: true }]
   const result = await f.run()
-  assert.equal(result.phase, 'interrupted'); assert.deepEqual(f.calls, ['prepare-services'])
+  assert.equal(result.phase, 'interrupted'); assert.equal(result.error.code, 'CRABOT_LEGACY_SYSTEM_PROCESSES'); assert.deepEqual(f.calls, ['prepare-services'])
   await assert.rejects(fs.lstat(path.join(f.source, '.system-takeover')), { code: 'ENOENT' })
 })
 test('wrong target root and changed accounts refuse before services or source entries are touched', options, async t => {

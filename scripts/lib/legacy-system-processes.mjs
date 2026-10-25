@@ -7,15 +7,22 @@ import { validateSystemConversionPlan } from './system-conversion.mjs'
 import { systemError } from './system-registry.mjs'
 const fail = () => { throw systemError('旧共享代码仍有未核实的进程或启动来源，未转换；请核对原部署。', 'CRABOT_LEGACY_SYSTEM_PROCESSES') }
 const inside = (root, value) => typeof value === 'string' && (value === root || value.startsWith(root + '/'))
-export function usesLegacySystemCode(root, current, args, cwd) {
+export function usesLegacySystemCode(root, current, args, cwd, { trustedTargetRoot } = {}) {
   if (!path.posix.isAbsolute(root) || root === '/' || path.posix.normalize(root) !== root || /[\0\r\n]/.test(root)
     || !Array.isArray(args) || args.some(value => typeof value !== 'string') || typeof cwd !== 'string') fail()
-  if (inside(root, current.executable) || args.some(value => value === root || value.includes(root + '/'))) return true
+  if (trustedTargetRoot !== undefined && (!path.posix.isAbsolute(trustedTargetRoot) || path.posix.normalize(trustedTargetRoot) !== trustedTargetRoot
+    || /[\0\r\n]/.test(trustedTargetRoot) || inside(trustedTargetRoot, root))) fail()
+  const newPath = value => trustedTargetRoot !== undefined && path.posix.isAbsolute(value)
+    && path.posix.normalize(value) === value && inside(trustedTargetRoot, value)
+  if (inside(root, current.executable) && !newPath(current.executable)
+    || args.some(value => !newPath(value) && (value === root || value.includes(root + '/')))) return true
   const shell = /^(?:ba|da|z|k)?sh$|^fish$/.test(path.posix.basename(current.executable))
   const interactive = shell && args.slice(1).every(value => /^-[il]+$/.test(value))
-  return inside(root, cwd) && !interactive
+  return inside(root, cwd) && !newPath(cwd) && !interactive
 }
-export function collectLegacySystemProcesses(root) {
+// The coordinator has already verified this optional target namespace as Root-owned
+// immutable new code. It is not an arbitrary CLI/env exclusion or lifecycle grant.
+export function collectLegacySystemProcesses(root, options) {
   if (process.platform !== 'linux' || process.getuid() !== 0) fail()
   const rows = []
   for (const pid of identity.listProcessIds()) {
@@ -30,7 +37,7 @@ export function collectLegacySystemProcesses(root) {
       const after = identity.inspectProcess(pid)
       if (!after) continue
       if (!identity.sameProcess(current, after)) fail()
-      rows.push({ process: after, uses_source: usesLegacySystemCode(root, after, args, cwd) })
+      rows.push({ process: after, uses_source: usesLegacySystemCode(root, after, args, cwd, options) })
     } catch {
       // Exit during observation is normal. An inaccessible live process is not
       // evidence that the old shared tree has no other users.

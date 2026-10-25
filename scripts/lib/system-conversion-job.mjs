@@ -37,7 +37,7 @@ export async function systemConversionOperations(plan, { root, registry,
   }
   const invokeLegacy = (entry, action) => { checked(entry); return legacy(entry, { root, operationId: plan.id, action }) }
   const invokeTarget = (entry, action) => { checked(entry, true); return target(entry, { root, operationId: plan.id, action }) }
-  const coverage = stopped => assertLegacySystemProcessCoverage(plan, processes(plan.source.installRoot), { stopped })
+  const coverage = stopped => assertLegacySystemProcessCoverage(plan, processes(plan.source.installRoot, { trustedTargetRoot: plan.install_root }), { stopped })
   return {
     fence: async () => { coverage(false); return fence.fence(plan.source, plan.id) },
     stop: entry => invokeLegacy(entry, 'stop-legacy'), snapshot: entry => invokeLegacy(entry, 'snapshot'),

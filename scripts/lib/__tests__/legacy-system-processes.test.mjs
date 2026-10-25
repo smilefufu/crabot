@@ -66,3 +66,16 @@ test('native root metadata collection is unavailable on a developer or non-root 
   // Guarding happens before native process enumeration or procfs access.
   assert.throws(() => collectLegacySystemProcesses(root), { code: 'CRABOT_LEGACY_SYSTEM_PROCESSES' })
 })
+
+
+test('verified target namespace inside the retained installation is new code, while actual old entry references remain covered', () => {
+  const target = root + '/.managed', options = { trustedTargetRoot: target }
+  const current = { ...processRecord(30, 1, 0), executable: target + '/releases/id/node' }
+  assert.equal(usesLegacySystemCode(root, current, [current.executable, target + '/releases/id/scripts/system-job.mjs'], '/', options), false)
+  assert.equal(usesLegacySystemCode(root, processRecord(30, 1, 0), ['/usr/bin/node', '/outside/status.mjs'], target, options), false)
+  assert.equal(usesLegacySystemCode(root, current, [current.executable, root + '/scripts/start.mjs'], '/', options), true)
+  assert.equal(usesLegacySystemCode(root, current, [current.executable, target + '/../scripts/start.mjs'], '/', options), true)
+  assert.equal(usesLegacySystemCode(root, current, [current.executable, target + '-other/main.js'], '/', options), true)
+  assert.equal(usesLegacySystemCode(root, current, [current.executable, '--scripts=' + target + '/new.js,' + root + '/scripts/start.mjs'], '/', options), true)
+  for (const value of [root, '/opt', 'relative', target + '/..']) assert.throws(() => usesLegacySystemCode(root, current, [], '/', { trustedTargetRoot: value }))
+})
