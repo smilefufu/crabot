@@ -9,6 +9,8 @@ import { fileURLToPath } from 'node:url'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { acquireExistingCliLock, releaseCliLock } from '../../scripts/lib/cli-lock.mjs'
+import identity from '../../scripts/lib/process-identity.cjs'
+import { probeKnownProcessExit } from '../../scripts/lib/known-process-exit.cjs'
 import { writeCoreRelease, verifyCoreRelease } from '../../scripts/lib/core-release.mjs'
 import { sealDesktopPayload, prepareDesktopInstallation, commitDesktopInstallation } from '../../scripts/lib/desktop-payload.mjs'
 import { buildUbuntuMaintenanceBackend } from '../../scripts/desktop/ubuntu-maintenance-backend.mjs'
@@ -117,8 +119,7 @@ for (const mode of ['node-job-valid', 'node-job-parent-flags', 'node-job-copy-ch
   let result = JSON.parse(stdout)
   if (mode === 'node-job-source-exit') {
     assert.equal(result.handoff, true)
-    const { directory, host } = result, identity = require('../../scripts/lib/process-identity.cjs')
-    const { probeKnownProcessExit } = require('../../scripts/lib/known-process-exit.cjs')
+    const { directory, host } = result
     const stat = await fs.lstat(directory, { bigint: true })
     t.after(async () => {
       if (identity.sameProcess(host, identity.inspectProcess(host.pid))) identity.terminateKnownProcess(host)
