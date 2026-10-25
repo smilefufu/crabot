@@ -12,7 +12,7 @@ import { readDesktopRemoval } from './desktop-removal-record.cjs'
 import { readDesktopRemovalProof } from './desktop-removal-proof.mjs'
 import { matchesDesktopRemovalProgram } from './desktop-removal-programs.mjs'
 import { inspectInstance } from './instance-runtime.mjs'
-import { verifyDesktopPayload, verifyDesktopPrograms } from './desktop-payload.mjs'
+import { verifyDesktopPayload, verifyDesktopPrograms, verifyDesktopGui } from './desktop-payload.mjs'
 import { privateJson, readPending, pendingName, publishPreparedProgram } from './desktop-preparation-files.mjs'
 const { promises: fs, constants } = physical
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b)
@@ -46,10 +46,13 @@ export async function prepareDesktopRemovalReinstall({ payload, installRoot, ope
     }
     // Compare the historical metadata too, with bounded streaming reads. The
     // Core inventory digest alone does not cover all three metadata files.
-    for (const [key, name] of [['release', 'core-release.json'], ['inventory', 'core-files.json'], ['host', 'desktop-host.json']]) {
-      const text = proof.core[key]
-      if (!await match(path.join(source.directory, 'core', name), { type: 'file', size: Buffer.byteLength(text), sha256: digest(text) }, false)) fail()
+    const verifyMetadata = async (root, requireOwner) => {
+      for (const [key, name] of [['release', 'core-release.json'], ['inventory', 'core-files.json'], ['host', 'desktop-host.json']]) {
+        const text = proof.core[key]
+        if (!await match(path.join(root, name), { type: 'file', size: Buffer.byteLength(text), sha256: digest(text) }, requireOwner)) fail()
+      }
     }
+    await verifyMetadata(path.join(source.directory, 'core'), false)
     const commandName = process.platform === 'win32' ? 'crabot.exe' : 'crabot'
     const commandProof = JSON.parse(proof.core.inventory).files['bin/' + commandName]
     if (commandProof?.type !== 'file') fail()
@@ -57,6 +60,8 @@ export async function prepareDesktopRemovalReinstall({ payload, installRoot, ope
     const payloadText = JSON.stringify(source.record) + '\n', payloadSha = digest(payloadText)
     let pending = await readPending(own.root)
     if (pending && (pending.installation_id !== own.record.installation_id || !same(pending.selection, record.source_selection) || pending.payload_sha256 !== payloadSha)) fail()
+    const prepared = { installRoot: own.root, installation_id: own.record.installation_id, selection: record.source_selection,
+      coreRoot: path.join(own.root, 'releases', record.source_selection.core_id), guiRoot: path.join(own.root, 'app/releases', record.source_selection.gui_id) }
     const assertCurrent = () => {
       if (!same(readDesktopRemoval(own.root), record) || fileIdentity(physical.lstatSync(proofFile, { bigint: true })) !== proofIdentity
         || !same(installation.readDesktopInstallation(own.root).record, own.record)
@@ -67,6 +72,11 @@ export async function prepareDesktopRemovalReinstall({ payload, installRoot, ope
         || inspectInstance(own.dataDir).state !== 'stopped') fail()
       try { if (physical.readdirSync(path.join(own.dataDir, 'module-runtime-registry/records')).some(name => name.endsWith('.json'))) fail() }
       catch (error) { if (error.code !== 'ENOENT') throw error }
+      for (const directory of [prepared.coreRoot, prepared.guiRoot]) {
+        let stat
+        try { stat = physical.lstatSync(directory) } catch (error) { if (error.code === 'ENOENT') continue; throw error }
+        if (!stat.isDirectory() || stat.isSymbolicLink() || !identity.isOwnedDirectory(directory)) fail()
+      }
     }
     const current = async () => {
       assertCurrent()
@@ -75,17 +85,30 @@ export async function prepareDesktopRemovalReinstall({ payload, installRoot, ope
     }
     const stopped = async () => { await current(); await verifyStopped(); await current() }
     await stopped(); await checkCommand(); await current()
+    const verified = async check => { try { await check(); return true } catch { signal?.throwIfAborted(); return false } }
+    const coreCached = await verified(async () => {
+      await verifyDesktopPrograms(prepared.coreRoot, path.join(source.directory, 'gui'), proof.payload, { signal })
+      await verifyMetadata(prepared.coreRoot, true)
+    })
+    const guiCached = await verified(() => verifyDesktopGui(prepared.guiRoot, proof.payload, { signal }))
+    await stopped(); await checkCommand(); await current()
+    const guiBytes = Object.values(proof.payload.gui).reduce((sum, entry) => sum + BigInt(entry.size ?? 0), 0n)
+    const needed = (coreCached ? 0n : source.bytes - guiBytes) + (guiCached ? 0n : guiBytes)
     const space = await fs.statfs(own.root, { bigint: true })
-    if (space.bavail * space.bsize < source.bytes + 512n * 1024n * 1024n) throw Object.assign(new Error('修复空间不足，原数据和保护已保留。'), { code: 'CRABOT_UPDATE_SPACE' })
+    if (space.bavail * space.bsize < needed + 512n * 1024n * 1024n) throw Object.assign(new Error('修复空间不足，原数据和保护已保留。'), { code: 'CRABOT_UPDATE_SPACE' })
     signal?.throwIfAborted()
-    staging = await fs.mkdtemp(path.join(own.root, '.preparing-reinstall-'))
-    const prepared = { installRoot: own.root, installation_id: own.record.installation_id, selection: record.source_selection,
-      coreRoot: path.join(own.root, 'releases', record.source_selection.core_id), guiRoot: path.join(own.root, 'app/releases', record.source_selection.gui_id) }
-    progress('copying')
-    const copies = await Promise.allSettled(['core', 'gui'].map(name => fs.cp(path.join(source.directory, name), path.join(staging, name),
-      { recursive: true, verbatimSymlinks: true, mode: constants.COPYFILE_FICLONE, filter: () => { signal?.throwIfAborted(); return true } })))
-    const failed = copies.find(result => result.status === 'rejected'); if (failed) throw failed.reason
-    await verifyDesktopPrograms(path.join(staging, 'core'), path.join(staging, 'gui'), proof.payload, { signal })
+    const programs = []
+    if (!coreCached) programs.push(['core', prepared.coreRoot])
+    if (!guiCached) programs.push(['gui', prepared.guiRoot])
+    progress('copying'); signal?.throwIfAborted()
+    if (programs.length) {
+      staging = await fs.mkdtemp(path.join(own.root, '.preparing-reinstall-'))
+      const copies = await Promise.allSettled(programs.map(([name]) => fs.cp(path.join(source.directory, name), path.join(staging, name),
+        { recursive: true, verbatimSymlinks: true, mode: constants.COPYFILE_FICLONE, filter: () => { signal?.throwIfAborted(); return true } })))
+      const failed = copies.find(result => result.status === 'rejected'); if (failed) throw failed.reason
+    }
+    await verifyDesktopPrograms(coreCached ? prepared.coreRoot : path.join(staging, 'core'),
+      guiCached ? prepared.guiRoot : path.join(staging, 'gui'), proof.payload, { signal })
     await stopped(); await checkCommand(); await current(); signal?.throwIfAborted()
     progress('restoring'); signal?.throwIfAborted(); await current()
     if (!pending) {
@@ -95,10 +118,12 @@ export async function prepareDesktopRemovalReinstall({ payload, installRoot, ope
     }
     // The removal fence stays throughout. From this boundary cancellation cannot
     // undo restored program publications; the same package can reverify them.
-    for (const [name, target] of [['core', prepared.coreRoot], ['gui', prepared.guiRoot]]) {
+    for (const [name, target] of programs) {
       await stopped()
-      await publishPreparedProgram(path.join(staging, name), target, undefined, () => verifyDesktopPrograms(
-        prepared.coreRoot, name === 'gui' ? target : path.join(staging, 'gui'), proof.payload))
+      await publishPreparedProgram(path.join(staging, name), target, undefined, async () => {
+        await verifyDesktopPrograms(prepared.coreRoot, name === 'gui' || guiCached ? prepared.guiRoot : path.join(staging, 'gui'), proof.payload)
+        await verifyMetadata(prepared.coreRoot, true)
+      })
     }
     await stopped(); await checkCommand(); await current()
     if (!await present(own.command)) {
@@ -106,7 +131,7 @@ export async function prepareDesktopRemovalReinstall({ payload, installRoot, ope
       if (process.platform !== 'win32') await fs.chmod(own.command, 0o755)
     }
     await stopped(); await checkCommand()
-    await verifyDesktopPrograms(prepared.coreRoot, prepared.guiRoot, proof.payload); await stopped()
+    await verifyDesktopPrograms(prepared.coreRoot, prepared.guiRoot, proof.payload); await verifyMetadata(prepared.coreRoot, true); await stopped()
     const cache = management.ensurePrivateDataRoot(path.join(own.root, 'app/payloads')), file = path.join(cache, record.source_selection.gui_id + '.json')
     const stat = await present(file)
     if (stat) {
