@@ -1,0 +1,95 @@
+import test, { before, after } from 'node:test'
+import assert from 'node:assert/strict'
+import { promises as fs } from 'node:fs'
+import path from 'node:path'
+import { tmpdir } from 'node:os'
+import { randomUUID } from 'node:crypto'
+import { createRequire } from 'node:module'
+import { fileURLToPath } from 'node:url'
+import { writeCoreRelease, verifyCoreRelease } from '../../scripts/lib/core-release.mjs'
+import { sealDesktopPayload, prepareDesktopInstallation, commitDesktopInstallation } from '../../scripts/lib/desktop-payload.mjs'
+import { buildUbuntuMaintenanceBackend } from '../../scripts/desktop/ubuntu-maintenance-backend.mjs'
+import { desktopMaintenanceNodeFiles } from '../../scripts/lib/desktop-maintenance-bootstrap.mjs'
+const linux = process.platform === 'linux', require = createRequire(new URL('../package.json', import.meta.url))
+let root, payload
+before(async () => {
+  if (!linux) return
+  root = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'crabot-node-removal-source-')))
+  payload = path.join(root, 'payload')
+  const core = path.join(payload, 'core'), gui = path.join(payload, 'gui'), resources = path.join(gui, 'resources')
+  await fs.mkdir(path.join(core, '.product-runtime/node/bin'), { recursive: true }); await fs.mkdir(path.join(core, 'bin'))
+  await fs.copyFile(process.execPath, path.join(core, '.product-runtime/node/bin/node'))
+  await fs.writeFile(path.join(core, 'package.json'), '{"version":"1.2.3","type":"module"}')
+  await fs.writeFile(path.join(core, 'product-runtime.json'), JSON.stringify({ schema_version: 1, versions: { node: process.versions.node } }))
+  await fs.writeFile(path.join(core, 'bin/crabot'), '#!/bin/sh\nexit 97\n', { mode: 0o755 })
+  await writeCoreRelease(core, { schema_version: 1, version: '1.2.3', platform: process.platform, arch: process.arch, commit: '1'.repeat(40), source_dirty: false })
+  await fs.writeFile(path.join(core, 'desktop-host.json'), JSON.stringify({ schema_version: 2, platform: process.platform, arch: process.arch }))
+  const release = await verifyCoreRelease(core), selection = { schema_version: 1, version: '1.2.3', gui_id: randomUUID(), core_id: release.inventory_sha256 }
+  await fs.mkdir(resources, { recursive: true })
+  await buildUbuntuMaintenanceBackend(path.join(resources, 'crabot-maintenance-backend'))
+  await fs.writeFile(path.join(gui, 'crabot-desktop'), '#!/bin/sh\nexit 98\n', { mode: 0o755 })
+  await fs.copyFile(process.env.CRABOT_GTK_FRONTEND, path.join(resources, 'crabot-maintenance'))
+  const native = path.join(resources, 'app.asar.unpacked/dist/bootstrap/crabot-native/build/Release/crabot-native.node')
+  await fs.mkdir(path.dirname(native), { recursive: true })
+  await fs.copyFile(fileURLToPath(new URL('../../crabot-native/build/Release/crabot-native.node', import.meta.url)), native)
+  const app = path.join(root, 'app'); await fs.mkdir(path.join(app, 'dist'), { recursive: true })
+  await fs.writeFile(path.join(app, 'dist/desktop-release.json'), JSON.stringify(selection) + '\n')
+  await require('@electron/asar').createPackage(app, path.join(resources, 'app.asar'))
+  await fs.writeFile(path.join(resources, 'desktop-release.json'), JSON.stringify(selection) + '\n')
+  await sealDesktopPayload(payload)
+}, 60000)
+after(async () => { if (root) await fs.rm(root, { recursive: true, force: true }) })
+test('standalone maintenance preparation rejects other platforms before accessing an installation', { skip: linux }, async () => {
+  const { prepareDesktopRemovalNode } = await import('../../scripts/lib/desktop-removal-host.mjs')
+  await assert.rejects(prepareDesktopRemovalNode({ installRoot: '/never-accessed', operationId: randomUUID() }), { code: 'CRABOT_DESKTOP_REMOVAL' })
+})
+for (const mode of ['valid', 'cancelled', 'changed-node', 'changed-backend', 'redirected-frontend', 'changed-selection', 'copy-failure', 'space', 'late-copy-change', 'late-cancel']) test('private Ubuntu Node host preparation: ' + mode, { skip: !linux, timeout: 60000 }, async t => {
+  const area = await fs.mkdtemp(path.join(root, 'case-'))
+  const own = await commitDesktopInstallation(await prepareDesktopInstallation({ payload, installRoot: path.join(area, 'installation') }))
+  await fs.writeFile(path.join(own.dataDir, 'preserved'), 'data and dependencies')
+  const options = { installRoot: own.root, operationId: randomUUID() }, source = path.join(own.guiRoot, 'resources/crabot-maintenance-backend/progress.mjs')
+  const { prepareDesktopRemovalNode } = await import('../../scripts/lib/desktop-removal-host.mjs')
+  if (mode === 'cancelled') options.signal = AbortSignal.abort()
+  if (mode === 'changed-node') await fs.appendFile(path.join(own.coreRoot, '.product-runtime/node/bin/node'), 'changed')
+  if (mode === 'changed-backend') await fs.appendFile(source, 'changed')
+  if (mode === 'redirected-frontend') { const file = path.join(own.guiRoot, 'resources/crabot-maintenance'); await fs.rename(file, file + '-original'); await fs.symlink(file + '-original', file) }
+  let copyDirectory
+  options.progress = stage => {
+    if (stage === 'prepared' && mode === 'late-copy-change') return fs.appendFile(path.join(copyDirectory, 'node'), 'changed')
+    if (stage === 'prepared' && mode === 'late-cancel') lateAbort.abort()
+    if (stage === 'copying' && mode === 'changed-selection') {
+      // A source change between capture and completion must invalidate the copy.
+      return fs.appendFile(path.join(own.root, 'current-release.json'), ' ')
+    }
+  }
+  if (mode === 'space') t.mock.method(fs, 'statfs', async () => ({ bavail: 0n, bsize: 1n }))
+  const lateAbort = new AbortController()
+  if (mode === 'late-cancel') options.signal = lateAbort.signal
+  if (mode === 'copy-failure' || mode === 'late-copy-change' || mode === 'late-cancel') {
+    const open = fs.open
+    t.mock.method(fs, 'open', async (file, ...rest) => {
+      if (String(file).includes('crabot-removal-host-') && String(file).endsWith('/node')) copyDirectory = path.dirname(file)
+      if (mode === 'copy-failure' && String(file).includes('crabot-removal-host-') && String(file).endsWith('/backend/progress.mjs')) {
+        copyDirectory = path.resolve(file, '../..'); throw Object.assign(new Error('finite copy failure'), { code: 'ENOSPC' })
+      }
+      return open(file, ...rest)
+    })
+  }
+  if (mode === 'valid') {
+    const host = await prepareDesktopRemovalNode(options)
+    t.after(() => fs.rm(host.directory, { recursive: true, force: true }))
+    assert.equal(path.dirname(host.executable), host.directory)
+    assert.equal(path.basename(host.executable), 'node')
+    assert.equal(host.self_verified, true)
+    const names = []
+    async function walk(directory) { for (const entry of await fs.readdir(directory, { withFileTypes: true })) { const file = path.join(directory, entry.name); if (entry.isDirectory()) await walk(file); else names.push(path.relative(host.directory, file).split(path.sep).join('/')) } }
+    await walk(host.directory)
+    assert.deepEqual(names.sort(), ['node', 'crabot-maintenance', ...desktopMaintenanceNodeFiles.map(name => 'backend/' + name)].sort())
+    assert.equal(names.some(name => /(^|\/)(data|core|\.product-runtime)(\/|$)/.test(name)), false)
+    assert.equal(host.proof.operation_id, options.operationId)
+    console.log('CRABOT_PRIVATE_NODE_PREPARATION ' + JSON.stringify({ fixed_resources_only: true, copied_node_executed: true, self_verified: true, business_started: false }))
+  } else await assert.rejects(prepareDesktopRemovalNode(options))
+  if (copyDirectory) await assert.rejects(fs.lstat(copyDirectory), { code: 'ENOENT' })
+  assert.equal(await fs.readFile(path.join(own.dataDir, 'preserved'), 'utf8'), 'data and dependencies')
+  for (const name of ['.desktop-removal.json', '.desktop-installing.json']) await assert.rejects(fs.lstat(path.join(own.root, name)), { code: 'ENOENT' })
+})
