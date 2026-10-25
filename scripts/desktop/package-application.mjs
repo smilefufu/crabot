@@ -23,7 +23,11 @@ if (args.has('--layout') && !paired) throw new Error('Unsupported candidate layo
 const core = await fs.realpath(path.resolve(args.get('--core'))), projectDir = path.resolve(args.get('--out'))
 if (!path.relative(root, projectDir).startsWith('.desktop-build' + path.sep)) throw new Error('Candidate project must be under .desktop-build')
 try { await fs.lstat(projectDir); throw new Error('Candidate project already exists') } catch (error) { if (error.code !== 'ENOENT') throw error }
+const started = performance.now()
+const stage = phase => console.log(JSON.stringify({ component: 'desktop-package', phase, elapsed_ms: Math.round(performance.now() - started) }))
+stage('source-integrity-start')
 const release = await verifyCoreRelease(core)
+stage('source-integrity-done')
 function checkSource() {
   if (release.source_dirty || execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim() !== release.commit
     || execFileSync('git', ['status', '--porcelain'], { cwd: root, encoding: 'utf8' }).trim()) {
@@ -37,9 +41,11 @@ if (paired && process.platform === 'linux') {
   const { readUbuntuBootstrap } = await import('./package-ubuntu-installer.mjs')
   ubuntuNative = await readUbuntuBootstrap(await fs.realpath(path.resolve(args.get('--native-bootstrap'))), release.commit)
 }
+stage('source-runtime-start')
 const runtime = product.loadProductRuntime(core, { required: true, full: true })
 scrapling.loadRuntime(core, { full: true })
 computerUse.loadRuntime(core, { full: true })
+stage('source-runtime-done')
 const appDir = path.join(projectDir, 'app')
 const appIcon = path.join(root, 'crabot-desktop/assets/app.png')
 await fs.mkdir(path.dirname(projectDir), { recursive: true })
@@ -49,8 +55,10 @@ const selection = { schema_version: 1, version: release.version, gui_id: randomU
 const offline = path.join(projectDir, 'offline'), pairedCore = path.join(offline, 'core')
 if (paired) {
   await fs.mkdir(offline)
+  stage('paired-core-copy-start')
   await fs.cp(core, pairedCore, { recursive: true, verbatimSymlinks: true, mode: constants.COPYFILE_FICLONE })
   await fs.writeFile(path.join(pairedCore, 'desktop-host.json'), JSON.stringify({ schema_version: 2, platform: process.platform, arch: process.arch }) + '\n')
+  stage('paired-core-copy-done')
 }
 await fs.cp(path.join(root, 'crabot-desktop/dist'), path.join(appDir, 'dist'), { recursive: true })
 const candidateMarker = JSON.stringify({ ...release, candidate_only: true }) + '\n'
@@ -71,8 +79,10 @@ await fs.writeFile(path.join(appDir, 'package.json'), JSON.stringify(packageJson
 await fs.copyFile(path.join(root, 'crabot-desktop/pnpm-lock.yaml'), path.join(appDir, 'pnpm-lock.yaml'))
 const install = ['install', '--prod', '--frozen-lockfile', '--node-linker=hoisted', '--package-import-method=copy', '--prefer-offline']
 const corepack = path.join(path.dirname(runtime.executables.node), process.platform === 'win32' ? 'node_modules/corepack/dist/corepack.js' : '../lib/node_modules/corepack/dist/corepack.js')
+stage('gui-dependencies-start')
 await runBounded(runtime.executables.node, [corepack, 'pnpm@9.15.9', ...install],
   { cwd: appDir, env: product.productEnvironment(runtime, path.join(root, '.desktop-build/build-cache')), timeout: 10 * 60_000 })
+stage('gui-dependencies-done')
 delete packageJson.devDependencies
 await fs.writeFile(path.join(appDir, 'package.json'), JSON.stringify(packageJson, null, 2) + '\n')
 const require = createRequire(path.join(root, 'crabot-desktop/package.json'))
@@ -118,21 +128,27 @@ const configuration = {
       await fs.writeFile(path.join(packagedCore, 'desktop-host.json'), JSON.stringify({ schema_version: 1, platform: process.platform, arch: process.arch }) + '\n')
     }
     await fs.writeFile(path.join(resources, 'candidate-only.json'), candidateMarker)
+    stage('packaged-runtime-start')
     product.loadProductRuntime(packagedCore, { required: true, full: true })
     scrapling.loadRuntime(packagedCore, { full: true })
     computerUse.loadRuntime(packagedCore, { full: true })
     await verifyCoreRelease(packagedCore, { version: release.version })
+    stage('packaged-runtime-done')
   },
 }
 await fs.writeFile(path.join(projectDir, 'candidate-build.json'), JSON.stringify({ ...release, candidate_only: true, signing: process.platform === 'darwin' ? 'ad_hoc' : 'unsigned' }, null, 2) + '\n')
+stage('electron-build-start')
 await build({ projectDir, config: configuration, publish: 'never', targets: Platform.current().createTarget('dir', Arch[process.arch]) })
+stage('electron-build-done')
 checkSource()
 if (!packagedResources) throw new Error('Electron builder did not report its packaged resources')
 // Signing/packing must not invalidate immutable core bytes or vendor identity.
+stage('final-runtime-start')
 product.loadProductRuntime(paired ? pairedCore : path.join(packagedResources, 'core'), { required: true, full: true })
 scrapling.loadRuntime(paired ? pairedCore : path.join(packagedResources, 'core'), { full: true })
 computerUse.loadRuntime(paired ? pairedCore : path.join(packagedResources, 'core'), { full: true })
 await verifyCoreRelease(paired ? pairedCore : path.join(packagedResources, 'core'), { version: release.version })
+stage('final-runtime-done')
 const builderRequire = createRequire(createRequire(require.resolve('electron-builder')).resolve('app-builder-lib/package.json'))
 const asar = builderRequire('@electron/asar')
 verifyDesktopAsar(asar, path.join(packagedResources, 'app.asar'), process.platform, paired ? selection : undefined)
@@ -150,8 +166,12 @@ for (const key of [FuseV1Options.RunAsNode, FuseV1Options.EnableNodeOptionsEnvir
 if (fuses[FuseV1Options.OnlyLoadAppFromAsar] !== 49) throw new Error('Packaged Electron must load only its ASAR')
 if (paired) {
   const gui = path.resolve(packagedResources, process.platform === 'darwin' ? '../../..' : '..')
+  stage('paired-gui-copy-start')
   await fs.cp(gui, path.join(offline, 'gui'), { recursive: true, verbatimSymlinks: true, mode: constants.COPYFILE_FICLONE })
+  stage('paired-gui-copy-done')
+  stage('paired-seal-start')
   await sealDesktopPayload(offline)
+  stage('paired-seal-done')
 }
 await fs.writeFile(path.join(projectDir, 'packaged-location.json'), JSON.stringify({ schema_version: paired ? 2 : 1,
   executable: path.relative(projectDir, executable).split(path.sep).join('/'),
