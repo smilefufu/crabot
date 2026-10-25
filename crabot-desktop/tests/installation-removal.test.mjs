@@ -16,5 +16,8 @@ test('actual Electron removes only entries in the private fixture and keeps data
   const result = await promisify(execFile)(createRequire(import.meta.url)('electron'),
     [fileURLToPath(new URL('./installation-removal.cjs', import.meta.url)), root], { env, timeout: 30000, maxBuffer: 32768 })
   assert.match(result.stdout, /"owned_entries_removed":true/)
+  const job = JSON.parse(result.stdout.split('\n').find(line => line.startsWith('CRABOT_REMOVAL_MENU_JOB ')).slice('CRABOT_REMOVAL_MENU_JOB '.length))
+  assert.equal(job.core_missing, true); assert.equal(job.owned_menu_removed, true); assert.equal(job.discovery_preserved, true)
+  assert.equal(job.actual_windows_shortcut, process.platform === 'win32')
   console.log(result.stdout.trim())
 })

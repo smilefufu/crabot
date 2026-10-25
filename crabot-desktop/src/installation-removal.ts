@@ -58,12 +58,12 @@ async function unchanged(expected: Snapshot) {
       : !Buffer.isBuffer(actual.content) || !expected.content.equals(actual.content))) fail()
 }
 
-export async function removeInstallationEntries(prepared: PreparedInstallation, options: {
+type EntryRemovalOptions = {
   home: string; platform: string; env: NodeJS.ProcessEnv; shell: Pick<Shell, 'readShortcutLink'>
   verifyStopped: () => Promise<void>; unregisterMac?: (application: string) => Promise<unknown>
-}): Promise<void> {
-  const { home, platform, env, shell } = options
-  if (!['darwin', 'win32', 'linux'].includes(platform) || typeof options.verifyStopped !== 'function') fail()
+}
+
+export async function removeInstallationEntries(prepared: PreparedInstallation, options: EntryRemovalOptions): Promise<void> {
   const current = () => {
     const own = installation.readDesktopSelection(prepared.installRoot)
     if (own.root !== prepared.installRoot || own.record.installation_id !== prepared.installation_id
@@ -71,6 +71,13 @@ export async function removeInstallationEntries(prepared: PreparedInstallation, 
       || Object.keys(own.selection).some(key => own.selection[key] !== prepared.selection?.[key as keyof PreparedInstallation['selection']])
       || Object.keys(prepared.selection).length !== 4) fail()
   }
+  return removeEntries(prepared, options, current, 'menu-and-locator')
+}
+
+// Common byte/shortcut cleanup only; the fixed entrypoint supplies its own admission.
+async function removeEntries(prepared: PreparedInstallation, options: EntryRemovalOptions, current: () => void, scope: 'menu-only' | 'menu-and-locator'): Promise<void> {
+  const { home, platform, env, shell } = options
+  if (!['darwin', 'win32', 'linux'].includes(platform) || typeof options.verifyStopped !== 'function') fail()
   const stopped = async () => { current(); await options.verifyStopped(); current() }
   await stopped()
   const locator = await readInstallationLocator(home, platform, env)
@@ -97,29 +104,28 @@ export async function removeInstallationEntries(prepared: PreparedInstallation, 
   }
   // All entries must pass before changing any of them. Keep the locator last so
   // a partial operation remains discoverable for repair and a verified retry.
-  const entries = [menu, locatorFile].filter((value): value is Snapshot => value !== null)
+  const entries = [menu, ...(scope === 'menu-and-locator' ? [locatorFile] : [])].filter((value): value is Snapshot => value !== null)
   await stopped()
   for (const item of entries) await unchanged(item)
   if (platform === 'darwin') {
     const unregister = options.unregisterMac || (async (application: string) => promisify(execFile)(
       '/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister',
       ['-u', application], { timeout: 30_000, maxBuffer: 64 * 1024 }))
+    current()
     await unregister(path.join(prepared.guiRoot, 'Crabot.app'))
   }
   for (const item of entries) {
     await stopped(); await unchanged(item)
+    current()
     await fs.unlink(item.file)
     await syncDirectory(path.dirname(item.file))
   }
 }
 
 
-// Current paired-desktop CLI registration only. No independent CLI/system
-// takeover, shell/PATH mutation, service stop or program deletion occurs here.
-export async function removeDesktopCliEntries(options: {
-  installRoot: string; operationId: string; home: string; env: NodeJS.ProcessEnv
-}): Promise<{ removed: string[]; retained: boolean }> {
-  const removalFail = (): never => { throw Object.assign(new Error('卸载作业、操作锁或停止结果无法核验，命令入口和用户数据已保留。'), { code: 'CRABOT_DESKTOP_REMOVAL' }) }
+type RemovalJobOptions = { installRoot: string; operationId: string }
+async function captureRemovalJob(options: RemovalJobOptions) {
+  const removalFail = (): never => { throw Object.assign(new Error('卸载作业、操作锁或停止结果无法核验，应用入口和用户数据已保留。'), { code: 'CRABOT_DESKTOP_REMOVAL' }) }
   const load = (file: string) => import(new URL('./bootstrap/scripts/lib/' + file, import.meta.url).href)
   const [proofs, locks, runtime, workspace, text] = await Promise.all([
     load('desktop-removal-proof.mjs'), load('cli-lock.mjs'), load('instance-runtime.mjs'), load('workspace-maintenance.cjs'), load('desktop-cli-text.mjs'),
@@ -150,8 +156,29 @@ export async function removeDesktopCliEntries(options: {
     try { if (physical.readdirSync(path.join(own.dataDir, 'module-runtime-registry/records')).some((file: string) => file.endsWith('.json'))) removalFail() }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
   }
-  const current = async (): Promise<boolean> => {
+  const proofCurrent = async () => {
     if (!same((await proofs.readDesktopRemovalProof(own.root)).record, initial.record)) removalFail()
+  }
+  return { own, record: initial.record, text, assertJob, proofCurrent }
+}
+
+// Menu cleanup for the same removing job, even after Core has gone. Discovery
+// and CLI registration stay for the later full-uninstall finalization.
+export async function removeDesktopMenuEntry(options: RemovalJobOptions & Pick<EntryRemovalOptions, 'home' | 'env' | 'shell' | 'unregisterMac'>): Promise<void> {
+  const { own, record, assertJob, proofCurrent } = await captureRemovalJob(options)
+  const prepared = { installRoot: own.root, installation_id: own.record.installation_id, selection: record.source_selection,
+    coreRoot: path.join(own.root, 'releases', record.source_selection.core_id), guiRoot: path.join(own.root, 'app/releases', record.source_selection.gui_id) }
+  await removeEntries(prepared, { ...options, platform: process.platform, verifyStopped: async () => { await proofCurrent(); assertJob() } }, assertJob, 'menu-only')
+}
+
+// Current paired-desktop CLI registration only. No independent CLI/system
+// takeover, shell/PATH mutation, service stop or program deletion occurs here.
+export async function removeDesktopCliEntries(options: {
+  installRoot: string; operationId: string; home: string; env: NodeJS.ProcessEnv
+}): Promise<{ removed: string[]; retained: boolean }> {
+  const { own, text, assertJob, proofCurrent } = await captureRemovalJob(options)
+  const current = async (): Promise<boolean> => {
+    await proofCurrent()
     const locator = await readInstallationLocator(options.home, process.platform, options.env)
     assertJob()
     return !locator || locator.install_root === own.root && locator.installation_id === own.record.installation_id

@@ -152,3 +152,62 @@ for (const mode of ['owned', 'partial', 'missing-prefix', 'foreign', 'changed-co
   assert.equal(await fs.readFile(path.join(f.home, '.zshrc'), 'utf8'), 'user shell settings preserved')
   assert.deepEqual(JSON.parse(await fs.readFile(path.join(f.root, '.desktop-removal.json'), 'utf8')), mode === 'before-removing' ? { ...f.removal, phase: 'stopping' } : f.removal)
 })
+
+
+for (const mode of ['owned', 'custom-menu', 'foreign-locator', 'wrong-operation', 'missing-lock', 'before-removing', 'running', 'lost-reply', 'lost-lock-during-check', 'changed-phase-during-check']) test('removal menu cleanup uses its job with missing Core and retains discovery: ' + mode, async t => {
+  const f = await fixture(t), api = await import('../dist/installation-removal.js')
+  assert.equal(typeof api.removeDesktopMenuEntry, 'function')
+  const { desktopApplicationEntry } = await import('../dist/installation-entries.js')
+  const guiRoot = path.join(f.root, 'app/releases', f.removal.source_selection.gui_id)
+  const executable = path.join(guiRoot, windows ? 'Crabot.exe' : 'crabot-desktop')
+  const entry = process.platform === 'darwin' ? path.join(f.home, 'Applications/Crabot.app') : windows
+    ? path.join(f.env.APPDATA, 'Microsoft/Windows/Start Menu/Programs/Crabot.lnk') : path.join(f.home, '.local/share/applications/crabot.desktop')
+  await fs.mkdir(path.dirname(entry), { recursive: true })
+  const shortcut = { target: executable, args: '', cwd: guiRoot, icon: executable, iconIndex: 0, description: 'Crabot', appUserModelId: 'com.crabot.desktop' }
+  if (process.platform === 'darwin') await fs.symlink(path.join(guiRoot, 'Crabot.app'), entry)
+  else await fs.writeFile(entry, windows ? 'inert shortcut API fixture' : desktopApplicationEntry(executable, path.join(guiRoot, 'resources/crabot.png'), f.removal.installation_id))
+  const input = { installRoot: f.root, operationId: f.operationId, home: f.home, env: f.env,
+    shell: { readShortcutLink: () => shortcut }, unregisterMac: async application => assert.equal(application, path.join(guiRoot, 'Crabot.app')) }
+  if (mode === 'custom-menu') {
+    if (process.platform === 'darwin') { await fs.unlink(entry); await fs.symlink(path.join(f.home, 'custom.app'), entry) }
+    else if (windows) shortcut.args = '--custom'
+    else await fs.writeFile(entry, 'user menu')
+  }
+  if (mode === 'foreign-locator') await privateJson(f.locator, { schema_version: 1, owner: identity.inspectProcess(process.pid).owner, install_root: f.home, installation_id: randomUUID() }, true)
+  if (mode === 'wrong-operation') input.operationId = randomUUID()
+  if (mode === 'missing-lock') locks.releaseCliLock(f.held.pop())
+  if (mode === 'before-removing') await privateJson(path.join(f.root, '.desktop-removal.json'), { ...f.removal, phase: 'stopping' }, true)
+  if (mode === 'running') await fs.writeFile(path.join(f.data, 'mm.pid'), String(process.pid))
+  const locator = await fs.readFile(f.locator), cli = await fs.readFile(f.metadata)
+  let injected = false
+  if (['lost-lock-during-check', 'changed-phase-during-check'].includes(mode)) {
+    const lstat = fs.lstat; let checks = 0
+    t.mock.method(fs, 'lstat', async (...args) => {
+      const value = await lstat(...args)
+      if (args[0] === entry && ++checks === 6) {
+        injected = true
+        if (mode === 'lost-lock-during-check') locks.releaseCliLock(f.held.pop())
+        else await privateJson(path.join(f.root, '.desktop-removal.json'), { ...f.removal, phase: 'completed' }, true)
+      }
+      return value
+    })
+  }
+  if (mode === 'lost-reply') {
+    const unlink = fs.unlink, fault = t.mock.method(fs, 'unlink', async file => {
+      await unlink(file)
+      if (file === entry) throw Object.assign(new Error('menu unlink reply lost'), { code: 'EIO' })
+    })
+    await assert.rejects(api.removeDesktopMenuEntry(input), { code: 'EIO' }); fault.mock.restore()
+  }
+  if (['wrong-operation', 'missing-lock', 'before-removing', 'running', 'lost-lock-during-check', 'changed-phase-during-check'].includes(mode)) await assert.rejects(api.removeDesktopMenuEntry(input), { code: 'CRABOT_DESKTOP_REMOVAL' })
+  else if (['custom-menu', 'foreign-locator'].includes(mode)) await assert.rejects(api.removeDesktopMenuEntry(input), { code: 'CRABOT_INSTALL_REGISTRATION' })
+  else {
+    await api.removeDesktopMenuEntry(input); await api.removeDesktopMenuEntry(input)
+    await assert.rejects(fs.lstat(entry), { code: 'ENOENT' })
+  }
+  if (['lost-lock-during-check', 'changed-phase-during-check'].includes(mode)) assert.equal(injected, true)
+  if (!['owned', 'lost-reply'].includes(mode)) assert.ok(await fs.lstat(entry))
+  assert.deepEqual(await fs.readFile(f.locator), locator); assert.deepEqual(await fs.readFile(f.metadata), cli)
+  assert.equal(await fs.readFile(path.join(f.data, 'user.txt'), 'utf8'), 'data and dependencies preserved')
+  await assert.rejects(fs.lstat(path.join(f.root, 'releases', f.removal.source_selection.core_id)), { code: 'ENOENT' })
+})

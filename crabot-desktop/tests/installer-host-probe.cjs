@@ -31,7 +31,7 @@ async function main() {
   const native = (await module('bootstrap/scripts/lib/process-identity.cjs')).default; assert.equal(typeof native.inspectProgramReferences, 'function')
   const emptyReferences = await native.inspectProgramReferences({ roots: [], files: [] })
   assert.equal(emptyReferences.complete, true); assert.equal(emptyReferences.incomplete, false); assert.deepEqual(emptyReferences.processes, []); assert.deepEqual(emptyReferences.unknown_pids, [])
-  const cli = await module('installation-removal.js'); assert.equal(typeof cli.removeDesktopCliEntries, 'function')
+  const cli = await module('installation-removal.js'); assert.equal(typeof cli.removeDesktopCliEntries, 'function'); assert.equal(typeof cli.removeDesktopMenuEntry, 'function')
   const checked = await backend.verifyDesktopPayload(payload)
   assert.ok(checked.bytes > 0n)
   const entries = await module('installation-entries.js')
