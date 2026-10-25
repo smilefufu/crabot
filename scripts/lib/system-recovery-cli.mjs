@@ -4,6 +4,7 @@ import cliLocation from './cli-location.cjs'
 import { assertCoordinatorStopped } from './system-coordinator.mjs'
 import { systemRecoveryOptions } from './system-recovery.mjs'
 import { systemdAvailable } from './system-service.mjs'
+import { systemConversionRecoveryOperations } from './system-conversion-job.mjs'
 import { submitSystemOperation } from './system-job-client.mjs'
 import { systemError } from './system-registry.mjs'
 
@@ -16,8 +17,9 @@ export async function recoverSystemOperation({ root, registry, store, args }) {
   await assertCoordinatorStopped(record)
   const installation = cliLocation.assertSelectedCli(root), plan = record.plan
   const selected = plan.kind === 'upgrade' ? cliLocation.readCliSelection(plan.install_root) : undefined
-  if (plan.kind === 'upgrade' && plan.install_root !== installation?.root) throw systemError('共享作业不属于此安装。')
+  if (['upgrade', 'conversion'].includes(plan.kind) && plan.install_root !== installation?.root) throw systemError('共享作业不属于此安装。')
   const options = systemRecoveryOptions(plan, record.progress, selected)
+  if (plan.kind === 'conversion') await systemConversionRecoveryOperations(plan, { root, registry, prior: record.progress })
   for (const item of plan.instances ?? plan.items) {
     try { registry.verifyAccount(item.entry) }
     catch (error) { console.log(item.entry.user + '\t身份核对失败：' + error.message + '；不会对该UID执行变更。'); continue }

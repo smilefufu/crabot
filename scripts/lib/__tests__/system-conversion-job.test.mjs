@@ -8,7 +8,7 @@ import { SystemRegistry } from '../system-registry.mjs'
 import { SystemOperationStore } from '../system-operation.mjs'
 import { createLegacySystemConversionPermit } from '../system-conversion-permit.mjs'
 import { planSystemConversion } from '../system-conversion.mjs'
-import { systemConversionOperations } from '../system-conversion-job.mjs'
+import { systemConversionOperations, systemConversionRecoveryOperations } from '../system-conversion-job.mjs'
 import { LegacySystemEntryFence } from '../legacy-system-fence.mjs'
 import { LegacySystemCommandLink } from '../legacy-system-command.mjs'
 import { discoverLegacySystemRelease } from '../legacy-system-release.mjs'
@@ -60,12 +60,13 @@ async function fixture(t, { failure, nested = false } = {}) {
       record.boot_id = bootId; maintenance.boot_id = bootId
       const permit = createLegacySystemConversionPermit({ record, maintenance, entry, bootId, action, sourceFence: await fence.inspect(source) })
       assert.equal(permit.action, action)
-      assert.equal(phase, action === 'start-legacy' ? 'restored' : action === 'migrate' ? 'data_changing' : 'fenced')
+      assert.equal(phase, action === 'start-legacy' ? 'restored' : ['migrate', 'check-migration'].includes(action) ? 'data_changing' : 'fenced')
       assert.deepEqual(request, { root: core, operationId: plan.id, action })
       calls.push(action + ':' + entry.uid)
       if (failure === action + ':' + entry.uid) throw new Error('controlled role failure')
       if (action === 'stop-legacy') { running = false; return { state: 'stopped', request_acknowledged: true } }
       if (action === 'snapshot') return { id: randomUUID(), system_operation_id: plan.id, target_id: plan.target.id, backup: { id: randomUUID(), sha256: 'd'.repeat(64) } }
+      if (action === 'check-migration') return { verified: true, service_started: false }
       if (action === 'migrate') return { migrated: true, service_started: false }
       if (action === 'start-legacy') return { state: 'started' }
       assert.equal(action, 'cancel-preparation'); return { cancelled: true }
@@ -119,4 +120,89 @@ test('wrong target root and changed accounts refuse before services or source en
   await assert.rejects(systemConversionOperations(f.plan, { ...f.dependencies, root: path.dirname(f.core) }))
   f.registry.accountLookup = () => ({ user: 'other', uid: 2001, gid: 2001, home: '/home/other' })
   await assert.rejects(systemConversionOperations(f.plan, f.dependencies)); assert.deepEqual(f.calls, [])
+})
+
+test('actual root metadata recovery observes a lost start reply without reissuing it or dispatching legacy roles', options, async t => {
+  const f = await fixture(t, { nested: true }), originalTarget = f.dependencies.target
+  f.dependencies.target = async (entry, request) => {
+    if (request.action === 'start') throw Error('controlled lost start reply')
+    return originalTarget(entry, request)
+  }
+  const previous = await f.run(); assert.equal(previous.results[0].state, 'unknown')
+  const beforeCalls = f.calls.length
+  const prepared = await f.store.prepareRecovery(f.plan.id, 'continue', { checkCoordinator: async () => {} })
+  assert.equal(f.store.maintenance().operation, 'conversion')
+  const recoveryCalls = []
+  const recovery = await systemConversionRecoveryOperations(f.plan, { ...f.dependencies, prior: prepared.recovery.base_progress,
+    verifyService: () => {}, target: async (entry, request) => {
+      assert.equal(request.action, 'inspect'); recoveryCalls.push(entry.uid)
+      return { state: 'stopped', generation: null }
+    } })
+  const result = await f.store.runRecovery(f.plan.id, prepared.recovery.id, recovery)
+  assert.equal(result.exit_code, 1)
+  assert.deepEqual(result.results.map(row => row.state), ['observed_stopped', 'observed_stopped'])
+  assert.equal(result.results[0].original_action_unknown, true)
+  assert.deepEqual(f.store.maintenance().unsettled, [])
+  assert.deepEqual(f.calls.slice(beforeCalls), ['check-migration:1001', 'check-migration:1002']); assert.deepEqual(recoveryCalls, [1001, 1002])
+  for (const { entry } of f.plan.instances) await assert.rejects(fs.lstat(entry.data_dir), { code: 'ENOENT' })
+  assert.equal(await f.store.prepareRecovery(f.plan.id, 'continue', { checkCoordinator: async () => {} }), null)
+})
+for (const changed of ['global-command', 'source-fence', 'target-bytes', 'registry', 'account', 'old-consumer', 'service']) {
+  test('post-data recovery rejects changed root facts before any UID operation: ' + changed, options, async t => {
+    const f = await fixture(t, { nested: true }); const prior = await f.run(); const calls = []
+    const dependencies = { ...f.dependencies, prior, verifyService: () => {}, target: async () => { calls.push('uid'); assert.fail('no UID dispatch') } }
+    if (changed === 'global-command') { await fs.unlink(f.command.command); await fs.symlink(path.join(f.source, 'cli.mjs'), f.command.command) }
+    if (changed === 'source-fence') await fs.appendFile(path.join(f.source, 'scripts/start.mjs'), '// changed fenced bytes')
+    if (changed === 'target-bytes') await fs.appendFile(path.join(f.core, 'package.json'), ' ')
+    if (changed === 'registry') await f.registry.update(entries => entries.filter(entry => entry.uid !== 1001))
+    if (changed === 'account') f.registry.accountLookup = () => ({ user: 'replacement', uid: 3001, gid: 3001, home: '/home/replacement' })
+    if (changed === 'old-consumer') dependencies.processes = () => [{ process: { pid: 91919, parent: 1, owner: '1001', started: 'unexpected', executable: '/usr/bin/node' }, uses_source: true }]
+    if (changed === 'service') dependencies.verifyService = () => { throw Error('global service template changed') }
+    await assert.rejects(systemConversionRecoveryOperations(f.plan, dependencies)); assert.deepEqual(calls, [])
+  })
+}
+
+test('real job write failure after last configuration resumes only that unissued startup through the original recovery journal', options, async t => {
+  const f = await fixture(t, { nested: true }), [one, two] = f.plan.instances
+  const original = one.observation
+  two.observation = { ...two.observation, runtime_state: 'running', data_binding: 'observed_running',
+    controller: { ...original.controller, pid: 82001, owner: String(two.entry.uid) },
+    mm: { ...original.mm, pid: 82002, parent: 82001, owner: String(two.entry.uid) }, mm_port: 19200, launch_kind: 'daemon' }
+  one.observation = { ...one.observation, runtime_state: 'stopped', data_binding: 'verified_stopped' }
+  for (const field of ['controller', 'mm', 'mm_port', 'launch_kind']) delete one.observation[field]
+  let oldAlive = true
+  f.dependencies.processes = () => oldAlive ? [two.observation.controller, two.observation.mm].map(process => ({ process, uses_source: true })) : []
+  const legacy = f.dependencies.legacy
+  f.dependencies.legacy = async (entry, request) => { const value = await legacy(entry, request); if (request.action === 'stop-legacy') oldAlive = false; return value }
+  const write = f.store.write.bind(f.store); let faulted = false
+  f.store.write = (file, record, mode) => {
+    if (!faulted && file.endsWith('/maintenance.json') && record.phase === 'running' && record.current_uid === two.entry.uid
+      && record.stage === 'service_configure_dispatched' && f.store.read(f.store.file(f.plan.id), true)?.progress?.results[1].configured) {
+      faulted = true; throw Error('controlled last configuration journal boundary')
+    }
+    return write(file, record, mode)
+  }
+  await assert.rejects(f.run(), { code: 'CRABOT_SYSTEM_JOURNAL_FAILED' }); assert.equal(faulted, true)
+  f.store.write = write
+  const prepared = await f.store.prepareRecovery(f.plan.id, 'continue', { checkCoordinator: async () => {} })
+  assert.equal(prepared.recovery.base_progress.results[1].start_dispatched, undefined)
+  const calls = [], states = new Map(f.plan.instances.map(({ entry }) => [entry.uid, { state: 'stopped', generation: null }]))
+  const operations = await systemConversionRecoveryOperations(f.plan, { ...f.dependencies, prior: prepared.recovery.base_progress, verifyService: () => {},
+    target: async (entry, request) => {
+      assert.equal(request.root, f.core); assert.equal(request.operationId, f.plan.id)
+      if (request.action === 'inspect') return states.get(entry.uid)
+      assert.equal(request.action, 'start'); assert.equal(entry.uid, two.entry.uid); calls.push(entry.uid)
+      assert.deepEqual(request.previous, { state: 'stopped', generation: null })
+      const maintenance = f.store.maintenance()
+      assert.equal(maintenance.operation, 'conversion'); assert.equal(maintenance.recovery_id, prepared.recovery.id)
+      assert.equal(maintenance.stage, 'target_start_dispatched'); assert.deepEqual(maintenance.allow_start, { uid: entry.uid, core_id: f.plan.target.id })
+      const generation = 'systemd:new-target'
+      states.set(entry.uid, { state: 'running', ready: true, generation, core_id: f.plan.target.id, core_version: f.plan.target.version })
+      return { state: 'started', generation }
+    } })
+  const result = await f.store.runRecovery(f.plan.id, prepared.recovery.id, operations)
+  assert.equal(result.exit_code, 0); assert.deepEqual(calls, [two.entry.uid])
+  assert.deepEqual(result.results.map(row => row.state), ['observed_stopped', 'healthy'])
+  assert.deepEqual(f.store.maintenance().unsettled, []); f.store.assertIdle()
+  for (const { entry } of f.plan.instances) await assert.rejects(fs.lstat(entry.data_dir), { code: 'ENOENT' })
 })

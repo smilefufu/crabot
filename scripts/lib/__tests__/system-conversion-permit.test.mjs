@@ -154,7 +154,7 @@ test('data descriptor cannot add business contents, redirect targets or cross or
     const fd = fs.openSync(file, 'r'); try { assert.throws(() => reader(fd, process.getuid())) } finally { fs.closeSync(fd) }
   }
   for (const patch of [{ input: 'arbitrary-command' }, { install_root: '../elsewhere' }, { target: { ...permit.target, api_key: 'must-not-read' } },
-    { snapshot: { ...permit.snapshot, content: 'must-not-transfer' } }, { action: 'check-migration' }]) {
+    { snapshot: { ...permit.snapshot, content: 'must-not-transfer' } }, { action: 'check-migration-unknown' }]) {
     assert.throws(() => validateLegacySystemConversionPermit({ ...permit, ...patch }))
   }
 })
@@ -211,6 +211,41 @@ for (const changed of ['originally-stopped', 'not-resuming', 'not-dispatched', '
     if (changed === 'wrong-stage') f.maintenance.stage = 'target_start_dispatched'
     if (changed === 'migrated') row.migration_dispatched = true
     if (changed === 'target-start-allow') f.record.progress.allow_start = { uid: f.entry.uid, core_id: 'b'.repeat(64) }
+    assert.throws(() => createLegacySystemConversionPermit(f))
+  })
+}
+
+function recoveryFixture() {
+  const f = dataFixture('migrate'), row = f.record.progress.results[0]
+  Object.assign(row, { migrated: true, registration_dispatched: true, registered: true, configured: true, resume_required: true })
+  const base = structuredClone(f.record.progress), id = randomUUID()
+  f.record.recovery = { id, mode: 'continue', base_progress: base }
+  Object.assign(f.record.progress, { recovery_mode: 'continue', stage: 'target_recovery_observing' })
+  Object.assign(f.maintenance, { recovery_id: id, stage: 'target_recovery_observing' })
+  f.action = 'check-migration'
+  return f
+}
+test('post-data recovery only mints a read-only check with the original backup receipt', () => {
+  const f = recoveryFixture(), permit = createLegacySystemConversionPermit(f)
+  assert.equal(permit.action, 'check-migration')
+  assert.deepEqual(permit.snapshot, f.record.recovery.base_progress.results[0].snapshot)
+  assert.equal(conversionMaintenanceMatches(permit, f.maintenance, f.bootId), true)
+  for (const action of ['snapshot', 'migrate', 'stop-legacy', 'start-legacy', 'cancel-preparation']) {
+    assert.throws(() => createLegacySystemConversionPermit({ ...f, action }))
+  }
+})
+for (const changed of ['no-recovery', 'other-recovery', 'mode', 'migration', 'registration', 'configuration', 'receipt', 'public-stage', 'allow-start']) {
+  test('read-only recovery refuses incomplete root authority: ' + changed, () => {
+    const f = recoveryFixture()
+    if (changed === 'no-recovery') delete f.record.recovery
+    if (changed === 'other-recovery') f.maintenance.recovery_id = randomUUID()
+    if (changed === 'mode') f.record.recovery.mode = 'cancel'
+    if (changed === 'migration') f.record.recovery.base_progress.results[0].migrated = false
+    if (changed === 'registration') f.record.progress.results[0].registered = false
+    if (changed === 'configuration') f.record.progress.results[0].configured = false
+    if (changed === 'receipt') f.record.progress.results[0].snapshot.backup.sha256 = 'e'.repeat(64)
+    if (changed === 'public-stage') f.maintenance.stage = 'migration_dispatched'
+    if (changed === 'allow-start') f.record.progress.allow_start = { uid: f.entry.uid, core_id: f.record.plan.target.id }
     assert.throws(() => createLegacySystemConversionPermit(f))
   })
 }

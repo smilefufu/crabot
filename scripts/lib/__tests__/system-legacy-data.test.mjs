@@ -200,3 +200,32 @@ test('an originally verified stopped UID is backed up and migrated without start
   assert.equal(await verifyPassword('private-fixture-password', JSON.parse(before)), true)
   assert.equal(await fsp.readFile(path.join(f.dataDir, 'fixture/content'), 'utf8'), 'before changed')
 })
+
+for (const changed of ['schema', 'backup', 'manifest', 'source-active', 'data-replaced', 'other-running-target', 'unknown-runtime', 'malformed-manifest']) {
+  test('post-migration UID verification rejects changed data without reapplying migrations: ' + changed, options, async t => {
+    const f = await fixture(t), snapshot = await f.invoke('snapshot')
+    await f.invoke('migrate', { snapshot })
+    const extra = { snapshot }
+    if (changed === 'schema') await fsp.writeFile(path.join(f.dataDir, 'fixture/SCHEMA_VERSION'), 'v1')
+    if (changed === 'backup') await fsp.writeFile(path.join(f.dataDir + '.desktop-backups', snapshot.backup.id, 'data/fixture/content'), 'changed backup')
+    if (changed === 'manifest') await fsp.writeFile(f.manifestFile, JSON.stringify({ ...JSON.parse(f.original), crabot_home: f.targetRoot, data_dir: f.dataDir, port_offset: 200 }))
+    if (changed === 'source-active') extra.processes = async (_, use) => use({ state: 'running' })
+    if (changed === 'data-replaced') { await fsp.rename(f.dataDir, f.dataDir + '-original'); await fsp.mkdir(f.dataDir, { mode: 0o700 }) }
+    if (changed === 'other-running-target') extra.inspectCurrent = () => ({ state: 'running', record: { install_root: f.sourceRoot } })
+    if (changed === 'unknown-runtime') extra.inspectCurrent = () => ({ state: 'starting' })
+    if (changed === 'malformed-manifest') await fsp.writeFile(f.manifestFile, '{private-fixture-kept-only-in-uid-file')
+    await assert.rejects(f.invoke('check-migration', extra), error => {
+      assert.equal(error.message.includes('private-fixture'), false); return true
+    })
+    if (changed !== 'data-replaced') assert.equal(await fsp.readFile(path.join(f.dataDir, 'fixture/content'), 'utf8'), 'before changed')
+    assert.equal(readVersionMaintenance(f.dataDir), null)
+  })
+}
+test('read-only migration verification accepts the exact running target without stopping or replaying it', options, async t => {
+  const f = await fixture(t), snapshot = await f.invoke('snapshot')
+  await f.invoke('migrate', { snapshot })
+  const before = await fsp.readFile(f.manifestFile, 'utf8')
+  assert.deepEqual(await f.invoke('check-migration', { snapshot, inspectCurrent: () => ({ state: 'running', record: { install_root: f.targetRoot } }) }), { verified: true, service_started: false })
+  assert.equal(await fsp.readFile(f.manifestFile, 'utf8'), before)
+  assert.equal(readVersionMaintenance(f.dataDir), null)
+})

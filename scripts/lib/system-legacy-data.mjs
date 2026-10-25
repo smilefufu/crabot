@@ -18,6 +18,9 @@ import cliLocation from './cli-location.cjs'
 import management from './desktop-management.cjs'
 import { createMaintenanceBackup, assertLocalMigrationData, verifyMaintenanceBackup } from './maintenance-backup.mjs'
 import { verifyDataCompatibility, applyStartupMigrations } from './core-preparation.mjs'
+import { assertNoInterruptedMigrations } from '../upgrade-lib/migration-transaction.mjs'
+import { previewSharedRequests } from '../upgrade-lib/shared-requests.mjs'
+import { previewWorkspaceLegacyExecutions } from './workspace-legacy-executions.mjs'
 import { inspectLegacyPythonEnvironment } from './legacy-python.mjs'
 import { prepareLegacyPythonRebuild } from './legacy-python-rebuild.mjs'
 import { beginLegacySystemVersionMaintenance, cancelPreparedLegacySystemVersionMaintenance, markLegacySystemVersionMaintenanceInstalling,
@@ -54,11 +57,11 @@ function ownManifest(file, uid) {
   } finally { fs.closeSync(fd) }
 }
 
-// manifestFile/runtimeOptions/inspectEnvironment/prepareEnvironment/processes
+// manifestFile/runtimeOptions/inspectEnvironment/prepareEnvironment/processes/inspectCurrent
 // are current-UID fixture seams. None are accepted from CLI, env or role permits.
 export async function maintainLegacySystemUser(entry, { action, source, observation, sourceFenceId, operationId, targetRoot, snapshot, env, outputFd,
   manifestFile = path.join(entry.home, '.crabot/instance.json'), runtimeOptions, inspectEnvironment = inspectLegacyPythonEnvironment,
-  prepareEnvironment = prepareLegacyPythonRebuild, processes = withVerifiedLegacyProcessGraph }) {
+  prepareEnvironment = prepareLegacyPythonRebuild, processes = withVerifiedLegacyProcessGraph, inspectCurrent = inspectInstance }) {
   const actual = userInfo()
   if (entry.uid <= 0 || actual.uid !== entry.uid || actual.gid !== entry.gid || actual.username !== entry.user || actual.homedir !== entry.home) fail()
   validateSystemConversionInstance({ entry, observation }, source)
@@ -88,12 +91,16 @@ export async function maintainLegacySystemUser(entry, { action, source, observat
     if (action === 'check-migration') {
       management.requirePrivateDataRoot(dataDir)
       assertLegacySystemDataLayout(dataDir)
-      if (readVersionMaintenance(dataDir) || snapshot?.system_operation_id !== operationId || snapshot.target_id !== target.id
-        || inspectInstance(dataDir).state !== 'stopped') fail()
+      if (readVersionMaintenance(dataDir) || snapshot?.system_operation_id !== operationId || snapshot.target_id !== target.id) fail()
+      const current = inspectCurrent(dataDir)
+      if (current.state !== 'stopped' && !(current.state === 'running' && current.record?.install_root === targetRoot)) fail()
       await processes(source.installRoot, value => { if (value.state !== 'stopped') fail() })
       const directory = path.join(dataDir + '.desktop-backups', snapshot.backup.id)
       const backup = await verifyMaintenanceBackup(directory, snapshot.backup.sha256)
       if (backup.source !== dataDir || verifyDataCompatibility(targetRoot, dataDir).length) fail()
+      await assertNoInterruptedMigrations(dataDir)
+      if (!['ready', 'not_applicable'].includes((await previewSharedRequests(targetRoot, dataDir)).status)
+        || !['ready', 'not_applicable'].includes((await previewWorkspaceLegacyExecutions(targetRoot, dataDir)).status)) fail()
       const original = ownManifest(path.join(directory, 'data', copyRelative), entry.uid)
       if (hash(original) !== observation.manifest_fingerprint
         || !isDeepStrictEqual(JSON.parse(ownManifest(manifestFile, entry.uid)), converted(original))) fail()
@@ -155,6 +162,7 @@ export async function maintainLegacySystemUser(entry, { action, source, observat
     if (diagnosticVerified) {
       try { fs.writeSync(diagnosticFd, new Date().toISOString() + ' ' + (error.stack ?? 'Unknown conversion failure') + '\n') } catch {}
     }
+    if (action === 'check-migration') fail()
     throw error
   } finally {
     if (diagnosticFd !== undefined) fs.closeSync(diagnosticFd)

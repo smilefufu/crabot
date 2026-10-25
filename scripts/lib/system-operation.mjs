@@ -149,7 +149,7 @@ export class SystemOperationStore {
       record.phase = 'recovery_prepared'; record.boot_id = readSystemBootId()
       this.write(this.file(id), record, 0o600)
       this.write(path.join(this.directory, 'maintenance.json'), { schema_version: 1, id,
-        operation: record.plan.kind === 'upgrade' ? 'upgrade' : record.plan.action,
+        operation: ['conversion', 'upgrade'].includes(record.plan.kind) ? record.plan.kind : record.plan.action,
         phase: 'recovery_prepared', targets: items.map(item => item.entry.uid), unsettled: [], recovery_id: attempt }, 0o644)
       return record
     } finally { releaseCliLock(lock) }

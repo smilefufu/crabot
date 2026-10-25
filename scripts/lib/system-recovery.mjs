@@ -1,5 +1,6 @@
 // Recovery consumes root intent and fresh UID observations. It never interprets
 // a missing reply as permission to replay a migration or an issued restart.
+import { systemConversionRecoveryOptions, executeSystemConversionRecovery } from './system-conversion-recovery.mjs'
 import { executeSystemUpgrade } from './system-upgrade.mjs'
 import { systemError } from './system-registry.mjs'
 
@@ -14,7 +15,7 @@ const safe = observation => observation && !observation.maintenance
   && (observation.state === 'stopped' || observation.state === 'running' && observation.ready === true)
 
 export function systemRecoveryOptions(plan, prior, selected) {
-  if (plan.kind === 'conversion') throw systemError('旧共享转换必须由专用恢复器核对来源、隔离与本人回执；未按批量或普通升级重放。', 'CRABOT_SYSTEM_CONVERSION_RECOVERY_REQUIRED')
+  if (plan.kind === 'conversion') return systemConversionRecoveryOptions(plan, prior)
   if (plan.kind !== 'upgrade') return { continue: true, cancel: true }
   if (selected === plan.source.id) {
     const rows = prior?.results ?? []
@@ -28,6 +29,7 @@ export function systemRecoveryOptions(plan, prior, selected) {
 
 export async function executeSystemRecovery(plan, prior, { mode, operations }) {
   if (!['continue', 'cancel'].includes(mode)) throw systemError('请选择继续或取消本次恢复。')
+  if (plan.kind === 'conversion') return executeSystemConversionRecovery(plan, prior, { mode, operations })
   const selected = plan.kind === 'upgrade' ? await operations.selected() : undefined
   const options = systemRecoveryOptions(plan, prior, selected)
   if (!options[mode]) throw systemError(mode === 'cancel' ? '共享核心已切换；取消不授权自动降级，请选择受保护的继续。' : '原版准备已有派发，请先取消准备并恢复原运行集合，再重新升级。')
