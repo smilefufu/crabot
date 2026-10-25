@@ -90,7 +90,7 @@ jobs:
         timeout-minutes: 10
         run: node .github/scripts/smoke-packaged-desktop.mjs ".desktop-build/安装 候选/paired" 2>&1 | tee .desktop-build/paired-boot.log
       - name: Signed paired update reaches ordinary target GUI and Core health
-        timeout-minutes: ${{ matrix.target == 'win32-x64' && 35 || 20 }}
+        timeout-minutes: 35
         env:
           CRABOT_PAIRED_ACCEPTANCE_ID: ${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.target }}
         run: |

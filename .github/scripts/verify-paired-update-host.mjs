@@ -16,6 +16,7 @@ import { verifyDesktopPayload, prepareDesktopInstallation, commitDesktopInstalla
 import { writeSignedDesktopPayload } from '../../scripts/desktop/sign-release.mjs'
 import { inspectInstance, identity } from '../../scripts/lib/instance-runtime.mjs'
 import { stopInstance } from '../../scripts/lib/instance-controller.mjs'
+import { probeKnownProcessExit } from '../../scripts/lib/known-process-exit.cjs'
 import product from '../../scripts/lib/product-runtime.cjs'
 import { buildPairedUpdateSource } from './build-paired-update-source.mjs'
 import { preparePairedUpdateCore } from './prepare-paired-update-core.mjs'
@@ -168,12 +169,26 @@ try {
   // The relaunch target has no inherited output pipe. In this synthetic CI
   // fixture only, a normal second open can expose loader errors. Keep the first
   // handoff failed; never use this observation as its health receipt.
-  if (process.platform === 'darwin' && fixtureEnvironment && evidence?.target_alive && evidence.ordinary_peer_verified
+  if (process.platform === 'darwin' && process.env.RUNNER_ENVIRONMENT === 'github-hosted' && process.env.GITHUB_REPOSITORY === 'smilefufu/crabot'
+    && fixtureEnvironment && evidence?.target_alive && evidence.ordinary_peer_verified
     && evidence.runtime?.state === 'stopped' && evidence.maintenance?.phase === 'verifying'
     && evidence.schema?.status === 'readable' && evidence.schema.pending.length === 0 && modelProvider.evidence.generation_requests === 0) {
     try {
       const installation = createRequire(import.meta.url)('../../scripts/lib/desktop-installation.cjs'), current = installation.readDesktopSelection(selected.root)
       const entry = createRequire(import.meta.url)('../../scripts/lib/desktop-entry.cjs'), policy = entry.loadDesktopEntry(current.coreRoot)
+      // Preserve the failed first target above. A concurrent second open only
+      // waits on its profile lock, hiding the original bootstrap error. Retire
+      // this exact synthetic process as cleanup already would, prove kernel
+      // exit, then observe an ordinary fresh open without bypassing any checks.
+      if (!identity.sameProcess(targetIdentity, identity.inspectProcess(targetIdentity.pid))
+        || targetIdentity.owner !== identity.inspectProcess(process.pid).owner || !entry.verifyDesktopEntry(targetIdentity, policy)) throw new Error('Diagnostic target changed')
+      identity.terminateKnownProcess(targetIdentity)
+      const exitDeadline = Date.now() + 10000
+      while (probeKnownProcessExit([targetIdentity]).state !== 'stopped') {
+        if (Date.now() >= exitDeadline) throw new Error('Diagnostic target exit unconfirmed')
+        await sleep(100)
+      }
+      checkpoint('failed-target-retired')
       const reopened = spawn(current.executable, ['--background'], { env: fixtureEnvironment, stdio: ['ignore', 'pipe', 'pipe'] })
       let output = '', owner, result, timer
       const ended = new Promise(resolve => { reopened.once('close', code => resolve({ exit_code: Number.isInteger(code) && code >= 0 && code <= 255 ? code : null })); reopened.once('error', () => resolve({ launch_failed: true })) })
@@ -190,7 +205,7 @@ try {
         clearTimeout(timer)
         if (owner && identity.sameProcess(owner, identity.inspectProcess(owner.pid))) identity.terminateKnownProcess(owner)
       }
-      report.target_reopen = { ...result, native_identity_verified: !!owner, ...summarizePairedTargetBootstrap(output, current.selection.version) }
+      report.target_reopen = { ...result, original_target_stopped: true, native_identity_verified: !!owner, ...summarizePairedTargetBootstrap(output, current.selection.version) }
       // No raw output, screen content, system logs, paths or user text leave this observer.
     } catch { report.target_reopen = { observation_unavailable: true } }
   }
