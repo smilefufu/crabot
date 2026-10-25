@@ -99,6 +99,7 @@ function sourceFailure(error) {
   if (error.code === 'CRABOT_PREPARATION_CANCELLED') return false
   const message = `${error.message}\n${error.stderr ?? ''}`
   if (/gyp ERR!|ELIFECYCLE|hash.*mismatch|mismatch.*hash|signature|keyid|integrity|EACCES|EPERM|ENOSPC|permission denied|no space left|cancelled/i.test(message)) return false
+  if (/cause:\s+Failed to fetch:\s+https?:\/\/\S+[\s\S]*?cause:\s+operation timed out\b/i.test(message)) return true
   return /HTTP[^\n]*(403|404|408|429|5\d\d)|403 Forbidden|404 Not Found|ERR_PNPM_(FETCH|META_FETCH|NO_MATCHING_VERSION)|ETIMEDOUT|ECONNRESET|ECONNREFUSED|ENOTFOUND|network.*(failed|unreachable)|connection.*(reset|refused|timed out)|request.*timed out|was not found in the package registry|there (?:is no version|are no versions) of/i.test(message)
 }
 
