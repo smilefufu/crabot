@@ -1,17 +1,18 @@
-import { assertAdminDataCompatibility } from './admin-data-compat.mjs'
+import { verifyDataCompatibility } from './data-compatibility.mjs'
 import { existsSync, readFileSync, mkdirSync } from 'node:fs'
 import { join, resolve, delimiter } from 'node:path'
 import { homedir } from 'node:os'
 import { randomBytes } from 'node:crypto'
-import { scanModules, runMigrations, previewMigrations } from '../upgrade-lib/migrate.mjs'
+import { runMigrations, previewMigrations } from '../upgrade-lib/migrate.mjs'
 import { runScript } from '../upgrade-lib/runner.mjs'
 import product from './product-runtime.cjs'
 import workspace from './workspace-maintenance.cjs'
 import management from './desktop-management.cjs'
 import cliLocation from './cli-location.cjs'
 import { assertLocalMigrationData } from './maintenance-backup.mjs'
-import { assertWorkspaceDataCompatibility } from './workspace-data-compat.mjs'
 import { readVersionMaintenance, assertVersionMaintenanceAllowsStart } from './version-maintenance.mjs'
+
+export { verifyDataCompatibility } from './data-compatibility.mjs'
 
 // Common preparation only: no password prompt, TTY, GUI, lifecycle lock or model calls.
 export function prepareCoreEnvironment({ root, dataDir, source = process.env, loadInstallationEnv }) {
@@ -57,22 +58,4 @@ export async function applyStartupMigrations(root, dataDir, env, log = () => {},
   const result = await runMigrations(root, dataDir, (script, directory, context) => runScript(script, directory, { ...context, root, env, outputFd }),
     { info: log, warn: log, error: log }, { lockHeld: true })
   if (!result.ok) throw Object.assign(new Error(`Migration failed: ${result.failedModule}/${result.failedAt}`), { code: 'CRABOT_MIGRATION_FAILED' })
-}
-
-export function verifyDataCompatibility(root, dataDir) {
-  assertAdminDataCompatibility(root, dataDir)
-  assertWorkspaceDataCompatibility(root, dataDir)
-  const pending = scanModules(root, dataDir)
-  // Preflight the whole version set before the first module can mutate data.
-  // A rollback cannot turn a newer schema into an older one by relabelling it.
-  for (const migration of pending) {
-    const versions = [migration.dataVersion ?? 'v0', migration.codeVersion]
-    if (versions.some(value => !/^v\d+$/.test(value) || !Number.isSafeInteger(Number(value.slice(1))))) {
-      throw Object.assign(new Error(`Invalid schema version: ${migration.moduleId}`), { code: 'CRABOT_SCHEMA_VERSION_INVALID' })
-    }
-    if (Number(versions[0].slice(1)) > Number(versions[1].slice(1))) {
-      throw Object.assign(new Error(`Data requires a newer core: ${migration.moduleId}`), { code: 'CRABOT_DATA_NEWER_THAN_CODE' })
-    }
-  }
-  return pending
 }

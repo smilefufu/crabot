@@ -104,7 +104,7 @@ for (const mode of ['matching', 'partial', 'missing-core', 'changed-file', 'new-
 
 // Mutation cases use only the inert private program fixture. Native observer
 // outcomes below are controlled explicitly; real observation has a separate case.
-for (const mode of ['owned', 'partial', 'changed-file', 'unknown-directory', 'missing-lock', 'wrong-operation', 'before-removing', 'running', 'referenced', 'unknown-reference', 'incomplete-observer', 'changed-after-observation', 'lost-unlink-reply', 'root-preparation', 'module-pending', 'lost-lock-after-observation', 'changed-proof-after-observation', 'directory-after-observation', 'reappeared-after-unlink', 'late-hardlink', 'late-file-link']) test('program removal holds the same job and preserves all user data: ' + mode, { timeout: 10000, skip: process.platform === 'win32' && mode === 'late-file-link' }, async t => {
+for (const mode of ['owned', 'partial', 'changed-file', 'unknown-directory', 'missing-lock', 'wrong-operation', 'wrong-installation', 'before-removing', 'running', 'referenced', 'unknown-reference', 'incomplete-observer', 'changed-after-observation', 'lost-unlink-reply', 'root-preparation', 'module-pending', 'lost-lock-after-observation', 'changed-proof-after-observation', 'directory-after-observation', 'reappeared-after-unlink', 'late-hardlink', 'late-file-link']) test('program removal holds the same job and preserves all user data: ' + mode, { timeout: 10000, skip: process.platform === 'win32' && mode === 'late-file-link' }, async t => {
   const f = await fixture(t), locks = await import('../cli-lock.mjs')
   const held = []
   try {
@@ -117,6 +117,7 @@ for (const mode of ['owned', 'partial', 'changed-file', 'unknown-directory', 'mi
     if (mode === 'unknown-directory') { await fs.mkdir(path.join(f.core, 'custom')); await fs.writeFile(path.join(f.core, 'custom/user.txt'), 'user additions') }
     if (mode === 'missing-lock') locks.releaseCliLock(held.pop())
     if (mode === 'wrong-operation') input.operationId = randomUUID()
+    if (mode === 'wrong-installation') { const file = path.join(f.root, 'desktop-installation.json'); await privateJson(file, { ...JSON.parse(await fs.readFile(file)), installation_id: randomUUID() }, true) }
     if (mode === 'before-removing') {
       const file = path.join(f.root, '.desktop-removal.json'), record = JSON.parse(await fs.readFile(file))
       await privateJson(file, { ...record, phase: 'stopping' }, true)
@@ -143,7 +144,7 @@ for (const mode of ['owned', 'partial', 'changed-file', 'unknown-directory', 'mi
       reappearance = t.mock.method(fsSync, 'unlinkSync', file => { unlink(file); if (file === target) fsSync.writeFileSync(target, 'Core bytes') })
     }
     const beforeData = await fs.readFile(path.join(f.data, 'user.txt')), beforeRecord = await fs.readFile(path.join(f.root, '.desktop-removal.json'))
-    const refused = ['missing-lock', 'wrong-operation', 'before-removing', 'running', 'referenced', 'unknown-reference', 'incomplete-observer', 'root-preparation', 'module-pending', 'lost-lock-after-observation', 'changed-proof-after-observation', 'directory-after-observation'].includes(mode)
+    const refused = ['missing-lock', 'wrong-operation', 'wrong-installation', 'before-removing', 'running', 'referenced', 'unknown-reference', 'incomplete-observer', 'root-preparation', 'module-pending', 'lost-lock-after-observation', 'changed-proof-after-observation', 'directory-after-observation'].includes(mode)
     if (mode === 'lost-unlink-reply') {
       const unlink = fsSync.unlinkSync; let removed = 0
       const fault = t.mock.method(fsSync, 'unlinkSync', file => {
@@ -168,7 +169,7 @@ for (const mode of ['owned', 'partial', 'changed-file', 'unknown-directory', 'mi
         const retried = await removeDesktopRemovalPrograms(input); assert.equal(retried.removed.length, 1); assert.equal(retried.retained.length, 0)
       } else if (mode !== 'changed-after-observation') assert.equal((await removeDesktopRemovalPrograms(input)).removed.length, 0)
     }
-    if (!['missing-lock', 'wrong-operation', 'before-removing', 'running', 'root-preparation', 'module-pending'].includes(mode)) assert.ok(observed >= 1)
+    if (!['missing-lock', 'wrong-operation', 'wrong-installation', 'before-removing', 'running', 'root-preparation', 'module-pending'].includes(mode)) assert.ok(observed >= 1)
     if (mode === 'late-hardlink') assert.equal(await fs.readFile(path.join(f.data, 'linked-program.txt'), 'utf8'), 'Core bytes')
     assert.deepEqual(await fs.readFile(path.join(f.data, 'user.txt')), beforeData)
     assert.deepEqual(await fs.readFile(path.join(f.root, '.desktop-removal.json')), beforeRecord)
