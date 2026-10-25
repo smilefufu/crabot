@@ -34,6 +34,7 @@ on:
       - '.github/scripts/paired-update-source-data.test.mjs'
       - '.github/scripts/build-paired-update-source.mjs'
       - '.github/scripts/prepare-paired-update-core*'
+      - '.github/scripts/paired-update-target-evidence*'
       - '.github/workflows/desktop.yml'
       - '.github/workflows/desktop-ubuntu-bootstrap.yml'
   workflow_dispatch:
@@ -85,7 +86,7 @@ jobs:
         env:
           CRABOT_CI_BASE: ${{ github.event.before || github.event.pull_request.base.sha }}
         run: |
-          node --test .github/scripts/desktop-runtime-scope.test.mjs .github/scripts/prepare-paired-update-core.test.mjs .github/scripts/check-paired-update-report.test.mjs
+          node --test .github/scripts/desktop-runtime-scope.test.mjs .github/scripts/prepare-paired-update-core.test.mjs .github/scripts/check-paired-update-report.test.mjs .github/scripts/paired-update-target-evidence.test.mjs
           node .github/scripts/desktop-runtime-scope.mjs
       - name: Linux build prerequisites
         if: runner.os == 'Linux' && steps.scope.outputs.full_runtime == 'true'

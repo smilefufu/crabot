@@ -19,6 +19,7 @@ import { stopInstance } from '../../scripts/lib/instance-controller.mjs'
 import product from '../../scripts/lib/product-runtime.cjs'
 import { buildPairedUpdateSource } from './build-paired-update-source.mjs'
 import { preparePairedUpdateCore } from './prepare-paired-update-core.mjs'
+import { collectPairedUpdateTargetEvidence } from './paired-update-target-evidence.mjs'
 import { startPairedUpdateModelProvider } from '../../crabot-desktop/tests/fixtures/paired-update-model-provider.mjs'
 
 if (process.env.GITHUB_ACTIONS !== 'true' || !['darwin', 'win32'].includes(process.platform)) throw new Error('Requires an isolated macOS/Windows CI user; never run against a developer MM')
@@ -43,7 +44,7 @@ if (space.bavail * space.bsize < needed || temporarySpace.bavail * temporarySpac
 const job = path.join(repository, '.desktop-build', 'paired-update-' + randomBytes(12).toString('hex')), temporary = await fs.mkdtemp(path.join(tmpdir(), 'Crabot 更新 '))
 await fs.mkdir(job, { mode: 0o700 }); const control = path.join(temporary, 'control'), home = path.join(temporary, 'home')
 await fs.mkdir(control, { mode: 0o700 }); await fs.mkdir(home, { mode: 0o700 })
-let modelProvider, selected, child, targetIdentity, sourceIdentity, expectedTargetGuiRoot, phase = 'prepare-target', success = false, sourceOutput = ''
+let modelProvider, selected, child, targetIdentity, sourceIdentity, expectedTargetGuiRoot, expectedTargetCoreRoot, handoffAt, phase = 'prepare-target', success = false, sourceOutput = ''
 const report = { acceptance_id: acceptanceId, platform: process.platform, arch: process.arch, candidate_channel_enabled: false, remote_model_called: false,
   source_gui: 'fixture-packaged-component-actor', target_gui: 'ordinary-packaged-main', fixture_debugger: false, real_login_session_verified: false }
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
@@ -101,12 +102,17 @@ try {
   assert.deepEqual(handoff.target, target.record.selection); assert.equal(handoff.ordinary_exits, 0); assert.equal(handoff.requests, 3)
   assert.match(handoff.maintenance_id, /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/); assert.equal(handoff.production_peer_policy_verified, true)
   phase = 'target-start-and-health'
+  handoffAt = (await fs.stat(path.join(control, 'handoff.json'))).mtimeMs
   const installation = createRequire(import.meta.url)('../../scripts/lib/desktop-installation.cjs'), current = installation.readDesktopSelection(selected.root)
+  expectedTargetCoreRoot = current.coreRoot
+  const entry = await import(new URL('../../scripts/lib/desktop-entry.cjs', import.meta.url))
+  const targetPolicy = entry.default.loadDesktopEntry(current.coreRoot)
   targetIdentity = await poll('ordinary target executable', async () => {
     for (const pid of identity.listProcessIds()) {
       try {
         const value = identity.inspectProcess(pid)
-        if (value?.owner === sourceIdentity.owner && await fs.realpath(value.executable) === await fs.realpath(current.executable)) return value
+        if (value?.owner === sourceIdentity.owner && await fs.realpath(value.executable) === await fs.realpath(current.executable)
+          && entry.default.verifyDesktopEntry(value, targetPolicy)) return value
       } catch { /* unrelated inaccessible or exited process */ }
     }
     return null
@@ -118,7 +124,6 @@ try {
     try { await fs.stat(path.join(selected.dataDir, 'desktop-maintenance.json')); return false }
     catch (error) { if (error.code === 'ENOENT') return true; throw error }
   })
-  const entry = await import(new URL('../../scripts/lib/desktop-entry.cjs', import.meta.url))
   assert.equal(entry.default.verifyDesktopEntry(targetIdentity, entry.default.loadDesktopEntry(current.coreRoot)), true)
   const after = inspectInstance(selected.dataDir)
   assert.equal(after.state, 'running'); assert.equal(after.record.install_root, current.coreRoot); assert.equal(after.record.instance_id, before.instance_id); assert.notEqual(after.record.generation, before.generation)
@@ -136,6 +141,10 @@ try {
   if (stage) report.source_stage = stage
   const activity = await readControl('source-activity').catch(() => null)
   if (activity) report.source_activity = activity
+  if (selected && expectedTargetCoreRoot) {
+    report.target_evidence = await collectPairedUpdateTargetEvidence({ dataDir: selected.dataDir, targetRoot: expectedTargetCoreRoot, targetIdentity, handoffAt })
+      .catch(() => ({ collection_failed: true }))
+  }
   process.exitCode = 1
 } finally {
   if (sourceIdentity && identity.sameProcess(sourceIdentity, identity.inspectProcess(sourceIdentity.pid))) {
