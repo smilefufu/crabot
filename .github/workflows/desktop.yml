@@ -386,6 +386,10 @@ jobs:
         if: runner.os == 'Linux' && steps.scope.outputs.full_runtime == 'true'
         timeout-minutes: 15
         run: sudo --preserve-env=GITHUB_ACTIONS "$GITHUB_WORKSPACE/.product-runtime/node/bin/node" .github/scripts/smoke-system-mode.mjs "$GITHUB_WORKSPACE/.desktop-build/安装 候选/core" "$GITHUB_WORKSPACE/.desktop-build/system-mode.json" "$GITHUB_WORKSPACE/.desktop-build/cli-archive/archive.json" 2>&1 | tee .desktop-build/system-mode.log
+      - name: Published legacy system archives through the ordinary installer
+        if: runner.os == 'Linux' && steps.scope.outputs.full_runtime == 'true'
+        timeout-minutes: 20
+        run: sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,GITHUB_REPOSITORY,GITHUB_WORKSPACE "$GITHUB_WORKSPACE/.product-runtime/node/bin/node" .github/scripts/smoke-system-legacy.mjs "$GITHUB_WORKSPACE/.desktop-build/安装 候选/core" "$GITHUB_WORKSPACE/.desktop-build/system-legacy.json" 2>&1 | tee .desktop-build/system-legacy.log
       - name: Whole Electron host with real core and CLI on Linux
         timeout-minutes: 12
         if: runner.os == 'Linux' && steps.scope.outputs.full_runtime == 'true'
@@ -416,6 +420,7 @@ jobs:
             .desktop-build/desktop-initialization-disk.json
             .desktop-build/cli-update-disk.json
             .desktop-build/system-mode.json
+            .desktop-build/system-legacy.json
             .desktop-build/platform-installers/installers.json
             .desktop-build/cli-archive/archive.json
             product-runtime.json
