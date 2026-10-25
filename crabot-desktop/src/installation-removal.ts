@@ -125,41 +125,8 @@ async function removeEntries(prepared: PreparedInstallation, options: EntryRemov
 
 type RemovalJobOptions = { installRoot: string; operationId: string }
 async function captureRemovalJob(options: RemovalJobOptions) {
-  const removalFail = (): never => { throw Object.assign(new Error('卸载作业、操作锁或停止结果无法核验，应用入口和用户数据已保留。'), { code: 'CRABOT_DESKTOP_REMOVAL' }) }
-  const load = (file: string) => import(new URL('./bootstrap/scripts/lib/' + file, import.meta.url).href)
-  const [proofs, locks, runtime, workspace, text] = await Promise.all([
-    load('desktop-removal-proof.mjs'), load('cli-lock.mjs'), load('instance-runtime.mjs'), load('workspace-maintenance.cjs'), load('desktop-cli-text.mjs'),
-  ])
-  const physical = require('./bootstrap/scripts/lib/physical-fs.cjs')
-  const own = installation.readDesktopInstallation(options.installRoot)
-  const directoryIdentity = (stat: BigIntStats) => [stat.dev, stat.ino, stat.mode, stat.uid, stat.gid].join(':')
-  const dataIdentity = directoryIdentity(physical.lstatSync(own.dataDir, { bigint: true }))
-  const initial = await proofs.readDesktopRemovalProof(own.root)
-  const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b)
-  const removal = require('./bootstrap/scripts/lib/desktop-removal-record.cjs')
-  const held = [own.root, own.dataDir].map(directory => {
-    const file = path.join(directory, 'cli.lock')
-    return { directory, file, token: locks.cliLockToken(file) }
-  })
-  // Final synchronous binding directly precedes each unlink; an earlier async
-  // proof/snapshot must not retain authority after either OS lock was released.
-  const assertJob = () => {
-    const actual = removal.readDesktopRemoval(own.root)
-    if (actual?.phase !== 'removing' || actual.operation_id !== options.operationId || !same(actual, initial.record)
-      || !same(installation.readDesktopInstallation(own.root).record, own.record)
-      || !same(installation.readDesktopPairReference(own.root).selection, initial.record.source_selection)
-      || directoryIdentity(physical.lstatSync(own.dataDir, { bigint: true })) !== dataIdentity
-      || !held.every(lock => lock.token && locks.cliLockToken(lock.file) === lock.token && locks.hasInheritedCliLock(lock.directory, lock.token))
-      || workspace.workspaceMaintenancePending(own.dataDir) || runtime.inspectInstance(own.dataDir).state !== 'stopped') removalFail()
-    try { physical.lstatSync(path.join(own.dataDir, 'desktop-maintenance.json')); removalFail() }
-    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
-    try { if (physical.readdirSync(path.join(own.dataDir, 'module-runtime-registry/records')).some((file: string) => file.endsWith('.json'))) removalFail() }
-    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
-  }
-  const proofCurrent = async () => {
-    if (!same((await proofs.readDesktopRemovalProof(own.root)).record, initial.record)) removalFail()
-  }
-  return { own, record: initial.record, text, assertJob, proofCurrent }
+  const { captureDesktopRemovalJob } = await import(new URL('./bootstrap/scripts/lib/desktop-removal-context.mjs', import.meta.url).href)
+  return captureDesktopRemovalJob(options)
 }
 
 // Menu cleanup for the same removing job, even after Core has gone. Discovery
@@ -176,7 +143,8 @@ export async function removeDesktopMenuEntry(options: RemovalJobOptions & Pick<E
 export async function removeDesktopCliEntries(options: {
   installRoot: string; operationId: string; home: string; env: NodeJS.ProcessEnv
 }): Promise<{ removed: string[]; retained: boolean }> {
-  const { own, text, assertJob, proofCurrent } = await captureRemovalJob(options)
+  const { own, assertJob, proofCurrent } = await captureRemovalJob(options)
+  const text = await import(new URL('./bootstrap/scripts/lib/desktop-cli-text.mjs', import.meta.url).href)
   const current = async (): Promise<boolean> => {
     await proofCurrent()
     const locator = await readInstallationLocator(options.home, process.platform, options.env)

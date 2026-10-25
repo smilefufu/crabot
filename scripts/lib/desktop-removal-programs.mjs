@@ -12,6 +12,53 @@ const generation = stat => [stat.dev, stat.ino, stat.mode, stat.uid, stat.gid, s
 const fail = () => { throw Object.assign(new Error('原程序范围或卸载作业已变化，原文件和数据已保留。'), { code: 'CRABOT_DESKTOP_REMOVAL' }) }
 const bytesRecord = text => ({ type: 'file', size: Buffer.byteLength(text), sha256: createHash('sha256').update(text).digest('hex') })
 const equalPath = (a, b) => process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b
+export async function matchesDesktopRemovalProgram(file, expected, before, { owned, signal }) {
+  if (before.nlink !== 1n || !owned(file, before)) return false
+  if (expected.type === 'link') {
+    if (!before.isSymbolicLink() || before.size > 32768n) return false
+    const link = await fs.readlink(file)
+    return link === expected.target && generation(before) === generation(await fs.lstat(file, { bigint: true }))
+  }
+  if (!before.isFile() || before.isSymbolicLink() || before.size !== BigInt(expected.size)
+    || expected.mode !== undefined && Number(before.mode & 0o777n) !== expected.mode) return false
+  const handle = await fs.open(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0))
+  try {
+    if (generation(before) !== generation(await handle.stat({ bigint: true }))) return false
+    const hash = createHash('sha256'), buffer = Buffer.alloc(65536)
+    let offset = 0
+    while (offset < expected.size) {
+      signal?.throwIfAborted()
+      const { bytesRead } = await handle.read(buffer, 0, Math.min(buffer.length, expected.size - offset), offset)
+      if (!bytesRead) return false
+      hash.update(buffer.subarray(0, bytesRead)); offset += bytesRead
+    }
+    return !(await handle.read(buffer, 0, 1, offset)).bytesRead && hash.digest('hex') === expected.sha256
+      && generation(before) === generation(await handle.stat({ bigint: true }))
+      && generation(before) === generation(await fs.lstat(file, { bigint: true }))
+  } finally { await handle.close() }
+}
+function programMaps(proof) {
+  const core = { ...JSON.parse(proof.core.inventory).files }
+  for (const [key, name] of [['release', 'core-release.json'], ['inventory', 'core-files.json'], ['host', 'desktop-host.json']]) {
+    if (Object.hasOwn(core, name)) fail()
+    core[name] = bytesRecord(proof.core[key])
+  }
+  const launcher = process.platform === 'win32' ? 'crabot.exe' : 'crabot', launcherRecord = core['bin/' + launcher]
+  if (launcherRecord?.type !== 'file') fail()
+  return { core, launcher, launcherRecord }
+}
+
+export function desktopRemovalProgramEntries(proof) {
+  const { core, launcher, launcherRecord } = programMaps(proof), selected = proof.source_selection
+  return [
+    ...Object.entries(core).map(([name, expected]) => ({ name: 'releases/' + selected.core_id + '/' + name, expected })),
+    ...Object.entries(proof.payload.gui).map(([name, expected]) => ({ name: 'app/releases/' + selected.gui_id + '/' + name, expected })),
+    { name: 'bin/' + launcher, expected: launcherRecord },
+  ].sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0)
+}
+
+export { generation as desktopProgramGeneration }
+
 export async function inspectDesktopRemovalPrograms({ installRoot, operationId, signal }) {
   signal?.throwIfAborted()
   const own = installation.readDesktopInstallation(installRoot), original = await readDesktopRemovalProof(own.root)
@@ -45,31 +92,6 @@ export async function inspectDesktopRemovalPrograms({ installRoot, operationId, 
     }
     return true
   }
-  async function matches(file, expected, before) {
-    if (before.nlink !== 1n || !owned(file, before)) return false
-    if (expected.type === 'link') {
-      if (!before.isSymbolicLink() || before.size > 32768n) return false
-      const link = await fs.readlink(file)
-      return link === expected.target && generation(before) === generation(await fs.lstat(file, { bigint: true }))
-    }
-    if (!before.isFile() || before.isSymbolicLink() || before.size !== BigInt(expected.size)
-      || expected.mode !== undefined && Number(before.mode & 0o777n) !== expected.mode) return false
-    const handle = await fs.open(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0))
-    try {
-      if (generation(before) !== generation(await handle.stat({ bigint: true }))) return false
-      const hash = createHash('sha256'), buffer = Buffer.alloc(65536)
-      let offset = 0
-      while (offset < expected.size) {
-        signal?.throwIfAborted()
-        const { bytesRead } = await handle.read(buffer, 0, Math.min(buffer.length, expected.size - offset), offset)
-        if (!bytesRead) return false
-        hash.update(buffer.subarray(0, bytesRead)); offset += bytesRead
-      }
-      return !(await handle.read(buffer, 0, 1, offset)).bytesRead && hash.digest('hex') === expected.sha256
-        && generation(before) === generation(await handle.stat({ bigint: true }))
-        && generation(before) === generation(await fs.lstat(file, { bigint: true }))
-    } finally { await handle.close() }
-  }
   function tree(files) {
     const root = { children: new Map() }
     for (const [name, record] of Object.entries(files)) {
@@ -101,7 +123,7 @@ export async function inspectDesktopRemovalPrograms({ installRoot, operationId, 
     }
     try {
       if (node.record) {
-        const match = await matches(file, node.record, before)
+        const match = await matchesDesktopRemovalProgram(file, node.record, before, { owned, signal })
         if (!await checkParents(file)) fail()
         if (match) result.matched.push(relative(file))
         else retain(file, 'changed')
@@ -114,13 +136,7 @@ export async function inspectDesktopRemovalPrograms({ installRoot, operationId, 
       }
     } catch { signal?.throwIfAborted(); retain(file, 'unverified') }
   }
-  const core = { ...JSON.parse(proof.core.inventory).files }
-  for (const [key, name] of [['release', 'core-release.json'], ['inventory', 'core-files.json'], ['host', 'desktop-host.json']]) {
-    if (Object.hasOwn(core, name)) fail()
-    core[name] = bytesRecord(proof.core[key])
-  }
-  const launcher = process.platform === 'win32' ? 'crabot.exe' : 'crabot', launcherRecord = core['bin/' + launcher]
-  if (launcherRecord?.type !== 'file') fail()
+  const { core, launcher, launcherRecord } = programMaps(proof)
   await inspect(path.join(own.root, 'releases', record.source_selection.core_id), tree(core))
   await inspect(path.join(own.root, 'app/releases', record.source_selection.gui_id), tree(proof.payload.gui))
   await inspect(path.join(own.root, 'bin', launcher), { record: launcherRecord })
