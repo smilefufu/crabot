@@ -19,6 +19,7 @@ import { stopInstance } from '../../scripts/lib/instance-controller.mjs'
 import product from '../../scripts/lib/product-runtime.cjs'
 import { buildPairedUpdateSource } from './build-paired-update-source.mjs'
 import { preparePairedUpdateCore } from './prepare-paired-update-core.mjs'
+import sourceLimits from '../../crabot-desktop/tests/fixtures/paired-update-limits.cjs'
 import { collectPairedUpdateTargetEvidence } from './paired-update-target-evidence.mjs'
 import { startPairedUpdateModelProvider } from '../../crabot-desktop/tests/fixtures/paired-update-model-provider.mjs'
 
@@ -84,6 +85,7 @@ try {
   selected = await commitDesktopInstallation(await prepareDesktopInstallation({ payload: sourcePayload, installRoot: path.join(temporary, '整体 安装') }))
   await fs.rm(path.join(job, 'source-project'), { recursive: true })
   expectedTargetGuiRoot = path.join(selected.root, 'app/releases', target.record.selection.gui_id)
+  expectedTargetCoreRoot = path.join(selected.root, 'releases', target.record.selection.core_id)
   const sentinel = path.join(selected.dataDir, 'update-fixture-preserved.txt')
   modelProvider = await startPairedUpdateModelProvider()
   const metadata = { modelEndpoint: modelProvider.endpoint, source: selected, home, control, publicKey: keys.publicKey.export({ type: 'spki', format: 'pem' }).toString(), publication,
@@ -98,7 +100,9 @@ try {
   sourceIdentity = await poll('source actor identity', async () => identity.inspectProcess(child.pid), 10000)
   const before = await poll('source ready', () => readControl('source-ready'))
   assert.equal(before.model_configured_via_http, true)
-  const handoff = await poll('committed target handoff', () => readControl('handoff'), 420000)
+  // The finite source actor already owns the hard lifetime. Observe its actual
+  // result or exit rather than killing a still-running actor at an earlier bound.
+  const handoff = await poll('committed target handoff', () => readControl('handoff'), sourceLimits.sourceLifetimeMs + sourceLimits.sourceExitObservationMs)
   assert.deepEqual(handoff.target, target.record.selection); assert.equal(handoff.ordinary_exits, 0); assert.equal(handoff.requests, 3)
   assert.match(handoff.maintenance_id, /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/); assert.equal(handoff.production_peer_policy_verified, true)
   phase = 'target-start-and-health'
@@ -141,6 +145,8 @@ try {
   if (stage) report.source_stage = stage
   const activity = await readControl('source-activity').catch(() => null)
   if (activity) report.source_activity = activity
+  const host = await readControl('source-host-state').catch(() => null)
+  if (host) report.source_host_state = host
   if (selected && expectedTargetCoreRoot) {
     report.target_evidence = await collectPairedUpdateTargetEvidence({ dataDir: selected.dataDir, targetRoot: expectedTargetCoreRoot, targetIdentity, handoffAt })
       .catch(() => ({ collection_failed: true }))

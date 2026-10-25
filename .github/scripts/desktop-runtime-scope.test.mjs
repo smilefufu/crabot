@@ -69,6 +69,7 @@ for (const [file, expected] of [
   ['.github/scripts/paired-update-source-activity.test.mjs', true],
   ['crabot-desktop/tests/fixtures/paired-update-source-activity.cjs', true],
   ['crabot-desktop/tests/fixtures/paired-update-source-data.cjs', true],
+  ['crabot-desktop/tests/fixtures/paired-update-limits.cjs', true],
   ['.github/scripts/check-paired-update-report.mjs', true],
   ['.github/scripts/check-paired-update-report.test.mjs', true],
   ['scripts/lib/desktop-removal-host.mjs', true],

@@ -6,6 +6,7 @@ const fs = require('node:fs')
 const path = require('node:path')
 const { pathToFileURL } = require('node:url')
 const { Readable } = require('node:stream')
+const { sourceLifetimeMs } = require('./paired-update-limits.cjs')
 if (process.env.GITHUB_ACTIONS !== 'true') throw new Error('An isolated CI user is required')
 const config = JSON.parse(fs.readFileSync(process.env.CRABOT_PAIRED_UPDATE_FIXTURE_CONFIG, 'utf8'))
 const profile = path.join(config.source.dataDir, 'desktop-profile')
@@ -14,7 +15,7 @@ app.setName('Crabot paired update source fixture')
 app.setPath('userData', profile); app.setPath('sessionData', profile)
 if (!app.requestSingleInstanceLock()) throw new Error('Fixture profile is already in use')
 let controller, driver, handingOff = false, ordinaryExits = 0, requests = 0
-const timer = setTimeout(() => app.exit(2), 600_000)
+const timer = setTimeout(() => app.exit(2), sourceLifetimeMs)
 const write = (name, value) => {
   const file = path.join(config.control, name + '.json'), temporary = file + '.tmp'
   fs.writeFileSync(temporary, JSON.stringify(value) + '\n', { flag: 'wx', mode: 0o600, flush: true }); fs.renameSync(temporary, file)
@@ -38,6 +39,8 @@ void app.whenReady().then(async () => {
   controller = new DesktopController({ coreRoot: config.source.coreRoot, dataRoot: config.source.dataDir, appVersion: config.source.selection.version,
     platform: process.platform, packaged: true, verifyBinding,
     loginStartup: { captureForUpdate: async () => 'off', restoreForUpdate: async () => assert.fail('Source may not restore target login') } })
+  controller.host.subscribe(state => write('source-host-state', { phase: state.phase,
+    ...(typeof state.code === 'string' && /^[A-Z0-9_]{1,128}$/.test(state.code) ? { code: state.code } : {}), at_ms: Math.round(performance.now()) }))
   const { startPairedUpdateSource } = require('./paired-update-source-data.cjs')
   const state = await startPairedUpdateSource(controller, config.source.dataDir)
   const { configurePairedSourceModel } = require('./paired-update-source-model.cjs')

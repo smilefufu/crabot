@@ -21,7 +21,7 @@ async function boundedFile(file, maximum, tail = false) {
   finally { await handle?.close() }
 }
 export async function collectPairedUpdateTargetEvidence({ dataDir, targetRoot, targetIdentity, handoffAt = null }) {
-  const evidence = { target_alive: false, ordinary_peer_verified: false }
+  const evidence = { target_observed: !!targetIdentity, target_alive: false, ordinary_peer_verified: false }
   if (targetIdentity) {
     try {
       evidence.target_alive = identity.sameProcess(targetIdentity, identity.inspectProcess(targetIdentity.pid))
