@@ -63,8 +63,15 @@ void app.whenReady().then(async () => {
     await new Promise(resolve => setTimeout(resolve, 500))
   }
   const maintenance = await import(pathToFileURL(path.join(config.source.coreRoot, 'scripts/lib/version-maintenance.mjs')).href)
+  const applyPreparedPair = controller.applyPreparedPair.bind(controller)
   driver = await createPairedUpdateHost({ coreRoot: config.source.coreRoot, dataRoot: config.source.dataDir, appVersion: config.source.selection.version,
-    pinnedPublicKeys: [config.publicKey], verifyBinding, controller, entries,
+    pinnedPublicKeys: [config.publicKey], verifyBinding, entries,
+    controller: { applyPreparedPair: async (...args) => {
+      write('source-stage', { phase: 'applying-prepared-pair', at_ms: Math.round(performance.now()) })
+      const target = await applyPreparedPair(...args)
+      write('source-stage', { phase: 'pair-committed', at_ms: Math.round(performance.now()) })
+      return target
+    } },
     transport: () => ({ close: async () => {}, fetch: async (url, options) => {
       requests++; assert.equal(options.method, 'GET'); assert.equal(options.credentials, 'omit'); assert.equal(options.redirect, 'manual')
       const name = new URL(url).pathname.split('/').at(-1)
@@ -72,7 +79,7 @@ void app.whenReady().then(async () => {
       const file = path.join(config.publication, name), stat = fs.statSync(file)
       return new Response(Readable.toWeb(fs.createReadStream(file)), { status: 200, headers: { 'Content-Length': String(stat.size) } })
     } }),
-    beginExit: () => { handingOff = true; return () => { handingOff = false } },
+    beginExit: () => { write('source-stage', { phase: 'exiting-source', at_ms: Math.round(performance.now()) }); handingOff = true; return () => { handingOff = false } },
     app: { once: (...args) => app.once(...args), off: (...args) => app.off(...args), quit: () => app.quit(), relaunch: options => {
       assert.deepEqual(options.args, [])
       const selected = installation.readDesktopSelection(config.source.root)
@@ -83,8 +90,10 @@ void app.whenReady().then(async () => {
         candidate_channel_enabled: false, production_peer_policy_verified: true })
       app.relaunch(options)
     } } })
+  write('source-stage', { phase: 'checking-release', at_ms: Math.round(performance.now()) })
   const candidate = await driver.check(() => {})
   assert.equal(candidate.kind, 'paired'); assert.equal(candidate.version, config.targetVersion)
+  write('source-stage', { phase: 'preparing-release', at_ms: Math.round(performance.now()) })
   await driver.install(candidate)
 }).catch(error => { write('failure', { code: typeof error.code === 'string' ? error.code : 'PAIRED_UPDATE_FIXTURE_FAILED',
   message: String(error.message).slice(0, 256), phase: controller?.host.snapshot().phase }); console.error(error.stack); clearTimeout(timer); app.exit(1) })

@@ -391,6 +391,8 @@ jobs:
           path: |
             .desktop-build/*.log
             .desktop-build/*.png
+            .desktop-build/paired-update-host.json
+            .desktop-build/fixture-diagnostics/paired-update-source.log
             .desktop-build/complete-paired-release.json
             .desktop-build/runtime-scope.json
             .desktop-build/desktop-resources.json

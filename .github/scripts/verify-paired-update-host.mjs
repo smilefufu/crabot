@@ -132,6 +132,8 @@ try {
   success = true
 } catch (error) {
   Object.assign(report, { failure_phase: phase, failure_code: error.code || 'PAIRED_HOST_ACCEPTANCE_FAILED', failure_message: String(error.message).slice(0, 512) })
+  const stage = await readControl('source-stage').catch(() => null)
+  if (stage) report.source_stage = stage
   const activity = await readControl('source-activity').catch(() => null)
   if (activity) report.source_activity = activity
   process.exitCode = 1
