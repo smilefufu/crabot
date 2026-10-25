@@ -103,6 +103,14 @@ export class StreamProtocolError extends Error {
   }
 }
 
+/** Provider 正常结束但只有空文本/元数据：可以重试，使用普通有限预算。 */
+export class EmptyResponseError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'EmptyResponseError'
+  }
+}
+
 // OpenAI 风格错误体把 code 放在 `error.code`（如 `{error:{code,message,type}}`）；
 // 仅少数上游用顶层 `code`。优先读嵌套，找不到再回退顶层，保证两种结构都能识别。
 function extractBodyCode(body: string): string | null {
@@ -230,6 +238,7 @@ export function isRetryableError(err: unknown): boolean {
   // 流式超时（TTFB / 空闲）总是可重试——换新连接重发
   if (err instanceof StreamTimeoutError) return true
   if (err instanceof StreamProtocolError) return true
+  if (err instanceof EmptyResponseError) return true
 
   if (err instanceof HttpResponseError) {
     // 先短路 body code 黑名单（如 content_filter）—— 这类错误即使包在 5xx 里也不该重试
@@ -266,6 +275,7 @@ export function isRetryableError(err: unknown): boolean {
 
 /** Errors for which the request may remain recoverable after the normal retry budget. */
 export function isConnectionRecoveryError(err: unknown): boolean {
+  if (err instanceof EmptyResponseError) return false
   if (err instanceof StreamTimeoutError) return true
   if (!(err instanceof Error) || err.name === 'AbortError') return false
   if (err instanceof StreamProtocolError) return true
