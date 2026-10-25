@@ -1,9 +1,11 @@
 # Crabot 项目进度
 
-### Gemini 未加载工具恢复：回归通过，待 PR 审查
+### Gemini 未加载工具恢复：已本机部署，现场业务待观察
 
 - 按已确认 [spec](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/specs/2026-10-24-gemini-unloaded-tool-recovery-design.md)，将有工具声明时完整的未知调用交给 Engine，返回 TOOL_NOT_LOADED/TOOL_UNAVAILABLE；不自动加载或执行，同批加载下一轮才可用。无工具、格式错误、不完整参数及重复 id 仍拒绝，签名与错误结果原位配对。
-- 同网关/模型的近似重放已首次复现 fetch_image 未加载错误（124062 输入/65 输出 tokens）；本次回归只用脱敏合成 SSE，无额外生成或现场部署。新增回归先在旧实现复现 5 项失败，最小修复后 Gemini、历史、Engine 编排和 Manager 目录 5 文件回归及 Agent 构建通过。
+- 同网关/模型的近似重放已首次复现 fetch_image 未加载错误（124062 输入/65 输出 tokens）；实现阶段回归只用脱敏合成 SSE，无额外生成。新增回归先在旧实现复现 5 项失败，最小修复后 Gemini、历史、Engine 编排和 Manager 目录 5 文件回归及 Agent 构建通过。
+
+- 2026-10-25按用户要求将本机从08352c3e升级至main代码2b4d5db6，包含语音播放启动与空回复交付保留修复。实例运行期间完整准备约70.40秒、产物2.05GB、迁移0模块/0备份字节；独立工作树Agent190/Voice45项全部通过。统一升级切换及后台启动约60.72秒，随后8模块/3端点均健康，新PID与9项实际产物哈希、HTTP页面一致；准备和测试期间旧PID保持。本次未调用付费模型或更改手机、声纹及服务配置；现场模型/真人语音验收独立保留。证据位于本任务crabot-main-deploy-20261025的prepared-summary、switch-result及verification记录。
 
 ### Gemini 原生兼容：实现与真实网关验证通过，本机代码已升级
 
@@ -34,7 +36,7 @@
 - 2026-10-22独立检查：最近三轮正确tag但播放unknown；固定短句复现本机TTS缺少原音色文件、HTTP200后断流。仅恢复原固定版本522320字节音色并核验SHA-256，4次公开短句验证成功，其中产品适配器270ms/104400有效样本；未重启Crabot/ADB或修改配置。外部服务冷启动依赖仍需稳定部署；两轮各5次流内overload重试（映射502）另记，不能把TTS恢复当作首声达标。
 - 本轮Agent71、Channel40、Admin75、Shared28、Android JVM30项共244项通过；新增真机静音PCM停止/旧帧拒绝/下一播放检查1项通过，真实terminal.enc摘要不变，只装测试APK。用户按钮整链体验仍待验收。当前清单：[功能与剩余验收](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/plans/2026-10-22-voice-remaining-acceptance.md)，P0交付与服务稳定→P1首声/异步生命周期/全语音管理→P2环境与多人覆盖；先独立检查，再集中安排有明确判据的真人环节。
 - 后续独立推进：已按原清单恢复62个依赖和所选ASR/TTS全部模型至持久副本（约1.11GiB），SHA及包兼容均通过；两组件各两次新进程/各两条公开请求通过，TTS首请求3402/846ms、热请求150/127ms，ASR61–71ms。仅随机端口副本，旧17781/17782仍在、配置和Crabot/ADB不动；不把副本就绪称作现场已切换。
-- 用户2026-10-24确认[播放启动修订](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/specs/2026-10-22-voice-playback-start-lifecycle-design.md)，正式协议先行同步。隔离分支实现首个非空白正文再预留，ready及必要持久准备后立即start；失败释放本次播放，真实started/completed、wire9及原预算保持。新增回归先在旧实现复现10项失败，整理后Agent99/Channel45项、Shared/Agent/Channel编译通过；真实RPC/WS覆盖3.4秒TTS、原结果绑定、空头重试与发送/存储/不完整WAV失败。[验证记录](crabot-agent/eval/shared-requests/evidence-2026-10-24-playback-start.json)。原0.8.0兼容项已有证据，本轮无APK/提示词/现场部署变更，真人体验与50轮首声仍未验收。
+- 用户2026-10-24确认[播放启动修订](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/specs/2026-10-22-voice-playback-start-lifecycle-design.md)，正式协议先行同步。隔离分支实现首个非空白正文再预留，ready及必要持久准备后立即start；失败释放本次播放，真实started/completed、wire9及原预算保持。新增回归先在旧实现复现10项失败，整理后Agent99/Channel45项、Shared/Agent/Channel编译通过；真实RPC/WS覆盖3.4秒TTS、原结果绑定、空头重试与发送/存储/不完整WAV失败。[验证记录](crabot-agent/eval/shared-requests/evidence-2026-10-24-playback-start.json)。原0.8.0兼容项已有证据；2026-10-25已随main2b4d5db6部署到本机，APK与提示词本轮未改，真人体验与50轮首声仍未验收。
 - 计时口径核对：first_chunk含元消息，流处理总长含消费者/播放等待；流内错误映射502不证明外层HTTP502。trace_id去重后5个语音回合/19次尝试、14次overload重试，相同时段无其他Manager同配置样本，不能借其他时段成功推定因果。无本轮付费模型调用，50轮首声未验收。
 - 升级恢复耗时超过预估：Admin退出至新进程约38秒、Voice约63秒；旧Agent退出等待约30秒，另有模块恢复时间。后续独立核对退出等待和启动阶段，不放宽当前恢复/交付语义、不与播放方案混改。额外Engine全集未完成，退避夹具expected 3 to be 5已在未改main复现，不计通过。
 
