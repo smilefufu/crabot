@@ -20,7 +20,7 @@ before(async () => {
   await fs.mkdir(path.join(core, '.product-runtime/node/bin'), { recursive: true }); await fs.mkdir(path.join(core, 'bin'))
   await fs.copyFile(process.execPath, path.join(core, '.product-runtime/node/bin/node'))
   await fs.writeFile(path.join(core, 'package.json'), '{"version":"1.2.3","type":"module"}')
-  await fs.writeFile(path.join(core, 'product-runtime.json'), JSON.stringify({ schema_version: 1, versions: { node: process.versions.node } }))
+  await fs.writeFile(path.join(core, 'product-runtime.json'), JSON.stringify({ schema_version: 1, version: '1.2.3', versions: { node: process.versions.node } }))
   await fs.writeFile(path.join(core, 'bin/crabot'), '#!/bin/sh\nexit 97\n', { mode: 0o755 })
   await writeCoreRelease(core, { schema_version: 1, version: '1.2.3', platform: process.platform, arch: process.arch, commit: '1'.repeat(40), source_dirty: false })
   await fs.writeFile(path.join(core, 'desktop-host.json'), JSON.stringify({ schema_version: 2, platform: process.platform, arch: process.arch }))
