@@ -98,3 +98,12 @@ test('bootstrap phase history and malformed output remain bounded without export
   assert.throws(() => summarizePairedTargetBootstrap('x'.repeat(65537), '1.2.4'))
   assert.throws(() => summarizePairedTargetBootstrap(null, '1.2.4'))
 })
+
+test('bounded locator stages distinguish an observed loader stall without exporting paths or arguments', () => {
+  const phases = ['loading-installation-verifier', 'installation-verifier-loaded', 'installation-pin-read', 'installation-discovered', 'installation-validated', 'environment-bound', 'profile-configured']
+  const output = phases.map(phase => JSON.stringify({ component: 'desktop-bootstrap', phase, path: '/private/must-not-export', token: 'secret' })).join('\n')
+  const result = summarizePairedTargetBootstrap(output, '1.2.3')
+  assert.deepEqual(result.events, phases.map(phase => ({ phase })))
+  assert.equal(JSON.stringify(result).includes('must-not-export'), false)
+  assert.equal(JSON.stringify(result).includes('secret'), false)
+})

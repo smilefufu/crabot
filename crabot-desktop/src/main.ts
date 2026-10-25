@@ -86,21 +86,28 @@ async function boot() {
   bootstrapStage('binding-installation')
   // Resolve the protected GUI identity before external code or privileged UI.
   // A failed pair binding must not fall back to Resources/core.
+  bootstrapStage('loading-installation-verifier')
   const verifier = app.isPackaged ? createRequire(import.meta.url)('./bootstrap/scripts/lib/desktop-installation.cjs') : null
+  bootstrapStage('installation-verifier-loaded')
   let pin: string | undefined
   if (verifier) {
     try { pin = readFileSync(path.join(directory, 'desktop-release.json'), 'utf8') }
     catch (error: any) { if (error.code !== 'ENOENT') throw error }
   }
+  bootstrapStage('installation-pin-read')
   const discovered = verifier?.locateDesktopGui(process.resourcesPath)
+  bootstrapStage('installation-discovered')
   const installation = pin !== undefined || discovered ? verifier.locatePinnedDesktopGui(process.resourcesPath, pin) : undefined
+  bootstrapStage('installation-validated')
   if (installation) {
     // Electron needs its UI profile and instance lock before the first await.
     // Only protected GUI code touches this profile; Core still requires a full hash.
     verifier.applyDesktopEnvironment(installation)
+    bootstrapStage('environment-bound')
     const management = createRequire(import.meta.url)('./bootstrap/scripts/lib/desktop-management.cjs')
     dataRoot = management.requirePrivateDataRoot(installation.dataDir)
     configureProfile(dataRoot)
+    bootstrapStage('profile-configured')
     if (!claimInstance()) return
     const { verifyCoreRelease } = await import(pathToFileURL(path.join(directory, 'bootstrap/scripts/lib/core-release.mjs')).href)
     const release = await verifyCoreRelease(installation.coreRoot, { version: installation.selection.version })

@@ -76,7 +76,8 @@ export function summarizePairedTargetBootstrap(output, version) {
   const codes = ['ERR_MODULE_NOT_FOUND', 'MODULE_NOT_FOUND', 'ERR_REQUIRE_ESM', 'ERR_INVALID_PACKAGE_CONFIG', 'ERR_UNKNOWN_FILE_EXTENSION', 'ERR_DLOPEN_FAILED',
     'CRABOT_CORE_INTEGRITY', 'CRABOT_MAINTENANCE_PENDING', 'CRABOT_MIGRATION_INTERRUPTED', 'CRABOT_DATA_MISSING', 'CRABOT_DESKTOP_INSTALLATION',
     'CRABOT_DESKTOP_TAKEOVER_REQUIRED', 'DESKTOP_UNAVAILABLE', 'DESKTOP_BOOT_FAILED']
-  const phases = ['binding-installation', 'instance-lock-acquired', 'instance-lock-denied', 'installation-bound', 'data-location-checked', 'app-ready', 'reading-login-startup', 'login-startup-read',
+  const phases = ['binding-installation', 'loading-installation-verifier', 'installation-verifier-loaded', 'installation-pin-read',
+    'installation-discovered', 'installation-validated', 'environment-bound', 'profile-configured', 'instance-lock-acquired', 'instance-lock-denied', 'installation-bound', 'data-location-checked', 'app-ready', 'reading-login-startup', 'login-startup-read',
     'loading-local-interface', 'local-interface-loaded', 'recovering-service', 'failed']
   const events = []
   for (const line of output.split('\n')) {
