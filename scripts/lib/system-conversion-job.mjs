@@ -1,5 +1,6 @@
 // Root conversion wiring only. All employee data/process actions remain behind
 // the fixed dropped-UID roles; root reads only code and operational metadata.
+import path from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import cliLocation from './cli-location.cjs'
 import { validateSystemConversionPlan } from './system-conversion.mjs'
@@ -21,6 +22,7 @@ export async function systemConversionOperations(plan, { root, registry,
   fence = new LegacySystemEntryFence(), command = new LegacySystemCommandLink(), processes = collectLegacySystemProcesses,
   legacy = runLegacySystemConversion, target = runSystemUser, prepare = prepareServices } = {}) {
   validateSystemConversionPlan(plan); registry.authority()
+  root = path.resolve(root)
   const installation = cliLocation.locateCliInstallation(root)
   if (!installation || installation.scope !== 'system' || installation.root !== plan.install_root
     || installation.coreRoot !== root || installation.id !== plan.target.id) fail()

@@ -82,7 +82,9 @@ async function fixture(t, { failure } = {}) {
   return { parent, source, core, registry, store, plan, fence, command, dependencies, calls, run }
 }
 test('filesystem metadata coordinator connects fenced source, all backups, atomic command switch and per-UID registration without opening employee data', options, async t => {
-  const f = await fixture(t), result = await f.run()
+  const f = await fixture(t)
+  f.dependencies.root += path.sep // system-job's file URL directory retains this separator.
+  const result = await f.run()
   assert.equal(result.exit_code, 0); assert.equal(await f.command.selected(f.plan), 'target')
   assert.equal((await f.fence.inspect(f.source)).phase, 'data_changing')
   assert.deepEqual(f.calls, ['prepare-services', 'stop-legacy:1001', 'snapshot:1001', 'snapshot:1002',

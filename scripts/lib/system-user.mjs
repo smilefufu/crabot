@@ -70,6 +70,7 @@ export function runLegacySystemConversionStop(entry, options) {
 }
 export async function runLegacySystemConversion(entry, { root, operationId, action, spawnProcess = spawn }) {
   if (process.platform !== 'linux' || process.getuid?.() !== 0) throw systemError('跨用户转换仅Linux管理员可执行。', 'CRABOT_SYSTEM_ADMIN_REQUIRED')
+  root = path.resolve(root)
   const { SystemOperationStore } = await import('./system-operation.mjs')
   const { LegacySystemEntryFence } = await import('./legacy-system-fence.mjs')
   const { cliLockToken } = await import('./cli-lock.mjs')
