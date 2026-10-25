@@ -14,7 +14,7 @@ import installation from '../desktop-installation.cjs'
 import { writeCoreRelease, verifyCoreRelease } from '../core-release.mjs'
 import { sealDesktopPayload, verifyDesktopPayload, prepareDesktopInstallation, commitDesktopInstallation } from '../desktop-payload.mjs'
 const windows = process.platform === 'win32', launcher = windows ? 'crabot.exe' : 'crabot'
-async function fixture(t, { version = '1.2.3', schema, functional = false, executableNode = true } = {}) {
+async function fixture(t, { version = '1.2.3', schema, functional = false, executableNode = true, shared = false } = {}) {
   const parent = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'Crabot 离线安装 ')))
   t.after(() => fs.rm(parent, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }))
   const payload = path.join(parent, '离线包'), core = path.join(payload, 'core'), gui = path.join(payload, 'gui'), target = path.join(parent, '选择的 目录')
@@ -69,6 +69,7 @@ async function fixture(t, { version = '1.2.3', schema, functional = false, execu
     await fs.writeFile(path.join(core, 'crabot-fixture/upgrade/from_v1_to_v2.mjs'),
       `import fs from 'node:fs';import path from 'node:path';const root=process.argv.find(arg=>arg.startsWith('--data-dir=')).slice(11);fs.writeFileSync(path.join(root,'content'),'converted by bundled Node');fs.appendFileSync(path.join(root,'executions'),'once\\n');`)
   }
+  if (shared) { await fs.mkdir(path.join(core, 'crabot-agent'), { recursive: true }); await fs.writeFile(path.join(core, 'crabot-agent/shared_request_version'), '1\n') }
   await writeCoreRelease(core, { schema_version: 1, version, platform: process.platform, arch: process.arch, commit: '1'.repeat(40), source_dirty: false })
   const release = await verifyCoreRelease(core), selection = { schema_version: 1, version, gui_id: randomUUID(), core_id: release.inventory_sha256 }
   await fs.writeFile(path.join(core, 'desktop-host.json'), JSON.stringify({ schema_version: 2, platform: process.platform, arch: process.arch }))
@@ -855,8 +856,8 @@ test('private preparation JSON supports large inventories and still refuses exis
   assert.equal(await fs.readFile(file, 'utf8'), JSON.stringify(value) + '\n')
 })
 
-async function removalProofFixture(t, { schema } = {}) {
-  const f = await fixture(t, { executableNode: false, schema }), prepared = await prepareDesktopInstallation({ payload: f.payload, installRoot: f.target })
+async function removalProofFixture(t, { schema, functional = false, shared = false } = {}) {
+  const f = await fixture(t, { executableNode: false, schema, functional, shared }), prepared = await prepareDesktopInstallation({ payload: f.payload, installRoot: f.target })
   await commitDesktopInstallation(prepared)
   await fs.writeFile(path.join(f.target, 'data', 'retained-user-file'), 'user content')
   const backend = await import('../desktop-removal-proof.mjs'), operation = randomUUID()
@@ -1223,5 +1224,66 @@ for (const mode of ['compatible', 'migration', 'newer', 'invalid', 'missing-prog
   await assert.rejects(fs.lstat(path.join(directory, 'executions')), { code: 'ENOENT' })
   if (mode !== 'fence-change') assert.deepEqual(await fs.readFile(marker), before)
   if (!['prepared', 'other-preparation', 'late-lock'].includes(mode)) await assert.rejects(fs.lstat(path.join(f.target, '.desktop-installing.json')), { code: 'ENOENT' })
+  assert.throws(() => installation.readDesktopSelection(f.target), { code: 'CRABOT_DESKTOP_REMOVAL_PENDING' })
+})
+
+
+for (const mode of ['migration', 'current', 'injected-environment', 'unprepared', 'missing-program', 'changed-program', 'changed-metadata', 'foreign-program', 'broken-shared', 'wrong-operation', 'running', 'cancelled', 'changed-phase', 'late-lock', 'late-job', 'late-cancel']) test('prepared reinstall previews real scopes with bundled Node and keeps all data protected: ' + mode, { timeout: 60000 }, async t => {
+  const f = await removalProofFixture(t, { schema: 'v2', functional: true, shared: true }), data = path.join(f.target, 'data'), directory = path.join(data, 'fixture')
+  const { prepareDesktopRemovalReinstall } = await import('../desktop-reinstall.mjs')
+  if (mode !== 'unprepared') await prepareDesktopRemovalReinstall({ payload: f.payload, installRoot: f.target, operationId: f.record.operation_id, verifyStopped: async () => {} })
+  await fs.mkdir(directory); await fs.writeFile(path.join(directory, 'content'), 'preserve this data')
+  const version = mode === 'current' ? 'v2' : 'v1'
+  await fs.writeFile(path.join(directory, 'SCHEMA_VERSION'), version + '\n')
+  if (mode === 'missing-program') await fs.rm(f.prepared.coreRoot, { recursive: true })
+  if (mode === 'changed-program') await fs.appendFile(path.join(f.prepared.coreRoot, 'cli.mjs'), 'changed target')
+  if (mode === 'changed-metadata') await fs.appendFile(path.join(f.prepared.coreRoot, 'desktop-host.json'), ' ')
+  if (mode === 'foreign-program') { const owned = identity.isOwnedDirectory; t.mock.method(identity, 'isOwnedDirectory', directory => directory !== f.prepared.coreRoot && owned(directory)) }
+  if (mode === 'broken-shared') { await fs.mkdir(path.join(data, 'agent'), { recursive: true }); await fs.writeFile(path.join(data, 'agent/shared-request-upgrade.json'), '{}') }
+  if (mode === 'running') await fs.writeFile(path.join(data, 'mm.pid'), String(process.pid))
+  const removal = path.join(f.target, '.desktop-removal.json'), before = await fs.readFile(removal), preparation = await fs.readFile(path.join(f.target, '.desktop-installing.json')).catch(() => null)
+  let checked = 0
+  const input = { payload: f.payload, installRoot: f.target, operationId: mode === 'wrong-operation' ? randomUUID() : f.record.operation_id,
+    verifyStopped: async () => { checked++; if (mode === 'changed-phase') { const { privateJson } = await import('../desktop-preparation-files.mjs'); await privateJson(removal, { ...f.record, phase: 'completed' }, true) } },
+    ...(mode === 'cancelled' ? { signal: AbortSignal.abort() } : {}) }
+  let injected = false
+  if (mode === 'injected-environment') {
+    const previous = { NODE_OPTIONS: process.env.NODE_OPTIONS, DATA_DIR: process.env.DATA_DIR }
+    t.after(() => { for (const [key, value] of Object.entries(previous)) { if (value === undefined) delete process.env[key]; else process.env[key] = value } })
+    process.env.NODE_OPTIONS = '--require=nonexistent-injection-must-not-run.cjs'; process.env.DATA_DIR = path.join(f.parent, 'wrong-data')
+  }
+  if (['late-lock', 'late-job', 'late-cancel'].includes(mode)) {
+    const open = fs.open, locks = await import('../cli-lock.mjs'), abort = new AbortController(); let reads = 0
+    input.signal = abort.signal
+    t.mock.method(fs, 'open', async (...args) => {
+      const handle = await open(...args)
+      if (args[0] === path.join(f.prepared.coreRoot, 'desktop-host.json') && ++reads === 2) {
+        injected = true
+        if (mode === 'late-lock') locks.releaseCliLock(path.join(data, 'cli.lock'))
+        else if (mode === 'late-cancel') abort.abort()
+        else writeFileSync(removal, JSON.stringify({ ...f.record, phase: 'completed' }) + '\n')
+      }
+      return handle
+    })
+  }
+  const { previewPreparedDesktopReinstallData } = await import('../desktop-reinstall-data.mjs')
+  if (['migration', 'current', 'injected-environment'].includes(mode)) {
+    const preview = await previewPreparedDesktopReinstallData(input)
+    assert.ok(checked > 0); assert.equal(preview.shared.status, 'pending'); assert.equal(preview.shared.files, 0)
+    assert.equal(preview.modules.length, mode === 'current' ? 0 : 1)
+    assert.equal(preview.backup_bytes, mode === 'current' ? 0 : Buffer.byteLength('preserve this data') + 3)
+    if (mode !== 'current') {
+      assert.equal(preview.modules[0].dataDir, directory)
+      assert.equal(preview.modules[0].codeVersion, 'v2'); assert.equal(preview.modules[0].dataVersion, 'v1')
+      assert.ok(preview.modules[0].scope.writes.includes(path.join('fixture', 'content')))
+    }
+  } else await assert.rejects(previewPreparedDesktopReinstallData(input))
+  assert.equal(await fs.readFile(path.join(directory, 'content'), 'utf8'), 'preserve this data')
+  assert.equal(await fs.readFile(path.join(directory, 'SCHEMA_VERSION'), 'utf8'), version + '\n')
+  assert.equal(await fs.readFile(path.join(data, 'retained-user-file'), 'utf8'), 'user content')
+  for (const name of ['fixture/executions', '.upgrade-migrations', 'shared-request-upgrade-v2']) await assert.rejects(fs.lstat(path.join(data, name)), { code: 'ENOENT' })
+  if (['late-lock', 'late-job', 'late-cancel'].includes(mode)) assert.equal(injected, true, 'The real Node preview must finish before this fault')
+  if (!['changed-phase', 'late-job'].includes(mode)) assert.deepEqual(await fs.readFile(removal), before)
+  assert.deepEqual(await fs.readFile(path.join(f.target, '.desktop-installing.json')).catch(() => null), preparation)
   assert.throws(() => installation.readDesktopSelection(f.target), { code: 'CRABOT_DESKTOP_REMOVAL_PENDING' })
 })
