@@ -56,7 +56,9 @@ async function fixture(t) {
   return { root, payload, intake, request, signed, calls, manifest, artifact }
 }
 test('authenticated actual ZIP passes full GUI/Core verification before preparation; JSON cannot authorize a later call', async t => {
-  const f = await fixture(t), staged = await f.intake.stage(f.request)
+  const f = await fixture(t), observations = []
+  t.mock.method(console, 'info', value => observations.push(JSON.parse(value)))
+  const staged = await f.intake.stage(f.request)
   assert.deepEqual(f.calls, ['verify'])
   await assert.rejects(f.intake.prepare(JSON.parse(JSON.stringify(staged)), { installRoot: f.root }), { code: 'CRABOT_DESKTOP_RELEASE_SIGNATURE' })
   const prepared = await f.intake.prepare(staged, { installRoot: f.root, payload: 'unsigned-input-must-not-override-stage' })
@@ -66,6 +68,12 @@ test('authenticated actual ZIP passes full GUI/Core verification before preparat
   await f.intake.discard(staged)
   await assert.rejects(fs.lstat(prepared.payload), { code: 'ENOENT' })
   await assert.rejects(f.intake.prepare(staged, { installRoot: f.root }), { code: 'CRABOT_DESKTOP_RELEASE_SIGNATURE' })
+  assert.deepEqual(observations.map(row => row.phase), ['verify_archive', 'copy_helper', 'extract', 'verify_payload', 'stage_complete',
+    'verify_archive', 'verify_payload', 'prepare_pair', 'pair_prepared', 'discard', 'discard_complete'])
+  for (const row of observations) {
+    assert.deepEqual(Object.keys(row), ['component', 'phase', 'at']); assert.equal(row.component, 'desktop-release-intake')
+    assert.equal(new Date(row.at).toISOString(), row.at); assert.equal(JSON.stringify(row).includes(f.root), false)
+  }
 })
 test('invalid source or archive never creates an extraction directory or reaches payload/target code', async t => {
   const f = await fixture(t), wrong = Buffer.from(f.signed.manifest); wrong[10] ^= 1

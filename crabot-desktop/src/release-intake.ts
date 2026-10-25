@@ -16,6 +16,9 @@ function fail(kind: 'INTEGRITY' | 'SIGNATURE'): never {
 }
 const cancelled = (signal?: AbortSignal) => { if (signal?.aborted) throw new DOMException('Cancelled', 'AbortError') }
 const hash = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex')
+type IntakePhase = 'verify_archive' | 'copy_helper' | 'extract' | 'verify_payload' | 'stage_complete' | 'prepare_pair' | 'pair_prepared'
+  | 'discard' | 'discard_complete' | 'remove_failed_stage' | 'failed_stage_removed'
+const report = (phase: IntakePhase) => console.info(JSON.stringify({ component: 'desktop-release-intake', phase, at: new Date().toISOString() }))
 
 async function extract(python: string, helper: string, artifact: string, payload: string, proof: DesktopReleaseProof, signal?: AbortSignal) {
   cancelled(signal)
@@ -69,6 +72,7 @@ export function createDesktopReleaseIntake<T>(options: {
     async stage(request: { manifestBytes: Uint8Array; signatureBytes: Uint8Array; artifact: string; context: Context; signal?: AbortSignal }): Promise<StagedRelease> {
       cancelled(request.signal)
       const proof = verifier.verifyMetadata(request.manifestBytes, request.signatureBytes, request.context)
+      report('verify_archive')
       await verifier.verifyArtifact(request.artifact, proof, { signal: request.signal })
       // Bad source/bytes never create a directory or launch even the trusted helper.
       const cache = management.ensurePrivateDataRoot(options.cacheRoot), job = path.join(cache, 'release-' + randomUUID())
@@ -76,15 +80,21 @@ export function createDesktopReleaseIntake<T>(options: {
       try {
         const payload = management.ensurePrivateDataRoot(path.join(job, 'payload'))
         const helper = path.join(job, 'extract.py')
+        report('copy_helper')
         await fs.copyFile(new URL('./bootstrap/scripts/desktop/extract-paired-release.py', import.meta.url), helper)
+        report('extract')
         await extract(options.python, helper, path.resolve(request.artifact), payload, proof, request.signal)
+        report('verify_payload')
         const checksum = await inventory(payload)
         await verifyPayload(payload, proof, request.signal)
         const stage = Object.freeze({ manifest: proof.manifest })
         stages.set(stage, { proof, artifact: path.resolve(request.artifact), job, payload, inventory: checksum })
+        report('stage_complete')
         return stage
       } catch (error) {
+        report('remove_failed_stage')
         await fs.rm(job, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+        report('failed_stage_removed')
         throw error
       }
     },
@@ -92,18 +102,25 @@ export function createDesktopReleaseIntake<T>(options: {
       const stored = stages.get(stage)
       if (!stored) fail('SIGNATURE')
       cancelled(request.signal)
+      report('verify_archive')
       await verifier.verifyArtifact(stored.artifact, stored.proof, { signal: request.signal })
+      report('verify_payload')
       if (await inventory(stored.payload) !== stored.inventory) fail('INTEGRITY')
       await verifyPayload(stored.payload, stored.proof, request.signal)
       // Online preparation still owns its existing lock, byte verification and
       // final-path preview; the intake grants no stop/migration/commit authority.
-      return options.preparePair({ payload: stored.payload, installRoot: request.installRoot, signal: request.signal })
+      report('prepare_pair')
+      const prepared = await options.preparePair({ payload: stored.payload, installRoot: request.installRoot, signal: request.signal })
+      report('pair_prepared')
+      return prepared
     },
     async discard(stage: StagedRelease): Promise<void> {
       const stored = stages.get(stage)
       if (!stored) fail('SIGNATURE')
       stages.delete(stage)
+      report('discard')
       await fs.rm(stored.job, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+      report('discard_complete')
     },
   }
 }

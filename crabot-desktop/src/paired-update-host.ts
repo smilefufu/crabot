@@ -16,6 +16,10 @@ const require = createRequire(import.meta.url)
 const installation = require('./bootstrap/scripts/lib/desktop-installation.cjs')
 const product = require('./bootstrap/scripts/lib/product-runtime.cjs')
 const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b)
+function reportPreparation(phase: string) {
+  if (['verifying', 'copying', 'previewing', 'prepared', 'verify_platform_programs', 'platform_programs_verified'].includes(phase))
+    console.info(JSON.stringify({ component: 'desktop-pair-preparation', phase, at: new Date().toISOString() }))
+}
 function fail(): never { throw Object.assign(new Error('Desktop update installation changed'), { code: 'CRABOT_DESKTOP_INSTALLATION' }) }
 type Transport = { fetch: Parameters<typeof createDesktopReleaseDownloader>[0]['fetch']; close: () => Promise<void> }
 
@@ -66,7 +70,8 @@ export async function createPairedUpdateHost(options: {
       const downloader = createDesktopReleaseDownloader({ pinnedPublicKeys: keys, platform, arch,
         cacheRoot: path.join(cache, 'release-downloads'), fetch: transport.fetch })
       const intake = createDesktopReleaseIntake<PreparedDesktopPair>({ pinnedPublicKeys: keys, python: runtime.executables.python,
-        cacheRoot: path.join(cache, 'release-intake'), verifyPayload: payload.verifyDesktopPayload, preparePair: preparation.prepareDesktopPair })
+        cacheRoot: path.join(cache, 'release-intake'), verifyPayload: payload.verifyDesktopPayload,
+        preparePair: request => preparation.prepareDesktopPair({ ...request, progress: reportPreparation }) })
       let committed: PreparedDesktopPair | undefined
       async function verifyHandoff(requested: { executable: string; dataDir: string }) {
         active()
@@ -88,8 +93,11 @@ export async function createPairedUpdateHost(options: {
       paired = createPairedUpdateDriver({ platform, arch, current, downloader, intake,
         preparePlatform: async (prepared, signal) => {
           const verifyPrograms = async () => {
+            reportPreparation('verify_platform_programs')
             current(); await preparation.verifyPreparedDesktopPair(prepared); current()
-            return product.loadProductRuntime(prepared.coreRoot, { required: true, full: true })
+            const runtime = product.loadProductRuntime(prepared.coreRoot, { required: true, full: true })
+            reportPreparation('platform_programs_verified')
+            return runtime
           }
           if (platform === 'linux') await prepareUbuntuUpdate(prepared, { signal, verifyPrograms })
           else { signal.throwIfAborted(); await verifyPrograms(); signal.throwIfAborted() }
