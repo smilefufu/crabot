@@ -7,6 +7,8 @@
 
 - 2026-10-25按用户要求将本机从08352c3e升级至main代码2b4d5db6，包含语音播放启动与空回复交付保留修复。实例运行期间完整准备约70.40秒、产物2.05GB、迁移0模块/0备份字节；独立工作树Agent190/Voice45项全部通过。统一升级切换及后台启动约60.72秒，随后8模块/3端点均健康，新PID与9项实际产物哈希、HTTP页面一致；准备和测试期间旧PID保持。本次未调用付费模型或更改手机、声纹及服务配置；现场模型/真人语音验收独立保留。证据位于本任务crabot-main-deploy-20261025的prepared-summary、switch-result及verification记录。
 
+- 本次部署流程按用户更正，以本会话语音分支 `fix/voice-preserve-unopened-queued-result` 为工作与本机源码安装分支，先合入 `origin/main`，再同步部署；不再直接将本机切到 main。已核对 main 包含本语音分支全部产品改动，合并后相对已部署2b4d5db6仅有PROGRESS差异，产品与构建输入相同，可保持现有产物及进程。
+
 ### Gemini 原生兼容：实现与真实网关验证通过，本机代码已升级
 
 - 按已确认 [spec](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/specs/2026-10-23-gemini-native-compatibility-design.md) 实现原生 GeminiAdapter：流式文本、图片输入、函数调用/结果、thoughtSignature 原位历史与 Manager/builtin 存储恢复、思考映射及用量。Admin 改为原生目录/预检，手动 Gemini 可同步模型；30 秒有界操作，分页失败或空目录保留旧值。
