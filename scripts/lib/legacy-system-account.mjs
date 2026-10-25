@@ -15,6 +15,19 @@ export async function discoverLegacySystemAccount(context, { actual = userInfo()
   if (actual.uid !== account.uid || actual.gid !== account.gid || actual.username !== account.user || actual.homedir !== account.home) fail()
   const code = await discoverRelease({ root: release.installRoot })
   if (code.version !== release.version || code.installRoot !== release.installRoot || code.code_fingerprint !== release.code_fingerprint) fail()
+  try {
+    const { bytes, value } = readLegacySystemManifest(account, actual)
+    if (!value || value.mode !== 'system' || value.port_offset !== hint || typeof value.crabot_home !== 'string'
+      || !path.isAbsolute(value.crabot_home) || fs.realpathSync(value.crabot_home) !== release.installRoot) fail()
+    return { user: account.user, uid: account.uid, port_offset: hint, install_root: release.installRoot,
+      code_fingerprint: code.code_fingerprint, manifest_fingerprint: createHash('sha256').update(bytes).digest('hex'), data_binding: 'unverified' }
+  } catch { fail() }
+}
+
+// Same-UID bounded bytes only. This does not establish code/data binding or
+// grant any lifecycle action; each caller applies its own role semantics.
+export function readLegacySystemManifest(account, actual = userInfo()) {
+  if (!account || actual.uid !== account.uid || actual.gid !== account.gid || actual.username !== account.user || actual.homedir !== account.home) fail()
   const directory = path.join(account.home, '.crabot'), manifest = path.join(directory, 'instance.json')
   let fd
   try {
@@ -31,11 +44,8 @@ export async function discoverLegacySystemAccount(context, { actual = userInfo()
       size += count
     }
     if (size > limit) fail()
-    const bytes = buffer.subarray(0, size), value = JSON.parse(bytes.toString('utf8'))
-    if (!value || value.mode !== 'system' || value.port_offset !== hint || typeof value.crabot_home !== 'string'
-      || !path.isAbsolute(value.crabot_home) || fs.realpathSync(value.crabot_home) !== release.installRoot) fail()
-    return { user: account.user, uid: account.uid, port_offset: hint, install_root: release.installRoot,
-      code_fingerprint: code.code_fingerprint, manifest_fingerprint: createHash('sha256').update(bytes).digest('hex'), data_binding: 'unverified' }
+    const bytes = buffer.subarray(0, size)
+    return { bytes, value: JSON.parse(bytes.toString('utf8')) }
   } catch { fail() }
   finally { if (fd !== undefined) fs.closeSync(fd) }
 }

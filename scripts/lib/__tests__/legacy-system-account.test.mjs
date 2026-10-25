@@ -39,7 +39,7 @@ test('every actual OS account mismatch refuses before shared-code or employee fi
 test('changed shared code, inconsistent modes, offsets and installation sources stay unconverted', options, async t => {
   const f = fixture(t)
   await assert.rejects(f.discover({ discoverRelease: async () => ({ ...f.release, code_fingerprint: 'b'.repeat(64) }) }))
-  for (const patch of [{ mode: 'user' }, { port_offset: 200 }, { port_offset: '100' }, { crabot_home: f.home }, { crabot_home: './shared-code' }]) {
+  for (const patch of [{ mode: 'user' }, { port_offset: 200 }, { port_offset: '100' }, { crabot_home: f.home }, { crabot_home: './shared-code' }, { crabot_home: path.join(f.home, 'missing-source') }]) {
     f.write(patch); await assert.rejects(f.discover(), { code: 'CRABOT_LEGACY_SYSTEM_ACCOUNT' })
   }
 })

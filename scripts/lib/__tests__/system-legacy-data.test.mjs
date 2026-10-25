@@ -187,3 +187,16 @@ for (const changed of ['missing-admin', 'missing-credentials', 'invalid-credenti
   assert.equal(readVersionMaintenance(f.dataDir), null)
   await assert.rejects(fsp.stat(path.join(f.dataDir + '.desktop-backups')), { code: 'ENOENT' })
 })
+
+test('an originally verified stopped UID is backed up and migrated without starting it or replacing its credentials', options, async t => {
+  const f = await fixture(t), observation = f.params.observation
+  observation.runtime_state = 'stopped'; observation.data_binding = 'verified_stopped'
+  for (const name of ['controller', 'mm', 'mm_port', 'launch_kind']) delete observation[name]
+  const before = await fsp.readFile(path.join(f.dataDir, 'admin/credentials.json'))
+  const snapshot = await f.invoke('snapshot')
+  const result = await f.invoke('migrate', { snapshot })
+  assert.equal(result.migrated, true); assert.equal(result.service_started, false)
+  assert.deepEqual(await fsp.readFile(path.join(f.dataDir, 'admin/credentials.json')), before)
+  assert.equal(await verifyPassword('private-fixture-password', JSON.parse(before)), true)
+  assert.equal(await fsp.readFile(path.join(f.dataDir, 'fixture/content'), 'utf8'), 'before changed')
+})

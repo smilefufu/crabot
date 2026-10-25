@@ -29,7 +29,7 @@ export function validateLegacySystemConversionPermit(permit) {
   if (!permit || Object.keys(permit).length !== fields.length || fields.some(key => !Object.hasOwn(permit, key))
     || permit.schema_version !== 1 || permit.kind !== 'legacy-system-conversion' || !Object.hasOwn(stages, permit.action)
     || !uuid(permit.id) || !uuid(permit.operation_id) || !uuid(permit.boot_id) || !uuid(permit.source_fence_id)
-    || permit.observation?.runtime_state !== 'running' || permit.observation.data_binding !== 'observed_running') fail()
+    || !data && (permit.observation?.runtime_state !== 'running' || permit.observation.data_binding !== 'observed_running')) fail()
   validateSystemConversionInstance({ entry: permit.entry, observation: permit.observation }, permit.source)
   if (data) {
     validateSystemConversionPlan({ schema_version: 1, kind: 'conversion', id: permit.operation_id, install_root: permit.install_root,

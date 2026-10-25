@@ -164,3 +164,23 @@ for (const action of ['snapshot', 'migrate', 'cancel-preparation']) test('nonadm
     await assert.rejects(runLegacySystemConversion({}, { root: '/must-not-read', operationId: randomUUID(), action,
       spawnProcess: () => assert.fail('must not spawn') }), { code: 'CRABOT_SYSTEM_ADMIN_REQUIRED' })
   })
+
+for (const action of ['snapshot', 'migrate', 'cancel-preparation']) test('existing verified-stopped data binding can receive only its exact conversion data role: ' + action, () => {
+  const f = dataFixture(action), observation = f.record.plan.instances[0].observation, row = f.record.progress.results[0]
+  observation.runtime_state = 'stopped'; observation.data_binding = 'verified_stopped'; row.originally_running = false
+  for (const name of ['controller', 'mm', 'mm_port', 'launch_kind']) delete observation[name]
+  const permit = createLegacySystemConversionPermit(f)
+  assert.equal(permit.action, action); assert.equal(permit.observation.runtime_state, 'stopped')
+  assert.equal(permit.entry.data_dir, f.entry.data_dir)
+  assert.equal(permit.source_fence_id, f.sourceFence.id)
+  assert.equal(conversionMaintenanceMatches(permit, f.maintenance, f.bootId), true)
+  assert.throws(() => validateLegacySystemConversionPermit({ ...permit, observation: { ...observation, data_binding: 'unverified' } }))
+})
+
+test('an entirely valid originally-stopped observation still cannot receive a legacy stop action', () => {
+  const f = fixture(), observation = f.record.plan.instances[0].observation
+  observation.runtime_state = 'stopped'; observation.data_binding = 'verified_stopped'
+  f.record.progress.results[0].originally_running = false
+  for (const name of ['controller', 'mm', 'mm_port', 'launch_kind']) delete observation[name]
+  assert.throws(() => createLegacySystemConversionPermit(f), { code: 'CRABOT_SYSTEM_CONVERSION_PERMIT' })
+})

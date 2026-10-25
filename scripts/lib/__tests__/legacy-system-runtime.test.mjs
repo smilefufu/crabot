@@ -2,8 +2,11 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
-import { tmpdir } from 'node:os'
+import { tmpdir, userInfo } from 'node:os'
+import { createHash } from 'node:crypto'
+import { newCredentialsFromPassword } from '../../../crabot-admin/dist/credentials.js'
 import identity from '../process-identity.cjs'
+import { readLegacySystemManifest } from '../legacy-system-account.mjs'
 import { discoverLegacySystemDeployment, withFencedLegacySystemRuntime } from '../legacy-system-runtime.mjs'
 const options = { skip: process.platform === 'win32' }
 function fixture(t) {
@@ -116,4 +119,73 @@ test('a replacement directory at the identical original path cannot acquire the 
   await assert.rejects(f.use(() => { called = true; return { accepted: true } }))
   assert.equal(called, false)
   assert.equal(fs.statSync(f.data + '-retained').mode & 0o777, 0o700)
+})
+
+async function standardStoppedFixture(t) {
+  const f = fixture(t), home = path.join(f.root, 'home'), profile = path.join(home, '.crabot'), data = path.join(profile, 'data-100')
+  fs.mkdirSync(data, { recursive: true, mode: 0o755 })
+  for (const name of ['admin', 'agent', 'memory']) fs.mkdirSync(path.join(data, name), { mode: 0o755 })
+  const credentials = JSON.stringify(await newCredentialsFromPassword('retained-private-password', { is_temp: false, changed_via: 'start' }))
+  fs.writeFileSync(path.join(data, 'admin/credentials.json'), credentials, { mode: 0o600 })
+  const manifest = path.join(profile, 'instance.json'), bytes = JSON.stringify({ mode: 'system', crabot_home: f.root, port_offset: 100, data_dir: data })
+  fs.writeFileSync(manifest, bytes, { mode: 0o600 })
+  const actual = userInfo()
+  f.context.account = { user: f.account.user, uid: actual.uid, gid: actual.gid, home }
+  f.options.readManifest = account => readLegacySystemManifest(account, { ...actual, username: account.user, homedir: home })
+  Object.assign(f.account, { port_offset: 100, install_root: f.root, manifest_fingerprint: createHash('sha256').update(bytes).digest('hex') })
+  f.snapshot.state = 'stopped'
+  return { ...f, home, profile, standardData: data, manifest, credentials }
+}
+test('a verified official account with its existing standard stopped profile produces the already defined stopped binding without writes', options, async t => {
+  const f = await standardStoppedFixture(t), before = fs.statSync(f.standardData, { bigint: true }), names = fs.readdirSync(f.standardData)
+  const result = await f.discover()
+  assert.equal(result.runtime_state, 'stopped')
+  assert.equal(result.data_binding, 'verified_stopped')
+  assert.equal(result.data_dir, f.standardData)
+  assert.deepEqual(result.data_directory, { device: String(before.dev), inode: String(before.ino) })
+  assert.equal(fs.statSync(f.standardData).mode & 0o777, Number(before.mode & 0o777n))
+  assert.deepEqual(fs.readdirSync(f.standardData), names)
+  assert.equal(fs.readFileSync(path.join(f.standardData, 'admin/credentials.json'), 'utf8'), f.credentials)
+  assert.equal(f.calls(), 0)
+  assert.equal(JSON.stringify(result).includes('retained-private-password'), false)
+})
+
+test('standard stopped binding does not require an informational data_dir field in the official account manifest', options, async t => {
+  const f = await standardStoppedFixture(t), value = JSON.parse(fs.readFileSync(f.manifest))
+  delete value.data_dir
+  const bytes = JSON.stringify(value); fs.writeFileSync(f.manifest, bytes)
+  f.account.manifest_fingerprint = createHash('sha256').update(bytes).digest('hex')
+  assert.equal((await f.discover()).data_dir, f.standardData)
+})
+
+for (const changed of ['missing-data', 'directory-alias', 'manifest-changed', 'conflicting-display-directory', 'invalid-credentials', 'live-pid', 'unsettled-modules', 'other-uid']) {
+  test('standard stopped discovery preserves data and refuses unverified evidence: ' + changed, options, async t => {
+    const f = await standardStoppedFixture(t), originalNames = fs.readdirSync(f.standardData)
+    if (changed === 'missing-data' || changed === 'directory-alias') {
+      fs.renameSync(f.standardData, f.standardData + '-retained')
+      if (changed === 'directory-alias') fs.symlinkSync(f.standardData + '-retained', f.standardData)
+    }
+    if (changed === 'manifest-changed' || changed === 'conflicting-display-directory') {
+      const value = JSON.parse(fs.readFileSync(f.manifest)); value.data_dir = f.other
+      const bytes = JSON.stringify(value); fs.writeFileSync(f.manifest, bytes)
+      if (changed === 'conflicting-display-directory') f.account.manifest_fingerprint = createHash('sha256').update(bytes).digest('hex')
+    }
+    if (changed === 'invalid-credentials') fs.writeFileSync(path.join(f.standardData, 'admin/credentials.json'), '{}')
+    if (changed === 'live-pid') fs.writeFileSync(path.join(f.standardData, 'mm.pid'), String(process.pid))
+    if (changed === 'unsettled-modules') { fs.mkdirSync(path.join(f.standardData, 'module-runtime-registry/records'), { recursive: true }); fs.writeFileSync(path.join(f.standardData, 'module-runtime-registry/records/old.json'), '{}') }
+    if (changed === 'other-uid') f.context.account.uid++
+    await assert.rejects(f.discover())
+    assert.equal(f.calls(), 0)
+    if (changed === 'missing-data') { assert.equal(fs.existsSync(f.standardData), false); assert.deepEqual(fs.readdirSync(f.standardData + '-retained'), originalNames) }
+    if (changed === 'directory-alias') assert.equal(fs.lstatSync(f.standardData).isSymbolicLink(), true)
+    if (!['missing-data', 'directory-alias', 'invalid-credentials'].includes(changed)) assert.equal(fs.readFileSync(path.join(f.standardData, 'admin/credentials.json'), 'utf8'), f.credentials)
+  })
+}
+test('a stopped binding stays stopped under fencing and a newly started instance cannot be stopped by the old plan', options, async t => {
+  const f = await standardStoppedFixture(t), expected = await f.discover()
+  assert.equal((await withFencedLegacySystemRuntime(f.context, expected, value => value, f.options)).state, 'stopped')
+  f.snapshot.state = 'running'
+  let called = false
+  await assert.rejects(withFencedLegacySystemRuntime(f.context, expected, () => { called = true }, f.options), { code: 'CRABOT_LEGACY_SYSTEM_RUNTIME' })
+  assert.equal(called, false)
 })
