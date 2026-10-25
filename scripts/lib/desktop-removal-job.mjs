@@ -1,11 +1,12 @@
-// Separate initial/existing private-GUI transactions share only mutex, normal
-// stop and source-exit observation, then bounded program removal. No Core executes.
+// Separate verified host roles share only the neutral job, mutex, normal stop
+// and exit observation. Host admission and byte checks remain role-specific.
 import path from 'node:path'
 import physicalFs from './physical-fs.cjs'
 import identity from './process-identity.cjs'
 import installation from './desktop-installation.cjs'
 import management from './desktop-management.cjs'
-import { captureInitialRemovalGuiHost, captureExistingRemovalGuiHost } from './desktop-removal-frame.mjs'
+import { captureInitialRemovalGuiHost, captureExistingRemovalGuiHost, captureInitialRemovalNodeHost } from './desktop-removal-frame.mjs'
+import { verifyUbuntuRemovalNodeCopy } from './desktop-removal-host.mjs'
 import { acquireExistingCliLock, releaseCliLock, cliLockToken } from './cli-lock.mjs'
 import { readDesktopRemoval } from './desktop-removal-record.cjs'
 import { readDesktopRemovalProof } from './desktop-removal-proof.mjs'
@@ -24,7 +25,7 @@ const fail = () => { throw Object.assign(new Error('卸载作业或停止结果�
 function absent(file) {
   try { physicalFs.lstatSync(file); return false } catch (error) { if (error.code === 'ENOENT') return true; throw error }
 }
-async function openDesktopRemoval({ installRoot, operationId, signal }, existing) {
+async function openDesktopRemoval({ installRoot, operationId, signal }, existing, role = 'gui') {
   const base = existing ? installation.readDesktopInstallation(installRoot) : installation.readDesktopSelection(installRoot)
   const selection = existing ? installation.readDesktopPairReference(base.root).selection : base.selection
   const own = { ...base, coreRoot: path.join(base.root, 'releases', selection.core_id), guiRoot: path.join(base.root, 'app/releases', selection.gui_id) }
@@ -40,13 +41,17 @@ async function openDesktopRemoval({ installRoot, operationId, signal }, existing
   try {
     dataLock = await acquireExistingCliLock(own.dataDir, 'desktop-removal'); dataToken = cliLockToken(dataLock)
     const dataIdentity = directoryIdentity(await fs.lstat(own.dataDir, { bigint: true }))
-    const capture = existing ? captureExistingRemovalGuiHost : captureInitialRemovalGuiHost
+    let capture = captureInitialRemovalGuiHost
+    if (role === 'node') capture = captureInitialRemovalNodeHost
+    else if (existing) capture = captureExistingRemovalGuiHost
     const captured = await capture({ installRoot: own.root, operationId, signal })
     const { proof, facts } = captured
     const executable = await fs.realpath(process.execPath)
     const hostGuiRoot = process.platform === 'darwin' ? path.resolve(path.dirname(executable), '../../..') : path.dirname(executable)
-    const hostDirectory = path.dirname(hostGuiRoot)
-    const hostDirectories = [hostDirectory, hostGuiRoot].map(directory => [directory, directoryIdentity(physicalFs.lstatSync(directory, { bigint: true }))])
+    const hostDirectory = role === 'node' ? path.dirname(executable) : path.dirname(hostGuiRoot)
+    const hostProcess = role === 'node' ? facts.host_node : facts.host_gui
+    const verifyHost = role === 'node' ? () => verifyUbuntuRemovalNodeCopy(hostDirectory, proof) : () => verifyDesktopGui(hostGuiRoot, proof.payload)
+    const hostDirectories = (role === 'node' ? [hostDirectory] : [hostDirectory, hostGuiRoot]).map(directory => [directory, directoryIdentity(physicalFs.lstatSync(directory, { bigint: true }))])
     let record = existing ? captured.record : { schema_version: 1, installation_id: own.record.installation_id, operation_id: operationId,
       source_selection: proof.source_selection, phase: 'preparing', proof_sha256: facts.proof_sha256 }
     const fence = path.join(own.root, '.desktop-removal.json')
@@ -63,7 +68,7 @@ async function openDesktopRemoval({ installRoot, operationId, signal }, existing
       if (closed || !rootToken || !dataToken || cliLockToken(rootLock) !== rootToken || cliLockToken(dataLock) !== dataToken
         || actualDataIdentity !== dataIdentity || !same(installation.readDesktopInstallation(own.root).record, own.record)
         || !same(installation.readDesktopPairReference(own.root).selection, record.source_selection)
-        || !identity.sameProcess(facts.host_gui, identity.inspectProcess(process.pid))
+        || !identity.sameProcess(hostProcess, identity.inspectProcess(process.pid))
         || !absent(path.join(own.dataDir, 'desktop-maintenance.json')) || workspaceMaintenancePending(own.dataDir)
         || !absent(path.join(own.root, '.desktop-installing.json'))
         || (published ? !same(readDesktopRemoval(own.root), record) : !absent(fence))) fail()
@@ -107,7 +112,7 @@ async function openDesktopRemoval({ installRoot, operationId, signal }, existing
         try {
           await pendingStop; await current(); assertStopped()
           if (retry) {
-            await verifyDesktopGui(hostGuiRoot, proof.payload)
+            await verifyHost()
             await current(); assertStopped()
           }
           const deadline = performance.now() + 15000
@@ -154,7 +159,7 @@ async function openDesktopRemoval({ installRoot, operationId, signal }, existing
               pendingPhase = undefined
             }
             await current()
-            await verifyDesktopGui(hostGuiRoot, proof.payload)
+            await verifyHost()
           }
           await current()
           const original = inspectInstance(own.dataDir)
@@ -190,7 +195,7 @@ async function openDesktopRemoval({ installRoot, operationId, signal }, existing
             pendingRemovalPhase = undefined
           }
           await current(); assertStopped()
-          await verifyDesktopGui(hostGuiRoot, proof.payload)
+          await verifyHost()
           await current(); assertStopped()
           if (probeKnownProcessExit([facts.source_gui]).state !== 'stopped') fail()
           await assertDesktopRemovalProgramsUnused({ installRoot: own.root, proof }, 'before-removing')
@@ -247,3 +252,8 @@ async function openDesktopRemoval({ installRoot, operationId, signal }, existing
 // Fixed role entrypoints. Existing records can never enter initial publication.
 export function beginInitialDesktopRemoval(options) { return openDesktopRemoval(options, false) }
 export function resumeDesktopRemoval(options) { return openDesktopRemoval(options, true) }
+
+export async function beginInitialDesktopRemovalNode(options) {
+  if (process.platform !== 'linux') fail()
+  return openDesktopRemoval(options, false, 'node')
+}

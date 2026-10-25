@@ -182,11 +182,7 @@ export async function prepareDesktopRemovalNode({ installRoot, operationId, sign
     // Re-read all private bytes before executing even the finite self-check.
     const verifyCopy = async () => {
       await privateCurrent()
-      for (const file of files) {
-        const target = path.join(directory, file.target), stat = await fs.lstat(target)
-        if (!stat.isFile() || stat.nlink !== 1 || stat.uid !== process.getuid() || (stat.mode & 0o777) !== file.entry.mode || stat.size !== file.entry.size
-          || await fs.realpath(target) !== target || createHash('sha256').update(await fs.readFile(target)).digest('hex') !== file.entry.sha256) fail()
-      }
+      await verifyUbuntuRemovalNodeCopy(directory, proof, { signal })
       await privateCurrent()
     }
     await verifyCopy()
@@ -214,4 +210,43 @@ export async function prepareDesktopRemovalNode({ installRoot, operationId, sign
     }
     throw error
   } finally { if (token && cliLockToken(lock) === token) releaseCliLock(lock) }
+}
+
+// Neutral byte facts shared by preparation and the separate Linux host role.
+// Reading a valid copy does not authorize a job, service action or deletion.
+export async function verifyUbuntuRemovalNodeCopy(directory, proof, { signal } = {}) {
+  if (process.platform !== 'linux') fail()
+  if (management.requirePrivateDataRoot(directory) !== directory) fail()
+  const original = directoryIdentity(await fs.lstat(directory, { bigint: true }))
+  const inventory = JSON.parse(proof.core.inventory).files
+  const files = [
+    { target: 'node', entry: inventory['.product-runtime/node/bin/node'] },
+    { target: 'crabot-maintenance', entry: proof.payload.gui['resources/crabot-maintenance'] },
+    ...desktopMaintenanceNodeFiles.map(name => ({ target: 'backend/' + name, entry: proof.payload.gui['resources/crabot-maintenance-backend/' + name] })),
+  ]
+  const generation = stat => [stat.dev, stat.ino, stat.mode, stat.uid, stat.gid, stat.size, stat.nlink, stat.mtimeNs, stat.ctimeNs].join(':')
+  for (const file of files) {
+    signal?.throwIfAborted()
+    const expected = file.entry
+    if (expected?.type !== 'file' || !Number.isSafeInteger(expected.size) || expected.size < 1 || expected.size > 128 * 1024 * 1024
+      || expected.mode & 0o022 || ['node', 'crabot-maintenance'].includes(file.target) && !(expected.mode & 0o111)) fail()
+    const target = path.join(directory, file.target), before = await fs.lstat(target, { bigint: true })
+    if (!before.isFile() || before.nlink !== 1n || before.uid !== BigInt(process.getuid()) || (before.mode & 0o777n) !== BigInt(expected.mode)
+      || before.size !== BigInt(expected.size) || await fs.realpath(target) !== target) fail()
+    const handle = await fs.open(target, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0))
+    try {
+      if (generation(await handle.stat({ bigint: true })) !== generation(before)) fail()
+      const hash = createHash('sha256'), bytes = Buffer.alloc(65536)
+      let position = 0
+      while (position < expected.size) {
+        const { bytesRead } = await handle.read(bytes, 0, Math.min(bytes.length, expected.size - position), position)
+        if (!bytesRead) fail()
+        hash.update(bytes.subarray(0, bytesRead)); position += bytesRead
+      }
+      if ((await handle.read(Buffer.alloc(1), 0, 1, position)).bytesRead || hash.digest('hex') !== expected.sha256
+        || generation(await handle.stat({ bigint: true })) !== generation(before) || generation(await fs.lstat(target, { bigint: true })) !== generation(before)) fail()
+    } finally { await handle.close() }
+  }
+  signal?.throwIfAborted()
+  if (management.requirePrivateDataRoot(directory) !== directory || directoryIdentity(await fs.lstat(directory, { bigint: true })) !== original) fail()
 }

@@ -7,6 +7,7 @@ import identity from './process-identity.cjs'
 import entry from './desktop-entry.cjs'
 import management from './desktop-management.cjs'
 import installation from './desktop-installation.cjs'
+import { verifyUbuntuRemovalNodeCopy } from './desktop-removal-host.mjs'
 import { processBirthAtLeast } from './owned-process-tree.cjs'
 import { captureDesktopRemovalProof, readDesktopRemovalProof } from './desktop-removal-proof.mjs'
 import { readOriginalDesktopPayload } from './desktop-program-proof.mjs'
@@ -73,4 +74,34 @@ export function captureExistingRemovalGuiHost(options) { return captureGuiHost(o
 // Public facts-only inspection; the transaction captures the same proof under both locks.
 export async function inspectInitialRemovalGuiHost(options) {
   return (await captureInitialRemovalGuiHost(options)).facts
+}
+
+// Linux's plain Node is a distinct host role, never an ordinary desktop peer.
+// These are handoff facts only; the transaction owns publication and actions.
+export async function captureInitialRemovalNodeHost({ installRoot, operationId, signal }) {
+  const fail = () => { throw Object.assign(new Error('独立Node维护宿主的来源或副本无法核验，原程序与数据已保留。'), { code: 'CRABOT_DESKTOP_REMOVAL' }) }
+  try {
+    if (process.platform !== 'linux' || !process.connected || typeof process.send !== 'function') fail()
+    signal?.throwIfAborted()
+    const own = installation.readDesktopSelection(installRoot), self = identity.inspectProcess(process.pid)
+    const parent = self && identity.inspectProcess(self.parent), policy = { executable: own.executable, development: false }
+    if (!self || !parent || self.owner !== own.record.owner || parent.owner !== self.owner || !processBirthAtLeast(self.started, parent.started)
+      || !entry.verifyDesktopEntry(parent, policy)) fail()
+    const executable = await fs.realpath(process.execPath), directory = management.requirePrivateDataRoot(path.dirname(executable))
+    if (await fs.realpath(self.executable) !== executable || path.basename(executable) !== 'node'
+      || !/^crabot-removal-host-[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(path.basename(directory))
+      || inside(own.root, directory) || inside(directory, own.root) || await fs.realpath(process.cwd()) !== directory) fail()
+    const hostIdentity = directoryIdentity(await fs.lstat(directory, { bigint: true })), dataIdentity = directoryIdentity(await fs.lstat(own.dataDir, { bigint: true }))
+    const proof = await captureDesktopRemovalProof(own.root, operationId, { signal })
+    await verifyUbuntuRemovalNodeCopy(directory, proof, { signal })
+    const current = installation.readDesktopSelection(own.root), source = await readOriginalDesktopPayload(own.root, own.selection)
+    const actualSelf = identity.inspectProcess(process.pid), actualParent = identity.inspectProcess(parent.pid)
+    if (!same(current.record, own.record) || !same(current.selection, proof.source_selection) || !same(source.record, proof.payload)
+      || !process.connected || typeof process.send !== 'function' || !identity.sameProcess(self, actualSelf) || actualSelf.parent !== parent.pid
+      || !identity.sameProcess(parent, actualParent) || !entry.verifyDesktopEntry(actualParent, policy) || directoryIdentity(await fs.lstat(own.dataDir, { bigint: true })) !== dataIdentity
+      || management.requirePrivateDataRoot(directory) !== directory || directoryIdentity(await fs.lstat(directory, { bigint: true })) !== hostIdentity) fail()
+    signal?.throwIfAborted()
+    return { proof, facts: { installation_id: own.record.installation_id, operation_id: operationId, source_selection: proof.source_selection,
+      source_gui: parent, host_node: self, proof_sha256: createHash('sha256').update(JSON.stringify(proof) + '\n').digest('hex') } }
+  } catch { if (signal?.aborted) signal.throwIfAborted(); fail() }
 }

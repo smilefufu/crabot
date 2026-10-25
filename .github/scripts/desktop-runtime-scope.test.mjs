@@ -28,6 +28,7 @@ for (const [file, expected] of [
   ['.github/workflows/desktop-ubuntu-bootstrap.yml', true],
   ['crabot-desktop/tests/ubuntu-removal-progress.test.mjs', true],
   ['crabot-desktop/tests/ubuntu-removal-host.test.mjs', true],
+  ['crabot-desktop/tests/fixtures/ubuntu-removal-node-parent.cjs', true],
   ['crabot-desktop/tests/fixtures/removal-progress-peer.c', true],
   ['scripts/workspace-relocation-coordinator.mjs', true],
   ['scripts/workspace-copy-host.mjs', true],
