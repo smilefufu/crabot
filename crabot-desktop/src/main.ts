@@ -4,6 +4,7 @@ import path from 'node:path'
 import { createRequire } from 'node:module'
 import { homedir } from 'node:os'
 import { access, mkdir, readFile, writeFile, rename, rm } from 'node:fs/promises'
+import { mkdirSync, readFileSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import type { DesktopDiagnostics } from 'crabot-client'
 import { pathToFileURL, fileURLToPath } from 'node:url'
@@ -57,6 +58,23 @@ async function quit(): Promise<boolean> {
 function show() { window?.show(); window?.focus() }
 function bootstrapStage(phase: string) { console.info(JSON.stringify({ component: 'desktop-bootstrap', phase, at: new Date().toISOString() })) }
 
+function configureProfile(root: string) {
+  const profile = path.join(root, 'desktop-profile'), temporary = path.join(profile, 'tmp')
+  mkdirSync(temporary, { recursive: true, mode: 0o700 })
+  app.setPath('userData', profile)
+  app.setPath('sessionData', profile)
+  app.setPath('temp', temporary)
+}
+function claimInstance() {
+  if (!app.requestSingleInstanceLock()) { bootstrapStage('instance-lock-denied'); quitting = true; app.quit(); return false }
+  bootstrapStage('instance-lock-acquired')
+  app.on('second-instance', (_event, args) => {
+    show()
+    if (args.includes('--check-updates')) { updateRequested = true; if (updates) void updates.open() }
+  })
+  return true
+}
+
 async function boot() {
   const installationProbe = process.argv.filter(value => value.startsWith('--installation-sandbox-probe='))
   if (installationProbe.length) {
@@ -69,37 +87,39 @@ async function boot() {
   // Resolve the protected GUI identity before external code or privileged UI.
   // A failed pair binding must not fall back to Resources/core.
   const verifier = app.isPackaged ? createRequire(import.meta.url)('./bootstrap/scripts/lib/desktop-installation.cjs') : null
-  const pin = verifier ? await readFile(path.join(directory, 'desktop-release.json'), 'utf8').catch(error => {
-    if (error.code === 'ENOENT') return undefined
-    throw error
-  }) : undefined
+  let pin: string | undefined
+  if (verifier) {
+    try { pin = readFileSync(path.join(directory, 'desktop-release.json'), 'utf8') }
+    catch (error: any) { if (error.code !== 'ENOENT') throw error }
+  }
   const discovered = verifier?.locateDesktopGui(process.resourcesPath)
-  if (pin !== undefined || discovered) {
-    const installation = verifier.locatePinnedDesktopGui(process.resourcesPath, pin)
+  const installation = pin !== undefined || discovered ? verifier.locatePinnedDesktopGui(process.resourcesPath, pin) : undefined
+  if (installation) {
+    // Electron needs its UI profile and instance lock before the first await.
+    // Only protected GUI code touches this profile; Core still requires a full hash.
+    verifier.applyDesktopEnvironment(installation)
+    const management = createRequire(import.meta.url)('./bootstrap/scripts/lib/desktop-management.cjs')
+    dataRoot = management.requirePrivateDataRoot(installation.dataDir)
+    configureProfile(dataRoot)
+    if (!claimInstance()) return
     const { verifyCoreRelease } = await import(pathToFileURL(path.join(directory, 'bootstrap/scripts/lib/core-release.mjs')).href)
     const release = await verifyCoreRelease(installation.coreRoot, { version: installation.selection.version })
     if (release.inventory_sha256 !== installation.selection.core_id) throw Object.assign(new Error('Protected Core identity changed'), { code: 'CRABOT_CORE_INTEGRITY' })
     verifyBinding = () => { verifier.locatePinnedDesktopGui(process.resourcesPath, pin) }
     coreRoot = installation.coreRoot
-    verifier.applyDesktopEnvironment(installation)
   }
   bootstrapStage('installation-bound')
   try {
     const { resolveCliDataDir } = await loadCore('scripts/lib/instance.mjs')
-    dataRoot = path.resolve(resolveCliDataDir({ homeDir: path.join(homedir(), '.crabot') }))
+    const resolved = path.resolve(resolveCliDataDir({ homeDir: path.join(homedir(), '.crabot') }))
+    if (installation && resolved !== dataRoot) throw Object.assign(new Error('Installed data binding changed'), { code: 'CRABOT_DESKTOP_INSTALLATION' })
+    dataRoot = resolved
     const management = (await loadCore('scripts/lib/desktop-management.cjs')).default
     dataRoot = management.ensurePrivateDataRoot(dataRoot)
-    app.setPath('userData', path.join(dataRoot, 'desktop-profile'))
-    app.setPath('sessionData', path.join(dataRoot, 'desktop-profile'))
-    await mkdir(path.join(dataRoot, 'desktop-profile/tmp'), { recursive: true, mode: 0o700 })
-    app.setPath('temp', path.join(dataRoot, 'desktop-profile/tmp'))
+    if (!installation) configureProfile(dataRoot)
   } catch (error) { initialError = error }
   bootstrapStage('data-location-checked')
-  if (!app.requestSingleInstanceLock()) { quitting = true; app.quit(); return }
-  app.on('second-instance', (_event, args) => {
-    show()
-    if (args.includes('--check-updates')) { updateRequested = true; if (updates) void updates.open() }
-  })
+  if (!installation && !claimInstance()) return
   await app.whenReady()
   if (process.platform === 'win32') app.setAppUserModelId('com.crabot.desktop')
   console.info(JSON.stringify({ component: 'desktop-bootstrap', phase: 'app-ready', app_version: app.getVersion(), at: new Date().toISOString() }))

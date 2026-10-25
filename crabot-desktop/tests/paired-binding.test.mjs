@@ -11,7 +11,7 @@ import identity from '../../scripts/lib/process-identity.cjs'
 import management from '../../scripts/lib/desktop-management.cjs'
 import { writeCoreRelease } from '../../scripts/lib/core-release.mjs'
 
-for (const scenario of ['pin-mismatch', 'core-corrupt', 'detached-pair', 'removal']) test('actual GUI entry refuses external Core execution before initialization: ' + scenario, { timeout: 35_000 }, async t => {
+for (const scenario of ['pin-mismatch', 'core-corrupt', 'detached-pair', 'removal', 'profile-before-ready']) test('actual GUI entry protects installation binding and profile initialization: ' + scenario, { timeout: 35_000 }, async t => {
   const parent = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'crabot-gui-binding-')))
   t.after(() => fs.rm(parent, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }))
   const root = management.ensurePrivateDataRoot(path.join(parent, 'install')), profile = management.ensurePrivateDataRoot(path.join(parent, 'profile'))
@@ -20,7 +20,8 @@ for (const scenario of ['pin-mismatch', 'core-corrupt', 'detached-pair', 'remova
   const stage = path.join(root, 'releases/stage'); await fs.mkdir(path.join(stage, 'scripts/lib'), { recursive: true })
   for (const file of ['package.json', 'product-runtime.json']) await fs.writeFile(path.join(stage, file), JSON.stringify({ version: '1.2.3' }))
   const instance = path.join(stage, 'scripts/lib/instance.mjs')
-  await fs.writeFile(instance, `import fs from 'node:fs';fs.writeFileSync(${JSON.stringify(marker)},'external code executed');export const resolveCliDataDir=()=>${JSON.stringify(data)};`)
+  await fs.writeFile(instance, `import fs from 'node:fs';fs.writeFileSync(${JSON.stringify(marker)},'external code executed');${scenario === 'profile-before-ready' ? "process.emit('crabot-profile-binding-fixture-core');" : ''}export const resolveCliDataDir=()=>${JSON.stringify(data)};`)
+  if (scenario === 'profile-before-ready') await fs.writeFile(path.join(stage, 'scripts/lib/desktop-management.cjs'), 'exports.ensurePrivateDataRoot = directory => directory;')
   await writeCoreRelease(stage, { schema_version: 1, version: '1.2.3', platform: process.platform, arch: process.arch, commit: 'a'.repeat(40), source_dirty: false })
   const release = JSON.parse(await fs.readFile(path.join(stage, 'core-release.json'), 'utf8'))
   const selection = { schema_version: 1, version: release.version, gui_id: randomUUID(), core_id: release.inventory_sha256 }
@@ -48,7 +49,7 @@ for (const scenario of ['pin-mismatch', 'core-corrupt', 'detached-pair', 'remova
     await fs.rename(core, path.join(resources, 'core'))
   }
   const options = path.join(parent, 'fixture.json'), report = path.join(parent, 'report.json')
-  await fs.writeFile(options, JSON.stringify({ resources, profile, data, marker, report,
+  await fs.writeFile(options, JSON.stringify({ resources, profile, data, marker, report, scenario, core,
     pin: scenario === 'pin-mismatch' ? { ...selection, gui_id: randomUUID() } : selection }))
   const env = { ...process.env }; delete env.ELECTRON_RUN_AS_NODE; delete env.NODE_OPTIONS
   const result = await new Promise((resolve, reject) => {
@@ -59,6 +60,11 @@ for (const scenario of ['pin-mismatch', 'core-corrupt', 'detached-pair', 'remova
   })
   assert.equal(result.code, 0, result.output)
   const evidence = JSON.parse(await fs.readFile(report, 'utf8'))
-  assert.deepEqual(evidence, { external_core_executed: false, repair_shown: true, removal_shown: scenario === 'removal', data_entries: [], business_mm_started: false, actual_packaged_binary: false })
+  if (scenario === 'profile-before-ready') {
+    assert.deepEqual(evidence, { external_core_executed: true, profile_bound_before_ready: true, profile_matches_installation: true,
+      core_verification_waited_for_ready: true, instance_lock_before_verification: true, business_mm_started: false, actual_packaged_binary: false })
+    return
+  }
+  assert.deepEqual(evidence, { external_core_executed: false, repair_shown: true, removal_shown: scenario === 'removal', data_entries: scenario === 'core-corrupt' ? ['desktop-profile'] : [], business_mm_started: false, actual_packaged_binary: false })
   console.log('CRABOT_GUI_BINDING_REJECTION ' + JSON.stringify({ scenario, ...evidence }))
 })

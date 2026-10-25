@@ -79,11 +79,12 @@ test('schema evidence uses the existing static validator without initializing or
 
 test('bootstrap summary exports only fixed phases/codes, excluding arbitrary fields, paths and user text', () => {
   const secret = 'private-model-token-and-user-text', output = [secret, '/private/' + secret,
+    JSON.stringify({ component: 'desktop-bootstrap', phase: 'instance-lock-acquired', secret }),
     JSON.stringify({ component: 'desktop-bootstrap', phase: 'app-ready', app_version: '1.2.4', secret }),
     JSON.stringify({ component: 'desktop-bootstrap', phase: secret }), JSON.stringify({ component: secret, phase: 'failed' }),
     "Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'crabot-client' in /private/" + secret, 'CRABOT_' + secret, 'bad json'].join('\n')
   const result = summarizePairedTargetBootstrap(output, '1.2.4')
-  assert.deepEqual(result, { events: [{ phase: 'app-ready', version_matches_current: true }], codes: ['ERR_MODULE_NOT_FOUND', 'MODULE_NOT_FOUND'], missing_packages: ['crabot-client'] })
+  assert.deepEqual(result, { events: [{ phase: 'instance-lock-acquired' }, { phase: 'app-ready', version_matches_current: true }], codes: ['ERR_MODULE_NOT_FOUND', 'MODULE_NOT_FOUND'], missing_packages: ['crabot-client'] })
   assert.equal(JSON.stringify(result).includes(secret), false)
   assert.equal(JSON.stringify(result).includes('/private/'), false)
 })
