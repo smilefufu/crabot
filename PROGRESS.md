@@ -1,5 +1,10 @@
 # Crabot 项目进度
 
+### Gemini 空响应重试：局部修复完成，未部署
+
+- 真实近似重放捕获 HTTP 200 的空文本/签名 SSE，缺少 finishReason；修正其错误分类，沿用既有普通有限重试，不再误入持续连接恢复。有效输出后截断、网络错误、取消和模型切换保持原处理，不制造成功终态。
+- 真实捕获响应经修复产物离线重放通过；新增回归在旧实现失败 4 项，修复后相关 7 文件 202 项与 Agent 构建通过。额外 callNonStreaming 旧夹具仍有基线失败，未计为全套通过、不混改；本轮没有增加真实模型请求或现场升级。共享 AGENTS/CLAUDE 规则已澄清：产品语义变更须 spec，纠正既有实现的局部 bug 走轻量修复。
+
 ### Gemini 未加载工具恢复：已本机部署，现场业务待观察
 
 - 按已确认 [spec](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/specs/2026-10-24-gemini-unloaded-tool-recovery-design.md)，将有工具声明时完整的未知调用交给 Engine，返回 TOOL_NOT_LOADED/TOOL_UNAVAILABLE；不自动加载或执行，同批加载下一轮才可用。无工具、格式错误、不完整参数及重复 id 仍拒绝，签名与错误结果原位配对。
