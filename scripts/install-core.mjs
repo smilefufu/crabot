@@ -2,6 +2,7 @@
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { homedir } from 'node:os'
+import { installSystemCore } from './lib/system-conversion-install.mjs'
 import { installStandaloneCli } from './lib/standalone-cli-install.mjs'
 import { resolveCliDataDir } from './lib/instance.mjs'
 import identity from './lib/process-identity.cjs'
@@ -10,7 +11,8 @@ const options = new Map(process.argv.slice(2).map(value => { const split = value
 if (!options.get('--install-root') || !['user', 'system'].includes(options.get('--scope'))) throw new Error('Expected --install-root=<directory> --scope=user|system')
 try {
   console.log('正在校验和安装内置环境，首次安装可能需要几分钟。')
-  const result = await installStandaloneCli({ sourceRoot: path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'),
+  const install = options.get('--scope') === 'system' ? installSystemCore : installStandaloneCli
+  const result = await install({ sourceRoot: path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'),
     installRoot: options.get('--install-root'), scope: options.get('--scope'),
     version: options.get('--expected-version')?.replace(/^v/, ''),
     dataDir: options.get('--scope') === 'user' ? resolveCliDataDir({ homeDir: path.join(homedir(), '.crabot') }) : undefined })
@@ -19,9 +21,11 @@ try {
     identity.appendUserPathDirectory(path.dirname(result.command), previous)
     if (!await notifyCliPathChange(result.coreRoot)) console.warn('环境通知尚未完成；新终端若仍未识别命令，请注销并重新登录。')
   }
-  console.log(options.get('--scope') === 'system'
-    ? 'Crabot 共享核心已安装。使用 sudo crabot system user add <已有Linux用户> 开通实例；业务尚未启动。'
-    : 'Crabot 内置核心已安装。服务尚未启动；使用 crabot start 完成实例初始化。')
+  let message = 'Crabot 内置核心已安装。服务尚未启动；使用 crabot start 完成实例初始化。'
+  if (options.get('--scope') === 'system') message = result.converted
+    ? '旧system转换已完成，原数据和端口已保留；使用 sudo crabot system status 查看各实例。'
+    : 'Crabot 共享核心已安装。使用 sudo crabot system user add <已有Linux用户> 开通实例；业务尚未启动。'
+  console.log(message)
   console.log('Core version: ' + result.version)
   if (result.retainedCore) console.log('受损核心已保留：' + result.retainedCore)
 } catch (error) { console.error('[crabot] ' + error.message); process.exitCode = 1 }

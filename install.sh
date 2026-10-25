@@ -501,7 +501,11 @@ main() {
     if [ -n "$CRABOT_RELEASE_VERSION" ]; then expected_version=("--expected-version=$CRABOT_RELEASE_VERSION"); fi
     [ -x "$bundled_node" ] || { error "Bundled Node is missing; repair the archive."; return 1; }
     [ "$SYSTEM_MODE" != true ] || scope=system
+    # Leave the retained old release before its process-coverage preflight.
+    INSTALL_DIR=$("$bundled_node" --input-type=module -e 'import path from "node:path"; console.log(path.resolve(process.argv[1]))' -- "$INSTALL_DIR") || return 1
+    if [ "$SYSTEM_MODE" = true ]; then cd / || return 1; fi
     "$bundled_node" "$bundled_source/scripts/install-core.mjs" "--install-root=$INSTALL_DIR" "--scope=$scope" "${expected_version[@]}" || return 1
+    if [ "$SYSTEM_MODE" = true ] && [ -f "$INSTALL_DIR/cli.mjs" ]; then INSTALL_DIR="$INSTALL_DIR/.managed"; fi
     BUNDLED_CORE_DIR="$INSTALL_DIR/releases/$(cat "$INSTALL_DIR/current-core")"
   else
   if [ "$SYSTEM_MODE" = "true" ]; then

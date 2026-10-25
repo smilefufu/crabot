@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import { createHash } from 'node:crypto'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, copyFileSync, chmodSync, symlinkSync, readlinkSync, existsSync, constants } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, copyFileSync, chmodSync, symlinkSync, readlinkSync, existsSync, realpathSync, constants } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -332,4 +332,35 @@ test('request upgrade generation is complete or rejected before package acceptan
   await assert.rejects(verifyReleasePackage(root, 'v2026.10.12.4'), /missing crabot-agent\/dist\/manager\/request-upgrade/)
   for (const file of generation.slice(1)) { mkdirSync(join(root, file, '..'), { recursive: true }); writeFileSync(join(root, file), '') }
   await verifyReleasePackage(root, 'v2026.10.12.4', { run: async () => {} })
+})
+
+test('system bundled installer leaves retained code cwd and follows the prepared root without writing OS state', unix, t => {
+  for (const converted of [false, true]) {
+    const f = bundledPathFixture(t), old = join(f.home, 'selected-root')
+    mkdirSync(old); if (converted) writeFileSync(join(old, 'cli.mjs'), 'retained old entry')
+    mkdirSync(join(f.core, 'scripts')); writeFileSync(join(f.core, 'core-release.json'), '{}')
+    writeFileSync(join(f.core, 'scripts/install-core.mjs'), `import fs from 'node:fs';import path from 'node:path';
+      const root=process.argv.find(value=>value.startsWith('--install-root=')).slice('--install-root='.length);
+      if(process.cwd()!=='/'||root!==process.env.TEST_SELECTED_ROOT||!process.argv.includes('--scope=system'))throw Error('installer cwd/root mismatch');
+      const selected=${converted} ? path.join(root,'.managed') : root;
+      fs.mkdirSync(path.join(selected,'releases','fixture'),{recursive:true});fs.writeFileSync(path.join(selected,'current-core'),'fixture\\n');
+      console.log('FIXTURE_ROOT_PREPARED');`)
+    const result = bash(`
+      SYSTEM_MODE=true; SOURCE_IS_LOCAL=true; SOURCE_DIR="$TEST_CORE"; CRABOT_VERSION=latest
+      cd "$TEST_SELECTED_ROOT"; INSTALL_DIR=.
+      detect_platform() { echo linux-x64; }
+      getconf() { echo 'glibc 2.35'; }
+      section() {
+        if [ "$1" = 'Creating /etc/crabot/ skeleton' ]; then
+          [ "$INSTALL_DIR" = "$TEST_EXPECTED_ROOT" ] || exit 97
+          [ "$BUNDLED_CORE_DIR" = "$TEST_EXPECTED_ROOT/releases/fixture" ] || exit 96
+          echo FIXTURE_VERIFIED_BEFORE_OS_WRITES; exit 0
+        fi
+      }
+      main
+    `, { ...f.env, TEST_SELECTED_ROOT: realpathSync(old), TEST_EXPECTED_ROOT: converted ? join(realpathSync(old), '.managed') : realpathSync(old) })
+    assert.equal(result.status, 0, result.stdout + result.stderr)
+    assert.match(result.stdout, /FIXTURE_VERIFIED_BEFORE_OS_WRITES/)
+    if (converted) assert.equal(readFileSync(join(old, 'cli.mjs'), 'utf8'), 'retained old entry')
+  }
 })
