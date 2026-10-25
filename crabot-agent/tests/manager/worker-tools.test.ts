@@ -580,7 +580,10 @@ describe('spawn_worker', () => {
     expect(schema.properties?.title?.description).toContain('具体执行内容')
     expect(schema.properties?.title?.description).toContain('继续处理')
     expect(spawnWorker.description).toContain('同项目执行器共享文件')
-    expect((spawnWorker.inputSchema.properties?.workspace as { description: string }).description).toContain('唯一默认工作区')
+    const workspaceDescription = (spawnWorker.inputSchema.properties?.workspace as { description: string }).description
+    expect(workspaceDescription).toContain('同项目复用同一路径')
+    expect(workspaceDescription).toContain('无法确定项目或远程查询不需要本机项目文件时省略')
+    expect(workspaceDescription).toContain('默认工作区的隔离任务目录')
   })
 
   it('透传 managerKey/origin/report_to 到台账，异步返回简短确认（非完整 worker 记录）', async () => {
