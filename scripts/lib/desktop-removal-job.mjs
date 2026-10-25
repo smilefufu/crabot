@@ -1,5 +1,5 @@
 // Separate initial/existing private-GUI transactions share only mutex, normal
-// stop and source-exit observation. Neither deletes programs or executes Core.
+// stop and source-exit observation, then bounded program removal. No Core executes.
 import path from 'node:path'
 import physicalFs from './physical-fs.cjs'
 import identity from './process-identity.cjs'
@@ -15,11 +15,12 @@ import { verifyDesktopGui, verifyDesktopPrograms } from './desktop-payload.mjs'
 import { inspectInstance } from './instance-runtime.mjs'
 import { stopInstance } from './instance-controller.mjs'
 import { probeKnownProcessExit } from './known-process-exit.cjs'
+import { assertDesktopRemovalProgramsUnused, removeDesktopRemovalPrograms } from './desktop-removal-delete.mjs'
 import { workspaceMaintenancePending } from './workspace-maintenance.cjs'
 const { promises: fs } = physicalFs
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b)
 const directoryIdentity = stat => [stat.dev, stat.ino, stat.mode, stat.uid, stat.gid].join(':')
-const fail = () => { throw Object.assign(new Error('卸载作业或停止结果无法核验，原程序、用户数据和保护已保留。'), { code: 'CRABOT_DESKTOP_REMOVAL' }) }
+const fail = () => { throw Object.assign(new Error('卸载作业或停止结果无法核验，剩余程序、用户数据和保护已保留。'), { code: 'CRABOT_DESKTOP_REMOVAL' }) }
 function absent(file) {
   try { physicalFs.lstatSync(file); return false } catch (error) { if (error.code === 'ENOENT') return true; throw error }
 }
@@ -29,6 +30,7 @@ async function openDesktopRemoval({ installRoot, operationId, signal }, existing
   const own = { ...base, coreRoot: path.join(base.root, 'releases', selection.core_id), guiRoot: path.join(base.root, 'app/releases', selection.gui_id) }
   const rootLock = await acquireExistingCliLock(own.root, 'desktop-removal'), rootToken = cliLockToken(rootLock)
   let dataLock, dataToken, job, pendingStop, pendingPhase, stopFailed = false, pendingSourceExit, sourceExitFailed = false, closed = false, busy = false, cancelIssued = false
+  let pendingRemoval, pendingRemovalPhase, removalFailed = false
   const close = () => {
     if (busy) fail()
     if (dataToken && cliLockToken(dataLock) === dataToken) releaseCliLock(dataLock)
@@ -171,6 +173,43 @@ async function openDesktopRemoval({ installRoot, operationId, signal }, existing
       })()
       return pendingStop
     }
+    const requestProgramRemoval = (retry = false) => {
+      if (closed || cancelIssued) fail()
+      if (pendingRemoval && (!retry || !removalFailed)) return pendingRemoval
+      if (retry && !removalFailed) fail()
+      if (busy || !pendingStop || !pendingSourceExit || ['preparing', 'completed'].includes(record.phase)) fail()
+      busy = true; removalFailed = false
+      pendingRemoval = (async () => {
+        try {
+          await pendingStop; await pendingSourceExit
+          if (pendingRemovalPhase) {
+            // Only our own attempted removing write may explain a lost reply.
+            const actual = readDesktopRemoval(own.root)
+            if (same(actual, pendingRemovalPhase)) record = pendingRemovalPhase
+            else if (!same(actual, record)) fail()
+            pendingRemovalPhase = undefined
+          }
+          await current(); assertStopped()
+          await verifyDesktopGui(hostGuiRoot, proof.payload)
+          await current(); assertStopped()
+          if (probeKnownProcessExit([facts.source_gui]).state !== 'stopped') fail()
+          await assertDesktopRemovalProgramsUnused({ installRoot: own.root, proof }, 'before-removing')
+          await current(); assertStopped()
+          if (probeKnownProcessExit([facts.source_gui]).state !== 'stopped') fail()
+          if (record.phase === 'stopping') {
+            pendingRemovalPhase = { ...record, phase: 'removing' }
+            await privateJson(fence, pendingRemovalPhase, true); record = pendingRemovalPhase; pendingRemovalPhase = undefined
+          }
+          await current(); assertStopped()
+          // Preparation cancellation cannot roll back a destructive phase.
+          const result = await removeDesktopRemovalPrograms({ installRoot: own.root, operationId })
+          await current(); assertStopped()
+          removalFailed = result.retained.length > 0
+          return result
+        } catch (error) { removalFailed = true; throw error } finally { busy = false }
+      })()
+      return pendingRemoval
+    }
     return {
       record: structuredClone(record),
       current: () => current(),
@@ -178,6 +217,8 @@ async function openDesktopRemoval({ installRoot, operationId, signal }, existing
       retryStop: () => requestStop(true),
       exitSource: () => requestSourceExit(),
       retrySourceExit: () => requestSourceExit(true),
+      removePrograms: () => requestProgramRemoval(),
+      retryRemovePrograms: () => requestProgramRemoval(true),
       async cancel() {
         if (busy || ['removing', 'completed'].includes(record.phase)) fail()
         busy = true

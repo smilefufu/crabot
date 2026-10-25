@@ -10,17 +10,32 @@ const directoryIdentity = stat => [stat.dev, stat.ino, stat.mode, stat.uid, stat
 const equalPath = (a, b) => process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b
 const fail = () => { throw Object.assign(new Error('程序文件或目录身份已变化，剩余程序、用户数据和卸载保护已保留。'), { code: 'CRABOT_DESKTOP_REMOVAL' }) }
 const referenceFailure = stage => { throw Object.assign(new Error('程序仍被使用或占用无法核实，剩余程序、用户数据和卸载保护已保留。请关闭相关程序后重试。'), { code: 'CRABOT_DESKTOP_PROGRAM_REFERENCES', stage }) }
+// Read-only resource observation. A caller still needs its live job, source-exit
+// and lock admission; this fact alone grants no phase change or deletion.
+export async function assertDesktopRemovalProgramsUnused({ installRoot, proof }, stage) {
+  const files = []
+  for (const entry of desktopRemovalProgramEntries(proof)) {
+    const file = path.join(installRoot, entry.name)
+    try { physical.lstatSync(file); files.push(file) }
+    catch (error) { if (error.code !== 'ENOENT') throw error }
+  }
+  let observation
+  try { observation = await identity.inspectProgramReferences({ roots: [path.join(installRoot, 'releases', proof.source_selection.core_id),
+    path.join(installRoot, 'app/releases', proof.source_selection.gui_id), path.join(installRoot, 'bin')], files }) }
+  catch { referenceFailure(stage) }
+  // Keep raw unknowns. No system-process exception is implemented here.
+  if (observation.complete !== true || observation.incomplete !== false || !Array.isArray(observation.processes)
+    || observation.processes.length || !Array.isArray(observation.unknown_pids) || observation.unknown_pids.length) referenceFailure(stage)
+}
 export async function removeDesktopRemovalPrograms({ installRoot, operationId }) {
   const scope = { installRoot, operationId }
-  const context = await captureDesktopRemovalJob(scope), { own, record, proof } = context
+  const context = await captureDesktopRemovalJob(scope), { own, proof } = context
   const current = async () => { await context.proofCurrent(); context.assertJob() }
   await current()
   const entries = desktopRemovalProgramEntries(proof), parents = new Map(), removed = []
   const root = physical.lstatSync(own.root, { bigint: true })
   const owned = (file, stat) => process.platform === 'win32'
     ? stat.isDirectory() ? identity.isOwnedDirectory(file) : identity.isOwnedFile(file) : stat.uid === root.uid
-  const core = path.join(own.root, 'releases', record.source_selection.core_id)
-  const gui = path.join(own.root, 'app/releases', record.source_selection.gui_id)
   const baseDirectories = new Set(['app', 'app/releases', 'releases', 'bin'].map(name => path.join(own.root, name)))
   async function checkParents(file, capture = false) {
     const list = []
@@ -55,18 +70,7 @@ export async function removeDesktopRemovalPrograms({ installRoot, operationId })
   await current()
   const directories = [...parents.keys()].filter(directory => !baseDirectories.has(directory))
   const observe = async stage => {
-    let observation
-    const files = []
-    for (const entry of entries) {
-      const file = path.join(own.root, entry.name)
-      try { physical.lstatSync(file); files.push(file) }
-      catch (error) { if (error.code !== 'ENOENT') throw error }
-    }
-    try { observation = await identity.inspectProgramReferences({ roots: [core, gui, path.join(own.root, 'bin')], files }) }
-    catch { referenceFailure(stage) }
-    // Keep raw unknowns. No system-process exception is implemented here.
-    if (observation.complete !== true || observation.incomplete !== false || !Array.isArray(observation.processes)
-      || observation.processes.length || !Array.isArray(observation.unknown_pids) || observation.unknown_pids.length) referenceFailure(stage)
+    await assertDesktopRemovalProgramsUnused({ installRoot: own.root, proof }, stage)
     await current()
   }
   if (candidates.size || directories.length) await observe('before-files')

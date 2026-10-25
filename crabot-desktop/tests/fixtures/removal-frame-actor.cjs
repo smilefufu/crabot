@@ -7,7 +7,7 @@ const { spawn } = require('node:child_process')
 const { once } = require('node:events')
 const cfg = JSON.parse(fs.readFileSync(process.env.CRABOT_REMOVAL_FRAME_CONFIG, 'utf8'))
 const host = process.argv.includes('--fixture-removal-host')
-const sourceExitMode = ['publish-source-exit', 'publish-source-retry', 'publish-source-late-exit', 'resume-lease-source-exit'].includes(cfg.mode)
+const sourceExitMode = ['publish-source-exit', 'publish-source-retry', 'publish-source-late-exit', 'resume-lease-source-exit', 'publish-source-remove', 'publish-source-remove-retry', 'resume-lease-source-remove'].includes(cfg.mode)
 const profile = host ? path.resolve(process.resourcesPath, process.platform === 'darwin' ? '../../../..' : '../..', 'frame-profile') : path.join(cfg.root, 'data/desktop-profile')
 fs.mkdirSync(profile, { recursive: true, mode: 0o700 }); app.setPath('userData', profile)
 const load = name => import(pathToFileURL(path.join(__dirname, 'bootstrap/scripts/lib', name)).href)
@@ -27,6 +27,74 @@ async function assertIndependentHostLocation() {
     assert.equal(observed.unknown_pids.includes(process.pid), false)
     assert.equal(observed.processes.some(value => value.pid === process.pid), false)
   }
+}
+async function removePrograms(lease) {
+  const assert = require('node:assert/strict'), native = require('./bootstrap/scripts/lib/process-identity.cjs')
+  const physical = require('./bootstrap/scripts/lib/physical-fs.cjs')
+  const original = native.inspectProgramReferences, rename = physical.promises.rename, unlink = physical.unlinkSync
+  const fence = path.join(cfg.root, '.desktop-removal.json'), read = () => JSON.parse(fs.readFileSync(fence))
+  const clear = async () => ({ complete: true, incomplete: false, processes: [], unknown_pids: [] })
+  // Only resource answers are controlled here. Parent/source identities, OS
+  // exits, locks, hashes, file mutations and the private host remain actual.
+  native.inspectProgramReferences = clear
+  try {
+    assert.throws(() => lease.retryRemovePrograms(), { code: 'CRABOT_DESKTOP_REMOVAL' })
+    if (cfg.mode === 'publish-source-remove-retry') {
+      const core = path.join(cfg.root, 'releases', read().source_selection.core_id), before = fs.readFileSync(fence)
+      native.inspectProgramReferences = async () => ({ complete: false, incomplete: false, processes: [], unknown_pids: [process.pid] })
+      const blocked = lease.removePrograms(); assert.equal(blocked, lease.removePrograms())
+      await assert.rejects(blocked, { code: 'CRABOT_DESKTOP_PROGRAM_REFERENCES', stage: 'before-removing' })
+      assert.equal(read().phase, 'stopping'); assert.ok(fs.existsSync(path.join(core, 'program.mjs')))
+      native.inspectProgramReferences = clear
+      const pin = path.join(process.resourcesPath, 'desktop-release.json'), bytes = fs.readFileSync(pin)
+      fs.appendFileSync(pin, ' ')
+      await assert.rejects(lease.retryRemovePrograms(), { code: 'CRABOT_CORE_INTEGRITY' }); fs.writeFileSync(pin, bytes)
+      native.inspectProgramReferences = async () => { fs.writeFileSync(fence, JSON.stringify({ ...read(), phase: 'completed' }) + '\n'); return clear() }
+      await assert.rejects(lease.retryRemovePrograms(), { code: 'CRABOT_DESKTOP_REMOVAL' }); fs.writeFileSync(fence, before)
+      native.inspectProgramReferences = clear
+      physical.promises.rename = async (...args) => { if (args[1] === fence) throw Object.assign(new Error('fixture removing not committed'), { code: 'EIO' }); return rename(...args) }
+      await assert.rejects(lease.retryRemovePrograms(), { code: 'EIO' }); assert.equal(read().phase, 'stopping')
+      physical.promises.rename = async (...args) => {
+        const result = await rename(...args)
+        if (args[1] === fence && read().phase === 'removing') throw Object.assign(new Error('fixture lost removing reply'), { code: 'EIO' })
+        return result
+      }
+      await assert.rejects(lease.retryRemovePrograms(), { code: 'EIO' }); physical.promises.rename = rename
+      assert.equal(read().phase, 'removing'); assert.ok(fs.existsSync(path.join(core, 'program.mjs')))
+      await assert.rejects(lease.cancel(), { code: 'CRABOT_DESKTOP_REMOVAL' })
+      const removing = fs.readFileSync(fence)
+      fs.writeFileSync(fence, JSON.stringify({ ...read(), phase: 'completed' }) + '\n')
+      await assert.rejects(lease.retryRemovePrograms(), { code: 'CRABOT_DESKTOP_REMOVAL' }); fs.writeFileSync(fence, removing)
+      const gui = path.join(cfg.root, 'app/releases', read().source_selection.gui_id)
+      let deleted
+      physical.unlinkSync = file => {
+        const result = unlink(file)
+        if (!deleted && file.startsWith(gui + path.sep)) { deleted = file; throw Object.assign(new Error('fixture lost file removal reply'), { code: 'EIO' }) }
+        return result
+      }
+      await assert.rejects(lease.retryRemovePrograms(), { code: 'EIO' }); physical.unlinkSync = unlink
+      assert.ok(deleted); assert.equal(fs.existsSync(deleted), false); assert.equal(read().phase, 'removing')
+      const unknown = path.join(core, 'user-kept.txt'); fs.writeFileSync(unknown, 'custom program directory file')
+      const retry = lease.retryRemovePrograms(); assert.equal(retry, lease.retryRemovePrograms()); assert.equal(retry, lease.removePrograms())
+      assert.throws(() => lease.close(), { code: 'CRABOT_DESKTOP_REMOVAL' })
+      const partial = await retry
+      assert.ok(partial.removed.length > 0); assert.equal(partial.retained.length, 1)
+      assert.equal(fs.readFileSync(unknown, 'utf8'), 'custom program directory file'); assert.equal(await lease.removePrograms(), partial)
+      await assert.rejects(lease.cancel(), { code: 'CRABOT_DESKTOP_REMOVAL' })
+      fs.unlinkSync(unknown) // Explicit fixture-user action; never product cleanup.
+    }
+    const first = cfg.mode === 'publish-source-remove-retry' ? lease.retryRemovePrograms() : lease.removePrograms()
+    assert.equal(first, lease.removePrograms())
+    assert.throws(() => lease.close(), { code: 'CRABOT_DESKTOP_REMOVAL' })
+    await assert.rejects(lease.cancel(), { code: 'CRABOT_DESKTOP_REMOVAL' })
+    const result = await first
+    assert.equal((await lease.current()).phase, 'removing')
+    if (cfg.mode !== 'publish-source-remove-retry') assert.ok(result.removed.length > 0)
+    assert.equal(result.retained.length, 0)
+    assert.equal(await lease.removePrograms(), result); assert.equal(await lease.retryRemovePrograms(), result)
+    assert.equal(fs.readFileSync(path.join(cfg.root, 'data/preserved-user-file'), 'utf8'), 'user bytes')
+    return { programsRemoved: true, controlledResourceObservation: true, removalRetried: cfg.mode === 'publish-source-remove-retry' }
+  } finally { native.inspectProgramReferences = original; physical.promises.rename = rename; physical.unlinkSync = unlink }
 }
 async function publication() {
   const { beginInitialDesktopRemoval } = await load('desktop-removal-job.mjs')
@@ -54,11 +122,12 @@ async function publication() {
     }
     return result
   }
-  let lease, lost = false, cancelRejected = false, cancelled = false, stopApplied = false, stopRejected = false, sourceExited = false, sourceExitRejected = false
+  let programResult = {}, lease, lost = false, cancelRejected = false, cancelled = false, stopApplied = false, stopRejected = false, sourceExited = false, sourceExitRejected = false
   try {
     try { lease = await beginInitialDesktopRemoval({ installRoot: cfg.root, operationId: cfg.operationId }) }
     catch (error) { if (cfg.mode !== 'publish-lost-reply' || error.code !== 'EIO') throw error; lost = true }
     const initial = await readDesktopRemovalProof(cfg.root)
+    if (cfg.mode.includes('source-remove')) assert.throws(() => lease.removePrograms(), { code: 'CRABOT_DESKTOP_REMOVAL' })
     if (['publish-stop-retry', 'publish-stop-lost-retry'].includes(cfg.mode)) {
       assert.throws(() => lease.retryStop(), { code: 'CRABOT_DESKTOP_REMOVAL' })
       const runtime = path.join(cfg.root, 'data/instance-runtime.json'), bytes = fs.readFileSync(runtime)
@@ -93,6 +162,7 @@ async function publication() {
     }
     else if (cfg.mode.startsWith('publish-source-')) {
       await lease.stop()
+      if (cfg.mode.includes('source-remove')) assert.throws(() => lease.removePrograms(), { code: 'CRABOT_DESKTOP_REMOVAL' })
       if (['publish-source-retry', 'publish-source-late-exit'].includes(cfg.mode)) {
         const native = require('./bootstrap/scripts/lib/process-identity.cjs'), source = native.inspectProcess(native.inspectProcess(process.pid).parent)
         assert.ok(source)
@@ -114,8 +184,8 @@ async function publication() {
         assert.throws(() => lease.close(), { code: 'CRABOT_DESKTOP_REMOVAL' }); await assert.rejects(lease.cancel(), { code: 'CRABOT_DESKTOP_REMOVAL' })
         await retry; await lease.retrySourceExit(); await assertIndependentHostLocation(); sourceExited = true
       }
-      else if (cfg.mode === 'publish-source-exit') { await lease.exitSource(); await assertIndependentHostLocation(); sourceExited = true }
-      else { await assert.rejects(lease.exitSource()); sourceExitRejected = true }
+      else if (cfg.mode === 'publish-source-exit' || cfg.mode.includes('source-remove')) { await lease.exitSource(); await assertIndependentHostLocation(); sourceExited = true; if (cfg.mode.includes('source-remove')) programResult = await removePrograms(lease) }
+      else { await assert.rejects(lease.exitSource()); sourceExitRejected = true; await assert.rejects(lease.removePrograms(), { code: 'CRABOT_DESKTOP_REMOVAL' }); assert.equal((await lease.current()).phase, 'stopping') }
     }
     if (cfg.mode === 'publish-module') {
       fs.mkdirSync(path.join(cfg.root, 'data/module-runtime-registry/records'), { recursive: true })
@@ -127,12 +197,12 @@ async function publication() {
       const changed = { ...initial.record, operation_id: '11111111-1111-4111-8111-111111111111' }
       await (await load('desktop-preparation-files.mjs')).privateJson(path.join(cfg.root, '.desktop-removal.json'), changed, true)
     }
-    if (!['publish-close', 'publish-lost-reply', 'publish-source-ignore', 'publish-source-disconnect'].includes(cfg.mode)) {
+    if (!['publish-close', 'publish-lost-reply', 'publish-source-ignore', 'publish-source-disconnect', 'publish-source-remove', 'publish-source-remove-retry'].includes(cfg.mode)) {
       try { await lease.cancel(); cancelled = true; await lease.cancel() }
       catch (error) { if (['publish-cancel', 'publish-stop', 'publish-stop-retry', 'publish-stop-lost-retry', 'publish-source-exit', 'publish-source-retry', 'publish-source-late-exit', 'publish-source-verifier'].includes(cfg.mode)) throw error; if (cfg.mode === 'publish-cancel-lost' && cancellationReplyLost) { await lease.cancel(); cancelled = true } else cancelRejected = error.code === 'CRABOT_DESKTOP_REMOVAL' }
     }
     const record = removal.readDesktopRemoval(cfg.root)
-    return { accepted: true, published: true, cancelled, cancelRejected, lost, retained: Boolean(record), operation_id: record?.operation_id,
+    return { ...programResult, accepted: true, published: true, cancelled, cancelRejected, lost, retained: Boolean(record), operation_id: record?.operation_id,
       cancellationReplyLost, stopApplied, stopRejected, sourceExited, sourceExitRejected, phase: record?.phase, proofRetained: fs.existsSync(path.join(cfg.root, 'app/removals', cfg.operationId, 'proof.json')) }
   } finally {
     physical.promises.link = originalLink; physical.promises.unlink = originalUnlink; physical.promises.rename = originalRename
@@ -140,6 +210,7 @@ async function publication() {
     if (['publish-stop', 'publish-stop-retry', 'publish-stop-lost-retry'].includes(cfg.mode)) assert.throws(() => lease.stop(), { code: 'CRABOT_DESKTOP_REMOVAL' })
     if (['publish-stop-retry', 'publish-stop-lost-retry'].includes(cfg.mode)) assert.throws(() => lease.retryStop(), { code: 'CRABOT_DESKTOP_REMOVAL' })
     if (['publish-source-retry', 'publish-source-late-exit'].includes(cfg.mode)) assert.throws(() => lease.retrySourceExit(), { code: 'CRABOT_DESKTOP_REMOVAL' })
+    if (cfg.mode.includes('source-remove')) { assert.throws(() => lease.removePrograms(), { code: 'CRABOT_DESKTOP_REMOVAL' }); assert.throws(() => lease.retryRemovePrograms(), { code: 'CRABOT_DESKTOP_REMOVAL' }) }
     for (const directory of [cfg.root, path.join(cfg.root, 'data')]) {
       const lock = await acquireExistingCliLock(directory, 'fixture-confirm-release', 0); releaseCliLock(lock)
     }
@@ -161,7 +232,8 @@ async function main() {
         try {
           const first = lease.stop(); assert.equal(first, lease.stop()); await first
           result.phase_after_stop = (await lease.current()).phase
-          if (sourceExitMode) { await lease.exitSource(); await assertIndependentHostLocation(); result.sourceExited = true }
+          if (cfg.mode === 'resume-lease-completed') assert.throws(() => lease.removePrograms(), { code: 'CRABOT_DESKTOP_REMOVAL' })
+          if (sourceExitMode) { await lease.exitSource(); await assertIndependentHostLocation(); result.sourceExited = true; if (cfg.mode.includes('source-remove')) Object.assign(result, await removePrograms(lease)) }
           if (cfg.mode === 'resume-lease-cancel') { await lease.cancel(); result.lease_cancelled = true }
           else if (['resume-lease-removing', 'resume-lease-completed', 'resume-lease-core-missing'].includes(cfg.mode)) {
             await assert.rejects(lease.cancel(), { code: 'CRABOT_DESKTOP_REMOVAL' }); result.lease_cancel_rejected = true
@@ -185,13 +257,13 @@ async function main() {
     assert.equal(first.accepted, true); assert.equal(first.published, true); assert.equal((await firstExit)[0], 0)
     fs.rmSync(prepared.directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); prepared = undefined
     fs.writeFileSync(process.env.CRABOT_REMOVAL_FRAME_CONFIG, JSON.stringify(cfg))
-    if (['resume-core-missing', 'resume-lease-core-missing'].includes(cfg.mode)) {
+    if (['resume-core-missing', 'resume-lease-core-missing', 'resume-lease-source-remove'].includes(cfg.mode)) {
       const reference = require('./bootstrap/scripts/lib/desktop-installation.cjs').readDesktopPairReference(cfg.root)
       fs.rmSync(path.join(cfg.root, 'releases', reference.selection.core_id), { recursive: true })
     }
-    if (['resume-lease-stopping', 'resume-lease-removing', 'resume-lease-completed', 'resume-lease-source-exit'].includes(cfg.mode)) {
+    if (['resume-lease-stopping', 'resume-lease-removing', 'resume-lease-completed', 'resume-lease-source-exit', 'resume-lease-source-remove'].includes(cfg.mode)) {
       const fence = path.join(cfg.root, '.desktop-removal.json'), current = JSON.parse(fs.readFileSync(fence, 'utf8'))
-      await (await load('desktop-preparation-files.mjs')).privateJson(fence, { ...current, phase: cfg.mode === 'resume-lease-source-exit' ? 'removing' : cfg.mode.slice('resume-lease-'.length) }, true)
+      await (await load('desktop-preparation-files.mjs')).privateJson(fence, { ...current, phase: ['resume-lease-source-exit', 'resume-lease-source-remove'].includes(cfg.mode) ? 'removing' : cfg.mode.slice('resume-lease-'.length) }, true)
     }
     prepared = await backend.prepareExistingDesktopRemovalGui({ installRoot: cfg.root, operationId: cfg.operationId })
     if (cfg.mode === 'resume-lease-busy') {
