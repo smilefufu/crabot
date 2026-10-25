@@ -8,6 +8,8 @@ import type { DesktopReleaseManifest } from 'crabot-client/contracts'
 import { createDesktopReleaseVerifier, type DesktopReleaseProof } from './release-signatures.js'
 
 const management = createRequire(import.meta.url)('./bootstrap/scripts/lib/desktop-management.cjs')
+// Cleanup treats nested ASARs as physical files; source helper reads still use Electron's virtual filesystem.
+const physicalFs = createRequire(import.meta.url)('./bootstrap/scripts/lib/physical-fs.cjs').promises
 type Context = Parameters<ReturnType<typeof createDesktopReleaseVerifier>['verifyMetadata']>[2]
 type VerifiedPayload = { record: { selection: DesktopReleaseManifest['selection'] } }
 type StagedRelease = { readonly manifest: Readonly<DesktopReleaseManifest> }
@@ -93,7 +95,7 @@ export function createDesktopReleaseIntake<T>(options: {
         return stage
       } catch (error) {
         report('remove_failed_stage')
-        await fs.rm(job, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+        await physicalFs.rm(job, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
         report('failed_stage_removed')
         throw error
       }
@@ -119,7 +121,7 @@ export function createDesktopReleaseIntake<T>(options: {
       if (!stored) fail('SIGNATURE')
       stages.delete(stage)
       report('discard')
-      await fs.rm(stored.job, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+      await physicalFs.rm(stored.job, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
       report('discard_complete')
     },
   }
