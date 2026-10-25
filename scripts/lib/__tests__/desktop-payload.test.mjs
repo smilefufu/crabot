@@ -1086,11 +1086,16 @@ for (const mode of ['missing', 'intact', 'damaged', 'completed', 'wrong-operatio
   if (mode === 'publication-cancel') options.signal = abort.signal
   if (mode === 'copy-cancel') { options.signal = abort.signal; options.progress = phase => { if (phase === 'copying') abort.abort() } }
   const cp = fs.cp, rename = fs.rename
-  let injected = false
+  let injected = false, dataMoved = false, dataMoveError
   if (['copy-failure', 'changed-data'].includes(mode)) t.mock.method(fs, 'cp', async (...args) => {
     if (mode === 'copy-failure') throw Object.assign(new Error('fixture failed copy'), { code: 'EIO' })
     const result = await cp(...args)
-    if (!injected) { injected = true; await fs.rename(data, data + '-original'); await fs.mkdir(data, { mode: 0o700 }) }
+    if (!injected) {
+      injected = true
+      try { await fs.rename(data, data + '-original'); dataMoved = true }
+      catch (error) { dataMoveError = error; throw error }
+      await fs.mkdir(data, { mode: 0o700 })
+    }
     return result
   })
   if (mode === 'lost-lock') options.verifyStopped = async () => releaseCliLock(path.join(data, 'cli.lock'))
@@ -1159,11 +1164,20 @@ for (const mode of ['missing', 'intact', 'damaged', 'completed', 'wrong-operatio
       assert.ok(directory); assert.equal(await fs.readFile(path.join(path.dirname(f.prepared.coreRoot), directory, 'custom-user-file'), 'utf8'), 'preserve changed program directory content')
     }
   }
+  if (mode === 'changed-data') {
+    assert.equal(injected, true)
+    if (!dataMoved) {
+      assert.equal(windows, true, 'Unix must exercise the actual directory identity change')
+      assert.ok(['EPERM', 'EACCES', 'EBUSY'].includes(dataMoveError?.code), 'Only a native locked-directory refusal may leave the original path')
+      await assert.rejects(fs.lstat(data + '-original'), { code: 'ENOENT' })
+    }
+    console.info('CRABOT_REINSTALL_DATA_RENAME ' + JSON.stringify({ moved: dataMoved, native_refusal: dataMoveError?.code ?? null }))
+  }
   if (mode === 'cache-race') { assert.equal(injected, true); await assert.rejects(fs.lstat(f.prepared.guiRoot), { code: 'ENOENT' }) }
   if (mode === 'late-proof') { assert.equal(injected, true); await assert.rejects(fs.lstat(f.prepared.coreRoot), { code: 'ENOENT' }) }
   if (mode !== 'changed-job') assert.deepEqual(await fs.readFile(fence), fenceBytes)
   assert.deepEqual(await fs.readFile(path.join(f.target, 'current-release.json')), selector)
-  assert.equal(await fs.readFile(path.join(['changed-data', 'missing-data'].includes(mode) ? data + '-original' : data, 'retained-user-file'), 'utf8'), 'user content')
+  assert.equal(await fs.readFile(path.join(dataMoved || mode === 'missing-data' ? data + '-original' : data, 'retained-user-file'), 'utf8'), 'user content')
   assert.throws(() => installation.readDesktopSelection(f.target), { code: mode === 'missing-data' ? 'CRABOT_DESKTOP_INSTALLATION' : 'CRABOT_DESKTOP_REMOVAL_PENDING' })
   if (mode === 'missing-data') await assert.rejects(fs.lstat(data), { code: 'ENOENT' })
   for (const directory of mode === 'missing-data' ? [f.target] : [f.target, data]) { const lock = await acquireExistingCliLock(directory, 'verify-reinstall-release', 0); releaseCliLock(lock) }
