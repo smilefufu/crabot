@@ -26,6 +26,7 @@ async function main() {
   app.setPath('userData', path.join(root, 'profile'))
   await app.whenReady()
   phase('app-ready')
+  if (process.env.CRABOT_BOUNDARY_PARENT_STALL === '1') { phase('parent-stall-ready'); await new Promise(() => {}); return }
   assert.throws(() => app.enableSandbox(), /before.*ready/i)
   console.log('CRABOT_ELECTRON_NATIVE_HOST loading Node-API helper in Electron ' + process.versions.electron)
   const identity = require('../../scripts/lib/process-identity.cjs')
