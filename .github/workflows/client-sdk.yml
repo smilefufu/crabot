@@ -1,0 +1,45 @@
+name: Shared client SDK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ['feat/desktop-client-sdk']
+    paths: ['crabot-client/**', '.github/workflows/client-sdk.yml']
+  pull_request:
+    paths: ['crabot-client/**', '.github/workflows/client-sdk.yml']
+
+permissions:
+  contents: read
+concurrency:
+  group: client-sdk-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  client-boundary:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.3'
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.9
+          run_install: false
+      - name: Install, build and test only the SDK from its committed files
+        shell: bash
+        run: |
+          set -euo pipefail
+          temporary=$(mktemp -d "$RUNNER_TEMP/crabot-client-review.XXXXXX")
+          trap 'rm -rf "$temporary"' EXIT
+          git -c core.autocrlf=false -c core.eol=lf archive --format=tar --output="$temporary/client.tar" HEAD crabot-client
+          (cd "$temporary" && tar -xf client.tar)
+          cd "$temporary/crabot-client"
+          pnpm install --frozen-lockfile --ignore-scripts
+          pnpm run build
+          pnpm test
+          echo 'CRABOT_CLIENT_REVIEW isolated_source=true fresh_locked_dependencies=true other_crabot_modules=false'
