@@ -103,8 +103,10 @@ const configuration = {
       await fs.copyFile(appIcon, path.join(resources, 'crabot.png'))
       if (ubuntuNative) {
         // These target resources are included in the complete GUI inventory and
-        // signed archive before the updater may execute either fixed helper.
-        await fs.writeFile(path.join(resources, 'crabot-sandbox-helper'), ubuntuNative.binaries['crabot-sandbox-helper'], { flag: 'wx', mode: 0o755 })
+        // signed archive before any fixed native resource may execute.
+        for (const name of ['crabot-sandbox-helper', 'crabot-maintenance']) {
+          await fs.writeFile(path.join(resources, name), ubuntuNative.binaries[name], { flag: 'wx', mode: 0o755 })
+        }
         await fs.copyFile(path.join(root, 'crabot-desktop/native/ubuntu/browser-probe.py'), path.join(resources, 'browser-probe.py'))
       }
     }

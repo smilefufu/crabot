@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
 import { readUbuntuBootstrap } from './package-ubuntu-installer.mjs'
-const commit = 'a'.repeat(40), names = ['crabot-installer', 'crabot-sandbox-helper']
+const commit = 'a'.repeat(40), names = ['crabot-installer', 'crabot-maintenance', 'crabot-sandbox-helper']
 async function fixture(t) {
   const root = await fs.mkdtemp(path.join(tmpdir(), 'crabot-native-package-'))
   t.after(() => fs.rm(root, { recursive: true, force: true }))
@@ -31,5 +31,13 @@ for (const mode of ['changed', 'symlink', 'hardlink', 'extra entry']) test('reje
   if (mode === 'symlink') { await fs.unlink(file); await fs.symlink(names[1], file) }
   if (mode === 'hardlink') await fs.link(file, path.join(f.root, 'other'))
   if (mode === 'extra entry') { f.manifest.files['arbitrary-script'] = f.manifest.files[names[0]]; await f.write() }
+  await assert.rejects(readUbuntuBootstrap(f.root, commit))
+})
+
+for (const mode of ['missing maintenance', 'changed maintenance', 'linked maintenance']) test('reject absent or changed fixed maintenance frontend: ' + mode, async t => {
+  const f = await fixture(t), file = path.join(f.root, 'crabot-maintenance')
+  if (mode === 'missing maintenance') { delete f.manifest.files['crabot-maintenance']; await f.write() }
+  if (mode === 'changed maintenance') await fs.appendFile(file, 'changed')
+  if (mode === 'linked maintenance') { await fs.unlink(file); await fs.symlink('crabot-installer', file) }
   await assert.rejects(readUbuntuBootstrap(f.root, commit))
 })

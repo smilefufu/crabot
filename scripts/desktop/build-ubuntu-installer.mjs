@@ -19,13 +19,14 @@ const flags = packages => execFileSync('/usr/bin/pkg-config', ['--cflags', '--li
 for (const [name, file, packages] of [
   ['crabot-sandbox-helper', 'sandbox-helper.c', ['json-glib-1.0']],
   ['crabot-installer', 'installer.c', ['gtk4', 'json-glib-1.0']],
+  ['crabot-maintenance', 'maintenance.c', ['gtk4', 'json-glib-1.0']],
 ]) {
   execFileSync('/usr/bin/cc', ['-std=c11', '-Wall', '-Wextra', '-Werror', '-O2', '-D_FORTIFY_SOURCE=3', '-fstack-protector-strong',
     '-Wl,-z,relro,-z,now', path.join(source, file), '-o', path.join(output, name), ...flags(packages)], { stdio: 'inherit' })
 }
 
 const files = {}
-for (const name of ['crabot-installer', 'crabot-sandbox-helper']) {
+for (const name of ['crabot-installer', 'crabot-maintenance', 'crabot-sandbox-helper']) {
   const bytes = await fs.readFile(path.join(output, name))
   files[name] = { size: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') }
 }

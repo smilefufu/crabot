@@ -11,9 +11,9 @@ export async function readUbuntuBootstrap(directory, commit) {
   if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || stat.size > 65536) throw new Error('Invalid native manifest')
   const manifest = JSON.parse(await fs.readFile(manifestFile, 'utf8'))
   if (manifest.schema_version !== 1 || manifest.platform !== 'linux' || manifest.arch !== 'x64' || manifest.build_os !== 'ubuntu-24.04'
-    || manifest.commit !== commit || manifest.source_dirty !== false || Object.keys(manifest.files || {}).sort().join(',') !== 'crabot-installer,crabot-sandbox-helper') throw new Error('Native source identity mismatch')
+    || manifest.commit !== commit || manifest.source_dirty !== false || Object.keys(manifest.files || {}).sort().join(',') !== 'crabot-installer,crabot-maintenance,crabot-sandbox-helper') throw new Error('Native source identity mismatch')
   const binaries = {}
-  for (const name of ['crabot-installer', 'crabot-sandbox-helper']) {
+  for (const name of ['crabot-installer', 'crabot-maintenance', 'crabot-sandbox-helper']) {
     const stat = await fs.lstat(path.join(directory, name)), record = manifest.files[name]
     if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || stat.size < 20 || stat.size > 10 * 1024 * 1024) throw new Error('Invalid native binary')
     const bytes = await fs.readFile(path.join(directory, name))

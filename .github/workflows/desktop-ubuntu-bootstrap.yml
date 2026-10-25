@@ -1,0 +1,60 @@
+name: Desktop Ubuntu native bootstrap
+
+on:
+  workflow_call:
+  workflow_dispatch:
+  push:
+    branches: ['feat/desktop-*']
+    paths:
+      - 'crabot-desktop/native/ubuntu/**'
+      - 'crabot-desktop/tests/native/**'
+      - 'scripts/desktop/build-ubuntu-installer.mjs'
+      - 'scripts/desktop/package-ubuntu-installer.mjs'
+      - 'scripts/desktop/ubuntu-bootstrap.test.mjs'
+      - '.github/workflows/desktop-ubuntu-bootstrap.yml'
+  pull_request:
+    paths:
+      - 'crabot-desktop/native/ubuntu/**'
+      - 'crabot-desktop/tests/native/**'
+      - 'scripts/desktop/build-ubuntu-installer.mjs'
+      - 'scripts/desktop/package-ubuntu-installer.mjs'
+      - 'scripts/desktop/ubuntu-bootstrap.test.mjs'
+      - '.github/workflows/desktop-ubuntu-bootstrap.yml'
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  ubuntu-bootstrap:
+    name: Build Ubuntu24 native bootstrap
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.3'
+      - name: Prepare native compiler and Ubuntu24 desktop headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libgtk-4-dev libjson-glib-dev xvfb xauth dbus-x11
+      - name: Compile fixed helper and GTK frontend from this clean commit
+        run: node scripts/desktop/build-ubuntu-installer.mjs .desktop-build/ubuntu-bootstrap
+      - name: Actual GTK maintenance display and bounded cancellation
+        timeout-minutes: 2
+        env:
+          GSK_RENDERER: cairo
+          GTK_A11Y: none
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror -O2 crabot-desktop/tests/native/ubuntu-maintenance.c -o .desktop-build/ubuntu-maintenance-test $(pkg-config --cflags --libs gtk4 json-glib-1.0)
+          timeout 20s dbus-run-session -- xvfb-run -a .desktop-build/ubuntu-maintenance-test
+          timeout 20s dbus-run-session -- xvfb-run -a .desktop-build/ubuntu-bootstrap/crabot-maintenance --smoke-test
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ubuntu-native-bootstrap
+          path: .desktop-build/ubuntu-bootstrap
+          retention-days: 3

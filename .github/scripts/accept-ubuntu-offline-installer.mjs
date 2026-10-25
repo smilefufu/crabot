@@ -17,7 +17,7 @@ assert.equal(info.bootstrap, 'gtk4'); assert.equal(info.candidate_only, true); a
 assert.equal(info.executable, 'ubuntu-native/crabot-installer'); assert.equal(info.payload, 'ubuntu-native/offline')
 const bundle = path.join(project, 'ubuntu-native'), native = JSON.parse(await fs.readFile(path.join(bundle, 'native-bootstrap.json'), 'utf8'))
 assert.equal(native.commit, process.env.GITHUB_SHA); assert.equal(native.build_os, 'ubuntu-24.04'); assert.equal(native.source_dirty, false)
-for (const name of ['crabot-installer', 'crabot-sandbox-helper']) {
+for (const name of ['crabot-installer', 'crabot-maintenance', 'crabot-sandbox-helper']) {
   const bytes = await fs.readFile(path.join(bundle, name))
   assert.equal(bytes.length, native.files[name].size)
   assert.equal(createHash('sha256').update(bytes).digest('hex'), native.files[name].sha256)

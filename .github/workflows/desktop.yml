@@ -50,25 +50,7 @@ defaults:
 
 jobs:
   ubuntu-bootstrap:
-    name: Build Ubuntu24 native bootstrap
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22.22.3'
-      - name: Prepare native compiler and Ubuntu24 desktop headers
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libgtk-4-dev libjson-glib-dev
-      - name: Compile fixed helper and GTK frontend from this clean commit
-        run: node scripts/desktop/build-ubuntu-installer.mjs .desktop-build/ubuntu-bootstrap
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ubuntu-native-bootstrap
-          path: .desktop-build/ubuntu-bootstrap
-          retention-days: 3
+    uses: ./.github/workflows/desktop-ubuntu-bootstrap.yml
   runtime:
     name: Desktop foundation ${{ matrix.target }}
     needs: ubuntu-bootstrap
