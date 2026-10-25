@@ -11,7 +11,7 @@ void (async () => {
   prepared = await prepareDesktopRemovalNode({ installRoot: cfg.own.root, operationId: cfg.operationId })
   if (cfg.mode === 'node-job-copy-changed') await fs.appendFile(path.join(prepared.directory, 'backend/progress.mjs'), '\n// changed fixture bytes\n')
   const script = `
-    const timer=setTimeout(()=>process.exit(2),30000);process.once('disconnect',()=>process.exit(2));
+    const timer=setTimeout(()=>process.exit(2),30000),parentLost=()=>process.exit(2);process.once('disconnect',parentLost);
     const {pathToFileURL}=await import('node:url'),path=await import('node:path'),{createRequire}=await import('node:module');
     const require=createRequire(pathToFileURL(path.join(process.cwd(),'backend/probe.cjs')));
     const identity=require('./bootstrap/scripts/lib/process-identity.cjs'),entry=require('./bootstrap/scripts/lib/desktop-entry.cjs');
@@ -24,7 +24,7 @@ void (async () => {
       const published=await lease.current();await lease.stop();const stopped=await lease.current();await lease.cancel();lease.close();lease=null;
       process.stdout.write(JSON.stringify({accepted:true,published:published.phase,stopped:stopped.phase,cancelled:true,ordinary_peer:ordinaryPeer})+'\\n');
     } catch(error) { if(lease)lease.close();process.stdout.write(JSON.stringify({accepted:false,code:error.code||'FIXTURE_UNEXPECTED'})+'\\n') }
-    clearTimeout(timer);process.disconnect();
+    clearTimeout(timer);process.removeListener('disconnect',parentLost);process.disconnect();
   `
   const root = cfg.otherRoot || cfg.own.root
   child = spawn(prepared.executable, ['--input-type=module', '--eval', script, root, cfg.operationId], {
@@ -35,7 +35,7 @@ void (async () => {
   child.stdout.on('data', bytes => { output += bytes.toString(); if (output.length > 4096) child.kill('SIGKILL') })
   child.stderr.on('data', bytes => { error = (error + bytes.toString()).slice(-4096) })
   const [code, signal] = await ended
-  if (code !== 0 || signal || error) throw new Error('Finite Node host failed: ' + error)
+  if (code !== 0 || signal || error) throw new Error('Finite Node host failed: ' + JSON.stringify({ code, signal, output: output.slice(0, 512) }) + ': ' + error)
   const result = JSON.parse(output)
   await fs.rm(prepared.directory, { recursive: true, force: true }); prepared = null
   clearTimeout(timer); process.stdout.write(JSON.stringify(result) + '\n')
