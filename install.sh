@@ -77,7 +77,7 @@ detect_platform() {
 }
 
 
-CRABOT_HELPER_REVISION='454272e495cd99d28419f905cda9dc69b0085383'
+CRABOT_HELPER_REVISION='d1ab1bfbd58cff5514ab485dd45c969c0f4bd99d'
 CRABOT_HELPER_ROOT=''
 CRABOT_HELPER_TEMP=''
 CRABOT_NPM_CONTEXT='-'
@@ -88,7 +88,7 @@ file_sha256() {
 installer_helper_hash() {
   case "$1" in
     scripts/installer-deps.mjs) echo d4fd4bed9aa55ab09c65f7f63ffb8bfe275fbfac953caca131e5504df67d72b7;;
-    scripts/lib/install-network.mjs) echo 73f6ea5a506843a388459184fa9f5dba06ea6120d05a8fe0611af67969afb271;;
+    scripts/lib/install-network.mjs) echo 1bda2f54d94a9e8dcf8b754067de9de4ef8f9d6ae37485e49d10643a8cf8f76d;;
     scripts/lib/memory-deps.mjs) echo 8111670a37b3c61e752fff79158b11a03a52dd3324b54b83f5240feed644c8f9;;
     scripts/lib/run-bounded.mjs) echo e793f0e40c059e47efcb13bc0ee3297e913395d3119196039810e08aaa4721f2;;
     scripts/lib/toolchain.mjs) echo 7ce0955b964790804305e7d227228bea222cdabfe1bce84213e86a80f99cc886;;
