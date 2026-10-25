@@ -68,10 +68,9 @@ export function discoverLegacySystemDeployment(context, options) {
   return verifiedSystemRuntime(context, snapshot => snapshot, options, true)
 }
 
-// A conversion adapter, not root authority. The caller's dedicated root job must
-// own the fence/permit. All observations and the shutdown RPC remain in this UID.
-export async function withFencedLegacySystemRuntime(context, expected, use, { observeAccount = account =>
-  discoverLegacySystemAccount(account, { discoverRelease: discoverFencedLegacySystemRelease }),
+// Read-only prior-binding verification. Code policy belongs to the scene caller;
+// this grants no lifecycle authority and does not derive a new stopped data path.
+export async function withObservedLegacySystemBinding(context, expected, use, { observeAccount = discoverLegacySystemAccount,
   observeProcesses = withVerifiedLegacyProcessGraph, signal } = {}) {
   if (!['running', 'stopped'].includes(expected?.runtime_state) || expected.data_binding !== (expected.runtime_state === 'running' ? 'observed_running' : 'verified_stopped')
     || !expected.data_directory || typeof expected.data_dir !== 'string' || !path.isAbsolute(expected.data_dir)) fail()
@@ -89,4 +88,11 @@ export async function withFencedLegacySystemRuntime(context, expected, use, { ob
     assertStoppedData(dataDir)
     return use({ ...snapshot, state: 'stopped', data_dir: dataDir }, null)
   }, { observeAccount, observeProcesses, signal })
+}
+
+// A conversion adapter, not root authority. The caller's dedicated root job must
+// own the fence/permit. All observations and the shutdown RPC remain in this UID.
+export function withFencedLegacySystemRuntime(context, expected, use, options = {}) {
+  return withObservedLegacySystemBinding(context, expected, use, { observeAccount: account =>
+    discoverLegacySystemAccount(account, { discoverRelease: discoverFencedLegacySystemRelease }), ...options })
 }

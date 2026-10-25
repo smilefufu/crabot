@@ -116,9 +116,20 @@ try {
         { env: { PATH: '/usr/bin:/bin', HOME: employee.home, USER: employee.user, LOGNAME: employee.user } })
       const setup = `const fs=require('fs'),p=require('path');const d=p.join(process.env.HOME,'.crabot');fs.mkdirSync(d,{mode:0o700});fs.writeFileSync(p.join(d,'instance.json'),JSON.stringify({mode:'system',port_offset:100,crabot_home:process.argv[1],data_dir:'/root/must-not-adopt',api_key:'must-not-return'}),{flag:'wx',mode:0o600});`
       await uidCommand(['-e', setup, legacyEntryFixture])
+      await assert.rejects(runLegacySystemAccount(employee, { root: core, release, portOffsetHint: 100 }), { code: 'CRABOT_LEGACY_SYSTEM_RUNTIME' })
+      const unsetDisplay = `const fs=require('fs'),p=require('path');const file=p.join(process.env.HOME,'.crabot/instance.json');const value=JSON.parse(fs.readFileSync(file));delete value.data_dir;fs.writeFileSync(file,JSON.stringify(value));`
+      await uidCommand(['-e', unsetDisplay])
+      await assert.rejects(runLegacySystemAccount(employee, { root: core, release, portOffsetHint: 100 }), { code: 'CRABOT_DATA_MISSING' })
+      const prepareStopped = `import fs from 'node:fs';import path from 'node:path';const {newCredentialsFromPassword}=await import(process.argv[1]);const data=path.join(process.env.HOME,'.crabot/data-100');fs.mkdirSync(data,{mode:0o755});for(const name of ['admin','agent','memory'])fs.mkdirSync(path.join(data,name),{mode:0o755});fs.writeFileSync(path.join(data,'admin/credentials.json'),JSON.stringify(await newCredentialsFromPassword('fixture-stopped-private',{is_temp:false,changed_via:'start'})),{flag:'wx',mode:0o600});`
+      await uidCommand(['--input-type=module', '-e', prepareStopped, pathToFileURL(path.join(core, 'crabot-admin/dist/credentials.js')).href])
       const result = await runLegacySystemAccount(employee, { root: core, release, portOffsetHint: 100 })
-      assert.equal(result.uid, employee.uid); assert.equal(result.data_binding, 'unverified')
-      assert.equal(result.port_offset, 100); assert.equal(result.runtime_state, 'no_known_launcher'); assert.doesNotMatch(JSON.stringify(result), /must-not|api_key|data_dir/)
+      assert.equal(result.uid, employee.uid); assert.equal(result.data_binding, 'verified_stopped')
+      assert.equal(result.port_offset, 100); assert.equal(result.runtime_state, 'stopped')
+      assert.equal(result.data_dir, path.join(employee.home, '.crabot/data-100'))
+      assert.doesNotMatch(JSON.stringify(result), /must-not|api_key|fixture-stopped-private/)
+      const unchanged = `const fs=require('fs'),p=require('path');const d=p.join(process.env.HOME,'.crabot/data-100');if((fs.statSync(d).mode&511)!==493||fs.readdirSync(d).sort().join(',')!=='admin,agent,memory'||!fs.readFileSync(p.join(d,'admin/credentials.json'),'utf8').includes('scrypt'))throw Error('read-only discovery changed stopped data');`
+      await uidCommand(['-e', unchanged])
+      console.log('CRABOT_SYSTEM_LEGACY_STOPPED_BINDING ' + JSON.stringify({ actual_uid: true, standard_existing_data: true, conflicting_display_refused: true, missing_data_not_initialized: true, no_source_mm_started: true }))
       const { collectLegacySystemProcesses, assertLegacySystemProcessCoverage } = await load('scripts/lib/legacy-system-processes.mjs')
       const { planSystemConversion } = await load('scripts/lib/system-conversion.mjs')
       const empty = planSystemConversion({ installRoot: installed, source: release, target: { id: selected, version: JSON.parse(await fs.readFile(path.join(core, 'package.json'), 'utf8')).version }, instances: [] })
@@ -159,7 +170,7 @@ try {
       assert.deepEqual(JSON.parse(observed.stdout), release)
       await assert.rejects(runLegacySystemAccount(employee, { root: core, release, portOffsetHint: 100 }), { code: 'CRABOT_LEGACY_UNSUPPORTED' })
       await sharedFence.restore(legacyEntryFixture, fenced.id, operationId)
-      const cleanup = `const fs=require('fs'),p=require('path');const d=p.join(process.env.HOME,'.crabot');if(fs.readdirSync(d).join(',')!=='instance.json')throw Error('unexpected fixture data');fs.unlinkSync(p.join(d,'instance.json'));fs.rmdirSync(d);`
+      const cleanup = `const fs=require('fs'),p=require('path');const d=p.join(process.env.HOME,'.crabot');if(fs.readdirSync(d).sort().join(',')!=='data-100,instance.json')throw Error('unexpected fixture data');fs.rmSync(p.join(d,'data-100'),{recursive:true});fs.unlinkSync(p.join(d,'instance.json'));fs.rmdirSync(d);`
       await uidCommand(['-e', cleanup])
     })
     await phase('administrator-open-' + suffix, () => run(runtime.executables.python, ['-I', '-B', '-X', 'utf8', '-c', ptyCode, command, user, 'fixture-pass-' + id]))

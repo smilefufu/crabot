@@ -32,6 +32,11 @@ try {
     const { user, uid, gid, home } = entry
     result = await stopFencedLegacySystemInstance({ account: { user, uid, gid, home }, release: permit.source,
       port_offset_hint: entry.port_offset }, { expected: permit.observation })
+  } else if (permit.action === 'start-legacy') {
+    const { startRestoredLegacySystemInstance } = await import('./lib/legacy-system-start.mjs')
+    const { user, uid, gid, home } = entry
+    result = await startRestoredLegacySystemInstance(entry, { account: { user, uid, gid, home }, release: permit.source,
+      port_offset_hint: entry.port_offset }, { expected: permit.observation, operationId: permit.operation_id })
   } else {
     const { maintainLegacySystemUser } = await import('./lib/system-legacy-data.mjs')
     result = await maintainLegacySystemUser(entry, { action: permit.action, source: permit.source, observation: permit.observation,
@@ -42,7 +47,7 @@ try {
   reply({ ok: true, result })
 } catch (error) {
   const controlled = new Set(['CRABOT_SYSTEM_CONVERSION_PERMIT', 'CRABOT_LEGACY_SYSTEM_ACCOUNT', 'CRABOT_LEGACY_SYSTEM_RUNTIME',
-    'CRABOT_LEGACY_RUNTIME_UNVERIFIED', 'CRABOT_LEGACY_UNSUPPORTED', 'CRABOT_LEGACY_STOP_UNKNOWN', 'CRABOT_SYSTEM_CONVERSION_DATA', 'CRABOT_LEGACY_SYSTEM_DIRECTORY', 'CRABOT_DATA_MISSING']).has(error.code)
+    'CRABOT_LEGACY_SYSTEM_START_UNKNOWN', 'CRABOT_LEGACY_RUNTIME_UNVERIFIED', 'CRABOT_LEGACY_UNSUPPORTED', 'CRABOT_LEGACY_STOP_UNKNOWN', 'CRABOT_SYSTEM_CONVERSION_DATA', 'CRABOT_LEGACY_SYSTEM_DIRECTORY', 'CRABOT_DATA_MISSING']).has(error.code)
   reply({ ok: false, code: controlled ? error.code : 'CRABOT_SYSTEM_CONVERSION_PERMIT',
     message: controlled ? error.message : '旧实例转换结果尚未核验，原数据和保护已保留；请检查员工本人诊断与保留备份。' })
   process.exitCode = 1

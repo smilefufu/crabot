@@ -184,3 +184,33 @@ test('an entirely valid originally-stopped observation still cannot receive a le
   for (const name of ['controller', 'mm', 'mm_port', 'launch_kind']) delete observation[name]
   assert.throws(() => createLegacySystemConversionPermit(f), { code: 'CRABOT_SYSTEM_CONVERSION_PERMIT' })
 })
+
+
+function sourceStartFixture() {
+  const f = fixture(), row = f.record.progress.results[0]
+  f.action = 'start-legacy'; row.state = 'kept_stopped'; row.stopped = true; row.resume_required = true; row.start_dispatched = true
+  f.record.progress.stage = 'source_start_dispatched'; f.maintenance.stage = 'source_start_dispatched'
+  f.sourceFence.phase = 'restored'; f.sourceFence.entries_fenced = false
+  return f
+}
+test('source restoration permit belongs only to the original running set after all preparation is cancelled and entries restored', () => {
+  const f = sourceStartFixture(), permit = createLegacySystemConversionPermit(f)
+  assert.equal(permit.action, 'start-legacy'); assert.equal(permit.install_root, undefined)
+  assert.equal(conversionMaintenanceMatches(permit, f.maintenance, f.bootId), true)
+  assert.equal(conversionStopMaintenanceMatches(permit, f.maintenance, f.bootId), false)
+})
+for (const changed of ['originally-stopped', 'not-resuming', 'not-dispatched', 'not-stopped', 'fenced-source', 'sealed-source', 'wrong-stage', 'migrated', 'target-start-allow']) {
+  test('source restoration cannot bypass original set or prepared-data cancellation: ' + changed, () => {
+    const f = sourceStartFixture(), row = f.record.progress.results[0]
+    if (changed === 'originally-stopped') row.originally_running = false
+    if (changed === 'not-resuming') row.resume_required = false
+    if (changed === 'not-dispatched') row.start_dispatched = false
+    if (changed === 'not-stopped') row.stopped = false
+    if (changed === 'fenced-source') { f.sourceFence.phase = 'fenced'; f.sourceFence.entries_fenced = true }
+    if (changed === 'sealed-source') f.sourceFence.phase = 'data_changing'
+    if (changed === 'wrong-stage') f.maintenance.stage = 'target_start_dispatched'
+    if (changed === 'migrated') row.migration_dispatched = true
+    if (changed === 'target-start-allow') f.record.progress.allow_start = { uid: f.entry.uid, core_id: 'b'.repeat(64) }
+    assert.throws(() => createLegacySystemConversionPermit(f))
+  })
+}

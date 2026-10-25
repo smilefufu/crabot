@@ -82,6 +82,10 @@ export async function runLegacySystemConversion(entry, { root, operationId, acti
   store.registry.verifyAccount(entry)
   const sourceFence = await new LegacySystemEntryFence().inspect(record?.plan?.source?.installRoot)
   const permit = createLegacySystemConversionPermit({ record, maintenance, entry, sourceFence, bootId: readSystemBootId(), action })
+  if (action === 'start-legacy') {
+    const { LegacySystemCommandLink } = await import('./legacy-system-command.mjs')
+    if (await new LegacySystemCommandLink().selected(record.plan) !== 'legacy') throw systemError('旧共享命令已改变，未恢复旧实例。', 'CRABOT_SYSTEM_CONVERSION_PERMIT')
+  }
   const cliLocation = (await import('./cli-location.cjs')).default
   const target = cliLocation.locateCliInstallation(root)
   if (!target || target.scope !== 'system' || target.coreRoot !== root || target.root !== record.plan.install_root || target.id !== record.plan.target.id) {

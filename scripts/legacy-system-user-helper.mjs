@@ -18,7 +18,7 @@ try {
 } catch (error) {
   // Only fixed discovery errors cross the boundary; no filesystem exception,
   // employee JSON, provider credential or stack enters root logs.
-  const controlled = new Set(['CRABOT_LEGACY_SYSTEM_ACCOUNT', 'CRABOT_LEGACY_SYSTEM_RUNTIME', 'CRABOT_LEGACY_RUNTIME_UNVERIFIED', 'CRABOT_LEGACY_UNSUPPORTED']).has(error.code)
+  const controlled = new Set(['CRABOT_LEGACY_SYSTEM_ACCOUNT', 'CRABOT_LEGACY_SYSTEM_RUNTIME', 'CRABOT_LEGACY_RUNTIME_UNVERIFIED', 'CRABOT_LEGACY_UNSUPPORTED', 'CRABOT_DATA_MISSING', 'CRABOT_LEGACY_SYSTEM_DIRECTORY']).has(error.code)
   reply({ ok: false, code: controlled ? error.code : 'CRABOT_LEGACY_SYSTEM_ACCOUNT',
     message: controlled ? error.message : '旧账号或部署来源无法核验，未转换；请核对该用户的原部署。' })
   process.exitCode = 1

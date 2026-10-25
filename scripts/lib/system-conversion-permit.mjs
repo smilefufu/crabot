@@ -7,7 +7,7 @@ import { systemError } from './system-registry.mjs'
 const uuid = value => typeof value === 'string' && /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(value)
 const digest = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value)
 const fail = () => { throw systemError('旧共享转换委托与当前根作业阶段不符，未派发本次动作。', 'CRABOT_SYSTEM_CONVERSION_PERMIT') }
-const stages = { 'stop-legacy': 'stop_dispatched', snapshot: 'snapshot_dispatched', migrate: 'migration_dispatched', 'cancel-preparation': 'source_preparation_cancel_dispatched' }
+const stages = { 'stop-legacy': 'stop_dispatched', 'start-legacy': 'source_start_dispatched', snapshot: 'snapshot_dispatched', migrate: 'migration_dispatched', 'cancel-preparation': 'source_preparation_cancel_dispatched' }
 function receipt(value, operationId, targetId) {
   return value && Object.keys(value).length === 4 && uuid(value.id) && value.system_operation_id === operationId && value.target_id === targetId
     && value.backup && Object.keys(value.backup).length === 2 && uuid(value.backup.id) && digest(value.backup.sha256)
@@ -23,7 +23,7 @@ export function conversionStopMaintenanceMatches(permit, maintenance, bootId) {
   return permit.action === 'stop-legacy' && conversionMaintenanceMatches(permit, maintenance, bootId)
 }
 export function validateLegacySystemConversionPermit(permit) {
-  const data = permit?.action !== 'stop-legacy'
+  const data = ['snapshot', 'migrate', 'cancel-preparation'].includes(permit?.action)
   const fields = ['schema_version', 'id', 'kind', 'action', 'operation_id', 'boot_id', 'source_fence_id', 'entry', 'source', 'observation',
     ...(data ? ['install_root', 'target', 'snapshot'] : [])]
   if (!permit || Object.keys(permit).length !== fields.length || fields.some(key => !Object.hasOwn(permit, key))
@@ -46,14 +46,22 @@ export function createLegacySystemConversionPermit({ record, maintenance, entry,
     || !Array.isArray(progress.results) || !uuid(progress.source_fence_id)
     || !isDeepStrictEqual(progress.results.map(row => row.uid), plan.instances.map(item => item.entry.uid))) fail()
   const item = plan.instances.find(item => item.entry.uid === entry.uid), row = progress.results.find(row => row.uid === entry.uid)
-  const data = action !== 'stop-legacy'
-  if (!item || !isDeepStrictEqual(item.entry, entry) || row?.state !== 'pending' || row.user !== entry.user
+  const data = ['snapshot', 'migrate', 'cancel-preparation'].includes(action)
+  let fencePhase = 'fenced'
+  if (action === 'migrate') fencePhase = 'data_changing'
+  else if (action === 'start-legacy') fencePhase = 'restored'
+  if (!item || !isDeepStrictEqual(item.entry, entry) || row?.state !== (action === 'start-legacy' ? 'kept_stopped' : 'pending') || row.user !== entry.user
     || sourceFence?.id !== progress.source_fence_id || sourceFence.operation_id !== plan.id
-    || sourceFence.phase !== (action === 'migrate' ? 'data_changing' : 'fenced') || sourceFence.entries_fenced !== true
+    || sourceFence.phase !== fencePhase
+    || sourceFence.entries_fenced !== (action !== 'start-legacy')
     || !isDeepStrictEqual(sourceFence.installation, plan.source)
     || !isDeepStrictEqual(maintenance?.targets, plan.instances.map(item => item.entry.uid))) fail()
   if (!data) {
-    if (row.originally_running !== true || row.stop_dispatched !== true || row.stopped !== false) fail()
+    if (row.originally_running !== true) fail()
+    if (action === 'stop-legacy') {
+      if (row.stop_dispatched !== true || row.stopped !== false) fail()
+    } else if (row.resume_required !== true || row.start_dispatched !== true || row.stopped !== true
+      || progress.results.some(current => current.stopped !== true || current.migration_dispatched || current.migrated)) fail()
   } else {
     if (progress.results.some(current => current.stopped !== true)) fail()
     if (action === 'migrate') {
