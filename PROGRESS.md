@@ -48,7 +48,7 @@
 
 ### 桌面化方案：独立 worktree 开发中，尚未进入 PR
 
-- 原生CI预算：7e矩阵Intel/Windows普通配对启动已通过，更新测试在job运行约135分钟时被取消，与原总上限吻合；仅将这两平台job上限调至180分钟，各step及产品期限、断言保持。ARM更新仍停在准备交接，新增分阶段诊断等待下一轮，不称根因已修。 fdd Windows重装负例已正确拒绝，夹具误读假定移动后的目录；改为明确记录实际rename结果，Windows仅接受原生锁拒绝，Unix仍须实际换目录，30项本机通过，Windows重验待跑。
+- 原生CI预算：7e矩阵Intel/Windows普通配对启动已通过，更新测试在job运行约135分钟时被取消，与原总上限吻合；仅将这两平台job上限调至180分钟，各step及产品期限、断言保持。ARM更新仍停在准备交接，新增分阶段诊断等待下一轮，不称根因已修。 fdd Windows重装负例已正确拒绝，夹具误读假定移动后的目录；改为明确记录实际rename结果，Windows仅接受原生锁拒绝，Unix仍须实际换目录，30项本机通过，Windows重验待跑。 fdd Intel实际占用观察测试20秒超时；原算法最多5次各10秒扫描，测试总预算调70秒并记录真实逐次耗时，44过1平台跳过，未改产品期限或未知处理。
 
 - 按[桌面Spec](crabot-docs/superpowers/specs/2026-10-17-desktop-application-design.md)在`feat/desktop-application`推进；整项未完成，产品main未推、未提前PR或部署现场。Electron+React、业务HTTP/WS与共享SDK、最小原生IPC、GUI免额外密码；关闭窗口后台运行，退出停止共享实例。安装时选整体根，之后迁workspace，不新增DATA_DIR选择步骤。
 - 资源保护：启动需≥40GiB空闲，低于30GiB只停止本任务，构建材料≤20GiB；最新50e ARM v19完整Core/GUI/安装宿主通过测试签名、解包、全内容及真实ASAR候选门禁；最低388.37GiB，含根下运行缓存的材料采样峰值/收尾16.51GiB，旧材料保留，未启动业务实例。完整实例仅隔离CI，磁盘/Docker事故由独立会话跟踪，不清理现场数据。

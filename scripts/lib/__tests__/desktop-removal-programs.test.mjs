@@ -179,8 +179,14 @@ for (const mode of ['owned', 'partial', 'changed-file', 'unknown-directory', 'mi
 })
 
 
-test('actual native program observation either proves the private removal or safely retains it', { timeout: 20000 }, async t => {
-  const f = await fixture(t), locks = await import('../cli-lock.mjs'), held = []
+test('actual native program observation either proves the private removal or safely retains it', { timeout: 70000 }, async t => {
+  const f = await fixture(t), locks = await import('../cli-lock.mjs'), held = [], observations = []
+  const inspect = identity.inspectProgramReferences
+  t.mock.method(identity, 'inspectProgramReferences', async request => {
+    const started = performance.now()
+    try { return await inspect(request) }
+    finally { observations.push(Math.round(performance.now() - started)) }
+  })
   try {
     held.push(await locks.acquireExistingCliLock(f.root, 'fixture-actual-program-removal'))
     held.push(await locks.acquireExistingCliLock(f.data, 'fixture-actual-program-removal'))
@@ -203,7 +209,8 @@ test('actual native program observation either proves the private removal or saf
     }
     assert.equal(await fs.readFile(path.join(f.data, 'user.txt'), 'utf8'), 'preserved data and runtime bases')
     assert.equal(JSON.parse(await fs.readFile(path.join(f.root, '.desktop-removal.json'))).phase, 'removing')
-    console.log('CRABOT_PRIVATE_PROGRAM_REMOVAL ' + JSON.stringify({ platform: process.platform, actual_native_observer: true, outcome,
+    assert.ok(observations.length > 0 && observations.length <= 5)
+    console.log('CRABOT_PRIVATE_PROGRAM_REMOVAL ' + JSON.stringify({ platform: process.platform, actual_native_observer: true, outcome, observation_ms: observations,
       real_installation_changed: false, business_mm_started: false, fence_preserved: true }))
   } finally { for (const lock of held.reverse()) locks.releaseCliLock(lock) }
 })
