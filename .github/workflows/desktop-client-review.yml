@@ -37,7 +37,7 @@ jobs:
           temporary=$(mktemp -d "$RUNNER_TEMP/crabot-client-review.XXXXXX")
           trap 'rm -rf "$temporary"' EXIT
           git -c core.autocrlf=false -c core.eol=lf archive --format=tar --output="$temporary/client.tar" HEAD crabot-client
-          tar -xf "$temporary/client.tar" -C "$temporary"
+          (cd "$temporary" && tar -xf client.tar)
           cd "$temporary/crabot-client"
           pnpm install --frozen-lockfile --ignore-scripts
           pnpm run build
