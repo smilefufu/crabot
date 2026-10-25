@@ -211,3 +211,82 @@ for (const mode of ['owned', 'custom-menu', 'foreign-locator', 'wrong-operation'
   assert.equal(await fs.readFile(path.join(f.data, 'user.txt'), 'utf8'), 'data and dependencies preserved')
   await assert.rejects(fs.lstat(path.join(f.root, 'releases', f.removal.source_selection.core_id)), { code: 'ENOENT' })
 })
+
+
+for (const mode of ['owned', 'xdg-config', 'absent', 'missing-directory', 'custom', 'other-executable', 'disabled', 'permissions', 'symlink', 'redirected-parent', 'foreign-locator', 'wrong-operation', 'missing-lock', 'before-removing', 'running', 'preparation', 'late-change', 'late-lock', 'late-parent', 'late-reappearance', 'lost-reply', 'reappeared']) test('Ubuntu autostart byte cleanup keeps the original removal protection: ' + mode, { skip: windows && ['permissions', 'symlink'].includes(mode) }, async t => {
+  const f = await fixture(t), api = await import('../dist/installation-removal.js')
+  const { LoginStartup } = await import('../dist/login-startup.js')
+  const configHome = path.join(f.home, mode === 'xdg-config' ? 'custom-config' : '.config'), entry = path.join(configHome, 'autostart/crabot.desktop')
+  const executable = path.join(f.root, 'app/releases', f.removal.source_selection.gui_id, 'crabot-desktop')
+  const startup = new LoginStartup({ platform: 'linux', packaged: true, executable, configHome,
+    app: { getLoginItemSettings() { throw new Error('No host OS login API in a file-only fixture') }, setLoginItemSettings() { throw new Error('No host OS login mutation') } } })
+  await startup.set(true)
+  const input = { installRoot: f.root, operationId: f.operationId, home: f.home, env: mode === 'xdg-config' ? { XDG_CONFIG_HOME: configHome } : {} }
+  if (mode === 'absent') await fs.unlink(entry)
+  if (mode === 'missing-directory') await fs.rm(path.dirname(entry), { recursive: true })
+  if (mode === 'custom') await fs.appendFile(entry, 'X-Custom=keep\n')
+  if (mode === 'other-executable') await fs.writeFile(entry, (await fs.readFile(entry, 'utf8')).replace(executable, path.join(f.home, 'other-program')))
+  if (mode === 'disabled') await fs.appendFile(entry, 'Hidden=true\n')
+  if (mode === 'permissions') await fs.chmod(entry, 0o644)
+  if (mode === 'symlink') { await fs.rename(entry, entry + '.original'); await fs.symlink(entry + '.original', entry) }
+  if (mode === 'redirected-parent') { await fs.rename(path.dirname(entry), path.dirname(entry) + '.original'); await fs.symlink(path.dirname(entry) + '.original', path.dirname(entry), windows ? 'junction' : 'dir') }
+  if (mode === 'foreign-locator') await privateJson(f.locator, { schema_version: 1, owner: identity.inspectProcess(process.pid).owner, install_root: f.home, installation_id: randomUUID() }, true)
+  if (mode === 'wrong-operation') input.operationId = randomUUID()
+  if (mode === 'missing-lock') locks.releaseCliLock(f.held.pop())
+  if (mode === 'before-removing') await privateJson(path.join(f.root, '.desktop-removal.json'), { ...f.removal, phase: 'stopping' }, true)
+  if (mode === 'running') await fs.writeFile(path.join(f.data, 'mm.pid'), String(process.pid))
+  if (mode === 'preparation') await privateJson(path.join(f.root, '.desktop-installing.json'), { schema_version: 1, id: randomUUID(), installation_id: f.removal.installation_id, selection: f.removal.source_selection, phase: 'prepared', payload_sha256: '0'.repeat(64) })
+  const before = await fs.readFile(entry).catch(() => null), marker = await fs.readFile(path.join(f.root, '.desktop-removal.json')), locator = await fs.readFile(f.locator)
+  let injected = false
+  if (['late-change', 'late-lock', 'late-parent'].includes(mode)) {
+    const stat = fs.lstat; let reads = 0
+    t.mock.method(fs, 'lstat', async (...args) => {
+      const value = await stat(...args)
+      if (args[0] === entry && ++reads === 4) {
+        injected = true
+        if (mode === 'late-change') await fs.appendFile(entry, 'X-Late=keep\n')
+        else if (mode === 'late-lock') locks.releaseCliLock(f.held.pop())
+        else { await fs.rename(path.dirname(entry), path.dirname(entry) + '.original'); await fs.symlink(path.dirname(entry) + '.original', path.dirname(entry), windows ? 'junction' : 'dir') }
+      }
+      return value
+    })
+  }
+  if (mode === 'lost-reply') {
+    const unlink = fsSync.unlinkSync, fault = t.mock.method(fsSync, 'unlinkSync', file => { const value = unlink(file); if (file === entry) { injected = true; throw Object.assign(new Error('Lost autostart deletion reply'), { code: 'EIO' }) }; return value })
+    await assert.rejects(api.removeUbuntuAutostartEntry(input), { code: 'EIO' }); fault.mock.restore()
+    assert.equal(injected, true)
+  }
+  if (mode === 'late-reappearance') {
+    const open = fs.open
+    t.mock.method(fs, 'open', async (...args) => {
+      const handle = await open(...args)
+      if (args[0] === path.dirname(entry) && process.platform !== 'win32') {
+        const sync = handle.sync.bind(handle)
+        handle.sync = async () => { await sync(); injected = true; await fs.writeFile(entry, 'late user replacement') }
+      }
+      return handle
+    })
+    if (windows) {
+      const unlink = fsSync.unlinkSync
+      t.mock.method(fsSync, 'unlinkSync', file => { const result = unlink(file); if (file === entry) { injected = true; fsSync.writeFileSync(entry, 'late user replacement') }; return result })
+    }
+  }
+  const refused = ['wrong-operation', 'missing-lock', 'before-removing', 'running', 'preparation', 'late-lock'].includes(mode)
+  const retained = ['custom', 'other-executable', 'disabled', 'permissions', 'symlink', 'redirected-parent', 'foreign-locator', 'late-change', 'late-parent', 'late-reappearance'].includes(mode)
+  if (refused) await assert.rejects(api.removeUbuntuAutostartEntry(input), { code: 'CRABOT_DESKTOP_REMOVAL' })
+  else if (retained) await assert.rejects(api.removeUbuntuAutostartEntry(input), { code: 'CRABOT_INSTALL_REGISTRATION' })
+  else {
+    await api.removeUbuntuAutostartEntry(input)
+    await assert.rejects(fs.lstat(entry), { code: 'ENOENT' })
+    if (mode === 'reappeared') { await fs.writeFile(entry, 'user replacement'); await assert.rejects(api.removeUbuntuAutostartEntry(input), { code: 'CRABOT_INSTALL_REGISTRATION' }); assert.equal(await fs.readFile(entry, 'utf8'), 'user replacement') }
+    else await api.removeUbuntuAutostartEntry(input)
+  }
+  if (['late-change', 'late-lock', 'late-parent'].includes(mode)) assert.equal(injected, true)
+  if (mode === 'missing-directory') await assert.rejects(fs.lstat(path.dirname(entry)), { code: 'ENOENT' })
+  if (mode === 'late-reappearance') { assert.equal(injected, true); assert.equal(await fs.readFile(entry, 'utf8'), 'late user replacement') }
+  if ((refused || retained) && !['late-change', 'late-reappearance'].includes(mode)) assert.deepEqual(await fs.readFile(entry), before)
+  assert.deepEqual(await fs.readFile(path.join(f.root, '.desktop-removal.json')), marker)
+  assert.deepEqual(await fs.readFile(f.locator), locator)
+  assert.equal(await fs.readFile(path.join(f.data, 'user.txt'), 'utf8'), 'data and dependencies preserved')
+  assert.ok(await fs.lstat(f.entry)); assert.ok(await fs.lstat(f.metadata))
+})

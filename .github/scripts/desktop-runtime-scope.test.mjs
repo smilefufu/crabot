@@ -41,6 +41,7 @@ for (const [file, expected] of [
   ['scripts/lib/desktop-preparation-files.mjs', true],
   ['scripts/lib/desktop-cli-text.mjs', true],
   ['crabot-desktop/tests/cli-removal.test.mjs', true],
+  ['crabot-desktop/src/login-startup.ts', true],
   ['scripts/lib/desktop-repair.mjs', true],
   ['scripts/lib/desktop-program-proof.mjs', true],
   ['scripts/lib/desktop-removal-proof.mjs', true],

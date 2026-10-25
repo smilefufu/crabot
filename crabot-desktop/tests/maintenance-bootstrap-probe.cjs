@@ -22,7 +22,7 @@ async function main() {
   const context = await load('desktop-removal-context.mjs'), deletion = await load('desktop-removal-delete.mjs')
   assert.equal(typeof context.captureDesktopRemovalJob, 'function'); assert.equal(typeof deletion.removeDesktopRemovalPrograms, 'function')
   const job = await load('desktop-removal-job.mjs'); assert.equal(typeof job.beginInitialDesktopRemoval, 'function'); assert.equal(typeof job.resumeDesktopRemoval, 'function')
-  const cli = await import(pathToFileURL(path.join(root, 'app.asar/dist/installation-removal.js')).href); assert.equal(typeof cli.removeDesktopCliEntries, 'function'); assert.equal(typeof cli.removeDesktopMenuEntry, 'function')
+  const cli = await import(pathToFileURL(path.join(root, 'app.asar/dist/installation-removal.js')).href); assert.equal(typeof cli.removeDesktopCliEntries, 'function'); assert.equal(typeof cli.removeDesktopMenuEntry, 'function'); assert.equal(typeof cli.removeUbuntuAutostartEntry, 'function')
   const native = (await load('process-identity.cjs')).default
   assert.equal(native.inspectProcess(process.pid).pid, process.pid)
   assert.equal(typeof native.inspectProgramReferences, 'function')

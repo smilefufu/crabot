@@ -1,12 +1,13 @@
 // Retained-data uninstall component only. The caller owns complete program
 // verification, the lifecycle lock and proof that the installation is stopped.
-import { promises as fs, constants, type BigIntStats } from 'node:fs'
+import fsSync, { promises as fs, constants, type BigIntStats } from 'node:fs'
 import path from 'node:path'
 import { createRequire } from 'node:module'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import type { Shell } from 'electron'
 import { desktopApplicationEntry, integrationRoot, readInstallationLocator, type PreparedInstallation } from './installation-entries.js'
+import { ubuntuLoginStartupEntry } from './login-startup.js'
 const require = createRequire(import.meta.url)
 const identity = require('./bootstrap/scripts/lib/process-identity.cjs')
 const installation = require('./bootstrap/scripts/lib/desktop-installation.cjs')
@@ -185,4 +186,37 @@ export async function removeDesktopCliEntries(options: {
   if (!entries.length) await syncDirectory(prefix)
   if (!await current()) return { removed, retained: true }
   return { removed, retained: false }
+}
+
+
+// Ubuntu's fixed autostart file only. No OS login APIs, discovery release,
+// program deletion or business startup; the trusted host owns OS routing.
+export async function removeUbuntuAutostartEntry(options: RemovalJobOptions & { home: string; env: NodeJS.ProcessEnv }): Promise<void> {
+  const { own, record, assertJob, proofCurrent } = await captureRemovalJob(options)
+  const current = async () => {
+    await proofCurrent()
+    const locator = await readInstallationLocator(options.home, process.platform, options.env)
+    assertJob()
+    if (locator && (locator.install_root !== own.root || locator.installation_id !== own.record.installation_id)) fail()
+  }
+  await current()
+  const configHome = options.env.XDG_CONFIG_HOME || path.join(options.home, '.config')
+  if (!path.isAbsolute(configHome)) fail()
+  const entry = path.join(configHome, 'autostart/crabot.desktop'), item = await snapshot(entry)
+  if (item && (!Buffer.isBuffer(item.content) || !item.content.equals(Buffer.from(ubuntuLoginStartupEntry(
+    path.join(own.root, 'app/releases', record.source_selection.gui_id, 'crabot-desktop'))))
+    || process.platform !== 'win32' && (item.stat.mode & 0o777n) !== 0o600n)) fail()
+  await current()
+  if (!item) return
+  await unchanged(item)
+  assertJob()
+  const parent = path.dirname(entry), canonical = fsSync.realpathSync(parent)
+  if ((process.platform === 'win32' ? canonical.toLowerCase() !== path.resolve(parent).toLowerCase() : canonical !== path.resolve(parent))
+    || !sameStat(fsSync.lstatSync(entry, { bigint: true }), item.stat)) fail()
+  fsSync.unlinkSync(entry)
+  await syncDirectory(parent)
+  await current()
+  // A new or late replacement is retained and reported, never silently removed.
+  if (await snapshot(entry)) fail()
+  assertJob()
 }
