@@ -571,7 +571,6 @@ export class VoiceChannel extends ModuleBase {
         this.receipts.prepare(event.playback_id, this.terminal.receiptIdentity, context.binding)
         play = new ReplyPlayback(event.playback_id, this.settings.tts_connection, {
           valid: () => { this.assertOutput(context); if (c.socket.bufferedAmount > 50000) failed('播放队列已满') },
-          start: () => this.send(c.socket, { type: 'playback_start', playback_id: event.playback_id, turn_id: context.turn_id ?? event.playback_id }),
           text: (sequence, text) => this.send(c.socket, { type: 'playback_text', playback_id: event.playback_id, sequence, text }),
           audio: (sequence, pcm) => c.socket.send(encodeVoiceFrame(2, event.playback_id, sequence, pcm)),
           end: (_text, sample_count, text_segment_count) => { this.receipts.ending(event.playback_id, sample_count); this.send(c.socket, { type: 'playback_end', playback_id: event.playback_id, sample_count, text_segment_count }) },
@@ -594,7 +593,12 @@ export class VoiceChannel extends ModuleBase {
           }
         })
         void done.catch(() => {})
+        this.send(c.socket, { type: 'playback_start', playback_id: event.playback_id, turn_id: context.turn_id ?? event.playback_id })
         return { accepted: true }
+      } catch (error) {
+        if (play) play.cancel('播放准备或开始失败')
+        else try { this.send(c.socket, { type: 'playback_cancel', playback_id: event.playback_id }) } catch { /* no active playback */ }
+        throw error
       } finally { if (this.reservation?.id === event.playback_id) this.reservation = undefined }
     }
     if (!play || JSON.stringify(this.outputContexts.get(event.playback_id)) !== JSON.stringify(context)) failed('播放ID或归属不一致')

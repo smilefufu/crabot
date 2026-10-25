@@ -153,6 +153,51 @@ describe('Gemini wire semantics', () => {
     expect(second.contents[2].parts[0].functionResponse).toEqual({ name: 'probe', id: 'call-1', response: { result: expect.stringMatching(/\nOK$/) } })
     expect(result.finalMessages.filter(message => message.role === 'assistant').every(message => message.providerState?.format === 'gemini')).toBe(true)
   })
+
+  it('returns a missing tool result through Engine without executing or replaying other tools', async () => {
+    const call = vi.fn(async () => ({ output: 'OK', isError: false }))
+    const missing = [{ functionCall: { name: 'missing_probe', args: {}, id: 'missing' }, thoughtSignature: 'missing-signature' }]
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(sse([response(missing, 'STOP')]))
+      .mockResolvedValueOnce(sse([response(signedParts, 'STOP')]))
+      .mockResolvedValueOnce(sse([response([{ text: 'done' }], 'STOP')]))
+    const result = await runEngine({ prompt: 'test', adapter: createAdapter(config), options: {
+      ...params, tools: [{ ...tool, call }], maxTurns: 3, disableCompaction: true,
+    } })
+    expect(result.outcome).toBe('completed')
+    expect(call).toHaveBeenCalledOnce()
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+    const second = JSON.parse(String(fetchMock.mock.calls[1][1]?.body))
+    expect(second.contents[1].parts).toEqual(missing)
+    expect(second.contents[2].parts[0].functionResponse).toEqual({ name: 'missing_probe', id: 'missing', response: { error: expect.stringContaining('Tool not found: missing_probe') } })
+    const third = JSON.parse(String(fetchMock.mock.calls[2][1]?.body))
+    expect(third.contents[1].parts).toEqual(missing)
+    expect(third.contents[3].parts).toEqual(signedParts)
+  })
+
+  it('still rejects function calls when no tools were offered', async () => {
+    await expect(collect([response([{ functionCall: { name: 'missing_probe', args: {} } }], 'STOP')]))
+      .rejects.toThrow('Gemini returned an undeclared function')
+  })
+
+  it.each([
+    { name: 'missing_probe', args: 'broken' },
+    { name: 'missing_probe', partialArgs: [] },
+    { name: 'missing_probe', args: {}, willContinue: true },
+  ])('still rejects an invalid undeclared function before executable events %#', async functionCall => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(sse([response([{ functionCall }], 'STOP')]))
+    const chunks: StreamChunk[] = []
+    await expect((async () => {
+      for await (const chunk of createAdapter(config).stream({ ...params, tools: [tool] })) chunks.push(chunk)
+    })()).rejects.toThrow('Gemini returned an invalid functionCall')
+    expect(chunks.some(chunk => chunk.type.startsWith('tool_use'))).toBe(false)
+  })
+
+  it('still rejects duplicate IDs in complete undeclared calls', async () => {
+    const part = { functionCall: { name: 'missing_probe', args: {}, id: 'same' } }
+    await expect(collect([response([part, part], 'STOP')], { tools: [tool] }))
+      .rejects.toThrow('Gemini returned duplicate function call IDs')
+  })
 })
 
 it('textualizes tool history for a no-tool fork without mutating signed source history', async () => {

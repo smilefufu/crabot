@@ -105,7 +105,7 @@ export class TaggedVoiceOutput {
   consumer(): AssistantTextConsumer {
     const context = this.context(), binding = this.binding?.(), key = context?.turn_id ?? binding?.response_id
     let original: VoiceDeliveryRecord | undefined
-    let record: VoiceDeliveryRecord | undefined, sequence = 0, committed = false, broken = false, queued = false
+    let record: VoiceDeliveryRecord | undefined, sequence = 0, committed = false, broken = false, queued = false, opened = false
     let playbackContext: VoicePlaybackContext | undefined
     const cancellation = new AbortController()
     const send = (event: VoiceOutputParams['event']) => this.port.send(playbackContext
@@ -113,10 +113,10 @@ export class TaggedVoiceOutput {
     const save = (): void => { if (record) this.port.save(record) }
     const cancel = async (): Promise<void> => {
       if (!record || record.status === 'completed') return
-      if (queued && original) { this.port.save(original); record = undefined; return }
+      if (original && (queued || !opened)) { this.port.save(original); record = undefined; return }
       record.status = !queued && record.status === 'streaming' ? 'unknown' : 'failed'
       try { save() } finally {
-        if (!queued) try { await send({ type: 'reply_cancel', playback_id: record.playback_id }) } catch { /* no replay */ }
+        if (opened && !queued) try { await send({ type: 'reply_cancel', playback_id: record.playback_id }) } catch { /* no replay */ }
         record = undefined
       }
     }
@@ -135,27 +135,33 @@ export class TaggedVoiceOutput {
         record = { playback_id: original?.playback_id ?? randomUUID(), channel_id: (binding ?? context!).channel_id, session_id: (binding ?? context!).session_id,
           turn_id: original?.turn_id ?? context?.turn_id ?? binding!.response_id, text: '', status: 'prepared', ...(binding ? { binding: structuredClone(original?.binding ?? binding), block_index: original?.block_index ?? blockIndex } : {}) }
         sequence = 0; if (!original) save()
-        const previous = this.lastPlaybackContext
-        playbackContext = undefined
-        if (binding) {
-          const continuing = previous?.kind === 'reply' && previous.turn_id === context?.turn_id
-            && previous.connection_epoch === context?.connection_epoch && JSON.stringify(previous.binding) === JSON.stringify(binding)
-          playbackContext = continuing ? previous : await this.port.prepare?.(record, binding.worker_id ? undefined : context)
-        }
-        queued = !!binding && !playbackContext
-        if (playbackContext) this.lastPlaybackContext = playbackContext
-        if (!queued) try { await send({ type: 'reply_start', playback_id: record.playback_id }) }
-        catch (error) {
-          if (!binding) throw error
-          // No reply_text has been sent, so this result has not produced any audio.
-          queued = true
-          try { await send({ type: 'reply_cancel', playback_id: record.playback_id }) } catch { /* preserve the unsent result */ }
-        }
+        queued = false; opened = false; playbackContext = undefined
       } else if (event === 'text' && record) {
-        record.text += text!; record.status = queued ? 'prepared' : 'streaming'; if (!queued || !original) save()
+        record.text += text!
+        const firstBody = !opened && !queued
+        if (firstBody) {
+          if (!original) save()
+          if (!record.text.trim()) return
+          const previous = this.lastPlaybackContext
+          if (binding) {
+            const continuing = previous?.kind === 'reply' && previous.turn_id === context?.turn_id
+              && previous.connection_epoch === context?.connection_epoch && JSON.stringify(previous.binding) === JSON.stringify(binding)
+            playbackContext = continuing ? previous : await this.port.prepare?.(record, binding.worker_id ? undefined : context)
+          }
+          queued = !!binding && !playbackContext
+          if (playbackContext) this.lastPlaybackContext = playbackContext
+          if (!queued) try { opened = true; await send({ type: 'reply_start', playback_id: record.playback_id }) }
+          catch (error) {
+            if (!binding) throw error
+            // No reply_text has been sent, so this result has not produced any audio.
+            queued = true
+            try { await send({ type: 'reply_cancel', playback_id: record.playback_id }) } catch { /* preserve the unsent result */ }
+          }
+        }
+        record.status = queued ? 'prepared' : 'streaming'; if (!queued || !original) save()
         if (!queued) {
           committed = true; this.committedTurns.add(key)
-          sequence = await appendVoiceText(send, this.port.receipt, record.playback_id, sequence, text!, cancellation.signal)
+          sequence = await appendVoiceText(send, this.port.receipt, record.playback_id, sequence, firstBody ? record.text : text!, cancellation.signal)
         }
       } else if (event === 'end' && record) {
         if (!record.text.trim()) { await cancel(); return }

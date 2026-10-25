@@ -5,7 +5,7 @@ import type { LLMAdapter, LLMAdapterConfig, LLMStreamParams } from './llm-adapte
 import { capToolResultForLLM, isToolResultMessage } from './llm-adapter-types.js'
 import type { EngineMessage, GeminiProviderState, LLMTokenUsage, StreamChunk, ToolUseBlock } from './types.js'
 import { fetchLlm } from './llm-fetch.js'
-import { HttpResponseError, StreamProtocolError, parseRetryAfterMs } from './retry-utils.js'
+import { EmptyResponseError, HttpResponseError, StreamProtocolError, parseRetryAfterMs } from './retry-utils.js'
 import { withStreamTimeout } from './stream-timeout.js'
 
 type Part = Record<string, unknown>
@@ -247,7 +247,8 @@ export class GeminiAdapter implements LLMAdapter {
             parts.push(part)
             if (part.functionCall !== undefined) {
               const call = functionCall(part)
-              if (!params.tools.some(tool => tool.name === call.name)) throw new Error('Gemini returned an undeclared function')
+              // Engine returns unavailable-tool errors; it alone decides what may execute.
+              if (params.tools.length === 0) throw new Error('Gemini returned an undeclared function')
               const id = call.id ?? randomUUID()
               if (ids.has(id)) throw new Error('Gemini returned duplicate function call IDs')
               ids.add(id)
@@ -269,7 +270,12 @@ export class GeminiAdapter implements LLMAdapter {
         }
       }
     }
-    if (!finish) throw new StreamProtocolError('Gemini stream ended without finishReason')
+    if (!finish) {
+      if (started && toolCalls.length === 0 && parts.every(part => !part.text)) {
+        throw new EmptyResponseError('Gemini returned an empty response without finishReason')
+      }
+      throw new StreamProtocolError('Gemini stream ended without finishReason')
+    }
     if (finish === 'STOP' && !visible && toolCalls.length === 0) throw new Error('Gemini returned an empty response')
     yield { type: 'provider_state', state: { format: 'gemini', content: { role: 'model', parts }, toolCalls } }
     yield { type: 'message_end', stopReason: finish === 'MAX_TOKENS' ? 'max_tokens' : toolCalls.length ? 'tool_use' : 'end_turn', ...(usage ? { usage } : {}) }
