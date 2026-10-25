@@ -1046,3 +1046,106 @@ test('initial removal publication refuses ordinary Node and releases both locks 
   await assert.rejects(beginInitialDesktopRemoval({ installRoot: f.target, operationId: randomUUID() }))
   await assert.rejects(fs.lstat(path.join(f.target, 'data')), { code: 'ENOENT' })
 })
+
+for (const mode of ['missing', 'intact', 'damaged', 'completed', 'wrong-operation', 'other-pair', 'changed-proof', 'no-stop-proof', 'running', 'module', 'changed-command', 'copy-cancel', 'copy-failure', 'publication-lost', 'prepared-lost', 'changed-job', 'changed-data', 'lost-lock', 'late-proof', 'missing-source-proof', 'metadata-change', 'missing-data', 'publication-cancel', 'late-cache-mode']) test('removal-fenced original programs reinstall without starting or clearing protection: ' + mode, { skip: windows && mode === 'late-cache-mode' }, async t => {
+  const f = await removalProofFixture(t), { privateJson, readPending } = await import('../desktop-preparation-files.mjs')
+  const { acquireExistingCliLock, releaseCliLock, cliLockToken, hasInheritedCliLock } = await import('../cli-lock.mjs')
+  f.record.phase = mode === 'completed' ? 'completed' : 'removing'; await f.publish()
+  const data = path.join(f.target, 'data'), fence = path.join(f.target, '.desktop-removal.json'), marker = path.join(f.target, '.desktop-installing.json')
+  const fenceBytes = await fs.readFile(fence), selector = await fs.readFile(path.join(f.target, 'current-release.json'))
+  const command = path.join(f.target, 'bin', launcher)
+  if (mode === 'damaged') {
+    await fs.writeFile(path.join(f.prepared.coreRoot, 'cli.mjs'), 'damaged original Core')
+    await fs.writeFile(path.join(f.prepared.coreRoot, 'custom-user-file'), 'preserve changed program directory content')
+    await fs.writeFile(path.join(f.prepared.guiRoot, path.relative(f.gui, f.resources), 'app.asar'), 'damaged GUI')
+  } else if (mode !== 'intact') {
+    await fs.rm(f.prepared.coreRoot, { recursive: true }); await fs.rm(f.prepared.guiRoot, { recursive: true }); await fs.unlink(command)
+  }
+  if (mode === 'missing-source-proof') await fs.unlink(path.join(f.target, '.desktop-install-payload.json'))
+  if (mode === 'missing-data') await fs.rename(data, data + '-original')
+  if (mode === 'metadata-change') { const file = path.join(f.core, 'core-release.json'), record = JSON.parse(await fs.readFile(file)); await fs.writeFile(file, JSON.stringify({ ...record, commit: '2'.repeat(40) }) + '\n') }
+  let stoppedCalls = 0
+  const options = { installRoot: f.target, payload: f.payload, operationId: f.record.operation_id, verifyStopped: async () => {
+    stoppedCalls++
+    for (const directory of [f.target, data]) {
+      const token = cliLockToken(path.join(directory, 'cli.lock')); assert.ok(token); assert.equal(hasInheritedCliLock(directory, token), true)
+    }
+  } }
+  if (mode === 'wrong-operation') options.operationId = randomUUID()
+  if (mode === 'other-pair') options.payload = (await fixture(t, { executableNode: false })).payload
+  if (mode === 'changed-proof') await fs.appendFile(f.file, ' ')
+  if (mode === 'no-stop-proof') delete options.verifyStopped
+  if (mode === 'running') await fs.writeFile(path.join(data, 'mm.pid'), String(process.pid))
+  if (mode === 'module') { await fs.mkdir(path.join(data, 'module-runtime-registry/records'), { recursive: true }); await fs.writeFile(path.join(data, 'module-runtime-registry/records/unknown.json'), '{}') }
+  if (mode === 'changed-command') await fs.writeFile(command, 'custom command, preserve')
+  const abort = new AbortController()
+  if (mode === 'publication-cancel') options.signal = abort.signal
+  if (mode === 'copy-cancel') { options.signal = abort.signal; options.progress = phase => { if (phase === 'copying') abort.abort() } }
+  const cp = fs.cp, rename = fs.rename
+  let injected = false
+  if (['copy-failure', 'changed-data'].includes(mode)) t.mock.method(fs, 'cp', async (...args) => {
+    if (mode === 'copy-failure') throw Object.assign(new Error('fixture failed copy'), { code: 'EIO' })
+    const result = await cp(...args)
+    if (!injected) { injected = true; await fs.rename(data, data + '-original'); await fs.mkdir(data, { mode: 0o700 }) }
+    return result
+  })
+  if (mode === 'lost-lock') options.verifyStopped = async () => releaseCliLock(path.join(data, 'cli.lock'))
+  let fault
+  if (['publication-lost', 'prepared-lost', 'changed-job', 'publication-cancel'].includes(mode)) fault = t.mock.method(fs, 'rename', async (from, to) => {
+    const result = await rename(from, to)
+    if (to === f.prepared.coreRoot && from.includes('.preparing-reinstall-')) {
+      if (mode === 'publication-cancel') abort.abort()
+      if (mode === 'publication-lost') throw Object.assign(new Error('fixture program reply lost'), { code: 'EIO' })
+      if (mode === 'changed-job') await privateJson(fence, { ...f.record, phase: 'completed' }, true)
+    }
+    if (mode === 'prepared-lost' && to === marker && (await readPending(f.target))?.phase === 'prepared') throw Object.assign(new Error('fixture prepared reply lost'), { code: 'EIO' })
+    return result
+  })
+  if (mode === 'late-proof') {
+    const lstat = fs.lstat, verify = options.verifyStopped
+    let afterStopProof = false
+    options.verifyStopped = async () => { await verify(); afterStopProof = true }
+    t.mock.method(fs, 'lstat', async (...args) => {
+      const inject = args[0] === marker && afterStopProof
+      if (args[0] === marker) afterStopProof = false
+      const stat = await lstat(...args)
+      if (inject && !injected) { injected = true; await fs.appendFile(f.file, ' ') }
+      return stat
+    })
+  }
+  if (mode === 'late-cache-mode') {
+    const cache = path.join(f.target, 'app/payloads'), file = path.join(cache, f.selection.gui_id + '.json'), lstat = fs.lstat
+    await fs.mkdir(cache, { mode: 0o700 }); await privateJson(file, f.proof.payload)
+    let reads = 0
+    t.mock.method(fs, 'lstat', async (...args) => { if (args[0] === file && ++reads === 3) await fs.chmod(file, 0o644); return lstat(...args) })
+  }
+  const { prepareDesktopRemovalReinstall } = await import('../desktop-reinstall.mjs')
+  if (['wrong-operation', 'other-pair', 'changed-proof', 'no-stop-proof', 'running', 'module', 'changed-command', 'copy-cancel', 'copy-failure', 'changed-job', 'changed-data', 'lost-lock', 'late-proof', 'metadata-change', 'missing-data', 'late-cache-mode'].includes(mode)) {
+    await assert.rejects(prepareDesktopRemovalReinstall(options))
+    if (!['changed-job', 'late-proof', 'late-cache-mode'].includes(mode)) await assert.rejects(fs.lstat(marker), { code: 'ENOENT' })
+    if (mode === 'changed-command') assert.equal(await fs.readFile(command, 'utf8'), 'custom command, preserve')
+  } else {
+    if (fault && mode !== 'publication-cancel') { await assert.rejects(prepareDesktopRemovalReinstall(options)); fault.mock.restore() }
+    const pending = await readPending(f.target)
+    const result = await prepareDesktopRemovalReinstall(options)
+    assert.deepEqual(result, f.prepared); assert.deepEqual(await verifyDesktopPayload(f.payload).then(value => value.record), f.proof.payload)
+    assert.equal((await readPending(f.target)).phase, 'prepared')
+    if (pending) assert.equal((await readPending(f.target)).id, pending.id)
+    assert.deepEqual(await prepareDesktopRemovalReinstall({ ...options, signal: undefined }), result)
+    const retained = await (await import('../desktop-program-proof.mjs')).readOriginalDesktopPayload(f.target, f.selection)
+    assert.equal(retained.file, path.join(f.target, 'app/payloads', f.selection.gui_id + '.json')); assert.equal(retained.text, JSON.stringify(f.proof.payload) + '\n')
+    assert.deepEqual(await fs.readFile(command), await fs.readFile(path.join(f.core, 'bin', launcher)))
+    assert.ok(stoppedCalls > 0)
+    if (mode === 'damaged') {
+      const directory = (await fs.readdir(path.dirname(f.prepared.coreRoot))).find(name => name.startsWith('.damaged-'))
+      assert.ok(directory); assert.equal(await fs.readFile(path.join(path.dirname(f.prepared.coreRoot), directory, 'custom-user-file'), 'utf8'), 'preserve changed program directory content')
+    }
+  }
+  if (mode === 'late-proof') { assert.equal(injected, true); await assert.rejects(fs.lstat(f.prepared.coreRoot), { code: 'ENOENT' }) }
+  if (mode !== 'changed-job') assert.deepEqual(await fs.readFile(fence), fenceBytes)
+  assert.deepEqual(await fs.readFile(path.join(f.target, 'current-release.json')), selector)
+  assert.equal(await fs.readFile(path.join(['changed-data', 'missing-data'].includes(mode) ? data + '-original' : data, 'retained-user-file'), 'utf8'), 'user content')
+  assert.throws(() => installation.readDesktopSelection(f.target), { code: mode === 'missing-data' ? 'CRABOT_DESKTOP_INSTALLATION' : 'CRABOT_DESKTOP_REMOVAL_PENDING' })
+  if (mode === 'missing-data') await assert.rejects(fs.lstat(data), { code: 'ENOENT' })
+  for (const directory of mode === 'missing-data' ? [f.target] : [f.target, data]) { const lock = await acquireExistingCliLock(directory, 'verify-reinstall-release', 0); releaseCliLock(lock) }
+})

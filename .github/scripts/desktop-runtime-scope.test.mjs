@@ -47,6 +47,7 @@ for (const [file, expected] of [
   ['scripts/lib/desktop-removal-programs.mjs', true],
   ['scripts/lib/desktop-removal-context.mjs', true],
   ['scripts/lib/desktop-removal-delete.mjs', true],
+  ['scripts/lib/desktop-reinstall.mjs', true],
   ['scripts/lib/desktop-removal-source.mjs', true],
   ['scripts/lib/__tests__/desktop-removal-programs.test.mjs', true],
   ['.github/scripts/paired-update-source-data.test.mjs', true],
