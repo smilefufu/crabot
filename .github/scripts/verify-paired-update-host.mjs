@@ -49,6 +49,8 @@ let modelProvider, selected, child, targetIdentity, sourceIdentity, expectedTarg
 const report = { acceptance_id: acceptanceId, platform: process.platform, arch: process.arch, candidate_channel_enabled: false, remote_model_called: false,
   source_gui: 'fixture-packaged-component-actor', target_gui: 'ordinary-packaged-main', fixture_debugger: false, real_login_session_verified: false }
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
+const started = performance.now()
+const checkpoint = stage => console.log('CRABOT_PAIRED_UPDATE_STAGE ' + JSON.stringify({ stage, elapsed_ms: Math.round(performance.now() - started) }))
 async function readControl(name) {
   try { return JSON.parse(await fs.readFile(path.join(control, name + '.json'), 'utf8')) }
   catch (error) { if (error.code === 'ENOENT') return null; throw error }
@@ -80,6 +82,7 @@ try {
   // The signed archive is self-contained. These exact producer trees were
   // never executed and are no longer needed; avoid retaining redundant cores.
   await fs.rm(targetProject, { recursive: true }); await fs.rm(targetCore, { recursive: true })
+  checkpoint('target-prepared')
   phase = 'prepare-source'
   const sourcePayload = await buildPairedUpdateSource({ repository, project, destination: path.join(job, 'source-project') })
   selected = await commitDesktopInstallation(await prepareDesktopInstallation({ payload: sourcePayload, installRoot: path.join(temporary, '整体 安装') }))
@@ -93,18 +96,21 @@ try {
   const config = path.join(control, 'config.json'); await fs.writeFile(config, JSON.stringify(metadata) + '\n', { mode: 0o600 })
   const env = { ...process.env, HOME: home, USERPROFILE: home, APPDATA: path.join(home, 'Roaming'), LOCALAPPDATA: path.join(home, 'Local'), DATA_DIR: selected.dataDir, GIT_ALLOW_PROTOCOL: 'file', CRABOT_PAIRED_UPDATE_FIXTURE_CONFIG: config }
   for (const name of ['ELECTRON_RUN_AS_NODE', 'NODE_OPTIONS', 'NODE_PATH', 'CRABOT_DEV', 'CRABOT_PORT_OFFSET']) delete env[name]
+  checkpoint('source-prepared')
   phase = 'source-start-and-update'
   child = spawn(selected.executable, ['--background'], { env, stdio: ['ignore', 'pipe', 'pipe'] })
   for (const stream of [child.stdout, child.stderr]) stream.on('data', bytes => { sourceOutput = (sourceOutput + bytes.toString()).slice(-128000) })
   child.on('error', error => { sourceOutput += String(error) })
   sourceIdentity = await poll('source actor identity', async () => identity.inspectProcess(child.pid), 10000)
   const before = await poll('source ready', () => readControl('source-ready'))
+  checkpoint('source-ready')
   assert.equal(before.model_configured_via_http, true)
   // The finite source actor already owns the hard lifetime. Observe its actual
   // result or exit rather than killing a still-running actor at an earlier bound.
   const handoff = await poll('committed target handoff', () => readControl('handoff'), sourceLimits.sourceLifetimeMs + sourceLimits.sourceExitObservationMs)
   assert.deepEqual(handoff.target, target.record.selection); assert.equal(handoff.ordinary_exits, 0); assert.equal(handoff.requests, 3)
   assert.match(handoff.maintenance_id, /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/); assert.equal(handoff.production_peer_policy_verified, true)
+  checkpoint('target-handoff')
   phase = 'target-start-and-health'
   handoffAt = (await fs.stat(path.join(control, 'handoff.json'))).mtimeMs
   const installation = createRequire(import.meta.url)('../../scripts/lib/desktop-installation.cjs'), current = installation.readDesktopSelection(selected.root)
@@ -121,6 +127,7 @@ try {
     }
     return null
   })
+  checkpoint('target-observed')
   assert.equal(identity.sameProcess(sourceIdentity, identity.inspectProcess(sourceIdentity.pid)), false)
   // Only ordinary target main clears this job after data compatibility, an
   // authenticated desktop session and Core verification. Keep normal peer args.
@@ -138,6 +145,7 @@ try {
     same_instance_new_generation: true, maintenance_cleared_after_real_health: true, data_preserved: true, normal_peer_policy_verified: true,
     target_health_proof: 'ordinary-main-maintenance-completion', renderer_inspected: false,
     historical_migration_tested: false, os_login_tested: false })
+  checkpoint('target-healthy')
   success = true
 } catch (error) {
   Object.assign(report, { failure_phase: phase, failure_code: error.code || 'PAIRED_HOST_ACCEPTANCE_FAILED', failure_message: String(error.message).slice(0, 512) })
@@ -153,6 +161,7 @@ try {
   }
   process.exitCode = 1
 } finally {
+  checkpoint('cleanup')
   if (sourceIdentity && identity.sameProcess(sourceIdentity, identity.inspectProcess(sourceIdentity.pid))) {
     try { identity.terminateKnownProcess(sourceIdentity) } catch { process.exitCode = 1 }
   }
