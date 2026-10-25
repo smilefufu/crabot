@@ -3,6 +3,7 @@
 import { constants, promises as fs } from 'node:fs'
 import path from 'node:path'
 import { inspectInstance, identity } from '../../scripts/lib/instance-runtime.mjs'
+import { verifyDataCompatibility } from '../../scripts/lib/data-compatibility.mjs'
 import { readVersionMaintenance } from '../../scripts/lib/version-maintenance.mjs'
 import entry from '../../scripts/lib/desktop-entry.cjs'
 
@@ -47,6 +48,11 @@ export async function collectPairedUpdateTargetEvidence({ dataDir, targetRoot, t
       else evidence.maintenance.status = 'absent'
     } catch { evidence.maintenance.status = 'unreadable' }
   }
+  try {
+    const pending = verifyDataCompatibility(targetRoot, dataDir)
+    if (pending.length > 64 || pending.some(item => !/^crabot-[A-Za-z0-9_-]{1,64}$/.test(item.moduleId))) throw new Error('Invalid diagnostic module list')
+    evidence.schema = { status: 'readable', pending: pending.map(item => ({ module_id: item.moduleId, code_version: item.codeVersion, data_version: item.dataVersion })) }
+  } catch { evidence.schema = { status: 'unreadable' } }
   evidence.logs = {}
   const logDirectory = path.join(dataDir, 'logs')
   const logDirectorySafe = await fs.lstat(logDirectory).then(value => value.isDirectory(), () => false)

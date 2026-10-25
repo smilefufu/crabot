@@ -60,3 +60,19 @@ test('a valid maintenance phase is read through the product validator without ex
   assert.deepEqual(result.maintenance, { status: 'readable', schema_version: 3, phase: 'verifying', target_core_matches: true })
   assert.equal(JSON.stringify(result).includes(record.id), false)
 })
+
+test('schema evidence uses the existing static validator without initializing or migrating data', async t => {
+  const f = await fixture(t), code = path.join(f.targetRoot, 'crabot-agent'), data = path.join(f.dataDir, 'agent')
+  await fs.mkdir(code); await fs.mkdir(data)
+  await fs.writeFile(path.join(code, 'schema_version'), 'v2')
+  await fs.writeFile(path.join(data, 'SCHEMA_VERSION'), 'v1')
+  const secret = 'private user text must never enter diagnostics'
+  await fs.writeFile(path.join(data, 'preserved'), secret)
+  const result = await collectPairedUpdateTargetEvidence(f)
+  assert.deepEqual(result.schema, { status: 'readable', pending: [{ module_id: 'crabot-agent', code_version: 'v2', data_version: 'v1' }] })
+  assert.equal(JSON.stringify(result).includes(secret), false)
+  assert.equal(JSON.stringify(result).includes(f.root), false)
+  assert.equal(await fs.readFile(path.join(data, 'SCHEMA_VERSION'), 'utf8'), 'v1')
+  assert.equal(await fs.readFile(path.join(data, 'preserved'), 'utf8'), secret)
+  assert.deepEqual((await fs.readdir(data)).sort(), ['SCHEMA_VERSION', 'preserved'])
+})

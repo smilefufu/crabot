@@ -55,6 +55,7 @@ async function quit(): Promise<boolean> {
   return pendingQuit
 }
 function show() { window?.show(); window?.focus() }
+function bootstrapStage(phase: string) { console.info(JSON.stringify({ component: 'desktop-bootstrap', phase, at: new Date().toISOString() })) }
 
 async function boot() {
   const installationProbe = process.argv.filter(value => value.startsWith('--installation-sandbox-probe='))
@@ -64,6 +65,7 @@ async function boot() {
     await runInstallationSandboxProbe(installationProbe[0].slice('--installation-sandbox-probe='.length))
     return
   }
+  bootstrapStage('binding-installation')
   // Resolve the protected GUI identity before external code or privileged UI.
   // A failed pair binding must not fall back to Resources/core.
   const verifier = app.isPackaged ? createRequire(import.meta.url)('./bootstrap/scripts/lib/desktop-installation.cjs') : null
@@ -81,6 +83,7 @@ async function boot() {
     coreRoot = installation.coreRoot
     verifier.applyDesktopEnvironment(installation)
   }
+  bootstrapStage('installation-bound')
   try {
     const { resolveCliDataDir } = await loadCore('scripts/lib/instance.mjs')
     dataRoot = path.resolve(resolveCliDataDir({ homeDir: path.join(homedir(), '.crabot') }))
@@ -91,6 +94,7 @@ async function boot() {
     await mkdir(path.join(dataRoot, 'desktop-profile/tmp'), { recursive: true, mode: 0o700 })
     app.setPath('temp', path.join(dataRoot, 'desktop-profile/tmp'))
   } catch (error) { initialError = error }
+  bootstrapStage('data-location-checked')
   if (!app.requestSingleInstanceLock()) { quitting = true; app.quit(); return }
   app.on('second-instance', (_event, args) => {
     show()
@@ -98,9 +102,12 @@ async function boot() {
   })
   await app.whenReady()
   if (process.platform === 'win32') app.setAppUserModelId('com.crabot.desktop')
+  console.info(JSON.stringify({ component: 'desktop-bootstrap', phase: 'app-ready', app_version: app.getVersion(), at: new Date().toISOString() }))
   const startup = new LoginStartup({ platform: process.platform, packaged: app.isPackaged, executable: process.execPath,
     configHome: path.resolve(process.env.XDG_CONFIG_HOME || path.join(homedir(), '.config')), app })
+  bootstrapStage('reading-login-startup')
   let startupState: StartupState = await startup.get().catch(() => ({ supported: app.isPackaged, enabled: false, approvalRequired: false }))
+  bootstrapStage('login-startup-read')
   const background = process.argv.includes('--background') || startup.launchedAtLogin()
   await access(path.join(coreRoot, 'crabot-admin/dist/web/desktop.html'))
   controller = new DesktopController({ coreRoot, dataRoot, appVersion: app.getVersion(), platform: process.platform as 'darwin' | 'win32' | 'linux', packaged: app.isPackaged, verifyBinding, loginStartup: startup,
@@ -236,10 +243,13 @@ async function boot() {
   updateMenus()
   window.on('focus', updateMenus)
   tray.on('click', show)
+  bootstrapStage('loading-local-interface')
   await window.loadURL('app://crabot/')
+  bootstrapStage('local-interface-loaded')
   // The local UI is visible while the controller verifies the large payload.
   if (initialError) controller.fail(initialError)
   else {
+    bootstrapStage('recovering-service')
     void controller.recoverVersion().then(recovered => { if (!recovered) void controller!.start() }).catch(error => controller!.fail(error))
     controller.watch()
   }
@@ -251,6 +261,8 @@ app.on('before-quit', event => { if (!quitting) { event.preventDefault(); void q
 app.on('window-all-closed', () => { /* Tray owns the application lifetime. */ })
 app.on('will-quit', () => { updates?.close(); artifacts?.close(); controller?.close(); tray?.destroy() })
 void boot().catch(async error => {
+  const code = typeof error?.code === 'string' && /^[A-Z0-9_]{1,128}$/.test(error.code) ? error.code : 'DESKTOP_BOOT_FAILED'
+  console.error(JSON.stringify({ component: 'desktop-bootstrap', phase: 'failed', code, at: new Date().toISOString() }))
   await app.whenReady()
   let message = 'Crabot 界面启动失败，请修复安装。'
   if (error?.code === 'CRABOT_DESKTOP_REMOVAL_PENDING') message = 'Crabot 卸载尚未完成。请继续卸载，或使用同版/更高版离线安装器修复。用户数据已保留。'
