@@ -215,17 +215,21 @@ for (const mode of ['owned', 'custom-menu', 'foreign-locator', 'wrong-operation'
 
 for (const mode of ['owned', 'xdg-config', 'absent', 'missing-directory', 'custom', 'other-executable', 'disabled', 'permissions', 'symlink', 'redirected-parent', 'foreign-locator', 'wrong-operation', 'missing-lock', 'before-removing', 'running', 'preparation', 'late-change', 'late-lock', 'late-parent', 'late-reappearance', 'lost-reply', 'reappeared']) test('Ubuntu autostart byte cleanup keeps the original removal protection: ' + mode, { skip: windows && ['permissions', 'symlink'].includes(mode) }, async t => {
   const f = await fixture(t), api = await import('../dist/installation-removal.js')
-  const { LoginStartup } = await import('../dist/login-startup.js')
+  const { LoginStartup, ubuntuLoginStartupEntry } = await import('../dist/login-startup.js')
   const configHome = path.join(f.home, mode === 'xdg-config' ? 'custom-config' : '.config'), entry = path.join(configHome, 'autostart/crabot.desktop')
   const executable = path.join(f.root, 'app/releases', f.removal.source_selection.gui_id, 'crabot-desktop')
   const startup = new LoginStartup({ platform: 'linux', packaged: true, executable, configHome,
     app: { getLoginItemSettings() { throw new Error('No host OS login API in a file-only fixture') }, setLoginItemSettings() { throw new Error('No host OS login mutation') } } })
   await startup.set(true)
-  const input = { installRoot: f.root, operationId: f.operationId, home: f.home, env: mode === 'xdg-config' ? { XDG_CONFIG_HOME: configHome } : {} }
+  const input = { installRoot: f.root, operationId: f.operationId, home: f.home, env: { ...f.env, ...(mode === 'xdg-config' ? { XDG_CONFIG_HOME: configHome } : {}) } }
   if (mode === 'absent') await fs.unlink(entry)
   if (mode === 'missing-directory') await fs.rm(path.dirname(entry), { recursive: true })
   if (mode === 'custom') await fs.appendFile(entry, 'X-Custom=keep\n')
-  if (mode === 'other-executable') await fs.writeFile(entry, (await fs.readFile(entry, 'utf8')).replace(executable, path.join(f.home, 'other-program')))
+  if (mode === 'other-executable') {
+    const previous = await fs.readFile(entry, 'utf8'), replacement = ubuntuLoginStartupEntry(path.join(f.home, 'other-program'))
+    assert.notEqual(previous, replacement)
+    await fs.writeFile(entry, replacement)
+  }
   if (mode === 'disabled') await fs.appendFile(entry, 'Hidden=true\n')
   if (mode === 'permissions') await fs.chmod(entry, 0o644)
   if (mode === 'symlink') { await fs.rename(entry, entry + '.original'); await fs.symlink(entry + '.original', entry) }
@@ -237,6 +241,8 @@ for (const mode of ['owned', 'xdg-config', 'absent', 'missing-directory', 'custo
   if (mode === 'running') await fs.writeFile(path.join(f.data, 'mm.pid'), String(process.pid))
   if (mode === 'preparation') await privateJson(path.join(f.root, '.desktop-installing.json'), { schema_version: 1, id: randomUUID(), installation_id: f.removal.installation_id, selection: f.removal.source_selection, phase: 'prepared', payload_sha256: '0'.repeat(64) })
   const before = await fs.readFile(entry).catch(() => null), marker = await fs.readFile(path.join(f.root, '.desktop-removal.json')), locator = await fs.readFile(f.locator)
+  const { readInstallationLocator } = await import('../dist/installation-entries.js')
+  assert.deepEqual(await readInstallationLocator(f.home, process.platform, input.env), JSON.parse(locator))
   let injected = false
   if (['late-change', 'late-lock', 'late-parent'].includes(mode)) {
     const stat = fs.lstat; let reads = 0
