@@ -12,7 +12,7 @@ const target = path.join(temporary, 'source'), node = process.execPath
 try {
   await fs.mkdir(target)
   const archive = path.join(temporary, 'main.tar')
-  execFileSync('git', ['archive', '--format=tar', '--output=' + archive, base], { cwd: repository, stdio: 'inherit', timeout: 30000 })
+  execFileSync('git', ['-c', 'core.autocrlf=false', '-c', 'core.eol=lf', 'archive', '--format=tar', '--output=' + archive, base], { cwd: repository, stdio: 'inherit', timeout: 30000 })
   const tar = process.platform === 'win32' ? path.join(process.env.SystemRoot, 'System32/tar.exe') : '/usr/bin/tar'
   execFileSync(tar, ['-xf', archive, '-C', target], { stdio: 'inherit', timeout: 30000 })
   await fs.unlink(archive)
