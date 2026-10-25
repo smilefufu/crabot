@@ -18,15 +18,27 @@ try {
   await fs.unlink(archive)
   const nativeFiles = execFileSync('git', ['ls-tree', '-rz', '--name-only', source, 'crabot-native/src'], { encoding: 'utf8' }).split('\0').filter(Boolean)
   const tests = ['process-identity.test.mjs', 'known-process-exit.test.mjs', 'known-process-termination.test.mjs', 'product-runtime.test.mjs',
-    'cli-launcher.test.mjs', 'private-file-paths.test.mjs', 'program-references.test.mjs', 'directory-move.test.mjs', 'file-move.test.mjs', 'directory-pin.test.mjs']
+    'cli-launcher.test.mjs', 'private-file-paths.test.mjs', 'program-references.test.mjs', 'directory-move.test.mjs', 'file-move.test.mjs', 'directory-pin.test.mjs', 'workspace-windows-metadata.test.mjs']
   const files = [...nativeFiles, 'scripts/build-native.mjs', 'scripts/lib/product-prepare.mjs', 'scripts/lib/product-runtime.cjs',
-    'scripts/lib/process-identity.cjs', 'scripts/lib/known-process-exit.cjs', ...tests.map(name => 'scripts/lib/__tests__/' + name),
+    'scripts/lib/process-identity.cjs', 'scripts/lib/known-process-exit.cjs', 'scripts/lib/workspace-file-metadata.mjs', 'scripts/lib/workspace-windows-metadata.mjs', ...tests.map(name => 'scripts/lib/__tests__/' + name),
     'scripts/lib/__tests__/fixtures/program-reference-build.mjs', 'scripts/lib/__tests__/fixtures/program-reference-holder.cc']
   if (!nativeFiles.length) throw new Error('Native candidate source is absent')
   for (const name of files) {
     const destination = path.join(target, name)
     await fs.mkdir(path.dirname(destination), { recursive: true })
-    await fs.writeFile(destination, execFileSync('git', ['show', source + ':' + name], { maxBuffer: 1024 * 1024 }))
+    let bytes = execFileSync('git', ['show', source + ':' + name], { maxBuffer: 1024 * 1024 })
+    // These files span review batches. B1 supplies the read-only Native facts;
+    // B5 later adds relocation/host behavior together with its Shared dependency.
+    let boundary
+    if (name === 'scripts/lib/workspace-file-metadata.mjs') boundary = '\n/** Content plus owner'
+    else if (name === 'scripts/lib/__tests__/workspace-windows-metadata.test.mjs') boundary = "\ntest('Native metadata failure labels"
+    if (boundary) {
+      const at = bytes.indexOf(boundary)
+      if (at < 0 || bytes.indexOf(boundary, at + 1) !== -1) throw new Error('Native review hunk boundary changed')
+      bytes = bytes.subarray(0, at)
+      if (bytes.includes('crabot-shared') || bytes.includes('workspace-file-host')) throw new Error('Later relocation dependency leaked into B1')
+    }
+    await fs.writeFile(destination, bytes)
   }
   for (const name of ['run-bounded.mjs', 'install-network.mjs', 'scrapling-runtime.cjs']) {
     const original = execFileSync('git', ['show', base + ':scripts/lib/' + name])
