@@ -17,7 +17,7 @@ import { materializeLegacyRelease } from './fixtures/legacy-release.mjs'
 import { writeCoreRelease, verifyCoreRelease } from '../core-release.mjs'
 import { installSystemCore } from '../system-conversion-install.mjs'
 const options = { skip: process.platform === 'win32' }
-async function fixture(t) {
+async function fixture(t, { running = false } = {}) {
   const parent = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'crabot-conversion-install-')))
   t.after(() => fs.rm(parent, { recursive: true, force: true }))
   const old = path.join(parent, 'old'), sourceRoot = path.join(parent, 'new'), global = path.join(parent, 'bin/crabot'), hintsFile = path.join(parent, 'ports.json')
@@ -52,7 +52,13 @@ async function fixture(t) {
         observe: async (account, { release: oldRelease, portOffsetHint }) => ({ user: account.user, uid: account.uid, port_offset: portOffsetHint,
           install_root: old, code_fingerprint: oldRelease.code_fingerprint, manifest_fingerprint: 'b'.repeat(64),
           data_dir: path.join(parent, 'private-data-' + account.uid), data_directory: { device: '1', inode: String(account.uid) },
-          runtime_state: 'stopped', data_binding: 'verified_stopped' }) })
+          runtime_state: running && account.uid === accounts[0].uid ? 'running' : 'stopped',
+          data_binding: running && account.uid === accounts[0].uid ? 'observed_running' : 'verified_stopped',
+          ...(running && account.uid === accounts[0].uid ? {
+            controller: { pid: 81001, parent: 1, owner: String(account.uid), started: 'old-controller', executable: '/usr/bin/node' },
+            mm: { pid: 81002, parent: 81001, owner: String(account.uid), started: 'old-mm', executable: '/usr/bin/node' },
+            mm_port: 19000 + portOffsetHint, launch_kind: 'daemon',
+          } : {}) }) })
     },
     submit: async (plan, value) => {
       calls.push('submit'); submitted = plan
@@ -113,7 +119,7 @@ test('a noninteractive conversion cannot silently accept maintenance', options, 
   await assert.rejects(f.invoke({ confirm: undefined }), /交互终端/)
   await assert.rejects(fs.lstat(f.registry.directory), { code: 'ENOENT' })
 })
-for (const incomplete of [false, true]) test('rerunning the original installer uses only an independently completed conversion: ' + incomplete, options, async t => {
+for (const incomplete of [false, true, 'migration', 'unsettled']) test('rerunning the original installer uses only an independently completed conversion: ' + incomplete, options, async t => {
   const f = await fixture(t); await f.invoke()
   const plan = f.submitted(), fence = f.args.fence
   const result = await f.store.run(plan.id, { conversion: {
@@ -128,8 +134,11 @@ for (const incomplete of [false, true]) test('rerunning the original installer u
   assert.equal(result.exit_code, 0)
   if (incomplete) {
     const file = f.store.file(plan.id), job = f.store.read(file, true)
-    job.phase = 'interrupted'; f.store.write(file, job, 0o600)
-    await assert.rejects(f.invoke(), /未完成/)
+    if (incomplete === 'migration') job.progress.results[0].migrated = false
+    else if (incomplete === 'unsettled') job.progress.results[0].state = 'pending'
+    else job.phase = 'interrupted'
+    f.store.write(file, job, 0o600)
+    await assert.rejects(f.invoke())
   } else {
     const repeated = await f.invoke()
     assert.equal(repeated.installRoot, plan.install_root)
@@ -184,4 +193,30 @@ if status is None or os.waitstatus_to_exitcode(status)!=0: sys.exit(1)
   assert.equal(probe.status, 0, probe.stdout + probe.stderr)
   assert.match(probe.stdout, new RegExp('CONFIRM_RESULT=' + (answer === 'y')))
   assert.equal(probe.stdout.split('[y/N]').length, 2)
+})
+
+test('a safely observed conversion recovery permits repeating the original installer despite its historical nonzero action result', options, async t => {
+  const f = await fixture(t, { running: true }); await f.invoke()
+  const plan = f.submitted(), fence = f.args.fence
+  const original = await f.store.run(plan.id, { conversion: {
+    fence: () => fence.fence(plan.source, plan.id), stop: async () => ({ state: 'stopped', request_acknowledged: true }),
+    snapshot: async () => ({ id: randomUUID(), system_operation_id: plan.id, target_id: plan.target.id, backup: { id: randomUUID(), sha256: 'c'.repeat(64) } }),
+    selectTarget: () => f.command.select(plan), sealSource: (id, operation) => fence.seal(f.old, id, operation),
+    migrate: async () => ({ migrated: true, service_started: false }), register: entry => f.registry.registerConverted(entry, { operationId: plan.id }),
+    configure: async () => {}, observeTarget: async () => ({ state: 'stopped' }), startTarget: async () => { throw Error('controlled lost startup reply') },
+  } })
+  assert.equal(original.exit_code, 1); assert.equal(original.results[0].state, 'unknown')
+  const prepared = await f.store.prepareRecovery(plan.id, 'continue', { checkCoordinator: async () => {} })
+  const restored = await f.store.runRecovery(plan.id, prepared.recovery.id, {
+    verify: async () => assert.equal(await f.command.selected(plan), 'target'),
+    verifyTargetData: async () => ({ verified: true, service_started: false }),
+    observeTarget: async entry => entry.uid === plan.instances[0].entry.uid
+      ? { state: 'running', ready: true, core_id: plan.target.id, core_version: plan.target.version, generation: 'observed-target' }
+      : { state: 'stopped', generation: null },
+    startTarget: () => assert.fail('issued startup must not repeat'),
+  })
+  assert.equal(restored.exit_code, 1); assert.equal(restored.results[0].original_action_unknown, true)
+  assert.equal(restored.phase, 'completed'); assert.deepEqual(f.store.maintenance().unsettled, [])
+  const repeat = await f.invoke(); assert.equal(repeat.installRoot, plan.install_root)
+  assert.equal(f.store.maintenance().id, plan.id); assert.equal(f.calls.filter(call => call === 'confirm').length, 1)
 })

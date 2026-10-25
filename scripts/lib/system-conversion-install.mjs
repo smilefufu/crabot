@@ -14,6 +14,7 @@ import { LegacySystemEntryFence } from './legacy-system-fence.mjs'
 import { LegacySystemCommandLink } from './legacy-system-command.mjs'
 import { readLegacySystemHints } from './legacy-system-hints.mjs'
 import { preflightLegacySystemConversion } from './system-conversion-preflight.mjs'
+import { systemConversionRecoveryOptions } from './system-conversion-recovery.mjs'
 import { planSystemConversion, validateSystemConversionPlan } from './system-conversion.mjs'
 import { SystemRegistry, systemError } from './system-registry.mjs'
 import { SystemOperationStore } from './system-operation.mjs'
@@ -61,8 +62,12 @@ export async function installSystemCore({ sourceRoot, installRoot, version, regi
       const plan = validateSystemConversionPlan(job?.plan)
       if (previous.phase !== 'data_changing' || !previous.entries_fenced || job.phase !== 'completed'
         || plan.id !== previous.operation_id || job.progress?.id !== plan.id || job.progress.source_fence_id !== previous.id
-        || job.progress?.phase !== 'completed' || job.progress.exit_code !== 0 || plan.install_root !== targetRoot
+        || job.progress?.phase !== 'completed' || ![0, 1].includes(job.progress.exit_code) || plan.install_root !== targetRoot
         || !isDeepStrictEqual(previous.installation, plan.source)) throw systemError('旧转换尚未完成，保留原保护；请通过已准备管理入口运行system status核对。')
+      systemConversionRecoveryOptions(plan, job.progress)
+      if (job.progress.results.some(row => !['healthy', 'kept_stopped', 'observed_running', 'observed_stopped'].includes(row.state))) {
+        throw systemError('旧转换仍有未核实结果，原保护和数据保留；请先完成system recover核对。')
+      }
       const id = cliLocation.readCliSelection(targetRoot)
       if (!id) throw systemError('已有转换的受管版本定位缺失，原数据保留，请修复安装。')
       const coreRoot = path.join(targetRoot, 'releases', id)

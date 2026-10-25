@@ -1,5 +1,6 @@
 // Published legacy archives, real dropped UIDs and the ordinary installer. This
-// fixture starts with stopped instances; it does not prove old running recovery.
+// fixture covers stopped profiles and a real original running/stopped set;
+// it does not claim interrupted-source restoration or a real model session.
 import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
 import { createReadStream, createWriteStream } from 'node:fs'
@@ -79,8 +80,8 @@ for (const release of releases) {
   const id = randomUUID().slice(0, 8), base = '/var/lib/crabot-legacy-acceptance-' + id, old = path.join(base, 'old'), managed = path.join(old, '.managed')
   const users = [], registry = new SystemRegistry(), store = new SystemOperationStore(registry)
   let ownOs = false, ownBase = false, core
-  const asUser = (entry, args) => run('/usr/bin/setpriv', ['--reuid=' + entry.uid, '--regid=' + entry.gid, '--init-groups', '--', node, ...args],
-    { env: { PATH: '/usr/bin:/bin', HOME: entry.home, USER: entry.user, LOGNAME: entry.user, LANG: 'C.UTF-8', HTTP_PROXY: env.HTTP_PROXY, HTTPS_PROXY: env.HTTPS_PROXY } })
+  const asUser = (entry, args, overrides = {}) => run('/usr/bin/setpriv', ['--reuid=' + entry.uid, '--regid=' + entry.gid, '--init-groups', '--', node, ...args],
+    { env: { PATH: '/usr/bin:/bin', HOME: entry.home, USER: entry.user, LOGNAME: entry.user, LANG: 'C.UTF-8', HTTP_PROXY: env.HTTP_PROXY, HTTPS_PROXY: env.HTTPS_PROXY, ...overrides } })
   console.log('CRABOT_LEGACY_ACCEPTANCE ' + JSON.stringify({ version: release.version, phase: 'preparing' }))
   try {
     for (const file of ownedOsFiles) await absent(file)
@@ -92,7 +93,8 @@ for (const release of releases) {
     await run('/bin/tar', ['--extract', '--gzip', '--file=' + archive, '--directory=' + old, '--strip-components=1', '--no-same-owner', '--no-same-permissions'])
     await fs.writeFile(path.join(old, 'VERSION'), release.version + '\n')
     const discovered = await discoverLegacySystemRelease({ root: old }); assert.equal(discovered.version, release.version)
-    // These are the old installer's standard OS markers. No old code executes.
+    // These are the old installer's standard OS markers; old business startup
+    // is explicit below and confined to these newly created CI accounts.
     await fs.mkdir('/etc/crabot'); ownOs = true
     for (const name of ['registry', 'defaults']) await fs.mkdir('/etc/crabot/' + name)
     await fs.writeFile('/etc/crabot/cluster.version', '1\n')
@@ -115,6 +117,14 @@ for (const release of releases) {
       assert.match(entry.credentials_sha256, /^[a-f0-9]{64}$/)
     }
     await fs.writeFile('/etc/crabot/registry/ports.json', JSON.stringify(users.map(entry => ({ user: entry.user, offset: entry.port_offset }))) + '\n', { mode: 0o664 })
+    const oldRunning = release.version === 'v2026.10.15.1'
+    if (oldRunning) {
+      const employee = users[0]
+      console.log('CRABOT_LEGACY_ACCEPTANCE ' + JSON.stringify({ version: release.version, phase: 'original-runtime-starting' }))
+      await asUser(employee, [path.join(old, 'scripts/start.mjs'), '-d'], {
+        DATA_DIR: employee.data_dir, CRABOT_PORT_OFFSET: String(employee.port_offset), CRABOT_HOME: old,
+      })
+    }
     console.log('CRABOT_LEGACY_ACCEPTANCE ' + JSON.stringify({ version: release.version, phase: 'ordinary-installer' }))
     await run('/usr/bin/python3', ['-I', '-B', '-c', ptyCode, path.join(source, 'install.sh'), '--install-dir=' + old], { timeout: 510_000 })
     assert.equal(await fs.readlink('/usr/local/bin/crabot'), path.join(managed, 'bin/crabot'))
@@ -122,12 +132,19 @@ for (const release of releases) {
     await verifyCoreRelease(core)
     const maintenance = store.maintenance(), job = store.read(store.file(maintenance.id), true)
     assert.equal(job.plan.kind, 'conversion'); assert.equal(job.phase, 'completed'); assert.equal(job.progress.exit_code, 0)
-    assert.deepEqual(job.progress.results.map(row => row.state), ['kept_stopped', 'kept_stopped'])
-    const entries = registry.read(); assert.equal(entries.length, users.length)
+    assert.deepEqual(job.progress.results.map(row => row.state), oldRunning ? ['healthy', 'kept_stopped'] : ['kept_stopped', 'kept_stopped'])
+    assert.deepEqual(job.plan.instances.map(item => item.observation.runtime_state), oldRunning ? ['running', 'stopped'] : ['stopped', 'stopped'])
+    for (const { observation } of job.plan.instances.filter(item => item.observation.runtime_state === 'running')) {
+      for (const original of [observation.controller, observation.mm]) assert.equal(identity.sameProcess(original, identity.inspectProcess(original.pid)), false)
+    }
+    const entries = registry.read(), generations = new Map(); assert.equal(entries.length, users.length)
     for (const user of users) {
       const entry = entries.find(value => value.uid === user.uid)
       assert.equal(entry.port_offset, user.port_offset); assert.equal(entry.data_dir, user.data_dir); assert.equal(entry.autostart, false)
-      assert.equal((await runSystemUser(entry, { root: core, action: 'inspect' })).state, 'stopped')
+      const current = await runSystemUser(entry, { root: core, action: 'inspect' })
+      assert.equal(current.state, oldRunning && user.uid === users[0].uid ? 'running' : 'stopped')
+      generations.set(entry.uid, current.generation)
+      if (current.state === 'running') { assert.equal(current.ready, true); assert.equal(current.core_id, selected) }
       const verify = `import fs from 'node:fs';import path from 'node:path';import {createHash} from 'node:crypto';
         const home=path.join(process.env.HOME,'.crabot'),data=path.join(home,'data-'+process.argv[1]),manifest=JSON.parse(fs.readFileSync(path.join(home,'instance.json')));
         if(manifest.api_key!=='fixture-original-private-key'||manifest.crabot_home!==process.argv[2]||manifest.data_dir!==data)throw Error('original private manifest changed');
@@ -140,11 +157,21 @@ for (const release of releases) {
     await run('/bin/bash', [path.join(source, 'install.sh'), '--system', '--install-dir=' + old], { timeout: 300_000 })
     assert.equal(store.maintenance().id, maintenance.id, 'repeat installer must not create another conversion')
     assert.equal(await fs.readFile('/etc/systemd/user/crabot.service', 'utf8'), renderSystemUserService(managed))
+    for (const entry of entries) assert.equal((await runSystemUser(entry, { root: core, action: 'inspect' })).generation, generations.get(entry.uid), 'repeat install does not restart a user')
+    const stoppedDeadline = Date.now() + 10_000
+    for (;;) {
+      try { await assertCoordinatorStopped(job); break }
+      catch (error) { if (Date.now() >= stoppedDeadline) throw error; await new Promise(resolve => setTimeout(resolve, 100)) }
+    }
+    const jobFile = store.file(job.plan.id), maintenanceFile = path.join(store.directory, 'maintenance.json')
+    const beforePreview = await Promise.all([fs.readFile(jobFile), fs.readFile(maintenanceFile)])
+    await run(path.join(managed, 'bin/crabot'), ['system', 'recover', job.plan.id])
+    assert.deepEqual(await Promise.all([fs.readFile(jobFile), fs.readFile(maintenanceFile)]), beforePreview, 'recovery preview cannot mutate root records')
     reports.push({ version: release.version, published_archive_sha256: release.sha256, actual_uid_count: users.length,
       ordinary_installer: true, stopped_instances_preserved: true, original_ports_and_data: true, credentials_and_history_preserved: true,
-      repeated_install_no_new_job: true, actual_old_runtime_started: false, business_model_calls: 0 })
+      repeated_install_no_new_job: true, recovery_preview_readonly: true, actual_old_runtime_started: oldRunning, original_running_set_restored: oldRunning, business_model_calls: 0 })
     await fs.writeFile(evidence, JSON.stringify({ schema_version: 1, cases: reports }, null, 2) + '\n')
-    console.log('CRABOT_LEGACY_ACCEPTANCE ' + JSON.stringify({ version: release.version, phase: 'passed-stopped-conversion' }))
+    console.log('CRABOT_LEGACY_ACCEPTANCE ' + JSON.stringify({ version: release.version, phase: oldRunning ? 'passed-original-running-set-conversion' : 'passed-stopped-conversion' }))
   } catch (error) {
     console.error('CRABOT_LEGACY_ACCEPTANCE ' + JSON.stringify({ version: release.version, phase: 'failed', code: error.code ?? 'ACCEPTANCE_FAILED' }))
     throw error

@@ -54,7 +54,7 @@
 - 共同运行环境、Client/桌面认证、项目目录/权限、workspace迁移/恢复、system生命周期及安装维护已有组件和部分原生证据；构建/组件测试/旧候选/最终使用验收严格区分。[总验收记录](crabot-docs/superpowers/plans/2026-10-17-desktop-application-validation.md)及各专题计划保留逐项历史，不在此重复过期待跑项。
 - 三个实际审查分支已建且自身CI通过，尚不建PR：B1 feat/desktop-native-foundation/ef028eca，40代码文件/hunk＋3构建说明/CI/ignore，四平台109项（Ubuntu90过、双Mac88过、Windows97过，其余平台条件跳过）；SDK feat/desktop-client-sdk/9ee3ce09，25自身文件＋CI，三平台各35/35。均从29bd独立构建，不依赖完整feature或预存其它模块dist。运行基础feat/desktop-runtime-foundation/65cd7eb6基于B1，新增10文件/818行，自身四平台34项（双Mac/Ubuntu33过1跳过、Windows32过2跳过），未安装SDK/GUI；完整产品验收与后续批次未完成。
 - 当前完整CI55e6ec72：Ubuntu引导通过；ARM普通目标仍未完成健康收口（runtime未创建、维护verifying）；Intel安装测试组在仍运行时达到15分钟；Linux仅一项好友权限测试在表单尚未初始化时操作失败。Windows仍在真实安装器构建。现保持全部断言/原产品期限，将CLI安装文件独立分组、补表单等待与固定定位阶段；本地Electron边界5/5、定位摘要9/9、对话对象47/47。完整更新仍不算通过。
-- 原system恢复§5.1已补全部UID迁移/配置有持久化成功回执后的专用恢复：本人只读核对原备份、实际schema/manifest和目录绑定，只补从未发出的原运行集合启动，不重放未知动作。全相关554项（553过1平台跳过），简化后恢复/根作业67/67；真实旧发行/跨UID仍由CI验证。
+- 原system恢复§5.1已补全部UID迁移/配置有持久化成功回执后的专用恢复：本人只读核对原备份、实际schema/manifest和目录绑定，只补从未发出的原运行集合启动，不重放未知动作。全相关557项（556过1平台跳过），简化后恢复/根作业67/67；修复已安全结算但历史exit=1导致重复安装误拒绝的回归，保留未知/未迁移拦截。真实旧发行/跨UID仍由CI验证。
 - 旧system标准停止实例的既有路径已补齐：同UID核验官方账号清单及固定HOME/.crabot/data-OFFSET后返回原协议verified_stopped，只允许原snapshot/migrate/cancel-preparation，原停止用户不启动。定向103项及扩大旧system相关216项全部通过，含真实临时凭据保留/范围备份和有限迁移；缺失/冲突/活进程拒绝，不初始化空数据。完整Root/多UID转换仍待。
 - S5根转换适配已接旧隔离/专用UID数据动作/原子命令切换/注册与目标服务；备份失败的本人恢复沿原Node与旧正常start，根真实文件事务串联到角色许可后复现并修正kept_stopped阶段误拒绝。完整system/legacy-system及简化复验均448项通过；仅当前UID文件事务和受控服务/进程观察，不代表真实旧发行多UID转换完成，安装器与真实恢复仍待。
 - 成对更新启动时序：ARM原生故障收窄到普通main的Electron就绪前；真实入口先红复现异步完整性校验后才设置profile/单实例锁，现从受保护GUI同步绑定既有data内界面目录，完整Core仍在外部导入前核验。20项实际Electron/交接/脱敏回归通过；Windows闲置测试连接清理另4项实际Electron通过。仍待完整原生整包复验，不计更新已验收。
