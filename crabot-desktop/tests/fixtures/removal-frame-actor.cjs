@@ -16,7 +16,9 @@ const actorStarted = Date.now()
 function stage(name) {
   if (host && cfg.stageFile) fs.writeFileSync(cfg.stageFile, JSON.stringify({ stage: name, elapsed_ms: Date.now() - actorStarted }) + '\n')
 }
-const timer = setTimeout(() => app.exit(2), 60000)
+// The retry scenario performs eight full GUI checks; this bounds only the
+// finite test actor, not a product stop, source exit or removal operation.
+const timer = setTimeout(() => app.exit(2), cfg.mode.includes('source-remove') ? 120000 : 60000)
 async function send(result) {
   await new Promise((resolve, reject) => process.send(result, error => error ? reject(error) : resolve()))
 }
