@@ -53,6 +53,7 @@
 - 范围初审以acc8a2c5对最新origin/main的merge-base计：879文件、84644新增/2563删除行，其中实现约38104新增行；不能作为单一PR提交。[总实施计划](crabot-docs/superpowers/plans/2026-10-17-desktop-application-implementation.md)已记录固定闭环与候选依赖批次；跨Core/Admin/start等共用文件须按行为拆分并独立验证，不能机械按目录拆PR。当前不重写历史、不提前建PR、不推产品main。
 - 共同运行环境、Client/桌面认证、项目目录/权限、workspace迁移/恢复、system生命周期及安装维护已有组件和部分原生证据；构建/组件测试/旧候选/最终使用验收严格区分。[总验收记录](crabot-docs/superpowers/plans/2026-10-17-desktop-application-validation.md)及各专题计划保留逐项历史，不在此重复过期待跑项。
 - 可审查边界实测：独立临时目录仅提取共享SDK的25个跟踪文件，只复用已安装的TypeScript/Zod，独立构建及35项真实SDK测试通过；未带Core/Admin/workspace实现，原生库候选仅带31文件和缓存头文件，原构建脚本禁止网络仍重编库/CLI成功，进程回归30过2平台跳过；不等于主线集成或其它批次已可合并。
+- 当前完整CI：e961 Linux基础组已通过；ARM完整更新已过旧discard卡点并出现普通目标GUI，但健康收口失败，正补目标侧证据。Intel两项源退出移除夹具20秒提前失败：有限慢读取在原逻辑复现，等待覆盖原60秒actor后4项及完整42场景通过；产品期限不改，Intel原生重验仍待。
 - 固定剩余闭环：完整成对更新；旧user CLI原位接管；已有安装修复和保留数据卸载/重装真实健康；旧system发行完整转换/恢复；workspace更早故障阶段恢复；原三平台真实使用/发行验收。不得再扩充产品子项目或以当前组件替代完整行为。
 - I4维护已有保护/证明/私有GUI、真实双锁stop/原GUI退出、清单程序/菜单/CLI/Windows Run与Ubuntu登录项组件，原程序补回、静态数据判断及包内Node范围预检不授迁移/正常启动权限。Ubuntu固定GTK资源e6ea150d经隔离Ubuntu24真实编译、7组控件/管道和窗口烟测通过；GTK/Node显示交接已补真实map就绪、有界消息、取消/断连及确切子进程退出，通信/进程26过1待Linux联测、归档/范围167过、原Electron维护4过；35d的Ubuntu24实际GTK 8组、Node/GTK 21项全过；固定Node代码43资源已构建，私有Node/空PATH/实际ASAR及相关171项通过，正常GUI完整封装仍待CI。尚未接完整私有Node宿主及卸载产品入口。[卸载实施/证据](crabot-docs/superpowers/plans/2026-10-24-desktop-retained-data-uninstall-implementation.md)。
 - 三份未确认草稿（重装验证新记录、受保护系统进程例外、旧Node指纹恢复）停作待批准实施项，仅保留历史，不实现所提新契约；原修复/卸载/旧部署兼容目标继续按既有约定完成。现有启动保护和原始未知拒绝保持，不擅自绕过。

@@ -66,7 +66,8 @@ before(async () => {
   await sealDesktopPayload(payload)
 }, 120000)
 after(async () => { if (root) await fs.rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }) })
-for (const mode of ['valid', 'node-parent', 'unexpected-source-args', 'changed-copy', 'other-installation', 'publish-close', 'publish-cancel', 'publish-module', 'publish-damaged', 'publish-lost-reply', 'publish-replaced-record', 'publish-live', 'publish-cancel-lost', 'publish-stop', 'publish-stop-wrong-root', 'publish-stop-lost', 'publish-stop-retry', 'publish-stop-lost-retry', 'publish-inherited-cwd', 'publish-source-verifier', 'publish-source-exit', 'publish-source-retry', 'publish-source-late-exit', 'publish-source-ignore', 'publish-source-disconnect', 'resume-valid', 'resume-core-missing', 'resume-wrong-operation', 'resume-changed-copy', 'resume-source-changed', 'resume-lease-cancel', 'resume-lease-stopping', 'resume-lease-removing', 'resume-lease-completed', 'resume-lease-core-missing', 'resume-lease-wrong-operation', 'resume-lease-busy', 'resume-lease-source-exit', 'publish-source-remove', 'publish-source-remove-retry', 'resume-lease-source-remove']) test('actual protected initial removal frame: ' + mode, { skip: !supported, timeout: 60000 }, async t => {
+for (const scenario of ['valid', 'node-parent', 'unexpected-source-args', 'changed-copy', 'other-installation', 'publish-close', 'publish-cancel', 'publish-module', 'publish-damaged', 'publish-lost-reply', 'publish-replaced-record', 'publish-live', 'publish-cancel-lost', 'publish-stop', 'publish-stop-wrong-root', 'publish-stop-lost', 'publish-stop-retry', 'publish-stop-lost-retry', 'publish-inherited-cwd', 'publish-source-verifier', 'publish-source-exit', 'publish-source-retry', 'publish-source-late-exit', 'publish-source-ignore', 'publish-source-disconnect', 'resume-valid', 'resume-core-missing', 'resume-wrong-operation', 'resume-changed-copy', 'resume-source-changed', 'resume-lease-cancel', 'resume-lease-stopping', 'resume-lease-removing', 'resume-lease-completed', 'resume-lease-core-missing', 'resume-lease-wrong-operation', 'resume-lease-busy', 'resume-lease-source-exit', 'publish-source-remove', 'publish-source-remove-retry', 'resume-lease-source-remove', 'publish-source-remove-retry-delayed']) test('actual protected initial removal frame: ' + scenario, { skip: !supported, timeout: scenario.includes('source-remove') ? 120000 : 60000 }, async t => {
+  const mode = scenario.endsWith('-delayed') ? scenario.slice(0, -8) : scenario
   const area = await fs.mkdtemp(path.join(root, 'case-'))
   const cancelled = ['publish-cancel', 'publish-cancel-lost', 'publish-stop', 'publish-stop-retry', 'publish-stop-lost-retry', 'publish-source-exit', 'publish-source-retry', 'publish-source-late-exit', 'publish-source-verifier', 'resume-lease-cancel'].includes(mode)
   const sourceExitMode = ['publish-source-exit', 'publish-source-retry', 'publish-source-late-exit', 'resume-lease-source-exit', 'publish-source-remove', 'publish-source-remove-retry', 'resume-lease-source-remove'].includes(mode)
@@ -97,7 +98,7 @@ for (const mode of ['valid', 'node-parent', 'unexpected-source-args', 'changed-c
     const record = readInstanceRuntime(own.dataDir)
     await fs.writeFile(path.join(own.dataDir, 'instance-runtime.json'), JSON.stringify({ ...record, install_root: area }) + '\n')
   }
-  const operationId = randomUUID(), cfg = { root: own.root, operationId, mode, resultFile: path.join(area, 'host-result.json') }
+  const operationId = randomUUID(), cfg = { root: own.root, operationId, mode, resultFile: path.join(area, 'host-result.json'), stageFile: path.join(area, 'host-stage.json'), removalPinDelayMs: scenario.endsWith('-delayed') ? 3000 : 0 }
   if (mode === 'other-installation') cfg.inspectRoot = (await commitDesktopInstallation(await prepareDesktopInstallation({ payload, installRoot: path.join(area, 'other') }))).root
   await fs.writeFile(path.join(own.dataDir, 'preserved-user-file'), 'user bytes')
   const config = path.join(area, 'control.json'); await fs.writeFile(config, JSON.stringify(cfg))
@@ -118,16 +119,23 @@ for (const mode of ['valid', 'node-parent', 'unexpected-source-args', 'changed-c
     const exitState = () => probeKnownProcessExit([host]).state
     t.after(async () => {
       if (identity.sameProcess(host, identity.inspectProcess(host.pid))) globalThis.process.kill(host.pid, 'SIGKILL')
-      if (exitState() === 'stopped') await fs.rm(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 })
+      const deadline = Date.now() + 5000
+      while (exitState() === 'running' && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 25))
+      if (exitState() !== 'stopped') throw new Error('Known fixture host exit remains unverified; private copy retained')
+      await fs.rm(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 })
     })
-    const deadline = Date.now() + 20000
+    // A multi-attempt removal actor already has its own 60s lifetime. Wait
+    // beyond that bound so the parent observes its actual result or exit.
+    const waitingSince = Date.now(), deadline = waitingSince + (mode.includes('source-remove') ? 70000 : 20000)
     while (!(await fs.lstat(cfg.resultFile).catch(() => null)) || exitState() !== 'stopped') {
       if (Date.now() > deadline) throw new Error('Independent host did not finish after actual source exit: ' + JSON.stringify({
-        host_exit_state: exitState(), result: await fs.readFile(cfg.resultFile, 'utf8').then(JSON.parse).catch(() => null),
+        last_stage: await fs.readFile(cfg.stageFile, 'utf8').then(JSON.parse).catch(() => null), host_exit_state: exitState(), result: await fs.readFile(cfg.resultFile, 'utf8').then(JSON.parse).catch(() => null),
       }))
       await new Promise(resolve => setTimeout(resolve, 100))
     }
     result = JSON.parse(await fs.readFile(cfg.resultFile, 'utf8'))
+    if (mode.includes('source-remove')) console.log('CRABOT_REMOVAL_HOST_TIMING ' + JSON.stringify({ scenario, post_source_exit_ms: Date.now() - waitingSince, controlled_pin_delay_ms: cfg.removalPinDelayMs, pin_reads: result.removalPinReads, removal_elapsed_ms: result.removalElapsedMs }))
+    if (scenario.endsWith('-delayed')) { assert.ok(result.removalPinReads >= 8, JSON.stringify(result)); assert.ok(result.removalElapsedMs > 20000, JSON.stringify(result)) }
   }
   if (mode.startsWith('resume-')) {
     assert.equal(result.accepted, ['resume-valid', 'resume-core-missing', 'resume-lease-cancel', 'resume-lease-stopping', 'resume-lease-removing', 'resume-lease-completed', 'resume-lease-core-missing', 'resume-lease-source-exit', 'resume-lease-source-remove'].includes(mode), JSON.stringify(result))

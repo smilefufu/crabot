@@ -12,12 +12,17 @@ const profile = host ? path.resolve(process.resourcesPath, process.platform === 
 fs.mkdirSync(profile, { recursive: true, mode: 0o700 }); app.setPath('userData', profile)
 const load = name => import(pathToFileURL(path.join(__dirname, 'bootstrap/scripts/lib', name)).href)
 let prepared, child, releaseDataLock
+const actorStarted = Date.now()
+function stage(name) {
+  if (host && cfg.stageFile) fs.writeFileSync(cfg.stageFile, JSON.stringify({ stage: name, elapsed_ms: Date.now() - actorStarted }) + '\n')
+}
 const timer = setTimeout(() => app.exit(2), 60000)
 async function send(result) {
   await new Promise((resolve, reject) => process.send(result, error => error ? reject(error) : resolve()))
 }
 async function assertIndependentHostLocation() {
   const assert = require('node:assert/strict'), native = require('./bootstrap/scripts/lib/process-identity.cjs')
+  stage('host-location-inspection')
   assert.equal(fs.realpathSync(process.cwd()), fs.realpathSync(path.dirname(profile)))
   if (process.platform === 'darwin') {
     const reference = require('./bootstrap/scripts/lib/desktop-installation.cjs').readDesktopPairReference(cfg.root)
@@ -27,11 +32,20 @@ async function assertIndependentHostLocation() {
     assert.equal(observed.unknown_pids.includes(process.pid), false)
     assert.equal(observed.processes.some(value => value.pid === process.pid), false)
   }
+  stage('host-location-confirmed')
 }
 async function removePrograms(lease) {
   const assert = require('node:assert/strict'), native = require('./bootstrap/scripts/lib/process-identity.cjs')
   const physical = require('./bootstrap/scripts/lib/physical-fs.cjs')
-  const original = native.inspectProgramReferences, rename = physical.promises.rename, unlink = physical.unlinkSync
+  const original = native.inspectProgramReferences, rename = physical.promises.rename, unlink = physical.unlinkSync, readFile = physical.promises.readFile
+  const started = Date.now(); let pinReads = 0
+  const observed = async (name, run) => { stage(name + ":start"); const value = await run(); stage(name + ":done"); return value }
+  if (cfg.removalPinDelayMs) physical.promises.readFile = async (...args) => {
+    if (args[0] === path.join(process.resourcesPath, "desktop-release.json")) {
+      pinReads++; await new Promise(resolve => setTimeout(resolve, cfg.removalPinDelayMs))
+    }
+    return readFile(...args)
+  }
   const fence = path.join(cfg.root, '.desktop-removal.json'), read = () => JSON.parse(fs.readFileSync(fence))
   const clear = async () => ({ complete: true, incomplete: false, processes: [], unknown_pids: [] })
   // Only resource answers are controlled here. Parent/source identities, OS
@@ -48,23 +62,23 @@ async function removePrograms(lease) {
       native.inspectProgramReferences = clear
       const pin = path.join(process.resourcesPath, 'desktop-release.json'), bytes = fs.readFileSync(pin)
       fs.appendFileSync(pin, ' ')
-      await assert.rejects(lease.retryRemovePrograms(), { code: 'CRABOT_CORE_INTEGRITY' }); fs.writeFileSync(pin, bytes)
+      await observed("retry-1", () => assert.rejects(lease.retryRemovePrograms(), { code: 'CRABOT_CORE_INTEGRITY' })); fs.writeFileSync(pin, bytes)
       native.inspectProgramReferences = async () => { fs.writeFileSync(fence, JSON.stringify({ ...read(), phase: 'completed' }) + '\n'); return clear() }
-      await assert.rejects(lease.retryRemovePrograms(), { code: 'CRABOT_DESKTOP_REMOVAL' }); fs.writeFileSync(fence, before)
+      await observed("retry-2", () => assert.rejects(lease.retryRemovePrograms(), { code: 'CRABOT_DESKTOP_REMOVAL' })); fs.writeFileSync(fence, before)
       native.inspectProgramReferences = clear
       physical.promises.rename = async (...args) => { if (args[1] === fence) throw Object.assign(new Error('fixture removing not committed'), { code: 'EIO' }); return rename(...args) }
-      await assert.rejects(lease.retryRemovePrograms(), { code: 'EIO' }); assert.equal(read().phase, 'stopping')
+      await observed("retry-3", () => assert.rejects(lease.retryRemovePrograms(), { code: 'EIO' })); assert.equal(read().phase, 'stopping')
       physical.promises.rename = async (...args) => {
         const result = await rename(...args)
         if (args[1] === fence && read().phase === 'removing') throw Object.assign(new Error('fixture lost removing reply'), { code: 'EIO' })
         return result
       }
-      await assert.rejects(lease.retryRemovePrograms(), { code: 'EIO' }); physical.promises.rename = rename
+      await observed("retry-4", () => assert.rejects(lease.retryRemovePrograms(), { code: 'EIO' })); physical.promises.rename = rename
       assert.equal(read().phase, 'removing'); assert.ok(fs.existsSync(path.join(core, 'program.mjs')))
       await assert.rejects(lease.cancel(), { code: 'CRABOT_DESKTOP_REMOVAL' })
       const removing = fs.readFileSync(fence)
       fs.writeFileSync(fence, JSON.stringify({ ...read(), phase: 'completed' }) + '\n')
-      await assert.rejects(lease.retryRemovePrograms(), { code: 'CRABOT_DESKTOP_REMOVAL' }); fs.writeFileSync(fence, removing)
+      await observed("retry-5", () => assert.rejects(lease.retryRemovePrograms(), { code: 'CRABOT_DESKTOP_REMOVAL' })); fs.writeFileSync(fence, removing)
       const gui = path.join(cfg.root, 'app/releases', read().source_selection.gui_id)
       let deleted
       physical.unlinkSync = file => {
@@ -72,12 +86,12 @@ async function removePrograms(lease) {
         if (!deleted && file.startsWith(gui + path.sep)) { deleted = file; throw Object.assign(new Error('fixture lost file removal reply'), { code: 'EIO' }) }
         return result
       }
-      await assert.rejects(lease.retryRemovePrograms(), { code: 'EIO' }); physical.unlinkSync = unlink
+      await observed("retry-6", () => assert.rejects(lease.retryRemovePrograms(), { code: 'EIO' })); physical.unlinkSync = unlink
       assert.ok(deleted); assert.equal(fs.existsSync(deleted), false); assert.equal(read().phase, 'removing')
       const unknown = path.join(core, 'user-kept.txt'); fs.writeFileSync(unknown, 'custom program directory file')
       const retry = lease.retryRemovePrograms(); assert.equal(retry, lease.retryRemovePrograms()); assert.equal(retry, lease.removePrograms())
       assert.throws(() => lease.close(), { code: 'CRABOT_DESKTOP_REMOVAL' })
-      const partial = await retry
+      const partial = await observed("partial-removal", () => retry)
       assert.ok(partial.removed.length > 0); assert.equal(partial.retained.length, 1)
       assert.equal(fs.readFileSync(unknown, 'utf8'), 'custom program directory file'); assert.equal(await lease.removePrograms(), partial)
       await assert.rejects(lease.cancel(), { code: 'CRABOT_DESKTOP_REMOVAL' })
@@ -87,14 +101,14 @@ async function removePrograms(lease) {
     assert.equal(first, lease.removePrograms())
     assert.throws(() => lease.close(), { code: 'CRABOT_DESKTOP_REMOVAL' })
     await assert.rejects(lease.cancel(), { code: 'CRABOT_DESKTOP_REMOVAL' })
-    const result = await first
+    const result = await observed("final-removal", () => first)
     assert.equal((await lease.current()).phase, 'removing')
     if (cfg.mode !== 'publish-source-remove-retry') assert.ok(result.removed.length > 0)
     assert.equal(result.retained.length, 0)
     assert.equal(await lease.removePrograms(), result); assert.equal(await lease.retryRemovePrograms(), result)
     assert.equal(fs.readFileSync(path.join(cfg.root, 'data/preserved-user-file'), 'utf8'), 'user bytes')
-    return { programsRemoved: true, controlledResourceObservation: true, removalRetried: cfg.mode === 'publish-source-remove-retry' }
-  } finally { native.inspectProgramReferences = original; physical.promises.rename = rename; physical.unlinkSync = unlink }
+    return { programsRemoved: true, controlledResourceObservation: true, removalRetried: cfg.mode === 'publish-source-remove-retry', removalPinReads: pinReads, removalElapsedMs: Date.now() - started }
+  } finally { native.inspectProgramReferences = original; physical.promises.rename = rename; physical.unlinkSync = unlink; physical.promises.readFile = readFile }
 }
 async function publication() {
   const { beginInitialDesktopRemoval } = await load('desktop-removal-job.mjs')
