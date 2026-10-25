@@ -2,7 +2,7 @@
 import { app, dialog, shell } from 'electron'
 import path from 'node:path'
 import { homedir, tmpdir } from 'node:os'
-import { mkdtemp, readdir } from 'node:fs/promises'
+import { mkdtemp } from 'node:fs/promises'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
@@ -44,8 +44,10 @@ async function boot() {
   selected = path.resolve(selected)
   // Existing user data must be handled by the takeover flow, never bypassed by
   // choosing another empty root. Its integration remains part of I3.
-  const oldData = await readdir(path.join(homedir(), '.crabot/data')).catch(error => { if (error.code === 'ENOENT') return []; throw error })
-  if (!locator && oldData.length) throw Object.assign(new Error('Legacy installation requires takeover'), { code: 'CRABOT_DESKTOP_TAKEOVER_REQUIRED' })
+  if (!locator) {
+    const { assertFreshUserInstallation } = await import(pathToFileURL(path.join(directory, 'bootstrap/scripts/lib/legacy-desktop.mjs')).href)
+    await assertFreshUserInstallation({ home: homedir(), source: process.env })
+  }
   const welcome = preselected ? { response: 0 } : await dialog.showMessageBox({ type: 'info', title: '安装 Crabot', message: '欢迎安装 Crabot',
     detail: '已包含运行环境，无需额外安装。主要程序和数据将保存在你选择的安装文件夹；工作区可在安装后调整。', buttons: ['继续', '退出'], defaultId: 0, cancelId: 1 })
   if (welcome.response !== 0) return

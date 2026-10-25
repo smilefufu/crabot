@@ -3,8 +3,11 @@ import assert from 'node:assert/strict'
 import { promises as fs, realpathSync } from 'node:fs'
 import path from 'node:path'
 import { tmpdir } from 'node:os'
+import { fileURLToPath } from 'node:url'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
 import { materializeLegacyRelease } from './fixtures/legacy-release.mjs'
-import { discoverLegacyUserInstall, discoverDefaultLegacyUserInstall } from '../legacy-desktop.mjs'
+import { discoverLegacyUserInstall, discoverDefaultLegacyUserInstall, assertFreshUserInstallation } from '../legacy-desktop.mjs'
 
 async function fixture(t) {
   const parent = await fs.mkdtemp(path.join(tmpdir(), 'crabot-legacy-discovery-'))
@@ -122,4 +125,56 @@ for (const mode of ['system', 'dev', 'offset']) test('default discovery refuses 
   if (mode === 'offset') f.source.CRABOT_PORT_OFFSET = '100'
   await assert.rejects(discoverDefaultLegacyUserInstall(f), { code: 'CRABOT_LEGACY_UNSUPPORTED' })
   assert.deepEqual(await fs.readdir(f.home), [])
+})
+
+for (const version of ['v2026.10.14.1', 'v2026.10.15.1']) test('fresh installer cannot bypass an existing release with an empty data directory: ' + version, async t => {
+  const f = await defaultFixture(t)
+  await fs.mkdir(f.dataDir, { recursive: true }); await materializeLegacyRelease(f.root, version)
+  const names = await fs.readdir(f.root)
+  await assert.rejects(assertFreshUserInstallation(f), { code: 'CRABOT_DESKTOP_TAKEOVER_REQUIRED' })
+  assert.deepEqual(await fs.readdir(f.root), names)
+  assert.deepEqual(await fs.readdir(f.dataDir), [])
+})
+
+test('fresh installer preserves an unrecognized old footprint without creating a replacement', async t => {
+  const f = await defaultFixture(t)
+  await fs.mkdir(f.root); await fs.writeFile(path.join(f.root, 'VERSION'), 'unrecognized old release')
+  await assert.rejects(assertFreshUserInstallation(f), { code: 'CRABOT_DESKTOP_TAKEOVER_REQUIRED' })
+  assert.deepEqual(await fs.readdir(f.root), ['VERSION'])
+})
+
+test('fresh installer accepts a clean home or empty default root without creating data', async t => {
+  const f = await defaultFixture(t)
+  await assertFreshUserInstallation(f)
+  assert.deepEqual(await fs.readdir(f.home), [])
+  await fs.mkdir(f.root)
+  await assertFreshUserInstallation(f)
+  assert.deepEqual(await fs.readdir(f.root), [])
+})
+
+test('offline installer discovery loads outside the checkout without Core or old-code execution', async t => {
+  const f = await defaultFixture(t), bootstrap = path.join(f.home, 'installer/bootstrap')
+  const repository = fileURLToPath(new URL('../../../', import.meta.url))
+  for (const relative of ['scripts/lib/legacy-desktop.mjs', 'scripts/lib/legacy-release-identity.mjs', 'scripts/lib/legacy-release-files.mjs',
+    'scripts/lib/mode.mjs', 'scripts/lib/process-identity.cjs', 'scripts/desktop/legacy-releases.json', 'crabot-native/build/Release/crabot-native.node']) {
+    const target = path.join(bootstrap, relative)
+    await fs.mkdir(path.dirname(target), { recursive: true }); await fs.copyFile(path.join(repository, relative), target)
+  }
+  await fs.mkdir(f.dataDir, { recursive: true }); await materializeLegacyRelease(f.root)
+  const names = await fs.readdir(f.root)
+  const script = `
+    import assert from 'node:assert/strict'
+    import { pathToFileURL } from 'node:url'
+    const [module,home,etcDir] = process.argv.slice(1)
+    const { assertFreshUserInstallation } = await import(pathToFileURL(module).href)
+    await assert.rejects(assertFreshUserInstallation({home,etcDir,source:{}}), {code:'CRABOT_DESKTOP_TAKEOVER_REQUIRED'})
+    console.log('OFFLINE_LEGACY_PREFLIGHT_CONFIRMED')
+  `
+  const env = Object.fromEntries(['SystemRoot', 'WINDIR', 'TEMP', 'TMP'].flatMap(name => process.env[name] ? [[name, process.env[name]]] : []))
+  const result = await promisify(execFile)(process.execPath, ['--input-type=module', '--eval', script,
+    path.join(bootstrap, 'scripts/lib/legacy-desktop.mjs'), f.home, f.etcDir], { env, cwd: bootstrap, timeout: 10000, maxBuffer: 65536 })
+  assert.equal(result.stdout.trim(), 'OFFLINE_LEGACY_PREFLIGHT_CONFIRMED')
+  assert.deepEqual(await fs.readdir(f.root), names)
+  assert.deepEqual(await fs.readdir(f.dataDir), [])
+  await assert.rejects(fs.lstat(path.join(bootstrap, 'crabot-core')), { code: 'ENOENT' })
 })

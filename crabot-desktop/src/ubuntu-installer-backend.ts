@@ -3,7 +3,7 @@ import { createRequire } from 'node:module'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import path from 'node:path'
 import { homedir } from 'node:os'
-import { readFile, readdir } from 'node:fs/promises'
+import { readFile } from 'node:fs/promises'
 import { createInterface } from 'node:readline'
 import { registerInstallationEntries, readInstallationLocator, type PreparedInstallation } from './installation-entries.js'
 import { finishUbuntuInstallation, ubuntuInstallationFailure } from './ubuntu-installation.js'
@@ -36,8 +36,10 @@ async function main() {
   const { detectMode } = await import(pathToFileURL(path.join(directory, 'bootstrap/scripts/lib/mode.mjs')).href)
   if (detectMode() === 'system') throw Object.assign(new Error('System deployment'), { code: 'CRABOT_INSTALL_SYSTEM_MODE' })
   const locator = await readInstallationLocator(homedir(), 'linux', process.env)
-  const oldData = await readdir(path.join(homedir(), '.crabot/data')).catch(error => { if (error.code === 'ENOENT') return []; throw error })
-  if (!locator && oldData.length) throw Object.assign(new Error('Legacy deployment'), { code: 'CRABOT_DESKTOP_TAKEOVER_REQUIRED' })
+  if (!locator) {
+    const { assertFreshUserInstallation } = await import(pathToFileURL(path.join(directory, 'bootstrap/scripts/lib/legacy-desktop.mjs')).href)
+    await assertFreshUserInstallation({ home: homedir(), source: process.env })
+  }
   const prepared: PreparedInstallation = await backend.prepareDesktopInstallation({ payload: path.join(bundle, 'offline'), installRoot: path.resolve(process.argv[2]),
     signal: abort.signal, progress: (phase: string) => emit('progress', { phase }) })
   // Verify the root helper's closed view before any executable probes or Polkit.

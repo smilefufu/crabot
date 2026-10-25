@@ -43,3 +43,15 @@ export async function discoverDefaultLegacyUserInstall({ home = homedir(), sourc
     fail('无法自动核实原安装，请选择并核对原安装位置；原目录未作修改。')
   }
 }
+
+// Fresh installation must not bypass an old deployment just because its data
+// happens to be empty. Recognition remains read-only; takeover is separate.
+export async function assertFreshUserInstallation(options = {}) {
+  let existing
+  try { existing = await discoverDefaultLegacyUserInstall(options) }
+  catch (error) {
+    if (error.code !== 'CRABOT_LEGACY_UNSUPPORTED') throw error
+    existing = true
+  }
+  if (existing) throw Object.assign(new Error('发现已有 Crabot 安装，需要核对原位置并接管；未创建新实例。'), { code: 'CRABOT_DESKTOP_TAKEOVER_REQUIRED' })
+}
