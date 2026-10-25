@@ -1,0 +1,64 @@
+name: Runtime foundation
+on:
+  workflow_dispatch:
+  push:
+    branches: ['feat/desktop-runtime-foundation']
+    paths:
+      - 'crabot-native/**'
+      - 'scripts/build-native.mjs'
+      - 'scripts/lib/product-*'
+      - 'scripts/lib/physical-fs.cjs'
+      - 'scripts/lib/agent-python-selection.cjs'
+      - 'scripts/lib/desktop-management.cjs'
+      - 'scripts/lib/core-release.mjs'
+      - 'scripts/lib/process-identity.cjs'
+      - 'scripts/lib/__tests__/product-*'
+      - 'scripts/lib/__tests__/agent-python-selection.test.mjs'
+      - 'scripts/lib/__tests__/core-release.test.mjs'
+      - '.github/workflows/runtime-foundation.yml'
+  pull_request:
+    paths:
+      - 'crabot-native/**'
+      - 'scripts/build-native.mjs'
+      - 'scripts/lib/product-*'
+      - 'scripts/lib/physical-fs.cjs'
+      - 'scripts/lib/agent-python-selection.cjs'
+      - 'scripts/lib/desktop-management.cjs'
+      - 'scripts/lib/core-release.mjs'
+      - 'scripts/lib/process-identity.cjs'
+      - 'scripts/lib/__tests__/product-*'
+      - 'scripts/lib/__tests__/agent-python-selection.test.mjs'
+      - 'scripts/lib/__tests__/core-release.test.mjs'
+      - '.github/workflows/runtime-foundation.yml'
+permissions:
+  contents: read
+concurrency:
+  group: runtime-foundation-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  runtime-boundary:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, macos-15-intel, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.3'
+      - name: Build this branch's native dependency without SDK or UI installation
+        shell: bash
+        run: node scripts/build-native.mjs
+      - name: Verify runtime primitives independently of business modules
+        shell: bash
+        run: >-
+          node --test --test-concurrency=1
+          scripts/lib/__tests__/product-runtime.test.mjs
+          scripts/lib/__tests__/product-download.test.mjs
+          scripts/lib/__tests__/product-agent-env.test.mjs
+          scripts/lib/__tests__/agent-python-selection.test.mjs
+          scripts/lib/__tests__/core-release.test.mjs
