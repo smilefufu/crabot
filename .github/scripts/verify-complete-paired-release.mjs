@@ -7,6 +7,7 @@ import { createRequire } from 'node:module'
 import physicalFs from '../../scripts/lib/physical-fs.cjs'
 import product from '../../scripts/lib/product-runtime.cjs'
 import { verifyCoreRelease } from '../../scripts/lib/core-release.mjs'
+import { desktopMaintenanceNodeFiles } from '../../scripts/lib/desktop-maintenance-bootstrap.mjs'
 import { verifyDesktopPayload } from '../../scripts/lib/desktop-payload.mjs'
 import { writeSignedDesktopPayload } from '../../scripts/desktop/sign-release.mjs'
 import { createDesktopReleaseIntake } from '../../crabot-desktop/dist/release-intake.js'
@@ -27,7 +28,7 @@ async function main() {
   phase = 'verify-payload'
   const verified = await verifyDesktopPayload(payload)
   if (release.source_dirty) throw new Error('Actual candidate must have clean product source')
-  if (process.platform === 'linux' && !['resources/crabot-sandbox-helper', 'resources/crabot-maintenance', 'resources/browser-probe.py'].every(name => verified.record.gui[name]?.type === 'file')) throw new Error('Signed Ubuntu GUI must cover all fixed native maintenance resources')
+  if (process.platform === 'linux' && !['resources/crabot-sandbox-helper', 'resources/crabot-maintenance', 'resources/browser-probe.py', ...desktopMaintenanceNodeFiles.map(file => 'resources/crabot-maintenance-backend/' + file)].every(name => verified.record.gui[name]?.type === 'file')) throw new Error('Signed Ubuntu GUI must cover all fixed native maintenance resources')
   if (verified.record.selection.version !== release.version || verified.record.selection.core_id !== release.inventory_sha256) throw new Error('Runtime Core and paired payload mismatch')
   const space = await fs.statfs(build, { bigint: true }), maximum = verified.bytes * 2n + reserve
   if (maximum > 20n * reserve || space.bavail * space.bsize < maximum) throw Object.assign(new Error('Complete archive check needs bounded program-copy space'), { code: 'CRABOT_UPDATE_SPACE' })

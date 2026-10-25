@@ -41,3 +41,13 @@ export const desktopMaintenanceBootstrap = Object.freeze([
   'scripts/lib/supervisor-shutdown.mjs',
   'scripts/lib/workspace-maintenance.cjs',
 ])
+
+// Fixed standalone-Node code resources, outside ASAR on Ubuntu only. The existing
+// GUI inventory covers each byte; this is not a new runtime manifest or journal.
+export const desktopMaintenanceNodeFiles = Object.freeze([
+  ...desktopMaintenanceBootstrap.map(file => 'bootstrap/' + file),
+  'bootstrap/crabot-native/build/Release/crabot-native.node',
+  'progress.mjs',
+  'node_modules/@electron/asar/index.cjs',
+  'node_modules/@electron/asar/package.json',
+])

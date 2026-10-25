@@ -13,6 +13,7 @@ import scrapling from '../lib/scrapling-runtime.cjs'
 import computerUse from '../lib/computer-use-runtime.cjs'
 import { verifyCoreRelease } from '../lib/core-release.mjs'
 import { verifyDesktopAsar } from '../lib/desktop-asar.mjs'
+import { buildUbuntuMaintenanceBackend } from './ubuntu-maintenance-backend.mjs'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 const args = new Map(process.argv.slice(2).map(value => { const split = value.indexOf('='); return [value.slice(0, split), value.slice(split + 1)] }))
@@ -76,6 +77,7 @@ delete packageJson.devDependencies
 await fs.writeFile(path.join(appDir, 'package.json'), JSON.stringify(packageJson, null, 2) + '\n')
 const require = createRequire(path.join(root, 'crabot-desktop/package.json'))
 const { build, Platform, Arch } = require('electron-builder')
+const ubuntuBackend = ubuntuNative ? await buildUbuntuMaintenanceBackend(path.join(projectDir, 'ubuntu-maintenance-backend')) : undefined
 let packagedResources
 const configuration = {
   appId: 'com.crabot.desktop', productName: 'Crabot', electronVersion: '44.9.0',
@@ -108,6 +110,7 @@ const configuration = {
           await fs.writeFile(path.join(resources, name), ubuntuNative.binaries[name], { flag: 'wx', mode: 0o755 })
         }
         await fs.copyFile(path.join(root, 'crabot-desktop/native/ubuntu/browser-probe.py'), path.join(resources, 'browser-probe.py'))
+        await fs.cp(ubuntuBackend, path.join(resources, 'crabot-maintenance-backend'), { recursive: true, verbatimSymlinks: true, mode: constants.COPYFILE_FICLONE })
       }
     }
     else {
