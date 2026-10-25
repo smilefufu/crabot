@@ -20,7 +20,7 @@ import product from '../../scripts/lib/product-runtime.cjs'
 import { buildPairedUpdateSource } from './build-paired-update-source.mjs'
 import { preparePairedUpdateCore } from './prepare-paired-update-core.mjs'
 import sourceLimits from '../../crabot-desktop/tests/fixtures/paired-update-limits.cjs'
-import { collectPairedUpdateTargetEvidence } from './paired-update-target-evidence.mjs'
+import { collectPairedUpdateTargetEvidence, summarizePairedTargetBootstrap } from './paired-update-target-evidence.mjs'
 import { startPairedUpdateModelProvider } from '../../crabot-desktop/tests/fixtures/paired-update-model-provider.mjs'
 
 if (process.env.GITHUB_ACTIONS !== 'true' || !['darwin', 'win32'].includes(process.platform)) throw new Error('Requires an isolated macOS/Windows CI user; never run against a developer MM')
@@ -45,7 +45,7 @@ if (space.bavail * space.bsize < needed || temporarySpace.bavail * temporarySpac
 const job = path.join(repository, '.desktop-build', 'paired-update-' + randomBytes(12).toString('hex')), temporary = await fs.mkdtemp(path.join(tmpdir(), 'Crabot 更新 '))
 await fs.mkdir(job, { mode: 0o700 }); const control = path.join(temporary, 'control'), home = path.join(temporary, 'home')
 await fs.mkdir(control, { mode: 0o700 }); await fs.mkdir(home, { mode: 0o700 })
-let modelProvider, selected, child, targetIdentity, sourceIdentity, expectedTargetGuiRoot, expectedTargetCoreRoot, handoffAt, phase = 'prepare-target', success = false, sourceOutput = ''
+let modelProvider, selected, child, targetIdentity, sourceIdentity, expectedTargetGuiRoot, expectedTargetCoreRoot, handoffAt, fixtureEnvironment, phase = 'prepare-target', success = false, sourceOutput = ''
 const report = { acceptance_id: acceptanceId, platform: process.platform, arch: process.arch, candidate_channel_enabled: false, remote_model_called: false,
   source_gui: 'fixture-packaged-component-actor', target_gui: 'ordinary-packaged-main', fixture_debugger: false, real_login_session_verified: false }
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
@@ -98,6 +98,7 @@ try {
   for (const name of ['ELECTRON_RUN_AS_NODE', 'NODE_OPTIONS', 'NODE_PATH', 'CRABOT_DEV', 'CRABOT_PORT_OFFSET']) delete env[name]
   checkpoint('source-prepared')
   phase = 'source-start-and-update'
+  fixtureEnvironment = env
   child = spawn(selected.executable, ['--background'], { env, stdio: ['ignore', 'pipe', 'pipe'] })
   for (const stream of [child.stdout, child.stderr]) stream.on('data', bytes => { sourceOutput = (sourceOutput + bytes.toString()).slice(-128000) })
   child.on('error', error => { sourceOutput += String(error) })
@@ -158,6 +159,36 @@ try {
   if (selected && expectedTargetCoreRoot) {
     report.target_evidence = await collectPairedUpdateTargetEvidence({ dataDir: selected.dataDir, targetRoot: expectedTargetCoreRoot, targetIdentity, handoffAt })
       .catch(() => ({ collection_failed: true }))
+  }
+  // The relaunch target has no inherited output pipe. In this synthetic CI
+  // fixture only, a normal second open can expose loader errors. Keep the first
+  // handoff failed; never use this observation as its health receipt.
+  const evidence = report.target_evidence
+  if (process.platform === 'darwin' && fixtureEnvironment && evidence?.target_alive && evidence.ordinary_peer_verified
+    && evidence.runtime?.state === 'stopped' && evidence.maintenance?.phase === 'verifying'
+    && evidence.schema?.status === 'readable' && evidence.schema.pending.length === 0 && modelProvider.evidence.generation_requests === 0) {
+    try {
+      const installation = createRequire(import.meta.url)('../../scripts/lib/desktop-installation.cjs'), current = installation.readDesktopSelection(selected.root)
+      const entry = createRequire(import.meta.url)('../../scripts/lib/desktop-entry.cjs'), policy = entry.loadDesktopEntry(current.coreRoot)
+      const reopened = spawn(current.executable, ['--background'], { env: fixtureEnvironment, stdio: ['ignore', 'pipe', 'pipe'] })
+      let output = '', owner, result, timer
+      const ended = new Promise(resolve => { reopened.once('close', code => resolve({ exit_code: Number.isInteger(code) && code >= 0 && code <= 255 ? code : null })); reopened.once('error', () => resolve({ launch_failed: true })) })
+      for (const stream of [reopened.stdout, reopened.stderr]) stream.on('data', bytes => { output = (output + bytes.toString()).slice(-65536) })
+      try {
+        const deadline = Date.now() + 2000
+        while (Date.now() < deadline && reopened.exitCode === null && reopened.signalCode === null) {
+          const observed = identity.inspectProcess(reopened.pid)
+          if (observed?.owner === targetIdentity.owner && entry.verifyDesktopEntry(observed, policy)) { owner = observed; break }
+          await sleep(25)
+        }
+        result = await Promise.race([ended, new Promise(resolve => { timer = setTimeout(() => resolve({ observation_elapsed: true }), 15000) })])
+      } finally {
+        clearTimeout(timer)
+        if (owner && identity.sameProcess(owner, identity.inspectProcess(owner.pid))) identity.terminateKnownProcess(owner)
+      }
+      report.target_reopen = { ...result, native_identity_verified: !!owner, ...summarizePairedTargetBootstrap(output, current.selection.version) }
+      // No raw output, screen content, system logs, paths or user text leave this observer.
+    } catch { report.target_reopen = { observation_unavailable: true } }
   }
   process.exitCode = 1
 } finally {

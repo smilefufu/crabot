@@ -69,3 +69,23 @@ export async function collectPairedUpdateTargetEvidence({ dataDir, targetRoot, t
   }
   return evidence
 }
+
+// Fixed code/phase vocabulary only. Never export raw stdout, paths or user text.
+export function summarizePairedTargetBootstrap(output, version) {
+  if (typeof output !== 'string' || output.length > 65536) throw new Error('Invalid bounded bootstrap output')
+  const codes = ['ERR_MODULE_NOT_FOUND', 'MODULE_NOT_FOUND', 'ERR_REQUIRE_ESM', 'ERR_INVALID_PACKAGE_CONFIG', 'ERR_UNKNOWN_FILE_EXTENSION', 'ERR_DLOPEN_FAILED',
+    'CRABOT_CORE_INTEGRITY', 'CRABOT_MAINTENANCE_PENDING', 'CRABOT_MIGRATION_INTERRUPTED', 'CRABOT_DATA_MISSING', 'CRABOT_DESKTOP_INSTALLATION',
+    'CRABOT_DESKTOP_TAKEOVER_REQUIRED', 'DESKTOP_UNAVAILABLE', 'DESKTOP_BOOT_FAILED']
+  const phases = ['binding-installation', 'installation-bound', 'data-location-checked', 'app-ready', 'reading-login-startup', 'login-startup-read',
+    'loading-local-interface', 'local-interface-loaded', 'recovering-service', 'failed']
+  const events = []
+  for (const line of output.split('\n')) {
+    try {
+      const event = JSON.parse(line)
+      if (event?.component === 'desktop-bootstrap' && phases.includes(event.phase)) events.push({ phase: event.phase,
+        ...(event.phase === 'app-ready' ? { version_matches_current: event.app_version === version } : {}) })
+    } catch {}
+  }
+  return { events: events.slice(-32), codes: codes.filter(code => output.includes(code)),
+    missing_packages: ['crabot-client', 'zod', 'electron-updater', '@electron/asar'].filter(name => output.includes("Cannot find package '" + name + "'")) }
+}

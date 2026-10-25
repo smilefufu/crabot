@@ -4,7 +4,7 @@ import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { tmpdir } from 'node:os'
 import { createInstanceRuntime, identity } from '../../scripts/lib/instance-runtime.mjs'
-import { collectPairedUpdateTargetEvidence } from './paired-update-target-evidence.mjs'
+import { collectPairedUpdateTargetEvidence, summarizePairedTargetBootstrap } from './paired-update-target-evidence.mjs'
 async function fixture(t) {
   const root = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'crabot-target-evidence-')))
   t.after(() => fs.rm(root, { recursive: true, force: true }))
@@ -75,4 +75,25 @@ test('schema evidence uses the existing static validator without initializing or
   assert.equal(await fs.readFile(path.join(data, 'SCHEMA_VERSION'), 'utf8'), 'v1')
   assert.equal(await fs.readFile(path.join(data, 'preserved'), 'utf8'), secret)
   assert.deepEqual((await fs.readdir(data)).sort(), ['SCHEMA_VERSION', 'preserved'])
+})
+
+test('bootstrap summary exports only fixed phases/codes, excluding arbitrary fields, paths and user text', () => {
+  const secret = 'private-model-token-and-user-text', output = [secret, '/private/' + secret,
+    JSON.stringify({ component: 'desktop-bootstrap', phase: 'app-ready', app_version: '1.2.4', secret }),
+    JSON.stringify({ component: 'desktop-bootstrap', phase: secret }), JSON.stringify({ component: secret, phase: 'failed' }),
+    "Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'crabot-client' in /private/" + secret, 'CRABOT_' + secret, 'bad json'].join('\n')
+  const result = summarizePairedTargetBootstrap(output, '1.2.4')
+  assert.deepEqual(result, { events: [{ phase: 'app-ready', version_matches_current: true }], codes: ['ERR_MODULE_NOT_FOUND', 'MODULE_NOT_FOUND'], missing_packages: ['crabot-client'] })
+  assert.equal(JSON.stringify(result).includes(secret), false)
+  assert.equal(JSON.stringify(result).includes('/private/'), false)
+})
+test('bootstrap phase history and malformed output remain bounded without exporting versions', () => {
+  const line = JSON.stringify({ component: 'desktop-bootstrap', phase: 'app-ready', app_version: 'untrusted-private-version' })
+  const result = summarizePairedTargetBootstrap(Array(40).fill(line).join('\n'), '1.2.4')
+  assert.equal(result.events.length, 32)
+  assert.ok(result.events.every(event => event.version_matches_current === false))
+  assert.equal(JSON.stringify(result).includes('untrusted-private-version'), false)
+  assert.deepEqual(summarizePairedTargetBootstrap('null\n{}\n', '1.2.4'), { events: [], codes: [], missing_packages: [] })
+  assert.throws(() => summarizePairedTargetBootstrap('x'.repeat(65537), '1.2.4'))
+  assert.throws(() => summarizePairedTargetBootstrap(null, '1.2.4'))
 })
