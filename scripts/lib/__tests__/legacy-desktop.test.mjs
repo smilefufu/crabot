@@ -4,7 +4,7 @@ import { promises as fs, realpathSync } from 'node:fs'
 import path from 'node:path'
 import { tmpdir } from 'node:os'
 import { materializeLegacyRelease } from './fixtures/legacy-release.mjs'
-import { discoverLegacyUserInstall } from '../legacy-desktop.mjs'
+import { discoverLegacyUserInstall, discoverDefaultLegacyUserInstall } from '../legacy-desktop.mjs'
 
 async function fixture(t) {
   const parent = await fs.mkdtemp(path.join(tmpdir(), 'crabot-legacy-discovery-'))
@@ -62,4 +62,64 @@ test('raw platform entry fingerprints reject line-ending changes', async t => {
   assert.notEqual(changed, before)
   await fs.writeFile(entry, changed)
   await assert.rejects(discoverLegacyUserInstall({ root: f.root, dataDir: f.dataDir }), { code: 'CRABOT_LEGACY_UNSUPPORTED' })
+})
+
+async function defaultFixture(t) {
+  const parent = await fs.mkdtemp(path.join(tmpdir(), 'crabot-default-legacy-'))
+  t.after(() => fs.rm(parent, { recursive: true, force: true }))
+  const home = path.join(parent, '普通 用户'), root = path.join(home, '.crabot'), dataDir = path.join(root, 'data'), etcDir = path.join(parent, 'etc')
+  await fs.mkdir(home); await fs.mkdir(etcDir)
+  return { home, root, dataDir, etcDir, source: {} }
+}
+
+test('default discovery creates no installation or data directory on a clean home', async t => {
+  const f = await defaultFixture(t)
+  assert.equal(await discoverDefaultLegacyUserInstall(f), null)
+  assert.deepEqual(await fs.readdir(f.home), [])
+})
+
+for (const version of ['v2026.10.14.1', 'v2026.10.15.1']) test('default discovery finds the existing standard user deployment in place: ' + version, async t => {
+  const f = await defaultFixture(t)
+  await fs.mkdir(f.dataDir, { recursive: true }); await materializeLegacyRelease(f.root, version)
+  await fs.writeFile(path.join(f.dataDir, 'original-history'), 'must stay here')
+  const before = await fs.readdir(f.root), dataBefore = await fs.readdir(f.dataDir)
+  const result = await discoverDefaultLegacyUserInstall(f)
+  assert.deepEqual(result, await discoverLegacyUserInstall(f))
+  assert.deepEqual(await fs.readdir(f.root), before); assert.deepEqual(await fs.readdir(f.dataDir), dataBefore)
+  assert.equal(await fs.readFile(path.join(f.dataDir, 'original-history'), 'utf8'), 'must stay here')
+})
+
+test('unrecognized default data requires locating the original installation instead of offering an empty replacement', async t => {
+  const f = await defaultFixture(t); await fs.mkdir(f.dataDir, { recursive: true })
+  await fs.writeFile(path.join(f.dataDir, 'original-history'), 'must stay here')
+  await assert.rejects(discoverDefaultLegacyUserInstall(f), { code: 'CRABOT_LEGACY_UNSUPPORTED' })
+  assert.deepEqual(await fs.readdir(f.dataDir), ['original-history'])
+})
+
+test('known old entry files without their data directory do not silently become a fresh installation', async t => {
+  const f = await defaultFixture(t); await fs.mkdir(f.root); await materializeLegacyRelease(f.root)
+  await assert.rejects(discoverDefaultLegacyUserInstall(f), { code: 'CRABOT_LEGACY_UNSUPPORTED' })
+  await assert.rejects(fs.lstat(f.dataDir), { code: 'ENOENT' })
+})
+
+test('a linked standard installation cannot redirect automatic discovery', { skip: process.platform === 'win32' }, async t => {
+  const f = await defaultFixture(t), target = path.join(f.home, 'unselected')
+  await fs.mkdir(target); await fs.symlink(target, f.root, 'dir')
+  await assert.rejects(discoverDefaultLegacyUserInstall(f), { code: 'CRABOT_LEGACY_UNSUPPORTED' })
+  assert.deepEqual(await fs.readdir(target), [])
+})
+
+test('an empty default root remains empty during fresh-install discovery', async t => {
+  const f = await defaultFixture(t); await fs.mkdir(f.root)
+  assert.equal(await discoverDefaultLegacyUserInstall(f), null)
+  assert.deepEqual(await fs.readdir(f.root), [])
+})
+
+for (const mode of ['system', 'dev', 'offset']) test('default discovery refuses other deployment modes even before creating a user root: ' + mode, async t => {
+  const f = await defaultFixture(t)
+  if (mode === 'system') await fs.writeFile(path.join(f.etcDir, 'cluster.version'), '1')
+  if (mode === 'dev') f.source.CRABOT_DEV = 'true'
+  if (mode === 'offset') f.source.CRABOT_PORT_OFFSET = '100'
+  await assert.rejects(discoverDefaultLegacyUserInstall(f), { code: 'CRABOT_LEGACY_UNSUPPORTED' })
+  assert.deepEqual(await fs.readdir(f.home), [])
 })
