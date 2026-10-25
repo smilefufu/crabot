@@ -8,6 +8,7 @@ import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
+import { acquireExistingCliLock, releaseCliLock } from '../../scripts/lib/cli-lock.mjs'
 import { writeCoreRelease, verifyCoreRelease } from '../../scripts/lib/core-release.mjs'
 import { sealDesktopPayload, prepareDesktopInstallation, commitDesktopInstallation } from '../../scripts/lib/desktop-payload.mjs'
 import { buildUbuntuMaintenanceBackend } from '../../scripts/desktop/ubuntu-maintenance-backend.mjs'
@@ -47,6 +48,8 @@ test('standalone maintenance preparation rejects other platforms before accessin
   await assert.rejects(prepareDesktopRemovalNode({ installRoot: '/never-accessed', operationId: randomUUID() }), { code: 'CRABOT_DESKTOP_REMOVAL' })
   const { beginInitialDesktopRemovalNode } = await import('../../scripts/lib/desktop-removal-job.mjs')
   await assert.rejects(() => beginInitialDesktopRemovalNode({ installRoot: '/never-accessed', operationId: randomUUID() }), { code: 'CRABOT_DESKTOP_REMOVAL' })
+  const { createDesktopRemovalNodeSourceExitVerifier } = await import('../../scripts/lib/desktop-removal-source.mjs')
+  assert.equal(await createDesktopRemovalNodeSourceExitVerifier({})({}), false)
 })
 for (const mode of ['valid', 'cancelled', 'changed-node', 'changed-backend', 'redirected-frontend', 'changed-selection', 'copy-failure', 'space', 'late-copy-change', 'late-cancel']) test('private Ubuntu Node host preparation: ' + mode, { skip: !linux, timeout: 60000 }, async t => {
   const area = await fs.mkdtemp(path.join(root, 'case-'))
@@ -100,7 +103,7 @@ for (const mode of ['valid', 'cancelled', 'changed-node', 'changed-backend', 're
 })
 
 
-for (const mode of ['node-job-valid', 'node-job-parent-flags', 'node-job-copy-changed', 'node-job-other-installation']) test('actual private Node initial job role: ' + mode, { skip: !linux, timeout: 60000 }, async t => {
+for (const mode of ['node-job-valid', 'node-job-parent-flags', 'node-job-copy-changed', 'node-job-other-installation', 'node-job-source-verifier']) test('actual private Node initial job role: ' + mode, { skip: !linux, timeout: 60000 }, async t => {
   const area = await fs.mkdtemp(path.join(root, 'node-role-'))
   const own = await commitDesktopInstallation(await prepareDesktopInstallation({ payload, installRoot: path.join(area, 'installation') }))
   await fs.writeFile(path.join(own.dataDir, 'preserved'), 'unchanged user content')
@@ -111,12 +114,18 @@ for (const mode of ['node-job-valid', 'node-job-parent-flags', 'node-job-copy-ch
   const running = promisify(execFile)(own.executable, mode === 'node-job-parent-flags' ? ['--no-warnings'] : [], { cwd: area, env, timeout: 50000, maxBuffer: 8192 })
   running.child.stdin.end(await fs.readFile(new URL('./fixtures/ubuntu-removal-node-parent.cjs', import.meta.url)))
   const { stdout } = await running, result = JSON.parse(stdout)
-  if (mode === 'node-job-valid') assert.deepEqual(result, { accepted: true, published: 'preparing', stopped: 'stopping', cancelled: true, ordinary_peer: false })
+  if (mode === 'node-job-source-verifier') assert.deepEqual(result, { accepted: true, published: 'preparing', stopped: 'stopping', cancelled: true, ordinary_peer: false, locks_reacquired: true,
+    source_verifier: { preparing_rejected: true, wrong_operation_rejected: true, verified_after_stop: true, changed_copy_rejected: true } })
+  else if (mode === 'node-job-valid') assert.deepEqual(result, { accepted: true, published: 'preparing', stopped: 'stopping', cancelled: true, ordinary_peer: false, locks_reacquired: true })
   else assert.deepEqual(result, { accepted: false, code: 'CRABOT_DESKTOP_REMOVAL' })
   assert.equal(await fs.readFile(path.join(own.dataDir, 'preserved'), 'utf8'), 'unchanged user content')
   for (const installation of [own.root, cfg.otherRoot].filter(Boolean)) {
-    for (const name of ['.desktop-removal.json', '.desktop-installing.json', 'cli.lock']) await assert.rejects(fs.lstat(path.join(installation, name)), { code: 'ENOENT' })
-    await assert.rejects(fs.lstat(path.join(installation, 'data/cli.lock')), { code: 'ENOENT' })
+    for (const name of ['.desktop-removal.json', '.desktop-installing.json']) await assert.rejects(fs.lstat(path.join(installation, name)), { code: 'ENOENT' })
+    const rootLock = await acquireExistingCliLock(installation, 'verify-node-role-released', 0)
+    try {
+      const dataLock = await acquireExistingCliLock(path.join(installation, 'data'), 'verify-node-role-released', 0)
+      releaseCliLock(dataLock)
+    } finally { releaseCliLock(rootLock) }
   }
   assert.equal((await fs.stat(own.executable)).isFile(), true)
 })

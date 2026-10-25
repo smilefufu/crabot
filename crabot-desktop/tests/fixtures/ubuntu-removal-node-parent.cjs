@@ -17,19 +17,37 @@ void (async () => {
     const identity=require('./bootstrap/scripts/lib/process-identity.cjs'),entry=require('./bootstrap/scripts/lib/desktop-entry.cjs');
     const installation=require('./bootstrap/scripts/lib/desktop-installation.cjs');
     let lease;
+    const probe=message=>new Promise((resolve,reject)=>{process.once('message',value=>value?.kind==='fixture_source_verification'?resolve(value.accepted):reject(new Error('bad fixture reply')));process.send(message,error=>{if(error)reject(error)})});
     try {
       const ordinaryPeer=entry.verifyDesktopEntry(identity.inspectProcess(process.pid),entry.loadDesktopEntry(installation.readDesktopSelection(process.argv[1]).coreRoot));
       const {beginInitialDesktopRemovalNode}=await import(pathToFileURL(path.join(process.cwd(),'backend/bootstrap/scripts/lib/desktop-removal-job.mjs')));
       lease=await beginInitialDesktopRemovalNode({installRoot:process.argv[1],operationId:process.argv[2]});
-      const published=await lease.current();await lease.stop();const stopped=await lease.current();await lease.cancel();lease.close();lease=null;
-      process.stdout.write(JSON.stringify({accepted:true,published:published.phase,stopped:stopped.phase,cancelled:true,ordinary_peer:ordinaryPeer})+'\\n');
+      const published=await lease.current(),message={kind:'desktop_removal_source_exit',installation_id:published.installation_id,operation_id:published.operation_id,source_selection:published.source_selection};
+      let sourceVerifier;
+      if(process.argv[3]==='node-job-source-verifier')sourceVerifier={preparing_rejected:await probe(message)===false};
+      await lease.stop();const stopped=await lease.current();
+      if(sourceVerifier){
+        sourceVerifier.wrong_operation_rejected=await probe({...message,operation_id:'00000000-0000-4000-8000-000000000000'})===false;
+        sourceVerifier.verified_after_stop=await probe(message)===true;
+        const fs=await import('node:fs/promises'),file=path.join(process.cwd(),'backend/progress.mjs'),bytes=await fs.readFile(file);
+        await fs.appendFile(file,'\\n// changed fixture copy\\n');sourceVerifier.changed_copy_rejected=await probe(message)===false;await fs.writeFile(file,bytes);
+      }
+      await lease.cancel();lease.close();lease=null;
+      const locks=await import(pathToFileURL(path.join(process.cwd(),'backend/bootstrap/scripts/lib/cli-lock.mjs')));
+      const rootLock=await locks.acquireExistingCliLock(process.argv[1],'fixture-reacquire',0);
+      try{const dataLock=await locks.acquireExistingCliLock(path.join(process.argv[1],'data'),'fixture-reacquire',0);locks.releaseCliLock(dataLock)}finally{locks.releaseCliLock(rootLock)}
+      process.stdout.write(JSON.stringify({accepted:true,published:published.phase,stopped:stopped.phase,cancelled:true,ordinary_peer:ordinaryPeer,locks_reacquired:true,...(sourceVerifier?{source_verifier:sourceVerifier}:{})})+'\\n');
     } catch(error) { if(lease)lease.close();process.stdout.write(JSON.stringify({accepted:false,code:error.code||'FIXTURE_UNEXPECTED'})+'\\n') }
     clearTimeout(timer);process.removeListener('disconnect',parentLost);process.disconnect();
   `
   const root = cfg.otherRoot || cfg.own.root
-  child = spawn(prepared.executable, ['--input-type=module', '--eval', script, root, cfg.operationId], {
+  child = spawn(prepared.executable, ['--input-type=module', '--eval', script, root, cfg.operationId, cfg.mode], {
     cwd: prepared.directory, env: { PATH: '', LANG: 'C.UTF-8' }, stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
   })
+  if (cfg.mode === 'node-job-source-verifier') {
+    const verifier = load('desktop-removal-source.mjs').then(module => module.createDesktopRemovalNodeSourceExitVerifier({ installRoot: cfg.own.root, prepared, child }))
+    child.on('message', async message => { const accepted = await (await verifier)(message); child.send({ kind: 'fixture_source_verification', accepted }, () => {}) })
+  }
   ended = once(child, 'close')
   let output = '', error = ''
   child.stdout.on('data', bytes => { output += bytes.toString(); if (output.length > 4096) child.kill('SIGKILL') })

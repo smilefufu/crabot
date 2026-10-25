@@ -10,13 +10,15 @@ import management from './desktop-management.cjs'
 import { processBirthAtLeast } from './owned-process-tree.cjs'
 import { readDesktopRemoval } from './desktop-removal-record.cjs'
 import { readDesktopRemovalProof } from './desktop-removal-proof.mjs'
+import { verifyUbuntuRemovalNodeCopy } from './desktop-removal-host.mjs'
 import { verifyDesktopGui } from './desktop-payload.mjs'
 import { inspectInstance } from './instance-runtime.mjs'
 import { workspaceMaintenancePending } from './workspace-maintenance.cjs'
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b)
 const inside = (parent, child) => { const relative = path.relative(parent, child); return !relative || relative !== '..' && !relative.startsWith('..' + path.sep) && !path.isAbsolute(relative) }
 const generation = stat => [stat.dev, stat.ino, stat.mode, stat.uid, stat.gid].join(':')
-function createSourceExitVerifier({ installRoot, prepared, child }, existing) {
+function createSourceExitVerifier({ installRoot, prepared, child }, existing, role = 'gui') {
+  const node = role === 'node'
   const own = installation.readDesktopInstallation(installRoot), source = identity.inspectProcess(process.pid)
   const proofText = JSON.stringify(prepared.proof) + '\n', proof = JSON.parse(proofText)
   const digest = createHash('sha256').update(proofText).digest('hex')
@@ -24,11 +26,14 @@ function createSourceExitVerifier({ installRoot, prepared, child }, existing) {
   const expectedPhase = existing ? phases[prepared.record?.phase] : 'stopping'
   const expectedRecord = existing && prepared.record ? { ...structuredClone(prepared.record), phase: expectedPhase } : null
   const directory = prepared.directory, guiRoot = prepared.guiRoot, executable = prepared.executable
-  const expectedExecutable = path.join(guiRoot, process.platform === 'darwin' ? 'Crabot.app/Contents/MacOS/Crabot' : 'Crabot.exe')
+  const expectedExecutable = node ? path.join(directory, 'node') : path.join(guiRoot, process.platform === 'darwin' ? 'Crabot.app/Contents/MacOS/Crabot' : 'Crabot.exe')
+  const hostLocationMatches = () => node
+    ? prepared.self_verified === true && path.dirname(executable) === directory && path.basename(executable) === 'node'
+    : path.dirname(guiRoot) === directory && path.basename(guiRoot) === 'gui' && physical.realpathSync(guiRoot) === guiRoot
   const originalData = generation(physical.lstatSync(own.dataDir, { bigint: true }))
   const originalDirectory = generation(physical.lstatSync(directory, { bigint: true }))
   const sourceExecutable = path.join(own.root, 'app/releases', proof.source_selection.gui_id,
-    process.platform === 'darwin' ? 'Crabot.app/Contents/MacOS/Crabot' : 'Crabot.exe')
+    process.platform === 'darwin' ? 'Crabot.app/Contents/MacOS/Crabot' : process.platform === 'linux' ? 'crabot-desktop' : 'Crabot.exe')
   let host
   const current = () => {
     const actual = identity.inspectProcess(child.pid), self = identity.inspectProcess(process.pid)
@@ -40,9 +45,9 @@ function createSourceExitVerifier({ installRoot, prepared, child }, existing) {
       || !entry.verifyDesktopEntry(self, { executable: sourceExecutable, development: false })
       || executable !== expectedExecutable || physical.realpathSync(actual.executable) !== physical.realpathSync(expectedExecutable)
       || inside(own.root, directory) || inside(directory, own.root)
-      || path.dirname(guiRoot) !== directory || path.basename(guiRoot) !== 'gui'
+      || !hostLocationMatches()
       || !/^crabot-removal-host-[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(path.basename(directory))
-      || management.requirePrivateDataRoot(directory) !== directory || physical.realpathSync(guiRoot) !== guiRoot
+      || management.requirePrivateDataRoot(directory) !== directory
       || generation(physical.lstatSync(directory, { bigint: true })) !== originalDirectory
       || generation(physical.lstatSync(own.dataDir, { bigint: true })) !== originalData
       || !same(installation.readDesktopInstallation(own.root).record, own.record)
@@ -59,7 +64,7 @@ function createSourceExitVerifier({ installRoot, prepared, child }, existing) {
   }
   return async message => {
     try {
-      if (!['darwin', 'win32'].includes(process.platform) || !message || typeof message !== 'object' || Array.isArray(message)
+      if (!(node ? process.platform === 'linux' : ['darwin', 'win32'].includes(process.platform)) || !message || typeof message !== 'object' || Array.isArray(message)
         || Object.keys(message).length !== 4 || !['kind', 'installation_id', 'operation_id', 'source_selection'].every(key => Object.hasOwn(message, key))
         || message.kind !== 'desktop_removal_source_exit' || message.installation_id !== proof.installation_id
         || message.operation_id !== proof.operation_id || !same(message.source_selection, proof.source_selection)
@@ -68,7 +73,8 @@ function createSourceExitVerifier({ installRoot, prepared, child }, existing) {
       // its actual image after startup, then require the same birth thereafter.
       host ??= identity.inspectProcess(child.pid)
       if (!current()) return false
-      await verifyDesktopGui(guiRoot, proof.payload)
+      if (node) await verifyUbuntuRemovalNodeCopy(directory, proof)
+      else await verifyDesktopGui(guiRoot, proof.payload)
       const actual = await readDesktopRemovalProof(own.root)
       return actual.record.proof_sha256 === digest && same(actual.proof, proof) && current()
     } catch { return false }
@@ -78,3 +84,8 @@ function createSourceExitVerifier({ installRoot, prepared, child }, existing) {
 // Role choice is fixed by the trusted source, never accepted from an IPC field.
 export function createDesktopRemovalSourceExitVerifier(options) { return createSourceExitVerifier(options, false) }
 export function createExistingRemovalSourceExitVerifier(options) { return createSourceExitVerifier(options, true) }
+
+export function createDesktopRemovalNodeSourceExitVerifier(options) {
+  if (process.platform !== 'linux') return async () => false
+  return createSourceExitVerifier(options, false, 'node')
+}
