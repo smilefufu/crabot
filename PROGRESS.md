@@ -48,7 +48,7 @@
 
 ### 桌面化方案：独立 worktree 开发中，尚未进入 PR
 
-- Ubuntu 卸载固定 GTK 进度前端已加入同源编译/完整 GUI 资源清单；本机资源与 CI 范围 85 项通过，真实 GTK 编译/窗口待隔离 Ubuntu24 CI，完整卸载仍未开放。
+- Ubuntu 卸载固定 GTK 进度前端已加入同源编译/完整 GUI 资源清单；本机资源与 CI 范围 85 项通过；隔离 Ubuntu24 真实编译、7组控件/管道及窗口烟测通过，私有 Node 宿主与完整卸载仍未接通。
 - CI阻塞：旧7e的Intel/Windows作业总时限取消、fdd Intel占用观察测试预算及Windows目录改名夹具已按证据修正，产品期限/断言和未知保留规则不变。Windows专用原生登录/入口组已通过；fdd ARM已完成解包/校验/版本对准备，卡在discard；真实嵌套ASAR小包两项先挂起，改物理文件清理后通过。宿主23/范围72及签名intake/解包/在线准备通过，完整新版本交接须新矩阵复验。
 
 - 按[桌面Spec](crabot-docs/superpowers/specs/2026-10-17-desktop-application-design.md)在`feat/desktop-application`推进；整项未完成，产品main未推、未提前PR或部署现场。Electron+React、业务HTTP/WS与共享SDK、最小原生IPC、GUI免额外密码；关闭窗口后台运行，退出停止共享实例。安装时选整体根，之后迁workspace，不新增DATA_DIR选择步骤。
