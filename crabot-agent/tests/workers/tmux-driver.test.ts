@@ -227,8 +227,9 @@ describe.skipIf(process.platform === 'win32' || !hasTmuxBinary())('TmuxDriver', 
     await waitFor(async () => !(await driver.isAlive(sessionName)))
     await expect(driver.capturePane(sessionName)).resolves.toMatchObject({
       dead: true,
-      text: expect.stringContaining('Pane is dead'),
+      text: expect.stringMatching(/final frame|Pane is dead/),
     })
+    await expect(driver.readProcessCarrier(sessionName)).resolves.toMatchObject({ dead: true })
   })
 })
 

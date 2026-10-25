@@ -206,3 +206,32 @@ test('real job write failure after last configuration resumes only that unissued
   assert.deepEqual(f.store.maintenance().unsettled, []); f.store.assertIdle()
   for (const { entry } of f.plan.instances) await assert.rejects(fs.lstat(entry.data_dir), { code: 'ENOENT' })
 })
+
+for (const failure of ['migration', 'service']) test('root-authorized per-user conversion isolates one failure and restores another original runner: ' + failure, options, async t => {
+  const f = await fixture(t, { nested: true, ...(failure === 'migration' ? { failure: 'migrate:1001' } : {}) })
+  const [one, two] = f.plan.instances, original = one.observation
+  two.observation = { ...two.observation, runtime_state: 'running', data_binding: 'observed_running',
+    controller: { ...original.controller, pid: 83001, owner: String(two.entry.uid) },
+    mm: { ...original.mm, pid: 83002, parent: 83001, owner: String(two.entry.uid) }, mm_port: 19200, launch_kind: 'daemon' }
+  const active = new Set([one.entry.uid, two.entry.uid]), legacy = f.dependencies.legacy, target = f.dependencies.target
+  f.dependencies.processes = () => f.plan.instances.filter(item => active.has(item.entry.uid))
+    .flatMap(item => [item.observation.controller, item.observation.mm].map(process => ({ process, uses_source: true })))
+  f.dependencies.legacy = async (entry, request) => {
+    const result = await legacy(entry, request)
+    if (request.action === 'stop-legacy') active.delete(entry.uid)
+    return result
+  }
+  f.dependencies.target = async (entry, request) => {
+    if (failure === 'service' && entry.uid === one.entry.uid && request.action === 'configure-service') throw Error('controlled user service failure')
+    return target(entry, request)
+  }
+  const result = await f.run()
+  assert.equal(result.phase, 'completed'); assert.equal(result.exit_code, 1)
+  assert.deepEqual(result.results.map(row => row.state), ['unknown', 'healthy'])
+  assert.deepEqual(f.store.maintenance().unsettled, [one.entry.uid])
+  assert.equal(result.results[0].migrated, failure === 'service' ? true : undefined)
+  assert.equal(result.results[1].migrated, true); assert.equal(result.results[1].configured, true)
+  assert.equal(f.calls.includes('start:1001'), false); assert.equal(f.calls.includes('start:1002'), true)
+  assert.equal(await f.command.selected(f.plan), 'target')
+  for (const { entry } of f.plan.instances) await assert.rejects(fs.lstat(entry.data_dir), { code: 'ENOENT' })
+})
