@@ -1,0 +1,704 @@
+#define NAPI_VERSION 8
+#include <node_api.h>
+#include <string>
+#include <vector>
+#include <fstream>
+#include <sstream>
+#include <stdexcept>
+#include <cerrno>
+#include <cmath>
+#include <cstring>
+#include <set>
+#include <cstddef>
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <windows.h>
+#include <iphlpapi.h>
+#include <tlhelp32.h>
+#include <sddl.h>
+#include <winternl.h>
+#include <shellapi.h>
+#include <io.h>
+#include <fcntl.h>
+#include <map>
+#include <mutex>
+#else
+#include <unistd.h>
+#include <signal.h>
+#include <sys/socket.h>
+#include <sys/file.h>
+#include <fcntl.h>
+#ifdef __APPLE__
+#include <libproc.h>
+#include <sys/proc.h>
+#include <sys/un.h>
+#include <sys/sysctl.h>
+#include <netinet/in.h>
+#else
+#include <dirent.h>
+#include <sys/syscall.h>
+#include <sys/stat.h>
+#endif
+#endif
+
+struct Identity {
+  int pid = 0;
+  int parent = 0;
+  std::string owner, started, executable;
+};
+
+#ifdef _WIN32
+// Only immutable creator metadata is retained. Every Inspect still opens and
+// verifies the actual current process handle, birth, token, image and exit state.
+static std::mutex creatorMutex;
+static std::map<int, std::pair<ULONGLONG, int>> creatorByPid;
+#endif
+
+static std::string Read(const std::string& path) {
+  std::ifstream file(path);
+  return std::string(std::istreambuf_iterator<char>(file), {});
+}
+
+static std::vector<int> Pids() {
+  std::vector<int> result;
+#ifdef _WIN32
+  HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+  if (snapshot == INVALID_HANDLE_VALUE) throw std::runtime_error("Cannot enumerate processes");
+  PROCESSENTRY32 entry{}; entry.dwSize = sizeof(entry);
+  if (Process32First(snapshot, &entry)) do { result.push_back(entry.th32ProcessID); } while (Process32Next(snapshot, &entry));
+  CloseHandle(snapshot);
+#elif __APPLE__
+  int bytes = proc_listpids(PROC_ALL_PIDS, 0, nullptr, 0);
+  if (bytes <= 0) throw std::runtime_error("Cannot enumerate processes");
+  result.resize(bytes / sizeof(int) + 1024);
+  bytes = proc_listpids(PROC_ALL_PIDS, 0, result.data(), result.size() * sizeof(int));
+  if (bytes <= 0) throw std::runtime_error("Cannot enumerate processes");
+  result.resize(bytes / sizeof(int));
+#else
+  DIR* directory = opendir("/proc");
+  if (!directory) throw std::runtime_error("Cannot enumerate processes");
+  while (auto entry = readdir(directory)) {
+    std::string name(entry->d_name);
+    if (name.find_first_not_of("0123456789") == std::string::npos) result.push_back(std::stoi(name));
+  }
+  closedir(directory);
+#endif
+  return result;
+}
+
+static Identity Inspect(int pid, const char** stage = nullptr) {
+  Identity result; result.pid = pid;
+#ifdef _WIN32
+  if (stage) *stage = "identity-open-process";
+  HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, pid);
+  if (!process) {
+    if (GetLastError() == ERROR_INVALID_PARAMETER) return {};
+    throw std::runtime_error("Cannot inspect process identity");
+  }
+  if (WaitForSingleObject(process, 0) == WAIT_OBJECT_0) { CloseHandle(process); return {}; }
+  FILETIME created, exited, kernel, user;
+  wchar_t path[32768]; DWORD length = 32768;
+  HANDLE token = nullptr;
+  const auto identify = [&]() {
+    if (stage) *stage = "identity-process-times";
+    if (!GetProcessTimes(process, &created, &exited, &kernel, &user)) return false;
+    if (stage) *stage = "identity-process-image";
+    if (!QueryFullProcessImageNameW(process, 0, path, &length)) return false;
+    if (stage) *stage = "identity-process-token";
+    return OpenProcessToken(process, TOKEN_QUERY, &token) != FALSE;
+  };
+  if (!identify()) {
+    const DWORD error = GetLastError();
+    // An opened process can terminate between queries; only an OS-signalled
+    // process is classified as exited. Access failures on live processes still fail closed.
+    DWORD waitState = WaitForSingleObject(process, 0);
+    if (waitState == WAIT_OBJECT_0) { CloseHandle(process); return {}; }
+    DWORD exitCode = 0;
+    const BOOL exitKnown = GetExitCodeProcess(process, &exitCode);
+    const DWORD exitError = exitKnown ? ERROR_SUCCESS : GetLastError();
+    // A published exit status may precede the signalled process object. Keep the
+    // same generation handle and require kernel confirmation, never the exit code alone.
+    if (error == ERROR_ACCESS_DENIED && waitState == WAIT_TIMEOUT && exitKnown && exitCode != STILL_ACTIVE) {
+      waitState = WaitForSingleObject(process, 25);
+      if (waitState == WAIT_OBJECT_0) { CloseHandle(process); return {}; }
+    }
+    CloseHandle(process);
+    throw std::runtime_error("Cannot inspect process identity (Windows error " + std::to_string(error)
+      + ", pid " + std::to_string(pid) + ", wait " + std::to_string(waitState)
+      + ", exit " + (exitKnown ? std::to_string(exitCode) : std::string("unavailable"))
+      + ", exit-query-error " + std::to_string(exitError) + ")");
+  }
+  if (stage) *stage = "identity-token-size";
+  DWORD size = 0; GetTokenInformation(token, TokenUser, nullptr, 0, &size);
+  std::vector<unsigned char> info(size);
+  if (stage) *stage = "identity-token-user";
+  if (!GetTokenInformation(token, TokenUser, info.data(), size, &size)) {
+    CloseHandle(token); CloseHandle(process); throw std::runtime_error("Cannot inspect process owner");
+  }
+  LPSTR sid = nullptr;
+  if (stage) *stage = "identity-owner-sid";
+  if (!ConvertSidToStringSidA(reinterpret_cast<TOKEN_USER*>(info.data())->User.Sid, &sid)) {
+    CloseHandle(token); CloseHandle(process); throw std::runtime_error("Cannot read process owner");
+  }
+  result.owner = sid; LocalFree(sid); CloseHandle(token);
+  ULARGE_INTEGER ticks; ticks.LowPart = created.dwLowDateTime; ticks.HighPart = created.dwHighDateTime;
+  result.started = std::to_string(ticks.QuadPart);
+  int count = WideCharToMultiByte(CP_UTF8, 0, path, length, nullptr, 0, nullptr, nullptr);
+  result.executable.resize(count);
+  WideCharToMultiByte(CP_UTF8, 0, path, length, result.executable.data(), count, nullptr, nullptr);
+  bool knownCreator = false;
+  {
+    std::lock_guard<std::mutex> lock(creatorMutex);
+    const auto previous = creatorByPid.find(pid);
+    if (previous != creatorByPid.end() && previous->second.first == ticks.QuadPart) {
+      result.parent = previous->second.second; knownCreator = true;
+    }
+  }
+  if (!knownCreator) {
+    if (stage) *stage = "identity-parent-snapshot";
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot == INVALID_HANDLE_VALUE) { CloseHandle(process); throw std::runtime_error("Cannot inspect process parent"); }
+    PROCESSENTRY32 entry{}; entry.dwSize = sizeof(entry);
+    if (Process32First(snapshot, &entry)) do {
+      if (entry.th32ProcessID == static_cast<DWORD>(pid)) { result.parent = entry.th32ParentProcessID; break; }
+    } while (Process32Next(snapshot, &entry));
+    CloseHandle(snapshot);
+  }
+  // Keep this generation pinned through the creator observation. Retained birth
+  // metadata never proves the process is still alive after its image/token queries.
+  const DWORD finalWait = WaitForSingleObject(process, 0);
+  CloseHandle(process);
+  if (finalWait == WAIT_OBJECT_0) return {};
+  if (finalWait != WAIT_TIMEOUT) throw std::runtime_error("Cannot confirm process identity is still current");
+  if (!knownCreator && ticks.QuadPart != 0 && result.parent > 0) {
+    std::lock_guard<std::mutex> lock(creatorMutex);
+    if (creatorByPid.size() >= 1024 && creatorByPid.find(pid) == creatorByPid.end()) creatorByPid.clear();
+    creatorByPid[pid] = { ticks.QuadPart, result.parent };
+  }
+#elif __APPLE__
+  proc_bsdinfo info{};
+  if (proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, sizeof(info)) != sizeof(info)) {
+    if (errno == ESRCH || errno == ENOENT) return {};
+    throw std::runtime_error("Cannot inspect process identity (macOS errno " + std::to_string(errno) + ", pid " + std::to_string(pid) + ")");
+  }
+  char path[PROC_PIDPATHINFO_MAXSIZE];
+  if (proc_pidpath(pid, path, sizeof(path)) <= 0) {
+    if (errno == ESRCH || errno == ENOENT) return {};
+    throw std::runtime_error("Cannot inspect process executable (macOS errno " + std::to_string(errno) + ", pid " + std::to_string(pid) + ")");
+  }
+  result.owner = std::to_string(info.pbi_uid); result.parent = info.pbi_ppid;
+  result.started = std::to_string(info.pbi_start_tvsec) + ":" + std::to_string(info.pbi_start_tvusec);
+  result.executable = path;
+#else
+  std::string base = "/proc/" + std::to_string(pid);
+  struct stat status;
+  if (stat(base.c_str(), &status)) {
+    if (errno == ENOENT || errno == ESRCH) return {};
+    throw std::runtime_error("Cannot inspect process identity");
+  }
+  std::string line = Read(base + "/stat");
+  auto end = line.rfind(')');
+  if (end == std::string::npos) return {};
+  std::istringstream fields(line.substr(end + 2));
+  std::vector<std::string> values; std::string value;
+  while (fields >> value) values.push_back(value);
+  if (values.size() < 20) throw std::runtime_error("Invalid process identity");
+  // Zombies have exited and cannot execute; their executable link is already gone.
+  if (values[0] == "Z") return {};
+  char path[65536]; auto length = readlink((base + "/exe").c_str(), path, sizeof(path));
+  if (length < 0) {
+    if (errno == ENOENT || errno == ESRCH) return {};
+    throw std::runtime_error("Cannot inspect process executable");
+  }
+  result.owner = std::to_string(status.st_uid); result.parent = std::stoi(values[1]);
+  auto boot = Read("/proc/sys/kernel/random/boot_id");
+  if (boot.empty()) throw std::runtime_error("Cannot inspect system boot identity");
+  result.started = boot + ":" + values[19];
+  result.executable.assign(path, length);
+#endif
+  return result;
+}
+
+// Read OS direct-parent PID metadata; callers separately bind creation/owner identity.
+static std::vector<int> Children(int pid) {
+  std::set<int> children;
+#ifdef _WIN32
+  // Toolhelp retains the creator PID after that creator exits and its PID is reused.
+  // Hold this parent generation while excluding entries born before it.
+  HANDLE parent = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, pid);
+  if (!parent) throw std::runtime_error("Cannot inspect child-list parent");
+  FILETIME parentCreated, parentExited, parentKernel, parentUser;
+  if (WaitForSingleObject(parent, 0) != WAIT_TIMEOUT
+      || !GetProcessTimes(parent, &parentCreated, &parentExited, &parentKernel, &parentUser)) {
+    CloseHandle(parent); throw std::runtime_error("Cannot inspect child-list parent generation");
+  }
+  HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+  if (snapshot == INVALID_HANDLE_VALUE) { CloseHandle(parent); throw std::runtime_error("Cannot enumerate process children"); }
+  try {
+    PROCESSENTRY32 entry{}; entry.dwSize = sizeof(entry);
+    BOOL found = Process32First(snapshot, &entry);
+    while (found) {
+      if (entry.th32ParentProcessID == static_cast<DWORD>(pid) && entry.th32ProcessID > 0) {
+        if (entry.th32ProcessID > 2147483647) throw std::runtime_error("Unsupported child process identity");
+        HANDLE child = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, entry.th32ProcessID);
+        bool predatesParent = false;
+        if (!child) {
+          if (GetLastError() != ERROR_INVALID_PARAMETER) throw std::runtime_error("Cannot inspect child generation");
+        } else {
+          FILETIME created, exited, kernel, user;
+          const bool timed = GetProcessTimes(child, &created, &exited, &kernel, &user);
+          const bool kernelExited = !timed && WaitForSingleObject(child, 0) == WAIT_OBJECT_0;
+          CloseHandle(child);
+          if (!timed && !kernelExited) throw std::runtime_error("Cannot inspect live child generation");
+          predatesParent = timed && CompareFileTime(&created, &parentCreated) < 0;
+        }
+        // Exited candidates remain in the list for the caller's independent kernel-exit verification.
+        if (!predatesParent) children.insert(static_cast<int>(entry.th32ProcessID));
+      }
+      // The handle/timing calls above may change LastError; only inspect it immediately after Process32Next.
+      found = Process32Next(snapshot, &entry);
+    }
+    if (GetLastError() != ERROR_NO_MORE_FILES) throw std::runtime_error("Incomplete process child snapshot");
+    if (WaitForSingleObject(parent, 0) != WAIT_TIMEOUT) throw std::runtime_error("Child-list parent exited during observation");
+  } catch (...) { CloseHandle(snapshot); CloseHandle(parent); throw; }
+  CloseHandle(snapshot); CloseHandle(parent);
+#elif __APPLE__
+  errno = 0;
+  int count = proc_listchildpids(pid, nullptr, 0);
+  if (count < 0 || errno || count > 1048576) throw std::runtime_error("Cannot enumerate process children");
+  size_t capacity = static_cast<size_t>(count) + 32;
+  for (;;) {
+    std::vector<int> values(capacity);
+    errno = 0;
+    count = proc_listchildpids(pid, values.data(), static_cast<int>(values.size() * sizeof(int)));
+    if (count < 0 || errno) throw std::runtime_error("Cannot enumerate process children");
+    if (static_cast<size_t>(count) < capacity) {
+      for (int index = 0; index < count; index++) if (values[index] > 0) children.insert(values[index]);
+      break;
+    }
+    if (capacity > 1048576) throw std::runtime_error("Process child snapshot is too large");
+    capacity *= 2;
+  }
+#else
+  const std::string tasksPath = "/proc/" + std::to_string(pid) + "/task";
+  DIR* tasks = opendir(tasksPath.c_str());
+  if (!tasks) throw std::runtime_error("Cannot enumerate process threads");
+  try {
+    for (;;) {
+      errno = 0;
+      auto entry = readdir(tasks);
+      if (!entry) {
+        if (errno) throw std::runtime_error("Incomplete process thread snapshot");
+        break;
+      }
+      const std::string name(entry->d_name);
+      if (name.empty() || name.find_first_not_of("0123456789") != std::string::npos) continue;
+      std::ifstream file(tasksPath + "/" + name + "/children");
+      if (!file) throw std::runtime_error("Cannot read process children");
+      int child;
+      while (file >> child) {
+        if (child <= 0) throw std::runtime_error("Invalid child process identity");
+        children.insert(child);
+      }
+      if (file.bad() || !file.eof()) throw std::runtime_error("Incomplete process child list");
+    }
+  } catch (...) { closedir(tasks); throw; }
+  closedir(tasks);
+#endif
+  return {children.begin(), children.end()};
+}
+
+#ifndef _WIN32
+static bool PidAbsent(int pid) {
+  if (kill(pid, 0) == 0 || errno == EPERM) return false;
+  if (errno == ESRCH) return true;
+  throw std::runtime_error("Cannot confirm process absence");
+}
+#endif
+
+static bool Exited(int pid) {
+#ifdef _WIN32
+  HANDLE process = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+  if (!process) {
+    if (GetLastError() == ERROR_INVALID_PARAMETER) return true;
+    throw std::runtime_error("Cannot inspect process exit");
+  }
+  const DWORD status = WaitForSingleObject(process, 0);
+  CloseHandle(process);
+  if (status == WAIT_OBJECT_0) return true;
+  if (status == WAIT_TIMEOUT) return false;
+  throw std::runtime_error("Cannot confirm process exit");
+#elif __APPLE__
+  proc_bsdinfo info{};
+  if (proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, sizeof(info)) != sizeof(info)) {
+    if (PidAbsent(pid)) return true;
+    throw std::runtime_error("Cannot inspect process exit (macOS errno " + std::to_string(errno) + ", pid " + std::to_string(pid) + ")");
+  }
+  return info.pbi_status == SZOMB;
+#else
+  errno = 0;
+  std::ifstream file("/proc/" + std::to_string(pid) + "/stat");
+  if (!file) {
+    if (PidAbsent(pid)) return true;
+    throw std::runtime_error("Cannot inspect process exit");
+  }
+  const std::string stat(std::istreambuf_iterator<char>(file), {});
+  if (file.bad()) throw std::runtime_error("Cannot read process exit state");
+  const auto end = stat.rfind(')');
+  if (end == std::string::npos) throw std::runtime_error("Invalid process exit state");
+  std::istringstream fields(stat.substr(end + 2));
+  char state;
+  if (!(fields >> state)) throw std::runtime_error("Cannot read process exit state");
+  return state == 'Z' || state == 'X' || state == 'x';
+#endif
+}
+
+static napi_value String(napi_env env, const std::string& text) {
+  napi_value value; napi_create_string_utf8(env, text.c_str(), text.size(), &value); return value;
+}
+static void Property(napi_env env, napi_value object, const char* key, napi_value value) { napi_set_named_property(env, object, key, value); }
+static napi_value Number(napi_env env, int number) { napi_value value; napi_create_int32(env, number, &value); return value; }
+static napi_value Object(napi_env env, const Identity& identity) {
+  napi_value value;
+  if (!identity.pid) { napi_get_null(env, &value); return value; }
+  napi_create_object(env, &value);
+  Property(env, value, "pid", Number(env, identity.pid));
+  Property(env, value, "parent", Number(env, identity.parent));
+  Property(env, value, "owner", String(env, identity.owner));
+  Property(env, value, "started", String(env, identity.started));
+  Property(env, value, "executable", String(env, identity.executable));
+  return value;
+}
+static int Argument(napi_env env, napi_callback_info info, bool descriptor = false) {
+  size_t argc = 1; napi_value args[1]; double value;
+  napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+  if (argc != 1 || napi_get_value_double(env, args[0], &value) != napi_ok || !std::isfinite(value) || value < (descriptor ? 0 : 1) || value > 2147483647 || value != static_cast<int>(value)) {
+    throw std::runtime_error("Expected a positive process ID or socket descriptor");
+  }
+  return static_cast<int>(value);
+}
+static napi_value InspectCall(napi_env env, napi_callback_info info) {
+  try { return Object(env, Inspect(Argument(env, info))); }
+  catch (const std::exception& error) { napi_throw_error(env, "CRABOT_PROCESS_IDENTITY", error.what()); return nullptr; }
+}
+static napi_value PidsCall(napi_env env, napi_callback_info) {
+  try {
+    auto pids = Pids(); napi_value result; napi_create_array(env, &result);
+    unsigned index = 0;
+    for (int pid : pids) if (pid > 0) napi_set_element(env, result, index++, Number(env, pid));
+    return result;
+  } catch (const std::exception& error) { napi_throw_error(env, "CRABOT_PROCESS_IDENTITY", error.what()); return nullptr; }
+}
+static napi_value ChildrenCall(napi_env env, napi_callback_info info) {
+  try {
+    const auto children = Children(Argument(env, info));
+    napi_value result; napi_create_array(env, &result);
+    for (uint32_t index = 0; index < children.size(); index++) napi_set_element(env, result, index, Number(env, children[index]));
+    return result;
+  } catch (const std::exception& error) { napi_throw_error(env, "CRABOT_PROCESS_IDENTITY", error.what()); return nullptr; }
+}
+static napi_value ExitedCall(napi_env env, napi_callback_info info) {
+  try {
+    napi_value result; napi_get_boolean(env, Exited(Argument(env, info)), &result); return result;
+  } catch (const std::exception& error) { napi_throw_error(env, "CRABOT_PROCESS_IDENTITY", error.what()); return nullptr; }
+}
+#ifndef _WIN32
+static napi_value PeerCall(napi_env env, napi_callback_info info) {
+  try {
+    int fd = Argument(env, info, true), pid;
+#ifdef __APPLE__
+    uid_t uid;
+    gid_t gid; socklen_t size = sizeof(pid);
+    if (getpeereid(fd, &uid, &gid) || getsockopt(fd, SOL_LOCAL, LOCAL_PEERPID, &pid, &size)) throw std::runtime_error("Cannot identify local socket peer");
+#else
+    uid_t uid;
+    struct ucred peer; socklen_t size = sizeof(peer);
+    if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &peer, &size)) throw std::runtime_error("Cannot identify local socket peer");
+    uid = peer.uid; pid = peer.pid;
+#endif
+    auto identity = Inspect(pid);
+    if (!identity.pid || identity.owner != std::to_string(uid)) throw std::runtime_error("Local peer identity changed");
+    return Object(env, identity);
+  } catch (const std::exception& error) { napi_throw_error(env, "CRABOT_PEER_IDENTITY", error.what()); return nullptr; }
+}
+#endif
+
+// Inspect the OS process entry, never arguments claimed by the IPC client.
+static std::vector<std::string> ProcessArguments(int pid) {
+  std::vector<std::string> args;
+#ifdef _WIN32
+  HANDLE process = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, pid);
+  if (!process) throw std::runtime_error("Cannot inspect process arguments");
+  using Query = NTSTATUS (NTAPI*)(HANDLE, PROCESSINFOCLASS, PVOID, ULONG, PULONG);
+  auto query = reinterpret_cast<Query>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQueryInformationProcess"));
+  PROCESS_BASIC_INFORMATION basic{}; PEB peb{}; RTL_USER_PROCESS_PARAMETERS parameters{};
+  bool valid = query && query(process, ProcessBasicInformation, &basic, sizeof(basic), nullptr) >= 0
+    && basic.PebBaseAddress && ReadProcessMemory(process, basic.PebBaseAddress, &peb, sizeof(peb), nullptr)
+    && peb.ProcessParameters && ReadProcessMemory(process, peb.ProcessParameters, &parameters, sizeof(parameters), nullptr);
+  auto size = parameters.CommandLine.Length;
+  std::vector<wchar_t> command(size / sizeof(wchar_t) + 1, L'\0');
+  valid = valid && size && size % sizeof(wchar_t) == 0 && size <= parameters.CommandLine.MaximumLength
+    && ReadProcessMemory(process, parameters.CommandLine.Buffer, command.data(), size, nullptr);
+  CloseHandle(process);
+  if (!valid) throw std::runtime_error("Cannot inspect process command line");
+  int count = 0; auto words = CommandLineToArgvW(command.data(), &count);
+  if (!words) throw std::runtime_error("Cannot parse process command line");
+  for (int i = 0; i < count; i++) {
+    int bytes = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, words[i], -1, nullptr, 0, nullptr, nullptr);
+    if (!bytes) { LocalFree(words); throw std::runtime_error("Invalid process command line"); }
+    std::vector<char> utf8(bytes);
+    WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, words[i], -1, utf8.data(), bytes, nullptr, nullptr);
+    args.emplace_back(utf8.data());
+  }
+  LocalFree(words);
+#elif __APPLE__
+  int mib[] = { CTL_KERN, KERN_PROCARGS2, pid };
+  size_t size = 0;
+  if (sysctl(mib, 3, nullptr, &size, nullptr, 0) || size < sizeof(int) || size > 2 * 1024 * 1024) throw std::runtime_error("Cannot inspect process arguments");
+  std::vector<char> buffer(size);
+  if (sysctl(mib, 3, buffer.data(), &size, nullptr, 0)) throw std::runtime_error("Cannot read process arguments");
+  int count; std::memcpy(&count, buffer.data(), sizeof(count));
+  size_t offset = sizeof(count);
+  while (offset < size && buffer[offset]) offset++;
+  while (offset < size && !buffer[offset]) offset++;
+  if (count <= 0 || count > 65536) throw std::runtime_error("Invalid process argument count");
+  for (int i = 0; i < count; i++) {
+    size_t end = offset;
+    while (end < size && buffer[end]) end++;
+    if (end >= size) throw std::runtime_error("Incomplete process arguments");
+    args.emplace_back(buffer.data() + offset, end - offset); offset = end + 1;
+  }
+#else
+  auto raw = Read("/proc/" + std::to_string(pid) + "/cmdline");
+  if (raw.empty() || raw.size() > 2 * 1024 * 1024 || raw.back() != '\0') throw std::runtime_error("Cannot read process arguments");
+  size_t offset = 0;
+  while (offset < raw.size()) {
+    auto end = raw.find('\0', offset); args.push_back(raw.substr(offset, end - offset)); offset = end + 1;
+  }
+#endif
+  return args;
+}
+static napi_value ArgumentsCall(napi_env env, napi_callback_info info) {
+  try {
+    auto args = ProcessArguments(Argument(env, info)); napi_value result; napi_create_array(env, &result);
+    for (size_t i = 0; i < args.size(); i++) napi_set_element(env, result, i, String(env, args[i]));
+    return result;
+  } catch (const std::exception& error) { napi_throw_error(env, "CRABOT_PROCESS_ARGUMENTS", error.what()); return nullptr; }
+}
+#include "tcp-listeners.h"
+struct FileLock {
+#ifdef _WIN32
+  HANDLE handle = INVALID_HANDLE_VALUE;
+#else
+  int handle = -1;
+#endif
+  void Close() {
+#ifdef _WIN32
+    if (handle != INVALID_HANDLE_VALUE) { CloseHandle(handle); handle = INVALID_HANDLE_VALUE; }
+#else
+    if (handle >= 0) { close(handle); handle = -1; }
+#endif
+  }
+};
+static void FinalizeLock(napi_env, void* data, void*) { auto lock = static_cast<FileLock*>(data); lock->Close(); delete lock; }
+static std::string Text(napi_env env, napi_value value) {
+  size_t size;
+  if (napi_get_value_string_utf8(env, value, nullptr, 0, &size) != napi_ok) throw std::runtime_error("Expected string");
+  std::vector<char> buffer(size + 1); napi_get_value_string_utf8(env, value, buffer.data(), buffer.size(), &size);
+  return std::string(buffer.data(), size);
+}
+// Liveness uses creation identity and owner; exec/reparenting do not create a new process.
+static bool CurrentOwnedGeneration(int pid, const std::string& started, const std::string& owner) {
+  const auto current = Inspect(pid);
+  if (!current.pid) {
+    if (Exited(pid)) return false;
+    throw std::runtime_error("Cannot verify a live process generation");
+  }
+  if (current.started != started) return false;
+  if (current.owner != owner) throw std::runtime_error("Process owner changed; no termination sent");
+  return true;
+}
+static bool TerminateGeneration(int pid, const std::string& started, const std::string& owner) {
+#ifdef _WIN32
+  const int selfPid = static_cast<int>(GetCurrentProcessId());
+#else
+  const int selfPid = getpid();
+#endif
+  if (pid == selfPid || owner != Inspect(selfPid).owner) throw std::runtime_error("Cannot terminate self or another OS owner");
+  if (Exited(pid)) return false;
+#ifdef _WIN32
+  HANDLE target = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE | PROCESS_TERMINATE, FALSE, pid);
+  if (!target) {
+    if (GetLastError() == ERROR_INVALID_PARAMETER || Exited(pid)) return false;
+    throw std::runtime_error("Cannot open the verified process for termination");
+  }
+  try {
+    bool submitted = false;
+    const DWORD state = WaitForSingleObject(target, 0);
+    if (state != WAIT_OBJECT_0 && state != WAIT_TIMEOUT) throw std::runtime_error("Cannot inspect the verified process handle");
+    if (state == WAIT_TIMEOUT && CurrentOwnedGeneration(pid, started, owner)) {
+      if (TerminateProcess(target, 1)) submitted = true;
+      else if (WaitForSingleObject(target, 0) != WAIT_OBJECT_0) throw std::runtime_error("Cannot terminate the verified process");
+    }
+    CloseHandle(target);
+    return submitted;
+  } catch (...) { CloseHandle(target); throw; }
+#elif defined(__APPLE__)
+  if (!CurrentOwnedGeneration(pid, started, owner)) return false;
+  if (kill(pid, SIGKILL) == 0) return true;
+  if (errno == ESRCH) return false;
+  throw std::runtime_error("Cannot terminate the verified process");
+#else
+#if defined(SYS_pidfd_open) && defined(SYS_pidfd_send_signal)
+  const int target = static_cast<int>(syscall(SYS_pidfd_open, pid, 0));
+  if (target < 0) {
+    if (errno == ESRCH) return false;
+    throw std::runtime_error("Cannot bind the verified process with pidfd");
+  }
+  try {
+    bool submitted = false;
+    if (CurrentOwnedGeneration(pid, started, owner)) {
+      if (syscall(SYS_pidfd_send_signal, target, SIGKILL, nullptr, 0) == 0) submitted = true;
+      else if (errno != ESRCH) throw std::runtime_error("Cannot terminate the verified process through pidfd");
+    }
+    close(target);
+    return submitted;
+  } catch (...) { close(target); throw; }
+#else
+  throw std::runtime_error("Kernel-bound process termination is unavailable");
+#endif
+#endif
+}
+static napi_value TerminateGenerationCall(napi_env env, napi_callback_info info) {
+  try {
+    size_t argc = 3; napi_value args[3]; double pid;
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    if (argc != 3 || napi_get_value_double(env, args[0], &pid) != napi_ok || !std::isfinite(pid)
+      || pid < 1 || pid > 2147483647 || pid != static_cast<int>(pid)) throw std::runtime_error("Expected a positive process ID and its creation identity/owner");
+    const auto started = Text(env, args[1]), owner = Text(env, args[2]);
+    if (started.empty() || owner.empty() || started.size() > 512 || owner.size() > 512
+      || started.find('\0') != std::string::npos || owner.find('\0') != std::string::npos) throw std::runtime_error("Invalid process creation identity/owner");
+    napi_value result; napi_get_boolean(env, TerminateGeneration(static_cast<int>(pid), started, owner), &result); return result;
+  } catch (const std::exception& error) { napi_throw_error(env, "CRABOT_PROCESS_SIGNAL", error.what()); return nullptr; }
+}
+
+static napi_value TryLock(napi_env env, napi_callback_info info) {
+  FileLock* lock = nullptr;
+  try {
+    size_t argc = 2; napi_value args[2]; napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    if (argc != 2) throw std::runtime_error("Expected lock path and metadata");
+    auto path = Text(env, args[0]), text = Text(env, args[1]);
+    if (path.find('\0') != std::string::npos || text.size() > 4096) throw std::runtime_error("Invalid file lock arguments");
+    lock = new FileLock;
+    bool busy = false;
+#ifdef _WIN32
+    int count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path.c_str(), -1, nullptr, 0);
+    std::vector<wchar_t> wide(count);
+    if (!count || !MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path.c_str(), -1, wide.data(), count)) throw std::runtime_error("Invalid file path");
+    lock->handle = CreateFileW(wide.data(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (lock->handle == INVALID_HANDLE_VALUE) {
+      busy = GetLastError() == ERROR_SHARING_VIOLATION || GetLastError() == ERROR_LOCK_VIOLATION;
+      if (!busy) throw std::runtime_error("Cannot open lifecycle lock");
+    } else {
+      DWORD written;
+      if (!SetFilePointerEx(lock->handle, {}, nullptr, FILE_BEGIN) || !SetEndOfFile(lock->handle)
+        || !WriteFile(lock->handle, text.data(), static_cast<DWORD>(text.size()), &written, nullptr) || written != text.size()) throw std::runtime_error("Cannot write lifecycle lock");
+    }
+#else
+    lock->handle = open(path.c_str(), O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
+    if (lock->handle < 0) throw std::runtime_error("Cannot open lifecycle lock");
+    if (flock(lock->handle, LOCK_EX | LOCK_NB)) {
+      busy = errno == EWOULDBLOCK || errno == EAGAIN;
+      if (!busy) throw std::runtime_error("Cannot acquire lifecycle lock");
+    } else if (ftruncate(lock->handle, 0) || write(lock->handle, text.data(), text.size()) != static_cast<ssize_t>(text.size())) throw std::runtime_error("Cannot write lifecycle lock");
+#endif
+    napi_value result;
+    if (busy) { lock->Close(); delete lock; napi_get_null(env, &result); }
+    else napi_create_external(env, lock, FinalizeLock, nullptr, &result);
+    return result;
+  } catch (const std::exception& error) {
+    if (lock) { lock->Close(); delete lock; }
+    napi_throw_error(env, "CRABOT_CLI_LOCK", error.what()); return nullptr;
+  }
+}
+static napi_value ReleaseLock(napi_env env, napi_callback_info info) {
+  size_t argc = 1; napi_value args[1]; void* data = nullptr;
+  napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+  if (argc != 1 || napi_get_value_external(env, args[0], &data) != napi_ok || !data) {
+    napi_throw_error(env, "CRABOT_CLI_LOCK", "Invalid lock handle"); return nullptr;
+  }
+  static_cast<FileLock*>(data)->Close();
+  napi_value result; napi_get_undefined(env, &result); return result;
+}
+#include "local-pipe.h"
+#include "private-file.h"
+#include "user-path.h"
+#include "desktop-login.h"
+#include "install-filesystem.h"
+#include "directory-move.h"
+#include "file-move.h"
+#include "file-metadata.h"
+#include "workspace-owner-inheritance.h"
+#include "directory-access.h"
+#include "directory-pin.h"
+#include "workspace-sync.h"
+#include "workspace-copy-metadata.h"
+#include "workspace-copy-job.h"
+#include "process-tree-observation.h"
+#include "program-references.h"
+
+static napi_value Initialize(napi_env env, napi_value exports) {
+  napi_property_descriptor methods[] = {
+#ifdef _WIN32
+    {"inspectDesktopLoginStartup", nullptr, InspectDesktopLogin, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"retargetDesktopLoginStartup", nullptr, RetargetDesktopLogin, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"removeDesktopLoginStartup", nullptr, RemoveDesktopLogin, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"captureProcessTreeGeneration", nullptr, CaptureProcessTreeGeneration, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"createWorkspaceCopyJob", nullptr, CreateWorkspaceCopyJob, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"inspectWorkspaceCopyJob", nullptr, InspectWorkspaceCopyJob, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"resumeWorkspaceCopyJob", nullptr, ResumeWorkspaceCopyJob, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"closeWorkspaceCopyJob", nullptr, CloseWorkspaceCopyJob, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"inspectDirectoryWriteAccess", nullptr, InspectDirectoryWriteAccess, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"inspectWorkspaceOwnerAccess", nullptr, InspectWorkspaceOwnerAccess, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"compareWorkspaceOwnerInheritance", nullptr, CompareWorkspaceOwnerInheritance, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"inspectCurrentPrimaryGroup", nullptr, InspectCurrentPrimaryGroup, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"inspectDirectoryFileId", nullptr, InspectDirectoryFileId, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"copyPinnedWorkspaceMetadata", nullptr, CopyPinnedWorkspaceMetadata, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"syncPinnedWorkspaceTree", nullptr, SyncPinnedWorkspaceTree, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"copyPinnedDirectoryMetadata", nullptr, CopyPinnedDirectoryMetadata, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"pinDirectory", nullptr, PinDirectory, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"releaseDirectoryPin", nullptr, ReleaseDirectoryPin, nullptr, nullptr, nullptr, napi_default, nullptr},
+#endif
+#ifndef _WIN32
+    {"copyDirectoryTimesFd", nullptr, CopyDirectoryTimesFd, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"enterDirectoryFd", nullptr, EnterDirectoryFd, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"createPrivateStagingDirectory", nullptr, CreatePrivateStagingDirectory, nullptr, nullptr, nullptr, napi_default, nullptr},
+#endif
+    {"inspectFileMetadata", nullptr, InspectFileMetadata, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"renameDirectoryNoReplace", nullptr, RenameDirectoryNoReplace, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"renameFileNoReplace", nullptr, RenameFileNoReplace, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"inspectInstallFilesystem", nullptr, InstallFilesystemCall, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"inspectProgramReferences", nullptr, ProgramReferencesCall, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"inspectProcess", nullptr, InspectCall, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"listProcessIds", nullptr, PidsCall, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"listChildProcessIds", nullptr, ChildrenCall, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"isProcessExited", nullptr, ExitedCall, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"terminateProcessGeneration", nullptr, TerminateGenerationCall, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"tryFileLock", nullptr, TryLock, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"releaseFileLock", nullptr, ReleaseLock, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"inspectProcessArguments", nullptr, ArgumentsCall, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"listListeningTcpPorts", nullptr, ListeningPortsCall, nullptr, nullptr, nullptr, napi_default, nullptr},
+#ifndef _WIN32
+    {"inspectPeer", nullptr, PeerCall, nullptr, nullptr, nullptr, napi_default, nullptr},
+#endif
+  };
+  napi_define_properties(env, exports, sizeof(methods) / sizeof(methods[0]), methods);
+#ifdef _WIN32
+  RegisterLocalPipe(env, exports);
+  RegisterPrivateFile(env, exports);
+  RegisterUserPath(env, exports);
+#endif
+  return exports;
+}
+NAPI_MODULE(NODE_GYP_MODULE_NAME, Initialize)
