@@ -133,3 +133,5 @@ export { parseVoiceConnection, voiceTerminalEntry, voiceSetupStatus } from './vo
 export * from './computer-use.js'
 
 export { geminiApiUrl, geminiApiHeaders, geminiModelId } from './gemini-api.js'
+
+export type { WorkspaceRecord, WorkspaceUsage, WorkspaceExecution, WorkspaceExecutionInventory, WorkspaceSummary, WorkspaceMaintenanceStatus, WorkspaceListResult, WorkspaceCreateRequest, WorkspaceUpdateRequest, WorkspaceRecordResult, WorkspaceGetResult, WorkspaceScanResult } from './workspace-types.js'
