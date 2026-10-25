@@ -103,18 +103,40 @@ for (const mode of ['valid', 'cancelled', 'changed-node', 'changed-backend', 're
 })
 
 
-for (const mode of ['node-job-valid', 'node-job-parent-flags', 'node-job-copy-changed', 'node-job-other-installation', 'node-job-source-verifier']) test('actual private Node initial job role: ' + mode, { skip: !linux, timeout: 60000 }, async t => {
+for (const mode of ['node-job-valid', 'node-job-parent-flags', 'node-job-copy-changed', 'node-job-other-installation', 'node-job-source-verifier', 'node-job-source-exit']) test('actual private Node initial job role: ' + mode, { skip: !linux, timeout: 60000 }, async t => {
   const area = await fs.mkdtemp(path.join(root, 'node-role-'))
   const own = await commitDesktopInstallation(await prepareDesktopInstallation({ payload, installRoot: path.join(area, 'installation') }))
   await fs.writeFile(path.join(own.dataDir, 'preserved'), 'unchanged user content')
-  const cfg = { mode, own, operationId: randomUUID() }
+  const cfg = { mode, own, operationId: randomUUID(), resultFile: path.join(area, 'node-result.json') }
   if (mode === 'node-job-other-installation') cfg.otherRoot = (await commitDesktopInstallation(await prepareDesktopInstallation({ payload, installRoot: path.join(area, 'other') }))).root
   const env = { ...process.env, CRABOT_NODE_REMOVAL_FIXTURE: JSON.stringify(cfg) }
   for (const name of ['NODE_OPTIONS', 'NODE_PATH', 'ELECTRON_RUN_AS_NODE']) delete env[name]
   const running = promisify(execFile)(own.executable, mode === 'node-job-parent-flags' ? ['--no-warnings'] : [], { cwd: area, env, timeout: 50000, maxBuffer: 8192 })
   running.child.stdin.end(await fs.readFile(new URL('./fixtures/ubuntu-removal-node-parent.cjs', import.meta.url)))
-  const { stdout } = await running, result = JSON.parse(stdout)
-  if (mode === 'node-job-source-verifier') assert.deepEqual(result, { accepted: true, published: 'preparing', stopped: 'stopping', cancelled: true, ordinary_peer: false, locks_reacquired: true,
+  const { stdout } = await running
+  let result = JSON.parse(stdout)
+  if (mode === 'node-job-source-exit') {
+    assert.equal(result.handoff, true)
+    const { directory, host } = result, identity = require('../../scripts/lib/process-identity.cjs')
+    const { probeKnownProcessExit } = require('../../scripts/lib/known-process-exit.cjs')
+    const stat = await fs.lstat(directory, { bigint: true })
+    t.after(async () => {
+      if (identity.sameProcess(host, identity.inspectProcess(host.pid))) identity.terminateKnownProcess(host)
+      const deadline = Date.now() + 5000
+      while (probeKnownProcessExit([host]).state === 'running' && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 25))
+      assert.equal(probeKnownProcessExit([host]).state, 'stopped')
+      const actual = await fs.lstat(directory, { bigint: true })
+      assert.equal(actual.dev, stat.dev); assert.equal(actual.ino, stat.ino)
+      await fs.rm(directory, { recursive: true })
+    })
+    const deadline = Date.now() + 35000
+    while (!await fs.lstat(cfg.resultFile).catch(() => null) || probeKnownProcessExit([host]).state !== 'stopped') {
+      if (Date.now() >= deadline) throw new Error('Private Node did not complete after actual source exit')
+      await new Promise(resolve => setTimeout(resolve, 25))
+    }
+    result = JSON.parse(await fs.readFile(cfg.resultFile, 'utf8'))
+    assert.deepEqual(result, { accepted: true, published: 'preparing', stopped: 'stopping', cancelled: true, ordinary_peer: false, locks_reacquired: true, source_exited: true })
+  } else if (mode === 'node-job-source-verifier') assert.deepEqual(result, { accepted: true, published: 'preparing', stopped: 'stopping', cancelled: true, ordinary_peer: false, locks_reacquired: true,
     source_verifier: { preparing_rejected: true, wrong_operation_rejected: true, verified_after_stop: true, changed_copy_rejected: true } })
   else if (mode === 'node-job-valid') assert.deepEqual(result, { accepted: true, published: 'preparing', stopped: 'stopping', cancelled: true, ordinary_peer: false, locks_reacquired: true })
   else assert.deepEqual(result, { accepted: false, code: 'CRABOT_DESKTOP_REMOVAL' })

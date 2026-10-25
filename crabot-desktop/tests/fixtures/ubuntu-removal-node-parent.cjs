@@ -26,6 +26,8 @@ void (async () => {
       let sourceVerifier;
       if(process.argv[3]==='node-job-source-verifier')sourceVerifier={preparing_rejected:await probe(message)===false};
       await lease.stop();const stopped=await lease.current();
+      let sourceExited;
+      if(process.argv[3]==='node-job-source-exit'){process.removeListener('disconnect',parentLost);sourceExited=(await lease.exitSource()).source_exited}
       if(sourceVerifier){
         sourceVerifier.wrong_operation_rejected=await probe({...message,operation_id:'00000000-0000-4000-8000-000000000000'})===false;
         sourceVerifier.verified_after_stop=await probe(message)===true;
@@ -36,17 +38,26 @@ void (async () => {
       const locks=await import(pathToFileURL(path.join(process.cwd(),'backend/bootstrap/scripts/lib/cli-lock.mjs')));
       const rootLock=await locks.acquireExistingCliLock(process.argv[1],'fixture-reacquire',0);
       try{const dataLock=await locks.acquireExistingCliLock(path.join(process.argv[1],'data'),'fixture-reacquire',0);locks.releaseCliLock(dataLock)}finally{locks.releaseCliLock(rootLock)}
-      process.stdout.write(JSON.stringify({accepted:true,published:published.phase,stopped:stopped.phase,cancelled:true,ordinary_peer:ordinaryPeer,locks_reacquired:true,...(sourceVerifier?{source_verifier:sourceVerifier}:{})})+'\\n');
+      const result={accepted:true,published:published.phase,stopped:stopped.phase,cancelled:true,ordinary_peer:ordinaryPeer,locks_reacquired:true,...(sourceVerifier?{source_verifier:sourceVerifier}:{}),...(sourceExited?{source_exited:sourceExited}:{})};
+      if(process.argv[3]==='node-job-source-exit')await(await import('node:fs/promises')).writeFile(process.argv[4],JSON.stringify(result));
+      else process.stdout.write(JSON.stringify(result)+'\\n');
     } catch(error) { if(lease)lease.close();process.stdout.write(JSON.stringify({accepted:false,code:error.code||'FIXTURE_UNEXPECTED'})+'\\n') }
-    clearTimeout(timer);process.removeListener('disconnect',parentLost);process.disconnect();
+    clearTimeout(timer);process.removeListener('disconnect',parentLost);if(process.connected)process.disconnect();
   `
   const root = cfg.otherRoot || cfg.own.root
-  child = spawn(prepared.executable, ['--input-type=module', '--eval', script, root, cfg.operationId, cfg.mode], {
+  child = spawn(prepared.executable, ['--input-type=module', '--eval', script, root, cfg.operationId, cfg.mode, cfg.resultFile], {
     cwd: prepared.directory, env: { PATH: '', LANG: 'C.UTF-8' }, stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
   })
-  if (cfg.mode === 'node-job-source-verifier') {
+  if (['node-job-source-verifier', 'node-job-source-exit'].includes(cfg.mode)) {
     const verifier = load('desktop-removal-source.mjs').then(module => module.createDesktopRemovalNodeSourceExitVerifier({ installRoot: cfg.own.root, prepared, child }))
-    child.on('message', async message => { const accepted = await (await verifier)(message); child.send({ kind: 'fixture_source_verification', accepted }, () => {}) })
+    child.on('message', async message => {
+      const accepted = await (await verifier)(message)
+      if (cfg.mode === 'node-job-source-exit') {
+        if (!accepted) throw new Error('Fixture source exit was rejected')
+        const identity = await load('process-identity.cjs')
+        process.stdout.write(JSON.stringify({ handoff: true, directory: prepared.directory, host: identity.default.inspectProcess(child.pid) }), () => process.exit(0))
+      } else child.send({ kind: 'fixture_source_verification', accepted }, () => {})
+    })
   }
   ended = once(child, 'close')
   let output = '', error = ''
