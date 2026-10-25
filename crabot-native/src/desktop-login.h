@@ -85,4 +85,35 @@ static napi_value RetargetDesktopLogin(napi_env env, napi_callback_info info) {
     napi_value result; napi_get_boolean(env, true, &result); return result;
   } catch (const std::exception& error) { napi_throw_error(env, "CRABOT_LOGIN_STARTUP_UPDATE", error.what()); return nullptr; }
 }
+// Uninstall only this original command; never touch StartupApproved or the
+// shared Run key itself. Missing state is idempotent, unfamiliar state retained.
+static napi_value RemoveDesktopLogin(napi_env env, napi_callback_info info) {
+  try {
+    size_t argc = 2; napi_value args[2]; napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    if (argc != 1) throw std::runtime_error("Expected original desktop program");
+    auto expected = DesktopLoginPath(env, args[0]);
+    DesktopLoginKey key;
+    LONG opened = RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run", 0,
+      KEY_QUERY_VALUE | KEY_SET_VALUE, &key.value);
+    if (opened != ERROR_FILE_NOT_FOUND && opened != ERROR_SUCCESS) throw std::runtime_error("Cannot open desktop login command");
+    if (opened == ERROR_SUCCESS) {
+      DWORD type = 0, bytes = 0;
+      LONG queried = RegQueryValueExW(key.value, L"Crabot", nullptr, &type, nullptr, &bytes);
+      if (queried != ERROR_FILE_NOT_FOUND) {
+        if (queried != ERROR_SUCCESS) throw std::runtime_error("Cannot inspect desktop login command");
+        auto current = ReadDesktopLoginCommand(key.value);
+        int count = 0; LPWSTR* parts = CommandLineToArgvW(current.c_str(), &count);
+        bool recognized = parts && count == 2 && _wcsicmp(parts[0], expected.c_str()) == 0 && std::wstring(parts[1]) == L"--background";
+        if (parts) LocalFree(parts);
+        if (!recognized) throw std::runtime_error("Unrecognized desktop login command retained");
+        if (ReadDesktopLoginCommand(key.value) != current) throw std::runtime_error("Desktop login command changed");
+        if (RegDeleteValueW(key.value, L"Crabot") != ERROR_SUCCESS || RegFlushKey(key.value) != ERROR_SUCCESS
+          || RegQueryValueExW(key.value, L"Crabot", nullptr, &type, nullptr, &bytes) != ERROR_FILE_NOT_FOUND) {
+          throw std::runtime_error("Desktop login removal remains unconfirmed");
+        }
+      }
+    }
+    napi_value result; napi_get_boolean(env, true, &result); return result;
+  } catch (const std::exception& error) { napi_throw_error(env, "CRABOT_INSTALL_REGISTRATION", error.what()); return nullptr; }
+}
 #endif

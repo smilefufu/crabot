@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 
-test('disposable Windows user retains actual StartupApproved bytes across a native login retarget', {
+test('disposable Windows user retains actual StartupApproved bytes across native login retarget and exact removal', {
   skip: process.platform !== 'win32' || process.env.GITHUB_ACTIONS !== 'true', timeout: 90000,
 }, async t => {
   const root = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'Crabot 启动 验收 ')))
@@ -21,5 +21,8 @@ test('disposable Windows user retains actual StartupApproved bytes across a nati
       throw error
     })
   assert.match(result.stdout, /"approval_bytes_preserved":true/)
+  assert.match(result.stdout, /"owned_removal_verified":true/)
+  assert.match(result.stdout, /"foreign_removal_refused":true/)
+  assert.match(result.stdout, /"approval_retained_after_removal":true/)
   console.log(result.stdout.trim())
 })

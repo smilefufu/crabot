@@ -220,3 +220,24 @@ export async function removeUbuntuAutostartEntry(options: RemovalJobOptions & { 
   if (await snapshot(entry)) fail()
   assertJob()
 }
+
+
+// Fixed current-user Windows Run value only. The native operation verifies the
+// original program and switches again; no StartupApproved bytes are rewritten.
+export async function removeWindowsLoginStartupEntry(options: RemovalJobOptions & { home: string; env: NodeJS.ProcessEnv }): Promise<void> {
+  const { own, record, assertJob, proofCurrent } = await captureRemovalJob(options)
+  const current = async () => {
+    await proofCurrent()
+    const locator = await readInstallationLocator(options.home, process.platform, options.env)
+    assertJob()
+    if (locator && (locator.install_root !== own.root || locator.installation_id !== own.record.installation_id)) fail()
+  }
+  await current()
+  if (typeof identity.removeDesktopLoginStartup !== 'function' || typeof identity.inspectDesktopLoginStartup !== 'function') fail()
+  const executable = path.join(own.root, 'app/releases', record.source_selection.gui_id, 'Crabot.exe')
+  assertJob()
+  if (identity.removeDesktopLoginStartup(executable) !== true) fail()
+  await current()
+  if (identity.inspectDesktopLoginStartup(executable) !== 'absent') fail()
+  assertJob()
+}

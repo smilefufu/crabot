@@ -290,3 +290,44 @@ for (const mode of ['owned', 'xdg-config', 'absent', 'missing-directory', 'custo
   assert.equal(await fs.readFile(path.join(f.data, 'user.txt'), 'utf8'), 'data and dependencies preserved')
   assert.ok(await fs.lstat(f.entry)); assert.ok(await fs.lstat(f.metadata))
 })
+
+
+for (const mode of ['owned', 'absent', 'custom', 'foreign', 'foreign-locator', 'wrong-operation', 'missing-lock', 'before-removing', 'running', 'preparation', 'missing-capability', 'lost-reply', 'late-reappearance', 'changed-phase']) test('Windows login command removal requires the same actual stopped job: ' + mode, async t => {
+  const f = await fixture(t), api = await import('../dist/installation-removal.js')
+  const expected = path.join(f.root, 'app/releases', f.removal.source_selection.gui_id, 'Crabot.exe')
+  const input = { installRoot: f.root, operationId: f.operationId, home: f.home, env: f.env }
+  if (mode === 'foreign-locator') await privateJson(f.locator, { schema_version: 1, owner: identity.inspectProcess(process.pid).owner, install_root: f.home, installation_id: randomUUID() }, true)
+  if (mode === 'wrong-operation') input.operationId = randomUUID()
+  if (mode === 'missing-lock') locks.releaseCliLock(f.held.pop())
+  if (mode === 'before-removing') await privateJson(path.join(f.root, '.desktop-removal.json'), { ...f.removal, phase: 'stopping' }, true)
+  if (mode === 'running') await fs.writeFile(path.join(f.data, 'mm.pid'), String(process.pid))
+  if (mode === 'preparation') await privateJson(path.join(f.root, '.desktop-installing.json'), { schema_version: 1, id: randomUUID(), installation_id: f.removal.installation_id, selection: f.removal.source_selection, phase: 'prepared', payload_sha256: '0'.repeat(64) })
+  const original = Object.getOwnPropertyDescriptor(identity, 'removeDesktopLoginStartup'), inspect = Object.getOwnPropertyDescriptor(identity, 'inspectDesktopLoginStartup')
+  t.after(() => { for (const [name, descriptor] of [['removeDesktopLoginStartup', original], ['inspectDesktopLoginStartup', inspect]]) { if (descriptor) Object.defineProperty(identity, name, descriptor); else delete identity[name] } })
+  let command = mode === 'absent' ? 'absent' : mode === 'custom' ? 'custom' : mode === 'foreign' ? 'different' : 'background', calls = 0
+  Object.defineProperty(identity, 'inspectDesktopLoginStartup', { configurable: true, writable: true, value: program => { assert.equal(program, expected); return command } })
+  Object.defineProperty(identity, 'removeDesktopLoginStartup', { configurable: true, writable: true, value: mode === 'missing-capability' ? undefined : program => {
+    calls++; assert.equal(program, expected)
+    for (const root of [f.root, f.data]) assert.equal(locks.hasInheritedCliLock(root, locks.cliLockToken(path.join(root, 'cli.lock'))), true)
+    if (['custom', 'different'].includes(command)) throw Object.assign(new Error('Native fixture retains unknown command'), { code: 'CRABOT_INSTALL_REGISTRATION' })
+    command = 'absent'
+    if (mode === 'lost-reply' && calls === 1) throw Object.assign(new Error('Native reply lost'), { code: 'EIO' })
+    if (mode === 'late-reappearance') command = 'different'
+    if (mode === 'changed-phase') fsSync.writeFileSync(path.join(f.root, '.desktop-removal.json'), JSON.stringify({ ...f.removal, phase: 'completed' }) + '\n')
+    return true
+  } })
+  const locator = await fs.readFile(f.locator), cli = await fs.readFile(f.metadata)
+  if (['wrong-operation', 'missing-lock', 'before-removing', 'running', 'preparation', 'changed-phase'].includes(mode)) await assert.rejects(api.removeWindowsLoginStartupEntry(input), { code: 'CRABOT_DESKTOP_REMOVAL' })
+  else if (['custom', 'foreign', 'foreign-locator', 'missing-capability', 'late-reappearance'].includes(mode)) await assert.rejects(api.removeWindowsLoginStartupEntry(input), { code: 'CRABOT_INSTALL_REGISTRATION' })
+  else {
+    if (mode === 'lost-reply') await assert.rejects(api.removeWindowsLoginStartupEntry(input), { code: 'EIO' })
+    await api.removeWindowsLoginStartupEntry(input); await api.removeWindowsLoginStartupEntry(input)
+    assert.equal(command, 'absent')
+  }
+  if (['wrong-operation', 'missing-lock', 'before-removing', 'running', 'preparation', 'foreign-locator', 'missing-capability'].includes(mode)) assert.equal(calls, 0)
+  if (mode === 'custom') assert.equal(command, 'custom')
+  if (['foreign', 'late-reappearance'].includes(mode)) assert.equal(command, 'different')
+  assert.deepEqual(await fs.readFile(f.locator), locator); assert.deepEqual(await fs.readFile(f.metadata), cli)
+  assert.equal(await fs.readFile(path.join(f.data, 'user.txt'), 'utf8'), 'data and dependencies preserved')
+  assert.deepEqual(JSON.parse(await fs.readFile(path.join(f.root, '.desktop-removal.json'), 'utf8')), { ...f.removal, phase: mode === 'before-removing' ? 'stopping' : mode === 'changed-phase' ? 'completed' : 'removing' })
+})

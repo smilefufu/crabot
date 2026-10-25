@@ -75,6 +75,7 @@ module.exports = { ...native, sameProcess, terminateKnownProcess,
     isOwnerOnlyDirectory: filesystemPath(native.isOwnerOnlyDirectory) } : {}),
   ...(native.inspectDesktopLoginStartup ? { inspectDesktopLoginStartup: native.inspectDesktopLoginStartup } : {}),
   ...(native.retargetDesktopLoginStartup ? { retargetDesktopLoginStartup: native.retargetDesktopLoginStartup } : {}),
+  ...(native.removeDesktopLoginStartup ? { removeDesktopLoginStartup: native.removeDesktopLoginStartup } : {}),
   ...(native.readUserPath ? { readUserPath: native.readUserPath, appendUserPathDirectory: native.appendUserPathDirectory,
     notifyUserPathChanged: native.notifyUserPathChanged } : {}),
 }

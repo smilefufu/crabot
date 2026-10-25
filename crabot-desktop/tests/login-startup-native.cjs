@@ -27,6 +27,9 @@ void app.whenReady().then(async () => {
   for (const file of [source, target]) { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, 'finite file, never execute') }
   assert.equal(native.inspectDesktopLoginStartup(source), 'absent')
   assert.throws(() => native.inspectDesktopLoginStartup('not-an-absolute-path'))
+  assert.throws(() => native.removeDesktopLoginStartup('not-an-absolute-path'))
+  assert.throws(() => native.removeDesktopLoginStartup(source, target))
+  assert.equal(native.removeDesktopLoginStartup(source), true)
   assert.equal(snapshot().every(value => value === null), true)
   const make = (executable, extra = {}) => new LoginStartup({ platform: 'win32', packaged: true, executable, configHome: root, app, ...extra })
   for (const enabled of [true, false]) {
@@ -58,6 +61,20 @@ void app.whenReady().then(async () => {
   assert.throws(() => native.retargetDesktopLoginStartup(source, target))
   await assert.rejects(make(source).captureForUpdate())
   assert.equal(JSON.stringify(snapshot()) === JSON.stringify(custom), true)
+  assert.throws(() => native.removeDesktopLoginStartup(source))
+  assert.equal(JSON.stringify(snapshot()) === JSON.stringify(custom), true)
+  for (const enabled of [true, false]) {
+    app.setLoginItemSettings({ name: 'Crabot', path: source, args: ['--background'], openAtLogin: true, enabled })
+    const beforeRemoval = snapshot()
+    assert.throws(() => native.removeDesktopLoginStartup(target))
+    assert.deepEqual(snapshot(), beforeRemoval, 'Foreign executable removal must retain both values')
+    assert.equal(native.removeDesktopLoginStartup(source), true)
+    const removed = snapshot()
+    assert.equal(removed[0], null); assert.deepEqual(removed[1], beforeRemoval[1])
+    assert.equal(native.inspectDesktopLoginStartup(source), 'absent')
+    assert.equal(native.removeDesktopLoginStartup(source), true)
+    assert.deepEqual(snapshot(), removed, 'An absent command retry must not rewrite approval')
+  }
   app.setLoginItemSettings({ name: 'Crabot', path: source, args: ['--background'], openAtLogin: true, enabled: false })
   const veto = snapshot()[1]
   const lost = make(target, { retargetWindows: (a, b) => { native.retargetDesktopLoginStartup(a, b); throw new Error('Reply lost') } })
@@ -65,7 +82,7 @@ void app.whenReady().then(async () => {
   assert.equal(JSON.stringify(snapshot()[1]) === JSON.stringify(veto), true)
   console.log('CRABOT_LOGIN_STARTUP_NATIVE ' + JSON.stringify({ actual_registry: true, named_item_state: true,
     enabled_and_disabled_retarget: true, approval_bytes_preserved: true, custom_preserved: true,
-    switches_checked_natively: true, lost_reply_readback: true, real_login_session_verified: false, business_mm_started: false }))
+    switches_checked_natively: true, lost_reply_readback: true, owned_removal_verified: true, foreign_removal_refused: true, approval_retained_after_removal: true, real_login_session_verified: false, business_mm_started: false }))
 }).then(() => finish(0), error => { console.error(error.stack); finish(1) })
 function finish(code) {
   try {

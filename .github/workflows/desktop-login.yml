@@ -10,6 +10,8 @@ on:
       - 'crabot-desktop/src/installation-removal.ts'
       - 'crabot-desktop/tests/installation-entries.test.mjs'
       - 'crabot-desktop/tests/installation-removal*'
+      - 'crabot-desktop/tests/cli-removal.test.mjs'
+      - 'crabot-desktop/tests/maintenance-bootstrap*'
       - 'crabot-native/**'
       - 'scripts/lib/process-identity.cjs'
       - '.github/workflows/desktop-login.yml'
@@ -21,6 +23,8 @@ on:
       - 'crabot-desktop/src/installation-removal.ts'
       - 'crabot-desktop/tests/installation-entries.test.mjs'
       - 'crabot-desktop/tests/installation-removal*'
+      - 'crabot-desktop/tests/cli-removal.test.mjs'
+      - 'crabot-desktop/tests/maintenance-bootstrap*'
       - 'crabot-native/**'
       - 'scripts/lib/process-identity.cjs'
       - '.github/workflows/desktop-login.yml'
@@ -58,4 +62,4 @@ jobs:
         run: node --test --test-concurrency=1 tests/login-startup.test.mjs tests/login-startup-update.test.mjs tests/login-startup-native.test.mjs
       - name: Private user entries and retained-data removal with actual Windows shortcut APIs
         working-directory: crabot-desktop
-        run: node --test --test-concurrency=1 tests/installation-entries.test.mjs tests/installation-removal.test.mjs
+        run: node --test --test-concurrency=1 tests/installation-entries.test.mjs tests/installation-removal.test.mjs tests/cli-removal.test.mjs tests/maintenance-bootstrap.test.mjs

@@ -653,6 +653,7 @@ static napi_value Initialize(napi_env env, napi_value exports) {
 #ifdef _WIN32
     {"inspectDesktopLoginStartup", nullptr, InspectDesktopLogin, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"retargetDesktopLoginStartup", nullptr, RetargetDesktopLogin, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"removeDesktopLoginStartup", nullptr, RemoveDesktopLogin, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"captureProcessTreeGeneration", nullptr, CaptureProcessTreeGeneration, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"createWorkspaceCopyJob", nullptr, CreateWorkspaceCopyJob, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"inspectWorkspaceCopyJob", nullptr, InspectWorkspaceCopyJob, nullptr, nullptr, nullptr, napi_default, nullptr},
