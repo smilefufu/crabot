@@ -4,6 +4,7 @@ const fs = require('node:fs/promises')
 const path = require('node:path')
 const { pathToFileURL } = require('node:url')
 const { createServer } = require('node:http')
+const { createConnection } = require('node:net')
 const { once } = require('node:events')
 const assert = require('node:assert/strict')
 const { WebSocketServer } = require('../../crabot-admin/node_modules/ws')
@@ -17,7 +18,9 @@ app.on('child-process-gone', (_event, details) => {
   if (details.type === 'GPU') console.log('CRABOT_BOUNDARY_GPU_EXIT ' + JSON.stringify({ reason: details.reason, exit_code: details.exitCode, elapsed_ms: Date.now() - started }))
 })
 protocol.registerSchemesAsPrivileged([{ scheme: 'app', privileges: { standard: true, secure: true, supportFetchAPI: true } }])
-const windows = [], servers = [], clients = new Set()
+const windows = [], servers = [], clients = new Set(), connections = new Set()
+let releaseStreamEnded
+const releaseStreamClosed = new Promise(resolve => { releaseStreamEnded = resolve })
 let root
 async function main() {
   root = process.env.CRABOT_BOUNDARY_ROOT
@@ -49,7 +52,7 @@ async function main() {
       res.setHeader('Access-Control-Allow-Origin', '*')
       res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type, X-Crabot-Request-Id')
       if (req.method === 'OPTIONS') { res.writeHead(204).end(); return }
-      if (req.url === '/release-stall') { res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'X-Content-Type-Options': 'nosniff' }); res.write('first'); return }
+      if (req.url === '/release-stall') { res.once('close', releaseStreamEnded); res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'X-Content-Type-Options': 'nosniff' }); res.write('first'); return }
       if (req.url === '/redirect') { res.writeHead(302, { Location: externalOrigin + '/landing' }).end(); return }
       if (req.url === '/api/media/a232f3cb-a297-440f-8aba-03af28359e36') {
         res.setHeader('Content-Type', 'text/html; charset=utf-8')
@@ -66,6 +69,7 @@ async function main() {
       }
       res.end(JSON.stringify({ ok: true }))
     })
+    server.on('connection', socket => { connections.add(socket); socket.once('close', () => connections.delete(socket)) })
     server.on('upgrade', (req, socket, head) => {
       upgrades.push({ url: req.url, authorization: req.headers.authorization })
       websocket.handleUpgrade(req, socket, head, client => {
@@ -78,6 +82,10 @@ async function main() {
     return `http://127.0.0.1:${server.address().port}`
   }
   const externalOrigin = await listen(external), origin = await listen(received)
+  if (process.env.CRABOT_BOUNDARY_HOLD_CONNECTION === '1') {
+    const held = createConnection(Number(new URL(origin).port), '127.0.0.1')
+    await once(held, 'connect'); phase('held-fixture-connection-ready')
+  }
   const ready = { phase: 'ready', app_version: 'fixture', platform: process.platform, instance_id: 'a'.repeat(64), generation: 'b232f3cb-a297-440f-8aba-03af28359e36', admin_url: origin }
   let state = ready
   const context = () => state.phase === 'ready' ? { instance_id: state.instance_id, generation: state.generation, admin_url: origin, connection_epoch: 1 } : null
@@ -178,6 +186,13 @@ async function main() {
   const reader = streamingResponse.body.getReader(); await reader.read()
   const interrupted = reader.read().then(value => value.done, () => true)
   await releaseTransport.close()
+  let streamTimer
+  try {
+    await Promise.race([releaseStreamClosed, new Promise((_, reject) => {
+      streamTimer = setTimeout(() => reject(new Error('Release cancellation did not close the fixture response')), 5000)
+    })])
+  } finally { clearTimeout(streamTimer) }
+  phase('release-stream-close-verified')
   assert.equal(await interrupted, true); reader.releaseLock()
   await assert.rejects(releaseTransport.fetch(externalOrigin + '/closed', {}))
   const result = await trusted.webContents.executeJavaScript(`fetch(${JSON.stringify(origin + '/api/probe')}).then(r=>r.json())`)
@@ -295,7 +310,9 @@ main().then(() => cleanup(0), error => { console.error('Electron boundary fixtur
 async function cleanup(code) {
   clients.forEach(client => client.terminate())
   windows.forEach(window => { if (!window.isDestroyed()) window.destroy() })
-  await Promise.all(servers.map(server => new Promise(resolve => server.close(resolve))))
+  const closed = servers.map(server => new Promise(resolve => server.close(resolve)))
+  connections.forEach(socket => socket.destroy()) // Only sockets accepted by these private fixture servers.
+  await Promise.all(closed)
   phase('cleanup-complete-' + code)
   app.exit(code)
 }
