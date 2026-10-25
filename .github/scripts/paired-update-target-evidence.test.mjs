@@ -4,7 +4,7 @@ import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { tmpdir } from 'node:os'
 import { createInstanceRuntime, identity } from '../../scripts/lib/instance-runtime.mjs'
-import { collectPairedUpdateTargetEvidence, summarizePairedTargetBootstrap } from './paired-update-target-evidence.mjs'
+import { collectPairedUpdateTargetEvidence, summarizePairedTargetBootstrap, summarizePairedTargetNativeStack, collectPairedTargetNativeStack } from './paired-update-target-evidence.mjs'
 async function fixture(t) {
   const root = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'crabot-target-evidence-')))
   t.after(() => fs.rm(root, { recursive: true, force: true }))
@@ -106,4 +106,41 @@ test('bounded locator stages distinguish an observed loader stall without export
   assert.deepEqual(result.events, phases.map(phase => ({ phase })))
   assert.equal(JSON.stringify(result).includes('must-not-export'), false)
   assert.equal(JSON.stringify(result).includes('secret'), false)
+})
+
+test('native target diagnostics retain only code symbols from the first thread', () => {
+  const raw = `Process: Crabot PRIVATE-TEXT
+Path: /Users/private/provider-secret
+Call graph:
+    40 Thread_123 DispatchQueue_1: com.apple.main-thread (serial)
+    + 40 start  (in dyld) + 1 [0x111]
+    +   40 electron::api::App::RequestSingleInstanceLock(gin::Arguments*, /Users/private)  (in Electron Framework) + 5 [0x222]
+    +     40 uv__io_poll  (in Electron Framework) + 9 [0x333]
+    +     40 -[SMAppService status] (in ServiceManagement) + 1 [0x334]
+    +     40 SecItemCopyMatching(PRIVATE-ARGUMENT) (in Security) + 1 [0x335]
+    +     40 PRIVATE_SECRET("credential") (in private-module) + 0 [0x444]
+    40 Thread_456
+    + 40 node::PrivateOtherThread  (in Electron Framework) + 1 [0x555]
+Total number in stack (recursive counted multiple, when >=5):
+`
+  assert.deepEqual(summarizePairedTargetNativeStack(raw), { main_thread_found: true,
+    frames: ['start', 'electron::api::App::RequestSingleInstanceLock', 'uv__io_poll', '-[SMAppService status]', 'SecItemCopyMatching'] })
+  assert.equal(JSON.stringify(summarizePairedTargetNativeStack(raw)).includes('PRIVATE'), false)
+  assert.equal(JSON.stringify(summarizePairedTargetNativeStack(raw)).includes('/Users'), false)
+})
+
+test('native target diagnostics have fixed module, frame-count and input limits', () => {
+  const lines = Array.from({ length: 80 }, (_, i) => ` + 1 base::Frame${i}() (in Electron Framework) + 1 [0x1]`)
+  const raw = 'Call graph:\n 1 Thread_1\n' + lines.join('\n')
+  assert.equal(summarizePairedTargetNativeStack(raw).frames.length, 40)
+  assert.deepEqual(summarizePairedTargetNativeStack('Path: secret\n'), { main_thread_found: false, frames: [] })
+  assert.throws(() => summarizePairedTargetNativeStack('x'.repeat(2 * 1024 * 1024 + 1)))
+})
+
+test('unsealed or missing target identity cannot invoke native observation', async t => {
+  const f = await fixture(t)
+  assert.deepEqual(await collectPairedTargetNativeStack({ targetRoot: f.targetRoot }), { status: 'unavailable' })
+  assert.deepEqual(await collectPairedTargetNativeStack({ targetRoot: f.targetRoot, targetIdentity: identity.inspectProcess(process.pid) }), { status: 'unavailable' })
+  assert.deepEqual(await fs.readdir(f.targetRoot), [])
+  assert.deepEqual(await fs.readdir(f.dataDir), ['logs'])
 })

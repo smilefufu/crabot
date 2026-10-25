@@ -2,6 +2,9 @@
 // configuration, tokens or raw log text; this does not authorize recovery.
 import { constants, promises as fs } from 'node:fs'
 import path from 'node:path'
+import { tmpdir } from 'node:os'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
 import { inspectInstance, identity } from '../../scripts/lib/instance-runtime.mjs'
 import { verifyDataCompatibility } from '../../scripts/lib/data-compatibility.mjs'
 import { readVersionMaintenance } from '../../scripts/lib/version-maintenance.mjs'
@@ -89,4 +92,54 @@ export function summarizePairedTargetBootstrap(output, version) {
   }
   return { events: events.slice(-32), codes: codes.filter(code => output.includes(code)),
     missing_packages: ['crabot-client', 'zod', 'electron-updater', '@electron/asar'].filter(name => output.includes("Cannot find package '" + name + "'")) }
+}
+
+// Code symbols only, with no arguments, addresses, paths or secondary threads.
+export function summarizePairedTargetNativeStack(output) {
+  if (typeof output !== 'string' || output.length > 2 * 1024 * 1024) throw new Error('Invalid bounded target stack')
+  const graph = output.indexOf('Call graph:')
+  if (graph < 0) return { main_thread_found: false, frames: [] }
+  const modules = new Set(['Electron Framework', 'node', 'dyld', 'libsystem_kernel.dylib', 'libsystem_pthread.dylib',
+    'libsystem_c.dylib', 'libuv.1.dylib', 'CoreFoundation', 'Foundation', 'AppKit', 'Security', 'ServiceManagement',
+    'LaunchServices', 'SharedFileList', 'CoreServicesInternal', 'libxpc.dylib', 'libdispatch.dylib', 'HIServices'])
+  const frames = []; let main = false
+  for (const line of output.slice(graph + 'Call graph:'.length).split('\n')) {
+    if (/^\s*\d+\s+Thread_[0-9]+\b/.test(line)) {
+      if (main) break
+      main = true; continue
+    }
+    if (!main) continue
+    const frame = line.match(/^[\s+!|:0-9]+([A-Za-z_][A-Za-z0-9_:~]*|[-+]\[[A-Za-z_][A-Za-z0-9_]* [A-Za-z_][A-Za-z0-9_:]*\])(?:\([^\r\n]*\))?\s+\(in ([^)]+)\)/)
+    if (frame && frame[1].length <= 128 && modules.has(frame[2]) && !frames.includes(frame[1])) frames.push(frame[1])
+    if (frames.length === 40) break
+  }
+  return { main_thread_found: main, frames }
+}
+
+// Failed synthetic acceptance only. The sampled process remains the original
+// ordinary target; this is never a successful handoff/health receipt.
+export async function collectPairedTargetNativeStack({ targetRoot, targetIdentity }) {
+  if (process.platform !== 'darwin' || process.env.GITHUB_ACTIONS !== 'true' || process.env.RUNNER_ENVIRONMENT !== 'github-hosted'
+    || process.env.GITHUB_REPOSITORY !== 'smilefufu/crabot') return { status: 'unavailable' }
+  let directory, result = { status: 'unavailable' }
+  const current = () => targetIdentity?.owner === identity.inspectProcess(process.pid).owner
+    && identity.sameProcess(targetIdentity, identity.inspectProcess(targetIdentity.pid))
+    && entry.verifyDesktopEntry(targetIdentity, entry.loadDesktopEntry(targetRoot))
+  try {
+    if (!current()) return result
+    directory = await fs.mkdtemp(path.join(tmpdir(), 'crabot-owned-target-stack-'))
+    const file = path.join(directory, 'sample.txt')
+    if (!current()) throw new Error('Target changed before native observation')
+    await promisify(execFile)('/usr/bin/sample', [String(targetIdentity.pid), '2', '1', '-file', file], {
+      cwd: directory, env: { PATH: '/usr/bin:/bin', LANG: 'C' }, timeout: 10000, maxBuffer: 65536,
+    })
+    if (!current()) throw new Error('Target changed during native observation')
+    const sample = await boundedFile(file, 2 * 1024 * 1024)
+    if (sample.status === 'readable') result = { status: 'readable', ...summarizePairedTargetNativeStack(sample.text) }
+  } catch { /* Unavailable sampling cannot replace the original acceptance failure. */ }
+  finally {
+    if (directory) try { await fs.rm(directory, { recursive: true, force: true }) }
+    catch { result = { status: 'cleanup_unconfirmed' } }
+  }
+  return result
 }

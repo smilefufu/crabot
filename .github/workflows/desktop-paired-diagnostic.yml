@@ -1,0 +1,110 @@
+# Targeted reproduction of the existing signed update. Full acceptance remains desktop.yml.
+name: Paired update diagnostic
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ['feat/desktop-application']
+    paths:
+      - '.github/workflows/desktop-paired-diagnostic.yml'
+      - '.github/scripts/paired-update-target-evidence*'
+      - '.github/scripts/verify-paired-update-host.mjs'
+
+permissions:
+  contents: read
+concurrency:
+  group: paired-diagnostic-${{ github.ref }}
+  cancel-in-progress: true
+defaults:
+  run:
+    shell: bash
+jobs:
+  original-target:
+    runs-on: macos-15
+    timeout-minutes: 60
+    strategy:
+      matrix:
+        target: [darwin-arm64]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.3'
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.13.0'
+      - name: Prepare isolated build directory
+        run: mkdir -p .desktop-build
+      - name: Build OS process identity helper with installed compiler
+        run: node scripts/build-native.mjs
+      - name: Install frozen build dependencies
+        run: |
+          pnpm --dir crabot-client install --frozen-lockfile
+          node crabot-client/node_modules/typescript/bin/tsc -p crabot-client/tsconfig.json
+          pnpm install --frozen-lockfile
+          pnpm --dir scripts/lib install --frozen-lockfile
+          pnpm --dir crabot-shared install --frozen-lockfile
+          node crabot-shared/node_modules/typescript/bin/tsc -p crabot-shared/tsconfig.json
+          for module in crabot-core crabot-agent crabot-admin crabot-mcp-tools crabot-channel-telegram crabot-channel-wechat crabot-channel-feishu crabot-channel-dingtalk crabot-channel-voice; do
+            pnpm --dir "$module" install --frozen-lockfile
+            node "$module/node_modules/typescript/bin/tsc" -p "$module/tsconfig.json"
+          done
+          pnpm --dir crabot-desktop install --frozen-lockfile
+          # Electron lazily installs on first require; complete it before test workers.
+          (cd crabot-desktop && node -e "require('electron')")
+      - name: Verify bounded target evidence before building the fixture
+        run: node --test .github/scripts/paired-update-target-evidence.test.mjs .github/scripts/check-paired-update-report.test.mjs
+      - name: Web compilation and state regressions
+        run: |
+          cd crabot-admin/web
+          pnpm install --frozen-lockfile
+          node node_modules/typescript/bin/tsc -p tsconfig.json
+          node node_modules/vite/bin/vite.js build
+          node node_modules/vitest/vitest.mjs run src/components/StoragePermissionEditor.test.tsx src/pages/DialogObjects/ src/pages/Permissions/ src/pages/Traces/RequestAuthority.test.tsx src/pages/Workspaces.test.tsx src/pages/Traces/WorkersView.test.tsx src/pages/Chat/index.test.tsx src/pages/MCPServers/MCPServerList.test.tsx src/pages/DesktopWelcome.test.tsx src/services/server-state.test.ts src/services/desktop-host.test.ts src/components/ChangePasswordDialog.test.tsx src/components/DesktopDiagnosticsPanel.test.tsx src/pages/Settings/ComputerUseSetupCard.test.tsx src/pages/Settings/VersionUpgradeCard.test.tsx src/pages/Settings/DesktopVersionUpgradeCard.test.tsx --maxWorkers=1 --minWorkers=1
+      - name: Electron compilation and main-process state regressions
+        working-directory: crabot-desktop
+        run: |
+          node node_modules/typescript/bin/tsc -p tsconfig.json
+          node build-preload.mjs
+          node --test ../scripts/desktop/ubuntu-maintenance-backend.test.mjs ../scripts/desktop/ubuntu-bootstrap.test.mjs ../scripts/desktop/release-signing.test.mjs tests/release-signatures.test.mjs tests/release-download.test.mjs tests/paired-update.test.mjs tests/paired-update-host.test.mjs tests/paired-handoff.test.mjs tests/ubuntu-installation.test.mjs tests/ubuntu-process.test.mjs tests/ubuntu-removal-progress.test.mjs tests/ubuntu-update.test.mjs tests/installation-entries.test.mjs tests/cli-removal.test.mjs tests/desktop-ipc.test.mjs tests/workspace-folder.test.mjs tests/desktop-disk.test.mjs tests/desktop-resources.test.mjs tests/first-model-fixture.test.mjs tests/full-host-control.test.mjs tests/desktop-network.test.mjs tests/artifact-network.test.mjs tests/session-host.test.mjs tests/diagnostics.test.mjs tests/login-startup.test.mjs tests/login-startup-update.test.mjs tests/controller.test.mjs tests/update-dialog.test.mjs tests/update-package.test.mjs
+      - name: Build locked browser and computer-use resources
+        run: |
+          node scripts/prepare-scrapling.mjs --release=desktop-ci
+          node scripts/prepare-computer-use.mjs
+      - name: Build sealed product environment
+        run: node scripts/prepare-product-runtime.mjs 2>&1 | tee .desktop-build/product-build.log
+      - name: Assemble common core and unpacked Electron candidate
+        run: |
+          node scripts/desktop/stage-core.mjs "--out=.desktop-build/安装 候选/core" --version=0.1.0-desktop.1
+          node .github/scripts/verify-release-payload.mjs "$GITHUB_WORKSPACE/.desktop-build/安装 候选/core"
+          node .github/scripts/validate-staged-core.mjs ".desktop-build/安装 候选/core"
+          node .github/scripts/smoke-installed-cli.mjs ".desktop-build/安装 候选/core"
+          node scripts/desktop/package-application.mjs --candidate=true "--core=.desktop-build/安装 候选/core" "--out=.desktop-build/安装 候选/gui" 2>&1 | tee .desktop-build/gui-package.log
+      - name: Build paired offline GUI and Core candidate
+        timeout-minutes: 10
+        run: node scripts/desktop/package-application.mjs --candidate=true --layout=paired --native-bootstrap=.desktop-build/ubuntu-bootstrap "--core=.desktop-build/安装 候选/core" "--out=.desktop-build/安装 候选/paired" 2>&1 | tee .desktop-build/paired-package.log
+      - name: Boot actual offline-prepared pair on macOS and Windows
+        timeout-minutes: 10
+        run: node .github/scripts/smoke-packaged-desktop.mjs ".desktop-build/安装 候选/paired" 2>&1 | tee .desktop-build/paired-boot.log
+      - name: Signed paired update reaches ordinary target GUI and Core health
+        timeout-minutes: ${{ matrix.target == 'win32-x64' && 35 || 20 }}
+        env:
+          CRABOT_PAIRED_ACCEPTANCE_ID: ${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.target }}
+        run: |
+          node .github/scripts/verify-paired-update-host.mjs ".desktop-build/安装 候选/paired" 2>&1 | tee .desktop-build/paired-update-host.log
+          node .github/scripts/check-paired-update-report.mjs .desktop-build/paired-update-host.json "$CRABOT_PAIRED_ACCEPTANCE_ID"
+      - name: Save only fixed diagnostic and package evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: paired-diagnostic-darwin-arm64
+          retention-days: 3
+          path: |
+            .desktop-build/paired-update-host.json
+            .desktop-build/paired-update-host.log
+            .desktop-build/gui-package.log
+            .desktop-build/paired-package.log
+            .desktop-build/product-build.log

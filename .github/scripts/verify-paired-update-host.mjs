@@ -20,7 +20,7 @@ import product from '../../scripts/lib/product-runtime.cjs'
 import { buildPairedUpdateSource } from './build-paired-update-source.mjs'
 import { preparePairedUpdateCore } from './prepare-paired-update-core.mjs'
 import sourceLimits from '../../crabot-desktop/tests/fixtures/paired-update-limits.cjs'
-import { collectPairedUpdateTargetEvidence, summarizePairedTargetBootstrap } from './paired-update-target-evidence.mjs'
+import { collectPairedUpdateTargetEvidence, summarizePairedTargetBootstrap, collectPairedTargetNativeStack } from './paired-update-target-evidence.mjs'
 import { startPairedUpdateModelProvider } from '../../crabot-desktop/tests/fixtures/paired-update-model-provider.mjs'
 
 if (process.env.GITHUB_ACTIONS !== 'true' || !['darwin', 'win32'].includes(process.platform)) throw new Error('Requires an isolated macOS/Windows CI user; never run against a developer MM')
@@ -160,10 +160,14 @@ try {
     report.target_evidence = await collectPairedUpdateTargetEvidence({ dataDir: selected.dataDir, targetRoot: expectedTargetCoreRoot, targetIdentity, handoffAt })
       .catch(() => ({ collection_failed: true }))
   }
+  const evidence = report.target_evidence
+  if (evidence?.target_alive && evidence.ordinary_peer_verified && expectedTargetCoreRoot) {
+    report.target_native_stack = await collectPairedTargetNativeStack({ targetRoot: expectedTargetCoreRoot, targetIdentity })
+      .catch(() => ({ status: 'unavailable' }))
+  }
   // The relaunch target has no inherited output pipe. In this synthetic CI
   // fixture only, a normal second open can expose loader errors. Keep the first
   // handoff failed; never use this observation as its health receipt.
-  const evidence = report.target_evidence
   if (process.platform === 'darwin' && fixtureEnvironment && evidence?.target_alive && evidence.ordinary_peer_verified
     && evidence.runtime?.state === 'stopped' && evidence.maintenance?.phase === 'verifying'
     && evidence.schema?.status === 'readable' && evidence.schema.pending.length === 0 && modelProvider.evidence.generation_requests === 0) {
