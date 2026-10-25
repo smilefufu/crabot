@@ -626,6 +626,81 @@ describe('buildManagerToolFace', () => {
     expect(buildManagerToolFace({ ...deps, faceState: createManagerToolFaceState() }).map((tool) => tool.name)).toEqual(names[0])
   })
 
+  it('Gemini 未加载 fetch_image 返回错误，同批加载仍不执行，下一轮显式调用才执行一次', async () => {
+    const state = createManagerToolFaceState()
+    const fetchImage = vi.fn(async () => ({ output: 'synthetic image inspected', isError: false }))
+    const deps = makeDeps({ faceState: state, candidatePermissions: permissions,
+      decorateTool: tool => tool.name === 'fetch_image' ? { ...tool, call: fetchImage } : tool })
+    const parts = [
+      [{ text: '查看图片', thoughtSignature: 'text-signature' }, { functionCall: { name: 'fetch_image', args: { session_id: 'sess-1', channel_id: 'ch-1', platform_message_id: 'synthetic-image' }, id: 'unloaded' }, thoughtSignature: 'image-signature' }],
+      [{ functionCall: { name: 'load_tool_family', args: { family: 'messaging' }, id: 'load' } }, { functionCall: { name: 'fetch_image', args: {}, id: 'same-batch' } }],
+      [{ functionCall: { name: 'fetch_image', args: {}, id: 'loaded' } }],
+      [{ text: 'done' }],
+    ]
+    const names: string[][] = []
+    const bodies: any[] = []
+    const turns: EngineTurnEvent[] = []
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
+      const body = JSON.parse(String(init?.body))
+      bodies.push(body)
+      names.push(body.tools[0].functionDeclarations.map((tool: { name: string }) => tool.name))
+      expect(fetchImage).toHaveBeenCalledTimes(bodies.length === 4 ? 1 : 0)
+      const event = { candidates: [{ content: { role: 'model', parts: parts[bodies.length - 1] }, finishReason: 'STOP' }] }
+      return new Response(`data: ${JSON.stringify(event)}\n\n`, { headers: { 'content-type': 'text/event-stream' } })
+    })
+    try {
+      const result = await runEngine({ prompt: '查看合成图片', adapter: createAdapter({ format: 'gemini', endpoint: 'https://example.test', apikey: 'test-key' }), options: {
+        model: 'gemini-4-argon-high', systemPrompt: 'test', maxTurns: 4, disableCompaction: true,
+        tools: () => buildManagerToolFace(deps), onTurn: turn => { turns.push(turn) },
+        unavailableToolResult: name => ({ output: state.catalog!.missingToolOutput(name), isError: true }),
+      } })
+      expect(result.outcome).toBe('completed')
+      expect(result.finalText).toBe('done')
+      expect(fetchImage).toHaveBeenCalledOnce()
+      expect(names[0]).toEqual([...NORMAL_MANAGER_CORE_NAMES])
+      expect(names[1]).toEqual(names[0])
+      expect(names[2]).toContain('fetch_image')
+      expect(turns[0].toolCalls[0]).toMatchObject({ name: 'fetch_image', isError: true, output: expect.stringContaining('TOOL_NOT_LOADED: use load_tool_family({family:"messaging"})') })
+      expect(turns[1].toolCalls[1]).toMatchObject({ name: 'fetch_image', isError: true, output: expect.stringContaining('TOOL_NOT_LOADED') })
+      expect(bodies[1].contents[1].parts).toEqual(parts[0])
+      expect(bodies[1].contents[2].parts[0].functionResponse).toEqual({ name: 'fetch_image', id: 'unloaded', response: { error: expect.stringContaining('TOOL_NOT_LOADED') } })
+      expect(bodies[2].contents[4].parts[1].functionResponse).toEqual({ name: 'fetch_image', id: 'same-batch', response: { error: expect.stringContaining('TOOL_NOT_LOADED') } })
+      expect(deps.messagingDeps.rpcClient.call).not.toHaveBeenCalled()
+    } finally {
+      fetchMock.mockRestore()
+    }
+  })
+
+  it.each(['unknown_function', 'mcp__remote__denied'])('Gemini %s 返回 TOOL_UNAVAILABLE，不加载或执行工具', async name => {
+    const state = createManagerToolFaceState()
+    const call = vi.fn(async () => ({ output: 'must not execute', isError: false }))
+    const deps = makeDeps({ faceState: state,
+      candidatePermissions: { ...permissions, tool_access: { ...permissions.tool_access, mcp_skill: false } },
+      externalMcpTools: [{ name: 'mcp__remote__denied', description: 'denied', category: 'mcp_skill', inputSchema: { type: 'object' }, isReadOnly: true, call }],
+    })
+    const turns: EngineTurnEvent[] = []
+    const event = (parts: unknown[]) => new Response(`data: ${JSON.stringify({ candidates: [{ content: { role: 'model', parts }, finishReason: 'STOP' }] })}\n\n`)
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(event([{ functionCall: { name, args: {}, id: 'unavailable' }, thoughtSignature: 'synthetic-signature' }]))
+      .mockResolvedValueOnce(event([{ text: 'done' }]))
+    try {
+      const result = await runEngine({ prompt: 'test', adapter: createAdapter({ format: 'gemini', endpoint: 'https://example.test', apikey: 'test-key' }), options: {
+        model: 'gemini-4-argon-high', systemPrompt: 'test', maxTurns: 2, disableCompaction: true,
+        tools: () => buildManagerToolFace(deps), onTurn: turn => { turns.push(turn) },
+        unavailableToolResult: name => ({ output: state.catalog!.missingToolOutput(name), isError: true }),
+      } })
+      expect(result.outcome).toBe('completed')
+      expect(turns[0].toolCalls[0]).toMatchObject({ name, isError: true, output: expect.stringContaining('TOOL_UNAVAILABLE') })
+      expect(state.loadedNames.size).toBe(0)
+      expect(call).not.toHaveBeenCalled()
+      expect(deps.messagingDeps.rpcClient.call).not.toHaveBeenCalled()
+      const second = JSON.parse(String(fetchMock.mock.calls[1][1]?.body))
+      expect(second.contents[2].parts[0].functionResponse).toEqual({ name, id: 'unavailable', response: { error: expect.stringContaining('TOOL_UNAVAILABLE') } })
+    } finally {
+      fetchMock.mockRestore()
+    }
+  })
+
   it.each(['search_tools', 'load_tool_family'])('同一 episode 中途启用 MCP 后，真实 Engine 用 %s 加载并在下一轮调用', async (loader) => {
     const call = vi.fn(async () => ({ output: 'scrapling result', isError: false }))
     const external: ToolDefinition = { name: 'mcp__scrapling__get', description: 'Fetch article', category: 'mcp_skill',
