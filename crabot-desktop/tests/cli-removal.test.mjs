@@ -12,7 +12,7 @@ const locks = await import(base + 'cli-lock.mjs')
 const { privateJson } = await import(base + 'desktop-preparation-files.mjs')
 const digest = text => createHash('sha256').update(text).digest('hex'), windows = process.platform === 'win32'
 const wrapper = '@echo off\r\nsetlocal DisableDelayedExpansion\r\n"%~dp0.crabot-desktop-core\\bin\\crabot.exe" %*\r\nexit /b %errorlevel%\r\n'
-async function fixture(t, rootName = 'installation') {
+async function fixture(t, rootName = 'installation', { xdg = false } = {}) {
   const directory = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'crabot-cli-removal-')))
   let held = []
   t.after(async () => { for (const lock of held.reverse()) locks.releaseCliLock(lock); await fs.rm(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }) })
@@ -35,7 +35,7 @@ async function fixture(t, rootName = 'installation') {
   await privateJson(path.join(root, '.desktop-removal.json'), removal)
   await fs.writeFile(path.join(data, 'user.txt'), 'data and dependencies preserved')
   await fs.writeFile(path.join(home, '.zshrc'), 'user shell settings preserved')
-  const env = { LOCALAPPDATA: path.join(home, 'Local'), APPDATA: path.join(home, 'Roaming') }
+  const env = { LOCALAPPDATA: path.join(home, 'Local'), APPDATA: path.join(home, 'Roaming'), ...(xdg ? { XDG_CONFIG_HOME: path.join(home, 'custom-config') } : {}) }
   const prefix = windows ? management.ensurePrivateDataRoot(path.join(env.LOCALAPPDATA, 'Crabot/cli')) : path.join(home, '.local/bin')
   if (!windows) await fs.mkdir(prefix, { recursive: true, mode: 0o755 })
   const metadata = path.join(prefix, '.crabot-desktop-cli.json'), entry = path.join(prefix, windows ? 'crabot.cmd' : 'crabot'), pointer = path.join(prefix, '.crabot-desktop-core')
@@ -214,14 +214,14 @@ for (const mode of ['owned', 'custom-menu', 'foreign-locator', 'wrong-operation'
 
 
 for (const mode of ['owned', 'xdg-config', 'absent', 'missing-directory', 'custom', 'other-executable', 'disabled', 'permissions', 'symlink', 'redirected-parent', 'foreign-locator', 'wrong-operation', 'missing-lock', 'before-removing', 'running', 'preparation', 'late-change', 'late-lock', 'late-parent', 'late-reappearance', 'lost-reply', 'reappeared']) test('Ubuntu autostart byte cleanup keeps the original removal protection: ' + mode, { skip: windows && ['permissions', 'symlink'].includes(mode) }, async t => {
-  const f = await fixture(t), api = await import('../dist/installation-removal.js')
+  const f = await fixture(t, undefined, { xdg: mode === 'xdg-config' }), api = await import('../dist/installation-removal.js')
   const { LoginStartup, ubuntuLoginStartupEntry } = await import('../dist/login-startup.js')
-  const configHome = path.join(f.home, mode === 'xdg-config' ? 'custom-config' : '.config'), entry = path.join(configHome, 'autostart/crabot.desktop')
+  const configHome = f.env.XDG_CONFIG_HOME || path.join(f.home, '.config'), entry = path.join(configHome, 'autostart/crabot.desktop')
   const executable = path.join(f.root, 'app/releases', f.removal.source_selection.gui_id, 'crabot-desktop')
   const startup = new LoginStartup({ platform: 'linux', packaged: true, executable, configHome,
     app: { getLoginItemSettings() { throw new Error('No host OS login API in a file-only fixture') }, setLoginItemSettings() { throw new Error('No host OS login mutation') } } })
   await startup.set(true)
-  const input = { installRoot: f.root, operationId: f.operationId, home: f.home, env: { ...f.env, ...(mode === 'xdg-config' ? { XDG_CONFIG_HOME: configHome } : {}) } }
+  const input = { installRoot: f.root, operationId: f.operationId, home: f.home, env: f.env }
   if (mode === 'absent') await fs.unlink(entry)
   if (mode === 'missing-directory') await fs.rm(path.dirname(entry), { recursive: true })
   if (mode === 'custom') await fs.appendFile(entry, 'X-Custom=keep\n')
@@ -241,8 +241,9 @@ for (const mode of ['owned', 'xdg-config', 'absent', 'missing-directory', 'custo
   if (mode === 'running') await fs.writeFile(path.join(f.data, 'mm.pid'), String(process.pid))
   if (mode === 'preparation') await privateJson(path.join(f.root, '.desktop-installing.json'), { schema_version: 1, id: randomUUID(), installation_id: f.removal.installation_id, selection: f.removal.source_selection, phase: 'prepared', payload_sha256: '0'.repeat(64) })
   const before = await fs.readFile(entry).catch(() => null), marker = await fs.readFile(path.join(f.root, '.desktop-removal.json')), locator = await fs.readFile(f.locator)
-  const { readInstallationLocator } = await import('../dist/installation-entries.js')
+  const { readInstallationLocator, integrationRoot } = await import('../dist/installation-entries.js')
   assert.deepEqual(await readInstallationLocator(f.home, process.platform, input.env), JSON.parse(locator))
+  assert.equal(integrationRoot(f.home, 'linux', input.env), path.join(configHome, 'crabot/desktop-integration'))
   let injected = false
   if (['late-change', 'late-lock', 'late-parent'].includes(mode)) {
     const stat = fs.lstat; let reads = 0
