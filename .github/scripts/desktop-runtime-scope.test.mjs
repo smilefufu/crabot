@@ -25,6 +25,9 @@ before(() => {
 after(() => { if (root) fs.rmSync(root, { recursive: true, force: true }) })
 
 for (const [file, expected] of [
+  ['.github/workflows/desktop-ubuntu-bootstrap.yml', true],
+  ['crabot-desktop/tests/ubuntu-removal-progress.test.mjs', true],
+  ['crabot-desktop/tests/fixtures/removal-progress-peer.c', true],
   ['scripts/workspace-relocation-coordinator.mjs', true],
   ['scripts/workspace-copy-host.mjs', true],
   ['scripts/workspace-file-host.mjs', true],

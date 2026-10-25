@@ -19,7 +19,7 @@ typedef struct {
   GtkWidget *cancel;
   GByteArray *pending;
   guint input_watch;
-  gboolean cancellable, cancel_sent, failed, disconnected, closing, smoke;
+  gboolean cancellable, cancel_sent, failed, disconnected, closing, smoke, ready_sent;
 } Maintenance;
 
 static void failed(Maintenance *s, gboolean disconnected) {
@@ -103,6 +103,12 @@ static gboolean read_input(gint fd, GIOCondition condition, gpointer data) {
   if (!consume(s, bytes, (gsize)count)) { s->input_watch = 0; return G_SOURCE_REMOVE; }
   return G_SOURCE_CONTINUE;
 }
+static void mapped(GtkWidget *widget, gpointer data) {
+  (void)widget; Maintenance *s = data;
+  if (s->ready_sent || s->failed || s->closing) return;
+  s->ready_sent = TRUE;
+  if (fputs("{\"event\":\"ready\"}\n", stdout) == EOF || fflush(stdout) != 0) failed(s, TRUE);
+}
 static gboolean smoke_finished(gpointer data) {
   Maintenance *s = data;
   puts("CRABOT_NATIVE_MAINTENANCE_WINDOW_READY"); fflush(stdout);
@@ -129,6 +135,7 @@ static void activate(GtkApplication *app, gpointer data) {
   gtk_box_append(GTK_BOX(row), s->cancel);
   g_signal_connect(s->cancel, "clicked", G_CALLBACK(cancel_clicked), s);
   g_signal_connect(s->window, "close-request", G_CALLBACK(close_requested), s);
+  g_signal_connect(s->window, "map", G_CALLBACK(mapped), s);
   gtk_window_present(s->window);
   if (s->smoke) g_timeout_add(800, smoke_finished, s);
   else s->input_watch = g_unix_fd_add(STDIN_FILENO, G_IO_IN | G_IO_HUP | G_IO_ERR | G_IO_NVAL, read_input, s);

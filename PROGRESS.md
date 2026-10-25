@@ -52,8 +52,9 @@
 - 基线仍为Electron＋React、共享SDK/HTTP与窄IPC、内置Node/Python/浏览器和隔离依赖、GUI/CLI共用实例、整体根选址、项目workspace及Admin在线迁移、旧对象目录权限兼容、system管理员部署/批量操作和保留数据卸载/重装。已确认目标不因内部方案未获确认而删减。
 - 范围初审以acc8a2c5对最新origin/main的merge-base计：879文件、84644新增/2563删除行，其中实现约38104新增行；不能作为单一PR提交。[总实施计划](crabot-docs/superpowers/plans/2026-10-17-desktop-application-implementation.md)已记录固定闭环与候选依赖批次；跨Core/Admin/start等共用文件须按行为拆分并独立验证，不能机械按目录拆PR。当前不重写历史、不提前建PR、不推产品main。
 - 共同运行环境、Client/桌面认证、项目目录/权限、workspace迁移/恢复、system生命周期及安装维护已有组件和部分原生证据；构建/组件测试/旧候选/最终使用验收严格区分。[总验收记录](crabot-docs/superpowers/plans/2026-10-17-desktop-application-validation.md)及各专题计划保留逐项历史，不在此重复过期待跑项。
+- 可审查边界实测：独立临时目录仅提取共享SDK的25个跟踪文件，只复用已安装的TypeScript/Zod，独立构建及35项真实SDK测试通过；未带Core/Admin/workspace实现，不等于主线集成或其它批次已可合并。
 - 固定剩余闭环：完整成对更新；旧user CLI原位接管；已有安装修复和保留数据卸载/重装真实健康；旧system发行完整转换/恢复；workspace更早故障阶段恢复；原三平台真实使用/发行验收。不得再扩充产品子项目或以当前组件替代完整行为。
-- I4维护已有保护/证明/私有GUI、真实双锁stop/原GUI退出、清单程序/菜单/CLI/Windows Run与Ubuntu登录项组件，原程序补回、静态数据判断及包内Node范围预检不授迁移/正常启动权限。Ubuntu固定GTK资源e6ea150d经隔离Ubuntu24真实编译、7组控件/管道和窗口烟测通过；尚未接完整私有Node宿主及卸载产品入口。[卸载实施/证据](crabot-docs/superpowers/plans/2026-10-24-desktop-retained-data-uninstall-implementation.md)。
+- I4维护已有保护/证明/私有GUI、真实双锁stop/原GUI退出、清单程序/菜单/CLI/Windows Run与Ubuntu登录项组件，原程序补回、静态数据判断及包内Node范围预检不授迁移/正常启动权限。Ubuntu固定GTK资源e6ea150d经隔离Ubuntu24真实编译、7组控件/管道和窗口烟测通过；GTK/Node显示交接已补真实map就绪、有界消息、取消/断连及确切子进程退出，通信/进程26过1待Linux联测、归档/范围167过、原Electron维护4过；新GTK管道真实联测待CI。尚未接完整私有Node宿主及卸载产品入口。[卸载实施/证据](crabot-docs/superpowers/plans/2026-10-24-desktop-retained-data-uninstall-implementation.md)。
 - 三份未确认草稿（重装验证新记录、受保护系统进程例外、旧Node指纹恢复）停作待批准实施项，仅保留历史，不实现所提新契约；原修复/卸载/旧部署兼容目标继续按既有约定完成。现有启动保护和原始未知拒绝保持，不擅自绕过。
 - 原macOS14、Windows11、Ubuntu GNOME24/26的真实桌面/输入法/权限、真实Provider任务及正式签名仍按原标准分别验收；缺测试资源、正式身份或实际模型预算时如实记录，不删验收、不自动扩大权限或花费。用户指定xinshu-mirror，尚无费用上限，不执行付费生成。
 - 开发保持feat/desktop-application worktree；构建沿40GiB准入/30GiB停止及任务材料20GiB保护，现场服务/Docker/用户OS入口不动。完整测试通过后按依赖分PR审查，不自合并；审查组织调整不增加功能或缩减整体验收。

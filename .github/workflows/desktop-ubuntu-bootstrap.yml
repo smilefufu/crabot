@@ -8,6 +8,13 @@ on:
     paths:
       - 'crabot-desktop/native/ubuntu/**'
       - 'crabot-desktop/tests/native/**'
+      - 'crabot-desktop/src/ubuntu-removal-progress.ts'
+      - 'crabot-desktop/src/ubuntu-process.ts'
+      - 'crabot-desktop/src/operation-progress.ts'
+      - 'crabot-desktop/tests/ubuntu-removal-progress.test.mjs'
+      - 'crabot-desktop/tests/fixtures/removal-progress-peer.c'
+      - 'crabot-native/**'
+      - 'scripts/build-native.mjs'
       - 'scripts/desktop/build-ubuntu-installer.mjs'
       - 'scripts/desktop/package-ubuntu-installer.mjs'
       - 'scripts/desktop/ubuntu-bootstrap.test.mjs'
@@ -16,6 +23,13 @@ on:
     paths:
       - 'crabot-desktop/native/ubuntu/**'
       - 'crabot-desktop/tests/native/**'
+      - 'crabot-desktop/src/ubuntu-removal-progress.ts'
+      - 'crabot-desktop/src/ubuntu-process.ts'
+      - 'crabot-desktop/src/operation-progress.ts'
+      - 'crabot-desktop/tests/ubuntu-removal-progress.test.mjs'
+      - 'crabot-desktop/tests/fixtures/removal-progress-peer.c'
+      - 'crabot-native/**'
+      - 'scripts/build-native.mjs'
       - 'scripts/desktop/build-ubuntu-installer.mjs'
       - 'scripts/desktop/package-ubuntu-installer.mjs'
       - 'scripts/desktop/ubuntu-bootstrap.test.mjs'
@@ -35,6 +49,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
           node-version: '22.22.3'
@@ -53,6 +68,19 @@ jobs:
           cc -std=c11 -Wall -Wextra -Werror -O2 crabot-desktop/tests/native/ubuntu-maintenance.c -o .desktop-build/ubuntu-maintenance-test $(pkg-config --cflags --libs gtk4 json-glib-1.0)
           timeout 20s dbus-run-session -- xvfb-run -a .desktop-build/ubuntu-maintenance-test
           timeout 20s dbus-run-session -- xvfb-run -a .desktop-build/ubuntu-bootstrap/crabot-maintenance --smoke-test
+      - name: Build the same-source Node identity and display modules
+        run: |
+          node scripts/build-native.mjs
+          pnpm --dir crabot-client install --frozen-lockfile
+          node crabot-client/node_modules/typescript/bin/tsc -p crabot-client/tsconfig.json
+          pnpm --dir crabot-desktop install --frozen-lockfile
+          node crabot-desktop/node_modules/typescript/bin/tsc -p crabot-desktop/tsconfig.json
+          (cd crabot-desktop && node build-preload.mjs)
+      - name: Actual private Node-to-GTK window handoff without business services
+        timeout-minutes: 2
+        env:
+          CRABOT_GTK_FRONTEND: ${{ github.workspace }}/.desktop-build/ubuntu-bootstrap/crabot-maintenance
+        run: timeout 90s dbus-run-session -- xvfb-run -a node --test crabot-desktop/tests/ubuntu-removal-progress.test.mjs
       - uses: actions/upload-artifact@v4
         with:
           name: ubuntu-native-bootstrap

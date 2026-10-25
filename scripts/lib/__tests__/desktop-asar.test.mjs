@@ -21,7 +21,7 @@ async function fixture(t, missingTray = false, installer = false, pair, omitted 
   if (installer) for (const file of ['dist/installer-main.js', 'dist/installer-preload.cjs', 'dist/installation-progress-window.js', 'dist/installation-entries.js',
     'dist/bootstrap/scripts/lib/desktop-payload.mjs', 'dist/bootstrap/scripts/lib/desktop-preparation-files.mjs', 'dist/bootstrap/scripts/lib/desktop-repair.mjs', 'dist/bootstrap/scripts/lib/desktop-program-proof.mjs', 'dist/bootstrap/scripts/lib/desktop-removal-proof.mjs', 'dist/bootstrap/scripts/lib/desktop-removal-host.mjs', 'dist/bootstrap/scripts/lib/module-process-start.cjs', 'dist/bootstrap/scripts/lib/instance-controller.mjs', 'dist/bootstrap/scripts/lib/core-release.mjs', 'dist/bootstrap/scripts/lib/physical-fs.cjs']) files[file] = 'installer fixture'
   for (const file of desktopMaintenanceBootstrap) files['dist/bootstrap/' + file] = 'fixed maintenance fixture'
-  for (const file of ['dist/operation-progress-window.js', 'dist/operation-progress.js', 'dist/removal-progress-window.js', 'dist/removal-preload.cjs', 'dist/installation-entries.js', 'dist/installation-removal.js']) files[file] = 'fixed progress fixture'
+  for (const file of ['dist/operation-progress-window.js', 'dist/operation-progress.js', 'dist/ubuntu-removal-progress.js', 'dist/removal-progress-window.js', 'dist/removal-preload.cjs', 'dist/installation-entries.js', 'dist/installation-removal.js']) files[file] = 'fixed progress fixture'
   if (pair) files['dist/desktop-release.json'] = pair.text
   for (const file of omitted) delete files[file]
   if (missingTray) delete files['dist/assets/tray.png']
@@ -121,7 +121,7 @@ for (const member of desktopMaintenanceBootstrap) test('GUI and installer ASAR r
   assert.throws(() => verifyInstallerAsar(missing, archive), /missing fixed maintenance dependency/)
 })
 
-for (const member of ['dist/operation-progress-window.js', 'dist/operation-progress.js', 'dist/removal-progress-window.js', 'dist/removal-preload.cjs', 'dist/installation-entries.js', 'dist/installation-removal.js']) test('GUI and installer require fixed progress code: ' + member, async t => {
+for (const member of ['dist/operation-progress-window.js', 'dist/operation-progress.js', 'dist/ubuntu-removal-progress.js', 'dist/removal-progress-window.js', 'dist/removal-preload.cjs', 'dist/installation-entries.js', 'dist/installation-removal.js']) test('GUI and installer require fixed progress code: ' + member, async t => {
   const archive = await fixture(t, false, true)
   const missing = { statFile: (file, name) => {
     if (name === path.normalize(member)) throw new Error('missing fixed progress component')
@@ -137,4 +137,11 @@ for (const installer of [false, true]) test('GUI and installer archives refuse m
   for (const [reader, platform] of [[asar, process.platform], [windowsFilesystem(archive), 'win32']]) {
     assert.throws(() => (installer ? verifyInstallerAsar : verifyDesktopAsar)(reader, archive, platform), /installation-removal.*not found/)
   }
+})
+
+for (const installer of [false, true]) test('protected GUI and installer require the Node-to-GTK display transport: ' + installer, async t => {
+  const archive = await fixture(t, false, installer, undefined, ['dist/ubuntu-removal-progress.js'])
+  const verify = installer ? verifyInstallerAsar : verifyDesktopAsar
+  assert.throws(() => verify(asar, archive), /ubuntu-removal-progress.*not found/)
+  assert.throws(() => verify(windowsFilesystem(archive), archive, 'win32'), /ubuntu-removal-progress.*not found/)
 })

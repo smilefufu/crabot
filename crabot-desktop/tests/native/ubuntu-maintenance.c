@@ -40,6 +40,16 @@ static void cancellation(void) {
   g_assert_cmpstr(result, ==, "{\"action\":\"cancel\"}\n");
   clear(&s);
 }
+static void readiness(void) {
+  Maintenance s = state(); int pipes[2]; g_assert_cmpint(pipe(pipes), ==, 0); g_assert_cmpint(fflush(stdout), ==, 0);
+  int original = dup(STDOUT_FILENO); g_assert_cmpint(original, >=, 0); g_assert_cmpint(dup2(pipes[1], STDOUT_FILENO), >=, 0); close(pipes[1]);
+  mapped(GTK_WIDGET(s.window), &s); mapped(GTK_WIDGET(s.window), &s);
+  g_assert_true(s.ready_sent); g_assert_false(s.cancellable);
+  g_assert_cmpint(dup2(original, STDOUT_FILENO), >=, 0); close(original);
+  const char *expected = "{\"event\":\"ready\"}\n"; char result[64] = {0};
+  g_assert_cmpint(read(pipes[0], result, sizeof result - 1), ==, (ssize_t)strlen(expected)); close(pipes[0]);
+  g_assert_cmpstr(result, ==, expected); clear(&s);
+}
 static void invalid(void) {
   const char *frames[] = { "[]\n", "{}\n", "\n", "{broken}\n",
     "{\"type\":\"progress\",\"message\":\"\",\"cancellable\":true}\n",
@@ -88,6 +98,6 @@ int main(int argc, char **argv) {
   g_test_add_func("/maintenance/progress", progress); g_test_add_func("/maintenance/cancellation", cancellation);
   g_test_add_func("/maintenance/invalid", invalid); g_test_add_func("/maintenance/limits", limits);
   g_test_add_func("/maintenance/fragmented", fragmented); g_test_add_func("/maintenance/disconnected", disconnected);
-  g_test_add_func("/maintenance/close", closed);
+  g_test_add_func("/maintenance/close", closed); g_test_add_func("/maintenance/readiness", readiness);
   return g_test_run();
 }
