@@ -13,18 +13,20 @@ try {
   for (const count of [0, 1, 64, 512, 4096, 8192, 32768, 65536]) {
     const start = performance.now(), result = await identity.inspectProgramReferences({ roots: [root], files: files.slice(0, count) })
     console.log('CRABOT_WINDOWS_REFERENCE_SCALE ' + JSON.stringify({ count, elapsed_ms: Math.round(performance.now() - start), ...result }))
-    if (count === 0) assert.equal(result.complete, true)
+    assert.equal(result.complete, true, JSON.stringify({ count, ...result }))
   }
   const longDirectory = path.join(root, ...Array.from({ length: 3 }, (_, i) => '项目 空间 ' + i + '-' + 'x'.repeat(90)))
   fs.mkdirSync(longDirectory, { recursive: true }); const longFile = path.join(longDirectory, 'resource.txt'); fs.writeFileSync(longFile, 'x')
   for (const [kind, file] of [['long-path', longFile], ['long-namespaced', path.toNamespacedPath(longFile)]]) {
     const start = performance.now(), result = await identity.inspectProgramReferences({ roots: [root], files: [file] })
     console.log('CRABOT_WINDOWS_REFERENCE_PATH ' + JSON.stringify({ kind, characters: file.length, elapsed_ms: Math.round(performance.now() - start), ...result }))
+    assert.equal(result.complete, true, JSON.stringify({ kind, ...result }))
   }
   const junction = path.join(root, 'directory-link'); fs.symlinkSync(longDirectory, junction, 'junction')
   for (const [kind, file] of [['directory', longDirectory], ['directory-link', junction]]) {
     const result = await identity.inspectProgramReferences({ roots: [root], files: [file] })
     console.log('CRABOT_WINDOWS_REFERENCE_PATH ' + JSON.stringify({ kind, ...result }))
+    assert.equal(result.complete, false, 'Directories are not Restart Manager file resources')
   }
   // Read the actual Win32 return codes independently of the product observer.
   // This does not turn a failed product observation into deletion permission.
@@ -38,11 +40,15 @@ try {
     { input: JSON.stringify(apiCases), encoding: 'utf8', timeout: 90000, maxBuffer: 65536, windowsHide: true })
   process.stdout.write(api)
   const code = 'const fs=require("node:fs");const fd=fs.openSync(process.argv[1],"r");process.stdout.write("ready\\n");process.stdin.once("data",()=>{fs.closeSync(fd);process.exit(0)})'
-  const child = spawn(process.execPath, ['-e', code, files[0]], { stdio: ['pipe', 'pipe', 'pipe'] }), exited = once(child, 'close')
-  try {
-    await once(child.stdout, 'data')
-    const held = await identity.inspectProgramReferences({ roots: [root], files: [files[0]] })
-    console.log('CRABOT_WINDOWS_REFERENCE_HELD ' + JSON.stringify(held)); assert.equal(held.processes.some(item => item.pid === child.pid), true)
-    child.stdin.end('close'); assert.equal((await exited)[0], 0)
-  } finally { if (child.exitCode === null && child.signalCode === null) { child.kill('SIGKILL'); await exited } }
+  for (const [kind, heldFile, resources] of [['ordinary', files[0], [files[0]]], ['long', longFile, [longFile]], ['last-group', files.at(-1), files]]) {
+    const child = spawn(process.execPath, ['-e', code, heldFile], { stdio: ['pipe', 'pipe', 'pipe'] }), exited = once(child, 'close')
+    try {
+      await once(child.stdout, 'data')
+      const held = await identity.inspectProgramReferences({ roots: [root], files: resources })
+      console.log('CRABOT_WINDOWS_REFERENCE_HELD ' + JSON.stringify({ kind, ...held }))
+      assert.equal(held.complete, true, JSON.stringify({ kind, ...held }))
+      assert.equal(held.processes.some(item => item.pid === child.pid), true)
+      child.stdin.end('close'); assert.equal((await exited)[0], 0)
+    } finally { if (child.exitCode === null && child.signalCode === null) { child.kill('SIGKILL'); await exited } }
+  }
 } finally { fs.rmSync(root, { recursive: true }) }

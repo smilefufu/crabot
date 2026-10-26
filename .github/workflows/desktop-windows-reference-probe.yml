@@ -6,6 +6,7 @@ on:
     paths:
       - '.github/scripts/probe-windows-program-references.mjs'
       - '.github/scripts/probe-windows-restart-manager.ps1'
+      - 'crabot-native/src/program-references.h'
       - '.github/workflows/desktop-windows-reference-probe.yml'
 permissions:
   contents: read
