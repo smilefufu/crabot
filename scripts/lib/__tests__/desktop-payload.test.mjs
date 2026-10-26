@@ -1504,8 +1504,12 @@ for (const mode of ['fresh', 'completed', 'not-removing', 'cancelled', 'changed-
     t.mock.method(native, 'inspectProgramReferences', async options => {
       const result = await observe(options)
       observations.push({ complete: result.complete, incomplete: result.incomplete, references: result.processes.length, unknown_stages: result.unknown_stages,
-        unknown: process.platform === 'linux' ? await Promise.all(result.unknown_details.slice(0, 8).map(async item => ({ ...item,
-          comm: (await fs.readFile('/proc/' + item.pid + '/comm', 'utf8').catch(() => 'unavailable')).trim().slice(0, 64) }))) : undefined })
+        unknown: await Promise.all(result.unknown_details.filter(item => item.os_error !== 1).slice(0, 8).map(async item => {
+          let current
+          try { const value = native.inspectProcess(item.pid); if (value) current = { pid: value.pid, parent: value.parent, started: value.started, executable: value.executable } } catch {}
+          return { ...item, current, ...(process.platform === 'linux' ? {
+            comm: (await fs.readFile('/proc/' + item.pid + '/comm', 'utf8').catch(() => 'unavailable')).trim().slice(0, 64) } : {}) }
+        })) })
       return result
     })
     const result = await prepareRetainedDesktopReinstall(options).catch(error => { throw new Error(error.code + ': ' + JSON.stringify(observations)) })
@@ -1761,6 +1765,7 @@ for (const allowed of [false, true]) test('retained product acceptance prepares 
   } else {
     const result = await prepareRetainedProductReinstall({ installRoot: f.target, payload: f.payload })
     assert.equal(result.partial_removal_fixture, true); assert.equal(result.complete_uninstall_tested, false)
+    if (!windows) for (const directory of [f.target, path.join(f.target, 'data')]) assert.equal((await fs.stat(directory)).mode & 0o777, 0o755)
     assert.ok(await fs.stat(path.join(prepared.coreRoot, 'cli.mjs')))
     assert.equal(await fs.readFile(result.sentinel, 'utf8'), 'preserved across partial removal and real GUI recovery\n')
     const { readVersionMaintenance, assertVersionMaintenanceAllowsStart } = await import('../version-maintenance.mjs')

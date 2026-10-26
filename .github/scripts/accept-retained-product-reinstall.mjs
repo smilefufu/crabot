@@ -24,6 +24,9 @@ export async function prepareRetainedProductReinstall({ installRoot, payload }) 
   assert.ok(space.bavail * space.bsize > source.bytes * 3n + 2n * 1024n ** 3n, 'Retained repair requires bounded program-copy space')
   const operationId = randomUUID(), sentinel = path.join(own.dataDir, 'retained-reinstall-sentinel.txt')
   assert.equal(inspectInstance(own.dataDir).state, 'stopped')
+  // This installation belongs to the disposable CI fixture. Exercise legacy
+  // readable roots without changing any real deployment or private records.
+  if (process.platform !== 'win32') { await fs.chmod(own.root, 0o755); await fs.chmod(own.dataDir, 0o755) }
   await fs.writeFile(sentinel, 'preserved across partial removal and real GUI recovery\n', { flag: 'wx', mode: 0o600 })
   const rootLock = await acquireExistingCliLock(own.root, 'ci-retained-removal-fixture')
   let dataLock, proof

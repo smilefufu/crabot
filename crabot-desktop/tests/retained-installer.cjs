@@ -21,8 +21,12 @@ const observe = native.inspectProgramReferences
 native.inspectProgramReferences = async options => {
   const result = await observe(options)
   observations.push({ complete: result.complete, incomplete: result.incomplete, references: result.processes.length, unknown_stages: result.unknown_stages,
-        unknown: process.platform === 'linux' ? await Promise.all(result.unknown_details.slice(0, 8).map(async item => ({ ...item,
-          comm: (await fs.promises.readFile('/proc/' + item.pid + '/comm', 'utf8').catch(() => 'unavailable')).trim().slice(0, 64) }))) : undefined })
+        unknown: await Promise.all(result.unknown_details.filter(item => item.os_error !== 1).slice(0, 8).map(async item => {
+          let current
+          try { const value = native.inspectProcess(item.pid); if (value) current = { pid: value.pid, parent: value.parent, started: value.started, executable: value.executable } } catch {}
+          return { ...item, current, ...(process.platform === 'linux' ? {
+            comm: (await fs.promises.readFile('/proc/' + item.pid + '/comm', 'utf8').catch(() => 'unavailable')).trim().slice(0, 64) } : {}) }
+        })) })
   return result
 }
 const dialogs = []
