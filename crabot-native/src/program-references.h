@@ -65,44 +65,79 @@ struct ProgramReferenceJob {
     outputBytes += bytes; processes.push_back(value);
   }
 #ifdef _WIN32
+  static std::wstring ResourceName(const std::string& file) {
+    auto name = Wide(file); std::replace(name.begin(), name.end(), L'/', L'\\');
+    if (name.size() < MAX_PATH) return name;
+    const auto extended = name.rfind(L"\\\\?\\", 0) == 0 ? name
+      : name.rfind(L"\\\\", 0) == 0 ? L"\\\\?\\UNC\\" + name.substr(2) : L"\\\\?\\" + name;
+    std::vector<WCHAR> buffer(32769);
+    const DWORD length = GetShortPathNameW(extended.c_str(), buffer.data(), static_cast<DWORD>(buffer.size()));
+    if (!length || length >= buffer.size()) throw std::runtime_error("Reference path alias unavailable");
+    std::wstring alias(buffer.data(), length);
+    if (alias.rfind(L"\\\\?\\UNC\\", 0) == 0) alias = L"\\\\" + alias.substr(8);
+    else if (alias.rfind(L"\\\\?\\", 0) == 0) alias = alias.substr(4);
+    if (alias.size() >= MAX_PATH) throw std::runtime_error("Reference path alias unavailable");
+    struct File {
+      HANDLE handle;
+      explicit File(const std::wstring& path) : handle(CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr)) {}
+      ~File() { if (handle != INVALID_HANDLE_VALUE) CloseHandle(handle); }
+    } original(extended), shortened(alias);
+    BY_HANDLE_FILE_INFORMATION first{}, second{};
+    if (original.handle == INVALID_HANDLE_VALUE || shortened.handle == INVALID_HANDLE_VALUE
+      || !GetFileInformationByHandle(original.handle, &first) || !GetFileInformationByHandle(shortened.handle, &second)
+      || !(first.nFileIndexHigh || first.nFileIndexLow)
+      || first.dwVolumeSerialNumber != second.dwVolumeSerialNumber || first.nFileIndexHigh != second.nFileIndexHigh
+      || first.nFileIndexLow != second.nFileIndexLow) throw std::runtime_error("Reference path alias changed");
+    return alias;
+  }
   void WindowsFiles() {
     if (files.empty()) return;
     struct Session {
       DWORD handle = 0; bool open = false;
       void Close() { if (open) { if (RmEndSession(handle) != ERROR_SUCCESS) throw std::runtime_error("Reference session cleanup unverified"); open = false; } }
       ~Session() { if (open) RmEndSession(handle); }
-    } session;
-    WCHAR key[CCH_RM_SESSION_KEY + 1] = {};
-    if (RmStartSession(&session.handle, 0, key) != ERROR_SUCCESS) throw std::runtime_error("Reference session unavailable");
-    session.open = true;
-    std::vector<std::wstring> names; for (const auto& file : files) names.push_back(Wide(file));
+    };
+    std::vector<std::wstring> names;
+    for (const auto& file : files) { Budget(); names.push_back(ResourceName(file)); }
     std::vector<LPCWSTR> pointers; for (const auto& name : names) pointers.push_back(name.c_str());
-    Budget();
-    if (RmRegisterResources(session.handle, static_cast<UINT>(pointers.size()), pointers.data(), 0, nullptr, 0, nullptr) != ERROR_SUCCESS) throw std::runtime_error("Reference resources unavailable");
-    for (int attempt = 0; attempt < 4; attempt++) {
-      Budget(); UINT needed = 0, count = 0; DWORD reboot = 0;
-      DWORD status = RmGetList(session.handle, &needed, &count, nullptr, &reboot);
-      if (status == ERROR_SUCCESS && needed == 0) { if (reboot) incomplete = true; session.Close(); return; }
-      if (status != ERROR_MORE_DATA || needed > 32768) throw std::runtime_error("Reference list unavailable");
-      std::vector<RM_PROCESS_INFO> entries(needed); count = needed;
-      status = RmGetList(session.handle, &needed, &count, entries.data(), &reboot);
-      if (status == ERROR_MORE_DATA) continue;
-      if (status != ERROR_SUCCESS || count > entries.size()) throw std::runtime_error("Reference list changed");
-      if (reboot) { incomplete = true; }
-      for (UINT i = 0; i < count; i++) {
-        Budget(); const auto& target = entries[i].Process;
-        if (!target.dwProcessId || target.dwProcessId > 2147483647) { incomplete = true; continue; }
-        const int pid = static_cast<int>(target.dwProcessId);
-        try {
-          const auto current = Inspect(pid); if (!current.pid) continue;
-          ULARGE_INTEGER birth; birth.LowPart = target.ProcessStartTime.dwLowDateTime; birth.HighPart = target.ProcessStartTime.dwHighDateTime;
-          if (current.started == std::to_string(birth.QuadPart)) Remember(current);
-        } catch (...) { if (!Exited(pid)) Unknown(pid, "windows_resource_identity", 0); }
+    // Restart Manager cannot list an arbitrarily large registered session.
+    // Every finite group gets its own session; all holder identities are merged.
+    for (size_t offset = 0; offset < pointers.size(); offset += 8192) {
+      Budget(); Session session; WCHAR key[CCH_RM_SESSION_KEY + 1] = {};
+      if (RmStartSession(&session.handle, 0, key) != ERROR_SUCCESS) throw std::runtime_error("Reference session unavailable");
+      session.open = true;
+      const auto count = static_cast<UINT>(std::min<size_t>(8192, pointers.size() - offset));
+      if (RmRegisterResources(session.handle, count, pointers.data() + offset, 0, nullptr, 0, nullptr) != ERROR_SUCCESS) throw std::runtime_error("Reference resources unavailable");
+      bool settled = false;
+      for (int attempt = 0; attempt < 4; attempt++) {
+        Budget(); UINT needed = 0, count = 0; DWORD reboot = 0;
+        DWORD status = RmGetList(session.handle, &needed, &count, nullptr, &reboot);
+        if (status == ERROR_SUCCESS && needed == 0) { if (reboot) incomplete = true; settled = true; break; }
+        if (status != ERROR_MORE_DATA || needed > 32768) throw std::runtime_error("Reference list unavailable");
+        std::vector<RM_PROCESS_INFO> entries(needed); count = needed;
+        status = RmGetList(session.handle, &needed, &count, entries.data(), &reboot);
+        if (status == ERROR_MORE_DATA) continue;
+        if (status != ERROR_SUCCESS || count > entries.size()) throw std::runtime_error("Reference list changed");
+        if (reboot) { incomplete = true; }
+        for (UINT i = 0; i < count; i++) {
+          Budget(); const auto& target = entries[i].Process;
+          if (!target.dwProcessId || target.dwProcessId > 2147483647) { incomplete = true; continue; }
+          const int pid = static_cast<int>(target.dwProcessId);
+          try {
+            const auto current = Inspect(pid); if (!current.pid) continue;
+            ULARGE_INTEGER birth; birth.LowPart = target.ProcessStartTime.dwLowDateTime; birth.HighPart = target.ProcessStartTime.dwHighDateTime;
+            if (current.started == std::to_string(birth.QuadPart)) Remember(current);
+          } catch (...) { if (!Exited(pid)) Unknown(pid, "windows_resource_identity", 0); }
+        }
+        settled = true; break;
       }
-      Budget(); session.Close(); return;
+      if (!settled) throw std::runtime_error("Reference list did not settle");
+      Budget(); session.Close();
     }
-    throw std::runtime_error("Reference list did not settle");
   }
+
 #else
   std::vector<int> OwnedPids() {
     std::vector<int> found;
