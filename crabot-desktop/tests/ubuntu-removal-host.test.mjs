@@ -6,7 +6,8 @@ import { homedir } from 'node:os'
 import { randomUUID, createHash } from 'node:crypto'
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
-import { execFile } from 'node:child_process'
+import { execFile, spawn } from 'node:child_process'
+import { once } from 'node:events'
 import { promisify } from 'node:util'
 import { acquireExistingCliLock, releaseCliLock } from '../../scripts/lib/cli-lock.mjs'
 import identity from '../../scripts/lib/process-identity.cjs'
@@ -218,7 +219,7 @@ for (const mode of ['preparing', 'stopping', 'removing-partial-core', 'wrong-ope
   assert.equal(await fs.readFile(path.join(own.dataDir, 'preserved'), 'utf8'), 'historical data')
 })
 
-for (const mode of ['valid', 'wrong-operation', 'changed-parent', 'changed-helper', 'changed-payload', 'cancelled']) {
+for (const mode of ['valid', 'wrong-operation', 'changed-parent', 'changed-helper', 'changed-payload', 'cancelled', 'early-cancel']) {
   test('offline installer Node continues an existing removal with original programs missing: ' + mode,
     { skip: !linux || process.env.GITHUB_ACTIONS !== 'true', timeout: 90000 }, async () => {
       const area = await fs.mkdtemp(path.join(root, 'offline-continuation-')), bundle = path.join(area, 'bundle')
@@ -260,6 +261,26 @@ for (const mode of ['valid', 'wrong-operation', 'changed-parent', 'changed-helpe
         cancelled: mode === 'cancelled', resultFile }))
       const env = { ...process.env, HOME: home, XDG_CONFIG_HOME: path.join(home, 'config'), XDG_DATA_HOME: path.join(home, 'share') }
       for (const name of ['NODE_OPTIONS', 'NODE_PATH', 'DATA_DIR', 'CRABOT_HOME', 'CRABOT_DEV', 'CRABOT_PORT_OFFSET']) delete env[name]
+      if (mode === 'early-cancel') {
+        const child = spawn(process.execPath, [fileURLToPath(new URL('../dist/ubuntu-installer-backend.js', import.meta.url)), own.root], {
+          env, cwd: bundle, stdio: ['pipe', 'pipe', 'pipe'],
+        })
+        const exited = once(child, 'exit'), peer = identity.inspectProcess(child.pid)
+        let timedOut = false, output = ''
+        child.stdout.on('data', bytes => { output = (output + bytes.toString()).slice(-8192) })
+        child.stderr.resume()
+        const timer = setTimeout(() => {
+          timedOut = true
+          if (child.exitCode === null && child.signalCode === null && identity.sameProcess(peer, identity.inspectProcess(child.pid))) child.kill('SIGKILL')
+        }, 5000)
+        child.stdin.write('{"action":"cancel"}\n') // Keep stdin open to expose a forgotten pending-choice promise.
+        try {
+          const [code] = await exited; assert.equal(timedOut, false); assert.equal(code, 2, output)
+          assert.equal(JSON.parse(await fs.readFile(path.join(own.root, '.desktop-removal.json'), 'utf8')).phase, 'removing')
+          assert.equal(await fs.readFile(path.join(own.dataDir, 'preserved'), 'utf8'), 'data and dependencies')
+        } finally { clearTimeout(timer); child.stdin.destroy() }
+        return
+      }
       const executed = await promisify(execFile)(installer, [path.join(bundle, 'offline/core/.product-runtime/node/bin/node'),
         fileURLToPath(new URL('fixtures/ubuntu-installer-removal-actor.mjs', import.meta.url)), cfg], { cwd: bundle, env, timeout: 75000, maxBuffer: 65536 })
       const actual = JSON.parse(await fs.readFile(resultFile, 'utf8'))
