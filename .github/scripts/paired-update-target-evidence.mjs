@@ -42,12 +42,13 @@ export async function collectPairedUpdateTargetEvidence({ dataDir, targetRoot, t
         mm_alive: !!runtime.record?.mm && identity.sameProcess(runtime.record.mm, identity.inspectProcess(runtime.record.mm.pid)) })
     } catch { evidence.runtime.status = 'unreadable' }
   }
+  let targetVersion = ''
   const maintenanceFile = await boundedFile(path.join(dataDir, 'desktop-maintenance.json'), 65536)
   evidence.maintenance = { status: maintenanceFile.status }
   if (maintenanceFile.status === 'readable') {
     try {
       const record = readVersionMaintenance(dataDir)
-      if (record) Object.assign(evidence.maintenance, { schema_version: record.schema_version, phase: record.phase, target_core_matches: record.target_core?.root === targetRoot })
+      if (record) { targetVersion = record.target_version; Object.assign(evidence.maintenance, { schema_version: record.schema_version, phase: record.phase, target_core_matches: record.target_core?.root === targetRoot }) }
       else evidence.maintenance.status = 'absent'
     } catch { evidence.maintenance.status = 'unreadable' }
   }
@@ -56,6 +57,16 @@ export async function collectPairedUpdateTargetEvidence({ dataDir, targetRoot, t
     if (pending.length > 64 || pending.some(item => !/^crabot-[A-Za-z0-9_-]{1,64}$/.test(item.moduleId))) throw new Error('Invalid diagnostic module list')
     evidence.schema = { status: 'readable', pending: pending.map(item => ({ module_id: item.moduleId, code_version: item.codeVersion, data_version: item.dataVersion })) }
   } catch { evidence.schema = { status: 'unreadable' } }
+  const profile = path.join(dataDir, 'desktop-profile')
+  const profileSafe = await fs.lstat(profile).then(value => value.isDirectory() && !value.isSymbolicLink(), () => false)
+    && await fs.realpath(profile).then(value => value === profile, () => false)
+  const bootstrap = profileSafe ? await boundedFile(path.join(profile, 'bootstrap.log'), 16384) : { status: 'unreadable' }
+  evidence.bootstrap = { status: bootstrap.status }
+  if (bootstrap.status === 'readable') {
+    const current = handoffAt === null || bootstrap.modified >= handoffAt
+    Object.assign(evidence.bootstrap, { modified_after_handoff: handoffAt === null ? null : current,
+      ...summarizePairedTargetBootstrap(current ? bootstrap.text : '', targetVersion) })
+  }
   evidence.logs = {}
   const logDirectory = path.join(dataDir, 'logs')
   const logDirectorySafe = await fs.lstat(logDirectory).then(value => value.isDirectory(), () => false)

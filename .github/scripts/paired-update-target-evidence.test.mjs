@@ -144,3 +144,21 @@ test('unsealed or missing target identity cannot invoke native observation', asy
   assert.deepEqual(await fs.readdir(f.targetRoot), [])
   assert.deepEqual(await fs.readdir(f.dataDir), ['logs'])
 })
+
+test('the original GUI private profile log exposes only current bounded bootstrap metadata', async t => {
+  const f = await fixture(t), profile = path.join(f.dataDir, 'desktop-profile'), file = path.join(profile, 'bootstrap.log')
+  await fs.mkdir(profile)
+  await fs.writeFile(file, JSON.stringify({ component: 'desktop-bootstrap', phase: 'profile-configured', path: '/private/user-content' }) + '\n'
+    + JSON.stringify({ component: 'desktop-bootstrap', phase: 'failed', code: 'CRABOT_CORE_INTEGRITY', message: 'private-message' }) + '\n')
+  const result = await collectPairedUpdateTargetEvidence(f)
+  assert.deepEqual(result.bootstrap.events, [{ phase: 'profile-configured' }, { phase: 'failed' }])
+  assert.deepEqual(result.bootstrap.codes, ['CRABOT_CORE_INTEGRITY'])
+  assert.equal(JSON.stringify(result).includes('private-message'), false)
+  assert.equal(JSON.stringify(result).includes('user-content'), false)
+  const stale = await collectPairedUpdateTargetEvidence({ ...f, handoffAt: Date.now() + 10000 })
+  assert.equal(stale.bootstrap.modified_after_handoff, false); assert.deepEqual(stale.bootstrap.events, [])
+  await fs.writeFile(file, 'x'.repeat(16385))
+  assert.deepEqual((await collectPairedUpdateTargetEvidence(f)).bootstrap, { status: 'unreadable' })
+  await fs.unlink(file); await fs.writeFile(path.join(f.root, 'keep'), 'private user content'); await fs.link(path.join(f.root, 'keep'), file)
+  assert.deepEqual((await collectPairedUpdateTargetEvidence(f)).bootstrap, { status: 'unreadable' })
+})

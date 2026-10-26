@@ -13,6 +13,7 @@ import { attachLocalPages } from './local-pages.js'
 import { attachDesktopNetwork } from './desktop-network.js'
 import { registerDesktopIpc } from './desktop-ipc.js'
 import { collectDiagnostics } from './diagnostics.js'
+import { openBootstrapLog } from './bootstrap-log.js'
 import { ArtifactWindows } from './artifact-window.js'
 import { LoginStartup, type StartupState } from './login-startup.js'
 import { externalUrl, isAppUrl, isTrustedFrame } from './window-security.js'
@@ -56,11 +57,24 @@ async function quit(): Promise<boolean> {
   return pendingQuit
 }
 function show() { window?.show(); window?.focus() }
-function bootstrapStage(phase: string) { console.info(JSON.stringify({ component: 'desktop-bootstrap', phase, at: new Date().toISOString() })) }
+const bootstrapHistory: { phase: string; at: string; code?: string; app_version?: string }[] = []
+let bootstrapLog: ReturnType<typeof openBootstrapLog>
+function bootstrapStage(phase: string, fields: { code?: string; app_version?: string } = {}) {
+  const event = { phase, at: new Date().toISOString(), ...fields }
+  const line = JSON.stringify({ component: 'desktop-bootstrap', ...event })
+  if (phase === 'failed') console.error(line); else console.info(line)
+  if (bootstrapHistory.length < 32) bootstrapHistory.push(event)
+  bootstrapLog?.(event)
+}
 
 function configureProfile(root: string) {
   const profile = path.join(root, 'desktop-profile'), temporary = path.join(profile, 'tmp')
   mkdirSync(temporary, { recursive: true, mode: 0o700 })
+  try {
+    const files = createRequire(import.meta.url)(app.isPackaged ? './bootstrap/scripts/lib/process-identity.cjs' : path.join(coreRoot, 'scripts/lib/process-identity.cjs'))
+    bootstrapLog = openBootstrapLog(profile, files)
+    for (const event of bootstrapHistory) bootstrapLog?.(event)
+  } catch { /* Console metadata remains available if the private log is unavailable. */ }
   app.setPath('userData', profile)
   app.setPath('sessionData', profile)
   app.setPath('temp', temporary)
@@ -129,7 +143,7 @@ async function boot() {
   if (!installation && !claimInstance()) return
   await app.whenReady()
   if (process.platform === 'win32') app.setAppUserModelId('com.crabot.desktop')
-  console.info(JSON.stringify({ component: 'desktop-bootstrap', phase: 'app-ready', app_version: app.getVersion(), at: new Date().toISOString() }))
+  bootstrapStage('app-ready', { app_version: app.getVersion() })
   const startup = new LoginStartup({ platform: process.platform, packaged: app.isPackaged, executable: process.execPath,
     configHome: path.resolve(process.env.XDG_CONFIG_HOME || path.join(homedir(), '.config')), app })
   bootstrapStage('reading-login-startup')
@@ -289,7 +303,7 @@ app.on('window-all-closed', () => { /* Tray owns the application lifetime. */ })
 app.on('will-quit', () => { updates?.close(); artifacts?.close(); controller?.close(); tray?.destroy() })
 void boot().catch(async error => {
   const code = typeof error?.code === 'string' && /^[A-Z0-9_]{1,128}$/.test(error.code) ? error.code : 'DESKTOP_BOOT_FAILED'
-  console.error(JSON.stringify({ component: 'desktop-bootstrap', phase: 'failed', code, at: new Date().toISOString() }))
+  bootstrapStage('failed', { code })
   await app.whenReady()
   let message = 'Crabot 界面启动失败，请修复安装。'
   if (error?.code === 'CRABOT_DESKTOP_REMOVAL_PENDING') message = 'Crabot 卸载尚未完成。请继续卸载，或使用同版/更高版离线安装器修复。用户数据已保留。'
