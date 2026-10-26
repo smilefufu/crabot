@@ -7,6 +7,18 @@ const path = require('node:path')
 const { pathToFileURL } = require('node:url')
 const { Readable } = require('node:stream')
 const { sourceLifetimeMs } = require('./paired-update-limits.cjs')
+// Observe the existing native verifier; never replace its result or arguments.
+const childProcess = require('node:child_process'), originalSpawn = childProcess.spawn
+let nativeInspectionStage
+childProcess.spawn = (command, args, options) => {
+  const child = originalSpawn(command, args, options)
+  if (args?.[0] === '--inspect-update') child.stderr?.on('data', bytes => {
+    const stage = /CRABOT_SANDBOX_NOT_READY:([a-z-]{1,64})/.exec(bytes.toString('utf8'))?.[1]
+    if (stage) nativeInspectionStage = stage
+  })
+  return child
+}
+require('node:module').syncBuiltinESMExports()
 if (process.env.GITHUB_ACTIONS !== 'true') throw new Error('An isolated CI user is required')
 const config = JSON.parse(fs.readFileSync(process.env.CRABOT_PAIRED_UPDATE_FIXTURE_CONFIG, 'utf8'))
 const profile = path.join(config.source.dataDir, 'desktop-profile')
@@ -99,4 +111,4 @@ void app.whenReady().then(async () => {
   write('source-stage', { phase: 'preparing-release', at_ms: Math.round(performance.now()) })
   await driver.install(candidate)
 }).catch(error => { write('failure', { code: typeof error.code === 'string' ? error.code : 'PAIRED_UPDATE_FIXTURE_FAILED',
-  message: String(error.message).slice(0, 256), phase: controller?.host.snapshot().phase }); console.error(error.stack); clearTimeout(timer); app.exit(1) })
+  message: (String(error.message) + (nativeInspectionStage ? '; native_stage=' + nativeInspectionStage : '')).slice(0, 256), phase: controller?.host.snapshot().phase }); console.error(error.stack); clearTimeout(timer); app.exit(1) })
