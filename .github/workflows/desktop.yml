@@ -154,6 +154,10 @@ jobs:
         if: runner.os == 'Linux'
         timeout-minutes: 2
         run: sudo --preserve-env=GITHUB_ACTIONS unshare --mount --propagation private -- "$(command -v node)" --import ./crabot-shared/node_modules/tsx/dist/loader.mjs --test --test-name-pattern='Linux same-device bind mounts' crabot-shared/src/workspace-usage.test.ts
+      - name: Windows copy assertions with direct TAP transport
+        if: runner.os == 'Windows'
+        timeout-minutes: 2
+        run: node scripts/lib/__tests__/workspace-copy.test.mjs
       - name: Runtime regressions
         timeout-minutes: 15
         run: |
