@@ -5,6 +5,7 @@ on:
     branches: ['feat/desktop-application']
     paths:
       - '.github/scripts/probe-windows-program-references.mjs'
+      - '.github/scripts/probe-windows-restart-manager.ps1'
       - '.github/workflows/desktop-windows-reference-probe.yml'
 permissions:
   contents: read

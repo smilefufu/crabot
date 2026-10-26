@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
-import { spawn } from 'node:child_process'
+import { spawn, execFileSync } from 'node:child_process'
 import { once } from 'node:events'
 import identity from '../../scripts/lib/process-identity.cjs'
 if (process.env.GITHUB_ACTIONS !== 'true' || process.platform !== 'win32') throw new Error('Requires disposable Windows CI')
@@ -26,6 +26,17 @@ try {
     const result = await identity.inspectProgramReferences({ roots: [root], files: [file] })
     console.log('CRABOT_WINDOWS_REFERENCE_PATH ' + JSON.stringify({ kind, ...result }))
   }
+  // Read the actual Win32 return codes independently of the product observer.
+  // This does not turn a failed product observation into deletion permission.
+  const apiCases = [
+    { kind: 'large-one-call', files }, { kind: 'large-batched', files, batch: 2048 },
+    { kind: 'long-path', files: [longFile] }, { kind: 'long-short-alias', files: [longFile], short_paths: true },
+    { kind: 'directory', files: [longDirectory] }, { kind: 'directory-link', files: [junction] },
+  ]
+  const api = execFileSync(path.join(process.env.SystemRoot, 'System32/WindowsPowerShell/v1.0/powershell.exe'),
+    ['-NoLogo', '-NoProfile', '-NonInteractive', '-File', path.resolve('.github/scripts/probe-windows-restart-manager.ps1')],
+    { input: JSON.stringify(apiCases), encoding: 'utf8', timeout: 90000, maxBuffer: 65536, windowsHide: true })
+  process.stdout.write(api)
   const code = 'const fs=require("node:fs");const fd=fs.openSync(process.argv[1],"r");process.stdout.write("ready\\n");process.stdin.once("data",()=>{fs.closeSync(fd);process.exit(0)})'
   const child = spawn(process.execPath, ['-e', code, files[0]], { stdio: ['pipe', 'pipe', 'pipe'] }), exited = once(child, 'close')
   try {
