@@ -10,6 +10,23 @@ void (async () => {
   const { prepareDesktopRemovalNode } = await load('desktop-removal-host.mjs')
   prepared = await prepareDesktopRemovalNode({ installRoot: cfg.own.root, operationId: cfg.operationId })
   if (cfg.mode === 'node-job-copy-changed') await fs.appendFile(path.join(prepared.directory, 'backend/progress.mjs'), '\n// changed fixture bytes\n')
+  if (cfg.mode === 'node-job-full-host') {
+    if (process.env.GITHUB_ACTIONS !== 'true') throw new Error('Disposable CI only')
+    const argument = '--crabot-removal-host=' + Buffer.from(JSON.stringify({ installRoot: cfg.own.root, operationId: cfg.operationId, existing: false })).toString('base64url')
+    child = spawn(prepared.executable, [path.join(prepared.directory, 'backend/main.mjs'), argument], { cwd: prepared.directory,
+      env: { PATH: '', LANG: 'C.UTF-8', GITHUB_ACTIONS: 'true', CRABOT_NODE_REMOVAL_TEST_RESULT: cfg.resultFile }, stdio: ['ignore', 'ignore', 'pipe', 'ipc'] })
+    ended = once(child, 'close')
+    const { createDesktopRemovalNodeSourceExitVerifier } = await load('desktop-removal-source.mjs')
+    const verifier = createDesktopRemovalNodeSourceExitVerifier({ installRoot: cfg.own.root, prepared, child })
+    child.on('message', message => { if (message?.kind === 'desktop_removal_source_exit') void verifier(message).then(async accepted => {
+      if (!accepted) throw new Error('Fixed host source exit rejected')
+      const { default: identity } = await load('process-identity.cjs')
+      process.stdout.write(JSON.stringify({ handoff: true, directory: prepared.directory, host: identity.inspectProcess(child.pid) }), () => process.exit(0))
+    }).catch(error => { console.error(error.message) }) })
+    let diagnostic = ''; child.stderr.on('data', bytes => { diagnostic = (diagnostic + bytes).slice(-2048) })
+    const [code] = await ended
+    throw new Error('Fixed host did not request verified source exit: ' + code + ':' + diagnostic)
+  }
   const script = `
     const timer=setTimeout(()=>process.exit(2),30000),parentLost=()=>process.exit(2);process.once('disconnect',parentLost);
     const {pathToFileURL}=await import('node:url'),path=await import('node:path'),{createRequire}=await import('node:module');

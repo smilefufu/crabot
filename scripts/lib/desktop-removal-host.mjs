@@ -197,7 +197,9 @@ export async function prepareDesktopRemovalNode({ installRoot, operationId, sign
       const rules=await import(pathToFileURL(path.join(root,'backend/rules.mjs')));
       const entries=await import(pathToFileURL(path.join(root,'backend/entries.mjs')));
       const operation=await import(pathToFileURL(path.join(root,'backend/operation.mjs')));
-      if(typeof job.beginInitialDesktopRemoval!=='function'||typeof progress.createUbuntuRemovalProgressWindow!=='function'||typeof rules.prepareUbuntuRemovalRules!=='function'||typeof entries.removeDesktopUserEntries!=='function'||typeof operation.runRemovalOperation!=='function')throw new Error('fixed backend incomplete');
+      const host=await import(pathToFileURL(path.join(root,'backend/host.mjs')));
+      const request=await import(pathToFileURL(path.join(root,'backend/request.mjs')));
+      if(typeof job.beginInitialDesktopRemoval!=='function'||typeof progress.createUbuntuRemovalProgressWindow!=='function'||typeof rules.prepareUbuntuRemovalRules!=='function'||typeof entries.removeDesktopUserEntries!=='function'||typeof operation.runRemovalOperation!=='function'||typeof host.runUbuntuRemovalHost!=='function'||typeof request.readRemovalHostRequest!=='function')throw new Error('fixed backend incomplete');
       process.stdout.write(JSON.stringify({node_version:process.versions.node,self_verified:true})+'\\n');`
     const result = await promisify(execFile)(executable, ['--input-type=module', '--eval', script, directory], {
       cwd: directory, env: { PATH: '', LANG: 'C.UTF-8' }, timeout: 15000, maxBuffer: 4096, signal,

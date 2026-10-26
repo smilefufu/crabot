@@ -10,6 +10,11 @@ on:
       - 'crabot-desktop/tests/native/**'
       - 'crabot-desktop/src/ubuntu-removal-progress.ts'
       - 'crabot-desktop/src/ubuntu-removal-rules.ts'
+      - 'crabot-desktop/src/ubuntu-removal-host.ts'
+      - 'crabot-desktop/src/removal-operation.ts'
+      - 'crabot-desktop/src/removal-request.ts'
+      - 'crabot-desktop/src/installation-removal.ts'
+      - 'scripts/desktop/ubuntu-maintenance-main.mjs'
       - 'crabot-desktop/src/ubuntu-process.ts'
       - 'crabot-desktop/src/operation-progress.ts'
       - 'crabot-desktop/tests/ubuntu-removal-progress.test.mjs'
@@ -34,6 +39,11 @@ on:
       - 'crabot-desktop/tests/native/**'
       - 'crabot-desktop/src/ubuntu-removal-progress.ts'
       - 'crabot-desktop/src/ubuntu-removal-rules.ts'
+      - 'crabot-desktop/src/ubuntu-removal-host.ts'
+      - 'crabot-desktop/src/removal-operation.ts'
+      - 'crabot-desktop/src/removal-request.ts'
+      - 'crabot-desktop/src/installation-removal.ts'
+      - 'scripts/desktop/ubuntu-maintenance-main.mjs'
       - 'crabot-desktop/src/ubuntu-process.ts'
       - 'crabot-desktop/src/operation-progress.ts'
       - 'crabot-desktop/tests/ubuntu-removal-progress.test.mjs'
@@ -64,7 +74,7 @@ jobs:
   ubuntu-bootstrap:
     name: Build Ubuntu24 native bootstrap
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
