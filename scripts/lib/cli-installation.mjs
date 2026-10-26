@@ -102,7 +102,12 @@ async function rootDirectory(root, scope) {
   if (scope === 'system') await systemDirectory(root)
   if (!identity.isOwnedDirectory(root) || (await fs.lstat(root)).isSymbolicLink()) fail('CLI 安装目录归属无法核验，未替换入口。')
   for (const name of ['.git', 'cli.mjs', 'core-release.json', 'desktop-installation.json', 'current-release.json']) if (await present(path.join(root, name))) fail('发现原有代码安装，请通过已有升级或桌面接管流程迁移，未覆盖原安装。')
-  if (scope === 'user') management.ensurePrivateDataRoot(root)
+  if (scope === 'user') {
+    if (await present(path.join(root, metadataName))) {
+      if (metadata(root).scope !== scope) fail('不能在原有 CLI 安装上更改 user/system 管理范围。')
+      management.requireExistingDataRoot(root)
+    } else management.ensurePrivateDataRoot(root)
+  }
   return realpathSync(root)
 }
 

@@ -470,14 +470,15 @@ test('code-only CLI replacement creates no outer data backup and keeps the servi
   assert.equal(await fs.readFile(path.join(f.dataDir, 'agent/traces/keep'), 'utf8'), 'untouched history')
 })
 
-test('same-version CLI reinstall retains an existing bound 0755 data directory', { skip: windows }, async t => {
+for (const [rootMode, dataMode] of [[0o700, 0o755], [0o755, 0o700], [0o755, 0o755]]) test('same-version CLI reinstall retains existing bound permissions: ' + rootMode + '/' + dataMode, { skip: windows }, async t => {
   const f = await fixture(t), sourceRoot = await f.source('1.2.3')
   const first = await installStandaloneCli({ sourceRoot, installRoot: f.installRoot, dataDir: f.dataDir })
   await fs.writeFile(path.join(f.dataDir, 'keep-user-data'), 'preserved')
-  await fs.chmod(f.dataDir, 0o755)
+  await fs.chmod(f.installRoot, rootMode); await fs.chmod(f.dataDir, dataMode)
   const second = await installStandaloneCli({ sourceRoot, installRoot: f.installRoot, dataDir: f.dataDir })
   assert.equal(second.id, first.id)
-  assert.equal((await fs.stat(f.dataDir)).mode & 0o777, 0o755)
+  assert.equal((await fs.stat(f.installRoot)).mode & 0o777, rootMode)
+  assert.equal((await fs.stat(f.dataDir)).mode & 0o777, dataMode)
   assert.equal(await fs.readFile(path.join(f.dataDir, 'keep-user-data'), 'utf8'), 'preserved')
   assert.equal(inspectInstance(f.dataDir).state, 'stopped')
 })

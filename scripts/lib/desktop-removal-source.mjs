@@ -42,7 +42,7 @@ function createSourceExitVerifier({ installRoot, prepared, child }, existing, ro
     if (!host || !source || !child.connected || child.exitCode !== null || child.signalCode !== null
       || !identity.sameProcess(source, self) || !identity.sameProcess(host, actual)
       || actual.parent !== source.pid || actual.owner !== own.record.owner || !processBirthAtLeast(actual.started, source.started)
-      || !entry.verifyDesktopEntry(self, { executable: sourceExecutable, development: false })
+      || !entry.verifyDesktopRemovalSourceEntry(self, { executable: sourceExecutable, development: false })
       || executable !== expectedExecutable || physical.realpathSync(actual.executable) !== physical.realpathSync(expectedExecutable)
       || inside(own.root, directory) || inside(directory, own.root)
       || !hostLocationMatches()

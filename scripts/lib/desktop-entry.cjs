@@ -39,4 +39,14 @@ function verifyDesktopEntry(peer, policy) {
   return identity.sameProcess(peer, identity.inspectProcess(peer.pid))
 }
 
-module.exports = { loadDesktopEntry, verifyDesktopEntry }
+// Installed Apps launches the original GUI with this single fixed intent. It
+// may hand off maintenance, but cannot authenticate as an ordinary business GUI.
+function verifyDesktopRemovalSourceEntry(peer, policy) {
+  if (verifyDesktopEntry(peer, policy)) return true
+  if (process.platform !== 'win32' || !policy || policy.development || !peer
+    || peer.owner !== identity.inspectProcess(process.pid).owner || !sameFile(peer.executable, policy.executable)) return false
+  const args = identity.inspectProcessArguments(peer.pid)
+  return args.length === 2 && args[1] === '--uninstall' && identity.sameProcess(peer, identity.inspectProcess(peer.pid))
+}
+
+module.exports = { loadDesktopEntry, verifyDesktopEntry, verifyDesktopRemovalSourceEntry }

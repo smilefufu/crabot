@@ -366,3 +366,23 @@ for (const name of ['desktop-installation.json', 'current-release.json']) test('
   assert.equal((await fs.stat(file)).mode & 0o777, 0o644)
   assert.equal((await fs.stat(f.root)).mode & 0o777, 0o755)
 })
+
+
+test('Windows uninstall source is maintenance-only and never a desktop business peer', t => {
+  const peer = identity.inspectProcess(process.pid), policy = { executable: peer.executable, development: false }
+  let args = [peer.executable, '--uninstall']
+  t.mock.method(identity, 'inspectProcessArguments', () => args)
+  assert.equal(typeof entry.verifyDesktopRemovalSourceEntry, 'function')
+  assert.equal(entry.verifyDesktopEntry(peer, policy), false)
+  assert.equal(entry.verifyDesktopRemovalSourceEntry(peer, policy), process.platform === 'win32')
+  for (const tail of [['--uninstall', '--background'], ['--uninstall', '--uninstall'], ['--uninstall=other'], ['--uninstall', '--remote-debugging-port=23456']]) {
+    args = [peer.executable, ...tail]
+    assert.equal(entry.verifyDesktopRemovalSourceEntry(peer, policy), false)
+    assert.equal(entry.verifyDesktopEntry(peer, policy), false)
+  }
+  args = [peer.executable, '--uninstall']
+  assert.equal(entry.verifyDesktopRemovalSourceEntry(peer, { ...policy, development: true, entry: peer.executable }), false)
+  assert.equal(entry.verifyDesktopRemovalSourceEntry({ ...peer, started: 'other-generation' }, policy), false)
+  args = [peer.executable, '--background']
+  assert.equal(entry.verifyDesktopRemovalSourceEntry(peer, policy), true)
+})

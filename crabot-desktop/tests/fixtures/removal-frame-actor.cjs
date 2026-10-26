@@ -7,7 +7,7 @@ const { spawn } = require('node:child_process')
 const { once } = require('node:events')
 const cfg = JSON.parse(fs.readFileSync(process.env.CRABOT_REMOVAL_FRAME_CONFIG, 'utf8'))
 const host = process.argv.includes('--fixture-removal-host')
-const sourceExitMode = ['publish-source-exit', 'publish-source-retry', 'publish-source-late-exit', 'resume-lease-source-exit', 'publish-source-remove', 'publish-source-remove-mac-login', 'publish-source-remove-complete', 'publish-source-remove-retry', 'resume-lease-source-remove'].includes(cfg.mode)
+const sourceExitMode = ['publish-source-exit', 'publish-source-retry', 'publish-source-late-exit', 'resume-lease-source-exit', 'publish-source-remove', 'publish-source-remove-mac-login', 'publish-source-remove-complete', 'publish-source-remove-windows-uninstall', 'publish-source-remove-retry', 'resume-lease-source-remove'].includes(cfg.mode)
 const profile = host ? path.resolve(process.resourcesPath, process.platform === 'darwin' ? '../../../..' : '../..', 'frame-profile') : path.join(cfg.root, 'data/desktop-profile')
 fs.mkdirSync(profile, { recursive: true, mode: 0o700 }); app.setPath('userData', profile)
 const load = name => import(pathToFileURL(path.join(__dirname, 'bootstrap/scripts/lib', name)).href)
@@ -153,7 +153,15 @@ async function removePrograms(lease) {
       assert.equal(read().phase, 'completed'); assert.equal(fs.readFileSync(path.join(cfg.root, 'data/preserved-user-file'), 'utf8'), 'user bytes')
       completionVerified = true
     }
-    return { completionVerified, macLoginCleaned, macLoginApiMocked: macLoginCleaned, programsRemoved: true, controlledResourceObservation: true, removalRetried: cfg.mode === 'publish-source-remove-retry', removalPinReads: pinReads, removalElapsedMs: Date.now() - started }
+    const windowsUninstallEntryRemoved = cfg.mode === 'publish-source-remove-windows-uninstall'
+    if (windowsUninstallEntryRemoved) {
+      const { removeWindowsUninstallEntry } = await import(pathToFileURL(path.join(__dirname, 'installation-removal.js')).href)
+      await assert.rejects(removeWindowsUninstallEntry({ installRoot: cfg.root, operationId: require('node:crypto').randomUUID() }), { code: 'CRABOT_DESKTOP_REMOVAL' })
+      await removeWindowsUninstallEntry({ installRoot: cfg.root, operationId: cfg.operationId })
+      await removeWindowsUninstallEntry({ installRoot: cfg.root, operationId: cfg.operationId })
+      assert.equal(read().phase, 'removing')
+    }
+    return { windowsUninstallEntryRemoved, completionVerified, macLoginCleaned, macLoginApiMocked: macLoginCleaned, programsRemoved: true, controlledResourceObservation: true, removalRetried: cfg.mode === 'publish-source-remove-retry', removalPinReads: pinReads, removalElapsedMs: Date.now() - started }
   } finally { native.inspectProgramReferences = original; physical.promises.rename = rename; physical.unlinkSync = unlink; physical.promises.readFile = readFile }
 }
 async function publication() {
@@ -257,7 +265,7 @@ async function publication() {
       const changed = { ...initial.record, operation_id: '11111111-1111-4111-8111-111111111111' }
       await (await load('desktop-preparation-files.mjs')).privateJson(path.join(cfg.root, '.desktop-removal.json'), changed, true)
     }
-    if (!['publish-close', 'publish-lost-reply', 'publish-source-ignore', 'publish-source-disconnect', 'publish-source-remove', 'publish-source-remove-mac-login', 'publish-source-remove-complete', 'publish-source-remove-retry'].includes(cfg.mode)) {
+    if (!['publish-close', 'publish-lost-reply', 'publish-source-ignore', 'publish-source-disconnect', 'publish-source-remove', 'publish-source-remove-mac-login', 'publish-source-remove-complete', 'publish-source-remove-windows-uninstall', 'publish-source-remove-retry'].includes(cfg.mode)) {
       try { await lease.cancel(); cancelled = true; await lease.cancel() }
       catch (error) { if (['publish-cancel', 'publish-stop', 'publish-stop-retry', 'publish-stop-lost-retry', 'publish-source-exit', 'publish-source-retry', 'publish-source-late-exit', 'publish-source-verifier'].includes(cfg.mode)) throw error; if (cfg.mode === 'publish-cancel-lost' && cancellationReplyLost) { await lease.cancel(); cancelled = true } else cancelRejected = error.code === 'CRABOT_DESKTOP_REMOVAL' }
     }

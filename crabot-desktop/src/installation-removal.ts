@@ -280,3 +280,15 @@ export async function removeMacLoginStartupEntry(options: RemovalJobOptions & {
   current()
   if (result.status !== 'not-registered' || result.openAtLogin !== false) fail()
 }
+
+// This fixed installation key is independent of the removed original program.
+export async function removeWindowsUninstallEntry(options: RemovalJobOptions): Promise<void> {
+  if (process.platform !== 'win32') fail()
+  const { own, record, assertJob, proofCurrent } = await captureRemovalJob(options)
+  await proofCurrent(); assertJob()
+  const original = { installRoot: own.root, executable: path.join(own.root, 'app/releases', record.source_selection.gui_id, 'Crabot.exe'),
+    version: record.source_selection.version }
+  if (typeof identity.removeDesktopUninstallEntry !== 'function'
+    || identity.removeDesktopUninstallEntry(own.record.installation_id, original) !== true) fail()
+  await proofCurrent(); assertJob()
+}

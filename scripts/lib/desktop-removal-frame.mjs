@@ -31,7 +31,7 @@ async function captureGuiHost({ installRoot, operationId, signal }, existing) {
     const self = identity.inspectProcess(process.pid)
     const parent = self && identity.inspectProcess(self.parent), policy = { executable: own.executable, development: false }
     if (!self || !parent || self.owner !== own.record.owner || parent.owner !== self.owner || !processBirthAtLeast(self.started, parent.started)
-      || !entry.verifyDesktopEntry(parent, policy)) fail()
+      || !entry.verifyDesktopRemovalSourceEntry(parent, policy)) fail()
     stage = 'private-location'
     const executable = await fs.realpath(process.execPath)
     if (await fs.realpath(self.executable) !== executable) fail()
@@ -59,7 +59,7 @@ async function captureGuiHost({ installRoot, operationId, signal }, existing) {
     const actualSelf = identity.inspectProcess(process.pid)
     if (!same(current.record, own.record) || !same(current.selection, proof.source_selection) || !same(own.selection, proof.source_selection)
       || !process.connected || typeof process.send !== 'function' || !identity.sameProcess(self, actualSelf) || actualSelf.parent !== parent.pid
-      || !entry.verifyDesktopEntry(parent, policy) || currentDataIdentity !== dataIdentity
+      || !entry.verifyDesktopRemovalSourceEntry(parent, policy) || currentDataIdentity !== dataIdentity
       || management.requirePrivateDataRoot(directory) !== directory || currentHostIdentity !== hostIdentity) fail()
     signal?.throwIfAborted()
     return { ...(previous ? { record: previous.record } : {}), proof, facts: { installation_id: own.record.installation_id, operation_id: operationId, source_selection: proof.source_selection,
@@ -86,7 +86,7 @@ export async function captureInitialRemovalNodeHost({ installRoot, operationId, 
     const own = installation.readDesktopSelection(installRoot), self = identity.inspectProcess(process.pid)
     const parent = self && identity.inspectProcess(self.parent), policy = { executable: own.executable, development: false }
     if (!self || !parent || self.owner !== own.record.owner || parent.owner !== self.owner || !processBirthAtLeast(self.started, parent.started)
-      || !entry.verifyDesktopEntry(parent, policy)) fail()
+      || !entry.verifyDesktopRemovalSourceEntry(parent, policy)) fail()
     const executable = await fs.realpath(process.execPath), directory = management.requirePrivateDataRoot(path.dirname(executable))
     if (await fs.realpath(self.executable) !== executable || path.basename(executable) !== 'node'
       || !/^crabot-removal-host-[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(path.basename(directory))
@@ -98,7 +98,7 @@ export async function captureInitialRemovalNodeHost({ installRoot, operationId, 
     const actualSelf = identity.inspectProcess(process.pid), actualParent = identity.inspectProcess(parent.pid)
     if (!same(current.record, own.record) || !same(current.selection, proof.source_selection) || !same(source.record, proof.payload)
       || !process.connected || typeof process.send !== 'function' || !identity.sameProcess(self, actualSelf) || actualSelf.parent !== parent.pid
-      || !identity.sameProcess(parent, actualParent) || !entry.verifyDesktopEntry(actualParent, policy) || directoryIdentity(await fs.lstat(own.dataDir, { bigint: true })) !== dataIdentity
+      || !identity.sameProcess(parent, actualParent) || !entry.verifyDesktopRemovalSourceEntry(actualParent, policy) || directoryIdentity(await fs.lstat(own.dataDir, { bigint: true })) !== dataIdentity
       || management.requirePrivateDataRoot(directory) !== directory || directoryIdentity(await fs.lstat(directory, { bigint: true })) !== hostIdentity) fail()
     signal?.throwIfAborted()
     return { proof, facts: { installation_id: own.record.installation_id, operation_id: operationId, source_selection: proof.source_selection,
