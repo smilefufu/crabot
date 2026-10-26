@@ -149,7 +149,7 @@ for (const release of releases.filter(release => selectedVersion === 'all' || re
       // installer's environment; provide real prerequisites before any upgrade.
       const { default: product } = await load('scripts/lib/product-runtime.cjs')
       const uv = path.join(base, 'uv'), runtime = product.loadProductRuntime(source, { required: true, full: true })
-      await fs.copyFile(runtime.uv, uv); await fs.chmod(uv, 0o755)
+      await fs.copyFile(runtime.executables.uv, uv); await fs.chmod(uv, 0o755)
       const uvLink = '/usr/local/bin/uv'
       const priorUv = await fs.lstat(uvLink).catch(error => { if (error.code === 'ENOENT') return null; throw error })
       if (!priorUv) { await fs.symlink(uv, uvLink); ownedUv = true }
