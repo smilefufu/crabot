@@ -46,7 +46,15 @@ if (process.argv[2] === '--identity') {
         { encoding: 'utf8', timeout: 15000, maxBuffer: 65536 })
       privileged = JSON.parse(result.stdout)
     }
-    console.log('CRABOT_EMPTY_PROGRAM_REFERENCES ' + JSON.stringify({ complete: receipt.complete, incomplete: receipt.incomplete,
+    let manager
+    try {
+      const { stdout } = await promisify(execFile)('/usr/bin/systemctl', ['--system', 'show', 'user@' + process.getuid() + '.service',
+        '--property=MainPID,ExecStart,ExecMainStartTimestampMonotonic,ControlGroup'], { encoding: 'utf8', timeout: 10000, maxBuffer: 65536 })
+      const properties = Object.fromEntries(stdout.trim().split('\n').map(line => { const at = line.indexOf('='); return [line.slice(0, at), line.slice(at + 1)] }))
+      manager = { pid: properties.MainPID, start_monotonic: properties.ExecMainStartTimestampMonotonic,
+        control_group: properties.ControlGroup, image: /\bpath=([^;]+?)\s*;/.exec(properties.ExecStart)?.[1] }
+    } catch (error) { manager = { unavailable: error.code || error.name } }
+    console.log('CRABOT_EMPTY_PROGRAM_REFERENCES ' + JSON.stringify({ manager, complete: receipt.complete, incomplete: receipt.incomplete,
       references: receipt.processes.length, unknown_count: receipt.unknown_pids.length, unknown, ordinary, privileged }))
   } finally { await fs.rmdir(directory) }
 }
