@@ -453,7 +453,7 @@ jobs:
   ubuntu-installation:
     name: Actual Ubuntu24 native installation
     needs: runtime
-    if: always() && !cancelled()
+    if: ${{ always() && !cancelled() && (inputs.target == '' || inputs.target == 'all' || inputs.target == 'linux-x64') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:

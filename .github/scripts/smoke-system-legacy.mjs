@@ -87,6 +87,7 @@ async function download(release, file) {
 for (const release of releases.filter(release => selectedVersion === 'all' || release.version === selectedVersion)) {
   const id = randomUUID().slice(0, 8), base = '/var/lib/crabot-legacy-acceptance-' + id, old = path.join(base, 'old'), managed = path.join(old, '.managed')
   const users = [], registry = new SystemRegistry(), store = new SystemOperationStore(registry)
+  const oldRunning = release.version === 'v2026.10.15.1'
   let ownOs = false, ownBase = false, core
   const asUser = (entry, args, overrides = {}, executable = node) => run('/usr/bin/setpriv', ['--reuid=' + entry.uid, '--regid=' + entry.gid, '--init-groups', '--', executable, ...args],
     { env: { PATH: '/usr/bin:/bin', HOME: entry.home, USER: entry.user, LOGNAME: entry.user, LANG: 'C.UTF-8', HTTP_PROXY: env.HTTP_PROXY, HTTPS_PROXY: env.HTTPS_PROXY, ...overrides } })
@@ -132,7 +133,6 @@ for (const release of releases.filter(release => selectedVersion === 'all' || re
       assert.match(entry.credentials_sha256, /^[a-f0-9]{64}$/)
     }
     await fs.writeFile('/etc/crabot/registry/ports.json', JSON.stringify(users.map(entry => ({ user: entry.user, offset: entry.port_offset }))) + '\n', { mode: 0o664 })
-    const oldRunning = release.version === 'v2026.10.15.1'
     if (oldRunning) {
       const employee = users[0]
       console.log('CRABOT_LEGACY_ACCEPTANCE ' + JSON.stringify({ version: release.version, phase: 'original-runtime-starting' }))
@@ -202,6 +202,14 @@ for (const release of releases.filter(release => selectedVersion === 'all' || re
   } catch (error) {
     console.error('CRABOT_LEGACY_ACCEPTANCE ' + JSON.stringify({ version: release.version, phase: 'failed', code: error.code ?? 'ACCEPTANCE_FAILED',
       stdout: typeof error.stdout === 'string' ? error.stdout.slice(-8192) : null, stderr: typeof error.stderr === 'string' ? error.stderr.slice(-8192) : null }))
+    for (const user of users) {
+      const diagnostic = `const fs=require('node:fs'),path=require('node:path');for(const name of ['mm.stdout.log','mm.stderr.log','supervisor.boot.log']){let fd;try{
+        fd=fs.openSync(path.join(process.argv[1],'logs',name),fs.constants.O_RDONLY|fs.constants.O_NOFOLLOW|fs.constants.O_NONBLOCK);const stat=fs.fstatSync(fd);
+        if(!stat.isFile()||stat.uid!==process.getuid()||stat.nlink!==1)continue;const bytes=Buffer.alloc(Math.min(stat.size,16384));fs.readSync(fd,bytes,0,bytes.length,stat.size-bytes.length);
+        console.log('CRABOT_LEGACY_OWN_LOG '+name+'\\n'+bytes.toString('utf8'));}catch(error){console.log('CRABOT_LEGACY_OWN_LOG '+name+' '+error.code)}finally{if(fd!==undefined)fs.closeSync(fd)}}`
+      const result = await asUser(user, ['-e', diagnostic, user.data_dir], {}, oldRunning ? path.join(base, 'node') : node).catch(() => null)
+      if (result) console.error(result.stdout)
+    }
     throw error
   } finally {
     if (ownOs) {
