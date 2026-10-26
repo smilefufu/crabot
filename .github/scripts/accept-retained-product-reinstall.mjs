@@ -40,11 +40,11 @@ export async function prepareRetainedProductReinstall({ installRoot, payload }) 
     catch (error) {
       // Read-only bounded diagnostics. Never convert this second observation
       // into permission to bypass the failed guard or mutate fixture programs.
-      const files = desktopRemovalProgramEntries(proof).map(entry => path.join(own.root, entry.name))
+      const entries = desktopRemovalProgramEntries(proof), files = entries.map(entry => path.join(own.root, entry.name))
       const started = performance.now()
       try {
         const result = await identity.inspectProgramReferences({ roots: [own.coreRoot, own.guiRoot, path.join(own.root, 'bin')], files })
-        console.log('CRABOT_RETAINED_REFERENCE_DIAGNOSIS ' + JSON.stringify({ file_count: files.length, max_path_length: files.reduce((maximum, file) => Math.max(maximum, file.length), 0),
+        console.log('CRABOT_RETAINED_REFERENCE_DIAGNOSIS ' + JSON.stringify({ file_count: files.length, link_count: entries.filter(entry => entry.expected.type === 'link').length, max_path_length: files.reduce((maximum, file) => Math.max(maximum, file.length), 0),
           elapsed_ms: Math.round(performance.now() - started), complete: result.complete, incomplete: result.incomplete,
           holders: result.processes.slice(0, 8).map(item => ({ pid: item.pid, parent: item.parent, image: path.basename(item.executable) })),
           holder_count: result.processes.length, unknown_count: result.unknown_pids.length, unknown: result.unknown_details.slice(0, 8) }))
