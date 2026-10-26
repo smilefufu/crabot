@@ -25,6 +25,7 @@ export const desktopMaintenanceBootstrap = Object.freeze([
   'scripts/lib/desktop-preparation-files.mjs',
   'scripts/lib/desktop-program-proof.mjs',
   'scripts/lib/desktop-removal-host.mjs',
+  'scripts/lib/desktop-removal-host-cleanup.mjs',
   'scripts/lib/desktop-removal-proof.mjs',
   'scripts/lib/desktop-removal-programs.mjs',
   'scripts/lib/desktop-removal-record.cjs',

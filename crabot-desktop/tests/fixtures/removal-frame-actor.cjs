@@ -6,16 +6,16 @@ const { pathToFileURL } = require('node:url')
 const { spawn } = require('node:child_process')
 const { once } = require('node:events')
 const cfg = JSON.parse(fs.readFileSync(process.env.CRABOT_REMOVAL_FRAME_CONFIG, 'utf8'))
-if (['publish-source-remove-main', 'resume-source-remove-main'].includes(cfg.mode) && process.argv.some(value => value.startsWith('--crabot-removal-host='))) {
+if (['publish-source-remove-main', 'publish-source-remove-source', 'resume-source-remove-main'].includes(cfg.mode) && process.argv.some(value => value.startsWith('--crabot-removal-host='))) {
   const assert = require('node:assert/strict'), electron = require('electron')
   const native = require('./bootstrap/scripts/lib/process-identity.cjs')
   native.inspectProgramReferences = async () => ({ complete: true, incomplete: false, processes: [], unknown_pids: [] })
   const reference = require('./bootstrap/scripts/lib/desktop-installation.cjs').readDesktopPairReference(cfg.root)
   const coreInitiallyMissing = !fs.existsSync(path.join(cfg.root, 'releases', reference.selection.core_id))
-  let windows = 0, loginWrites = 0, registrationCalls = 0, lastMessage = ''
+  let windows = 0, loginWrites = 0, registrationCalls = 0, lastMessage = ''; const dialogCodes = []
   electron.app.setLoginItemSettings = options => { loginWrites++; assert.deepEqual(options, { openAtLogin: false }) }
   electron.app.getLoginItemSettings = () => ({ status: 'not-registered', openAtLogin: false })
-  electron.dialog.showMessageBox = async options => { lastMessage = options.message; return { response: /尚未完成/.test(options.message) ? 2 : 0 } }
+  electron.dialog.showMessageBox = async options => { lastMessage = options.message; const code = /诊断代码：([A-Z0-9_]+)/.exec(options.detail || '')?.[1]; if (code) dialogCodes.push(code); return { response: /尚未卸载完成|删除已经开始/.test(options.message) ? 2 : 0 } }
   const childProcess = require('node:child_process'), execFile = childProcess.execFile
   childProcess.execFile = (file, args, options, callback) => {
     if (file === '/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister') {
@@ -36,8 +36,8 @@ if (['publish-source-remove-main', 'resume-source-remove-main'].includes(cfg.mod
     fs.writeFileSync(cfg.resultFile, JSON.stringify({ accepted: complete, published: !!record, retained: !!record, cancelled: false,
       cancelRejected: false, sourceExited: complete, sourceExitRejected: false, stopRejected: false, cancellationReplyLost: false,
       lost: false, proofRetained: true, programsRemoved: complete, completionVerified: complete, controlledResourceObservation: true,
-      removalRetried: false, actual_main: true, core_initially_missing: coreInitiallyMissing, actual_progress_windows: windows, os_api_mocked: true, login_writes: loginWrites,
-      registration_calls: registrationCalls, message: lastMessage }) + '\n')
+      removalRetried: false, actual_main: true, actual_source: cfg.mode === 'publish-source-remove-source', core_initially_missing: coreInitiallyMissing, actual_progress_windows: windows, os_api_mocked: true, login_writes: loginWrites,
+      registration_calls: registrationCalls, dialog_codes: dialogCodes, message: lastMessage }) + '\n')
   })
   void import(pathToFileURL(path.join(__dirname, 'full-main.js')).href).catch(error => {
     fs.writeFileSync(cfg.resultFile, JSON.stringify({ accepted: false, code: error.code, message: String(error.message).slice(0, 256) })); app.exit(1)
@@ -46,8 +46,8 @@ if (['publish-source-remove-main', 'resume-source-remove-main'].includes(cfg.mod
 }
 
 const host = process.argv.includes('--fixture-removal-host')
-const sourceExitMode = ['publish-source-exit', 'publish-source-retry', 'publish-source-late-exit', 'resume-lease-source-exit', 'publish-source-remove', 'publish-source-remove-main', 'resume-source-remove-main', 'publish-source-remove-operation', 'publish-source-remove-cancel-retry', 'publish-source-remove-mac-login', 'publish-source-remove-complete', 'publish-source-remove-windows-uninstall', 'publish-source-remove-retry', 'resume-lease-source-remove'].includes(cfg.mode)
-const profile = host ? path.resolve(process.resourcesPath, process.platform === 'darwin' ? '../../../..' : '../..', 'frame-profile') : path.join(cfg.root, 'data/desktop-profile')
+const sourceExitMode = ['publish-source-exit', 'publish-source-retry', 'publish-source-late-exit', 'resume-lease-source-exit', 'publish-source-remove', 'publish-source-remove-main', 'publish-source-remove-source', 'resume-source-remove-main', 'publish-source-remove-operation', 'publish-source-remove-cancel-retry', 'publish-source-remove-mac-login', 'publish-source-remove-complete', 'publish-source-remove-windows-uninstall', 'publish-source-remove-retry', 'resume-lease-source-remove'].includes(cfg.mode)
+const profile = host ? path.resolve(process.resourcesPath, process.platform === 'darwin' ? '../../../..' : '../..', 'profile') : path.join(cfg.root, 'data/desktop-profile')
 fs.mkdirSync(profile, { recursive: true, mode: 0o700 }); app.setPath('userData', profile)
 const load = name => import(pathToFileURL(path.join(__dirname, 'bootstrap/scripts/lib', name)).href)
 let prepared, child, releaseDataLock
@@ -345,7 +345,7 @@ async function publication() {
       const changed = { ...initial.record, operation_id: '11111111-1111-4111-8111-111111111111' }
       await (await load('desktop-preparation-files.mjs')).privateJson(path.join(cfg.root, '.desktop-removal.json'), changed, true)
     }
-    if (!['publish-close', 'publish-lost-reply', 'publish-source-ignore', 'publish-source-disconnect', 'publish-source-remove', 'publish-source-remove-main', 'resume-source-remove-main', 'publish-source-remove-operation', 'publish-source-remove-cancel-retry', 'publish-source-remove-mac-login', 'publish-source-remove-complete', 'publish-source-remove-windows-uninstall', 'publish-source-remove-retry'].includes(cfg.mode)) {
+    if (!['publish-close', 'publish-lost-reply', 'publish-source-ignore', 'publish-source-disconnect', 'publish-source-remove', 'publish-source-remove-main', 'publish-source-remove-source', 'resume-source-remove-main', 'publish-source-remove-operation', 'publish-source-remove-cancel-retry', 'publish-source-remove-mac-login', 'publish-source-remove-complete', 'publish-source-remove-windows-uninstall', 'publish-source-remove-retry'].includes(cfg.mode)) {
       try { await lease.cancel(); cancelled = true; await lease.cancel() }
       catch (error) { if (['publish-cancel', 'publish-stop', 'publish-stop-retry', 'publish-stop-lost-retry', 'publish-source-exit', 'publish-source-retry', 'publish-source-late-exit', 'publish-source-verifier'].includes(cfg.mode)) throw error; if (cfg.mode === 'publish-cancel-lost' && cancellationReplyLost) { await lease.cancel(); cancelled = true } else cancelRejected = error.code === 'CRABOT_DESKTOP_REMOVAL' }
     }
@@ -396,6 +396,27 @@ async function main() {
     else await send(result)
     return
   }
+  if (cfg.mode === 'publish-source-remove-source') {
+    app.on('window-all-closed', () => {}) // Match the ordinary source Main lifetime.
+    const electron = require('electron'), cp = require('node:child_process'), native = require('./bootstrap/scripts/lib/process-identity.cjs')
+    const originalSpawn = cp.spawn
+    electron.dialog.showMessageBox = async () => ({ response: 1 })
+    cp.spawn = (executable, args, options) => {
+      const child = originalSpawn(executable, args, options)
+      if (args.some(value => value.startsWith('--crabot-removal-host='))) child.once('spawn', () => {
+        const gui = process.platform === 'darwin' ? path.resolve(path.dirname(executable), '../../..') : path.dirname(executable)
+        void send({ handoff: true, host: native.inspectProcess(child.pid), directory: path.dirname(gui) })
+      })
+      return child
+    }
+    require('node:module').syncBuiltinESMExports()
+    const { startGuiRemovalFromSource } = await import(pathToFileURL(path.join(__dirname, 'source-entry.js')).href)
+    const options = { installRoot: cfg.root, operationId: cfg.operationId, beginExit: () => () => {} }
+    const operation = startGuiRemovalFromSource(options)
+    require('node:assert/strict').equal(operation, startGuiRemovalFromSource(options))
+    await operation
+    return
+  }
   if (cfg.mode.startsWith('resume-')) {
     const backend = await load('desktop-removal-host.mjs'), assert = require('node:assert/strict')
     prepared = await backend.prepareDesktopRemovalGui({ installRoot: cfg.root, operationId: cfg.operationId })
@@ -421,9 +442,11 @@ async function main() {
   } else prepared = await (await load('desktop-removal-host.mjs')).prepareDesktopRemovalGui({ installRoot: cfg.root, operationId: cfg.operationId })
   if (cfg.mode === 'resume-source-changed') fs.appendFileSync(path.join(process.resourcesPath, 'desktop-release.json'), ' ')
   if (['changed-copy', 'resume-changed-copy'].includes(cfg.mode)) fs.appendFileSync(path.join(prepared.guiRoot, process.platform === 'darwin' ? 'Crabot.app/Contents/Resources/desktop-release.json' : 'resources/desktop-release.json'), ' ')
-  const hostArguments = ['publish-source-remove-main', 'resume-source-remove-main'].includes(cfg.mode) ? ['--crabot-removal-host=' + Buffer.from(JSON.stringify({ installRoot: cfg.root, operationId: cfg.operationId, existing: cfg.mode.startsWith('resume-') })).toString('base64url')] : ['--fixture-removal-host']
+  const hostArguments = ['publish-source-remove-main', 'publish-source-remove-source', 'resume-source-remove-main'].includes(cfg.mode) ? ['--crabot-removal-host=' + Buffer.from(JSON.stringify({ installRoot: cfg.root, operationId: cfg.operationId, existing: cfg.mode.startsWith('resume-') })).toString('base64url')] : ['--fixture-removal-host']
   child = spawn(prepared.executable, hostArguments, { env: process.env, cwd: cfg.mode === 'publish-inherited-cwd' ? cfg.root : prepared.directory, detached: true, stdio: ['ignore', 'ignore', 'ignore', 'ipc'] })
   const native = require('./bootstrap/scripts/lib/process-identity.cjs'), childIdentity = native.inspectProcess(child.pid)
+  const cleanup = cfg.mode === 'publish-cancel' ? (await load('desktop-removal-host-cleanup.mjs')).captureRemovalGuiCleanup(prepared, child) : undefined
+  if (cleanup) { const assert = require('node:assert/strict'); await assert.rejects(cleanup(), { code: 'CRABOT_DESKTOP_REMOVAL' }); assert.equal(fs.existsSync(prepared.directory), true) }
   if (sourceExitMode) await send({ handoff: true, host: childIdentity, directory: prepared.directory })
   const { createDesktopRemovalSourceExitVerifier, createExistingRemovalSourceExitVerifier } = await load('desktop-removal-source.mjs')
   const createVerifier = cfg.mode.startsWith('resume-') ? createExistingRemovalSourceExitVerifier : createDesktopRemovalSourceExitVerifier
@@ -495,7 +518,15 @@ async function main() {
     const locks = await load('cli-lock.mjs'), file = await locks.acquireExistingCliLock(cfg.root, 'fixture-confirm-root-release', 0)
     locks.releaseCliLock(file); releaseDataLock(); releaseDataLock = undefined
   }
-  fs.rmSync(prepared.directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); prepared = undefined
+  if (cleanup) {
+    const assert = require('node:assert/strict'), extra = path.join(prepared.directory, 'user-kept')
+    fs.writeFileSync(extra, 'unexpected private-root bytes')
+    await assert.rejects(cleanup(), { code: 'CRABOT_DESKTOP_REMOVAL' }); assert.equal(fs.readFileSync(extra, 'utf8'), 'unexpected private-root bytes')
+    fs.unlinkSync(extra) // Explicit fixture owner action; not product cleanup.
+    await cleanup(); result.private_copy_removed = !fs.existsSync(prepared.directory)
+  }
+  else fs.rmSync(prepared.directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 })
+  prepared = undefined
   await send(result)
 }
 main().then(() => { clearTimeout(timer); app.exit(0) }).catch(async error => {
