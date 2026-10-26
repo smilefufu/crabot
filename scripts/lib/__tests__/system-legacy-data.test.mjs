@@ -59,7 +59,9 @@ test('legacy UID snapshot includes the original home manifest, migrates once, an
   const f = await fixture(t), snapshot = await f.invoke('snapshot')
   assert.equal(JSON.stringify(snapshot).includes('private-fixture'), false)
   const directory = path.join(f.dataDir + '.desktop-backups', snapshot.backup.id)
-  await verifyMaintenanceBackup(directory, snapshot.backup.sha256)
+  const backup = await verifyMaintenanceBackup(directory, snapshot.backup.sha256)
+  assert.deepEqual(backup.scope, ['system-conversion/' + f.operationId + '/legacy-instance.json'])
+  await assert.rejects(fsp.lstat(path.join(directory, 'data/fixture')), { code: 'ENOENT' })
   assert.equal(await fsp.readFile(path.join(directory, 'data/system-conversion', f.operationId, 'legacy-instance.json'), 'utf8'), f.original)
   assert.equal(await fsp.readFile(f.manifestFile, 'utf8'), f.original)
   assert.deepEqual(await f.invoke('migrate', { snapshot }), { migrated: true, service_started: false })
@@ -207,7 +209,7 @@ for (const changed of ['schema', 'backup', 'manifest', 'source-active', 'data-re
     await f.invoke('migrate', { snapshot })
     const extra = { snapshot }
     if (changed === 'schema') await fsp.writeFile(path.join(f.dataDir, 'fixture/SCHEMA_VERSION'), 'v1')
-    if (changed === 'backup') await fsp.writeFile(path.join(f.dataDir + '.desktop-backups', snapshot.backup.id, 'data/fixture/content'), 'changed backup')
+    if (changed === 'backup') await fsp.writeFile(path.join(f.dataDir + '.desktop-backups', snapshot.backup.id, 'data/system-conversion', f.operationId, 'legacy-instance.json'), 'changed backup')
     if (changed === 'manifest') await fsp.writeFile(f.manifestFile, JSON.stringify({ ...JSON.parse(f.original), crabot_home: f.targetRoot, data_dir: f.dataDir, port_offset: 200 }))
     if (changed === 'source-active') extra.processes = async (_, use) => use({ state: 'running' })
     if (changed === 'data-replaced') { await fsp.rename(f.dataDir, f.dataDir + '-original'); await fsp.mkdir(f.dataDir, { mode: 0o700 }) }

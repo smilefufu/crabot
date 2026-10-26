@@ -133,3 +133,27 @@ test('migration coverage ignores unrelated historical references and inspects on
   await assertLocalMigrationData(f.data, [migration], f.root)
   assert.equal(await fs.readFile(path.join(external, 'keep'), 'utf8'), 'must stay outside migration')
 })
+
+test('an exact conversion manifest scope never enters unrelated modules or copies their data', async t => {
+  const f = await fixture(t), relative = 'system-conversion/known-operation/legacy-instance.json'
+  await fs.mkdir(path.dirname(path.join(f.data, relative)), { recursive: true })
+  await fs.writeFile(path.join(f.data, relative), '{"mode":"system"}')
+  const lock = await acquireCliLock(f.data, 'conversion-scope-test'); t.after(() => releaseCliLock(lock))
+  const readdir = fs.readdir.bind(fs)
+  t.mock.method(fs, 'readdir', async (directory, ...args) => {
+    assert.equal(['admin', 'memory'].some(name => String(directory) === path.join(f.data, name)), false, 'Unrelated modules are outside this backup')
+    return readdir(directory, ...args)
+  })
+  const result = await createMaintenanceBackup(f.data, { scope: [relative] })
+  const manifest = await verifyMaintenanceBackup(result.directory, result.sha256)
+  assert.equal(result.bytes, Buffer.byteLength('{"mode":"system"}'))
+  assert.deepEqual(manifest.scope, [relative])
+  assert.equal(await fs.readFile(path.join(result.directory, 'data', relative), 'utf8'), '{"mode":"system"}')
+  await assert.rejects(fs.lstat(path.join(result.directory, 'data/admin')), { code: 'ENOENT' })
+})
+
+for (const scope of [[], ['../outside'], ['admin'], ['agent-venv/keep']]) test('exact conversion backup rejects an unsafe or whole-module scope: ' + JSON.stringify(scope), async t => {
+  const f = await fixture(t), lock = await acquireCliLock(f.data, 'conversion-scope-test'); t.after(() => releaseCliLock(lock))
+  await assert.rejects(createMaintenanceBackup(f.data, { scope }))
+  await assert.rejects(fs.lstat(f.data + '.desktop-backups'), { code: 'ENOENT' })
+})

@@ -28,7 +28,7 @@ async function syncDirectory(directory) {
   try { await handle.sync() } finally { await handle.close() }
 }
 
-export async function createMaintenanceBackup(dataDir, { signal } = {}) {
+export async function createMaintenanceBackup(dataDir, { signal, scope: requestedScope } = {}) {
   cancelled(signal)
   // Match the canonical path used by desktop management and instance records.
   // Windows async realpath can expand a short TEMP path differently.
@@ -41,11 +41,22 @@ export async function createMaintenanceBackup(dataDir, { signal } = {}) {
   })
   if (records.some(name => name.endsWith('.json'))) fail('CRABOT_STOP_UNKNOWN', '仍有未收口模块记录，未开始备份。')
   const files = Object.create(null), references = []
-  const scope = (await entries(dataDir)).filter(entry => !excluded.has(entry.name)).map(entry => entry.name)
+  let scope
+  if (requestedScope === undefined) scope = (await entries(dataDir)).filter(entry => !excluded.has(entry.name)).map(entry => entry.name)
+  else {
+    if (!Array.isArray(requestedScope) || !requestedScope.length) fail('CRABOT_BACKUP_SCOPE_UNVERIFIED', '缺少明确的迁移备份范围，未开始备份。')
+    scope = []
+    for (const name of requestedScope) {
+      await scopedPath(dataDir, name)
+      const relative = name.split(/[\\/]/).join('/')
+      if (excluded.has(relative.split('/')[0])) fail('CRABOT_BACKUP_SCOPE_UNVERIFIED', '工作依赖和运行控制不属于数据备份范围。')
+      if (!scope.includes(relative)) scope.push(relative)
+    }
+  }
   async function inspect(directory, prefix = '') {
     for (const entry of await entries(directory)) {
       const relative = prefix ? prefix + '/' + entry.name : entry.name
-      if (!prefix && !scope.includes(entry.name)) continue
+      if (!scope.some(name => relative === name || name.startsWith(relative + '/') || relative.startsWith(name + '/'))) continue
       cancelled(signal)
       const file = path.join(dataDir, relative), stat = await fs.lstat(file)
       if (entry.isSymbolicLink()) references.push({ path: relative, target: await fs.readlink(file) })

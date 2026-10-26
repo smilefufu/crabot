@@ -125,7 +125,7 @@ export async function maintainLegacySystemUser(entry, { action, source, observat
       converted(original)
       record = await beginLegacySystemVersionMaintenance(parameters)
       privateWrite(path.join(directory, 'legacy-instance.json'), original)
-      const backup = await createMaintenanceBackup(dataDir); await recordVersionMaintenanceBackup(dataDir, record.id, backup)
+      const backup = await createMaintenanceBackup(dataDir, { scope: [copyRelative] }); await recordVersionMaintenanceBackup(dataDir, record.id, backup)
       const python = await inspectEnvironment({ root: targetRoot, dataDir })
       const prepared = python.status === 'absent' ? undefined : await prepareEnvironment({ root: targetRoot, dataDir, expectedFingerprint: python.fingerprint })
       await bindLegacyPythonMaintenance({ dataDir, id: record.id, prepared, inspectEnvironment })
