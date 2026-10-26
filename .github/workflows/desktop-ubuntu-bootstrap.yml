@@ -112,6 +112,8 @@ jobs:
           cc -std=c11 -Wall -Wextra -Werror -O2 crabot-desktop/tests/native/ubuntu-maintenance.c -o .desktop-build/ubuntu-maintenance-test $(pkg-config --cflags --libs gtk4 json-glib-1.0)
           timeout 20s dbus-run-session -- xvfb-run -a .desktop-build/ubuntu-maintenance-test
           timeout 20s dbus-run-session -- xvfb-run -a .desktop-build/ubuntu-bootstrap/crabot-maintenance --smoke-test
+          cc -std=c11 -Wall -Wextra -Werror -O2 crabot-desktop/native/ubuntu/installer-lifecycle.test.c -o .desktop-build/ubuntu-installer-lifecycle-test $(pkg-config --cflags --libs gtk4 json-glib-1.0)
+          timeout 20s dbus-run-session -- xvfb-run -a .desktop-build/ubuntu-installer-lifecycle-test
       - name: Build the same-source Node identity and display modules
         run: |
           node scripts/build-native.mjs
