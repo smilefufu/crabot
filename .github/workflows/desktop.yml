@@ -71,12 +71,18 @@ on:
       - '.github/workflows/desktop.yml'
       - '.github/workflows/desktop-ubuntu-bootstrap.yml'
   workflow_dispatch:
+    inputs:
+      target:
+        description: 'Validation target; final acceptance requires all platforms'
+        type: choice
+        default: all
+        options: [all, linux-x64, darwin-arm64, darwin-x64, win32-x64]
 
 permissions:
   contents: read
 
 concurrency:
-  group: desktop-${{ github.ref }}
+  group: desktop-${{ github.ref }}${{ inputs.target && inputs.target != 'all' && format('-{0}', inputs.target) || '' }}
   cancel-in-progress: false
 
 defaults:
@@ -93,16 +99,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: ubuntu-22.04
-            target: linux-x64
-          - os: macos-15
-            target: darwin-arm64
-          - os: macos-15-intel
-            target: darwin-x64
-          - os: windows-latest
-            target: win32-x64
-    runs-on: ${{ matrix.os }}
+        target: ${{ fromJSON(inputs.target && inputs.target != 'all' && format('["{0}"]', inputs.target) || '["linux-x64","darwin-arm64","darwin-x64","win32-x64"]') }}
+    runs-on: ${{ fromJSON('{"linux-x64":"ubuntu-22.04","darwin-arm64":"macos-15","darwin-x64":"macos-15-intel","win32-x64":"windows-latest"}')[matrix.target] }}
     steps:
       - uses: actions/checkout@v4
         with:
