@@ -1751,7 +1751,7 @@ for (const version of ['1.2.3', '1.2.4']) test('new retained pair previews actua
   assert.deepEqual(installation.readDesktopPairReference(f.target).selection, f.selection)
 })
 
-for (const allowed of [false, true, 'higher']) test('retained product acceptance prepares only its isolated partial-removal fixture: ' + allowed, async t => {
+for (const allowed of [false, true, 'higher', 'all-programs']) test('retained product acceptance prepares its isolated removal fixture: ' + allowed, async t => {
   const previous = process.env.GITHUB_ACTIONS
   t.after(() => { if (previous === undefined) delete process.env.GITHUB_ACTIONS; else process.env.GITHUB_ACTIONS = previous })
   process.env.GITHUB_ACTIONS = String(Boolean(allowed))
@@ -1764,12 +1764,12 @@ for (const allowed of [false, true, 'higher']) test('retained product acceptance
     await assert.rejects(fs.lstat(path.join(f.target, '.desktop-removal.json')), { code: 'ENOENT' })
   } else {
     const incoming = allowed === 'higher' ? await fixture(t, { version: '1.2.4', schema: 'v2', functional: true }) : f
-    const result = await prepareRetainedProductReinstall({ installRoot: f.target, payload: incoming.payload })
+    const result = await prepareRetainedProductReinstall({ installRoot: f.target, payload: incoming.payload, removeAllPrograms: allowed === 'all-programs' })
     assert.deepEqual(result.selection, incoming.selection)
-    assert.equal(result.partial_removal_fixture, true); assert.equal(result.complete_uninstall_tested, false)
+    assert.equal(result.partial_removal_fixture, allowed !== 'all-programs'); assert.equal(result.complete_program_removal, allowed === 'all-programs'); assert.equal(result.complete_uninstall_tested, false)
     if (!windows) for (const directory of [f.target, path.join(f.target, 'data')]) assert.equal((await fs.stat(directory)).mode & 0o777, 0o755)
     assert.ok(await fs.stat(path.join(result.coreRoot, 'cli.mjs')))
-    assert.equal(await fs.readFile(result.sentinel, 'utf8'), 'preserved across partial removal and real GUI recovery\n')
+    assert.equal(await fs.readFile(result.sentinel, 'utf8'), 'preserved across program removal and real GUI recovery\n')
     const { readVersionMaintenance, assertVersionMaintenanceAllowsStart } = await import('../version-maintenance.mjs')
     assert.equal(readVersionMaintenance(path.join(f.target, 'data')).id, result.maintenanceId)
     assert.throws(() => assertVersionMaintenanceAllowsStart(path.join(f.target, 'data')), { code: 'CRABOT_MAINTENANCE_PENDING' })

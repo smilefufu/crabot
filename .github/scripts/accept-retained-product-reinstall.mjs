@@ -1,4 +1,4 @@
-// CI fixture for U5 only: the partial-removal state is authored explicitly.
+// CI fixture for U5: the removing record is authored explicitly; program deletion can be real.
 // Program preparation/handoff and the subsequent ordinary GUI/Core are real.
 // This does not stand in for the complete uninstall UI/host lifecycle.
 import assert from 'node:assert/strict'
@@ -15,11 +15,12 @@ import { prepareDesktopRemovalReinstall, assertReinstallVersion } from '../../sc
 import { runPreparedDesktopReinstallHandoff } from '../../scripts/lib/desktop-reinstall-data.mjs'
 import identity from '../../scripts/lib/process-identity.cjs'
 import { desktopRemovalProgramEntries } from '../../scripts/lib/desktop-removal-programs.mjs'
-import { assertDesktopRemovalProgramsUnused } from '../../scripts/lib/desktop-removal-delete.mjs'
+import { assertDesktopRemovalProgramsUnused, removeDesktopRemovalPrograms } from '../../scripts/lib/desktop-removal-delete.mjs'
 import { verifyDesktopPayload } from '../../scripts/lib/desktop-payload.mjs'
 
-export async function prepareRetainedProductReinstall({ installRoot, payload, preparePrograms = async () => {} }) {
+export async function prepareRetainedProductReinstall({ installRoot, payload, preparePrograms = async () => {}, removeAllPrograms = false }) {
   if (process.env.GITHUB_ACTIONS !== 'true') throw new Error('Requires an isolated CI user, never a developer deployment')
+  assert.equal(typeof removeAllPrograms, 'boolean')
   const started = performance.now()
   const stage = name => console.log('CRABOT_RETAINED_REPAIR_STAGE ' + JSON.stringify({ stage: name, elapsed_ms: Math.round(performance.now() - started) }))
   stage('source-verification')
@@ -33,7 +34,7 @@ export async function prepareRetainedProductReinstall({ installRoot, payload, pr
   // This installation belongs to the disposable CI fixture. Exercise legacy
   // readable roots without changing any real deployment or private records.
   if (process.platform !== 'win32') { await fs.chmod(own.root, 0o755); await fs.chmod(own.dataDir, 0o755) }
-  await fs.writeFile(sentinel, 'preserved across partial removal and real GUI recovery\n', { flag: 'wx', mode: 0o600 })
+  await fs.writeFile(sentinel, 'preserved across program removal and real GUI recovery\n', { flag: 'wx', mode: 0o600 })
   const rootLock = await acquireExistingCliLock(own.root, 'ci-retained-removal-fixture')
   let dataLock, proof
   try {
@@ -63,10 +64,17 @@ export async function prepareRetainedProductReinstall({ installRoot, payload, pr
     await privateJson(path.join(directory, 'proof.json'), proof)
     await privateJson(path.join(own.root, '.desktop-removal.json'), { schema_version: 1, installation_id: own.record.installation_id,
       operation_id: operationId, source_selection: own.selection, phase: 'removing', proof_sha256: createHash('sha256').update(text).digest('hex') })
-    // Exactly one known sealed program file is removed after the guard. User
-    // data/workspaces and executable runtimes remain untouched by this fixture.
-    assert.equal(JSON.parse(proof.core.inventory).files['cli.mjs'].type, 'file')
-    await fs.unlink(path.join(own.coreRoot, 'cli.mjs'))
+    if (removeAllPrograms) {
+      const removed = await removeDesktopRemovalPrograms({ installRoot: own.root, operationId })
+      assert.deepEqual(removed.retained, [])
+      for (const directory of [own.coreRoot, own.guiRoot]) await assert.rejects(fs.lstat(directory), { code: 'ENOENT' })
+      stage('fixture-all-programs-removed')
+    } else {
+      // Preserve an interrupted partial-deletion case alongside the full program
+      // removal case. Neither fixture asserts OS-entry or UI lifecycle completion.
+      assert.equal(JSON.parse(proof.core.inventory).files['cli.mjs'].type, 'file')
+      await fs.unlink(path.join(own.coreRoot, 'cli.mjs'))
+    }
   } finally { if (dataLock) releaseCliLock(dataLock); releaseCliLock(rootLock) }
   assert.throws(() => installation.readDesktopSelection(own.root), { code: 'CRABOT_DESKTOP_REMOVAL_PENDING' })
   const options = { payload, installRoot: own.root, operationId,
@@ -82,7 +90,7 @@ export async function prepareRetainedProductReinstall({ installRoot, payload, pr
   assert.equal(handoff.verification_pending, true); assert.equal(handoff.health_verified, false)
   assert.equal(inspectInstance(own.dataDir).state, 'stopped')
   assert.ok(await fs.stat(path.join(own.dataDir, 'desktop-maintenance.json')))
-  assert.equal(await fs.readFile(sentinel, 'utf8'), 'preserved across partial removal and real GUI recovery\n')
+  assert.equal(await fs.readFile(sentinel, 'utf8'), 'preserved across program removal and real GUI recovery\n')
   return { sentinel, maintenanceId: handoff.maintenance_id, executable: handoff.executable, coreRoot: path.join(own.root, 'releases', source.record.selection.core_id),
-    selection: source.record.selection, partial_removal_fixture: true, complete_uninstall_tested: false }
+    selection: source.record.selection, partial_removal_fixture: !removeAllPrograms, complete_program_removal: removeAllPrograms, complete_uninstall_tested: false }
 }

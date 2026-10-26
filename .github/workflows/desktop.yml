@@ -95,12 +95,15 @@ jobs:
   ubuntu-bootstrap:
     uses: ./.github/workflows/desktop-ubuntu-bootstrap.yml
   runtime:
-    name: Desktop foundation ${{ matrix.target }}
+    name: ${{ matrix.suite == 'regression' && 'Desktop foundation' || 'Desktop product' }} ${{ matrix.target }}
     needs: ubuntu-bootstrap
     timeout-minutes: ${{ (matrix.target == 'darwin-x64' || matrix.target == 'win32-x64') && 180 || matrix.target == 'linux-x64' && 150 || 90 }}
     strategy:
       fail-fast: false
+      # The same-source suites are independent: do not consume the product
+      # installation window with the preceding 87-minute Intel regression batch.
       matrix:
+        suite: [regression, product]
         target: ${{ fromJSON(inputs.target && inputs.target != 'all' && format('["{0}"]', inputs.target) || '["linux-x64","darwin-arm64","darwin-x64","win32-x64"]') }}
     runs-on: ${{ fromJSON('{"linux-x64":"ubuntu-24.04","darwin-arm64":"macos-15","darwin-x64":"macos-15-intel","win32-x64":"windows-latest"}')[matrix.target] }}
     steps:
@@ -115,6 +118,7 @@ jobs:
         with:
           version: '0.13.0'
       - name: Select complete runtime validation scope
+        if: matrix.suite == 'product'
         id: scope
         env:
           CRABOT_CI_BASE: ${{ github.event.before || github.event.pull_request.base.sha }}
@@ -147,6 +151,7 @@ jobs:
             pnpm --dir "$module" install --frozen-lockfile
             node "$module/node_modules/typescript/bin/tsc" -p "$module/tsconfig.json"
           done
+          pnpm --dir crabot-admin/web install --frozen-lockfile
           pnpm --dir crabot-desktop install --frozen-lockfile
           # Electron lazily installs on first require; complete it before test workers.
           (cd crabot-desktop && node -e "require('electron')")
@@ -154,13 +159,15 @@ jobs:
         if: runner.os == 'Linux'
         run: node .github/scripts/ubuntu-electron-test-sandbox.mjs
       - name: Linux workspace bind-mount boundary in a private mount namespace
-        if: runner.os == 'Linux'
+        if: matrix.suite == 'regression' && (runner.os == 'Linux')
         timeout-minutes: 2
         run: sudo --preserve-env=GITHUB_ACTIONS unshare --mount --propagation private -- "$(command -v node)" --import ./crabot-shared/node_modules/tsx/dist/loader.mjs --test --test-name-pattern='Linux same-device bind mounts' crabot-shared/src/workspace-usage.test.ts
       - name: OS copy assertions with direct TAP transport
+        if: matrix.suite == 'regression'
         timeout-minutes: 2
         run: node scripts/lib/__tests__/workspace-copy.test.mjs
       - name: Runtime regressions
+        if: matrix.suite == 'regression'
         timeout-minutes: 15
         run: |
           node --test crabot-client/tests/*.test.mjs
@@ -173,19 +180,24 @@ jobs:
           (cd scripts/lib && node node_modules/vitest/vitest.mjs run __tests__/check.test.mjs __tests__/mm-probe.test.mjs --maxWorkers=1 --minWorkers=1)
           node --test scripts/lib/__tests__/workspace-relocation-intent.test.mjs scripts/lib/__tests__/workspace-process-stop.test.mjs scripts/lib/__tests__/workspace-file-plan.test.mjs scripts/lib/__tests__/workspace-root-publish.test.mjs scripts/lib/__tests__/workspace-coordinator-entry.test.mjs scripts/lib/__tests__/admin-data-compat.test.mjs scripts/lib/__tests__/core-preparation.test.mjs scripts/lib/__tests__/workspace-data-compat.test.mjs scripts/lib/__tests__/workspace-legacy-executions.test.mjs scripts/lib/__tests__/core-preflight.test.mjs scripts/lib/__tests__/installer-compat.test.mjs
       - name: Workspace fixed coordinator and Root regressions
+        if: matrix.suite == 'regression'
         timeout-minutes: ${{ matrix.target == 'win32-x64' && 60 || 15 }}
         run: node --test scripts/lib/__tests__/workspace-coordinator-launch.test.mjs
       - name: Installation and program proof regressions
+        if: matrix.suite == 'regression'
         timeout-minutes: 15
         run: |
           node --test .github/scripts/paired-update-target-evidence.test.mjs .github/scripts/paired-update-source-model.test.mjs .github/scripts/paired-update-source-data.test.mjs .github/scripts/paired-update-source-activity.test.mjs scripts/lib/__tests__/desktop-asar.test.mjs scripts/lib/__tests__/archive-core.test.mjs scripts/lib/__tests__/core-release.test.mjs scripts/lib/__tests__/stage-core-imports.test.mjs scripts/lib/__tests__/desktop-installation.test.mjs scripts/lib/__tests__/desktop-removal-programs.test.mjs scripts/lib/__tests__/desktop-removal-system-processes.test.mjs scripts/lib/__tests__/cli-launcher.test.mjs
       - name: Offline installation and retained repair regressions
+        if: matrix.suite == 'regression'
         timeout-minutes: ${{ matrix.target == 'darwin-x64' && 30 || 15 }}
         run: node --test scripts/lib/__tests__/desktop-payload.test.mjs
       - name: CLI installation and retained reinstall regressions
+        if: matrix.suite == 'regression'
         timeout-minutes: 15
         run: node --test scripts/lib/__tests__/cli-installation.test.mjs
       - name: Legacy installation and stop regressions
+        if: matrix.suite == 'regression'
         timeout-minutes: 15
         run: |
           node --test scripts/lib/__tests__/legacy-desktop.test.mjs scripts/lib/__tests__/legacy-entry-fence.test.mjs scripts/lib/__tests__/legacy-system-*.test.mjs
@@ -193,48 +205,57 @@ jobs:
           node --test scripts/lib/__tests__/legacy-runtime.test.mjs scripts/lib/__tests__/legacy-stop.test.mjs
           node --test scripts/lib/__tests__/maintenance-backup.test.mjs
       - name: Version maintenance and migration regressions
+        if: matrix.suite == 'regression'
         timeout-minutes: 15
         run: |
           node --test scripts/lib/__tests__/version-maintenance.test.mjs scripts/lib/__tests__/legacy-python-maintenance.test.mjs scripts/lib/__tests__/legacy-version-maintenance.test.mjs scripts/lib/__tests__/desktop-update-entry.test.mjs scripts/lib/__tests__/desktop-cli-install.test.mjs
           (cd scripts/upgrade-lib && node ../../node_modules/vitest/vitest.mjs run --maxWorkers=1 --minWorkers=1)
       - name: Core lifecycle regressions
+        if: matrix.suite == 'regression'
         timeout-minutes: 15
         run: |
           cd crabot-core
           node node_modules/vitest/vitest.mjs run src/port-allocator.test.ts src/workspace-maintenance.test.ts src/agent-venv.test.ts src/core-modules.test.ts src/shutdown-generation.test.ts src/module-management-secrets.test.ts --maxWorkers=1 --minWorkers=1
       - name: Workspace native module regressions
+        if: matrix.suite == 'regression'
         timeout-minutes: 15
         run: |
           cd crabot-core
           node node_modules/vitest/vitest.mjs run src/workspace-module-scope.test.ts src/workspace-module-stop.test.ts --maxWorkers=1 --minWorkers=1
       - name: Workspace coordinator authorization and Worker journal regressions
+        if: matrix.suite == 'regression'
         timeout-minutes: 15
         run: |
           cd crabot-core
           node node_modules/vitest/vitest.mjs run src/workspace-human-verification.test.ts --testNamePattern "MM consumes a human intent|MM dedicated fixed coordinator|MM delegates capture only|MM sensitive Worker stop" --maxWorkers=1 --minWorkers=1
       # Long recovery suites run at the same commit in workspace-core.yml, with four OS matrices.
       - name: Workspace coordinator native dispatch and module regressions
+        if: matrix.suite == 'regression'
         timeout-minutes: ${{ matrix.target == 'win32-x64' && 30 || 15 }}
         run: |
           cd crabot-core
           node node_modules/vitest/vitest.mjs run src/workspace-human-verification.test.ts --testNamePattern "^(?!.*(?:MM consumes a human intent|MM dedicated fixed coordinator|MM delegates capture only|MM sensitive Worker stop|MM launches the actual fixed coordinator|MM submits one fixed workspace stop sequence|MM requires original Admin quiescence|post-relocation validation launches|new runtime health and Root|fixed job archive storage handoff|normal fixed-job Admin completion preparation|fixed terminal release and current Admin resume|completes two actually owned|same MM workspace recovery and later migration|isolated business Agent after workspace relocation))" --maxWorkers=1 --minWorkers=1
       - name: Workspace fixed host and actual Admin quiescence regressions
+        if: matrix.suite == 'regression'
         timeout-minutes: 15
         run: |
           cd crabot-core
           node node_modules/vitest/vitest.mjs run src/workspace-human-verification.test.ts --testNamePattern "MM launches the actual fixed coordinator|MM submits one fixed workspace stop sequence|MM requires original Admin quiescence" --maxWorkers=1 --minWorkers=1
       - name: Agent environment regressions
+        if: matrix.suite == 'regression'
         run: |
           cd crabot-agent
           node node_modules/vitest/vitest.mjs run tests/workers/native-cli-managed-shell.test.ts tests/workers/codex-app-server-shell.test.ts tests/workers/codex-app-server-client.test.ts tests/workers/relocated-native-history.test.ts tests/workers/composite-trace.test.ts tests/manager/project-doc-tools.test.ts tests/permissions/managed-workspace.test.ts tests/permissions/managed-workspace-host.test.ts tests/workers/harness/request-guard.test.ts tests/unified-agent-trigger-schedule.test.ts tests/core/execution-admissions.test.ts tests/workers/harness/harness-lifecycle.test.ts tests/core/workspace-relocation-ledgers.test.ts tests/core/workspace-relocation-commit.test.ts tests/core/workspace-relocation-checkpoints.test.ts tests/core/workspace-relocation-retirements.test.ts tests/core/workspace-relocation-recovery-capture.test.ts tests/core/workspace-relocation-recovery-progress.test.ts tests/core/workspace-recovery-routing.test.ts tests/manager/session-store.test.ts tests/manager/restart-resume.test.ts tests/workers/harness/workspace-relocation-close.test.ts tests/workers/harness/workspace-relocation-scope.test.ts tests/workers/harness/workspace-legacy-executions.test.ts tests/workers/native-process-observation.test.ts tests/workers/headless-native-processes.test.ts tests/workers/tmux-driver.test.ts tests/core/workspace-maintenance.test.ts tests/core/workspace-background-admissions.test.ts tests/core/workspace-background-processes.test.ts tests/core/workspace-recovery-validation.test.ts tests/core/workspace-relocation-authority.test.ts tests/core/workspace-relocation-stop-journal.test.ts tests/core/workspace-relocation-stop-rpc.test.ts tests/core/workspace-relocation-process-rpc.test.ts tests/permissions/all-directories.test.ts tests/permissions/legacy-directory-upgrade.test.ts tests/workers/harness/context-store.test.ts tests/workers/harness/request-spawn.test.ts tests/manager/request-permission-gate.test.ts tests/core/config-loader.test.ts tests/core/config-loader-slice0.test.ts tests/core/runtime-env.test.ts tests/core/child-env-guard.test.ts tests/engine/host-process-maintenance.test.ts tests/utils/resolve-bash-path.test.ts tests/agent/mcp-connector.test.ts tests/mcp-connector-tool-defaults.test.ts tests/manager/tool-face.test.ts tests/workers/harness/project-workspaces.test.ts tests/workers/harness/workspace-execution.test.ts tests/manager/read-model.test.ts tests/workers/harness/workspace-manager.test.ts tests/workers/harness/ledger-store.test.ts tests/workers/private-project-provision.test.ts tests/workers/private-project-runtime.test.ts tests/workers/codex-managed-notify.test.ts tests/workers/codex-project-config.test.ts --maxWorkers=1 --minWorkers=1
           node node_modules/vitest/vitest.mjs run tests/manager/conversation-request-runner.test.ts --testNamePattern='retains a migrated old request' --maxWorkers=1 --minWorkers=1
       - name: Shared HTTP and chat protocol regressions
+        if: matrix.suite == 'regression'
         run: |
           node node_modules/typescript/bin/tsc -p tsconfig.cli.json
           node node_modules/vitest/vitest.mjs run src/cli/client.test.ts --maxWorkers=1 --minWorkers=1
           cd crabot-admin
           node node_modules/vitest/vitest.mjs run src/workspace-relocation-start-auth.test.ts src/friend-permission-store.test.ts src/legacy-directory-migration.test.ts src/request-permission-sources.test.ts src/group-session-config.test.ts src/shared-request-impact.test.ts src/backup/import/run-import.test.ts src/workspaces.test.ts src/workspaces-http.test.ts src/workspace-web-maintenance.test.ts src/workspace-recovery-finalization-web.test.ts src/core-agent-cutover-retry.test.ts src/channel-manager.workspace-startup.test.ts src/channel-manager.voice-setup.test.ts src/workspace-relocation-auth.test.ts src/chat-http-ws.test.ts src/chat-manager.test.ts src/chat-outbox-recovery.test.ts src/http-diagnostics.test.ts src/model-client-http.test.ts src/desktop-upgrade-http.test.ts src/version/upgrade-runner.test.ts src/version/version-service.test.ts src/desktop-auth.test.ts src/credentials.test.ts src/computer-use-setup-api.test.ts src/memory-access.test.ts src/voice-admin.test.ts src/managed-mcp.test.ts src/managed-mcp-runtime.test.ts src/mcp-subagent-config-mutation.test.ts src/core-agent-config-coherent-read.test.ts --maxWorkers=1 --minWorkers=1
       - name: Web compilation and state regressions
+        if: matrix.suite == 'regression'
         run: |
           cd crabot-admin/web
           pnpm install --frozen-lockfile
@@ -242,12 +263,14 @@ jobs:
           node node_modules/vite/bin/vite.js build
           node node_modules/vitest/vitest.mjs run src/components/StoragePermissionEditor.test.tsx src/pages/DialogObjects/ src/pages/Permissions/ src/pages/Traces/RequestAuthority.test.tsx src/pages/Workspaces.test.tsx src/pages/Traces/WorkersView.test.tsx src/pages/Chat/index.test.tsx src/pages/MCPServers/MCPServerList.test.tsx src/pages/DesktopWelcome.test.tsx src/services/server-state.test.ts src/services/desktop-host.test.ts src/components/ChangePasswordDialog.test.tsx src/components/DesktopDiagnosticsPanel.test.tsx src/pages/Settings/ComputerUseSetupCard.test.tsx src/pages/Settings/VersionUpgradeCard.test.tsx src/pages/Settings/DesktopVersionUpgradeCard.test.tsx --maxWorkers=1 --minWorkers=1
       - name: Electron compilation and main-process state regressions
+        if: matrix.suite == 'regression'
         working-directory: crabot-desktop
         run: |
           node node_modules/typescript/bin/tsc -p tsconfig.json
           node build-preload.mjs
           node --test ../scripts/desktop/ubuntu-maintenance-backend.test.mjs ../scripts/desktop/ubuntu-bootstrap.test.mjs ../scripts/desktop/release-signing.test.mjs tests/release-signatures.test.mjs tests/release-download.test.mjs tests/paired-update.test.mjs tests/paired-update-host.test.mjs tests/paired-handoff.test.mjs tests/bootstrap-log.test.mjs tests/ubuntu-installation.test.mjs tests/ubuntu-process.test.mjs tests/ubuntu-removal-progress.test.mjs tests/ubuntu-update.test.mjs tests/removal-operation.test.mjs tests/removal-request.test.mjs tests/installation-entries.test.mjs tests/cli-removal.test.mjs tests/desktop-ipc.test.mjs tests/workspace-folder.test.mjs tests/desktop-disk.test.mjs tests/desktop-resources.test.mjs tests/first-model-fixture.test.mjs tests/full-host-control.test.mjs tests/desktop-network.test.mjs tests/artifact-network.test.mjs tests/session-host.test.mjs tests/diagnostics.test.mjs tests/login-startup.test.mjs tests/login-startup-update.test.mjs tests/controller.test.mjs tests/update-dialog.test.mjs tests/update-package.test.mjs
       - name: Actual paired controller scoped migration without MM
+        if: matrix.suite == 'regression'
         env:
           CRABOT_PAIRED_CONTROLLER_TEST: '1'
         run: |
@@ -257,13 +280,14 @@ jobs:
             node --test --test-name-pattern="actual GUI controller runs|actual paired update host" scripts/lib/__tests__/desktop-payload.test.mjs 2>&1 | tee .desktop-build/paired-controller.log
           fi
       - name: Interrupted migration retains data and refuses automatic replay
+        if: matrix.suite == 'regression'
         run: node .github/scripts/smoke-migration-interruption.mjs 2>&1 | tee .desktop-build/migration-interruption.log
       - name: Real sandboxed Electron window boundaries on Linux
-        if: runner.os == 'Linux'
+        if: matrix.suite == 'regression' && (runner.os == 'Linux')
         working-directory: crabot-desktop
         run: xvfb-run -a node --test --test-concurrency=1 tests/electron-boundary.test.mjs tests/installation-probe.test.mjs tests/installation-removal.test.mjs tests/installer-progress.test.mjs tests/maintenance-bootstrap.test.mjs tests/removal-frame.test.mjs tests/paired-relaunch.test.mjs tests/paired-update-gate.test.mjs tests/paired-binding.test.mjs tests/login-startup-recovery.test.mjs 2>&1 | tee ../.desktop-build/electron-boundary.log
       - name: Real sandboxed Electron window boundaries on macOS and Windows
-        if: runner.os != 'Linux'
+        if: matrix.suite == 'regression' && (runner.os != 'Linux')
         working-directory: crabot-desktop
         run: node --test --test-concurrency=1 tests/electron-boundary.test.mjs tests/installation-removal.test.mjs tests/installer-progress.test.mjs tests/maintenance-bootstrap.test.mjs tests/removal-frame.test.mjs tests/paired-relaunch.test.mjs tests/paired-update-gate.test.mjs tests/paired-binding.test.mjs tests/login-startup-recovery.test.mjs 2>&1 | tee ../.desktop-build/electron-boundary.log
       - name: Build locked browser and computer-use resources
@@ -440,7 +464,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: desktop-runtime-${{ matrix.target }}
+          name: desktop-runtime-${{ matrix.target }}-${{ matrix.suite }}
           path: |
             .desktop-build/*.log
             .desktop-build/*.png
@@ -452,7 +476,7 @@ jobs:
             .desktop-build/desktop-initialization-disk.json
             .desktop-build/cli-update-disk.json
             .desktop-build/system-mode.json
-            .desktop-build/system-legacy.json
+            .desktop-build/system-legacy*.json
             .desktop-build/platform-installers/installers.json
             .desktop-build/cli-archive/archive.json
             product-runtime.json

@@ -158,7 +158,7 @@ try {
   if (location.schema_version === 2) {
     const { prepareRetainedProductReinstall } = await import('./accept-retained-product-reinstall.mjs')
     stage('retained-program-preparation')
-    retainedRepair = await prepareRetainedProductReinstall({ installRoot, payload: retainedPayload || inside(location.payload), preparePrograms: registerUbuntuFixturePrograms })
+    retainedRepair = await prepareRetainedProductReinstall({ installRoot, payload: retainedPayload || inside(location.payload), preparePrograms: registerUbuntuFixturePrograms, removeAllPrograms: !retainedPayload })
     if (retainedPayload) {
       assert.notEqual(retainedRepair.selection.version, release.version)
       const originalRelease = JSON.parse(await fs.readFile(path.join(core, 'core-release.json'), 'utf8'))
@@ -182,9 +182,9 @@ try {
     assert.equal(await fs.realpath(repaired.record.install_root), await fs.realpath(core))
     assert.equal(JSON.parse(await cli('status', '--json')).running, true)
     assert.equal(await registeredCliVersion(), retainedRepair.selection.version)
-    assert.equal(await fs.readFile(retainedRepair.sentinel, 'utf8'), 'preserved across partial removal and real GUI recovery\n')
+    assert.equal(await fs.readFile(retainedRepair.sentinel, 'utf8'), 'preserved across program removal and real GUI recovery\n')
     await cli('stop'); await gui.phase('stopped'); gui.child.kill('SIGKILL'); await gui.exited()
-    retainedRepair = { partial_removal_fixture: true, complete_uninstall_tested: false,
+    retainedRepair = { partial_removal_fixture: !!retainedPayload, complete_program_removal: !retainedPayload, complete_uninstall_tested: false,
       ordinary_packaged_main: true, actual_core_started: true, same_instance_new_generation: true,
       maintenance_cleared_after_real_health: true, data_preserved: true, registered_cli_compatible: true, higher_version: !!retainedPayload }
   }

@@ -92,7 +92,7 @@ try {
   checkpoint('target-prepared')
   phase = 'higher-retained-reinstall'
   await runBounded(runtime.executables.node, [path.join(repository, '.github/scripts/smoke-packaged-desktop.mjs'), project,
-    '--retained-payload=' + targetPayload], { cwd: repository, timeout: 600000 })
+    '--retained-payload=' + targetPayload], { cwd: repository, timeout: 1200000 })
   report.higher_retained_reinstall_verified = true
   await fs.rm(targetProject, { recursive: true })
   checkpoint('higher-retained-reinstall-verified')
