@@ -5,6 +5,8 @@ const path = require('node:path')
 const { pathToFileURL } = require('node:url')
 const { syncBuiltinESMExports } = require('node:module')
 const options = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'))
+if (options.scenario === 'private-removal-on-original') process.argv = [process.execPath, '--crabot-removal-host=' + Buffer.from(JSON.stringify({ installRoot: options.installRoot, operationId: options.operationId, existing: false })).toString('base64url')]
+if (options.scenario === 'malformed-removal-host') process.argv = [process.execPath, '--crabot-removal-host=%%%']
 app.setPath('userData', options.profile); app.setPath('sessionData', options.profile)
 Object.defineProperty(app, 'isPackaged', { value: true })
 Object.defineProperty(process, 'resourcesPath', { value: options.resources })

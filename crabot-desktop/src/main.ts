@@ -1,3 +1,5 @@
+import { readRemovalHostRequest } from './removal-request.js'
+import { startDesktopRemovalHost } from './removal-host.js'
 import { revealWorkspaceFolder, selectWorkspaceDirectory } from './workspace-folder.js'
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, protocol, session, shell, Tray } from 'electron'
 import path from 'node:path'
@@ -38,6 +40,7 @@ let updates: UpdateDialog | undefined
 let updateRequested = process.argv.includes('--check-updates')
 let installingCli = false
 let verifyBinding: (() => void) | undefined
+let cancelRemovalHost: (() => void) | undefined
 
 async function quit(): Promise<boolean> {
   if (pendingQuit) return pendingQuit
@@ -91,6 +94,13 @@ function claimInstance() {
 }
 
 async function boot() {
+  const removal = readRemovalHostRequest(process.argv)
+  if (removal) {
+    const host = startDesktopRemovalHost(removal)
+    cancelRemovalHost = host.cancel
+    await host.finished
+    cancelRemovalHost = undefined; quitting = true; app.quit(); return
+  }
   const installationProbe = process.argv.filter(value => value.startsWith('--installation-sandbox-probe='))
   if (installationProbe.length) {
     if (installationProbe.length !== 1) { app.exit(1); return }
@@ -299,7 +309,7 @@ async function boot() {
   if (updateRequested) void updates.open()
 }
 app.on('activate', show)
-app.on('before-quit', event => { if (!quitting) { event.preventDefault(); void quit() } })
+app.on('before-quit', event => { if (!quitting) { event.preventDefault(); if (cancelRemovalHost) cancelRemovalHost(); else void quit() } })
 app.on('window-all-closed', () => { /* Tray owns the application lifetime. */ })
 app.on('will-quit', () => { updates?.close(); artifacts?.close(); controller?.close(); tray?.destroy() })
 void boot().catch(async error => {
@@ -307,7 +317,7 @@ void boot().catch(async error => {
   bootstrapStage('failed', { code })
   await app.whenReady()
   let message = 'Crabot 界面启动失败，请修复安装。'
-  if (error?.code === 'CRABOT_DESKTOP_REMOVAL_PENDING') message = 'Crabot 卸载尚未完成。请继续卸载，或使用同版/更高版离线安装器修复。用户数据已保留。'
+  if (['CRABOT_DESKTOP_REMOVAL', 'CRABOT_DESKTOP_REMOVAL_PENDING'].includes(error?.code)) message = 'Crabot 卸载尚未完成。请继续卸载，或使用同版/更高版离线安装器修复。用户数据已保留。'
   else if (['CRABOT_DESKTOP_INSTALLATION', 'CRABOT_CORE_INTEGRITY'].includes(error?.code)) message = 'Crabot 安装位置、内置文件或版本对未通过校验，请使用同版或更高版安装包修复。已有数据保留。'
   await dialog.showMessageBox({ type: 'error', message })
   quitting = true; app.quit()

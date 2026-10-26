@@ -11,7 +11,7 @@ import identity from '../../scripts/lib/process-identity.cjs'
 import management from '../../scripts/lib/desktop-management.cjs'
 import { writeCoreRelease } from '../../scripts/lib/core-release.mjs'
 
-for (const scenario of ['pin-mismatch', 'core-corrupt', 'detached-pair', 'removal', 'profile-before-ready', 'legacy-profile-before-ready']) test('actual GUI entry protects installation binding and profile initialization: ' + scenario, { timeout: 35_000 }, async t => {
+for (const scenario of ['private-removal-on-original', 'malformed-removal-host', 'pin-mismatch', 'core-corrupt', 'detached-pair', 'removal', 'profile-before-ready', 'legacy-profile-before-ready']) test('actual GUI entry protects installation binding and profile initialization: ' + scenario, { timeout: 35_000 }, async t => {
   const parent = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'crabot-gui-binding-')))
   t.after(() => fs.rm(parent, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }))
   const root = management.ensurePrivateDataRoot(path.join(parent, 'install')), profile = management.ensurePrivateDataRoot(path.join(parent, 'profile'))
@@ -50,7 +50,7 @@ for (const scenario of ['pin-mismatch', 'core-corrupt', 'detached-pair', 'remova
     await fs.rename(core, path.join(resources, 'core'))
   }
   const options = path.join(parent, 'fixture.json'), report = path.join(parent, 'report.json')
-  await fs.writeFile(options, JSON.stringify({ resources, profile, data, marker, report, scenario, core,
+  await fs.writeFile(options, JSON.stringify({ resources, profile, data, marker, report, scenario, core, installRoot: root, operationId: randomUUID(),
     pin: scenario === 'pin-mismatch' ? { ...selection, gui_id: randomUUID() } : selection }))
   const env = { ...process.env }; delete env.ELECTRON_RUN_AS_NODE; delete env.NODE_OPTIONS
   const result = await new Promise((resolve, reject) => {
@@ -67,6 +67,6 @@ for (const scenario of ['pin-mismatch', 'core-corrupt', 'detached-pair', 'remova
     if (scenario === 'legacy-profile-before-ready' && process.platform !== 'win32') for (const directory of [root, data]) assert.equal((await fs.stat(directory)).mode & 0o777, 0o755)
     return
   }
-  assert.deepEqual(evidence, { external_core_executed: false, repair_shown: true, removal_shown: scenario === 'removal', data_entries: scenario === 'core-corrupt' ? ['desktop-profile'] : [], business_mm_started: false, actual_packaged_binary: false })
+  assert.deepEqual(evidence, { external_core_executed: false, repair_shown: true, removal_shown: ['removal', 'private-removal-on-original', 'malformed-removal-host'].includes(scenario), data_entries: scenario === 'core-corrupt' ? ['desktop-profile'] : [], business_mm_started: false, actual_packaged_binary: false })
   console.log('CRABOT_GUI_BINDING_REJECTION ' + JSON.stringify({ scenario, ...evidence }))
 })

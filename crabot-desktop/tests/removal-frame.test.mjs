@@ -37,6 +37,8 @@ before(async () => {
   await fs.cp(path.join(repository, 'crabot-desktop/dist/bootstrap'), path.join(appDir, 'dist/bootstrap'), { recursive: true })
   for (const name of ['installation-removal.js', 'installation-entries.js', 'login-startup.js', 'removal-operation.js']) await fs.copyFile(path.join(repository, 'crabot-desktop/dist', name), path.join(appDir, 'dist', name))
   await fs.copyFile(new URL('fixtures/removal-frame-actor.cjs', import.meta.url), path.join(appDir, 'dist/main.cjs'))
+  await fs.copyFile(path.join(repository, 'crabot-desktop/dist/removal-preload.cjs'), path.join(appDir, 'dist/removal-preload.cjs'))
+  await require('esbuild').build({ entryPoints: [path.join(repository, 'crabot-desktop/src/main.ts')], outfile: path.join(appDir, 'dist/full-main.js'), bundle: true, platform: 'node', format: 'esm', target: 'node22', external: ['electron', 'original-fs'], banner: { js: "import { createRequire as fixtureRequire } from 'node:module'; const require = fixtureRequire(import.meta.url);" }, logLevel: 'silent' })
   await fs.writeFile(path.join(appDir, 'dist/desktop-release.json'), JSON.stringify(selection) + '\n')
   await fs.writeFile(path.join(appDir, 'package.json'), JSON.stringify({ name: 'crabot-removal-frame-fixture', type: 'module', version: '1.2.3', main: 'dist/main.cjs', dependencies: { '@electron/asar': '3.4.1' } }))
   const parser = path.join(appDir, 'node_modules/@electron/asar'); await fs.mkdir(parser, { recursive: true })
@@ -67,7 +69,7 @@ before(async () => {
   await sealDesktopPayload(payload)
 }, 120000)
 after(async () => { if (root) await fs.rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }) })
-for (const scenario of ['valid', 'node-parent', 'unexpected-source-args', 'changed-copy', 'other-installation', 'publish-close', 'publish-cancel', 'publish-module', 'publish-damaged', 'publish-lost-reply', 'publish-replaced-record', 'publish-live', 'publish-cancel-lost', 'publish-stop', 'publish-stop-wrong-root', 'publish-stop-lost', 'publish-stop-retry', 'publish-stop-lost-retry', 'publish-inherited-cwd', 'publish-source-verifier', 'publish-source-exit', 'publish-source-retry', 'publish-source-late-exit', 'publish-source-ignore', 'publish-source-disconnect', 'resume-valid', 'resume-core-missing', 'resume-wrong-operation', 'resume-changed-copy', 'resume-source-changed', 'resume-lease-cancel', 'resume-lease-stopping', 'resume-lease-removing', 'resume-lease-completed', 'resume-lease-core-missing', 'resume-lease-wrong-operation', 'resume-lease-busy', 'resume-lease-source-exit', 'publish-source-remove', 'publish-source-remove-operation', 'publish-source-remove-cancel-retry', 'publish-source-remove-mac-login', 'publish-source-remove-complete', 'publish-source-remove-windows-uninstall', 'publish-source-remove-retry', 'resume-lease-source-remove', 'publish-source-remove-retry-delayed']) test('actual protected initial removal frame: ' + scenario, { skip: !supported || ['publish-source-remove-mac-login', 'publish-source-remove-operation'].includes(scenario) && process.platform !== 'darwin' || scenario === 'publish-source-remove-windows-uninstall' && process.platform !== 'win32', timeout: scenario.includes('source-remove') ? 180000 : 60000 }, async t => {
+for (const scenario of ['valid', 'node-parent', 'unexpected-source-args', 'changed-copy', 'other-installation', 'publish-close', 'publish-cancel', 'publish-module', 'publish-damaged', 'publish-lost-reply', 'publish-replaced-record', 'publish-live', 'publish-cancel-lost', 'publish-stop', 'publish-stop-wrong-root', 'publish-stop-lost', 'publish-stop-retry', 'publish-stop-lost-retry', 'publish-inherited-cwd', 'publish-source-verifier', 'publish-source-exit', 'publish-source-retry', 'publish-source-late-exit', 'publish-source-ignore', 'publish-source-disconnect', 'resume-valid', 'resume-core-missing', 'resume-wrong-operation', 'resume-changed-copy', 'resume-source-changed', 'resume-lease-cancel', 'resume-lease-stopping', 'resume-lease-removing', 'resume-lease-completed', 'resume-lease-core-missing', 'resume-lease-wrong-operation', 'resume-lease-busy', 'resume-lease-source-exit', 'publish-source-remove', 'publish-source-remove-main', 'resume-source-remove-main', 'publish-source-remove-operation', 'publish-source-remove-cancel-retry', 'publish-source-remove-mac-login', 'publish-source-remove-complete', 'publish-source-remove-windows-uninstall', 'publish-source-remove-retry', 'resume-lease-source-remove', 'publish-source-remove-retry-delayed']) test('actual protected initial removal frame: ' + scenario, { skip: !supported || ['publish-source-remove-mac-login', 'publish-source-remove-operation', 'publish-source-remove-main'].includes(scenario) && process.platform !== 'darwin' || scenario === 'publish-source-remove-windows-uninstall' && process.platform !== 'win32', timeout: scenario.includes('source-remove') ? 180000 : 60000 }, async t => {
   const mode = scenario.endsWith('-delayed') ? scenario.slice(0, -8) : scenario
   const area = await fs.mkdtemp(path.join(root, 'case-'))
   const cancelled = ['publish-cancel', 'publish-cancel-lost', 'publish-stop', 'publish-stop-retry', 'publish-stop-lost-retry', 'publish-source-exit', 'publish-source-retry', 'publish-source-late-exit', 'publish-source-verifier', 'resume-lease-cancel'].includes(mode)
@@ -79,7 +81,7 @@ for (const scenario of ['valid', 'node-parent', 'unexpected-source-args', 'chang
     const api = await import('../dist/installation-removal.js')
     assert.equal(typeof api.removeMacLoginStartupEntry, 'function', 'Mac same-job login cleanup is missing')
   }
-  const sourceExitMode = ['publish-source-exit', 'publish-source-retry', 'publish-source-late-exit', 'resume-lease-source-exit', 'publish-source-remove', 'publish-source-remove-operation', 'publish-source-remove-cancel-retry', 'publish-source-remove-mac-login', 'publish-source-remove-complete', 'publish-source-remove-windows-uninstall', 'publish-source-remove-retry', 'resume-lease-source-remove'].includes(mode)
+  const sourceExitMode = ['publish-source-exit', 'publish-source-retry', 'publish-source-late-exit', 'resume-lease-source-exit', 'publish-source-remove', 'publish-source-remove-main', 'resume-source-remove-main', 'publish-source-remove-operation', 'publish-source-remove-cancel-retry', 'publish-source-remove-mac-login', 'publish-source-remove-complete', 'publish-source-remove-windows-uninstall', 'publish-source-remove-retry', 'resume-lease-source-remove'].includes(mode)
   const existingPhase = ({ 'resume-lease-stopping': 'stopping', 'resume-lease-removing': 'removing', 'resume-lease-completed': 'completed', 'resume-lease-source-exit': 'removing', 'resume-lease-source-remove': 'removing' })[mode] || 'preparing'
   const own = await commitDesktopInstallation(await prepareDesktopInstallation({ payload, installRoot: path.join(area, 'installation') }))
   let finite, finiteExited, finiteOutput = ''
@@ -112,6 +114,12 @@ for (const scenario of ['valid', 'node-parent', 'unexpected-source-args', 'chang
   await fs.writeFile(path.join(own.dataDir, 'preserved-user-file'), 'user bytes')
   const config = path.join(area, 'control.json'); await fs.writeFile(config, JSON.stringify(cfg))
   const env = { ...process.env, CRABOT_REMOVAL_FRAME_CONFIG: config }
+  if (['publish-source-remove-main', 'resume-source-remove-main'].includes(mode)) {
+    env.HOME = path.join(own.dataDir, 'finite-user-home')
+    await fs.mkdir(env.HOME, { mode: 0o700 })
+    env.USERPROFILE = env.HOME; env.APPDATA = path.join(env.HOME, 'Roaming'); env.LOCALAPPDATA = path.join(env.HOME, 'Local')
+    env.XDG_CONFIG_HOME = path.join(env.HOME, '.config')
+  }
   for (const key of ['ELECTRON_RUN_AS_NODE', 'NODE_OPTIONS', 'NODE_PATH', 'DATA_DIR', 'CRABOT_HOME', 'CRABOT_DEV', 'CRABOT_PORT_OFFSET']) delete env[key]
   const args = mode === 'publish-source-remove-windows-uninstall' ? ['--uninstall'] : ['--background', ...(mode === 'unexpected-source-args' ? ['--unexpected-maintenance-source'] : [])]
   const direct = mode === 'node-parent' ? await prepareDesktopRemovalGui({ installRoot: own.root, operationId }) : undefined
@@ -146,7 +154,10 @@ for (const scenario of ['valid', 'node-parent', 'unexpected-source-args', 'chang
     if (mode.includes('source-remove')) console.log('CRABOT_REMOVAL_HOST_TIMING ' + JSON.stringify({ scenario, post_source_exit_ms: Date.now() - waitingSince, controlled_pin_delay_ms: cfg.removalPinDelayMs, pin_reads: result.removalPinReads, removal_elapsed_ms: result.removalElapsedMs }))
     if (scenario.endsWith('-delayed')) { assert.ok(result.removalPinReads >= 8, JSON.stringify(result)); assert.ok(result.removalElapsedMs > 20000, JSON.stringify(result)) }
   }
-  if (mode.startsWith('resume-')) {
+  if (mode === 'resume-source-remove-main') {
+    assert.equal(result.accepted, true, JSON.stringify(result)); assert.equal(result.core_initially_missing, true)
+    assert.equal((await import('../../scripts/lib/desktop-removal-record.cjs')).default.readDesktopRemoval(own.root).phase, 'completed')
+  } else if (mode.startsWith('resume-')) {
     assert.equal(result.accepted, ['resume-valid', 'resume-core-missing', 'resume-lease-cancel', 'resume-lease-stopping', 'resume-lease-removing', 'resume-lease-completed', 'resume-lease-core-missing', 'resume-lease-source-exit', 'resume-lease-source-remove'].includes(mode), JSON.stringify(result))
     if (result.accepted) {
       assert.equal(result.resumed, true); assert.equal(result.record.operation_id, operationId); assert.equal(result.record.phase, existingPhase)
@@ -169,7 +180,7 @@ for (const scenario of ['valid', 'node-parent', 'unexpected-source-args', 'chang
     assert.equal(result.accepted, true, JSON.stringify(result)); assert.equal(result.published, true)
     assert.equal(result.cancelled, cancelled, JSON.stringify(result)); assert.equal(result.retained, !cancelled)
     assert.equal(result.cancelRejected, ['publish-module', 'publish-damaged', 'publish-replaced-record', 'publish-live', 'publish-stop-wrong-root', 'publish-stop-lost'].includes(mode), JSON.stringify(result))
-    assert.equal(result.sourceExited, ['publish-source-exit', 'publish-source-retry', 'publish-source-late-exit', 'publish-source-remove', 'publish-source-remove-operation', 'publish-source-remove-cancel-retry', 'publish-source-remove-mac-login', 'publish-source-remove-complete', 'publish-source-remove-windows-uninstall', 'publish-source-remove-retry'].includes(mode)); assert.equal(result.sourceExitRejected, ['publish-source-ignore', 'publish-source-disconnect', 'publish-source-retry', 'publish-source-late-exit'].includes(mode))
+    assert.equal(result.sourceExited, ['publish-source-exit', 'publish-source-retry', 'publish-source-late-exit', 'publish-source-remove', 'publish-source-remove-main', 'resume-source-remove-main', 'publish-source-remove-operation', 'publish-source-remove-cancel-retry', 'publish-source-remove-mac-login', 'publish-source-remove-complete', 'publish-source-remove-windows-uninstall', 'publish-source-remove-retry'].includes(mode)); assert.equal(result.sourceExitRejected, ['publish-source-ignore', 'publish-source-disconnect', 'publish-source-retry', 'publish-source-late-exit'].includes(mode))
     assert.equal(result.stopRejected, ['publish-stop-wrong-root', 'publish-stop-lost', 'publish-stop-retry', 'publish-stop-lost-retry'].includes(mode))
     if (mode === 'publish-stop-lost') assert.equal(result.phase, 'stopping')
     assert.equal(result.cancellationReplyLost, mode === 'publish-cancel-lost'); assert.equal(result.lost, mode === 'publish-lost-reply'); assert.equal(result.proofRetained, true)
@@ -181,10 +192,11 @@ for (const scenario of ['valid', 'node-parent', 'unexpected-source-args', 'chang
     assert.equal(result.accepted, false, JSON.stringify(result)); assert.equal(result.code, 'CRABOT_DESKTOP_REMOVAL', JSON.stringify(result))
     assert.equal(result.stage, mode === 'changed-copy' ? 'private-programs' : 'source-peer', JSON.stringify(result))
   }
-  if (['publish-source-remove-complete', 'publish-source-remove-operation'].includes(mode)) assert.equal(result.completionVerified, true)
+  if (['publish-source-remove-complete', 'publish-source-remove-operation', 'publish-source-remove-main', 'resume-source-remove-main'].includes(mode)) assert.equal(result.completionVerified, true)
+  if (['publish-source-remove-main', 'resume-source-remove-main'].includes(mode)) { assert.equal(result.actual_main, true); assert.equal(result.actual_progress_windows, 1); assert.equal(result.os_api_mocked, true); assert.equal(result.login_writes, process.platform === 'darwin' ? 1 : 0); assert.equal(result.registration_calls, process.platform === 'darwin' ? 1 : 0); assert.equal(result.message, '应用已卸载，数据已保留。') }
   if (mode === 'publish-source-remove-windows-uninstall') assert.equal(result.windowsUninstallEntryRemoved, true)
   if (mode === 'publish-source-remove-mac-login') { assert.equal(result.macLoginCleaned, true); assert.equal(result.macLoginApiMocked, true) }
-  if (mode.includes('source-remove')) { assert.equal(result.programsRemoved, true); assert.equal(result.controlledResourceObservation, true); assert.equal(result.removalRetried, mode === 'publish-source-remove-retry'); assert.equal((await import('../../scripts/lib/desktop-removal-record.cjs')).default.readDesktopRemoval(own.root).phase, ['publish-source-remove-complete', 'publish-source-remove-operation'].includes(mode) ? 'completed' : 'removing'); await assert.rejects(fs.lstat(own.executable), { code: 'ENOENT' }) }
+  if (mode.includes('source-remove')) { assert.equal(result.programsRemoved, true); assert.equal(result.controlledResourceObservation, true); assert.equal(result.removalRetried, mode === 'publish-source-remove-retry'); assert.equal((await import('../../scripts/lib/desktop-removal-record.cjs')).default.readDesktopRemoval(own.root).phase, ['publish-source-remove-complete', 'publish-source-remove-operation', 'publish-source-remove-main', 'resume-source-remove-main'].includes(mode) ? 'completed' : 'removing'); await assert.rejects(fs.lstat(own.executable), { code: 'ENOENT' }) }
   if ((!mode.startsWith('resume-') && !mode.startsWith('publish-')) || cancelled || mode === 'publish-inherited-cwd') await assert.rejects(fs.lstat(path.join(own.root, '.desktop-removal.json')), { code: 'ENOENT' })
   else assert.equal((await fs.lstat(path.join(own.root, '.desktop-removal.json'))).isFile(), true)
   assert.equal(await fs.readFile(path.join(own.dataDir, 'preserved-user-file'), 'utf8'), 'user bytes')

@@ -6,8 +6,47 @@ const { pathToFileURL } = require('node:url')
 const { spawn } = require('node:child_process')
 const { once } = require('node:events')
 const cfg = JSON.parse(fs.readFileSync(process.env.CRABOT_REMOVAL_FRAME_CONFIG, 'utf8'))
+if (['publish-source-remove-main', 'resume-source-remove-main'].includes(cfg.mode) && process.argv.some(value => value.startsWith('--crabot-removal-host='))) {
+  const assert = require('node:assert/strict'), electron = require('electron')
+  const native = require('./bootstrap/scripts/lib/process-identity.cjs')
+  native.inspectProgramReferences = async () => ({ complete: true, incomplete: false, processes: [], unknown_pids: [] })
+  const reference = require('./bootstrap/scripts/lib/desktop-installation.cjs').readDesktopPairReference(cfg.root)
+  const coreInitiallyMissing = !fs.existsSync(path.join(cfg.root, 'releases', reference.selection.core_id))
+  let windows = 0, loginWrites = 0, registrationCalls = 0, lastMessage = ''
+  electron.app.setLoginItemSettings = options => { loginWrites++; assert.deepEqual(options, { openAtLogin: false }) }
+  electron.app.getLoginItemSettings = () => ({ status: 'not-registered', openAtLogin: false })
+  electron.dialog.showMessageBox = async options => { lastMessage = options.message; return { response: /尚未完成/.test(options.message) ? 2 : 0 } }
+  const childProcess = require('node:child_process'), execFile = childProcess.execFile
+  childProcess.execFile = (file, args, options, callback) => {
+    if (file === '/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister') {
+      registrationCalls++; queueMicrotask(() => callback(null, '', '')); return
+    }
+    return execFile(file, args, options, callback)
+  }
+  require('node:module').syncBuiltinESMExports()
+  app.on('browser-window-created', (_event, window) => {
+    windows++; const preferences = window.webContents.getLastWebPreferences()
+    assert.equal(preferences.sandbox, true); assert.equal(preferences.contextIsolation, true); assert.equal(preferences.nodeIntegration, false)
+  })
+  const deadline = setTimeout(() => app.exit(2), 60000)
+  app.on('will-quit', () => {
+    clearTimeout(deadline)
+    const record = require('./bootstrap/scripts/lib/desktop-removal-record.cjs').readDesktopRemoval(cfg.root)
+    const complete = record?.phase === 'completed'
+    fs.writeFileSync(cfg.resultFile, JSON.stringify({ accepted: complete, published: !!record, retained: !!record, cancelled: false,
+      cancelRejected: false, sourceExited: complete, sourceExitRejected: false, stopRejected: false, cancellationReplyLost: false,
+      lost: false, proofRetained: true, programsRemoved: complete, completionVerified: complete, controlledResourceObservation: true,
+      removalRetried: false, actual_main: true, core_initially_missing: coreInitiallyMissing, actual_progress_windows: windows, os_api_mocked: true, login_writes: loginWrites,
+      registration_calls: registrationCalls, message: lastMessage }) + '\n')
+  })
+  void import(pathToFileURL(path.join(__dirname, 'full-main.js')).href).catch(error => {
+    fs.writeFileSync(cfg.resultFile, JSON.stringify({ accepted: false, code: error.code, message: String(error.message).slice(0, 256) })); app.exit(1)
+  })
+  return
+}
+
 const host = process.argv.includes('--fixture-removal-host')
-const sourceExitMode = ['publish-source-exit', 'publish-source-retry', 'publish-source-late-exit', 'resume-lease-source-exit', 'publish-source-remove', 'publish-source-remove-operation', 'publish-source-remove-cancel-retry', 'publish-source-remove-mac-login', 'publish-source-remove-complete', 'publish-source-remove-windows-uninstall', 'publish-source-remove-retry', 'resume-lease-source-remove'].includes(cfg.mode)
+const sourceExitMode = ['publish-source-exit', 'publish-source-retry', 'publish-source-late-exit', 'resume-lease-source-exit', 'publish-source-remove', 'publish-source-remove-main', 'resume-source-remove-main', 'publish-source-remove-operation', 'publish-source-remove-cancel-retry', 'publish-source-remove-mac-login', 'publish-source-remove-complete', 'publish-source-remove-windows-uninstall', 'publish-source-remove-retry', 'resume-lease-source-remove'].includes(cfg.mode)
 const profile = host ? path.resolve(process.resourcesPath, process.platform === 'darwin' ? '../../../..' : '../..', 'frame-profile') : path.join(cfg.root, 'data/desktop-profile')
 fs.mkdirSync(profile, { recursive: true, mode: 0o700 }); app.setPath('userData', profile)
 const load = name => import(pathToFileURL(path.join(__dirname, 'bootstrap/scripts/lib', name)).href)
@@ -306,7 +345,7 @@ async function publication() {
       const changed = { ...initial.record, operation_id: '11111111-1111-4111-8111-111111111111' }
       await (await load('desktop-preparation-files.mjs')).privateJson(path.join(cfg.root, '.desktop-removal.json'), changed, true)
     }
-    if (!['publish-close', 'publish-lost-reply', 'publish-source-ignore', 'publish-source-disconnect', 'publish-source-remove', 'publish-source-remove-operation', 'publish-source-remove-cancel-retry', 'publish-source-remove-mac-login', 'publish-source-remove-complete', 'publish-source-remove-windows-uninstall', 'publish-source-remove-retry'].includes(cfg.mode)) {
+    if (!['publish-close', 'publish-lost-reply', 'publish-source-ignore', 'publish-source-disconnect', 'publish-source-remove', 'publish-source-remove-main', 'resume-source-remove-main', 'publish-source-remove-operation', 'publish-source-remove-cancel-retry', 'publish-source-remove-mac-login', 'publish-source-remove-complete', 'publish-source-remove-windows-uninstall', 'publish-source-remove-retry'].includes(cfg.mode)) {
       try { await lease.cancel(); cancelled = true; await lease.cancel() }
       catch (error) { if (['publish-cancel', 'publish-stop', 'publish-stop-retry', 'publish-stop-lost-retry', 'publish-source-exit', 'publish-source-retry', 'publish-source-late-exit', 'publish-source-verifier'].includes(cfg.mode)) throw error; if (cfg.mode === 'publish-cancel-lost' && cancellationReplyLost) { await lease.cancel(); cancelled = true } else cancelRejected = error.code === 'CRABOT_DESKTOP_REMOVAL' }
     }
@@ -366,13 +405,13 @@ async function main() {
     assert.equal(first.accepted, true); assert.equal(first.published, true); assert.equal((await firstExit)[0], 0)
     fs.rmSync(prepared.directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); prepared = undefined
     fs.writeFileSync(process.env.CRABOT_REMOVAL_FRAME_CONFIG, JSON.stringify(cfg))
-    if (['resume-core-missing', 'resume-lease-core-missing', 'resume-lease-source-remove'].includes(cfg.mode)) {
+    if (['resume-core-missing', 'resume-lease-core-missing', 'resume-lease-source-remove', 'resume-source-remove-main'].includes(cfg.mode)) {
       const reference = require('./bootstrap/scripts/lib/desktop-installation.cjs').readDesktopPairReference(cfg.root)
       fs.rmSync(path.join(cfg.root, 'releases', reference.selection.core_id), { recursive: true })
     }
-    if (['resume-lease-stopping', 'resume-lease-removing', 'resume-lease-completed', 'resume-lease-source-exit', 'resume-lease-source-remove'].includes(cfg.mode)) {
+    if (['resume-lease-stopping', 'resume-lease-removing', 'resume-lease-completed', 'resume-lease-source-exit', 'resume-lease-source-remove', 'resume-source-remove-main'].includes(cfg.mode)) {
       const fence = path.join(cfg.root, '.desktop-removal.json'), current = JSON.parse(fs.readFileSync(fence, 'utf8'))
-      await (await load('desktop-preparation-files.mjs')).privateJson(fence, { ...current, phase: ['resume-lease-source-exit', 'resume-lease-source-remove'].includes(cfg.mode) ? 'removing' : cfg.mode.slice('resume-lease-'.length) }, true)
+      await (await load('desktop-preparation-files.mjs')).privateJson(fence, { ...current, phase: ['resume-lease-source-exit', 'resume-lease-source-remove', 'resume-source-remove-main'].includes(cfg.mode) ? 'removing' : cfg.mode.slice('resume-lease-'.length) }, true)
     }
     prepared = await backend.prepareExistingDesktopRemovalGui({ installRoot: cfg.root, operationId: cfg.operationId })
     if (cfg.mode === 'resume-lease-busy') {
@@ -382,7 +421,8 @@ async function main() {
   } else prepared = await (await load('desktop-removal-host.mjs')).prepareDesktopRemovalGui({ installRoot: cfg.root, operationId: cfg.operationId })
   if (cfg.mode === 'resume-source-changed') fs.appendFileSync(path.join(process.resourcesPath, 'desktop-release.json'), ' ')
   if (['changed-copy', 'resume-changed-copy'].includes(cfg.mode)) fs.appendFileSync(path.join(prepared.guiRoot, process.platform === 'darwin' ? 'Crabot.app/Contents/Resources/desktop-release.json' : 'resources/desktop-release.json'), ' ')
-  child = spawn(prepared.executable, ['--fixture-removal-host'], { env: process.env, cwd: cfg.mode === 'publish-inherited-cwd' ? cfg.root : prepared.directory, detached: true, stdio: ['ignore', 'ignore', 'ignore', 'ipc'] })
+  const hostArguments = ['publish-source-remove-main', 'resume-source-remove-main'].includes(cfg.mode) ? ['--crabot-removal-host=' + Buffer.from(JSON.stringify({ installRoot: cfg.root, operationId: cfg.operationId, existing: cfg.mode.startsWith('resume-') })).toString('base64url')] : ['--fixture-removal-host']
+  child = spawn(prepared.executable, hostArguments, { env: process.env, cwd: cfg.mode === 'publish-inherited-cwd' ? cfg.root : prepared.directory, detached: true, stdio: ['ignore', 'ignore', 'ignore', 'ipc'] })
   const native = require('./bootstrap/scripts/lib/process-identity.cjs'), childIdentity = native.inspectProcess(child.pid)
   if (sourceExitMode) await send({ handoff: true, host: childIdentity, directory: prepared.directory })
   const { createDesktopRemovalSourceExitVerifier, createExistingRemovalSourceExitVerifier } = await load('desktop-removal-source.mjs')
