@@ -17,6 +17,7 @@ void (async () => {
     const identity=require('./bootstrap/scripts/lib/process-identity.cjs'),entry=require('./bootstrap/scripts/lib/desktop-entry.cjs');
     const installation=require('./bootstrap/scripts/lib/desktop-installation.cjs');
     let lease,ruleAttempts=0;
+    const stage=name=>require('node:fs').writeFileSync(process.argv[4]+'.stage',JSON.stringify({stage:name}));
     const probe=message=>new Promise((resolve,reject)=>{process.once('message',value=>value?.kind==='fixture_source_verification'?resolve(value.accepted):reject(new Error('bad fixture reply')));process.send(message,error=>{if(error)reject(error)})});
     try {
       const ordinaryPeer=entry.verifyDesktopEntry(identity.inspectProcess(process.pid),entry.loadDesktopEntry(installation.readDesktopSelection(process.argv[1]).coreRoot));
@@ -25,6 +26,7 @@ void (async () => {
       const platformMode=['node-job-source-remove','node-job-source-platform-cancel'].includes(process.argv[3]);
       let preparePlatformRemoval;
       if(platformMode){
+        assert.equal(process.env.GITHUB_ACTIONS,'true','Privileged actor is disposable-CI only');
         // Only this finite CI actor substitutes noninteractive sudo for Polkit.
         // The copied native helper, job, kernel-state reads and IPC are actual.
         const childProcess=require('node:child_process'),launch=childProcess.spawn;
@@ -35,7 +37,9 @@ void (async () => {
         (await import('node:module')).syncBuiltinESMExports();
         const {prepareUbuntuRemovalRules}=await import(pathToFileURL(path.join(process.cwd(),'backend/rules.mjs')));
         preparePlatformRemoval=async()=>{
+          stage('system-prepare');
           const platform=await prepareUbuntuRemovalRules({installRoot:process.argv[1],operationId:process.argv[2],signal:new AbortController().signal});
+          stage('system-ready');
           if(process.argv[3]==='node-job-source-platform-cancel'){await platform.close();throw Object.assign(new Error('finite authorization cancelled'),{code:'FIXTURE_PLATFORM_CANCEL'})}
           return {remove:async()=>{
             ruleAttempts++;assert.equal((await lease.current()).phase,'removing');
@@ -49,9 +53,9 @@ void (async () => {
       const published=await lease.current(),message={kind:'desktop_removal_source_exit',installation_id:published.installation_id,operation_id:published.operation_id,source_selection:published.source_selection};
       let sourceVerifier;
       if(process.argv[3]==='node-job-source-verifier')sourceVerifier={preparing_rejected:await probe(message)===false};
-      await lease.stop();const stopped=await lease.current();
+      stage('stopping');await lease.stop();const stopped=await lease.current();
       let sourceExited;
-      if(['node-job-source-exit','node-job-source-remove','node-job-source-platform-cancel'].includes(process.argv[3])){process.removeListener('disconnect',parentLost);sourceExited=(await lease.exitSource()).source_exited}
+      if(['node-job-source-exit','node-job-source-remove','node-job-source-platform-cancel'].includes(process.argv[3])){stage('source-exit');process.removeListener('disconnect',parentLost);sourceExited=(await lease.exitSource()).source_exited}
       if(sourceVerifier){
         sourceVerifier.wrong_operation_rejected=await probe({...message,operation_id:'00000000-0000-4000-8000-000000000000'})===false;
         sourceVerifier.verified_after_stop=await probe(message)===true;
@@ -60,10 +64,10 @@ void (async () => {
       }
       let programsRemoved=false,platformCancelled=false;
       if(process.argv[3]==='node-job-source-platform-cancel'){
-        await assert.rejects(lease.removePrograms(),{code:'FIXTURE_PLATFORM_CANCEL'});assert.equal((await lease.current()).phase,'stopping');platformCancelled=true;
+        stage('cancelled-preparation-test');await assert.rejects(lease.removePrograms(),{code:'FIXTURE_PLATFORM_CANCEL'});assert.equal((await lease.current()).phase,'stopping');platformCancelled=true;
       }
       if(process.argv[3]==='node-job-source-remove'){
-        await assert.rejects(lease.removePrograms(),{code:'FIXTURE_PLATFORM_CLEANUP'});
+        stage('program-removal-test');await assert.rejects(lease.removePrograms(),{code:'FIXTURE_PLATFORM_CLEANUP'});
         assert.equal((await lease.current()).phase,'removing');
         const result=await lease.retryRemovePrograms();assert.equal(result.retained.length,0);assert.equal(ruleAttempts,2);
         const {finishDesktopRemoval}=await import(pathToFileURL(path.join(process.cwd(),'backend/bootstrap/scripts/lib/desktop-removal-job.mjs')));
@@ -76,12 +80,17 @@ void (async () => {
       const result={accepted:true,published:published.phase,stopped:stopped.phase,cancelled:!programsRemoved,ordinary_peer:ordinaryPeer,locks_reacquired:true,...(programsRemoved?{programs_removed:true,platform_cleanup_attempts:ruleAttempts,completed:true}:{}),...(platformCancelled?{platform_cancelled:true}:{}),...(sourceVerifier?{source_verifier:sourceVerifier}:{}),...(sourceExited?{source_exited:sourceExited}:{})};
       if(['node-job-source-exit','node-job-source-remove','node-job-source-platform-cancel'].includes(process.argv[3]))await(await import('node:fs/promises')).writeFile(process.argv[4],JSON.stringify(result));
       else process.stdout.write(JSON.stringify(result)+'\\n');
-    } catch(error) { if(lease)lease.close();process.stdout.write(JSON.stringify({accepted:false,code:error.code||'FIXTURE_UNEXPECTED'})+'\\n') }
+    } catch(error) {
+      if(lease)lease.close();
+      const result={accepted:false,code:error.code||'FIXTURE_UNEXPECTED',message:String(error.message).slice(0,512),stack:String(error.stack).slice(0,2048)};
+      if(['node-job-source-exit','node-job-source-remove','node-job-source-platform-cancel'].includes(process.argv[3]))await(await import('node:fs/promises')).writeFile(process.argv[4],JSON.stringify(result));
+      else process.stdout.write(JSON.stringify(result)+'\\n');
+    }
     clearTimeout(timer);process.removeListener('disconnect',parentLost);if(process.connected)process.disconnect();
   `
   const root = cfg.otherRoot || cfg.own.root
   child = spawn(prepared.executable, ['--input-type=module', '--eval', script, root, cfg.operationId, cfg.mode, cfg.resultFile], {
-    cwd: prepared.directory, env: { PATH: '', LANG: 'C.UTF-8' }, stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+    cwd: prepared.directory, env: { PATH: '', LANG: 'C.UTF-8', ...(process.env.GITHUB_ACTIONS==='true'?{GITHUB_ACTIONS:'true'}:{}) }, stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
   })
   if (['node-job-source-verifier', 'node-job-source-exit', 'node-job-source-remove', 'node-job-source-platform-cancel'].includes(cfg.mode)) {
     const verifier = load('desktop-removal-source.mjs').then(module => module.createDesktopRemovalNodeSourceExitVerifier({ installRoot: cfg.own.root, prepared, child }))

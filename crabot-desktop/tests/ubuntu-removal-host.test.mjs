@@ -112,7 +112,7 @@ for (const mode of ['valid', 'cancelled', 'changed-node', 'changed-backend', 're
 })
 
 
-for (const mode of ['node-job-valid', 'node-job-parent-flags', 'node-job-copy-changed', 'node-job-other-installation', 'node-job-source-verifier', 'node-job-source-exit', 'node-job-source-remove', 'node-job-source-platform-cancel']) test('actual private Node initial job role: ' + mode, { skip: !linux, timeout: 60000 }, async t => {
+for (const mode of ['node-job-valid', 'node-job-parent-flags', 'node-job-copy-changed', 'node-job-other-installation', 'node-job-source-verifier', 'node-job-source-exit', 'node-job-source-remove', 'node-job-source-platform-cancel']) test('actual private Node initial job role: ' + mode, { skip: !linux || ['node-job-source-remove', 'node-job-source-platform-cancel'].includes(mode) && process.env.GITHUB_ACTIONS !== 'true', timeout: 60000 }, async t => {
   const area = await fs.mkdtemp(path.join(root, 'node-role-'))
   const own = await commitDesktopInstallation(await prepareDesktopInstallation({ payload, installRoot: path.join(area, 'installation') }))
   await fs.writeFile(path.join(own.dataDir, 'preserved'), 'unchanged user content')
@@ -139,7 +139,7 @@ for (const mode of ['node-job-valid', 'node-job-parent-flags', 'node-job-copy-ch
     })
     const deadline = Date.now() + 35000
     while (!await fs.lstat(cfg.resultFile).catch(() => null) || probeKnownProcessExit([host]).state !== 'stopped') {
-      if (Date.now() >= deadline) throw new Error('Private Node did not complete after actual source exit')
+      if (Date.now() >= deadline) throw new Error('Private Node did not complete after actual source exit: ' + JSON.stringify({ result: await fs.readFile(cfg.resultFile, 'utf8').then(JSON.parse).catch(() => null), stage: await fs.readFile(cfg.resultFile + '.stage', 'utf8').then(JSON.parse).catch(() => null), exit: probeKnownProcessExit([host]).state }))
       await new Promise(resolve => setTimeout(resolve, 25))
     }
     result = JSON.parse(await fs.readFile(cfg.resultFile, 'utf8'))
