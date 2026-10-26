@@ -6,7 +6,7 @@ import type { PreparedInstallation } from './installation-entries.js'
 const load = (name: string): Promise<any> => import(new URL('./bootstrap/scripts/lib/' + name, import.meta.url).href)
 export async function prepareRetainedDesktopReinstall(options: {
   payload: string; installRoot: string; signal: AbortSignal
-  registerEntries: (prepared: PreparedInstallation) => Promise<void>
+  registerEntries: (prepared: PreparedInstallation, operationId: string) => Promise<void>
   progress: (phase: string) => void
 }): Promise<{ executable: string; dataDir: string; verification_pending: true; health_verified: false } | null> {
   try { await lstat(path.join(options.installRoot, '.desktop-removal.json')) }
@@ -26,5 +26,5 @@ export async function prepareRetainedDesktopReinstall(options: {
   options.progress('handing-off')
   const { runPreparedDesktopReinstallHandoff } = await load('desktop-reinstall-data.mjs')
   return runPreparedDesktopReinstallHandoff({ payload: options.payload, installRoot: options.installRoot,
-    operationId: record.operation_id, registerEntries: options.registerEntries })
+    operationId: record.operation_id, registerEntries: (prepared: PreparedInstallation) => options.registerEntries(prepared, record.operation_id) })
 }

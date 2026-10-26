@@ -8,13 +8,13 @@ import * as locks from './cli-lock.mjs'
 import * as runtime from './instance-runtime.mjs'
 import workspace from './workspace-maintenance.cjs'
 import removal from './desktop-removal-record.cjs'
+const same = (a, b) => JSON.stringify(a) === JSON.stringify(b)
 const removalFail = () => { throw Object.assign(new Error('卸载作业、操作锁或停止结果无法核验，剩余程序、入口和用户数据已保留。'), { code: 'CRABOT_DESKTOP_REMOVAL' }) }
 export async function captureDesktopRemovalFacts(options) {
   const own = installation.readDesktopInstallation(options.installRoot)
   const directoryIdentity = (stat) => [stat.dev, stat.ino, stat.mode, stat.uid, stat.gid].join(':')
-  const dataIdentity = directoryIdentity(physical.lstatSync(own.dataDir, { bigint: true }))
+  const dataIdentity = directoryIdentity(physical.lstatSync(own.dataDir, { bigint: true })), selection = installation.readDesktopPairReference(own.root).selection
   const initial = await proofs.readDesktopRemovalProof(own.root)
-  const same = (a, b) => JSON.stringify(a) === JSON.stringify(b)
   const proofDirectory = path.join(own.root, 'app/removals', initial.record.operation_id)
   const proofFile = path.join(proofDirectory, 'proof.json')
   const fileIdentity = stat => [stat.dev, stat.ino, stat.mode, stat.uid, stat.gid, stat.nlink, stat.size, stat.mtimeNs, stat.ctimeNs].join(':')
@@ -29,7 +29,6 @@ export async function captureDesktopRemovalFacts(options) {
     const actual = removal.readDesktopRemoval(own.root)
     if (actual?.operation_id !== options.operationId || !same(actual, initial.record)
       || !same(installation.readDesktopInstallation(own.root).record, own.record)
-      || !same(installation.readDesktopPairReference(own.root).selection, initial.record.source_selection)
       || directoryIdentity(physical.lstatSync(own.dataDir, { bigint: true })) !== dataIdentity
       || fileIdentity(physical.lstatSync(proofFile, { bigint: true })) !== proofIdentity
       || proofParents.some(([directory, expected]) => directoryIdentity(physical.lstatSync(directory, { bigint: true })) !== expected)
@@ -39,7 +38,11 @@ export async function captureDesktopRemovalFacts(options) {
   const proofCurrent = async () => {
     if (!same((await proofs.readDesktopRemovalProof(own.root)).record, initial.record)) removalFail()
   }
-  return { own, record: initial.record, proof: initial.proof, assertIdentity, proofCurrent }
+  return { own, record: initial.record, proof: initial.proof, selection, assertIdentity, proofCurrent }
+}
+
+function assertRemovalSelection(own, record) {
+  if (!same(installation.readDesktopPairReference(own.root).selection, record.source_selection)) removalFail()
 }
 
 function assertModulesStopped(own) {
@@ -51,14 +54,14 @@ function assertModulesStopped(own) {
 // Read-only stopped facts. Each consumer still owns its preparation/phase policy.
 export async function captureStoppedDesktopRemoval(options) {
   const { own, record, proof, assertIdentity, proofCurrent } = await captureDesktopRemovalFacts(options)
-  return { own, record, proof, proofCurrent, assertStopped: () => { assertIdentity(); assertModulesStopped(own) } }
+  return { own, record, proof, proofCurrent, assertStopped: () => { assertIdentity(); assertRemovalSelection(own, record); assertModulesStopped(own) } }
 }
 // Destructive admission keeps its original fixed role and field shape.
 export async function captureDesktopRemovalJob(options) {
   const { own, record, proof, assertIdentity, proofCurrent } = await captureDesktopRemovalFacts(options)
   const assertJob = () => {
     if (record.phase !== 'removing') removalFail()
-    assertIdentity()
+    assertIdentity(); assertRemovalSelection(own, record)
     try { physical.lstatSync(path.join(own.root, '.desktop-installing.json')); removalFail() }
     catch (error) { if (error.code !== 'ENOENT') throw error }
     assertModulesStopped(own)

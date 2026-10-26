@@ -336,3 +336,48 @@ test('hard-linked menu content is preserved and removal never creates missing di
   await remove(f.prepared, f.options)
   await assert.rejects(fs.stat(path.dirname(f.entry)), { code: 'ENOENT' })
 })
+
+for (const platform of ['darwin', 'linux', 'win32']) {
+  test('retained repair updates a deleted source menu without changing selection or business data: ' + platform,
+    { skip: platform === 'darwin' && windows || platform === 'win32' && !windows }, async t => {
+      const f = await updateFixture(t, platform), { registerRetainedInstallationEntries } = await import('../dist/installation-entries.js')
+      const operationId = randomUUID(), file = path.join(f.root, '.desktop-removal.json')
+      const record = { schema_version: 1, installation_id: f.prepared.installation_id, operation_id: operationId,
+        source_selection: f.prepared.selection, phase: 'completed', proof_sha256: 'd'.repeat(64) }
+      const text = JSON.stringify(record) + '\n'
+      if (windows) identity.writePrivateFile(file, text); else await fs.writeFile(file, text, { mode: 0o600 })
+      await fs.rm(f.prepared.guiRoot, { recursive: true }); await fs.rm(f.prepared.coreRoot, { recursive: true })
+      await fs.unlink(path.join(integrationRoot(f.home, platform, f.env), 'installation.json'))
+      await registerRetainedInstallationEntries(f.target, { ...f.options, operationId })
+      await registerRetainedInstallationEntries(f.target, { ...f.options, operationId })
+      assert.equal(JSON.parse(await fs.readFile(f.selector, 'utf8')).gui_id, f.prepared.selection.gui_id)
+      assert.equal(await fs.readFile(file, 'utf8'), text)
+      assert.equal((await readInstallationLocator(f.home, platform, f.env)).install_root, f.root)
+      if (platform === 'darwin') assert.equal(await fs.realpath(path.join(f.home, 'Applications/Crabot.app')), path.join(f.target.guiRoot, 'Crabot.app'))
+      else if (platform === 'win32') assert.equal(f.shell.readShortcutLink(path.join(f.env.APPDATA, 'Microsoft/Windows/Start Menu/Programs/Crabot.lnk')).target, path.join(f.target.guiRoot, 'Crabot.exe'))
+      else assert.ok((await fs.readFile(path.join(f.env.XDG_DATA_HOME, 'applications/crabot.desktop'), 'utf8')).includes(f.target.selection.gui_id))
+      assert.deepEqual(await fs.readdir(path.join(f.root, 'data')), [])
+      await assert.rejects(registerRetainedInstallationEntries(f.target, { ...f.options, operationId: randomUUID() }), { code: 'CRABOT_INSTALL_REGISTRATION' })
+    })
+}
+
+for (const changed of ['menu', 'locator', 'operation', 'phase', 'selection', 'target']) {
+  test('retained entry registration preserves existing entries when admission changes: ' + changed, async t => {
+    const f = await updateFixture(t, 'linux'), { registerRetainedInstallationEntries } = await import('../dist/installation-entries.js')
+    const operationId = randomUUID(), record = { schema_version: 1, installation_id: f.prepared.installation_id, operation_id: operationId,
+      source_selection: f.prepared.selection, phase: changed === 'phase' ? 'stopping' : 'completed', proof_sha256: 'd'.repeat(64) }
+    const file = path.join(f.root, '.desktop-removal.json'), text = JSON.stringify(record) + '\n'
+    if (windows) identity.writePrivateFile(file, text); else await fs.writeFile(file, text, { mode: 0o600 })
+    const entry = path.join(f.env.XDG_DATA_HOME, 'applications/crabot.desktop')
+    const locator = path.join(integrationRoot(f.home, 'linux', f.env), 'installation.json')
+    if (changed === 'menu') await fs.writeFile(entry, 'custom entry')
+    if (changed === 'locator') { const value = JSON.parse(await fs.readFile(locator, 'utf8')); value.installation_id = randomUUID(); await fs.writeFile(locator, JSON.stringify(value)) }
+    if (changed === 'selection') { const value = { ...f.target.selection, gui_id: randomUUID() }; await fs.writeFile(f.selector, JSON.stringify(value) + '\n') }
+    if (changed === 'target') { await fs.rename(f.target.guiRoot, f.target.guiRoot + '-retained'); await fs.symlink(f.target.guiRoot + '-retained', f.target.guiRoot, windows ? 'junction' : 'dir') }
+    const before = await Promise.all([fs.readFile(entry), fs.readFile(locator)])
+    await assert.rejects(registerRetainedInstallationEntries(f.target, { ...f.options,
+      operationId: changed === 'operation' ? randomUUID() : operationId }), { code: 'CRABOT_INSTALL_REGISTRATION' })
+    assert.deepEqual(await Promise.all([fs.readFile(entry), fs.readFile(locator)]), before)
+    assert.equal(await fs.readFile(file, 'utf8'), text)
+  })
+}

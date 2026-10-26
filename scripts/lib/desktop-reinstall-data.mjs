@@ -15,7 +15,8 @@ import { readDesktopRemoval } from './desktop-removal-record.cjs'
 import { fileURLToPath } from 'node:url'
 import { verifyDesktopPayload, verifyDesktopPrograms } from './desktop-payload.mjs'
 import { matchesDesktopRemovalProgram } from './desktop-removal-programs.mjs'
-import { readPending } from './desktop-preparation-files.mjs'
+import { readPending, privateJson } from './desktop-preparation-files.mjs'
+import { assertReinstallVersion } from './desktop-reinstall.mjs'
 import { verifyDataCompatibility } from './data-compatibility.mjs'
 const { promises: fs } = physical
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b)
@@ -30,7 +31,8 @@ async function withReinstallData({ payload, installRoot, operationId, verifyStop
   try {
     dataLock = await acquireExistingCliLock(own.dataDir, 'desktop-reinstall-inspect'); dataToken = cliLockToken(dataLock)
     const context = await captureStoppedDesktopRemoval({ installRoot: own.root, operationId })
-    if (!same(context.own.record, own.record) || !same(context.proof.payload, source.record)) fail()
+    if (!same(context.own.record, own.record)) fail()
+    assertReinstallVersion(context.record.source_selection.version, source.record.selection.version)
     const pending = await readPending(own.root)
     const payloadSha = digest(JSON.stringify(source.record) + '\n')
     if (pending && (pending.installation_id !== own.record.installation_id || !same(pending.selection, source.record.selection) || pending.payload_sha256 !== payloadSha)) fail()
@@ -88,7 +90,11 @@ export function previewPreparedDesktopReinstallData(options) {
       assertDirectories(); await current()
       await verifyDesktopPrograms(core, gui, source.record, { signal: options.signal })
       for (const [key, name] of [['release', 'core-release.json'], ['inventory', 'core-files.json'], ['host', 'desktop-host.json']]) {
-        const file = path.join(core, name), text = context.proof.core[key], stat = physical.lstatSync(file, { bigint: true })
+        const file = path.join(core, name), stat = physical.lstatSync(file, { bigint: true })
+        // The old proof remains history; a different target is checked against
+        // the fully verified incoming package, never against deleted old code.
+        const text = same(source.record, context.proof.payload) ? context.proof.core[key]
+          : await fs.readFile(path.join(source.directory, 'core', name))
         if (!await matchesDesktopRemovalProgram(file, { type: 'file', size: Buffer.byteLength(text), sha256: digest(text) }, stat,
           { owned: (file, stat) => process.platform === 'win32' ? identity.isOwnedFile(file) : stat.uid === BigInt(process.getuid()), signal: options.signal })) fail()
       }
@@ -133,22 +139,27 @@ export async function handoffPreparedDesktopReinstall({ payload, installRoot, op
   try {
     dataLock = await acquireExistingCliLock(own.dataDir, 'desktop-reinstall-handoff'); dataToken = cliLockToken(dataLock)
     const context = await captureDesktopRemovalFacts({ installRoot: own.root, operationId })
-    if (!['removing', 'completed'].includes(context.record.phase) || !same(source.record, context.proof.payload)) fail()
+    if (!['removing', 'completed'].includes(context.record.phase)) fail()
+    assertReinstallVersion(context.record.source_selection.version, source.record.selection.version)
     const prepared = { installRoot: own.root, installation_id: own.record.installation_id, selection: source.record.selection, coreRoot: core, guiRoot: gui }
     const pending = await readPending(own.root), payloadSha = digest(JSON.stringify(source.record) + '\n')
     if (pending && (pending.phase !== 'prepared' || pending.installation_id !== own.record.installation_id
       || !same(pending.selection, prepared.selection) || pending.payload_sha256 !== payloadSha)) fail()
-    const versions = await import('./version-maintenance.mjs')
+    const versions = await import('./version-maintenance.mjs'), original = context.record.source_selection
+    const sourceRoot = path.join(own.root, 'releases', original.core_id)
+    let expectedSelection = context.selection
+    if (!same(expectedSelection, original) && !same(expectedSelection, prepared.selection)) fail()
     const matching = record => record?.schema_version === 3 && record.system_operation_id === undefined
-      && record.data_dir === own.dataDir && record.install_root === core && record.source_version === prepared.selection.version
-      && record.source_inventory_sha256 === prepared.selection.core_id && record.target_version === prepared.selection.version
+      && record.data_dir === own.dataDir && record.install_root === sourceRoot && record.source_version === original.version
+      && record.source_inventory_sha256 === original.core_id && record.target_version === prepared.selection.version
       && (record.phase === 'preparing' && record.target_core === undefined
         || record.target_core?.root === core && record.target_core.inventory_sha256 === prepared.selection.core_id)
       && ['preparing', 'prepared', 'installing', 'verifying'].includes(record.phase)
     let record = versions.readVersionMaintenance(own.dataDir)
-    if (record && !matching(record)) fail()
+    if (record && !matching(record) || !record && !same(expectedSelection, original)) fail()
     const current = async () => {
       context.assertIdentity(); await context.proofCurrent(); context.assertIdentity()
+      if (!same(installation.readDesktopPairReference(own.root).selection, expectedSelection)) fail()
       try { if (physical.readdirSync(path.join(own.dataDir, 'module-runtime-registry/records')).some(name => name.endsWith('.json'))) fail() }
       catch (error) { if (error.code !== 'ENOENT') throw error }
       const actual = versions.readVersionMaintenance(own.dataDir)
@@ -161,14 +172,18 @@ export async function handoffPreparedDesktopReinstall({ payload, installRoot, op
       const proof = await readOriginalDesktopPayload(own.root, prepared.selection)
       if (proof.text !== JSON.stringify(source.record) + '\n') fail()
       verifyDataCompatibility(core, own.dataDir)
+      const inventory = JSON.parse(await fs.readFile(path.join(core, 'core-files.json'), 'utf8')).files
+      const command = process.platform === 'win32' ? 'crabot.exe' : 'crabot', stat = physical.lstatSync(own.command, { bigint: true })
+      if (!await matchesDesktopRemovalProgram(own.command, inventory['bin/' + command], stat,
+        { owned: (file, stat) => process.platform === 'win32' ? identity.isOwnedFile(file) : stat.uid === BigInt(process.getuid()) })) fail()
       await current()
     }
     await programs()
     await registerEntries(prepared)
     await programs()
-    if (!record) record = await versions.beginVersionMaintenance(own.dataDir, core, prepared.selection.version, prepared.selection.version, { dataProtection: 'scoped' })
+    if (!record) record = await versions.beginRetainedDesktopVersionMaintenance({ installRoot: own.root, operationId, selection: prepared.selection })
     if (record.phase === 'preparing') {
-      record = await versions.bindVersionMaintenanceTarget(own.dataDir, record.id, core)
+      if (!record.target_core) record = await versions.bindVersionMaintenanceTarget(own.dataDir, record.id, core)
       record = await versions.prepareScopedVersionMaintenance(own.dataDir, record.id)
     }
     if (record.phase === 'prepared') await versions.markVersionMaintenanceInstalling(own.dataDir, record.id)
@@ -177,6 +192,11 @@ export async function handoffPreparedDesktopReinstall({ payload, installRoot, op
     const syncRoot = async () => {
       if (process.platform === 'win32') return
       const directory = await fs.open(own.root, 'r'); try { await directory.sync() } finally { await directory.close() }
+    }
+    if (!same(expectedSelection, prepared.selection)) {
+      await privateJson(path.join(own.root, 'current-release.json'), prepared.selection, true)
+      expectedSelection = prepared.selection
+      await current()
     }
     if (!same(await readPending(own.root), pending)) fail()
     if (pending) { await fs.unlink(path.join(own.root, '.desktop-installing.json')); await syncRoot() }

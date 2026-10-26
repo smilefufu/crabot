@@ -7,6 +7,7 @@ import { userInfo } from 'node:os'
 import { withFencedLegacySystemRuntime } from './legacy-system-runtime.mjs'
 import identity from './process-identity.cjs'
 import management from './desktop-management.cjs'
+import installation from './desktop-installation.cjs'
 import { acquireStartupLock, releaseCliLock, cliLockToken } from './cli-lock.mjs'
 import { verifyCoreRelease } from './core-release.mjs'
 import { inspectInstance } from './instance-runtime.mjs'
@@ -101,6 +102,39 @@ export async function beginVersionMaintenance(dataDir, root, targetVersion, sour
     phase: 'preparing', backup: null, ...(dataProtection ? { data_protection: dataProtection } : {}), ...(systemOperationId ? { system_operation_id: systemOperationId } : {}) }
   write(dataDir, record, true); return record
 }
+// A retained installation may no longer have its old Core. Its immutable
+// removal proof supplies historical source facts, never old-code execution.
+export async function beginRetainedDesktopVersionMaintenance({ installRoot, operationId, selection }) {
+  if (!selection || selection.schema_version !== 1 || !version(selection.version) || !uuid(selection.gui_id)
+    || !/^[a-f0-9]{64}$/.test(selection.core_id) || Object.keys(selection).length !== 4) fail()
+  const { captureDesktopRemovalFacts } = await import('./desktop-removal-context.mjs')
+  const { readOriginalDesktopPayload } = await import('./desktop-program-proof.mjs')
+  const { readPending } = await import('./desktop-preparation-files.mjs')
+  const { assertReinstallVersion } = await import('./desktop-reinstall.mjs')
+  const context = await captureDesktopRemovalFacts({ installRoot, operationId }), { own } = context
+  const dataDir = locked(management.requireExistingDataRoot(own.dataDir)), source = context.record.source_selection
+  const current = () => {
+    context.assertIdentity()
+    if (!['removing', 'completed'].includes(context.record.phase) || readVersionMaintenance(dataDir)
+      || JSON.stringify(installation.readDesktopPairReference(own.root).selection) !== JSON.stringify(source)) fail()
+  }
+  current(); assertReinstallVersion(source.version, selection.version)
+  const targetRoot = realpathSync(path.join(own.root, 'releases', selection.core_id))
+  const target = await verifyCoreRelease(targetRoot, { version: selection.version })
+  if (target.inventory_sha256 !== selection.core_id) fail()
+  const payload = await readOriginalDesktopPayload(own.root, selection), pending = await readPending(own.root)
+  if (payload.record.platform !== process.platform || payload.record.arch !== process.arch
+    || pending && (pending.phase !== 'prepared' || pending.installation_id !== own.record.installation_id
+      || JSON.stringify(pending.selection) !== JSON.stringify(selection) || pending.payload_sha256 !== payload.sha256)) fail()
+  current(); await context.proofCurrent(); current()
+  if (JSON.stringify(await readPending(own.root)) !== JSON.stringify(pending)) fail()
+  const record = { schema_version: 3, id: randomUUID(), data_dir: dataDir,
+    install_root: path.join(own.root, 'releases', source.core_id), source_version: source.version, source_inventory_sha256: source.core_id,
+    target_version: target.version, target_core: { root: targetRoot, inventory_sha256: target.inventory_sha256 },
+    phase: 'preparing', backup: null, data_protection: 'scoped' }
+  write(dataDir, record, true); return record
+}
+
 // Explicit legacy-user adapter. The ordinary sealed source path above remains
 // distinct; no old release is assigned a fabricated Core inventory/version.
 async function legacyUserSource(record) {

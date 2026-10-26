@@ -1398,29 +1398,31 @@ for (const mode of ['wrong-operation', 'active-module', 'program-changed', 'lost
   await assert.rejects(fs.lstat(path.join(data, 'mm.pid')), { code: 'ENOENT' })
 })
 
-for (const outcome of ['ready', 'health-failed', 'migration-interrupted']) test('actual GUI controller runs restored-pair recovery and keeps failed health protected: ' + outcome, { skip: process.env.CRABOT_PAIRED_CONTROLLER_TEST !== '1' }, async t => {
+for (const [outcome, version] of [['ready'], ['health-failed'], ['migration-interrupted'], ['ready', '1.2.3'], ['ready', '1.2.4'], ['health-failed', '1.2.4'], ['migration-interrupted', '1.2.4']]) test('actual GUI controller runs restored-pair recovery and keeps failed health protected: ' + outcome + (version ? ' new target ' + version : ''), { skip: process.env.CRABOT_PAIRED_CONTROLLER_TEST !== '1' }, async t => {
   const f = await removalProofFixture(t, { schema: 'v2', functional: true })
   f.record.phase = 'completed'; await f.publish()
   const data = path.join(f.target, 'data'), directory = path.join(data, 'fixture')
   await fs.mkdir(directory); await fs.writeFile(path.join(directory, 'SCHEMA_VERSION'), 'v1'); await fs.writeFile(path.join(directory, 'content'), 'before')
   const { prepareDesktopRemovalReinstall } = await import('../desktop-reinstall.mjs')
-  await prepareDesktopRemovalReinstall({ payload: f.payload, installRoot: f.target, operationId: f.record.operation_id, verifyStopped: async () => {} })
+  const incoming = version ? await fixture(t, { version, schema: 'v2', functional: true }) : f
+  if (version) await fs.rm(f.prepared.coreRoot, { recursive: true })
+  const prepared = await prepareDesktopRemovalReinstall({ payload: incoming.payload, installRoot: f.target, operationId: f.record.operation_id, verifyStopped: async () => {} })
   const code = `
     import assert from 'node:assert/strict';import fs from 'node:fs';import path from 'node:path';import {fileURLToPath} from 'node:url';
-    const [module,payload,root,id,outcome,controllerModule]=process.argv.slice(1),core=fileURLToPath(new URL('../../',module)),data=path.join(root,'data');
+    const [module,payload,root,id,outcome,controllerModule,appVersion]=process.argv.slice(1),core=fileURLToPath(new URL('../../',module)),data=path.join(root,'data');
     const {handoffPreparedDesktopReinstall}=await import(module);
     const handoff=await handoffPreparedDesktopReinstall({payload,installRoot:root,operationId:id,registerEntries:async()=>{}});
     const versions=await import(new URL('./version-maintenance.mjs',module));
     const {applyStartupMigrations}=await import(new URL('./core-preparation.mjs',module));
     const {DesktopController}=await import(controllerModule);
-    const controller=new DesktopController({coreRoot:core,dataRoot:data,appVersion:'1.2.3',platform:process.platform});
+    const controller=new DesktopController({coreRoot:core,dataRoot:data,appVersion,platform:process.platform});
     let starts=0,healthy=outcome==='ready';
     // Only the service/health seam is controlled. Ordinary controller admission,
     // scoped conversion, backups and version-fence finalization are actual code.
     controller.startCore=async()=>{
       starts++;
       if(outcome!=='migration-interrupted')await applyStartupMigrations(core,data,{PATH:'',CRABOT_PRODUCT_REQUIRED:'1',...(process.platform==='win32'?{SystemRoot:process.env.SystemRoot}:{})});
-      if(healthy)controller.host.publish({phase:'ready',app_version:'1.2.3',platform:process.platform,instance_id:'1'.repeat(64),generation:'11111111-1111-4111-8111-111111111111',admin_url:'http://127.0.0.1:3000'});
+      if(healthy)controller.host.publish({phase:'ready',app_version:appVersion,platform:process.platform,instance_id:'1'.repeat(64),generation:'11111111-1111-4111-8111-111111111111',admin_url:'http://127.0.0.1:3000'});
       else controller.host.status('error');
     };
     try{
@@ -1439,10 +1441,10 @@ for (const outcome of ['ready', 'health-failed', 'migration-interrupted']) test(
       console.log(JSON.stringify({starts,protected:pending!==null}));
     }finally{controller.close()}
   `
-  const runtime = (await import('../product-runtime.cjs')).default.loadProductRuntime(f.prepared.coreRoot, { required: true, full: true })
+  const runtime = (await import('../product-runtime.cjs')).default.loadProductRuntime(prepared.coreRoot, { required: true, full: true })
   const result = await promisify(execFile)(runtime.executables.node, ['--input-type=module', '-e', code,
-    pathToFileURL(path.join(f.prepared.coreRoot, 'scripts/lib/desktop-reinstall-data.mjs')).href, f.payload, f.target, f.record.operation_id, outcome,
-    new URL('../../../crabot-desktop/dist/controller.js', import.meta.url).href],
+    pathToFileURL(path.join(prepared.coreRoot, 'scripts/lib/desktop-reinstall-data.mjs')).href, incoming.payload, f.target, f.record.operation_id, outcome,
+    new URL('../../../crabot-desktop/dist/controller.js', import.meta.url).href, version || '1.2.3'],
     { env: { PATH: '', ...(windows ? { SystemRoot: process.env.SystemRoot } : {}) }, timeout: 45000, maxBuffer: 65536 })
   assert.deepEqual(JSON.parse(result.stdout), { starts: outcome === 'health-failed' ? 2 : 1, protected: outcome === 'migration-interrupted' })
   assert.equal(await fs.readFile(path.join(directory, 'SCHEMA_VERSION'), 'utf8'), outcome === 'migration-interrupted' ? 'v1' : 'v2\n')
@@ -1519,13 +1521,16 @@ for (const mode of ['fresh', 'completed', 'not-removing', 'cancelled', 'changed-
   await assert.rejects(fs.lstat(path.join(data, 'mm.pid')), { code: 'ENOENT' })
 })
 
-for (const damaged of [false, true]) test('actual GUI controller runs ordinary retained installer without declaring unverified service complete: ' + (damaged ? 'invalid package' : 'pending health'),
+for (const [damaged, version] of [[false], [true], [false, '1.2.3'], [false, '1.2.4']]) test('actual GUI controller runs ordinary retained installer without declaring unverified service complete: ' + (damaged ? 'invalid package' : 'pending health') + (version ? ' new target ' + version : ''),
   { skip: process.env.CRABOT_PAIRED_CONTROLLER_TEST !== '1', timeout: 120000 }, async t => {
     const f = await removalProofFixture(t, { schema: 'v2', functional: true })
     f.record.phase = 'completed'; await f.publish()
+    const incoming = version ? await fixture(t, { version, schema: 'v2', functional: true }) : f
+    const selection = (await verifyDesktopPayload(incoming.payload)).record.selection
+    if (version) await fs.rm(f.prepared.coreRoot, { recursive: true })
     const resources = path.join(f.parent, 'installer-resources'), home = path.join(f.parent, 'isolated-home'), reportFile = path.join(f.parent, 'installer-report.json')
     await fs.mkdir(resources); await fs.mkdir(home)
-    await fs.rename(f.payload, path.join(resources, 'offline'))
+    await fs.rename(incoming.payload, path.join(resources, 'offline'))
     if (damaged) await fs.appendFile(path.join(resources, 'offline/core/cli.mjs'), 'changed')
     const installer = path.join(f.parent, 'installer')
     await fs.cp(new URL('../../../crabot-desktop/dist/', import.meta.url), path.join(installer, 'dist'), { recursive: true })
@@ -1533,7 +1538,12 @@ for (const damaged of [false, true]) test('actual GUI controller runs ordinary r
     await fs.mkdir(path.join(installer, 'node_modules'), { recursive: true })
     await fs.symlink(fileURLToPath(new URL('../../../crabot-client', import.meta.url)), path.join(installer, 'node_modules/crabot-client'), windows ? 'junction' : 'dir')
     await fs.cp(path.join(resources, 'offline/core/node_modules/@electron/asar'), path.join(installer, 'node_modules/@electron/asar'), { recursive: true })
-    const options = { root: f.target, home, resources, report: reportFile, application: path.join(f.prepared.guiRoot, 'Crabot.app'), entry: path.join(installer, 'dist/installer-main.js') }
+    const options = { root: f.target, home, resources, report: reportFile, application: path.join(f.target, 'app/releases', selection.gui_id, 'Crabot.app'), entry: path.join(installer, 'dist/installer-main.js') }
+    if (version) {
+      const { registerInstallationEntries } = await import('../../../crabot-desktop/dist/installation-entries.js')
+      const shell = { writeShortcutLink() { throw new Error('Native shortcut creation belongs to the Electron actor') }, readShortcutLink() { throw new Error('Native shortcut reading belongs to the Electron actor') } }
+      if (!windows) await registerInstallationEntries(f.prepared, { home, platform: process.platform, env: { XDG_CONFIG_HOME: path.join(home, '.config'), XDG_DATA_HOME: path.join(home, '.local/share') }, shell, registerMac: async () => {} })
+    }
     const config = path.join(f.parent, 'installer-config.json'); await fs.writeFile(config, JSON.stringify(options))
     const require = createRequire(new URL('../../../crabot-desktop/package.json', import.meta.url)), env = { ...process.env, HOME: home,
       APPDATA: path.join(home, 'AppData/Roaming'), LOCALAPPDATA: path.join(home, 'AppData/Local'), XDG_CONFIG_HOME: path.join(home, '.config'), XDG_DATA_HOME: path.join(home, '.local/share') }
@@ -1556,7 +1566,7 @@ for (const damaged of [false, true]) test('actual GUI controller runs ordinary r
       if (damaged) assert.throws(() => installation.readDesktopSelection(f.target), { code: 'CRABOT_DESKTOP_REMOVAL_PENDING' })
       else {
         assert.match(report.dialogs.at(-1).message, /尚待启动核验/)
-        assert.deepEqual(installation.readDesktopSelection(f.target).selection, f.selection)
+        assert.deepEqual(installation.readDesktopSelection(f.target).selection, selection)
         const versions = await import('../version-maintenance.mjs')
         assert.throws(() => versions.assertVersionMaintenanceAllowsStart(path.join(f.target, 'data')), { code: 'CRABOT_MAINTENANCE_PENDING' })
       }
@@ -1626,4 +1636,113 @@ for (const mode of ['missing', 'known-old', 'known-new', 'custom', 'lost-publica
   assert.deepEqual(installation.readDesktopPairReference(f.target).selection, f.selection)
   assert.throws(() => installation.readDesktopSelection(f.target), { code: 'CRABOT_DESKTOP_REMOVAL_PENDING' })
   assert.equal(await fs.readFile(path.join(f.target, 'data/retained-user-file'), 'utf8'), 'user content')
+})
+
+for (const version of ['1.2.3', '1.2.4']) test('new retained target handoff preserves historical source facts without reconstructing the removed Core: ' + version, async t => {
+  const f = await removalProofFixture(t, { schema: 'v1', functional: true })
+  f.record.phase = 'completed'; await f.publish()
+  const proof = await fs.readFile(f.file), data = path.join(f.target, 'data'), directory = path.join(data, 'fixture')
+  await fs.mkdir(directory); await fs.writeFile(path.join(directory, 'SCHEMA_VERSION'), 'v1'); await fs.writeFile(path.join(directory, 'content'), 'before')
+  const next = await fixture(t, { version, schema: 'v2', functional: true })
+  await fs.rm(f.prepared.coreRoot, { recursive: true })
+  const { prepareDesktopRemovalReinstall } = await import('../desktop-reinstall.mjs')
+  const prepared = await prepareDesktopRemovalReinstall({ payload: next.payload, installRoot: f.target, operationId: f.record.operation_id, verifyStopped: async () => {} })
+  const runtime = (await import('../product-runtime.cjs')).default.loadProductRuntime(prepared.coreRoot, { required: true, full: true })
+  const code = `const{handoffPreparedDesktopReinstall}=await import(process.argv[1]);console.log(JSON.stringify(await handoffPreparedDesktopReinstall({payload:process.argv[2],installRoot:process.argv[3],operationId:process.argv[4],registerEntries:async()=>{}})));`
+  const { stdout } = await promisify(execFile)(runtime.executables.node, ['--input-type=module', '-e', code,
+    pathToFileURL(path.join(prepared.coreRoot, 'scripts/lib/desktop-reinstall-data.mjs')).href, next.payload, f.target, f.record.operation_id],
+    { env: { PATH: '', ...(windows ? { SystemRoot: process.env.SystemRoot } : {}) }, timeout: 45000, maxBuffer: 65536 })
+  assert.equal(JSON.parse(stdout).verification_pending, true)
+  assert.deepEqual(installation.readDesktopSelection(f.target).selection, next.selection)
+  const versions = await import('../version-maintenance.mjs'), record = versions.readVersionMaintenance(data)
+  assert.equal(record.source_version, f.selection.version); assert.equal(record.source_inventory_sha256, f.selection.core_id)
+  assert.equal(record.install_root, f.prepared.coreRoot); assert.equal(record.target_version, version)
+  assert.deepEqual(record.target_core, { root: prepared.coreRoot, inventory_sha256: next.selection.core_id })
+  assert.equal(record.phase, 'installing'); assert.throws(() => versions.assertVersionMaintenanceAllowsStart(data), { code: 'CRABOT_MAINTENANCE_PENDING' })
+  await assert.rejects(fs.lstat(f.prepared.coreRoot), { code: 'ENOENT' })
+  assert.deepEqual(await fs.readFile(f.file), proof)
+  assert.equal(await fs.readFile(path.join(directory, 'content'), 'utf8'), 'before')
+  await assert.rejects(fs.lstat(path.join(directory, 'executions')), { code: 'ENOENT' })
+  await assert.rejects(fs.lstat(path.join(data, 'mm.pid')), { code: 'ENOENT' })
+})
+
+for (const mode of ['selector-lost', 'wrong-selector', 'foreign-maintenance', 'launcher-changed']) test('new-target handoff keeps guards and resumes only its verified selection: ' + mode, async t => {
+  const f = await removalProofFixture(t, { schema: 'v1', functional: true })
+  f.record.phase = 'completed'; await f.publish()
+  const next = await fixture(t, { version: '1.2.4', schema: 'v2', functional: true })
+  await fs.rm(f.prepared.coreRoot, { recursive: true })
+  const { prepareDesktopRemovalReinstall } = await import('../desktop-reinstall.mjs'), { privateJson, readPending } = await import('../desktop-preparation-files.mjs')
+  const options = { payload: next.payload, installRoot: f.target, operationId: f.record.operation_id, verifyStopped: async () => {} }
+  const prepared = await prepareDesktopRemovalReinstall(options), initial = await readPending(f.target), data = path.join(f.target, 'data')
+  if (mode === 'wrong-selector') await privateJson(path.join(f.target, 'current-release.json'), { ...f.selection, gui_id: randomUUID() }, true)
+  if (mode === 'launcher-changed') await fs.writeFile(path.join(f.target, 'bin', launcher), 'keep user command')
+  const runtime = (await import('../product-runtime.cjs')).default.loadProductRuntime(prepared.coreRoot, { required: true, full: true })
+  const code = `
+    import fs from 'node:fs';import path from 'node:path';import{fileURLToPath}from'node:url';
+    const [module,payload,root,id,mode]=process.argv.slice(1);
+    const versions=await import(new URL('./version-maintenance.mjs',module)),locks=await import(new URL('./cli-lock.mjs',module));
+    if(mode==='foreign-maintenance'){
+      const lock=await locks.acquireExistingCliLock(path.join(root,'data'),'foreign-maintenance');
+      try{await versions.beginVersionMaintenance(path.join(root,'data'),fileURLToPath(new URL('../../',module)),'9.0.0',undefined,{dataProtection:'scoped'})}finally{locks.releaseCliLock(lock)}
+    }
+    const rename=fs.promises.rename;
+    fs.promises.rename=async(from,to)=>{await rename(from,to);if(mode==='selector-lost'&&to===path.join(root,'current-release.json'))throw new Error('selector publication reply lost')};
+    const {handoffPreparedDesktopReinstall}=await import(module);
+    try{console.log(JSON.stringify(await handoffPreparedDesktopReinstall({payload,installRoot:root,operationId:id,registerEntries:async()=>{}})))}
+    catch(error){console.log(JSON.stringify({rejected:true}));process.exitCode=17}
+  `
+  const execute = async value => promisify(execFile)(runtime.executables.node, ['--input-type=module', '-e', code,
+    pathToFileURL(path.join(prepared.coreRoot, 'scripts/lib/desktop-reinstall-data.mjs')).href, next.payload, f.target, f.record.operation_id, value],
+    { env: { PATH: '', ...(windows ? { SystemRoot: process.env.SystemRoot } : {}) }, timeout: 45000, maxBuffer: 65536 })
+  await assert.rejects(execute(mode), error => error.code === 17)
+  assert.throws(() => installation.readDesktopSelection(f.target), { code: 'CRABOT_DESKTOP_REMOVAL_PENDING' })
+  const versions = await import('../version-maintenance.mjs'), record = versions.readVersionMaintenance(data)
+  if (mode === 'selector-lost') {
+    assert.deepEqual(installation.readDesktopPairReference(f.target).selection, next.selection)
+    assert.equal(record.phase, 'installing')
+    const copied = t.mock.method(fs, 'cp', async () => { throw new Error('valid programs must not be copied again') })
+    await prepareDesktopRemovalReinstall(options); copied.mock.restore()
+    assert.equal((await readPending(f.target)).id, initial.id)
+    assert.equal(versions.readVersionMaintenance(data).id, record.id)
+    await execute('continue')
+    assert.deepEqual(installation.readDesktopSelection(f.target).selection, next.selection)
+    assert.equal(versions.readVersionMaintenance(data).id, record.id)
+  } else if (mode === 'foreign-maintenance') assert.equal(record.target_version, '9.0.0')
+  else assert.equal(record, null)
+  if (mode === 'launcher-changed') assert.equal(await fs.readFile(path.join(f.target, 'bin', launcher), 'utf8'), 'keep user command')
+  assert.equal(await fs.readFile(path.join(data, 'retained-user-file'), 'utf8'), 'user content')
+  await assert.rejects(fs.lstat(path.join(data, 'mm.pid')), { code: 'ENOENT' })
+})
+
+for (const [capture, assertion] of [['captureStoppedDesktopRemoval', 'assertStopped'], ['captureDesktopRemovalJob', 'assertJob']]) test('original removal role still rejects a different selected pair without other guards: ' + capture, async t => {
+  const f = await removalProofFixture(t)
+  f.record.phase = 'removing'; await f.publish()
+  const { privateJson } = await import('../desktop-preparation-files.mjs'), locks = await import('../cli-lock.mjs')
+  await privateJson(path.join(f.target, 'current-release.json'), { ...f.selection, gui_id: randomUUID() }, true)
+  const root = await locks.acquireExistingCliLock(f.target, 'original-removal-role'), data = await locks.acquireExistingCliLock(path.join(f.target, 'data'), 'original-removal-role')
+  try {
+    const roles = await import('../desktop-removal-context.mjs'), context = await roles[capture]({ installRoot: f.target, operationId: f.record.operation_id })
+    assert.throws(() => context[assertion](), { code: 'CRABOT_DESKTOP_REMOVAL' })
+  } finally { locks.releaseCliLock(data); locks.releaseCliLock(root) }
+})
+
+for (const version of ['1.2.3', '1.2.4']) test('new retained pair previews actual migration scopes after the original Core is deleted: ' + version, async t => {
+  const f = await removalProofFixture(t, { schema: 'v1', functional: true })
+  const next = await fixture(t, { version, schema: 'v2', functional: true })
+  const data = path.join(f.target, 'data'), directory = path.join(data, 'fixture')
+  await fs.mkdir(directory); await fs.writeFile(path.join(directory, 'SCHEMA_VERSION'), 'v1'); await fs.writeFile(path.join(directory, 'content'), 'before')
+  await fs.rm(f.prepared.coreRoot, { recursive: true })
+  const input = { payload: next.payload, installRoot: f.target, operationId: f.record.operation_id, verifyStopped: async () => {} }
+  const { inspectDesktopReinstallData, previewPreparedDesktopReinstallData } = await import('../desktop-reinstall-data.mjs')
+  const versions = await inspectDesktopReinstallData(input)
+  assert.equal(versions[0].codeVersion, 'v2'); assert.equal(versions[0].dataVersion, 'v1')
+  const { prepareDesktopRemovalReinstall } = await import('../desktop-reinstall.mjs')
+  await prepareDesktopRemovalReinstall(input)
+  const preview = await previewPreparedDesktopReinstallData(input)
+  assert.equal(preview.modules[0].codeVersion, 'v2'); assert.equal(preview.modules[0].dataVersion, 'v1')
+  assert.ok(preview.modules[0].scope.writes.includes(path.join('fixture', 'content')))
+  assert.equal(await fs.readFile(path.join(directory, 'content'), 'utf8'), 'before')
+  assert.equal(await fs.readFile(path.join(directory, 'SCHEMA_VERSION'), 'utf8'), 'v1')
+  await assert.rejects(fs.lstat(path.join(directory, 'executions')), { code: 'ENOENT' })
+  assert.deepEqual(installation.readDesktopPairReference(f.target).selection, f.selection)
 })

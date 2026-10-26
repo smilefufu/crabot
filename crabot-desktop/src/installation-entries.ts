@@ -9,6 +9,7 @@ import { promisify } from 'node:util'
 import type { Shell } from 'electron'
 const identity = createRequire(import.meta.url)('./bootstrap/scripts/lib/process-identity.cjs')
 const installation = createRequire(import.meta.url)('./bootstrap/scripts/lib/desktop-installation.cjs')
+const removal = createRequire(import.meta.url)('./bootstrap/scripts/lib/desktop-removal-record.cjs')
 export interface PreparedInstallation {
   installRoot: string
   installation_id: string
@@ -161,6 +162,17 @@ export async function replaceInstallationEntries(source: PreparedInstallation, p
   await ownedDirectory(registration)
   await writeUnchanged(path.join(registration, 'installation.json'), JSON.stringify({ schema_version: 1, owner: identity.inspectProcess(process.pid).owner,
     install_root: root.root, installation_id: prepared.installation_id }) + '\n')
+  await replaceKnownDesktopMenu(source, prepared, options)
+  await registerInstallationEntries(prepared, options)
+  const current = installation.readDesktopSelection(prepared.installRoot)
+  if (current.record.installation_id !== root.record.installation_id
+    || !samePair(current.selection, source.selection) && !samePair(current.selection, prepared.selection)) fail()
+}
+
+// Byte/path recognition only. Each caller retains its own lifecycle admission.
+async function replaceKnownDesktopMenu(source: PreparedInstallation, prepared: PreparedInstallation,
+  options: Parameters<typeof registerInstallationEntries>[1]) {
+  const { home, platform, env, shell } = options
   if (platform === 'darwin') {
     const alias = path.join(home, 'Applications/Crabot.app'), stat = await entryStat(alias)
     const application = path.join(prepared.guiRoot, 'Crabot.app')
@@ -194,8 +206,36 @@ export async function replaceInstallationEntries(source: PreparedInstallation, p
       path.join(member.guiRoot, 'resources/crabot.png'), member.installation_id)
     await replaceMenuText(entry, text(source), text(prepared))
   } else fail()
+}
+
+export async function registerRetainedInstallationEntries(prepared: PreparedInstallation,
+  options: Parameters<typeof registerInstallationEntries>[1] & { operationId: string }) {
+  const own = installation.readDesktopInstallation(prepared.installRoot)
+  const record = removal.readDesktopRemoval(own.root)
+  if (!record || record.operation_id !== options.operationId || !['removing', 'completed'].includes(record.phase)) fail()
+  const source: PreparedInstallation = { installRoot: own.root, installation_id: own.record.installation_id,
+    selection: record.source_selection, guiRoot: path.join(own.root, 'app/releases', record.source_selection.gui_id),
+    coreRoot: path.join(own.root, 'releases', record.source_selection.core_id) }
+  assertPairMember(prepared, own.root, own.record.installation_id)
+  const assertCurrent = () => {
+    const current = installation.readDesktopPairReference(own.root)
+    if (current.installation_id !== own.record.installation_id
+      || !samePair(current.selection, source.selection) && !samePair(current.selection, prepared.selection)
+      || JSON.stringify(removal.readDesktopRemoval(own.root)) !== JSON.stringify(record)) fail()
+  }
+  assertCurrent()
+  for (const directory of [prepared.guiRoot, prepared.coreRoot]) {
+    const stat = await fs.lstat(directory)
+    if (!stat.isDirectory() || stat.isSymbolicLink() || !identity.isOwnedDirectory(directory)) fail()
+  }
+  const locator = await readInstallationLocator(options.home, options.platform, options.env)
+  if (locator && (locator.install_root !== own.root || locator.installation_id !== prepared.installation_id)) fail()
+  const registration = integrationRoot(options.home, options.platform, options.env)
+  await ownedDirectory(registration)
+  await writeUnchanged(path.join(registration, 'installation.json'), JSON.stringify({ schema_version: 1,
+    owner: identity.inspectProcess(process.pid).owner, install_root: own.root, installation_id: prepared.installation_id }) + '\n')
+  assertCurrent()
+  await replaceKnownDesktopMenu(source, prepared, options)
   await registerInstallationEntries(prepared, options)
-  const current = installation.readDesktopSelection(prepared.installRoot)
-  if (current.record.installation_id !== root.record.installation_id
-    || !samePair(current.selection, source.selection) && !samePair(current.selection, prepared.selection)) fail()
+  assertCurrent()
 }

@@ -5,7 +5,7 @@ import path from 'node:path'
 import { homedir } from 'node:os'
 import { readFile } from 'node:fs/promises'
 import { createInterface } from 'node:readline'
-import { registerInstallationEntries, readInstallationLocator, type PreparedInstallation } from './installation-entries.js'
+import { registerInstallationEntries, registerRetainedInstallationEntries, readInstallationLocator, type PreparedInstallation } from './installation-entries.js'
 import { ensureUbuntuProgramsReady, finishUbuntuInstallation, ubuntuInstallationFailure } from './ubuntu-installation.js'
 import { runUbuntuProcess, ubuntuDesktopEnvironment } from './ubuntu-process.js'
 import { probeUbuntuPrograms } from './ubuntu-program-probe.js'
@@ -62,11 +62,13 @@ async function main() {
       shell: { readShortcutLink: () => { throw new Error('Windows only') }, writeShortcutLink: () => false } })
   }
   const retained = await prepareRetainedDesktopReinstall({ payload, installRoot, signal: abort.signal,
-    progress: phase => emit('progress', { phase }), registerEntries: async prepared => {
+    progress: phase => emit('progress', { phase }), registerEntries: async (prepared, operationId) => {
       await inspectPrepared(prepared)
       await ensureUbuntuProgramsReady(readiness(prepared))
       abort.signal.throwIfAborted()
-      await register(prepared)
+      emit('progress', { phase: 'registering' })
+      await registerRetainedInstallationEntries(prepared, { home: homedir(), platform: 'linux', env: process.env, operationId,
+        shell: { readShortcutLink: () => { throw new Error('Windows only') }, writeShortcutLink: () => false } })
     } })
   if (retained) { emit('complete', { executable: retained.executable, verification_pending: true }); return }
   const prepared: PreparedInstallation = await backend.prepareDesktopInstallation({ payload, installRoot,

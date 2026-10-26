@@ -7,7 +7,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { z } from 'crabot-client'
-import { registerInstallationEntries, readInstallationLocator, type PreparedInstallation } from './installation-entries.js'
+import { registerInstallationEntries, registerRetainedInstallationEntries, readInstallationLocator, type PreparedInstallation } from './installation-entries.js'
 import { createInstallationProgressWindow } from './installation-progress-window.js'
 import { prepareRetainedDesktopReinstall } from './retained-reinstall.js'
 const directory = path.dirname(fileURLToPath(import.meta.url))
@@ -68,7 +68,8 @@ async function boot() {
     try {
       await progress.ready
       const registerEntries = (prepared: PreparedInstallation) => registerInstallationEntries(prepared, { home: homedir(), platform: process.platform, env: process.env, shell })
-      const retained = await prepareRetainedDesktopReinstall({ payload, installRoot: selected, signal: abort.signal, registerEntries,
+      const retained = await prepareRetainedDesktopReinstall({ payload, installRoot: selected, signal: abort.signal,
+        registerEntries: (prepared, operationId) => registerRetainedInstallationEntries(prepared, { home: homedir(), platform: process.platform, env: process.env, shell, operationId }),
         progress: phase => progress.update(labels[phase] || '正在核验安装结果…', phase !== 'handing-off') })
       if (retained) { installed = retained; verificationPending = true }
       else {

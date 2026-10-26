@@ -56,8 +56,9 @@ export async function prepareDesktopRemovalReinstall({ payload, installRoot, ope
   try {
     dataLock = await acquireExistingCliLock(own.dataDir, 'desktop-removal-reinstall'); dataToken = cliLockToken(dataLock)
     const initial = await readDesktopRemovalProof(own.root), { proof, record } = initial
+    const selected = installation.readDesktopPairReference(own.root).selection
     if (record.operation_id !== operationId || record.installation_id !== own.record.installation_id
-      || !same(installation.readDesktopPairReference(own.root).selection, record.source_selection)) fail()
+      || !same(selected, record.source_selection) && !same(selected, source.record.selection)) fail()
     assertReinstallVersion(record.source_selection.version, source.record.selection.version)
     const proofDirectory = path.join(own.root, 'app/removals', operationId), proofFile = path.join(proofDirectory, 'proof.json')
     const proofIdentity = fileIdentity(physical.lstatSync(proofFile, { bigint: true }))
@@ -101,7 +102,7 @@ export async function prepareDesktopRemovalReinstall({ payload, installRoot, ope
     const assertCurrent = () => {
       if (!same(readDesktopRemoval(own.root), record) || fileIdentity(physical.lstatSync(proofFile, { bigint: true })) !== proofIdentity
         || !same(installation.readDesktopInstallation(own.root).record, own.record)
-        || !same(installation.readDesktopPairReference(own.root).selection, record.source_selection)
+        || !same(installation.readDesktopPairReference(own.root).selection, selected)
         || directories.some(([directory, expected]) => directoryIdentity(physical.lstatSync(directory, { bigint: true })) !== expected)
         || !rootToken || !dataToken || cliLockToken(rootLock) !== rootToken || cliLockToken(dataLock) !== dataToken
         || !hasInheritedCliLock(own.root, rootToken) || !hasInheritedCliLock(own.dataDir, dataToken)
