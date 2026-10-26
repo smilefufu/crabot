@@ -77,6 +77,11 @@ try {
   await absent(installed); await absent(previousFixture); await absent(legacyEntryFixture)
   const parent = await fs.lstat(path.dirname(installed))
   assert.equal(parent.uid, 0); assert.equal(parent.mode & 0o022, 0, 'CI system install must use a root-protected ancestor')
+  // Same hosted-image prerequisite proven by the published legacy fixture.
+  const commands = await fs.lstat('/usr/local/bin')
+  assert.ok(commands.isDirectory() && !commands.isSymbolicLink()); assert.equal(commands.uid, 0)
+  if (commands.mode & 0o022) await fs.chmod('/usr/local/bin', (commands.mode & 0o7777) & ~0o022)
+  console.log('CRABOT_SYSTEM_COMMAND_DIRECTORY ' + JSON.stringify({ before: commands.mode & 0o7777, after: (await fs.stat('/usr/local/bin')).mode & 0o7777 }))
   installOwned = true
   let installationSource = source
   if (archiveReport) {
