@@ -51,6 +51,7 @@ export const desktopMaintenanceNodeFiles = Object.freeze([
   'progress.mjs',
   'rules.mjs',
   'entries.mjs',
+  'operation.mjs',
   'node_modules/@electron/asar/index.cjs',
   'node_modules/@electron/asar/package.json',
 ])

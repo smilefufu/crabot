@@ -181,7 +181,7 @@ async function openDesktopRemoval({ installRoot, operationId, signal, preparePla
       })()
       return pendingStop
     }
-    const requestProgramRemoval = (retry = false) => {
+    const requestProgramRemoval = (retry = false, attemptSignal = signal, beforeRemoving) => {
       if (closed || cancelIssued) fail()
       if (pendingRemoval && (!retry || !removalFailed)) return pendingRemoval
       if (retry && !removalFailed) fail()
@@ -214,7 +214,10 @@ async function openDesktopRemoval({ installRoot, operationId, signal, preparePla
             if (probeKnownProcessExit([facts.source_gui]).state !== 'stopped') fail()
           }
           if (record.phase === 'stopping') {
-            signal?.throwIfAborted()
+            attemptSignal?.throwIfAborted()
+            // The fixed host disables cancellation for this attempt immediately
+            // before the existing destructive-phase write, without an await.
+            beforeRemoving?.()
             pendingRemovalPhase = { ...record, phase: 'removing' }
             await privateJson(fence, pendingRemovalPhase, true); record = pendingRemovalPhase; pendingRemovalPhase = undefined
           }
@@ -245,8 +248,8 @@ async function openDesktopRemoval({ installRoot, operationId, signal, preparePla
       retryStop: () => requestStop(true),
       exitSource: () => requestSourceExit(),
       retrySourceExit: () => requestSourceExit(true),
-      removePrograms: () => requestProgramRemoval(),
-      retryRemovePrograms: () => requestProgramRemoval(true),
+      removePrograms: (attemptSignal, beforeRemoving) => requestProgramRemoval(false, attemptSignal, beforeRemoving),
+      retryRemovePrograms: (attemptSignal, beforeRemoving) => requestProgramRemoval(true, attemptSignal, beforeRemoving),
       async cancel() {
         if (busy || ['removing', 'completed'].includes(record.phase)) fail()
         busy = true

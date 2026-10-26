@@ -64,13 +64,14 @@
 
 - 按2026-10-25冻结范围继续；不新增需求、恢复记录或产品子项目。原feature worktree开发，完整验收后按依赖拆PR，不推产品main、不自行merge。[实施计划](crabot-docs/superpowers/plans/2026-10-17-desktop-application-implementation.md)和[验收证据](crabot-docs/superpowers/plans/2026-10-17-desktop-application-validation.md)保留逐项结果，组件通过不等于交付。
 - 四个独立review分支已分别自身编译验证：Native基础c9adc007、Client SDK 9ee3ce09、Runtime基础5659228c、Workspace基础b9d2c4a7；相应四平台或三平台CI均通过。后续批次按真实依赖/main重新定位，不能借feature dist或提交悬空引用。
-- GUI/CLI共用实例、窄IPC与共享HTTP/WS、内置环境、项目workspace及权限迁移、system批量运维主体已实现。原Windows整包两次通过、ARM签名更新40256350443通过，仅证明对应候选。最新完整四平台40329179356继续，Linux签名更新到达普通目标健康步骤后失败，正在定位；不以旧候选替代最终验收。
+- GUI/CLI共用实例、窄IPC与共享HTTP/WS、内置环境、项目workspace及权限迁移、system批量运维主体已实现。原Windows整包两次通过、ARM签名更新40256350443通过，仅证明对应候选。最新完整四平台40329179356继续，Linux源GUI/Core已ready，目标尚未启动；更新夹具安装位于/tmp，被原Native祖先权限规则拒绝，已将隔离夹具移至真实CI用户home并补反例，待原生重验；不以旧候选替代最终验收。
 - 已有目录不再套用新建0700工厂：Main、Core启动、旧维护/迁移、CLI根/data、Python和workspace读取保留旧0755，真正私有控制文件仍私有、777拒绝、缺失data不创建空实例。426项400过26条件跳过，实际Main6/6、Core准备11/11、已有CLI安装/修复30/30；Ubuntu原生helper同类红例修后24/26及受限内核40325177636全过。无新权限或持久格式。
 - 用户确认的系统观察误阻断已最小修正：macOS固定系统映像、fileport/空映射结束、末轮新增PID实际查询；Linux仅固定systemd用户管理器/PAM角色且各自代际稳定，未知事实保留。155项角色/scope及Ubuntu22/24实际40308333289通过；Native、实际Controller/普通安装器24/24通过。Windows独占文件创建误用仅修测试夹具，原生重验继续。
 - 卸载清理组件已具备实际Root/data锁、同作业proof、停止与程序引用检查；程序仅按原清单移除，保留data/workspace/工作依赖/保护，已有completed阶段收尾不新增状态。完整GUI角色43项通过。Mac ARM/Intel真实ServiceManagement副本注销40319343347通过；Windows固定当前用户标准卸载注册40326851268通过；均未触及本机实际登录项或注册产品用户入口。
 - Ubuntu规则清理40334108386三原生任务全过：授权本身不删除，原stopping可取消，removing后才确认；实际源程序占用拒绝、维护副本接受、管理员自定义保留、重复清理通过。真实Node/GTK宿主40336678230全过，GTK21/21、Node19过1平台跳过；CI仅以非交互sudo替代Polkit弹窗，其余真实子进程/文件/内核/作业执行，不当成图形授权验收。
 - 平台入口组合清理已按登录/标准卸载→自有CLI→菜单/locator顺序接入固定GUI/Node资源；Mac真实私有HOME与alias/locator清理通过（OS API明确模拟，真实OS证据另计），无Core bootstrap4/4；维护专用定位不返回Core/业务环境，49项定位回归通过，最终定向1/1。完整用户卸载宿主/菜单仍未开放，继续原闭环，见[卸载实施证据](crabot-docs/superpowers/plans/2026-10-24-desktop-retained-data-uninstall-implementation.md)。
 - 保留数据重装已接三平台普通安装器、原/新元组与更高版程序准备、既有schema3目标交接、入口及普通Controller健康收口；Core已删和丢回复不重放迁移。461项435过26条件跳过，编译后24/24，原普通安装UI2/2；服务端受控，不替代真实目标GUI/Core健康。CI partial_removal_fixture明确不是完整卸载，U5继续。
+- 固定卸载操作协调器已串联正常停止、原GUI退出、程序删除、平台入口与completed收尾；同一会话只重试失败步骤，取消后新尝试不继承旧取消信号。真实私有GUI整链与取消后重试各1/1通过；展示/OS登录API及资源观察明确为替身，其余实际锁、父子身份、程序删除和数据保留。协调器10/10、Node资源组13/13通过；完整产品Main/菜单接线继续。
 - 剩余冻结闭环：完整成对更新；完整卸载/重装真实健康；旧user CLI原位接管（范围准入的实际契约冲突待决）；已发布旧system完整转换/恢复；workspace更早故障阶段恢复；最低OS/Wayland/IME/真实登录、模型及正式签名验收。旧system外层备份已收窄到原绑定副本、模块写入归共同执行器，62项通过；旧恢复格式不改。新重装记录/旧Node指纹草稿仍冻结。
 - 本地Core557项541过16跳过；Admin/Agent旧失败在独立main复现，不混改。选定xinshu-mirror不代表付费预算已确认，无付费生成/现场部署。本地磁盘保护40GiB起建、30GiB停止本任务组、材料20GiB上限；现约343GiB空闲、既有材料15.87GiB，未动Docker/Spotlight/现场服务。
 
