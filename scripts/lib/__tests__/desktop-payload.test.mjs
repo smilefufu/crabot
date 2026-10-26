@@ -479,20 +479,24 @@ test('actual GUI controller runs one scoped Node conversion and commits the stop
           return {supported:true,enabled:false,approvalRequired:false};
         }},loginStartupRecovered:state=>{notices.push(state===null?'unconfirmed':'off')}});
       lock=await locks.acquireStartupLock(current.dataDir,'finite-login-recovery');
-      await target.recoverLoginStartup();
+      const first=await target.recoverLoginStartup();
       const pending=JSON.parse(await readFile(sidecar,'utf8')).phase;
-      await target.recoverLoginStartup();
-      await target.recoverLoginStartup();
+      const second=await target.recoverLoginStartup();
+      const consumed=await target.recoverLoginStartup();
+      if(first!==null||second?.enabled!==false||second?.approvalRequired!==false||consumed!==undefined)throw new Error('Login result or consumed replay changed');
+      // This component has not run business health. Native notices belong only
+      // to recoverVersion after service/maintenance settlement, never here.
+      if(notices.length)throw new Error('Login component presented a premature native notice');
       const phase=JSON.parse(await readFile(sidecar,'utf8')).phase;
       console.log('PAIRED_CONTROLLER '+JSON.stringify({entries,phase:c.host.snapshot().phase,dataDir:selected.dataDir,
-        login:{captures,restores,notices,pending,phase,maintenance:maintenance.readVersionMaintenance(current.dataDir).phase}}));
+        login:{captures,restores,notices,results:[first===null?'unconfirmed':'invalid',second?.enabled===false?'off':'invalid'],pending,phase,maintenance:maintenance.readVersionMaintenance(current.dataDir).phase}}));
     }finally{if(lock)locks.releaseCliLock(lock);target?.close();c.close()}
   `
   const result = await promisify(execFile)(process.execPath, ['--input-type=module', '-e', code, JSON.stringify([prepared, current])],
     { env: { ...process.env, PATH: '' }, timeout: 45_000, maxBuffer: 64 * 1024 })
   const evidence = JSON.parse(result.stdout.split('\n').find(line => line.startsWith('PAIRED_CONTROLLER ')).slice('PAIRED_CONTROLLER '.length))
   assert.deepEqual(evidence, { entries: 1, phase: 'stopped', dataDir: current.dataDir,
-    login: { captures: 1, restores: 2, notices: ['unconfirmed', 'off'], pending: 'pending', phase: 'consumed', maintenance: 'verifying' } })
+    login: { captures: 1, restores: 2, notices: [], results: ['unconfirmed', 'off'], pending: 'pending', phase: 'consumed', maintenance: 'verifying' } })
   assert.deepEqual(installation.readDesktopSelection(f.target).selection, prepared.selection)
   assert.equal(await fs.readFile(path.join(current.dataDir, 'fixture/content'), 'utf8'), 'converted by bundled Node')
   assert.equal(await fs.readFile(path.join(current.dataDir, 'fixture/SCHEMA_VERSION'), 'utf8'), 'v2\n')
