@@ -267,12 +267,17 @@ for (const mode of ['valid', 'wrong-operation', 'changed-parent', 'changed-helpe
         // here too, rather than fail at a missing import before stdin is read.
         const backendDirectory = path.join(bundle, 'backend/dist')
         await fs.cp(fileURLToPath(new URL('../dist/', import.meta.url)), backendDirectory, { recursive: true })
+        await fs.cp(path.join(bundle, 'offline/gui/resources/crabot-maintenance-backend/node_modules'), path.join(bundle, 'backend/node_modules'), { recursive: true })
         for (const name of ['mode.mjs', 'legacy-desktop.mjs', 'legacy-release-identity.mjs', 'legacy-release-files.mjs']) {
           await fs.copyFile(fileURLToPath(new URL('../../scripts/lib/' + name, import.meta.url)), path.join(backendDirectory, 'bootstrap/scripts/lib', name))
         }
         const catalog = path.join(backendDirectory, 'bootstrap/scripts/desktop')
         await fs.mkdir(catalog, { recursive: true })
         await fs.copyFile(fileURLToPath(new URL('../../scripts/desktop/legacy-releases.json', import.meta.url)), path.join(catalog, 'legacy-releases.json'))
+        await promisify(execFile)(process.execPath, ['--input-type=module', '-e',
+          'import{pathToFileURL}from"node:url";for(const file of process.argv.slice(1))await import(pathToFileURL(file).href)',
+          ...['desktop-payload.mjs', 'mode.mjs', 'legacy-desktop.mjs'].map(name => path.join(backendDirectory, 'bootstrap/scripts/lib', name))],
+          { env, cwd: bundle, timeout: 5000, maxBuffer: 65536 })
         const child = spawn(process.execPath, [path.join(backendDirectory, 'ubuntu-installer-backend.js'), own.root], {
           env, cwd: bundle, stdio: ['pipe', 'pipe', 'pipe'],
         })
