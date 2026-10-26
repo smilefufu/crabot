@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { homedir } from 'node:os'
-import { randomUUID } from 'node:crypto'
+import { randomUUID, createHash } from 'node:crypto'
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 import { execFile } from 'node:child_process'
@@ -54,7 +54,12 @@ after(async () => { if (root) await fs.rm(root, { recursive: true, force: true }
 test('standalone maintenance preparation rejects other platforms before accessing an installation', { skip: linux }, async () => {
   const { runUbuntuRemovalHost } = await import('../dist/ubuntu-removal-host.js')
   await assert.rejects(runUbuntuRemovalHost({ installRoot: '/never-accessed', operationId: randomUUID(), existing: false }), { code: 'CRABOT_DESKTOP_REMOVAL' })
-  const { prepareDesktopRemovalNode } = await import('../../scripts/lib/desktop-removal-host.mjs')
+  const { prepareDesktopRemovalNode, prepareExistingDesktopRemovalNode } = await import('../../scripts/lib/desktop-removal-host.mjs')
+  assert.equal(typeof prepareExistingDesktopRemovalNode, 'function')
+  await assert.rejects(prepareExistingDesktopRemovalNode({ installRoot: '/never-accessed', operationId: randomUUID() }), { code: 'CRABOT_DESKTOP_REMOVAL' })
+  const { resumeDesktopRemovalNode } = await import('../../scripts/lib/desktop-removal-job.mjs')
+  assert.equal(typeof resumeDesktopRemovalNode, 'function')
+  await assert.rejects(resumeDesktopRemovalNode({ installRoot: '/never-accessed', operationId: randomUUID() }), { code: 'CRABOT_DESKTOP_REMOVAL' })
   await assert.rejects(prepareDesktopRemovalNode({ installRoot: '/never-accessed', operationId: randomUUID() }), { code: 'CRABOT_DESKTOP_REMOVAL' })
   const { beginInitialDesktopRemovalNode } = await import('../../scripts/lib/desktop-removal-job.mjs')
   await assert.rejects(() => beginInitialDesktopRemovalNode({ installRoot: '/never-accessed', operationId: randomUUID() }), { code: 'CRABOT_DESKTOP_REMOVAL' })
@@ -114,7 +119,7 @@ for (const mode of ['valid', 'cancelled', 'changed-node', 'changed-backend', 're
 })
 
 
-for (const mode of ['node-job-full-host', 'node-job-valid', 'node-job-parent-flags', 'node-job-copy-changed', 'node-job-other-installation', 'node-job-source-verifier', 'node-job-source-exit', 'node-job-source-remove', 'node-job-source-platform-cancel']) test('actual private Node initial job role: ' + mode, { skip: !linux || ['node-job-full-host', 'node-job-source-remove', 'node-job-source-platform-cancel'].includes(mode) && process.env.GITHUB_ACTIONS !== 'true', timeout: 60000 }, async t => {
+for (const mode of ['node-job-resume', 'node-job-resume-source-exit', 'node-job-full-host', 'node-job-valid', 'node-job-parent-flags', 'node-job-copy-changed', 'node-job-other-installation', 'node-job-source-verifier', 'node-job-source-exit', 'node-job-source-remove', 'node-job-source-platform-cancel']) test('actual private Node initial job role: ' + mode, { skip: !linux || ['node-job-full-host', 'node-job-source-remove', 'node-job-source-platform-cancel'].includes(mode) && process.env.GITHUB_ACTIONS !== 'true', timeout: 60000 }, async t => {
   const area = await fs.mkdtemp(path.join(root, 'node-role-'))
   let sourcePayload = payload
   if (mode === 'node-job-full-host') {
@@ -149,7 +154,7 @@ for (const mode of ['node-job-full-host', 'node-job-valid', 'node-job-parent-fla
   running.child.stdin.end(await fs.readFile(new URL('./fixtures/ubuntu-removal-node-parent.cjs', import.meta.url)))
   const { stdout } = await running
   let result = JSON.parse(stdout)
-  if (['node-job-full-host', 'node-job-source-exit', 'node-job-source-remove', 'node-job-source-platform-cancel'].includes(mode)) {
+  if (['node-job-resume-source-exit', 'node-job-full-host', 'node-job-source-exit', 'node-job-source-remove', 'node-job-source-platform-cancel'].includes(mode)) {
     assert.equal(result.handoff, true)
     const { directory, host } = result
     const stat = await fs.lstat(directory, { bigint: true })
@@ -169,10 +174,10 @@ for (const mode of ['node-job-full-host', 'node-job-valid', 'node-job-parent-fla
     }
     result = JSON.parse(await fs.readFile(cfg.resultFile, 'utf8'))
     if (mode === 'node-job-full-host') assert.deepEqual(result, { accepted: true, completed: true, fixed_node_entry: true, frontend_fixture: true, polkit_transport_fixture: true })
-    else assert.deepEqual(result, { accepted: true, published: 'preparing', stopped: 'stopping', cancelled: mode !== 'node-job-source-remove', ordinary_peer: false, locks_reacquired: true, source_exited: true, ...(mode === 'node-job-source-remove' ? { programs_removed: true, platform_cleanup_attempts: 2, completed: true } : {}), ...(mode === 'node-job-source-platform-cancel' ? { platform_cancelled: true } : {}) })
+    else assert.deepEqual(result, { accepted: true, published: mode === 'node-job-resume-source-exit' ? 'stopping' : 'preparing', stopped: 'stopping', cancelled: mode !== 'node-job-source-remove', ordinary_peer: false, locks_reacquired: true, source_exited: true, ...(mode === 'node-job-source-remove' ? { programs_removed: true, platform_cleanup_attempts: 2, completed: true } : {}), ...(mode === 'node-job-source-platform-cancel' ? { platform_cancelled: true } : {}) })
   } else if (mode === 'node-job-source-verifier') assert.deepEqual(result, { accepted: true, published: 'preparing', stopped: 'stopping', cancelled: true, ordinary_peer: false, locks_reacquired: true,
     source_verifier: { preparing_rejected: true, wrong_operation_rejected: true, verified_after_stop: true, changed_copy_rejected: true } })
-  else if (mode === 'node-job-valid') assert.deepEqual(result, { accepted: true, published: 'preparing', stopped: 'stopping', cancelled: true, ordinary_peer: false, locks_reacquired: true })
+  else if (['node-job-valid', 'node-job-resume'].includes(mode)) assert.deepEqual(result, { accepted: true, published: mode === 'node-job-resume' ? 'stopping' : 'preparing', stopped: 'stopping', cancelled: true, ordinary_peer: false, locks_reacquired: true })
   else assert.deepEqual(result, { accepted: false, code: 'CRABOT_DESKTOP_REMOVAL' })
   assert.equal(await fs.readFile(path.join(own.dataDir, 'preserved'), 'utf8'), 'unchanged user content')
   for (const installation of [own.root, cfg.otherRoot].filter(Boolean)) {
@@ -188,4 +193,27 @@ for (const mode of ['node-job-full-host', 'node-job-valid', 'node-job-parent-fla
   }
   if (['node-job-full-host', 'node-job-source-remove'].includes(mode)) await assert.rejects(fs.lstat(own.executable), { code: 'ENOENT' })
   else assert.equal((await fs.stat(own.executable)).isFile(), true)
+})
+
+for (const mode of ['preparing', 'stopping', 'removing-partial-core', 'wrong-operation', 'source-changed', 'runtime-changed']) test('existing private Node copy preserves its historical job: ' + mode, { skip: !linux, timeout: 60000 }, async t => {
+  const area = await fs.mkdtemp(path.join(root, 'existing-node-')), own = await commitDesktopInstallation(await prepareDesktopInstallation({ payload, installRoot: path.join(area, 'installation') }))
+  const operationId = randomUUID(), { captureDesktopRemovalProof } = await import('../../scripts/lib/desktop-removal-proof.mjs')
+  const proof = await captureDesktopRemovalProof(own.root, operationId), text = JSON.stringify(proof) + '\n'
+  const directory = path.join(own.root, 'app/removals', operationId); await fs.mkdir(directory, { recursive: true, mode: 0o700 })
+  await fs.writeFile(path.join(directory, 'proof.json'), text, { mode: 0o600 })
+  const record = { schema_version: 1, installation_id: own.record.installation_id, operation_id: operationId, source_selection: own.selection,
+    phase: mode === 'preparing' ? 'preparing' : mode === 'removing-partial-core' ? 'removing' : 'stopping', proof_sha256: createHash('sha256').update(text).digest('hex') }
+  const fence = path.join(own.root, '.desktop-removal.json'), bytes = JSON.stringify(record) + '\n'
+  await fs.writeFile(fence, bytes, { mode: 0o600 }); await fs.writeFile(path.join(own.dataDir, 'preserved'), 'historical data')
+  if (mode === 'removing-partial-core') await fs.rm(path.join(own.coreRoot, '.scrapling-runtime-fixture-0123456789abcdef-12345678'), { recursive: true })
+  if (mode === 'source-changed') await fs.appendFile(path.join(own.guiRoot, 'resources/desktop-release.json'), 'changed')
+  if (mode === 'runtime-changed') await fs.appendFile(path.join(own.coreRoot, 'product-runtime.json'), 'changed')
+  const { prepareExistingDesktopRemovalNode } = await import('../../scripts/lib/desktop-removal-host.mjs')
+  const preparing = prepareExistingDesktopRemovalNode({ installRoot: own.root, operationId: mode === 'wrong-operation' ? randomUUID() : operationId })
+  if (['preparing', 'stopping', 'removing-partial-core'].includes(mode)) {
+    const prepared = await preparing; t.after(() => fs.rm(prepared.directory, { recursive: true }))
+    assert.deepEqual(prepared.record, record); assert.equal(prepared.self_verified, true); assert.deepEqual(prepared.proof, proof)
+  } else await assert.rejects(preparing)
+  assert.equal(await fs.readFile(fence, 'utf8'), bytes); assert.equal(await fs.readFile(path.join(directory, 'proof.json'), 'utf8'), text)
+  assert.equal(await fs.readFile(path.join(own.dataDir, 'preserved'), 'utf8'), 'historical data')
 })

@@ -100,21 +100,33 @@ export async function prepareExistingDesktopRemovalGui({ installRoot, operationI
 
 // Ubuntu's display runs separately from this plain Node copy. This prepares no
 // job or service action and never executes the source Core or the GTK frontend.
-export async function prepareDesktopRemovalNode({ installRoot, operationId, signal, progress = () => {} }) {
+async function prepareRemovalNode({ installRoot, operationId, signal, progress = () => {} }, existing) {
   if (process.platform !== 'linux') fail()
-  const own = installation.readDesktopSelection(installRoot)
+  const base = existing ? installation.readDesktopInstallation(installRoot) : installation.readDesktopSelection(installRoot)
+  const selection = existing ? installation.readDesktopPairReference(base.root).selection : base.selection
+  const own = { ...base, selection, coreRoot: path.join(base.root, 'releases', selection.core_id), guiRoot: path.join(base.root, 'app/releases', selection.gui_id) }
   const lock = await acquireExistingCliLock(own.root, 'prepare-removal-node'), token = cliLockToken(lock)
   let directory, createdIdentity
   try {
-    const proof = await captureDesktopRemovalProof(own.root, operationId, { signal })
-    const original = await readOriginalDesktopPayload(own.root, own.selection)
+    const previous = existing ? await readDesktopRemovalProof(own.root) : null
+    if (previous && (previous.record.operation_id !== operationId || !same(previous.record.source_selection, own.selection))) fail()
+    const proof = previous ? previous.proof : await captureDesktopRemovalProof(own.root, operationId, { signal })
+    if (previous) await verifyDesktopGui(own.guiRoot, proof.payload, { signal })
+    const original = previous ? null : await readOriginalDesktopPayload(own.root, own.selection)
     const dataIdentity = directoryIdentity(await fs.lstat(own.dataDir, { bigint: true }))
     const current = async () => {
       signal?.throwIfAborted()
       if (!token || cliLockToken(lock) !== token) fail()
-      const actual = installation.readDesktopSelection(own.root), source = await readOriginalDesktopPayload(own.root, own.selection)
-      if (!same(actual.record, own.record) || !same(actual.selection, proof.source_selection) || source.file !== original.file || source.text !== original.text
-        || !same(source.record, proof.payload) || directoryIdentity(await fs.lstat(own.dataDir, { bigint: true })) !== dataIdentity
+      const actual = existing ? { ...installation.readDesktopInstallation(own.root), selection: installation.readDesktopPairReference(own.root).selection } : installation.readDesktopSelection(own.root)
+      if (previous) {
+        const source = await readDesktopRemovalProof(own.root)
+        if (!same(source.record, previous.record) || !same(source.proof, proof)) fail()
+      } else {
+        const source = await readOriginalDesktopPayload(own.root, own.selection)
+        if (source.file !== original.file || source.text !== original.text || !same(source.record, proof.payload)) fail()
+      }
+      if (!same(actual.record, own.record) || !same(actual.selection, proof.source_selection)
+        || directoryIdentity(await fs.lstat(own.dataDir, { bigint: true })) !== dataIdentity
         || await versionMaintenancePending(own.dataDir) || workspaceMaintenancePending(own.dataDir) || cliLockToken(lock) !== token) fail()
     }
     await current()
@@ -206,7 +218,7 @@ export async function prepareDesktopRemovalNode({ installRoot, operationId, sign
     })
     if (result.stderr || result.stdout !== JSON.stringify({ node_version: version, self_verified: true }) + '\n') fail()
     await progress('prepared'); await verifyCopy()
-    return { directory, executable, frontend: path.join(directory, 'crabot-maintenance'), proof, self_verified: true }
+    return { ...(previous ? { record: previous.record } : {}), directory, executable, frontend: path.join(directory, 'crabot-maintenance'), proof, self_verified: true }
   } catch (error) {
     if (directory) {
       try {
@@ -217,6 +229,9 @@ export async function prepareDesktopRemovalNode({ installRoot, operationId, sign
     throw error
   } finally { if (token && cliLockToken(lock) === token) releaseCliLock(lock) }
 }
+
+export function prepareDesktopRemovalNode(options) { return prepareRemovalNode(options, false) }
+export function prepareExistingDesktopRemovalNode(options) { return prepareRemovalNode(options, true) }
 
 // Neutral byte facts shared by preparation and the separate Linux host role.
 // Reading a valid copy does not authorize a job, service action or deletion.

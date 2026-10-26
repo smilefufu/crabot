@@ -89,3 +89,8 @@ export function createDesktopRemovalNodeSourceExitVerifier(options) {
   if (process.platform !== 'linux') return async () => false
   return createSourceExitVerifier(options, false, 'node')
 }
+
+export function createExistingRemovalNodeSourceExitVerifier(options) {
+  if (process.platform !== 'linux') return async () => false
+  return createSourceExitVerifier(options, true, 'node')
+}

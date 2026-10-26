@@ -17,7 +17,7 @@ const displayText = (text: string) => {
 }
 
 export async function runUbuntuRemovalHost(request: RemovalRequest): Promise<'completed' | 'cancelled' | 'retained'> {
-  if (process.platform !== 'linux' || request.existing || process.getuid!() === 0 || process.getuid!() !== process.geteuid!()) return fail()
+  if (process.platform !== 'linux' || process.getuid!() === 0 || process.getuid!() !== process.geteuid!()) return fail()
   const management = require('./bootstrap/scripts/lib/desktop-management.cjs')
   const directory = management.requirePrivateDataRoot(path.dirname(fs.realpathSync(process.execPath)))
   if (path.basename(process.execPath) !== 'node' || fs.realpathSync(process.cwd()) !== directory
@@ -34,7 +34,7 @@ export async function runUbuntuRemovalHost(request: RemovalRequest): Promise<'co
   }
   process.on('message', cancel)
   try {
-    lease = await job.beginInitialDesktopRemovalNode({ installRoot: own.root, operationId: request.operationId, signal: activeAbort.signal,
+    lease = await (request.existing ? job.resumeDesktopRemovalNode : job.beginInitialDesktopRemovalNode)({ installRoot: own.root, operationId: request.operationId, signal: activeAbort.signal,
       preparePlatformRemoval: () => prepareUbuntuRemovalRules({ installRoot: own.root, operationId: request.operationId, signal: activeAbort.signal }) })
     const { proof } = await readDesktopRemovalProof(own.root), frontend = proof.payload.gui['resources/crabot-maintenance']
     const open = (abort: AbortController) => openWindow({ directory, frontend, abort })

@@ -5,7 +5,7 @@ import physicalFs from './physical-fs.cjs'
 import identity from './process-identity.cjs'
 import installation from './desktop-installation.cjs'
 import management from './desktop-management.cjs'
-import { captureInitialRemovalGuiHost, captureExistingRemovalGuiHost, captureInitialRemovalNodeHost } from './desktop-removal-frame.mjs'
+import { captureInitialRemovalGuiHost, captureExistingRemovalGuiHost, captureInitialRemovalNodeHost, captureExistingRemovalNodeHost } from './desktop-removal-frame.mjs'
 import { verifyUbuntuRemovalNodeCopy } from './desktop-removal-host.mjs'
 import { acquireExistingCliLock, releaseCliLock, cliLockToken } from './cli-lock.mjs'
 import { readDesktopRemoval } from './desktop-removal-record.cjs'
@@ -45,7 +45,7 @@ async function openDesktopRemoval({ installRoot, operationId, signal, preparePla
     dataLock = await acquireExistingCliLock(own.dataDir, 'desktop-removal'); dataToken = cliLockToken(dataLock)
     const dataIdentity = directoryIdentity(await fs.lstat(own.dataDir, { bigint: true }))
     let capture = captureInitialRemovalGuiHost
-    if (role === 'node') capture = captureInitialRemovalNodeHost
+    if (role === 'node') capture = existing ? captureExistingRemovalNodeHost : captureInitialRemovalNodeHost
     else if (existing) capture = captureExistingRemovalGuiHost
     const captured = await capture({ installRoot: own.root, operationId, signal })
     const { proof, facts } = captured
@@ -282,6 +282,10 @@ export function resumeDesktopRemoval(options) { return openDesktopRemoval(option
 export async function beginInitialDesktopRemovalNode(options) {
   if (process.platform !== 'linux') fail()
   return openDesktopRemoval(options, false, 'node')
+}
+export async function resumeDesktopRemovalNode(options) {
+  if (process.platform !== 'linux') fail()
+  return openDesktopRemoval(options, true, 'node')
 }
 
 // The fixed host calls this only after its platform-entry cleanup succeeds.

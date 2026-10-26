@@ -78,12 +78,15 @@ export async function inspectInitialRemovalGuiHost(options) {
 
 // Linux's plain Node is a distinct host role, never an ordinary desktop peer.
 // These are handoff facts only; the transaction owns publication and actions.
-export async function captureInitialRemovalNodeHost({ installRoot, operationId, signal }) {
+async function captureRemovalNodeHost({ installRoot, operationId, signal }, existing) {
   const fail = () => { throw Object.assign(new Error('独立Node维护宿主的来源或副本无法核验，原程序与数据已保留。'), { code: 'CRABOT_DESKTOP_REMOVAL' }) }
   try {
     if (process.platform !== 'linux' || !process.connected || typeof process.send !== 'function') fail()
     signal?.throwIfAborted()
-    const own = installation.readDesktopSelection(installRoot), self = identity.inspectProcess(process.pid)
+    const base = existing ? installation.readDesktopInstallation(installRoot) : installation.readDesktopSelection(installRoot)
+    const selection = existing ? installation.readDesktopPairReference(base.root).selection : base.selection
+    const guiRoot = path.join(base.root, 'app/releases', selection.gui_id)
+    const own = { ...base, selection, guiRoot, executable: path.join(guiRoot, 'crabot-desktop') }, self = identity.inspectProcess(process.pid)
     const parent = self && identity.inspectProcess(self.parent), policy = { executable: own.executable, development: false }
     if (!self || !parent || self.owner !== own.record.owner || parent.owner !== self.owner || !processBirthAtLeast(self.started, parent.started)
       || !entry.verifyDesktopRemovalSourceEntry(parent, policy)) fail()
@@ -92,16 +95,26 @@ export async function captureInitialRemovalNodeHost({ installRoot, operationId, 
       || !/^crabot-removal-host-[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(path.basename(directory))
       || inside(own.root, directory) || inside(directory, own.root) || await fs.realpath(process.cwd()) !== directory) fail()
     const hostIdentity = directoryIdentity(await fs.lstat(directory, { bigint: true })), dataIdentity = directoryIdentity(await fs.lstat(own.dataDir, { bigint: true }))
-    const proof = await captureDesktopRemovalProof(own.root, operationId, { signal })
+    const previous = existing ? await readDesktopRemovalProof(own.root) : null
+    if (previous && (previous.record.operation_id !== operationId || !same(previous.record.source_selection, own.selection))) fail()
+    const proof = previous ? previous.proof : await captureDesktopRemovalProof(own.root, operationId, { signal })
+    if (previous) await verifyDesktopGui(own.guiRoot, proof.payload, { signal })
     await verifyUbuntuRemovalNodeCopy(directory, proof, { signal })
-    const current = installation.readDesktopSelection(own.root), source = await readOriginalDesktopPayload(own.root, own.selection)
+    const current = existing ? { ...installation.readDesktopInstallation(own.root), selection: installation.readDesktopPairReference(own.root).selection } : installation.readDesktopSelection(own.root)
+    if (previous) {
+      const source = await readDesktopRemovalProof(own.root)
+      if (!same(source.record, previous.record) || !same(source.proof, proof)) fail()
+    } else if (!same((await readOriginalDesktopPayload(own.root, own.selection)).record, proof.payload)) fail()
     const actualSelf = identity.inspectProcess(process.pid), actualParent = identity.inspectProcess(parent.pid)
-    if (!same(current.record, own.record) || !same(current.selection, proof.source_selection) || !same(source.record, proof.payload)
+    if (!same(current.record, own.record) || !same(current.selection, proof.source_selection)
       || !process.connected || typeof process.send !== 'function' || !identity.sameProcess(self, actualSelf) || actualSelf.parent !== parent.pid
       || !identity.sameProcess(parent, actualParent) || !entry.verifyDesktopRemovalSourceEntry(actualParent, policy) || directoryIdentity(await fs.lstat(own.dataDir, { bigint: true })) !== dataIdentity
       || management.requirePrivateDataRoot(directory) !== directory || directoryIdentity(await fs.lstat(directory, { bigint: true })) !== hostIdentity) fail()
     signal?.throwIfAborted()
-    return { proof, facts: { installation_id: own.record.installation_id, operation_id: operationId, source_selection: proof.source_selection,
+    return { ...(previous ? { record: previous.record } : {}), proof, facts: { installation_id: own.record.installation_id, operation_id: operationId, source_selection: proof.source_selection,
       source_gui: parent, host_node: self, proof_sha256: createHash('sha256').update(JSON.stringify(proof) + '\n').digest('hex') } }
   } catch { if (signal?.aborted) signal.throwIfAborted(); fail() }
 }
+
+export function captureInitialRemovalNodeHost(options) { return captureRemovalNodeHost(options, false) }
+export function captureExistingRemovalNodeHost(options) { return captureRemovalNodeHost(options, true) }
