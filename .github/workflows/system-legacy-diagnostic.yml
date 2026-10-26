@@ -1,0 +1,59 @@
+# One bounded diagnosis of the frozen S5 case; current-source acceptance remains desktop.yml.
+name: Published system legacy diagnostic
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  legacy:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.3'
+      - uses: actions/download-artifact@v4
+        with:
+          name: ubuntu-native-installation-candidate
+          run-id: 40359477903
+          github-token: ${{ github.token }}
+          path: .desktop-build
+      - name: Verify the pinned candidate and prepare only the credential fixture
+        run: |
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs'
+          const disk = fs.statfsSync('.', { bigint: true })
+          if (disk.bavail * disk.bsize < 16n * 1024n ** 3n) throw new Error('Require 16GiB before extraction and legacy cases')
+          NODE
+          mkdir -p .desktop-build/legacy-candidate '.desktop-build/安装 候选'
+          tar -xzf .desktop-build/ubuntu-native-candidate.tar.gz --no-same-owner -C .desktop-build/legacy-candidate
+          mv .desktop-build/legacy-candidate/ubuntu-native/offline/core '.desktop-build/安装 候选/core'
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs/promises'
+          import { stripTypeScriptTypes } from 'node:module'
+          import { pathToFileURL } from 'node:url'
+          import path from 'node:path'
+          const core = path.resolve('.desktop-build/安装 候选/core')
+          const { verifyCoreRelease } = await import(pathToFileURL(path.join(core, 'scripts/lib/core-release.mjs')))
+          const release = await verifyCoreRelease(core)
+          if (release.commit !== '7cb3b6dd0096f83058e9cc22119e18cce9f1ec59' || release.source_dirty !== false) throw new Error('Unexpected diagnostic producer')
+          await fs.mkdir('crabot-admin/dist', { recursive: true })
+          await fs.writeFile('crabot-admin/dist/credentials.js', stripTypeScriptTypes(await fs.readFile('crabot-admin/src/credentials.ts', 'utf8')))
+          console.log('CRABOT_SYSTEM_DIAGNOSTIC_SOURCE ' + JSON.stringify({ commit: release.commit, current_source_acceptance: false }))
+          NODE
+      - name: Run the unchanged published legacy installer acceptance
+        run: sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,GITHUB_REPOSITORY,GITHUB_WORKSPACE "$GITHUB_WORKSPACE/.desktop-build/安装 候选/core/.product-runtime/node/bin/node" .github/scripts/smoke-system-legacy.mjs "$GITHUB_WORKSPACE/.desktop-build/安装 候选/core" "$GITHUB_WORKSPACE/.desktop-build/system-legacy.json" 2>&1 | tee .desktop-build/system-legacy.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: published-system-legacy-diagnostic
+          path: |
+            .desktop-build/system-legacy.log
+            .desktop-build/system-legacy.json
+          if-no-files-found: ignore
+          retention-days: 3
