@@ -117,3 +117,9 @@ test('macOS fileport observation handles inactive IPC spaces while retaining act
   }
   assert.equal(observed, true, 'The real shell holding this CWD must remain reported')
 })
+
+
+test('Windows resource queries cover long paths and every finite file group', { skip: process.platform !== 'win32' || process.env.GITHUB_ACTIONS !== 'true', timeout: 90000 }, async () => {
+  const { verifyWindowsResourceLimits } = await import('./fixtures/program-reference-windows-limits.mjs')
+  await verifyWindowsResourceLimits()
+})
