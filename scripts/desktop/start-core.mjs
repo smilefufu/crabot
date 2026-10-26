@@ -20,7 +20,7 @@ export async function startDesktopCore({ root, dataDir, source = process.env, on
   if (detectMode() === 'system' || source.CRABOT_DEV === 'true' || Number(source.CRABOT_PORT_OFFSET ?? 0) !== 0) {
     throw Object.assign(new Error('此部署需要使用原管理方式；桌面不会自动接管 system/dev 实例。'), { code: 'CRABOT_DESKTOP_TAKEOVER_REQUIRED' })
   }
-  management.ensurePrivateDataRoot(dataDir)
+  management.requireExistingDataRoot(dataDir)
   const lock = cliLockToken(join(dataDir, 'cli.lock')) ? undefined : await acquireStartupLock(dataDir, 'desktop-start')
   try {
     assertVersionMaintenanceAllowsStart(dataDir)

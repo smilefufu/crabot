@@ -1,11 +1,12 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, chmodSync, rmSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, chmodSync, statSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { createHash } from 'node:crypto'
 import management from '../desktop-management.cjs'
 import { prepareCoreEnvironment, applyStartupMigrations } from '../core-preparation.mjs'
+import { startDesktopCore } from '../../desktop/start-core.mjs'
 
 function fixture(t) {
   const root = mkdtempSync(join(tmpdir(), 'crabot-prepare-'))
@@ -139,4 +140,29 @@ test('management startup accepts an already current format without running start
   assert.equal(readFileSync(join(moduleData, 'SCHEMA_VERSION'), 'utf8'), 'v1\n')
   assert.equal(readFileSync(join(data, 'workspace-control/relocation.json'), 'utf8'), 'pending')
   assert.equal(existsSync(join(data, 'mm.pid')), false)
+})
+
+// Exercise the actual desktop adapter, stopping at the deliberately absent
+// product manifest. No finite fixture can accidentally start a business MM.
+test('desktop startup accepts existing readable data without changing its permissions', { skip: process.platform === 'win32' }, async t => {
+  const { root, data } = fixture(t)
+  management.initializeDesktopManagement(data)
+  const marker = readFileSync(join(data, 'desktop-managed.json'), 'utf8'), stages = []
+  chmodSync(data, 0o755)
+  await assert.rejects(startDesktopCore({ root, dataDir: data, source: {}, onStage: value => stages.push(value) }), { code: 'CRABOT_RUNTIME_INVALID' })
+  assert.ok(stages.includes('prepare_environment'))
+  assert.equal(statSync(data).mode & 0o777, 0o755)
+  assert.equal(readFileSync(join(data, 'desktop-managed.json'), 'utf8'), marker)
+  assert.equal(existsSync(join(data, 'mm.pid')), false)
+  assert.equal(existsSync(join(data, 'admin')), false)
+  chmodSync(data, 0o777)
+  await assert.rejects(startDesktopCore({ root, dataDir: data, source: {} }), { code: 'CRABOT_DATA_NOT_PRIVATE' })
+  assert.equal(statSync(data).mode & 0o777, 0o777)
+})
+
+test('desktop startup does not create missing data as an empty replacement', async t => {
+  const { root, data } = fixture(t)
+  rmSync(data, { recursive: true })
+  await assert.rejects(startDesktopCore({ root, dataDir: data, source: {} }), { code: 'CRABOT_DATA_MISSING' })
+  assert.equal(existsSync(data), false)
 })
