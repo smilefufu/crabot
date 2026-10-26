@@ -24,6 +24,11 @@ before(async () => {
   const core = path.join(payload, 'core'), gui = path.join(payload, 'gui'), resources = path.join(gui, 'resources')
   await fs.mkdir(path.join(core, '.product-runtime/node/bin'), { recursive: true }); await fs.mkdir(path.join(core, 'bin'))
   await fs.copyFile(process.execPath, path.join(core, '.product-runtime/node/bin/node'))
+  // Inert ELF bytes provide only the original browser-policy inventory. These
+  // role tests never execute a browser or claim namespace/GUI acceptance.
+  const browser = path.join(core, '.scrapling-runtime-fixture-0123456789abcdef-12345678/browsers/chromium-1234/chrome-linux64/chrome')
+  await fs.mkdir(path.dirname(browser), { recursive: true })
+  await fs.copyFile(path.join(path.dirname(process.env.CRABOT_GTK_FRONTEND), 'crabot-sandbox-helper'), browser)
   await fs.writeFile(path.join(core, 'package.json'), '{"version":"1.2.3","type":"module"}')
   await fs.writeFile(path.join(core, 'product-runtime.json'), JSON.stringify({ schema_version: 1, version: '1.2.3', versions: { node: process.versions.node } }))
   await fs.writeFile(path.join(core, 'bin/crabot'), '#!/bin/sh\nexit 97\n', { mode: 0o755 })
@@ -35,6 +40,7 @@ before(async () => {
   // A finite Node image stands in only for source OS identity; no Electron/GUI acceptance is claimed.
   await fs.copyFile(process.execPath, path.join(gui, 'crabot-desktop'))
   await fs.copyFile(process.env.CRABOT_GTK_FRONTEND, path.join(resources, 'crabot-maintenance'))
+  await fs.copyFile(path.join(path.dirname(process.env.CRABOT_GTK_FRONTEND), 'crabot-sandbox-helper'), path.join(resources, 'crabot-sandbox-helper'))
   const native = path.join(resources, 'app.asar.unpacked/dist/bootstrap/crabot-native/build/Release/crabot-native.node')
   await fs.mkdir(path.dirname(native), { recursive: true })
   await fs.copyFile(fileURLToPath(new URL('../../crabot-native/build/Release/crabot-native.node', import.meta.url)), native)
@@ -53,7 +59,7 @@ test('standalone maintenance preparation rejects other platforms before accessin
   const { createDesktopRemovalNodeSourceExitVerifier } = await import('../../scripts/lib/desktop-removal-source.mjs')
   assert.equal(await createDesktopRemovalNodeSourceExitVerifier({})({}), false)
 })
-for (const mode of ['valid', 'cancelled', 'changed-node', 'changed-backend', 'redirected-frontend', 'changed-selection', 'copy-failure', 'space', 'late-copy-change', 'late-cancel']) test('private Ubuntu Node host preparation: ' + mode, { skip: !linux, timeout: 60000 }, async t => {
+for (const mode of ['valid', 'cancelled', 'changed-node', 'changed-backend', 'redirected-frontend', 'changed-selection', 'copy-failure', 'space', 'late-copy-change', 'late-cancel', 'changed-sandbox-helper']) test('private Ubuntu Node host preparation: ' + mode, { skip: !linux, timeout: 60000 }, async t => {
   const area = await fs.mkdtemp(path.join(root, 'case-'))
   const own = await commitDesktopInstallation(await prepareDesktopInstallation({ payload, installRoot: path.join(area, 'installation') }))
   await fs.writeFile(path.join(own.dataDir, 'preserved'), 'data and dependencies')
@@ -62,6 +68,7 @@ for (const mode of ['valid', 'cancelled', 'changed-node', 'changed-backend', 're
   if (mode === 'cancelled') options.signal = AbortSignal.abort()
   if (mode === 'changed-node') await fs.appendFile(path.join(own.coreRoot, '.product-runtime/node/bin/node'), 'changed')
   if (mode === 'changed-backend') await fs.appendFile(source, 'changed')
+  if (mode === 'changed-sandbox-helper') await fs.appendFile(path.join(own.guiRoot, 'resources', 'crabot-sandbox-helper'), 'changed')
   if (mode === 'redirected-frontend') { const file = path.join(own.guiRoot, 'resources/crabot-maintenance'); await fs.rename(file, file + '-original'); await fs.symlink(file + '-original', file) }
   let copyDirectory
   options.progress = stage => {
@@ -94,7 +101,7 @@ for (const mode of ['valid', 'cancelled', 'changed-node', 'changed-backend', 're
     const names = []
     async function walk(directory) { for (const entry of await fs.readdir(directory, { withFileTypes: true })) { const file = path.join(directory, entry.name); if (entry.isDirectory()) await walk(file); else names.push(path.relative(host.directory, file).split(path.sep).join('/')) } }
     await walk(host.directory)
-    assert.deepEqual(names.sort(), ['node', 'crabot-maintenance', ...desktopMaintenanceNodeFiles.map(name => 'backend/' + name)].sort())
+    assert.deepEqual(names.sort(), ['node', 'crabot-maintenance', 'crabot-sandbox-helper', ...desktopMaintenanceNodeFiles.map(name => 'backend/' + name)].sort())
     assert.equal(names.some(name => /(^|\/)(data|core|\.product-runtime)(\/|$)/.test(name)), false)
     assert.equal(host.proof.operation_id, options.operationId)
     console.log('CRABOT_PRIVATE_NODE_PREPARATION ' + JSON.stringify({ fixed_resources_only: true, copied_node_executed: true, self_verified: true, business_started: false }))
@@ -105,7 +112,7 @@ for (const mode of ['valid', 'cancelled', 'changed-node', 'changed-backend', 're
 })
 
 
-for (const mode of ['node-job-valid', 'node-job-parent-flags', 'node-job-copy-changed', 'node-job-other-installation', 'node-job-source-verifier', 'node-job-source-exit']) test('actual private Node initial job role: ' + mode, { skip: !linux, timeout: 60000 }, async t => {
+for (const mode of ['node-job-valid', 'node-job-parent-flags', 'node-job-copy-changed', 'node-job-other-installation', 'node-job-source-verifier', 'node-job-source-exit', 'node-job-source-remove', 'node-job-source-platform-cancel']) test('actual private Node initial job role: ' + mode, { skip: !linux, timeout: 60000 }, async t => {
   const area = await fs.mkdtemp(path.join(root, 'node-role-'))
   const own = await commitDesktopInstallation(await prepareDesktopInstallation({ payload, installRoot: path.join(area, 'installation') }))
   await fs.writeFile(path.join(own.dataDir, 'preserved'), 'unchanged user content')
@@ -117,7 +124,7 @@ for (const mode of ['node-job-valid', 'node-job-parent-flags', 'node-job-copy-ch
   running.child.stdin.end(await fs.readFile(new URL('./fixtures/ubuntu-removal-node-parent.cjs', import.meta.url)))
   const { stdout } = await running
   let result = JSON.parse(stdout)
-  if (mode === 'node-job-source-exit') {
+  if (['node-job-source-exit', 'node-job-source-remove', 'node-job-source-platform-cancel'].includes(mode)) {
     assert.equal(result.handoff, true)
     const { directory, host } = result
     const stat = await fs.lstat(directory, { bigint: true })
@@ -136,19 +143,23 @@ for (const mode of ['node-job-valid', 'node-job-parent-flags', 'node-job-copy-ch
       await new Promise(resolve => setTimeout(resolve, 25))
     }
     result = JSON.parse(await fs.readFile(cfg.resultFile, 'utf8'))
-    assert.deepEqual(result, { accepted: true, published: 'preparing', stopped: 'stopping', cancelled: true, ordinary_peer: false, locks_reacquired: true, source_exited: true })
+    assert.deepEqual(result, { accepted: true, published: 'preparing', stopped: 'stopping', cancelled: mode !== 'node-job-source-remove', ordinary_peer: false, locks_reacquired: true, source_exited: true, ...(mode === 'node-job-source-remove' ? { programs_removed: true, platform_cleanup_attempts: 2, completed: true } : {}), ...(mode === 'node-job-source-platform-cancel' ? { platform_cancelled: true } : {}) })
   } else if (mode === 'node-job-source-verifier') assert.deepEqual(result, { accepted: true, published: 'preparing', stopped: 'stopping', cancelled: true, ordinary_peer: false, locks_reacquired: true,
     source_verifier: { preparing_rejected: true, wrong_operation_rejected: true, verified_after_stop: true, changed_copy_rejected: true } })
   else if (mode === 'node-job-valid') assert.deepEqual(result, { accepted: true, published: 'preparing', stopped: 'stopping', cancelled: true, ordinary_peer: false, locks_reacquired: true })
   else assert.deepEqual(result, { accepted: false, code: 'CRABOT_DESKTOP_REMOVAL' })
   assert.equal(await fs.readFile(path.join(own.dataDir, 'preserved'), 'utf8'), 'unchanged user content')
   for (const installation of [own.root, cfg.otherRoot].filter(Boolean)) {
-    for (const name of ['.desktop-removal.json', '.desktop-installing.json']) await assert.rejects(fs.lstat(path.join(installation, name)), { code: 'ENOENT' })
+    for (const name of ['.desktop-removal.json', '.desktop-installing.json']) {
+      if (mode === 'node-job-source-remove' && name === '.desktop-removal.json') assert.equal(JSON.parse(await fs.readFile(path.join(installation, name), 'utf8')).phase, 'completed')
+      else await assert.rejects(fs.lstat(path.join(installation, name)), { code: 'ENOENT' })
+    }
     const rootLock = await acquireExistingCliLock(installation, 'verify-node-role-released', 0)
     try {
       const dataLock = await acquireExistingCliLock(path.join(installation, 'data'), 'verify-node-role-released', 0)
       releaseCliLock(dataLock)
     } finally { releaseCliLock(rootLock) }
   }
-  assert.equal((await fs.stat(own.executable)).isFile(), true)
+  if (mode === 'node-job-source-remove') await assert.rejects(fs.lstat(own.executable), { code: 'ENOENT' })
+  else assert.equal((await fs.stat(own.executable)).isFile(), true)
 })

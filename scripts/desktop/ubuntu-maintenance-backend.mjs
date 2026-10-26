@@ -18,6 +18,8 @@ export async function buildUbuntuMaintenanceBackend(output) {
   const { build } = require('esbuild')
   await build({ entryPoints: [path.join(repository, 'crabot-desktop/src/ubuntu-removal-progress.ts')], outfile: path.join(output, 'progress.mjs'),
     bundle: true, platform: 'node', format: 'esm', target: 'node22', sourcemap: false, logLevel: 'silent' })
+  await build({ entryPoints: [path.join(repository, 'crabot-desktop/src/ubuntu-removal-rules.ts')], outfile: path.join(output, 'rules.mjs'),
+    bundle: true, platform: 'node', format: 'esm', target: 'node22', sourcemap: false, logLevel: 'silent' })
   const asarVersion = require('@electron/asar/package.json').version
   if (asarVersion !== '3.4.1') throw new Error('Unexpected maintenance archive dependency version')
   const asar = path.join(output, 'node_modules/@electron/asar')

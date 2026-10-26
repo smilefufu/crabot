@@ -8,6 +8,7 @@ import re
 from pathlib import Path
 import subprocess
 import tempfile
+import time
 import uuid
 
 parser = argparse.ArgumentParser()
@@ -184,6 +185,7 @@ with tempfile.TemporaryDirectory(prefix='Crabot namespace 用户 *?[]{}@{HOME} \
     fence_file, removal_proof, removal = removal_record()
     assert run(option='--inspect-removal').stdout == output
     run(False, '--unregister')  # No privilege acquired by supplying a job file.
+    run(False, '--prepare-removal')
     for phase in ['preparing', 'completed']:
         put('.desktop-removal.json', {**removal, 'phase': phase})
         run(False, '--inspect-removal')
@@ -256,6 +258,19 @@ with tempfile.TemporaryDirectory(prefix='Crabot namespace 用户 *?[]{}@{HOME} \
             def unregister():
                 return subprocess.run(['/usr/bin/sudo', '/usr/bin/env', 'PKEXEC_UID=' + str(os.getuid()), helper, '--unregister', tmp],
                                       capture_output=True, text=True, timeout=120)
+            def prepare_removal():
+                process = subprocess.Popen(['/usr/bin/sudo', '/usr/bin/env', 'PKEXEC_UID=' + str(os.getuid()), helper, '--prepare-removal', tmp],
+                                           stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                assert process.stdout.readline().strip() == 'CRABOT_SANDBOX_REMOVAL_READY'
+                return process
+            # Closing the privileged preparation or sending an unknown frame
+            # before the removal commit changes no rule or operation phase.
+            for frame in ['', 'bad\n', 'remove\n']:
+                prepared = prepare_removal()
+                _, diagnostic = prepared.communicate(frame, timeout=120)
+                assert prepared.returncode != 0
+                assert all(file.exists() for file in old_policies)
+                assert fence_file.read_bytes() == removal_bytes
             # A real labeled finite child still in use must preserve every rule.
             held = subprocess.Popen([str(gui_file), '--hold'], stdout=subprocess.PIPE, text=True)
             try:
@@ -281,18 +296,45 @@ with tempfile.TemporaryDirectory(prefix='Crabot namespace 用户 *?[]{}@{HOME} \
                 subprocess.run(['/usr/bin/sudo', '/usr/bin/tee', str(old_policies[0])], input=original_policy, stdout=subprocess.DEVNULL, check=True, timeout=5)
             # Simulate an interrupted cleanup with one already unloaded/deleted
             # exact fixture rule. The retry reads actual kernel/file state.
-            subprocess.run(['/usr/bin/sudo', '/usr/sbin/apparmor_parser', '-R', '-T', '-K', '--', str(old_policies[0])], check=True, timeout=90)
-            subprocess.run(['/usr/bin/sudo', '/usr/bin/rm', '--', str(old_policies[0])], check=True, timeout=5)
-            for _ in range(2):
-                result = unregister()
-                assert result.returncode == 0, result.stderr
+            maintenance = subprocess.Popen([str(gui_file), '--exec-hold'], stdout=subprocess.PIPE, text=True)
+            try:
+                assert maintenance.stdout.readline().strip() == 'CRABOT_NAMESPACE_EXEC_HOLD'
+                deadline = time.monotonic() + 5
+                while True:
+                    image = subprocess.run(['/usr/bin/sudo', '/usr/bin/readlink', f'/proc/{maintenance.pid}/exe'], capture_output=True, text=True, timeout=5)
+                    if image.returncode == 0 and image.stdout.strip().endswith('/sleep'):
+                        break
+                    assert time.monotonic() < deadline, 'Finite maintenance image did not exec'
+                    time.sleep(0.01)
+                label = subprocess.check_output(['/usr/bin/sudo', '/usr/bin/cat', f'/proc/{maintenance.pid}/attr/current'], text=True, timeout=5)
+                inherited_label = label.startswith(old_policies[0].name + ' ')
+                assert inherited_label or label.strip() == 'unconfined', 'Unexpected finite maintenance label'
+                print('CRABOT_MAINTENANCE_LABEL ' + json.dumps({'source_label_inherited': inherited_label}), flush=True)
+                # This finite maintenance image uses no userns permission. Its
+                # inherited label must not be mistaken for the original GUI.
+                subprocess.run(['/usr/bin/sudo', '/usr/sbin/apparmor_parser', '-R', '-T', '-K', '--', str(old_policies[1])], check=True, timeout=90)
+                subprocess.run(['/usr/bin/sudo', '/usr/bin/rm', '--', str(old_policies[1])], check=True, timeout=5)
+                prepared = prepare_removal()
+                assert all(file.exists() for file in old_policies if file != old_policies[1])
+                put('.desktop-removal.json', {**removal, 'phase': 'removing'})
+                removal_bytes = fence_file.read_bytes()
+                output_after_confirm, diagnostic = prepared.communicate('remove\n', timeout=120)
+                assert prepared.returncode == 0 and 'CRABOT_SANDBOX_VERIFIED' in output_after_confirm, diagnostic
+                for _ in range(2):
+                    result = unregister()
+                    assert result.returncode == 0, result.stderr
+                assert maintenance.poll() is None
+            finally:
+                if maintenance.poll() is None:
+                    maintenance.terminate()
+                maintenance.wait(timeout=5)
             assert not any(file.exists() for file in old_policies)
             assert subprocess.run([str(gui_file)], timeout=5).returncode == 13
             assert subprocess.run([str(chrome_file)], timeout=5).returncode == 13
             assert subprocess.run([str(next_gui_file)], timeout=5).returncode == 0
             assert restriction.read_bytes() == original_setting
             assert fence_file.read_bytes() == removal_bytes and removal_proof.read_bytes() == proof_bytes
-            print('CRABOT_KERNEL_REMOVAL_ACCEPTANCE: active profile blocked; administrator edit preserved; partial/repeated exact cleanup; other GUI rule retained; job unchanged')
+            print('CRABOT_KERNEL_REMOVAL_ACCEPTANCE: authorization alone performs no deletion; commit confirmation verified; active original entry blocked; maintenance image accepted; administrator edit preserved; partial/repeated exact cleanup; other GUI rule retained; job unchanged')
         finally:
             # All test executables above exited; preserve unknown or changed rules.
             for file in policies:

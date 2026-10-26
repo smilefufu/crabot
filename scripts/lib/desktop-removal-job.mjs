@@ -27,7 +27,8 @@ const fail = () => { throw Object.assign(new Error('卸载作业或停止结果�
 function absent(file) {
   try { physicalFs.lstatSync(file); return false } catch (error) { if (error.code === 'ENOENT') return true; throw error }
 }
-async function openDesktopRemoval({ installRoot, operationId, signal }, existing, role = 'gui') {
+async function openDesktopRemoval({ installRoot, operationId, signal, preparePlatformRemoval }, existing, role = 'gui') {
+  if (preparePlatformRemoval !== undefined && (role !== 'node' || typeof preparePlatformRemoval !== 'function')) fail()
   const base = existing ? installation.readDesktopInstallation(installRoot) : installation.readDesktopSelection(installRoot)
   const selection = existing ? installation.readDesktopPairReference(base.root).selection : base.selection
   const own = { ...base, coreRoot: path.join(base.root, 'releases', selection.core_id), guiRoot: path.join(base.root, 'app/releases', selection.gui_id) }
@@ -187,6 +188,7 @@ async function openDesktopRemoval({ installRoot, operationId, signal }, existing
       if (busy || !pendingStop || !pendingSourceExit || ['preparing', 'completed'].includes(record.phase)) fail()
       busy = true; removalFailed = false
       pendingRemoval = (async () => {
+        let platformRemoval, failure
         try {
           await pendingStop; await pendingSourceExit
           if (pendingRemovalPhase) {
@@ -203,17 +205,36 @@ async function openDesktopRemoval({ installRoot, operationId, signal }, existing
           await assertDesktopRemovalProgramsUnused({ installRoot: own.root, proof }, 'before-removing')
           await current(); assertStopped()
           if (probeKnownProcessExit([facts.source_gui]).state !== 'stopped') fail()
+          // Authorization is prepared while cancellation still has its original
+          // stopping semantics. The fixed host receives no deletion authority.
+          if (preparePlatformRemoval) {
+            platformRemoval = await preparePlatformRemoval()
+            if (!platformRemoval || typeof platformRemoval.remove !== 'function' || typeof platformRemoval.close !== 'function') fail()
+            await current(); assertStopped()
+            if (probeKnownProcessExit([facts.source_gui]).state !== 'stopped') fail()
+          }
           if (record.phase === 'stopping') {
+            signal?.throwIfAborted()
             pendingRemovalPhase = { ...record, phase: 'removing' }
             await privateJson(fence, pendingRemovalPhase, true); record = pendingRemovalPhase; pendingRemovalPhase = undefined
           }
           await current(); assertStopped()
           // Preparation cancellation cannot roll back a destructive phase.
+          if (platformRemoval) {
+            await platformRemoval.remove()
+            await current(); assertStopped()
+            if (probeKnownProcessExit([facts.source_gui]).state !== 'stopped') fail()
+          }
           const result = await removeDesktopRemovalPrograms({ installRoot: own.root, operationId })
           await current(); assertStopped()
           removalFailed = result.retained.length > 0
           return result
-        } catch (error) { removalFailed = true; throw error } finally { busy = false }
+        } catch (error) { failure = error; removalFailed = true; throw error }
+        finally {
+          try { await platformRemoval?.close() }
+          catch (cleanup) { removalFailed = true; if (failure) throw new AggregateError([failure, cleanup], '卸载及系统授权进程收尾未完成，保护与数据已保留。'); throw cleanup }
+          finally { busy = false }
+        }
       })()
       return pendingRemoval
     }

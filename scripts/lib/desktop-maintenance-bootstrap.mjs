@@ -49,6 +49,7 @@ export const desktopMaintenanceNodeFiles = Object.freeze([
   ...desktopMaintenanceBootstrap.map(file => 'bootstrap/' + file),
   'bootstrap/crabot-native/build/Release/crabot-native.node',
   'progress.mjs',
+  'rules.mjs',
   'node_modules/@electron/asar/index.cjs',
   'node_modules/@electron/asar/package.json',
 ])

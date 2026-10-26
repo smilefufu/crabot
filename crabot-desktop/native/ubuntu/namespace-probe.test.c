@@ -9,6 +9,7 @@ int main(int argc, char **argv) {
    * Exercise the network namespace operation Chromium also needs. */
   if (unshare(CLONE_NEWUSER) != 0) return errno == EPERM || errno == EACCES ? 13 : 1;
   if (unshare(CLONE_NEWNET) == 0) {
+    if (argc == 2 && !strcmp(argv[1], "--exec-hold")) { puts("CRABOT_NAMESPACE_EXEC_HOLD"); fflush(stdout); execl("/usr/bin/sleep", "sleep", "30", (char *)NULL); return 1; }
     if (argc == 2 && !strcmp(argv[1], "--hold")) { puts("CRABOT_NAMESPACE_HOLD"); fflush(stdout); sleep(30); }
     return 0;
   }

@@ -4,6 +4,7 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <inttypes.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -311,9 +312,12 @@ static int removal_targets(const char *install_root, int root, Target targets[3]
   }
   need(found[0]); return found[1] ? 3 : 2;
 }
-static void unchanged_targets(const char *root_path, int root, Target targets[3], int count) {
+static void unchanged_root(const char *root_path, int root) {
   int current = root_directory(root_path, caller); struct stat before, after;
   need(fstat(root, &before) == 0 && fstat(current, &after) == 0 && before.st_ino == after.st_ino && before.st_dev == after.st_dev); close(current);
+}
+static void unchanged_targets(const char *root_path, int root, Target targets[3], int count) {
+  unchanged_root(root_path, root); struct stat after;
   for (int i = 0; i < count; i++) {
     int fd = open_chain(root, targets[i].relative, caller, false, false);
     need(fstat(fd, &after) == 0 && same_stat(&targets[i].identity, &after)); close(fd);
@@ -378,15 +382,21 @@ static bool policy_loaded(const Target *target) {
   }
   bool ok = !ferror(profiles); fclose(profiles); need(ok); return loaded;
 }
-static void no_known_policy_user(const Target *target) {
-  /* The fixed Node host owns full program-reference/stop admission. This extra
-   * check refuses a positively observed inherited AppArmor label, including a
-   * child that executed a different image. It is not a global handle proof. */
+static void no_known_policy_user(const Target *target, const char *install_root) {
+  /* The verified Node host owns full program/descendant stop admission. Refuse
+   * a positively observed original namespace entry still running. A private
+   * Node/GTK maintenance copy can inherit the source GUI label without depending
+   * on its userns permission; that label alone is not original-program use. */
+  g_autofree char *expected = g_build_filename(install_root, target->relative, NULL);
   DIR *proc = opendir("/proc"); need(proc != NULL); struct dirent *item;
   while ((item = readdir(proc))) {
     if (!matches(item->d_name, "^[1-9][0-9]*$")) continue;
     g_autofree char *directory = g_strconcat("/proc/", item->d_name, NULL); struct stat st;
     if (stat(directory, &st) != 0 || st.st_uid != caller) continue;
+    g_autofree char *image_file = g_strconcat(directory, "/exe", NULL);
+    char image[4096]; ssize_t image_size = readlink(image_file, image, sizeof image - 1);
+    if (image_size <= 0 || (size_t)image_size >= sizeof image - 1) continue;
+    image[image_size] = 0; if (strcmp(image, expected)) continue;
     g_autofree char *file = g_strconcat(directory, "/attr/current", NULL);
     int fd = open(file, O_RDONLY | O_CLOEXEC | O_NOFOLLOW); if (fd < 0) continue;
     char label[8192]; ssize_t count = read(fd, label, sizeof label - 1); close(fd);
@@ -396,23 +406,46 @@ static void no_known_policy_user(const Target *target) {
   }
   closedir(proc);
 }
-static void remove_policy(int directory_fd, const Target *target) {
+static void remove_policy(int directory_fd, const Target *target, const char *install_root) {
   bool file = existing_policy(directory_fd, target), loaded = policy_loaded(target);
   if (!file) { need(!loaded); return; }
-  no_known_policy_user(target);
+  no_known_policy_user(target, install_root);
   if (loaded) { stage = "system-policy-unload"; parse_policy(target, true); need(!policy_loaded(target)); }
   stage = "system-policy-remove";
   need(existing_policy(directory_fd, target));
   need(unlinkat(directory_fd, target->name, 0) == 0 && fsync(directory_fd) == 0);
   need(!existing_policy(directory_fd, target) && !policy_loaded(target));
 }
+static char *removal_binding(int root, bool removing) {
+  g_autoptr(JsonNode) node = json(root, ".desktop-removal.json", 4096, true, NULL);
+  JsonObject *record = json_node_get_object(node);
+  if (removing) eq(record, "phase", "removing");
+  return g_strconcat(string(record, "operation_id"), ":", string(record, "proof_sha256"), NULL);
+}
+static void confirm_removal(const char *install_root, int root, Target targets[3], int count) {
+  g_autofree char *binding = removal_binding(root, false);
+  puts("CRABOT_SANDBOX_REMOVAL_READY"); need(fflush(stdout) == 0);
+  stage = "removal-confirmation";
+  struct pollfd input = { .fd = STDIN_FILENO, .events = POLLIN };
+  need(poll(&input, 1, 90000) > 0);
+  char frame[16]; ssize_t size = read(STDIN_FILENO, frame, sizeof frame);
+  need(size == 7 && !memcmp(frame, "remove\n", 7));
+  unchanged_root(install_root, root);
+  Target current[3] = {0}; int actual = removal_targets(install_root, root, current); need(actual == count);
+  g_autofree char *after = removal_binding(root, true); need(!strcmp(binding, after));
+  for (int i = 0; i < count; i++) {
+    need(!strcmp(targets[i].name, current[i].name) && !strcmp(targets[i].text, current[i].text));
+    g_free(current[i].relative); g_free(current[i].name); g_free(current[i].text); g_free(current[i].sha);
+  }
+}
 int main(int argc, char **argv) {
   umask(077);
   bool update = argc == 4 && (!strcmp(argv[1], "--inspect-update") || !strcmp(argv[1], "--register-update"));
   bool inspect = (argc == 3 && !strcmp(argv[1], "--inspect")) || (update && !strcmp(argv[1], "--inspect-update"));
   bool registration = (argc == 3 && !strcmp(argv[1], "--register")) || (update && !strcmp(argv[1], "--register-update"));
-  bool removal = argc == 3 && (!strcmp(argv[1], "--inspect-removal") || !strcmp(argv[1], "--unregister"));
-  bool unregister = removal && !strcmp(argv[1], "--unregister");
+  bool prepared_removal = argc == 3 && !strcmp(argv[1], "--prepare-removal");
+  bool removal = prepared_removal || (argc == 3 && (!strcmp(argv[1], "--inspect-removal") || !strcmp(argv[1], "--unregister")));
+  bool unregister = prepared_removal || (removal && !strcmp(argv[1], "--unregister"));
   need(inspect || registration || removal);
   if (update) need(matches(argv[3], "^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$"));
   if (registration || unregister) {
@@ -426,8 +459,10 @@ int main(int argc, char **argv) {
   if (unregister) {
     stage = "system-policy-conflict"; int system = system_directory();
     for (int i = 0; i < count; i++) existing_policy(system, &targets[i]);
-    for (int i = 0; i < count; i++) { stage = "system-policy-unused"; no_known_policy_user(&targets[i]); }
-    for (int i = 0; i < count; i++) remove_policy(system, &targets[i]);
+    for (int i = 0; i < count; i++) { stage = "system-policy-unused"; no_known_policy_user(&targets[i], argv[2]); }
+    if (prepared_removal) confirm_removal(argv[2], root, targets, count);
+    for (int i = 0; i < count; i++) existing_policy(system, &targets[i]);
+    for (int i = 0; i < count; i++) remove_policy(system, &targets[i], argv[2]);
     close(system);
   } else if (registration) {
     stage = "system-policy-conflict"; int system = system_directory();

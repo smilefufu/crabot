@@ -128,11 +128,12 @@ export async function prepareDesktopRemovalNode({ installRoot, operationId, sign
     const files = [
       { source: path.join(own.coreRoot, nodePath), target: 'node', entry: inventory[nodePath] },
       { source: path.join(own.guiRoot, 'resources/crabot-maintenance'), target: 'crabot-maintenance', entry: proof.payload.gui['resources/crabot-maintenance'] },
+      { source: path.join(own.guiRoot, 'resources/crabot-sandbox-helper'), target: 'crabot-sandbox-helper', entry: proof.payload.gui['resources/crabot-sandbox-helper'] },
       ...desktopMaintenanceNodeFiles.map(name => ({ source: path.join(own.guiRoot, 'resources/crabot-maintenance-backend', name), target: 'backend/' + name,
         entry: proof.payload.gui['resources/crabot-maintenance-backend/' + name] })),
     ]
     if (files.some(file => file.entry?.type !== 'file' || !Number.isSafeInteger(file.entry.size) || file.entry.size < 1 || file.entry.size > 128 * 1024 * 1024
-      || file.entry.mode & 0o022 || ['node', 'crabot-maintenance'].includes(file.target) && !(file.entry.mode & 0o111))) fail()
+      || file.entry.mode & 0o022 || ['node', 'crabot-maintenance', 'crabot-sandbox-helper'].includes(file.target) && !(file.entry.mode & 0o111))) fail()
     const parent = await fs.realpath(tmpdir()), space = await fs.statfs(parent, { bigint: true })
     if (space.bavail * space.bsize < files.reduce((sum, file) => sum + BigInt(file.entry.size), 0n) + 512n * 1024n * 1024n) {
       throw Object.assign(new Error('临时维护程序空间不足，原应用和数据已保留。'), { code: 'CRABOT_UPDATE_SPACE' })
@@ -193,7 +194,8 @@ export async function prepareDesktopRemovalNode({ installRoot, operationId, sign
       if(fs.realpathSync(identity.inspectProcess(process.pid).executable)!==fs.realpathSync(process.execPath))throw new Error('private interpreter mismatch');
       const job=await import(pathToFileURL(path.join(root,'backend/bootstrap/scripts/lib/desktop-removal-job.mjs')));
       const progress=await import(pathToFileURL(path.join(root,'backend/progress.mjs')));
-      if(typeof job.beginInitialDesktopRemoval!=='function'||typeof progress.createUbuntuRemovalProgressWindow!=='function')throw new Error('fixed backend incomplete');
+      const rules=await import(pathToFileURL(path.join(root,'backend/rules.mjs')));
+      if(typeof job.beginInitialDesktopRemoval!=='function'||typeof progress.createUbuntuRemovalProgressWindow!=='function'||typeof rules.prepareUbuntuRemovalRules!=='function')throw new Error('fixed backend incomplete');
       process.stdout.write(JSON.stringify({node_version:process.versions.node,self_verified:true})+'\\n');`
     const result = await promisify(execFile)(executable, ['--input-type=module', '--eval', script, directory], {
       cwd: directory, env: { PATH: '', LANG: 'C.UTF-8' }, timeout: 15000, maxBuffer: 4096, signal,
@@ -222,6 +224,7 @@ export async function verifyUbuntuRemovalNodeCopy(directory, proof, { signal } =
   const files = [
     { target: 'node', entry: inventory['.product-runtime/node/bin/node'] },
     { target: 'crabot-maintenance', entry: proof.payload.gui['resources/crabot-maintenance'] },
+    { target: 'crabot-sandbox-helper', entry: proof.payload.gui['resources/crabot-sandbox-helper'] },
     ...desktopMaintenanceNodeFiles.map(name => ({ target: 'backend/' + name, entry: proof.payload.gui['resources/crabot-maintenance-backend/' + name] })),
   ]
   const generation = stat => [stat.dev, stat.ino, stat.mode, stat.uid, stat.gid, stat.size, stat.nlink, stat.mtimeNs, stat.ctimeNs].join(':')
@@ -229,7 +232,7 @@ export async function verifyUbuntuRemovalNodeCopy(directory, proof, { signal } =
     signal?.throwIfAborted()
     const expected = file.entry
     if (expected?.type !== 'file' || !Number.isSafeInteger(expected.size) || expected.size < 1 || expected.size > 128 * 1024 * 1024
-      || expected.mode & 0o022 || ['node', 'crabot-maintenance'].includes(file.target) && !(expected.mode & 0o111)) fail()
+      || expected.mode & 0o022 || ['node', 'crabot-maintenance', 'crabot-sandbox-helper'].includes(file.target) && !(expected.mode & 0o111)) fail()
     const target = path.join(directory, file.target), before = await fs.lstat(target, { bigint: true })
     if (!before.isFile() || before.nlink !== 1n || before.uid !== BigInt(process.getuid()) || (before.mode & 0o777n) !== BigInt(expected.mode)
       || before.size !== BigInt(expected.size) || await fs.realpath(target) !== target) fail()
