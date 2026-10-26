@@ -262,7 +262,18 @@ for (const mode of ['valid', 'wrong-operation', 'changed-parent', 'changed-helpe
       const env = { ...process.env, HOME: home, XDG_CONFIG_HOME: path.join(home, 'config'), XDG_DATA_HOME: path.join(home, 'share') }
       for (const name of ['NODE_OPTIONS', 'NODE_PATH', 'DATA_DIR', 'CRABOT_HOME', 'CRABOT_DEV', 'CRABOT_PORT_OFFSET']) delete env[name]
       if (mode === 'early-cancel') {
-        const child = spawn(process.execPath, [fileURLToPath(new URL('../dist/ubuntu-installer-backend.js', import.meta.url)), own.root], {
+        // The ordinary packager includes the installer library tree, beyond the
+        // smaller maintenance bootstrap. Stage the real read-only preconditions
+        // here too, rather than fail at a missing import before stdin is read.
+        const backendDirectory = path.join(bundle, 'backend/dist')
+        await fs.cp(fileURLToPath(new URL('../dist/', import.meta.url)), backendDirectory, { recursive: true })
+        for (const name of ['mode.mjs', 'legacy-desktop.mjs', 'legacy-release-identity.mjs', 'legacy-release-files.mjs']) {
+          await fs.copyFile(fileURLToPath(new URL('../../scripts/lib/' + name, import.meta.url)), path.join(backendDirectory, 'bootstrap/scripts/lib', name))
+        }
+        const catalog = path.join(backendDirectory, 'bootstrap/scripts/desktop')
+        await fs.mkdir(catalog, { recursive: true })
+        await fs.copyFile(fileURLToPath(new URL('../../scripts/desktop/legacy-releases.json', import.meta.url)), path.join(catalog, 'legacy-releases.json'))
+        const child = spawn(process.execPath, [path.join(backendDirectory, 'ubuntu-installer-backend.js'), own.root], {
           env, cwd: bundle, stdio: ['pipe', 'pipe', 'pipe'],
         })
         const exited = once(child, 'exit'), peer = identity.inspectProcess(child.pid)
@@ -276,6 +287,7 @@ for (const mode of ['valid', 'wrong-operation', 'changed-parent', 'changed-helpe
         child.stdin.write('{"action":"cancel"}\n') // Keep stdin open to expose a forgotten pending-choice promise.
         try {
           const [code] = await exited; assert.equal(timedOut, false); assert.equal(code, 2, output)
+          assert.deepEqual(JSON.parse(output.trim()), { type: 'failed', code: 'CANCELLED' })
           assert.equal(JSON.parse(await fs.readFile(path.join(own.root, '.desktop-removal.json'), 'utf8')).phase, 'removing')
           assert.equal(await fs.readFile(path.join(own.dataDir, 'preserved'), 'utf8'), 'data and dependencies')
         } finally { clearTimeout(timer); child.stdin.destroy() }
