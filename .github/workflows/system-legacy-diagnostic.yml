@@ -2,6 +2,9 @@
 name: Published system legacy diagnostic
 on:
   workflow_dispatch:
+  push:
+    branches: ['feat/desktop-application']
+    paths: ['.github/workflows/system-legacy-diagnostic.yml']
 permissions:
   contents: read
   actions: read
