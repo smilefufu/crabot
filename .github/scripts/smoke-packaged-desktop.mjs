@@ -9,6 +9,8 @@ import { promisify } from 'node:util'
 import { pathToFileURL } from 'node:url'
 import { once } from 'node:events'
 if (process.env.GITHUB_ACTIONS !== 'true') throw new Error('Packaged core boot test requires an isolated CI user')
+const started = performance.now()
+const stage = name => console.log('CRABOT_PACKAGED_BOOT_STAGE ' + JSON.stringify({ stage: name, elapsed_ms: Math.round(performance.now() - started) }))
 const project = await fs.realpath(path.resolve(process.argv[2]))
 const location = JSON.parse(await fs.readFile(path.join(project, 'packaged-location.json'), 'utf8'))
 function inside(relative) {
@@ -39,7 +41,9 @@ if (location.schema_version === 2) {
     assert.ok(stdout.endsWith('CRABOT_SANDBOX_VERIFIED\n'))
     console.log('CRABOT_PREPARED_NATIVE_ROLES_VERIFIED')
   }
+  stage('pair-commit')
   const selected = await commitDesktopInstallation(prepared)
+  stage('pair-committed')
   executable = selected.executable; core = selected.coreRoot; data = selected.dataDir; installRoot = selected.root
 } else {
   // An app nested under the checkout can silently resolve missing dependencies.
@@ -60,7 +64,9 @@ if (location.schema_version === 2) {
 const fromCheckout = path.relative(project, core)
 assert.ok(path.isAbsolute(fromCheckout) || fromCheckout.startsWith('..' + path.sep))
 const { verifyCoreRelease } = await import(pathToFileURL(path.join(core, 'scripts/lib/core-release.mjs')))
+stage('core-verification')
 await verifyCoreRelease(core)
+stage('core-verified')
 const env = { ...process.env, DATA_DIR: data }
 delete env.ELECTRON_RUN_AS_NODE; delete env.NODE_OPTIONS; delete env.NODE_PATH; delete env.CRABOT_DEV; delete env.CRABOT_PORT_OFFSET
 let node = path.join(core, process.platform === 'win32' ? '.product-runtime/node/node.exe' : '.product-runtime/node/bin/node')
@@ -100,10 +106,11 @@ function launch() {
   child.stderr.on('data', chunk => { output = (output + chunk).slice(-128_000) })
   child.on('error', error => { output += String(error); ended = true })
   async function phase(expected) {
+    stage('waiting-gui-' + expected)
     // Includes full immutable payload checks, bounded 120s preflight and core boot.
     const deadline = Date.now() + 180_000
     while (Date.now() < deadline) {
-      if (phases.some(event => event.phase === expected)) return
+      if (phases.some(event => event.phase === expected)) { stage('observed-gui-' + expected); return }
       if (ended || phases.some(event => ['error', 'migration_required'].includes(event.phase))) throw new Error('Packaged boot failed\n' + output)
       await new Promise(resolve => setTimeout(resolve, 100))
     }
@@ -137,6 +144,7 @@ try {
   }
   const release = JSON.parse(await fs.readFile(path.join(core, 'core-release.json'), 'utf8'))
   assert.equal(await registeredCliVersion(), release.version)
+  stage('registered-cli-verified')
   gui.child.kill('SIGKILL'); await gui.exited()
   assert.equal((await inspectInstance()).state, 'running')
   gui = launch(); await gui.phase('ready')
@@ -147,12 +155,14 @@ try {
   let retainedRepair
   if (location.schema_version === 2) {
     const { prepareRetainedProductReinstall } = await import('./accept-retained-product-reinstall.mjs')
+    stage('retained-program-preparation')
     retainedRepair = await prepareRetainedProductReinstall({ installRoot, payload: retainedPayload || inside(location.payload) })
     if (retainedPayload) {
       assert.notEqual(retainedRepair.selection.version, release.version)
       const originalRelease = JSON.parse(await fs.readFile(path.join(core, 'core-release.json'), 'utf8'))
       assert.notEqual(retainedRepair.selection.core_id, originalRelease.inventory_sha256)
     }
+    stage('retained-programs-prepared')
     executable = retainedRepair.executable; core = retainedRepair.coreRoot
     node = path.join(core, process.platform === 'win32' ? '.product-runtime/node/node.exe' : '.product-runtime/node/bin/node')
     gui = launch(); await gui.phase('ready')
@@ -163,6 +173,7 @@ try {
       if (Date.now() >= deadline) throw new Error('Ordinary retained target did not complete maintenance after ready')
       await new Promise(resolve => setTimeout(resolve, 100))
     }
+    stage('retained-maintenance-cleared')
     const repaired = await inspectInstance()
     assert.equal(repaired.state, 'running'); assert.equal(repaired.record.instance_id, first.record.instance_id)
     assert.notEqual(repaired.record.generation, first.record.generation)
@@ -196,10 +207,12 @@ try {
   } catch { console.error('Packaged fixture diagnostics could not be preserved') }
   throw error
 } finally {
+  stage('cleanup-start')
   for (const child of children) if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
   const exits = await Promise.allSettled(children.map(waitForExit))
   await cli('stop')
   assert.equal((await inspectInstance()).state, 'stopped', 'Unverified processes keep their disposable data for investigation')
   for (const exit of exits) if (exit.status === 'rejected') throw exit.reason
   await fs.rm(temporary, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+  stage('cleanup-completed')
 }
