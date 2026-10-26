@@ -1,0 +1,26 @@
+name: Desktop macOS owned login copy probe
+on:
+  workflow_dispatch:
+  push:
+    branches: ['feat/desktop-application']
+    paths:
+      - '.github/scripts/probe-macos-removal-login.mjs'
+      - '.github/scripts/fixtures/macos-removal-login.m'
+      - '.github/workflows/desktop-macos-removal-login-probe.yml'
+permissions:
+  contents: read
+jobs:
+  login-copy:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-15-intel]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.3'
+      - name: Register only a unique CI app and test its identical maintenance copy
+        run: node .github/scripts/probe-macos-removal-login.mjs
