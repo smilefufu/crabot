@@ -120,7 +120,7 @@ async function boot() {
     verifier.applyDesktopEnvironment(installation)
     bootstrapStage('environment-bound')
     const management = createRequire(import.meta.url)('./bootstrap/scripts/lib/desktop-management.cjs')
-    dataRoot = management.requirePrivateDataRoot(installation.dataDir)
+    dataRoot = management.requireExistingDataRoot(installation.dataDir)
     configureProfile(dataRoot)
     bootstrapStage('profile-configured')
     if (!claimInstance()) return
@@ -137,7 +137,7 @@ async function boot() {
     if (installation && resolved !== dataRoot) throw Object.assign(new Error('Installed data binding changed'), { code: 'CRABOT_DESKTOP_INSTALLATION' })
     dataRoot = resolved
     const management = (await loadCore('scripts/lib/desktop-management.cjs')).default
-    dataRoot = management.ensurePrivateDataRoot(dataRoot)
+    dataRoot = installation ? management.requireExistingDataRoot(dataRoot) : management.ensurePrivateDataRoot(dataRoot)
     if (!installation) configureProfile(dataRoot)
   } catch (error) { initialError = error }
   bootstrapStage('data-location-checked')

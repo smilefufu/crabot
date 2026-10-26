@@ -12,7 +12,7 @@ const readSync = fs.readFileSync
 fs.readFileSync = (file, ...rest) => typeof file === 'string' && path.resolve(file) === path.resolve(__dirname, '../dist/desktop-release.json')
   ? JSON.stringify(options.pin) + '\n' : readSync(file, ...rest)
 syncBuiltinESMExports()
-if (options.scenario === 'profile-before-ready') {
+if (options.scenario.endsWith('profile-before-ready')) {
   const physical = require('original-fs').promises, readPhysical = physical.readFile
   let waited = false, earlyLock = false
   const requestLock = app.requestSingleInstanceLock.bind(app)
