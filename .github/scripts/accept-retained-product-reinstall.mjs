@@ -18,7 +18,7 @@ import { desktopRemovalProgramEntries } from '../../scripts/lib/desktop-removal-
 import { assertDesktopRemovalProgramsUnused } from '../../scripts/lib/desktop-removal-delete.mjs'
 import { verifyDesktopPayload } from '../../scripts/lib/desktop-payload.mjs'
 
-export async function prepareRetainedProductReinstall({ installRoot, payload }) {
+export async function prepareRetainedProductReinstall({ installRoot, payload, preparePrograms = async () => {} }) {
   if (process.env.GITHUB_ACTIONS !== 'true') throw new Error('Requires an isolated CI user, never a developer deployment')
   const own = installation.readDesktopSelection(installRoot), source = await verifyDesktopPayload(payload)
   assertReinstallVersion(own.selection.version, source.record.selection.version)
@@ -68,7 +68,7 @@ export async function prepareRetainedProductReinstall({ installRoot, payload }) 
   const handoff = await runPreparedDesktopReinstallHandoff({ payload, installRoot: own.root, operationId,
     // OS menu registration is covered by actual ordinary installer tests; this
     // fixture exercises the Core/GUI health boundary, not a replacement shell.
-    registerEntries: async prepared => assert.deepEqual(prepared.selection, source.record.selection) })
+    registerEntries: async prepared => { assert.deepEqual(prepared.selection, source.record.selection); await preparePrograms(prepared) } })
   assert.equal(handoff.verification_pending, true); assert.equal(handoff.health_verified, false)
   assert.equal(inspectInstance(own.dataDir).state, 'stopped')
   assert.ok(await fs.stat(path.join(own.dataDir, 'desktop-maintenance.json')))

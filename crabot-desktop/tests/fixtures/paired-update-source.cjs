@@ -11,6 +11,12 @@ const { sourceLifetimeMs } = require('./paired-update-limits.cjs')
 const childProcess = require('node:child_process'), originalSpawn = childProcess.spawn
 let nativeInspectionStage
 childProcess.spawn = (command, args, options) => {
+  if (process.platform === 'linux' && command === '/usr/bin/pkexec' && config.ciPolkitTransport === 'sudo') {
+    assert.equal(args.length, 4); assert.equal(args[1], '--register-update'); assert.equal(args[2], config.source.root)
+    assert.match(args[3], /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/)
+    assert.equal(args[0], path.join(config.source.root, 'app/releases', args[3], 'resources/crabot-sandbox-helper'))
+    return originalSpawn('/usr/bin/sudo', ['-n', '/usr/bin/env', 'PKEXEC_UID=' + process.getuid(), ...args], options)
+  }
   const child = originalSpawn(command, args, options)
   if (args?.[0] === '--inspect-update') child.stderr?.on('data', bytes => {
     const stage = /CRABOT_SANDBOX_NOT_READY:([a-z-]{1,64})/.exec(bytes.toString('utf8'))?.[1]

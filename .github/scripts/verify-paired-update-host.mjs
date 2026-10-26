@@ -19,6 +19,7 @@ import { stopInstance } from '../../scripts/lib/instance-controller.mjs'
 import { probeKnownProcessExit } from '../../scripts/lib/known-process-exit.cjs'
 import product from '../../scripts/lib/product-runtime.cjs'
 import { buildPairedUpdateSource } from './build-paired-update-source.mjs'
+import { registerUbuntuFixturePrograms } from './ubuntu-fixture-programs.mjs'
 import { preparePairedUpdateCore } from './prepare-paired-update-core.mjs'
 import sourceLimits from '../../crabot-desktop/tests/fixtures/paired-update-limits.cjs'
 import { collectPairedUpdateTargetEvidence, summarizePairedTargetBootstrap, collectPairedTargetNativeStack } from './paired-update-target-evidence.mjs'
@@ -52,7 +53,8 @@ await fs.mkdir(job, { mode: 0o700 }); const control = path.join(temporary, 'cont
 await fs.mkdir(control, { mode: 0o700 }); await fs.mkdir(home, { mode: 0o700 })
 let modelProvider, selected, child, targetIdentity, sourceIdentity, expectedTargetGuiRoot, expectedTargetCoreRoot, handoffAt, fixtureEnvironment, phase = 'prepare-target', success = false, sourceOutput = ''
 const report = { acceptance_id: acceptanceId, platform: process.platform, arch: process.arch, candidate_channel_enabled: false, remote_model_called: false,
-  source_gui: 'fixture-packaged-component-actor', target_gui: 'ordinary-packaged-main', fixture_debugger: false, real_login_session_verified: false }
+  source_gui: 'fixture-packaged-component-actor', target_gui: 'ordinary-packaged-main', fixture_debugger: false, real_login_session_verified: false,
+  polkit_transport_substituted: process.platform === 'linux' }
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
 const started = performance.now()
 const checkpoint = stage => console.log('CRABOT_PAIRED_UPDATE_STAGE ' + JSON.stringify({ stage, elapsed_ms: Math.round(performance.now() - started) }))
@@ -96,14 +98,16 @@ try {
   checkpoint('higher-retained-reinstall-verified')
   phase = 'prepare-source'
   const sourcePayload = await buildPairedUpdateSource({ repository, project, destination: path.join(job, 'source-project') })
-  selected = await commitDesktopInstallation(await prepareDesktopInstallation({ payload: sourcePayload, installRoot: path.join(temporary, '整体 安装') }))
+  const sourcePrepared = await prepareDesktopInstallation({ payload: sourcePayload, installRoot: path.join(temporary, '整体 安装') })
+  await registerUbuntuFixturePrograms(sourcePrepared)
+  selected = await commitDesktopInstallation(sourcePrepared)
   await fs.rm(path.join(job, 'source-project'), { recursive: true })
   expectedTargetGuiRoot = path.join(selected.root, 'app/releases', target.record.selection.gui_id)
   expectedTargetCoreRoot = path.join(selected.root, 'releases', target.record.selection.core_id)
   const sentinel = path.join(selected.dataDir, 'update-fixture-preserved.txt')
   modelProvider = await startPairedUpdateModelProvider()
   const metadata = { modelEndpoint: modelProvider.endpoint, source: selected, home, control, publicKey: keys.publicKey.export({ type: 'spki', format: 'pem' }).toString(), publication,
-    manifestName: path.basename(signed.manifestFile), signaturesName: path.basename(signed.signaturesFile), artifactName: path.basename(signed.artifact), targetVersion }
+    manifestName: path.basename(signed.manifestFile), signaturesName: path.basename(signed.signaturesFile), artifactName: path.basename(signed.artifact), targetVersion, ciPolkitTransport: process.platform === 'linux' ? 'sudo' : null }
   const config = path.join(control, 'config.json'); await fs.writeFile(config, JSON.stringify(metadata) + '\n', { mode: 0o600 })
   const env = { ...process.env, HOME: home, USERPROFILE: home, APPDATA: path.join(home, 'Roaming'), LOCALAPPDATA: path.join(home, 'Local'), DATA_DIR: selected.dataDir, GIT_ALLOW_PROTOCOL: 'file', CRABOT_PAIRED_UPDATE_FIXTURE_CONFIG: config }
   for (const name of ['ELECTRON_RUN_AS_NODE', 'NODE_OPTIONS', 'NODE_PATH', 'CRABOT_DEV', 'CRABOT_PORT_OFFSET']) delete env[name]

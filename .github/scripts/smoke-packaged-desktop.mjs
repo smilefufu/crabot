@@ -8,6 +8,7 @@ import { spawn, execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { pathToFileURL } from 'node:url'
 import { once } from 'node:events'
+import { registerUbuntuFixturePrograms } from './ubuntu-fixture-programs.mjs'
 if (process.env.GITHUB_ACTIONS !== 'true') throw new Error('Packaged core boot test requires an isolated CI user')
 const started = performance.now()
 const stage = name => console.log('CRABOT_PACKAGED_BOOT_STAGE ' + JSON.stringify({ stage: name, elapsed_ms: Math.round(performance.now() - started) }))
@@ -41,6 +42,7 @@ if (location.schema_version === 2) {
     assert.ok(stdout.endsWith('CRABOT_SANDBOX_VERIFIED\n'))
     console.log('CRABOT_PREPARED_NATIVE_ROLES_VERIFIED')
   }
+  await registerUbuntuFixturePrograms(prepared)
   stage('pair-commit')
   const selected = await commitDesktopInstallation(prepared)
   stage('pair-committed')
@@ -156,7 +158,7 @@ try {
   if (location.schema_version === 2) {
     const { prepareRetainedProductReinstall } = await import('./accept-retained-product-reinstall.mjs')
     stage('retained-program-preparation')
-    retainedRepair = await prepareRetainedProductReinstall({ installRoot, payload: retainedPayload || inside(location.payload) })
+    retainedRepair = await prepareRetainedProductReinstall({ installRoot, payload: retainedPayload || inside(location.payload), preparePrograms: registerUbuntuFixturePrograms })
     if (retainedPayload) {
       assert.notEqual(retainedRepair.selection.version, release.version)
       const originalRelease = JSON.parse(await fs.readFile(path.join(core, 'core-release.json'), 'utf8'))
