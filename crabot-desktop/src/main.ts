@@ -13,7 +13,7 @@ import { attachLocalPages } from './local-pages.js'
 import { attachDesktopNetwork } from './desktop-network.js'
 import { registerDesktopIpc } from './desktop-ipc.js'
 import { collectDiagnostics } from './diagnostics.js'
-import { openBootstrapLog } from './bootstrap-log.js'
+import { openBootstrapLog, logBootstrapException } from './bootstrap-log.js'
 import { ArtifactWindows } from './artifact-window.js'
 import { LoginStartup, type StartupState } from './login-startup.js'
 import { externalUrl, isAppUrl, isTrustedFrame } from './window-security.js'
@@ -59,6 +59,7 @@ async function quit(): Promise<boolean> {
 function show() { window?.show(); window?.focus() }
 const bootstrapHistory: { phase: string; at: string; code?: string; app_version?: string }[] = []
 let bootstrapLog: ReturnType<typeof openBootstrapLog>
+process.on('uncaughtExceptionMonitor', error => logBootstrapException(event => bootstrapLog?.(event), error))
 function bootstrapStage(phase: string, fields: { code?: string; app_version?: string } = {}) {
   const event = { phase, at: new Date().toISOString(), ...fields }
   const line = JSON.stringify({ component: 'desktop-bootstrap', ...event })

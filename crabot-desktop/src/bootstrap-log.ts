@@ -55,3 +55,12 @@ export function openBootstrapLog(profile: string, files: Files): ((event: Event)
     }
   } catch { return undefined } finally { close(fd) }
 }
+
+// Observation only: Electron/Node retains its ordinary exception handling.
+export function logBootstrapException(write: (event: Event) => void, error: unknown): void {
+  try {
+    const code = (error as { code?: unknown })?.code
+    write({ phase: 'failed', at: new Date().toISOString(), code: typeof code === 'string' && /^[A-Z0-9_]{1,128}$/.test(code)
+      ? code : 'DESKTOP_UNCAUGHT_EXCEPTION' })
+  } catch { /* Failure diagnostics cannot replace the original exception. */ }
+}

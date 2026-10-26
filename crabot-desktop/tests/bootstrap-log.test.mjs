@@ -1,11 +1,12 @@
 import test from 'node:test'
+import { spawnSync } from 'node:child_process'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 import { tmpdir } from 'node:os'
 import native from '../../scripts/lib/process-identity.cjs'
 import management from '../../scripts/lib/desktop-management.cjs'
-import { openBootstrapLog } from '../dist/bootstrap-log.js'
+import { openBootstrapLog, logBootstrapException } from '../dist/bootstrap-log.js'
 async function fixture(t) {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(tmpdir(), 'crabot-bootstrap-log-')))
   t.after(() => fs.rmSync(root, { recursive: true, force: true }))
@@ -86,4 +87,25 @@ test('bootstrap logging preserves a nonprivate file and enforces its byte budget
   fs.appendFileSync(f.file, 'x'.repeat(16370))
   write(event())
   assert.equal(fs.statSync(f.file).size, 16370)
+})
+
+for (const code of ['EPIPE', 'ERR_DLOPEN_FAILED', 'private error message', undefined]) test('uncaught observation projects only a bounded error code: ' + code, async t => {
+  const f = await fixture(t), write = openBootstrapLog(f.profile, native)
+  logBootstrapException(write, { code, message: 'private-message', stack: '/private/stack' })
+  const text = fs.readFileSync(f.file, 'utf8'), event = JSON.parse(text)
+  assert.equal(event.phase, 'failed')
+  assert.equal(event.code, ['EPIPE', 'ERR_DLOPEN_FAILED'].includes(code) ? code : 'DESKTOP_UNCAUGHT_EXCEPTION')
+  assert.equal(text.includes('private'), false)
+  assert.doesNotThrow(() => logBootstrapException(() => { throw new Error('disk failure') }, new Error('original')))
+})
+
+test('monitor observation retains the ordinary fatal exception result', () => {
+  const helper = new URL('../dist/bootstrap-log.js', import.meta.url).href
+  const script = `import { logBootstrapException } from ${JSON.stringify(helper)};
+    process.on('uncaughtExceptionMonitor', error => logBootstrapException(event => process.stdout.write(JSON.stringify(event)), error));
+    throw Object.assign(new Error('synthetic fatal actor'), { code: 'EPIPE' });`
+  const child = spawnSync(process.execPath, ['--input-type=module', '-e', script], { encoding: 'utf8', timeout: 5000, maxBuffer: 65536 })
+  assert.equal(child.status, 1); assert.equal(child.signal, null)
+  assert.equal(JSON.parse(child.stdout).code, 'EPIPE')
+  assert.match(child.stderr, /synthetic fatal actor/)
 })
