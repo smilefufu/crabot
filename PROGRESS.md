@@ -63,7 +63,7 @@
 ### 桌面化方案：范围冻结，原 worktree 收口中，未进入 PR
 
 - 按2026-10-25冻结边界继续，不增加产品子项目或恢复记录。用户2026-10-26已确认macOS及Linux受保护系统角色导致的实测误阻断修正；仅落实这些有限例外。原已确认体验和验收保持；[实施计划](crabot-docs/superpowers/plans/2026-10-17-desktop-application-implementation.md)、[完整验收证据](crabot-docs/superpowers/plans/2026-10-17-desktop-application-validation.md)记录逐项结果及失败，不以组件替代交付。
-- 已形成四个实际独立构建的review分支：Native基础、Client SDK、Runtime基础、Workspace目录基础。各有自身依赖/编译和四平台或三平台CI，未借feature dist；B1原生引用修正后自身重编110项89过21平台跳过，1438aa35自身新版四平台CI已全部通过。后续依赖批次必须在依赖合并后按实际main重新定位并验证，不提交悬空引用或巨大单PR。
+- 已形成四个实际独立构建的review分支：Native基础、Client SDK、Runtime基础、Workspace目录基础。各有自身依赖/编译和四平台或三平台CI，未借feature dist；B1最新c9adc007自身四平台CI全部通过，独立本机重编111项90过21平台跳过；Runtime/Workspace已同步实际Native依赖，自身重编后分别34项33过1跳过、182项181过1跳过，新四平台继续。后续依赖批次必须在依赖合并后按实际main重新定位并验证，不提交悬空引用或巨大单PR。
 - 现有GUI/CLI共用、窄IPC+共享HTTP/WS、内置环境、项目workspace及权限迁移、system批量运维主体仍在原feature worktree。Windows旧候选两次整包GUI/Core/CLI与签名更新通过；只证明对应候选，不能代替最终版/Win11真实桌面或登录验收。
 - ARM原更新故障由固定首目标证据收窄至recovering-service/NSAlert；实际Electron/Controller进一步复现登录警告框阻塞服务启动。已将提示延后到原恢复/健康/维护确定之后，不改变OS意图与健康门槛；旧两项时序回归先红，修后66项65过1平台跳过、7项实际Electron全过。6e5bd1a2原签名整包40256350443已成功，普通目标Main、新实例代际、真实健康收口和数据保留已核实；仍非真实模型/登录验收。
 - Linux原流程三次在固定libfreetype/libpng源503/读取超时中止，未到S5。61b4f1fe仅将四个失效URL替换为Ubuntu官方固定快照，x64/arm64四包真实HTTP200且原SHA完全相同；六项内置Python与16项资源/打包回归通过。61b完整Linux在资源步骤前被旧通知断言阻断，c10405ac修正组件测试后已重跑原流程；缺artifact不算实际Ubuntu安装产品失败。
