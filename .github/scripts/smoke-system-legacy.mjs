@@ -38,6 +38,12 @@ const releases = [
   { version: 'v2026.10.15.1', size: 439576227, sha256: '735c56bdc74b12a67b8d889fa211aa35dc916b20d2b509262d51898307bb3f64' },
 ]
 const reports = [], ownedOsFiles = ['/etc/crabot', '/usr/local/bin/crabot', '/etc/systemd/user/crabot.service', '/etc/logrotate.d/crabot']
+// GitHub images can make this root-owned command directory world-writable.
+// Match the shared-install prerequisite only on this disposable hosted runner.
+const commandDirectory = await fs.lstat('/usr/local/bin')
+assert.ok(commandDirectory.isDirectory() && !commandDirectory.isSymbolicLink()); assert.equal(commandDirectory.uid, 0)
+if (commandDirectory.mode & 0o022) await fs.chmod('/usr/local/bin', (commandDirectory.mode & 0o7777) & ~0o022)
+console.log('CRABOT_LEGACY_COMMAND_DIRECTORY ' + JSON.stringify({ before: commandDirectory.mode & 0o7777, after: (await fs.stat('/usr/local/bin')).mode & 0o7777 }))
 const absent = async file => assert.rejects(fs.lstat(file), { code: 'ENOENT' })
 const ptyCode = String.raw`import os,pty,select,signal,sys,time
 pid,master=pty.fork()
