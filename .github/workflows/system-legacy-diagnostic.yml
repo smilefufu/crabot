@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   push:
     branches: ['feat/desktop-application']
-    paths: ['.github/workflows/system-legacy-diagnostic.yml']
+    paths: ['.github/workflows/system-legacy-diagnostic.yml', '.github/scripts/smoke-system-legacy.mjs']
 permissions:
   contents: read
   actions: read
@@ -49,7 +49,7 @@ jobs:
           await fs.writeFile('crabot-admin/dist/credentials.js', stripTypeScriptTypes(await fs.readFile('crabot-admin/src/credentials.ts', 'utf8')))
           console.log('CRABOT_SYSTEM_DIAGNOSTIC_SOURCE ' + JSON.stringify({ commit: release.commit, current_source_acceptance: false }))
           NODE
-      - name: Run the unchanged published legacy installer acceptance
+      - name: Run the published legacy installer acceptance
         run: sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,GITHUB_REPOSITORY,GITHUB_WORKSPACE "$GITHUB_WORKSPACE/.desktop-build/安装 候选/core/.product-runtime/node/bin/node" .github/scripts/smoke-system-legacy.mjs "$GITHUB_WORKSPACE/.desktop-build/安装 候选/core" "$GITHUB_WORKSPACE/.desktop-build/system-legacy.json" 2>&1 | tee .desktop-build/system-legacy.log
       - uses: actions/upload-artifact@v4
         if: always()

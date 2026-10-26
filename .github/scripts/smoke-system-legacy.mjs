@@ -88,6 +88,12 @@ for (const release of releases) {
     await absent(base)
     const space = await fs.statfs('/var/lib', { bigint: true }); assert.ok(space.bavail * space.bsize >= 12n * 1024n ** 3n, 'require 12GiB before one legacy case')
     await fs.mkdir(base, { mode: 0o755 }); ownBase = true
+    // The test accounts consume public fixture code, not the runner's build
+    // directory. Keep the same generated helper outside the sealed old release.
+    const credentialSource = path.join(workspace, 'crabot-admin/dist/credentials.js'), credentials = path.join(base, 'credentials.js')
+    const credentialSourceStat = await fs.stat(credentialSource)
+    await fs.chmod(base, 0o755); await fs.copyFile(credentialSource, credentials); await fs.chmod(credentials, 0o644)
+    console.log('CRABOT_LEGACY_CREDENTIAL_FIXTURE ' + JSON.stringify({ source_mode: credentialSourceStat.mode & 0o777, copied_mode: (await fs.stat(credentials)).mode & 0o777 }))
     const archive = path.join(base, 'legacy.tar.gz')
     await download(release, archive); await fs.mkdir(old, { mode: 0o755 })
     await run('/bin/tar', ['--extract', '--gzip', '--file=' + archive, '--directory=' + old, '--strip-components=1', '--no-same-owner', '--no-same-permissions'])
@@ -114,7 +120,7 @@ for (const release of releases) {
         fs.writeFileSync(path.join(data,'agent/preserved.txt'),'original stopped account history');
         fs.writeFileSync(path.join(home,'instance.json'),JSON.stringify({mode:'system',port_offset:off,crabot_home:old,api_key:'fixture-original-private-key'}),{mode:0o600});
         console.log(createHash('sha256').update(credentials).digest('hex'));`
-      entry.credentials_sha256 = (await asUser(entry, ['--input-type=module', '-e', prepare, pathToFileURL(path.join(workspace, 'crabot-admin/dist/credentials.js')).href, old, String(entry.port_offset)])).stdout.trim()
+      entry.credentials_sha256 = (await asUser(entry, ['--input-type=module', '-e', prepare, pathToFileURL(credentials).href, old, String(entry.port_offset)])).stdout.trim()
       assert.match(entry.credentials_sha256, /^[a-f0-9]{64}$/)
     }
     await fs.writeFile('/etc/crabot/registry/ports.json', JSON.stringify(users.map(entry => ({ user: entry.user, offset: entry.port_offset }))) + '\n', { mode: 0o664 })
