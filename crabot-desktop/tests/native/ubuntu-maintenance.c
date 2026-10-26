@@ -126,7 +126,7 @@ static void dialog_choices(void) {
         g_usleep(1000);
       }
       g_assert_true(clicked); g_assert_null(s.dialog);
-      g_assert_cmpint(dup2(original, STDOUT_FILENO), ==, 0); close(original);
+      g_assert_cmpint(dup2(original, STDOUT_FILENO), >=, 0); close(original);
       char result[4096] = {0}; g_assert_cmpint(read(pipes[0], result, sizeof result - 1), >, 0); close(pipes[0]);
       g_autofree char *expected = g_strdup_printf("{\"choice\":\"%s\"}\n", dialog->choices[choice]);
       g_assert_nonnull(strstr(result, expected)); clear(&s);
