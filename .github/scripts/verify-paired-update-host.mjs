@@ -75,7 +75,7 @@ try {
   const targetVersion = `${match[1]}.${match[2]}.${Number(match[3]) + 1}-desktop-fixture.1`, targetCore = path.join(job, 'core')
   await preparePairedUpdateCore(originalCore, targetCore, targetVersion)
   const targetProject = path.join(job, 'paired')
-  await runBounded(runtime.executables.node, [path.join(repository, 'scripts/desktop/package-application.mjs'), '--candidate=true', '--layout=paired', '--core=' + targetCore, '--out=' + targetProject], { cwd: repository, timeout: 240000 })
+  await runBounded(runtime.executables.node, [path.join(repository, 'scripts/desktop/package-application.mjs'), '--candidate=true', '--layout=paired', '--core=' + targetCore, '--out=' + targetProject, ...(process.platform === 'linux' ? ['--native-bootstrap=' + path.join(repository, '.desktop-build/ubuntu-bootstrap')] : [])], { cwd: repository, timeout: 240000 })
   const targetPayload = path.join(targetProject, 'offline'), target = await verifyDesktopPayload(targetPayload)
   const keys = generateKeyPairSync('ed25519'), publication = path.join(job, 'publication')
   const signed = await writeSignedDesktopPayload({ payload: targetPayload, python: runtime.executables.python,
