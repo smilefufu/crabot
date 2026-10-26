@@ -2,7 +2,7 @@ import test, { before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
-import { tmpdir } from 'node:os'
+import { homedir } from 'node:os'
 import { randomUUID } from 'node:crypto'
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
@@ -19,7 +19,7 @@ const linux = process.platform === 'linux', require = createRequire(new URL('../
 let root, payload
 before(async () => {
   if (!linux) return
-  root = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'crabot-node-removal-source-')))
+  root = await fs.realpath(await fs.mkdtemp(path.join(homedir(), '.crabot-node-removal-source-')))
   payload = path.join(root, 'payload')
   const core = path.join(payload, 'core'), gui = path.join(payload, 'gui'), resources = path.join(gui, 'resources')
   await fs.mkdir(path.join(core, '.product-runtime/node/bin'), { recursive: true }); await fs.mkdir(path.join(core, 'bin'))

@@ -16,7 +16,7 @@ void (async () => {
     const require=createRequire(pathToFileURL(path.join(process.cwd(),'backend/probe.cjs')));
     const identity=require('./bootstrap/scripts/lib/process-identity.cjs'),entry=require('./bootstrap/scripts/lib/desktop-entry.cjs');
     const installation=require('./bootstrap/scripts/lib/desktop-installation.cjs');
-    let lease,ruleAttempts=0;
+    let lease,ruleAttempts=0,platformFailure;
     const stage=name=>require('node:fs').writeFileSync(process.argv[4]+'.stage',JSON.stringify({stage:name}));
     const probe=message=>new Promise((resolve,reject)=>{process.once('message',value=>value?.kind==='fixture_source_verification'?resolve(value.accepted):reject(new Error('bad fixture reply')));process.send(message,error=>{if(error)reject(error)})});
     try {
@@ -38,7 +38,9 @@ void (async () => {
         const {prepareUbuntuRemovalRules}=await import(pathToFileURL(path.join(process.cwd(),'backend/rules.mjs')));
         preparePlatformRemoval=async()=>{
           stage('system-prepare');
-          const platform=await prepareUbuntuRemovalRules({installRoot:process.argv[1],operationId:process.argv[2],signal:new AbortController().signal});
+          let platform;
+          try{platform=await prepareUbuntuRemovalRules({installRoot:process.argv[1],operationId:process.argv[2],signal:new AbortController().signal})}
+          catch(error){platformFailure=error;throw error}
           stage('system-ready');
           if(process.argv[3]==='node-job-source-platform-cancel'){await platform.close();throw Object.assign(new Error('finite authorization cancelled'),{code:'FIXTURE_PLATFORM_CANCEL'})}
           return {remove:async()=>{
@@ -78,12 +80,12 @@ void (async () => {
       const rootLock=await locks.acquireExistingCliLock(process.argv[1],'fixture-reacquire',0);
       try{const dataLock=await locks.acquireExistingCliLock(path.join(process.argv[1],'data'),'fixture-reacquire',0);locks.releaseCliLock(dataLock)}finally{locks.releaseCliLock(rootLock)}
       const result={accepted:true,published:published.phase,stopped:stopped.phase,cancelled:!programsRemoved,ordinary_peer:ordinaryPeer,locks_reacquired:true,...(programsRemoved?{programs_removed:true,platform_cleanup_attempts:ruleAttempts,completed:true}:{}),...(platformCancelled?{platform_cancelled:true}:{}),...(sourceVerifier?{source_verifier:sourceVerifier}:{}),...(sourceExited?{source_exited:sourceExited}:{})};
-      if(['node-job-source-exit','node-job-source-remove','node-job-source-platform-cancel'].includes(process.argv[3]))await(await import('node:fs/promises')).writeFile(process.argv[4],JSON.stringify({...result,message:String(error.message).slice(0,512),stage:error.stage,stack:String(error.stack).slice(0,2048)}));
+      if(['node-job-source-exit','node-job-source-remove','node-job-source-platform-cancel'].includes(process.argv[3]))await(await import('node:fs/promises')).writeFile(process.argv[4],JSON.stringify(result));
       else process.stdout.write(JSON.stringify(result)+'\\n');
     } catch(error) {
       if(lease)lease.close();
       const result={accepted:false,code:error.code||'FIXTURE_UNEXPECTED'};
-      if(['node-job-source-exit','node-job-source-remove','node-job-source-platform-cancel'].includes(process.argv[3]))await(await import('node:fs/promises')).writeFile(process.argv[4],JSON.stringify({...result,message:String(error.message).slice(0,512),stage:error.stage,stack:String(error.stack).slice(0,2048)}));
+      if(['node-job-source-exit','node-job-source-remove','node-job-source-platform-cancel'].includes(process.argv[3]))await(await import('node:fs/promises')).writeFile(process.argv[4],JSON.stringify({...result,message:String(error.message).slice(0,512),stage:(platformFailure||error).stage,cause_code:platformFailure?.code,cause_message:platformFailure?.message,stack:String(error.stack).slice(0,2048)}));
       else process.stdout.write(JSON.stringify(result)+'\\n');
     }
     clearTimeout(timer);process.removeListener('disconnect',parentLost);if(process.connected)process.disconnect();
