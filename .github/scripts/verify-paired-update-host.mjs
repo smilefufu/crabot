@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { spawn, execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { createRequire } from 'node:module'
@@ -40,10 +40,14 @@ const original = await verifyCoreRelease(originalCore), verified = await verifyD
 assert.equal(original.source_dirty, false); assert.equal(verified.record.selection.core_id, original.inventory_sha256)
 const runtime = product.loadProductRuntime(originalCore, { required: true, full: true })
 const needed = verified.bytes * 9n + 2n * 1024n ** 3n, space = await fs.statfs(repository, { bigint: true })
-const temporarySpace = await fs.statfs(tmpdir(), { bigint: true })
+// The native Ubuntu authority rejects world-writable ancestors such as /tmp.
+// Keep the isolated installation under the actual CI user's home, as the
+// ordinary native installer fixtures do; do not weaken the production helper.
+const temporaryParent = await fs.realpath(process.platform === 'linux' ? homedir() : tmpdir())
+const temporarySpace = await fs.statfs(temporaryParent, { bigint: true })
 if (space.bavail * space.bsize < needed || temporarySpace.bavail * temporarySpace.bsize < needed) throw Object.assign(new Error('Whole update fixture needs bounded program-copy space'), { code: 'CRABOT_UPDATE_SPACE' })
 // npm redacts UUID-shaped dependency paths; build directories use random hex.
-const job = path.join(repository, '.desktop-build', 'paired-update-' + randomBytes(12).toString('hex')), temporary = await fs.mkdtemp(path.join(tmpdir(), 'Crabot 更新 '))
+const job = path.join(repository, '.desktop-build', 'paired-update-' + randomBytes(12).toString('hex')), temporary = await fs.mkdtemp(path.join(temporaryParent, 'Crabot 更新 '))
 await fs.mkdir(job, { mode: 0o700 }); const control = path.join(temporary, 'control'), home = path.join(temporary, 'home')
 await fs.mkdir(control, { mode: 0o700 }); await fs.mkdir(home, { mode: 0o700 })
 let modelProvider, selected, child, targetIdentity, sourceIdentity, expectedTargetGuiRoot, expectedTargetCoreRoot, handoffAt, fixtureEnvironment, phase = 'prepare-target', success = false, sourceOutput = ''

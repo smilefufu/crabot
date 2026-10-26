@@ -85,6 +85,8 @@ with tempfile.TemporaryDirectory(prefix='Crabot namespace 用户 *?[]{}@{HOME} \
         put(f'releases/{core}/{headless}', binary, 0o755)
     # Business directories deliberately absent. Helper must not need/read them.
     output = run().stdout
+    with tempfile.TemporaryDirectory(prefix='crabot-unsafe-parent-', dir='/tmp') as unsafe:
+        assert 'CRABOT_SANDBOX_NOT_READY:root' in run(False, target=unsafe).stderr
     # Existing installation roots retain readable/traversable permissions. The
     # helper verifies ownership and no foreign writes, never chmods the root.
     root.chmod(0o755)
