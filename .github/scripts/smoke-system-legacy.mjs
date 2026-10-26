@@ -25,7 +25,7 @@ const { SystemRegistry } = await load('scripts/lib/system-registry.mjs')
 const { SystemOperationStore } = await load('scripts/lib/system-operation.mjs')
 const { discoverLegacySystemRelease } = await load('scripts/lib/legacy-system-release.mjs')
 const { runSystemUser } = await load('scripts/lib/system-user.mjs')
-const { assertCoordinatorStopped } = await load('scripts/lib/system-coordinator.mjs')
+const { assertCoordinatorStopped, coordinatorUnit } = await load('scripts/lib/system-coordinator.mjs')
 const { renderSystemUserService } = await load('scripts/lib/system-service.mjs')
 const { default: identity } = await load('scripts/lib/process-identity.cjs')
 await verifyCoreRelease(source)
@@ -192,8 +192,13 @@ for (const release of releases) {
     if (ownOs) {
       const maintenance = store.maintenance()
       if (maintenance) {
-        await run('/usr/bin/systemctl', ['stop', 'crabot-operation-' + maintenance.id])
-        await assertCoordinatorStopped(store.read(store.file(maintenance.id), true))
+        const record = store.read(store.file(maintenance.id), true)
+        try { await assertCoordinatorStopped(record) }
+        catch (error) {
+          if (error.code !== 'CRABOT_SYSTEM_OPERATION_ACTIVE') throw error
+          await run('/usr/bin/systemctl', ['stop', coordinatorUnit(record)])
+          await assertCoordinatorStopped(record)
+        }
       }
       for (const user of users) {
         await run('/usr/bin/systemctl', ['stop', 'user@' + user.uid + '.service']).catch(() => {})

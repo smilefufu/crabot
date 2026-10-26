@@ -14,6 +14,7 @@ permissions:
   actions: read
 jobs:
   helper-abi:
+    if: ${{ inputs.helper_only }}
     # Diagnose the same packaged helper on the full runtime job's Ubuntu22 host.
     runs-on: ubuntu-22.04
     timeout-minutes: 10
