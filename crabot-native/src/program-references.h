@@ -162,7 +162,8 @@ struct ProgramReferenceJob {
     for (int count = 0; count < 65536; count++) {
       Budget(); proc_regionwithpathinfo value{}; errno = 0;
       if (proc_pidinfo(pid, PROC_PIDREGIONPATHINFO, address, &value, sizeof(value)) != sizeof(value)) {
-        if (errno == ESRCH || (errno == EINVAL && count > 0)) return related;
+        // EINVAL is also the end marker when the VM map is already empty.
+        if (errno == ESRCH || errno == EINVAL) return related;
         throw std::runtime_error("Process mappings unavailable");
       }
       if (Related(value.prp_vip.vip_path)) related = true;
