@@ -403,7 +403,7 @@ async function main() {
     let sourceWindows = 0; app.on('browser-window-created', () => { sourceWindows++ })
     electron.dialog.showMessageBox = async () => ({ response: 1 })
     cp.spawn = (executable, args, options) => {
-      if (process.platform === 'linux' && args.some(value => value.startsWith('--crabot-removal-host='))) options = { ...options, env: { ...options.env, GITHUB_ACTIONS: 'true', CRABOT_NODE_REMOVAL_TEST_RESULT: cfg.resultFile } }
+      if (process.platform === 'linux' && args.some(value => value.startsWith('--crabot-removal-host='))) options = { ...options, env: { ...options.env, GITHUB_ACTIONS: 'true', CRABOT_NODE_REMOVAL_TEST_RESULT: cfg.resultFile, CRABOT_NODE_REMOVAL_TEST_STAGE: cfg.stageFile } }
       const child = originalSpawn(executable, args, options)
       if (args.some(value => value.startsWith('--crabot-removal-host='))) child.once('spawn', () => {
         const gui = process.platform === 'darwin' ? path.resolve(path.dirname(executable), '../../..') : path.dirname(executable)

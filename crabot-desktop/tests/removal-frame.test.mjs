@@ -78,6 +78,15 @@ before(async () => {
         await fs.copyFile(path.join(path.dirname(process.env.CRABOT_GTK_FRONTEND), 'crabot-sandbox-helper'), path.join(resources, 'crabot-sandbox-helper'))
         const backend = path.join(resources, 'crabot-maintenance-backend'); await buildUbuntuMaintenanceBackend(backend)
         const main = path.join(backend, 'main.mjs'), source = await fs.readFile(main, 'utf8')
+        const operationFile = path.join(backend, 'operation.mjs'), operationSource = await fs.readFile(operationFile, 'utf8')
+        assert.ok(operationSource.includes('failure = error;'))
+        await fs.writeFile(operationFile, "import fixtureFs from 'node:fs';\n" + operationSource.replace('failure = error;',
+          "failure = error;fixtureFs.writeFileSync(process.env.CRABOT_NODE_REMOVAL_TEST_STAGE,JSON.stringify({step,code:error?.code,stage:error?.stage,message:String(error?.message).slice(0,512)})+'\\n');"))
+        const referencesFile = path.join(backend, 'bootstrap/scripts/lib/desktop-removal-delete.mjs'), referencesSource = await fs.readFile(referencesFile, 'utf8')
+        const marker = '  // Keep the raw observation, including every unknown and its fixed OS reason.'
+        assert.ok(referencesSource.includes(marker))
+        await fs.writeFile(referencesFile, referencesSource.replace(marker,
+          "  physical.writeFileSync(process.env.CRABOT_NODE_REMOVAL_TEST_STAGE+'.references',JSON.stringify({stage,complete:observation.complete,incomplete:observation.incomplete,holders:observation.processes.slice(0,8),unknown:observation.unknown_details?.slice(0,8)})+'\\n');\n"+marker))
         const prefix = `import fixtureChild from 'node:child_process';import{syncBuiltinESMExports as fixtureSync}from'node:module';
           if(process.env.GITHUB_ACTIONS!=='true')throw new Error('Disposable CI only');
           const fixtureSpawn=fixtureChild.spawn;fixtureChild.spawn=(command,args,options)=>command==='/usr/bin/pkexec'?fixtureSpawn('/usr/bin/sudo',['-n','/usr/bin/env','PKEXEC_UID='+process.getuid(),...args],options):fixtureSpawn(command,args,options);fixtureSync();\n`
@@ -183,6 +192,7 @@ for (const scenario of ['valid', 'node-parent', 'unexpected-source-args', 'chang
       await new Promise(resolve => setTimeout(resolve, 100))
     }
     result = JSON.parse(await fs.readFile(cfg.resultFile, 'utf8'))
+    if (linuxSource) result.diagnostic = { failure: await fs.readFile(cfg.stageFile, 'utf8').catch(() => null), references: await fs.readFile(cfg.stageFile + '.references', 'utf8').catch(() => null) }
     if (mode.includes('source-remove')) console.log('CRABOT_REMOVAL_HOST_TIMING ' + JSON.stringify({ scenario, post_source_exit_ms: Date.now() - waitingSince, controlled_pin_delay_ms: cfg.removalPinDelayMs, pin_reads: result.removalPinReads, removal_elapsed_ms: result.removalElapsedMs }))
     if (scenario.endsWith('-delayed')) { assert.ok(result.removalPinReads >= 8, JSON.stringify(result)); assert.ok(result.removalElapsedMs > 20000, JSON.stringify(result)) }
   }
