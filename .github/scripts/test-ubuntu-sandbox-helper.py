@@ -84,6 +84,15 @@ with tempfile.TemporaryDirectory(prefix='Crabot namespace 用户 *?[]{}@{HOME} \
         put(f'releases/{core}/{headless}', binary, 0o755)
     # Business directories deliberately absent. Helper must not need/read them.
     output = run().stdout
+    # Existing installation roots retain readable/traversable permissions. The
+    # helper verifies ownership and no foreign writes, never chmods the root.
+    root.chmod(0o755)
+    assert run().stdout == output
+    assert root.stat().st_mode & 0o7777 == 0o755
+    root.chmod(0o777)
+    run(False)
+    assert root.stat().st_mode & 0o7777 == 0o777
+    root.chmod(0o700)
     assert '\\x2a\\x3f\\x5b\\x5d\\x7b\\x7d\\x40\\x7bHOME\\x7d' in output
     assert '\\x5c\\x22' in output
     run(False, '--register')
