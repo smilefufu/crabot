@@ -2,14 +2,45 @@
 name: Published system legacy diagnostic
 on:
   workflow_dispatch:
+    inputs:
+      helper_only:
+        type: boolean
+        default: false
   push:
     branches: ['feat/desktop-application']
-    paths: ['.github/workflows/system-legacy-diagnostic.yml', '.github/scripts/smoke-system-legacy.mjs']
+    paths: ['.github/scripts/smoke-system-legacy.mjs']
 permissions:
   contents: read
   actions: read
 jobs:
+  helper-abi:
+    # Diagnose the same packaged helper on the full runtime job's Ubuntu22 host.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: ubuntu-native-installation-candidate
+          run-id: 40359477903
+          github-token: ${{ github.token }}
+          path: diagnostic
+      - name: Inspect only the fixed packaged native helper
+        shell: bash
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y libjson-glib-1.0-0
+          mkdir diagnostic/extracted
+          tar -xzf diagnostic/ubuntu-native-candidate.tar.gz -C diagnostic/extracted ubuntu-native/offline/gui/resources/crabot-sandbox-helper
+          helper=diagnostic/extracted/ubuntu-native/offline/gui/resources/crabot-sandbox-helper
+          getconf GNU_LIBC_VERSION
+          ldd "$helper" || true
+          set +e
+          "$helper" --inspect "$RUNNER_TEMP/crabot-absent-abi-probe"
+          result=$?
+          echo "CRABOT_HELPER_ABI_EXIT=$result"
+          test "$result" -eq 1
   legacy:
+    if: ${{ !inputs.helper_only }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     defaults:
