@@ -29,7 +29,7 @@ test('the fixed Node backend loads in an independent private Node without Core o
     fs.mkdirSync(path.join(output,'sample'));fs.writeFileSync(path.join(output,'sample/value'),'archive probe');
     await asar.createPackage(path.join(output,'sample'),path.join(output,'probe.asar'));
     if(asar.extractFile(path.join(output,'probe.asar'),'value').toString()!=='archive probe')throw new Error('bundled archive reader failed');
-    if(typeof proof.readDesktopRemovalProof!=='function'||typeof job.beginInitialDesktopRemoval!=='function'||typeof progress.createUbuntuRemovalProgressWindow!=='function'||native.inspectProcess(process.pid).pid!==process.pid)throw new Error('fixed backend incomplete');
+    if(typeof proof.readDesktopRemovalProof!=='function'||typeof job.beginInitialDesktopRemoval!=='function'||typeof job.finishDesktopRemoval!=='function'||typeof progress.createUbuntuRemovalProgressWindow!=='function'||native.inspectProcess(process.pid).pid!==process.pid)throw new Error('fixed backend incomplete');
     if(fs.readFileSync('preserved-data','utf8')!=='user data')throw new Error('data changed');
     console.log(JSON.stringify({fixed_node_backend_loaded:true,actual_private_node:true,native_addon_loaded:true,actual_archive_reader:true,core_present:false,business_mm_started:false}));
   `

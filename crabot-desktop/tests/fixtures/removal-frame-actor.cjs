@@ -7,7 +7,7 @@ const { spawn } = require('node:child_process')
 const { once } = require('node:events')
 const cfg = JSON.parse(fs.readFileSync(process.env.CRABOT_REMOVAL_FRAME_CONFIG, 'utf8'))
 const host = process.argv.includes('--fixture-removal-host')
-const sourceExitMode = ['publish-source-exit', 'publish-source-retry', 'publish-source-late-exit', 'resume-lease-source-exit', 'publish-source-remove', 'publish-source-remove-retry', 'resume-lease-source-remove'].includes(cfg.mode)
+const sourceExitMode = ['publish-source-exit', 'publish-source-retry', 'publish-source-late-exit', 'resume-lease-source-exit', 'publish-source-remove', 'publish-source-remove-mac-login', 'publish-source-remove-complete', 'publish-source-remove-retry', 'resume-lease-source-remove'].includes(cfg.mode)
 const profile = host ? path.resolve(process.resourcesPath, process.platform === 'darwin' ? '../../../..' : '../..', 'frame-profile') : path.join(cfg.root, 'data/desktop-profile')
 fs.mkdirSync(profile, { recursive: true, mode: 0o700 }); app.setPath('userData', profile)
 const load = name => import(pathToFileURL(path.join(__dirname, 'bootstrap/scripts/lib', name)).href)
@@ -109,7 +109,51 @@ async function removePrograms(lease) {
     assert.equal(result.retained.length, 0)
     assert.equal(await lease.removePrograms(), result); assert.equal(await lease.retryRemovePrograms(), result)
     assert.equal(fs.readFileSync(path.join(cfg.root, 'data/preserved-user-file'), 'utf8'), 'user bytes')
-    return { programsRemoved: true, controlledResourceObservation: true, removalRetried: cfg.mode === 'publish-source-remove-retry', removalPinReads: pinReads, removalElapsedMs: Date.now() - started }
+    const macLoginCleaned = cfg.mode === 'publish-source-remove-mac-login'
+    if (macLoginCleaned) {
+      const { removeMacLoginStartupEntry } = await import(pathToFileURL(path.join(__dirname, 'installation-removal.js')).href)
+      let status = 'requires-approval', accept = false, writes = 0
+      const api = { getLoginItemSettings: () => ({ status, openAtLogin: status === 'enabled' }),
+        setLoginItemSettings: options => { assert.deepEqual(options, { openAtLogin: false }); writes++; if (accept) status = 'not-registered' } }
+      const input = { installRoot: cfg.root, operationId: cfg.operationId, app: api }
+      await assert.rejects(removeMacLoginStartupEntry({ ...input, operationId: require('node:crypto').randomUUID() }))
+      const cwd = process.cwd(); process.chdir(cfg.root)
+      try { await assert.rejects(removeMacLoginStartupEntry(input)) } finally { process.chdir(cwd) }
+      assert.equal(writes, 0)
+      await assert.rejects(removeMacLoginStartupEntry(input), { code: 'CRABOT_INSTALL_REGISTRATION' })
+      assert.equal(read().phase, 'removing'); accept = true
+      await removeMacLoginStartupEntry(input); await removeMacLoginStartupEntry(input)
+      assert.equal(writes, 3); assert.equal(status, 'not-registered'); assert.equal(read().phase, 'removing')
+      assert.equal(fs.readFileSync(path.join(cfg.root, 'data/preserved-user-file'), 'utf8'), 'user bytes')
+    }
+    let completionVerified = false
+    if (cfg.mode === 'publish-source-remove-complete') {
+      const { finishDesktopRemoval } = await load('desktop-removal-job.mjs')
+      const input = { installRoot: cfg.root, operationId: cfg.operationId }
+      await assert.rejects(finishDesktopRemoval({ ...input, operationId: require('node:crypto').randomUUID() }), { code: 'CRABOT_DESKTOP_REMOVAL' })
+      const core = path.join(cfg.root, 'releases', read().source_selection.core_id), unknown = path.join(core, 'custom-kept.txt')
+      fs.mkdirSync(core, { mode: 0o700 }); fs.writeFileSync(unknown, 'user-added program file')
+      await assert.rejects(finishDesktopRemoval(input), { code: 'CRABOT_DESKTOP_REMOVAL' })
+      assert.equal(fs.readFileSync(unknown, 'utf8'), 'user-added program file')
+      fs.unlinkSync(unknown); fs.rmdirSync(core) // Explicit fixture-user cleanup.
+      const bytes = fs.readFileSync(fence)
+      fs.writeFileSync(fence, JSON.stringify({ ...read(), phase: 'stopping' }) + '\n')
+      await assert.rejects(finishDesktopRemoval(input), { code: 'CRABOT_DESKTOP_REMOVAL' }); fs.writeFileSync(fence, bytes)
+      const records = path.join(cfg.root, 'data/module-runtime-registry/records')
+      fs.mkdirSync(records, { recursive: true }); fs.writeFileSync(path.join(records, 'unsettled.json'), '{}')
+      await assert.rejects(finishDesktopRemoval(input), { code: 'CRABOT_DESKTOP_REMOVAL' }); fs.unlinkSync(path.join(records, 'unsettled.json'))
+      physical.promises.rename = async (...args) => {
+        const value = await rename(...args)
+        if (args[1] === fence) throw Object.assign(new Error('fixture completed reply lost'), { code: 'EIO' })
+        return value
+      }
+      await assert.rejects(finishDesktopRemoval(input), { code: 'EIO' }); physical.promises.rename = rename
+      assert.equal(read().phase, 'completed')
+      await finishDesktopRemoval(input); await finishDesktopRemoval(input)
+      assert.equal(read().phase, 'completed'); assert.equal(fs.readFileSync(path.join(cfg.root, 'data/preserved-user-file'), 'utf8'), 'user bytes')
+      completionVerified = true
+    }
+    return { completionVerified, macLoginCleaned, macLoginApiMocked: macLoginCleaned, programsRemoved: true, controlledResourceObservation: true, removalRetried: cfg.mode === 'publish-source-remove-retry', removalPinReads: pinReads, removalElapsedMs: Date.now() - started }
   } finally { native.inspectProgramReferences = original; physical.promises.rename = rename; physical.unlinkSync = unlink; physical.promises.readFile = readFile }
 }
 async function publication() {
@@ -213,7 +257,7 @@ async function publication() {
       const changed = { ...initial.record, operation_id: '11111111-1111-4111-8111-111111111111' }
       await (await load('desktop-preparation-files.mjs')).privateJson(path.join(cfg.root, '.desktop-removal.json'), changed, true)
     }
-    if (!['publish-close', 'publish-lost-reply', 'publish-source-ignore', 'publish-source-disconnect', 'publish-source-remove', 'publish-source-remove-retry'].includes(cfg.mode)) {
+    if (!['publish-close', 'publish-lost-reply', 'publish-source-ignore', 'publish-source-disconnect', 'publish-source-remove', 'publish-source-remove-mac-login', 'publish-source-remove-complete', 'publish-source-remove-retry'].includes(cfg.mode)) {
       try { await lease.cancel(); cancelled = true; await lease.cancel() }
       catch (error) { if (['publish-cancel', 'publish-stop', 'publish-stop-retry', 'publish-stop-lost-retry', 'publish-source-exit', 'publish-source-retry', 'publish-source-late-exit', 'publish-source-verifier'].includes(cfg.mode)) throw error; if (cfg.mode === 'publish-cancel-lost' && cancellationReplyLost) { await lease.cancel(); cancelled = true } else cancelRejected = error.code === 'CRABOT_DESKTOP_REMOVAL' }
     }

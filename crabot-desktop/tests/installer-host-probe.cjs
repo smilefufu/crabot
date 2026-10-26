@@ -25,7 +25,7 @@ async function main() {
   const controller = await module('bootstrap/scripts/lib/instance-controller.mjs')
   assert.equal(typeof controller.stopInstance, 'function')
   const frame = await module('bootstrap/scripts/lib/desktop-removal-frame.mjs'); assert.equal(typeof frame.inspectInitialRemovalGuiHost, 'function'); assert.equal(typeof frame.captureExistingRemovalGuiHost, 'function')
-  const job = await module('bootstrap/scripts/lib/desktop-removal-job.mjs'); assert.equal(typeof job.beginInitialDesktopRemoval, 'function'); assert.equal(typeof job.resumeDesktopRemoval, 'function')
+  const job = await module('bootstrap/scripts/lib/desktop-removal-job.mjs'); assert.equal(typeof job.beginInitialDesktopRemoval, 'function'); assert.equal(typeof job.resumeDesktopRemoval, 'function'); assert.equal(typeof job.finishDesktopRemoval, 'function')
   const sourceExit = await module('bootstrap/scripts/lib/desktop-removal-source.mjs'); assert.equal(typeof sourceExit.createDesktopRemovalSourceExitVerifier, 'function'); assert.equal(typeof sourceExit.createExistingRemovalSourceExitVerifier, 'function')
   const programs = await module('bootstrap/scripts/lib/desktop-removal-programs.mjs'); assert.equal(typeof programs.inspectDesktopRemovalPrograms, 'function')
   const native = (await module('bootstrap/scripts/lib/process-identity.cjs')).default; assert.equal(typeof native.inspectProgramReferences, 'function')

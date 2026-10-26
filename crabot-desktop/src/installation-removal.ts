@@ -5,12 +5,13 @@ import path from 'node:path'
 import { createRequire } from 'node:module'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import type { Shell } from 'electron'
+import type { App, Shell } from 'electron'
 import { desktopApplicationEntry, integrationRoot, readInstallationLocator, type PreparedInstallation } from './installation-entries.js'
 import { ubuntuLoginStartupEntry } from './login-startup.js'
 const require = createRequire(import.meta.url)
 const identity = require('./bootstrap/scripts/lib/process-identity.cjs')
 const installation = require('./bootstrap/scripts/lib/desktop-installation.cjs')
+const management = require('./bootstrap/scripts/lib/desktop-management.cjs')
 const fail = (): never => { throw Object.assign(new Error('系统入口已变化或不属于本安装，已保留剩余入口及全部用户数据。请核对后重试。'), { code: 'CRABOT_INSTALL_REGISTRATION' }) }
 type EntryKind = 'file' | 'symlink' | 'junction'
 type Snapshot = { file: string; kind: EntryKind; limit: number; stat: BigIntStats; content: Buffer | string }
@@ -247,4 +248,35 @@ export async function removeWindowsLoginStartupEntry(options: RemovalJobOptions 
   await current()
   if (identity.inspectDesktopLoginStartup(executable) !== 'absent') fail()
   assertJob()
+}
+
+// macOS scopes this API to the calling app, so it must be the verified private
+// copy of this installation. Core and original GUI may already be removed.
+export async function removeMacLoginStartupEntry(options: RemovalJobOptions & {
+  app: Pick<App, 'getLoginItemSettings' | 'setLoginItemSettings'>
+}): Promise<void> {
+  if (process.platform !== 'darwin') fail()
+  const { own, proof, assertJob, proofCurrent } = await captureRemovalJob(options)
+  const self = identity.inspectProcess(process.pid), executable = fsSync.realpathSync(process.execPath)
+  const guiRoot = path.resolve(path.dirname(executable), '../../..')
+  const directory = management.requirePrivateDataRoot(path.dirname(guiRoot))
+  if (path.basename(guiRoot) !== 'gui' || !/^crabot-removal-host-[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(path.basename(directory))
+    || directory === own.root || directory.startsWith(own.root + path.sep) || own.root.startsWith(directory + path.sep)
+    || !self || self.owner !== own.record.owner || fsSync.realpathSync(self.executable) !== executable) fail()
+  const generation = () => {
+    const value = fsSync.lstatSync(directory, { bigint: true })
+    return [value.dev, value.ino, value.mode, value.uid, value.gid].join(':')
+  }
+  const original = generation()
+  const current = () => {
+    assertJob()
+    if (management.requirePrivateDataRoot(directory) !== directory || generation() !== original
+      || fsSync.realpathSync(process.cwd()) !== directory || !identity.sameProcess(self, identity.inspectProcess(process.pid))) fail()
+  }
+  const { verifyDesktopGui } = await import(new URL('./bootstrap/scripts/lib/desktop-payload.mjs', import.meta.url).href)
+  current(); await proofCurrent(); await verifyDesktopGui(guiRoot, proof.payload); await proofCurrent(); current()
+  options.app.setLoginItemSettings({ openAtLogin: false })
+  const result = options.app.getLoginItemSettings()
+  current()
+  if (result.status !== 'not-registered' || result.openAtLogin !== false) fail()
 }

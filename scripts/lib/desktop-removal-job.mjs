@@ -17,6 +17,8 @@ import { inspectInstance } from './instance-runtime.mjs'
 import { stopInstance } from './instance-controller.mjs'
 import { probeKnownProcessExit } from './known-process-exit.cjs'
 import { assertDesktopRemovalProgramsUnused, removeDesktopRemovalPrograms } from './desktop-removal-delete.mjs'
+import { captureStoppedDesktopRemoval } from './desktop-removal-context.mjs'
+import { inspectDesktopRemovalPrograms } from './desktop-removal-programs.mjs'
 import { workspaceMaintenancePending } from './workspace-maintenance.cjs'
 const { promises: fs } = physicalFs
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b)
@@ -256,4 +258,29 @@ export function resumeDesktopRemoval(options) { return openDesktopRemoval(option
 export async function beginInitialDesktopRemovalNode(options) {
   if (process.platform !== 'linux') fail()
   return openDesktopRemoval(options, false, 'node')
+}
+
+// The fixed host calls this only after its platform-entry cleanup succeeds.
+// It settles the existing phase; it neither removes entries nor clears the fence.
+export async function finishDesktopRemoval(options) {
+  const context = await captureStoppedDesktopRemoval(options)
+  const { own, record, proof, assertStopped, proofCurrent } = context
+  const current = async () => {
+    await proofCurrent(); assertStopped()
+    if (!['removing', 'completed'].includes(record.phase) || !absent(path.join(own.root, '.desktop-installing.json'))) fail()
+  }
+  await current()
+  const programs = await inspectDesktopRemovalPrograms(options)
+  if (programs.matched.length || programs.retained.length) fail()
+  await current()
+  await assertDesktopRemovalProgramsUnused({ installRoot: own.root, proof }, 'before-completed')
+  await current()
+  const completed = { ...record, phase: 'completed' }
+  if (record.phase !== 'completed') await privateJson(path.join(own.root, '.desktop-removal.json'), completed, true)
+  // A lost reply is retried by reading the same completed record. No program,
+  // service, entry or migration is replayed to infer that the write succeeded.
+  const settled = await captureStoppedDesktopRemoval(options)
+  await settled.proofCurrent(); settled.assertStopped()
+  if (!same(settled.record, completed)) fail()
+  return structuredClone(completed)
 }
