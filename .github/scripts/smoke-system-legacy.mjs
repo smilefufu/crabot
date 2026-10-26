@@ -86,7 +86,7 @@ for (const release of releases) {
   const id = randomUUID().slice(0, 8), base = '/var/lib/crabot-legacy-acceptance-' + id, old = path.join(base, 'old'), managed = path.join(old, '.managed')
   const users = [], registry = new SystemRegistry(), store = new SystemOperationStore(registry)
   let ownOs = false, ownBase = false, core
-  const asUser = (entry, args, overrides = {}) => run('/usr/bin/setpriv', ['--reuid=' + entry.uid, '--regid=' + entry.gid, '--init-groups', '--', node, ...args],
+  const asUser = (entry, args, overrides = {}, executable = node) => run('/usr/bin/setpriv', ['--reuid=' + entry.uid, '--regid=' + entry.gid, '--init-groups', '--', executable, ...args],
     { env: { PATH: '/usr/bin:/bin', HOME: entry.home, USER: entry.user, LOGNAME: entry.user, LANG: 'C.UTF-8', HTTP_PROXY: env.HTTP_PROXY, HTTPS_PROXY: env.HTTPS_PROXY, ...overrides } })
   console.log('CRABOT_LEGACY_ACCEPTANCE ' + JSON.stringify({ version: release.version, phase: 'preparing' }))
   try {
@@ -134,9 +134,21 @@ for (const release of releases) {
     if (oldRunning) {
       const employee = users[0]
       console.log('CRABOT_LEGACY_ACCEPTANCE ' + JSON.stringify({ version: release.version, phase: 'original-runtime-starting' }))
+      // Old system installations use a public system Node, not a desktop-owned
+      // interpreter location. Use the same verified bytes outside both releases.
+      const legacyNode = path.join(base, 'node')
+      await fs.copyFile(node, legacyNode); await fs.chmod(legacyNode, 0o755)
+      const probe = `const fs=require('fs'),{spawnSync}=require('child_process');let executable=true;try{fs.accessSync(process.execPath,fs.constants.X_OK)}catch{executable=false}
+        const child=spawnSync(process.execPath,['-e','process.stdout.write("child-ok")'],{encoding:'utf8',detached:true,timeout:10000,killSignal:'SIGKILL'});
+        console.log(JSON.stringify({uid:process.getuid(),executable,child_code:child.status,child_error:child.error?.code??null,child_ready:child.stdout==='child-ok'}));`
+      for (const [role, binary] of [['candidate-node', node], ['public-legacy-node', legacyNode]]) {
+        const result = JSON.parse((await asUser(employee, ['-e', probe], {}, binary)).stdout)
+        console.log('CRABOT_LEGACY_NODE_PROBE ' + JSON.stringify({ role, ...result }))
+        if (role === 'public-legacy-node') { assert.equal(result.child_code, 0); assert.equal(result.child_ready, true) }
+      }
       await asUser(employee, [path.join(old, 'scripts/start.mjs'), '-d'], {
         DATA_DIR: employee.data_dir, CRABOT_PORT_OFFSET: String(employee.port_offset), CRABOT_HOME: old,
-      })
+      }, legacyNode)
     }
     console.log('CRABOT_LEGACY_ACCEPTANCE ' + JSON.stringify({ version: release.version, phase: 'ordinary-installer' }))
     await run('/usr/bin/python3', ['-I', '-B', '-c', ptyCode, path.join(source, 'install.sh'), '--install-dir=' + old], { timeout: 510_000 })
