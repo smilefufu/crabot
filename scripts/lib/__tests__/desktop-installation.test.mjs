@@ -338,3 +338,31 @@ for (const changed of ['oversized', 'replaced-during-read']) test('strict remova
   await fs.rename(file, file + '.retained')
   assert.deepEqual(await fs.readdir(path.join(f.root, 'data')), [])
 })
+
+for (const modes of [[0o755, 0o755], [0o755, 0o700], [0o700, 0o755]]) {
+  test('existing desktop locator preserves usable legacy directory modes: ' + modes.join('/'), { skip: windows }, async t => {
+    const f = await fixture(t), data = path.join(f.root, 'data')
+    await fs.chmod(f.root, modes[0]); await fs.chmod(data, modes[1])
+    const selected = desktop.readDesktopSelection(f.root)
+    assert.equal(selected.dataDir, data); assert.equal(desktop.locateDesktopGui(f.resources).coreRoot, f.coreRoot)
+    const result = await promisify(execFile)(path.join(f.root, 'bin', nativeName), ['help'], { env: { PATH: '' } })
+    assert.deepEqual(JSON.parse(result.stdout), { data, core: f.coreRoot })
+    assert.deepEqual(await Promise.all([f.root, data].map(async directory => (await fs.stat(directory)).mode & 0o777)), modes)
+    assert.deepEqual(await fs.readdir(data), [])
+  })
+}
+for (const name of ['root', 'data']) test('existing desktop locator still rejects other-user writable directories: ' + name, { skip: windows }, async t => {
+  const f = await fixture(t), directory = name === 'root' ? f.root : path.join(f.root, 'data')
+  await fs.chmod(directory, 0o775)
+  assert.throws(() => desktop.readDesktopSelection(f.root), { code: 'CRABOT_DESKTOP_INSTALLATION' })
+  assert.equal((await fs.stat(directory)).mode & 0o777, 0o775)
+  assert.deepEqual(await fs.readdir(path.join(f.root, 'data')), [])
+})
+
+for (const name of ['desktop-installation.json', 'current-release.json']) test('legacy readable roots do not relax private desktop control files: ' + name, { skip: windows }, async t => {
+  const f = await fixture(t), file = path.join(f.root, name)
+  await fs.chmod(f.root, 0o755); await fs.chmod(path.join(f.root, 'data'), 0o755); await fs.chmod(file, 0o644)
+  assert.throws(() => desktop.readDesktopSelection(f.root), { code: 'CRABOT_DESKTOP_INSTALLATION' })
+  assert.equal((await fs.stat(file)).mode & 0o777, 0o644)
+  assert.equal((await fs.stat(f.root)).mode & 0o777, 0o755)
+})

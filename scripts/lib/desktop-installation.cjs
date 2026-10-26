@@ -12,10 +12,13 @@ const keys = (value, names) => value && typeof value === 'object' && !Array.isAr
 function present(file) {
   try { fs.lstatSync(file); return true } catch (error) { if (error.code === 'ENOENT') return false; throw error }
 }
-function directory(file, privateRoot = false) {
+function directory(file, managedRoot = false) {
   const stat = fs.lstatSync(file)
   if (!stat.isDirectory() || stat.isSymbolicLink() || !identity.isOwnedDirectory(file)) fail()
-  if (privateRoot && (process.platform === 'win32' ? !identity.isPrivateDirectory(file) : (stat.mode & 0o777) !== 0o700)) fail()
+  // Existing roots can retain legacy read/traverse access. Private records and
+  // sockets have their own checks; only creation requires an exact private mode.
+  if (managedRoot && (process.platform === 'win32' ? !identity.isPrivateDirectory(file)
+    : (stat.mode & 0o700) !== 0o700 || (stat.mode & 0o022) !== 0)) fail()
   return stat
 }
 function json(file, privateFile = false) {
