@@ -75,3 +75,28 @@ for (const mode of ['mapped', 'cwd', 'fileport', 'library', 'protected']) test('
   const after = await native.inspectProgramReferences({ roots: [temporary], files: [file] })
   assert.equal(after.processes.some(value => value.pid === child.pid), false)
 })
+
+test('native reference observation queries newly listed processes instead of requiring a static desktop', { skip: process.platform === 'win32', timeout: 30000 }, async t => {
+  const temporary = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'crabot-reference-churn-')))
+  const children = [], create = () => {
+    if (children.length >= 48) return
+    const related = children.length % 2 === 0
+    const child = spawn('/bin/sleep', ['3'], { cwd: related ? temporary : tmpdir(), stdio: 'ignore' })
+    children.push({ child, related, end: once(child, 'exit') })
+  }
+  let timer
+  t.after(async () => {
+    clearInterval(timer)
+    for (const { child } of children) if (child.exitCode === null && child.signalCode === null) child.kill()
+    await Promise.all(children.map(value => value.end))
+    await fs.rm(temporary, { recursive: true, force: true })
+  })
+  create(); timer = setInterval(create, 50)
+  const result = await native.inspectProgramReferences({ roots: [temporary], files: [] })
+  clearInterval(timer)
+  const ours = new Map(children.map(value => [value.child.pid, value.related]))
+  const unqueried = result.unknown_details.filter(value => ours.has(value.pid) && value.stage === 'process_list_changed')
+  assert.equal(unqueried.length, 0, 'Newly listed owned processes must actually be queried: ' + JSON.stringify(unqueried))
+  assert.ok(result.processes.some(value => ours.get(value.pid) === true), 'Actual CWD holders remain reported')
+  assert.ok(result.processes.every(value => !ours.has(value.pid) || ours.get(value.pid)), 'Unrelated actors are not file holders')
+})

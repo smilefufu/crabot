@@ -252,7 +252,7 @@ struct ProgramReferenceJob {
       for (int pass = 0; pass < 2; pass++) for (int pid : OwnedPids()) if (seen.insert(pid).second) UnixProcess(pid, self.owner);
       for (int pid : OwnedPids()) {
         Budget();
-        if (!seen.count(pid)) { Unknown(pid, "process_list_changed", 0); continue; }
+        if (seen.insert(pid).second) { UnixProcess(pid, self.owner); continue; }
         const auto original = observed.find(pid);
         if (original == observed.end()) continue;
         try {
