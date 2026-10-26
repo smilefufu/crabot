@@ -1,6 +1,6 @@
 // Published legacy archives, real dropped UIDs and the ordinary installer. This
 // fixture covers stopped profiles and a real original running/stopped set;
-// it does not claim interrupted-source restoration or a real model session.
+// optional backup-failure covers restoration before data mutation, not a real model session.
 import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
 import { createReadStream, createWriteStream } from 'node:fs'
@@ -18,7 +18,6 @@ if (process.env.GITHUB_ACTIONS !== 'true' || process.env.RUNNER_ENVIRONMENT !== 
 }
 const workspace = await fs.realpath(process.env.GITHUB_WORKSPACE), source = await fs.realpath(process.argv[2]), evidence = path.resolve(process.argv[3])
 assert.equal(source, path.join(workspace, '.desktop-build/安装 候选/core'))
-assert.equal(evidence, path.join(workspace, '.desktop-build/system-legacy.json'))
 const load = file => import(pathToFileURL(path.join(source, file)).href)
 const { verifyCoreRelease } = await load('scripts/lib/core-release.mjs')
 const { SystemRegistry } = await load('scripts/lib/system-registry.mjs')
@@ -43,6 +42,7 @@ const scenario = process.argv[5] || 'normal'
 assert.ok(['normal', 'backup-failure'].includes(scenario))
 const backupFailure = scenario === 'backup-failure'
 if (backupFailure) assert.equal(selectedVersion, 'v2026.10.15.1')
+assert.equal(evidence, path.join(workspace, '.desktop-build/system-legacy' + (backupFailure ? '-backup-failure' : '') + '.json'))
 const reports = [], ownedOsFiles = ['/etc/crabot', '/usr/local/bin/crabot', '/etc/systemd/user/crabot.service', '/etc/logrotate.d/crabot']
 // GitHub images can make this root-owned command directory world-writable.
 // Match the shared-install prerequisite only on this disposable hosted runner.

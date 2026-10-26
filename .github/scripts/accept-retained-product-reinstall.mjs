@@ -20,7 +20,11 @@ import { verifyDesktopPayload } from '../../scripts/lib/desktop-payload.mjs'
 
 export async function prepareRetainedProductReinstall({ installRoot, payload, preparePrograms = async () => {} }) {
   if (process.env.GITHUB_ACTIONS !== 'true') throw new Error('Requires an isolated CI user, never a developer deployment')
+  const started = performance.now()
+  const stage = name => console.log('CRABOT_RETAINED_REPAIR_STAGE ' + JSON.stringify({ stage: name, elapsed_ms: Math.round(performance.now() - started) }))
+  stage('source-verification')
   const own = installation.readDesktopSelection(installRoot), source = await verifyDesktopPayload(payload)
+  stage('source-verified')
   assertReinstallVersion(own.selection.version, source.record.selection.version)
   const space = await fs.statfs(own.root, { bigint: true })
   assert.ok(space.bavail * space.bsize > source.bytes * 3n + 2n * 1024n ** 3n, 'Retained repair requires bounded program-copy space')
@@ -35,7 +39,9 @@ export async function prepareRetainedProductReinstall({ installRoot, payload, pr
   try {
     dataLock = await acquireExistingCliLock(own.dataDir, 'ci-retained-removal-fixture')
     assert.equal(inspectInstance(own.dataDir).state, 'stopped')
+    stage('fixture-proof-capture')
     proof = await captureDesktopRemovalProof(own.root, operationId)
+    stage('fixture-proof-captured')
     try { await assertDesktopRemovalProgramsUnused({ installRoot: own.root, proof }, 'ci-before-partial-removal') }
     catch (error) {
       // Read-only bounded diagnostics. Never convert this second observation
@@ -51,6 +57,7 @@ export async function prepareRetainedProductReinstall({ installRoot, payload, pr
       } catch (diagnostic) { console.log('CRABOT_RETAINED_REFERENCE_DIAGNOSIS ' + JSON.stringify({ file_count: files.length, code: diagnostic.code || 'DIAGNOSIS_UNAVAILABLE' })) }
       throw error
     }
+    stage('fixture-programs-unused')
     const directory = management.ensurePrivateDataRoot(path.join(management.ensurePrivateDataRoot(path.join(own.root, 'app/removals')), operationId))
     const text = JSON.stringify(proof) + '\n'
     await privateJson(path.join(directory, 'proof.json'), proof)
@@ -64,11 +71,14 @@ export async function prepareRetainedProductReinstall({ installRoot, payload, pr
   assert.throws(() => installation.readDesktopSelection(own.root), { code: 'CRABOT_DESKTOP_REMOVAL_PENDING' })
   const options = { payload, installRoot: own.root, operationId,
     verifyStopped: () => assertDesktopRemovalProgramsUnused({ installRoot: own.root, proof }, 'ci-reinstall') }
-  await prepareDesktopRemovalReinstall(options)
+  stage('fixture-ready')
+  await prepareDesktopRemovalReinstall({ ...options, progress: phase => stage('programs-' + phase) })
+  stage('handoff-start')
   const handoff = await runPreparedDesktopReinstallHandoff({ payload, installRoot: own.root, operationId,
     // OS menu registration is covered by actual ordinary installer tests; this
     // fixture exercises the Core/GUI health boundary, not a replacement shell.
     registerEntries: async prepared => { assert.deepEqual(prepared.selection, source.record.selection); await preparePrograms(prepared) } })
+  stage('handoff-completed')
   assert.equal(handoff.verification_pending, true); assert.equal(handoff.health_verified, false)
   assert.equal(inspectInstance(own.dataDir).state, 'stopped')
   assert.ok(await fs.stat(path.join(own.dataDir, 'desktop-maintenance.json')))
