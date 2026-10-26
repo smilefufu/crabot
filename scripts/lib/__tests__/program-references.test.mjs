@@ -105,13 +105,14 @@ test('macOS fileport observation handles inactive IPC spaces while retaining act
   const directory = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'crabot-reference-exec-')))
   const child = spawn('/bin/bash', ["-c", "for ((i=0;i<100;i++)); do /bin/sh -c 'echo $$; exec /bin/sleep 0.05'; done"], { cwd: directory, stdio: ['ignore', 'pipe', 'inherit'] })
   const ended = once(child, 'exit')
-  t.after(async () => { if (child.exitCode === null && child.signalCode === null) child.kill(); await ended; await fs.rm(directory, { recursive: true, force: true }) })
+  t.after(async () => { await ended; await fs.rm(directory, { recursive: true, force: true }) })
   await once(child.stdout, 'data')
   let observed = false
   for (let pass = 0; pass < 3; pass++) {
     const receipt = await native.inspectProgramReferences({ roots: [directory], files: [] })
-    const unknowns = receipt.unknown_details.filter(item => item.stage === 'fileport_list' && item.os_error === 3)
-    assert.deepEqual(unknowns, [], 'An inactive IPC space has no fileport namespace; other resource checks must still run')
+    const unknowns = receipt.unknown_details.filter(item => item.stage === 'fileport_list' && item.os_error === 3
+      || item.stage === 'mappings' && item.os_error === 22)
+    assert.deepEqual(unknowns, [], 'Inactive IPC or empty VM namespaces have no corresponding resource; other checks must still run')
     observed ||= receipt.processes.some(item => item.pid === child.pid)
   }
   assert.equal(observed, true, 'The real shell holding this CWD must remain reported')
