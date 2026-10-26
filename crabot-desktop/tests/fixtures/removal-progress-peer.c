@@ -19,6 +19,13 @@ int main(void) {
       if (!strcmp(mode, "ignore-close")) { for (;;) pause(); }
       return 0;
     }
+    if (strstr(frame, "\"type\":\"dialog\"")) {
+      FILE *request = fopen("dialog-frame", "w"); if (!request) return 12; fputs(frame, request); fclose(request);
+      if (!strcmp(mode, "dialog-retry") || !strcmp(mode, "dialog-duplicate")) puts("{\"choice\":\"retry\"}");
+      if (!strcmp(mode, "dialog-duplicate")) puts("{\"choice\":\"retry\"}");
+      if (!strcmp(mode, "dialog-reveal") || !strcmp(mode, "dialog-invalid")) puts("{\"choice\":\"reveal\"}");
+      fflush(stdout);
+    }
     if (!strcmp(mode, "late-invalid")) { puts("{\"action\":\"run\"}"); fflush(stdout); }
     if (!strcmp(mode, "cancel") || !strcmp(mode, "duplicate-cancel") || !strcmp(mode, "uncancellable")) {
       puts("{\"action\":\"cancel\"}");

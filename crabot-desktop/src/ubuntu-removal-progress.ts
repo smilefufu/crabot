@@ -12,6 +12,9 @@ const identity = require('./bootstrap/scripts/lib/process-identity.cjs')
 const management = require('./bootstrap/scripts/lib/desktop-management.cjs')
 const { probeKnownProcessExit } = require('./bootstrap/scripts/lib/known-process-exit.cjs')
 type FrontendFile = { type: 'file'; size: number; sha256: string; mode: number }
+const dialogChoices = { 'retry-cancel': ['retry', 'cancel', 'close'], 'retry-repair': ['retry', 'repair', 'close'], completed: ['close', 'reveal'], cancelled: ['close'], repair: ['close'] } as const
+export type RemovalDialogKind = keyof typeof dialogChoices
+export type RemovalDialogChoice = 'retry' | 'cancel' | 'repair' | 'close' | 'reveal'
 const failure = () => Object.assign(new Error('独立维护界面无法核验或连接已中断，操作结果尚未确认。'), { code: 'CRABOT_DESKTOP_REMOVAL' })
 const generation = (stat: fs.BigIntStats) => [stat.dev, stat.ino, stat.mode, stat.uid, stat.gid, stat.nlink, stat.size, stat.mtimeNs, stat.ctimeNs].join(':')
 
@@ -52,11 +55,12 @@ export async function createUbuntuRemovalProgressWindow(options: { directory: st
   let peer: { pid: number; parent: number; owner: string; started: string; executable: string } | undefined
   let ready = false, closing = false, stopped = false, cancellable = false, fault: Error | undefined
   let input = Buffer.alloc(0), diagnostic = ''
+  let pendingDialog: { kind: RemovalDialogKind; resolve: (choice: RemovalDialogChoice) => void; reject: (error: Error) => void } | undefined
   let acceptReady!: () => void, rejectReady!: (error: Error) => void, closePromise: Promise<void> | undefined
   const readiness = new Promise<void>((resolve, reject) => { acceptReady = resolve; rejectReady = reject })
   // Rejections are still observed by the caller; startup cleanup can await close.
   void readiness.catch(() => {})
-  const fail = (error = failure()) => { fault ||= error; cancellable = false; rejectReady(fault); options.abort.abort(fault) }
+  const fail = (error = failure()) => { fault ||= error; cancellable = false; rejectReady(fault); pendingDialog?.reject(fault); pendingDialog = undefined; options.abort.abort(fault) }
   const current = () => {
     if (fault || !ready || closing || stopped || !peer || !identity.sameProcess(peer, identity.inspectProcess(child.pid))) throw fault || failure()
     verify()
@@ -86,6 +90,11 @@ export async function createUbuntuRemovalProgressWindow(options: { directory: st
           if (!peer || !identity.sameProcess(peer, identity.inspectProcess(child.pid))) throw failure()
           ready = true; acceptReady()
         } catch { fail() }
+      } else if (ready && pendingDialog && /^\{"choice":"(?:retry|cancel|repair|close|reveal)"\}\n$/.test(frame.toString('utf8'))) {
+        try { current() } catch { fail(); return }
+        const choice = JSON.parse(frame.toString('utf8')).choice as RemovalDialogChoice
+        if (!(dialogChoices[pendingDialog.kind] as readonly string[]).includes(choice)) { fail(); return }
+        const pending = pendingDialog; pendingDialog = undefined; pending.resolve(choice)
       } else if (frame.equals(Buffer.from('{"action":"cancel"}\n')) && ready) {
         try { current() } catch { fail(); return }
         if (cancellable && !options.abort.signal.aborted) { cancellable = false; options.abort.abort() }
@@ -99,6 +108,7 @@ export async function createUbuntuRemovalProgressWindow(options: { directory: st
   }
   const close = () => closePromise ||= (async () => {
     closing = true; cancellable = false
+    pendingDialog?.reject(failure()); pendingDialog = undefined
     if (!stopped && child.stdin.writable) child.stdin.end('{"type":"close"}\n')
     if (await waitExit(3000)) return
     // Only this exact child generation may be terminated. Unknowns retain the
@@ -122,8 +132,17 @@ export async function createUbuntuRemovalProgressWindow(options: { directory: st
   return {
     update(message: string, allowCancel = true) {
       const progress = OperationProgressSchema.parse({ message, cancellable: allowCancel && !options.abort.signal.aborted })
-      current(); cancellable = progress.cancellable
+      current(); if (pendingDialog) throw failure(); cancellable = progress.cancellable
       if (!child.stdin.write(JSON.stringify({ type: 'progress', ...progress }) + '\n')) { fail(); throw fault || failure() }
+    },
+    choose(kind: RemovalDialogKind): Promise<RemovalDialogChoice> {
+      current()
+      if (!Object.hasOwn(dialogChoices, kind) || pendingDialog) throw failure()
+      cancellable = false
+      return new Promise((resolve, reject) => {
+        pendingDialog = { kind, resolve, reject }
+        if (!child.stdin.write(JSON.stringify({ type: 'dialog', kind }) + '\n')) fail()
+      }).then(choice => { current(); return choice as RemovalDialogChoice })
     },
     assertReady: current,
     close,

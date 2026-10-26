@@ -12,7 +12,12 @@ static Maintenance state(void) {
   s.pending = g_byte_array_new();
   return s;
 }
-static void clear(Maintenance *s) { gtk_window_destroy(s->window); g_object_unref(s->window); g_byte_array_unref(s->pending); }
+static void clear(Maintenance *s) {
+  if (s->dialog_cancel) g_cancellable_cancel(s->dialog_cancel);
+  gint64 deadline = g_get_monotonic_time() + 5 * G_USEC_PER_SEC;
+  while (s->dialog && g_get_monotonic_time() < deadline) { g_main_context_iteration(NULL, FALSE); g_usleep(1000); }
+  g_assert_null(s->dialog); g_clear_object(&s->dialog_cancel);
+  gtk_window_destroy(s->window); g_object_unref(s->window); g_byte_array_unref(s->pending); }
 static gboolean accept(Maintenance *s, const char *text) { return consume(s, text, strlen(text)); }
 static void progress(void) {
   Maintenance s = state();
@@ -93,11 +98,53 @@ static void closed(void) {
   Maintenance s = state(); g_assert_false(accept(&s, "{\"type\":\"close\"}\n"));
   g_assert_true(s.closing); g_assert_false(s.failed); g_assert_false(s.cancel_sent); clear(&s);
 }
+static GtkWidget *find_button(GtkWidget *widget, const char *label) {
+  if (GTK_IS_BUTTON(widget) && !g_strcmp0(gtk_button_get_label(GTK_BUTTON(widget)), label)) return widget;
+  for (GtkWidget *child = gtk_widget_get_first_child(widget); child; child = gtk_widget_get_next_sibling(child)) {
+    GtkWidget *found = find_button(child, label); if (found) return found;
+  }
+  return NULL;
+}
+static void dialog_choices(void) {
+  for (size_t i = 0; i < G_N_ELEMENTS(dialogs); i++) {
+    const MaintenanceDialog *dialog = &dialogs[i];
+    for (int choice = 0; choice < dialog->count; choice++) {
+      Maintenance s = state(); gtk_window_present(s.window);
+      int pipes[2]; g_assert_cmpint(pipe(pipes), ==, 0); g_assert_cmpint(fflush(stdout), ==, 0);
+      int original = dup(STDOUT_FILENO); g_assert_cmpint(original, >=, 0); g_assert_cmpint(dup2(pipes[1], STDOUT_FILENO), >=, 0); close(pipes[1]);
+      g_autofree char *request = g_strdup_printf("{\"type\":\"dialog\",\"kind\":\"%s\"}\n", dialog->kind);
+      g_assert_true(accept(&s, request)); g_assert_nonnull(s.dialog); g_assert_false(s.cancellable);
+      gboolean clicked = FALSE; gint64 deadline = g_get_monotonic_time() + 5 * G_USEC_PER_SEC;
+      while (s.dialog && g_get_monotonic_time() < deadline) {
+        g_main_context_iteration(NULL, FALSE);
+        GListModel *windows = gtk_window_get_toplevels();
+        for (guint j = 0; !clicked && j < g_list_model_get_n_items(windows); j++) {
+          g_autoptr(GtkWindow) window = g_list_model_get_item(windows, j);
+          GtkWidget *button = find_button(GTK_WIDGET(window), dialog->buttons[choice]);
+          if (button) { clicked = TRUE; g_signal_emit_by_name(button, "clicked"); }
+        }
+        g_usleep(1000);
+      }
+      g_assert_true(clicked); g_assert_null(s.dialog);
+      g_assert_cmpint(dup2(original, STDOUT_FILENO), ==, 0); close(original);
+      char result[4096] = {0}; g_assert_cmpint(read(pipes[0], result, sizeof result - 1), >, 0); close(pipes[0]);
+      g_autofree char *expected = g_strdup_printf("{\"choice\":\"%s\"}\n", dialog->choices[choice]);
+      g_assert_nonnull(strstr(result, expected)); clear(&s);
+    }
+  }
+}
+static void invalid_dialog(void) {
+  const char *frames[] = { "{\"type\":\"dialog\",\"kind\":\"run\"}\n", "{\"type\":\"dialog\",\"kind\":5}\n", "{\"type\":\"dialog\",\"kind\":\"completed\",\"path\":\"/tmp\"}\n", NULL };
+  for (size_t i = 0; frames[i]; i++) { Maintenance s = state(); g_assert_false(accept(&s, frames[i])); g_assert_true(s.failed); clear(&s); }
+  Maintenance s = state(); g_assert_true(accept(&s, "{\"type\":\"dialog\",\"kind\":\"retry-cancel\"}\n"));
+  g_assert_false(accept(&s, "{\"type\":\"dialog\",\"kind\":\"completed\"}\n")); g_assert_true(s.failed); clear(&s);
+}
 int main(int argc, char **argv) {
   g_test_init(&argc, &argv, NULL); gtk_init();
   g_test_add_func("/maintenance/progress", progress); g_test_add_func("/maintenance/cancellation", cancellation);
   g_test_add_func("/maintenance/invalid", invalid); g_test_add_func("/maintenance/limits", limits);
   g_test_add_func("/maintenance/fragmented", fragmented); g_test_add_func("/maintenance/disconnected", disconnected);
   g_test_add_func("/maintenance/close", closed); g_test_add_func("/maintenance/readiness", readiness);
+  g_test_add_func("/maintenance/dialog-choices", dialog_choices); g_test_add_func("/maintenance/invalid-dialog", invalid_dialog);
   return g_test_run();
 }

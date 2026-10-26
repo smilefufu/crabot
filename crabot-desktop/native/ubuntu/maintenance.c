@@ -12,18 +12,32 @@
 
 // Display only. The verified Node owner performs all maintenance operations.
 typedef struct {
+  const char *kind, *message, *buttons[4], *choices[3];
+  int count, cancel;
+} MaintenanceDialog;
+static const MaintenanceDialog dialogs[] = {
+  { "retry-cancel", "Crabot 尚未卸载完成，用户数据已保留。", { "重试", "取消卸载", "暂时退出", NULL }, { "retry", "cancel", "close" }, 3, 2 },
+  { "retry-repair", "程序删除已经开始，用户数据已保留。", { "继续卸载", "保留数据修复…", "暂时退出", NULL }, { "retry", "repair", "close" }, 3, 2 },
+  { "completed", "应用已卸载，数据已保留。", { "关闭", "查看保留位置", NULL }, { "close", "reveal" }, 2, 0 },
+  { "cancelled", "卸载已取消，程序及数据已保留。", { "知道了", NULL }, { "close" }, 1, 0 },
+  { "repair", "请打开同版或更高版 Crabot 离线安装器。", { "关闭维护界面", NULL }, { "close" }, 1, 0 },
+};
+typedef struct {
   GtkApplication *app;
   GtkWindow *window;
   GtkLabel *status;
   GtkSpinner *spinner;
   GtkWidget *cancel;
   GByteArray *pending;
+  const MaintenanceDialog *dialog;
+  GCancellable *dialog_cancel;
   guint input_watch;
   gboolean cancellable, cancel_sent, failed, disconnected, closing, smoke, ready_sent;
 } Maintenance;
 
 static void failed(Maintenance *s, gboolean disconnected) {
   s->failed = TRUE; s->disconnected = disconnected; s->cancellable = FALSE;
+  if (s->dialog_cancel) g_cancellable_cancel(s->dialog_cancel);
   gtk_spinner_stop(s->spinner);
   gtk_label_set_text(s->status, disconnected
     ? "维护连接已中断，无法确认操作结果。用户数据保留，请重新打开受信任的维护入口核验。"
@@ -60,6 +74,31 @@ static gboolean message_valid(const char *text) {
   }
   return TRUE;
 }
+static void dialog_chosen(GObject *source, GAsyncResult *result, gpointer data) {
+  Maintenance *s = data;
+  int choice = gtk_alert_dialog_choose_finish(GTK_ALERT_DIALOG(source), result, NULL);
+  const MaintenanceDialog *dialog = s->dialog; s->dialog = NULL; g_clear_object(&s->dialog_cancel);
+  if (!dialog || s->failed || s->disconnected || s->closing) return;
+  if (choice < 0) choice = dialog->cancel;
+  if (choice >= dialog->count) { failed(s, FALSE); return; }
+  if (fprintf(stdout, "{\"choice\":\"%s\"}\n", dialog->choices[choice]) < 0 || fflush(stdout) != 0) failed(s, TRUE);
+}
+static gboolean show_dialog(Maintenance *s, const char *kind) {
+  if (!kind || s->dialog) return FALSE;
+  for (size_t i = 0; i < G_N_ELEMENTS(dialogs); i++) {
+    const MaintenanceDialog *choice = &dialogs[i];
+    if (strcmp(kind, choice->kind)) continue;
+    s->cancellable = FALSE; gtk_widget_set_sensitive(s->cancel, FALSE); gtk_spinner_stop(s->spinner);
+    s->dialog = choice; s->dialog_cancel = g_cancellable_new();
+    GtkAlertDialog *dialog = gtk_alert_dialog_new("%s", choice->message);
+    gtk_alert_dialog_set_detail(dialog, gtk_label_get_text(s->status));
+    gtk_alert_dialog_set_buttons(dialog, choice->buttons);
+    gtk_alert_dialog_set_cancel_button(dialog, choice->cancel); gtk_alert_dialog_set_default_button(dialog, 0);
+    gtk_alert_dialog_choose(dialog, s->window, s->dialog_cancel, dialog_chosen, s); g_object_unref(dialog);
+    return TRUE;
+  }
+  return FALSE;
+}
 static gboolean frame(Maintenance *s, const char *line, gsize size) {
   if (!size || size > 4096 || s->failed || s->closing || memchr(line, '\0', size)) return FALSE;
   g_autoptr(JsonParser) parser = json_parser_new();
@@ -69,8 +108,10 @@ static gboolean frame(Maintenance *s, const char *line, gsize size) {
   JsonObject *object = json_node_get_object(node);
   const char *type = string_field(object, "type");
   if (!g_strcmp0(type, "close") && json_object_get_size(object) == 1) {
-    s->closing = TRUE; gtk_window_destroy(s->window); return TRUE;
+    s->closing = TRUE; if (s->dialog_cancel) g_cancellable_cancel(s->dialog_cancel); gtk_window_destroy(s->window); return TRUE;
   }
+  if (!g_strcmp0(type, "dialog") && json_object_get_size(object) == 2) return show_dialog(s, string_field(object, "kind"));
+  if (s->dialog) return FALSE;
   JsonNode *allow = json_object_get_member(object, "cancellable");
   const char *message = string_field(object, "message");
   if (g_strcmp0(type, "progress") || json_object_get_size(object) != 3 || !message_valid(message)
@@ -153,6 +194,6 @@ int main(int argc, char **argv) {
   g_signal_connect(s.app, "activate", G_CALLBACK(activate), &s);
   int result = g_application_run(G_APPLICATION(s.app), 1, argv);
   if (s.input_watch) g_source_remove(s.input_watch);
-  g_object_unref(s.app); g_byte_array_unref(s.pending);
+  g_clear_object(&s.dialog_cancel); g_object_unref(s.app); g_byte_array_unref(s.pending);
   return s.failed ? 1 : result;
 }

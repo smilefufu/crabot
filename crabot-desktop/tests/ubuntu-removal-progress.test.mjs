@@ -104,3 +104,20 @@ test('actual same-source GTK maps, displays progress and exits through the priva
   await window.close(); assert.equal(abort.signal.aborted, false)
   console.log('CRABOT_GTK_PIPE_RESULT ' + JSON.stringify({ actual_gtk: true, private_stdio: true, window_mapped: true, business_mm_started: false }))
 })
+
+for (const [mode, kind, choice] of [['dialog-retry', 'retry-cancel', 'retry'], ['dialog-reveal', 'completed', 'reveal']]) test('owned dialog returns only its fixed choices: ' + kind, { skip: !supported, timeout: 15000 }, async t => {
+  const f = await fixture(t, mode), window = await f.create()
+  window.update('只显示当前操作状态', false)
+  assert.equal(await window.choose(kind), choice); window.assertReady()
+  assert.deepEqual(JSON.parse(await files.readFile(path.join(f.directory, 'dialog-frame'), 'utf8')), { type: 'dialog', kind })
+})
+for (const mode of ['dialog-invalid', 'dialog-duplicate']) test('bad or duplicate dialog output cannot settle a user choice: ' + mode, { skip: !supported, timeout: 15000 }, async t => {
+  const f = await fixture(t, mode), window = await f.create()
+  await assert.rejects(window.choose('retry-cancel')); assert.equal(f.abort.signal.aborted, true)
+})
+test('closing a pending dialog rejects its choice and awaits the actual child exit', { skip: !supported, timeout: 15000 }, async t => {
+  const f = await fixture(t, 'dialog-wait'), window = await f.create(), choice = window.choose('retry-repair')
+  void choice.catch(() => {})
+  assert.throws(() => window.choose('completed')); assert.throws(() => window.update('不得更换待确认内容'))
+  await window.close(); await assert.rejects(choice)
+})
