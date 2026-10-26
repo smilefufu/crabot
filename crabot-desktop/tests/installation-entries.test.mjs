@@ -4,14 +4,16 @@ import { promises as fs, writeFileSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 import { tmpdir } from 'node:os'
 import { randomUUID } from 'node:crypto'
+import { createRequire } from 'node:module'
 import { desktopApplicationEntry, integrationRoot, readInstallationLocator, registerInstallationEntries } from '../dist/installation-entries.js'
 import identity from '../../scripts/lib/process-identity.cjs'
 import management from '../../scripts/lib/desktop-management.cjs'
 const windows = process.platform === 'win32'
 const uninstallEntries = new Map()
 if (windows) {
-  const replace = identity.replaceDesktopUninstallEntry
-  identity.replaceDesktopUninstallEntry = (id, source, target) => {
+  const entryIdentity = createRequire(new URL('../dist/installation-entries.js', import.meta.url))('./bootstrap/scripts/lib/process-identity.cjs')
+  const replace = entryIdentity.replaceDesktopUninstallEntry
+  entryIdentity.replaceDesktopUninstallEntry = (id, source, target) => {
     const result = replace(id, source, target)
     if (result === true) uninstallEntries.set(id, target)
     return result
