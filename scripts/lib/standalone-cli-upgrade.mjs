@@ -20,7 +20,7 @@ export async function applyStoppedCliUpgrade({ sourceRoot, targetRoot, dataDir, 
   if (!source || !target || source.scope !== 'user' || target.scope !== 'user' || source.root !== target.root
     || !source.selected || source.id === target.id) fail('只接受当前独立 user CLI 同一安装内已准备的新核心。')
   if (management.readDesktopManagement(dataDir) || !await readStandaloneCliBinding(dataDir, source.root)) fail('实例不属于此独立 CLI，请使用对应的桌面或迁移入口。')
-  management.ensurePrivateDataRoot(dataDir)
+  management.requireExistingDataRoot(dataDir)
   const lock = await acquireCliLock(dataDir, 'upgrade-standalone-cli')
   try {
     const stopped = async expected => {

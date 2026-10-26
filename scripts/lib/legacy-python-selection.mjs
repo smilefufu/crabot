@@ -16,7 +16,7 @@ import { planLegacyPythonRebuild } from './legacy-python-rebuild.mjs'
 const fail = (code = 'CRABOT_LEGACY_PYTHON_SELECTION_UNVERIFIED', cause) => { throw Object.assign(new Error('Python默认环境尚不能安全切换；原环境、准备目录及已有引用均保留。', { cause }), { code }) }
 const uncertain = cause => fail('CRABOT_PYTHON_SELECTION_UNKNOWN', cause)
 function stopped(dataDir) {
-  dataDir = management.requirePrivateDataRoot(dataDir)
+  dataDir = management.requireExistingDataRoot(dataDir)
   if (!cliLockToken(path.join(dataDir, 'cli.lock')) || inspectInstance(dataDir).state !== 'stopped') fail('CRABOT_BACKUP_REQUIRES_STOP')
   return dataDir
 }

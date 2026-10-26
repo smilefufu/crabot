@@ -25,9 +25,12 @@ function frame(directory, privateEntry = true) {
 }
 function context(dataDir, id) {
   if (!uuid(id)) fail()
-  const data = management.requirePrivateDataRoot(dataDir), control = path.join(data, 'workspace-control'), parent = path.join(control, 'relocation-recovery'), directory = path.join(parent, id)
-  const dataFrame = frame(data), controlFrame = frame(control)
-  const verify = () => { if (hash(frame(data)) !== hash(dataFrame) || hash(frame(control)) !== hash(controlFrame)) fail() }
+  const data = management.requireExistingDataRoot(dataDir), control = path.join(data, 'workspace-control'), parent = path.join(control, 'relocation-recovery'), directory = path.join(parent, id)
+  const dataFrame = frame(data, false), controlFrame = frame(control)
+  const verify = () => {
+    management.requireExistingDataRoot(data)
+    if (hash(frame(data, false)) !== hash(dataFrame) || hash(frame(control)) !== hash(controlFrame)) fail()
+  }
   return { data, control, parent, directory, dataFrame, verify }
 }
 function read(directory, name, privateEntry = true, flush = false, parse = JSON.parse) {

@@ -52,7 +52,7 @@ function verifyRecordObservation(frame) {
     catch (error) { if (error.code !== 'ENOENT' || observed.version !== null) fail(); continue }
     if (observed.version === null || observationVersion(file, observed.kind, stat) !== observed.version || stat.isSymbolicLink()) fail(undefined, 'record-recheck-' + observed.kind)
     if (observed.kind === 'data') {
-      if (management.requirePrivateDataRoot(file) !== file) fail()
+      if (management.requireExistingDataRoot(file) !== file) fail()
     } else {
       const directory = observed.kind === 'directory'
       if (directory ? !stat.isDirectory() : !stat.isFile() || stat.nlink !== 1n) fail()
@@ -110,7 +110,7 @@ function context(dataDir, locked = false) {
   // Only the pure synchronous graph shares this pinned root. Mutating callers
   // still validate immediately; the outer reader rechecks actual root permissions.
   const cached = !locked && recordObservation?.dataRoots.get(dataDir)
-  const dataRoot = cached || management.requirePrivateDataRoot(dataDir)
+  const dataRoot = cached || management.requireExistingDataRoot(dataDir)
   if (recordObservation && !cached) {
     observeRecordPath(dataRoot, 'data', fs.lstatSync(dataRoot, { bigint: true }))
     if (!locked) recordObservation.dataRoots.set(dataDir, dataRoot)

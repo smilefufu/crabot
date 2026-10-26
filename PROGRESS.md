@@ -63,13 +63,14 @@
 ### 桌面化方案：范围冻结，原 worktree 收口中，未进入 PR
 
 - 按2026-10-25冻结边界继续，不增加产品子项目或恢复记录。唯一重大遗漏例外：用户2026-10-26确认有限修正macOS受保护系统进程导致的卸载全局阻断。原已确认体验和验收保持；[实施计划](crabot-docs/superpowers/plans/2026-10-17-desktop-application-implementation.md)、[完整验收证据](crabot-docs/superpowers/plans/2026-10-17-desktop-application-validation.md)记录逐项结果及失败，不以组件替代交付。
-- 已形成四个实际独立构建的review分支：Native基础、Client SDK、Runtime基础、Workspace目录基础。各有自身依赖/编译和四平台或三平台CI，未借feature dist；B1原生引用修正后重编109项88过21平台跳过，新四平台CI继续。后续依赖批次必须在依赖合并后按实际main重新定位并验证，不提交悬空引用或巨大单PR。
+- 已形成四个实际独立构建的review分支：Native基础、Client SDK、Runtime基础、Workspace目录基础。各有自身依赖/编译和四平台或三平台CI，未借feature dist；B1原生引用修正后重编109项88过21平台跳过，自身新版四平台CI已全部通过。后续依赖批次必须在依赖合并后按实际main重新定位并验证，不提交悬空引用或巨大单PR。
 - 现有GUI/CLI共用、窄IPC+共享HTTP/WS、内置环境、项目workspace及权限迁移、system批量运维主体仍在原feature worktree。Windows旧候选两次整包GUI/Core/CLI与签名更新通过；只证明对应候选，不能代替最终版/Win11真实桌面或登录验收。
-- ARM原更新故障由固定首目标证据收窄至recovering-service/NSAlert；实际Electron/Controller进一步复现登录警告框阻塞服务启动。已将提示延后到原恢复/健康/维护确定之后，不改变OS意图与健康门槛；旧两项时序回归先红，修后66项65过1平台跳过、7项实际Electron全过。6e5bd1a2原签名整包复验40256350443进行中，未报成功。
-- Linux原流程三次在固定libfreetype/libpng源503/读取超时中止，未到S5。61b4f1fe仅将四个失效URL替换为Ubuntu官方固定快照，x64/arm64四包真实HTTP200且原SHA完全相同；六项内置Python与16项资源/打包回归通过。原完整Linux复验40256681351进行中；缺artifact不算实际Ubuntu安装产品失败。
+- ARM原更新故障由固定首目标证据收窄至recovering-service/NSAlert；实际Electron/Controller进一步复现登录警告框阻塞服务启动。已将提示延后到原恢复/健康/维护确定之后，不改变OS意图与健康门槛；旧两项时序回归先红，修后66项65过1平台跳过、7项实际Electron全过。6e5bd1a2原签名整包40256350443已成功，普通目标Main、新实例代际、真实健康收口和数据保留已核实；仍非真实模型/登录验收。
+- Linux原流程三次在固定libfreetype/libpng源503/读取超时中止，未到S5。61b4f1fe仅将四个失效URL替换为Ubuntu官方固定快照，x64/arm64四包真实HTTP200且原SHA完全相同；六项内置Python与16项资源/打包回归通过。61b完整Linux在资源步骤前被旧通知断言阻断，c10405ac修正组件测试后已重跑原流程；缺artifact不算实际Ubuntu安装产品失败。
 - 已确认卸载修正先更新Desktop§7.3再实现：仅macOS固定规范系统映像、所有权/写权限与稳定祖先链可核实者分类，Crabot运行链和明确引用优先阻断，原生未知不改写。真实私有测试安装可删除已证明程序，data/workspace/工作依赖和保护保留；相关186项183过3平台跳过。U5与完整卸载入口仍未开放；[卸载实施证据](crabot-docs/superpowers/plans/2026-10-24-desktop-retained-data-uninstall-implementation.md)保留各平台组件和待办。
 - 本地全套验证已逐项区分通过、平台跳过与main原有失败；未把截断/超时当通过。Core557项541过16跳过；Admin/Agent旧失败经独立main依赖/编译复现，不混改无关重试/提示词。已有Provider选择不替代真实模型预算授权，无付费生成或现场部署。
 - 固定剩余闭环：完整成对更新；旧user CLI原位接管；已有安装修复及保留数据卸载/重装真实健康；旧system发行完整转换/恢复；workspace更早故障阶段恢复；原最低OS/真实桌面/模型/签名发行验收。重装新记录、旧Node指纹恢复草稿继续冻结，不借它们扩大设计。
+- 按用户要求专项审查无效阻断：已移除旧业务DATA_DIR必须0700的错误前置，覆盖维护/旧迁移、CLI升级重装、Python选择与workspace记录；旧0755原样保留，真正私有控制仍700/600。327项326过1平台跳过，另Core冷恢复6/6；真实Node迁移与内置Python离线重建均覆盖。无新权限/记录/需求，完整旧CLI接管仍未因此完成。
 - 本地构建继续磁盘保护：40GiB起建、30GiB停止本任务组、任务材料20GiB上限；当前空闲约345GiB、主worktree材料约15.87GiB。只清理本次有限夹具，未改Docker/Spotlight或停现场服务。产品只推feature/review分支，完整测好再按依赖开PR，不直推main、不自行merge。
 
 ### 任务默认目录文件授权：独立修复待审查

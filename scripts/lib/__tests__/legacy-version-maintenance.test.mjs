@@ -91,8 +91,8 @@ test('legacy preparation cancellation verifies source and backup; it does not re
   assert.equal(await fs.readFile(path.join(f.data, 'fixture/content'), 'utf8'), 'before')
 })
 
-for (const fail of [false, true]) test('legacy source migrates only once offline, retaining its old environment; failure=' + fail, async t => {
-  const f = await fixture(t, { fail }); await acquireCliLock(f.data, 'legacy-maintenance-test')
+for (const fail of [false, true]) for (const dataMode of process.platform === 'win32' ? [null] : [0o700, 0o755]) test('legacy source migrates only once offline, retaining its old environment; failure=' + fail + '; dataMode=' + dataMode, async t => {
+  const f = await fixture(t, { fail }); if (dataMode !== null) await fs.chmod(f.data, dataMode); await acquireCliLock(f.data, 'legacy-maintenance-test')
   const { record, backup } = await f.backedUp()
   await markVersionMaintenanceInstalling(f.data, record.id)
   assert.equal((await inspectLegacyEntryFence(f.root)).phase, 'data_changing')
@@ -106,6 +106,7 @@ for (const fail of [false, true]) test('legacy source migrates only once offline
     assert.throws(() => assertVersionMaintenanceAllowsStart(f.data), { code: 'CRABOT_MAINTENANCE_PENDING' })
   } else { await complete(); assert.equal(readVersionMaintenance(f.data), null) }
   await assert.rejects(complete())
+  if (dataMode !== null) assert.equal((await fs.stat(f.data)).mode & 0o777, dataMode)
   assert.equal(await fs.readFile(path.join(f.data, 'fixture/content'), 'utf8'), fail ? 'before' : 'before changed')
   assert.equal(await fs.readFile(path.join(backup.directory, 'data/fixture/content'), 'utf8'), 'before')
   assert.equal(await fs.readFile(path.join(f.data, 'agent-venv/keep'), 'utf8'), 'old Python unchanged')

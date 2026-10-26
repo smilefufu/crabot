@@ -13,6 +13,8 @@ import { acquireCliLock, acquireWorkspaceRelocationLock, releaseCliLock } from '
 import { beginVersionMaintenance } from '../version-maintenance.mjs'
 import { writeCoreRelease } from '../core-release.mjs'
 import { WorkspaceCatalog } from '../../../crabot-shared/dist/workspace-catalog.js'
+import { readWorkspaceRecoveryCoordinator } from '../workspace-recovery-records.mjs'
+import { locateWorkspaceRelocationHistory } from '../workspace-relocation-history.mjs'
 import { assertWorkspaceExecutionAllowed } from '../../../crabot-shared/dist/workspace-maintenance.js'
 import { observeWorkspaceRelocationRecords, commitWorkspaceRelocationProcesses, readWorkspaceRelocationProcesses, commitWorkspaceRelocationCoordinator, commitWorkspaceRelocationCoordinatorReady, readWorkspaceRelocationCoordinator, commitWorkspaceRelocationModules, readWorkspaceRelocationModules, prepareWorkspaceRelocationModuleStops, observeWorkspaceRelocationModuleProcesses, completeWorkspaceRelocationModuleStops, readWorkspaceRelocationModuleStops, beginWorkspaceRelocationIntent, readWorkspaceRelocationIntent, commitWorkspaceRelocationWorkers, readWorkspaceRelocationWorkers, prepareWorkspaceRelocationStops, completeWorkspaceRelocationStops, readWorkspaceRelocationStops } from '../workspace-relocation-intent.mjs'
 
@@ -1368,9 +1370,9 @@ test('one synchronous graph checks a shared private directory once and still val
 test('one synchronous record graph validates and pins its data root once before final revalidation', async t => {
   const f = await fixture(t), lock = await acquireCliLock(f.data, 'workspace-relocation')
   try {
-    const accepted = await beginWorkspaceRelocationIntent(f.input), requireRoot = management.requirePrivateDataRoot
+    const accepted = await beginWorkspaceRelocationIntent(f.input), requireRoot = management.requireExistingDataRoot
     let roots = 0
-    const counting = t.mock.method(management, 'requirePrivateDataRoot', (...args) => { roots++; return requireRoot(...args) })
+    const counting = t.mock.method(management, 'requireExistingDataRoot', (...args) => { roots++; return requireRoot(...args) })
     try {
       observeWorkspaceRelocationRecords(() => {
         assert.deepEqual(readWorkspaceRelocationIntent(f.data), accepted)
@@ -1387,5 +1389,22 @@ test('one synchronous record graph validates and pins its data root once before 
     try { assert.deepEqual(readWorkspaceRelocationIntent(f.data), accepted) }
     finally { check.mock.restore() }
     assert.ok(finalRootRechecks >= 2, 'new graph rechecks the actual root, with no cross-frame cache')
+  } finally { releaseCliLock(lock) }
+})
+
+test('existing 0755 data admits workspace maintenance while keeping control records private', { skip: process.platform === 'win32' }, async t => {
+  const f = await fixture(t)
+  await fs.chmod(f.data, 0o755)
+  assert.deepEqual(readWorkspaceRecoveryCoordinator(f.data, randomUUID()), { launch: null, ready: null })
+  assert.equal(await locateWorkspaceRelocationHistory({ dataDir: f.data, managerKey: 'test::old', workerId: 'old-worker', incarnationId: 'old-incarnation' }), null)
+  const lock = await acquireCliLock(f.data, 'workspace-relocation')
+  try {
+    const intent = await beginWorkspaceRelocationIntent(f.input)
+    assert.deepEqual(readWorkspaceRelocationIntent(f.data), intent)
+    assert.equal((await fs.stat(f.data)).mode & 0o777, 0o755)
+    assert.equal((await fs.stat(path.dirname(f.recordFile))).mode & 0o777, 0o700)
+    assert.equal((await fs.stat(f.recordFile)).mode & 0o777, 0o600)
+    assert.throws(() => assertWorkspaceExecutionAllowed(f.data), { code: 'WORKSPACE_MAINTENANCE' })
+    assert.equal(await fs.readFile(path.join(f.source, 'default/original.txt'), 'utf8'), 'user bytes')
   } finally { releaseCliLock(lock) }
 })

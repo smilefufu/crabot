@@ -87,7 +87,8 @@ export async function installStandaloneCli({ sourceRoot, installRoot, dataDir, s
     const prepared = await prepareCliPayload({ sourceRoot, installRoot, scope, version, repair: scope === 'user', dataDir,
       beforeWrite: async () => {
         if (scope !== 'user') return
-        dataDir = management.ensurePrivateDataRoot(dataDir)
+        const binding = await readStandaloneCliBinding(dataDir, canonicalRoot(installRoot))
+        dataDir = binding ? management.requireExistingDataRoot(dataDir) : management.ensurePrivateDataRoot(dataDir)
         lock = await acquireCliLock(dataDir, 'install-standalone-cli')
         assertVersionMaintenanceAllowsStart(dataDir)
         await checkData(dataDir, canonicalRoot(installRoot), selected)

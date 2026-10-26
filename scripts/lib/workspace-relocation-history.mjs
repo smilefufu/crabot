@@ -30,7 +30,7 @@ function exists(file) {
   try { fs.lstatSync(file); return true } catch (error) { if (error.code !== 'ENOENT') throw error; return false }
 }
 function historyGraph(dataDir) {
-  management.requirePrivateDataRoot(dataDir)
+  management.requireExistingDataRoot(dataDir)
   const control = path.join(dataDir, 'workspace-control'), history = path.join(control, 'relocation-history')
   const directories = {}, nodes = [], ids = new Set(), receipts = new Set()
   let names = []

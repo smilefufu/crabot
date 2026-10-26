@@ -92,7 +92,7 @@ export function assertVersionMaintenanceAllowsStart(dataDir) {
 }
 export async function beginVersionMaintenance(dataDir, root, targetVersion, sourceVersion, { systemOperationId, dataProtection } = {}) {
   dataDir = locked(dataDir)
-  management.ensurePrivateDataRoot(dataDir)
+  management.requireExistingDataRoot(dataDir)
   if (readVersionMaintenance(dataDir) || !version(targetVersion) || systemOperationId !== undefined && !uuid(systemOperationId)
     || dataProtection !== undefined && dataProtection !== 'scoped') fail()
   const release = await verifyCoreRelease(root, { version: sourceVersion })
@@ -120,7 +120,7 @@ async function legacyUserSource(record) {
   return fenced
 }
 export async function beginLegacyUserVersionMaintenance({ dataDir, installation, entryFenceId, targetRoot }) {
-  dataDir = management.requirePrivateDataRoot(dataDir); locked(dataDir)
+  dataDir = management.requireExistingDataRoot(dataDir); locked(dataDir)
   if (readVersionMaintenance(dataDir) || !uuid(entryFenceId) || installation?.dataRoot !== dataDir
     || !legacyVersions.includes(installation?.version)) fail()
   targetRoot = realpathSync(targetRoot)
@@ -190,7 +190,7 @@ export async function cancelPreparedLegacySystemVersionMaintenance(options) {
 // Persist only a prepared environment reference while the old default is still
 // untouched. This grants neither deployment authority nor permission to start.
 export async function bindLegacyPythonMaintenance({ dataDir, id, prepared, inspectEnvironment = inspectLegacyPythonEnvironment }) {
-  dataDir = locked(management.requirePrivateDataRoot(dataDir))
+  dataDir = locked(management.requireExistingDataRoot(dataDir))
   const record = readVersionMaintenance(dataDir)
   if (record?.schema_version !== 2 || record.id !== id || record.phase !== 'backed_up'
     || inspectInstance(dataDir).state !== 'stopped' || pythonSelection.readAgentEnvironmentReference(dataDir)) fail()
@@ -213,7 +213,7 @@ export async function bindLegacyPythonMaintenance({ dataDir, id, prepared, inspe
 // Selection is a data-changing step, after the surrounding takeover has sealed
 // old entry points. A lost publication result retains the same installing guard.
 export async function selectLegacyPythonMaintenance({ dataDir, id, inspectEnvironment = inspectLegacyPythonEnvironment, selectPrepared = selectLegacyPythonRebuild }) {
-  dataDir = locked(management.requirePrivateDataRoot(dataDir))
+  dataDir = locked(management.requireExistingDataRoot(dataDir))
   const record = readVersionMaintenance(dataDir)
   if (record?.schema_version !== 2 || record.id !== id || record.phase !== 'installing' || !record.legacy_python
     || inspectInstance(dataDir).state !== 'stopped') fail()

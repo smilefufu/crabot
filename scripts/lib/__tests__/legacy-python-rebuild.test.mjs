@@ -184,8 +184,10 @@ test('the production preparation runner verifies a dependency-free legacy enviro
 })
 
 
-test('verified rebuild selection changes the default interpreter without moving either environment', async t => {
-  const f = await fixture(t), prepared = await prepare(f)
+for (const dataMode of process.platform === 'win32' ? [null] : [0o700, 0o755]) test('verified rebuild selection changes the default interpreter without moving either environment; dataMode=' + dataMode, async t => {
+  const f = await fixture(t)
+  if (dataMode !== null) await fs.chmod(f.dataDir, dataMode)
+  const prepared = await prepare(f)
   const input = { root, dataDir: f.dataDir, prepared, expectedFingerprint: f.old.fingerprint }
   console.log('LEGACY_PYTHON_SELECTION_STAGE pre-publication-failure-check')
   const open = fs.open, rename = fs.rename
@@ -239,6 +241,7 @@ test('verified rebuild selection changes the default interpreter without moving 
   assert.equal(selection.readAgentEnvironmentSelection(f.dataDir), null)
   assert.equal((await fs.stat(path.join(f.dataDir, prepared.directory))).isDirectory(), true)
   await assertOriginal(f)
+  if (dataMode !== null) assert.equal((await fs.stat(f.dataDir)).mode & 0o777, dataMode)
 })
 
 test('selection refuses a changed source and a missing operation lock without replacing the old default', async t => {

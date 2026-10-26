@@ -328,3 +328,36 @@ for (const failure of ['migration', 'completion', 'core-change', 'lost-lock', 'l
   assert.equal(readVersionMaintenance(f.dataDir).id, f.record.id)
   assert.throws(() => assertVersionMaintenanceAllowsStart(f.dataDir), { code: 'CRABOT_MAINTENANCE_PENDING' })
 })
+
+// Legacy CLI data is commonly 0755. Maintenance must protect its own private
+// receipt rather than require changing the permissions of all existing data.
+test('existing 0755 data can enter and cancel version maintenance without changing permissions', { skip: process.platform === 'win32' }, async t => {
+  const f = await fixture(t)
+  await fs.chmod(f.dataDir, 0o755)
+  const { lock, record } = await f.begin()
+  try {
+    assert.equal((await fs.stat(f.dataDir)).mode & 0o777, 0o755)
+    assert.equal((await fs.stat(path.join(f.dataDir, 'desktop-maintenance.json'))).mode & 0o777, 0o600)
+    assert.throws(() => assertVersionMaintenanceAllowsStart(f.dataDir), { code: 'CRABOT_MAINTENANCE_PENDING' })
+    await cancelPreparedVersionMaintenance({ ...f, id: record.id, verifyCompatible: async () => {} })
+    assert.equal(readVersionMaintenance(f.dataDir), null)
+    assert.equal((await fs.stat(f.dataDir)).mode & 0o777, 0o755)
+    assert.equal(await fs.readFile(path.join(f.dataDir, 'admin/config'), 'utf8'), 'preserved')
+  } finally { releaseCliLock(lock) }
+})
+
+test('existing-data validation rejects writable sharing, links and missing roots without creating state', { skip: process.platform === 'win32' }, async t => {
+  const f = await fixture(t), alias = f.dataDir + '-alias', missing = f.dataDir + '-missing'
+  for (const mode of [0o775, 0o777, 0o500]) {
+    await fs.chmod(f.dataDir, mode)
+    assert.throws(() => management.requireExistingDataRoot(f.dataDir), { code: 'CRABOT_DATA_NOT_PRIVATE' })
+    assert.equal((await fs.stat(f.dataDir)).mode & 0o777, mode)
+  }
+  await fs.chmod(f.dataDir, 0o755)
+  await fs.symlink(f.dataDir, alias)
+  assert.throws(() => management.requireExistingDataRoot(alias), { code: 'CRABOT_DATA_NOT_PRIVATE' })
+  assert.throws(() => management.requireExistingDataRoot(missing), { code: 'CRABOT_DATA_MISSING' })
+  await assert.rejects(fs.lstat(missing), { code: 'ENOENT' })
+  assert.throws(() => management.requirePrivateDataRoot(f.dataDir), { code: 'CRABOT_DATA_NOT_PRIVATE' }, 'private control scopes still require private access')
+  assert.equal(await fs.readFile(path.join(f.dataDir, 'admin/config'), 'utf8'), 'preserved')
+})

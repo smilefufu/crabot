@@ -246,7 +246,7 @@ test('repair restores an occupied publication failure and can rebuild a missing 
 })
 
 
-test('offline CLI upgrade preserves dependencies and stopped state while verifying a real Node migration', async t => {
+for (const dataMode of windows ? [null] : [0o700, 0o755]) test('offline CLI upgrade preserves dependencies and stopped state while verifying a real Node migration; dataMode=' + dataMode, async t => {
   const f = await fixture(t)
   const one = await installStandaloneCli({ sourceRoot: await f.source('1.2.3'), installRoot: f.installRoot, dataDir: f.dataDir })
   await fs.mkdir(path.join(f.dataDir, 'admin'), { recursive: true })
@@ -272,9 +272,11 @@ test('offline CLI upgrade preserves dependencies and stopped state while verifyi
       return original(...args)
     })
   })
+  if (dataMode !== null) await fs.chmod(f.dataDir, dataMode)
   let result
   try { result = await applyStoppedCliUpgrade({ sourceRoot: one.coreRoot, targetRoot: two.coreRoot, dataDir: f.dataDir }) }
   finally { guards.forEach(guard => guard.mock.restore()) }
+  if (dataMode !== null) assert.equal((await fs.stat(f.dataDir)).mode & 0o777, dataMode)
   assert.equal(result.service_started, false); assert.equal(result.health_verified, false)
   assert.equal(inspectInstance(f.dataDir).state, 'stopped')
   assert.equal(readCliSelection(f.installRoot), two.id)
@@ -466,4 +468,16 @@ test('code-only CLI replacement creates no outer data backup and keeps the servi
   assert.equal(readVersionMaintenance(f.dataDir), null)
   for (const directory of [f.dataDir + '.desktop-backups', path.join(f.dataDir, '.upgrade-migrations')]) await assert.rejects(fs.lstat(directory), { code: 'ENOENT' })
   assert.equal(await fs.readFile(path.join(f.dataDir, 'agent/traces/keep'), 'utf8'), 'untouched history')
+})
+
+test('same-version CLI reinstall retains an existing bound 0755 data directory', { skip: windows }, async t => {
+  const f = await fixture(t), sourceRoot = await f.source('1.2.3')
+  const first = await installStandaloneCli({ sourceRoot, installRoot: f.installRoot, dataDir: f.dataDir })
+  await fs.writeFile(path.join(f.dataDir, 'keep-user-data'), 'preserved')
+  await fs.chmod(f.dataDir, 0o755)
+  const second = await installStandaloneCli({ sourceRoot, installRoot: f.installRoot, dataDir: f.dataDir })
+  assert.equal(second.id, first.id)
+  assert.equal((await fs.stat(f.dataDir)).mode & 0o777, 0o755)
+  assert.equal(await fs.readFile(path.join(f.dataDir, 'keep-user-data'), 'utf8'), 'preserved')
+  assert.equal(inspectInstance(f.dataDir).state, 'stopped')
 })

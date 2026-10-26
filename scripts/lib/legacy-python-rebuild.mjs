@@ -43,7 +43,7 @@ export function planLegacyPythonRebuild(observation) {
 
 // execute is a test seam for an offline wheel source, never a user command.
 export async function prepareLegacyPythonRebuild({ root, dataDir, expectedFingerprint, signal, progress = () => {}, execute = runBounded }) {
-  dataDir = management.ensurePrivateDataRoot(dataDir)
+  dataDir = management.requireExistingDataRoot(dataDir)
   if (!cliLockToken(path.join(dataDir, 'cli.lock')) || inspectInstance(dataDir).state !== 'stopped') throw fail('CRABOT_BACKUP_REQUIRES_STOP')
   cancelled(signal)
   const original = await inspectLegacyPythonEnvironment({ root, dataDir })

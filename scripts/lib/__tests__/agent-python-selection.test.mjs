@@ -63,3 +63,13 @@ test('redirected environment roots and hardlinked control files are rejected', t
   assert.throws(() => selection.readAgentEnvironmentSelection(f.data), { code: 'CRABOT_PYTHON_ENV_SELECTION_INVALID' })
   assert.equal(fs.existsSync(path.join(retained, 'legacy-rebuild.json')), true)
 })
+
+test('existing 0755 data resolves a private Python selection without weakening its controls', { skip: process.platform === 'win32' }, t => {
+  const f = fixture(t); f.publish(); fs.chmodSync(f.data, 0o755)
+  assert.equal(selection.readAgentEnvironmentSelection(f.data).directory, f.directory)
+  assert.equal(fs.statSync(f.data).mode & 0o777, 0o755)
+  fs.chmodSync(f.file, 0o644)
+  assert.throws(() => selection.readAgentEnvironmentSelection(f.data), { code: 'CRABOT_PYTHON_ENV_SELECTION_INVALID' })
+  fs.chmodSync(f.file, 0o600); fs.chmodSync(f.directory, 0o755)
+  assert.throws(() => selection.readAgentEnvironmentSelection(f.data), { code: 'CRABOT_PYTHON_ENV_SELECTION_INVALID' })
+})
