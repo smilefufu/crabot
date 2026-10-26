@@ -150,6 +150,9 @@ jobs:
           pnpm --dir crabot-desktop install --frozen-lockfile
           # Electron lazily installs on first require; complete it before test workers.
           (cd crabot-desktop && node -e "require('electron')")
+      - name: Prepare exact development Electron sandbox on Ubuntu24
+        if: runner.os == 'Linux'
+        run: node .github/scripts/ubuntu-electron-test-sandbox.mjs
       - name: Linux workspace bind-mount boundary in a private mount namespace
         if: runner.os == 'Linux'
         timeout-minutes: 2
