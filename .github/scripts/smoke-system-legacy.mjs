@@ -149,7 +149,7 @@ for (const release of releases.filter(release => selectedVersion === 'all' || re
         if (role === 'public-legacy-node') { assert.equal(result.child_code, 0); assert.equal(result.child_ready, true) }
       }
       await asUser(employee, [path.join(old, 'scripts/start.mjs'), '-d'], {
-        DATA_DIR: employee.data_dir, CRABOT_PORT_OFFSET: String(employee.port_offset), CRABOT_HOME: old,
+        PATH: base + ':/usr/bin:/bin', DATA_DIR: employee.data_dir, CRABOT_PORT_OFFSET: String(employee.port_offset), CRABOT_HOME: old,
       }, legacyNode)
     }
     console.log('CRABOT_LEGACY_ACCEPTANCE ' + JSON.stringify({ version: release.version, phase: 'ordinary-installer' }))
