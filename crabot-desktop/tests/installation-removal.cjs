@@ -38,7 +38,7 @@ void app.whenReady().then(async () => {
   const prepared = { installRoot: root, installation_id: id, guiRoot, coreRoot, selection }
   const env = { APPDATA: path.join(home, 'Roaming'), LOCALAPPDATA: path.join(home, 'Local'), XDG_CONFIG_HOME: path.join(home, '.config'), XDG_DATA_HOME: path.join(home, '.local/share') }
   const { registerInstallationEntries, integrationRoot } = await import(pathToFileURL(path.resolve(__dirname, '../dist/installation-entries.js')).href)
-  const { removeInstallationEntries, removeDesktopMenuEntry } = await import(pathToFileURL(path.resolve(__dirname, '../dist/installation-removal.js')).href)
+  const { removeInstallationEntries, removeDesktopMenuEntry, removeDesktopInstallationEntries } = await import(pathToFileURL(path.resolve(__dirname, '../dist/installation-removal.js')).href)
   const sentinel = path.join(root, 'data', 'preserved.txt'); await fs.writeFile(sentinel, 'business dependencies and workspace stay')
   let stops = 0, unregisters = 0
   const options = { home, platform: process.platform, env, shell, registerMac: async () => {},
@@ -75,6 +75,7 @@ void app.whenReady().then(async () => {
   await fs.rm(coreRoot, { recursive: true })
   const input = { installRoot: root, operationId, home, env, shell, unregisterMac: options.unregisterMac }
   await assert.rejects(removeDesktopMenuEntry(input), { code: 'CRABOT_DESKTOP_REMOVAL' })
+  await assert.rejects(removeDesktopInstallationEntries(input), { code: 'CRABOT_DESKTOP_REMOVAL' })
   const locks = await import(pathToFileURL(path.resolve(__dirname, '../dist/bootstrap/scripts/lib/cli-lock.mjs')).href)
   const held = []
   try {
@@ -92,5 +93,21 @@ void app.whenReady().then(async () => {
     assert.equal(await fs.readFile(sentinel, 'utf8'), 'business dependencies and workspace stay'); assert.ok(await fs.stat(executable))
     console.log('CRABOT_REMOVAL_MENU_JOB ' + JSON.stringify({ platform: process.platform, core_missing: true, owned_menu_removed: true,
       discovery_preserved: true, actual_windows_shortcut: windows, real_user_menu_changed: false, business_mm_started: false }))
+    const originalLocator = JSON.parse(await fs.readFile(locator, 'utf8'))
+    await privateJson(locator, { ...originalLocator, install_root: path.join(parent, 'other') })
+    await assert.rejects(removeDesktopInstallationEntries(input), { code: 'CRABOT_INSTALL_REGISTRATION' })
+    assert.equal(JSON.parse(await fs.readFile(locator, 'utf8')).install_root, path.join(parent, 'other'))
+    await privateJson(locator, originalLocator)
+    await assert.rejects(removeDesktopInstallationEntries({ ...input, operationId: randomUUID() }), { code: 'CRABOT_DESKTOP_REMOVAL' })
+    await privateJson(path.join(root, '.desktop-removal.json'), { ...fence, phase: 'stopping' })
+    await assert.rejects(removeDesktopInstallationEntries(input), { code: 'CRABOT_DESKTOP_REMOVAL' })
+    await privateJson(path.join(root, '.desktop-removal.json'), fence)
+    await removeDesktopInstallationEntries(input); await removeDesktopInstallationEntries(input)
+    await assert.rejects(fs.lstat(locator), { code: 'ENOENT' })
+    assert.deepEqual(JSON.parse(await fs.readFile(path.join(root, '.desktop-removal.json'), 'utf8')), fence)
+    assert.equal(await fs.readFile(sentinel, 'utf8'), 'business dependencies and workspace stay')
+    console.log('CRABOT_REMOVAL_INSTALLATION_ENTRIES ' + JSON.stringify({ core_missing: true, discovery_removed: true, repeated_cleanup: true,
+      foreign_locator_preserved: true, removal_fence_preserved: true, data_preserved: true, complete_uninstall_tested: false }))
+
   } finally { for (const lock of held.reverse()) locks.releaseCliLock(lock) }
 }).then(() => { clearTimeout(timer); app.exit(0) }, error => { console.error(error.stack); clearTimeout(timer); app.exit(1) })

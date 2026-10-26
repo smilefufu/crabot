@@ -130,13 +130,20 @@ async function captureRemovalJob(options: RemovalJobOptions) {
   return captureDesktopRemovalJob(options)
 }
 
-// Menu cleanup for the same removing job, even after Core has gone. Discovery
-// and CLI registration stay for the later full-uninstall finalization.
-export async function removeDesktopMenuEntry(options: RemovalJobOptions & Pick<EntryRemovalOptions, 'home' | 'env' | 'shell' | 'unregisterMac'>): Promise<void> {
+// Removal-job entry cleanup keeps its own admission even after Core is gone.
+// The full host orders locator removal after its other cleanup responsibilities.
+async function removeJobEntries(options: RemovalJobOptions & Pick<EntryRemovalOptions, 'home' | 'env' | 'shell' | 'unregisterMac'>,
+  scope: 'menu-only' | 'menu-and-locator'): Promise<void> {
   const { own, record, assertJob, proofCurrent } = await captureRemovalJob(options)
   const prepared = { installRoot: own.root, installation_id: own.record.installation_id, selection: record.source_selection,
     coreRoot: path.join(own.root, 'releases', record.source_selection.core_id), guiRoot: path.join(own.root, 'app/releases', record.source_selection.gui_id) }
-  await removeEntries(prepared, { ...options, platform: process.platform, verifyStopped: async () => { await proofCurrent(); assertJob() } }, assertJob, 'menu-only')
+  await removeEntries(prepared, { ...options, platform: process.platform, verifyStopped: async () => { await proofCurrent(); assertJob() } }, assertJob, scope)
+}
+export function removeDesktopMenuEntry(options: RemovalJobOptions & Pick<EntryRemovalOptions, 'home' | 'env' | 'shell' | 'unregisterMac'>): Promise<void> {
+  return removeJobEntries(options, 'menu-only')
+}
+export function removeDesktopInstallationEntries(options: RemovalJobOptions & Pick<EntryRemovalOptions, 'home' | 'env' | 'shell' | 'unregisterMac'>): Promise<void> {
+  return removeJobEntries(options, 'menu-and-locator')
 }
 
 // Current paired-desktop CLI registration only. No independent CLI/system
