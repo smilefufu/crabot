@@ -9,12 +9,13 @@ import { once } from 'node:events'
 import { z } from 'crabot-client'
 import { registerInstallationEntries, readInstallationLocator, type PreparedInstallation } from './installation-entries.js'
 import { createInstallationProgressWindow } from './installation-progress-window.js'
+import { prepareRetainedDesktopReinstall } from './retained-reinstall.js'
 const directory = path.dirname(fileURLToPath(import.meta.url))
 app.setName('安装 Crabot')
 const preparedSchema = z.object({ installRoot: z.string().min(1), installation_id: z.uuid(), coreRoot: z.string().min(1), guiRoot: z.string().min(1),
   selection: z.object({ schema_version: z.literal(1), version: z.string().min(1), gui_id: z.uuid(), core_id: z.string().regex(/^[a-f0-9]{64}$/) }).strict() }).strict()
 let exitCode = 2
-const labels: Record<string, string> = { verifying: '正在核验离线安装组件…', copying: '正在安装 Crabot 和内置运行环境…', prepared: '正在核验安装结果…' }
+const labels: Record<string, string> = { verifying: '正在核验离线安装组件…', copying: '正在安装 Crabot 和内置运行环境…', prepared: '正在核验安装结果…', restoring: '正在修复程序，保留原数据…', 'handing-off': '正在注册入口并准备恢复服务…' }
 function failure(error: unknown) {
   const code = (error as { code?: string })?.code
   if (code === 'CRABOT_UPDATE_SPACE' || code === 'ENOSPC') return '磁盘空间不足。已保留原目录，请释放空间后重试，或选择其他安装位置。'
@@ -23,6 +24,8 @@ function failure(error: unknown) {
   if (code === 'CRABOT_INSTALL_SYSTEM_MODE') return '此机器由管理员统一部署，请通过浏览器或渠道使用 Crabot。桌面安装未更改任何实例。'
   if (code === 'CRABOT_DESKTOP_TAKEOVER_REQUIRED') return '检测到已有 Crabot 部署，需要沿用原安装位置进行接管。原数据已保留，未创建新实例。'
   if (code === 'CRABOT_DESKTOP_INSTALLATION' && error instanceof Error && error.message.length <= 512) return error.message
+  if (code === 'CRABOT_DESKTOP_PROGRAM_REFERENCES') return '原 Crabot 程序仍在使用或尚未确认退出。请先关闭原应用和相关程序，再使用此安装包继续。'
+  if (code === 'CRABOT_DESKTOP_REMOVAL') return '保留数据修复尚未完成。原数据和维护记录已保留，请在原安装位置使用对应离线安装包继续。'
   if (code === 'CRABOT_INSTALL_REGISTRATION') return '系统应用入口与已有文件冲突。原文件已保留，请核对原安装后重试。'
   return '安装尚未完成，现有文件和准备记录已保留。请核对所选位置及访问权限，再使用同一安装包继续。'
 }
@@ -61,14 +64,20 @@ async function boot() {
     if (confirmation.response === 2) return
     if (confirmation.response !== 0) continue
     const abort = new AbortController(), progress = createInstallationProgressWindow(abort)
-    let installed: { executable: string; dataDir: string } | undefined
+    let installed: { executable: string; dataDir: string } | undefined, verificationPending = false
     try {
       await progress.ready
-      const prepared: PreparedInstallation = preparedSchema.parse(await backend.prepareDesktopInstallation({ payload, installRoot: selected, signal: abort.signal,
-        progress: (phase: string) => progress.update(labels[phase] || '正在核验安装结果…') }))
-      progress.update('正在注册系统应用入口…', false)
-      await registerInstallationEntries(prepared, { home: homedir(), platform: process.platform, env: process.env, shell })
-      installed = await backend.commitDesktopInstallation(prepared)
+      const registerEntries = (prepared: PreparedInstallation) => registerInstallationEntries(prepared, { home: homedir(), platform: process.platform, env: process.env, shell })
+      const retained = await prepareRetainedDesktopReinstall({ payload, installRoot: selected, signal: abort.signal, registerEntries,
+        progress: phase => progress.update(labels[phase] || '正在核验安装结果…', phase !== 'handing-off') })
+      if (retained) { installed = retained; verificationPending = true }
+      else {
+        const prepared: PreparedInstallation = preparedSchema.parse(await backend.prepareDesktopInstallation({ payload, installRoot: selected, signal: abort.signal,
+          progress: (phase: string) => progress.update(labels[phase] || '正在核验安装结果…') }))
+        progress.update('正在注册系统应用入口…', false)
+        await registerEntries(prepared)
+        installed = await backend.commitDesktopInstallation(prepared)
+      }
       exitCode = 0
     } catch (error) {
       exitCode = abort.signal.aborted ? 2 : 1
@@ -79,14 +88,17 @@ async function boot() {
       if (answer.response === 0) continue
       return
     } finally { progress.close() }
-    const complete = await dialog.showMessageBox({ type: 'info', title: '安装完成', message: 'Crabot 已安装', detail: '现在可以打开应用，完成模型配置并开始使用。', buttons: ['打开 Crabot', '完成'], defaultId: 0, cancelId: 1 })
+    const complete = await dialog.showMessageBox({ type: 'info', title: verificationPending ? '继续恢复服务' : '安装完成',
+      message: verificationPending ? '程序已修复，原数据已保留。服务尚待启动核验。' : 'Crabot 已安装',
+      detail: verificationPending ? '打开 Crabot 后会核对必要的数据转换和服务健康；未通过前不会解除维护保护。也可以稍后从应用入口继续。' : '现在可以打开应用，完成模型配置并开始使用。',
+      buttons: verificationPending ? ['打开 Crabot 继续核验', '稍后继续'] : ['打开 Crabot', '完成'], defaultId: 0, cancelId: 1 })
     if (complete.response === 0 && installed) {
       const env: NodeJS.ProcessEnv = { ...process.env, DATA_DIR: installed.dataDir }
       for (const name of ['ELECTRON_RUN_AS_NODE', 'NODE_OPTIONS', 'NODE_PATH', 'CRABOT_DEV', 'CRABOT_PORT_OFFSET', 'CRABOT_HOME']) delete env[name]
       try {
         const child = spawn(installed.executable, [], { env, detached: true, stdio: 'ignore' })
         await once(child, 'spawn'); child.unref()
-      } catch { await dialog.showMessageBox({ type: 'error', title: '应用尚未启动', message: 'Crabot 已安装，可从系统应用入口重新打开。' }) }
+      } catch { await dialog.showMessageBox({ type: 'error', title: '应用尚未启动', message: verificationPending ? '服务尚未核验，请从系统应用入口打开 Crabot 继续。原数据和维护保护已保留。' : 'Crabot 已安装，可从系统应用入口重新打开。' }) }
     }
     return
   }

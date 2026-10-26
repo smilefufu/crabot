@@ -38,7 +38,7 @@ export function verifyInstallerAsar(asar, archive, platform = process.platform) 
   const paths = platform === 'win32' ? path.win32 : path.posix
   for (const file of desktopMaintenanceBootstrap) asar.statFile(archive, paths.normalize('dist/bootstrap/' + file))
   for (const file of [...operationProgressFiles, ...systemEntryFiles]) asar.statFile(archive, paths.normalize(file))
-  for (const file of ['dist/installer-main.js', 'dist/installer-preload.cjs', 'dist/bootstrap/scripts/desktop/legacy-releases.json', 'dist/bootstrap/scripts/lib/legacy-desktop.mjs',
+  for (const file of ['dist/installer-main.js', 'dist/retained-reinstall.js', 'dist/installer-preload.cjs', 'dist/bootstrap/scripts/desktop/legacy-releases.json', 'dist/bootstrap/scripts/lib/legacy-desktop.mjs',
     'dist/bootstrap/scripts/lib/legacy-release-identity.mjs', 'dist/bootstrap/scripts/lib/legacy-release-files.mjs', 'dist/bootstrap/scripts/lib/mode.mjs',
     'dist/installation-progress-window.js',
     'dist/bootstrap/scripts/lib/desktop-payload.mjs', 'dist/bootstrap/scripts/lib/desktop-preparation-files.mjs', 'dist/bootstrap/scripts/lib/desktop-repair.mjs', 'dist/bootstrap/scripts/lib/desktop-program-proof.mjs', 'dist/bootstrap/scripts/lib/desktop-removal-proof.mjs', 'dist/bootstrap/scripts/lib/desktop-removal-host.mjs', 'dist/bootstrap/scripts/lib/module-process-start.cjs', 'dist/bootstrap/scripts/lib/instance-controller.mjs', 'dist/bootstrap/scripts/lib/desktop-removal-record.cjs', 'dist/bootstrap/scripts/lib/core-release.mjs', 'dist/bootstrap/scripts/lib/physical-fs.cjs', 'dist/bootstrap/scripts/lib/process-identity.cjs',

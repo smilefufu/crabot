@@ -20,7 +20,7 @@ async function fixture(t, missingTray = false, installer = false, pair, omitted 
   for (const file of ['dist/ubuntu-process.js', 'dist/ubuntu-program-probe.js', 'dist/ubuntu-update.js', 'dist/paired-update.js', 'dist/release-intake.js', 'dist/release-signatures.js', 'dist/release-download.js', 'dist/release-transport.js', 'dist/bootstrap/scripts/lib/desktop-management.cjs', 'dist/bootstrap/scripts/desktop/extract-paired-release.py']) files[file] = 'trusted release fixture'
   if (installer) for (const file of ['dist/bootstrap/scripts/desktop/legacy-releases.json', 'dist/bootstrap/scripts/lib/legacy-desktop.mjs',
     'dist/bootstrap/scripts/lib/legacy-release-identity.mjs', 'dist/bootstrap/scripts/lib/legacy-release-files.mjs', 'dist/bootstrap/scripts/lib/mode.mjs',
-    'dist/installer-main.js', 'dist/installer-preload.cjs', 'dist/installation-progress-window.js', 'dist/installation-entries.js',
+    'dist/installer-main.js', 'dist/retained-reinstall.js', 'dist/installer-preload.cjs', 'dist/installation-progress-window.js', 'dist/installation-entries.js',
     'dist/bootstrap/scripts/lib/desktop-payload.mjs', 'dist/bootstrap/scripts/lib/desktop-preparation-files.mjs', 'dist/bootstrap/scripts/lib/desktop-repair.mjs', 'dist/bootstrap/scripts/lib/desktop-program-proof.mjs', 'dist/bootstrap/scripts/lib/desktop-removal-proof.mjs', 'dist/bootstrap/scripts/lib/desktop-removal-host.mjs', 'dist/bootstrap/scripts/lib/module-process-start.cjs', 'dist/bootstrap/scripts/lib/instance-controller.mjs', 'dist/bootstrap/scripts/lib/core-release.mjs', 'dist/bootstrap/scripts/lib/physical-fs.cjs']) files[file] = 'installer fixture'
   for (const file of desktopMaintenanceBootstrap) files['dist/bootstrap/' + file] = 'fixed maintenance fixture'
   for (const file of ['dist/operation-progress-window.js', 'dist/operation-progress.js', 'dist/ubuntu-removal-progress.js', 'dist/removal-progress-window.js', 'dist/removal-preload.cjs', 'dist/installation-entries.js', 'dist/installation-removal.js']) files[file] = 'fixed progress fixture'
@@ -158,3 +158,8 @@ for (const member of ['scripts/desktop/legacy-releases.json', 'scripts/lib/legac
     }
   })
 }
+
+test('installer requires its retained-data repair coordinator in the protected archive', async t => {
+  const archive = await fixture(t, false, true, undefined, ['dist/retained-reinstall.js'])
+  assert.throws(() => verifyInstallerAsar(asar, archive), /retained-reinstall.*not found/)
+})

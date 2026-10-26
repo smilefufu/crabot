@@ -1397,7 +1397,7 @@ for (const mode of ['wrong-operation', 'active-module', 'program-changed', 'lost
   await assert.rejects(fs.lstat(path.join(data, 'mm.pid')), { code: 'ENOENT' })
 })
 
-for (const outcome of ['ready', 'health-failed', 'migration-interrupted']) test('restored pair uses ordinary controller recovery and keeps failed health protected: ' + outcome, async t => {
+for (const outcome of ['ready', 'health-failed', 'migration-interrupted']) test('actual GUI controller runs restored-pair recovery and keeps failed health protected: ' + outcome, { skip: process.env.CRABOT_PAIRED_CONTROLLER_TEST !== '1' }, async t => {
   const f = await removalProofFixture(t, { schema: 'v2', functional: true })
   f.record.phase = 'completed'; await f.publish()
   const data = path.join(f.target, 'data'), directory = path.join(data, 'fixture')
@@ -1481,3 +1481,86 @@ for (const failed of [false, true]) test('trusted installer registers entries th
   assert.equal(await fs.readFile(path.join(data, 'retained-user-file'), 'utf8'), 'user content')
   await assert.rejects(fs.lstat(path.join(data, 'mm.pid')), { code: 'ENOENT' })
 })
+
+for (const mode of ['fresh', 'completed', 'not-removing', 'cancelled', 'changed-package']) test('actual GUI controller runs retained installer backend routing: ' + mode, { skip: process.env.CRABOT_PAIRED_CONTROLLER_TEST !== '1', timeout: 120000 }, async t => {
+  const { prepareRetainedDesktopReinstall } = await import('../../../crabot-desktop/dist/retained-reinstall.js')
+  const f = await removalProofFixture(t, { schema: 'v2', functional: true })
+  const data = path.join(f.target, 'data'), abort = new AbortController(), phases = []
+  f.record.phase = mode === 'not-removing' ? 'preparing' : 'completed'; await f.publish()
+  if (mode === 'changed-package') await fs.appendFile(path.join(f.gui, process.platform === 'darwin' ? 'Crabot.app/Contents/MacOS/Crabot' : windows ? 'Crabot.exe' : 'crabot-desktop'), 'changed')
+  if (mode === 'cancelled') abort.abort()
+  let registered = 0
+  const options = { payload: f.payload, installRoot: mode === 'fresh' ? path.join(f.parent, 'fresh-not-created') : f.target, signal: abort.signal,
+    registerEntries: async () => { registered++ }, progress: phase => phases.push(phase) }
+  if (mode === 'fresh') {
+    assert.equal(await prepareRetainedDesktopReinstall(options), null)
+    await assert.rejects(fs.lstat(options.installRoot), { code: 'ENOENT' })
+  } else if (mode === 'completed') {
+    const native = (await import('../../../crabot-desktop/dist/bootstrap/scripts/lib/process-identity.cjs')).default
+    const observe = native.inspectProgramReferences, observations = []
+    t.mock.method(native, 'inspectProgramReferences', async options => {
+      const result = await observe(options)
+      observations.push({ complete: result.complete, incomplete: result.incomplete, references: result.processes.length, unknown_stages: result.unknown_stages })
+      return result
+    })
+    const result = await prepareRetainedDesktopReinstall(options).catch(error => { throw new Error(error.code + ': ' + JSON.stringify(observations)) })
+    assert.equal(result.verification_pending, true); assert.equal(result.health_verified, false)
+    assert.equal(result.executable, installation.readDesktopSelection(f.target).executable)
+    assert.equal(phases.at(-1), 'handing-off'); assert.equal(registered, 1)
+  } else {
+    await assert.rejects(prepareRetainedDesktopReinstall(options))
+    assert.throws(() => installation.readDesktopSelection(f.target), { code: 'CRABOT_DESKTOP_REMOVAL_PENDING' })
+    assert.equal(registered, 0)
+  }
+  assert.equal(await fs.readFile(path.join(data, 'retained-user-file'), 'utf8'), 'user content')
+  await assert.rejects(fs.lstat(path.join(data, 'mm.pid')), { code: 'ENOENT' })
+})
+
+for (const damaged of [false, true]) test('actual GUI controller runs ordinary retained installer without declaring unverified service complete: ' + (damaged ? 'invalid package' : 'pending health'),
+  { skip: process.env.CRABOT_PAIRED_CONTROLLER_TEST !== '1', timeout: 120000 }, async t => {
+    const f = await removalProofFixture(t, { schema: 'v2', functional: true })
+    f.record.phase = 'completed'; await f.publish()
+    const resources = path.join(f.parent, 'installer-resources'), home = path.join(f.parent, 'isolated-home'), reportFile = path.join(f.parent, 'installer-report.json')
+    await fs.mkdir(resources); await fs.mkdir(home)
+    await fs.rename(f.payload, path.join(resources, 'offline'))
+    if (damaged) await fs.appendFile(path.join(resources, 'offline/core/cli.mjs'), 'changed')
+    const installer = path.join(f.parent, 'installer')
+    await fs.cp(new URL('../../../crabot-desktop/dist/', import.meta.url), path.join(installer, 'dist'), { recursive: true })
+    await fs.cp(path.join(resources, 'offline/core/scripts'), path.join(installer, 'dist/bootstrap/scripts'), { recursive: true })
+    await fs.mkdir(path.join(installer, 'node_modules'), { recursive: true })
+    await fs.symlink(fileURLToPath(new URL('../../../crabot-client', import.meta.url)), path.join(installer, 'node_modules/crabot-client'), windows ? 'junction' : 'dir')
+    await fs.cp(path.join(resources, 'offline/core/node_modules/@electron/asar'), path.join(installer, 'node_modules/@electron/asar'), { recursive: true })
+    const options = { root: f.target, home, resources, report: reportFile, application: path.join(f.prepared.guiRoot, 'Crabot.app'), entry: path.join(installer, 'dist/installer-main.js') }
+    const config = path.join(f.parent, 'installer-config.json'); await fs.writeFile(config, JSON.stringify(options))
+    const require = createRequire(new URL('../../../crabot-desktop/package.json', import.meta.url)), env = { ...process.env, HOME: home,
+      APPDATA: path.join(home, 'AppData/Roaming'), LOCALAPPDATA: path.join(home, 'AppData/Local'), XDG_CONFIG_HOME: path.join(home, '.config'), XDG_DATA_HOME: path.join(home, '.local/share') }
+    for (const key of ['ELECTRON_RUN_AS_NODE', 'NODE_OPTIONS', 'NODE_PATH', 'DATA_DIR', 'CRABOT_HOME', 'CRABOT_DEV', 'CRABOT_PORT_OFFSET']) delete env[key]
+    let report
+    try {
+      const launched = promisify(execFile)(require('electron'), [fileURLToPath(new URL('../../../crabot-desktop/tests/retained-installer.cjs', import.meta.url)), config],
+        { cwd: f.parent, env, timeout: 115000, maxBuffer: 65536 })
+      if (damaged) await assert.rejects(launched, error => error.code === 1)
+      else await launched.catch(async error => {
+        const actual = JSON.parse(await fs.readFile(reportFile, 'utf8').catch(() => 'null'))
+        throw new Error('Installer actor failed: ' + JSON.stringify({dialogs:actual?.dialogs,observations:actual?.observations}) + '\n' + error.stderr)
+      })
+      report = JSON.parse(await fs.readFile(reportFile, 'utf8'))
+      assert.equal(report.actual_installer_main, true); assert.equal(report.windows, 1, JSON.stringify(report.dialogs)); assert.equal(report.sandboxed, true)
+      assert.equal(report.dialogs.at(-1).title, damaged ? '安装尚未完成' : '继续恢复服务')
+      assert.equal(report.dialogs.some(value => value.title === '安装完成'), false)
+      assert.equal(report.business_mm_started, false); assert.equal(report.actual_product_gui, false)
+      assert.equal(report.macRegistration, !damaged && process.platform === 'darwin' ? 1 : 0)
+      if (damaged) assert.throws(() => installation.readDesktopSelection(f.target), { code: 'CRABOT_DESKTOP_REMOVAL_PENDING' })
+      else {
+        assert.match(report.dialogs.at(-1).message, /尚待启动核验/)
+        assert.deepEqual(installation.readDesktopSelection(f.target).selection, f.selection)
+        const versions = await import('../version-maintenance.mjs')
+        assert.throws(() => versions.assertVersionMaintenanceAllowsStart(path.join(f.target, 'data')), { code: 'CRABOT_MAINTENANCE_PENDING' })
+      }
+      await assert.rejects(fs.lstat(path.join(f.target, 'data/mm.pid')), { code: 'ENOENT' })
+      assert.equal(await fs.readFile(path.join(f.target, 'data/retained-user-file'), 'utf8'), 'user content')
+    } finally {
+      report ??= JSON.parse(await fs.readFile(reportFile, 'utf8').catch(() => 'null'))
+      if (report?.profile && await fs.realpath(path.dirname(report.profile)) === await fs.realpath(tmpdir()) && /^crabot-installer-[A-Za-z0-9]+$/.test(path.basename(report.profile))) await fs.rm(report.profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+    }
+  })

@@ -1,5 +1,6 @@
 // Build a distinct offline installer host. The signed GUI payload is opaque;
-// the installer never rewrites it or uses its Core as executable helper code.
+// fresh installation never executes it. Retained-data repair uses only the
+// verified installed target's fixed recovery handoff.
 import { promises as fs, constants } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'

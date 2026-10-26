@@ -241,7 +241,12 @@ jobs:
       - name: Actual paired controller scoped migration without MM
         env:
           CRABOT_PAIRED_CONTROLLER_TEST: '1'
-        run: node --test --test-name-pattern="actual GUI controller runs|actual paired update host" scripts/lib/__tests__/desktop-payload.test.mjs 2>&1 | tee .desktop-build/paired-controller.log
+        run: |
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            xvfb-run -a node --test --test-name-pattern="actual GUI controller runs|actual paired update host" scripts/lib/__tests__/desktop-payload.test.mjs 2>&1 | tee .desktop-build/paired-controller.log
+          else
+            node --test --test-name-pattern="actual GUI controller runs|actual paired update host" scripts/lib/__tests__/desktop-payload.test.mjs 2>&1 | tee .desktop-build/paired-controller.log
+          fi
       - name: Interrupted migration retains data and refuses automatic replay
         run: node .github/scripts/smoke-migration-interruption.mjs 2>&1 | tee .desktop-build/migration-interruption.log
       - name: Real sandboxed Electron window boundaries on Linux
