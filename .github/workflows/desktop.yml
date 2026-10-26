@@ -97,7 +97,7 @@ jobs:
   runtime:
     name: Desktop foundation ${{ matrix.target }}
     needs: ubuntu-bootstrap
-    timeout-minutes: ${{ (matrix.target == 'darwin-x64' || matrix.target == 'win32-x64') && 180 || 90 }}
+    timeout-minutes: ${{ (matrix.target == 'darwin-x64' || matrix.target == 'win32-x64') && 180 || matrix.target == 'linux-x64' && 150 || 90 }}
     strategy:
       fail-fast: false
       matrix:
@@ -376,12 +376,16 @@ jobs:
         timeout-minutes: 10
         run: node .github/scripts/smoke-packaged-desktop.mjs ".desktop-build/安装 候选/paired" 2>&1 | tee .desktop-build/paired-boot.log
       - name: Signed paired update reaches ordinary target GUI and Core health
-        if: runner.os != 'Linux' && steps.scope.outputs.full_runtime == 'true'
+        if: steps.scope.outputs.full_runtime == 'true'
         timeout-minutes: 35
         env:
           CRABOT_PAIRED_ACCEPTANCE_ID: ${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.target }}
         run: |
-          node .github/scripts/verify-paired-update-host.mjs ".desktop-build/安装 候选/paired" 2>&1 | tee .desktop-build/paired-update-host.log
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            xvfb-run -a node .github/scripts/verify-paired-update-host.mjs ".desktop-build/安装 候选/paired" 2>&1 | tee .desktop-build/paired-update-host.log
+          else
+            node .github/scripts/verify-paired-update-host.mjs ".desktop-build/安装 候选/paired" 2>&1 | tee .desktop-build/paired-update-host.log
+          fi
           node .github/scripts/check-paired-update-report.mjs .desktop-build/paired-update-host.json "$CRABOT_PAIRED_ACCEPTANCE_ID"
       - name: Ordinary CLI archive and actual upgrade command
         if: steps.scope.outputs.full_runtime == 'true'

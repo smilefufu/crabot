@@ -104,6 +104,7 @@ for (const release of releases) {
       await run('/usr/sbin/useradd', ['--create-home', '--shell', '/bin/bash', user])
       const entry = registry.accountLookup(user); users.push(entry)
       entry.port_offset = (index + 1) * 100; entry.data_dir = path.join(entry.home, '.crabot/data-' + entry.port_offset)
+      // Test data comes from the same-source build; sealed Core deliberately has only the bundled Admin entry.
       const prepare = `import fs from 'node:fs';import path from 'node:path';import {createHash} from 'node:crypto';
         const {newCredentialsFromPassword}=await import(process.argv[1]);const old=process.argv[2],off=Number(process.argv[3]),home=path.join(process.env.HOME,'.crabot'),data=path.join(home,'data-'+off);
         fs.mkdirSync(home,{mode:0o700});fs.mkdirSync(data,{mode:0o755});
@@ -113,7 +114,7 @@ for (const release of releases) {
         fs.writeFileSync(path.join(data,'agent/preserved.txt'),'original stopped account history');
         fs.writeFileSync(path.join(home,'instance.json'),JSON.stringify({mode:'system',port_offset:off,crabot_home:old,api_key:'fixture-original-private-key'}),{mode:0o600});
         console.log(createHash('sha256').update(credentials).digest('hex'));`
-      entry.credentials_sha256 = (await asUser(entry, ['--input-type=module', '-e', prepare, pathToFileURL(path.join(source, 'crabot-admin/dist/credentials.js')).href, old, String(entry.port_offset)])).stdout.trim()
+      entry.credentials_sha256 = (await asUser(entry, ['--input-type=module', '-e', prepare, pathToFileURL(path.join(workspace, 'crabot-admin/dist/credentials.js')).href, old, String(entry.port_offset)])).stdout.trim()
       assert.match(entry.credentials_sha256, /^[a-f0-9]{64}$/)
     }
     await fs.writeFile('/etc/crabot/registry/ports.json', JSON.stringify(users.map(entry => ({ user: entry.user, offset: entry.port_offset }))) + '\n', { mode: 0o664 })

@@ -9,7 +9,7 @@ import { sealDesktopPayload, verifyDesktopPayload } from '../../scripts/lib/desk
 import { verifyDesktopAsar } from '../../scripts/lib/desktop-asar.mjs'
 
 export async function buildPairedUpdateSource({ repository, project, destination }) {
-  assert.ok(['darwin', 'win32'].includes(process.platform))
+  assert.ok(['darwin', 'win32', 'linux'].includes(process.platform))
   const original = await verifyDesktopPayload(path.join(project, 'offline'))
   const selection = { ...original.record.selection, gui_id: randomUUID() }, app = path.join(destination, 'app')
   await fs.mkdir(destination, { mode: 0o700 })
@@ -34,21 +34,25 @@ export async function buildPairedUpdateSource({ repository, project, destination
     electronDist: path.join(path.dirname(require.resolve('electron/package.json')), 'dist'),
     files: ['dist/**/*', 'package.json', '!**/*.map'], asar: true, asarUnpack: ['dist/bootstrap/**/*.node'], npmRebuild: false, publish: null,
     electronFuses: { runAsNode: false, enableCookieEncryption: true, enableNodeOptionsEnvironmentVariable: false,
-      enableNodeCliInspectArguments: false, enableEmbeddedAsarIntegrityValidation: true, onlyLoadAppFromAsar: true, grantFileProtocolExtraPrivileges: false },
-    mac: { minimumSystemVersion: '14.0.0', identity: '-', hardenedRuntime: false, notarize: false }, win: { executableName: 'Crabot' },
+      enableNodeCliInspectArguments: false, enableEmbeddedAsarIntegrityValidation: process.platform !== 'linux', onlyLoadAppFromAsar: true, grantFileProtocolExtraPrivileges: false },
+    mac: { minimumSystemVersion: '14.0.0', identity: '-', hardenedRuntime: false, notarize: false }, win: { executableName: 'Crabot' }, linux: { executableName: 'crabot-desktop' },
     afterPack: async context => {
       resources = process.platform === 'darwin' ? path.join(context.appOutDir, 'Crabot.app/Contents/Resources') : path.join(context.appOutDir, 'resources')
       await fs.writeFile(path.join(resources, 'desktop-release.json'), JSON.stringify(selection) + '\n')
       const originalResources = path.join(original.guiRoot, process.platform === 'darwin' ? 'Crabot.app/Contents/Resources' : 'resources')
       for (const file of ['candidate-only.json', 'crabot.png']) await fs.copyFile(path.join(originalResources, file), path.join(resources, file))
+      if (process.platform === 'linux') for (const file of ['crabot-sandbox-helper', 'crabot-maintenance', 'browser-probe.py', 'crabot-maintenance-backend']) {
+        await fs.cp(path.join(originalResources, file), path.join(resources, file), { recursive: true, verbatimSymlinks: true, mode: constants.COPYFILE_FICLONE })
+      }
     },
   } })
   assert.ok(resources)
   verifyDesktopAsar(builder('@electron/asar'), path.join(resources, 'app.asar'), process.platform, selection)
-  const executable = process.platform === 'darwin' ? path.join(resources, '../MacOS/Crabot') : path.join(resources, '../Crabot.exe')
+  const executable = process.platform === 'darwin' ? path.join(resources, '../MacOS/Crabot') : path.join(resources, process.platform === 'win32' ? '../Crabot.exe' : '../crabot-desktop')
   const { getCurrentFuseWire, FuseV1Options } = builder('@electron/fuses'), fuses = await getCurrentFuseWire(executable)
   for (const key of [FuseV1Options.RunAsNode, FuseV1Options.EnableNodeOptionsEnvironmentVariable, FuseV1Options.EnableNodeCliInspectArguments]) assert.equal(fuses[key], 48)
-  for (const key of [FuseV1Options.OnlyLoadAppFromAsar, FuseV1Options.EnableEmbeddedAsarIntegrityValidation]) assert.equal(fuses[key], 49)
+  assert.equal(fuses[FuseV1Options.OnlyLoadAppFromAsar], 49)
+  assert.equal(fuses[FuseV1Options.EnableEmbeddedAsarIntegrityValidation], process.platform === 'linux' ? 48 : 49)
   await fs.cp(path.resolve(resources, process.platform === 'darwin' ? '../../..' : '..'), path.join(payload, 'gui'),
     { recursive: true, verbatimSymlinks: true, mode: constants.COPYFILE_FICLONE })
   await sealDesktopPayload(payload)

@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { fileURLToPath } from 'node:url'
+import { verifyPairedUpdateReport } from './check-paired-update-report.mjs'
 const expectedId = '12345-1-darwin-arm64', checker = fileURLToPath(new URL('check-paired-update-report.mjs', import.meta.url))
 const complete = () => ({ acceptance_id: expectedId, platform: 'darwin', arch: 'arm64', candidate_channel_enabled: false, remote_model_called: false,
   source_model_configured_via_http: true, model_substitute: true, source_gui: 'fixture-packaged-component-actor', target_gui: 'ordinary-packaged-main', fixture_debugger: false, real_login_session_verified: false,
@@ -40,3 +41,11 @@ for (const mode of ['complete', 'observed-zero-exit-failure', 'stale', 'missing-
     })
   })
 }
+
+test('the same actual outcome requirements cover Linux x64 without accepting mismatched platforms', () => {
+  const report = { ...complete(), acceptance_id: '12345-1-linux-x64', platform: 'linux', arch: 'x64' }
+  assert.doesNotThrow(() => verifyPairedUpdateReport(report, report.acceptance_id))
+  assert.throws(() => verifyPairedUpdateReport({ ...report, target_main_ready: false }, report.acceptance_id))
+  assert.throws(() => verifyPairedUpdateReport({ ...report, arch: 'arm64' }, report.acceptance_id))
+  assert.throws(() => verifyPairedUpdateReport({ ...report, acceptance_id: '12345-1-linux-arm64', arch: 'arm64' }, '12345-1-linux-arm64'))
+})

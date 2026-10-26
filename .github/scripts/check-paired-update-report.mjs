@@ -8,7 +8,7 @@ const completed = ['source_model_configured_via_http', 'model_substitute', 'sour
   'maintenance_cleared_after_real_health', 'data_preserved', 'normal_peer_policy_verified', 'fixture_core_stopped', 'fixture_gui_stopped', 'temporary_program_copies_removed']
 const excluded = ['candidate_channel_enabled', 'remote_model_called', 'fixture_debugger', 'real_login_session_verified', 'renderer_inspected', 'historical_migration_tested', 'os_login_tested']
 export function verifyPairedUpdateReport(report, expectedId) {
-  assert.match(expectedId, /^\d+-[1-9]\d*-(?:darwin-(?:arm64|x64)|win32-x64)$/)
+  assert.match(expectedId, /^\d+-[1-9]\d*-(?:darwin-(?:arm64|x64)|win32-x64|linux-x64)$/)
   assert.ok(report && typeof report === 'object' && !Array.isArray(report))
   assert.equal(report.acceptance_id, expectedId)
   assert.ok(expectedId.endsWith('-' + report.platform + '-' + report.arch))

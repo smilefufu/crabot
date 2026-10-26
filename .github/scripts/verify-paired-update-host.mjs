@@ -24,9 +24,9 @@ import sourceLimits from '../../crabot-desktop/tests/fixtures/paired-update-limi
 import { collectPairedUpdateTargetEvidence, summarizePairedTargetBootstrap, collectPairedTargetNativeStack } from './paired-update-target-evidence.mjs'
 import { startPairedUpdateModelProvider } from '../../crabot-desktop/tests/fixtures/paired-update-model-provider.mjs'
 
-if (process.env.GITHUB_ACTIONS !== 'true' || !['darwin', 'win32'].includes(process.platform)) throw new Error('Requires an isolated macOS/Windows CI user; never run against a developer MM')
+if (process.env.GITHUB_ACTIONS !== 'true' || !['darwin', 'win32', 'linux'].includes(process.platform)) throw new Error('Requires an isolated macOS/Windows/Linux CI user; never run against a developer MM')
 const acceptanceId = process.env.CRABOT_PAIRED_ACCEPTANCE_ID
-assert.match(acceptanceId ?? '', /^\d+-[1-9]\d*-(?:darwin-(?:arm64|x64)|win32-x64)$/)
+assert.match(acceptanceId ?? '', /^\d+-[1-9]\d*-(?:darwin-(?:arm64|x64)|win32-x64|linux-x64)$/)
 const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 const project = await fs.realpath(path.resolve(process.argv[2])), location = JSON.parse(await fs.readFile(path.join(project, 'packaged-location.json'), 'utf8'))
 assert.equal(location.schema_version, 2)

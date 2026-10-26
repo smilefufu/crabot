@@ -109,3 +109,25 @@ test('monitor observation retains the ordinary fatal exception result', () => {
   assert.equal(JSON.parse(child.stdout).code, 'EPIPE')
   assert.match(child.stderr, /synthetic fatal actor/)
 })
+
+test('initial truncation does not require truncating an append-only Windows handle', async t => {
+  const f = await fixture(t), open = fs.openSync, truncate = fs.ftruncateSync, appendOnly = new Set()
+  t.mock.method(fs, 'openSync', function(file, flags, ...args) {
+    const fd = open.call(this, file, flags, ...args)
+    if (typeof flags === 'number' && (flags & fs.constants.O_APPEND)) appendOnly.add(fd)
+    else appendOnly.delete(fd)
+    return fd
+  })
+  t.mock.method(fs, 'ftruncateSync', function(fd, length) {
+    if (appendOnly.has(fd)) throw Object.assign(new Error('Windows append-only handle cannot truncate'), { code: 'EACCES' })
+    return truncate.call(this, fd, length)
+  })
+  const write = openBootstrapLog(f.profile, native)
+  assert.equal(typeof write, 'function')
+  write(event('app-ready'))
+  assert.equal(JSON.parse(fs.readFileSync(f.file, 'utf8')).phase, 'app-ready')
+  const again = openBootstrapLog(f.profile, native)
+  assert.equal(fs.readFileSync(f.file, 'utf8'), '')
+  again(event('failed'))
+  assert.equal(JSON.parse(fs.readFileSync(f.file, 'utf8')).phase, 'failed')
+})

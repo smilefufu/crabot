@@ -21,11 +21,11 @@ export function openBootstrapLog(profile: string, files: Files): ((event: Event)
         && (process.platform === 'win32' ? files.isOwnerOnlyDirectory?.(profile) : (current.mode & 0o777) === 0o700)
     }
     if (!profileCurrent()) return
-    const open = () => {
+    const open = (append = true) => {
       const before = fs.lstatSync(file)
       if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1 || before.size > 16384
         || (process.platform === 'win32' ? !files.isPrivateFile?.(file) : before.uid !== process.getuid!() || (before.mode & 0o777) !== 0o600)) throw new Error('Unavailable bootstrap log')
-      const handle = fs.openSync(file, fs.constants.O_WRONLY | fs.constants.O_APPEND | (fs.constants.O_NOFOLLOW ?? 0))
+      const handle = fs.openSync(file, fs.constants.O_WRONLY | (append ? fs.constants.O_APPEND : 0) | (fs.constants.O_NOFOLLOW ?? 0))
       try {
         const actual = fs.fstatSync(handle)
         if (!actual.isFile() || actual.dev !== before.dev || actual.ino !== before.ino || actual.nlink !== 1) throw new Error('Changed bootstrap log')
@@ -36,7 +36,7 @@ export function openBootstrapLog(profile: string, files: Files): ((event: Event)
       if (process.platform === 'win32') files.writePrivateFile!(file, '')
       else fs.closeSync(fs.openSync(file, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL, 0o600))
     }
-    fd = open(); const original = fs.fstatSync(fd); fs.ftruncateSync(fd, 0); fs.closeSync(fd); fd = undefined
+    fd = open(false); const original = fs.fstatSync(fd); fs.ftruncateSync(fd, 0); fs.closeSync(fd); fd = undefined
     let count = 0, failed = false
     return event => {
       if (!event || failed || count >= 32 || !/^[a-z][a-z-]{0,47}$/.test(event.phase) || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(event.at)
