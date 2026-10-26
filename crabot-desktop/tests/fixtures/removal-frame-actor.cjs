@@ -41,6 +41,18 @@ async function removePrograms(lease) {
   const physical = require('./bootstrap/scripts/lib/physical-fs.cjs')
   const original = native.inspectProgramReferences, rename = physical.promises.rename, unlink = physical.unlinkSync, readFile = physical.promises.readFile
   const started = Date.now(); let pinReads = 0
+  let userEntries
+  if (cfg.mode === 'publish-source-remove-mac-login') {
+    const own = require('./bootstrap/scripts/lib/desktop-installation.cjs').readDesktopInstallation(cfg.root)
+    const record = JSON.parse(fs.readFileSync(path.join(cfg.root, '.desktop-removal.json')))
+    const { registerInstallationEntries, integrationRoot } = await import(pathToFileURL(path.join(__dirname, 'installation-entries.js')).href)
+    const home = require('./bootstrap/scripts/lib/desktop-management.cjs').ensurePrivateDataRoot(path.join(cfg.root, 'data/finite-user-home'))
+    const env = {}, shell = require('electron').shell
+    const prepared = { installRoot: cfg.root, installation_id: own.record.installation_id, selection: record.source_selection,
+      guiRoot: path.join(cfg.root, 'app/releases', record.source_selection.gui_id), coreRoot: path.join(cfg.root, 'releases', record.source_selection.core_id) }
+    await registerInstallationEntries(prepared, { home, env, shell, platform: process.platform, registerMac: async () => {} })
+    userEntries = { home, env, shell, unregisterMac: async () => {}, locator: path.join(integrationRoot(home, process.platform, env), 'installation.json') }
+  }
   const observed = async (name, run) => { stage(name + ":start"); const value = await run(); stage(name + ":done"); return value }
   if (cfg.removalPinDelayMs) physical.promises.readFile = async (...args) => {
     if (args[0] === path.join(process.resourcesPath, "desktop-release.json")) {
@@ -111,7 +123,7 @@ async function removePrograms(lease) {
     assert.equal(fs.readFileSync(path.join(cfg.root, 'data/preserved-user-file'), 'utf8'), 'user bytes')
     const macLoginCleaned = cfg.mode === 'publish-source-remove-mac-login'
     if (macLoginCleaned) {
-      const { removeMacLoginStartupEntry } = await import(pathToFileURL(path.join(__dirname, 'installation-removal.js')).href)
+      const { removeMacLoginStartupEntry, removeDesktopUserEntries } = await import(pathToFileURL(path.join(__dirname, 'installation-removal.js')).href)
       let status = 'requires-approval', accept = false, writes = 0
       const api = { getLoginItemSettings: () => ({ status, openAtLogin: status === 'enabled' }),
         setLoginItemSettings: options => { assert.deepEqual(options, { openAtLogin: false }); writes++; if (accept) status = 'not-registered' } }
@@ -122,7 +134,8 @@ async function removePrograms(lease) {
       assert.equal(writes, 0)
       await assert.rejects(removeMacLoginStartupEntry(input), { code: 'CRABOT_INSTALL_REGISTRATION' })
       assert.equal(read().phase, 'removing'); accept = true
-      await removeMacLoginStartupEntry(input); await removeMacLoginStartupEntry(input)
+      await removeMacLoginStartupEntry(input); await removeDesktopUserEntries({ ...input, ...userEntries })
+      assert.equal(fs.existsSync(userEntries.locator), false); assert.throws(() => fs.lstatSync(path.join(userEntries.home, 'Applications/Crabot.app')), { code: 'ENOENT' })
       assert.equal(writes, 3); assert.equal(status, 'not-registered'); assert.equal(read().phase, 'removing')
       assert.equal(fs.readFileSync(path.join(cfg.root, 'data/preserved-user-file'), 'utf8'), 'user bytes')
     }

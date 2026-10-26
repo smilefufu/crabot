@@ -292,3 +292,23 @@ export async function removeWindowsUninstallEntry(options: RemovalJobOptions): P
     || identity.removeDesktopUninstallEntry(own.record.installation_id, original) !== true) fail()
   await proofCurrent(); assertJob()
 }
+
+// Fixed host cleanup order: login/standard uninstall entry, owned CLI, then
+// menu and discovery last. The host settles the removal job only on success.
+export async function removeDesktopUserEntries(options: RemovalJobOptions & {
+  home: string; env: NodeJS.ProcessEnv; shell?: Pick<Shell, 'readShortcutLink'>
+  app?: Pick<App, 'getLoginItemSettings' | 'setLoginItemSettings'>
+  unregisterMac?: (application: string) => Promise<unknown>
+}): Promise<void> {
+  if (process.platform === 'darwin') {
+    const app = options.app
+    if (!app) return fail()
+    await removeMacLoginStartupEntry({ ...options, app })
+  } else if (process.platform === 'win32') {
+    await removeWindowsLoginStartupEntry(options)
+    await removeWindowsUninstallEntry(options)
+  } else if (process.platform === 'linux') await removeUbuntuAutostartEntry(options)
+  else fail()
+  if ((await removeDesktopCliEntries(options)).retained) fail()
+  await removeDesktopInstallationEntries({ ...options, shell: options.shell ?? { readShortcutLink: () => fail() } })
+}

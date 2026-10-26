@@ -386,3 +386,22 @@ test('Windows uninstall source is maintenance-only and never a desktop business 
   args = [peer.executable, '--background']
   assert.equal(entry.verifyDesktopRemovalSourceEntry(peer, policy), true)
 })
+
+
+test('removal source location reads the protected GUI without creating a Core or business context', async t => {
+  const f = await fixture(t), pin = JSON.stringify(f.selection) + '\n'
+  assert.equal(typeof desktop.locateDesktopRemovalGui, 'function')
+  const located = desktop.locateDesktopRemovalGui(f.resources, pin)
+  assert.equal(located.root, f.root); assert.equal(located.executable, f.executable)
+  assert.deepEqual(located.reference.selection, f.selection)
+  assert.equal(Object.hasOwn(located, 'coreRoot'), false); assert.equal(Object.hasOwn(located, 'selection'), false)
+  assert.throws(() => desktop.applyDesktopEnvironment(located, {}), { code: 'CRABOT_DESKTOP_INSTALLATION' })
+  await privateJson(path.join(f.root, '.desktop-removal.json'), { ...removalRecord(f), phase: 'removing' })
+  await fs.rm(f.coreRoot, { recursive: true })
+  assert.deepEqual(desktop.locateDesktopRemovalGui(f.resources, pin).reference.selection, f.selection)
+  assert.throws(() => desktop.locatePinnedDesktopGui(f.resources, pin), { code: 'CRABOT_DESKTOP_REMOVAL_PENDING' })
+  assert.throws(() => desktop.locateDesktopRemovalGui(f.resources, pin + ' '), { code: 'CRABOT_DESKTOP_INSTALLATION' })
+  await fs.rmdir(path.join(f.root, 'data'))
+  assert.throws(() => desktop.locateDesktopRemovalGui(f.resources, pin), { code: 'CRABOT_DESKTOP_INSTALLATION' })
+  await assert.rejects(fs.stat(path.join(f.root, 'data')), { code: 'ENOENT' })
+})

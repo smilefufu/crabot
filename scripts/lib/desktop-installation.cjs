@@ -110,6 +110,29 @@ function locateDesktopGui(resources) {
   if (fs.realpathSync.native(resources) !== selected.resources || guiRoot !== selected.guiRoot) fail()
   return selected
 }
+// Maintenance location only. No Core path, environment setup, startup admission
+// or permission to ignore an existing job is returned by this reader.
+function locateDesktopRemovalGui(resources, pinText) {
+  try {
+    resources = fs.realpathSync.native(resources)
+    const guiRoot = path.resolve(resources, process.platform === 'darwin' ? '../../..' : '..')
+    const own = readDesktopInstallation(path.resolve(guiRoot, '../../..')), reference = readDesktopPairReference(own.root)
+    if (reference.installation_id !== own.record.installation_id || reference.data_dir !== own.dataDir
+      || typeof pinText !== 'string' || pinText !== JSON.stringify(reference.selection) + '\n'
+      || guiRoot !== path.join(own.root, 'app/releases', reference.selection.gui_id)) fail()
+    directory(guiRoot)
+    const expectedResources = path.join(guiRoot, process.platform === 'darwin' ? 'Crabot.app/Contents/Resources' : 'resources')
+    if (resources !== expectedResources) fail()
+    const declaration = json(path.join(resources, 'desktop-release.json'))
+    if (!keys(declaration, ['schema_version', 'version', 'gui_id', 'core_id'])
+      || JSON.stringify(declaration) + '\n' !== pinText) fail()
+    const executable = path.join(guiRoot, process.platform === 'darwin' ? 'Crabot.app/Contents/MacOS/Crabot' : process.platform === 'win32' ? 'Crabot.exe' : 'crabot-desktop')
+    const stat = fs.lstatSync(executable)
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1
+      || (process.platform === 'win32' ? !identity.isOwnedFile(executable) : String(stat.uid) !== own.record.owner)) fail()
+    return { ...own, reference, guiRoot, resources, executable: fs.realpathSync.native(executable) }
+  } catch { fail() }
+}
 // The caller reads this pin from its own protected ASAR before importing Core.
 // Resources metadata remains a locator, never a replacement for that pin.
 function locatePinnedDesktopGui(resources, pinText) {
@@ -132,4 +155,4 @@ function applyDesktopEnvironment(installation, env = process.env) {
   env.CRABOT_DEV = 'false'
   env.CRABOT_PRODUCT_REQUIRED = '1'
 }
-module.exports = { assertDesktopRemovalAllowsStart, readDesktopInstallation, readDesktopPairReference, readDesktopSelection, locateDesktopCore, locateDesktopGui, locatePinnedDesktopGui, applyDesktopEnvironment }
+module.exports = { assertDesktopRemovalAllowsStart, readDesktopInstallation, readDesktopPairReference, readDesktopSelection, locateDesktopCore, locateDesktopGui, locateDesktopRemovalGui, locatePinnedDesktopGui, applyDesktopEnvironment }
