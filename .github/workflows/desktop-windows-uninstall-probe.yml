@@ -1,0 +1,25 @@
+name: Desktop Windows uninstall entry
+on:
+  workflow_dispatch:
+  push:
+    branches: ['feat/desktop-application']
+    paths:
+      - 'crabot-native/src/desktop-uninstall.h'
+      - '.github/scripts/probe-windows-uninstall-entry.mjs'
+      - '.github/workflows/desktop-windows-uninstall-probe.yml'
+permissions:
+  contents: read
+jobs:
+  uninstall-entry:
+    runs-on: windows-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.3'
+      - name: Compile the same-source native helper
+        run: node scripts/build-native.mjs
+      - name: Verify only the disposable installation registry key
+        run: node .github/scripts/probe-windows-uninstall-entry.mjs

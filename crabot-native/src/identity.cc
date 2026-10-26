@@ -635,6 +635,7 @@ static napi_value ReleaseLock(napi_env env, napi_callback_info info) {
 #include "private-file.h"
 #include "user-path.h"
 #include "desktop-login.h"
+#include "desktop-uninstall.h"
 #include "install-filesystem.h"
 #include "directory-move.h"
 #include "file-move.h"
@@ -651,6 +652,8 @@ static napi_value ReleaseLock(napi_env env, napi_callback_info info) {
 static napi_value Initialize(napi_env env, napi_value exports) {
   napi_property_descriptor methods[] = {
 #ifdef _WIN32
+    {"replaceDesktopUninstallEntry", nullptr, ReplaceDesktopUninstall, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"removeDesktopUninstallEntry", nullptr, RemoveDesktopUninstall, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"inspectDesktopLoginStartup", nullptr, InspectDesktopLogin, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"retargetDesktopLoginStartup", nullptr, RetargetDesktopLogin, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"removeDesktopLoginStartup", nullptr, RemoveDesktopLogin, nullptr, nullptr, nullptr, napi_default, nullptr},
