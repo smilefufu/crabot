@@ -92,9 +92,9 @@ for (const release of releases.filter(release => selectedVersion === 'all' || re
   const id = randomUUID().slice(0, 8), base = '/var/lib/crabot-legacy-acceptance-' + id, old = path.join(base, 'old'), managed = path.join(old, '.managed')
   const users = [], registry = new SystemRegistry(), store = new SystemOperationStore(registry)
   const oldRunning = release.version === 'v2026.10.15.1'
-  let ownOs = false, ownBase = false, core
-  const asUser = (entry, args, overrides = {}, executable = node) => run('/usr/bin/setpriv', ['--reuid=' + entry.uid, '--regid=' + entry.gid, '--init-groups', '--', executable, ...args],
-    { env: { PATH: '/usr/bin:/bin', HOME: entry.home, USER: entry.user, LOGNAME: entry.user, LANG: 'C.UTF-8', HTTP_PROXY: env.HTTP_PROXY, HTTPS_PROXY: env.HTTPS_PROXY, ...overrides } })
+  let ownOs = false, ownBase = false, ownedUv = false, core
+  const asUser = (entry, args, overrides = {}, executable = node, options = {}) => run('/usr/bin/setpriv', ['--reuid=' + entry.uid, '--regid=' + entry.gid, '--init-groups', '--', executable, ...args],
+    { ...options, env: { PATH: '/usr/bin:/bin', HOME: entry.home, USER: entry.user, LOGNAME: entry.user, LANG: 'C.UTF-8', HTTP_PROXY: env.HTTP_PROXY, HTTPS_PROXY: env.HTTPS_PROXY, ...overrides } })
   console.log('CRABOT_LEGACY_ACCEPTANCE ' + JSON.stringify({ version: release.version, phase: 'preparing' }))
   try {
     for (const file of ownedOsFiles) await absent(file)
@@ -144,6 +144,22 @@ for (const release of releases.filter(release => selectedVersion === 'all' || re
       // interpreter location. Use the same verified bytes outside both releases.
       const legacyNode = path.join(base, 'node')
       await fs.copyFile(node, legacyNode); await fs.chmod(legacyNode, 0o755)
+      // Published legacy releases require a system uv and a prepared shared
+      // Memory environment. The new product's bundled runtime is not the old
+      // installer's environment; provide real prerequisites before any upgrade.
+      const { default: product } = await load('scripts/lib/product-runtime.cjs')
+      const uv = path.join(base, 'uv'), runtime = product.loadProductRuntime(source, { required: true, full: true })
+      await fs.copyFile(runtime.uv, uv); await fs.chmod(uv, 0o755)
+      const uvLink = '/usr/local/bin/uv'
+      const priorUv = await fs.lstat(uvLink).catch(error => { if (error.code === 'ENOENT') return null; throw error })
+      if (!priorUv) { await fs.symlink(uv, uvLink); ownedUv = true }
+      assert.match((await run(uvLink, ['--version'])).stdout, /^uv 0\.13\.0(?:\s|$)/)
+      const memory = path.join(old, 'crabot-memory'), venv = path.join(memory, '.venv')
+      await fs.mkdir(venv, { mode: 0o755 }); await fs.chown(venv, employee.uid, employee.gid)
+      await asUser(employee, ['sync', '--frozen', '--no-dev', '--python', '/usr/bin/python3', '--no-python-downloads'], {
+        PATH: base + ':/usr/local/bin:/usr/bin:/bin', HTTP_PROXY: '', HTTPS_PROXY: '', UV_DEFAULT_INDEX: 'https://pypi.org/simple',
+      }, uv, { cwd: memory, timeout: 180000 })
+      console.log('CRABOT_LEGACY_PREREQUISITES ' + JSON.stringify({ actual_uv: true, actual_frozen_memory_environment: true, code_modified: false }))
       const probe = `const fs=require('fs'),{spawnSync}=require('child_process');let executable=true;try{fs.accessSync(process.execPath,fs.constants.X_OK)}catch{executable=false}
         const child=spawnSync(process.execPath,['-e','process.stdout.write("child-ok")'],{encoding:'utf8',detached:true,timeout:10000,killSignal:'SIGKILL'});
         console.log(JSON.stringify({uid:process.getuid(),executable,child_code:child.status,child_error:child.error?.code??null,child_ready:child.stdout==='child-ok'}));`
@@ -153,8 +169,18 @@ for (const release of releases.filter(release => selectedVersion === 'all' || re
         if (role === 'public-legacy-node') { assert.equal(result.child_code, 0); assert.equal(result.child_ready, true) }
       }
       await asUser(employee, [path.join(old, 'scripts/start.mjs'), '-d'], {
-        PATH: base + ':/usr/bin:/bin', DATA_DIR: employee.data_dir, CRABOT_PORT_OFFSET: String(employee.port_offset), CRABOT_HOME: old,
+        PATH: base + ':/usr/local/bin:/usr/bin:/bin', DATA_DIR: employee.data_dir, CRABOT_PORT_OFFSET: String(employee.port_offset), CRABOT_HOME: old,
       }, legacyNode)
+      const { probeSystemReadiness } = await load('scripts/lib/system-control.mjs')
+      const readyDeadline = Date.now() + 90000
+      let readiness
+      do {
+        readiness = await probeSystemReadiness(19000 + employee.port_offset)
+        if (readiness.ready) break
+        await new Promise(resolve => setTimeout(resolve, 250))
+      } while (Date.now() < readyDeadline)
+      assert.equal(readiness.ready, true, 'The original Admin/Agent/Memory must be operational before testing an upgrade')
+      console.log('CRABOT_LEGACY_ORIGINAL_READY ' + JSON.stringify(readiness))
     }
     if (backupFailure) {
       // A real filesystem conflict in the stopped account's backup destination,
@@ -289,6 +315,7 @@ for (const release of releases.filter(release => selectedVersion === 'all' || re
       for (const user of users) await run('/usr/sbin/userdel', ['--remove', user.user])
       await fs.rm('/etc/crabot', { recursive: true })
     }
+    if (ownedUv) { assert.equal(await fs.readlink('/usr/local/bin/uv'), path.join(base, 'uv')); await fs.unlink('/usr/local/bin/uv') }
     if (ownBase) await fs.rm(base, { recursive: true })
   }
 }
