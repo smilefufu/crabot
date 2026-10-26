@@ -84,10 +84,16 @@ try {
   const keys = generateKeyPairSync('ed25519'), publication = path.join(job, 'publication')
   const signed = await writeSignedDesktopPayload({ payload: targetPayload, python: runtime.executables.python,
     privateKeys: [keys.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString()], output: publication })
-  // The signed archive is self-contained. These exact producer trees were
-  // never executed and are no longer needed; avoid retaining redundant cores.
-  await fs.rm(targetProject, { recursive: true }); await fs.rm(targetCore, { recursive: true })
+  // The independent producer Core is redundant; the verified payload below is
+  // also used for the frozen higher-version retained-reinstall acceptance.
+  await fs.rm(targetCore, { recursive: true })
   checkpoint('target-prepared')
+  phase = 'higher-retained-reinstall'
+  await runBounded(runtime.executables.node, [path.join(repository, '.github/scripts/smoke-packaged-desktop.mjs'), project,
+    '--retained-payload=' + targetPayload], { cwd: repository, timeout: 600000 })
+  report.higher_retained_reinstall_verified = true
+  await fs.rm(targetProject, { recursive: true })
+  checkpoint('higher-retained-reinstall-verified')
   phase = 'prepare-source'
   const sourcePayload = await buildPairedUpdateSource({ repository, project, destination: path.join(job, 'source-project') })
   selected = await commitDesktopInstallation(await prepareDesktopInstallation({ payload: sourcePayload, installRoot: path.join(temporary, '整体 安装') }))

@@ -1751,10 +1751,10 @@ for (const version of ['1.2.3', '1.2.4']) test('new retained pair previews actua
   assert.deepEqual(installation.readDesktopPairReference(f.target).selection, f.selection)
 })
 
-for (const allowed of [false, true]) test('retained product acceptance prepares only its isolated partial-removal fixture: ' + allowed, async t => {
+for (const allowed of [false, true, 'higher']) test('retained product acceptance prepares only its isolated partial-removal fixture: ' + allowed, async t => {
   const previous = process.env.GITHUB_ACTIONS
   t.after(() => { if (previous === undefined) delete process.env.GITHUB_ACTIONS; else process.env.GITHUB_ACTIONS = previous })
-  process.env.GITHUB_ACTIONS = String(allowed)
+  process.env.GITHUB_ACTIONS = String(Boolean(allowed))
   const f = await fixture(t, { schema: 'v2', functional: true })
   const prepared = await prepareDesktopInstallation({ payload: f.payload, installRoot: f.target })
   await commitDesktopInstallation(prepared)
@@ -1763,10 +1763,12 @@ for (const allowed of [false, true]) test('retained product acceptance prepares 
     await assert.rejects(prepareRetainedProductReinstall({ installRoot: f.target, payload: f.payload }), /isolated CI user/)
     await assert.rejects(fs.lstat(path.join(f.target, '.desktop-removal.json')), { code: 'ENOENT' })
   } else {
-    const result = await prepareRetainedProductReinstall({ installRoot: f.target, payload: f.payload })
+    const incoming = allowed === 'higher' ? await fixture(t, { version: '1.2.4', schema: 'v2', functional: true }) : f
+    const result = await prepareRetainedProductReinstall({ installRoot: f.target, payload: incoming.payload })
+    assert.deepEqual(result.selection, incoming.selection)
     assert.equal(result.partial_removal_fixture, true); assert.equal(result.complete_uninstall_tested, false)
     if (!windows) for (const directory of [f.target, path.join(f.target, 'data')]) assert.equal((await fs.stat(directory)).mode & 0o777, 0o755)
-    assert.ok(await fs.stat(path.join(prepared.coreRoot, 'cli.mjs')))
+    assert.ok(await fs.stat(path.join(result.coreRoot, 'cli.mjs')))
     assert.equal(await fs.readFile(result.sentinel, 'utf8'), 'preserved across partial removal and real GUI recovery\n')
     const { readVersionMaintenance, assertVersionMaintenanceAllowsStart } = await import('../version-maintenance.mjs')
     assert.equal(readVersionMaintenance(path.join(f.target, 'data')).id, result.maintenanceId)

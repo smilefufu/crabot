@@ -11,7 +11,7 @@ import { inspectInstance } from '../../scripts/lib/instance-runtime.mjs'
 import { acquireExistingCliLock, releaseCliLock } from '../../scripts/lib/cli-lock.mjs'
 import { captureDesktopRemovalProof } from '../../scripts/lib/desktop-removal-proof.mjs'
 import { privateJson } from '../../scripts/lib/desktop-preparation-files.mjs'
-import { prepareDesktopRemovalReinstall } from '../../scripts/lib/desktop-reinstall.mjs'
+import { prepareDesktopRemovalReinstall, assertReinstallVersion } from '../../scripts/lib/desktop-reinstall.mjs'
 import { runPreparedDesktopReinstallHandoff } from '../../scripts/lib/desktop-reinstall-data.mjs'
 import identity from '../../scripts/lib/process-identity.cjs'
 import { desktopRemovalProgramEntries } from '../../scripts/lib/desktop-removal-programs.mjs'
@@ -21,7 +21,7 @@ import { verifyDesktopPayload } from '../../scripts/lib/desktop-payload.mjs'
 export async function prepareRetainedProductReinstall({ installRoot, payload }) {
   if (process.env.GITHUB_ACTIONS !== 'true') throw new Error('Requires an isolated CI user, never a developer deployment')
   const own = installation.readDesktopSelection(installRoot), source = await verifyDesktopPayload(payload)
-  assert.deepEqual(own.selection, source.record.selection)
+  assertReinstallVersion(own.selection.version, source.record.selection.version)
   const space = await fs.statfs(own.root, { bigint: true })
   assert.ok(space.bavail * space.bsize > source.bytes * 3n + 2n * 1024n ** 3n, 'Retained repair requires bounded program-copy space')
   const operationId = randomUUID(), sentinel = path.join(own.dataDir, 'retained-reinstall-sentinel.txt')
@@ -68,10 +68,11 @@ export async function prepareRetainedProductReinstall({ installRoot, payload }) 
   const handoff = await runPreparedDesktopReinstallHandoff({ payload, installRoot: own.root, operationId,
     // OS menu registration is covered by actual ordinary installer tests; this
     // fixture exercises the Core/GUI health boundary, not a replacement shell.
-    registerEntries: async prepared => assert.deepEqual(prepared.selection, own.selection) })
+    registerEntries: async prepared => assert.deepEqual(prepared.selection, source.record.selection) })
   assert.equal(handoff.verification_pending, true); assert.equal(handoff.health_verified, false)
   assert.equal(inspectInstance(own.dataDir).state, 'stopped')
   assert.ok(await fs.stat(path.join(own.dataDir, 'desktop-maintenance.json')))
   assert.equal(await fs.readFile(sentinel, 'utf8'), 'preserved across partial removal and real GUI recovery\n')
-  return { sentinel, maintenanceId: handoff.maintenance_id, partial_removal_fixture: true, complete_uninstall_tested: false }
+  return { sentinel, maintenanceId: handoff.maintenance_id, executable: handoff.executable, coreRoot: path.join(own.root, 'releases', source.record.selection.core_id),
+    selection: source.record.selection, partial_removal_fixture: true, complete_uninstall_tested: false }
 }

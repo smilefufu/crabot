@@ -18,6 +18,9 @@ function inside(relative) {
   return result
 }
 assert.ok([1, 2].includes(location.schema_version))
+const retainedArgument = process.argv[3]
+assert.ok(process.argv.length <= 4 && (retainedArgument === undefined || location.schema_version === 2 && retainedArgument.startsWith('--retained-payload=')))
+const retainedPayload = retainedArgument === undefined ? undefined : await fs.realpath(retainedArgument.slice('--retained-payload='.length))
 const originalExecutable = inside(location.executable), originalCore = inside(location.core)
 // The native Ubuntu helper requires every installation ancestor to resist other-user writes.
 const temporary = await fs.realpath(await fs.mkdtemp(path.join(process.platform === 'linux' ? homedir() : tmpdir(), 'Crabot 打包 ')))
@@ -60,7 +63,7 @@ const { verifyCoreRelease } = await import(pathToFileURL(path.join(core, 'script
 await verifyCoreRelease(core)
 const env = { ...process.env, DATA_DIR: data }
 delete env.ELECTRON_RUN_AS_NODE; delete env.NODE_OPTIONS; delete env.NODE_PATH; delete env.CRABOT_DEV; delete env.CRABOT_PORT_OFFSET
-const node = path.join(core, process.platform === 'win32' ? '.product-runtime/node/node.exe' : '.product-runtime/node/bin/node')
+let node = path.join(core, process.platform === 'win32' ? '.product-runtime/node/node.exe' : '.product-runtime/node/bin/node')
 const cliDiagnostics = []
 const cli = async (...args) => {
   const result = await promisify(execFile)(node, [path.join(core, 'cli.mjs'), ...args], { env, cwd: core, timeout: 90_000, maxBuffer: 2 * 1024 * 1024 })
@@ -123,15 +126,17 @@ try {
   const registration = JSON.parse((await promisify(execFile)(node, ['--input-type=module', '-e', registrationCode, core, data, cliHome],
     { env: registrationEnv, timeout: 90_000, maxBuffer: 2 * 1024 * 1024 })).stdout)
   const commandEnv = { ...registrationEnv, DATA_DIR: data, CRABOT_REGISTERED_CLI: registration.command }
-  let registeredVersion
-  if (process.platform === 'win32') {
-    const probe = path.join(temporary, 'registered-cli.cmd')
-    await fs.writeFile(probe, '@echo off\r\ncall "%CRABOT_REGISTERED_CLI%" --version\r\nexit /b %errorlevel%\r\n')
-    registeredVersion = (await promisify(execFile)(path.join(process.env.SystemRoot, 'System32/cmd.exe'), ['/d', '/c', probe],
-      { env: commandEnv, encoding: 'utf8', timeout: 30_000 })).stdout.trim()
-  } else registeredVersion = (await promisify(execFile)(registration.command, ['--version'], { env: commandEnv, encoding: 'utf8', timeout: 30_000 })).stdout.trim()
+  const registeredCliVersion = async () => {
+    if (process.platform === 'win32') {
+      const probe = path.join(temporary, 'registered-cli.cmd')
+      await fs.writeFile(probe, '@echo off\r\ncall "%CRABOT_REGISTERED_CLI%" --version\r\nexit /b %errorlevel%\r\n')
+      return (await promisify(execFile)(path.join(process.env.SystemRoot, 'System32/cmd.exe'), ['/d', '/c', probe],
+        { env: commandEnv, encoding: 'utf8', timeout: 30_000 })).stdout.trim()
+    }
+    return (await promisify(execFile)(registration.command, ['--version'], { env: commandEnv, encoding: 'utf8', timeout: 30_000 })).stdout.trim()
+  }
   const release = JSON.parse(await fs.readFile(path.join(core, 'core-release.json'), 'utf8'))
-  assert.equal(registeredVersion, release.version)
+  assert.equal(await registeredCliVersion(), release.version)
   gui.child.kill('SIGKILL'); await gui.exited()
   assert.equal((await inspectInstance()).state, 'running')
   gui = launch(); await gui.phase('ready')
@@ -142,7 +147,14 @@ try {
   let retainedRepair
   if (location.schema_version === 2) {
     const { prepareRetainedProductReinstall } = await import('./accept-retained-product-reinstall.mjs')
-    retainedRepair = await prepareRetainedProductReinstall({ installRoot, payload: inside(location.payload) })
+    retainedRepair = await prepareRetainedProductReinstall({ installRoot, payload: retainedPayload || inside(location.payload) })
+    if (retainedPayload) {
+      assert.notEqual(retainedRepair.selection.version, release.version)
+      const originalRelease = JSON.parse(await fs.readFile(path.join(core, 'core-release.json'), 'utf8'))
+      assert.notEqual(retainedRepair.selection.core_id, originalRelease.inventory_sha256)
+    }
+    executable = retainedRepair.executable; core = retainedRepair.coreRoot
+    node = path.join(core, process.platform === 'win32' ? '.product-runtime/node/node.exe' : '.product-runtime/node/bin/node')
     gui = launch(); await gui.phase('ready')
     const deadline = Date.now() + 180_000
     while (true) {
@@ -156,11 +168,12 @@ try {
     assert.notEqual(repaired.record.generation, first.record.generation)
     assert.equal(await fs.realpath(repaired.record.install_root), await fs.realpath(core))
     assert.equal(JSON.parse(await cli('status', '--json')).running, true)
+    assert.equal(await registeredCliVersion(), retainedRepair.selection.version)
     assert.equal(await fs.readFile(retainedRepair.sentinel, 'utf8'), 'preserved across partial removal and real GUI recovery\n')
     await cli('stop'); await gui.phase('stopped'); gui.child.kill('SIGKILL'); await gui.exited()
     retainedRepair = { partial_removal_fixture: true, complete_uninstall_tested: false,
       ordinary_packaged_main: true, actual_core_started: true, same_instance_new_generation: true,
-      maintenance_cleared_after_real_health: true, data_preserved: true, registered_cli_compatible: true }
+      maintenance_cleared_after_real_health: true, data_preserved: true, registered_cli_compatible: true, higher_version: !!retainedPayload }
   }
   console.log('CRABOT_PACKAGED_BOOT ' + JSON.stringify({ platform: process.platform, arch: process.arch,
     paired_offline_install: location.schema_version === 2, os_install_registration: false, retained_repair: retainedRepair,
