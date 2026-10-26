@@ -11,6 +11,9 @@ on:
       - 'crabot-desktop/src/ubuntu-removal-progress.ts'
       - 'crabot-desktop/src/ubuntu-removal-rules.ts'
       - 'crabot-desktop/src/ubuntu-removal-host.ts'
+      - 'crabot-desktop/src/removal-source.ts'
+      - 'crabot-desktop/tests/removal-frame.test.mjs'
+      - 'crabot-desktop/tests/fixtures/removal-frame-actor.cjs'
       - 'crabot-desktop/src/removal-operation.ts'
       - 'crabot-desktop/src/removal-request.ts'
       - 'crabot-desktop/src/installation-removal.ts'
@@ -40,6 +43,9 @@ on:
       - 'crabot-desktop/src/ubuntu-removal-progress.ts'
       - 'crabot-desktop/src/ubuntu-removal-rules.ts'
       - 'crabot-desktop/src/ubuntu-removal-host.ts'
+      - 'crabot-desktop/src/removal-source.ts'
+      - 'crabot-desktop/tests/removal-frame.test.mjs'
+      - 'crabot-desktop/tests/fixtures/removal-frame-actor.cjs'
       - 'crabot-desktop/src/removal-operation.ts'
       - 'crabot-desktop/src/removal-request.ts'
       - 'crabot-desktop/src/installation-removal.ts'
@@ -111,6 +117,14 @@ jobs:
         env:
           CRABOT_GTK_FRONTEND: ${{ github.workspace }}/.desktop-build/ubuntu-bootstrap/crabot-maintenance
         run: timeout 90s dbus-run-session -- xvfb-run -a node --test crabot-desktop/tests/ubuntu-removal-progress.test.mjs
+      - name: Actual GUI source hands off to the native GTK and Node uninstall owner
+        timeout-minutes: 3
+        env:
+          CRABOT_GTK_FRONTEND: ${{ github.workspace }}/.desktop-build/ubuntu-bootstrap/crabot-maintenance
+          CRABOT_GTK_ACTOR: ${{ github.workspace }}/.desktop-build/crabot-maintenance-actor
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror -O2 -DCRABOT_MAINTENANCE_ACTOR crabot-desktop/tests/native/ubuntu-maintenance.c -o .desktop-build/crabot-maintenance-actor $(pkg-config --cflags --libs gtk4 json-glib-1.0)
+          timeout 150s dbus-run-session -- xvfb-run -a node --test --test-name-pattern=publish-source-remove-source crabot-desktop/tests/removal-frame.test.mjs
       - name: Prepare only the private Node and fixed maintenance resources
         timeout-minutes: 3
         env:

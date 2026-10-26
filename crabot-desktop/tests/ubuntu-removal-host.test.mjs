@@ -177,7 +177,7 @@ for (const mode of ['node-job-resume', 'node-job-resume-source-exit', 'node-job-
     else assert.deepEqual(result, { accepted: true, published: mode === 'node-job-resume-source-exit' ? 'stopping' : 'preparing', stopped: 'stopping', cancelled: mode !== 'node-job-source-remove', ordinary_peer: false, locks_reacquired: true, source_exited: true, ...(mode === 'node-job-source-remove' ? { programs_removed: true, platform_cleanup_attempts: 2, completed: true } : {}), ...(mode === 'node-job-source-platform-cancel' ? { platform_cancelled: true } : {}) })
   } else if (mode === 'node-job-source-verifier') assert.deepEqual(result, { accepted: true, published: 'preparing', stopped: 'stopping', cancelled: true, ordinary_peer: false, locks_reacquired: true,
     source_verifier: { preparing_rejected: true, wrong_operation_rejected: true, verified_after_stop: true, changed_copy_rejected: true } })
-  else if (['node-job-valid', 'node-job-resume'].includes(mode)) assert.deepEqual(result, { accepted: true, published: mode === 'node-job-resume' ? 'stopping' : 'preparing', stopped: 'stopping', cancelled: true, ordinary_peer: false, locks_reacquired: true })
+  else if (['node-job-valid', 'node-job-resume'].includes(mode)) assert.deepEqual(result, { accepted: true, published: mode === 'node-job-resume' ? 'stopping' : 'preparing', stopped: 'stopping', cancelled: true, ordinary_peer: false, locks_reacquired: true, ...(mode === 'node-job-valid' ? { private_copy_removed: true } : {}) })
   else assert.deepEqual(result, { accepted: false, code: 'CRABOT_DESKTOP_REMOVAL' })
   assert.equal(await fs.readFile(path.join(own.dataDir, 'preserved'), 'utf8'), 'unchanged user content')
   for (const installation of [own.root, cfg.otherRoot].filter(Boolean)) {

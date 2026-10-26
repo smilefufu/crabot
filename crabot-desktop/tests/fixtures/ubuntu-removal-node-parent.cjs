@@ -117,9 +117,16 @@ void (async () => {
     clearTimeout(timer);process.removeListener('disconnect',parentLost);if(process.connected)process.disconnect();
   `
   const root = cfg.otherRoot || cfg.own.root
+  const cleanupFactory = cfg.mode === 'node-job-valid' ? (await load('desktop-removal-host-cleanup.mjs')).captureRemovalNodeCleanup : undefined
   child = spawn(prepared.executable, ['--input-type=module', '--eval', script, root, cfg.operationId, cfg.mode, cfg.resultFile], {
     cwd: prepared.directory, env: { PATH: '', LANG: 'C.UTF-8', ...(process.env.GITHUB_ACTIONS==='true'?{GITHUB_ACTIONS:'true'}:{}) }, stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
   })
+  ended = once(child, 'close')
+  let cleanup
+  if (cleanupFactory) {
+    await once(child, 'spawn'); cleanup = cleanupFactory(prepared, child)
+    await require('node:assert/strict').rejects(cleanup(), { code: 'CRABOT_DESKTOP_REMOVAL' })
+  }
   if (['node-job-source-verifier', 'node-job-resume-source-exit', 'node-job-source-exit', 'node-job-source-remove', 'node-job-source-platform-cancel'].includes(cfg.mode)) {
     const verifier = load('desktop-removal-source.mjs').then(module => (cfg.mode.startsWith('node-job-resume') ? module.createExistingRemovalNodeSourceExitVerifier : module.createDesktopRemovalNodeSourceExitVerifier)({ installRoot: cfg.own.root, prepared, child }))
     child.on('message', async message => {
@@ -131,14 +138,15 @@ void (async () => {
       } else child.send({ kind: 'fixture_source_verification', accepted }, () => {})
     })
   }
-  ended = once(child, 'close')
   let output = '', error = ''
   child.stdout.on('data', bytes => { output += bytes.toString(); if (output.length > 4096) child.kill('SIGKILL') })
   child.stderr.on('data', bytes => { error = (error + bytes.toString()).slice(-4096) })
   const [code, signal] = await ended
   if (code !== 0 || signal || error) throw new Error('Finite Node host failed: ' + JSON.stringify({ code, signal, output: output.slice(0, 512) }) + ': ' + error)
   const result = JSON.parse(output)
-  await fs.rm(prepared.directory, { recursive: true, force: true }); prepared = null
+  if (cleanup) { await cleanup(); result.private_copy_removed = true; await require('node:assert/strict').rejects(fs.stat(prepared.directory), { code: 'ENOENT' }) }
+  else await fs.rm(prepared.directory, { recursive: true, force: true })
+  prepared = null
   clearTimeout(timer); process.stdout.write(JSON.stringify(result) + '\n')
 })().catch(async error => {
   if (child && child.exitCode === null && child.signalCode === null) { child.kill('SIGKILL'); await ended.catch(() => {}) }

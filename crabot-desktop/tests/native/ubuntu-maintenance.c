@@ -139,7 +139,30 @@ static void invalid_dialog(void) {
   Maintenance s = state(); g_assert_true(accept(&s, "{\"type\":\"dialog\",\"kind\":\"retry-cancel\"}\n"));
   g_assert_false(accept(&s, "{\"type\":\"dialog\",\"kind\":\"completed\"}\n")); g_assert_true(s.failed); clear(&s);
 }
+#ifdef CRABOT_MAINTENANCE_ACTOR
+static gboolean actor_choice(gpointer data) {
+  (void)data;
+  if (!gtk_is_initialized()) return G_SOURCE_CONTINUE;
+  const char *labels[] = { "暂时退出", "关闭维护界面", "知道了", "关闭", NULL };
+  GListModel *windows = gtk_window_get_toplevels();
+  for (guint i = 0; i < g_list_model_get_n_items(windows); i++) {
+    g_autoptr(GtkWindow) window = g_list_model_get_item(windows, i);
+    if (!gtk_widget_get_visible(GTK_WIDGET(window))) continue;
+    for (size_t j = 0; labels[j]; j++) {
+      GtkWidget *button = find_button(GTK_WIDGET(window), labels[j]);
+      if (button && !g_object_get_data(G_OBJECT(button), "crabot-actor-clicked")) {
+        g_object_set_data(G_OBJECT(button), "crabot-actor-clicked", GINT_TO_POINTER(1));
+        g_signal_emit_by_name(button, "clicked"); return G_SOURCE_CONTINUE;
+      }
+    }
+  }
+  return G_SOURCE_CONTINUE;
+}
+#endif
 int main(int argc, char **argv) {
+#ifdef CRABOT_MAINTENANCE_ACTOR
+  if (argc == 1) { g_timeout_add(20, actor_choice, NULL); return maintenance_product_main(argc, argv); }
+#endif
   g_test_init(&argc, &argv, NULL); gtk_init();
   g_test_add_func("/maintenance/progress", progress); g_test_add_func("/maintenance/cancellation", cancellation);
   g_test_add_func("/maintenance/invalid", invalid); g_test_add_func("/maintenance/limits", limits);

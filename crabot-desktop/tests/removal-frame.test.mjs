@@ -2,7 +2,7 @@ import test, { before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { promises as fs, constants } from 'node:fs'
 import path from 'node:path'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 import { randomUUID } from 'node:crypto'
@@ -15,17 +15,30 @@ import { writeCoreRelease, verifyCoreRelease } from '../../scripts/lib/core-rele
 import { sealDesktopPayload, prepareDesktopInstallation, commitDesktopInstallation } from '../../scripts/lib/desktop-payload.mjs'
 import identity from '../../scripts/lib/process-identity.cjs'
 import { probeKnownProcessExit } from '../../scripts/lib/known-process-exit.cjs'
+import { buildUbuntuMaintenanceBackend } from '../../scripts/desktop/ubuntu-maintenance-backend.mjs'
 import { prepareDesktopRemovalGui } from '../../scripts/lib/desktop-removal-host.mjs'
-const supported = ['darwin', 'win32'].includes(process.platform), repository = fileURLToPath(new URL('../../', import.meta.url))
+const linuxSource = process.platform === 'linux' && process.env.GITHUB_ACTIONS === 'true' && !!process.env.CRABOT_GTK_ACTOR
+const supported = ['darwin', 'win32'].includes(process.platform) || linuxSource, repository = fileURLToPath(new URL('../../', import.meta.url))
 const require = createRequire(new URL('../package.json', import.meta.url))
 let root, payload
 before(async () => {
   if (!supported) return
-  root = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'crabot-protected-removal-frame-')))
+  root = await fs.realpath(await fs.mkdtemp(path.join(linuxSource ? homedir() : tmpdir(), 'crabot-protected-removal-frame-')))
   payload = path.join(root, 'payload'); const core = path.join(payload, 'core'), appDir = path.join(root, 'app')
   await fs.mkdir(path.join(core, 'bin'), { recursive: true })
   await fs.copyFile(path.join(repository, 'crabot-native/build/Release', process.platform === 'win32' ? 'crabot.exe' : 'crabot'), path.join(core, 'bin', process.platform === 'win32' ? 'crabot.exe' : 'crabot'))
   for (const name of ['package.json', 'product-runtime.json']) await fs.writeFile(path.join(core, name), JSON.stringify({ version: '1.2.3', ...(name === 'package.json' ? { type: 'module' } : {}) }))
+  if (linuxSource) {
+    await fs.mkdir(path.join(core, '.product-runtime/node/bin'), { recursive: true })
+    await fs.copyFile(process.execPath, path.join(core, '.product-runtime/node/bin/node'))
+    const runtimeDirectory = '.scrapling-runtime-fixture-0123456789abcdef-12345678'
+    const browser = runtimeDirectory + '/browsers/chromium-1234/chrome-linux64/chrome'
+    const binary = await fs.readFile(path.join(path.dirname(process.env.CRABOT_GTK_FRONTEND), 'crabot-sandbox-helper'))
+    await fs.mkdir(path.dirname(path.join(core, browser)), { recursive: true }); await fs.writeFile(path.join(core, browser), binary, { mode: 0o755 })
+    await fs.writeFile(path.join(core, 'scrapling-runtime.json'), JSON.stringify({ directory: runtimeDirectory }) + '\n')
+    await fs.writeFile(path.join(core, 'product-runtime.json'), JSON.stringify({ schema_version: 1, version: '1.2.3', platform: 'linux', arch: 'x64',
+      versions: { node: process.versions.node }, browser: runtimeDirectory + '/chromium-launcher', files: { [browser]: { type: 'file', size: binary.length, sha256: (await import('node:crypto')).createHash('sha256').update(binary).digest('hex') } } }) + '\n')
+  }
   await fs.mkdir(path.join(core, 'crabot-core/dist'), { recursive: true })
   await fs.copyFile(new URL('../../scripts/lib/__tests__/fixtures/core.mjs', import.meta.url), path.join(core, 'crabot-core/dist/main.js'))
   await fs.writeFile(path.join(core, 'program.mjs'), 'throw new Error("Never execute this minimal fixture Core")')
@@ -54,23 +67,36 @@ before(async () => {
     electronDist: path.join(path.dirname(require.resolve('electron/package.json')), 'dist'), files: ['dist/**/*', 'package.json'], asar: true,
     asarUnpack: ['dist/bootstrap/**/*.node'], npmRebuild: false, publish: null,
     electronFuses: { runAsNode: false, enableCookieEncryption: true, enableNodeOptionsEnvironmentVariable: false, enableNodeCliInspectArguments: false,
-      enableEmbeddedAsarIntegrityValidation: true, onlyLoadAppFromAsar: true, grantFileProtocolExtraPrivileges: false },
-    mac: { minimumSystemVersion: '14.0.0', identity: '-', hardenedRuntime: false, notarize: false }, win: { executableName: 'Crabot' },
+      enableEmbeddedAsarIntegrityValidation: process.platform !== 'linux', onlyLoadAppFromAsar: true, grantFileProtocolExtraPrivileges: false },
+    mac: { minimumSystemVersion: '14.0.0', identity: '-', hardenedRuntime: false, notarize: false }, win: { executableName: 'Crabot' }, linux: { executableName: 'crabot-desktop' },
     afterPack: async context => {
       gui = context.appOutDir
       const resources = path.join(gui, process.platform === 'darwin' ? 'Crabot.app/Contents/Resources' : 'resources')
       await fs.writeFile(path.join(resources, 'desktop-release.json'), JSON.stringify(selection) + '\n')
+      if (linuxSource) {
+        await fs.copyFile(process.env.CRABOT_GTK_ACTOR, path.join(resources, 'crabot-maintenance'))
+        await fs.copyFile(path.join(path.dirname(process.env.CRABOT_GTK_FRONTEND), 'crabot-sandbox-helper'), path.join(resources, 'crabot-sandbox-helper'))
+        const backend = path.join(resources, 'crabot-maintenance-backend'); await buildUbuntuMaintenanceBackend(backend)
+        const main = path.join(backend, 'main.mjs'), source = await fs.readFile(main, 'utf8')
+        const prefix = `import fixtureChild from 'node:child_process';import{syncBuiltinESMExports as fixtureSync}from'node:module';
+          if(process.env.GITHUB_ACTIONS!=='true')throw new Error('Disposable CI only');
+          const fixtureSpawn=fixtureChild.spawn;fixtureChild.spawn=(command,args,options)=>command==='/usr/bin/pkexec'?fixtureSpawn('/usr/bin/sudo',['-n','/usr/bin/env','PKEXEC_UID='+process.getuid(),...args],options):fixtureSpawn(command,args,options);fixtureSync();\n`
+        const finished = `const result=await runUbuntuRemovalHost(request);fs.writeFileSync(process.env.CRABOT_NODE_REMOVAL_TEST_RESULT,JSON.stringify({accepted:result==='completed',published:true,retained:true,cancelled:false,cancelRejected:false,sourceExited:result==='completed',sourceExitRejected:false,stopRejected:false,cancellationReplyLost:false,lost:false,proofRetained:true,programsRemoved:result==='completed',completionVerified:result==='completed',controlledResourceObservation:false,removalRetried:false,actual_source:true,actual_node_entry:true,polkit_transport_fixture:true})+'\\n')`
+        await fs.writeFile(main, prefix + source.replace('await runUbuntuRemovalHost(request)', finished).replace('} catch (error) {', `} catch (error) {fs.writeFileSync(process.env.CRABOT_NODE_REMOVAL_TEST_RESULT,JSON.stringify({accepted:false,code:error?.code,message:String(error?.message).slice(0,512)})+'\\n');`))
+      }
+
     },
   } })
-  const executable = path.join(gui, process.platform === 'darwin' ? 'Crabot.app/Contents/MacOS/Crabot' : 'Crabot.exe')
+  const executable = path.join(gui, process.platform === 'darwin' ? 'Crabot.app/Contents/MacOS/Crabot' : process.platform === 'linux' ? 'crabot-desktop' : 'Crabot.exe')
   const { getCurrentFuseWire, FuseV1Options } = builder('@electron/fuses'), fuses = await getCurrentFuseWire(executable)
   for (const key of [FuseV1Options.RunAsNode, FuseV1Options.EnableNodeOptionsEnvironmentVariable, FuseV1Options.EnableNodeCliInspectArguments]) assert.equal(fuses[key], 48)
-  for (const key of [FuseV1Options.OnlyLoadAppFromAsar, FuseV1Options.EnableEmbeddedAsarIntegrityValidation]) assert.equal(fuses[key], 49)
+  assert.equal(fuses[FuseV1Options.OnlyLoadAppFromAsar], 49)
+  assert.equal(fuses[FuseV1Options.EnableEmbeddedAsarIntegrityValidation], linuxSource ? 48 : 49)
   await fs.cp(gui, path.join(payload, 'gui'), { recursive: true, verbatimSymlinks: true, mode: constants.COPYFILE_FICLONE })
   await sealDesktopPayload(payload)
 }, 120000)
 after(async () => { if (root) await fs.rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }) })
-for (const scenario of ['valid', 'node-parent', 'unexpected-source-args', 'changed-copy', 'other-installation', 'publish-close', 'publish-cancel', 'publish-module', 'publish-damaged', 'publish-lost-reply', 'publish-replaced-record', 'publish-live', 'publish-cancel-lost', 'publish-stop', 'publish-stop-wrong-root', 'publish-stop-lost', 'publish-stop-retry', 'publish-stop-lost-retry', 'publish-inherited-cwd', 'publish-source-verifier', 'publish-source-exit', 'publish-source-retry', 'publish-source-late-exit', 'publish-source-ignore', 'publish-source-disconnect', 'resume-valid', 'resume-core-missing', 'resume-wrong-operation', 'resume-changed-copy', 'resume-source-changed', 'resume-lease-cancel', 'resume-lease-stopping', 'resume-lease-removing', 'resume-lease-completed', 'resume-lease-core-missing', 'resume-lease-wrong-operation', 'resume-lease-busy', 'resume-lease-source-exit', 'publish-source-remove', 'publish-source-remove-main', 'publish-source-remove-source', 'resume-source-remove-main', 'publish-source-remove-operation', 'publish-source-remove-cancel-retry', 'publish-source-remove-mac-login', 'publish-source-remove-complete', 'publish-source-remove-windows-uninstall', 'publish-source-remove-retry', 'resume-lease-source-remove', 'publish-source-remove-retry-delayed']) test('actual protected initial removal frame: ' + scenario, { skip: !supported || ['publish-source-remove-mac-login', 'publish-source-remove-operation', 'publish-source-remove-main'].includes(scenario) && process.platform !== 'darwin' || scenario === 'publish-source-remove-windows-uninstall' && process.platform !== 'win32', timeout: scenario.includes('source-remove') ? 180000 : 60000 }, async t => {
+for (const scenario of ['valid', 'node-parent', 'unexpected-source-args', 'changed-copy', 'other-installation', 'publish-close', 'publish-cancel', 'publish-module', 'publish-damaged', 'publish-lost-reply', 'publish-replaced-record', 'publish-live', 'publish-cancel-lost', 'publish-stop', 'publish-stop-wrong-root', 'publish-stop-lost', 'publish-stop-retry', 'publish-stop-lost-retry', 'publish-inherited-cwd', 'publish-source-verifier', 'publish-source-exit', 'publish-source-retry', 'publish-source-late-exit', 'publish-source-ignore', 'publish-source-disconnect', 'resume-valid', 'resume-core-missing', 'resume-wrong-operation', 'resume-changed-copy', 'resume-source-changed', 'resume-lease-cancel', 'resume-lease-stopping', 'resume-lease-removing', 'resume-lease-completed', 'resume-lease-core-missing', 'resume-lease-wrong-operation', 'resume-lease-busy', 'resume-lease-source-exit', 'publish-source-remove', 'publish-source-remove-main', 'publish-source-remove-source', 'resume-source-remove-main', 'publish-source-remove-operation', 'publish-source-remove-cancel-retry', 'publish-source-remove-mac-login', 'publish-source-remove-complete', 'publish-source-remove-windows-uninstall', 'publish-source-remove-retry', 'resume-lease-source-remove', 'publish-source-remove-retry-delayed']) test('actual protected initial removal frame: ' + scenario, { skip: !supported || process.platform === 'linux' && scenario !== 'publish-source-remove-source' || ['publish-source-remove-mac-login', 'publish-source-remove-operation', 'publish-source-remove-main'].includes(scenario) && process.platform !== 'darwin' || scenario === 'publish-source-remove-windows-uninstall' && process.platform !== 'win32', timeout: scenario.includes('source-remove') ? 180000 : 60000 }, async t => {
   const mode = scenario.endsWith('-delayed') ? scenario.slice(0, -8) : scenario
   const area = await fs.mkdtemp(path.join(root, 'case-'))
   const cancelled = ['publish-cancel', 'publish-cancel-lost', 'publish-stop', 'publish-stop-retry', 'publish-stop-lost-retry', 'publish-source-exit', 'publish-source-retry', 'publish-source-late-exit', 'publish-source-verifier', 'resume-lease-cancel'].includes(mode)
@@ -84,7 +110,11 @@ for (const scenario of ['valid', 'node-parent', 'unexpected-source-args', 'chang
   }
   const sourceExitMode = ['publish-source-exit', 'publish-source-retry', 'publish-source-late-exit', 'resume-lease-source-exit', 'publish-source-remove', 'publish-source-remove-main', 'publish-source-remove-source', 'resume-source-remove-main', 'publish-source-remove-operation', 'publish-source-remove-cancel-retry', 'publish-source-remove-mac-login', 'publish-source-remove-complete', 'publish-source-remove-windows-uninstall', 'publish-source-remove-retry', 'resume-lease-source-remove'].includes(mode)
   const existingPhase = ({ 'resume-lease-stopping': 'stopping', 'resume-lease-removing': 'removing', 'resume-lease-completed': 'completed', 'resume-lease-source-exit': 'removing', 'resume-lease-source-remove': 'removing' })[mode] || 'preparing'
-  const own = await commitDesktopInstallation(await prepareDesktopInstallation({ payload, installRoot: path.join(area, 'installation') }))
+  const preparedInstallation = await prepareDesktopInstallation({ payload, installRoot: path.join(area, 'installation') })
+  if (linuxSource && (await fs.readFile('/proc/sys/kernel/apparmor_restrict_unprivileged_userns', 'utf8').catch(() => '')).trim() === '1') {
+    await promisify(execFile)('/usr/bin/sudo', ['-n', '/usr/bin/env', 'PKEXEC_UID=' + process.getuid(), path.join(path.dirname(process.env.CRABOT_GTK_FRONTEND), 'crabot-sandbox-helper'), '--register', preparedInstallation.installRoot], { timeout: 30000, maxBuffer: 65536 })
+  }
+  const own = await commitDesktopInstallation(preparedInstallation)
   let finite, finiteExited, finiteOutput = ''
   if (mode.startsWith('publish-stop')) {
     const reserve = createServer().listen(0, '127.0.0.1'); await once(reserve, 'listening')
@@ -134,6 +164,7 @@ for (const scenario of ['valid', 'node-parent', 'unexpected-source-args', 'chang
   if (sourceExitMode) {
     assert.equal(result.handoff, true, JSON.stringify(result))
     const host = result.host, directory = result.directory
+    if (linuxSource) assert.equal(result.source_progress_windows, 1)
     const exitState = () => probeKnownProcessExit([host]).state
     t.after(async () => {
       if (identity.sameProcess(host, identity.inspectProcess(host.pid))) globalThis.process.kill(host.pid, 'SIGKILL')
@@ -194,12 +225,12 @@ for (const scenario of ['valid', 'node-parent', 'unexpected-source-args', 'chang
     assert.equal(result.stage, mode === 'changed-copy' ? 'private-programs' : 'source-peer', JSON.stringify(result))
   }
   if (['publish-source-remove-complete', 'publish-source-remove-operation', 'publish-source-remove-main', 'publish-source-remove-source', 'resume-source-remove-main'].includes(mode)) assert.equal(result.completionVerified, true)
-  if (['publish-source-remove-main', 'publish-source-remove-source', 'resume-source-remove-main'].includes(mode)) { assert.equal(result.actual_main, true); assert.equal(result.actual_progress_windows, 1); assert.equal(result.os_api_mocked, true); assert.equal(result.login_writes, process.platform === 'darwin' ? 1 : 0); assert.equal(result.registration_calls, process.platform === 'darwin' ? 1 : 0); assert.equal(result.message, '应用已卸载，数据已保留。') }
+  if (!linuxSource && ['publish-source-remove-main', 'publish-source-remove-source', 'resume-source-remove-main'].includes(mode)) { assert.equal(result.actual_main, true); assert.equal(result.actual_progress_windows, 1); assert.equal(result.os_api_mocked, true); assert.equal(result.login_writes, process.platform === 'darwin' ? 1 : 0); assert.equal(result.registration_calls, process.platform === 'darwin' ? 1 : 0); assert.equal(result.message, '应用已卸载，数据已保留。') }
   if (mode === 'publish-cancel') assert.equal(result.private_copy_removed, true)
-  if (mode === 'publish-source-remove-source') { assert.equal(result.actual_source, true); assert.deepEqual(result.dialog_codes, [], JSON.stringify(result)) }
+  if (mode === 'publish-source-remove-source') { assert.equal(result.actual_source, true); if (!linuxSource) assert.deepEqual(result.dialog_codes, [], JSON.stringify(result)); else { assert.equal(result.actual_node_entry, true); assert.equal(result.polkit_transport_fixture, true) } }
   if (mode === 'publish-source-remove-windows-uninstall') assert.equal(result.windowsUninstallEntryRemoved, true)
   if (mode === 'publish-source-remove-mac-login') { assert.equal(result.macLoginCleaned, true); assert.equal(result.macLoginApiMocked, true) }
-  if (mode.includes('source-remove')) { assert.equal(result.programsRemoved, true); assert.equal(result.controlledResourceObservation, true); assert.equal(result.removalRetried, mode === 'publish-source-remove-retry'); assert.equal((await import('../../scripts/lib/desktop-removal-record.cjs')).default.readDesktopRemoval(own.root).phase, ['publish-source-remove-complete', 'publish-source-remove-operation', 'publish-source-remove-main', 'publish-source-remove-source', 'resume-source-remove-main'].includes(mode) ? 'completed' : 'removing'); await assert.rejects(fs.lstat(own.executable), { code: 'ENOENT' }) }
+  if (mode.includes('source-remove')) { assert.equal(result.programsRemoved, true); assert.equal(result.controlledResourceObservation, !linuxSource); assert.equal(result.removalRetried, mode === 'publish-source-remove-retry'); assert.equal((await import('../../scripts/lib/desktop-removal-record.cjs')).default.readDesktopRemoval(own.root).phase, ['publish-source-remove-complete', 'publish-source-remove-operation', 'publish-source-remove-main', 'publish-source-remove-source', 'resume-source-remove-main'].includes(mode) ? 'completed' : 'removing'); await assert.rejects(fs.lstat(own.executable), { code: 'ENOENT' }) }
   if ((!mode.startsWith('resume-') && !mode.startsWith('publish-')) || cancelled || mode === 'publish-inherited-cwd') await assert.rejects(fs.lstat(path.join(own.root, '.desktop-removal.json')), { code: 'ENOENT' })
   else assert.equal((await fs.lstat(path.join(own.root, '.desktop-removal.json'))).isFile(), true)
   assert.equal(await fs.readFile(path.join(own.dataDir, 'preserved-user-file'), 'utf8'), 'user bytes')

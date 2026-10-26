@@ -400,12 +400,14 @@ async function main() {
     app.on('window-all-closed', () => {}) // Match the ordinary source Main lifetime.
     const electron = require('electron'), cp = require('node:child_process'), native = require('./bootstrap/scripts/lib/process-identity.cjs')
     const originalSpawn = cp.spawn
+    let sourceWindows = 0; app.on('browser-window-created', () => { sourceWindows++ })
     electron.dialog.showMessageBox = async () => ({ response: 1 })
     cp.spawn = (executable, args, options) => {
+      if (process.platform === 'linux' && args.some(value => value.startsWith('--crabot-removal-host='))) options = { ...options, env: { ...options.env, GITHUB_ACTIONS: 'true', CRABOT_NODE_REMOVAL_TEST_RESULT: cfg.resultFile } }
       const child = originalSpawn(executable, args, options)
       if (args.some(value => value.startsWith('--crabot-removal-host='))) child.once('spawn', () => {
         const gui = process.platform === 'darwin' ? path.resolve(path.dirname(executable), '../../..') : path.dirname(executable)
-        void send({ handoff: true, host: native.inspectProcess(child.pid), directory: path.dirname(gui) })
+        void send({ handoff: true, host: native.inspectProcess(child.pid), directory: process.platform === 'linux' ? path.dirname(executable) : path.dirname(gui), source_progress_windows: sourceWindows })
       })
       return child
     }

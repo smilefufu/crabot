@@ -2,9 +2,12 @@
 // intent; it never publishes a removal job or deletes installed program files.
 import { app, dialog } from 'electron'
 import fs from 'node:fs'
+import path from 'node:path'
+import { homedir } from 'node:os'
 import { spawn } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { createRemovalProgressWindow } from './removal-progress-window.js'
+import { ubuntuDesktopEnvironment } from './ubuntu-process.js'
 import { removalHostArgument } from './removal-request.js'
 const require = createRequire(import.meta.url)
 const load = (file: string) => import(new URL('./bootstrap/scripts/lib/' + file, import.meta.url).href)
@@ -16,7 +19,8 @@ export function startGuiRemovalFromSource(options: SourceOptions): Promise<void>
   return active ||= removeFromSource(options).finally(() => { active = undefined })
 }
 async function removeFromSource(options: SourceOptions) {
-  if (!app.isPackaged || !['darwin', 'win32'].includes(process.platform)) throw Object.assign(new Error('需要已安装的本机应用入口。'), { code: 'CRABOT_DESKTOP_REMOVAL' })
+  if (!app.isPackaged || !['darwin', 'win32', 'linux'].includes(process.platform)) throw Object.assign(new Error('需要已安装的本机应用入口。'), { code: 'CRABOT_DESKTOP_REMOVAL' })
+  const node = process.platform === 'linux'
   const own = require('./bootstrap/scripts/lib/desktop-installation.cjs').readDesktopInstallation(options.installRoot)
   const { readDesktopRemoval } = require('./bootstrap/scripts/lib/desktop-removal-record.cjs')
   const previous = readDesktopRemoval(own.root), operationId = previous?.operation_id ?? options.operationId
@@ -32,23 +36,30 @@ async function removeFromSource(options: SourceOptions) {
     await progress.ready; abort.signal.throwIfAborted()
     const backend = await load('desktop-removal-host.mjs')
     progress.update('正在准备独立维护界面；用户数据不会复制或删除…')
-    prepared = await (previous ? backend.prepareExistingDesktopRemovalGui : backend.prepareDesktopRemovalGui)({
+    const prepare = node ? (previous ? backend.prepareExistingDesktopRemovalNode : backend.prepareDesktopRemovalNode)
+      : (previous ? backend.prepareExistingDesktopRemovalGui : backend.prepareDesktopRemovalGui)
+    prepared = await prepare({
       installRoot: own.root, operationId, signal: abort.signal,
       progress: () => progress.update('正在核验独立维护程序，完成后正常停止共享服务…'),
     })
     directoryId = generation(fs.lstatSync(prepared.directory, { bigint: true }))
     abort.signal.throwIfAborted()
-    const env = { ...process.env }
+    const env: NodeJS.ProcessEnv = node ? { ...ubuntuDesktopEnvironment(process.env), HOME: homedir(),
+      ...Object.fromEntries(['XDG_CONFIG_HOME', 'XDG_DATA_HOME'].flatMap(key => process.env[key] ? [[key, process.env[key]!]] : [])) } : { ...process.env }
     for (const key of ['ELECTRON_RUN_AS_NODE', 'NODE_OPTIONS', 'NODE_PATH', 'DATA_DIR', 'CRABOT_HOME', 'CRABOT_DEV', 'CRABOT_PORT_OFFSET']) delete env[key]
-    child = spawn(prepared.executable, [removalHostArgument({ installRoot: own.root, operationId, existing: !!previous })], {
+    const argument = removalHostArgument({ installRoot: own.root, operationId, existing: !!previous })
+    child = spawn(prepared.executable, node ? [path.join(prepared.directory, 'backend/main.mjs'), argument] : [argument], {
       env, cwd: prepared.directory, detached: true, stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
     })
     const stopped = new Promise<number | null>((resolve, reject) => { child!.once('error', reject); child!.once('close', code => resolve(code)) })
     void stopped.catch(() => {})
     await new Promise<void>((resolve, reject) => { child!.once('spawn', resolve); child!.once('error', reject) })
-    const cleanup: () => Promise<void> = (await load('desktop-removal-host-cleanup.mjs')).captureRemovalGuiCleanup(prepared, child)
+    const cleanupModule = await load('desktop-removal-host-cleanup.mjs')
+    const cleanup: () => Promise<void> = (node ? cleanupModule.captureRemovalNodeCleanup : cleanupModule.captureRemovalGuiCleanup)(prepared, child)
     const source = await load('desktop-removal-source.mjs')
-    const verifyExit = (previous ? source.createExistingRemovalSourceExitVerifier : source.createDesktopRemovalSourceExitVerifier)({ installRoot: own.root, prepared, child })
+    const exitVerifier = node ? (previous ? source.createExistingRemovalNodeSourceExitVerifier : source.createDesktopRemovalNodeSourceExitVerifier)
+      : (previous ? source.createExistingRemovalSourceExitVerifier : source.createDesktopRemovalSourceExitVerifier)
+    const verifyExit = exitVerifier({ installRoot: own.root, prepared, child })
     abort.signal.addEventListener('abort', cancelChild)
     if (abort.signal.aborted) cancelChild()
     child.on('message', value => {
