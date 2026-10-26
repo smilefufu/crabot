@@ -5,7 +5,7 @@ on:
     branches: ['feat/desktop-application']
     paths:
       - '.github/scripts/probe-windows-program-references.mjs'
-      - '.github/scripts/probe-windows-restart-manager.ps1'
+      - 'scripts/lib/__tests__/fixtures/program-reference-windows-limits.mjs'
       - 'crabot-native/src/program-references.h'
       - '.github/workflows/desktop-windows-reference-probe.yml'
 permissions:

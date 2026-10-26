@@ -21,7 +21,8 @@ try {
     'cli-launcher.test.mjs', 'private-file-paths.test.mjs', 'program-references.test.mjs', 'directory-move.test.mjs', 'file-move.test.mjs', 'directory-pin.test.mjs', 'workspace-windows-metadata.test.mjs']
   const files = [...nativeFiles, 'scripts/build-native.mjs', 'scripts/lib/product-prepare.mjs', 'scripts/lib/product-runtime.cjs',
     'scripts/lib/process-identity.cjs', 'scripts/lib/known-process-exit.cjs', 'scripts/lib/workspace-file-metadata.mjs', 'scripts/lib/workspace-windows-metadata.mjs', ...tests.map(name => 'scripts/lib/__tests__/' + name),
-    'scripts/lib/__tests__/fixtures/program-reference-build.mjs', 'scripts/lib/__tests__/fixtures/program-reference-holder.cc']
+    'scripts/lib/__tests__/fixtures/program-reference-build.mjs', 'scripts/lib/__tests__/fixtures/program-reference-holder.cc',
+    'scripts/lib/__tests__/fixtures/program-reference-windows-limits.mjs']
   if (!nativeFiles.length) throw new Error('Native candidate source is absent')
   for (const name of files) {
     const destination = path.join(target, name)
