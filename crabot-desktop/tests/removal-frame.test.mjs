@@ -86,7 +86,10 @@ before(async () => {
         const marker = '  // Keep the raw observation, including every unknown and its fixed OS reason.'
         assert.ok(referencesSource.includes(marker))
         await fs.writeFile(referencesFile, referencesSource.replace(marker,
-          "  physical.writeFileSync(process.env.CRABOT_NODE_REMOVAL_TEST_STAGE+'.references',JSON.stringify({stage,complete:observation.complete,incomplete:observation.incomplete,holders:observation.processes.slice(0,8),unknown:observation.unknown_details?.slice(0,8)})+'\\n');\n"+marker))
+          `  const fixtureRoots=[path.join(installRoot,'releases',proof.source_selection.core_id),path.join(installRoot,'app/releases',proof.source_selection.gui_id),path.join(installRoot,'bin')];
+  const fixtureRelated=value=>files.includes(value)||fixtureRoots.some(root=>value===root||value.startsWith(root+path.sep));
+  const fixtureLinks=pid=>{try{return {cwd:physical.readlinkSync('/proc/'+pid+'/cwd'),fds:physical.readdirSync('/proc/'+pid+'/fd').slice(0,512).flatMap(fd=>{try{const target=physical.readlinkSync('/proc/'+pid+'/fd/'+fd);return fixtureRelated(target)?[{fd,target}]:[]}catch{return []}}).slice(0,8),maps:physical.readFileSync('/proc/'+pid+'/maps','utf8').split('\\n').filter(line=>fixtureRoots.some(root=>line.includes(root))).slice(0,8)}}catch(error){return {code:error.code}}};
+  physical.writeFileSync(process.env.CRABOT_NODE_REMOVAL_TEST_STAGE+'.references',JSON.stringify({stage,complete:observation.complete,incomplete:observation.incomplete,holders:observation.processes.slice(0,8).map(holder=>({...holder,references:fixtureLinks(holder.pid)})),unknown:observation.unknown_details?.slice(0,8)})+'\\n');\n`+marker))
         const prefix = `import fixtureChild from 'node:child_process';import{syncBuiltinESMExports as fixtureSync}from'node:module';
           if(process.env.GITHUB_ACTIONS!=='true')throw new Error('Disposable CI only');
           const fixtureSpawn=fixtureChild.spawn;fixtureChild.spawn=(command,args,options)=>command==='/usr/bin/pkexec'?fixtureSpawn('/usr/bin/sudo',['-n','/usr/bin/env','PKEXEC_UID='+process.getuid(),...args],options):fixtureSpawn(command,args,options);fixtureSync();\n`
