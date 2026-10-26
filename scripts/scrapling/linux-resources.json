@@ -129,7 +129,7 @@
     {
       "package": "libfreetype6",
       "version": "2.11.1+dfsg-1ubuntu0.3",
-      "url": "https://launchpad.net/ubuntu/+archive/primary/+files/libfreetype6_2.11.1+dfsg-1ubuntu0.3_arm64.deb",
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260901T000000Z/pool/main/f/freetype/libfreetype6_2.11.1+dfsg-1ubuntu0.3_arm64.deb",
       "sha256": "2dfec0077df5cef76c6247610ed4d164ec6ce27fb2982313275ead0832ac745d"
     },
     {
@@ -303,7 +303,7 @@
     {
       "package": "libpng16-16",
       "version": "1.6.37-3ubuntu0.6",
-      "url": "https://launchpad.net/ubuntu/+archive/primary/+files/libpng16-16_1.6.37-3ubuntu0.6_arm64.deb",
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260901T000000Z/pool/main/libp/libpng1.6/libpng16-16_1.6.37-3ubuntu0.6_arm64.deb",
       "sha256": "d3e87c9de2166c39e42830881c155f749d1bc26dbdba9bbb2e20286af51fa3c7"
     },
     {
@@ -593,7 +593,7 @@
     {
       "package": "libfreetype6",
       "version": "2.11.1+dfsg-1ubuntu0.3",
-      "url": "https://launchpad.net/ubuntu/+archive/primary/+files/libfreetype6_2.11.1+dfsg-1ubuntu0.3_amd64.deb",
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260901T000000Z/pool/main/f/freetype/libfreetype6_2.11.1+dfsg-1ubuntu0.3_amd64.deb",
       "sha256": "729f5a3a72069ddcef6a54f6825178667477625574925504594769665897afbc"
     },
     {
@@ -767,7 +767,7 @@
     {
       "package": "libpng16-16",
       "version": "1.6.37-3ubuntu0.6",
-      "url": "https://launchpad.net/ubuntu/+archive/primary/+files/libpng16-16_1.6.37-3ubuntu0.6_amd64.deb",
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260901T000000Z/pool/main/libp/libpng1.6/libpng16-16_1.6.37-3ubuntu0.6_amd64.deb",
       "sha256": "c50e4291d15bbe3489245f773ad1d2cdb63b1753a1382a393ad34ce1b8d70358"
     },
     {
