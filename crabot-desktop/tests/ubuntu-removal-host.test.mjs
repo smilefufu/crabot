@@ -217,3 +217,58 @@ for (const mode of ['preparing', 'stopping', 'removing-partial-core', 'wrong-ope
   assert.equal(await fs.readFile(fence, 'utf8'), bytes); assert.equal(await fs.readFile(path.join(directory, 'proof.json'), 'utf8'), text)
   assert.equal(await fs.readFile(path.join(own.dataDir, 'preserved'), 'utf8'), 'historical data')
 })
+
+for (const mode of ['valid', 'wrong-operation', 'changed-parent', 'changed-helper', 'changed-payload', 'cancelled']) {
+  test('offline installer Node continues an existing removal with original programs missing: ' + mode,
+    { skip: !linux || process.env.GITHUB_ACTIONS !== 'true', timeout: 90000 }, async () => {
+      const area = await fs.mkdtemp(path.join(root, 'offline-continuation-')), bundle = path.join(area, 'bundle')
+      await fs.mkdir(bundle)
+      await fs.cp(payload, path.join(bundle, 'offline'), { recursive: true, verbatimSymlinks: true })
+      const installer = path.join(bundle, 'crabot-installer'), helper = path.join(bundle, 'crabot-sandbox-helper')
+      await promisify(execFile)('/usr/bin/cc', ['-std=c11', '-Wall', '-Wextra', '-Werror', '-O2',
+        fileURLToPath(new URL('native/ubuntu-installer-parent.c', import.meta.url)), '-o', installer])
+      await fs.copyFile(path.join(path.dirname(process.env.CRABOT_GTK_FRONTEND), 'crabot-sandbox-helper'), helper)
+      const files = {}
+      for (const name of ['crabot-installer', 'crabot-sandbox-helper']) {
+        const bytes = await fs.readFile(path.join(bundle, name)); files[name] = { size: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') }
+      }
+      await fs.writeFile(path.join(bundle, 'native-bootstrap.json'), JSON.stringify({ schema_version: 1, platform: 'linux', arch: 'x64',
+        build_os: 'ubuntu-24.04', commit: '1'.repeat(40), source_dirty: false, files }))
+      const own = await commitDesktopInstallation(await prepareDesktopInstallation({ payload, installRoot: path.join(area, 'installed') }))
+      await fs.writeFile(path.join(own.dataDir, 'preserved'), 'data and dependencies')
+      const { captureDesktopRemovalProof } = await import('../../scripts/lib/desktop-removal-proof.mjs')
+      const { privateJson } = await import('../../scripts/lib/desktop-preparation-files.mjs')
+      const operationId = randomUUID(), proof = await captureDesktopRemovalProof(own.root, operationId)
+      const proofDirectory = path.join(own.root, 'app/removals', operationId)
+      await fs.mkdir(proofDirectory, { recursive: true, mode: 0o700 }); await fs.chmod(path.dirname(proofDirectory), 0o700)
+      await privateJson(path.join(proofDirectory, 'proof.json'), proof)
+      await privateJson(path.join(own.root, '.desktop-removal.json'), { schema_version: 1, installation_id: own.record.installation_id,
+        operation_id: operationId, source_selection: own.selection, phase: 'removing',
+        proof_sha256: createHash('sha256').update(JSON.stringify(proof) + '\n').digest('hex') })
+      await fs.rm(own.coreRoot, { recursive: true }); await fs.rm(own.guiRoot, { recursive: true })
+      if (mode === 'changed-parent') await fs.appendFile(installer, 'changed')
+      if (mode === 'changed-helper') {
+        await fs.appendFile(helper, 'changed'); const bytes = await fs.readFile(helper)
+        const manifest = JSON.parse(await fs.readFile(path.join(bundle, 'native-bootstrap.json'), 'utf8'))
+        manifest.files['crabot-sandbox-helper'] = { size: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') }
+        await fs.writeFile(path.join(bundle, 'native-bootstrap.json'), JSON.stringify(manifest))
+      }
+      if (mode === 'changed-payload') await fs.appendFile(path.join(bundle, 'offline/core/cli.mjs'), 'changed')
+      const home = path.join(area, 'home'); await fs.mkdir(home, { mode: 0o700 })
+      const resultFile = path.join(area, 'result.json'), cfg = path.join(area, 'control.json')
+      await fs.writeFile(cfg, JSON.stringify({ bundle, root: own.root, operationId: mode === 'wrong-operation' ? randomUUID() : operationId,
+        cancelled: mode === 'cancelled', resultFile }))
+      const env = { ...process.env, HOME: home, XDG_CONFIG_HOME: path.join(home, 'config'), XDG_DATA_HOME: path.join(home, 'share') }
+      for (const name of ['NODE_OPTIONS', 'NODE_PATH', 'DATA_DIR', 'CRABOT_HOME', 'CRABOT_DEV', 'CRABOT_PORT_OFFSET']) delete env[name]
+      const executed = await promisify(execFile)(installer, [path.join(bundle, 'offline/core/.product-runtime/node/bin/node'),
+        fileURLToPath(new URL('fixtures/ubuntu-installer-removal-actor.mjs', import.meta.url)), cfg], { cwd: bundle, env, timeout: 75000, maxBuffer: 65536 })
+      const actual = JSON.parse(await fs.readFile(resultFile, 'utf8'))
+      assert.equal(actual.result, mode === 'valid' ? 'completed' : 'rejected', JSON.stringify(actual) + '\n' + executed.stderr)
+      assert.equal(actual.authorizations, mode === 'valid' ? 1 : 0)
+      assert.equal(await fs.readFile(path.join(own.dataDir, 'preserved'), 'utf8'), 'data and dependencies')
+      const record = JSON.parse(await fs.readFile(path.join(own.root, '.desktop-removal.json'), 'utf8'))
+      assert.equal(record.phase, mode === 'valid' ? 'completed' : 'removing'); assert.equal(record.operation_id, operationId)
+      assert.deepEqual(JSON.parse(await fs.readFile(path.join(proofDirectory, 'proof.json'), 'utf8')), proof)
+      await assert.rejects(fs.lstat(own.coreRoot), { code: 'ENOENT' }); await assert.rejects(fs.lstat(own.guiRoot), { code: 'ENOENT' })
+    })
+}

@@ -34,7 +34,13 @@ export async function prepareUbuntuRemovalRules(options: { installRoot: string; 
   }
   await current(); await verifyUbuntuRemovalNodeCopy(directory, original.proof); await current()
   options.signal.throwIfAborted()
-  const child = spawn('/usr/bin/pkexec', [path.join(directory, 'crabot-sandbox-helper'), '--prepare-removal', original.own.root], {
+  return prepareRuleAuthorization({ directory, installRoot: original.own.root, signal: options.signal, current })
+}
+
+// Same fixed helper handshake; callers retain their distinct host admission.
+async function prepareRuleAuthorization(options: { directory: string; installRoot: string; signal: AbortSignal; current: (removing?: boolean) => Promise<void> }) {
+  const { directory, current } = options
+  const child = spawn('/usr/bin/pkexec', [path.join(directory, 'crabot-sandbox-helper'), '--prepare-removal', options.installRoot], {
     cwd: directory, env: ubuntuDesktopEnvironment(process.env), stdio: ['pipe', 'pipe', 'pipe'],
   })
   let fault: Error | undefined, ready = false, confirmed = false, verified = false, closed = false
@@ -87,4 +93,26 @@ export async function prepareUbuntuRemovalRules(options: { installRoot: string; 
       close,
     }
   } catch (error) { await close(); throw error }
+}
+
+
+export async function prepareUbuntuInstallerRemovalRules(options: {
+  installRoot: string; operationId: string; signal: AbortSignal; bundle: string; verifyHost: () => Promise<void>
+}) {
+  options.signal.throwIfAborted()
+  if (process.platform !== 'linux' || process.getuid!() === 0 || process.getuid!() !== process.geteuid!()) throw failure()
+  const directory = fs.realpathSync(options.bundle), self = identity.inspectProcess(process.pid)
+  if (directory !== options.bundle || fs.realpathSync(process.cwd()) !== directory
+    || fs.realpathSync(process.execPath) !== path.join(directory, 'offline/core/.product-runtime/node/bin/node')) throw failure()
+  const { captureStoppedDesktopRemoval } = await import(new URL('./bootstrap/scripts/lib/desktop-removal-context.mjs', import.meta.url).href)
+  const original = await captureStoppedDesktopRemoval(options)
+  const current = async () => {
+    const actual = await captureStoppedDesktopRemoval(options)
+    await actual.proofCurrent(); actual.assertStopped()
+    if (actual.record.phase !== 'removing' || !same(actual.record, original.record) || !same(actual.own.record, original.own.record)
+      || !identity.sameProcess(self, identity.inspectProcess(process.pid)) || fs.realpathSync(process.cwd()) !== directory) throw failure()
+  }
+  await current(); await options.verifyHost(); await current()
+  options.signal.throwIfAborted()
+  return prepareRuleAuthorization({ directory, installRoot: original.own.root, signal: options.signal, current })
 }

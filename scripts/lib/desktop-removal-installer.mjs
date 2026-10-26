@@ -12,6 +12,7 @@ import { verifyDesktopGui, verifyDesktopPayload } from './desktop-payload.mjs'
 import { assertReinstallVersion } from './desktop-reinstall.mjs'
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b)
 const generation = stat => [stat.dev, stat.ino, stat.mode, stat.uid, stat.gid].join(':')
+const fileGeneration = stat => [stat.dev, stat.ino, stat.mode, stat.uid, stat.gid, stat.nlink, stat.size, stat.mtimeNs, stat.ctimeNs].join(':')
 const inside = (parent, child) => { const relative = path.relative(parent, child); return !relative || relative !== '..' && !relative.startsWith('..' + path.sep) && !path.isAbsolute(relative) }
 const fail = () => { throw Object.assign(new Error('离线安装器与卸载维护程序交接无法核验，剩余程序和数据已保留。'), { code: 'CRABOT_DESKTOP_REMOVAL' }) }
 export async function captureInstallerRemovalGuiHost({ installRoot, operationId, installerPayload, signal }) {
@@ -56,4 +57,55 @@ export async function captureInstallerRemovalGuiHost({ installRoot, operationId,
   return { record, proof, hostPayload: incoming.record, facts: { installation_id: own.record.installation_id, operation_id: operationId,
     source_selection: record.source_selection, source_installer: parent, host_gui: self,
     proof_sha256: createHash('sha256').update(JSON.stringify(proof) + '\n').digest('hex') } }
+}
+
+// Ubuntu's trusted offline installer already runs an independent bundled Node
+// outside the original program scope. No temporary runtime copy is necessary.
+export async function captureInstallerRemovalNodeHost({ installRoot, operationId, installerPayload, signal }) {
+  if (process.platform !== 'linux' || process.getuid() === 0 || process.getuid() !== process.geteuid()) fail()
+  signal?.throwIfAborted()
+  const own = installation.readDesktopInstallation(installRoot), { record, proof } = await readDesktopRemovalProof(own.root)
+  if (record.operation_id !== operationId || !['removing', 'completed'].includes(record.phase)
+    || !same(installation.readDesktopPairReference(own.root).selection, record.source_selection)) fail()
+  const incoming = await verifyDesktopPayload(installerPayload, { signal }), bundle = path.dirname(incoming.directory)
+  if (incoming.directory !== installerPayload || path.basename(incoming.directory) !== 'offline') fail()
+  assertReinstallVersion(record.source_selection.version, incoming.record.selection.version)
+  const self = identity.inspectProcess(process.pid), parent = self && identity.inspectProcess(self.parent)
+  const node = path.join(incoming.coreRoot, '.product-runtime/node/bin/node'), installer = path.join(bundle, 'crabot-installer')
+  if (!self || !parent || self.owner !== own.record.owner || parent.owner !== self.owner || !processBirthAtLeast(self.started, parent.started)
+    || physical.realpathSync(process.execPath) !== node || physical.realpathSync(self.executable) !== node
+    || physical.realpathSync(parent.executable) !== installer || physical.realpathSync(process.cwd()) !== bundle) fail()
+  const manifestFile = path.join(bundle, 'native-bootstrap.json'), manifestStat = physical.lstatSync(manifestFile)
+  if (!manifestStat.isFile() || manifestStat.isSymbolicLink() || manifestStat.size > 65536) fail()
+  const manifest = JSON.parse(physical.readFileSync(manifestFile, 'utf8'))
+  const release = JSON.parse(physical.readFileSync(path.join(incoming.coreRoot, 'core-release.json'), 'utf8'))
+  if (manifest.schema_version !== 1 || manifest.platform !== 'linux' || manifest.arch !== 'x64' || manifest.source_dirty !== false
+    || manifest.build_os !== 'ubuntu-24.04' || manifest.commit !== release.commit) fail()
+  const native = ['crabot-installer', 'crabot-sandbox-helper'].map(name => {
+    const file = path.join(bundle, name), stat = physical.lstatSync(file, { bigint: true }), expected = manifest.files?.[name]
+    if (!stat.isFile() || stat.isSymbolicLink() || !expected || !Number.isSafeInteger(expected.size) || expected.size < 20
+      || stat.size !== BigInt(expected.size) || stat.size > 10n * 1024n * 1024n || !(stat.mode & 0o111n)
+      || createHash('sha256').update(physical.readFileSync(file)).digest('hex') !== expected.sha256
+      || name === 'crabot-sandbox-helper' && expected.sha256 !== incoming.record.gui['resources/crabot-sandbox-helper']?.sha256) fail()
+    return [file, fileGeneration(stat)]
+  })
+  const programs = [[node, fileGeneration(physical.lstatSync(node, { bigint: true }))], ...native]
+  const directories = [bundle, path.dirname(node)].map(file => [file, generation(physical.lstatSync(file, { bigint: true }))])
+  const assertHostCurrent = () => {
+    if (!identity.sameProcess(self, identity.inspectProcess(process.pid)) || physical.realpathSync(process.cwd()) !== bundle) fail()
+    for (const [file, original] of directories) if (physical.realpathSync(file) !== file || generation(physical.lstatSync(file, { bigint: true })) !== original) fail()
+    for (const [file, original] of programs) {
+      const stat = physical.lstatSync(file, { bigint: true })
+      if (!stat.isFile() || stat.isSymbolicLink() || fileGeneration(stat) !== original) fail()
+    }
+  }
+  const actual = await readDesktopRemovalProof(own.root)
+  if (!same(actual.record, record) || !same(actual.proof, proof) || !same(installation.readDesktopInstallation(own.root).record, own.record)
+    || !same(installation.readDesktopPairReference(own.root).selection, record.source_selection)
+    || !identity.sameProcess(parent, identity.inspectProcess(parent.pid))) fail()
+  assertHostCurrent(); signal?.throwIfAborted()
+  return { record, proof, hostPayload: incoming.record, hostDirectory: bundle, assertHostCurrent,
+    verifyHost: async () => assertHostCurrent(),
+    facts: { installation_id: own.record.installation_id, operation_id: operationId, source_selection: record.source_selection,
+      source_installer: parent, host_node: self, proof_sha256: createHash('sha256').update(JSON.stringify(proof) + '\n').digest('hex') } }
 }

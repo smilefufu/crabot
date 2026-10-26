@@ -18,7 +18,7 @@ typedef struct {
   GSubprocess *backend, *authorization;
   GDataInputStream *output;
   char *bundle, *selected, *executable;
-  gboolean busy, failed, complete, cancelling, finalizing, smoke, authorization_pending;
+  gboolean busy, failed, complete, cancelling, finalizing, smoke, authorization_pending, retained_choice_pending, removing, removed;
 } Installer;
 static void status(Installer *s, const char *text) { gtk_label_set_text(s->status, text); }
 static void busy(Installer *s, gboolean value) {
@@ -32,15 +32,26 @@ static void busy(Installer *s, gboolean value) {
 }
 static void finish_if_idle(Installer *s) {
   // A late permission result must never reach a later installation attempt.
-  if (s->backend || s->authorization_pending || s->authorization) return;
-  s->cancelling = FALSE; busy(s, FALSE); gtk_widget_set_visible(s->open, s->complete);
-  if (!s->complete) gtk_button_set_label(GTK_BUTTON(s->install), "重试安装");
+  if (s->backend || s->authorization_pending || s->authorization || s->retained_choice_pending) return;
+  s->cancelling = FALSE; busy(s, FALSE); gtk_widget_set_visible(s->open, s->complete && !s->removed);
+  if (!s->complete) gtk_button_set_label(GTK_BUTTON(s->install), s->removing ? "重试" : "重试安装");
 }
 static void action(Installer *s, const char *value) {
   if (!s->backend) return;
   GOutputStream *input = g_subprocess_get_stdin_pipe(s->backend);
   g_autofree char *frame = g_strdup_printf("{\"action\":\"%s\"}\n", value);
   if (!g_output_stream_write_all(input, frame, strlen(frame), NULL, NULL, NULL)) s->failed = TRUE;
+}
+static void retained_chosen(GObject *source, GAsyncResult *result, gpointer data) {
+  Installer *s = data;
+  int choice = gtk_alert_dialog_choose_finish(GTK_ALERT_DIALOG(source), result, NULL);
+  s->retained_choice_pending = FALSE;
+  if (s->backend && !s->cancelling) {
+    s->removing = choice == 1;
+    if (s->removing) { s->finalizing = TRUE; gtk_widget_set_sensitive(s->cancel, FALSE); gtk_window_set_title(s->window, "卸载 Crabot"); }
+    action(s, choice == 0 ? "repair" : choice == 1 ? "continue_removal" : "cancel");
+  }
+  finish_if_idle(s);
 }
 static GSubprocessLauncher *launcher(GSubprocessFlags flags) {
   GSubprocessLauncher *launch = g_subprocess_launcher_new(flags);
@@ -79,6 +90,7 @@ static void permission_chosen(GObject *source, GAsyncResult *result, gpointer da
   g_subprocess_wait_check_async(s->authorization, NULL, authorization_finished, s);
 }
 static const char *failure_text(const char *code) {
+  if (!g_strcmp0(code, "removal")) return "卸载尚未完成，原数据与维护进度已保留。可重试，或选择保留数据重新安装。";
   if (!g_strcmp0(code, "CANCELLED")) return "安装已取消，准备记录已保留。可以使用同一安装包与位置继续。";
   if (!g_strcmp0(code, "ENOSPC") || !g_strcmp0(code, "CRABOT_UPDATE_SPACE")) return "磁盘空间不足。原目录已保留，请释放空间或选择其它安装位置。";
   if (!g_strcmp0(code, "CRABOT_CORE_INTEGRITY")) return "离线安装包不完整或已改变，请重新获取完整安装包。";
@@ -114,7 +126,24 @@ static gboolean frame(Installer *s, const char *line, gsize size) {
   if (!json_parser_load_from_data(parser, line, (gssize)size, NULL)) return FALSE;
   JsonNode *node = json_parser_get_root(parser); if (!node || !JSON_NODE_HOLDS_OBJECT(node)) return FALSE;
   JsonObject *object = json_node_get_object(node); const char *type = field(object, "type");
-  if (!g_strcmp0(type, "progress")) {
+  if (!g_strcmp0(type, "retained_choice_required")) {
+    if (s->retained_choice_pending || s->authorization_pending || s->authorization || s->complete) return FALSE;
+    if (s->cancelling) { action(s, "cancel"); return TRUE; }
+    s->retained_choice_pending = TRUE;
+    GtkAlertDialog *dialog = gtk_alert_dialog_new("检测到上次卸载中断，数据已保留");
+    gtk_alert_dialog_set_detail(dialog, "可以保留原数据重新安装，或继续移除本安装的程序和系统入口。工作区与工作依赖保持保留。");
+    const char *buttons[] = { "保留数据重新安装", "继续卸载", "取消", NULL };
+    gtk_alert_dialog_set_buttons(dialog, buttons); gtk_alert_dialog_set_cancel_button(dialog, 2); gtk_alert_dialog_set_default_button(dialog, 0);
+    gtk_alert_dialog_choose(dialog, s->window, NULL, retained_chosen, s); g_object_unref(dialog);
+  } else if (!g_strcmp0(type, "removal_progress")) {
+    const char *message = field(object, "message");
+    if (!s->removing || s->complete || !message || strlen(message) > 2048) return FALSE;
+    status(s, message); s->finalizing = TRUE; gtk_widget_set_sensitive(s->cancel, FALSE);
+  } else if (!g_strcmp0(type, "removed")) {
+    if (!s->removing || s->complete || s->failed) return FALSE;
+    s->removed = TRUE; s->complete = TRUE;
+    status(s, "Crabot 已卸载，用户数据、工作区和工作依赖均已保留。可用同版或更高版离线安装器重新安装。");
+  } else if (!g_strcmp0(type, "progress")) {
     const char *text = progress_text(field(object, "phase")); if (!text || s->complete) return FALSE;
     if (!s->cancelling) status(s, text);
     if (!g_strcmp0(field(object, "phase"), "registering") || !g_strcmp0(field(object, "phase"), "handing-off")) { s->finalizing = TRUE; gtk_widget_set_sensitive(s->cancel, FALSE); }
@@ -170,7 +199,7 @@ static void start_install(Installer *s) {
   g_autoptr(GSubprocessLauncher) launch = launcher(G_SUBPROCESS_FLAGS_STDIN_PIPE | G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDERR_SILENCE);
   s->backend = g_subprocess_launcher_spawn(launch, NULL, node, backend, s->selected, NULL);
   if (!s->backend) { status(s, "无法打开内置安装组件。请重新获取完整离线安装包，无需安装系统 Node。"); return; }
-  s->failed = FALSE; s->cancelling = FALSE; s->finalizing = FALSE; busy(s, TRUE); status(s, "正在核验离线安装组件…");
+  s->failed = FALSE; s->cancelling = FALSE; s->finalizing = FALSE; s->removing = FALSE; s->removed = FALSE; gtk_window_set_title(s->window, "安装 Crabot"); busy(s, TRUE); status(s, "正在核验离线安装组件…");
   s->output = g_data_input_stream_new(g_subprocess_get_stdout_pipe(s->backend));
   g_data_input_stream_set_newline_type(s->output, G_DATA_STREAM_NEWLINE_TYPE_LF);
   g_data_input_stream_read_line_async(s->output, G_PRIORITY_DEFAULT, NULL, read_frame, s);

@@ -9,19 +9,27 @@ import { registerInstallationEntries, registerRetainedInstallationEntries, readI
 import { ensureUbuntuProgramsReady, finishUbuntuInstallation, ubuntuInstallationFailure } from './ubuntu-installation.js'
 import { runUbuntuProcess, ubuntuDesktopEnvironment } from './ubuntu-process.js'
 import { probeUbuntuPrograms } from './ubuntu-program-probe.js'
-import { prepareRetainedDesktopReinstall } from './retained-reinstall.js'
+import { prepareRetainedDesktopReinstall, inspectRetainedDesktopRemoval } from './retained-reinstall.js'
+import { runUbuntuInstallerRemoval } from './ubuntu-installer-removal.js'
 const directory = path.dirname(fileURLToPath(import.meta.url)), bundle = path.resolve(directory, '../..')
 const abort = new AbortController()
 const emit = (type: string, fields: Record<string, unknown> = {}) => process.stdout.write(JSON.stringify({ type, ...fields }) + '\n')
 let authorization: { resolve: () => void; reject: (error: Error) => void } | undefined
+let retainedChoice: { resolve: (choice: 'repair' | 'remove') => void; reject: (error: Error) => void } | undefined
+let continuingRemoval = false
+const rejectPending = (error: Error) => { authorization?.reject(error); authorization = undefined; retainedChoice?.reject(error); retainedChoice = undefined }
 const input = createInterface({ input: process.stdin, crlfDelay: Infinity })
 input.on('line', line => {
-  if (line === '{"action":"cancel"}') { abort.abort(); authorization?.reject(new Error('Cancelled')); return }
+  if (line === '{"action":"cancel"}') { if (!continuingRemoval) abort.abort(); rejectPending(new Error('Cancelled')); return }
+  if (retainedChoice && (line === '{"action":"repair"}' || line === '{"action":"continue_removal"}')) {
+    retainedChoice.resolve(line === '{"action":"repair"}' ? 'repair' : 'remove'); retainedChoice = undefined; return
+  }
   if (line === '{"action":"authorized"}' && authorization) { authorization.resolve(); authorization = undefined; return }
   if (line === '{"action":"denied"}' && authorization) { authorization.reject(Object.assign(new Error('OS authorization rejected'), { code: 'CRABOT_INSTALL_SYSTEM_AUTHORIZATION' })); authorization = undefined; return }
-  abort.abort(); authorization?.reject(new Error('Invalid installer action')); authorization = undefined
+  if (!continuingRemoval) abort.abort(); rejectPending(new Error('Invalid installer action'))
 })
-input.on('close', () => { abort.abort(); authorization?.reject(new Error('Installer closed')) })
+input.on('close', () => { if (!continuingRemoval) abort.abort(); rejectPending(new Error('Installer closed')) })
+process.stdout.on('error', () => { if (!continuingRemoval) { abort.abort(); rejectPending(new Error('Installer display unavailable')) } })
 process.on('SIGTERM', () => abort.abort())
 
 async function main() {
@@ -42,6 +50,19 @@ async function main() {
     await assertFreshUserInstallation({ home: homedir(), source: process.env })
   }
   const payload = path.join(bundle, 'offline'), installRoot = path.resolve(process.argv[2])
+  const retainedState = await inspectRetainedDesktopRemoval(installRoot), removal = retainedState?.record
+  if (retainedState?.canContinue) {
+    abort.signal.throwIfAborted()
+    const action = await new Promise<'repair' | 'remove'>((resolve, reject) => { retainedChoice = { resolve, reject }; emit('retained_choice_required') })
+    abort.signal.throwIfAborted()
+    if (action === 'remove') {
+      continuingRemoval = true
+      const result = await runUbuntuInstallerRemoval({ payload, installRoot, operationId: removal.operation_id, signal: abort.signal,
+        progress: message => emit('removal_progress', { message }) })
+      if (result !== 'completed') throw Object.assign(new Error('Removal remains incomplete'), { code: 'CRABOT_DESKTOP_REMOVAL' })
+      emit('removed'); return
+    }
+  }
   const product = createRequire(import.meta.url)('./bootstrap/scripts/lib/product-runtime.cjs')
   const inspectPrepared = async (prepared: PreparedInstallation) => {
     const inspected = await runUbuntuProcess(path.join(bundle, 'crabot-sandbox-helper'), ['--inspect', prepared.installRoot], ubuntuDesktopEnvironment(process.env), 60_000, abort.signal)
@@ -81,6 +102,6 @@ async function main() {
   emit('complete', { executable: installed.executable })
 }
 void main().catch(error => {
-  emit('failed', ubuntuInstallationFailure(error, abort.signal.aborted))
+  emit('failed', continuingRemoval ? { code: 'removal' } : ubuntuInstallationFailure(error, abort.signal.aborted))
   process.exitCode = abort.signal.aborted ? 2 : 1
 }).finally(() => { input.close(); process.stdin.destroy() })

@@ -4,6 +4,23 @@ import { lstat } from 'node:fs/promises'
 import path from 'node:path'
 import type { PreparedInstallation } from './installation-entries.js'
 const load = (name: string): Promise<any> => import(new URL('./bootstrap/scripts/lib/' + name, import.meta.url).href)
+// Read-only UI facts. An interrupted repair must resume repair; its newly
+// prepared programs are outside the original uninstall proof's deletion scope.
+export async function inspectRetainedDesktopRemoval(installRoot: string): Promise<{ record: any; canContinue: boolean } | null> {
+  const exists = async (file: string) => {
+    try { await lstat(file); return true }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false; throw error }
+  }
+  if (!await exists(path.join(installRoot, '.desktop-removal.json'))) return null
+  const { readDesktopRemoval } = await load('desktop-removal-record.cjs')
+  const installation = await load('desktop-installation.cjs')
+  const own = installation.readDesktopInstallation(installRoot), record = readDesktopRemoval(own.root)
+  const pending = await Promise.all([path.join(own.root, '.desktop-installing.json'), path.join(own.dataDir, 'desktop-maintenance.json')].map(exists))
+  const selected = installation.readDesktopPairReference(own.root).selection
+  return { record, canContinue: record.phase === 'removing' && !pending.some(Boolean)
+    && JSON.stringify(selected) === JSON.stringify(record.source_selection) }
+}
+
 export async function prepareRetainedDesktopReinstall(options: {
   payload: string; installRoot: string; signal: AbortSignal
   registerEntries: (prepared: PreparedInstallation, operationId: string) => Promise<void>

@@ -2,14 +2,14 @@
 import { app, dialog, shell } from 'electron'
 import path from 'node:path'
 import { homedir, tmpdir } from 'node:os'
-import { mkdtemp, lstat } from 'node:fs/promises'
+import { mkdtemp } from 'node:fs/promises'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { z } from 'crabot-client'
 import { registerInstallationEntries, registerRetainedInstallationEntries, readInstallationLocator, type PreparedInstallation } from './installation-entries.js'
 import { createInstallationProgressWindow } from './installation-progress-window.js'
-import { prepareRetainedDesktopReinstall } from './retained-reinstall.js'
+import { prepareRetainedDesktopReinstall, inspectRetainedDesktopRemoval } from './retained-reinstall.js'
 const directory = path.dirname(fileURLToPath(import.meta.url))
 app.setName('安装 Crabot')
 const preparedSchema = z.object({ installRoot: z.string().min(1), installation_id: z.uuid(), coreRoot: z.string().min(1), guiRoot: z.string().min(1),
@@ -59,9 +59,8 @@ async function boot() {
     preselected = false
     if (chosen.canceled || chosen.filePaths.length !== 1) return
     selected = chosen.filePaths[0]
-    const { readDesktopRemoval } = await import(pathToFileURL(path.join(directory, 'bootstrap/scripts/lib/desktop-removal-record.cjs')).href)
-    const removal = await lstat(path.join(selected, '.desktop-removal.json')).then(() => readDesktopRemoval(selected), error => { if (error.code === 'ENOENT') return null; throw error })
-    if (removal?.phase === 'removing') {
+    const retainedState = await inspectRetainedDesktopRemoval(selected), removal = retainedState?.record
+    if (retainedState?.canContinue) {
       const action = await dialog.showMessageBox({ type: 'question', title: '卸载尚未完成', message: '检测到上次卸载中断，数据已保留。',
         detail: `安装位置：${selected}\n可以保留数据重新安装，或继续移除本安装的程序和系统入口。`,
         buttons: ['保留数据重新安装', '继续卸载', '取消'], defaultId: 0, cancelId: 2, noLink: true })

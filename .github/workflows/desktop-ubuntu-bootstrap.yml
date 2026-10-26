@@ -11,6 +11,11 @@ on:
       - 'crabot-desktop/src/ubuntu-removal-progress.ts'
       - 'crabot-desktop/src/ubuntu-removal-rules.ts'
       - 'crabot-desktop/src/ubuntu-removal-host.ts'
+      - 'crabot-desktop/src/ubuntu-installer-backend.ts'
+      - 'crabot-desktop/src/ubuntu-installer-removal.ts'
+      - 'crabot-desktop/tests/ubuntu-installer-removal.test.mjs'
+      - 'crabot-desktop/tests/fixtures/ubuntu-installer-removal-actor.mjs'
+      - 'scripts/lib/desktop-removal-installer.mjs'
       - 'crabot-desktop/src/removal-source.ts'
       - 'crabot-desktop/tests/removal-frame.test.mjs'
       - 'crabot-desktop/tests/fixtures/removal-frame-actor.cjs'
@@ -43,6 +48,11 @@ on:
       - 'crabot-desktop/src/ubuntu-removal-progress.ts'
       - 'crabot-desktop/src/ubuntu-removal-rules.ts'
       - 'crabot-desktop/src/ubuntu-removal-host.ts'
+      - 'crabot-desktop/src/ubuntu-installer-backend.ts'
+      - 'crabot-desktop/src/ubuntu-installer-removal.ts'
+      - 'crabot-desktop/tests/ubuntu-installer-removal.test.mjs'
+      - 'crabot-desktop/tests/fixtures/ubuntu-installer-removal-actor.mjs'
+      - 'scripts/lib/desktop-removal-installer.mjs'
       - 'crabot-desktop/src/removal-source.ts'
       - 'crabot-desktop/tests/removal-frame.test.mjs'
       - 'crabot-desktop/tests/fixtures/removal-frame-actor.cjs'
@@ -112,7 +122,7 @@ jobs:
           (cd crabot-desktop && node -e "require('electron')")
           node crabot-desktop/node_modules/typescript/bin/tsc -p crabot-desktop/tsconfig.json
           (cd crabot-desktop && node build-preload.mjs)
-          node --test scripts/desktop/ubuntu-maintenance-backend.test.mjs
+          node --test scripts/desktop/ubuntu-maintenance-backend.test.mjs crabot-desktop/tests/ubuntu-installer-removal.test.mjs
       - name: Actual private Node-to-GTK window handoff without business services
         timeout-minutes: 2
         env:
@@ -126,7 +136,7 @@ jobs:
         run: |
           cc -std=c11 -Wall -Wextra -Werror -O2 -DCRABOT_MAINTENANCE_ACTOR crabot-desktop/tests/native/ubuntu-maintenance.c -o .desktop-build/crabot-maintenance-actor $(pkg-config --cflags --libs gtk4 json-glib-1.0)
           timeout 150s dbus-run-session -- xvfb-run -a node --test --test-name-pattern=publish-source-remove-source crabot-desktop/tests/removal-frame.test.mjs
-      - name: Prepare only the private Node and fixed maintenance resources
+      - name: Verify private Node hosts and offline installer continuation
         timeout-minutes: 3
         env:
           CRABOT_GTK_FRONTEND: ${{ github.workspace }}/.desktop-build/ubuntu-bootstrap/crabot-maintenance

@@ -1806,3 +1806,24 @@ for (const mode of ['same', 'higher', 'completed', 'older', 'wrong-operation', '
     assert.equal(await fs.readFile(path.join(f.target, 'data/retained-user-file'), 'utf8'), 'user content')
   })
 }
+
+for (const mode of ['none', 'removing', 'stopping', 'completed', 'installing', 'data-maintenance', 'new-pair']) {
+  test('installer offers continuation only before retained repair has prepared another program set: ' + mode, async t => {
+    const f = await removalProofFixture(t)
+    f.record.phase = ['stopping', 'completed'].includes(mode) ? mode : 'removing'
+    if (mode === 'none') await fs.unlink(path.join(f.target, '.desktop-removal.json'))
+    else await f.publish()
+    if (mode === 'installing') await fs.writeFile(path.join(f.target, '.desktop-installing.json'), '{}', { mode: 0o600 })
+    if (mode === 'data-maintenance') await fs.writeFile(path.join(f.target, 'data/desktop-maintenance.json'), '{}', { mode: 0o600 })
+    if (mode === 'new-pair') await fs.writeFile(path.join(f.target, 'current-release.json'), JSON.stringify({ ...f.selection, gui_id: randomUUID() }) + '\n')
+    const file = path.join(f.target, '.desktop-removal.json'), before = mode === 'none' ? null : await fs.readFile(file)
+    const { inspectRetainedDesktopRemoval } = await import('../../../crabot-desktop/dist/retained-reinstall.js')
+    const actual = await inspectRetainedDesktopRemoval(f.target)
+    if (mode === 'none') { assert.equal(actual, null); await assert.rejects(fs.lstat(file), { code: 'ENOENT' }) }
+    else {
+      assert.deepEqual(actual.record, f.record); assert.equal(actual.canContinue, mode === 'removing')
+      assert.deepEqual(await fs.readFile(file), before)
+    }
+    assert.equal(await fs.readFile(path.join(f.target, 'data/retained-user-file'), 'utf8'), 'user content')
+  })
+}
