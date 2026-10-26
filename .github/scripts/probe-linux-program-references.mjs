@@ -1,6 +1,6 @@
 // Bounded read-only CI diagnosis; raw unknown receipts are never filtered.
 import assert from 'node:assert/strict'
-import { promises as fs } from 'node:fs'
+import physical, { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { homedir } from 'node:os'
 import { execFile } from 'node:child_process'
@@ -22,7 +22,7 @@ async function describe(pid) {
       return { image, uid: value.uid, mode: value.mode & 0o777 }
     } catch (error) { return { error: error.code } }
   }
-  const value = { pid, parent, started, fork_without_exec, comm: (await fs.readFile(prefix + '/comm', 'utf8')).trim().slice(0, 64),
+  const value = { pid, parent, started, fork_without_exec, cgroup: (await fs.readFile(prefix + '/cgroup', 'utf8')).trim(), comm: (await fs.readFile(prefix + '/comm', 'utf8')).trim().slice(0, 64),
     executable: await readImage(pid), parent_executable: await readImage(parent) }
   const after = await fs.readFile(prefix + '/stat', 'utf8')
   const current = after.slice(after.lastIndexOf(')') + 2).trim().split(/\s+/)
@@ -57,9 +57,13 @@ if (process.argv[2] === '--identity') {
         control_group: properties.ControlGroup, image: /\bpath=([^;]+?)\s*;/.exec(properties.ExecStart)?.[1] }
     } catch (error) { manager = { unavailable: error.code || error.name } }
     const classified = receipt.complete || classify(receipt)
+    const system_images = await Promise.all(['/usr/bin/systemctl', '/usr/bin/getconf', '/usr/lib/systemd/systemd', '/usr/lib/systemd/systemd-executor'].map(async file => {
+      try { const stat = await fs.lstat(file); return { file, canonical: await fs.realpath(file), uid: stat.uid, mode: stat.mode & 0o777, regular: stat.isFile() } }
+      catch (error) { return { file, error: error.code } }
+    }))
+    console.log('CRABOT_EMPTY_PROGRAM_REFERENCES ' + JSON.stringify({ classified, system_images, ticks: physical.existsSync('/usr/bin/getconf') ? (await promisify(execFile)('/usr/bin/getconf', ['CLK_TCK'])).stdout.trim() : null, manager, complete: receipt.complete, incomplete: receipt.incomplete,
+      references: receipt.processes.length, unknown_count: receipt.unknown_pids.length, unknown, ordinary, privileged }))
     assert.equal(classified, true, 'Default system roles must not block an empty owned directory')
     assert.equal(classify({ ...receipt, processes: [{ pid: process.pid }] }), false, 'An explicit program reference must still block')
-    console.log('CRABOT_EMPTY_PROGRAM_REFERENCES ' + JSON.stringify({ classified, manager, complete: receipt.complete, incomplete: receipt.incomplete,
-      references: receipt.processes.length, unknown_count: receipt.unknown_pids.length, unknown, ordinary, privileged }))
   } finally { await fs.rmdir(directory) }
 }
