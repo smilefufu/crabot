@@ -3344,6 +3344,16 @@ describe('normal fixed-job Admin completion preparation', () => {
         expect(typeof cold.releaseWorkspaceRecoveryCompletion).toBe('function')
         expect(typeof cold.resumeWorkspaceRecoveryWeb).toBe('function')
         const grant = cold.workspaceRecoveryFinalizationGrant
+        if (mode === 'Agent') {
+          const completion = path.join(f.data, 'workspace-control/relocation-history', request.intent_id, 'relocation-complete.json')
+          const open = vi.spyOn(syncFs, 'openSync')
+          try {
+            grant.verify()
+            expect(open.mock.calls.filter(([file]) => file === completion)).toHaveLength(1)
+            grant.verify()
+            expect(open.mock.calls.filter(([file]) => file === completion)).toHaveLength(2)
+          } finally { open.mockRestore() }
+        }
         const finalization = async (params: any, bearer?: string) => {
           const response = await fetch(`http://127.0.0.1:${cold.config.port}/verify_workspace_relocation_recovery_finalization`, { method: 'POST',
             headers: { 'Content-Type': 'application/json', ...(bearer ? { Authorization: 'Bearer ' + bearer } : {}) },

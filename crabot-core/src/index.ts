@@ -2765,13 +2765,13 @@ export class ModuleManager {
             } else await health.verify()
             grant!.verify()
           }, verify: () => {
-            try {
+            try { return require('../../scripts/lib/workspace-relocation-intent.mjs').observeWorkspaceRelocationRecords(() => {
               verifyActors()
               if (context.readScope().released) {
                 if (!grant!.releasedHealth) throw failure()
                 grant!.releasedHealth.assertCurrent()
               } else health.assertCurrent()
-            } catch (cause) { grant!.revoked = true; coordinator.close(); throw Object.assign(failure(), { cause }) }
+            }) } catch (cause) { grant!.revoked = true; coordinator.close(); throw Object.assign(failure(), { cause }) }
           } }
         if (this.workspaceRecoveryFinalizationGrant) this.workspaceRecoveryFinalizationGrant.revoked = true
         this.workspaceRecoveryFinalizationGrant = grant; grant.verify()
