@@ -169,6 +169,45 @@ with tempfile.TemporaryDirectory(prefix='Crabot namespace 用户 *?[]{}@{HOME} \
     run(False, '--inspect-update', update_gui=next_gui)
     put(f'app/releases/{next_gui}/resources/desktop-release.json', next_selection)
     run(option='--inspect-update', update_gui=next_gui)
+    def removal_record(phase='stopping'):
+        operation = str(uuid.uuid4())
+        proof = {'schema_version': 1, 'installation_id': ident, 'operation_id': operation, 'source_selection': selection,
+                 'payload': payload, 'core': {'release': encode({'schema_version': 1, 'version': version, 'inventory_sha256': core,
+                                                               'platform': 'linux', 'arch': 'x64'}).decode(),
+                                             'inventory': encode(index).decode(),
+                                             'host': encode({'schema_version': 2, 'platform': 'linux', 'arch': 'x64'}).decode()}}
+        proof_file = put(f'app/removals/{operation}/proof.json', proof)
+        record = {'schema_version': 1, 'installation_id': ident, 'operation_id': operation, 'source_selection': selection,
+                  'phase': phase, 'proof_sha256': sha(encode(proof))}
+        return put('.desktop-removal.json', record), proof_file, record
+
+    fence_file, removal_proof, removal = removal_record()
+    assert run(option='--inspect-removal').stdout == output
+    run(False, '--unregister')  # No privilege acquired by supplying a job file.
+    for phase in ['preparing', 'completed']:
+        put('.desktop-removal.json', {**removal, 'phase': phase})
+        run(False, '--inspect-removal')
+    put('.desktop-removal.json', removal)
+    proof_bytes = removal_proof.read_bytes()
+    removal_proof.write_bytes(proof_bytes + b' ')
+    run(False, '--inspect-removal')
+    removal_proof.write_bytes(proof_bytes)
+    removal_proof.chmod(0o644)
+    run(False, '--inspect-removal')
+    removal_proof.chmod(0o600)
+    put('.desktop-removal.json', {**removal, 'operation_id': str(uuid.uuid4())})
+    run(False, '--inspect-removal')
+    put('.desktop-removal.json', removal)
+    # Exact history remains inspectable after program deletion; it never loads
+    # or executes a missing Core and never touches any business directory.
+    old_core = root / f'releases/{core}'
+    retained_core = root / 'finite-retained-core'
+    old_core.rename(retained_core)
+    gui_file.unlink()
+    assert run(option='--inspect-removal').stdout == output
+    retained_core.rename(old_core)
+    put(f'app/releases/{gui}/crabot-desktop', binary, 0o755)
+    fence_file.unlink()
     put('.desktop-installing.json', saved)
     if args.namespace_probe:
         restriction = Path('/proc/sys/kernel/apparmor_restrict_unprivileged_userns')
@@ -212,6 +251,48 @@ with tempfile.TemporaryDirectory(prefix='Crabot namespace 用户 *?[]{}@{HOME} \
             assert subprocess.run([str(neighbor)], timeout=5).returncode == 13
             assert restriction.read_bytes() == original_setting
             print('CRABOT_KERNEL_NAMESPACE_ACCEPTANCE: actual denial -> exact roles allowed; neighbor denied; global setting unchanged; no GUI/Polkit claim')
+            fence_file, removal_proof, removal = removal_record()
+            removal_bytes, proof_bytes = fence_file.read_bytes(), removal_proof.read_bytes()
+            def unregister():
+                return subprocess.run(['/usr/bin/sudo', '/usr/bin/env', 'PKEXEC_UID=' + str(os.getuid()), helper, '--unregister', tmp],
+                                      capture_output=True, text=True, timeout=120)
+            # A real labeled finite child still in use must preserve every rule.
+            held = subprocess.Popen([str(gui_file), '--hold'], stdout=subprocess.PIPE, text=True)
+            try:
+                assert held.stdout.readline().strip() == 'CRABOT_NAMESPACE_HOLD'
+                blocked = unregister()
+                assert blocked.returncode != 0 and 'system-policy-in-use' in blocked.stderr
+                assert identities == [(file.stat().st_dev, file.stat().st_ino, file.read_bytes()) for file in old_policies]
+            finally:
+                held.terminate()
+                held.wait(timeout=5)
+            # Administrator edits are preserved before any of the other rules
+            # are unloaded. Restore only this explicitly made fixture edit.
+            original_policy = old_policies[0].read_bytes()
+            customized = original_policy + b'# finite administrator fixture edit\n'
+            subprocess.run(['/usr/bin/sudo', '/usr/bin/tee', str(old_policies[0])], input=customized, stdout=subprocess.DEVNULL, check=True, timeout=5)
+            try:
+                blocked = unregister()
+                assert blocked.returncode != 0 and 'system-policy-conflict' in blocked.stderr
+                assert old_policies[0].read_bytes() == customized
+                assert all(file.exists() for file in old_policies)
+            finally:
+                assert old_policies[0].read_bytes() == customized
+                subprocess.run(['/usr/bin/sudo', '/usr/bin/tee', str(old_policies[0])], input=original_policy, stdout=subprocess.DEVNULL, check=True, timeout=5)
+            # Simulate an interrupted cleanup with one already unloaded/deleted
+            # exact fixture rule. The retry reads actual kernel/file state.
+            subprocess.run(['/usr/bin/sudo', '/usr/sbin/apparmor_parser', '-R', '-T', '-K', '--', str(old_policies[0])], check=True, timeout=90)
+            subprocess.run(['/usr/bin/sudo', '/usr/bin/rm', '--', str(old_policies[0])], check=True, timeout=5)
+            for _ in range(2):
+                result = unregister()
+                assert result.returncode == 0, result.stderr
+            assert not any(file.exists() for file in old_policies)
+            assert subprocess.run([str(gui_file)], timeout=5).returncode == 13
+            assert subprocess.run([str(chrome_file)], timeout=5).returncode == 13
+            assert subprocess.run([str(next_gui_file)], timeout=5).returncode == 0
+            assert restriction.read_bytes() == original_setting
+            assert fence_file.read_bytes() == removal_bytes and removal_proof.read_bytes() == proof_bytes
+            print('CRABOT_KERNEL_REMOVAL_ACCEPTANCE: active profile blocked; administrator edit preserved; partial/repeated exact cleanup; other GUI rule retained; job unchanged')
         finally:
             # All test executables above exited; preserve unknown or changed rules.
             for file in policies:
