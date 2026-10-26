@@ -7,6 +7,7 @@ import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { randomUUID } from 'node:crypto'
 import native from '../process-identity.cjs'
+import { probeKnownProcessExit } from '../known-process-exit.cjs'
 import management from '../desktop-management.cjs'
 import { acquireCliLock, releaseCliLock } from '../cli-lock.mjs'
 import { WorkspaceCatalog } from '../../../crabot-shared/dist/workspace-catalog.js'
@@ -122,7 +123,7 @@ test('the cumulative journal keeps a detached descendant after the original pare
   assert.throws(f.complete, { code: 'WORKSPACE_RELOCATION_INVALID' })
   native.terminateKnownProcess(descendant)
   const deadline = Date.now() + 5000
-  while (!native.isProcessExited(descendant.pid)) { assert.ok(Date.now() < deadline); await new Promise(resolve => setTimeout(resolve, 10)) }
+  while (probeKnownProcessExit([descendant]).state !== 'stopped') { assert.ok(Date.now() < deadline); await new Promise(resolve => setTimeout(resolve, 10)) }
   f.complete()
   assert.deepEqual(records.readWorkspaceRelocationProcessStops(f.data, f.id).observations.at(-1).processes, processes)
 })

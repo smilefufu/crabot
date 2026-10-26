@@ -151,6 +151,10 @@ for (const installer of [false, true]) test('protected GUI and installer require
 for (const member of ['scripts/desktop/legacy-releases.json', 'scripts/lib/legacy-desktop.mjs', 'scripts/lib/legacy-release-identity.mjs', 'scripts/lib/legacy-release-files.mjs', 'scripts/lib/mode.mjs']) {
   test('installer cannot omit an independent legacy discovery dependency: ' + member, async t => {
     const f = await fixture(t, false, true, undefined, ['dist/bootstrap/' + member])
-    assert.throws(() => verifyInstallerAsar(asar, f, process.platform), error => { assert.ok(error.message.includes(member)); return true })
+    for (const [reader, platform] of [[asar, process.platform], [windowsFilesystem(f), 'win32']]) {
+      assert.throws(() => verifyInstallerAsar(reader, f, platform), error => {
+        assert.ok(error.message.replaceAll('\\', '/').includes(member)); return true
+      })
+    }
   })
 }
