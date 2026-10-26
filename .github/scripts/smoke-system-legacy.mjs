@@ -37,6 +37,8 @@ const releases = [
   { version: 'v2026.10.14.1', size: 439564473, sha256: 'dc665e8fbce97cb3a815beac4931d71b141e042a9052c0a859eda954be452ea5' },
   { version: 'v2026.10.15.1', size: 439576227, sha256: '735c56bdc74b12a67b8d889fa211aa35dc916b20d2b509262d51898307bb3f64' },
 ]
+const selectedVersion = process.argv[4] || 'all'
+assert.ok(selectedVersion === 'all' || releases.some(release => release.version === selectedVersion))
 const reports = [], ownedOsFiles = ['/etc/crabot', '/usr/local/bin/crabot', '/etc/systemd/user/crabot.service', '/etc/logrotate.d/crabot']
 // GitHub images can make this root-owned command directory world-writable.
 // Match the shared-install prerequisite only on this disposable hosted runner.
@@ -82,7 +84,7 @@ async function download(release, file) {
   const hash = createHash('sha256'); for await (const chunk of createReadStream(file)) hash.update(chunk)
   assert.equal(hash.digest('hex'), release.sha256)
 }
-for (const release of releases) {
+for (const release of releases.filter(release => selectedVersion === 'all' || release.version === selectedVersion)) {
   const id = randomUUID().slice(0, 8), base = '/var/lib/crabot-legacy-acceptance-' + id, old = path.join(base, 'old'), managed = path.join(old, '.managed')
   const users = [], registry = new SystemRegistry(), store = new SystemOperationStore(registry)
   let ownOs = false, ownBase = false, core
@@ -195,10 +197,11 @@ for (const release of releases) {
     reports.push({ version: release.version, published_archive_sha256: release.sha256, actual_uid_count: users.length,
       ordinary_installer: true, stopped_instances_preserved: true, original_ports_and_data: true, credentials_and_history_preserved: true,
       repeated_install_no_new_job: true, recovery_preview_readonly: true, actual_old_runtime_started: oldRunning, original_running_set_restored: oldRunning, business_model_calls: 0 })
-    await fs.writeFile(evidence, JSON.stringify({ schema_version: 1, cases: reports }, null, 2) + '\n')
+    await fs.writeFile(evidence, JSON.stringify({ schema_version: 1, requested_versions: selectedVersion === 'all' ? releases.map(release => release.version) : [selectedVersion], cases: reports }, null, 2) + '\n')
     console.log('CRABOT_LEGACY_ACCEPTANCE ' + JSON.stringify({ version: release.version, phase: oldRunning ? 'passed-original-running-set-conversion' : 'passed-stopped-conversion' }))
   } catch (error) {
-    console.error('CRABOT_LEGACY_ACCEPTANCE ' + JSON.stringify({ version: release.version, phase: 'failed', code: error.code ?? 'ACCEPTANCE_FAILED' }))
+    console.error('CRABOT_LEGACY_ACCEPTANCE ' + JSON.stringify({ version: release.version, phase: 'failed', code: error.code ?? 'ACCEPTANCE_FAILED',
+      stdout: typeof error.stdout === 'string' ? error.stdout.slice(-8192) : null, stderr: typeof error.stderr === 'string' ? error.stderr.slice(-8192) : null }))
     throw error
   } finally {
     if (ownOs) {
