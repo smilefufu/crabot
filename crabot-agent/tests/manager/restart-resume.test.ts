@@ -970,9 +970,12 @@ describe('Manager restart continuation', () => {
     expect(accepted).not.toHaveBeenCalled()
   })
 
-  it('恢复运行中注入的 guidance，不丢失、不重复，且不修改普通 system 或持久历史', async () => {
+  it.each([0, 1100])('恢复运行中注入的 guidance，不丢失、不重复，且不修改普通 system 或持久历史（工具延迟 %i ms）', async delay => {
     const requests: LLMStreamParams[] = []
+    let markPaused!: () => void
+    const paused = new Promise<void>(resolve => { markPaused = resolve })
     const inject = defineTool({ name: 'inject', description: 'fixture', inputSchema: {}, call: async () => {
+      if (delay) await new Promise(resolve => setTimeout(resolve, delay))
       const loop = old.getOrCreate(KEY)
       const clock = { received_at: '2026-09-06T22:05:00+08:00', timezone: 'Asia/Shanghai' }
       loop.enqueueDuringEpisode({ ...clock, wake: { kind: 'worker_event', event: {
@@ -985,9 +988,10 @@ describe('Manager restart continuation', () => {
     const old = registry({ async *stream(params) {
       requests.push({ ...params, messages: [...params.messages] })
       if (requests.length === 1) yield* chunksFromContent([{ type: 'tool_use', id: 'inject-once', name: 'inject', input: {} }], 'tool_use')
-      else await new Promise(() => {})
+      else { markPaused(); await new Promise(() => {}) }
     }, updateConfig() {} }, { toolFace: () => [inject] })
     void old.routeHumanMessages('feishu', 'restart-test', [message('original', 'Continue')])
+    await paused
     const checkpoint = await checkpointWhere(value => value.turns.length === 1 && requests.length === 2)
     expect(checkpoint.transientMessageIds).toHaveLength(4)
     const restored = registry({ async *stream(params) {
