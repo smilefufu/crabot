@@ -281,3 +281,24 @@ test('Windows final file ownership is checked again after its byte match', { ski
     assert.equal(await fs.readFile(path.join(f.data, 'user.txt'), 'utf8'), 'preserved data and runtime bases')
   } finally { for (const lock of held.reverse()) locks.releaseCliLock(lock) }
 })
+
+test('verified unrelated protected macOS service no longer blocks proven private program deletion', { skip: process.platform !== 'darwin' }, async t => {
+  const f = await fixture(t), locks = await import('../cli-lock.mjs'), held = []
+  const inspect = identity.inspectProcess, service = { pid: 2147483000, parent: 1, owner: inspect(process.pid).owner,
+    started: '100:1', executable: '/usr/libexec/lsd' }
+  try {
+    held.push(await locks.acquireExistingCliLock(f.root, 'fixture-protected-system'))
+    held.push(await locks.acquireExistingCliLock(f.data, 'fixture-protected-system'))
+    t.mock.method(identity, 'listProcessIds', () => [service.pid])
+    t.mock.method(identity, 'inspectProcess', pid => pid === service.pid ? { ...service } : inspect(pid))
+    const observation = { complete: false, incomplete: false, processes: [], unknown_pids: [service.pid],
+      unknown_details: [{ pid: service.pid, stage: 'descriptor_details', os_error: 1 }] }
+    t.mock.method(identity, 'inspectProgramReferences', async () => observation)
+    const { removeDesktopRemovalPrograms } = await import('../desktop-removal-delete.mjs')
+    const result = await removeDesktopRemovalPrograms({ installRoot: f.root, operationId: f.operationId })
+    assert.ok(result.removed.length >= 7); assert.equal(result.retained.length, 0)
+    assert.equal(observation.complete, false); assert.deepEqual(observation.unknown_pids, [service.pid])
+    assert.equal(await fs.readFile(path.join(f.data, 'user.txt'), 'utf8'), 'preserved data and runtime bases')
+    assert.equal(JSON.parse(await fs.readFile(path.join(f.root, '.desktop-removal.json'))).phase, 'removing')
+  } finally { for (const lock of held.reverse()) locks.releaseCliLock(lock) }
+})

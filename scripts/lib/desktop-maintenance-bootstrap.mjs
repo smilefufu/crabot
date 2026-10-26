@@ -14,6 +14,7 @@ export const desktopMaintenanceBootstrap = Object.freeze([
   'scripts/lib/workspace-data-compat.mjs',
   'scripts/lib/desktop-removal-context.mjs',
   'scripts/lib/desktop-removal-delete.mjs',
+  'scripts/lib/desktop-removal-system-processes.mjs',
   'scripts/lib/desktop-removal-frame.mjs',
   'scripts/lib/desktop-removal-job.mjs',
   'scripts/lib/desktop-removal-source.mjs',
