@@ -34,7 +34,7 @@ export async function captureWorkspaceRelocationRecovery(dataDir: string, { sign
   const check = () => { if (signal?.aborted) throw failure('aborted') }
   check()
   try {
-    const root = management.requirePrivateDataRoot(dataDir) as string
+    const root = management.requireExistingDataRoot(dataDir) as string
     const remember = (relative: string, optional = false): boolean => {
       check()
       if (frames.has(relative)) return true

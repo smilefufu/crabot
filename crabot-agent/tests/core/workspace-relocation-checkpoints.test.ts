@@ -29,6 +29,24 @@ for (const kind of ['manager', 'request'] as const) describe('fixed ' + kind + '
   })
   afterEach(async () => { await fs.rm(root, { recursive: true, force: true }) })
 
+  it.skipIf(process.platform === 'win32')('archives under a legacy 0755 data root while keeping private history', async () => {
+    await fs.chmod(data, 0o755)
+    const result = await archiveWorkspaceRelocationCheckpoint(options)
+    expect(result.dispatch).toBe('dispatch')
+    expect(await fs.readFile(path.join(archive, 'checkpoint.json'))).toEqual(original)
+    expect((await fs.stat(data)).mode & 0o777).toBe(0o755)
+    expect((await fs.stat(archive)).mode & 0o777).toBe(0o700)
+    expect((await fs.stat(path.join(archive, 'checkpoint.json'))).mode & 0o777).toBe(0o600)
+  })
+
+  it.skipIf(process.platform === 'win32').each([0o775, 0o777, 0o500])('refuses an unsafe existing data root without changing mode %s', async mode => {
+    try {
+      await fs.chmod(data, mode)
+      await expect(archiveWorkspaceRelocationCheckpoint(options)).rejects.toThrow()
+      expect((await fs.stat(data)).mode & 0o777).toBe(mode)
+    } finally { await fs.chmod(data, 0o700) }
+  })
+
   it('preserves raw history and unknown results while removing only the bound active checkpoint', async () => {
     const first = await archiveWorkspaceRelocationCheckpoint(options)
     expect(first.dispatch).toBe('dispatch')

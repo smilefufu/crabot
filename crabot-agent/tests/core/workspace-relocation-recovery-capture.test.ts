@@ -28,6 +28,22 @@ describe('fixed read-only Agent recovery responsibility capture', () => {
   function write(file: string, body: unknown) {
     fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, typeof body === 'string' ? body : JSON.stringify(body), { mode: 0o600 })
   }
+  it.skipIf(process.platform === 'win32')('reads a legacy 0755 data root without changing its permissions', async () => {
+    fs.chmodSync(data, 0o755); write(active, checkpoint())
+    const before = fs.readFileSync(active), snapshot = await captureWorkspaceRelocationRecovery(data)
+    expect(snapshot.checkpoints).toHaveLength(1)
+    expect(fs.readFileSync(active)).toEqual(before)
+    expect(fs.statSync(data).mode & 0o777).toBe(0o755)
+  })
+
+  it.skipIf(process.platform === 'win32').each([0o775, 0o777, 0o500])('refuses an unsafe existing data root without changing mode %s', async mode => {
+    try {
+      fs.chmodSync(data, mode)
+      await expect(captureWorkspaceRelocationRecovery(data)).rejects.toThrow()
+      expect(fs.statSync(data).mode & 0o777).toBe(mode)
+    } finally { fs.chmodSync(data, 0o700) }
+  })
+
   it('accepts genuinely absent business namespaces without creating directories or reading workspace files', async () => {
     const before = fs.readdirSync(agent)
     const snapshot = await captureWorkspaceRelocationRecovery(data)

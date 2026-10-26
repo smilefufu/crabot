@@ -27,7 +27,7 @@ export interface WorkspaceRelocationLedgerSnapshot {
 export async function captureWorkspaceRelocationLedgers(dataDir: string, { signal }: { signal?: AbortSignal } = {}): Promise<WorkspaceRelocationLedgerSnapshot> {
   const check = () => { if (signal?.aborted) throw failure('capture-aborted') }
   check()
-  const root = management.requirePrivateDataRoot(dataDir) as string
+  const root = management.requireExistingDataRoot(dataDir) as string
   const directory = path.join(root, 'agent', 'worker-ledgers')
   const directories: DirectoryObservation[] = [], pins: unknown[] = []
   const owned = (stat: BigIntStats, file: string, isDirectory: boolean) => {

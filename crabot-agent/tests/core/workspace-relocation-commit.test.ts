@@ -44,6 +44,25 @@ describe('Agent-owned fixed-plan ledger commits (no business Agent startup)', ()
     const prepared = prepareWorkspaceRelocationWorkerClosure({ intentId: id, closedAt, workers, ledgers: snapshot.files })
     return commitWorkspaceRelocationLedgers({ snapshot, plan, prepared, verify })
   }
+  it.skipIf(process.platform === 'win32')('closes old workers under a legacy 0755 data root with private control records', async () => {
+    await fs.chmod(data, 0o755)
+    plan.directories = (await captureWorkspaceRelocationLedgers(data)).directories
+    expect((await run(data, workers, plan)).dispatch).toBe('dispatch')
+    expect(JSON.parse(await fs.readFile(file, 'utf8')).workers[0].task).toMatchObject({ status: 'closed', closed: { by: 'migration' } })
+    expect((await fs.stat(data)).mode & 0o777).toBe(0o755)
+    const journal = path.join(data, 'workspace-control/relocation-active/relocation-worker-commits')
+    expect((await fs.stat(journal)).mode & 0o777).toBe(0o700)
+    expect((await fs.stat(path.join(journal, 'header.json'))).mode & 0o777).toBe(0o600)
+  })
+
+  it.skipIf(process.platform === 'win32').each([0o775, 0o777, 0o500])('refuses an unsafe existing data root without changing mode %s', async mode => {
+    try {
+      await fs.chmod(data, mode)
+      await expect(run(data, workers, plan)).rejects.toThrow()
+      expect((await fs.stat(data)).mode & 0o777).toBe(mode)
+    } finally { await fs.chmod(data, 0o700) }
+  })
+
   it('commits exact prepared bytes, keeps ownership/history and observes without rewriting after completion', async () => {
     const result = await run(data, workers, plan), body = await fs.readFile(file, 'utf8'), stat = await fs.stat(file, { bigint: true })
     expect(result.dispatch).toBe('dispatch'); expect(result.closed_ledgers).toBe(1)

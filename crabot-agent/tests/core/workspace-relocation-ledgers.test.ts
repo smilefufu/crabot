@@ -26,6 +26,23 @@ describe('Agent-only read-only relocation ledger capture', () => {
   })
   afterEach(async () => { vi.restoreAllMocks(); await fs.rm(root, { recursive: true, force: true }) })
 
+  it.skipIf(process.platform === 'win32')('reads a legacy 0755 data root without changing its permissions', async () => {
+    await fs.chmod(data, 0o755)
+    const before = await fs.readFile(file)
+    const snapshot = await captureWorkspaceRelocationLedgers(data)
+    expect(snapshot.files).toHaveLength(1)
+    expect(await fs.readFile(file)).toEqual(before)
+    expect((await fs.stat(data)).mode & 0o777).toBe(0o755)
+  })
+
+  it.skipIf(process.platform === 'win32').each([0o775, 0o777, 0o500])('refuses an unsafe existing data root without changing mode %s', async mode => {
+    try {
+      await fs.chmod(data, mode)
+      await expect(captureWorkspaceRelocationLedgers(data)).rejects.toThrow()
+      expect((await fs.stat(data)).mode & 0o777).toBe(mode)
+    } finally { await fs.chmod(data, 0o700) }
+  })
+
   it('captures exact bytes and canonical owners without reading old backups, temporary data or the workspace', async () => {
     await fs.writeFile(path.join(directory, '.tmp-12345678-1234-4123-8123-123456789abc.json'), 'unfinished legacy temp')
     await fs.writeFile(path.join(directory, 'old.json.pre-request-fixture.bak'), 'preserve legacy backup')

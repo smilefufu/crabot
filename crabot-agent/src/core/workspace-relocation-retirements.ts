@@ -69,13 +69,13 @@ function directoryExists(directory: string) {
 }
 /** Keep actual ancestor identities pinned while reading or publishing this Agent-owned namespace. */
 function directoryScope(dataDir: string, directory: string) {
-  const root = management.requirePrivateDataRoot(dataDir) as string
+  const root = management.requireExistingDataRoot(dataDir) as string
   const paths = [root, path.join(root, 'agent'), directory]
   const frames: Array<{ path: string; version: string; privatePath: boolean; native_id: string | null }> = [], pins: unknown[] = []
   const close = () => { for (const pin of pins.splice(0).reverse()) native.releaseDirectoryPin(pin) }
   try {
     for (const [index, file] of paths.entries()) {
-      const privatePath = index !== 1, stat = owned(file, true, privatePath)
+      const privatePath = index === 2, stat = owned(file, true, privatePath)
       if (fs.realpathSync(file) !== file) throw failure()
       let nativeId: string | null = null
       if (process.platform === 'win32') { const pin = native.pinDirectory(file); pins.push(pin); nativeId = pin.identity }
@@ -166,7 +166,7 @@ export async function publishWorkspaceRelocationRetirements({ dataDir, document:
   validateDocument(document)
   if (Buffer.byteLength(JSON.stringify(document)) + 1 > limit) throw failure()
   await verify()
-  const root = management.requirePrivateDataRoot(dataDir) as string, agent = path.join(root, 'agent')
+  const root = management.requireExistingDataRoot(dataDir) as string, agent = path.join(root, 'agent')
   owned(agent, true)
   if (fs.realpathSync(agent) !== agent) throw failure()
   const directory = path.join(agent, 'workspace-relocation-retirements')

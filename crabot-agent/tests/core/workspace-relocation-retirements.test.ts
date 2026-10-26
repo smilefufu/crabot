@@ -25,6 +25,27 @@ describe('Agent-owned exact workspace migration recovery retirements', () => {
   afterEach(async () => { await fs.rm(root, { recursive: true, force: true }) })
   const publish = (dataDir: string, document: any, verify = async () => {}) => publishWorkspaceRelocationRetirements({ dataDir, document, verify })
 
+  it.skipIf(process.platform === 'win32')('publishes and reads private retirements under a legacy 0755 data root', async () => {
+    await fs.chmod(data, 0o755)
+    expect((await publish(data, plan)).dispatch).toBe('dispatch')
+    expect(new WorkspaceRelocationRetirements(data).request(key, sha, nextSha)).toBe(true)
+    expect((await fs.stat(data)).mode & 0o777).toBe(0o755)
+    expect((await fs.stat(directory)).mode & 0o777).toBe(0o700)
+    const file = path.join(directory, id + '.json'), before = await fs.readFile(file)
+    expect((await fs.stat(file)).mode & 0o777).toBe(0o600)
+    await fs.chmod(directory, 0o755)
+    expect(() => new WorkspaceRelocationRetirements(data).request(key, sha, nextSha)).toThrow()
+    expect(await fs.readFile(file)).toEqual(before)
+  })
+
+  it.skipIf(process.platform === 'win32').each([0o775, 0o777, 0o500])('refuses an unsafe existing data root without changing mode %s', async mode => {
+    try {
+      await fs.chmod(data, mode)
+      await expect(publish(data, plan)).rejects.toThrow()
+      expect((await fs.stat(data)).mode & 0o777).toBe(mode)
+    } finally { await fs.chmod(data, 0o700) }
+  })
+
   it('has no effect and creates no namespace when no migration exists', async () => {
     const store = new WorkspaceRelocationRetirements(data)
     expect(store.request(key, sha, nextSha)).toBe(false)

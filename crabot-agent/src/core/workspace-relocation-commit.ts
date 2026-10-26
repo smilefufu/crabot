@@ -27,7 +27,7 @@ export async function commitWorkspaceRelocationLedgers({ snapshot, plan, prepare
 }) {
   await verify()
   if (prepared.reduce((sum, row) => sum + Buffer.byteLength(row.contents), 0) > 64 * 1024 * 1024) throw failure()
-  const root = management.requirePrivateDataRoot(snapshot.data_root) as string
+  const root = management.requireExistingDataRoot(snapshot.data_root) as string
   const directory = path.join(root, 'agent/worker-ledgers'), journal = path.join(root, 'workspace-control/relocation-active/relocation-worker-commits')
   const planHash = sha256CanonicalJson(plan), byManager = new Map<string, WorkspaceRelocationLedgerClosure>(prepared.map(row => [row.manager_key, row]))
   if (!/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(plan.intent_id)

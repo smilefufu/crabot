@@ -38,7 +38,7 @@ export async function archiveWorkspaceRelocationCheckpoint(options: CheckpointAr
     || !['manager', 'request'].includes(options.source.kind)
     || options.source.kind === 'request' && !/^[a-f0-9]{64}$/.test(options.source.requestId)) throw failure()
   await verify()
-  const root = management.requirePrivateDataRoot(options.dataDir) as string, agent = path.join(root, 'agent')
+  const root = management.requireExistingDataRoot(options.dataDir) as string, agent = path.join(root, 'agent')
   const paths = options.source.kind === 'manager' ? [root, agent, path.join(agent, 'managers')]
     : [root, agent, path.join(agent, 'conversation-requests'), path.join(agent, 'conversation-requests', options.source.requestId),
       path.join(agent, 'conversation-requests', options.source.requestId, 'session')]
