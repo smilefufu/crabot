@@ -32,7 +32,7 @@ native.inspectProgramReferences = async options => {
 const dialogs = []
 dialog.showMessageBox = async value => {
   dialogs.push({ title: value.title, message: value.message })
-  if (value.title === '安装位置') return { response: 0 }
+  if (['安装位置', '卸载尚未完成'].includes(value.title)) return { response: 0 }
   assert.ok(['继续恢复服务', '安装尚未完成'].includes(value.title), 'Unexpected ordinary installer dialog')
   return { response: 1 } // Finish this finite actor without starting the product GUI.
 }

@@ -41,7 +41,7 @@ export function captureRemovalGuiCleanup(prepared, child) {
   const directory = prepared.directory, gui = path.join(directory, 'gui')
   if (prepared.guiRoot !== gui || prepared.executable !== path.join(gui, process.platform === 'darwin' ? 'Crabot.app/Contents/MacOS/Crabot' : 'Crabot.exe')) fail()
   return capturePrivateCleanup(prepared, child, async () => {
-    await verifyDesktopGui(gui, prepared.proof.payload)
+    await verifyDesktopGui(gui, prepared.hostPayload ?? prepared.proof.payload)
     if (physical.readdirSync(directory).some(name => !['gui', 'profile'].includes(name))) fail()
   })
 }

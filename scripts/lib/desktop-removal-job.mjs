@@ -7,6 +7,7 @@ import installation from './desktop-installation.cjs'
 import management from './desktop-management.cjs'
 import { captureInitialRemovalGuiHost, captureExistingRemovalGuiHost, captureInitialRemovalNodeHost, captureExistingRemovalNodeHost } from './desktop-removal-frame.mjs'
 import { verifyUbuntuRemovalNodeCopy } from './desktop-removal-host.mjs'
+import { captureInstallerRemovalGuiHost } from './desktop-removal-installer.mjs'
 import { acquireExistingCliLock, releaseCliLock, cliLockToken } from './cli-lock.mjs'
 import { readDesktopRemoval } from './desktop-removal-record.cjs'
 import { readDesktopRemovalProof } from './desktop-removal-proof.mjs'
@@ -45,7 +46,7 @@ function closeInheritedGuiResources(guiRoot, proof) {
     physicalFs.closeSync(fd)
   }
 }
-async function openDesktopRemoval({ installRoot, operationId, signal, preparePlatformRemoval }, existing, role = 'gui') {
+async function openDesktopRemoval({ installRoot, operationId, signal, preparePlatformRemoval, installerPayload }, existing, role = 'gui') {
   if (preparePlatformRemoval !== undefined && (role !== 'node' || typeof preparePlatformRemoval !== 'function')) fail()
   const base = existing ? installation.readDesktopInstallation(installRoot) : installation.readDesktopSelection(installRoot)
   const selection = existing ? installation.readDesktopPairReference(base.root).selection : base.selection
@@ -64,15 +65,16 @@ async function openDesktopRemoval({ installRoot, operationId, signal, preparePla
     const dataIdentity = directoryIdentity(await fs.lstat(own.dataDir, { bigint: true }))
     let capture = captureInitialRemovalGuiHost
     if (role === 'node') capture = existing ? captureExistingRemovalNodeHost : captureInitialRemovalNodeHost
+    else if (role === 'installer') capture = captureInstallerRemovalGuiHost
     else if (existing) capture = captureExistingRemovalGuiHost
-    const captured = await capture({ installRoot: own.root, operationId, signal })
+    const captured = await capture({ installRoot: own.root, operationId, signal, ...(role === 'installer' ? { installerPayload } : {}) })
     const { proof, facts } = captured
     if (role === 'node') closeInheritedGuiResources(own.guiRoot, proof)
     const executable = await fs.realpath(process.execPath)
     const hostGuiRoot = process.platform === 'darwin' ? path.resolve(path.dirname(executable), '../../..') : path.dirname(executable)
     const hostDirectory = role === 'node' ? path.dirname(executable) : path.dirname(hostGuiRoot)
     const hostProcess = role === 'node' ? facts.host_node : facts.host_gui
-    const verifyHost = role === 'node' ? () => verifyUbuntuRemovalNodeCopy(hostDirectory, proof) : () => verifyDesktopGui(hostGuiRoot, proof.payload)
+    const verifyHost = role === 'node' ? () => verifyUbuntuRemovalNodeCopy(hostDirectory, proof) : () => verifyDesktopGui(hostGuiRoot, captured.hostPayload ?? proof.payload)
     const hostDirectories = (role === 'node' ? [hostDirectory] : [hostDirectory, hostGuiRoot]).map(directory => [directory, directoryIdentity(physicalFs.lstatSync(directory, { bigint: true }))])
     let record = existing ? captured.record : { schema_version: 1, installation_id: own.record.installation_id, operation_id: operationId,
       source_selection: proof.source_selection, phase: 'preparing', proof_sha256: facts.proof_sha256 }
@@ -124,6 +126,7 @@ async function openDesktopRemoval({ installRoot, operationId, signal, preparePla
       try { if (physicalFs.readdirSync(records).some(name => name.endsWith('.json'))) fail() }
       catch (error) { if (error.code !== 'ENOENT') throw error }
     }
+    const sourceExited = () => role === 'installer' || probeKnownProcessExit([facts.source_gui]).state === 'stopped'
     const requestSourceExit = (retry = false) => {
       if (closed || cancelIssued) fail()
       if (pendingSourceExit && (!retry || !sourceExitFailed)) return pendingSourceExit
@@ -136,6 +139,13 @@ async function openDesktopRemoval({ installRoot, operationId, signal, preparePla
           if (retry) {
             await verifyHost()
             await current(); assertStopped()
+          }
+          if (role === 'installer') {
+            // The offline installer is outside the original program scope and
+            // remains alive to reap this child. Confirm old programs are unused.
+            await assertDesktopRemovalProgramsUnused({ installRoot: own.root, proof }, 'before-removing')
+            await current(); assertStopped()
+            return { source_exited: true }
           }
           const deadline = performance.now() + 15000
           if (probeKnownProcessExit([facts.source_gui]).state === 'running') {
@@ -220,17 +230,17 @@ async function openDesktopRemoval({ installRoot, operationId, signal, preparePla
           await current(); assertStopped()
           await verifyHost()
           await current(); assertStopped()
-          if (probeKnownProcessExit([facts.source_gui]).state !== 'stopped') fail()
+          if (!sourceExited()) fail()
           await assertDesktopRemovalProgramsUnused({ installRoot: own.root, proof }, 'before-removing')
           await current(); assertStopped()
-          if (probeKnownProcessExit([facts.source_gui]).state !== 'stopped') fail()
+          if (!sourceExited()) fail()
           // Authorization is prepared while cancellation still has its original
           // stopping semantics. The fixed host receives no deletion authority.
           if (preparePlatformRemoval) {
             platformRemoval = await preparePlatformRemoval()
             if (!platformRemoval || typeof platformRemoval.remove !== 'function' || typeof platformRemoval.close !== 'function') fail()
             await current(); assertStopped()
-            if (probeKnownProcessExit([facts.source_gui]).state !== 'stopped') fail()
+            if (!sourceExited()) fail()
           }
           if (record.phase === 'stopping') {
             attemptSignal?.throwIfAborted()
@@ -245,7 +255,7 @@ async function openDesktopRemoval({ installRoot, operationId, signal, preparePla
           if (platformRemoval) {
             await platformRemoval.remove()
             await current(); assertStopped()
-            if (probeKnownProcessExit([facts.source_gui]).state !== 'stopped') fail()
+            if (!sourceExited()) fail()
           }
           const result = await removeDesktopRemovalPrograms({ installRoot: own.root, operationId })
           await current(); assertStopped()
@@ -262,6 +272,7 @@ async function openDesktopRemoval({ installRoot, operationId, signal, preparePla
     }
     return {
       record: structuredClone(record),
+      ...(role === 'installer' ? { hostPayload: structuredClone(captured.hostPayload) } : {}),
       current: () => current(),
       stop: () => requestStop(),
       retryStop: () => requestStop(true),
@@ -297,6 +308,7 @@ async function openDesktopRemoval({ installRoot, operationId, signal, preparePla
 // Fixed role entrypoints. Existing records can never enter initial publication.
 export function beginInitialDesktopRemoval(options) { return openDesktopRemoval(options, false) }
 export function resumeDesktopRemoval(options) { return openDesktopRemoval(options, true) }
+export function resumeInstallerDesktopRemoval(options) { return openDesktopRemoval(options, true, 'installer') }
 
 export async function beginInitialDesktopRemovalNode(options) {
   if (process.platform !== 'linux') fail()

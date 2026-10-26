@@ -254,6 +254,7 @@ export async function removeWindowsLoginStartupEntry(options: RemovalJobOptions 
 // copy of this installation. Core and original GUI may already be removed.
 export async function removeMacLoginStartupEntry(options: RemovalJobOptions & {
   app: Pick<App, 'getLoginItemSettings' | 'setLoginItemSettings'>
+  maintenancePayload?: { selection: { version: string } }
 }): Promise<void> {
   if (process.platform !== 'darwin') fail()
   const { own, proof, assertJob, proofCurrent } = await captureRemovalJob(options)
@@ -274,7 +275,12 @@ export async function removeMacLoginStartupEntry(options: RemovalJobOptions & {
       || fsSync.realpathSync(process.cwd()) !== directory || !identity.sameProcess(self, identity.inspectProcess(process.pid))) fail()
   }
   const { verifyDesktopGui } = await import(new URL('./bootstrap/scripts/lib/desktop-payload.mjs', import.meta.url).href)
-  current(); await proofCurrent(); await verifyDesktopGui(guiRoot, proof.payload); await proofCurrent(); current()
+  const payload = options.maintenancePayload ?? proof.payload
+  if (options.maintenancePayload) {
+    const { assertReinstallVersion } = await import(new URL('./bootstrap/scripts/lib/desktop-reinstall.mjs', import.meta.url).href)
+    assertReinstallVersion(proof.source_selection.version, payload.selection.version)
+  }
+  current(); await proofCurrent(); await verifyDesktopGui(guiRoot, payload); await proofCurrent(); current()
   options.app.setLoginItemSettings({ openAtLogin: false })
   const result = options.app.getLoginItemSettings()
   current()
@@ -298,6 +304,7 @@ export async function removeWindowsUninstallEntry(options: RemovalJobOptions): P
 export async function removeDesktopUserEntries(options: RemovalJobOptions & {
   home: string; env: NodeJS.ProcessEnv; shell?: Pick<Shell, 'readShortcutLink'>
   app?: Pick<App, 'getLoginItemSettings' | 'setLoginItemSettings'>
+  maintenancePayload?: { selection: { version: string } }
   unregisterMac?: (application: string) => Promise<unknown>
 }): Promise<void> {
   if (process.platform === 'darwin') {

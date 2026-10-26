@@ -6,7 +6,7 @@ const { pathToFileURL } = require('node:url')
 const { spawn } = require('node:child_process')
 const { once } = require('node:events')
 const cfg = JSON.parse(fs.readFileSync(process.env.CRABOT_REMOVAL_FRAME_CONFIG, 'utf8'))
-if (['publish-source-remove-main', 'publish-source-remove-source', 'resume-source-remove-main'].includes(cfg.mode) && process.argv.some(value => value.startsWith('--crabot-removal-host='))) {
+if (['publish-source-remove-main', 'publish-source-remove-source', 'resume-source-remove-main', 'installer-source', 'installer-ui'].includes(cfg.mode) && process.argv.some(value => value.startsWith('--crabot-removal-host='))) {
   const assert = require('node:assert/strict'), electron = require('electron')
   const native = require('./bootstrap/scripts/lib/process-identity.cjs')
   native.inspectProgramReferences = async () => ({ complete: true, incomplete: false, processes: [], unknown_pids: [] })
@@ -368,7 +368,32 @@ async function main() {
   await app.whenReady()
   if (host) {
     let result
-    try { if (cfg.mode.startsWith('resume-')) {
+    try { if (cfg.mode.startsWith('installer-')) {
+      const assert = require('node:assert/strict'), native = require('./bootstrap/scripts/lib/process-identity.cjs')
+      const { captureInstallerRemovalGuiHost } = await load('desktop-removal-installer.mjs')
+      const input = { installRoot: cfg.root, operationId: cfg.mode === 'installer-wrong-operation' ? require('node:crypto').randomUUID() : cfg.operationId, installerPayload: cfg.installerPayload }
+      const captured = await captureInstallerRemovalGuiHost(input)
+      assert.deepEqual(captured.proof.source_selection, cfg.originalSelection)
+      assert.notEqual(captured.facts.source_installer.pid, captured.facts.host_gui.pid)
+      const { resumeInstallerDesktopRemoval } = await load('desktop-removal-job.mjs')
+      native.inspectProgramReferences = async () => ({ complete: true, incomplete: false, processes: [], unknown_pids: [] })
+      const lease = await resumeInstallerDesktopRemoval(input)
+      try {
+        await lease.stop(); await lease.exitSource()
+        assert.ok(native.sameProcess(captured.facts.source_installer, native.inspectProcess(captured.facts.source_installer.pid)))
+        await assert.rejects(lease.cancel(), { code: 'CRABOT_DESKTOP_REMOVAL' })
+        const removed = await lease.removePrograms(); assert.deepEqual(removed.retained, [])
+        let loginWrites = 0
+        if (process.platform === 'darwin') {
+          const { removeMacLoginStartupEntry } = await import(pathToFileURL(path.join(__dirname, 'installation-removal.js')).href)
+          await removeMacLoginStartupEntry({ ...input, maintenancePayload: lease.hostPayload, app: {
+            setLoginItemSettings: value => { assert.deepEqual(value, { openAtLogin: false }); loginWrites++ },
+            getLoginItemSettings: () => ({ status: 'not-registered', openAtLogin: false }) } })
+        }
+        assert.equal(fs.readFileSync(path.join(cfg.root, 'data/preserved-user-file'), 'utf8'), 'user bytes')
+        result = { accepted: true, original_proof_preserved: true, programsRemoved: true, loginWrites, parent_remained_alive: true, controlledResourceObservation: true }
+      } finally { lease.close() }
+    } else if (cfg.mode.startsWith('resume-')) {
       const { captureExistingRemovalGuiHost } = await load('desktop-removal-frame.mjs')
       const captured = await captureExistingRemovalGuiHost({ installRoot: cfg.root,
         operationId: cfg.mode === 'resume-wrong-operation' ? '11111111-1111-4111-8111-111111111111' : cfg.operationId })
@@ -417,6 +442,69 @@ async function main() {
     const operation = startGuiRemovalFromSource(options)
     require('node:assert/strict').equal(operation, startGuiRemovalFromSource(options))
     await operation
+    return
+  }
+  if (cfg.mode.startsWith('installer-')) {
+    const assert = require('node:assert/strict'), crypto = require('node:crypto')
+    const { captureDesktopRemovalProof } = await load('desktop-removal-proof.mjs')
+    const { privateJson } = await load('desktop-preparation-files.mjs')
+    if (['installer-source', 'installer-ui'].includes(cfg.mode)) {
+      const own = require('./bootstrap/scripts/lib/desktop-installation.cjs').readDesktopSelection(cfg.root)
+      const { registerInstallationEntries } = await import(pathToFileURL(path.join(__dirname, 'installation-entries.js')).href)
+      await registerInstallationEntries({ installRoot: own.root, installation_id: own.record.installation_id,
+        coreRoot: own.coreRoot, guiRoot: own.guiRoot, selection: own.selection }, {
+        home: process.env.HOME, env: process.env, platform: process.platform, shell: require('electron').shell, registerMac: async () => {} })
+    }
+    const proof = await captureDesktopRemovalProof(cfg.root, cfg.operationId)
+    const directory = path.join(cfg.root, 'app/removals', cfg.operationId)
+    fs.mkdirSync(directory, { recursive: true, mode: 0o700 }); fs.chmodSync(path.dirname(directory), 0o700)
+    await privateJson(path.join(directory, 'proof.json'), proof)
+    await privateJson(path.join(cfg.root, '.desktop-removal.json'), { schema_version: 1, installation_id: proof.installation_id,
+      operation_id: cfg.operationId, source_selection: proof.source_selection, phase: 'removing',
+      proof_sha256: crypto.createHash('sha256').update(JSON.stringify(proof)+'\n').digest('hex') })
+    cfg.installerPayload = path.join(process.resourcesPath, 'offline'); cfg.originalSelection = proof.source_selection
+    fs.writeFileSync(process.env.CRABOT_REMOVAL_FRAME_CONFIG, JSON.stringify(cfg))
+    fs.rmSync(path.join(cfg.root, 'releases', proof.source_selection.core_id), { recursive: true })
+    fs.rmSync(path.join(cfg.root, 'app/releases', proof.source_selection.gui_id), { recursive: true })
+    if (cfg.mode === 'installer-ui') {
+      const electron = require('electron'), native = require('./bootstrap/scripts/lib/process-identity.cjs')
+      app.on('window-all-closed', () => {})
+      native.inspectProgramReferences = async () => ({ complete: true, incomplete: false, processes: [], unknown_pids: [] })
+      const decisions = []
+      electron.dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [cfg.root] })
+      electron.dialog.showMessageBox = async options => {
+        decisions.push(options.title)
+        if (options.title === '安装 Crabot') return { response: 0 }
+        if (['卸载尚未完成', '卸载 Crabot'].includes(options.title)) return { response: 1 }
+        throw Error('Unexpected installer dialog: ' + options.title + ': ' + options.message)
+      }
+      const exit = app.exit.bind(app)
+      app.exit = code => {
+        clearTimeout(timer)
+        const result = fs.existsSync(cfg.resultFile) ? JSON.parse(fs.readFileSync(cfg.resultFile, 'utf8')) : { accepted: false }
+        void send({ ...result, installer_decisions: decisions, actual_installer_main: true, original_proof_preserved: true,
+          parent_remained_alive: true, loginWrites: result.login_writes, source_completed_cleanup: code === 0 }).finally(() => exit(code))
+      }
+      void import(pathToFileURL(path.join(__dirname, 'installer-main.js')).href).catch(() => app.exit(1))
+      await new Promise(() => {})
+    }
+    if (cfg.mode === 'installer-source') {
+      const electron = require('electron'), native = require('./bootstrap/scripts/lib/process-identity.cjs')
+      app.on('window-all-closed', () => {})
+      electron.dialog.showMessageBox = async () => ({ response: 1 })
+      native.inspectProgramReferences = async () => ({ complete: true, incomplete: false, processes: [], unknown_pids: [] })
+      const { startInstallerRemovalFromSource } = await import(pathToFileURL(path.join(__dirname, 'source-entry.js')).href)
+      await startInstallerRemovalFromSource({ installRoot: cfg.root, operationId: cfg.operationId, installerPayload: cfg.installerPayload })
+      const result = JSON.parse(fs.readFileSync(cfg.resultFile, 'utf8'))
+      await send({ ...result, original_proof_preserved: true, parent_remained_alive: true, loginWrites: result.login_writes, source_completed_cleanup: true })
+      return
+    }
+    prepared = await (await load('desktop-removal-host.mjs')).prepareInstallerDesktopRemovalGui({ payload: cfg.installerPayload, installRoot: cfg.root, operationId: cfg.operationId })
+    if (cfg.mode === 'installer-changed-copy') fs.appendFileSync(path.join(prepared.guiRoot, process.platform === 'darwin' ? 'Crabot.app/Contents/Resources/desktop-release.json' : 'resources/desktop-release.json'), ' ')
+    child = spawn(prepared.executable, ['--fixture-removal-host'], { env: process.env, cwd: prepared.directory, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] })
+    const stopped = once(child, 'exit'), [result] = await once(child, 'message')
+    await stopped
+    await send({ ...result, directory: prepared.directory })
     return
   }
   if (cfg.mode.startsWith('resume-')) {

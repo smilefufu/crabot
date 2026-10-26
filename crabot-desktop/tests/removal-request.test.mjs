@@ -20,3 +20,11 @@ for (const args of [
 ]) test('private removal invocation rejects extra or malformed arguments: ' + args.length, () => {
   assert.throws(() => readRemovalHostRequest(args), { code: 'CRABOT_DESKTOP_REMOVAL' })
 })
+
+test('offline installer continuation carries only an existing-job payload locator', () => {
+  const installer = { ...request, existing: true, installerPayload: path.resolve('offline') }
+  assert.deepEqual(readRemovalHostRequest([process.execPath, removalHostArgument(installer)]), installer)
+  for (const invalid of [{ ...installer, existing: false }, { ...installer, installerPayload: '../payload' }, { ...installer, installerPayload: '' }, { ...installer, installerPayload: null }]) {
+    assert.throws(() => removalHostArgument(invalid), { code: 'CRABOT_DESKTOP_REMOVAL' })
+  }
+})

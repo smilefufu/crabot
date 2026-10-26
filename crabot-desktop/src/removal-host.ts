@@ -34,10 +34,12 @@ export function startDesktopRemovalHost(request: RemovalRequest) {
   process.on('message', message)
   const finished = (async () => {
     await app.whenReady(); Menu.setApplicationMenu(null)
-    const { beginInitialDesktopRemoval, resumeDesktopRemoval, finishDesktopRemoval } = await load('desktop-removal-job.mjs')
+    const { beginInitialDesktopRemoval, resumeDesktopRemoval, resumeInstallerDesktopRemoval, finishDesktopRemoval } = await load('desktop-removal-job.mjs')
     const { removeDesktopUserEntries } = await import('./installation-removal.js')
     const own = require('./bootstrap/scripts/lib/desktop-installation.cjs').readDesktopInstallation(request.installRoot)
-    const lease = await (request.existing ? resumeDesktopRemoval : beginInitialDesktopRemoval)({ ...request, signal: admissionAbort.signal })
+    let open = request.existing ? resumeDesktopRemoval : beginInitialDesktopRemoval
+    if (request.installerPayload) open = resumeInstallerDesktopRemoval
+    const lease = await open({ ...request, signal: admissionAbort.signal })
     const result = await runRemovalOperation({ lease,
       openProgress: async abort => {
         activeAbort = abort
@@ -62,7 +64,7 @@ export function startDesktopRemovalHost(request: RemovalRequest) {
           detail: `选择原安装位置 ${own.root}，安装器将核验并使用原有数据。此界面关闭后即可继续；不要删除数据目录。`, buttons: ['关闭维护界面'] })
         return 'close'
       },
-      removeEntries: () => removeDesktopUserEntries({ installRoot: own.root, operationId: request.operationId, home: homedir(), env: process.env, app, shell }),
+      removeEntries: () => removeDesktopUserEntries({ installRoot: own.root, operationId: request.operationId, home: homedir(), env: process.env, app, shell, maintenancePayload: lease.hostPayload }),
       finish: () => finishDesktopRemoval({ installRoot: own.root, operationId: request.operationId }),
     })
     if (result === 'completed') {

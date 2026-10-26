@@ -2,7 +2,7 @@
 import { app, dialog, shell } from 'electron'
 import path from 'node:path'
 import { homedir, tmpdir } from 'node:os'
-import { mkdtemp } from 'node:fs/promises'
+import { mkdtemp, lstat } from 'node:fs/promises'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
@@ -59,6 +59,20 @@ async function boot() {
     preselected = false
     if (chosen.canceled || chosen.filePaths.length !== 1) return
     selected = chosen.filePaths[0]
+    const { readDesktopRemoval } = await import(pathToFileURL(path.join(directory, 'bootstrap/scripts/lib/desktop-removal-record.cjs')).href)
+    const removal = await lstat(path.join(selected, '.desktop-removal.json')).then(() => readDesktopRemoval(selected), error => { if (error.code === 'ENOENT') return null; throw error })
+    if (removal?.phase === 'removing') {
+      const action = await dialog.showMessageBox({ type: 'question', title: '卸载尚未完成', message: '检测到上次卸载中断，数据已保留。',
+        detail: `安装位置：${selected}\n可以保留数据重新安装，或继续移除本安装的程序和系统入口。`,
+        buttons: ['保留数据重新安装', '继续卸载', '取消'], defaultId: 0, cancelId: 2, noLink: true })
+      if (action.response === 2) return
+      if (action.response === 1) {
+        const { startInstallerRemovalFromSource } = await import('./removal-source.js')
+        await startInstallerRemovalFromSource({ installRoot: selected, operationId: removal.operation_id, installerPayload: payload })
+        exitCode = 0
+        return
+      }
+    }
     const confirmation = await dialog.showMessageBox({ type: 'question', title: '安装位置', message: '将 Crabot 安装到所选文件夹？', detail: selected,
       buttons: ['安装', '重新选择', '取消'], defaultId: 0, cancelId: 2 })
     if (confirmation.response === 2) return

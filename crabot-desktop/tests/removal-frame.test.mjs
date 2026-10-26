@@ -48,11 +48,13 @@ before(async () => {
   await promisify(execFile)(process.execPath, ['build-preload.mjs'], { cwd: path.join(repository, 'crabot-desktop'), timeout: 30000, maxBuffer: 65536 })
   await fs.mkdir(path.join(appDir, 'dist'), { recursive: true })
   await fs.cp(path.join(repository, 'crabot-desktop/dist/bootstrap'), path.join(appDir, 'dist/bootstrap'), { recursive: true })
+  await fs.copyFile(path.join(repository, 'scripts/lib/mode.mjs'), path.join(appDir, 'dist/bootstrap/scripts/lib/mode.mjs'))
   for (const name of ['installation-removal.js', 'installation-entries.js', 'login-startup.js', 'removal-operation.js']) await fs.copyFile(path.join(repository, 'crabot-desktop/dist', name), path.join(appDir, 'dist', name))
   await fs.copyFile(new URL('fixtures/removal-frame-actor.cjs', import.meta.url), path.join(appDir, 'dist/main.cjs'))
   await fs.copyFile(path.join(repository, 'crabot-desktop/dist/removal-preload.cjs'), path.join(appDir, 'dist/removal-preload.cjs'))
   await require('esbuild').build({ entryPoints: [path.join(repository, 'crabot-desktop/src/removal-source.ts')], outfile: path.join(appDir, 'dist/source-entry.js'), bundle: true, platform: 'node', format: 'esm', target: 'node22', external: ['electron', 'original-fs'], logLevel: 'silent' })
   await require('esbuild').build({ entryPoints: [path.join(repository, 'crabot-desktop/src/main.ts')], outfile: path.join(appDir, 'dist/full-main.js'), bundle: true, platform: 'node', format: 'esm', target: 'node22', external: ['electron', 'original-fs'], banner: { js: "import { createRequire as fixtureRequire } from 'node:module'; const require = fixtureRequire(import.meta.url);" }, logLevel: 'silent' })
+  await require('esbuild').build({ entryPoints: [path.join(repository, 'crabot-desktop/src/installer-main.ts')], outfile: path.join(appDir, 'dist/installer-main.js'), bundle: true, platform: 'node', format: 'esm', target: 'node22', external: ['electron', 'original-fs'], banner: { js: "import { createRequire as fixtureRequire } from 'node:module'; const require = fixtureRequire(import.meta.url);" }, logLevel: 'silent' })
   await fs.writeFile(path.join(appDir, 'dist/desktop-release.json'), JSON.stringify(selection) + '\n')
   await fs.writeFile(path.join(appDir, 'package.json'), JSON.stringify({ name: 'crabot-removal-frame-fixture', type: 'module', version: '1.2.3', main: 'dist/main.cjs', dependencies: { '@electron/asar': '3.4.1' } }))
   const parser = path.join(appDir, 'node_modules/@electron/asar'); await fs.mkdir(parser, { recursive: true })
@@ -258,3 +260,60 @@ for (const scenario of ['valid', 'node-parent', 'unexpected-source-args', 'chang
   }
   await fs.rm(area, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 })
 })
+
+let installerImage
+async function removalInstaller() {
+  return installerImage ||= (async () => {
+    const { build, Platform, Arch } = require('electron-builder')
+    let resources
+    await build({ projectDir: root, publish: 'never', targets: Platform.current().createTarget('dir', Arch[process.arch]), config: {
+      appId: 'com.crabot.installer', productName: 'Crabot Installer', electronVersion: '44.9.0',
+      directories: { app: path.join(root, 'app'), output: path.join(root, 'installer') },
+      electronDist: path.join(path.dirname(require.resolve('electron/package.json')), 'dist'), files: ['dist/**/*', 'package.json'], asar: true,
+      asarUnpack: ['dist/bootstrap/**/*.node'], npmRebuild: false, publish: null,
+      electronFuses: { runAsNode: false, enableCookieEncryption: true, enableNodeOptionsEnvironmentVariable: false, enableNodeCliInspectArguments: false,
+        enableEmbeddedAsarIntegrityValidation: true, onlyLoadAppFromAsar: true, grantFileProtocolExtraPrivileges: false },
+      mac: { minimumSystemVersion: '14.0.0', identity: '-', hardenedRuntime: false, notarize: false, signIgnore: ['/Resources/offline/'] },
+      win: { executableName: 'CrabotInstaller' },
+      afterPack: async context => {
+        resources = path.join(context.appOutDir, process.platform === 'darwin' ? 'Crabot Installer.app/Contents/Resources' : 'resources')
+        await fs.cp(payload, path.join(resources, 'offline'), { recursive: true, verbatimSymlinks: true, mode: constants.COPYFILE_FICLONE })
+      },
+    } })
+    return process.platform === 'darwin' ? path.resolve(resources, '../MacOS/Crabot Installer') : path.resolve(resources, '../CrabotInstaller.exe')
+  })()
+}
+for (const mode of ['installer-valid', 'installer-wrong-operation', 'installer-changed-copy', 'installer-source-args', 'installer-source', 'installer-ui']) {
+  test('actual offline installer continues a removal without original GUI or Core: ' + mode, { skip: !['darwin', 'win32'].includes(process.platform), timeout: 120000 }, async t => {
+    const area = await fs.mkdtemp(path.join(root, 'installer-case-'))
+    const own = await commitDesktopInstallation(await prepareDesktopInstallation({ payload, installRoot: path.join(area, 'installed') }))
+    await fs.writeFile(path.join(own.dataDir, 'preserved-user-file'), 'user bytes')
+    const config = path.join(area, 'control.json'), operationId = randomUUID()
+    await fs.writeFile(config, JSON.stringify({ mode, root: own.root, operationId, resultFile: path.join(area, 'host-result.json') }))
+    const home = path.join(area, 'private-home'); await fs.mkdir(home, { mode: 0o700 })
+    const env = { ...process.env, CRABOT_REMOVAL_FRAME_CONFIG: config, HOME: home, USERPROFILE: home,
+      APPDATA: path.join(home, 'Roaming'), LOCALAPPDATA: path.join(home, 'Local'), XDG_CONFIG_HOME: path.join(home, '.config') }
+    for (const key of ['ELECTRON_RUN_AS_NODE', 'NODE_OPTIONS', 'NODE_PATH', 'DATA_DIR', 'CRABOT_HOME', 'CRABOT_DEV', 'CRABOT_PORT_OFFSET']) delete env[key]
+    const child = spawn(await removalInstaller(), mode === 'installer-source-args' ? ['--unexpected'] : [], {
+      env, cwd: area, stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+    })
+    const stopped = once(child, 'exit'), peer = identity.inspectProcess(child.pid)
+    t.after(() => { if (child.exitCode === null && child.signalCode === null && identity.sameProcess(peer, identity.inspectProcess(child.pid))) child.kill('SIGKILL') })
+    let output = ''; for (const stream of [child.stdout, child.stderr]) stream.on('data', value => { output = (output + value.toString()).slice(-4000) })
+    const [result] = await Promise.race([once(child, 'message'), stopped.then(([code]) => { throw Error('Installer source exited: ' + code + '\n' + output) })])
+    const [code] = await stopped
+    assert.equal(code, 0, output); assert.equal(result.accepted, ['installer-valid', 'installer-source', 'installer-ui'].includes(mode), JSON.stringify(result))
+    const record = (await import('../../scripts/lib/desktop-removal-record.cjs')).default.readDesktopRemoval(own.root)
+    assert.equal(record.operation_id, operationId); assert.equal(record.phase, ['installer-source', 'installer-ui'].includes(mode) ? 'completed' : 'removing')
+    assert.equal(await fs.readFile(path.join(own.dataDir, 'preserved-user-file'), 'utf8'), 'user bytes')
+    await assert.rejects(fs.lstat(own.coreRoot), { code: 'ENOENT' }); await assert.rejects(fs.lstat(own.guiRoot), { code: 'ENOENT' })
+    if (result.accepted) {
+      assert.equal(result.original_proof_preserved, true); assert.equal(result.parent_remained_alive, true)
+      assert.equal(result.programsRemoved, true); assert.equal(result.loginWrites, process.platform === 'darwin' ? 1 : 0)
+    } else assert.ok(['CRABOT_DESKTOP_REMOVAL', 'CRABOT_CORE_INTEGRITY'].includes(result.code), JSON.stringify(result))
+    // Both finite GUI processes are reaped; this exact returned copy was never
+    // persisted as a restart entry and contains no user data.
+    if (['installer-source', 'installer-ui'].includes(mode)) assert.equal(result.source_completed_cleanup, true)
+    else await fs.rm(result.directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 })
+  })
+}
