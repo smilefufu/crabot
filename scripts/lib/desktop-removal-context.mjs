@@ -9,7 +9,7 @@ import * as runtime from './instance-runtime.mjs'
 import workspace from './workspace-maintenance.cjs'
 import removal from './desktop-removal-record.cjs'
 const removalFail = () => { throw Object.assign(new Error('卸载作业、操作锁或停止结果无法核验，剩余程序、入口和用户数据已保留。'), { code: 'CRABOT_DESKTOP_REMOVAL' }) }
-async function captureRemovalFacts(options) {
+export async function captureDesktopRemovalFacts(options) {
   const own = installation.readDesktopInstallation(options.installRoot)
   const directoryIdentity = (stat) => [stat.dev, stat.ino, stat.mode, stat.uid, stat.gid].join(':')
   const dataIdentity = directoryIdentity(physical.lstatSync(own.dataDir, { bigint: true }))
@@ -50,12 +50,12 @@ function assertModulesStopped(own) {
 }
 // Read-only stopped facts. Each consumer still owns its preparation/phase policy.
 export async function captureStoppedDesktopRemoval(options) {
-  const { own, record, proof, assertIdentity, proofCurrent } = await captureRemovalFacts(options)
+  const { own, record, proof, assertIdentity, proofCurrent } = await captureDesktopRemovalFacts(options)
   return { own, record, proof, proofCurrent, assertStopped: () => { assertIdentity(); assertModulesStopped(own) } }
 }
 // Destructive admission keeps its original fixed role and field shape.
 export async function captureDesktopRemovalJob(options) {
-  const { own, record, proof, assertIdentity, proofCurrent } = await captureRemovalFacts(options)
+  const { own, record, proof, assertIdentity, proofCurrent } = await captureDesktopRemovalFacts(options)
   const assertJob = () => {
     if (record.phase !== 'removing') removalFail()
     assertIdentity()
