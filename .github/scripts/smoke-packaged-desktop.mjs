@@ -106,7 +106,7 @@ function launch() {
     }
     throw new Error('Packaged phase timed out: ' + expected + '\n' + output)
   }
-  guiDiagnostics.push(() => ({ phases, output }))
+  guiDiagnostics.push(() => ({ pid: child.pid, phases, output }))
   return { child, exited: () => waitForExit(child), phase }
 }
 try {

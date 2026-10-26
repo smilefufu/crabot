@@ -13,6 +13,8 @@ import { captureDesktopRemovalProof } from '../../scripts/lib/desktop-removal-pr
 import { privateJson } from '../../scripts/lib/desktop-preparation-files.mjs'
 import { prepareDesktopRemovalReinstall } from '../../scripts/lib/desktop-reinstall.mjs'
 import { runPreparedDesktopReinstallHandoff } from '../../scripts/lib/desktop-reinstall-data.mjs'
+import identity from '../../scripts/lib/process-identity.cjs'
+import { desktopRemovalProgramEntries } from '../../scripts/lib/desktop-removal-programs.mjs'
 import { assertDesktopRemovalProgramsUnused } from '../../scripts/lib/desktop-removal-delete.mjs'
 import { verifyDesktopPayload } from '../../scripts/lib/desktop-payload.mjs'
 
@@ -34,7 +36,21 @@ export async function prepareRetainedProductReinstall({ installRoot, payload }) 
     dataLock = await acquireExistingCliLock(own.dataDir, 'ci-retained-removal-fixture')
     assert.equal(inspectInstance(own.dataDir).state, 'stopped')
     proof = await captureDesktopRemovalProof(own.root, operationId)
-    await assertDesktopRemovalProgramsUnused({ installRoot: own.root, proof }, 'ci-before-partial-removal')
+    try { await assertDesktopRemovalProgramsUnused({ installRoot: own.root, proof }, 'ci-before-partial-removal') }
+    catch (error) {
+      // Read-only bounded diagnostics. Never convert this second observation
+      // into permission to bypass the failed guard or mutate fixture programs.
+      const files = desktopRemovalProgramEntries(proof).map(entry => path.join(own.root, entry.name))
+      const started = performance.now()
+      try {
+        const result = await identity.inspectProgramReferences({ roots: [own.coreRoot, own.guiRoot, path.join(own.root, 'bin')], files })
+        console.log('CRABOT_RETAINED_REFERENCE_DIAGNOSIS ' + JSON.stringify({ file_count: files.length, max_path_length: files.reduce((maximum, file) => Math.max(maximum, file.length), 0),
+          elapsed_ms: Math.round(performance.now() - started), complete: result.complete, incomplete: result.incomplete,
+          holders: result.processes.slice(0, 8).map(item => ({ pid: item.pid, parent: item.parent, image: path.basename(item.executable) })),
+          holder_count: result.processes.length, unknown_count: result.unknown_pids.length, unknown: result.unknown_details.slice(0, 8) }))
+      } catch (diagnostic) { console.log('CRABOT_RETAINED_REFERENCE_DIAGNOSIS ' + JSON.stringify({ file_count: files.length, code: diagnostic.code || 'DIAGNOSIS_UNAVAILABLE' })) }
+      throw error
+    }
     const directory = management.ensurePrivateDataRoot(path.join(management.ensurePrivateDataRoot(path.join(own.root, 'app/removals')), operationId))
     const text = JSON.stringify(proof) + '\n'
     await privateJson(path.join(directory, 'proof.json'), proof)

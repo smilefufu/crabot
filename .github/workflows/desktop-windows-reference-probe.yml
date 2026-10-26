@@ -1,0 +1,26 @@
+name: Desktop Windows reference diagnosis
+on:
+  workflow_dispatch:
+  push:
+    branches: ['feat/desktop-application']
+    paths:
+      - '.github/scripts/probe-windows-program-references.mjs'
+      - '.github/workflows/desktop-windows-reference-probe.yml'
+permissions:
+  contents: read
+jobs:
+  references:
+    runs-on: windows-2022
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.3'
+      - name: Build same-source native observer
+        shell: bash
+        run: node scripts/build-native.mjs
+      - name: Observe finite resource counts and a real held file
+        shell: bash
+        run: node .github/scripts/probe-windows-program-references.mjs
