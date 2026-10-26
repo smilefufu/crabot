@@ -5,7 +5,7 @@ const { pathToFileURL } = require('node:url'), { spawn } = require('node:child_p
 const cfg = JSON.parse(process.env.CRABOT_NODE_REMOVAL_FIXTURE)
 const load = name => import(pathToFileURL(path.join(cfg.own.guiRoot, 'resources/crabot-maintenance-backend/bootstrap/scripts/lib', name)))
 const timer = setTimeout(() => process.exit(2), 45000)
-let prepared, child, ended
+let prepared, child, ended, inheritedGui, inheritedData
 void (async () => {
   const { prepareDesktopRemovalNode, prepareExistingDesktopRemovalNode } = await load('desktop-removal-host.mjs')
   if (cfg.mode.startsWith('node-job-resume')) {
@@ -77,7 +77,9 @@ void (async () => {
           },close:()=>platform.close()};
         };
       }
+      if(process.argv[3]==='node-job-valid'){require('node:fs').fstatSync(4);require('node:fs').fstatSync(5)}
       lease=await(process.argv[3].startsWith('node-job-resume')?resumeDesktopRemovalNode:beginInitialDesktopRemovalNode)({installRoot:process.argv[1],operationId:process.argv[2],...(preparePlatformRemoval?{preparePlatformRemoval}:{})});
+      if(process.argv[3]==='node-job-valid'){const sync=require('node:fs');assert.throws(()=>sync.fstatSync(4),{code:'EBADF'});const bytes=Buffer.alloc(64);const size=sync.readSync(5,bytes,0,bytes.length,0);assert.equal(bytes.subarray(0,size).toString(),'unchanged user content');sync.closeSync(5)}
       const published=await lease.current(),message={kind:'desktop_removal_source_exit',installation_id:published.installation_id,operation_id:published.operation_id,source_selection:published.source_selection};
       let sourceVerifier;
       if(process.argv[3]==='node-job-source-verifier')sourceVerifier={preparing_rejected:await probe(message)===false};
@@ -118,8 +120,9 @@ void (async () => {
   `
   const root = cfg.otherRoot || cfg.own.root
   const cleanupFactory = cfg.mode === 'node-job-valid' ? (await load('desktop-removal-host-cleanup.mjs')).captureRemovalNodeCleanup : undefined
+  if (cfg.mode === 'node-job-valid') { inheritedGui = await fs.open(path.join(cfg.own.guiRoot, 'resources/desktop-release.json'), 'r'); inheritedData = await fs.open(path.join(cfg.own.dataDir, 'preserved'), 'r') }
   child = spawn(prepared.executable, ['--input-type=module', '--eval', script, root, cfg.operationId, cfg.mode, cfg.resultFile], {
-    cwd: prepared.directory, env: { PATH: '', LANG: 'C.UTF-8', ...(process.env.GITHUB_ACTIONS==='true'?{GITHUB_ACTIONS:'true'}:{}) }, stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+    cwd: prepared.directory, env: { PATH: '', LANG: 'C.UTF-8', ...(process.env.GITHUB_ACTIONS==='true'?{GITHUB_ACTIONS:'true'}:{}) }, stdio: ['ignore', 'pipe', 'pipe', 'ipc', ...(inheritedGui ? [inheritedGui.fd, inheritedData.fd] : [])],
   })
   ended = once(child, 'close')
   let cleanup
@@ -144,6 +147,7 @@ void (async () => {
   const [code, signal] = await ended
   if (code !== 0 || signal || error) throw new Error('Finite Node host failed: ' + JSON.stringify({ code, signal, output: output.slice(0, 512) }) + ': ' + error)
   const result = JSON.parse(output)
+  if (inheritedGui) { await inheritedGui.stat(); await inheritedData.stat() }
   if (cleanup) { await cleanup(); result.private_copy_removed = true; await require('node:assert/strict').rejects(fs.stat(prepared.directory), { code: 'ENOENT' }) }
   else await fs.rm(prepared.directory, { recursive: true, force: true })
   prepared = null
@@ -152,4 +156,4 @@ void (async () => {
   if (child && child.exitCode === null && child.signalCode === null) { child.kill('SIGKILL'); await ended.catch(() => {}) }
   if (prepared) await fs.rm(prepared.directory, { recursive: true, force: true })
   clearTimeout(timer); console.error(error); process.exitCode = 1
-})
+}).finally(async () => { await inheritedGui?.close(); await inheritedData?.close() })

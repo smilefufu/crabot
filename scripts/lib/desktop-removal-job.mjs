@@ -27,6 +27,24 @@ const fail = () => { throw Object.assign(new Error('卸载作业或停止结果�
 function absent(file) {
   try { physicalFs.lstatSync(file); return false } catch (error) { if (error.code === 'ENOENT') return true; throw error }
 }
+// Electron may leave its resource descriptors open across exec on Linux.
+// The verified plain-Node host never consumes the original GUI resources.
+function closeInheritedGuiResources(guiRoot, proof) {
+  const files = new Set(Object.entries(proof.payload.gui).filter(([, entry]) => entry.type === 'file').map(([name]) => path.join(guiRoot, name)))
+  for (const name of physicalFs.readdirSync('/proc/self/fd')) {
+    if (!/^[0-9]+$/.test(name) || Number(name) < 4) continue
+    const fd = Number(name), link = '/proc/self/fd/' + name
+    let file
+    try { file = physicalFs.readlinkSync(link) }
+    catch (error) { if (error.code === 'ENOENT') continue; throw error }
+    if (!files.has(file)) continue
+    const opened = physicalFs.fstatSync(fd, { bigint: true }), original = physicalFs.lstatSync(file, { bigint: true })
+    if (!opened.isFile() || !original.isFile() || original.isSymbolicLink()
+      || opened.dev !== original.dev || opened.ino !== original.ino || opened.uid !== BigInt(process.getuid())
+      || physicalFs.readlinkSync(link) !== file) fail()
+    physicalFs.closeSync(fd)
+  }
+}
 async function openDesktopRemoval({ installRoot, operationId, signal, preparePlatformRemoval }, existing, role = 'gui') {
   if (preparePlatformRemoval !== undefined && (role !== 'node' || typeof preparePlatformRemoval !== 'function')) fail()
   const base = existing ? installation.readDesktopInstallation(installRoot) : installation.readDesktopSelection(installRoot)
@@ -49,6 +67,7 @@ async function openDesktopRemoval({ installRoot, operationId, signal, preparePla
     else if (existing) capture = captureExistingRemovalGuiHost
     const captured = await capture({ installRoot: own.root, operationId, signal })
     const { proof, facts } = captured
+    if (role === 'node') closeInheritedGuiResources(own.guiRoot, proof)
     const executable = await fs.realpath(process.execPath)
     const hostGuiRoot = process.platform === 'darwin' ? path.resolve(path.dirname(executable), '../../..') : path.dirname(executable)
     const hostDirectory = role === 'node' ? path.dirname(executable) : path.dirname(hostGuiRoot)
