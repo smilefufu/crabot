@@ -9,11 +9,39 @@ import site
 import ssl
 import subprocess
 import sys
+import time
+import urllib.error
 import urllib.request
 
 runtime = Path(sys.argv[1]).resolve()
 inputs = Path(sys.argv[2])
 BASE_LIBRARIES = {"libc.so.6", "libm.so.6", "libdl.so.2", "libpthread.so.0", "librt.so.1", "libresolv.so.2", "libutil.so.1", "libanl.so.1", "libgcc_s.so.1", "libstdc++.so.6"}
+
+
+def download_linux_resource(url, archive, checksum, certificates):
+    deadline = time.monotonic() + 120
+    for attempt in range(2):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("Linux resource download budget exhausted")
+        digest = hashlib.sha256()
+        try:
+            with urllib.request.urlopen(url, timeout=remaining, context=certificates) as response, archive.open("wb") as output:
+                while chunk := response.read(1024 * 1024):
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError("Linux resource download budget exhausted")
+                    output.write(chunk)
+                    digest.update(chunk)
+        except urllib.error.HTTPError as error:
+            if error.code != 503 or attempt or deadline - time.monotonic() <= 1:
+                raise
+            error.close()
+            print("Scrapling native resource: HTTP 503; retrying once", flush=True)
+            time.sleep(1)
+            continue
+        if digest.hexdigest() != checksum:
+            raise RuntimeError(f"Linux resource checksum failed: {archive.stem}")
+        return
 
 
 def linux_resources():
@@ -27,13 +55,7 @@ def linux_resources():
         print(f"Scrapling native resource: {package['package']} {package['version']}", flush=True)
         archive = extracted / (package["package"] + ".deb")
         url = package["url"].replace("http://", "https://", 1)
-        digest = hashlib.sha256()
-        with urllib.request.urlopen(url, timeout=120, context=certificates) as response, archive.open("wb") as output:
-            while chunk := response.read(1024 * 1024):
-                output.write(chunk)
-                digest.update(chunk)
-        if digest.hexdigest() != package["sha256"]:
-            raise RuntimeError(f"Linux resource checksum failed: {package['package']}")
+        download_linux_resource(url, archive, package["sha256"], certificates)
         subprocess.run(["dpkg-deb", "-x", str(archive), str(extracted)], check=True, timeout=60)
         archive.unlink()
     libraries = runtime / "lib"
