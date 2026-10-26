@@ -6,6 +6,9 @@ on:
       helper_only:
         type: boolean
         default: false
+      backup_failure:
+        type: boolean
+        default: false
       legacy_version:
         type: choice
         default: all
@@ -87,7 +90,7 @@ jobs:
           console.log('CRABOT_SYSTEM_DIAGNOSTIC_SOURCE ' + JSON.stringify({ commit: release.commit, current_source_acceptance: false }))
           NODE
       - name: Run the published legacy installer acceptance
-        run: sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,GITHUB_REPOSITORY,GITHUB_WORKSPACE "$GITHUB_WORKSPACE/.desktop-build/安装 候选/core/.product-runtime/node/bin/node" .github/scripts/smoke-system-legacy.mjs "$GITHUB_WORKSPACE/.desktop-build/安装 候选/core" "$GITHUB_WORKSPACE/.desktop-build/system-legacy.json" "${{ inputs.legacy_version }}" 2>&1 | tee .desktop-build/system-legacy.log
+        run: sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,GITHUB_REPOSITORY,GITHUB_WORKSPACE "$GITHUB_WORKSPACE/.desktop-build/安装 候选/core/.product-runtime/node/bin/node" .github/scripts/smoke-system-legacy.mjs "$GITHUB_WORKSPACE/.desktop-build/安装 候选/core" "$GITHUB_WORKSPACE/.desktop-build/system-legacy.json" "${{ inputs.legacy_version }}" "${{ inputs.backup_failure && 'backup-failure' || '' }}" 2>&1 | tee .desktop-build/system-legacy.log
       - uses: actions/upload-artifact@v4
         if: always()
         with:

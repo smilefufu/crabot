@@ -39,6 +39,10 @@ const releases = [
 ]
 const selectedVersion = process.argv[4] || 'all'
 assert.ok(selectedVersion === 'all' || releases.some(release => release.version === selectedVersion))
+const scenario = process.argv[5] || 'normal'
+assert.ok(['normal', 'backup-failure'].includes(scenario))
+const backupFailure = scenario === 'backup-failure'
+if (backupFailure) assert.equal(selectedVersion, 'v2026.10.15.1')
 const reports = [], ownedOsFiles = ['/etc/crabot', '/usr/local/bin/crabot', '/etc/systemd/user/crabot.service', '/etc/logrotate.d/crabot']
 // GitHub images can make this root-owned command directory world-writable.
 // Match the shared-install prerequisite only on this disposable hosted runner.
@@ -152,8 +156,51 @@ for (const release of releases.filter(release => selectedVersion === 'all' || re
         PATH: base + ':/usr/bin:/bin', DATA_DIR: employee.data_dir, CRABOT_PORT_OFFSET: String(employee.port_offset), CRABOT_HOME: old,
       }, legacyNode)
     }
-    console.log('CRABOT_LEGACY_ACCEPTANCE ' + JSON.stringify({ version: release.version, phase: 'ordinary-installer' }))
-    await run('/usr/bin/python3', ['-I', '-B', '-c', ptyCode, path.join(source, 'install.sh'), '--install-dir=' + old], { timeout: 510_000 })
+    if (backupFailure) {
+      // A real filesystem conflict in the stopped account's backup destination,
+      // not a mocked coordinator or forced product return value.
+      await asUser(users[1], ['-e', "require('node:fs').writeFileSync(process.argv[1]+'.desktop-backups','CI-owned backup destination conflict',{flag:'wx',mode:0o600})", users[1].data_dir])
+    }
+    console.log('CRABOT_LEGACY_ACCEPTANCE ' + JSON.stringify({ version: release.version, phase: 'ordinary-installer', backup_failure_fixture: backupFailure }))
+    let installationError
+    try { await run('/usr/bin/python3', ['-I', '-B', '-c', ptyCode, path.join(source, 'install.sh'), '--install-dir=' + old], { timeout: 510_000 }) }
+    catch (error) { if (!backupFailure) throw error; installationError = error }
+    if (backupFailure) {
+      assert.ok(installationError, 'The occupied backup destination must reject conversion')
+      const maintenance = store.maintenance(), job = store.read(store.file(maintenance.id), true)
+      assert.equal(job.plan.kind, 'conversion'); assert.equal(job.phase, 'completed'); assert.equal(job.progress.exit_code, 1)
+      assert.deepEqual(job.progress.results.map(row => row.state), ['healthy', 'kept_stopped'], JSON.stringify({ stage: job.progress.stage, error: job.progress.error, results: job.progress.results.map(row => ({ state: row.state, error: row.error })) }))
+      assert.deepEqual(job.plan.instances.map(item => item.observation.runtime_state), ['running', 'stopped'])
+      const { LegacySystemEntryFence } = await load('scripts/lib/legacy-system-fence.mjs')
+      assert.equal((await new LegacySystemEntryFence().inspect(old)).phase, 'restored')
+      assert.equal(await fs.readlink('/usr/local/bin/crabot'), path.join(old, 'cli.mjs'))
+      const { probeMmHealthy } = await load('scripts/lib/mm-probe.mjs')
+      assert.equal(await probeMmHealthy(19000 + users[0].port_offset), true, 'Original MM actually answers healthy after restoration')
+      for (const user of users) {
+        const check = `const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto');
+          const home=path.join(process.env.HOME,'.crabot'),data=process.argv[1],manifest=JSON.parse(fs.readFileSync(path.join(home,'instance.json')));
+          if(manifest.crabot_home!==process.argv[2]||manifest.api_key!=='fixture-original-private-key')throw Error('old binding changed');
+          if(fs.readFileSync(path.join(data,'agent/preserved.txt'),'utf8')!=='original stopped account history')throw Error('old history changed');
+          if(fs.existsSync(path.join(data,'desktop-maintenance.json')))throw Error('source version protection remains');
+          console.log(crypto.createHash('sha256').update(fs.readFileSync(path.join(data,'admin/credentials.json'))).digest('hex'));`
+        assert.equal((await asUser(user, ['-e', check, user.data_dir, old], {}, path.join(base, 'node'))).stdout.trim(), user.credentials_sha256)
+      }
+      assert.equal(registry.read().length, 0, 'Failed pre-data conversion cannot register target users')
+      const { collectLegacySystemProcesses } = await load('scripts/lib/legacy-system-processes.mjs')
+      const consumers = collectLegacySystemProcesses(old, { trustedTargetRoot: path.join(managed, 'releases', job.plan.target.id) }).filter(row => row.uses_source)
+      assert.ok(consumers.some(row => row.process.owner === String(users[0].uid)))
+      assert.equal(consumers.some(row => row.process.owner === String(users[1].uid)), false)
+      assert.equal(job.progress.results[1].start_dispatched, undefined)
+      for (const original of [job.plan.instances[0].observation.controller, job.plan.instances[0].observation.mm]) {
+        assert.equal(identity.sameProcess(original, identity.inspectProcess(original.pid)), false)
+      }
+      reports.push({ version: release.version, ordinary_installer: true, actual_backup_destination_conflict: true,
+        original_running_set_restored: true, original_command_restored: true, old_health_actual: true,
+        credentials_and_history_preserved: true, target_users_not_registered: true, business_model_calls: 0 })
+      await fs.writeFile(evidence, JSON.stringify({ schema_version: 1, scenario: 'backup-failure', cases: reports }, null, 2) + '\n')
+      console.log('CRABOT_LEGACY_ACCEPTANCE ' + JSON.stringify({ version: release.version, phase: 'passed-before-data-failure-restoration' }))
+      continue
+    }
     assert.equal(await fs.readlink('/usr/local/bin/crabot'), path.join(managed, 'bin/crabot'))
     const selected = (await fs.readFile(path.join(managed, 'current-core'), 'utf8')).trim(); core = path.join(managed, 'releases', selected)
     await verifyCoreRelease(core)
