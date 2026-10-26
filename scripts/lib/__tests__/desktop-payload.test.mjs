@@ -1776,3 +1776,33 @@ for (const allowed of [false, true, 'higher']) test('retained product acceptance
     await assert.rejects(fs.lstat(path.join(f.target, 'data/mm.pid')), { code: 'ENOENT' })
   }
 })
+
+for (const mode of ['same', 'higher', 'completed', 'older', 'wrong-operation', 'preparing', 'changed-payload', 'cancelled', 'changed-job']) {
+  test('trusted installer prepares an incoming maintenance GUI without the removed original: ' + mode, { skip: process.platform === 'linux' }, async t => {
+    const { prepareInstallerDesktopRemovalGui } = await import('../desktop-removal-host.mjs')
+    assert.equal(typeof prepareInstallerDesktopRemovalGui, 'function')
+    const f = await removalProofFixture(t), incoming = await fixture(t, { version: mode === 'higher' ? '1.2.4' : mode === 'older' ? '1.2.2' : '1.2.3', executableNode: false })
+    f.record.phase = mode === 'completed' ? 'completed' : mode === 'preparing' ? 'preparing' : 'removing'; await f.publish()
+    await fs.rm(f.prepared.coreRoot, { recursive: true }); await fs.rm(f.prepared.guiRoot, { recursive: true })
+    const record = await fs.readFile(path.join(f.target, '.desktop-removal.json')), proof = await fs.readFile(f.file)
+    if (mode === 'changed-payload') await fs.appendFile(path.join(incoming.core, 'cli.mjs'), 'changed')
+    const input = { payload: incoming.payload, installRoot: f.target, operationId: mode === 'wrong-operation' ? randomUUID() : f.record.operation_id,
+      signal: mode === 'cancelled' ? AbortSignal.abort() : new AbortController().signal,
+      progress: phase => { if (mode === 'changed-job' && phase === 'copying') writeFileSync(path.join(f.target, '.desktop-removal.json'), JSON.stringify({ ...f.record, phase: 'completed' }) + '\n') } }
+    if (['same', 'higher', 'completed'].includes(mode)) {
+      const prepared = await prepareInstallerDesktopRemovalGui(input)
+      t.after(() => fs.rm(prepared.directory, { recursive: true, force: true })) // This preparation never starts a child.
+      assert.deepEqual(prepared.proof, f.proof); assert.deepEqual(prepared.record, f.record)
+      assert.deepEqual(prepared.hostPayload, (await verifyDesktopPayload(incoming.payload)).record)
+      assert.notEqual(prepared.hostPayload.selection.gui_id, prepared.proof.source_selection.gui_id)
+      await (await import('../desktop-payload.mjs')).verifyDesktopGui(prepared.guiRoot, prepared.hostPayload)
+      assert.deepEqual(await fs.readdir(prepared.directory), ['gui'])
+    } else await assert.rejects(prepareInstallerDesktopRemovalGui(input))
+    if (mode !== 'changed-job') assert.deepEqual(await fs.readFile(path.join(f.target, '.desktop-removal.json')), record)
+    assert.deepEqual(await fs.readFile(f.file), proof)
+    assert.deepEqual(installation.readDesktopPairReference(f.target).selection, f.selection)
+    await assert.rejects(fs.lstat(f.prepared.coreRoot), { code: 'ENOENT' }); await assert.rejects(fs.lstat(f.prepared.guiRoot), { code: 'ENOENT' })
+    await assert.rejects(fs.lstat(path.join(f.target, 'data/desktop-maintenance.json')), { code: 'ENOENT' })
+    assert.equal(await fs.readFile(path.join(f.target, 'data/retained-user-file'), 'utf8'), 'user content')
+  })
+}

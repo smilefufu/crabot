@@ -11,7 +11,7 @@ import management from './desktop-management.cjs'
 import installation from './desktop-installation.cjs'
 import { captureDesktopRemovalProof, readDesktopRemovalProof } from './desktop-removal-proof.mjs'
 import { readOriginalDesktopPayload } from './desktop-program-proof.mjs'
-import { verifyDesktopGui } from './desktop-payload.mjs'
+import { verifyDesktopGui, verifyDesktopPayload } from './desktop-payload.mjs'
 import { acquireExistingCliLock, releaseCliLock, cliLockToken } from './cli-lock.mjs'
 import { workspaceMaintenancePending } from './workspace-maintenance.cjs'
 const { promises: fs, constants } = physicalFs
@@ -38,28 +38,28 @@ export async function prepareDesktopRemovalGui({ installRoot, operationId, signa
         || await versionMaintenancePending(own.dataDir) || workspaceMaintenancePending(own.dataDir) || cliLockToken(lock) !== token) fail()
     }
     await current(); signal?.throwIfAborted()
-    return await copyRemovalGui(own, proof, current, signal, progress)
+    return { ...await copyRemovalGui(own.guiRoot, proof.payload, current, signal, progress), proof }
   } finally { if (token && cliLockToken(lock) === token) releaseCliLock(lock) }
 }
 
 // Same neutral byte-copy operation for independently verified role contexts.
-async function copyRemovalGui(own, proof, current, signal, progress) {
+async function copyRemovalGui(sourceGui, payload, current, signal, progress) {
   let directory, createdIdentity
   try {
-    const bytes = Object.values(proof.payload.gui).reduce((sum, file) => sum + BigInt(file.size ?? 0), 0n)
+    const bytes = Object.values(payload.gui).reduce((sum, file) => sum + BigInt(file.size ?? 0), 0n)
     const parent = await fs.realpath(tmpdir()), space = await fs.statfs(parent, { bigint: true })
     if (space.bavail * space.bsize < bytes + 512n * 1024n * 1024n) throw Object.assign(new Error('临时维护程序空间不足，原应用和数据已保留。'), { code: 'CRABOT_UPDATE_SPACE' })
     directory = management.ensurePrivateDataRoot(path.join(parent, 'crabot-removal-host-' + randomUUID()))
     createdIdentity = directoryIdentity(await fs.lstat(directory, { bigint: true }))
     const guiRoot = path.join(directory, 'gui')
     progress('copying'); signal?.throwIfAborted(); await current()
-    await fs.cp(own.guiRoot, guiRoot, { recursive: true, verbatimSymlinks: true, mode: constants.COPYFILE_FICLONE,
+    await fs.cp(sourceGui, guiRoot, { recursive: true, verbatimSymlinks: true, mode: constants.COPYFILE_FICLONE,
       filter: () => { signal?.throwIfAborted(); return true } })
     await current(); progress('prepared'); signal?.throwIfAborted()
-    await verifyDesktopGui(guiRoot, proof.payload, { signal }); await current()
+    await verifyDesktopGui(guiRoot, payload, { signal }); await current()
     if (management.requirePrivateDataRoot(directory) !== directory || directoryIdentity(await fs.lstat(directory, { bigint: true })) !== createdIdentity) fail()
     signal?.throwIfAborted()
-    return { directory, guiRoot, executable: path.join(guiRoot, process.platform === 'darwin' ? 'Crabot.app/Contents/MacOS/Crabot' : 'Crabot.exe'), proof }
+    return { directory, guiRoot, executable: path.join(guiRoot, process.platform === 'darwin' ? 'Crabot.app/Contents/MacOS/Crabot' : 'Crabot.exe') }
   } catch (error) {
     if (directory) {
       try {
@@ -94,7 +94,39 @@ export async function prepareExistingDesktopRemovalGui({ installRoot, operationI
     }
     await current(); signal?.throwIfAborted()
     await verifyDesktopGui(own.guiRoot, proof.payload, { signal }); await current()
-    return { ...await copyRemovalGui(own, proof, current, signal, progress), record }
+    return { ...await copyRemovalGui(own.guiRoot, proof.payload, current, signal, progress), proof, record }
+  } finally { if (token && cliLockToken(lock) === token) releaseCliLock(lock) }
+}
+
+// A trusted offline installer supplies its own complete same/newer GUI. The
+// historical proof still describes only the old programs; it is never rewritten
+// to match this maintenance image. Preparation grants no lifecycle authority.
+export async function prepareInstallerDesktopRemovalGui({ payload, installRoot, operationId, signal, progress = () => {} }) {
+  if (!['darwin', 'win32'].includes(process.platform)) fail()
+  signal?.throwIfAborted()
+  const own = installation.readDesktopInstallation(installRoot)
+  const lock = await acquireExistingCliLock(own.root, 'prepare-installer-removal-host'), token = cliLockToken(lock)
+  try {
+    const { record, proof } = await readDesktopRemovalProof(own.root)
+    if (record.operation_id !== operationId || !['removing', 'completed'].includes(record.phase)
+      || !same(installation.readDesktopPairReference(own.root).selection, record.source_selection)) fail()
+    const dataIdentity = directoryIdentity(await fs.lstat(own.dataDir, { bigint: true }))
+    const current = async () => {
+      if (!token || cliLockToken(lock) !== token) fail()
+      const actual = await readDesktopRemovalProof(own.root)
+      if (!same(actual.record, record) || !same(actual.proof, proof)
+        || !same(installation.readDesktopInstallation(own.root).record, own.record)
+        || !same(installation.readDesktopPairReference(own.root).selection, record.source_selection)
+        || directoryIdentity(await fs.lstat(own.dataDir, { bigint: true })) !== dataIdentity
+        || await versionMaintenancePending(own.dataDir) || workspaceMaintenancePending(own.dataDir)
+        || cliLockToken(lock) !== token) fail()
+    }
+    await current(); signal?.throwIfAborted()
+    const incoming = await verifyDesktopPayload(payload, { signal })
+    const { assertReinstallVersion } = await import('./desktop-reinstall.mjs')
+    assertReinstallVersion(record.source_selection.version, incoming.record.selection.version)
+    await current(); signal?.throwIfAborted()
+    return { ...await copyRemovalGui(incoming.guiRoot, incoming.record, current, signal, progress), record, proof, hostPayload: incoming.record }
   } finally { if (token && cliLockToken(lock) === token) releaseCliLock(lock) }
 }
 
