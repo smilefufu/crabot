@@ -299,6 +299,7 @@ jobs:
               > ".desktop-build/ubuntu-$release.log" 2>&1
           done
       - name: Assemble common core and unpacked Electron candidate
+        id: common_candidate
         if: steps.scope.outputs.full_runtime == 'true'
         run: |
           node scripts/desktop/stage-core.mjs "--out=.desktop-build/安装 候选/core" --version=0.1.0-desktop.1
@@ -408,7 +409,8 @@ jobs:
         timeout-minutes: 15
         run: sudo --preserve-env=GITHUB_ACTIONS "$GITHUB_WORKSPACE/.product-runtime/node/bin/node" .github/scripts/smoke-system-mode.mjs "$GITHUB_WORKSPACE/.desktop-build/安装 候选/core" "$GITHUB_WORKSPACE/.desktop-build/system-mode.json" "$GITHUB_WORKSPACE/.desktop-build/cli-archive/archive.json" 2>&1 | tee .desktop-build/system-mode.log
       - name: Published legacy system archives through the ordinary installer
-        if: runner.os == 'Linux' && steps.scope.outputs.full_runtime == 'true'
+        # Independent of GUI update/repair results, but never use an incomplete Core.
+        if: ${{ !cancelled() && runner.os == 'Linux' && steps.scope.outputs.full_runtime == 'true' && steps.common_candidate.outcome == 'success' }}
         timeout-minutes: 20
         run: sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,GITHUB_REPOSITORY,GITHUB_WORKSPACE "$GITHUB_WORKSPACE/.product-runtime/node/bin/node" .github/scripts/smoke-system-legacy.mjs "$GITHUB_WORKSPACE/.desktop-build/安装 候选/core" "$GITHUB_WORKSPACE/.desktop-build/system-legacy.json" 2>&1 | tee .desktop-build/system-legacy.log
       - name: Whole Electron host with real core and CLI on Linux
