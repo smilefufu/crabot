@@ -109,6 +109,7 @@ jobs:
           node crabot-client/node_modules/typescript/bin/tsc -p crabot-client/tsconfig.json
           pnpm install --frozen-lockfile
           pnpm --dir crabot-desktop install --frozen-lockfile
+          (cd crabot-desktop && node -e "require('electron')")
           node crabot-desktop/node_modules/typescript/bin/tsc -p crabot-desktop/tsconfig.json
           (cd crabot-desktop && node build-preload.mjs)
           node --test scripts/desktop/ubuntu-maintenance-backend.test.mjs
