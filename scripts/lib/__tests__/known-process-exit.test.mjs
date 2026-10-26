@@ -99,8 +99,8 @@ test('real parent exit keeps an observed detached child in the exit proof', { ti
     if (parent.exitCode === null && parent.signalCode === null) { const exited = once(parent, 'exit'); parent.kill(); await exited }
     stopLeaf()
     const deadline = Date.now() + 5000
-    while (leaf && !native.isProcessExited(leaf.pid) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 20))
-    if (leaf) assert.equal(native.isProcessExited(leaf.pid), true, 'controlled child must exit before fixture cleanup')
+    while (leaf && probeKnownProcessExit([leaf]).state !== 'stopped' && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 20))
+    if (leaf) assert.equal(probeKnownProcessExit([leaf]).state, 'stopped', 'controlled child must exit before fixture cleanup')
   })
   const [pid] = await once(parent, 'message'), root = native.inspectProcess(parent.pid)
   leaf = native.inspectProcess(pid)
@@ -109,6 +109,6 @@ test('real parent exit keeps an observed detached child in the exit proof', { ti
   assert.deepEqual(probeKnownProcessExit([root, leaf]), { state: 'running', running_pids: [leaf.pid], unknown_pids: [] })
   stopLeaf()
   const deadline = Date.now() + 5000
-  while (!native.isProcessExited(leaf.pid) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 20))
+  while (probeKnownProcessExit([leaf]).state !== 'stopped' && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 20))
   assert.deepEqual(probeKnownProcessExit([root, leaf]), { state: 'stopped', running_pids: [], unknown_pids: [] })
 })
