@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import identity from '../process-identity.cjs'
-import { captureMacRemovalSystemProcesses } from '../desktop-removal-system-processes.mjs'
+import { captureMacRemovalSystemProcesses, captureLinuxRemovalSystemProcesses } from '../desktop-removal-system-processes.mjs'
 function fixture() {
   const root = '/Users/example/Crabot', owner = '502', service = { pid: 50, parent: 1, owner, started: '100:1', executable: '/usr/libexec/service' }
   const items = new Map([[service.pid, service], [process.pid, { pid: process.pid, owner }]])
@@ -72,4 +72,60 @@ test('system ancestor is pinned with the service generation', () => {
   const classify = captureMacRemovalSystemProcesses(f.root, f.api, f.fs)
   assert.equal(classify(f.observation), true)
   f.items.get(60).started = '101:1'; assert.equal(classify(f.observation), false)
+})
+
+function linuxFixture() {
+  const uid = 1001, root = '/home/example/Crabot', files = new Map(), stats = new Map()
+  const group = '/user.slice/user-1001.slice/user@1001.service'
+  const service = { MainPID: '50', ExecMainStartTimestampMonotonic: '10501259', ControlGroup: group,
+    ExecStart: '{ path=/usr/lib/systemd/systemd ; argv[]=/usr/lib/systemd/systemd --user ; }' }
+  function proc(pid, parent, name, start, flags = 0) {
+    const fields = Array(50).fill('0'); fields[0] = 'S'; fields[1] = String(parent); fields[6] = String(flags); fields[19] = String(start)
+    files.set('/proc/' + pid + '/stat', pid + ' (' + name + ') ' + fields.join(' '))
+    files.set('/proc/' + pid + '/cgroup', '0::' + group + '/init.scope\n')
+    stats.set('/proc/' + pid, { uid, isDirectory: () => true, isSymbolicLink: () => false })
+  }
+  proc(50, 1, 'systemd', 1050); proc(51, 50, '(sd-pam)', 1064, 64)
+  files.set('/proc/50/task/50/children', '51 ')
+  const fs = { readFileSync: name => { if (!files.has(name)) throw new Error('missing'); return files.get(name) },
+    realpathSync: name => name,
+    lstatSync: name => stats.get(name) || ({ uid: 0, mode: 0o100755, isFile: () => true, isSymbolicLink: () => false }) }
+  const run = command => command.endsWith('/getconf') ? '100\n' : Object.entries(service).map(([key, value]) => key + '=' + value).join('\n')
+  const observation = { complete: false, incomplete: false, processes: [], unknown_pids: [50, 51],
+    unknown_details: [{ pid: 50, stage: 'identity', os_error: 13 }, { pid: 51, stage: 'identity', os_error: 13 }] }
+  return { uid, root, fs, run, service, files, stats, observation, proc }
+}
+test('Linux root system manager and fork-only PAM role classify raw protected unknowns without altering receipts', () => {
+  const f = linuxFixture(), before = structuredClone(f.observation)
+  const classify = captureLinuxRemovalSystemProcesses(f.root, f.fs, f.run, f.uid)
+  assert.equal(classify(f.observation), true); assert.deepEqual(f.observation, before)
+})
+for (const mode of ['wrong-uid', 'wrong-parent', 'wrong-name', 'execed-pam', 'wrong-group', 'wrong-start', 'wrong-image', 'image-alias',
+  'image-writable', 'image-owner', 'own-root', 'manager-unavailable', 'late-generation', 'late-unit', 'late-image', 'reference',
+  'unknown-process', 'wrong-error', 'wrong-stage', 'incomplete', 'duplicate-pid', 'missing-reason']) test('Linux protected-role evidence still blocks: ' + mode, () => {
+  const f = linuxFixture()
+  if (mode === 'wrong-uid') f.stats.get('/proc/51').uid++
+  if (mode === 'wrong-parent') f.proc(51, 49, '(sd-pam)', 1064, 64)
+  if (mode === 'wrong-name') f.proc(51, 50, 'Crabot', 1064, 64)
+  if (mode === 'execed-pam') f.proc(51, 50, '(sd-pam)', 1064, 0)
+  if (mode === 'wrong-group') f.files.set('/proc/51/cgroup', '0::/user.slice/other.service')
+  if (mode === 'wrong-start') f.service.ExecMainStartTimestampMonotonic = '90000000'
+  if (mode === 'wrong-image') f.service.ExecStart = '{ path=/home/example/systemd ; }'
+  if (mode === 'image-alias') f.fs.realpathSync = () => '/home/example/systemd'
+  if (mode === 'image-writable') f.fs.lstatSync = () => ({ uid: 0, mode: 0o100777, isFile: () => true, isSymbolicLink: () => false })
+  if (mode === 'image-owner') f.fs.lstatSync = () => ({ uid: 1001, mode: 0o100755, isFile: () => true, isSymbolicLink: () => false })
+  if (mode === 'own-root') f.root = '/usr/lib/systemd'
+  if (mode === 'manager-unavailable') f.run = () => { throw new Error('unavailable') }
+  const classify = captureLinuxRemovalSystemProcesses(f.root, f.fs, f.run, f.uid)
+  if (mode === 'late-generation') f.proc(51, 50, '(sd-pam)', 1100, 64)
+  if (mode === 'late-unit') f.service.MainPID = '52'
+  if (mode === 'late-image') f.service.ExecStart = '{ path=/home/example/systemd ; }'
+  if (mode === 'reference') f.observation.processes.push({ pid: 50 })
+  if (mode === 'unknown-process') { f.observation.unknown_pids.push(52); f.observation.unknown_details.push({ pid: 52, stage: 'identity', os_error: 13 }) }
+  if (mode === 'wrong-error') f.observation.unknown_details[0].os_error = 5
+  if (mode === 'wrong-stage') f.observation.unknown_details[0].stage = 'mappings'
+  if (mode === 'incomplete') f.observation.incomplete = true
+  if (mode === 'duplicate-pid') f.observation.unknown_pids.push(50)
+  if (mode === 'missing-reason') delete f.observation.unknown_details
+  assert.equal(classify(f.observation), false)
 })

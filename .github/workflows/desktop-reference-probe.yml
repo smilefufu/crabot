@@ -6,6 +6,8 @@ on:
     paths:
       - '.github/scripts/probe-linux-program-references.mjs'
       - '.github/workflows/desktop-reference-probe.yml'
+      - 'scripts/lib/desktop-removal-system-processes.mjs'
+      - 'scripts/lib/__tests__/desktop-removal-system-processes.test.mjs'
 permissions:
   contents: read
 jobs:
@@ -20,5 +22,7 @@ jobs:
           node-version: '22.22.3'
       - name: Build same-source OS observation helper only
         run: node scripts/build-native.mjs
+      - name: Verify protected roles and rejecting unknown or occupied cases
+        run: node --test scripts/lib/__tests__/desktop-removal-system-processes.test.mjs
       - name: Observe an empty directory and bounded unknown identities
         run: node .github/scripts/probe-linux-program-references.mjs

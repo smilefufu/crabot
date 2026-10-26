@@ -7,6 +7,7 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { fileURLToPath } from 'node:url'
 import identity from '../../scripts/lib/process-identity.cjs'
+import { captureLinuxRemovalSystemProcesses } from '../../scripts/lib/desktop-removal-system-processes.mjs'
 
 assert.equal(process.env.GITHUB_ACTIONS === 'true' || process.getuid?.() === 0 && process.argv[2] === '--identity', true)
 assert.equal(process.platform, 'linux')
@@ -37,6 +38,7 @@ if (process.argv[2] === '--identity') {
   assert.equal(process.argv.length, 2); assert.ok(process.getuid() > 0)
   const directory = await fs.mkdtemp(path.join(homedir(), 'crabot-empty-reference-'))
   try {
+    const classify = captureLinuxRemovalSystemProcesses(directory)
     const receipt = await identity.inspectProgramReferences({ roots: [directory], files: [] })
     const unknown = receipt.unknown_details.slice(0, 8), pids = [...new Set(unknown.map(item => item.pid))]
     const ordinary = await Promise.all(pids.map(pid => describe(pid).catch(error => ({ pid, unavailable: error.code || error.name }))))
@@ -54,7 +56,10 @@ if (process.argv[2] === '--identity') {
       manager = { pid: properties.MainPID, start_monotonic: properties.ExecMainStartTimestampMonotonic,
         control_group: properties.ControlGroup, image: /\bpath=([^;]+?)\s*;/.exec(properties.ExecStart)?.[1] }
     } catch (error) { manager = { unavailable: error.code || error.name } }
-    console.log('CRABOT_EMPTY_PROGRAM_REFERENCES ' + JSON.stringify({ manager, complete: receipt.complete, incomplete: receipt.incomplete,
+    const classified = receipt.complete || classify(receipt)
+    assert.equal(classified, true, 'Default system roles must not block an empty owned directory')
+    assert.equal(classify({ ...receipt, processes: [{ pid: process.pid }] }), false, 'An explicit program reference must still block')
+    console.log('CRABOT_EMPTY_PROGRAM_REFERENCES ' + JSON.stringify({ classified, manager, complete: receipt.complete, incomplete: receipt.incomplete,
       references: receipt.processes.length, unknown_count: receipt.unknown_pids.length, unknown, ordinary, privileged }))
   } finally { await fs.rmdir(directory) }
 }

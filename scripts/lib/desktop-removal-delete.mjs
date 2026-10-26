@@ -3,7 +3,7 @@
 import path from 'node:path'
 import physical from './physical-fs.cjs'
 import identity from './process-identity.cjs'
-import { captureMacRemovalSystemProcesses } from './desktop-removal-system-processes.mjs'
+import { captureMacRemovalSystemProcesses, captureLinuxRemovalSystemProcesses } from './desktop-removal-system-processes.mjs'
 import { captureDesktopRemovalJob } from './desktop-removal-context.mjs'
 import { inspectDesktopRemovalPrograms, desktopRemovalProgramEntries, matchesDesktopRemovalProgram, desktopProgramGeneration } from './desktop-removal-programs.mjs'
 const { promises: fs } = physical
@@ -20,7 +20,9 @@ export async function assertDesktopRemovalProgramsUnused({ installRoot, proof },
     try { physical.lstatSync(file); files.push(file) }
     catch (error) { if (error.code !== 'ENOENT') throw error }
   }
-  const unrelatedSystemUnknowns = process.platform === 'darwin' ? captureMacRemovalSystemProcesses(installRoot) : () => false
+  let unrelatedSystemUnknowns = () => false
+  if (process.platform === 'darwin') unrelatedSystemUnknowns = captureMacRemovalSystemProcesses(installRoot)
+  if (process.platform === 'linux') unrelatedSystemUnknowns = captureLinuxRemovalSystemProcesses(installRoot)
   let observation
   try { observation = await identity.inspectProgramReferences({ roots: [path.join(installRoot, 'releases', proof.source_selection.core_id),
     path.join(installRoot, 'app/releases', proof.source_selection.gui_id), path.join(installRoot, 'bin')], files }) }
