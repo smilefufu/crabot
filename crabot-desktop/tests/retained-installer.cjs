@@ -20,7 +20,9 @@ const observations = [], native = require(path.join(path.dirname(options.entry),
 const observe = native.inspectProgramReferences
 native.inspectProgramReferences = async options => {
   const result = await observe(options)
-  observations.push({ complete: result.complete, incomplete: result.incomplete, references: result.processes.length, unknown_stages: result.unknown_stages })
+  observations.push({ complete: result.complete, incomplete: result.incomplete, references: result.processes.length, unknown_stages: result.unknown_stages,
+        unknown: process.platform === 'linux' ? await Promise.all(result.unknown_details.slice(0, 8).map(async item => ({ ...item,
+          comm: (await fs.promises.readFile('/proc/' + item.pid + '/comm', 'utf8').catch(() => 'unavailable')).trim().slice(0, 64) }))) : undefined })
   return result
 }
 const dialogs = []

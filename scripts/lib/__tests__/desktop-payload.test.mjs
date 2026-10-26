@@ -14,7 +14,7 @@ import installation from '../desktop-installation.cjs'
 import { writeCoreRelease, verifyCoreRelease } from '../core-release.mjs'
 import { sealDesktopPayload, verifyDesktopPayload, prepareDesktopInstallation, commitDesktopInstallation } from '../desktop-payload.mjs'
 const windows = process.platform === 'win32', launcher = windows ? 'crabot.exe' : 'crabot'
-async function fixture(t, { version = '1.2.3', schema, functional = false, executableNode = true, shared = false } = {}) {
+async function fixture(t, { version = '1.2.3', schema, functional = false, executableNode = true, shared = false, launcherSuffix = '' } = {}) {
   const parent = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'Crabot 离线安装 ')))
   t.after(() => fs.rm(parent, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }))
   const payload = path.join(parent, '离线包'), core = path.join(payload, 'core'), gui = path.join(payload, 'gui'), target = path.join(parent, '选择的 目录')
@@ -29,6 +29,7 @@ async function fixture(t, { version = '1.2.3', schema, functional = false, execu
   else await fs.writeFile(node, 'inert Node bytes; never executed\n')
   await fs.copyFile(new URL('../../../crabot-native/build/Release/' + launcher, import.meta.url), path.join(core, 'bin', launcher))
   if (!windows) { await fs.chmod(node, 0o755); await fs.chmod(path.join(core, 'bin', launcher), 0o755) }
+  if (launcherSuffix) await fs.appendFile(path.join(core, 'bin', launcher), launcherSuffix)
   for (const file of ['package.json', 'product-runtime.json']) await fs.writeFile(path.join(core, file), JSON.stringify({ version }))
   await fs.writeFile(path.join(core, 'cli.mjs'), `console.log(JSON.stringify({version:${JSON.stringify(version)},required:process.env.CRABOT_PRODUCT_REQUIRED}))`)
   if (schema) {
@@ -1052,7 +1053,7 @@ test('initial removal publication refuses ordinary Node and releases both locks 
   await assert.rejects(fs.lstat(path.join(f.target, 'data')), { code: 'ENOENT' })
 })
 
-for (const mode of ['missing', 'intact', 'damaged', 'completed', 'wrong-operation', 'other-pair', 'changed-proof', 'no-stop-proof', 'running', 'module', 'changed-command', 'copy-cancel', 'copy-failure', 'publication-lost', 'prepared-lost', 'changed-job', 'changed-data', 'lost-lock', 'late-proof', 'missing-source-proof', 'metadata-change', 'missing-data', 'publication-cancel', 'late-cache-mode', 'cached-no-copy', 'core-only', 'gui-only', 'damaged-metadata', 'cache-race', 'foreign-program']) test('removal-fenced original programs reinstall without starting or clearing protection: ' + mode, { skip: windows && mode === 'late-cache-mode' }, async t => {
+for (const mode of ['missing', 'intact', 'damaged', 'completed', 'wrong-operation', 'older-package', 'changed-proof', 'no-stop-proof', 'running', 'module', 'changed-command', 'copy-cancel', 'copy-failure', 'publication-lost', 'prepared-lost', 'changed-job', 'changed-data', 'lost-lock', 'late-proof', 'missing-source-proof', 'metadata-change', 'missing-data', 'publication-cancel', 'late-cache-mode', 'cached-no-copy', 'core-only', 'gui-only', 'damaged-metadata', 'cache-race', 'foreign-program']) test('removal-fenced original programs reinstall without starting or clearing protection: ' + mode, { skip: windows && mode === 'late-cache-mode' }, async t => {
   const f = await removalProofFixture(t), { privateJson, readPending } = await import('../desktop-preparation-files.mjs')
   const { acquireExistingCliLock, releaseCliLock, cliLockToken, hasInheritedCliLock } = await import('../cli-lock.mjs')
   f.record.phase = mode === 'completed' ? 'completed' : 'removing'; await f.publish()
@@ -1081,7 +1082,7 @@ for (const mode of ['missing', 'intact', 'damaged', 'completed', 'wrong-operatio
     }
   } }
   if (mode === 'wrong-operation') options.operationId = randomUUID()
-  if (mode === 'other-pair') options.payload = (await fixture(t, { executableNode: false })).payload
+  if (mode === 'older-package') options.payload = (await fixture(t, { version: '1.2.2', executableNode: false })).payload
   if (mode === 'changed-proof') await fs.appendFile(f.file, ' ')
   if (mode === 'no-stop-proof') delete options.verifyStopped
   if (mode === 'running') await fs.writeFile(path.join(data, 'mm.pid'), String(process.pid))
@@ -1144,7 +1145,7 @@ for (const mode of ['missing', 'intact', 'damaged', 'completed', 'wrong-operatio
   }
   if (mode === 'foreign-program') { const owned = identity.isOwnedDirectory; t.mock.method(identity, 'isOwnedDirectory', directory => directory !== f.prepared.guiRoot && owned(directory)) }
   const { prepareDesktopRemovalReinstall } = await import('../desktop-reinstall.mjs')
-  if (['wrong-operation', 'other-pair', 'changed-proof', 'no-stop-proof', 'running', 'module', 'changed-command', 'copy-cancel', 'copy-failure', 'changed-job', 'changed-data', 'lost-lock', 'late-proof', 'metadata-change', 'missing-data', 'late-cache-mode', 'cache-race', 'foreign-program'].includes(mode)) {
+  if (['wrong-operation', 'older-package', 'changed-proof', 'no-stop-proof', 'running', 'module', 'changed-command', 'copy-cancel', 'copy-failure', 'changed-job', 'changed-data', 'lost-lock', 'late-proof', 'metadata-change', 'missing-data', 'late-cache-mode', 'cache-race', 'foreign-program'].includes(mode)) {
     await assert.rejects(prepareDesktopRemovalReinstall(options))
     if (!['changed-job', 'late-proof', 'late-cache-mode'].includes(mode)) await assert.rejects(fs.lstat(marker), { code: 'ENOENT' })
     if (mode === 'changed-command') assert.equal(await fs.readFile(command, 'utf8'), 'custom command, preserve')
@@ -1500,7 +1501,9 @@ for (const mode of ['fresh', 'completed', 'not-removing', 'cancelled', 'changed-
     const observe = native.inspectProgramReferences, observations = []
     t.mock.method(native, 'inspectProgramReferences', async options => {
       const result = await observe(options)
-      observations.push({ complete: result.complete, incomplete: result.incomplete, references: result.processes.length, unknown_stages: result.unknown_stages })
+      observations.push({ complete: result.complete, incomplete: result.incomplete, references: result.processes.length, unknown_stages: result.unknown_stages,
+        unknown: process.platform === 'linux' ? await Promise.all(result.unknown_details.slice(0, 8).map(async item => ({ ...item,
+          comm: (await fs.readFile('/proc/' + item.pid + '/comm', 'utf8').catch(() => 'unavailable')).trim().slice(0, 64) }))) : undefined })
       return result
     })
     const result = await prepareRetainedDesktopReinstall(options).catch(error => { throw new Error(error.code + ': ' + JSON.stringify(observations)) })
@@ -1564,3 +1567,63 @@ for (const damaged of [false, true]) test('actual GUI controller runs ordinary r
       if (report?.profile && await fs.realpath(path.dirname(report.profile)) === await fs.realpath(tmpdir()) && /^crabot-installer-[A-Za-z0-9]+$/.test(path.basename(report.profile))) await fs.rm(report.profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
     }
   })
+
+for (const version of ['1.2.3', '1.2.4']) test('retained program preparation accepts an authorized same-or-newer pair after the old Core was removed: ' + version, async t => {
+  const f = await removalProofFixture(t, { schema: 'v1', functional: true })
+  f.record.phase = 'completed'; await f.publish()
+  const next = await fixture(t, { version, schema: 'v2', functional: true })
+  await fs.rm(f.prepared.coreRoot, { recursive: true })
+  const { prepareDesktopRemovalReinstall } = await import('../desktop-reinstall.mjs')
+  const prepared = await prepareDesktopRemovalReinstall({ payload: next.payload, installRoot: f.target, operationId: f.record.operation_id, verifyStopped: async () => {} })
+  assert.deepEqual(prepared.selection, next.selection)
+  const { verifyDesktopPrograms } = await import('../desktop-payload.mjs')
+  await verifyDesktopPrograms(prepared.coreRoot, prepared.guiRoot, (await verifyDesktopPayload(next.payload)).record)
+  assert.deepEqual(installation.readDesktopPairReference(f.target).selection, f.selection)
+  assert.throws(() => installation.readDesktopSelection(f.target), { code: 'CRABOT_DESKTOP_REMOVAL_PENDING' })
+  assert.equal(await fs.readFile(path.join(f.target, 'data/retained-user-file'), 'utf8'), 'user content')
+  await assert.rejects(fs.lstat(path.join(f.target, 'data/mm.pid')), { code: 'ENOENT' })
+})
+
+for (const [source, target] of [['1.2.3', '1.2.3'], ['1.2.3', '1.2.4'], ['1.9.9', '2.0.0'], ['1.2.3-rc.2', '1.2.3-rc.10'], ['1.2.3-rc.10', '1.2.3'], ['1.2.3-1', '1.2.3-alpha'], ['1.2.3-rc', '1.2.3-rc.1'], ['1.2.3-rc.01.a', '1.2.3-rc.1.b']]) test('retained repair accepts same/newer version ordering: ' + source + ' -> ' + target, async () => {
+  const { assertReinstallVersion } = await import('../desktop-reinstall.mjs')
+  assert.doesNotThrow(() => assertReinstallVersion(source, target))
+})
+for (const [source, target] of [['1.2.4', '1.2.3'], ['10.0.0', '2.0.0'], ['1.2.3', '1.2.3-rc.10'], ['1.2.3-rc.10', '1.2.3-rc.2'], ['1.2.3-alpha', '1.2.3-1'], ['1.2.3-rc.1', '1.2.3-rc'], ['1.2.3-rc.01.b', '1.2.3-rc.1.a'], ['invalid', '1.2.3'], ['1.2.3', 'latest']]) test('retained repair rejects older/invalid versions: ' + source + ' -> ' + target, async () => {
+  const { assertReinstallVersion } = await import('../desktop-reinstall.mjs')
+  assert.throws(() => assertReinstallVersion(source, target))
+})
+for (const mode of ['missing', 'known-old', 'known-new', 'custom', 'lost-publication', 'late-custom']) test('newer retained program preparation replaces only a recognized application launcher: ' + mode, async t => {
+  const f = await removalProofFixture(t, { executableNode: false })
+  f.record.phase = 'completed'; await f.publish()
+  // Different, byte-only launcher variant. This test never executes that file.
+  const next = await fixture(t, { version: '1.2.4', executableNode: false, launcherSuffix: '\nnew fixture launcher bytes\n' })
+  const command = path.join(f.target, 'bin', launcher), target = await fs.readFile(path.join(next.core, 'bin', launcher))
+  if (mode === 'missing') await fs.unlink(command)
+  if (mode === 'known-new') await fs.writeFile(command, target)
+  if (mode === 'custom') await fs.writeFile(command, 'user command')
+  const before = await fs.lstat(command, { bigint: true }).catch(() => null)
+  const rename = fs.rename, copy = fs.copyFile
+  let injected = false
+  const renamed = t.mock.method(fs, 'rename', async (from, to) => {
+    await rename(from, to)
+    if (!injected && mode === 'lost-publication' && to === command) { injected = true; throw new Error('launcher publication reply lost') }
+  })
+  const copied = t.mock.method(fs, 'copyFile', async (from, to, ...args) => {
+    await copy(from, to, ...args)
+    if (!injected && mode === 'late-custom' && to.startsWith(command + '.tmp-')) { injected = true; await fs.writeFile(command, 'late user command') }
+  })
+  const { prepareDesktopRemovalReinstall } = await import('../desktop-reinstall.mjs')
+  const options = { payload: next.payload, installRoot: f.target, operationId: f.record.operation_id, verifyStopped: async () => {} }
+  if (['custom', 'lost-publication', 'late-custom'].includes(mode)) {
+    await assert.rejects(prepareDesktopRemovalReinstall(options))
+    if (mode !== 'custom') assert.equal(injected, true)
+    if (mode !== 'lost-publication') assert.equal(await fs.readFile(command, 'utf8'), mode === 'custom' ? 'user command' : 'late user command')
+    else { renamed.mock.restore(); copied.mock.restore(); await prepareDesktopRemovalReinstall(options) }
+  } else await prepareDesktopRemovalReinstall(options)
+  if (!['custom', 'late-custom'].includes(mode)) assert.deepEqual(await fs.readFile(command), target)
+  if (mode === 'known-new') assert.equal((await fs.lstat(command, { bigint: true })).ino, before.ino)
+  assert.equal((await fs.readdir(path.dirname(command))).some(name => name.startsWith(launcher + '.tmp-')), false)
+  assert.deepEqual(installation.readDesktopPairReference(f.target).selection, f.selection)
+  assert.throws(() => installation.readDesktopSelection(f.target), { code: 'CRABOT_DESKTOP_REMOVAL_PENDING' })
+  assert.equal(await fs.readFile(path.join(f.target, 'data/retained-user-file'), 'utf8'), 'user content')
+})

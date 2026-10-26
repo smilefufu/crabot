@@ -21,6 +21,30 @@ const directoryIdentity = stat => [stat.dev, stat.ino, stat.mode, stat.uid, stat
 const digest = text => createHash('sha256').update(text).digest('hex')
 const inside = (parent, child) => { const relative = path.relative(parent, child); return !relative || relative !== '..' && !relative.startsWith('..' + path.sep) && !path.isAbsolute(relative) }
 const fail = () => { throw Object.assign(new Error('原安装、卸载作业或程序恢复条件无法核验，数据和维护保护已保留。'), { code: 'CRABOT_DESKTOP_REMOVAL' }) }
+export function assertReinstallVersion(source, target) {
+  const parse = value => typeof value === 'string' && /^(\d+)\.(\d+)\.(\d+)(?:-([\w.-]+))?$/.exec(value)
+  const before = parse(source), after = parse(target)
+  if (!before || !after) fail()
+  for (let i = 1; i <= 3; i++) {
+    const difference = BigInt(after[i]) - BigInt(before[i])
+    if (difference < 0n) fail()
+    if (difference > 0n) return
+  }
+  if (before[4] === undefined) { if (after[4] !== undefined) fail(); return }
+  if (after[4] === undefined) return
+  const a = before[4].split('.'), b = after[4].split('.')
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    if (a[i] === b[i]) continue
+    if (a[i] === undefined) return
+    if (b[i] === undefined) fail()
+    const an = /^\d+$/.test(a[i]), bn = /^\d+$/.test(b[i])
+    if (an && bn && BigInt(a[i]) === BigInt(b[i])) continue
+    if (an && bn) { if (BigInt(b[i]) < BigInt(a[i])) fail() }
+    else if (an !== bn) { if (bn) fail() }
+    else if (b[i] < a[i]) fail()
+    return
+  }
+}
 async function present(file) { try { return await fs.lstat(file, { bigint: true }) } catch (error) { if (error.code === 'ENOENT') return null; throw error } }
 export async function prepareDesktopRemovalReinstall({ payload, installRoot, operationId, verifyStopped, signal, progress = () => {} }) {
   if (typeof verifyStopped !== 'function') fail()
@@ -33,8 +57,8 @@ export async function prepareDesktopRemovalReinstall({ payload, installRoot, ope
     dataLock = await acquireExistingCliLock(own.dataDir, 'desktop-removal-reinstall'); dataToken = cliLockToken(dataLock)
     const initial = await readDesktopRemovalProof(own.root), { proof, record } = initial
     if (record.operation_id !== operationId || record.installation_id !== own.record.installation_id
-      || !same(installation.readDesktopPairReference(own.root).selection, record.source_selection)
-      || !same(source.record, proof.payload)) fail()
+      || !same(installation.readDesktopPairReference(own.root).selection, record.source_selection)) fail()
+    assertReinstallVersion(record.source_selection.version, source.record.selection.version)
     const proofDirectory = path.join(own.root, 'app/removals', operationId), proofFile = path.join(proofDirectory, 'proof.json')
     const proofIdentity = fileIdentity(physical.lstatSync(proofFile, { bigint: true }))
     const roots = [path.dirname(proofDirectory), proofDirectory, own.root, ...['app', 'app/releases', 'releases', 'bin', 'data'].map(name => path.join(own.root, name))]
@@ -44,24 +68,36 @@ export async function prepareDesktopRemovalReinstall({ payload, installRoot, ope
       const stat = await present(file)
       return stat && await matchesDesktopRemovalProgram(file, expected, stat, { owned: requireOwner ? owned : () => true })
     }
-    // Compare the historical metadata too, with bounded streaming reads. The
-    // Core inventory digest alone does not cover all three metadata files.
+    // Bind target metadata to the trusted package; keep the original removal
+    // proof as history even when the original Core no longer exists.
+    const metadataFiles = [['release', 'core-release.json'], ['inventory', 'core-files.json'], ['host', 'desktop-host.json']]
+    const metadata = { ...proof.core }
+    if (!same(source.record, proof.payload)) for (const [key, name] of metadataFiles) {
+      const handle = await fs.open(path.join(source.directory, 'core', name), constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0))
+      try {
+        const stat = await handle.stat({ bigint: true })
+        if (!stat.isFile() || stat.nlink !== 1n || stat.size > 64n * 1024n * 1024n) fail()
+        const bytes = await handle.readFile()
+        if (bytes.length !== Number(stat.size) || fileIdentity(await handle.stat({ bigint: true })) !== fileIdentity(stat)) fail()
+        metadata[key] = bytes
+      } finally { await handle.close() }
+    }
     const verifyMetadata = async (root, requireOwner) => {
-      for (const [key, name] of [['release', 'core-release.json'], ['inventory', 'core-files.json'], ['host', 'desktop-host.json']]) {
-        const text = proof.core[key]
+      for (const [key, name] of metadataFiles) {
+        const text = metadata[key]
         if (!await match(path.join(root, name), { type: 'file', size: Buffer.byteLength(text), sha256: digest(text) }, requireOwner)) fail()
       }
     }
     await verifyMetadata(path.join(source.directory, 'core'), false)
     const commandName = process.platform === 'win32' ? 'crabot.exe' : 'crabot'
-    const commandProof = JSON.parse(proof.core.inventory).files['bin/' + commandName]
-    if (commandProof?.type !== 'file') fail()
-    const checkCommand = async () => { if (await present(own.command) && !await match(own.command, commandProof)) fail() }
+    const commandProof = JSON.parse(proof.core.inventory).files['bin/' + commandName], targetCommand = JSON.parse(metadata.inventory).files['bin/' + commandName]
+    if (commandProof?.type !== 'file' || targetCommand?.type !== 'file') fail()
+    const checkCommand = async () => { if (await present(own.command) && !await match(own.command, commandProof) && !await match(own.command, targetCommand)) fail() }
     const payloadText = JSON.stringify(source.record) + '\n', payloadSha = digest(payloadText)
     let pending = await readPending(own.root)
-    if (pending && (pending.installation_id !== own.record.installation_id || !same(pending.selection, record.source_selection) || pending.payload_sha256 !== payloadSha)) fail()
-    const prepared = { installRoot: own.root, installation_id: own.record.installation_id, selection: record.source_selection,
-      coreRoot: path.join(own.root, 'releases', record.source_selection.core_id), guiRoot: path.join(own.root, 'app/releases', record.source_selection.gui_id) }
+    if (pending && (pending.installation_id !== own.record.installation_id || !same(pending.selection, source.record.selection) || pending.payload_sha256 !== payloadSha)) fail()
+    const prepared = { installRoot: own.root, installation_id: own.record.installation_id, selection: source.record.selection,
+      coreRoot: path.join(own.root, 'releases', source.record.selection.core_id), guiRoot: path.join(own.root, 'app/releases', source.record.selection.gui_id) }
     const assertCurrent = () => {
       if (!same(readDesktopRemoval(own.root), record) || fileIdentity(physical.lstatSync(proofFile, { bigint: true })) !== proofIdentity
         || !same(installation.readDesktopInstallation(own.root).record, own.record)
@@ -87,12 +123,12 @@ export async function prepareDesktopRemovalReinstall({ payload, installRoot, ope
     await stopped(); await checkCommand(); await current()
     const verified = async check => { try { await check(); return true } catch { signal?.throwIfAborted(); return false } }
     const coreCached = await verified(async () => {
-      await verifyDesktopPrograms(prepared.coreRoot, path.join(source.directory, 'gui'), proof.payload, { signal })
+      await verifyDesktopPrograms(prepared.coreRoot, path.join(source.directory, 'gui'), source.record, { signal })
       await verifyMetadata(prepared.coreRoot, true)
     })
-    const guiCached = await verified(() => verifyDesktopGui(prepared.guiRoot, proof.payload, { signal }))
+    const guiCached = await verified(() => verifyDesktopGui(prepared.guiRoot, source.record, { signal }))
     await stopped(); await checkCommand(); await current()
-    const guiBytes = Object.values(proof.payload.gui).reduce((sum, entry) => sum + BigInt(entry.size ?? 0), 0n)
+    const guiBytes = Object.values(source.record.gui).reduce((sum, entry) => sum + BigInt(entry.size ?? 0), 0n)
     const needed = (coreCached ? 0n : source.bytes - guiBytes) + (guiCached ? 0n : guiBytes)
     const space = await fs.statfs(own.root, { bigint: true })
     if (space.bavail * space.bsize < needed + 512n * 1024n * 1024n) throw Object.assign(new Error('修复空间不足，原数据和保护已保留。'), { code: 'CRABOT_UPDATE_SPACE' })
@@ -108,12 +144,12 @@ export async function prepareDesktopRemovalReinstall({ payload, installRoot, ope
       const failed = copies.find(result => result.status === 'rejected'); if (failed) throw failed.reason
     }
     await verifyDesktopPrograms(coreCached ? prepared.coreRoot : path.join(staging, 'core'),
-      guiCached ? prepared.guiRoot : path.join(staging, 'gui'), proof.payload, { signal })
+      guiCached ? prepared.guiRoot : path.join(staging, 'gui'), source.record, { signal })
     await stopped(); await checkCommand(); await current(); signal?.throwIfAborted()
     progress('restoring'); signal?.throwIfAborted(); await current()
     if (!pending) {
       pending = { schema_version: 1, id: randomUUID(), installation_id: own.record.installation_id,
-        selection: record.source_selection, phase: 'preparing', payload_sha256: payloadSha }
+        selection: prepared.selection, phase: 'preparing', payload_sha256: payloadSha }
       await privateJson(path.join(own.root, pendingName), pending)
     }
     // The removal fence stays throughout. From this boundary cancellation cannot
@@ -121,18 +157,27 @@ export async function prepareDesktopRemovalReinstall({ payload, installRoot, ope
     for (const [name, target] of programs) {
       await stopped()
       await publishPreparedProgram(path.join(staging, name), target, undefined, async () => {
-        await verifyDesktopPrograms(prepared.coreRoot, name === 'gui' || guiCached ? prepared.guiRoot : path.join(staging, 'gui'), proof.payload)
+        await verifyDesktopPrograms(prepared.coreRoot, name === 'gui' || guiCached ? prepared.guiRoot : path.join(staging, 'gui'), source.record)
         await verifyMetadata(prepared.coreRoot, true)
       })
     }
     await stopped(); await checkCommand(); await current()
-    if (!await present(own.command)) {
-      await fs.copyFile(path.join(prepared.coreRoot, 'bin', commandName), own.command, constants.COPYFILE_EXCL)
-      if (process.platform !== 'win32') await fs.chmod(own.command, 0o755)
+    if (!await match(own.command, targetCommand)) {
+      const previous = await present(own.command), temporary = own.command + '.tmp-' + randomUUID()
+      try {
+        await fs.copyFile(path.join(prepared.coreRoot, 'bin', commandName), temporary, constants.COPYFILE_EXCL)
+        if (process.platform !== 'win32') await fs.chmod(temporary, 0o755)
+        await stopped(); await checkCommand(); await current()
+        const actual = await present(own.command)
+        if (previous ? !actual || fileIdentity(actual) !== fileIdentity(previous) : actual) fail()
+        if (previous) await fs.rename(temporary, own.command)
+        else { await fs.link(temporary, own.command); await fs.unlink(temporary) }
+      } finally { await fs.rm(temporary, { force: true }) }
+      if (!await match(own.command, targetCommand)) fail()
     }
     await stopped(); await checkCommand()
-    await verifyDesktopPrograms(prepared.coreRoot, prepared.guiRoot, proof.payload); await verifyMetadata(prepared.coreRoot, true); await stopped()
-    const cache = management.ensurePrivateDataRoot(path.join(own.root, 'app/payloads')), file = path.join(cache, record.source_selection.gui_id + '.json')
+    await verifyDesktopPrograms(prepared.coreRoot, prepared.guiRoot, source.record); await verifyMetadata(prepared.coreRoot, true); await stopped()
+    const cache = management.ensurePrivateDataRoot(path.join(own.root, 'app/payloads')), file = path.join(cache, prepared.selection.gui_id + '.json')
     const stat = await present(file)
     if (stat) {
       if ((process.platform === 'win32' ? !identity.isPrivateFile(file) : (stat.mode & 0o777n) !== 0o600n)
