@@ -144,11 +144,13 @@ struct ProgramReferenceJob {
     }
     stage = "fileport_list"; errno = 0;
     needed = proc_pidinfo(pid, PROC_PIDLISTFILEPORTS, 0, nullptr, 0);
-    if ((needed == 0 && errno) || needed < 0 || needed > 262144 * static_cast<int>(sizeof(proc_fileportinfo))) throw std::runtime_error("Process fileports unavailable");
+    // XNU returns ESRCH when the task IPC space is inactive; there are no
+    // usable fileports then. Continue FD/mapping and generation checks below.
+    if ((needed == 0 && errno && errno != ESRCH) || needed < 0 || needed > 262144 * static_cast<int>(sizeof(proc_fileportinfo))) throw std::runtime_error("Process fileports unavailable");
     if (needed) {
       std::vector<proc_fileportinfo> ports(needed / sizeof(proc_fileportinfo) + 512); errno = 0;
       bytes = proc_pidinfo(pid, PROC_PIDLISTFILEPORTS, 0, ports.data(), static_cast<int>(ports.size() * sizeof(proc_fileportinfo)));
-      if ((bytes == 0 && errno) || bytes < 0 || bytes >= static_cast<int>(ports.size() * sizeof(proc_fileportinfo)) || bytes % sizeof(proc_fileportinfo)) throw std::runtime_error("Process fileport list changed");
+      if ((bytes == 0 && errno && errno != ESRCH) || bytes < 0 || bytes >= static_cast<int>(ports.size() * sizeof(proc_fileportinfo)) || bytes % sizeof(proc_fileportinfo)) throw std::runtime_error("Process fileport list changed");
       for (int i = 0; i < bytes / static_cast<int>(sizeof(proc_fileportinfo)); i++) {
         Budget(); if (ports[i].proc_fdtype != PROX_FDTYPE_VNODE) continue;
         stage = "fileport_details"; vnode_fdinfowithpath value{};
