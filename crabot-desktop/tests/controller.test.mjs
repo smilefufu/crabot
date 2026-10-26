@@ -385,11 +385,11 @@ for (const source of [true, false]) test('source recovery and old target jobs do
   assert.equal(os, 0); assert.equal(notices, 0); assert.deepEqual(await fs.readdir(root), [])
 })
 
-for (const health of [false, true]) test('an unconfirmed login recovery cannot clear or fake business health: ' + health, async t => {
+for (const health of [false, true]) for (const noticeThrows of [false, true]) test('an unconfirmed login recovery cannot clear or fake business health: ' + health + ', notice throws: ' + noticeThrows, async t => {
   const calls = [], notices = []
   const controller = new DesktopController({ coreRoot: '/target', dataRoot: '/data', appVersion: '1.2.4', platform: process.platform,
     loginStartup: { captureForUpdate: async () => assert.fail('No capture'), restoreForUpdate: async () => assert.fail('Unverified OS operation') },
-    loginStartupRecovered: state => notices.push(state) })
+    loginStartupRecovered: state => { calls.push('notice'); notices.push(state); if (noticeThrows) throw new Error('Presentation failed') } })
   t.after(() => controller.close())
   controller.load = async file => {
     if (file.endsWith('version-maintenance.mjs')) return {
@@ -415,5 +415,7 @@ for (const health of [false, true]) test('an unconfirmed login recovery cannot c
   else await assert.rejects(controller.recoverVersion(), { code: 'CRABOT_MAINTENANCE_PENDING' })
   assert.deepEqual(notices, [null]); assert.equal(calls.includes('start'), true)
   assert.equal(calls.includes('clear'), health)
+  assert.ok(calls.indexOf('notice') > calls.indexOf('start'), 'A native notice must not precede service recovery')
+  if (health) assert.ok(calls.indexOf('notice') > calls.indexOf('clear'), 'A native notice must not block health finalization')
   assert.equal(calls.filter(item => item === 'compatibility').length, health ? 2 : 1)
 })

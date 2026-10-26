@@ -188,7 +188,7 @@ export class DesktopController {
       throw Object.assign(new Error('Login startup intent could not be confirmed before stop'), { code: 'CRABOT_LOGIN_STARTUP_UPDATE' })
     }
   }
-  private async recoverLoginStartup() {
+  private async recoverLoginStartup(): Promise<StartupState | null | undefined> {
     if (!this.options.loginStartup) return
     try {
       const maintenance = await this.load('scripts/lib/version-maintenance.mjs')
@@ -213,10 +213,10 @@ export class DesktopController {
         : this.options.platform === 'win32' ? 'Crabot.exe' : 'crabot-desktop')
       const state = await this.options.loginStartup.restoreForUpdate(intent.intent, sourceExecutable)
       await store.consume(intent)
-      this.options.loginStartupRecovered?.(state)
+      return state
     } catch {
       // This capability cannot clear maintenance, bypass health or mask a data error.
-      this.options.loginStartupRecovered?.(null)
+      return null
     }
   }
   recoverVersion(): Promise<boolean> {
@@ -226,15 +226,25 @@ export class DesktopController {
       if (!maintenance.readVersionMaintenance(this.options.dataRoot)) return false
       const { verifyDataCompatibility } = await this.load('scripts/lib/core-preparation.mjs')
       const { assertLocalMigrationData } = await this.load('scripts/lib/maintenance-backup.mjs')
-      await maintenance.recoverVersionMaintenance({ dataDir: this.options.dataRoot, root: this.options.coreRoot, appVersion: this.options.appVersion,
-        verifyCompatible: async () => {
-          const pending = verifyDataCompatibility(this.options.coreRoot, this.options.dataRoot)
-          if (pending.length && maintenance.readVersionMaintenance(this.options.dataRoot)?.phase === 'verifying') {
-            throw Object.assign(new Error('An earlier migration attempt has an unconfirmed result'), { code: 'CRABOT_MIGRATION_INTERRUPTED' })
-          }
-          await assertLocalMigrationData(this.options.dataRoot, pending, this.options.coreRoot)
-        },
-        run: async () => { await this.recoverLoginStartup(); await this.startCore(); return this.host.snapshot().phase === 'ready' } })
+      let startupState: StartupState | null | undefined
+      try {
+        await maintenance.recoverVersionMaintenance({ dataDir: this.options.dataRoot, root: this.options.coreRoot, appVersion: this.options.appVersion,
+          verifyCompatible: async () => {
+            const pending = verifyDataCompatibility(this.options.coreRoot, this.options.dataRoot)
+            if (pending.length && maintenance.readVersionMaintenance(this.options.dataRoot)?.phase === 'verifying') {
+              throw Object.assign(new Error('An earlier migration attempt has an unconfirmed result'), { code: 'CRABOT_MIGRATION_INTERRUPTED' })
+            }
+            await assertLocalMigrationData(this.options.dataRoot, pending, this.options.coreRoot)
+          },
+          run: async () => { startupState = await this.recoverLoginStartup(); await this.startCore(); return this.host.snapshot().phase === 'ready' } })
+      } finally {
+        // A macOS app-modal notice can block even before showMessageBox returns.
+        // Present it only after actual service recovery and maintenance settlement.
+        if (startupState !== undefined) {
+          try { this.options.loginStartupRecovered?.(startupState) }
+          catch { /* Presentation cannot replace the service recovery result. */ }
+        }
+      }
       return true
     })
     this.operation = pending.then(() => {}, () => {}).finally(() => { this.busy-- })
