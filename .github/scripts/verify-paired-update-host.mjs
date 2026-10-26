@@ -62,7 +62,7 @@ async function poll(label, check, timeout = 180000) {
     const failure = await readControl('failure')
     if (failure) throw new Error('Source fixture failure: ' + failure.code + ': ' + failure.message)
     const value = await check(); if (value) return value
-    if (child && child.exitCode !== null && child.exitCode !== 0) throw new Error('Source actor exited before ' + label)
+    if (child && child.exitCode !== null && child.exitCode !== 0) throw new Error('Source actor exited before ' + label + ' (exit=' + child.exitCode + ', signal=' + child.signalCode + ')')
     await sleep(250)
   }
   throw new Error('Timed out: ' + label)
