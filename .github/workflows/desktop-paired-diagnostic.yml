@@ -76,6 +76,8 @@ jobs:
           node scripts/prepare-computer-use.mjs
       - name: Build sealed product environment
         run: node scripts/prepare-product-runtime.mjs 2>&1 | tee .desktop-build/product-build.log
+      - name: Verify fixed Linux resource download failure behavior
+        run: node .github/scripts/test-linux-resource-download.mjs
       - name: Assemble common core and unpacked Electron candidate
         run: |
           node scripts/desktop/stage-core.mjs "--out=.desktop-build/安装 候选/core" --version=0.1.0-desktop.1

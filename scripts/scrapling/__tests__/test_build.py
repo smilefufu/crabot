@@ -17,7 +17,7 @@ import urllib.request
 
 
 def downloader():
-    source = Path(__file__).with_name('build.py')
+    source = Path(__file__).resolve().parent.parent / 'build.py'
     definition = next(node for node in ast.parse(source.read_text()).body
                       if isinstance(node, ast.FunctionDef) and node.name == 'download_linux_resource')
     scope = {'hashlib': hashlib, 'time': time, 'urllib': urllib}
