@@ -1746,3 +1746,26 @@ for (const version of ['1.2.3', '1.2.4']) test('new retained pair previews actua
   await assert.rejects(fs.lstat(path.join(directory, 'executions')), { code: 'ENOENT' })
   assert.deepEqual(installation.readDesktopPairReference(f.target).selection, f.selection)
 })
+
+for (const allowed of [false, true]) test('retained product acceptance prepares only its isolated partial-removal fixture: ' + allowed, async t => {
+  const previous = process.env.GITHUB_ACTIONS
+  t.after(() => { if (previous === undefined) delete process.env.GITHUB_ACTIONS; else process.env.GITHUB_ACTIONS = previous })
+  process.env.GITHUB_ACTIONS = String(allowed)
+  const f = await fixture(t, { schema: 'v2', functional: true })
+  const prepared = await prepareDesktopInstallation({ payload: f.payload, installRoot: f.target })
+  await commitDesktopInstallation(prepared)
+  const { prepareRetainedProductReinstall } = await import('../../../.github/scripts/accept-retained-product-reinstall.mjs')
+  if (!allowed) {
+    await assert.rejects(prepareRetainedProductReinstall({ installRoot: f.target, payload: f.payload }), /isolated CI user/)
+    await assert.rejects(fs.lstat(path.join(f.target, '.desktop-removal.json')), { code: 'ENOENT' })
+  } else {
+    const result = await prepareRetainedProductReinstall({ installRoot: f.target, payload: f.payload })
+    assert.equal(result.partial_removal_fixture, true); assert.equal(result.complete_uninstall_tested, false)
+    assert.ok(await fs.stat(path.join(prepared.coreRoot, 'cli.mjs')))
+    assert.equal(await fs.readFile(result.sentinel, 'utf8'), 'preserved across partial removal and real GUI recovery\n')
+    const { readVersionMaintenance, assertVersionMaintenanceAllowsStart } = await import('../version-maintenance.mjs')
+    assert.equal(readVersionMaintenance(path.join(f.target, 'data')).id, result.maintenanceId)
+    assert.throws(() => assertVersionMaintenanceAllowsStart(path.join(f.target, 'data')), { code: 'CRABOT_MAINTENANCE_PENDING' })
+    await assert.rejects(fs.lstat(path.join(f.target, 'data/mm.pid')), { code: 'ENOENT' })
+  }
+})

@@ -25,6 +25,7 @@ before(() => {
 after(() => { if (root) fs.rmSync(root, { recursive: true, force: true }) })
 
 for (const [file, expected] of [
+  ['.github/scripts/accept-retained-product-reinstall.mjs', true],
   ['.github/workflows/desktop-ubuntu-bootstrap.yml', true],
   ['crabot-desktop/tests/ubuntu-removal-progress.test.mjs', true],
   ['crabot-desktop/tests/ubuntu-removal-host.test.mjs', true],

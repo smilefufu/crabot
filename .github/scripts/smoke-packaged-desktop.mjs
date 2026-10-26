@@ -21,7 +21,7 @@ assert.ok([1, 2].includes(location.schema_version))
 const originalExecutable = inside(location.executable), originalCore = inside(location.core)
 // The native Ubuntu helper requires every installation ancestor to resist other-user writes.
 const temporary = await fs.realpath(await fs.mkdtemp(path.join(process.platform === 'linux' ? homedir() : tmpdir(), 'Crabot 打包 ')))
-let executable, core, data
+let executable, core, data, installRoot
 if (location.schema_version === 2) {
   // Programmatic backend acceptance; OS installer menus/registration are separate.
   const { prepareDesktopInstallation, commitDesktopInstallation } = await import('../../scripts/lib/desktop-payload.mjs')
@@ -37,7 +37,7 @@ if (location.schema_version === 2) {
     console.log('CRABOT_PREPARED_NATIVE_ROLES_VERIFIED')
   }
   const selected = await commitDesktopInstallation(prepared)
-  executable = selected.executable; core = selected.coreRoot; data = selected.dataDir
+  executable = selected.executable; core = selected.coreRoot; data = selected.dataDir; installRoot = selected.root
 } else {
   // An app nested under the checkout can silently resolve missing dependencies.
   const platformRoot = path.dirname(process.platform === 'darwin' ? path.dirname(path.dirname(originalExecutable)) : originalExecutable)
@@ -139,8 +139,31 @@ try {
   await cli('stop'); await gui.phase('stopped')
   assert.equal((await inspectInstance()).state, 'stopped')
   gui.child.kill('SIGKILL'); await gui.exited()
+  let retainedRepair
+  if (location.schema_version === 2) {
+    const { prepareRetainedProductReinstall } = await import('./accept-retained-product-reinstall.mjs')
+    retainedRepair = await prepareRetainedProductReinstall({ installRoot, payload: inside(location.payload) })
+    gui = launch(); await gui.phase('ready')
+    const deadline = Date.now() + 180_000
+    while (true) {
+      try { await fs.lstat(path.join(data, 'desktop-maintenance.json')) }
+      catch (error) { if (error.code === 'ENOENT') break; throw error }
+      if (Date.now() >= deadline) throw new Error('Ordinary retained target did not complete maintenance after ready')
+      await new Promise(resolve => setTimeout(resolve, 100))
+    }
+    const repaired = await inspectInstance()
+    assert.equal(repaired.state, 'running'); assert.equal(repaired.record.instance_id, first.record.instance_id)
+    assert.notEqual(repaired.record.generation, first.record.generation)
+    assert.equal(await fs.realpath(repaired.record.install_root), await fs.realpath(core))
+    assert.equal(JSON.parse(await cli('status', '--json')).running, true)
+    assert.equal(await fs.readFile(retainedRepair.sentinel, 'utf8'), 'preserved across partial removal and real GUI recovery\n')
+    await cli('stop'); await gui.phase('stopped'); gui.child.kill('SIGKILL'); await gui.exited()
+    retainedRepair = { partial_removal_fixture: true, complete_uninstall_tested: false,
+      ordinary_packaged_main: true, actual_core_started: true, same_instance_new_generation: true,
+      maintenance_cleared_after_real_health: true, data_preserved: true, registered_cli_compatible: true }
+  }
   console.log('CRABOT_PACKAGED_BOOT ' + JSON.stringify({ platform: process.platform, arch: process.arch,
-    paired_offline_install: location.schema_version === 2, os_install_registration: false,
+    paired_offline_install: location.schema_version === 2, os_install_registration: false, retained_repair: retainedRepair,
     packaged_asar_native_auth: true, installed_core_shared_with_cli: true, gui_crash_preserves_core: true, reattach_same_generation: true,
     cli_stop_stays_stopped: true, unicode_spaced_data: true, outside_checkout: true, registered_bundled_cli: true, release_signed: false }))
 } catch (error) {
