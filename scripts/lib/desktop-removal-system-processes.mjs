@@ -59,16 +59,14 @@ export function captureLinuxRemovalSystemProcesses(installRoot, filesystem = phy
     if (!Number.isSafeInteger(uid) || uid < 1) return () => false
     const unit = 'user@' + uid + '.service', group = '/user.slice/user-' + uid + '.slice/' + unit
     const secureImage = file => {
-      if (!['/usr/bin/systemctl', '/usr/bin/getconf', '/usr/lib/systemd/systemd', '/usr/lib/systemd/systemd-executor'].includes(file)
+      if (!['/usr/bin/systemctl', '/usr/lib/systemd/systemd'].includes(file)
         || inside(file, installRoot) || filesystem.realpathSync(file) !== file) return false
       const stat = filesystem.lstatSync(file)
       return stat.isFile() && !stat.isSymbolicLink() && stat.uid === 0 && (stat.mode & 0o022) === 0
     }
-    if (!secureImage('/usr/bin/systemctl') || !secureImage('/usr/bin/getconf')) return () => false
+    if (!secureImage('/usr/bin/systemctl')) return () => false
     const options = { encoding: 'utf8', timeout: 10000, maxBuffer: 65536,
       env: { PATH: '/usr/bin:/bin', LC_ALL: 'C', SYSTEMD_COLORS: '0' } }
-    const ticks = BigInt(run('/usr/bin/getconf', ['CLK_TCK'], options).trim())
-    if (ticks < 1n || ticks > 1000000n) return () => false
     const readService = () => {
       if (!secureImage('/usr/bin/systemctl')) throw new Error('unverified system manager client')
       const output = run('/usr/bin/systemctl', ['--system', '--no-pager', '--no-ask-password', 'show', unit,
@@ -76,11 +74,12 @@ export function captureLinuxRemovalSystemProcesses(installRoot, filesystem = phy
       const properties = Object.fromEntries(output.trim().split('\n').map(line => {
         const at = line.indexOf('='); return [line.slice(0, at), line.slice(at + 1)]
       }))
-      const image = /\bpath=([^;]+?)\s*;/.exec(properties.ExecStart)?.[1]
+      const declaredImage = /\bpath=([^;]+?)\s*;/.exec(properties.ExecStart)?.[1]
+      if (!['/lib/systemd/systemd', '/usr/lib/systemd/systemd'].includes(declaredImage)) throw new Error('unverified system image')
+      const image = filesystem.realpathSync(declaredImage)
       if (image !== '/usr/lib/systemd/systemd' || !secureImage(image) || properties.ControlGroup !== group
         || !/^[1-9][0-9]*$/.test(properties.MainPID) || !/^[1-9][0-9]*$/.test(properties.ExecMainStartTimestampMonotonic)) throw new Error('unverified user manager')
-      return { pid: Number(properties.MainPID), started: BigInt(properties.ExecMainStartTimestampMonotonic) * ticks / 1000000n,
-        stamp: properties.ExecMainStartTimestampMonotonic, image }
+      return { pid: Number(properties.MainPID), stamp: properties.ExecMainStartTimestampMonotonic, image }
     }
     const readProcess = pid => {
       if (!Number.isSafeInteger(pid) || pid < 1) throw new Error('invalid process')
@@ -93,7 +92,9 @@ export function captureLinuxRemovalSystemProcesses(installRoot, filesystem = phy
       return { pid, parent: Number(fields[1]), name: text.slice(text.indexOf('(') + 1, end), started: fields[19], flags: fields[6] }
     }
     const service = readService(), manager = readProcess(service.pid), candidates = new Map()
-    if (manager.parent !== 1 || BigInt(manager.started) !== service.started || manager.name !== 'systemd') return () => false
+    // Service exec timestamps and kernel creation ticks describe different instants.
+    // Pin each independently across the resource query instead of equating them.
+    if (manager.parent !== 1 || manager.name !== 'systemd') return () => false
     candidates.set(manager.pid, manager)
     const children = filesystem.readFileSync('/proc/' + manager.pid + '/task/' + manager.pid + '/children', 'utf8').trim().split(/\s+/).filter(Boolean)
     if (children.length > 32768) return () => false
@@ -101,7 +102,7 @@ export function captureLinuxRemovalSystemProcesses(installRoot, filesystem = phy
       try {
         const item = readProcess(Number(child))
         if (item.parent === manager.pid && item.name === '(sd-pam)' && (BigInt(item.flags) & 64n) !== 0n
-          && BigInt(item.started) >= BigInt(manager.started) && secureImage('/usr/lib/systemd/systemd-executor')) candidates.set(item.pid, item)
+          && BigInt(item.started) >= BigInt(manager.started)) candidates.set(item.pid, item)
       } catch { /* An unverified child never qualifies. */ }
     }
     const same = (before, after) => Object.keys(before).every(key => before[key] === after[key])
@@ -117,7 +118,6 @@ export function captureLinuxRemovalSystemProcesses(installRoot, filesystem = phy
           const before = candidates.get(pid), details = observation.unknown_details.filter(item => item.pid === pid)
           return before && details.length === 1 && ['identity', 'descriptor_list', 'descriptor_details'].includes(details[0].stage)
             && [1, 13].includes(details[0].os_error) && same(before, readProcess(pid))
-            && (pid === manager.pid || secureImage('/usr/lib/systemd/systemd-executor'))
         })
       } catch { return false }
     }

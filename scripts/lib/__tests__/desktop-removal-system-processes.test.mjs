@@ -109,7 +109,7 @@ for (const mode of ['wrong-uid', 'wrong-parent', 'wrong-name', 'execed-pam', 'wr
   if (mode === 'wrong-name') f.proc(51, 50, 'Crabot', 1064, 64)
   if (mode === 'execed-pam') f.proc(51, 50, '(sd-pam)', 1064, 0)
   if (mode === 'wrong-group') f.files.set('/proc/51/cgroup', '0::/user.slice/other.service')
-  if (mode === 'wrong-start') f.service.ExecMainStartTimestampMonotonic = '90000000'
+  if (mode === 'wrong-start') f.service.ExecMainStartTimestampMonotonic = 'unknown'
   if (mode === 'wrong-image') f.service.ExecStart = '{ path=/home/example/systemd ; }'
   if (mode === 'image-alias') f.fs.realpathSync = () => '/home/example/systemd'
   if (mode === 'image-writable') f.fs.lstatSync = () => ({ uid: 0, mode: 0o100777, isFile: () => true, isSymbolicLink: () => false })
@@ -128,4 +128,19 @@ for (const mode of ['wrong-uid', 'wrong-parent', 'wrong-name', 'execed-pam', 'wr
   if (mode === 'duplicate-pid') f.observation.unknown_pids.push(50)
   if (mode === 'missing-reason') delete f.observation.unknown_details
   assert.equal(classify(f.observation), false)
+})
+
+test('Linux service timestamp and kernel start ticks measure different instants, with both generations pinned', () => {
+  const f = linuxFixture(); f.service.ExecMainStartTimestampMonotonic = '10511259'
+  const classify = captureLinuxRemovalSystemProcesses(f.root, f.fs, f.run, f.uid)
+  assert.equal(classify(f.observation), true)
+  f.service.ExecMainStartTimestampMonotonic = '10521259'
+  assert.equal(classify(f.observation), false)
+})
+test('Linux known lib systemd service path resolves to its canonical root-owned image without requiring an unused executor file', () => {
+  const f = linuxFixture(); f.service.ExecStart = '{ path=/lib/systemd/systemd ; }'
+  f.fs.realpathSync = name => name === '/lib/systemd/systemd' ? '/usr/lib/systemd/systemd' : name
+  const stat = f.fs.lstatSync
+  f.fs.lstatSync = name => { if (name.endsWith('/systemd-executor')) throw new Error('absent on older systemd'); return stat(name) }
+  assert.equal(captureLinuxRemovalSystemProcesses(f.root, f.fs, f.run, f.uid)(f.observation), true)
 })
