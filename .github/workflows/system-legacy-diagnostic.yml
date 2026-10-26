@@ -45,6 +45,10 @@ jobs:
           const { verifyCoreRelease } = await import(pathToFileURL(path.join(core, 'scripts/lib/core-release.mjs')))
           const release = await verifyCoreRelease(core)
           if (release.commit !== '7cb3b6dd0096f83058e9cc22119e18cce9f1ec59' || release.source_dirty !== false) throw new Error('Unexpected diagnostic producer')
+          // This artifact is an App-owned copy. The real CLI/system producer
+          // shares the same sealed Core bytes without this out-of-inventory binding.
+          await fs.unlink(path.join(core, 'desktop-host.json'))
+          if ((await verifyCoreRelease(core)).inventory_sha256 !== release.inventory_sha256) throw new Error('Shared Core bytes changed')
           await fs.mkdir('crabot-admin/dist', { recursive: true })
           await fs.writeFile('crabot-admin/dist/credentials.js', stripTypeScriptTypes(await fs.readFile('crabot-admin/src/credentials.ts', 'utf8')))
           console.log('CRABOT_SYSTEM_DIAGNOSTIC_SOURCE ' + JSON.stringify({ commit: release.commit, current_source_acceptance: false }))
