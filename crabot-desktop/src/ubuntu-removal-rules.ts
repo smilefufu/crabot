@@ -11,7 +11,8 @@ const management = require('./bootstrap/scripts/lib/desktop-management.cjs')
 const failure = (diagnostic = '') => Object.assign(new Error(
   diagnostic.includes('CRABOT_SANDBOX_NOT_READY:system-policy-in-use') ? '仍有程序使用本应用的系统登记，请关闭相关程序后重试。'
     : diagnostic.includes('CRABOT_SANDBOX_NOT_READY:system-policy-conflict') ? '系统登记已被管理员修改，相关规则已保留，请核对后重试。'
-      : '本应用系统登记的授权或移除尚未完成，程序、数据与维护保护已保留。'), { code: 'CRABOT_INSTALL_SYSTEM_AUTHORIZATION' })
+      : '本应用系统登记的授权或移除尚未完成，程序、数据与维护保护已保留。'), { code: 'CRABOT_INSTALL_SYSTEM_AUTHORIZATION', ...(/CRABOT_SANDBOX_NOT_READY:([a-z-]{1,64})/.test(diagnostic)
+    ? { stage: diagnostic.match(/CRABOT_SANDBOX_NOT_READY:([a-z-]{1,64})/)![1] } : {}) })
 const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b)
 export async function prepareUbuntuRemovalRules(options: { installRoot: string; operationId: string; signal: AbortSignal }) {
   options.signal.throwIfAborted()

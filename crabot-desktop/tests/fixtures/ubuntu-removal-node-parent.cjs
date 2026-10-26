@@ -78,12 +78,12 @@ void (async () => {
       const rootLock=await locks.acquireExistingCliLock(process.argv[1],'fixture-reacquire',0);
       try{const dataLock=await locks.acquireExistingCliLock(path.join(process.argv[1],'data'),'fixture-reacquire',0);locks.releaseCliLock(dataLock)}finally{locks.releaseCliLock(rootLock)}
       const result={accepted:true,published:published.phase,stopped:stopped.phase,cancelled:!programsRemoved,ordinary_peer:ordinaryPeer,locks_reacquired:true,...(programsRemoved?{programs_removed:true,platform_cleanup_attempts:ruleAttempts,completed:true}:{}),...(platformCancelled?{platform_cancelled:true}:{}),...(sourceVerifier?{source_verifier:sourceVerifier}:{}),...(sourceExited?{source_exited:sourceExited}:{})};
-      if(['node-job-source-exit','node-job-source-remove','node-job-source-platform-cancel'].includes(process.argv[3]))await(await import('node:fs/promises')).writeFile(process.argv[4],JSON.stringify(result));
+      if(['node-job-source-exit','node-job-source-remove','node-job-source-platform-cancel'].includes(process.argv[3]))await(await import('node:fs/promises')).writeFile(process.argv[4],JSON.stringify({...result,message:String(error.message).slice(0,512),stage:error.stage,stack:String(error.stack).slice(0,2048)}));
       else process.stdout.write(JSON.stringify(result)+'\\n');
     } catch(error) {
       if(lease)lease.close();
-      const result={accepted:false,code:error.code||'FIXTURE_UNEXPECTED',message:String(error.message).slice(0,512),stack:String(error.stack).slice(0,2048)};
-      if(['node-job-source-exit','node-job-source-remove','node-job-source-platform-cancel'].includes(process.argv[3]))await(await import('node:fs/promises')).writeFile(process.argv[4],JSON.stringify(result));
+      const result={accepted:false,code:error.code||'FIXTURE_UNEXPECTED'};
+      if(['node-job-source-exit','node-job-source-remove','node-job-source-platform-cancel'].includes(process.argv[3]))await(await import('node:fs/promises')).writeFile(process.argv[4],JSON.stringify({...result,message:String(error.message).slice(0,512),stage:error.stage,stack:String(error.stack).slice(0,2048)}));
       else process.stdout.write(JSON.stringify(result)+'\\n');
     }
     clearTimeout(timer);process.removeListener('disconnect',parentLost);if(process.connected)process.disconnect();
