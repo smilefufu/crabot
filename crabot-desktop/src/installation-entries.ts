@@ -66,6 +66,14 @@ export async function readInstallationLocator(home: string, platform: string, en
     || Object.keys(record).some(key => !['schema_version', 'owner', 'install_root', 'installation_id'].includes(key))) fail()
   return record
 }
+function registerWindowsUninstallEntry(source: PreparedInstallation, target: PreparedInstallation) {
+  if (source.installRoot !== target.installRoot || source.installation_id !== target.installation_id) fail()
+  const entry = (value: PreparedInstallation) => ({ installRoot: value.installRoot,
+    executable: path.join(value.guiRoot, 'Crabot.exe'), version: value.selection.version })
+  if (typeof identity.replaceDesktopUninstallEntry !== 'function'
+    || identity.replaceDesktopUninstallEntry(target.installation_id, entry(source), entry(target)) !== true) fail()
+}
+
 export async function registerInstallationEntries(prepared: PreparedInstallation, options: {
   home: string; platform: string; env: NodeJS.ProcessEnv; shell: Pick<Shell, 'writeShortcutLink' | 'readShortcutLink'>;
   registerMac?: (application: string) => Promise<unknown>
@@ -92,6 +100,7 @@ export async function registerInstallationEntries(prepared: PreparedInstallation
     return
   }
   if (platform === 'win32') {
+    registerWindowsUninstallEntry(prepared, prepared)
     const directory = path.join(env.APPDATA || path.join(home, 'AppData/Roaming'), 'Microsoft/Windows/Start Menu/Programs')
     await ownedDirectory(directory)
     const entry = path.join(directory, 'Crabot.lnk'), executable = path.join(prepared.guiRoot, 'Crabot.exe'), stat = await present(entry)
@@ -163,6 +172,7 @@ export async function replaceInstallationEntries(source: PreparedInstallation, p
   await writeUnchanged(path.join(registration, 'installation.json'), JSON.stringify({ schema_version: 1, owner: identity.inspectProcess(process.pid).owner,
     install_root: root.root, installation_id: prepared.installation_id }) + '\n')
   await replaceKnownDesktopMenu(source, prepared, options)
+  if (options.platform === 'win32') registerWindowsUninstallEntry(source, prepared)
   await registerInstallationEntries(prepared, options)
   const current = installation.readDesktopSelection(prepared.installRoot)
   if (current.record.installation_id !== root.record.installation_id
@@ -236,6 +246,7 @@ export async function registerRetainedInstallationEntries(prepared: PreparedInst
     owner: identity.inspectProcess(process.pid).owner, install_root: own.root, installation_id: prepared.installation_id }) + '\n')
   assertCurrent()
   await replaceKnownDesktopMenu(source, prepared, options)
+  if (options.platform === 'win32') registerWindowsUninstallEntry(source, prepared)
   await registerInstallationEntries(prepared, options)
   assertCurrent()
 }

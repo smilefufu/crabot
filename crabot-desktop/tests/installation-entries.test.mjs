@@ -8,6 +8,16 @@ import { desktopApplicationEntry, integrationRoot, readInstallationLocator, regi
 import identity from '../../scripts/lib/process-identity.cjs'
 import management from '../../scripts/lib/desktop-management.cjs'
 const windows = process.platform === 'win32'
+const uninstallEntries = new Map()
+if (windows) {
+  const replace = identity.replaceDesktopUninstallEntry
+  identity.replaceDesktopUninstallEntry = (id, source, target) => {
+    const result = replace(id, source, target)
+    if (result === true) uninstallEntries.set(id, target)
+    return result
+  }
+}
+
 async function fixture(t) {
   const parent = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'Crabot 系统入口 ')))
   t.after(() => fs.rm(parent, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }))
@@ -15,6 +25,10 @@ async function fixture(t) {
   for (const name of ['app/releases', 'releases', 'bin']) await fs.mkdir(path.join(root, name), { recursive: true })
   management.ensurePrivateDataRoot(path.join(root, 'data'))
   const stat = await fs.lstat(root, { bigint: true }), id = randomUUID(), guiId = randomUUID(), coreId = 'a'.repeat(64)
+  if (windows) t.after(() => {
+    const entry = uninstallEntries.get(id)
+    if (entry) { assert.equal(identity.removeDesktopUninstallEntry(id, entry), true); uninstallEntries.delete(id) }
+  })
   const record = { schema_version: 1, installation_id: id, owner: identity.inspectProcess(process.pid).owner,
     install_root: root, root_identity: { dev: String(stat.dev), ino: String(stat.ino) }, paths: { app: 'app/releases', core: 'releases', data: 'data', bin: 'bin' } }
   const text = JSON.stringify(record) + '\n', file = path.join(root, 'desktop-installation.json')
@@ -66,6 +80,8 @@ test('a locator for another installation or malformed locator cannot claim a new
 test('Windows menu registration uses the actual selected executable and preserves a conflicting shortcut', { skip: !windows }, async t => {
   const f = await fixture(t), options = { ...f, platform: 'win32' }
   await registerInstallationEntries(f.prepared, options); await registerInstallationEntries(f.prepared, options)
+  assert.deepEqual(uninstallEntries.get(f.prepared.installation_id), { installRoot: f.root,
+    executable: path.join(f.prepared.guiRoot, 'Crabot.exe'), version: f.prepared.selection.version })
   const entry = path.join(f.env.APPDATA, 'Microsoft/Windows/Start Menu/Programs/Crabot.lnk')
   const shortcut = JSON.parse(await fs.readFile(entry, 'utf8'))
   assert.equal(shortcut.target, path.join(f.prepared.guiRoot, 'Crabot.exe')); assert.equal(shortcut.appUserModelId, 'com.crabot.desktop')
@@ -103,6 +119,7 @@ for (const platform of ['darwin', 'win32', 'linux']) {
     const f = await updateFixture(t, platform)
     const { replaceInstallationEntries } = await import('../dist/installation-entries.js')
     await replaceInstallationEntries(f.prepared, f.target, f.options)
+    if (platform === 'win32') assert.deepEqual(uninstallEntries.get(f.prepared.installation_id), { installRoot: f.root, executable: path.join(f.target.guiRoot, 'Crabot.exe'), version: f.target.selection.version })
     await replaceInstallationEntries(f.prepared, f.target, f.options)
     assert.equal(JSON.parse(await fs.readFile(f.selector, 'utf8')).gui_id, f.prepared.selection.gui_id)
     if (platform === 'darwin') assert.equal(await fs.realpath(path.join(f.home, 'Applications/Crabot.app')), path.join(f.target.guiRoot, 'Crabot.app'))

@@ -45,6 +45,24 @@ if (['publish-source-remove-main', 'publish-source-remove-source', 'resume-sourc
   return
 }
 
+if (cfg.publicEntry) {
+  const electron = require('electron'), cp = require('node:child_process'), native = require('./bootstrap/scripts/lib/process-identity.cjs')
+  const originalSpawn = cp.spawn
+  let sourceWindows = 0; app.on('browser-window-created', () => { sourceWindows++ })
+  electron.dialog.showMessageBox = async options => ({ response: options.title === '卸载 Crabot' ? 1 : 0 })
+  cp.spawn = (executable, args, options) => {
+    const child = originalSpawn(executable, args, options)
+    if (args.some(value => value.startsWith('--crabot-removal-host='))) child.once('spawn', () => {
+      const gui = process.platform === 'darwin' ? path.resolve(path.dirname(executable), '../../..') : path.dirname(executable)
+      void send({ handoff: true, host: native.inspectProcess(child.pid), directory: path.dirname(gui), source_progress_windows: sourceWindows })
+    })
+    return child
+  }
+  require('node:module').syncBuiltinESMExports()
+  void import(pathToFileURL(path.join(__dirname, 'full-main.js')).href).catch(() => app.exit(1))
+  return
+}
+
 const host = process.argv.includes('--fixture-removal-host')
 const sourceExitMode = ['publish-source-exit', 'publish-source-retry', 'publish-source-late-exit', 'resume-lease-source-exit', 'publish-source-remove', 'publish-source-remove-main', 'publish-source-remove-source', 'resume-source-remove-main', 'publish-source-remove-operation', 'publish-source-remove-cancel-retry', 'publish-source-remove-mac-login', 'publish-source-remove-complete', 'publish-source-remove-windows-uninstall', 'publish-source-remove-retry', 'resume-lease-source-remove'].includes(cfg.mode)
 const profile = host ? path.resolve(process.resourcesPath, process.platform === 'darwin' ? '../../../..' : '../..', 'profile') : path.join(cfg.root, 'data/desktop-profile')

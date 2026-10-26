@@ -41,8 +41,41 @@ let updateRequested = process.argv.includes('--check-updates')
 let installingCli = false
 let verifyBinding: (() => void) | undefined
 let cancelRemovalHost: (() => void) | undefined
+let uninstallRequested = process.platform === 'win32' && process.argv.includes('--uninstall')
+let requestUninstall: (() => Promise<void>) | undefined
+let pendingUninstall: Promise<void> | undefined
+
+function uninstallInstallation(installRoot: string): Promise<void> {
+  return pendingUninstall ||= (async () => {
+    try {
+      const { startGuiRemovalFromSource } = await import('./removal-source.js')
+      await startGuiRemovalFromSource({ installRoot, operationId: randomUUID(), beginExit: () => {
+        quitting = true; return () => { quitting = false }
+      } })
+    } catch {
+      await dialog.showMessageBox({ type: 'error', title: '卸载尚未完成', message: 'Crabot 尚未卸载完成，用户数据已保留。',
+        detail: '请核对当前维护进度后重试；如果原程序已不完整，请用同版或更高版离线安装器继续。', buttons: ['知道了'] })
+    }
+  })().finally(() => { pendingUninstall = undefined })
+}
+
+async function bootUninstall() {
+  if (!app.isPackaged) throw new Error('Installed application required')
+  const verifier = createRequire(import.meta.url)('./bootstrap/scripts/lib/desktop-installation.cjs')
+  const pin = readFileSync(path.join(directory, 'desktop-release.json'), 'utf8')
+  const own = verifier.locateDesktopRemovalGui(process.resourcesPath, pin)
+  // Reject a corrupt fence before even creating the source GUI's UI profile.
+  createRequire(import.meta.url)('./bootstrap/scripts/lib/desktop-removal-record.cjs').readDesktopRemoval(own.root)
+  dataRoot = own.dataDir; configureProfile(dataRoot)
+  if (!claimInstance()) return
+  await app.whenReady()
+  requestUninstall = () => uninstallInstallation(own.root)
+  await requestUninstall()
+  quitting = true; app.quit()
+}
 
 async function quit(): Promise<boolean> {
+  if (pendingUninstall) return false
   if (pendingQuit) return pendingQuit
   pendingQuit = (async () => {
     const state = controller?.host.snapshot()
@@ -87,6 +120,9 @@ function claimInstance() {
   if (!app.requestSingleInstanceLock()) { bootstrapStage('instance-lock-denied'); quitting = true; app.quit(); return false }
   bootstrapStage('instance-lock-acquired')
   app.on('second-instance', (_event, args) => {
+    if (process.platform === 'win32' && args.includes('--uninstall')) {
+      uninstallRequested = true; if (requestUninstall) void requestUninstall(); return
+    }
     show()
     if (args.includes('--check-updates')) { updateRequested = true; if (updates) void updates.open() }
   })
@@ -101,6 +137,7 @@ async function boot() {
     await host.finished
     cancelRemovalHost = undefined; quitting = true; app.quit(); return
   }
+  if (uninstallRequested) { await bootUninstall(); return }
   const installationProbe = process.argv.filter(value => value.startsWith('--installation-sandbox-probe='))
   if (installationProbe.length) {
     if (installationProbe.length !== 1) { app.exit(1); return }
@@ -278,15 +315,17 @@ async function boot() {
   function updateMenus() {
     const cliItem = () => ({ label: installingCli ? '正在安装 crabot 命令…' : '安装 crabot 命令…',
       enabled: app.isPackaged && !installingCli && controller?.host.snapshot().phase !== 'migration_required', click: () => { void installCli() } })
+    const uninstallItem = () => ({ label: pendingUninstall ? '正在卸载 Crabot…' : '卸载 Crabot…',
+      enabled: !!requestUninstall && !pendingUninstall && !quitting, click: () => { void requestUninstall?.() } })
     const startupItem = () => ({ label: '登录后在后台启动' + (startupState.approvalRequired ? '（待系统允许）' : ''), type: 'checkbox' as const,
       checked: startupState.enabled || startupState.approvalRequired, enabled: startupState.supported && controller?.host.snapshot().phase !== 'migration_required',
       click: (item: Electron.MenuItem) => { void changeStartup(item.checked) } })
     tray?.setContextMenu(Menu.buildFromTemplate([{ label: '打开 Crabot', click: show }, { type: 'separator' },
       { label: '启动服务', click: () => { void controller!.start() } }, { label: '停止服务', click: () => { void controller!.stop() } },
-      { type: 'separator' }, startupItem(), cliItem(), { label: '检查更新…', click: () => { void updates!.open() } }, { label: '退出 Crabot', click: () => { void quit() } }]))
+      { type: 'separator' }, startupItem(), cliItem(), uninstallItem(), { label: '检查更新…', click: () => { void updates!.open() } }, { label: '退出 Crabot', click: () => { void quit() } }]))
     Menu.setApplicationMenu(Menu.buildFromTemplate([
       { label: 'Crabot', submenu: [{ label: '打开 Crabot', click: show }, startupItem(),
-        cliItem(),
+        cliItem(), uninstallItem(),
         { label: '检查更新…', click: () => { void updates!.open() } }, { type: 'separator' }, { label: '退出 Crabot', accelerator: 'CommandOrControl+Q', click: () => { void quit() } }] },
       { label: '文件', submenu: [{ label: '保存当前附件…', accelerator: 'CommandOrControl+S', enabled: artifacts?.hasFocused(), click: () => { artifacts?.saveFocused() } }] },
       { role: 'editMenu' }, { role: 'viewMenu' }, { role: 'windowMenu' },
@@ -298,6 +337,8 @@ async function boot() {
   bootstrapStage('loading-local-interface')
   await window.loadURL('app://crabot/')
   bootstrapStage('local-interface-loaded')
+  if (installation) { requestUninstall = () => uninstallInstallation(installation.root); updateMenus() }
+  if (uninstallRequested && requestUninstall) { await requestUninstall(); controller.watch(); return }
   // The local UI is visible while the controller verifies the large payload.
   if (initialError) controller.fail(initialError)
   else {
@@ -309,10 +350,19 @@ async function boot() {
   if (updateRequested) void updates.open()
 }
 app.on('activate', show)
-app.on('before-quit', event => { if (!quitting) { event.preventDefault(); if (cancelRemovalHost) cancelRemovalHost(); else void quit() } })
+app.on('before-quit', event => {
+  if (quitting) return
+  event.preventDefault()
+  if (pendingUninstall) return
+  if (cancelRemovalHost) cancelRemovalHost()
+  else void quit()
+})
 app.on('window-all-closed', () => { /* Tray owns the application lifetime. */ })
 app.on('will-quit', () => { updates?.close(); artifacts?.close(); controller?.close(); tray?.destroy() })
 void boot().catch(async error => {
+  if (error?.code === 'CRABOT_DESKTOP_REMOVAL_PENDING' && app.isPackaged) {
+    try { await bootUninstall(); return } catch (failure) { error = failure }
+  }
   const code = typeof error?.code === 'string' && /^[A-Z0-9_]{1,128}$/.test(error.code) ? error.code : 'DESKTOP_BOOT_FAILED'
   bootstrapStage('failed', { code })
   await app.whenReady()

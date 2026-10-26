@@ -110,8 +110,11 @@ before(async () => {
   await sealDesktopPayload(payload)
 }, 120000)
 after(async () => { if (root) await fs.rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }) })
-for (const scenario of ['valid', 'node-parent', 'unexpected-source-args', 'changed-copy', 'other-installation', 'publish-close', 'publish-cancel', 'publish-module', 'publish-damaged', 'publish-lost-reply', 'publish-replaced-record', 'publish-live', 'publish-cancel-lost', 'publish-stop', 'publish-stop-wrong-root', 'publish-stop-lost', 'publish-stop-retry', 'publish-stop-lost-retry', 'publish-inherited-cwd', 'publish-source-verifier', 'publish-source-exit', 'publish-source-retry', 'publish-source-late-exit', 'publish-source-ignore', 'publish-source-disconnect', 'resume-valid', 'resume-core-missing', 'resume-wrong-operation', 'resume-changed-copy', 'resume-source-changed', 'resume-lease-cancel', 'resume-lease-stopping', 'resume-lease-removing', 'resume-lease-completed', 'resume-lease-core-missing', 'resume-lease-wrong-operation', 'resume-lease-busy', 'resume-lease-source-exit', 'publish-source-remove', 'publish-source-remove-main', 'publish-source-remove-source', 'resume-source-remove-main', 'publish-source-remove-operation', 'publish-source-remove-cancel-retry', 'publish-source-remove-mac-login', 'publish-source-remove-complete', 'publish-source-remove-windows-uninstall', 'publish-source-remove-retry', 'resume-lease-source-remove', 'publish-source-remove-retry-delayed']) test('actual protected initial removal frame: ' + scenario, { skip: !supported || process.platform === 'linux' && scenario !== 'publish-source-remove-source' || ['publish-source-remove-mac-login', 'publish-source-remove-operation', 'publish-source-remove-main'].includes(scenario) && process.platform !== 'darwin' || scenario === 'publish-source-remove-windows-uninstall' && process.platform !== 'win32', timeout: scenario.includes('source-remove') ? 180000 : 60000 }, async t => {
-  const mode = scenario.endsWith('-delayed') ? scenario.slice(0, -8) : scenario
+for (const scenario of ['publish-source-remove-public-entry', 'publish-source-remove-public-core-missing', 'publish-source-remove-windows-entry', 'valid', 'node-parent', 'unexpected-source-args', 'changed-copy', 'other-installation', 'publish-close', 'publish-cancel', 'publish-module', 'publish-damaged', 'publish-lost-reply', 'publish-replaced-record', 'publish-live', 'publish-cancel-lost', 'publish-stop', 'publish-stop-wrong-root', 'publish-stop-lost', 'publish-stop-retry', 'publish-stop-lost-retry', 'publish-inherited-cwd', 'publish-source-verifier', 'publish-source-exit', 'publish-source-retry', 'publish-source-late-exit', 'publish-source-ignore', 'publish-source-disconnect', 'resume-valid', 'resume-core-missing', 'resume-wrong-operation', 'resume-changed-copy', 'resume-source-changed', 'resume-lease-cancel', 'resume-lease-stopping', 'resume-lease-removing', 'resume-lease-completed', 'resume-lease-core-missing', 'resume-lease-wrong-operation', 'resume-lease-busy', 'resume-lease-source-exit', 'publish-source-remove', 'publish-source-remove-main', 'publish-source-remove-source', 'resume-source-remove-main', 'publish-source-remove-operation', 'publish-source-remove-cancel-retry', 'publish-source-remove-mac-login', 'publish-source-remove-complete', 'publish-source-remove-windows-uninstall', 'publish-source-remove-retry', 'resume-lease-source-remove', 'publish-source-remove-retry-delayed']) test('actual protected initial removal frame: ' + scenario, { skip: !supported || process.platform === 'linux' && scenario !== 'publish-source-remove-source' || ['publish-source-remove-mac-login', 'publish-source-remove-operation', 'publish-source-remove-main'].includes(scenario) && process.platform !== 'darwin' || ['publish-source-remove-windows-uninstall', 'publish-source-remove-windows-entry'].includes(scenario) && process.platform !== 'win32', timeout: scenario.includes('source-remove') ? 180000 : 60000 }, async t => {
+  const publicEntry = ['publish-source-remove-public-entry', 'publish-source-remove-public-core-missing', 'publish-source-remove-windows-entry'].includes(scenario)
+  let mode = scenario
+  if (publicEntry) mode = 'publish-source-remove-source'
+  else if (scenario.endsWith('-delayed')) mode = scenario.slice(0, -8)
   const area = await fs.mkdtemp(path.join(root, 'case-'))
   const cancelled = ['publish-cancel', 'publish-cancel-lost', 'publish-stop', 'publish-stop-retry', 'publish-stop-lost-retry', 'publish-source-exit', 'publish-source-retry', 'publish-source-late-exit', 'publish-source-verifier', 'resume-lease-cancel'].includes(mode)
   if (mode === 'publish-source-remove-complete') {
@@ -154,9 +157,20 @@ for (const scenario of ['valid', 'node-parent', 'unexpected-source-args', 'chang
     const record = readInstanceRuntime(own.dataDir)
     await fs.writeFile(path.join(own.dataDir, 'instance-runtime.json'), JSON.stringify({ ...record, install_root: area }) + '\n')
   }
-  const operationId = randomUUID(), cfg = { root: own.root, operationId, mode, resultFile: path.join(area, 'host-result.json'), stageFile: path.join(area, 'host-stage.json'), removalPinDelayMs: scenario.endsWith('-delayed') ? 3000 : 0 }
+  const operationId = randomUUID(), cfg = { root: own.root, operationId, mode, publicEntry, resultFile: path.join(area, 'host-result.json'), stageFile: path.join(area, 'host-stage.json'), removalPinDelayMs: scenario.endsWith('-delayed') ? 3000 : 0 }
   if (mode === 'other-installation') cfg.inspectRoot = (await commitDesktopInstallation(await prepareDesktopInstallation({ payload, installRoot: path.join(area, 'other') }))).root
   await fs.writeFile(path.join(own.dataDir, 'preserved-user-file'), 'user bytes')
+  if (publicEntry && scenario !== 'publish-source-remove-windows-entry') {
+    const { captureDesktopRemovalProof } = await import('../../scripts/lib/desktop-removal-proof.mjs')
+    const { privateJson } = await import('../../scripts/lib/desktop-preparation-files.mjs')
+    const proof = await captureDesktopRemovalProof(own.root, operationId), job = path.join(own.root, 'app/removals', operationId)
+    await fs.mkdir(job, { recursive: true, mode: 0o700 }); await fs.chmod(path.dirname(job), 0o700)
+    await privateJson(path.join(job, 'proof.json'), proof)
+    await privateJson(path.join(own.root, '.desktop-removal.json'), { schema_version: 1, installation_id: own.record.installation_id,
+      operation_id: operationId, source_selection: own.selection, phase: 'preparing',
+      proof_sha256: (await import('node:crypto')).createHash('sha256').update(JSON.stringify(proof) + '\n').digest('hex') })
+  }
+  if (scenario === 'publish-source-remove-public-core-missing') await fs.rm(own.coreRoot, { recursive: true })
   const config = path.join(area, 'control.json'); await fs.writeFile(config, JSON.stringify(cfg))
   const env = { ...process.env, CRABOT_REMOVAL_FRAME_CONFIG: config }
   if (['publish-source-remove-main', 'publish-source-remove-source', 'resume-source-remove-main'].includes(mode)) {
@@ -166,7 +180,7 @@ for (const scenario of ['valid', 'node-parent', 'unexpected-source-args', 'chang
     env.XDG_CONFIG_HOME = path.join(env.HOME, '.config')
   }
   for (const key of ['ELECTRON_RUN_AS_NODE', 'NODE_OPTIONS', 'NODE_PATH', 'DATA_DIR', 'CRABOT_HOME', 'CRABOT_DEV', 'CRABOT_PORT_OFFSET']) delete env[key]
-  const args = mode === 'publish-source-remove-windows-uninstall' ? ['--uninstall'] : ['--background', ...(mode === 'unexpected-source-args' ? ['--unexpected-maintenance-source'] : [])]
+  const args = mode === 'publish-source-remove-windows-uninstall' || scenario === 'publish-source-remove-windows-entry' ? ['--uninstall'] : ['--background', ...(mode === 'unexpected-source-args' ? ['--unexpected-maintenance-source'] : [])]
   const direct = mode === 'node-parent' ? await prepareDesktopRemovalGui({ installRoot: own.root, operationId }) : undefined
   t.after(async () => { if (direct) await fs.rm(direct.directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }) })
   const child = spawn(direct?.executable || own.executable, direct ? ['--fixture-removal-host'] : args, { env, cwd: direct?.directory ?? (sourceExitMode ? own.guiRoot : undefined), stdio: ['ignore', 'pipe', 'pipe', 'ipc'] }), exited = once(child, 'exit')
@@ -242,6 +256,7 @@ for (const scenario of ['valid', 'node-parent', 'unexpected-source-args', 'chang
   if (['publish-source-remove-complete', 'publish-source-remove-operation', 'publish-source-remove-main', 'publish-source-remove-source', 'resume-source-remove-main'].includes(mode)) assert.equal(result.completionVerified, true)
   if (!linuxSource && ['publish-source-remove-main', 'publish-source-remove-source', 'resume-source-remove-main'].includes(mode)) { assert.equal(result.actual_main, true); assert.equal(result.actual_progress_windows, 1); assert.equal(result.os_api_mocked, true); assert.equal(result.login_writes, process.platform === 'darwin' ? 1 : 0); assert.equal(result.registration_calls, process.platform === 'darwin' ? 1 : 0); assert.equal(result.message, '应用已卸载，数据已保留。') }
   if (mode === 'publish-cancel') assert.equal(result.private_copy_removed, true)
+  if (scenario === 'publish-source-remove-public-core-missing') assert.equal(result.core_initially_missing, true)
   if (mode === 'publish-source-remove-source') { assert.equal(result.actual_source, true); if (!linuxSource) assert.deepEqual(result.dialog_codes, [], JSON.stringify(result)); else { assert.equal(result.actual_node_entry, true); assert.equal(result.polkit_transport_fixture, true) } }
   if (mode === 'publish-source-remove-windows-uninstall') assert.equal(result.windowsUninstallEntryRemoved, true)
   if (mode === 'publish-source-remove-mac-login') { assert.equal(result.macLoginCleaned, true); assert.equal(result.macLoginApiMocked, true) }
