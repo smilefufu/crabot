@@ -75,3 +75,45 @@ for (const mode of ['mapped', 'cwd', 'fileport', 'library', 'protected']) test('
   const after = await native.inspectProgramReferences({ roots: [temporary], files: [file] })
   assert.equal(after.processes.some(value => value.pid === child.pid), false)
 })
+
+test('native reference observation queries newly listed processes instead of requiring a static desktop', { skip: process.platform === 'win32', timeout: 30000 }, async t => {
+  const temporary = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'crabot-reference-churn-')))
+  const children = [], create = () => {
+    if (children.length >= 48) return
+    const related = children.length % 2 === 0
+    const child = spawn('/bin/sleep', ['3'], { cwd: related ? temporary : tmpdir(), stdio: 'ignore' })
+    children.push({ child, related, end: once(child, 'exit') })
+  }
+  let timer
+  t.after(async () => {
+    clearInterval(timer)
+    for (const { child } of children) if (child.exitCode === null && child.signalCode === null) child.kill()
+    await Promise.all(children.map(value => value.end))
+    await fs.rm(temporary, { recursive: true, force: true })
+  })
+  create(); timer = setInterval(create, 50)
+  const result = await native.inspectProgramReferences({ roots: [temporary], files: [] })
+  clearInterval(timer)
+  const ours = new Map(children.map(value => [value.child.pid, value.related]))
+  const unqueried = result.unknown_details.filter(value => ours.has(value.pid) && value.stage === 'process_list_changed')
+  assert.equal(unqueried.length, 0, 'Newly listed owned processes must actually be queried: ' + JSON.stringify(unqueried))
+  assert.ok(result.processes.some(value => ours.get(value.pid) === true), 'Actual CWD holders remain reported')
+  assert.ok(result.processes.every(value => !ours.has(value.pid) || ours.get(value.pid)), 'Unrelated actors are not file holders')
+})
+
+test('macOS fileport observation handles inactive IPC spaces while retaining actual CWD holders', { skip: process.platform !== 'darwin', timeout: 30000 }, async t => {
+  const directory = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'crabot-reference-exec-')))
+  const child = spawn('/bin/bash', ["-c", "for ((i=0;i<100;i++)); do /bin/sh -c 'echo $$; exec /bin/sleep 0.05'; done"], { cwd: directory, stdio: ['ignore', 'pipe', 'inherit'] })
+  const ended = once(child, 'exit')
+  t.after(async () => { await ended; await fs.rm(directory, { recursive: true, force: true }) })
+  await once(child.stdout, 'data')
+  let observed = false
+  for (let pass = 0; pass < 3; pass++) {
+    const receipt = await native.inspectProgramReferences({ roots: [directory], files: [] })
+    const unknowns = receipt.unknown_details.filter(item => item.stage === 'fileport_list' && item.os_error === 3
+      || item.stage === 'mappings' && item.os_error === 22)
+    assert.deepEqual(unknowns, [], 'Inactive IPC or empty VM namespaces have no corresponding resource; other checks must still run')
+    observed ||= receipt.processes.some(item => item.pid === child.pid)
+  }
+  assert.equal(observed, true, 'The real shell holding this CWD must remain reported')
+})

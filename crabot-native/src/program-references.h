@@ -124,8 +124,7 @@ struct ProgramReferenceJob {
     if (found.size() > 32768) throw std::runtime_error("Too many reference processes"); return found;
   }
 #ifdef __APPLE__
-  bool MacReferences(int pid) {
-    bool related = false;
+  bool MacReferences(int pid, bool& related) {
     stage = "directories";
     proc_vnodepathinfo directories{};
     if (proc_pidinfo(pid, PROC_PIDVNODEPATHINFO, 0, &directories, sizeof(directories)) != sizeof(directories)) throw std::runtime_error("Process directories unavailable");
@@ -145,11 +144,13 @@ struct ProgramReferenceJob {
     }
     stage = "fileport_list"; errno = 0;
     needed = proc_pidinfo(pid, PROC_PIDLISTFILEPORTS, 0, nullptr, 0);
-    if ((needed == 0 && errno) || needed < 0 || needed > 262144 * static_cast<int>(sizeof(proc_fileportinfo))) throw std::runtime_error("Process fileports unavailable");
+    // XNU returns ESRCH when the task IPC space is inactive; there are no
+    // usable fileports then. Continue FD/mapping and generation checks below.
+    if ((needed == 0 && errno && errno != ESRCH) || needed < 0 || needed > 262144 * static_cast<int>(sizeof(proc_fileportinfo))) throw std::runtime_error("Process fileports unavailable");
     if (needed) {
       std::vector<proc_fileportinfo> ports(needed / sizeof(proc_fileportinfo) + 512); errno = 0;
       bytes = proc_pidinfo(pid, PROC_PIDLISTFILEPORTS, 0, ports.data(), static_cast<int>(ports.size() * sizeof(proc_fileportinfo)));
-      if ((bytes == 0 && errno) || bytes < 0 || bytes >= static_cast<int>(ports.size() * sizeof(proc_fileportinfo)) || bytes % sizeof(proc_fileportinfo)) throw std::runtime_error("Process fileport list changed");
+      if ((bytes == 0 && errno && errno != ESRCH) || bytes < 0 || bytes >= static_cast<int>(ports.size() * sizeof(proc_fileportinfo)) || bytes % sizeof(proc_fileportinfo)) throw std::runtime_error("Process fileport list changed");
       for (int i = 0; i < bytes / static_cast<int>(sizeof(proc_fileportinfo)); i++) {
         Budget(); if (ports[i].proc_fdtype != PROX_FDTYPE_VNODE) continue;
         stage = "fileport_details"; vnode_fdinfowithpath value{};
@@ -161,7 +162,8 @@ struct ProgramReferenceJob {
     for (int count = 0; count < 65536; count++) {
       Budget(); proc_regionwithpathinfo value{}; errno = 0;
       if (proc_pidinfo(pid, PROC_PIDREGIONPATHINFO, address, &value, sizeof(value)) != sizeof(value)) {
-        if (errno == ESRCH || (errno == EINVAL && count > 0)) return related;
+        // EINVAL is also the end marker when the VM map is already empty.
+        if (errno == ESRCH || errno == EINVAL) return related;
         throw std::runtime_error("Process mappings unavailable");
       }
       if (Related(value.prp_vip.vip_path)) related = true;
@@ -210,16 +212,16 @@ struct ProgramReferenceJob {
   }
 #endif
   void UnixProcess(int pid, const std::string& owner) {
-    Budget(); Identity original;
+    Budget(); Identity original; bool related = false;
     try {
       stage = "identity"; original = Inspect(pid); if (!original.pid) return;
       if (original.owner != owner) { Unknown(pid, "process_generation", 0); return; }
       const size_t bytes = original.executable.size() + original.owner.size() + original.started.size();
       if (observedBytes + bytes > 32 * 1024 * 1024) { incomplete = true; throw std::runtime_error("Too many observed identities"); }
       observedBytes += bytes; observed.emplace(pid, original);
-      bool related = Related(original.executable);
+      related = Related(original.executable);
 #ifdef __APPLE__
-      related = MacReferences(pid) || related;
+      related = MacReferences(pid, related) || related;
 #else
       related = LinuxReferences(pid) || related;
 #endif
@@ -228,7 +230,10 @@ struct ProgramReferenceJob {
       if (current.started != original.started || current.owner != original.owner || current.executable != original.executable) { Unknown(pid, "process_generation", 0); return; }
       if (related) Remember(current);
     } catch (const std::bad_alloc&) { incomplete = true; throw; }
-    catch (...) { const int code = errno; if (!Exited(pid)) Unknown(pid, stage, code); }
+    catch (...) {
+      const int code = errno;
+      if (!Exited(pid)) { if (related) Remember(original); Unknown(pid, stage, code); }
+    }
   }
 #endif
   void Run() {
@@ -250,7 +255,7 @@ struct ProgramReferenceJob {
       for (int pass = 0; pass < 2; pass++) for (int pid : OwnedPids()) if (seen.insert(pid).second) UnixProcess(pid, self.owner);
       for (int pid : OwnedPids()) {
         Budget();
-        if (!seen.count(pid)) { Unknown(pid, "process_list_changed", 0); continue; }
+        if (seen.insert(pid).second) { UnixProcess(pid, self.owner); continue; }
         const auto original = observed.find(pid);
         if (original == observed.end()) continue;
         try {
