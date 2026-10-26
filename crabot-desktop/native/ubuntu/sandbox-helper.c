@@ -56,7 +56,7 @@ static int root_directory(const char *root, uid_t owner) {
   need(root && root[0] == '/' && strlen(root) < 3000 && root[1] && !strchr(root, '\n') && !strchr(root, '\r'));
   int slash = open("/", O_RDONLY | O_CLOEXEC | O_DIRECTORY); need(slash >= 0);
   int fd = open_chain(slash, root + 1, owner, true, true); close(slash);
-  struct stat st; need(fstat(fd, &st) == 0 && st.st_uid == owner && (st.st_mode & 07777) == 0700);
+  struct stat st; need(fstat(fd, &st) == 0 && st.st_uid == owner && (st.st_mode & 0700) == 0700 && !(st.st_mode & 07022));
   return fd;
 }
 static char *read_file(int base, const char *relative, uid_t owner, size_t limit, bool private_file, char **digest) {
