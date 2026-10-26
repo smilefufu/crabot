@@ -86,6 +86,8 @@ static const char *failure_text(const char *code) {
   if (!g_strcmp0(code, "CRABOT_INSTALL_SYSTEM_MODE")) return "此机器由管理员统一部署，请通过浏览器或渠道使用 Crabot。现有实例未改变。";
   if (!g_strcmp0(code, "CRABOT_DESKTOP_TAKEOVER_REQUIRED")) return "检测到已有 Crabot 部署，需要沿用原位置接管。原数据保留，未创建新实例。";
   if (!g_strcmp0(code, "CRABOT_INSTALL_REGISTRATION")) return "系统应用入口与已有文件冲突。原文件已保留，请核对原安装后重试。";
+  if (!g_strcmp0(code, "CRABOT_DESKTOP_PROGRAM_REFERENCES")) return "原程序仍被使用或占用尚未核实，请先关闭原 Crabot 和相关程序后继续；原数据已保留。";
+  if (!g_strcmp0(code, "CRABOT_DESKTOP_REMOVAL")) return "保留数据修复尚未完成，原数据和维护保护已保留。请使用对应离线包在原位置继续。";
   if (!g_strcmp0(code, "CRABOT_INSTALL_PROGRAM_IDENTITY")) return "安装程序或内置浏览器未通过身份校验。原文件已保留，请重新获取完整安装包。";
   if (!g_strcmp0(code, "CRABOT_INSTALL_GUI_SANDBOX")) return "应用沙箱验证未通过。请检查 Ubuntu 系统授权和桌面组件，再使用此安装包重试。";
   if (!g_strcmp0(code, "CRABOT_INSTALL_BROWSER_SANDBOX")) return "内置浏览器的沙箱或网络检查未通过。准备记录已保留，请检查系统限制后重试。";
@@ -96,8 +98,10 @@ static const char *progress_text(const char *phase) {
   if (!g_strcmp0(phase, "verifying")) return "正在核验离线安装组件…";
   if (!g_strcmp0(phase, "copying")) return "正在安装 Crabot 与内置运行环境…";
   if (!g_strcmp0(phase, "prepared")) return "程序已准备，正在核验安装结果…";
+  if (!g_strcmp0(phase, "restoring")) return "正在修复程序，原数据保持不变…";
+  if (!g_strcmp0(phase, "handing-off")) return "正在准备恢复服务，维护保护仍然有效…";
   if (!g_strcmp0(phase, "sandbox")) return "正在检查应用、内置浏览器的真实沙箱与网络…";
-  if (!g_strcmp0(phase, "registering")) return "正在登记系统应用入口并完成安装…";
+  if (!g_strcmp0(phase, "registering")) return "正在登记系统应用入口…";
   return NULL;
 }
 static const char *field(JsonObject *object, const char *name) {
@@ -113,7 +117,7 @@ static gboolean frame(Installer *s, const char *line, gsize size) {
   if (!g_strcmp0(type, "progress")) {
     const char *text = progress_text(field(object, "phase")); if (!text || s->complete) return FALSE;
     if (!s->cancelling) status(s, text);
-    if (!g_strcmp0(field(object, "phase"), "registering")) { s->finalizing = TRUE; gtk_widget_set_sensitive(s->cancel, FALSE); }
+    if (!g_strcmp0(field(object, "phase"), "registering") || !g_strcmp0(field(object, "phase"), "handing-off")) { s->finalizing = TRUE; gtk_widget_set_sensitive(s->cancel, FALSE); }
   } else if (!g_strcmp0(type, "authorization_required")) {
     if (s->authorization_pending || s->authorization || s->complete || s->cancelling) { action(s, "denied"); return TRUE; }
     s->authorization_pending = TRUE;
@@ -129,8 +133,14 @@ static gboolean frame(Installer *s, const char *line, gsize size) {
     g_autofree char *escaped = g_regex_escape_string(root, -1);
     g_autofree char *pattern = g_strdup_printf("^%s/app/releases/[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}/crabot-desktop$", escaped);
     free(root); if (!g_regex_match_simple(pattern, executable, 0, 0) || s->failed || s->complete) return FALSE;
+    JsonNode *pending = json_object_get_member(object, "verification_pending");
+    if (pending && (!JSON_NODE_HOLDS_VALUE(pending) || json_node_get_value_type(pending) != G_TYPE_BOOLEAN)) return FALSE;
+    gboolean verifying = pending && json_node_get_boolean(pending);
     s->executable = g_strdup(executable); s->complete = TRUE;
-    status(s, "Crabot 已安装并通过沙箱检查。打开应用后配置模型即可开始使用。");
+    if (verifying) {
+      gtk_button_set_label(GTK_BUTTON(s->open), "打开 Crabot 继续核验");
+      status(s, "程序已修复，原数据已保留。服务尚待启动核验；可打开 Crabot 继续，也可稍后从应用入口继续。");
+    } else status(s, "Crabot 已安装并通过沙箱检查。打开应用后配置模型即可开始使用。");
   } else return FALSE;
   return TRUE;
 }
@@ -191,7 +201,7 @@ static void open_clicked(GtkButton *button, gpointer data) {
   (void)button; Installer *s = data; if (!s->complete || !s->executable) return;
   g_autoptr(GSubprocessLauncher) launch = launcher(G_SUBPROCESS_FLAGS_STDOUT_SILENCE | G_SUBPROCESS_FLAGS_STDERR_SILENCE);
   g_autoptr(GSubprocess) child = g_subprocess_launcher_spawn(launch, NULL, s->executable, NULL);
-  if (child) gtk_window_destroy(s->window); else status(s, "Crabot 已安装。暂未打开，可从系统应用入口重试。");
+  if (child) gtk_window_destroy(s->window); else status(s, "应用暂未打开，可从系统应用入口重试。");
 }
 static gboolean smoke_finished(gpointer data) { Installer *s = data; puts("CRABOT_NATIVE_INSTALLER_WINDOW_READY"); gtk_window_destroy(s->window); return G_SOURCE_REMOVE; }
 static void activate(GtkApplication *app, gpointer data) {

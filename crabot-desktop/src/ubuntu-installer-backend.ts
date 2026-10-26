@@ -6,9 +6,10 @@ import { homedir } from 'node:os'
 import { readFile } from 'node:fs/promises'
 import { createInterface } from 'node:readline'
 import { registerInstallationEntries, readInstallationLocator, type PreparedInstallation } from './installation-entries.js'
-import { finishUbuntuInstallation, ubuntuInstallationFailure } from './ubuntu-installation.js'
+import { ensureUbuntuProgramsReady, finishUbuntuInstallation, ubuntuInstallationFailure } from './ubuntu-installation.js'
 import { runUbuntuProcess, ubuntuDesktopEnvironment } from './ubuntu-process.js'
 import { probeUbuntuPrograms } from './ubuntu-program-probe.js'
+import { prepareRetainedDesktopReinstall } from './retained-reinstall.js'
 const directory = path.dirname(fileURLToPath(import.meta.url)), bundle = path.resolve(directory, '../..')
 const abort = new AbortController()
 const emit = (type: string, fields: Record<string, unknown> = {}) => process.stdout.write(JSON.stringify({ type, ...fields }) + '\n')
@@ -40,13 +41,13 @@ async function main() {
     const { assertFreshUserInstallation } = await import(pathToFileURL(path.join(directory, 'bootstrap/scripts/lib/legacy-desktop.mjs')).href)
     await assertFreshUserInstallation({ home: homedir(), source: process.env })
   }
-  const prepared: PreparedInstallation = await backend.prepareDesktopInstallation({ payload: path.join(bundle, 'offline'), installRoot: path.resolve(process.argv[2]),
-    signal: abort.signal, progress: (phase: string) => emit('progress', { phase }) })
-  // Verify the root helper's closed view before any executable probes or Polkit.
-  const inspected = await runUbuntuProcess(path.join(bundle, 'crabot-sandbox-helper'), ['--inspect', prepared.installRoot], ubuntuDesktopEnvironment(process.env), 60_000, abort.signal)
-  if (inspected.code !== 0) throw Object.assign(new Error('Native inspection failed'), { code: 'CRABOT_INSTALL_PROGRAM_IDENTITY' })
+  const payload = path.join(bundle, 'offline'), installRoot = path.resolve(process.argv[2])
   const product = createRequire(import.meta.url)('./bootstrap/scripts/lib/product-runtime.cjs')
-  const installed = await finishUbuntuInstallation({ signal: abort.signal,
+  const inspectPrepared = async (prepared: PreparedInstallation) => {
+    const inspected = await runUbuntuProcess(path.join(bundle, 'crabot-sandbox-helper'), ['--inspect', prepared.installRoot], ubuntuDesktopEnvironment(process.env), 60_000, abort.signal)
+    if (inspected.code !== 0) throw Object.assign(new Error('Native inspection failed'), { code: 'CRABOT_INSTALL_PROGRAM_IDENTITY' })
+  }
+  const readiness = (prepared: PreparedInstallation) => ({ signal: abort.signal,
     probe: async () => {
       emit('progress', { phase: 'sandbox' })
       const runtime = product.loadProductRuntime(prepared.coreRoot, { required: true, full: true })
@@ -54,11 +55,26 @@ async function main() {
     },
     authorizationNeeded: async () => (await readFile('/proc/sys/kernel/apparmor_restrict_unprivileged_userns', 'utf8').catch(() => '')).trim() === '1',
     authorize: () => new Promise<void>((resolve, reject) => { authorization = { resolve, reject }; emit('authorization_required') }),
-    register: async () => {
-      emit('progress', { phase: 'registering' })
-      await registerInstallationEntries(prepared, { home: homedir(), platform: 'linux', env: process.env,
-        shell: { readShortcutLink: () => { throw new Error('Windows only') }, writeShortcutLink: () => false } })
-    }, commit: () => backend.commitDesktopInstallation(prepared),
+  })
+  const register = async (prepared: PreparedInstallation) => {
+    emit('progress', { phase: 'registering' })
+    await registerInstallationEntries(prepared, { home: homedir(), platform: 'linux', env: process.env,
+      shell: { readShortcutLink: () => { throw new Error('Windows only') }, writeShortcutLink: () => false } })
+  }
+  const retained = await prepareRetainedDesktopReinstall({ payload, installRoot, signal: abort.signal,
+    progress: phase => emit('progress', { phase }), registerEntries: async prepared => {
+      await inspectPrepared(prepared)
+      await ensureUbuntuProgramsReady(readiness(prepared))
+      abort.signal.throwIfAborted()
+      await register(prepared)
+    } })
+  if (retained) { emit('complete', { executable: retained.executable, verification_pending: true }); return }
+  const prepared: PreparedInstallation = await backend.prepareDesktopInstallation({ payload, installRoot,
+    signal: abort.signal, progress: (phase: string) => emit('progress', { phase }) })
+  // Fresh completion remains separate from retained-data target recovery.
+  await inspectPrepared(prepared)
+  const installed = await finishUbuntuInstallation({ ...readiness(prepared),
+    register: () => register(prepared), commit: () => backend.commitDesktopInstallation(prepared),
   }) as { executable: string }
   emit('complete', { executable: installed.executable })
 }

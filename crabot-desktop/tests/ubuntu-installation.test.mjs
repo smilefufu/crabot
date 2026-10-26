@@ -58,3 +58,7 @@ test('shared readiness preserves update semantics without first-install entries 
   await ensureUbuntuProgramsReady(f.options)
   assert.deepEqual(f.calls, ['probe', 'needed', 'authorize', 'probe'])
 })
+
+for (const code of ['CRABOT_DESKTOP_REMOVAL', 'CRABOT_DESKTOP_PROGRAM_REFERENCES']) test('Ubuntu repair preserves its actionable fixed failure: ' + code, () => {
+  assert.deepEqual(ubuntuInstallationFailure({ code, message: 'private detail' }, false), { code })
+})

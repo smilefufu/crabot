@@ -46,8 +46,33 @@ static void pending_authorization_blocks_retry(void) {
   // Check after both children are reaped, including the failing old-source case.
   g_assert_true(held_busy); g_assert_true(held_cancel); g_assert_true(retry_disabled); g_assert_true(released);
 }
+static void retained_completion_is_not_service_health(void) {
+  const char *flags[] = { "", ",\"verification_pending\":true", ",\"verification_pending\":\"true\"" };
+  for (size_t i = 0; i < G_N_ELEMENTS(flags); i++) {
+    g_autofree char *root = g_dir_make_tmp("crabot-installer-complete-XXXXXX", NULL);
+    g_assert_nonnull(root);
+    Installer s = {0}; s.selected = root;
+    s.status = GTK_LABEL(g_object_ref_sink(gtk_label_new("")));
+    s.open = g_object_ref_sink(gtk_button_new()); s.cancel = g_object_ref_sink(gtk_button_new());
+    if (i == 1) {
+      const char *progress = "{\"type\":\"progress\",\"phase\":\"handing-off\"}";
+      g_assert_true(frame(&s, progress, strlen(progress)));
+      g_assert_true(s.finalizing); g_assert_false(gtk_widget_get_sensitive(s.cancel));
+    }
+    g_autofree char *line = g_strdup_printf("{\"type\":\"complete\",\"executable\":\"%s/app/releases/11111111-1111-4111-8111-111111111111/crabot-desktop\"%s}", root, flags[i]);
+    if (i == 2) { g_assert_false(frame(&s, line, strlen(line))); g_assert_false(s.complete); g_assert_null(s.executable); }
+    else {
+      g_assert_true(frame(&s, line, strlen(line))); g_assert_true(s.complete);
+      g_assert_nonnull(strstr(gtk_label_get_text(s.status), i == 1 ? "尚待启动核验" : "通过沙箱检查"));
+      if (i == 1) g_assert_cmpstr(gtk_button_get_label(GTK_BUTTON(s.open)), ==, "打开 Crabot 继续核验");
+    }
+    g_free(s.executable); g_object_unref(s.status); g_object_unref(s.open); g_object_unref(s.cancel);
+    g_assert_cmpint(rmdir(root), ==, 0);
+  }
+}
 int main(int argc, char **argv) {
   g_test_init(&argc, &argv, NULL); gtk_init();
   g_test_add_func("/installer/pending-authorization-blocks-retry", pending_authorization_blocks_retry);
+  g_test_add_func("/installer/retained-completion-pending-health", retained_completion_is_not_service_health);
   return g_test_run();
 }

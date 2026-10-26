@@ -188,9 +188,12 @@ static int verify_targets(const char *install_root, int root, Target targets[3],
     pending = json(root, ".desktop-installing.json", 4096, true, NULL);
     JsonObject *state = json_node_get_object(pending); keys(state, "schema_version,id,installation_id,selection,phase,payload_sha256");
     need(integer(state, "schema_version") == 1); eq(state, "installation_id", id); eq(state, "phase", "prepared");
-    selection = object(state, "selection");
+    selection = object(state, "selection"); valid_pair(selection);
+    g_autofree char *prepared_proof = g_strdup_printf("app/payloads/%s.json", string(selection, "gui_id"));
+    int cached = fstatat(root, prepared_proof, &st, AT_SYMLINK_NOFOLLOW);
+    need(cached == 0 || errno == ENOENT);
     g_autofree char *payload_sha = NULL;
-    payload = json(root, ".desktop-install-payload.json", 64 * 1024 * 1024, true, &payload_sha);
+    payload = json(root, cached == 0 ? prepared_proof : ".desktop-install-payload.json", 64 * 1024 * 1024, true, &payload_sha);
     eq(state, "payload_sha256", payload_sha);
   }
   valid_pair(selection);

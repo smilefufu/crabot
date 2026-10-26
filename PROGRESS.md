@@ -63,7 +63,7 @@
 ### 桌面化方案：范围冻结，原 worktree 收口中，未进入 PR
 
 - 按2026-10-25冻结边界继续，不增加产品子项目或恢复记录。唯一重大遗漏例外：用户2026-10-26确认有限修正macOS受保护系统进程导致的卸载全局阻断。原已确认体验和验收保持；[实施计划](crabot-docs/superpowers/plans/2026-10-17-desktop-application-implementation.md)、[完整验收证据](crabot-docs/superpowers/plans/2026-10-17-desktop-application-validation.md)记录逐项结果及失败，不以组件替代交付。
-- 已形成四个实际独立构建的review分支：Native基础、Client SDK、Runtime基础、Workspace目录基础。各有自身依赖/编译和四平台或三平台CI，未借feature dist；B1原生引用修正后重编109项88过21平台跳过，自身新版四平台CI已全部通过。后续依赖批次必须在依赖合并后按实际main重新定位并验证，不提交悬空引用或巨大单PR。
+- 已形成四个实际独立构建的review分支：Native基础、Client SDK、Runtime基础、Workspace目录基础。各有自身依赖/编译和四平台或三平台CI，未借feature dist；B1原生引用修正后自身重编110项89过21平台跳过，1438aa35自身新版四平台CI已全部通过。后续依赖批次必须在依赖合并后按实际main重新定位并验证，不提交悬空引用或巨大单PR。
 - 现有GUI/CLI共用、窄IPC+共享HTTP/WS、内置环境、项目workspace及权限迁移、system批量运维主体仍在原feature worktree。Windows旧候选两次整包GUI/Core/CLI与签名更新通过；只证明对应候选，不能代替最终版/Win11真实桌面或登录验收。
 - ARM原更新故障由固定首目标证据收窄至recovering-service/NSAlert；实际Electron/Controller进一步复现登录警告框阻塞服务启动。已将提示延后到原恢复/健康/维护确定之后，不改变OS意图与健康门槛；旧两项时序回归先红，修后66项65过1平台跳过、7项实际Electron全过。6e5bd1a2原签名整包40256350443已成功，普通目标Main、新实例代际、真实健康收口和数据保留已核实；仍非真实模型/登录验收。
 - Linux原流程三次在固定libfreetype/libpng源503/读取超时中止，未到S5。61b4f1fe仅将四个失效URL替换为Ubuntu官方固定快照，x64/arm64四包真实HTTP200且原SHA完全相同；六项内置Python与16项资源/打包回归通过。61b完整Linux在资源步骤前被旧通知断言阻断，c10405ac修正组件测试后已重跑原流程；缺artifact不算实际Ubuntu安装产品失败。
@@ -73,6 +73,7 @@
 - 按用户要求专项审查无效阻断：已移除旧业务DATA_DIR必须0700的错误前置，覆盖维护/旧迁移、CLI升级重装、Python选择与workspace记录；旧0755原样保留，真正私有控制仍700/600。327项326过1平台跳过，另Core冷恢复6/6；真实Node迁移与内置Python离线重建均覆盖。无新权限/记录/需求，完整旧CLI接管仍未因此完成。
 - 保留数据重装原元组已接既有版本保护及目标Node/安装器匿名IPC；原Controller与真实范围迁移组合覆盖健康失败、重试不重复迁移，330项321过9跳过；另无Core实际ASAR/删除组133项132过1跳过。仅组件通过，尚缺完整安装UI、更高版及目标GUI/Core实际健康；不开放完整卸载。Intel整包源夹具在约582秒提交后、交接前退出，已补退出码并延长测试夹具寿命，产品期限不变，待实测。
 - 原元组保留数据修复已接macOS/Windows普通安装器，实际Electron沙箱进度/坏包/“尚待服务核验”验证通过；完整编译后18项全过，打包/证据/范围182项全过。实际受控短进程复现末轮新增PID未查询便阻断，已改为原完整查询；新Native22项18过4平台跳过，真实引用/未知不放宽。Ubuntu同源安装再次通过；Linux更新夹具漏传原生组件已修正，待重跑。
+- Ubuntu原生修复接线沿同一受管Node交接，复用已存在prepared/per-GUI目标证明及原沙箱/Polkit权限，不新增记录/特权命令；GTK明确显示待服务核验。本机类型及27项就绪/包输入测试通过，GTK真实帧与Native坏证明反例已接CI，原生运行结果尚待。更高版及真实恢复健康继续。
 - 本地构建继续磁盘保护：40GiB起建、30GiB停止本任务组、任务材料20GiB上限；当前空闲约345GiB、主worktree材料约15.87GiB。只清理本次有限夹具，未改Docker/Spotlight或停现场服务。产品只推feature/review分支，完整测好再按依赖开PR，不直推main、不自行merge。
 
 ### 任务默认目录文件授权：独立修复待审查

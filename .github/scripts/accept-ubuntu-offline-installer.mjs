@@ -2,7 +2,7 @@
 // Ubuntu24 CI user. sudo supplies test authorization; graphical Polkit is not UAT.
 import assert from 'node:assert/strict'
 import { promises as fs } from 'node:fs'
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import path from 'node:path'
 import { homedir } from 'node:os'
 import { spawn, execFile } from 'node:child_process'
@@ -72,9 +72,32 @@ assert.equal(locator.install_root, installRoot); assert.equal(locator.installati
 const menu = await fs.readFile(path.join(home, 'share/applications/crabot.desktop'), 'utf8')
 assert.ok(menu.includes(installation.record.installation_id))
 for (const file of ['mm.pid', 'agent', 'admin']) await assert.rejects(fs.access(path.join(installation.dataDir, file)), { code: 'ENOENT' })
+// The fixed ordinary helper also recognizes the already prepared per-GUI proof
+// used by retained-data restoration, without replacing the original root proof.
+const originalProof = path.join(installRoot, '.desktop-install-payload.json'), savedProof = originalProof + '.test-saved'
+const preparedProof = path.join(installRoot, 'app/payloads', installation.selection.gui_id + '.json'), pendingFile = path.join(installRoot, '.desktop-installing.json')
+const text = await fs.readFile(path.join(bundle, 'offline/desktop-payload.json'), 'utf8')
+let cached
+try { cached = await fs.readFile(preparedProof) } catch (error) { if (error.code !== 'ENOENT') throw error }
+if (cached) assert.equal(cached.toString(), text)
+else { await fs.mkdir(path.dirname(preparedProof), { recursive: true, mode: 0o700 }); await fs.writeFile(preparedProof, text, { flag: 'wx', mode: 0o600 }) }
+await fs.rename(originalProof, savedProof)
+try {
+  await fs.writeFile(pendingFile, JSON.stringify({ schema_version: 1, id: randomUUID(), installation_id: installation.record.installation_id,
+    selection: installation.selection, phase: 'prepared', payload_sha256: createHash('sha256').update(text).digest('hex') }) + '\n', { flag: 'wx', mode: 0o600 })
+  await exec(path.join(bundle, 'crabot-sandbox-helper'), ['--inspect', installRoot], { env, timeout: 120000, maxBuffer: 65536 })
+  await fs.writeFile(preparedProof, text + '\n')
+  await assert.rejects(exec(path.join(bundle, 'crabot-sandbox-helper'), ['--inspect', installRoot], { env, timeout: 120000, maxBuffer: 65536 }))
+} finally {
+  if (cached) await fs.writeFile(preparedProof, cached)
+  else await fs.unlink(preparedProof)
+  await fs.rename(savedProof, originalProof)
+  await fs.unlink(pendingFile)
+}
+for (const file of ['mm.pid', 'agent', 'admin']) await assert.rejects(fs.access(path.join(installation.dataDir, file)), { code: 'ENOENT' })
 const report = { source: native.commit, actual_native_first_window: true, actual_fresh_installation: true, test_authorizations: authorizations,
   actual_gui_browser_sandbox_and_network: true, actual_bundled_mcp_fetch: true, global_restriction_unchanged: true,
-  unique_pair_and_user_entries: true, business_mm_started: false, graphical_polkit: false, gnome_wayland: false, product_uninstall: false }
+  unique_pair_and_user_entries: true, retained_pair_native_inspection: true, changed_prepared_proof_rejected: true, business_mm_started: false, graphical_polkit: false, gnome_wayland: false, product_uninstall: false }
 await fs.writeFile('.desktop-build/ubuntu-installation-report.json', JSON.stringify(report, null, 2) + '\n')
 console.log('CRABOT_UBUNTU_INSTALLATION ' + JSON.stringify(report))
 // Preserve the owned installed root/policies until this disposable VM ends.
