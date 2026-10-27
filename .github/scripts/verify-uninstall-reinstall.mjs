@@ -40,6 +40,7 @@ if (linux) {
 for (const name of ['ELECTRON_RUN_AS_NODE', 'NODE_OPTIONS', 'NODE_PATH', 'CRABOT_DEV', 'CRABOT_PORT_OFFSET', 'WORKER_WORKSPACES_DIR']) delete env[name]
 const started = performance.now(), children = []
 let selected, host, registrationExecutable, targetPrepared, report, success = false, sourceOutput = ''
+let previousKeychain, testKeychain
 const stage = name => console.log('CRABOT_UNINSTALL_REINSTALL_STAGE ' + JSON.stringify({ stage: name, elapsed_ms: Math.round(performance.now() - started) }))
 async function read(name) { try { return JSON.parse(await fs.readFile(path.join(control, name + '.json'), 'utf8')) } catch (error) { if (error.code === 'ENOENT') return null; throw error } }
 async function wait(name, check, timeout = 180000) {
@@ -91,6 +92,20 @@ async function register(prepared, action) {
 }
 const shortcut = process.platform === 'darwin' ? path.join(home, 'Applications/Crabot.app') : linux ? path.join(env.XDG_DATA_HOME, 'applications/crabot.desktop') : path.join(env.APPDATA, 'Microsoft/Windows/Start Menu/Programs/Crabot.lnk')
 try {
+  if (process.platform === 'darwin') {
+    // The isolated runner has no unlocked login session. Its blocked Security
+    // authorization UI otherwise keeps Chromium alive after the ordinary quit.
+    const security = args => promisify(execFile)('/usr/bin/security', args, { timeout: 10000, maxBuffer: 4096 })
+    previousKeychain = (await security(['default-keychain', '-d', 'user'])).stdout.trim().replace(/^"|"$/g, '')
+    testKeychain = path.join(control, 'acceptance.keychain-db')
+    const password = randomBytes(32).toString('hex')
+    try {
+      await security(['create-keychain', '-p', password, testKeychain])
+      await security(['set-keychain-settings', '-lut', '21600', testKeychain])
+      await security(['unlock-keychain', '-p', password, testKeychain])
+      await security(['default-keychain', '-d', 'user', '-s', testKeychain])
+    } catch { throw new Error('Cannot prepare an unlocked isolated CI keychain') }
+  }
   stage('building-confirmation-driver')
   const sourcePayload = await buildDesktopComponentSource({ repository, project, destination: job, entryFixture: 'uninstall-main-driver.cjs', ...(linux ? { ubuntuRemovalControl: control } : {}) })
   registrationExecutable = path.join(sourcePayload, process.platform === 'darwin' ? 'gui/Crabot.app/Contents/MacOS/Crabot' : 'gui/Crabot.exe')
@@ -162,6 +177,10 @@ try {
     if (host?.identity && identity.sameProcess(host.identity, identity.inspectProcess(host.identity.pid))) process.kill(host.identity.pid, 'SIGKILL')
     for (const record of children) if (record.identity && identity.sameProcess(record.identity, identity.inspectProcess(record.identity.pid))) process.kill(record.identity.pid, 'SIGKILL')
     await Promise.allSettled(children.map(record => record.exited))
+    if (testKeychain) {
+      if (previousKeychain) await promisify(execFile)('/usr/bin/security', ['default-keychain', '-d', 'user', '-s', previousKeychain], { timeout: 10000, maxBuffer: 4096 })
+      await promisify(execFile)('/usr/bin/security', ['delete-keychain', testKeychain], { timeout: 10000, maxBuffer: 4096 })
+    }
     await fs.mkdir(path.join(repository, '.desktop-build'), { recursive: true }); await fs.writeFile(path.join(repository, '.desktop-build/uninstall-reinstall.log'), sourceOutput)
     if (!success) await fs.writeFile(path.join(repository, '.desktop-build/uninstall-reinstall-diagnostic.json'), JSON.stringify({
       driver: await read('driver-failed'), host: await read('maintenance-started'),

@@ -97,7 +97,9 @@ async function removeFromSource(options: SourceOptions | InstallerOptions) {
     if (code !== 0) throw Object.assign(new Error('独立维护界面退出，原卸载进度与数据已保留。'), { code: 'CRABOT_DESKTOP_REMOVAL' })
   } catch (error) {
     const code = (error as { code?: unknown })?.code
+    const operationStage = (error as { stage?: unknown })?.stage
     try { console.error(JSON.stringify({ component: 'desktop-removal-source', stage,
+      operation_stage: typeof operationStage === 'string' && /^[a-z-]{1,80}$/.test(operationStage) ? operationStage : undefined,
       code: typeof code === 'string' && /^[A-Z0-9_]{1,128}$/.test(code) ? code : 'CRABOT_DESKTOP_REMOVAL' })) } catch { /* Diagnostics cannot change removal. */ }
     // Before a child ever starts, this fresh in-memory copy has no executable
     // owner. A running or unidentified child always retains its diagnostic copy.

@@ -138,7 +138,7 @@ async function prepareRemovalNode({ installRoot, operationId, signal, progress =
   const selection = existing ? installation.readDesktopPairReference(base.root).selection : base.selection
   const own = { ...base, selection, coreRoot: path.join(base.root, 'releases', selection.core_id), guiRoot: path.join(base.root, 'app/releases', selection.gui_id) }
   const lock = await acquireExistingCliLock(own.root, 'prepare-removal-node'), token = cliLockToken(lock)
-  let directory, createdIdentity
+  let directory, createdIdentity, stage = 'capture-proof'
   try {
     const previous = existing ? await readDesktopRemovalProof(own.root) : null
     if (previous && (previous.record.operation_id !== operationId || !same(previous.record.source_selection, own.selection))) fail()
@@ -162,6 +162,7 @@ async function prepareRemovalNode({ installRoot, operationId, signal, progress =
         || await versionMaintenancePending(own.dataDir) || workspaceMaintenancePending(own.dataDir) || cliLockToken(lock) !== token) fail()
     }
     await current()
+    stage = 'runtime-inventory'
     const inventory = JSON.parse(proof.core.inventory).files, nodePath = '.product-runtime/node/bin/node'
     const runtimeEntry = inventory['product-runtime.json']
     if (runtimeEntry?.type !== 'file' || runtimeEntry.size > 65536) fail()
@@ -179,6 +180,7 @@ async function prepareRemovalNode({ installRoot, operationId, signal, progress =
     ]
     if (files.some(file => file.entry?.type !== 'file' || !Number.isSafeInteger(file.entry.size) || file.entry.size < 1 || file.entry.size > 128 * 1024 * 1024
       || file.entry.mode & 0o022 || ['node', 'crabot-maintenance', 'crabot-sandbox-helper', 'cleanup'].includes(file.target) && !(file.entry.mode & 0o111))) fail()
+    stage = 'copy-space'
     const parent = await fs.realpath(tmpdir()), space = await fs.statfs(parent, { bigint: true })
     if (space.bavail * space.bsize < files.reduce((sum, file) => sum + BigInt(file.entry.size), 0n) + 512n * 1024n * 1024n) {
       throw Object.assign(new Error('临时维护程序空间不足，原应用和数据已保留。'), { code: 'CRABOT_UPDATE_SPACE' })
@@ -189,6 +191,7 @@ async function prepareRemovalNode({ installRoot, operationId, signal, progress =
       await current()
       if (management.requirePrivateDataRoot(directory) !== directory || directoryIdentity(await fs.lstat(directory, { bigint: true })) !== createdIdentity) fail()
     }
+    stage = 'copy-resources'
     await progress('copying'); await privateCurrent()
     const generation = stat => [stat.dev, stat.ino, stat.mode, stat.uid, stat.gid, stat.size, stat.nlink, stat.mtimeNs, stat.ctimeNs].join(':')
     for (const file of files) {
@@ -231,6 +234,7 @@ async function prepareRemovalNode({ installRoot, operationId, signal, progress =
       await verifyUbuntuRemovalNodeCopy(directory, proof, { signal })
       await privateCurrent()
     }
+    stage = 'verify-copy'
     await verifyCopy()
     const executable = path.join(directory, 'node')
     const script = `import fs from 'node:fs';import path from 'node:path';import {createRequire} from 'node:module';import {pathToFileURL} from 'node:url';
@@ -246,10 +250,13 @@ async function prepareRemovalNode({ installRoot, operationId, signal, progress =
       const request=await import(pathToFileURL(path.join(root,'backend/request.mjs')));
       if(typeof job.beginInitialDesktopRemoval!=='function'||typeof progress.createUbuntuRemovalProgressWindow!=='function'||typeof rules.prepareUbuntuRemovalRules!=='function'||typeof entries.removeDesktopUserEntries!=='function'||typeof operation.runRemovalOperation!=='function'||typeof host.runUbuntuRemovalHost!=='function'||typeof request.readRemovalHostRequest!=='function')throw new Error('fixed backend incomplete');
       process.stdout.write(JSON.stringify({node_version:process.versions.node,self_verified:true})+'\\n');`
+    stage = 'self-check-execution'
     const result = await promisify(execFile)(executable, ['--input-type=module', '--eval', script, directory], {
       cwd: directory, env: { PATH: '', LANG: 'C.UTF-8' }, timeout: 15000, maxBuffer: 4096, signal,
     })
+    stage = 'self-check-result'
     if (result.stderr || result.stdout !== JSON.stringify({ node_version: version, self_verified: true }) + '\n') fail()
+    stage = 'final-copy-verification'
     await progress('prepared'); await verifyCopy()
     return { ...(previous ? { record: previous.record } : {}), directory, executable, frontend: path.join(directory, 'crabot-maintenance'), proof, self_verified: true }
   } catch (error) {
@@ -259,7 +266,7 @@ async function prepareRemovalNode({ installRoot, operationId, signal, progress =
         await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
       } catch (cleanup) { throw new AggregateError([error, cleanup], '维护副本准备与清理未完成，原应用、数据和诊断已保留。') }
     }
-    throw error
+    throw Object.assign(error, { stage })
   } finally { if (token && cliLockToken(lock) === token) releaseCliLock(lock) }
 }
 
