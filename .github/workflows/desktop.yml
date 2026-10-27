@@ -408,6 +408,10 @@ jobs:
         if: runner.os != 'Linux' && steps.scope.outputs.full_runtime == 'true'
         timeout-minutes: 6
         run: node .github/scripts/verify-offline-installer-host.mjs ".desktop-build/安装 候选/installer" 2>&1 | tee .desktop-build/installer-host-probe.log
+      - name: Published legacy user archives through actual installer and ordinary Main
+        if: runner.os != 'Linux' && steps.scope.outputs.full_runtime == 'true'
+        timeout-minutes: 30
+        run: node .github/scripts/verify-legacy-user-takeover.mjs ".desktop-build/安装 候选/paired" ".desktop-build/安装 候选/installer" 2>&1 | tee .desktop-build/legacy-user-stage.log
       # One batch includes cold boot, warm reattach and retained-repair boot.
       # Keep each product deadline unchanged; the Windows batch reached its third real ready state at 1200.7s.
       - name: Boot actual offline-prepared pair on Linux
@@ -484,6 +488,7 @@ jobs:
             .desktop-build/cli-update-disk.json
             .desktop-build/system-mode.json
             .desktop-build/system-legacy*.json
+            .desktop-build/legacy-user-takeover.json
             .desktop-build/platform-installers/installers.json
             .desktop-build/cli-archive/archive.json
             product-runtime.json
