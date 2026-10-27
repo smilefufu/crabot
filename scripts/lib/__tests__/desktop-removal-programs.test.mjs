@@ -164,7 +164,13 @@ for (const mode of ['owned', 'partial', 'changed-file', 'unknown-directory', 'mi
     let reappearance
     if (mode === 'reappeared-after-unlink') {
       const unlink = fsSync.unlinkSync
-      reappearance = t.mock.method(fsSync, 'unlinkSync', file => { unlink(file); if (file === target) fsSync.writeFileSync(target, 'Core bytes') })
+      reappearance = t.mock.method(fsSync, 'unlinkSync', file => {
+        unlink(file)
+        if (file === target) {
+          if (process.platform === 'win32') identity.writePrivateFile(target, 'Core bytes')
+          else fsSync.writeFileSync(target, 'Core bytes')
+        }
+      })
     }
     const beforeData = await fs.readFile(path.join(f.data, 'user.txt')), beforeRecord = await fs.readFile(path.join(f.root, '.desktop-removal.json'))
     const refused = ['missing-lock', 'wrong-operation', 'wrong-installation', 'before-removing', 'running', 'referenced', 'unknown-reference', 'incomplete-observer', 'root-preparation', 'module-pending', 'lost-lock-after-observation', 'changed-proof-after-observation', 'directory-after-observation'].includes(mode)
@@ -326,10 +332,18 @@ test('verified unrelated protected macOS service no longer blocks proven private
   } finally { for (const lock of held.reverse()) locks.releaseCliLock(lock) }
 })
 
-test('one unchanged destructive admission does not rediscover the installation for every nested reader', async t => {
-  const f = await fixture(t), locks = await import('../cli-lock.mjs')
-  const held = [await locks.acquireExistingCliLock(f.root, 'fixture-observation'), await locks.acquireExistingCliLock(f.data, 'fixture-observation')]
+// Release native handles before the fixture's directory-removal hook on Windows.
+async function lockedProgramFixture(t, command) {
+  const locks = await import('../cli-lock.mjs'), held = []
   t.after(() => { for (const lock of held.reverse()) locks.releaseCliLock(lock) })
+  const f = await fixture(t)
+  held.push(await locks.acquireExistingCliLock(f.root, command))
+  held.push(await locks.acquireExistingCliLock(f.data, command))
+  return { ...f, locks, held }
+}
+
+test('one unchanged destructive admission does not rediscover the installation for every nested reader', async t => {
+  const f = await lockedProgramFixture(t, 'fixture-observation')
   const { captureDesktopRemovalJob } = await import('../desktop-removal-context.mjs')
   const context = await captureDesktopRemovalJob({ installRoot: f.root, operationId: f.operationId })
   context.assertJob()
@@ -347,9 +361,7 @@ test('one unchanged destructive admission does not rediscover the installation f
 })
 
 for (const mode of ['unchanged-rewrite', 'record-changed', 'in-place-record-changed', 'installation-changed', 'selection-changed', 'runtime-changed', 'permission-changed', 'lock-released', 'ancestor-redirected']) test('warmed removal facts still inspect every current mutation: ' + mode, async t => {
-  const f = await fixture(t), locks = await import('../cli-lock.mjs')
-  const held = [await locks.acquireExistingCliLock(f.root, 'fixture-freshness'), await locks.acquireExistingCliLock(f.data, 'fixture-freshness')]
-  t.after(() => { for (const lock of held.reverse()) locks.releaseCliLock(lock) })
+  const f = await lockedProgramFixture(t, 'fixture-freshness'), { locks, held } = f
   const { captureDesktopRemovalJob } = await import('../desktop-removal-context.mjs')
   const context = await captureDesktopRemovalJob({ installRoot: f.root, operationId: f.operationId })
   context.assertJob()
@@ -414,9 +426,7 @@ test('finite many-file removal keeps repeated installation reads bounded and pre
 })
 
 test('generic stopped facts leave the retained target selection policy with their caller', async t => {
-  const f = await fixture(t), locks = await import('../cli-lock.mjs')
-  const held = [await locks.acquireExistingCliLock(f.root, 'fixture-selection'), await locks.acquireExistingCliLock(f.data, 'fixture-selection')]
-  t.after(() => { for (const lock of held.reverse()) locks.releaseCliLock(lock) })
+  const f = await lockedProgramFixture(t, 'fixture-selection')
   const { captureDesktopRemovalFacts, captureStoppedDesktopRemoval } = await import('../desktop-removal-context.mjs')
   const facts = await captureDesktopRemovalFacts({ installRoot: f.root, operationId: f.operationId })
   facts.assertIdentity()
@@ -428,9 +438,7 @@ test('generic stopped facts leave the retained target selection policy with thei
 })
 
 for (const mode of ['no-targets', 'reappeared-program', 'reappeared-directory']) test('unused-program observation still requires an actual remaining target: ' + mode, async t => {
-  const f = await fixture(t), locks = await import('../cli-lock.mjs')
-  const held = [await locks.acquireExistingCliLock(f.root, 'fixture-empty-targets'), await locks.acquireExistingCliLock(f.data, 'fixture-empty-targets')]
-  t.after(() => { for (const lock of held.reverse()) locks.releaseCliLock(lock) })
+  const f = await lockedProgramFixture(t, 'fixture-empty-targets')
   const { removeDesktopRemovalPrograms, assertDesktopRemovalProgramsUnused } = await import('../desktop-removal-delete.mjs')
   const { readDesktopRemovalProof } = await import('../desktop-removal-proof.mjs')
   t.mock.method(identity, 'inspectProgramReferences', async () => ({ complete: true, incomplete: false, processes: [], unknown_pids: [] }))
