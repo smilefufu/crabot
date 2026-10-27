@@ -2,7 +2,7 @@
 import { app, dialog, shell } from 'electron'
 import path from 'node:path'
 import { homedir, tmpdir } from 'node:os'
-import { mkdtemp } from 'node:fs/promises'
+import { mkdtempSync } from 'node:fs'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
@@ -33,7 +33,7 @@ function failure(error: unknown) {
   return '安装尚未完成，现有文件和准备记录已保留。请核对所选位置及访问权限，再使用同一安装包继续。'
 }
 async function boot() {
-  const profile = await mkdtemp(path.join(tmpdir(), 'crabot-installer-'))
+  const profile = mkdtempSync(path.join(tmpdir(), 'crabot-installer-'))
   app.setPath('userData', profile); app.setPath('sessionData', profile)
   await app.whenReady()
   if (process.platform === 'win32') app.setAppUserModelId('com.crabot.installer')

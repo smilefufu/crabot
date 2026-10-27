@@ -11,7 +11,7 @@ const source = (await fs.readFile(new URL('../../crabot-desktop/src/installer-ma
 const prefix = source.match(/async function boot\(\) \{\n([\s\S]+?)\n  await app.whenReady\(\)/)?.[1]
 assert.ok(prefix && prefix.includes("app.setPath('sessionData', profile)"))
 const results = []
-for (const mode of ['current-cjs-import', 'current-esm-entry', 'sync-cjs-import', 'sync-esm-entry']) {
+for (const mode of ['legacy-cjs-import', 'legacy-esm-entry', 'current-cjs-import', 'current-esm-entry']) {
   const root = await fs.mkdtemp(path.join(temporary, 'Crabot 安装初始化 '))
   try {
     const home = path.join(root, 'home'), entry = mode.endsWith('esm-entry') ? 'entry.mjs' : 'entry.cjs'
@@ -19,7 +19,7 @@ for (const mode of ['current-cjs-import', 'current-esm-entry', 'sync-cjs-import'
     delete env.ELECTRON_RUN_AS_NODE
     for (const directory of [env.APPDATA, env.LOCALAPPDATA]) await fs.mkdir(directory, { recursive: true })
     await fs.writeFile(path.join(root, 'package.json'), JSON.stringify({ name: 'crabot-installer-initialization-probe', type: 'module', main: entry }))
-    const body = mode.startsWith('sync-') ? prefix.replace('await mkdtemp(', 'mkdtempSync(') : prefix
+    const body = mode.startsWith('legacy-') ? prefix.replace('mkdtempSync(', 'await mkdtemp(') : prefix
     await fs.writeFile(path.join(root, 'profile.mjs'), `import { app } from 'electron';
 import path from 'node:path'; import { tmpdir } from 'node:os';
 import { mkdtemp } from 'node:fs/promises'; import { mkdtempSync } from 'node:fs';
@@ -41,6 +41,11 @@ void boot().catch(error=>{console.error(error.code||error.name);app.exit(2)});
         fatal: output.split('\n').filter(line => /FATAL|Check failed|CHECK failed/.test(line)).map(line => line.replaceAll(root, '<fixture>')).slice(0, 4) }))
     })
     results.push(result); console.log('CRABOT_INSTALLER_PROFILE_PROBE ' + JSON.stringify(result))
+    if (mode.startsWith('current-')) {
+      assert.equal(result.code, 0, 'Current installer profile must reach native ready')
+      assert.equal(result.configured_before_ready, true)
+      assert.equal(result.reached_ready, true)
+    }
   } finally { await fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
 }
 assert.equal(results.length, 4)
