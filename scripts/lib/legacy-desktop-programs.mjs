@@ -11,7 +11,7 @@ import { acquireExistingCliLock, releaseCliLock } from './cli-lock.mjs'
 import { discoverLegacyUserInstall } from './legacy-desktop.mjs'
 import { inspectLegacyEntryFence } from './legacy-entry-fence.mjs'
 import { verifyDesktopPayload, verifyDesktopPrograms } from './desktop-payload.mjs'
-import { privateJson } from './desktop-preparation-files.mjs'
+import { privateJson, readPending } from './desktop-preparation-files.mjs'
 import { previewMigrations } from '../upgrade-lib/migrate.mjs'
 const { promises: fs, constants } = physicalFs
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b)
@@ -50,17 +50,26 @@ export async function verifyLegacyDesktopPrograms(prepared, { entryFenceId, sign
   await sourceCurrent(prepared.installation, entryFenceId)
   return record
 }
-export async function prepareLegacyDesktopPrograms({ payload, installation, signal, progress = () => {} }) {
+export async function prepareLegacyDesktopPrograms({ payload, installation, entryFenceId, signal, progress = () => {} }) {
   signal?.throwIfAborted(); progress('verifying')
-  await sourceCurrent(installation)
+  await sourceCurrent(installation, entryFenceId)
   const source = await verifyDesktopPayload(payload, { signal }), root = installation.installRoot
   const relative = path.relative(source.directory, root)
   if (!relative || relative !== '..' && !relative.startsWith('..' + path.sep) && !path.isAbsolute(relative)) fail()
   const lock = await acquireExistingCliLock(root, 'prepare-legacy-desktop-programs')
   let staging, preparationError
   try {
-    await sourceCurrent(installation)
+    await sourceCurrent(installation, entryFenceId)
     const selection = source.record.selection, coreRoot = path.join(root, 'releases', selection.core_id), guiRoot = path.join(root, 'app/releases', selection.gui_id)
+    if (entryFenceId) {
+      const { readVersionMaintenance } = await import('./version-maintenance.mjs')
+      const record = readVersionMaintenance(installation.dataRoot)
+      const pending = await readPending(root)
+      if (pending && !same(pending.selection, selection)) fail()
+      if (record && (record.schema_version !== 4 || record.legacy_source.entry_fence_id !== entryFenceId
+        || record.legacy_source.fingerprint !== installation.fingerprint || record.install_root !== root
+        || record.target_core.root !== coreRoot || record.target_core.inventory_sha256 !== selection.core_id || record.target_version !== selection.version)) fail()
+    }
     for (const relative of ['app', 'app/releases', 'releases']) {
       const directory = path.join(root, relative)
       if (await present(directory)) management.requireExistingDataRoot(directory)
@@ -81,7 +90,7 @@ export async function prepareLegacyDesktopPrograms({ payload, installation, sign
         { recursive: true, verbatimSymlinks: true, mode: constants.COPYFILE_FICLONE, filter: () => { signal?.throwIfAborted(); return true } })))
       const failed = copied.find(result => result.status === 'rejected'); if (failed) throw failed.reason
       await verifyDesktopPrograms(coreCached ? coreRoot : path.join(staging, 'core'), guiCached ? guiRoot : path.join(staging, 'gui'), source.record, { signal })
-      await sourceCurrent(installation)
+      await sourceCurrent(installation, entryFenceId)
       for (const { name, target } of programs) {
         signal?.throwIfAborted()
         if (await present(target)) fail()
@@ -95,8 +104,8 @@ export async function prepareLegacyDesktopPrograms({ payload, installation, sign
     const prepared = { installation, selection, coreRoot, guiRoot, proof: { file, sha256: digest(text) } }
     progress('previewing')
     const preview = await previewMigrations(coreRoot, installation.dataRoot)
-    await verifyLegacyDesktopPrograms(prepared, { signal })
-    progress('prepared'); signal?.throwIfAborted(); await sourceCurrent(installation)
+    await verifyLegacyDesktopPrograms(prepared, { entryFenceId, signal })
+    progress('prepared'); signal?.throwIfAborted(); await sourceCurrent(installation, entryFenceId)
     return { ...prepared, preview }
   } catch (error) { preparationError = error; throw error }
   finally {

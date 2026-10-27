@@ -10,12 +10,13 @@ import { z } from 'crabot-client'
 import { registerInstallationEntries, registerRetainedInstallationEntries, readInstallationLocator, type PreparedInstallation } from './installation-entries.js'
 import { createInstallationProgressWindow } from './installation-progress-window.js'
 import { prepareRetainedDesktopReinstall, inspectRetainedDesktopRemoval } from './retained-reinstall.js'
+import { discoverLegacyTakeover, installLegacyTakeover, type LegacyTakeoverSource } from './legacy-takeover.js'
 const directory = path.dirname(fileURLToPath(import.meta.url))
 app.setName('安装 Crabot')
 const preparedSchema = z.object({ installRoot: z.string().min(1), installation_id: z.uuid(), coreRoot: z.string().min(1), guiRoot: z.string().min(1),
   selection: z.object({ schema_version: z.literal(1), version: z.string().min(1), gui_id: z.uuid(), core_id: z.string().regex(/^[a-f0-9]{64}$/) }).strict() }).strict()
 let exitCode = 2
-const labels: Record<string, string> = { verifying: '正在核验离线安装组件…', copying: '正在安装 Crabot 和内置运行环境…', prepared: '正在核验安装结果…', restoring: '正在修复程序，保留原数据…', 'handing-off': '正在注册入口并准备恢复服务…' }
+const labels: Record<string, string> = { verifying: '正在核验离线安装组件…', copying: '正在安装 Crabot 和内置运行环境…', prepared: '正在核验安装结果…', restoring: '正在修复程序，保留原数据…', 'handing-off': '正在注册入口并准备恢复服务…', previewing: '正在核对需要转换的数据…', stopping: '正在正常停止旧版服务…', preparing_environment: '正在核验并恢复工作依赖…', switching: '正在切换旧安装，原数据保留…', converting: '正在转换已备份的数据范围…' }
 function failure(error: unknown) {
   const code = (error as { code?: string })?.code
   if (code === 'CRABOT_UPDATE_SPACE' || code === 'ENOSPC') return '磁盘空间不足。已保留原目录，请释放空间后重试，或选择其他安装位置。'
@@ -26,6 +27,8 @@ function failure(error: unknown) {
   if (code === 'CRABOT_DESKTOP_INSTALLATION' && error instanceof Error && error.message.length <= 512) return error.message
   if (code === 'CRABOT_DESKTOP_PROGRAM_REFERENCES') return '原 Crabot 程序仍在使用或尚未确认退出。请先关闭原应用和相关程序，再使用此安装包继续。'
   if (code === 'CRABOT_DESKTOP_REMOVAL') return '保留数据修复尚未完成。原数据和维护记录已保留，请在原安装位置使用对应离线安装包继续。'
+  if (code === 'CRABOT_LEGACY_UNSUPPORTED' && error instanceof Error && error.message.length <= 512) return error.message
+  if (code === 'CRABOT_MAINTENANCE_PENDING') return '旧安装接管尚未核验完成，原数据和保护记录已保留。请在原安装位置使用同一安装包继续。'
   if (code === 'CRABOT_INSTALL_REGISTRATION') return '系统应用入口与已有文件冲突。原文件已保留，请核对原安装后重试。'
   return '安装尚未完成，现有文件和准备记录已保留。请核对所选位置及访问权限，再使用同一安装包继续。'
 }
@@ -45,12 +48,20 @@ async function boot() {
   let selected = requested[0]?.slice('--install-root='.length) || locator?.install_root || path.join(homedir(), 'Crabot')
   if (!path.isAbsolute(selected) || /[\r\n\0]/.test(selected)) throw new Error('Invalid installer destination')
   selected = path.resolve(selected)
-  // Existing user data must be handled by the takeover flow, never bypassed by
-  // choosing another empty root. Its integration remains part of I3.
-  if (!locator) {
+  let legacyRequired = false, detectedLegacy: LegacyTakeoverSource | null = null
+  try { detectedLegacy = await discoverLegacyTakeover(locator?.install_root || path.join(homedir(), '.crabot')) }
+  catch { legacyRequired = true }
+  if (detectedLegacy) { legacyRequired = true; selected = detectedLegacy.installation.installRoot; preselected = true }
+  if (!locator && !detectedLegacy) {
     const { assertFreshUserInstallation } = await import(pathToFileURL(path.join(directory, 'bootstrap/scripts/lib/legacy-desktop.mjs')).href)
-    await assertFreshUserInstallation({ home: homedir(), source: process.env })
+    try { await assertFreshUserInstallation({ home: homedir(), source: process.env }) }
+    catch (error) {
+      if ((error as { code?: string }).code !== 'CRABOT_DESKTOP_TAKEOVER_REQUIRED') throw error
+      legacyRequired = true
+    }
   }
+  if (legacyRequired && !detectedLegacy) await dialog.showMessageBox({ type: 'info', title: '选择原 Crabot 安装位置',
+    message: '发现已有部署，但未能自动确认原安装位置。', detail: '请选择原 Crabot 安装文件夹。将沿用其中的数据，不会在其它空目录创建替代实例。', buttons: ['选择原位置'] })
   const welcome = preselected ? { response: 0 } : await dialog.showMessageBox({ type: 'info', title: '安装 Crabot', message: '欢迎安装 Crabot',
     detail: '已包含运行环境，无需额外安装。主要程序和数据将保存在你选择的安装文件夹；工作区可在安装后调整。', buttons: ['继续', '退出'], defaultId: 0, cancelId: 1 })
   if (welcome.response !== 0) return
@@ -59,6 +70,16 @@ async function boot() {
     preselected = false
     if (chosen.canceled || chosen.filePaths.length !== 1) return
     selected = chosen.filePaths[0]
+    let legacy: LegacyTakeoverSource | null
+    try { legacy = await discoverLegacyTakeover(selected) }
+    catch (error) {
+      await dialog.showMessageBox({ type: 'error', title: '尚未确认原安装', message: failure(error), detail: '请选择可核实的原 Crabot 安装文件夹；已有数据未作修改。', buttons: ['重新选择'] })
+      continue
+    }
+    if (legacyRequired && !legacy) {
+      await dialog.showMessageBox({ type: 'error', title: '请选择原安装位置', message: '此位置不是可确认的原 Crabot 安装。', detail: '已有部署需要原位接管，不能用空目录代替原数据。', buttons: ['重新选择'] })
+      continue
+    }
     const retainedState = await inspectRetainedDesktopRemoval(selected), removal = retainedState?.record
     if (retainedState?.canContinue) {
       const action = await dialog.showMessageBox({ type: 'question', title: '卸载尚未完成', message: '检测到上次卸载中断，数据已保留。',
@@ -72,8 +93,12 @@ async function boot() {
         return
       }
     }
-    const confirmation = await dialog.showMessageBox({ type: 'question', title: '安装位置', message: '将 Crabot 安装到所选文件夹？', detail: selected,
-      buttons: ['安装', '重新选择', '取消'], defaultId: 0, cancelId: 2 })
+    const confirmation = legacy
+      ? await dialog.showMessageBox({ type: 'question', title: '接管已有 Crabot', message: '升级这份已有安装，并保留原数据？',
+        detail: `原版本：${legacy.installation.version}\n安装位置：${legacy.installation.installRoot}\n数据位置：${legacy.installation.dataRoot}\n将正常停止旧服务，保留模型配置、历史、工作区和依赖。完成后 GUI 与原命令共用同一实例；服务仍需启动核验。`,
+        buttons: ['接管并保留数据', '重新选择', '取消'], defaultId: 0, cancelId: 2 })
+      : await dialog.showMessageBox({ type: 'question', title: '安装位置', message: '将 Crabot 安装到所选文件夹？', detail: selected,
+        buttons: ['安装', '重新选择', '取消'], defaultId: 0, cancelId: 2 })
     if (confirmation.response === 2) return
     if (confirmation.response !== 0) continue
     const abort = new AbortController(), progress = createInstallationProgressWindow(abort)
@@ -81,16 +106,22 @@ async function boot() {
     try {
       await progress.ready
       const registerEntries = (prepared: PreparedInstallation) => registerInstallationEntries(prepared, { home: homedir(), platform: process.platform, env: process.env, shell })
-      const retained = await prepareRetainedDesktopReinstall({ payload, installRoot: selected, signal: abort.signal,
-        registerEntries: (prepared, operationId) => registerRetainedInstallationEntries(prepared, { home: homedir(), platform: process.platform, env: process.env, shell, operationId }),
-        progress: phase => progress.update(labels[phase] || '正在核验安装结果…', phase !== 'handing-off') })
-      if (retained) { installed = retained; verificationPending = true }
-      else {
-        const prepared: PreparedInstallation = preparedSchema.parse(await backend.prepareDesktopInstallation({ payload, installRoot: selected, signal: abort.signal,
-          progress: (phase: string) => progress.update(labels[phase] || '正在核验安装结果…') }))
-        progress.update('正在注册系统应用入口…', false)
-        await registerEntries(prepared)
-        installed = await backend.commitDesktopInstallation(prepared)
+      if (legacy) {
+        installed = await installLegacyTakeover({ payload, source: legacy, signal: abort.signal, registerEntries,
+          progress: phase => progress.update(labels[phase] || '正在核验接管结果…', !['switching', 'converting', 'handing-off'].includes(phase)) })
+        verificationPending = true
+      } else {
+        const retained = await prepareRetainedDesktopReinstall({ payload, installRoot: selected, signal: abort.signal,
+          registerEntries: (prepared, operationId) => registerRetainedInstallationEntries(prepared, { home: homedir(), platform: process.platform, env: process.env, shell, operationId }),
+          progress: phase => progress.update(labels[phase] || '正在核验安装结果…', phase !== 'handing-off') })
+        if (retained) { installed = retained; verificationPending = true }
+        else {
+          const prepared: PreparedInstallation = preparedSchema.parse(await backend.prepareDesktopInstallation({ payload, installRoot: selected, signal: abort.signal,
+            progress: (phase: string) => progress.update(labels[phase] || '正在核验安装结果…') }))
+          progress.update('正在注册系统应用入口…', false)
+          await registerEntries(prepared)
+          installed = await backend.commitDesktopInstallation(prepared)
+        }
       }
       exitCode = 0
     } catch (error) {

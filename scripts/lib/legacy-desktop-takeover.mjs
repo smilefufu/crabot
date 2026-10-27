@@ -9,7 +9,7 @@ import installationState from './desktop-installation.cjs'
 import management from './desktop-management.cjs'
 import pythonSelection from './agent-python-selection.cjs'
 import { randomUUID } from 'node:crypto'
-import { privateJson } from './desktop-preparation-files.mjs'
+import { privateJson, readPending } from './desktop-preparation-files.mjs'
 import { acquireExistingCliLock, releaseCliLock } from './cli-lock.mjs'
 import { verifyLegacyDesktopPrograms } from './legacy-desktop-programs.mjs'
 import { fenceLegacyEntries, inspectLegacyEntryFence, enableLegacyCliForwarding } from './legacy-entry-fence.mjs'
@@ -76,7 +76,7 @@ export async function convertLegacyDesktopData({ prepared, signal, progress = ()
         if (observed.status !== 'absent') preparedEnvironment = await prepareLegacyPythonRebuild({ root, dataDir, expectedFingerprint: observed.fingerprint, signal })
       }
       record = await bindLegacyPythonMaintenance({ dataDir, id: record.id, prepared: preparedEnvironment, inspectEnvironment })
-      signal?.throwIfAborted()
+      signal?.throwIfAborted(); progress('switching')
       await markVersionMaintenanceInstalling(dataDir, record.id)
       record = readVersionMaintenance(dataDir)
     }
@@ -160,13 +160,26 @@ export async function commitLegacyDesktopInstallation({ prepared, maintenanceId,
     } else await privateJson(markerFile, marker)
     const registration = { installRoot: own.root, installation_id: own.record.installation_id,
       selection: prepared.selection, coreRoot: prepared.coreRoot, guiRoot: prepared.guiRoot }
+    // Existing program-preparation format: it binds the exact GUI for native
+    // sandbox inspection and keeps normal GUI startup blocked until OS entries
+    // finish. No fresh-data initializer or additional recovery format is used.
+    const pending = { schema_version: 1, id: maintenanceId, installation_id: own.record.installation_id,
+      selection: prepared.selection, phase: 'prepared', payload_sha256: prepared.proof.sha256 }
+    const originalPending = await readPending(own.root)
+    if (originalPending && JSON.stringify(originalPending) !== JSON.stringify(pending)) fail()
+    if (!originalPending) await privateJson(path.join(own.root, '.desktop-installing.json'), pending)
     const selector = path.join(own.root, 'current-release.json')
-    if (await present(selector) && JSON.stringify(installationState.readDesktopSelection(own.root).selection) !== JSON.stringify(prepared.selection)) fail()
+    if (await present(selector) && JSON.stringify(installationState.readDesktopPairReference(own.root).selection) !== JSON.stringify(prepared.selection)) fail()
     await enableLegacyCliForwarding(source.installRoot, entry.id)
     await registerEntries(registration)
     await verify()
     if (JSON.stringify(installationState.readDesktopInstallation(own.root).record) !== JSON.stringify(own.record)) fail()
+    if (JSON.stringify(await readPending(own.root)) !== JSON.stringify(pending)) fail()
     if (!await present(selector)) await privateJson(selector, prepared.selection)
+    await fs.unlink(path.join(own.root, '.desktop-installing.json'))
+    if (process.platform !== 'win32') {
+      const directory = await fs.open(own.root, 'r'); try { await directory.sync() } finally { await directory.close() }
+    }
     const selected = installationState.readDesktopSelection(own.root)
     if (JSON.stringify(selected.selection) !== JSON.stringify(prepared.selection)) fail()
     current()

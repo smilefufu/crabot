@@ -11,16 +11,19 @@ import { runUbuntuProcess, ubuntuDesktopEnvironment } from './ubuntu-process.js'
 import { probeUbuntuPrograms } from './ubuntu-program-probe.js'
 import { prepareRetainedDesktopReinstall, inspectRetainedDesktopRemoval } from './retained-reinstall.js'
 import { runUbuntuInstallerRemoval } from './ubuntu-installer-removal.js'
+import { discoverLegacyTakeover, installLegacyTakeover } from './legacy-takeover.js'
 const directory = path.dirname(fileURLToPath(import.meta.url)), bundle = path.resolve(directory, '../..')
 const abort = new AbortController()
 const emit = (type: string, fields: Record<string, unknown> = {}) => process.stdout.write(JSON.stringify({ type, ...fields }) + '\n')
 let authorization: { resolve: () => void; reject: (error: Error) => void } | undefined
 let retainedChoice: { resolve: (choice: 'repair' | 'remove') => void; reject: (error: Error) => void } | undefined
+let legacyChoice: { resolve: () => void; reject: (error: Error) => void } | undefined
 let continuingRemoval = false
-const rejectPending = (error: Error) => { authorization?.reject(error); authorization = undefined; retainedChoice?.reject(error); retainedChoice = undefined }
+const rejectPending = (error: Error) => { authorization?.reject(error); authorization = undefined; retainedChoice?.reject(error); retainedChoice = undefined; legacyChoice?.reject(error); legacyChoice = undefined }
 const input = createInterface({ input: process.stdin, crlfDelay: Infinity })
 input.on('line', line => {
   if (line === '{"action":"cancel"}') { if (!continuingRemoval) abort.abort(); rejectPending(new Error('Cancelled')); return }
+  if (legacyChoice && line === '{"action":"takeover"}') { legacyChoice.resolve(); legacyChoice = undefined; return }
   if (retainedChoice && (line === '{"action":"repair"}' || line === '{"action":"continue_removal"}')) {
     retainedChoice.resolve(line === '{"action":"repair"}' ? 'repair' : 'remove'); retainedChoice = undefined; return
   }
@@ -45,11 +48,22 @@ async function main() {
   const { detectMode } = await import(pathToFileURL(path.join(directory, 'bootstrap/scripts/lib/mode.mjs')).href)
   if (detectMode() === 'system') throw Object.assign(new Error('System deployment'), { code: 'CRABOT_INSTALL_SYSTEM_MODE' })
   const locator = await readInstallationLocator(homedir(), 'linux', process.env)
-  if (!locator) {
+  const payload = path.join(bundle, 'offline')
+  let installRoot = path.resolve(process.argv[2]), legacy = await discoverLegacyTakeover(installRoot)
+  const originalRoot = locator?.install_root || path.join(homedir(), '.crabot')
+  if (!legacy && installRoot !== originalRoot) legacy = await discoverLegacyTakeover(originalRoot)
+  if (!locator && !legacy) {
     const { assertFreshUserInstallation } = await import(pathToFileURL(path.join(directory, 'bootstrap/scripts/lib/legacy-desktop.mjs')).href)
     await assertFreshUserInstallation({ home: homedir(), source: process.env })
   }
-  const payload = path.join(bundle, 'offline'), installRoot = path.resolve(process.argv[2])
+  if (legacy) {
+    installRoot = legacy.installation.installRoot
+    await new Promise<void>((resolve, reject) => {
+      legacyChoice = { resolve, reject }
+      emit('legacy_takeover_required', { install_root: installRoot, version: legacy!.installation.version })
+    })
+    abort.signal.throwIfAborted()
+  }
   const retainedState = await inspectRetainedDesktopRemoval(installRoot), removal = retainedState?.record
   if (retainedState?.canContinue) {
     abort.signal.throwIfAborted()
@@ -81,6 +95,16 @@ async function main() {
     emit('progress', { phase: 'registering' })
     await registerInstallationEntries(prepared, { home: homedir(), platform: 'linux', env: process.env,
       shell: { readShortcutLink: () => { throw new Error('Windows only') }, writeShortcutLink: () => false } })
+  }
+  if (legacy) {
+    const installed = await installLegacyTakeover({ payload, source: legacy, signal: abort.signal,
+      progress: phase => emit('progress', { phase }), registerEntries: async prepared => {
+        await inspectPrepared(prepared)
+        await ensureUbuntuProgramsReady(readiness(prepared))
+        abort.signal.throwIfAborted()
+        await register(prepared)
+      } })
+    emit('complete', { executable: installed.executable, verification_pending: true }); return
   }
   const retained = await prepareRetainedDesktopReinstall({ payload, installRoot, signal: abort.signal,
     progress: phase => emit('progress', { phase }), registerEntries: async (prepared, operationId) => {

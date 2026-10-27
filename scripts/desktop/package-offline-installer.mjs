@@ -31,7 +31,7 @@ const packageFile = path.join(appDir, 'package.json'), pkg = JSON.parse(await fs
 await fs.writeFile(packageFile, JSON.stringify({ ...pkg, name: 'crabot-installer', main: 'dist/installer-main.js', productName: 'Crabot Installer' }, null, 2) + '\n')
 // Only tracked helper code is copied. No local node_modules, tests, .env, data or
 // source paths are consulted by the shipped installer after this build step.
-const helpers = execFileSync('git', ['ls-files', '-z', '--', 'scripts/lib', 'scripts/upgrade-lib', 'scripts/desktop/legacy-releases.json'], { cwd: root, encoding: 'utf8' }).split('\0').filter(file => file && /\.(?:mjs|cjs|json)$/.test(file) && !file.split('/').some(part => ['node_modules', '__tests__', 'fixtures', 'tests'].includes(part)))
+const helpers = execFileSync('git', ['ls-files', '-z', '--', 'scripts/lib', 'scripts/upgrade-lib', 'scripts/desktop/legacy-releases.json', 'scripts/desktop/legacy-python-bootstrap.json'], { cwd: root, encoding: 'utf8' }).split('\0').filter(file => file && /\.(?:mjs|cjs|json)$/.test(file) && !file.split('/').some(part => ['node_modules', '__tests__', 'fixtures', 'tests'].includes(part)))
 for (const file of helpers) {
   const target = path.join(appDir, 'dist/bootstrap', file)
   await fs.mkdir(path.dirname(target), { recursive: true }); await fs.copyFile(path.join(root, file), target)

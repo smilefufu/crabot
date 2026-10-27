@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { promises as fs, constants, writeFileSync } from 'node:fs'
+import { promises as fs, constants, writeFileSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 import { tmpdir } from 'node:os'
 import { randomUUID, createHash } from 'node:crypto'
@@ -14,7 +14,7 @@ import installation from '../desktop-installation.cjs'
 import { writeCoreRelease, verifyCoreRelease } from '../core-release.mjs'
 import { sealDesktopPayload, verifyDesktopPayload, prepareDesktopInstallation, commitDesktopInstallation } from '../desktop-payload.mjs'
 const windows = process.platform === 'win32', launcher = windows ? 'crabot.exe' : 'crabot'
-async function fixture(t, { version = '1.2.3', schema, functional = false, executableNode = true, shared = false, launcherSuffix = '', conversionFailure = false } = {}) {
+async function fixture(t, { version = '1.2.3', schema, functional = false, executableNode = true, shared = false, launcherSuffix = '', conversionFailure = false, realPython = false } = {}) {
   const parent = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'Crabot 离线安装 ')))
   t.after(() => fs.rm(parent, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }))
   const payload = path.join(parent, '离线包'), core = path.join(payload, 'core'), gui = path.join(payload, 'gui'), target = path.join(parent, '选择的 目录')
@@ -57,6 +57,20 @@ async function fixture(t, { version = '1.2.3', schema, functional = false, execu
       executables: Object.fromEntries(['node', 'python', 'uv', 'bash', 'git', 'rg'].map(name => [name, relativeNode])),
       path_entries: [directory], python_home: directory, memory_packages: directory, seed_wheels: [],
       files: { [relativeNode]: { size: (await fs.stat(node)).size, sha256: createHash('sha256').update(await fs.readFile(node)).digest('hex') } } }))
+    if (realPython) {
+      const cached = JSON.parse(await fs.readFile(new URL('../../../product-runtime.json', import.meta.url), 'utf8'))
+      const repository = fileURLToPath(new URL('../../../', import.meta.url)), originalHome = path.join(repository, cached.python_home)
+      const pythonHome = path.join(core, '.product-runtime/python')
+      await fs.cp(originalHome, pythonHome, { recursive: true, verbatimSymlinks: true, mode: constants.COPYFILE_FICLONE })
+      const python = path.join(pythonHome, path.relative(originalHome, await fs.realpath(path.join(repository, cached.executables.python))))
+      const manifestFile = path.join(core, 'product-runtime.json'), manifest = JSON.parse(await fs.readFile(manifestFile, 'utf8'))
+      const relativePython = path.relative(core, python).split(path.sep).join('/')
+      manifest.executables.python = relativePython; manifest.python_home = '.product-runtime/python'
+      manifest.versions.python = cached.versions.python
+      manifest.files[relativePython] = { size: (await fs.stat(python)).size, sha256: createHash('sha256').update(await fs.readFile(python)).digest('hex') }
+      await fs.writeFile(manifestFile, JSON.stringify(manifest))
+      await fs.copyFile(new URL('../../desktop/inspect-legacy-python.py', import.meta.url), path.join(core, 'scripts/desktop/inspect-legacy-python.py'))
+    }
     // Keep the real parser self-contained in this minimal Node-only Core.
     const require = createRequire(import.meta.url)
     const tool = createRequire(new URL('../../../crabot-desktop/package.json', import.meta.url))
@@ -2058,4 +2072,39 @@ for (const changed of ['source', 'gui-before-health', 'gui-after-health', 'old-r
   const { readVersionMaintenance } = await import('../version-maintenance.mjs')
   assert.equal(readVersionMaintenance(f.data).phase, 'verifying')
   assert.equal(await fs.readFile(path.join(f.data, 'fixture/executions'), 'utf8'), 'once\n')
+})
+
+
+const cachedPythonAvailable = (() => { try { const value = JSON.parse(readFileSync(new URL('../../../product-runtime.json', import.meta.url), 'utf8')); return Boolean(value.executables?.python && value.python_home) } catch { return false } })()
+for (const registrationFails of [false, true]) test('legacy installer Node handoff uses actual bundled Python and waits for registration/exit; registration failure=' + registrationFails, { skip: !cachedPythonAvailable }, async t => {
+  const f = await legacyProgramFixture(t, { functional: true, realPython: true }); await fs.unlink(path.join(f.data, 'mm.pid'))
+  const { prepareLegacyDesktopPrograms } = await import('../legacy-desktop-programs.mjs')
+  const { runPreparedLegacyDesktopTakeover } = await import('../legacy-desktop-handoff.mjs')
+  const prepared = await prepareLegacyDesktopPrograms({ payload: f.payload, installation: f.legacy })
+  let registered = 0
+  const run = () => runPreparedLegacyDesktopTakeover({ prepared, registerEntries: async value => {
+    assert.equal(value.installRoot, f.target); assert.equal(value.coreRoot, prepared.coreRoot)
+    registered++
+    const pending = JSON.parse(await fs.readFile(path.join(f.target, '.desktop-installing.json'), 'utf8'))
+    assert.equal(pending.phase, 'prepared'); assert.deepEqual(pending.selection, f.selection)
+    assert.throws(() => installation.readDesktopSelection(f.target), { code: 'CRABOT_DESKTOP_INSTALLATION' })
+    if (registrationFails && registered === 1) throw new Error('controlled registration failure')
+  } })
+  if (registrationFails) {
+    await assert.rejects(run())
+    await assert.rejects(fs.stat(path.join(f.target, 'current-release.json')), { code: 'ENOENT' })
+    const { discoverLegacyDesktopTakeover } = await import('../legacy-desktop-discovery.mjs')
+    const source = await discoverLegacyDesktopTakeover({ root: f.target })
+    assert.deepEqual(source.installation, f.legacy); assert.equal(typeof source.entryFenceId, 'string')
+    const again = await prepareLegacyDesktopPrograms({ payload: f.payload, ...source })
+    assert.deepEqual(again.selection, prepared.selection); assert.deepEqual(again.proof, prepared.proof)
+  }
+  const result = await run()
+  assert.equal(result.verification_pending, true); assert.equal(result.health_verified, false); assert.equal(result.dataDir, f.data)
+  assert.equal(registered, registrationFails ? 2 : 1)
+  await assert.rejects(fs.stat(path.join(f.target, '.desktop-installing.json')), { code: 'ENOENT' })
+  assert.deepEqual(installation.readDesktopSelection(f.target).selection, f.selection)
+  assert.equal(await fs.readFile(path.join(f.data, 'fixture/executions'), 'utf8'), 'once\n')
+  const { readVersionMaintenance } = await import('../version-maintenance.mjs')
+  assert.equal(readVersionMaintenance(f.data).phase, 'verifying')
 })

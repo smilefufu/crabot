@@ -178,3 +178,36 @@ test('offline installer discovery loads outside the checkout without Core or old
   assert.deepEqual(await fs.readdir(f.dataDir), [])
   await assert.rejects(fs.lstat(path.join(bootstrap, 'crabot-core')), { code: 'ENOENT' })
 })
+
+test('desktop takeover discovery leaves clean locations untouched and recognizes the original root', async t => {
+  const f = await defaultFixture(t)
+  const { discoverLegacyDesktopTakeover } = await import('../legacy-desktop-discovery.mjs')
+  assert.equal(await discoverLegacyDesktopTakeover({ root: f.root, source: f.source, etcDir: f.etcDir }), null)
+  await assert.rejects(fs.stat(f.root), { code: 'ENOENT' })
+  await fs.mkdir(f.dataDir, { recursive: true }); await materializeLegacyRelease(f.root)
+  const result = await discoverLegacyDesktopTakeover({ root: f.root, source: f.source, etcDir: f.etcDir })
+  assert.equal(result.installation.installRoot, await fs.realpath(f.root))
+  assert.equal(result.entryFenceId, undefined)
+  assert.deepEqual(await fs.readdir(f.dataDir), [])
+})
+
+test('desktop takeover discovery reads a fenced source without pretending it is a fresh install', async t => {
+  const f = await defaultFixture(t); await fs.mkdir(f.dataDir, { recursive: true }); await materializeLegacyRelease(f.root)
+  const { discoverLegacyDesktopTakeover } = await import('../legacy-desktop-discovery.mjs')
+  const { fenceLegacyEntries } = await import('../legacy-entry-fence.mjs')
+  const original = await discoverLegacyUserInstall(f), entry = await fenceLegacyEntries(original)
+  const result = await discoverLegacyDesktopTakeover({ root: f.root, source: f.source, etcDir: f.etcDir })
+  assert.deepEqual(result.installation, original); assert.equal(result.entryFenceId, entry.id)
+  assert.deepEqual(await fs.readdir(f.dataDir), [])
+})
+
+
+test('a cancelled and restored old takeover can be discovered again without changing its data', async t => {
+  const f = await defaultFixture(t); await fs.mkdir(f.dataDir, { recursive: true }); await materializeLegacyRelease(f.root)
+  const { discoverLegacyDesktopTakeover } = await import('../legacy-desktop-discovery.mjs')
+  const { fenceLegacyEntries, restoreLegacyEntries } = await import('../legacy-entry-fence.mjs')
+  const original = await discoverLegacyUserInstall(f)
+  await fenceLegacyEntries(original); await restoreLegacyEntries(f.root)
+  assert.deepEqual(await discoverLegacyDesktopTakeover({ root: f.root, source: f.source, etcDir: f.etcDir }), { installation: original })
+  assert.deepEqual(await fs.readdir(f.dataDir), [])
+})

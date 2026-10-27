@@ -18,7 +18,7 @@ typedef struct {
   GSubprocess *backend, *authorization;
   GDataInputStream *output;
   char *bundle, *selected, *executable;
-  gboolean busy, failed, complete, cancelling, finalizing, smoke, authorization_pending, retained_choice_pending, removing, removed;
+  gboolean busy, failed, complete, cancelling, finalizing, smoke, authorization_pending, retained_choice_pending, legacy_choice_pending, removing, removed;
 } Installer;
 static void status(Installer *s, const char *text) { gtk_label_set_text(s->status, text); }
 static void busy(Installer *s, gboolean value) {
@@ -32,7 +32,7 @@ static void busy(Installer *s, gboolean value) {
 }
 static void finish_if_idle(Installer *s) {
   // A late permission result must never reach a later installation attempt.
-  if (s->backend || s->authorization_pending || s->authorization || s->retained_choice_pending) return;
+  if (s->backend || s->authorization_pending || s->authorization || s->retained_choice_pending || s->legacy_choice_pending) return;
   s->cancelling = FALSE; busy(s, FALSE); gtk_widget_set_visible(s->open, s->complete && !s->removed);
   if (!s->complete) gtk_button_set_label(GTK_BUTTON(s->install), s->removing ? "重试" : "重试安装");
 }
@@ -51,6 +51,13 @@ static void retained_chosen(GObject *source, GAsyncResult *result, gpointer data
     if (s->removing) { s->finalizing = TRUE; gtk_widget_set_sensitive(s->cancel, FALSE); gtk_window_set_title(s->window, "卸载 Crabot"); }
     action(s, choice == 0 ? "repair" : choice == 1 ? "continue_removal" : "cancel");
   }
+  finish_if_idle(s);
+}
+static void legacy_chosen(GObject *source, GAsyncResult *result, gpointer data) {
+  Installer *s = data;
+  int choice = gtk_alert_dialog_choose_finish(GTK_ALERT_DIALOG(source), result, NULL);
+  s->legacy_choice_pending = FALSE;
+  if (s->backend && !s->cancelling) action(s, choice == 1 ? "takeover" : "cancel");
   finish_if_idle(s);
 }
 static GSubprocessLauncher *launcher(GSubprocessFlags flags) {
@@ -96,7 +103,8 @@ static const char *failure_text(const char *code) {
   if (!g_strcmp0(code, "CRABOT_CORE_INTEGRITY")) return "离线安装包不完整或已改变，请重新获取完整安装包。";
   if (!g_strcmp0(code, "CRABOT_INSTALL_FILESYSTEM")) return "请选择支持私有文件权限的本机持久卷；当前文件夹不适合安装。";
   if (!g_strcmp0(code, "CRABOT_INSTALL_SYSTEM_MODE")) return "此机器由管理员统一部署，请通过浏览器或渠道使用 Crabot。现有实例未改变。";
-  if (!g_strcmp0(code, "CRABOT_DESKTOP_TAKEOVER_REQUIRED")) return "检测到已有 Crabot 部署，需要沿用原位置接管。原数据保留，未创建新实例。";
+  if (!g_strcmp0(code, "CRABOT_DESKTOP_TAKEOVER_REQUIRED") || !g_strcmp0(code, "CRABOT_LEGACY_UNSUPPORTED")) return "未能核实原安装，请重新选择原 Crabot 文件夹。已有数据保留，未创建新实例。";
+  if (!g_strcmp0(code, "CRABOT_MAINTENANCE_PENDING")) return "旧安装接管尚未核验完成，原数据与保护记录已保留。请使用同一安装包在原位置继续。";
   if (!g_strcmp0(code, "CRABOT_INSTALL_REGISTRATION")) return "系统应用入口与已有文件冲突。原文件已保留，请核对原安装后重试。";
   if (!g_strcmp0(code, "CRABOT_DESKTOP_PROGRAM_REFERENCES")) return "原程序仍被使用或占用尚未核实，请先关闭原 Crabot 和相关程序后继续；原数据已保留。";
   if (!g_strcmp0(code, "CRABOT_DESKTOP_REMOVAL")) return "保留数据修复尚未完成，原数据和维护保护已保留。请使用对应离线包在原位置继续。";
@@ -113,6 +121,11 @@ static const char *progress_text(const char *phase) {
   if (!g_strcmp0(phase, "restoring")) return "正在修复程序，原数据保持不变…";
   if (!g_strcmp0(phase, "handing-off")) return "正在准备恢复服务，维护保护仍然有效…";
   if (!g_strcmp0(phase, "sandbox")) return "正在检查应用、内置浏览器的真实沙箱与网络…";
+  if (!g_strcmp0(phase, "previewing")) return "正在核对需要转换的数据…";
+  if (!g_strcmp0(phase, "stopping")) return "正在正常停止旧版服务…";
+  if (!g_strcmp0(phase, "preparing_environment")) return "正在核验并恢复工作依赖…";
+  if (!g_strcmp0(phase, "switching")) return "正在切换旧安装，原数据保留…";
+  if (!g_strcmp0(phase, "converting")) return "正在转换已备份的数据范围…";
   if (!g_strcmp0(phase, "registering")) return "正在登记系统应用入口…";
   return NULL;
 }
@@ -126,8 +139,21 @@ static gboolean frame(Installer *s, const char *line, gsize size) {
   if (!json_parser_load_from_data(parser, line, (gssize)size, NULL)) return FALSE;
   JsonNode *node = json_parser_get_root(parser); if (!node || !JSON_NODE_HOLDS_OBJECT(node)) return FALSE;
   JsonObject *object = json_node_get_object(node); const char *type = field(object, "type");
-  if (!g_strcmp0(type, "retained_choice_required")) {
-    if (s->retained_choice_pending || s->authorization_pending || s->authorization || s->complete) return FALSE;
+  if (!g_strcmp0(type, "legacy_takeover_required")) {
+    const char *root = field(object, "install_root"), *version = field(object, "version");
+    if (s->legacy_choice_pending || s->retained_choice_pending || s->authorization_pending || s->authorization || s->complete
+      || !root || !g_path_is_absolute(root) || strlen(root) >= 3000 || strpbrk(root, "\r\n") || !version || strlen(version) > 128) return FALSE;
+    if (s->cancelling) { action(s, "cancel"); return TRUE; }
+    g_clear_pointer(&s->selected, g_free); s->selected = g_strdup(root); gtk_editable_set_text(GTK_EDITABLE(s->destination), root);
+    s->legacy_choice_pending = TRUE;
+    GtkAlertDialog *dialog = gtk_alert_dialog_new("升级已有 Crabot，并保留原数据？");
+    g_autofree char *detail = g_strdup_printf("原版本：%s\n安装位置：%s\n将正常停止旧服务，保留模型配置、历史、工作区和依赖。GUI 与原命令共用同一实例，完成后仍需启动核验。", version, root);
+    gtk_alert_dialog_set_detail(dialog, detail);
+    const char *buttons[] = { "取消", "接管并保留数据", NULL };
+    gtk_alert_dialog_set_buttons(dialog, buttons); gtk_alert_dialog_set_cancel_button(dialog, 0); gtk_alert_dialog_set_default_button(dialog, 1);
+    gtk_alert_dialog_choose(dialog, s->window, NULL, legacy_chosen, s); g_object_unref(dialog);
+  } else if (!g_strcmp0(type, "retained_choice_required")) {
+    if (s->legacy_choice_pending || s->retained_choice_pending || s->authorization_pending || s->authorization || s->complete) return FALSE;
     if (s->cancelling) { action(s, "cancel"); return TRUE; }
     s->retained_choice_pending = TRUE;
     GtkAlertDialog *dialog = gtk_alert_dialog_new("检测到上次卸载中断，数据已保留");
@@ -146,7 +172,7 @@ static gboolean frame(Installer *s, const char *line, gsize size) {
   } else if (!g_strcmp0(type, "progress")) {
     const char *text = progress_text(field(object, "phase")); if (!text || s->complete) return FALSE;
     if (!s->cancelling) status(s, text);
-    if (!g_strcmp0(field(object, "phase"), "registering") || !g_strcmp0(field(object, "phase"), "handing-off")) { s->finalizing = TRUE; gtk_widget_set_sensitive(s->cancel, FALSE); }
+    if (!g_strcmp0(field(object, "phase"), "registering") || !g_strcmp0(field(object, "phase"), "handing-off") || !g_strcmp0(field(object, "phase"), "switching") || !g_strcmp0(field(object, "phase"), "converting")) { s->finalizing = TRUE; gtk_widget_set_sensitive(s->cancel, FALSE); }
   } else if (!g_strcmp0(type, "authorization_required")) {
     if (s->authorization_pending || s->authorization || s->complete || s->cancelling) { action(s, "denied"); return TRUE; }
     s->authorization_pending = TRUE;
@@ -242,7 +268,11 @@ static void activate(GtkApplication *app, gpointer data) {
   GtkWidget *heading = gtk_label_new("欢迎安装 Crabot"); gtk_widget_add_css_class(heading, "title-1"); gtk_label_set_xalign(GTK_LABEL(heading), 0); gtk_box_append(GTK_BOX(box), heading);
   GtkWidget *detail = gtk_label_new("已包含 Node、Python 和浏览器，无需额外安装。\n程序、运行环境与数据存入所选文件夹；工作区可在安装后调整。");
   gtk_label_set_wrap(GTK_LABEL(detail), TRUE); gtk_label_set_xalign(GTK_LABEL(detail), 0); gtk_box_append(GTK_BOX(box), detail);
-  s->destination = GTK_ENTRY(gtk_entry_new()); g_autofree char *initial = g_build_filename(g_get_home_dir(), "Crabot", NULL);
+  s->destination = GTK_ENTRY(gtk_entry_new());
+  g_autofree char *legacy_root = g_build_filename(g_get_home_dir(), ".crabot", NULL);
+  g_autofree char *legacy_version = g_build_filename(legacy_root, "VERSION", NULL), *legacy_fence = g_build_filename(legacy_root, ".desktop-takeover", NULL);
+  g_autofree char *initial = g_file_test(legacy_version, G_FILE_TEST_IS_REGULAR) || g_file_test(legacy_fence, G_FILE_TEST_IS_DIR)
+    ? g_strdup(legacy_root) : g_build_filename(g_get_home_dir(), "Crabot", NULL);
   gtk_editable_set_text(GTK_EDITABLE(s->destination), initial); gtk_box_append(GTK_BOX(box), GTK_WIDGET(s->destination));
   s->choose = gtk_button_new_with_label("选择安装文件夹…"); gtk_widget_set_halign(s->choose, GTK_ALIGN_START); gtk_box_append(GTK_BOX(box), s->choose);
   s->status = GTK_LABEL(gtk_label_new("确认位置后点击安装。取消选址不会停止任何 Crabot 实例。")); gtk_label_set_wrap(s->status, TRUE); gtk_label_set_xalign(s->status, 0); gtk_widget_set_vexpand(GTK_WIDGET(s->status), TRUE); gtk_box_append(GTK_BOX(box), GTK_WIDGET(s->status));

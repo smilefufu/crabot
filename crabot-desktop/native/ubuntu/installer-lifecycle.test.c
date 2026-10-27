@@ -129,10 +129,54 @@ static void retained_removal_choices(void) {
     g_object_unref(s.choose); g_object_unref(s.install); g_object_unref(s.cancel); g_object_unref(s.open);
   }
 }
+static void legacy_takeover_choices(void) {
+  const char *labels[] = { "取消", "接管并保留数据" };
+  const char *actions[] = { "cancel", "takeover" };
+  for (int choice = 0; choice < 2; choice++) {
+    Installer s = {0};
+    s.window = GTK_WINDOW(g_object_ref_sink(gtk_window_new()));
+    s.destination = GTK_ENTRY(g_object_ref_sink(gtk_entry_new())); s.status = GTK_LABEL(g_object_ref_sink(gtk_label_new("")));
+    s.spinner = GTK_SPINNER(g_object_ref_sink(gtk_spinner_new())); s.choose = g_object_ref_sink(gtk_button_new());
+    s.install = g_object_ref_sink(gtk_button_new()); s.cancel = g_object_ref_sink(gtk_button_new()); s.open = g_object_ref_sink(gtk_button_new());
+    s.backend = g_subprocess_new(G_SUBPROCESS_FLAGS_STDIN_PIPE | G_SUBPROCESS_FLAGS_STDOUT_PIPE, NULL, "/bin/cat", NULL);
+    g_assert_nonnull(s.backend); busy(&s, TRUE);
+    const char *invalid = "{\"type\":\"legacy_takeover_required\",\"install_root\":\"relative\",\"version\":\"v2026.10.15.1\"}";
+    g_assert_false(frame(&s, invalid, strlen(invalid)));
+    const char *request = "{\"type\":\"legacy_takeover_required\",\"install_root\":\"/tmp/Crabot original\",\"version\":\"v2026.10.15.1\"}";
+    g_assert_true(frame(&s, request, strlen(request))); g_assert_true(s.legacy_choice_pending);
+    g_assert_false(frame(&s, request, strlen(request)));
+    GSubprocess *active = s.backend; s.backend = NULL; finish_if_idle(&s); g_assert_true(s.busy); s.backend = active;
+    GtkWidget *button = NULL; gint64 deadline = g_get_monotonic_time() + 5 * G_TIME_SPAN_SECOND;
+    while (!button && g_get_monotonic_time() < deadline) {
+      while (g_main_context_iteration(NULL, FALSE)) {}
+      GListModel *windows = gtk_window_get_toplevels();
+      for (guint i = 0; i < g_list_model_get_n_items(windows) && !button; i++) {
+        g_autoptr(GtkWindow) window = g_list_model_get_item(windows, i);
+        button = button_named(GTK_WIDGET(window), labels[choice]);
+      }
+      if (!button) g_usleep(1000);
+    }
+    g_assert_nonnull(button); g_signal_emit_by_name(button, "clicked");
+    while (s.legacy_choice_pending && g_get_monotonic_time() < deadline) { g_main_context_iteration(NULL, FALSE); g_usleep(1000); }
+    g_assert_false(s.legacy_choice_pending);
+    g_assert_cmpstr(s.selected, ==, "/tmp/Crabot original");
+    g_assert_cmpstr(gtk_editable_get_text(GTK_EDITABLE(s.destination)), ==, s.selected);
+    g_autoptr(GDataInputStream) output = g_data_input_stream_new(g_subprocess_get_stdout_pipe(s.backend));
+    g_autofree char *received = g_data_input_stream_read_line(output, NULL, NULL, NULL);
+    g_autofree char *expected = g_strdup_printf("{\"action\":\"%s\"}", actions[choice]);
+    g_assert_cmpstr(received, ==, expected); g_assert_false(s.removing);
+    g_assert_true(g_output_stream_close(g_subprocess_get_stdin_pipe(s.backend), NULL, NULL));
+    g_assert_true(g_subprocess_wait_check(s.backend, NULL, NULL)); g_clear_object(&s.backend); finish_if_idle(&s);
+    gtk_window_destroy(s.window); g_object_unref(s.window); g_free(s.selected);
+    g_object_unref(s.destination); g_object_unref(s.status); g_object_unref(s.spinner);
+    g_object_unref(s.choose); g_object_unref(s.install); g_object_unref(s.cancel); g_object_unref(s.open);
+  }
+}
 int main(int argc, char **argv) {
   g_test_init(&argc, &argv, NULL); gtk_init();
   g_test_add_func("/installer/pending-authorization-blocks-retry", pending_authorization_blocks_retry);
   g_test_add_func("/installer/retained-completion-pending-health", retained_completion_is_not_service_health);
   g_test_add_func("/installer/retained-removal-choices", retained_removal_choices);
+  g_test_add_func("/installer/legacy-takeover-choices", legacy_takeover_choices);
   return g_test_run();
 }
