@@ -73,3 +73,7 @@ scrapling-runtime.json.*.tmp
 .computer-use-runtime/
 
 /crabot-memory/prepared-environment.json
+
+# Native host build outputs and pinned compiler headers
+/.desktop-build/
+/crabot-native/build/

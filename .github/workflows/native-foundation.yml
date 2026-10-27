@@ -1,0 +1,87 @@
+name: Native foundation
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ['feat/desktop-native-foundation']
+    paths:
+      - 'crabot-native/**'
+      - 'scripts/build-native.mjs'
+      - 'scripts/lib/product-prepare.mjs'
+      - 'scripts/lib/product-runtime.cjs'
+      - 'scripts/lib/process-identity.cjs'
+      - 'scripts/lib/known-process-exit.cjs'
+      - 'scripts/lib/workspace-file-metadata.mjs'
+      - 'scripts/lib/workspace-windows-metadata.mjs'
+      - 'scripts/lib/__tests__/workspace-windows-metadata.test.mjs'
+      - 'scripts/lib/__tests__/*-move.test.mjs'
+      - 'scripts/lib/__tests__/process-identity.test.mjs'
+      - 'scripts/lib/__tests__/known-process-*.test.mjs'
+      - 'scripts/lib/__tests__/cli-launcher.test.mjs'
+      - 'scripts/lib/__tests__/product-runtime.test.mjs'
+      - 'scripts/lib/__tests__/private-file-paths.test.mjs'
+      - 'scripts/lib/__tests__/program-reference*'
+      - 'scripts/lib/__tests__/directory-pin.test.mjs'
+      - 'scripts/lib/__tests__/fixtures/program-reference*'
+      - '.github/workflows/native-foundation.yml'
+  pull_request:
+    paths:
+      - 'crabot-native/**'
+      - 'scripts/build-native.mjs'
+      - 'scripts/lib/product-prepare.mjs'
+      - 'scripts/lib/product-runtime.cjs'
+      - 'scripts/lib/process-identity.cjs'
+      - 'scripts/lib/known-process-exit.cjs'
+      - 'scripts/lib/workspace-file-metadata.mjs'
+      - 'scripts/lib/workspace-windows-metadata.mjs'
+      - 'scripts/lib/__tests__/workspace-windows-metadata.test.mjs'
+      - 'scripts/lib/__tests__/*-move.test.mjs'
+      - 'scripts/lib/__tests__/process-identity.test.mjs'
+      - 'scripts/lib/__tests__/known-process-*.test.mjs'
+      - 'scripts/lib/__tests__/cli-launcher.test.mjs'
+      - 'scripts/lib/__tests__/product-runtime.test.mjs'
+      - 'scripts/lib/__tests__/private-file-paths.test.mjs'
+      - 'scripts/lib/__tests__/program-reference*'
+      - 'scripts/lib/__tests__/directory-pin.test.mjs'
+      - 'scripts/lib/__tests__/fixtures/program-reference*'
+      - '.github/workflows/native-foundation.yml'
+
+permissions:
+  contents: read
+concurrency:
+  group: native-foundation-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  native-boundary:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, macos-15-intel, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.3'
+      - name: Compile this complete native boundary
+        shell: bash
+        run: node scripts/build-native.mjs
+      - name: Run native behavior and baseline downloader regressions
+        shell: bash
+        run: >-
+          node --test
+          scripts/lib/__tests__/process-identity.test.mjs
+          scripts/lib/__tests__/known-process-exit.test.mjs
+          scripts/lib/__tests__/known-process-termination.test.mjs
+          scripts/lib/__tests__/product-runtime.test.mjs
+          scripts/lib/__tests__/cli-launcher.test.mjs
+          scripts/lib/__tests__/private-file-paths.test.mjs
+          scripts/lib/__tests__/program-references.test.mjs
+          scripts/lib/__tests__/directory-move.test.mjs
+          scripts/lib/__tests__/file-move.test.mjs
+          scripts/lib/__tests__/directory-pin.test.mjs
+          scripts/lib/__tests__/workspace-windows-metadata.test.mjs
+          scripts/lib/__tests__/install-network.test.mjs
