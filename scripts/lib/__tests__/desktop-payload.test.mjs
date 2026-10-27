@@ -1783,6 +1783,10 @@ for (const allowed of [false, true, 'higher', 'all-programs']) test('retained pr
     await assert.rejects(prepareRetainedProductReinstall({ installRoot: f.target, payload: f.payload }), /isolated CI user/)
     await assert.rejects(fs.lstat(path.join(f.target, '.desktop-removal.json')), { code: 'ENOENT' })
   } else {
+    // These payload files never execute. Native reference detection and the
+    // real product acceptance retain actual OS observations in their own suites.
+    t.mock.method(identity, 'inspectProgramReferences', async () => ({ complete: true, incomplete: false,
+      processes: [], unknown_pids: [], unknown_details: [] }))
     const incoming = allowed === 'higher' ? await fixture(t, { version: '1.2.4', schema: 'v2', functional: true }) : f
     const result = await prepareRetainedProductReinstall({ installRoot: f.target, payload: incoming.payload, removeAllPrograms: allowed === 'all-programs' })
     assert.deepEqual(result.selection, incoming.selection)
