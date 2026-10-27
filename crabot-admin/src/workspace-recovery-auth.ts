@@ -18,7 +18,7 @@ interface Options {
 
 /** Read the current Admin's own durable root; a caller cannot choose the parent PID. */
 export function observeCurrentWorkspaceAdmin(options: Options) {
-  const data = management.requirePrivateDataRoot(options.dataDir), runtime = { ...options.runtimeIdentity() }, self = native.inspectProcess(process.pid)
+  const data = management.requireExistingDataRoot(options.dataDir), runtime = { ...options.runtimeIdentity() }, self = native.inspectProcess(process.pid)
   if (!self || runtime.module_id !== 'admin-web' || !runtime.instance_id || !runtime.runtime_id
     || !/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(runtime.runtime_id)) throw unavailable()
   const directories = [path.join(data, 'module-runtime-registry'), path.join(data, 'module-runtime-registry/records')]

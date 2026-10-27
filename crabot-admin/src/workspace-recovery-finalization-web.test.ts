@@ -8,7 +8,7 @@ const management = require('../../scripts/lib/desktop-management.cjs')
 
 describe('current recovery completion preparation authentication', () => {
   it('requires a credential before own runtime reads and does not inspect caller fields before canonical authentication', async () => {
-    const metadata = vi.spyOn(management, 'requirePrivateDataRoot').mockImplementation(() => { throw new Error('No current runtime proof') })
+    const metadata = vi.spyOn(management, 'requireExistingDataRoot').mockImplementation(() => { throw new Error('No current runtime proof') })
     const identity = vi.fn(() => ({ instance_id: 'fixture-instance', module_id: 'admin-web', runtime_id: randomUUID() })), quiesce = vi.fn(async () => {}), resume = vi.fn()
     try {
       const web = createWorkspaceRecoveryFinalizationWeb({ dataDir: path.join(tmpdir(), 'absent-completion-' + randomUUID()), moduleManagerPort: 1,
