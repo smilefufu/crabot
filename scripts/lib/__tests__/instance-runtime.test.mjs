@@ -26,7 +26,7 @@ async function fixture(t, delay = 100, registrationDelay = 0, { forceRegistratio
   const probe = createServer().listen(0, '127.0.0.1'); await once(probe, 'listening')
   const port = probe.address().port; await new Promise(resolve => probe.close(resolve))
   const child = spawn(process.execPath, [fileURLToPath(new URL('./fixtures/managed-core.mjs', import.meta.url))], {
-    env: { ...process.env, TEST_CORE_ROOT: root, TEST_DATA_DIR: data, TEST_PORT: String(port), TEST_MARKER: marker, TEST_READY: ready, TEST_STOP_DELAY: String(delay), TEST_REGISTER_DELAY: String(registrationDelay), TEST_IDENTITY_REPORT: join(root, 'identity-report.json'), TEST_FORCE_REGISTRATION_FAILURE: forceRegistrationFailure ? '1' : '', TEST_CONTROLLER_LOG: join(root, 'controller.log') },
+    env: { ...process.env, TEST_CORE_ROOT: root, TEST_DATA_DIR: data, TEST_PORT: String(port), TEST_MARKER: marker, TEST_READY: ready, TEST_MODULES_UNAVAILABLE: join(root, 'modules-unavailable'), TEST_STOP_DELAY: String(delay), TEST_REGISTER_DELAY: String(registrationDelay), TEST_IDENTITY_REPORT: join(root, 'identity-report.json'), TEST_FORCE_REGISTRATION_FAILURE: forceRegistrationFailure ? '1' : '', TEST_CONTROLLER_LOG: join(root, 'controller.log') },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
   let output = ''; child.stdout.on('data', chunk => { output += chunk }); child.stderr.on('data', chunk => { output += chunk })
@@ -258,4 +258,30 @@ test('shared module-start probe preserves the existing Core producer identity fo
   assert.equal(typeof expected, 'string')
   assert.equal(await probeProcessStartIdentity(process.pid), expected)
   assert.equal(await probeProcessStartIdentity(2_147_483_647), null)
+})
+
+test('status preserves verified running state when the module RPC is unavailable, without trusting a forged identity', async t => {
+  const f = await fixture(t), entry = fileURLToPath(new URL('../../status.mjs', import.meta.url))
+  const status = async () => {
+    const child = spawn(process.execPath, [entry, '--json'], {
+      env: { ...process.env, DATA_DIR: f.data, HOME: f.root, USERPROFILE: f.root, CRABOT_PORT_OFFSET: '0' }, stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    let stdout = '', stderr = ''
+    child.stdout.on('data', bytes => { stdout += bytes }); child.stderr.on('data', bytes => { stderr += bytes })
+    const [code] = await once(child, 'exit'); assert.equal(code, 0, stderr)
+    return { body: JSON.parse(stdout), stderr }
+  }
+  writeFileSync(join(f.root, 'modules-unavailable'), 'fixture RPC unavailable')
+  const recordFile = join(f.data, 'instance-runtime.json'), original = readFileSync(recordFile, 'utf8')
+  const unavailable = await status()
+  assert.equal(unavailable.body.running, true)
+  assert.equal(unavailable.body.modules, null); assert.equal(unavailable.body.endpoints.mm.healthy, false)
+  assert.equal(readFileSync(recordFile, 'utf8'), original); assert.equal(existsSync(f.marker), false)
+  writeFileSync(recordFile, JSON.stringify({ ...f.record, controller: { ...f.record.controller, started: 'wrong incarnation' } }))
+  const forged = readFileSync(recordFile, 'utf8'), unknown = await status()
+  assert.equal(unknown.body.running, false); assert.equal(unknown.body.modules, null)
+  assert.match(unknown.stderr, /Cannot verify instance identity/)
+  assert.equal(readFileSync(recordFile, 'utf8'), forged)
+  writeFileSync(recordFile, original)
+  await stopInstance(f.data)
 })

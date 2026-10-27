@@ -1,6 +1,6 @@
 // A local test child, never a Crabot instance. No modules, models or production data.
 import { createServer } from 'node:http'
-import { writeFileSync } from 'node:fs'
+import { writeFileSync, existsSync } from 'node:fs'
 // A failed fixture setup must not leave its fake HTTP server holding test pipes.
 process.once('disconnect', () => process.exit(0))
 let stopping = false
@@ -25,6 +25,7 @@ createServer((request, response) => {
       response.writeHead(valid ? 200 : 409).end(JSON.stringify({ success: valid }))
       if (valid) stop()
     } else if (request.url === '/list_modules') {
+      if (process.env.TEST_MODULES_UNAVAILABLE && existsSync(process.env.TEST_MODULES_UNAVAILABLE)) { response.writeHead(503).end('{}'); return }
       response.end(JSON.stringify({ success: true, data: { modules: [{ module_id: 'admin-web', status: 'running', port: 23456 }] } }))
     } else response.end(JSON.stringify({ success: true, data: { status: process.env.TEST_HEALTH_STATUS || 'healthy' } }))
   })
