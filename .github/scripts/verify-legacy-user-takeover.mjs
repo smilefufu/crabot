@@ -196,6 +196,7 @@ try {
         }
         try { diagnostics.push({ name: 'installer-native.log', text: (await fs.readFile(path.join(control, 'installer-native.log'), 'utf8')).slice(-32000) }) }
         catch (error) { if (error.code !== 'ENOENT') diagnostics.push({ name: 'installer-native.log', unavailable: true }) }
+        if (process.platform === 'win32') diagnostics.push({ name: 'native-crash-frame', frames: await (await import('./read-ci-crash-frame.mjs')).readCiCrashFrames(path.join(control, 'crashes')) })
         await fs.writeFile(path.join(repository, '.desktop-build/legacy-user-diagnostic' + suffix + '.json'), JSON.stringify({ version, platform, diagnostics }) + '\n')
       }
       if (!await absent(dataDir) && inspectInstance(dataDir).state === 'running') await stopInstance(dataDir)
