@@ -302,6 +302,13 @@ for (const scenario of ['publish-source-remove-public-entry', 'publish-source-re
 let installerImage
 async function removalInstaller() {
   return installerImage ||= (async () => {
+    // Match the real independent installer's helper closure. The ordinary GUI
+    // above has already been sealed and retains only its maintenance bootstrap.
+    const bootstrap = path.join(root, 'app/dist/bootstrap/scripts')
+    const filter = file => !file.split(path.sep).some(part => ['node_modules', '__tests__', 'fixtures', 'tests'].includes(part))
+    for (const directory of ['lib', 'upgrade-lib']) await fs.cp(path.join(repository, 'scripts', directory), path.join(bootstrap, directory), { recursive: true, filter })
+    await fs.mkdir(path.join(bootstrap, 'desktop'), { recursive: true })
+    for (const name of ['legacy-releases.json', 'legacy-python-bootstrap.json']) await fs.copyFile(path.join(repository, 'scripts/desktop', name), path.join(bootstrap, 'desktop', name))
     const { build, Platform, Arch } = require('electron-builder')
     let resources
     await build({ projectDir: root, publish: 'never', targets: Platform.current().createTarget('dir', Arch[process.arch]), config: {
