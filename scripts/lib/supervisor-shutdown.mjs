@@ -2,7 +2,7 @@ export const MM_SHUTDOWN_WINDOW_MS = 60_000
 export const SUPERVISOR_FORCE_MARGIN_MS = 10_000
 export const SUPERVISOR_FORCE_TIMEOUT_MS = MM_SHUTDOWN_WINDOW_MS + SUPERVISOR_FORCE_MARGIN_MS
 
-export function createSupervisorShutdownController({ mm, cleanup, log }) {
+export function createSupervisorShutdownController({ mm, cleanup, log, requestShutdown }) {
   let forceTimer = null
   let finished = false
 
@@ -11,7 +11,10 @@ export function createSupervisorShutdownController({ mm, cleanup, log }) {
       if (finished || forceTimer !== null) return
       log(`[supervisor] received ${signal}, stopping MM\n`)
       if (mm.pid) {
-        try { mm.kill('SIGTERM') } catch { /* MM already exited */ }
+        try {
+          if (requestShutdown) requestShutdown()
+          else mm.kill('SIGTERM')
+        } catch { /* MM already exited */ }
       }
       forceTimer = setTimeout(() => {
         if (mm.pid) {

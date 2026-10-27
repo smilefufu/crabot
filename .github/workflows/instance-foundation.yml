@@ -1,0 +1,60 @@
+name: Shared instance control foundation
+on:
+  workflow_dispatch:
+  push:
+    branches: ['feat/desktop-instance-foundation']
+    paths:
+      - 'scripts/lib/instance-*'
+      - 'scripts/lib/managed-core.mjs'
+      - 'scripts/lib/module-process-start.cjs'
+      - 'scripts/lib/owned-process-tree.cjs'
+      - 'scripts/lib/pid.mjs'
+      - 'scripts/lib/supervisor-shutdown.mjs'
+      - 'scripts/lib/mm-probe.mjs'
+      - 'scripts/status.mjs'
+      - 'scripts/lib/__tests__/**'
+      - '.github/workflows/instance-foundation.yml'
+  pull_request:
+    paths:
+      - 'scripts/lib/instance-*'
+      - 'scripts/lib/managed-core.mjs'
+      - 'scripts/lib/module-process-start.cjs'
+      - 'scripts/lib/owned-process-tree.cjs'
+      - 'scripts/lib/pid.mjs'
+      - 'scripts/lib/supervisor-shutdown.mjs'
+      - 'scripts/lib/mm-probe.mjs'
+      - 'scripts/status.mjs'
+      - 'scripts/lib/__tests__/**'
+      - '.github/workflows/instance-foundation.yml'
+permissions:
+  contents: read
+jobs:
+  lifecycle:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, macos-15-intel, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.3'
+      - name: Build this branch's native dependency only
+        shell: bash
+        run: node scripts/build-native.mjs
+      - name: Install only the existing scripts package's frozen dependencies
+        run: pnpm --dir scripts/lib install --frozen-lockfile --ignore-scripts
+      - name: Verify actual finite controller children, generations and graceful shutdown
+        shell: bash
+        run: >-
+          node --test --test-concurrency=1
+          scripts/lib/__tests__/instance-runtime.test.mjs
+          scripts/lib/__tests__/instance-runtime-write.test.mjs
+          scripts/lib/__tests__/owned-process-tree.test.mjs
+      - name: Verify unchanged CLI helpers with the existing scripts test runner
+        working-directory: scripts/lib
+        shell: bash
+        run: node node_modules/vitest/vitest.mjs run __tests__/pid.test.mjs __tests__/supervisor-shutdown.test.mjs __tests__/mm-probe.test.mjs --maxWorkers=1 --minWorkers=1

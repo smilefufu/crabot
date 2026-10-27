@@ -44,7 +44,7 @@ describe('probeMmModules', () => {
     const modules = await probeMmModules(19000, fetchImpl)
     expect(modules).toHaveLength(2)
     const [url, opts] = fetchImpl.mock.calls[0]
-    expect(url).toBe('http://localhost:19000/list_modules')
+    expect(url).toBe('http://127.0.0.1:19000/list_modules')
     expect(opts.method).toBe('POST')
   })
 
@@ -62,7 +62,7 @@ describe('probeMmHealthy', () => {
     })
     expect(await probeMmHealthy(19000, fetchImpl)).toBe(true)
     const [url, opts] = fetchImpl.mock.calls[0]
-    expect(url).toBe('http://localhost:19000/health')
+    expect(url).toBe('http://127.0.0.1:19000/health')
     expect(opts.method).toBe('POST')
   })
 

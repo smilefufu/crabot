@@ -4,6 +4,7 @@ import { join } from 'node:path'
 const PID_FILE = 'mm.pid'
 
 export function writePid(dataDir, pid) {
+  if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error('Invalid process ID')
   writeFileSync(join(dataDir, PID_FILE), String(pid))
 }
 
@@ -11,8 +12,8 @@ export function readPid(dataDir) {
   const p = join(dataDir, PID_FILE)
   if (!existsSync(p)) return null
   const raw = readFileSync(p, 'utf-8').trim()
-  const n = parseInt(raw, 10)
-  return Number.isFinite(n) ? n : null
+  const n = /^\d+$/.test(raw) ? Number(raw) : NaN
+  return Number.isSafeInteger(n) && n > 0 ? n : null
 }
 
 export function clearPid(dataDir) {
@@ -20,6 +21,7 @@ export function clearPid(dataDir) {
 }
 
 export function isPidAlive(pid) {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return false
   try {
     process.kill(pid, 0)
     return true
