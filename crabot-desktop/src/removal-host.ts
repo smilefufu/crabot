@@ -77,6 +77,12 @@ export function startDesktopRemovalHost(request: RemovalRequest) {
       }
     } else if (result === 'cancelled') await dialog.showMessageBox({ type: 'info', title: '已取消卸载', message: '程序及用户数据已保留。',
       detail: '共享服务不会自动重启。如需继续使用，请从正常应用入口手动启动。', buttons: ['知道了'] })
+    if (!request.installerPayload) {
+      try {
+        const { scheduleRemovalCopyCleanup } = await load('desktop-removal-copy-cleanup.mjs')
+        await scheduleRemovalCopyCleanup({ directory, source: lease.copySource, payload: lease.copyPayload })
+      } catch { console.error(JSON.stringify({ component: 'desktop-removal', code: 'PRIVATE_COPY_RETAINED' })) }
+    }
     return result
   })().finally(() => { process.removeListener('message', message) })
   return { cancel, finished }

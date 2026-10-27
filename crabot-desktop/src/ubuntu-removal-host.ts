@@ -68,6 +68,10 @@ export async function runUbuntuRemovalHost(request: RemovalRequest): Promise<'co
         detail = opened.code === 0 ? retained : `无法打开文件管理器。数据仍保留在：${own.dataDir}`
       }
     } else if (result === 'cancelled') await choose('cancelled', '共享服务不会自动重启。需要继续使用时，请从正常应用入口启动。')
+    try {
+      const { scheduleRemovalCopyCleanup } = await load('bootstrap/scripts/lib/desktop-removal-copy-cleanup.mjs')
+      await scheduleRemovalCopyCleanup({ directory, source: lease.copySource, payload: lease.copyPayload, node: lease.copyNode })
+    } catch { process.stderr.write(JSON.stringify({ component: 'desktop-removal', code: 'PRIVATE_COPY_RETAINED' }) + '\n') }
     return result
   } finally { process.removeListener('message', cancel); lease?.close() }
 }

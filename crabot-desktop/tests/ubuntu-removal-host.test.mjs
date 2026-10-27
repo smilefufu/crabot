@@ -41,6 +41,7 @@ before(async () => {
   // A finite Node image stands in only for source OS identity; no Electron/GUI acceptance is claimed.
   await fs.copyFile(process.execPath, path.join(gui, 'crabot-desktop'))
   await fs.copyFile(process.env.CRABOT_GTK_FRONTEND, path.join(resources, 'crabot-maintenance'))
+  await fs.copyFile(fileURLToPath(new URL('../../crabot-native/build/Release/crabot-copy-cleanup', import.meta.url)), path.join(resources, 'crabot-copy-cleanup'))
   await fs.copyFile(path.join(path.dirname(process.env.CRABOT_GTK_FRONTEND), 'crabot-sandbox-helper'), path.join(resources, 'crabot-sandbox-helper'))
   const native = path.join(resources, 'app.asar.unpacked/dist/bootstrap/crabot-native/build/Release/crabot-native.node')
   await fs.mkdir(path.dirname(native), { recursive: true })

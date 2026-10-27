@@ -15,7 +15,12 @@ if (['publish-source-remove-main', 'publish-source-remove-source', 'resume-sourc
   let windows = 0, loginWrites = 0, registrationCalls = 0, lastMessage = ''; const dialogCodes = []
   electron.app.setLoginItemSettings = options => { loginWrites++; assert.deepEqual(options, { openAtLogin: false }) }
   electron.app.getLoginItemSettings = () => ({ status: 'not-registered', openAtLogin: false })
-  electron.dialog.showMessageBox = async options => { lastMessage = options.message; const code = /诊断代码：([A-Z0-9_]+)/.exec(options.detail || '')?.[1]; if (code) dialogCodes.push(code); return { response: /尚未卸载完成|删除已经开始/.test(options.message) ? 2 : 0 } }
+  electron.dialog.showMessageBox = async options => {
+    if (cfg.cleanupUnknown && options.title === 'Crabot 已卸载') {
+      const gui = process.platform === 'darwin' ? path.resolve(process.resourcesPath, '../../..') : path.dirname(process.resourcesPath)
+      fs.writeFileSync(path.join(gui, 'not-owned-by-job.txt'), 'preserve added diagnostic', { flag: 'wx' })
+    }
+    lastMessage = options.message; const code = /诊断代码：([A-Z0-9_]+)/.exec(options.detail || '')?.[1]; if (code) dialogCodes.push(code); return { response: /尚未卸载完成|删除已经开始/.test(options.message) ? 2 : 0 } }
   const childProcess = require('node:child_process'), execFile = childProcess.execFile
   childProcess.execFile = (file, args, options, callback) => {
     if (file === '/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister') {

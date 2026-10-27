@@ -280,6 +280,9 @@ async function openDesktopRemoval({ installRoot, operationId, signal, preparePla
     }
     return {
       record: structuredClone(record),
+      copyPayload: structuredClone(captured.hostPayload ?? proof.payload),
+      ...(!installer ? { copySource: structuredClone(facts.source_gui) } : {}),
+      ...(nodeRole && !installer ? { copyNode: JSON.parse(proof.core.inventory).files['.product-runtime/node/bin/node'] } : {}),
       ...(installer ? { hostPayload: structuredClone(captured.hostPayload) } : {}),
       ...(installerNode ? { verifyHost } : {}),
       current: () => current(),

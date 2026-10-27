@@ -23,7 +23,8 @@ async function guiInventory(root, signal) {
   const directory = await fs.lstat(root)
   if (!directory.isDirectory() || directory.isSymbolicLink()) fail('GUI 载荷根被重定向。')
   const executable = path.join(root, process.platform === 'darwin' ? 'Crabot.app/Contents/MacOS/Crabot' : process.platform === 'win32' ? 'Crabot.exe' : 'crabot-desktop')
-  for (const file of [executable, path.join(resources(root), 'app.asar'), path.join(resources(root), 'app.asar.unpacked/dist/bootstrap/crabot-native/build/Release/crabot-native.node')]) {
+  const cleanup = path.join(resources(root), 'crabot-copy-cleanup' + (process.platform === 'win32' ? '.exe' : ''))
+  for (const file of [executable, cleanup, path.join(resources(root), 'app.asar'), path.join(resources(root), 'app.asar.unpacked/dist/bootstrap/crabot-native/build/Release/crabot-native.node')]) {
     const stat = await fs.lstat(file); if (!stat.isFile() || stat.isSymbolicLink()) fail('GUI 载荷缺少固定入口或本地安装核验器。')
   }
   const entries = [], files = Object.create(null)

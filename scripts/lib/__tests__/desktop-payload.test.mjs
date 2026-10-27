@@ -76,6 +76,7 @@ async function fixture(t, { version = '1.2.3', schema, functional = false, execu
   await fs.writeFile(path.join(core, 'desktop-host.json'), JSON.stringify({ schema_version: 2, platform: process.platform, arch: process.arch }))
   await fs.mkdir(path.dirname(exe), { recursive: true }); await fs.mkdir(resources, { recursive: true })
   await fs.writeFile(exe, 'GUI fixture, never launched')
+  await fs.writeFile(path.join(resources, 'crabot-copy-cleanup' + (windows ? '.exe' : '')), 'inert cleanup fixture; never executed')
   const asarInput = path.join(parent, 'asar-input')
   await fs.mkdir(path.join(asarInput, 'dist'), { recursive: true })
   await fs.writeFile(path.join(asarInput, 'dist/desktop-release.json'), JSON.stringify(selection) + '\n')
@@ -86,6 +87,11 @@ async function fixture(t, { version = '1.2.3', schema, functional = false, execu
   await sealDesktopPayload(payload)
   return { parent, payload, core, gui, resources, selection, target }
 }
+test('sealing a new complete GUI rejects a missing native copy-cleanup component', async t => {
+  const f = await fixture(t)
+  await fs.unlink(path.join(f.resources, 'crabot-copy-cleanup' + (windows ? '.exe' : '')))
+  await assert.rejects(sealDesktopPayload(f.payload), { code: 'ENOENT' })
+})
 test('complete offline payload prepares final stable roots and commits one pair without a service', async t => {
   const f = await fixture(t), phases = []
   const source = await verifyDesktopPayload(f.payload)

@@ -33,7 +33,8 @@ async function fixture(t) {
   await fs.writeFile(path.join(resources, 'desktop-release.json'), JSON.stringify(selection) + '\n')
   const executable = path.join(gui, process.platform === 'darwin' ? 'Crabot.app/Contents/MacOS/Crabot' : process.platform === 'win32' ? 'Crabot.exe' : 'crabot-desktop')
   const helper = path.join(resources, 'app.asar.unpacked/dist/bootstrap/crabot-native/build/Release/crabot-native.node')
-  for (const file of [executable, helper]) { await fs.mkdir(path.dirname(file), { recursive: true }); await fs.writeFile(file, 'finite fixture, never executed') }
+  const cleanup = path.join(resources, 'crabot-copy-cleanup' + (process.platform === 'win32' ? '.exe' : ''))
+  for (const file of [executable, helper, cleanup]) { await fs.mkdir(path.dirname(file), { recursive: true }); await fs.writeFile(file, 'finite fixture, never executed') }
   await sealDesktopPayload(payload)
   const zip = new AdmZip()
   async function add(directory) {

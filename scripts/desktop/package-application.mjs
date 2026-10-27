@@ -113,6 +113,8 @@ const configuration = {
     if (paired) {
       await fs.writeFile(path.join(resources, 'desktop-release.json'), JSON.stringify(selection) + '\n')
       await fs.copyFile(appIcon, path.join(resources, 'crabot.png'))
+      const cleanup = 'crabot-copy-cleanup' + (process.platform === 'win32' ? '.exe' : '')
+      await fs.copyFile(path.join(root, 'crabot-native/build/Release', cleanup), path.join(resources, cleanup))
       if (ubuntuNative) {
         // These target resources are included in the complete GUI inventory and
         // signed archive before any fixed native resource may execute.

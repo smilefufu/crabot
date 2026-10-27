@@ -48,7 +48,7 @@ export function captureRemovalGuiCleanup(prepared, child) {
 export function captureRemovalNodeCleanup(prepared, child) {
   if (process.platform !== 'linux' || prepared.executable !== path.join(prepared.directory, 'node')
     || prepared.frontend !== path.join(prepared.directory, 'crabot-maintenance') || prepared.self_verified !== true) fail()
-  const allowed = new Map(['node', 'crabot-maintenance', 'crabot-sandbox-helper', ...desktopMaintenanceNodeFiles.map(name => 'backend/' + name)].map(name => [name, 'file']))
+  const allowed = new Map(['node', 'crabot-maintenance', 'crabot-sandbox-helper', 'cleanup', ...desktopMaintenanceNodeFiles.map(name => 'backend/' + name)].map(name => [name, 'file']))
   for (const name of [...allowed.keys()]) for (let parent = path.posix.dirname(name); parent !== '.'; parent = path.posix.dirname(parent)) allowed.set(parent, 'directory')
   const closedContents = directory => {
     for (const entry of physical.readdirSync(directory, { withFileTypes: true })) {

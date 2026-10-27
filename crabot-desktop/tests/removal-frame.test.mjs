@@ -75,6 +75,8 @@ before(async () => {
       gui = context.appOutDir
       const resources = path.join(gui, process.platform === 'darwin' ? 'Crabot.app/Contents/Resources' : 'resources')
       await fs.writeFile(path.join(resources, 'desktop-release.json'), JSON.stringify(selection) + '\n')
+      const cleanup = 'crabot-copy-cleanup' + (process.platform === 'win32' ? '.exe' : '')
+      await fs.copyFile(path.join(repository, 'crabot-native/build/Release', cleanup), path.join(resources, cleanup))
       if (linuxSource) {
         await fs.copyFile(process.env.CRABOT_GTK_ACTOR, path.join(resources, 'crabot-maintenance'))
         await fs.copyFile(path.join(path.dirname(process.env.CRABOT_GTK_FRONTEND), 'crabot-sandbox-helper'), path.join(resources, 'crabot-sandbox-helper'))
@@ -110,8 +112,8 @@ before(async () => {
   await sealDesktopPayload(payload)
 }, 120000)
 after(async () => { if (root) await fs.rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }) })
-for (const scenario of ['publish-source-remove-public-entry', 'publish-source-remove-public-core-missing', 'publish-source-remove-windows-entry', 'valid', 'node-parent', 'unexpected-source-args', 'changed-copy', 'other-installation', 'publish-close', 'publish-cancel', 'publish-module', 'publish-damaged', 'publish-lost-reply', 'publish-replaced-record', 'publish-live', 'publish-cancel-lost', 'publish-stop', 'publish-stop-wrong-root', 'publish-stop-lost', 'publish-stop-retry', 'publish-stop-lost-retry', 'publish-inherited-cwd', 'publish-source-verifier', 'publish-source-exit', 'publish-source-retry', 'publish-source-late-exit', 'publish-source-ignore', 'publish-source-disconnect', 'resume-valid', 'resume-core-missing', 'resume-wrong-operation', 'resume-changed-copy', 'resume-source-changed', 'resume-lease-cancel', 'resume-lease-stopping', 'resume-lease-removing', 'resume-lease-completed', 'resume-lease-core-missing', 'resume-lease-wrong-operation', 'resume-lease-busy', 'resume-lease-source-exit', 'publish-source-remove', 'publish-source-remove-main', 'publish-source-remove-source', 'resume-source-remove-main', 'publish-source-remove-operation', 'publish-source-remove-cancel-retry', 'publish-source-remove-mac-login', 'publish-source-remove-complete', 'publish-source-remove-windows-uninstall', 'publish-source-remove-retry', 'resume-lease-source-remove', 'publish-source-remove-retry-delayed']) test('actual protected initial removal frame: ' + scenario, { skip: !supported || process.platform === 'linux' && scenario !== 'publish-source-remove-source' || ['publish-source-remove-mac-login', 'publish-source-remove-operation', 'publish-source-remove-main'].includes(scenario) && process.platform !== 'darwin' || ['publish-source-remove-windows-uninstall', 'publish-source-remove-windows-entry'].includes(scenario) && process.platform !== 'win32', timeout: scenario.includes('source-remove') ? 180000 : 60000 }, async t => {
-  const publicEntry = ['publish-source-remove-public-entry', 'publish-source-remove-public-core-missing', 'publish-source-remove-windows-entry'].includes(scenario)
+for (const scenario of ['publish-source-remove-public-entry', 'publish-source-remove-public-unknown-copy', 'publish-source-remove-public-core-missing', 'publish-source-remove-windows-entry', 'valid', 'node-parent', 'unexpected-source-args', 'changed-copy', 'other-installation', 'publish-close', 'publish-cancel', 'publish-module', 'publish-damaged', 'publish-lost-reply', 'publish-replaced-record', 'publish-live', 'publish-cancel-lost', 'publish-stop', 'publish-stop-wrong-root', 'publish-stop-lost', 'publish-stop-retry', 'publish-stop-lost-retry', 'publish-inherited-cwd', 'publish-source-verifier', 'publish-source-exit', 'publish-source-retry', 'publish-source-late-exit', 'publish-source-ignore', 'publish-source-disconnect', 'resume-valid', 'resume-core-missing', 'resume-wrong-operation', 'resume-changed-copy', 'resume-source-changed', 'resume-lease-cancel', 'resume-lease-stopping', 'resume-lease-removing', 'resume-lease-completed', 'resume-lease-core-missing', 'resume-lease-wrong-operation', 'resume-lease-busy', 'resume-lease-source-exit', 'publish-source-remove', 'publish-source-remove-main', 'publish-source-remove-source', 'resume-source-remove-main', 'publish-source-remove-operation', 'publish-source-remove-cancel-retry', 'publish-source-remove-mac-login', 'publish-source-remove-complete', 'publish-source-remove-windows-uninstall', 'publish-source-remove-retry', 'resume-lease-source-remove', 'publish-source-remove-retry-delayed']) test('actual protected initial removal frame: ' + scenario, { skip: !supported || process.platform === 'linux' && scenario !== 'publish-source-remove-source' || ['publish-source-remove-mac-login', 'publish-source-remove-operation', 'publish-source-remove-main'].includes(scenario) && process.platform !== 'darwin' || ['publish-source-remove-windows-uninstall', 'publish-source-remove-windows-entry'].includes(scenario) && process.platform !== 'win32', timeout: scenario.includes('source-remove') ? 180000 : 60000 }, async t => {
+  const publicEntry = ['publish-source-remove-public-entry', 'publish-source-remove-public-unknown-copy', 'publish-source-remove-public-core-missing', 'publish-source-remove-windows-entry'].includes(scenario)
   let mode = scenario
   if (publicEntry) mode = 'publish-source-remove-source'
   else if (scenario.endsWith('-delayed')) mode = scenario.slice(0, -8)
@@ -157,7 +159,7 @@ for (const scenario of ['publish-source-remove-public-entry', 'publish-source-re
     const record = readInstanceRuntime(own.dataDir)
     await fs.writeFile(path.join(own.dataDir, 'instance-runtime.json'), JSON.stringify({ ...record, install_root: area }) + '\n')
   }
-  const operationId = randomUUID(), cfg = { root: own.root, operationId, mode, publicEntry, resultFile: path.join(area, 'host-result.json'), stageFile: path.join(area, 'host-stage.json'), removalPinDelayMs: scenario.endsWith('-delayed') ? 3000 : 0 }
+  const operationId = randomUUID(), cfg = { root: own.root, operationId, mode, publicEntry, cleanupUnknown: scenario === 'publish-source-remove-public-unknown-copy', resultFile: path.join(area, 'host-result.json'), stageFile: path.join(area, 'host-stage.json'), removalPinDelayMs: scenario.endsWith('-delayed') ? 3000 : 0 }
   if (mode === 'other-installation') cfg.inspectRoot = (await commitDesktopInstallation(await prepareDesktopInstallation({ payload, installRoot: path.join(area, 'other') }))).root
   await fs.writeFile(path.join(own.dataDir, 'preserved-user-file'), 'user bytes')
   if (publicEntry && scenario !== 'publish-source-remove-windows-entry') {
@@ -209,6 +211,27 @@ for (const scenario of ['publish-source-remove-public-entry', 'publish-source-re
         last_stage: await fs.readFile(cfg.stageFile, 'utf8').then(JSON.parse).catch(() => null), host_exit_state: exitState(), result: await fs.readFile(cfg.resultFile, 'utf8').then(JSON.parse).catch(() => null),
       }))
       await new Promise(resolve => setTimeout(resolve, 100))
+    }
+    if (scenario === 'publish-source-remove-public-entry' || linuxSource) {
+      const cleanupDeadline = Date.now() + 10000
+      while (await fs.lstat(directory).catch(error => { if (error.code === 'ENOENT') return null; throw error })) {
+        if (process.platform === 'win32' && Date.now() >= cleanupDeadline) {
+          // A mapped self-image can be non-deletable on this Windows filesystem.
+          // Only its exact small first-party helper may remain, never the GUI copy.
+          assert.deepEqual(await fs.readdir(directory), ['cleanup.exe'])
+          const helper = path.join(directory, 'cleanup.exe')
+          assert.deepEqual(await fs.readFile(helper), await fs.readFile(path.join(payload, 'gui/resources/crabot-copy-cleanup.exe')))
+          const references = await identity.inspectProgramReferences({ roots: [], files: [helper] })
+          assert.equal(references.complete, true); assert.deepEqual(references.processes, [])
+          break
+        }
+        if (Date.now() >= cleanupDeadline) assert.fail('The exited source left its completed private maintenance copy behind')
+        await new Promise(resolve => setTimeout(resolve, 100))
+      }
+    }
+    if (scenario === 'publish-source-remove-public-unknown-copy') {
+      assert.equal(await fs.readFile(path.join(directory, 'gui/not-owned-by-job.txt'), 'utf8'), 'preserve added diagnostic')
+      await assert.rejects(fs.lstat(path.join(directory, 'cleanup' + (process.platform === 'win32' ? '.exe' : ''))), { code: 'ENOENT' })
     }
     result = JSON.parse(await fs.readFile(cfg.resultFile, 'utf8'))
     if (linuxSource) result.diagnostic = { failure: await fs.readFile(cfg.stageFile, 'utf8').catch(() => null), references: await fs.readFile(cfg.stageFile + '.references', 'utf8').catch(() => null) }
