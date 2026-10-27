@@ -6,6 +6,7 @@ let output = ''
 child.stdout.setEncoding('utf8')
 child.stdout.on('data', text => {
   output += text
+  if (output.includes('\n')) assert.equal(output, 'READY\n', 'Unexpected native readiness bytes: ' + Buffer.from(output).toString('hex'))
   if (output === 'READY\n') {
     process.stdout.write('CHILD:' + child.pid + '\nREADY\n')
     process.stdin.once('data', bytes => { assert.equal(bytes.toString(), 'q'); process.exit(0) })

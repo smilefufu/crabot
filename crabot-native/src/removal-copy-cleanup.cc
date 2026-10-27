@@ -182,7 +182,12 @@ int main(int argc, char**) {
 #else
     programs = Capture(root / "gui", volume); Require(!programs.empty());
 #endif
+#ifdef _WIN32
+    // Keep the fixed readiness bytes independent of CRT CR-LF translation.
+    DWORD written = 0; Require(WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), "READY\n", 6, &written, nullptr) && written == 6);
+#else
     std::cout << "READY\n" << std::flush;
+#endif
     parent.Wait(); Require(Identity(root, true, true) == original);
     Remove(programs);
 #ifndef __linux__
