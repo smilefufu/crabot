@@ -421,10 +421,14 @@ jobs:
         if: runner.os == 'Linux' && steps.scope.outputs.full_runtime == 'true'
         timeout-minutes: 30
         run: dbus-run-session -- xvfb-run -a node .github/scripts/verify-legacy-user-takeover.mjs ".desktop-build/安装 候选/paired" ".desktop-build/安装 候选/installer" 2>&1 | tee .desktop-build/legacy-user-stage.log
-      - name: Published legacy user archives through actual installer and ordinary Main
+      - name: Published legacy v2026.10.14.1 through actual installer and ordinary Main
         if: runner.os != 'Linux' && steps.scope.outputs.full_runtime == 'true'
         timeout-minutes: 30
-        run: node .github/scripts/verify-legacy-user-takeover.mjs ".desktop-build/安装 候选/paired" ".desktop-build/安装 候选/installer" 2>&1 | tee .desktop-build/legacy-user-stage.log
+        run: node .github/scripts/verify-legacy-user-takeover.mjs ".desktop-build/安装 候选/paired" ".desktop-build/安装 候选/installer" v2026.10.14.1 2>&1 | tee .desktop-build/legacy-user-stage-v2026.10.14.1.log
+      - name: Published legacy v2026.10.15.1 through actual installer and ordinary Main
+        if: runner.os != 'Linux' && steps.scope.outputs.full_runtime == 'true'
+        timeout-minutes: 30
+        run: node .github/scripts/verify-legacy-user-takeover.mjs ".desktop-build/安装 候选/paired" ".desktop-build/安装 候选/installer" v2026.10.15.1 2>&1 | tee .desktop-build/legacy-user-stage-v2026.10.15.1.log
       # One batch includes cold boot, warm reattach and retained-repair boot.
       # Keep each product deadline unchanged; the Windows batch reached its third real ready state at 1200.7s.
       - name: Boot actual offline-prepared pair on Linux
@@ -506,8 +510,8 @@ jobs:
             .desktop-build/cli-update-disk.json
             .desktop-build/system-mode.json
             .desktop-build/system-legacy*.json
-            .desktop-build/legacy-user-takeover.json
-            .desktop-build/legacy-user-diagnostic.json
+            .desktop-build/legacy-user-takeover*.json
+            .desktop-build/legacy-user-diagnostic*.json
             .desktop-build/platform-installers/installers.json
             .desktop-build/cli-archive/archive.json
             product-runtime.json

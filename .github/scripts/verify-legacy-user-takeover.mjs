@@ -26,8 +26,11 @@ assert.equal(installer, path.join(repository, '.desktop-build/安装 候选/inst
 const target = await verifyDesktopPayload(path.join(project, 'offline'))
 const platform = (process.platform === 'win32' ? 'windows' : process.platform) + '-' + process.arch
 const archives = JSON.parse(await fs.readFile(new URL('fixtures/legacy-desktop-archives.json', import.meta.url), 'utf8'))
+const requestedVersion = process.argv[4]
+assert.ok(process.argv.length <= 5 && (requestedVersion === undefined || Object.hasOwn(archives, requestedVersion)), 'Unknown historical fixture version')
+const versions = requestedVersion ? [requestedVersion] : Object.keys(archives), suffix = requestedVersion ? '-' + requestedVersion : ''
 const execute = promisify(execFile), reports = [], temporary = await fs.realpath(await fs.mkdtemp(path.join(process.platform === 'linux' ? homedir() : tmpdir(), 'Crabot 原位接管 ')))
-const driverRoot = path.join(repository, '.desktop-build/legacy-installer-' + randomUUID()), evidence = path.join(repository, '.desktop-build/legacy-user-takeover.json')
+const driverRoot = path.join(repository, '.desktop-build/legacy-installer-' + randomUUID()), evidence = path.join(repository, '.desktop-build/legacy-user-takeover' + suffix + '.json')
 let output = '', allPassed = false
 async function space() { for (const directory of [repository, temporary]) { const value = await fs.statfs(directory, { bigint: true }); assert.ok(value.bavail * value.bsize > target.bytes * 5n + 4n * 1024n ** 3n, 'Legacy acceptance copy-space prerequisite') } }
 async function absent(file) { try { await fs.lstat(file); return false } catch (error) { if (error.code === 'ENOENT') return true; throw error } }
@@ -82,7 +85,7 @@ try {
   await space()
   const linux = process.platform === 'linux', bundle = path.join(installer, 'ubuntu-native')
   const driver = linux ? null : await buildLegacyInstallerDriver({ repository, installer, destination: driverRoot, payload: target.directory })
-  for (const version of Object.keys(archives)) {
+  for (const version of versions) {
     await space()
     const home = path.join(temporary, version), root = path.join(home, '.crabot'), dataDir = path.join(root, 'data'), control = path.join(home, 'control')
     await fs.mkdir(control, { recursive: true, mode: 0o700 })
@@ -182,6 +185,7 @@ try {
         old_data_fixture_stopped: true, ordinary_main_core_healthy: true, actual_native_and_original_cli_same_instance: true, host_node_required: false,
         original_credentials_and_sentinels_preserved: true, actual_bundled_python_file_access: true, historical_user_data_fixture: true,
         historical_user_model_session_tested: false, business_model_calls: 0 })
+      await fs.writeFile(evidence, JSON.stringify({ complete: false, cases: reports }) + '\n')
       passed = true; stage('verified')
     } finally {
       if (!passed) {
@@ -192,7 +196,7 @@ try {
         }
         try { diagnostics.push({ name: 'installer-native.log', text: (await fs.readFile(path.join(control, 'installer-native.log'), 'utf8')).slice(-32000) }) }
         catch (error) { if (error.code !== 'ENOENT') diagnostics.push({ name: 'installer-native.log', unavailable: true }) }
-        await fs.writeFile(path.join(repository, '.desktop-build/legacy-user-diagnostic.json'), JSON.stringify({ version, platform, diagnostics }) + '\n')
+        await fs.writeFile(path.join(repository, '.desktop-build/legacy-user-diagnostic' + suffix + '.json'), JSON.stringify({ version, platform, diagnostics }) + '\n')
       }
       if (!await absent(dataDir) && inspectInstance(dataDir).state === 'running') await stopInstance(dataDir)
       if (peer && identity.sameProcess(peer, identity.inspectProcess(peer.pid))) process.kill(peer.pid, 'SIGKILL')
@@ -215,7 +219,7 @@ try {
   // Ubuntu sandbox rules belong to this disposable CI VM and end with it.
   // This fixture never claims to validate product uninstall or graphical Polkit.
 } finally {
-  await fs.writeFile(path.join(repository, '.desktop-build/legacy-user-takeover.log'), output)
+  await fs.writeFile(path.join(repository, '.desktop-build/legacy-user-takeover' + suffix + '.log'), output)
   await fs.writeFile(evidence, JSON.stringify({ complete: allPassed, cases: reports }) + '\n')
   if (allPassed) { await fs.rm(temporary, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); await fs.rm(driverRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
 }
