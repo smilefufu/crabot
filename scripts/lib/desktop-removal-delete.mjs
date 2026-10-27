@@ -20,12 +20,20 @@ export async function assertDesktopRemovalProgramsUnused({ installRoot, proof },
     try { physical.lstatSync(file); files.push(file) }
     catch (error) { if (error.code !== 'ENOENT') throw error }
   }
+  const programDirectories = [path.join(installRoot, 'releases', proof.source_selection.core_id),
+    path.join(installRoot, 'app/releases', proof.source_selection.gui_id)]
+  // Once every proved program file and both program directories are absent,
+  // there is no remaining deletion target. The bin base is retained. Job,
+  // source-exit and lock checks remain the caller's independent responsibility.
+  if (!files.length && programDirectories.every(directory => {
+    try { physical.lstatSync(directory); return false }
+    catch (error) { if (error.code === 'ENOENT') return true; throw error }
+  })) return
   let unrelatedSystemUnknowns = () => false
   if (process.platform === 'darwin') unrelatedSystemUnknowns = captureMacRemovalSystemProcesses(installRoot)
   if (process.platform === 'linux') unrelatedSystemUnknowns = captureLinuxRemovalSystemProcesses(installRoot)
   let observation
-  try { observation = await identity.inspectProgramReferences({ roots: [path.join(installRoot, 'releases', proof.source_selection.core_id),
-    path.join(installRoot, 'app/releases', proof.source_selection.gui_id), path.join(installRoot, 'bin')], files }) }
+  try { observation = await identity.inspectProgramReferences({ roots: [...programDirectories, path.join(installRoot, 'bin')], files }) }
   catch { referenceFailure(stage) }
   // Keep the raw observation, including every unknown and its fixed OS reason.
   if (observation.complete !== true || observation.incomplete !== false || !Array.isArray(observation.processes)

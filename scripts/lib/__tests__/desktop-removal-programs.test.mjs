@@ -8,6 +8,7 @@ import management from '../desktop-management.cjs'
 import identity from '../process-identity.cjs'
 import { privateJson } from '../desktop-preparation-files.mjs'
 const digest = bytes => createHash('sha256').update(bytes).digest('hex')
+let windowsFixtureObserved = false
 const recordFor = bytes => ({ type: 'file', size: Buffer.byteLength(bytes), sha256: digest(bytes), ...(process.platform === 'win32' ? {} : { mode: 0o644 }) })
 async function fixture(t, programCount = 0) {
   const temporary = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'crabot-program-audit-')))
@@ -42,6 +43,14 @@ async function fixture(t, programCount = 0) {
   await fs.writeFile(path.join(data, 'user.txt'), 'preserved data and runtime bases')
   for (const [name, content] of [['runtime-bases/python-retained/base.txt', 'retained interpreter'], ['mcp-envs/server/packages.txt', 'retained MCP dependencies'], ['workspaces/project/work.txt', 'retained project']]) {
     const file = path.join(data, name); await fs.mkdir(path.dirname(file), { recursive: true }); await fs.writeFile(file, content)
+  }
+  if (process.platform === 'win32' && !windowsFixtureObserved) {
+    windowsFixtureObserved = true
+    console.log('CRABOT_FINITE_WINDOWS_LOCATION ' + JSON.stringify({ native_canonical_root: fsSync.realpathSync.native(root) === root,
+      root_private: identity.isPrivateDirectory(root), data_private: identity.isPrivateDirectory(data),
+      owned_bases: ['app', 'app/releases', 'releases', 'data', 'bin'].every(name => identity.isOwnedDirectory(path.join(root, name))),
+      private_records: ['desktop-installation.json', 'current-release.json', '.desktop-removal.json'].every(name => identity.isPrivateFile(path.join(root, name))),
+      owner_matches: identity.inspectProcess(process.pid).owner === JSON.parse(await fs.readFile(path.join(root, 'desktop-installation.json'), 'utf8')).owner }))
   }
   return { root, data, core, gui, launcher, temporary, operationId }
 }
@@ -404,4 +413,27 @@ test('generic stopped facts leave the retained target selection policy with thei
   facts.assertIdentity() // No source-selection authority is supplied by neutral facts.
   const stopped = await captureStoppedDesktopRemoval({ installRoot: f.root, operationId: f.operationId })
   assert.throws(() => stopped.assertStopped(), { code: 'CRABOT_DESKTOP_REMOVAL' })
+})
+
+for (const mode of ['no-targets', 'reappeared-program', 'reappeared-directory']) test('unused-program observation still requires an actual remaining target: ' + mode, async t => {
+  const f = await fixture(t), locks = await import('../cli-lock.mjs')
+  const held = [await locks.acquireExistingCliLock(f.root, 'fixture-empty-targets'), await locks.acquireExistingCliLock(f.data, 'fixture-empty-targets')]
+  t.after(() => { for (const lock of held.reverse()) locks.releaseCliLock(lock) })
+  const { removeDesktopRemovalPrograms, assertDesktopRemovalProgramsUnused } = await import('../desktop-removal-delete.mjs')
+  const { readDesktopRemovalProof } = await import('../desktop-removal-proof.mjs')
+  t.mock.method(identity, 'inspectProgramReferences', async () => ({ complete: true, incomplete: false, processes: [], unknown_pids: [] }))
+  const { proof } = await readDesktopRemovalProof(f.root)
+  const result = await removeDesktopRemovalPrograms({ installRoot: f.root, operationId: f.operationId })
+  assert.equal(result.retained.length, 0)
+  if (mode === 'reappeared-program') await fs.writeFile(path.join(f.root, 'bin', f.launcher), 'unknown new file; do not remove')
+  if (mode === 'reappeared-directory') await fs.mkdir(f.gui)
+  let queries = 0
+  t.mock.method(identity, 'inspectProgramReferences', async () => {
+    queries++
+    return { complete: false, incomplete: true, processes: [], unknown_pids: [process.pid], unknown_details: [] }
+  })
+  const pending = assertDesktopRemovalProgramsUnused({ installRoot: f.root, proof }, 'fixture-no-targets')
+  if (mode === 'no-targets') { await pending; assert.equal(queries, 0) }
+  else { await assert.rejects(pending, { code: 'CRABOT_DESKTOP_PROGRAM_REFERENCES' }); assert.equal(queries, 1) }
+  assert.equal(await fs.readFile(path.join(f.data, 'user.txt'), 'utf8'), 'preserved data and runtime bases')
 })

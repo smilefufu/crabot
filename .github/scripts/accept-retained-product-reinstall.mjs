@@ -37,21 +37,22 @@ export async function prepareRetainedProductReinstall({ installRoot, payload, pr
   await fs.writeFile(sentinel, 'preserved across program removal and real GUI recovery\n', { flag: 'wx', mode: 0o600 })
   const rootLock = await acquireExistingCliLock(own.root, 'ci-retained-removal-fixture')
   let dataLock, proof
-  const verifyUnused = async stage => {
+  const withReferenceDiagnosis = async (stage, action) => {
     const inspect = identity.inspectProgramReferences
     let observation
     // Preserve the first actual observation on failure; a second query can hide
     // a transient process generation change. Results and product policy are unchanged.
     identity.inspectProgramReferences = async query => { observation = await inspect(query); return observation }
-    try { await assertDesktopRemovalProgramsUnused({ installRoot: own.root, proof }, stage) }
+    try { return await action() }
     catch (error) {
-      if (observation) console.log('CRABOT_RETAINED_REFERENCE_DIAGNOSIS ' + JSON.stringify({ stage,
+      if (observation) console.log('CRABOT_RETAINED_REFERENCE_DIAGNOSIS ' + JSON.stringify({ stage: error.stage ?? stage,
         inventory_file_count: desktopRemovalProgramEntries(proof).length, complete: observation.complete, incomplete: observation.incomplete,
         holders: observation.processes.slice(0, 8).map(item => ({ pid: item.pid, parent: item.parent, image: path.basename(item.executable) })),
-        holder_count: observation.processes.length, unknown_count: observation.unknown_pids.length, unknown: observation.unknown_details.slice(0, 8) }))
+        holder_count: observation.processes.length, unknown_count: observation.unknown_pids.length, unknown: observation.unknown_details.slice(0, 16) }))
       throw error
     } finally { identity.inspectProgramReferences = inspect }
   }
+  const verifyUnused = stage => withReferenceDiagnosis(stage, () => assertDesktopRemovalProgramsUnused({ installRoot: own.root, proof }, stage))
   try {
     dataLock = await acquireExistingCliLock(own.dataDir, 'ci-retained-removal-fixture')
     assert.equal(inspectInstance(own.dataDir).state, 'stopped')
@@ -66,7 +67,7 @@ export async function prepareRetainedProductReinstall({ installRoot, payload, pr
     await privateJson(path.join(own.root, '.desktop-removal.json'), { schema_version: 1, installation_id: own.record.installation_id,
       operation_id: operationId, source_selection: own.selection, phase: 'removing', proof_sha256: createHash('sha256').update(text).digest('hex') })
     if (removeAllPrograms) {
-      const removed = await removeDesktopRemovalPrograms({ installRoot: own.root, operationId })
+      const removed = await withReferenceDiagnosis('ci-program-removal', () => removeDesktopRemovalPrograms({ installRoot: own.root, operationId }))
       assert.deepEqual(removed.retained, [])
       for (const directory of [own.coreRoot, own.guiRoot]) await assert.rejects(fs.lstat(directory), { code: 'ENOENT' })
       stage('fixture-all-programs-removed')
