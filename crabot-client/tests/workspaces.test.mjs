@@ -121,17 +121,19 @@ test('status keeps historical commit distinct from full completion, validates a 
 })
 
 
-test('recovery is explicit, strictly correlated and never retried after losing admission', async () => {
+for (const action of [null, 'restore_source', 'finish_commit']) test('recovery is explicit, strictly correlated and never retried after losing admission: ' + (action ?? 'archived'), async () => {
   const recovery_id = '87654321-4321-4321-8321-cba987654321'
-  const offer = { intent_id: id, completion_sha256: 'a'.repeat(64), finalizing_sha256: 'b'.repeat(64) }
-  const request = { ...offer, recovery_id, confirmed: true }
+  const offer = action ? { intent_id: id, checkpoint_sha256: 'a'.repeat(64), action }
+    : { intent_id: id, completion_sha256: 'a'.repeat(64), finalizing_sha256: 'b'.repeat(64) }
+  const request = action ? { intent_id: id, recovery_id, checkpoint_sha256: offer.checkpoint_sha256, confirmed: true } : { ...offer, recovery_id, confirmed: true }
   const preview = fixture({ available: true, recovery: offer })
   assert.deepEqual(await preview.client.previewRelocationRecovery(id), { available: true, recovery: offer })
   assert.equal(preview.calls[0].options.method, 'GET'); assert.equal(preview.calls[0].options.body, undefined)
   assert.equal(preview.calls[0].url, 'http://localhost:3000/api/workspaces/relocation/jobs/' + id + '/recovery')
   const f = fixture({ intent_id: id, recovery_id, accepted: true }, 202)
   assert.deepEqual(await f.client.startRelocationRecovery(request), { intent_id: id, recovery_id, accepted: true })
-  for (const bad of [{ ...request, confirmed: false }, { ...request, path: '/forged' }, { ...request, completion_sha256: 'A'.repeat(64) }, { ...request, recovery_id: recovery_id.toUpperCase() }]) {
+  for (const bad of [{ ...request, confirmed: false }, { ...request, path: '/forged' }, { ...request, action: 'finish_commit' },
+    { ...request, completion_sha256: 'A'.repeat(64) }, { ...request, checkpoint_sha256: 'A'.repeat(64) }, { ...request, recovery_id: recovery_id.toUpperCase() }]) {
     assert.throws(() => f.client.startRelocationRecovery(bad))
   }
   assert.equal(f.calls.length, 1)
@@ -148,4 +150,10 @@ test('recovery is explicit, strictly correlated and never retried after losing a
   } }))
   await assert.rejects(client.startRelocationRecovery(request), { kind: 'unreachable' })
   assert.equal(attempts, 1); assert.ok(!JSON.stringify(diagnostics).includes('private-human')); assert.ok(!JSON.stringify(diagnostics).includes(recovery_id))
+})
+
+test('source restoration status preserves its outcome without claiming a target move', async () => {
+  const job = { intent_id: id, state: 'needs_attention', stage: 'restoring', source: '/old', target: '/planned', outcome: 'source_restored' }
+  assert.deepEqual(await fixture({ available: true, job }).client.relocationStatus(id), { available: true, job })
+  await assert.rejects(fixture({ available: true, job: { ...job, outcome: 'moved' } }).client.relocationStatus(id), { kind: 'validation' })
 })

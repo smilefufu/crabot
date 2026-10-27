@@ -1513,19 +1513,32 @@ export class ModuleManager {
 
   private async getWorkspaceRelocationStatus(params: WorkspaceRelocationJobQuery, bearer?: string): Promise<WorkspaceRelocationStatusResult> {
     const query = await this.verifyWorkspaceRelocationJobQuery(params, bearer)
-    const job = this.workspaceInitialJob, recovery = this.workspaceRecoveryJob
+    const job = this.workspaceInitialJob, recovery = this.workspaceRecoveryJob, interrupted = this.workspaceInterruptedService
+    const interruptedId = interrupted?.request.intent_id
     const recoveryId = recovery?.request.intent_id
     const ownId = job && (job.proof || job.phase === 'preparing') ? job.request.intent_id : undefined
     const records = require('../../scripts/lib/workspace-relocation-intent.mjs')
+    const read = (id?: string): WorkspaceRelocationStatusResult => require('../../scripts/lib/workspace-interrupted-observation.mjs').readWorkspaceInterruptedJobStatus(this.dataDir, id)
+      ?? records.readWorkspaceRelocationJobStatus(this.dataDir, id)
     let stored: WorkspaceRelocationStatusResult
-    if (query.intent_id) stored = records.readWorkspaceRelocationJobStatus(this.dataDir, query.intent_id)
-    else if (job?.phase === 'preparing' || job?.phase === 'accepted') stored = records.readWorkspaceRelocationJobStatus(this.dataDir, ownId)
-    else if (recovery?.phase === 'running') stored = records.readWorkspaceRelocationJobStatus(this.dataDir, recoveryId)
+    if (query.intent_id) stored = read(query.intent_id)
+    else if (job?.phase === 'preparing' || job?.phase === 'accepted') stored = read(ownId)
+    else if (recovery?.phase === 'running') stored = read(recoveryId)
     else {
-      stored = records.readWorkspaceRelocationJobStatus(this.dataDir)
-      if (stored.available && !stored.job && (recoveryId || ownId)) stored = records.readWorkspaceRelocationJobStatus(this.dataDir, recoveryId ?? ownId)
+      stored = read()
+      if (stored.available && !stored.job && (interruptedId || recoveryId || ownId)) stored = read(interruptedId ?? recoveryId ?? ownId)
     }
-    const id = query.intent_id ?? stored.job?.intent_id ?? recoveryId ?? ownId
+    const id = query.intent_id ?? stored.job?.intent_id ?? interruptedId ?? recoveryId ?? ownId
+    if (stored.available && interrupted && interruptedId === id) {
+      if (!stored.job || interrupted.phase === 'resumed' && stored.job.state !== 'committed') return { available: false, job: null }
+      if (!['resumed', 'needs_attention'].includes(interrupted.phase)) {
+        const owner = interrupted.coordinator, native = require('../../scripts/lib/process-identity.cjs')
+        if (!owner?.child.connected || owner.child.exitCode !== null || owner.child.signalCode !== null
+          || !native.sameProcess(owner.launch.process, native.inspectProcess(owner.child.pid))) return { available: false, job: null }
+      }
+      return { available: true, job: { ...stored.job, state: interrupted.phase === 'resumed' ? 'completed' : interrupted.phase === 'needs_attention' ? 'needs_attention' : 'running',
+        stage: interrupted.phase === 'resumed' ? 'finished' : 'restoring' } }
+    }
     if (stored.available && recovery && recoveryId === id) {
       if (!stored.job || recovery.phase === 'completed' && stored.job.state !== 'committed') return { available: false, job: null }
       if (recovery.phase === 'running') {
@@ -1922,6 +1935,10 @@ export class ModuleManager {
     if (this.workspaceRecoveryHandoffBusy()) return { available: true, recovery: null }
     const records = require('../../scripts/lib/workspace-relocation-intent.mjs')
     try {
+      const observations = require('../../scripts/lib/workspace-interrupted-observation.mjs')
+      if (observations.readWorkspaceInterruptedRecoveryFacts(this.dataDir, query.intent_id)) return {
+        available: true, recovery: observations.previewWorkspaceInterruptedRecovery(this.dataDir, query.intent_id),
+      }
       return records.observeWorkspaceRelocationRecords(() => {
         const status = records.readWorkspaceRelocationJobStatus(this.dataDir, query.intent_id)
         if (!status.available) return { available: false, recovery: null }
@@ -1947,10 +1964,18 @@ export class ModuleManager {
     }
     if (this.isShuttingDown || this.workspaceRecoveryHandoffBusy()) throw Object.assign(new Error('当前作业仍在收尾，请查看原作业。'), { code: 'SERVICE_UNAVAILABLE' })
     const reply = Promise.resolve().then(async (): Promise<WorkspaceRelocationRecoveryAccepted> => {
-      const coordinator = await this.initializeWorkspaceRelocationRecovery(request, bearer)
-      await coordinator.verify()
-      // The original driver owns its failure/status and all once-only effects, never the browser.
-      void this.completeWorkspaceRecovery(request, bearer).catch(() => {})
+      if ('checkpoint_sha256' in request) {
+        const offer = require('../../scripts/lib/workspace-interrupted-observation.mjs').previewWorkspaceInterruptedRecovery(this.dataDir, request.intent_id)
+        if (!offer || offer.checkpoint_sha256 !== request.checkpoint_sha256) throw Object.assign(new Error('原恢复检查点已变化或尚不能执行，请重新核验。'), { code: 'SERVICE_UNAVAILABLE' })
+        const current = await this.initializeWorkspaceInterruptedService(request, bearer)
+        await current.verify()
+        void this.completeWorkspaceInterruptedService(current).catch(() => {})
+      } else {
+        const coordinator = await this.initializeWorkspaceRelocationRecovery(request, bearer)
+        await coordinator.verify()
+        // The driver owns failure/status and all once-only effects, never the browser.
+        void this.completeWorkspaceRecovery(request, bearer).catch(() => {})
+      }
       return Object.freeze({ intent_id: request.intent_id, recovery_id: request.recovery_id, accepted: true })
     })
     this.workspaceRecoveryReceipts.set(request.recovery_id, { fingerprint, reply })

@@ -433,6 +433,33 @@ it('unknown recovery admission retains both identities without automatically ret
   await waitFor(() => expect(mocks.relocationStatus).toHaveBeenCalled())
   expect(mocks.startRelocationRecovery).toHaveBeenCalledTimes(1)
 })
+
+it.each(['restore_source', 'finish_commit'])('interrupted recovery renders its actual action and sends only the checkpoint: %s', async action => {
+  const verify = await pendingRecovery()
+  const offer = { intent_id: id, checkpoint_sha256: 'c'.repeat(64), action }
+  mocks.previewRelocationRecovery.mockResolvedValue({ available: true, recovery: offer })
+  mocks.startRelocationRecovery.mockImplementation(async request => ({ intent_id: id, recovery_id: request.recovery_id, accepted: true }))
+  fireEvent.click(verify)
+  const label = action === 'restore_source' ? '结束迁移并恢复原位置' : '继续完成迁移'
+  const start = await screen.findByRole('button', { name: label })
+  if (action === 'restore_source') expect(screen.queryByText(/旧执行器永久保持关闭/)).toBeNull()
+  fireEvent.click(start); fireEvent.click(start)
+  await waitFor(() => expect(mocks.startRelocationRecovery).toHaveBeenCalledTimes(1))
+  expect(mocks.startRelocationRecovery.mock.calls[0][0]).toEqual({ intent_id: id, checkpoint_sha256: offer.checkpoint_sha256,
+    recovery_id: expect.stringMatching(/^[a-f0-9-]{36}$/), confirmed: true })
+  expect(await screen.findByText(/恢复已接纳/)).toBeInTheDocument()
+  if (action === 'restore_source') expect(screen.getByText(/之前停止的执行器不会自动续跑/)).toBeInTheDocument()
+})
+
+it('source-restored completion is distinct from moving into the planned target', async () => {
+  const result = { available: true, job: { intent_id: id, state: 'completed', stage: 'finished', source: '/old', target: '/planned', outcome: 'source_restored' } }
+  mocks.currentRelocation.mockResolvedValue(result); mocks.relocationStatus.mockResolvedValue(result)
+  render(<MemoryRouter><Workspaces /></MemoryRouter>)
+  expect(await screen.findByText('迁移已结束，已恢复原位置')).toBeInTheDocument()
+  expect(screen.getByText('原计划位置')).toBeInTheDocument()
+  expect(screen.queryByText('迁移已完成')).toBeNull()
+  expect(screen.queryByRole('button', { name: '核验恢复条件' })).toBeNull()
+})
 it('a late recovery preview cannot enable recovery after current status has changed', async () => {
   let resolve!: (value: unknown) => void
   const verify = await pendingRecovery()

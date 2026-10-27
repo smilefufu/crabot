@@ -119,6 +119,7 @@ export interface WorkspaceRelocationJobStatus {
   stage: WorkspaceRelocationJobStage
   source?: string
   target?: string
+  outcome?: 'source_restored'
 }
 export interface WorkspaceRelocationStatusResult {
   available: boolean
@@ -307,18 +308,31 @@ export interface VerifyWorkspaceRelocationRecoveryRequestParams {
   completion_sha256: string
   finalizing_sha256: string
 }
-export interface WorkspaceRelocationRecoveryOffer {
+export interface WorkspaceArchivedRelocationRecoveryOffer {
   intent_id: string
   completion_sha256: string
   finalizing_sha256: string
 }
+export interface WorkspaceInterruptedRelocationRecoveryOffer {
+  intent_id: string
+  checkpoint_sha256: string
+  action: 'restore_source' | 'finish_commit'
+}
+export type WorkspaceRelocationRecoveryOffer = WorkspaceArchivedRelocationRecoveryOffer | WorkspaceInterruptedRelocationRecoveryOffer
 export interface WorkspaceRelocationRecoveryPreviewResult {
   available: boolean
   recovery: WorkspaceRelocationRecoveryOffer | null
 }
-export interface StartWorkspaceRelocationRecoveryParams extends VerifyWorkspaceRelocationRecoveryRequestParams {
+export interface StartWorkspaceArchivedRelocationRecoveryParams extends VerifyWorkspaceRelocationRecoveryRequestParams {
   confirmed: true
 }
+export interface StartWorkspaceInterruptedRelocationRecoveryParams {
+  intent_id: string
+  recovery_id: string
+  checkpoint_sha256: string
+  confirmed: true
+}
+export type StartWorkspaceRelocationRecoveryParams = StartWorkspaceArchivedRelocationRecoveryParams | StartWorkspaceInterruptedRelocationRecoveryParams
 export interface WorkspaceRelocationRecoveryAccepted {
   intent_id: string
   recovery_id: string

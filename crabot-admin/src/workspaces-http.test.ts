@@ -297,13 +297,16 @@ it('fixed job status validates the identity and receipt without falling back fro
 })
 
 
-function recoveryConfirmation() {
-  return { intent_id: randomUUID(), recovery_id: randomUUID(), completion_sha256: 'a'.repeat(64), finalizing_sha256: 'b'.repeat(64), confirmed: true as const }
+function recoveryConfirmation(interrupted = false) {
+  const common = { intent_id: randomUUID(), recovery_id: randomUUID(), confirmed: true as const }
+  return interrupted ? { ...common, checkpoint_sha256: 'a'.repeat(64) }
+    : { ...common, completion_sha256: 'a'.repeat(64), finalizing_sha256: 'b'.repeat(64) }
 }
-it('recovery HTTP is human-only and remains live behind its closed file drain', async () => {
-  const f = await fixture(), request = recoveryConfirmation(), headers = { Authorization: 'Bearer fixture-human', 'Content-Type': 'application/json' }
+it.each([false, true])('recovery HTTP is human-only and remains live behind its closed file drain: interrupted=%s', async interrupted => {
+  const f = await fixture(), request = recoveryConfirmation(interrupted), headers = { Authorization: 'Bearer fixture-human', 'Content-Type': 'application/json' }
   const { recovery_id, confirmed, ...offer } = request
-  const call = startRpc(f.admin, async (method: string) => method === 'preview_workspace_relocation_recovery' ? { available: true, recovery: offer } : { intent_id: request.intent_id, recovery_id, accepted: true })
+  const suggestion = interrupted ? { ...offer, action: 'restore_source' } : offer
+  const call = startRpc(f.admin, async (method: string) => method === 'preview_workspace_relocation_recovery' ? { available: true, recovery: suggestion } : { intent_id: request.intent_id, recovery_id, accepted: true })
   const preview = f.endpoint + '/workspaces/relocation/jobs/' + request.intent_id + '/recovery', submit = f.endpoint + '/workspaces/relocation/recover'
   expect((await fetch(preview)).status).toBe(401)
   for (const token of ['fixture-internal', jwt.sign({ sub: 'agent-cli', exp: Math.floor(Date.now() / 1000) + 60 }, 'fixture-secret')]) {
@@ -313,7 +316,7 @@ it('recovery HTTP is human-only and remains live behind its closed file drain', 
   expect(call).not.toHaveBeenCalled()
   await fs.writeFile(path.join(f.root, 'workspace-control/relocation-finalizing.json'), 'finite original fence')
   await f.admin.quiesceWorkspaceWebAccess()
-  expect(await f.client.previewRelocationRecovery(request.intent_id)).toEqual({ available: true, recovery: offer })
+  expect(await f.client.previewRelocationRecovery(request.intent_id)).toEqual({ available: true, recovery: suggestion })
   const response = await fetch(submit, { method: 'POST', headers, body: JSON.stringify(request) })
   expect(response.status).toBe(202); expect(response.headers.get('cache-control')).toBe('no-store')
   expect(await response.json()).toEqual({ intent_id: request.intent_id, recovery_id, accepted: true })
@@ -322,11 +325,11 @@ it('recovery HTTP is human-only and remains live behind its closed file drain', 
   expect((await fetch(f.endpoint + '/workspaces/default/usage/refresh', { method: 'POST', headers, body: '{}' })).status).toBe(503)
   expect(await fs.readFile(path.join(f.root, 'workspace-control/relocation-finalizing.json'), 'utf8')).toBe('finite original fence')
 })
-it('recovery rejects injected input, mismatched replies and unknown admission without leaking raw errors', async () => {
-  const f = await fixture(), request = recoveryConfirmation(), headers = { Authorization: 'Bearer fixture-human', 'Content-Type': 'application/json' }
+it.each([false, true])('recovery rejects injected input, mismatched replies and unknown admission without leaking raw errors: interrupted=%s', async interrupted => {
+  const f = await fixture(), request = recoveryConfirmation(interrupted), headers = { Authorization: 'Bearer fixture-human', 'Content-Type': 'application/json' }
   const call = startRpc(f.admin, async () => ({ intent_id: request.intent_id, recovery_id: request.recovery_id, accepted: true }))
   const submit = (body: unknown) => fetch(f.endpoint + '/workspaces/relocation/recover', { method: 'POST', headers, body: JSON.stringify(body) })
-  for (const body of [{ ...request, confirmed: false }, { ...request, path: '/forged' }, { ...request, finalizing_sha256: 'bad' }]) expect((await submit(body)).status).toBe(400)
+  for (const body of [{ ...request, confirmed: false }, { ...request, path: '/forged' }, { ...request, action: 'finish_commit' }, { ...request, finalizing_sha256: 'bad' }]) expect((await submit(body)).status).toBe(400)
   expect((await fetch(f.endpoint + '/workspaces/relocation/jobs/not-a-job/recovery', { headers })).status).toBe(400)
   expect((await fetch(f.endpoint + '/workspaces/relocation/jobs/' + request.intent_id + '/recovery?source=x', { headers })).status).toBe(400)
   expect(call).not.toHaveBeenCalled()
@@ -337,8 +340,8 @@ it('recovery rejects injected input, mismatched replies and unknown admission wi
   call.mockResolvedValueOnce({ available: false, recovery: null })
   expect(await f.client.previewRelocationRecovery(request.intent_id)).toEqual({ available: false, recovery: null })
 })
-it('disconnecting recovery HTTP does not cancel the single already handed off admission', async () => {
-  const f = await fixture(), request = recoveryConfirmation()
+it.each([false, true])('disconnecting recovery HTTP does not cancel the single already handed off admission: interrupted=%s', async interrupted => {
+  const f = await fixture(), request = recoveryConfirmation(interrupted)
   let seen!: () => void, finish!: () => void, completed = false
   const entered = new Promise<void>(resolve => { seen = resolve }), release = new Promise<void>(resolve => { finish = resolve })
   const call = startRpc(f.admin, async () => { seen(); await release; await f.admin.quiesceWorkspaceWebAccess(); completed = true; return { intent_id: request.intent_id, recovery_id: request.recovery_id, accepted: true } })

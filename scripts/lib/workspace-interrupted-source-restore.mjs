@@ -22,6 +22,8 @@ function executionScope(checkpoint) {
   if (exits.probeKnownProcessExit(processes).state !== 'stopped') throw failure()
   return hash({ coordinator: checkpoint.coordinator, workers: checkpoint.stops, modules: checkpoint.module_stops, processes: checkpoint.process_stops })
 }
+/** Read-only original stop facts. This neither stops current validation modules nor authorizes a move. */
+export function assertWorkspaceInterruptedOriginalExecutionExited(checkpoint) { executionScope(checkpoint) }
 /** Current recovery's observation only; never fills the old coordinator's missing record. */
 export function readWorkspaceInterruptedExecutionExit({ dataDir, recoveryId, checkpoint }) {
   const role = readWorkspaceInterruptedRecoveryRole(dataDir, recoveryId), scopeHash = executionScope(checkpoint)

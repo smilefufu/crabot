@@ -141,8 +141,14 @@ function RelocationStatusPanel({ observation, knownId }: { observation: ReturnTy
   if (missing || knownId && !job && !status.isError) title = '提交结果待核实，请刷新迁移进度；不要重复提交。'
   let detail = '请稍后刷新，当前工作区列表与搜索仍可使用。'
   if (!uncertain && job) {
-    if (job.state === 'completed') { title = '迁移已完成'; detail = '目录、执行模块和管理页面已恢复，旧执行器保持关闭。' }
-    else if (job.state === 'committed') { title = '目录切换已提交'; detail = '这条历史记录确认了目录切换，完整业务恢复结果仍待核实。' }
+    if (job.state === 'completed') {
+      title = job.outcome === 'source_restored' ? '迁移已结束，已恢复原位置' : '迁移已完成'
+      detail = job.outcome === 'source_restored' ? '执行模块和管理页面已恢复；之前停止的执行器不会自动续跑。' : '目录、执行模块和管理页面已恢复，旧执行器保持关闭。'
+    }
+    else if (job.state === 'committed') {
+      title = job.outcome === 'source_restored' ? '原位置已恢复' : '目录切换已提交'
+      detail = '这条历史记录确认了目录处理结果，完整业务恢复结果仍待核实。'
+    }
     else if (job.state === 'needs_attention') { title = '迁移尚未确认完成'; detail = '请先核对当前状态；刷新页面不会重新执行迁移。' }
     else { title = relocationStages[job.stage]; detail = job.state === 'preparing' ? '正在准备并核对本次迁移，尚未确认接管。' : '迁移由后台继续执行，关闭页面不会取消已接纳的作业。' }
   }
@@ -151,7 +157,7 @@ function RelocationStatusPanel({ observation, knownId }: { observation: ReturnTy
     {(job || knownId) && <p className="workspace-path">作业编号：{job?.intent_id ?? knownId}</p>}
     {job && <><dl className="workspace-facts">
       <dt>原位置</dt><dd className="workspace-path">{job.source ?? '尚未核实'}</dd>
-      <dt>目标位置</dt><dd className="workspace-path">{job.target ?? '尚未核实'}</dd>
+      <dt>{job.outcome === 'source_restored' ? '原计划位置' : '目标位置'}</dt><dd className="workspace-path">{job.target ?? '尚未核实'}</dd>
       {uncertain && <><dt>上次确认阶段</dt><dd>{relocationStages[job.stage]}</dd></>}
     </dl></>}
     <div className="workspace-actions"><Button variant="secondary" disabled={status.isFetching} onClick={() => void status.refetch()}>刷新迁移进度</Button>
@@ -164,6 +170,7 @@ function RelocationRecoveryPanel({ client, observation, knownId, rememberJob }: 
 }) {
   const { job, uncertain, status } = observation, intentId = knownId ?? job?.intent_id
   const [offer, setOffer] = useState<WorkspaceRelocationRecoveryOffer>(), [busy, setBusy] = useState(false), [notice, setNotice] = useState(''), [recoveryId, setRecoveryId] = useState('')
+  const [submittedOffer, setSubmittedOffer] = useState<WorkspaceRelocationRecoveryOffer>()
   const request = useRef<AbortController | undefined>(undefined), submitted = useRef(false), mounted = useRef(true)
   const state = `${job?.state}:${job?.stage}:${uncertain}`, current = useRef(state); current.current = state
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; request.current?.abort() } }, [])
@@ -184,8 +191,10 @@ function RelocationRecoveryPanel({ client, observation, knownId, rememberJob }: 
   async function recover() {
     if (!offer || !eligible || submitted.current || busy) return
     submitted.current = true
-    const recovery_id = projectId(), input = { ...offer, recovery_id, confirmed: true as const }
-    setRecoveryId(recovery_id); setBusy(true); setOffer(undefined); rememberJob(offer.intent_id)
+    const recovery_id = projectId(), input = 'checkpoint_sha256' in offer
+      ? { intent_id: offer.intent_id, checkpoint_sha256: offer.checkpoint_sha256, recovery_id, confirmed: true as const }
+      : { ...offer, recovery_id, confirmed: true as const }
+    setRecoveryId(recovery_id); setSubmittedOffer(offer); setBusy(true); setOffer(undefined); rememberJob(offer.intent_id)
     try {
       await client.startRelocationRecovery(input)
       if (mounted.current) setNotice('恢复已接纳，正在后台继续；关闭页面不会取消。')
@@ -193,12 +202,16 @@ function RelocationRecoveryPanel({ client, observation, knownId, rememberJob }: 
     finally { if (mounted.current) { setBusy(false); void status.refetch() } }
   }
   if (!eligible && !recoveryId || job?.state === 'completed') return null
+  const visibleOffer = offer ?? submittedOffer, action = visibleOffer && 'action' in visibleOffer ? visibleOffer.action : undefined
+  let description = '先核验原作业，系统会确定恢复原位置或继续完成迁移；历史文件保留。'
+  if (visibleOffer) description = action === 'restore_source' ? '结束本次迁移并恢复原位置，再核验服务；之前停止的执行器不会自动续跑。'
+    : '恢复本次原活动服务，使用已提交的新目录；旧执行器永久保持关闭，历史文件保留。'
   return <Card><section aria-label="恢复工作目录服务"><h2>恢复服务</h2>
-    <p>恢复本次原活动服务，使用已提交的新目录；旧执行器永久保持关闭，历史文件保留。</p>
+    <p>{description}</p>
     {notice && <p role="status">{notice}</p>}
     {recoveryId && <p className="workspace-path">恢复编号：{recoveryId}</p>}
     <div className="workspace-actions"><Button variant="secondary" disabled={!eligible || busy || submitted.current} onClick={() => void preview()}>核验恢复条件</Button>
-      {offer && <Button disabled={busy || submitted.current} onClick={() => void recover()}>继续恢复服务</Button>}</div>
+      {offer && <Button disabled={busy || submitted.current} onClick={() => void recover()}>{action === 'restore_source' ? '结束迁移并恢复原位置' : action === 'finish_commit' ? '继续完成迁移' : '继续恢复服务'}</Button>}</div>
   </section></Card>
 }
 

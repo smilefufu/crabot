@@ -39,6 +39,8 @@ function positions(state) {
   if (plan?.mode === 'copy' && actors?.file_ready && !tree && !published) fail('copy-missing')
   return { source, container, tree, target, published }
 }
+/** Metadata only for an offer; the effect driver separately verifies file bytes under its role. */
+export function readWorkspaceInterruptedPositions(checkpoint) { return positions(checkpoint) }
 
 /** Checkpoint and physical position/content facts only; never a stop, move, cleanup or release permit. */
 export async function inspectWorkspaceInterruptedRelocation({ dataDir, id, signal }) {

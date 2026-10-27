@@ -16,7 +16,7 @@ import { relocationAgentConfig } from '../../crabot-agent/tests/core/fixtures/re
 afterEach(() => vi.restoreAllMocks())
 
 for (const forward of [false, true]) describe('current interrupted ' + (forward ? 'forward' : 'source') + ' recovery admission', () => {
-  const modes = ['healthy', 'health failure then explicit retry', 'cold Core after failed health', 'released before Web acknowledgement',
+  const modes = ['healthy', 'HTTP and SDK', 'health failure then explicit retry', 'cold Core after failed health', 'released before Web acknowledgement',
     ...(forward ? ['archived before protection handoff'] : []),
     ...(!forward ? ['stopped before final exit summary', 'stopped before final exit summary then explicit retry'] : []),
     ...(process.env.GITHUB_ACTIONS === 'true' && process.env.CRABOT_WORKSPACE_BUSINESS_ONSTART_CI === '1' ? ['business onStart', 'business released before Web acknowledgement'] : [])]
@@ -54,7 +54,27 @@ for (const forward of [false, true]) describe('current interrupted ' + (forward 
       old!.disconnect(); await ended
       if (actors) await vi.waitFor(() => expect(require('../../scripts/lib/known-process-exit.cjs').probeKnownProcessExit([actors.host.process]).state).toBe('stopped'), { timeout: 5000 })
       const checkpoint = records.readWorkspaceInterruptedRelocationCheckpoint(f.data, f.params.intent_id)
-      let context = await f.manager.initializeWorkspaceInterruptedService({ intent_id: f.params.intent_id, recovery_id: randomUUID(), checkpoint_sha256: checkpoint.checkpoint_sha256 }, 'fixture-human')
+      const request = { intent_id: f.params.intent_id, recovery_id: randomUUID(), checkpoint_sha256: checkpoint.checkpoint_sha256 }
+      let context: any, client: any
+      if (mode === 'HTTP and SDK') {
+        const { HttpClient, WorkspaceClient } = await import('../../crabot-client/dist/index.js')
+        client = new WorkspaceClient(new HttpClient({ endpoint: `http://127.0.0.1:${f.port}/api`, token: () => 'fixture-human' }))
+        const control = path.join(f.data, 'workspace-control'), controlNames = (await fs.readdir(control)).sort(), children = new Map(f.manager.processes)
+        expect(await client.previewRelocationRecovery(request.intent_id)).toEqual({ available: true, recovery: {
+          intent_id: request.intent_id, checkpoint_sha256: request.checkpoint_sha256, action: forward ? 'finish_commit' : 'restore_source',
+        } })
+        expect((await fs.readdir(control)).sort()).toEqual(controlNames)
+        expect(f.manager.processes).toEqual(children); expect(f.manager.workspaceInterruptedService).toBeUndefined()
+        await expect(client.startRelocationRecovery({ ...request, recovery_id: randomUUID(), checkpoint_sha256: '0'.repeat(64), confirmed: true })).rejects.toBeDefined()
+        expect((await fs.readdir(control)).sort()).toEqual(controlNames)
+        expect(f.manager.workspaceInterruptedService).toBeUndefined()
+        const receipt = await client.startRelocationRecovery({ ...request, confirmed: true })
+        expect(receipt).toEqual({ intent_id: request.intent_id, recovery_id: request.recovery_id, accepted: true })
+        context = f.manager.workspaceInterruptedService
+        expect((await client.relocationStatus(request.intent_id)).job.state).not.toBe('completed')
+        expect(await client.startRelocationRecovery({ ...request, confirmed: true })).toEqual(receipt)
+        expect(f.manager.workspaceInterruptedService).toBe(context)
+      } else context = await f.manager.initializeWorkspaceInterruptedService(request, 'fixture-human')
       const unhealthy = path.join(f.data, 'validation-health-unhealthy')
       const releasedFailure = mode === 'released before Web acknowledgement' || mode === 'business released before Web acknowledgement', extraUnhealthy = path.join(f.data, 'extra-health-unhealthy')
       if (releasedFailure) await fs.writeFile(extraUnhealthy, 'finite post-release health rejection')
@@ -132,6 +152,15 @@ for (const forward of [false, true]) describe('current interrupted ' + (forward 
       expect((await fetch(`http://127.0.0.1:${f.port}/api/friends`, { headers: { Authorization: 'Bearer fixture-human' } })).status).toBe(200)
       expect(require('../../scripts/lib/known-process-exit.cjs').probeKnownProcessExit([context.coordinator.launch.process]).state).toBe('stopped')
       expect(JSON.parse(await fs.readFile(path.join(context.coordinator.launch.control_root.path, 'service-resumed.json'), 'utf8')).job.recovery_id).toBe(context.request.recovery_id)
+      if (client) {
+        const status = await client.relocationStatus(request.intent_id)
+        expect(status).toMatchObject({ available: true, job: { state: 'completed', stage: 'finished', source, target: intent.target } })
+        if (forward) expect(status.job.outcome).toBeUndefined()
+        else expect(status.job.outcome).toBe('source_restored')
+        expect(require('../../scripts/lib/workspace-interrupted-observation.mjs').readWorkspaceInterruptedJobStatus(f.data, request.intent_id))
+          .toMatchObject({ available: true, job: { state: 'committed', stage: 'finished', ...(forward ? {} : { outcome: 'source_restored' }) } })
+        expect(await client.previewRelocationRecovery(request.intent_id)).toEqual({ available: true, recovery: null })
+      }
       expect(f.manager.workspaceCoordinatorGrant).toBeUndefined()
     } catch (cause) {
       const diagnostics = []
@@ -1062,6 +1091,7 @@ describe('MM reads workspace recovery handoff under current human authority', ()
       grant.revoked = true
       expect(await f.manager.previewWorkspaceRelocationRecovery({ intent_id: f.params.intent_id }, 'fixture-human')).toEqual({ available: false, recovery: null })
       grant.close(); await f.manager.closeWorkspaceCoordinatorChannel(grant.child)
+      expect(require('../../scripts/lib/workspace-interrupted-observation.mjs').readWorkspaceInterruptedRecoveryFacts(f.data, f.params.intent_id)).toBeNull()
       expect(await f.manager.previewWorkspaceRelocationRecovery({ intent_id: f.params.intent_id }, 'fixture-human')).toEqual({ available: true, recovery: {
         intent_id: f.params.intent_id, completion_sha256: sha256CanonicalJson(archive.completion), finalizing_sha256: sha256CanonicalJson(fence),
       } })

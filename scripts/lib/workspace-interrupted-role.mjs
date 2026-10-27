@@ -108,6 +108,12 @@ function previousRecoveriesExited(ctx, request) {
     if (!previous.launch || exits.probeKnownProcessExit([previous.launch.process]).state !== 'stopped') throw failure()
   }
 }
+/** No new recovery id, lock or authority is created by this offer-time observation. */
+export function assertWorkspaceInterruptedRecoveriesExited(dataDir, intentId) {
+  if (!uuid(intentId)) throw failure()
+  const data = management.requireExistingDataRoot(dataDir)
+  previousRecoveriesExited({ data, parent: path.join(data, 'workspace-control/relocation-recovery') }, { intent_id: intentId })
+}
 export async function commitWorkspaceInterruptedRecoveryLaunch({ dataDir, request: input, coordinator, verify }) {
   if (typeof verify !== 'function' || process.versions.electron) throw failure()
   const request = parseWorkspaceInterruptedRecoveryRequest(input), ctx = context(dataDir, request.recovery_id)
