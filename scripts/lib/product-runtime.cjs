@@ -72,12 +72,13 @@ function loadProductRuntime(root, { required = false, full = false } = {}) {
       invalid('inventory 文件清单损坏: ' + name)
     }
   }
-  const executables = {}
+  const executables = {}, verified = new Set()
   for (const name of COMMANDS) {
     const relative = relativePath(manifest.executables?.[name])
     const entry = manifest.files[relative]
     if (!entry) invalid('inventory 未收录必需命令: ' + name)
     executables[name] = verifyFile(root, relative, entry)
+    verified.add(relative)
     if (process.platform !== 'win32' && !(fs.statSync(executables[name]).mode & 0o111)) {
       invalid('组件不可执行: ' + name)
     }
@@ -92,9 +93,11 @@ function loadProductRuntime(root, { required = false, full = false } = {}) {
     relativePath(relative)
     if (!manifest.files[relative]) invalid('inventory 未收录 seed wheel')
     verifyFile(root, relative, manifest.files[relative])
+    verified.add(relative)
   }
   if (full) {
-    for (const [relative, entry] of Object.entries(manifest.files)) verifyFile(root, relative, entry)
+    // Required commands and seed wheels were fully hashed in this same call.
+    for (const [relative, entry] of Object.entries(manifest.files)) if (!verified.has(relative)) verifyFile(root, relative, entry)
   }
   return {
     root, manifest, executables,
