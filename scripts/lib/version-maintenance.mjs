@@ -15,7 +15,6 @@ import { verifyMaintenanceBackup } from './maintenance-backup.mjs'
 import { previewMigrations } from '../upgrade-lib/migrate.mjs'
 import { assertNoInterruptedMigrations } from '../upgrade-lib/migration-transaction.mjs'
 import cliLocation from './cli-location.cjs'
-import { readLegacyDesktopPrograms } from './legacy-desktop-programs.mjs'
 import { withVerifiedLegacyProcessGraph } from './legacy-process-graph.mjs'
 import { inspectLegacyEntryFence, sealLegacyEntryFence } from './legacy-entry-fence.mjs'
 import { discoverLegacyRuntime, discoverSealedLegacyRuntime } from './legacy-runtime.mjs'
@@ -397,6 +396,7 @@ export async function recoverLegacyUserVersionMaintenance({ dataDir, root, appVe
     if (record.schema_version !== 4 || record.phase !== 'verifying' || record.target_core.root !== root
       || record.target_version !== appVersion || !record.legacy_python || typeof verifyTakeover !== 'function'
       || typeof verifyCompatible !== 'function' || typeof run !== 'function') fail()
+    const { readLegacyDesktopPrograms } = await import('./legacy-desktop-programs.mjs')
     const verify = async () => {
       await verifyTakeover()
       const entry = await legacyUserEntry(record)
