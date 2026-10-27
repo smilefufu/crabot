@@ -532,6 +532,11 @@ function validModules(modules, historical = false) {
   }
   return true
 }
+/** Shape only for current execution capture; no original job, stop or process authority. */
+export function assertWorkspaceExecutionScopeShape(value) {
+  if (!fields(value, ['workers', 'processes', 'modules']) || !validWorkers(value.workers)
+    || !validProcesses(value.processes, true) || !validModules(value.modules, true)) fail()
+}
 function absent(ctx, names) {
   for (const name of [...names, closurePlanFile, closureCommitsDirectory, recoveryPlanFile, recoveryCommitFile, rootPlanFile, rootPublishedFile, rootSelectedFile, rootParentsFile, rootParentsCompleteFile]) {
     try { fs.lstatSync(path.join(ctx.control, name)); fail() }

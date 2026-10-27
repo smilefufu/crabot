@@ -14,6 +14,8 @@ import { launchWorkspaceInterruptedRecoveryCoordinator } from '../workspace-inte
 import { readWorkspaceInterruptedRecoveryRole } from '../workspace-interrupted-role.mjs'
 import { WorkspaceCatalog } from '../../../crabot-shared/dist/workspace-catalog.js'
 import { sha256CanonicalJson as hash } from '../../../crabot-shared/dist/canonical-json.js'
+import { createWorkspaceInterruptedExecutionJournal, readWorkspaceInterruptedEarlyExecution } from '../workspace-interrupted-execution.mjs'
+import { stopKnownProcessScope } from '../known-process-stop.cjs'
 
 async function fixture(t) {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(tmpdir(), 'crabot-interrupted-role-中文 '))), data = management.ensurePrivateDataRoot(path.join(root, 'data')), id = randomUUID()
@@ -101,4 +103,66 @@ test('an idle initialized recovery role cannot invent missing execution-exit evi
   assert.equal(fs.existsSync(path.join(directory, 'source-complete.json')), false)
   assert.equal(fs.existsSync(path.join(f.root, 'new')), false)
   assert.equal(readWorkspaceInterruptedRelocationCheckpoint(f.data, f.id).execution_exit, null)
+})
+
+test('early recovery records and settles its actual finite process without filling original stop records', { timeout: 45000 }, async t => {
+  const f = await fixture(t), checkpoint = readWorkspaceInterruptedRelocationCheckpoint(f.data, f.id)
+  await acquireWorkspaceRelocationLock(f.data, f.id)
+  const role = await launchWorkspaceInterruptedRecoveryCoordinator(f.options()); f.children.push(role)
+  const child = spawn(process.execPath, ['-e', "process.on('disconnect',()=>process.exit(0));process.send('ready')"], { stdio: ['ignore', 'ignore', 'ignore', 'ipc'] })
+  f.children.push({ child }); await once(child, 'message')
+  const scope = { workers: [], modules: [], processes: [native.inspectProcess(child.pid)] }
+  const journal = await createWorkspaceInterruptedExecutionJournal({ dataDir: f.data, recoveryId: f.request.recovery_id, checkpoint, scope, verify: role.verify })
+  assert.equal(readWorkspaceInterruptedEarlyExecution(f.data, checkpoint).proof, null)
+  assert.equal(await journal.prepare('processes'), 'dispatch')
+  let submissions = 0
+  await stopKnownProcessScope(scope.processes, { timeoutMs: 1000,
+    onObserved: processes => journal.observe(null, processes),
+    submit: async () => {
+      assert.equal(await journal.prepare('workers'), 'dispatch'); submissions++
+      await journal.complete('workers', [])
+      assert.equal(await journal.prepare('modules'), 'dispatch'); await journal.complete('modules', [])
+      child.disconnect()
+    } }, native)
+  await journal.complete('processes', {})
+  const complete = await journal.finish()
+  assert.ok(complete.proof); assert.equal(submissions, 1)
+  assert.equal(await journal.prepare('workers'), 'observe')
+  assert.deepEqual(readWorkspaceInterruptedRelocationCheckpoint(f.data, f.id), checkpoint)
+  assert.equal(fs.existsSync(path.join(f.data, 'workspace-control/relocation-active/relocation-stop-attempt.json')), false)
+})
+
+test('a fresh early recovery id cannot resend a previous unknown Worker stop', { timeout: 45000 }, async t => {
+  const f = await fixture(t), checkpoint = readWorkspaceInterruptedRelocationCheckpoint(f.data, f.id)
+  await acquireWorkspaceRelocationLock(f.data, f.id)
+  const role = await launchWorkspaceInterruptedRecoveryCoordinator(f.options()); f.children.push(role)
+  const scope = { workers: [], modules: [], processes: [] }
+  const journal = await createWorkspaceInterruptedExecutionJournal({ dataDir: f.data, recoveryId: f.request.recovery_id, checkpoint, scope, verify: role.verify })
+  assert.equal(await journal.prepare('workers'), 'dispatch')
+  assert.equal(readWorkspaceInterruptedEarlyExecution(f.data, checkpoint).proof, null)
+  const ended = once(role.child, 'exit'); role.close(); await ended
+  await acquireWorkspaceRelocationLock(f.data, f.id)
+  f.request.recovery_id = randomUUID()
+  const next = await launchWorkspaceInterruptedRecoveryCoordinator(f.options()); f.children.push(next)
+  await assert.rejects(createWorkspaceInterruptedExecutionJournal({ dataDir: f.data, recoveryId: f.request.recovery_id, checkpoint, scope, verify: next.verify }), { code: 'WORKSPACE_RELOCATION_INVALID' })
+  assert.equal(fs.existsSync(path.join(next.launch.control_root.path, 'execution-plan.json')), false)
+  assert.deepEqual(readWorkspaceInterruptedRelocationCheckpoint(f.data, f.id), checkpoint)
+})
+
+test('a plan-only early interruption can be freshly confirmed before any stop was submitted', { timeout: 45000 }, async t => {
+  const f = await fixture(t), checkpoint = readWorkspaceInterruptedRelocationCheckpoint(f.data, f.id), scope = { workers: [], modules: [], processes: [] }
+  await acquireWorkspaceRelocationLock(f.data, f.id)
+  const role = await launchWorkspaceInterruptedRecoveryCoordinator(f.options()); f.children.push(role)
+  await createWorkspaceInterruptedExecutionJournal({ dataDir: f.data, recoveryId: f.request.recovery_id, checkpoint, scope, verify: role.verify })
+  const ended = once(role.child, 'exit'); role.close(); await ended
+  await acquireWorkspaceRelocationLock(f.data, f.id); f.request.recovery_id = randomUUID()
+  const next = await launchWorkspaceInterruptedRecoveryCoordinator(f.options()); f.children.push(next)
+  const journal = await createWorkspaceInterruptedExecutionJournal({ dataDir: f.data, recoveryId: f.request.recovery_id, checkpoint, scope, verify: next.verify })
+  for (const kind of ['processes', 'workers', 'modules']) {
+    assert.equal(await journal.prepare(kind), 'dispatch')
+    if (kind === 'processes') await journal.observe(null, [])
+    await journal.complete(kind, kind === 'processes' ? {} : [])
+  }
+  assert.ok((await journal.finish()).proof)
+  assert.deepEqual(readWorkspaceInterruptedRelocationCheckpoint(f.data, f.id), checkpoint)
 })

@@ -445,6 +445,24 @@ export interface WorkspaceInterruptedRecoveryRuntimeResult extends WorkspaceInte
   module_id: 'crabot-agent'
   runtime_id: string
 }
+export interface WorkspaceInterruptedExecutionAuthorityParams extends WorkspaceInterruptedRecoveryRequest {
+  action: 'capture' | 'stop_workers'
+}
+export interface WorkspaceInterruptedExecutionAuthorityResult extends WorkspaceInterruptedExecutionAuthorityParams {
+  verified: true
+  launch_sha256: string
+  scope_sha256: string
+  instance_id: string
+  module_id: 'crabot-agent'
+  runtime_id: string
+}
+export interface WorkspaceInterruptedExecutionCaptureResult {
+  workers: ReadonlyArray<WorkspaceRelocationWorker>
+  processes: ReadonlyArray<WorkerProcessIdentity>
+}
+export interface CompleteWorkspaceInterruptedWorkerStopsParams extends WorkspaceInterruptedRecoveryRequest {
+  results: ReadonlyArray<WorkspaceRelocationStopResult>
+}
 export interface WorkspaceInterruptedRecoveryWebVerificationParams {
   action: 'prepare_web' | 'resume_web'
 }

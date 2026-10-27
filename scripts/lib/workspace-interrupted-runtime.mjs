@@ -38,7 +38,7 @@ function context(dataDir, recoveryId) {
   return { role, original, observation, directory, verify }
 }
 function planValue(value, role, original, observation) {
-  const allowed = new Set(['crabot-agent', 'memory-default', ...(original.checkpoint.modules?.modules ?? []).map(item => item.module_id)])
+  const allowed = new Set(['crabot-agent', 'memory-default', ...original.modules.map(item => item.module_id)])
   if (!exact(value, ['schema_version', 'recovery_id', 'launch_sha256', 'instance_id', 'admin_runtime_id', 'modules']) || value.schema_version !== 2
     || value.recovery_id !== role.launch.request.recovery_id || value.launch_sha256 !== hash(role.launch)
     || !uuid(value.instance_id) || !uuid(value.admin_runtime_id) || !Array.isArray(value.modules) || value.modules.length > 32768) throw failure()

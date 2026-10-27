@@ -6,6 +6,7 @@ import { readWorkspaceSourceRecoveryScope, workspaceSourceRestorationPaths, asse
 import { readWorkspaceInterruptedForwardPreparation, forwardFinalizingName } from './workspace-interrupted-forward-records.mjs'
 import { assertWorkspaceInterruptedActorsExited, assertWorkspaceInterruptedRecoveriesExited, readWorkspaceInterruptedRecoveryRole } from './workspace-interrupted-role.mjs'
 import { assertWorkspaceInterruptedOriginalExecutionExited } from './workspace-interrupted-source-restore.mjs'
+import { readWorkspaceInterruptedEarlyExecution, workspaceOriginalExecutionNeedsSettlement } from './workspace-interrupted-execution.mjs'
 import { readWorkspaceInterruptedPositions } from './workspace-interrupted-recovery.mjs'
 import { assertWorkspaceInterruptedRootCurrent, readWorkspaceInterruptedServiceScope } from './workspace-interrupted-service-scope.mjs'
 import { readWorkspaceInterruptedRuntimePlan } from './workspace-interrupted-runtime.mjs'
@@ -53,10 +54,11 @@ export function previewWorkspaceInterruptedRecovery(dataDir, id) {
   const facts = readWorkspaceInterruptedRecoveryFacts(dataDir, id)
   if (!facts) return null
   const checkpoint = facts.checkpoint
-  if (!checkpoint.coordinator?.ready || !checkpoint.modules) return null
+  const unsubmitted = workspaceOriginalExecutionNeedsSettlement(checkpoint), early = unsubmitted && readWorkspaceInterruptedEarlyExecution(dataDir, checkpoint)
+  if (!unsubmitted && (!checkpoint.coordinator?.ready || !checkpoint.modules)) return null
   assertWorkspaceInterruptedActorsExited(checkpoint)
   assertWorkspaceInterruptedRecoveriesExited(dataDir, id)
-  assertWorkspaceInterruptedOriginalExecutionExited(checkpoint)
+  if (!unsubmitted || early && Object.values(early.attempts).some(Boolean)) assertWorkspaceInterruptedOriginalExecutionExited(checkpoint, dataDir)
   if (facts.released && wasResumed(dataDir, facts)) return null
   if (facts.kind === 'source') assertWorkspaceSourceRootCurrent(facts)
   else if (facts.kind === 'forward') assertWorkspaceInterruptedRootCurrent(facts)

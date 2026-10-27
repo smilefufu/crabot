@@ -14,6 +14,7 @@ import {
 import { MEMORY_DATA_RPC_METHODS } from './memory-access.js'
 
 const SENSITIVE_METHODS: SensitiveRpcMethod[] = [
+  'verify_workspace_interrupted_recovery_execution', 'capture_workspace_interrupted_recovery_execution', 'stop_workspace_interrupted_recovery_workers', 'prepare_workspace_interrupted_recovery_worker_stops', 'complete_workspace_interrupted_recovery_worker_stops',
   'verify_workspace_interrupted_recovery_runtime', 'verify_workspace_interrupted_recovery_root', 'prepare_workspace_interrupted_recovery_web', 'resume_workspace_interrupted_recovery_web', 'verify_workspace_interrupted_recovery_web',
   'resolve_request_permission_source', 'resolve_request_permission_sources',
   'get_voice_config', 'submit_voice_turn', 'get_voice_turn_status', 'get_authorized_voice_turn', 'confirm_voice_turn',

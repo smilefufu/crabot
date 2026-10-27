@@ -1,5 +1,6 @@
 import { createWorkspaceInterruptedRootVerifier } from './core/workspace-interrupted-validation.js'
 import { createWorkspaceRelocationStopJournal } from './core/workspace-relocation-stop-journal.js'
+import { createWorkspaceInterruptedExecutionAuthority } from './core/workspace-interrupted-execution.js'
 import { createWorkspaceRelocationRootVerifier, createWorkspaceRecoveryRootVerifier } from './core/workspace-relocation-validation.js'
 import { verifyWorkspaceRelocationAuthority } from './core/workspace-relocation-authority.js'
 import type { VerifyWorkspaceRelocationRecoveryRootParams, VerifyWorkspaceRelocationRecoveryRootResult, VerifyWorkspaceRelocationRootParams, VerifyWorkspaceRelocationRootResult, CaptureWorkspaceRelocationProcessesParams, CaptureWorkspaceRelocationProcessesResult, CaptureWorkspaceRelocationWorkersParams, CaptureWorkspaceRelocationWorkersResult, StopWorkspaceRelocationWorkersParams, StopWorkspaceRelocationWorkersResult, RpcHandlerContext } from 'crabot-shared'
@@ -1027,6 +1028,30 @@ export class UnifiedAgent extends ModuleBase {
     return this.workspaceInterruptedRootVerifier(params, context?.authorizationBearer)
   }
 
+  private async handleWorkspaceInterruptedExecution(params: unknown, context: RpcHandlerContext | undefined, action: 'capture' | 'stop_workers') {
+    const dataDir = getDataRootDir()
+    const authority = await createWorkspaceInterruptedExecutionAuthority({ dataDir, moduleManagerPort: this.rpcClient.moduleManagerTargetPort,
+      runtimeBearer: () => ConfigLoader.getRuntimeBearer(), runtimeIdentity: () => ({ instance_id: process.env.CRABOT_INSTANCE_ID, module_id: this.config.moduleId, runtime_id: process.env.CRABOT_MODULE_RUNTIME_ID }),
+      isClosing: () => this.runtimeClosing }, params, context?.authorizationBearer, action)
+    await this.quiesceExecutionAdmissions()
+    if (action === 'capture') {
+      const workers = await this.captureWorkspaceRelocationScope()
+      const legacy = require('../../scripts/lib/workspace-legacy-record.cjs').readWorkspaceLegacyExecutions(dataDir)
+      if (legacy && legacy.status !== 'ready') throw new RpcError('SERVICE_UNAVAILABLE', '旧执行范围尚未核实。')
+      const processes = await this.requireManagerStack().harness.captureWorkspaceRelocationProcesses(workers, legacy?.value)
+      const background = await this.builtinBgRegistry.captureWorkspaceShellProcesses()
+      const fixed = require('../../scripts/lib/owned-process-tree.cjs').recaptureObservedProcessScope([...processes, ...background])
+      await authority.verify()
+      return { workers, processes: fixed }
+    }
+    const workers = require('../../scripts/lib/workspace-interrupted-execution.mjs').readWorkspaceInterruptedExecutionWorkers(dataDir, authority.request.recovery_id, authority.proof.scope_sha256)
+    const result = await this.requireManagerStack().harness.requestWorkspaceRelocationStops(workers, {
+      prepare: async current => { if (sha256CanonicalJson(current) !== sha256CanonicalJson(workers)) throw new RpcError('FORBIDDEN', '原执行器范围已变化。'); return authority.prepare() },
+      complete: results => authority.complete(results),
+    })
+    await authority.verify(); return result
+  }
+
   private async handleCaptureWorkspaceRelocationWorkers(params: CaptureWorkspaceRelocationWorkersParams, context?: RpcHandlerContext): Promise<CaptureWorkspaceRelocationWorkersResult> {
     const bearer = context?.authorizationBearer
     if (typeof bearer !== 'string' || !bearer) throw new RpcError('UNAUTHORIZED', '缺少迁移协调凭据。')
@@ -1958,6 +1983,8 @@ export class UnifiedAgent extends ModuleBase {
     this.registerMethod('verify_workspace_relocation_root', this.handleVerifyWorkspaceRelocationRoot.bind(this))
     this.registerMethod('verify_workspace_relocation_recovery_root', this.handleVerifyWorkspaceRelocationRecoveryRoot.bind(this))
     this.registerMethod('verify_workspace_interrupted_recovery_root', this.handleVerifyWorkspaceInterruptedRoot.bind(this))
+    this.registerMethod('capture_workspace_interrupted_recovery_execution', (params, context) => this.handleWorkspaceInterruptedExecution(params, context, 'capture'))
+    this.registerMethod('stop_workspace_interrupted_recovery_workers', (params, context) => this.handleWorkspaceInterruptedExecution(params, context, 'stop_workers'))
     this.registerMethod('capture_workspace_relocation_workers', this.handleCaptureWorkspaceRelocationWorkers.bind(this))
     this.registerMethod('get_workspace_execution_admin', async () => this.requireManagerStack().harness.getWorkspaceExecutionInventory())
     this.registerMethod('list_workers_admin', this.handleListWorkersAdmin.bind(this))
