@@ -52,7 +52,9 @@ function uninstallInstallation(installRoot: string): Promise<void> {
       await startGuiRemovalFromSource({ installRoot, operationId: randomUUID(), beginExit: () => {
         quitting = true; return () => { quitting = false }
       } })
-    } catch {
+    } catch (error) {
+      const code = (error as { code?: unknown })?.code
+      bootstrapStage('uninstall-unconfirmed', { code: typeof code === 'string' && /^[A-Z0-9_]{1,128}$/.test(code) ? code : 'CRABOT_DESKTOP_REMOVAL' })
       await dialog.showMessageBox({ type: 'error', title: '卸载尚未完成', message: 'Crabot 尚未卸载完成，用户数据已保留。',
         detail: '请核对当前维护进度后重试；如果原程序已不完整，请用同版或更高版离线安装器继续。', buttons: ['知道了'] })
     }

@@ -347,7 +347,7 @@ for (const mode of ['installer-valid', 'installer-wrong-operation', 'installer-c
     let output = ''; for (const stream of [child.stdout, child.stderr]) stream.on('data', value => { output = (output + value.toString()).slice(-4000) })
     const [result] = await Promise.race([once(child, 'message'), stopped.then(([code]) => { throw Error('Installer source exited: ' + code + '\n' + output) })])
     const [code] = await stopped
-    assert.equal(code, 0, output); assert.equal(result.accepted, ['installer-valid', 'installer-source', 'installer-ui'].includes(mode), JSON.stringify(result))
+    assert.equal(code, 0, JSON.stringify(result) + '\n' + output); assert.equal(result.accepted, ['installer-valid', 'installer-source', 'installer-ui'].includes(mode), JSON.stringify(result))
     const record = (await import('../../scripts/lib/desktop-removal-record.cjs')).default.readDesktopRemoval(own.root)
     assert.equal(record.operation_id, operationId); assert.equal(record.phase, ['installer-source', 'installer-ui'].includes(mode) ? 'completed' : 'removing')
     assert.equal(await fs.readFile(path.join(own.dataDir, 'preserved-user-file'), 'utf8'), 'user bytes')

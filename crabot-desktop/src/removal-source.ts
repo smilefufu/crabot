@@ -37,6 +37,7 @@ async function removeFromSource(options: SourceOptions | InstallerOptions) {
   if (answer.response !== 1) return
   const abort = new AbortController(), progress = createRemovalProgressWindow(abort)
   let prepared: any, directoryId: string | undefined, child: ReturnType<typeof spawn> | undefined, restoreExit: (() => void) | undefined
+  let stage = 'progress-ready'
   const closeProgress = () => progress.close()
   const cancelChild = () => { try { if (child?.connected) child.send({ kind: 'desktop_removal_cancel' }, () => {}) } catch {} }
   try {
@@ -47,6 +48,7 @@ async function removeFromSource(options: SourceOptions | InstallerOptions) {
     if (installer) prepare = backend.prepareInstallerDesktopRemovalGui
     else if (node) prepare = previous ? backend.prepareExistingDesktopRemovalNode : backend.prepareDesktopRemovalNode
     else prepare = previous ? backend.prepareExistingDesktopRemovalGui : backend.prepareDesktopRemovalGui
+    stage = 'prepare-host'
     prepared = await prepare({
       installRoot: own.root, operationId, signal: abort.signal, ...(installer ? { payload: options.installerPayload } : {}),
       progress: () => progress.update('正在核验独立维护程序，完成后正常停止共享服务…'),
@@ -57,16 +59,19 @@ async function removeFromSource(options: SourceOptions | InstallerOptions) {
       ...Object.fromEntries(['XDG_CONFIG_HOME', 'XDG_DATA_HOME'].flatMap(key => process.env[key] ? [[key, process.env[key]!]] : [])) } : { ...process.env }
     for (const key of ['ELECTRON_RUN_AS_NODE', 'NODE_OPTIONS', 'NODE_PATH', 'DATA_DIR', 'CRABOT_HOME', 'CRABOT_DEV', 'CRABOT_PORT_OFFSET']) delete env[key]
     const argument = removalHostArgument({ installRoot: own.root, operationId, existing: !!previous, ...(installer ? { installerPayload: options.installerPayload } : {}) })
+    stage = 'spawn-host'
     child = spawn(prepared.executable, node ? [path.join(prepared.directory, 'backend/main.mjs'), argument] : [argument], {
       env, cwd: prepared.directory, detached: true, stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
     })
     const stopped = new Promise<number | null>((resolve, reject) => { child!.once('error', reject); child!.once('close', code => resolve(code)) })
     void stopped.catch(() => {})
     await new Promise<void>((resolve, reject) => { child!.once('spawn', resolve); child!.once('error', reject) })
+    stage = 'load-cleanup'
     const cleanupModule = await load('desktop-removal-host-cleanup.mjs')
     const cleanup: () => Promise<void> = (node ? cleanupModule.captureRemovalNodeCleanup : cleanupModule.captureRemovalGuiCleanup)(prepared, child)
     let verifyExit: ((value: unknown) => Promise<boolean>) | undefined
     if (!installer) {
+      stage = 'bind-source-exit'
       const source = await load('desktop-removal-source.mjs')
       const exitVerifier = node ? (previous ? source.createExistingRemovalNodeSourceExitVerifier : source.createDesktopRemovalNodeSourceExitVerifier)
         : (previous ? source.createExistingRemovalSourceExitVerifier : source.createDesktopRemovalSourceExitVerifier)
@@ -85,11 +90,15 @@ async function removeFromSource(options: SourceOptions | InstallerOptions) {
         try { app.quit() } catch (error) { restoreExit(); throw error }
       }).catch(() => { /* The child retains its stopping job and shows a bounded retry. */ })
     })
+    stage = 'wait-host'
     const code = await stopped
     closeProgress()
     await cleanup()
     if (code !== 0) throw Object.assign(new Error('独立维护界面退出，原卸载进度与数据已保留。'), { code: 'CRABOT_DESKTOP_REMOVAL' })
   } catch (error) {
+    const code = (error as { code?: unknown })?.code
+    try { console.error(JSON.stringify({ component: 'desktop-removal-source', stage,
+      code: typeof code === 'string' && /^[A-Z0-9_]{1,128}$/.test(code) ? code : 'CRABOT_DESKTOP_REMOVAL' })) } catch { /* Diagnostics cannot change removal. */ }
     // Before a child ever starts, this fresh in-memory copy has no executable
     // owner. A running or unidentified child always retains its diagnostic copy.
     if (prepared && !child?.pid && directoryId) {

@@ -83,7 +83,7 @@ on:
         description: 'Existing suite to rerun; complete acceptance still requires both'
         type: choice
         default: all
-        options: [all, regression, product]
+        options: [all, regression, gui, product]
 
 permissions:
   contents: read
@@ -100,7 +100,7 @@ jobs:
   ubuntu-bootstrap:
     uses: ./.github/workflows/desktop-ubuntu-bootstrap.yml
   runtime:
-    name: ${{ matrix.suite == 'regression' && 'Desktop foundation' || 'Desktop product' }} ${{ matrix.target }}
+    name: ${{ matrix.suite == 'regression' && 'Desktop foundation' || matrix.suite == 'gui' && 'Desktop GUI regression' || 'Desktop product' }} ${{ matrix.target }}
     needs: ubuntu-bootstrap
     timeout-minutes: ${{ (matrix.target == 'darwin-x64' || matrix.target == 'win32-x64') && 180 || matrix.target == 'linux-x64' && 150 || 90 }}
     strategy:
@@ -290,11 +290,11 @@ jobs:
         if: matrix.suite == 'regression'
         run: node .github/scripts/smoke-migration-interruption.mjs 2>&1 | tee .desktop-build/migration-interruption.log
       - name: Real sandboxed Electron window boundaries on Linux
-        if: matrix.suite == 'regression' && (runner.os == 'Linux')
+        if: (matrix.suite == 'regression' || matrix.suite == 'gui') && (runner.os == 'Linux')
         working-directory: crabot-desktop
         run: xvfb-run -a node --test --test-concurrency=1 tests/electron-boundary.test.mjs tests/installation-probe.test.mjs tests/installation-removal.test.mjs tests/installer-progress.test.mjs tests/maintenance-bootstrap.test.mjs tests/removal-frame.test.mjs tests/paired-relaunch.test.mjs tests/paired-update-gate.test.mjs tests/paired-binding.test.mjs tests/login-startup-recovery.test.mjs 2>&1 | tee ../.desktop-build/electron-boundary.log
       - name: Real sandboxed Electron window boundaries on macOS and Windows
-        if: matrix.suite == 'regression' && (runner.os != 'Linux')
+        if: (matrix.suite == 'regression' || matrix.suite == 'gui') && (runner.os != 'Linux')
         working-directory: crabot-desktop
         run: node --test --test-concurrency=1 tests/electron-boundary.test.mjs tests/installation-removal.test.mjs tests/installer-progress.test.mjs tests/maintenance-bootstrap.test.mjs tests/removal-frame.test.mjs tests/paired-relaunch.test.mjs tests/paired-update-gate.test.mjs tests/paired-binding.test.mjs tests/login-startup-recovery.test.mjs 2>&1 | tee ../.desktop-build/electron-boundary.log
       - name: Build locked browser and computer-use resources
