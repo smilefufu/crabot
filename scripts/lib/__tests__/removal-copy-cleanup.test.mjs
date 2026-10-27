@@ -74,6 +74,10 @@ for (const mode of ['complete', 'changed-file', 'unknown-file', 'profile-symlink
     }
     if (mode === 'changed-file') assert.equal(await fs.readFile(file, 'utf8'), 'changed copy retained')
     else if (mode === 'unknown-file') assert.equal(await fs.readFile(path.join(gui, 'unknown'), 'utf8'), 'foreign addition')
-    else await assert.rejects(fs.lstat(f.root), { code: 'ENOENT' })
+    else if (mode === 'profile-symlink' && process.platform === 'linux') {
+      // Linux has no GUI profile: replacing a captured directory is a changed
+      // program-copy object, so retain it rather than treating it as cache.
+      assert.equal(await fs.readlink(profile), outside)
+    } else await assert.rejects(fs.lstat(f.root), { code: 'ENOENT' })
     assert.equal(await fs.readFile(path.join(outside, 'precious'), 'utf8'), 'outside user files')
   })
