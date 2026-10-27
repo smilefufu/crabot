@@ -66,6 +66,8 @@ async function fixture(t, { exitEvidence = true, crossVolume = false } = {}) {
           host.emit=(event,...values)=>{if(event==='message'&&values[0]?.kind==='workspace_file_prepared'&&!held){held=true;setTimeout(()=>{aliveAtDelivery=native.sameProcess(hostIdentity,native.inspectProcess(host.pid));emit(event,...values)},150);return true}return emit(event,...values)};
           try{const prepared=await prepareWorkspaceFilesWithHost(host,args);result={prepared,held,aliveAtDelivery}}finally{host.emit=emit}
         }
+        else if(message.operation==='closure-prepare-fixture'){fs.mkdirSync(args.dataDir+'/agent/worker-ledgers',{recursive:true});const agent=await import(${JSON.stringify(new URL('../../../crabot-agent/dist/core/workspace-relocation-closure.js', import.meta.url).href)});result=await agent.prepareWorkspaceRelocationClosure(args)}
+        else if(message.operation==='closure-commit-fixture'){const agent=await import(${JSON.stringify(new URL('../../../crabot-agent/dist/core/workspace-relocation-closure.js', import.meta.url).href)});result=await agent.commitWorkspaceRelocationClosure(args)}
         else if(message.operation==='file-begin')result=await records.beginWorkspaceRelocationFiles(args);
         else if(message.operation==='file-ready')result=await records.commitWorkspaceRelocationFileReady(args);
         else if(message.operation==='file-move-fixture'){const intent=records.readWorkspaceRelocationIntent(args.dataDir),plan=records.readWorkspaceRelocationFilePlan(args.dataDir,args.id);native.renameDirectoryNoReplace(intent.source.path,plan.staging_path+'/tree');result=true}
@@ -570,4 +572,76 @@ for (const mode of ['confirmed', 'modified bytes', 'live Host', 'stale catalog']
   assert.deepEqual(await f.catalog.snapshot(), f.before)
   const bytes = fs.readFileSync(f.actorsFile)
   assert.equal((await f.command('file-ready')).result.dispatch, 'observe'); assert.deepEqual(fs.readFileSync(f.actorsFile), bytes)
+})
+
+
+test('interrupted checkpoint follows actual file preparation and does not execute the original live role', async t => {
+  const f = await fixture(t)
+  assert.equal((await f.command()).error, undefined)
+  const first = records.readWorkspaceInterruptedRelocationCheckpoint(f.data, f.id)
+  assert.equal(first.action, 'restore_source')
+  assert.equal(first.execution_exit.intent_id, f.id)
+  assert.equal(first.file_plan.mode, 'rename')
+  assert.equal(first.coordinator.launch.process.pid, f.child.pid)
+  assert.equal(first.file_actors, null)
+  assert.equal((await f.command('actors-prepare')).error, undefined)
+  const next = records.readWorkspaceInterruptedRelocationCheckpoint(f.data, f.id)
+  assert.notEqual(next.checkpoint_sha256, first.checkpoint_sha256)
+  assert.equal(next.file_actors.attempt.intent_id, f.id)
+  assert.equal(next.action, 'restore_source')
+  assert.equal(fs.existsSync(next.file_plan.staging_path), false)
+  assert.equal(fs.readFileSync(path.join(f.source, 'default/file'), 'utf8'), 'original bytes')
+  assert.deepEqual(await f.catalog.snapshot(), f.before)
+})
+
+
+for (const damage of ['none', 'changed moved bytes', 'new source', 'replaced tree']) test('interrupted rename inspection preserves actual source positions: ' + damage, async t => {
+  const f = await stageFixture(t)
+  await f.command('host-permit'); await f.command('stage-prepare'); await f.command('file-begin'); await f.command('host-stop')
+  assert.equal((await f.command('file-move-fixture')).error, undefined)
+  const tree = path.join(f.staging, 'tree'), originalFile = path.join(tree, 'default/file')
+  const journal = fs.readFileSync(f.actorsFile)
+  if (damage === 'changed moved bytes') fs.writeFileSync(originalFile, 'user changed original')
+  if (damage === 'new source') fs.mkdirSync(f.source)
+  if (damage === 'replaced tree') { fs.renameSync(tree, path.join(f.staging, 'retained-original')); fs.mkdirSync(tree) }
+  const { inspectWorkspaceInterruptedRelocation } = await import('../workspace-interrupted-recovery.mjs')
+  if (damage === 'none') {
+    const observed = await inspectWorkspaceInterruptedRelocation({ dataDir: f.data, id: f.id })
+    assert.equal(observed.checkpoint.action, 'restore_source')
+    assert.equal(observed.positions.source, null)
+    assert.equal(observed.positions.tree.path, tree)
+    assert.equal(observed.positions.tree.ino, observed.checkpoint.intent.source.ino)
+    assert.equal(observed.positions.published, false)
+    assert.equal(observed.content.fingerprint, observed.checkpoint.file_plan.source_content_sha256)
+    assert.deepEqual(await f.catalog.snapshot(), f.before)
+    assert.equal(fs.readFileSync(originalFile, 'utf8'), 'original bytes')
+  } else await assert.rejects(inspectWorkspaceInterruptedRelocation({ dataDir: f.data, id: f.id }), { code: 'WORKSPACE_RELOCATION_INVALID' })
+  assert.deepEqual(fs.readFileSync(f.actorsFile), journal)
+  assert.equal(fs.existsSync(f.target), false)
+})
+
+
+test('interrupted checkpoint crosses closure commit before catalog selection and never classifies it as rollback', async t => {
+  const f = await stageFixture(t)
+  await f.command('host-permit'); await f.command('stage-prepare'); await f.command('file-begin'); await f.command('host-stop')
+  assert.equal((await f.command('file-move-fixture')).error, undefined)
+  assert.equal((await f.command('file-ready')).error, undefined)
+  const prepare = await f.command('closure-prepare-fixture')
+  assert.equal(prepare.error, undefined)
+  assert.equal(records.readWorkspaceInterruptedRelocationCheckpoint(f.data, f.id).action, 'restore_source')
+  const commit = await f.command('closure-commit-fixture')
+  assert.equal(commit.error, undefined)
+  const state = records.readWorkspaceInterruptedRelocationCheckpoint(f.data, f.id)
+  assert.equal(state.action, 'finish_commit')
+  assert.ok(state.closure_commit)
+  // A crash before the final receipt still has a prepared commit journal.
+  fs.unlinkSync(path.join(f.data, 'workspace-control/relocation-active/relocation-worker-commits/complete.json'))
+  const partial = records.readWorkspaceInterruptedRelocationCheckpoint(f.data, f.id)
+  assert.equal(partial.action, 'finish_commit')
+  assert.equal(partial.closure_commit, null)
+  assert.notEqual(partial.checkpoint_sha256, state.checkpoint_sha256)
+  assert.equal(state.root_plan, null)
+  assert.equal(state.selected, null)
+  assert.deepEqual(await f.catalog.snapshot(), f.before)
+  assert.equal(fs.readFileSync(path.join(f.staging, 'tree/default/file'), 'utf8'), 'original bytes')
 })

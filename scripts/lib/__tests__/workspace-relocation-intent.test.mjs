@@ -1408,3 +1408,26 @@ test('existing 0755 data admits workspace maintenance while keeping control reco
     assert.equal(await fs.readFile(path.join(f.source, 'default/original.txt'), 'utf8'), 'user bytes')
   } finally { releaseCliLock(lock) }
 })
+
+
+test('interrupted checkpoint reads only original intent facts without granting a recovery role', async t => {
+  const f = await fixture(t), lock = await acquireCliLock(f.data, 'workspace-relocation')
+  try {
+    const intent = await beginWorkspaceRelocationIntent(f.input)
+    releaseCliLock(lock)
+    const records = await import('../workspace-relocation-intent.mjs')
+    const before = await fs.readFile(f.recordFile), names = await fs.readdir(path.dirname(f.recordFile))
+    const checkpoint = records.readWorkspaceInterruptedRelocationCheckpoint(f.data, intent.id)
+    assert.equal(checkpoint.action, 'restore_source')
+    assert.equal(checkpoint.intent.id, intent.id)
+    assert.match(checkpoint.checkpoint_sha256, /^[a-f0-9]{64}$/)
+    assert.deepEqual(records.readWorkspaceInterruptedRelocationCheckpoint(f.data, intent.id), checkpoint)
+    assert.deepEqual(await fs.readFile(f.recordFile), before)
+    assert.deepEqual(await fs.readdir(path.dirname(f.recordFile)), names)
+    assert.equal(checkpoint.coordinator.launch, null)
+    assert.equal(checkpoint.workers, null)
+    assert.throws(() => assertWorkspaceExecutionAllowed(f.data), { code: 'WORKSPACE_MAINTENANCE' })
+    await fs.writeFile(path.join(path.dirname(f.recordFile), 'unexpected-record'), 'do not adopt')
+    assert.throws(() => records.readWorkspaceInterruptedRelocationCheckpoint(f.data, intent.id))
+  } finally { releaseCliLock(lock) }
+})

@@ -2536,3 +2536,38 @@ export async function verifyWorkspaceRelocationReleasedCapabilities({ dataDir, i
   await current()
   return Object.freeze({ completion_sha256: sha256CanonicalJson(state.completion), finalizing_sha256: releasedHash })
 }
+
+
+/** Original active-job facts only. This does not establish exit, content integrity or an effect role. */
+export const readWorkspaceInterruptedRelocationCheckpoint = recordGraphReader(function readWorkspaceInterruptedRelocationCheckpoint(dataDir, id) {
+  const { ctx, intent } = coordinatorContext(dataDir, id)
+  const materials = workspaceJobMaterials(ctx), present = new Set(materials.map(item => item.name))
+  const readIf = (name, reader) => present.has(name) ? reader(dataDir, id) : null
+  const workers = readWorkspaceRelocationWorkers(dataDir, id), coordinator = readWorkspaceRelocationCoordinator(dataDir, id)
+  const facts = {
+    intent, workers, coordinator,
+    stops: workers ? readWorkspaceRelocationStops(dataDir, id) : null,
+    processes: readIf('relocation-worker-processes.json', readWorkspaceRelocationProcesses),
+    modules: workers ? readWorkspaceRelocationModules(dataDir, id) : null,
+    module_stops: readIf('relocation-module-stop-attempt.json', readWorkspaceRelocationModuleStops),
+    process_stops: readIf(processStopFile, readWorkspaceRelocationProcessStops),
+    execution_exit: readWorkspaceRelocationExecutionExit(dataDir, id),
+    file_plan: readWorkspaceRelocationFilePlan(dataDir, id),
+    file_actors: readIf(fileActorsFile, readWorkspaceRelocationFileActors),
+    closure_plan: readWorkspaceRelocationClosurePlan(dataDir, id),
+    closure_commit: readWorkspaceRelocationClosureCommit(dataDir, id),
+    recovery_plan: readWorkspaceRelocationRecoveryPlan(dataDir, id),
+    recovery_commit: readWorkspaceRelocationRecoveryCommit(dataDir, id),
+    root_plan: readWorkspaceRelocationRootPlan(dataDir, id),
+    published: readWorkspaceRelocationRootPublished(dataDir, id),
+    selected: readWorkspaceRelocationRootSelected(dataDir, id),
+    parents_plan: readWorkspaceRelocationRootParentsPlan(dataDir, id),
+    parents_complete: readWorkspaceRelocationRootParentsComplete(dataDir, id),
+    health: readWorkspaceRelocationHealth(dataDir, id),
+    completion: readWorkspaceRelocationCompletion(dataDir, id),
+  }
+  // A prepared closure journal already crosses the commit boundary, even when
+  // complete.json or catalog selection has not yet been written.
+  const action = present.has(closureCommitsDirectory) || facts.published || facts.selected ? 'finish_commit' : 'restore_source'
+  return { ...facts, action, materials, checkpoint_sha256: sha256CanonicalJson({ facts, materials, action }) }
+})
