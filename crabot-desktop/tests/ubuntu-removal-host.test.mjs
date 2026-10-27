@@ -31,7 +31,12 @@ before(async () => {
   await fs.mkdir(path.dirname(browser), { recursive: true })
   await fs.copyFile(path.join(path.dirname(process.env.CRABOT_GTK_FRONTEND), 'crabot-sandbox-helper'), browser)
   await fs.writeFile(path.join(core, 'package.json'), '{"version":"1.2.3","type":"module"}')
-  await fs.writeFile(path.join(core, 'product-runtime.json'), JSON.stringify({ schema_version: 1, version: '1.2.3', versions: { node: process.versions.node } }))
+  // Real offline releases index thousands of Python/browser files; their
+  // integrity-bound runtime manifest is much larger than a small config file.
+  const runtime = JSON.stringify({ schema_version: 1, version: '1.2.3', versions: { node: process.versions.node },
+    files: Object.fromEntries(Array.from({ length: 1024 }, (_, index) => ['.product-runtime/python/lib/package/file-' + index + '.py', { size: index, sha256: '1'.repeat(64) }])) })
+  assert.ok(Buffer.byteLength(runtime) > 65536)
+  await fs.writeFile(path.join(core, 'product-runtime.json'), runtime)
   await fs.writeFile(path.join(core, 'bin/crabot'), '#!/bin/sh\nexit 97\n', { mode: 0o755 })
   await writeCoreRelease(core, { schema_version: 1, version: '1.2.3', platform: process.platform, arch: process.arch, commit: '1'.repeat(40), source_dirty: false })
   await fs.writeFile(path.join(core, 'desktop-host.json'), JSON.stringify({ schema_version: 2, platform: process.platform, arch: process.arch }))
