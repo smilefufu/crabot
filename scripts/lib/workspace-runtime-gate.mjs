@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import native from './process-identity.cjs'
-import { verifyWorkspaceRecoveryRuntimeStart } from './workspace-recovery-records.mjs'
+import { verifyWorkspaceRuntimeStart } from './workspace-runtime-records.mjs'
 import { sha256CanonicalJson as hash } from '../../crabot-shared/dist/canonical-json.js'
 export const gateFields = (value, names) => value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length === names.length && names.every(name => Object.hasOwn(value, name))
 export const gateUuid = value => typeof value === 'string' && /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(value)
@@ -53,7 +53,7 @@ export function createWorkspaceRuntimeGate() {
     })
   }
   function registration() {
-    return verifyWorkspaceRecoveryRuntimeStart({ dataDir: binding.dataDir, recoveryId: binding.recoveryId, moduleId: binding.moduleId,
+    return verifyWorkspaceRuntimeStart({ dataDir: binding.dataDir, recoveryId: binding.recoveryId, moduleId: binding.moduleId,
       recordHash: binding.recordHash, definitionHash: hash(binding.invocation) })
   }
   async function current() {

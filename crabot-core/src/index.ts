@@ -4443,10 +4443,10 @@ export class ModuleManager {
         await runtimeGate.ready()
         await this.assertWorkspaceProcessStartAllowed(moduleId, validationPermit)
         const invocation = { command, args, cwd: path.resolve(runtime.cwd ?? '.'), env: childEnv }
-        const records = require('../../scripts/lib/workspace-recovery-records.mjs')
+        const records = require('../../scripts/lib/workspace-runtime-records.mjs')
         const verify = () => this.assertWorkspaceProcessStartAllowed(moduleId, validationPermit)
         const assertCurrent = () => this.assertWorkspaceProcessStartCurrent(moduleId, validationPermit)
-        const receipt = await records.commitWorkspaceRecoveryRuntimeStart({ dataDir: this.dataDir, recoveryId, moduleId,
+        const receipt = await records.commitWorkspaceRuntimeStart({ dataDir: this.dataDir, recoveryId, moduleId,
           process: require('../../scripts/lib/process-identity.cjs').inspectProcess(proc.pid), runtime: runtimeRecord,
           definitionHash: sha256CanonicalJson(invocation), verify })
         try {

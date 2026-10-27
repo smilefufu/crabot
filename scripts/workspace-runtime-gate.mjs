@@ -2,7 +2,7 @@
 import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import native from './lib/process-identity.cjs'
-import { verifyWorkspaceRecoveryRuntimeStart } from './lib/workspace-recovery-records.mjs'
+import { verifyWorkspaceRuntimeStart } from './lib/workspace-runtime-records.mjs'
 import { gateFields, gateUuid, gateMessageBudget, validWorkspaceRuntimeInvocation } from './lib/workspace-runtime-gate.mjs'
 import { sha256CanonicalJson as hash } from '../crabot-shared/dist/canonical-json.js'
 let attempted = false, started = false, runtimeId
@@ -21,7 +21,7 @@ process.on('message', message => {
     if (attempted || !gateFields(message, ['kind', 'nonce', 'data_dir', 'recovery_id', 'module_id', 'record_sha256', 'invocation'])
       || message.kind !== 'workspace_runtime_gate_start' || !validWorkspaceRuntimeInvocation(message.invocation)) throw new Error('Invalid start')
     attempted = true
-    const record = verifyWorkspaceRecoveryRuntimeStart({ dataDir: message.data_dir, recoveryId: message.recovery_id, moduleId: message.module_id,
+    const record = verifyWorkspaceRuntimeStart({ dataDir: message.data_dir, recoveryId: message.recovery_id, moduleId: message.module_id,
       recordHash: message.record_sha256, definitionHash: hash(message.invocation) })
     const self = native.inspectProcess(process.pid)
     if (!native.sameProcess(record.process, self) || self.parent !== record.parent.pid || !native.sameProcess(record.parent, native.inspectProcess(self.parent))) throw new Error('Invalid carrier')

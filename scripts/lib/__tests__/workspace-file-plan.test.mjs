@@ -870,3 +870,70 @@ test('source recovery retires exact old wakes and archives unknown Manager work 
     assert.equal(new WorkspaceRelocationRetirements(f.data).workboard(key, 1), true)
   } finally { if (role.child.connected) await close() }
 })
+
+for (const mode of ['valid', 'unregistered', 'changed invocation']) test('source recovery starts a registered fixed carrier once: ' + mode, { timeout: 60000 }, async t => {
+  const f = await stageFixture(t)
+  await f.command('host-permit'); await f.command('stage-prepare'); await f.command('file-begin'); await f.command('host-stop')
+  assert.equal((await f.command('file-move-fixture')).error, undefined)
+  f.child.disconnect(); await f.exited
+  fs.mkdirSync(path.join(f.data, 'agent'), { recursive: true })
+  const checkpoint = records.readWorkspaceInterruptedRelocationCheckpoint(f.data, f.id), recoveryId = randomUUID()
+  const locks = await import('../cli-lock.mjs'), lock = await locks.acquireWorkspaceInterruptedRecoveryLock(f.data, f.id)
+  const role = await (await import('../workspace-interrupted-launch.mjs')).launchWorkspaceInterruptedRecoveryCoordinator({ dataDir: f.data,
+    request: { intent_id: f.id, recovery_id: recoveryId, checkpoint_sha256: checkpoint.checkpoint_sha256 }, verify: async () => {}, releaseParentLock: () => releaseCliLock(lock) })
+  let gate
+  try {
+    await role.restoreSource(); await role.archiveSource(); await role.prepareSourceBusiness()
+    const runtime = await import('../workspace-interrupted-runtime.mjs'), dispatch = await import('../workspace-runtime-records.mjs')
+    const instanceId = randomUUID(), runtimeId = randomUUID(), adminRuntimeId = randomUUID(), port = 19841
+    await runtime.commitWorkspaceInterruptedRuntimePlan({ dataDir: f.data, recoveryId, instanceId, adminRuntimeId,
+      modules: [{ module_id: 'memory-default', runtime_id: runtimeId, module_port: port }], verify: role.verify })
+    gate = (await import('../workspace-runtime-gate.mjs')).createWorkspaceRuntimeGate()
+    await gate.ready()
+    const observed = path.join(f.root, 'finite-runtime-starts'), invocation = { command: process.execPath,
+      args: ['-e', `require('node:fs').appendFileSync(${JSON.stringify(observed)},'started\\n');setTimeout(()=>process.exit(0),30000)`], cwd: f.root, env: {} }
+    const processIdentity = native.inspectProcess(gate.child.pid), registry = path.join(f.data, 'module-runtime-registry/records')
+    fs.mkdirSync(registry, { recursive: true })
+    fs.writeFileSync(path.join(path.dirname(registry), 'instance-id'), instanceId + '\n', { mode: 0o600 })
+    const registration = { schema_version: 1, instance_id: instanceId, runtime_id: runtimeId, module_id: 'memory-default', root_pid: gate.child.pid,
+      process_start_identity: processIdentity.started, module_port: port, created_at: new Date().toISOString() }
+    if (mode !== 'unregistered') fs.writeFileSync(path.join(registry, runtimeId + '.json'), JSON.stringify(registration), { mode: 0o600 })
+    assert.equal(fs.existsSync(observed), false)
+    const commit = () => dispatch.commitWorkspaceRuntimeStart({ dataDir: f.data, recoveryId, moduleId: 'memory-default', process: processIdentity,
+      runtime: registration, definitionHash: sha256CanonicalJson(invocation), verify: role.verify })
+    if (mode === 'unregistered') {
+      await assert.rejects(commit)
+      assert.equal(fs.existsSync(observed), false)
+    } else {
+      const receipt = await commit(), input = { dataDir: f.data, recoveryId, moduleId: 'memory-default', recordHash: sha256CanonicalJson(receipt),
+        invocation: mode === 'changed invocation' ? { ...invocation, args: ['-e', 'process.exit(0)'] } : invocation, verify: role.verify, assertCurrent: () => {} }
+      assert.equal(receipt.schema_version, 2)
+      if (mode === 'changed invocation') {
+        await assert.rejects(gate.start(input)); assert.equal(fs.existsSync(observed), false)
+      } else {
+        const first = gate.start(input)
+        assert.equal(gate.start(input), first)
+        await first
+        await gate.observe()
+        const deadline = Date.now() + 5000
+        while (!fs.existsSync(observed) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 20))
+        assert.equal(fs.readFileSync(observed, 'utf8'), 'started\n')
+        assert.deepEqual(await f.catalog.snapshot(), f.before)
+        assert.equal((await import('../workspace-maintenance.cjs')).default.workspaceMaintenancePending(f.data), true)
+      }
+    }
+  } finally {
+    if (gate) {
+      const { captureSpawnedProcessTree } = await import('../spawned-process-tree.cjs')
+      const processes = gate.child.exitCode === null && gate.child.signalCode === null ? captureSpawnedProcessTree(gate.child) : []
+      const ended = gate.child.exitCode === null && gate.child.signalCode === null ? once(gate.child, 'exit') : Promise.resolve()
+      for (const processIdentity of [...processes].reverse()) native.terminateKnownProcess(processIdentity)
+      gate.close(); await ended
+    }
+    const ended = once(role.child, 'exit'); role.close(); await ended; releaseCliLock(lock)
+    const history = (await import('../workspace-interrupted-runtime.mjs')).readWorkspaceInterruptedRuntimeHistory(f.data, f.id)
+    assert.equal(history.length, 1)
+    assert.equal(history[0].plan.recovery_id, recoveryId)
+    assert.equal(history[0].starts.filter(Boolean).length, mode === 'unregistered' ? 0 : 1)
+  }
+})
