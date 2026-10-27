@@ -298,33 +298,52 @@ describe('processAdminChatMessage —— admin chat 入站（cutover 后下游�
     return internals.managerStack.principals.get(MANAGER_KEY)
   }
 
-  it('真实连接重试贯通到 Admin 进度，进度不提前消费正式回复的 request_ids', async () => {
+  it.each([5_000, 30_000])('真实连接重试已用%s毫秒：聊天按门槛提示、Admin trace和日志保留详情', async (elapsedMs) => {
     boot({ turns: [[sendMessageBlock({ channelId: 'admin-web', sessionId: 'admin-chat', text: '正式结果' })]] })
     const appendSpan = vi.spyOn(internals.traceStore, 'appendManagerSpan')
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {})
+    let now = Date.now()
+    const clock = vi.spyOn(Date, 'now').mockImplementation(() => now)
     let attempts = 0
     hoisted.managerAdapter = {
       async *stream(params: unknown) {
-        if (attempts++ === 0) throw new StreamTimeoutError('ttfb', 90_000)
+        if (attempts++ === 0) {
+          now += elapsedMs
+          throw new StreamTimeoutError('ttfb', 90_000)
+        }
         yield* script.adapter.stream(params as never)
       }, updateConfig() {},
     }
-    const pending = runAdminChat(amsg({ id: 'recovery-progress' }), 'req-recovery-progress')
-    await vi.waitFor(() => expect(directDeliveries()).toHaveLength(1))
-    const progress = directDeliveries()[0]
-    expect(progress.content?.text).toContain('连接恢复中')
-    expect(progress.request_ids).toEqual([])
-    expect(progress.delivery_id).toBeTruthy()
-    expect(appendSpan).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({
-      type: 'decision', details: expect.objectContaining({ kind: 'llm_retry', retryMode: 'connection_recovery', elapsedMs: expect.any(Number), delayMs: expect.any(Number) }),
-    }))
-
-    await pending
-
-    const deliveries = directDeliveries()
-    expect(deliveries).toHaveLength(2)
-    expect(deliveries[1].content?.text).toBe('正式结果')
-    expect(deliveries[1].request_ids).toEqual(['req-recovery-progress'])
-    expect(deliveries[1].delivery_id).not.toBe(progress.delivery_id)
+    try {
+      const pending = runAdminChat(amsg({ id: 'recovery-progress' }), 'req-recovery-progress')
+      await vi.waitFor(() => expect(appendSpan).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({
+        type: 'decision', details: expect.objectContaining({
+          kind: 'llm_retry', retryMode: 'connection_recovery', elapsedMs, delayMs: expect.any(Number),
+          error: expect.stringContaining('stream ttfb timeout after 90000ms'),
+        }),
+      })))
+      if (elapsedMs < 30_000) {
+        expect(directDeliveries()).toHaveLength(0)
+      } else {
+        await vi.waitFor(() => expect(directDeliveries()).toHaveLength(1))
+        const progress = directDeliveries()[0]
+        expect(progress.content?.text).toBe('模型连接暂时不稳定，正在自动重试。')
+        expect(progress.request_ids).toEqual([])
+        expect(progress.delivery_id).toBeTruthy()
+      }
+      expect(errorLog).toHaveBeenCalledWith(expect.stringContaining('connection recovery attempt 1'), expect.any(StreamTimeoutError))
+      await pending
+      const deliveries = directDeliveries()
+      expect(deliveries).toHaveLength(elapsedMs < 30_000 ? 1 : 2)
+      const result = deliveries[deliveries.length - 1]
+      expect(result.content?.text).toBe('正式结果')
+      expect(result.request_ids).toEqual(['req-recovery-progress'])
+      if (elapsedMs >= 30_000) expect(result.delivery_id).not.toBe(deliveries[0].delivery_id)
+      expect(attempts).toBe(3) // 一次连接失败、恢复后的发送工具回合、正常收尾回合。
+    } finally {
+      clock.mockRestore()
+      errorLog.mockRestore()
+    }
   }, 15_000)
 
   function workerToolNames(): string[] {

@@ -392,6 +392,27 @@ describe('processDirectBatch —— 私聊 lane handler（cutover 后下游是 m
   // ==========================================================================
 
   describe('整批递给 manager（变异靶 M2）', () => {
+    it('连接恢复前30秒静默且不占用通知冷却，30秒后才简短提示', async () => {
+      boot()
+      const event = {
+        type: 'llm_retry' as const, retryMode: 'connection_recovery' as const,
+        turn: 1, attempt: 1, maxAttempts: Number.MAX_SAFE_INTEGER, source: 'stream' as const,
+        elapsedMs: 5_000, error: 'TypeError: fetch failed → ECONNRESET',
+      }
+      for (const elapsedMs of [undefined, 0, 5_000, 29_999]) {
+        await internals.sendManagerLlmRetry('wechat::sess-1', { ...event, elapsedMs })
+      }
+      expect(rpcCalls.filter((call) => call.method === 'send_message')).toHaveLength(0)
+      expect(internals.llmRecoverySentAt.size).toBe(0)
+      await internals.sendManagerLlmRetry('wechat::sess-1', { ...event, elapsedMs: 30_000 })
+      const sends = rpcCalls.filter((call) => call.method === 'send_message')
+      expect(sends).toHaveLength(1)
+      expect(sends[0].params).toMatchObject({
+        session_id: 'sess-1', content: { type: 'text', text: '模型连接暂时不稳定，正在自动重试。' },
+      })
+      expect(internals.failLoudSentAt.size).toBe(0)
+    })
+
     it('连接恢复通知按当前会话投递、脱敏和冷却，投递失败不影响后续失败告知', async () => {
       boot()
       internals.knownSecrets.add('private-test-credential')
@@ -406,8 +427,8 @@ describe('processDirectBatch —— 私聊 lane handler（cutover 后下游是 m
       await internals.sendManagerLlmRetry('wechat::sess-1', { ...event, attempt: 3 })
       let sends = rpcCalls.filter((call) => call.method === 'send_message')
       expect(sends).toHaveLength(1)
-      expect(sends[0].params).toMatchObject({ session_id: 'sess-1', content: { text: expect.stringContaining('连接恢复中') } })
-      expect(JSON.stringify(sends)).toContain('185 秒')
+      expect(sends[0].params).toMatchObject({ session_id: 'sess-1', content: { text: '模型连接暂时不稳定，正在自动重试。' } })
+      expect(JSON.stringify(sends)).not.toContain('stream ttfb timeout')
       expect(JSON.stringify(sends)).not.toContain('private-test-credential')
       expect(JSON.stringify(sends)).not.toContain(String(Number.MAX_SAFE_INTEGER))
       expect(internals.failLoudSentAt.size).toBe(0)
@@ -789,6 +810,24 @@ describe('processDirectBatch —— 私聊 lane handler（cutover 后下游是 m
       expect(sent!.params.session_id).toBe('sess-1')
       expect(failLoudText()).toContain('管理员')
       expect(failLoudText()).toContain('LLM boom')
+    })
+
+    it.each([5_000, 30_000])('连接恢复已用%s毫秒后最终失败，仍立即明确告知', async (elapsedMs) => {
+      boot()
+      await internals.sendManagerLlmRetry(MANAGER_KEY, {
+        type: 'llm_retry', retryMode: 'connection_recovery', turn: 1,
+        attempt: 1, maxAttempts: Number.MAX_SAFE_INTEGER, source: 'stream',
+        elapsedMs, error: 'ECONNRESET',
+      })
+      internals.managerStack.registry.routeHumanMessages = async () => ({
+        episodeId: 'ep-stopped', outcome: 'failed', turns: 1,
+        consumedEvents: false, repliedToHuman: false, error: 'LLM 恢复已终止',
+      })
+      await internals.processDirectBatch(batchOf([makeMessage({ id: 'recovery-stopped', type: 'private' })]))
+      const sends = rpcCalls.filter((call) => call.method === 'send_message')
+      expect(sends).toHaveLength(elapsedMs < 30_000 ? 1 : 2)
+      expect((sends[sends.length - 1].params.content as { text: string }).text).toContain('LLM 恢复已终止')
+      expect((sends[sends.length - 1].params.content as { text: string }).text).toContain('没处理完')
     })
 
     /**
