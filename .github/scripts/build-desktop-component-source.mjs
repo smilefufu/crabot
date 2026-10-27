@@ -8,7 +8,7 @@ import { randomUUID } from 'node:crypto'
 import { sealDesktopPayload, verifyDesktopPayload } from '../../scripts/lib/desktop-payload.mjs'
 import { verifyDesktopAsar } from '../../scripts/lib/desktop-asar.mjs'
 
-export async function buildDesktopComponentSource({ repository, project, destination, entryFixture, additionalFixtures = [] }) {
+export async function buildDesktopComponentSource({ repository, project, destination, entryFixture, additionalFixtures = [], ubuntuRemovalControl }) {
   for (const file of [entryFixture, ...additionalFixtures]) assert.match(file, /^[a-z0-9-]+\.cjs$/)
   assert.ok(['darwin', 'win32', 'linux'].includes(process.platform))
   const original = await verifyDesktopPayload(path.join(project, 'offline'))
@@ -45,6 +45,11 @@ export async function buildDesktopComponentSource({ repository, project, destina
       for (const file of ['candidate-only.json', 'crabot.png', cleanup]) await fs.copyFile(path.join(originalResources, file), path.join(resources, file))
       if (process.platform === 'linux') for (const file of ['crabot-sandbox-helper', 'crabot-maintenance', 'browser-probe.py', 'crabot-maintenance-backend']) {
         await fs.cp(path.join(originalResources, file), path.join(resources, file), { recursive: true, verbatimSymlinks: true, mode: constants.COPYFILE_FICLONE })
+      }
+      if (ubuntuRemovalControl) {
+        assert.equal(process.platform, 'linux'); assert.equal(entryFixture, 'uninstall-main-driver.cjs')
+        const { prepareUbuntuUninstallDriver } = await import('./build-uninstall-ubuntu-driver.mjs')
+        await prepareUbuntuUninstallDriver({ repository, resources, control: ubuntuRemovalControl })
       }
     },
   } })

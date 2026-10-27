@@ -127,7 +127,7 @@ jobs:
           node .github/scripts/desktop-runtime-scope.mjs
       - name: Linux build prerequisites
         if: runner.os == 'Linux' && steps.scope.outputs.full_runtime == 'true'
-        run: sudo apt-get update && sudo apt-get install -y build-essential libcurl4-openssl-dev libexpat1-dev zlib1g-dev libjson-glib-dev
+        run: sudo apt-get update && sudo apt-get install -y build-essential libcurl4-openssl-dev libexpat1-dev zlib1g-dev libjson-glib-dev libgtk-4-dev
       - name: Prepare isolated build directory
         run: mkdir -p .desktop-build
       - name: Compile same-source helper for actual paired-layout verification
@@ -439,9 +439,14 @@ jobs:
           fi
           node .github/scripts/check-paired-update-report.mjs .desktop-build/paired-update-host.json "$CRABOT_PAIRED_ACCEPTANCE_ID"
       - name: Ordinary Main complete uninstall and retained reinstall
-        if: runner.os != 'Linux' && steps.scope.outputs.full_runtime == 'true'
+        if: steps.scope.outputs.full_runtime == 'true'
         timeout-minutes: 20
-        run: node .github/scripts/verify-uninstall-reinstall.mjs ".desktop-build/安装 候选/paired" 2>&1 | tee .desktop-build/uninstall-reinstall-stage.log
+        run: |
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            dbus-run-session -- xvfb-run -a node .github/scripts/verify-uninstall-reinstall.mjs ".desktop-build/安装 候选/paired" 2>&1 | tee .desktop-build/uninstall-reinstall-stage.log
+          else
+            node .github/scripts/verify-uninstall-reinstall.mjs ".desktop-build/安装 候选/paired" 2>&1 | tee .desktop-build/uninstall-reinstall-stage.log
+          fi
       - name: Ordinary CLI archive and actual upgrade command
         if: steps.scope.outputs.full_runtime == 'true'
         run: |

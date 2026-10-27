@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict'
 import path from 'node:path'
 import { promises as fs } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { spawn, execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { once } from 'node:events'
@@ -18,8 +18,10 @@ import { stopInstance } from '../../scripts/lib/instance-controller.mjs'
 import { probeKnownProcessExit } from '../../scripts/lib/known-process-exit.cjs'
 import product from '../../scripts/lib/product-runtime.cjs'
 import management from '../../scripts/lib/desktop-management.cjs'
+import { registerUbuntuFixturePrograms } from './ubuntu-fixture-programs.mjs'
 
-if (process.env.GITHUB_ACTIONS !== 'true' || !['darwin', 'win32'].includes(process.platform)) throw new Error('Isolated macOS/Windows CI only')
+if (process.env.GITHUB_ACTIONS !== 'true' || !['darwin', 'win32', 'linux'].includes(process.platform)) throw new Error('Isolated desktop CI only')
+const linux = process.platform === 'linux'
 const repository = path.resolve('.'), project = await fs.realpath(process.argv[2])
 const location = JSON.parse(await fs.readFile(path.join(project, 'packaged-location.json'), 'utf8'))
 assert.equal(location.schema_version, 2)
@@ -27,10 +29,14 @@ const payload = path.resolve(project, location.payload), target = await verifyDe
 assert.ok(path.relative(project, payload) && !path.relative(project, payload).startsWith('..'))
 const needed = target.bytes * 9n + 2n * 1024n ** 3n
 for (const parent of [repository, tmpdir()]) { const space = await fs.statfs(parent, { bigint: true }); assert.ok(space.bavail * space.bsize > needed) }
-const temporary = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'Crabot 卸载重装 ')))
+const temporary = await fs.realpath(await fs.mkdtemp(path.join(linux ? homedir() : tmpdir(), 'Crabot 卸载重装 ')))
 const job = path.join(repository, '.desktop-build', 'uninstall-reinstall-' + randomBytes(8).toString('hex'))
 const control = management.ensurePrivateDataRoot(path.join(temporary, 'control')), home = management.ensurePrivateDataRoot(path.join(temporary, 'home'))
 const env = { ...process.env, HOME: home, USERPROFILE: home, APPDATA: path.join(home, 'Roaming'), LOCALAPPDATA: path.join(home, 'Local') }
+if (linux) {
+  env.XDG_CONFIG_HOME = management.ensurePrivateDataRoot(path.join(home, '.config'))
+  env.XDG_DATA_HOME = management.ensurePrivateDataRoot(path.join(home, '.local/share'))
+}
 for (const name of ['ELECTRON_RUN_AS_NODE', 'NODE_OPTIONS', 'NODE_PATH', 'CRABOT_DEV', 'CRABOT_PORT_OFFSET', 'WORKER_WORKSPACES_DIR']) delete env[name]
 const started = performance.now(), children = []
 let selected, host, registrationExecutable, targetPrepared, report, success = false, sourceOutput = ''
@@ -66,17 +72,30 @@ function launch(executable, launchEnv) {
 }
 async function absent(file) { try { await fs.lstat(file); return false } catch (error) { if (error.code === 'ENOENT') return true; throw error } }
 async function register(prepared, action) {
+  if (linux) {
+    const options = { home, platform: 'linux', env, shell: {}, verifyStopped: async () => assert.equal(inspectInstance(selected.dataDir).state, 'stopped') }
+    if (action === 'remove') {
+      const { removeInstallationEntries } = await import(pathToFileURL(path.join(repository, 'crabot-desktop/dist/installation-removal.js')))
+      await removeInstallationEntries(prepared, options)
+    } else {
+      const { registerInstallationEntries } = await import(pathToFileURL(path.join(repository, 'crabot-desktop/dist/installation-entries.js')))
+      await registerInstallationEntries(prepared, options)
+    }
+    await fs.writeFile(path.join(control, (action === 'remove' ? 'entries-cleaned' : 'entries-restored') + '.json'), 'true\n')
+    return
+  }
   const file = path.join(control, 'registration-' + action + '.json')
   await fs.writeFile(file, JSON.stringify({ control, prepared, registration: action }) + '\n', { flag: 'wx', mode: 0o600 })
   await promisify(execFile)(registrationExecutable, [], { env: { ...env, CRABOT_UNINSTALL_MAIN_DRIVER: file }, timeout: 90000, maxBuffer: 128000 })
   assert.ok(await read(action === 'remove' ? 'entries-cleaned' : 'entries-restored'))
 }
-const shortcut = process.platform === 'darwin' ? path.join(home, 'Applications/Crabot.app') : path.join(env.APPDATA, 'Microsoft/Windows/Start Menu/Programs/Crabot.lnk')
+const shortcut = process.platform === 'darwin' ? path.join(home, 'Applications/Crabot.app') : linux ? path.join(env.XDG_DATA_HOME, 'applications/crabot.desktop') : path.join(env.APPDATA, 'Microsoft/Windows/Start Menu/Programs/Crabot.lnk')
 try {
   stage('building-confirmation-driver')
-  const sourcePayload = await buildDesktopComponentSource({ repository, project, destination: job, entryFixture: 'uninstall-main-driver.cjs' })
+  const sourcePayload = await buildDesktopComponentSource({ repository, project, destination: job, entryFixture: 'uninstall-main-driver.cjs', ...(linux ? { ubuntuRemovalControl: control } : {}) })
   registrationExecutable = path.join(sourcePayload, process.platform === 'darwin' ? 'gui/Crabot.app/Contents/MacOS/Crabot' : 'gui/Crabot.exe')
   const prepared = await prepareDesktopInstallation({ payload: sourcePayload, installRoot: path.join(temporary, '整体 安装') })
+  await registerUbuntuFixturePrograms(prepared)
   selected = await commitDesktopInstallation(prepared)
   const configFile = path.join(control, 'config.json')
   await fs.writeFile(configFile, JSON.stringify({ control, prepared }) + '\n', { flag: 'wx', mode: 0o600 })
@@ -99,7 +118,7 @@ try {
   await wait('completed native dialog', () => read('completed-dialog'), 900000)
   await source.exited
   await wait('maintenance kernel exit', () => probeKnownProcessExit([host.identity]).state === 'stopped', 30000)
-  await wait('private GUI copy cleanup', () => absent(path.join(host.directory, 'gui')), 30000)
+  await wait('private GUI copy cleanup', () => absent(linux ? host.directory : path.join(host.directory, 'gui')), 30000)
   assert.equal(inspectInstance(selected.dataDir).state, 'stopped')
   for (const file of [selected.coreRoot, selected.guiRoot, shortcut]) assert.equal(await absent(file), true)
   for (const file of files) assert.equal(await fs.readFile(file, 'utf8'), 'retained ordinary Main acceptance\n')
@@ -108,7 +127,7 @@ try {
   stage('complete-uninstall-verified')
   await prepareDesktopRemovalReinstall({ payload, installRoot: selected.root, operationId: removal.operation_id, verifyStopped: async () => assert.equal(inspectInstance(selected.dataDir).state, 'stopped') })
   const handoff = await runPreparedDesktopReinstallHandoff({ payload, installRoot: selected.root, operationId: removal.operation_id,
-    registerEntries: async prepared => { targetPrepared = prepared; await register(prepared, 'restore') } })
+    registerEntries: async prepared => { targetPrepared = prepared; await registerUbuntuFixturePrograms(prepared); await register(prepared, 'restore') } })
   stage('ordinary-target-start')
   const restored = launch(handoff.executable, env)
   await wait('ordinary retained target ready', () => restored.ready)
@@ -129,7 +148,7 @@ try {
   await promisify(execFile)(runtime.executables.python, ['-c', 'import pathlib,sys;pathlib.Path(sys.argv[1]).write_text("bundled Python ready")', pythonFile], { env, cwd: workspace.root, timeout: 10000 })
   assert.equal(await fs.readFile(scriptFile, 'utf8'), 'bundled Node ready'); assert.equal(await fs.readFile(pythonFile, 'utf8'), 'bundled Python ready')
   report = { platform: process.platform, arch: process.arch, ordinary_main_loaded: true, native_dialog_input_substituted: true, actual_core_started: true,
-    complete_uninstall_lifecycle_tested: true, original_gui_and_core_removed: true, original_os_entries_removed: true, private_gui_copy_removed: true,
+    complete_uninstall_lifecycle_tested: true, actual_gtk_display: linux, gtk_buttons_automated: linux, polkit_transport_substituted: linux, graphical_polkit_tested: false, original_gui_and_core_removed: true, original_os_entries_removed: true, private_gui_copy_removed: true,
     retained_data_and_workspace_verified: true, ordinary_target_real_health: true, same_instance_new_generation: true, restored_os_entries: true,
     registered_native_cli_compatible: true, bundled_node_python_files_verified: true, agent_model_generation_tested: false, real_login_session_verified: false }
   success = true
