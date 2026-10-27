@@ -11,7 +11,7 @@ assert.equal(process.env.GITHUB_ACTIONS, 'true', 'Login fixture is CI-only')
 assert.equal(process.platform, 'darwin')
 const run = promisify(execFile), temporary = process.env.RUNNER_TEMP
 assert.ok(temporary && path.isAbsolute(temporary))
-async function probe(sourceRemoved) {
+async function probe(sourceRemoved, registerFirst) {
 const root = await fs.mkdtemp(path.join(temporary, 'crabot-login-owned-'))
 const identifier = 'com.crabot.test.removal-login.' + randomUUID()
 const application = name => path.join(root, name, 'Fixture.app')
@@ -24,7 +24,7 @@ const restoreSource = async () => {
   await fs.cp(application('host'), application('source'), { recursive: true, verbatimSymlinks: true, mode: constants.COPYFILE_FICLONE })
   await command('/usr/bin/codesign', ['--verify', '--strict', application('source')]); sourceMissing = false
 }
-const facts = { fixture_only: true, business_started: false, source_removed_before_unregister: sourceRemoved, identifier, observations: [] }
+const facts = { fixture_only: true, business_started: false, registered_before_copy: registerFirst, source_removed_before_unregister: sourceRemoved, identifier, observations: [] }
 try {
   await fs.mkdir(path.dirname(executable('source')), { recursive: true, mode: 0o700 })
   await command('/usr/bin/clang', ['-fobjc-arc', '-mmacosx-version-min=14.0', '-framework', 'Foundation', '-framework', 'ServiceManagement',
@@ -41,6 +41,14 @@ try {
   assert.equal(before.ok, true); assert.ok(['not_registered', 'not_found'].includes(before.status))
   await fs.cp(application('source'), application('host'), { recursive: true, verbatimSymlinks: true, mode: constants.COPYFILE_FICLONE })
   await command('/usr/bin/codesign', ['--verify', '--strict', application('host')])
+  if (!registerFirst) {
+    if (sourceRemoved) { await fs.rm(application('source'), { recursive: true }); sourceMissing = true }
+    const removed = await observe('host', 'unregister'); facts.observations.push({ role: 'never_registered_copy_unregister', ...removed })
+    await restoreSource()
+    const after = await observe('source', 'status'); facts.observations.push({ role: 'never_registered_source_after', ...after })
+    assert.equal(after.ok, true); assert.ok(['not_registered', 'not_found'].includes(after.status))
+    return
+  }
   registrationAttempted = true
   const registered = await observe('source', 'register'); facts.observations.push({ role: 'source_register', ...registered })
   assert.equal(registered.ok, true, 'OS must accept this owned registration before copy behavior can be tested')
@@ -71,4 +79,4 @@ finally {
 }
 if (failure) throw failure
 }
-for (const sourceRemoved of [false, true]) await probe(sourceRemoved)
+for (const registerFirst of [true, false]) for (const sourceRemoved of [false, true]) await probe(sourceRemoved, registerFirst)
