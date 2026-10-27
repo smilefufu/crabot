@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { hashPassword, verifyPassword, readCredentials, writeCredentials, newCredentialsFromPassword, rotateCredentials, DEFAULT_SCRYPT_PARAMS, type Credentials } from './credentials'
+import { hashPassword, verifyPassword, readCredentials, writeCredentials, createCredentialsIfAbsent, newCredentialsFromPassword, rotateCredentials, DEFAULT_SCRYPT_PARAMS, type Credentials } from './credentials'
 import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
 import * as os from 'node:os'
@@ -45,7 +45,8 @@ describe('credentials read/write', () => {
     await writeCredentials(dir, cred)
 
     const stat = await fs.stat(path.join(dir, 'credentials.json'))
-    expect(stat.mode & 0o777).toBe(0o600)
+    if (process.platform === 'win32') expect(require('../../scripts/lib/process-identity.cjs').isPrivateFile(path.join(dir, 'credentials.json'))).toBe(true)
+    else expect(stat.mode & 0o777).toBe(0o600)
 
     const read = await readCredentials(dir)
     expect(read).toEqual(cred)
@@ -118,4 +119,18 @@ describe('rotateCredentials', () => {
     expect(await verifyPassword('new-secret', rotated)).toBe(true)
     expect(await verifyPassword('old', rotated)).toBe(false)
   })
+})
+
+it('首次密码并发发布只有一个成功，不覆盖赢家，且不留下临时凭据', async () => {
+  const dir = await makeTmpDir()
+  try {
+    const candidates = await Promise.all(['first', 'second'].map(password => newCredentialsFromPassword(password, { is_temp: false, changed_via: 'ui' })))
+    const results = await Promise.all(candidates.map(credentials => createCredentialsIfAbsent(dir, credentials)))
+    expect(results.filter(Boolean)).toHaveLength(1)
+    expect(await readCredentials(dir)).toEqual(candidates[results.indexOf(true)])
+    if (process.platform === 'win32') expect(require('../../scripts/lib/process-identity.cjs').isPrivateFile(path.join(dir, 'credentials.json'))).toBe(true)
+    expect(await fs.readdir(dir)).toEqual(['credentials.json'])
+    expect(await createCredentialsIfAbsent(dir, candidates[results.indexOf(false)])).toBe(false)
+    expect(await readCredentials(dir)).toEqual(candidates[results.indexOf(true)])
+  } finally { await fs.rm(dir, { recursive: true, force: true }) }
 })

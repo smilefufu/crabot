@@ -9,6 +9,7 @@ import { Socket } from 'node:net'
 import { WebSocket, WebSocketServer } from 'ws'
 import { generateId, generateTimestamp, sha256CanonicalJson, type RpcClient, type TaskId } from 'crabot-shared'
 import { createHash } from 'node:crypto'
+import { ChatClientMessageSchema } from 'crabot-client'
 import { AdminChatAssertions } from './admin-chat-assertions.js'
 import { ChatRequestIndex } from './chat-request-index.js'
 import { ChatDeliveryJournalStore, type ChatDeliveryJournalRecord } from './chat-delivery-journal.js'
@@ -95,12 +96,14 @@ export class ChatManager {
   private messages: Map<string, ChatMessage> = new Map()
   private wsServer: WebSocketServer | null = null
   private activeClient: WebSocket | null = null
+  private readonly clientSessions = new WeakMap<WebSocket, { token: string; queue: Promise<void>; pending: number }>()
   private readonly messagesFilePath: string
   private readonly assertions: AdminChatAssertions
   /** P6-A §3.4：request 级 CAS 真相源（fingerprint 幂等/冲突判据）。 */
   private readonly requestIndex: ChatRequestIndex
   /** P6-A §3.4/§11.8：delivery 事务 journal（prepared/committing/committed/rolled_back）。 */
   private readonly deliveryJournal: ChatDeliveryJournalStore
+  private readonly inboundAbort = new AbortController()
 
   constructor(
     private readonly dataDir: string,
@@ -173,7 +176,8 @@ export class ChatManager {
     }
 
     // JWT 认证
-    const token = url.searchParams.get('token')
+    const token = req.headers.authorization?.startsWith('Bearer ')
+      ? req.headers.authorization.slice(7) : url.searchParams.get('token')
     let tokenValid = false
     try {
       tokenValid = !!(token && (await this.verifyJwt(token, this.jwtSecret, this.dataDir)))
@@ -199,23 +203,24 @@ export class ChatManager {
       }
 
       this.activeClient = ws
-      this.setupWebSocket(ws)
+      this.setupWebSocket(ws, token!)
     })
   }
 
-  private setupWebSocket(ws: WebSocket): void {
-    ws.on('message', async (data) => {
+  private setupWebSocket(ws: WebSocket, token: string): void {
+    this.clientSessions.set(ws, { token, queue: Promise.resolve(), pending: 0 })
+    ws.on('message', (data) => this.queueClientOperation(ws, 'inbound', async () => {
       try {
-        const message = JSON.parse(data.toString()) as ChatClientMessage
+        const message = ChatClientMessageSchema.parse(JSON.parse(data.toString()))
         await this.onMessage(message)
       } catch (error) {
-        console.error('[ChatManager] Failed to handle message:', error)
+        console.error('[ChatManager] Failed to handle chat frame; no frame contents logged')
         this.pushToClient({
           type: 'chat_error',
           error: 'Invalid message format',
         })
       }
-    })
+    }))
 
     ws.on('close', () => {
       if (this.activeClient === ws) {
@@ -226,6 +231,27 @@ export class ChatManager {
     ws.on('error', (error) => {
       console.error('[ChatManager] WebSocket error:', error)
     })
+  }
+
+  // Each frame uses current server-side authority. Serializing per connection also
+  // preserves order while credential/epoch checks await disk or native peer checks.
+  private queueClientOperation(ws: WebSocket, direction: 'inbound' | 'outbound', operation: () => void | Promise<void>): void {
+    const session = this.clientSessions.get(ws)
+    if (!session || this.inboundAbort.signal.aborted || this.activeClient !== ws || ws.readyState !== WebSocket.OPEN) return
+    if (session.pending >= 128) { ws.close(1013, 'Reconnect and refresh state'); return }
+    session.pending++
+    session.queue = session.queue.then(async () => {
+      // A received input belongs to its authenticated session even after the peer disconnects.
+      // Outbound pushes still require the current open socket.
+      if (this.inboundAbort.signal.aborted || (direction === 'outbound' && (this.activeClient !== ws || ws.readyState !== WebSocket.OPEN))) return
+      let authorized = false
+      try { authorized = !!await this.verifyJwt(session.token, this.jwtSecret, this.dataDir) } catch { /* fail closed */ }
+      if (this.inboundAbort.signal.aborted || (direction === 'outbound' && (this.activeClient !== ws || ws.readyState !== WebSocket.OPEN))) return
+      if (!authorized) { ws.close(4401, 'Session expired'); return }
+      await operation()
+    }).catch(() => {
+      console.warn('[ChatManager] WebSocket operation failed; no frame contents logged')
+    }).finally(() => { session.pending-- })
   }
 
   private async onMessage(data: ChatClientMessage): Promise<void> {
@@ -453,8 +479,8 @@ export class ChatManager {
       throw new Error('Admin Chat ingress was not JWT authenticated')
     }
     assertValidRequestId(params.request_id)
-    const text = params.text.trim()
-    if (!text && params.files.length === 0) {
+    const text = params.text
+    if (!text.trim() && params.files.length === 0) {
       throw new Error('Empty message')
     }
 
@@ -574,15 +600,16 @@ export class ChatManager {
   }
 
   private pushToClient(message: ChatServerMessage): void {
-    if (this.activeClient && this.activeClient.readyState === WebSocket.OPEN) {
+    const client = this.activeClient
+    if (client) this.queueClientOperation(client, 'outbound', () => {
       // send 在 OPEN→CLOSING 竞态下可能同步抛错；推送是 best-effort，
       // 不能让异常冒泡污染调用方（尤其任务状态机 applyStatusTransition 钩子）
       try {
-        this.activeClient.send(JSON.stringify(message))
+        client.send(JSON.stringify(message))
       } catch (error) {
         console.warn('[ChatManager] pushToClient failed:', error instanceof Error ? error.message : String(error))
       }
-    }
+    })
   }
 
   // ==========================================================================
@@ -954,6 +981,7 @@ export class ChatManager {
   // ==========================================================================
 
   close(): void {
+    this.inboundAbort.abort()
     if (this.activeClient) {
       this.activeClient.close(1000, 'Server shutting down')
       this.activeClient = null

@@ -1,3 +1,6 @@
+import { parseChatMultipartMetadata } from 'crabot-client'
+import { correlateHttpRequest } from './http-diagnostics.js'
+import { DesktopSessions, type DesktopClaims } from './desktop-session.js'
 import { parseFriendPermissionRecords, serializeFriendPermissionRecords } from './friend-permission-store.js'
 import type { ConversationRequestSource } from 'crabot-shared'
 import type { VerifyMemoryAccessResult, VerifyMemoryRequestAccessResult } from 'crabot-shared'
@@ -281,7 +284,7 @@ import {
   formatGoalListResponse,
   formatMissingIdResponse,
 } from './goal-slash.js'
-import { readCredentials, verifyPassword, rotateCredentials, writeCredentials } from './credentials.js'
+import { readCredentials, verifyPassword, rotateCredentials, writeCredentials, newCredentialsFromPassword, createCredentialsIfAbsent } from './credentials.js'
 import { ComputerUseSetup } from './computer-use-setup.js'
 import { isStandardComputerUse, type ComputerUseRuntimeStatus, type ComputerUseSetupRequest } from 'crabot-shared'
 import { getAdminLogsDir, getDataRootDir } from './core/data-paths.js'
@@ -291,6 +294,7 @@ import { getAdminLogsDir, getDataRootDir } from './core/data-paths.js'
 // ============================================================================
 
 interface JwtPayload {
+  desktop?: DesktopClaims
   sub: string
   iat: number
   exp: number
@@ -677,6 +681,7 @@ export class AdminModule extends ModuleBase {
   private voiceFingerprint?: string
   private voiceGateway!: VoiceGateway
   private jwtSecret: string = ''
+  private desktopSessions?: DesktopSessions
 
   // 数据存储
   private friends: Map<FriendId, Friend> = new Map()
@@ -862,7 +867,7 @@ export class AdminModule extends ModuleBase {
       verifyRuntime: async (id, bearer) => { await this.rpcClient.callModuleManagerSensitive('verify_voice_runtime', { expected_module_id: id }, this.config.moduleId, { authorizationBearer: bearer }) },
       verifyCore: async bearer => { await this.rpcClient.callModuleManagerSensitive('verify_core_agent_runtime', { expected_module_id: 'crabot-agent' }, this.config.moduleId, { authorizationBearer: bearer }) },
       verifyHuman: async bearer => {
-        const payload = bearer ? await verifyJwtWithEpoch(bearer, this.jwtSecret, this.adminConfig.data_dir) : null
+        const payload = bearer ? await this.verifyAuthenticatedToken(bearer) : null
         if (!payload) throw new RpcError('UNAUTHORIZED', 'Human Admin credential required')
         if (payload.sub !== 'admin' || payload.agent_cli) throw new RpcError('FORBIDDEN', 'Human Admin credential required')
       },
@@ -1271,7 +1276,7 @@ export class AdminModule extends ModuleBase {
       this.rpcClient,
       () => this.ensureAgentPort(),
       this.jwtSecret,
-      verifyJwtWithEpoch,
+      token => this.verifyHumanToken(token),
       this.mediaStore!,
     )
     await this.chatManager.loadData()
@@ -1314,6 +1319,20 @@ export class AdminModule extends ModuleBase {
 
     // 启动 Web 服务器
     await this.startWebServer()
+    try {
+      this.desktopSessions = new DesktopSessions({
+        root: path.resolve(__dirname, '../..'), dataRoot: getDataRootDir(),
+        adminUrl: `http://127.0.0.1:${this.adminConfig.web_port}`,
+        issue: async (desktop, exp) => {
+          const cred = await readCredentials(this.adminConfig.data_dir)
+          return signJwt({ sub: 'admin', iat: Math.floor(Date.now() / 1000), exp, e: cred?.token_epoch ?? 0, desktop }, this.jwtSecret)
+        },
+      })
+      await this.desktopSessions.start()
+    } catch {
+      await this.desktopSessions?.close().catch(() => {})
+      console.warn('[DesktopAuth] DESKTOP_UNAVAILABLE; browser and management services remain available')
+    }
 
     console.log(`[Admin] Web server started on port ${this.adminConfig.web_port}`)
 
@@ -1357,6 +1376,8 @@ export class AdminModule extends ModuleBase {
   }
 
   protected override async onStop(): Promise<void> {
+    try { await this.desktopSessions?.close() }
+    catch { console.warn('[DesktopAuth] Listener stopped; discovery cleanup incomplete, record retained') }
     this.voiceAdmin.stop()
     await this.computerUseSetup?.close()
     if (this.configDrainRetryTimer) {
@@ -1412,6 +1433,7 @@ export class AdminModule extends ModuleBase {
   protected override async getHealthDetails(): Promise<Record<string, unknown>> {
     const health: Record<string, unknown> = {
       web_server_running: this.webServer !== null,
+      desktop_session_ready: this.desktopSessions?.ready === true,
       cutover_ready: this.cutoverActivated,
       ...(this.cutoverActivated ? {} : { recovery_reason: this.cutoverRecoveryReason ?? 'waiting for authenticated core Agent startup/configuration' }),
       friends_count: this.friends.size,
@@ -1554,7 +1576,7 @@ export class AdminModule extends ModuleBase {
     this.closeWebTransport = transport.close
 
     return new Promise((resolve, reject) => {
-      this.webServer!.listen(this.adminConfig.web_port, () => {
+      this.webServer!.listen(this.adminConfig.web_port, process.env.CRABOT_ADMIN_WEB_HOST, () => {
         resolve()
       })
       this.webServer!.on('error', reject)
@@ -1564,8 +1586,9 @@ export class AdminModule extends ModuleBase {
   private async handleWebRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
     // 设置 CORS 头
     res.setHeader('Access-Control-Allow-Origin', '*')
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, DELETE, OPTIONS')
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization')
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS')
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Crabot-Request-Id')
+    res.setHeader('Access-Control-Expose-Headers', 'X-Crabot-Request-Id')
 
     if (req.method === 'OPTIONS') {
       res.writeHead(204)
@@ -1575,6 +1598,7 @@ export class AdminModule extends ModuleBase {
 
     const url = new URL(req.url ?? '/', `http://localhost:${this.adminConfig.web_port}`)
     const pathname = url.pathname
+    if (pathname.startsWith('/api/')) correlateHttpRequest(req, res)
     let agentCliAuth: AgentCliWebAuth | undefined
 
     if (!this.cutoverActivated && (pathname === '/api/chat/messages' || pathname === '/api/chat/tasks' || pathname.startsWith('/api/chat/messages/') || pathname.startsWith('/api/chat/tasks/'))) {
@@ -1609,8 +1633,16 @@ export class AdminModule extends ModuleBase {
           return
         }
       } else {
-        const payload = await verifyJwtWithEpoch(token, this.jwtSecret, this.adminConfig.data_dir)
+        const payload = await this.verifyAuthenticatedToken(token)
+        if (pathname.startsWith('/api/chat/') && payload && (payload.sub !== 'admin' || payload.agent_cli)) {
+          sendJson(res, 403, { error: 'Human Admin credential required' })
+          return
+        }
         if (!payload) {
+          if (verifyJwt(token, this.jwtSecret)?.desktop !== undefined) {
+            sendJson(res, 401, { error: 'DESKTOP_UNAUTHORIZED', message: 'Desktop session is unavailable; reconnect locally' })
+            return
+          }
         // 区分 token 不合法 vs epoch 失效
         const basicValid = basicPayload
         if (basicValid && basicValid.sub !== 'internal') {
@@ -3123,6 +3155,22 @@ export class AdminModule extends ModuleBase {
   // 认证 API
   // ============================================================================
 
+  private async verifyAuthenticatedToken(token: string): Promise<JwtPayload | null> {
+    const payload = verifyJwt(token, this.jwtSecret)
+    if (!payload) return null
+    // Only the new desktop claim enters this branch. Legacy internal/password
+    // tokens continue through the original verifier with its unchanged epoch rules.
+    if (payload.desktop === undefined) return verifyJwtWithEpoch(token, this.jwtSecret, this.adminConfig.data_dir)
+    if (payload.sub !== 'admin' || payload.agent_cli || !this.desktopSessions?.validate(payload.desktop, payload.exp)) return null
+    const cred = await readCredentials(this.adminConfig.data_dir)
+    return payload.e === (cred?.token_epoch ?? 0) ? payload : null
+  }
+
+  private async verifyHumanToken(token: string): Promise<JwtPayload | null> {
+    const payload = await this.verifyAuthenticatedToken(token)
+    return payload?.sub === 'admin' && !payload.agent_cli ? payload : null
+  }
+
   private async handleLogin(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const body = await this.readJsonBody<LoginRequest>(req)
 
@@ -3164,15 +3212,18 @@ export class AdminModule extends ModuleBase {
     res.end(JSON.stringify(response))
   }
 
-  private async handleGetMe(_req: IncomingMessage, res: ServerResponse): Promise<void> {
+  private async handleGetMe(req: IncomingMessage, res: ServerResponse): Promise<void> {
     // 鉴权已在 dispatcher 拦截（API 前置）；此处只读 credentials.json
     const cred = await readCredentials(this.adminConfig.data_dir)
-    if (!cred) {
+    const token = req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.slice(7) : ''
+    const human = await this.verifyHumanToken(token)
+    if (!human) { sendJson(res, 403, { error: 'Human Admin credential required' }); return }
+    if (!cred && !human.desktop) {
       res.writeHead(503)
       res.end(JSON.stringify({ error: AdminErrorCode.SERVER_NOT_INITIALIZED }))
       return
     }
-    const body: MeResponse = { is_temp: cred.is_temp }
+    const body: MeResponse = { is_temp: cred?.is_temp ?? false, password_configured: !!cred, auth_method: human.desktop ? 'desktop' : 'password' }
     res.writeHead(200, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify(body))
   }
@@ -3186,8 +3237,8 @@ export class AdminModule extends ModuleBase {
       res.end(JSON.stringify({ error: 'Unauthorized' }))
       return
     }
-    const payload = await verifyJwtWithEpoch(token, this.jwtSecret, this.adminConfig.data_dir)
-    if (!payload || payload.sub === 'internal') {
+    const payload = await this.verifyHumanToken(token)
+    if (!payload) {
       res.writeHead(403)
       res.end(JSON.stringify({ error: 'Forbidden', message: 'internal-token cannot change human password' }))
       return
@@ -3205,6 +3256,13 @@ export class AdminModule extends ModuleBase {
 
     const cred = await readCredentials(this.adminConfig.data_dir)
     if (!cred) {
+      if (payload.desktop) {
+        const created = await createCredentialsIfAbsent(this.adminConfig.data_dir,
+          await newCredentialsFromPassword(body.new_password, { is_temp: false, changed_via: 'ui' }))
+        if (!created) { sendJson(res, 409, { error: 'Browser password was configured concurrently; refresh before changing it' }); return }
+        sendJson(res, 200, {})
+        return
+      }
       res.writeHead(503)
       res.end(JSON.stringify({ error: AdminErrorCode.SERVER_NOT_INITIALIZED }))
       return
@@ -8189,7 +8247,7 @@ export class AdminModule extends ModuleBase {
   private async handleComputerUseSetupApi(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const header = req.headers.authorization
     const token = typeof header === 'string' && header.startsWith('Bearer ') ? header.slice(7) : ''
-    const human = await verifyJwtWithEpoch(token, this.jwtSecret, this.adminConfig.data_dir)
+    const human = await this.verifyAuthenticatedToken(token)
     if (!human || !Number.isSafeInteger(human.exp) || human.exp <= Date.now() / 1000) { sendJson(res, 401, { error: 'Unauthorized' }); return }
     if (human.sub !== 'admin') { sendJson(res, 403, { error: 'Forbidden' }); return }
     try {
@@ -10298,7 +10356,7 @@ export class AdminModule extends ModuleBase {
       ?? (req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.slice(7) : null)
     let ok = false
     try {
-      ok = !!(token && (await verifyJwtWithEpoch(token, this.jwtSecret, this.adminConfig.data_dir)))
+      ok = !!(token && (await this.verifyAuthenticatedToken(token)))
     } catch { ok = false }
     if (!ok) {
       sendJson(res, 401, { error: 'Unauthorized' })
@@ -10395,12 +10453,15 @@ export class AdminModule extends ModuleBase {
         body: Buffer.concat(chunks),
       })
       const form = await request.formData()
-      const text = String(form.get('text') ?? '')
-      const requestId = String(form.get('request_id') ?? '')
-      if (!requestId) {
-        sendJson(res, 400, { error: 'request_id required' })
+      const metadata = parseChatMultipartMetadata({
+        text: form.get('text') ?? undefined, text_json: form.get('text_json') ?? undefined,
+        request_id: form.get('request_id') ?? '',
+      })
+      if (!metadata.success) {
+        sendJson(res, 400, { error: 'invalid chat request_id or text' })
         return
       }
+      const text = metadata.data.text ?? '', requestId = metadata.data.request_id
       const files: Array<{ buffer: Buffer; filename: string; mime_type: string }> = []
       // File 类在 Node 20+ 全局可用；使用 as unknown 绕过 tsconfig 中未含 DOM lib 的类型限制
       const FileClass = (globalThis as unknown as { File: new (...args: unknown[]) => { name: string; type: string; arrayBuffer(): Promise<ArrayBuffer> } }).File
@@ -10421,7 +10482,8 @@ export class AdminModule extends ModuleBase {
       )
       sendJson(res, 200, result)
     } catch (err) {
-      sendJson(res, 400, { error: err instanceof Error ? err.message : 'invalid multipart request' })
+      const conflict = (err as { code?: string })?.code === 'ADMIN_CHAT_REQUEST_CONFLICT'
+      sendJson(res, conflict ? 409 : 400, { error: err instanceof Error ? err.message : 'invalid multipart request' })
     }
   }
 
@@ -10599,7 +10661,7 @@ export class AdminModule extends ModuleBase {
     const bearer = context?.authorizationBearer
     if (!bearer) throw new RpcError('UNAUTHORIZED', 'Missing Memory credential')
     if (params.caller_kind === 'admin_web') {
-      const payload = await verifyJwtWithEpoch(bearer, this.jwtSecret, this.adminConfig.data_dir)
+      const payload = await this.verifyAuthenticatedToken(bearer)
       if (!payload) throw new RpcError('UNAUTHORIZED', 'Invalid Admin credential')
       if (payload.sub !== 'admin' || payload.agent_cli) throw new RpcError('FORBIDDEN', 'Human Admin credential required')
     } else if (params.caller_kind === 'core_agent') {

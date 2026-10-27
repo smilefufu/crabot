@@ -8,6 +8,9 @@ importers:
 
   .:
     dependencies:
+      crabot-client:
+        specifier: file:./crabot-client
+        version: file:crabot-client
       commander:
         specifier: ^13.0.0
         version: 13.1.0
@@ -653,6 +656,12 @@ packages:
     resolution: {integrity: sha512-4LCcse/U2MHZ63HAJVE+v71o7yOdIe4cZ70Wpf8D/IyjDKYQLV5GD46B+hSTjJsvV5PztjvHoU580EftxjDZFQ==}
     engines: {node: '>=12.20'}
 
+  crabot-client@file:crabot-client:
+    resolution: {directory: crabot-client, type: directory}
+
+  zod@4.6.7:
+    resolution: {integrity: sha512-g8W2D2kU6a8untc053fX1uVBKzM7yqAxW/3zwk83+6RyF2+SKOuV+c0wBDhUwzV1PaGapmZH+rmcUzPf+3CGwg==}
+
 snapshots:
 
   '@esbuild/aix-ppc64@0.21.5':
@@ -1163,3 +1172,9 @@ snapshots:
       stackback: 0.0.2
 
   yocto-queue@1.2.2: {}
+
+  crabot-client@file:crabot-client:
+    dependencies:
+      zod: 4.6.7
+
+  zod@4.6.7: {}

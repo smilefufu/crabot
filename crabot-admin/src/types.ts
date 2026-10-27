@@ -543,6 +543,8 @@ export interface ChangePasswordRequest {
 
 export interface MeResponse {
   is_temp: boolean
+  password_configured?: boolean
+  auth_method?: 'password' | 'desktop'
 }
 
 // PermissionTemplate 管理
