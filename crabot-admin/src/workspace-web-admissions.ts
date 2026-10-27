@@ -40,7 +40,10 @@ export class WorkspaceWebAdmissions {
   }
 
   /** Only the owning prepared completion may reclose after its durable fence was released. */
-  async closeAfterFailedResume(): Promise<void> {
+  closeAfterFailedResume(): Promise<void> { return this.closeAfterRelease() }
+
+  /** The current authenticated handoff may drain an already released workspace. */
+  async closeAfterRelease(): Promise<void> {
     this.closed = true
     while (this.pending.size) await Promise.all([...this.pending])
   }

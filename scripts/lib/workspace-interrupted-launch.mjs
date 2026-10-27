@@ -6,7 +6,7 @@ import { randomUUID } from 'node:crypto'
 import native from './process-identity.cjs'
 import { captureSpawnedProcessTree } from './spawned-process-tree.cjs'
 import { commitWorkspaceInterruptedRecoveryLaunch, readWorkspaceInterruptedRecoveryRole, parseWorkspaceInterruptedRecoveryRequest } from './workspace-interrupted-role.mjs'
-import { readPendingWorkspaceSourceRestoration } from './workspace-interrupted-source-records.mjs'
+import { readWorkspaceSourceRecoveryScope } from './workspace-interrupted-source-records.mjs'
 import { readWorkspaceRelocationIntent, readWorkspaceInterruptedRelocationCheckpoint } from './workspace-relocation-intent.mjs'
 import { sha256CanonicalJson as hash } from '../../crabot-shared/dist/canonical-json.js'
 const entry = fileURLToPath(new URL('../workspace-interrupted-coordinator.mjs', import.meta.url))
@@ -21,7 +21,7 @@ export async function launchWorkspaceInterruptedRecoveryCoordinator(options) {
     const request = parseWorkspaceInterruptedRecoveryRequest(options.request)
     await options.verify()
     const original = readWorkspaceRelocationIntent(options.dataDir) ? readWorkspaceInterruptedRelocationCheckpoint(options.dataDir, request.intent_id)
-      : readPendingWorkspaceSourceRestoration(options.dataDir, request.intent_id).checkpoint
+      : readWorkspaceSourceRecoveryScope(options.dataDir, request.intent_id).checkpoint
     if (readWorkspaceInterruptedRecoveryRole(options.dataDir, request.recovery_id).launch) throw failure()
     const allowed = new Set(['PATH', 'HOME', 'USERPROFILE', 'SYSTEMROOT', 'WINDIR', 'TEMP', 'TMP', 'TMPDIR', 'LANG', 'LC_ALL', 'LC_CTYPE'])
     const env = Object.fromEntries(Object.entries(process.env).filter(([key, value]) => value !== undefined && allowed.has(key.toUpperCase())))

@@ -19,26 +19,30 @@ export function createWorkspaceInterruptedRootVerifier(options: Options) {
     if (!token || Buffer.byteLength(token) !== Buffer.byteLength(bearer) || !timingSafeEqual(Buffer.from(token), Buffer.from(bearer))) throw new RpcError('FORBIDDEN', 'Agent运行凭据不匹配。')
     const records = require('../../../scripts/lib/workspace-interrupted-runtime.mjs')
     const { parseWorkspaceInterruptedRecoveryRequest, readWorkspaceInterruptedRecoveryRole } = require('../../../scripts/lib/workspace-interrupted-role.mjs')
-    const { readWorkspaceSourceCompletionScope } = require('../../../scripts/lib/workspace-interrupted-source-records.mjs')
+    const { readWorkspaceSourceCompletionScope, assertWorkspaceSourceRootCurrent } = require('../../../scripts/lib/workspace-interrupted-source-records.mjs')
     const native = require('../../../scripts/lib/process-identity.cjs')
     let request: WorkspaceInterruptedRecoveryRequest
     try { request = parseWorkspaceInterruptedRecoveryRequest(input) }
     catch { throw new RpcError('INVALID_PARAMS', '原位置核验只接受固定恢复作业标识。') }
     const role = readWorkspaceInterruptedRecoveryRole(options.dataDir, request.recovery_id)
-    const plan = records.readWorkspaceInterruptedRuntimePlan(options.dataDir, request.recovery_id), start = records.readWorkspaceInterruptedRuntimeStart(options.dataDir, request.recovery_id, 'crabot-agent')
+    const plan = records.readWorkspaceInterruptedRuntimePlan(options.dataDir, request.recovery_id)
+    const observation = records.readWorkspaceInterruptedRuntimeObservation(options.dataDir, request.recovery_id, 'crabot-agent')
+    const start = observation ?? records.readWorkspaceInterruptedRuntimeStart(options.dataDir, request.recovery_id, 'crabot-agent')
     const source = readWorkspaceSourceCompletionScope(options.dataDir, request.intent_id), identity = Object.freeze({ ...options.runtimeIdentity() })
     if (!role.launch || !role.ready || !plan || !start || sha256CanonicalJson(role.launch.request) !== sha256CanonicalJson(request)
       || identity.module_id !== 'crabot-agent' || identity.instance_id !== plan.instance_id || identity.runtime_id !== start.runtime.runtime_id) throw failure()
     const signature = sha256CanonicalJson({ role, plan, start, marker: source.marker, identity })
-    if (original && original !== signature) throw failure()
     const result: WorkspaceInterruptedRecoveryRuntimeResult = Object.freeze({ verified: true, ...request, launch_sha256: sha256CanonicalJson(role.launch),
       plan_sha256: sha256CanonicalJson(plan), catalog_sha256: source.scope.catalog_sha256, instance_id: plan.instance_id, module_id: 'crabot-agent', runtime_id: start.runtime.runtime_id })
     const assertCurrent = () => {
+      try { assertWorkspaceSourceRootCurrent(source) } catch { throw failure() }
       if (options.isClosing() || options.runtimeBearer() !== token || sha256CanonicalJson(options.runtimeIdentity()) !== sha256CanonicalJson(identity)
         || sha256CanonicalJson(readWorkspaceInterruptedRecoveryRole(options.dataDir, request.recovery_id)) !== sha256CanonicalJson(role)) throw failure()
-      records.verifyWorkspaceInterruptedRuntimeStart({ dataDir: options.dataDir, recoveryId: request.recovery_id, moduleId: 'crabot-agent',
+      if (observation) {
+        if (sha256CanonicalJson(records.verifyWorkspaceInterruptedRuntimeObservation(options.dataDir, request.recovery_id, 'crabot-agent')) !== sha256CanonicalJson(observation)) throw failure()
+      } else records.verifyWorkspaceInterruptedRuntimeStart({ dataDir: options.dataDir, recoveryId: request.recovery_id, moduleId: 'crabot-agent',
         recordHash: sha256CanonicalJson(start), definitionHash: start.definition_sha256 })
-      // The actual Agent must descend from the exact registered idle carrier.
+      // Bind the actual Agent itself, or its exact registered carrier ancestry.
       const chain = [], seen = new Set<number>()
       let current = native.inspectProcess(process.pid)
       while (current && !native.sameProcess(start.process, current)) {
@@ -48,7 +52,7 @@ export function createWorkspaceInterruptedRootVerifier(options: Options) {
         if (!parent || !require('../../../scripts/lib/owned-process-tree.cjs').processBirthAtLeast(current.started, parent.started)) throw failure()
         current = parent
       }
-      if (!current || !chain.length || chain.some(item => {
+      if (!current || (!observation && !chain.length) || chain.some(item => {
         const actual = native.inspectProcess(item.pid)
         return !native.sameProcess(item, actual) || actual.parent !== item.parent
       })) throw failure()
@@ -67,6 +71,11 @@ export function createWorkspaceInterruptedRootVerifier(options: Options) {
         assertCurrent()
         if (sha256CanonicalJson(proof) !== sha256CanonicalJson(result)) throw failure()
       } finally { rpc.close() }
+    }
+    if (original && original !== signature) {
+      // Authenticate a fresh explicit role before replacing the prior probe.
+      await verify()
+      pending = undefined
     }
     if (!pending) {
       original = signature

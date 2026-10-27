@@ -39,6 +39,17 @@ export function readPendingWorkspaceSourceRestoration(dataDir, id) {
 export function readWorkspaceSourceRestoration(dataDir, id) {
   return readRestoration(dataDir, id, false)
 }
+export function readWorkspaceSourceRecoveryScope(dataDir, id) {
+  const ctx = workspaceSourceRestorationPaths(dataDir, id)
+  return present(ctx.fence) ? { ...readPendingWorkspaceSourceRestoration(dataDir, id), released: false, release: null }
+    : readWorkspaceSourceCompletionScope(dataDir, id)
+}
+/** Read-only root generation check; neither a probe nor an execution permit. */
+export function assertWorkspaceSourceRootCurrent(source) {
+  const expected = source.complete.source, stat = fs.lstatSync(expected.path, { bigint: true })
+  if (!stat.isDirectory() || stat.isSymbolicLink() || String(stat.dev) !== expected.dev || String(stat.ino) !== expected.ino
+    || fs.realpathSync(expected.path) !== expected.path || process.platform === 'win32' && native.inspectDirectoryFileId(expected.path) !== expected.native_id) throw failure()
+}
 function readRestoration(dataDir, id, pending) {
   const ctx = workspaceSourceRestorationPaths(dataDir, id)
   const roots = [ctx.control, ctx.parent, ctx.job].filter(present).map(frame)
@@ -111,4 +122,30 @@ export function readWorkspaceSourceCompletionScope(dataDir, id) {
     || hash(current.launch.request) !== hash({ intent_id: id, recovery_id: release.job.recovery_id, checkpoint_sha256: release.job.checkpoint_sha256 })
     || hash(readJson(path.join(current.launch.control_root.path, 'runtime-plan.json'))) !== release.job.plan_sha256) throw failure()
   return { ...restored, released: true, release }
+}
+
+/** Past completion only; never a new permit or an assertion of current health. */
+export function readWorkspaceSourceServiceResumption(dataDir, id) {
+  const source = readWorkspaceSourceCompletionScope(dataDir, id)
+  if (!source.released) return null
+  const parent = path.dirname(source.role.launch.control_root.path), names = fs.readdirSync(parent).sort()
+  frame(parent)
+  let completed = null
+  for (const recoveryId of names) {
+    if (!uuid(recoveryId)) throw failure()
+    const directory = path.join(parent, recoveryId), record = readJson(path.join(directory, 'service-resumed.json'))
+    if (!record) continue
+    const role = readWorkspaceInterruptedRecoveryRole(dataDir, recoveryId)
+    if (role.launch?.request.intent_id !== id) continue
+    const job = record.job, plan = readJson(path.join(directory, 'runtime-plan.json'))
+    if (!exact(record, ['schema_version', 'job', 'scope_sha256']) || record.schema_version !== 2 || record.scope_sha256 !== source.marker.scope_sha256
+      || !exact(job, ['intent_id', 'recovery_id', 'checkpoint_sha256', 'launch_sha256', 'plan_sha256', 'instance_id', 'admin_runtime_id'])
+      || !role.ready || role.launch.action !== 'restore_source' || hash(role.launch.request) !== hash({ intent_id: job.intent_id, recovery_id: job.recovery_id, checkpoint_sha256: job.checkpoint_sha256 })
+      || job.recovery_id !== recoveryId || job.checkpoint_sha256 !== source.checkpoint.checkpoint_sha256 || job.launch_sha256 !== hash(role.launch)
+      || !uuid(job.instance_id) || !uuid(job.admin_runtime_id) || !plan || plan.schema_version !== 2 || plan.recovery_id !== recoveryId
+      || plan.launch_sha256 !== job.launch_sha256 || job.plan_sha256 !== hash(plan) || job.instance_id !== plan.instance_id || job.admin_runtime_id !== plan.admin_runtime_id) throw failure()
+    completed = record
+  }
+  if (hash(fs.readdirSync(parent).sort()) !== hash(names)) throw failure()
+  return completed
 }

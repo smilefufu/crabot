@@ -73,7 +73,8 @@ export async function acquireWorkspaceInterruptedRecoveryLock(dataDir, id, waitM
   const source = await import('./workspace-interrupted-source-records.mjs')
   const binding = () => {
     if (records.readWorkspaceRelocationIntent(dataDir)) return records.readWorkspaceInterruptedRelocationCheckpoint(dataDir, id).checkpoint_sha256
-    return source.readPendingWorkspaceSourceRestoration(dataDir, id).checkpoint.checkpoint_sha256
+    const scope = source.readWorkspaceSourceRecoveryScope(dataDir, id)
+    return JSON.stringify([scope.checkpoint.checkpoint_sha256, scope.released, scope.release])
   }
   const original = binding()
   return acquire(dataDir, 'workspace-interrupted-recovery', waitMs, undefined, () => {

@@ -964,7 +964,7 @@ for (const mode of ['valid', 'unregistered', 'changed invocation']) test('source
   }
 })
 
-for (const mode of ['verified', 'wrong bearer', 'wrong runtime', 'Core rejects']) test('actual interrupted Agent Root primitive under a finite Core transport: ' + mode, { timeout: 60000 }, async t => {
+for (const mode of ['verified', 'changed probed root', 'wrong bearer', 'wrong runtime', 'Core rejects']) test('actual interrupted Agent Root primitive under a finite Core transport: ' + mode, { timeout: 60000 }, async t => {
   const f = await stageFixture(t)
   await f.command('host-permit'); await f.command('stage-prepare'); await f.command('file-begin'); await f.command('host-stop')
   assert.equal((await f.command('file-move-fixture')).error, undefined)
@@ -997,8 +997,11 @@ for (const mode of ['verified', 'wrong bearer', 'wrong runtime', 'Core rejects']
     const code = `const fs=require('node:fs'),{createWorkspaceInterruptedRootVerifier}=require(${JSON.stringify(entry)});
       const verify=createWorkspaceInterruptedRootVerifier({dataDir:${JSON.stringify(f.data)},moduleManagerPort:${server.address().port},runtimeBearer:()=> 'finite-Agent-credential',
         runtimeIdentity:()=>({instance_id:${JSON.stringify(instanceId)},module_id:'crabot-agent',runtime_id:${JSON.stringify(mode === 'wrong runtime' ? randomUUID() : runtimeId)}}),isClosing:()=>false});
-      (async()=>{try{const first=await verify(${JSON.stringify(role.launch.request)},${JSON.stringify(mode === 'wrong bearer' ? 'wrong' : 'finite-Agent-credential')});const second=await verify(${JSON.stringify(role.launch.request)},'finite-Agent-credential');fs.writeFileSync(${JSON.stringify(resultFile)},JSON.stringify({ok:true,first,second}))}
-      catch(error){fs.writeFileSync(${JSON.stringify(resultFile)},JSON.stringify({ok:false,code:error.code,stage:error.stage,message:error.message}))}})();setTimeout(()=>process.exit(0),30000);`
+      (async()=>{let replaced=false;try{const first=await verify(${JSON.stringify(role.launch.request)},${JSON.stringify(mode === 'wrong bearer' ? 'wrong' : 'finite-Agent-credential')});
+        if(${mode === 'changed probed root'}){fs.renameSync(${JSON.stringify(f.source)},${JSON.stringify(f.source + '-retained')});fs.mkdirSync(${JSON.stringify(f.source)});replaced=true}
+        const second=await verify(${JSON.stringify(role.launch.request)},'finite-Agent-credential');fs.writeFileSync(${JSON.stringify(resultFile)},JSON.stringify({ok:true,first,second}))}
+      catch(error){fs.writeFileSync(${JSON.stringify(resultFile)},JSON.stringify({ok:false,code:error.code,stage:error.stage,message:error.message}))}
+      finally{if(replaced){fs.rmdirSync(${JSON.stringify(f.source)});fs.renameSync(${JSON.stringify(f.source + '-retained')},${JSON.stringify(f.source)})}}})();setTimeout(()=>process.exit(0),30000);`
     const invocation = { command: process.execPath, args: ['-e', code], cwd: f.root, env: {} }
     gate = (await import('../workspace-runtime-gate.mjs')).createWorkspaceRuntimeGate(); await gate.ready()
     const identity = native.inspectProcess(gate.child.pid), registry = path.join(f.data, 'module-runtime-registry/records')
@@ -1016,7 +1019,8 @@ for (const mode of ['verified', 'wrong bearer', 'wrong runtime', 'Core rejects']
     if (mode === 'verified') {
       assert.deepEqual(result.first, expected); assert.deepEqual(result.second, expected)
       assert.equal(calls, 4)
-    } else if (mode === 'wrong bearer' || mode === 'wrong runtime') assert.equal(calls, 0)
+    } else if (mode === 'changed probed root') assert.equal(calls, 3)
+    else if (mode === 'wrong bearer' || mode === 'wrong runtime') assert.equal(calls, 0)
     else assert.equal(calls, 1)
     assert.deepEqual(fs.readdirSync(f.source), ['default'])
     assert.equal(fs.readFileSync(path.join(f.source, 'default/file'), 'utf8'), 'original bytes')

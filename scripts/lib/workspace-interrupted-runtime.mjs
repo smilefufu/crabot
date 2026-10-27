@@ -16,7 +16,9 @@ function context(dataDir, recoveryId) {
   const role = readWorkspaceInterruptedRecoveryRole(dataDir, recoveryId)
   if (!role.launch || !role.ready || role.launch.action !== 'restore_source') throw failure()
   const original = readWorkspaceSourceCompletionScope(dataDir, role.launch.request.intent_id)
-  if (original.released && original.release.job.recovery_id !== recoveryId) throw failure()
+  const observation = readJson(path.join(role.launch.control_root.path, 'runtime-observations.json'))
+  if (observation) observationValue(observation, role, original)
+  if (original.released && original.release.job.recovery_id !== recoveryId && !observation) throw failure()
   const business = readJson(path.join(path.dirname(original.original.path), 'business-prepared.json'), 32 * 1024 * 1024)
   if (!original.archived || !exact(business, ['schema_version', 'intent_id', 'scope_sha256', 'checkpoints']) || business.schema_version !== 2
     || business.intent_id !== role.launch.request.intent_id || business.scope_sha256 !== original.marker.scope_sha256 || !Array.isArray(business.checkpoints)
@@ -26,13 +28,14 @@ function context(dataDir, recoveryId) {
   const verify = (live = false) => {
     if (hash(readWorkspaceInterruptedRecoveryRole(dataDir, recoveryId)) !== fingerprint
       || hash(readWorkspaceSourceCompletionScope(dataDir, role.launch.request.intent_id).marker) !== hash(original.marker)
+      || observation && hash(readJson(path.join(directory, 'runtime-observations.json'))) !== hash(observation)
       || live && (!native.sameProcess(role.launch.parent, native.inspectProcess(role.launch.parent.pid))
         || !native.sameProcess(role.launch.process, native.inspectProcess(role.launch.process.pid)))) throw failure()
   }
   verify()
-  return { role, original, directory, verify }
+  return { role, original, observation, directory, verify }
 }
-function planValue(value, role, original) {
+function planValue(value, role, original, observation) {
   const allowed = new Set(['crabot-agent', 'memory-default', ...(original.checkpoint.modules?.modules ?? []).map(item => item.module_id)])
   if (!exact(value, ['schema_version', 'recovery_id', 'launch_sha256', 'instance_id', 'admin_runtime_id', 'modules']) || value.schema_version !== 2
     || value.recovery_id !== role.launch.request.recovery_id || value.launch_sha256 !== hash(role.launch)
@@ -43,12 +46,15 @@ function planValue(value, role, original) {
       || !Number.isInteger(item.module_port) || item.module_port < 1 || item.module_port > 65535 || modules.has(item.module_id) || runtimes.has(item.runtime_id)) throw failure()
     modules.add(item.module_id); runtimes.add(item.runtime_id)
   }
+  if (observation && (observation.observations.length !== value.modules.length || observation.observations.some(item =>
+    item.runtime.instance_id !== value.instance_id || !value.modules.some(module => module.module_id === item.runtime.module_id
+      && module.runtime_id === item.runtime.runtime_id && module.module_port === item.runtime.module_port)))) throw failure()
   return value
 }
 export function readWorkspaceInterruptedRuntimePlan(dataDir, recoveryId) {
   const ctx = context(dataDir, recoveryId), plan = readJson(path.join(ctx.directory, 'runtime-plan.json'))
   if (!plan) return null
-  planValue(plan, ctx.role, ctx.original); ctx.verify()
+  planValue(plan, ctx.role, ctx.original, ctx.observation); ctx.verify()
   return plan
 }
 export async function commitWorkspaceInterruptedRuntimePlan({ dataDir, recoveryId, instanceId, adminRuntimeId, modules, verify }) {
@@ -56,7 +62,7 @@ export async function commitWorkspaceInterruptedRuntimePlan({ dataDir, recoveryI
   const ctx = context(dataDir, recoveryId)
   if (!native.sameProcess(ctx.role.launch.parent, native.inspectProcess(process.pid))) throw failure()
   const plan = planValue({ schema_version: 2, recovery_id: recoveryId, launch_sha256: hash(ctx.role.launch),
-    instance_id: instanceId, admin_runtime_id: adminRuntimeId, modules: structuredClone(modules) }, ctx.role, ctx.original)
+    instance_id: instanceId, admin_runtime_id: adminRuntimeId, modules: structuredClone(modules) }, ctx.role, ctx.original, ctx.observation)
   await verify(); ctx.verify(true)
   if (readJson(path.join(ctx.directory, 'runtime-plan.json'))) throw failure()
   publish(ctx.directory, 'runtime-plan.json', plan, () => ctx.verify(true))
@@ -72,6 +78,60 @@ function registration(dataDir, runtimeId) {
   const instanceFile = path.join(directory, 'instance-id')
   if (readBoundBytes(instanceFile, version(owned(instanceFile))).toString('utf8').trim() !== record.instance_id) throw failure()
   return record
+}
+function observationValue(value, role, source) {
+  if (!source.released || !exact(value, ['schema_version', 'recovery_id', 'launch_sha256', 'release_sha256', 'observations'])
+    || value.schema_version !== 2 || value.recovery_id !== role.launch.request.recovery_id || value.launch_sha256 !== hash(role.launch)
+    || value.release_sha256 !== hash(source.release) || !Array.isArray(value.observations) || value.observations.length > 32768) throw failure()
+  const ids = new Set(), runtimes = new Set()
+  for (const item of value.observations) {
+    const runtime = item?.runtime, identity = item?.process
+    if (!exact(item, ['process', 'runtime']) || !exact(identity, ['pid', 'parent', 'started', 'owner', 'executable'])
+      || !Number.isInteger(identity.pid) || identity.pid <= 0 || identity.parent !== role.launch.parent.pid || identity.owner !== role.launch.parent.owner
+      || ['started', 'owner', 'executable'].some(key => typeof identity[key] !== 'string' || !identity[key] || identity[key].includes('\0'))
+      || !exact(runtime, ['schema_version', 'instance_id', 'runtime_id', 'module_id', 'root_pid', 'process_start_identity', 'module_port', 'created_at'])
+      || runtime.schema_version !== 1 || !uuid(runtime.instance_id) || !uuid(runtime.runtime_id) || !moduleName(runtime.module_id)
+      || runtime.root_pid !== identity.pid || !Number.isInteger(runtime.module_port) || runtime.module_port < 1 || runtime.module_port > 65535
+      || typeof runtime.process_start_identity !== 'string' || !runtime.process_start_identity || typeof runtime.created_at !== 'string'
+      || new Date(runtime.created_at).toISOString() !== runtime.created_at || ids.has(runtime.module_id) || runtimes.has(runtime.runtime_id)) throw failure()
+    ids.add(runtime.module_id); runtimes.add(runtime.runtime_id)
+  }
+  return value
+}
+/** Existing current-Core children are observed, never represented as fresh starts. */
+export async function commitWorkspaceInterruptedRuntimeObservations({ dataDir, recoveryId, instanceId, adminRuntimeId, observations, verify }) {
+  if (typeof verify !== 'function' || process.versions.electron) throw failure()
+  const role = readWorkspaceInterruptedRecoveryRole(dataDir, recoveryId)
+  if (!role.launch || !role.ready || !native.sameProcess(role.launch.parent, native.inspectProcess(process.pid))) throw failure()
+  const source = readWorkspaceSourceCompletionScope(dataDir, role.launch.request.intent_id)
+  const record = observationValue({ schema_version: 2, recovery_id: recoveryId, launch_sha256: hash(role.launch),
+    release_sha256: hash(source.release), observations: structuredClone(observations) }, role, source)
+  const current = () => {
+    if (hash(readWorkspaceInterruptedRecoveryRole(dataDir, recoveryId)) !== hash(role)
+      || hash(readWorkspaceSourceCompletionScope(dataDir, role.launch.request.intent_id).release) !== hash(source.release)
+      || !native.sameProcess(role.launch.parent, native.inspectProcess(process.pid)) || !native.sameProcess(role.launch.process, native.inspectProcess(role.launch.process.pid))) throw failure()
+    for (const item of record.observations) if (!native.sameProcess(item.process, native.inspectProcess(item.process.pid))
+      || hash(registration(dataDir, item.runtime.runtime_id)) !== hash(item.runtime)) throw failure()
+  }
+  await verify(); current()
+  publish(role.launch.control_root.path, 'runtime-observations.json', record, current)
+  return commitWorkspaceInterruptedRuntimePlan({ dataDir, recoveryId, instanceId, adminRuntimeId,
+    modules: record.observations.map(item => ({ module_id: item.runtime.module_id, runtime_id: item.runtime.runtime_id, module_port: item.runtime.module_port })), verify })
+}
+export function readWorkspaceInterruptedRuntimeObservation(dataDir, recoveryId, moduleId) {
+  const ctx = context(dataDir, recoveryId)
+  if (!ctx.observation) return null
+  const plan = readWorkspaceInterruptedRuntimePlan(dataDir, recoveryId)
+  if (!plan) throw failure()
+  ctx.verify()
+  return ctx.observation.observations.find(item => item.runtime.module_id === moduleId) ?? null
+}
+export function verifyWorkspaceInterruptedRuntimeObservation(dataDir, recoveryId, moduleId) {
+  const ctx = context(dataDir, recoveryId), item = readWorkspaceInterruptedRuntimeObservation(dataDir, recoveryId, moduleId)
+  if (!item || !native.sameProcess(item.process, native.inspectProcess(item.process.pid))
+    || hash(registration(dataDir, item.runtime.runtime_id)) !== hash(item.runtime)) throw failure()
+  ctx.verify(true)
+  return item
 }
 function runtimeValue(record, ctx, plan, moduleId) {
   const target = plan.modules.find(item => item.module_id === moduleId), runtime = record?.runtime

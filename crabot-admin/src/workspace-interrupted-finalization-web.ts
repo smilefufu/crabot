@@ -7,7 +7,7 @@ interface Options {
   moduleManagerPort: number
   modulePort: number
   runtimeIdentity: () => { instance_id?: string; module_id: string; runtime_id?: string }
-  quiesce: () => Promise<void>
+  quiesce: (released: boolean) => Promise<void>
   resume: (verify: () => Promise<void>) => Promise<void>
   reclose: () => Promise<void>
 }
@@ -50,7 +50,7 @@ export function createWorkspaceInterruptedFinalizationWeb(options: Options) {
       actor.verify()
     }
     await verify()
-    return { job, fingerprint, verify }
+    return { job, fingerprint, verify, released: original.released }
   }
   return Object.freeze({
     async prepare(input: unknown, bearer?: string) {
@@ -58,7 +58,7 @@ export function createWorkspaceInterruptedFinalizationWeb(options: Options) {
       if (!preparation || preparation.fingerprint !== current.fingerprint) {
         const pending = Promise.resolve().then(async () => {
           try {
-            await current.verify(); await options.quiesce(); await current.verify()
+            await current.verify(); await options.quiesce(current.released); await current.verify()
             return Object.freeze({ prepared: true as const, ...current.job })
           } catch (cause) {
             if (preparation?.fingerprint === current.fingerprint) preparation.failed = true

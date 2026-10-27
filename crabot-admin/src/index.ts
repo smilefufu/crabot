@@ -1742,7 +1742,10 @@ export class AdminModule extends ModuleBase {
     return this.workspaceInterruptedFinalizationWeb ??= createWorkspaceInterruptedFinalizationWeb({ dataDir: path.resolve(this.adminConfig.data_dir, '..'),
       moduleManagerPort: this.rpcClient.moduleManagerTargetPort, modulePort: this.config.port,
       runtimeIdentity: () => ({ instance_id: process.env.CRABOT_INSTANCE_ID, module_id: this.config.moduleId, runtime_id: process.env.CRABOT_MODULE_RUNTIME_ID }),
-      quiesce: () => this.quiesceWorkspaceWebAccess(), reclose: () => this.recloseWorkspaceWebAccessAfterResumeFailure(), resume: async verify => {
+      quiesce: async released => {
+        if (!released) return this.quiesceWorkspaceWebAccess()
+        await Promise.all([this.workspaceWebAccess().closeAfterRelease(), this.workspaceService.pauseScanning()])
+      }, reclose: () => this.recloseWorkspaceWebAccessAfterResumeFailure(), resume: async verify => {
         await this.resumeWorkspaceStartup(verify)
         await verify()
         this.workspaceService.resumeScanning(); this.workspaceWebAccess().reopen()

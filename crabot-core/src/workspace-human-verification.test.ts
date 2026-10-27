@@ -16,11 +16,12 @@ import { relocationAgentConfig } from '../../crabot-agent/tests/core/fixtures/re
 afterEach(() => vi.restoreAllMocks())
 
 describe('current interrupted source recovery admission', () => {
-  const modes = ['healthy', 'health failure then explicit retry', 'cold Core after failed health', 'stopped before final exit summary',
-    ...(process.env.GITHUB_ACTIONS === 'true' && process.env.CRABOT_WORKSPACE_BUSINESS_ONSTART_CI === '1' ? ['business onStart'] : [])]
+  const modes = ['healthy', 'health failure then explicit retry', 'cold Core after failed health', 'released before Web acknowledgement', 'stopped before final exit summary',
+    ...(process.env.GITHUB_ACTIONS === 'true' && process.env.CRABOT_WORKSPACE_BUSINESS_ONSTART_CI === '1' ? ['business onStart', 'business released before Web acknowledgement'] : [])]
   it.each(modes)('restores the actual moved source and exact finite services while keeping the same Admin online: %s', async mode => {
-    const business = mode === 'business onStart'
+    const business = mode === 'business onStart' || mode === 'business released before Web acknowledgement'
     const f = await fixture({ actualAdmin: true, actualAgent: true, businessAgent: business, ...(business ? {} : { validationHealth: 'healthy' as const }), withMemory: true, memoryHealth: 'healthy', extraModule: 'running', processLifetimeMs: 180000 })
+    const healthChecks = vi.spyOn(f.manager, 'verifyWorkspaceInterruptedHealth')
     const records = require('../../scripts/lib/workspace-relocation-intent.mjs'), native = require('../../scripts/lib/process-identity.cjs')
     const locks = require('../../scripts/lib/cli-lock.mjs'), lock = await locks.acquireWorkspaceRelocationLock(f.data, f.params.intent_id)
     let old: ChildProcess | undefined, files: any, cold: any, coldHost: ReturnType<typeof http.createServer> | undefined
@@ -50,13 +51,27 @@ describe('current interrupted source recovery admission', () => {
       const checkpoint = records.readWorkspaceInterruptedRelocationCheckpoint(f.data, f.params.intent_id)
       let context = await f.manager.initializeWorkspaceInterruptedService({ intent_id: f.params.intent_id, recovery_id: randomUUID(), checkpoint_sha256: checkpoint.checkpoint_sha256 }, 'fixture-human')
       const unhealthy = path.join(f.data, 'validation-health-unhealthy')
+      const releasedFailure = mode === 'released before Web acknowledgement' || mode === 'business released before Web acknowledgement', extraUnhealthy = path.join(f.data, 'extra-health-unhealthy')
+      if (releasedFailure) await fs.writeFile(extraUnhealthy, 'finite post-release health rejection')
       const retry = mode === 'health failure then explicit retry' || mode === 'cold Core after failed health'
       if (retry) await fs.writeFile(unhealthy, 'finite health rejection')
       const first = f.manager.completeWorkspaceInterruptedSource(context)
       expect(f.manager.completeWorkspaceInterruptedSource(context)).toBe(first)
-      if (retry) {
+      if (releasedFailure) {
+        await expect(first).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE', stage: 'restore-modules' })
+        expect(require('../../scripts/lib/workspace-interrupted-source-records.mjs').readWorkspaceSourceCompletionScope(f.data, f.params.intent_id).released).toBe(true)
+        expect(require('../../scripts/lib/workspace-interrupted-source-records.mjs').readWorkspaceSourceServiceResumption(f.data, f.params.intent_id)).toBeNull()
+        const children = new Map(f.manager.processes)
+        await vi.waitFor(() => expect(require('../../scripts/lib/known-process-exit.cjs').probeKnownProcessExit([context.coordinator.launch.process]).state).toBe('stopped'), { timeout: 5000 })
+        await fs.unlink(extraUnhealthy)
+        context = await f.manager.initializeWorkspaceInterruptedService({ intent_id: f.params.intent_id, recovery_id: randomUUID(), checkpoint_sha256: checkpoint.checkpoint_sha256 }, 'fixture-human')
+        expect((await f.manager.completeWorkspaceInterruptedSource(context)).resumed).toBe(true)
+        for (const [id, child] of children) expect(f.manager.processes.get(id)).toBe(child)
+        await expect(fs.lstat(path.join(context.coordinator.launch.control_root.path, 'runtime-starts'))).rejects.toMatchObject({ code: 'ENOENT' })
+      } else if (retry) {
         await expect(first).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE', stage: 'verify-core-health' })
         expect(context.phase).toBe('needs_attention')
+        expect(require('../../scripts/lib/workspace-interrupted-source-records.mjs').readWorkspaceSourceServiceResumption(f.data, f.params.intent_id)).toBeNull()
         expect(require('../../scripts/lib/workspace-maintenance.cjs').workspaceMaintenancePending(f.data)).toBe(true)
         expect(await fs.readFile(path.join(source, 'default/preserved.txt'), 'utf8')).toBe('original source bytes')
         expect(f.manager.processes.get('admin-web')).toBe(admin)
@@ -82,6 +97,7 @@ describe('current interrupted source recovery admission', () => {
         expect((await f.manager.completeWorkspaceInterruptedSource(context)).resumed).toBe(true)
       } else expect((await first).resumed).toBe(true)
       expect(context.phase).toBe('resumed')
+      if (mode === 'healthy') expect(healthChecks.mock.calls.length).toBeLessThanOrEqual(4)
       expect(f.manager.processes.get('admin-web')).toBe(admin)
       expect(f.manager.modules.get('fixture-channel').status).toBe('running')
       expect(await fs.readFile(path.join(source, 'default/preserved.txt'), 'utf8')).toBe('original source bytes')
@@ -104,6 +120,7 @@ describe('current interrupted source recovery admission', () => {
       }
       expect((await fetch(`http://127.0.0.1:${f.port}/api/friends`, { headers: { Authorization: 'Bearer fixture-human' } })).status).toBe(200)
       expect(require('../../scripts/lib/known-process-exit.cjs').probeKnownProcessExit([context.coordinator.launch.process]).state).toBe('stopped')
+      expect(require('../../scripts/lib/workspace-interrupted-source-records.mjs').readWorkspaceSourceServiceResumption(f.data, f.params.intent_id).job.recovery_id).toBe(context.request.recovery_id)
       expect(f.manager.workspaceCoordinatorGrant).toBeUndefined()
     } catch (cause) {
       const diagnostics = []
