@@ -89,6 +89,11 @@ try {
     const archive = path.join(home, process.platform === 'win32' ? 'old.zip' : 'old.tar.gz'), extracted = path.join(home, 'extracted')
     let gui, exited, peer, prepared, passed = false
     const env = { ...process.env, HOME: home, USERPROFILE: home, APPDATA: path.join(home, 'Roaming'), LOCALAPPDATA: path.join(home, 'Local') }
+    if (process.platform === 'win32') {
+      // Real Windows profiles already contain these OS-owned parent locations.
+      // Keep the disposable profile valid before Chromium's native startup.
+      for (const directory of [env.APPDATA, env.LOCALAPPDATA]) await fs.mkdir(directory, { recursive: true })
+    }
     for (const name of ['NODE_OPTIONS', 'NODE_PATH', 'ELECTRON_RUN_AS_NODE', 'DATA_DIR', 'CRABOT_HOME', 'CRABOT_DEV', 'CRABOT_PORT_OFFSET', 'WORKER_WORKSPACES_DIR']) delete env[name]
     const stage = name => console.log('CRABOT_LEGACY_USER_STAGE ' + JSON.stringify({ version, stage: name }))
     try {
@@ -181,7 +186,7 @@ try {
     } finally {
       if (!passed) {
         const diagnostics = []
-        for (const name of ['driver-started.json', 'driver-quit.json', 'driver-failed.json', 'takeover-confirmed.json', 'installer-handoff.json']) {
+        for (const name of ['driver-started.json', 'driver-ready.json', 'driver-imported.json', 'driver-quit.json', 'driver-failed.json', 'takeover-confirmed.json', 'installer-handoff.json']) {
           try { diagnostics.push({ name, value: JSON.parse(await fs.readFile(path.join(control, name), 'utf8')) }) }
           catch (error) { if (error.code !== 'ENOENT') diagnostics.push({ name, unavailable: true }) }
         }

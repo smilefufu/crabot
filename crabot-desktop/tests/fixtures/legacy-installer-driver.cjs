@@ -7,6 +7,7 @@ const config = JSON.parse(fs.readFileSync(process.env.CRABOT_LEGACY_INSTALLER_DR
 const record = (name, value) => fs.writeFileSync(path.join(config.control, name + '.json'), JSON.stringify(value) + '\n', { flag: 'wx', mode: 0o600 })
 record(config.cleanup ? 'cleanup-driver-started' : 'driver-started', { phase: 'entry' })
 const { app, dialog, shell } = require('electron')
+if (!config.cleanup) app.once('ready', () => record('driver-ready', { phase: 'app-ready' }))
 app.once('quit', (_event, code) => record(config.cleanup ? 'cleanup-driver-quit' : 'driver-quit', { code }))
 const fail = error => { record('driver-failed', { message: error.message }); console.error(error); app.exit(2) }
 if (config.cleanup) {
@@ -31,5 +32,5 @@ if (config.cleanup) {
     fail(new Error('Unexpected installer dialog: ' + JSON.stringify(options)))
     throw new Error('Unexpected installer dialog')
   }
-  void import('./installer-main.js').catch(fail)
+  void import('./installer-main.js').then(() => record('driver-imported', { phase: 'installer-imported' })).catch(fail)
 }
