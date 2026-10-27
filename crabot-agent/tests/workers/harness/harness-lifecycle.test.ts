@@ -2209,6 +2209,7 @@ describe('WorkerHarness.handleStateChange', () => {
     expect(w.incarnations[0].ended_reason).toBe('failed')
 
     // 对外事件带的是提交后的 task.status——manager 的台账块、admin 侧读端点看的都是这一份。
+    await Promise.all((harness as unknown as { stateChangeTails: Map<string, Promise<void>> }).stateChangeTails.values())
     const stateEvents = events.filter((e) => e.kind === 'state_changed')
     expect(stateEvents).toHaveLength(1)
     expect(stateEvents[0].task_status).toBe('halted')
