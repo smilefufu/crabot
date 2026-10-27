@@ -1,10 +1,13 @@
 // CI substitutes native dialog input only. Installer, target Node, conversion,
 // OS entries, ordinary target Main and business health remain actual product code.
 const fs = require('node:fs'), path = require('node:path')
-const { app, dialog, shell } = require('electron')
+process.stderr.write('CRABOT_LEGACY_INSTALLER_DRIVER_ENTRY\n')
 if (process.env.GITHUB_ACTIONS !== 'true') throw new Error('Isolated CI only')
 const config = JSON.parse(fs.readFileSync(process.env.CRABOT_LEGACY_INSTALLER_DRIVER, 'utf8'))
 const record = (name, value) => fs.writeFileSync(path.join(config.control, name + '.json'), JSON.stringify(value) + '\n', { flag: 'wx', mode: 0o600 })
+record(config.cleanup ? 'cleanup-driver-started' : 'driver-started', { phase: 'entry' })
+const { app, dialog, shell } = require('electron')
+app.once('quit', (_event, code) => record(config.cleanup ? 'cleanup-driver-quit' : 'driver-quit', { code }))
 const fail = error => { record('driver-failed', { message: error.message }); console.error(error); app.exit(2) }
 if (config.cleanup) {
   const profile = path.join(config.control, 'cleanup-profile'); fs.mkdirSync(profile, { mode: 0o700 })

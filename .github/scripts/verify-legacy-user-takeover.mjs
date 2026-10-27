@@ -122,8 +122,12 @@ try {
         await runUbuntuInstaller({ bundle, root, env, control, version })
       } else {
         try {
-          const installed = await execute(driver, [], { env, timeout: 600000, maxBuffer: 256000 }); output += installed.stdout + installed.stderr
-        } catch (error) { output += String(error.stdout ?? '') + String(error.stderr ?? ''); throw error }
+          const installed = await execute(driver, ['--enable-logging=stderr'], { env, timeout: 600000, maxBuffer: 256000 }); output += installed.stdout + installed.stderr
+        } catch (error) {
+          output += String(error.stdout ?? '') + String(error.stderr ?? '')
+          output += '\nCRABOT_LEGACY_INSTALLER_EXIT ' + JSON.stringify({ code: error.code, signal: error.signal, killed: error.killed }) + '\n'
+          throw error
+        }
       }
       assert.equal(JSON.parse(await fs.readFile(path.join(control, 'installer-handoff.json'), 'utf8')), true)
       assert.ok(JSON.parse(await fs.readFile(path.join(control, 'takeover-confirmed.json'), 'utf8')).detail.includes(version))
@@ -177,7 +181,7 @@ try {
     } finally {
       if (!passed) {
         const diagnostics = []
-        for (const name of ['driver-failed.json', 'takeover-confirmed.json', 'installer-handoff.json']) {
+        for (const name of ['driver-started.json', 'driver-quit.json', 'driver-failed.json', 'takeover-confirmed.json', 'installer-handoff.json']) {
           try { diagnostics.push({ name, value: JSON.parse(await fs.readFile(path.join(control, name), 'utf8')) }) }
           catch (error) { if (error.code !== 'ENOENT') diagnostics.push({ name, unavailable: true }) }
         }
