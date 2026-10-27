@@ -102,10 +102,11 @@ static napi_value IsPrivatePath(napi_env env, napi_callback_info info, bool dire
       nullptr, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT | (directory ? FILE_FLAG_BACKUP_SEMANTICS : 0), nullptr);
     if (file == INVALID_HANDLE_VALUE) throw std::runtime_error("Cannot inspect private file");
     BY_HANDLE_FILE_INFORMATION fileInfo{};
-    PSID owner = nullptr; PACL acl = nullptr;
+    PSID owner = nullptr, group = nullptr; PACL acl = nullptr;
     if (!GetFileInformationByHandle(file, &fileInfo) || (fileInfo.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)
       || !!(fileInfo.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != directory
-      || GetSecurityInfo(file, SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, &owner, nullptr, &acl, nullptr, &descriptor) != ERROR_SUCCESS) throw std::runtime_error("Cannot inspect private file ACL");
+      || GetSecurityInfo(file, SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION
+        | (existingData ? GROUP_SECURITY_INFORMATION : 0), &owner, &group, &acl, nullptr, &descriptor) != ERROR_SUCCESS) throw std::runtime_error("Cannot inspect private file ACL");
     auto sid = PrivateFileCurrentOwner();
     if (!ConvertStringSidToSidA(sid.c_str(), &current)) throw std::runtime_error("Cannot inspect current user SID");
     SECURITY_DESCRIPTOR_CONTROL control; DWORD revision; void* raw = nullptr;
