@@ -51,7 +51,12 @@ export async function runRemovalOperation(options: Options): Promise<'completed'
           step++; attempted = false
         }
         return 'completed'
-      } catch (error) { failure = error }
+      } catch (error) {
+        failure = error
+        const stage = (error as { stage?: unknown } | null)?.stage
+        console.error(JSON.stringify({ component: 'desktop-removal', step, code: errorCode(error),
+          ...(typeof stage === 'string' && /^[a-z-]{1,80}$/.test(stage) ? { stage } : {}) }))
+      }
       finally { await progress?.close() }
       // The old display and its signal are gone before a retry. A failed stage
       // stays current; successful stop/exit/removal is never replayed by this UI.

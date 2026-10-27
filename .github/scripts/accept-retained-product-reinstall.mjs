@@ -48,7 +48,10 @@ export async function prepareRetainedProductReinstall({ installRoot, payload, pr
       if (observation) console.log('CRABOT_RETAINED_REFERENCE_DIAGNOSIS ' + JSON.stringify({ stage: error.stage ?? stage,
         inventory_file_count: desktopRemovalProgramEntries(proof).length, complete: observation.complete, incomplete: observation.incomplete,
         holders: observation.processes.slice(0, 8).map(item => ({ pid: item.pid, parent: item.parent, image: path.basename(item.executable) })),
-        holder_count: observation.processes.length, unknown_count: observation.unknown_pids.length, unknown: observation.unknown_details.slice(0, 16) }))
+        holder_count: observation.processes.length, unknown_count: observation.unknown_pids.length, unknown: observation.unknown_details.slice(0, 16).map(item => {
+          let current; try { current = identity.inspectProcess(item.pid) } catch {}
+          return { ...item, current: current ? { image: path.basename(current.executable), parent: current.parent, started: current.started } : null }
+        }) }))
       throw error
     } finally { identity.inspectProgramReferences = inspect }
   }

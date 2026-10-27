@@ -15,6 +15,11 @@ const failure = details => {
   console.error('CRABOT_UNINSTALL_DRIVER_FAILED ' + JSON.stringify({ pid: process.pid, diagnostic }))
   app.exit(2)
 }
+const originalError = console.error
+console.error = (...args) => {
+  fs.appendFileSync(path.join(config.control, 'driver-error-' + process.pid + '.log'), args.map(value => String(value)).join(' ') + '\n')
+  originalError(...args)
+}
 const host = process.argv.some(value => value.startsWith('--crabot-removal-host='))
 if (host) {
   const identity = require('./bootstrap/scripts/lib/process-identity.cjs')

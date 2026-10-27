@@ -34,27 +34,31 @@ function createSourceExitVerifier({ installRoot, prepared, child }, existing, ro
   const originalDirectory = generation(physical.lstatSync(directory, { bigint: true }))
   const sourceExecutable = path.join(own.root, 'app/releases', proof.source_selection.gui_id,
     process.platform === 'darwin' ? 'Crabot.app/Contents/MacOS/Crabot' : process.platform === 'linux' ? 'crabot-desktop' : 'Crabot.exe')
-  let host
+  let host, stage
   const current = () => {
+    stage = 'process-identity'
     const actual = identity.inspectProcess(child.pid), self = identity.inspectProcess(process.pid)
     const record = readDesktopRemoval(own.root)
     if (!expectedPhase || (existing ? !expectedRecord || !same(record, expectedRecord) : Object.hasOwn(prepared, 'record'))) return false
     if (!host || !source || !child.connected || child.exitCode !== null || child.signalCode !== null
       || !identity.sameProcess(source, self) || !identity.sameProcess(host, actual)
       || actual.parent !== source.pid || actual.owner !== own.record.owner || !processBirthAtLeast(actual.started, source.started)
-      || !entry.verifyDesktopRemovalSourceEntry(self, { executable: sourceExecutable, development: false })
-      || executable !== expectedExecutable || physical.realpathSync(actual.executable) !== physical.realpathSync(expectedExecutable)
+      || !entry.verifyDesktopRemovalSourceEntry(self, { executable: sourceExecutable, development: false }) ) return false
+    stage = 'host-location'
+    if (executable !== expectedExecutable || physical.realpathSync(actual.executable) !== physical.realpathSync(expectedExecutable)
       || inside(own.root, directory) || inside(directory, own.root)
       || !hostLocationMatches()
       || !/^crabot-removal-host-[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(path.basename(directory))
       || management.requirePrivateDataRoot(directory) !== directory
-      || generation(physical.lstatSync(directory, { bigint: true })) !== originalDirectory
-      || generation(physical.lstatSync(own.dataDir, { bigint: true })) !== originalData
+      || generation(physical.lstatSync(directory, { bigint: true })) !== originalDirectory ) return false
+    stage = 'installation-and-job'
+    if (generation(physical.lstatSync(own.dataDir, { bigint: true })) !== originalData
       || !same(installation.readDesktopInstallation(own.root).record, own.record)
       || !same(installation.readDesktopPairReference(own.root).selection, proof.source_selection)
       || !record || record.phase !== expectedPhase || record.installation_id !== proof.installation_id
-      || record.operation_id !== proof.operation_id || record.proof_sha256 !== digest || !same(record.source_selection, proof.source_selection)
-      || inspectInstance(own.dataDir).state !== 'stopped' || workspaceMaintenancePending(own.dataDir)) return false
+      || record.operation_id !== proof.operation_id || record.proof_sha256 !== digest || !same(record.source_selection, proof.source_selection) ) return false
+    stage = 'stopped-service'
+    if (inspectInstance(own.dataDir).state !== 'stopped' || workspaceMaintenancePending(own.dataDir)) return false
     for (const file of [path.join(own.root, '.desktop-installing.json'), path.join(own.dataDir, 'desktop-maintenance.json')]) {
       try { physical.lstatSync(file); return false } catch (error) { if (error.code !== 'ENOENT') throw error }
     }
@@ -63,7 +67,10 @@ function createSourceExitVerifier({ installRoot, prepared, child }, existing, ro
     return true
   }
   return async message => {
+    let accepted = false
+    const started = performance.now()
     try {
+      stage = 'exit-intent'
       if (!(node ? process.platform === 'linux' : ['darwin', 'win32'].includes(process.platform)) || !message || typeof message !== 'object' || Array.isArray(message)
         || Object.keys(message).length !== 4 || !['kind', 'installation_id', 'operation_id', 'source_selection'].every(key => Object.hasOwn(message, key))
         || message.kind !== 'desktop_removal_source_exit' || message.installation_id !== proof.installation_id
@@ -73,11 +80,15 @@ function createSourceExitVerifier({ installRoot, prepared, child }, existing, ro
       // its actual image after startup, then require the same birth thereafter.
       host ??= identity.inspectProcess(child.pid)
       if (!current()) return false
+      stage = 'private-programs'
       if (node) await verifyUbuntuRemovalNodeCopy(directory, proof)
       else await verifyDesktopGui(guiRoot, proof.payload)
+      stage = 'job-proof'
       const actual = await readDesktopRemovalProof(own.root)
-      return actual.record.proof_sha256 === digest && same(actual.proof, proof) && current()
+      accepted = actual.record.proof_sha256 === digest && same(actual.proof, proof) && current()
+      return accepted
     } catch { return false }
+    finally { console.info(JSON.stringify({ component: 'desktop-removal-source-exit', stage, accepted, elapsed_ms: Math.round(performance.now() - started) })) }
   }
 }
 

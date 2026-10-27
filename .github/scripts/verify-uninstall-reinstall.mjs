@@ -141,6 +141,7 @@ try {
     await fs.mkdir(path.join(repository, '.desktop-build'), { recursive: true }); await fs.writeFile(path.join(repository, '.desktop-build/uninstall-reinstall.log'), sourceOutput)
     if (!success) await fs.writeFile(path.join(repository, '.desktop-build/uninstall-reinstall-diagnostic.json'), JSON.stringify({
       driver: await read('driver-failed'), host: await read('maintenance-started'),
+      errors: await Promise.all((await fs.readdir(control)).filter(file => /^driver-error-[0-9]+\.log$/.test(file)).map(async file => ({ file, text: (await fs.readFile(path.join(control, file), 'utf8')).slice(-64000) }))),
       source_ready: children[0]?.ready === true, original_source_exit_code: children[0]?.child.exitCode,
     }) + '\n')
     if (success) {
