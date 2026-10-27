@@ -14,6 +14,7 @@ import { acquireExistingCliLock, releaseCliLock } from './cli-lock.mjs'
 import { verifyLegacyDesktopPrograms } from './legacy-desktop-programs.mjs'
 import { fenceLegacyEntries, inspectLegacyEntryFence, enableLegacyCliForwarding } from './legacy-entry-fence.mjs'
 import { inspectInstance } from './instance-runtime.mjs'
+import { adoptLegacyDesktopCli } from './legacy-desktop-cli.mjs'
 import { discoverSealedLegacyRuntime } from './legacy-runtime.mjs'
 import { stopFencedLegacyInstance } from './legacy-stop.mjs'
 import { inspectLegacyPythonEnvironment } from './legacy-python.mjs'
@@ -171,6 +172,7 @@ export async function commitLegacyDesktopInstallation({ prepared, maintenanceId,
     const selector = path.join(own.root, 'current-release.json')
     if (await present(selector) && JSON.stringify(installationState.readDesktopPairReference(own.root).selection) !== JSON.stringify(prepared.selection)) fail()
     await enableLegacyCliForwarding(source.installRoot, entry.id)
+    await adoptLegacyDesktopCli({ installRoot: own.root })
     await registerEntries(registration)
     await verify()
     if (JSON.stringify(installationState.readDesktopInstallation(own.root).record) !== JSON.stringify(own.record)) fail()

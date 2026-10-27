@@ -48,6 +48,7 @@ async function main() {
   const { detectMode } = await import(pathToFileURL(path.join(directory, 'bootstrap/scripts/lib/mode.mjs')).href)
   if (detectMode() === 'system') throw Object.assign(new Error('System deployment'), { code: 'CRABOT_INSTALL_SYSTEM_MODE' })
   const locator = await readInstallationLocator(homedir(), 'linux', process.env)
+  abort.signal.throwIfAborted()
   const payload = path.join(bundle, 'offline')
   let installRoot = path.resolve(process.argv[2]), legacy = await discoverLegacyTakeover(installRoot)
   const originalRoot = locator?.install_root || path.join(homedir(), '.crabot')
@@ -56,6 +57,7 @@ async function main() {
     const { assertFreshUserInstallation } = await import(pathToFileURL(path.join(directory, 'bootstrap/scripts/lib/legacy-desktop.mjs')).href)
     await assertFreshUserInstallation({ home: homedir(), source: process.env })
   }
+  abort.signal.throwIfAborted()
   if (legacy) {
     installRoot = legacy.installation.installRoot
     await new Promise<void>((resolve, reject) => {

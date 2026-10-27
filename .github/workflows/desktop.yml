@@ -202,7 +202,7 @@ jobs:
         if: matrix.suite == 'regression'
         timeout-minutes: 15
         run: |
-          node --test scripts/lib/__tests__/legacy-desktop.test.mjs scripts/lib/__tests__/legacy-entry-fence.test.mjs scripts/lib/__tests__/legacy-system-*.test.mjs
+          node --test scripts/lib/__tests__/legacy-desktop.test.mjs scripts/lib/__tests__/legacy-desktop-cli.test.mjs scripts/lib/__tests__/legacy-entry-fence.test.mjs scripts/lib/__tests__/legacy-system-*.test.mjs
           node --test scripts/lib/__tests__/legacy-mm-rpc.test.mjs scripts/lib/__tests__/module-shutdown-rpc.test.mjs
           node --test scripts/lib/__tests__/legacy-runtime.test.mjs scripts/lib/__tests__/legacy-stop.test.mjs
           node --test scripts/lib/__tests__/maintenance-backup.test.mjs
