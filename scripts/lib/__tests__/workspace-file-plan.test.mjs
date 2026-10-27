@@ -786,8 +786,34 @@ for (const boundary of boundaries) test('fresh forward role selects only the ori
     if (crossVolume) assert.equal(fs.readFileSync(path.join(f.source, 'default/file'), 'utf8'), 'original bytes')
     assert.equal(fs.existsSync(path.join(f.data, 'workspace-control/relocation-active')), true)
     assert.equal(records.readWorkspaceInterruptedRelocationCheckpoint(f.data, f.id).completion, null)
+    const preparation = role.prepareForwardService()
+    assert.equal(role.prepareForwardService(), preparation)
+    const prepared = await preparation
+    const scope = (await import('../workspace-interrupted-forward-records.mjs')).readWorkspaceInterruptedForwardPreparation(f.data, f.id)
+    assert.equal(prepared.scope_sha256, scope.marker.scope_sha256)
+    assert.equal(scope.root.path, f.target)
+    assert.deepEqual(scope.checkpoint, records.readWorkspaceInterruptedRelocationCheckpoint(f.data, f.id))
+    assert.equal((await import('../workspace-maintenance.cjs')).workspaceMaintenancePending(f.data), true)
     await role.verify()
     for (const fact of checkpoint.materials) assert.deepEqual(records.readWorkspaceInterruptedRelocationCheckpoint(f.data, f.id).materials.find(item => item.name === fact.name), fact)
+    if (boundary === 'before plan' && !nested && !crossVolume) {
+      const marker = path.join(f.data, 'workspace-control/relocation-forward-finalizing.json'), bytes = fs.readFileSync(marker)
+      role.close(); await ended
+      const nextLock = await locks.acquireWorkspaceInterruptedRecoveryLock(f.data, f.id), current = records.readWorkspaceInterruptedRelocationCheckpoint(f.data, f.id)
+      const next = await (await import('../workspace-interrupted-launch.mjs')).launchWorkspaceInterruptedRecoveryCoordinator({ dataDir: f.data,
+        request: { intent_id: f.id, recovery_id: randomUUID(), checkpoint_sha256: current.checkpoint_sha256 }, verify: async () => {}, releaseParentLock: () => locks.releaseCliLock(nextLock) })
+      const nextEnded = once(next.child, 'exit')
+      try {
+        assert.equal(native.sameProcess(next.launch.process, role.launch.process), false)
+        assert.deepEqual(await next.prepareForwardService(), prepared)
+        assert.deepEqual(fs.readFileSync(marker), bytes)
+        await next.verify()
+      } finally { next.close(); await nextEnded }
+      fs.writeFileSync(marker, 'broken')
+      const forwardRecords = await import('../workspace-interrupted-forward-records.mjs')
+      assert.throws(() => forwardRecords.readWorkspaceInterruptedForwardPreparation(f.data, f.id))
+      assert.equal(fs.readFileSync(path.join(f.target, 'default/file'), 'utf8'), 'original bytes')
+    }
   } finally { role.close(); await ended }
 })
 }
@@ -1168,11 +1194,12 @@ for (const mode of ['verified', 'changed probed root', 'wrong bearer', 'wrong ru
     const code = `const fs=require('node:fs'),{createWorkspaceInterruptedRootVerifier}=require(${JSON.stringify(entry)});
       const verify=createWorkspaceInterruptedRootVerifier({dataDir:${JSON.stringify(f.data)},moduleManagerPort:${server.address().port},runtimeBearer:()=> 'finite-Agent-credential',
         runtimeIdentity:()=>({instance_id:${JSON.stringify(instanceId)},module_id:'crabot-agent',runtime_id:${JSON.stringify(mode === 'wrong runtime' ? randomUUID() : runtimeId)}}),isClosing:()=>false});
-      (async()=>{let replaced=false;try{const first=await verify(${JSON.stringify(role.launch.request)},${JSON.stringify(mode === 'wrong bearer' ? 'wrong' : 'finite-Agent-credential')});
+      (async()=>{let replaced=false,result;try{const first=await verify(${JSON.stringify(role.launch.request)},${JSON.stringify(mode === 'wrong bearer' ? 'wrong' : 'finite-Agent-credential')});
         if(${mode === 'changed probed root'}){fs.renameSync(${JSON.stringify(f.source)},${JSON.stringify(f.source + '-retained')});fs.mkdirSync(${JSON.stringify(f.source)});replaced=true}
-        const second=await verify(${JSON.stringify(role.launch.request)},'finite-Agent-credential');fs.writeFileSync(${JSON.stringify(resultFile)},JSON.stringify({ok:true,first,second}))}
-      catch(error){fs.writeFileSync(${JSON.stringify(resultFile)},JSON.stringify({ok:false,code:error.code,stage:error.stage,message:error.message}))}
-      finally{if(replaced){fs.rmdirSync(${JSON.stringify(f.source)});fs.renameSync(${JSON.stringify(f.source + '-retained')},${JSON.stringify(f.source)})}}})();setTimeout(()=>process.exit(0),30000);`
+        const second=await verify(${JSON.stringify(role.launch.request)},'finite-Agent-credential');result={ok:true,first,second}}
+      catch(error){result={ok:false,code:error.code,stage:error.stage,message:error.message}}
+      finally{if(replaced){fs.rmdirSync(${JSON.stringify(f.source)});fs.renameSync(${JSON.stringify(f.source + '-retained')},${JSON.stringify(f.source)})}}
+      fs.writeFileSync(${JSON.stringify(resultFile)},JSON.stringify(result))})();setTimeout(()=>process.exit(0),30000);`
     const invocation = { command: process.execPath, args: ['-e', code], cwd: f.root, env: {} }
     gate = (await import('../workspace-runtime-gate.mjs')).createWorkspaceRuntimeGate(); await gate.ready()
     const identity = native.inspectProcess(gate.child.pid), registry = path.join(f.data, 'module-runtime-registry/records')

@@ -7,6 +7,7 @@ import native from './process-identity.cjs'
 import { captureSpawnedProcessTree } from './spawned-process-tree.cjs'
 import { commitWorkspaceInterruptedRecoveryLaunch, readWorkspaceInterruptedRecoveryRole, parseWorkspaceInterruptedRecoveryRequest } from './workspace-interrupted-role.mjs'
 import { readWorkspaceSourceRecoveryScope } from './workspace-interrupted-source-records.mjs'
+import { readWorkspaceInterruptedForwardPreparation } from './workspace-interrupted-forward-records.mjs'
 import { readWorkspaceRelocationIntent, readWorkspaceInterruptedRelocationCheckpoint } from './workspace-relocation-intent.mjs'
 import { sha256CanonicalJson as hash } from '../../crabot-shared/dist/canonical-json.js'
 const entry = fileURLToPath(new URL('../workspace-interrupted-coordinator.mjs', import.meta.url))
@@ -173,6 +174,24 @@ export async function launchWorkspaceInterruptedRecoveryCoordinator(options) {
       verification = root
       return root
     }
-    return Object.freeze({ child, launch, ready, verify, restoreSource, archiveSource, prepareSourceBusiness, releaseSource, finishClosures, finishManagerRecovery, finishRoot, close })
+    let forwardPreparation
+    const prepareForwardService = () => {
+      if (forwardPreparation) return forwardPreparation
+      forwardPreparation = verification.then(async () => {
+        const message = { kind: 'workspace_interrupted_prepare_forward_service', recovery_id: request.recovery_id, launch_sha256: hash(launch), ready_sha256: hash(ready), nonce: randomUUID() }
+        let result
+        await exchange(message, reply => {
+          const scope = readWorkspaceInterruptedForwardPreparation(options.dataDir, request.intent_id)
+          if (!exact(reply, ['kind', 'recovery_id', 'launch_sha256', 'ready_sha256', 'nonce', 'result']) || reply.kind !== 'workspace_interrupted_forward_prepared'
+            || ['recovery_id', 'launch_sha256', 'ready_sha256', 'nonce'].some(key => reply[key] !== message[key])
+            || !exact(reply.result, ['prepared', 'scope_sha256']) || reply.result.prepared !== true || !scope || reply.result.scope_sha256 !== scope.marker.scope_sha256) return false
+          result = Object.freeze({ ...reply.result }); return true
+        }, 240000)
+        return result
+      }).catch(cause => { close(); throw Object.assign(failure(), { cause }) })
+      verification = forwardPreparation
+      return forwardPreparation
+    }
+    return Object.freeze({ child, launch, ready, verify, restoreSource, archiveSource, prepareSourceBusiness, releaseSource, finishClosures, finishManagerRecovery, finishRoot, prepareForwardService, close })
   } catch (cause) { close(); throw Object.assign(failure(), { cause }) }
 }

@@ -60,7 +60,7 @@ export function readWorkspaceInterruptedRecoveryRole(dataDir, recoveryId) {
   return { launch, ready: ready ?? null }
 }
 /** Only append planned closure/retirement facts; every pre-existing material stays byte-identical. */
-function assertForwardProgress(original, current) {
+export function assertWorkspaceInterruptedForwardProgress(original, current) {
   assertWorkspaceInterruptedCheckpointSnapshot(original)
   if (original.action !== 'finish_commit' || current.action !== 'finish_commit' || !original.closure_plan) throw failure()
   const immutable = ({ checkpoint_sha256, materials, closure_commit, recovery_plan, recovery_commit, parents_plan, parents_complete, root_plan, published, selected, ...facts }) => facts
@@ -89,7 +89,7 @@ function originalScope(ctx, request, recoveryId) {
   if (recoveryId && checkpoint.action === 'finish_commit') {
     const original = readJson(path.join(context(ctx.data, recoveryId).directory, 'forward-checkpoint.json'), 32 * 1024 * 1024)
     if (!original || original.checkpoint_sha256 !== request.checkpoint_sha256) throw failure()
-    assertForwardProgress(original, checkpoint)
+    assertWorkspaceInterruptedForwardProgress(original, checkpoint)
   } else if (checkpoint.checkpoint_sha256 !== request.checkpoint_sha256) throw failure()
   assertWorkspaceInterruptedActorsExited(checkpoint)
   return checkpoint

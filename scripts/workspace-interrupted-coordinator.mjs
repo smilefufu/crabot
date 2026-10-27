@@ -5,7 +5,7 @@ import { readWorkspaceInterruptedRecoveryRole, verifyWorkspaceInterruptedRecover
 import { sha256CanonicalJson as hash } from '../crabot-shared/dist/canonical-json.js'
 const exact = (value, keys) => value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key))
 const uuid = value => typeof value === 'string' && /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(value)
-let input, lock, token, ready, sourceRestoration, sourceArchive, sourceBusiness, sourceRelease, closures, managerRecovery, root, busy = false, closed = false
+let input, lock, token, ready, sourceRestoration, sourceArchive, sourceBusiness, sourceRelease, closures, managerRecovery, root, forwardPreparation, busy = false, closed = false
 function close() {
   if (closed) return
   closed = true; clearTimeout(timer)
@@ -25,6 +25,13 @@ function finishManagerRecovery() {
     await finishClosures()
     const { finishWorkspaceInterruptedManagerRecovery } = await import('./lib/workspace-interrupted-manager.mjs')
     return finishWorkspaceInterruptedManagerRecovery({ dataDir: input.data_dir, recoveryId: input.recovery_id, launchHash: input.launch_sha256 })
+  })
+}
+function finishRoot() {
+  return root ??= Promise.resolve().then(async () => {
+    await finishManagerRecovery()
+    const { finishWorkspaceInterruptedRoot } = await import('./lib/workspace-interrupted-root.mjs')
+    return finishWorkspaceInterruptedRoot({ dataDir: input.data_dir, recoveryId: input.recovery_id, launchHash: input.launch_sha256 })
   })
 }
 process.once('disconnect', close); process.once('error', close)
@@ -47,16 +54,18 @@ process.on('message', async message => {
     } else {
       const fields = ['kind', 'recovery_id', 'launch_sha256', 'ready_sha256', 'nonce']
       if (message.kind === 'workspace_interrupted_release_source') fields.push('job', 'credential', 'module_manager_port')
-      if (!ready || !exact(message, fields) || !['workspace_interrupted_verify', 'workspace_interrupted_restore_source', 'workspace_interrupted_archive_source', 'workspace_interrupted_prepare_source_business', 'workspace_interrupted_release_source', 'workspace_interrupted_finish_closures', 'workspace_interrupted_finish_manager_recovery', 'workspace_interrupted_finish_root'].includes(message.kind)
+      if (!ready || !exact(message, fields) || !['workspace_interrupted_verify', 'workspace_interrupted_restore_source', 'workspace_interrupted_archive_source', 'workspace_interrupted_prepare_source_business', 'workspace_interrupted_release_source', 'workspace_interrupted_finish_closures', 'workspace_interrupted_finish_manager_recovery', 'workspace_interrupted_finish_root', 'workspace_interrupted_prepare_forward_service'].includes(message.kind)
         || message.recovery_id !== input.recovery_id || message.launch_sha256 !== input.launch_sha256 || message.ready_sha256 !== hash(ready) || !uuid(message.nonce)) throw new Error('Invalid role request')
       verifyWorkspaceInterruptedRecoveryRole({ dataDir: input.data_dir, recoveryId: input.recovery_id, launchHash: input.launch_sha256 })
-      if (message.kind === 'workspace_interrupted_finish_root') {
-        root ??= Promise.resolve().then(async () => {
-          await finishManagerRecovery()
-          const { finishWorkspaceInterruptedRoot } = await import('./lib/workspace-interrupted-root.mjs')
-          return finishWorkspaceInterruptedRoot({ dataDir: input.data_dir, recoveryId: input.recovery_id, launchHash: input.launch_sha256 })
+      if (message.kind === 'workspace_interrupted_prepare_forward_service') {
+        forwardPreparation ??= Promise.resolve().then(async () => {
+          await finishRoot()
+          const { prepareWorkspaceInterruptedForwardService } = await import('./lib/workspace-interrupted-forward-records.mjs')
+          return prepareWorkspaceInterruptedForwardService({ dataDir: input.data_dir, recoveryId: input.recovery_id, launchHash: input.launch_sha256 })
         })
-        await send({ ...message, kind: 'workspace_interrupted_root_finished', result: await root })
+        await send({ ...message, kind: 'workspace_interrupted_forward_prepared', result: await forwardPreparation })
+      } else if (message.kind === 'workspace_interrupted_finish_root') {
+        await send({ ...message, kind: 'workspace_interrupted_root_finished', result: await finishRoot() })
       } else if (message.kind === 'workspace_interrupted_finish_manager_recovery') {
         await send({ ...message, kind: 'workspace_interrupted_manager_recovery_finished', result: await finishManagerRecovery() })
       } else if (message.kind === 'workspace_interrupted_finish_closures') {
@@ -95,7 +104,7 @@ process.on('message', async message => {
     }
   } catch (error) {
     const operations = ['workspace_interrupted_initialize', 'workspace_interrupted_verify', 'workspace_interrupted_restore_source', 'workspace_interrupted_archive_source',
-      'workspace_interrupted_prepare_source_business', 'workspace_interrupted_release_source', 'workspace_interrupted_finish_closures', 'workspace_interrupted_finish_manager_recovery', 'workspace_interrupted_finish_root']
+      'workspace_interrupted_prepare_source_business', 'workspace_interrupted_release_source', 'workspace_interrupted_finish_closures', 'workspace_interrupted_finish_manager_recovery', 'workspace_interrupted_finish_root', 'workspace_interrupted_prepare_forward_service']
     const codes = ['WORKSPACE_RELOCATION_INVALID', 'CRABOT_WORKSPACE_RECOVERY_COORDINATOR', 'EACCES', 'EBUSY', 'EPERM', 'ENOENT', 'EEXIST', 'EIO']
     // Fixed technical labels only; never a request, credential, path or error body.
     process.stderr.write(JSON.stringify({ component: 'workspace-interrupted-recovery', operation: operations.includes(message?.kind) ? message.kind : 'invalid-request',

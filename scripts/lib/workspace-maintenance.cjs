@@ -9,7 +9,7 @@ function workspaceMaintenancePending(dataRoot) {
     if (!parent.isDirectory() || parent.isSymbolicLink()) return true
   } catch (error) { return error.code !== 'ENOENT' }
   for (const file of [
-    'relocation-active', 'relocation-finalizing.json', 'relocation-source-finalizing.json',
+    'relocation-active', 'relocation-finalizing.json', 'relocation-source-finalizing.json', 'relocation-forward-finalizing.json',
     'relocation.json', 'relocation-workers.json', 'relocation-worker-processes.json',
     'relocation-stop-attempt.json', 'relocation-stop-submission.json',
     'relocation-modules.json', 'relocation-module-stop-attempt.json',
