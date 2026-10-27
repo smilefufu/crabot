@@ -1989,3 +1989,43 @@ test('target takeover resumes an unstarted conversion after a lost pre-conversio
   assert.equal(readVersionMaintenance(f.data).phase, 'verifying')
   assert.equal(await fs.readFile(path.join(f.data, 'fixture/executions'), 'utf8'), 'once\n')
 })
+
+
+for (const interrupted of [false, true]) test('legacy target commits its original data binding and exact pair while retaining health protection; registration interruption=' + interrupted, async t => {
+  const f = await legacyProgramFixture(t, { functional: true }); await fs.unlink(path.join(f.data, 'mm.pid'))
+  const { prepareLegacyDesktopPrograms } = await import('../legacy-desktop-programs.mjs')
+  const prepared = await prepareLegacyDesktopPrograms({ payload: f.payload, installation: f.legacy })
+  const node = path.join(prepared.coreRoot, windows ? '.product-runtime/node/node.exe' : '.product-runtime/node/bin/node')
+  const script = `import{pathToFileURL}from'node:url';const [module,prepared,interrupt]=process.argv.slice(1);const role=await import(pathToFileURL(module).href);const input=JSON.parse(prepared);const converted=await role.convertLegacyDesktopData({prepared:input,inspectEnvironment:async()=>({status:'absent'})});const result=await role.commitLegacyDesktopInstallation({prepared:input,maintenanceId:converted.maintenance_id,registerEntries:async value=>{if(value.coreRoot!==input.coreRoot)throw new Error('wrong registration');if(interrupt==='yes')throw new Error('controlled registration interruption')}});console.log(JSON.stringify(result))`
+  const run = interrupt => promisify(execFile)(node, ['--input-type=module', '--eval', script, path.join(prepared.coreRoot, 'scripts/lib/legacy-desktop-takeover.mjs'), JSON.stringify(prepared), interrupt], { timeout: 30_000, maxBuffer: 65536 })
+  if (interrupted) {
+    await assert.rejects(run('yes'))
+    await assert.rejects(fs.lstat(path.join(f.target, 'current-release.json')), { code: 'ENOENT' })
+  }
+  const result = JSON.parse((await run('no')).stdout.trim())
+  const selected = installation.readDesktopSelection(f.target)
+  assert.equal(result.dataDir, f.data); assert.equal(result.executable, selected.executable)
+  assert.equal(result.verification_pending, true); assert.equal(result.health_verified, false)
+  assert.deepEqual(selected.selection, f.selection)
+  const { readVersionMaintenance, assertVersionMaintenanceAllowsStart } = await import('../version-maintenance.mjs')
+  const maintenance = readVersionMaintenance(f.data)
+  assert.equal(maintenance.schema_version, 4); assert.equal(maintenance.phase, 'verifying')
+  assert.throws(() => assertVersionMaintenanceAllowsStart(f.data), { code: 'CRABOT_MAINTENANCE_PENDING' })
+  assert.equal(await fs.readFile(path.join(f.data, 'fixture/content'), 'utf8'), 'converted by bundled Node')
+  assert.equal(await fs.readFile(path.join(f.data, 'fixture/executions'), 'utf8'), 'once\n')
+  assert.deepEqual(JSON.parse((await run('no')).stdout.trim()), result)
+  assert.equal(installation.readDesktopInstallation(f.target).record.installation_id, selected.record.installation_id)
+  const management = await import('../desktop-management.cjs')
+  assert.deepEqual(management.default.readDesktopManagement(f.data), { schema_version: 1, install_kind: 'desktop', admin_listen_host: '127.0.0.1' })
+  if (!interrupted) {
+    const oldCommand = path.join(f.target, 'cli.mjs')
+    await assert.rejects(promisify(execFile)(process.execPath, [oldCommand, '--version']), error => { assert.match(error.stderr, /CRABOT_LEGACY_ENTRY_FENCE/); return true })
+    // Routing-only continuation: this disposable fixture simulates admitted
+    // health by clearing its guard. No GUI or business MM health is claimed.
+    await fs.unlink(path.join(f.data, 'desktop-maintenance.json'))
+    const forwarded = await promisify(execFile)(process.execPath, [oldCommand, '--version'], { timeout: 15_000 })
+    assert.equal(JSON.parse(forwarded.stdout.trim()).version, f.selection.version)
+    await fs.unlink(path.join(f.target, 'bin', launcher))
+    await assert.rejects(promisify(execFile)(process.execPath, [oldCommand, '--version']), error => { assert.match(error.stderr, /CRABOT_LEGACY_ENTRY_FENCE/); return true })
+  }
+})

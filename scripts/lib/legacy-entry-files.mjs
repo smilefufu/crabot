@@ -18,6 +18,35 @@ export function entryFenceBytes(file, scope = 'desktop') {
     ? '@echo off\r\necho Crabot takeover is pending. Open the desktop app to recover. 1>&2\r\nexit /b 1\r\n'
     : '#!/usr/bin/env node\nthrow Object.assign(new Error("Crabot takeover is pending. Open the desktop app to recover."), { code: "CRABOT_LEGACY_ENTRY_FENCE" })\n')
 }
+// The original command can hand off only after a paired installation has
+// cleared its maintenance guard. Old Core/supervisor guards never forward.
+export function pairedCliFenceBytes(file) {
+  if (file === 'crabot.cmd') return Buffer.from([
+    '@echo off', 'setlocal DisableDelayedExpansion',
+    'if not exist "%~dp0desktop-installation.json" goto pending',
+    'if not exist "%~dp0current-release.json" goto pending',
+    'if exist "%~dp0data\\desktop-maintenance.json" goto pending',
+    'if not exist "%~dp0bin\\crabot.exe" goto pending',
+    '"%~dp0bin\\crabot.exe" %*', 'exit /b %errorlevel%', ':pending',
+    'echo Crabot takeover is pending. Open the desktop app to recover. 1>&2', 'exit /b 1', '',
+  ].join('\r\n'))
+  if (file !== 'cli.mjs') return null
+  return Buffer.from(`#!/usr/bin/env node
+import { existsSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import { spawnSync } from 'node:child_process'
+const relative = name => fileURLToPath(new URL(name, import.meta.url))
+const command = relative('./bin/' + (process.platform === 'win32' ? 'crabot.exe' : 'crabot'))
+if (!existsSync(relative('./desktop-installation.json')) || !existsSync(relative('./current-release.json'))
+  || existsSync(relative('./data/desktop-maintenance.json')) || !existsSync(command)) {
+  throw Object.assign(new Error('Crabot takeover is pending. Open the desktop app to recover.'), { code: 'CRABOT_LEGACY_ENTRY_FENCE' })
+}
+const result = spawnSync(command, process.argv.slice(2), { stdio: 'inherit', env: process.env })
+if (result.error) throw result.error
+if (result.signal) process.kill(process.pid, result.signal)
+else process.exit(result.status ?? 1)
+`)
+}
 export async function readEntry(file, limit = 1024 * 1024) {
   const stat = await fs.lstat(file)
   if (!stat.isFile() || stat.size > limit || realpathSync(file) !== file) failEntryFence()

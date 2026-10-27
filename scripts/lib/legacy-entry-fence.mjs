@@ -8,7 +8,12 @@ import identity from './process-identity.cjs'
 import management from './desktop-management.cjs'
 import { acquireCliLock, releaseCliLock } from './cli-lock.mjs'
 import { discoverLegacyUserInstall } from './legacy-desktop.mjs'
-import { legacyEntryFiles as entries, hashEntry as hash, failEntryFence as fail, entryFenceBytes as fence, readEntry as regular, replaceEntry as replace, syncEntryDirectory } from './legacy-entry-files.mjs'
+import { legacyEntryFiles as entries, hashEntry as hash, failEntryFence as fail, entryFenceBytes as fence, pairedCliFenceBytes, readEntry as regular, replaceEntry as replace, syncEntryDirectory } from './legacy-entry-files.mjs'
+
+function knownFence(file, bytes) {
+  const forward = pairedCliFenceBytes(file), digest = hash(bytes)
+  return digest === hash(fence(file)) || forward !== null && digest === hash(forward)
+}
 
 const catalog = JSON.parse(await fs.readFile(new URL('../desktop/legacy-releases.json', import.meta.url), 'utf8'))
 async function control(root, create = false) {
@@ -57,9 +62,9 @@ async function current(root, record) {
   }
   const states = new Map()
   for (const file of entries) {
-    const digest = hash((await regular(path.join(root, file))).bytes)
+    const bytes = (await regular(path.join(root, file))).bytes, digest = hash(bytes)
     const original = Buffer.from(record.originals[file].bytes, 'base64')
-    if (digest !== hash(original) && digest !== hash(fence(file))) fail()
+    if (digest !== hash(original) && !knownFence(file, bytes)) fail()
     states.set(file, digest === hash(original) ? 'original' : 'fenced')
   }
   return states
@@ -111,7 +116,7 @@ export async function restoreLegacyEntries(root) {
     const states = await current(root, record) // Check every entry before restoring any.
     record.phase = 'restoring'; await write(directory, record)
     for (const file of entries) if (states.get(file) !== 'original') {
-      if (hash((await regular(path.join(root, file))).bytes) !== hash(fence(file))) fail()
+      if (!knownFence(file, (await regular(path.join(root, file))).bytes)) fail()
       await replace(path.join(root, file), Buffer.from(record.originals[file].bytes, 'base64'), record.originals[file].mode)
     }
     record.phase = 'restored'; await write(directory, record)
@@ -128,5 +133,24 @@ export async function sealLegacyEntryFence(root, id) {
     const record = await read(root, directory), states = await current(root, record)
     if (record.id !== id || record.phase !== 'fenced' || [...states.values()].some(state => state !== 'fenced')) fail()
     record.phase = 'data_changing'; await write(directory, record)
+  } finally { releaseCliLock(lock) }
+}
+
+
+// The takeover coordinator separately verifies schema4, target programs and
+// stopped conversion. Only these original command files gain the fixed handoff;
+// the same durable originals and all old Core guards are kept.
+export async function enableLegacyCliForwarding(root, id) {
+  root = realpathSync(root)
+  const directory = await control(root), lock = await acquireCliLock(directory, 'legacy-cli-forwarding')
+  try {
+    const record = await read(root, directory), states = await current(root, record)
+    if (record.id !== id || !['fenced', 'data_changing'].includes(record.phase) || [...states.values()].some(state => state !== 'fenced')) fail()
+    for (const file of ['cli.mjs', 'crabot.cmd']) {
+      const bytes = (await regular(path.join(root, file))).bytes, target = pairedCliFenceBytes(file)
+      if (hash(bytes) === hash(target)) continue
+      if (!knownFence(file, bytes)) fail()
+      await replace(path.join(root, file), target, record.originals[file].mode)
+    }
   } finally { releaseCliLock(lock) }
 }

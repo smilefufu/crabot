@@ -119,3 +119,42 @@ test('strict umask does not change original entry permissions after a cancelled 
   assert.equal((await fs.stat(entry)).mode & 0o777, original)
   await restored(f)
 })
+
+test('known CLI forwarding remains a reversible fence until the actual desktop handoff is healthy', async t => {
+  const f = await fixture(t), record = await fenceLegacyEntries(f.installation)
+  const { enableLegacyCliForwarding } = await import('../legacy-entry-fence.mjs')
+  await assert.rejects(enableLegacyCliForwarding(f.root, 'wrong-id'))
+  await enableLegacyCliForwarding(f.root, record.id)
+  assert.equal((await inspectLegacyEntryFence(f.root)).entries_fenced, true)
+  await assert.rejects(promisify(execFile)(process.execPath, [path.join(f.root, 'cli.mjs'), '--version']), error => {
+    assert.match(error.stderr, /CRABOT_LEGACY_ENTRY_FENCE/); return true
+  })
+  await restoreLegacyEntries(f.root); await restored(f)
+})
+
+test('lost CLI forwarding publication accepts only the two known guards and can finish once', async t => {
+  const f = await fixture(t), record = await fenceLegacyEntries(f.installation), rename = fs.rename
+  const { enableLegacyCliForwarding } = await import('../legacy-entry-fence.mjs')
+  const patch = t.mock.method(fs, 'rename', async (from, to) => {
+    if (to === path.join(f.root, 'crabot.cmd')) throw Object.assign(new Error('controlled command publication failure'), { code: 'EIO' })
+    return rename(from, to)
+  })
+  await assert.rejects(enableLegacyCliForwarding(f.root, record.id), { code: 'EIO' }); patch.mock.restore()
+  assert.equal((await inspectLegacyEntryFence(f.root)).entries_fenced, true)
+  await enableLegacyCliForwarding(f.root, record.id)
+  const cli = await fs.readFile(path.join(f.root, 'cli.mjs'))
+  await enableLegacyCliForwarding(f.root, record.id)
+  assert.deepEqual(await fs.readFile(path.join(f.root, 'cli.mjs')), cli)
+  await sealLegacyEntryFence(f.root, record.id)
+  await assert.rejects(restoreLegacyEntries(f.root))
+  await unchanged(f)
+})
+
+test('an edited CLI or original-entry state cannot be overwritten by forwarding', async t => {
+  const f = await fixture(t), record = await fenceLegacyEntries(f.installation)
+  const { enableLegacyCliForwarding } = await import('../legacy-entry-fence.mjs')
+  const before = await fs.readFile(path.join(f.root, 'crabot.cmd'))
+  await fs.appendFile(path.join(f.root, 'cli.mjs'), '// user change')
+  await assert.rejects(enableLegacyCliForwarding(f.root, record.id))
+  assert.deepEqual(await fs.readFile(path.join(f.root, 'crabot.cmd')), before)
+})

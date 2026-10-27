@@ -1,12 +1,18 @@
 // Dedicated target-Node data role for legacy-user takeover. Program selection,
 // OS/CLI registration and ordinary target GUI health are separate later steps.
-import { promises as fs, realpathSync } from 'node:fs'
+import { promises as fs, realpathSync, constants } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import product from './product-runtime.cjs'
+import identity from './process-identity.cjs'
+import installationState from './desktop-installation.cjs'
+import management from './desktop-management.cjs'
+import pythonSelection from './agent-python-selection.cjs'
+import { randomUUID } from 'node:crypto'
+import { privateJson } from './desktop-preparation-files.mjs'
 import { acquireExistingCliLock, releaseCliLock } from './cli-lock.mjs'
 import { verifyLegacyDesktopPrograms } from './legacy-desktop-programs.mjs'
-import { fenceLegacyEntries, inspectLegacyEntryFence } from './legacy-entry-fence.mjs'
+import { fenceLegacyEntries, inspectLegacyEntryFence, enableLegacyCliForwarding } from './legacy-entry-fence.mjs'
 import { inspectInstance } from './instance-runtime.mjs'
 import { discoverSealedLegacyRuntime } from './legacy-runtime.mjs'
 import { stopFencedLegacyInstance } from './legacy-stop.mjs'
@@ -18,13 +24,27 @@ import { applyStartupMigrations, verifyDataCompatibility } from './core-preparat
 import { assertNoInterruptedMigrations } from '../upgrade-lib/migration-transaction.mjs'
 const fail = () => { throw Object.assign(new Error('旧安装接管尚未核验完成，原数据和保护记录已保留，请从同一安装包继续检查。'), { code: 'CRABOT_MAINTENANCE_PENDING' }) }
 
-// All locks and maintenance imports must come from this exact verified target,
-// rather than an installer/Electron module with a different in-memory lock map.
-export async function convertLegacyDesktopData({ prepared, signal, progress = () => {}, inspectEnvironment = inspectLegacyPythonEnvironment }) {
+function matchesMaintenance(value, prepared, entryFenceId) {
+  const source = prepared.installation
+  return value?.schema_version === 4 && value.data_dir === source.dataRoot && value.install_root === source.installRoot
+    && value.source_version === source.version && value.legacy_source.scope === 'user'
+    && value.legacy_source.fingerprint === source.fingerprint && value.legacy_source.entry_fence_id === entryFenceId
+    && value.target_version === prepared.selection.version && value.target_core.root === prepared.coreRoot
+    && value.target_core.inventory_sha256 === prepared.selection.core_id
+}
+function targetRuntime(prepared) {
   const root = realpathSync(fileURLToPath(new URL('../../', import.meta.url)))
   if (root !== prepared?.coreRoot) fail()
   const runtime = product.loadProductRuntime(root, { required: true, full: true })
   if (realpathSync(process.execPath) !== realpathSync(runtime.executables.node)) fail()
+  return { root, runtime }
+}
+async function present(file) { try { return await fs.lstat(file) } catch (error) { if (error.code === 'ENOENT') return null; throw error } }
+
+// All locks and maintenance imports must come from this exact verified target,
+// rather than an installer/Electron module with a different in-memory lock map.
+export async function convertLegacyDesktopData({ prepared, signal, progress = () => {}, inspectEnvironment = inspectLegacyPythonEnvironment }) {
+  const { root, runtime } = targetRuntime(prepared)
   const installation = prepared.installation, dataDir = installation.dataRoot
   const rootLock = await acquireExistingCliLock(installation.installRoot, 'legacy-desktop-takeover')
   let dataLock
@@ -35,11 +55,7 @@ export async function convertLegacyDesktopData({ prepared, signal, progress = ()
     await verifyLegacyDesktopPrograms(prepared, { entryFenceId: entry?.id, signal })
     dataLock = await acquireExistingCliLock(dataDir, 'legacy-desktop-takeover')
     let record = readVersionMaintenance(dataDir)
-    const matching = value => value?.schema_version === 4 && value.data_dir === dataDir && value.install_root === installation.installRoot
-      && value.source_version === installation.version && value.legacy_source.scope === 'user'
-      && value.legacy_source.fingerprint === installation.fingerprint && value.legacy_source.entry_fence_id === entry?.id
-      && value.target_version === prepared.selection.version && value.target_core.root === root
-      && value.target_core.inventory_sha256 === prepared.selection.core_id
+    const matching = value => matchesMaintenance(value, prepared, entry?.id)
     if (record && !matching(record)) fail()
     signal?.throwIfAborted()
     if (!entry) entry = await fenceLegacyEntries(installation)
@@ -81,5 +97,79 @@ export async function convertLegacyDesktopData({ prepared, signal, progress = ()
     const current = readVersionMaintenance(dataDir)
     if (!matching(current) || current.id !== record.id || current.phase !== 'verifying') fail()
     return { maintenance_id: current.id, dataDir, verification_pending: true, health_verified: false }
+  } finally { if (dataLock) releaseCliLock(dataLock); releaseCliLock(rootLock) }
+}
+
+
+// After the exact stopped conversion only. This publishes the existing desktop
+// formats and target selector, but leaves version protection for ordinary GUI health.
+export async function commitLegacyDesktopInstallation({ prepared, maintenanceId, registerEntries }) {
+  const { root } = targetRuntime(prepared), source = prepared.installation, dataDir = source.dataRoot
+  if (typeof registerEntries !== 'function') fail()
+  const rootLock = await acquireExistingCliLock(source.installRoot, 'commit-legacy-desktop-installation')
+  let dataLock
+  try {
+    dataLock = await acquireExistingCliLock(dataDir, 'commit-legacy-desktop-installation')
+    const entry = await inspectLegacyEntryFence(source.installRoot)
+    const current = () => {
+      const record = readVersionMaintenance(dataDir)
+      if (!matchesMaintenance(record, prepared, entry.id) || record.id !== maintenanceId || record.phase !== 'verifying' || !record.legacy_python) fail()
+      const selected = pythonSelection.readAgentEnvironmentReference(dataDir)
+      if (record.legacy_python.status === 'prepared') {
+        pythonSelection.verifyAgentEnvironmentCandidate(dataDir, record.legacy_python.reference)
+        if (JSON.stringify(selected) !== JSON.stringify(record.legacy_python.reference)) fail()
+      } else if (selected !== null) fail()
+      if (inspectInstance(dataDir).state !== 'stopped') fail()
+    }
+    const verify = async () => {
+      current()
+      await verifyLegacyDesktopPrograms(prepared, { entryFenceId: entry.id })
+      if ((await discoverSealedLegacyRuntime(source, { entryFenceId: entry.id })).state !== 'stopped') fail()
+      await assertNoInterruptedMigrations(dataDir)
+      if (verifyDataCompatibility(root, dataDir).length) fail()
+      current()
+    }
+    await verify()
+    const bin = path.join(source.installRoot, 'bin')
+    if (await present(bin)) management.requireExistingDataRoot(bin)
+    else management.ensurePrivateDataRoot(bin)
+    const metadata = path.join(source.installRoot, 'desktop-installation.json')
+    if (!await present(metadata)) {
+      const stat = await fs.lstat(source.installRoot, { bigint: true })
+      await privateJson(metadata, { schema_version: 1, installation_id: randomUUID(), owner: identity.inspectProcess(process.pid).owner,
+        install_root: source.installRoot, root_identity: { dev: String(stat.dev), ino: String(stat.ino) },
+        paths: { app: 'app/releases', core: 'releases', data: 'data', bin: 'bin' } })
+    }
+    const own = installationState.readDesktopInstallation(source.installRoot)
+    const name = process.platform === 'win32' ? 'crabot.exe' : 'crabot', launcher = path.join(bin, name), original = path.join(root, 'bin', name)
+    const stat = await present(launcher)
+    if (stat) {
+      if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1
+        || (process.platform === 'win32' ? !identity.isOwnedFile(launcher) : stat.uid !== process.getuid())
+        || !(await fs.readFile(launcher)).equals(await fs.readFile(original))) fail()
+    } else {
+      await fs.copyFile(original, launcher, constants.COPYFILE_EXCL)
+      if (process.platform !== 'win32') await fs.chmod(launcher, 0o755)
+    }
+    const marker = { schema_version: 1, install_kind: 'desktop', admin_listen_host: '127.0.0.1' }, markerFile = path.join(dataDir, 'desktop-managed.json')
+    const markerStat = await present(markerFile)
+    if (markerStat) {
+      if (!markerStat.isFile() || markerStat.isSymbolicLink() || markerStat.nlink !== 1
+        || (process.platform === 'win32' ? !identity.isPrivateFile(markerFile) : markerStat.uid !== process.getuid() || (markerStat.mode & 0o777) !== 0o600)
+        || JSON.stringify(management.readDesktopManagement(dataDir)) !== JSON.stringify(marker)) fail()
+    } else await privateJson(markerFile, marker)
+    const registration = { installRoot: own.root, installation_id: own.record.installation_id,
+      selection: prepared.selection, coreRoot: prepared.coreRoot, guiRoot: prepared.guiRoot }
+    const selector = path.join(own.root, 'current-release.json')
+    if (await present(selector) && JSON.stringify(installationState.readDesktopSelection(own.root).selection) !== JSON.stringify(prepared.selection)) fail()
+    await enableLegacyCliForwarding(source.installRoot, entry.id)
+    await registerEntries(registration)
+    await verify()
+    if (JSON.stringify(installationState.readDesktopInstallation(own.root).record) !== JSON.stringify(own.record)) fail()
+    if (!await present(selector)) await privateJson(selector, prepared.selection)
+    const selected = installationState.readDesktopSelection(own.root)
+    if (JSON.stringify(selected.selection) !== JSON.stringify(prepared.selection)) fail()
+    current()
+    return { executable: selected.executable, dataDir, maintenance_id: maintenanceId, verification_pending: true, health_verified: false }
   } finally { if (dataLock) releaseCliLock(dataLock); releaseCliLock(rootLock) }
 }
