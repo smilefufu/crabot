@@ -4,6 +4,8 @@ import path from 'node:path'
 import native from './process-identity.cjs'
 import { readWorkspaceInterruptedRecoveryRole } from './workspace-interrupted-role.mjs'
 import { readPendingWorkspaceSourceRestoration, readWorkspaceSourceCompletionScope } from './workspace-interrupted-source-records.mjs'
+import { forwardFinalizingName, readWorkspaceInterruptedForwardPreparation } from './workspace-interrupted-forward-records.mjs'
+import { readWorkspaceInterruptedServiceScope } from './workspace-interrupted-service-scope.mjs'
 import { createWorkspaceMaintenanceFileAccess, version } from '../../crabot-agent/dist/core/workspace-maintenance-files.js'
 import { sha256CanonicalJson as hash } from '../../crabot-shared/dist/canonical-json.js'
 const failure = () => Object.assign(new Error('中断恢复的模块登记或当前角色无法核实，维护保护已保留；未重复启动。'), { code: 'CRABOT_WORKSPACE_RUNTIME_GATE' })
@@ -13,21 +15,21 @@ const uuid = value => typeof value === 'string' && /^[a-f0-9]{8}-(?:[a-f0-9]{4}-
 const digest = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value)
 const moduleName = value => typeof value === 'string' && /^[a-zA-Z0-9._-]{1,128}$/.test(value) && !['.', '..', 'admin-web'].includes(value)
 function context(dataDir, recoveryId) {
-  const role = readWorkspaceInterruptedRecoveryRole(dataDir, recoveryId)
-  if (!role.launch || !role.ready || role.launch.action !== 'restore_source') throw failure()
-  const original = readWorkspaceSourceCompletionScope(dataDir, role.launch.request.intent_id)
+  const original = readWorkspaceInterruptedServiceScope(dataDir, recoveryId), role = original.role
   const observation = readJson(path.join(role.launch.control_root.path, 'runtime-observations.json'))
   if (observation) observationValue(observation, role, original)
   if (original.released && original.release.job.recovery_id !== recoveryId && !observation) throw failure()
-  const business = readJson(path.join(path.dirname(original.original.path), 'business-prepared.json'), 32 * 1024 * 1024)
-  if (!original.archived || !exact(business, ['schema_version', 'intent_id', 'scope_sha256', 'checkpoints']) || business.schema_version !== 2
-    || business.intent_id !== role.launch.request.intent_id || business.scope_sha256 !== original.marker.scope_sha256 || !Array.isArray(business.checkpoints)
-    || business.checkpoints.length !== original.scope.recovery_snapshot.checkpoints.length || business.checkpoints.some((item, index) =>
-      !exact(item, ['index', 'manifest_sha256', 'complete_sha256']) || item.index !== index || !digest(item.manifest_sha256) || !digest(item.complete_sha256))) throw failure()
+  if (original.action === 'restore_source') {
+    const source = original.facts, business = readJson(path.join(path.dirname(source.original.path), 'business-prepared.json'), 32 * 1024 * 1024)
+    if (!source.archived || !exact(business, ['schema_version', 'intent_id', 'scope_sha256', 'checkpoints']) || business.schema_version !== 2
+      || business.intent_id !== role.launch.request.intent_id || business.scope_sha256 !== original.marker.scope_sha256 || !Array.isArray(business.checkpoints)
+      || business.checkpoints.length !== source.scope.recovery_snapshot.checkpoints.length || business.checkpoints.some((item, index) =>
+        !exact(item, ['index', 'manifest_sha256', 'complete_sha256']) || item.index !== index || !digest(item.manifest_sha256) || !digest(item.complete_sha256))) throw failure()
+  }
   const directory = role.launch.control_root.path, fingerprint = hash(role)
   const verify = (live = false) => {
     if (hash(readWorkspaceInterruptedRecoveryRole(dataDir, recoveryId)) !== fingerprint
-      || hash(readWorkspaceSourceCompletionScope(dataDir, role.launch.request.intent_id).marker) !== hash(original.marker)
+      || hash(readWorkspaceInterruptedServiceScope(dataDir, recoveryId).marker) !== hash(original.marker)
       || observation && hash(readJson(path.join(directory, 'runtime-observations.json'))) !== hash(observation)
       || live && (!native.sameProcess(role.launch.parent, native.inspectProcess(role.launch.parent.pid))
         || !native.sameProcess(role.launch.process, native.inspectProcess(role.launch.process.pid)))) throw failure()
@@ -193,7 +195,9 @@ export async function commitWorkspaceInterruptedRuntimeStart(options) {
 
 /** Prior ownership facts only. A fresh current driver still verifies/stops every actual runtime. */
 export function readWorkspaceInterruptedRuntimeHistory(dataDir, intentId) {
-  const pending = readPendingWorkspaceSourceRestoration(dataDir, intentId)
+  const forward = fs.existsSync(path.join(dataDir, 'workspace-control', forwardFinalizingName))
+  const pending = forward ? readWorkspaceInterruptedForwardPreparation(dataDir, intentId) : readPendingWorkspaceSourceRestoration(dataDir, intentId)
+  if (!pending) throw failure()
   const parent = path.dirname(pending.role.launch.control_root.path), names = fs.readdirSync(parent).sort(), rows = []
   owned(parent, true, true)
   for (const id of names) {
@@ -203,11 +207,12 @@ export function readWorkspaceInterruptedRuntimeHistory(dataDir, intentId) {
     const launch = readJson(path.join(directory, 'launch.json'))
     if (!launch || launch.schema_version !== 2 || launch.request?.intent_id !== intentId) continue
     const role = readWorkspaceInterruptedRecoveryRole(dataDir, id)
-    if (role.launch.action !== 'restore_source' || role.launch.request.checkpoint_sha256 !== pending.checkpoint.checkpoint_sha256) throw failure()
+    if (role.launch.action !== (forward ? 'finish_commit' : 'restore_source') || !forward && role.launch.request.checkpoint_sha256 !== pending.checkpoint.checkpoint_sha256) throw failure()
     if (!role.ready) {
       if (fs.existsSync(path.join(directory, 'runtime-plan.json')) || fs.existsSync(path.join(directory, 'runtime-starts'))) throw failure()
       continue
     }
+    if (forward && hash(readWorkspaceInterruptedServiceScope(dataDir, id).checkpoint) !== hash(pending.checkpoint)) throw failure()
     const plan = readWorkspaceInterruptedRuntimePlan(dataDir, id)
     if (!plan) {
       if (fs.existsSync(path.join(directory, 'runtime-starts'))) throw failure()

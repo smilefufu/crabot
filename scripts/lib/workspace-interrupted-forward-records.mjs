@@ -24,7 +24,7 @@ function frame(file, privateEntry = true) {
   if (!stat.isDirectory() || stat.isSymbolicLink() || fs.realpathSync(file) !== file) throw failure()
   return { path: file, dev: String(stat.dev), ino: String(stat.ino), native_id: process.platform === 'win32' ? native.inspectDirectoryFileId(file) : null }
 }
-/** Prepared active-job facts only. Archival and service completion are separate. */
+/** Prepared active-job facts only. Current Root capability and service completion are separate. */
 export function readWorkspaceInterruptedForwardPreparation(dataDir, id) {
   const ctx = context(dataDir, id), control = frame(ctx.control), original = frame(ctx.active), marker = readJson(ctx.fence)
   if (!marker) return null
@@ -41,7 +41,7 @@ export function readWorkspaceInterruptedForwardPreparation(dataDir, id) {
   assertWorkspaceInterruptedForwardProgress(baseline, scope.checkpoint)
   const selected = scope.checkpoint.selected
   if (!selected || !scope.checkpoint.recovery_commit || scope.catalog_sha256 !== selected.catalog_sha256 || scope.catalog_revision !== selected.catalog_revision
-    || hash(scope.root) !== hash(scope.checkpoint.published?.target) || hash(frame(scope.root.path, false)) !== hash(scope.root)
+    || hash(scope.root) !== hash(scope.checkpoint.published?.target)
     || hash(readWorkspaceInterruptedRelocationCheckpoint(ctx.data, id)) !== hash(scope.checkpoint)
     || hash(readJson(ctx.fence)) !== hash(marker) || hash(frame(ctx.control)) !== hash(control) || hash(frame(ctx.active)) !== hash(original)) throw failure()
   return { marker, scope, checkpoint: scope.checkpoint, root: scope.root, original, role }
@@ -58,7 +58,7 @@ export async function prepareWorkspaceInterruptedForwardService({ dataDir, recov
   verify()
   const previous = readWorkspaceInterruptedForwardPreparation(ctx.data, id)
   if (previous) {
-    if (hash(catalog) !== previous.scope.catalog_sha256) throw failure()
+    if (hash(catalog) !== previous.scope.catalog_sha256 || hash(frame(previous.root.path, false)) !== hash(previous.root)) throw failure()
     return Object.freeze({ prepared: true, scope_sha256: previous.marker.scope_sha256 })
   }
   if (!checkpoint.selected || !checkpoint.published || !checkpoint.recovery_commit) throw failure()

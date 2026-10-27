@@ -9,7 +9,7 @@ interface Options {
   runtimeIdentity: () => { instance_id?: string; module_id: string; runtime_id?: string }
   isClosing: () => boolean
 }
-const failure = () => new RpcError('SERVICE_UNAVAILABLE', '原位置与本次实际Agent文件能力尚未核实，未报告恢复完成。')
+const failure = () => new RpcError('SERVICE_UNAVAILABLE', '选定工作区与本次实际Agent文件能力尚未核实，未报告恢复完成。')
 /** Current interrupted role only; the old normal/archived root verifiers keep their own contracts. */
 export function createWorkspaceInterruptedRootVerifier(options: Options) {
   let original: string | undefined, pending: Promise<WorkspaceInterruptedRecoveryRuntimeResult> | undefined
@@ -19,23 +19,23 @@ export function createWorkspaceInterruptedRootVerifier(options: Options) {
     if (!token || Buffer.byteLength(token) !== Buffer.byteLength(bearer) || !timingSafeEqual(Buffer.from(token), Buffer.from(bearer))) throw new RpcError('FORBIDDEN', 'Agent运行凭据不匹配。')
     const records = require('../../../scripts/lib/workspace-interrupted-runtime.mjs')
     const { parseWorkspaceInterruptedRecoveryRequest, readWorkspaceInterruptedRecoveryRole } = require('../../../scripts/lib/workspace-interrupted-role.mjs')
-    const { readWorkspaceSourceCompletionScope, assertWorkspaceSourceRootCurrent } = require('../../../scripts/lib/workspace-interrupted-source-records.mjs')
+    const { readWorkspaceInterruptedServiceScope, assertWorkspaceInterruptedRootCurrent } = require('../../../scripts/lib/workspace-interrupted-service-scope.mjs')
     const native = require('../../../scripts/lib/process-identity.cjs')
     let request: WorkspaceInterruptedRecoveryRequest
     try { request = parseWorkspaceInterruptedRecoveryRequest(input) }
-    catch { throw new RpcError('INVALID_PARAMS', '原位置核验只接受固定恢复作业标识。') }
+    catch { throw new RpcError('INVALID_PARAMS', '工作区核验只接受固定恢复作业标识。') }
     const role = readWorkspaceInterruptedRecoveryRole(options.dataDir, request.recovery_id)
     const plan = records.readWorkspaceInterruptedRuntimePlan(options.dataDir, request.recovery_id)
     const observation = records.readWorkspaceInterruptedRuntimeObservation(options.dataDir, request.recovery_id, 'crabot-agent')
     const start = observation ?? records.readWorkspaceInterruptedRuntimeStart(options.dataDir, request.recovery_id, 'crabot-agent')
-    const source = readWorkspaceSourceCompletionScope(options.dataDir, request.intent_id), identity = Object.freeze({ ...options.runtimeIdentity() })
+    const scope = readWorkspaceInterruptedServiceScope(options.dataDir, request.recovery_id), identity = Object.freeze({ ...options.runtimeIdentity() })
     if (!role.launch || !role.ready || !plan || !start || sha256CanonicalJson(role.launch.request) !== sha256CanonicalJson(request)
       || identity.module_id !== 'crabot-agent' || identity.instance_id !== plan.instance_id || identity.runtime_id !== start.runtime.runtime_id) throw failure()
-    const signature = sha256CanonicalJson({ role, plan, start, marker: source.marker, identity })
+    const signature = sha256CanonicalJson({ role, plan, start, marker: scope.marker, identity })
     const result: WorkspaceInterruptedRecoveryRuntimeResult = Object.freeze({ verified: true, ...request, launch_sha256: sha256CanonicalJson(role.launch),
-      plan_sha256: sha256CanonicalJson(plan), catalog_sha256: source.scope.catalog_sha256, instance_id: plan.instance_id, module_id: 'crabot-agent', runtime_id: start.runtime.runtime_id })
+      plan_sha256: sha256CanonicalJson(plan), catalog_sha256: scope.catalog_sha256, instance_id: plan.instance_id, module_id: 'crabot-agent', runtime_id: start.runtime.runtime_id })
     const assertCurrent = () => {
-      try { assertWorkspaceSourceRootCurrent(source) } catch { throw failure() }
+      try { assertWorkspaceInterruptedRootCurrent(scope) } catch { throw failure() }
       if (options.isClosing() || options.runtimeBearer() !== token || sha256CanonicalJson(options.runtimeIdentity()) !== sha256CanonicalJson(identity)
         || sha256CanonicalJson(readWorkspaceInterruptedRecoveryRole(options.dataDir, request.recovery_id)) !== sha256CanonicalJson(role)) throw failure()
       if (observation) {
@@ -59,12 +59,12 @@ export function createWorkspaceInterruptedRootVerifier(options: Options) {
     }
     const verify = async () => {
       assertCurrent()
-      const scope = readWorkspaceSourceCompletionScope(options.dataDir, request.intent_id)
-      if (sha256CanonicalJson(scope.marker) !== sha256CanonicalJson(source.marker)) throw failure()
+      const current = readWorkspaceInterruptedServiceScope(options.dataDir, request.recovery_id)
+      if (sha256CanonicalJson(current.marker) !== sha256CanonicalJson(scope.marker)) throw failure()
       const catalog = await new WorkspaceCatalog({ dataRoot: options.dataDir, storageRoot: process.env.WORKER_WORKSPACES_DIR, files: native }).snapshot()
       assertCurrent()
-      if (catalog.storage_root !== source.complete.source.path || catalog.revision < source.scope.catalog_revision
-        || !scope.released && sha256CanonicalJson(catalog) !== source.scope.catalog_sha256) throw failure()
+      if (catalog.storage_root !== scope.root.path || catalog.revision < scope.catalog_revision
+        || !current.released && sha256CanonicalJson(catalog) !== scope.catalog_sha256) throw failure()
       const rpc = await require('../../../scripts/lib/pinned-process-rpc.cjs').openPinnedProcessRpc(role.launch.parent, options.moduleManagerPort, { source: 'crabot-agent', timeoutMs: 30000 })
       try {
         const proof = await rpc.call('verify_workspace_interrupted_recovery_runtime', request, { authorizationBearer: token })
@@ -80,7 +80,7 @@ export function createWorkspaceInterruptedRootVerifier(options: Options) {
     if (!pending) {
       original = signature
       pending = Promise.resolve().then(async () => {
-        await require('../../../scripts/lib/workspace-root-probe.mjs').probeWorkspaceDirectory({ directory: source.complete.source, authorize: async () => { await verify(); return assertCurrent } })
+        await require('../../../scripts/lib/workspace-root-probe.mjs').probeWorkspaceDirectory({ directory: scope.root, authorize: async () => { await verify(); return assertCurrent } })
         return result
       })
     }

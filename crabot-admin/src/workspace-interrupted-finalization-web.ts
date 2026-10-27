@@ -11,7 +11,7 @@ interface Options {
   resume: (verify: () => Promise<void>) => Promise<void>
   reclose: () => Promise<void>
 }
-const failure = () => new RpcError('SERVICE_UNAVAILABLE', '原位置恢复的当前Web交接尚未核实，未确认业务已恢复。')
+const failure = () => new RpcError('SERVICE_UNAVAILABLE', '工作区恢复的当前Web交接尚未核实，未确认业务已恢复。')
 const exact = (value: any, fields: string[]) => value && typeof value === 'object' && !Array.isArray(value)
   && Object.keys(value).length === fields.length && fields.every(key => Object.prototype.hasOwnProperty.call(value, key))
 /** Private current-role Web handoff; human JWTs and old archived-job credentials do not select this role. */
@@ -21,7 +21,7 @@ export function createWorkspaceInterruptedFinalizationWeb(options: Options) {
     if (!bearer) throw new RpcError('UNAUTHORIZED', '缺少当前收尾凭据。')
     const parse = require('../../scripts/lib/workspace-interrupted-role.mjs').parseWorkspaceInterruptedRecoveryRequest
     const request = parse(input) as WorkspaceInterruptedRecoveryRequest, actor = observeCurrentWorkspaceAdmin(options)
-    const sources = require('../../scripts/lib/workspace-interrupted-source-records.mjs')
+    const scopes = require('../../scripts/lib/workspace-interrupted-service-scope.mjs')
     const authenticate = async () => {
       actor.verify()
       const rpc = await require('../../scripts/lib/pinned-process-rpc.cjs').openPinnedProcessRpc(actor.parent, options.moduleManagerPort, { source: 'admin-web', timeoutMs: 5000 })
@@ -35,7 +35,7 @@ export function createWorkspaceInterruptedFinalizationWeb(options: Options) {
         return job as WorkspaceInterruptedRecoveryWebJob
       } finally { rpc.close() }
     }
-    const job = await authenticate(), fingerprint = sha256CanonicalJson(job), original = sources.readWorkspaceSourceCompletionScope(options.dataDir, request.intent_id)
+    const job = await authenticate(), fingerprint = sha256CanonicalJson(job), original = scopes.readWorkspaceInterruptedServiceScope(options.dataDir, request.recovery_id)
     const role = require('../../scripts/lib/workspace-interrupted-role.mjs').readWorkspaceInterruptedRecoveryRole(options.dataDir, request.recovery_id)
     const plan = require('../../scripts/lib/workspace-interrupted-runtime.mjs').readWorkspaceInterruptedRuntimePlan(options.dataDir, request.recovery_id)
     const native = require('../../scripts/lib/process-identity.cjs')
@@ -44,7 +44,7 @@ export function createWorkspaceInterruptedFinalizationWeb(options: Options) {
     if (action === 'resume_web' && (!original.released || !preparation || preparation.fingerprint !== fingerprint || preparation.failed)) throw failure()
     const verify = async () => {
       actor.verify()
-      const current = sources.readWorkspaceSourceCompletionScope(options.dataDir, request.intent_id)
+      const current = scopes.readWorkspaceInterruptedServiceScope(options.dataDir, request.recovery_id)
       if (sha256CanonicalJson(current.marker) !== sha256CanonicalJson(original.marker) || action === 'resume_web' && !current.released
         || sha256CanonicalJson(await authenticate()) !== fingerprint) throw failure()
       actor.verify()

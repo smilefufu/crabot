@@ -1094,10 +1094,12 @@ test('source recovery retires exact old wakes and archives unknown Manager work 
   } finally { if (role.child.connected) await close() }
 })
 
-for (const mode of ['valid', 'unregistered', 'changed invocation']) test('source recovery starts a registered fixed carrier once: ' + mode, { timeout: 60000 }, async t => {
+for (const forward of [false, true])
+for (const mode of ['valid', 'unregistered', 'changed invocation']) test((forward ? 'forward' : 'source') + ' recovery starts a registered fixed carrier once: ' + mode, { timeout: 60000 }, async t => {
   const f = await stageFixture(t)
   await f.command('host-permit'); await f.command('stage-prepare'); await f.command('file-begin'); await f.command('host-stop')
   assert.equal((await f.command('file-move-fixture')).error, undefined)
+  if (forward) for (const step of ['file-ready', 'closure-prepare-fixture', 'closure-commit-fixture']) assert.equal((await f.command(step)).error, undefined)
   f.child.disconnect(); await f.exited
   fs.mkdirSync(path.join(f.data, 'agent'), { recursive: true })
   const checkpoint = records.readWorkspaceInterruptedRelocationCheckpoint(f.data, f.id), recoveryId = randomUUID()
@@ -1106,7 +1108,10 @@ for (const mode of ['valid', 'unregistered', 'changed invocation']) test('source
     request: { intent_id: f.id, recovery_id: recoveryId, checkpoint_sha256: checkpoint.checkpoint_sha256 }, verify: async () => {}, releaseParentLock: () => releaseCliLock(lock) })
   let gate
   try {
-    await role.restoreSource(); await role.archiveSource(); await role.prepareSourceBusiness()
+    if (forward) await role.prepareForwardService()
+    else { await role.restoreSource(); await role.archiveSource(); await role.prepareSourceBusiness() }
+    const selected = await f.catalog.snapshot()
+    assert.equal(selected.storage_root, forward ? f.target : f.source)
     const runtime = await import('../workspace-interrupted-runtime.mjs'), dispatch = await import('../workspace-runtime-records.mjs')
     const instanceId = randomUUID(), runtimeId = randomUUID(), adminRuntimeId = randomUUID(), port = 19841
     await runtime.commitWorkspaceInterruptedRuntimePlan({ dataDir: f.data, recoveryId, instanceId, adminRuntimeId,
@@ -1141,7 +1146,7 @@ for (const mode of ['valid', 'unregistered', 'changed invocation']) test('source
         const deadline = Date.now() + 5000
         while (!fs.existsSync(observed) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 20))
         assert.equal(fs.readFileSync(observed, 'utf8'), 'started\n')
-        assert.deepEqual(await f.catalog.snapshot(), f.before)
+        assert.deepEqual(await f.catalog.snapshot(), selected)
         assert.equal((await import('../workspace-maintenance.cjs')).default.workspaceMaintenancePending(f.data), true)
       }
     }
@@ -1161,10 +1166,12 @@ for (const mode of ['valid', 'unregistered', 'changed invocation']) test('source
   }
 })
 
-for (const mode of ['verified', 'changed probed root', 'wrong bearer', 'wrong runtime', 'Core rejects']) test('actual interrupted Agent Root primitive under a finite Core transport: ' + mode, { timeout: 60000 }, async t => {
+for (const forward of [false, true])
+for (const mode of ['verified', 'changed probed root', 'wrong bearer', 'wrong runtime', 'Core rejects']) test('actual interrupted Agent Root primitive under a finite Core transport: ' + (forward ? 'forward ' : '') + mode, { timeout: 60000 }, async t => {
   const f = await stageFixture(t)
   await f.command('host-permit'); await f.command('stage-prepare'); await f.command('file-begin'); await f.command('host-stop')
   assert.equal((await f.command('file-move-fixture')).error, undefined)
+  if (forward) for (const step of ['file-ready', 'closure-prepare-fixture', 'closure-commit-fixture']) assert.equal((await f.command(step)).error, undefined)
   f.child.disconnect(); await f.exited
   fs.mkdirSync(path.join(f.data, 'agent'), { recursive: true })
   const checkpoint = records.readWorkspaceInterruptedRelocationCheckpoint(f.data, f.id), recoveryId = randomUUID()
@@ -1184,21 +1191,24 @@ for (const mode of ['verified', 'changed probed root', 'wrong bearer', 'wrong ru
   await once(server, 'listening')
   let gate
   try {
-    await role.restoreSource(); await role.archiveSource(); await role.prepareSourceBusiness()
+    if (forward) await role.prepareForwardService()
+    else { await role.restoreSource(); await role.archiveSource(); await role.prepareSourceBusiness() }
+    const selectedRoot = forward ? f.target : f.source, selected = await f.catalog.snapshot()
+    assert.equal(selected.storage_root, selectedRoot)
     const runtime = await import('../workspace-interrupted-runtime.mjs'), instanceId = randomUUID(), runtimeId = randomUUID()
     const plan = await runtime.commitWorkspaceInterruptedRuntimePlan({ dataDir: f.data, recoveryId, instanceId, adminRuntimeId: randomUUID(),
       modules: [{ module_id: 'crabot-agent', runtime_id: runtimeId, module_port: 19842 }], verify: role.verify })
     expected = { verified: true, ...role.launch.request, launch_sha256: sha256CanonicalJson(role.launch), plan_sha256: sha256CanonicalJson(plan),
-      catalog_sha256: sha256CanonicalJson(f.before), instance_id: instanceId, module_id: 'crabot-agent', runtime_id: runtimeId }
+      catalog_sha256: sha256CanonicalJson(selected), instance_id: instanceId, module_id: 'crabot-agent', runtime_id: runtimeId }
     const resultFile = path.join(f.root, 'Root-result.json'), entry = fileURLToPath(new URL('../../../crabot-agent/dist/core/workspace-interrupted-validation.js', import.meta.url))
     const code = `const fs=require('node:fs'),{createWorkspaceInterruptedRootVerifier}=require(${JSON.stringify(entry)});
       const verify=createWorkspaceInterruptedRootVerifier({dataDir:${JSON.stringify(f.data)},moduleManagerPort:${server.address().port},runtimeBearer:()=> 'finite-Agent-credential',
         runtimeIdentity:()=>({instance_id:${JSON.stringify(instanceId)},module_id:'crabot-agent',runtime_id:${JSON.stringify(mode === 'wrong runtime' ? randomUUID() : runtimeId)}}),isClosing:()=>false});
       (async()=>{let replaced=false,result;try{const first=await verify(${JSON.stringify(role.launch.request)},${JSON.stringify(mode === 'wrong bearer' ? 'wrong' : 'finite-Agent-credential')});
-        if(${mode === 'changed probed root'}){fs.renameSync(${JSON.stringify(f.source)},${JSON.stringify(f.source + '-retained')});fs.mkdirSync(${JSON.stringify(f.source)});replaced=true}
+        if(${mode === 'changed probed root'}){fs.renameSync(${JSON.stringify(selectedRoot)},${JSON.stringify(selectedRoot + '-retained')});fs.mkdirSync(${JSON.stringify(selectedRoot)});replaced=true}
         const second=await verify(${JSON.stringify(role.launch.request)},'finite-Agent-credential');result={ok:true,first,second}}
       catch(error){result={ok:false,code:error.code,stage:error.stage,message:error.message}}
-      finally{if(replaced){fs.rmdirSync(${JSON.stringify(f.source)});fs.renameSync(${JSON.stringify(f.source + '-retained')},${JSON.stringify(f.source)})}}
+      finally{if(replaced){fs.rmdirSync(${JSON.stringify(selectedRoot)});fs.renameSync(${JSON.stringify(selectedRoot + '-retained')},${JSON.stringify(selectedRoot)})}}
       fs.writeFileSync(${JSON.stringify(resultFile)},JSON.stringify(result))})();setTimeout(()=>process.exit(0),30000);`
     const invocation = { command: process.execPath, args: ['-e', code], cwd: f.root, env: {} }
     gate = (await import('../workspace-runtime-gate.mjs')).createWorkspaceRuntimeGate(); await gate.ready()
@@ -1220,8 +1230,8 @@ for (const mode of ['verified', 'changed probed root', 'wrong bearer', 'wrong ru
     } else if (mode === 'changed probed root') assert.equal(calls, 3)
     else if (mode === 'wrong bearer' || mode === 'wrong runtime') assert.equal(calls, 0)
     else assert.equal(calls, 1)
-    assert.deepEqual(fs.readdirSync(f.source), ['default'])
-    assert.equal(fs.readFileSync(path.join(f.source, 'default/file'), 'utf8'), 'original bytes')
+    assert.deepEqual(fs.readdirSync(selectedRoot), ['default'])
+    assert.equal(fs.readFileSync(path.join(selectedRoot, 'default/file'), 'utf8'), 'original bytes')
     assert.equal((await import('../workspace-maintenance.cjs')).default.workspaceMaintenancePending(f.data), true)
   } finally {
     server.closeAllConnections(); await new Promise(resolve => server.close(resolve))
