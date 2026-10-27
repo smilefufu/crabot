@@ -109,6 +109,31 @@ test('full verification catches dependency damage beyond command entrypoints', a
   assert.throws(() => loadProductRuntime(f.root, { full: true }), /integrity|完整性/i)
 })
 
+test('one full verification reads each inventory entry once and still rehashes it on every call', async t => {
+  const f = await fixture(t), dependency = 'runtime/memory/package.py', wheel = 'runtime/pip.whl'
+  for (const relative of [dependency, wheel]) {
+    await writeFile(join(f.root, relative), 'before')
+    f.manifest.files[relative] = { size: 6, sha256: createHash('sha256').update('before').digest('hex') }
+  }
+  f.manifest.seed_wheels = [wheel]
+  // An extra executable declaration is not one of the six verified commands.
+  f.manifest.executables.unused = dependency
+  await f.save()
+  const io = require('node:fs'), original = io.readFileSync, reads = new Map()
+  t.mock.method(io, 'readFileSync', function (file, ...args) {
+    if (typeof file === 'string' && Object.hasOwn(f.manifest.files, file.slice(f.root.length + 1).split('\\').join('/'))) {
+      reads.set(file, (reads.get(file) ?? 0) + 1)
+    }
+    return original.call(this, file, ...args)
+  })
+  for (let call = 1; call <= 2; call++) {
+    loadProductRuntime(f.root, { full: true })
+    for (const relative of Object.keys(f.manifest.files)) assert.equal(reads.get(join(f.root, relative)), call, relative)
+  }
+  await writeFile(join(f.root, dependency), 'after!')
+  assert.throws(() => loadProductRuntime(f.root, { full: true }), /integrity|完整性/i)
+})
+
 test('product PATH and caches are private without altering Worker CLI install policy or caller env', async t => {
   const f = await fixture(t)
   const runtime = loadProductRuntime(f.root)
