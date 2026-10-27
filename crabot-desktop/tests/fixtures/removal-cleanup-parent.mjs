@@ -1,7 +1,7 @@
 // Finite Node image parent for the Windows kernel-exit fixture, never a GUI.
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-const child = spawn(process.argv[2], [], { stdio: ['ignore', 'pipe', 'inherit'] })
+const child = spawn(process.argv[2], [], { detached: true, windowsHide: true, stdio: ['ignore', 'pipe', 'inherit'] })
 let output = ''
 child.stdout.setEncoding('utf8')
 child.stdout.on('data', text => {
