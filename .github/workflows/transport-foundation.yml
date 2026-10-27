@@ -1,0 +1,39 @@
+name: Local desktop transport foundation
+on:
+  workflow_dispatch:
+  push:
+    branches: ['feat/desktop-transport-foundation']
+    paths:
+      - 'scripts/lib/local-auth-transport.cjs'
+      - 'scripts/lib/desktop-frames.cjs'
+      - 'scripts/lib/__tests__/local-auth-transport.test.mjs'
+      - 'scripts/lib/__tests__/desktop-frames.test.mjs'
+      - '.github/workflows/transport-foundation.yml'
+  pull_request:
+    paths:
+      - 'scripts/lib/local-auth-transport.cjs'
+      - 'scripts/lib/desktop-frames.cjs'
+      - 'scripts/lib/__tests__/local-auth-transport.test.mjs'
+      - 'scripts/lib/__tests__/desktop-frames.test.mjs'
+      - '.github/workflows/transport-foundation.yml'
+permissions:
+  contents: read
+jobs:
+  transport:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, macos-15-intel, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.3'
+      - name: Build this branch's native OS peer dependency
+        shell: bash
+        run: node scripts/build-native.mjs
+      - name: Verify actual local peers, private pipes and bounded frames without GUI or Core
+        shell: bash
+        run: node --test --test-concurrency=1 scripts/lib/__tests__/local-auth-transport.test.mjs scripts/lib/__tests__/desktop-frames.test.mjs

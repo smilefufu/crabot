@@ -30,8 +30,17 @@ int main(int argc, char** argv) {
   void* mapped = MAP_FAILED; int fd = -1;
 #ifdef __APPLE__
   fileport_t port = MACH_PORT_NULL;
+  void* anonymous = MAP_FAILED; size_t anonymousSize = 0;
+  if (!strcmp(argv[2], "anonymous-mapped")) {
+    const size_t page = static_cast<size_t>(getpagesize());
+    anonymousSize = 66000 * 2 * page;
+    anonymous = mmap(nullptr, anonymousSize, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (anonymous == MAP_FAILED) return 10;
+    // Virtual reservations only; do not touch pages or allocate a large file.
+    for (size_t index = 0; index < 66000; index++) if (mprotect(static_cast<char*>(anonymous) + index * 2 * page, page, PROT_READ)) return 11;
+  }
 #endif
-  if (!strcmp(argv[2], "mapped")) {
+  if (!strcmp(argv[2], "mapped") || !strcmp(argv[2], "anonymous-mapped")) {
     fd = open(argv[1], O_RDONLY); if (fd < 0) return 3;
     mapped = mmap(nullptr, 4096, PROT_READ, MAP_PRIVATE, fd, 0); close(fd); fd = -1;
     if (mapped == MAP_FAILED) return 4;
@@ -52,6 +61,7 @@ int main(int argc, char** argv) {
   puts("ready"); fflush(stdout); getchar();
   if (mapped != MAP_FAILED) munmap(mapped, 4096);
 #ifdef __APPLE__
+  if (anonymous != MAP_FAILED) munmap(anonymous, anonymousSize);
   if (port != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), port);
 #endif
   if (fd >= 0) close(fd);

@@ -158,8 +158,28 @@ export async function readCredentials(dataDir: string): Promise<Credentials | nu
 
 export async function writeCredentials(dataDir: string, c: Credentials): Promise<void> {
   await fs.mkdir(dataDir, { recursive: true })
-  const tmp = path.join(dataDir, `${FILE_NAME}.tmp.${process.pid}`)
+  const tmp = path.join(dataDir, `${FILE_NAME}.tmp.${crypto.randomUUID()}`)
   const target = path.join(dataDir, FILE_NAME)
-  await fs.writeFile(tmp, JSON.stringify(c, null, 2), { mode: 0o600 })
-  await fs.rename(tmp, target)
+  let created = false
+  try { await writePrivateCandidate(tmp, c); created = true; await fs.rename(tmp, target) }
+  finally { if (created) await fs.rm(tmp, { force: true }) }
+}
+
+async function writePrivateCandidate(file: string, credentials: Credentials): Promise<void> {
+  const text = JSON.stringify(credentials, null, 2)
+  if (process.platform === 'win32') require('../../scripts/lib/process-identity.cjs').writePrivateFile(file, text)
+  else await fs.writeFile(file, text, { flag: 'wx', mode: 0o600 })
+}
+
+/** Publish a first human password atomically without overwriting a concurrent writer. */
+export async function createCredentialsIfAbsent(dataDir: string, credentials: Credentials): Promise<boolean> {
+  await fs.mkdir(dataDir, { recursive: true })
+  const temporary = path.join(dataDir, `${FILE_NAME}.tmp.${crypto.randomUUID()}`)
+  let created = false
+  try {
+    await writePrivateCandidate(temporary, credentials)
+    created = true
+    try { await fs.link(temporary, path.join(dataDir, FILE_NAME)); return true }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'EEXIST') return false; throw error }
+  } finally { if (created) await fs.rm(temporary, { force: true }) }
 }

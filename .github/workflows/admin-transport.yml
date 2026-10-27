@@ -1,0 +1,63 @@
+name: Admin desktop sessions and HTTP transport
+on:
+  workflow_dispatch:
+  push:
+    branches: ['feat/desktop-admin-transport']
+  pull_request:
+    paths:
+      - 'crabot-admin/**'
+      - 'crabot-client/**'
+      - 'scripts/lib/desktop-*.cjs'
+      - 'scripts/lib/desktop-session-client.mjs'
+      - 'scripts/lib/__tests__/desktop-session.test.mjs'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/admin-transport.yml'
+permissions:
+  contents: read
+jobs:
+  transport:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, macos-15-intel, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.3'
+      - name: Build this branch's SDK, Shared and frozen Admin dependencies
+        shell: bash
+        run: |
+          set -e
+          pnpm --dir crabot-client install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-client run build
+          pnpm --dir crabot-shared install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-shared run build
+          pnpm install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-admin install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-admin run build
+          pnpm run build:cli
+      - name: Build this branch's actual Native helper
+        run: node scripts/build-native.mjs
+      - name: Verify actual finite peer/session processes and framing
+        run: >-
+          node --test --test-concurrency=1
+          scripts/lib/__tests__/desktop-session.test.mjs
+          scripts/lib/__tests__/desktop-frames.test.mjs
+          scripts/lib/__tests__/local-auth-transport.test.mjs
+      - name: Verify SDK from its own compiled output
+        run: node --test crabot-client/tests/*.test.mjs
+      - name: Verify HTTP, credentials, current WS authority and original Chat semantics
+        working-directory: crabot-admin
+        run: >-
+          node node_modules/vitest/vitest.mjs run
+          src/desktop-auth.test.ts src/credentials.test.ts src/http-cors.test.ts
+          src/http-diagnostics.test.ts src/chat-http-ws.test.ts src/chat-manager.test.ts
+          src/chat-master-permission.test.ts src/chat-task-update-push.test.ts
+          src/chat-delivery-journal.test.ts src/admin-chat-assertions.test.ts
+          src/request-permission-sources.test.ts
+          --maxWorkers=1 --minWorkers=1

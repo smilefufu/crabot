@@ -1,5 +1,11 @@
 # Crabot 项目进度
 
+### 桌面化拆分：Admin 会话与 HTTP/WS 接线（独立候选，尚未建 PR）
+
+- 依赖已验证的 SDK、Native、本机帧/peer 传输和实例记录；只接现有人类会话、首个浏览器密码、HTTP 文字/附件元数据和 WS 当前会话校验，不混入安装写入、项目目录迁移或恢复。原有限入站重试保持，WS 推送不改变持久业务结算。
+- 自身 Native/SDK/Shared/Admin/CLI 构建，SDK 35、Admin 原组 92及新增 CORS 定向组、实际有限 Node peer/session 12过2平台跳过；真实有限 Electron app://crabot + 现有 Desktop network 验证 GET/PUT200、OPTIONS无凭据、实际请求由主进程注入、PUT接口仅到达一次。全为私有夹具，无业务 onStart 或模型调用。
+- 独立四平台工作流已接入，待 CI；最终 GUI/Core、完整安装定位和跨版本维护仍由完整产品验收承担。没有创建 PR 或推送产品 main。
+
 ### 桌面化拆分：旧对象目录权限兼容（独立候选，尚未建 PR）
 
 - 按已确认目录权限 Spec，仅旧对象有效 null 一次转显式 all，新对象保持默认范围；目录覆盖不冻结模板其它权限，保存/重置/导入保留原授权来源。
