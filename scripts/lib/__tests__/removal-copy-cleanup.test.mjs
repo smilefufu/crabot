@@ -90,6 +90,9 @@ for (const mode of ['complete', 'changed-file', 'unknown-file', 'profile-symlink
       // program-copy object, so retain it rather than treating it as cache.
       assert.equal(await fs.readlink(profile), outside)
     } else if (windows) {
+      console.log('CRABOT_FINITE_COPY_CLEANUP ' + JSON.stringify({
+        gui_remaining: await fs.readdir(gui).catch(error => { if (error.code === 'ENOENT') return []; throw error }),
+        profile_remaining: await fs.readdir(profile).catch(error => { if (error.code === 'ENOENT') return []; throw error }), stderr: errors.slice(-128) }))
       await assert.rejects(fs.lstat(gui), { code: 'ENOENT' }); await assert.rejects(fs.lstat(profile), { code: 'ENOENT' })
       const remaining = await fs.readdir(f.root).catch(error => { if (error.code === 'ENOENT') return []; throw error })
       assert.ok(remaining.length === 0 || remaining.length === 1 && remaining[0] === 'cleanup.exe')

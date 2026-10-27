@@ -89,7 +89,10 @@ struct Parent {
     Require(Owner(process.value) == Owner(GetCurrentProcess()) && fs::equivalent(Image(process.value), root / L"gui/Crabot.exe"));
     Require(WaitForSingleObject(process.value, 0) == WAIT_TIMEOUT);
   }
-  void Wait() { Require(WaitForSingleObject(process.value, INFINITE) == WAIT_OBJECT_0); }
+  void Wait() {
+    Require(WaitForSingleObject(process.value, INFINITE) == WAIT_OBJECT_0);
+    Require(CloseHandle(process.value)); process.value = INVALID_HANDLE_VALUE;
+  }
 };
 #else
 static fs::path Image() {
