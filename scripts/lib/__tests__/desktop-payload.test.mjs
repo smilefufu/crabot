@@ -2029,3 +2029,33 @@ for (const interrupted of [false, true]) test('legacy target commits its origina
     await assert.rejects(promisify(execFile)(process.execPath, [oldCommand, '--version']), error => { assert.match(error.stderr, /CRABOT_LEGACY_ENTRY_FENCE/); return true })
   }
 })
+
+for (const healthy of [false, true]) test('dedicated ordinary-GUI legacy recovery keeps protection until its health callback succeeds; health substitute=' + healthy, async t => {
+  const f = await legacyProgramFixture(t, { functional: true }); await fs.unlink(path.join(f.data, 'mm.pid'))
+  const { prepareLegacyDesktopPrograms } = await import('../legacy-desktop-programs.mjs')
+  const prepared = await prepareLegacyDesktopPrograms({ payload: f.payload, installation: f.legacy })
+  const node = path.join(prepared.coreRoot, windows ? '.product-runtime/node/node.exe' : '.product-runtime/node/bin/node')
+  const script = `import{pathToFileURL}from'node:url';import path from'node:path';const [module,prepared,healthy]=process.argv.slice(1);const role=await import(pathToFileURL(module).href),input=JSON.parse(prepared);const converted=await role.convertLegacyDesktopData({prepared:input,inspectEnvironment:async()=>({status:'absent'})});await role.commitLegacyDesktopInstallation({prepared:input,maintenanceId:converted.maintenance_id,registerEntries:async()=>{}});const versions=await import(pathToFileURL(path.join(input.coreRoot,'scripts/lib/version-maintenance.mjs')).href);const result=await versions.recoverLegacyUserVersionMaintenance({dataDir:input.installation.dataRoot,root:input.coreRoot,appVersion:input.selection.version,verifyTakeover:async()=>{},verifyCompatible:async()=>{},run:async()=>healthy==='yes'});console.log(JSON.stringify({recovered:result}));`
+  const run = () => promisify(execFile)(node, ['--input-type=module', '--eval', script, path.join(prepared.coreRoot, 'scripts/lib/legacy-desktop-takeover.mjs'), JSON.stringify(prepared), healthy ? 'yes' : 'no'], { timeout: 30_000, maxBuffer: 65536 })
+  // The trusted health callback is substituted. This checks actual proof/data
+  // admission and fence persistence, not ordinary GUI or live MM health.
+  if (healthy) assert.equal(JSON.parse((await run()).stdout.trim()).recovered, true)
+  else await assert.rejects(run())
+  const { readVersionMaintenance } = await import('../version-maintenance.mjs')
+  if (healthy) assert.equal(readVersionMaintenance(f.data), null)
+  else assert.equal(readVersionMaintenance(f.data).phase, 'verifying')
+  assert.equal(await fs.readFile(path.join(f.data, 'fixture/executions'), 'utf8'), 'once\n')
+})
+
+for (const changed of ['source', 'gui-before-health', 'gui-after-health', 'old-record', 'unknown-transaction']) test('dedicated legacy health cannot clear changed takeover evidence: ' + changed, async t => {
+  const f = await legacyProgramFixture(t, { functional: true }); await fs.unlink(path.join(f.data, 'mm.pid'))
+  const { prepareLegacyDesktopPrograms } = await import('../legacy-desktop-programs.mjs')
+  const prepared = await prepareLegacyDesktopPrograms({ payload: f.payload, installation: f.legacy })
+  const node = path.join(prepared.coreRoot, windows ? '.product-runtime/node/node.exe' : '.product-runtime/node/bin/node')
+  const script = `import{pathToFileURL}from'node:url';import path from'node:path';import fs from'node:fs/promises';const [module,prepared,changed]=process.argv.slice(1),input=JSON.parse(prepared),role=await import(pathToFileURL(module).href);const converted=await role.convertLegacyDesktopData({prepared:input,inspectEnvironment:async()=>({status:'absent'})});const committed=await role.commitLegacyDesktopInstallation({prepared:input,maintenanceId:converted.maintenance_id,registerEntries:async()=>{}});const data=input.installation.dataRoot,journal=path.join(data,'desktop-maintenance.json');if(changed==='source')await fs.appendFile(path.join(input.installation.installRoot,'VERSION'),'changed');if(changed==='gui-before-health')await fs.appendFile(committed.executable,'changed');if(changed==='old-record'){const record=JSON.parse(await fs.readFile(journal,'utf8'));record.schema_version=2;delete record.data_protection;await fs.writeFile(journal,JSON.stringify(record));}if(changed==='unknown-transaction'){const directory=path.join(data,'.upgrade-migrations'),[id]=await fs.readdir(directory),state=path.join(directory,id,'state.json'),value=JSON.parse(await fs.readFile(state,'utf8'));value.phase='running';await fs.writeFile(state,JSON.stringify(value));}const versions=await import(pathToFileURL(path.join(input.coreRoot,'scripts/lib/version-maintenance.mjs')).href);let called=false;try{await versions.recoverLegacyUserVersionMaintenance({dataDir:data,root:input.coreRoot,appVersion:input.selection.version,verifyTakeover:async()=>{},verifyCompatible:async()=>{},run:async()=>{called=true;if(changed==='gui-after-health')await fs.appendFile(committed.executable,'changed');return true}});console.log(JSON.stringify({unexpected_success:true,called}));}catch(error){console.log(JSON.stringify({blocked:true,called}));}`
+  const result = await promisify(execFile)(node, ['--input-type=module', '--eval', script, path.join(prepared.coreRoot, 'scripts/lib/legacy-desktop-takeover.mjs'), JSON.stringify(prepared), changed], { timeout: 30_000, maxBuffer: 65536 })
+  assert.deepEqual(JSON.parse(result.stdout.trim()), { blocked: true, called: changed === 'gui-after-health' })
+  const { readVersionMaintenance } = await import('../version-maintenance.mjs')
+  assert.equal(readVersionMaintenance(f.data).phase, 'verifying')
+  assert.equal(await fs.readFile(path.join(f.data, 'fixture/executions'), 'utf8'), 'once\n')
+})

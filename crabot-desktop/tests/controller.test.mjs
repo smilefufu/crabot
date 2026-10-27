@@ -419,3 +419,49 @@ for (const health of [false, true]) for (const noticeThrows of [false, true]) te
   if (health) assert.ok(calls.indexOf('notice') > calls.indexOf('clear'), 'A native notice must not block health finalization')
   assert.equal(calls.filter(item => item === 'compatibility').length, health ? 2 : 1)
 })
+
+for (const outcome of ['ready', 'cli-failed', 'pending-data']) test('schema4 GUI recovery uses dedicated admission and waits for CLI proof: ' + outcome, async t => {
+  const calls = [], controller = new DesktopController({ coreRoot: '/target', dataRoot: '/data', appVersion: '1.2.4', platform: process.platform,
+    verifyBinding: () => calls.push('binding') })
+  t.after(() => controller.close())
+  controller.load = async file => {
+    if (file.endsWith('version-maintenance.mjs')) return {
+      readVersionMaintenance: () => ({ schema_version: 4, phase: 'verifying' }),
+      recoverVersionMaintenance: () => assert.fail('The ordinary updater cannot admit a legacy takeover'),
+      recoverLegacyUserVersionMaintenance: async options => {
+        calls.push('lock'); await options.verifyTakeover(); await options.verifyCompatible()
+        if (!await options.run()) throw new Error('No health')
+        await options.verifyCompatible(); calls.push('clear')
+      },
+    }
+    if (file.endsWith('core-preparation.mjs')) return { verifyDataCompatibility: () => outcome === 'pending-data' ? ['fixture'] : [] }
+    if (file.endsWith('maintenance-backup.mjs')) return { assertLocalMigrationData: async () => { calls.push('coverage') } }
+    assert.fail('Unexpected adapter: ' + file)
+  }
+  controller.startCore = async () => {
+    calls.push('start')
+    controller.host.publish({ phase: 'ready', app_version: '1.2.4', platform: process.platform,
+      instance_id: '1'.repeat(64), generation: '11111111-1111-4111-8111-111111111111', admin_url: 'http://127.0.0.1:3000' })
+  }
+  controller.verifyLegacyCli = async () => {
+    calls.push('cli')
+    if (outcome === 'cli-failed') throw Object.assign(new Error('CLI is unconfirmed'), { code: 'CRABOT_MAINTENANCE_PENDING' })
+  }
+  if (outcome === 'ready') { assert.equal(await controller.recoverVersion(), true); assert.ok(calls.indexOf('cli') < calls.indexOf('clear')) }
+  else await assert.rejects(controller.recoverVersion(), { code: outcome === 'pending-data' ? 'CRABOT_MIGRATION_INTERRUPTED' : 'CRABOT_MAINTENANCE_PENDING' })
+  assert.equal(calls.includes('clear'), outcome === 'ready')
+  assert.equal(calls.includes('start'), outcome !== 'pending-data')
+  assert.equal(calls.includes('binding'), true)
+})
+
+
+for (const changed of ['mm-missing', 'generation-mismatch', 'not-ready']) test('legacy CLI health never probes an unconfirmed GUI/MM context: ' + changed, async t => {
+  const controller = new DesktopController({ coreRoot: '/unused', dataRoot: '/unused', appVersion: '1.2.4', platform: process.platform })
+  t.after(() => controller.close())
+  const generation = '11111111-1111-4111-8111-111111111111'
+  if (changed !== 'not-ready') controller.host.publish({ phase: 'ready', app_version: '1.2.4', platform: process.platform,
+    instance_id: '1'.repeat(64), generation, admin_url: 'http://127.0.0.1:3000' })
+  controller.current = async () => ({ mmAlive: changed !== 'mm-missing', record: { generation: changed === 'generation-mismatch' ? 'another-generation' : generation } })
+  controller.load = () => assert.fail('No installation lookup or CLI spawn before native GUI/MM confirmation')
+  await assert.rejects(controller.verifyLegacyCli(), { code: 'CRABOT_MAINTENANCE_PENDING' })
+})

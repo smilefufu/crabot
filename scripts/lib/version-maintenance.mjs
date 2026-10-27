@@ -15,6 +15,8 @@ import { verifyMaintenanceBackup } from './maintenance-backup.mjs'
 import { previewMigrations } from '../upgrade-lib/migrate.mjs'
 import { assertNoInterruptedMigrations } from '../upgrade-lib/migration-transaction.mjs'
 import cliLocation from './cli-location.cjs'
+import { readLegacyDesktopPrograms } from './legacy-desktop-programs.mjs'
+import { withVerifiedLegacyProcessGraph } from './legacy-process-graph.mjs'
 import { inspectLegacyEntryFence, sealLegacyEntryFence } from './legacy-entry-fence.mjs'
 import { discoverLegacyRuntime, discoverSealedLegacyRuntime } from './legacy-runtime.mjs'
 import pythonSelection from './agent-python-selection.cjs'
@@ -138,9 +140,8 @@ export async function beginRetainedDesktopVersionMaintenance({ installRoot, oper
 
 // Explicit legacy-user adapter. The ordinary sealed source path above remains
 // distinct; no old release is assigned a fabricated Core inventory/version.
-async function legacyUserSource(record) {
-  if (![2, 4].includes(record?.schema_version) || record.legacy_source?.scope !== 'user'
-    || inspectInstance(record.data_dir).state !== 'stopped') fail()
+async function legacyUserEntry(record) {
+  if (![2, 4].includes(record?.schema_version) || record.legacy_source?.scope !== 'user') fail()
   for (const marker of ['.git', 'core-release.json', 'cli-installation.json']) {
     try { lstatSync(path.join(record.install_root, marker)); fail() } catch (error) { if (error.code !== 'ENOENT') throw error }
   }
@@ -150,8 +151,13 @@ async function legacyUserSource(record) {
   if (fenced.id !== record.legacy_source.entry_fence_id || !fenced.entries_fenced
     || !['fenced', 'data_changing'].includes(fenced.phase)
     || Object.keys(expected).some(key => fenced.installation[key] !== expected[key])) fail()
+  return fenced
+}
+async function legacyUserSource(record) {
+  if (inspectInstance(record.data_dir).state !== 'stopped') fail()
+  const fenced = await legacyUserEntry(record)
   const observe = fenced.phase === 'fenced' ? discoverLegacyRuntime : discoverSealedLegacyRuntime
-  if ((await observe(expected, { entryFenceId: fenced.id })).state !== 'stopped') fail()
+  if ((await observe(fenced.installation, { entryFenceId: fenced.id })).state !== 'stopped') fail()
   return fenced
 }
 export async function beginLegacyUserVersionMaintenance({ dataDir, installation, entryFenceId, targetRoot, dataProtection }) {
@@ -377,6 +383,55 @@ export async function recoverVersionMaintenance({ dataDir, root, appVersion, ver
   } finally { if (record) recovering.delete(record.id); releaseCliLock(lock) }
 }
 
+
+// Legacy takeover already completed its stopped conversion and pair/entry
+// handoff. Ordinary GUI owns the trusted startup + actual GUI/Core/CLI health
+// callback; neither a prepared pair nor merely opening that GUI completes it.
+export async function recoverLegacyUserVersionMaintenance({ dataDir, root, appVersion, verifyTakeover, verifyCompatible, run }) {
+  const lock = await acquireStartupLock(dataDir, 'desktop-recover-legacy-user')
+  let record
+  try {
+    dataDir = locked(dataDir); record = readVersionMaintenance(dataDir)
+    if (!record) return false
+    root = realpathSync(root)
+    if (record.schema_version !== 4 || record.phase !== 'verifying' || record.target_core.root !== root
+      || record.target_version !== appVersion || !record.legacy_python || typeof verifyTakeover !== 'function'
+      || typeof verifyCompatible !== 'function' || typeof run !== 'function') fail()
+    const verify = async () => {
+      await verifyTakeover()
+      const entry = await legacyUserEntry(record)
+      if (entry.phase !== 'data_changing') fail()
+      const prepared = await readLegacyDesktopPrograms(record.install_root)
+      if (prepared.installation.dataRoot !== dataDir || prepared.installation.fingerprint !== record.legacy_source.fingerprint
+        || prepared.coreRoot !== root || prepared.selection.core_id !== record.target_core.inventory_sha256
+        || prepared.selection.version !== appVersion) fail()
+      const selected = pythonSelection.readAgentEnvironmentReference(dataDir)
+      if (record.legacy_python.status === 'prepared') {
+        pythonSelection.verifyAgentEnvironmentCandidate(dataDir, record.legacy_python.reference)
+        if (JSON.stringify(selected) !== JSON.stringify(record.legacy_python.reference)) fail()
+      } else if (selected !== null) fail()
+      await assertNoInterruptedMigrations(dataDir)
+      await verifyCompatible()
+      const current = readVersionMaintenance(dataDir)
+      if (JSON.stringify(current) !== JSON.stringify(record)) fail()
+    }
+    await verify()
+    const current = inspectInstance(dataDir)
+    if (current.state === 'stopped') await legacyUserSource(record)
+    else {
+      if (current.state !== 'running' || current.record?.install_root !== root || !current.record.mm
+        || !identity.sameProcess(current.record.mm, identity.inspectProcess(current.record.mm.pid))) fail()
+      // The verified new runtime now owns the PID/module records. Observe old
+      // entry processes separately; do not mistake the new controller for old.
+      await withVerifiedLegacyProcessGraph(record.install_root, snapshot => { if (snapshot.state !== 'stopped') fail() })
+    }
+    recovering.add(record.id)
+    if (!await run()) fail()
+    await verify()
+    rmSync(path.join(dataDir, name)); syncDirectory(dataDir)
+    return true
+  } finally { if (record) recovering.delete(record.id); releaseCliLock(lock) }
+}
 
 // Run one stopped conversion without granting startup or clearing protection.
 // A paired GUI update still owns selection, handoff and target health.

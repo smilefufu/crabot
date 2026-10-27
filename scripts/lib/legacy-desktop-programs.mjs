@@ -6,6 +6,7 @@ import { createHash } from 'node:crypto'
 import physicalFs from './physical-fs.cjs'
 import identity from './process-identity.cjs'
 import management from './desktop-management.cjs'
+import installationState from './desktop-installation.cjs'
 import { acquireExistingCliLock, releaseCliLock } from './cli-lock.mjs'
 import { discoverLegacyUserInstall } from './legacy-desktop.mjs'
 import { inspectLegacyEntryFence } from './legacy-entry-fence.mjs'
@@ -103,4 +104,17 @@ export async function prepareLegacyDesktopPrograms({ payload, installation, sign
     catch (error) { if (preparationError) throw new AggregateError([preparationError, error], '接管准备和暂存清理未完成，原数据与错误已保留。'); throw error }
     finally { releaseCliLock(lock) }
   }
+}
+
+
+// Read-only reconstruction of the already selected takeover pair. Source facts
+// come from the original entry fence; this grants no startup or completion.
+export async function readLegacyDesktopPrograms(root) {
+  const own = installationState.readDesktopSelection(root), entry = await inspectLegacyEntryFence(own.root)
+  management.requirePrivateDataRoot(path.join(own.root, 'app/payloads'))
+  const file = path.join(own.root, 'app/payloads', own.selection.gui_id + '.json'), text = await proofText(file)
+  const prepared = { installation: entry.installation, selection: own.selection, coreRoot: own.coreRoot, guiRoot: own.guiRoot,
+    proof: { file, sha256: digest(text) } }
+  await verifyLegacyDesktopPrograms(prepared, { entryFenceId: entry.id })
+  return prepared
 }

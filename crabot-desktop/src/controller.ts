@@ -1,3 +1,5 @@
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
 import { existsSync, realpathSync } from 'node:fs'
 import { lstat, readdir } from 'node:fs/promises'
 import path from 'node:path'
@@ -219,16 +221,37 @@ export class DesktopController {
       return null
     }
   }
+  private async verifyLegacyCli(): Promise<void> {
+    const before = await this.current(), state = this.host.snapshot()
+    if (state.phase !== 'ready' || !before.mmAlive || before.record?.generation !== state.generation) {
+      throw Object.assign(new Error('Legacy takeover service health is unconfirmed'), { code: 'CRABOT_MAINTENANCE_PENDING' })
+    }
+    const { default: installation } = await this.load('scripts/lib/desktop-installation.cjs')
+    const own = installation.locateDesktopCore(this.options.coreRoot)
+    if (!own || own.dataDir !== this.options.dataRoot) throw new Error('Legacy takeover installation changed')
+    const env: NodeJS.ProcessEnv = { ...process.env, DATA_DIR: own.dataDir, CRABOT_HOME: own.coreRoot, CRABOT_DEV: 'false', CRABOT_PORT_OFFSET: '0', CRABOT_PRODUCT_REQUIRED: '1' }
+    for (const name of ['NODE_OPTIONS', 'NODE_PATH', 'ELECTRON_RUN_AS_NODE']) delete env[name]
+    const { stdout } = await promisify(execFile)(own.command, ['status', '--json'], { env, encoding: 'utf8', timeout: 15_000, maxBuffer: 1024 * 1024, windowsHide: true })
+    const status = JSON.parse(stdout), after = await this.current(), afterState = this.host.snapshot()
+    this.options.verifyBinding?.()
+    if (status.running !== true || typeof status.data_dir !== 'string' || realpathSync(status.data_dir) !== own.dataDir
+      || !after.mmAlive || after.record?.generation !== before.record.generation || afterState.phase !== 'ready' || afterState.generation !== state.generation) {
+      throw Object.assign(new Error('Legacy takeover CLI does not confirm this healthy instance'), { code: 'CRABOT_MAINTENANCE_PENDING' })
+    }
+  }
   recoverVersion(): Promise<boolean> {
     this.busy++
     const pending = this.operation.then(async () => {
       const maintenance = await this.load('scripts/lib/version-maintenance.mjs')
-      if (!maintenance.readVersionMaintenance(this.options.dataRoot)) return false
+      const record = maintenance.readVersionMaintenance(this.options.dataRoot)
+      if (!record) return false
       const { verifyDataCompatibility } = await this.load('scripts/lib/core-preparation.mjs')
       const { assertLocalMigrationData } = await this.load('scripts/lib/maintenance-backup.mjs')
       let startupState: StartupState | null | undefined
       try {
-        await maintenance.recoverVersionMaintenance({ dataDir: this.options.dataRoot, root: this.options.coreRoot, appVersion: this.options.appVersion,
+        const recover = record.schema_version === 4 ? maintenance.recoverLegacyUserVersionMaintenance : maintenance.recoverVersionMaintenance
+        await recover({ dataDir: this.options.dataRoot, root: this.options.coreRoot, appVersion: this.options.appVersion,
+          ...(record.schema_version === 4 ? { verifyTakeover: async () => { this.options.verifyBinding?.() } } : {}),
           verifyCompatible: async () => {
             const pending = verifyDataCompatibility(this.options.coreRoot, this.options.dataRoot)
             if (pending.length && maintenance.readVersionMaintenance(this.options.dataRoot)?.phase === 'verifying') {
@@ -236,7 +259,12 @@ export class DesktopController {
             }
             await assertLocalMigrationData(this.options.dataRoot, pending, this.options.coreRoot)
           },
-          run: async () => { startupState = await this.recoverLoginStartup(); await this.startCore(); return this.host.snapshot().phase === 'ready' } })
+          run: async () => {
+            startupState = await this.recoverLoginStartup()
+            await this.startCore()
+            if (record.schema_version === 4) await this.verifyLegacyCli()
+            return this.host.snapshot().phase === 'ready'
+          } })
       } finally {
         // A macOS app-modal notice can block even before showMessageBox returns.
         // Present it only after actual service recovery and maintenance settlement.
