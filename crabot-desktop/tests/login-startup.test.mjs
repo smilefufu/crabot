@@ -23,6 +23,17 @@ async function fixture(t, extra = {}) {
     configHome, file: path.join(configHome, 'autostart/crabot.desktop'), calls, state: next => { value = { ...value, ...next } } }
 }
 
+test('macOS never-registered startup remains off across update without writing a login item', async t => {
+  const f = await fixture(t, { platform: 'darwin', executable: '/Applications/Crabot.app/Contents/MacOS/Crabot' })
+  f.state({ status: 'not-found', openAtLogin: false })
+  assert.equal(await f.startup.captureForUpdate(), 'off')
+  assert.deepEqual(await f.startup.restoreForUpdate('off', '/old/Crabot.app/Contents/MacOS/Crabot'), { supported: true, enabled: false, approvalRequired: false })
+  assert.equal(f.calls.filter(([operation]) => operation === 'set').length, 0)
+  f.state({ status: 'not-found', openAtLogin: true })
+  await assert.rejects(f.startup.captureForUpdate())
+  await assert.rejects(f.startup.restoreForUpdate('off', '/old/Crabot.app/Contents/MacOS/Crabot'))
+})
+
 test('Ubuntu startup is absent by default and created only on opt-in, with a background argument', async t => {
   const f = await fixture(t)
   assert.equal((await f.startup.get()).enabled, false)

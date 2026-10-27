@@ -284,7 +284,7 @@ export async function removeMacLoginStartupEntry(options: RemovalJobOptions & {
   options.app.setLoginItemSettings({ openAtLogin: false })
   const result = options.app.getLoginItemSettings()
   current()
-  if (result.status !== 'not-registered' || result.openAtLogin !== false) fail()
+  if (!['not-registered', 'not-found'].includes(result.status ?? '') || result.openAtLogin !== false) fail()
 }
 
 // This fixed installation key is independent of the removed original program.

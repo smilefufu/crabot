@@ -63,7 +63,7 @@
 ### 桌面化方案：冻结范围收口，未进入 PR
 
 - 按2026-10-25冻结范围在原feature worktree继续，不新增产品需求。完整验收后按依赖拆PR，不推产品main、不自行merge；逐项历史证据见[实施计划](crabot-docs/superpowers/plans/2026-10-17-desktop-application-implementation.md)和[验收记录](crabot-docs/superpowers/plans/2026-10-17-desktop-application-validation.md)，组件通过不等于交付。
-- 已独立构建验证四个审查分支：Native24811473、SDK9ee3ce09、Runtime68a65368、Workspace3f7db64d；Native/Runtime/Workspace各自四平台CI40518525847/40464623428/40464632614通过，SDK原证据保持。基础层不混GUI/业务；后续CLI/system/GUI/安装批次按真实依赖拆，不借feature dist。
+- 已独立构建验证七个审查分支：Native24811473、SDK9ee3ce09、Runtime68a65368、Workspace3f7db64d、MCP29dd67f9、实例6307cd33、本地传输931e26b9。新增三批分别4/17/5文件262/1293/297行，自身四平台CI40574116345/40575144368/40575599971全部通过；此前四批证据保持。实例批次仅将一条依赖实际Core产物的原集成断言留给后续Core接线，不加替身。基础层不混GUI/业务、不借feature dist，后续CLI/system/GUI/安装按实际依赖继续拆，尚未建PR。
 - 主体已实现：Electron/React、共享HTTP/WS SDK与窄IPC、本机免密码会话、GUI/CLI共用实例、内置Node/Python/浏览器与MCP隔离、项目workspace/空间与旧对象目录权限迁移、system批量运维。已有根/data误用新建0700检查已修，旧0755原位保留，私有控制仍0700/0600；Main/Core/Agent/CLI及实际Python范围迁移回归通过，无现场chmod或部署。
 - 原生进程/文件占用按用户确认规则修正误阻断：Mac固定系统角色及Linux systemd用户管理器/PAM有限分类，真实引用/未知保留。Windows Restart Manager实际65536文件、长路径与最后分组持有者已在原10秒总预算通过（40371441461）。不扩大系统例外或忽略未知来使验收通过。
 - 保留数据卸载已接菜单/托盘、Windows冷入口/已运行转发与标准卸载登记；原生锁、固定作业proof、正常停机、原GUI退出、清单程序删除、平台入口与原completed收尾已串联。Mac实际公共入口/Core缺失/取消/离线继续、异常副本保留均通过；Windows公共GUI仍随完整回归验收，不以组件替身当完整卸载UI。
@@ -84,6 +84,7 @@
 - 剩余：最新完整跨平台成对发行与回归、完整卸载→保留数据重装健康/任务文件验收、旧user首次接管、workspace故障恢复跨平台整链、最低OS/Wayland/IME/真实登录、真实模型与正式签名。未开放发行或建PR；xinshu-mirror已选但付费预算尚未确认，无付费生成/现场部署。
 - 最新整包：Ubuntu 5abb8c81/40529851320全部3项job通过，含GTK卸载→保留数据重装/Main+Core/CLI/内置Node/Python；Polkit运输替身，非真实登录或模型。Windows4cd/40561314150取得真实原生崩溃地址；官方44.9.0符号定位PostEarlyInitialization，短测试40572540516复现异步建profile时CJS/ESM均0x80000003，同步建目录两者均到ready。最小修复仅同步创建临时profile，Desktop编译通过，完整旧user安装仍须复验。ARM d43卸载在系统入口清理被CRABOT_INSTALL_REGISTRATION阻断；ece6/40558559930在完成旧user/修复/成对更新后，卸载仅运行约7分钟即被90分钟CI总上限中止，没有本轮登录状态结论。总CI预算调整至150分钟，每步与产品期限不变。Intel dbc/40557892438两种实际Python接管均成功但共享8分钟步骤到期；现拆为各8分钟并计时，40572321309继续整包，不据此宣称DMG问题已解决。
 - Windows旧job-directory中断失败在后续两次四平台矩阵未重现，保留证据/固定无敏感错误代码诊断，未据此宣称根因已修。
+- macOS默认未启用登录项误阻断已定位：真实Native双架构40576583413确认从未注册时注销后仍not_found，已注册源/副本则正常变为not_registered。原卸载和关闭状态的更新保留均先红后绿；仅接受已知not-found且openAtLogin=false作为未启用，矛盾启用及未知/待批准原规则保持，不创建登录项。有限真实维护作业1/1、登录记录/选择28过1平台跳过、Desktop编译通过，完整成对更新/卸载仍须产品CI。
 - 本机资源：40GiB起建、低于30GiB停止本任务组，材料20GiB上限；现约340GiB空闲、既有材料15.87GiB，仅有限小型测试/编译，无新的本机整包构建，未动Docker/Spotlight/现场服务。Core557项541过16跳过；无关Admin/Agent基线失败已在独立main复现，不混改。
 
 ### 任务默认目录文件授权：独立修复待审查

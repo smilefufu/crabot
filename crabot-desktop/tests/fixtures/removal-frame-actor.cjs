@@ -232,8 +232,8 @@ async function removePrograms(lease) {
     const macLoginCleaned = cfg.mode === 'publish-source-remove-mac-login'
     if (macLoginCleaned) {
       const { removeMacLoginStartupEntry, removeDesktopUserEntries } = await import(pathToFileURL(path.join(__dirname, 'installation-removal.js')).href)
-      let status = 'requires-approval', accept = false, writes = 0
-      const api = { getLoginItemSettings: () => ({ status, openAtLogin: status === 'enabled' }),
+      let status = 'requires-approval', accept = false, writes = 0, conflictingEnabled = false
+      const api = { getLoginItemSettings: () => ({ status, openAtLogin: conflictingEnabled || status === 'enabled' }),
         setLoginItemSettings: options => { assert.deepEqual(options, { openAtLogin: false }); writes++; if (accept) status = 'not-registered' } }
       const input = { installRoot: cfg.root, operationId: cfg.operationId, app: api }
       await assert.rejects(removeMacLoginStartupEntry({ ...input, operationId: require('node:crypto').randomUUID() }))
@@ -241,10 +241,16 @@ async function removePrograms(lease) {
       try { await assert.rejects(removeMacLoginStartupEntry(input)) } finally { process.chdir(cwd) }
       assert.equal(writes, 0)
       await assert.rejects(removeMacLoginStartupEntry(input), { code: 'CRABOT_INSTALL_REGISTRATION' })
-      assert.equal(read().phase, 'removing'); accept = true
+      assert.equal(read().phase, 'removing')
+      status = 'not-found'
+      await removeMacLoginStartupEntry(input)
+      assert.equal(status, 'not-found', 'Never-registered startup remains absent after disabling')
+      conflictingEnabled = true
+      await assert.rejects(removeMacLoginStartupEntry(input), { code: 'CRABOT_INSTALL_REGISTRATION' })
+      conflictingEnabled = false; status = 'requires-approval'; accept = true
       await removeMacLoginStartupEntry(input); await removeDesktopUserEntries({ ...input, ...userEntries })
       assert.equal(fs.existsSync(userEntries.locator), false); assert.throws(() => fs.lstatSync(path.join(userEntries.home, 'Applications/Crabot.app')), { code: 'ENOENT' })
-      assert.equal(writes, 3); assert.equal(status, 'not-registered'); assert.equal(read().phase, 'removing')
+      assert.equal(writes, 5); assert.equal(status, 'not-registered'); assert.equal(read().phase, 'removing')
       assert.equal(fs.readFileSync(path.join(cfg.root, 'data/preserved-user-file'), 'utf8'), 'user bytes')
     }
     let completionVerified = false

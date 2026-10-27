@@ -105,8 +105,12 @@ export class LoginStartup {
       if (this.windowsCommand(this.options.executable) === 'different') throw new Error('已有登录启动项属于另一应用，未开始更新。')
       return this.windowsEntry(this.options.executable)?.enabled ? 'on' : 'off'
     }
-    if (this.options.platform === 'darwin' && this.options.app.getLoginItemSettings().status === 'not-found') {
-      throw new Error('系统无法识别当前应用的登录启动状态，未开始更新。')
+    if (this.options.platform === 'darwin') {
+      const state = this.options.app.getLoginItemSettings()
+      if (state.status === 'not-found') {
+        if (state.openAtLogin === false) return 'off'
+        throw new Error('系统无法识别当前应用的登录启动状态，未开始更新。')
+      }
     }
     const state = await this.get()
     if (!state.supported) throw new Error('当前平台不支持登录启动。')
@@ -164,7 +168,10 @@ export class LoginStartup {
     }
     if (platform !== 'darwin') throw new Error('当前平台不支持登录启动。')
     const current = app.getLoginItemSettings()
-    if (current.status === 'not-found') throw new Error('系统无法识别当前应用，登录启动设置已保留。')
+    if (current.status === 'not-found') {
+      if (intent === 'off' && current.openAtLogin === false) return this.get()
+      throw new Error('系统无法识别当前应用，登录启动设置已保留。')
+    }
     if (intent !== 'on' || current.openAtLogin || current.status === 'requires-approval') return this.get()
     if (current.status !== 'not-registered') throw new Error('系统登录启动状态无法核验。')
     // This is the verified target application, never an old GUI registering a
