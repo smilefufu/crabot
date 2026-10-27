@@ -73,7 +73,7 @@ test('standalone maintenance preparation rejects other platforms before accessin
   const { createDesktopRemovalNodeSourceExitVerifier } = await import('../../scripts/lib/desktop-removal-source.mjs')
   assert.equal(await createDesktopRemovalNodeSourceExitVerifier({})({}), false)
 })
-for (const mode of ['valid', 'cancelled', 'changed-node', 'changed-backend', 'redirected-frontend', 'changed-selection', 'copy-failure', 'space', 'late-copy-change', 'late-cancel', 'changed-sandbox-helper']) test('private Ubuntu Node host preparation: ' + mode, { skip: !linux, timeout: 60000 }, async t => {
+for (const mode of ['valid', 'cancelled', 'changed-node', 'changed-runtime-inventory', 'changed-backend', 'redirected-frontend', 'changed-selection', 'copy-failure', 'space', 'late-copy-change', 'late-cancel', 'changed-sandbox-helper']) test('private Ubuntu Node host preparation: ' + mode, { skip: !linux, timeout: 60000 }, async t => {
   const area = await fs.mkdtemp(path.join(root, 'case-'))
   const own = await commitDesktopInstallation(await prepareDesktopInstallation({ payload, installRoot: path.join(area, 'installation') }))
   await fs.writeFile(path.join(own.dataDir, 'preserved'), 'data and dependencies')
@@ -81,6 +81,7 @@ for (const mode of ['valid', 'cancelled', 'changed-node', 'changed-backend', 're
   const { prepareDesktopRemovalNode } = await import('../../scripts/lib/desktop-removal-host.mjs')
   if (mode === 'cancelled') options.signal = AbortSignal.abort()
   if (mode === 'changed-node') await fs.appendFile(path.join(own.coreRoot, '.product-runtime/node/bin/node'), 'changed')
+  if (mode === 'changed-runtime-inventory') await fs.appendFile(path.join(own.coreRoot, 'product-runtime.json'), 'changed')
   if (mode === 'changed-backend') await fs.appendFile(source, 'changed')
   if (mode === 'changed-sandbox-helper') await fs.appendFile(path.join(own.guiRoot, 'resources', 'crabot-sandbox-helper'), 'changed')
   if (mode === 'redirected-frontend') { const file = path.join(own.guiRoot, 'resources/crabot-maintenance'); await fs.rename(file, file + '-original'); await fs.symlink(file + '-original', file) }

@@ -165,7 +165,7 @@ async function prepareRemovalNode({ installRoot, operationId, signal, progress =
     stage = 'runtime-inventory'
     const inventory = JSON.parse(proof.core.inventory).files, nodePath = '.product-runtime/node/bin/node'
     const runtimeEntry = inventory['product-runtime.json']
-    if (runtimeEntry?.type !== 'file' || runtimeEntry.size > 65536) fail()
+    if (runtimeEntry?.type !== 'file') fail()
     const runtimeBytes = await fs.readFile(path.join(own.coreRoot, 'product-runtime.json'))
     if (runtimeBytes.length !== runtimeEntry.size || createHash('sha256').update(runtimeBytes).digest('hex') !== runtimeEntry.sha256) fail()
     const version = JSON.parse(runtimeBytes).versions?.node
