@@ -15,6 +15,113 @@ import { relocationAgentConfig } from '../../crabot-agent/tests/core/fixtures/re
 
 afterEach(() => vi.restoreAllMocks())
 
+describe('current interrupted source recovery admission', () => {
+  const modes = ['healthy', 'health failure then explicit retry',
+    ...(process.env.GITHUB_ACTIONS === 'true' && process.env.CRABOT_WORKSPACE_BUSINESS_ONSTART_CI === '1' ? ['business onStart'] : [])]
+  it.each(modes)('restores the actual moved source and exact finite services while keeping the same Admin online: %s', async mode => {
+    const business = mode === 'business onStart'
+    const f = await fixture({ actualAdmin: true, actualAgent: true, businessAgent: business, ...(business ? {} : { validationHealth: 'healthy' as const }), withMemory: true, memoryHealth: 'healthy', extraModule: 'running', processLifetimeMs: 180000 })
+    const records = require('../../scripts/lib/workspace-relocation-intent.mjs'), native = require('../../scripts/lib/process-identity.cjs')
+    const locks = require('../../scripts/lib/cli-lock.mjs'), lock = await locks.acquireWorkspaceRelocationLock(f.data, f.params.intent_id)
+    let old: ChildProcess | undefined, files: any
+    try {
+      const intent = records.readWorkspaceRelocationIntent(f.data), source = intent.source.path, admin = f.manager.processes.get('admin-web')
+      const catalog = new WorkspaceCatalog({ dataRoot: f.data, files: native }), before = await catalog.snapshot()
+      if (business) f.manager.modules.get('crabot-agent').skip_health_check = false
+      await fs.writeFile(path.join(source, 'default/preserved.txt'), 'original source bytes')
+      const prepared = await f.manager.prepareWorkspaceRelocationFiles(f.params, 'fixture-human')
+      old = prepared.coordinator
+      files = require('../../scripts/lib/workspace-file-journal.mjs').createWorkspaceFileJournal(old, { dataDir: f.data, id: f.params.intent_id,
+        launch: records.readWorkspaceRelocationCoordinator(f.data, f.params.intent_id).launch })
+      await files.prepareStage(); await files.prepareFiles(); files.close()
+      await expect(fs.lstat(source)).rejects.toMatchObject({ code: 'ENOENT' })
+      const actors = records.readWorkspaceRelocationFileActors(f.data, f.params.intent_id), ended = once(old!, 'exit')
+      old!.disconnect(); await ended
+      await vi.waitFor(() => expect(require('../../scripts/lib/known-process-exit.cjs').probeKnownProcessExit([actors.host.process]).state).toBe('stopped'), { timeout: 5000 })
+      const checkpoint = records.readWorkspaceInterruptedRelocationCheckpoint(f.data, f.params.intent_id)
+      let context = await f.manager.initializeWorkspaceInterruptedService({ intent_id: f.params.intent_id, recovery_id: randomUUID(), checkpoint_sha256: checkpoint.checkpoint_sha256 }, 'fixture-human')
+      const unhealthy = path.join(f.data, 'validation-health-unhealthy')
+      if (mode === 'health failure then explicit retry') await fs.writeFile(unhealthy, 'finite health rejection')
+      const first = f.manager.completeWorkspaceInterruptedSource(context)
+      expect(f.manager.completeWorkspaceInterruptedSource(context)).toBe(first)
+      if (mode === 'health failure then explicit retry') {
+        await expect(first).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE', stage: 'verify-core-health' })
+        expect(context.phase).toBe('needs_attention')
+        expect(require('../../scripts/lib/workspace-maintenance.cjs').workspaceMaintenancePending(f.data)).toBe(true)
+        expect(await fs.readFile(path.join(source, 'default/preserved.txt'), 'utf8')).toBe('original source bytes')
+        expect(f.manager.processes.get('admin-web')).toBe(admin)
+        await vi.waitFor(() => expect(require('../../scripts/lib/known-process-exit.cjs').probeKnownProcessExit([context.coordinator.launch.process]).state).toBe('stopped'), { timeout: 5000 })
+        await fs.unlink(unhealthy)
+        context = await f.manager.initializeWorkspaceInterruptedService({ intent_id: f.params.intent_id, recovery_id: randomUUID(), checkpoint_sha256: checkpoint.checkpoint_sha256 }, 'fixture-human')
+        expect((await f.manager.completeWorkspaceInterruptedSource(context)).resumed).toBe(true)
+      } else expect((await first).resumed).toBe(true)
+      expect(context.phase).toBe('resumed')
+      expect(f.manager.processes.get('admin-web')).toBe(admin)
+      expect(f.manager.modules.get('fixture-channel').status).toBe('running')
+      expect(await fs.readFile(path.join(source, 'default/preserved.txt'), 'utf8')).toBe('original source bytes')
+      expect(await catalog.snapshot()).toEqual(before)
+      expect(require('../../scripts/lib/workspace-maintenance.cjs').workspaceMaintenancePending(f.data)).toBe(false)
+      expect(require('../../scripts/lib/workspace-interrupted-source-records.mjs').readWorkspaceSourceCompletionScope(f.data, f.params.intent_id).released).toBe(true)
+      const ledger = JSON.parse(await fs.readFile(path.join(f.data, 'agent/worker-ledgers/channel%3A%3Asession.json'), 'utf8'))
+      expect(ledger.workers[0].task.status).not.toBe('closed')
+      expect(ledger.workers[0].incarnations[0].incarnation_id).toBe('inc')
+      expect(ledger.workers[0].incarnations).toHaveLength(1)
+      if (business) {
+        await vi.waitFor(async () => expect(await fs.readFile(path.join(f.data, 'logs/crabot-agent.log'), 'utf8')).toContain('Unified Agent module started successfully'), { timeout: 10000 })
+        // Give the real startup reconciler a bounded opportunity to publish a
+        // recovery wake. This fixture serves config, never a model response.
+        await new Promise(resolve => setTimeout(resolve, 2000))
+        expect((await f.calls()).some(item => item.method.startsWith('/v1/'))).toBe(false)
+        const current = JSON.parse(await fs.readFile(path.join(f.data, 'agent/worker-ledgers/channel%3A%3Asession.json'), 'utf8'))
+        expect(current.workers[0].incarnations).toHaveLength(1)
+        expect(current.workers[0].task.status).not.toBe('closed')
+      }
+      expect((await fetch(`http://127.0.0.1:${f.port}/api/friends`, { headers: { Authorization: 'Bearer fixture-human' } })).status).toBe(200)
+      expect(require('../../scripts/lib/known-process-exit.cjs').probeKnownProcessExit([context.coordinator.launch.process]).state).toBe('stopped')
+      expect(f.manager.workspaceCoordinatorGrant).toBeUndefined()
+    } catch (cause) {
+      const diagnostics = []
+      for (let error: any = cause, count = 0; error && count < 6; error = error.cause, count++) diagnostics.push({ code: error.code, stage: error.stage })
+      console.error('[Source recovery finite diagnostic]', diagnostics)
+      throw cause
+    } finally {
+      files?.close()
+      if (old?.connected) { const ended = once(old, 'exit'); old.disconnect(); await ended }
+      locks.releaseCliLock(lock)
+      await f.cleanup()
+    }
+  }, process.platform === 'win32' ? 180000 : 60000)
+
+  it('binds a fresh real role to the current human and Admin without claiming execution exit', async () => {
+    const f = await fixture({ actualAdmin: true, extraModule: 'inactive', processLifetimeMs: 60000 })
+    const records = require('../../scripts/lib/workspace-relocation-intent.mjs'), native = require('../../scripts/lib/process-identity.cjs')
+    let originalProcess: any
+    try {
+      const checkpoint = records.readWorkspaceInterruptedRelocationCheckpoint(f.data, f.params.intent_id)
+      const request = { intent_id: f.params.intent_id, recovery_id: randomUUID(), checkpoint_sha256: checkpoint.checkpoint_sha256 }
+      await expect(f.manager.initializeWorkspaceInterruptedService(request)).rejects.toMatchObject({ code: 'UNAUTHORIZED' })
+      await expect(f.manager.initializeWorkspaceInterruptedService(request, 'wrong-human')).rejects.toMatchObject({ code: 'UNAUTHORIZED' })
+      expect(f.manager.workspaceInterruptedService).toBeUndefined()
+      const admin = f.manager.processes.get('admin-web'), context = await f.manager.initializeWorkspaceInterruptedService(request, 'fixture-human')
+      expect(context.phase).toBe('preparing'); expect(context.coordinator.launch.schema_version).toBe(2)
+      originalProcess = context.coordinator.launch.process
+      await context.verify()
+      expect(await f.manager.initializeWorkspaceInterruptedService({ ...request }, 'fixture-human')).toBe(context)
+      expect(f.manager.processes.get('admin-web')).toBe(admin)
+      expect(records.readWorkspaceInterruptedRelocationCheckpoint(f.data, f.params.intent_id).execution_exit).toBeNull()
+      expect(require('../../scripts/lib/workspace-maintenance.cjs').workspaceMaintenancePending(f.data)).toBe(true)
+      await expect(fs.lstat(path.join(f.root, 'relocated'))).rejects.toMatchObject({ code: 'ENOENT' })
+      await f.manager.stop()
+      expect(context.coordinator.child.connected).toBe(false)
+      expect(require('../../scripts/lib/known-process-exit.cjs').probeKnownProcessExit([originalProcess]).state).toBe('stopped')
+      expect(require('../../scripts/lib/workspace-maintenance.cjs').workspaceMaintenancePending(f.data)).toBe(true)
+    } finally {
+      await f.cleanup()
+      if (originalProcess) expect(native.sameProcess(originalProcess, native.inspectProcess(originalProcess.pid))).toBe(false)
+    }
+  }, process.platform === 'win32' ? 120000 : 30000)
+})
+
 function coordinatorJournalFailures(child: ReturnType<typeof spawn>): string[] {
   return require('../../scripts/lib/workspace-coordinator-launch.mjs').workspaceCoordinatorDiagnostics(child)
     .split('\n').filter((line: string) => line.includes('workspace_journal_failed') || line.includes('workspace_root_probe_failed')).slice(-3)
@@ -238,7 +345,7 @@ async function fixture(options: { withMemory?: boolean; inactiveMemory?: boolean
             },10);` : ''}`)
         }
         await fs.writeFile(agentScript, `const fs=require('node:fs');
-          if(${!!options.businessAgent}&&fs.existsSync(${JSON.stringify(path.join(data, 'workspace-control/relocation-active/relocation-root-selected.json'))})){
+          if(${!!options.businessAgent}&&(fs.existsSync(${JSON.stringify(path.join(data, 'workspace-control/relocation-active/relocation-root-selected.json'))})||fs.existsSync(${JSON.stringify(path.join(data, 'workspace-control/relocation-source-finalizing.json'))}))){
             if(process.env.GITHUB_ACTIONS!=='true'||process.env.CRABOT_WORKSPACE_BUSINESS_ONSTART_CI!=='1')throw new Error('Business onStart is isolated CI only');
             setTimeout(()=>process.exit(1),${options.processLifetimeMs ?? 300000}).unref();
             require(${JSON.stringify(path.resolve('../crabot-agent/dist/main.js'))});
@@ -248,7 +355,7 @@ async function fixture(options: { withMemory?: boolean; inactiveMemory?: boolean
           const registrationRuntimeId=process.env.CRABOT_MODULE_RUNTIME_ID;
           if(${!!options.validationRuntimeMismatch}&&fs.existsSync(selected))process.env.CRABOT_MODULE_RUNTIME_ID='fixture-wrong-runtime';
           const config=${JSON.stringify(relocationAgentConfig)};config.port=Number(process.env.Crabot_PORT);const agent=new UnifiedAgent(config);
-          if(${JSON.stringify(options.validationHealth ?? null)}&&fs.existsSync(selected))agent.getHealthStatus=async()=>fs.existsSync(${JSON.stringify(path.join(data, 'validation-health-unhealthy'))})?'unhealthy':${JSON.stringify(options.validationHealth ?? 'healthy')};
+          if(${JSON.stringify(options.validationHealth ?? null)}&&(fs.existsSync(selected)||fs.existsSync(${JSON.stringify(path.join(data, 'workspace-control/relocation-source-finalizing.json'))})))agent.getHealthStatus=async()=>fs.existsSync(${JSON.stringify(path.join(data, 'validation-health-unhealthy'))})?'unhealthy':${JSON.stringify(options.validationHealth ?? 'healthy')};
           agent.managerStack.harness.deps.isWorkspaceRelocationReady=()=>true;
           agent.managerStack.adapters.get('builtin').stop=async()=>{fs.appendFileSync(process.env.FIXTURE_STOPS,'stop\\n');
             if(process.env.FIXTURE_ORPHAN_READY){const native=require(${JSON.stringify(path.resolve('../scripts/lib/process-identity.cjs'))}),end=Date.now()+8000;for(;;){

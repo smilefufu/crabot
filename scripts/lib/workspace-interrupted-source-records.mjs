@@ -67,7 +67,7 @@ function readRestoration(dataDir, id, pending) {
   if (hash({ ...original, path: role.launch.active_root.path }) !== hash(role.launch.active_root)
     || hash(materials) !== hash(scope.checkpoint.materials)) throw failure()
   if (hash([ctx.control, ctx.parent, ctx.job].filter(present).map(frame)) !== hash(roots)) throw failure()
-  return { checkpoint: scope.checkpoint, scope, marker, original, role, archived }
+  return { checkpoint: scope.checkpoint, scope, marker, original, role, complete, archived }
 }
 
 /** Completed source-restoration history only; no current role or service release. */
@@ -79,4 +79,36 @@ export function listWorkspaceSourceRestorations(dataDir) {
   const result = names.map(id => readWorkspaceSourceRestoration(data, id))
   if (hash([control, parent].map(frame)) !== hash(roots) || hash(fs.readdirSync(parent).sort()) !== hash(names)) throw failure()
   return result
+}
+
+/** Read-only terminal handoff facts; these never authorize a fresh recovery role. */
+export function readWorkspaceSourceCompletionScope(dataDir, id) {
+  const restored = readWorkspaceSourceRestoration(dataDir, id), ctx = workspaceSourceRestorationPaths(dataDir, id)
+  const fence = readJson(ctx.fence)
+  if (fence) {
+    if (hash(fence) !== hash(restored.marker)) throw failure()
+    return { ...restored, released: false, release: null }
+  }
+  const parent = path.join(ctx.control, 'relocation-recovery'), names = fs.readdirSync(parent).sort(), matches = []
+  frame(parent)
+  for (const recoveryId of names) {
+    if (!uuid(recoveryId)) throw failure()
+    const directory = path.join(parent, recoveryId), guard = path.join(directory, 'source-released-guard.json')
+    if (!present(guard)) continue
+    frame(directory)
+    const role = readWorkspaceInterruptedRecoveryRole(dataDir, recoveryId)
+    if (role.launch?.request.intent_id !== id) continue
+    if (hash(readJson(guard)) !== hash(restored.marker)) throw failure()
+    matches.push({ role, release: readJson(path.join(directory, 'source-release.json')) })
+  }
+  if (matches.length !== 1 || hash(fs.readdirSync(parent).sort()) !== hash(names)) throw failure()
+  const { role: current, release } = matches[0]
+  if (!exact(release, ['schema_version', 'job', 'scope_sha256']) || release.schema_version !== 2 || release.scope_sha256 !== restored.marker.scope_sha256
+    || !exact(release.job, ['intent_id', 'recovery_id', 'checkpoint_sha256', 'launch_sha256', 'plan_sha256', 'instance_id', 'admin_runtime_id'])
+    || release.job.intent_id !== id || release.job.checkpoint_sha256 !== restored.checkpoint.checkpoint_sha256 || !uuid(release.job.recovery_id)
+    || !uuid(release.job.instance_id) || !uuid(release.job.admin_runtime_id) || !digest(release.job.launch_sha256) || !digest(release.job.plan_sha256)) throw failure()
+  if (!current.launch || !current.ready || hash(current.launch) !== release.job.launch_sha256 || current.launch.action !== 'restore_source'
+    || hash(current.launch.request) !== hash({ intent_id: id, recovery_id: release.job.recovery_id, checkpoint_sha256: release.job.checkpoint_sha256 })
+    || hash(readJson(path.join(current.launch.control_root.path, 'runtime-plan.json'))) !== release.job.plan_sha256) throw failure()
+  return { ...restored, released: true, release }
 }

@@ -102,7 +102,21 @@ export async function launchWorkspaceInterruptedRecoveryCoordinator(options) {
       verification = business
       return business
     }
+    let release, releaseFingerprint
+    const releaseSource = ({ job, credential, moduleManagerPort }) => {
+      const fingerprint = hash(job)
+      if (release) return releaseFingerprint === fingerprint ? release : Promise.reject(failure())
+      releaseFingerprint = fingerprint
+      release = verification.then(async () => {
+        const message = { kind: 'workspace_interrupted_release_source', recovery_id: request.recovery_id, launch_sha256: hash(launch), ready_sha256: hash(ready), nonce: randomUUID() }
+        const result = Object.freeze({ released: true, ...structuredClone(job) })
+        await exchange({ ...message, job, credential, module_manager_port: moduleManagerPort }, reply => hash(reply) === hash({ ...message, kind: 'workspace_interrupted_source_released', result }), 240000)
+        return result
+      }).catch(cause => { close(); throw Object.assign(failure(), { cause }) })
+      verification = release
+      return release
+    }
     await verify()
-    return Object.freeze({ child, launch, ready, verify, restoreSource, archiveSource, prepareSourceBusiness, close })
+    return Object.freeze({ child, launch, ready, verify, restoreSource, archiveSource, prepareSourceBusiness, releaseSource, close })
   } catch (cause) { close(); throw Object.assign(failure(), { cause }) }
 }

@@ -75,6 +75,12 @@ on:
       - 'scripts/lib/__tests__/workspace-root-probe.test.mjs'
       - '.github/workflows/workspace-core.yml'
   workflow_dispatch:
+    inputs:
+      suite:
+        description: 'Focused rerun; complete acceptance still requires the full matrix'
+        type: choice
+        default: all
+        options: [all, interrupted-source]
 
 permissions:
   contents: read
@@ -91,7 +97,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-22.04, macos-15, macos-15-intel, windows-2022]
-        suite: [finite, business, archive, recovery, recovery-terminal, recovery-services, recovery-admin, owned, owned-recovery, completion]
+        suite: ${{ fromJSON(inputs.suite == 'interrupted-source' && '["interrupted-source"]' || '["finite","business","archive","recovery","recovery-terminal","recovery-services","recovery-admin","owned","owned-recovery","completion"]') }}
     # The locked SQLite node-gyp requires VS2022; do not depend on the floating VS18 image.
     runs-on: ${{ matrix.os }}
     concurrency:
@@ -138,11 +144,17 @@ jobs:
       - name: Actual fixed job launch and technical health without business onStart
         if: ${{ matrix.suite == 'finite' && !cancelled() && steps.compile.outcome == 'success' }}
         working-directory: crabot-core
-        run: node node_modules/vitest/vitest.mjs run src/workspace-human-verification.test.ts --testNamePattern='^(?!.*completes two actually owned).*(?:workspace fixture mock ownership|finite cold terminal diagnostics|MM reads workspace job status|MM reads workspace recovery handoff|MM owns the initial|MM verifies an initial|actual Admin recovery RPC observer|post-relocation validation launches|new runtime health and Root)' --maxWorkers=1 --minWorkers=1
+        run: node node_modules/vitest/vitest.mjs run src/workspace-human-verification.test.ts --testNamePattern='^(?!.*completes two actually owned).*(?:current interrupted source recovery admission|workspace fixture mock ownership|finite cold terminal diagnostics|MM reads workspace job status|MM reads workspace recovery handoff|MM owns the initial|MM verifies an initial|actual Admin recovery RPC observer|post-relocation validation launches|new runtime health and Root)' --maxWorkers=1 --minWorkers=1
       - name: Actual two owned SDK migrations and return to the default root
         if: ${{ matrix.suite == 'owned' && !cancelled() && steps.compile.outcome == 'success' }}
         working-directory: crabot-core
         run: node node_modules/vitest/vitest.mjs run src/workspace-human-verification.test.ts --testNamePattern='completes two actually owned initial jobs' --maxWorkers=1 --minWorkers=1
+      - name: Actual interrupted source services, explicit retry and business onStart
+        if: ${{ (matrix.suite == 'interrupted-source' || matrix.suite == 'business') && !cancelled() && steps.compile.outcome == 'success' }}
+        working-directory: crabot-core
+        env:
+          CRABOT_WORKSPACE_BUSINESS_ONSTART_CI: '1'
+        run: node node_modules/vitest/vitest.mjs run src/workspace-human-verification.test.ts --testNamePattern='current interrupted source recovery admission' --maxWorkers=1 --minWorkers=1
       - name: Same MM failed normal job, current recovery and another SDK migration
         if: ${{ matrix.suite == 'owned-recovery' && !cancelled() && steps.compile.outcome == 'success' }}
         working-directory: crabot-core

@@ -171,3 +171,5 @@ export { parseWorkspaceRelocationStartRequest } from './workspace-start-request.
 
 export { parseWorkspaceRelocationRecoveryStartRequest } from './workspace-recovery-start-request.js'
 export { geminiApiUrl, geminiApiHeaders, geminiModelId } from './gemini-api.js'
+
+export type { WorkspaceInterruptedRecoveryRequest, WorkspaceInterruptedRecoveryRuntimeResult, WorkspaceInterruptedRecoveryWebVerificationParams, WorkspaceInterruptedRecoveryWebJob, WorkspaceInterruptedRecoveryWebVerificationResult, WorkspaceInterruptedRecoveryWebPrepared, WorkspaceInterruptedRecoveryWebResumed } from './workspace-types.js'

@@ -3,7 +3,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import native from './process-identity.cjs'
 import { readWorkspaceInterruptedRecoveryRole } from './workspace-interrupted-role.mjs'
-import { readPendingWorkspaceSourceRestoration } from './workspace-interrupted-source-records.mjs'
+import { readPendingWorkspaceSourceRestoration, readWorkspaceSourceCompletionScope } from './workspace-interrupted-source-records.mjs'
 import { createWorkspaceMaintenanceFileAccess, version } from '../../crabot-agent/dist/core/workspace-maintenance-files.js'
 import { sha256CanonicalJson as hash } from '../../crabot-shared/dist/canonical-json.js'
 const failure = () => Object.assign(new Error('中断恢复的模块登记或当前角色无法核实，维护保护已保留；未重复启动。'), { code: 'CRABOT_WORKSPACE_RUNTIME_GATE' })
@@ -11,11 +11,12 @@ const { owned, readJson, readBoundBytes, publish, syncDirectory } = createWorksp
 const exact = (value, keys) => value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key))
 const uuid = value => typeof value === 'string' && /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(value)
 const digest = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value)
-const core = value => ['crabot-agent', 'memory-default'].includes(value)
+const moduleName = value => typeof value === 'string' && /^[a-zA-Z0-9._-]{1,128}$/.test(value) && !['.', '..', 'admin-web'].includes(value)
 function context(dataDir, recoveryId) {
   const role = readWorkspaceInterruptedRecoveryRole(dataDir, recoveryId)
   if (!role.launch || !role.ready || role.launch.action !== 'restore_source') throw failure()
-  const original = readPendingWorkspaceSourceRestoration(dataDir, role.launch.request.intent_id)
+  const original = readWorkspaceSourceCompletionScope(dataDir, role.launch.request.intent_id)
+  if (original.released && original.release.job.recovery_id !== recoveryId) throw failure()
   const business = readJson(path.join(path.dirname(original.original.path), 'business-prepared.json'), 32 * 1024 * 1024)
   if (!original.archived || !exact(business, ['schema_version', 'intent_id', 'scope_sha256', 'checkpoints']) || business.schema_version !== 2
     || business.intent_id !== role.launch.request.intent_id || business.scope_sha256 !== original.marker.scope_sha256 || !Array.isArray(business.checkpoints)
@@ -24,20 +25,21 @@ function context(dataDir, recoveryId) {
   const directory = role.launch.control_root.path, fingerprint = hash(role)
   const verify = (live = false) => {
     if (hash(readWorkspaceInterruptedRecoveryRole(dataDir, recoveryId)) !== fingerprint
-      || hash(readPendingWorkspaceSourceRestoration(dataDir, role.launch.request.intent_id).marker) !== hash(original.marker)
+      || hash(readWorkspaceSourceCompletionScope(dataDir, role.launch.request.intent_id).marker) !== hash(original.marker)
       || live && (!native.sameProcess(role.launch.parent, native.inspectProcess(role.launch.parent.pid))
         || !native.sameProcess(role.launch.process, native.inspectProcess(role.launch.process.pid)))) throw failure()
   }
   verify()
-  return { role, directory, verify }
+  return { role, original, directory, verify }
 }
-function planValue(value, role) {
+function planValue(value, role, original) {
+  const allowed = new Set(['crabot-agent', 'memory-default', ...(original.checkpoint.modules?.modules ?? []).map(item => item.module_id)])
   if (!exact(value, ['schema_version', 'recovery_id', 'launch_sha256', 'instance_id', 'admin_runtime_id', 'modules']) || value.schema_version !== 2
     || value.recovery_id !== role.launch.request.recovery_id || value.launch_sha256 !== hash(role.launch)
-    || !uuid(value.instance_id) || !uuid(value.admin_runtime_id) || !Array.isArray(value.modules) || value.modules.length > 2) throw failure()
+    || !uuid(value.instance_id) || !uuid(value.admin_runtime_id) || !Array.isArray(value.modules) || value.modules.length > 32768) throw failure()
   const modules = new Set(), runtimes = new Set([value.admin_runtime_id])
   for (const item of value.modules) {
-    if (!exact(item, ['module_id', 'runtime_id', 'module_port']) || !core(item.module_id) || !uuid(item.runtime_id)
+    if (!exact(item, ['module_id', 'runtime_id', 'module_port']) || !moduleName(item.module_id) || !allowed.has(item.module_id) || !uuid(item.runtime_id)
       || !Number.isInteger(item.module_port) || item.module_port < 1 || item.module_port > 65535 || modules.has(item.module_id) || runtimes.has(item.runtime_id)) throw failure()
     modules.add(item.module_id); runtimes.add(item.runtime_id)
   }
@@ -46,7 +48,7 @@ function planValue(value, role) {
 export function readWorkspaceInterruptedRuntimePlan(dataDir, recoveryId) {
   const ctx = context(dataDir, recoveryId), plan = readJson(path.join(ctx.directory, 'runtime-plan.json'))
   if (!plan) return null
-  planValue(plan, ctx.role); ctx.verify()
+  planValue(plan, ctx.role, ctx.original); ctx.verify()
   return plan
 }
 export async function commitWorkspaceInterruptedRuntimePlan({ dataDir, recoveryId, instanceId, adminRuntimeId, modules, verify }) {
@@ -54,7 +56,7 @@ export async function commitWorkspaceInterruptedRuntimePlan({ dataDir, recoveryI
   const ctx = context(dataDir, recoveryId)
   if (!native.sameProcess(ctx.role.launch.parent, native.inspectProcess(process.pid))) throw failure()
   const plan = planValue({ schema_version: 2, recovery_id: recoveryId, launch_sha256: hash(ctx.role.launch),
-    instance_id: instanceId, admin_runtime_id: adminRuntimeId, modules: structuredClone(modules) }, ctx.role)
+    instance_id: instanceId, admin_runtime_id: adminRuntimeId, modules: structuredClone(modules) }, ctx.role, ctx.original)
   await verify(); ctx.verify(true)
   if (readJson(path.join(ctx.directory, 'runtime-plan.json'))) throw failure()
   publish(ctx.directory, 'runtime-plan.json', plan, () => ctx.verify(true))
@@ -85,7 +87,7 @@ function runtimeValue(record, ctx, plan, moduleId) {
   return record
 }
 export function readWorkspaceInterruptedRuntimeStart(dataDir, recoveryId, moduleId) {
-  if (!core(moduleId)) throw failure()
+  if (!moduleName(moduleId)) throw failure()
   const ctx = context(dataDir, recoveryId), plan = readWorkspaceInterruptedRuntimePlan(dataDir, recoveryId)
   if (!plan) throw failure()
   const directory = path.join(ctx.directory, 'runtime-starts')
@@ -106,7 +108,7 @@ export function verifyWorkspaceInterruptedRuntimeStart({ dataDir, recoveryId, mo
 }
 export async function commitWorkspaceInterruptedRuntimeStart(options) {
   if (!exact(options, ['dataDir', 'recoveryId', 'moduleId', 'process', 'runtime', 'definitionHash', 'verify'])
-    || typeof options.verify !== 'function' || !core(options.moduleId) || process.versions.electron) throw failure()
+    || typeof options.verify !== 'function' || !moduleName(options.moduleId) || process.versions.electron) throw failure()
   const { dataDir, recoveryId, moduleId, verify } = options, ctx = context(dataDir, recoveryId), plan = readWorkspaceInterruptedRuntimePlan(dataDir, recoveryId)
   if (!plan || !native.sameProcess(ctx.role.launch.parent, native.inspectProcess(process.pid))) throw failure()
   const record = runtimeValue({ schema_version: 2, recovery_id: recoveryId, plan_sha256: hash(plan), definition_sha256: options.definitionHash,

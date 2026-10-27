@@ -2,6 +2,7 @@ import { verifyWorkspaceRecoveryAdmin } from './workspace-recovery-auth.js'
 import { assertWorkspaceExecutionAllowed, workspaceMaintenancePending } from 'crabot-shared'
 import { createWorkspaceFinalizationWeb } from './workspace-finalization-web.js'
 import { createWorkspaceRecoveryFinalizationWeb } from './workspace-recovery-finalization-web.js'
+import { createWorkspaceInterruptedFinalizationWeb } from './workspace-interrupted-finalization-web.js'
 import { parseFriendPermissionRecords, serializeFriendPermissionRecords } from './friend-permission-store.js'
 import { WorkspaceRelocationRecoveryAcceptedSchema, WorkspaceRelocationRecoveryPreviewResultSchema, WorkspaceExecutionInventorySchema, WorkspaceIdSchema, WorkspaceRelocationStatusResultSchema, WorkspaceRelocationStartResultSchema } from 'crabot-client'
 import { WorkspaceService } from './workspaces.js'
@@ -728,6 +729,7 @@ export class AdminModule extends ModuleBase {
   private workspaceService: WorkspaceService
   private workspaceFinalizationWeb?: ReturnType<typeof createWorkspaceFinalizationWeb>
   private workspaceRecoveryFinalizationWeb?: ReturnType<typeof createWorkspaceRecoveryFinalizationWeb>
+  private workspaceInterruptedFinalizationWeb?: ReturnType<typeof createWorkspaceInterruptedFinalizationWeb>
   private workspaceWebAdmissions?: WorkspaceWebAdmissions
   private voiceAdmin: VoiceAdmin
 
@@ -1036,6 +1038,8 @@ export class AdminModule extends ModuleBase {
     this.registerMethod('prepare_workspace_relocation_completion', (params, context) => this.workspaceFinalizationAccess().prepare(params, context?.authorizationBearer))
     this.registerMethod('prepare_workspace_relocation_recovery_completion', (params, context) => this.workspaceRecoveryFinalizationAccess().prepare(params, context?.authorizationBearer))
     this.registerMethod('resume_workspace_relocation_recovery_web', (params, context) => this.workspaceRecoveryFinalizationAccess().resume(params, context?.authorizationBearer))
+    this.registerMethod('prepare_workspace_interrupted_recovery_web', (params, context) => this.workspaceInterruptedFinalizationAccess().prepare(params, context?.authorizationBearer))
+    this.registerMethod('resume_workspace_interrupted_recovery_web', (params, context) => this.workspaceInterruptedFinalizationAccess().resume(params, context?.authorizationBearer))
     this.registerMethod('resume_workspace_relocation_web', (params, context) => this.workspaceFinalizationAccess().resume(params, context?.authorizationBearer))
 
     // Schedule 管理
@@ -1728,6 +1732,17 @@ export class AdminModule extends ModuleBase {
       runtimeIdentity: () => ({ instance_id: process.env.CRABOT_INSTANCE_ID, module_id: this.config.moduleId, runtime_id: process.env.CRABOT_MODULE_RUNTIME_ID }),
       quiesce: () => this.quiesceWorkspaceWebAccess(), reclose: () => this.recloseWorkspaceWebAccessAfterResumeFailure(), resume: async verify => {
         assertWorkspaceExecutionAllowed(path.resolve(this.adminConfig.data_dir, '..'))
+        await this.resumeWorkspaceStartup(verify)
+        await verify()
+        this.workspaceService.resumeScanning(); this.workspaceWebAccess().reopen()
+      } })
+  }
+
+  private workspaceInterruptedFinalizationAccess(): ReturnType<typeof createWorkspaceInterruptedFinalizationWeb> {
+    return this.workspaceInterruptedFinalizationWeb ??= createWorkspaceInterruptedFinalizationWeb({ dataDir: path.resolve(this.adminConfig.data_dir, '..'),
+      moduleManagerPort: this.rpcClient.moduleManagerTargetPort, modulePort: this.config.port,
+      runtimeIdentity: () => ({ instance_id: process.env.CRABOT_INSTANCE_ID, module_id: this.config.moduleId, runtime_id: process.env.CRABOT_MODULE_RUNTIME_ID }),
+      quiesce: () => this.quiesceWorkspaceWebAccess(), reclose: () => this.recloseWorkspaceWebAccessAfterResumeFailure(), resume: async verify => {
         await this.resumeWorkspaceStartup(verify)
         await verify()
         this.workspaceService.resumeScanning(); this.workspaceWebAccess().reopen()

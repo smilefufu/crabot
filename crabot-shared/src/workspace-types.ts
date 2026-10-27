@@ -415,3 +415,38 @@ export interface WorkspaceRecoveryRuntimeInvocation {
   cwd: string
   env: Record<string, string>
 }
+
+/** Current schema-2 interrupted-job role; distinct from completed-archive recovery. */
+export interface WorkspaceInterruptedRecoveryRequest {
+  intent_id: string
+  recovery_id: string
+  checkpoint_sha256: string
+}
+export interface WorkspaceInterruptedRecoveryRuntimeResult extends WorkspaceInterruptedRecoveryRequest {
+  verified: true
+  launch_sha256: string
+  plan_sha256: string
+  catalog_sha256: string
+  instance_id: string
+  module_id: 'crabot-agent'
+  runtime_id: string
+}
+export interface WorkspaceInterruptedRecoveryWebVerificationParams {
+  action: 'prepare_web' | 'resume_web'
+}
+export interface WorkspaceInterruptedRecoveryWebJob extends WorkspaceInterruptedRecoveryRequest {
+  launch_sha256: string
+  plan_sha256: string
+  instance_id: string
+  admin_runtime_id: string
+}
+export interface WorkspaceInterruptedRecoveryWebVerificationResult extends WorkspaceInterruptedRecoveryWebJob {
+  verified: true
+  action: 'prepare_web' | 'resume_web'
+}
+export interface WorkspaceInterruptedRecoveryWebPrepared extends WorkspaceInterruptedRecoveryWebJob {
+  prepared: true
+}
+export interface WorkspaceInterruptedRecoveryWebResumed extends WorkspaceInterruptedRecoveryWebJob {
+  resumed: true
+}
