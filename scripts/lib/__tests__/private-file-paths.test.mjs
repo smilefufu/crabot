@@ -9,7 +9,7 @@ import identity from '../process-identity.cjs'
 
 test('Windows private file adapter preserves payload and converts actual filesystem paths only', () => {
   const calls = [], method = name => (...args) => { calls.push([name, ...args]); return true }
-  const native = Object.fromEntries(['writePrivateFile', 'isPrivateFile', 'isOwnedFile', 'createPrivateDirectory', 'isPrivateDirectory', 'isOwnedDirectory', 'isOwnerOnlyFile', 'isOwnerOnlyDirectory'].map(name => [name, method(name)]))
+  const native = Object.fromEntries(['writePrivateFile', 'isPrivateFile', 'isOwnedFile', 'createPrivateDirectory', 'isPrivateDirectory', 'isOwnedDirectory', 'isOwnerOnlyFile', 'isOwnerOnlyDirectory', 'isExistingDataDirectory'].map(name => [name, method(name)]))
   const module = { exports: {} }
   vm.runInNewContext(fs.readFileSync(new URL('../process-identity.cjs', import.meta.url), 'utf8'), {
     module, process: { platform: 'win32' }, require: name => name === 'node:path' ? path.win32 : name === 'node:fs' ? fs : native,
@@ -103,4 +103,30 @@ test('Windows runtime registry inheritance remains owner-only without changing p
   assert.equal(fs.readFileSync(file, 'utf8'), 'retained runtime bytes')
   assert.equal(identity.isPrivateDirectory(registry), false)
   assert.equal(identity.isPrivateFile(file), false)
+})
+
+test('Windows existing app data keeps inherited/readable ACLs but rejects other ordinary writers', { skip: process.platform !== 'win32' }, t => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'crabot-existing-access-')))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  const data = path.join(root, 'data'); identity.createPrivateDirectory(data)
+  const inherited = path.join(data, 'inherited'); fs.mkdirSync(inherited)
+  const file = path.join(inherited, 'retained.txt'); fs.writeFileSync(file, 'old project bytes')
+  const before = fs.statSync(inherited, { bigint: true })
+  const icacls = path.join(process.env.SystemRoot, 'System32/icacls.exe')
+  assert.equal(identity.isPrivateDirectory(inherited), false)
+  assert.equal(identity.isExistingDataDirectory(inherited), true)
+  for (const sid of ['S-1-5-18', 'S-1-5-32-544']) execFileSync(icacls, [inherited, '/grant', '*' + sid + ':(OI)(CI)(F)'], { stdio: 'pipe' })
+  execFileSync(icacls, [inherited, '/grant', '*S-1-1-0:(R)'], { stdio: 'pipe' })
+  const acl = execFileSync(icacls, [inherited], { encoding: 'utf8' })
+  assert.equal(identity.isExistingDataDirectory(inherited), true)
+  assert.equal(identity.isPrivateDirectory(inherited), false, 'private control factory remains strict')
+  assert.equal(execFileSync(icacls, [inherited], { encoding: 'utf8' }), acl, 'observation never changes the old ACL')
+  execFileSync(icacls, [inherited, '/grant', '*S-1-1-0:(W)'], { stdio: 'pipe' })
+  assert.equal(identity.isExistingDataDirectory(inherited), false)
+  execFileSync(icacls, [inherited, '/remove:g', '*S-1-1-0'], { stdio: 'pipe' })
+  assert.equal(identity.isExistingDataDirectory(inherited), true)
+  const link = path.join(root, 'link'); fs.symlinkSync(inherited, link, 'junction')
+  assert.throws(() => identity.isExistingDataDirectory(link), { code: 'CRABOT_PRIVATE_FILE' })
+  assert.equal(fs.statSync(inherited, { bigint: true }).ino, before.ino)
+  assert.equal(fs.readFileSync(file, 'utf8'), 'old project bytes')
 })

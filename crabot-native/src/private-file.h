@@ -56,7 +56,40 @@ static napi_value WritePrivateFile(napi_env env, napi_callback_info info) {
     napi_throw_error(env, "CRABOT_PRIVATE_FILE", error.what()); return nullptr;
   }
 }
-static napi_value IsPrivatePath(napi_env env, napi_callback_info info, bool directory, bool requirePrivate = true, bool requireProtected = true) {
+// Existing application roots keep their ACLs. SYSTEM/Administrators already
+// control the OS; ordinary other principals may read but may not mutate data.
+static bool ExistingDataAcl(PACL acl, PSID owner) {
+  if (!acl || !IsValidAcl(acl)) return false;
+  const DWORD writes = GENERIC_ALL | GENERIC_WRITE | WRITE_DAC | WRITE_OWNER | DELETE
+    | FILE_DELETE_CHILD | FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_WRITE_EA | FILE_WRITE_ATTRIBUTES;
+  for (DWORD index = 0; index < acl->AceCount; index++) {
+    void* raw = nullptr;
+    if (!GetAce(acl, index, &raw)) return false;
+    const auto header = static_cast<ACE_HEADER*>(raw);
+    if (header->AceType == ACCESS_DENIED_ACE_TYPE) continue;
+    if (header->AceType != ACCESS_ALLOWED_ACE_TYPE) return false;
+    const auto ace = static_cast<ACCESS_ALLOWED_ACE*>(raw);
+    const auto sid = reinterpret_cast<PSID>(&ace->SidStart);
+    if (!IsValidSid(sid)) return false;
+    if (!EqualSid(sid, owner) && !IsWellKnownSid(sid, WinLocalSystemSid)
+      && !IsWellKnownSid(sid, WinBuiltinAdministratorsSid) && (ace->Mask & writes)) return false;
+  }
+  return true;
+}
+static bool ExistingDataAccess(PSECURITY_DESCRIPTOR descriptor, PACL acl, PSID owner) {
+  if (!ExistingDataAcl(acl, owner)) return false;
+  HANDLE primary = nullptr, token = nullptr;
+  if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | TOKEN_DUPLICATE, &primary)) return false;
+  const BOOL duplicated = DuplicateToken(primary, SecurityImpersonation, &token);
+  CloseHandle(primary);
+  if (!duplicated) return false;
+  GENERIC_MAPPING mapping{ FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_GENERIC_EXECUTE, FILE_ALL_ACCESS };
+  PRIVILEGE_SET privileges{}; DWORD size = sizeof(privileges), granted = 0; BOOL allowed = FALSE;
+  const BOOL checked = AccessCheck(descriptor, token, FILE_ALL_ACCESS, &mapping, &privileges, &size, &granted, &allowed);
+  CloseHandle(token);
+  return checked && allowed && (granted & FILE_ALL_ACCESS) == FILE_ALL_ACCESS;
+}
+static napi_value IsPrivatePath(napi_env env, napi_callback_info info, bool directory, bool requirePrivate = true, bool requireProtected = true, bool existingData = false) {
   HANDLE file = INVALID_HANDLE_VALUE; PSECURITY_DESCRIPTOR descriptor = nullptr; PSID current = nullptr;
   try {
     size_t argc = 1; napi_value args[1]; napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
@@ -74,6 +107,7 @@ static napi_value IsPrivatePath(napi_env env, napi_callback_info info, bool dire
     if (!ConvertStringSidToSidA(sid.c_str(), &current)) throw std::runtime_error("Cannot inspect current user SID");
     SECURITY_DESCRIPTOR_CONTROL control; DWORD revision; void* raw = nullptr;
     bool valid = owner && EqualSid(owner, current);
+    if (valid && existingData) valid = ExistingDataAccess(descriptor, acl, current);
     if (valid && requirePrivate) valid = acl && GetSecurityDescriptorControl(descriptor, &control, &revision)
       && (!requireProtected || (control & SE_DACL_PROTECTED)) && acl->AceCount == 1 && GetAce(acl, 0, &raw);
     if (valid && requirePrivate) {
@@ -95,6 +129,7 @@ static napi_value IsOwnerOnlyFile(napi_env env, napi_callback_info info) { retur
 static napi_value IsOwnerOnlyDirectory(napi_env env, napi_callback_info info) { return IsPrivatePath(env, info, true, true, false); }
 static napi_value IsOwnedDirectory(napi_env env, napi_callback_info info) { return IsPrivatePath(env, info, true, false); }
 static napi_value IsOwnedFile(napi_env env, napi_callback_info info) { return IsPrivatePath(env, info, false, false); }
+static napi_value IsExistingDataDirectory(napi_env env, napi_callback_info info) { return IsPrivatePath(env, info, true, false, false, true); }
 static napi_value CreatePrivateDirectory(napi_env env, napi_callback_info info) {
   PSECURITY_DESCRIPTOR descriptor = nullptr;
   try {
@@ -123,6 +158,7 @@ static void RegisterPrivateFile(napi_env env, napi_value exports) {
     {"isOwnerOnlyFile", nullptr, IsOwnerOnlyFile, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"isOwnerOnlyDirectory", nullptr, IsOwnerOnlyDirectory, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"isOwnedDirectory", nullptr, IsOwnedDirectory, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"isExistingDataDirectory", nullptr, IsExistingDataDirectory, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"isOwnedFile", nullptr, IsOwnedFile, nullptr, nullptr, nullptr, napi_default, nullptr},
   };
   napi_define_properties(env, exports, sizeof(methods) / sizeof(methods[0]), methods);

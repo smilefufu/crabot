@@ -25,7 +25,7 @@ function requireDataRoot(directory, privateOnly) {
   try { stat = fs.lstatSync(directory) }
   catch (error) { if (error.code === 'ENOENT') fail('CRABOT_DATA_MISSING', '数据目录不存在，未创建空实例；请检查原目录及备份。'); throw error }
   if (!stat.isDirectory() || stat.isSymbolicLink()) fail('CRABOT_DATA_NOT_PRIVATE', '数据目录不是可验证的本机目录。')
-  const allowed = process.platform === 'win32' ? identity.isPrivateDirectory(directory)
+  const allowed = process.platform === 'win32' ? (privateOnly ? identity.isPrivateDirectory(directory) : identity.isExistingDataDirectory(directory))
     : String(stat.uid) === identity.inspectProcess(process.pid).owner
       && (privateOnly ? (stat.mode & 0o777) === 0o700 : (stat.mode & 0o700) === 0o700 && (stat.mode & 0o022) === 0)
   if (!allowed) fail('CRABOT_DATA_NOT_PRIVATE', '数据目录的访问权限需要检查；未修改已有权限或数据。')
