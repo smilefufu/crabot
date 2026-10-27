@@ -22,15 +22,23 @@ async function fixture(t, programCount = 0) {
   const inventory = JSON.stringify({ schema_version: 1, files }) + '\n'
   const selection = { schema_version: 1, version: '1.2.3', gui_id: randomUUID(), core_id: digest(inventory) }
   const core = path.join(root, 'releases', selection.core_id), gui = path.join(root, 'app/releases', selection.gui_id)
-  for (const dir of [path.join(core, 'nested'), path.join(core, 'bin'), gui, path.join(root, 'bin')]) await fs.mkdir(dir, { recursive: true })
-  for (let index = 0; index < programCount; index++) await fs.writeFile(path.join(core, 'nested/finite-' + index + '.txt'), 'Core bytes')
-  await fs.writeFile(path.join(core, 'nested/program.txt'), 'Core bytes'); await fs.writeFile(path.join(core, 'bin', launcher), launcherBytes)
-  await fs.writeFile(path.join(root, 'bin', launcher), launcherBytes)
+  for (const dir of [path.join(core, 'nested'), path.join(core, 'bin'), gui, path.join(root, 'bin')]) {
+    if (process.platform === 'win32') {
+      // Elevated CI can default ordinary children to the Administrators owner.
+      // Construct the current-user-owned installation this fixture actually tests.
+      let current = root
+      for (const part of path.relative(root, dir).split(path.sep)) current = management.ensurePrivateDataRoot(path.join(current, part))
+    } else await fs.mkdir(dir, { recursive: true })
+  }
+  const writeProgram = (file, text) => process.platform === 'win32' ? identity.writePrivateFile(file, text) : fs.writeFile(file, text)
+  for (let index = 0; index < programCount; index++) await writeProgram(path.join(core, 'nested/finite-' + index + '.txt'), 'Core bytes')
+  await writeProgram(path.join(core, 'nested/program.txt'), 'Core bytes'); await writeProgram(path.join(core, 'bin', launcher), launcherBytes)
+  await writeProgram(path.join(root, 'bin', launcher), launcherBytes)
   if (process.platform !== 'win32') { await fs.chmod(path.join(core, 'bin', launcher), 0o755); await fs.chmod(path.join(root, 'bin', launcher), 0o755); await fs.symlink('program.txt', path.join(core, 'nested/relative-link')) }
-  await fs.writeFile(path.join(gui, 'program.txt'), 'GUI bytes')
+  await writeProgram(path.join(gui, 'program.txt'), 'GUI bytes')
   const coreText = { release: JSON.stringify({ schema_version: 1, version: selection.version, platform: process.platform, arch: process.arch, commit: '1'.repeat(40), source_dirty: false, inventory_sha256: selection.core_id }) + '\n', inventory,
     host: JSON.stringify({ schema_version: 2, platform: process.platform, arch: process.arch }) + '\n' }
-  for (const [key, name] of [['release', 'core-release.json'], ['inventory', 'core-files.json'], ['host', 'desktop-host.json']]) await fs.writeFile(path.join(core, name), coreText[key])
+  for (const [key, name] of [['release', 'core-release.json'], ['inventory', 'core-files.json'], ['host', 'desktop-host.json']]) await writeProgram(path.join(core, name), coreText[key])
   const stat = await fs.lstat(root, { bigint: true }), installationId = randomUUID(), operationId = randomUUID()
   await privateJson(path.join(root, 'desktop-installation.json'), { schema_version: 1, installation_id: installationId, owner: identity.inspectProcess(process.pid).owner,
     install_root: root, root_identity: { dev: String(stat.dev), ino: String(stat.ino) }, paths: { app: 'app/releases', core: 'releases', data: 'data', bin: 'bin' } })
@@ -46,7 +54,11 @@ async function fixture(t, programCount = 0) {
   }
   if (process.platform === 'win32' && !windowsFixtureObserved) {
     windowsFixtureObserved = true
-    console.log('CRABOT_FINITE_WINDOWS_LOCATION ' + JSON.stringify({ native_canonical_root: fsSync.realpathSync.native(root) === root,
+    const ordinary = path.join(root, 'finite-default-owner-probe')
+    await fs.mkdir(ordinary)
+    const defaultOwnerIsUser = identity.isOwnedDirectory(ordinary), defaultOwnerIsAdministrators = identity.inspectFileMetadata(ordinary).owner === 'S-1-5-32-544'
+    await fs.rmdir(ordinary)
+    console.log('CRABOT_FINITE_WINDOWS_LOCATION ' + JSON.stringify({ default_child_owned_by_user: defaultOwnerIsUser, default_child_administrators_owned: defaultOwnerIsAdministrators, native_canonical_root: fsSync.realpathSync.native(root) === root,
       root_private: identity.isPrivateDirectory(root), data_private: identity.isPrivateDirectory(data),
       owned_bases: ['app', 'app/releases', 'releases', 'data', 'bin'].every(name => identity.isOwnedDirectory(path.join(root, name))),
       private_records: ['desktop-installation.json', 'current-release.json', '.desktop-removal.json'].every(name => identity.isPrivateFile(path.join(root, name))),
