@@ -408,6 +408,10 @@ jobs:
         if: runner.os != 'Linux' && steps.scope.outputs.full_runtime == 'true'
         timeout-minutes: 6
         run: node .github/scripts/verify-offline-installer-host.mjs ".desktop-build/安装 候选/installer" 2>&1 | tee .desktop-build/installer-host-probe.log
+      - name: Published legacy Ubuntu user archives through actual backend and ordinary Main
+        if: runner.os == 'Linux' && steps.scope.outputs.full_runtime == 'true'
+        timeout-minutes: 30
+        run: dbus-run-session -- xvfb-run -a node .github/scripts/verify-legacy-user-takeover.mjs ".desktop-build/安装 候选/paired" ".desktop-build/安装 候选/installer" 2>&1 | tee .desktop-build/legacy-user-stage.log
       - name: Published legacy user archives through actual installer and ordinary Main
         if: runner.os != 'Linux' && steps.scope.outputs.full_runtime == 'true'
         timeout-minutes: 30

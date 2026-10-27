@@ -3,7 +3,8 @@
 import assert from 'node:assert/strict'
 import path from 'node:path'
 import { promises as fs, createReadStream, createWriteStream } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
+import { createInterface } from 'node:readline'
 import { randomUUID, createHash } from 'node:crypto'
 import { spawn, execFile } from 'node:child_process'
 import { promisify } from 'node:util'
@@ -18,14 +19,14 @@ import { stopInstance } from '../../scripts/lib/instance-controller.mjs'
 import installation from '../../scripts/lib/desktop-installation.cjs'
 import product from '../../scripts/lib/product-runtime.cjs'
 assert.equal(process.env.GITHUB_ACTIONS, 'true'); assert.equal(process.env.RUNNER_ENVIRONMENT, 'github-hosted')
-assert.ok(['darwin', 'win32'].includes(process.platform))
+assert.ok(['darwin', 'win32', 'linux'].includes(process.platform))
 const repository = path.resolve('.'), project = await fs.realpath(process.argv[2]), installer = await fs.realpath(process.argv[3])
 assert.equal(project, path.join(repository, '.desktop-build/安装 候选/paired'))
 assert.equal(installer, path.join(repository, '.desktop-build/安装 候选/installer'))
 const target = await verifyDesktopPayload(path.join(project, 'offline'))
 const platform = (process.platform === 'win32' ? 'windows' : process.platform) + '-' + process.arch
 const archives = JSON.parse(await fs.readFile(new URL('fixtures/legacy-desktop-archives.json', import.meta.url), 'utf8'))
-const execute = promisify(execFile), reports = [], temporary = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'Crabot 原位接管 ')))
+const execute = promisify(execFile), reports = [], temporary = await fs.realpath(await fs.mkdtemp(path.join(process.platform === 'linux' ? homedir() : tmpdir(), 'Crabot 原位接管 ')))
 const driverRoot = path.join(repository, '.desktop-build/legacy-installer-' + randomUUID()), evidence = path.join(repository, '.desktop-build/legacy-user-takeover.json')
 let output = '', allPassed = false
 async function space() { for (const directory of [repository, temporary]) { const value = await fs.statfs(directory, { bigint: true }); assert.ok(value.bavail * value.bsize > target.bytes * 5n + 4n * 1024n ** 3n, 'Legacy acceptance copy-space prerequisite') } }
@@ -42,9 +43,45 @@ async function download(version, destination) {
   const hash = createHash('sha256'); for await (const chunk of createReadStream(destination)) hash.update(chunk)
   assert.equal(hash.digest('hex'), sha256)
 }
+async function runUbuntuInstaller({ bundle, root, env, control, version }) {
+  const node = path.join(bundle, 'offline/core/.product-runtime/node/bin/node')
+  const child = spawn(node, [path.join(bundle, 'backend/dist/ubuntu-installer-backend.js'), root], { env, stdio: ['pipe', 'pipe', 'pipe'] })
+  const ended = once(child, 'close'); let failure, complete = false, processing = Promise.resolve()
+  child.stdin.on('error', error => { failure ??= error })
+  child.stderr.on('data', bytes => { output = (output + bytes.toString()).slice(-128000) })
+  const lines = createInterface({ input: child.stdout })
+  lines.on('line', line => {
+    processing = processing.then(async () => {
+      assert.ok(Buffer.byteLength(line) <= 65536)
+      const frame = JSON.parse(line)
+      if (frame.type === 'legacy_takeover_required') {
+        assert.equal(frame.install_root, root); assert.equal(frame.version, version)
+        await fs.writeFile(path.join(control, 'takeover-confirmed.json'), JSON.stringify({ detail: frame.version }) + '\n', { flag: 'wx' })
+        child.stdin.write('{"action":"takeover"}\n')
+      } else if (frame.type === 'authorization_required') {
+        // Only authorization transport is substituted. The actual native helper
+        // still validates and registers the exact prepared GUI/browser programs.
+        await execute('/usr/bin/sudo', ['-n', '/usr/bin/env', 'PKEXEC_UID=' + process.getuid(), path.join(bundle, 'crabot-sandbox-helper'), '--register', root],
+          { env, timeout: 120000, maxBuffer: 65536 })
+        child.stdin.write('{"action":"authorized"}\n')
+      } else if (frame.type === 'complete') {
+        assert.equal(frame.verification_pending, true); complete = true
+        await fs.writeFile(path.join(control, 'installer-handoff.json'), 'true\n', { flag: 'wx' })
+      } else if (frame.type === 'failed') throw new Error('Actual Ubuntu legacy installer: ' + JSON.stringify(frame))
+      else assert.equal(frame.type, 'progress')
+    }).catch(error => { failure ??= error; if (child.stdin.writable) child.stdin.write('{"action":"cancel"}\n') })
+  })
+  const timer = setTimeout(() => { failure ??= new Error('Ubuntu installer acceptance timed out'); if (child.stdin.writable) child.stdin.write('{"action":"cancel"}\n') }, 600000)
+  try {
+    const [code] = await ended; await processing
+    if (failure) throw failure
+    assert.equal(code, 0, output); assert.equal(complete, true)
+  } finally { clearTimeout(timer); lines.close(); child.stdin.destroy() }
+}
 try {
   await space()
-  const driver = await buildLegacyInstallerDriver({ repository, installer, destination: driverRoot, payload: target.directory })
+  const linux = process.platform === 'linux', bundle = path.join(installer, 'ubuntu-native')
+  const driver = linux ? null : await buildLegacyInstallerDriver({ repository, installer, destination: driverRoot, payload: target.directory })
   for (const version of Object.keys(archives)) {
     await space()
     const home = path.join(temporary, version), root = path.join(home, '.crabot'), dataDir = path.join(root, 'data'), control = path.join(home, 'control')
@@ -78,7 +115,14 @@ try {
       await fs.writeFile(config, JSON.stringify({ control, installRoot: root }) + '\n', { mode: 0o600 })
       env.CRABOT_LEGACY_INSTALLER_DRIVER = config
       stage('actual-installer')
-      const installed = await execute(driver, [], { env, timeout: 600000, maxBuffer: 256000 }); output += installed.stdout + installed.stderr
+      if (linux) {
+        Object.assign(env, { XDG_CONFIG_HOME: path.join(home, 'config'), XDG_DATA_HOME: path.join(home, 'share'),
+          XDG_CACHE_HOME: path.join(home, 'cache'), XDG_RUNTIME_DIR: path.join(home, 'run'), GDK_BACKEND: 'x11' })
+        for (const name of ['config', 'share', 'cache', 'run']) await fs.mkdir(path.join(home, name), { mode: 0o700 })
+        await runUbuntuInstaller({ bundle, root, env, control, version })
+      } else {
+        const installed = await execute(driver, [], { env, timeout: 600000, maxBuffer: 256000 }); output += installed.stdout + installed.stderr
+      }
       assert.equal(JSON.parse(await fs.readFile(path.join(control, 'installer-handoff.json'), 'utf8')), true)
       assert.ok(JSON.parse(await fs.readFile(path.join(control, 'takeover-confirmed.json'), 'utf8')).detail.includes(version))
       const own = installation.readDesktopSelection(root)
@@ -122,7 +166,8 @@ try {
       await execute(runtime.executables.python, ['-c', 'import pathlib,sys;pathlib.Path(sys.argv[1]).write_text("old workspace usable")', scriptFile], { env, timeout: 10000 })
       assert.equal(await fs.readFile(scriptFile, 'utf8'), 'old workspace usable')
       assert.equal(inspectInstance(dataDir).record.generation, instance.record.generation)
-      reports.push({ version, platform, published_archive_verified: true, actual_installer_loaded: true, native_dialog_input_substituted: true,
+      reports.push({ version, platform, published_archive_verified: true, actual_installer_loaded: true, native_dialog_input_substituted: !linux, actual_ubuntu_backend: linux,
+        graphical_polkit_tested: false, actual_gtk_flow_driven: false,
         old_data_fixture_stopped: true, ordinary_main_core_healthy: true, actual_native_and_original_cli_same_instance: true, host_node_required: false,
         original_credentials_and_sentinels_preserved: true, actual_bundled_python_file_access: true, historical_user_data_fixture: true,
         historical_user_model_session_tested: false, business_model_calls: 0 })
@@ -133,13 +178,21 @@ try {
       if (exited) await exited
       if (passed && prepared) {
         const cleanup = path.join(control, 'cleanup.json'); await fs.writeFile(cleanup, JSON.stringify({ control, cleanup: true, prepared }) + '\n')
-        await execute(driver, [], { env: { ...env, CRABOT_LEGACY_INSTALLER_DRIVER: cleanup }, timeout: 90000, maxBuffer: 128000 })
+        if (linux) {
+          const { removeInstallationEntries } = await import(pathToFileURL(path.join(bundle, 'backend/dist/installation-removal.js')))
+          await removeInstallationEntries(prepared, { home, platform: 'linux', env,
+            shell: { readShortcutLink: () => { throw new Error('Windows only') } },
+            verifyStopped: async () => assert.equal(inspectInstance(dataDir).state, 'stopped') })
+          await fs.writeFile(path.join(control, 'entries-cleaned.json'), 'true\n')
+        } else await execute(driver, [], { env: { ...env, CRABOT_LEGACY_INSTALLER_DRIVER: cleanup }, timeout: 90000, maxBuffer: 128000 })
         assert.equal(JSON.parse(await fs.readFile(path.join(control, 'entries-cleaned.json'), 'utf8')), true)
         await fs.rm(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
       }
     }
   }
   allPassed = true
+  // Ubuntu sandbox rules belong to this disposable CI VM and end with it.
+  // This fixture never claims to validate product uninstall or graphical Polkit.
 } finally {
   await fs.writeFile(path.join(repository, '.desktop-build/legacy-user-takeover.log'), output)
   await fs.writeFile(evidence, JSON.stringify({ complete: allPassed, cases: reports }) + '\n')
