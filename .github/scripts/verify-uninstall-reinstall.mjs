@@ -39,7 +39,8 @@ async function read(name) { try { return JSON.parse(await fs.readFile(path.join(
 async function wait(name, check, timeout = 180000) {
   const deadline = Date.now() + timeout
   while (Date.now() < deadline) {
-    if (await read('driver-failed')) throw new Error('Ordinary Main driver reported an unexpected dialog')
+    const failure = await read('driver-failed')
+    if (failure) throw new Error('Ordinary Main driver failed: ' + JSON.stringify(failure))
     for (const record of children) if (record.failed || !record.ready && record.child.exitCode !== null) throw new Error('Ordinary GUI exited before ready')
     const result = await check(); if (result) return result
     await new Promise(resolve => setTimeout(resolve, 100))
@@ -138,6 +139,10 @@ try {
     for (const record of children) if (record.identity && identity.sameProcess(record.identity, identity.inspectProcess(record.identity.pid))) process.kill(record.identity.pid, 'SIGKILL')
     await Promise.allSettled(children.map(record => record.exited))
     await fs.mkdir(path.join(repository, '.desktop-build'), { recursive: true }); await fs.writeFile(path.join(repository, '.desktop-build/uninstall-reinstall.log'), sourceOutput)
+    if (!success) await fs.writeFile(path.join(repository, '.desktop-build/uninstall-reinstall-diagnostic.json'), JSON.stringify({
+      driver: await read('driver-failed'), host: await read('maintenance-started'),
+      source_ready: children[0]?.ready === true, original_source_exit_code: children[0]?.child.exitCode,
+    }) + '\n')
     if (success) {
       await register(targetPrepared, 'remove'); assert.equal(await absent(shortcut), true)
       await fs.rm(temporary, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); await fs.rm(job, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })

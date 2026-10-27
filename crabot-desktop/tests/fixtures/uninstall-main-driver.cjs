@@ -6,10 +6,15 @@ const { app, dialog, Menu, shell } = require('electron')
 if (process.env.GITHUB_ACTIONS !== 'true') throw new Error('Isolated CI only')
 const config = JSON.parse(fs.readFileSync(process.env.CRABOT_UNINSTALL_MAIN_DRIVER, 'utf8'))
 const event = (name, fields = {}) => {
-  const file = path.join(config.control, name + '.json'), temporary = file + '.tmp'
+  const file = path.join(config.control, name + '.json'), temporary = file + '.tmp-' + process.pid
   fs.writeFileSync(temporary, JSON.stringify({ pid: process.pid, ...fields }) + '\n', { flag: 'wx', mode: 0o600 }); fs.renameSync(temporary, file)
 }
-const failure = () => { if (!fs.existsSync(path.join(config.control, 'driver-failed.json'))) event('driver-failed'); app.exit(2) }
+const failure = details => {
+  const diagnostic = details instanceof Error ? { message: details.message, code: details.code } : details
+  if (!fs.existsSync(path.join(config.control, 'driver-failed.json'))) event('driver-failed', { diagnostic })
+  console.error('CRABOT_UNINSTALL_DRIVER_FAILED ' + JSON.stringify({ pid: process.pid, diagnostic }))
+  app.exit(2)
+}
 const host = process.argv.some(value => value.startsWith('--crabot-removal-host='))
 if (host) {
   const identity = require('./bootstrap/scripts/lib/process-identity.cjs')
@@ -24,7 +29,8 @@ dialog.showMessageBox = async (...args) => {
   if (options.title === 'Crabot 已卸载' && options.buttons?.[0] === '关闭') {
     event('completed-dialog'); return { response: 0, checkboxChecked: false }
   }
-  failure(); throw new Error('Unexpected native dialog')
+  failure({ dialog: { title: options.title, message: options.message, detail: options.detail, buttons: options.buttons } })
+  throw new Error('Unexpected native dialog')
 }
 const timer = setTimeout(failure, 20 * 60 * 1000)
 timer.unref()
@@ -39,7 +45,7 @@ if (!host && !config.registration) {
       const { registerInstallationEntries } = await import('./installation-entries.js')
       await registerInstallationEntries(config.prepared, { home: require('node:os').homedir(), platform: process.platform, env: process.env, shell })
       event('entries-registered'); event('menu-clicked'); item.click(item, undefined, {})
-    } catch { failure() }
+    } catch (error) { failure(error) }
   }, 100)
   inspect.unref()
 }
