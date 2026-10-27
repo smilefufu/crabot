@@ -1634,7 +1634,7 @@ export class AdminModule extends ModuleBase {
   private async handleWebRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
     // 设置 CORS 头
     res.setHeader('Access-Control-Allow-Origin', '*')
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, DELETE, OPTIONS')
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS')
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Crabot-Request-Id')
     res.setHeader('Access-Control-Expose-Headers', 'X-Crabot-Request-Id')
 
