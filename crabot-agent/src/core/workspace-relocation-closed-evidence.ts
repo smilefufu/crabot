@@ -19,17 +19,11 @@ interface ClosureInspectionOptions {
 }
 
 /** Read-only Agent facts; callers retain current role, lock and whole-execution exit checks. */
-async function inspectClosureFacts({ dataDir, id, verify, signal }: ClosureInspectionOptions, archived: boolean) {
+async function inspectClosureFacts({ dataDir, id, verify, signal }: ClosureInspectionOptions, readFacts: () => any) {
   if (typeof verify !== 'function') throw failure()
-  const records = require(path.join(__dirname, '../../../scripts/lib/workspace-relocation-intent.mjs'))
   const { owned, readJson } = createWorkspaceMaintenanceFileAccess(failure)
   await verify()
-  const readFacts = () => archived ? records.readWorkspaceRelocationArchivedClosureFacts(dataDir, id) : {
-    workerPlan: records.readWorkspaceRelocationClosurePlan(dataDir, id), workerComplete: records.readWorkspaceRelocationClosureCommit(dataDir, id),
-    recoveryPlan: records.readWorkspaceRelocationRecoveryPlan(dataDir, id), recoveryComplete: records.readWorkspaceRelocationRecoveryCommit(dataDir, id),
-  }
-  const { workerPlan, workerComplete, recoveryPlan, recoveryComplete } = readFacts()
-  const controlRoot = archived ? path.join(dataDir, 'workspace-control/relocation-history', id) : path.join(dataDir, 'workspace-control/relocation-active')
+  const { workerPlan, workerComplete, recoveryPlan, recoveryComplete, controlRoot } = readFacts()
   if (!workerPlan || !workerComplete || !recoveryPlan || !recoveryComplete) throw failure()
   const workerHash = sha256CanonicalJson(workerComplete), recoveryHash = sha256CanonicalJson(recoveryComplete)
   const workerPlanHash = sha256CanonicalJson(workerPlan), recoveryPlanHash = sha256CanonicalJson(recoveryPlan)
@@ -71,7 +65,7 @@ async function inspectClosureFacts({ dataDir, id, verify, signal }: ClosureInspe
     if (signal?.aborted) throw failure()
     const current = readFacts()
     if (sha256CanonicalJson(current.workerPlan) !== workerPlanHash || sha256CanonicalJson(current.workerComplete) !== workerHash
-      || sha256CanonicalJson(current.recoveryPlan) !== recoveryPlanHash || sha256CanonicalJson(current.recoveryComplete) !== recoveryHash) throw failure()
+      || sha256CanonicalJson(current.recoveryPlan) !== recoveryPlanHash || sha256CanonicalJson(current.recoveryComplete) !== recoveryHash || current.controlRoot !== controlRoot) throw failure()
     for (const directory of directories) if (!sameIdentity(version(owned(directory.path, true)), directory.version, true)
       || fs.realpathSync(directory.path) !== directory.path || process.platform === 'win32' && native.inspectDirectoryFileId(directory.path) !== directory.native_id) throw failure()
     if (sha256CanonicalJson(fs.readdirSync(directories[2].path).sort()) !== sha256CanonicalJson(names)) throw failure()
@@ -87,9 +81,27 @@ async function inspectClosureFacts({ dataDir, id, verify, signal }: ClosureInspe
 
 
 export function inspectWorkspaceRelocationClosures(options: ClosureInspectionOptions) {
-  return inspectClosureFacts(options, false)
+  const records = require('../../../scripts/lib/workspace-relocation-intent.mjs'), { dataDir, id } = options
+  return inspectClosureFacts(options, () => ({
+    workerPlan: records.readWorkspaceRelocationClosurePlan(dataDir, id), workerComplete: records.readWorkspaceRelocationClosureCommit(dataDir, id),
+    recoveryPlan: records.readWorkspaceRelocationRecoveryPlan(dataDir, id), recoveryComplete: records.readWorkspaceRelocationRecoveryCommit(dataDir, id),
+    controlRoot: path.join(dataDir, 'workspace-control/relocation-active'),
+  }))
 }
 
 export function inspectArchivedWorkspaceRelocationClosures(options: ClosureInspectionOptions) {
-  return inspectClosureFacts(options, true)
+  const records = require('../../../scripts/lib/workspace-relocation-intent.mjs')
+  return inspectClosureFacts(options, () => ({ ...records.readWorkspaceRelocationArchivedClosureFacts(options.dataDir, options.id),
+    controlRoot: path.join(options.dataDir, 'workspace-control/relocation-history', options.id) }))
+}
+
+/** Current caller supplies authority; the version-2 facts do not revive an old completion. */
+export function inspectInterruptedWorkspaceRelocationClosures(options: ClosureInspectionOptions) {
+  const records = require('../../../scripts/lib/workspace-interrupted-forward-records.mjs')
+  return inspectClosureFacts(options, () => {
+    const facts = records.readWorkspaceInterruptedForwardPreparation(options.dataDir, options.id)
+    if (!facts) throw failure()
+    return { workerPlan: facts.checkpoint.closure_plan, workerComplete: facts.checkpoint.closure_commit,
+      recoveryPlan: facts.checkpoint.recovery_plan, recoveryComplete: facts.checkpoint.recovery_commit, controlRoot: facts.original.path }
+  })
 }

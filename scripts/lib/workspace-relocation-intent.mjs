@@ -2627,3 +2627,11 @@ export const readWorkspaceCancelledRelocationMaterials = recordGraphReader(funct
   for (const directory of [ctx.baseControl, parent, job, control]) if (!privateControl(directory)) fail()
   return workspaceJobMaterials({ ...ctx, control })
 })
+
+/** Original technical inventory retained by a version-2 forward recovery, never an old completion. */
+export const readWorkspaceForwardRelocationMaterials = recordGraphReader(function readWorkspaceForwardRelocationMaterials(dataDir, id) {
+  if (!uuid(id)) fail()
+  const ctx = context(dataDir), parent = path.join(ctx.baseControl, 'relocation-history'), job = path.join(parent, id), control = path.join(job, 'original')
+  for (const directory of [ctx.baseControl, parent, job, control]) if (!privateControl(directory)) fail()
+  return workspaceJobMaterials({ ...ctx, control })
+})

@@ -22,7 +22,7 @@ export async function launchWorkspaceInterruptedRecoveryCoordinator(options) {
     const request = parseWorkspaceInterruptedRecoveryRequest(options.request)
     await options.verify()
     const original = readWorkspaceRelocationIntent(options.dataDir) ? readWorkspaceInterruptedRelocationCheckpoint(options.dataDir, request.intent_id)
-      : readWorkspaceSourceRecoveryScope(options.dataDir, request.intent_id).checkpoint
+      : (readWorkspaceInterruptedForwardPreparation(options.dataDir, request.intent_id) ?? readWorkspaceSourceRecoveryScope(options.dataDir, request.intent_id)).checkpoint
     if (readWorkspaceInterruptedRecoveryRole(options.dataDir, request.recovery_id).launch) throw failure()
     const allowed = new Set(['PATH', 'HOME', 'USERPROFILE', 'SYSTEMROOT', 'WINDIR', 'TEMP', 'TMP', 'TMPDIR', 'LANG', 'LC_ALL', 'LC_CTYPE'])
     const env = Object.fromEntries(Object.entries(process.env).filter(([key, value]) => value !== undefined && allowed.has(key.toUpperCase())))
@@ -203,6 +203,17 @@ export async function launchWorkspaceInterruptedRecoveryCoordinator(options) {
       verification = forwardPreparation
       return forwardPreparation
     }
-    return Object.freeze({ child, launch, ready, verify, observeOriginalExit, restoreSource, archiveSource, prepareSourceBusiness, releaseSource, finishClosures, finishManagerRecovery, finishRoot, prepareForwardService, close })
+    let forwardArchive
+    const archiveForward = () => {
+      if (forwardArchive) return forwardArchive
+      forwardArchive = verification.then(async () => {
+        const message = { kind: 'workspace_interrupted_archive_forward', recovery_id: request.recovery_id, launch_sha256: hash(launch), ready_sha256: hash(ready), nonce: randomUUID() }
+        await exchange(message, reply => hash(reply) === hash({ ...message, kind: 'workspace_interrupted_forward_archived', result: { committed: true, service_restored: false } }), 240000)
+        return Object.freeze({ committed: true, service_restored: false })
+      }).catch(cause => { close(); throw Object.assign(failure(), { cause }) })
+      verification = forwardArchive
+      return forwardArchive
+    }
+    return Object.freeze({ child, launch, ready, verify, observeOriginalExit, restoreSource, archiveSource, prepareSourceBusiness, releaseSource, finishClosures, finishManagerRecovery, finishRoot, prepareForwardService, archiveForward, close })
   } catch (cause) { close(); throw Object.assign(failure(), { cause }) }
 }

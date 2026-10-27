@@ -808,7 +808,24 @@ for (const boundary of boundaries) test('fresh forward role selects only the ori
         assert.deepEqual(await next.prepareForwardService(), prepared)
         assert.deepEqual(fs.readFileSync(marker), bytes)
         await next.verify()
+        assert.deepEqual(await next.archiveForward(), { committed: true, service_restored: false })
+        await next.verify()
+        const archived = (await import('../workspace-interrupted-forward-records.mjs')).readWorkspaceInterruptedForwardPreparation(f.data, f.id)
+        assert.equal(archived.archived, true)
+        assert.deepEqual(archived.checkpoint, current)
+        assert.deepEqual(fs.readFileSync(marker), bytes)
+        assert.equal(fs.existsSync(path.join(f.data, 'workspace-control/relocation-active')), false)
+        assert.equal(fs.existsSync(path.join(archived.original.path, 'relocation-complete.json')), false)
+        assert.equal(fs.readFileSync(path.join(f.target, 'default/file'), 'utf8'), 'original bytes')
+        assert.equal(await (await import('../workspace-relocation-history.mjs')).locateWorkspaceRelocationHistory({ dataDir: f.data,
+          managerKey: 'channel::original', workerId: 'original-worker', incarnationId: 'not-present' }), null)
       } finally { next.close(); await nextEnded }
+      const thirdLock = await locks.acquireWorkspaceInterruptedRecoveryLock(f.data, f.id)
+      const third = await (await import('../workspace-interrupted-launch.mjs')).launchWorkspaceInterruptedRecoveryCoordinator({ dataDir: f.data,
+        request: { intent_id: f.id, recovery_id: randomUUID(), checkpoint_sha256: current.checkpoint_sha256 }, verify: async () => {}, releaseParentLock: () => locks.releaseCliLock(thirdLock) })
+      const thirdEnded = once(third.child, 'exit')
+      try { await third.verify(); assert.deepEqual(await third.archiveForward(), { committed: true, service_restored: false }) }
+      finally { third.close(); await thirdEnded }
       fs.writeFileSync(marker, 'broken')
       const forwardRecords = await import('../workspace-interrupted-forward-records.mjs')
       assert.throws(() => forwardRecords.readWorkspaceInterruptedForwardPreparation(f.data, f.id))
@@ -987,10 +1004,12 @@ test('source restoration archives original materials under a continuous maintena
   } finally { const exited = once(role.child, 'exit'); role.close(); await exited; releaseCliLock(lock) }
 })
 
-for (const boundary of ['guard', 'job-directory', 'marker', 'archive-rename']) test('fresh source restoration continues after an actual interrupted ' + boundary, { timeout: 60000 }, async t => {
+for (const forward of [false, true])
+for (const boundary of ['guard', 'job-directory', 'marker', 'archive-rename']) test('fresh ' + (forward ? 'forward completion' : 'source restoration') + ' continues after an actual interrupted ' + boundary, { timeout: 60000 }, async t => {
   const f = await stageFixture(t)
   await f.command('host-permit'); await f.command('stage-prepare'); await f.command('file-begin'); await f.command('host-stop')
   assert.equal((await f.command('file-move-fixture')).error, undefined)
+  if (forward) for (const step of ['file-ready', 'closure-prepare-fixture', 'closure-commit-fixture']) assert.equal((await f.command(step)).error, undefined)
   f.child.disconnect(); await f.exited
   fs.mkdirSync(path.join(f.data, 'agent'), { recursive: true })
   const checkpoint = records.readWorkspaceInterruptedRelocationCheckpoint(f.data, f.id), recoveryId = randomUUID()
@@ -1000,11 +1019,11 @@ for (const boundary of ['guard', 'job-directory', 'marker', 'archive-rename']) t
   // product fault-injection flag, original-record rewrite or simulated rename.
   const code = `import fs from 'node:fs';import path from 'node:path';
     import native from ${JSON.stringify(new URL('../process-identity.cjs', import.meta.url).href)};
-    const boundary=${JSON.stringify(boundary)}, id=${JSON.stringify(f.id)};
+    const boundary=${JSON.stringify(boundary)}, id=${JSON.stringify(f.id)}, forward=${forward};
     let published;const link=fs.linkSync,unlink=fs.unlinkSync,mkdir=fs.mkdirSync,privateDir=native.createPrivateDirectory,rename=native.renameDirectoryNoReplace;
     fs.linkSync=(from,to)=>{link(from,to);published=to};
-    fs.unlinkSync=file=>{unlink(file);if(boundary==='guard'&&published?.endsWith('relocation-source-finalizing.json')||boundary==='marker'&&published?.endsWith('source-restored.json'))process.exit(3)};
-    const afterDirectory=file=>{if(boundary==='job-directory'&&path.basename(file)===id&&path.basename(path.dirname(file))==='relocation-cancelled')process.exit(3)};
+    fs.unlinkSync=file=>{unlink(file);if(boundary==='guard'&&published?.endsWith(forward?'relocation-forward-finalizing.json':'relocation-source-finalizing.json')||boundary==='marker'&&published?.endsWith(forward?'forward-committed.json':'source-restored.json'))process.exit(3)};
+    const afterDirectory=file=>{if(boundary==='job-directory'&&path.basename(file)===id&&path.basename(path.dirname(file))===(forward?'relocation-history':'relocation-cancelled'))process.exit(3)};
     fs.mkdirSync=(file,...args)=>{const result=mkdir(file,...args);afterDirectory(file);return result};
     native.createPrivateDirectory=file=>{const result=privateDir(file);afterDirectory(file);return result};
     native.renameDirectoryNoReplace=(from,to)=>{const result=rename(from,to);if(boundary==='archive-rename'&&path.basename(from)==='relocation-active')process.exit(3);return result};
@@ -1019,27 +1038,42 @@ for (const boundary of ['guard', 'job-directory', 'marker', 'archive-rename']) t
   const [ready] = await waiting
   const base = { recovery_id: recoveryId, launch_sha256: ready.launch_sha256, ready_sha256: ready.ready_sha256 }
   const restored = once(child, 'message')
-  child.send({ ...base, kind: 'workspace_interrupted_restore_source', nonce: randomUUID() })
-  assert.equal((await restored)[0].result.source_restored, true)
-  child.send({ ...base, kind: 'workspace_interrupted_archive_source', nonce: randomUUID() })
+  child.send({ ...base, kind: forward ? 'workspace_interrupted_prepare_forward_service' : 'workspace_interrupted_restore_source', nonce: randomUUID() })
+  if (!forward || boundary !== 'guard') {
+    assert.equal((await restored)[0].result[forward ? 'prepared' : 'source_restored'], true)
+    child.send({ ...base, kind: forward ? 'workspace_interrupted_archive_forward' : 'workspace_interrupted_archive_source', nonce: randomUUID() })
+  } else void restored.catch(() => {})
   assert.equal((await exited)[0], 3)
-  const reader = await import('../workspace-interrupted-source-records.mjs'), pending = reader.readPendingWorkspaceSourceRestoration(f.data, f.id)
-  const oldTerminal = fs.readFileSync(path.join(pending.role.launch.control_root.path, 'source-terminal.json'))
+  const reader = await import('../workspace-interrupted-source-records.mjs'), forwardReader = await import('../workspace-interrupted-forward-records.mjs')
+  const pending = forward ? forwardReader.readWorkspaceInterruptedForwardPreparation(f.data, f.id) : reader.readPendingWorkspaceSourceRestoration(f.data, f.id)
+  const terminal = path.join(pending.role.launch.control_root.path, forward ? 'forward-terminal.json' : 'source-terminal.json'), oldTerminal = fs.readFileSync(terminal)
   lock = await locks.acquireWorkspaceInterruptedRecoveryLock(f.data, f.id)
   const { launchWorkspaceInterruptedRecoveryCoordinator } = await import('../workspace-interrupted-launch.mjs')
-  const next = await launchWorkspaceInterruptedRecoveryCoordinator({ dataDir: f.data, request: { ...request, recovery_id: randomUUID() },
+  const next = await launchWorkspaceInterruptedRecoveryCoordinator({ dataDir: f.data, request: { ...request, recovery_id: randomUUID(), checkpoint_sha256: pending.checkpoint.checkpoint_sha256 },
     verify: async () => {}, releaseParentLock: () => releaseCliLock(lock) })
   try {
-    assert.equal((await next.restoreSource()).source_restored, true)
-    assert.deepEqual(await next.archiveSource(), { source_restored: true, service_restored: false })
+    if (forward) {
+      assert.equal((await next.prepareForwardService()).prepared, true)
+      assert.deepEqual(await next.archiveForward(), { committed: true, service_restored: false })
+    } else {
+      assert.equal((await next.restoreSource()).source_restored, true)
+      assert.deepEqual(await next.archiveSource(), { source_restored: true, service_restored: false })
+    }
     await next.verify()
-    const retained = reader.readWorkspaceSourceRestoration(f.data, f.id)
+    const retained = forward ? forwardReader.readWorkspaceInterruptedForwardPreparation(f.data, f.id) : reader.readWorkspaceSourceRestoration(f.data, f.id)
     assert.deepEqual(retained.marker, pending.marker)
-    assert.deepEqual(fs.readFileSync(path.join(pending.role.launch.control_root.path, 'source-terminal.json')), oldTerminal)
-    assert.deepEqual(await f.catalog.snapshot(), f.before)
-    assert.equal(fs.readFileSync(path.join(f.source, 'default/file'), 'utf8'), 'original bytes')
-    assert.equal(fs.existsSync(path.join(f.data, 'workspace-control/relocation-history', f.id)), false)
+    assert.deepEqual(fs.readFileSync(terminal), oldTerminal)
+    const after = await f.catalog.snapshot()
+    if (forward) { assert.equal(after.storage_root, f.target); assert.equal(after.revision, f.before.revision + 1) }
+    else assert.deepEqual(after, f.before)
+    assert.equal(fs.readFileSync(path.join(forward ? f.target : f.source, 'default/file'), 'utf8'), 'original bytes')
+    assert.equal(fs.existsSync(path.join(f.data, 'workspace-control/relocation-history', f.id)), forward)
     assert.equal((await import('../workspace-maintenance.cjs')).default.workspaceMaintenancePending(f.data), true)
+    if (forward && boundary === 'archive-rename') {
+      fs.appendFileSync(path.join(retained.original.path, 'relocation.json'), '\n')
+      assert.throws(() => forwardReader.readWorkspaceInterruptedForwardPreparation(f.data, f.id))
+      assert.equal(fs.readFileSync(path.join(f.target, 'default/file'), 'utf8'), 'original bytes')
+    }
   } finally { const ended = once(next.child, 'exit'); next.close(); await ended; releaseCliLock(lock) }
 })
 

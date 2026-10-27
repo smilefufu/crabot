@@ -9,6 +9,7 @@ import { WorkspaceCatalog } from '../../crabot-shared/dist/workspace-catalog.js'
 import { readWorkspaceRelocationIntent, readWorkspaceRelocationWorkers,
   readWorkspaceRelocationRootPublished, readWorkspaceRelocationRootSelected, readWorkspaceRelocationFilePlan,
   readWorkspaceRelocationArchivedState, readWorkspaceRelocationReleased, readCurrentWorkspaceRelocationFinalizing } from './workspace-relocation-intent.mjs'
+import { readWorkspaceInterruptedForwardPreparation } from './workspace-interrupted-forward-records.mjs'
 
 const failure = () => Object.assign(new Error('无法核实迁移历史文件位置；原记录与文件已保留。'), { code: 'CRABOT_WORKSPACE_HISTORY_LOCATION' })
 const text = value => typeof value === 'string' && value.length > 0 && !value.includes('\0')
@@ -47,6 +48,13 @@ function historyGraph(dataDir) {
   }
   const finalizing = readCurrentWorkspaceRelocationFinalizing(dataDir)
   for (const id of ids) {
+    if (exists(path.join(history, id, 'forward-committed.json'))) {
+      const state = readWorkspaceInterruptedForwardPreparation(dataDir, id), checkpoint = state?.checkpoint
+      if (!state?.archived || receipts.has(id) || finalizing?.intent_id === id) throw failure()
+      nodes.push({ intent: checkpoint.intent, selected: checkpoint.selected, published: checkpoint.published, workers: checkpoint.workers,
+        files: checkpoint.file_plan, completion: state.scope, released: state.released, forward: true })
+      continue
+    }
     const state = readWorkspaceRelocationArchivedState(dataDir, id), released = readWorkspaceRelocationReleased(dataDir, id)
     if ((!released && finalizing?.intent_id !== id) || (finalizing?.intent_id === id && released)) throw failure()
     nodes.push({ intent: state.intent, selected: state.selected, published: state.published, workers: state.workers, files: state.files,
@@ -59,7 +67,7 @@ function historyGraph(dataDir) {
     const selected = readWorkspaceRelocationRootSelected(dataDir, intent.id), published = readWorkspaceRelocationRootPublished(dataDir, intent.id)
     if (!selected || !published) throw failure()
     nodes.push({ intent, selected, published, workers: readWorkspaceRelocationWorkers(dataDir, intent.id), files: readWorkspaceRelocationFilePlan(dataDir, intent.id) })
-  } else if ((finalizing && !ids.has(finalizing.intent_id)) || (!finalizing && workspaceMaintenancePending(dataDir))) throw failure()
+  } else if ((finalizing && !ids.has(finalizing.intent_id)) || (!finalizing && workspaceMaintenancePending(dataDir) && !nodes.some(node => node.forward && !node.released))) throw failure()
   nodes.sort((a, b) => a.intent.catalog_revision - b.intent.catalog_revision)
   for (let i = 1; i < nodes.length; i++) {
     const previous = nodes[i - 1], current = nodes[i], source = current.files?.source_observation.source_identity

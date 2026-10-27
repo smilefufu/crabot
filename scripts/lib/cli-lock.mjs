@@ -67,13 +67,14 @@ export async function acquireWorkspaceRelocationLock(dataDir, id, waitMs = 5000)
   })
 }
 
-// Only the explicit interrupted job, including its guarded source-restored handoff.
+// Only the explicit interrupted job, including its guarded terminal handoff.
 export async function acquireWorkspaceInterruptedRecoveryLock(dataDir, id, waitMs = 5000) {
   const records = await import('./workspace-relocation-intent.mjs')
   const source = await import('./workspace-interrupted-source-records.mjs')
+  const forward = await import('./workspace-interrupted-forward-records.mjs')
   const binding = () => {
     if (records.readWorkspaceRelocationIntent(dataDir)) return records.readWorkspaceInterruptedRelocationCheckpoint(dataDir, id).checkpoint_sha256
-    const scope = source.readWorkspaceSourceRecoveryScope(dataDir, id)
+    const scope = forward.readWorkspaceInterruptedForwardPreparation(dataDir, id) ?? source.readWorkspaceSourceRecoveryScope(dataDir, id)
     return JSON.stringify([scope.checkpoint.checkpoint_sha256, scope.released, scope.release])
   }
   const original = binding()

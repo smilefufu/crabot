@@ -23,7 +23,7 @@ export function readWorkspaceInterruptedServiceScope(dataDir, recoveryId) {
   if (action !== 'finish_commit' || !facts || !baseline || baseline.checkpoint_sha256 !== checkpointHash) throw failure()
   assertWorkspaceInterruptedForwardProgress(baseline, facts.checkpoint)
   return { role, action, facts, checkpoint: facts.checkpoint, marker: facts.marker, root: facts.root,
-    catalog_sha256: facts.scope.catalog_sha256, catalog_revision: facts.scope.catalog_revision, released: false, release: null }
+    catalog_sha256: facts.scope.catalog_sha256, catalog_revision: facts.scope.catalog_revision, released: facts.released, release: facts.release }
 }
 /** The current capability owner checks the actual directory generation before each probe/use. */
 export function assertWorkspaceInterruptedRootCurrent(scope) {
