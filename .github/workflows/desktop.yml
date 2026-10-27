@@ -261,6 +261,10 @@ jobs:
           node node_modules/vitest/vitest.mjs run src/cli/client.test.ts --maxWorkers=1 --minWorkers=1
           cd crabot-admin
           node node_modules/vitest/vitest.mjs run src/workspace-relocation-start-auth.test.ts src/friend-permission-store.test.ts src/legacy-directory-migration.test.ts src/request-permission-sources.test.ts src/group-session-config.test.ts src/shared-request-impact.test.ts src/backup/import/run-import.test.ts src/workspaces.test.ts src/workspaces-http.test.ts src/workspace-web-maintenance.test.ts src/workspace-recovery-finalization-web.test.ts src/core-agent-cutover-retry.test.ts src/channel-manager.workspace-startup.test.ts src/channel-manager.voice-setup.test.ts src/workspace-relocation-auth.test.ts src/chat-http-ws.test.ts src/chat-manager.test.ts src/chat-outbox-recovery.test.ts src/http-diagnostics.test.ts src/model-client-http.test.ts src/desktop-upgrade-http.test.ts src/version/upgrade-runner.test.ts src/version/version-service.test.ts src/desktop-auth.test.ts src/credentials.test.ts src/computer-use-setup-api.test.ts src/memory-access.test.ts src/voice-admin.test.ts src/managed-mcp.test.ts src/managed-mcp-runtime.test.ts src/mcp-subagent-config-mutation.test.ts src/core-agent-config-coherent-read.test.ts --maxWorkers=1 --minWorkers=1
+      - name: Build actual React application for isolated GUI regressions
+        if: matrix.suite == 'gui'
+        working-directory: crabot-admin/web
+        run: node node_modules/vite/bin/vite.js build
       - name: Web compilation and state regressions
         if: matrix.suite == 'regression'
         run: |

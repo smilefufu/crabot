@@ -14,6 +14,7 @@ import { readInstanceRuntime, inspectInstance } from '../../scripts/lib/instance
 import { writeCoreRelease, verifyCoreRelease } from '../../scripts/lib/core-release.mjs'
 import { sealDesktopPayload, prepareDesktopInstallation, commitDesktopInstallation } from '../../scripts/lib/desktop-payload.mjs'
 import identity from '../../scripts/lib/process-identity.cjs'
+import management from '../../scripts/lib/desktop-management.cjs'
 import { probeKnownProcessExit } from '../../scripts/lib/known-process-exit.cjs'
 import { buildUbuntuMaintenanceBackend } from '../../scripts/desktop/ubuntu-maintenance-backend.mjs'
 import { prepareDesktopRemovalGui } from '../../scripts/lib/desktop-removal-host.mjs'
@@ -166,7 +167,8 @@ for (const scenario of ['publish-source-remove-public-open-window', 'publish-sou
     const { captureDesktopRemovalProof } = await import('../../scripts/lib/desktop-removal-proof.mjs')
     const { privateJson } = await import('../../scripts/lib/desktop-preparation-files.mjs')
     const proof = await captureDesktopRemovalProof(own.root, operationId), job = path.join(own.root, 'app/removals', operationId)
-    await fs.mkdir(job, { recursive: true, mode: 0o700 }); await fs.chmod(path.dirname(job), 0o700)
+    management.ensurePrivateDataRoot(path.dirname(job)); management.ensurePrivateDataRoot(job)
+    if (process.platform === 'win32') assert.equal(identity.isPrivateDirectory(job), true)
     await privateJson(path.join(job, 'proof.json'), proof)
     await privateJson(path.join(own.root, '.desktop-removal.json'), { schema_version: 1, installation_id: own.record.installation_id,
       operation_id: operationId, source_selection: own.selection, phase: 'preparing',

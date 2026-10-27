@@ -498,7 +498,8 @@ async function main() {
     }
     const proof = await captureDesktopRemovalProof(cfg.root, cfg.operationId)
     const directory = path.join(cfg.root, 'app/removals', cfg.operationId)
-    fs.mkdirSync(directory, { recursive: true, mode: 0o700 }); fs.chmodSync(path.dirname(directory), 0o700)
+    const management = require('./bootstrap/scripts/lib/desktop-management.cjs')
+    management.ensurePrivateDataRoot(path.dirname(directory)); management.ensurePrivateDataRoot(directory)
     await privateJson(path.join(directory, 'proof.json'), proof)
     await privateJson(path.join(cfg.root, '.desktop-removal.json'), { schema_version: 1, installation_id: proof.installation_id,
       operation_id: cfg.operationId, source_selection: proof.source_selection, phase: 'removing',
