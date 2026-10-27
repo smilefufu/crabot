@@ -18,12 +18,12 @@ import { createWorkspaceFileToolJournal, serveWorkspaceFileToolJournal } from '.
 
 const fixtureLifetimeMs = process.platform === 'win32' ? 120000 : 30000
 
-async function fixture(t, { exitEvidence = true, exitRecord = true, crossVolume = false, withWorker = false } = {}) {
+async function fixture(t, { exitEvidence = true, exitRecord = true, crossVolume = false, withWorker = false, targetRelative = 'new' } = {}) {
   const root = fs.realpathSync.native(fs.mkdtempSync(path.join(tmpdir(), 'workspace-file-plan-中文 space-')))
   const data = management.ensurePrivateDataRoot(path.join(root, 'data')), id = randomUUID()
   const catalog = new WorkspaceCatalog({ dataRoot: data, files: native }); await catalog.initialize()
   const targetRoot = crossVolume ? fs.mkdtempSync('/dev/shm/crabot-file-tools-') : root
-  const before = await catalog.snapshot(), source = before.storage_root, target = path.join(targetRoot, 'new')
+  const before = await catalog.snapshot(), source = before.storage_root, target = path.join(targetRoot, targetRelative)
   const ledger = path.join(data, 'agent/worker-ledgers/channel%3A%3Aoriginal.json')
   const worker = { worker_id: 'original-worker', manager_key: 'channel::original', task: { id: 'original-task', title: 'preserve original goal', status: 'halted',
     created_at: '2026-10-27T00:00:00.000Z', halt: { halted_at: '2026-10-27T00:00:00.000Z', halt_reason: 'turn_end' } },
@@ -76,6 +76,9 @@ async function fixture(t, { exitEvidence = true, exitRecord = true, crossVolume 
         else if(message.operation==='closure-commit-fixture'){const agent=await import(${JSON.stringify(new URL('../../../crabot-agent/dist/core/workspace-relocation-closure.js', import.meta.url).href)});result=await agent.commitWorkspaceRelocationClosure(args)}
         else if(message.operation==='recovery-prepare-fixture'){const agent=await import(${JSON.stringify(new URL('../../../crabot-agent/dist/core/workspace-relocation-recovery.js', import.meta.url).href)});result=await agent.prepareWorkspaceRelocationRecovery(args)}
         else if(message.operation==='recovery-commit-fixture'){const agent=await import(${JSON.stringify(new URL('../../../crabot-agent/dist/core/workspace-relocation-recovery.js', import.meta.url).href)});result=await agent.commitWorkspaceRelocationRecovery(args)}
+        else if(message.operation==='root-plan-fixture')result=await records.prepareWorkspaceRelocationRootPlan(args)
+        else if(message.operation==='root-publish-fixture')result=await records.publishWorkspaceRelocationRoot(args)
+        else if(message.operation==='root-select-fixture')result=await records.selectWorkspaceRelocationRoot(args)
         else if(['closure-interrupt-prepared','closure-interrupt-replaced'].includes(message.operation)){const rename=fs.renameSync;fs.renameSync=(source,target)=>{if(target===${JSON.stringify(ledger)}){if(message.operation==='closure-interrupt-replaced')rename(source,target);throw Object.assign(new Error('finite closure interruption'),{code:'EIO'})}return rename(source,target)};try{const agent=await import(${JSON.stringify(new URL('../../../crabot-agent/dist/core/workspace-relocation-closure.js', import.meta.url).href)});result=await agent.commitWorkspaceRelocationClosure(args)}finally{fs.renameSync=rename}}
         else if(message.operation==='file-begin')result=await records.beginWorkspaceRelocationFiles(args);
         else if(message.operation==='file-ready')result=await records.commitWorkspaceRelocationFileReady(args);
@@ -734,6 +737,60 @@ for (const boundary of ['unplanned', 'planned', 'archived', 'complete', 'changed
     assert.equal(fs.existsSync(f.source), false)
   } finally { role.close(); await ended }
 })
+
+for (const { nested, crossVolume } of [{ nested: false, crossVolume: false }, { nested: true, crossVolume: false }, { nested: false, crossVolume: true }]) {
+const boundaries = crossVolume ? ['before plan', 'publication without receipt', 'selection without receipt']
+  : ['before plan', 'planned', 'publication without receipt', 'published', 'selection without receipt', 'selected', 'target occupied', 'changed target content']
+const suffix = (nested ? ' with missing parents' : '') + (crossVolume ? ' across volumes' : '')
+for (const boundary of boundaries) test('fresh forward role selects only the original Root: ' + boundary + suffix, { skip: crossVolume && crossVolumeTools.skip, timeout: 60000 }, async t => {
+  const f = await stageFixture(t, { withWorker: true, crossVolume, targetRelative: nested ? 'nested/project/new' : 'new' })
+  await f.command('host-permit'); await f.command('stage-prepare'); await f.command('file-begin')
+  if (crossVolume) { await f.command('tools-relay'); assert.equal((await f.command('tools-copy')).error, undefined) }
+  await f.command('host-stop')
+  if (!crossVolume) assert.equal((await f.command('file-move-fixture')).error, undefined)
+  assert.equal((await f.command('file-ready')).error, undefined)
+  for (const step of ['closure-prepare-fixture', 'closure-commit-fixture', 'recovery-prepare-fixture', 'recovery-commit-fixture']) assert.equal((await f.command(step)).error, undefined)
+  if (boundary !== 'before plan') assert.equal((await f.command('root-plan-fixture')).error, undefined)
+  if (boundary === 'publication without receipt') {
+    const plan = records.readWorkspaceRelocationRootPlan(f.data, f.id)
+    native.renameDirectoryNoReplace(plan.publication.tree.path, plan.publication.target)
+  } else if (['published', 'selection without receipt', 'selected', 'changed target content'].includes(boundary)) assert.equal((await f.command('root-publish-fixture')).error, undefined)
+  if (boundary === 'selection without receipt' || boundary === 'selected') {
+    assert.equal((await f.command('root-select-fixture')).error, undefined)
+    if (boundary === 'selection without receipt') fs.unlinkSync(path.join(f.data, 'workspace-control/relocation-active/relocation-root-selected.json'))
+  }
+  f.child.disconnect(); await f.exited
+  const checkpoint = records.readWorkspaceInterruptedRelocationCheckpoint(f.data, f.id)
+  const locks = await import('../cli-lock.mjs'), recoveryId = randomUUID(), lock = await locks.acquireWorkspaceInterruptedRecoveryLock(f.data, f.id)
+  const role = await (await import('../workspace-interrupted-launch.mjs')).launchWorkspaceInterruptedRecoveryCoordinator({ dataDir: f.data,
+    request: { intent_id: f.id, recovery_id: recoveryId, checkpoint_sha256: checkpoint.checkpoint_sha256 }, verify: async () => {}, releaseParentLock: () => locks.releaseCliLock(lock) })
+  const ended = once(role.child, 'exit')
+  try {
+    if (boundary === 'target occupied' || boundary === 'changed target content') {
+      if (boundary === 'target occupied') fs.mkdirSync(f.target)
+      const changed = path.join(f.target, 'external-content.txt')
+      fs.writeFileSync(changed, 'preserve external user content')
+      await assert.rejects(role.finishRoot())
+      assert.equal(fs.readFileSync(changed, 'utf8'), 'preserve external user content')
+      assert.deepEqual(await f.catalog.snapshot(), f.before)
+      return
+    }
+    const first = role.finishRoot()
+    assert.equal(role.finishRoot(), first)
+    const selected = await first, after = await f.catalog.snapshot()
+    assert.equal(selected.catalog_sha256, sha256CanonicalJson(after))
+    assert.equal(after.storage_root, f.target)
+    assert.equal(after.revision, f.before.revision + 1)
+    assert.equal(fs.readFileSync(path.join(f.target, 'default/file'), 'utf8'), 'original bytes')
+    assert.equal(fs.existsSync(f.source), crossVolume)
+    if (crossVolume) assert.equal(fs.readFileSync(path.join(f.source, 'default/file'), 'utf8'), 'original bytes')
+    assert.equal(fs.existsSync(path.join(f.data, 'workspace-control/relocation-active')), true)
+    assert.equal(records.readWorkspaceInterruptedRelocationCheckpoint(f.data, f.id).completion, null)
+    await role.verify()
+    for (const fact of checkpoint.materials) assert.deepEqual(records.readWorkspaceInterruptedRelocationCheckpoint(f.data, f.id).materials.find(item => item.name === fact.name), fact)
+  } finally { role.close(); await ended }
+})
+}
 
 test('interrupted checkpoint crosses closure commit before catalog selection and never classifies it as rollback', async t => {
   const f = await stageFixture(t)

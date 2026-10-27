@@ -1626,18 +1626,29 @@ const readRootPlanState = recordGraphReader(function readRootPlanState(dataDir, 
 export const readWorkspaceRelocationRootPlan = recordGraphReader(function readWorkspaceRelocationRootPlan(dataDir, id) { return readRootPlanState(dataDir, id)?.record ?? null })
 export async function prepareWorkspaceRelocationRootPlan({ dataDir, id, signal }) {
   const { ctx, intent, verify } = workspaceFileCoordinatorContext(dataDir, id, signal)
+  return prepareRootPlanForContext({ dataDir, id, signal, ctx, intent, verify,
+    authorize: () => verifyWorkspaceRelocationClosureReadiness({ dataDir, id, signal }) })
+}
+/** Neutral fixed Root effects; the interrupted caller supplies its current role. */
+export async function prepareWorkspaceRelocationRootPlanUnderAuthority({ dataDir, id, signal, authorize, assertCurrent, temporaryDirectory }) {
+  if (typeof authorize !== 'function' || typeof assertCurrent !== 'function') fail()
+  await authorize()
+  const { ctx, intent } = coordinatorContext(dataDir, id)
+  return prepareRootPlanForContext({ dataDir, id, signal, ctx, intent, verify: assertCurrent, authorize, temporaryDirectory })
+}
+async function prepareRootPlanForContext({ dataDir, id, signal, ctx, intent, verify, authorize, temporaryDirectory }) {
   verify()
   const previous = readWorkspaceRelocationRootPlan(dataDir, id)
   if (previous) { syncIntent(ctx); return { dispatch: 'observe', plan: previous } }
-  await verifyWorkspaceRelocationClosureReadiness({ dataDir, id, signal })
+  await authorize()
   const agent = await import('../../crabot-agent/dist/core/workspace-relocation-closed-evidence.js')
-  const evidence = await agent.inspectWorkspaceRelocationClosures({ dataDir, id, signal, verify: () => verifyWorkspaceRelocationClosureReadiness({ dataDir, id, signal }) })
+  const evidence = await agent.inspectWorkspaceRelocationClosures({ dataDir, id, signal, verify: authorize })
   const actors = readWorkspaceRelocationFileActors(dataDir, id), catalog = new WorkspaceCatalog({ dataRoot: ctx.dataRoot, storageRoot: process.env.WORKER_WORKSPACES_DIR, files: native })
   const filePlan = readWorkspaceRelocationFilePlan(dataDir, id)
   const before = await catalog.snapshot(), bindings = readWorkspaceRelocationClosureBindings(dataDir, id)
   if (sha256CanonicalJson(before) !== bindings.catalog_sha256 || before.revision !== intent.catalog_revision || before.storage_root !== intent.source.path) fail()
   const after = projectWorkspaceCatalogRelocation(before, intent.target)
-  const preparedParents = await prepareWorkspaceRelocationRootParents({ dataDir, id, signal, ctx, intent, filePlan, evidence, verify })
+  const preparedParents = await prepareWorkspaceRelocationRootParents({ dataDir, id, signal, ctx, intent, filePlan, evidence, verify, authorize, temporaryDirectory })
   const parent = preparedParents.parent
   const empty = intent.target_identity ? rootFrame(intent.target) : null
   const publication = { intent_id: id, container: { ...actors.staging.container, native_id: actors.staging.container_native_id },
@@ -1660,8 +1671,8 @@ export async function prepareWorkspaceRelocationRootPlan({ dataDir, id, signal }
   if (sha256CanonicalJson(await catalog.snapshot()) !== bindings.catalog_sha256) fail()
   publishPrivateJson(ctx, path.join(ctx.control, rootPlanFile), record, scopeLimit, () => {
     verifyInput(); if (readWorkspaceRelocationRootPlan(dataDir, id)) fail()
-  })
-  await verifyWorkspaceRelocationClosureReadiness({ dataDir, id, signal }); verifyInput()
+  }, temporaryDirectory)
+  await authorize(); verifyInput()
   const accepted = readWorkspaceRelocationRootPlan(dataDir, id)
   if (sha256CanonicalJson(accepted) !== sha256CanonicalJson(record)) fail()
   return { dispatch: 'dispatch', plan: accepted }
@@ -1691,7 +1702,10 @@ export const readWorkspaceRelocationRootSelected = recordGraphReader(function re
   return record
 })
 function workspaceRootContext(dataDir, id, signal) {
-  const base = workspaceFileCoordinatorContext(dataDir, id, signal), plan = readWorkspaceRelocationRootPlan(dataDir, id)
+  return rootContextForAuthority(workspaceFileCoordinatorContext(dataDir, id, signal), dataDir, id)
+}
+function rootContextForAuthority(base, dataDir, id) {
+  const plan = readWorkspaceRelocationRootPlan(dataDir, id)
   if (!plan) fail()
   const planHash = sha256CanonicalJson(plan), actors = readWorkspaceRelocationFileActors(dataDir, id), actorsHash = sha256CanonicalJson(actors)
   const fileScope = [actors.host.process, ...(actors.tools?.tools ?? []).map(item => item.process)]
@@ -1760,7 +1774,16 @@ async function inspectRootTarget(root, evidence, signal) {
   return { verify: verifyTarget, content_sha256: content.fingerprint, metadata_sha256: original.metadata_fingerprint }
 }
 export async function publishWorkspaceRelocationRoot({ dataDir, id, signal }) {
-  const root = workspaceRootContext(dataDir, id, signal), { ctx, plan, planHash, verify } = root
+  return publishRootForContext(workspaceRootContext(dataDir, id, signal), { dataDir, id, signal })
+}
+export async function publishWorkspaceRelocationRootUnderAuthority({ dataDir, id, signal, authorize, assertCurrent, temporaryDirectory }) {
+  if (typeof authorize !== 'function' || typeof assertCurrent !== 'function') fail()
+  await authorize()
+  const base = { ...coordinatorContext(dataDir, id), verify: assertCurrent }
+  return publishRootForContext(rootContextForAuthority(base, dataDir, id), { dataDir, id, signal, temporaryDirectory })
+}
+async function publishRootForContext(root, { dataDir, id, signal, temporaryDirectory }) {
+  const { ctx, plan, planHash, verify } = root
   const previous = readWorkspaceRelocationRootPublished(dataDir, id)
   const catalog = new WorkspaceCatalog({ dataRoot: ctx.dataRoot, storageRoot: process.env.WORKER_WORKSPACES_DIR, files: native })
   const projection = await rootCatalogProjection(catalog, plan, root.intent)
@@ -1785,13 +1808,22 @@ export async function publishWorkspaceRelocationRoot({ dataDir, id, signal }) {
   publishPrivateJson(ctx, path.join(ctx.control, rootPublishedFile), record, 65536, () => {
     verify(); evidence.verify()
     if (readWorkspaceRelocationRootPublished(dataDir, id)) fail()
-  })
+  }, temporaryDirectory)
   await proof.verify()
   if (sha256CanonicalJson(readWorkspaceRelocationRootPublished(dataDir, id)) !== sha256CanonicalJson(record)) fail()
   return { dispatch: 'dispatch', published_sha256: sha256CanonicalJson(record) }
 }
 export async function selectWorkspaceRelocationRoot({ dataDir, id, signal }) {
-  const root = workspaceRootContext(dataDir, id, signal), { ctx, plan, planHash, verify } = root
+  return selectRootForContext(workspaceRootContext(dataDir, id, signal), { dataDir, id, signal })
+}
+export async function selectWorkspaceRelocationRootUnderAuthority({ dataDir, id, signal, authorize, assertCurrent, temporaryDirectory }) {
+  if (typeof authorize !== 'function' || typeof assertCurrent !== 'function') fail()
+  await authorize()
+  const base = { ...coordinatorContext(dataDir, id), verify: assertCurrent }
+  return selectRootForContext(rootContextForAuthority(base, dataDir, id), { dataDir, id, signal, temporaryDirectory })
+}
+async function selectRootForContext(root, { dataDir, id, signal, temporaryDirectory }) {
+  const { ctx, plan, planHash, verify } = root
   const published = readWorkspaceRelocationRootPublished(dataDir, id), previous = readWorkspaceRelocationRootSelected(dataDir, id)
   if (!published) fail()
   const publishedHash = sha256CanonicalJson(published)
@@ -1817,7 +1849,7 @@ export async function selectWorkspaceRelocationRoot({ dataDir, id, signal }) {
   }
   publishPrivateJson(ctx, path.join(ctx.control, rootSelectedFile), record, 65536, () => {
     verifyPublished(); if (readWorkspaceRelocationRootSelected(dataDir, id)) fail()
-  })
+  }, temporaryDirectory)
   await proof.verify(); verifyPublished()
   if (sha256CanonicalJson(await catalog.snapshot()) !== plan.catalog_after_sha256
     || sha256CanonicalJson(readWorkspaceRelocationRootSelected(dataDir, id)) !== sha256CanonicalJson(record)) fail()
@@ -1920,9 +1952,9 @@ function verifyRootParentsState(plan, intent, payload) {
   }
   if (payload && staged) fail()
 }
-async function prepareWorkspaceRelocationRootParents({ dataDir, id, signal, ctx, intent, filePlan, evidence, verify }) {
+async function prepareWorkspaceRelocationRootParents({ dataDir, id, signal, ctx, intent, filePlan, evidence, verify, authorize, temporaryDirectory }) {
   const check = () => { verify(); verifyRootStagingParent(filePlan); evidence.verify() }
-  const checkReady = async () => { check(); await verifyWorkspaceRelocationClosureReadiness({ dataDir, id, signal }); check() }
+  const checkReady = async () => { check(); await authorize(); check() }
   await checkReady()
   let plan = readWorkspaceRelocationRootParentsPlan(dataDir, id)
   if (!plan) {
@@ -1963,7 +1995,7 @@ async function prepareWorkspaceRelocationRootParents({ dataDir, id, signal, ctx,
     publishPrivateJson(ctx, path.join(ctx.control, rootParentsFile), plan, scopeLimit, () => {
       check(); verifyRootParentsState(plan, intent)
       if (readWorkspaceRelocationRootParentsPlan(dataDir, id)) fail()
-    })
+    }, temporaryDirectory)
   }
   const planHash = sha256CanonicalJson(plan)
   const verifyPlan = async () => {
@@ -1980,7 +2012,7 @@ async function prepareWorkspaceRelocationRootParents({ dataDir, id, signal, ctx,
   else publishPrivateJson(ctx, path.join(ctx.control, rootParentsCompleteFile), record, 65536, () => {
     check(); verifyRootParentsState(plan, intent)
     if (sha256CanonicalJson(readWorkspaceRelocationRootParentsPlan(dataDir, id)) !== planHash || readWorkspaceRelocationRootParentsComplete(dataDir, id)) fail()
-  })
+  }, temporaryDirectory)
   await verifyPlan()
   if (sha256CanonicalJson(readWorkspaceRelocationRootParentsComplete(dataDir, id)) !== sha256CanonicalJson(record)) fail()
   return { parent: record.target_parent, commit_sha256: sha256CanonicalJson(record), plan }

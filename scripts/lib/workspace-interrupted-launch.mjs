@@ -154,6 +154,25 @@ export async function launchWorkspaceInterruptedRecoveryCoordinator(options) {
       verification = managerRecovery
       return managerRecovery
     }
-    return Object.freeze({ child, launch, ready, verify, restoreSource, archiveSource, prepareSourceBusiness, releaseSource, finishClosures, finishManagerRecovery, close })
+    let root
+    const finishRoot = () => {
+      if (root) return root
+      root = verification.then(async () => {
+        const message = { kind: 'workspace_interrupted_finish_root', recovery_id: request.recovery_id, launch_sha256: hash(launch), ready_sha256: hash(ready), nonce: randomUUID() }
+        let result
+        await exchange(message, reply => {
+          const selected = readWorkspaceInterruptedRelocationCheckpoint(options.dataDir, request.intent_id).selected
+          if (!exact(reply, ['kind', 'recovery_id', 'launch_sha256', 'ready_sha256', 'nonce', 'result']) || reply.kind !== 'workspace_interrupted_root_finished'
+            || ['recovery_id', 'launch_sha256', 'ready_sha256', 'nonce'].some(key => reply[key] !== message[key])
+            || !exact(reply.result, ['selected', 'selected_sha256', 'catalog_sha256']) || reply.result.selected !== true || !selected
+            || reply.result.selected_sha256 !== hash(selected) || reply.result.catalog_sha256 !== selected.catalog_sha256) return false
+          result = Object.freeze({ ...reply.result }); return true
+        }, 240000)
+        return result
+      }).catch(cause => { close(); throw Object.assign(failure(), { cause }) })
+      verification = root
+      return root
+    }
+    return Object.freeze({ child, launch, ready, verify, restoreSource, archiveSource, prepareSourceBusiness, releaseSource, finishClosures, finishManagerRecovery, finishRoot, close })
   } catch (cause) { close(); throw Object.assign(failure(), { cause }) }
 }

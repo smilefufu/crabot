@@ -63,12 +63,13 @@ export function readWorkspaceInterruptedRecoveryRole(dataDir, recoveryId) {
 function assertForwardProgress(original, current) {
   assertWorkspaceInterruptedCheckpointSnapshot(original)
   if (original.action !== 'finish_commit' || current.action !== 'finish_commit' || !original.closure_plan) throw failure()
-  const immutable = ({ checkpoint_sha256, materials, closure_commit, recovery_plan, recovery_commit, ...facts }) => facts
+  const immutable = ({ checkpoint_sha256, materials, closure_commit, recovery_plan, recovery_commit, parents_plan, parents_complete, root_plan, published, selected, ...facts }) => facts
   if (hash(immutable(original)) !== hash(immutable(current)) || original.closure_commit && hash(original.closure_commit) !== hash(current.closure_commit)) throw failure()
-  for (const key of ['recovery_plan', 'recovery_commit']) if (original[key] && hash(original[key]) !== hash(current[key])) throw failure()
+  for (const key of ['recovery_plan', 'recovery_commit', 'parents_plan', 'parents_complete', 'root_plan', 'published', 'selected']) if (original[key] && hash(original[key]) !== hash(current[key])) throw failure()
   const before = new Map(original.materials.map(item => [item.name, item])), after = new Map(current.materials.map(item => [item.name, item]))
   for (const [name, fact] of before) if (hash(after.get(name)) !== hash(fact)) throw failure()
-  const allowed = new Set(['relocation-worker-commits/complete.json', 'relocation-manager-closure.json', 'relocation-manager-complete.json'])
+  const allowed = new Set(['relocation-worker-commits/complete.json', 'relocation-manager-closure.json', 'relocation-manager-complete.json',
+    'relocation-root-parents.json', 'relocation-root-parents-complete.json', 'relocation-root-plan.json', 'relocation-root-published.json', 'relocation-root-selected.json'])
   for (const [index, ledger] of original.closure_plan.ledgers.entries()) if (ledger.before_sha256 !== ledger.after_sha256) {
     allowed.add('relocation-worker-commits/' + index + '.prepared.json'); allowed.add('relocation-worker-commits/' + index + '.closed.json')
   }
