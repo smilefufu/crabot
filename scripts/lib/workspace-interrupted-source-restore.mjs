@@ -4,7 +4,8 @@ import path from 'node:path'
 import native from './process-identity.cjs'
 import exits from './known-process-exit.cjs'
 import { verifyWorkspaceInterruptedRecoveryRole } from './workspace-interrupted-role.mjs'
-import { inspectWorkspaceInterruptedRelocation } from './workspace-interrupted-recovery.mjs'
+import { inspectWorkspaceInterruptedRelocation, inspectWorkspaceInterruptedCheckpoint } from './workspace-interrupted-recovery.mjs'
+import { readPendingWorkspaceSourceRestoration, workspaceSourceRestorationPaths } from './workspace-interrupted-source-records.mjs'
 import { readWorkspaceInterruptedRelocationCheckpoint } from './workspace-relocation-intent.mjs'
 import { sha256CanonicalJson as hash } from '../../crabot-shared/dist/canonical-json.js'
 import { createWorkspaceMaintenanceFileAccess } from '../../crabot-agent/dist/core/workspace-maintenance-files.js'
@@ -19,6 +20,16 @@ function executionExited(checkpoint) {
 }
 export async function restoreWorkspaceInterruptedSource({ dataDir, recoveryId, launchHash, signal }) {
   const roleOptions = { dataDir, recoveryId, launchHash }, role = verifyWorkspaceInterruptedRecoveryRole(roleOptions), request = role.launch.request
+  const ctx = workspaceSourceRestorationPaths(dataDir, request.intent_id)
+  if (fs.existsSync(ctx.fence)) {
+    const pending = readPendingWorkspaceSourceRestoration(dataDir, request.intent_id)
+    const verify = () => { verifyWorkspaceInterruptedRecoveryRole(roleOptions); executionExited(pending.checkpoint) }
+    const observed = await inspectWorkspaceInterruptedCheckpoint(pending.checkpoint, verify, signal)
+    const { readJson } = createWorkspaceMaintenanceFileAccess(failure)
+    const complete = readJson(path.join(pending.role.launch.control_root.path, 'source-complete.json'))
+    if (!observed.positions.source || observed.content.fingerprint !== complete.content_sha256) throw failure()
+    return Object.freeze({ source_restored: true, source: observed.positions.source.path, retained_staging: observed.positions.container?.path ?? null })
+  }
   const parentPath = path.dirname(readWorkspaceInterruptedRelocationCheckpoint(dataDir, request.intent_id).intent.source.path)
   const parentFrame = () => {
     const stat = fs.lstatSync(parentPath, { bigint: true })

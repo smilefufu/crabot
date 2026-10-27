@@ -6,7 +6,8 @@ import { randomUUID } from 'node:crypto'
 import native from './process-identity.cjs'
 import { captureSpawnedProcessTree } from './spawned-process-tree.cjs'
 import { commitWorkspaceInterruptedRecoveryLaunch, readWorkspaceInterruptedRecoveryRole, parseWorkspaceInterruptedRecoveryRequest } from './workspace-interrupted-role.mjs'
-import { readWorkspaceInterruptedRelocationCheckpoint } from './workspace-relocation-intent.mjs'
+import { readPendingWorkspaceSourceRestoration } from './workspace-interrupted-source-records.mjs'
+import { readWorkspaceRelocationIntent, readWorkspaceInterruptedRelocationCheckpoint } from './workspace-relocation-intent.mjs'
 import { sha256CanonicalJson as hash } from '../../crabot-shared/dist/canonical-json.js'
 const entry = fileURLToPath(new URL('../workspace-interrupted-coordinator.mjs', import.meta.url))
 const failure = () => Object.assign(new Error('本次迁移恢复交接尚未确认，维护保护已保留；未重新启动协调器。'), { code: 'CRABOT_WORKSPACE_RECOVERY_COORDINATOR' })
@@ -19,7 +20,8 @@ export async function launchWorkspaceInterruptedRecoveryCoordinator(options) {
       || typeof options.releaseParentLock !== 'function' || process.versions.electron) throw failure()
     const request = parseWorkspaceInterruptedRecoveryRequest(options.request)
     await options.verify()
-    const original = readWorkspaceInterruptedRelocationCheckpoint(options.dataDir, request.intent_id)
+    const original = readWorkspaceRelocationIntent(options.dataDir) ? readWorkspaceInterruptedRelocationCheckpoint(options.dataDir, request.intent_id)
+      : readPendingWorkspaceSourceRestoration(options.dataDir, request.intent_id).checkpoint
     if (readWorkspaceInterruptedRecoveryRole(options.dataDir, request.recovery_id).launch) throw failure()
     const allowed = new Set(['PATH', 'HOME', 'USERPROFILE', 'SYSTEMROOT', 'WINDIR', 'TEMP', 'TMP', 'TMPDIR', 'LANG', 'LC_ALL', 'LC_CTYPE'])
     const env = Object.fromEntries(Object.entries(process.env).filter(([key, value]) => value !== undefined && allowed.has(key.toUpperCase())))
@@ -78,7 +80,29 @@ export async function launchWorkspaceInterruptedRecoveryCoordinator(options) {
       verification = restoration
       return restoration
     }
+    let archive
+    const archiveSource = () => {
+      if (archive) return archive
+      archive = verification.then(async () => {
+        const message = { kind: 'workspace_interrupted_archive_source', recovery_id: request.recovery_id, launch_sha256: hash(launch), ready_sha256: hash(ready), nonce: randomUUID() }
+        await exchange(message, reply => hash(reply) === hash({ ...message, kind: 'workspace_interrupted_source_archived', result: { source_restored: true, service_restored: false } }), 240000)
+        return Object.freeze({ source_restored: true, service_restored: false })
+      }).catch(cause => { close(); throw Object.assign(failure(), { cause }) })
+      verification = archive
+      return archive
+    }
+    let business
+    const prepareSourceBusiness = () => {
+      if (business) return business
+      business = verification.then(async () => {
+        const message = { kind: 'workspace_interrupted_prepare_source_business', recovery_id: request.recovery_id, launch_sha256: hash(launch), ready_sha256: hash(ready), nonce: randomUUID() }
+        await exchange(message, reply => hash(reply) === hash({ ...message, kind: 'workspace_interrupted_source_business_prepared', result: { prepared: true } }), 240000)
+        return Object.freeze({ prepared: true })
+      }).catch(cause => { close(); throw Object.assign(failure(), { cause }) })
+      verification = business
+      return business
+    }
     await verify()
-    return Object.freeze({ child, launch, ready, verify, restoreSource, close })
+    return Object.freeze({ child, launch, ready, verify, restoreSource, archiveSource, prepareSourceBusiness, close })
   } catch (cause) { close(); throw Object.assign(failure(), { cause }) }
 }

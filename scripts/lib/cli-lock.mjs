@@ -67,6 +67,20 @@ export async function acquireWorkspaceRelocationLock(dataDir, id, waitMs = 5000)
   })
 }
 
+// Only the explicit interrupted job, including its guarded source-restored handoff.
+export async function acquireWorkspaceInterruptedRecoveryLock(dataDir, id, waitMs = 5000) {
+  const records = await import('./workspace-relocation-intent.mjs')
+  const source = await import('./workspace-interrupted-source-records.mjs')
+  const binding = () => {
+    if (records.readWorkspaceRelocationIntent(dataDir)) return records.readWorkspaceInterruptedRelocationCheckpoint(dataDir, id).checkpoint_sha256
+    return source.readPendingWorkspaceSourceRestoration(dataDir, id).checkpoint.checkpoint_sha256
+  }
+  const original = binding()
+  return acquire(dataDir, 'workspace-interrupted-recovery', waitMs, undefined, () => {
+    if (binding() !== original) throw workspace.failure()
+  }, true)
+}
+
 // A new recovery owner's mutex only. No old launch, bearer, or business action is revived.
 export async function acquireWorkspaceRelocationRecoveryLock(dataDir, id, waitMs = 5000) {
   const records = await import('./workspace-relocation-intent.mjs')

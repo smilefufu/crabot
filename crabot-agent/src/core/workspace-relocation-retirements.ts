@@ -111,7 +111,7 @@ function readDocuments(directory: string, temporary?: string, allowEmpty = false
   return documents
 }
 
-function recordsFor(documents: RetirementDocument[]): Map<string, string> {
+function recordsFor(documents: ReadonlyArray<{ records: ReadonlyArray<RetiredRecovery> }>): Map<string, string> {
   const records = new Map<string, string>()
   for (const document of documents) for (const record of document.records) {
     const identity = recordIdentity(record), value = recordValue(record), previous = records.get(identity)
@@ -135,6 +135,12 @@ export class WorkspaceRelocationRetirements {
         records = recordsFor(readDocuments(directory))
         scope.verify()
       } finally { scope.close() }
+    }
+    const restored = require('../../../scripts/lib/workspace-interrupted-source-records.mjs').listWorkspaceSourceRestorations(this.dataDir)
+    const sourceRecords = recordsFor(restored.map((item: any) => ({ records: item.scope.recovery_snapshot.records })))
+    for (const [identity, value] of sourceRecords) {
+      if (records.has(identity) && records.get(identity) !== value) throw failure()
+      records.set(identity, value)
     }
     this.records = records
   }

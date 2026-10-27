@@ -42,7 +42,15 @@ function positions(state) {
 
 /** Checkpoint and physical position/content facts only; never a stop, move, cleanup or release permit. */
 export async function inspectWorkspaceInterruptedRelocation({ dataDir, id, signal }) {
-  const checkpoint = readWorkspaceInterruptedRelocationCheckpoint(dataDir, id), before = positions(checkpoint)
+  const checkpoint = readWorkspaceInterruptedRelocationCheckpoint(dataDir, id)
+  return inspectWorkspaceInterruptedCheckpoint(checkpoint, () => {
+    if (readWorkspaceInterruptedRelocationCheckpoint(dataDir, id).checkpoint_sha256 !== checkpoint.checkpoint_sha256) fail('observation-changed')
+  }, signal)
+}
+// Neutral physical observation shared by the active and source-restored drivers.
+export async function inspectWorkspaceInterruptedCheckpoint(checkpoint, verify, signal) {
+  verify()
+  const before = positions(checkpoint)
   const mode = checkpoint.file_plan?.mode ?? 'rename'
   const original = before.source ?? (before.published ? before.target : before.tree)
   if (!original) fail('original-directory-missing')
@@ -50,7 +58,7 @@ export async function inspectWorkspaceInterruptedRelocation({ dataDir, id, signa
   // The moved original must still contain the bytes captured before its move.
   // An incomplete cross-volume copy never becomes a replacement for the source.
   if (!before.source && content.fingerprint !== checkpoint.file_plan.source_content_sha256) fail('moved-content-changed')
-  if (signal?.aborted || readWorkspaceInterruptedRelocationCheckpoint(dataDir, id).checkpoint_sha256 !== checkpoint.checkpoint_sha256
-    || hash(positions(checkpoint)) !== hash(before)) fail('observation-changed')
+  verify()
+  if (signal?.aborted || hash(positions(checkpoint)) !== hash(before)) fail('observation-changed')
   return { checkpoint, positions: before, content }
 }

@@ -2571,3 +2571,12 @@ export const readWorkspaceInterruptedRelocationCheckpoint = recordGraphReader(fu
   const action = present.has(closureCommitsDirectory) || facts.published || facts.selected ? 'finish_commit' : 'restore_source'
   return { ...facts, action, materials, checkpoint_sha256: sha256CanonicalJson({ facts, materials, action }) }
 })
+
+
+/** Technical inventory of atomically retained source-restored materials; no moved-root history or role. */
+export const readWorkspaceCancelledRelocationMaterials = recordGraphReader(function readWorkspaceCancelledRelocationMaterials(dataDir, id) {
+  if (!uuid(id)) fail()
+  const ctx = context(dataDir), parent = path.join(ctx.baseControl, 'relocation-cancelled'), job = path.join(parent, id), control = path.join(job, 'original')
+  for (const directory of [ctx.baseControl, parent, job, control]) if (!privateControl(directory)) fail()
+  return workspaceJobMaterials({ ...ctx, control })
+})

@@ -5,6 +5,7 @@ import native from './process-identity.cjs'
 import management from './desktop-management.cjs'
 import exits from './known-process-exit.cjs'
 import { cliLockToken } from './cli-lock.mjs'
+import { readPendingWorkspaceSourceRestoration } from './workspace-interrupted-source-records.mjs'
 import { readWorkspaceInterruptedRelocationCheckpoint } from './workspace-relocation-intent.mjs'
 import { sha256CanonicalJson as hash } from '../../crabot-shared/dist/canonical-json.js'
 import { createWorkspaceMaintenanceFileAccess } from '../../crabot-agent/dist/core/workspace-maintenance-files.js'
@@ -59,7 +60,12 @@ export function readWorkspaceInterruptedRecoveryRole(dataDir, recoveryId) {
   return { launch, ready: ready ?? null }
 }
 function originalScope(ctx, request) {
-  const checkpoint = readWorkspaceInterruptedRelocationCheckpoint(ctx.data, request.intent_id)
+  const active = path.join(ctx.control, 'relocation-active')
+  let checkpoint
+  if (readJson(path.join(ctx.control, 'relocation-source-finalizing.json'))) {
+    checkpoint = readPendingWorkspaceSourceRestoration(ctx.data, request.intent_id).checkpoint
+  } else if (optionalDirectory(active)) checkpoint = readWorkspaceInterruptedRelocationCheckpoint(ctx.data, request.intent_id)
+  else throw failure()
   if (checkpoint.checkpoint_sha256 !== request.checkpoint_sha256) throw failure()
   assertWorkspaceInterruptedActorsExited(checkpoint)
   return checkpoint
@@ -68,7 +74,8 @@ export async function commitWorkspaceInterruptedRecoveryLaunch({ dataDir, reques
   if (typeof verify !== 'function' || process.versions.electron) throw failure()
   const request = parseWorkspaceInterruptedRecoveryRequest(input), ctx = context(dataDir, request.recovery_id)
   const self = native.inspectProcess(process.pid), token = cliLockToken(path.join(ctx.data, 'cli.lock')), data = frame(ctx.data, false), control = frame(ctx.control)
-  const checkpoint = originalScope(ctx, request), active = frame(path.join(ctx.control, 'relocation-active'))
+  const checkpoint = originalScope(ctx, request), activePath = path.join(ctx.control, 'relocation-active')
+  const active = optionalDirectory(activePath) ? frame(activePath) : readPendingWorkspaceSourceRestoration(ctx.data, request.intent_id).original
   const current = () => {
     if (!token || cliLockToken(path.join(ctx.data, 'cli.lock')) !== token || !processIdentity(self) || !processIdentity(coordinator)
       || coordinator.parent !== self.pid || coordinator.owner !== self.owner || coordinator.pid === self.pid
@@ -99,7 +106,8 @@ export function verifyWorkspaceInterruptedRecoveryRole({ dataDir, recoveryId, la
   if (!role.launch || hash(role.launch) !== launchHash || requireReady && !role.ready || !process.connected
     || !cliLockToken(path.join(ctx.data, 'cli.lock')) || !native.sameProcess(role.launch.process, self)
     || !native.sameProcess(role.launch.parent, native.inspectProcess(role.launch.parent.pid))
-    || hash(frame(role.launch.active_root.path)) !== hash(role.launch.active_root)) throw failure()
+    || hash(optionalDirectory(role.launch.active_root.path) ? frame(role.launch.active_root.path)
+      : { ...readPendingWorkspaceSourceRestoration(ctx.data, role.launch.request.intent_id).original, path: role.launch.active_root.path }) !== hash(role.launch.active_root)) throw failure()
   const checkpoint = originalScope(ctx, role.launch.request)
   if (checkpoint.action !== role.launch.action) throw failure()
   return role
