@@ -42,7 +42,8 @@ export function buildGroupPermissionOverrides(
     }
   }
   const sameScopes = (a: string[], b: string[]) => a.length === b.length && a.every((scope, i) => scope === b[i])
-  const sameStorage = current.storage?.workspace_path === base.storage?.workspace_path && current.storage?.access === base.storage?.access
+  const sameStorage = current.storage === base.storage || !!current.storage && !!base.storage && current.storage.access === base.storage.access
+    && ('scope' in current.storage ? 'scope' in base.storage : 'workspace_path' in base.storage && current.storage.workspace_path === base.storage.workspace_path)
   const memory_scopes = previous?.memory_scopes !== undefined && sameScopes(current.memory_scopes, resolveGroupPermissions(sessionId, template, previous).memory_scopes)
     ? previous.memory_scopes : current.memory_scopes
   return {

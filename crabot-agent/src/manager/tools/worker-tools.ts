@@ -350,7 +350,7 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
           description: '交给执行器的任务描述/初始输入。要它目标驱动就把目标写在这里',
         },
         impl: { type: 'string', enum: WORKER_IMPL_IDS as unknown as string[], description: '执行器实现,缺省按部署偏好' },
-        workspace: { type: 'string', description: '复用的 workspace 路径,缺省新建一个' },
+        workspace: { type: 'string', description: '已确认项目在本机的实际目录；同项目复用同一路径。无法确定项目或远程查询不需要本机项目文件时省略，使用默认工作区的隔离任务目录；远程路径写入任务说明' },
       },
       required: ['title', 'prompt'],
     },

@@ -230,4 +230,10 @@ describe('request spawn binds before any carrier side effect', () => {
     moved.resolved.storage = { workspace_path: path.join(root, 'b'), access: 'read' }
     expect((await boundedRequestPermissions(friend!, moved)).storage?.access).toBe('read')
   })
+  it('an unauthorized explicit local directory fails before Worker creation and says no task executed', async () => {
+    await expect(harness.spawnRequestWorker({ ...params, workspace: path.join(root, 'unapproved') }, caller)).rejects.toThrow('Worker 未创建，任务未执行')
+    expect(provision).not.toHaveBeenCalled(); expect(spawn).not.toHaveBeenCalled()
+    expect((await ledger.getLedger(key)).workers).toHaveLength(0)
+  })
+
 })

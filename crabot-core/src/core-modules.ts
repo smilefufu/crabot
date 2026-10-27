@@ -27,6 +27,7 @@ export function buildCoreModules(o: BuildCoreModulesOpts): CoreModule[] {
   const modules: CoreModule[] = [
     {
       module_id: 'admin-web',
+      data_dir: path.join(o.dataDir, 'admin'),
       module_type: 'admin',
       version: '0.1.0',
       protocol_version: '0.1.0',

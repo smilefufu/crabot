@@ -1,7 +1,7 @@
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
-import type { EffectiveToolCategory } from 'crabot-shared'
+import { isStoragePermission, type EffectiveToolCategory } from 'crabot-shared'
 import type { ResolvedPermissions } from '../types.js'
 import type { PermissionDecision, ToolDefinition } from '../engine/types.js'
 
@@ -69,8 +69,9 @@ export async function checkFileAccess(principal: ReturnType<Principal>, value: s
     const target = await canonicalPath(path.resolve(cwd, value === '~' ? os.homedir() : value.startsWith('~/') ? path.join(os.homedir(), value.slice(2)) : value))
     const ownRoot = await managed?.()
     if (ownRoot && isWithin(ownRoot, target)) return allowed
-    if (!principal.storage) return denied('PERMISSION_DENIED', '未授权额外文件范围')
+    if (!principal.storage || !isStoragePermission(principal.storage)) return denied('PERMISSION_DENIED', '未授权额外文件范围')
     if (write && principal.storage.access !== 'readwrite') return denied('PERMISSION_DENIED', '文件范围只读')
+    if ('scope' in principal.storage) return allowed
     const root = await fs.realpath(principal.storage.workspace_path)
     if (!(await fs.stat(root)).isDirectory()) return denied('PERMISSION_DENIED', '授权文件范围不是目录')
     if (!isWithin(root, target)) return denied('PERMISSION_DENIED', '文件路径超出授权范围')

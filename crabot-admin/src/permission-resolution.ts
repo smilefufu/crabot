@@ -29,7 +29,7 @@ export function unionStorage(
   if (!a) return b ? { ...b } : null
   if (!b) return { ...a }
   // path 一致 → access 按 readwrite > read 取宽
-  if (a.workspace_path === b.workspace_path) {
+  if ('workspace_path' in a && 'workspace_path' in b && a.workspace_path === b.workspace_path) {
     const access: 'read' | 'readwrite' = (a.access === 'readwrite' || b.access === 'readwrite') ? 'readwrite' : 'read'
     return { workspace_path: a.workspace_path, access }
   }

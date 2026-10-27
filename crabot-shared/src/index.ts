@@ -133,3 +133,5 @@ export { parseVoiceConnection, voiceTerminalEntry, voiceSetupStatus } from './vo
 export * from './computer-use.js'
 
 export { geminiApiUrl, geminiApiHeaders, geminiModelId } from './gemini-api.js'
+
+export { isStoragePermission, type StoragePermission, type DirectoryStoragePermission, type AllDirectoriesStoragePermission } from './storage-permission.js'

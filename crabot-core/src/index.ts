@@ -1164,6 +1164,9 @@ export class ModuleManager {
       if (result.kind === 'allow_first_install') {
         const { mkdirSync, writeFileSync } = await import('node:fs')
         mkdirSync(runtime.data_dir, { recursive: true })
+        if (moduleId === 'admin-web' && result.writeVersion === 'v1') {
+          writeFileSync(`${runtime.data_dir}/friend-permission-configs.json`, '[]\n', { flag: 'wx', mode: 0o600 })
+        }
         writeFileSync(`${runtime.data_dir}/SCHEMA_VERSION`, `${result.writeVersion}\n`)
         console.log(`[ModuleManager] ${moduleId}: wrote initial SCHEMA_VERSION = ${result.writeVersion}`)
       }

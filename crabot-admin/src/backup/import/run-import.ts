@@ -1,3 +1,4 @@
+import { parseFriendPermissionRecords, type FriendPermissionRecord } from '../../friend-permission-store.js'
 /**
  * Crabot 原生导入编排：逐类别从归档读 payload → 对每条调注入的 upsert → 汇总 → finalize（reload+push）。
  * 依赖注入：AdminModule 侧接线真实回调（onConflict 绑进闭包），单测注入假回调。
@@ -23,6 +24,7 @@ export type ImportDeps = {
   upsertSubagent?: UpsertFn
   upsertTemplate?: UpsertFn
   upsertFriend?: UpsertFn
+  upsertFriendPermission?: UpsertFn
   upsertSchedule?: UpsertFn
   upsertTask?: UpsertFn
   upsertSessionConfig?: UpsertFn
@@ -68,9 +70,16 @@ export async function runCrabotImport(params: {
   //   - global_model_config.json（单对象非数组，C1 特殊落地）
   //   - agent-configs/crabot-agent.json（P6-D：由 importCoreAgentConfig 单独进 CoreStore）
   //   - channel-configs/<id>.json（随 channel 实例由 upsertChannel 一并写）
-  //   - friend-permission-configs.json（按 friend_id 而非 id，留 C1 决定）
   //   - vendor.yaml（system mode 由 root 管，不导入）
   try {
+    let friendPermissions: FriendPermissionRecord[] = []
+    if (selected.has('config')) {
+      const text = await readArchiveTextFile(archivePath, 'payload/config/friend-permission-configs.json')
+      if (text !== null) {
+        try { friendPermissions = parseFriendPermissionRecords(JSON.parse(text)) }
+        catch { throw new ImportPreflightRejected('INVALID_PARAMS', '好友权限备份格式无法核验，未开始导入') }
+      }
+    }
     // P6-D §3.18.1：全包 preflight 必须先于任何 domain 写入（含 core config）。
     let agentPayload: { coreConfigRaw: Record<string, unknown> | null; archiveRows: unknown[] } | null = null
     if (selected.has('config')) {
@@ -112,6 +121,12 @@ export async function runCrabotImport(params: {
           results.push({ kind: item.kind, id, status: 'failed', reason: String(err) })
         }
       }
+    }
+
+    for (const record of friendPermissions) {
+      if (!deps.upsertFriendPermission) { errors.push('缺少好友权限导入处理器'); break }
+      try { results.push({ kind: 'friend-permission', id: record.friend_id, status: await deps.upsertFriendPermission(record) }) }
+      catch (error) { results.push({ kind: 'friend-permission', id: record.friend_id, status: 'failed', reason: String(error) }) }
     }
 
     // channels 实例（带 config）单独走 upsertChannel

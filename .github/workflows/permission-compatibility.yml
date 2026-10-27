@@ -1,0 +1,91 @@
+name: Directory permission upgrade compatibility
+on:
+  workflow_dispatch:
+  push:
+    branches: ['feat/desktop-permissions-compatibility']
+  pull_request:
+    paths:
+      - 'crabot-shared/**'
+      - 'crabot-admin/**'
+      - 'crabot-agent/**'
+      - 'crabot-core/**'
+      - 'scripts/upgrade-lib/**'
+      - 'scripts/lib/admin-data-compat.mjs'
+      - 'scripts/lib/__tests__/admin-data-compat.test.mjs'
+      - '.github/workflows/permission-compatibility.yml'
+permissions:
+  contents: read
+jobs:
+  compatibility:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, macos-15-intel, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.3'
+      - name: Build Shared and install this branch's frozen dependencies
+        shell: bash
+        run: |
+          set -e
+          pnpm install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-shared install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-shared run build
+          for package in crabot-core crabot-admin crabot-agent crabot-admin/web; do
+            pnpm --dir "$package" install --frozen-lockfile --ignore-scripts
+          done
+      - name: Build actual Core, Admin, Agent and Web
+        shell: bash
+        run: |
+          set -e
+          for package in crabot-core crabot-admin crabot-agent; do
+            pnpm --dir "$package" run build
+          done
+          pnpm --dir crabot-admin/web run build
+      - name: Validate strict directory records and old target rejection
+        shell: bash
+        run: |
+          set -e
+          node --test scripts/lib/__tests__/admin-data-compat.test.mjs
+          cd crabot-shared
+          node --import tsx --test src/storage-permission.test.ts
+      - name: Verify initial Admin version before a new conversation
+        working-directory: crabot-core
+        run: node node_modules/vitest/vitest.mjs run src/admin-first-install.test.ts src/schema-check.test.ts src/core-modules.test.ts --maxWorkers=1 --minWorkers=1
+      - name: Verify real bounded metadata migration and permission inheritance
+        working-directory: crabot-admin
+        run: >-
+          node node_modules/vitest/vitest.mjs run
+          src/friend-permission-store.test.ts src/legacy-directory-migration.test.ts
+          src/permission-entry-compat.test.ts src/friend-permission-cli-access.test.ts
+          src/group-session-config.test.ts src/group-session-permissions.test.ts
+          src/request-permission-sources.test.ts src/permission-template-cli-access.test.ts
+          src/permission-resolution.test.ts src/shared-request-impact.test.ts src/backup/import/run-import.test.ts
+          --maxWorkers=1 --minWorkers=1
+      - name: Verify upgraded project dispatch and actual file access without a model
+        working-directory: crabot-agent
+        run: >-
+          node node_modules/vitest/vitest.mjs run
+          tests/permissions/all-directories.test.ts tests/permissions/legacy-directory-upgrade.test.ts
+          tests/workers/harness/context-store.test.ts tests/workers/harness/request-spawn.test.ts
+          tests/permissions/harness-admission.test.ts tests/permissions/entry-contract.test.ts
+          tests/manager/project-doc-tools.test.ts tests/manager/request-permission-gate.test.ts
+          --maxWorkers=1 --minWorkers=1
+      - name: Verify existing bounded migration transactions
+        working-directory: scripts/upgrade-lib
+        run: >-
+          node ../../node_modules/vitest/vitest.mjs run --config vitest.config.mjs
+          __tests__/migrate.test.mjs __tests__/scoped-migration.test.mjs __tests__/prepared-upgrade.test.mjs
+          --maxWorkers=1 --minWorkers=1
+      - name: Verify directory editor, inheritance reset and request display
+        working-directory: crabot-admin/web
+        run: >-
+          node node_modules/vitest/vitest.mjs run
+          src/components/StoragePermissionEditor.test.tsx src/pages/DialogObjects/ src/pages/Permissions/
+          src/pages/Traces/RequestAuthority.test.tsx src/services/friend.test.ts
+          --maxWorkers=1 --minWorkers=1

@@ -1,12 +1,12 @@
 import { randomUUID } from 'crypto'
-import { canonicalizeJson } from 'crabot-shared'
+import { canonicalizeJson, isStoragePermission } from 'crabot-shared'
 import { AsyncMutex } from '../async-mutex.js'
 import { assertConversationRequestBinding } from './request-binding.js'
 import type { ConversationRequestBinding } from '../../manager/conversation-request.js'
 import { promises as fs } from 'fs'
 import { join } from 'path'
 
-import { CLI_DOMAINS, type CliAccessConfig, type ResolvedPermissions, type StoragePermission, type ToolAccessConfig } from '../../types.js'
+import { CLI_DOMAINS, type CliAccessConfig, type ResolvedPermissions, type ToolAccessConfig } from '../../types.js'
 
 const CONTEXT_FILE = 'context.json'
 const CONTEXT_KEYS = ['principal_permissions', 'manager_key', 'target_session', 'creator_friend_id', 'schema_version', 'request']
@@ -46,10 +46,6 @@ function hasOnlyKeys(value: Record<string, unknown>, keys: readonly string[]): b
   return Object.keys(value).every((key) => keys.includes(key))
 }
 
-function isStoragePermission(value: unknown): value is StoragePermission | null {
-  return value === null || (isRecord(value) && hasOnlyKeys(value, ['workspace_path', 'access']) &&
-    typeof value.workspace_path === 'string' && (value.access === 'read' || value.access === 'readwrite'))
-}
 
 export function isResolvedPermissionsSnapshot(value: unknown): value is ResolvedPermissions {
   if (!isRecord(value) || !hasOnlyKeys(value, ['tool_access', 'cli_access', 'storage', 'memory_scopes'])) return false

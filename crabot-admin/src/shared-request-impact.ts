@@ -1,9 +1,10 @@
+import { parseFriendPermissionRecords } from './friend-permission-store.js'
 import fs from 'node:fs/promises'
 import { EFFECTIVE_TOOL_CATEGORIES } from 'crabot-shared'
 import path from 'node:path'
 import { PermissionTemplateManager } from './permission-template-manager.js'
 import { parseGroupSessionConfigRecord } from './group-session-config.js'
-import { CLI_DOMAINS, createCliAccessConfig, type Friend, type FriendPermissionConfig, type PermissionTemplate, type ResolvedPermissions } from './types.js'
+import { CLI_DOMAINS, createCliAccessConfig, type Friend, type FriendPermissionConfig, type PermissionTemplate, type ResolvedPermissions, type StoragePermission } from './types.js'
 
 const rank = { none: 0, read: 1, write: 2 }
 function coversPath(parent: string, child: string): boolean {
@@ -12,11 +13,11 @@ function coversPath(parent: string, child: string): boolean {
   return relative === '' || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative))
 }
 /** A read-only projection of Admin.buildResolvedFriendPermissions; regression-tested against the live resolver. */
-export function impactFriendPermissions(friend: Friend, config: FriendPermissionConfig | undefined, templates: PermissionTemplateManager): ResolvedPermissions | null {
+export function impactFriendPermissions(friend: Friend, config: FriendPermissionConfig | undefined, templates: PermissionTemplateManager, override?: StoragePermission): ResolvedPermissions | null {
   if (friend.permission === 'master') return templates.resolvePermissions('master_private', null)
   if (config) return { tool_access: { ...config.tool_access, desktop: false }, cli_access: { ...createCliAccessConfig('none'), ...config.cli_access },
     storage: config.storage ? { ...config.storage } : null, memory_scopes: [...config.memory_scopes] }
-  try { return templates.resolvePermissions(friend.permission_template_id ?? 'standard', null) }
+  try { const resolved = templates.resolvePermissions(friend.permission_template_id ?? 'standard', null); return override ? { ...resolved, storage: { ...override } } : resolved }
   catch (error) {
     if (error && typeof error === 'object' && 'code' in error && error.code === 'NOT_FOUND') return null
     throw error
@@ -29,8 +30,8 @@ export function additionalRequestCapabilities(group: ResolvedPermissions, friend
     if (rank[friend.cli_access[key]] > (group.tool_access.shell ? rank[group.cli_access[key]] : 0)) changes.push(`cli:${key}:${friend.cli_access[key]}`)
   }
   if (friend.tool_access.file_io && friend.storage && (!group.tool_access.file_io || !group.storage
-    || !coversPath(group.storage.workspace_path, friend.storage.workspace_path)
-    || friend.storage.access === 'readwrite' && group.storage.access !== 'readwrite')) changes.push(`storage:${friend.storage.access}:${friend.storage.workspace_path}`)
+    || !('scope' in group.storage) && ('scope' in friend.storage || !coversPath(group.storage.workspace_path, friend.storage.workspace_path))
+    || friend.storage.access === 'readwrite' && group.storage.access !== 'readwrite')) changes.push(`storage:${friend.storage.access}:${'scope' in friend.storage ? 'all' : friend.storage.workspace_path}`)
   if (friend.tool_access.memory && group.tool_access.memory) {
     const scopes = group.memory_scopes.length ? group.memory_scopes : groupId ? [groupId] : []
     if (!friend.memory_scopes.length || !groupId && !group.memory_scopes.length || friend.memory_scopes.some(scope => !scopes.includes(scope))) changes.push('memory:additional_query_scope')
@@ -51,7 +52,7 @@ export async function buildSharedRequestImpact(dataRoot: string) {
   templates.loadFromArray(await arrayFile<PermissionTemplate>(path.join(admin, 'templates.json')))
   templates.initSystemTemplates()
   const friends = await arrayFile<Friend>(path.join(admin, 'friends.json'))
-  const configs = new Map((await arrayFile<{ friend_id: string; config: FriendPermissionConfig }>(path.join(admin, 'friend-permission-configs.json'))).map(item => [item.friend_id, item.config]))
+  const configs = new Map(parseFriendPermissionRecords(await arrayFile<unknown>(path.join(admin, 'friend-permission-configs.json'))).map(item => [item.friend_id, item]))
   const unknown: string[] = [], groups = new Map<string, NonNullable<ReturnType<typeof parseGroupSessionConfigRecord>>>()
   for (const raw of await arrayFile<unknown>(path.join(admin, 'session-configs.json'))) {
     const group = parseGroupSessionConfigRecord(raw)
@@ -77,7 +78,7 @@ export async function buildSharedRequestImpact(dataRoot: string) {
     try { group = templates.resolveGroupPermissions(target.config.template_id ?? 'group_default', target.config) }
     catch { group = templates.resolvePermissions('minimal'); unknown.push(`missing_group_template:${target.channel_id}:${target.session_id ?? 'default'}`) }
     for (const friend of friends.filter(friend => friend.channel_identities.some(identity => identity.channel_id === target.channel_id))) {
-      const personal = impactFriendPermissions(friend, configs.get(friend.id), templates)
+      const personal = impactFriendPermissions(friend, configs.get(friend.id)?.config, templates, configs.get(friend.id)?.storage_override)
       if (!personal) { unknown.push(`unavailable_friend_permissions:${friend.id}`); continue }
       const additions = additionalRequestCapabilities(group, personal, target.session_id)
       if (friend.permission === 'master') additions.push('master:verified_request')
