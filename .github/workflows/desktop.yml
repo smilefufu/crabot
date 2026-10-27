@@ -79,12 +79,17 @@ on:
         type: choice
         default: all
         options: [all, linux-x64, darwin-arm64, darwin-x64, win32-x64]
+      suite:
+        description: 'Existing suite to rerun; complete acceptance still requires both'
+        type: choice
+        default: all
+        options: [all, regression, product]
 
 permissions:
   contents: read
 
 concurrency:
-  group: desktop-${{ github.ref }}${{ inputs.target && inputs.target != 'all' && format('-{0}', inputs.target) || '' }}
+  group: desktop-${{ github.ref }}${{ inputs.target && inputs.target != 'all' && format('-{0}', inputs.target) || '' }}${{ inputs.suite && inputs.suite != 'all' && format('-{0}', inputs.suite) || '' }}
   cancel-in-progress: false
 
 defaults:
@@ -103,7 +108,7 @@ jobs:
       # The same-source suites are independent: do not consume the product
       # installation window with the preceding 87-minute Intel regression batch.
       matrix:
-        suite: [regression, product]
+        suite: ${{ fromJSON(inputs.suite && inputs.suite != 'all' && format('["{0}"]', inputs.suite) || '["regression","product"]') }}
         target: ${{ fromJSON(inputs.target && inputs.target != 'all' && format('["{0}"]', inputs.target) || '["linux-x64","darwin-arm64","darwin-x64","win32-x64"]') }}
     runs-on: ${{ fromJSON('{"linux-x64":"ubuntu-24.04","darwin-arm64":"macos-15","darwin-x64":"macos-15-intel","win32-x64":"windows-latest"}')[matrix.target] }}
     steps:
