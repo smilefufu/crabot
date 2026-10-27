@@ -95,8 +95,10 @@ try {
   if (process.platform === 'darwin') {
     // The isolated runner has no unlocked login session. Its blocked Security
     // authorization UI otherwise keeps Chromium alive after the ordinary quit.
-    const security = args => promisify(execFile)('/usr/bin/security', args, { timeout: 10000, maxBuffer: 4096 })
-    previousKeychain = (await security(['default-keychain', '-d', 'user'])).stdout.trim().replace(/^"|"$/g, '')
+    // Security preferences must use the same isolated HOME as the GUI.
+    const security = args => promisify(execFile)('/usr/bin/security', args, { env, timeout: 10000, maxBuffer: 4096 })
+    try { previousKeychain = (await security(['default-keychain', '-d', 'user'])).stdout.trim().replace(/^"|"$/g, '') }
+    catch { previousKeychain = undefined }
     testKeychain = path.join(control, 'acceptance.keychain-db')
     const password = randomBytes(32).toString('hex')
     try {
@@ -178,8 +180,8 @@ try {
     for (const record of children) if (record.identity && identity.sameProcess(record.identity, identity.inspectProcess(record.identity.pid))) process.kill(record.identity.pid, 'SIGKILL')
     await Promise.allSettled(children.map(record => record.exited))
     if (testKeychain) {
-      if (previousKeychain) await promisify(execFile)('/usr/bin/security', ['default-keychain', '-d', 'user', '-s', previousKeychain], { timeout: 10000, maxBuffer: 4096 })
-      await promisify(execFile)('/usr/bin/security', ['delete-keychain', testKeychain], { timeout: 10000, maxBuffer: 4096 })
+      if (previousKeychain) await promisify(execFile)('/usr/bin/security', ['default-keychain', '-d', 'user', '-s', previousKeychain], { env, timeout: 10000, maxBuffer: 4096 })
+      await promisify(execFile)('/usr/bin/security', ['delete-keychain', testKeychain], { env, timeout: 10000, maxBuffer: 4096 })
     }
     await fs.mkdir(path.join(repository, '.desktop-build'), { recursive: true }); await fs.writeFile(path.join(repository, '.desktop-build/uninstall-reinstall.log'), sourceOutput)
     if (!success) await fs.writeFile(path.join(repository, '.desktop-build/uninstall-reinstall-diagnostic.json'), JSON.stringify({

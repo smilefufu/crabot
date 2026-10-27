@@ -127,7 +127,7 @@ try {
         await runUbuntuInstaller({ bundle, root, env, control, version })
       } else {
         try {
-          const installed = await execute(driver, ['--enable-logging=stderr'], { env, timeout: 600000, maxBuffer: 256000 }); output += installed.stdout + installed.stderr
+          const installed = await execute(driver, ['--enable-logging=file', '--log-file=' + path.join(control, 'installer-native.log')], { env, timeout: 600000, maxBuffer: 256000 }); output += installed.stdout + installed.stderr
         } catch (error) {
           output += String(error.stdout ?? '') + String(error.stderr ?? '')
           output += '\nCRABOT_LEGACY_INSTALLER_EXIT ' + JSON.stringify({ code: error.code, signal: error.signal, killed: error.killed }) + '\n'
@@ -190,6 +190,8 @@ try {
           try { diagnostics.push({ name, value: JSON.parse(await fs.readFile(path.join(control, name), 'utf8')) }) }
           catch (error) { if (error.code !== 'ENOENT') diagnostics.push({ name, unavailable: true }) }
         }
+        try { diagnostics.push({ name: 'installer-native.log', text: (await fs.readFile(path.join(control, 'installer-native.log'), 'utf8')).slice(-32000) }) }
+        catch (error) { if (error.code !== 'ENOENT') diagnostics.push({ name: 'installer-native.log', unavailable: true }) }
         await fs.writeFile(path.join(repository, '.desktop-build/legacy-user-diagnostic.json'), JSON.stringify({ version, platform, diagnostics }) + '\n')
       }
       if (!await absent(dataDir) && inspectInstance(dataDir).state === 'running') await stopInstance(dataDir)
