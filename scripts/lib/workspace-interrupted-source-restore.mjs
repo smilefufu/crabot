@@ -44,6 +44,18 @@ function executionExited(checkpoint, options) {
     launch_sha256: hash(role.launch), checkpoint_sha256: checkpoint.checkpoint_sha256, scope_sha256: scopeHash, observed_at: new Date().toISOString() }, verify)
   if (!readWorkspaceInterruptedExecutionExit({ ...options, checkpoint })) throw failure()
 }
+/** Observe only the original stopped scope, before cleaning prior validation carriers. */
+export function observeWorkspaceInterruptedOriginalExit(options) {
+  const role = verifyWorkspaceInterruptedRecoveryRole(options)
+  if (role.launch.action !== 'restore_source') throw failure()
+  const ctx = workspaceSourceRestorationPaths(options.dataDir, role.launch.request.intent_id)
+  const checkpoint = fs.existsSync(ctx.fence)
+    ? readPendingWorkspaceSourceRestoration(options.dataDir, role.launch.request.intent_id).checkpoint
+    : readWorkspaceInterruptedRelocationCheckpoint(options.dataDir, role.launch.request.intent_id)
+  executionExited(checkpoint, options)
+  verifyWorkspaceInterruptedRecoveryRole(options)
+  return Object.freeze({ original_execution_exited: true })
+}
 export async function restoreWorkspaceInterruptedSource({ dataDir, recoveryId, launchHash, signal }) {
   const roleOptions = { dataDir, recoveryId, launchHash }, role = verifyWorkspaceInterruptedRecoveryRole(roleOptions), request = role.launch.request
   const ctx = workspaceSourceRestorationPaths(dataDir, request.intent_id)

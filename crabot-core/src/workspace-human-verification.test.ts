@@ -16,7 +16,7 @@ import { relocationAgentConfig } from '../../crabot-agent/tests/core/fixtures/re
 afterEach(() => vi.restoreAllMocks())
 
 describe('current interrupted source recovery admission', () => {
-  const modes = ['healthy', 'health failure then explicit retry', 'cold Core after failed health', 'released before Web acknowledgement', 'stopped before final exit summary',
+  const modes = ['healthy', 'health failure then explicit retry', 'cold Core after failed health', 'released before Web acknowledgement', 'stopped before final exit summary', 'stopped before final exit summary then explicit retry',
     ...(process.env.GITHUB_ACTIONS === 'true' && process.env.CRABOT_WORKSPACE_BUSINESS_ONSTART_CI === '1' ? ['business onStart', 'business released before Web acknowledgement'] : [])]
   it.each(modes)('restores the actual moved source and exact finite services while keeping the same Admin online: %s', async mode => {
     const business = mode === 'business onStart' || mode === 'business released before Web acknowledgement'
@@ -31,7 +31,7 @@ describe('current interrupted source recovery admission', () => {
       const catalog = new WorkspaceCatalog({ dataRoot: f.data, files: native }), before = await catalog.snapshot()
       if (business) f.manager.modules.get('crabot-agent').skip_health_check = false
       await fs.writeFile(path.join(source, 'default/preserved.txt'), 'original source bytes')
-      const early = mode === 'stopped before final exit summary'
+      const early = mode.startsWith('stopped before final exit summary')
       const prepared = early ? await f.manager.submitWorkspaceRelocationStops(f.params, 'fixture-human')
         : await f.manager.prepareWorkspaceRelocationFiles(f.params, 'fixture-human')
       old = prepared.coordinator
@@ -53,7 +53,7 @@ describe('current interrupted source recovery admission', () => {
       const unhealthy = path.join(f.data, 'validation-health-unhealthy')
       const releasedFailure = mode === 'released before Web acknowledgement' || mode === 'business released before Web acknowledgement', extraUnhealthy = path.join(f.data, 'extra-health-unhealthy')
       if (releasedFailure) await fs.writeFile(extraUnhealthy, 'finite post-release health rejection')
-      const retry = mode === 'health failure then explicit retry' || mode === 'cold Core after failed health'
+      const retry = mode === 'health failure then explicit retry' || mode === 'cold Core after failed health' || mode === 'stopped before final exit summary then explicit retry'
       if (retry) await fs.writeFile(unhealthy, 'finite health rejection')
       const first = f.manager.completeWorkspaceInterruptedSource(context)
       expect(f.manager.completeWorkspaceInterruptedSource(context)).toBe(first)

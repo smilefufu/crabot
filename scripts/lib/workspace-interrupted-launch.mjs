@@ -62,6 +62,17 @@ export async function launchWorkspaceInterruptedRecoveryCoordinator(options) {
       }).catch(cause => { close(); throw Object.assign(failure(), { cause }) })
       return verification
     }
+    let originalExit
+    const observeOriginalExit = () => {
+      if (originalExit) return originalExit
+      originalExit = verification.then(async () => {
+        const message = { kind: 'workspace_interrupted_observe_original_exit', recovery_id: request.recovery_id, launch_sha256: hash(launch), ready_sha256: hash(ready), nonce: randomUUID() }
+        await exchange(message, reply => hash(reply) === hash({ ...message, kind: 'workspace_interrupted_original_exit_observed', result: { original_execution_exited: true } }))
+        return Object.freeze({ original_execution_exited: true })
+      }).catch(cause => { close(); throw Object.assign(failure(), { cause }) })
+      verification = originalExit
+      return originalExit
+    }
     let restoration
     const restoreSource = () => {
       if (restoration) return restoration
@@ -192,6 +203,6 @@ export async function launchWorkspaceInterruptedRecoveryCoordinator(options) {
       verification = forwardPreparation
       return forwardPreparation
     }
-    return Object.freeze({ child, launch, ready, verify, restoreSource, archiveSource, prepareSourceBusiness, releaseSource, finishClosures, finishManagerRecovery, finishRoot, prepareForwardService, close })
+    return Object.freeze({ child, launch, ready, verify, observeOriginalExit, restoreSource, archiveSource, prepareSourceBusiness, releaseSource, finishClosures, finishManagerRecovery, finishRoot, prepareForwardService, close })
   } catch (cause) { close(); throw Object.assign(failure(), { cause }) }
 }

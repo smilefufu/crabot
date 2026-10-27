@@ -1832,16 +1832,14 @@ export class ModuleManager {
     current.completion = Promise.resolve().then(async () => {
       let stage = 'cleanup-runtimes'
       try {
-        const records = require('../../scripts/lib/workspace-relocation-intent.mjs'), sources = require('../../scripts/lib/workspace-interrupted-source-records.mjs')
+        const sources = require('../../scripts/lib/workspace-interrupted-source-records.mjs')
         let source: any, ordered: WorkspaceModuleScope[] = []
         if (current.observing) {
           source = sources.readWorkspaceSourceRecoveryScope(this.dataDir, current.request.intent_id)
           if (!source.released) throw new Error('Original service release is unavailable')
           stage = 'observe-current-runtimes'; await this.observeWorkspaceInterruptedRuntimes(current)
         } else {
-          if (records.readWorkspaceRelocationIntent(this.dataDir) && !records.readWorkspaceInterruptedRelocationCheckpoint(this.dataDir, current.request.intent_id).execution_exit) {
-            stage = 'verify-original-stops'; await current.coordinator.restoreSource()
-          }
+          stage = 'verify-original-stops'; await current.coordinator.observeOriginalExit()
           stage = 'cleanup-runtimes'; await this.cleanupWorkspaceInterruptedRuntimes(current)
           stage = 'restore-source'; await current.coordinator.restoreSource()
           stage = 'archive-source'; await current.coordinator.archiveSource()
