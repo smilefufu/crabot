@@ -73,6 +73,15 @@ if (cfg.publicEntry) {
     return child
   }
   require('node:module').syncBuiltinESMExports()
+  if (cfg.openSourceWindow) {
+    const profile = path.join(cfg.root, 'data/desktop-profile'), temporary = path.join(profile, 'tmp')
+    fs.mkdirSync(temporary, { recursive: true, mode: 0o700 }); app.setPath('userData', profile); app.setPath('sessionData', profile); app.setPath('temp', temporary)
+    void app.whenReady().then(() => {
+      const window = new electron.BrowserWindow({ show: false, webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false } })
+      return window.loadURL('data:text/html,<title>Finite ordinary source window</title>')
+    })
+    app.on('quit', () => console.error('FINITE_SOURCE_QUIT_RESOURCES ' + JSON.stringify(process.getActiveResourcesInfo())))
+  }
   void import(pathToFileURL(path.join(__dirname, 'full-main.js')).href).catch(() => app.exit(1))
   return
 }

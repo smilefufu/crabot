@@ -121,7 +121,9 @@ try {
         for (const name of ['config', 'share', 'cache', 'run']) await fs.mkdir(path.join(home, name), { mode: 0o700 })
         await runUbuntuInstaller({ bundle, root, env, control, version })
       } else {
-        const installed = await execute(driver, [], { env, timeout: 600000, maxBuffer: 256000 }); output += installed.stdout + installed.stderr
+        try {
+          const installed = await execute(driver, [], { env, timeout: 600000, maxBuffer: 256000 }); output += installed.stdout + installed.stderr
+        } catch (error) { output += String(error.stdout ?? '') + String(error.stderr ?? ''); throw error }
       }
       assert.equal(JSON.parse(await fs.readFile(path.join(control, 'installer-handoff.json'), 'utf8')), true)
       assert.ok(JSON.parse(await fs.readFile(path.join(control, 'takeover-confirmed.json'), 'utf8')).detail.includes(version))
@@ -173,6 +175,14 @@ try {
         historical_user_model_session_tested: false, business_model_calls: 0 })
       passed = true; stage('verified')
     } finally {
+      if (!passed) {
+        const diagnostics = []
+        for (const name of ['driver-failed.json', 'takeover-confirmed.json', 'installer-handoff.json']) {
+          try { diagnostics.push({ name, value: JSON.parse(await fs.readFile(path.join(control, name), 'utf8')) }) }
+          catch (error) { if (error.code !== 'ENOENT') diagnostics.push({ name, unavailable: true }) }
+        }
+        await fs.writeFile(path.join(repository, '.desktop-build/legacy-user-diagnostic.json'), JSON.stringify({ version, platform, diagnostics }) + '\n')
+      }
       if (!await absent(dataDir) && inspectInstance(dataDir).state === 'running') await stopInstance(dataDir)
       if (peer && identity.sameProcess(peer, identity.inspectProcess(peer.pid))) process.kill(peer.pid, 'SIGKILL')
       if (exited) await exited

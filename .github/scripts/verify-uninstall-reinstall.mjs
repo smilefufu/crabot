@@ -153,6 +153,11 @@ try {
     registered_native_cli_compatible: true, bundled_node_python_files_verified: true, agent_model_generation_tested: false, real_login_session_verified: false }
   success = true
 } finally {
+  if (!success && process.platform === 'darwin' && children[0]?.identity && identity.sameProcess(children[0].identity, identity.inspectProcess(children[0].identity.pid))) {
+    // One second of this disposable source's native stacks, before fixture cleanup.
+    await promisify(execFile)('/usr/bin/sample', [String(children[0].identity.pid), '1', '1', '-file', path.join(repository, '.desktop-build/uninstall-source-sample.log')],
+      { timeout: 5000, maxBuffer: 65536 }).catch(() => {})
+  }
   try { if (selected && inspectInstance(selected.dataDir).state === 'running') await stopInstance(selected.dataDir) } finally {
     if (host?.identity && identity.sameProcess(host.identity, identity.inspectProcess(host.identity.pid))) process.kill(host.identity.pid, 'SIGKILL')
     for (const record of children) if (record.identity && identity.sameProcess(record.identity, identity.inspectProcess(record.identity.pid))) process.kill(record.identity.pid, 'SIGKILL')

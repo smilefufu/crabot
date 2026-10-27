@@ -23,7 +23,7 @@ console.error = (...args) => {
 // Observe the ordinary Main's actual quit path without bypassing any handler.
 for (const phase of ['before-quit', 'will-quit', 'quit']) app.on(phase, event => {
   console.error('CRABOT_UNINSTALL_QUIT ' + JSON.stringify({ phase, pid: process.pid, prevented: event.defaultPrevented,
-    windows: require('electron').BrowserWindow.getAllWindows().map(window => ({ id: window.id, destroyed: window.isDestroyed() })) }))
+    active_resources: process.getActiveResourcesInfo(), windows: require('electron').BrowserWindow.getAllWindows().map(window => ({ id: window.id, destroyed: window.isDestroyed() })) }))
 })
 app.on('browser-window-created', (_event, window) => window.on('close', event => {
   queueMicrotask(() => console.error('CRABOT_UNINSTALL_WINDOW_CLOSE ' + JSON.stringify({ pid: process.pid, id: window.id, prevented: event.defaultPrevented, destroyed: window.isDestroyed() })))
