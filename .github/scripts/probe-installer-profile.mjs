@@ -7,7 +7,7 @@ import { spawn } from 'node:child_process'
 assert.equal(process.env.GITHUB_ACTIONS, 'true')
 const electron = process.argv[2], temporary = process.env.RUNNER_TEMP
 assert.ok(path.isAbsolute(electron) && temporary && path.isAbsolute(temporary))
-const source = await fs.readFile(new URL('../../crabot-desktop/src/installer-main.ts', import.meta.url), 'utf8')
+const source = (await fs.readFile(new URL('../../crabot-desktop/src/installer-main.ts', import.meta.url), 'utf8')).replaceAll('\r\n', '\n')
 const prefix = source.match(/async function boot\(\) \{\n([\s\S]+?)\n  await app.whenReady\(\)/)?.[1]
 assert.ok(prefix && prefix.includes("app.setPath('sessionData', profile)"))
 const results = []
