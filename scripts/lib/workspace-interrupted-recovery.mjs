@@ -25,8 +25,11 @@ function positions(state) {
   if (source && !matches(intent.source, source, intent.source.path, plan?.source_observation.source_identity.native_id)) fail('source-replaced')
   if (container && (!actors?.staging || !matches(actors.staging.container, container, plan.staging_path, actors.staging.container_native_id))) fail('staging-unsettled')
   if (actors?.staging && !container) fail('staging-missing')
-  if (tree && (!actors?.file_attempt && plan.mode === 'rename' || !matches(plan.mode === 'copy' ? actors?.staging?.tree : intent.source,
-    tree, path.join(plan.staging_path, 'tree'), plan.mode === 'copy' ? actors?.staging?.tree_native_id : plan.source_observation.source_identity.native_id))) fail('tree-replaced')
+  if (tree) {
+    const expected = plan.mode === 'copy' ? actors?.staging?.tree : intent.source
+    const nativeId = plan.mode === 'copy' ? actors?.staging?.tree_native_id : plan.source_observation.source_identity.native_id
+    if (plan.mode === 'rename' && !actors?.file_attempt || !matches(expected, tree, path.join(plan.staging_path, 'tree'), nativeId)) fail('tree-replaced')
+  }
   let published = false
   if (root && target && matches(root.publication.tree, target, intent.target, root.publication.tree.native_id)) {
     inspectPublishedWorkspaceRoot({ plan: root.publication }); published = true

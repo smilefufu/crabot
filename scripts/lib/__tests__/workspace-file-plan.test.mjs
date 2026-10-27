@@ -489,8 +489,8 @@ for (const mode of ['confirmed', 'lost registration', 'lost permission']) test('
 })
 
 
-async function stageFixture(t) {
-  const f = await fixture(t); await f.command(); await f.command('actors-prepare'); await f.command('host-register')
+async function stageFixture(t, options) {
+  const f = await fixture(t, options); await f.command(); await f.command('actors-prepare'); await f.command('host-register')
   return { ...f, actorsFile: path.join(f.data, 'workspace-control/relocation-active/relocation-file-actors.jsonl'), staging: records.readWorkspaceRelocationFilePlan(f.data, f.id).staging_path }
 }
 
@@ -644,4 +644,88 @@ test('interrupted checkpoint crosses closure commit before catalog selection and
   assert.equal(state.selected, null)
   assert.deepEqual(await f.catalog.snapshot(), f.before)
   assert.equal(fs.readFileSync(path.join(f.staging, 'tree/default/file'), 'utf8'), 'original bytes')
+})
+
+
+for (const mode of ['source unchanged', 'source in staging', 'partial cross-volume copy']) test('new recovery generation restores the original source without closing or replaying Workers: ' + mode,
+  { skip: mode === 'partial cross-volume copy' && process.platform !== 'linux', timeout: 60000 }, async t => {
+  const f = await stageFixture(t, { crossVolume: mode === 'partial cross-volume copy' })
+  await f.command('host-permit'); await f.command('stage-prepare'); await f.command('file-begin'); await f.command('host-stop')
+  if (mode === 'source in staging') assert.equal((await f.command('file-move-fixture')).error, undefined)
+  if (mode === 'partial cross-volume copy') fs.writeFileSync(path.join(f.staging, 'tree/unfinished-copy'), 'keep interrupted bytes')
+  f.child.disconnect(); await f.exited
+  const original = records.readWorkspaceInterruptedRelocationCheckpoint(f.data, f.id)
+  const { launchWorkspaceInterruptedRecoveryCoordinator } = await import('../workspace-interrupted-launch.mjs')
+  const recoveryId = randomUUID(), lock = await acquireWorkspaceRelocationLock(f.data, f.id)
+  let role
+  try {
+    role = await launchWorkspaceInterruptedRecoveryCoordinator({ dataDir: f.data,
+      request: { intent_id: f.id, recovery_id: recoveryId, checkpoint_sha256: original.checkpoint_sha256 }, verify: async () => {}, releaseParentLock: () => releaseCliLock(lock) })
+    const first = role.restoreSource()
+    assert.equal(role.restoreSource(), first)
+    assert.deepEqual(await first, { source_restored: true, source: f.source, retained_staging: f.staging })
+    await role.verify()
+    assert.equal(fs.readFileSync(path.join(f.source, 'default/file'), 'utf8'), 'original bytes')
+    assert.deepEqual(await f.catalog.snapshot(), f.before)
+    const after = records.readWorkspaceInterruptedRelocationCheckpoint(f.data, f.id)
+    assert.equal(after.checkpoint_sha256, original.checkpoint_sha256)
+    assert.equal(after.closure_plan, null); assert.equal(after.closure_commit, null)
+    const control = path.join(f.data, 'workspace-control/relocation-recovery', recoveryId)
+    const prepared = JSON.parse(fs.readFileSync(path.join(control, 'source-plan.json'))), complete = JSON.parse(fs.readFileSync(path.join(control, 'source-complete.json')))
+    assert.equal(prepared.schema_version, 2); assert.equal(complete.plan_sha256, sha256CanonicalJson(prepared))
+    assert.equal(complete.source.ino, original.intent.source.ino)
+    assert.equal(complete.content_sha256, prepared.content_sha256)
+    assert.equal(fs.existsSync(path.join(f.data, 'workspace-control/relocation-active')), true)
+    assert.equal(fs.existsSync(f.target), false)
+    if (mode === 'partial cross-volume copy') assert.equal(fs.readFileSync(path.join(f.staging, 'tree/unfinished-copy'), 'utf8'), 'keep interrupted bytes')
+    else assert.deepEqual(fs.readdirSync(f.staging), [])
+  } finally {
+    if (role) { const exited = once(role.child, 'exit'); role.close(); await exited }
+    releaseCliLock(lock)
+  }
+})
+
+
+test('a fresh explicit recovery verifies an actual rename that lost its completion receipt', { timeout: 60000 }, async t => {
+  const f = await stageFixture(t)
+  await f.command('host-permit'); await f.command('stage-prepare'); await f.command('file-begin'); await f.command('host-stop')
+  assert.equal((await f.command('file-move-fixture')).error, undefined)
+  f.child.disconnect(); await f.exited
+  const checkpoint = records.readWorkspaceInterruptedRelocationCheckpoint(f.data, f.id), recoveryId = randomUUID()
+  const roleModule = await import('../workspace-interrupted-role.mjs')
+  let lock = await acquireWorkspaceRelocationLock(f.data, f.id)
+  // Only the finite child injects termination immediately after the real OS rename.
+  const code = `import native from ${JSON.stringify(new URL('../process-identity.cjs', import.meta.url).href)};
+    const rename=native.renameDirectoryNoReplace;native.renameDirectoryNoReplace=(...args)=>{rename(...args);process.exit(3)};
+    await import(${JSON.stringify(new URL('../../workspace-interrupted-coordinator.mjs', import.meta.url).href)});`
+  const child = spawn(process.execPath, ['--input-type=module', '-e', code], { stdio: ['ignore', 'ignore', 'ignore', 'ipc'] }), exited = once(child, 'exit')
+  t.after(async () => { if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL'); await exited })
+  await once(child, 'spawn')
+  const request = { intent_id: f.id, recovery_id: recoveryId, checkpoint_sha256: checkpoint.checkpoint_sha256 }
+  const launch = await roleModule.commitWorkspaceInterruptedRecoveryLaunch({ dataDir: f.data, request, coordinator: native.inspectProcess(child.pid), verify: async () => {} })
+  const readyReply = once(child, 'message')
+  releaseCliLock(lock)
+  child.send({ kind: 'workspace_interrupted_initialize', data_dir: f.data, recovery_id: recoveryId, launch_sha256: sha256CanonicalJson(launch) })
+  const [ready] = await readyReply
+  assert.equal(ready.kind, 'workspace_interrupted_ready')
+  child.send({ kind: 'workspace_interrupted_restore_source', recovery_id: recoveryId, launch_sha256: ready.launch_sha256, ready_sha256: ready.ready_sha256, nonce: randomUUID() })
+  assert.equal((await exited)[0], 3)
+  assert.equal(fs.readFileSync(path.join(f.source, 'default/file'), 'utf8'), 'original bytes')
+  const previous = path.join(f.data, 'workspace-control/relocation-recovery', recoveryId)
+  const planBytes = fs.readFileSync(path.join(previous, 'source-plan.json'))
+  assert.equal(fs.existsSync(path.join(previous, 'source-complete.json')), false)
+  const sourceVersion = fs.lstatSync(f.source, { bigint: true })
+  lock = await acquireWorkspaceRelocationLock(f.data, f.id)
+  const { launchWorkspaceInterruptedRecoveryCoordinator } = await import('../workspace-interrupted-launch.mjs')
+  const next = await launchWorkspaceInterruptedRecoveryCoordinator({ dataDir: f.data, request: { ...request, recovery_id: randomUUID() },
+    verify: async () => {}, releaseParentLock: () => releaseCliLock(lock) })
+  try {
+    assert.equal((await next.restoreSource()).source_restored, true)
+    const after = fs.lstatSync(f.source, { bigint: true })
+    assert.equal(after.ino, sourceVersion.ino); assert.equal(after.ctimeNs, sourceVersion.ctimeNs)
+    assert.deepEqual(fs.readFileSync(path.join(previous, 'source-plan.json')), planBytes)
+    assert.equal(fs.existsSync(path.join(previous, 'source-complete.json')), false)
+    assert.deepEqual(await f.catalog.snapshot(), f.before)
+    assert.equal(records.readWorkspaceRelocationClosurePlan(f.data, f.id), null)
+  } finally { const ended = once(next.child, 'exit'); next.close(); await ended; releaseCliLock(lock) }
 })
