@@ -1565,26 +1565,27 @@ export class ModuleManager {
     if (previous?.fingerprint === fingerprint) return previous.pending
     if (this.isShuttingDown || this.workspaceRecoveryHandoffBusy()) throw Object.assign(new Error('原工作区作业仍在收尾。'), { code: 'SERVICE_UNAVAILABLE' })
     const pending = Promise.resolve().then(async () => {
-      const failure = () => Object.assign(new Error('当前原位置恢复接纳尚未核实，原文件与维护保护已保留。'), { code: 'SERVICE_UNAVAILABLE' })
+      const failure = () => Object.assign(new Error('当前工作区恢复接纳尚未核实，原文件与维护保护已保留。'), { code: 'SERVICE_UNAVAILABLE' })
       const locks = require('../../scripts/lib/cli-lock.mjs'), native = require('../../scripts/lib/process-identity.cjs')
       let lock: string | undefined, token: string | undefined, state: WorkspaceInterruptedServiceContext | undefined
       try {
         lock = await locks.acquireWorkspaceInterruptedRecoveryLock(this.dataDir, request.intent_id); token = locks.cliLockToken(lock)
         await this.verifyWorkspaceRelocationJobQuery({ intent_id: request.intent_id }, bearer)
         const records = require('../../scripts/lib/workspace-relocation-intent.mjs'), active = records.readWorkspaceRelocationIntent(this.dataDir)
-        const source = active ? undefined : require('../../scripts/lib/workspace-interrupted-source-records.mjs').readWorkspaceSourceRecoveryScope(this.dataDir, request.intent_id)
-        const original = active ? records.readWorkspaceInterruptedRelocationCheckpoint(this.dataDir, request.intent_id) : source.checkpoint
-        if (original.action !== 'restore_source' || original.checkpoint_sha256 !== request.checkpoint_sha256) throw failure()
+        const terminal = active ? undefined : require('../../scripts/lib/workspace-interrupted-forward-records.mjs').readWorkspaceInterruptedForwardPreparation(this.dataDir, request.intent_id)
+          ?? require('../../scripts/lib/workspace-interrupted-source-records.mjs').readWorkspaceSourceRecoveryScope(this.dataDir, request.intent_id)
+        const original = active ? records.readWorkspaceInterruptedRelocationCheckpoint(this.dataDir, request.intent_id) : terminal.checkpoint
+        if (!['restore_source', 'finish_commit'].includes(original.action) || original.checkpoint_sha256 !== request.checkpoint_sha256) throw failure()
         // Same active intent and human Web drain, with no normal coordinator/runner reuse.
-        // After atomic source archival, restoration observes the existing source only;
-        // the current private completion preparation drains Admin before release.
+        // After atomic archival, current private completion preparation drains
+        // Admin before release without entering the old coordinator's runner.
         if (active) await this.quiesceWorkspaceRelocationWeb({ intent_id: active.id, intent_sha256: sha256CanonicalJson(active) }, bearer)
         const self = native.inspectProcess(process.pid), admin = this.processes.get('admin-web'), adminState = admin && this.childStates.get(admin)
         const adminRuntime = this.modules.get('admin-web'), adminIdentity = admin?.pid && native.inspectProcess(admin.pid)
         if (!self || !admin || !adminState || !adminRuntime || !adminIdentity || !token) throw failure()
         const definitions: WorkspaceModuleDefinitions = new Map([...this.modules].map(([id, runtime]) => [id, { runtime,
           hash: sha256CanonicalJson(workspaceModuleDefinition(runtime)), overrides: sha256CanonicalJson(this.envOverrides.get(id) ?? {}) }]))
-        const current: WorkspaceInterruptedServiceContext = { request, observing: source?.released === true, phase: 'preparing', cleaned: false, runtimes: new Map(), registrations: new Map(), assertCurrent: () => {}, verify: async () => {} }
+        const current: WorkspaceInterruptedServiceContext = { request, observing: terminal?.released === true, phase: 'preparing', cleaned: false, runtimes: new Map(), registrations: new Map(), assertCurrent: () => {}, verify: async () => {} }
         state = current; this.workspaceInterruptedService = current
         current.assertCurrent = () => {
           if (this.workspaceInterruptedService !== current || this.isShuttingDown || current.phase === 'needs_attention'
@@ -1659,7 +1660,7 @@ export class ModuleManager {
     this.handleVerifyCoreAgentRuntime({ expected_module_id: 'crabot-agent' }, { authorizationBearer: bearer })
     const request = require('../../scripts/lib/workspace-interrupted-role.mjs').parseWorkspaceInterruptedRecoveryRequest(params)
     const current = this.workspaceInterruptedService, agent = current?.runtimes.get('crabot-agent'), credential = this.runtimeBearers.get('crabot-agent')
-    const failure = () => Object.assign(new Error('当前原位置核验运行无法确认。'), { code: 'FORBIDDEN' })
+    const failure = () => Object.assign(new Error('当前工作区核验运行无法确认。'), { code: 'FORBIDDEN' })
     if (!current || !current.coordinator || !current.plan || !agent || !credential || credential.child !== agent.child || sha256CanonicalJson(request) !== sha256CanonicalJson(current.request)) throw failure()
     await current.verify()
     const records = require('../../scripts/lib/workspace-interrupted-runtime.mjs')
@@ -1667,10 +1668,10 @@ export class ModuleManager {
       : records.readWorkspaceInterruptedRuntimeStart(this.dataDir, request.recovery_id, 'crabot-agent')
     if (!current.observing) records.verifyWorkspaceInterruptedRuntimeStart({ dataDir: this.dataDir, recoveryId: request.recovery_id, moduleId: 'crabot-agent', recordHash: sha256CanonicalJson(receipt), definitionHash: receipt.definition_sha256 })
     if (receipt.runtime.runtime_id !== agent.state.runtimeId || this.runtimeBearers.get('crabot-agent') !== credential || credential.revoked) throw failure()
-    const source = require('../../scripts/lib/workspace-interrupted-source-records.mjs').readWorkspaceSourceCompletionScope(this.dataDir, request.intent_id)
+    const scope = require('../../scripts/lib/workspace-interrupted-service-scope.mjs').readWorkspaceInterruptedServiceScope(this.dataDir, request.recovery_id)
     current.assertCurrent()
     return { verified: true, ...request, launch_sha256: sha256CanonicalJson(current.coordinator.launch), plan_sha256: sha256CanonicalJson(current.plan),
-      catalog_sha256: source.scope.catalog_sha256, instance_id: this.runtimeRegistry.getInstanceId(), module_id: 'crabot-agent', runtime_id: agent.state.runtimeId }
+      catalog_sha256: scope.catalog_sha256, instance_id: this.runtimeRegistry.getInstanceId(), module_id: 'crabot-agent', runtime_id: agent.state.runtimeId }
   }
 
   private async handleVerifyWorkspaceInterruptedWeb(params: unknown, bearer?: string): Promise<import('crabot-shared').WorkspaceInterruptedRecoveryWebVerificationResult> {
@@ -1686,8 +1687,8 @@ export class ModuleManager {
     // repeating all health RPCs for every authentication made one handoff do 16.
     await current.verify()
     if ([...current.runtimes.keys()].some(id => this.modules.get(id)?.status !== 'running')) throw Object.assign(new Error('Current service state changed'), { code: 'FORBIDDEN' })
-    const sources = require('../../scripts/lib/workspace-interrupted-source-records.mjs')
-    sources.assertWorkspaceSourceRootCurrent(sources.readWorkspaceSourceCompletionScope(this.dataDir, current.request.intent_id))
+    const scopes = require('../../scripts/lib/workspace-interrupted-service-scope.mjs')
+    scopes.assertWorkspaceInterruptedRootCurrent(scopes.readWorkspaceInterruptedServiceScope(this.dataDir, current.request.recovery_id))
     current.assertCurrent()
     return { verified: true, ...current.job, action: action as 'prepare_web' | 'resume_web' }
   }
@@ -1699,12 +1700,13 @@ export class ModuleManager {
     const failure = () => Object.assign(new Error('原恢复运行尚未完整退出，已保留维护与登记；未重试未知启动。'), { code: 'SERVICE_UNAVAILABLE' })
     await current.verify()
     const active = records.readWorkspaceRelocationIntent(this.dataDir)
+    const forward = current.coordinator.launch.action === 'finish_commit' && require('../../scripts/lib/workspace-interrupted-forward-records.mjs').readWorkspaceInterruptedForwardPreparation(this.dataDir, current.request.intent_id)
     const checkpoint = active ? records.readWorkspaceInterruptedRelocationCheckpoint(this.dataDir, current.request.intent_id)
-      : sources.readPendingWorkspaceSourceRestoration(this.dataDir, current.request.intent_id).checkpoint
+      : forward ? forward.checkpoint : sources.readPendingWorkspaceSourceRestoration(this.dataDir, current.request.intent_id).checkpoint
     if (!checkpoint.execution_exit && !require('../../scripts/lib/workspace-interrupted-source-restore.mjs').readWorkspaceInterruptedExecutionExit({ dataDir: this.dataDir,
       recoveryId: current.request.recovery_id, checkpoint })) throw failure()
     const archived = fs.existsSync(sources.workspaceSourceRestorationPaths(this.dataDir, current.request.intent_id).original)
-    const history = archived ? runtimeRecords.readWorkspaceInterruptedRuntimeHistory(this.dataDir, current.request.intent_id) : []
+    const history = archived || forward ? runtimeRecords.readWorkspaceInterruptedRuntimeHistory(this.dataDir, current.request.intent_id) : []
     const scopes: WorkspaceModuleScope[] = checkpoint.modules.modules
     const known = new Map<string, { moduleId: ModuleId; port: number; original?: WorkspaceModuleScope; receipt?: any }>()
     for (const scope of scopes) if (scope.runtime_id) known.set(scope.runtime_id, { moduleId: scope.module_id, port: scope.module_port, original: scope })
@@ -1827,24 +1829,28 @@ export class ModuleManager {
   }
 
   /** One fixed background driver; HTTP closure cannot cancel or resubmit its effects. */
-  private completeWorkspaceInterruptedSource(current: WorkspaceInterruptedServiceContext): Promise<import('crabot-shared').WorkspaceInterruptedRecoveryWebResumed> {
+  private completeWorkspaceInterruptedService(current: WorkspaceInterruptedServiceContext): Promise<import('crabot-shared').WorkspaceInterruptedRecoveryWebResumed> {
     if (current.completion) return current.completion
     current.completion = Promise.resolve().then(async () => {
       let stage = 'cleanup-runtimes'
       try {
-        const sources = require('../../scripts/lib/workspace-interrupted-source-records.mjs')
+        const scopes = require('../../scripts/lib/workspace-interrupted-service-scope.mjs'), forward = current.coordinator.launch.action === 'finish_commit'
         let source: any, ordered: WorkspaceModuleScope[] = []
         if (current.observing) {
-          source = sources.readWorkspaceSourceRecoveryScope(this.dataDir, current.request.intent_id)
+          source = scopes.readWorkspaceInterruptedServiceScope(this.dataDir, current.request.recovery_id)
           if (!source.released) throw new Error('Original service release is unavailable')
           stage = 'observe-current-runtimes'; await this.observeWorkspaceInterruptedRuntimes(current)
         } else {
-          stage = 'verify-original-stops'; await current.coordinator.observeOriginalExit()
+          if (!forward) { stage = 'verify-original-stops'; await current.coordinator.observeOriginalExit() }
           stage = 'cleanup-runtimes'; await this.cleanupWorkspaceInterruptedRuntimes(current)
-          stage = 'restore-source'; await current.coordinator.restoreSource()
-          stage = 'archive-source'; await current.coordinator.archiveSource()
-          stage = 'retire-old-wakes'; await current.coordinator.prepareSourceBusiness()
-          source = sources.readPendingWorkspaceSourceRestoration(this.dataDir, current.request.intent_id)
+          if (forward) {
+            stage = 'finish-original-commit'; await current.coordinator.prepareForwardService()
+          } else {
+            stage = 'restore-source'; await current.coordinator.restoreSource()
+            stage = 'archive-source'; await current.coordinator.archiveSource()
+            stage = 'retire-old-wakes'; await current.coordinator.prepareSourceBusiness()
+          }
+          source = scopes.readWorkspaceInterruptedServiceScope(this.dataDir, current.request.recovery_id)
           const modules: WorkspaceModuleScope[] = source.checkpoint.modules.modules.filter((item: WorkspaceModuleScope) => item.runtime_id && item.processes.length)
           if (!modules.some(item => item.module_id === 'crabot-agent')) throw new Error('Original Agent scope is unavailable')
           stage = 'plan-runtimes'
@@ -1868,7 +1874,9 @@ export class ModuleManager {
         })
         if (sha256CanonicalJson(prepared) !== sha256CanonicalJson({ prepared: true, ...current.job })) throw new Error('Current Admin preparation is unconfirmed')
         if (!current.observing) {
-          stage = 'release-protection'; await current.coordinator.releaseSource({ job: current.job, credential: current.token, moduleManagerPort: this.config.port })
+          if (forward) { stage = 'archive-forward'; await current.coordinator.archiveForward() }
+          stage = 'release-protection'
+          await current.coordinator[forward ? 'releaseForward' : 'releaseSource']({ job: current.job, credential: current.token, moduleManagerPort: this.config.port })
         }
         current.phase = 'released'
         stage = 'restore-modules'
@@ -1901,7 +1909,7 @@ export class ModuleManager {
         return expected
       } catch (cause) {
         current.phase = 'needs_attention'; current.token = undefined; current.coordinator?.close()
-        throw Object.assign(new Error('原位置服务恢复尚未完整确认，请查看原作业；未重发效果。'), { code: 'SERVICE_UNAVAILABLE', stage, cause })
+        throw Object.assign(new Error('工作区服务恢复尚未完整确认，请查看原作业；未重发效果。'), { code: 'SERVICE_UNAVAILABLE', stage, cause })
       }
     })
     return current.completion

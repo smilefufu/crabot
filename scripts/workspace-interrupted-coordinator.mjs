@@ -53,8 +53,8 @@ process.on('message', async message => {
       await send({ kind: 'workspace_interrupted_ready', recovery_id: input.recovery_id, launch_sha256: input.launch_sha256, ready_sha256: hash(ready) })
     } else {
       const fields = ['kind', 'recovery_id', 'launch_sha256', 'ready_sha256', 'nonce']
-      if (message.kind === 'workspace_interrupted_release_source') fields.push('job', 'credential', 'module_manager_port')
-      if (!ready || !exact(message, fields) || !['workspace_interrupted_verify', 'workspace_interrupted_observe_original_exit', 'workspace_interrupted_restore_source', 'workspace_interrupted_archive_source', 'workspace_interrupted_prepare_source_business', 'workspace_interrupted_release_source', 'workspace_interrupted_finish_closures', 'workspace_interrupted_finish_manager_recovery', 'workspace_interrupted_finish_root', 'workspace_interrupted_prepare_forward_service', 'workspace_interrupted_archive_forward'].includes(message.kind)
+      if (['workspace_interrupted_release_source', 'workspace_interrupted_release_forward'].includes(message.kind)) fields.push('job', 'credential', 'module_manager_port')
+      if (!ready || !exact(message, fields) || !['workspace_interrupted_verify', 'workspace_interrupted_observe_original_exit', 'workspace_interrupted_restore_source', 'workspace_interrupted_archive_source', 'workspace_interrupted_prepare_source_business', 'workspace_interrupted_release_source', 'workspace_interrupted_release_forward', 'workspace_interrupted_finish_closures', 'workspace_interrupted_finish_manager_recovery', 'workspace_interrupted_finish_root', 'workspace_interrupted_prepare_forward_service', 'workspace_interrupted_archive_forward'].includes(message.kind)
         || message.recovery_id !== input.recovery_id || message.launch_sha256 !== input.launch_sha256 || message.ready_sha256 !== hash(ready) || !uuid(message.nonce)) throw new Error('Invalid role request')
       verifyWorkspaceInterruptedRecoveryRole({ dataDir: input.data_dir, recoveryId: input.recovery_id, launchHash: input.launch_sha256 })
       if (message.kind === 'workspace_interrupted_archive_forward') {
@@ -103,20 +103,22 @@ process.on('message', async message => {
           return prepareWorkspaceInterruptedSourceBusiness({ dataDir: input.data_dir, recoveryId: input.recovery_id, launchHash: input.launch_sha256 })
         })
         await send({ ...message, kind: 'workspace_interrupted_source_business_prepared', result: await sourceBusiness })
-      } else if (message.kind === 'workspace_interrupted_release_source') {
+      } else if (['workspace_interrupted_release_source', 'workspace_interrupted_release_forward'].includes(message.kind)) {
+        const forward = message.kind === 'workspace_interrupted_release_forward', action = forward ? 'finish_commit' : 'restore_source'
+        if (readWorkspaceInterruptedRecoveryRole(input.data_dir, input.recovery_id).launch.action !== action) throw new Error('Release action is not current')
         sourceRelease ??= Promise.resolve().then(async () => {
-          const { releaseWorkspaceInterruptedSource } = await import('./lib/workspace-interrupted-source-release.mjs')
-          return releaseWorkspaceInterruptedSource({ dataDir: input.data_dir, recoveryId: input.recovery_id, launchHash: input.launch_sha256,
-            job: message.job, credential: message.credential, moduleManagerPort: message.module_manager_port })
+          const { releaseWorkspaceInterruptedProtection } = await import('./lib/workspace-interrupted-service-release.mjs')
+          return releaseWorkspaceInterruptedProtection({ dataDir: input.data_dir, recoveryId: input.recovery_id, launchHash: input.launch_sha256,
+            job: message.job, credential: message.credential, moduleManagerPort: message.module_manager_port }, action)
         })
         // Credentials are never copied into acknowledgement frames or diagnostics.
         const { job: _, credential: secret, module_manager_port: port, ...reply } = message
-        await send({ ...reply, kind: 'workspace_interrupted_source_released', result: await sourceRelease })
+        await send({ ...reply, kind: 'workspace_interrupted_' + (forward ? 'forward' : 'source') + '_released', result: await sourceRelease })
       } else await send({ ...message, kind: 'workspace_interrupted_verified' })
     }
   } catch (error) {
     const operations = ['workspace_interrupted_initialize', 'workspace_interrupted_verify', 'workspace_interrupted_observe_original_exit', 'workspace_interrupted_restore_source', 'workspace_interrupted_archive_source',
-      'workspace_interrupted_prepare_source_business', 'workspace_interrupted_release_source', 'workspace_interrupted_finish_closures', 'workspace_interrupted_finish_manager_recovery', 'workspace_interrupted_finish_root', 'workspace_interrupted_prepare_forward_service', 'workspace_interrupted_archive_forward']
+      'workspace_interrupted_prepare_source_business', 'workspace_interrupted_release_source', 'workspace_interrupted_release_forward', 'workspace_interrupted_finish_closures', 'workspace_interrupted_finish_manager_recovery', 'workspace_interrupted_finish_root', 'workspace_interrupted_prepare_forward_service', 'workspace_interrupted_archive_forward']
     const codes = ['WORKSPACE_RELOCATION_INVALID', 'CRABOT_WORKSPACE_RECOVERY_COORDINATOR', 'EACCES', 'EBUSY', 'EPERM', 'ENOENT', 'EEXIST', 'EIO']
     // Fixed technical labels only; never a request, credential, path or error body.
     process.stderr.write(JSON.stringify({ component: 'workspace-interrupted-recovery', operation: operations.includes(message?.kind) ? message.kind : 'invalid-request',

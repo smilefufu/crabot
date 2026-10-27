@@ -3,8 +3,8 @@ import fs from 'node:fs'
 import path from 'node:path'
 import native from './process-identity.cjs'
 import { readWorkspaceInterruptedRecoveryRole } from './workspace-interrupted-role.mjs'
-import { readPendingWorkspaceSourceRestoration, readWorkspaceSourceCompletionScope } from './workspace-interrupted-source-records.mjs'
-import { forwardFinalizingName, readWorkspaceInterruptedForwardPreparation } from './workspace-interrupted-forward-records.mjs'
+import { readPendingWorkspaceSourceRestoration } from './workspace-interrupted-source-records.mjs'
+import { readWorkspaceInterruptedForwardPreparation } from './workspace-interrupted-forward-records.mjs'
 import { readWorkspaceInterruptedServiceScope } from './workspace-interrupted-service-scope.mjs'
 import { createWorkspaceMaintenanceFileAccess, version } from '../../crabot-agent/dist/core/workspace-maintenance-files.js'
 import { sha256CanonicalJson as hash } from '../../crabot-shared/dist/canonical-json.js'
@@ -105,12 +105,12 @@ export async function commitWorkspaceInterruptedRuntimeObservations({ dataDir, r
   if (typeof verify !== 'function' || process.versions.electron) throw failure()
   const role = readWorkspaceInterruptedRecoveryRole(dataDir, recoveryId)
   if (!role.launch || !role.ready || !native.sameProcess(role.launch.parent, native.inspectProcess(process.pid))) throw failure()
-  const source = readWorkspaceSourceCompletionScope(dataDir, role.launch.request.intent_id)
+  const source = readWorkspaceInterruptedServiceScope(dataDir, recoveryId)
   const record = observationValue({ schema_version: 2, recovery_id: recoveryId, launch_sha256: hash(role.launch),
     release_sha256: hash(source.release), observations: structuredClone(observations) }, role, source)
   const current = () => {
     if (hash(readWorkspaceInterruptedRecoveryRole(dataDir, recoveryId)) !== hash(role)
-      || hash(readWorkspaceSourceCompletionScope(dataDir, role.launch.request.intent_id).release) !== hash(source.release)
+      || hash(readWorkspaceInterruptedServiceScope(dataDir, recoveryId).release) !== hash(source.release)
       || !native.sameProcess(role.launch.parent, native.inspectProcess(process.pid)) || !native.sameProcess(role.launch.process, native.inspectProcess(role.launch.process.pid))) throw failure()
     for (const item of record.observations) if (!native.sameProcess(item.process, native.inspectProcess(item.process.pid))
       || hash(registration(dataDir, item.runtime.runtime_id)) !== hash(item.runtime)) throw failure()
@@ -195,8 +195,8 @@ export async function commitWorkspaceInterruptedRuntimeStart(options) {
 
 /** Prior ownership facts only. A fresh current driver still verifies/stops every actual runtime. */
 export function readWorkspaceInterruptedRuntimeHistory(dataDir, intentId) {
-  const forward = fs.existsSync(path.join(dataDir, 'workspace-control', forwardFinalizingName))
-  const pending = forward ? readWorkspaceInterruptedForwardPreparation(dataDir, intentId) : readPendingWorkspaceSourceRestoration(dataDir, intentId)
+  const forward = readWorkspaceInterruptedForwardPreparation(dataDir, intentId)
+  const pending = forward ?? readPendingWorkspaceSourceRestoration(dataDir, intentId)
   if (!pending) throw failure()
   const parent = path.dirname(pending.role.launch.control_root.path), names = fs.readdirSync(parent).sort(), rows = []
   owned(parent, true, true)

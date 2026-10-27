@@ -1280,10 +1280,12 @@ for (const mode of ['verified', 'changed probed root', 'wrong bearer', 'wrong ru
   }
 })
 
-for (const accepted of [false, true]) test('source protection handoff consumes the finite current Core acknowledgement: ' + accepted, { timeout: 60000 }, async t => {
+for (const forward of [false, true])
+for (const accepted of [false, true, 'wrong action']) test((forward ? 'forward' : 'source') + ' protection handoff consumes the finite current Core acknowledgement: ' + accepted, { timeout: 60000 }, async t => {
   const f = await stageFixture(t)
   await f.command('host-permit'); await f.command('stage-prepare'); await f.command('file-begin'); await f.command('host-stop')
   assert.equal((await f.command('file-move-fixture')).error, undefined)
+  if (forward) for (const step of ['file-ready', 'closure-prepare-fixture', 'closure-commit-fixture']) assert.equal((await f.command(step)).error, undefined)
   f.child.disconnect(); await f.exited
   fs.mkdirSync(path.join(f.data, 'agent'), { recursive: true })
   const checkpoint = records.readWorkspaceInterruptedRelocationCheckpoint(f.data, f.id), recoveryId = randomUUID()
@@ -1304,17 +1306,21 @@ for (const accepted of [false, true]) test('source protection handoff consumes t
   }).listen(0, '127.0.0.1')
   await once(server, 'listening')
   try {
-    await role.restoreSource(); await role.archiveSource(); await role.prepareSourceBusiness()
+    if (forward) { await role.prepareForwardService(); await role.archiveForward() }
+    else { await role.restoreSource(); await role.archiveSource(); await role.prepareSourceBusiness() }
+    const selected = await f.catalog.snapshot(), selectedRoot = forward ? f.target : f.source
     const runtime = await import('../workspace-interrupted-runtime.mjs'), instanceId = randomUUID(), adminRuntimeId = randomUUID()
     const plan = await runtime.commitWorkspaceInterruptedRuntimePlan({ dataDir: f.data, recoveryId, instanceId, adminRuntimeId, modules: [], verify: role.verify })
     job = { ...role.launch.request, launch_sha256: sha256CanonicalJson(role.launch), plan_sha256: sha256CanonicalJson(plan), instance_id: instanceId, admin_runtime_id: adminRuntimeId }
-    const first = role.releaseSource({ job, credential: 'finite-role-secret', moduleManagerPort: server.address().port })
-    assert.equal(role.releaseSource({ job, credential: 'finite-role-secret', moduleManagerPort: server.address().port }), first)
+    const release = role[(forward !== (accepted === 'wrong action')) ? 'releaseForward' : 'releaseSource']
+    const first = release({ job, credential: 'finite-role-secret', moduleManagerPort: server.address().port })
+    assert.equal(release({ job, credential: 'finite-role-secret', moduleManagerPort: server.address().port }), first)
     const maintenance = (await import('../workspace-maintenance.cjs')).default
-    if (accepted) {
+    if (accepted === true) {
       assert.deepEqual(await first, { released: true, ...job })
       await role.verify()
-      const state = (await import('../workspace-interrupted-source-records.mjs')).readWorkspaceSourceCompletionScope(f.data, f.id)
+      const state = forward ? (await import('../workspace-interrupted-forward-records.mjs')).readWorkspaceInterruptedForwardPreparation(f.data, f.id)
+        : (await import('../workspace-interrupted-source-records.mjs')).readWorkspaceSourceCompletionScope(f.data, f.id)
       assert.equal(state.released, true); assert.equal(state.release.job.recovery_id, recoveryId)
       assert.equal(maintenance.workspaceMaintenancePending(f.data), false)
       assert.equal(calls, 2)
@@ -1322,11 +1328,11 @@ for (const accepted of [false, true]) test('source protection handoff consumes t
     } else {
       await assert.rejects(first)
       assert.equal(maintenance.workspaceMaintenancePending(f.data), true)
-      assert.equal(calls, 1)
+      assert.equal(calls, accepted === 'wrong action' ? 0 : 1)
     }
-    assert.deepEqual(await f.catalog.snapshot(), f.before)
-    assert.equal(fs.readFileSync(path.join(f.source, 'default/file'), 'utf8'), 'original bytes')
-    assert.equal(fs.existsSync(path.join(f.data, 'workspace-control/relocation-history', f.id)), false)
+    assert.deepEqual(await f.catalog.snapshot(), selected)
+    assert.equal(fs.readFileSync(path.join(selectedRoot, 'default/file'), 'utf8'), 'original bytes')
+    assert.equal(fs.existsSync(path.join(f.data, 'workspace-control/relocation-history', f.id)), forward)
   } finally {
     server.closeAllConnections(); await new Promise(resolve => server.close(resolve))
     if (role.child.exitCode === null && role.child.signalCode === null) { const ended = once(role.child, 'exit'); role.close(); await ended }

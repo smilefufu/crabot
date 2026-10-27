@@ -149,12 +149,12 @@ jobs:
         if: ${{ matrix.suite == 'owned' && !cancelled() && steps.compile.outcome == 'success' }}
         working-directory: crabot-core
         run: node node_modules/vitest/vitest.mjs run src/workspace-human-verification.test.ts --testNamePattern='completes two actually owned initial jobs' --maxWorkers=1 --minWorkers=1
-      - name: Actual interrupted source services, explicit retry and business onStart
+      - name: Actual interrupted source and forward services, retry and business onStart
         if: ${{ (matrix.suite == 'interrupted-source' || matrix.suite == 'business') && !cancelled() && steps.compile.outcome == 'success' }}
         working-directory: crabot-core
         env:
           CRABOT_WORKSPACE_BUSINESS_ONSTART_CI: '1'
-        run: node node_modules/vitest/vitest.mjs run src/workspace-human-verification.test.ts --testNamePattern='current interrupted source recovery admission' --maxWorkers=1 --minWorkers=1
+        run: node node_modules/vitest/vitest.mjs run src/workspace-human-verification.test.ts --testNamePattern='current interrupted (source|forward) recovery admission' --maxWorkers=1 --minWorkers=1
       - name: Same MM failed normal job, current recovery and another SDK migration
         if: ${{ matrix.suite == 'owned-recovery' && !cancelled() && steps.compile.outcome == 'success' }}
         working-directory: crabot-core
