@@ -222,7 +222,7 @@ jobs:
         timeout-minutes: 15
         run: |
           cd crabot-core
-          node node_modules/vitest/vitest.mjs run src/port-allocator.test.ts src/workspace-maintenance.test.ts src/agent-venv.test.ts src/core-modules.test.ts src/shutdown-generation.test.ts src/module-management-secrets.test.ts --maxWorkers=1 --minWorkers=1
+          node node_modules/vitest/vitest.mjs run src/port-allocator.test.ts src/workspace-maintenance.test.ts src/agent-venv.test.ts src/core-modules.test.ts src/admin-first-install.test.ts src/schema-check.test.ts src/shutdown-generation.test.ts src/module-management-secrets.test.ts --maxWorkers=1 --minWorkers=1
       - name: Workspace native module regressions
         if: matrix.suite == 'regression'
         timeout-minutes: 15

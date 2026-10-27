@@ -6,6 +6,19 @@ import AdminModule from './index.js'
 import { parseFriendPermissionRecords, serializeFriendPermissionRecords } from './friend-permission-store.js'
 import { createToolAccessConfig, createCliAccessConfig } from './types.js'
 const all = { scope: 'all' as const, access: 'readwrite' as const }
+it('an initialized empty first-install store loads while a missing versioned store is never silently recreated', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'admin-first-permissions-'))
+  const directory = path.join(root, 'data/admin'), file = path.join(directory, 'friend-permission-configs.json')
+  try {
+    await fs.mkdir(directory, { recursive: true }); await fs.writeFile(path.join(directory, 'SCHEMA_VERSION'), 'v1\n')
+    const admin = new AdminModule({ moduleId: 'admin-permission-fixture', moduleType: 'admin', version: 'test', protocolVersion: '0.1.0', port: 0 }, { data_dir: directory, web_port: 0 }) as any
+    await expect(admin.loadData()).rejects.toThrow('权限文件缺失')
+    await expect(fs.stat(file)).rejects.toMatchObject({ code: 'ENOENT' })
+    await fs.writeFile(file, '[]\n')
+    await expect(admin.loadData()).resolves.toBeUndefined()
+    expect(admin.friendPermissionConfigs.size).toBe(0); expect(admin.friendStorageOverrides.size).toBe(0)
+  } finally { await fs.rm(root, { recursive: true, force: true }) }
+})
 it('strictly distinguishes full config and directory-only records without ignoring malformed data', () => {
   expect(parseFriendPermissionRecords([{ friend_id: 'old', storage_override: all }])).toEqual([{ friend_id: 'old', storage_override: all }])
   for (const input of [[{ friend_id: 'old', config: {}, storage_override: all }], [{ friend_id: 'old', storage_override: { ...all, workspace_path: '/' } }], [{ friend_id: 'old', storage_override: all }, { friend_id: 'old', storage_override: all }], [{ friend_id: 'old' }], {}]) expect(() => parseFriendPermissionRecords(input)).toThrow('Invalid friend permission')

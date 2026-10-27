@@ -34,6 +34,7 @@ export function buildCoreModules(o: BuildCoreModulesOpts): CoreModule[] {
       protocol_version: '0.1.0',
       entry: o.isDev ? 'npx tsx --watch src/main.ts' : `node "${path.join(o.adminDir, 'dist/main.js')}"`,
       cwd: o.adminDir,
+      data_dir: path.join(o.dataDir, 'admin'),
       auto_start: o.isDev || fs.existsSync(path.join(o.adminDir, 'dist', 'main.js')),
       auto_restart: true,
       start_priority: 10,

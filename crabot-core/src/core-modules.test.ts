@@ -38,7 +38,8 @@ describe('buildCoreModules：DATA_DIR 顶层契约', () => {
     expect(envOf(mods, 'memory-default').PATH).toBeUndefined()
   })
   it('admin：DATA_DIR=顶层，CRABOT_ADMIN_DATA_DIR=模块级，builtin MCP 路径来自代码根', () => {
-    const env = envOf(buildCoreModules(OPTS), 'admin-web')
+    const modules = buildCoreModules(OPTS), env = envOf(modules, 'admin-web')
+    expect(modules.find(module => module.module_id === 'admin-web')?.data_dir).toBe(env.CRABOT_ADMIN_DATA_DIR)
     expect(env.DATA_DIR).toBe('/home/u/.crabot/data')
     expect(env.CRABOT_ADMIN_DATA_DIR).toBe(join('/home/u/.crabot/data', 'admin'))
     expect(env.CRABOT_MCP_TOOLS_PATH).toBe(join('/repo', 'crabot-mcp-tools'))
