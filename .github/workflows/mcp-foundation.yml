@@ -1,0 +1,44 @@
+name: Managed MCP preparation foundation
+on:
+  workflow_dispatch:
+  push:
+    branches: ['feat/desktop-mcp-foundation']
+    paths:
+      - 'scripts/lib/managed-mcp-*'
+      - 'scripts/lib/product-*'
+      - 'scripts/lib/agent-python-selection.cjs'
+      - 'scripts/lib/__tests__/managed-mcp-prepare.test.mjs'
+      - '.github/workflows/mcp-foundation.yml'
+  pull_request:
+    paths:
+      - 'scripts/lib/managed-mcp-*'
+      - 'scripts/lib/product-*'
+      - 'scripts/lib/agent-python-selection.cjs'
+      - 'scripts/lib/__tests__/managed-mcp-prepare.test.mjs'
+      - '.github/workflows/mcp-foundation.yml'
+permissions:
+  contents: read
+jobs:
+  preparation:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, macos-15-intel, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.3'
+      - name: Build only this branch's native runtime dependency
+        shell: bash
+        run: node scripts/build-native.mjs
+      - name: Verify preparation paths, compatibility and stable Python bases without business startup
+        shell: bash
+        run: >-
+          node --test --test-concurrency=1
+          scripts/lib/__tests__/managed-mcp-prepare.test.mjs
+          scripts/lib/__tests__/product-runtime.test.mjs
+          scripts/lib/__tests__/product-agent-env.test.mjs
+          scripts/lib/__tests__/agent-python-selection.test.mjs
