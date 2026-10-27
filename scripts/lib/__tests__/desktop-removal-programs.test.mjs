@@ -9,7 +9,7 @@ import identity from '../process-identity.cjs'
 import { privateJson } from '../desktop-preparation-files.mjs'
 const digest = bytes => createHash('sha256').update(bytes).digest('hex')
 const recordFor = bytes => ({ type: 'file', size: Buffer.byteLength(bytes), sha256: digest(bytes), ...(process.platform === 'win32' ? {} : { mode: 0o644 }) })
-async function fixture(t) {
+async function fixture(t, programCount = 0) {
   const temporary = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'crabot-program-audit-')))
   t.after(() => fs.rm(temporary, { recursive: true, force: true, maxRetries: 15, retryDelay: 100 }))
   const root = management.ensurePrivateDataRoot(path.join(temporary, 'installation')), data = management.ensurePrivateDataRoot(path.join(root, 'data'))
@@ -17,10 +17,12 @@ async function fixture(t) {
   const files = { 'nested/program.txt': recordFor('Core bytes'), ['bin/' + launcher]: recordFor(launcherBytes) }
   if (process.platform !== 'win32') files['bin/' + launcher].mode = 0o755
   if (process.platform !== 'win32') files['nested/relative-link'] = { type: 'link', target: 'program.txt' }
+  for (let index = 0; index < programCount; index++) files['nested/finite-' + index + '.txt'] = recordFor('Core bytes')
   const inventory = JSON.stringify({ schema_version: 1, files }) + '\n'
   const selection = { schema_version: 1, version: '1.2.3', gui_id: randomUUID(), core_id: digest(inventory) }
   const core = path.join(root, 'releases', selection.core_id), gui = path.join(root, 'app/releases', selection.gui_id)
   for (const dir of [path.join(core, 'nested'), path.join(core, 'bin'), gui, path.join(root, 'bin')]) await fs.mkdir(dir, { recursive: true })
+  for (let index = 0; index < programCount; index++) await fs.writeFile(path.join(core, 'nested/finite-' + index + '.txt'), 'Core bytes')
   await fs.writeFile(path.join(core, 'nested/program.txt'), 'Core bytes'); await fs.writeFile(path.join(core, 'bin', launcher), launcherBytes)
   await fs.writeFile(path.join(root, 'bin', launcher), launcherBytes)
   if (process.platform !== 'win32') { await fs.chmod(path.join(core, 'bin', launcher), 0o755); await fs.chmod(path.join(root, 'bin', launcher), 0o755); await fs.symlink('program.txt', path.join(core, 'nested/relative-link')) }
@@ -301,4 +303,105 @@ test('verified unrelated protected macOS service no longer blocks proven private
     assert.equal(await fs.readFile(path.join(f.data, 'user.txt'), 'utf8'), 'preserved data and runtime bases')
     assert.equal(JSON.parse(await fs.readFile(path.join(f.root, '.desktop-removal.json'))).phase, 'removing')
   } finally { for (const lock of held.reverse()) locks.releaseCliLock(lock) }
+})
+
+test('one unchanged destructive admission does not rediscover the installation for every nested reader', async t => {
+  const f = await fixture(t), locks = await import('../cli-lock.mjs')
+  const held = [await locks.acquireExistingCliLock(f.root, 'fixture-observation'), await locks.acquireExistingCliLock(f.data, 'fixture-observation')]
+  t.after(() => { for (const lock of held.reverse()) locks.releaseCliLock(lock) })
+  const { captureDesktopRemovalJob } = await import('../desktop-removal-context.mjs')
+  const context = await captureDesktopRemovalJob({ installRoot: f.root, operationId: f.operationId })
+  context.assertJob()
+  const read = fsSync.readFileSync, inspect = identity.inspectProcess
+  let discoveryReads = 0, processQueries = 0
+  t.mock.method(fsSync, 'readFileSync', (file, ...args) => {
+    if (file === path.join(f.root, 'desktop-installation.json')) discoveryReads++
+    return read(file, ...args)
+  })
+  t.mock.method(identity, 'inspectProcess', (...args) => { processQueries++; return inspect(...args) })
+  context.assertJob()
+  console.log('CRABOT_REMOVAL_ADMISSION_COST ' + JSON.stringify({ installation_reads: discoveryReads, actual_process_queries: processQueries }))
+  assert.ok(processQueries > 0, 'Actual process and lock facts remain fresh')
+  assert.ok(discoveryReads <= 1, 'Unchanged installation JSON was repeatedly read during one file admission: ' + discoveryReads)
+})
+
+for (const mode of ['unchanged-rewrite', 'record-changed', 'in-place-record-changed', 'installation-changed', 'selection-changed', 'runtime-changed', 'permission-changed', 'lock-released', 'ancestor-redirected']) test('warmed removal facts still inspect every current mutation: ' + mode, async t => {
+  const f = await fixture(t), locks = await import('../cli-lock.mjs')
+  const held = [await locks.acquireExistingCliLock(f.root, 'fixture-freshness'), await locks.acquireExistingCliLock(f.data, 'fixture-freshness')]
+  t.after(() => { for (const lock of held.reverse()) locks.releaseCliLock(lock) })
+  const { captureDesktopRemovalJob } = await import('../desktop-removal-context.mjs')
+  const context = await captureDesktopRemovalJob({ installRoot: f.root, operationId: f.operationId })
+  context.assertJob()
+  const rewrite = async (name, transform) => {
+    const file = path.join(f.root, name), original = JSON.parse(await fs.readFile(file, 'utf8'))
+    await privateJson(file, transform(original), true)
+  }
+  if (mode === 'unchanged-rewrite') await rewrite('.desktop-removal.json', value => value)
+  if (mode === 'record-changed') await rewrite('.desktop-removal.json', value => ({ ...value, phase: 'completed' }))
+  if (mode === 'in-place-record-changed') {
+    const file = path.join(f.root, '.desktop-removal.json'), before = await fs.lstat(file, { bigint: true })
+    const text = await fs.readFile(file, 'utf8')
+    await fs.writeFile(file, text.replace('\"removing\"', '\"stopping\"'))
+    const after = await fs.lstat(file, { bigint: true })
+    assert.equal(after.ino, before.ino); assert.equal(after.size, before.size)
+  }
+  if (mode === 'installation-changed') await rewrite('desktop-installation.json', value => ({ ...value, installation_id: randomUUID() }))
+  if (mode === 'selection-changed') await rewrite('current-release.json', value => ({ ...value, gui_id: randomUUID() }))
+  if (mode === 'runtime-changed') await fs.writeFile(path.join(f.data, 'instance-runtime.json'), '{}')
+  if (mode === 'permission-changed') {
+    const file = path.join(f.root, '.desktop-removal.json')
+    if (process.platform === 'win32') {
+      // Replacing a private file with an ordinary inherited-ACL copy must be seen.
+      const text = await fs.readFile(file); await fs.unlink(file); await fs.writeFile(file, text)
+    } else await fs.chmod(file, 0o644)
+  }
+  if (mode === 'lock-released') locks.releaseCliLock(held.pop())
+  if (mode === 'ancestor-redirected') {
+    const moved = f.temporary + '-moved'
+    t.after(() => fs.rm(moved, { recursive: true, force: true, maxRetries: 15, retryDelay: 100 }))
+    await fs.rename(f.temporary, moved)
+    await fs.symlink(moved, f.temporary, process.platform === 'win32' ? 'junction' : 'dir')
+  }
+  if (mode === 'unchanged-rewrite') context.assertJob()
+  else assert.throws(() => context.assertJob())
+  assert.equal(await fs.readFile(path.join(f.data, 'user.txt'), 'utf8'), 'preserved data and runtime bases')
+})
+
+test('finite many-file removal keeps repeated installation reads bounded and preserves data', { timeout: 60000 }, async t => {
+  const locks = await import('../cli-lock.mjs'), { removeDesktopRemovalPrograms } = await import('../desktop-removal-delete.mjs')
+  const observations = [], read = fsSync.readFileSync
+  t.mock.method(identity, 'inspectProgramReferences', async () => ({ complete: true, incomplete: false, processes: [], unknown_pids: [] }))
+  for (const programCount of [64, 128]) {
+    const f = await fixture(t, programCount)
+    const held = [await locks.acquireExistingCliLock(f.root, 'fixture-cost'), await locks.acquireExistingCliLock(f.data, 'fixture-cost')]
+    let discoveryReads = 0
+    const reader = t.mock.method(fsSync, 'readFileSync', (file, ...args) => {
+      if (file === path.join(f.root, 'desktop-installation.json')) discoveryReads++
+      return read(file, ...args)
+    })
+    try {
+      const started = performance.now(), result = await removeDesktopRemovalPrograms({ installRoot: f.root, operationId: f.operationId })
+      console.log('CRABOT_REMOVAL_MANY_FILE_COST ' + JSON.stringify({ platform: process.platform, finite_added_files: programCount,
+        installation_reads: discoveryReads, elapsed_ms: Math.round(performance.now() - started), resource_observation_substituted: true }))
+      assert.equal(result.retained.length, 0); assert.ok(result.removed.length > programCount)
+      observations.push(discoveryReads)
+      await assert.rejects(fs.lstat(f.core), { code: 'ENOENT' }); await assert.rejects(fs.lstat(f.gui), { code: 'ENOENT' })
+      assert.equal(await fs.readFile(path.join(f.data, 'user.txt'), 'utf8'), 'preserved data and runtime bases')
+    } finally { reader.mock.restore(); for (const lock of held.reverse()) locks.releaseCliLock(lock) }
+  }
+  assert.equal(observations[1], observations[0], 'Doubling program files must not double installation JSON parsing')
+})
+
+test('generic stopped facts leave the retained target selection policy with their caller', async t => {
+  const f = await fixture(t), locks = await import('../cli-lock.mjs')
+  const held = [await locks.acquireExistingCliLock(f.root, 'fixture-selection'), await locks.acquireExistingCliLock(f.data, 'fixture-selection')]
+  t.after(() => { for (const lock of held.reverse()) locks.releaseCliLock(lock) })
+  const { captureDesktopRemovalFacts, captureStoppedDesktopRemoval } = await import('../desktop-removal-context.mjs')
+  const facts = await captureDesktopRemovalFacts({ installRoot: f.root, operationId: f.operationId })
+  facts.assertIdentity()
+  const file = path.join(f.root, 'current-release.json'), selected = JSON.parse(await fs.readFile(file, 'utf8'))
+  await privateJson(file, { ...selected, gui_id: randomUUID() }, true)
+  facts.assertIdentity() // No source-selection authority is supplied by neutral facts.
+  const stopped = await captureStoppedDesktopRemoval({ installRoot: f.root, operationId: f.operationId })
+  assert.throws(() => stopped.assertStopped(), { code: 'CRABOT_DESKTOP_REMOVAL' })
 })

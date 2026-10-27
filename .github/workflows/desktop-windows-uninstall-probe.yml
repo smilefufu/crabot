@@ -23,3 +23,8 @@ jobs:
         run: node scripts/build-native.mjs
       - name: Verify only the disposable installation registry key
         run: node .github/scripts/probe-windows-uninstall-entry.mjs
+      - name: Install only the frozen Node test dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Real finite Windows removal and unchanged-document cost
+        timeout-minutes: 3
+        run: node --test --test-name-pattern="one unchanged destructive admission|warmed removal facts|finite many-file removal|program removal holds|generic stopped facts" scripts/lib/__tests__/desktop-removal-programs.test.mjs
