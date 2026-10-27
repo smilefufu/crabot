@@ -1,0 +1,30 @@
+name: Actual GNOME session compatibility
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  gnome-session:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.3'
+      - name: Prepare native probe and default GNOME packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gnome-keyring dbus-x11 libglib2.0-bin libcap2-bin
+          pnpm install --frozen-lockfile
+          node scripts/build-native.mjs
+      - name: Observe actual GNOME protected processes against an empty program directory
+        run: dbus-run-session -- node .github/scripts/observe-gnome-removal-compatibility.mjs
+      - name: Save fixed compatibility evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gnome-removal-compatibility
+          path: .desktop-build/gnome-removal-compatibility.json
+          include-hidden-files: true
