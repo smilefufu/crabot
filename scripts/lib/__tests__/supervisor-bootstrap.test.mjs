@@ -58,7 +58,7 @@ test('the launching frontend registers the detached controller before it can out
   writeFileSync(join(root, 'package.json'), '{"type":"module"}')
   // Deliberately hold the supervisor before any child-side runtime registration.
   // It never starts a business MM or even a TCP server.
-  writeFileSync(join(root, 'scripts/supervisor.mjs'), 'import{writeFileSync}from"node:fs";writeFileSync(process.env.TEST_CHILD_PID,String(process.pid));setInterval(()=>{},1000)')
+  writeFileSync(join(root, 'scripts/supervisor.mjs'), 'import{writeFileSync,renameSync}from"node:fs";const file=process.env.TEST_CHILD_PID;writeFileSync(file+".tmp",String(process.pid));renameSync(file+".tmp",file);setInterval(()=>{},1000)')
   const launch = new URL('../background-core.mjs', import.meta.url).href, locks = new URL('../cli-lock.mjs', import.meta.url).href
   const source = `import{launchBackgroundCore}from${JSON.stringify(launch)};import{acquireCliLock}from${JSON.stringify(locks)};await acquireCliLock(process.env.TEST_DATA,"fixture-start");await launchBackgroundCore({root:process.env.TEST_ROOT,dataDir:process.env.TEST_DATA,env:process.env,mmPort:19000,webPort:3000})`
   const frontend = spawn(process.execPath, ['--input-type=module', '-e', source], {
@@ -75,6 +75,8 @@ test('the launching frontend registers the detached controller before it can out
     rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
   })
   await waitFor(pidFile); controller = identity.inspectProcess(Number(readFileSync(pidFile, 'utf8')))
+  await waitFor(join(data, 'instance-runtime.json'))
+  assert.equal(inspectInstance(data).record.controller.pid, controller.pid)
   frontend.kill('SIGKILL'); await exited
   assert.equal(inspectInstance(data).state, 'starting')
   await assert.rejects(stopInstance(data), { code: 'CRABOT_INSTANCE_STARTING' })
