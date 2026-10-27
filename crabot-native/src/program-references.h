@@ -194,9 +194,18 @@ struct ProgramReferenceJob {
       }
     }
     stage = "mappings"; uint64_t address = 0;
+    // Darwin's PROC_PIDREGIONPATHINFO2 (22) visits file-backed vnodes only.
+    // The public SDK omits its name; retain the existing walk if unavailable.
+    // Anonymous VM reservations cannot hold a program file open.
+    int mappingFlavor = 22;
     for (int count = 0; count < 65536; count++) {
       Budget(); proc_regionwithpathinfo value{}; errno = 0;
-      if (proc_pidinfo(pid, PROC_PIDREGIONPATHINFO, address, &value, sizeof(value)) != sizeof(value)) {
+      int bytes = proc_pidinfo(pid, mappingFlavor, address, &value, sizeof(value));
+      if (count == 0 && bytes != sizeof(value) && errno == EINVAL) {
+        mappingFlavor = PROC_PIDREGIONPATHINFO; errno = 0;
+        bytes = proc_pidinfo(pid, mappingFlavor, address, &value, sizeof(value));
+      }
+      if (bytes != sizeof(value)) {
         // EINVAL is also the end marker when the VM map is already empty.
         if (errno == ESRCH || errno == EINVAL) return related;
         throw std::runtime_error("Process mappings unavailable");

@@ -54,8 +54,8 @@ async function referenceHolder() {
   return holder
 }
 after(async () => { if (holderDirectory) await fs.rm(holderDirectory, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) })
-for (const mode of ['mapped', 'cwd', 'fileport', 'library', 'protected']) test('actual native reference actor: ' + mode, {
-  skip: mode === 'fileport' ? process.platform !== 'darwin' : mode === 'library' ? process.platform !== 'win32' : mode === 'protected' ? process.platform !== 'linux' : process.platform === 'win32', timeout: 90000,
+for (const mode of ['mapped', 'anonymous-mapped', 'cwd', 'fileport', 'library', 'protected']) test('actual native reference actor: ' + mode, {
+  skip: ['fileport', 'anonymous-mapped'].includes(mode) ? process.platform !== 'darwin' : mode === 'library' ? process.platform !== 'win32' : mode === 'protected' ? process.platform !== 'linux' : process.platform === 'win32', timeout: 90000,
 }, async t => {
   const actor = await referenceHolder(), temporary = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'crabot-reference-actor-')))
   let child, exited
@@ -70,6 +70,7 @@ for (const mode of ['mapped', 'cwd', 'fileport', 'library', 'protected']) test('
   const result = await native.inspectProgramReferences({ roots: [temporary], files: [file] })
   if (mode === 'protected') { assert.equal(result.complete, false); assert.ok(result.unknown_pids.includes(child.pid)) }
   else assert.ok(result.processes.some(value => value.pid === child.pid), JSON.stringify(result))
+  if (mode === 'anonymous-mapped') assert.equal(result.unknown_pids.includes(child.pid), false, 'Anonymous VM reservations must not exhaust the file-mapping query')
   assert.equal(child.exitCode, null); assert.equal(child.signalCode, null); assert.deepEqual(await fs.readFile(file), originalBytes)
   child.stdin.end('x'); assert.equal((await exited)[0], 0)
   const after = await native.inspectProgramReferences({ roots: [temporary], files: [file] })
