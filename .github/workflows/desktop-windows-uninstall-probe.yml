@@ -25,6 +25,9 @@ jobs:
         run: node .github/scripts/probe-windows-uninstall-entry.mjs
       - name: Install only the frozen Node test dependencies
         run: pnpm install --frozen-lockfile
+      - name: Native private-copy parent exit and cleanup
+        timeout-minutes: 2
+        run: node --test scripts/lib/__tests__/removal-copy-cleanup.test.mjs
       - name: Real finite Windows removal and unchanged-document cost
         timeout-minutes: 3
         run: node --test --test-name-pattern="one unchanged destructive admission|warmed removal facts|finite many-file removal|program removal holds|generic stopped facts" scripts/lib/__tests__/desktop-removal-programs.test.mjs

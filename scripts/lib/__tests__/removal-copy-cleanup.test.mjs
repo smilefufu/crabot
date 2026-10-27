@@ -17,7 +17,8 @@ async function fixture(t) {
   const parent = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'crabot-cleanup-unit-')))
   const root = management.ensurePrivateDataRoot(path.join(parent, 'crabot-removal-host-' + randomUUID()))
   const helper = path.join(root, 'cleanup' + (windows ? '.exe' : ''))
-  await fs.copyFile(native, helper)
+  if (windows) { identity.writePrivateFile(helper, ''); await fs.writeFile(helper, await fs.readFile(native)) }
+  else await fs.copyFile(native, helper)
   const fixture = { parent, root, helper, close: async () => {} }
   t.after(async () => { await fixture.close(); await fs.rm(parent, { recursive: true, force: true }) })
   return fixture
@@ -29,17 +30,27 @@ test('the cleanup binary rejects an unrelated parent without touching the privat
   assert.equal(await fs.readFile(file, 'utf8'), 'not a maintenance host')
 })
 for (const mode of ['complete', 'changed-file', 'unknown-file', 'profile-symlink']) test('native private-copy exit and closed-file scope: ' + mode,
-  { skip: windows, timeout: 20000 }, async t => {
+  { skip: windows && mode === 'profile-symlink', timeout: 20000 }, async t => {
     const f = await fixture(t)
-    const gui = path.join(f.root, process.platform === 'darwin' ? 'gui' : 'backend')
-    const executable = process.platform === 'darwin' ? path.join(gui, 'Crabot.app/Contents/MacOS/Crabot') : path.join(f.root, 'node')
-    await fs.mkdir(path.dirname(executable), { recursive: true }); await fs.mkdir(gui, { recursive: true })
-    await promisify(execFile)('cc', ['-std=c11', '-Wall', '-Wextra', '-Werror', '-O2',
-      fileURLToPath(new URL('../../../crabot-desktop/tests/native/removal-cleanup-parent.c', import.meta.url)), '-o', executable], { timeout: 10000 })
+    const gui = path.join(f.root, process.platform === 'linux' ? 'backend' : 'gui')
+    const executable = process.platform === 'darwin' ? path.join(gui, 'Crabot.app/Contents/MacOS/Crabot') : windows ? path.join(gui, 'Crabot.exe') : path.join(f.root, 'node')
+    let args = [f.helper]
+    if (windows) {
+      management.ensurePrivateDataRoot(gui)
+      // A finite native-image parent, not a GUI or business runtime. Preserve
+      // current-user ownership even on the elevated Windows CI account.
+      identity.writePrivateFile(executable, ''); await fs.writeFile(executable, await fs.readFile(process.execPath))
+      args = [fileURLToPath(new URL('../../../crabot-desktop/tests/fixtures/removal-cleanup-parent.mjs', import.meta.url)), f.helper]
+    } else {
+      await fs.mkdir(path.dirname(executable), { recursive: true }); await fs.mkdir(gui, { recursive: true })
+      await promisify(execFile)('cc', ['-std=c11', '-Wall', '-Wextra', '-Werror', '-O2',
+        fileURLToPath(new URL('../../../crabot-desktop/tests/native/removal-cleanup-parent.c', import.meta.url)), '-o', executable], { timeout: 10000 })
+    }
     const file = path.join(gui, 'asset'), profile = path.join(f.root, 'profile'), outside = path.join(f.parent, 'outside')
-    await fs.writeFile(file, 'copied asset'); await fs.mkdir(profile); await fs.writeFile(path.join(profile, 'cache'), 'private display cache')
+    if (windows) { identity.writePrivateFile(file, 'copied asset'); management.ensurePrivateDataRoot(profile); identity.writePrivateFile(path.join(profile, 'cache'), 'private display cache') }
+    else { await fs.writeFile(file, 'copied asset'); await fs.mkdir(profile); await fs.writeFile(path.join(profile, 'cache'), 'private display cache') }
     await fs.mkdir(outside); await fs.writeFile(path.join(outside, 'precious'), 'outside user files')
-    const child = spawn(executable, [f.helper], { cwd: f.parent, stdio: ['pipe', 'pipe', 'pipe'] }), parent = identity.inspectProcess(child.pid)
+    const child = spawn(executable, args, { cwd: f.parent, stdio: ['pipe', 'pipe', 'pipe'] }), parent = identity.inspectProcess(child.pid)
     const exited = once(child, 'exit'); let output = '', errors = '', peer
     child.stderr.on('data', bytes => { errors += bytes.toString() })
     f.close = async () => {
@@ -78,6 +89,10 @@ for (const mode of ['complete', 'changed-file', 'unknown-file', 'profile-symlink
       // Linux has no GUI profile: replacing a captured directory is a changed
       // program-copy object, so retain it rather than treating it as cache.
       assert.equal(await fs.readlink(profile), outside)
+    } else if (windows) {
+      await assert.rejects(fs.lstat(gui), { code: 'ENOENT' }); await assert.rejects(fs.lstat(profile), { code: 'ENOENT' })
+      const remaining = await fs.readdir(f.root).catch(error => { if (error.code === 'ENOENT') return []; throw error })
+      assert.ok(remaining.length === 0 || remaining.length === 1 && remaining[0] === 'cleanup.exe')
     } else await assert.rejects(fs.lstat(f.root), { code: 'ENOENT' })
     assert.equal(await fs.readFile(path.join(outside, 'precious'), 'utf8'), 'outside user files')
   })
