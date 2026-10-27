@@ -26,6 +26,12 @@ for (const forward of [false, true]) describe('current interrupted ' + (forward 
     const healthChecks = vi.spyOn(f.manager, 'verifyWorkspaceInterruptedHealth')
     const records = require('../../scripts/lib/workspace-relocation-intent.mjs'), native = require('../../scripts/lib/process-identity.cjs')
     const locks = require('../../scripts/lib/cli-lock.mjs'), lock = await locks.acquireWorkspaceRelocationLock(f.data, f.params.intent_id)
+    const observers: Array<() => void> = []
+    const observe = (context: any) => {
+      if (forward && mode === 'cold Core after failed health' && process.env.GITHUB_ACTIONS === 'true' && process.platform === 'darwin') {
+        observers.push(observeColdTerminalProgress(f.manager, context.coordinator, context))
+      }
+    }
     let old: ChildProcess | undefined, files: any, cold: any, coldHost: ReturnType<typeof http.createServer> | undefined
     try {
       const intent = records.readWorkspaceRelocationIntent(f.data), source = intent.source.path, selectedRoot = forward ? intent.target : source
@@ -83,6 +89,7 @@ for (const forward of [false, true]) describe('current interrupted ' + (forward 
       if (retry && !archiveFailure) await fs.writeFile(unhealthy, 'finite health rejection')
       if (archiveFailure) context.coordinator = Object.freeze({ ...context.coordinator,
         releaseForward: async () => { throw new Error('Finite parent handoff unavailable after actual archive') } })
+      observe(context)
       const first = f.manager.completeWorkspaceInterruptedService(context)
       expect(f.manager.completeWorkspaceInterruptedService(context)).toBe(first)
       if (releasedFailure) {
@@ -98,6 +105,7 @@ for (const forward of [false, true]) describe('current interrupted ' + (forward 
         await expect(fs.lstat(path.join(context.coordinator.launch.control_root.path, 'runtime-starts'))).rejects.toMatchObject({ code: 'ENOENT' })
       } else if (retry) {
         await expect(first).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE', stage: archiveFailure ? 'release-protection' : 'verify-core-health' })
+        for (const stop of observers.splice(0).reverse()) stop()
         expect(context.phase).toBe('needs_attention')
         await expect(fs.lstat(path.join(context.coordinator.launch.control_root.path, 'service-resumed.json'))).rejects.toMatchObject({ code: 'ENOENT' })
         expect(require('../../scripts/lib/workspace-maintenance.cjs').workspaceMaintenancePending(f.data)).toBe(true)
@@ -122,6 +130,7 @@ for (const forward of [false, true]) describe('current interrupted ' + (forward 
         }
         if (!archiveFailure) await fs.unlink(unhealthy)
         context = await f.manager.initializeWorkspaceInterruptedService({ intent_id: f.params.intent_id, recovery_id: randomUUID(), checkpoint_sha256: currentCheckpoint().checkpoint_sha256 }, 'fixture-human')
+        observe(context)
         expect((await f.manager.completeWorkspaceInterruptedService(context)).resumed).toBe(true)
       } else expect((await first).resumed).toBe(true)
       expect(context.phase).toBe('resumed')
@@ -168,6 +177,7 @@ for (const forward of [false, true]) describe('current interrupted ' + (forward 
       console.error('[Source recovery finite diagnostic]', diagnostics)
       throw cause
     } finally {
+      for (const stop of observers.reverse()) stop()
       files?.close()
       if (old?.connected) { const ended = once(old, 'exit'); old.disconnect(); await ended }
       locks.releaseCliLock(lock)
@@ -237,7 +247,8 @@ function observeColdTerminalProgress(cold: any, coordinator: any, grant: any) {
       } catch (error) { done(); throw error }
     })
   }
-  for (const key of ['releaseWorkspaceRecoveryCompletion', 'prepareWorkspaceRecoveryCompletion', 'beginWorkspaceRecoveryCompletionObservation', 'restoreWorkspaceModules']) watch(cold, key)
+  for (const key of ['releaseWorkspaceRecoveryCompletion', 'prepareWorkspaceRecoveryCompletion', 'beginWorkspaceRecoveryCompletionObservation', 'restoreWorkspaceModules',
+    'cleanupWorkspaceInterruptedRuntimes', 'verifyWorkspaceInterruptedHealth', 'startWorkspaceInterruptedModule', 'observeWorkspaceInterruptedRuntimes']) watch(cold, key)
   watch(grant, 'verifyHealth', 'current-health'); watch(grant, 'verify', 'current-facts')
   watch(syncFs, 'readFileSync', 'sync-file-read')
   for (const key of ['inspectProcess', 'isPrivateDirectory', 'isPrivateFile', 'listListeningTcpPorts']) watch(native, key, 'native-' + key)

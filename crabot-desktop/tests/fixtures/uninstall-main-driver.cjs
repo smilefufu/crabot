@@ -33,6 +33,14 @@ app.on('browser-window-created', (_event, window) => window.on('close', event =>
 }))
 const host = process.argv.some(value => value.startsWith('--crabot-removal-host='))
 if (host) {
+  if (process.platform === 'darwin') {
+    const getLoginItemSettings = app.getLoginItemSettings.bind(app)
+    app.getLoginItemSettings = (...args) => {
+      const value = getLoginItemSettings(...args)
+      console.error('CRABOT_UNINSTALL_LOGIN_STATE ' + JSON.stringify({ openAtLogin: value.openAtLogin, status: value.status }))
+      return value
+    }
+  }
   const identity = require('./bootstrap/scripts/lib/process-identity.cjs')
   const gui = process.platform === 'darwin' ? path.resolve(process.resourcesPath, '../../..') : path.dirname(process.resourcesPath)
   event('maintenance-started', { identity: identity.inspectProcess(process.pid), directory: path.dirname(gui) })
