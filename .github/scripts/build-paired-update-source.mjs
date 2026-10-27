@@ -40,7 +40,8 @@ export async function buildPairedUpdateSource({ repository, project, destination
       resources = process.platform === 'darwin' ? path.join(context.appOutDir, 'Crabot.app/Contents/Resources') : path.join(context.appOutDir, 'resources')
       await fs.writeFile(path.join(resources, 'desktop-release.json'), JSON.stringify(selection) + '\n')
       const originalResources = path.join(original.guiRoot, process.platform === 'darwin' ? 'Crabot.app/Contents/Resources' : 'resources')
-      for (const file of ['candidate-only.json', 'crabot.png']) await fs.copyFile(path.join(originalResources, file), path.join(resources, file))
+      const cleanup = 'crabot-copy-cleanup' + (process.platform === 'win32' ? '.exe' : '')
+      for (const file of ['candidate-only.json', 'crabot.png', cleanup]) await fs.copyFile(path.join(originalResources, file), path.join(resources, file))
       if (process.platform === 'linux') for (const file of ['crabot-sandbox-helper', 'crabot-maintenance', 'browser-probe.py', 'crabot-maintenance-backend']) {
         await fs.cp(path.join(originalResources, file), path.join(resources, file), { recursive: true, verbatimSymlinks: true, mode: constants.COPYFILE_FICLONE })
       }
