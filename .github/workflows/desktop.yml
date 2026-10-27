@@ -378,7 +378,7 @@ jobs:
         run: node .github/scripts/verify-complete-paired-release.mjs ".desktop-build/安装 候选/core" ".desktop-build/安装 候选/paired/offline" 2>&1 | tee .desktop-build/complete-paired-release.log
       - name: Build independent offline installer host
         if: steps.scope.outputs.full_runtime == 'true'
-        timeout-minutes: 15
+        timeout-minutes: 20
         run: node scripts/desktop/package-offline-installer.mjs --candidate=true --distribute=${{ runner.os != 'Linux' }} --native-bootstrap=.desktop-build/ubuntu-bootstrap "--paired=.desktop-build/安装 候选/paired" "--out=.desktop-build/安装 候选/installer" 2>&1 | tee .desktop-build/offline-installer.log
       - name: Verify native installer backend and payload without business startup on Linux
         if: runner.os == 'Linux' && steps.scope.outputs.full_runtime == 'true'

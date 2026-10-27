@@ -14,7 +14,7 @@ import installation from '../desktop-installation.cjs'
 import { writeCoreRelease, verifyCoreRelease } from '../core-release.mjs'
 import { sealDesktopPayload, verifyDesktopPayload, prepareDesktopInstallation, commitDesktopInstallation } from '../desktop-payload.mjs'
 const windows = process.platform === 'win32', launcher = windows ? 'crabot.exe' : 'crabot'
-async function fixture(t, { version = '1.2.3', schema, functional = false, executableNode = true, shared = false, launcherSuffix = '' } = {}) {
+async function fixture(t, { version = '1.2.3', schema, functional = false, executableNode = true, shared = false, launcherSuffix = '', conversionFailure = false } = {}) {
   const parent = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'Crabot 离线安装 ')))
   t.after(() => fs.rm(parent, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }))
   const payload = path.join(parent, '离线包'), core = path.join(payload, 'core'), gui = path.join(payload, 'gui'), target = path.join(parent, '选择的 目录')
@@ -68,7 +68,7 @@ async function fixture(t, { version = '1.2.3', schema, functional = false, execu
     await fs.writeFile(path.join(parser, 'package.json'), JSON.stringify({ name: '@electron/asar', version: '3.4.1', main: 'index.cjs' }))
     await fs.writeFile(path.join(core, 'crabot-fixture/upgrade/scope.mjs'), `export const migrationScope=()=>({reads:[],writes:['fixture/content','fixture/executions']})`)
     await fs.writeFile(path.join(core, 'crabot-fixture/upgrade/from_v1_to_v2.mjs'),
-      `import fs from 'node:fs';import path from 'node:path';const root=process.argv.find(arg=>arg.startsWith('--data-dir=')).slice(11);fs.writeFileSync(path.join(root,'content'),'converted by bundled Node');fs.appendFileSync(path.join(root,'executions'),'once\\n');`)
+      `import fs from 'node:fs';import path from 'node:path';const root=process.argv.find(arg=>arg.startsWith('--data-dir=')).slice(11);fs.writeFileSync(path.join(root,'content'),'converted by bundled Node');fs.appendFileSync(path.join(root,'executions'),'once\\n');${conversionFailure ? 'process.exit(13)' : ''}`)
   }
   if (shared) { await fs.mkdir(path.join(core, 'crabot-agent'), { recursive: true }); await fs.writeFile(path.join(core, 'crabot-agent/shared_request_version'), '1\n') }
   await writeCoreRelease(core, { schema_version: 1, version, platform: process.platform, arch: process.arch, commit: '1'.repeat(40), source_dirty: false })
@@ -1833,3 +1833,159 @@ for (const mode of ['none', 'removing', 'stopping', 'completed', 'installing', '
     assert.equal(await fs.readFile(path.join(f.target, 'data/retained-user-file'), 'utf8'), 'user content')
   })
 }
+
+
+async function legacyProgramFixture(t, options = {}) {
+  const f = await fixture(t, { ...options, schema: 'v2', executableNode: false })
+  const { materializeLegacyRelease } = await import('./fixtures/legacy-release.mjs')
+  const { discoverLegacyUserInstall } = await import('../legacy-desktop.mjs')
+  const data = path.join(f.target, 'data')
+  await fs.mkdir(data, { recursive: true, mode: 0o700 }); await materializeLegacyRelease(f.target)
+  await fs.mkdir(path.join(data, 'fixture')); await fs.writeFile(path.join(data, 'fixture/SCHEMA_VERSION'), 'v1')
+  await fs.writeFile(path.join(data, 'fixture/content'), 'old project data')
+  // Online preparation neither trusts nor uses a PID hint to stop business.
+  await fs.writeFile(path.join(data, 'mm.pid'), String(process.pid))
+  const legacy = await discoverLegacyUserInstall({ root: f.target, dataDir: data })
+  return { ...f, data, legacy }
+}
+
+test('legacy online program preparation preserves old entries and data while staging the exact final pair', async t => {
+  const f = await legacyProgramFixture(t), phases = []
+  if (!windows) await fs.chmod(f.data, 0o755)
+  const { prepareLegacyDesktopPrograms, verifyLegacyDesktopPrograms } = await import('../legacy-desktop-programs.mjs')
+  const entry = await fs.readFile(path.join(f.target, 'cli.mjs')), data = await fs.readdir(f.data)
+  const prepared = await prepareLegacyDesktopPrograms({ payload: f.payload, installation: f.legacy, progress: phase => phases.push(phase) })
+  assert.deepEqual(phases, ['verifying', 'copying', 'previewing', 'prepared'])
+  assert.deepEqual(prepared.installation, f.legacy)
+  assert.equal(prepared.coreRoot, path.join(f.target, 'releases', f.selection.core_id))
+  assert.equal(prepared.guiRoot, path.join(f.target, 'app/releases', f.selection.gui_id))
+  assert.equal(prepared.preview.modules.length, 1)
+  await verifyLegacyDesktopPrograms(prepared)
+  assert.deepEqual(await fs.readFile(path.join(f.target, 'cli.mjs')), entry)
+  assert.deepEqual(await fs.readdir(f.data), data)
+  assert.equal(await fs.readFile(path.join(f.data, 'fixture/content'), 'utf8'), 'old project data')
+  for (const file of ['desktop-installation.json', 'current-release.json', '.desktop-installing.json', '.desktop-takeover']) await assert.rejects(fs.lstat(path.join(f.target, file)), { code: 'ENOENT' })
+  const cp = t.mock.method(fs, 'cp', () => assert.fail('retry must reuse verified immutable programs'))
+  const again = await prepareLegacyDesktopPrograms({ payload: f.payload, installation: f.legacy })
+  cp.mock.restore(); assert.deepEqual(again, prepared)
+  if (!windows) assert.equal((await fs.stat(f.data)).mode & 0o777, 0o755)
+})
+
+for (const changed of ['source', 'external-data', 'missing-data', 'unknown-program', 'cancelled', 'redirected-app']) test('legacy online staging rejects changed or unsupported inputs without touching data: ' + changed, { skip: process.platform === 'win32' && changed === 'redirected-app' }, async t => {
+  const f = await legacyProgramFixture(t), abort = new AbortController()
+  const { prepareLegacyDesktopPrograms } = await import('../legacy-desktop-programs.mjs')
+  let legacy = f.legacy
+  if (changed === 'source') legacy = { ...legacy, fingerprint: 'a'.repeat(64) }
+  if (changed === 'external-data') legacy = { ...legacy, dataRoot: f.parent }
+  if (changed === 'missing-data') await fs.rename(f.data, f.data + '-retained')
+  if (changed === 'unknown-program') {
+    await fs.mkdir(path.join(f.target, 'releases', f.selection.core_id), { recursive: true })
+    await fs.writeFile(path.join(f.target, 'releases', f.selection.core_id, 'keep'), 'unknown program')
+  }
+  if (changed === 'cancelled') abort.abort()
+  if (changed === 'redirected-app') await fs.symlink(f.parent, path.join(f.target, 'app'), 'dir')
+  const original = await fs.readFile(path.join(f.target, 'cli.mjs'))
+  await assert.rejects(prepareLegacyDesktopPrograms({ payload: f.payload, installation: legacy, signal: abort.signal }))
+  const data = changed === 'missing-data' ? f.data + '-retained' : f.data
+  assert.equal(await fs.readFile(path.join(data, 'fixture/content'), 'utf8'), 'old project data')
+  assert.deepEqual(await fs.readFile(path.join(f.target, 'cli.mjs')), original)
+  for (const file of ['desktop-installation.json', 'current-release.json', '.desktop-takeover']) await assert.rejects(fs.lstat(path.join(f.target, file)), { code: 'ENOENT' })
+  if (changed === 'missing-data') await assert.rejects(fs.lstat(f.data), { code: 'ENOENT' })
+  if (changed === 'unknown-program') assert.equal(await fs.readFile(path.join(f.target, 'releases', f.selection.core_id, 'keep'), 'utf8'), 'unknown program')
+})
+
+
+for (const changed of ['insufficient-space', 'corrupt-proof', 'prepared-cancellation']) test('legacy online preparation retains a usable old install after ' + changed, async t => {
+  const f = await legacyProgramFixture(t), abort = new AbortController()
+  const { prepareLegacyDesktopPrograms, verifyLegacyDesktopPrograms } = await import('../legacy-desktop-programs.mjs')
+  if (changed === 'insufficient-space') t.mock.method(fs, 'statfs', async () => ({ bavail: 0n, bsize: 4096n }))
+  const options = { payload: f.payload, installation: f.legacy, signal: abort.signal,
+    progress: phase => { if (phase === 'prepared' && changed === 'prepared-cancellation') abort.abort() } }
+  if (changed === 'corrupt-proof') {
+    const prepared = await prepareLegacyDesktopPrograms(options)
+    await fs.appendFile(prepared.proof.file, 'changed')
+    await assert.rejects(verifyLegacyDesktopPrograms(prepared))
+    await assert.rejects(prepareLegacyDesktopPrograms(options))
+  } else await assert.rejects(prepareLegacyDesktopPrograms(options))
+  const { discoverLegacyUserInstall } = await import('../legacy-desktop.mjs')
+  assert.deepEqual(await discoverLegacyUserInstall({ root: f.target, dataDir: f.data }), f.legacy)
+  assert.equal(await fs.readFile(path.join(f.data, 'fixture/content'), 'utf8'), 'old project data')
+  await assert.rejects(fs.lstat(path.join(f.data, 'desktop-maintenance.json')), { code: 'ENOENT' })
+  if (changed === 'insufficient-space') await assert.rejects(fs.lstat(path.join(f.target, 'releases', f.selection.core_id)), { code: 'ENOENT' })
+})
+
+
+for (const conversionFailure of [false, true]) test('actual target Node takes over stopped legacy data once and retains dedicated health protection; failure=' + conversionFailure, async t => {
+  const f = await legacyProgramFixture(t, { functional: true, conversionFailure })
+  await fs.unlink(path.join(f.data, 'mm.pid'))
+  const { prepareLegacyDesktopPrograms } = await import('../legacy-desktop-programs.mjs')
+  const prepared = await prepareLegacyDesktopPrograms({ payload: f.payload, installation: f.legacy })
+  const node = path.join(prepared.coreRoot, windows ? '.product-runtime/node/node.exe' : '.product-runtime/node/bin/node')
+  const module = path.join(prepared.coreRoot, 'scripts/lib/legacy-desktop-takeover.mjs')
+  // Interpreter inspection is substituted; the sealed target Node, locks,
+  // old entry bytes and actual scoped migration/rollback run here. No MM starts.
+  const script = `import{pathToFileURL}from'node:url';const [module,prepared]=process.argv.slice(1);const {convertLegacyDesktopData}=await import(pathToFileURL(module).href);const value=await convertLegacyDesktopData({prepared:JSON.parse(prepared),inspectEnvironment:async()=>({status:'absent'})});console.log(JSON.stringify(value))`
+  const run = () => promisify(execFile)(node, ['--input-type=module', '--eval', script, module, JSON.stringify(prepared)], { timeout: 30_000, maxBuffer: 65536 })
+  if (conversionFailure) {
+    await assert.rejects(run())
+    assert.equal(await fs.readFile(path.join(f.data, 'fixture/content'), 'utf8'), 'old project data')
+    await assert.rejects(fs.lstat(path.join(f.data, 'fixture/executions')), { code: 'ENOENT' })
+    await assert.rejects(run())
+  } else {
+    const result = JSON.parse((await run()).stdout.trim())
+    assert.equal(result.verification_pending, true); assert.equal(result.health_verified, false)
+    assert.equal(await fs.readFile(path.join(f.data, 'fixture/content'), 'utf8'), 'converted by bundled Node')
+    assert.equal(await fs.readFile(path.join(f.data, 'fixture/executions'), 'utf8'), 'once\n')
+    assert.deepEqual(JSON.parse((await run()).stdout.trim()), result)
+    assert.equal(await fs.readFile(path.join(f.data, 'fixture/executions'), 'utf8'), 'once\n')
+    await fs.writeFile(path.join(f.data, 'mm.pid'), String(process.pid))
+    await assert.rejects(run())
+    await fs.unlink(path.join(f.data, 'mm.pid'))
+  }
+  const { readVersionMaintenance, assertVersionMaintenanceAllowsStart } = await import('../version-maintenance.mjs')
+  const maintenance = readVersionMaintenance(f.data)
+  assert.equal(maintenance.schema_version, 4); assert.equal(maintenance.phase, 'verifying'); assert.equal(maintenance.backup, null)
+  assert.throws(() => assertVersionMaintenanceAllowsStart(f.data), { code: 'CRABOT_MAINTENANCE_PENDING' })
+  const { inspectLegacyEntryFence } = await import('../legacy-entry-fence.mjs')
+  assert.equal((await inspectLegacyEntryFence(f.target)).phase, 'data_changing')
+  await assert.rejects(fs.lstat(f.data + '.desktop-backups'), { code: 'ENOENT' })
+  assert.equal((await fs.readdir(path.join(f.data, '.upgrade-migrations'))).length, 1)
+  for (const file of ['desktop-installation.json', 'current-release.json', 'desktop-managed.json']) await assert.rejects(fs.lstat(path.join(file === 'desktop-managed.json' ? f.data : f.target, file)), { code: 'ENOENT' })
+})
+
+
+test('target takeover never converts an existing legacy maintenance record into scoped admission', async t => {
+  const f = await legacyProgramFixture(t, { functional: true }); await fs.unlink(path.join(f.data, 'mm.pid'))
+  const { prepareLegacyDesktopPrograms } = await import('../legacy-desktop-programs.mjs')
+  const { fenceLegacyEntries } = await import('../legacy-entry-fence.mjs')
+  const { beginLegacyUserVersionMaintenance, readVersionMaintenance } = await import('../version-maintenance.mjs')
+  const { acquireCliLock, releaseCliLock } = await import('../cli-lock.mjs')
+  const prepared = await prepareLegacyDesktopPrograms({ payload: f.payload, installation: f.legacy }), entry = await fenceLegacyEntries(f.legacy)
+  const lock = await acquireCliLock(f.data, 'legacy-original-record-test')
+  let original
+  try { original = await beginLegacyUserVersionMaintenance({ dataDir: f.data, installation: f.legacy, entryFenceId: entry.id, targetRoot: prepared.coreRoot }) }
+  finally { releaseCliLock(lock) }
+  const node = path.join(prepared.coreRoot, windows ? '.product-runtime/node/node.exe' : '.product-runtime/node/bin/node')
+  const script = `import{pathToFileURL}from'node:url';const [module,prepared]=process.argv.slice(1);const {convertLegacyDesktopData}=await import(pathToFileURL(module).href);await convertLegacyDesktopData({prepared:JSON.parse(prepared),inspectEnvironment:async()=>({status:'absent'})})`
+  await assert.rejects(promisify(execFile)(node, ['--input-type=module', '--eval', script, path.join(prepared.coreRoot, 'scripts/lib/legacy-desktop-takeover.mjs'), JSON.stringify(prepared)], { timeout: 30_000, maxBuffer: 65536 }))
+  assert.deepEqual(readVersionMaintenance(f.data), original)
+  assert.equal(await fs.readFile(path.join(f.data, 'fixture/content'), 'utf8'), 'old project data')
+  await assert.rejects(fs.lstat(path.join(f.data, '.upgrade-migrations')), { code: 'ENOENT' })
+})
+
+test('target takeover resumes an unstarted conversion after a lost pre-conversion result without replay', async t => {
+  const f = await legacyProgramFixture(t, { functional: true }); await fs.unlink(path.join(f.data, 'mm.pid'))
+  const { prepareLegacyDesktopPrograms } = await import('../legacy-desktop-programs.mjs')
+  const { readVersionMaintenance } = await import('../version-maintenance.mjs')
+  const prepared = await prepareLegacyDesktopPrograms({ payload: f.payload, installation: f.legacy })
+  const node = path.join(prepared.coreRoot, windows ? '.product-runtime/node/node.exe' : '.product-runtime/node/bin/node')
+  const script = `import{pathToFileURL}from'node:url';const [module,prepared,interrupt]=process.argv.slice(1);const {convertLegacyDesktopData}=await import(pathToFileURL(module).href);await convertLegacyDesktopData({prepared:JSON.parse(prepared),inspectEnvironment:async()=>({status:'absent'}),progress:phase=>{if(interrupt==='yes'&&phase==='converting')throw new Error('controlled before conversion')}})`
+  const run = interrupt => promisify(execFile)(node, ['--input-type=module', '--eval', script, path.join(prepared.coreRoot, 'scripts/lib/legacy-desktop-takeover.mjs'), JSON.stringify(prepared), interrupt], { timeout: 30_000, maxBuffer: 65536 })
+  await assert.rejects(run('yes'))
+  assert.equal(readVersionMaintenance(f.data).phase, 'installing')
+  assert.equal(await fs.readFile(path.join(f.data, 'fixture/content'), 'utf8'), 'old project data')
+  await assert.rejects(fs.lstat(path.join(f.data, '.upgrade-migrations')), { code: 'ENOENT' })
+  await run('no'); await run('no')
+  assert.equal(readVersionMaintenance(f.data).phase, 'verifying')
+  assert.equal(await fs.readFile(path.join(f.data, 'fixture/executions'), 'utf8'), 'once\n')
+})
