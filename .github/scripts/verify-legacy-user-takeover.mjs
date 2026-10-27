@@ -95,7 +95,7 @@ try {
       stage('published-archive')
       await download(version, archive); await fs.mkdir(extracted)
       const tar = process.platform === 'win32' ? path.join(process.env.SystemRoot, 'System32/tar.exe') : '/usr/bin/tar'
-      await execute(tar, ['-xf', archive, '-C', extracted], { timeout: 180000, maxBuffer: 65536 })
+      await execute(tar, ['-xf', path.basename(archive), '-C', 'extracted'], { cwd: home, timeout: 180000, maxBuffer: 65536 })
       const children = await fs.readdir(extracted); assert.equal(children.length, 1)
       await fs.rename(path.join(extracted, children[0]), root); await fs.writeFile(path.join(root, 'VERSION'), version + '\n')
       await fs.mkdir(dataDir, { recursive: true, mode: 0o755 })
