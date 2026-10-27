@@ -88,7 +88,7 @@ function createSourceExitVerifier({ installRoot, prepared, child }, existing, ro
       accepted = actual.record.proof_sha256 === digest && same(actual.proof, proof) && current()
       return accepted
     } catch { return false }
-    finally { console.info(JSON.stringify({ component: 'desktop-removal-source-exit', stage, accepted, elapsed_ms: Math.round(performance.now() - started) })) }
+    finally { console.error(JSON.stringify({ component: 'desktop-removal-source-exit', stage, accepted, elapsed_ms: Math.round(performance.now() - started) })) }
   }
 }
 

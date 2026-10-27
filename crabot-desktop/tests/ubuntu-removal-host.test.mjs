@@ -269,30 +269,31 @@ for (const mode of ['valid', 'wrong-operation', 'changed-parent', 'changed-helpe
         const backendDirectory = path.join(bundle, 'backend/dist')
         await fs.cp(fileURLToPath(new URL('../dist/', import.meta.url)), backendDirectory, { recursive: true })
         await fs.cp(path.join(bundle, 'offline/gui/resources/crabot-maintenance-backend/node_modules'), path.join(bundle, 'backend/node_modules'), { recursive: true })
-        for (const name of ['mode.mjs', 'legacy-desktop.mjs', 'legacy-release-identity.mjs', 'legacy-release-files.mjs']) {
-          await fs.copyFile(fileURLToPath(new URL('../../scripts/lib/' + name, import.meta.url)), path.join(backendDirectory, 'bootstrap/scripts/lib', name))
-        }
+        const helperFilter = file => !file.split(path.sep).some(part => ['node_modules', '__tests__', 'fixtures'].includes(part))
+        for (const directory of ['lib', 'upgrade-lib']) await fs.cp(fileURLToPath(new URL('../../scripts/' + directory, import.meta.url)),
+          path.join(backendDirectory, 'bootstrap/scripts', directory), { recursive: true, filter: helperFilter })
         const catalog = path.join(backendDirectory, 'bootstrap/scripts/desktop')
         await fs.mkdir(catalog, { recursive: true })
-        await fs.copyFile(fileURLToPath(new URL('../../scripts/desktop/legacy-releases.json', import.meta.url)), path.join(catalog, 'legacy-releases.json'))
+        for (const name of ['legacy-releases.json', 'legacy-python-bootstrap.json']) await fs.copyFile(
+          fileURLToPath(new URL('../../scripts/desktop/' + name, import.meta.url)), path.join(catalog, name))
         await promisify(execFile)(process.execPath, ['--input-type=module', '-e',
           'import{pathToFileURL}from"node:url";for(const file of process.argv.slice(1))await import(pathToFileURL(file).href)',
-          ...['desktop-payload.mjs', 'mode.mjs', 'legacy-desktop.mjs'].map(name => path.join(backendDirectory, 'bootstrap/scripts/lib', name))],
+          ...['desktop-payload.mjs', 'mode.mjs', 'legacy-desktop.mjs', 'legacy-desktop-discovery.mjs'].map(name => path.join(backendDirectory, 'bootstrap/scripts/lib', name))],
           { env, cwd: bundle, timeout: 5000, maxBuffer: 65536 })
         const child = spawn(process.execPath, [path.join(backendDirectory, 'ubuntu-installer-backend.js'), own.root], {
           env, cwd: bundle, stdio: ['pipe', 'pipe', 'pipe'],
         })
         const exited = once(child, 'exit'), peer = identity.inspectProcess(child.pid)
-        let timedOut = false, output = ''
+        let timedOut = false, output = '', stderr = ''
         child.stdout.on('data', bytes => { output = (output + bytes.toString()).slice(-8192) })
-        child.stderr.resume()
+        child.stderr.on('data', bytes => { stderr = (stderr + bytes.toString()).slice(-8192) })
         const timer = setTimeout(() => {
           timedOut = true
           if (child.exitCode === null && child.signalCode === null && identity.sameProcess(peer, identity.inspectProcess(child.pid))) child.kill('SIGKILL')
         }, 5000)
         child.stdin.write('{"action":"cancel"}\n') // Keep stdin open to expose a forgotten pending-choice promise.
         try {
-          const [code] = await exited; assert.equal(timedOut, false); assert.equal(code, 2, output)
+          const [code] = await exited; assert.equal(timedOut, false); assert.equal(code, 2, output + '\n' + stderr)
           assert.deepEqual(JSON.parse(output.trim()), { type: 'failed', code: 'CANCELLED' })
           assert.equal(JSON.parse(await fs.readFile(path.join(own.root, '.desktop-removal.json'), 'utf8')).phase, 'removing')
           assert.equal(await fs.readFile(path.join(own.dataDir, 'preserved'), 'utf8'), 'data and dependencies')
