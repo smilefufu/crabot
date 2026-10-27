@@ -5,7 +5,9 @@ import readline from 'node:readline'
 const argv = process.argv.slice(2)
 if (argv.includes('--version')) {
   process.stdout.write(`${process.env.FAKE_CODEX_VERSION ?? 'codex-cli 0.147.0'}\n`)
-  process.exit(0)
+  const wait = Number(process.env.FAKE_TERMINATION_DELAY_MS ?? '0')
+  if (wait > 0) setTimeout(() => process.exit(0), wait)
+  else process.exit(0)
 }
 
 if (!argv.includes('app-server')) process.exit(2)
@@ -14,6 +16,7 @@ const mode = process.env.FAKE_APP_SERVER_MODE ?? 'happy'
 const forkThreadId = process.env.FAKE_FORK_THREAD_ID ?? '019d0000-0000-7000-8000-000000000001'
 const turnId = process.env.FAKE_TURN_ID ?? '019d0000-0000-7000-8000-000000000002'
 const delayMs = Number(process.env.FAKE_COMPLETION_DELAY_MS ?? '20')
+if (process.env.FAKE_PID_FILE) appendFileSync(process.env.FAKE_PID_FILE, String(process.pid) + '\n')
 const terminationFile = process.env.FAKE_TERMINATION_FILE
 const requestFile = process.env.FAKE_REQUEST_FILE
 

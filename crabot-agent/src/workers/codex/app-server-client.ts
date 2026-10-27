@@ -1,3 +1,4 @@
+import { join } from 'node:path'
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { buildScrubbedChildEnv } from '../connections/secret-env.js'
 import { resolveNativeShellPath } from '../../utils/resolve-bash-path.js'
@@ -230,11 +231,8 @@ export class CodexAppServerClient {
   }
 
   async terminate(): Promise<boolean> {
-    if (this.processExited) return true
-    killProcessTree(this.child, 'SIGTERM')
-    if (await this.waitForExit(1000)) return true
-    killProcessTree(this.child, 'SIGKILL')
-    return this.waitForExit(1000)
+    this.termination ??= this.terminateObservedProcesses()
+    return this.termination
   }
 
   private write(message: JsonObject): void {
@@ -325,6 +323,43 @@ export class CodexAppServerClient {
     const result = await Promise.race([exited, timeout])
     if (timer) clearTimeout(timer)
     return result
+  }
+
+  private termination?: Promise<boolean>
+
+
+  private async terminateObservedProcesses(): Promise<boolean> {
+    if (this.processExited) return true
+    let stage = 'capture'
+    try {
+      const { captureSpawnedProcessTree } = require(join(__dirname, '../../../../scripts/lib/spawned-process-tree.cjs'))
+      const processes = captureSpawnedProcessTree(this.child)
+      if (!Array.isArray(processes)) return false
+      const { stopKnownProcessScope } = require(join(__dirname, '../../../../scripts/lib/known-process-stop.cjs'))
+      stage = 'stop'
+      await stopKnownProcessScope(processes, {
+        timeoutMs: process.platform === 'win32' ? 1 : 1000,
+        onObserved: async () => {},
+        ...(process.platform === 'win32' ? {} : { graceful: () => { killProcessTree(this.child, 'SIGTERM') } }),
+      })
+      stage = 'exit'
+      if (!await this.waitForExit(1000)) throw new Error('Carrier exit was not observed')
+      return true
+    } catch (error) {
+      const info = error as { code?: unknown; stage?: unknown; message?: unknown }
+      const bounded = (value: unknown, pattern: RegExp) => typeof value === 'string' && pattern.test(value) ? value : undefined
+      const reasons = new Map([
+        ['Cannot inspect process exit', 'exit-observation'],
+        ['Cannot open the verified process for termination', 'open-target'],
+        ['Cannot inspect the verified process handle', 'target-handle'],
+        ['Cannot terminate the verified process', 'terminate-target'],
+        ['Cannot terminate self or another OS owner', 'target-owner'],
+      ])
+      console.warn('Codex app-server termination unconfirmed', { stage,
+        code: bounded(info?.code, /^[A-Z0-9_]{1,80}$/), native_stage: bounded(info?.stage, /^[a-z-]{1,80}$/),
+        reason: typeof info?.message === 'string' ? reasons.get(info.message) : undefined })
+      return false
+    }
   }
 }
 

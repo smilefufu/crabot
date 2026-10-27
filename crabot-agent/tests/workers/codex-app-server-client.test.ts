@@ -88,6 +88,33 @@ describe('CodexAppServerClient', () => {
     })).resolves.toBe(false)
   })
 
+  it.each(['normal', 'shell child', 'observed tree'])('%s termination confirms the actual app-server exits, including a shell child', async mode => {
+    const native = require('../../../scripts/lib/process-identity.cjs')
+    const pidFile = join(dir, 'app-server.pid')
+    const client = new CodexAppServerClient({
+      command: mode === 'normal' ? `exec node ${quote(FIXTURE)} app-server --stdio`
+        : `node ${quote(FIXTURE)} app-server --stdio; result=$?; exit "$result"`,
+      cwd: dir,
+      env: { PATH: process.env.PATH ?? '', CODEX_HOME: dir, FAKE_PID_FILE: pidFile, FAKE_TERMINATION_DELAY_MS: '200' },
+    })
+    let processIdentity: ReturnType<typeof native.inspectProcess>
+    try {
+      await client.initialize(new Date(Date.now() + 2000).toISOString())
+      processIdentity = native.inspectProcess(Number(await fs.readFile(pidFile, 'utf8')))
+      expect(processIdentity).not.toBeNull()
+      const stopped = mode !== 'observed tree' ? await client.terminate()
+        : await (client as unknown as { terminateObservedProcesses(): Promise<boolean> }).terminateObservedProcesses()
+      expect(stopped).toBe(true)
+      expect(native.isProcessExited(processIdentity.pid)).toBe(true)
+    } finally {
+      await client.terminate()
+      if (processIdentity) {
+        try { if (!native.isProcessExited(processIdentity.pid)) native.terminateKnownProcess(processIdentity) }
+        catch { /* Preserve the primary assertion when the owned fixture is already exiting. */ }
+      }
+    }
+  })
+
   it('子进程关闭 stdin 时把 EPIPE 收口为 RPC 失败', async () => {
     const client = new CodexAppServerClient({
       command: `exec node -e ${quote('process.stdin.destroy(); setTimeout(() => {}, 1000)')}`,

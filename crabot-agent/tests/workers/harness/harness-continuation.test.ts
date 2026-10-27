@@ -329,7 +329,7 @@ describe('WorkerHarness — 透明接续：revive (capabilities().revive === tru
     const fake = new FakeAdapter({ implId: 'codex', caps: { revive: true }, onStateChange: harness.handleStateChange })
     adaptersMap.set('codex', fake)
     const worker = await harness.spawnWorker(spawnParams({ impl: 'codex', principal_permissions: {
-      ...BUILTIN_WORKER_PERMISSIONS, storage: { workspace_path: '/', access: 'readwrite' },
+      ...BUILTIN_WORKER_PERMISSIONS, storage: { scope: 'all', access: 'readwrite' },
     } }))
     const read = async (id: string) => JSON.parse(await fs.readFile(join(workersDir, worker.worker_id, 'observations', `${id}.json`), 'utf8'))
     const first = await read(worker.incarnations[0].incarnation_id!)

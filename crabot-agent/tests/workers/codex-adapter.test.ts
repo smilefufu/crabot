@@ -159,6 +159,10 @@ describe('CodexWorkerAdapter.provision', () => {
 
   beforeEach(async () => {
     ws = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-adapter-provision-'))
+    if (process.platform === 'win32') {
+      await fs.rmdir(ws)
+      require('../../../scripts/lib/process-identity.cjs').createPrivateDirectory(ws)
+    }
     codexHomeSource = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-adapter-home-src-'))
   })
 
@@ -181,7 +185,8 @@ describe('CodexWorkerAdapter.provision', () => {
 
     const configPath = path.join(ws, '.codex/config.toml')
     const configToml = await fs.readFile(configPath, 'utf-8')
-    expect((await fs.stat(configPath)).mode & 0o777).toBe(0o600)
+    if (process.platform === 'win32') expect(require('../../../scripts/lib/process-identity.cjs').isPrivateFile(configPath)).toBe(true)
+    else expect((await fs.stat(configPath)).mode & 0o777).toBe(0o600)
     expect(configToml).toContain('notify = ')
     expect(configToml).toContain('events-cli.jsonl')
     expect(configToml).toContain('permission_request')
@@ -284,7 +289,8 @@ describe('CodexWorkerAdapter.provision', () => {
 
     const authPath = path.join(ws, '.codex/auth.json')
     const stat = await fs.stat(authPath)
-    expect((stat.mode & 0o777)).toBe(0o600)
+    if (process.platform === 'win32') expect(require('../../../scripts/lib/process-identity.cjs').isPrivateFile(authPath)).toBe(true)
+    else expect((stat.mode & 0o777)).toBe(0o600)
   })
 
   it('provision 在 .codex/ 目录下写入 .gitignore 防止整个隔离 HOME 入库', async () => {
@@ -376,8 +382,7 @@ describe('CodexWorkerAdapter.provision', () => {
 
     const realRoot = await fs.realpath(ws)
     const configToml = await fs.readFile(path.join(ws, '.codex/config.toml'), 'utf-8')
-    expect(configToml).toContain(`[projects."${realRoot}"]`)
-    expect(configToml).toContain('trust_level = "trusted"')
+    expect((parseToml(configToml) as any).projects[realRoot].trust_level).toBe('trusted')
     // TOML 根级 key(notify)必须出现在 [projects...] 表头之前。
     expect(configToml.indexOf('notify =')).toBeLessThan(configToml.indexOf('[projects.'))
   })
@@ -1740,7 +1745,10 @@ describe('CodexWorkerAdapter.fork — app-server', () => {
 
   it('private project fork restores managed MCP configuration after operation-time provider refresh', async () => {
     const runtime = await fs.realpath(await fs.mkdtemp(path.join(dataDir, 'private-runtime-')))
-    await fs.chmod(runtime, 0o700)
+    if (process.platform === 'win32') {
+      await fs.rmdir(runtime)
+      require('../../../scripts/lib/process-identity.cjs').createPrivateDirectory(runtime)
+    } else await fs.chmod(runtime, 0o700)
     const workspace = { root: await fs.realpath(workspaceRoot), workspace_id: randomUUID(), runtime_root: runtime }
     const adapter = new CodexWorkerAdapter({ dataDir, codexHomeSource: codexHome, tmux: new NoopTmux(), codexBin: appServerBin() })
     const skill = path.join(dataDir, 'fixture-skill'); await fs.mkdir(skill); await fs.writeFile(path.join(skill, 'SKILL.md'), 'Frozen worker skill')
@@ -1765,11 +1773,12 @@ describe('CodexWorkerAdapter.fork — app-server', () => {
 
   it('turn/start 明确拒绝时在同一次 fork 调用返回 query_submit 失败并收口进程', async () => {
     const terminationFile = path.join(dataDir, 'terminated.log')
+    const pidFile = path.join(dataDir, 'rejected-pids.log')
     const adapter = new CodexWorkerAdapter({
       dataDir,
       codexHomeSource: codexHome,
       tmux: new NoopTmux(),
-      codexBin: appServerBin('turn_error', `FAKE_TERMINATION_FILE=${shQuote(terminationFile)}`),
+      codexBin: appServerBin('turn_error', `FAKE_TERMINATION_FILE=${shQuote(terminationFile)} FAKE_PID_FILE=${shQuote(pidFile)}`),
     })
     await adapter.detect()
 
@@ -1782,7 +1791,10 @@ describe('CodexWorkerAdapter.fork — app-server', () => {
       stage: 'query_submit',
       certainty: 'not_started',
     } satisfies Partial<ForkEstablishmentError>)
-    expect(await fs.readFile(terminationFile, 'utf8')).toContain('SIGTERM')
+    if (process.platform !== 'win32') expect(await fs.readFile(terminationFile, 'utf8')).toContain('SIGTERM')
+    const pids = (await fs.readFile(pidFile, 'utf8')).trim().split('\n').map(Number)
+    expect(pids.length).toBeGreaterThan(0)
+    for (const pid of pids) expect(require('../../../scripts/lib/process-identity.cjs').isProcessExited(pid)).toBe(true)
     await expect(fs.access(path.join(dataDir, workerId, 'meta-2.json'))).rejects.toThrow()
   })
 
@@ -1809,11 +1821,12 @@ describe('CodexWorkerAdapter.fork — app-server', () => {
 
   it('建立 deadline 到期会失败并终止 app-server，不留下可误认成功的 meta', async () => {
     const terminationFile = path.join(dataDir, 'timeout-terminated.log')
+    const pidFile = path.join(dataDir, 'timeout-pids.log')
     const adapter = new CodexWorkerAdapter({
       dataDir,
       codexHomeSource: codexHome,
       tmux: new NoopTmux(),
-      codexBin: appServerBin('hang_fork', `FAKE_TERMINATION_FILE=${shQuote(terminationFile)}`),
+      codexBin: appServerBin('hang_fork', `FAKE_TERMINATION_FILE=${shQuote(terminationFile)} FAKE_PID_FILE=${shQuote(pidFile)}`),
     })
     await adapter.detect()
 
@@ -1822,7 +1835,10 @@ describe('CodexWorkerAdapter.fork — app-server', () => {
       '侧问问题',
       options(100),
     )).rejects.toMatchObject({ name: 'ForkEstablishmentError', stage: 'timeout', certainty: 'unknown' })
-    expect(await fs.readFile(terminationFile, 'utf8')).toContain('SIGTERM')
+    if (process.platform !== 'win32') expect(await fs.readFile(terminationFile, 'utf8')).toContain('SIGTERM')
+    const pids = (await fs.readFile(pidFile, 'utf8')).trim().split('\n').map(Number)
+    expect(pids.length).toBeGreaterThan(0)
+    for (const pid of pids) expect(require('../../../scripts/lib/process-identity.cjs').isProcessExited(pid)).toBe(true)
     await expect(fs.access(path.join(dataDir, workerId, 'meta-2.json'))).rejects.toThrow()
   })
 
