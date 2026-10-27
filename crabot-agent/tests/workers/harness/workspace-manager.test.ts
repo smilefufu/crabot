@@ -6,21 +6,24 @@ import { WorkspaceManager, InvalidWorkspaceError } from '../../../src/workers/ha
 
 describe('WorkspaceManager', () => {
   let root: string
+  let dataRoot: string
   let manager: WorkspaceManager
 
   beforeEach(async () => {
-    root = await fs.mkdtemp(join(tmpdir(), 'workspace-manager-test-'))
+    dataRoot = await fs.realpath(await fs.mkdtemp(join(tmpdir(), 'workspace-manager-test-')))
+    root = join(dataRoot, 'workspaces')
+    await fs.mkdir(root)
     manager = new WorkspaceManager(root)
   })
 
   afterEach(async () => {
-    await fs.rm(root, { recursive: true, force: true })
+    await fs.rm(dataRoot, { recursive: true, force: true })
   })
 
-  describe('默认行为：缺省创建 <root>/<taskId> 且幂等', () => {
-    it('缺省 requested 时创建 <root>/<taskId> 目录', async () => {
+  describe('默认行为：一个default下保持任务目录隔离且幂等', () => {
+    it('缺省 requested 时创建 default/tasks/<taskId> 目录', async () => {
       const ws = await manager.resolve('task-1')
-      expect(ws.root).toBe(resolve(root, 'task-1'))
+      expect(ws.root).toBe(resolve(root, 'default/tasks/task-1'))
 
       // 验证目录已创建
       const stat = await fs.stat(ws.root)
@@ -54,7 +57,7 @@ describe('WorkspaceManager', () => {
       const externalDir = await fs.mkdtemp(join(tmpdir(), 'external-ws-'))
       try {
         const ws = await manager.resolve('task-1', externalDir)
-        expect(ws.root).toBe(externalDir)
+        expect(ws.root).toBe(await fs.realpath(externalDir))
       } finally {
         await fs.rm(externalDir, { recursive: true, force: true })
       }
@@ -232,20 +235,21 @@ describe('WorkspaceManager', () => {
   describe('constructor 默认 root', () => {
     it('不指定 root 时应使用 getWorkspacesRootDir()', async () => {
       // 临时更改环境变量来测试
-      const oldEnv = process.env.WORKER_WORKSPACES_DIR
+      const oldEnv = process.env.WORKER_WORKSPACES_DIR, oldAgent = process.env.CRABOT_AGENT_DATA_DIR
+      const profile = await fs.realpath(await fs.mkdtemp(join(tmpdir(), 'workspaces-root-')))
       try {
-        const testDir = await fs.mkdtemp(join(tmpdir(), 'workspaces-root-'))
+        const testDir = join(profile, 'workspaces')
         process.env.WORKER_WORKSPACES_DIR = testDir
+        process.env.CRABOT_AGENT_DATA_DIR = join(profile, 'agent')
         const mgr = new WorkspaceManager()
         const ws = await mgr.resolve('task-default')
-        expect(ws.root).toBe(resolve(testDir, 'task-default'))
-        await fs.rm(testDir, { recursive: true, force: true })
+        expect(ws.root).toBe(resolve(testDir, 'default/tasks/task-default'))
       } finally {
-        if (oldEnv !== undefined) {
-          process.env.WORKER_WORKSPACES_DIR = oldEnv
-        } else {
-          delete process.env.WORKER_WORKSPACES_DIR
-        }
+        await fs.rm(profile, { recursive: true, force: true })
+        if (oldEnv !== undefined) process.env.WORKER_WORKSPACES_DIR = oldEnv
+        else delete process.env.WORKER_WORKSPACES_DIR
+        if (oldAgent !== undefined) process.env.CRABOT_AGENT_DATA_DIR = oldAgent
+        else delete process.env.CRABOT_AGENT_DATA_DIR
       }
     })
   })

@@ -20,11 +20,6 @@ function shQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`
 }
 
-/** POSIX shell 双引号内的转义(用于 `"${VAR:-<默认值>}"` 里的默认值部分)。 */
-function dqEscape(s: string): string {
-  return s.replace(/([\\"$`])/g, '\\$1')
-}
-
 /**
  * hook 运行时的事件文件重定向变量。设了且非空 → 事件写它,否则写 hookCommand 生成时
  * baked 进去的默认路径。
@@ -44,7 +39,7 @@ export const EVENTS_FILE_ENV = 'CRABOT_CLI_EVENTS_FILE'
 const POLL_INTERVAL_MS = 2000
 
 export class CliEventChannel {
-  constructor(private filePath: string) {}
+  constructor(private filePath: string, private source?: string) {}
 
   /**
    * 返回当前文件末尾。调用方在启动一个新的 CLI 化身前记住该位置，再由 watch() 从这里
@@ -69,7 +64,7 @@ export class CliEventChannel {
    * `raw:null`。外形完整但内部无效的 object 无法靠纯 POSIX shell 完整验证；readAll/watch
    * 会识别本命令生成的可信 envelope，保留 ts/kind 并把这类 raw 同样降级为 null。
    *
-   * 追加目标是 `"${CRABOT_CLI_EVENTS_FILE:-<本 channel 的路径>}"`——运行时可被调用方经
+   * 追加目标默认是本 channel 的路径，运行时可被调用方经
    * env 重定向到私有文件,见 EVENTS_FILE_ENV 注释。
    */
   hookCommand(kind: string): string {
@@ -77,13 +72,15 @@ export class CliEventChannel {
     // 再整体当作单个 shell 单引号字面量传给 printf 的 %s——避免 kind 内容
     // 里出现 % 之类字符被 printf 误当格式指令解析。
     const kindJsonEscaped = JSON.stringify(kind).slice(1, -1)
-    const format = '{"ts":"%s","kind":"%s","source":"crabot_cli_hook","raw":%s}\\n'
-    const target = `"\${${EVENTS_FILE_ENV}:-${dqEscape(this.filePath)}}"`
+    const format = '{"ts":"%s","kind":"%s","source":"%s","raw":%s}\\n'
+    const source = JSON.stringify(this.source ?? 'crabot_cli_hook').slice(1, -1)
     const raw = "raw=$(tr -d '\\r\\n'); case \"$raw\" in \\{*\\}) ;; *) raw=null ;; esac"
     return [
+      `crabot_event_file=${shQuote(this.filePath)}`,
+      `if [ -n "\${${EVENTS_FILE_ENV}:-}" ]; then crabot_event_file="$${EVENTS_FILE_ENV}"; fi`,
       'ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)',
       raw,
-      `printf '${format}' "$ts" ${shQuote(kindJsonEscaped)} "$raw" >> ${target}`,
+      `printf '${format}' "$ts" ${shQuote(kindJsonEscaped)} ${shQuote(source)} "$raw" >> "$crabot_event_file"`,
     ].join('; ')
   }
 
@@ -97,7 +94,7 @@ export class CliEventChannel {
     }
     const events: CliEvent[] = []
     for (const line of text.split('\n')) {
-      const event = parseLine(line)
+      const event = parseLine(line, this.source)
       if (event) events.push(event)
     }
     return events
@@ -151,7 +148,7 @@ export class CliEventChannel {
       for (const line of completeLines) {
         consumedBytes += Buffer.byteLength(line, 'utf-8') + 1 // +1 for '\n'
         if (stopped) break
-        const event = parseLine(line)
+        const event = parseLine(line, this.source)
         if (event) await onEvent(event)
       }
       offset += consumedBytes
@@ -204,11 +201,12 @@ export class CliEventChannel {
   }
 }
 
-function parseLine(line: string): CliEvent | null {
+function parseLine(line: string, source?: string): CliEvent | null {
   const trimmed = line.trim()
   if (!trimmed) return null
   try {
     const parsed = JSON.parse(trimmed)
+    if (source !== undefined && parsed?.source !== source) return null
     if (parsed && typeof parsed === 'object' && typeof parsed.ts === 'string' && typeof parsed.kind === 'string') {
       return { ts: parsed.ts, kind: parsed.kind, raw: 'raw' in parsed ? parsed.raw : null }
     }
@@ -218,9 +216,10 @@ function parseLine(line: string): CliEvent | null {
     // POSIX shell 无法在不依赖 jq/node 的前提下完整校验任意 JSON；若 payload 外形像 object
     // 但内部损坏，带固定 source discriminator 的本通道 envelope 仍保留 turn/notification
     // 事件，仅把 raw 降级为 null。没有 discriminator 的其它坏行继续跳过。
-    const envelope = /^\{"ts":"([^"\\]*)","kind":"((?:\\.|[^"\\])*)","source":"crabot_cli_hook","raw":.*\}$/.exec(trimmed)
+    const envelope = /^\{"ts":"([^"\\]*)","kind":"((?:\\.|[^"\\])*)","source":"((?:\\.|[^"\\])*)","raw":.*\}$/.exec(trimmed)
     if (!envelope) return null
     try {
+      if (JSON.parse(`"${envelope[3]}"`) !== (source ?? 'crabot_cli_hook')) return null
       const kind = JSON.parse(`"${envelope[2]}"`)
       return typeof kind === 'string' ? { ts: envelope[1], kind, raw: null } : null
     } catch {

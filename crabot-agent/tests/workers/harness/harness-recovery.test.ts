@@ -368,7 +368,7 @@ describe('WorkerHarness.reconcileOnStartup — 三态判定', () => {
 
     const stateEvents = events.filter((e) => e.kind === 'state_changed' && e.worker_id === 'w-resurrected')
     expect(stateEvents).toHaveLength(1)
-    expect(stateEvents[0].detail).toEqual({ to: 'running', source: 'reconcile' })
+    expect(stateEvents[0].detail).toMatchObject({ to: 'running', source: 'reconcile', execution: { state: 'running', reasons: ['mainline_running'] } })
   })
 
   it('主线化身的 impl 没有注册 adapter(已禁用/未安装) → 落 failed(crashed)，detail 记原因，不调用任何 adapter.state()', async () => {

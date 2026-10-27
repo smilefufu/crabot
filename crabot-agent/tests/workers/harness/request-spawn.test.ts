@@ -27,7 +27,8 @@ describe('request spawn binds before any carrier side effect', () => {
   let originalResolve: WorkspaceManager['resolve']
   let provision: ReturnType<typeof vi.fn>, spawn: ReturnType<typeof vi.fn>, resolve: ReturnType<typeof vi.spyOn>, connection: ReturnType<typeof vi.fn>
   beforeEach(async () => {
-    root = await fs.mkdtemp(path.join(os.tmpdir(), 'request-spawn-')); await fs.mkdir(path.join(root, 'a')); await fs.mkdir(path.join(root, 'b'))
+    root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'request-spawn-'))); await fs.mkdir(path.join(root, 'a')); await fs.mkdir(path.join(root, 'b'))
+    await fs.mkdir(path.join(root, 'data'), { mode: 0o700 }); await fs.mkdir(path.join(root, 'workspaces'), { mode: 0o700 })
     const permissions: ResolvedPermissions = { tool_access: { memory: true, messaging: true, task: true, mcp_skill: true, file_io: true, browser: true, shell: true, remote_exec: false, desktop: true }, cli_access: { provider: 'write', agent: 'write', mcp: 'write', skill: 'write', schedule: 'write', channel: 'write', friend: 'write', permission: 'write', config: 'write', undo: 'write' }, storage: { workspace_path: path.join(root, 'a'), access: 'read' }, memory_scopes: [] }
     group = { kind: 'group', subject_id: key, is_master: false, resolved: structuredClone(permissions) }
     friend = { kind: 'friend', subject_id: 'actual-owner', is_master: true, resolved: { ...structuredClone(permissions), storage: { workspace_path: path.join(root, 'b'), access: 'readwrite' } } }
@@ -39,7 +40,7 @@ describe('request spawn binds before any carrier side effect', () => {
     caller = new ConversationRequestAuthority(requests, key, recordId, 'request', current)
     ledger = new LedgerStore(path.join(root, 'ledgers')); contexts = new WorkerContextStore(path.join(root, 'workers'))
     guard = new WorkerRequestGuard(ledger, contexts, requests, current)
-    workspaces = new WorkspaceManager(path.join(root, 'workspaces')); originalResolve = workspaces.resolve.bind(workspaces); resolve = vi.spyOn(workspaces, 'resolve')
+    workspaces = new WorkspaceManager(path.join(root, 'workspaces'), path.join(root, 'data')); originalResolve = workspaces.resolve.bind(workspaces); resolve = vi.spyOn(workspaces, 'resolve')
     provision = vi.fn(async () => {}); spawn = vi.fn(async (spec: SpawnSpec) => ({ worker_id: spec.worker_id, incarnation_id: spec.incarnation_id, seq: 1, impl: 'builtin', session_ref: 'actual-session' }))
     const adapter = { implId: 'builtin', provision, spawn, capabilities: () => ({ fork: true, revive: true, goalMode: false, subagent: false, structuredTrace: true }), state: async () => 'running', readTrace: async () => ({ events: [], nextCursor: { offset: 0 } }) } as unknown as WorkerAdapter
     connection = vi.fn(async () => ({ env: {}, dispose: vi.fn(async () => {}) }))
@@ -105,7 +106,7 @@ describe('request spawn binds before any carrier side effect', () => {
     expect(worker.origin.creator_friend_id).toBe('actual-owner')
     expect(worker.report_to).toEqual({ channel_id: 'voice', session_id: 'shared' })
     const workspace = worker.incarnations[0].workspace!
-    expect(workspace).toBe(path.join(root, 'workspaces', worker.worker_id))
+    expect(workspace).toBe(path.join(await fs.realpath(root), 'workspaces/default/tasks', worker.worker_id))
     expect((await contexts.read(worker.worker_id))!.principal_permissions!.storage).toEqual(storage === 'null' ? null : { workspace_path: await fs.realpath(path.join(root, 'a')), access: 'read' })
     expect(provision).toHaveBeenCalledOnce(); expect(spawn).toHaveBeenCalledOnce()
   })

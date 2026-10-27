@@ -1,5 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { buildScrubbedChildEnv } from '../connections/secret-env.js'
+import { resolveNativeShellPath } from '../../utils/resolve-bash-path.js'
 
 type JsonObject = Record<string, unknown>
 
@@ -104,10 +105,11 @@ export class CodexAppServerClient {
     readonly cwd: string
     readonly env: Record<string, string>
   }) {
+    const shell = resolveNativeShellPath()
     this.exitedPromise = new Promise((resolve) => {
       this.resolveExited = resolve
     })
-    this.child = spawn('/bin/sh', ['-c', opts.command], {
+    this.child = spawn(shell, ['-c', opts.command], {
       cwd: opts.cwd,
       env: { ...buildScrubbedChildEnv(), ...opts.env },
       detached: true,
@@ -380,8 +382,9 @@ export async function probeCodexAppServerFork(opts: {
   readonly timeoutMs?: number
 }): Promise<boolean> {
   const deadlineAt = new Date(Date.now() + (opts.timeoutMs ?? 3000)).toISOString()
-  const client = new CodexAppServerClient(opts)
+  let client: CodexAppServerClient | undefined
   try {
+    client = new CodexAppServerClient(opts)
     await client.initialize(deadlineAt)
     const [fork, turn] = await Promise.allSettled([
       client.request('thread/fork', {
@@ -399,7 +402,7 @@ export async function probeCodexAppServerFork(opts: {
   } catch {
     return false
   } finally {
-    await client.terminate()
+    await client?.terminate()
   }
 }
 
@@ -410,14 +413,15 @@ export async function probeCodexAppServerSubagents(opts: {
   readonly timeoutMs?: number
 }): Promise<boolean> {
   const deadlineAt = new Date(Date.now() + (opts.timeoutMs ?? 3000)).toISOString()
-  const client = new CodexAppServerClient(opts)
+  let client: CodexAppServerClient | undefined
   try {
+    client = new CodexAppServerClient(opts)
     await client.initialize(deadlineAt)
     await client.listThreads({ parentThreadId: '00000000-0000-0000-0000-000000000001', limit: 1 }, deadlineAt)
     return true
   } catch {
     return false
   } finally {
-    await client.terminate()
+    await client?.terminate()
   }
 }

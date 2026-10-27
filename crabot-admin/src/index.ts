@@ -1,3 +1,5 @@
+import { WorkspaceService } from './workspaces.js'
+import { WorkspaceExecutionInventorySchema, WorkspaceIdSchema } from 'crabot-client'
 import { parseChatMultipartMetadata } from 'crabot-client'
 import { correlateHttpRequest } from './http-diagnostics.js'
 import { DesktopSessions, type DesktopClaims } from './desktop-session.js'
@@ -758,6 +760,7 @@ export class AdminModule extends ModuleBase {
   private readonly templatesFilePath: string
   private readonly pendingMessagesFilePath: string
   private readonly sessionConfigsFilePath: string
+  private workspaceService: WorkspaceService
   private readonly friendPermissionConfigsFilePath: string
   private readonly schedulesFilePath: string
   private readonly tasksFilePath: string
@@ -794,6 +797,9 @@ export class AdminModule extends ModuleBase {
   ) {
     super(moduleConfig)
     this.adminConfig = { ...DEFAULT_ADMIN_CONFIG, ...adminConfig }
+    this.workspaceService = new WorkspaceService({ dataRoot: path.resolve(this.adminConfig.data_dir, '..'),
+      storageRoot: process.env.WORKER_WORKSPACES_DIR || undefined,
+      execution: async () => WorkspaceExecutionInventorySchema.parse(await this.callAgentRpc('get_workspace_execution_admin', {})) })
     this.configMutationCoordinator = new CoreAgentConfigMutationCoordinator(this.adminConfig.data_dir, {
       readSemanticSnapshot: () => this.readCoreAgentSemanticSnapshot(),
       // Initial/upgrade seeding may commit multiple serialized source changes before Admin has
@@ -1133,6 +1139,8 @@ export class AdminModule extends ModuleBase {
 
     // 确保数据目录存在
     await fs.mkdir(this.adminConfig.data_dir, { recursive: true })
+    try { await this.workspaceService.initialize() }
+    catch { console.warn('[Admin] Workspace catalog unavailable; management remains online and original records are retained') }
     await this.voiceAdmin.load()
     this.voiceAdmin.start()
     // Source managers must load before coordinator recovery so its semantic HMAC observes
@@ -1376,6 +1384,7 @@ export class AdminModule extends ModuleBase {
   }
 
   protected override async onStop(): Promise<void> {
+    await this.workspaceService.close()
     try { await this.desktopSessions?.close() }
     catch { console.warn('[DesktopAuth] Listener stopped; discovery cleanup incomplete, record retained') }
     this.voiceAdmin.stop()
@@ -1598,6 +1607,7 @@ export class AdminModule extends ModuleBase {
 
     const url = new URL(req.url ?? '/', `http://localhost:${this.adminConfig.web_port}`)
     const pathname = url.pathname
+    const workspaceRequest = pathname === '/api/workspaces' || pathname.startsWith('/api/workspaces/')
     if (pathname.startsWith('/api/')) correlateHttpRequest(req, res)
     let agentCliAuth: AgentCliWebAuth | undefined
 
@@ -1625,6 +1635,7 @@ export class AdminModule extends ModuleBase {
 
       const basicPayload = verifyJwt(token, this.jwtSecret)
       if (basicPayload?.sub === 'agent-cli') {
+        if (workspaceRequest) { sendJson(res, 403, { error: 'Human Admin credential required' }); return }
         try {
           agentCliAuth = await this.authorizeAgentCliRequest(basicPayload, req.method, pathname)
         } catch (error) {
@@ -1634,7 +1645,7 @@ export class AdminModule extends ModuleBase {
         }
       } else {
         const payload = await this.verifyAuthenticatedToken(token)
-        if (pathname.startsWith('/api/chat/') && payload && (payload.sub !== 'admin' || payload.agent_cli)) {
+        if ((pathname.startsWith('/api/chat/') || workspaceRequest) && payload && (payload.sub !== 'admin' || payload.agent_cli)) {
           sendJson(res, 403, { error: 'Human Admin credential required' })
           return
         }
@@ -1662,6 +1673,7 @@ export class AdminModule extends ModuleBase {
 
     // 路由处理
     try {
+      if (workspaceRequest && await this.workspaceService.handleWeb(req, res, pathname, () => this.readJsonBody(req, 65536))) return
       if (await this.voiceAdmin.handleWeb(req, res, pathname, () => this.readJsonBody(req))) return
       if (pathname === '/api/auth/login' && req.method === 'POST') {
         await this.handleLogin(req, res)
@@ -11506,6 +11518,8 @@ export class AdminModule extends ModuleBase {
     // 单个即单值（沿用 parseAccessibleScopes 的 getAll 惯例，不另发明逗号分隔语法）。
     const statuses = url.searchParams.getAll('status').filter(Boolean)
     const managerKey = url.searchParams.get('manager_key') || undefined
+    const workspaceId = url.searchParams.get('workspace_id') || undefined
+    if (workspaceId && !WorkspaceIdSchema.safeParse(workspaceId).success) { sendJson(res, 400, { error: 'Invalid workspace_id' }); return }
     const impl = url.searchParams.get('impl') || undefined
     const q = url.searchParams.get('q')?.trim() || undefined
     const includeTerminal = url.searchParams.get('include_terminal') === 'true'
@@ -11520,6 +11534,7 @@ export class AdminModule extends ModuleBase {
         status?: string | string[]
         impl?: string
         manager_key?: string
+        workspace_id?: string
         q?: string
         include_terminal?: boolean
         include_legacy?: boolean
@@ -11531,6 +11546,7 @@ export class AdminModule extends ModuleBase {
       ...(statuses.length === 1 ? { status: statuses[0] } : {}),
       ...(statuses.length > 1 ? { status: statuses } : {}),
       ...(managerKey ? { manager_key: managerKey } : {}),
+      ...(workspaceId ? { workspace_id: workspaceId } : {}),
       ...(impl ? { impl } : {}),
       ...(q ? { q } : {}),
       ...(includeTerminal ? { include_terminal: true } : {}),

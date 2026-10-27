@@ -1,0 +1,75 @@
+name: Project workspaces and private executor runtime
+on:
+  workflow_dispatch:
+  push:
+    branches: ['feat/desktop-project-workspaces']
+  pull_request:
+    paths:
+      - 'crabot-agent/**'
+      - 'crabot-admin/src/workspaces*'
+      - 'scripts/lib/*data-compat*'
+      - 'scripts/upgrade-lib/migrate.mjs'
+      - '.github/workflows/project-workspaces.yml'
+permissions:
+  contents: read
+jobs:
+  projects:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, macos-15-intel, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.3'
+      - name: Build this branch's Shared, SDK, Admin, Agent and CLI
+        shell: bash
+        run: |
+          set -e
+          pnpm --dir crabot-client install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-client run build
+          pnpm --dir crabot-shared install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-shared run build
+          pnpm install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-admin install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-admin run build
+          pnpm --dir crabot-agent install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-agent run build
+          pnpm run build:cli
+      - name: Build this branch's actual Native helper
+        run: node scripts/build-native.mjs
+      - name: Verify read-only data compatibility before migration
+        run: node --test scripts/lib/__tests__/workspace-data-compat.test.mjs
+      - name: Verify original scoped migration semantics
+        working-directory: scripts/upgrade-lib
+        run: node ../../node_modules/vitest/vitest.mjs run __tests__/migrate.test.mjs __tests__/scoped-migration.test.mjs __tests__/shared-requests.test.mjs --maxWorkers=1 --minWorkers=1
+      - name: Verify real Admin HTTP and SDK registration and usage
+        working-directory: crabot-admin
+        run: node node_modules/vitest/vitest.mjs run src/workspaces.test.ts src/workspaces-http.test.ts --maxWorkers=1 --minWorkers=1
+      - name: Verify project identity, authority, continuation and private CLI profiles
+        working-directory: crabot-agent
+        run: >-
+          node node_modules/vitest/vitest.mjs run
+          tests/workers/harness/ledger-store.test.ts
+          tests/workers/harness/harness-lifecycle.test.ts
+          tests/workers/harness/harness-continuation.test.ts
+          tests/workers/harness/request-spawn.test.ts
+          tests/workers/harness/harness-workspace-git.test.ts
+          tests/workers/private-project-provision.test.ts
+          tests/workers/private-project-runtime.test.ts
+          tests/workers/codex-project-config.test.ts
+          tests/workers/codex-managed-notify.test.ts
+          tests/workers/codex-adapter.test.ts
+          tests/workers/codex-app-server-client.test.ts
+          tests/workers/contract-claude-code.test.ts
+          tests/workers/contract-codex.test.ts
+          tests/workers/connection-translators.test.ts
+          tests/workers/harness/workspace-manager.test.ts
+          tests/workers/harness/workspace-execution.test.ts
+          tests/manager/read-model.test.ts
+          tests/permissions/harness-admission.test.ts
+          --maxWorkers=1 --minWorkers=1

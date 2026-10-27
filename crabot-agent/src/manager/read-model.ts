@@ -53,6 +53,7 @@ export interface TimeRange {
 
 /** §8.3 list_workers_admin:跨对话对象扁平查询 */
 export interface ListWorkersAdminParams {
+  workspace_id?: string
   status?: TaskStatus | TaskStatus[]
   impl?: WorkerImplId
   manager_key?: ManagerKey
@@ -217,6 +218,7 @@ export function filterAndPageWorkers(
   // 先应用身份/内容/时间范围，计数与当前查询 scope 对齐；visibility/status 后应用。
   const scoped = all.filter((entry) => {
     const worker = entry.worker
+    if (params.workspace_id && worker.workspace_id !== params.workspace_id) return false
     if (params.manager_key && entry.managerKey !== params.manager_key) return false
     if (params.impl) {
       const mainline = worker.incarnations.filter((inc) => inc.forked_from === undefined).at(-1)

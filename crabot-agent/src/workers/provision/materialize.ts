@@ -133,6 +133,12 @@ export async function materializeSkills(
   await writeManagedSkillNames(targetRoot, targetSubdir, nextNames)
 }
 
+/** Resolve the frozen, Crabot-owned Skill snapshot for another private native home. */
+export async function readMaterializedSkills(ws: string, targetSubdir: string): Promise<ProvisionSources['skills']> {
+  const targetRoot = path.join(ws, targetSubdir)
+  return (await readManagedSkillNames(targetRoot, targetSubdir)).map(name => ({ id: name, name, skill_dir: path.join(targetRoot, name) }))
+}
+
 /** cc 标准 .mcp.json：stdio 保留 env；远端 server 显式 type，并保留认证 headers。 */
 export function renderMcpJson(servers: ProvisionSources['mcpServers']): string {
   const mcpServers: Record<string, Record<string, unknown>> = {}

@@ -381,7 +381,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
 
   const ledger = new LedgerStore(join(agentDir, 'worker-ledgers'))
   const principalBindings = new PrincipalBindingStore(join(agentDir, 'manager-principal-bindings.json'))
-  const workspaces = new WorkspaceManager(resolveWorkspacesRoot(deps.dataRoot))
+  const workspaces = new WorkspaceManager(resolveWorkspacesRoot(deps.dataRoot), deps.dataRoot)
   const workersDir = join(agentDir, 'workers')
   const workerContextStore = new WorkerContextStore(workersDir)
 

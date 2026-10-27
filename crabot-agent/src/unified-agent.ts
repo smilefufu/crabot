@@ -1827,6 +1827,7 @@ export class UnifiedAgent extends ModuleBase {
     // Manager/Worker（v3）接口：§8.2 调度触发 + §8.3 task 读模型四件套。
     this.registerMethod('trigger_schedule', this.handleTriggerSchedule.bind(this))
     this.registerMethod('authorize_agent_cli_execution', this.handleAuthorizeAgentCliExecution.bind(this))
+    this.registerMethod('get_workspace_execution_admin', async () => this.requireManagerStack().harness.getWorkspaceExecutionInventory())
     this.registerMethod('list_workers_admin', this.handleListWorkersAdmin.bind(this))
     this.registerMethod('list_managers_admin', this.handleListManagersAdmin.bind(this))
     this.registerMethod('get_workboard_admin', this.handleGetWorkboardAdmin.bind(this))

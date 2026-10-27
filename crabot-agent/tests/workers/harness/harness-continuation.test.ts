@@ -218,7 +218,9 @@ async function makeHarness(
   await fs.mkdir(workspacesRoot, { recursive: true })
 
   const ledger = new LedgerStore(ledgersDir)
-  const workspaces = new WorkspaceManager(workspacesRoot)
+  const profile = join(dataDir, 'profile')
+  await fs.mkdir(profile, { recursive: true })
+  const workspaces = new WorkspaceManager(workspacesRoot, profile)
 
   const adaptersMap = new Map<WorkerImplId, WorkerAdapter>()
   const deps: HarnessDeps = {
@@ -289,6 +291,37 @@ const changeOf = (e: HarnessEvent): string | undefined => (e.detail as { change?
 async function readAuditLog(workersDir: string, workerId: string): Promise<HarnessEvent[]> {
   return new WorkerEventLog(join(workersDir, workerId)).readAll()
 }
+
+it.each(['resume', 'handoff'] as const)('project identity, shared files and authority survive %s without creating a second project', async mode => {
+  const { harness, adaptersMap, workersDir } = await makeHarness()
+  const source = new FakeAdapter({ caps: { revive: mode === 'resume' }, onStateChange: harness.handleStateChange,
+    sendInputBehavior: h => { throw new WorkerExitedError(h.worker_id, h.seq) } })
+  const target = new FakeAdapter({ implId: 'claude-code', onStateChange: harness.handleStateChange })
+  adaptersMap.set('builtin', source); adaptersMap.set('claude-code', target)
+  await fs.mkdir(join(dataDir, 'shared-project'))
+  const project = await fs.realpath(join(dataDir, 'shared-project'))
+  const input = spawnParams({ workspace: project })
+  const worker = await harness.spawnWorker(input)
+  await fs.writeFile(join(project, 'result.txt'), 'shared result')
+  const peer = await harness.spawnWorker(input)
+  expect(peer.workspace_id).toBe(worker.workspace_id)
+  expect(source.spawnCalls[1].workspace.root).toBe(source.spawnCalls[0].workspace.root)
+  expect(source.spawnCalls[1].workspace.runtime_root).not.toBe(source.spawnCalls[0].workspace.runtime_root)
+  const contextBefore = JSON.parse(await fs.readFile(join(workersDir, worker.worker_id, 'context.json'), 'utf8'))
+  await harness.sendToWorker(worker.worker_id, 'continue the project')
+  const current = (await harness.listWorkers(worker.manager_key)).find(item => item.worker_id === worker.worker_id)!
+  expect(current.workspace_id).toBe(worker.workspace_id)
+  const catalog = JSON.parse(await fs.readFile(join(dataDir, 'profile/workspace-control/catalog.json'), 'utf8'))
+  expect(catalog.workspaces.find((item: { workspace_id: string }) => item.workspace_id === worker.workspace_id).last_used_at).toBe(current.updated_at)
+  expect(current.manager_key).toBe(worker.manager_key)
+  expect(current.origin).toEqual(worker.origin); expect(current.report_to).toEqual(worker.report_to)
+  expect(current.incarnations.every(item => item.workspace === project)).toBe(true)
+  const continuation = mode === 'resume' ? source.resumeCalls[0].opts!.workspace : target.spawnCalls[0].workspace
+  expect(continuation).toEqual(source.spawnCalls[0].workspace)
+  const contextAfter = JSON.parse(await fs.readFile(join(workersDir, worker.worker_id, 'context.json'), 'utf8'))
+  expect(contextAfter.principal_permissions).toEqual(contextBefore.principal_permissions)
+  expect(await fs.readFile(join(project, 'result.txt'), 'utf8')).toBe('shared result')
+})
 
 describe('WorkerHarness — 透明接续：revive (capabilities().revive === true)', () => {
   it('CLI 接续保留已记录的注入事实，约束变化更新 revision，重复接续不重复说明', async () => {
@@ -1252,6 +1285,7 @@ describe('WorkerHarness — 接续过程中的并发', () => {
 
     // 第一次 sendToWorker 触发接续，卡在 resumeGate 上（resume 还没返回，per-worker 锁被占着）。
     const firstSend = harness.sendToWorker(worker.worker_id, '第一条')
+    await waitUntil(() => fake.resumeCalls.length === 1)
 
     // 第二次 sendToWorker 此时应该排队等锁：它的 deliver() 也会经 inbox 尝试投递，但由于
     // inbox.flush 内部同样串行、且第一条的接续持有 per-worker 锁，第二条不会在接续完成前
@@ -1288,7 +1322,9 @@ describe('WorkerHarness.handoffIncarnation — handoff 目标是 builtin 时的 
     const workersDir = join(dataDir, 'workers')
     await fs.mkdir(workspacesRoot, { recursive: true })
     const ledger = new LedgerStore(ledgersDir)
-    const workspaces = new WorkspaceManager(workspacesRoot)
+    const profile = join(dataDir, 'profile')
+    await fs.mkdir(profile, { recursive: true })
+    const workspaces = new WorkspaceManager(workspacesRoot, profile)
     const adaptersMap = new Map<WorkerImplId, WorkerAdapter>()
     const deps: HarnessDeps = {
       adapters: adaptersMap,
@@ -1340,7 +1376,9 @@ describe('WorkerHarness.handoffIncarnation — handoff 目标是 builtin 时的 
     const workersDir = join(dataDir, 'workers')
     await fs.mkdir(workspacesRoot, { recursive: true })
     const ledger = new LedgerStore(ledgersDir)
-    const workspaces = new WorkspaceManager(workspacesRoot)
+    const profile = join(dataDir, 'profile')
+    await fs.mkdir(profile, { recursive: true })
+    const workspaces = new WorkspaceManager(workspacesRoot, profile)
     const builtinDefaults: NonNullable<SpawnSpec['builtin']> = {
       adapter: {} as LLMAdapter,
       model: 'test-model',

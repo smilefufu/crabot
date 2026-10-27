@@ -48,7 +48,7 @@ function makeHarness(impl: WorkerImplId = 'builtin'): WorkerHarness {
     capabilities: () => ({ fork: true, revive: true, goalMode: false, subagent: false, structuredTrace: true }),
   } as unknown as WorkerAdapter
   return new WorkerHarness({ adapters: new Map([[impl, adapter]]), defaultImpl: impl, ledger,
-    workspaces: new WorkspaceManager(path.join(root, 'workspaces')), workersDir: path.join(root, 'workers'),
+    workspaces: new WorkspaceManager(path.join(root, 'workspaces'), path.join(root, 'data')), workersDir: path.join(root, 'workers'),
     now: () => new Date().toISOString(), onOperationNotification: async (_key, event) => { events.push(event) },
   })
 }
@@ -64,6 +64,7 @@ beforeEach(async () => {
   root = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'harness-workspace-git-')))
   workspace = path.join(root, 'workspace')
   await fs.mkdir(workspace)
+  await fs.mkdir(path.join(root, 'data'), { mode: 0o700 }); await fs.mkdir(path.join(root, 'workspaces'), { mode: 0o700 })
   ledger = new LedgerStore(path.join(root, 'ledgers'))
   seq = 0
   events = []

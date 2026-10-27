@@ -1,3 +1,4 @@
+import { projectWorkspaceExecution } from './workspace-execution.js'
 import { executionAdmission } from '../execution-policy.js'
 import { sha256CanonicalJson } from 'crabot-shared'
 import type { ConversationRequestAuthority } from '../../manager/conversation-request-authority.js'
@@ -1258,6 +1259,7 @@ export class WorkerHarness {
       }, p.principal_permissions)
       const initial: LedgerWorker = {
         worker_id: workerId,
+        workspace_id: workspace.workspace_id,
         manager_key: p.managerKey,
         task: {
           id: workerId,
@@ -1435,6 +1437,7 @@ export class WorkerHarness {
         inbox.hold('input_pending')
       }
 
+      await this.noteWorkspaceUse(workspace.workspace_id, now)
       await this.appendEvent(workerId, 1, 'lifecycle_changed', { change: 'spawned', impl }, spawned?.task.status)
       const uiSnapshot = await this.prepareUiSnapshot(spawnedHandle, p.managerKey, initialInput?.report, now)
       const turnOutcome = await this.createInitialInputTurn(p.managerKey, spawnedHandle, initialInput, now,
@@ -2326,9 +2329,10 @@ export class WorkerHarness {
       // Source material is read-only. No legacy adapter, resume/checkpoint replay, or
       // source kill is involved in this path.
       const material = await this.readLegacyHandoffMaterial(worker, legacy.workspace)
-      const workspace = await this.deps.workspaces.resolve(
+      const workspace = await this.deps.workspaces.resolveExisting(
         worker.worker_id,
         material.workspaceCandidate,
+        worker.workspace_id,
       )
       // Source reads may have waited past the synchronous deadline. Do not begin a new
       // provision/handoff after the caller has already received its timeout.
@@ -2993,6 +2997,7 @@ export class WorkerHarness {
     const workerContext = await this.contextStore.read(worker.worker_id)
     await this.assertWorkerExecutionPolicy(worker.worker_id, mainline.impl)
     const gitPermissions = workerContext?.principal_permissions
+    const boundWorkspace = await this.deps.workspaces.resolveExisting(worker.worker_id, mainline.workspace, worker.workspace_id)
     const workspaceGit = (await this.checkWorkspaceGit(mainline.workspace, gitPermissions, undefined, (file, write) => this.assertWorkerFileAccess(worker.worker_id, file, write))).current
     const gitContext: WorkerWorkspaceGitContext = {
       worker_id: worker.worker_id, incarnation_id: incarnationId, workspace_root: mainline.workspace, baseline: workspaceGit,
@@ -3035,6 +3040,7 @@ export class WorkerHarness {
       if (item?.authorize) await item.authorize()
       await this.assertWorkerExecutionPolicy(worker.worker_id, mainline.impl)
       const returnedHandle = await adapter.resume(prevRef, appendWorkspaceGitObservation(text, workspaceGit), {
+        ...(worker.workspace_id ? { workspace: boundWorkspace } : {}),
         workspace_git: gitContext,
         ...(admission ? { connection_env: admission.env } : {}),
         ...await this.executionEnv(workerContext ?? {}, {
@@ -3123,6 +3129,7 @@ export class WorkerHarness {
     const inbox = this.getInbox(worker.worker_id)
     inbox.release()
     const replayedConsumed = inbox.requeueConsumed()
+    await this.noteWorkspaceUse(worker.workspace_id, now)
     await this.appendEvent(worker.worker_id, newHandle.seq, 'lifecycle_changed', { change: 'resumed', from_seq: mainline.seq }, revived?.task.status)
     const uiSnapshot = await this.prepareUiSnapshot(newHandle, managerKey, initialInput?.report, now)
     const turnOutcome = await this.createInitialInputTurn(managerKey, newHandle, initialInput, now,
@@ -3223,7 +3230,7 @@ export class WorkerHarness {
         )
       }
 
-      workspace = { root: source.workspace }
+      workspace = await this.deps.workspaces.resolveExisting(worker.worker_id, source.workspace, worker.workspace_id)
       caps = this.deps.capabilityBundle
         ? await this.deps.capabilityBundle({
             worker_id: worker.worker_id,
@@ -3239,7 +3246,7 @@ export class WorkerHarness {
       // tracked credential target 等确定性检查必须在 package / source stop 之前完成；preflightProvision
       // 不得写 workspace。正式 provision 仍在 source teardown 之后执行并重检，避免 TOCTOU 静默越界。
       await this.assertWorkerExecutionPolicy(worker.worker_id, targetImpl)
-      await newAdapter.preflightProvision?.(workspace, caps)
+      await newAdapter.preflightProvision?.(workspace, caps, admission?.env)
       const expiredAfterPreflight = this.expiredInboxDelivery(deadlineItem, source.seq)
       if (expiredAfterPreflight) {
         if (admission) void admission.dispose().catch(() => {})
@@ -3429,6 +3436,7 @@ export class WorkerHarness {
       }
     })
 
+    await this.noteWorkspaceUse(worker.workspace_id, now)
     this.bumpInputOwnershipRevision(worker.worker_id)
     const inbox = this.getInbox(worker.worker_id)
     inbox.release()
@@ -3755,14 +3763,7 @@ export class WorkerHarness {
   /** Ownership only; caller still applies its own resource/role and lifecycle checks. */
   managedWorkspaceScope(workerId: string, workspaceRoot: string): ManagedWorkspaceScope {
     return async () => {
-      const found = await this.deps.ledger.findWorker(workerId), context = await this.contextStore.read(workerId)
-      if (!found || !context?.principal_permissions || context.manager_key !== found.managerKey
-        || found.worker.manager_key !== found.managerKey || context.creator_friend_id !== found.worker.origin.creator_friend_id
-        || !found.worker.incarnations.some(item => item.workspace === workspaceRoot)) throw new Error('CAPABILITY_UNKNOWN: Worker file ownership unavailable')
-      if (found.worker.origin.request || context.request) {
-        const guard = this.deps.requestGuard?.()
-        if (!guard || !await guard.load(workerId)) throw new Error('CAPABILITY_UNKNOWN: Worker request ownership unavailable')
-      }
+      await this.requireWorkspaceOwnership(workerId, workspaceRoot)
       return this.deps.workspaces.fileScope(workerId, workspaceRoot)()
     }
   }
@@ -6382,6 +6383,7 @@ export class WorkerHarness {
       readonly implId: WorkerImplId
       readonly ref: IncarnationRef
       readonly workspace: string
+      readonly workspaceId?: string
       readonly managerKey: ManagerKey
       readonly receipt: WorkerQueryReceipt
     }
@@ -6439,6 +6441,7 @@ export class WorkerHarness {
           session_ref: incarnation.session_ref,
         },
         workspace: incarnation.workspace,
+        workspaceId: found.worker.workspace_id,
         managerKey: found.managerKey,
         receipt,
       }
@@ -6475,6 +6478,7 @@ export class WorkerHarness {
       }, permissions)
       admission = await this.deps.admitWorkerConnection?.(prep.implId, workerId)
       const forkOptions: ForkOptions = {
+        ...(prep.workspaceId ? { workspace: await this.deps.workspaces.resolveExisting(workerId, prep.workspace, prep.workspaceId) } : {}),
         workspace_git: { worker_id: workerId, incarnation_id: forkIncarnationId, workspace_root: prep.workspace, baseline: forkGit },
         query_id: prep.receipt.query_id,
         incarnation_id: forkIncarnationId,
@@ -6564,6 +6568,7 @@ export class WorkerHarness {
           forkHandle!.seq,
           this.deps.now(),
         )
+        await this.noteWorkspaceUse(prep.workspaceId, now)
         if (admission) {
           this.connectionDisposers.set(`${workerId}:${forkHandle!.seq}`, admission.dispose)
           admission = undefined
@@ -7291,6 +7296,33 @@ export class WorkerHarness {
     const base: HarnessEvent = { ts, kind, worker_id: workerId, seq }
     const withDetail: HarnessEvent = detail !== undefined ? { ...base, detail } : base
     return taskStatus !== undefined ? { ...withDetail, task_status: taskStatus } : withDetail
+  }
+
+
+  private async noteWorkspaceUse(workspaceId: string | undefined, at: string): Promise<void> {
+    if (!workspaceId) return
+    try { await this.deps.workspaces.markUsed(workspaceId, at) }
+    catch { console.warn('[WorkerHarness] workspace last-use persistence failed; running execution is preserved') }
+  }
+
+  private async requireWorkspaceOwnership(workerId: string, workspaceRoot: string): Promise<void> {
+    const found = await this.deps.ledger.findWorker(workerId), context = await this.contextStore.read(workerId)
+    if (!found || !context?.principal_permissions || context.manager_key !== found.managerKey
+      || found.worker.manager_key !== found.managerKey || context.creator_friend_id !== found.worker.origin.creator_friend_id
+      || !found.worker.incarnations.some(item => item.workspace === workspaceRoot)) throw new Error('CAPABILITY_UNKNOWN: Worker file ownership unavailable')
+    if (found.worker.origin.request || context.request) {
+      const guard = this.deps.requestGuard?.()
+      if (!guard || !await guard.load(workerId)) throw new Error('CAPABILITY_UNKNOWN: Worker request ownership unavailable')
+    }
+  }
+
+  async getWorkspaceExecutionInventory(): Promise<import('crabot-shared').WorkspaceExecutionInventory> {
+    if (this.deps.isExecutionReady?.() !== true) return { ready: false, items: {} }
+    const workers = (await this.deps.ledger.listAllWorkers()).map(entry => entry.worker)
+    // Until historical roots are indexed, an absent binding cannot be reported as zero occupants.
+    if (workers.some(worker => worker.workspace_id === undefined)) return { ready: false, items: {} }
+    const items = await projectWorkspaceExecution(workers, id => this.getWorkerExecutionObservation(id))
+    return this.deps.isExecutionReady?.() === true ? { ready: true, items } : { ready: false, items: {} }
   }
 }
 

@@ -33,6 +33,18 @@ function makeWorker(workerId: string, overrides: Partial<LedgerWorker> = {}): Le
 }
 
 describe('LedgerStore', () => {
+
+  it('an established workspace binding is immutable even when a mutator edits its input in place', async () => {
+    const key = 'fixture::project' as ManagerKey
+    await store.upsertWorker(key, 'bound', () => makeWorker('bound', { manager_key: key, workspace_id: 'default' }))
+    await expect(store.upsertWorker(key, 'bound', previous => {
+      previous!.workspace_id = '12345678-1234-4123-8123-123456789abc'
+      return previous
+    })).rejects.toThrow('workspace_id is immutable')
+    expect((await store.findWorker('bound'))?.worker.workspace_id).toBe('default')
+    await store.upsertWorker(key, 'old', () => makeWorker('old', { manager_key: key }))
+    await expect(store.upsertWorker(key, 'old', previous => ({ ...previous!, workspace_id: 'default' }))).rejects.toThrow('workspace_id is immutable')
+  })
   let dir: string
   let store: LedgerStore
 
