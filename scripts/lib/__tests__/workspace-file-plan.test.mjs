@@ -74,6 +74,8 @@ async function fixture(t, { exitEvidence = true, exitRecord = true, crossVolume 
         }
         else if(message.operation==='closure-prepare-fixture'){fs.mkdirSync(args.dataDir+'/agent/worker-ledgers',{recursive:true});const agent=await import(${JSON.stringify(new URL('../../../crabot-agent/dist/core/workspace-relocation-closure.js', import.meta.url).href)});result=await agent.prepareWorkspaceRelocationClosure(args)}
         else if(message.operation==='closure-commit-fixture'){const agent=await import(${JSON.stringify(new URL('../../../crabot-agent/dist/core/workspace-relocation-closure.js', import.meta.url).href)});result=await agent.commitWorkspaceRelocationClosure(args)}
+        else if(message.operation==='recovery-prepare-fixture'){const agent=await import(${JSON.stringify(new URL('../../../crabot-agent/dist/core/workspace-relocation-recovery.js', import.meta.url).href)});result=await agent.prepareWorkspaceRelocationRecovery(args)}
+        else if(message.operation==='recovery-commit-fixture'){const agent=await import(${JSON.stringify(new URL('../../../crabot-agent/dist/core/workspace-relocation-recovery.js', import.meta.url).href)});result=await agent.commitWorkspaceRelocationRecovery(args)}
         else if(['closure-interrupt-prepared','closure-interrupt-replaced'].includes(message.operation)){const rename=fs.renameSync;fs.renameSync=(source,target)=>{if(target===${JSON.stringify(ledger)}){if(message.operation==='closure-interrupt-replaced')rename(source,target);throw Object.assign(new Error('finite closure interruption'),{code:'EIO'})}return rename(source,target)};try{const agent=await import(${JSON.stringify(new URL('../../../crabot-agent/dist/core/workspace-relocation-closure.js', import.meta.url).href)});result=await agent.commitWorkspaceRelocationClosure(args)}finally{fs.renameSync=rename}}
         else if(message.operation==='file-begin')result=await records.beginWorkspaceRelocationFiles(args);
         else if(message.operation==='file-ready')result=await records.commitWorkspaceRelocationFileReady(args);
@@ -680,6 +682,57 @@ for (const boundary of ['prepared', 'replaced', 'closed', 'complete', 'changed o
     assert.equal(fs.existsSync(f.source), false)
     assert.equal(fs.readFileSync(path.join(f.staging, 'tree/default/file'), 'utf8'), 'original bytes')
   } finally { role.close(); await roleExited }
+})
+
+for (const boundary of ['unplanned', 'planned', 'archived', 'complete', 'changed checkpoint', 'missing archive receipt']) test('fresh forward role retires original Manager checkpoints without replay at ' + boundary, { timeout: 60000 }, async t => {
+  const f = await stageFixture(t, { withWorker: true })
+  await f.command('host-permit'); await f.command('stage-prepare'); await f.command('file-begin'); await f.command('host-stop')
+  assert.equal((await f.command('file-move-fixture')).error, undefined)
+  assert.equal((await f.command('file-ready')).error, undefined)
+  const manager = path.join(f.data, 'agent/managers/channel%3A%3Aoriginal'), active = path.join(manager, 'running.json')
+  fs.mkdirSync(manager, { recursive: true })
+  const body = JSON.stringify({ episodeId: 'original-episode', state: { key: 'channel::original', recent: [{ role: 'user', content: 'PRESERVED_PRIVATE_INPUT' }], foldedCount: 0 },
+    envelopes: [], wakeIndex: -1, pending: [], hasEngineMessages: true, turns: [], responses: [], tools: [], pendingToolCallIds: ['unknown-operation'],
+    adminChatClaims: [], transientMessageIds: [], spawnedWorkerIds: [], execution: { successfulSendMessageTargets: [], continuedWorkers: [], needsSpawnRecheck: false,
+      spawnRecheckInjected: false, spawnRecheckOutcomeRecorded: false, postSendRecheckSequence: 0 } }) + '\n'
+  fs.writeFileSync(active, body, { mode: 0o600 })
+  assert.equal((await f.command('closure-prepare-fixture')).error, undefined)
+  assert.equal((await f.command('closure-commit-fixture')).error, undefined)
+  if (boundary !== 'unplanned') assert.equal((await f.command('recovery-prepare-fixture')).error, undefined)
+  if (boundary === 'archived' || boundary === 'complete' || boundary === 'missing archive receipt') {
+    assert.equal((await f.command('recovery-commit-fixture')).error, undefined)
+    if (boundary === 'archived') fs.unlinkSync(path.join(f.data, 'workspace-control/relocation-active/relocation-manager-complete.json'))
+  }
+  f.child.disconnect(); await f.exited
+  const checkpoint = records.readWorkspaceInterruptedRelocationCheckpoint(f.data, f.id)
+  const locks = await import('../cli-lock.mjs'), recoveryId = randomUUID(), lock = await locks.acquireWorkspaceInterruptedRecoveryLock(f.data, f.id)
+  const role = await (await import('../workspace-interrupted-launch.mjs')).launchWorkspaceInterruptedRecoveryCoordinator({ dataDir: f.data,
+    request: { intent_id: f.id, recovery_id: recoveryId, checkpoint_sha256: checkpoint.checkpoint_sha256 }, verify: async () => {}, releaseParentLock: () => locks.releaseCliLock(lock) })
+  const ended = once(role.child, 'exit')
+  try {
+    const history = path.join(manager, 'workspace-relocation-history', f.id)
+    if (boundary === 'changed checkpoint' || boundary === 'missing archive receipt') {
+      const original = fs.readFileSync(boundary === 'changed checkpoint' ? active : path.join(history, 'checkpoint.json'))
+      if (boundary === 'changed checkpoint') fs.appendFileSync(active, ' ')
+      else fs.unlinkSync(path.join(history, 'complete.json'))
+      await assert.rejects(role.finishManagerRecovery())
+      assert.deepEqual(fs.readFileSync(boundary === 'changed checkpoint' ? active : path.join(history, 'checkpoint.json')),
+        boundary === 'changed checkpoint' ? Buffer.concat([original, Buffer.from(' ')]) : original)
+      assert.deepEqual(await f.catalog.snapshot(), f.before)
+      return
+    }
+    const first = role.finishManagerRecovery()
+    assert.equal(role.finishManagerRecovery(), first)
+    const result = await first
+    assert.equal(result.commit_sha256, sha256CanonicalJson(records.readWorkspaceRelocationRecoveryCommit(f.data, f.id)))
+    assert.equal(fs.existsSync(active), false)
+    assert.equal(fs.readFileSync(path.join(history, 'checkpoint.json'), 'utf8'), body)
+    assert.equal(JSON.parse(fs.readFileSync(path.join(f.data, 'agent/worker-ledgers/channel%3A%3Aoriginal.json'))).workers[0].task.status, 'closed')
+    await role.verify()
+    for (const fact of checkpoint.materials) assert.deepEqual(records.readWorkspaceInterruptedRelocationCheckpoint(f.data, f.id).materials.find(item => item.name === fact.name), fact)
+    assert.deepEqual(await f.catalog.snapshot(), f.before)
+    assert.equal(fs.existsSync(f.source), false)
+  } finally { role.close(); await ended }
 })
 
 test('interrupted checkpoint crosses closure commit before catalog selection and never classifies it as rollback', async t => {

@@ -25,7 +25,7 @@ export async function launchWorkspaceInterruptedRecoveryCoordinator(options) {
     if (readWorkspaceInterruptedRecoveryRole(options.dataDir, request.recovery_id).launch) throw failure()
     const allowed = new Set(['PATH', 'HOME', 'USERPROFILE', 'SYSTEMROOT', 'WINDIR', 'TEMP', 'TMP', 'TMPDIR', 'LANG', 'LC_ALL', 'LC_CTYPE'])
     const env = Object.fromEntries(Object.entries(process.env).filter(([key, value]) => value !== undefined && allowed.has(key.toUpperCase())))
-    child = spawn(process.execPath, [entry], { cwd: path.dirname(entry), env, stdio: ['ignore', 'ignore', 'ignore', 'ipc'], windowsHide: true })
+    child = spawn(process.execPath, [entry], { cwd: path.dirname(entry), env, stdio: ['ignore', 'ignore', 'inherit', 'ipc'], windowsHide: true })
     child.on('error', close); child.once('exit', close)
     child.on('message', () => { if (!pending) close() })
     const identity = captureSpawnedProcessTree(child).find(value => value.pid === child.pid)
@@ -136,6 +136,24 @@ export async function launchWorkspaceInterruptedRecoveryCoordinator(options) {
       verification = closures
       return closures
     }
-    return Object.freeze({ child, launch, ready, verify, restoreSource, archiveSource, prepareSourceBusiness, releaseSource, finishClosures, close })
+    let managerRecovery
+    const finishManagerRecovery = () => {
+      if (managerRecovery) return managerRecovery
+      managerRecovery = verification.then(async () => {
+        const message = { kind: 'workspace_interrupted_finish_manager_recovery', recovery_id: request.recovery_id, launch_sha256: hash(launch), ready_sha256: hash(ready), nonce: randomUUID() }
+        let result
+        await exchange(message, reply => {
+          if (!exact(reply, ['kind', 'recovery_id', 'launch_sha256', 'ready_sha256', 'nonce', 'result']) || reply.kind !== 'workspace_interrupted_manager_recovery_finished'
+            || ['recovery_id', 'launch_sha256', 'ready_sha256', 'nonce'].some(key => reply[key] !== message[key])
+            || !exact(reply.result, ['dispatch', 'commit_sha256']) || !['dispatch', 'observe'].includes(reply.result.dispatch)
+            || reply.result.commit_sha256 !== hash(readWorkspaceInterruptedRelocationCheckpoint(options.dataDir, request.intent_id).recovery_commit)) return false
+          result = Object.freeze({ ...reply.result }); return true
+        }, 240000)
+        return result
+      }).catch(cause => { close(); throw Object.assign(failure(), { cause }) })
+      verification = managerRecovery
+      return managerRecovery
+    }
+    return Object.freeze({ child, launch, ready, verify, restoreSource, archiveSource, prepareSourceBusiness, releaseSource, finishClosures, finishManagerRecovery, close })
   } catch (cause) { close(); throw Object.assign(failure(), { cause }) }
 }

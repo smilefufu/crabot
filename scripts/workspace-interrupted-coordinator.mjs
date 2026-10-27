@@ -5,7 +5,7 @@ import { readWorkspaceInterruptedRecoveryRole, verifyWorkspaceInterruptedRecover
 import { sha256CanonicalJson as hash } from '../crabot-shared/dist/canonical-json.js'
 const exact = (value, keys) => value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key))
 const uuid = value => typeof value === 'string' && /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(value)
-let input, lock, token, ready, sourceRestoration, sourceArchive, sourceBusiness, sourceRelease, closures, busy = false, closed = false
+let input, lock, token, ready, sourceRestoration, sourceArchive, sourceBusiness, sourceRelease, closures, managerRecovery, busy = false, closed = false
 function close() {
   if (closed) return
   closed = true; clearTimeout(timer)
@@ -34,10 +34,19 @@ process.on('message', async message => {
     } else {
       const fields = ['kind', 'recovery_id', 'launch_sha256', 'ready_sha256', 'nonce']
       if (message.kind === 'workspace_interrupted_release_source') fields.push('job', 'credential', 'module_manager_port')
-      if (!ready || !exact(message, fields) || !['workspace_interrupted_verify', 'workspace_interrupted_restore_source', 'workspace_interrupted_archive_source', 'workspace_interrupted_prepare_source_business', 'workspace_interrupted_release_source', 'workspace_interrupted_finish_closures'].includes(message.kind)
+      if (!ready || !exact(message, fields) || !['workspace_interrupted_verify', 'workspace_interrupted_restore_source', 'workspace_interrupted_archive_source', 'workspace_interrupted_prepare_source_business', 'workspace_interrupted_release_source', 'workspace_interrupted_finish_closures', 'workspace_interrupted_finish_manager_recovery'].includes(message.kind)
         || message.recovery_id !== input.recovery_id || message.launch_sha256 !== input.launch_sha256 || message.ready_sha256 !== hash(ready) || !uuid(message.nonce)) throw new Error('Invalid role request')
       verifyWorkspaceInterruptedRecoveryRole({ dataDir: input.data_dir, recoveryId: input.recovery_id, launchHash: input.launch_sha256 })
-      if (message.kind === 'workspace_interrupted_finish_closures') {
+      if (message.kind === 'workspace_interrupted_finish_manager_recovery') {
+        managerRecovery ??= Promise.resolve().then(async () => {
+          const { finishWorkspaceInterruptedClosures } = await import('./lib/workspace-interrupted-closure.mjs')
+          closures ??= finishWorkspaceInterruptedClosures({ dataDir: input.data_dir, recoveryId: input.recovery_id, launchHash: input.launch_sha256 })
+          await closures
+          const { finishWorkspaceInterruptedManagerRecovery } = await import('./lib/workspace-interrupted-manager.mjs')
+          return finishWorkspaceInterruptedManagerRecovery({ dataDir: input.data_dir, recoveryId: input.recovery_id, launchHash: input.launch_sha256 })
+        })
+        await send({ ...message, kind: 'workspace_interrupted_manager_recovery_finished', result: await managerRecovery })
+      } else if (message.kind === 'workspace_interrupted_finish_closures') {
         closures ??= Promise.resolve().then(async () => {
           const { finishWorkspaceInterruptedClosures } = await import('./lib/workspace-interrupted-closure.mjs')
           return finishWorkspaceInterruptedClosures({ dataDir: input.data_dir, recoveryId: input.recovery_id, launchHash: input.launch_sha256 })
@@ -75,7 +84,15 @@ process.on('message', async message => {
         await send({ ...reply, kind: 'workspace_interrupted_source_released', result: await sourceRelease })
       } else await send({ ...message, kind: 'workspace_interrupted_verified' })
     }
-  } catch { close() } finally { busy = false }
+  } catch (error) {
+    const operations = ['workspace_interrupted_initialize', 'workspace_interrupted_verify', 'workspace_interrupted_restore_source', 'workspace_interrupted_archive_source',
+      'workspace_interrupted_prepare_source_business', 'workspace_interrupted_release_source', 'workspace_interrupted_finish_closures', 'workspace_interrupted_finish_manager_recovery']
+    const codes = ['WORKSPACE_RELOCATION_INVALID', 'CRABOT_WORKSPACE_RECOVERY_COORDINATOR', 'EACCES', 'EBUSY', 'EPERM', 'ENOENT', 'EEXIST', 'EIO']
+    // Fixed technical labels only; never a request, credential, path or error body.
+    process.stderr.write(JSON.stringify({ component: 'workspace-interrupted-recovery', operation: operations.includes(message?.kind) ? message.kind : 'invalid-request',
+      code: codes.includes(error?.code) ? error.code : 'RECOVERY_ROLE_FAILED' }) + '\n')
+    close()
+  } finally { busy = false }
 })
 
 if (!process.connected) close()

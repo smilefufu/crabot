@@ -298,8 +298,8 @@ export async function beginWorkspaceRelocationIntent(options) {
   }
 }
 
-function publishPrivateJson(ctx, file, value, limit, verify) {
-  const temporary = path.join(ctx.control, '.relocation-' + randomUUID())
+function publishPrivateJson(ctx, file, value, limit, verify, temporaryDirectory = ctx.control) {
+  const temporary = path.join(temporaryDirectory, '.relocation-' + randomUUID())
   try {
     const content = JSON.stringify(value) + '\n'
     if (Buffer.byteLength(content) > limit) fail()
@@ -310,6 +310,7 @@ function publishPrivateJson(ctx, file, value, limit, verify) {
     try { fs.linkSync(temporary, file) } catch (error) { if (error.code === 'EEXIST') fail('WORKSPACE_RELOCATION_CONFLICT'); throw error }
   } finally { fs.rmSync(temporary, { force: true }) }
   syncIntent(ctx)
+  if (temporaryDirectory !== ctx.control) syncDirectory(temporaryDirectory)
 }
 
 const scopeLimit = 32 * 1024 * 1024
@@ -1499,21 +1500,28 @@ export const readWorkspaceRelocationRecoveryPlan = recordGraphReader(function re
 })
 /** Technical Agent plan only; this never archives a checkpoint or settles business responsibility. */
 export async function prepareWorkspaceRelocationRecoveryPlan({ dataDir, id, manifest, signal }) {
+  const { verify } = workspaceFileCoordinatorContext(dataDir, id, signal)
+  return publishWorkspaceRelocationRecoveryPlan({ dataDir, id, manifest,
+    authorize: () => verifyWorkspaceRelocationClosureReadiness({ dataDir, id, signal }), assertCurrent: verify })
+}
+/** Fixed technical storage; each caller retains its own current effect authority. */
+export async function publishWorkspaceRelocationRecoveryPlan({ dataDir, id, manifest, authorize, assertCurrent, temporaryDirectory }) {
+  if (typeof authorize !== 'function' || typeof assertCurrent !== 'function') fail()
   const record = { schema_version: 1, intent_id: id, ...structuredClone(manifest) }
-  await verifyWorkspaceRelocationClosureReadiness({ dataDir, id, signal })
-  const { ctx, verify } = workspaceFileCoordinatorContext(dataDir, id, signal)
+  await authorize(); assertCurrent()
+  const { ctx } = coordinatorContext(dataDir, id)
   validRecoveryPlan(record, ctx, id)
   const previous = readWorkspaceRelocationRecoveryPlan(dataDir, id)
   if (previous) {
     if (sha256CanonicalJson(previous) !== sha256CanonicalJson(record)) fail()
     syncIntent(ctx); return { dispatch: 'observe', plan: previous }
   }
-  const verifyInput = () => { verify(); validRecoveryPlan(record, ctx, id); verifyWorkspaceRecoverySnapshot(record.snapshot, ctx.dataRoot) }
+  const verifyInput = () => { assertCurrent(); validRecoveryPlan(record, ctx, id); verifyWorkspaceRecoverySnapshot(record.snapshot, ctx.dataRoot) }
   verifyInput()
   publishPrivateJson(ctx, path.join(ctx.control, recoveryPlanFile), record, scopeLimit, () => {
     verifyInput(); if (readWorkspaceRelocationRecoveryPlan(dataDir, id)) fail()
-  })
-  await verifyWorkspaceRelocationClosureReadiness({ dataDir, id, signal })
+  }, temporaryDirectory)
+  await authorize()
   verifyInput()
   const accepted = readWorkspaceRelocationRecoveryPlan(dataDir, id)
   if (sha256CanonicalJson(accepted) !== sha256CanonicalJson(record)) fail()
@@ -1541,13 +1549,20 @@ export const readWorkspaceRelocationRecoveryCommit = recordGraphReader(function 
   return record
 })
 export async function completeWorkspaceRelocationRecovery({ dataDir, id, manifest, signal, verifyEffects }) {
+  const { verify } = workspaceFileCoordinatorContext(dataDir, id, signal)
+  return publishWorkspaceRelocationRecoveryCommit({ dataDir, id, manifest, verifyEffects,
+    authorize: () => verifyWorkspaceRelocationClosureReadiness({ dataDir, id, signal }), assertCurrent: verify })
+}
+/** Receipt storage only; neither a plan nor an earlier actor grants current authority. */
+export async function publishWorkspaceRelocationRecoveryCommit({ dataDir, id, manifest, verifyEffects, authorize, assertCurrent, temporaryDirectory }) {
+  if (typeof authorize !== 'function' || typeof assertCurrent !== 'function') fail()
   const record = { schema_version: 1, intent_id: id, ...structuredClone(manifest) }
-  await verifyWorkspaceRelocationClosureReadiness({ dataDir, id, signal })
-  const { ctx, verify } = workspaceFileCoordinatorContext(dataDir, id, signal), plan = readWorkspaceRelocationRecoveryPlan(dataDir, id)
+  await authorize(); assertCurrent()
+  const { ctx } = coordinatorContext(dataDir, id), plan = readWorkspaceRelocationRecoveryPlan(dataDir, id)
   if (!plan || typeof verifyEffects !== 'function') fail()
   validRecoveryCommit(record, plan, id)
   const verifyInput = () => {
-    verify(); verifyEffects()
+    assertCurrent(); verifyEffects()
     if (sha256CanonicalJson(readWorkspaceRelocationRecoveryPlan(dataDir, id)) !== record.plan_sha256) fail()
   }
   verifyInput()
@@ -1558,8 +1573,8 @@ export async function completeWorkspaceRelocationRecovery({ dataDir, id, manifes
   }
   publishPrivateJson(ctx, path.join(ctx.control, recoveryCommitFile), record, scopeLimit, () => {
     verifyInput(); if (readWorkspaceRelocationRecoveryCommit(dataDir, id)) fail()
-  })
-  await verifyWorkspaceRelocationClosureReadiness({ dataDir, id, signal })
+  }, temporaryDirectory)
+  await authorize()
   verifyInput()
   if (sha256CanonicalJson(readWorkspaceRelocationRecoveryCommit(dataDir, id)) !== sha256CanonicalJson(record)) fail()
   return { dispatch: 'dispatch', commit_sha256: sha256CanonicalJson(record) }

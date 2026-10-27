@@ -59,15 +59,16 @@ export function readWorkspaceInterruptedRecoveryRole(dataDir, recoveryId) {
     || hash(frame(ctx.parent)) !== hash(parent) || hash(frame(ctx.directory)) !== hash(directory)) throw failure()
   return { launch, ready: ready ?? null }
 }
-/** Only append the original closure journal; every pre-existing fact stays byte-identical. */
-function assertClosureProgress(original, current) {
+/** Only append planned closure/retirement facts; every pre-existing material stays byte-identical. */
+function assertForwardProgress(original, current) {
   assertWorkspaceInterruptedCheckpointSnapshot(original)
   if (original.action !== 'finish_commit' || current.action !== 'finish_commit' || !original.closure_plan) throw failure()
-  const immutable = ({ checkpoint_sha256, materials, closure_commit, ...facts }) => facts
+  const immutable = ({ checkpoint_sha256, materials, closure_commit, recovery_plan, recovery_commit, ...facts }) => facts
   if (hash(immutable(original)) !== hash(immutable(current)) || original.closure_commit && hash(original.closure_commit) !== hash(current.closure_commit)) throw failure()
+  for (const key of ['recovery_plan', 'recovery_commit']) if (original[key] && hash(original[key]) !== hash(current[key])) throw failure()
   const before = new Map(original.materials.map(item => [item.name, item])), after = new Map(current.materials.map(item => [item.name, item]))
   for (const [name, fact] of before) if (hash(after.get(name)) !== hash(fact)) throw failure()
-  const allowed = new Set(['relocation-worker-commits/complete.json'])
+  const allowed = new Set(['relocation-worker-commits/complete.json', 'relocation-manager-closure.json', 'relocation-manager-complete.json'])
   for (const [index, ledger] of original.closure_plan.ledgers.entries()) if (ledger.before_sha256 !== ledger.after_sha256) {
     allowed.add('relocation-worker-commits/' + index + '.prepared.json'); allowed.add('relocation-worker-commits/' + index + '.closed.json')
   }
@@ -87,7 +88,7 @@ function originalScope(ctx, request, recoveryId) {
   if (recoveryId && checkpoint.action === 'finish_commit') {
     const original = readJson(path.join(context(ctx.data, recoveryId).directory, 'forward-checkpoint.json'), 32 * 1024 * 1024)
     if (!original || original.checkpoint_sha256 !== request.checkpoint_sha256) throw failure()
-    assertClosureProgress(original, checkpoint)
+    assertForwardProgress(original, checkpoint)
   } else if (checkpoint.checkpoint_sha256 !== request.checkpoint_sha256) throw failure()
   assertWorkspaceInterruptedActorsExited(checkpoint)
   return checkpoint
