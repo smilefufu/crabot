@@ -154,7 +154,7 @@ jobs:
         working-directory: crabot-core
         env:
           CRABOT_WORKSPACE_BUSINESS_ONSTART_CI: '1'
-        run: node node_modules/vitest/vitest.mjs run src/workspace-human-verification.test.ts --testNamePattern='current interrupted (source|forward) recovery admission' --maxWorkers=1 --minWorkers=1
+        run: node node_modules/vitest/vitest.mjs run src/workspace-human-verification.test.ts --testNamePattern='current interrupted (source|forward) recovery admission' --maxWorkers=1 --minWorkers=1 --bail=1
       - name: Same MM failed normal job, current recovery and another SDK migration
         if: ${{ matrix.suite == 'owned-recovery' && !cancelled() && steps.compile.outcome == 'success' }}
         working-directory: crabot-core
