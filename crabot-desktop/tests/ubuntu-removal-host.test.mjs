@@ -110,7 +110,7 @@ for (const mode of ['valid', 'cancelled', 'changed-node', 'changed-backend', 're
     const names = []
     async function walk(directory) { for (const entry of await fs.readdir(directory, { withFileTypes: true })) { const file = path.join(directory, entry.name); if (entry.isDirectory()) await walk(file); else names.push(path.relative(host.directory, file).split(path.sep).join('/')) } }
     await walk(host.directory)
-    assert.deepEqual(names.sort(), ['node', 'crabot-maintenance', 'crabot-sandbox-helper', ...desktopMaintenanceNodeFiles.map(name => 'backend/' + name)].sort())
+    assert.deepEqual(names.sort(), ['node', 'crabot-maintenance', 'crabot-sandbox-helper', 'cleanup', ...desktopMaintenanceNodeFiles.map(name => 'backend/' + name)].sort())
     assert.equal(names.some(name => /(^|\/)(data|core|\.product-runtime)(\/|$)/.test(name)), false)
     assert.equal(host.proof.operation_id, options.operationId)
     console.log('CRABOT_PRIVATE_NODE_PREPARATION ' + JSON.stringify({ fixed_resources_only: true, copied_node_executed: true, self_verified: true, business_started: false }))
