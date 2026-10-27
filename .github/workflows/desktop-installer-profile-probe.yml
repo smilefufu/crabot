@@ -1,0 +1,31 @@
+name: Desktop installer initialization probe
+on:
+  workflow_dispatch:
+  push:
+    branches: ['feat/desktop-application']
+    paths:
+      - '.github/scripts/probe-installer-profile.mjs'
+      - '.github/workflows/desktop-installer-profile-probe.yml'
+permissions:
+  contents: read
+jobs:
+  profile:
+    runs-on: windows-latest
+    timeout-minutes: 8
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.3'
+      - name: Install only the exact product Electron version in the disposable runner
+        run: |
+          ELECTRON_VERSION=$(node -p "require('./crabot-desktop/package.json').devDependencies.electron")
+          npm install --prefix "$RUNNER_TEMP/crabot-electron-probe" --ignore-scripts --no-audit --no-fund "electron@$ELECTRON_VERSION"
+          node "$RUNNER_TEMP/crabot-electron-probe/node_modules/electron/install.js"
+      - name: Observe original and synchronous profile initialization without business startup
+        run: |
+          ELECTRON_BINARY=$(node -p "require(process.env.RUNNER_TEMP + '/crabot-electron-probe/node_modules/electron')")
+          node .github/scripts/probe-installer-profile.mjs "$ELECTRON_BINARY"
