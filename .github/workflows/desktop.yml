@@ -430,6 +430,10 @@ jobs:
             node .github/scripts/verify-paired-update-host.mjs ".desktop-build/安装 候选/paired" 2>&1 | tee .desktop-build/paired-update-host.log
           fi
           node .github/scripts/check-paired-update-report.mjs .desktop-build/paired-update-host.json "$CRABOT_PAIRED_ACCEPTANCE_ID"
+      - name: Ordinary Main complete uninstall and retained reinstall
+        if: runner.os != 'Linux' && steps.scope.outputs.full_runtime == 'true'
+        timeout-minutes: 20
+        run: node .github/scripts/verify-uninstall-reinstall.mjs ".desktop-build/安装 候选/paired" 2>&1 | tee .desktop-build/uninstall-reinstall-stage.log
       - name: Ordinary CLI archive and actual upgrade command
         if: steps.scope.outputs.full_runtime == 'true'
         run: |

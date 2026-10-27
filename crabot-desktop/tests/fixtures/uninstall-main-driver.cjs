@@ -1,0 +1,64 @@
+// CI-only native-dialog/menu driver. The ordinary Main and all removal modules
+// run unchanged; this contains no controller, lifecycle or file-deletion logic.
+const fs = require('node:fs')
+const path = require('node:path')
+const { app, dialog, Menu, shell } = require('electron')
+if (process.env.GITHUB_ACTIONS !== 'true') throw new Error('Isolated CI only')
+const config = JSON.parse(fs.readFileSync(process.env.CRABOT_UNINSTALL_MAIN_DRIVER, 'utf8'))
+const event = (name, fields = {}) => {
+  const file = path.join(config.control, name + '.json'), temporary = file + '.tmp'
+  fs.writeFileSync(temporary, JSON.stringify({ pid: process.pid, ...fields }) + '\n', { flag: 'wx', mode: 0o600 }); fs.renameSync(temporary, file)
+}
+const failure = () => { if (!fs.existsSync(path.join(config.control, 'driver-failed.json'))) event('driver-failed'); app.exit(2) }
+const host = process.argv.some(value => value.startsWith('--crabot-removal-host='))
+if (host) {
+  const identity = require('./bootstrap/scripts/lib/process-identity.cjs')
+  const gui = process.platform === 'darwin' ? path.resolve(process.resourcesPath, '../../..') : path.dirname(process.resourcesPath)
+  event('maintenance-started', { identity: identity.inspectProcess(process.pid), directory: path.dirname(gui) })
+}
+dialog.showMessageBox = async (...args) => {
+  const options = args.at(-1)
+  if (options.title === '卸载 Crabot' && options.buttons?.[1] === '卸载并保留数据') {
+    event('confirmed'); return { response: 1, checkboxChecked: false }
+  }
+  if (options.title === 'Crabot 已卸载' && options.buttons?.[0] === '关闭') {
+    event('completed-dialog'); return { response: 0, checkboxChecked: false }
+  }
+  failure(); throw new Error('Unexpected native dialog')
+}
+const timer = setTimeout(failure, 20 * 60 * 1000)
+timer.unref()
+if (!host && !config.registration) {
+  const inspect = setInterval(async () => {
+    if (!fs.existsSync(path.join(config.control, 'allow-remove'))) return
+    const items = Menu.getApplicationMenu()?.items.flatMap(item => item.submenu?.items || []) || []
+    const item = items.find(value => value.label === '卸载 Crabot…')
+    if (!item?.enabled) return
+    clearInterval(inspect)
+    try {
+      const { registerInstallationEntries } = await import('./installation-entries.js')
+      await registerInstallationEntries(config.prepared, { home: require('node:os').homedir(), platform: process.platform, env: process.env, shell })
+      event('entries-registered'); event('menu-clicked'); item.click(item, undefined, {})
+    } catch { failure() }
+  }, 100)
+  inspect.unref()
+}
+if (config.registration) {
+  const profile = path.join(config.control, 'registration-profile')
+  fs.mkdirSync(profile, { recursive: true, mode: 0o700 }); app.setPath('userData', profile)
+  void app.whenReady().then(async () => {
+    const options = { home: require('node:os').homedir(), platform: process.platform, env: process.env, shell }
+    if (config.registration === 'remove') {
+      const { removeInstallationEntries } = await import('./installation-removal.js')
+      const { inspectInstance } = await import('./bootstrap/scripts/lib/instance-runtime.mjs')
+      await removeInstallationEntries(config.prepared, { ...options, verifyStopped: async () => {
+        if (inspectInstance(path.join(config.prepared.installRoot, 'data')).state !== 'stopped') throw new Error('Fixture still running')
+      } })
+      event('entries-cleaned')
+    } else {
+      const { registerInstallationEntries } = await import('./installation-entries.js')
+      await registerInstallationEntries(config.prepared, options); event('entries-restored')
+    }
+    app.exit(0)
+  }).catch(failure)
+} else void import('./main.js').catch(failure)
