@@ -6,6 +6,14 @@ import { findTranslator, connectionCapabilitiesFor } from '../../src/workers/con
 import { buildScrubbedChildEnv } from '../../src/workers/connections/secret-env.js'
 import { RuntimeFileSet } from '../../src/workers/connections/runtime-file.js'
 
+async function binaryFixture() {
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-binary-resolution-')))
+  const home = path.join(root, 'home'), data = path.join(root, 'data'), globalDir = path.join(root, 'global'), userDir = path.join(home, 'bin')
+  for (const directory of [data, globalDir, userDir]) await fs.mkdir(directory, { recursive: true })
+  for (const directory of [globalDir, userDir]) await fs.writeFile(path.join(directory, 'crabot-fake-cli'), '#!/bin/sh\necho ok\n', { mode: 0o755 })
+  return { root, home, data, globalDir, userDir }
+}
+
 describe('connection translators（P6-B §7）', () => {
   it('translator 不以 CLI 版本筛选 connection mode', () => {
     expect(findTranslator('codex', 'existing_host')).toBeDefined()
@@ -72,9 +80,14 @@ describe('connection translators（P6-B §7）', () => {
 
   it('runtime file：0600 落盘、逃逸拒绝、dispose 清空', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-runtime-file-'))
+    if (process.platform === 'win32') {
+      await fs.rmdir(root)
+      require('../../../scripts/lib/process-identity.cjs').createPrivateDirectory(root)
+    }
     const set = await RuntimeFileSet.create(root, { 'config.toml': 'x = 1' })
     const stat = await fs.stat(set.resolve('config.toml'))
-    expect(stat.mode & 0o777).toBe(0o600)
+    if (process.platform === 'win32') expect(require('../../../scripts/lib/process-identity.cjs').isPrivateFile(set.resolve('config.toml'))).toBe(true)
+    else expect(stat.mode & 0o777).toBe(0o600)
     expect(() => set.resolve('../escape')).toThrow(/escapes/)
     await set.dispose()
     await expect(fs.stat(set.root)).rejects.toThrow(/ENOENT/)
@@ -110,10 +123,12 @@ describe('用户级 binary 路径含空格（R15 实证 + 移除 managed 后语�
 
   it('resolveUserLevelBinary：全局路径（$HOME 之外）被忽略并报 global_detected', async () => {
     const { resolveUserLevelBinary } = await import('../../src/workers/cli-binary.js')
-    // 'sh' 在 /bin/sh（全局）——必被忽略
-    const result = await resolveUserLevelBinary('sh', '/tmp/crabot-data')
-    expect(result.binary).toBeUndefined()
-    expect(result.global_detected).toBe(true)
+    const f = await binaryFixture()
+    try {
+      const result = await resolveUserLevelBinary('crabot-fake-cli', f.data, { homeDir: f.home, pathEnv: f.globalDir })
+      expect(result.binary).toBeUndefined()
+      expect(result.global_detected).toBe(true)
+    } finally { await fs.rm(f.root, { recursive: true, force: true }) }
   })
 })
 
@@ -135,21 +150,14 @@ describe('用户级-only 不变量（PR95 review）', () => {
   })
 
   it('resolveUserLevelBinary：PATH 前面是全局、后面是用户级时选中用户级', async () => {
-    const home = os.homedir()
-    const userBinDir = path.join(home, '.crabot-test-bin')
-    await fs.mkdir(userBinDir, { recursive: true })
-    const userBin = path.join(userBinDir, 'crabot-fake-cli')
-    await fs.writeFile(userBin, '#!/bin/sh\necho ok\n', { mode: 0o755 })
+    const f = await binaryFixture()
     const { resolveUserLevelBinary } = await import('../../src/workers/cli-binary.js')
-    const origPath = process.env.PATH
-    process.env.PATH = `/usr/bin:${userBinDir}:${origPath}`
     try {
-      const result = await resolveUserLevelBinary('crabot-fake-cli', '/tmp/crabot-data')
-      expect(result.binary).toBe(userBin)
+      const result = await resolveUserLevelBinary('crabot-fake-cli', f.data, { homeDir: f.home, pathEnv: [f.globalDir, f.userDir].join(path.delimiter) })
+      expect(result.binary).toBe(path.join(f.userDir, 'crabot-fake-cli'))
       expect(result.global_detected).toBe(false)
     } finally {
-      process.env.PATH = origPath
-      await fs.rm(userBinDir, { recursive: true, force: true })
+      await fs.rm(f.root, { recursive: true, force: true })
     }
   })
 })
