@@ -58,7 +58,8 @@ static napi_value WritePrivateFile(napi_env env, napi_callback_info info) {
 }
 // Existing application roots keep their ACLs. SYSTEM/Administrators already
 // control the OS; ordinary other principals may read but may not mutate data.
-static bool ExistingDataAcl(PACL acl, PSID owner) {
+static bool ExistingDataAcl(PACL acl, PSID owner, const char*& stage) {
+  stage = "acl";
   if (!acl || !IsValidAcl(acl)) return false;
   const DWORD writes = GENERIC_ALL | GENERIC_WRITE | WRITE_DAC | WRITE_OWNER | DELETE
     | FILE_DELETE_CHILD | FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_WRITE_EA | FILE_WRITE_ATTRIBUTES;
@@ -67,17 +68,18 @@ static bool ExistingDataAcl(PACL acl, PSID owner) {
     if (!GetAce(acl, index, &raw)) return false;
     const auto header = static_cast<ACE_HEADER*>(raw);
     if (header->AceType == ACCESS_DENIED_ACE_TYPE) continue;
-    if (header->AceType != ACCESS_ALLOWED_ACE_TYPE) return false;
+    if (header->AceType != ACCESS_ALLOWED_ACE_TYPE) { stage = "ace-type"; return false; }
     const auto ace = static_cast<ACCESS_ALLOWED_ACE*>(raw);
     const auto sid = reinterpret_cast<PSID>(&ace->SidStart);
     if (!IsValidSid(sid)) return false;
     if (!EqualSid(sid, owner) && !IsWellKnownSid(sid, WinLocalSystemSid)
-      && !IsWellKnownSid(sid, WinBuiltinAdministratorsSid) && (ace->Mask & writes)) return false;
+      && !IsWellKnownSid(sid, WinBuiltinAdministratorsSid) && (ace->Mask & writes)) { stage = "ordinary-writer"; return false; }
   }
   return true;
 }
-static bool ExistingDataAccess(PSECURITY_DESCRIPTOR descriptor, PACL acl, PSID owner) {
-  if (!ExistingDataAcl(acl, owner)) return false;
+static bool ExistingDataAccess(PSECURITY_DESCRIPTOR descriptor, PACL acl, PSID owner, const char*& stage) {
+  if (!ExistingDataAcl(acl, owner, stage)) return false;
+  stage = "token";
   HANDLE primary = nullptr, token = nullptr;
   if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | TOKEN_DUPLICATE, &primary)) return false;
   const BOOL duplicated = DuplicateToken(primary, SecurityImpersonation, &token);
@@ -85,6 +87,7 @@ static bool ExistingDataAccess(PSECURITY_DESCRIPTOR descriptor, PACL acl, PSID o
   if (!duplicated) return false;
   GENERIC_MAPPING mapping{ FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_GENERIC_EXECUTE, FILE_ALL_ACCESS };
   PRIVILEGE_SET privileges{}; DWORD size = sizeof(privileges), granted = 0; BOOL allowed = FALSE;
+  stage = "effective-access";
   const BOOL checked = AccessCheck(descriptor, token, FILE_ALL_ACCESS, &mapping, &privileges, &size, &granted, &allowed);
   CloseHandle(token);
   return checked && allowed && (granted & FILE_ALL_ACCESS) == FILE_ALL_ACCESS;
@@ -107,7 +110,11 @@ static napi_value IsPrivatePath(napi_env env, napi_callback_info info, bool dire
     if (!ConvertStringSidToSidA(sid.c_str(), &current)) throw std::runtime_error("Cannot inspect current user SID");
     SECURITY_DESCRIPTOR_CONTROL control; DWORD revision; void* raw = nullptr;
     bool valid = owner && EqualSid(owner, current);
-    if (valid && existingData) valid = ExistingDataAccess(descriptor, acl, current);
+    if (valid && existingData) {
+      const char* stage = "acl";
+      valid = ExistingDataAccess(descriptor, acl, current, stage);
+      if (!valid) fprintf(stderr, "CRABOT_EXISTING_DIRECTORY_ACCESS:%s:%lu\n", stage, GetLastError());
+    }
     if (valid && requirePrivate) valid = acl && GetSecurityDescriptorControl(descriptor, &control, &revision)
       && (!requireProtected || (control & SE_DACL_PROTECTED)) && acl->AceCount == 1 && GetAce(acl, 0, &raw);
     if (valid && requirePrivate) {

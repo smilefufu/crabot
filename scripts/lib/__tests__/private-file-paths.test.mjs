@@ -117,7 +117,7 @@ test('Windows existing app data keeps inherited/readable ACLs but rejects other 
   assert.equal(identity.isExistingDataDirectory(inherited), true)
   for (const sid of ['S-1-5-18', 'S-1-5-32-544']) execFileSync(icacls, [inherited, '/grant', '*' + sid + ':(OI)(CI)(F)'], { stdio: 'pipe' })
   execFileSync(icacls, [inherited, '/grant', '*S-1-1-0:(R)'], { stdio: 'pipe' })
-  const acl = execFileSync(icacls, [inherited], { encoding: 'utf8' })
+  const acl = execFileSync(icacls, [inherited], { encoding: 'utf8' }); t.diagnostic(acl)
   assert.equal(identity.isExistingDataDirectory(inherited), true)
   assert.equal(identity.isPrivateDirectory(inherited), false, 'private control factory remains strict')
   assert.equal(execFileSync(icacls, [inherited], { encoding: 'utf8' }), acl, 'observation never changes the old ACL')

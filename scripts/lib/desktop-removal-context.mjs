@@ -64,7 +64,7 @@ export async function captureDesktopRemovalFacts(options) {
       const stat = physical.lstatSync(directory, { bigint: true }), managed = directory === own.root || directory === own.dataDir
       if (!stat.isDirectory() || stat.isSymbolicLink()
         || directory === own.root && (String(stat.dev) !== own.record.root_identity.dev || String(stat.ino) !== own.record.root_identity.ino)
-        || (process.platform === 'win32' ? !identity.isOwnedDirectory(directory) || managed && !identity.isPrivateDirectory(directory)
+        || (process.platform === 'win32' ? !identity.isOwnedDirectory(directory) || managed && !identity.isExistingDataDirectory(directory)
           : String(stat.uid) !== own.record.owner || managed && ((stat.mode & 0o700n) !== 0o700n || (stat.mode & 0o022n) !== 0n))) removalFail()
     }
     assertFixedDocuments()

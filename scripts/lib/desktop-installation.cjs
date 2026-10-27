@@ -17,7 +17,7 @@ function directory(file, managedRoot = false) {
   if (!stat.isDirectory() || stat.isSymbolicLink() || !identity.isOwnedDirectory(file)) fail()
   // Existing roots can retain legacy read/traverse access. Private records and
   // sockets have their own checks; only creation requires an exact private mode.
-  if (managedRoot && (process.platform === 'win32' ? !identity.isPrivateDirectory(file)
+  if (managedRoot && (process.platform === 'win32' ? !identity.isExistingDataDirectory(file)
     : (stat.mode & 0o700) !== 0o700 || (stat.mode & 0o022) !== 0)) fail()
   return stat
 }
