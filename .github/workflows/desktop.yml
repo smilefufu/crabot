@@ -345,10 +345,14 @@ jobs:
           node .github/scripts/validate-staged-core.mjs ".desktop-build/安装 候选/core"
           node .github/scripts/smoke-installed-cli.mjs ".desktop-build/安装 候选/core"
           node scripts/desktop/package-application.mjs --candidate=true "--core=.desktop-build/安装 候选/core" "--out=.desktop-build/安装 候选/gui" 2>&1 | tee .desktop-build/gui-package.log
-      - name: Real bundled Python selection inside scoped maintenance
+      - name: Real bundled Python selection inside system maintenance
         if: steps.scope.outputs.full_runtime == 'true'
         timeout-minutes: 8
-        run: node .github/scripts/smoke-legacy-python-maintenance.mjs ".desktop-build/安装 候选/core" 2>&1 | tee .desktop-build/python-maintenance.log
+        run: node .github/scripts/smoke-legacy-python-maintenance.mjs ".desktop-build/安装 候选/core" system 2>&1 | tee .desktop-build/python-maintenance-system.log
+      - name: Real bundled Python selection inside legacy-user scoped maintenance
+        if: steps.scope.outputs.full_runtime == 'true'
+        timeout-minutes: 8
+        run: node .github/scripts/smoke-legacy-python-maintenance.mjs ".desktop-build/安装 候选/core" legacy-user 2>&1 | tee .desktop-build/python-maintenance-user.log
       - name: Real bundled Python behind a registered workspace gate
         if: steps.scope.outputs.full_runtime == 'true'
         timeout-minutes: 12

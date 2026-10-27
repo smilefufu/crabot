@@ -25,13 +25,29 @@ import identity from '../../scripts/lib/process-identity.cjs'
 import product from '../../scripts/lib/product-runtime.cjs'
 import selection from '../../scripts/lib/agent-python-selection.cjs'
 const require = createRequire(new URL('../../crabot-admin/package.json', import.meta.url)), AdmZip = require('adm-zip')
+const sourceKinds = process.argv[3] ? [process.argv[3]] : ['system', 'legacy-user']
+assert.ok(sourceKinds.every(kind => ['system', 'legacy-user'].includes(kind)), 'Unknown source case')
 const execute = promisify(execFile), root = await fs.realpath(process.argv[2]), core = await verifyCoreRelease(root)
+const loadRuntime = product.loadProductRuntime
+let runtimeVerificationCalls = 0, runtimeVerificationMs = 0
+product.loadProductRuntime = (...args) => {
+  const started = performance.now()
+  try { return loadRuntime(...args) }
+  finally { runtimeVerificationCalls++; runtimeVerificationMs += performance.now() - started }
+}
 const runtime = product.loadProductRuntime(root, { required: true, full: true })
 for (const file of ['scripts/lib/version-maintenance.mjs', 'scripts/lib/legacy-python-rebuild.mjs', 'scripts/lib/legacy-python-selection.mjs', 'scripts/desktop/inspect-legacy-python.py']) {
   assert.deepEqual(await fs.readFile(path.join(root, file)), await fs.readFile(new URL('../../' + file, import.meta.url)),
     'This component probe requires a Core staged from the current tested sources: ' + file)
 }
 async function verifySource(sourceKind) {
+  const started = performance.now(), initialRuntimeMs = runtimeVerificationMs, initialRuntimeCalls = runtimeVerificationCalls
+  const measure = async (phase, run) => {
+    const before = performance.now(), runtimeBefore = runtimeVerificationMs
+    try { return await run() }
+    finally { console.log('CRABOT_PYTHON_MAINTENANCE_PHASE ' + JSON.stringify({ source_kind: sourceKind, phase,
+      elapsed_ms: Math.round(performance.now() - before), runtime_verification_ms: Math.round(runtimeVerificationMs - runtimeBefore) })) }
+  }
   const parent = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'Crabot Python transaction ')))
   let lock
   try {
@@ -51,7 +67,7 @@ async function verifySource(sourceKind) {
     for (const [name, bytes] of Object.entries(files)) archive.addFile(name, Buffer.from(bytes))
     archive.addFile(info + 'RECORD', Buffer.from(records(files))); archive.writeZip(path.join(wheels, 'crabot_transaction_probe-1.2.3-py3-none-any.whl'))
     await fs.mkdir(path.join(dataDir, 'fixture')); await fs.writeFile(path.join(dataDir, 'fixture/config'), 'retained fixture data')
-    const original = await inspectLegacyPythonEnvironment({ root, dataDir }), operation = randomUUID()
+    const original = await measure('inspect-source', () => inspectLegacyPythonEnvironment({ root, dataDir })), operation = randomUUID()
     let id = randomUUID(), backup
     const record = { schema_version: 2, id, data_dir: dataDir, install_root: path.join(parent, 'retained-source-policy-fixture'),
       source_version: 'v2026.10.15.1', target_version: core.version, system_operation_id: operation,
@@ -77,8 +93,8 @@ async function verifySource(sourceKind) {
     }
     const offline = (command, args, options) => execute(command,
       command === runtime.executables.uv && args[1] === 'install' ? [...args, '--offline', '--no-index', '--find-links', wheels] : args, options)
-    const prepared = await prepareLegacyPythonRebuild({ root, dataDir, expectedFingerprint: original.fingerprint, execute: offline })
-    const bound = await bindLegacyPythonMaintenance({ dataDir, id, prepared })
+    const prepared = await measure('rebuild', () => prepareLegacyPythonRebuild({ root, dataDir, expectedFingerprint: original.fingerprint, execute: offline }))
+    const bound = await measure('bind', () => bindLegacyPythonMaintenance({ dataDir, id, prepared }))
     assert.equal(selection.readAgentEnvironmentReference(dataDir), null)
     await assert.rejects(selectLegacyPythonMaintenance({ dataDir, id }), { code: 'CRABOT_MAINTENANCE_PENDING' })
     if (sourceKind === 'legacy-user') await markVersionMaintenanceInstalling(dataDir, id)
@@ -86,12 +102,12 @@ async function verifySource(sourceKind) {
       // This component test does not execute or impersonate the root sealing role.
       await write({ ...bound, phase: 'installing' })
     }
-    const selected = await selectLegacyPythonMaintenance({ dataDir, id })
+    const selected = await measure('select', () => selectLegacyPythonMaintenance({ dataDir, id }))
     assert.equal(selected.selected, true); assert.equal(selection.readAgentEnvironmentSelection(dataDir).record.id, prepared.id)
     const result = await execute(prepared.binary, ['-I', '-B', '-X', 'utf8', '-c', 'import crabot_transaction_probe;print(crabot_transaction_probe.value)'],
       { env: product.productEnvironment(runtime, dataDir, {}), timeout: 15000 })
     assert.equal(result.stdout.trim(), 'verified-new-environment')
-    assert.equal((await inspectLegacyPythonEnvironment({ root, dataDir })).fingerprint, original.fingerprint)
+    assert.equal((await measure('reinspect-source', () => inspectLegacyPythonEnvironment({ root, dataDir }))).fingerprint, original.fingerprint)
     assert.equal(await fs.readFile(path.join(site, 'crabot_transaction_probe.py'), 'utf8'), oldFiles['crabot_transaction_probe.py'])
     if (backup) assert.equal(await fs.readFile(path.join(backup.directory, 'data/fixture/config'), 'utf8'), 'retained fixture data')
     else {
@@ -102,7 +118,12 @@ async function verifySource(sourceKind) {
     console.log('CRABOT_PYTHON_MAINTENANCE ' + JSON.stringify({ platform: process.platform, arch: process.arch, actual_bundled_python: true,
       actual_offline_wheel: true, actual_durable_default: true, no_early_selection: true, original_environment_preserved: true,
       scoped_backup_verified: Boolean(backup), no_wide_backup: !backup, source_kind: sourceKind, business_start_still_fenced: true, source_policy_fixture: sourceKind === 'system', root_conversion_verified: false, mm_started: false }))
-  } finally { releaseCliLock(lock); await fs.rm(parent, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
+  } finally {
+    releaseCliLock(lock); await fs.rm(parent, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+    console.log('CRABOT_PYTHON_MAINTENANCE_TIMING ' + JSON.stringify({ source_kind: sourceKind,
+      elapsed_ms: Math.round(performance.now() - started), runtime_verification_calls: runtimeVerificationCalls - initialRuntimeCalls,
+      runtime_verification_ms: Math.round(runtimeVerificationMs - initialRuntimeMs) }))
+  }
 
 }
-for (const sourceKind of ['system', 'legacy-user']) await verifySource(sourceKind)
+for (const sourceKind of sourceKinds) await verifySource(sourceKind)
