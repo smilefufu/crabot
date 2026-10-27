@@ -492,6 +492,10 @@ jobs:
         env:
           CRABOT_FULL_CORE_TEST: '1'
         run: node --test tests/full-host.test.mjs 2>&1 | tee ../.desktop-build/full-host.log
+      - name: Observe installer volume occupancy after macOS failure
+        if: failure() && runner.os == 'macOS'
+        continue-on-error: true
+        run: node .github/scripts/observe-macos-dmg-failure.mjs
       - name: Save runtime evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -502,6 +506,7 @@ jobs:
             .desktop-build/*.png
             .desktop-build/paired-update-host.json
             .desktop-build/uninstall-reinstall*.json
+            .desktop-build/dmg-failure.json
             .desktop-build/fixture-diagnostics/paired-update-source.log
             .desktop-build/complete-paired-release.json
             .desktop-build/runtime-scope.json
