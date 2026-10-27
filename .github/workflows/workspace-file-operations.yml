@@ -1,0 +1,59 @@
+name: Workspace physical file operations
+on:
+  workflow_dispatch:
+  push:
+    branches: ['feat/desktop-workspace-file-operations']
+  pull_request:
+    paths:
+      - 'scripts/lib/workspace-copy.mjs'
+      - 'scripts/lib/workspace-file-metadata.mjs'
+      - 'scripts/lib/workspace-posix-copy.mjs'
+      - 'scripts/lib/workspace-windows-copy.mjs'
+      - 'scripts/lib/workspace-root-publish.mjs'
+      - 'scripts/lib/workspace-sync.mjs'
+      - 'scripts/lib/workspace-tar.mjs'
+      - 'scripts/lib/run-bounded.mjs'
+      - 'scripts/workspace-copy-host.mjs'
+      - '.github/workflows/workspace-file-operations.yml'
+permissions:
+  contents: read
+jobs:
+  files:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, macos-15-intel, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 12
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.3'
+      - name: Build this branch's actual Native helper
+        run: node scripts/build-native.mjs
+      - name: Build this branch's Shared without business processes
+        run: |
+          set -e
+          pnpm --dir crabot-shared install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-shared run build
+      - name: Verify real temporary copies, metadata, sync, publication and owned process gates
+        run: >-
+          node --test --test-concurrency=1
+          scripts/lib/__tests__/workspace-copy.test.mjs
+          scripts/lib/__tests__/workspace-file-metadata.test.mjs
+          scripts/lib/__tests__/workspace-root-publish.test.mjs
+          scripts/lib/__tests__/workspace-tar.test.mjs
+          scripts/lib/__tests__/workspace-sync.test.mjs
+          scripts/lib/__tests__/workspace-windows-copy.test.mjs
+          scripts/lib/__tests__/workspace-windows-sync.test.mjs
+          scripts/lib/__tests__/workspace-copy-job.test.mjs
+      - name: Preserve original bounded-command failure and cancellation semantics
+        run: >-
+          node --test
+          --test-name-pattern='preparation subprocess|failed subprocess|preparation parent'
+          scripts/lib/__tests__/scrapling-runtime.test.mjs

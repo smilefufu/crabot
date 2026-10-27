@@ -45,3 +45,40 @@ export async function inspectWorkspaceFileMetadata(file, { signal } = {}) {
   return { fingerprint: hash.digest('hex'), named_streams: first.streams.length, copy_blockers: first.copy_blockers, owner: first.owner, group: first.group,
     ...(nonSecurity ? { non_security_fingerprint: nonSecurity.digest('hex') } : {}) }
 }
+
+/** Content plus owner, access ACL, attributes and named-stream checks; it does not create files or permit closing Workers, selecting a root or deleting a source. */
+export async function verifyWorkspaceRelocationCopy(source, target, { signal, metadataCompatibility = 'exact' } = {}) {
+  if (!['exact', 'windows-owner-inheritance-v1'].includes(metadataCompatibility)
+    || metadataCompatibility !== 'exact' && process.platform !== 'win32') throw unverified()
+  const compatible = metadataCompatibility === 'windows-owner-inheritance-v1'
+  const { verifyWorkspaceRelocationContent } = await import('../../crabot-shared/dist/workspace-relocation-content.js')
+  const { inspectWorkspaceRelocationTree } = await import('../../crabot-shared/dist/workspace-relocation-files.js')
+  const path = await import('node:path')
+  const content = await verifyWorkspaceRelocationContent(source, target, { signal })
+  const hash = createHash('sha256'), targetHash = createHash('sha256'); let entries = 0, inherited = 0
+  async function visit(relative) {
+    const left = path.join(source, relative), right = path.join(target, relative)
+    const a = await inspectWorkspaceFileMetadata(left, { signal }), b = await inspectWorkspaceFileMetadata(right, { signal })
+    const directory = (await fs.lstat(left)).isDirectory()
+    if (compatible && directory && (!native.inspectWorkspaceOwnerAccess(left) || !native.inspectWorkspaceOwnerAccess(right))) throw unverified()
+    if (a.fingerprint !== b.fingerprint) {
+      if (!compatible || directory || !a.non_security_fingerprint || a.non_security_fingerprint !== b.non_security_fingerprint
+        || a.copy_blockers.length || b.copy_blockers.length || !native.compareWorkspaceOwnerInheritance(left, right)) throw unverified()
+      inherited++
+    }
+    hash.update(JSON.stringify([relative, a.fingerprint]) + '\n')
+    targetHash.update(JSON.stringify([relative, b.fingerprint]) + '\n'); entries++
+    if (directory) {
+      const leftNames = (await fs.readdir(left)).sort(), rightNames = (await fs.readdir(right)).sort()
+      if (JSON.stringify(leftNames) !== JSON.stringify(rightNames)) throw unverified()
+      for (const name of leftNames) await visit(path.join(relative, name))
+    }
+    if ((await inspectWorkspaceFileMetadata(left, { signal })).fingerprint !== a.fingerprint
+      || (await inspectWorkspaceFileMetadata(right, { signal })).fingerprint !== b.fingerprint) throw unverified()
+  }
+  await visit('')
+  const a = await inspectWorkspaceRelocationTree(source, 'copy', { signal }), b = await inspectWorkspaceRelocationTree(target, 'copy', { signal })
+  if (a.issues.length || b.issues.length || a.fingerprint !== content.source_fingerprint || b.fingerprint !== content.target_fingerprint) throw unverified()
+  return { ...content, metadata_entries: entries, metadata_fingerprint: hash.digest('hex'), target_metadata_fingerprint: targetHash.digest('hex'),
+    metadata_compatibility: metadataCompatibility, legacy_owner_inheritance_files: inherited }
+}
