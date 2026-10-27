@@ -51,7 +51,7 @@ export async function removeDesktopRemovalPrograms({ installRoot, operationId })
   const owned = (file, stat) => process.platform === 'win32'
     ? stat.isDirectory() ? identity.isOwnedDirectory(file) : identity.isOwnedFile(file) : stat.uid === root.uid
   const baseDirectories = new Set(['app', 'app/releases', 'releases', 'bin'].map(name => path.join(own.root, name)))
-  async function checkParents(file, capture = false) {
+  async function captureParents(file) {
     const list = []
     for (let parent = path.dirname(file); parent !== own.root; parent = path.dirname(parent)) {
       const relative = path.relative(own.root, parent)
@@ -59,14 +59,13 @@ export async function removeDesktopRemovalPrograms({ installRoot, operationId })
       list.push(parent)
     }
     for (const parent of list.reverse()) {
+      if (parents.has(parent)) continue
       let stat
       try { stat = await fs.lstat(parent, { bigint: true }) }
       catch (error) { if (error.code === 'ENOENT') return false; throw error }
       if (!stat.isDirectory() || stat.isSymbolicLink() || stat.dev !== root.dev || !owned(parent, stat)
         || !equalPath(await fs.realpath(parent), parent)) fail()
-      const expected = parents.get(parent)
-      if (expected && directoryIdentity(stat) !== expected || !expected && !capture) fail()
-      if (capture) parents.set(parent, directoryIdentity(stat))
+      parents.set(parent, directoryIdentity(stat))
     }
     return true
   }
@@ -80,7 +79,7 @@ export async function removeDesktopRemovalPrograms({ installRoot, operationId })
   }
   const assertBases = () => { for (const directory of baseDirectories) assertDirectory(directory) }
   const before = await inspectDesktopRemovalPrograms(scope), candidates = new Set(before.matched)
-  for (const entry of entries) await checkParents(path.join(own.root, entry.name), true)
+  for (const entry of entries) await captureParents(path.join(own.root, entry.name))
   await current()
   const directories = [...parents.keys()].filter(directory => !baseDirectories.has(directory))
   const observe = async stage => {
@@ -96,7 +95,8 @@ export async function removeDesktopRemovalPrograms({ installRoot, operationId })
     if (group && group !== nextGroup) await observe('before-group')
     group = nextGroup
     const file = path.join(own.root, entry.name)
-    if (!await checkParents(file)) continue
+    try { assertParents(file) }
+    catch (error) { if (error.code === 'ENOENT') continue; throw error }
     let stat
     try { stat = await fs.lstat(file, { bigint: true }) }
     catch (error) { if (error.code === 'ENOENT') continue; throw error }

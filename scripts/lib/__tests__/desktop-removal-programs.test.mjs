@@ -414,7 +414,9 @@ test('finite many-file removal keeps repeated installation reads bounded and pre
   for (const programCount of [64, 128]) {
     const f = await fixture(t, programCount)
     const held = [await locks.acquireExistingCliLock(f.root, 'fixture-cost'), await locks.acquireExistingCliLock(f.data, 'fixture-cost')]
-    let discoveryReads = 0
+    let discoveryReads = 0, asyncParentReads = 0
+    const lstat = fs.lstat, parent = path.join(f.core, 'nested')
+    const parentReader = t.mock.method(fs, 'lstat', (file, ...args) => { if (file === parent) asyncParentReads++; return lstat(file, ...args) })
     const reader = t.mock.method(fsSync, 'readFileSync', (file, ...args) => {
       if (file === path.join(f.root, 'desktop-installation.json')) discoveryReads++
       return read(file, ...args)
@@ -422,12 +424,13 @@ test('finite many-file removal keeps repeated installation reads bounded and pre
     try {
       const started = performance.now(), result = await removeDesktopRemovalPrograms({ installRoot: f.root, operationId: f.operationId })
       console.log('CRABOT_REMOVAL_MANY_FILE_COST ' + JSON.stringify({ platform: process.platform, finite_added_files: programCount,
-        installation_reads: discoveryReads, elapsed_ms: Math.round(performance.now() - started), resource_observation_substituted: true }))
+        installation_reads: discoveryReads, async_parent_reads: asyncParentReads, elapsed_ms: Math.round(performance.now() - started), resource_observation_substituted: true }))
       assert.equal(result.retained.length, 0); assert.ok(result.removed.length > programCount)
       observations.push(discoveryReads)
+      assert.ok(asyncParentReads <= 4, 'One original parent is captured once; every destructive admission still performs its full synchronous check: ' + asyncParentReads)
       await assert.rejects(fs.lstat(f.core), { code: 'ENOENT' }); await assert.rejects(fs.lstat(f.gui), { code: 'ENOENT' })
       assert.equal(await fs.readFile(path.join(f.data, 'user.txt'), 'utf8'), 'preserved data and runtime bases')
-    } finally { reader.mock.restore(); for (const lock of held.reverse()) locks.releaseCliLock(lock) }
+    } finally { parentReader.mock.restore(); reader.mock.restore(); for (const lock of held.reverse()) locks.releaseCliLock(lock) }
   }
   assert.equal(observations[1], observations[0], 'Doubling program files must not double installation JSON parsing')
 })

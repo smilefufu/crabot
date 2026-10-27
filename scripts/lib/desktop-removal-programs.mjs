@@ -73,9 +73,9 @@ export async function inspectDesktopRemovalPrograms({ installRoot, operationId, 
     return stat.isDirectory() ? native.isOwnedDirectory(file) : native.isOwnedFile(file)
   }
   async function directory(file) {
-    const stat = await fs.lstat(file, { bigint: true })
+    const stat = physical.lstatSync(file, { bigint: true })
     if (!stat.isDirectory() || stat.isSymbolicLink() || stat.dev !== rootStat.dev || !owned(file, stat)
-      || !equalPath(await fs.realpath(file), file)) fail()
+      || !equalPath(physical.realpathSync(file), file)) fail()
     if (parents.has(file) && parents.get(file) !== generation(stat)) fail()
     parents.set(file, generation(stat))
   }
