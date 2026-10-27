@@ -80,6 +80,7 @@ async function removeFromSource(options: SourceOptions | InstallerOptions) {
       if (message?.kind !== 'desktop_removal_source_exit' || !verifyExit) return
       void verifyExit(message).then((accepted: boolean) => {
         if (!accepted || abort.signal.aborted || installer) return
+        closeProgress()
         restoreExit = options.beginExit()
         try { app.quit() } catch (error) { restoreExit(); throw error }
       }).catch(() => { /* The child retains its stopping job and shows a bounded retry. */ })

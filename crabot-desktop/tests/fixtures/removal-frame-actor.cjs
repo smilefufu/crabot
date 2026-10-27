@@ -57,10 +57,19 @@ if (cfg.publicEntry) {
   electron.dialog.showMessageBox = async options => ({ response: options.title === '卸载 Crabot' ? 1 : 0 })
   cp.spawn = (executable, args, options) => {
     const child = originalSpawn(executable, args, options)
-    if (args.some(value => value.startsWith('--crabot-removal-host='))) child.once('spawn', () => {
-      const gui = process.platform === 'darwin' ? path.resolve(path.dirname(executable), '../../..') : path.dirname(executable)
-      void send({ handoff: true, host: native.inspectProcess(child.pid), directory: path.dirname(gui), source_progress_windows: sourceWindows })
-    })
+    if (args.some(value => value.startsWith('--crabot-removal-host='))) {
+      if (cfg.dropHostReady) {
+        const emit = child.emit
+        child.emit = function (event, ...values) {
+          if (event === 'message' && values[0]?.kind === 'desktop_removal_host_ready') return false
+          return emit.call(this, event, ...values)
+        }
+      }
+      child.once('spawn', () => {
+        const gui = process.platform === 'darwin' ? path.resolve(path.dirname(executable), '../../..') : path.dirname(executable)
+        void send({ handoff: true, host: native.inspectProcess(child.pid), directory: path.dirname(gui), source_progress_windows: sourceWindows })
+      })
+    }
     return child
   }
   require('node:module').syncBuiltinESMExports()
