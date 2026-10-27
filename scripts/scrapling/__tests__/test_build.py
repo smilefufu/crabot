@@ -64,12 +64,19 @@ class DownloadTests(unittest.TestCase):
             self.assertEqual(host.requests, 2)
             self.assertEqual(self.archive.read_bytes(), b'locked resource')
 
-    def test_persistent_503_stops_after_one_retry(self):
-        with server([503]) as (host, url):
-            with self.assertRaises(urllib.error.HTTPError):
-                self.download(url, self.archive, self.expected, None)
+    def test_one_transient_502_retries_original_url_and_verifies_exact_bytes(self):
+        with server([502, 200]) as (host, url):
+            self.download(url, self.archive, self.expected, None)
             self.assertEqual(host.requests, 2)
-            self.assertFalse(self.archive.exists())
+            self.assertEqual(self.archive.read_bytes(), b'locked resource')
+
+    def test_persistent_gateway_errors_stop_after_one_retry(self):
+        for status in [502, 503]:
+            with self.subTest(status=status), server([status]) as (host, url):
+                with self.assertRaises(urllib.error.HTTPError):
+                    self.download(url, self.archive, self.expected, None)
+                self.assertEqual(host.requests, 2)
+                self.assertFalse(self.archive.exists())
 
     def test_other_http_errors_do_not_retry(self):
         for status in [401, 403, 404, 500]:
