@@ -392,7 +392,14 @@ for (const mode of ['unchanged-rewrite', 'record-changed', 'in-place-record-chan
   if (mode === 'ancestor-redirected') {
     const moved = f.temporary + '-moved'
     t.after(() => fs.rm(moved, { recursive: true, force: true, maxRetries: 15, retryDelay: 100 }))
-    await fs.rename(f.temporary, moved)
+    try { await fs.rename(f.temporary, moved) } catch (error) {
+      // Windows can prevent replacing an ancestor while native job locks exist.
+      if (process.platform !== 'win32' || !['EPERM', 'EACCES', 'EBUSY'].includes(error.code)) throw error
+      assert.equal(fsSync.realpathSync.native(f.root), f.root)
+      context.assertJob()
+      assert.equal(await fs.readFile(path.join(f.data, 'user.txt'), 'utf8'), 'preserved data and runtime bases')
+      return
+    }
     await fs.symlink(moved, f.temporary, process.platform === 'win32' ? 'junction' : 'dir')
   }
   if (mode === 'unchanged-rewrite') context.assertJob()
