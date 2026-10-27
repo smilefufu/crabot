@@ -1,0 +1,35 @@
+name: Owned process capture and stop
+on:
+  workflow_dispatch:
+  push:
+    branches: ['feat/desktop-owned-process-stop']
+  pull_request:
+    paths:
+      - 'scripts/lib/known-process-stop.cjs'
+      - 'scripts/lib/spawned-process-tree.cjs'
+      - 'scripts/lib/__tests__/known-process-stop.test.mjs'
+      - 'scripts/lib/__tests__/spawned-process-tree.test.mjs'
+      - '.github/workflows/owned-process-stop.yml'
+permissions:
+  contents: read
+jobs:
+  processes:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, macos-15-intel, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.3'
+      - name: Build this branch's actual Native helper
+        run: node scripts/build-native.mjs
+      - name: Verify actual owned temporary carriers and exact generation shutdown
+        run: >-
+          node --test --test-concurrency=1
+          scripts/lib/__tests__/known-process-stop.test.mjs
+          scripts/lib/__tests__/spawned-process-tree.test.mjs
