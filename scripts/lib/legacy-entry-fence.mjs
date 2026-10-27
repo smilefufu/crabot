@@ -107,6 +107,26 @@ export async function inspectLegacyEntryFence(root) {
   return { id: record.id, phase: record.phase, entries_fenced: [...states.values()].every(state => state === 'fenced'), installation: record.installation }
 }
 
+// Continue only this initial entry publication, before any data maintenance.
+// Original bytes are already durable; no stop or migration is replayed here.
+export async function resumeLegacyEntryFence(root, id) {
+  root = realpathSync(root)
+  const directory = await control(root), lock = await acquireCliLock(directory, 'resume-legacy-entry-fence')
+  try {
+    const record = await read(root, directory)
+    if (record.id !== id || !['fencing', 'fenced'].includes(record.phase)) fail()
+    try { await fs.lstat(path.join(record.installation.dataRoot, 'desktop-maintenance.json')); fail() }
+    catch (error) { if (error.code !== 'ENOENT') throw error }
+    const states = await current(root, record)
+    for (const file of entries) if (states.get(file) === 'original') {
+      if (hash((await regular(path.join(root, file))).bytes) !== hash(Buffer.from(record.originals[file].bytes, 'base64'))) fail()
+      await replace(path.join(root, file), fence(file), record.originals[file].mode)
+    }
+    if (record.phase !== 'fenced') { record.phase = 'fenced'; await write(directory, record) }
+    return { id: record.id, phase: record.phase, installation: record.installation }
+  } finally { releaseCliLock(lock) }
+}
+
 export async function restoreLegacyEntries(root) {
   root = realpathSync(root)
   const directory = await control(root), lock = await acquireCliLock(directory, 'restore-legacy-entries')

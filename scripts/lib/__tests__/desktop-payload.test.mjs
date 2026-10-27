@@ -2108,3 +2108,26 @@ for (const registrationFails of [false, true]) test('legacy installer Node hando
   const { readVersionMaintenance } = await import('../version-maintenance.mjs')
   assert.equal(readVersionMaintenance(f.data).phase, 'verifying')
 })
+
+test('actual installer takeover resumes a partial entry fence before stopping or converting data', { skip: !cachedPythonAvailable }, async t => {
+  const f = await legacyProgramFixture(t, { functional: true, realPython: true }); await fs.unlink(path.join(f.data, 'mm.pid'))
+  const { fenceLegacyEntries, inspectLegacyEntryFence } = await import('../legacy-entry-fence.mjs'), rename = fs.rename
+  const fault = t.mock.method(fs, 'rename', async (from, to) => {
+    if (to === path.join(f.target, 'scripts/start.mjs')) throw Object.assign(new Error('controlled partial entry fence'), { code: 'EIO' })
+    return rename(from, to)
+  })
+  await assert.rejects(fenceLegacyEntries(f.legacy), { code: 'EIO' }); fault.mock.restore()
+  const partial = await inspectLegacyEntryFence(f.target); assert.equal(partial.phase, 'fencing')
+  const { discoverLegacyDesktopTakeover } = await import('../legacy-desktop-discovery.mjs')
+  const source = await discoverLegacyDesktopTakeover({ root: f.target })
+  assert.equal(source.entryFenceId, partial.id)
+  const { prepareLegacyDesktopPrograms } = await import('../legacy-desktop-programs.mjs')
+  const prepared = await prepareLegacyDesktopPrograms({ payload: f.payload, ...source })
+  assert.equal((await inspectLegacyEntryFence(f.target)).phase, 'fencing', 'online program preparation cannot change old entry state')
+  const { runPreparedLegacyDesktopTakeover } = await import('../legacy-desktop-handoff.mjs')
+  const result = await runPreparedLegacyDesktopTakeover({ prepared, entryFenceId: partial.id, registerEntries: async () => {} })
+  assert.equal(result.verification_pending, true)
+  const record = (await import('../version-maintenance.mjs')).readVersionMaintenance(f.data)
+  assert.equal(record.phase, 'verifying'); assert.equal(record.legacy_source.entry_fence_id, partial.id)
+  assert.equal(await fs.readFile(path.join(f.data, 'fixture/executions'), 'utf8'), 'once\n')
+})

@@ -158,3 +158,35 @@ test('an edited CLI or original-entry state cannot be overwritten by forwarding'
   await assert.rejects(enableLegacyCliForwarding(f.root, record.id))
   assert.deepEqual(await fs.readFile(path.join(f.root, 'crabot.cmd')), before)
 })
+
+test('an interrupted initial fence completes the same recorded entry set without changing data', async t => {
+  const f = await fixture(t), rename = fs.rename
+  const fault = t.mock.method(fs, 'rename', async (from, to) => {
+    if (to === path.join(f.root, 'scripts/start.mjs')) throw Object.assign(new Error('controlled initial fence interruption'), { code: 'EIO' })
+    return rename(from, to)
+  })
+  await assert.rejects(fenceLegacyEntries(f.installation), { code: 'EIO' }); fault.mock.restore()
+  const partial = await inspectLegacyEntryFence(f.root), before = JSON.parse(await fs.readFile(f.journal, 'utf8'))
+  assert.equal(partial.phase, 'fencing'); assert.equal(partial.entries_fenced, false)
+  const { resumeLegacyEntryFence } = await import('../legacy-entry-fence.mjs')
+  assert.equal(typeof resumeLegacyEntryFence, 'function')
+  await assert.rejects(resumeLegacyEntryFence(f.root, '11111111-1111-4111-8111-111111111111'))
+  const result = await resumeLegacyEntryFence(f.root, partial.id)
+  assert.equal(result.id, partial.id); assert.equal(result.phase, 'fenced')
+  assert.equal((await inspectLegacyEntryFence(f.root)).entries_fenced, true)
+  assert.deepEqual(JSON.parse(await fs.readFile(f.journal, 'utf8')).originals, before.originals)
+  await resumeLegacyEntryFence(f.root, partial.id)
+  await unchanged(f); await restoreLegacyEntries(f.root); await restored(f)
+})
+
+for (const changed of ['edited-entry', 'data-maintenance', 'data-changing']) test('initial entry continuation cannot cross changed or data-maintenance state: ' + changed, async t => {
+  const f = await fixture(t), entry = await fenceLegacyEntries(f.installation)
+  if (changed === 'edited-entry') await fs.appendFile(path.join(f.root, 'scripts/start.mjs'), 'custom edit')
+  if (changed === 'data-maintenance') await fs.writeFile(path.join(f.dataDir, 'desktop-maintenance.json'), '{}', { mode: 0o600 })
+  if (changed === 'data-changing') await sealLegacyEntryFence(f.root, entry.id)
+  const file = path.join(f.root, 'cli.mjs'), before = await fs.readFile(file), journal = await fs.readFile(f.journal)
+  const { resumeLegacyEntryFence } = await import('../legacy-entry-fence.mjs')
+  await assert.rejects(resumeLegacyEntryFence(f.root, entry.id), { code: 'CRABOT_LEGACY_ENTRY_FENCE' })
+  assert.deepEqual(await fs.readFile(file), before); assert.deepEqual(await fs.readFile(f.journal), journal)
+  assert.equal(await fs.readFile(path.join(f.dataDir, 'keep'), 'utf8'), 'business-data')
+})

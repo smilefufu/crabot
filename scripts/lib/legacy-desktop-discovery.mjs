@@ -30,6 +30,7 @@ export async function discoverLegacyDesktopTakeover({ root, source = process.env
     const { readVersionMaintenance } = await import('./version-maintenance.mjs')
     record ??= readVersionMaintenance(dataDir)
     if (!record && entry.phase === 'restored') return { installation: await discoverLegacyUserInstall({ root, dataDir, source, etcDir }) }
+    if (!record && entry.phase === 'fencing') return { installation: entry.installation, entryFenceId: entry.id }
     if (!entry.entries_fenced || !['fenced', 'data_changing'].includes(entry.phase)) pending()
     if (record && (record.schema_version !== 4 || record.install_root !== root || record.data_dir !== dataDir
       || record.legacy_source.entry_fence_id !== entry.id || record.legacy_source.fingerprint !== entry.installation.fingerprint)) pending()

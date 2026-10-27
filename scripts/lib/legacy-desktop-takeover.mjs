@@ -12,7 +12,7 @@ import { randomUUID } from 'node:crypto'
 import { privateJson, readPending } from './desktop-preparation-files.mjs'
 import { acquireExistingCliLock, releaseCliLock } from './cli-lock.mjs'
 import { verifyLegacyDesktopPrograms } from './legacy-desktop-programs.mjs'
-import { fenceLegacyEntries, inspectLegacyEntryFence, enableLegacyCliForwarding } from './legacy-entry-fence.mjs'
+import { fenceLegacyEntries, inspectLegacyEntryFence, enableLegacyCliForwarding, resumeLegacyEntryFence } from './legacy-entry-fence.mjs'
 import { inspectInstance } from './instance-runtime.mjs'
 import { adoptLegacyDesktopCli } from './legacy-desktop-cli.mjs'
 import { discoverSealedLegacyRuntime } from './legacy-runtime.mjs'
@@ -60,6 +60,7 @@ export async function convertLegacyDesktopData({ prepared, signal, progress = ()
     if (record && !matching(record)) fail()
     signal?.throwIfAborted()
     if (!entry) entry = await fenceLegacyEntries(installation)
+    else if (!record && entry.phase === 'fencing') entry = await resumeLegacyEntryFence(installation.installRoot, entry.id)
     if (!record && entry.phase !== 'fenced') fail()
     // Sends at most one shutdown mutation; unknown processes are never killed.
     if (entry.phase === 'fenced' && (!record || ['preparing', 'prepared'].includes(record.phase))) {

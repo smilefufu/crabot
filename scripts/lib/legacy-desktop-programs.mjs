@@ -23,8 +23,10 @@ async function sourceCurrent(installation, entryFenceId) {
   management.requireExistingDataRoot(installation.installRoot); management.requireExistingDataRoot(installation.dataRoot)
   if (entryFenceId) {
     const entry = await inspectLegacyEntryFence(installation.installRoot)
-    if (entry.id !== entryFenceId || !entry.entries_fenced || !['fenced', 'data_changing'].includes(entry.phase)
-      || !same(entry.installation, installation)) fail()
+    if (entry.id !== entryFenceId || !same(entry.installation, installation)) fail()
+    if (entry.phase === 'fencing') {
+      if (await present(path.join(installation.dataRoot, 'desktop-maintenance.json'))) fail()
+    } else if (!entry.entries_fenced || !['fenced', 'data_changing'].includes(entry.phase)) fail()
   } else if (!same(await discoverLegacyUserInstall({ root: installation.installRoot, dataDir: installation.dataRoot }), installation)) fail()
 }
 async function proofText(file) {
