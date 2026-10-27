@@ -124,7 +124,7 @@ jobs:
           (cd crabot-desktop && node -e "require('electron')")
           node crabot-desktop/node_modules/typescript/bin/tsc -p crabot-desktop/tsconfig.json
           (cd crabot-desktop && node build-preload.mjs)
-          node --test scripts/desktop/ubuntu-maintenance-backend.test.mjs crabot-desktop/tests/ubuntu-installer-removal.test.mjs
+          node --test scripts/lib/__tests__/removal-copy-cleanup.test.mjs scripts/desktop/ubuntu-maintenance-backend.test.mjs crabot-desktop/tests/ubuntu-installer-removal.test.mjs
       - name: Actual private Node-to-GTK window handoff without business services
         timeout-minutes: 2
         env:

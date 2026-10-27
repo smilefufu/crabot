@@ -155,6 +155,8 @@ jobs:
           pnpm --dir crabot-desktop install --frozen-lockfile
           # Electron lazily installs on first require; complete it before test workers.
           (cd crabot-desktop && node -e "require('electron')")
+          node crabot-desktop/node_modules/typescript/bin/tsc -p crabot-desktop/tsconfig.json
+          (cd crabot-desktop && node build-preload.mjs)
       - name: Prepare exact development Electron sandbox on Ubuntu24
         if: runner.os == 'Linux'
         run: node .github/scripts/ubuntu-electron-test-sandbox.mjs
@@ -187,7 +189,7 @@ jobs:
         if: matrix.suite == 'regression'
         timeout-minutes: 15
         run: |
-          node --test .github/scripts/paired-update-target-evidence.test.mjs .github/scripts/paired-update-source-model.test.mjs .github/scripts/paired-update-source-data.test.mjs .github/scripts/paired-update-source-activity.test.mjs scripts/lib/__tests__/desktop-asar.test.mjs scripts/lib/__tests__/archive-core.test.mjs scripts/lib/__tests__/core-release.test.mjs scripts/lib/__tests__/stage-core-imports.test.mjs scripts/lib/__tests__/desktop-installation.test.mjs scripts/lib/__tests__/desktop-removal-programs.test.mjs scripts/lib/__tests__/desktop-removal-system-processes.test.mjs scripts/lib/__tests__/cli-launcher.test.mjs
+          node --test .github/scripts/paired-update-target-evidence.test.mjs .github/scripts/paired-update-source-model.test.mjs .github/scripts/paired-update-source-data.test.mjs .github/scripts/paired-update-source-activity.test.mjs scripts/lib/__tests__/desktop-asar.test.mjs scripts/lib/__tests__/archive-core.test.mjs scripts/lib/__tests__/core-release.test.mjs scripts/lib/__tests__/stage-core-imports.test.mjs scripts/lib/__tests__/desktop-installation.test.mjs scripts/lib/__tests__/desktop-removal-programs.test.mjs scripts/lib/__tests__/removal-copy-cleanup.test.mjs scripts/lib/__tests__/desktop-removal-system-processes.test.mjs scripts/lib/__tests__/cli-launcher.test.mjs
       - name: Offline installation and retained repair regressions
         if: matrix.suite == 'regression'
         timeout-minutes: ${{ matrix.target == 'darwin-x64' && 30 || 15 }}

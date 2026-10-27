@@ -37,27 +37,28 @@ export async function prepareRetainedProductReinstall({ installRoot, payload, pr
   await fs.writeFile(sentinel, 'preserved across program removal and real GUI recovery\n', { flag: 'wx', mode: 0o600 })
   const rootLock = await acquireExistingCliLock(own.root, 'ci-retained-removal-fixture')
   let dataLock, proof
+  const verifyUnused = async stage => {
+    const inspect = identity.inspectProgramReferences
+    let observation
+    // Preserve the first actual observation on failure; a second query can hide
+    // a transient process generation change. Results and product policy are unchanged.
+    identity.inspectProgramReferences = async query => { observation = await inspect(query); return observation }
+    try { await assertDesktopRemovalProgramsUnused({ installRoot: own.root, proof }, stage) }
+    catch (error) {
+      if (observation) console.log('CRABOT_RETAINED_REFERENCE_DIAGNOSIS ' + JSON.stringify({ stage,
+        inventory_file_count: desktopRemovalProgramEntries(proof).length, complete: observation.complete, incomplete: observation.incomplete,
+        holders: observation.processes.slice(0, 8).map(item => ({ pid: item.pid, parent: item.parent, image: path.basename(item.executable) })),
+        holder_count: observation.processes.length, unknown_count: observation.unknown_pids.length, unknown: observation.unknown_details.slice(0, 8) }))
+      throw error
+    } finally { identity.inspectProgramReferences = inspect }
+  }
   try {
     dataLock = await acquireExistingCliLock(own.dataDir, 'ci-retained-removal-fixture')
     assert.equal(inspectInstance(own.dataDir).state, 'stopped')
     stage('fixture-proof-capture')
     proof = await captureDesktopRemovalProof(own.root, operationId)
     stage('fixture-proof-captured')
-    try { await assertDesktopRemovalProgramsUnused({ installRoot: own.root, proof }, 'ci-before-partial-removal') }
-    catch (error) {
-      // Read-only bounded diagnostics. Never convert this second observation
-      // into permission to bypass the failed guard or mutate fixture programs.
-      const entries = desktopRemovalProgramEntries(proof), files = entries.map(entry => path.join(own.root, entry.name))
-      const started = performance.now()
-      try {
-        const result = await identity.inspectProgramReferences({ roots: [own.coreRoot, own.guiRoot, path.join(own.root, 'bin')], files })
-        console.log('CRABOT_RETAINED_REFERENCE_DIAGNOSIS ' + JSON.stringify({ file_count: files.length, link_count: entries.filter(entry => entry.expected.type === 'link').length, max_path_length: files.reduce((maximum, file) => Math.max(maximum, file.length), 0),
-          elapsed_ms: Math.round(performance.now() - started), complete: result.complete, incomplete: result.incomplete,
-          holders: result.processes.slice(0, 8).map(item => ({ pid: item.pid, parent: item.parent, image: path.basename(item.executable) })),
-          holder_count: result.processes.length, unknown_count: result.unknown_pids.length, unknown: result.unknown_details.slice(0, 8) }))
-      } catch (diagnostic) { console.log('CRABOT_RETAINED_REFERENCE_DIAGNOSIS ' + JSON.stringify({ file_count: files.length, code: diagnostic.code || 'DIAGNOSIS_UNAVAILABLE' })) }
-      throw error
-    }
+    await verifyUnused('ci-before-partial-removal')
     stage('fixture-programs-unused')
     const directory = management.ensurePrivateDataRoot(path.join(management.ensurePrivateDataRoot(path.join(own.root, 'app/removals')), operationId))
     const text = JSON.stringify(proof) + '\n'
@@ -78,7 +79,7 @@ export async function prepareRetainedProductReinstall({ installRoot, payload, pr
   } finally { if (dataLock) releaseCliLock(dataLock); releaseCliLock(rootLock) }
   assert.throws(() => installation.readDesktopSelection(own.root), { code: 'CRABOT_DESKTOP_REMOVAL_PENDING' })
   const options = { payload, installRoot: own.root, operationId,
-    verifyStopped: () => assertDesktopRemovalProgramsUnused({ installRoot: own.root, proof }, 'ci-reinstall') }
+    verifyStopped: () => verifyUnused('ci-reinstall') }
   stage('fixture-ready')
   await prepareDesktopRemovalReinstall({ ...options, progress: phase => stage('programs-' + phase) })
   stage('handoff-start')

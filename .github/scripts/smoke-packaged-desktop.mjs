@@ -9,6 +9,7 @@ import { promisify } from 'node:util'
 import { pathToFileURL } from 'node:url'
 import { once } from 'node:events'
 import { registerUbuntuFixturePrograms } from './ubuntu-fixture-programs.mjs'
+import { prepareCiElectronSandbox } from './ubuntu-electron-test-sandbox.mjs'
 if (process.env.GITHUB_ACTIONS !== 'true') throw new Error('Packaged core boot test requires an isolated CI user')
 const started = performance.now()
 const stage = name => console.log('CRABOT_PACKAGED_BOOT_STAGE ' + JSON.stringify({ stage: name, elapsed_ms: Math.round(performance.now() - started) }))
@@ -62,6 +63,7 @@ if (location.schema_version === 2) {
   }
   executable = path.join(relocated, path.relative(platformRoot, originalExecutable))
   core = path.join(relocated, path.relative(platformRoot, originalCore)); data = path.join(temporary, '实例 数据')
+  if (process.platform === 'linux') await prepareCiElectronSandbox(executable)
 }
 const fromCheckout = path.relative(project, core)
 assert.ok(path.isAbsolute(fromCheckout) || fromCheckout.startsWith('..' + path.sep))
