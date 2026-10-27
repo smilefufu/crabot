@@ -26,6 +26,7 @@ const name = 'desktop-maintenance.json', recovering = new Set()
 const legacyVersions = JSON.parse(readFileSync(new URL('../desktop/legacy-releases.json', import.meta.url), 'utf8')).versions
 const version = value => typeof value === 'string' && /^\d+\.\d+\.\d+(?:-[\w.-]+)?$/.test(value)
 const uuid = value => typeof value === 'string' && /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(value)
+const hasScopedProtection = record => [3, 4].includes(record?.schema_version)
 const fail = () => { throw Object.assign(new Error('版本维护尚未核验完成。请在桌面应用中检查恢复，必要时重新安装；原数据和记录已保留。'), { code: 'CRABOT_MAINTENANCE_PENDING' }) }
 function locked(dataDir) {
   dataDir = realpathSync(dataDir)
@@ -48,17 +49,17 @@ export function readVersionMaintenance(dataDir) {
     const source = record.legacy_source
     const validSource = [1, 3].includes(record.schema_version)
       ? version(record.source_version) && /^[a-f0-9]{64}$/.test(record.source_inventory_sha256) && source === undefined
-      : record.schema_version === 2 && legacyVersions.includes(record.source_version) && record.source_inventory_sha256 === undefined
+      : [2, 4].includes(record.schema_version) && legacyVersions.includes(record.source_version) && record.source_inventory_sha256 === undefined
         && record.target_core !== undefined && uuid(source?.entry_fence_id) && /^[a-f0-9]{64}$/.test(source.fingerprint)
         && (source.scope === 'user' && record.system_operation_id === undefined && Object.keys(source).length === 3
-          || source.scope === 'system' && uuid(record.system_operation_id) && /^[a-f0-9]{64}$/.test(source.manifest_fingerprint) && Object.keys(source).length === 4)
+          || record.schema_version === 2 && source.scope === 'system' && uuid(record.system_operation_id) && /^[a-f0-9]{64}$/.test(source.manifest_fingerprint) && Object.keys(source).length === 4)
     if (record.legacy_python !== undefined) {
       const prepared = record.legacy_python
-      if (record.schema_version !== 2 || !prepared || prepared.status === 'absent' && Object.keys(prepared).length !== 1
+      if (![2, 4].includes(record.schema_version) || !prepared || prepared.status === 'absent' && Object.keys(prepared).length !== 1
         || prepared.status === 'prepared' && Object.keys(prepared).length !== 2 || !['absent', 'prepared'].includes(prepared.status)) fail()
       if (prepared.status === 'prepared') pythonSelection.verifyAgentEnvironmentReference(prepared.reference)
     }
-    const scoped = record.schema_version === 3
+    const scoped = hasScopedProtection(record)
     const phases = scoped ? ['preparing', 'prepared', 'installing', 'verifying'] : ['preparing', 'backed_up', 'installing', 'verifying']
     if (scoped && (record.data_protection !== 'scoped' || record.backup !== null
       || record.phase !== 'preparing' && !record.target_core)) fail()
@@ -138,7 +139,7 @@ export async function beginRetainedDesktopVersionMaintenance({ installRoot, oper
 // Explicit legacy-user adapter. The ordinary sealed source path above remains
 // distinct; no old release is assigned a fabricated Core inventory/version.
 async function legacyUserSource(record) {
-  if (record?.schema_version !== 2 || record.legacy_source?.scope !== 'user'
+  if (![2, 4].includes(record?.schema_version) || record.legacy_source?.scope !== 'user'
     || inspectInstance(record.data_dir).state !== 'stopped') fail()
   for (const marker of ['.git', 'core-release.json', 'cli-installation.json']) {
     try { lstatSync(path.join(record.install_root, marker)); fail() } catch (error) { if (error.code !== 'ENOENT') throw error }
@@ -153,16 +154,17 @@ async function legacyUserSource(record) {
   if ((await observe(expected, { entryFenceId: fenced.id })).state !== 'stopped') fail()
   return fenced
 }
-export async function beginLegacyUserVersionMaintenance({ dataDir, installation, entryFenceId, targetRoot }) {
+export async function beginLegacyUserVersionMaintenance({ dataDir, installation, entryFenceId, targetRoot, dataProtection }) {
   dataDir = management.requireExistingDataRoot(dataDir); locked(dataDir)
   if (readVersionMaintenance(dataDir) || !uuid(entryFenceId) || installation?.dataRoot !== dataDir
-    || !legacyVersions.includes(installation?.version)) fail()
+    || !legacyVersions.includes(installation?.version) || dataProtection !== undefined && dataProtection !== 'scoped') fail()
   targetRoot = realpathSync(targetRoot)
   const release = await verifyCoreRelease(targetRoot)
-  const record = { schema_version: 2, id: randomUUID(), data_dir: dataDir, install_root: realpathSync(installation.installRoot),
+  const record = { schema_version: dataProtection === 'scoped' ? 4 : 2, id: randomUUID(), data_dir: dataDir, install_root: realpathSync(installation.installRoot),
     source_version: installation.version, target_version: release.version,
     legacy_source: { scope: 'user', entry_fence_id: entryFenceId, fingerprint: installation.fingerprint },
-    target_core: { root: targetRoot, inventory_sha256: release.inventory_sha256 }, phase: 'preparing', backup: null }
+    target_core: { root: targetRoot, inventory_sha256: release.inventory_sha256 }, phase: 'preparing', backup: null,
+    ...(dataProtection ? { data_protection: dataProtection } : {}) }
   if ((await legacyUserSource(record)).phase !== 'fenced') fail()
   write(dataDir, record, true); return record
 }
@@ -221,16 +223,22 @@ export async function cancelPreparedLegacySystemVersionMaintenance(options) {
   return { preparation_cancelled: true, service_started: false }
 }
 
+async function legacyPythonProtection(dataDir, record) {
+  if (hasScopedProtection(record)) return protectionOf(dataDir, record)
+  const release = await verifyCoreRelease(record.target_core.root, { version: record.target_version })
+  if (release.inventory_sha256 !== record.target_core.inventory_sha256) fail()
+  await backupOf(dataDir, record)
+}
+
 // Persist only a prepared environment reference while the old default is still
 // untouched. This grants neither deployment authority nor permission to start.
 export async function bindLegacyPythonMaintenance({ dataDir, id, prepared, inspectEnvironment = inspectLegacyPythonEnvironment }) {
   dataDir = locked(management.requireExistingDataRoot(dataDir))
   const record = readVersionMaintenance(dataDir)
-  if (record?.schema_version !== 2 || record.id !== id || record.phase !== 'backed_up'
+  if (![2, 4].includes(record?.schema_version) || record.id !== id || record.phase !== (hasScopedProtection(record) ? 'prepared' : 'backed_up')
     || inspectInstance(dataDir).state !== 'stopped' || pythonSelection.readAgentEnvironmentReference(dataDir)) fail()
-  const root = record.target_core.root, release = await verifyCoreRelease(root, { version: record.target_version })
-  if (release.inventory_sha256 !== record.target_core.inventory_sha256) fail()
-  await backupOf(dataDir, record)
+  const root = record.target_core.root
+  await legacyPythonProtection(dataDir, record)
   const observed = await inspectEnvironment({ root, dataDir })
   let value
   if (observed.status === 'absent' && prepared === undefined) value = { status: 'absent' }
@@ -249,11 +257,10 @@ export async function bindLegacyPythonMaintenance({ dataDir, id, prepared, inspe
 export async function selectLegacyPythonMaintenance({ dataDir, id, inspectEnvironment = inspectLegacyPythonEnvironment, selectPrepared = selectLegacyPythonRebuild }) {
   dataDir = locked(management.requireExistingDataRoot(dataDir))
   const record = readVersionMaintenance(dataDir)
-  if (record?.schema_version !== 2 || record.id !== id || record.phase !== 'installing' || !record.legacy_python
+  if (![2, 4].includes(record?.schema_version) || record.id !== id || record.phase !== 'installing' || !record.legacy_python
     || inspectInstance(dataDir).state !== 'stopped') fail()
-  const root = record.target_core.root, release = await verifyCoreRelease(root, { version: record.target_version })
-  if (release.inventory_sha256 !== record.target_core.inventory_sha256) fail()
-  await backupOf(dataDir, record)
+  const root = record.target_core.root
+  await legacyPythonProtection(dataDir, record)
   if (record.legacy_python.status === 'absent') {
     if ((await inspectEnvironment({ root, dataDir })).status !== 'absent' || pythonSelection.readAgentEnvironmentReference(dataDir)) fail()
     return { selected: false, environment_created: false }
@@ -286,17 +293,22 @@ export async function bindVersionMaintenanceTarget(dataDir, id, root) {
 export async function prepareScopedVersionMaintenance(dataDir, id) {
   dataDir = locked(dataDir)
   const record = readVersionMaintenance(dataDir)
-  if (record?.schema_version !== 3 || record.id !== id || record.phase !== 'preparing' || !record.target_core
+  if (!hasScopedProtection(record) || record.id !== id || record.phase !== 'preparing' || !record.target_core
     || inspectInstance(dataDir).state !== 'stopped') fail()
   await protectionOf(dataDir, record)
   record.phase = 'prepared'; write(dataDir, record); return record
 }
 async function protectionOf(dataDir, record) {
-  if (record.schema_version !== 3) return backupOf(dataDir, record)
+  if (!hasScopedProtection(record)) return backupOf(dataDir, record)
   if (!record.target_core || inspectInstance(dataDir).state !== 'stopped') fail()
   const release = await verifyCoreRelease(record.target_core.root, { version: record.target_version })
   if (release.inventory_sha256 !== record.target_core.inventory_sha256) fail()
+  if (record.schema_version === 4) {
+    const source = await legacyUserSource(record)
+    if (['installing', 'verifying'].includes(record.phase) && source.phase !== 'data_changing') fail()
+  }
   await previewMigrations(record.target_core.root, dataDir)
+  if (record.schema_version === 4) await legacyUserSource(record)
 }
 async function backupOf(dataDir, record) {
   if (!record.backup) fail()
@@ -307,7 +319,7 @@ async function backupOf(dataDir, record) {
 export async function recordVersionMaintenanceBackup(dataDir, id, backup) {
   dataDir = locked(dataDir)
   const record = readVersionMaintenance(dataDir)
-  if (record?.schema_version === 3 || record?.id !== id || record.phase !== 'preparing' || !uuid(backup.id) || !/^[a-f0-9]{64}$/.test(backup.sha256)) fail()
+  if (hasScopedProtection(record) || record?.id !== id || record.phase !== 'preparing' || !uuid(backup.id) || !/^[a-f0-9]{64}$/.test(backup.sha256)) fail()
   record.backup = { id: backup.id, sha256: backup.sha256 }
   await backupOf(dataDir, record)
   record.phase = 'backed_up'; write(dataDir, record)
@@ -315,9 +327,9 @@ export async function recordVersionMaintenanceBackup(dataDir, id, backup) {
 export async function markVersionMaintenanceInstalling(dataDir, id) {
   dataDir = locked(dataDir)
   const record = readVersionMaintenance(dataDir)
-  if (record?.id !== id || record.phase !== (record.schema_version === 3 ? 'prepared' : 'backed_up')) fail()
+  if (record?.id !== id || record.phase !== (hasScopedProtection(record) ? 'prepared' : 'backed_up')) fail()
   await protectionOf(dataDir, record)
-  if (record.schema_version === 2) {
+  if ([2, 4].includes(record.schema_version)) {
     const source = await legacyUserSource(record)
     if (source.phase === 'fenced') await sealLegacyEntryFence(record.install_root, source.id)
     if ((await legacyUserSource(record)).phase !== 'data_changing') fail()
@@ -376,7 +388,7 @@ export async function migrateStoppedVersionMaintenance({ dataDir, root, id, migr
   const verify = async () => {
     locked(dataDir)
     if (inspectInstance(dataDir).state !== 'stopped') fail()
-    if (record.schema_version === 3) return protectionOf(dataDir, record)
+    if (hasScopedProtection(record)) return protectionOf(dataDir, record)
     const release = await verifyCoreRelease(root, { version: record.target_version })
     if (release.inventory_sha256 !== record.target_core.inventory_sha256) fail()
     await backupOf(dataDir, record)
@@ -394,6 +406,8 @@ export async function migrateStoppedVersionMaintenance({ dataDir, root, id, migr
 
 // Existing offline callers finish here and keep their original stopped state.
 export async function completeStoppedVersionMaintenance(options) {
+  // Fresh legacy takeover still owns paired selection and actual GUI/Core health.
+  if (readVersionMaintenance(locked(options.dataDir))?.schema_version === 4) fail()
   await migrateStoppedVersionMaintenance(options)
   const dataDir = locked(options.dataDir), record = readVersionMaintenance(dataDir)
   if (record?.id !== options.id || record.phase !== 'verifying') fail()
@@ -432,9 +446,11 @@ export async function cancelPreparedVersionMaintenance({ dataDir, root, id, veri
 export async function cancelPreparedLegacyUserVersionMaintenance({ dataDir, id }) {
   dataDir = locked(dataDir)
   const record = readVersionMaintenance(dataDir)
-  if (record?.schema_version !== 2 || record.id !== id || !['preparing', 'backed_up'].includes(record.phase)) fail()
+  if (![2, 4].includes(record?.schema_version) || record.id !== id
+    || !['preparing', hasScopedProtection(record) ? 'prepared' : 'backed_up'].includes(record.phase)) fail()
   if ((await legacyUserSource(record)).phase !== 'fenced') fail()
-  if (record.backup) await backupOf(dataDir, record)
+  if (hasScopedProtection(record)) await assertNoInterruptedMigrations(dataDir)
+  else if (record.backup) await backupOf(dataDir, record)
   if ((await legacyUserSource(record)).phase !== 'fenced') fail()
   const current = readVersionMaintenance(dataDir)
   if (current?.id !== id || current.phase !== record.phase) fail()
