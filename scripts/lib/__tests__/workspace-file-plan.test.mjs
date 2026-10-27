@@ -18,7 +18,7 @@ import { createWorkspaceFileToolJournal, serveWorkspaceFileToolJournal } from '.
 
 const fixtureLifetimeMs = process.platform === 'win32' ? 120000 : 30000
 
-async function fixture(t, { exitEvidence = true, crossVolume = false } = {}) {
+async function fixture(t, { exitEvidence = true, exitRecord = true, crossVolume = false } = {}) {
   const root = fs.realpathSync.native(fs.mkdtempSync(path.join(tmpdir(), 'workspace-file-plan-中文 space-')))
   const data = management.ensurePrivateDataRoot(path.join(root, 'data')), id = randomUUID()
   const catalog = new WorkspaceCatalog({ dataRoot: data, files: native }); await catalog.initialize()
@@ -47,7 +47,7 @@ async function fixture(t, { exitEvidence = true, crossVolume = false } = {}) {
     if(${exitEvidence}){records.prepareWorkspaceRelocationProcessStops(args);records.observeWorkspaceRelocationProcesses({...args,processes:[]});
       records.prepareWorkspaceRelocationStops({...args,workers:[]});records.completeWorkspaceRelocationStops({...args,results:[]});
       records.prepareWorkspaceRelocationModuleStops({...args,modules:[]});records.completeWorkspaceRelocationModuleStops({...args,results:[]});
-      records.completeWorkspaceRelocationProcessStops(args);records.commitWorkspaceRelocationExecutionExit(args)}
+      records.completeWorkspaceRelocationProcessStops(args);if(${exitRecord})records.commitWorkspaceRelocationExecutionExit(args)}
     let host,hostIdentity,hostEnded,tools;
     async function ensureHost(){if(host)return;host=spawn(process.execPath,['--input-type=module','-e',${JSON.stringify(hostCode)}],{cwd:${JSON.stringify(source)},stdio:['ignore','ignore','ignore','ipc']});hostEnded=once(host,'exit');await once(host,'message');hostIdentity=native.inspectProcess(host.pid);process.send({kind:'fixture-actor',identity:hostIdentity})}
     process.send({kind:'fixture-ready'});process.on('message',async message=>{if(message.kind!=='command')return;
@@ -681,6 +681,32 @@ for (const mode of ['source unchanged', 'source in staging', 'partial cross-volu
     else assert.deepEqual(fs.readdirSync(f.staging), [])
   } finally {
     if (role) { const exited = once(role.child, 'exit'); role.close(); await exited }
+    releaseCliLock(lock)
+  }
+})
+
+for (const settled of [false, true]) test('fresh recovery observes settled original stops without inventing the old execution receipt: ' + settled, { timeout: 60000 }, async t => {
+  const f = await fixture(t, { exitEvidence: settled, exitRecord: false })
+  f.child.disconnect(); await f.exited
+  const checkpoint = records.readWorkspaceInterruptedRelocationCheckpoint(f.data, f.id)
+  assert.equal(checkpoint.execution_exit, null)
+  const lock = await acquireWorkspaceRelocationLock(f.data, f.id), recoveryId = randomUUID()
+  const role = await (await import('../workspace-interrupted-launch.mjs')).launchWorkspaceInterruptedRecoveryCoordinator({ dataDir: f.data,
+    request: { intent_id: f.id, recovery_id: recoveryId, checkpoint_sha256: checkpoint.checkpoint_sha256 }, verify: async () => {}, releaseParentLock: () => releaseCliLock(lock) })
+  try {
+    if (settled) {
+      assert.equal((await role.restoreSource()).source_restored, true)
+      const exit = JSON.parse(fs.readFileSync(path.join(role.launch.control_root.path, 'execution-exit.json')))
+      assert.equal(exit.schema_version, 2); assert.equal(exit.recovery_id, recoveryId)
+      assert.equal(exit.checkpoint_sha256, checkpoint.checkpoint_sha256)
+    } else await assert.rejects(role.restoreSource())
+    assert.equal(records.readWorkspaceInterruptedRelocationCheckpoint(f.data, f.id).execution_exit, null)
+    assert.equal(records.readWorkspaceInterruptedRelocationCheckpoint(f.data, f.id).checkpoint_sha256, checkpoint.checkpoint_sha256)
+    assert.equal(fs.readFileSync(path.join(f.source, 'default/file'), 'utf8'), 'original bytes')
+    assert.deepEqual(await f.catalog.snapshot(), f.before)
+    assert.equal((await import('../workspace-maintenance.cjs')).default.workspaceMaintenancePending(f.data), true)
+  } finally {
+    if (role.child.exitCode === null && role.child.signalCode === null) { const ended = once(role.child, 'exit'); role.close(); await ended }
     releaseCliLock(lock)
   }
 })

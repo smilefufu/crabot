@@ -16,41 +16,67 @@ import { relocationAgentConfig } from '../../crabot-agent/tests/core/fixtures/re
 afterEach(() => vi.restoreAllMocks())
 
 describe('current interrupted source recovery admission', () => {
-  const modes = ['healthy', 'health failure then explicit retry',
+  const modes = ['healthy', 'health failure then explicit retry', 'cold Core after failed health', 'stopped before final exit summary',
     ...(process.env.GITHUB_ACTIONS === 'true' && process.env.CRABOT_WORKSPACE_BUSINESS_ONSTART_CI === '1' ? ['business onStart'] : [])]
   it.each(modes)('restores the actual moved source and exact finite services while keeping the same Admin online: %s', async mode => {
     const business = mode === 'business onStart'
     const f = await fixture({ actualAdmin: true, actualAgent: true, businessAgent: business, ...(business ? {} : { validationHealth: 'healthy' as const }), withMemory: true, memoryHealth: 'healthy', extraModule: 'running', processLifetimeMs: 180000 })
     const records = require('../../scripts/lib/workspace-relocation-intent.mjs'), native = require('../../scripts/lib/process-identity.cjs')
     const locks = require('../../scripts/lib/cli-lock.mjs'), lock = await locks.acquireWorkspaceRelocationLock(f.data, f.params.intent_id)
-    let old: ChildProcess | undefined, files: any
+    let old: ChildProcess | undefined, files: any, cold: any, coldHost: ReturnType<typeof http.createServer> | undefined
     try {
-      const intent = records.readWorkspaceRelocationIntent(f.data), source = intent.source.path, admin = f.manager.processes.get('admin-web')
+      const intent = records.readWorkspaceRelocationIntent(f.data), source = intent.source.path
+      let admin = f.manager.processes.get('admin-web')
       const catalog = new WorkspaceCatalog({ dataRoot: f.data, files: native }), before = await catalog.snapshot()
       if (business) f.manager.modules.get('crabot-agent').skip_health_check = false
       await fs.writeFile(path.join(source, 'default/preserved.txt'), 'original source bytes')
-      const prepared = await f.manager.prepareWorkspaceRelocationFiles(f.params, 'fixture-human')
+      const early = mode === 'stopped before final exit summary'
+      const prepared = early ? await f.manager.submitWorkspaceRelocationStops(f.params, 'fixture-human')
+        : await f.manager.prepareWorkspaceRelocationFiles(f.params, 'fixture-human')
       old = prepared.coordinator
-      files = require('../../scripts/lib/workspace-file-journal.mjs').createWorkspaceFileJournal(old, { dataDir: f.data, id: f.params.intent_id,
-        launch: records.readWorkspaceRelocationCoordinator(f.data, f.params.intent_id).launch })
-      await files.prepareStage(); await files.prepareFiles(); files.close()
-      await expect(fs.lstat(source)).rejects.toMatchObject({ code: 'ENOENT' })
-      const actors = records.readWorkspaceRelocationFileActors(f.data, f.params.intent_id), ended = once(old!, 'exit')
+      if (early) {
+        // Simulate the last receipt not reaching disk; all preceding original
+        // stop records and actual child exits remain those of the real driver.
+        await fs.unlink(path.join(f.data, 'workspace-control/relocation-active/relocation-execution-exit.json'))
+      } else {
+        files = require('../../scripts/lib/workspace-file-journal.mjs').createWorkspaceFileJournal(old, { dataDir: f.data, id: f.params.intent_id,
+          launch: records.readWorkspaceRelocationCoordinator(f.data, f.params.intent_id).launch })
+        await files.prepareStage(); await files.prepareFiles(); files.close()
+        await expect(fs.lstat(source)).rejects.toMatchObject({ code: 'ENOENT' })
+      }
+      const actors = early ? undefined : records.readWorkspaceRelocationFileActors(f.data, f.params.intent_id), ended = once(old!, 'exit')
       old!.disconnect(); await ended
-      await vi.waitFor(() => expect(require('../../scripts/lib/known-process-exit.cjs').probeKnownProcessExit([actors.host.process]).state).toBe('stopped'), { timeout: 5000 })
+      if (actors) await vi.waitFor(() => expect(require('../../scripts/lib/known-process-exit.cjs').probeKnownProcessExit([actors.host.process]).state).toBe('stopped'), { timeout: 5000 })
       const checkpoint = records.readWorkspaceInterruptedRelocationCheckpoint(f.data, f.params.intent_id)
       let context = await f.manager.initializeWorkspaceInterruptedService({ intent_id: f.params.intent_id, recovery_id: randomUUID(), checkpoint_sha256: checkpoint.checkpoint_sha256 }, 'fixture-human')
       const unhealthy = path.join(f.data, 'validation-health-unhealthy')
-      if (mode === 'health failure then explicit retry') await fs.writeFile(unhealthy, 'finite health rejection')
+      const retry = mode === 'health failure then explicit retry' || mode === 'cold Core after failed health'
+      if (retry) await fs.writeFile(unhealthy, 'finite health rejection')
       const first = f.manager.completeWorkspaceInterruptedSource(context)
       expect(f.manager.completeWorkspaceInterruptedSource(context)).toBe(first)
-      if (mode === 'health failure then explicit retry') {
+      if (retry) {
         await expect(first).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE', stage: 'verify-core-health' })
         expect(context.phase).toBe('needs_attention')
         expect(require('../../scripts/lib/workspace-maintenance.cjs').workspaceMaintenancePending(f.data)).toBe(true)
         expect(await fs.readFile(path.join(source, 'default/preserved.txt'), 'utf8')).toBe('original source bytes')
         expect(f.manager.processes.get('admin-web')).toBe(admin)
         await vi.waitFor(() => expect(require('../../scripts/lib/known-process-exit.cjs').probeKnownProcessExit([context.coordinator.launch.process]).state).toBe('stopped'), { timeout: 5000 })
+        if (mode === 'cold Core after failed health') {
+          const definitions = [...f.manager.modules].map(([id, runtime]: [string, any]) => [id, { ...runtime, status: 'stopped', pid: undefined }])
+          await f.manager.stop()
+          cold = new ModuleManager({ port: 0, modules: [], shutdown_timeout: 0.1 }, f.data) as any
+          cold.managementOnly = false
+          coldHost = http.createServer((req, res) => { void cold.handleRequest(req, res) })
+          await new Promise<void>(resolve => coldHost!.listen(0, '127.0.0.1', resolve))
+          cold.config.port = (coldHost.address() as { port: number }).port
+          for (const [id, runtime] of definitions) cold.modules.set(id, runtime)
+          await cold.portAllocator.initialize()
+          await cold.startModuleProcess('admin-web')
+          f.manager = cold
+          expect(cold.processes.get('admin-web')).not.toBe(admin)
+          admin = cold.processes.get('admin-web')
+          await vi.waitFor(async () => expect((await fetch(`http://127.0.0.1:${f.port}/api/friends`, { headers: { Authorization: 'Bearer fixture-human' } })).status).toBe(200), { timeout: 10000 })
+        }
         await fs.unlink(unhealthy)
         context = await f.manager.initializeWorkspaceInterruptedService({ intent_id: f.params.intent_id, recovery_id: randomUUID(), checkpoint_sha256: checkpoint.checkpoint_sha256 }, 'fixture-human')
         expect((await f.manager.completeWorkspaceInterruptedSource(context)).resumed).toBe(true)
@@ -88,7 +114,11 @@ describe('current interrupted source recovery admission', () => {
       files?.close()
       if (old?.connected) { const ended = once(old, 'exit'); old.disconnect(); await ended }
       locks.releaseCliLock(lock)
-      await f.cleanup()
+      try { if (cold) await cold.stop() }
+      finally {
+        if (coldHost) { coldHost.closeAllConnections(); await new Promise<void>(resolve => coldHost!.close(() => resolve())) }
+        await f.cleanup()
+      }
     }
   }, process.platform === 'win32' ? 180000 : 60000)
 

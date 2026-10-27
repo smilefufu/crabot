@@ -1691,7 +1691,8 @@ export class ModuleManager {
     const active = records.readWorkspaceRelocationIntent(this.dataDir)
     const checkpoint = active ? records.readWorkspaceInterruptedRelocationCheckpoint(this.dataDir, current.request.intent_id)
       : sources.readPendingWorkspaceSourceRestoration(this.dataDir, current.request.intent_id).checkpoint
-    if (!checkpoint.execution_exit) throw failure()
+    if (!checkpoint.execution_exit && !require('../../scripts/lib/workspace-interrupted-source-restore.mjs').readWorkspaceInterruptedExecutionExit({ dataDir: this.dataDir,
+      recoveryId: current.request.recovery_id, checkpoint })) throw failure()
     const archived = fs.existsSync(sources.workspaceSourceRestorationPaths(this.dataDir, current.request.intent_id).original)
     const history = archived ? runtimeRecords.readWorkspaceInterruptedRuntimeHistory(this.dataDir, current.request.intent_id) : []
     const scopes: WorkspaceModuleScope[] = checkpoint.modules.modules
@@ -1760,8 +1761,8 @@ export class ModuleManager {
       if (Date.now() > deadline || runtime.status === 'error' || runtime.status === 'stopped') throw Object.assign(new Error('恢复模块尚未健康，未重复启动。'), { code: 'SERVICE_UNAVAILABLE' })
       await new Promise(resolve => setTimeout(resolve, 100))
     }
-    current.pendingModule = undefined
     await current.verify()
+    current.pendingModule = undefined
   }
 
   private async verifyWorkspaceInterruptedHealth(current: WorkspaceInterruptedServiceContext): Promise<void> {
@@ -1798,6 +1799,11 @@ export class ModuleManager {
     current.completion = Promise.resolve().then(async () => {
       let stage = 'cleanup-runtimes'
       try {
+        const records = require('../../scripts/lib/workspace-relocation-intent.mjs')
+        if (records.readWorkspaceRelocationIntent(this.dataDir) && !records.readWorkspaceInterruptedRelocationCheckpoint(this.dataDir, current.request.intent_id).execution_exit) {
+          stage = 'verify-original-stops'; await current.coordinator.restoreSource()
+        }
+        stage = 'cleanup-runtimes'
         await this.cleanupWorkspaceInterruptedRuntimes(current)
         stage = 'restore-source'; await current.coordinator.restoreSource()
         stage = 'archive-source'; await current.coordinator.archiveSource()
