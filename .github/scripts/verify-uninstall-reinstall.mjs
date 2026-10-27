@@ -40,7 +40,6 @@ if (linux) {
 for (const name of ['ELECTRON_RUN_AS_NODE', 'NODE_OPTIONS', 'NODE_PATH', 'CRABOT_DEV', 'CRABOT_PORT_OFFSET', 'WORKER_WORKSPACES_DIR']) delete env[name]
 const started = performance.now(), children = []
 let selected, host, registrationExecutable, targetPrepared, report, success = false, sourceOutput = ''
-let previousKeychain, testKeychain
 const stage = name => console.log('CRABOT_UNINSTALL_REINSTALL_STAGE ' + JSON.stringify({ stage: name, elapsed_ms: Math.round(performance.now() - started) }))
 async function read(name) { try { return JSON.parse(await fs.readFile(path.join(control, name + '.json'), 'utf8')) } catch (error) { if (error.code === 'ENOENT') return null; throw error } }
 async function wait(name, check, timeout = 180000) {
@@ -92,22 +91,6 @@ async function register(prepared, action) {
 }
 const shortcut = process.platform === 'darwin' ? path.join(home, 'Applications/Crabot.app') : linux ? path.join(env.XDG_DATA_HOME, 'applications/crabot.desktop') : path.join(env.APPDATA, 'Microsoft/Windows/Start Menu/Programs/Crabot.lnk')
 try {
-  if (process.platform === 'darwin') {
-    // The isolated runner has no unlocked login session. Its blocked Security
-    // authorization UI otherwise keeps Chromium alive after the ordinary quit.
-    // Security preferences must use the same isolated HOME as the GUI.
-    const security = args => promisify(execFile)('/usr/bin/security', args, { env, timeout: 10000, maxBuffer: 4096 })
-    try { previousKeychain = (await security(['default-keychain', '-d', 'user'])).stdout.trim().replace(/^"|"$/g, '') }
-    catch { previousKeychain = undefined }
-    testKeychain = path.join(control, 'acceptance.keychain-db')
-    const password = randomBytes(32).toString('hex')
-    try {
-      await security(['create-keychain', '-p', password, testKeychain])
-      await security(['set-keychain-settings', '-lut', '21600', testKeychain])
-      await security(['unlock-keychain', '-p', password, testKeychain])
-      await security(['default-keychain', '-d', 'user', '-s', testKeychain])
-    } catch { throw new Error('Cannot prepare an unlocked isolated CI keychain') }
-  }
   stage('building-confirmation-driver')
   const sourcePayload = await buildDesktopComponentSource({ repository, project, destination: job, entryFixture: 'uninstall-main-driver.cjs', ...(linux ? { ubuntuRemovalControl: control } : {}) })
   registrationExecutable = path.join(sourcePayload, process.platform === 'darwin' ? 'gui/Crabot.app/Contents/MacOS/Crabot' : 'gui/Crabot.exe')
@@ -167,7 +150,8 @@ try {
   report = { platform: process.platform, arch: process.arch, ordinary_main_loaded: true, native_dialog_input_substituted: true, actual_core_started: true,
     complete_uninstall_lifecycle_tested: true, actual_gtk_display: linux, gtk_buttons_automated: linux, polkit_transport_substituted: linux, graphical_polkit_tested: false, original_gui_and_core_removed: true, original_os_entries_removed: true, private_gui_copy_removed: true,
     retained_data_and_workspace_verified: true, ordinary_target_real_health: true, same_instance_new_generation: true, restored_os_entries: true,
-    registered_native_cli_compatible: true, bundled_node_python_files_verified: true, agent_model_generation_tested: false, real_login_session_verified: false }
+    registered_native_cli_compatible: true, bundled_node_python_files_verified: true, agent_model_generation_tested: false, real_login_session_verified: false,
+    cookie_keychain_substituted: process.platform === 'darwin', real_keychain_verified: false }
   success = true
 } finally {
   if (!success && process.platform === 'darwin' && children[0]?.identity && identity.sameProcess(children[0].identity, identity.inspectProcess(children[0].identity.pid))) {
@@ -179,10 +163,6 @@ try {
     if (host?.identity && identity.sameProcess(host.identity, identity.inspectProcess(host.identity.pid))) process.kill(host.identity.pid, 'SIGKILL')
     for (const record of children) if (record.identity && identity.sameProcess(record.identity, identity.inspectProcess(record.identity.pid))) process.kill(record.identity.pid, 'SIGKILL')
     await Promise.allSettled(children.map(record => record.exited))
-    if (testKeychain) {
-      if (previousKeychain) await promisify(execFile)('/usr/bin/security', ['default-keychain', '-d', 'user', '-s', previousKeychain], { env, timeout: 10000, maxBuffer: 4096 })
-      await promisify(execFile)('/usr/bin/security', ['delete-keychain', testKeychain], { env, timeout: 10000, maxBuffer: 4096 })
-    }
     await fs.mkdir(path.join(repository, '.desktop-build'), { recursive: true }); await fs.writeFile(path.join(repository, '.desktop-build/uninstall-reinstall.log'), sourceOutput)
     if (!success) await fs.writeFile(path.join(repository, '.desktop-build/uninstall-reinstall-diagnostic.json'), JSON.stringify({
       driver: await read('driver-failed'), host: await read('maintenance-started'),

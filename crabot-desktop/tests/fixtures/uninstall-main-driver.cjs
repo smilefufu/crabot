@@ -4,6 +4,9 @@ const fs = require('node:fs')
 const path = require('node:path')
 const { app, dialog, Menu, shell } = require('electron')
 if (process.env.GITHUB_ACTIONS !== 'true') throw new Error('Isolated CI only')
+// Electron's own CI uses this for unsigned apps without a login keychain:
+// https://github.com/electron/electron/pull/53790 . No product argument is changed.
+if (process.platform === 'darwin') app.commandLine.appendSwitch('use-mock-keychain')
 const config = JSON.parse(fs.readFileSync(process.env.CRABOT_UNINSTALL_MAIN_DRIVER, 'utf8'))
 const event = (name, fields = {}) => {
   const file = path.join(config.control, name + '.json'), temporary = file + '.tmp-' + process.pid
