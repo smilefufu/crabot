@@ -33,6 +33,7 @@
 
 ### 语音：wire9已部署，按优先级收口验收
 
+- 2026-10-27针对性真人复测仍未通过：首轮FuFu匹配/接纳，回答开始控制后97ms被取消，真实回执interrupted/0样本，没有第二轮接纳。当前本机TTS原音色缺失，固定短句和本轮首句均复现HTTP200后断流；按原固定revision/SHA恢复522320字节资源后，两句212/246ms返回有效WAV，未重启Crabot/ADB或改配置。不能据此归并10月25日未知异常或宣布续聊通过。当前800ms静音收尾及播放关麦/仅按钮打断不满足用户本次自然停顿/语音打断预期，需明确最小交互修订与AEC验收；暂不再重复真人测试。真实模型本轮首chunk22.363秒（50877输入tokens），首声目标仍未达成。详情沿[诊断记录](https://github.com/smilefufu/crabot-voice-android/blob/main/docs/verification/2026-10-25-standby-second-input-diagnosis.md)更新。
 - 2026-10-25待机真人验收未通过：用户第二次输入后自动关麦；首轮接纳并完整播放，随后43200样本采音后无新识别/接纳，后续两段是旧请求的积压结果，不能算第二轮成功。原三轮批次已停止。0.8.2/code19只补本机异常及生命周期诊断，保留配对/声音、阈值和原规则；30项JVM及8控制器/4原生公开音频对照通过，2.7秒连续重置对照未复现现场故障。已安装同签名APK并核对密文不变，测试/记录推安卓main 7e3d068；只安排一次针对性两轮抓原始错误，不重做整套。见[诊断记录](https://github.com/smilefufu/crabot-voice-android/blob/main/docs/verification/2026-10-25-standby-second-input-diagnosis.md)。
 - Android 0.8.1/code18 已保留数据升级并直推 main（4d11bef）：恢复原“一次开启、多轮待机”，修复接话到期重复开麦及通知跨过接话期限后退出待机两条路径；旧实现两项回归失败，修复后30项JVM、4项隔离控制器及1项方向检查通过。首页/分组设置/既有FuFu记录已真机核对；安装与测试阶段即时密文摘要一致，正常重连的目录同步仍按原逻辑重加密。真人连续唤醒/接话验收待补，声纹规则和后台部署不变；[验证记录](https://github.com/smilefufu/crabot-voice-android/blob/main/docs/verification/2026-10-24-persistent-standby-and-home.md)。
 - 用户已确认后端/安卓配套设计及一处提示词文字；正式 Voice v0.9.0/wire9 先行发布。不增加通用 SSML 或新模型配置，普通 voice_reply 按需完整回答，宿主自动断句、单个 TTS 请求加一个预取，按实际播放游标保持最多一秒在途音频。
