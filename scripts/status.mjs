@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url'
 import { homedir } from 'node:os'
 import { hasInstance, readInstance, resolveCliDataDir } from './lib/instance.mjs'
 import { probeMmModules } from './lib/mm-probe.mjs'
+import { inspectInstance } from './lib/instance-runtime.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const ROOT = resolve(__dirname, '..')
@@ -35,14 +36,29 @@ const ENDPOINTS = {
   admin_rpc: { url: `http://localhost:${19001 + OFFSET}`, label: 'Admin RPC' },
 }
 
-// 单点判定：MM 活 = 整个实例活；admin_ui/admin_rpc 的死活从 modules 里找 admin-web 推断
-const modules = await probeMmModules(19000 + OFFSET)
-const running = modules !== null
+// 受管实例以真实运行身份判定；模块 RPC 可达性单独报告，不能把暂时不可达当成停机。
+let modules = null, running = false
+try {
+  const instance = inspectInstance(DATA_DIR)
+  if (instance.state === 'legacy') {
+    // Read-only compatibility; this is not an ownership proof and cannot authorize takeover/stop.
+    modules = await probeMmModules(19000 + OFFSET)
+    running = modules !== null
+  } else if (instance.state === 'running' && instance.record.mm) {
+    ENDPOINTS.mm.url = `http://localhost:${instance.record.mm_port}`
+    const snapshot = await probeMmModules(instance.record.mm_port)
+    const latest = inspectInstance(DATA_DIR)
+    if (latest.state === 'running' && latest.record.generation === instance.record.generation) {
+      running = true; modules = snapshot
+    }
+  }
+} catch (error) { console.error(`[crabot] Cannot verify instance identity: ${error.message}`) }
 const adminModule = modules?.find((m) => (m.module_id ?? m.id) === 'admin-web')
 const adminAlive = adminModule?.status === 'running'
+if (typeof adminModule?.port === 'number') ENDPOINTS.admin_rpc.url = `http://localhost:${adminModule.port}`
 
 const health = {
-  mm: running,
+  mm: modules !== null,
   admin_ui: adminAlive,
   admin_rpc: adminAlive, // admin-web 进程同时暴露 web (3000+OFF) 和 RPC (19001+OFF)
 }
@@ -94,8 +110,8 @@ if (running && modules) {
     console.log(`  ${(m.id ?? m.module_id ?? '?').padEnd(17)} ${status.padEnd(10)} ${pidStr}`)
   }
   console.log()
-} else if (!running) {
-  console.log('  ' + c.dim('Modules: instance not running'))
+} else {
+  console.log('  ' + c.dim(running ? 'Modules: instance is running; module status is temporarily unavailable' : 'Modules: instance not running'))
   console.log()
 }
 if (hasLogs) {
