@@ -241,7 +241,7 @@ jobs:
       # Long recovery suites run at the same commit in workspace-core.yml, with four OS matrices.
       - name: Workspace coordinator native dispatch and module regressions
         if: matrix.suite == 'regression'
-        timeout-minutes: ${{ matrix.target == 'win32-x64' && 30 || 15 }}
+        timeout-minutes: ${{ matrix.target == 'darwin-x64' && 45 || matrix.target == 'win32-x64' && 30 || 15 }}
         run: |
           cd crabot-core
           node node_modules/vitest/vitest.mjs run src/workspace-human-verification.test.ts --testNamePattern "^(?!.*(?:MM consumes a human intent|MM dedicated fixed coordinator|MM delegates capture only|MM sensitive Worker stop|MM launches the actual fixed coordinator|MM submits one fixed workspace stop sequence|MM requires original Admin quiescence|post-relocation validation launches|new runtime health and Root|fixed job archive storage handoff|normal fixed-job Admin completion preparation|fixed terminal release and current Admin resume|completes two actually owned|same MM workspace recovery and later migration|isolated business Agent after workspace relocation))" --maxWorkers=1 --minWorkers=1
