@@ -117,6 +117,25 @@ export async function launchWorkspaceInterruptedRecoveryCoordinator(options) {
       return release
     }
     await verify()
-    return Object.freeze({ child, launch, ready, verify, restoreSource, archiveSource, prepareSourceBusiness, releaseSource, close })
+    let closures
+    const finishClosures = () => {
+      if (closures) return closures
+      closures = verification.then(async () => {
+        const message = { kind: 'workspace_interrupted_finish_closures', recovery_id: request.recovery_id, launch_sha256: hash(launch), ready_sha256: hash(ready), nonce: randomUUID() }
+        let result
+        await exchange(message, reply => {
+          if (!exact(reply, ['kind', 'recovery_id', 'launch_sha256', 'ready_sha256', 'nonce', 'result']) || reply.kind !== 'workspace_interrupted_closures_finished'
+            || ['recovery_id', 'launch_sha256', 'ready_sha256', 'nonce'].some(key => reply[key] !== message[key])
+            || !exact(reply.result, ['dispatch', 'closed_ledgers', 'commit_sha256']) || !['dispatch', 'observe'].includes(reply.result.dispatch)
+            || !Number.isSafeInteger(reply.result.closed_ledgers) || reply.result.closed_ledgers < 0
+            || reply.result.commit_sha256 !== hash(readWorkspaceInterruptedRelocationCheckpoint(options.dataDir, request.intent_id).closure_commit)) return false
+          result = Object.freeze({ ...reply.result }); return true
+        }, 240000)
+        return result
+      }).catch(cause => { close(); throw Object.assign(failure(), { cause }) })
+      verification = closures
+      return closures
+    }
+    return Object.freeze({ child, launch, ready, verify, restoreSource, archiveSource, prepareSourceBusiness, releaseSource, finishClosures, close })
   } catch (cause) { close(); throw Object.assign(failure(), { cause }) }
 }

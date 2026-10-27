@@ -18,17 +18,23 @@ import { createWorkspaceFileToolJournal, serveWorkspaceFileToolJournal } from '.
 
 const fixtureLifetimeMs = process.platform === 'win32' ? 120000 : 30000
 
-async function fixture(t, { exitEvidence = true, exitRecord = true, crossVolume = false } = {}) {
+async function fixture(t, { exitEvidence = true, exitRecord = true, crossVolume = false, withWorker = false } = {}) {
   const root = fs.realpathSync.native(fs.mkdtempSync(path.join(tmpdir(), 'workspace-file-plan-中文 space-')))
   const data = management.ensurePrivateDataRoot(path.join(root, 'data')), id = randomUUID()
   const catalog = new WorkspaceCatalog({ dataRoot: data, files: native }); await catalog.initialize()
   const targetRoot = crossVolume ? fs.mkdtempSync('/dev/shm/crabot-file-tools-') : root
   const before = await catalog.snapshot(), source = before.storage_root, target = path.join(targetRoot, 'new')
+  const ledger = path.join(data, 'agent/worker-ledgers/channel%3A%3Aoriginal.json')
+  const worker = { worker_id: 'original-worker', manager_key: 'channel::original', task: { id: 'original-task', title: 'preserve original goal', status: 'halted',
+    created_at: '2026-10-27T00:00:00.000Z', halt: { halted_at: '2026-10-27T00:00:00.000Z', halt_reason: 'turn_end' } },
+    origin: { trigger_type: 'scheduled' }, report_to: { channel_id: 'channel', session_id: 'original' }, incarnations: [], updated_at: '2026-10-27T00:00:00.000Z' }
+  const workers = withWorker ? (await import('../../../crabot-agent/dist/workers/harness/workspace-relocation-scope.js')).captureWorkspaceRelocationWorkers([{ managerKey: worker.manager_key, worker }]) : []
+  if (withWorker) { fs.mkdirSync(path.dirname(ledger), { recursive: true }); fs.writeFileSync(ledger, JSON.stringify({ manager_key: worker.manager_key, workers: [worker] }), { mode: 0o600 }) }
   fs.writeFileSync(path.join(source, 'default/file'), 'original bytes')
   if (crossVolume) fs.writeFileSync(path.join(source, 'default/finite-archive.bin'), Buffer.alloc(1024 * 1024, 7))
   const lock = await acquireCliLock(data, 'workspace-relocation')
   await records.beginWorkspaceRelocationIntent({ dataDir: data, id, target, expectedRevision: before.revision, protectedRoots: [] })
-  records.commitWorkspaceRelocationWorkers({ dataDir: data, id, workers: [] })
+  records.commitWorkspaceRelocationWorkers({ dataDir: data, id, workers })
   records.commitWorkspaceRelocationProcesses({ dataDir: data, id, processes: [] })
   records.commitWorkspaceRelocationModules({ dataDir: data, id, modules: [] })
   const entry = new URL('../workspace-coordinator-entry.mjs', import.meta.url).href
@@ -45,7 +51,7 @@ async function fixture(t, { exitEvidence = true, exitRecord = true, crossVolume 
   const code = `import fs from 'node:fs';import{spawn}from'node:child_process';import{once}from'node:events';import native from ${JSON.stringify(new URL('../process-identity.cjs', import.meta.url).href)};import{enterWorkspaceRelocationCoordinator}from ${JSON.stringify(entry)};import * as records from ${JSON.stringify(module)};
     const context=await enterWorkspaceRelocationCoordinator(), args={dataDir:context.dataDir,id:context.id};
     if(${exitEvidence}){records.prepareWorkspaceRelocationProcessStops(args);records.observeWorkspaceRelocationProcesses({...args,processes:[]});
-      records.prepareWorkspaceRelocationStops({...args,workers:[]});records.completeWorkspaceRelocationStops({...args,results:[]});
+      records.prepareWorkspaceRelocationStops({...args,workers:${JSON.stringify(workers)}});records.completeWorkspaceRelocationStops({...args,results:[]});
       records.prepareWorkspaceRelocationModuleStops({...args,modules:[]});records.completeWorkspaceRelocationModuleStops({...args,results:[]});
       records.completeWorkspaceRelocationProcessStops(args);if(${exitRecord})records.commitWorkspaceRelocationExecutionExit(args)}
     let host,hostIdentity,hostEnded,tools;
@@ -68,6 +74,7 @@ async function fixture(t, { exitEvidence = true, exitRecord = true, crossVolume 
         }
         else if(message.operation==='closure-prepare-fixture'){fs.mkdirSync(args.dataDir+'/agent/worker-ledgers',{recursive:true});const agent=await import(${JSON.stringify(new URL('../../../crabot-agent/dist/core/workspace-relocation-closure.js', import.meta.url).href)});result=await agent.prepareWorkspaceRelocationClosure(args)}
         else if(message.operation==='closure-commit-fixture'){const agent=await import(${JSON.stringify(new URL('../../../crabot-agent/dist/core/workspace-relocation-closure.js', import.meta.url).href)});result=await agent.commitWorkspaceRelocationClosure(args)}
+        else if(['closure-interrupt-prepared','closure-interrupt-replaced'].includes(message.operation)){const rename=fs.renameSync;fs.renameSync=(source,target)=>{if(target===${JSON.stringify(ledger)}){if(message.operation==='closure-interrupt-replaced')rename(source,target);throw Object.assign(new Error('finite closure interruption'),{code:'EIO'})}return rename(source,target)};try{const agent=await import(${JSON.stringify(new URL('../../../crabot-agent/dist/core/workspace-relocation-closure.js', import.meta.url).href)});result=await agent.commitWorkspaceRelocationClosure(args)}finally{fs.renameSync=rename}}
         else if(message.operation==='file-begin')result=await records.beginWorkspaceRelocationFiles(args);
         else if(message.operation==='file-ready')result=await records.commitWorkspaceRelocationFileReady(args);
         else if(message.operation==='file-move-fixture'){const intent=records.readWorkspaceRelocationIntent(args.dataDir),plan=records.readWorkspaceRelocationFilePlan(args.dataDir,args.id);native.renameDirectoryNoReplace(intent.source.path,plan.staging_path+'/tree');result=true}
@@ -620,6 +627,60 @@ for (const damage of ['none', 'changed moved bytes', 'new source', 'replaced tre
   assert.equal(fs.existsSync(f.target), false)
 })
 
+
+for (const boundary of ['prepared', 'replaced', 'closed', 'complete', 'changed original material', 'changed staged bytes', 'missing original receipt']) test('fresh forward role completes only the original Worker closure at ' + boundary, { timeout: 60000 }, async t => {
+  const f = await stageFixture(t, { withWorker: true })
+  await f.command('host-permit'); await f.command('stage-prepare'); await f.command('file-begin'); await f.command('host-stop')
+  assert.equal((await f.command('file-move-fixture')).error, undefined)
+  assert.equal((await f.command('file-ready')).error, undefined)
+  assert.equal((await f.command('closure-prepare-fixture')).error, undefined)
+  const damaged = boundary.includes(' ')
+  if (boundary === 'prepared' || boundary === 'replaced' || damaged) assert.ok((await f.command('closure-interrupt-' + (damaged ? 'prepared' : boundary))).error)
+  else {
+    assert.equal((await f.command('closure-commit-fixture')).error, undefined)
+    if (boundary === 'closed') fs.unlinkSync(path.join(f.data, 'workspace-control/relocation-active/relocation-worker-commits/complete.json'))
+  }
+  f.child.disconnect(); await f.exited
+  const checkpoint = records.readWorkspaceInterruptedRelocationCheckpoint(f.data, f.id)
+  assert.equal(checkpoint.action, 'finish_commit')
+  const locks = await import('../cli-lock.mjs'), recoveryId = randomUUID(), lock = await locks.acquireWorkspaceInterruptedRecoveryLock(f.data, f.id)
+  const role = await (await import('../workspace-interrupted-launch.mjs')).launchWorkspaceInterruptedRecoveryCoordinator({ dataDir: f.data,
+    request: { intent_id: f.id, recovery_id: recoveryId, checkpoint_sha256: checkpoint.checkpoint_sha256 }, verify: async () => {}, releaseParentLock: () => locks.releaseCliLock(lock) })
+  const roleExited = once(role.child, 'exit')
+  try {
+    if (damaged) {
+      const journal = path.join(f.data, 'workspace-control/relocation-active/relocation-worker-commits'), ledger = path.join(f.data, 'agent/worker-ledgers/channel%3A%3Aoriginal.json')
+      const before = fs.readFileSync(ledger)
+      if (boundary === 'missing original receipt') fs.unlinkSync(path.join(journal, '0.prepared.json'))
+      else if (boundary === 'changed staged bytes') fs.appendFileSync(path.join(f.staging, 'tree/default/file'), 'external change')
+      else {
+        const target = path.join(journal, 'header.json'), replacement = path.join(f.root, 'changed-header.json'), contents = fs.readFileSync(target)
+        if (process.platform === 'win32') native.writePrivateFile(replacement, contents.toString())
+        else fs.writeFileSync(replacement, contents, { mode: 0o600 })
+        fs.renameSync(replacement, target)
+      }
+      await assert.rejects(role.finishClosures())
+      assert.deepEqual(fs.readFileSync(ledger), before)
+      assert.equal(fs.existsSync(path.join(journal, 'complete.json')), false)
+      return
+    }
+    const first = role.finishClosures()
+    assert.equal(role.finishClosures(), first)
+    const result = await first
+    assert.equal(result.commit_sha256, sha256CanonicalJson(records.readWorkspaceRelocationClosureCommit(f.data, f.id)))
+    const body = JSON.parse(fs.readFileSync(path.join(f.data, 'agent/worker-ledgers/channel%3A%3Aoriginal.json')))
+    assert.equal(body.workers[0].task.status, 'closed')
+    assert.equal(body.workers[0].task.title, 'preserve original goal')
+    assert.deepEqual(body.workers[0].origin, { trigger_type: 'scheduled' })
+    assert.deepEqual(body.workers[0].report_to, { channel_id: 'channel', session_id: 'original' })
+    assert.deepEqual(body.workers[0].incarnations, [])
+    await role.verify()
+    for (const fact of checkpoint.materials) assert.deepEqual(records.readWorkspaceInterruptedRelocationCheckpoint(f.data, f.id).materials.find(item => item.name === fact.name), fact)
+    assert.deepEqual(await f.catalog.snapshot(), f.before)
+    assert.equal(fs.existsSync(f.source), false)
+    assert.equal(fs.readFileSync(path.join(f.staging, 'tree/default/file'), 'utf8'), 'original bytes')
+  } finally { role.close(); await roleExited }
+})
 
 test('interrupted checkpoint crosses closure commit before catalog selection and never classifies it as rollback', async t => {
   const f = await stageFixture(t)

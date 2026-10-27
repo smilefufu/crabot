@@ -18,7 +18,7 @@ interface ClosurePlan {
 }
 interface PreparedFact { temporary: string; version: string }
 
-/** Agent-only commit primitive. Its fixed caller supplies fresh original-coordinator authorization before every effect. */
+/** Agent-owned fixed-plan primitive. Its caller supplies current job authorization before every effect. */
 export async function commitWorkspaceRelocationLedgers({ snapshot, plan, prepared, verify }: {
   snapshot: WorkspaceRelocationLedgerSnapshot
   plan: ClosurePlan

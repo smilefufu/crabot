@@ -5,7 +5,7 @@ import native from './process-identity.cjs'
 import management from './desktop-management.cjs'
 import exits from './known-process-exit.cjs'
 import { cliLockToken } from './cli-lock.mjs'
-import { readPendingWorkspaceSourceRestoration, readWorkspaceSourceCompletionScope, readWorkspaceSourceRecoveryScope } from './workspace-interrupted-source-records.mjs'
+import { readPendingWorkspaceSourceRestoration, readWorkspaceSourceCompletionScope, readWorkspaceSourceRecoveryScope, assertWorkspaceInterruptedCheckpointSnapshot } from './workspace-interrupted-source-records.mjs'
 import { readWorkspaceInterruptedRelocationCheckpoint } from './workspace-relocation-intent.mjs'
 import { sha256CanonicalJson as hash } from '../../crabot-shared/dist/canonical-json.js'
 import { createWorkspaceMaintenanceFileAccess } from '../../crabot-agent/dist/core/workspace-maintenance-files.js'
@@ -59,7 +59,21 @@ export function readWorkspaceInterruptedRecoveryRole(dataDir, recoveryId) {
     || hash(frame(ctx.parent)) !== hash(parent) || hash(frame(ctx.directory)) !== hash(directory)) throw failure()
   return { launch, ready: ready ?? null }
 }
-function originalScope(ctx, request) {
+/** Only append the original closure journal; every pre-existing fact stays byte-identical. */
+function assertClosureProgress(original, current) {
+  assertWorkspaceInterruptedCheckpointSnapshot(original)
+  if (original.action !== 'finish_commit' || current.action !== 'finish_commit' || !original.closure_plan) throw failure()
+  const immutable = ({ checkpoint_sha256, materials, closure_commit, ...facts }) => facts
+  if (hash(immutable(original)) !== hash(immutable(current)) || original.closure_commit && hash(original.closure_commit) !== hash(current.closure_commit)) throw failure()
+  const before = new Map(original.materials.map(item => [item.name, item])), after = new Map(current.materials.map(item => [item.name, item]))
+  for (const [name, fact] of before) if (hash(after.get(name)) !== hash(fact)) throw failure()
+  const allowed = new Set(['relocation-worker-commits/complete.json'])
+  for (const [index, ledger] of original.closure_plan.ledgers.entries()) if (ledger.before_sha256 !== ledger.after_sha256) {
+    allowed.add('relocation-worker-commits/' + index + '.prepared.json'); allowed.add('relocation-worker-commits/' + index + '.closed.json')
+  }
+  for (const name of after.keys()) if (!before.has(name) && !allowed.has(name)) throw failure()
+}
+function originalScope(ctx, request, recoveryId) {
   const active = path.join(ctx.control, 'relocation-active')
   let checkpoint
   if (readJson(path.join(ctx.control, 'relocation-source-finalizing.json'))) {
@@ -70,7 +84,11 @@ function originalScope(ctx, request) {
     if (!terminal.released) throw failure()
     checkpoint = terminal.checkpoint
   }
-  if (checkpoint.checkpoint_sha256 !== request.checkpoint_sha256) throw failure()
+  if (recoveryId && checkpoint.action === 'finish_commit') {
+    const original = readJson(path.join(context(ctx.data, recoveryId).directory, 'forward-checkpoint.json'), 32 * 1024 * 1024)
+    if (!original || original.checkpoint_sha256 !== request.checkpoint_sha256) throw failure()
+    assertClosureProgress(original, checkpoint)
+  } else if (checkpoint.checkpoint_sha256 !== request.checkpoint_sha256) throw failure()
   assertWorkspaceInterruptedActorsExited(checkpoint)
   return checkpoint
 }
@@ -113,6 +131,7 @@ export async function commitWorkspaceInterruptedRecoveryLaunch({ dataDir, reques
   const launch = { schema_version: 2, request, action: checkpoint.action, parent: self, process: { ...coordinator }, data_root: data,
     control_root: directory, active_root: active, created_at: new Date().toISOString() }
   await verify(); check(); publish(ctx.directory, 'launch.json', launch, check)
+  if (checkpoint.action === 'finish_commit') publish(ctx.directory, 'forward-checkpoint.json', checkpoint, check, 32 * 1024 * 1024)
   syncDirectory(ctx.parent); syncDirectory(ctx.control); syncDirectory(ctx.data)
   await verify(); check()
   if (hash(readWorkspaceInterruptedRecoveryRole(ctx.data, request.recovery_id).launch) !== hash(launch)) throw failure()
@@ -126,7 +145,7 @@ export function verifyWorkspaceInterruptedRecoveryRole({ dataDir, recoveryId, la
     || !native.sameProcess(role.launch.parent, native.inspectProcess(role.launch.parent.pid))
     || hash(optionalDirectory(role.launch.active_root.path) ? frame(role.launch.active_root.path)
       : { ...readWorkspaceSourceCompletionScope(ctx.data, role.launch.request.intent_id).original, path: role.launch.active_root.path }) !== hash(role.launch.active_root)) throw failure()
-  const checkpoint = originalScope(ctx, role.launch.request)
+  const checkpoint = originalScope(ctx, role.launch.request, recoveryId)
   if (checkpoint.action !== role.launch.action) throw failure()
   return role
 }
