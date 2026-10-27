@@ -16,6 +16,7 @@ import { buildLegacyInstallerDriver } from './build-legacy-installer-driver.mjs'
 import { verifyDesktopPayload } from '../../scripts/lib/desktop-payload.mjs'
 import { inspectInstance, identity } from '../../scripts/lib/instance-runtime.mjs'
 import { stopInstance } from '../../scripts/lib/instance-controller.mjs'
+import { probeHealthStatus, probeMmModules } from '../../scripts/lib/mm-probe.mjs'
 import installation from '../../scripts/lib/desktop-installation.cjs'
 import product from '../../scripts/lib/product-runtime.cjs'
 assert.equal(process.env.GITHUB_ACTIONS, 'true'); assert.equal(process.env.RUNNER_ENVIRONMENT, 'github-hosted')
@@ -190,6 +191,17 @@ try {
     } finally {
       if (!passed) {
         const diagnostics = []
+        try {
+          const state = inspectInstance(dataDir), record = state.record
+          const modules = record ? await probeMmModules(record.mm_port) : null
+          const statuses = new Set(['registered', 'starting', 'running', 'stopping', 'stopped', 'error', 'disconnected'])
+          diagnostics.push({ name: 'startup-health', state: state.state,
+            controller_alive: !!record && identity.sameProcess(record.controller, identity.inspectProcess(record.controller.pid)),
+            mm_alive: !!record?.mm && identity.sameProcess(record.mm, identity.inspectProcess(record.mm.pid)),
+            mm_health: record ? await probeHealthStatus(record.mm_port) : null,
+            modules: modules?.filter(module => ['admin-web', 'crabot-agent', 'crabot-memory'].includes(module.module_id))
+              .map(module => ({ module_id: module.module_id, status: statuses.has(module.status) ? module.status : 'unknown' })) ?? null })
+        } catch { diagnostics.push({ name: 'startup-health', unavailable: true }) }
         for (const name of ['driver-started.json', 'driver-ready.json', 'driver-imported.json', 'driver-quit.json', 'driver-failed.json', 'takeover-confirmed.json', 'installer-handoff.json']) {
           try { diagnostics.push({ name, value: JSON.parse(await fs.readFile(path.join(control, name), 'utf8')) }) }
           catch (error) { if (error.code !== 'ENOENT') diagnostics.push({ name, unavailable: true }) }
