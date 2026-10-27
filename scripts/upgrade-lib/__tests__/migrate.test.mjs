@@ -1,15 +1,15 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { scanModules } from '../migrate.mjs'
 
 describe('scanModules', () => {
   let crabotHome, dataDir
 
   beforeEach(() => {
-    crabotHome = mkdtempSync(join(tmpdir(), 'crabot-home-'))
-    dataDir = mkdtempSync(join(tmpdir(), 'crabot-data-'))
+    crabotHome = realpathSync.native(mkdtempSync(join(tmpdir(), 'crabot-home-')))
+    dataDir = realpathSync.native(mkdtempSync(join(tmpdir(), 'crabot-data-')))
   })
 
   afterEach(() => {
@@ -88,8 +88,8 @@ describe('chainUpgrade', () => {
   let moduleDir, dataDir, calls
 
   beforeEach(() => {
-    moduleDir = mkdtempSync(join(tmpdir(), 'crabot-mod-'))
-    dataDir = mkdtempSync(join(tmpdir(), 'crabot-data-'))
+    moduleDir = realpathSync.native(mkdtempSync(join(tmpdir(), 'crabot-mod-')))
+    dataDir = realpathSync.native(mkdtempSync(join(tmpdir(), 'crabot-data-')))
     mkdirSync(join(moduleDir, 'upgrade'))
     calls = []
   })
@@ -116,7 +116,7 @@ describe('chainUpgrade', () => {
     const { chainUpgrade } = await import('../migrate.mjs')
     const result = await chainUpgrade(moduleDir, dataDir, null, 'v2', fakeRunner())
     expect(result.ok).toBe(true)
-    expect(calls.map(c => c.scriptPath.split('/').pop())).toEqual([
+    expect(calls.map(c => basename(c.scriptPath))).toEqual([
       'from_v0_to_v1.mjs',
       'from_v1_to_v2.mjs',
     ])
@@ -128,7 +128,7 @@ describe('chainUpgrade', () => {
     makeScript('from_v2_to_v3.mjs')
     const { chainUpgrade } = await import('../migrate.mjs')
     await chainUpgrade(moduleDir, dataDir, 'v1', 'v3', fakeRunner())
-    expect(calls.map(c => c.scriptPath.split('/').pop())).toEqual([
+    expect(calls.map(c => basename(c.scriptPath))).toEqual([
       'from_v1_to_v2.mjs',
       'from_v2_to_v3.mjs',
     ])
@@ -165,7 +165,7 @@ describe('writeSchemaVersion', () => {
   let dataDir
 
   beforeEach(() => {
-    dataDir = mkdtempSync(join(tmpdir(), 'crabot-sv-'))
+    dataDir = realpathSync.native(mkdtempSync(join(tmpdir(), 'crabot-sv-')))
   })
 
   afterEach(() => {
@@ -192,8 +192,8 @@ describe('runMigrations', () => {
   let crabotHome, dataDir, logs
 
   beforeEach(() => {
-    crabotHome = mkdtempSync(join(tmpdir(), 'crabot-rm-h-'))
-    dataDir = mkdtempSync(join(tmpdir(), 'crabot-rm-d-'))
+    crabotHome = realpathSync.native(mkdtempSync(join(tmpdir(), 'crabot-rm-h-')))
+    dataDir = realpathSync.native(mkdtempSync(join(tmpdir(), 'crabot-rm-d-')))
     logs = { info: [], warn: [], error: [] }
   })
 
@@ -269,8 +269,8 @@ describe('applyMigration', () => {
   let crabotHome, dataDir, moduleDir, moduleData
 
   beforeEach(() => {
-    crabotHome = mkdtempSync(join(tmpdir(), 'crabot-am-h-'))
-    dataDir = mkdtempSync(join(tmpdir(), 'crabot-am-d-'))
+    crabotHome = realpathSync.native(mkdtempSync(join(tmpdir(), 'crabot-am-h-')))
+    dataDir = realpathSync.native(mkdtempSync(join(tmpdir(), 'crabot-am-d-')))
     moduleDir = join(crabotHome, 'crabot-memory')
     moduleData = join(dataDir, 'memory')
     mkdirSync(moduleDir, { recursive: true })

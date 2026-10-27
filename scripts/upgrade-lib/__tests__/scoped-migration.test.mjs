@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url'
 const home = fileURLToPath(new URL('../../../', import.meta.url))
 let root, moduleDir
 beforeEach(async () => {
-  root = await fs.mkdtemp(path.join(os.tmpdir(), 'scoped-migration-'))
+  root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'scoped-migration-')))
   moduleDir = path.join(root, 'product/crabot-test')
   await fs.mkdir(path.join(moduleDir, 'upgrade'), { recursive: true })
   await fs.mkdir(path.join(root, 'data/test'), { recursive: true })
@@ -31,6 +31,7 @@ it('unknown scope and broad/escaping scopes fail in read-only preview before any
 it('one chain backup restores original mode/bytes and removes only declared new paths after step 2 fails', async () => {
   await adapter()
   await fs.chmod(path.join(root, 'data/test/original'), 0o640)
+  const originalMode = (await fs.stat(path.join(root, 'data/test/original'))).mode & 0o777
   await fs.writeFile(path.join(root, 'data/test/unrelated'), 'keep')
   let calls = 0
   const result = await executeMigration(await description(), async () => {
@@ -41,7 +42,7 @@ it('one chain backup restores original mode/bytes and removes only declared new 
   expect(result.ok).toBe(false)
   expect(await fs.readFile(path.join(root, 'data/test/SCHEMA_VERSION'), 'utf8')).toBe('v1\n')
   expect(await fs.readFile(path.join(root, 'data/test/original'), 'utf8')).toBe('original')
-  expect((await fs.stat(path.join(root, 'data/test/original'))).mode & 0o777).toBe(0o640)
+  expect((await fs.stat(path.join(root, 'data/test/original'))).mode & 0o777).toBe(originalMode)
   await expect(fs.stat(path.join(root, 'data/test/new'))).rejects.toThrow()
   expect(await fs.readFile(path.join(root, 'data/test/unrelated'), 'utf8')).toBe('keep')
   expect(await fs.readdir(path.join(root, 'data/.upgrade-migrations'))).toHaveLength(1)
@@ -93,14 +94,14 @@ it('all supported Memory chains declare cross-module cleanup, SQLite companions 
   await fs.writeFile(path.join(root, 'data/admin/module-configs/agent-one.json'), '{}')
   for (let from = 0; from < 5; from++) {
     const d = await describeMigration(path.join(home, 'crabot-memory'), data, from ? `v${from}` : null, 'v5')
-    expect(d.scope.writes).toContain('memory/long_term_v2.db-wal')
-    expect(d.scope.reads.concat(d.scope.writes)).toContain('memory/short_term.db')
+    expect(d.scope.writes).toContain(path.normalize('memory/long_term_v2.db-wal'))
+    expect(d.scope.reads.concat(d.scope.writes)).toContain(path.normalize('memory/short_term.db'))
     if (from <= 2) {
-      expect(d.scope.writes).toContain('admin/module-configs/memory-one.json')
-      expect(d.scope.writes).toContain(`memory/lancedb.deprecated.${d.id}`)
-      expect(d.scope.writes).not.toContain('admin/module-configs/agent-one.json')
+      expect(d.scope.writes).toContain(path.normalize('admin/module-configs/memory-one.json'))
+      expect(d.scope.writes).toContain(path.join('memory', `lancedb.deprecated.${d.id}`))
+      expect(d.scope.writes).not.toContain(path.normalize('admin/module-configs/agent-one.json'))
     }
-    expect(d.scope.writes).not.toContain('memory/metadata.db')
+    expect(d.scope.writes).not.toContain(path.normalize('memory/metadata.db'))
     expect(d.scripts).toHaveLength(5 - from)
   }
 })
@@ -156,7 +157,7 @@ it('verified rollback previews a repaired scope without writes and archives old 
   const oldState = await fs.readFile(path.join(oldDirectory, 'state.json'))
   await adapter(['test/original', 'test/new', 'test/extra'])
   const repaired = await description()
-  expect(repaired.scope.writes).toContain('test/extra')
+  expect(repaired.scope.writes).toContain(path.normalize('test/extra'))
   expect(await fs.readFile(path.join(oldDirectory, 'plan.json'))).toEqual(oldPlan)
   await expect(fs.stat(path.join(root, 'data/.upgrade-migrations-history'))).rejects.toThrow()
   const convert = vi.fn(async () => ({ exitCode: 0 }))
