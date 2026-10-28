@@ -35,7 +35,8 @@ async function holdWithoutDeleteSharing(file: string) {
       child.once('exit', () => reject(new Error('Owned file-lock helper exited before ready: ' + error)))
     })
   } catch (error) { child.kill(); await exited.catch(() => {}); throw error }
-  return async () => { child.stdin.end('release\n'); await exited }
+  let released: Promise<void> | undefined
+  return () => released ??= (async () => { child.stdin.end('release\n'); await exited })()
 }
 
 it.skipIf(process.platform !== 'win32')('commits the same atomic registry update after a short real Windows sharing lock', async () => {

@@ -405,7 +405,13 @@ export class BgEntityRegistry {
 
     const tmp = `${this.registryPath}.tmp.${process.pid}.${Date.now()}`
     await fs.writeFile(tmp, JSON.stringify(file, null, 2), 'utf8')
-    await fs.rename(tmp, this.registryPath)
+    for (let attempt = 0; ; attempt++) {
+      try { await fs.rename(tmp, this.registryPath); return }
+      catch (error) {
+        if (process.platform !== 'win32' || (error as NodeJS.ErrnoException).code !== 'EPERM' || attempt >= 5) throw error
+        await new Promise(resolve => setTimeout(resolve, 50 * (attempt + 1)))
+      }
+    }
   }
 
   /**
