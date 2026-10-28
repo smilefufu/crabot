@@ -18,6 +18,9 @@ async function write(name, bytes) { await fs.mkdir(path.dirname(path.join(home, 
 const env = () => ({ ...process.env, DATA_DIR: data, CRABOT_CLI_LOCK_HELD: '', CRABOT_CLI_LOCK_OWNER: '', CRABOT_ORPHAN_RECOVERY_INTERACTIVE: '0' })
 async function scripts() {
   for (const name of ['lib', 'upgrade-lib']) await fs.cp(path.join(product, 'scripts', name), path.join(home, 'scripts', name), { recursive: true, filter: source => !['node_modules', '__tests__'].includes(path.basename(source)) })
+  await fs.mkdir(path.join(home, 'scripts/desktop'), { recursive: true })
+  for (const name of ['legacy-releases.json', 'legacy-python-bootstrap.json']) await fs.copyFile(path.join(product, 'scripts/desktop', name), path.join(home, 'scripts/desktop', name))
+  await fs.symlink(path.join(product, 'node_modules'), path.join(home, 'node_modules'), process.platform === 'win32' ? 'junction' : 'dir')
   await fs.mkdir(path.join(home, 'crabot-native/build/Release'), { recursive: true })
   await fs.copyFile(path.join(product, 'crabot-native/build/Release/crabot-native.node'), path.join(home, 'crabot-native/build/Release/crabot-native.node'))
   await write('scripts/lib/instance.mjs', 'export const resolveCliDataDir = () => process.env.DATA_DIR; export const hasInstance = () => true')
@@ -67,7 +70,7 @@ it('actual restart entry never invokes stop when target migration scope is not r
 it('actual Web upgrade entry leaves the running build alone when isolated preparation fails', async () => {
   await scripts()
   await write('scripts/upgrade-lib/prepared-upgrade.mjs', 'export async function prepareUpgrade() { throw new Error("fixture preparation failure") }; export async function installPreparedUpgrade() { throw new Error("unexpected switch") }')
-  await write('scripts/upgrade-lib/release.mjs', 'export const getCurrentVersion = () => null; export const getLatestVersion = async () => ({tag:"next"}); export const writeVersionFile = () => { throw new Error("unexpected version write") }')
+  await write('scripts/upgrade-lib/release.mjs', 'export const stageRelease=async()=>{throw new Error("unexpected staging")};export const downloadRelease=async()=>{throw new Error("unexpected download")};export const getReleaseUrls=()=>({});export const getCurrentVersion = () => null; export const getLatestVersion = async () => ({tag:"next"}); export const writeVersionFile = () => { throw new Error("unexpected version write") }')
   await write('dist/live.js', 'old build')
   await fs.copyFile(path.join(product, 'scripts/ui-upgrade.mjs'), path.join(home, 'scripts/ui-upgrade.mjs'))
   const result = spawnSync(process.execPath, [path.join(home, 'scripts/ui-upgrade.mjs')], { cwd: home, env: env(), encoding: 'utf8', timeout: 10000 })
@@ -82,7 +85,7 @@ it('foreground start releases only its startup lock after MM health, while its o
   await write('crabot-admin/dist/credentials.js', 'exports.readCredentials = async () => ({}); exports.writeCredentials = async () => {}; exports.newCredentialsFromPassword = () => {};')
   await fs.copyFile(path.join(product, 'scripts/start.mjs'), path.join(home, 'scripts/start.mjs'))
   const port = await new Promise(resolve => { const socket = net.createServer(); socket.listen(0, '127.0.0.1', () => { const port = socket.address().port; socket.close(() => resolve(port)) }) })
-  await write('crabot-core/dist/main.js', `const http=require('node:http'); const server=http.createServer((req,res)=>{res.setHeader('content-type','application/json');res.end(JSON.stringify({success:true,data:{status:'healthy'}}))}); server.listen(${port},'127.0.0.1');`)
+  await write('crabot-core/dist/main.js', `const http=require('node:http'); const server=http.createServer((req,res)=>{res.setHeader('content-type','application/json');res.end(JSON.stringify({success:true,data:{status:'healthy'}}))}); server.listen(${port},'127.0.0.1'); process.on('message', message => { if(message?.type==='crabot-shutdown')server.close(()=>process.exit(0)) });`)
   const child = spawn(process.execPath, [path.join(home, 'scripts/start.mjs')], { cwd: home, env: { ...env(), CRABOT_PORT_OFFSET: String(port - 19000) }, stdio: ['ignore', 'pipe', 'pipe'] })
   let output = ''; child.stdout.on('data', bytes => { output += bytes }); child.stderr.on('data', bytes => { output += bytes })
   const exited = new Promise(resolve => child.on('close', resolve))
@@ -135,7 +138,7 @@ it.skipIf(process.env.GITHUB_ACTIONS !== 'true')('actual compiled MM releases st
 it.each(['upgrade.mjs', 'ui-upgrade.mjs'])('already current release is read-only and invokes no preparation or stop: %s', async entry => {
   await scripts()
   await write('scripts/upgrade-lib/prepared-upgrade.mjs', 'export async function prepareUpgrade() { throw new Error("unexpected reprepare") }; export async function installPreparedUpgrade() { throw new Error("unexpected switch") }')
-  await write('scripts/upgrade-lib/release.mjs', 'export const getCurrentVersion = () => "next"; export const getLatestVersion = async () => ({tag:"next"}); export const writeVersionFile = () => { throw new Error("unexpected version write") }')
+  await write('scripts/upgrade-lib/release.mjs', 'export const stageRelease=async()=>{throw new Error("unexpected staging")};export const downloadRelease=async()=>{throw new Error("unexpected download")};export const getReleaseUrls=()=>({});export const getCurrentVersion = () => "next"; export const getLatestVersion = async () => ({tag:"next"}); export const writeVersionFile = () => { throw new Error("unexpected version write") }')
   await fs.copyFile(path.join(product, 'scripts', entry), path.join(home, 'scripts', entry))
   const result = spawnSync(process.execPath, [path.join(home, 'scripts', entry), '--yes'], { cwd: home, env: env(), encoding: 'utf8', timeout: 10000 })
   expect(result.status, result.stderr).toBe(0)

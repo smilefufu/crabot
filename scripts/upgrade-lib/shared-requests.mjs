@@ -115,6 +115,7 @@ export async function previewSharedRequests(crabotHome, dataRoot) {
 export async function prepareSharedRequests(crabotHome, dataRoot, logger = console, options = {}) {
   const preview = await previewSharedRequests(crabotHome, dataRoot)
   if (['ready', 'not_applicable'].includes(preview.status)) return preview
+  if (options.prepareOnly && preview.status === 'legacy_pending') throw new Error('Legacy request recovery cannot run through backup-only preparation')
   let release
   if (!options.lockHeld) {
     await fs.mkdir(dataRoot, { recursive: true })
@@ -156,6 +157,12 @@ export async function prepareSharedRequests(crabotHome, dataRoot, logger = conso
     }
     const plan = JSON.parse(bytes)
     await verify(dataRoot, transaction, plan)
+    if (options.prepareOnly) {
+      for (const file of plan.files) {
+        if (hash(await fs.readFile(path.join(dataRoot, file.name))) !== file.original_sha256) throw new Error('Request conversion already changed data; backup preparation cannot claim an untouched source')
+      }
+      return { status: 'backup_prepared', report: path.join(transaction, 'impact.json'), backup_bytes: backupBytes(plan.backup_manifest) }
+    }
     try {
       for (const file of plan.files) {
         const original = await fs.readFile(path.join(transaction, 'backup', file.name))

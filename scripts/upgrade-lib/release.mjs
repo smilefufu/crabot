@@ -6,8 +6,12 @@ import { createHash } from 'node:crypto'
 import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { verifyReleasePackage } from '../lib/release-package.mjs'
+import { verifyCoreRelease } from '../lib/core-release.mjs'
+import location from '../lib/cli-location.cjs'
 
 export function getCurrentVersion(crabotHome) {
+  const sealed = location.readCoreVersion(crabotHome)
+  if (sealed !== null) return sealed
   const p = join(crabotHome, 'VERSION')
   if (!existsSync(p)) return null
   const v = readFileSync(p, 'utf-8').trim()
@@ -124,10 +128,15 @@ export async function unpackRelease({ tarPath, stage, version, logger }) {
   return stage
 }
 
+export function stageRelease({ tmp, tarPath, version, logger }) {
+  return unpackRelease({ tarPath, stage: join(tmp, 'stage'), version, logger })
+}
+
 // 解压 + 覆盖安装目录（必须在 stop 之后做：覆盖的是运行代码文件）。
 export async function extractRelease({ tmp, tarPath, version, crabotHome, logger }) {
   let stage = join(tmp, 'stage')
   try {
+    if (existsSync(join(crabotHome, 'core-release.json'))) throw new Error('不可原地覆盖内置核心，请使用版本切换或桌面更新。')
     stage = await unpackRelease({ tarPath, stage, version, logger })
     const fs = await import('node:fs')
     const retained = new Set(['.git', '.env', 'data', 'instance.json', 'agent-venv', 'VERSION'])
@@ -157,6 +166,10 @@ export async function downloadAndExtract({ url, sha256Url, version, crabotHome, 
 }
 
 export async function writeVersionFile(crabotHome, version) {
+  if (existsSync(join(crabotHome, 'core-release.json'))) {
+    await verifyCoreRelease(crabotHome, { version: version.replace(/^v/, '') })
+    return // The immutable release already owns its version; never add a file.
+  }
   const fs = await import('node:fs/promises')
   await fs.writeFile(join(crabotHome, 'VERSION'), `${version}\n`, 'utf-8')
 }

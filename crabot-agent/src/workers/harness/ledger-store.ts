@@ -380,6 +380,11 @@ export class LedgerStore {
   }
 }
 
+/** Same deterministic legacy metadata used by normal reads, without reading or writing any ledger. */
+export function normalizeLegacyWorkerMetadata(worker: LedgerWorker): LedgerWorker {
+  return migrateLegacyTaskStatus(materializeLegacyIncarnations(worker).worker).worker
+}
+
 function legacyIncarnationId(workerId: string, index: number): string {
   return `legacy:${encodeURIComponent(workerId)}:${index + 1}`
 }

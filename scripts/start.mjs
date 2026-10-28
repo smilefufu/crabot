@@ -5,29 +5,38 @@
 
 import './_preflight.mjs'
 
-import { existsSync, readFileSync, mkdirSync, openSync } from 'node:fs'
-import { randomBytes } from 'node:crypto'
+import { existsSync } from 'node:fs'
 import { createInterface } from 'node:readline'
 import { resolve, dirname } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { spawn, spawnSync } from 'node:child_process'
+import { spawnSync } from 'node:child_process'
 import { homedir } from 'node:os'
 import net from 'node:net'
-import { writePid, clearPid, checkSingleInstance, isPidAlive } from './lib/pid.mjs'
-import { runMigrations } from './upgrade-lib/migrate.mjs'
-import { runScript } from './upgrade-lib/runner.mjs'
-import { hasInstance, resolveCliDataDir } from './lib/instance.mjs'
 import { probeMmHealthy } from './lib/mm-probe.mjs'
-import { acquireCliLock, releaseCliLock, inheritedCliLock, cliLockToken } from './lib/cli-lock.mjs'
+import { checkSingleInstance } from './lib/pid.mjs'
+import { prepareCoreEnvironment, applyStartupMigrations } from './lib/core-preparation.mjs'
+import management from './lib/desktop-management.cjs'
+import { hasInstance, resolveCliDataDir } from './lib/instance.mjs'
+import { acquireStartupLock, releaseCliLock, hasInheritedCliLock } from './lib/cli-lock.mjs'
+import { runCorePreflight } from './lib/core-preflight.mjs'
+import { runManagedCore } from './lib/managed-core.mjs'
+import { inspectInstance } from './lib/instance-runtime.mjs'
+import { launchBackgroundCore } from './lib/background-core.mjs'
 import scraplingRuntime from './lib/scrapling-runtime.cjs'
 import { runBounded } from './lib/scrapling-prepare.mjs'
+import { verifyCoreRelease } from './lib/core-release.mjs'
+import cliLocation from './lib/cli-location.cjs'
+import { prepareSystemStartupData } from './lib/system-startup-data.mjs'
+import { assertVersionMaintenanceAllowsStart } from './lib/version-maintenance.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const ROOT = resolve(__dirname, '..')
 const HOME_CRABOT = resolve(homedir(), '.crabot')
+if (existsSync(resolve(ROOT, 'core-release.json'))) await verifyCoreRelease(ROOT)
+assertVersionMaintenanceAllowsStart(resolveCliDataDir({ homeDir: HOME_CRABOT }))
 
 // auto-init：缺 instance.json → 同步调 crabot init（在 const OFFSET 读取前）
-if (!hasInstance(HOME_CRABOT)) {
+if (!hasInstance(HOME_CRABOT) && !management.readDesktopManagement(resolveCliDataDir({ homeDir: HOME_CRABOT }))) {
   console.log('[crabot] first run, auto-running init...')
   const initEntry = resolve(__dirname, 'init.mjs')
   const r = spawnSync(process.execPath, [initEntry], { stdio: 'inherit', env: { ...process.env } })
@@ -50,29 +59,25 @@ process.env.CRABOT_ORPHAN_RECOVERY_INTERACTIVE = !DAEMON_MODE
 
 // ── 环境变量 ──
 
-function loadEnvFile(filePath) {
-  if (!existsSync(filePath)) return
-  const lines = readFileSync(filePath, 'utf-8').split('\n')
-  for (const raw of lines) {
-    const line = raw.replace(/#.*$/, '').trim()
-    if (!line || !line.includes('=')) continue
-    const idx = line.indexOf('=')
-    const key = line.slice(0, idx)
-    const val = line.slice(idx + 1)
-    if (!process.env[key]) {
-      process.env[key] = val
-    }
-  }
-}
-
 const DATA_DIR = resolveCliDataDir({ homeDir: HOME_CRABOT })
 const OFFSET = parseInt(process.env.CRABOT_PORT_OFFSET || '0', 10)
-process.env.DATA_DIR = DATA_DIR
+// Hold the operation lock before environment preparation can write to DATA_DIR.
+// Version replacement must not race these earlier startup writers.
+let startupLock
+if (!hasInheritedCliLock(DATA_DIR)) {
+  try {
+    startupLock = await acquireStartupLock(DATA_DIR, 'start')
+    process.on('exit', () => releaseCliLock(startupLock))
+  } catch (error) {
+    console.error(`[crabot] ${error.message}`)
+    process.exit(1)
+  }
+}
+assertVersionMaintenanceAllowsStart(DATA_DIR)
+const prepared = prepareCoreEnvironment({ root: ROOT, dataDir: DATA_DIR })
+Object.assign(process.env, prepared.env)
 
-// admin/.env 已废弃（密码改存 credentials.json）；保留 ROOT/.env 兜底
-loadEnvFile(resolve(ROOT, '.env'))
-
-if (scraplingRuntime.runtimeRequired(DATA_DIR)) {
+if (!prepared.runtime && scraplingRuntime.runtimeRequired(DATA_DIR)) {
   try {
     await runBounded(process.execPath, [resolve(ROOT, 'scripts/prepare-scrapling.mjs')])
   } catch (err) {
@@ -81,46 +86,8 @@ if (scraplingRuntime.runtimeRequired(DATA_DIR)) {
   }
 }
 
-if (!process.env.CRABOT_JWT_SECRET) {
-  process.env.CRABOT_JWT_SECRET = randomBytes(32).toString('hex')
-}
-
-// PATH 兜底：onboard/install 有些场景未持久化 ~/.local/bin 到 shell profile，
-// 导致 Node spawn 子进程时找不到 uv。若该目录存在且未在 PATH 中，prepend 进去。
-const LOCAL_BIN = resolve(homedir(), '.local/bin')
-if (existsSync(LOCAL_BIN)) {
-  const currentPath = (process.env.PATH || '').split(':').filter(Boolean)
-  if (!currentPath.includes(LOCAL_BIN)) {
-    process.env.PATH = [LOCAL_BIN, ...currentPath].join(':')
-  }
-}
-
-// NO_PROXY 兜底：用户开了系统代理（HTTP_PROXY/HTTPS_PROXY/ALL_PROXY）时，
-// Python httpx 默认 trust_env=True 会把 localhost RPC 也走代理 → 502 Bad Gateway，
-// memory 等 Python 模块 register 失败、卡在 starting。Node http 不读代理变量不受影响，
-// 但显式声明 loopback 不走代理对 TS 也无害。
-{
-  const required = ['localhost', '127.0.0.1', '::1']
-  const merge = (existing) => {
-    const set = new Set(
-      (existing || '').split(',').map((s) => s.trim()).filter(Boolean)
-    )
-    for (const h of required) set.add(h)
-    return Array.from(set).join(',')
-  }
-  const merged = merge(process.env.NO_PROXY || process.env.no_proxy)
-  process.env.NO_PROXY = merged
-  process.env.no_proxy = merged
-}
-
-// ── 数据目录 ──
-
-for (const sub of ['admin', 'agent', 'memory']) {
-  mkdirSync(resolve(DATA_DIR, sub), { recursive: true })
-}
-
 // ── 密码检查 ──
-
+if (!prepared.managed) {
 const credModUrl = pathToFileURL(
   resolve(ROOT, 'crabot-admin/dist/credentials.js'),
 ).href
@@ -152,6 +119,7 @@ if (!existingCred) {
   console.log('[crabot] Password saved.')
   console.log('[crabot] \x1b[33mThis is a temporary password — you will be required to change it on first login.\x1b[0m')
 }
+}
 
 // ── 启动 Module Manager ──
 
@@ -162,25 +130,12 @@ if (!existsSync(mmEntry) || !existsSync(orphanRecoveryEntry)) {
   process.exit(1)
 }
 
-// CLI 操作互斥（restart 外层持锁时经 env 跳过）。start 有大量 process.exit 出口，
-// 统一由 exit handler 释放；SIGKILL 残留的死锁由 acquire 侧的陈旧检测接管。
-let startupCliLock
-function releaseStartupLock() {
-  releaseCliLock(startupCliLock)
-  startupCliLock = undefined
-}
-if (!inheritedCliLock(DATA_DIR)) {
-  try {
-    startupCliLock = await acquireCliLock(DATA_DIR, 'start')
-    process.env.CRABOT_CLI_LOCK_HELD = cliLockToken(startupCliLock)
-    process.on('exit', releaseStartupLock)
-  } catch (error) {
-    console.error(`[crabot] ${error.message}`)
-    process.exit(1)
-  }
-}
-
 // 单实例预检
+const currentInstance = inspectInstance(DATA_DIR)
+if (currentInstance.state === 'running' || currentInstance.state === 'starting') {
+  console.error(`[crabot] already running (pid=${currentInstance.record.mm?.pid ?? currentInstance.record.controller.pid}). Run 'crabot stop' first.`)
+  process.exit(1)
+}
 const single = checkSingleInstance(DATA_DIR)
 if (!single.ok) {
   console.error(`[crabot] already running (pid=${single.runningPid}). Run 'crabot stop' first.`)
@@ -201,12 +156,9 @@ if (!await probePort(19000 + OFFSET)) {
   process.exit(1)
 }
 
-const orphanRecovery = spawnSync(process.execPath, [orphanRecoveryEntry], {
-  cwd: resolve(ROOT, 'crabot-core'),
-  stdio: 'inherit',
-  env: { ...process.env },
-})
-if (orphanRecovery.status !== 0) {
+const orphanRecovery = await runCorePreflight({ root: ROOT, dataDir: DATA_DIR, node: process.execPath,
+  stdio: 'inherit', env: { ...process.env } })
+if (orphanRecovery.exitCode !== 0) {
   console.error('[crabot] startup aborted before Module Manager was launched.')
   process.exit(1)
 }
@@ -222,105 +174,34 @@ console.log(`[crabot] Tmp-page proxy target: 127.0.0.1:${TMP_PAGE_PORT}`)
 console.log(`[crabot] Starting Module Manager (port ${MM_PORT})...`)
 console.log(`[crabot] Admin Web: http://localhost:${WEB_PORT}`)
 
-// All migrations complete with a verified scoped backup before this startup writes its PID.
-const migration = await runMigrations(ROOT, DATA_DIR, runScript, console, { lockHeld: true })
-if (!migration.ok) {
-  console.error(`[crabot] migration failed for ${migration.failedModule} at ${migration.failedAt}; scoped backup: ${migration.backupPath}`)
-  process.exit(1)
+// Start fallback shares scoped backup, migration and request preparation with upgrade.
+// Managed system startup also retains its administrator operation fence.
+try {
+  if (cliLocation.locateCliInstallation(ROOT)?.scope === 'system') await prepareSystemStartupData({ root: ROOT, dataDir: DATA_DIR, env: process.env })
+  else await applyStartupMigrations(ROOT, DATA_DIR, process.env, message => console.log(`[crabot] ${message}`))
 }
+catch (error) { console.error(`[crabot] ${error.message}`); process.exit(1) }
 
 if (!DAEMON_MODE) {
-  // 前台模式：写本进程 PID（stop 时 SIGTERM 给我，我转发给 MM）
-  writePid(DATA_DIR, process.pid)
-
-  const child = spawn(process.execPath, [mmEntry], {
-    cwd: resolve(ROOT, 'crabot-core'),
-    stdio: 'inherit',
-    env: { ...process.env },
-  })
-
-  if (startupCliLock) {
-    // The foreground process stays alive; its operation lock is only for bounded startup.
-    void (async () => {
-      const deadline = Date.now() + 30_000
-      while (child.exitCode === null && Date.now() < deadline) {
-        if (await probeMmHealthy(MM_PORT)) break
-        await new Promise(resolve => setTimeout(resolve, 250))
-      }
-      releaseStartupLock()
-    })()
+  const { mm } = await runManagedCore({ root: ROOT, dataDir: DATA_DIR, mmPort: MM_PORT,
+    env: process.env, stdio: ['inherit', 'inherit', 'inherit'],
+    cleanup: code => process.exit(code), log: message => process.stdout.write(message) })
+  // Startup owns the operation lock until the actual child opens ingress or finishes.
+  const startupDeadline = Date.now() + 30_000
+  while (mm.exitCode === null && mm.signalCode === null && Date.now() < startupDeadline) {
+    if (await probeMmHealthy(MM_PORT)) break
+    await new Promise(resolve => setTimeout(resolve, 250))
   }
-
-  const cleanup = () => {
-    try {
-      if (readFileSync(resolve(DATA_DIR, 'mm.pid'), 'utf8').trim() === String(process.pid)) clearPid(DATA_DIR)
-    } catch { /* Never clear a replacement process's PID. */ }
-  }
-  child.on('exit', (code) => {
-    cleanup()
-    process.exit(code ?? 1)
-  })
-  child.on('error', (err) => {
-    cleanup()
-    console.error(`[crabot] failed to spawn Module Manager: ${err.message}`)
-    process.exit(1)
-  })
-  process.on('exit', cleanup)
-
-  for (const sig of ['SIGINT', 'SIGTERM']) {
-    process.on(sig, () => child.kill(sig))
-  }
+  releaseCliLock(startupLock)
+  startupLock = undefined
 } else {
-  // 后台模式：spawn detached supervisor，父进程轮询 health 后退出
-  const supervisorEntry = resolve(__dirname, 'supervisor.mjs')
-  // supervisor 自身的 boot 日志：它若在顶层 import 阶段就崩（如缺运行时依赖），
-  // stdio:'ignore' 会让它静默消失、连 mm.stderr.log 都来不及建（supervisor.mjs
-  // 在更后面才 createStream）。把 supervisor 进程自己的 stdout/stderr 落到这里，
-  // 保证这类「起不来且没日志」的崩溃留下堆栈。
-  const bootLogDir = resolve(DATA_DIR, 'logs')
-  mkdirSync(bootLogDir, { recursive: true })
-  const bootLogFd = openSync(resolve(bootLogDir, 'supervisor.boot.log'), 'a')
-  const sup = spawn(process.execPath, [supervisorEntry], {
-    detached: true,
-    stdio: ['ignore', bootLogFd, bootLogFd],
-    env: {
-      ...process.env,
-      CRABOT_SUPERVISOR_DATA_DIR: DATA_DIR,
-      CRABOT_SUPERVISOR_MM_ENTRY: mmEntry,
-      CRABOT_SUPERVISOR_MM_CWD: resolve(ROOT, 'crabot-core'),
-    },
-  })
-  // 父进程立即写 supervisor.pid 到 mm.pid（避免 race）
-  writePid(DATA_DIR, sup.pid)
-  sup.unref()
-
-  console.log('[crabot] Starting in background...')
-  console.log('[crabot] Waiting for Module Manager to become healthy... (up to 30s)')
-
-  // 健康轮询（最多 30s）
-  const deadline = Date.now() + 30_000
-  while (Date.now() < deadline) {
-    if (!isPidAlive(sup.pid)) {
-      console.error('[crabot] supervisor exited unexpectedly. Check logs at', resolve(DATA_DIR, 'logs/supervisor.boot.log'))
-      process.exit(1)
-    }
-    try {
-      // MM 的 /health 是 POST RPC 路由，GET 会 405（见 lib/mm-probe.mjs）
-      if (await probeMmHealthy(MM_PORT)) {
-        const r2 = await fetch(`http://localhost:${WEB_PORT}/health`, { signal: AbortSignal.timeout(1500) })
-        if (r2.ok) {
-          console.log(`[crabot] \x1b[32m●\x1b[0m MM ready (port ${MM_PORT})`)
-          console.log(`[crabot] \x1b[32m●\x1b[0m Admin Web ready (port ${WEB_PORT})`)
-          console.log(`[crabot] Started. PID ${sup.pid}. Run \`crabot status\` to check, \`crabot stop\` to stop.`)
-          process.exit(0)
-        }
-      }
-    } catch { /* keep trying */ }
-    await new Promise(r => setTimeout(r, 250))
-  }
-  console.error(`[crabot] timeout after 30s. Check logs at ${resolve(DATA_DIR, 'logs/mm.stderr.log')}`)
-  console.error(`[crabot] supervisor still running at pid ${sup.pid}; if it eventually starts, fine; otherwise crabot stop.`)
-  process.exit(1)
+  try {
+    const { record } = await launchBackgroundCore({ root: ROOT, dataDir: DATA_DIR, env: process.env,
+      mmPort: MM_PORT, webPort: WEB_PORT, log: message => console.log(`[crabot] ${message}`) })
+    console.log(`[crabot] MM ready (port ${MM_PORT}); Admin Web ready (port ${WEB_PORT}).`)
+    console.log(`[crabot] Started. PID ${record.controller.pid}. Run \`crabot status\` to check, \`crabot stop\` to stop.`)
+    process.exit(0)
+  } catch (error) { console.error(`[crabot] ${error.message}`); process.exit(1) }
 }
 
 // ── 辅助函数 ──
@@ -330,27 +211,40 @@ function createPrompter() {
     return {
       ask(prompt) {
         return new Promise((res) => {
-          process.stdout.write(prompt)
-          process.stdin.setRawMode(true)
-          process.stdin.resume()
+          const previousRaw = process.stdin.isRaw
           let input = ''
+          const cleanup = () => {
+            process.stdin.setRawMode(previousRaw)
+            process.stdin.removeListener('data', onData)
+            process.stdin.pause()
+          }
           const onData = (ch) => {
-            const c = ch.toString()
-            if (c === '\n' || c === '\r') {
-              process.stdin.setRawMode(false)
-              process.stdin.removeListener('data', onData)
-              process.stdin.pause()
-              process.stdout.write('\n')
-              res(input)
-            } else if (c === '\x7f' || c === '\b') {
-              if (input.length > 0) input = input.slice(0, -1)
-            } else if (c === '\x03') {
-              process.exit(1)
-            } else {
-              input += c
+            for (const c of ch.toString()) {
+              if (c === '\n' || c === '\r') {
+                cleanup()
+                process.stdout.write('\n')
+                res(input)
+                return
+              } else if (c === '\x7f' || c === '\b') {
+                if (input.length > 0) input = input.slice(0, -1)
+              } else if (c === '\x03') {
+                cleanup()
+                process.exit(1)
+              } else {
+                input += c
+              }
             }
           }
-          process.stdin.on('data', onData)
+          try {
+            process.stdin.setEncoding('utf8')
+            process.stdin.setRawMode(true)
+            process.stdin.on('data', onData)
+            process.stdin.resume()
+            process.stdout.write(prompt)
+          } catch (error) {
+            cleanup()
+            throw error
+          }
         })
       },
       close() {},

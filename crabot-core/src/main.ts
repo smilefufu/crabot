@@ -14,36 +14,41 @@ import { createOrphanTerminationConfirmer } from './orphan-recovery-prompt.js'
 async function main(): Promise<void> {
   // 获取模块路径
   const CRABOT_ROOT = path.resolve(process.cwd(), '..')
+  // A desktop removal fence blocks direct MM startup before any data/PID work.
+  require('../../scripts/lib/desktop-installation.cjs').locateDesktopCore(CRABOT_ROOT)
   const ADMIN_DIR = path.join(CRABOT_ROOT, 'crabot-admin')
   const AGENT_DIR = path.join(CRABOT_ROOT, 'crabot-agent')
   const PORT_OFF = parseInt(process.env.CRABOT_PORT_OFFSET || '0', 10)
   const DATA_DIR = process.env.DATA_DIR
     || path.join(homedir(), '.crabot', PORT_OFF > 0 ? `data-${PORT_OFF}` : 'data')
-  // Hold the same instance operation lock through direct MM startup and ingress opening.
-  fs.mkdirSync(DATA_DIR, { recursive: true })
-  const locks = require(path.join(CRABOT_ROOT, 'scripts/lib/cli-lock.mjs'))
-  const inheritedLock = locks.inheritedCliLock(DATA_DIR)
-  const startupLock = inheritedLock ? null : await locks.acquireCliLock(DATA_DIR, 'mm-start')
-  process.on('exit', () => locks.releaseCliLock(startupLock))
-  if (!inheritedLock) {
+  const managedStartup = Boolean(process.env.CRABOT_INSTANCE_GENERATION)
+  const locks = require('../../scripts/lib/cli-lock.mjs')
+  let startupLock: string | undefined
+  if (managedStartup) {
+    require('../../scripts/lib/mm-startup.cjs').verifyManagedMmStartup({
+      root: CRABOT_ROOT, dataDir: DATA_DIR, generation: process.env.CRABOT_INSTANCE_GENERATION,
+    })
+  } else {
+    // Direct/dev startup prepares data before publishing its own PID or ingress.
+    fs.mkdirSync(DATA_DIR, { recursive: true })
+    const inheritedLock = locks.inheritedCliLock(DATA_DIR)
+    startupLock = inheritedLock ? undefined : await locks.acquireStartupLock(DATA_DIR, 'mm-start')
+    process.on('exit', () => locks.releaseCliLock(startupLock))
     const { assertStopped } = require(path.join(CRABOT_ROOT, 'scripts/upgrade-lib/scoped-data.mjs'))
     await assertStopped(DATA_DIR)
-  }
-  execFileSync(process.execPath, [path.join(CRABOT_ROOT, 'scripts/prepare-shared-requests.mjs'), `--data-dir=${DATA_DIR}`], {
-    stdio: 'inherit', env: { ...process.env, CRABOT_CLI_LOCK_HELD: inheritedLock ? process.env.CRABOT_CLI_LOCK_HELD : locks.cliLockToken(startupLock) },
-  })
-  delete process.env.CRABOT_CLI_LOCK_HELD
-  delete process.env.CRABOT_CLI_LOCK_OWNER
-  if (!inheritedLock) {
-    // Direct/dev MM owns its PID only after preparation, with no live-PID exemption.
+    execFileSync(process.execPath, [path.join(CRABOT_ROOT, 'scripts/prepare-shared-requests.mjs'), `--data-dir=${DATA_DIR}`], {
+      stdio: 'inherit', env: { ...process.env, CRABOT_CLI_LOCK_HELD: inheritedLock ? process.env.CRABOT_CLI_LOCK_HELD : locks.cliLockToken(startupLock) },
+    })
     fs.writeFileSync(path.join(DATA_DIR, 'mm.pid'), String(process.pid))
     process.on('exit', () => {
       try {
         const file = path.join(DATA_DIR, 'mm.pid')
         if (fs.readFileSync(file, 'utf8').trim() === String(process.pid)) fs.unlinkSync(file)
-      } catch { /* Startup may have exited before writing a PID. */ }
+      } catch { /* Never remove replacement ownership. */ }
     })
   }
+  delete process.env.CRABOT_CLI_LOCK_HELD
+  delete process.env.CRABOT_CLI_LOCK_OWNER
   // Agent worker tools 的工作目录（bash / read / write / edit / glob / grep 的 cwd）。
   // 默认 = 用户家目录：agent 一上来就能直接看到用户真实文件（~/code/ 等），而不是
   // Crabot 自身的安装根（既无用又混淆）。WORKSPACE_DIR env 显式设置则覆盖。
@@ -118,7 +123,7 @@ async function main(): Promise<void> {
     console.log(`[ModuleManager] Port offset: ${PORT_OFFSET} (MM=${PORT}, Admin RPC=${ADMIN_RPC_PORT}, Admin Web=${ADMIN_WEB_PORT})`)
   }
 
-  const { preparedMemoryPython } = require(path.join(CRABOT_ROOT, 'scripts/lib/memory-deps.mjs'))
+  const { preparedMemoryPython } = require('../../scripts/lib/memory-deps.mjs')
   const memoryPython = productRuntime ? null : await preparedMemoryPython(MEMORY_DIR)
 
   // 核心模块定义（Admin 和 Agent 是核心层模块，需要预定义）
@@ -173,6 +178,12 @@ async function main(): Promise<void> {
 
   process.on('SIGINT', shutdown)
   process.on('SIGTERM', shutdown)
+  process.on('message', (message: unknown) => {
+    const request = message as { type?: unknown; generation?: unknown } | null
+    if (request?.type === 'crabot-shutdown' && typeof request.generation === 'string'
+      && request.generation === process.env.CRABOT_INSTANCE_GENERATION) void shutdown()
+  })
+  process.channel?.unref()
 
   // 启动
   manager.start().then(() => locks.releaseCliLock(startupLock)).catch((error) => {

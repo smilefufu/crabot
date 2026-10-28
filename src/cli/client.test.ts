@@ -54,10 +54,8 @@ describe('AdminClient', () => {
     it('Authorization Bearer 头部注入', async () => {
       await client.get('/api/agents')
       const init = fetchMock.mock.calls[0]?.[1] as RequestInit
-      expect(init.headers).toMatchObject({
-        'Authorization': 'Bearer tk-secret',
-        'Content-Type': 'application/json',
-      })
+      expect(new Headers(init.headers).get('Authorization')).toBe('Bearer tk-secret')
+      expect(new Headers(init.headers).get('Content-Type')).toBe('application/json')
     })
 
     it('post 带 body 时序列化为 JSON 字符串', async () => {
@@ -150,6 +148,10 @@ describe('AdminClient', () => {
   })
 
   describe('getList 归一化', () => {
+    it('204 空响应保持旧 CLI 的空字符串结果', async () => {
+      fetchMock.mockResolvedValue(new Response(null, { status: 204 }))
+      expect(await client.delete('/api/example')).toBe('')
+    })
     it('admin 返回 bare array → 直接返回', async () => {
       fetchMock.mockResolvedValue(makeResponse({ body: [{ id: '1' }, { id: '2' }] }))
       expect(await client.getList<{ id: string }>('/api/agents')).toEqual([{ id: '1' }, { id: '2' }])

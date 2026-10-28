@@ -40,7 +40,7 @@ function verifyAgentEnvironmentReference(record) {
 function verifyAgentEnvironmentCandidate(dataDir, record) {
   try {
     verifyAgentEnvironmentReference(record)
-    dataDir = management.requirePrivateDataRoot(dataDir)
+    dataDir = management.requireExistingDataRoot(dataDir)
     const container = path.join(dataDir, 'agent-environments')
     if (management.requirePrivateDataRoot(container) !== container) invalid()
     const directory = path.join(container, record.id)
@@ -57,7 +57,7 @@ function verifyAgentEnvironmentCandidate(dataDir, record) {
 function readAgentEnvironmentReference(dataDir) {
   const file = path.join(dataDir, selectionName)
   try { fs.lstatSync(file) } catch (error) { if (error.code === 'ENOENT') return null; invalid() }
-  dataDir = management.requirePrivateDataRoot(dataDir)
+  dataDir = management.requireExistingDataRoot(dataDir)
   return verifyAgentEnvironmentReference(privateDocument(path.join(dataDir, selectionName)).value)
 }
 function readAgentEnvironmentSelection(dataDir) {

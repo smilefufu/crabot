@@ -194,3 +194,34 @@ test('offline Python sources do not run network or standalone metadata probes', 
   assert.equal(standalone.url, standalone.official)
   assert.equal(source.systemProxy, false)
 })
+
+const uvFetchTimeout = `error: Request failed after 3 retries in 128.7s
+  cause: Failed to fetch: https://mirrors.aliyun.com/pypi/simple/patchright/
+  cause: error sending request for url (https://mirrors.aliyun.com/pypi/simple/patchright/)
+  cause: operation timed out`
+
+test('the actual uv fetch-timeout format falls back to official within the existing single budget', async () => {
+  const source = await selectPackageSource('python', { logger: silent, probe: async () => true }), calls = []
+  const value = await withPackageSource(source, async (url, env, remaining) => {
+    calls.push({ url, remaining })
+    if (calls.length === 1) throw Object.assign(new Error('uv exited with code 2'), { stderr: uvFetchTimeout })
+    return 'official-ready'
+  }, { logger: silent, timeout: 1000 })
+  assert.equal(value, 'official-ready')
+  assert.deepEqual(calls.map(call => call.url), ['https://mirrors.aliyun.com/pypi/simple/', 'https://pypi.org/simple'])
+  assert.ok(calls[1].remaining <= calls[0].remaining && calls[0].remaining <= 1000)
+})
+
+for (const message of ['Hash mismatch', 'EPERM: permission denied', 'preparation cancelled']) test('terminal errors still dominate the uv timeout context: ' + message, async () => {
+  const source = await selectPackageSource('python', { logger: silent, probe: async () => true }); let calls = 0
+  const error = Object.assign(new Error(message), { stderr: uvFetchTimeout })
+  await assert.rejects(withPackageSource(source, async () => { calls++; throw error }, { logger: silent }), value => value === error)
+  assert.equal(calls, 1)
+})
+
+test('a local operation timeout without the uv network fetch context is not retried', async () => {
+  const source = await selectPackageSource('python', { logger: silent, probe: async () => true }); let calls = 0
+  const error = Object.assign(new Error('uv exited with code 2'), { stderr: 'local filesystem operation timed out' })
+  await assert.rejects(withPackageSource(source, async () => { calls++; throw error }, { logger: silent }), value => value === error)
+  assert.equal(calls, 1)
+})

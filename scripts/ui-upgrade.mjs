@@ -13,16 +13,19 @@ import { runScript } from './upgrade-lib/runner.mjs'
 import { runMigrations } from './upgrade-lib/migrate.mjs'
 import { prepareUpgrade, installPreparedUpgrade } from './upgrade-lib/prepared-upgrade.mjs'
 import { acquireCliLock, releaseCliLock, cliLockToken } from './lib/cli-lock.mjs'
+import { locateCliInstallation } from './lib/cli-installation.mjs'
+import product from './lib/product-runtime.cjs'
 import { preflightRestart } from './upgrade-lib/preflight.mjs'
 import {
   getCurrentVersion,
   getLatestVersion,
+  getReleaseUrls,
+  downloadRelease,
   writeVersionFile,
 } from './upgrade-lib/release.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const CRABOT_HOME = resolve(__dirname, '..')
-const CLI = join(CRABOT_HOME, 'cli.mjs')
 const DATA_DIR = resolveCliDataDir({ homeDir: resolve(homedir(), '.crabot') })
 const STATUS_DIR = join(DATA_DIR, 'admin')
 const STATUS_FILE = join(STATUS_DIR, 'upgrade-status.json')
@@ -58,8 +61,11 @@ function writeStatus(patch) {
   writeFileSync(STATUS_FILE, JSON.stringify({ ...prev, ...patch }, null, 2))
 }
 
-function node(args, lock) {
-  execFileSync(process.execPath, [CLI, ...args], { cwd: CRABOT_HOME, stdio: 'inherit', env: { ...process.env, CRABOT_CLI_LOCK_HELD: cliLockToken(lock) } })
+function node(args, lock, root = CRABOT_HOME) {
+  const runtime = root === CRABOT_HOME ? null : product.loadProductRuntime(root, { required: true })
+  execFileSync(runtime?.executables.node ?? process.execPath, [join(root, 'cli.mjs'), ...args], {
+    cwd: CRABOT_HOME, stdio: 'inherit', env: { ...process.env, CRABOT_CLI_LOCK_HELD: cliLockToken(lock) },
+  })
 }
 
 function stamp() {
@@ -68,6 +74,8 @@ function stamp() {
 
 async function main() {
   if (detectInstallScope('/etc/crabot') === 'system' && process.getuid?.() !== 0) throw new Error('System upgrade requires an administrator; the running instance was not stopped')
+  const standalone = locateCliInstallation(CRABOT_HOME)
+  if (standalone && standalone.scope !== 'user') throw new Error('共享核心升级请联系管理员，原实例保持运行。')
   const mode = detectMode(CRABOT_HOME) // 'release' | 'source'
   const fromVersion = readVersion(mode)
   console.log(`[ui-upgrade] start mode=${mode} from=${fromVersion} at=${stamp()}`)
@@ -82,6 +90,7 @@ async function main() {
 
   // ========== 准备阶段（实例照常运行，最慢、最易失败的步骤都在这里；失败不停服务）==========
   let prepared
+  let preparedCli
   let targetVersion
   try {
     targetVersion = mode === 'release' ? (await getLatestVersion()).tag : undefined
@@ -95,9 +104,15 @@ async function main() {
         }
       } catch (error) { logger.warn(`Installed target needs repair: ${error.message}`) }
     }
-    prepared = await prepareUpgrade(CRABOT_HOME, DATA_DIR, { mode, version: targetVersion, logger })
-    console.log(`[ui-upgrade] prepared product ${prepared.payload_bytes} bytes; scoped data backup ${prepared.preview.backup_bytes ?? 'legacy pending'}`)
-    await preflightRestart(prepared.stage, DATA_DIR)
+    if (standalone) {
+      const artifact = await downloadRelease({ ...getReleaseUrls(targetVersion), logger })
+      const { prepareDownloadedCliUpgrade } = await import('./lib/standalone-cli-release.mjs')
+      preparedCli = await prepareDownloadedCliUpgrade({ root: CRABOT_HOME, artifact, logger })
+    } else {
+      prepared = await prepareUpgrade(CRABOT_HOME, DATA_DIR, { mode, version: targetVersion, logger })
+      console.log(`[ui-upgrade] prepared product ${prepared.payload_bytes} bytes; scoped data backup ${prepared.preview.backup_bytes ?? 'legacy pending'}`)
+      await preflightRestart(prepared.stage, DATA_DIR)
+    }
   } catch (err) {
     const msg = err?.message || String(err)
     console.error('[ui-upgrade] prepare FAILED（服务未停，无影响）:', msg)
@@ -111,11 +126,20 @@ async function main() {
   let switchStarted = false
   try {
     lock = await acquireCliLock(DATA_DIR, 'web-upgrade')
-    await preflightRestart(prepared.stage, DATA_DIR)
+    if (!preparedCli) await preflightRestart(prepared.stage, DATA_DIR)
     writeStatus({ phase: 'restarting' })
     console.log('[ui-upgrade] (switch) stop')
     switchStarted = true
     node(['stop'], lock)
+    if (preparedCli) {
+      // The target coordinator acquires its own instance lock.
+      releaseCliLock(lock); lock = undefined
+      const { applyPreparedCliUpgrade } = await import('./lib/standalone-cli-release.mjs')
+      await applyPreparedCliUpgrade({ root: CRABOT_HOME, dataDir: DATA_DIR, prepared: preparedCli })
+      node(['start', '-d'], lock, preparedCli.coreRoot)
+      writeStatus({ phase: 'done', to_version: preparedCli.version, finished_at: stamp() })
+      return
+    }
     await installPreparedUpgrade(prepared, CRABOT_HOME, DATA_DIR)
 
     console.log('[ui-upgrade] (switch) run migrations')

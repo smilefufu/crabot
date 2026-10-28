@@ -75,3 +75,28 @@ export interface WorkspaceScanResult {
   workspace_id: string
   usage: WorkspaceUsage
 }
+
+export type WorkspaceRelocationImplementation = 'builtin' | 'claude-code' | 'codex' | 'legacy'
+export interface WorkspaceRelocationIncarnation {
+  readonly incarnation_id: string
+  readonly impl: WorkspaceRelocationImplementation
+  readonly seq: number
+  readonly workspace: string
+  readonly started_at: string
+  readonly forked_from?: number | string
+  readonly query_id?: string
+}
+export interface WorkspaceRelocationWorker {
+  readonly worker_id: string
+  readonly manager_key: `${string}::${string}`
+  readonly task_id: string
+  readonly workspace_id?: string
+  readonly incarnations: ReadonlyArray<WorkspaceRelocationIncarnation>
+}
+
+export type WorkspaceRelocationStopStatus = 'submitted' | 'unknown' | 'unavailable'
+export interface WorkspaceRelocationStopResult {
+  readonly worker_id: string
+  readonly incarnation_id: string
+  readonly status: WorkspaceRelocationStopStatus
+}

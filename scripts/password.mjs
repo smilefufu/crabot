@@ -30,27 +30,40 @@ function createPrompter() {
     return {
       ask(prompt) {
         return new Promise((res) => {
-          process.stdout.write(prompt)
-          process.stdin.setRawMode(true)
-          process.stdin.resume()
+          const previousRaw = process.stdin.isRaw
           let input = ''
+          const cleanup = () => {
+            process.stdin.setRawMode(previousRaw)
+            process.stdin.removeListener('data', onData)
+            process.stdin.pause()
+          }
           const onData = (ch) => {
-            const c = ch.toString()
-            if (c === '\n' || c === '\r') {
-              process.stdin.setRawMode(false)
-              process.stdin.removeListener('data', onData)
-              process.stdin.pause()
-              process.stdout.write('\n')
-              res(input)
-            } else if (c === '\x7f' || c === '\b') {
-              if (input.length > 0) input = input.slice(0, -1)
-            } else if (c === '\x03') {
-              process.exit(1)
-            } else {
-              input += c
+            for (const c of ch.toString()) {
+              if (c === '\n' || c === '\r') {
+                cleanup()
+                process.stdout.write('\n')
+                res(input)
+                return
+              } else if (c === '\x7f' || c === '\b') {
+                if (input.length > 0) input = input.slice(0, -1)
+              } else if (c === '\x03') {
+                cleanup()
+                process.exit(1)
+              } else {
+                input += c
+              }
             }
           }
-          process.stdin.on('data', onData)
+          try {
+            process.stdin.setEncoding('utf8')
+            process.stdin.setRawMode(true)
+            process.stdin.on('data', onData)
+            process.stdin.resume()
+            process.stdout.write(prompt)
+          } catch (error) {
+            cleanup()
+            throw error
+          }
         })
       },
       close() {},

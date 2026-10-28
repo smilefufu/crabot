@@ -77,3 +77,7 @@ scrapling-runtime.json.*.tmp
 # Native host build outputs and pinned compiler headers
 /.desktop-build/
 /crabot-native/build/
+
+# Generated bundled-runtime and finite offline-test resources
+/.product-runtime/
+/product-runtime.json
