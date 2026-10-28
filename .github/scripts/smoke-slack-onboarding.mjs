@@ -7,12 +7,11 @@ import { cliEnvironment, ensureCli, privateDirectory, startCli } from '../../cra
 import { prepareProject, SLACK_MANIFEST } from '../../crabot-channel-slack/dist/cli-project.js'
 const root = await fs.mkdtemp(path.join(os.tmpdir(), "crabot slack-cli's $safe-"))
 const originalFetch = globalThis.fetch
-let job, commandTimer
+let job, commandTimer, executable
 try {
   console.log(`Slack CLI smoke: preparing private tool directory (${process.platform}/${process.arch})`)
   await privateDirectory(root)
   if (process.env.SLACK_CLI_TEST_ARCHIVE) globalThis.fetch = async () => new Response(await fs.readFile(process.env.SLACK_CLI_TEST_ARCHIVE))
-  let executable
   try { executable = await ensureCli(root, AbortSignal.timeout(300000)) }
   finally { globalThis.fetch = originalFetch }
   console.log('Slack CLI smoke: checking verified executable startup (15 second limit)')
@@ -37,6 +36,30 @@ try {
   await assert.rejects(fs.access(path.join(root, 'handoff.json')))
   console.log(`Slack CLI 4.11.0 verified archive and real local hooks passed: ${process.platform}/${process.arch}; no login, App creation or messages`)
 } catch (error) {
+  if (process.platform === 'win32' && executable && !job) {
+    // Diagnostic-only profiles: never use their result to accept the original failed probe.
+    const base = cliEnvironment()
+    const standard = { ...base }
+    for (const key of ['OS', 'SystemDrive', 'HOMEDRIVE', 'HOMEPATH', 'USERNAME', 'USERDOMAIN', 'COMPUTERNAME', 'PATHEXT', 'ProgramData', 'ProgramFiles', 'CommonProgramFiles', 'WINDIR', 'NUMBER_OF_PROCESSORS', 'PROCESSOR_ARCHITECTURE']) {
+      if (process.env[key] !== undefined) standard[key] = process.env[key]
+    }
+    for (const [label, env] of [['standard-windows-env', standard], ['noninteractive-terminal', { ...base, CI: 'true', TERM: 'dumb', NO_COLOR: '1' }]]) {
+      try {
+        const output = execFileSync(executable, ['--version'], { cwd: root, env, timeout: 15000, windowsHide: true, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+        console.log(`Slack CLI startup diagnostic: ${label} pinned-version=${output.includes('4.11.0')}`)
+      } catch { console.log(`Slack CLI startup diagnostic: ${label} failed`) }
+    }
+    let plain
+    try {
+      plain = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-slack-cli-startup-'))
+      await privateDirectory(plain)
+      const copy = path.join(plain, 'slack.exe')
+      await fs.copyFile(executable, copy)
+      const output = execFileSync(copy, ['--version'], { cwd: plain, env: base, timeout: 15000, windowsHide: true, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+      console.log(`Slack CLI startup diagnostic: simple-private-path pinned-version=${output.includes('4.11.0')}`)
+    } catch { console.log('Slack CLI startup diagnostic: simple-private-path failed') }
+    finally { if (plain) await fs.rm(plain, { recursive: true, force: true }).catch(() => console.log('Slack CLI startup diagnostic: temporary copy cleanup failed')) }
+  }
   // This isolated manifest-only probe never logs in; report fixed milestones, not raw CLI logs.
   try {
     const state = await fs.access(path.join(root, 'project', 'process-state.json')).then(() => true, () => false)
