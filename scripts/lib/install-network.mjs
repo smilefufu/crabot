@@ -33,10 +33,14 @@ export async function uvTransport(uv, directory, env = process.env) {
 async function systemProxy(url, env) {
   if (process.platform !== 'win32' || env.HTTPS_PROXY || env.https_proxy || env.ALL_PROXY || env.all_proxy) return ''
   const script = '$u=[Uri]$env:CRABOT_NETWORK_PROBE;$p=[Net.WebRequest]::DefaultWebProxy;if($p){$v=$p.GetProxy($u);if($v -ne $u){$v.AbsoluteUri}}'
-  const { stdout } = await exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
-    env: { ...env, CRABOT_NETWORK_PROBE: url }, timeout: 5000, maxBuffer: 4096,
-  })
-  return stdout.trim()
+  try {
+    const { stdout } = await exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
+      env: { ...env, CRABOT_NETWORK_PROBE: url }, timeout: 15_000, maxBuffer: 4096,
+    })
+    return stdout.trim()
+  } catch (error) {
+    throw new Error(`Cannot inspect Windows system proxy (exit ${error.code ?? 'unknown'}, signal ${error.signal ?? 'none'}, timed_out=${error.killed === true})`)
+  }
 }
 
 async function probeSource(url, kind, env, proxy) {
@@ -95,6 +99,7 @@ function sourceFailure(error) {
   if (error.code === 'CRABOT_PREPARATION_CANCELLED') return false
   const message = `${error.message}\n${error.stderr ?? ''}`
   if (/gyp ERR!|ELIFECYCLE|hash.*mismatch|mismatch.*hash|signature|keyid|integrity|EACCES|EPERM|ENOSPC|permission denied|no space left|cancelled/i.test(message)) return false
+  if (/cause:\s+Failed to fetch:\s+https?:\/\/\S+[\s\S]*?cause:\s+operation timed out\b/i.test(message)) return true
   return /HTTP[^\n]*(403|404|408|429|5\d\d)|403 Forbidden|404 Not Found|ERR_PNPM_(FETCH|META_FETCH|NO_MATCHING_VERSION)|ETIMEDOUT|ECONNRESET|ECONNREFUSED|ENOTFOUND|network.*(failed|unreachable)|connection.*(reset|refused|timed out)|request.*timed out|was not found in the package registry|there (?:is no version|are no versions) of/i.test(message)
 }
 
