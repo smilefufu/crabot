@@ -86,7 +86,7 @@ describe('connection translators（P6-B §7）', () => {
     }
     const set = await RuntimeFileSet.create(root, { 'config.toml': 'x = 1' })
     const stat = await fs.stat(set.resolve('config.toml'))
-    if (process.platform === 'win32') expect(require('../../../scripts/lib/process-identity.cjs').isPrivateFile(set.resolve('config.toml'))).toBe(true)
+    if (process.platform === 'win32') expect(require('../../../scripts/lib/process-identity.cjs').isOwnerOnlyFile(set.resolve('config.toml'))).toBe(true)
     else expect(stat.mode & 0o777).toBe(0o600)
     expect(() => set.resolve('../escape')).toThrow(/escapes/)
     await set.dispose()

@@ -185,7 +185,7 @@ describe('CodexWorkerAdapter.provision', () => {
 
     const configPath = path.join(ws, '.codex/config.toml')
     const configToml = await fs.readFile(configPath, 'utf-8')
-    if (process.platform === 'win32') expect(require('../../../scripts/lib/process-identity.cjs').isPrivateFile(configPath)).toBe(true)
+    if (process.platform === 'win32') expect(require('../../../scripts/lib/process-identity.cjs').isOwnerOnlyFile(configPath)).toBe(true)
     else expect((await fs.stat(configPath)).mode & 0o777).toBe(0o600)
     expect(configToml).toContain('notify = ')
     expect(configToml).toContain('events-cli.jsonl')
@@ -289,7 +289,7 @@ describe('CodexWorkerAdapter.provision', () => {
 
     const authPath = path.join(ws, '.codex/auth.json')
     const stat = await fs.stat(authPath)
-    if (process.platform === 'win32') expect(require('../../../scripts/lib/process-identity.cjs').isPrivateFile(authPath)).toBe(true)
+    if (process.platform === 'win32') expect(require('../../../scripts/lib/process-identity.cjs').isOwnerOnlyFile(authPath)).toBe(true)
     else expect((stat.mode & 0o777)).toBe(0o600)
   })
 

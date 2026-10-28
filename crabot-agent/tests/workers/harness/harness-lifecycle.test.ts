@@ -968,7 +968,8 @@ describe('WorkerHarness.spawnWorker', () => {
       ['original', false],
       ['later', false],
     ])
-    expect(events.find((event) => event.kind === 'state_changed')?.detail).toMatchObject({
+    await waitUntil(() => events.some(event => event.kind === 'state_changed' && event.detail?.kind === 'input_delivery_stalled'))
+    expect(events.find((event) => event.kind === 'state_changed' && event.detail?.kind === 'input_delivery_stalled')?.detail).toMatchObject({
       to: 'idle',
       kind: 'input_delivery_stalled',
       wait_mode: 'action',
