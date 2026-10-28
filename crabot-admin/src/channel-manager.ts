@@ -8,7 +8,7 @@ import fs from 'fs/promises'
 import fsSync from 'fs'
 import path from 'path'
 import yaml from 'js-yaml'
-import { generateTimestamp, type RpcClient, validateInstanceId, voiceSetupStatus, type VoiceSetupMetadata } from 'crabot-shared'
+import { generateTimestamp, RpcCallError, type RpcClient, validateInstanceId, voiceSetupStatus, type VoiceSetupMetadata } from 'crabot-shared'
 import type {
   ChannelImplementation,
   ChannelInstance,
@@ -372,11 +372,13 @@ export class ChannelManager {
     }
 
     if (instance.module_registered) {
+      await this.rpcClient.stopModule(id, 'admin')
+      // stopModule 只表示已受理；注销失败时必须保留实例/配置，供停止完成后重试。
       try {
-        await this.rpcClient.stopModule(id, 'admin')
         await this.rpcClient.unregisterModuleDefinition(id, 'admin')
       } catch (error) {
-        console.error(`[ChannelManager] Failed to unregister module:`, error)
+        // MM 已明确确认定义不存在时，可以清理遗留实例；连接/权限等错误不能吞掉。
+        if (!(error instanceof RpcCallError && error.code === 'NOT_FOUND')) throw error
       }
     }
 
