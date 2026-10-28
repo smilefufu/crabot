@@ -1,0 +1,58 @@
+name: Managed MCP application integration
+on:
+  workflow_dispatch:
+  push:
+    branches: ['feat/desktop-managed-mcp']
+  pull_request:
+    paths:
+      - 'crabot-admin/src/*mcp*'
+      - 'crabot-agent/src/agent/mcp-connector.ts'
+      - 'crabot-agent/src/core/runtime-env.ts'
+      - 'scripts/lib/managed-mcp-*'
+      - '.github/workflows/managed-mcp.yml'
+permissions:
+  contents: read
+jobs:
+  managed:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, macos-15-intel, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.3'
+      - name: Build only this checkout's actual dependencies and business modules
+        shell: bash
+        run: |
+          pnpm --dir crabot-client install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-client run build
+          pnpm --dir crabot-shared install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-shared run build
+          pnpm install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-admin install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-admin run build
+          pnpm --dir crabot-agent install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-agent run build
+          node scripts/build-native.mjs
+      - name: Verify registration, revision and actual Admin projection
+        working-directory: crabot-admin
+        run: >-
+          node node_modules/vitest/vitest.mjs run
+          src/managed-mcp.test.ts src/managed-mcp-runtime.test.ts
+          src/mcp-subagent-config-mutation.test.ts src/core-agent-config-coherent-read.test.ts
+          --maxWorkers=1 --minWorkers=1
+      - name: Verify Agent environments, MCP transport and original observers
+        working-directory: crabot-agent
+        run: >-
+          node node_modules/vitest/vitest.mjs run
+          tests/core/runtime-env.test.ts tests/core/child-env-guard.test.ts
+          tests/agent/mcp-connector.test.ts tests/mcp-connector-tool-defaults.test.ts
+          tests/computer-use-owner.test.ts tests/workers/harness/harness-workspace-git.test.ts
+          --maxWorkers=1 --minWorkers=1
+      - name: Verify real finite dependency isolation without package-manager execution
+        run: node --test scripts/lib/__tests__/managed-mcp-prepare.test.mjs
