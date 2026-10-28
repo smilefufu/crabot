@@ -1,0 +1,27 @@
+name: Desktop built-in administrator scope
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  scope:
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.3'
+      - name: Build actual SDK and Shared and install frozen module dependencies
+        shell: bash
+        run: |
+          pnpm --dir crabot-client install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-client run build
+          pnpm --dir crabot-shared install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-shared run build
+          pnpm --dir crabot-admin install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-agent install --frozen-lockfile --ignore-scripts
+      - name: Probe real built-in template, admission and guarded project reads on both drives
+        working-directory: crabot-admin
+        run: node node_modules/vitest/vitest.mjs run src/permission-template-host-scope.test.ts --maxWorkers=1 --minWorkers=1
