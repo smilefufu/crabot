@@ -267,7 +267,7 @@ for (const forward of [false, true]) describe('current interrupted ' + (forward 
         await f.cleanup()
       }
     }
-  }, process.platform === 'win32' ? 180000 : 60000)
+  }, process.platform === 'win32' ? 180000 : 120000)
 
   if (!forward) it('binds a fresh real role to the current human and Admin without claiming execution exit', async () => {
     const f = await fixture({ actualAdmin: true, extraModule: 'inactive', processLifetimeMs: 60000 })

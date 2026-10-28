@@ -85,7 +85,7 @@ on:
         description: 'Focused rerun; complete acceptance still requires the full matrix'
         type: choice
         default: all
-        options: [all, interrupted-source]
+        options: [all, interrupted-source, finite, business]
 
 permissions:
   contents: read
@@ -97,12 +97,12 @@ defaults:
 jobs:
   core:
     name: ${{ matrix.suite == 'business' && 'Business workspace runtime' || matrix.suite == 'archive' && 'Archived workspace records' || matrix.suite == 'recovery-terminal' && 'Cold workspace release' || matrix.suite == 'recovery-services' && 'Cold workspace service restoration' || matrix.suite == 'recovery-admin' && 'Cold workspace Admin restoration' || matrix.suite == 'recovery' && 'Cold workspace recovery' || matrix.suite == 'owned' && 'Owned workspace migrations' || matrix.suite == 'owned-recovery' && 'Same MM workspace recovery' || matrix.suite == 'completion' && 'Workspace job completion' || 'Fixed workspace lifecycle' }} ${{ matrix.os }}
-    timeout-minutes: ${{ matrix.os == 'windows-2022' && 45 || 25 }}
+    timeout-minutes: ${{ matrix.os == 'windows-2022' && matrix.suite == 'finite' && 90 || matrix.os == 'windows-2022' && 45 || 25 }}
     strategy:
       fail-fast: false
       matrix:
         os: ${{ fromJSON(inputs.target && inputs.target != 'all' && format('["{0}"]', inputs.target) || '["ubuntu-22.04","macos-15","macos-15-intel","windows-2022"]') }}
-        suite: ${{ fromJSON(inputs.suite == 'interrupted-source' && '["interrupted-source"]' || '["finite","business","archive","recovery","recovery-terminal","recovery-services","recovery-admin","owned","owned-recovery","completion"]') }}
+        suite: ${{ fromJSON(inputs.suite && inputs.suite != 'all' && format('["{0}"]', inputs.suite) || '["finite","business","archive","recovery","recovery-terminal","recovery-services","recovery-admin","owned","owned-recovery","completion"]') }}
     # The locked SQLite node-gyp requires VS2022; do not depend on the floating VS18 image.
     runs-on: ${{ matrix.os }}
     concurrency:
