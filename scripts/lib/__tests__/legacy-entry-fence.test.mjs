@@ -8,6 +8,7 @@ import { promisify } from 'node:util'
 import { materializeLegacyRelease } from './fixtures/legacy-release.mjs'
 import { discoverLegacyUserInstall } from '../legacy-desktop.mjs'
 import { fenceLegacyEntries, inspectLegacyEntryFence, restoreLegacyEntries, sealLegacyEntryFence } from '../legacy-entry-fence.mjs'
+import { entryFenceBytes } from '../legacy-entry-files.mjs'
 
 async function fixture(t, version) {
   const parent = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'Crabot 旧入口 ')))
@@ -33,6 +34,7 @@ for (const version of ['v2026.10.14.1', 'v2026.10.15.1']) test('recognized entry
   const f = await fixture(t, version), record = await fenceLegacyEntries(f.installation)
   assert.equal(record.phase, 'fenced')
   assert.equal((await inspectLegacyEntryFence(f.root)).id, record.id)
+  assert.deepEqual(await fs.readFile(path.join(f.root, 'cli.mjs')), entryFenceBytes('cli.mjs'))
   await assert.rejects(promisify(execFile)(process.execPath, [path.join(f.root, 'cli.mjs'), 'start']), error => {
     assert.match(error.stderr, /CRABOT_LEGACY_ENTRY_FENCE/); return true
   })
