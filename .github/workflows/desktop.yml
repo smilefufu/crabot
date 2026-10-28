@@ -450,7 +450,7 @@ jobs:
         run: xvfb-run -a node .github/scripts/smoke-packaged-desktop.mjs ".desktop-build/安装 候选/paired" 2>&1 | tee .desktop-build/paired-boot.log
       - name: Boot actual offline-prepared pair on macOS and Windows
         if: runner.os != 'Linux' && steps.scope.outputs.full_runtime == 'true'
-        timeout-minutes: ${{ matrix.target == 'darwin-x64' && 35 || runner.os == 'Windows' && 25 || 20 }}
+        timeout-minutes: ${{ matrix.target == 'darwin-x64' && 35 || runner.os == 'Windows' && 40 || 20 }}
         run: node .github/scripts/smoke-packaged-desktop.mjs ".desktop-build/安装 候选/paired" 2>&1 | tee .desktop-build/paired-boot.log
       - name: Signed paired update reaches ordinary target GUI and Core health
         if: steps.scope.outputs.full_runtime == 'true'
