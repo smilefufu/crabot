@@ -30,7 +30,7 @@ async function main(): Promise<void> {
     await assertStopped(DATA_DIR)
   }
   execFileSync(process.execPath, [path.join(CRABOT_ROOT, 'scripts/prepare-shared-requests.mjs'), `--data-dir=${DATA_DIR}`], {
-    stdio: 'inherit', env: { ...process.env, CRABOT_CLI_LOCK_HELD: '1', CRABOT_CLI_LOCK_OWNER: inheritedLock ? process.env.CRABOT_CLI_LOCK_OWNER : String(process.pid) },
+    stdio: 'inherit', env: { ...process.env, CRABOT_CLI_LOCK_HELD: inheritedLock ? process.env.CRABOT_CLI_LOCK_HELD : locks.cliLockToken(startupLock) },
   })
   delete process.env.CRABOT_CLI_LOCK_HELD
   delete process.env.CRABOT_CLI_LOCK_OWNER

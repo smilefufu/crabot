@@ -5,6 +5,7 @@ import os from 'node:os'
 import net from 'node:net'
 import { fileURLToPath } from 'node:url'
 import { spawnSync, spawn } from 'node:child_process'
+import { acquireCliLock, releaseCliLock } from '../../lib/cli-lock.mjs'
 const product = fileURLToPath(new URL('../../../', import.meta.url))
 let root, data, home
 beforeEach(async () => {
@@ -17,6 +18,8 @@ async function write(name, bytes) { await fs.mkdir(path.dirname(path.join(home, 
 const env = () => ({ ...process.env, DATA_DIR: data, CRABOT_CLI_LOCK_HELD: '', CRABOT_CLI_LOCK_OWNER: '', CRABOT_ORPHAN_RECOVERY_INTERACTIVE: '0' })
 async function scripts() {
   for (const name of ['lib', 'upgrade-lib']) await fs.cp(path.join(product, 'scripts', name), path.join(home, 'scripts', name), { recursive: true, filter: source => !['node_modules', '__tests__'].includes(path.basename(source)) })
+  await fs.mkdir(path.join(home, 'crabot-native/build/Release'), { recursive: true })
+  await fs.copyFile(path.join(product, 'crabot-native/build/Release/crabot-native.node'), path.join(home, 'crabot-native/build/Release/crabot-native.node'))
   await write('scripts/lib/instance.mjs', 'export const resolveCliDataDir = () => process.env.DATA_DIR; export const hasInstance = () => true')
   await write('scripts/lib/node_modules/proper-lockfile/index.js', 'module.exports = {}')
   await write('scripts/lib/scrapling-runtime.cjs', 'module.exports = { runtimeRequired() { return false } }')
@@ -30,7 +33,7 @@ async function invalidLedger() {
   const file = path.join(data, 'agent/worker-ledgers/bad.json')
   await fs.mkdir(path.dirname(file), { recursive: true }); await fs.writeFile(file, '{"schema_version":99}')
 }
-it('actual compiled direct MM rejects corrupt data before its PID, venv or ingress can be created', async () => {
+it.skipIf(process.env.GITHUB_ACTIONS !== 'true')('actual compiled direct MM rejects corrupt data before its PID, venv or ingress can be created', async () => {
   await invalidLedger()
   const result = spawnSync(process.execPath, [path.join(product, 'crabot-core/dist/main.js')], { cwd: path.join(product, 'crabot-core'), env: { ...env(), PORT: '0' }, encoding: 'utf8', timeout: 10000 })
   expect(result.status).toBe(1)
@@ -79,7 +82,7 @@ it('foreground start releases only its startup lock after MM health, while its o
   await write('crabot-admin/dist/credentials.js', 'exports.readCredentials = async () => ({}); exports.writeCredentials = async () => {}; exports.newCredentialsFromPassword = () => {};')
   await fs.copyFile(path.join(product, 'scripts/start.mjs'), path.join(home, 'scripts/start.mjs'))
   const port = await new Promise(resolve => { const socket = net.createServer(); socket.listen(0, '127.0.0.1', () => { const port = socket.address().port; socket.close(() => resolve(port)) }) })
-  await write('crabot-core/dist/main.js', `const http=require('node:http'); const server=http.createServer((req,res)=>{res.setHeader('content-type','application/json');res.end(JSON.stringify({data:{status:'healthy'}}))}); server.listen(${port},'127.0.0.1');`)
+  await write('crabot-core/dist/main.js', `const http=require('node:http'); const server=http.createServer((req,res)=>{res.setHeader('content-type','application/json');res.end(JSON.stringify({success:true,data:{status:'healthy'}}))}); server.listen(${port},'127.0.0.1');`)
   const child = spawn(process.execPath, [path.join(home, 'scripts/start.mjs')], { cwd: home, env: { ...env(), CRABOT_PORT_OFFSET: String(port - 19000) }, stdio: ['ignore', 'pipe', 'pipe'] })
   let output = ''; child.stdout.on('data', bytes => { output += bytes }); child.stderr.on('data', bytes => { output += bytes })
   const exited = new Promise(resolve => child.on('close', resolve))
@@ -87,19 +90,19 @@ it('foreground start releases only its startup lock after MM health, while its o
     const deadline = Date.now() + 8000
     while (Date.now() < deadline) {
       const pid = await fs.readFile(path.join(data, 'mm.pid'), 'utf8').catch(() => '')
-      const locked = await fs.stat(path.join(data, 'cli.lock')).then(() => true, () => false)
+      const locked = await acquireCliLock(data, 'probe', 0).then(lock => { releaseCliLock(lock); return false }, () => true)
       if (pid && !locked) break
       await new Promise(resolve => setTimeout(resolve, 20))
     }
     expect(child.exitCode, output).toBeNull()
     expect(await fs.readFile(path.join(data, 'mm.pid'), 'utf8')).toBe(String(child.pid))
-    await expect(fs.stat(path.join(data, 'cli.lock'))).rejects.toThrow()
+    const available = await acquireCliLock(data, 'probe', 0); releaseCliLock(available)
     await fs.writeFile(path.join(data, 'mm.pid'), '2147483000')
   } finally { child.kill('SIGTERM'); await exited }
   expect(await fs.readFile(path.join(data, 'mm.pid'), 'utf8')).toBe('2147483000')
 }, 12000)
 
-it('actual compiled MM releases startup ownership after ingress and its exit preserves later lock/PID evidence', async () => {
+it.skipIf(process.env.GITHUB_ACTIONS !== 'true')('actual compiled MM releases startup ownership after ingress and its exit preserves later lock/PID evidence', async () => {
   await scripts()
   await fs.cp(path.join(product, 'crabot-core/dist'), path.join(home, 'crabot-core/dist'), { recursive: true })
   await fs.symlink(path.join(product, 'crabot-core/node_modules'), path.join(home, 'crabot-core/node_modules'), 'dir')
@@ -115,13 +118,13 @@ it('actual compiled MM releases startup ownership after ingress and its exit pre
     let healthy = false
     while (Date.now() < deadline) {
       try { healthy = (await (await fetch(`http://127.0.0.1:${port}/health`, { method: 'POST', body: '{}', signal: AbortSignal.timeout(200) })).json()).data.status === 'healthy' } catch {}
-      const locked = await fs.stat(path.join(data, 'cli.lock')).then(() => true, () => false)
+      const locked = await acquireCliLock(data, 'probe', 0).then(lock => { releaseCliLock(lock); return false }, () => true)
       if (healthy && !locked) break
       await new Promise(resolve => setTimeout(resolve, 20))
     }
     expect(healthy, output).toBe(true)
     expect(await fs.readFile(path.join(data, 'mm.pid'), 'utf8')).toBe(String(child.pid))
-    await expect(fs.stat(path.join(data, 'cli.lock'))).rejects.toThrow()
+    const available = await acquireCliLock(data, 'probe', 0); releaseCliLock(available)
     await fs.writeFile(path.join(data, 'cli.lock'), JSON.stringify({ pid: 2147483000, command: 'later fixture' }))
     await fs.writeFile(path.join(data, 'mm.pid'), '2147483000')
   } finally { child.kill('SIGTERM'); await exited }

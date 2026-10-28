@@ -18,7 +18,7 @@ import { runMigrations } from './upgrade-lib/migrate.mjs'
 import { runScript } from './upgrade-lib/runner.mjs'
 import { hasInstance, resolveCliDataDir } from './lib/instance.mjs'
 import { probeMmHealthy } from './lib/mm-probe.mjs'
-import { acquireCliLock, releaseCliLock, inheritedCliLock } from './lib/cli-lock.mjs'
+import { acquireCliLock, releaseCliLock, inheritedCliLock, cliLockToken } from './lib/cli-lock.mjs'
 import scraplingRuntime from './lib/scrapling-runtime.cjs'
 import { runBounded } from './lib/scrapling-prepare.mjs'
 
@@ -172,8 +172,7 @@ function releaseStartupLock() {
 if (!inheritedCliLock(DATA_DIR)) {
   try {
     startupCliLock = await acquireCliLock(DATA_DIR, 'start')
-    process.env.CRABOT_CLI_LOCK_HELD = '1'
-    process.env.CRABOT_CLI_LOCK_OWNER = String(process.pid)
+    process.env.CRABOT_CLI_LOCK_HELD = cliLockToken(startupCliLock)
     process.on('exit', releaseStartupLock)
   } catch (error) {
     console.error(`[crabot] ${error.message}`)

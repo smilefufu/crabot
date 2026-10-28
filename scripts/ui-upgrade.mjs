@@ -12,7 +12,7 @@ import { resolveCliDataDir } from './lib/instance.mjs'
 import { runScript } from './upgrade-lib/runner.mjs'
 import { runMigrations } from './upgrade-lib/migrate.mjs'
 import { prepareUpgrade, installPreparedUpgrade } from './upgrade-lib/prepared-upgrade.mjs'
-import { acquireCliLock, releaseCliLock } from './lib/cli-lock.mjs'
+import { acquireCliLock, releaseCliLock, cliLockToken } from './lib/cli-lock.mjs'
 import { preflightRestart } from './upgrade-lib/preflight.mjs'
 import {
   getCurrentVersion,
@@ -58,8 +58,8 @@ function writeStatus(patch) {
   writeFileSync(STATUS_FILE, JSON.stringify({ ...prev, ...patch }, null, 2))
 }
 
-function node(args) {
-  execFileSync(process.execPath, [CLI, ...args], { cwd: CRABOT_HOME, stdio: 'inherit', env: { ...process.env, CRABOT_CLI_LOCK_HELD: '1', CRABOT_CLI_LOCK_OWNER: String(process.pid) } })
+function node(args, lock) {
+  execFileSync(process.execPath, [CLI, ...args], { cwd: CRABOT_HOME, stdio: 'inherit', env: { ...process.env, CRABOT_CLI_LOCK_HELD: cliLockToken(lock) } })
 }
 
 function stamp() {
@@ -115,7 +115,7 @@ async function main() {
     writeStatus({ phase: 'restarting' })
     console.log('[ui-upgrade] (switch) stop')
     switchStarted = true
-    node(['stop'])
+    node(['stop'], lock)
     await installPreparedUpgrade(prepared, CRABOT_HOME, DATA_DIR)
 
     console.log('[ui-upgrade] (switch) run migrations')
@@ -129,7 +129,7 @@ async function main() {
     }
 
     console.log('[ui-upgrade] (switch) start -d')
-    node(['start', '-d'])
+    node(['start', '-d'], lock)
 
     writeStatus({ phase: 'done', to_version: readVersion(mode), finished_at: stamp() })
     console.log(`[ui-upgrade] done at=${stamp()}`)

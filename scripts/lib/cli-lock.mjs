@@ -1,99 +1,85 @@
-// crabot CLI 操作互斥锁（实例级）。
-//
-// 背景：restart/stop/start 交叠时会互踩——后来的 stop 按 mm.pid 把先前 start 刚拉起的
-// supervisor SIGTERM 掉（2026-08-28 生产实例连续两次重启失败的根因：另一操作者的 stop
-// 与用户串行执行的 restart 撞窗）。此锁让并发的 CLI 操作明确失败或短暂等待，而不是
-// 静默互杀。
-//
-// 语义：
-//   - 锁文件 $DATA_DIR/cli.lock，O_EXCL('wx') 原子创建，内容 { pid, command, started_at }。
-//   - 持有者已死（process.exit 未走 release、SIGKILL）→ 陈旧锁，在短生命周期修复互斥内重读属主后 rename 接管。
-//   - 被占且持有者存活：默认等待 5s 后报错退出，报错携带持有者 pid/命令/起始时间，
-//     便于定位"谁在操作实例"。
-//   - restart 经 env CRABOT_CLI_LOCK_HELD=1 调用子 stop/start：子命令跳过抢锁，
-//     锁由 restart 外层持有全程。
-import { readFileSync, writeFileSync, unlinkSync, renameSync, mkdirSync, rmdirSync, statSync } from 'node:fs'
+// OS-owned lock: crash closes the handle; the persistent metadata file is never renamed/unlinked.
+import { mkdirSync, readFileSync, lstatSync } from 'node:fs'
 import { resolve } from 'node:path'
+import { randomUUID } from 'node:crypto'
+import native from './process-identity.cjs'
+import preflight from './preflight-state.cjs'
+import workspace from './workspace-maintenance.cjs'
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+const handles = new Map()
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
 
-function isPidAlive(pid) {
-  try { process.kill(pid, 0); return true }
-  catch (error) { if (error.code === 'ESRCH') return false; throw error }
-}
-function readHolder(lockPath) {
-  try { return JSON.parse(readFileSync(lockPath, 'utf8')) } catch { return null }
-}
-function validHolder(holder) { return holder && Number.isSafeInteger(holder.pid) && holder.pid > 0 }
-
-// Serialize only stale-lock repair, then re-read ownership. A cached dead PID cannot authorize
-// renaming a newer live lock. An interrupted repair is retained and fails within the deadline.
-function recoverStaleLock(lockPath) {
-  const recovery = `${lockPath}.recovery`, owner = resolve(recovery, 'owner.json')
-  try { mkdirSync(recovery, { mode: 0o700 }) }
-  catch (error) { if (error.code === 'EEXIST') return false; throw error }
-  try {
-    writeFileSync(owner, JSON.stringify({ pid: process.pid, started_at: new Date().toISOString() }), { flag: 'wx', mode: 0o600 })
-    const current = readHolder(lockPath)
-    if (!validHolder(current) || isPidAlive(current.pid)) return false
-    const stale = `${lockPath}.stale.${process.pid}`
-    try { renameSync(lockPath, stale) } catch (error) { if (error.code === 'ENOENT') return true; throw error }
-    unlinkSync(stale)
-    return true
-  } finally {
-    try { unlinkSync(owner) } catch (error) { if (error.code !== 'ENOENT') throw error }
-    rmdirSync(recovery)
+async function acquire(dataDir, command, waitMs, recoveryId, workspaceAdmission = workspace.assertWorkspaceExecutionAllowed, existingOnly = false) {
+  workspaceAdmission(dataDir)
+  const directoryIdentity = () => {
+    const stat = lstatSync(dataDir, { bigint: true })
+    if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error('maintenance directory is not an existing ordinary directory')
+    return [stat.dev, stat.ino, stat.mode, stat.uid, stat.gid].join(':')
   }
-}
-
-export async function acquireCliLock(dataDir, command, waitMs = 5000) {
-  const lockPath = resolve(dataDir, 'cli.lock')
-  const directory = statSync(dataDir)
-  if (process.getuid && process.getuid() !== 0 && directory.uid !== process.getuid()) throw new Error('CLI instance directory belongs to another user')
+  if (!existingOnly) mkdirSync(dataDir, { recursive: true })
+  const original = existingOnly ? directoryIdentity() : undefined
+  const assertDirectory = () => {
+    if (existingOnly && directoryIdentity() !== original) throw new Error('maintenance directory changed while acquiring its lock')
+  }
+  const path = resolve(dataDir, 'cli.lock')
   const deadline = Date.now() + waitMs
+  const token = randomUUID()
+  const owner = native.inspectProcess(process.pid)
   for (;;) {
-    try {
-      writeFileSync(lockPath, JSON.stringify({ pid: process.pid, command, started_at: new Date().toISOString() }), { flag: 'wx' })
-      return lockPath
-    } catch (error) {
-      if (error?.code !== 'EEXIST') throw error
+    assertDirectory(); workspaceAdmission(dataDir)
+    let preparationBusy
+    if (!handles.has(path)) {
+      const handle = native.tryFileLock(path, JSON.stringify({ pid: process.pid, command, started_at: new Date().toISOString(), owner, token }))
+      if (handle) {
+        try { assertDirectory(); workspaceAdmission(dataDir); preflight.assertSettled(dataDir, recoveryId) }
+        catch (error) {
+          native.releaseFileLock(handle)
+          if (error.code !== 'CRABOT_PREFLIGHT_BUSY') throw error
+          preparationBusy = error
+        }
+        if (!preparationBusy) { handles.set(path, { handle, token }); return path }
+      }
     }
-    const holder = readHolder(lockPath)
-    if (!validHolder(holder)) {
-      if (Date.now() >= deadline) throw new Error('invalid CLI lock; preserve ownership evidence before recovery')
-      await sleep(200)
-      continue
-    }
-    if (!isPidAlive(holder.pid)) {
-      if (recoverStaleLock(lockPath)) continue
-      if (Date.now() >= deadline) throw new Error('stale CLI lock recovery is incomplete or busy; preserve recovery evidence')
-      await sleep(200)
-      continue
-    }
-    if (Date.now() >= deadline) {
-      throw new Error(
-        `another crabot CLI operation is in progress `
-        + `(pid=${holder.pid}, cmd=${holder.command ?? '?'}, since=${holder.started_at ?? '?'}) — `
-        + `wait for it to finish, then retry`,
-      )
-    }
-    await sleep(200)
+    if (Date.now() >= deadline) throw preparationBusy ?? new Error('another crabot CLI operation is in progress — wait for it to finish, then retry')
+    await sleep(Math.min(100, Math.max(1, deadline - Date.now())))
   }
 }
 
-export function releaseCliLock(lockPath) {
-  if (!lockPath) return
-  try {
-    if (readHolder(lockPath)?.pid === process.pid) unlinkSync(lockPath)
-  } catch { /* Missing or unknown ownership must not remove another operation's lock. */ }
+export function acquireCliLock(dataDir, command, waitMs = 5000) { return acquire(dataDir, command, waitMs) }
+
+// Maintenance on an already verified installation must not initialize missing data.
+export function acquireExistingCliLock(dataDir, command, waitMs = 5000) {
+  return acquire(dataDir, command, waitMs, undefined, workspace.assertWorkspaceExecutionAllowed, true)
 }
 
-/** An inherited flag alone is not a lock: bind it to the live parent's actual lock record. */
-export function inheritedCliLock(dataDir, env = process.env) {
-  const pid = Number(env.CRABOT_CLI_LOCK_OWNER)
-  if (env.CRABOT_CLI_LOCK_HELD !== '1' || !Number.isSafeInteger(pid) || pid < 1) return false
+// Only explicit startup/recovery can replace a stopped orphan-check receipt.
+// This does not authorize retrying schema migrations or other business work.
+export async function acquireStartupLock(dataDir, command = 'start', waitMs = 5000) {
+  const previous = preflight.read(dataDir)
+  return acquire(dataDir, command, waitMs, previous?.id, () => {})
+}
+
+export function releaseCliLock(path) {
+  const lock = handles.get(path)
+  if (!lock) return
+  native.releaseFileLock(lock.handle)
+  handles.delete(path)
+}
+
+export function cliLockToken(path) { return handles.get(path)?.token }
+
+export function hasInheritedCliLock(dataDir, token = process.env.CRABOT_CLI_LOCK_HELD) {
+  if (!token || token === '1') return false
   try {
-    const holder = JSON.parse(readFileSync(resolve(dataDir, 'cli.lock'), 'utf8'))
-    return holder.pid === pid && isPidAlive(pid)
+    const path = resolve(dataDir, 'cli.lock')
+    const raw = readFileSync(path, 'utf8'), record = JSON.parse(raw)
+    if (record.token !== token || !native.sameProcess(record.owner, native.inspectProcess(record.pid))) return false
+    // Persistent metadata is not proof the owner still holds its OS handle.
+    const available = native.tryFileLock(path, raw)
+    if (available) { native.releaseFileLock(available); return false }
+    return true
   } catch { return false }
 }
+
+// Shared migration helpers use the same native inherited-lock verification.
+export const inheritedCliLock = hasInheritedCliLock

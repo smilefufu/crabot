@@ -5,7 +5,7 @@ import { createRequire } from 'node:module'
 import { promisify } from 'node:util'
 import { randomUUID } from 'node:crypto'
 import { fileDigest, optional, writeAtomic, hash, assertStopped } from './scoped-data.mjs'
-import { acquireCliLock, releaseCliLock, inheritedCliLock } from '../lib/cli-lock.mjs'
+import { acquireCliLock, releaseCliLock, cliLockToken } from '../lib/cli-lock.mjs'
 import { runSourceUpgrade, syncPythonDeps } from './source.mjs'
 import { downloadRelease, getReleaseUrls, unpackRelease } from './release.mjs'
 import { verifyReleasePackage } from '../lib/release-package.mjs'
@@ -174,7 +174,7 @@ export async function prepareUpgrade(home, dataRoot, { mode, version, logger = c
 export async function installPreparedUpgrade(prepared, home, dataRoot) {
   home = await fs.realpath(home)
   await assertStopped(dataRoot)
-  if (!inheritedCliLock(dataRoot, { CRABOT_CLI_LOCK_HELD: '1', CRABOT_CLI_LOCK_OWNER: String(process.pid) })) throw new Error('Product switch requires the owning instance operation lock')
+  if (!cliLockToken(path.resolve(dataRoot, 'cli.lock'))) throw new Error('Product switch requires the owning instance operation lock')
   if (prepared.phase !== 'prepared' || prepared.identity.home !== home || JSON.stringify(prepared.identity.environment) !== JSON.stringify(environment())) throw new Error('Prepared upgrade belongs to a different target or environment')
   if (prepared.identity.mode === 'source' && await sourceIdentity(home) !== prepared.identity.target) throw new Error('Source target changed after preparation')
   // The expensive digest audit ran immediately before stop. Verify the sealed payload's identity
