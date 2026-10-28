@@ -6,6 +6,12 @@
 - 原生备份完全同 id 沿用 skip/overwrite；仅大小写不同的 id 在 skip 时跳过、overwrite 时拒绝且不写实例/配置，避免隐式改名破坏引用。存量数据不迁移，其余字符/长度限制不变。正式命名协议、MM 冲突说明和旧设计记录已同步修订。
 - 旧实现先复现 14 项失败；修复后 Shared 7、Admin 152、Core 61、Web 21 项相关回归共 241 项通过，Shared 构建、Admin/Core 类型检查和 Web 生产构建通过。完整 diff 已复核；按用户要求走 PR，未重启或部署运行实例，未执行真实飞书授权。
 
+### WorkBuddy 端到端校准：1/3有效完成，Provider缺usage后停止
+
+- 已按确认spec尝试Code/Web/Office三题及获批的一次Web恢复，总额度120M；Code原始100分并交付，Web/Office因Provider及评测边界错误中断。上游原始运行分33.33不能视为能力总分。
+- 已知399,210 token（Manager264,354、Worker134,856），另2次未知；未继续收费或扩量。首次未知单独预留10M，保留所有失败与Code成果。
+- 5项预算回归及真实生产链路脚本回放通过，get_message评测遗漏已修复并回归；真实Web/Office模型裁判未验收。详见 `crabot-agent/eval/workbuddy/RESULTS.md`；后续先解决Provider稳定性与usage账目。
+
 ### LLM 连接恢复通知降噪：局部修复完成，未部署
 
 - 本次 LLM 调用前 30 秒仅自动重试，之后在下一次连接失败时简短提示“模型连接暂时不稳定，正在自动重试。”；保留 5 分钟通知冷却。Admin trace 与日志继续记录每次错误详情，最终失败告知不受静默门槛或恢复提示冷却影响。
