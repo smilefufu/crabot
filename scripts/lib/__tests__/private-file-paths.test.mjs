@@ -130,3 +130,28 @@ test('Windows existing app data keeps inherited/readable ACLs but rejects other 
   assert.equal(fs.statSync(inherited, { bigint: true }).ino, before.ino)
   assert.equal(fs.readFileSync(file, 'utf8'), 'old project bytes')
 })
+
+test('Windows ordinary existing paths remain manageable without changing their security descriptors', { skip: process.platform !== 'win32' }, t => {
+  const temporary = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'crabot-default-owner-')))
+  t.after(() => fs.rmSync(temporary, { recursive: true, force: true }))
+  const root = path.join(temporary, 'legacy'), data = path.join(root, 'data'), file = path.join(root, 'VERSION')
+  fs.mkdirSync(data, { recursive: true }); fs.writeFileSync(file, 'old release bytes')
+  const original = new Map([root, data, file].map(target => [target, identity.inspectFileMetadata(target)]))
+  const administratorsOwned = original.get(root).owner === 'S-1-5-32-544'
+  t.diagnostic('ordinary default Administrators owner: ' + administratorsOwned)
+  for (const directory of [root, data]) {
+    assert.equal(identity.isOwnedDirectory(directory), true)
+    assert.equal(identity.isExistingDataDirectory(directory), true)
+    assert.equal(identity.isPrivateDirectory(directory), false)
+  }
+  assert.equal(identity.isOwnedFile(file), true)
+  assert.equal(identity.isPrivateFile(file), false)
+  for (const [target, before] of original) assert.deepEqual(identity.inspectFileMetadata(target), before)
+  assert.equal(fs.readFileSync(file, 'utf8'), 'old release bytes')
+  const control = path.join(root, 'private-control.json'); identity.writePrivateFile(control, '{}')
+  assert.equal(identity.isPrivateFile(control), true)
+  const icacls = path.join(process.env.SystemRoot, 'System32/icacls.exe')
+  execFileSync(icacls, [root, '/grant', '*S-1-1-0:(W)'], { stdio: 'pipe' })
+  assert.equal(identity.isExistingDataDirectory(root), false)
+  if (administratorsOwned) assert.equal(identity.isOwnedDirectory(root), false)
+})
