@@ -41,6 +41,7 @@ jobs:
           src/workspace-relocation-content.test.ts
           src/workspace-relocation-files.test.ts
       - name: Verify actual finite filesystem copies, directory publication and cleanup
+        if: runner.os != 'Windows'
         run: >-
           node --test --test-concurrency=1
           scripts/lib/__tests__/workspace-copy.test.mjs
@@ -51,3 +52,23 @@ jobs:
           scripts/lib/__tests__/workspace-windows-sync.test.mjs
           scripts/lib/__tests__/workspace-root-probe.test.mjs
           scripts/lib/__tests__/workspace-root-publish.test.mjs
+      - name: Verify actual copies with ordinary current-user default ownership
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          ./.github/scripts/run-current-user-owner.ps1 -TestFiles @(
+            'scripts/lib/__tests__/workspace-copy.test.mjs',
+            'scripts/lib/__tests__/workspace-file-metadata.test.mjs',
+            'scripts/lib/__tests__/workspace-sync.test.mjs',
+            'scripts/lib/__tests__/workspace-tar.test.mjs',
+            'scripts/lib/__tests__/workspace-windows-copy.test.mjs',
+            'scripts/lib/__tests__/workspace-windows-sync.test.mjs',
+            'scripts/lib/__tests__/workspace-root-probe.test.mjs',
+            'scripts/lib/__tests__/workspace-root-publish.test.mjs'
+          )
+      - name: Verify the elevated runner's different default owner is retained or rejected explicitly
+        if: runner.os == 'Windows'
+        run: >-
+          node --test --test-name-pattern="another token owner|private source=false"
+          scripts/lib/__tests__/workspace-copy.test.mjs
+          scripts/lib/__tests__/workspace-windows-copy.test.mjs
