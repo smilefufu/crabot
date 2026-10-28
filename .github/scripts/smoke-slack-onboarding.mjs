@@ -73,6 +73,15 @@ try {
         })
       })
     }
+    // libuv keeps a hidden console when a stdio descriptor is explicitly inherited.
+    let input
+    try {
+      input = await fs.open('NUL', 'r')
+      const started = Date.now()
+      const output = execFileSync(executable, ['--version'], { ...options, stdio: [input.fd, 'pipe', 'pipe'] })
+      console.log(`Slack CLI startup diagnostic: explicit-nul-input-hidden pinned-version=${output.includes('4.11.0')} elapsed-ms=${Date.now() - started}`)
+    } catch { console.log('Slack CLI startup diagnostic: explicit-nul-input-hidden failed') }
+    finally { await input?.close().catch(() => {}) }
   }
   // This isolated manifest-only probe never logs in; report fixed milestones, not raw CLI logs.
   try {
