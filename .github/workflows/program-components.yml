@@ -1,0 +1,44 @@
+name: Desktop program components
+on:
+  workflow_dispatch:
+  push:
+    branches: ['feat/desktop-program-components']
+  pull_request:
+    paths:
+      - 'scripts/lib/desktop-*.mjs'
+      - 'scripts/lib/desktop-removal-record.cjs'
+      - 'scripts/lib/__tests__/desktop-asar.test.mjs'
+      - 'scripts/lib/__tests__/desktop-payload.test.mjs'
+      - 'scripts/lib/__tests__/desktop-removal-programs.test.mjs'
+      - 'scripts/lib/__tests__/desktop-removal-system-processes.test.mjs'
+      - '.github/workflows/program-components.yml'
+permissions:
+  contents: read
+jobs:
+  programs:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, macos-15-intel, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.3'
+      - name: Prepare this checkout's SDK and fixed production parser
+        shell: bash
+        run: |
+          pnpm --dir crabot-client install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-client run build
+          pnpm install --frozen-lockfile --ignore-scripts
+          node scripts/build-native.mjs
+      - name: Verify real archive bytes, fresh preparation and retained-data program boundaries
+        run: >-
+          node --test --test-concurrency=1
+          scripts/lib/__tests__/desktop-asar.test.mjs
+          scripts/lib/__tests__/desktop-payload.test.mjs
+          scripts/lib/__tests__/desktop-removal-programs.test.mjs
+          scripts/lib/__tests__/desktop-removal-system-processes.test.mjs
