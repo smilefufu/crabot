@@ -14,6 +14,13 @@ FROM_SOURCE=false
 NODE_SWITCHED_BY_NVM=false
 NODE_PREV_VERSION=""
 SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+BUNDLED_CORE_DIR=""
+CRABOT_DOWNLOAD_DIR=""
+CRABOT_RELEASE_ROOT=""
+CRABOT_RELEASE_VERSION=""
+CRABOT_RELEASE_PLATFORM=""
+SOURCE_IS_LOCAL=false
+if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then SOURCE_IS_LOCAL=true; fi
 
 # 解析参数
 SYSTEM_MODE=false
@@ -70,7 +77,7 @@ detect_platform() {
 }
 
 
-CRABOT_HELPER_REVISION='454272e495cd99d28419f905cda9dc69b0085383'
+CRABOT_HELPER_REVISION='d1ab1bfbd58cff5514ab485dd45c969c0f4bd99d'
 CRABOT_HELPER_ROOT=''
 CRABOT_HELPER_TEMP=''
 CRABOT_NPM_CONTEXT='-'
@@ -81,9 +88,9 @@ file_sha256() {
 installer_helper_hash() {
   case "$1" in
     scripts/installer-deps.mjs) echo d4fd4bed9aa55ab09c65f7f63ffb8bfe275fbfac953caca131e5504df67d72b7;;
-    scripts/lib/install-network.mjs) echo a44aa06ead8e498fde4442919fd9fbbd8dd1b4af7c461d9b8ace955fe3ded18d;;
+    scripts/lib/install-network.mjs) echo 1bda2f54d94a9e8dcf8b754067de9de4ef8f9d6ae37485e49d10643a8cf8f76d;;
     scripts/lib/memory-deps.mjs) echo 8111670a37b3c61e752fff79158b11a03a52dd3324b54b83f5240feed644c8f9;;
-    scripts/lib/run-bounded.mjs) echo 20cd05bbf043961f774a68d83c5c4ab5885a33dda0e36409788341b054132df7;;
+    scripts/lib/run-bounded.mjs) echo e793f0e40c059e47efcb13bc0ee3297e913395d3119196039810e08aaa4721f2;;
     scripts/lib/toolchain.mjs) echo 7ce0955b964790804305e7d227228bea222cdabfe1bce84213e86a80f99cc886;;
     *) return 1;;
   esac
@@ -314,7 +321,7 @@ append_path() {
     printf '\n%s\n' "$line" >> "$file"
   fi
   # nvm 安装器不创建缺失的 profile；登录 shell 也未必读取 .bashrc。
-  if [ -s "${NVM_DIR:-$HOME/.nvm}/nvm.sh" ]; then
+  if [ -z "$BUNDLED_CORE_DIR" ] && [ -s "${NVM_DIR:-$HOME/.nvm}/nvm.sh" ]; then
     local nvm_line='export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"; [ ! -s "$NVM_DIR/nvm.sh" ] || . "$NVM_DIR/nvm.sh"'
     if [ "${NVM_DIR:-$HOME/.nvm}" != "$HOME/.nvm" ]; then
       nvm_line="export NVM_DIR=$(printf '%q' "$NVM_DIR"); [ ! -s \"\$NVM_DIR/nvm.sh\" ] || . \"\$NVM_DIR/nvm.sh\""
@@ -325,24 +332,41 @@ append_path() {
 configure_path() {
   local crabot_path="$INSTALL_DIR/cli.mjs"
   if [ "$FROM_SOURCE" = true ]; then crabot_path="$SOURCE_DIR/cli.mjs"; fi
+  if [ -n "$BUNDLED_CORE_DIR" ]; then crabot_path="$INSTALL_DIR/bin/crabot"; fi
   if [ "$SYSTEM_MODE" = true ]; then
+    if [ -n "$BUNDLED_CORE_DIR" ] && { [ -e /usr/local/bin/crabot ] || [ -L /usr/local/bin/crabot ]; }; then
+      if [ ! -L /usr/local/bin/crabot ] || [ "$(readlink /usr/local/bin/crabot)" != "$crabot_path" ]; then
+        error "Preserving conflicting command: /usr/local/bin/crabot; installed command: $crabot_path"; return 1
+      fi
+      return
+    fi
     ln -sf "$crabot_path" /usr/local/bin/crabot
     chmod +x "$crabot_path"
     return
   fi
   local bin_dir="$HOME/.local/bin" shell_rc
   mkdir -p "$bin_dir"
-  if [ -e "$bin_dir/crabot" ] && { [ ! -L "$bin_dir/crabot" ] || [ "$(readlink "$bin_dir/crabot")" != "$crabot_path" ]; }; then
+  if [ -n "$BUNDLED_CORE_DIR" ]; then
+    "$BUNDLED_CORE_DIR/.product-runtime/node/bin/node" --input-type=module - "$bin_dir" <<'JS'
+import fs from 'node:fs'
+const stat = fs.lstatSync(process.argv[2])
+if (!stat.isDirectory() || stat.isSymbolicLink() || stat.uid !== process.getuid() || (stat.mode & 0o022)) throw new Error('User command directory is not exclusively writable by this account; existing entries were preserved')
+JS
+  fi
+  if { [ -e "$bin_dir/crabot" ] || [ -L "$bin_dir/crabot" ]; } && { [ ! -L "$bin_dir/crabot" ] || [ "$(readlink "$bin_dir/crabot")" != "$crabot_path" ]; }; then
+    if [ -n "$BUNDLED_CORE_DIR" ]; then error "Preserving conflicting command: $bin_dir/crabot; installed command: $crabot_path"; return 1; fi
     warn "Preserving existing launcher: $bin_dir/crabot; new CLI: $crabot_path"
   else
-    ln -sf "$crabot_path" "$bin_dir/crabot"
+    if [ -z "$BUNDLED_CORE_DIR" ]; then ln -sf "$crabot_path" "$bin_dir/crabot"
+    elif [ ! -L "$bin_dir/crabot" ]; then ln -s "$crabot_path" "$bin_dir/crabot"; fi
   fi
   chmod +x "$crabot_path"
   case "$SHELL" in
     */zsh)
       mkdir -p "${ZDOTDIR:-$HOME}"
       shell_rc="${ZDOTDIR:-$HOME}/.zshrc"
-      append_path "$shell_rc" ;;
+      append_path "$shell_rc"
+      if [ -n "$BUNDLED_CORE_DIR" ]; then append_path "${ZDOTDIR:-$HOME}/.zprofile"; fi ;;
     */bash)
       append_path "$HOME/.bashrc"
       shell_rc="$HOME/.bash_profile"
@@ -401,6 +425,49 @@ verify_release() {
   fi
 }
 
+# Download/checksum/extract before choosing an interpreter. Complete releases
+# bring their own tools; only legacy/source generations prepare host prerequisites.
+download_release() {
+  local platform="$1"
+  local version="${CRABOT_RELEASE_VERSION:-$CRABOT_VERSION}"
+  if [ "$version" = "latest" ]; then
+    # 用 /releases/latest 的重定向拿真实 tag
+    # （atom feed 的 <title> 是 release 标题，可能含 commit message + 中文，不能当 tag 用）
+    local latest_url
+    latest_url=$(curl -fsSLI -o /dev/null -w '%{url_effective}' \
+      "https://github.com/smilefufu/crabot/releases/latest")
+    version="${latest_url##*/tag/}"
+    if [ -z "$version" ] || [ "$version" = "$latest_url" ]; then
+      error "Failed to fetch latest version from GitHub. Set CRABOT_VERSION manually."
+      exit 1
+    fi
+    info "Latest version: $version"
+  fi
+
+  case "$version" in ''|*[!a-zA-Z0-9._-]*) error "Invalid release version: $version"; return 1;; esac
+  [ -z "$CRABOT_DOWNLOAD_DIR" ] || rm -rf "$CRABOT_DOWNLOAD_DIR"
+  CRABOT_DOWNLOAD_DIR=$(mktemp -d "${TMPDIR:-/tmp}/crabot-install.XXXXXX")
+  trap cleanup_installer_files EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  local filename="crabot-${version}-${platform}.tar.gz"
+  local url="https://github.com/smilefufu/crabot/releases/download/${version}/${filename}"
+  info "Downloading $filename..."
+  curl -fsSL "$url" -o "$CRABOT_DOWNLOAD_DIR/$filename" --connect-timeout 30 --max-time 900
+  curl -fsSL "${url}.sha256" -o "$CRABOT_DOWNLOAD_DIR/${filename}.sha256" --connect-timeout 30 --max-time 60
+  info "Verifying checksum..."
+  (cd "$CRABOT_DOWNLOAD_DIR" && {
+    if command -v sha256sum >/dev/null 2>&1; then sha256sum -c "${filename}.sha256"
+    else shasum -a 256 -c "${filename}.sha256"; fi
+  }) || { error "Checksum verification failed!"; return 1; }
+  local stage="$CRABOT_DOWNLOAD_DIR/package"
+  mkdir -p "$stage"
+  tar -xzf "$CRABOT_DOWNLOAD_DIR/$filename" -C "$stage" --strip-components=1
+  CRABOT_RELEASE_ROOT="$stage"
+  CRABOT_RELEASE_VERSION="$version"
+  CRABOT_RELEASE_PLATFORM="$platform"
+}
+
 # --- 主流程 ---
 main() {
   section "Crabot Installer"
@@ -416,6 +483,31 @@ main() {
     version_ge "${libc#glibc }" 2.35 || { error "Linux release requires glibc >= 2.35, found $libc"; return 1; }
   fi
 
+  local bundled_source=""
+  if [ "$FROM_SOURCE" != true ]; then
+    if [ "$SOURCE_IS_LOCAL" = true ] && [ -f "$SOURCE_DIR/core-release.json" ] && [ "$CRABOT_VERSION" = latest ]; then
+      bundled_source="$SOURCE_DIR"
+    else
+      download_release "$platform"
+      if [ -f "$CRABOT_RELEASE_ROOT/core-release.json" ]; then bundled_source="$CRABOT_RELEASE_ROOT"
+      elif [ -e "$CRABOT_RELEASE_ROOT/.product-runtime" ] || [ -e "$CRABOT_RELEASE_ROOT/product-runtime.json" ]; then
+        error "Bundled release metadata is missing; original installation preserved."; return 1
+      fi
+    fi
+  fi
+  if [ -n "$bundled_source" ]; then
+    local bundled_node="$bundled_source/.product-runtime/node/bin/node" scope=user
+    local expected_version=()
+    if [ -n "$CRABOT_RELEASE_VERSION" ]; then expected_version=("--expected-version=$CRABOT_RELEASE_VERSION"); fi
+    [ -x "$bundled_node" ] || { error "Bundled Node is missing; repair the archive."; return 1; }
+    [ "$SYSTEM_MODE" != true ] || scope=system
+    # Leave the retained old release before its process-coverage preflight.
+    INSTALL_DIR=$("$bundled_node" --input-type=module -e 'import path from "node:path"; console.log(path.resolve(process.argv[1]))' -- "$INSTALL_DIR") || return 1
+    if [ "$SYSTEM_MODE" = true ]; then cd / || return 1; fi
+    "$bundled_node" "$bundled_source/scripts/install-core.mjs" "--install-root=$INSTALL_DIR" "--scope=$scope" "${expected_version[@]}" || return 1
+    if [ "$SYSTEM_MODE" = true ] && [ -f "$INSTALL_DIR/cli.mjs" ]; then INSTALL_DIR="$INSTALL_DIR/.managed"; fi
+    BUNDLED_CORE_DIR="$INSTALL_DIR/releases/$(cat "$INSTALL_DIR/current-core")"
+  else
   if [ "$SYSTEM_MODE" = "true" ]; then
     ensure_system_node
     ensure_system_uv
@@ -441,41 +533,9 @@ JS
     info "Source install complete."
   else
     section "Release Install"
-    # 获取版本
-    local version="$CRABOT_VERSION"
-    if [ "$version" = "latest" ]; then
-      # 用 /releases/latest 的重定向拿真实 tag
-      # （atom feed 的 <title> 是 release 标题，可能含 commit message + 中文，不能当 tag 用）
-      local latest_url
-      latest_url=$(curl -fsSLI -o /dev/null -w '%{url_effective}' \
-        "https://github.com/smilefufu/crabot/releases/latest")
-      version="${latest_url##*/tag/}"
-      if [ -z "$version" ] || [ "$version" = "$latest_url" ]; then
-        error "Failed to fetch latest version from GitHub. Set CRABOT_VERSION manually."
-        exit 1
-      fi
-      info "Latest version: $version"
-    fi
-
-    case "$version" in ''|*[!a-zA-Z0-9._-]*) error "Invalid release version: $version"; return 1;; esac
+    local version="$CRABOT_RELEASE_VERSION" stage="$CRABOT_RELEASE_ROOT" entry
+    if [ "$CRABOT_RELEASE_PLATFORM" != "$platform" ]; then download_release "$platform"; stage="$CRABOT_RELEASE_ROOT"; fi
     assert_stopped
-    CRABOT_DOWNLOAD_DIR=$(mktemp -d "${TMPDIR:-/tmp}/crabot-install.XXXXXX")
-    trap cleanup_installer_files EXIT
-    trap 'exit 130' INT
-    trap 'exit 143' TERM
-    local filename="crabot-${version}-${platform}.tar.gz"
-    local url="https://github.com/smilefufu/crabot/releases/download/${version}/${filename}"
-    info "Downloading $filename..."
-    curl -fsSL "$url" -o "$CRABOT_DOWNLOAD_DIR/$filename" --connect-timeout 30 --max-time 900
-    curl -fsSL "${url}.sha256" -o "$CRABOT_DOWNLOAD_DIR/${filename}.sha256" --connect-timeout 30 --max-time 60
-    info "Verifying checksum..."
-    (cd "$CRABOT_DOWNLOAD_DIR" && {
-      if command -v sha256sum >/dev/null 2>&1; then sha256sum -c "${filename}.sha256"
-      else shasum -a 256 -c "${filename}.sha256"; fi
-    }) || { error "Checksum verification failed!"; return 1; }
-    local stage="$CRABOT_DOWNLOAD_DIR/package" entry
-    mkdir -p "$stage"
-    tar -xzf "$CRABOT_DOWNLOAD_DIR/$filename" -C "$stage" --strip-components=1
     verify_release "$stage" "$version"
     mkdir -p "$INSTALL_DIR"
     if [ "$SYSTEM_MODE" = true ]; then chown root:root "$INSTALL_DIR"; chmod 0755 "$INSTALL_DIR"; fi
@@ -503,26 +563,27 @@ JS
 
   fi
 
+  fi # source / legacy release preparation
+
   if [ "$SYSTEM_MODE" = "true" ]; then
     section "Creating /etc/crabot/ skeleton"
 
-    # 创建 crabot group（如不存在）
-    if ! getent group crabot &>/dev/null; then
-      groupadd -r crabot
-      info "created group 'crabot'"
-    fi
-
-    mkdir -p /etc/crabot/defaults /etc/crabot/registry
-    chown root:root /etc/crabot
-    chown root:root /etc/crabot/defaults
-    chown root:crabot /etc/crabot/registry
+    mkdir -p /etc/crabot/defaults
+    chown root:root /etc/crabot /etc/crabot/defaults
     chmod 0755 /etc/crabot /etc/crabot/defaults
-    chmod 0775 /etc/crabot/registry
-
-    if [ ! -f /etc/crabot/registry/ports.json ]; then
-      echo '[]' > /etc/crabot/registry/ports.json
-      chown root:crabot /etc/crabot/registry/ports.json
-      chmod 0664 /etc/crabot/registry/ports.json
+    if [ -n "$BUNDLED_CORE_DIR" ]; then
+      "$BUNDLED_CORE_DIR/.product-runtime/node/bin/node" "$BUNDLED_CORE_DIR/scripts/system-install.mjs"
+    else
+      # Existing source/legacy installation keeps its original initialization path.
+      if ! getent group crabot &>/dev/null; then groupadd -r crabot; fi
+      mkdir -p /etc/crabot/registry
+      chown root:crabot /etc/crabot/registry
+      chmod 0775 /etc/crabot/registry
+      if [ ! -f /etc/crabot/registry/ports.json ]; then
+        echo '[]' > /etc/crabot/registry/ports.json
+        chown root:crabot /etc/crabot/registry/ports.json
+        chmod 0664 /etc/crabot/registry/ports.json
+      fi
     fi
 
     if [ ! -f /etc/crabot/cluster.version ]; then
@@ -531,8 +592,8 @@ JS
     fi
 
     # 铺一份供应商目录注释样例（.example 不激活；激活需改名为 vendor.yaml）
-    if [ -f "$INSTALL_DIR/scripts/templates/vendor.yaml.example" ]; then
-      cp "$INSTALL_DIR/scripts/templates/vendor.yaml.example" /etc/crabot/defaults/vendor.yaml.example
+    if [ -f "${BUNDLED_CORE_DIR:-$INSTALL_DIR}/scripts/templates/vendor.yaml.example" ]; then
+      cp "${BUNDLED_CORE_DIR:-$INSTALL_DIR}/scripts/templates/vendor.yaml.example" /etc/crabot/defaults/vendor.yaml.example
       chmod 0644 /etc/crabot/defaults/vendor.yaml.example
     fi
 
@@ -554,16 +615,21 @@ LR
 
   section "Setting up PATH"
   configure_path
-  if [ "$FROM_SOURCE" != true ]; then printf '%s\n' "$version" > "$INSTALL_DIR/VERSION"; fi
+  if [ "$FROM_SOURCE" != true ] && [ -z "$BUNDLED_CORE_DIR" ]; then printf '%s\n' "$version" > "$INSTALL_DIR/VERSION"; fi
 
   if [ "$SYSTEM_MODE" = "true" ]; then
     section "Done! (system mode)"
     info "下一步："
-    info "  1. 把员工加入 crabot group:"
-    info "     sudo usermod -a -G crabot alice"
-    info "     sudo usermod -a -G crabot bob"
-    info "  2. (可选) 自定义员工可选供应商目录：sudo crabot vendor add，或编辑 /etc/crabot/defaults/vendor.yaml（参考同目录 .example）"
-    info "  3. 通知员工：crabot start 即可（vendor 改动各员工重启 crabot 后自动生效，无需 sync）"
+    if [ -n "$BUNDLED_CORE_DIR" ]; then
+      info "  1. 开通已有Linux用户：sudo crabot system user add alice"
+      info "  2. 以员工身份启动：sudo -H -u alice crabot start -d"
+      info "  3. 查看全局状态：sudo crabot system status"
+      info "  批量操作：sudo crabot system start/stop/restart --all（真实systemd环境）"
+    else
+      info "  1. 把员工加入 crabot group：sudo usermod -a -G crabot alice"
+      info "  2. 员工重新登录后运行crabot start"
+    fi
+    info "  可选供应商目录：sudo crabot vendor add；vendor改动各员工重启后生效，无需sync。"
   else
     section "Done!"
     if [ "$NODE_SWITCHED_BY_NVM" = "true" ]; then

@@ -1,0 +1,60 @@
+name: Desktop release assembly
+on:
+  workflow_dispatch:
+  push:
+    branches: ['feat/desktop-release-assembly']
+  pull_request:
+    paths:
+      - 'crabot-desktop/**'
+      - '.github/workflows/desktop-release-assembly.yml'
+permissions:
+  contents: read
+jobs:
+  host:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, macos-15-intel, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.3'
+      - name: Build this checkout's actual SDK, Shared, Native and internal host
+        run: |
+          pnpm --dir crabot-client install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-client run build
+          pnpm --dir crabot-shared install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-shared run build
+          pnpm install --frozen-lockfile --ignore-scripts
+          pnpm run build:cli
+          pnpm --dir scripts/lib install --frozen-lockfile --ignore-scripts
+          node scripts/build-native.mjs
+          pnpm --dir crabot-core install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-core run build
+          pnpm --dir crabot-agent install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-agent run build
+          pnpm --dir crabot-desktop install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-desktop run build
+      - name: Install original publisher fixture dependency
+        run: pnpm --dir crabot-admin install --frozen-lockfile --ignore-scripts
+      - name: Build actual Admin startup dependency
+        run: pnpm --dir crabot-admin run build
+      - name: Verify original sealed CLI routing, installation compatibility and staging imports
+        run: node --test --test-concurrency=1 scripts/lib/__tests__/stage-core-imports.test.mjs scripts/lib/__tests__/desktop-cli-install.test.mjs scripts/lib/__tests__/desktop-update-entry.test.mjs scripts/lib/__tests__/installer-compat.test.mjs
+      - name: Verify actual startup entry contracts and original upgrade boundaries
+        working-directory: scripts/upgrade-lib
+        run: node ../../node_modules/vitest/vitest.mjs run --config vitest.config.mjs __tests__/startup-entry.test.mjs --maxWorkers=1 --minWorkers=1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify original finite browser-resource download retry budget
+        run: python -m unittest discover -s scripts/scrapling/__tests__ -p test_build.py

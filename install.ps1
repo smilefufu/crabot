@@ -26,12 +26,12 @@ function Add-ToolPath($directory) {
 
 
 # Installer-owned helpers also work with legacy packages; verify every file before executing.
-$InstallerHelperRevision = '454272e495cd99d28419f905cda9dc69b0085383'
+$InstallerHelperRevision = 'd1ab1bfbd58cff5514ab485dd45c969c0f4bd99d'
 $InstallerHelperHashes = @{
     'scripts/installer-deps.mjs' = 'd4fd4bed9aa55ab09c65f7f63ffb8bfe275fbfac953caca131e5504df67d72b7'
-    'scripts/lib/install-network.mjs' = 'a44aa06ead8e498fde4442919fd9fbbd8dd1b4af7c461d9b8ace955fe3ded18d'
+    'scripts/lib/install-network.mjs' = '1bda2f54d94a9e8dcf8b754067de9de4ef8f9d6ae37485e49d10643a8cf8f76d'
     'scripts/lib/memory-deps.mjs' = '8111670a37b3c61e752fff79158b11a03a52dd3324b54b83f5240feed644c8f9'
-    'scripts/lib/run-bounded.mjs' = '20cd05bbf043961f774a68d83c5c4ab5885a33dda0e36409788341b054132df7'
+    'scripts/lib/run-bounded.mjs' = 'e793f0e40c059e47efcb13bc0ee3297e913395d3119196039810e08aaa4721f2'
     'scripts/lib/toolchain.mjs' = '7ce0955b964790804305e7d227228bea222cdabfe1bce84213e86a80f99cc886'
 }
 $script:InstallerHelper = $null
@@ -334,7 +334,50 @@ set "PATH=%LOCALAPPDATA%\crabot\node;%PATH%"
     Set-Content -LiteralPath $cmdPath -Value $content -Encoding ASCII
 }
 
+# Resolve and verify the archive before deciding whether host tools are needed.
+function Get-ReleasePackage([string]$releaseVersion) {
+    if ($releaseVersion -eq 'latest') { $releaseVersion = Get-LatestRelease }
+    if ($releaseVersion -notmatch '^[A-Za-z0-9._-]+$') { throw 'Invalid release version' }
+    $filename = "crabot-$releaseVersion-windows-x64.zip"
+    $url = "https://github.com/smilefufu/crabot/releases/download/$releaseVersion/$filename"
+    $temporary = Join-Path $env:TEMP ('crabot-install-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $temporary | Out-Null
+    try {
+        $archive = Join-Path $temporary $filename
+        Write-Info "Downloading $filename..."
+        Invoke-WebRequest -Uri $url -OutFile $archive -UseBasicParsing -TimeoutSec 900
+        Invoke-WebRequest -Uri "$url.sha256" -OutFile "$archive.sha256" -UseBasicParsing -TimeoutSec 60
+        $expected = ((Get-Content -LiteralPath "$archive.sha256" -Raw).Trim() -split '\s+')[0]
+        if ($expected -notmatch '^[a-f0-9]{64}$' -or (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ine $expected) {
+            throw 'Release archive checksum verification failed.'
+        }
+        Write-Info 'Extracting...'
+        Expand-Archive -LiteralPath $archive -DestinationPath $temporary
+        $root = Join-Path $temporary "crabot-$releaseVersion-windows-x64"
+        if (-not (Test-Path -LiteralPath $root -PathType Container)) { throw 'Invalid release archive root' }
+        return [pscustomobject]@{ Root = $root; Temporary = $temporary; Version = $releaseVersion }
+    } catch {
+        Remove-InstallerTemporaryDirectory $temporary
+        throw
+    }
+}
+
+# Only installer-owned temporary roots are passed here. An exited image/scanner can briefly retain a handle.
+function Remove-InstallerTemporaryDirectory([string]$directory) {
+    for ($attempt = 0; $attempt -lt 10; $attempt++) {
+        if (-not (Test-Path -LiteralPath $directory)) { return }
+        try {
+            Remove-Item -LiteralPath $directory -Recurse -Force -ErrorAction Stop
+            return
+        } catch {
+            if ($attempt -eq 9) { Write-Warn 'Installer temporary files could not be removed; installation data was preserved.'; return }
+            Start-Sleep -Milliseconds 100
+        }
+    }
+}
+
 function Install-Crabot {
+$downloadedRelease = $null
 try {
 # Windows PowerShell 5.1 progress rendering slows large downloads; keep this local.
 $ProgressPreference = 'SilentlyContinue'
@@ -345,6 +388,39 @@ $nativeArch = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } e
 if ($nativeArch -ne 'AMD64') { throw "Unsupported Windows architecture: $nativeArch; only native x64 releases are published" }
 $InstallDir = [IO.Path]::GetFullPath($InstallDir)
 if ($Version -notmatch '^[A-Za-z0-9._-]+$') { throw 'Invalid release version' }
+$bundledSource = $null
+if (-not $FromSource) {
+    if ($Version -eq 'latest' -and $PSScriptRoot -and (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'core-release.json') -PathType Leaf)) {
+        $bundledSource = $PSScriptRoot
+    } else {
+        $downloadedRelease = Get-ReleasePackage $Version
+        $Version = $downloadedRelease.Version
+        if (Test-Path -LiteralPath (Join-Path $downloadedRelease.Root 'core-release.json') -PathType Leaf) {
+            $bundledSource = $downloadedRelease.Root
+        } elseif ((Test-Path -LiteralPath (Join-Path $downloadedRelease.Root '.product-runtime')) -or
+                  (Test-Path -LiteralPath (Join-Path $downloadedRelease.Root 'product-runtime.json'))) {
+            throw 'Bundled release metadata is missing; original installation preserved.'
+        }
+    }
+}
+if ($bundledSource) {
+    $bundledNode = Join-Path $bundledSource '.product-runtime/node/node.exe'
+    if (-not (Test-Path -LiteralPath $bundledNode -PathType Leaf)) { throw 'Bundled Node is missing; repair the archive.' }
+    $expectedCommand = Join-Path $InstallDir 'bin/crabot.exe'
+    $sourceCommand = Join-Path $bundledSource 'bin/crabot.exe'
+    foreach ($existingCommand in @(Get-Command crabot -All -ErrorAction SilentlyContinue)) {
+        if ($existingCommand.CommandType -ne 'Application' -or
+            ($existingCommand.Path -ine $expectedCommand -and $existingCommand.Path -ine $sourceCommand)) {
+            throw 'An existing crabot command was preserved. Resolve its source before installing this CLI.'
+        }
+    }
+    $expectedVersion = @()
+    if ($downloadedRelease) { $expectedVersion = @("--expected-version=$Version") }
+    & $bundledNode (Join-Path $bundledSource 'scripts/install-core.mjs') "--install-root=$InstallDir" '--scope=user' @expectedVersion
+    Assert-NativeSuccess 'Bundled CLI installation'
+    Write-Info 'Open a new terminal and run crabot start. The service has not been started.'
+    return
+}
 Ensure-Node
 Ensure-Uv
 Ensure-Bash
@@ -363,38 +439,11 @@ await runSourceUpgrade(process.cwd(), console)
     } finally { Pop-Location }
 } else {
     Write-Info "Release install..."
-    if ($Version -eq "latest") {
-        $Version = Get-LatestRelease
-        Write-Info "Latest version: $Version"
-    }
     Assert-CrabotStopped $InstallDir
-
-    $filename = "crabot-$Version-windows-x64.zip"
-    $url = "https://github.com/smilefufu/crabot/releases/download/$Version/$filename"
+    $stageParent = $downloadedRelease.Temporary
+    $stageRelease = $downloadedRelease.Root
     New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-    $stageParent = Join-Path (Split-Path $InstallDir -Parent) (".crabot-i-{0}" -f [guid]::NewGuid().ToString('N').Substring(0, 8))
-    $stageRelease = Join-Path $stageParent "crabot-$Version-windows-x64"
-    $archivePath = Join-Path $stageParent $filename
-
-    New-Item -ItemType Directory -Force -Path $stageParent | Out-Null
     try {
-        Write-Info "Downloading $filename..."
-        Invoke-WebRequest -Uri $url -OutFile $archivePath -UseBasicParsing -TimeoutSec 900
-
-        $checksumUrl = "$url.sha256"
-        $checksumPath = "$archivePath.sha256"
-        Write-Info "Verifying release checksum..."
-        Invoke-WebRequest -Uri $checksumUrl -OutFile $checksumPath -UseBasicParsing -TimeoutSec 60
-        $expectedHash = ((Get-Content -LiteralPath $checksumPath -Raw).Trim() -split "\s+")[0]
-        if ($expectedHash -notmatch '^[a-f0-9]{64}$') { throw 'Invalid release checksum manifest' }
-        $actualHash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash
-        if ($actualHash -ine $expectedHash) {
-            Write-Err "Release archive checksum verification failed."
-            exit 1
-        }
-
-        Write-Info "Extracting..."
-        Expand-Archive -LiteralPath $archivePath -DestinationPath $stageParent -Force
         if (-not (Test-Path -LiteralPath (Join-Path $stageRelease "cli.mjs") -PathType Leaf) -or
             -not (Test-Path -LiteralPath (Join-Path $stageRelease "package.json") -PathType Leaf) -or
             -not (Test-Path -LiteralPath (Join-Path $stageRelease "scripts") -PathType Container) -or
@@ -527,6 +576,7 @@ Write-Info "Run 'crabot --help' for all commands."
 Write-Warn "If a new terminal cannot find crabot, restart Windows Explorer or sign out and back in to refresh the user PATH."
 
 } finally {
+    if ($downloadedRelease) { Remove-InstallerTemporaryDirectory $downloadedRelease.Temporary }
     if ($script:InstallerHelperTemp) { Remove-Item -LiteralPath $script:InstallerHelperTemp -Recurse -Force -ErrorAction SilentlyContinue }
 }
 }

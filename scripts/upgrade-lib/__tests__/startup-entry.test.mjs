@@ -4,8 +4,8 @@ import path from 'node:path'
 import os from 'node:os'
 import net from 'node:net'
 import { fileURLToPath } from 'node:url'
-import { spawnSync, spawn } from 'node:child_process'
 import { acquireCliLock, releaseCliLock } from '../../lib/cli-lock.mjs'
+import { spawnSync, spawn } from 'node:child_process'
 const product = fileURLToPath(new URL('../../../', import.meta.url))
 let root, data, home
 beforeEach(async () => {
@@ -20,7 +20,6 @@ async function scripts() {
   for (const name of ['lib', 'upgrade-lib']) await fs.cp(path.join(product, 'scripts', name), path.join(home, 'scripts', name), { recursive: true, filter: source => !['node_modules', '__tests__'].includes(path.basename(source)) })
   await fs.mkdir(path.join(home, 'scripts/desktop'), { recursive: true })
   for (const name of ['legacy-releases.json', 'legacy-python-bootstrap.json']) await fs.copyFile(path.join(product, 'scripts/desktop', name), path.join(home, 'scripts/desktop', name))
-  await fs.symlink(path.join(product, 'node_modules'), path.join(home, 'node_modules'), process.platform === 'win32' ? 'junction' : 'dir')
   await fs.mkdir(path.join(home, 'crabot-native/build/Release'), { recursive: true })
   await fs.copyFile(path.join(product, 'crabot-native/build/Release/crabot-native.node'), path.join(home, 'crabot-native/build/Release/crabot-native.node'))
   await write('scripts/lib/instance.mjs', 'export const resolveCliDataDir = () => process.env.DATA_DIR; export const hasInstance = () => true')
@@ -30,6 +29,7 @@ async function scripts() {
   await write('scripts/lib/mode.mjs', "export const detectMode = () => 'user'")
   await write('cli.mjs', `import fs from 'node:fs'; import path from 'node:path'; const file=path.join(process.env.DATA_DIR,'calls.json'); const calls=fs.existsSync(file)?JSON.parse(fs.readFileSync(file)):[]; calls.push(process.argv[2]); fs.writeFileSync(file,JSON.stringify(calls));`)
   for (const name of ['crabot-core/dist/main.js', 'crabot-core/dist/orphan-recovery-preflight.js', 'crabot-admin/dist/main.js', 'crabot-agent/dist/main.js']) await write(name, '// finite fixture; must not spawn')
+  await write('scripts/lib/fixture-note', 'isolated test installation')
   await fs.copyFile(path.join(product, 'scripts/prepare-shared-requests.mjs'), path.join(home, 'scripts/prepare-shared-requests.mjs'))
 }
 async function invalidLedger() {
@@ -70,7 +70,7 @@ it('actual restart entry never invokes stop when target migration scope is not r
 it('actual Web upgrade entry leaves the running build alone when isolated preparation fails', async () => {
   await scripts()
   await write('scripts/upgrade-lib/prepared-upgrade.mjs', 'export async function prepareUpgrade() { throw new Error("fixture preparation failure") }; export async function installPreparedUpgrade() { throw new Error("unexpected switch") }')
-  await write('scripts/upgrade-lib/release.mjs', 'export const stageRelease=async()=>{throw new Error("unexpected staging")};export const downloadRelease=async()=>{throw new Error("unexpected download")};export const getReleaseUrls=()=>({});export const getCurrentVersion = () => null; export const getLatestVersion = async () => ({tag:"next"}); export const writeVersionFile = () => { throw new Error("unexpected version write") }')
+  await write('scripts/upgrade-lib/release.mjs', 'export const downloadRelease=async()=>{throw new Error("unexpected download")};export const getReleaseUrls=()=>({});export const getCurrentVersion = () => null; export const getLatestVersion = async () => ({tag:"next"}); export const writeVersionFile = () => { throw new Error("unexpected version write") }')
   await write('dist/live.js', 'old build')
   await fs.copyFile(path.join(product, 'scripts/ui-upgrade.mjs'), path.join(home, 'scripts/ui-upgrade.mjs'))
   const result = spawnSync(process.execPath, [path.join(home, 'scripts/ui-upgrade.mjs')], { cwd: home, env: env(), encoding: 'utf8', timeout: 10000 })
@@ -138,7 +138,7 @@ it.skipIf(process.env.GITHUB_ACTIONS !== 'true')('actual compiled MM releases st
 it.each(['upgrade.mjs', 'ui-upgrade.mjs'])('already current release is read-only and invokes no preparation or stop: %s', async entry => {
   await scripts()
   await write('scripts/upgrade-lib/prepared-upgrade.mjs', 'export async function prepareUpgrade() { throw new Error("unexpected reprepare") }; export async function installPreparedUpgrade() { throw new Error("unexpected switch") }')
-  await write('scripts/upgrade-lib/release.mjs', 'export const stageRelease=async()=>{throw new Error("unexpected staging")};export const downloadRelease=async()=>{throw new Error("unexpected download")};export const getReleaseUrls=()=>({});export const getCurrentVersion = () => "next"; export const getLatestVersion = async () => ({tag:"next"}); export const writeVersionFile = () => { throw new Error("unexpected version write") }')
+  await write('scripts/upgrade-lib/release.mjs', 'export const downloadRelease=async()=>{throw new Error("unexpected download")};export const getReleaseUrls=()=>({});export const getCurrentVersion = () => "next"; export const getLatestVersion = async () => ({tag:"next"}); export const writeVersionFile = () => { throw new Error("unexpected version write") }')
   await fs.copyFile(path.join(product, 'scripts', entry), path.join(home, 'scripts', entry))
   const result = spawnSync(process.execPath, [path.join(home, 'scripts', entry), '--yes'], { cwd: home, env: env(), encoding: 'utf8', timeout: 10000 })
   expect(result.status, result.stderr).toBe(0)

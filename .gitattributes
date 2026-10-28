@@ -1,0 +1,8 @@
+# These installer helpers are verified against hashes of their published bytes.
+scripts/installer-deps.mjs text eol=lf
+scripts/lib/install-network.mjs text eol=lf
+scripts/lib/memory-deps.mjs text eol=lf
+scripts/lib/run-bounded.mjs text eol=lf
+scripts/lib/toolchain.mjs text eol=lf
+# Keep the CLI shebang readable by the Windows Vitest module loader.
+scripts/check.mjs text eol=lf

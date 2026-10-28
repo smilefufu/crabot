@@ -9,11 +9,14 @@ import { resolveCliDataDir } from './lib/instance.mjs'
 import { acquireCliLock, releaseCliLock } from './lib/cli-lock.mjs'
 import { runScript } from './upgrade-lib/runner.mjs'
 import { runMigrations } from './upgrade-lib/migrate.mjs'
-import { locateCliInstallation } from './lib/cli-installation.mjs'
 import { assertStopped } from './upgrade-lib/scoped-data.mjs'
 import { prepareUpgrade, installPreparedUpgrade } from './upgrade-lib/prepared-upgrade.mjs'
 import { preflightRestart } from './upgrade-lib/preflight.mjs'
-import { getCurrentVersion, getLatestVersion, writeVersionFile } from './upgrade-lib/release.mjs'
+import { getCurrentVersion, getLatestVersion, writeVersionFile, downloadRelease, getReleaseUrls } from './upgrade-lib/release.mjs'
+
+import { locateCliInstallation } from './lib/cli-installation.mjs'
+import { inspectInstance } from './lib/instance-runtime.mjs'
+import { openDesktopUpdate } from './lib/desktop-update-entry.mjs'
 
 const CRABOT_HOME = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const DATA_DIR = resolveCliDataDir({ homeDir: resolve(homedir(), '.crabot') })
@@ -26,9 +29,23 @@ async function confirm() {
 }
 async function main() {
   if (detectInstallScope('/etc/crabot') === 'system' && process.getuid?.() !== 0) throw new Error('System install: ask the administrator to run sudo crabot upgrade')
-  if (locateCliInstallation(CRABOT_HOME)?.scope === 'system') {
+  if (await openDesktopUpdate(CRABOT_HOME)) {
+    console.log('[crabot] 已请求桌面应用打开更新界面，请在应用中确认安装。')
+    return
+  }
+  const standalone = locateCliInstallation(CRABOT_HOME)
+  if (standalone?.scope === 'system') {
     const { runSystemUpgradeCli } = await import('./lib/system-upgrade-cli.mjs')
     process.exitCode = await runSystemUpgradeCli({ root: CRABOT_HOME, yes: assumeYes, logger: console })
+    return
+  }
+  if (standalone) {
+    if (inspectInstance(DATA_DIR).state !== 'stopped') throw new Error('实例尚未核验停止，请先运行 crabot stop。')
+    if (!await confirm()) return
+    const { tag } = await getLatestVersion()
+    const artifact = await downloadRelease({ ...getReleaseUrls(tag), logger: console })
+    const { applyDownloadedCliUpgrade } = await import('./lib/standalone-cli-release.mjs')
+    await applyDownloadedCliUpgrade({ root: CRABOT_HOME, dataDir: DATA_DIR, artifact, logger: console })
     return
   }
   const mode = detectMode(CRABOT_HOME)

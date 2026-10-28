@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import stat
 import shutil
 import locale
 import site
@@ -37,6 +38,55 @@ def enforce_headless(method):
     return guarded
 
 
+def paired_linux_core():
+    if sys.platform != "linux":
+        return False
+    host = RUNTIME.parent / "desktop-host.json"
+    try:
+        info = host.lstat()
+    except FileNotFoundError:
+        return False
+    if not stat.S_ISREG(info.st_mode) or info.st_size > 4096:
+        raise RuntimeError("Invalid desktop program identity")
+    record = json.loads(host.read_text())
+    if isinstance(record, dict) and type(record.get("schema_version")) is int and record["schema_version"] == 1:
+        return False  # Existing embedded/independent CLI behavior is unchanged.
+    if (not isinstance(record, dict) or set(record) != {"schema_version", "platform", "arch"}
+            or type(record.get("schema_version")) is not int or record["schema_version"] != 2
+            or record["platform"] != "linux" or record["arch"] != "x64"
+            or info.st_uid != os.getuid() or info.st_nlink != 1 or info.st_mode & 0o022):
+        raise RuntimeError("Invalid desktop program identity")
+    return True
+
+
+def enforce_browser_sandbox(method):
+    @functools.wraps(method)
+    async def guarded(browser_type, *args, **kwargs):
+        if browser_type.name == "chromium":
+            flags = [str(flag).partition("=")[0] for flag in kwargs.get("args") or ()]
+            if kwargs.get("chromium_sandbox") is False or any(
+                flag in ("--no-sandbox", "--single-process")
+                or (flag.startswith("--disable-") and "sandbox" in flag and flag != "--disable-setuid-sandbox")
+                for flag in flags
+            ):
+                from mcp.server.mcpserver.exceptions import ToolError
+                raise ToolError("受管桌面浏览器必须启用 Chromium 沙箱，不能传入关闭沙箱的选项。")
+            kwargs["chromium_sandbox"] = True
+        return await method(browser_type, *args, **kwargs)
+    guarded._crabot_managed_sandbox = True
+    return guarded
+
+
+def enable_managed_browser_sandbox():
+    from playwright.async_api import BrowserType as PlaywrightBrowserType
+    from patchright.async_api import BrowserType as PatchrightBrowserType
+    for browser_type in (PlaywrightBrowserType, PatchrightBrowserType):
+        for name in ("launch", "launch_persistent_context"):
+            method = getattr(browser_type, name)
+            if not getattr(method, "_crabot_managed_sandbox", False):
+                setattr(browser_type, name, enforce_browser_sandbox(method))
+
+
 async def run_stdio(server):
     if sys.platform == "win32":
         await server.run_stdio_async()
@@ -65,6 +115,8 @@ async def serve():
     os.environ["PLAYWRIGHT_NODEJS_PATH"] = str(RUNTIME / manifest["node"])
     if sys.platform == "linux":
         os.environ["FONTCONFIG_FILE"] = str(RUNTIME / "fonts.conf")
+    if paired_linux_core():
+        enable_managed_browser_sandbox()
     upstream = ScraplingMCPServer(executable_path=str(RUNTIME / manifest["browser"]))
     headless = os.environ.get("CRABOT_SCRAPLING_SYSTEM") == "1" or (
         sys.platform == "linux" and not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))

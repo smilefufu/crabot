@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import { createHash } from 'node:crypto'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, copyFileSync, chmodSync, symlinkSync, readlinkSync, existsSync, realpathSync, constants } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -34,6 +34,25 @@ test('installer helper pins match the shipped scripts on Unix and Windows', () =
     assert.ok(powershell.includes(`'${name}' = '${actual}'`), `${name}: Windows pin must match shipped helper`)
   }
 })
+test('pinned helper and CLI entry checkout bytes stay LF even with Windows CRLF defaults', t => {
+  const root = fixture(t), attributes = fileURLToPath(new URL('../../../.gitattributes', import.meta.url))
+  const runGit = (args, input) => {
+    const result = spawnSync('git', ['-c', 'core.autocrlf=true', '-c', 'core.eol=crlf', ...args], { cwd: root, input })
+    assert.equal(result.status, 0, result.stderr?.toString())
+    return result.stdout
+  }
+  runGit(['init', '--quiet'])
+  writeFileSync(join(root, '.gitattributes'), existsSync(attributes) ? readFileSync(attributes) : '')
+  const shell = readFileSync(installer, 'utf8')
+  const names = [...shell.matchAll(/(scripts\/[\w/.-]+)\) echo ([a-f0-9]{64})/g)].map(match => match[1])
+  for (const name of [...names, 'scripts/check.mjs']) {
+    const original = readFileSync(new URL(`../../../${name}`, import.meta.url))
+    const blob = runGit(['hash-object', '-w', '--stdin'], original).toString().trim()
+    const checkout = runGit(['cat-file', '--filters', '--path=' + name, blob])
+    assert.equal(createHash('sha256').update(checkout).digest('hex'), createHash('sha256').update(original).digest('hex'), name)
+  }
+})
+
 test('failed uv download is a failed prerequisite, without an installed message', unix, t => {
   const result = bash('curl() { return 22; }; ensure_uv', { HOME: fixture(t), PATH: '/usr/bin:/bin:/usr/sbin:/sbin' })
   assert.notEqual(result.status, 0, result.stdout + result.stderr)
@@ -92,6 +111,7 @@ test('CLI repairs dependencies before linking an entry with static third-party i
   const fs = await import('node:fs/promises')
   await fs.copyFile(new URL('../../../cli.mjs', import.meta.url), join(root, 'cli.mjs'))
   await fs.mkdir(join(root, 'scripts/lib'), { recursive: true })
+  await fs.copyFile(new URL('../cli-location.cjs', import.meta.url), join(root, 'scripts/lib/cli-location.cjs'))
   await fs.writeFile(join(root, 'scripts/_preflight.mjs'), `import fs from 'node:fs';import path from 'node:path';import {fileURLToPath} from 'node:url';const lib=path.join(path.dirname(fileURLToPath(import.meta.url)),'lib/node_modules/fixture-package');fs.mkdirSync(lib,{recursive:true});fs.writeFileSync(path.join(lib,'package.json'),JSON.stringify({main:'index.js'}));fs.writeFileSync(path.join(lib,'index.js'),'module.exports=true')`)
   await fs.writeFile(join(root, 'scripts/lib/registry.mjs'), "import value from 'fixture-package'; export default value")
   await fs.writeFile(join(root, 'scripts/start.mjs'), "import './_preflight.mjs';import value from './lib/registry.mjs';if(!value)process.exit(1);console.log('entry linked after dependency repair')")
@@ -189,11 +209,19 @@ test('healthy Corepack avoids Windows PATH discovery; localized absence is check
   for (const mode of ['healthy', 'missing', 'unknown', 'discovery-timeout', 'tmp-missing']) {
     const code = `
       import cp from 'node:child_process';
+      import os from 'node:os';
       import { syncBuiltinESMExports } from 'node:module';
       import { EventEmitter } from 'node:events';
+      import { promisify } from 'node:util';
       Object.defineProperty(process, 'platform', { value: 'win32' });
+      const npmConfig = () => { throw new Error('npm transport must use its promisified query'); };
+      npmConfig[promisify.custom] = async (command,args) => {
+        if(command!==process.execPath || JSON.stringify(args.slice(-4))!==JSON.stringify(['config','list','--json','--no-update-notifier']))throw new Error('unexpected npm transport command');
+        return {stdout:'{}',stderr:''};
+      };
+      cp.execFile = npmConfig;
       const mode = process.env.TEST_MODE; let where = 0;
-      if(mode==='tmp-missing')process.env.TEMP=process.env.TMP=process.env.TEST_ROOT+'/does-not-exist';
+      if(mode==='tmp-missing')os.tmpdir=()=>process.env.TEST_ROOT+'/does-not-exist';
       cp.execFileSync = () => { where++; if(mode==='missing')throw Object.assign(new Error('absent'),{status:1}); if(mode==='discovery-timeout')throw Object.assign(new Error('scan timed out'),{code:'ETIMEDOUT'}); };
       cp.spawn = () => { const child=new EventEmitter();child.stderr=new EventEmitter();setImmediate(()=>{if(mode!=='healthy')child.stderr.emit('data',Buffer.from('commande introuvable fixture'));child.emit('close',mode==='healthy'?0:1)});return child; };
       syncBuiltinESMExports();
@@ -208,6 +236,93 @@ test('healthy Corepack avoids Windows PATH discovery; localized absence is check
   }
 })
 
+
+function bundledPathFixture(t) {
+  const home = fixture(t), core = join(home, '产品 中文'), installed = join(home, 'installed')
+  mkdirSync(join(core, '.product-runtime/node/bin'), { recursive: true })
+  copyFileSync(process.execPath, join(core, '.product-runtime/node/bin/node'), constants.COPYFILE_FICLONE)
+  chmodSync(join(core, '.product-runtime/node/bin/node'), 0o755)
+  mkdirSync(join(installed, 'bin'), { recursive: true })
+  writeFileSync(join(installed, 'bin/crabot'), '#!/bin/sh\necho bundled-command\n', { mode: 0o755 })
+  return { home, core, installed, env: { HOME: home, TEST_CORE: core, CRABOT_INSTALL_DIR: installed, SHELL: '/bin/bash', PATH: '/usr/bin:/bin:/usr/sbin:/sbin' } }
+}
+
+test('bundled CLI PATH setup uses its own Node and preserves login preferences without adding nvm', unix, t => {
+  const f = bundledPathFixture(t)
+  writeFileSync(join(f.home, '.profile'), 'export PRESERVED_PROFILE=present\n')
+  mkdirSync(join(f.home, '.nvm')); writeFileSync(join(f.home, '.nvm/nvm.sh'), 'echo must-not-be-added\n')
+  for (let i = 0; i < 2; i++) {
+    const result = bash('BUNDLED_CORE_DIR="$TEST_CORE"; configure_path', f.env)
+    assert.equal(result.status, 0, result.stdout + result.stderr)
+  }
+  const profile = readFileSync(join(f.home, '.profile'), 'utf8')
+  assert.ok(profile.startsWith('export PRESERVED_PROFILE=present\n')); assert.doesNotMatch(profile, /NVM_DIR|nvm\.sh/)
+  for (const args of [['--login', '-c'], ['-i', '-c']]) {
+    const result = spawnSync('/bin/bash', [...args, 'crabot'], { env: { ...process.env, ...f.env }, encoding: 'utf8' })
+    assert.equal(result.status, 0, result.stderr); assert.match(result.stdout, /bundled-command/)
+  }
+})
+
+test('bundled PATH setup preserves a broken custom link and rejects a shared writable command directory', unix, t => {
+  for (const mode of ['broken-link', 'shared-directory']) {
+    const f = bundledPathFixture(t), prefix = join(f.home, '.local/bin'), entry = join(prefix, 'crabot')
+    mkdirSync(prefix, { recursive: true })
+    if (mode === 'broken-link') symlinkSync('/missing-custom-command', entry)
+    else chmodSync(prefix, 0o777)
+    const result = bash('BUNDLED_CORE_DIR="$TEST_CORE"; configure_path', f.env)
+    assert.notEqual(result.status, 0)
+    if (mode === 'broken-link') assert.equal(readlinkSync(entry), '/missing-custom-command')
+    else assert.equal(existsSync(entry), false)
+    assert.equal(existsSync(join(f.home, '.bashrc')), false)
+  }
+})
+
+
+test('remote complete releases use bundled Node before host setup and reject broken payloads', unix, t => {
+  for (const mode of ['complete', 'missing-metadata', 'bad-checksum']) {
+    const home = fixture(t), payload = join(home, 'payload'), archive = join(home, 'release.tar.gz')
+    mkdirSync(join(payload, '.product-runtime/node/bin'), { recursive: true })
+    copyFileSync(process.execPath, join(payload, '.product-runtime/node/bin/node'), constants.COPYFILE_FICLONE)
+    chmodSync(join(payload, '.product-runtime/node/bin/node'), 0o755)
+    if (mode !== 'missing-metadata') writeFileSync(join(payload, 'core-release.json'), '{}')
+    mkdirSync(join(payload, 'scripts'))
+    writeFileSync(join(payload, 'scripts/install-core.mjs'), "if(!process.argv.includes('--scope=user')||!process.argv.includes('--expected-version=fixture')||!process.argv.some(v=>v.startsWith('--install-root=')))process.exit(98);console.log('BUNDLED_INSTALL_ENTRY');process.exit(47)")
+    const packed = spawnSync('tar', ['-czf', archive, '-C', home, 'payload'], { encoding: 'utf8' })
+    assert.equal(packed.status, 0, packed.stderr)
+    const sha = mode === 'bad-checksum' ? '0'.repeat(64) : createHash('sha256').update(readFileSync(archive)).digest('hex')
+    const result = bash(`
+      curl() {
+        local url='' output=''
+        while [ "$#" -gt 0 ]; do case "$1" in https:*) url="$1";; -o) shift; output="$1";; esac; shift; done
+        case "$url" in *.sha256) printf '%s  %s\n' "$FIXTURE_SHA" "$(basename "\${url%.sha256}")" > "$output";; *) cp "$FIXTURE_ARCHIVE" "$output";; esac
+      }
+      ensure_node() { echo UNEXPECTED_HOST_NODE; return 88; }
+      ensure_uv() { echo UNEXPECTED_HOST_UV; return 88; }
+      main
+    `, { HOME: home, TMPDIR: home, CRABOT_VERSION: 'fixture', CRABOT_INSTALL_DIR: join(home, 'installed'), FIXTURE_ARCHIVE: archive, FIXTURE_SHA: sha })
+    const output = result.stdout + result.stderr
+    assert.notEqual(result.status, 0, output)
+    assert.doesNotMatch(output, /UNEXPECTED_HOST/)
+    if (mode === 'complete') assert.match(output, /BUNDLED_INSTALL_ENTRY/)
+    else {
+      assert.doesNotMatch(output, /BUNDLED_INSTALL_ENTRY/)
+      assert.match(output, mode === 'missing-metadata' ? /metadata is missing/ : /Checksum verification failed/)
+    }
+    assert.equal(existsSync(join(home, 'installed')), false)
+    assert.deepEqual(readdirSync(home).filter(name => name.startsWith('crabot-install.')), [])
+  }
+})
+
+
+test('PowerShell 5.1 and 7 remote complete releases bypass host prerequisites and preserve failed installs', { skip: process.platform !== 'win32' }, t => {
+  for (const shell of ['powershell.exe', 'pwsh.exe']) {
+    const result = spawnSync(shell, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File',
+      fileURLToPath(new URL('./remote-installer.ps1', import.meta.url)), '-Installer', installer.replace(/install\.sh$/, 'install.ps1'), '-Node', process.execPath],
+    { encoding: 'utf8', timeout: 120_000 })
+    assert.equal(result.status, 0, shell + ': ' + result.stdout + result.stderr)
+  }
+})
+
 test('request upgrade generation is complete or rejected before package acceptance', async t => {
   const { verifyReleasePackage } = await import('../release-package.mjs')
   const root = fixture(t)
@@ -217,4 +332,35 @@ test('request upgrade generation is complete or rejected before package acceptan
   await assert.rejects(verifyReleasePackage(root, 'v2026.10.12.4'), /missing crabot-agent\/dist\/manager\/request-upgrade/)
   for (const file of generation.slice(1)) { mkdirSync(join(root, file, '..'), { recursive: true }); writeFileSync(join(root, file), '') }
   await verifyReleasePackage(root, 'v2026.10.12.4', { run: async () => {} })
+})
+
+test('system bundled installer leaves retained code cwd and follows the prepared root without writing OS state', unix, t => {
+  for (const converted of [false, true]) {
+    const f = bundledPathFixture(t), old = join(f.home, 'selected-root')
+    mkdirSync(old); if (converted) writeFileSync(join(old, 'cli.mjs'), 'retained old entry')
+    mkdirSync(join(f.core, 'scripts')); writeFileSync(join(f.core, 'core-release.json'), '{}')
+    writeFileSync(join(f.core, 'scripts/install-core.mjs'), `import fs from 'node:fs';import path from 'node:path';
+      const root=process.argv.find(value=>value.startsWith('--install-root=')).slice('--install-root='.length);
+      if(process.cwd()!=='/'||root!==process.env.TEST_SELECTED_ROOT||!process.argv.includes('--scope=system'))throw Error('installer cwd/root mismatch');
+      const selected=${converted} ? path.join(root,'.managed') : root;
+      fs.mkdirSync(path.join(selected,'releases','fixture'),{recursive:true});fs.writeFileSync(path.join(selected,'current-core'),'fixture\\n');
+      console.log('FIXTURE_ROOT_PREPARED');`)
+    const result = bash(`
+      SYSTEM_MODE=true; SOURCE_IS_LOCAL=true; SOURCE_DIR="$TEST_CORE"; CRABOT_VERSION=latest
+      cd "$TEST_SELECTED_ROOT"; INSTALL_DIR=.
+      detect_platform() { echo linux-x64; }
+      getconf() { echo 'glibc 2.35'; }
+      section() {
+        if [ "$1" = 'Creating /etc/crabot/ skeleton' ]; then
+          [ "$INSTALL_DIR" = "$TEST_EXPECTED_ROOT" ] || exit 97
+          [ "$BUNDLED_CORE_DIR" = "$TEST_EXPECTED_ROOT/releases/fixture" ] || exit 96
+          echo FIXTURE_VERIFIED_BEFORE_OS_WRITES; exit 0
+        fi
+      }
+      main
+    `, { ...f.env, TEST_SELECTED_ROOT: realpathSync(old), TEST_EXPECTED_ROOT: converted ? join(realpathSync(old), '.managed') : realpathSync(old) })
+    assert.equal(result.status, 0, result.stdout + result.stderr)
+    assert.match(result.stdout, /FIXTURE_VERIFIED_BEFORE_OS_WRITES/)
+    if (converted) assert.equal(readFileSync(join(old, 'cli.mjs'), 'utf8'), 'retained old entry')
+  }
 })
