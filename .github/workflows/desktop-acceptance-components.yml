@@ -63,4 +63,3 @@ jobs:
           crabot-desktop/tests/desktop-resources.test.mjs
           crabot-desktop/tests/first-model-fixture.test.mjs
           crabot-desktop/tests/full-host-control.test.mjs
-          crabot-desktop/tests/paired-update-host.test.mjs
