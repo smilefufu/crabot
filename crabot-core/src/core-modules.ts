@@ -17,6 +17,8 @@ export interface BuildCoreModulesOpts {
   mmEndpoint: string
   adminEndpoint: string
   newApiToken: string
+  productRuntime?: boolean
+  agentPath?: string
 }
 
 type CoreModule = ModuleDefinition & Record<string, unknown>
@@ -31,7 +33,7 @@ export function buildCoreModules(o: BuildCoreModulesOpts): CoreModule[] {
       module_type: 'admin',
       version: '0.1.0',
       protocol_version: '0.1.0',
-      entry: o.isDev ? 'npx tsx --watch src/main.ts' : 'node dist/main.js',
+      entry: o.isDev ? 'npx tsx --watch src/main.ts' : `node "${path.join(o.adminDir, 'dist/main.js')}"`,
       cwd: o.adminDir,
       auto_start: o.isDev || fs.existsSync(path.join(o.adminDir, 'dist', 'main.js')),
       auto_restart: true,
@@ -72,6 +74,7 @@ export function buildCoreModules(o: BuildCoreModulesOpts): CoreModule[] {
         CRABOT_MODULE_ID: 'crabot-agent',
         // agent 的 restart_instance 工具用 CRABOT_HOME 定位 scripts/restart.mjs
         CRABOT_HOME: o.crabotRoot,
+        ...(o.agentPath ? { PATH: o.agentPath } : {}),
       } as Record<string, string>,
     },
     {
@@ -79,7 +82,8 @@ export function buildCoreModules(o: BuildCoreModulesOpts): CoreModule[] {
       module_type: 'memory',
       version: '0.1.0',
       protocol_version: '0.4.0',
-      entry: o.memoryPython ? `"${o.memoryPython}" -m src.main` : memoryEntry,
+      entry: o.productRuntime ? 'node ../scripts/run-product-memory.mjs'
+        : o.memoryPython ? `"${o.memoryPython}" -m src.main` : memoryEntry,
       cwd: o.memoryDir,
       data_dir: path.join(o.dataDir, 'memory'),
       auto_start: fs.existsSync(path.join(o.memoryDir, 'src', 'main.py')),

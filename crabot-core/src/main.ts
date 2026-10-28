@@ -58,8 +58,11 @@ async function main(): Promise<void> {
   // Agent 专用 python 环境：确保 $DATA_DIR/agent-venv 存在（uv 懒创建），把其 bin
   // 前置到 PATH，让 agent shell 的 python3/pip3 落到实例 venv 而非系统 python。
   // uv 不可用或创建失败时返回 null，保持原 PATH（等价历史行为）。
-  const agentVenvPath = ensureAgentVenv(DATA_DIR)
-  if (agentVenvPath) {
+  const { loadProductRuntime, productEnvironment } = require('../../scripts/lib/product-runtime.cjs')
+  const productRuntime = loadProductRuntime(CRABOT_ROOT, { required: process.env.CRABOT_PRODUCT_REQUIRED === '1' })
+  if (productRuntime) Object.assign(process.env, productEnvironment(productRuntime, DATA_DIR))
+  const agentVenvPath = ensureAgentVenv(DATA_DIR, undefined, productRuntime)
+  if (agentVenvPath && !productRuntime) {
     process.env.PATH = agentVenvPath
   }
 
@@ -116,7 +119,7 @@ async function main(): Promise<void> {
   }
 
   const { preparedMemoryPython } = require(path.join(CRABOT_ROOT, 'scripts/lib/memory-deps.mjs'))
-  const memoryPython = await preparedMemoryPython(MEMORY_DIR)
+  const memoryPython = productRuntime ? null : await preparedMemoryPython(MEMORY_DIR)
 
   // 核心模块定义（Admin 和 Agent 是核心层模块，需要预定义）
   const CORE_MODULES = buildCoreModules({
@@ -125,6 +128,8 @@ async function main(): Promise<void> {
     agentDir: AGENT_DIR,
     memoryDir: MEMORY_DIR,
     memoryPython,
+    productRuntime: Boolean(productRuntime),
+    agentPath: productRuntime ? agentVenvPath ?? undefined : undefined,
     dataDir: DATA_DIR,
     workspaceDir: WORKSPACE_DIR,
     isDev,

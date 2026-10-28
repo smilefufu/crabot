@@ -25,7 +25,11 @@ type SpawnFn = typeof spawnSync
  *
  * spawn 参数仅用于测试注入，生产走默认 spawnSync。
  */
-export function ensureAgentVenv(dataDir: string, spawn: SpawnFn = spawnSync): string | null {
+export function ensureAgentVenv(dataDir: string, spawn: SpawnFn = spawnSync, productRuntime?: unknown): string | null {
+  if (productRuntime) {
+    const { ensureProductAgentVenv } = require('../../scripts/lib/product-python-env.cjs')
+    return ensureProductAgentVenv(productRuntime, dataDir, spawn)
+  }
   const venvDir = path.join(dataDir, 'agent-venv')
   const venvBin = path.join(venvDir, IS_WIN ? 'Scripts' : 'bin')
   const venvPython = path.join(venvBin, IS_WIN ? 'python.exe' : 'python')
