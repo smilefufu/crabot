@@ -7,8 +7,9 @@ import { createRequire } from 'node:module'
 import vm from 'node:vm'
 import { verifyDesktopAsar, verifyInstallerAsar } from '../desktop-asar.mjs'
 import { desktopMaintenanceBootstrap } from '../desktop-maintenance-bootstrap.mjs'
-const productionRequire = createRequire(import.meta.url)
-const asar = productionRequire('@electron/asar')
+const desktopRequire = createRequire(new URL('../../../crabot-desktop/package.json', import.meta.url))
+const builderRequire = createRequire(createRequire(desktopRequire.resolve('electron-builder')).resolve('app-builder-lib/package.json'))
+const asar = builderRequire('@electron/asar')
 async function fixture(t, missingTray = false, installer = false, pair, omitted = []) {
   const parent = await fs.mkdtemp(path.join(tmpdir(), 'Crabot ASAR 中文 ')), source = path.join(parent, 'source'), archive = path.join(parent, 'app.asar')
   t.after(() => fs.rm(parent, { recursive: true, force: true }))
@@ -41,7 +42,7 @@ async function fixture(t, missingTray = false, installer = false, pair, omitted 
 function windowsFilesystem(archive) {
   // Execute the installed ASAR filesystem unchanged, using Windows path APIs.
   // The actual archive/header is produced by ASAR; no Electron or business Core runs.
-  const file = productionRequire.resolve('@electron/asar/lib/filesystem.js'), require = createRequire(file), module = { exports: {} }
+  const file = builderRequire.resolve('@electron/asar/lib/filesystem.js'), require = createRequire(file), module = { exports: {} }
   vm.runInNewContext(readFileSync(file, 'utf8'), { module, exports: module.exports, Buffer, process,
     require: name => name === 'path' ? path.win32 : require(name) }, { filename: file })
   const filesystem = new module.exports.Filesystem('C:\\fixture\\app.asar'), header = asar.getRawHeader(archive)

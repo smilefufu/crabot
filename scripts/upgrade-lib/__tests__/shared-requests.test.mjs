@@ -146,6 +146,8 @@ it('a process crash after first conversion resumes only the verified file transa
   expect(child.status, child.stderr).toBe(41)
   await expect(fs.stat(ready())).rejects.toThrow()
   expect(JSON.parse(await fs.readFile(ledgerPath(), 'utf8'))).toHaveProperty('schema_version', 1)
+  await expect(prepareSharedRequests(home, root, quiet, { prepareOnly: true })).rejects.toThrow('already changed data')
+  await expect(fs.stat(ready())).rejects.toThrow()
   expect((await prepareSharedRequests(home, root, quiet)).status).toBe('prepared')
   expect(await fs.readFile(path.join(root, 'agent', 'workers', 'old', 'input.json'), 'utf8')).toBe('OLD INPUT DO NOT REPLAY')
 })
@@ -265,4 +267,40 @@ it.each([false, true])('legacy v1 ready and interrupted transactions retain orig
   expect(result.status).toBe(interrupted ? 'prepared' : 'ready')
   expect(JSON.parse(await fs.readFile(ready(), 'utf8'))).toMatchObject({ schema_version: 1, transaction: 'shared-request-upgrade-v1' })
   await expect(fs.stat(path.join(root, 'shared-request-upgrade-v2'))).rejects.toThrow()
+})
+
+
+it('shared recovery can be prepared before selection without wrapping ledgers or publishing authority', async () => {
+  await setup()
+  const original = await fs.readFile(ledgerPath(), 'utf8'), copy = vi.spyOn(fs, 'copyFile')
+  try {
+    const prepared = await prepareSharedRequests(home, root, quiet, { prepareOnly: true })
+    expect(prepared.status).toBe('backup_prepared')
+    expect(await fs.readFile(ledgerPath(), 'utf8')).toBe(original)
+    await expect(fs.stat(ready())).rejects.toMatchObject({ code: 'ENOENT' })
+    const copies = copy.mock.calls.length
+    expect(copies).toBeGreaterThan(0)
+    expect((await prepareSharedRequests(home, root, quiet, { prepareOnly: true })).status).toBe('backup_prepared')
+    expect((await prepareSharedRequests(home, root, quiet)).status).toBe('prepared')
+    expect(copy).toHaveBeenCalledTimes(copies)
+    expect(JSON.parse(await fs.readFile(ledgerPath(), 'utf8'))).toEqual({ schema_version: 1, ledger: ledger() })
+  } finally { copy.mockRestore() }
+})
+it('prepared shared authority inputs cannot change before conversion', async () => {
+  await setup()
+  const original = await fs.readFile(ledgerPath(), 'utf8')
+  await prepareSharedRequests(home, root, quiet, { prepareOnly: true })
+  await fs.writeFile(path.join(root, 'admin/friends.json'), '[{}]')
+  await expect(prepareSharedRequests(home, root, quiet)).rejects.toThrow('Data changed')
+  expect(await fs.readFile(ledgerPath(), 'utf8')).toBe(original)
+  await expect(fs.stat(ready())).rejects.toMatchObject({ code: 'ENOENT' })
+})
+it('backup-only preparation cannot execute an unfinished legacy request transaction', async () => {
+  await setup()
+  const original = await fs.readFile(ledgerPath(), 'utf8'), legacy = path.join(root, 'shared-request-upgrade-v1')
+  await fs.mkdir(legacy); await fs.writeFile(path.join(legacy, 'evidence'), 'preserve')
+  await expect(prepareSharedRequests(home, root, quiet, { prepareOnly: true })).rejects.toThrow('Legacy request')
+  expect(await fs.readFile(path.join(legacy, 'evidence'), 'utf8')).toBe('preserve')
+  expect(await fs.readFile(ledgerPath(), 'utf8')).toBe(original)
+  await expect(fs.stat(ready())).rejects.toMatchObject({ code: 'ENOENT' })
 })

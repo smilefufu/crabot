@@ -1,0 +1,176 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import path from 'node:path'
+import { tmpdir } from 'node:os'
+import { execFileSync, spawn } from 'node:child_process'
+import native from '../process-identity.cjs'
+import management from '../desktop-management.cjs'
+import { WorkspaceCatalog } from '../../../crabot-shared/dist/workspace-catalog.js'
+import { beginWorkspaceRelocationIntent, readWorkspaceRelocationIntent } from '../workspace-relocation-intent.mjs'
+import { acquireCliLock, releaseCliLock } from '../cli-lock.mjs'
+import { randomUUID } from 'node:crypto'
+import { once } from 'node:events'
+import { inspectWorkspaceCopySource } from '../workspace-copy.mjs'
+import { inspectWorkspaceFileMetadata, verifyWorkspaceRelocationCopy } from '../workspace-file-metadata.mjs'
+import { copyWorkspaceTreePinned } from '../workspace-windows-copy.mjs'
+const windows = { skip: process.platform !== 'win32', timeout: 30000 }
+const policy = 'windows-owner-inheritance-v1'
+function fixture(t) {
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(tmpdir(), 'workspace-owner-inheritance-')))
+  const source = path.join(root, 'source'), target = path.join(root, 'container/tree')
+  for (const directory of [source, path.dirname(target), target]) native.createPrivateDirectory(directory)
+  const file = path.join(source, 'original.txt'); fs.writeFileSync(file, 'original retained bytes')
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  return { source, target, file }
+}
+function setAcl(file, sddl) {
+  execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+    `$ErrorActionPreference='Stop';Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+public static class CrabotAclFixture {
+  [DllImport("advapi32.dll", CharSet=CharSet.Unicode, SetLastError=true, ExactSpelling=true)]
+  static extern bool ConvertStringSecurityDescriptorToSecurityDescriptorW(string text, uint revision, out IntPtr descriptor, out uint size);
+  [DllImport("advapi32.dll", CharSet=CharSet.Unicode, SetLastError=true, ExactSpelling=true)]
+  static extern bool SetFileSecurityW(string path, uint fields, IntPtr descriptor);
+  [DllImport("kernel32.dll")] static extern IntPtr LocalFree(IntPtr memory);
+  public static void Set(string path, string text) {
+    IntPtr descriptor; uint size;
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(text, 1, out descriptor, out size)) throw new Win32Exception();
+    try { if (!SetFileSecurityW(path, 4, descriptor)) throw new Win32Exception(); }
+    finally { LocalFree(descriptor); }
+  }
+}
+'@
+[CrabotAclFixture]::Set($env:CRABOT_TEST_FILE,$env:CRABOT_TEST_SDDL)`],
+  { env: { ...process.env, CRABOT_TEST_FILE: file, CRABOT_TEST_SDDL: sddl }, stdio: 'pipe' })
+}
+function addAuditOnly(file, copy) {
+  // Only this separate CI fixture process may use its audit privilege, never the product caller.
+  execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `
+$ErrorActionPreference='Stop'
+$sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User
+$sections=[System.Security.AccessControl.AccessControlSections]::Access -bor [System.Security.AccessControl.AccessControlSections]::Owner -bor [System.Security.AccessControl.AccessControlSections]::Group
+foreach($file in @($env:CRABOT_TEST_FILE,$env:CRABOT_TEST_COPY)) {
+if(!$file){continue}
+$acl=Get-Acl -LiteralPath $file -Audit
+$before=$acl.GetSecurityDescriptorSddlForm($sections)
+$right=if($file -eq $env:CRABOT_TEST_FILE){[System.Security.AccessControl.FileSystemRights]::ReadData}else{[System.Security.AccessControl.FileSystemRights]::WriteData}
+$rule=New-Object System.Security.AccessControl.FileSystemAuditRule($sid,$right,[System.Security.AccessControl.AuditFlags]::Success)
+$acl.AddAuditRule($rule)
+[System.IO.File]::SetAccessControl($file,$acl)
+$actual=Get-Acl -LiteralPath $file -Audit
+if($actual.GetSecurityDescriptorSddlForm($sections) -ne $before){throw 'Audit fixture unexpectedly changed access permissions or ownership'}
+if(@($actual.GetAuditRules($true,$true,[System.Security.Principal.SecurityIdentifier])|Where-Object {$_.IdentityReference -eq $sid -and ($_.AuditFlags -band [System.Security.AccessControl.AuditFlags]::Success) -and ($_.FileSystemRights -band $right)}).Count -lt 1){throw 'Actual fixture audit ACE is missing'}
+}
+`], { env: { ...process.env, CRABOT_TEST_FILE: file, CRABOT_TEST_COPY: copy ?? '' }, stdio: 'pipe' })
+}
+for (const mutation of ['named stream', 'integrity label']) test('private Windows copy preserves raw proofs and rejects a changed ' + mutation, windows, async t => {
+  const f = fixture(t), original = await inspectWorkspaceFileMetadata(f.file)
+  const pins = [f.source, f.target, path.dirname(f.target)].map(directory => native.pinDirectory(directory))
+  try {
+    await inspectWorkspaceCopySource(f.source, { metadataCompatibility: policy })
+    await copyWorkspaceTreePinned(...pins, { metadataCompatibility: policy, journal: {
+      async register() { return { dispatch: 'dispatch' } }, async permit() { return { dispatch: 'dispatch' } }, async complete() {},
+    } })
+    const proof = await verifyWorkspaceRelocationCopy(f.source, f.target, { metadataCompatibility: policy })
+    assert.equal(proof.metadata_compatibility, policy)
+    assert.equal(proof.legacy_owner_inheritance_files === 0, proof.metadata_fingerprint === proof.target_metadata_fingerprint)
+    assert.deepEqual(await inspectWorkspaceFileMetadata(f.file), original)
+    const copy = path.join(f.target, 'original.txt')
+    if (mutation === 'named stream') fs.writeFileSync(copy + ':extra', 'unapproved stream')
+    else {
+      execFileSync(path.join(process.env.SystemRoot, 'System32/icacls.exe'), [copy, '/setintegritylevel', 'L'], { stdio: 'pipe' })
+      assert.equal(native.compareWorkspaceOwnerInheritance(f.file, copy), false)
+    }
+    await assert.rejects(verifyWorkspaceRelocationCopy(f.source, f.target, { metadataCompatibility: policy }), { code: 'CRABOT_FILE_METADATA' })
+  } finally { for (const pin of pins.reverse()) native.releaseDirectoryPin(pin) }
+})
+for (const auditScope of ['source only', 'different rules on both files']) test('Windows compatibility refuses actual audit ACEs: ' + auditScope, windows, async t => {
+  const f = fixture(t), pins = [f.source, f.target, path.dirname(f.target)].map(directory => native.pinDirectory(directory))
+  try {
+    const owner = native.inspectProcess(process.pid).owner
+    setAcl(f.file, 'O:' + owner + 'D:(A;;FA;;;' + owner + ')')
+    assert.equal(native.inspectFileMetadata(f.file).metadata.includes(Buffer.from('(A;;FA;')), true, 'source fixture must start with an explicit full-access ACE')
+    await copyWorkspaceTreePinned(...pins, { metadataCompatibility: policy, journal: {
+      async register() { return { dispatch: 'dispatch' } }, async permit() { return { dispatch: 'dispatch' } }, async complete() {},
+    } })
+    const copy = path.join(f.target, 'original.txt')
+    addAuditOnly(f.file, auditScope === 'source only' ? undefined : copy)
+    assert.equal(native.compareWorkspaceOwnerInheritance(f.file, copy), false)
+    await assert.rejects(inspectWorkspaceCopySource(f.source, { metadataCompatibility: policy }), { code: 'WORKSPACE_COPY_ACL_UNSUPPORTED' })
+    assert.equal(fs.readFileSync(f.file, 'utf8'), 'original retained bytes')
+  } finally { for (const pin of pins.reverse()) native.releaseDirectoryPin(pin) }
+})
+for (const kind of ['extra user', 'deny', 'restricted', 'file inheritance flags', 'different user']) {
+  test('Windows compatibility preflight blocks ' + kind + ' before any copy or source mutation', windows, async t => {
+    const f = fixture(t), owner = native.inspectProcess(process.pid).owner
+    const aces = {
+      'extra user': '(A;;FA;;;' + owner + ')(A;;FR;;;WD)',
+      'deny': '(D;;WD;;;WD)(A;;FA;;;' + owner + ')',
+      'restricted': '(A;;FR;;;' + owner + ')',
+      'file inheritance flags': '(A;OI;FA;;;' + owner + ')',
+      'different user': '(A;;FA;;;WD)',
+    }
+    setAcl(f.file, 'O:' + owner + 'D:P' + aces[kind])
+    const before = native.inspectFileMetadata(f.file).metadata
+    if (kind === 'file inheritance flags') assert.equal(before.includes(Buffer.from('(A;OI;')), true, 'fixture must retain the actual unsupported flag')
+    assert.equal(native.inspectWorkspaceOwnerAccess(f.file), false)
+    await assert.rejects(inspectWorkspaceCopySource(f.source, { metadataCompatibility: policy }), { code: 'WORKSPACE_COPY_ACL_UNSUPPORTED' })
+    assert.deepEqual(native.inspectFileMetadata(f.file).metadata, before)
+    assert.deepEqual(fs.readdirSync(f.target), [])
+    assert.equal(fs.readFileSync(f.file, 'utf8'), 'original retained bytes')
+  })
+}
+test('directories, extra hard links, unchanged and protected security never qualify as the one inheritance difference', windows, async t => {
+  const f = fixture(t), other = path.join(f.target, 'other.txt'); fs.copyFileSync(f.file, other)
+  assert.equal(native.compareWorkspaceOwnerInheritance(f.file, f.file), false)
+  assert.equal(native.compareWorkspaceOwnerInheritance(f.source, f.target), false)
+  const owner = native.inspectProcess(process.pid).owner
+  setAcl(other, 'O:' + owner + 'D:P(A;;FA;;;' + owner + ')')
+  assert.equal(native.compareWorkspaceOwnerInheritance(f.file, other), false)
+  fs.linkSync(f.file, path.join(f.source, 'link'))
+  assert.equal(native.inspectWorkspaceOwnerAccess(f.file), false)
+  assert.equal(native.compareWorkspaceOwnerInheritance(f.file, other), false)
+})
+test('compatibility refuses non-private parents even if the files have current-user full access', windows, async t => {
+  const f = fixture(t), owner = native.inspectProcess(process.pid).owner
+  const acl = 'O:' + owner + 'D:P(A;OICI;FA;;;' + owner + ')(A;OICI;FR;;;WD)'
+  execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+    "$ErrorActionPreference='Stop';$a=New-Object System.Security.AccessControl.DirectorySecurity;$a.SetSecurityDescriptorSddlForm($env:CRABOT_TEST_SDDL);Set-Acl -LiteralPath $env:CRABOT_TEST_FILE -AclObject $a"],
+    { env: { ...process.env, CRABOT_TEST_FILE: f.source, CRABOT_TEST_SDDL: acl }, stdio: 'pipe' })
+  await assert.rejects(inspectWorkspaceCopySource(f.source, { metadataCompatibility: policy }), { code: 'WORKSPACE_COPY_ACL_UNSUPPORTED' })
+})
+
+
+for (const acl of ['restricted', 'audit']) test('unsupported Windows ' + acl + ' ACL rejects the actual cross-volume intent before fencing or stopping existing execution', windows, async t => {
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(tmpdir(), 'workspace-acl-admission-')))
+  const other = path.resolve('.desktop-build')
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  fs.mkdirSync(other, { recursive: true })
+  if (fs.statSync(root).dev === fs.statSync(other).dev) { t.skip('requires two actual writable volumes'); return }
+  const data = management.ensurePrivateDataRoot(path.join(root, 'data'))
+  const catalog = new WorkspaceCatalog({ dataRoot: data, files: native }); await catalog.initialize()
+  const snapshot = await catalog.snapshot(), file = path.join(snapshot.storage_root, 'limited.txt')
+  fs.writeFileSync(file, 'keep original project work')
+  const owner = native.inspectProcess(process.pid).owner
+  if (acl === 'audit') addAuditOnly(file)
+  else setAcl(file, 'O:' + owner + 'D:P(A;;FR;;;' + owner + ')')
+  const original = native.inspectFileMetadata(file).metadata
+  const child = spawn(process.execPath, ['-e', 'setTimeout(()=>process.exit(0),30000)'], { stdio: 'ignore' })
+  await once(child, 'spawn'); const processIdentity = native.inspectProcess(child.pid), ended = once(child, 'exit')
+  t.after(async () => { if (child.exitCode === null && child.signalCode === null) child.kill(); await ended })
+  const lock = await acquireCliLock(data, 'workspace-relocation')
+  try {
+    await assert.rejects(beginWorkspaceRelocationIntent({ dataDir: data, id: randomUUID(), target: path.join(other, 'not-created-' + randomUUID()),
+      expectedRevision: snapshot.revision, protectedRoots: [] }), { code: 'WORKSPACE_COPY_ACL_UNSUPPORTED' })
+    assert.equal(readWorkspaceRelocationIntent(data), null)
+    assert.deepEqual(await catalog.snapshot(), snapshot)
+    assert.equal(native.sameProcess(processIdentity, native.inspectProcess(child.pid)), true)
+    assert.equal(child.exitCode, null)
+    assert.deepEqual(native.inspectFileMetadata(file).metadata, original)
+    assert.equal(fs.readFileSync(file, 'utf8'), 'keep original project work')
+  } finally { releaseCliLock(lock) }
+})

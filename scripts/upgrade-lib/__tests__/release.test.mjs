@@ -1,8 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { getCurrentVersion, detectPlatform } from '../release.mjs'
+import { writeCoreRelease } from '../../lib/core-release.mjs'
+import { verifyReleasePackage } from '../../lib/release-package.mjs'
+import { getCurrentVersion, detectPlatform, writeVersionFile } from '../release.mjs'
 
 describe('getCurrentVersion', () => {
   let dir
@@ -18,6 +20,27 @@ describe('getCurrentVersion', () => {
   it('reads VERSION file content', () => {
     writeFileSync(join(dir, 'VERSION'), 'v1.5\n')
     expect(getCurrentVersion(dir)).toBe('v1.5')
+  })
+
+  it('reads and verifies a sealed version without adding mutable VERSION or running dependency installers', async () => {
+    for (const file of ['package.json', 'product-runtime.json']) writeFileSync(join(dir, file), '{"version":"1.2.3"}')
+    await writeCoreRelease(dir, { schema_version: 1, version: '1.2.3', platform: process.platform, arch: process.arch, commit: '1'.repeat(40), source_dirty: false })
+    expect(getCurrentVersion(dir)).toBe('1.2.3')
+    const index = readFileSync(join(dir, 'core-files.json'), 'utf8')
+    await verifyReleasePackage(dir, 'v1.2.3', { run: () => { throw new Error('Must not run an installer') } })
+    await writeVersionFile(dir, 'v1.2.3')
+    expect(existsSync(join(dir, 'VERSION'))).toBe(false)
+    expect(readFileSync(join(dir, 'core-files.json'), 'utf8')).toBe(index)
+    writeFileSync(join(dir, 'unexpected'), 'not part of this release')
+    await expect(verifyReleasePackage(dir, '1.2.3')).rejects.toHaveProperty('code', 'CRABOT_CORE_INTEGRITY')
+  })
+
+  it('rejects invalid or missing sealed metadata rather than using a stale VERSION', () => {
+    writeFileSync(join(dir, 'VERSION'), 'v0.9.0')
+    writeFileSync(join(dir, 'core-files.json'), '{}')
+    expect(() => getCurrentVersion(dir)).toThrow('Invalid sealed release version')
+    writeFileSync(join(dir, 'core-release.json'), 'invalid-json')
+    expect(() => getCurrentVersion(dir)).toThrow('Invalid sealed release version')
   })
 
   it('returns null if VERSION file is absent', () => {

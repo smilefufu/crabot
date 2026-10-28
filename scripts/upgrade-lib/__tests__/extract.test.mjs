@@ -6,7 +6,7 @@ import { join } from 'node:path'
 vi.mock('../../lib/scrapling-prepare.mjs', () => ({ runBounded: vi.fn() }))
 vi.mock('../../lib/release-package.mjs', () => ({ verifyReleasePackage: vi.fn() }))
 import { runBounded } from '../../lib/scrapling-prepare.mjs'
-import { extractRelease } from '../release.mjs'
+import { extractRelease, stageRelease } from '../release.mjs'
 
 describe('Windows release extraction', () => {
   let directory, tmp, home
@@ -34,6 +34,26 @@ describe('Windows release extraction', () => {
     await extractRelease({ tmp, tarPath: join(tmp, 'release.zip'), version: 'next', crabotHome: home })
     expect(readFileSync(join(home, 'cli.mjs'), 'utf8')).toBe('new code')
     expect(readFileSync(join(home, 'VERSION'), 'utf8')).toBe('previous\n')
+    expect(existsSync(tmp)).toBe(false)
+  })
+
+  it('stages and verifies a candidate without changing installed files or disposing the caller-owned download', async () => {
+    runBounded.mockImplementation(async (_command, _args, options) => {
+      const root = join(options.env.CRABOT_UPGRADE_STAGE, 'crabot-release')
+      mkdirSync(root, { recursive: true })
+      writeFileSync(join(root, 'cli.mjs'), 'staged candidate')
+    })
+    const stage = await stageRelease({ tmp, tarPath: join(tmp, 'release.zip'), version: 'next' })
+    expect(readFileSync(join(stage, 'cli.mjs'), 'utf8')).toBe('staged candidate')
+    expect(readFileSync(join(home, 'cli.mjs'), 'utf8')).toBe('previous code')
+    expect(existsSync(tmp)).toBe(true)
+  })
+
+  it('rejects the legacy overwrite adapter before extraction for a sealed installed core', async () => {
+    writeFileSync(join(home, 'core-release.json'), '{}')
+    await expect(extractRelease({ tmp, tarPath: join(tmp, 'release.zip'), version: 'next', crabotHome: home })).rejects.toThrow(/原地覆盖/)
+    expect(runBounded).not.toHaveBeenCalled()
+    expect(readFileSync(join(home, 'cli.mjs'), 'utf8')).toBe('previous code')
     expect(existsSync(tmp)).toBe(false)
   })
 
