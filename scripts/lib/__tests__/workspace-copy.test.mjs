@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os'
 import { execFileSync } from 'node:child_process'
 import { inspectWorkspaceCopySource, copyWorkspaceToStaging } from '../workspace-copy.mjs'
 import { runBounded } from '../run-bounded.mjs'
+import native from '../process-identity.cjs'
 
 async function fixture(t) {
   const root = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'crabot-staging-copy-中文 space-')))
@@ -226,4 +227,16 @@ test('cancelling after real gated tool registration never requests permission or
   const observed = JSON.parse(await fs.readFile(result, 'utf8'))
   assert.deepEqual(observed, { permitted: false, completed: true, code: 'WORKSPACE_COPY_UNVERIFIED', entries: [] })
   assert.equal(await fs.readFile(path.join(source, '.git/config'), 'utf8'), '[core]\n')
+})
+
+
+test('a Windows source owned by another token owner is rejected before creating staging', { skip: process.platform !== 'win32' }, async t => {
+  const { root, container } = await fixture(t), source = path.join(root, 'ordinary-token-owner')
+  await fs.mkdir(source)
+  const before = await fs.lstat(source, { bigint: true }), metadata = native.inspectFileMetadata(source)
+  if (metadata.owner === native.inspectProcess(process.pid).owner) { t.skip('This token creates current-user-owned directories'); return }
+  await assert.rejects(copyWorkspaceToStaging(source, container), { code: 'WORKSPACE_COPY_OWNER_UNSUPPORTED' })
+  await assert.rejects(fs.stat(container), { code: 'ENOENT' })
+  assert.equal((await fs.lstat(source, { bigint: true })).ino, before.ino)
+  assert.deepEqual(native.inspectFileMetadata(source).metadata, metadata.metadata)
 })

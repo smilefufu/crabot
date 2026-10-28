@@ -24,7 +24,7 @@ function fixture(t, { privateSource = false } = {}) {
   return { source, tree, container, pins }
 }
 
-for (const privateSource of [false, true]) test('Windows fixed driver journals one copy and preserves exact metadata (private source=' + privateSource + ')', { skip: process.platform !== 'win32', timeout: 30000 }, async t => {
+for (const privateSource of [false, true]) test('Windows fixed driver preserves exact ownership or retains an unrepresentable source (private source=' + privateSource + ')', { skip: process.platform !== 'win32', timeout: 30000 }, async t => {
   const f = fixture(t, { privateSource }), file = path.join(f.source, 'retained')
   fs.writeFileSync(file + ':retained-stream', 'original stream'); fs.chmodSync(file, 0o444)
   const { inspectWorkspaceFileMetadata, verifyWorkspaceRelocationCopy } = await import('../workspace-file-metadata.mjs')
@@ -39,6 +39,14 @@ for (const privateSource of [false, true]) test('Windows fixed driver journals o
     },
     async permit() { calls.push('permit'); assert.deepEqual(fs.readdirSync(f.tree), []); return { dispatch: 'dispatch' } },
     async complete() { calls.push('complete'); assert.equal(knownExit.probeKnownProcessExit([actor]).state, 'stopped'); return { dispatch: 'dispatch' } },
+  }
+  if (rootBefore.owner !== native.inspectProcess(process.pid).owner) {
+    await assert.rejects(copyWorkspaceTreePinned(...f.pins, { journal }), { code: 'CRABOT_WORKSPACE_METADATA' })
+    assert.deepEqual(calls, ['register', 'permit', 'complete'])
+    assert.deepEqual(await inspectWorkspaceFileMetadata(f.source), rootBefore)
+    assert.deepEqual(await inspectWorkspaceFileMetadata(file), before)
+    assert.equal(fs.readFileSync(file, 'utf8'), 'original bytes')
+    return
   }
   await copyWorkspaceTreePinned(...f.pins, { journal })
   assert.deepEqual(calls, ['register', 'permit', 'complete'])
