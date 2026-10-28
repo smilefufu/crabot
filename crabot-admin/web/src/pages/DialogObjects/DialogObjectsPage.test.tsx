@@ -699,7 +699,9 @@ describe('DialogObjectsPage', () => {
 
     expect(await screen.findByRole('heading', { name: '好友详情' })).toBeInTheDocument()
 
+    await waitFor(() => expect(screen.getByLabelText('显示名称')).toHaveValue('Alice'))
     fireEvent.change(screen.getByLabelText('显示名称'), { target: { value: 'Alice Renamed' } })
+    expect(screen.getByRole('button', { name: '保存基础信息' })).toBeEnabled()
     fireEvent.click(screen.getByRole('button', { name: '保存基础信息' }))
 
     await waitFor(() => {
@@ -720,7 +722,9 @@ describe('DialogObjectsPage', () => {
 
     expect(await screen.findByRole('heading', { name: '好友详情' })).toBeInTheDocument()
 
+    await waitFor(() => expect(screen.getByLabelText('显示名称')).toHaveValue('Alice'))
     fireEvent.change(screen.getByLabelText('权限'), { target: { value: 'master' } })
+    expect(screen.getByRole('button', { name: '保存基础信息' })).toBeEnabled()
     fireEvent.click(screen.getByRole('button', { name: '保存基础信息' }))
 
     await waitFor(() => {
@@ -738,7 +742,7 @@ describe('DialogObjectsPage', () => {
     expect(await screen.findByRole('heading', { name: '好友详情' })).toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('button', { name: '绑定新身份' }))
-    fireEvent.change(screen.getByLabelText('Channel ID'), { target: { value: 'wechat-alt' } })
+    fireEvent.change(await screen.findByLabelText('Channel ID'), { target: { value: 'wechat-alt' } })
     fireEvent.change(screen.getByLabelText('平台用户 ID'), { target: { value: 'alice-alt' } })
     fireEvent.change(screen.getByLabelText('平台显示名称（可选）'), { target: { value: 'Alice Alt' } })
     fireEvent.click(screen.getByRole('button', { name: '绑定' }))
@@ -764,10 +768,31 @@ describe('DialogObjectsPage', () => {
     })
   })
 
+  it('preserves a friend selected immediately when the list appears', async () => {
+    let selected = false
+    const observer = new MutationObserver(() => {
+      if (selected) return
+      const button = screen.queryByRole('button', { name: 'Master Boss' })
+      if (!button) return
+      selected = true
+      button.click()
+    })
+    observer.observe(document.body, { childList: true, subtree: true })
+    try {
+      render(<DialogObjectsPage />)
+      await waitFor(() => expect(selected).toBe(true))
+      expect(await screen.findByDisplayValue('Master Boss')).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: 'Master Boss' })).toHaveClass('is-active')
+    } finally {
+      observer.disconnect()
+    }
+  })
+
   it('keeps master friends permission locked in the dialog objects workbench', async () => {
     render(<DialogObjectsPage />)
 
     fireEvent.click(await screen.findByRole('button', { name: 'Master Boss' }))
+    expect(await screen.findByDisplayValue('Master Boss')).toBeInTheDocument()
 
     expect(screen.getByLabelText('权限')).toBeDisabled()
     expect(screen.queryByLabelText('权限模板')).not.toBeInTheDocument()

@@ -530,3 +530,11 @@ describe('SubagentDetail', () => {
     )
   })
 })
+
+it('workspace entry includes exact project identity and terminal history without changing other filters', async () => {
+  mocked.listWorkers = vi.fn().mockResolvedValue(listResult())
+  render(<MemoryRouter initialEntries={['/traces?tab=workers&workspace_id=default']}><WorkersView /></MemoryRouter>)
+  await waitFor(() => expect(mocked.listWorkers).toHaveBeenCalledWith(expect.objectContaining({ workspace_id: 'default', include_terminal: true, include_legacy: true })))
+  fireEvent.click(screen.getByRole('button', { name: '清除工作区过滤' }))
+  await waitFor(() => expect(mocked.listWorkers.mock.lastCall?.[0]).not.toHaveProperty('workspace_id'))
+})

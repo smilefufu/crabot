@@ -10,6 +10,8 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Chat } from './index'
 import type { ChatMessage, ChatServerMessage } from '../../types/chat'
+import { ClientError } from 'crabot-client'
+import { setServerScope } from '../../services/server-state'
 
 const loadHistory = vi.fn()
 const sendMessage = vi.fn()
@@ -17,6 +19,12 @@ const getTaskSnapshot = vi.fn()
 const toastMocks = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn(), info: vi.fn() }))
 let messageHandler: ((m: ChatServerMessage) => void) | null = null
 let statusHandler: ((s: 'connected') => void) | null = null
+let persistedMessages: ChatMessage[] = []
+let nextRequestId = 'keyboard-request'
+vi.mock('crabot-client', async () => ({
+  ...await vi.importActual<typeof import('crabot-client')>('crabot-client'),
+  createRequestId: () => nextRequestId,
+}))
 
 vi.mock('../../components/Layout/MainLayout', () => ({
   MainLayout: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
@@ -60,7 +68,12 @@ beforeAll(() => {
 
 /** 渲染并发送一条消息，返回它的 request_id */
 async function renderAndSend(requestId: string): Promise<void> {
-  sendMessage.mockReturnValue(requestId)
+  nextRequestId = requestId
+  sendMessage.mockImplementation(async (text: string, id: string) => {
+    const message: ChatMessage = { message_id: `srv-user-${id}`, role: 'user', content: { type: 'text', text }, request_id: id, timestamp: new Date().toISOString() }
+    persistedMessages.push(message)
+    return { request_id: id, message }
+  })
   render(
     <MemoryRouter>
       <Chat />
@@ -77,8 +90,10 @@ async function renderAndSend(requestId: string): Promise<void> {
 
 /** 把一条服务端推送喂给组件已注册的 handler */
 async function push(message: ChatServerMessage): Promise<void> {
+  if (message.type === 'chat_push') persistedMessages.push(message.message)
+  if (message.type === 'chat_message_acked') persistedMessages = persistedMessages.map(item => message.request_ids.includes(item.request_id ?? '') ? { ...item, acknowledged_at: new Date().toISOString() } : item)
   await act(async () => {
-    messageHandler!(message)
+    await messageHandler!(message)
   })
 }
 
@@ -98,7 +113,8 @@ describe('Master Chat 无占位追加流与已接收标记', () => {
     vi.clearAllMocks()
     messageHandler = null
     statusHandler = null
-    loadHistory.mockResolvedValue([])
+    persistedMessages = []
+    loadHistory.mockImplementation(async (limit = 30, before?: string) => [...persistedMessages].filter(message => !before || message.timestamp < before).sort((a, b) => b.timestamp.localeCompare(a.timestamp)).slice(0, limit))
     getTaskSnapshot.mockResolvedValue(null)
   })
 
@@ -107,6 +123,50 @@ describe('Master Chat 无占位追加流与已接收标记', () => {
 
     expect(screen.getByText('帮我看下这个')).toBeInTheDocument()
     expect(screen.queryByText('思考中...')).not.toBeInTheDocument()
+  })
+
+  it('HTTP 发送结果未知时保留草稿，原样重试复用 request_id 且只显示一个服务端 UUID', async () => {
+    sendMessage.mockRejectedValueOnce(new ClientError('unreachable', 'response lost'))
+    await renderAndSend('req-retry')
+    expect(screen.getByRole('textbox')).toHaveValue('帮我看下这个')
+    expect(toastMocks.error).toHaveBeenCalledWith(expect.stringContaining('发送结果尚未确认'))
+    await act(async () => { fireEvent.click(screen.getByText('发送')) })
+    expect(sendMessage.mock.calls.map(call => call[1])).toEqual(['req-retry', 'req-retry'])
+    expect(persistedMessages).toHaveLength(1)
+    expect(screen.getAllByText('帮我看下这个')).toHaveLength(1)
+  })
+
+  it('提交期间继续编辑的新草稿不会被较早的 HTTP 成功响应清空', async () => {
+    let resolve!: (value: unknown) => void
+    sendMessage.mockImplementation(() => new Promise(done => { resolve = done }))
+    render(<MemoryRouter><Chat /></MemoryRouter>)
+    await waitFor(() => expect(loadHistory).toHaveBeenCalled())
+    const input = screen.getByRole('textbox')
+    fireEvent.change(input, { target: { value: 'first' } })
+    fireEvent.click(screen.getByText('发送'))
+    fireEvent.change(input, { target: { value: 'new draft' } })
+    const message: ChatMessage = { message_id: 'first-http', role: 'user', content: { type: 'text', text: 'first' }, timestamp: new Date().toISOString() }
+    persistedMessages.push(message)
+    await act(async () => { resolve({ message, request_id: 'first' }) })
+    expect(input).toHaveValue('new draft')
+    expect(screen.getByText('first')).toBeInTheDocument()
+  })
+
+  it('实例切换后忽略旧实例的迟到发送结果并保留草稿', async () => {
+    let resolve!: (value: unknown) => void
+    sendMessage.mockImplementation(() => new Promise(done => { resolve = done }))
+    render(<MemoryRouter><Chat /></MemoryRouter>)
+    await waitFor(() => expect(loadHistory).toHaveBeenCalled())
+    const input = screen.getByRole('textbox')
+    fireEvent.change(input, { target: { value: 'old instance draft' } })
+    fireEvent.click(screen.getByText('发送'))
+    await act(async () => { setServerScope('replacement-instance') })
+    await act(async () => { resolve({ message: {
+      message_id: 'late-old-instance', role: 'user', content: { type: 'text', text: 'old instance result' }, timestamp: new Date().toISOString(),
+    } }) })
+    expect(input).toHaveValue('old instance draft')
+    expect(screen.queryByText('old instance result')).not.toBeInTheDocument()
+    await act(async () => { setServerScope('browser') })
   })
 
   it('chat_push 回复直接追加为独立消息', async () => {
@@ -170,13 +230,13 @@ describe('Master Chat 无占位追加流与已接收标记', () => {
     // 断连期间服务端落库（loadHistory 倒序：最新在前）
     loadHistory.mockResolvedValue([
       { message_id: 'srv_reply', role: 'assistant', content: { type: 'text', text: '断连前的回复' }, request_id: 'req-8', timestamp: new Date().toISOString() },
-      { message_id: 'srv_user', role: 'user', content: { type: 'text', text: '帮我看下这个' }, request_id: 'req-8', acknowledged_at: new Date().toISOString(), timestamp: new Date(Date.now() - 1000).toISOString() },
+      { ...persistedMessages.find(message => message.request_id === 'req-8')!, acknowledged_at: new Date().toISOString() },
     ])
     await act(async () => { statusHandler!('connected') })
 
     expect(screen.getByText('断连前的回复')).toBeInTheDocument()
     expect(screen.getByTitle(/已接收/)).toBeInTheDocument()
-    // 本地乐观 user 消息被落库版本取代（同 request_id），不重复显示
+    // 已知 UUID 被快照更新标记，不重复显示。
     expect(screen.getAllByText('帮我看下这个')).toHaveLength(1)
   })
 
@@ -199,7 +259,7 @@ describe('Master Chat 无占位追加流与已接收标记', () => {
     // 若 concat 队尾，提问会渲染到回复后面（review 指出的必现顺序错乱）
     loadHistory.mockResolvedValue([
       { message_id: 'srv_回复先到了', role: 'assistant', content: { type: 'text', text: '回复先到了' }, request_id: 'req-10', timestamp: new Date().toISOString() },
-      { message_id: 'srv_user', role: 'user', content: { type: 'text', text: '帮我看下这个' }, request_id: 'req-10', acknowledged_at: new Date().toISOString(), timestamp: new Date(Date.now() - 1000).toISOString() },
+      { ...persistedMessages.find(message => message.request_id === 'req-10')!, acknowledged_at: new Date().toISOString() },
     ])
     await act(async () => { statusHandler!('connected') })
 
@@ -218,7 +278,9 @@ describe('聊天发送快捷键', () => {
     localStorage.clear()
     loadHistory.mockResolvedValue([])
     getTaskSnapshot.mockResolvedValue(null)
-    sendMessage.mockReturnValue('keyboard-request')
+    sendMessage.mockImplementation(async (text: string) => ({ request_id: 'keyboard-request', message: {
+      message_id: 'keyboard-message', role: 'user', content: { type: 'text', text }, request_id: 'keyboard-request', timestamp: new Date().toISOString(),
+    } }))
   })
 
   async function composer(platform = 'Win32', modified = false) {

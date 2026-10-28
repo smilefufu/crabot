@@ -3,6 +3,7 @@
  * legacy conversation-unit / raw trace 主视图已退役；trace 清理走专用维护面（CleanupDialogs）。
  */
 import React, { useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { MainLayout } from '../../components/Layout/MainLayout'
 import { ManagersView } from './ManagersView'
 import { WorkersView } from './WorkersView'
@@ -12,7 +13,8 @@ import './TraceOverview.css'
 type Tab = 'managers' | 'workers'
 
 export const Traces: React.FC = () => {
-  const [tab, setTab] = useState<Tab>('managers')
+  const [searchParams] = useSearchParams()
+  const [tab, setTab] = useState<Tab>(searchParams.get('tab') === 'workers' ? 'workers' : 'managers')
   const [cleanupOpen, setCleanupOpen] = useState(false)
 
   return (

@@ -162,6 +162,7 @@ export interface WorkerRequestAuthorityView {
 }
 
 export interface LedgerWorker {
+  workspace_id?: string
   worker_id: string
   manager_key: string
   task: {
@@ -434,6 +435,7 @@ export const agentObservabilityService = {
   listWorkers(params: {
     status?: string | string[]
     manager_key?: string
+    workspace_id?: string
     impl?: string
     q?: string
     include_terminal?: boolean
@@ -447,6 +449,7 @@ export const agentObservabilityService = {
     const statuses = Array.isArray(params.status) ? params.status : params.status ? [params.status] : []
     for (const status of statuses) search.append('status', status)
     if (params.manager_key) search.set('manager_key', params.manager_key)
+    if (params.workspace_id) search.set('workspace_id', params.workspace_id)
     if (params.impl) search.set('impl', params.impl)
     if (params.q) search.set('q', params.q)
     if (params.include_terminal) search.set('include_terminal', 'true')

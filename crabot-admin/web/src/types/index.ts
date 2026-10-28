@@ -255,9 +255,7 @@ export interface ChangePasswordRequest {
   new_password: string
 }
 
-export interface MeResponse {
-  is_temp: boolean
-}
+export type { MeResponse } from 'crabot-client'
 
 // ============================================================================
 // API 响应类型

@@ -1,0 +1,10 @@
+.desktop-welcome { min-height: 100vh; box-sizing: border-box; display: grid; place-items: center; padding: 40px; background: var(--bg-primary); color: var(--text-primary); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+.desktop-welcome-card { width: 100%; max-width: 640px; }
+.desktop-welcome-brand { font-size: 18px; font-weight: 650; margin-bottom: 32px; color: var(--primary); }
+.desktop-welcome h1 { font-size: 30px; line-height: 1.35; margin: 0 0 16px; letter-spacing: -.03em; }
+.desktop-welcome p { color: var(--text-secondary); line-height: 1.7; }
+.desktop-welcome-steps { display: flex; gap: 32px; padding: 20px 0 20px 20px; font-size: 13px; color: var(--text-secondary); }
+.desktop-welcome-models { display: grid; gap: 16px; padding: 24px; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; }
+.desktop-welcome-actions, .desktop-welcome-links { display: flex; gap: 16px; margin: 24px 0; }
+.desktop-welcome-links { font-size: 13px; }
+.desktop-welcome-note { font-size: 12px; }

@@ -1,0 +1,10 @@
+.desktop-diagnostics { color: var(--text-primary); }
+.desktop-diagnostics h2 { font-size: 24px; margin-bottom: 12px; }
+.desktop-diagnostics p { color: var(--text-secondary); font-size: 13px; line-height: 1.7; margin: 12px 0; }
+.desktop-diagnostics-actions { display: flex; flex-wrap: wrap; gap: 10px; margin: 20px 0; }
+.desktop-diagnostics dl { display: grid; grid-template-columns: minmax(120px, 1fr) 3fr; gap: 12px 20px; padding: 20px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }
+.desktop-diagnostics-row { display: contents; }
+.desktop-diagnostics dt { font-size: 13px; color: var(--text-secondary); }
+.desktop-diagnostics dd { font-size: 13px; margin: 0; }
+.desktop-diagnostics summary { cursor: pointer; font-size: 13px; }
+.desktop-diagnostics pre { max-height: 360px; overflow: auto; padding: 16px; font-size: 12px; white-space: pre-wrap; background: var(--surface); border-radius: 10px; }

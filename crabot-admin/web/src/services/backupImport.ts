@@ -4,8 +4,7 @@
  * overview：上传备份归档，探测 product 类型（crabot / openclaw）。
  * execute：仅 crabot product 适用，按类别执行导入。
  */
-import { storage } from '../utils/storage'
-import { api } from './api'
+import { api, fetchAdmin } from './api'
 
 export type ImportOverview =
   | { product: 'crabot'; staged_id: string; categories: string[] }
@@ -23,12 +22,10 @@ export interface CrabotImportSummary {
 
 /** 上传归档并获取 overview（原始二进制流上传，与 openclaw-import/parse 对齐）。 */
 export async function uploadForImportOverview(file: File): Promise<ImportOverview> {
-  const token = storage.getToken()
-  const res = await fetch('/api/backup/import/overview', {
+  const res = await fetchAdmin('/api/backup/import/overview', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/octet-stream',
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
     },
     body: file,
   })

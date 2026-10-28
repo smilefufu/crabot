@@ -1,0 +1,38 @@
+name: Desktop and Admin Web integration
+on:
+  workflow_dispatch:
+  push:
+    branches: ['feat/desktop-web-integration']
+  pull_request:
+    paths:
+      - 'crabot-admin/web/**'
+      - 'crabot-client/**'
+      - '.github/workflows/desktop-web-integration.yml'
+permissions:
+  contents: read
+jobs:
+  web:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, macos-15-intel, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.3'
+      - name: Build this checkout's SDK and both actual React entry points
+        run: |
+          pnpm --dir crabot-client install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-client run build
+          pnpm --dir crabot-admin/web install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-admin/web run build
+      - name: Verify the complete existing Web suite with desktop and workspace flows
+        working-directory: crabot-admin/web
+        run: node node_modules/vitest/vitest.mjs run --maxWorkers=1 --minWorkers=1

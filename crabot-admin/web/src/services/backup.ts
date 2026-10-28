@@ -1,8 +1,7 @@
 /**
  * 备份导出 API 客户端。
  */
-import { api } from './api'
-import { storage } from '../utils/storage'
+import { api, fetchAdmin } from './api'
 
 export interface BackupOptions {
   categories: string[]
@@ -22,10 +21,8 @@ export async function downloadBackup(categories: string[], includeSecrets: boole
     categories: categories.join(','),
     includeSecrets: String(includeSecrets),
   })
-  const token = storage.getToken()
-  const res = await fetch(`/api/backup/export?${q.toString()}`, {
+  const res = await fetchAdmin(`/api/backup/export?${q.toString()}`, {
     method: 'GET',
-    headers: token ? { Authorization: `Bearer ${token}` } : {},
   })
   if (!res.ok) {
     const body = await res.json().catch(() => ({})) as { error?: string }
