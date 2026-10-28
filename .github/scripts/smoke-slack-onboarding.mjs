@@ -15,7 +15,22 @@ try {
   try { executable = await ensureCli(root, AbortSignal.timeout(300000)) }
   finally { globalThis.fetch = originalFetch }
   console.log('Slack CLI smoke: checking verified executable startup (15 second limit)')
-  const version = execFileSync(executable, ['--version'], { cwd: root, env: cliEnvironment(), timeout: 15000, windowsHide: true, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+  const startupEnvironment = cliEnvironment()
+  if (process.platform === 'win32') startupEnvironment.GODEBUG = 'inittrace=1'
+  let version
+  try {
+    version = execFileSync(executable, ['--version'], { cwd: root, env: startupEnvironment, timeout: 15000, windowsHide: true, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+  } catch (error) {
+    // Only package names from Go's initialization trace; no login or CLI output.
+    if (process.platform === 'win32') {
+      const initialized = String(error.stderr ?? '').split('\n').flatMap(line => {
+        const match = /^init ([A-Za-z0-9_./-]+) @/.exec(line)
+        return match ? [match[1]] : []
+      })
+      console.log(`Slack CLI initialization diagnostic: ${initialized.slice(-16).join(', ') || 'no completed package initialization'}`)
+    }
+    throw error
+  }
   assert.ok(version.includes('4.11.0'), 'Verified official executable must report its pinned version')
   console.log('Slack CLI smoke: verified official tool started; preparing fixed hooks')
   const project = await prepareProject(root)
