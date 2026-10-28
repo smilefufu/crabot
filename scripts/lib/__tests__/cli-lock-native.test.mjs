@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync, existsSync, symlinkSync, renameSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { spawn } from 'node:child_process'
+import { spawn, execFileSync } from 'node:child_process'
 import { once } from 'node:events'
 import native from '../process-identity.cjs'
 import { acquireCliLock, acquireStartupLock, releaseCliLock, cliLockToken, hasInheritedCliLock } from '../cli-lock.mjs'
@@ -107,4 +107,20 @@ test('a directory replaced during native acquisition releases the handle and ref
   assert.equal(existsSync(join(current, 'cli.lock')), false)
   const lock = await acquireExistingCliLock(old, 'inspect-original', 0)
   releaseCliLock(lock)
+})
+
+
+test('a real CLI child inherits only its live parent mutex token', async t => {
+  const dir = directory(t), lock = await acquireCliLock(dir, 'parent-restart')
+  t.after(() => releaseCliLock(lock))
+  const source = `import{hasInheritedCliLock}from${JSON.stringify(new URL('../cli-lock.mjs', import.meta.url).href)};process.stdout.write(JSON.stringify(hasInheritedCliLock(process.argv[1])))`
+  const child = token => JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e', source, dir], {
+    env: { ...process.env, CRABOT_CLI_LOCK_HELD: token }, encoding: 'utf8', timeout: 5000,
+  }))
+  const token = cliLockToken(lock)
+  assert.equal(child(token), true)
+  assert.equal(child('1'), false)
+  assert.equal(child('00000000-0000-0000-0000-000000000000'), false)
+  releaseCliLock(lock)
+  assert.equal(child(token), false)
 })
