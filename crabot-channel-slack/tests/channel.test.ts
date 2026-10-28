@@ -191,7 +191,11 @@ describe('Slack cache, synchronization and write failures', () => {
     expect(saved.config.credentials).toEqual({bot_token:'xoxb-replaced',app_token:'xapp-test'})
     expect(saved.config.group.only_respond_to_mentions).toBe(false)
     const stat=fs.statSync(path.join(s.dir,'config.json'))
-    expect(stat.mode&0o777).toBe(0o600)
+    if(process.platform==='win32'){
+      const {execFileSync}=await import('node:child_process')
+      const output=execFileSync('powershell.exe',['-NoProfile','-NonInteractive','-Command',`$a=Get-Acl -LiteralPath $env:CRABOT_TEST_CREDENTIAL_FILE; @{protected=$a.AreAccessRulesProtected;own=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value;allowed=@($a.Access | Where-Object AccessControlType -eq Allow | ForEach-Object {$_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value})} | ConvertTo-Json -Compress`],{encoding:'utf8',env:{...process.env,CRABOT_TEST_CREDENTIAL_FILE:path.join(s.dir,'config.json')}})
+      const acl=JSON.parse(output);expect(acl.protected).toBe(true);expect(acl.allowed).toEqual([acl.own])
+    }else expect(stat.mode&0o777).toBe(0o600)
     fs.mkdirSync(path.join(s.dir,'config.json.tmp'))
     await expect(s.rpc('update_config',{config:{group:{only_respond_to_mentions:true}}})).rejects.toThrow()
     expect((await s.rpc('get_config')).config.group.only_respond_to_mentions).toBe(false)

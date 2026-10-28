@@ -1,5 +1,6 @@
 import fs from 'node:fs'
 import path from 'node:path'
+import { execFileSync } from 'node:child_process'
 import { RpcError } from 'crabot-shared'
 import type { SlackConfig } from './types.js'
 
@@ -69,6 +70,14 @@ export class ConfigStore {
   private save(config: SlackConfig) {
     const tmp = this.file + '.tmp'
     try {
+      if (process.platform === 'win32') {
+        // Unix mode bits do not restrict Windows readers; secure the empty file first.
+        fs.writeFileSync(tmp, '', { mode: 0o600 })
+        const output = execFileSync('whoami', ['/user', '/fo', 'csv', '/nh'], { encoding: 'utf8', windowsHide: true, timeout: 5000 })
+        const sid = output.match(/S-1-5-[0-9-]+/)?.[0]
+        if (!sid) throw new Error('Cannot establish private Slack credential permissions')
+        execFileSync('icacls', [tmp, '/inheritance:r', '/grant:r', `*${sid}:F`], { windowsHide: true, timeout: 5000 })
+      }
       fs.writeFileSync(tmp, JSON.stringify({ config, bootstrap: this.bootstrap }), { mode: 0o600 })
       fs.renameSync(tmp, this.file)
     } finally {

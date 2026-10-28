@@ -10,6 +10,12 @@ runtime:
 install: corepack pnpm install --frozen-lockfile
 build: corepack pnpm run build
 entry: dist/main.js
+onboarding_methods:
+  - id: local-cli
+    name: 本地授权
+    description: 在 Slack 确认授权，由 Crabot 自动创建和配置你自己的 App；保持本地直连
+    type: challenge_code
+    handler: dist/onboard.js
 config_schema:
   type: object
   required: [SLACK_BOT_TOKEN, SLACK_APP_TOKEN]

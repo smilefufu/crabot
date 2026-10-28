@@ -2,7 +2,15 @@
 
 Slack 首版使用官方 Node SDK 的 Socket Mode，不需要公网回调地址。每个实例绑定一个 workspace 的一个 Bot 安装；支持 Bot 与用户的一对一 DM、Bot 已加入的公开/私有 channel。多人 DM（MPIM）不在首版范围。
 
-## 创建 App 与接入
+## 推荐：Admin 本地授权
+
+在 Admin「新建 Channel」选择 **Slack · 本地授权**，填写名称并开始。复制页面的一次性命令到目标 workspace，在 Slack 弹窗确认，再将验证码填回页面。Crabot 自动准备固定版本官方 CLI、创建/配置/安装你自己的 App，并保存运行时凭据；用户不需要使用终端或手填 Token。
+
+CLI 仅在接入阶段运行。交接前确认 CLI/hook 完全退出，完成后清理本地开发者授权与交接副本；渠道运行和重启只使用已保存的 Bot/App Token。App 显示名带 `(local)`，不需要 Crabot 云服务、公网回调或隧道。
+
+创建后确认授权用户并显式选择现有 Friend（也可稍后绑定），不自动认主。连接状态与真实收发验证分别显示；要用于群聊，仍需邀请 Bot 加群。授权失败/取消不会自动远端删除已创建 App；创建失败时先用「重试完成创建」继续同一结果，避免重复授权。
+
+## 手动创建 App 与接入
 
 1. 在 [Slack Apps](https://api.slack.com/apps) 创建内部 App，开启 Socket Mode。创建 App-Level Token，授权 `connections:write`，得到 `xapp-…`。
 2. 添加 Bot scopes：`chat:write`、`channels:history`、`groups:history`、`channels:read`、`groups:read`、`im:history`、`im:read`、`im:write`、`users:read`；安装到自己的 workspace，取得 `xoxb-…` Bot Token。增改 scopes 后重新安装授权。

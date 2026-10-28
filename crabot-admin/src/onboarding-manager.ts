@@ -59,7 +59,7 @@ export class OnboardingManager {
     }
   }
 
-  shutdown(): void {
+  async shutdown(): Promise<void> {
     for (const cached of this.onboarders.values()) {
       try {
         cached.onboarder.stopGc?.()
@@ -67,6 +67,8 @@ export class OnboardingManager {
         // ignore
       }
     }
+    const results = await Promise.allSettled([...this.onboarders.values()].map(cached => cached.onboarder.dispose?.()))
+    if (results.some(result => result.status === 'rejected')) throw new Error('Channel onboarding cleanup not confirmed')
     this.onboarders.clear()
   }
 

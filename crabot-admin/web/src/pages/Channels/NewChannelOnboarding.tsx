@@ -17,6 +17,7 @@ import { Loading } from '../../components/Common/Loading'
 import { channelService } from '../../services/channel'
 import { useToast } from '../../contexts/ToastContext'
 import type { ChannelImplementation, ChannelOnboardingMethod, OnboardBeginResult, OnboardPollEvent } from '../../types'
+import { SlackLocalOnboarding } from './SlackLocalOnboarding'
 import { EventSubscriptionCard } from './EventSubscriptionCard'
 
 type Step = 'idle' | 'starting' | 'pending' | 'authorized' | 'creating' | 'claim_master_name' | 'done' | 'error' | 'expired'
@@ -44,6 +45,11 @@ interface Status {
 const NAME_PATTERN = /^[\p{Script=Han}a-z0-9-]{2,50}$/u
 
 export const NewChannelOnboarding: React.FC = () => {
+  const { implId, methodId } = useParams()
+  return implId === 'channel-slack' && methodId === 'local-cli' ? <SlackLocalOnboarding /> : <StandardChannelOnboarding />
+}
+
+const StandardChannelOnboarding: React.FC = () => {
   const navigate = useNavigate()
   const toast = useToast()
   const { implId = '', methodId = '' } = useParams()
