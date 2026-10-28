@@ -12,7 +12,11 @@ permissions:
   contents: read
 jobs:
   registry:
-    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, macos-15-intel, windows-2022]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 12
     steps:
       - uses: actions/checkout@v4
