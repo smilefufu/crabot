@@ -14,16 +14,24 @@ beforeEach(() => {
   vi.mocked(channelService.onboardBegin).mockResolvedValue({ session_id: 'session-one', ui_mode: 'challenge_code', authorization_command: '/slackauthticket fixture-ticket', expires_at: Date.now() + 600000 })
   vi.mocked(channelService.onboardPoll).mockImplementation((_impl, _method, _session, callback) => { poll = callback; return { close: vi.fn() } })
   vi.mocked(channelService.onboardSubmit).mockResolvedValue({ accepted: true })
-  vi.mocked(channelService.onboardFinish).mockResolvedValue({ instance: { id: 'Slack-one' } as never, authorized_identity: { platform_user_id: 'UOWNER' } })
+  vi.mocked(channelService.onboardFinish).mockResolvedValue({ instance: { id: 'slack-one' } as never, authorized_identity: { platform_user_id: 'UOWNER' } })
 })
 async function start() {
   render(<MemoryRouter><SlackLocalOnboarding /></MemoryRouter>)
   expect(channelService.onboardBegin).not.toHaveBeenCalled()
-  fireEvent.change(screen.getByLabelText('渠道名称'), { target: { value: 'Slack-one' } })
+  fireEvent.change(screen.getByLabelText('渠道名称'), { target: { value: 'slack-one' } })
   fireEvent.click(screen.getByRole('button', { name: '开始授权' }))
   await screen.findByLabelText('一次性验证码')
 }
 describe('Slack local setup experience', () => {
+  it('rejects uppercase instance names before starting authorization, matching the shared contract', () => {
+    render(<MemoryRouter><SlackLocalOnboarding /></MemoryRouter>)
+    fireEvent.change(screen.getByLabelText('渠道名称'), { target: { value: 'Slack-one' } })
+    fireEvent.click(screen.getByRole('button', { name: '开始授权' }))
+    expect(channelService.onboardBegin).not.toHaveBeenCalled()
+    expect(screen.getByRole('alert')).toHaveTextContent('小写英文字母')
+  })
+
   it('keeps a newer terminal SSE result when a submit HTTP response arrives late', async () => {
     let reject!: (error: Error) => void
     vi.mocked(channelService.onboardSubmit).mockReturnValueOnce(new Promise((_resolve, r) => { reject = r }))
@@ -53,7 +61,7 @@ describe('Slack local setup experience', () => {
     expect(channelService.onboardFinish).toHaveBeenCalledTimes(1)
     fireEvent.change(select, { target: { value: 'master' } })
     fireEvent.click(screen.getByRole('button', { name: '确认关联' }))
-    await waitFor(() => expect(friendService.linkIdentity).toHaveBeenCalledWith('master', { channel_id: 'Slack-one', platform_user_id: 'UOWNER', platform_display_name: 'UOWNER' }))
+    await waitFor(() => expect(friendService.linkIdentity).toHaveBeenCalledWith('master', { channel_id: 'slack-one', platform_user_id: 'UOWNER', platform_display_name: 'UOWNER' }))
     expect(screen.getByText(/真实消息收发尚未验证/)).toBeTruthy()
   })
   it('retries finish using the same session rather than creating a new App', async () => {
@@ -69,7 +77,7 @@ describe('Slack local setup experience', () => {
     let resolve!: (value: any) => void
     vi.mocked(channelService.onboardBegin).mockReturnValue(new Promise(r => { resolve = r }))
     const view = render(<MemoryRouter><SlackLocalOnboarding /></MemoryRouter>)
-    fireEvent.change(screen.getByLabelText('渠道名称'), { target: { value: 'Slack-one' } })
+    fireEvent.change(screen.getByLabelText('渠道名称'), { target: { value: 'slack-one' } })
     fireEvent.click(screen.getByRole('button', { name: '开始授权' }))
     view.unmount()
     await act(async () => { resolve({ session_id: 'late-session', ui_mode: 'challenge_code' }) })
