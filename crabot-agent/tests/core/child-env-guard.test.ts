@@ -20,7 +20,7 @@ describe('Agent child environment guard', () => {
       if (!/from ['"](?:node:)?child_process['"]/.test(source)) continue
       // P6-B：buildScrubbedChildEnv（worker/installer/setup 的强 allowlist 版）与
       // buildChildEnv（Slice 0 bearer-scrub 基线）都是受认可的 env helper。
-      expect(source, path.relative(root, file)).toMatch(/buildChildEnv|buildScrubbedChildEnv/)
+      expect(source, path.relative(root, file)).toMatch(/buildChildEnv|buildMcpChildEnv|buildScrubbedChildEnv/)
       expect(source, path.relative(root, file)).not.toMatch(/env:\s*process\.env/)
       expect(source, path.relative(root, file)).not.toMatch(/env:\s*\{\s*\.\.\.process\.env/)
       expect(source, path.relative(root, file)).not.toMatch(/const\s+\w*Env\s*=\s*\{\s*\.\.\.process\.env/)

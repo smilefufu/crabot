@@ -14,7 +14,7 @@ import { sha256CanonicalJson } from 'crabot-shared'
 import { defineTool } from '../engine/tool-framework.js'
 import type { ToolDefinition, ToolCategory } from '../engine/types.js'
 import type { MCPServerConfig, ResolvedPermissions } from '../types.js'
-import { buildChildEnv } from '../core/runtime-env.js'
+import { buildMcpChildEnv } from '../core/runtime-env.js'
 import { capWithMarker, truncateUtf8 } from '../engine/byte-cap.js'
 import { isManagedComputerUse } from './computer-use-owner.js'
 
@@ -257,9 +257,8 @@ export class McpConnector {
         return new StdioClientTransport({
           command: config.command,
           args: config.args ?? [],
-          // 未配置 env 时保持 SDK 默认白名单（getDefaultEnvironment），不向用户可配的
-          // MCP 命令下发整个 Agent 环境；配置了 env 时叠加并剔除 runtime bearer。
-          env: config.env ? buildChildEnv(config.env) : undefined,
+          // Keep SDK defaults plus sealed runtime paths/caches; never inherit all host credentials.
+          env: buildMcpChildEnv(config.env),
         })
       }
       case 'streamable-http': {

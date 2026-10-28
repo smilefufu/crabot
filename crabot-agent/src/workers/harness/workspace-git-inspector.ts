@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
+import { buildChildEnv } from '../../core/runtime-env.js'
 import type { WorkspaceGitChange, WorkspaceGitCheck, WorkspaceGitObservation, WorkspaceGitState } from '../types.js'
 
 const TIMEOUT_MS = 5_000
@@ -68,7 +69,7 @@ class GitInspection {
   async run(cwd: string, args: string[], allowed = [0]): Promise<{ text: string; code: number }> {
     if (this.abort.signal.aborted || Date.now() >= this.deadline) throw new InspectionError('inspection_timeout')
     if (this.outputBytes >= OUTPUT_LIMIT) throw new InspectionError('output_limit')
-    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_')))
+    const env = Object.fromEntries(Object.entries(buildChildEnv()).filter(([key]) => !key.startsWith('GIT_')))
     Object.assign(env, { LC_ALL: 'C', LANG: 'C', GIT_TERMINAL_PROMPT: '0', GIT_NO_LAZY_FETCH: '1' })
     return new Promise((resolve, reject) => {
       let exceeded = false

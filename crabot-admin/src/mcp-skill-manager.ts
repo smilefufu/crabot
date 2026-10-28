@@ -5,6 +5,7 @@
  */
 
 import fs from 'fs/promises'
+import { existsSync } from 'node:fs'
 import path from 'path'
 import { createHash, randomBytes } from 'node:crypto'
 import AdmZip from 'adm-zip'
@@ -12,6 +13,8 @@ import { canonicalizeJson, generateId, generateTimestamp } from 'crabot-shared'
 import { durableAtomicWriteFile, durableRemovePath, durableRename } from './durable-file.js'
 import type { ConfigDomain, CoreAgentConfigMutationContext } from './core-agent-config-revision-store.js'
 import type { OnConflict } from './backup/import/import-types.js'
+
+const { managedMcpSelection, validateManagedMcp } = require('../../scripts/lib/managed-mcp-config.cjs')
 
 export type RegistryMutationRunner = (
   domains: ConfigDomain[],
@@ -24,7 +27,7 @@ export type RegistryMutationRunner = (
 function runtimeMcpEntries(entries: Map<string, MCPServerRegistryEntry>): unknown[] {
   return Array.from(entries.values()).filter((entry) => entry.enabled).map((entry) => JSON.parse(JSON.stringify({
     id: entry.id, name: entry.name, transport: entry.transport, command: entry.command,
-    args: entry.args, env: entry.env, url: entry.url, headers: entry.headers, description: entry.description,
+    args: entry.args, env: entry.env, managed_runtime: entry.managed_runtime, url: entry.url, headers: entry.headers, description: entry.description,
   }))).sort((a: any, b: any) => a.id.localeCompare(b.id))
 }
 
@@ -91,6 +94,7 @@ export interface MCPServerRegistryEntry {
   command?: string
   args?: string[]
   env?: Record<string, string>
+  managed_runtime?: 'python' | 'node'
 
   /** HTTP/SSE 配置（当 transport='streamable-http' 或 'sse' 时使用） */
   url?: string
@@ -187,7 +191,9 @@ export class MCPServerManager {
   private semanticSnapshotProvider: (() => unknown) | null = null
   private mutationTail: Promise<void> = Promise.resolve()
 
-  constructor(dataDir: string) {
+  constructor(dataDir: string, private readonly bundledRuntime = existsSync(path.join(
+    process.env.CRABOT_HOME ?? path.resolve(__dirname, '../..'), 'core-release.json',
+  ))) {
     this.filePath = path.join(dataDir, 'mcp-servers.json')
   }
 
@@ -267,6 +273,7 @@ export class MCPServerManager {
     command?: string
     args?: string[]
     env?: Record<string, string>
+    managed_runtime?: 'python' | 'node' | null
     // http/sse
     url?: string
     headers?: Record<string, string>
@@ -285,6 +292,7 @@ export class MCPServerManager {
         command: params.command,
         args: params.args,
         env: params.env,
+        managed_runtime: managedMcpSelection(params, this.bundledRuntime),
         url: params.url,
         headers: params.headers,
         description: params.description,
@@ -312,7 +320,7 @@ export class MCPServerManager {
         MCPServerRegistryEntry,
         'name' | 'transport' | 'command' | 'args' | 'env' | 'url' | 'headers' | 'description' | 'is_essential' | 'enabled'
       >
-    >
+    > & { managed_runtime?: 'python' | 'node' | null }
   ): Promise<MCPServerRegistryEntry> {
     return this.serial(async () => {
       const entry = this.servers.get(id)
@@ -323,8 +331,10 @@ export class MCPServerManager {
       const updated: MCPServerRegistryEntry = {
         ...entry,
         ...params,
+        managed_runtime: params.managed_runtime === undefined ? entry.managed_runtime : params.managed_runtime ?? undefined,
         updated_at: generateTimestamp(),
       }
+      validateManagedMcp(updated)
       const currentRuntime = canonicalizeJson(runtimeMcpEntries(this.servers))
       const next = new Map(this.servers)
       next.set(id, updated)
@@ -353,6 +363,8 @@ export class MCPServerManager {
     return this.serial(async () => {
       const exists = this.servers.has(entry.id)
       if (exists && onConflict === 'skip') return 'skipped'
+      entry = { ...entry, managed_runtime: entry.managed_runtime ?? undefined }
+      validateManagedMcp(entry)
       const next = new Map(this.servers)
       next.set(entry.id, entry)
       if (exists && canonicalizeJson(this.runtimeSemanticEntries()) === canonicalizeJson(runtimeMcpEntries(next))) {
@@ -387,22 +399,26 @@ export class MCPServerManager {
       const now = generateTimestamp()
       const newEntries: MCPServerRegistryEntry[] = []
 
-      const buildEntry = (name: string, c: Record<string, unknown>): MCPServerRegistryEntry => ({
-        id: generateId(),
-        name,
-        transport: 'stdio',
-        command: c.command as string,
-        args: Array.isArray(c.args) ? c.args.map(String) : undefined,
-        env: typeof c.env === 'object' && c.env !== null
-          ? Object.fromEntries(Object.entries(c.env as Record<string, unknown>).map(([k, v]) => [k, String(v)]))
-          : undefined,
-        is_builtin: false,
-        is_essential: false,
-        can_disable: true,
-        enabled: true,
-        created_at: now,
-        updated_at: now,
-      })
+      const buildEntry = (name: string, c: Record<string, unknown>): MCPServerRegistryEntry => {
+        const selection = managedMcpSelection(c, this.bundledRuntime)
+        return {
+          id: generateId(),
+          name,
+          transport: 'stdio',
+          command: c.command as string,
+          managed_runtime: selection,
+          args: Array.isArray(c.args) ? c.args.map(String) : undefined,
+          env: typeof c.env === 'object' && c.env !== null
+            ? Object.fromEntries(Object.entries(c.env as Record<string, unknown>).map(([k, v]) => [k, String(v)]))
+            : undefined,
+          is_builtin: false,
+          is_essential: false,
+          can_disable: true,
+          enabled: true,
+          created_at: now,
+          updated_at: now,
+        }
+      }
 
       if ('mcpServers' in obj && typeof obj.mcpServers === 'object' && obj.mcpServers !== null) {
         for (const [name, cfg] of Object.entries(obj.mcpServers as Record<string, unknown>)) {

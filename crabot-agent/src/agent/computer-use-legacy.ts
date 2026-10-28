@@ -2,11 +2,12 @@ import { execFile } from 'node:child_process'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { parse as parseToml } from 'smol-toml'
+import { buildChildEnv } from '../core/runtime-env.js'
 import type { LedgerWorker } from '../workers/harness/ledger-types.js'
 
 interface ProcessRow { pid: number; ppid: number; command: string }
 function run(command: string, args: string[]): Promise<string> {
-  return new Promise((done, fail) => execFile(command, args, { timeout: 3_000, maxBuffer: 8 * 1024 * 1024 }, (error, output) => error ? fail(error) : done(output)))
+  return new Promise((done, fail) => execFile(command, args, { env: buildChildEnv(), timeout: 3_000, maxBuffer: 8 * 1024 * 1024 }, (error, output) => error ? fail(error) : done(output)))
 }
 async function processes(): Promise<ProcessRow[]> {
   return (await run('ps', ['-axo', 'pid=,ppid=,stat=,command='])).split('\n').flatMap(line => {
