@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { execFile, execFileSync, spawn } from 'node:child_process'
+import { execFile, execFileSync } from 'node:child_process'
 import { cliEnvironment, ensureCli, privateDirectory, startCli } from '../../crabot-channel-slack/dist/cli-tools.js'
 import { prepareProject, SLACK_MANIFEST } from '../../crabot-channel-slack/dist/cli-project.js'
 const root = await fs.mkdtemp(path.join(os.tmpdir(), "crabot slack-cli's $safe-"))
@@ -64,21 +64,45 @@ try {
     } catch { console.log('Slack CLI startup diagnostic: regular-output-files failed') }
     finally { await Promise.all(handles.map(handle => handle.close().catch(() => {}))) }
     await new Promise(resolve => {
-      execFile(executable, ['--version'], options, (error, output) => {
-        console.log(`Slack CLI startup diagnostic: async-default-pipes pinned-version=${!error && output.includes('4.11.0')}`)
+      execFile(executable, ['--version'], { ...options, windowsHide: false }, (error, output) => {
+        console.log(`Slack CLI startup diagnostic: node-pipes-console-allowed pinned-version=${!error && output.includes('4.11.0')}`)
         resolve()
       })
     })
-    const overlapped = await new Promise(resolve => {
-      const child = spawn(executable, ['--version'], { cwd: root, env: options.env, windowsHide: true, stdio: ['ignore', 'overlapped', 'overlapped'] })
-      let output = '', expired = false
-      const timer = setTimeout(() => { expired = true; child.kill('SIGKILL') }, 15000)
-      child.stdout.on('data', chunk => { output = (output + chunk.toString()).slice(-4096) })
-      child.stderr.on('data', () => {})
-      child.once('error', () => { clearTimeout(timer); resolve(false) })
-      child.once('close', code => { clearTimeout(timer); resolve(!expired && code === 0 && output.includes('4.11.0')) })
-    }).catch(() => false)
-    console.log(`Slack CLI startup diagnostic: async-overlapped-output pinned-version=${overlapped}`)
+    // Compare Windows' standard redirected pipes and console creation independently.
+    const powershell = path.join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+    for (const noWindow of [true, false]) {
+      const script = `
+$ErrorActionPreference = 'Stop'
+$p = New-Object System.Diagnostics.Process
+try {
+  $p.StartInfo.FileName = $env:CRABOT_DIAGNOSTIC_EXECUTABLE
+  $p.StartInfo.Arguments = '--version'
+  $p.StartInfo.UseShellExecute = $false
+  $p.StartInfo.CreateNoWindow = $${noWindow}
+  $p.StartInfo.WindowStyle = 'Hidden'
+  $p.StartInfo.RedirectStandardInput = $true
+  $p.StartInfo.RedirectStandardOutput = $true
+  $p.StartInfo.RedirectStandardError = $true
+  [void]$p.Start()
+  $p.StandardInput.Close()
+  $stdout = $p.StandardOutput.ReadToEndAsync()
+  $stderr = $p.StandardError.ReadToEndAsync()
+  $finished = $p.WaitForExit(10000)
+  $valid = $finished -and $p.ExitCode -eq 0 -and $stdout.Wait(1000) -and $stdout.Result.Contains('4.11.0')
+  [Console]::WriteLine('pinned-version=' + $valid.ToString().ToLowerInvariant())
+} catch { [Console]::WriteLine('diagnostic-failed') }
+finally {
+  if ($p.Id -and -not $p.HasExited) { $p.Kill(); [void]$p.WaitForExit(2000) }
+  $p.Dispose()
+}`
+      await new Promise(resolve => {
+        execFile(powershell, ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')], { ...options, timeout: 20000, env: { ...options.env, CRABOT_DIAGNOSTIC_EXECUTABLE: executable } }, (error, output) => {
+          console.log(`Slack CLI startup diagnostic: dotnet-pipes-create-no-window=${noWindow} pinned-version=${!error && output.trim() === 'pinned-version=true'}`)
+          resolve()
+        })
+      })
+    }
   }
   // This isolated manifest-only probe never logs in; report fixed milestones, not raw CLI logs.
   try {
