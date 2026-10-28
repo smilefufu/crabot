@@ -404,7 +404,7 @@ await runSourceUpgrade(process.cwd(), console)
             exit 1
         }
 
-        $runtimeModules = @('crabot-shared','scripts/lib','crabot-core','crabot-admin','crabot-agent','crabot-channel-dingtalk','crabot-channel-feishu','crabot-channel-telegram','crabot-channel-wechat','crabot-mcp-tools')
+        $runtimeModules = @('crabot-shared','scripts/lib','crabot-core','crabot-admin','crabot-agent','crabot-channel-dingtalk','crabot-channel-slack','crabot-channel-feishu','crabot-channel-telegram','crabot-channel-wechat','crabot-mcp-tools')
         foreach ($mod in $runtimeModules) {
             $moduleDir = Join-Path $stageRelease $mod
             if (-not (Test-Path -LiteralPath (Join-Path $moduleDir 'package.json') -PathType Leaf) -or

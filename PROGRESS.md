@@ -1,5 +1,11 @@
 # Crabot 项目进度
 
+### Slack Channel 首版：实现完成，待 PR 审查和真实 workspace 验收
+
+- 依照已确认 [spec](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/specs/2026-10-27-native-slack-channel-design.md) 及 Channel 0.1.6 协议：新增 Socket Mode 原生渠道，支持 DM/公开群/私有群、默认 true 且可热更新并持久化的 @过滤；thread 仅保存关系，普通发送到原会话主界面。
+- 补充 Admin 内置发现/配置保存、dev、源码升级和 macOS/Linux/Windows 发布安装清单；沿用原 Session、身份鉴权与 Agent 普通消息入口，不改飞书或 Agent 工具契约。
+- 已完成 fake Slack 边界、真实本地 HTTP RPC 配置重启与空发布目录安装验证；详细步骤见[实施计划](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/plans/2026-10-28-native-slack-channel-implementation.md)。未使用真实 Token、调用模型或部署；Token 配对、权限、Agent 实际消费及 Slack 实际投递仍须 workspace 联调。
+
 ### LLM 连接恢复通知降噪：局部修复完成，未部署
 
 - 本次 LLM 调用前 30 秒仅自动重试，之后在下一次连接失败时简短提示“模型连接暂时不稳定，正在自动重试。”；保留 5 分钟通知冷却。Admin trace 与日志继续记录每次错误详情，最终失败告知不受静默门槛或恢复提示冷却影响。
