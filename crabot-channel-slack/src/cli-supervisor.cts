@@ -61,7 +61,8 @@ process.on('message', (message: { type: string; executable: string; args: string
   if (message.type === 'stop') { finishStop(); return }
   if (message.type !== 'start' || child || finishing) return
   fs.rmSync(path.join(project, 'stop'), { force: true })
-  child = spawn(message.executable, message.args, { cwd: message.cwd, env: process.env, detached: process.platform !== 'win32', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
+  // Slack CLI probes its terminal before parsing flags; Windows needs normal console startup.
+  child = spawn(message.executable, message.args, { cwd: message.cwd, env: process.env, detached: process.platform !== 'win32', windowsHide: false, stdio: ['ignore', 'pipe', 'pipe'] })
   child.on('spawn', () => fs.writeFileSync(stateFile, JSON.stringify({ cli_pid: child!.pid, supervisor_pid: process.pid }), { mode: 0o600 }))
   closed = new Promise(resolve => child!.once('close', code => { exitCode = code; resolve(); finishStop() }))
   const capture = (chunk: Buffer) => {

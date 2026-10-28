@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { execFile, execFileSync } from 'node:child_process'
+import { execFileSync } from 'node:child_process'
 import { cliEnvironment, ensureCli, privateDirectory, startCli } from '../../crabot-channel-slack/dist/cli-tools.js'
 import { prepareProject, SLACK_MANIFEST } from '../../crabot-channel-slack/dist/cli-project.js'
 const root = await fs.mkdtemp(path.join(os.tmpdir(), "crabot slack-cli's $safe-"))
@@ -15,22 +15,7 @@ try {
   try { executable = await ensureCli(root, AbortSignal.timeout(300000)) }
   finally { globalThis.fetch = originalFetch }
   console.log('Slack CLI smoke: checking verified executable startup (15 second limit)')
-  const startupEnvironment = cliEnvironment()
-  if (process.platform === 'win32') startupEnvironment.GODEBUG = 'inittrace=1'
-  let version
-  try {
-    version = execFileSync(executable, ['--version'], { cwd: root, env: startupEnvironment, timeout: 15000, windowsHide: true, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
-  } catch (error) {
-    // Only package names from Go's initialization trace; no login or CLI output.
-    if (process.platform === 'win32') {
-      const initialized = String(error.stderr ?? '').split('\n').flatMap(line => {
-        const match = /^init ([A-Za-z0-9_./-]+) @/.exec(line)
-        return match ? [match[1]] : []
-      })
-      console.log(`Slack CLI initialization diagnostic: ${initialized.slice(-16).join(', ') || 'no completed package initialization'}`)
-    }
-    throw error
-  }
+  const version = execFileSync(executable, ['--version'], { cwd: root, env: cliEnvironment(), timeout: 15000, windowsHide: false, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
   assert.ok(version.includes('4.11.0'), 'Verified official executable must report its pinned version')
   console.log('Slack CLI smoke: verified official tool started; preparing fixed hooks')
   const project = await prepareProject(root)
@@ -50,54 +35,6 @@ try {
   assert.equal(manifest.settings.socket_mode_enabled, true)
   await assert.rejects(fs.access(path.join(root, 'handoff.json')))
   console.log(`Slack CLI 4.11.0 verified archive and real local hooks passed: ${process.platform}/${process.arch}; no login, App creation or messages`)
-} catch (error) {
-  if (process.platform === 'win32' && executable && !job) {
-    // Diagnostic-only I/O profiles; the original failed probe still fails this job.
-    const options = { cwd: root, env: cliEnvironment(), timeout: 15000, windowsHide: true, encoding: 'utf8' }
-    const handles = []
-    try {
-      handles.push(await fs.open(path.join(root, 'version.stdout'), 'wx', 0o600))
-      handles.push(await fs.open(path.join(root, 'version.stderr'), 'wx', 0o600))
-      execFileSync(executable, ['--version'], { ...options, stdio: ['ignore', handles[0].fd, handles[1].fd] })
-      const output = await fs.readFile(path.join(root, 'version.stdout'), 'utf8')
-      console.log(`Slack CLI startup diagnostic: regular-output-files pinned-version=${output.includes('4.11.0')}`)
-    } catch { console.log('Slack CLI startup diagnostic: regular-output-files failed') }
-    finally { await Promise.all(handles.map(handle => handle.close().catch(() => {}))) }
-    // Same API, binary, args, cwd, environment and pipes; vary only console hiding.
-    for (const windowsHide of [true, false]) {
-      await new Promise(resolve => {
-        const started = Date.now()
-        execFile(executable, ['--version'], { ...options, windowsHide }, (error, output) => {
-          console.log(`Slack CLI startup diagnostic: async-pipes-windows-hide=${windowsHide} pinned-version=${!error && output.includes('4.11.0')} elapsed-ms=${Date.now() - started}`)
-          resolve()
-        })
-      })
-    }
-    // libuv keeps a hidden console when a stdio descriptor is explicitly inherited.
-    let input
-    try {
-      input = await fs.open('NUL', 'r')
-      const started = Date.now()
-      const output = execFileSync(executable, ['--version'], { ...options, stdio: [input.fd, 'pipe', 'pipe'] })
-      console.log(`Slack CLI startup diagnostic: explicit-nul-input-hidden pinned-version=${output.includes('4.11.0')} elapsed-ms=${Date.now() - started}`)
-    } catch { console.log('Slack CLI startup diagnostic: explicit-nul-input-hidden failed') }
-    finally { await input?.close().catch(() => {}) }
-  }
-  // This isolated manifest-only probe never logs in; report fixed milestones, not raw CLI logs.
-  try {
-    const state = await fs.access(path.join(root, 'project', 'process-state.json')).then(() => true, () => false)
-    console.log(`Slack CLI smoke diagnostic: supervisor recorded CLI spawn=${state}`)
-    const logs = path.join(root, 'cli', 'logs')
-    for (const name of (await fs.readdir(logs)).filter(name => /^slack-debug-[0-9]+\.log$/.test(name)).slice(0, 4)) {
-      const lines = (await fs.readFile(path.join(logs, name), 'utf8')).slice(-65536).split('\n')
-      for (const line of lines) {
-        for (const marker of ['starting hook command', 'finished hook command', 'initialized SDK CLI config']) {
-          if (line.includes(marker)) console.log(`Slack CLI smoke diagnostic: ${marker}`)
-        }
-      }
-    }
-  } catch { console.log('Slack CLI smoke diagnostic: isolated CLI log unavailable') }
-  throw error
 } finally {
   clearTimeout(commandTimer)
   globalThis.fetch = originalFetch
