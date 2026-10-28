@@ -14,3 +14,12 @@ test('malformed or extra metadata is never accepted as equal non-security eviden
     assert.throws(() => workspaceMetadataWithoutSecurity(input))
   }
 })
+
+
+test('Native metadata failure labels forward only bounded technical stages', async () => {
+  const { workspaceFileMetadataStage } = await import('../workspace-file-host.mjs')
+  for (const stage of ['metadata-owner-ace', 'metadata-control-34820-32772', 'metadata-exact']) assert.equal(workspaceFileMetadataStage(stage), stage)
+  for (const value of [null, undefined, {}, 'path/to/user/file', 'metadata-control-123456-0', 'metadata-exact\n', 'metadata-exact\r', 'metadata-control-1-2\nsecret']) {
+    assert.equal(workspaceFileMetadataStage(value), null)
+  }
+})

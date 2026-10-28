@@ -251,6 +251,15 @@ test('independent common stop settles its exact fixture generation without any C
   assert.equal(inspectInstance(f.data).state, 'stopped')
   assert.equal(existsSync(join(host, 'crabot-core')), false)
 })
+test('shared module-start probe preserves the existing Core producer identity for the current process', async () => {
+  const { probeProcessStartIdentity } = await import('../module-process-start.cjs')
+  const core = await import('../../../crabot-core/dist/module-runtime-registry.js')
+  const expected = await core.probeProcessStartIdentity(process.pid)
+  assert.equal(typeof expected, 'string')
+  assert.equal(await probeProcessStartIdentity(process.pid), expected)
+  assert.equal(await probeProcessStartIdentity(2_147_483_647), null)
+})
+
 test('status preserves verified running state when the module RPC is unavailable, without trusting a forged identity', async t => {
   const f = await fixture(t), entry = fileURLToPath(new URL('../../status.mjs', import.meta.url))
   const status = async () => {
