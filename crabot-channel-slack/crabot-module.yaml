@@ -1,0 +1,48 @@
+module_id: channel-slack
+name: Slack
+version: 0.1.0
+module_type: channel
+description: Slack 私聊与群聊，Socket Mode 长连接
+protocol_version: "0.2.0"
+runtime:
+  type: nodejs
+  version: ">=22.0.0"
+install: corepack pnpm install --frozen-lockfile
+build: corepack pnpm run build
+entry: dist/main.js
+config_schema:
+  type: object
+  required: [SLACK_BOT_TOKEN, SLACK_APP_TOKEN]
+  properties:
+    SLACK_BOT_TOKEN:
+      type: string
+      title: Bot Token
+      format: password
+      description: xoxb 开头的 Bot Token，修改后重启
+      x-runtime-path: credentials.bot_token
+    SLACK_APP_TOKEN:
+      type: string
+      title: App-Level Token
+      format: password
+      description: xapp 开头，授权 connections:write，修改后重启
+      x-runtime-path: credentials.app_token
+    SLACK_ONLY_RESPOND_TO_MENTIONS:
+      type: string
+      title: 群聊仅响应 @Crabot
+      enum: ["true", "false"]
+      enum_titles: ["是", "否"]
+      default: "true"
+      x-runtime-path: group.only_respond_to_mentions
+    SLACK_CACHE_MAX_DAYS:
+      type: string
+      title: 交互缓存保留天数
+      default: "30"
+      x-runtime-path: cache.max_days
+    SLACK_CACHE_MAX_MESSAGES:
+      type: string
+      title: 每个会话最多缓存消息数
+      default: "1000"
+      x-runtime-path: cache.max_messages_per_session
+author: Crabot Team
+license: Apache-2.0
+keywords: [slack, channel, messaging]

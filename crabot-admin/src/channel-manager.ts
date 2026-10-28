@@ -32,6 +32,7 @@ const BUILTIN_MODULE_PATHS: readonly string[] = [
   '../crabot-channel-telegram',
   '../crabot-channel-feishu',
   '../crabot-channel-dingtalk',
+  '../crabot-channel-slack',
   '../crabot-channel-voice',
 ]
 
@@ -89,6 +90,7 @@ export class ChannelManager {
   private implementations: Map<string, ChannelImplementation> = new Map()
   private instances: Map<string, ChannelInstance> = new Map()
   private instanceWrites: Promise<unknown> = Promise.resolve()
+  private slackConfigUpdates: Promise<unknown> = Promise.resolve()
 
   private readonly dataDir: string
   private readonly implementationsFilePath: string
@@ -340,7 +342,8 @@ export class ChannelManager {
    */
   async saveLocalConfig(instanceId: string, config: Record<string, string>): Promise<void> {
     const configPath = path.join(this.configsDir, `${instanceId}.json`)
-    await this.atomicWriteFile(configPath, JSON.stringify(config, null, 2))
+    const mode = this.instances.get(instanceId)?.implementation_id === 'channel-slack' ? 0o600 : undefined
+    await this.atomicWriteFile(configPath, JSON.stringify(config, null, 2), mode)
   }
 
   async updateInstance(params: UpdateChannelInstanceParams): Promise<ChannelInstance> {
@@ -413,6 +416,14 @@ export class ChannelManager {
   }
 
   async updateConfig(params: UpdateChannelConfigParams): Promise<{ config: ChannelConfig; requires_restart: boolean }> {
+    if (this.instances.get(params.instance_id)?.implementation_id !== 'channel-slack') return this.applyConfig(params)
+    // Serialize Slack RPC + bootstrap mirror so concurrent saves cannot restore an older env on restart.
+    const update = this.slackConfigUpdates.then(() => this.applyConfig(params))
+    this.slackConfigUpdates = update.catch(() => {})
+    return update
+  }
+
+  private async applyConfig(params: UpdateChannelConfigParams): Promise<{ config: ChannelConfig; requires_restart: boolean }> {
     const instance = this.instances.get(params.instance_id)
     if (!instance) {
       throw new Error(`Instance not found: ${params.instance_id}`)
@@ -429,6 +440,19 @@ export class ChannelManager {
       { config: params.config },
       'admin'
     )
+    if (instance.implementation_id === 'channel-slack') {
+      // Slack persists before applying; keep Admin's stopped-instance form and restart env in sync.
+      const local = (await this.loadLocalConfig(params.instance_id)) ?? {}
+      if (!result.config.group || !result.config.cache) throw new Error('Slack returned incomplete persisted config')
+      local.SLACK_ONLY_RESPOND_TO_MENTIONS = String(result.config.group.only_respond_to_mentions)
+      local.SLACK_CACHE_MAX_DAYS = String(result.config.cache.max_days)
+      local.SLACK_CACHE_MAX_MESSAGES = String(result.config.cache.max_messages_per_session)
+      for (const [key, env] of [['bot_token', 'SLACK_BOT_TOKEN'], ['app_token', 'SLACK_APP_TOKEN']] as const) {
+        const value = params.config.credentials?.[key]
+        if (value && value !== '***') local[env] = value
+      }
+      await this.saveLocalConfig(params.instance_id, local)
+    }
     return result
   }
 
@@ -576,9 +600,13 @@ export class ChannelManager {
   /**
    * 原子写入文件：先写临时文件，再 rename（避免进程被杀时文件损坏）
    */
-  private async atomicWriteFile(filePath: string, content: string): Promise<void> {
+  private async atomicWriteFile(filePath: string, content: string, mode?: number): Promise<void> {
     const tempPath = `${filePath}.tmp`
-    try { await fs.writeFile(tempPath, content, 'utf-8'); await fs.rename(tempPath, filePath) }
+    try {
+      await fs.writeFile(tempPath, content, { encoding: 'utf-8', mode })
+      if (mode !== undefined) await fs.chmod(tempPath, mode)
+      await fs.rename(tempPath, filePath)
+    }
     finally { await fs.rm(tempPath, { force: true }) }
   }
 
