@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { execFile, execFileSync } from 'node:child_process'
+import { execFile, execFileSync, spawn } from 'node:child_process'
 import { cliEnvironment, ensureCli, privateDirectory, startCli } from '../../crabot-channel-slack/dist/cli-tools.js'
 import { prepareProject, SLACK_MANIFEST } from '../../crabot-channel-slack/dist/cli-project.js'
 const root = await fs.mkdtemp(path.join(os.tmpdir(), "crabot slack-cli's $safe-"))
@@ -54,6 +54,16 @@ try {
         resolve()
       })
     })
+    const overlapped = await new Promise(resolve => {
+      const child = spawn(executable, ['--version'], { cwd: root, env: options.env, windowsHide: true, stdio: ['ignore', 'overlapped', 'overlapped'] })
+      let output = '', expired = false
+      const timer = setTimeout(() => { expired = true; child.kill('SIGKILL') }, 15000)
+      child.stdout.on('data', chunk => { output = (output + chunk.toString()).slice(-4096) })
+      child.stderr.on('data', () => {})
+      child.once('error', () => { clearTimeout(timer); resolve(false) })
+      child.once('close', code => { clearTimeout(timer); resolve(!expired && code === 0 && output.includes('4.11.0')) })
+    }).catch(() => false)
+    console.log(`Slack CLI startup diagnostic: async-overlapped-output pinned-version=${overlapped}`)
   }
   // This isolated manifest-only probe never logs in; report fixed milestones, not raw CLI logs.
   try {
