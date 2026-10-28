@@ -19,7 +19,7 @@
 只有用户已批准明确任务范围和预算后才可使用 `--live`。必须提供以下环境变量：
 
 - `REPLAY_DATA_DIR`：已授权实例的数据根；只读取模型引用、当前配置并由 Admin buildConnectionInfo 解析。
-- `REPLAY_RUNTIME_ROOT`：含已构建 Admin 的源码根。
+- `REPLAY_RUNTIME_ROOT`：含已构建 Admin 和 Agent 的源码根。
 - `WORKBUDDY_OUTPUT`：本次全新的输出目录，不覆盖既有轨迹。
 - `WORKBUDDY_TASK_ID`、`WORKBUDDY_INSTRUCTION`：冻结清单中的题目 ID 与原始指令。
 - `WORKBUDDY_TIMEOUT_MS`：原始题目 agent timeout 乘已确认的 2 倍，与 Harness² 环境口径一致。
@@ -43,8 +43,8 @@ node judge.mjs --task-dir "$PINNED_TASK_DIRECTORY" --image "$VERIFIER_IMAGE" --w
 
 另需 `WORKBUDDY_JUDGE_OUTPUT`、`WORKBUDDY_PYTHON` 和完整的 `WORKBUDDY_PRIOR_TOKENS`。裁判请求也计入相同 120M 预算。单条已知边界失败保留原始分数与原因，不通过重抽或修改 rubric 修饰结果。
 
-结果必须分别报告各类原始分、full-pass、已启动/已评分覆盖率、本地交付结果、输入/缓存/输出/推理用量、错误和环境差异。提前结束、Worker 自报与存在文件都不构成完成证明。120M 是批准的整体额度，10M 余量不能证明未知模型具有某个物理最大输出；发现 Provider usage 无法核对时必须停止，而不是继续估算花费。
+结果必须分别报告各类原始分、full-pass、已启动/已评分覆盖率、本地交付结果、输入/缓存/输出/推理用量、错误和环境差异。提前结束、Worker 自报与存在文件都不构成完成证明。120M 是批准的整体额度；每次10M未知预留是保守账目，不是实测费用。可重试失败缺usage时，先单独留额，再由原生机制决定后续尝试；正常响应读到EOF仍缺usage、计费错误或预算不足必须停止，不把未知伪造成已知消耗。
 
-2026-10-28 用户批准有限恢复：保留 Web 首次 SSE-502/缺 usage 记录，为该请求在原120M内单独预留10M；此预留不计作实测已用。恢复入口设置 `WORKBUDDY_UNKNOWN_RESERVE=10000000`，并按 `WORKBUDDY_PRIOR_TOKENS` 传入所有真实已知用量。预算同时扣除已知用量和未知预留，再为在途请求保留10M。Web只恢复一次，之后Office；再次缺usage即停，不重跑Code。
+历史首次恢复授权（本轮已结束，当前以末段再次授权为准）：保留 Web 首次 SSE-502/缺 usage 记录，为该请求在原120M内单独预留10M；此预留不计作实测已用。恢复入口设置 `WORKBUDDY_UNKNOWN_RESERVE=10000000`，并按 `WORKBUDDY_PRIOR_TOKENS` 传入所有真实已知用量。预算同时扣除已知用量和未知预留，再为在途请求保留10M。Web只恢复一次，之后Office；再次缺usage即停，不重跑Code。
 
 2026-10-28 再次授权：先诊断并修复接线，再完成同一Web/Office，Code不重跑，历史失败全部保留。两条历史未知各预留10M（共20M）；两条原生HTTP诊断共18,417 token纳入已知累计，续测起点为417,627。`WORKBUDDY_SMOKE_RECOVER=1` 模拟首次overloaded再成功，验证原生重试、独立预留和真实交付。运行 `node --test budget.test.mjs observe.test.mjs judge.test.mjs` 验证预算、EOF观察和无真实凭据的裁判HTTP转发。
