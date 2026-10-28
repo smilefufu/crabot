@@ -485,9 +485,10 @@ jobs:
             node .github/scripts/verify-paired-update-host.mjs ".desktop-build/安装 候选/paired" 2>&1 | tee .desktop-build/paired-update-host.log
           fi
           node .github/scripts/check-paired-update-report.mjs .desktop-build/paired-update-host.json "$CRABOT_PAIRED_ACCEPTANCE_ID"
+      # Intel completed the full removal at 15.6 minutes; allow the remaining real reinstall and health checks.
       - name: Ordinary Main complete uninstall and retained reinstall
         if: steps.scope.outputs.full_runtime == 'true'
-        timeout-minutes: ${{ runner.os == 'Windows' && 30 || 20 }}
+        timeout-minutes: ${{ matrix.target == 'darwin-x64' && 40 || runner.os == 'Windows' && 30 || 20 }}
         run: |
           if [[ "$RUNNER_OS" == Linux ]]; then
             dbus-run-session -- xvfb-run -a node .github/scripts/verify-uninstall-reinstall.mjs ".desktop-build/安装 候选/paired" 2>&1 | tee .desktop-build/uninstall-reinstall-stage.log
