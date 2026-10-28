@@ -1,5 +1,4 @@
 """Run with the pinned WorkBuddy Python environment; never uses Docker or a model."""
-import asyncio
 import contextlib
 import importlib.util
 import io
