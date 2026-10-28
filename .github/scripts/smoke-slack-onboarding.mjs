@@ -63,42 +63,12 @@ try {
       console.log(`Slack CLI startup diagnostic: regular-output-files pinned-version=${output.includes('4.11.0')}`)
     } catch { console.log('Slack CLI startup diagnostic: regular-output-files failed') }
     finally { await Promise.all(handles.map(handle => handle.close().catch(() => {}))) }
-    await new Promise(resolve => {
-      execFile(executable, ['--version'], { ...options, windowsHide: false }, (error, output) => {
-        console.log(`Slack CLI startup diagnostic: node-pipes-console-allowed pinned-version=${!error && output.includes('4.11.0')}`)
-        resolve()
-      })
-    })
-    // Compare Windows' standard redirected pipes and console creation independently.
-    const powershell = path.join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
-    for (const noWindow of [true, false]) {
-      const script = `
-$ErrorActionPreference = 'Stop'
-$p = New-Object System.Diagnostics.Process
-try {
-  $p.StartInfo.FileName = $env:CRABOT_DIAGNOSTIC_EXECUTABLE
-  $p.StartInfo.Arguments = '--version'
-  $p.StartInfo.UseShellExecute = $false
-  $p.StartInfo.CreateNoWindow = $${noWindow}
-  $p.StartInfo.WindowStyle = 'Hidden'
-  $p.StartInfo.RedirectStandardInput = $true
-  $p.StartInfo.RedirectStandardOutput = $true
-  $p.StartInfo.RedirectStandardError = $true
-  [void]$p.Start()
-  $p.StandardInput.Close()
-  $stdout = $p.StandardOutput.ReadToEndAsync()
-  $stderr = $p.StandardError.ReadToEndAsync()
-  $finished = $p.WaitForExit(10000)
-  $valid = $finished -and $p.ExitCode -eq 0 -and $stdout.Wait(1000) -and $stdout.Result.Contains('4.11.0')
-  [Console]::WriteLine('pinned-version=' + $valid.ToString().ToLowerInvariant())
-} catch { [Console]::WriteLine('diagnostic-failed') }
-finally {
-  if ($p.Id -and -not $p.HasExited) { $p.Kill(); [void]$p.WaitForExit(2000) }
-  $p.Dispose()
-}`
+    // Same API, binary, args, cwd, environment and pipes; vary only console hiding.
+    for (const windowsHide of [true, false]) {
       await new Promise(resolve => {
-        execFile(powershell, ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')], { ...options, timeout: 20000, env: { ...options.env, CRABOT_DIAGNOSTIC_EXECUTABLE: executable } }, (error, output) => {
-          console.log(`Slack CLI startup diagnostic: dotnet-pipes-create-no-window=${noWindow} pinned-version=${!error && output.trim() === 'pinned-version=true'}`)
+        const started = Date.now()
+        execFile(executable, ['--version'], { ...options, windowsHide }, (error, output) => {
+          console.log(`Slack CLI startup diagnostic: async-pipes-windows-hide=${windowsHide} pinned-version=${!error && output.includes('4.11.0')} elapsed-ms=${Date.now() - started}`)
           resolve()
         })
       })
