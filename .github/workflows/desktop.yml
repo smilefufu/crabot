@@ -1,0 +1,582 @@
+name: Desktop runtime
+
+on:
+  push:
+    branches: ['feat/desktop-*']
+    paths:
+      - 'crabot-desktop/**'
+      - 'crabot-client/**'
+      - 'crabot-shared/**'
+      - 'crabot-admin/**'
+      - 'src/cli/client*'
+      - 'crabot-core/**'
+      - 'crabot-native/**'
+      - 'crabot-agent/src/core/runtime-env.ts'
+      - 'crabot-agent/src/core/workspace-*'
+      - 'crabot-agent/tests/core/workspace-*'
+      - 'crabot-agent/src/agent/mcp-connector.ts'
+      - 'crabot-agent/src/workers/**'
+      - 'crabot-agent/src/manager/bootstrap.ts'
+      - 'crabot-agent/src/manager/tools/worker-tools.ts'
+      - 'crabot-agent/tests/workers/**'
+      - 'scripts/**'
+      - 'install.sh'
+      - 'install.ps1'
+      - '.github/scripts/*product*'
+      - '.github/scripts/fixtures/product-*'
+      - '.github/scripts/desktop-runtime-scope.mjs'
+      - '.github/scripts/smoke-migration-interruption.mjs'
+      - '.github/scripts/smoke-workspace-python-gate.mjs'
+      - '.github/scripts/test-linux-resource-download.mjs'
+      - '.github/scripts/test-paired-release-intake.mjs'
+      - '.github/scripts/verify-paired-update-host.mjs'
+      - '.github/scripts/check-paired-update-report*'
+      - '.github/scripts/paired-update-source-data.test.mjs'
+      - '.github/scripts/build-paired-update-source.mjs'
+      - '.github/scripts/prepare-paired-update-core*'
+      - '.github/scripts/paired-update-target-evidence*'
+      - '.github/workflows/desktop.yml'
+      - '.github/workflows/desktop-ubuntu-bootstrap.yml'
+  pull_request:
+    paths:
+      - 'crabot-desktop/**'
+      - 'crabot-client/**'
+      - 'crabot-shared/**'
+      - 'crabot-admin/**'
+      - 'src/cli/client*'
+      - 'crabot-core/**'
+      - 'crabot-native/**'
+      - 'crabot-agent/src/core/runtime-env.ts'
+      - 'crabot-agent/src/core/workspace-*'
+      - 'crabot-agent/tests/core/workspace-*'
+      - 'crabot-agent/src/agent/mcp-connector.ts'
+      - 'crabot-agent/src/workers/**'
+      - 'crabot-agent/src/manager/bootstrap.ts'
+      - 'crabot-agent/src/manager/tools/worker-tools.ts'
+      - 'crabot-agent/tests/workers/**'
+      - 'scripts/**'
+      - 'install.sh'
+      - 'install.ps1'
+      - '.github/scripts/*product*'
+      - '.github/scripts/fixtures/product-*'
+      - '.github/scripts/desktop-runtime-scope.mjs'
+      - '.github/scripts/smoke-migration-interruption.mjs'
+      - '.github/scripts/smoke-workspace-python-gate.mjs'
+      - '.github/scripts/test-linux-resource-download.mjs'
+      - '.github/scripts/test-paired-release-intake.mjs'
+      - '.github/scripts/verify-paired-update-host.mjs'
+      - '.github/scripts/check-paired-update-report*'
+      - '.github/scripts/paired-update-source-data.test.mjs'
+      - '.github/scripts/build-paired-update-source.mjs'
+      - '.github/scripts/prepare-paired-update-core*'
+      - '.github/scripts/paired-update-target-evidence*'
+      - '.github/workflows/desktop.yml'
+      - '.github/workflows/desktop-ubuntu-bootstrap.yml'
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'Validation target; final acceptance requires all platforms'
+        type: choice
+        default: all
+        options: [all, linux-x64, darwin-arm64, darwin-x64, win32-x64]
+      suite:
+        description: 'Existing suite to rerun; complete acceptance still requires both'
+        type: choice
+        default: all
+        options: [all, regression, gui, product]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-${{ github.ref }}${{ inputs.target && inputs.target != 'all' && format('-{0}', inputs.target) || '' }}${{ inputs.suite && inputs.suite != 'all' && format('-{0}', inputs.suite) || '' }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  ubuntu-bootstrap:
+    uses: ./.github/workflows/desktop-ubuntu-bootstrap.yml
+  runtime:
+    name: ${{ matrix.suite == 'regression' && 'Desktop foundation' || matrix.suite == 'gui' && 'Desktop GUI regression' || 'Desktop product' }} ${{ matrix.target }}
+    needs: ubuntu-bootstrap
+    timeout-minutes: ${{ matrix.target == 'darwin-x64' && matrix.suite == 'product' && 240 || (matrix.target == 'darwin-x64' || matrix.target == 'win32-x64') && 180 || 150 }}
+    strategy:
+      fail-fast: false
+      # The same-source suites are independent: do not consume the product
+      # installation window with the preceding 87-minute Intel regression batch.
+      matrix:
+        suite: ${{ fromJSON(inputs.suite && inputs.suite != 'all' && format('["{0}"]', inputs.suite) || '["regression","product"]') }}
+        target: ${{ fromJSON(inputs.target && inputs.target != 'all' && format('["{0}"]', inputs.target) || '["linux-x64","darwin-arm64","darwin-x64","win32-x64"]') }}
+    runs-on: ${{ fromJSON('{"linux-x64":"ubuntu-24.04","darwin-arm64":"macos-15","darwin-x64":"macos-15-intel","win32-x64":"windows-latest"}')[matrix.target] }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.3'
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.13.0'
+      - name: Select complete runtime validation scope
+        if: matrix.suite == 'product'
+        id: scope
+        env:
+          CRABOT_CI_BASE: ${{ github.event.before || github.event.pull_request.base.sha }}
+        run: |
+          node --test .github/scripts/desktop-runtime-scope.test.mjs .github/scripts/prepare-paired-update-core.test.mjs .github/scripts/check-paired-update-report.test.mjs
+          node .github/scripts/desktop-runtime-scope.mjs
+      - name: Linux build prerequisites
+        if: runner.os == 'Linux' && steps.scope.outputs.full_runtime == 'true'
+        run: sudo apt-get update && sudo apt-get install -y build-essential libcurl4-openssl-dev libexpat1-dev zlib1g-dev libjson-glib-dev libgtk-4-dev
+      - name: Prepare isolated build directory
+        run: mkdir -p .desktop-build
+      - name: Compile same-source helper for actual paired-layout verification
+        if: runner.os == 'Linux' && steps.scope.outputs.full_runtime == 'true'
+        run: cc -std=c11 -Wall -Wextra -Werror -O2 crabot-desktop/native/ubuntu/sandbox-helper.c -o .desktop-build/ubuntu-helper-source-probe $(pkg-config --cflags --libs json-glib-1.0)
+      - name: Build OS process identity helper with installed compiler
+        run: node scripts/build-native.mjs
+      - name: Shared system installation ownership and restrictive umask
+        if: runner.os == 'Linux'
+        timeout-minutes: 2
+        run: sudo --preserve-env=GITHUB_ACTIONS,GITHUB_WORKSPACE "$(command -v node)" .github/scripts/smoke-system-install-ownership.mjs 2>&1 | tee .desktop-build/system-install-ownership.log
+      - name: Install frozen build dependencies
+        run: |
+          pnpm --dir crabot-client install --frozen-lockfile
+          node crabot-client/node_modules/typescript/bin/tsc -p crabot-client/tsconfig.json
+          pnpm install --frozen-lockfile
+          pnpm --dir scripts/lib install --frozen-lockfile
+          pnpm --dir crabot-shared install --frozen-lockfile
+          node crabot-shared/node_modules/typescript/bin/tsc -p crabot-shared/tsconfig.json
+          for module in crabot-core crabot-agent crabot-admin crabot-mcp-tools crabot-channel-telegram crabot-channel-wechat crabot-channel-feishu crabot-channel-dingtalk crabot-channel-slack crabot-channel-voice; do
+            pnpm --dir "$module" install --frozen-lockfile
+            node "$module/node_modules/typescript/bin/tsc" -p "$module/tsconfig.json"
+          done
+          pnpm --dir crabot-admin/web install --frozen-lockfile
+          pnpm --dir crabot-desktop install --frozen-lockfile
+          # Electron lazily installs on first require; complete it before test workers.
+          (cd crabot-desktop && node -e "require('electron')")
+          node crabot-desktop/node_modules/typescript/bin/tsc -p crabot-desktop/tsconfig.json
+          (cd crabot-desktop && node build-preload.mjs)
+      - name: Prepare exact development Electron sandbox on Ubuntu24
+        if: runner.os == 'Linux'
+        run: node .github/scripts/ubuntu-electron-test-sandbox.mjs
+      - name: Linux workspace bind-mount boundary in a private mount namespace
+        if: matrix.suite == 'regression' && (runner.os == 'Linux')
+        timeout-minutes: 2
+        run: sudo --preserve-env=GITHUB_ACTIONS unshare --mount --propagation private -- "$(command -v node)" --import ./crabot-shared/node_modules/tsx/dist/loader.mjs --test --test-name-pattern='Linux same-device bind mounts' crabot-shared/src/workspace-usage.test.ts
+      - name: OS copy assertions with direct TAP transport
+        if: matrix.suite == 'regression'
+        timeout-minutes: 2
+        run: node scripts/lib/__tests__/workspace-copy.test.mjs
+      - name: Runtime regressions
+        if: matrix.suite == 'regression'
+        timeout-minutes: 15
+        run: |
+          node --test crabot-client/tests/*.test.mjs
+          node --import ./crabot-shared/node_modules/tsx/dist/loader.mjs --test crabot-shared/src/storage-permission.test.ts
+          node --import ./crabot-shared/node_modules/tsx/dist/loader.mjs --test crabot-shared/src/workspace-catalog.test.ts crabot-shared/src/workspace-catalog-relocation.test.ts crabot-shared/src/workspace-maintenance.test.ts crabot-shared/src/workspace-usage.test.ts crabot-shared/src/workspace-mounts.test.ts crabot-shared/src/workspace-relocation-files.test.ts crabot-shared/src/workspace-relocation-content.test.ts crabot-shared/src/workspace-relocation-target.test.ts
+          node --test scripts/lib/__tests__/product-*.test.mjs scripts/lib/__tests__/agent-python-selection.test.mjs
+          node --test scripts/lib/__tests__/cli-password-input.test.mjs scripts/lib/__tests__/instance-runtime.test.mjs scripts/lib/__tests__/cli-lock-native.test.mjs scripts/lib/__tests__/process-identity.test.mjs scripts/lib/__tests__/program-references.test.mjs scripts/lib/__tests__/private-file-paths.test.mjs scripts/lib/__tests__/directory-move.test.mjs scripts/lib/__tests__/file-move.test.mjs scripts/lib/__tests__/directory-pin.test.mjs scripts/lib/__tests__/workspace-file-metadata.test.mjs scripts/lib/__tests__/workspace-copy-job.test.mjs scripts/lib/__tests__/workspace-sync.test.mjs scripts/lib/__tests__/workspace-tar.test.mjs scripts/lib/__tests__/known-process-exit.test.mjs scripts/lib/__tests__/known-process-termination.test.mjs scripts/lib/__tests__/known-process-stop.test.mjs scripts/lib/__tests__/owned-process-tree.test.mjs scripts/lib/__tests__/tmux-process-tree.test.mjs scripts/lib/__tests__/spawned-process-tree.test.mjs scripts/lib/__tests__/local-auth-transport.test.mjs scripts/lib/__tests__/desktop-frames.test.mjs scripts/lib/__tests__/stop-windows.test.mjs scripts/lib/__tests__/background-core.test.mjs scripts/lib/__tests__/supervisor-bootstrap.test.mjs scripts/lib/__tests__/mm-startup.test.mjs
+          node --test scripts/lib/__tests__/system-*.test.mjs
+          node --test scripts/lib/__tests__/desktop-session.test.mjs
+          (cd scripts/lib && node node_modules/vitest/vitest.mjs run __tests__/check.test.mjs __tests__/mm-probe.test.mjs --maxWorkers=1 --minWorkers=1)
+      - name: Workspace files and interrupted recovery regressions
+        if: matrix.suite == 'regression'
+        timeout-minutes: ${{ matrix.target == 'win32-x64' && 45 || matrix.target == 'darwin-x64' && 25 || 15 }}
+        run: node --test scripts/lib/__tests__/workspace-relocation-intent.test.mjs scripts/lib/__tests__/workspace-process-stop.test.mjs scripts/lib/__tests__/workspace-file-plan.test.mjs scripts/lib/__tests__/workspace-root-publish.test.mjs scripts/lib/__tests__/workspace-coordinator-entry.test.mjs scripts/lib/__tests__/workspace-interrupted-role.test.mjs scripts/lib/__tests__/admin-data-compat.test.mjs scripts/lib/__tests__/core-preparation.test.mjs scripts/lib/__tests__/workspace-data-compat.test.mjs scripts/lib/__tests__/workspace-legacy-executions.test.mjs scripts/lib/__tests__/core-preflight.test.mjs scripts/lib/__tests__/installer-compat.test.mjs
+      - name: Workspace fixed coordinator and Root regressions
+        if: matrix.suite == 'regression'
+        timeout-minutes: ${{ matrix.target == 'win32-x64' && 60 || 15 }}
+        run: node --test scripts/lib/__tests__/workspace-coordinator-launch.test.mjs
+      - name: Installation and program proof regressions
+        if: matrix.suite == 'regression'
+        timeout-minutes: 15
+        run: |
+          node --test .github/scripts/paired-update-target-evidence.test.mjs .github/scripts/paired-update-source-model.test.mjs .github/scripts/paired-update-source-data.test.mjs .github/scripts/paired-update-source-activity.test.mjs scripts/lib/__tests__/desktop-asar.test.mjs scripts/lib/__tests__/archive-core.test.mjs scripts/lib/__tests__/core-release.test.mjs scripts/lib/__tests__/stage-core-imports.test.mjs scripts/lib/__tests__/desktop-installation.test.mjs scripts/lib/__tests__/desktop-removal-programs.test.mjs scripts/lib/__tests__/removal-copy-cleanup.test.mjs scripts/lib/__tests__/desktop-removal-system-processes.test.mjs scripts/lib/__tests__/cli-launcher.test.mjs
+      - name: Offline installation and retained repair regressions
+        if: matrix.suite == 'regression'
+        timeout-minutes: ${{ matrix.target == 'darwin-x64' && 30 || 15 }}
+        run: node --test scripts/lib/__tests__/desktop-payload.test.mjs
+      - name: CLI installation and retained reinstall regressions
+        if: matrix.suite == 'regression'
+        timeout-minutes: 15
+        run: node --test scripts/lib/__tests__/cli-installation.test.mjs
+      - name: Legacy installation and stop regressions
+        if: matrix.suite == 'regression'
+        timeout-minutes: 15
+        run: |
+          node --test scripts/lib/__tests__/legacy-desktop.test.mjs scripts/lib/__tests__/legacy-desktop-cli.test.mjs scripts/lib/__tests__/legacy-entry-fence.test.mjs scripts/lib/__tests__/legacy-system-*.test.mjs
+          node --test scripts/lib/__tests__/legacy-mm-rpc.test.mjs scripts/lib/__tests__/module-shutdown-rpc.test.mjs
+          node --test scripts/lib/__tests__/legacy-runtime.test.mjs scripts/lib/__tests__/legacy-stop.test.mjs
+          node --test scripts/lib/__tests__/maintenance-backup.test.mjs
+      - name: Version maintenance and migration regressions
+        if: matrix.suite == 'regression'
+        timeout-minutes: 15
+        run: |
+          node --test scripts/lib/__tests__/version-maintenance.test.mjs scripts/lib/__tests__/legacy-python-maintenance.test.mjs scripts/lib/__tests__/legacy-version-maintenance.test.mjs scripts/lib/__tests__/desktop-update-entry.test.mjs scripts/lib/__tests__/desktop-cli-install.test.mjs
+          (cd scripts/upgrade-lib && node ../../node_modules/vitest/vitest.mjs run --maxWorkers=1 --minWorkers=1)
+      - name: Core lifecycle regressions
+        if: matrix.suite == 'regression'
+        timeout-minutes: 15
+        run: |
+          cd crabot-core
+          node node_modules/vitest/vitest.mjs run src/port-allocator.test.ts src/workspace-maintenance.test.ts src/agent-venv.test.ts src/core-modules.test.ts src/admin-first-install.test.ts src/schema-check.test.ts src/shutdown-generation.test.ts src/module-management-secrets.test.ts --maxWorkers=1 --minWorkers=1
+      - name: Workspace native module regressions
+        if: matrix.suite == 'regression'
+        timeout-minutes: 15
+        run: |
+          cd crabot-core
+          node node_modules/vitest/vitest.mjs run src/workspace-module-scope.test.ts src/workspace-module-stop.test.ts --maxWorkers=1 --minWorkers=1
+      - name: Workspace coordinator authorization and Worker journal regressions
+        if: matrix.suite == 'regression'
+        timeout-minutes: 15
+        run: |
+          cd crabot-core
+          node node_modules/vitest/vitest.mjs run src/workspace-human-verification.test.ts --testNamePattern "MM consumes a human intent|MM dedicated fixed coordinator|MM delegates capture only|MM sensitive Worker stop" --maxWorkers=1 --minWorkers=1
+      # Long recovery suites run at the same commit in workspace-core.yml, with four OS matrices.
+      - name: Workspace native process dispatch regressions
+        if: matrix.suite == 'regression'
+        timeout-minutes: ${{ matrix.target == 'win32-x64' && 30 || 15 }}
+        run: |
+          cd crabot-core
+          node node_modules/vitest/vitest.mjs run src/workspace-human-verification.test.ts --testNamePattern "MM delegates actual fixed Agent stop code|fixed coordinator first CLI process observation journal|MM delegates fixed Native observation" --maxWorkers=1 --minWorkers=1
+      - name: Workspace coordinator native dispatch and module regressions
+        if: matrix.suite == 'regression'
+        timeout-minutes: ${{ matrix.target == 'darwin-x64' && 45 || matrix.target == 'win32-x64' && 30 || 15 }}
+        run: |
+          cd crabot-core
+          node node_modules/vitest/vitest.mjs run src/workspace-human-verification.test.ts --testNamePattern "^(?!.*(?:current interrupted (?:source|forward) recovery admission|MM delegates actual fixed Agent stop code|fixed coordinator first CLI process observation journal|MM delegates fixed Native observation|MM consumes a human intent|MM dedicated fixed coordinator|MM delegates capture only|MM sensitive Worker stop|MM launches the actual fixed coordinator|MM submits one fixed workspace stop sequence|MM requires original Admin quiescence|post-relocation validation launches|new runtime health and Root|fixed job archive storage handoff|normal fixed-job Admin completion preparation|fixed terminal release and current Admin resume|completes two actually owned|same MM workspace recovery and later migration|isolated business Agent after workspace relocation))" --maxWorkers=1 --minWorkers=1
+      - name: Workspace fixed host and actual Admin quiescence regressions
+        if: matrix.suite == 'regression'
+        timeout-minutes: 15
+        run: |
+          cd crabot-core
+          node node_modules/vitest/vitest.mjs run src/workspace-human-verification.test.ts --testNamePattern "MM launches the actual fixed coordinator|MM submits one fixed workspace stop sequence|MM requires original Admin quiescence" --maxWorkers=1 --minWorkers=1
+      - name: Agent environment regressions
+        if: matrix.suite == 'regression'
+        run: |
+          cd crabot-agent
+          node node_modules/vitest/vitest.mjs run tests/workers/native-cli-managed-shell.test.ts tests/workers/codex-app-server-shell.test.ts tests/workers/codex-app-server-client.test.ts tests/workers/relocated-native-history.test.ts tests/workers/composite-trace.test.ts tests/manager/project-doc-tools.test.ts tests/permissions/managed-workspace.test.ts tests/permissions/managed-workspace-host.test.ts tests/workers/harness/request-guard.test.ts tests/unified-agent-trigger-schedule.test.ts tests/core/execution-admissions.test.ts tests/workers/harness/harness-lifecycle.test.ts tests/core/workspace-relocation-ledgers.test.ts tests/core/workspace-relocation-commit.test.ts tests/core/workspace-relocation-checkpoints.test.ts tests/core/workspace-relocation-retirements.test.ts tests/core/workspace-relocation-recovery-capture.test.ts tests/core/workspace-relocation-recovery-progress.test.ts tests/core/workspace-recovery-routing.test.ts tests/manager/session-store.test.ts tests/manager/restart-resume.test.ts tests/workers/harness/workspace-relocation-close.test.ts tests/workers/harness/workspace-relocation-scope.test.ts tests/workers/harness/workspace-legacy-executions.test.ts tests/workers/native-process-observation.test.ts tests/workers/headless-native-processes.test.ts tests/workers/tmux-driver.test.ts tests/core/workspace-maintenance.test.ts tests/core/workspace-background-admissions.test.ts tests/core/workspace-background-processes.test.ts tests/core/workspace-recovery-validation.test.ts tests/core/workspace-relocation-authority.test.ts tests/core/workspace-relocation-stop-journal.test.ts tests/core/workspace-relocation-stop-rpc.test.ts tests/core/workspace-relocation-process-rpc.test.ts tests/permissions/all-directories.test.ts tests/permissions/legacy-directory-upgrade.test.ts tests/workers/harness/context-store.test.ts tests/workers/harness/request-spawn.test.ts tests/manager/request-permission-gate.test.ts tests/core/config-loader.test.ts tests/core/config-loader-slice0.test.ts tests/core/runtime-env.test.ts tests/core/child-env-guard.test.ts tests/engine/host-process-maintenance.test.ts tests/utils/resolve-bash-path.test.ts tests/agent/mcp-connector.test.ts tests/mcp-connector-tool-defaults.test.ts tests/manager/tool-face.test.ts tests/workers/harness/project-workspaces.test.ts tests/workers/harness/workspace-execution.test.ts tests/manager/read-model.test.ts tests/workers/harness/workspace-manager.test.ts tests/workers/harness/ledger-store.test.ts tests/workers/private-project-provision.test.ts tests/workers/private-project-runtime.test.ts tests/workers/codex-managed-notify.test.ts tests/workers/codex-project-config.test.ts --maxWorkers=1 --minWorkers=1
+          node node_modules/vitest/vitest.mjs run tests/manager/conversation-request-runner.test.ts --testNamePattern='retains a migrated old request' --maxWorkers=1 --minWorkers=1
+      - name: Shared HTTP and chat protocol regressions
+        if: matrix.suite == 'regression'
+        run: |
+          node node_modules/typescript/bin/tsc -p tsconfig.cli.json
+          node node_modules/vitest/vitest.mjs run src/cli/client.test.ts --maxWorkers=1 --minWorkers=1
+          cd crabot-admin
+          node node_modules/vitest/vitest.mjs run src/workspace-relocation-start-auth.test.ts src/friend-permission-store.test.ts src/legacy-directory-migration.test.ts src/request-permission-sources.test.ts src/group-session-config.test.ts src/shared-request-impact.test.ts src/backup/import/run-import.test.ts src/workspaces.test.ts src/workspaces-http.test.ts src/workspace-web-maintenance.test.ts src/workspace-recovery-finalization-web.test.ts src/core-agent-cutover-retry.test.ts src/channel-manager.workspace-startup.test.ts src/channel-manager.voice-setup.test.ts src/workspace-relocation-auth.test.ts src/chat-http-ws.test.ts src/chat-manager.test.ts src/chat-outbox-recovery.test.ts src/http-cors.test.ts src/http-diagnostics.test.ts src/model-client-http.test.ts src/desktop-upgrade-http.test.ts src/version/upgrade-runner.test.ts src/version/version-service.test.ts src/desktop-auth.test.ts src/credentials.test.ts src/computer-use-setup-api.test.ts src/memory-access.test.ts src/voice-admin.test.ts src/managed-mcp.test.ts src/managed-mcp-runtime.test.ts src/mcp-subagent-config-mutation.test.ts src/core-agent-config-coherent-read.test.ts --maxWorkers=1 --minWorkers=1
+      - name: Build actual React application for isolated GUI regressions
+        if: matrix.suite == 'gui'
+        working-directory: crabot-admin/web
+        run: node node_modules/vite/bin/vite.js build
+      - name: Web compilation and state regressions
+        if: matrix.suite == 'regression'
+        run: |
+          cd crabot-admin/web
+          pnpm install --frozen-lockfile
+          node node_modules/typescript/bin/tsc -p tsconfig.json
+          node node_modules/vite/bin/vite.js build
+          node node_modules/vitest/vitest.mjs run src/components/StoragePermissionEditor.test.tsx src/pages/DialogObjects/ src/pages/Permissions/ src/pages/Traces/RequestAuthority.test.tsx src/pages/Workspaces.test.tsx src/pages/Traces/WorkersView.test.tsx src/pages/Chat/index.test.tsx src/pages/MCPServers/MCPServerList.test.tsx src/pages/DesktopWelcome.test.tsx src/services/server-state.test.ts src/services/desktop-host.test.ts src/components/ChangePasswordDialog.test.tsx src/components/DesktopDiagnosticsPanel.test.tsx src/pages/Settings/ComputerUseSetupCard.test.tsx src/pages/Settings/VersionUpgradeCard.test.tsx src/pages/Settings/DesktopVersionUpgradeCard.test.tsx --maxWorkers=1 --minWorkers=1
+      - name: Electron compilation and main-process state regressions
+        if: matrix.suite == 'regression'
+        working-directory: crabot-desktop
+        run: |
+          node node_modules/typescript/bin/tsc -p tsconfig.json
+          node build-preload.mjs
+          node --test ../scripts/desktop/ubuntu-maintenance-backend.test.mjs ../scripts/desktop/ubuntu-bootstrap.test.mjs ../scripts/desktop/release-signing.test.mjs tests/release-signatures.test.mjs tests/release-download.test.mjs tests/paired-update.test.mjs tests/paired-update-host.test.mjs tests/paired-handoff.test.mjs tests/bootstrap-log.test.mjs tests/ubuntu-installation.test.mjs tests/ubuntu-process.test.mjs tests/ubuntu-removal-progress.test.mjs tests/ubuntu-update.test.mjs tests/removal-operation.test.mjs tests/removal-request.test.mjs tests/installation-entries.test.mjs tests/cli-removal.test.mjs tests/desktop-ipc.test.mjs tests/workspace-folder.test.mjs tests/desktop-disk.test.mjs tests/desktop-resources.test.mjs tests/first-model-fixture.test.mjs tests/full-host-control.test.mjs tests/desktop-network.test.mjs tests/artifact-network.test.mjs tests/session-host.test.mjs tests/diagnostics.test.mjs tests/login-startup.test.mjs tests/login-startup-update.test.mjs tests/controller.test.mjs tests/update-dialog.test.mjs tests/update-package.test.mjs
+      - name: Actual paired controller scoped migration without MM
+        if: matrix.suite == 'regression'
+        env:
+          CRABOT_PAIRED_CONTROLLER_TEST: '1'
+        run: |
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            xvfb-run -a node --test --test-name-pattern="actual GUI controller runs|actual paired update host" scripts/lib/__tests__/desktop-payload.test.mjs 2>&1 | tee .desktop-build/paired-controller.log
+          else
+            node --test --test-name-pattern="actual GUI controller runs|actual paired update host" scripts/lib/__tests__/desktop-payload.test.mjs 2>&1 | tee .desktop-build/paired-controller.log
+          fi
+      - name: Interrupted migration retains data and refuses automatic replay
+        if: matrix.suite == 'regression'
+        run: node .github/scripts/smoke-migration-interruption.mjs 2>&1 | tee .desktop-build/migration-interruption.log
+      - name: Real sandboxed Electron window boundaries on Linux
+        if: (matrix.suite == 'regression' || matrix.suite == 'gui') && (runner.os == 'Linux')
+        working-directory: crabot-desktop
+        run: xvfb-run -a node --test --test-concurrency=1 tests/electron-boundary.test.mjs tests/installation-probe.test.mjs tests/installation-removal.test.mjs tests/installer-progress.test.mjs tests/maintenance-bootstrap.test.mjs tests/removal-frame.test.mjs tests/paired-relaunch.test.mjs tests/paired-update-gate.test.mjs tests/paired-binding.test.mjs tests/login-startup-recovery.test.mjs 2>&1 | tee ../.desktop-build/electron-boundary.log
+      - name: Real sandboxed Electron window boundaries on macOS and Windows
+        if: (matrix.suite == 'regression' || matrix.suite == 'gui') && (runner.os != 'Linux')
+        working-directory: crabot-desktop
+        run: node --test --test-concurrency=1 tests/electron-boundary.test.mjs tests/installation-removal.test.mjs tests/installer-progress.test.mjs tests/maintenance-bootstrap.test.mjs tests/removal-frame.test.mjs tests/paired-relaunch.test.mjs tests/paired-update-gate.test.mjs tests/paired-binding.test.mjs tests/login-startup-recovery.test.mjs 2>&1 | tee ../.desktop-build/electron-boundary.log
+      - name: Build locked browser and computer-use resources
+        if: steps.scope.outputs.full_runtime == 'true'
+        run: |
+          node scripts/prepare-scrapling.mjs --release=desktop-ci
+          node scripts/prepare-computer-use.mjs
+      - name: Build sealed product environment
+        if: steps.scope.outputs.full_runtime == 'true'
+        run: node scripts/prepare-product-runtime.mjs 2>&1 | tee .desktop-build/product-build.log
+      - name: Verify fixed Linux resource download failure behavior
+        if: steps.scope.outputs.full_runtime == 'true'
+        run: node .github/scripts/test-linux-resource-download.mjs
+      - name: Observe legacy Python without executing old code
+        if: steps.scope.outputs.full_runtime == 'true'
+        run: node --test scripts/lib/__tests__/legacy-python.test.mjs 2>&1 | tee .desktop-build/legacy-python-inspection.log
+      - name: Rebuild legacy Python in an unselected environment
+        timeout-minutes: 20
+        if: steps.scope.outputs.full_runtime == 'true'
+        run: node --test scripts/lib/__tests__/legacy-python-rebuild.test.mjs 2>&1 | tee .desktop-build/legacy-python-rebuild.log
+      - name: Execute real offline local capabilities
+        if: steps.scope.outputs.full_runtime == 'true'
+        run: node .github/scripts/smoke-product-runtime.mjs 2>&1 | tee .desktop-build/product-smoke.log
+      - name: Real isolated managed MCP dependencies and stdio connections
+        if: steps.scope.outputs.full_runtime == 'true'
+        run: node .github/scripts/smoke-managed-mcp.mjs 2>&1 | tee .desktop-build/managed-mcp-smoke.log
+      - name: Standard Ubuntu runtime compatibility
+        if: runner.os == 'Linux' && steps.scope.outputs.full_runtime == 'true'
+        run: |
+          for release in 24.04 26.04; do
+            docker run --rm --network=none \
+              -v "$GITHUB_WORKSPACE:/workspace" -w /workspace \
+              "ubuntu:$release" \
+              /workspace/.product-runtime/node/bin/node \
+              .github/scripts/smoke-product-runtime.mjs \
+              > ".desktop-build/ubuntu-$release.log" 2>&1
+          done
+      - name: Assemble common core and unpacked Electron candidate
+        id: common_candidate
+        if: steps.scope.outputs.full_runtime == 'true'
+        run: |
+          node scripts/desktop/stage-core.mjs "--out=.desktop-build/安装 候选/core" --version=0.1.0-desktop.1
+          node .github/scripts/verify-release-payload.mjs "$GITHUB_WORKSPACE/.desktop-build/安装 候选/core"
+          node .github/scripts/validate-staged-core.mjs ".desktop-build/安装 候选/core"
+          node .github/scripts/smoke-installed-cli.mjs ".desktop-build/安装 候选/core"
+          node scripts/desktop/package-application.mjs --candidate=true "--core=.desktop-build/安装 候选/core" "--out=.desktop-build/安装 候选/gui" 2>&1 | tee .desktop-build/gui-package.log
+      - name: Real bundled Python selection inside system maintenance
+        if: steps.scope.outputs.full_runtime == 'true'
+        timeout-minutes: 8
+        run: node .github/scripts/smoke-legacy-python-maintenance.mjs ".desktop-build/安装 候选/core" system 2>&1 | tee .desktop-build/python-maintenance-system.log
+      - name: Real bundled Python selection inside legacy-user scoped maintenance
+        if: steps.scope.outputs.full_runtime == 'true'
+        timeout-minutes: 8
+        run: node .github/scripts/smoke-legacy-python-maintenance.mjs ".desktop-build/安装 候选/core" legacy-user 2>&1 | tee .desktop-build/python-maintenance-user.log
+      - name: Real bundled Python behind a registered workspace gate
+        if: steps.scope.outputs.full_runtime == 'true'
+        timeout-minutes: 12
+        run: node .github/scripts/smoke-workspace-python-gate.mjs ".desktop-build/安装 候选/core" 2>&1 | tee .desktop-build/python-workspace-gate.log
+      - name: Build and extract native installer candidates
+        if: steps.scope.outputs.full_runtime == 'true'
+        timeout-minutes: 15
+        run: |
+          node scripts/desktop/package-installers.mjs --candidate=true "--project=.desktop-build/安装 候选/gui" --out=.desktop-build/platform-installers 2>&1 | tee .desktop-build/installers.log
+          node .github/scripts/verify-installer-candidates.mjs .desktop-build/platform-installers 2>&1 | tee .desktop-build/installer-verification.log
+      - name: Boot actual packaged app with native session and CLI on Linux
+        timeout-minutes: 10
+        if: runner.os == 'Linux' && steps.scope.outputs.full_runtime == 'true'
+        run: xvfb-run -a node .github/scripts/smoke-packaged-desktop.mjs ".desktop-build/安装 候选/gui" 2>&1 | tee .desktop-build/packaged-boot.log
+      - name: Boot actual packaged app with native session and CLI on macOS and Windows
+        timeout-minutes: 10
+        if: runner.os != 'Linux' && steps.scope.outputs.full_runtime == 'true'
+        run: node .github/scripts/smoke-packaged-desktop.mjs ".desktop-build/安装 候选/gui" 2>&1 | tee .desktop-build/packaged-boot.log
+      - name: Signed complete-archive intake with the actual bundled Python
+        if: steps.scope.outputs.full_runtime == 'true'
+        timeout-minutes: 6
+        run: node .github/scripts/test-paired-release-intake.mjs ".desktop-build/安装 候选/core" 2>&1 | tee .desktop-build/signed-release-intake.log
+      - name: Load same-commit Ubuntu24 native bootstrap
+        if: runner.os == 'Linux' && steps.scope.outputs.full_runtime == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: ubuntu-native-bootstrap
+          path: .desktop-build/ubuntu-bootstrap
+      - name: Build paired offline GUI and Core candidate
+        if: steps.scope.outputs.full_runtime == 'true'
+        timeout-minutes: 10
+        run: node scripts/desktop/package-application.mjs --candidate=true --layout=paired --native-bootstrap=.desktop-build/ubuntu-bootstrap "--core=.desktop-build/安装 候选/core" "--out=.desktop-build/安装 候选/paired" 2>&1 | tee .desktop-build/paired-package.log
+      - name: Verify actual complete GUI and Core signed archive
+        if: steps.scope.outputs.full_runtime == 'true'
+        timeout-minutes: 10
+        run: node .github/scripts/verify-complete-paired-release.mjs ".desktop-build/安装 候选/core" ".desktop-build/安装 候选/paired/offline" 2>&1 | tee .desktop-build/complete-paired-release.log
+      - name: Build independent offline installer host
+        if: steps.scope.outputs.full_runtime == 'true'
+        timeout-minutes: 20
+        run: node scripts/desktop/package-offline-installer.mjs --candidate=true --distribute=${{ runner.os != 'Linux' }} --native-bootstrap=.desktop-build/ubuntu-bootstrap "--paired=.desktop-build/安装 候选/paired" "--out=.desktop-build/安装 候选/installer" 2>&1 | tee .desktop-build/offline-installer.log
+      - name: Verify native installer backend and payload without business startup on Linux
+        if: runner.os == 'Linux' && steps.scope.outputs.full_runtime == 'true'
+        timeout-minutes: 6
+        run: xvfb-run -a node .github/scripts/verify-offline-installer-host.mjs ".desktop-build/安装 候选/installer" 2>&1 | tee .desktop-build/installer-host-probe.log
+      - name: Stage temporary Linux program payload for Ubuntu24 installation acceptance
+        if: runner.os == 'Linux' && steps.scope.outputs.full_runtime == 'true'
+        timeout-minutes: 8
+        run: |
+          node --input-type=module <<'NODE'
+          import { statfsSync } from 'node:fs'
+          import { execFileSync } from 'node:child_process'
+          const size = Number(execFileSync('du', ['--apparent-size', '-sk', '.desktop-build/安装 候选/installer/ubuntu-native'], { encoding: 'utf8' }).split(/\s+/)[0]) * 1024
+          const disk = statfsSync('.desktop-build')
+          if (!Number.isSafeInteger(size) || size <= 0 || disk.bavail * disk.bsize < size + 1024 ** 3) throw new Error('Insufficient CI space to transfer candidate safely')
+          NODE
+          tar -czf .desktop-build/ubuntu-native-candidate.tar.gz -C ".desktop-build/安装 候选/installer" ubuntu-native installer-location.json
+      - name: Transfer only the immutable candidate to the disposable Ubuntu24 test VM
+        if: runner.os == 'Linux' && steps.scope.outputs.full_runtime == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ubuntu-native-installation-candidate
+          path: .desktop-build/ubuntu-native-candidate.tar.gz
+          compression-level: 0
+          retention-days: 1
+      - name: Verify actual installer ASAR without business startup on macOS and Windows
+        if: runner.os != 'Linux' && steps.scope.outputs.full_runtime == 'true'
+        timeout-minutes: 6
+        run: node .github/scripts/verify-offline-installer-host.mjs ".desktop-build/安装 候选/installer" 2>&1 | tee .desktop-build/installer-host-probe.log
+      - name: Published legacy Ubuntu user archives through actual backend and ordinary Main
+        if: runner.os == 'Linux' && steps.scope.outputs.full_runtime == 'true'
+        timeout-minutes: 30
+        run: dbus-run-session -- xvfb-run -a node .github/scripts/verify-legacy-user-takeover.mjs ".desktop-build/安装 候选/paired" ".desktop-build/安装 候选/installer" 2>&1 | tee .desktop-build/legacy-user-stage.log
+      - name: Published legacy v2026.10.14.1 through actual installer and ordinary Main
+        if: runner.os != 'Linux' && steps.scope.outputs.full_runtime == 'true'
+        timeout-minutes: 30
+        run: node .github/scripts/verify-legacy-user-takeover.mjs ".desktop-build/安装 候选/paired" ".desktop-build/安装 候选/installer" v2026.10.14.1 2>&1 | tee .desktop-build/legacy-user-stage-v2026.10.14.1.log
+      - name: Published legacy v2026.10.15.1 through actual installer and ordinary Main
+        if: runner.os != 'Linux' && steps.scope.outputs.full_runtime == 'true'
+        timeout-minutes: 30
+        run: node .github/scripts/verify-legacy-user-takeover.mjs ".desktop-build/安装 候选/paired" ".desktop-build/安装 候选/installer" v2026.10.15.1 2>&1 | tee .desktop-build/legacy-user-stage-v2026.10.15.1.log
+      # One batch includes cold boot, warm reattach and retained-repair boot.
+      # Keep each product deadline unchanged; the Windows batch reached its third real ready state at 1200.7s.
+      - name: Boot actual offline-prepared pair on Linux
+        if: runner.os == 'Linux' && steps.scope.outputs.full_runtime == 'true'
+        timeout-minutes: 20
+        run: xvfb-run -a node .github/scripts/smoke-packaged-desktop.mjs ".desktop-build/安装 候选/paired" 2>&1 | tee .desktop-build/paired-boot.log
+      - name: Boot actual offline-prepared pair on macOS and Windows
+        if: runner.os != 'Linux' && steps.scope.outputs.full_runtime == 'true'
+        timeout-minutes: ${{ matrix.target == 'darwin-x64' && 35 || runner.os == 'Windows' && 25 || 20 }}
+        run: node .github/scripts/smoke-packaged-desktop.mjs ".desktop-build/安装 候选/paired" 2>&1 | tee .desktop-build/paired-boot.log
+      - name: Signed paired update reaches ordinary target GUI and Core health
+        if: steps.scope.outputs.full_runtime == 'true'
+        timeout-minutes: ${{ matrix.target == 'darwin-x64' && 60 || 35 }}
+        env:
+          CRABOT_PAIRED_ACCEPTANCE_ID: ${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.target }}
+        run: |
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            xvfb-run -a node .github/scripts/verify-paired-update-host.mjs ".desktop-build/安装 候选/paired" 2>&1 | tee .desktop-build/paired-update-host.log
+          else
+            node .github/scripts/verify-paired-update-host.mjs ".desktop-build/安装 候选/paired" 2>&1 | tee .desktop-build/paired-update-host.log
+          fi
+          node .github/scripts/check-paired-update-report.mjs .desktop-build/paired-update-host.json "$CRABOT_PAIRED_ACCEPTANCE_ID"
+      - name: Ordinary Main complete uninstall and retained reinstall
+        if: steps.scope.outputs.full_runtime == 'true'
+        timeout-minutes: ${{ runner.os == 'Windows' && 30 || 20 }}
+        run: |
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            dbus-run-session -- xvfb-run -a node .github/scripts/verify-uninstall-reinstall.mjs ".desktop-build/安装 候选/paired" 2>&1 | tee .desktop-build/uninstall-reinstall-stage.log
+          else
+            node .github/scripts/verify-uninstall-reinstall.mjs ".desktop-build/安装 候选/paired" 2>&1 | tee .desktop-build/uninstall-reinstall-stage.log
+          fi
+      - name: Ordinary CLI archive and actual upgrade command
+        if: steps.scope.outputs.full_runtime == 'true'
+        run: |
+          node scripts/desktop/archive-core.mjs --candidate=true "--core=.desktop-build/安装 候选/core" --out=.desktop-build/cli-archive 2>&1 | tee .desktop-build/cli-archive.log
+          node .github/scripts/smoke-cli-update.mjs ".desktop-build/安装 候选/core" ".desktop-build/安装 候选/core" .desktop-build/cli-archive/archive.json --cli-command 2>&1 | tee .desktop-build/cli-update.log
+      - name: Real systemd administrator and three-user batch control
+        if: runner.os == 'Linux' && steps.scope.outputs.full_runtime == 'true'
+        timeout-minutes: 15
+        run: sudo --preserve-env=GITHUB_ACTIONS "$GITHUB_WORKSPACE/.product-runtime/node/bin/node" .github/scripts/smoke-system-mode.mjs "$GITHUB_WORKSPACE/.desktop-build/安装 候选/core" "$GITHUB_WORKSPACE/.desktop-build/system-mode.json" "$GITHUB_WORKSPACE/.desktop-build/cli-archive/archive.json" 2>&1 | tee .desktop-build/system-mode.log
+      - name: Published legacy system archives through the ordinary installer
+        # Independent of GUI update/repair results, but never use an incomplete Core.
+        if: ${{ !cancelled() && runner.os == 'Linux' && steps.scope.outputs.full_runtime == 'true' && steps.common_candidate.outcome == 'success' }}
+        timeout-minutes: 20
+        run: sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,GITHUB_REPOSITORY,GITHUB_WORKSPACE "$GITHUB_WORKSPACE/.product-runtime/node/bin/node" .github/scripts/smoke-system-legacy.mjs "$GITHUB_WORKSPACE/.desktop-build/安装 候选/core" "$GITHUB_WORKSPACE/.desktop-build/system-legacy.json" 2>&1 | tee .desktop-build/system-legacy.log
+      - name: Legacy backup failure restores the original running set
+        if: ${{ !cancelled() && runner.os == 'Linux' && steps.scope.outputs.full_runtime == 'true' && steps.common_candidate.outcome == 'success' }}
+        timeout-minutes: 20
+        run: sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,GITHUB_REPOSITORY,GITHUB_WORKSPACE "$GITHUB_WORKSPACE/.product-runtime/node/bin/node" .github/scripts/smoke-system-legacy.mjs "$GITHUB_WORKSPACE/.desktop-build/安装 候选/core" "$GITHUB_WORKSPACE/.desktop-build/system-legacy-backup-failure.json" v2026.10.15.1 backup-failure 2>&1 | tee .desktop-build/system-legacy-backup-failure.log
+      - name: Whole Electron host with real core and CLI on Linux
+        timeout-minutes: 12
+        if: runner.os == 'Linux' && steps.scope.outputs.full_runtime == 'true'
+        working-directory: crabot-desktop
+        env:
+          CRABOT_FULL_CORE_TEST: '1'
+        run: xvfb-run -a node --test tests/full-host.test.mjs 2>&1 | tee ../.desktop-build/full-host.log
+      - name: Whole Electron host with real core and CLI on macOS and Windows
+        timeout-minutes: 12
+        if: runner.os != 'Linux' && steps.scope.outputs.full_runtime == 'true'
+        working-directory: crabot-desktop
+        env:
+          CRABOT_FULL_CORE_TEST: '1'
+        run: node --test tests/full-host.test.mjs 2>&1 | tee ../.desktop-build/full-host.log
+      - name: Observe installer volume occupancy after macOS failure
+        if: failure() && runner.os == 'macOS'
+        continue-on-error: true
+        run: node .github/scripts/observe-macos-dmg-failure.mjs
+      - name: Save runtime evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-runtime-${{ matrix.target }}-${{ matrix.suite }}
+          path: |
+            .desktop-build/*.log
+            .desktop-build/*.png
+            .desktop-build/paired-update-host.json
+            .desktop-build/uninstall-reinstall*.json
+            .desktop-build/dmg-failure.json
+            .desktop-build/fixture-diagnostics/paired-update-source.log
+            .desktop-build/complete-paired-release.json
+            .desktop-build/runtime-scope.json
+            .desktop-build/desktop-resources.json
+            .desktop-build/desktop-initialization-disk.json
+            .desktop-build/cli-update-disk.json
+            .desktop-build/system-mode.json
+            .desktop-build/system-legacy*.json
+            .desktop-build/legacy-user-takeover*.json
+            .desktop-build/legacy-user-diagnostic*.json
+            .desktop-build/platform-installers/installers.json
+            .desktop-build/cli-archive/archive.json
+            product-runtime.json
+          if-no-files-found: warn
+          include-hidden-files: true
+
+  ubuntu-installation:
+    name: Actual Ubuntu24 native installation
+    needs: runtime
+    if: ${{ always() && !cancelled() && (inputs.suite == '' || inputs.suite == 'all' || inputs.suite == 'product') && (inputs.target == '' || inputs.target == 'all' || inputs.target == 'linux-x64') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.3'
+      - name: Select full installation scope
+        id: scope
+        env:
+          CRABOT_CI_BASE: ${{ github.event.before || github.event.pull_request.base.sha }}
+        run: node .github/scripts/desktop-runtime-scope.mjs
+      - name: Load same-run Linux candidate
+        if: steps.scope.outputs.full_runtime == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: ubuntu-native-installation-candidate
+          path: .desktop-build
+      - name: Prepare isolated desktop test libraries
+        if: steps.scope.outputs.full_runtime == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libgtk-4-1 libjson-glib-1.0-0 libgtk-3-0t64 libnss3 libxss1 libasound2t64 libgbm1 xvfb xauth dbus-x11
+          mkdir -p .desktop-build/ubuntu-installation
+          tar -xzf .desktop-build/ubuntu-native-candidate.tar.gz -C .desktop-build/ubuntu-installation
+      - name: Exercise actual user backend, test authorization, GUI and MCP sandbox
+        if: steps.scope.outputs.full_runtime == 'true'
+        timeout-minutes: 14
+        run: |
+          ulimit -c 0
+          dbus-run-session -- xvfb-run -a node .github/scripts/accept-ubuntu-offline-installer.mjs .desktop-build/ubuntu-installation
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.scope.outputs.full_runtime == 'true'
+        with:
+          name: ubuntu-installation-report
+          path: .desktop-build/ubuntu-installation-report.json
+          if-no-files-found: ignore
+          retention-days: 3
