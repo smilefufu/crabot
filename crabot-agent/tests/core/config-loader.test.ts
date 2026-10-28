@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import type { RpcClient } from 'crabot-shared'
+import { RpcCallError, type RpcClient } from 'crabot-shared'
 import { ConfigLoader } from '../../src/core/config-loader.js'
 import type { UnifiedAgentConfig } from '../../src/types.js'
 
@@ -100,6 +100,29 @@ describe('ConfigLoader authenticated runtime wire', () => {
     expect(degraded.agent_config).toBeUndefined()
     expect(degraded.runtime_config_authenticated).toBe(false)
   })
+
+  it('Admin明确未配模型时立即返回受保护的配置，之后仍能接受认证配置', async () => {
+    const callSensitive = vi.fn().mockRejectedValue(new RpcCallError('ADMIN_CORE_AGENT_MODEL_NOT_CONFIGURED', 'Core Agent powerful model is not configured'))
+    const client = { callSensitive } as unknown as RpcClient
+    const degraded = await ConfigLoader.loadWithRetry(client, 'http://localhost:19002', { budgetMs: 40, initialDelayMs: 5, maxDelayMs: 5 })
+    expect(callSensitive).toHaveBeenCalledTimes(1)
+    expect(degraded.module_id).toBe('crabot-agent'); expect(degraded.agent_config).toBeUndefined()
+    expect(degraded.runtime_config_authenticated).toBe(false)
+    callSensitive.mockResolvedValue({ config_revision: 1, config: runtimeConfig() })
+    const configured = await ConfigLoader.load('', client, 'http://localhost:19002')
+    expect(configured.runtime_config_authenticated).toBe(true)
+    expect(configured.agent_config?.model_config).toHaveProperty('powerful')
+  })
+
+  for (const error of [new RpcCallError('UNAUTHORIZED', 'Core Agent powerful model is not configured'),
+    Object.assign(new Error('Core Agent powerful model is not configured'), { code: 'ADMIN_CORE_AGENT_MODEL_NOT_CONFIGURED' })]) {
+    it('相同文案的认证/普通异常仍按原预算重试，不伪造可用配置：' + error.name, async () => {
+      const callSensitive = vi.fn().mockRejectedValue(error), client = { callSensitive } as unknown as RpcClient
+      const degraded = await ConfigLoader.loadWithRetry(client, 'http://localhost:19002', { budgetMs: 40, initialDelayMs: 5, maxDelayMs: 5 })
+      expect(callSensitive.mock.calls.length).toBeGreaterThan(1)
+      expect(degraded.agent_config).toBeUndefined(); expect(degraded.runtime_config_authenticated).toBe(false)
+    })
+  }
 
   it('adminEndpoint 未配置属环境问题 → 降级启动，不空转重试', async () => {
     const { client, calls } = fakeRpcClient(0)

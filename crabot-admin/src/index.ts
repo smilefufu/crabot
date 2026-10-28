@@ -1,3 +1,4 @@
+import type { GetAgentModelConfigResult } from './types.js'
 import { resolveManagedMcpConfig } from './managed-mcp-runtime.js'
 import { WorkspaceService } from './workspaces.js'
 import { WorkspaceExecutionInventorySchema, WorkspaceIdSchema } from 'crabot-client'
@@ -1895,6 +1896,11 @@ export class AdminModule extends ModuleBase {
 
       if (pathname === '/api/model-config/global' && req.method === 'PATCH') {
         await this.handleUpdateGlobalConfigApi(req, res)
+        return
+      }
+
+      if (pathname === '/api/model-config/agents/crabot-agent' && req.method === 'GET') {
+        this.handleGetAgentModelConfigApi(res)
         return
       }
 
@@ -7345,6 +7351,19 @@ export class AdminModule extends ModuleBase {
     const config = this.modelProviderManager.getGlobalConfig()
     res.writeHead(200, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify({ config }))
+  }
+
+  /** §3.19.5：只读投影活跃容器，不复用会解析凭据/刷新 OAuth 的 runtime pull。 */
+  private handleGetAgentModelConfigApi(res: ServerResponse): void {
+    const stored = this.agentManager.getConfig('crabot-agent')
+    const allowed = new Set(CORE_AGENT_DEFINITION.model_roles.map(role => role.key))
+    const models = Object.fromEntries(Object.entries(stored?.model_config ?? {}).map(([key, ref]) => {
+      if (!allowed.has(key) || typeof ref.provider_id !== 'string' || typeof ref.model_id !== 'string') throw new Error('Core model reference is invalid')
+      return [key, { provider_id: ref.provider_id, model_id: ref.model_id }]
+    }))
+    const result: GetAgentModelConfigResult = { config: stored ? { agent_id: 'crabot-agent', models,
+      ...(stored.thinking ? { thinking: stored.thinking } : {}) } : null }
+    sendJson(res, 200, result)
   }
 
   private async handleUpdateGlobalConfigApi(req: IncomingMessage, res: ServerResponse): Promise<void> {
