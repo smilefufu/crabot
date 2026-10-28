@@ -1,5 +1,12 @@
 # Crabot 项目进度
 
+### 渠道实例名大写误拒绝：bug 修复完成，未部署
+
+- 允许 `AI客服bot` 等大小写 ASCII 混合名称，保留输入；创建、OpenClaw 导入和 MM 动态注册按 NFC 后的小写比较键查重，不新增大小写别名解析。
+- 原生备份完全同 id 沿用 skip/overwrite；仅大小写不同的 id 在 skip 时跳过、overwrite 时拒绝且不写实例/配置，避免隐式改名破坏引用。存量数据不迁移，其余字符/长度限制不变。正式命名协议、MM 冲突说明和旧设计记录已同步修订。
+- Follow-up：新大写实例跨实例迁移时，若其渠道记录因大小写冲突被 skip，同一备份中的关联好友/会话引用仍按原 id 导入；当前不增加别名或自动合并身份，关联导入的依赖检查另行处理。
+- 旧实现先复现 14 项失败；修复后 Shared 7、Admin 152、Core 61、Web 21 项相关回归共 241 项通过，Shared 构建、Admin/Core 类型检查和 Web 生产构建通过。完整 diff 已复核；按用户要求走 PR，未重启或部署运行实例，未执行真实飞书授权。
+
 ### Slack Channel 首版：实现完成，待 PR 审查和真实 workspace 验收
 
 - 依照已确认 [spec](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/specs/2026-10-27-native-slack-channel-design.md) 及 Channel 0.1.6 协议：新增 Socket Mode 原生渠道，支持 DM/公开群/私有群、默认 true 且可热更新并持久化的 @过滤；thread 仅保存关系，普通发送到原会话主界面。

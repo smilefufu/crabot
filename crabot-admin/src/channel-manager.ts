@@ -186,6 +186,11 @@ export class ChannelManager {
     return this.instances.get(id)
   }
 
+  private findInstanceIdConflict(id: string): ChannelInstance | undefined {
+    const key = id.normalize('NFC').toLowerCase()
+    return Array.from(this.instances.values()).find(instance => instance.id.normalize('NFC').toLowerCase() === key)
+  }
+
   async createInstance(params: CreateChannelInstanceParams): Promise<ChannelInstance> {
     if ('voice_setup' in params) throw new Error('voice_setup 只能由语音向导维护')
     const impl = this.implementations.get(params.implementation_id)
@@ -199,7 +204,7 @@ export class ChannelManager {
       throw new Error(`Invalid instance name: ${validated.reason}`)
     }
     const instanceId = validated.id
-    if (this.instances.has(instanceId)) {
+    if (this.findInstanceIdConflict(instanceId)) {
       throw new Error(`Instance name already exists: ${params.name}`)
     }
 
@@ -694,8 +699,13 @@ export class ChannelManager {
     // 备份可能来自 macOS（NFD 文件名），归一化后再匹配，防跨平台 id 对不上号
     const id = instance.id.normalize('NFC')
     const normalized: ChannelInstance = { ...instance, id, name: instance.name.normalize('NFC') }
-    const exists = this.instances.has(id)
-    if (exists && onConflict === 'skip') return 'skipped'
+    const conflict = this.findInstanceIdConflict(id)
+    if (conflict && onConflict === 'skip') return 'skipped'
+    // 导入必须保留 id；仅大小写不同不能当成覆盖，否则会留下断开的会话/好友引用。
+    if (conflict && conflict.id !== id) {
+      throw new Error(`Instance name already exists: ${instance.id} (${conflict.id})`)
+    }
+    const exists = conflict !== undefined
     this.instances.set(id, normalized)
     await this.saveInstances()
     if (config !== null) {
