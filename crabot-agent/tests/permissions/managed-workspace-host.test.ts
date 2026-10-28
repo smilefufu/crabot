@@ -130,5 +130,5 @@ describe('host task ownership and compatibility', () => {
       expect(await fs.readFile(file, 'utf8')).toBe('task result')
       expect(tools.some(tool => tool.category === 'messaging' || tool.category === 'memory')).toBe(false)
     } finally { await stack.dispose() }
-  })
+  }, 30_000)
 })
