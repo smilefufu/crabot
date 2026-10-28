@@ -92,7 +92,8 @@ export async function ensureCli(dataDir: string, signal: AbortSignal): Promise<s
     if (createHash('sha256').update(bytes).digest('hex') !== asset.sha256) throw new Error('Slack CLI 官方载荷校验失败，已拒绝执行')
     const archive = path.join(stage, asset.file)
     await fs.writeFile(archive, bytes, { flag: 'wx', mode: 0o600 })
-    await execute('tar', ['-xf', archive, '-C', stage], { signal, windowsHide: true })
+    const tar = process.platform === 'win32' ? path.join(process.env.SystemRoot || process.env.SYSTEMROOT!, 'System32', 'tar.exe') : 'tar'
+    await execute(tar, ['-xf', archive, '-C', stage], { signal, windowsHide: true })
     const binary = path.join(stage, 'bin', process.platform === 'win32' ? 'slack.exe' : 'slack')
     const digest = createHash('sha256').update(await fs.readFile(binary)).digest('hex')
     if (process.platform !== 'win32') await fs.chmod(binary, 0o700)
