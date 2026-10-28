@@ -22,6 +22,8 @@ jobs:
           pnpm --dir crabot-shared run build
           pnpm --dir crabot-admin install --frozen-lockfile --ignore-scripts
           pnpm --dir crabot-agent install --frozen-lockfile --ignore-scripts
+          pnpm install --frozen-lockfile --ignore-scripts
+          node scripts/build-native.mjs
       - name: Probe real built-in template, admission and guarded project reads on both drives
         working-directory: crabot-admin
         run: node node_modules/vitest/vitest.mjs run src/permission-template-host-scope.test.ts --maxWorkers=1 --minWorkers=1
