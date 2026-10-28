@@ -42,6 +42,18 @@ it('custom explicit directory restrictions and new ordinary templates retain the
   expect(manager.resolvePermissions('group_default', null)?.storage).toBeNull()
 })
 
+it('startup refreshes the old built-in cache without changing custom directory restrictions', () => {
+  const manager = new PermissionTemplateManager(); manager.initSystemTemplates()
+  const previous = manager.toArray().map(template => template.id === 'master_private'
+    ? { ...template, storage: { workspace_path: '/', access: 'readwrite' as const } }
+    : template)
+  const { task, browser, remote_exec, ...tool_access } = createToolAccessConfig(false)
+  const custom = manager.create({ name: 'private project', tool_access, storage: { workspace_path: 'C:\\project', access: 'read' } })
+  manager.loadFromArray([...previous, custom]); manager.initSystemTemplates()
+  expect(manager.resolvePermissions('master_private', null)?.storage).toEqual({ scope: 'all', access: 'readwrite' })
+  expect(manager.get(custom.id)).toEqual(custom)
+})
+
 it.skipIf(process.platform !== 'win32')('the already supported explicit all scope reads the same two native Windows drives', async () => {
   const home = await fs.mkdtemp(path.join(os.homedir(), 'crabot-master-all-control-')); roots.push(home)
   const repository = await fs.mkdtemp(path.join(process.cwd(), '.master-all-control-')); roots.push(repository)
