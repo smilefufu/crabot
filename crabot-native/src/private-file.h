@@ -103,12 +103,16 @@ static napi_value IsPrivatePath(napi_env env, napi_callback_info info, bool dire
     if (!GetFileInformationByHandle(file, &fileInfo) || (fileInfo.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)
       || !!(fileInfo.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != directory
       || GetSecurityInfo(file, SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION
-        | (existingData ? GROUP_SECURITY_INFORMATION : 0), &owner, &group, &acl, nullptr, &descriptor) != ERROR_SUCCESS) throw std::runtime_error("Cannot inspect private file ACL");
+        | ((!requirePrivate || existingData) ? GROUP_SECURITY_INFORMATION : 0), &owner, &group, &acl, nullptr, &descriptor) != ERROR_SUCCESS) throw std::runtime_error("Cannot inspect private file ACL");
     auto sid = PrivateFileCurrentOwner();
     if (!ConvertStringSidToSidA(sid.c_str(), &current)) throw std::runtime_error("Cannot inspect current user SID");
     SECURITY_DESCRIPTOR_CONTROL control; DWORD revision; void* raw = nullptr;
     bool valid = owner && EqualSid(owner, current);
-    if (valid && existingData) valid = ExistingDataAccess(descriptor, acl, current);
+    // Elevated Windows may give ordinary user paths Administrators ownership.
+    // Existing-path observation accepts that only with full current access and no ordinary other writers.
+    if (!valid && !requirePrivate && owner && IsWellKnownSid(owner, WinBuiltinAdministratorsSid))
+      valid = ExistingDataAccess(descriptor, acl, current);
+    else if (valid && existingData) valid = ExistingDataAccess(descriptor, acl, current);
     if (valid && requirePrivate) valid = acl && GetSecurityDescriptorControl(descriptor, &control, &revision)
       && (!requireProtected || (control & SE_DACL_PROTECTED)) && acl->AceCount == 1 && GetAce(acl, 0, &raw);
     if (valid && requirePrivate) {
