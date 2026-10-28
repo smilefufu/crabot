@@ -6,6 +6,23 @@
 - 补充 Admin 内置发现/配置保存、dev、源码升级和 macOS/Linux/Windows 发布安装清单；沿用原 Session、身份鉴权与 Agent 普通消息入口，不改飞书或 Agent 工具契约。
 - 已完成 fake Slack 边界、真实本地 HTTP RPC 配置重启与空发布目录安装验证；详细步骤见[实施计划](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/plans/2026-10-28-native-slack-channel-implementation.md)。未使用真实 Token、调用模型或部署；Token 配对、权限、Agent 实际消费及 Slack 实际投递仍须 workspace 联调。
 
+### 飞书历史回填错误提示：局部修复完成，未部署
+
+- 历史列表和单条读取遇到 SDK HTTP 错误时，提示保留飞书业务 code、原始 msg 和可用的 log_id；明确权限错误补充应用身份、消息读取及群消息权限检查。无飞书错误体的网络异常保持原样，不改 RPC 错误码、回填分页或权限判定。
+- 旧实现先复现 4 项失败；修复后飞书全量 285 项、群工作台 Web 4 项及飞书构建通过。覆盖 SDK → 回填 → RPC 序列化和真实 API 客户端 → 页面通知，验证失败不写消息、可再次重试且认证请求头不进入错误回包。私有部署具体根因仍需其业务错误码核对，尚未部署。
+
+### Channel 停止误报与删除失败丢配置：局部修复完成，未部署
+
+- 停止接口仍返回 running/starting/stopping 时，页面提示正在等待退出；只有 stopped 才报停止成功，error/unknown 不报成功。渠道列表每 2 秒刷新实际状态，停止完成后自动显示删除入口；不覆盖配置编辑内容，离开页面清理轮询。
+- 删除沿用 MM 的先停止、后注销流程；停止/注销失败时返回错误并保留实例和配置。仅 MM 明确返回定义 NOT_FOUND 时允许清理遗留配置，避免吞错后留下仍运行但无配置的渠道。不改 MM 生命周期、停止超时或持久化格式。
+- 旧实现先复现 3 项失败；修复后 Admin 33 项、Web 全量 372 项通过（共 405 项），Admin 类型检查、Web 类型检查及生产构建通过。页面回归覆盖等待真实停止、出现删除入口和删除后移除列表项；未操作真实渠道、未部署，现场具体实例现象仍待用户补充核对。
+
+### WorkBuddy 端到端校准：1/3有效完成，Provider缺usage后停止
+
+- 已按确认spec尝试Code/Web/Office三题及获批的一次Web恢复，总额度120M；Code原始100分并交付，Web/Office因Provider及评测边界错误中断。上游原始运行分33.33不能视为能力总分。
+- 已知399,210 token（Manager264,354、Worker134,856），另2次未知；未继续收费或扩量。首次未知单独预留10M，保留所有失败与Code成果。
+- 5项预算回归及真实生产链路脚本回放通过，get_message评测遗漏已修复并回归；真实Web/Office模型裁判未验收。详见 `crabot-agent/eval/workbuddy/RESULTS.md`；后续先解决Provider稳定性与usage账目。
+
 ### LLM 连接恢复通知降噪：局部修复完成，未部署
 
 - 本次 LLM 调用前 30 秒仅自动重试，之后在下一次连接失败时简短提示“模型连接暂时不稳定，正在自动重试。”；保留 5 分钟通知冷却。Admin trace 与日志继续记录每次错误详情，最终失败告知不受静默门槛或恢复提示冷却影响。
