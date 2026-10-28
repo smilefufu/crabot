@@ -39,12 +39,6 @@ try {
   if (process.platform === 'win32' && executable && !job) {
     // Diagnostic-only I/O profiles; the original failed probe still fails this job.
     const options = { cwd: root, env: cliEnvironment(), timeout: 15000, windowsHide: true, encoding: 'utf8' }
-    for (const [label, stdio] of [['stdin-pipe', ['pipe', 'pipe', 'pipe']], ['overlapped-output', ['ignore', 'overlapped', 'overlapped']]]) {
-      try {
-        const output = execFileSync(executable, ['--version'], { ...options, stdio })
-        console.log(`Slack CLI startup diagnostic: ${label} pinned-version=${output.includes('4.11.0')}`)
-      } catch { console.log(`Slack CLI startup diagnostic: ${label} failed`) }
-    }
     const handles = []
     try {
       handles.push(await fs.open(path.join(root, 'version.stdout'), 'wx', 0o600))
