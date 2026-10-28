@@ -11,6 +11,7 @@
 
 - 依据已确认 [spec](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/specs/2026-10-28-slack-local-cli-onboarding-design.md) 和已发布正式协议，增加 Admin 的本地 CLI 自动建 App/凭据交接、一次性验证码输入、显式 Friend 身份关联；不自动认主，不改消息/群权限/thread 规则。
 - 官方 CLI 4.11.0 四发布目标载荷均实际下载并与独立 SHA-256 核对；运行期不依赖 CLI，授权进程、私有材料与失败重试按会话收口。进度和验收边界见[实施计划](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/plans/2026-10-28-slack-local-cli-onboarding-implementation.md)。不部署或调用付费模型。
+- 按已确认的 [CI 拆分设计](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/specs/2026-10-28-slack-ci-separation-design.md)，Slack 四平台原生 hooks/回归与完整发行验收分开；保留原 Release 触发和自动合并门禁。CLI 冒烟增加阶段日志及 5 分钟命令预算，最新四平台结果以 PR 检查为准。
 
 ### Slack Channel 首版：实现及四平台发布验证完成
 

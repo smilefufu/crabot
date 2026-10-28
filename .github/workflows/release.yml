@@ -23,13 +23,6 @@ on:
       - 'scripts/lib/run-bounded.mjs'
       - 'scripts/lib/__tests__/install-network.test.mjs'
       - 'crabot-core/src/core-modules*'
-      - 'crabot-channel-slack/**'
-      - '.github/scripts/smoke-slack-onboarding.mjs'
-      - 'crabot-shared/src/onboarder.ts'
-      - 'crabot-admin/src/*onboard*'
-      - 'crabot-admin/src/channel-manager.ts'
-      - 'crabot-admin/web/src/pages/Channels/*Onboarding*'
-      - 'crabot-admin/web/src/services/channel.ts'
       - '.github/scripts/*domestic*'
       - '.github/scripts/test-uv-product-config.py'
       - 'scripts/lib/__tests__/*install*.mjs'
@@ -162,14 +155,6 @@ jobs:
 
           # admin: 后端 build → 前端 build:web（顺序执行，build:web 会进入 web/ 子项目自己 install）
           (cd crabot-admin && pnpm run build && pnpm run build:web)
-
-      - name: Slack local onboarding regressions
-        shell: bash
-        run: |
-          node .github/scripts/smoke-slack-onboarding.mjs
-          pnpm --dir crabot-channel-slack test
-          pnpm --dir crabot-admin exec vitest run src/slack-onboarding-http.test.ts src/slack-onboarding-sessions.test.ts src/channel-manager.slack.test.ts src/onboard-finish-response.test.ts src/onboarding-master.test.ts --maxWorkers=2 --minWorkers=1
-          pnpm --dir crabot-admin/web exec vitest run src/pages/Channels/SlackLocalOnboarding.test.tsx --maxWorkers=2 --minWorkers=1
 
       - name: Prepare portable Scrapling runtime
         shell: bash
