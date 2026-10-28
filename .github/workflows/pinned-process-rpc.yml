@@ -1,0 +1,36 @@
+name: Pinned process RPC and role adapters
+on:
+  workflow_dispatch:
+  push:
+    branches: ['feat/desktop-pinned-process-rpc']
+  pull_request:
+    paths:
+      - 'scripts/lib/pinned-process-rpc.cjs'
+      - 'scripts/lib/legacy-mm-rpc.mjs'
+      - 'scripts/lib/module-*-rpc.cjs'
+      - 'scripts/lib/__tests__/legacy-mm-rpc.test.mjs'
+      - 'scripts/lib/__tests__/module-*-rpc.test.mjs'
+      - '.github/workflows/pinned-process-rpc.yml'
+permissions:
+  contents: read
+jobs:
+  rpc:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, macos-15-intel, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.3'
+      - name: Build this checkout's actual Native dependency
+        run: node scripts/build-native.mjs
+      - name: Verify actual bounded connections and finite child carriers
+        run: >-
+          node --test --test-concurrency=1
+          scripts/lib/__tests__/legacy-mm-rpc.test.mjs
+          scripts/lib/__tests__/module-shutdown-rpc.test.mjs
+          scripts/lib/__tests__/module-carrier-rpc.test.mjs
