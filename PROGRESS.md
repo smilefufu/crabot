@@ -62,14 +62,12 @@
 
 ### 桌面化方案：冻结范围收口，未进入 PR
 
-- 按已确认 Electron/React、共享 HTTP/WS SDK、统一内置运行时及依赖隔离、GUI/CLI 共用实例、项目 workspace 和 system 批量管理实施；不增加需求。中断迁移恢复 b625 的服务40566583813、文件40566589606四平台全过，含实际HTTP/SDK、提交前恢复/提交后收尾、冷重启和隔离业务onStart，零模型调用。
-- 最终产品源码9b83（后续仅CI/测试调整）：40592820219中Ubuntu与ARM完整产品组、两平台基础组成功；公开旧user14/15、成对更新、完整卸载/保留数据重装均覆盖，Ubuntu另含真实systemd三用户批量和旧system转换。Intel旧user14/15均通过，离线启动/修复组合步骤触及CI总预算，40609463707单平台续验；Windows已通过原普通启动、成对更新及完整卸载，20分钟组合步骤在重装普通Main阶段被CI取消，待新的限定轮。不能把历史daf08/587成功当作最新全组通过。
-- GUI40594510892四平台全部成功。Windows/ARM原生对话框输入为替代，Ubuntu sudo替代Polkit；最低OS、Wayland/IME、真实登录、真实模型与正式签名未冒充完成。xinshu-mirror已选，付费预算未确认，无新增模型请求或现场业务启动。
-- 原CORS漏PUT及新Admin首版标记/空权限数组已修并定向验证。Windows与Intel大汇总测试仅触及CI步骤时限，按已有测试组拆分、不改产品/单用例期限。另Intel前向恢复显式重试有一条60秒个案超时，当前仅加阶段观察；本机Node22相同有限用例19.79秒通过，不据此排除CI问题。
-- 独立审查候选的Native、SDK、Runtime、Workspace基础及MCP/实例/peer/权限/Admin传输各自已有四平台通过证据。项目工作区候选f150fdd2：Linux/两Mac已通过，Windows三处旧POSIX所有者断言经实际ACL探针确认误判，改验私有父目录与真实访问规则；73过44平台跳过，新的四平台CI继续。
-- 新拆分只读迁移基础60cafd59/40602535235、文件操作e60a3234/40603676627、精确子进程停止f28cd16a/40603996408、生命周期契约5fec57bf/40608293375均四平台全过；Web共享传输5dbb9fcb/40609451716独立构建与全量Web测试四平台全过。均从自身源码和依赖构建，不借feature dist；具体依赖次序记录在验收文档。
-- 继续：剩余Core/安装升级/迁移及桌面UI按可独立review边界整理，修复真实回归后完成最新完整矩阵和最终Code Review，之后才建依赖PR，不直推产品main。完整证据与限制见[验收记录](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/plans/2026-10-17-desktop-application-validation.md)。
-- 资源：空闲约338GiB；40GiB启动/30GiB停止保护与材料20GiB上限保持，不在本机重复下载/构建完整运行时，不动Docker/Spotlight或现场服务。
+- 按已确认桌面/CLI共用实例、内置环境隔离、项目workspace、在线迁移及system批量管理推进，不加需求。中断恢复b625服务40566583813/文件40566589606四平台全过，含实际HTTP/SDK、冷重启和隔离业务onStart，零模型调用。
+- 旧运行代码9b83：Ubuntu/ARM完整产品和基础组40592820219成功；Windows完整产品40610721428、基础40610706271及Intel基础40610713386均成功。覆盖旧user14/15、配对更新、完整卸载和保留数据重装，Ubuntu另含真实systemd三用户及旧system转换。Intel产品40609463707仍验，不记全组完成。
+- Windows普通旧目录owner误判已按原兼容目标修复：仅实际可管理且无普通其他写者的Administrators所有目录认可；不改ACL，私有控制保持严格。Native3e8d1ade/40620287390与旧兼容6ebfb546/40620500097四平台全过。当前产品运行代码a7bbea0a，c7d80634仅补父子token回归；最终完整四平台40622296346进行中。
+- 独立候选1–21均有自身四平台证据，新增Core运行时、普通生命周期、受管MCP原表单、首次模型后端、固定连接策略已全部通过，项目f150亦已全绿；producer parity已恢复。启动互斥7f5c9bc9本机34项过/2仅CI，两Mac待；system基础d19377a4本机26过、CI继续。剩余完整驱动/UI/安装维护按真实依赖拆审，不能以占位代码或别处分支dist证明独立。
+- GUI40594510892四平台过；最低OS、真实Polkit/Wayland/IME/登录、真实模型与正式签名未冒充完成。mirror-xinshu已选，付费预算仍未确认，无新增付费调用。Intel单例恢复重试在原60秒期限复验通过，早前超时根因未定。
+- 继续完整测试与最终Code Review后再建依赖PR，不直推main、不自行merge。[完整证据](https://github.com/smilefufu/crabot-docs/blob/main/superpowers/plans/2026-10-17-desktop-application-validation.md)。磁盘约331GiB空余，40/30GiB保护与材料20GiB上限保持，无重复完整构建、Docker/Spotlight或现场服务变更。
 
 ### 任务默认目录文件授权：独立修复待审查
 
