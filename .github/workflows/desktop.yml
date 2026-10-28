@@ -84,6 +84,10 @@ on:
         type: choice
         default: all
         options: [all, regression, gui, product]
+      retain_windows_installer:
+        description: 'Keep the unsigned offline candidate for authorized Windows11 manual acceptance'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -430,6 +434,23 @@ jobs:
         if: runner.os != 'Linux' && steps.scope.outputs.full_runtime == 'true'
         timeout-minutes: 6
         run: node .github/scripts/verify-offline-installer-host.mjs ".desktop-build/安装 候选/installer" 2>&1 | tee .desktop-build/installer-host-probe.log
+      - name: Hash Windows manual acceptance installer
+        if: runner.os == 'Windows' && steps.scope.outputs.full_runtime == 'true' && inputs.retain_windows_installer == true
+        run: |
+          cd ".desktop-build/安装 候选/installer/distribution"
+          sha256sum *offline-candidate.exe > SHA256SUMS
+      - name: Retain Windows offline installer for manual acceptance
+        if: runner.os == 'Windows' && steps.scope.outputs.full_runtime == 'true' && inputs.retain_windows_installer == true
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows11-offline-candidate-${{ github.sha }}
+          path: |
+            .desktop-build/安装 候选/installer/distribution/*offline-candidate.exe
+            .desktop-build/安装 候选/installer/distribution/artifacts.json
+            .desktop-build/安装 候选/installer/distribution/SHA256SUMS
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
       - name: Published legacy Ubuntu user archives through actual backend and ordinary Main
         if: runner.os == 'Linux' && steps.scope.outputs.full_runtime == 'true'
         timeout-minutes: 30
