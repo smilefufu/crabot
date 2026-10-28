@@ -30,3 +30,18 @@ test('unknown usage reserve reduces admission without fabricating measured token
   assert.throws(() => b.begin('b'))
   for (const reserve of [NaN, Infinity, -1, 120_000_000]) assert.throws(() => new Budget(120_000_000, 0, reserve))
 })
+
+test('unknown attempts retain a separate reserve while allowing native retries', () => {
+  const b = new Budget(120_000_000, 417627, 20_000_000)
+  b.begin('failed'); assert.equal(b.reserveUnknown('failed'), 10_000_000)
+  assert.equal(b.used, 417627); assert.equal(b.reserved, 30_000_000)
+  b.begin('retry'); b.finish('retry', {prompt_tokens: 20, completion_tokens: 3})
+  assert.equal(b.used, 417650)
+  assert.throws(() => b.reserveUnknown('failed'))
+})
+test('unknown reservations eventually close admission within the shared envelope', () => {
+  const b = new Budget(120_000_000, 100_000_000)
+  b.begin('one'); b.reserveUnknown('one'); b.begin('two'); b.reserveUnknown('two')
+  assert.equal(b.reserved, 20_000_000); assert.equal(b.used, 100_000_000)
+  assert.throws(() => b.begin('three'))
+})
