@@ -1,5 +1,11 @@
 # Crabot 项目进度
 
+### WorkBuddy 端到端校准：1/3有效完成，Provider缺usage后停止
+
+- 已按确认spec尝试Code/Web/Office三题及获批的一次Web恢复，总额度120M；Code原始100分并交付，Web/Office因Provider及评测边界错误中断。上游原始运行分33.33不能视为能力总分。
+- 已知399,210 token（Manager264,354、Worker134,856），另2次未知；未继续收费或扩量。首次未知单独预留10M，保留所有失败与Code成果。
+- 5项预算回归及真实生产链路脚本回放通过，get_message评测遗漏已修复并回归；真实Web/Office模型裁判未验收。详见 `crabot-agent/eval/workbuddy/RESULTS.md`；后续先解决Provider稳定性与usage账目。
+
 ### LLM 连接恢复通知降噪：局部修复完成，未部署
 
 - 本次 LLM 调用前 30 秒仅自动重试，之后在下一次连接失败时简短提示“模型连接暂时不稳定，正在自动重试。”；保留 5 分钟通知冷却。Admin trace 与日志继续记录每次错误详情，最终失败告知不受静默门槛或恢复提示冷却影响。
