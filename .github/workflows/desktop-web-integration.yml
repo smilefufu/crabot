@@ -34,6 +34,7 @@ jobs:
           pnpm --dir crabot-shared install --frozen-lockfile --ignore-scripts
           pnpm --dir crabot-shared run build
           pnpm install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-admin install --frozen-lockfile --ignore-scripts
           pnpm --dir crabot-admin/web install --frozen-lockfile --ignore-scripts
           pnpm --dir crabot-admin/web run build
       - name: Verify the complete existing Web suite with desktop and workspace flows
