@@ -27,6 +27,9 @@ jobs:
         with:
           version: '0.13.0'
           python-version: '3.13'
+          enable-cache: false
+      - name: Prepare the exact finite fixture interpreter before offline tests
+        run: uv python install 3.13
       - name: Build this checkout's SDK, Shared, Core and Native
         shell: bash
         run: |
