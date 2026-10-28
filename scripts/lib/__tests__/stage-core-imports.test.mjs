@@ -21,3 +21,21 @@ test('Core staging bootstrap does not load the native binary it still needs to b
   const { stdout } = await promisify(execFile)(process.execPath, ['--input-type=module', '-e', code], { timeout: 10_000 })
   assert.deepEqual(JSON.parse(stdout), { native_loaded: false })
 })
+
+
+test('sealed Core retains every channel advertised by the current Admin', async () => {
+  const strings = async (file, name) => {
+    const source = ts.createSourceFile(file.pathname, await fs.readFile(file, 'utf8'), ts.ScriptTarget.Latest, true)
+    for (const statement of source.statements) {
+      if (!ts.isVariableStatement(statement)) continue
+      for (const declaration of statement.declarationList.declarations) {
+        if (declaration.name.getText(source) === name && ts.isArrayLiteralExpression(declaration.initializer))
+          return declaration.initializer.elements.map(value => value.text)
+      }
+    }
+    assert.fail('Missing module inventory: ' + name)
+  }
+  const advertised = await strings(new URL('../../../crabot-admin/src/channel-manager.ts', import.meta.url), 'BUILTIN_MODULE_PATHS')
+  const packaged = await strings(new URL('../../desktop/stage-core.mjs', import.meta.url), 'modules')
+  for (const module of advertised) assert.ok(packaged.includes(module.replace('../', '')), 'Missing built-in channel in sealed Core: ' + module)
+})
