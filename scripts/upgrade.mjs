@@ -9,6 +9,7 @@ import { resolveCliDataDir } from './lib/instance.mjs'
 import { acquireCliLock, releaseCliLock } from './lib/cli-lock.mjs'
 import { runScript } from './upgrade-lib/runner.mjs'
 import { runMigrations } from './upgrade-lib/migrate.mjs'
+import { locateCliInstallation } from './lib/cli-installation.mjs'
 import { assertStopped } from './upgrade-lib/scoped-data.mjs'
 import { prepareUpgrade, installPreparedUpgrade } from './upgrade-lib/prepared-upgrade.mjs'
 import { preflightRestart } from './upgrade-lib/preflight.mjs'
@@ -25,6 +26,11 @@ async function confirm() {
 }
 async function main() {
   if (detectInstallScope('/etc/crabot') === 'system' && process.getuid?.() !== 0) throw new Error('System install: ask the administrator to run sudo crabot upgrade')
+  if (locateCliInstallation(CRABOT_HOME)?.scope === 'system') {
+    const { runSystemUpgradeCli } = await import('./lib/system-upgrade-cli.mjs')
+    process.exitCode = await runSystemUpgradeCli({ root: CRABOT_HOME, yes: assumeYes, logger: console })
+    return
+  }
   const mode = detectMode(CRABOT_HOME)
   if (!await confirm()) return
   const version = mode === 'release' ? (await getLatestVersion()).tag : undefined

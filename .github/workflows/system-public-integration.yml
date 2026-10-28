@@ -1,0 +1,48 @@
+name: System administrator public integration
+on:
+  workflow_dispatch:
+  push:
+    branches: ['feat/desktop-system-public-integration']
+  pull_request:
+    paths:
+      - 'cli.mjs'
+      - 'scripts/system*.mjs'
+      - 'scripts/*system-user-helper.mjs'
+      - 'scripts/lib/*system*.mjs'
+      - 'scripts/upgrade-lib/scoped-preparation.mjs'
+      - '.github/workflows/system-public-integration.yml'
+permissions:
+  contents: read
+jobs:
+  system:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, macos-15-intel, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.3'
+      - name: Build only this checkout's actual modules and Native
+        run: |
+          pnpm --dir crabot-client install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-client run build
+          pnpm --dir crabot-shared install --frozen-lockfile --ignore-scripts
+          pnpm --dir crabot-shared run build
+          pnpm install --frozen-lockfile --ignore-scripts
+          pnpm run build:cli
+          pnpm --dir scripts/lib install --frozen-lockfile --ignore-scripts
+          for module in crabot-core crabot-agent crabot-admin; do
+            pnpm --dir "$module" install --frozen-lockfile --ignore-scripts
+            pnpm --dir "$module" run build
+          done
+          node scripts/build-native.mjs
+      - name: Verify original batch, UID, upgrade, conversion and recovery semantics
+        run: node --test --test-concurrency=1 scripts/lib/__tests__/*system*.test.mjs
