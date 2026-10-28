@@ -73,6 +73,49 @@ describe('FeishuClient raw card reads', () => {
     await expect(c.listMessages({ container_id_type: 'chat', container_id: 'oc_x' })).rejects.toMatchObject({ code: 'PERMISSION_DENIED' })
   })
 
+  it.each(['list', 'get'])('preserves Feishu diagnostics when message.%s rejects HTTP 400', async (method) => {
+    const c = makeClient()
+    const sdk = (c as any).client
+    const sdkError = Object.assign(new Error('Request failed with status code 400'), {
+      response: { status: 400, data: {
+        code: 99991672,
+        msg: 'Access denied. Required scope: im:message.group_msg',
+        error: { log_id: 'feishu-history-log' },
+      } },
+      config: { headers: { Authorization: 'Bearer secret-marker' } },
+    })
+    sdk.im.message[method].mockRejectedValue(sdkError)
+    const result = method === 'list' ? c.listMessages({ container_id_type: 'chat', container_id: 'oc_x' }) : c.getMessage('om_x')
+    const error = await result.catch((err) => err)
+    expect(error.message).toContain('99991672')
+    expect(error.message).toContain('Access denied. Required scope: im:message.group_msg')
+    expect(error.message).toContain('log_id=feishu-history-log')
+    expect(error.message).toContain('应用身份')
+    expect(error.message).toContain('im:message:readonly')
+    expect(error.message).not.toContain('secret-marker')
+    expect(error.cause).toBe(sdkError)
+  })
+
+  it('preserves parameter errors without labelling them as missing permissions', async () => {
+    const c = makeClient()
+    ;(c as any).client.im.message.list.mockRejectedValue(Object.assign(new Error('Request failed with status code 400'), {
+      response: { status: 400, data: { code: 230001, msg: 'invalid container_id', log_id: 'parameter-log' } },
+    }))
+    const error = await c.listMessages({ container_id_type: 'chat', container_id: 'oc_x' }).catch((err) => err)
+    expect(error.message).toContain('230001')
+    expect(error.message).toContain('invalid container_id')
+    expect(error.message).toContain('log_id=parameter-log')
+    expect(error.message).not.toContain('应用身份')
+  })
+
+  it.each(['list', 'get'])('keeps network errors from message.%s unchanged', async (method) => {
+    const c = makeClient()
+    const networkError = new Error('socket reset')
+    ;(c as any).client.im.message[method].mockRejectedValue(networkError)
+    const result = method === 'list' ? c.listMessages({ container_id_type: 'chat', container_id: 'oc_x' }) : c.getMessage('om_x')
+    await expect(result).rejects.toBe(networkError)
+  })
+
   it('requests original card JSON for get and list while retaining pagination', async () => {
     const c = makeClient()
     const sdk = (c as any).client
