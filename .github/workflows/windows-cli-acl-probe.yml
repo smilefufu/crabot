@@ -1,0 +1,21 @@
+name: Temporary Windows CLI ACL facts
+on:
+  workflow_dispatch:
+  push:
+    branches: ['ci/desktop-windows-cli-acl-probe']
+permissions:
+  contents: read
+jobs:
+  facts:
+    runs-on: windows-2022
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.3'
+      - name: Build this checkout's actual Native helper
+        run: node scripts/build-native.mjs
+      - name: Inspect actual default and explicit private ACLs in one disposable fixture
+        run: node .github/scripts/windows-cli-acl-probe.mjs
