@@ -45,7 +45,7 @@ const commit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding:
 const sourceDirty = !!execFileSync('git', ['status', '--porcelain'], { cwd: root, encoding: 'utf8' }).trim()
 if (sourceDirty && options.get('--allow-dirty') !== 'true') throw new Error('Release staging requires committed sources; development candidates may use --allow-dirty=true')
 const modules = ['crabot-client', 'crabot-shared', 'crabot-core', 'crabot-agent', 'crabot-admin', 'crabot-mcp-tools',
-  'crabot-channel-telegram', 'crabot-channel-wechat', 'crabot-channel-feishu', 'crabot-channel-dingtalk', 'crabot-channel-voice']
+  'crabot-channel-telegram', 'crabot-channel-wechat', 'crabot-channel-feishu', 'crabot-channel-dingtalk', 'crabot-channel-slack', 'crabot-channel-voice']
 // Rebuild the actual sources before taking the immutable snapshot. Checking that
 // dist exists is insufficient: a local candidate could otherwise contain old UI.
 for (const module of modules) {

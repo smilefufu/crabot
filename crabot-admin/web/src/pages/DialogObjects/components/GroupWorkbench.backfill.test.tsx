@@ -10,11 +10,10 @@ afterEach(() => {
 
 it('shows the backfill API error code, reason and log_id in the real toast', async () => {
   const message = '飞书历史消息读取失败（code=99991672，log_id=backfill-log）：Access denied: im:message.group_msg'
-  const fetchMock = vi.fn().mockResolvedValue({
-    ok: false,
+  const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ error: message }), {
     status: 502,
-    json: async () => ({ error: message }),
-  })
+    headers: { 'Content-Type': 'application/json' },
+  }))
   vi.stubGlobal('fetch', fetchMock)
   vi.stubGlobal('localStorage', { getItem: () => null })
   const group: DialogObjectGroupEntry = {
@@ -37,7 +36,7 @@ it('shows the backfill API error code, reason and log_id in the real toast', asy
 
   expect(await screen.findByRole('alert')).toHaveTextContent(`回填历史失败：${message}`)
   expect(screen.getByRole('button', { name: '回填历史消息' })).toBeEnabled()
-  expect(fetchMock).toHaveBeenCalledWith('/api/dialog-objects/groups/group-1/backfill-history', expect.objectContaining({
+  expect(fetchMock).toHaveBeenCalledWith(new URL('/api/dialog-objects/groups/group-1/backfill-history', window.location.origin).href, expect.objectContaining({
     method: 'POST',
     body: JSON.stringify({ channel_id: 'feishu-test', max_count: 500 }),
   }))
