@@ -32,7 +32,8 @@ describe('durable whole voice batch ingress', () => {
   it('persists all A B A messages before confirmation and never restores a playback context', () => {
     const { dir, inbox, payload } = fixture(), record = inbox.accept(payload)
     expect(inbox.context(record)).toEqual(payload.reply_context)
-    expect(fs.statSync(path.join(dir, fs.readdirSync(dir)[0])).mode & 0o777).toBe(0o600)
+    // POSIX mode bits do not represent a Windows DACL.
+    if (process.platform !== 'win32') expect(fs.statSync(path.join(dir, fs.readdirSync(dir)[0])).mode & 0o777).toBe(0o600)
     expect(fs.readFileSync(path.join(dir, fs.readdirSync(dir)[0]), 'utf8')).not.toContain('expires_at')
     const restored = new VoiceInbox(dir); restored.load()
     expect(restored.pending()[0].payload?.messages.map(m => m.message.sender.friend_id)).toEqual(['A', 'B', 'A'])
