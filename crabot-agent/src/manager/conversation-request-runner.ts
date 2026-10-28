@@ -27,6 +27,7 @@ export interface RequestRunContext {
 }
 interface Dependencies {
   canRun?(): boolean
+  isRetired?(request: ConversationRequestRecord): boolean
   onSettled?(key: ManagerKey): void
   createLoop(context: RequestRunContext): ManagerLoop
   resolveCurrent(kind: RequestPermissionSource['kind'], source: ConversationRequestSource): Promise<RequestPermissionSource | null>
@@ -76,6 +77,7 @@ export class ConversationRequestRunner {
     const fixed = await this.requests.get(key, requestId)
     if (!fixed) throw new Error('Request not found')
     if (fixed.record.status === 'closed') return this.report(fixed.record, 'closed')
+    if (this.deps.isRetired?.(fixed.record)) return this.report(fixed.record, 'recovery_required')
     if (this.closing || this.deps.canRun?.() === false) return this.report(fixed.record, 'recovery_required')
     if (this.active.has(requestId)) return this.report(fixed.record, 'running')
     this.active.add(requestId)
@@ -145,6 +147,7 @@ export class ConversationRequestRunner {
     const fixed = await this.requests.get(key, requestId)
     if (!fixed || fixed.record.status !== 'open' || event.kind !== 'voice_management' && !fixed.record.worker_ids.includes(event.worker_id)) throw new Error('Request event binding unavailable')
     await this.validateEvent(key, requestId, event)
+    if (this.deps.isRetired?.(fixed.record)) return { consumed: false }
     if (receipt && event.kind !== 'activity_available') throw new Error('Invalid activity receipt kind')
     const normalized = JSON.parse(JSON.stringify(event)) as RequestRuntimeEvent
     const eventId = requestEventId(normalized), directory = path.join(this.root, requestId, 'events', eventId), file = path.join(directory, 'event.json')
@@ -197,13 +200,13 @@ export class ConversationRequestRunner {
   }
   private async drainEvents(key: ManagerKey, requestId: string): Promise<void> {
     let fixed = await this.requests.get(key, requestId)
-    if (!fixed || fixed.record.status !== 'open') return
+    if (!fixed || fixed.record.status !== 'open' || this.deps.isRetired?.(fixed.record)) return
     const root = path.join(this.root, requestId), initial = await readRequestAdmission(path.join(root, 'admission.json'), fixed.record)
     if (initial?.phase !== 'settled' || initial.outcome !== 'completed' || await this.hasUnknownDelivery(fixed.record)) return
     const canonical = new ManagerSessionStore(path.join(root, 'session'))
     for (;;) {
       fixed = await this.requests.get(key, requestId)
-      if (!fixed || fixed.record.status !== 'open') return
+      if (!fixed || fixed.record.status !== 'open' || this.deps.isRetired?.(fixed.record)) return
       const entries = await fs.readdir(path.join(root, 'events')).catch(error => {
         if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []; throw error
       })

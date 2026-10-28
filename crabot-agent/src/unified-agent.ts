@@ -1,3 +1,10 @@
+import { createWorkspaceInterruptedRootVerifier } from './core/workspace-interrupted-validation.js'
+import { createWorkspaceRelocationStopJournal } from './core/workspace-relocation-stop-journal.js'
+import { createWorkspaceInterruptedExecutionAuthority } from './core/workspace-interrupted-execution.js'
+import { createWorkspaceRelocationRootVerifier, createWorkspaceRecoveryRootVerifier } from './core/workspace-relocation-validation.js'
+import { verifyWorkspaceRelocationAuthority } from './core/workspace-relocation-authority.js'
+import type { VerifyWorkspaceRelocationRecoveryRootParams, VerifyWorkspaceRelocationRecoveryRootResult, VerifyWorkspaceRelocationRootParams, VerifyWorkspaceRelocationRootResult, CaptureWorkspaceRelocationProcessesParams, CaptureWorkspaceRelocationProcessesResult, CaptureWorkspaceRelocationWorkersParams, CaptureWorkspaceRelocationWorkersResult, StopWorkspaceRelocationWorkersParams, StopWorkspaceRelocationWorkersResult, RpcHandlerContext } from 'crabot-shared'
+import { ExecutionAdmissions } from './core/execution-admissions.js'
 import { WorkerRequestToolScope } from './workers/harness/request-tools.js'
 import { selectSubAgentSkills } from './agent/subagent-tool-filter.js'
 import { getInternalHandler } from './hooks/internal-handlers.js'
@@ -21,7 +28,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { tmpdir } from 'node:os'
 import { createHash } from 'node:crypto'
-import { ModuleBase, RpcError, generateId, sha256CanonicalJson, type AgentCliExecutionRef, type ModuleConfig, type Event, type ModuleId } from 'crabot-shared'
+import { assertWorkspaceExecutionAllowed, ModuleBase, RpcError, generateId, sha256CanonicalJson, type AgentCliExecutionRef, type ModuleConfig, type Event, type ModuleId } from 'crabot-shared'
 import { resolveTimezone } from './utils/time.js'
 import type {
   UnifiedAgentConfig,
@@ -67,6 +74,7 @@ import { toImageConnInfo, imageToolsFor, type ImageConnInfo } from './mcp/crab-i
 import { getAgentTraceDir, getAgentLogsDir, getAgentDataDir, getWorkspaceDir, getDataRootDir, getAdminDataDir } from './core/data-paths.js'
 import { retireWorkerSupervision } from './workers/harness/supervision-retirement-migration.js'
 import { ConfigLoader } from './core/config-loader.js'
+import { WorkspaceRelocationRetirements } from './core/workspace-relocation-retirements.js'
 import { TraceStore } from './core/trace-store.js'
 import { readReviewBackgrounds } from './engine/bg-entities/review-facts.js'
 import { BuiltinSubagentRunner } from './workers/builtin/subagent-runner.js'
@@ -811,6 +819,7 @@ export class UnifiedAgent extends ModuleBase {
    * 未装配时读端点 fail-fast 报错，不返回空结果——空结果会被 admin 误读成"没有 worker"。
    */
   private managerStack?: ManagerStack
+  private workspaceRetirementStore?: WorkspaceRelocationRetirements
   private readonly voiceInbox = new VoiceInbox(path.join(getAgentDataDir(), 'voice-inbox'))
   private readonly voiceDrains = new Map<string, Promise<void>>()
   private voiceRetryTimer?: ReturnType<typeof setInterval>
@@ -824,6 +833,10 @@ export class UnifiedAgent extends ModuleBase {
   /** True after startup reconciliation has settled, even when it failed. */
   private managerReconciliationSettled = false
   private runtimeClosing = false
+  private workspaceRootVerifier?: ReturnType<typeof createWorkspaceRelocationRootVerifier>
+  private workspaceInterruptedRootVerifier?: ReturnType<typeof createWorkspaceInterruptedRootVerifier>
+  private workspaceRecoveryRootVerifier?: ReturnType<typeof createWorkspaceRecoveryRootVerifier>
+  private readonly executionAdmissions = new ExecutionAdmissions()
   /** 每个 ManagerKey 至多一个任务板 notice 路由尝试；最新 revision 仍以 Store 为准。 */
   private readonly workboardNoticeDispatching = new Set<ManagerKey>()
   private readonly workboardNoticeRetryTimers = new Map<ManagerKey, ReturnType<typeof setTimeout>>()
@@ -981,9 +994,147 @@ export class UnifiedAgent extends ModuleBase {
     return !this.configStale && this.hasRuntimeExecutionConfig()
   }
 
+  /** Internal relocation boundary: registration/admission settles before fixing the stop set. */
+  async quiesceExecutionAdmissions(): Promise<void> {
+    await Promise.all([this.executionAdmissions.closeAndDrain(), this.requireManagerStack().harness.quiesceExecutionAdmissions(), this.builtinBgRegistry.quiesceExecutionAdmissions()])
+  }
+
+  /** Internal only; the fixed job still owns authorization, persistence and stop proof. */
+  async captureWorkspaceRelocationScope() {
+    await this.quiesceExecutionAdmissions()
+    return this.requireManagerStack().harness.captureWorkspaceRelocationScope()
+  }
+
+  private handleVerifyWorkspaceRelocationRoot(params: VerifyWorkspaceRelocationRootParams, context?: RpcHandlerContext): Promise<VerifyWorkspaceRelocationRootResult> {
+    this.workspaceRootVerifier ??= createWorkspaceRelocationRootVerifier({ dataDir: getDataRootDir(),
+      moduleManagerPort: this.rpcClient.moduleManagerTargetPort, runtimeBearer: () => ConfigLoader.getRuntimeBearer(),
+      runtimeIdentity: () => ({ instance_id: process.env.CRABOT_INSTANCE_ID, module_id: this.config.moduleId, runtime_id: process.env.CRABOT_MODULE_RUNTIME_ID }),
+      isClosing: () => this.runtimeClosing })
+    return this.workspaceRootVerifier(params, context?.authorizationBearer)
+  }
+
+  private handleVerifyWorkspaceRelocationRecoveryRoot(params: VerifyWorkspaceRelocationRecoveryRootParams, context?: RpcHandlerContext): Promise<VerifyWorkspaceRelocationRecoveryRootResult> {
+    this.workspaceRecoveryRootVerifier ??= createWorkspaceRecoveryRootVerifier({ dataDir: getDataRootDir(),
+      moduleManagerPort: this.rpcClient.moduleManagerTargetPort, runtimeBearer: () => ConfigLoader.getRuntimeBearer(),
+      runtimeIdentity: () => ({ instance_id: process.env.CRABOT_INSTANCE_ID, module_id: this.config.moduleId, runtime_id: process.env.CRABOT_MODULE_RUNTIME_ID }),
+      isClosing: () => this.runtimeClosing })
+    return this.workspaceRecoveryRootVerifier(params, context?.authorizationBearer)
+  }
+
+  private handleVerifyWorkspaceInterruptedRoot(params: import('crabot-shared').WorkspaceInterruptedRecoveryRequest, context?: RpcHandlerContext) {
+    this.workspaceInterruptedRootVerifier ??= createWorkspaceInterruptedRootVerifier({ dataDir: getDataRootDir(),
+      moduleManagerPort: this.rpcClient.moduleManagerTargetPort, runtimeBearer: () => ConfigLoader.getRuntimeBearer(),
+      runtimeIdentity: () => ({ instance_id: process.env.CRABOT_INSTANCE_ID, module_id: this.config.moduleId, runtime_id: process.env.CRABOT_MODULE_RUNTIME_ID }),
+      isClosing: () => this.runtimeClosing })
+    return this.workspaceInterruptedRootVerifier(params, context?.authorizationBearer)
+  }
+
+  private async handleWorkspaceInterruptedExecution(params: unknown, context: RpcHandlerContext | undefined, action: 'capture' | 'stop_workers') {
+    const dataDir = getDataRootDir()
+    const authority = await createWorkspaceInterruptedExecutionAuthority({ dataDir, moduleManagerPort: this.rpcClient.moduleManagerTargetPort,
+      runtimeBearer: () => ConfigLoader.getRuntimeBearer(), runtimeIdentity: () => ({ instance_id: process.env.CRABOT_INSTANCE_ID, module_id: this.config.moduleId, runtime_id: process.env.CRABOT_MODULE_RUNTIME_ID }),
+      isClosing: () => this.runtimeClosing }, params, context?.authorizationBearer, action)
+    await this.quiesceExecutionAdmissions()
+    if (action === 'capture') {
+      const workers = await this.captureWorkspaceRelocationScope()
+      const legacy = require('../../scripts/lib/workspace-legacy-record.cjs').readWorkspaceLegacyExecutions(dataDir)
+      if (legacy && legacy.status !== 'ready') throw new RpcError('SERVICE_UNAVAILABLE', '旧执行范围尚未核实。')
+      const processes = await this.requireManagerStack().harness.captureWorkspaceRelocationProcesses(workers, legacy?.value)
+      const background = await this.builtinBgRegistry.captureWorkspaceShellProcesses()
+      const fixed = require('../../scripts/lib/owned-process-tree.cjs').recaptureObservedProcessScope([...processes, ...background])
+      await authority.verify()
+      return { workers, processes: fixed }
+    }
+    const workers = require('../../scripts/lib/workspace-interrupted-execution.mjs').readWorkspaceInterruptedExecutionWorkers(dataDir, authority.request.recovery_id, authority.proof.scope_sha256)
+    const result = await this.requireManagerStack().harness.requestWorkspaceRelocationStops(workers, {
+      prepare: async current => { if (sha256CanonicalJson(current) !== sha256CanonicalJson(workers)) throw new RpcError('FORBIDDEN', '原执行器范围已变化。'); return authority.prepare() },
+      complete: results => authority.complete(results),
+    })
+    await authority.verify(); return result
+  }
+
+  private async handleCaptureWorkspaceRelocationWorkers(params: CaptureWorkspaceRelocationWorkersParams, context?: RpcHandlerContext): Promise<CaptureWorkspaceRelocationWorkersResult> {
+    const bearer = context?.authorizationBearer
+    if (typeof bearer !== 'string' || !bearer) throw new RpcError('UNAUTHORIZED', '缺少迁移协调凭据。')
+    if (!params || typeof params !== 'object' || Array.isArray(params) || Object.keys(params).length !== 2
+      || !Object.keys(params).every(key => key === 'intent_id' || key === 'launch_id')) {
+      throw new RpcError('INVALID_PARAMS', '迁移范围捕获只接受固定作业标识。')
+    }
+    const request = Object.freeze({ intent_id: params.intent_id, launch_id: params.launch_id, action: 'capture_workers' as const })
+    const verify = () => verifyWorkspaceRelocationAuthority({ dataDir: getDataRootDir(), moduleManagerPort: this.rpcClient.moduleManagerTargetPort, params: request, bearer })
+    const proof = await verify()
+    if (this.runtimeClosing) throw new RpcError('WORKSPACE_MAINTENANCE', 'Agent正在关闭，不能固定执行器范围。')
+    let workers
+    try { workers = await this.captureWorkspaceRelocationScope() }
+    catch { throw new RpcError('WORKSPACE_MAINTENANCE', '执行器接纳或启动对账未能完成，已保留维护保护。') }
+    const current = await verify()
+    if (sha256CanonicalJson(current) !== sha256CanonicalJson(proof)) throw new RpcError('FORBIDDEN', '迁移授权在执行收口期间已变化。')
+    if (this.runtimeClosing) throw new RpcError('WORKSPACE_MAINTENANCE', 'Agent正在关闭，不能发布执行器范围。')
+    return { workers }
+  }
+
+  private async handleCaptureWorkspaceRelocationProcesses(params: CaptureWorkspaceRelocationProcessesParams, context?: RpcHandlerContext): Promise<CaptureWorkspaceRelocationProcessesResult> {
+    const bearer = context?.authorizationBearer
+    if (typeof bearer !== 'string' || !bearer) throw new RpcError('UNAUTHORIZED', '缺少迁移协调凭据。')
+    if (!params || typeof params !== 'object' || Array.isArray(params) || Object.keys(params).length !== 2
+      || !Object.keys(params).every(key => key === 'intent_id' || key === 'launch_id')) {
+      throw new RpcError('INVALID_PARAMS', '迁移进程捕获只接受固定作业标识。')
+    }
+    const dataDir = getDataRootDir()
+    const request = Object.freeze({ intent_id: params.intent_id, launch_id: params.launch_id, action: 'capture_workers' as const })
+    const verify = () => verifyWorkspaceRelocationAuthority({ dataDir, moduleManagerPort: this.rpcClient.moduleManagerTargetPort, params: request, bearer })
+    const proof = await verify()
+    if (this.runtimeClosing) throw new RpcError('WORKSPACE_MAINTENANCE', 'Agent正在关闭，不能捕获执行进程。')
+    const readFixed = () => {
+      try {
+        const records = require(path.join(__dirname, '../../scripts/lib/workspace-relocation-intent.mjs'))
+        const fixed = records.readWorkspaceRelocationWorkers(dataDir, request.intent_id)
+        if (!fixed || records.readWorkspaceRelocationStops(dataDir, request.intent_id).attempt) throw new Error('not pre-stop')
+        const modules = records.readWorkspaceRelocationModules(dataDir, request.intent_id)
+        if (modules && records.readWorkspaceRelocationModuleStops(dataDir, request.intent_id).attempt) throw new Error('module stop started')
+        const { readWorkspaceLegacyExecutions } = require(path.join(__dirname, '../../scripts/lib/workspace-legacy-record.cjs'))
+        const legacy = readWorkspaceLegacyExecutions(dataDir)
+        if (legacy && legacy.status !== 'ready') throw new Error('legacy boundary not ready')
+        return { scope: fixed, legacy }
+      } catch { throw new RpcError('SERVICE_UNAVAILABLE', '原固定范围或停止前状态无法核实，已保留维护保护。') }
+    }
+    const initial = readFixed()
+    let processes
+    try {
+      await this.quiesceExecutionAdmissions()
+      const workers = await this.requireManagerStack().harness.captureWorkspaceRelocationProcesses(initial.scope.workers, initial.legacy?.value)
+      const background = await this.builtinBgRegistry.captureWorkspaceShellProcesses()
+      const { recaptureObservedProcessScope } = require(path.join(__dirname, '../../scripts/lib/owned-process-tree.cjs'))
+      processes = recaptureObservedProcessScope([...workers, ...background])
+    } catch { throw new RpcError('WORKSPACE_MAINTENANCE', '执行进程范围或启动对账无法核实，已保留维护保护。') }
+    if (sha256CanonicalJson(readFixed()) !== sha256CanonicalJson(initial)) throw new RpcError('SERVICE_UNAVAILABLE', '原固定执行器范围已变化。')
+    const current = await verify()
+    if (sha256CanonicalJson(current) !== sha256CanonicalJson(proof)) throw new RpcError('FORBIDDEN', '迁移授权在进程捕获期间已变化。')
+    if (sha256CanonicalJson(readFixed()) !== sha256CanonicalJson(initial)) throw new RpcError('SERVICE_UNAVAILABLE', '原固定执行器范围已变化。')
+    if (this.runtimeClosing) throw new RpcError('WORKSPACE_MAINTENANCE', 'Agent正在关闭，不能发布执行进程。')
+    return { processes }
+  }
+
+  private async handleStopWorkspaceRelocationWorkers(params: StopWorkspaceRelocationWorkersParams, context?: RpcHandlerContext): Promise<StopWorkspaceRelocationWorkersResult> {
+    const binding = await createWorkspaceRelocationStopJournal({ dataDir: getDataRootDir(), moduleManagerPort: this.rpcClient.moduleManagerTargetPort,
+      params, bearer: context?.authorizationBearer })
+    if (this.runtimeClosing) throw new RpcError('WORKSPACE_MAINTENANCE', 'Agent正在关闭，不能提交迁移停止。')
+    try {
+      await this.quiesceExecutionAdmissions()
+      const result = await this.requireManagerStack().harness.requestWorkspaceRelocationStops(binding.workers, binding.journal)
+      await binding.verify()
+      if (this.runtimeClosing) throw new RpcError('WORKSPACE_MAINTENANCE', 'Agent正在关闭，停止结果仍待核验。')
+      return result
+    } catch (error) {
+      if (error instanceof RpcError) throw error
+      throw new RpcError('WORKSPACE_MAINTENANCE', '固定执行器范围或启动对账无法核实，已保留维护保护。')
+    }
+  }
+
   /** Central admission for every new runtime-config-dependent execution. */
   private assertRuntimeExecutionAdmission(): void {
     if (this.runtimeClosing) throw new Error('AGENT_SHUTTING_DOWN')
+    assertWorkspaceExecutionAllowed(getDataRootDir())
     if (!this.configAuthenticated || this.configStale) throw new Error('AGENT_RUNTIME_CONFIG_STALE')
     if (!this.hasRuntimeExecutionConfig()) throw new Error('Agent runtime config is not configured')
   }
@@ -1265,6 +1416,7 @@ export class UnifiedAgent extends ModuleBase {
         this.assertRuntimeExecutionAdmission()
         return this.buildBuiltinWorkerRuntime(ctx)
       },
+      isRequestRetired: request => this.workspaceRetirements().request(request.manager_key, request.request_id, request.source_sha256),
       assertExecutionAdmission: () => this.assertRuntimeExecutionAdmission(),
       isClosing: () => this.runtimeClosing,
       describeExecutionTools: (impl, principal) => {
@@ -1827,6 +1979,14 @@ export class UnifiedAgent extends ModuleBase {
     // Manager/Worker（v3）接口：§8.2 调度触发 + §8.3 task 读模型四件套。
     this.registerMethod('trigger_schedule', this.handleTriggerSchedule.bind(this))
     this.registerMethod('authorize_agent_cli_execution', this.handleAuthorizeAgentCliExecution.bind(this))
+    this.registerMethod('stop_workspace_relocation_workers', this.handleStopWorkspaceRelocationWorkers.bind(this))
+    this.registerMethod('capture_workspace_relocation_processes', this.handleCaptureWorkspaceRelocationProcesses.bind(this))
+    this.registerMethod('verify_workspace_relocation_root', this.handleVerifyWorkspaceRelocationRoot.bind(this))
+    this.registerMethod('verify_workspace_relocation_recovery_root', this.handleVerifyWorkspaceRelocationRecoveryRoot.bind(this))
+    this.registerMethod('verify_workspace_interrupted_recovery_root', this.handleVerifyWorkspaceInterruptedRoot.bind(this))
+    this.registerMethod('capture_workspace_interrupted_recovery_execution', (params, context) => this.handleWorkspaceInterruptedExecution(params, context, 'capture'))
+    this.registerMethod('stop_workspace_interrupted_recovery_workers', (params, context) => this.handleWorkspaceInterruptedExecution(params, context, 'stop_workers'))
+    this.registerMethod('capture_workspace_relocation_workers', this.handleCaptureWorkspaceRelocationWorkers.bind(this))
     this.registerMethod('get_workspace_execution_admin', async () => this.requireManagerStack().harness.getWorkspaceExecutionInventory())
     this.registerMethod('list_workers_admin', this.handleListWorkersAdmin.bind(this))
     this.registerMethod('list_managers_admin', this.handleListManagersAdmin.bind(this))
@@ -2199,7 +2359,7 @@ export class UnifiedAgent extends ModuleBase {
 
   private async reconcileVoiceHandoffs(): Promise<void> {
     for (const record of this.voiceInbox.pending()) {
-      if (record.phase !== 'accepted' || !record.payload) continue
+      if (record.phase !== 'accepted' || !record.payload || this.workspaceRetirements().voice(record.channel_id, record.turn_id, record.payload_sha256)) continue
       const payload = record.payload
       const checkpoint = await this.requireManagerStack().store.loadCheckpoint(`${payload.channel_id}::${payload.session_id}` as import('./manager/types.js').ManagerKey)
       const ids = new Set(checkpoint ? [...checkpoint.envelopes, ...checkpoint.pending].flatMap(e => e.wake.kind === 'human_messages' || e.wake.kind === 'attention_flush' ? e.wake.messages.map(m => m.platform_message_id) : []) : [])
@@ -2216,7 +2376,7 @@ export class UnifiedAgent extends ModuleBase {
         await this.reconcileVoiceHandoffs()
         for (const record of this.voiceInbox.pending().filter(r => r.channel_id === channelId)) {
           await this.confirmVoiceInbox(record)
-          if (record.phase === 'managed' || !record.payload) continue
+          if (record.phase === 'managed' || !record.payload || this.workspaceRetirements().voice(record.channel_id, record.turn_id, record.payload_sha256)) continue
           const payload = record.payload
           const context = this.voiceInbox.context(record)
           let queued!: () => void
@@ -3600,6 +3760,10 @@ export class UnifiedAgent extends ModuleBase {
 
   /** §8.2：maintenance 走 Agent-owned system task；其他 Schedule 投递 instruction 或执行脚本。 */
   private async handleTriggerSchedule(params: TriggerScheduleParams): Promise<TriggerScheduleResult> {
+    return this.executionAdmissions.run(() => this.handleAdmittedTriggerSchedule(params))
+  }
+
+  private async handleAdmittedTriggerSchedule(params: TriggerScheduleParams): Promise<TriggerScheduleResult> {
     this.assertRuntimeExecutionAdmission()
     if (!params.trigger_id?.trim() || !params.schedule_name?.trim()
       || !params.target_session?.channel_id || !params.target_session.session_id
@@ -4045,6 +4209,7 @@ export class UnifiedAgent extends ModuleBase {
       const notice = await stack.workboard.pendingAdminNotice(key)
       if (!notice) return
       dispatchedRevision = notice.revision
+      if (this.workspaceRetirements().workboard(key, notice.revision)) return
       await stack.workboard.recordAdminNoticeAttempt(key, notice.revision)
       const result = await stack.registry.routeWorkboardAdminUpdate({
         key,
@@ -4072,7 +4237,7 @@ export class UnifiedAgent extends ModuleBase {
   private async dispatchNewerPendingWorkboardNotice(key: ManagerKey, dispatchedRevision: number | undefined): Promise<void> {
     if (this.runtimeClosing) return
     const pending = await this.requireManagerStack().workboard.pendingAdminNotice(key)
-    if (pending && pending.revision !== dispatchedRevision) this.dispatchWorkboardAdminNotice(key)
+    if (pending && !this.workspaceRetirements().workboard(key, pending.revision) && pending.revision !== dispatchedRevision) this.dispatchWorkboardAdminNotice(key)
   }
 
   /** 只清除实际被成功 episode 消费的 revision；更晚的 Admin 保存保持待投递。 */
@@ -4093,7 +4258,7 @@ export class UnifiedAgent extends ModuleBase {
     if (this.runtimeClosing || this.workboardNoticeRetryTimers.has(key)) return
     const stack = this.requireManagerStack()
     const notice = await stack.workboard.pendingAdminNotice(key)
-    if (!notice || (revision !== undefined && notice.revision !== revision)) return
+    if (!notice || this.workspaceRetirements().workboard(key, notice.revision) || (revision !== undefined && notice.revision !== revision)) return
     const delay = WORKBOARD_RETRY_DELAYS_MS[Math.min(notice.attempts, WORKBOARD_RETRY_DELAYS_MS.length - 1)]
     const retryAfter = new Date(Date.now() + delay).toISOString()
     await stack.workboard.recordAdminNoticeAttempt(key, notice.revision, retryAfter)
@@ -4107,6 +4272,7 @@ export class UnifiedAgent extends ModuleBase {
     const stack = this.requireManagerStack()
     const notices = await stack.workboard.listPendingAdminNotices()
     for (const { manager_key, notice } of notices) {
+      if (this.workspaceRetirements().workboard(manager_key, notice.revision)) continue
       if (notice.retry_after_at && Date.parse(notice.retry_after_at) > Date.now()) {
         const delay = Date.parse(notice.retry_after_at) - Date.now()
         if (!this.workboardNoticeRetryTimers.has(manager_key)) {
@@ -5348,6 +5514,7 @@ export class UnifiedAgent extends ModuleBase {
       for (const key of keys) {
         const pending = await this.adminChatCorrelationStore().pendingWakes(key)
         for (const wake of pending) {
+          if (this.workspaceRetirements().adminChat(key, wake.request_id, wake.message_sha256)) continue
           try {
             await stack.registry.routeHumanMessages(
               'admin-web',
@@ -5365,6 +5532,10 @@ export class UnifiedAgent extends ModuleBase {
     } catch (error) {
       console.error(`[${this.config.moduleId}] admin chat wake replay scan failed:`, error instanceof Error ? error.message : String(error))
     }
+  }
+
+  private workspaceRetirements(): WorkspaceRelocationRetirements {
+    return this.workspaceRetirementStore ??= new WorkspaceRelocationRetirements(getDataRootDir())
   }
 
   /** P6-A §3.2/§3.5：Admin Chat correlation 持久化（inbound wake journal + outbound delivery）。 */
@@ -5667,6 +5838,7 @@ export class UnifiedAgent extends ModuleBase {
   }
 
   protected override async onStart(): Promise<void> {
+    this.workspaceRetirements().load()
     this.voiceInbox.load()
     await this.reconcileVoiceHandoffs()
     await retireWorkerSupervision(getAgentDataDir())
@@ -5789,7 +5961,7 @@ export class UnifiedAgent extends ModuleBase {
         if (this.runtimeClosing) return
         void this.drainVoiceInbox().catch(() => console.warn('[Agent] Durable voice inbox awaits runtime admission'))
         if (!this.voiceRetryTimer) this.voiceRetryTimer = setInterval(() => {
-          if (this.voiceInbox.pending().length) void this.drainVoiceInbox().catch(() => {})
+          if (this.voiceInbox.pending().some(record => !record.confirmed || !this.workspaceRetirements().voice(record.channel_id, record.turn_id, record.payload_sha256))) void this.drainVoiceInbox().catch(() => {})
         }, 5000)
         // 空台账（现网常态）不打日志，避免每次启动都刷一行没有信息量的 0/0/0。
         if (report.revived.length === 0 && report.failed.length === 0) return

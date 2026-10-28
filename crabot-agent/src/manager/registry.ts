@@ -157,6 +157,7 @@ export interface ManagerRegistryDeps {
   readonly now: () => Date
   /** Once true, no new wake may create or enqueue work for a Manager episode. */
   readonly isClosing?: () => boolean
+  readonly assertExecutionAdmission?: () => void
   /** 仅用于计算当前事项期限，不缓存或注入任务板正文。 */
   readonly readCurrentWorkboard: (key: ManagerKey) => Promise<ManagerWorkboard>
   /** 人类消息渲染的时区(见 `ManagerLoopDeps.timezone`);不注入则退回 `resolveTimezone(undefined)`。 */
@@ -287,6 +288,7 @@ export class ManagerRegistry {
   /** 每个 key 最近一次"活跃"的时间戳(创建时 / 每次 episode 结束时刷新),evictIdle 的判据。 */
   private readonly lastActiveAtMs = new Map<ManagerKey, number>()
   private readonly pendingResumes = new Map<ManagerKey, ManagerResumeCheckpoint>()
+  private readonly pendingResumeReads = new Map<ManagerKey, object>()
   private readonly resumeTasks = new Map<ManagerKey, Promise<void>>()
   private readonly idleReviewGenerations = new Map<ManagerKey, number>()
   private readonly pendingIdleReviewCycles = new Map<ManagerKey, number>()
@@ -305,7 +307,7 @@ export class ManagerRegistry {
   constructor(private readonly deps: ManagerRegistryDeps) {}
 
   registerResumeCheckpoints(checkpoints: ReadonlyArray<ManagerResumeCheckpoint>): void {
-    for (const checkpoint of checkpoints) this.pendingResumes.set(checkpoint.state.key, checkpoint)
+    for (const checkpoint of checkpoints) this.setPendingResume(checkpoint.state.key, checkpoint)
     if (checkpoints.length > 0) {
       this.resumeReady = new Promise((resolve) => { this.releaseResumes = resolve })
     }
@@ -319,6 +321,23 @@ export class ManagerRegistry {
         console.error(`[ManagerRegistry] resume failed for ${key}:`, error)
       }
     }))
+  }
+
+  private setPendingResume(key: ManagerKey, checkpoint: ManagerResumeCheckpoint | undefined): void {
+    this.pendingResumeReads.delete(key)
+    if (checkpoint) this.pendingResumes.set(key, checkpoint)
+    else this.pendingResumes.delete(key)
+  }
+
+  private async refreshPendingResume(key: ManagerKey): Promise<void> {
+    const read = {}
+    this.pendingResumeReads.set(key, read)
+    try {
+      const checkpoint = await this.deps.store.loadCheckpoint(key)
+      if (checkpoint && this.pendingResumeReads.get(key) === read) this.setPendingResume(key, checkpoint)
+    } finally {
+      if (this.pendingResumeReads.get(key) === read) this.pendingResumeReads.delete(key)
+    }
   }
 
   private async ensureResumed(key: ManagerKey, restoreIdleReviewCycle = false): Promise<void> {
@@ -361,7 +380,7 @@ export class ManagerRegistry {
       if (checkpoint) {
         const retained = { ...checkpoint, pending: [...checkpoint.pending, envelope] }
         this.deps.store.saveCheckpoint(retained)
-        this.pendingResumes.set(key, retained)
+        this.setPendingResume(key, retained)
       }
     }
     throw error
@@ -910,8 +929,7 @@ export class ManagerRegistry {
       }).then(async (value) => {
         result = value
         if (value.contextRecoveryRequired) {
-          const checkpoint = await this.deps.store.loadCheckpoint(key)
-          if (checkpoint) this.pendingResumes.set(key, checkpoint)
+          await this.refreshPendingResume(key)
         }
         return value
       }).catch(error => this.retainWakeAfterRecoveryFailure(key, admittedEnvelope, error)).finally(() => {
@@ -1146,7 +1164,7 @@ export class ManagerRegistry {
     try {
       // 输入提交放行 lane 与成功 LLM 响应的确认各用独立回调。
       if (recovery) {
-        this.pendingResumes.delete(key)
+        this.setPendingResume(key, undefined)
         result = await loop.resume(recovery)
       } else if (envelope === undefined) {
         result = await loop.drainMailbox()
@@ -1156,8 +1174,7 @@ export class ManagerRegistry {
         result = await loop.wakeUp(envelope)
       }
       if (result.contextRecoveryRequired) {
-        const checkpoint = await this.deps.store.loadCheckpoint(key)
-        if (checkpoint) this.pendingResumes.set(key, checkpoint)
+        await this.refreshPendingResume(key)
       }
       return result
     } catch (error) {
@@ -1462,6 +1479,7 @@ export class ManagerRegistry {
 
   private assertWakeAdmission(): void {
     if (this.disposed || this.deps.isClosing?.()) throw new Error('AGENT_SHUTTING_DOWN')
+    this.deps.assertExecutionAdmission?.()
   }
 
   private hasWakePreparation(key: ManagerKey): boolean {

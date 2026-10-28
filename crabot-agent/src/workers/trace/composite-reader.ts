@@ -244,6 +244,7 @@ export async function readCompositeWorkerTrace(
     const adapter = deps.adapters.get(incarnation.impl)
     const handle: IncarnationHandle = {
       worker_id: params.worker_id,
+      incarnation_id: incarnationId,
       seq: incarnation.seq,
       impl: incarnation.impl,
       session_ref: incarnationSessionRef(incarnation) ?? '',

@@ -151,7 +151,7 @@ export function createConversationRequestLoop(context: RequestRunContext, deps: 
       schedule: { targetSession: target, ...(source.sender_friend_id ? { creatorFriendId: source.sender_friend_id } : {}),
         canCreate: !!source.sender_friend_id, resolvePermissions: async () => (recheck ? await recheck() : actor).resolved },
       isSystemThread: false, workboard: { store: board, managerKey: key },
-      projectDocs: { ledger: visibleLedger, managedWorkspace: (id, workspace) => deps.harness.managedWorkspaceScope(id, workspace), readWorkerContext: id => deps.contexts.read(id), managerKey: key, managerPrincipalPermissions: permissions },
+      projectDocs: { ledger: visibleLedger, historyWorkspace: (id, incarnation) => deps.harness.workspaceHistoryRead(id, incarnation), managedWorkspace: (id, workspace) => deps.harness.managedWorkspaceScope(id, workspace), readWorkerContext: id => deps.contexts.read(id), managerKey: key, managerPrincipalPermissions: permissions },
     }
   }
   const scope = new RequestManagerToolScope({ context, raw, checkOperation: async (name, input, actor) => {

@@ -1,3 +1,4 @@
+import { assertWorkspaceExecutionAllowed, workspaceMaintenancePending } from 'crabot-shared'
 import { isDeepStrictEqual } from 'node:util'
 import { allowed } from '../permissions/tool-authorization.js'
 import { ConversationRequestRunner } from './conversation-request-runner.js'
@@ -170,6 +171,7 @@ export interface ManagerStack {
 }
 
 export interface BootstrapDeps {
+  readonly isRequestRetired?: (request: import('./conversation-request.js').ConversationRequestRecord) => boolean
   readonly coreRuntimeBearer?: () => string | undefined
   readonly reflectionEvidence?: Pick<ReflectionEvidenceDeps, 'traces' | 'captureWorkerTrace' | 'readWorkerTrace' | 'redact'>
   readonly confirmDailyReflection?: import('./daily-reflection.js').DailyReflectionDeps['confirm']
@@ -374,6 +376,7 @@ function resolveWorkspacesRoot(dataRoot: string): string {
  */
 export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
   const agentDir = join(deps.dataRoot, 'agent')
+  const maintenancePending = () => workspaceMaintenancePending(deps.dataRoot)
   // 三个 adapter 各自的私有 dataDir(存 meta-<seq>.json / 运行时目录 / session 树),与 §7 的
   // `agent/workers/<worker_id>/`(harness 亲历事件流与输出)是两个互不相干的目录。
   const adapterDataDir = (impl: WorkerImplId): string => join(agentDir, 'worker-adapters', impl)
@@ -556,12 +559,14 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     redactFailureReason: deps.redactFailureReason,
     builtinSpawnDefaults: resolveBuiltinRuntime,
     assertExecutionAdmission: deps.assertExecutionAdmission,
+    assertMaintenanceAdmission: () => assertWorkspaceExecutionAllowed(deps.dataRoot),
     assertExecutionPolicy: deps.assertExecutionPolicy,
     capabilityBundle: deps.capabilityBundle,
     computerUseEnv: deps.computerUseEnv,
     issueAgentCliCredential: deps.issueAgentCliCredential,
     hasRunningBg: deps.hasRunningBg,
-    isExecutionReady: () => candidatesReady && !candidatesClosing && !deps.isClosing?.(),
+    isExecutionReady: () => candidatesReady && !candidatesClosing && !deps.isClosing?.() && !maintenancePending(),
+    isWorkspaceRelocationReady: () => candidatesReady && !candidatesClosing && !deps.isClosing?.(),
     listWorkerBackground: deps.listWorkerBackground,
     hasPendingWorkerNotification: deps.hasPendingWorkerNotification,
     readReviewBackgrounds: deps.readReviewBackgrounds,
@@ -592,6 +597,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     'claude-code',
     new ClaudeCodeAdapter({
       dataDir: adapterDataDir('claude-code'),
+      readWorkspaceHistory: handle => handle.incarnation_id ? harness.workspaceHistoryRead(handle.worker_id, handle.incarnation_id) : Promise.resolve(null),
       onStateChange: harness.handleStateChange,
       onNativeActivity: harness.handleNativeActivity,
       ...(deps.resolveUserLevelBinary ? { resolveUserLevelBinary: () => deps.resolveUserLevelBinary!('claude-code') } : {}),
@@ -601,6 +607,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     'codex',
     new CodexWorkerAdapter({
       dataDir: adapterDataDir('codex'),
+      readWorkspaceHistory: handle => handle.incarnation_id ? harness.workspaceHistoryRead(handle.worker_id, handle.incarnation_id) : Promise.resolve(null),
       onStateChange: harness.handleStateChange,
       onNativeActivity: harness.handleNativeActivity,
       ...(deps.resolveUserLevelBinary ? { resolveUserLevelBinary: () => deps.resolveUserLevelBinary!('codex') } : {}),
@@ -643,13 +650,13 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
   const candidateRuns = new Map<ManagerKey, Promise<void>>()
   let candidateTail = Promise.resolve()
   const scheduleCandidates = (key: ManagerKey): void => {
-    if (!candidatesReady || candidatesClosing || deps.isClosing?.()) return
+    if (!candidatesReady || candidatesClosing || deps.isClosing?.() || maintenancePending()) return
     pendingCandidateManagers.add(key)
     if (candidateRuns.has(key)) return
     const run = candidateTail.then(async () => {
       // Recovery callers can proceed before this lower-priority work starts.
       await new Promise<void>(resolve => setImmediate(resolve))
-      if (!pendingCandidateManagers.delete(key) || candidatesClosing || deps.isClosing?.()) return
+      if (!pendingCandidateManagers.delete(key) || candidatesClosing || deps.isClosing?.() || maintenancePending()) return
       const board = await workboardStore.load(key)
       await harness.reconcileContinuationCandidates(key, board, use => workboardStore.withCurrentBoard(key, use))
     }).catch(error => console.error(`[manager-bootstrap] candidate reconciliation failed for ${key}:`, error))
@@ -731,8 +738,9 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
   const requestRuntimeRoot = join(agentDir, 'conversation-requests')
   let voiceManagementHost: VoiceManagementHost
   requestRunner = new ConversationRequestRunner(requestRuntimeRoot, conversationRequests, {
+    isRetired: deps.isRequestRetired,
     validateVoiceManagement: (key, requestId, result) => voiceManagementHost.validate(key, requestId, result),
-    canRun: () => candidatesReady && !candidatesClosing && !deps.isClosing?.(),
+    canRun: () => candidatesReady && !candidatesClosing && !deps.isClosing?.() && !maintenancePending(),
     timezone: deps.timezone ?? (() => 'Asia/Shanghai'),
     onSettled: key => { if (registry) void registry.refreshVoiceOutput(key).catch(() => { /* Preserve queued delivery when the terminal is unavailable. */ }) },
     validateVoiceDelivery: async (key, requestId, result) => {
@@ -751,7 +759,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     },
     resolveCurrent: resolveCurrentRequestSource,
     createLoop: context => createConversationRequestLoop(context, { bootstrap: deps, harness, ledger, contexts: workerContextStore,
-      canRun: () => candidatesReady && !candidatesClosing && !deps.isClosing?.(),
+      canRun: () => candidatesReady && !candidatesClosing && !deps.isClosing?.() && !maintenancePending(),
       guard: requestGuard, policy: DEFAULT_MANAGER_COMPACTION_POLICY, root: requestRuntimeRoot,
       voiceOutput: voiceOutputFor?.(context.request.manager_key) }),
   })
@@ -818,6 +826,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     quotedPrefetch: deps.messagingDeps,
     now: () => new Date(deps.now()),
     isClosing: deps.isClosing,
+    assertExecutionAdmission: () => assertWorkspaceExecutionAllowed(deps.dataRoot),
     readCurrentWorkboard: (key) => workboardStore.load(key),
     timezone: deps.timezone,
     managerKeyFor: (key) => key,
@@ -1120,6 +1129,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
         projectDocs: {
           ledger: sharedProjectLedger,
           managedWorkspace: (id, workspace) => harness.managedWorkspaceScope(id, workspace),
+          historyWorkspace: (id, incarnation) => harness.workspaceHistoryRead(id, incarnation),
           readWorkerContext: (workerId) => workerContextStore.read(workerId),
           managerKey: key,
           managerPrincipalPermissions: managerPermissions ?? undefined,
