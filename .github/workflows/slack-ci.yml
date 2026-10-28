@@ -96,13 +96,13 @@ jobs:
           # admin: 后端 build → 前端 build:web（顺序执行，build:web 会进入 web/ 子项目自己 install）
           (cd crabot-admin && pnpm run build && pnpm run build:web)
 
-      - name: Official Slack CLI native hooks
-        shell: bash
-        run: node .github/scripts/smoke-slack-onboarding.mjs
-
       - name: Slack channel and process regressions
         shell: bash
         run: pnpm --dir crabot-channel-slack test
+
+      - name: Official Slack CLI native hooks
+        shell: bash
+        run: node .github/scripts/smoke-slack-onboarding.mjs
 
       - name: Admin onboarding regressions
         shell: bash

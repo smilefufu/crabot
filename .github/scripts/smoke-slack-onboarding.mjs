@@ -2,7 +2,8 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { ensureCli, privateDirectory, startCli } from '../../crabot-channel-slack/dist/cli-tools.js'
+import { execFileSync } from 'node:child_process'
+import { cliEnvironment, ensureCli, privateDirectory, startCli } from '../../crabot-channel-slack/dist/cli-tools.js'
 import { prepareProject, SLACK_MANIFEST } from '../../crabot-channel-slack/dist/cli-project.js'
 const root = await fs.mkdtemp(path.join(os.tmpdir(), "crabot slack-cli's $safe-"))
 const originalFetch = globalThis.fetch
@@ -14,7 +15,10 @@ try {
   let executable
   try { executable = await ensureCli(root, AbortSignal.timeout(300000)) }
   finally { globalThis.fetch = originalFetch }
-  console.log('Slack CLI smoke: verified official tool; preparing fixed hooks')
+  console.log('Slack CLI smoke: checking verified executable startup (15 second limit)')
+  const version = execFileSync(executable, ['--version'], { cwd: root, env: cliEnvironment(), timeout: 15000, windowsHide: true, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+  assert.ok(version.includes('4.11.0'), 'Verified official executable must report its pinned version')
+  console.log('Slack CLI smoke: verified official tool started; preparing fixed hooks')
   const project = await prepareProject(root)
   await privateDirectory(path.join(root, 'cli'))
   console.log('Slack CLI smoke: starting local manifest/hooks command (5 minute limit)')
